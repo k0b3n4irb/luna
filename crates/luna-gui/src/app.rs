@@ -13,10 +13,11 @@ use luna_cartridge::Cartridge;
 use luna_core::Snes;
 use luna_ppu::{FRAME_H, FRAME_W};
 
-/// Steps to attempt per UI frame (~16 ms at 60Hz). The number is
-/// generous — actual SNES per-frame instructions cluster around 30k.
-/// With no scheduler yet, this is an approximation.
-const STEPS_PER_FRAME: u32 = 30_000;
+/// Steps to attempt per UI frame (~16 ms at 60Hz). 60 k is comfortable
+/// on modern hardware and gives the synthetic-VBlank counter (every
+/// 30 k inside Snes::step) two synthetic frames per UI tick — enough
+/// to make games with double-vblank handlers progress.
+const STEPS_PER_FRAME: u32 = 60_000;
 
 /// The Luna desktop application.
 pub(crate) struct LunaApp {
@@ -43,6 +44,7 @@ pub(crate) struct LunaApp {
     /// UI panel toggles.
     show_cpu_panel: bool,
     show_ppu_panel: bool,
+    show_stubs_panel: bool,
 }
 
 impl LunaApp {
@@ -59,6 +61,7 @@ impl LunaApp {
             fps: 0.0,
             show_cpu_panel: true,
             show_ppu_panel: true,
+            show_stubs_panel: true,
         }
     }
 
@@ -131,6 +134,10 @@ impl LunaApp {
 
     /// Step the CPU `STEPS_PER_FRAME` times, catching panics so a
     /// not-yet-implemented opcode doesn't kill the GUI.
+    ///
+    /// A single `catch_unwind` wraps the *whole* batch — the previous
+    /// per-step variant cost ~60 k unwind-setup calls per UI frame and
+    /// noticeably throttled emulation throughput.
     fn step_cpu(&mut self) {
         if self.paused {
             return;
@@ -140,21 +147,23 @@ impl LunaApp {
         };
         let prev_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
-        for _ in 0..STEPS_PER_FRAME {
-            if snes.cpu.stopped {
-                break;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let mut executed = 0u32;
+            while executed < STEPS_PER_FRAME && !snes.cpu.stopped {
+                snes.step();
+                executed += 1;
             }
-            match catch_unwind(AssertUnwindSafe(|| snes.step())) {
-                Ok(_) => self.instructions_executed += 1,
-                Err(payload) => {
-                    let msg = payload_to_string(payload);
-                    self.last_error = Some(format!("CPU panic: {msg}"));
-                    self.paused = true;
-                    break;
-                }
+            executed
+        }));
+        std::panic::set_hook(prev_hook);
+        match result {
+            Ok(n) => self.instructions_executed += u64::from(n),
+            Err(payload) => {
+                let msg = payload_to_string(payload);
+                self.last_error = Some(format!("CPU panic: {msg}"));
+                self.paused = true;
             }
         }
-        std::panic::set_hook(prev_hook);
     }
 
     /// Render the PPU framebuffer into an egui texture.
@@ -236,6 +245,7 @@ impl App for LunaApp {
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.show_cpu_panel, "CPU panel");
                     ui.checkbox(&mut self.show_ppu_panel, "PPU panel");
+                    ui.checkbox(&mut self.show_stubs_panel, "Stubs panel");
                 });
                 ui.menu_button("Help", |ui| {
                     ui.label("Luna SNES — 2026");
@@ -252,7 +262,7 @@ impl App for LunaApp {
         });
 
         // ---------------- Right side panel (debug) ----------------
-        if self.show_cpu_panel || self.show_ppu_panel {
+        if self.show_cpu_panel || self.show_ppu_panel || self.show_stubs_panel {
             egui::SidePanel::right("debug_panel")
                 .resizable(true)
                 .default_width(280.0)
@@ -272,6 +282,13 @@ impl App for LunaApp {
                                 .default_open(true)
                                 .show(ui, |ui| {
                                     ppu_panel(ui, snes);
+                                });
+                        }
+                        if self.show_stubs_panel {
+                            egui::CollapsingHeader::new(RichText::new("Stubs").strong())
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    stubs_panel(ui, snes);
                                 });
                         }
                     } else {
@@ -417,6 +434,37 @@ fn ppu_panel(ui: &mut egui::Ui, snes: &Snes) {
                 )));
                 ui.end_row();
             }
+        });
+}
+
+fn stubs_panel(ui: &mut egui::Ui, snes: &Snes) {
+    let mono = |s: String| RichText::new(s).monospace();
+    ui.label(
+        RichText::new("Compat stubs — replaced once real APU/scheduler land.")
+            .small()
+            .italics()
+            .color(Color32::from_rgb(160, 160, 180)),
+    );
+    egui::Grid::new("stubs_regs")
+        .num_columns(2)
+        .striped(true)
+        .show(ui, |ui| {
+            for (i, v) in snes.apu_mailbox_to_cpu.iter().enumerate() {
+                ui.label(format!("APU $214{i}"));
+                ui.label(mono(format!("${v:02X}")));
+                ui.end_row();
+            }
+            ui.label("Fake frames");
+            ui.label(mono(snes.fake_frame_count.to_string()));
+            ui.end_row();
+            ui.label("NMITIMEN");
+            let nmiten = snes.cpu_regs.nmitimen;
+            ui.label(mono(format!(
+                "${:02X} {}",
+                nmiten,
+                if nmiten & 0x80 != 0 { "(NMI on)" } else { "" }
+            )));
+            ui.end_row();
         });
 }
 
