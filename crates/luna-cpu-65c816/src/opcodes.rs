@@ -145,6 +145,44 @@ impl Cpu {
             0x3A => self.dec_a(),
 
             // -----------------------------------------------------------
+            // Arithmetic — ADC (Add with Carry, binary mode only for now)
+            // -----------------------------------------------------------
+            0x69 => self.adc_imm(bus),
+            0x65 => self.adc_dp(bus),
+            0x67 => self.adc_dp_indirect_long(bus),
+            0x6D => self.adc_abs(bus),
+            0x6F => self.adc_long(bus),
+            0x75 => self.adc_dp_x(bus),
+            0x72 => self.adc_dp_indirect(bus),
+            0x77 => self.adc_dp_indirect_long_y(bus),
+            0x7D => self.adc_abs_x(bus),
+            0x7F => self.adc_long_x(bus),
+            0x79 => self.adc_abs_y(bus),
+            0x71 => self.adc_dp_indirect_y(bus),
+            0x63 => self.adc_sr_s(bus),
+            0x73 => self.adc_sr_s_y(bus),
+            0x61 => self.adc_dp_x_indirect(bus),
+
+            // -----------------------------------------------------------
+            // Arithmetic — SBC (Subtract with Carry, binary mode only)
+            // -----------------------------------------------------------
+            0xE9 => self.sbc_imm(bus),
+            0xE5 => self.sbc_dp(bus),
+            0xE7 => self.sbc_dp_indirect_long(bus),
+            0xED => self.sbc_abs(bus),
+            0xEF => self.sbc_long(bus),
+            0xF5 => self.sbc_dp_x(bus),
+            0xF2 => self.sbc_dp_indirect(bus),
+            0xF7 => self.sbc_dp_indirect_long_y(bus),
+            0xFD => self.sbc_abs_x(bus),
+            0xFF => self.sbc_long_x(bus),
+            0xF9 => self.sbc_abs_y(bus),
+            0xF1 => self.sbc_dp_indirect_y(bus),
+            0xE3 => self.sbc_sr_s(bus),
+            0xF3 => self.sbc_sr_s_y(bus),
+            0xE1 => self.sbc_dp_x_indirect(bus),
+
+            // -----------------------------------------------------------
             // Misc
             // -----------------------------------------------------------
             0xEA => { /* NOP */ }
@@ -612,6 +650,223 @@ impl Cpu {
             self.a = self.a.wrapping_sub(1);
             self.set_nz16(self.a);
         }
+    }
+
+    // ===================================================================
+    // ADC / SBC core
+    //
+    // Binary mode (D=0) is implemented here. Decimal-mode arithmetic
+    // (D=1, BCD) is deferred to P0.4b.4.1 — see the TODO in is_implemented
+    // (tom_harte.rs) which excludes ADC/SBC for now.
+    // ===================================================================
+
+    /// Add `value` to A with carry; sets N/V/Z/C per width.
+    fn adc_value(&mut self, value: u16) {
+        let c_in = u32::from(self.p.contains(bit::C));
+        if self.p.acc8() {
+            let a = u32::from(self.a8());
+            let v = u32::from(value as u8);
+            let raw = a + v + c_in;
+            let result = raw as u8;
+            self.p.set(bit::C, raw > 0xFF);
+            // Two's-complement overflow: signs of operands match but
+            // differ from result sign.
+            let overflow = (!(a ^ v) & (a ^ u32::from(result))) & 0x80 != 0;
+            self.p.set(bit::V, overflow);
+            self.set_a_low(result);
+            self.set_nz8(result);
+        } else {
+            let a = u32::from(self.a);
+            let v = u32::from(value);
+            let raw = a + v + c_in;
+            let result = raw as u16;
+            self.p.set(bit::C, raw > 0xFFFF);
+            let overflow = (!(a ^ v) & (a ^ u32::from(result))) & 0x8000 != 0;
+            self.p.set(bit::V, overflow);
+            self.a = result;
+            self.set_nz16(result);
+        }
+    }
+
+    /// Subtract `value` from A with borrow (carry inverted).
+    /// On the 65C816, `SBC v` is equivalent to `ADC ~v` (one's complement),
+    /// with the carry interpreted as "not borrow".
+    fn sbc_value(&mut self, value: u16) {
+        if self.p.acc8() {
+            self.adc_value(u16::from(!(value as u8)));
+        } else {
+            self.adc_value(!value);
+        }
+    }
+
+    fn adc_imm<B: Bus>(&mut self, bus: &mut B) {
+        let v = if self.p.acc8() {
+            u16::from(self.fetch_u8(bus))
+        } else {
+            self.fetch_u16(bus)
+        };
+        self.adc_value(v);
+    }
+
+    fn sbc_imm<B: Bus>(&mut self, bus: &mut B) {
+        let v = if self.p.acc8() {
+            u16::from(self.fetch_u8(bus))
+        } else {
+            self.fetch_u16(bus)
+        };
+        self.sbc_value(v);
+    }
+
+    fn arithmetic_read_from<B: Bus>(&mut self, bus: &mut B, addr: Addr24) -> u16 {
+        if self.p.acc8() {
+            u16::from(bus.read(addr))
+        } else {
+            read_word(bus, addr)
+        }
+    }
+
+    // ADC modes
+    fn adc_dp<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.adc_value(v);
+    }
+    fn adc_dp_indirect_long<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indirect_long(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.adc_value(v);
+    }
+    fn adc_abs<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.adc_value(v);
+    }
+    fn adc_long<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_long(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.adc_value(v);
+    }
+    fn adc_dp_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indexed_x(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.adc_value(v);
+    }
+    fn adc_dp_indirect<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indirect(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.adc_value(v);
+    }
+    fn adc_dp_indirect_long_y<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indirect_long_y(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.adc_value(v);
+    }
+    fn adc_abs_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_indexed_x(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.adc_value(v);
+    }
+    fn adc_abs_y<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_indexed_y(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.adc_value(v);
+    }
+    fn adc_long_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_long_indexed_x(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.adc_value(v);
+    }
+    fn adc_dp_indirect_y<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indirect_y(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.adc_value(v);
+    }
+    fn adc_sr_s<B: Bus>(&mut self, bus: &mut B) {
+        let a = stack_relative(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.adc_value(v);
+    }
+    fn adc_sr_s_y<B: Bus>(&mut self, bus: &mut B) {
+        let a = stack_relative_indirect_y(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.adc_value(v);
+    }
+    fn adc_dp_x_indirect<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indexed_indirect(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.adc_value(v);
+    }
+
+    // SBC modes (same wiring, sbc_value internally)
+    fn sbc_dp<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.sbc_value(v);
+    }
+    fn sbc_dp_indirect_long<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indirect_long(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.sbc_value(v);
+    }
+    fn sbc_abs<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.sbc_value(v);
+    }
+    fn sbc_long<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_long(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.sbc_value(v);
+    }
+    fn sbc_dp_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indexed_x(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.sbc_value(v);
+    }
+    fn sbc_dp_indirect<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indirect(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.sbc_value(v);
+    }
+    fn sbc_dp_indirect_long_y<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indirect_long_y(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.sbc_value(v);
+    }
+    fn sbc_abs_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_indexed_x(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.sbc_value(v);
+    }
+    fn sbc_abs_y<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_indexed_y(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.sbc_value(v);
+    }
+    fn sbc_long_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_long_indexed_x(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.sbc_value(v);
+    }
+    fn sbc_dp_indirect_y<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indirect_y(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.sbc_value(v);
+    }
+    fn sbc_sr_s<B: Bus>(&mut self, bus: &mut B) {
+        let a = stack_relative(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.sbc_value(v);
+    }
+    fn sbc_sr_s_y<B: Bus>(&mut self, bus: &mut B) {
+        let a = stack_relative_indirect_y(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.sbc_value(v);
+    }
+    fn sbc_dp_x_indirect<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indexed_indirect(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.sbc_value(v);
     }
 }
 
@@ -1092,6 +1347,109 @@ mod tests {
     // -------------------------------------------------------------------
     // Misc
     // -------------------------------------------------------------------
+
+    // -------------------------------------------------------------------
+    // ADC / SBC (binary mode)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn adc_imm_basic() {
+        // CLC, LDA #$10, ADC #$20 → A=$30, C=0, V=0
+        let (mut cpu, mut bus) = run(&[0x18, 0xA9, 0x10, 0x69, 0x20]);
+        cpu.step(&mut bus); // CLC
+        cpu.step(&mut bus); // LDA #$10
+        cpu.step(&mut bus); // ADC #$20
+        assert_eq!(cpu.a8(), 0x30);
+        assert!(!cpu.p.contains(bit::C));
+        assert!(!cpu.p.contains(bit::V));
+    }
+
+    #[test]
+    fn adc_imm_carries_out_at_overflow() {
+        // CLC, LDA #$FF, ADC #$01 → A=$00, C=1, Z=1
+        let (mut cpu, mut bus) = run(&[0x18, 0xA9, 0xFF, 0x69, 0x01]);
+        cpu.step(&mut bus); // CLC
+        cpu.step(&mut bus); // LDA #$FF
+        cpu.step(&mut bus); // ADC #$01
+        assert_eq!(cpu.a8(), 0x00);
+        assert!(cpu.p.contains(bit::C));
+        assert!(cpu.p.contains(bit::Z));
+    }
+
+    #[test]
+    fn adc_imm_uses_carry_in() {
+        // SEC, LDA #$10, ADC #$20 → A=$31, C=0
+        let (mut cpu, mut bus) = run(&[0x38, 0xA9, 0x10, 0x69, 0x20]);
+        cpu.step(&mut bus); // SEC
+        cpu.step(&mut bus); // LDA #$10
+        cpu.step(&mut bus); // ADC #$20
+        assert_eq!(cpu.a8(), 0x31);
+        assert!(!cpu.p.contains(bit::C));
+    }
+
+    #[test]
+    fn adc_imm_signed_overflow_pos_plus_pos_eq_neg() {
+        // CLC, LDA #$50, ADC #$50 → A=$A0 (negative), V=1
+        let (mut cpu, mut bus) = run(&[0x18, 0xA9, 0x50, 0x69, 0x50]);
+        cpu.step(&mut bus); // CLC
+        cpu.step(&mut bus); // LDA #$50
+        cpu.step(&mut bus); // ADC #$50
+        assert_eq!(cpu.a8(), 0xA0);
+        assert!(cpu.p.contains(bit::V));
+        assert!(cpu.p.contains(bit::N));
+    }
+
+    #[test]
+    fn sbc_imm_basic_with_carry_set() {
+        // SEC (no borrow), LDA #$30, SBC #$10 → A=$20, C=1
+        let (mut cpu, mut bus) = run(&[0x38, 0xA9, 0x30, 0xE9, 0x10]);
+        cpu.step(&mut bus); // SEC
+        cpu.step(&mut bus); // LDA #$30
+        cpu.step(&mut bus); // SBC #$10
+        assert_eq!(cpu.a8(), 0x20);
+        assert!(cpu.p.contains(bit::C), "no borrow → C stays set");
+    }
+
+    #[test]
+    fn sbc_imm_borrows() {
+        // SEC, LDA #$10, SBC #$20 → A=$F0, C=0 (borrow occurred)
+        let (mut cpu, mut bus) = run(&[0x38, 0xA9, 0x10, 0xE9, 0x20]);
+        cpu.step(&mut bus); // SEC
+        cpu.step(&mut bus); // LDA #$10
+        cpu.step(&mut bus); // SBC #$20
+        assert_eq!(cpu.a8(), 0xF0);
+        assert!(!cpu.p.contains(bit::C));
+        assert!(cpu.p.contains(bit::N));
+    }
+
+    #[test]
+    fn adc_abs_reads_from_memory() {
+        let (mut cpu, mut bus) = run(&[0x18, 0xA9, 0x10, 0x6D, 0x00, 0x20]); // CLC, LDA #$10, ADC $2000
+        cpu.db = 0;
+        bus.poke(0x00_2000, 0x25);
+        cpu.step(&mut bus); // CLC
+        cpu.step(&mut bus); // LDA #$10
+        cpu.step(&mut bus); // ADC $2000
+        assert_eq!(cpu.a8(), 0x35);
+    }
+
+    #[test]
+    fn adc_16bit_wraps_at_10000() {
+        // CLC, XCE, REP #$20, LDA #$FFFF, ADC #$0001
+        let prog = &[0x18, 0xFB, 0xC2, 0x20, 0xA9, 0xFF, 0xFF, 0x69, 0x01, 0x00];
+        let (mut cpu, mut bus) = run(prog);
+        cpu.step(&mut bus); // CLC
+        cpu.step(&mut bus); // XCE
+        cpu.step(&mut bus); // REP #$20
+        // Carry is set as a side-effect of XCE — need another CLC.
+        // Easier: just verify the wrap behavior in a focused way.
+        cpu.p.remove(bit::C);
+        cpu.step(&mut bus); // LDA #$FFFF
+        cpu.step(&mut bus); // ADC #$0001
+        assert_eq!(cpu.a, 0);
+        assert!(cpu.p.contains(bit::C));
+        assert!(cpu.p.contains(bit::Z));
+    }
 
     #[test]
     fn nop_just_advances_pc() {
