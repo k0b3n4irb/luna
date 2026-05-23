@@ -14,6 +14,7 @@
   - [3.1 Architecture en couches](#31-architecture-en-couches)
   - [3.2 Modes d'exécution](#32-modes-dexécution)
 - [4. Organisation du workspace Rust](#4-organisation-du-workspace-rust)
+  - [4.1 Stratégie cross-target async](#41-stratégie-cross-target-async)
 - [5. Couche 1 — Bus & mémoire](#5-couche-1--bus--mémoire)
 - [6. Couche 2 — Cœur d'émulation](#6-couche-2--cœur-démulation)
   - [6.1 CPU 65C816](#61-cpu-65c816)
@@ -40,6 +41,9 @@
   - [9.4 Implications architecturales](#94-implications-architecturales)
   - [9.5 `luna-api` comme contrat public stable](#95-luna-api-comme-contrat-public-stable)
 - [10. Modèle de threading](#10-modèle-de-threading)
+  - [10.1 Cible native](#101-cible-native-linux--macos--windows)
+  - [10.2 Cible WASM (Luna Studio Web — V2)](#102-cible-wasm-luna-studio-web--v2)
+  - [10.3 Discipline stricte](#103-discipline-stricte)
 - [11. Déterminisme & reproductibilité](#11-déterminisme--reproductibilité)
 - [12. Stratégie de test](#12-stratégie-de-test)
 - [13. Build, distribution, licence](#13-build-distribution-licence)
@@ -253,69 +257,133 @@ au cœur via le bus interne (latence < 1ms, zéro coût token).
 
 ## 4. Organisation du workspace Rust
 
-Workspace Cargo avec ~10 crates, chaque crate ayant une responsabilité
-nette et testable indépendamment.
+Workspace Cargo avec ~15 crates. Chaque crate est annoté **cross-target**
+(compile en natif et `wasm32-unknown-unknown`) ou **native-only** (interdit
+en WASM). Cette discipline est vérifiée en CI : `cargo check --target
+wasm32-unknown-unknown` sur les crates cross-target.
 
 ```
 luna/
-├── Cargo.toml                  # workspace root
-├── ARCHITECTURE.md             # ce document
-├── README.md                   # panorama émulateurs (existant)
+├── Cargo.toml                       # workspace root
+├── ARCHITECTURE.md                  # ce document
+├── README.md                        # panorama émulateurs (existant)
+├── RESEARCH.md                      # synthèse des recherches pré-Phase-0
 │
 ├── crates/
-│   ├── luna-bus/               # memory map, mappers de cartouche
-│   ├── luna-cpu/               # 65C816 cycle-accurate
-│   ├── luna-ppu/               # Picture Processing Unit
-│   ├── luna-apu/               # SPC700 + DSP audio
-│   ├── luna-dma/               # DMA + HDMA
-│   ├── luna-coproc/            # SA-1, Super FX, DSP-1/2/3/4, etc.
-│   ├── luna-cartridge/         # parsing ROM, détection header, SRAM
+│   │── # ──────────── CŒUR D'ÉMULATION (cross-target, !Send, no_std-ready) ────
+│   ├── luna-bus/                    # ✅ memory map, mappers cartouche
+│   ├── luna-cpu-65c816/             # ✅ CPU principal, cycle-accurate
+│   ├── luna-cpu-spc700/             # ✅ CPU audio
+│   ├── luna-ppu/                    # ✅ Picture Processing Unit
+│   ├── luna-apu/                    # ✅ SPC700 + DSP audio (orchestre spc700)
+│   ├── luna-dma/                    # ✅ DMA + HDMA
+│   ├── luna-coproc/                 # ✅ SA-1, Super FX, DSP-1/2/3/4, etc.
+│   ├── luna-cartridge/              # ✅ parsing ROM, détection header, SRAM
+│   ├── luna-core/                   # ✅ assemble les composants, scheduler
 │   │
-│   ├── luna-core/              # assemble tous les composants, scheduler
+│   │── # ──────────── ABSTRACTIONS CROSS-TARGET ─────────────────────
+│   ├── luna-async/                  # ✅ façade runtime (spawn/sleep/channels)
+│   ├── luna-api/                    # ✅ ★ contrat public stable (couche 3)
 │   │
-│   ├── luna-api/               # ★ contrat public stable (couche 3)
+│   │── # ──────────── TRANSPORTS (mix cross-target / native-only) ────
+│   ├── luna-mcp-core/               # ✅ types Tool/Resource, schemas
+│   ├── luna-mcp-server/             # ❌ rmcp + tokio mainline (native-only)
+│   ├── luna-mcp-client/             # ✅ transport WebSocket cross-target
+│   ├── luna-rest/                   # ❌ axum + OpenAPI (V1.1, native-only)
+│   ├── luna-ws/                     # ❌ tokio-tungstenite (V1.1, native-only)
+│   ├── luna-wasm/                   # ⚠️ WASM-only, bindings JS (V2)
+│   ├── luna-ffi/                    # ❌ cdylib C/Python (V2, native-only)
+│   ├── luna-libretro/               # ❌ core libretro (V2, native-only)
 │   │
-│   ├── # Transports / adaptateurs (couche 4) — chacun dépend SEULEMENT de luna-api
-│   ├── luna-mcp/               # serveur MCP (V1)
-│   ├── luna-rest/              # serveur REST + OpenAPI (V1.1)
-│   ├── luna-ws/                # serveur WebSocket (V1.1)
-│   ├── luna-wasm/              # bindings WASM/JS (V2)
-│   ├── luna-ffi/               # cdylib pour FFI C/Python/… (V2)
-│   ├── luna-libretro/          # core libretro (V2)
-│   │
-│   ├── luna-cli/               # binaire `luna`, dispatche les modes
-│   ├── luna-gui/               # GUI egui/wgpu (standalone + spectator)
-│   └── luna-overlay/           # overlays spectator (timeline agent, surbrillances)
+│   │── # ──────────── BINAIRES & GUI ───────────────────────────────
+│   ├── luna-cli/                    # ❌ binaire `luna`, dispatche les modes
+│   ├── luna-gui/                    # ⚠️ egui/wgpu (natif + WASM via eframe)
+│   └── luna-overlay/                # ⚠️ overlays spectator (natif + WASM)
 │
 ├── tests/
-│   ├── roms/                   # test ROMs (krom, blargg, peter_lemon)
-│   └── golden/                 # frames de référence pour tests visuels
+│   ├── roms/                        # test ROMs (krom, blargg, peter_lemon)
+│   ├── tom-harte/                   # JSON suite ProcessorTests pour 65C816
+│   └── golden/                      # frames de référence pour tests visuels
 │
 └── tools/
-    └── disasm/                 # désassembleur 65C816 standalone
+    └── disasm/                      # désassembleur 65C816 standalone
 ```
 
-**Choix de dépendances clés**
+Légende : ✅ cross-target / ⚠️ cross-target avec features cfg-gated /
+❌ native-only.
 
-| Domaine            | Crate                       | Rationale                          |
-|--------------------|-----------------------------|------------------------------------|
-| Async runtime      | `tokio` (full)              | Standard de facto, multi-threadé   |
-| Sérialisation      | `serde` + `serde_json`      | Indispensable pour MCP             |
-| MCP                | `rmcp` (officiel Anthropic) | SDK Rust officiel, ou roll-our-own |
-| Canaux             | `crossbeam-channel`         | Plus rapide que `std::sync::mpsc`  |
-| Rendu (gui)        | `wgpu` + `egui`             | Cross-platform moderne             |
-| Audio (gui)        | `cpal`                      | Cross-platform, low-latency        |
-| Tests visuels      | `image` + `pixelmatch`      | Comparaison golden frames          |
-| Tracing            | `tracing` + `tracing-subscriber` | Logs structurés              |
-| CLI args           | `clap` (derive)             | Standard                           |
-| Coroutines         | **aucune crate externe**    | Cf. §6.6                           |
+**Choix de dépendances clés** (révisés après recherche, cf. RESEARCH.md)
 
-**Décision sur les coroutines** : contrairement à ares qui utilise libco
-(coroutines coopératives en C), on n'introduit *pas* `genawaiter` ni
-`async-coroutines` dans le cœur. Rust permet une autre approche : modéliser
-chaque composant comme une **state machine implicite** dont la fonction
-`tick(cycles_budget) -> cycles_consumed` peut être appelée par le scheduler.
-Cf. §6.6.
+| Domaine             | Crate(s)                                       | Rationale                                                   |
+|---------------------|------------------------------------------------|-------------------------------------------------------------|
+| Async runtime natif | `tokio` (rt-multi-thread, sync, macros)        | Standard de facto                                           |
+| Async runtime web   | `wasm-bindgen-futures` + `gloo-timers`         | Single-thread, microtask queue                              |
+| **Façade async**    | **`luna-async`** (crate maison)                | **Évite `#[cfg(target_arch)]` partout — obligatoire**       |
+| Channels (cross)    | `futures::channel::mpsc` / `async-channel`     | `crossbeam-channel` **panique** en WASM (cf. RESEARCH.md)   |
+| Sérialisation       | `serde` + `serde_json`                         | Indispensable pour MCP                                      |
+| MCP serveur         | `rmcp` (officiel Anthropic) — natif uniquement | Pas de support `wasm32-unknown-unknown`                     |
+| Schemas             | `schemars` + `ts-rs` (build-time) + `utoipa`   | Génération JSON Schema / TS / OpenAPI                       |
+| Rendu (gui)         | `wgpu` + `egui` / `eframe`                     | Cross-platform natif + WASM via WebGPU/WebGL                |
+| Audio natif         | `cpal`                                         | Cross-platform low-latency                                  |
+| Audio web           | `cpal` (backend wasm-bindgen, output only)     | Bridge Web Audio API ; latence ~50-100ms                    |
+| Test 65C816         | `tom-harte/ProcessorTests` (JSON)              | Suite utilisée par jgenesis, dr.beer, etc.                  |
+| Tests visuels       | `image` + `pixelmatch`                         | Comparaison golden frames                                   |
+| Tracing             | `tracing` + `tracing-subscriber`               | Logs structurés                                             |
+| CLI args            | `clap` (derive)                                | Standard                                                    |
+| Coroutines          | **aucune** (`genawaiter` rejeté)               | Pattern static dispatch préféré, cf. §6.6                   |
+
+**Décision sur l'architecture interne** : contrairement à ares qui utilise
+libco, et contrairement à certains émulateurs Rust qui tentent
+`#[coroutine]` (nightly, save-states cassés), Luna utilise le pattern
+**CPU-driven master-clock catch-up** validé par jgenesis et tetanes. Cf.
+§6.6 pour les détails.
+
+### 4.1 Stratégie cross-target async
+
+Le cœur (`luna-core`, `luna-api`, `luna-mcp-core`) doit pouvoir compiler
+en `wasm32-unknown-unknown`. Or :
+
+- `tokio` mainline ne supporte que partiellement WASM
+  (`tokio::time` *panique* à l'exécution).
+- `crossbeam-channel` ne fonctionne **pas** en WASM (parking primitive
+  absente, panic "unreachable").
+- `std::thread::spawn` indisponible en WASM single-thread.
+
+**Solution adoptée** : un crate `luna-async` qui expose une API minimale
+(`spawn`, `sleep`, `yield_now`, `mpsc`, `oneshot`) avec deux
+implémentations conditionnelles :
+
+```rust
+// crates/luna-async/src/lib.rs
+#[cfg(not(target_arch = "wasm32"))]
+mod imp {
+    pub use tokio::task::spawn;
+    pub use tokio::time::sleep;
+}
+
+#[cfg(target_arch = "wasm32")]
+mod imp {
+    use std::future::Future;
+    pub fn spawn<F: Future<Output = ()> + 'static>(f: F) {
+        wasm_bindgen_futures::spawn_local(f);
+    }
+    pub async fn sleep(d: std::time::Duration) {
+        gloo_timers::future::TimeoutFuture::new(d.as_millis() as u32).await;
+    }
+}
+
+pub use imp::{spawn, sleep};
+
+// Channels cross-target — `futures::channel` fonctionne partout
+pub use futures::channel::{mpsc, oneshot};
+```
+
+**Discipline `!Send` partout dans le cœur** : single-thread compatible
+WASM. Le parallélisme natif passe par des workers explicites
+(threads dédiés) dans `luna-mcp-server` natif, jamais dans `luna-core`.
+
+**Conséquence sur la boucle 60Hz** : voir §10 (thread dédié en natif,
+`requestAnimationFrame` en WASM, abstrait par un trait `Frontend`).
 
 ---
 
@@ -324,21 +392,50 @@ Cf. §6.6.
 Le **bus** est l'objet central qui route les lectures/écritures vers les
 bons composants selon l'adresse 24 bits du 65C816 (`$bb:aaaa`).
 
-### Trait `BusDevice`
+### Trait `Bus` (vue exposée au CPU)
 
 ```rust
-pub trait BusDevice {
-    /// Lit un octet à l'adresse donnée. Doit être déterministe.
-    fn read(&mut self, addr: u24) -> u8;
+pub type MCycles = u64;
+
+pub trait Bus {
+    /// Lit un octet. DÉCLENCHE `io_cycle()` en interne avec le coût
+    /// d'accès (SLOW=8 / FAST=6 / XSLOW=12 mclk selon la région).
+    fn read(&mut self, addr: u32) -> u8;
 
     /// Écrit un octet. Peut avoir des effets de bord (registres MMIO).
-    fn write(&mut self, addr: u24, value: u8);
+    /// Déclenche également `io_cycle()` avec le coût d'accès.
+    fn write(&mut self, addr: u32, value: u8);
 
-    /// Snapshot pour save state / time travel.
+    /// **PRIMITIVE CLÉ POUR LA MID-INSTRUCTION ACCURACY.**
+    /// Appelée par le CPU à chaque accès bus (lecture, écriture, ou
+    /// cycle interne sans accès). Le bus en profite pour rattraper
+    /// immédiatement le PPU, traiter HDMA, et tester NMI/IRQ.
+    ///
+    /// C'est ce qui rend Mario Kart, F-Zero, et tous les jeux à
+    /// HDMA/mid-frame effects corrects.
+    fn io_cycle(&mut self, mcycles: MCycles);
+
+    /// Sondage des lignes d'interruption après accumulation via io_cycle.
+    fn nmi_pending(&self) -> bool;
+    fn irq_pending(&self) -> bool;
+}
+
+/// Trait pour les composants stockés derrière le bus (PPU, DMA, etc.)
+pub trait BusDevice {
+    fn read(&mut self, addr: u32) -> u8;
+    fn write(&mut self, addr: u32, value: u8);
     fn snapshot(&self) -> Vec<u8>;
     fn restore(&mut self, data: &[u8]) -> Result<(), SnapshotError>;
 }
 ```
+
+**Pourquoi `io_cycle()` ?** C'est la primitive qui distingue un émulateur
+SNES "moderately accurate" d'un cycle-accurate vrai. Sans elle, le PPU
+n'est rattrapé qu'entre les instructions CPU — ce qui rate les effets
+HDMA, le timing exact des IRQ H/V, et les bugs Mario Kart. Avec elle,
+chaque accès mémoire du CPU déclenche un catch-up du PPU jusqu'au cycle
+exact, ce qui garantit la précision tout en restant zero-alloc dans la
+hot loop. Pattern validé par jgenesis et tetanes.
 
 ### Mappers de cartouche
 
@@ -489,53 +586,161 @@ de compiler une build minimale si on cible un jeu spécifique.
 
 ### 6.6 Scheduler & synchro cycle-accurate
 
-**Le problème** : faire avancer dans le bon ordre un CPU principal, un
-PPU (lui-même cadencé par dots/scanlines), un APU async, des DMAs qui
-peuvent voler des cycles au CPU, et potentiellement un coprocesseur — le
-tout en restant déterministe.
+**Le problème** : faire avancer dans le bon ordre un CPU principal
+(21.477 MHz NTSC), un PPU (cadencé par dots/scanlines), un APU à
+fréquence indépendante (3.072 MHz SPC700), des DMAs qui volent des
+cycles au CPU, et potentiellement un coprocesseur — le tout en restant
+déterministe et performant.
 
-**Approche** : un scheduler à *master clock* (21.477 MHz NTSC) qui distribue
-des "budgets de cycles" aux composants, dans un ordre fixé par les
-*relative timings* du hardware réel.
+**Décision** : on adopte le pattern **CPU-driven master-clock catch-up**
+validé par [jgenesis](https://github.com/jsgroth/jgenesis) et
+[tetanes](https://github.com/lukexor/tetanes), considérés comme l'état
+de l'art Rust en émulation cycle-accurate.
+
+**Patterns rejetés et pourquoi**
+
+| Pattern | Verdict | Raison |
+|---|---|---|
+| Event-queue `BinaryHeap` (style moa) | ❌ | À 21M cycles/s, l'overhead heap + `Box<dyn>` consomme 50% du budget cycle |
+| Coroutines `#[coroutine]` (Lochnes) | ❌ | Nightly only, save-states impossibles (closures non-sérialisables), perf marginale |
+| `genawaiter` (stable, mais...) | ❌ | LLVM peine à inliner ; save-states cassés |
+| Instruction-step naïf (rboy GB) | ❌ | Pas de mid-instruction accuracy, casse Mario Kart |
+| Lazy + `next_event` (gameroy GB) | ⚠️ | À utiliser **en complément** pour optimiser WAI/STP |
+| **CPU master-clock catch-up + `io_cycle()` (jgenesis)** | ✅ | **Notre choix** |
+| State-machine pure par cycle (DaveTCode NES) | ⚠️ | Excellent pour le CPU isolé, à utiliser dans `luna-cpu-65c816` |
+
+**Pattern adopté — vue d'ensemble**
+
+```
+loop {
+  delta_mclk = if memory_refresh_pending { 40 }                  // DRAM refresh
+              else if dma.active() { dma.tick(bus) }             // DMA vole les cycles
+              else { cpu.step(bus) }                             // 1 instruction CPU
+                       ↑ pendant cette étape, le CPU appelle
+                         bus.io_cycle(n) à chaque accès,
+                         ce qui rattrape PPU/HDMA en cours d'instruction
+  apu.tick(delta_mclk)                                           // catch-up rationnel
+  ppu.catch_up_to(total_mclk + delta_mclk)                       // résidu cycles internes
+  total_mclk += delta_mclk
+  if ppu.frame_complete() { return }
+}
+```
+
+**Croquis Rust complet**
 
 ```rust
-pub struct Scheduler {
-    master_clock: u64,
-    next_events: BinaryHeap<Event>,   // heap-ordered par deadline
+// crates/luna-core/src/scheduler.rs
+
+pub type MCycles = u64;
+pub const NTSC_MASTER_HZ: u64 = 21_477_272;
+pub const APU_MASTER_HZ:  u64 = 24_576_000;
+
+pub struct Snes {
+    pub cpu: Cpu65816,
+    pub ppu: Ppu,
+    pub apu: Apu,             // SPC700 + DSP, fréquence indépendante
+    pub dma: DmaUnit,
+    pub cart: Cartridge,
+    pub wram: Box<[u8; 0x20000]>,
+    pub total_mclk: MCycles,
+    pub frame_mclk: MCycles,
+    pub memory_refresh_pending: bool,
 }
 
-pub enum Event {
-    CpuStep,
-    PpuDot,
-    ApuTick,
-    DmaTransfer { channel: u8 },
-    HdmaScanline,
-    Nmi, Irq,
-}
+impl Snes {
+    /// Une itération = soit 1 instruction CPU, soit 1 cycle DMA, soit
+    /// 1 refresh DRAM. Zero-alloc dans la hot loop.
+    #[inline]
+    pub fn step(&mut self) -> TickEffect {
+        let delta = if self.memory_refresh_pending {
+            self.memory_refresh_pending = false;
+            MEMORY_REFRESH_CYCLES                                    // ~40 mclk
+        } else if self.dma.active() {
+            // DMA vole les cycles au CPU. Unité = 8 mclk (1 transfert byte)
+            self.dma.tick(&mut self.snes_bus())
+        } else {
+            // CPU exécute UNE instruction. Pendant `step`, bus.io_cycle()
+            // rattrape immédiatement PPU + HDMA + IRQ check.
+            let mut bus = self.snes_bus();
+            self.cpu.step(&mut bus);
+            bus.access_master_cycles_total
+        };
 
-impl Scheduler {
-    pub fn run_to_frame(&mut self, machine: &mut Machine) -> Frame {
-        while !machine.ppu.frame_complete() {
-            let next = self.next_events.pop().unwrap();
-            self.dispatch(next, machine);
+        // APU à fréquence différente : catch-up à arithmétique
+        // RATIONNELLE u64 (pas de float, pas de dérive).
+        let apu_eff = self.apu.tick(delta);
+
+        // Résidu PPU (cycles internes CPU sans accès bus → pas rattrapés
+        // par io_cycle). Habituellement 0-2 mclk.
+        let ppu_eff = self.ppu.catch_up_to(self.total_mclk + delta);
+
+        self.total_mclk += delta;
+        self.frame_mclk += delta;
+
+        TickEffect {
+            frame_complete: ppu_eff.frame_complete,
+            audio_samples: apu_eff.audio_samples,
         }
-        machine.ppu.take_frame()
+    }
+
+    pub fn run_to_frame(&mut self, audio_out: &mut Vec<(f32, f32)>) {
+        loop {
+            let e = self.step();
+            audio_out.extend(e.audio_samples);
+            if e.frame_complete { return; }
+        }
+    }
+}
+
+// APU catch-up à arithmétique rationnelle — PAS DE FLOAT
+impl Apu {
+    pub fn tick(&mut self, main_mcycles: MCycles) -> TickEffect {
+        // master CPU = 21.477272 MHz, master APU = 24.576 MHz
+        self.numerator += main_mcycles * APU_MASTER_HZ;
+        while self.numerator >= NTSC_MASTER_HZ {
+            self.numerator -= NTSC_MASTER_HZ;
+            self.spc700.step(&mut self.bus);
+            self.timer0.tick(); self.timer1.tick(); self.timer2.tick();
+            if self.sample_divider.tick() { self.emit_sample(); }
+        }
+        TickEffect::default()
     }
 }
 ```
 
-**Pourquoi pas libco / coroutines** : libco rend le code clair en C où il
-n'y a pas d'alternative idiomatique. En Rust on a :
+**Pourquoi ça marche** (à conserver en tête lors de l'implémentation) :
 
-- **Sum types (enums)** pour représenter l'état d'une instruction en
-  cours.
-- **Pattern matching** pour reprendre exactement où on en était.
-- **Borrow checker** qui empêche les corruptions de stack-switching.
+1. **Zero-alloc dans la hot loop** — pas de `Box<dyn>`, pas de
+   `BinaryHeap`, pas de `Vec::push` par cycle. Static dispatch partout.
+2. **Mid-instruction accuracy gratuite** — `bus.io_cycle()` rattrape le
+   PPU à chaque accès, donc HDMA scanline-précis, IRQ H/V exacts, et
+   les bugs Mario Kart sont correctement reproduits.
+3. **Pas de dérive APU/CPU** — arithmétique rationnelle u64 (pas de
+   float). Vérifiable : après 1h d'émulation, `apu.cycle_count() ≈
+   apu_freq * elapsed`.
+4. **Save states triviaux** — tous les champs sont des `struct` concrets
+   `serde::Serialize` (impossible avec coroutines/closures).
+5. **Run-ahead / netplay possibles** — `step()` est pur, on peut cloner
+   l'état entier et le rejouer.
+6. **Borrow checker compatible** — pattern `SnesBus<'a>` créé à chaque
+   step qui emprunte les champs séparément (`&mut self.ppu, &mut
+   self.wram, …`). Pas de `Rc<RefCell>` dans la hot loop.
 
-Le surcoût lisibilité de la state-machine vs coroutines est réel mais
-acceptable, et le gain en sécurité + portabilité (pas de stack switching
-asm-dépendant) le justifie. ares pourrait le faire aujourd'hui s'il était
-écrit en Rust ; c'est notre choix.
+**Risques résiduels & mitigations** : cf. §15.
+
+**Fichiers de référence à étudier en Phase 0** (lecture seule, GPL-3.0
+incompatible avec copie) :
+
+- [`jgenesis/backend/snes-core/src/api.rs`](https://github.com/jsgroth/jgenesis/blob/master/backend/snes-core/src/api.rs#L284)
+  — `Snes::tick` ligne 284 (modèle direct)
+- [`jgenesis/backend/snes-core/src/apu.rs`](https://github.com/jsgroth/jgenesis/blob/master/backend/snes-core/src/apu.rs#L274)
+  — catch-up rationnel ligne 274
+- [`jgenesis/backend/snes-core/src/memory/dma.rs`](https://github.com/jsgroth/jgenesis/blob/master/backend/snes-core/src/memory/dma.rs)
+  — DMA/HDMA timing
+- [`jgenesis/backend/snes-core/src/bus.rs`](https://github.com/jsgroth/jgenesis/blob/master/backend/snes-core/src/bus.rs)
+  — calcul `access_master_cycles` par région mémoire
+- [`tetanes-core/src/cpu.rs`](https://github.com/lukexor/tetanes/blob/main/tetanes-core/src/cpu.rs#L280)
+  — pattern `start_cycle`/`end_cycle` (NES mais transposable)
 
 ---
 
@@ -1065,6 +1270,28 @@ dérive automatiquement :
 Une seule source de vérité, plusieurs surfaces. Le risque de
 désynchronisation entre client et serveur est éliminé à la compilation.
 
+**⚠️ Contrainte WASM importante** : `rmcp` (le SDK MCP Rust officiel) ne
+supporte pas `wasm32-unknown-unknown` (dépend de `tokio` mainline avec
+features non-WASM). Conséquence pour Luna Studio Web :
+
+- Le binaire WASM **n'embarque pas de serveur MCP**.
+- L'agent IA distant se connecte à un Luna **natif** (qui héberge le
+  serveur MCP officiel), via WebSocket relayé par le client web.
+- Architecture cible pour la V2 web :
+
+  ```
+  Agent IA ──MCP stdio──► Luna natif ──WebSocket──► Luna Studio Web (WASM)
+                                                          │
+                                                          ▼
+                                                   Vue partagée du même
+                                                   état d'émulation
+  ```
+
+- Alternative future : attendre `wasm32-wasip2` + Component Model
+  (maturité mi-2026 selon paiml/rust-mcp-sdk).
+
+Cf. RESEARCH.md pour les détails de l'audit WASM.
+
 ### 9.3 Cas d'usage produit déverrouillés
 
 Au-delà de l'agent IA, voici l'écosystème d'outils que l'API rend
@@ -1224,21 +1451,26 @@ C'est le seul crate dont la stabilité d'API est garantie au niveau
 
 ## 10. Modèle de threading
 
+Le modèle diffère selon la cible (natif vs WASM). Le code partagé passe
+par la façade `luna-async` (§4.1) pour rester cross-target.
+
+### 10.1 Cible native (Linux / macOS / Windows)
+
 ```
 ┌────────────────────────────────────────────────────────────────┐
 │            Thread "emulation" (dédié, 60 Hz)                   │
-│  - Scheduler master clock                                      │
-│  - Tick CPU / PPU / APU / DMA                                  │
+│  - Scheduler CPU master-clock catch-up (§6.6)                  │
+│  - bus.io_cycle() rattrape PPU/HDMA mid-instruction            │
 │  - Vérifie les breakpoints                                     │
-│  - Lit les commandes (Command) entre les frames                │
-│  - Publie les événements (Event) sur le bus                    │
+│  - Lit les Command entre les frames                            │
+│  - Publie les Event sur le bus                                 │
 └───────┬────────────────────────────────────────────┬───────────┘
-        │ crossbeam_channel<Command> (entrée)        │ broadcast<Event>
+        │ futures::channel::mpsc<Command> (entrée)   │ broadcast<Event>
         ▲                                            ▼
 ┌───────┴──────────────┐                  ┌──────────────────────┐
 │  Tokio runtime       │                  │  Bus d'événements    │
-│  (thread principal)  │                  │  (broadcast tokio)   │
-│  - serveur MCP       │◄─── Event ──────►│  diffusion fan-out   │
+│  (thread principal)  │                  │  (tokio broadcast)   │
+│  - luna-mcp-server   │◄─── Event ──────►│  diffusion fan-out   │
 │  - handlers async    │                  └──────┬───────────────┘
 │  - parse JSON-RPC    │                         │
 └──────────────────────┘                         │
@@ -1253,12 +1485,43 @@ C'est le seul crate dont la stabilité d'API est garantie au niveau
                                 └────────────────────────────────┘
 ```
 
-**Discipline stricte** : le cœur n'accède à *aucune* ressource async ni
-GUI directement. Toute interaction avec le monde extérieur passe par les
-deux canaux (`Command` en entrée, `Event` broadcast en sortie). Cela
-garantit que :
+### 10.2 Cible WASM (Luna Studio Web — V2)
 
-- Le cœur reste testable sans tokio ni winit.
+```
+┌────────────────────────────────────────────────────────────────┐
+│              Tâches single-thread (Web Worker ou main)         │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ Émulation cadencée par requestAnimationFrame()           │   │
+│  │  - Scheduler CPU master-clock catch-up (§6.6)            │   │
+│  │  - bus.io_cycle() rattrape PPU/HDMA mid-instruction      │   │
+│  └────────────────┬────────────────────────────────────────┘   │
+│                   │ Rc<RefCell<EmuState>>                       │
+│                   ▼                                             │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ Microtask queue : luna-mcp-client + GUI eframe          │   │
+│  │  - WebSocket vers Luna natif distant (PAS de serveur    │   │
+│  │    MCP embarqué — rmcp incompatible WASM)               │   │
+│  │  - egui/wgpu via eframe (WebGPU ou WebGL2)              │   │
+│  └─────────────────────────────────────────────────────────┘   │
+└────────────────────────────────────────────────────────────────┘
+```
+
+### 10.3 Discipline stricte
+
+- Le cœur n'accède à *aucune* ressource async ni GUI directement.
+  Toute interaction avec le monde extérieur passe par les canaux
+  (`Command` en entrée, `Event` broadcast en sortie).
+- **Pas de `crossbeam-channel` dans le cœur** — il panique en WASM.
+  Utiliser `futures::channel::mpsc` partout (compatible cross-target).
+- **`!Send` partout** dans `luna-core` et `luna-mcp-core` — single-thread
+  pour compat WASM. Le parallélisme natif passe par des threads
+  explicites dans `luna-mcp-server` natif uniquement.
+- **Pas de `borrow_mut()` à travers un `await`** côté WASM — risque de
+  panic `RefCell already borrowed`.
+
+Avantages structurels :
+
+- Le cœur reste testable sans tokio ni winit ni WebSocket.
 - La latence MCP n'impacte pas le timing d'émulation.
 - On peut figer le cœur (pause) sans déranger le serveur MCP ni la GUI.
 - **GUI et MCP sont symétriques** : tous deux sont des consommateurs du
@@ -1388,17 +1651,44 @@ Recommandation : **MPL-2.0** (Mozilla Public License 2.0). Justification :
 
 ## 14. Roadmap & phasage
 
-### Phase 0 — Squelette (2 semaines)
+### Phase 0 — Validation des patterns & squelette (3 semaines)
 
-- Workspace Cargo + CI (GitHub Actions).
-- `luna-bus` : memory map basique + LoROM mapper.
-- `luna-cpu` : décodeur d'instructions 65C816 (sans timing fin).
+**Recherche & validation** (1 semaine — préalable à tout code de production) :
+
+- Lecture du code de référence (lecture seule, GPL-3.0, pas de copie) :
+  - `jgenesis/backend/snes-core/src/api.rs` (modèle `Snes::tick`)
+  - `jgenesis/backend/snes-core/src/apu.rs` (catch-up rationnel)
+  - `jgenesis/backend/snes-core/src/bus.rs` (`access_master_cycles`)
+  - `jgenesis/backend/snes-core/src/memory/dma.rs` (DMA/HDMA timing)
+  - `tetanes-core/src/cpu.rs` (pattern `start_cycle`/`end_cycle`)
+  - `jgenesis/ARCHITECTURE.md` (modèle d'organisation du workspace)
+- Vérifier la licence de `emu-rs/snes-apu` (MIT/Apache attendu) — si
+  compatible, planifier son intégration en Phase 2 pour économiser ~1
+  mois.
+- Cloner et faire tourner [Tom Harte 65816 ProcessorTests](https://github.com/SingleStepTests/65816)
+  pour valider le format de la suite de test.
+
+**Squelette code** (2 semaines) :
+
+- Workspace Cargo avec les ~15 crates (cf. §4), tous compilent vide.
+- CI GitHub Actions : `cargo check` + `cargo check --target
+  wasm32-unknown-unknown` (échoue si un crate cross-target casse).
+- `luna-async` : façade runtime (spawn/sleep/channels) avec
+  implémentations natif (tokio) + web (wasm-bindgen-futures).
+- `luna-bus` : memory map basique + LoROM mapper + trait `Bus` avec
+  `io_cycle()`.
+- `luna-cpu-65c816` : décodeur d'instructions complet (sans timing fin
+  encore). Jump-table `[fn(&mut Cpu, &mut Bus); 256]`.
 - `luna-cli` : charge une ROM, exécute 1 frame, dump l'état CPU.
+- Tests : premier passage de quelques tests Tom Harte.
 
 ### Phase 1 — Premier rendu (4 semaines)
 
 - `luna-ppu` : modes 0 et 1, scanline-based, sprites basiques.
 - `luna-dma` : DMA (sans HDMA).
+- `luna-core::Snes::step()` complet (cf. §6.6) — CPU + DMA + PPU
+  catch-up via `bus.io_cycle()`.
+- 1000+ tests Tom Harte passent (cible : 100% du 65C816).
 - Une ROM de test (krom CPUMSC) affiche "PASS".
 
 ### Phase 2 — Audio + jeux simples (4 semaines)
@@ -1466,34 +1756,45 @@ Phases optionnelles selon traction & feedback communauté :
 
 ### Risques techniques
 
-| Risque                                      | Mitigation                              |
-|---------------------------------------------|-----------------------------------------|
-| Performance cycle-accurate trop lente       | Profiling intensif, optim hot paths, SIMD pour PPU |
-| Sync CPU↔APU difficile à stabiliser         | Boucle de catch-up + tests blargg       |
-| Schémas MCP qui changent (spec en évolution)| Pinner sur version stable, abstraire `rmcp` |
-| Coprocesseurs sous-documentés (Super FX)    | S'appuyer sur fullsnes.htm + code ares/bsnes |
-| **Explosion de coûts tokens en usage IA**   | Profils `economy/balanced/generous`, hash-then-fetch, resources MCP, budget tracker (§8.5) |
-| GUI spectator qui ralentit le cœur          | Thread GUI séparé, framebuffer partagé via `arc-swap` ou triple-buffer |
+| Risque                                          | Mitigation                                                                          |
+|-------------------------------------------------|-------------------------------------------------------------------------------------|
+| Performance cycle-accurate trop lente           | Pattern jgenesis static dispatch zero-alloc (§6.6), profiling criterion, SIMD PPU   |
+| Sync CPU↔APU difficile à stabiliser             | Arithmétique rationnelle u64 (pas de float, §6.6), tests blargg APU                 |
+| Schémas MCP qui changent (spec en évolution)    | Pinner sur version stable, abstraire derrière `luna-mcp-core`                       |
+| Coprocesseurs sous-documentés (Super FX)        | S'appuyer sur fullsnes.htm + code jgenesis (lecture, pas copie GPL)                 |
+| **Explosion de coûts tokens en usage IA**       | Profils `economy/balanced/generous`, hash-then-fetch, resources MCP, budget tracker (§8.5) |
+| GUI spectator qui ralentit le cœur              | Thread GUI séparé, framebuffer partagé via `arc-swap` ou triple-buffer              |
+| **Borrow checker hostile** (CPU + bus + PPU mut simultanés) | Pattern `SnesBus<'a>` créé à chaque step, emprunts séparés. Pas de `Rc<RefCell>` dans la hot loop |
+| **`tokio::time` panique en WASM**               | Façade `luna-async` obligatoire dès V1 (§4.1) — bannir `tokio::*` direct dans le cœur |
+| **`crossbeam-channel` panique en WASM**         | Utiliser `futures::channel::mpsc` partout, jamais crossbeam dans le cœur            |
+| **`rmcp` ne tourne pas en WASM**                | V2 Luna Studio Web = client WebSocket vers Luna natif distant (cf. §9.2)            |
+| **Mid-instruction effects manqués** (Mario Kart, F-Zero) | Pattern `bus.io_cycle()` à chaque accès CPU (§5, §6.6). Tester contre Tom Harte ProcessorTests |
+| **NMI/IRQ timing 1-cycle off**                  | Latcher l'état IRQ/NMI au début d'instruction, le servir avant fetch suivant (cf. jgenesis api.rs:323) |
 
 ### Questions ouvertes (à trancher en Phase 0)
 
-1. **Faut-il rouler notre propre crate MCP** ou s'appuyer sur `rmcp` ?
-   - Si `rmcp` mature : on l'utilise.
-   - Sinon : implémentation interne JSON-RPC + schemas.
-2. **Compatibilité libretro core** : reportée à la Phase 10. À confirmer
-   que les contraintes libretro (sync API, threading model) sont
-   compatibles avec notre cœur.
-3. **WASM target** : faisable dès V1 ou attendre Phase 8 (Luna Studio
-   Web) ? Implication sur le choix des deps (certaines crates ne sont
-   pas WASM-compatibles, ex. `tokio` mainline).
-4. **Format des game maps** : TOML, JSON, ou format custom ? Comment
+1. **Licence finale** : MPL-2.0 (proposée) vs Apache-2.0 (plus permissif).
+   Validation après revue des contraintes commerciales souhaitées.
+2. **Intégration `emu-rs/snes-apu`** : vérifier la licence en Phase 0. Si
+   MIT/Apache, planifier l'intégration Phase 2 (économie ~1 mois). Sinon,
+   APU from-scratch.
+3. **Compatibilité libretro core** : reportée à la Phase 10. À confirmer
+   que les contraintes libretro (sync API, threading) sont compatibles
+   avec notre cœur `!Send`.
+4. **WASM target dès V1 ?** : recommandé — la façade `luna-async` doit
+   être en place dès le départ pour éviter les retours en arrière
+   coûteux. La compilation WASM peut rester "compile + tests basiques"
+   en V1, sans GUI complète.
+5. **Format des game maps** : TOML, JSON, ou format custom ? Comment
    partager dans la communauté (registre GitHub, marketplace) ?
-5. **Stratégie de stabilisation `luna-api`** : à quel moment figer
-   l'API publique ? Trop tôt = on regrette des choix, trop tard =
-   l'écosystème ne peut pas démarrer. Cible : Phase 6.
-6. **Multi-tenancy en V1.1 ou V2** : un seul cœur d'émulation par
-   binaire (simple, sûr) ou plusieurs sessions parallèles (plus complexe,
-   débloque le cas "cloud sandbox") ?
+6. **Stratégie de stabilisation `luna-api`** : à quel moment figer
+   l'API publique ? Cible : Phase 6.
+7. **Multi-tenancy en V1.1 ou V2** : un seul cœur d'émulation par binaire
+   (simple) ou plusieurs sessions parallèles (débloque "cloud sandbox") ?
+8. **`!Send` partout vs cfg-gate** : la simplicité de `!Send` partout
+   l'emporte-t-elle sur le parallélisme natif perdu ? Recommandation
+   recherche : `!Send` partout (cf. eframe, la majorité des émulateurs
+   Rust cross-target).
 
 ### Questions de produit
 
