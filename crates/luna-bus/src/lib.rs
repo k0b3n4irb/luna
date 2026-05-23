@@ -28,6 +28,6 @@ pub mod types;
 pub mod testing;
 
 pub use bus::{Bus, BusDevice};
-pub use mapper::Mapper;
+pub use mapper::{Mapper, MapperKind};
 pub use speed::{MemorySpeed, address_speed};
-pub use types::{Addr24, MCycles, bank_of, offset_of};
+pub use types::{Addr24, MCycles, bank_of, make_addr, offset_of};
