@@ -9,5 +9,10 @@ authors.workspace = true
 repository.workspace = true
 readme.workspace = true
 
+[features]
+default = []
+# Enables testing utilities (RamBus, EventLog) for downstream crates' tests.
+test-utils = []
+
 [lints]
 workspace = true
