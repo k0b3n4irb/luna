@@ -1,7 +1,12 @@
 //! SNES emulator core.
 //!
-//! Assembles `luna-cpu-65c816`, `luna-ppu`, `luna-apu`, `luna-dma`,
-//! `luna-coproc` and `luna-cartridge` behind a single `Snes` struct, and
-//! runs the CPU-driven master-clock catch-up scheduler.
+//! Phase 0.6 scope: just enough to wire a `Cpu65816` against a cartridge
+//! and step it. WRAM (128 KB) is exposed. PPU / APU / DMA registers are
+//! still stubbed (reads return 0xFF / open-bus; writes are dropped) and
+//! will land in Phase 1+.
 //!
-//! See `ARCHITECTURE.md` §6 and §6.6 in particular.
+//! See `ARCHITECTURE.md` §6 and §6.6 for the target architecture.
+
+pub mod snes;
+
+pub use snes::Snes;
