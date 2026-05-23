@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel older runs of the same ref when a new one starts.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # missing_docs is a warning in the workspace lints; -D warnings turns it
+  # (and any other warning) into a hard error in CI.
+  RUSTFLAGS: "-D warnings"
+  # Reduce noise from incremental compilation when caches are warm.
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  # ---------------------------------------------------------------------
+  # cargo check on the host (Linux x86_64). Catches any warning as error.
+  # ---------------------------------------------------------------------
+  check:
+    name: check (native)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets
+
+  # ---------------------------------------------------------------------
+  # cargo test on the host.
+  # ---------------------------------------------------------------------
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-features
+
+  # ---------------------------------------------------------------------
+  # cargo check on wasm32-unknown-unknown for every cross-target crate.
+  #
+  # The exclusion list = the "native-only" crates from ARCHITECTURE.md §4:
+  #   luna-mcp-server, luna-rest, luna-ws, luna-ffi, luna-libretro,
+  #   luna-cli (binary), luna-gui (eframe — supports WASM but pulls
+  #   native-only deps in dev), luna-overlay.
+  # Everything else MUST build for wasm32 or the design is broken.
+  # ---------------------------------------------------------------------
+  wasm-check:
+    name: check (wasm32)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+      - run: |
+          cargo check --target wasm32-unknown-unknown \
+            -p luna-async \
+            -p luna-bus \
+            -p luna-cpu-65c816 \
+            -p luna-cpu-spc700 \
+            -p luna-ppu \
+            -p luna-apu \
+            -p luna-dma \
+            -p luna-coproc \
+            -p luna-cartridge \
+            -p luna-core \
+            -p luna-api \
+            -p luna-mcp-core \
+            -p luna-mcp-client
+
+  # ---------------------------------------------------------------------
+  # Formatting (cargo fmt --check).
+  # ---------------------------------------------------------------------
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  # ---------------------------------------------------------------------
+  # Lints (cargo clippy with -D warnings on top of workspace lints).
+  # ---------------------------------------------------------------------
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
