@@ -120,10 +120,19 @@ impl Cpu {
             0x9E => self.stz_abs_x(bus),
 
             // -----------------------------------------------------------
-            // Jumps
+            // Jumps & calls
             // -----------------------------------------------------------
             0x4C => self.jmp_abs(bus),
             0x5C => self.jmp_long(bus),
+            0x6C => self.jmp_abs_indirect(bus),
+            0xDC => self.jmp_abs_indirect_long(bus),
+            0x7C => self.jmp_abs_indexed_indirect(bus),
+            0x20 => self.jsr_abs(bus),
+            0x22 => self.jsl_long(bus),
+            0xFC => self.jsr_abs_indexed_indirect(bus),
+            0x60 => self.rts(bus),
+            0x6B => self.rtl(bus),
+            0x82 => self.brl(bus),
 
             // -----------------------------------------------------------
             // Branches (8-bit signed PC-relative)
@@ -809,6 +818,94 @@ impl Cpu {
         let target = self.fetch_u24(bus);
         self.pc = target as u16;
         self.pb = (target >> 16) as u8;
+    }
+
+    /// `JMP ($abs)` — read 16-bit pointer at $00:operand, jump to it
+    /// (program bank stays the same).
+    fn jmp_abs_indirect<B: Bus>(&mut self, bus: &mut B) {
+        let ptr_off = self.fetch_u16(bus);
+        let lo = bus.read(make_addr(0, ptr_off));
+        let hi = bus.read(make_addr(0, ptr_off.wrapping_add(1)));
+        self.pc = u16::from(lo) | (u16::from(hi) << 8);
+    }
+
+    /// `JMP [$abs]` — read 24-bit pointer at $00:operand, jump to it
+    /// (program bank changes).
+    fn jmp_abs_indirect_long<B: Bus>(&mut self, bus: &mut B) {
+        let ptr_off = self.fetch_u16(bus);
+        let lo = bus.read(make_addr(0, ptr_off));
+        let mid = bus.read(make_addr(0, ptr_off.wrapping_add(1)));
+        let hi = bus.read(make_addr(0, ptr_off.wrapping_add(2)));
+        self.pc = u16::from(lo) | (u16::from(mid) << 8);
+        self.pb = hi;
+    }
+
+    /// `JMP ($abs,X)` — pointer is fetched from `PB:(operand + X)`.
+    /// Program bank stays the same.
+    fn jmp_abs_indexed_indirect<B: Bus>(&mut self, bus: &mut B) {
+        let base = self.fetch_u16(bus);
+        let ptr_off = base.wrapping_add(self.x);
+        let lo = bus.read(make_addr(self.pb, ptr_off));
+        let hi = bus.read(make_addr(self.pb, ptr_off.wrapping_add(1)));
+        self.pc = u16::from(lo) | (u16::from(hi) << 8);
+    }
+
+    /// `JSR $abs` — push (PC - 1) at the post-fetch PC (so the return
+    /// address points at the **last byte of the JSR instruction**, and
+    /// RTS will increment by 1 to land on the next instruction).
+    fn jsr_abs<B: Bus>(&mut self, bus: &mut B) {
+        let target = self.fetch_u16(bus);
+        let return_addr = self.pc.wrapping_sub(1);
+        self.push_u16(bus, return_addr);
+        self.pc = target;
+    }
+
+    /// `JSL $long` — push the program bank, then push PC-1 (16-bit),
+    /// then jump to the 24-bit target. RTL undoes the push order.
+    fn jsl_long<B: Bus>(&mut self, bus: &mut B) {
+        let target = self.fetch_u24(bus);
+        let return_pc = self.pc.wrapping_sub(1);
+        self.push_u8(bus, self.pb);
+        self.push_u16(bus, return_pc);
+        self.pb = (target >> 16) as u8;
+        self.pc = target as u16;
+    }
+
+    /// `JSR ($abs,X)` — like JMP (abs,X) but pushes the return address.
+    /// IMPORTANT: per the 65C816 manual, the return address is pushed
+    /// **before** the operand is read for X-indirection (so PC points
+    /// at the last byte of the JSR operand, not past it).
+    fn jsr_abs_indexed_indirect<B: Bus>(&mut self, bus: &mut B) {
+        let base = self.fetch_u16(bus);
+        // Return address = current PC minus 1 (pointing at the high byte
+        // of the operand we just fetched).
+        let return_addr = self.pc.wrapping_sub(1);
+        self.push_u16(bus, return_addr);
+        let ptr_off = base.wrapping_add(self.x);
+        let lo = bus.read(make_addr(self.pb, ptr_off));
+        let hi = bus.read(make_addr(self.pb, ptr_off.wrapping_add(1)));
+        self.pc = u16::from(lo) | (u16::from(hi) << 8);
+    }
+
+    /// `RTS` — pull PC, increment by 1, stay in the same program bank.
+    fn rts<B: Bus>(&mut self, bus: &mut B) {
+        let pc = self.pull_u16(bus);
+        self.pc = pc.wrapping_add(1);
+    }
+
+    /// `RTL` — pull PC (16-bit), then PB; increment PC by 1.
+    fn rtl<B: Bus>(&mut self, bus: &mut B) {
+        let pc = self.pull_u16(bus);
+        let pb = self.pull_u8(bus);
+        self.pc = pc.wrapping_add(1);
+        self.pb = pb;
+    }
+
+    /// `BRL rel16` — branch always, with a signed 16-bit PC-relative
+    /// displacement.
+    fn brl<B: Bus>(&mut self, bus: &mut B) {
+        let rel = self.fetch_u16(bus) as i16;
+        self.pc = self.pc.wrapping_add_signed(rel);
     }
 
     // ===================================================================
@@ -2648,6 +2745,61 @@ mod tests {
         cpu.step(&mut bus);
         assert_eq!(cpu.pc, 0x9000);
         assert_eq!(cpu.pb, 0);
+    }
+
+    #[test]
+    fn jmp_abs_indirect_reads_pointer_in_bank0() {
+        // JMP ($1000) where memory $001000 = $9000 → PC = $9000
+        let (mut cpu, mut bus) = run(&[0x6C, 0x00, 0x10]);
+        bus.poke_slice(0x00_1000, &[0x00, 0x90]);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.pc, 0x9000);
+        assert_eq!(cpu.pb, 0);
+    }
+
+    #[test]
+    fn jmp_abs_indirect_long_changes_bank() {
+        // JMP [$1000] where memory $001000 = $7E:9000
+        let (mut cpu, mut bus) = run(&[0xDC, 0x00, 0x10]);
+        bus.poke_slice(0x00_1000, &[0x00, 0x90, 0x7E]);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.pc, 0x9000);
+        assert_eq!(cpu.pb, 0x7E);
+    }
+
+    #[test]
+    fn jsr_rts_round_trip() {
+        // JSR $9000 at $8000 ; at $9000: RTS.
+        // Use a short main program so run()'s reset-vector setup is
+        // preserved, then poke the subroutine separately.
+        let (mut cpu, mut bus) = run(&[0x20, 0x00, 0x90]);
+        bus.poke(0x00_9000, 0x60); // RTS at $9000
+        cpu.step(&mut bus); // JSR $9000
+        assert_eq!(cpu.pc, 0x9000);
+        cpu.step(&mut bus); // RTS
+        assert_eq!(cpu.pc, 0x8003, "RTS lands on the byte AFTER JSR's operand");
+    }
+
+    #[test]
+    fn jsl_rtl_round_trip_across_banks() {
+        // JSL $00:9000 ; at $00:9000 → RTL.
+        let (mut cpu, mut bus) = run(&[0x22, 0x00, 0x90, 0x00]);
+        bus.poke(0x00_9000, 0x6B); // RTL at $9000
+        cpu.step(&mut bus); // JSL
+        assert_eq!(cpu.pc, 0x9000);
+        assert_eq!(cpu.pb, 0x00);
+        cpu.step(&mut bus); // RTL
+        assert_eq!(cpu.pc, 0x8004);
+        assert_eq!(cpu.pb, 0x00);
+    }
+
+    #[test]
+    fn brl_branches_with_16bit_displacement() {
+        // BRL +$0100 from PC=$8000. After fetching the 3-byte opcode
+        // PC=$8003, target = $8103.
+        let (mut cpu, mut bus) = run(&[0x82, 0x00, 0x01]);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.pc, 0x8103);
     }
 
     #[test]
