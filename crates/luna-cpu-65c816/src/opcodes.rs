@@ -14,7 +14,7 @@ use crate::addressing::{
 };
 use crate::cpu::Cpu;
 use crate::flags::bit;
-use luna_bus::{Addr24, Bus};
+use luna_bus::{Addr24, Bus, make_addr};
 
 impl Cpu {
     /// Execute one instruction: fetch opcode at `PB:PC` and dispatch.
@@ -340,6 +340,26 @@ impl Cpu {
             0x0C => self.tsb_abs(bus),
             0x14 => self.trb_dp(bus),
             0x1C => self.trb_abs(bus),
+
+            // -----------------------------------------------------------
+            // Stack — push / pull / effective address pushes
+            // -----------------------------------------------------------
+            0x48 => self.pha(bus),
+            0xDA => self.phx(bus),
+            0x5A => self.phy(bus),
+            0x08 => self.php(bus),
+            0x8B => self.phb(bus),
+            0x0B => self.phd(bus),
+            0x4B => self.phk(bus),
+            0x68 => self.pla(bus),
+            0xFA => self.plx(bus),
+            0x7A => self.ply(bus),
+            0x28 => self.plp(bus),
+            0xAB => self.plb(bus),
+            0x2B => self.pld(bus),
+            0xF4 => self.pea(bus),
+            0xD4 => self.pei(bus),
+            0x62 => self.per(bus),
 
             // -----------------------------------------------------------
             // Inter-register transfers
@@ -2038,6 +2058,182 @@ impl Cpu {
         self.a = self.a.rotate_left(8);
         self.set_nz8(self.a as u8);
     }
+
+    // ===================================================================
+    // Stack primitives
+    //
+    // Push: write at $00:SP, then SP--.
+    // Pull: SP++, then read at $00:SP.
+    // In emulation mode, SP wraps within $0100-$01FF (high byte pinned
+    // to 0x01).
+    // 16-bit values are pushed high-byte first so they read back
+    // little-endian.
+    // ===================================================================
+
+    fn push_u8<B: Bus>(&mut self, bus: &mut B, value: u8) {
+        bus.write(make_addr(0, self.sp), value);
+        self.sp = if self.e {
+            0x0100 | (self.sp.wrapping_sub(1) & 0x00FF)
+        } else {
+            self.sp.wrapping_sub(1)
+        };
+    }
+
+    fn pull_u8<B: Bus>(&mut self, bus: &mut B) -> u8 {
+        self.sp = if self.e {
+            0x0100 | (self.sp.wrapping_add(1) & 0x00FF)
+        } else {
+            self.sp.wrapping_add(1)
+        };
+        bus.read(make_addr(0, self.sp))
+    }
+
+    fn push_u16<B: Bus>(&mut self, bus: &mut B, value: u16) {
+        self.push_u8(bus, (value >> 8) as u8);
+        self.push_u8(bus, value as u8);
+    }
+
+    fn pull_u16<B: Bus>(&mut self, bus: &mut B) -> u16 {
+        let lo = self.pull_u8(bus);
+        let hi = self.pull_u8(bus);
+        u16::from(lo) | (u16::from(hi) << 8)
+    }
+
+    // ===================================================================
+    // PH* / PL* — push and pull registers
+    // ===================================================================
+
+    fn pha<B: Bus>(&mut self, bus: &mut B) {
+        if self.p.acc8() {
+            self.push_u8(bus, self.a8());
+        } else {
+            self.push_u16(bus, self.a);
+        }
+    }
+
+    fn phx<B: Bus>(&mut self, bus: &mut B) {
+        if self.p.idx8() {
+            self.push_u8(bus, self.x8());
+        } else {
+            self.push_u16(bus, self.x);
+        }
+    }
+
+    fn phy<B: Bus>(&mut self, bus: &mut B) {
+        if self.p.idx8() {
+            self.push_u8(bus, self.y8());
+        } else {
+            self.push_u16(bus, self.y);
+        }
+    }
+
+    fn php<B: Bus>(&mut self, bus: &mut B) {
+        self.push_u8(bus, self.p.bits());
+    }
+
+    fn phb<B: Bus>(&mut self, bus: &mut B) {
+        self.push_u8(bus, self.db);
+    }
+
+    fn phd<B: Bus>(&mut self, bus: &mut B) {
+        self.push_u16(bus, self.dp);
+    }
+
+    fn phk<B: Bus>(&mut self, bus: &mut B) {
+        self.push_u8(bus, self.pb);
+    }
+
+    fn pla<B: Bus>(&mut self, bus: &mut B) {
+        if self.p.acc8() {
+            let v = self.pull_u8(bus);
+            self.set_a_low(v);
+            self.set_nz8(v);
+        } else {
+            let v = self.pull_u16(bus);
+            self.a = v;
+            self.set_nz16(v);
+        }
+    }
+
+    fn plx<B: Bus>(&mut self, bus: &mut B) {
+        if self.p.idx8() {
+            let v = self.pull_u8(bus);
+            self.set_x_low(v);
+            self.set_nz8(v);
+        } else {
+            let v = self.pull_u16(bus);
+            self.x = v;
+            self.set_nz16(v);
+        }
+    }
+
+    fn ply<B: Bus>(&mut self, bus: &mut B) {
+        if self.p.idx8() {
+            let v = self.pull_u8(bus);
+            self.set_y_low(v);
+            self.set_nz8(v);
+        } else {
+            let v = self.pull_u16(bus);
+            self.y = v;
+            self.set_nz16(v);
+        }
+    }
+
+    fn plp<B: Bus>(&mut self, bus: &mut B) {
+        let new_p = self.pull_u8(bus);
+        // Emulation mode forces M and X to 1 in P (they cannot be
+        // cleared while E=1).
+        let effective = if self.e {
+            new_p | bit::M | bit::X
+        } else {
+            new_p
+        };
+        self.p = crate::flags::StatusFlags(effective);
+        if self.p.idx8() {
+            self.x &= 0x00FF;
+            self.y &= 0x00FF;
+        }
+    }
+
+    fn plb<B: Bus>(&mut self, bus: &mut B) {
+        let v = self.pull_u8(bus);
+        self.db = v;
+        self.set_nz8(v);
+    }
+
+    fn pld<B: Bus>(&mut self, bus: &mut B) {
+        let v = self.pull_u16(bus);
+        self.dp = v;
+        self.set_nz16(v);
+    }
+
+    // ===================================================================
+    // PEA / PEI / PER — push effective address
+    //
+    // PEA #imm16    — push the next two operand bytes as a 16-bit value
+    // PEI (dp)      — read 16-bit pointer at DP+dp, push it
+    // PER rel16     — push PC + signed 16-bit displacement (after fetch)
+    // ===================================================================
+
+    fn pea<B: Bus>(&mut self, bus: &mut B) {
+        let v = self.fetch_u16(bus);
+        self.push_u16(bus, v);
+    }
+
+    fn pei<B: Bus>(&mut self, bus: &mut B) {
+        let dp_off = u16::from(self.fetch_u8(bus));
+        let ptr = self.dp.wrapping_add(dp_off);
+        let lo = bus.read(make_addr(0, ptr));
+        let hi = bus.read(make_addr(0, ptr.wrapping_add(1)));
+        let v = u16::from(lo) | (u16::from(hi) << 8);
+        self.push_u16(bus, v);
+    }
+
+    fn per<B: Bus>(&mut self, bus: &mut B) {
+        let rel = self.fetch_u16(bus) as i16;
+        let target = self.pc.wrapping_add_signed(rel);
+        self.push_u16(bus, target);
+    }
 }
 
 #[cfg(test)]
@@ -2773,6 +2969,89 @@ mod tests {
         cpu.step(&mut bus);
         assert_eq!(cpu.a, 0x1234);
         assert!(!cpu.p.contains(bit::N));
+    }
+
+    // -------------------------------------------------------------------
+    // Stack
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn pha_pla_round_trip_8bit() {
+        // LDA #$42, PHA, LDA #$00, PLA → A=$42
+        let (mut cpu, mut bus) = run(&[0xA9, 0x42, 0x48, 0xA9, 0x00, 0x68]);
+        cpu.step(&mut bus); // LDA #$42
+        let sp_before = cpu.sp;
+        cpu.step(&mut bus); // PHA
+        assert_eq!(cpu.sp, sp_before - 1);
+        cpu.step(&mut bus); // LDA #$00
+        cpu.step(&mut bus); // PLA
+        assert_eq!(cpu.a8(), 0x42);
+        assert_eq!(cpu.sp, sp_before, "PLA must restore SP");
+    }
+
+    #[test]
+    fn pha_16bit_pushes_two_bytes_in_little_endian_layout() {
+        // CLC, XCE, REP #$20, LDA #$ABCD, PHA → stack has $AB at $1FF, $CD at $1FE.
+        let prog = &[0x18, 0xFB, 0xC2, 0x20, 0xA9, 0xCD, 0xAB, 0x48];
+        let (mut cpu, mut bus) = run(prog);
+        for _ in 0..4 {
+            cpu.step(&mut bus);
+        } // through LDA
+        cpu.step(&mut bus); // PHA
+        // After PHA SP = original - 2. Original SP after reset = $01FF.
+        // PHA writes high byte first ($AB at $1FF), then low byte ($CD at $1FE).
+        assert_eq!(bus.peek(0x00_01FF), 0xAB);
+        assert_eq!(bus.peek(0x00_01FE), 0xCD);
+        assert_eq!(cpu.sp, 0x01FD);
+    }
+
+    #[test]
+    fn php_plp_round_trip_preserves_flags() {
+        // Set C and N via SEC and LDA #$80 in emulation mode, PHP,
+        // CLC + clear N via LDA #$00, then PLP → flags restored.
+        let (mut cpu, mut bus) = run(&[0x38, 0xA9, 0x80, 0x08, 0x18, 0xA9, 0x00, 0x28]);
+        cpu.step(&mut bus); // SEC
+        cpu.step(&mut bus); // LDA #$80
+        let saved = cpu.p.bits();
+        cpu.step(&mut bus); // PHP
+        cpu.step(&mut bus); // CLC
+        cpu.step(&mut bus); // LDA #$00 (clears N, sets Z)
+        cpu.step(&mut bus); // PLP
+        assert_eq!(cpu.p.bits(), saved);
+    }
+
+    #[test]
+    fn plp_in_emulation_keeps_m_and_x_set() {
+        // Push $00 (no flags), then PLP. In emulation mode the loaded P
+        // must still have M and X = 1.
+        let (mut cpu, mut bus) = run(&[0xA9, 0x00, 0x48, 0x28]);
+        cpu.step(&mut bus); // LDA #$00 (sets Z, clears N)
+        cpu.step(&mut bus); // PHA
+        // Push extra zero byte to act as the "P" we'll pull.
+        cpu.p.remove(bit::M | bit::X);
+        cpu.step(&mut bus); // PLP — pulls the $00 we just pushed
+        assert!(cpu.p.contains(bit::M));
+        assert!(cpu.p.contains(bit::X));
+    }
+
+    #[test]
+    fn pea_pushes_16bit_immediate() {
+        // PEA #$1234
+        let (mut cpu, mut bus) = run(&[0xF4, 0x34, 0x12]);
+        cpu.step(&mut bus);
+        assert_eq!(bus.peek(0x00_01FF), 0x12);
+        assert_eq!(bus.peek(0x00_01FE), 0x34);
+        assert_eq!(cpu.sp, 0x01FD);
+    }
+
+    #[test]
+    fn per_pushes_pc_plus_signed_rel() {
+        // PER $0010 from PC=$8000. After fetching the 3-byte opcode PC=$8003,
+        // target = $8003 + $0010 = $8013. Stack receives $80 at $1FF, $13 at $1FE.
+        let (mut cpu, mut bus) = run(&[0x62, 0x10, 0x00]);
+        cpu.step(&mut bus);
+        assert_eq!(bus.peek(0x00_01FF), 0x80);
+        assert_eq!(bus.peek(0x00_01FE), 0x13);
     }
 
     #[test]
