@@ -1,0 +1,13 @@
+[package]
+name = "luna-gui"
+description = "Luna GUI — egui/wgpu front-end serving both standalone (human plays) and spectator (AI plays, human watches) modes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true

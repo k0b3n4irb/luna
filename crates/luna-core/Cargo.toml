@@ -1,0 +1,13 @@
+[package]
+name = "luna-core"
+description = "SNES emulator core — assembles every component and runs the CPU-driven master-clock scheduler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true

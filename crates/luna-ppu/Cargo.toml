@@ -1,0 +1,13 @@
+[package]
+name = "luna-ppu"
+description = "SNES Picture Processing Unit — backgrounds, sprites, mode 0–7, OAM, CGRAM"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true

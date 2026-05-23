@@ -1,0 +1,28 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+
+# Editors
+*.swp
+*.swo
+.vscode/
+.idea/
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tests
+/tests/tom-harte/*.json
+/tests/tom-harte/*.zip
+!/tests/tom-harte/.gitkeep
+/tests/roms/*.sfc
+/tests/roms/*.smc
+!/tests/roms/.gitkeep
+/tests/golden/*.png
+!/tests/golden/.gitkeep
+
+# Local config
+/.envrc
+/.direnv
