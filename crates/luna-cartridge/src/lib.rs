@@ -172,17 +172,17 @@ fn parse_at(rom: &[u8], off: usize) -> Header {
     let mapper_kind = mapper_from_byte(map_byte).unwrap_or(MapperKind::LoRom);
     let fast_rom = (map_byte & 0x10) != 0;
     // The size bytes are exponents (KB = 1 << byte). Garbage cartridges
-    // (or our wrong-offset probing) can produce byte values like 0xEA
-    // which would overflow `1 << byte`. Clamp to 31 — far above any real
-    // SNES ROM (4 GB) — to keep the parser total even on bogus input.
-    let rom_size_kb = 1u32
-        .checked_shl(u32::from(rom[off + 0x17]).min(31))
-        .unwrap_or(0);
+    // (or our wrong-offset probing) can produce arbitrary byte values
+    // which would propagate downstream into multi-terabyte allocation
+    // requests. Clamp the exponents to ranges that span the real SNES
+    // catalogue: ROM up to 64 MB (1 << 16 KB) and SRAM up to 128 KB
+    // (1 << 7 KB). Larger advertised values are saturated, not trusted.
+    let rom_size_kb = 1u32 << u32::from(rom[off + 0x17]).min(16);
     let sram_byte = rom[off + 0x18];
     let sram_size_kb = if sram_byte == 0 {
         0
     } else {
-        1u32.checked_shl(u32::from(sram_byte).min(31)).unwrap_or(0)
+        1u32 << u32::from(sram_byte).min(7)
     };
 
     Header {

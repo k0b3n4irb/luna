@@ -9,11 +9,14 @@ use luna_bus::lorom::LoRomMapper;
 use luna_bus::{Addr24, Bus, MCycles, Mapper, MapperKind, address_speed, bank_of, offset_of};
 use luna_cartridge::Cartridge;
 use luna_cpu_65c816::Cpu;
+use luna_ppu::Ppu;
 
 /// Top-level SNES machine.
 pub struct Snes {
     /// Main CPU (65C816).
     pub cpu: Cpu,
+    /// Picture Processing Unit — VRAM / CGRAM / OAM + registers.
+    pub ppu: Ppu,
     /// 128 KB Work RAM (banks `$7E-$7F` and the LowRAM mirror).
     pub wram: Box<[u8; 0x20000]>,
     /// Cartridge mapper (LoROM in P0.6; other mappers in V1+).
@@ -51,6 +54,7 @@ impl Snes {
 
         Self {
             cpu: Cpu::new(),
+            ppu: Ppu::new(),
             wram: Box::new([0; 0x20000]),
             mapper,
             fast_rom: cart.header.fast_rom,
@@ -65,6 +69,7 @@ impl Snes {
     pub fn reset(&mut self) {
         let Snes {
             cpu,
+            ppu,
             wram,
             mapper,
             fast_rom,
@@ -75,6 +80,7 @@ impl Snes {
         let mut bus = SnesBus {
             wram,
             mapper: mapper.as_mut(),
+            ppu,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
@@ -89,6 +95,7 @@ impl Snes {
         let before = self.total_mclk;
         let Snes {
             cpu,
+            ppu,
             wram,
             mapper,
             fast_rom,
@@ -99,6 +106,7 @@ impl Snes {
         let mut bus = SnesBus {
             wram,
             mapper: mapper.as_mut(),
+            ppu,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
@@ -119,6 +127,7 @@ impl Snes {
 struct SnesBus<'a> {
     wram: &'a mut [u8; 0x20000],
     mapper: &'a mut dyn Mapper,
+    ppu: &'a mut Ppu,
     fast_rom: bool,
     nmi: &'a mut bool,
     irq: &'a mut bool,
@@ -144,6 +153,21 @@ impl<'a> SnesBus<'a> {
     }
 }
 
+impl<'a> SnesBus<'a> {
+    /// Returns `Some(offset)` if `addr` falls in the PPU MMIO range
+    /// (`$00-$3F:$2100-$213F` and the `$80-$BF` mirror). The offset is
+    /// relative to `$2100` (0x00-0x3F).
+    fn ppu_offset(addr: Addr24) -> Option<u8> {
+        let bank = bank_of(addr);
+        let offset = offset_of(addr);
+        if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && matches!(offset, 0x2100..=0x213F) {
+            Some((offset - 0x2100) as u8)
+        } else {
+            None
+        }
+    }
+}
+
 impl<'a> Bus for SnesBus<'a> {
     fn read(&mut self, addr: Addr24) -> u8 {
         let speed = address_speed(addr, self.fast_rom);
@@ -152,12 +176,16 @@ impl<'a> Bus for SnesBus<'a> {
         if let Some(o) = Self::wram_offset(addr) {
             return self.wram[o];
         }
+        if let Some(off) = Self::ppu_offset(addr) {
+            return self.ppu.read(off);
+        }
         if let Some(v) = self.mapper.read(addr) {
             return v;
         }
-        // MMIO / open bus stub — Phase 0.6 returns 0xFF for any access
-        // we don't yet route. Real hardware exposes the last value on the
-        // data bus, which we'll model in P1.
+        // Open bus stub — anything we don't yet route returns 0xFF.
+        // Real hardware exposes the last value on the data bus, which
+        // we'll model when it matters (CPU-internal registers $4200+
+        // land in P1.3).
         0xFF
     }
 
@@ -167,10 +195,12 @@ impl<'a> Bus for SnesBus<'a> {
 
         if let Some(o) = Self::wram_offset(addr) {
             self.wram[o] = value;
+        } else if let Some(off) = Self::ppu_offset(addr) {
+            self.ppu.write(off, value);
         } else if self.mapper.write(addr, value) {
             // Mapper claims SRAM writes; ROM writes are silently dropped.
         } else {
-            // MMIO writes are dropped in P0.6.
+            // MMIO writes outside PPU still dropped in P1.1.
         }
     }
 
@@ -272,6 +302,7 @@ mod tests {
         let cart = demo_lorom();
         let mut snes = Snes::from_cartridge(cart);
         let Snes {
+            ppu,
             wram,
             mapper,
             fast_rom,
@@ -283,6 +314,7 @@ mod tests {
         let mut bus = SnesBus {
             wram,
             mapper: mapper.as_mut(),
+            ppu,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
@@ -293,6 +325,34 @@ mod tests {
         assert_eq!(bus.read(make_addr(0x00, 0x0100)), 0xAA);
         // And from $7E (full WRAM):
         assert_eq!(bus.read(make_addr(0x7E, 0x0100)), 0xAA);
+    }
+
+    #[test]
+    fn cpu_writes_to_ppu_register_reach_the_ppu() {
+        // Build a program that writes $42 to PPU $2100 (INIDISP).
+        // Reuse demo_lorom() so the SRAM exponent / checksum etc. are
+        // all set correctly — then patch in the program bytes.
+        let cart = demo_lorom();
+        let mut rom = cart.rom.clone();
+        // Program at $8000 (file offset 0): LDA #$42, STA $2100
+        rom[0] = 0xA9;
+        rom[1] = 0x42;
+        rom[2] = 0x8D;
+        rom[3] = 0x00;
+        rom[4] = 0x21;
+        // Re-checksum so the header parser still accepts the ROM (we
+        // overwrote the demo_lorom's STA-target program at offset 0).
+        // For now, demo_lorom's checksum bytes at $7FDC-$7FDF are
+        // already valid for the original ROM. Since we're patching
+        // only 5 bytes, just keep the same checksum (parser only checks
+        // complement vs checksum XOR, not against ROM contents).
+        let cart = Cartridge::from_bytes(rom).unwrap();
+        let mut snes = Snes::from_cartridge(cart);
+        snes.reset();
+        snes.cpu.db = 0; // ensure data bank is 0 for abs addressing
+        snes.step(); // LDA #$42
+        snes.step(); // STA $2100
+        assert_eq!(snes.ppu.inidisp, 0x42, "PPU INIDISP must reflect the write");
     }
 
     #[test]

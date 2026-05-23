@@ -267,6 +267,7 @@ dependencies = [
  "luna-bus",
  "luna-cartridge",
  "luna-cpu-65c816",
+ "luna-ppu",
 ]
 
 [[package]]
