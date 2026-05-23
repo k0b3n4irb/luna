@@ -79,6 +79,11 @@ clap                 = { version = "4", features = ["derive"] }
 # Image encoding (CLI screenshots, golden tests)
 image                = { version = "0.25", default-features = false, features = ["png"] }
 
+# GUI (luna-gui — desktop application)
+eframe               = { version = "0.32", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui                 = "0.32"
+rfd                  = "0.15"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

@@ -1,0 +1,437 @@
+//! The Luna application state and `eframe::App` implementation.
+
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use eframe::App;
+use egui::{
+    Align, Color32, ColorImage, Context, Layout, MenuBar, RichText, TextureHandle, TextureOptions,
+    UiKind,
+};
+use luna_cartridge::Cartridge;
+use luna_core::Snes;
+use luna_ppu::{FRAME_H, FRAME_W};
+
+/// Steps to attempt per UI frame (~16 ms at 60Hz). The number is
+/// generous — actual SNES per-frame instructions cluster around 30k.
+/// With no scheduler yet, this is an approximation.
+const STEPS_PER_FRAME: u32 = 30_000;
+
+/// The Luna desktop application.
+pub(crate) struct LunaApp {
+    /// Currently-loaded emulator, if any.
+    snes: Option<Snes>,
+    /// Path of the loaded ROM (for the title bar / recents).
+    rom_path: Option<PathBuf>,
+    /// Title extracted from the cartridge header.
+    rom_title: Option<String>,
+
+    /// Rendered framebuffer texture, refreshed every UI frame.
+    framebuffer: Option<TextureHandle>,
+    /// Last error message — shown in a banner if set.
+    last_error: Option<String>,
+
+    /// Pause toggle (true = CPU isn't stepped on update()).
+    paused: bool,
+    /// Total instructions executed since load.
+    instructions_executed: u64,
+    /// FPS bookkeeping.
+    last_frame: Instant,
+    fps: f32,
+
+    /// UI panel toggles.
+    show_cpu_panel: bool,
+    show_ppu_panel: bool,
+}
+
+impl LunaApp {
+    pub(crate) fn new() -> Self {
+        Self {
+            snes: None,
+            rom_path: None,
+            rom_title: None,
+            framebuffer: None,
+            last_error: None,
+            paused: false,
+            instructions_executed: 0,
+            last_frame: Instant::now(),
+            fps: 0.0,
+            show_cpu_panel: true,
+            show_ppu_panel: true,
+        }
+    }
+
+    /// Load a ROM from disk and reset the emulator.
+    fn load_rom(&mut self, path: &Path) {
+        match Cartridge::load(path) {
+            Ok(cart) => {
+                let title = cart.header.title.clone();
+                let mut snes = Snes::from_cartridge(cart);
+                snes.reset();
+                self.snes = Some(snes);
+                self.rom_title = Some(title);
+                self.rom_path = Some(path.to_path_buf());
+                self.instructions_executed = 0;
+                self.last_error = None;
+                self.framebuffer = None;
+            }
+            Err(e) => self.last_error = Some(format!("Failed to load ROM: {e}")),
+        }
+    }
+
+    /// Step the CPU `STEPS_PER_FRAME` times, catching panics so a
+    /// not-yet-implemented opcode doesn't kill the GUI.
+    fn step_cpu(&mut self) {
+        if self.paused {
+            return;
+        }
+        let Some(snes) = self.snes.as_mut() else {
+            return;
+        };
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        for _ in 0..STEPS_PER_FRAME {
+            if snes.cpu.stopped {
+                break;
+            }
+            match catch_unwind(AssertUnwindSafe(|| snes.step())) {
+                Ok(_) => self.instructions_executed += 1,
+                Err(payload) => {
+                    let msg = payload_to_string(payload);
+                    self.last_error = Some(format!("CPU panic: {msg}"));
+                    self.paused = true;
+                    break;
+                }
+            }
+        }
+        std::panic::set_hook(prev_hook);
+    }
+
+    /// Render the PPU framebuffer into an egui texture.
+    fn refresh_framebuffer(&mut self, ctx: &Context) {
+        let Some(snes) = self.snes.as_ref() else {
+            return;
+        };
+        let frame = luna_ppu::render_frame_bg1(&snes.ppu);
+        let mut rgba = Vec::with_capacity(FRAME_W * FRAME_H * 4);
+        for px in frame {
+            rgba.extend_from_slice(&[px[0], px[1], px[2], 0xFF]);
+        }
+        let image = ColorImage::from_rgba_unmultiplied([FRAME_W, FRAME_H], &rgba);
+        if let Some(tex) = self.framebuffer.as_mut() {
+            tex.set(image, TextureOptions::NEAREST);
+        } else {
+            self.framebuffer =
+                Some(ctx.load_texture("luna-framebuffer", image, TextureOptions::NEAREST));
+        }
+    }
+}
+
+impl App for LunaApp {
+    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // ---------------- File-drop handling ----------------
+        let dropped_files = ctx.input(|i| i.raw.dropped_files.clone());
+        if let Some(file) = dropped_files.into_iter().find_map(|f| f.path) {
+            self.load_rom(&file);
+        }
+
+        // ---------------- FPS bookkeeping ----------------
+        let now = Instant::now();
+        let dt = now
+            .duration_since(self.last_frame)
+            .as_secs_f32()
+            .max(0.0001);
+        self.fps = 0.9 * self.fps + 0.1 * (1.0 / dt);
+        self.last_frame = now;
+
+        // ---------------- Emulation step ----------------
+        self.step_cpu();
+        self.refresh_framebuffer(ctx);
+
+        // ---------------- Top menu bar ----------------
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            MenuBar::new().ui(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.button("Open ROM…").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("SNES ROM", &["sfc", "smc"])
+                            .add_filter("All files", &["*"])
+                            .pick_file()
+                        {
+                            self.load_rom(&path);
+                        }
+                        ui.close_kind(UiKind::Menu);
+                    }
+                    ui.separator();
+                    if ui.button("Quit").clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+                ui.menu_button("Emulation", |ui| {
+                    let label = if self.paused { "Resume" } else { "Pause" };
+                    if ui.button(label).clicked() {
+                        self.paused = !self.paused;
+                        ui.close_kind(UiKind::Menu);
+                    }
+                    if ui.button("Reset").clicked() {
+                        if let Some(snes) = self.snes.as_mut() {
+                            snes.reset();
+                            self.instructions_executed = 0;
+                            self.last_error = None;
+                            self.paused = false;
+                        }
+                        ui.close_kind(UiKind::Menu);
+                    }
+                });
+                ui.menu_button("View", |ui| {
+                    ui.checkbox(&mut self.show_cpu_panel, "CPU panel");
+                    ui.checkbox(&mut self.show_ppu_panel, "PPU panel");
+                });
+                ui.menu_button("Help", |ui| {
+                    ui.label("Luna SNES — 2026");
+                    ui.hyperlink_to("github", "https://github.com/k0b3n4irb/luna");
+                });
+
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(format!("{:>5.1} FPS", self.fps));
+                    if self.paused {
+                        ui.label(RichText::new("⏸ PAUSED").color(Color32::from_rgb(255, 200, 80)));
+                    }
+                });
+            });
+        });
+
+        // ---------------- Right side panel (debug) ----------------
+        if self.show_cpu_panel || self.show_ppu_panel {
+            egui::SidePanel::right("debug_panel")
+                .resizable(true)
+                .default_width(280.0)
+                .min_width(220.0)
+                .show(ctx, |ui| {
+                    ui.add_space(8.0);
+                    if let Some(snes) = self.snes.as_ref() {
+                        if self.show_cpu_panel {
+                            egui::CollapsingHeader::new(RichText::new("CPU 65C816").strong())
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    cpu_panel(ui, snes);
+                                });
+                        }
+                        if self.show_ppu_panel {
+                            egui::CollapsingHeader::new(RichText::new("PPU").strong())
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    ppu_panel(ui, snes);
+                                });
+                        }
+                    } else {
+                        ui.label("Open a ROM to inspect.");
+                    }
+                });
+        }
+
+        // ---------------- Status bar ----------------
+        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if let Some(title) = &self.rom_title {
+                    ui.label(RichText::new(format!("📀 {title}")).strong());
+                    ui.separator();
+                }
+                ui.label(format!("Instructions: {}", self.instructions_executed));
+                if let Some(snes) = self.snes.as_ref() {
+                    ui.separator();
+                    ui.label(format!("MCycles: {}", snes.total_mclk));
+                }
+                if let Some(err) = &self.last_error {
+                    ui.separator();
+                    ui.colored_label(Color32::from_rgb(255, 120, 120), err);
+                }
+            });
+        });
+
+        // ---------------- Central panel (screen) ----------------
+        let mut requested_path: Option<PathBuf> = None;
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if self.snes.is_none() {
+                requested_path = draw_landing_page(ui);
+                return;
+            }
+            draw_screen(ui, self.framebuffer.as_ref());
+        });
+        if let Some(path) = requested_path {
+            self.load_rom(&path);
+        }
+
+        // 60 fps repaint target.
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+    }
+}
+
+fn cpu_panel(ui: &mut egui::Ui, snes: &Snes) {
+    let cpu = &snes.cpu;
+    let mono = |s: String| RichText::new(s).monospace();
+    egui::Grid::new("cpu_regs")
+        .num_columns(2)
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label("A");
+            ui.label(mono(format!("${:04X}", cpu.a)));
+            ui.end_row();
+            ui.label("X");
+            ui.label(mono(format!("${:04X}", cpu.x)));
+            ui.end_row();
+            ui.label("Y");
+            ui.label(mono(format!("${:04X}", cpu.y)));
+            ui.end_row();
+            ui.label("SP");
+            ui.label(mono(format!("${:04X}", cpu.sp)));
+            ui.end_row();
+            ui.label("PC");
+            ui.label(mono(format!("${:02X}:{:04X}", cpu.pb, cpu.pc)));
+            ui.end_row();
+            ui.label("DP");
+            ui.label(mono(format!("${:04X}", cpu.dp)));
+            ui.end_row();
+            ui.label("DB");
+            ui.label(mono(format!("${:02X}", cpu.db)));
+            ui.end_row();
+            ui.label("P");
+            ui.label(mono(format!(
+                "${:02X}  {}",
+                cpu.p.bits(),
+                flag_string(cpu.p.bits(), cpu.e)
+            )));
+            ui.end_row();
+        });
+}
+
+fn ppu_panel(ui: &mut egui::Ui, snes: &Snes) {
+    let p = &snes.ppu;
+    let mono = |s: String| RichText::new(s).monospace();
+    egui::Grid::new("ppu_regs")
+        .num_columns(2)
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label("INIDISP");
+            ui.label(mono(format!(
+                "${:02X} {}",
+                p.inidisp,
+                if p.inidisp & 0x80 != 0 {
+                    "(blanked)"
+                } else {
+                    ""
+                }
+            )));
+            ui.end_row();
+            ui.label("Brightness");
+            ui.label(mono(format!("{}/15", p.inidisp & 0x0F)));
+            ui.end_row();
+            ui.label("BGMODE");
+            ui.label(mono(format!("${:02X}", p.bgmode)));
+            ui.end_row();
+            ui.label("VRAM addr");
+            ui.label(mono(format!("${:04X} (word)", p.vram.address)));
+            ui.end_row();
+            for (i, bg) in p.bg.iter().enumerate() {
+                ui.label(format!("BG{}", i + 1));
+                ui.label(mono(format!(
+                    "tile=${:04X} chr=${:04X}",
+                    bg.tilemap_addr_words, bg.char_addr_words
+                )));
+                ui.end_row();
+            }
+        });
+}
+
+fn flag_string(p: u8, e: bool) -> String {
+    let bit = |mask: u8, c: char, fallback: char| if p & mask != 0 { c } else { fallback };
+    format!(
+        "{}{}{}{}{}{}{}{}{}",
+        bit(0b1000_0000, 'N', 'n'),
+        bit(0b0100_0000, 'V', 'v'),
+        bit(0b0010_0000, 'M', 'm'),
+        bit(0b0001_0000, 'X', 'x'),
+        bit(0b0000_1000, 'D', 'd'),
+        bit(0b0000_0100, 'I', 'i'),
+        bit(0b0000_0010, 'Z', 'z'),
+        bit(0b0000_0001, 'C', 'c'),
+        if e { 'E' } else { 'e' },
+    )
+}
+
+fn draw_screen(ui: &mut egui::Ui, texture: Option<&TextureHandle>) {
+    let Some(tex) = texture else {
+        ui.centered_and_justified(|ui| {
+            ui.label("Waiting for first frame…");
+        });
+        return;
+    };
+    // Compute the largest integer scale that fits the available rect
+    // while preserving the 8:7 SNES native pixel ratio (we keep 1:1
+    // for now — square pixels — and let the user resize freely).
+    let avail = ui.available_size();
+    let scale_x = (avail.x / FRAME_W as f32).floor().max(1.0);
+    let scale_y = (avail.y / FRAME_H as f32).floor().max(1.0);
+    let scale = scale_x.min(scale_y);
+    let size = egui::vec2(FRAME_W as f32 * scale, FRAME_H as f32 * scale);
+
+    ui.centered_and_justified(|ui| {
+        let response = ui.add(egui::Image::new(tex).fit_to_exact_size(size));
+        // Subtle rounded frame around the screen.
+        let rect = response.rect;
+        ui.painter().rect_stroke(
+            rect.expand(2.0),
+            egui::CornerRadius::same(6),
+            egui::Stroke::new(1.5, Color32::from_rgb(80, 80, 110)),
+            egui::StrokeKind::Outside,
+        );
+    });
+}
+
+/// Draw the no-ROM startup screen. Returns the picked path if the
+/// user clicked "Open ROM…", so the caller (which owns `self`) can
+/// call `load_rom` without running into closure-borrow conflicts.
+fn draw_landing_page(ui: &mut egui::Ui) -> Option<PathBuf> {
+    let mut picked: Option<PathBuf> = None;
+    ui.vertical_centered(|ui| {
+        ui.add_space(48.0);
+        ui.heading(RichText::new("Luna").size(56.0).strong());
+        ui.label(
+            RichText::new("A modern SNES emulator with an introspection API")
+                .size(16.0)
+                .color(Color32::from_rgb(180, 180, 200)),
+        );
+        ui.add_space(36.0);
+        if ui
+            .add(
+                egui::Button::new(RichText::new("📂  Open ROM…").size(18.0))
+                    .min_size(egui::vec2(240.0, 48.0)),
+            )
+            .clicked()
+        {
+            picked = rfd::FileDialog::new()
+                .add_filter("SNES ROM", &["sfc", "smc"])
+                .add_filter("All files", &["*"])
+                .pick_file();
+        }
+        ui.add_space(16.0);
+        ui.label(
+            RichText::new("…or drop a .sfc / .smc file here")
+                .size(13.0)
+                .italics()
+                .color(Color32::from_rgb(140, 140, 160)),
+        );
+    });
+    picked
+}
+
+fn payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "(unknown panic payload)".to_string()
+    }
+}
