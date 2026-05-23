@@ -75,21 +75,28 @@ impl LunaApp {
                 return;
             }
         };
-        // Reject everything we can't construct without a panic. The
-        // upstream `Snes::from_cartridge` still panics on these, but
-        // catching here lets us deliver a useful diagnostic.
-        if !matches!(cart.header.mapper_kind, luna_bus::MapperKind::LoRom) {
-            self.last_error = Some(format!(
-                "Unsupported cartridge type: {:?}. \
-                 Only LoROM is wired up so far — \
-                 HiROM / SA-1 / Super FX land in later phases.",
-                cart.header.mapper_kind
-            ));
-            self.snes = None;
-            self.rom_title = Some(cart.header.title.clone());
-            self.rom_path = Some(path.to_path_buf());
-            self.framebuffer = None;
-            return;
+        // Mapper compatibility check.
+        // LoROM / HiROM / ExHiROM are wired through `Snes::from_cartridge`.
+        // Coprocessor carts (SA-1 / Super FX / S-DD1 / SPC7110) need
+        // their own subsystem implementation — refuse them with a
+        // clear message rather than half-loading.
+        use luna_bus::MapperKind;
+        match cart.header.mapper_kind {
+            MapperKind::LoRom | MapperKind::HiRom | MapperKind::ExHiRom => {}
+            other => {
+                self.last_error = Some(format!(
+                    "Cartridge needs the {other:?} coprocessor, which isn't yet \
+                     emulated. Star Fox / Yoshi's Island (Super FX), Super Mario \
+                     RPG / Kirby Super Star (SA-1) and friends will land in \
+                     their own dedicated phase. Plain LoROM, HiROM and ExHiROM \
+                     carts work today."
+                ));
+                self.snes = None;
+                self.rom_title = Some(cart.header.title.clone());
+                self.rom_path = Some(path.to_path_buf());
+                self.framebuffer = None;
+                return;
+            }
         }
         let title = cart.header.title.clone();
         let prev_hook = std::panic::take_hook();

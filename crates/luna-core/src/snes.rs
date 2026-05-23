@@ -6,6 +6,7 @@
 //! are silently dropped.
 
 use crate::cpu_regs::CpuRegs;
+use luna_bus::hirom::HiRomMapper;
 use luna_bus::lorom::LoRomMapper;
 use luna_bus::{Addr24, Bus, MCycles, Mapper, MapperKind, address_speed, bank_of, offset_of};
 use luna_cartridge::Cartridge;
@@ -46,15 +47,20 @@ impl Snes {
     /// set — currently LoROM only. HiROM / SA-1 / Super FX land in
     /// later phases.
     pub fn from_cartridge(cart: Cartridge) -> Self {
+        let sram_bytes = (cart.header.sram_size_kb as usize) * 1024;
         let mapper: Box<dyn Mapper + Send> = match cart.header.mapper_kind {
-            MapperKind::LoRom => {
-                let sram_bytes = (cart.header.sram_size_kb as usize) * 1024;
-                Box::new(LoRomMapper::new(cart.rom, sram_bytes))
+            MapperKind::LoRom => Box::new(LoRomMapper::new(cart.rom, sram_bytes)),
+            // ExHiROM uses the same byte-level layout as HiROM for the
+            // lower 32 Mbit; we treat them identically here. Real
+            // ExHiROM extended-bank addressing (banks 64+) is not yet
+            // modelled but is rare in the wild.
+            MapperKind::HiRom | MapperKind::ExHiRom => {
+                Box::new(HiRomMapper::new(cart.rom, sram_bytes))
             }
             other => {
                 panic!(
-                    "luna-core P0.6 only supports LoROM; cartridge claims {other:?}. \
-                     HiROM / SA-1 / Super FX land in P1+."
+                    "Cartridge requires coprocessor support not yet implemented: {other:?}. \
+                     SA-1 / Super FX / S-DD1 / SPC7110 will land in their own dedicated phases."
                 );
             }
         };
