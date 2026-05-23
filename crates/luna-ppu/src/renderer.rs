@@ -19,6 +19,16 @@ pub const FRAME_W: usize = 256;
 /// (NTSC: 224 lines; PAL adds 15 more, modelled later).
 pub const FRAME_H: usize = 224;
 
+/// Renderer options — feature-flag-style switches for debugging.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RenderOptions {
+    /// When `true`, the renderer ignores `INIDISP` bit 7 (forced blank)
+    /// and forces full master brightness ($0F). Used by the GUI's
+    /// **Force display** debug toggle so the user can peek at VRAM/CGRAM
+    /// state even when a game keeps the screen blanked during boot.
+    pub bypass_forced_blank: bool,
+}
+
 /// Render one scanline of BG1 in Mode 0 (2bpp).
 ///
 /// Pixels are produced by:
@@ -33,14 +43,24 @@ pub const FRAME_H: usize = 224;
 /// global), which matches the behaviour of a single-BG composite.
 #[must_use]
 pub fn render_bg1_scanline(ppu: &Ppu, y: u16) -> Scanline {
+    render_bg1_scanline_with(ppu, y, RenderOptions::default())
+}
+
+/// Same as [`render_bg1_scanline`] but with debug options.
+#[must_use]
+pub fn render_bg1_scanline_with(ppu: &Ppu, y: u16, opts: RenderOptions) -> Scanline {
     let mut out = [[0u8; 3]; 256];
 
     // INIDISP bit 7: forced blank — entire scanline is black, ignoring
     // master brightness (which is 0 in forced blank anyway per spec).
-    if ppu.inidisp & 0x80 != 0 {
+    if ppu.inidisp & 0x80 != 0 && !opts.bypass_forced_blank {
         return out;
     }
-    let brightness = ppu.inidisp & 0x0F;
+    let brightness = if opts.bypass_forced_blank {
+        0x0F
+    } else {
+        ppu.inidisp & 0x0F
+    };
 
     let bg = bg_state(ppu, 0);
     // 32x32 tilemap layout only for now. (SC bits in $2107 not modelled.)
@@ -104,9 +124,15 @@ pub fn render_bg1_scanline(ppu: &Ppu, y: u16) -> Scanline {
 /// 224 scanlines (NTSC native). For 239-line PAL we'll extend later.
 #[must_use]
 pub fn render_frame_bg1(ppu: &Ppu) -> Vec<[u8; 3]> {
+    render_frame_bg1_with(ppu, RenderOptions::default())
+}
+
+/// Same as [`render_frame_bg1`] but with debug options.
+#[must_use]
+pub fn render_frame_bg1_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
     let mut buf = vec![[0u8; 3]; FRAME_W * FRAME_H];
     for y in 0..FRAME_H {
-        let line = render_bg1_scanline(ppu, y as u16);
+        let line = render_bg1_scanline_with(ppu, y as u16, opts);
         let off = y * FRAME_W;
         buf[off..off + FRAME_W].copy_from_slice(&line);
     }
@@ -178,6 +204,33 @@ mod tests {
         for px in &line {
             assert_eq!(*px, [0, 0, 0]);
         }
+    }
+
+    #[test]
+    fn bypass_forced_blank_ignores_inidisp_bit_7() {
+        let mut p = setup_demo_tile();
+        p.write(register::INIDISP, 0x80); // forced blank ON
+        let opts = RenderOptions {
+            bypass_forced_blank: true,
+        };
+        let line = render_bg1_scanline_with(&p, 0, opts);
+        // First pixel uses index 1 → red ($001F) at full brightness.
+        assert_ne!(line[0], [0, 0, 0]);
+    }
+
+    #[test]
+    fn bypass_forced_blank_forces_full_brightness() {
+        let mut p = setup_demo_tile();
+        // Forced blank ON, but ALSO brightness 0 (which would be black even
+        // without bit 7). Bypass should override brightness too.
+        p.write(register::INIDISP, 0x80);
+        let opts = RenderOptions {
+            bypass_forced_blank: true,
+        };
+        let line = render_bg1_scanline_with(&p, 0, opts);
+        // Color 1 in our setup is $001F → red at brightness 15.
+        // scale_5_to_8(0x1F) = 0xFF; brightness 15 keeps full value.
+        assert_eq!(line[0], [0xFF, 0, 0]);
     }
 
     #[test]

@@ -45,6 +45,19 @@ pub(crate) struct LunaApp {
     show_cpu_panel: bool,
     show_ppu_panel: bool,
     show_stubs_panel: bool,
+
+    /// Debug: render with `INIDISP` forced-blank ignored and master
+    /// brightness clamped to $0F. Lets the user see whatever the game
+    /// has uploaded to VRAM/CGRAM even when boot init keeps the screen
+    /// blanked. Off by default.
+    force_display: bool,
+
+    /// Snapshot of the 8 bytes at `PB:PC`, captured once per UI frame
+    /// and displayed in the CPU panel. Lets the user (and Claude
+    /// looking at screenshots) tell at a glance what the CPU is
+    /// looping on. Zero-initialised; refreshed after each frame's
+    /// `step_cpu`.
+    pc_bytes: [u8; 8],
 }
 
 impl LunaApp {
@@ -62,6 +75,8 @@ impl LunaApp {
             show_cpu_panel: true,
             show_ppu_panel: true,
             show_stubs_panel: true,
+            force_display: false,
+            pc_bytes: [0; 8],
         }
     }
 
@@ -164,6 +179,13 @@ impl LunaApp {
                 self.paused = true;
             }
         }
+        // Diagnostic: snapshot the 8 bytes at PB:PC for the CPU panel.
+        if let Some(snes) = self.snes.as_mut() {
+            let bytes = snes.peek_pc_bytes(8);
+            for (slot, b) in self.pc_bytes.iter_mut().zip(bytes.iter()) {
+                *slot = *b;
+            }
+        }
     }
 
     /// Render the PPU framebuffer into an egui texture.
@@ -171,7 +193,10 @@ impl LunaApp {
         let Some(snes) = self.snes.as_ref() else {
             return;
         };
-        let frame = luna_ppu::render_frame_bg1(&snes.ppu);
+        let opts = luna_ppu::RenderOptions {
+            bypass_forced_blank: self.force_display,
+        };
+        let frame = luna_ppu::render_frame_bg1_with(&snes.ppu, opts);
         let mut rgba = Vec::with_capacity(FRAME_W * FRAME_H * 4);
         for px in frame {
             rgba.extend_from_slice(&[px[0], px[1], px[2], 0xFF]);
@@ -246,6 +271,14 @@ impl App for LunaApp {
                     ui.checkbox(&mut self.show_cpu_panel, "CPU panel");
                     ui.checkbox(&mut self.show_ppu_panel, "PPU panel");
                     ui.checkbox(&mut self.show_stubs_panel, "Stubs panel");
+                    ui.separator();
+                    ui.checkbox(&mut self.force_display, "Force display (bypass INIDISP)")
+                        .on_hover_text(
+                            "Render even when the game has set forced-blank \
+                         (INIDISP bit 7). Master brightness is also \
+                         clamped to $0F. Useful to see what's in VRAM \
+                         when a game stays blanked during boot.",
+                        );
                 });
                 ui.menu_button("Help", |ui| {
                     ui.label("Luna SNES — 2026");
@@ -274,7 +307,7 @@ impl App for LunaApp {
                             egui::CollapsingHeader::new(RichText::new("CPU 65C816").strong())
                                 .default_open(true)
                                 .show(ui, |ui| {
-                                    cpu_panel(ui, snes);
+                                    cpu_panel(ui, snes, &self.pc_bytes);
                                 });
                         }
                         if self.show_ppu_panel {
@@ -285,8 +318,8 @@ impl App for LunaApp {
                                 });
                         }
                         if self.show_stubs_panel {
-                            egui::CollapsingHeader::new(RichText::new("Stubs").strong())
-                                .default_open(false)
+                            egui::CollapsingHeader::new(RichText::new("Stubs & diag").strong())
+                                .default_open(true)
                                 .show(ui, |ui| {
                                     stubs_panel(ui, snes);
                                 });
@@ -361,7 +394,7 @@ impl App for LunaApp {
     }
 }
 
-fn cpu_panel(ui: &mut egui::Ui, snes: &Snes) {
+fn cpu_panel(ui: &mut egui::Ui, snes: &Snes, pc_bytes: &[u8; 8]) {
     let cpu = &snes.cpu;
     let mono = |s: String| RichText::new(s).monospace();
     egui::Grid::new("cpu_regs")
@@ -394,6 +427,19 @@ fn cpu_panel(ui: &mut egui::Ui, snes: &Snes) {
                 "${:02X}  {}",
                 cpu.p.bits(),
                 flag_string(cpu.p.bits(), cpu.e)
+            )));
+            ui.end_row();
+            ui.label("@PC");
+            ui.label(mono(format!(
+                "{:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
+                pc_bytes[0],
+                pc_bytes[1],
+                pc_bytes[2],
+                pc_bytes[3],
+                pc_bytes[4],
+                pc_bytes[5],
+                pc_bytes[6],
+                pc_bytes[7],
             )));
             ui.end_row();
         });
@@ -457,13 +503,30 @@ fn stubs_panel(ui: &mut egui::Ui, snes: &Snes) {
             ui.label("Fake frames");
             ui.label(mono(snes.fake_frame_count.to_string()));
             ui.end_row();
+            ui.label("NMIs served");
+            ui.label(mono(snes.nmis_serviced.to_string()));
+            ui.end_row();
             ui.label("NMITIMEN");
             let nmiten = snes.cpu_regs.nmitimen;
             ui.label(mono(format!(
                 "${:02X} {}",
                 nmiten,
-                if nmiten & 0x80 != 0 { "(NMI on)" } else { "" }
+                if nmiten & 0x80 != 0 {
+                    "(NMI on)"
+                } else {
+                    "(masked)"
+                }
             )));
+            ui.end_row();
+            ui.label("INIDISP writes");
+            ui.label(mono(snes.ppu.inidisp_write_count.to_string()));
+            ui.end_row();
+            ui.label("Backdrop");
+            let bg0 = snes.ppu.cgram.color(0);
+            ui.label(mono(format!("${bg0:04X}")));
+            ui.end_row();
+            ui.label("HVBJOY");
+            ui.label(mono(format!("${:02X}", snes.cpu_regs.hvbjoy)));
             ui.end_row();
         });
 }
