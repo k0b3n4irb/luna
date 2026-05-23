@@ -1,0 +1,13 @@
+[package]
+name = "luna-mcp-client"
+description = "MCP client for Luna — cross-target, WebSocket transport for Luna Studio Web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true

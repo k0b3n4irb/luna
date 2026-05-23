@@ -1,0 +1,13 @@
+[package]
+name = "luna-coproc"
+description = "SNES cartridge coprocessors — SA-1, Super FX, DSP-1/2/3/4, Cx4, S-DD1, SPC7110, ST010+"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
