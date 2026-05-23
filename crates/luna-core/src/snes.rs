@@ -5,6 +5,7 @@
 //! from their registers return `0xFF` (open-bus convention) and writes
 //! are silently dropped.
 
+use crate::apu_stub::ApuStub;
 use crate::cpu_regs::CpuRegs;
 use luna_bus::hirom::HiRomMapper;
 use luna_bus::lorom::LoRomMapper;
@@ -42,12 +43,11 @@ pub struct Snes {
     pub total_mclk: MCycles,
 
     // ------------- "Compat stubs" — replaced by real subsystems later -------------
-    /// `$2140-$2143` CPU-side APU mailbox. Until the real SPC700/DSP
-    /// are wired in, we echo writes back to the matching read register
-    /// and seed the first two bytes with the canonical IPL "ready"
-    /// values (`$AA`, `$BB`) so the standard handshake loop in most
-    /// games sees what it expects.
-    pub apu_mailbox_to_cpu: [u8; 4],
+    /// Smart APU mailbox stub — a state machine that mimics enough of
+    /// the IPL ROM upload protocol and the post-upload command/ack
+    /// dance for many games to progress past their boot phase without
+    /// a real SPC700 + DSP. See [`crate::apu_stub`].
+    pub apu: ApuStub,
     /// Instructions executed since the last synthetic VBlank.
     pub fake_vblank_counter: u32,
     /// Counter of synthetic VBlanks since reset (= a rough "frame"
@@ -102,7 +102,7 @@ impl Snes {
             total_mclk: 0,
             // Compat: post-reset, the IPL ROM has dropped these into
             // the CPU-facing mailbox to signal "audio CPU ready".
-            apu_mailbox_to_cpu: [0xAA, 0xBB, 0x00, 0x00],
+            apu: ApuStub::new(),
             fake_vblank_counter: 0,
             fake_frame_count: 0,
             nmis_serviced: 0,
@@ -117,7 +117,7 @@ impl Snes {
             ppu,
             dma,
             cpu_regs,
-            apu_mailbox_to_cpu,
+            apu,
             wram,
             mapper,
             fast_rom,
@@ -132,7 +132,7 @@ impl Snes {
             ppu,
             dma,
             cpu_regs,
-            apu_mailbox: apu_mailbox_to_cpu,
+            apu,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
@@ -150,7 +150,7 @@ impl Snes {
             ppu,
             dma,
             cpu_regs,
-            apu_mailbox_to_cpu,
+            apu,
             wram,
             mapper,
             fast_rom,
@@ -165,7 +165,7 @@ impl Snes {
             ppu,
             dma,
             cpu_regs,
-            apu_mailbox: apu_mailbox_to_cpu,
+            apu,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
@@ -211,7 +211,7 @@ impl Snes {
             ppu,
             dma,
             cpu_regs,
-            apu_mailbox_to_cpu,
+            apu,
             wram,
             mapper,
             fast_rom,
@@ -226,7 +226,7 @@ impl Snes {
             ppu,
             dma,
             cpu_regs,
-            apu_mailbox: apu_mailbox_to_cpu,
+            apu,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
@@ -254,7 +254,7 @@ struct SnesBus<'a> {
     ppu: &'a mut Ppu,
     dma: &'a mut Dma,
     cpu_regs: &'a mut CpuRegs,
-    apu_mailbox: &'a mut [u8; 4],
+    apu: &'a mut ApuStub,
     fast_rom: bool,
     nmi: &'a mut bool,
     irq: &'a mut bool,
@@ -404,11 +404,9 @@ impl<'a> Bus for SnesBus<'a> {
             return self.ppu.read(off);
         }
         if let Some(port) = Self::apu_port(addr) {
-            // Compat stub: read the "to-CPU" mailbox byte. Real APU
-            // arrives in P2.SPC.* — until then this returns the
-            // canonical IPL handshake values until the game writes
-            // them itself.
-            return self.apu_mailbox[port];
+            // Smart APU stub: handshake bytes, then IPL counter echo,
+            // then post-upload fake-ack. See `crate::apu_stub`.
+            return self.apu.read(port);
         }
         if let Some(offset) = Self::dma_offset(addr) {
             return self.dma.read_register(offset).unwrap_or(0xFF);
@@ -444,10 +442,10 @@ impl<'a> Bus for SnesBus<'a> {
             return;
         }
         if let Some(port) = Self::apu_port(addr) {
-            // Compat stub: echo what the CPU writes back into the
-            // matching read mailbox port. The canonical SPC handshake
-            // (write $CC → wait for $CC) thus succeeds immediately.
-            self.apu_mailbox[port] = value;
+            // Smart APU stub: tracks the IPL upload phase to choose
+            // between counter echo (during upload) and fake-ack
+            // (post-upload). See `crate::apu_stub`.
+            self.apu.write(port, value);
             return;
         }
         if let Some(offset) = Self::dma_offset(addr) {
@@ -588,7 +586,7 @@ mod tests {
             ppu,
             dma,
             cpu_regs,
-            apu_mailbox_to_cpu,
+            apu,
             wram,
             mapper,
             fast_rom,
@@ -603,7 +601,7 @@ mod tests {
             ppu,
             dma,
             cpu_regs,
-            apu_mailbox: apu_mailbox_to_cpu,
+            apu,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
