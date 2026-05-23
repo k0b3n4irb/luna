@@ -13,7 +13,10 @@ readme.workspace = true
 luna-bus = { workspace = true }
 
 [dev-dependencies]
-luna-bus = { workspace = true, features = ["test-utils"] }
+luna-bus   = { workspace = true, features = ["test-utils"] }
+# Tom Harte JSON tests integration (see tests/tom_harte.rs).
+serde      = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["std"] }
 
 [lints]
 workspace = true
