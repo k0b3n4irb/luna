@@ -15,7 +15,10 @@ mod tile;
 
 pub use memory::{Cgram, Oam, Vram};
 pub use ppu::{BgState, Ppu, bg_state, register};
-pub use renderer::{FRAME_H, FRAME_W, Scanline, render_bg1_scanline, render_frame_bg1};
+pub use renderer::{
+    FRAME_H, FRAME_W, RenderOptions, Scanline, render_bg1_scanline, render_bg1_scanline_with,
+    render_frame_bg1, render_frame_bg1_with,
+};
 pub use tile::{
     apply_brightness, bgr555_to_rgb888, decode_2bpp_row, decode_4bpp_row, scale_5_to_8,
 };
