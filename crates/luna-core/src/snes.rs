@@ -8,7 +8,9 @@
 use crate::cpu_regs::CpuRegs;
 use luna_bus::hirom::HiRomMapper;
 use luna_bus::lorom::LoRomMapper;
-use luna_bus::{Addr24, Bus, MCycles, Mapper, MapperKind, address_speed, bank_of, offset_of};
+use luna_bus::{
+    Addr24, Bus, MCycles, Mapper, MapperKind, address_speed, bank_of, make_addr, offset_of,
+};
 use luna_cartridge::Cartridge;
 use luna_cpu_65c816::Cpu;
 use luna_dma::{Dma, DmaBus};
@@ -51,6 +53,11 @@ pub struct Snes {
     /// Counter of synthetic VBlanks since reset (= a rough "frame"
     /// count until the PPU drives this).
     pub fake_frame_count: u64,
+    /// How many NMIs we have actually delivered to the CPU (i.e. the
+    /// game's NMI handler was entered). When `NMITIMEN.7` is off this
+    /// stays at zero even though `fake_frame_count` keeps rising —
+    /// the GUI uses the discrepancy to diagnose stuck boot sequences.
+    pub nmis_serviced: u64,
 }
 
 /// How many CPU instructions between two synthetic VBlanks. Close to
@@ -98,6 +105,7 @@ impl Snes {
             apu_mailbox_to_cpu: [0xAA, 0xBB, 0x00, 0x00],
             fake_vblank_counter: 0,
             fake_frame_count: 0,
+            nmis_serviced: 0,
         }
     }
 
@@ -179,12 +187,57 @@ impl Snes {
             // If the game has enabled NMI, raise it now.
             if self.cpu_regs.nmitimen & 0x80 != 0 {
                 self.cpu.trigger_nmi();
+                self.nmis_serviced = self.nmis_serviced.saturating_add(1);
             }
         } else {
             // Outside vblank — clear the HVBJOY vblank bit.
             self.cpu_regs.hvbjoy &= !0x80;
         }
         self.total_mclk - before
+    }
+
+    /// Read 8 bytes starting at the current `PB:PC`. Used by the GUI to
+    /// show the instruction stream around the CPU's program counter
+    /// without disturbing emulation state.
+    ///
+    /// Reads go through the real bus, so PPU/CPU/MMIO regs *would* be
+    /// observed if PC were in an MMIO window — but that's never the
+    /// case for executable code in practice.
+    #[must_use]
+    pub fn peek_pc_bytes(&mut self, count: usize) -> Vec<u8> {
+        let pc = self.cpu.pc;
+        let pb = self.cpu.pb;
+        let Snes {
+            ppu,
+            dma,
+            cpu_regs,
+            apu_mailbox_to_cpu,
+            wram,
+            mapper,
+            fast_rom,
+            nmi_pending,
+            irq_pending,
+            total_mclk,
+            ..
+        } = self;
+        let mut bus = SnesBus {
+            wram,
+            mapper: mapper.as_mut(),
+            ppu,
+            dma,
+            cpu_regs,
+            apu_mailbox: apu_mailbox_to_cpu,
+            fast_rom: *fast_rom,
+            nmi: nmi_pending,
+            irq: irq_pending,
+            mclk_total: total_mclk,
+        };
+        (0..count)
+            .map(|i| {
+                let off = pc.wrapping_add(i as u16);
+                bus.read(make_addr(pb, off))
+            })
+            .collect()
     }
 }
 

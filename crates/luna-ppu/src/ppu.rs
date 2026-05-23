@@ -132,6 +132,12 @@ pub struct Ppu {
     /// Last value seen on the PPU data bus — returned for reads of
     /// write-only registers.
     pub open_bus: u8,
+
+    // ---------- Diagnostic counters (debug-only, not on hot path) ----------
+    /// How many times `$2100` (INIDISP) has been written since reset.
+    /// Used by the GUI's Stubs panel to detect "the game never touched
+    /// INIDISP again after init" (= NMI handler not running).
+    pub inidisp_write_count: u64,
 }
 
 impl Default for Ppu {
@@ -155,6 +161,7 @@ impl Ppu {
             bg: [BgState::default(); 4],
             bg_scroll_latch: 0,
             open_bus: 0,
+            inidisp_write_count: 0,
         }
     }
 
@@ -213,7 +220,10 @@ impl Ppu {
     pub fn write(&mut self, offset: u8, value: u8) {
         self.open_bus = value;
         match offset {
-            register::INIDISP => self.inidisp = value,
+            register::INIDISP => {
+                self.inidisp = value;
+                self.inidisp_write_count = self.inidisp_write_count.saturating_add(1);
+            }
             register::OBSEL => self.obsel = value,
             register::OAMADDL => self.oam.set_address_low(value),
             register::OAMADDH => self.oam.set_address_high(value),
@@ -305,6 +315,19 @@ mod tests {
         p.write(register::OAMDATA, 0x20);
         assert_eq!(p.oam.peek(0), 0x10);
         assert_eq!(p.oam.peek(1), 0x20);
+    }
+
+    #[test]
+    fn inidisp_write_count_tracks_writes() {
+        let mut p = Ppu::new();
+        assert_eq!(p.inidisp_write_count, 0);
+        p.write(register::INIDISP, 0x80);
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::INIDISP, 0x00);
+        assert_eq!(p.inidisp_write_count, 3);
+        // Writes to *other* registers don't bump the counter.
+        p.write(register::BGMODE, 0xAB);
+        assert_eq!(p.inidisp_write_count, 3);
     }
 
     #[test]
