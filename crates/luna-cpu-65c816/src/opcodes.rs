@@ -183,6 +183,35 @@ impl Cpu {
             0xE1 => self.sbc_dp_x_indirect(bus),
 
             // -----------------------------------------------------------
+            // Comparisons — CMP (vs A, M-width)
+            // -----------------------------------------------------------
+            0xC9 => self.cmp_imm(bus),
+            0xC5 => self.cmp_dp(bus),
+            0xC7 => self.cmp_dp_indirect_long(bus),
+            0xCD => self.cmp_abs(bus),
+            0xCF => self.cmp_long(bus),
+            0xD5 => self.cmp_dp_x(bus),
+            0xD2 => self.cmp_dp_indirect(bus),
+            0xD7 => self.cmp_dp_indirect_long_y(bus),
+            0xDD => self.cmp_abs_x(bus),
+            0xDF => self.cmp_long_x(bus),
+            0xD9 => self.cmp_abs_y(bus),
+            0xD1 => self.cmp_dp_indirect_y(bus),
+            0xC3 => self.cmp_sr_s(bus),
+            0xD3 => self.cmp_sr_s_y(bus),
+            0xC1 => self.cmp_dp_x_indirect(bus),
+
+            // -----------------------------------------------------------
+            // Comparisons — CPX, CPY (X-width)
+            // -----------------------------------------------------------
+            0xE0 => self.cpx_imm(bus),
+            0xE4 => self.cpx_dp(bus),
+            0xEC => self.cpx_abs(bus),
+            0xC0 => self.cpy_imm(bus),
+            0xC4 => self.cpy_dp(bus),
+            0xCC => self.cpy_abs(bus),
+
+            // -----------------------------------------------------------
             // Misc
             // -----------------------------------------------------------
             0xEA => { /* NOP */ }
@@ -868,6 +897,173 @@ impl Cpu {
         let v = self.arithmetic_read_from(bus, a);
         self.sbc_value(v);
     }
+
+    // ===================================================================
+    // Comparisons (CMP / CPX / CPY)
+    //
+    // Sets N / Z / C as if `reg - value` was computed; the register is
+    // NOT modified. C is set when `reg >= value` (no borrow). The V flag
+    // is not affected (unlike SBC).
+    // ===================================================================
+
+    fn compare_8(&mut self, reg: u8, value: u8) {
+        let result = reg.wrapping_sub(value);
+        self.p.set(bit::C, reg >= value);
+        self.set_nz8(result);
+    }
+
+    fn compare_16(&mut self, reg: u16, value: u16) {
+        let result = reg.wrapping_sub(value);
+        self.p.set(bit::C, reg >= value);
+        self.set_nz16(result);
+    }
+
+    /// CMP core: compare A with `value` at the M-flag width.
+    fn cmp_value(&mut self, value: u16) {
+        if self.p.acc8() {
+            self.compare_8(self.a8(), value as u8);
+        } else {
+            self.compare_16(self.a, value);
+        }
+    }
+
+    /// CPX/CPY core: compare an index register with `value` at the
+    /// X-flag width.
+    fn compare_index(&mut self, reg: u16, value: u16) {
+        if self.p.idx8() {
+            self.compare_8(reg as u8, value as u8);
+        } else {
+            self.compare_16(reg, value);
+        }
+    }
+
+    // CMP — same dispatch pattern as ADC/SBC.
+
+    fn cmp_imm<B: Bus>(&mut self, bus: &mut B) {
+        let v = if self.p.acc8() {
+            u16::from(self.fetch_u8(bus))
+        } else {
+            self.fetch_u16(bus)
+        };
+        self.cmp_value(v);
+    }
+    fn cmp_dp<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.cmp_value(v);
+    }
+    fn cmp_dp_indirect_long<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indirect_long(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.cmp_value(v);
+    }
+    fn cmp_abs<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.cmp_value(v);
+    }
+    fn cmp_long<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_long(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.cmp_value(v);
+    }
+    fn cmp_dp_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indexed_x(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.cmp_value(v);
+    }
+    fn cmp_dp_indirect<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indirect(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.cmp_value(v);
+    }
+    fn cmp_dp_indirect_long_y<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indirect_long_y(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.cmp_value(v);
+    }
+    fn cmp_abs_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_indexed_x(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.cmp_value(v);
+    }
+    fn cmp_abs_y<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_indexed_y(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.cmp_value(v);
+    }
+    fn cmp_long_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_long_indexed_x(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.cmp_value(v);
+    }
+    fn cmp_dp_indirect_y<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indirect_y(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.cmp_value(v);
+    }
+    fn cmp_sr_s<B: Bus>(&mut self, bus: &mut B) {
+        let a = stack_relative(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.cmp_value(v);
+    }
+    fn cmp_sr_s_y<B: Bus>(&mut self, bus: &mut B) {
+        let a = stack_relative_indirect_y(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.cmp_value(v);
+    }
+    fn cmp_dp_x_indirect<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indexed_indirect(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.cmp_value(v);
+    }
+
+    // CPX/CPY — only 3 addressing modes each.
+
+    fn index_read_from<B: Bus>(&mut self, bus: &mut B, addr: Addr24) -> u16 {
+        if self.p.idx8() {
+            u16::from(bus.read(addr))
+        } else {
+            read_word(bus, addr)
+        }
+    }
+
+    fn cpx_imm<B: Bus>(&mut self, bus: &mut B) {
+        let v = if self.p.idx8() {
+            u16::from(self.fetch_u8(bus))
+        } else {
+            self.fetch_u16(bus)
+        };
+        self.compare_index(self.x, v);
+    }
+    fn cpx_dp<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page(self, bus);
+        let v = self.index_read_from(bus, a);
+        self.compare_index(self.x, v);
+    }
+    fn cpx_abs<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute(self, bus);
+        let v = self.index_read_from(bus, a);
+        self.compare_index(self.x, v);
+    }
+    fn cpy_imm<B: Bus>(&mut self, bus: &mut B) {
+        let v = if self.p.idx8() {
+            u16::from(self.fetch_u8(bus))
+        } else {
+            self.fetch_u16(bus)
+        };
+        self.compare_index(self.y, v);
+    }
+    fn cpy_dp<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page(self, bus);
+        let v = self.index_read_from(bus, a);
+        self.compare_index(self.y, v);
+    }
+    fn cpy_abs<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute(self, bus);
+        let v = self.index_read_from(bus, a);
+        self.compare_index(self.y, v);
+    }
 }
 
 #[cfg(test)]
@@ -1431,6 +1627,78 @@ mod tests {
         cpu.step(&mut bus); // LDA #$10
         cpu.step(&mut bus); // ADC $2000
         assert_eq!(cpu.a8(), 0x35);
+    }
+
+    // -------------------------------------------------------------------
+    // CMP / CPX / CPY
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn cmp_imm_equal_sets_zero_and_carry() {
+        // LDA #$42, CMP #$42 → Z=1, C=1, N=0
+        let (mut cpu, mut bus) = run(&[0xA9, 0x42, 0xC9, 0x42]);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.a8(), 0x42, "CMP must not modify A");
+        assert!(cpu.p.contains(bit::Z));
+        assert!(cpu.p.contains(bit::C));
+        assert!(!cpu.p.contains(bit::N));
+    }
+
+    #[test]
+    fn cmp_imm_greater_clears_zero_keeps_carry() {
+        // LDA #$50, CMP #$30 → Z=0, C=1 (no borrow), N=0
+        let (mut cpu, mut bus) = run(&[0xA9, 0x50, 0xC9, 0x30]);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        assert!(!cpu.p.contains(bit::Z));
+        assert!(cpu.p.contains(bit::C));
+        assert!(!cpu.p.contains(bit::N));
+    }
+
+    #[test]
+    fn cmp_imm_less_clears_carry() {
+        // LDA #$20, CMP #$50 → Z=0, C=0 (borrow), N=1 ($D0 sign bit)
+        let (mut cpu, mut bus) = run(&[0xA9, 0x20, 0xC9, 0x50]);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        assert!(!cpu.p.contains(bit::Z));
+        assert!(!cpu.p.contains(bit::C));
+        assert!(cpu.p.contains(bit::N));
+    }
+
+    #[test]
+    fn cpx_compares_against_x() {
+        // LDX #$10, CPX #$10 → Z=1, C=1
+        let (mut cpu, mut bus) = run(&[0xA2, 0x10, 0xE0, 0x10]);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        assert!(cpu.p.contains(bit::Z));
+        assert!(cpu.p.contains(bit::C));
+    }
+
+    #[test]
+    fn cpy_compares_against_y_reading_memory() {
+        // LDY #$05, CPY $2000 (memory contains $05) → Z=1
+        let (mut cpu, mut bus) = run(&[0xA0, 0x05, 0xCC, 0x00, 0x20]);
+        cpu.db = 0;
+        bus.poke(0x00_2000, 0x05);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        assert!(cpu.p.contains(bit::Z));
+    }
+
+    #[test]
+    fn cmp_16bit_compares_full_word() {
+        // CLC, XCE, REP #$20, LDA #$1234, CMP #$1234
+        let prog = &[0x18, 0xFB, 0xC2, 0x20, 0xA9, 0x34, 0x12, 0xC9, 0x34, 0x12];
+        let (mut cpu, mut bus) = run(prog);
+        for _ in 0..4 {
+            cpu.step(&mut bus);
+        } // through LDA
+        cpu.step(&mut bus); // CMP #$1234
+        assert!(cpu.p.contains(bit::Z));
+        assert!(cpu.p.contains(bit::C));
     }
 
     #[test]
