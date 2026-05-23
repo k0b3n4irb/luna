@@ -38,7 +38,24 @@ pub struct Snes {
     pub irq_pending: bool,
     /// Total master cycles consumed since reset.
     pub total_mclk: MCycles,
+
+    // ------------- "Compat stubs" — replaced by real subsystems later -------------
+    /// `$2140-$2143` CPU-side APU mailbox. Until the real SPC700/DSP
+    /// are wired in, we echo writes back to the matching read register
+    /// and seed the first two bytes with the canonical IPL "ready"
+    /// values (`$AA`, `$BB`) so the standard handshake loop in most
+    /// games sees what it expects.
+    pub apu_mailbox_to_cpu: [u8; 4],
+    /// Instructions executed since the last synthetic VBlank.
+    pub fake_vblank_counter: u32,
+    /// Counter of synthetic VBlanks since reset (= a rough "frame"
+    /// count until the PPU drives this).
+    pub fake_frame_count: u64,
 }
+
+/// How many CPU instructions between two synthetic VBlanks. Close to
+/// the ~30 k typical NTSC frame size at our (instruction-step) clock.
+pub const FAKE_VBLANK_INTERVAL: u32 = 30_000;
 
 impl Snes {
     /// Build a new machine from a parsed cartridge.
@@ -76,6 +93,11 @@ impl Snes {
             nmi_pending: false,
             irq_pending: false,
             total_mclk: 0,
+            // Compat: post-reset, the IPL ROM has dropped these into
+            // the CPU-facing mailbox to signal "audio CPU ready".
+            apu_mailbox_to_cpu: [0xAA, 0xBB, 0x00, 0x00],
+            fake_vblank_counter: 0,
+            fake_frame_count: 0,
         }
     }
 
@@ -87,12 +109,14 @@ impl Snes {
             ppu,
             dma,
             cpu_regs,
+            apu_mailbox_to_cpu,
             wram,
             mapper,
             fast_rom,
             nmi_pending,
             irq_pending,
             total_mclk,
+            ..
         } = self;
         let mut bus = SnesBus {
             wram,
@@ -100,6 +124,7 @@ impl Snes {
             ppu,
             dma,
             cpu_regs,
+            apu_mailbox: apu_mailbox_to_cpu,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
@@ -117,12 +142,14 @@ impl Snes {
             ppu,
             dma,
             cpu_regs,
+            apu_mailbox_to_cpu,
             wram,
             mapper,
             fast_rom,
             nmi_pending,
             irq_pending,
             total_mclk,
+            ..
         } = self;
         let mut bus = SnesBus {
             wram,
@@ -130,12 +157,33 @@ impl Snes {
             ppu,
             dma,
             cpu_regs,
+            apu_mailbox: apu_mailbox_to_cpu,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
             mclk_total: total_mclk,
         };
         cpu.step(&mut bus);
+
+        // Compat stub: synthesise a VBlank every FAKE_VBLANK_INTERVAL
+        // instructions. Real timing comes from the PPU's scanline
+        // counter once the renderer drives the frame clock — for now
+        // this lets games' VBlank-wait loops eventually proceed.
+        self.fake_vblank_counter = self.fake_vblank_counter.wrapping_add(1);
+        if self.fake_vblank_counter >= FAKE_VBLANK_INTERVAL {
+            self.fake_vblank_counter = 0;
+            self.fake_frame_count = self.fake_frame_count.wrapping_add(1);
+            // Set the VBlank-pending flag visible at $4210 and HVBJOY.
+            self.cpu_regs.nmi_flag = true;
+            self.cpu_regs.hvbjoy |= 0x80;
+            // If the game has enabled NMI, raise it now.
+            if self.cpu_regs.nmitimen & 0x80 != 0 {
+                self.cpu.trigger_nmi();
+            }
+        } else {
+            // Outside vblank — clear the HVBJOY vblank bit.
+            self.cpu_regs.hvbjoy &= !0x80;
+        }
         self.total_mclk - before
     }
 }
@@ -153,6 +201,7 @@ struct SnesBus<'a> {
     ppu: &'a mut Ppu,
     dma: &'a mut Dma,
     cpu_regs: &'a mut CpuRegs,
+    apu_mailbox: &'a mut [u8; 4],
     fast_rom: bool,
     nmi: &'a mut bool,
     irq: &'a mut bool,
@@ -230,6 +279,18 @@ impl<'a> SnesBus<'a> {
             None
         }
     }
+
+    /// Returns `Some(port_idx)` (0-3) if `addr` is an APU mailbox port
+    /// at `$2140-$2143` (or its `$80-$BF` mirror).
+    fn apu_port(addr: Addr24) -> Option<usize> {
+        let bank = bank_of(addr);
+        let offset = offset_of(addr);
+        if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && matches!(offset, 0x2140..=0x2143) {
+            Some(usize::from(offset - 0x2140))
+        } else {
+            None
+        }
+    }
 }
 
 /// DMA-side view of the system: holds the minimum needed for a sync
@@ -289,6 +350,13 @@ impl<'a> Bus for SnesBus<'a> {
         if let Some(off) = Self::ppu_offset(addr) {
             return self.ppu.read(off);
         }
+        if let Some(port) = Self::apu_port(addr) {
+            // Compat stub: read the "to-CPU" mailbox byte. Real APU
+            // arrives in P2.SPC.* — until then this returns the
+            // canonical IPL handshake values until the game writes
+            // them itself.
+            return self.apu_mailbox[port];
+        }
         if let Some(offset) = Self::dma_offset(addr) {
             return self.dma.read_register(offset).unwrap_or(0xFF);
         }
@@ -320,6 +388,13 @@ impl<'a> Bus for SnesBus<'a> {
         }
         if let Some(off) = Self::ppu_offset(addr) {
             self.ppu.write(off, value);
+            return;
+        }
+        if let Some(port) = Self::apu_port(addr) {
+            // Compat stub: echo what the CPU writes back into the
+            // matching read mailbox port. The canonical SPC handshake
+            // (write $CC → wait for $CC) thus succeeds immediately.
+            self.apu_mailbox[port] = value;
             return;
         }
         if let Some(offset) = Self::dma_offset(addr) {
@@ -460,6 +535,7 @@ mod tests {
             ppu,
             dma,
             cpu_regs,
+            apu_mailbox_to_cpu,
             wram,
             mapper,
             fast_rom,
@@ -474,6 +550,7 @@ mod tests {
             ppu,
             dma,
             cpu_regs,
+            apu_mailbox: apu_mailbox_to_cpu,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
