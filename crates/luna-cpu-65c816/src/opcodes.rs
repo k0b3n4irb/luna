@@ -342,6 +342,23 @@ impl Cpu {
             0x1C => self.trb_abs(bus),
 
             // -----------------------------------------------------------
+            // Inter-register transfers
+            // -----------------------------------------------------------
+            0xAA => self.tax(),
+            0xA8 => self.tay(),
+            0x8A => self.txa(),
+            0x98 => self.tya(),
+            0x9B => self.txy(),
+            0xBB => self.tyx(),
+            0xBA => self.tsx(),
+            0x9A => self.txs(),
+            0x5B => self.tcd(),
+            0x7B => self.tdc(),
+            0x1B => self.tcs(),
+            0x3B => self.tsc(),
+            0xEB => self.xba(),
+
+            // -----------------------------------------------------------
             // Misc
             // -----------------------------------------------------------
             0xEA => { /* NOP */ }
@@ -1879,6 +1896,148 @@ impl Cpu {
         let a = absolute(self, bus);
         self.modify_memory_with(bus, a, Self::trb_compute);
     }
+
+    // ===================================================================
+    // Inter-register transfers
+    //
+    // Width rules summary:
+    // - TAX / TAY: width = X flag (the destination width). Source A is
+    //   read at the SAME width — i.e. the low byte of A if X=1, else
+    //   the full 16-bit A.
+    // - TXA / TYA: width = M flag (the destination width). Source X / Y
+    //   is read at M-width.
+    // - TXY / TYX: width = X flag (both are index registers).
+    // - TSX: width = X flag.
+    // - TXS: in EMULATION mode, only X.low → SP.low, SP.high forced to
+    //   $01. In native mode, full 16-bit transfer.
+    // - TCD / TDC / TCS / TSC: **always 16-bit**, regardless of M.
+    //   TCD / TCS load DP / SP from the full 16-bit accumulator (B:A).
+    //   TDC / TSC load A (full 16-bit) from DP / SP.
+    // - XBA: swap A.low ↔ A.high; sets N/Z from the new low byte.
+    // ===================================================================
+
+    fn tax(&mut self) {
+        if self.p.idx8() {
+            let v = self.a8();
+            self.set_x_low(v);
+            self.set_nz8(v);
+        } else {
+            self.x = self.a;
+            self.set_nz16(self.x);
+        }
+    }
+
+    fn tay(&mut self) {
+        if self.p.idx8() {
+            let v = self.a8();
+            self.set_y_low(v);
+            self.set_nz8(v);
+        } else {
+            self.y = self.a;
+            self.set_nz16(self.y);
+        }
+    }
+
+    fn txa(&mut self) {
+        if self.p.acc8() {
+            let v = self.x8();
+            self.set_a_low(v);
+            self.set_nz8(v);
+        } else {
+            self.a = self.x;
+            self.set_nz16(self.a);
+        }
+    }
+
+    fn tya(&mut self) {
+        if self.p.acc8() {
+            let v = self.y8();
+            self.set_a_low(v);
+            self.set_nz8(v);
+        } else {
+            self.a = self.y;
+            self.set_nz16(self.a);
+        }
+    }
+
+    fn txy(&mut self) {
+        if self.p.idx8() {
+            let v = self.x8();
+            self.set_y_low(v);
+            self.set_nz8(v);
+        } else {
+            self.y = self.x;
+            self.set_nz16(self.y);
+        }
+    }
+
+    fn tyx(&mut self) {
+        if self.p.idx8() {
+            let v = self.y8();
+            self.set_x_low(v);
+            self.set_nz8(v);
+        } else {
+            self.x = self.y;
+            self.set_nz16(self.x);
+        }
+    }
+
+    fn tsx(&mut self) {
+        if self.p.idx8() {
+            let v = self.sp as u8;
+            self.set_x_low(v);
+            self.set_nz8(v);
+        } else {
+            self.x = self.sp;
+            self.set_nz16(self.x);
+        }
+    }
+
+    fn txs(&mut self) {
+        // Emulation mode pins SP.high to 0x01.
+        self.sp = if self.e {
+            0x0100 | u16::from(self.x as u8)
+        } else {
+            self.x
+        };
+        // TXS does NOT update flags.
+    }
+
+    fn tcd(&mut self) {
+        // Always 16-bit: DP ← full A (regardless of M flag).
+        self.dp = self.a;
+        self.set_nz16(self.dp);
+    }
+
+    fn tdc(&mut self) {
+        // Always 16-bit: A ← DP.
+        self.a = self.dp;
+        self.set_nz16(self.a);
+    }
+
+    fn tcs(&mut self) {
+        // Always 16-bit, except emulation pins SP.high to 0x01.
+        self.sp = if self.e {
+            0x0100 | (self.a & 0x00FF)
+        } else {
+            self.a
+        };
+        // TCS does NOT update flags.
+    }
+
+    fn tsc(&mut self) {
+        // Always 16-bit: A ← SP.
+        self.a = self.sp;
+        self.set_nz16(self.a);
+    }
+
+    fn xba(&mut self) {
+        // Swap the two bytes of the full 16-bit A. Flags reflect the
+        // NEW low byte (the previous high byte). M flag does not gate
+        // the swap itself, but the flags use the 8-bit-result formula.
+        self.a = self.a.rotate_left(8);
+        self.set_nz8(self.a as u8);
+    }
 }
 
 #[cfg(test)]
@@ -2552,6 +2711,78 @@ mod tests {
         cpu.step(&mut bus);
         assert!(cpu.p.contains(bit::Z));
         assert_eq!(bus.peek(0x00_2000), 0x3F);
+    }
+
+    // -------------------------------------------------------------------
+    // Inter-register transfers
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn tax_copies_a_low_to_x_in_emulation() {
+        // LDA #$42, TAX → X.low=$42
+        let (mut cpu, mut bus) = run(&[0xA9, 0x42, 0xAA]);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.x8(), 0x42);
+    }
+
+    #[test]
+    fn txa_copies_x_into_a_at_m_width() {
+        // LDX #$10, TXA → A.low=$10
+        let (mut cpu, mut bus) = run(&[0xA2, 0x10, 0x8A]);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.a8(), 0x10);
+    }
+
+    #[test]
+    fn txs_in_emulation_pins_sp_high_to_01() {
+        // LDX #$AB, TXS → SP=$01AB.
+        let (mut cpu, mut bus) = run(&[0xA2, 0xAB, 0x9A]);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.sp, 0x01AB, "emulation forces SP high to 0x01");
+    }
+
+    #[test]
+    fn txs_in_native_uses_full_x() {
+        // CLC, XCE, REP #$10, LDX #$ABCD, TXS → SP=$ABCD
+        let prog = &[0x18, 0xFB, 0xC2, 0x10, 0xA2, 0xCD, 0xAB, 0x9A];
+        let (mut cpu, mut bus) = run(prog);
+        for _ in 0..4 {
+            cpu.step(&mut bus);
+        } // through LDX
+        cpu.step(&mut bus); // TXS
+        assert_eq!(cpu.sp, 0xABCD);
+    }
+
+    #[test]
+    fn tcd_copies_full_a_to_dp_regardless_of_m() {
+        // Emulation mode (M=1) but TCD is always 16-bit.
+        let (mut cpu, mut bus) = run(&[0x5B]);
+        cpu.a = 0xABCD;
+        cpu.step(&mut bus);
+        assert_eq!(cpu.dp, 0xABCD);
+        assert!(cpu.p.contains(bit::N));
+    }
+
+    #[test]
+    fn tdc_copies_dp_to_full_a() {
+        let (mut cpu, mut bus) = run(&[0x7B]);
+        cpu.dp = 0x1234;
+        cpu.step(&mut bus);
+        assert_eq!(cpu.a, 0x1234);
+        assert!(!cpu.p.contains(bit::N));
+    }
+
+    #[test]
+    fn xba_swaps_a_bytes_and_sets_flags_from_new_low() {
+        // A=$ABCD → XBA → A=$CDAB, N reflects $AB (bit 7 set)
+        let (mut cpu, mut bus) = run(&[0xEB]);
+        cpu.a = 0xABCD;
+        cpu.step(&mut bus);
+        assert_eq!(cpu.a, 0xCDAB);
+        assert!(cpu.p.contains(bit::N));
     }
 
     #[test]
