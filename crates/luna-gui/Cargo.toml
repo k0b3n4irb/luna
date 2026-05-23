@@ -1,6 +1,6 @@
 [package]
 name = "luna-gui"
-description = "Luna GUI — egui/wgpu front-end serving both standalone (human plays) and spectator (AI plays, human watches) modes"
+description = "Luna SNES emulator — desktop GUI (eframe / egui / wgpu)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,19 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 readme.workspace = true
+
+[[bin]]
+name = "luna-gui"
+path = "src/main.rs"
+
+[dependencies]
+luna-cartridge = { workspace = true }
+luna-core      = { workspace = true }
+luna-ppu       = { workspace = true }
+
+eframe = { workspace = true }
+egui   = { workspace = true }
+rfd    = { workspace = true }
 
 [lints]
 workspace = true
