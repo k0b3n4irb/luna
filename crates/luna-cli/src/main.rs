@@ -110,21 +110,41 @@ fn print_header(cart: &Cartridge) {
     let h = &cart.header;
     println!("=== ROM ===");
     println!("Title:       {:?}", h.title);
-    println!("Mapper:      {:?}{}", h.mapper_kind, if h.fast_rom { " (FastROM)" } else { "" });
-    println!("ROM size:    {} KB ({} bytes on disk)", h.rom_size_kb, cart.rom.len());
+    println!(
+        "Mapper:      {:?}{}",
+        h.mapper_kind,
+        if h.fast_rom { " (FastROM)" } else { "" }
+    );
+    println!(
+        "ROM size:    {} KB ({} bytes on disk)",
+        h.rom_size_kb,
+        cart.rom.len()
+    );
     println!("SRAM size:   {} KB", h.sram_size_kb);
     println!("Region:      {:?}", h.region);
     println!("Version:     v{}", h.version);
-    println!("Checksum:    ${:04X} / complement ${:04X} (valid: {})",
-        h.checksum, h.checksum_complement, h.checksum_valid());
+    println!(
+        "Checksum:    ${:04X} / complement ${:04X} (valid: {})",
+        h.checksum,
+        h.checksum_complement,
+        h.checksum_valid()
+    );
 }
 
 fn print_cpu_state(snes: &Snes) {
     let cpu = &snes.cpu;
-    println!("A=${:04X}  X=${:04X}  Y=${:04X}  SP=${:04X}  DP=${:04X}",
-        cpu.a, cpu.x, cpu.y, cpu.sp, cpu.dp);
-    println!("PC=${:02X}:{:04X}  DB=${:02X}  P=${:02X}  E={}",
-        cpu.pb, cpu.pc, cpu.db, cpu.p.bits(), u8::from(cpu.e));
+    println!(
+        "A=${:04X}  X=${:04X}  Y=${:04X}  SP=${:04X}  DP=${:04X}",
+        cpu.a, cpu.x, cpu.y, cpu.sp, cpu.dp
+    );
+    println!(
+        "PC=${:02X}:{:04X}  DB=${:02X}  P=${:02X}  E={}",
+        cpu.pb,
+        cpu.pc,
+        cpu.db,
+        cpu.p.bits(),
+        u8::from(cpu.e)
+    );
     println!("flags: {}", flag_string(cpu.p.bits(), cpu.e));
 }
 

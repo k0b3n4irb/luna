@@ -167,13 +167,11 @@ impl<'a> Bus for SnesBus<'a> {
 
         if let Some(o) = Self::wram_offset(addr) {
             self.wram[o] = value;
-            return;
+        } else if self.mapper.write(addr, value) {
+            // Mapper claims SRAM writes; ROM writes are silently dropped.
+        } else {
+            // MMIO writes are dropped in P0.6.
         }
-        // Mapper claims SRAM writes; drop ROM writes silently.
-        if self.mapper.write(addr, value) {
-            return;
-        }
-        // MMIO writes are dropped in P0.6.
     }
 
     fn io_cycle(&mut self, mcycles: MCycles) {
