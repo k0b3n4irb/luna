@@ -42,6 +42,12 @@ enum Command {
         /// only at this point) and write it to the given path.
         #[arg(long)]
         screenshot: Option<PathBuf>,
+        /// Bypass INIDISP forced-blank when rendering. Lets you see
+        /// whatever the game has uploaded to VRAM/CGRAM even if its
+        /// init left the screen blanked (typical when waiting on the
+        /// SPC700 we don't fully emulate yet).
+        #[arg(long)]
+        force_display: bool,
     },
     /// MCP server stub (real implementation lands in Phase 3).
     Mcp,
@@ -54,7 +60,8 @@ fn main() -> ExitCode {
             rom,
             steps,
             screenshot,
-        } => run(&rom, steps, screenshot.as_deref()),
+            force_display,
+        } => run(&rom, steps, screenshot.as_deref(), force_display),
         Command::Mcp => {
             eprintln!("MCP server not implemented yet — see ARCHITECTURE.md §14 (Phase 3).");
             ExitCode::from(2)
@@ -62,7 +69,12 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(rom_path: &std::path::Path, steps: u64, screenshot: Option<&std::path::Path>) -> ExitCode {
+fn run(
+    rom_path: &std::path::Path,
+    steps: u64,
+    screenshot: Option<&std::path::Path>,
+    force_display: bool,
+) -> ExitCode {
     let cart = match Cartridge::load(rom_path) {
         Ok(c) => c,
         Err(e) => {
@@ -116,7 +128,7 @@ fn run(rom_path: &std::path::Path, steps: u64, screenshot: Option<&std::path::Pa
 
     // Screenshot dump: render whatever the PPU has accumulated.
     if let Some(out_path) = screenshot {
-        match save_screenshot(&snes, out_path) {
+        match save_screenshot(&snes, out_path, force_display) {
             Ok(()) => println!("\nScreenshot written to {}", out_path.display()),
             Err(e) => {
                 eprintln!("\nerror: could not write screenshot: {e}");
@@ -203,6 +215,25 @@ fn print_diag_state(snes: &mut Snes) {
         print!(" {b:02X}");
     }
     println!();
+
+    // VRAM / CGRAM occupancy digest: how many non-zero bytes in each.
+    // Lets us tell "the game has uploaded graphics" from "VRAM is
+    // empty" — important for diagnosing why the screen stays black.
+    let mut vram_non_zero = 0usize;
+    for off in 0..0x10000u32 {
+        if snes.ppu.vram.peek(off as u16) != 0 {
+            vram_non_zero += 1;
+        }
+    }
+    let mut cgram_non_zero = 0usize;
+    for idx in 0..256u16 {
+        if snes.ppu.cgram.color(idx as u8) != 0 {
+            cgram_non_zero += 1;
+        }
+    }
+    println!(
+        "VRAM:  {vram_non_zero}/65536 non-zero bytes  |  CGRAM: {cgram_non_zero}/256 non-zero colours"
+    );
 }
 
 fn flag_string(p: u8, e: bool) -> String {
@@ -221,8 +252,15 @@ fn flag_string(p: u8, e: bool) -> String {
     )
 }
 
-fn save_screenshot(snes: &Snes, path: &std::path::Path) -> Result<(), image::ImageError> {
-    let frame = luna_ppu::render_frame_bg1(&snes.ppu);
+fn save_screenshot(
+    snes: &Snes,
+    path: &std::path::Path,
+    force_display: bool,
+) -> Result<(), image::ImageError> {
+    let opts = luna_ppu::RenderOptions {
+        bypass_forced_blank: force_display,
+    };
+    let frame = luna_ppu::render_frame_bg1_with(&snes.ppu, opts);
     let mut buf = Vec::with_capacity(luna_ppu::FRAME_W * luna_ppu::FRAME_H * 3);
     for px in frame {
         buf.extend_from_slice(&px);
