@@ -9,5 +9,10 @@ authors.workspace = true
 repository.workspace = true
 readme.workspace = true
 
+[features]
+default = []
+# Enables a flat 64 KB RamBus for downstream tests.
+test-utils = []
+
 [lints]
 workspace = true
