@@ -10,6 +10,8 @@
 
 mod memory;
 mod ppu;
+mod tile;
 
 pub use memory::{Cgram, Oam, Vram};
 pub use ppu::{Ppu, register};
+pub use tile::{apply_brightness, bgr555_to_rgb888, decode_2bpp_row, decode_4bpp_row, scale_5_to_8};
