@@ -145,6 +145,26 @@ impl Cpu {
             0x3A => self.dec_a(),
 
             // -----------------------------------------------------------
+            // Increment / decrement memory (read-modify-write, M-width)
+            // -----------------------------------------------------------
+            0xE6 => self.inc_dp(bus),
+            0xEE => self.inc_abs(bus),
+            0xF6 => self.inc_dp_x(bus),
+            0xFE => self.inc_abs_x(bus),
+            0xC6 => self.dec_dp(bus),
+            0xCE => self.dec_abs(bus),
+            0xD6 => self.dec_dp_x(bus),
+            0xDE => self.dec_abs_x(bus),
+
+            // -----------------------------------------------------------
+            // Increment / decrement index registers (X-width)
+            // -----------------------------------------------------------
+            0xE8 => self.inx(),
+            0xC8 => self.iny(),
+            0xCA => self.dex(),
+            0x88 => self.dey(),
+
+            // -----------------------------------------------------------
             // Arithmetic — ADC (Add with Carry, binary mode only for now)
             // -----------------------------------------------------------
             0x69 => self.adc_imm(bus),
@@ -678,6 +698,103 @@ impl Cpu {
         } else {
             self.a = self.a.wrapping_sub(1);
             self.set_nz16(self.a);
+        }
+    }
+
+    // ===================================================================
+    // INC / DEC memory (read-modify-write at M-width)
+    // ===================================================================
+
+    fn modify_memory<B: Bus>(&mut self, bus: &mut B, addr: Addr24, op: fn(u16) -> u16) {
+        if self.p.acc8() {
+            let v = bus.read(addr);
+            let new = op(u16::from(v)) as u8;
+            bus.write(addr, new);
+            self.set_nz8(new);
+        } else {
+            let v = read_word(bus, addr);
+            let new = op(v);
+            bus.write(addr, new as u8);
+            bus.write(addr.wrapping_add(1), (new >> 8) as u8);
+            self.set_nz16(new);
+        }
+    }
+
+    fn inc_dp<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page(self, bus);
+        self.modify_memory(bus, a, |v| v.wrapping_add(1));
+    }
+    fn inc_abs<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute(self, bus);
+        self.modify_memory(bus, a, |v| v.wrapping_add(1));
+    }
+    fn inc_dp_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indexed_x(self, bus);
+        self.modify_memory(bus, a, |v| v.wrapping_add(1));
+    }
+    fn inc_abs_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_indexed_x(self, bus);
+        self.modify_memory(bus, a, |v| v.wrapping_add(1));
+    }
+    fn dec_dp<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page(self, bus);
+        self.modify_memory(bus, a, |v| v.wrapping_sub(1));
+    }
+    fn dec_abs<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute(self, bus);
+        self.modify_memory(bus, a, |v| v.wrapping_sub(1));
+    }
+    fn dec_dp_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indexed_x(self, bus);
+        self.modify_memory(bus, a, |v| v.wrapping_sub(1));
+    }
+    fn dec_abs_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_indexed_x(self, bus);
+        self.modify_memory(bus, a, |v| v.wrapping_sub(1));
+    }
+
+    // ===================================================================
+    // INX / INY / DEX / DEY  (X-width)
+    // ===================================================================
+
+    fn inx(&mut self) {
+        if self.p.idx8() {
+            let v = self.x8().wrapping_add(1);
+            self.set_x_low(v);
+            self.set_nz8(v);
+        } else {
+            self.x = self.x.wrapping_add(1);
+            self.set_nz16(self.x);
+        }
+    }
+    fn iny(&mut self) {
+        if self.p.idx8() {
+            let v = self.y8().wrapping_add(1);
+            self.set_y_low(v);
+            self.set_nz8(v);
+        } else {
+            self.y = self.y.wrapping_add(1);
+            self.set_nz16(self.y);
+        }
+    }
+    fn dex(&mut self) {
+        if self.p.idx8() {
+            let v = self.x8().wrapping_sub(1);
+            self.set_x_low(v);
+            self.set_nz8(v);
+        } else {
+            self.x = self.x.wrapping_sub(1);
+            self.set_nz16(self.x);
+        }
+    }
+    fn dey(&mut self) {
+        if self.p.idx8() {
+            let v = self.y8().wrapping_sub(1);
+            self.set_y_low(v);
+            self.set_nz8(v);
+        } else {
+            self.y = self.y.wrapping_sub(1);
+            self.set_nz16(self.y);
         }
     }
 
@@ -1538,6 +1655,63 @@ mod tests {
         cpu.step(&mut bus);
         assert_eq!(cpu.a8(), 0xFF);
         assert!(cpu.p.contains(bit::N));
+    }
+
+    #[test]
+    fn inc_abs_modifies_memory_and_sets_flags() {
+        // INC $2000 — memory contains $7F → becomes $80, N=1
+        let (mut cpu, mut bus) = run(&[0xEE, 0x00, 0x20]);
+        cpu.db = 0;
+        bus.poke(0x00_2000, 0x7F);
+        cpu.step(&mut bus);
+        assert_eq!(bus.peek(0x00_2000), 0x80);
+        assert!(cpu.p.contains(bit::N));
+    }
+
+    #[test]
+    fn dec_dp_wraps_zero_to_ff() {
+        // DEC $10 (DP=$0100, memory $0110 = $00)
+        let (mut cpu, mut bus) = run(&[0xC6, 0x10]);
+        cpu.dp = 0x0100;
+        bus.poke(0x00_0110, 0x00);
+        cpu.step(&mut bus);
+        assert_eq!(bus.peek(0x00_0110), 0xFF);
+        assert!(cpu.p.contains(bit::N));
+        assert!(!cpu.p.contains(bit::Z));
+    }
+
+    #[test]
+    fn inc_16bit_writes_two_bytes() {
+        // CLC, XCE, REP #$20, INC $2000 (memory $00FF → $0100)
+        let prog = &[0x18, 0xFB, 0xC2, 0x20, 0xEE, 0x00, 0x20];
+        let (mut cpu, mut bus) = run(prog);
+        cpu.db = 0;
+        bus.poke_slice(0x00_2000, &[0xFF, 0x00]);
+        cpu.step(&mut bus); // CLC
+        cpu.step(&mut bus); // XCE
+        cpu.step(&mut bus); // REP #$20
+        cpu.step(&mut bus); // INC $2000
+        assert_eq!(bus.peek(0x00_2000), 0x00);
+        assert_eq!(bus.peek(0x00_2001), 0x01);
+    }
+
+    #[test]
+    fn inx_increments_x_and_sets_zero_on_wrap() {
+        // LDX #$FF, INX → X=$00, Z=1
+        let (mut cpu, mut bus) = run(&[0xA2, 0xFF, 0xE8]);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.x8(), 0x00);
+        assert!(cpu.p.contains(bit::Z));
+    }
+
+    #[test]
+    fn dey_decrements_y() {
+        let (mut cpu, mut bus) = run(&[0xA0, 0x05, 0x88]);
+        cpu.step(&mut bus); // LDY #$05
+        cpu.step(&mut bus); // DEY
+        assert_eq!(cpu.y8(), 0x04);
+        assert!(!cpu.p.contains(bit::Z));
     }
 
     // -------------------------------------------------------------------
