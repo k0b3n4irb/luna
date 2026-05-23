@@ -35,6 +35,11 @@ pub struct Cpu {
     pub stopped: bool,
     /// Set by `WAI`; CPU pauses until an interrupt.
     pub waiting: bool,
+    /// Edge-latched NMI line. Set externally via [`Cpu::trigger_nmi`]
+    /// (typically by the system at VBlank when NMITIMEN.7 is on);
+    /// cleared automatically when the CPU services the NMI sequence at
+    /// the next instruction boundary.
+    pub pending_nmi: bool,
 }
 
 impl Default for Cpu {
@@ -61,7 +66,16 @@ impl Cpu {
             e: true, // 65C816 boots in emulation mode.
             stopped: false,
             waiting: false,
+            pending_nmi: false,
         }
+    }
+
+    /// Latch an NMI for servicing at the next instruction boundary.
+    ///
+    /// Idempotent: calling this when `pending_nmi` is already `true`
+    /// has no effect (NMI is edge-triggered on the 65C816).
+    pub fn trigger_nmi(&mut self) {
+        self.pending_nmi = true;
     }
 
     /// Perform a reset sequence: read the reset vector at `$00:FFFC` and
