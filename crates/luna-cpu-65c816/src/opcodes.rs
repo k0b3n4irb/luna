@@ -6,10 +6,15 @@
 //! clear panic message so the dispatch table is complete and Tom Harte
 //! tests can be wired up in P0.4b without further plumbing changes.
 
-use crate::addressing::{absolute, absolute_long, direct_page, read_word};
+use crate::addressing::{
+    absolute, absolute_indexed_x, absolute_indexed_y, absolute_long, absolute_long_indexed_x,
+    direct_page, direct_page_indexed_indirect, direct_page_indexed_x, direct_page_indexed_y,
+    direct_page_indirect, direct_page_indirect_long, direct_page_indirect_long_y,
+    direct_page_indirect_y, read_word, stack_relative, stack_relative_indirect_y,
+};
 use crate::cpu::Cpu;
 use crate::flags::bit;
-use luna_bus::Bus;
+use luna_bus::{Addr24, Bus};
 
 impl Cpu {
     /// Execute one instruction: fetch opcode at `PB:PC` and dispatch.
@@ -46,12 +51,37 @@ impl Cpu {
             0xF8 => self.p.insert(bit::D), // SED
 
             // -----------------------------------------------------------
-            // Loads (LDA)
+            // Loads (LDA — accumulator-width)
             // -----------------------------------------------------------
             0xA9 => self.lda_imm(bus),
             0xA5 => self.lda_dp(bus),
+            0xA7 => self.lda_dp_indirect_long(bus),
             0xAD => self.lda_abs(bus),
             0xAF => self.lda_long(bus),
+            0xB5 => self.lda_dp_x(bus),
+            0xB2 => self.lda_dp_indirect(bus),
+            0xB7 => self.lda_dp_indirect_long_y(bus),
+            0xBD => self.lda_abs_x(bus),
+            0xBF => self.lda_long_x(bus),
+            0xB9 => self.lda_abs_y(bus),
+            0xB1 => self.lda_dp_indirect_y(bus),
+            0xA3 => self.lda_sr_s(bus),
+            0xB3 => self.lda_sr_s_y(bus),
+            0xA1 => self.lda_dp_x_indirect(bus),
+
+            // -----------------------------------------------------------
+            // Loads (LDX, LDY — index-register width)
+            // -----------------------------------------------------------
+            0xA2 => self.ldx_imm(bus),
+            0xA6 => self.ldx_dp(bus),
+            0xAE => self.ldx_abs(bus),
+            0xB6 => self.ldx_dp_y(bus),
+            0xBE => self.ldx_abs_y(bus),
+            0xA0 => self.ldy_imm(bus),
+            0xA4 => self.ldy_dp(bus),
+            0xAC => self.ldy_abs(bus),
+            0xB4 => self.ldy_dp_x(bus),
+            0xBC => self.ldy_abs_x(bus),
 
             // -----------------------------------------------------------
             // Stores (STA)
@@ -188,6 +218,153 @@ impl Cpu {
     fn lda_long<B: Bus>(&mut self, bus: &mut B) {
         let addr = absolute_long(self, bus);
         self.lda_from_addr(bus, addr);
+    }
+
+    fn lda_dp_x<B: Bus>(&mut self, bus: &mut B) {
+        let addr = direct_page_indexed_x(self, bus);
+        self.lda_from_addr(bus, addr);
+    }
+
+    fn lda_dp_indirect<B: Bus>(&mut self, bus: &mut B) {
+        let addr = direct_page_indirect(self, bus);
+        self.lda_from_addr(bus, addr);
+    }
+
+    fn lda_dp_indirect_long<B: Bus>(&mut self, bus: &mut B) {
+        let addr = direct_page_indirect_long(self, bus);
+        self.lda_from_addr(bus, addr);
+    }
+
+    fn lda_dp_indirect_y<B: Bus>(&mut self, bus: &mut B) {
+        let addr = direct_page_indirect_y(self, bus);
+        self.lda_from_addr(bus, addr);
+    }
+
+    fn lda_dp_indirect_long_y<B: Bus>(&mut self, bus: &mut B) {
+        let addr = direct_page_indirect_long_y(self, bus);
+        self.lda_from_addr(bus, addr);
+    }
+
+    fn lda_dp_x_indirect<B: Bus>(&mut self, bus: &mut B) {
+        let addr = direct_page_indexed_indirect(self, bus);
+        self.lda_from_addr(bus, addr);
+    }
+
+    fn lda_abs_x<B: Bus>(&mut self, bus: &mut B) {
+        let addr = absolute_indexed_x(self, bus);
+        self.lda_from_addr(bus, addr);
+    }
+
+    fn lda_abs_y<B: Bus>(&mut self, bus: &mut B) {
+        let addr = absolute_indexed_y(self, bus);
+        self.lda_from_addr(bus, addr);
+    }
+
+    fn lda_long_x<B: Bus>(&mut self, bus: &mut B) {
+        let addr = absolute_long_indexed_x(self, bus);
+        self.lda_from_addr(bus, addr);
+    }
+
+    fn lda_sr_s<B: Bus>(&mut self, bus: &mut B) {
+        let addr = stack_relative(self, bus);
+        self.lda_from_addr(bus, addr);
+    }
+
+    fn lda_sr_s_y<B: Bus>(&mut self, bus: &mut B) {
+        let addr = stack_relative_indirect_y(self, bus);
+        self.lda_from_addr(bus, addr);
+    }
+
+    // ===================================================================
+    // Loads (LDX, LDY — width gated by the X flag, NOT M)
+    // ===================================================================
+
+    fn ldx_imm<B: Bus>(&mut self, bus: &mut B) {
+        if self.p.idx8() {
+            let v = self.fetch_u8(bus);
+            self.set_x_low(v);
+            self.set_nz8(v);
+        } else {
+            let v = self.fetch_u16(bus);
+            self.x = v;
+            self.set_nz16(v);
+        }
+    }
+
+    fn ldx_from_addr<B: Bus>(&mut self, bus: &mut B, addr: Addr24) {
+        if self.p.idx8() {
+            let v = bus.read(addr);
+            self.set_x_low(v);
+            self.set_nz8(v);
+        } else {
+            let v = read_word(bus, addr);
+            self.x = v;
+            self.set_nz16(v);
+        }
+    }
+
+    fn ldx_dp<B: Bus>(&mut self, bus: &mut B) {
+        let addr = direct_page(self, bus);
+        self.ldx_from_addr(bus, addr);
+    }
+
+    fn ldx_abs<B: Bus>(&mut self, bus: &mut B) {
+        let addr = absolute(self, bus);
+        self.ldx_from_addr(bus, addr);
+    }
+
+    fn ldx_dp_y<B: Bus>(&mut self, bus: &mut B) {
+        let addr = direct_page_indexed_y(self, bus);
+        self.ldx_from_addr(bus, addr);
+    }
+
+    fn ldx_abs_y<B: Bus>(&mut self, bus: &mut B) {
+        let addr = absolute_indexed_y(self, bus);
+        self.ldx_from_addr(bus, addr);
+    }
+
+    fn ldy_imm<B: Bus>(&mut self, bus: &mut B) {
+        if self.p.idx8() {
+            let v = self.fetch_u8(bus);
+            self.set_y_low(v);
+            self.set_nz8(v);
+        } else {
+            let v = self.fetch_u16(bus);
+            self.y = v;
+            self.set_nz16(v);
+        }
+    }
+
+    fn ldy_from_addr<B: Bus>(&mut self, bus: &mut B, addr: Addr24) {
+        if self.p.idx8() {
+            let v = bus.read(addr);
+            self.set_y_low(v);
+            self.set_nz8(v);
+        } else {
+            let v = read_word(bus, addr);
+            self.y = v;
+            self.set_nz16(v);
+        }
+    }
+
+    fn ldy_dp<B: Bus>(&mut self, bus: &mut B) {
+        let addr = direct_page(self, bus);
+        self.ldy_from_addr(bus, addr);
+    }
+
+    fn ldy_abs<B: Bus>(&mut self, bus: &mut B) {
+        let addr = absolute(self, bus);
+        self.ldy_from_addr(bus, addr);
+    }
+
+    fn ldy_dp_x<B: Bus>(&mut self, bus: &mut B) {
+        let addr = direct_page_indexed_x(self, bus);
+        self.ldy_from_addr(bus, addr);
+    }
+
+    fn ldy_abs_x<B: Bus>(&mut self, bus: &mut B) {
+        let addr = absolute_indexed_x(self, bus);
+        self.ldy_from_addr(bus, addr);
     }
 
     // ===================================================================
@@ -411,6 +588,158 @@ mod tests {
         bus.poke(0x00_0110, 0x99);
         cpu.step(&mut bus);
         assert_eq!(cpu.a8(), 0x99);
+    }
+
+    #[test]
+    fn lda_dp_x() {
+        // LDA $10,X with X=4, DP=0x100 → reads $0114
+        let (mut cpu, mut bus) = run(&[0xB5, 0x10]);
+        cpu.dp = 0x0100;
+        cpu.x = 0x04;
+        bus.poke(0x00_0114, 0x66);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.a8(), 0x66);
+    }
+
+    #[test]
+    fn lda_dp_indirect() {
+        // LDA ($10) with DP=0x100, pointer at 0x110 = $2000, DB=$7E → $7E:2000
+        let (mut cpu, mut bus) = run(&[0xB2, 0x10]);
+        cpu.dp = 0x0100;
+        cpu.db = 0x7E;
+        bus.poke_slice(0x00_0110, &[0x00, 0x20]);
+        bus.poke(0x7E_2000, 0x77);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.a8(), 0x77);
+    }
+
+    #[test]
+    fn lda_dp_indirect_long() {
+        // LDA [$10] reads a 24-bit pointer
+        let (mut cpu, mut bus) = run(&[0xA7, 0x10]);
+        cpu.dp = 0x0100;
+        bus.poke_slice(0x00_0110, &[0x34, 0x12, 0x7E]);
+        bus.poke(0x7E_1234, 0x88);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.a8(), 0x88);
+    }
+
+    #[test]
+    fn lda_dp_indirect_y() {
+        // LDA ($10),Y with Y=5
+        let (mut cpu, mut bus) = run(&[0xB1, 0x10]);
+        cpu.dp = 0x0100;
+        cpu.db = 0x7E;
+        cpu.y = 0x05;
+        bus.poke_slice(0x00_0110, &[0x00, 0x20]); // pointer = $2000
+        bus.poke(0x7E_2005, 0xBE);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.a8(), 0xBE);
+    }
+
+    #[test]
+    fn lda_abs_x() {
+        // LDA $1000,X
+        let (mut cpu, mut bus) = run(&[0xBD, 0x00, 0x10]);
+        cpu.db = 0;
+        cpu.x = 0x04;
+        bus.poke(0x00_1004, 0xC0);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.a8(), 0xC0);
+    }
+
+    #[test]
+    fn lda_abs_y() {
+        let (mut cpu, mut bus) = run(&[0xB9, 0x00, 0x10]); // LDA $1000,Y
+        cpu.db = 0;
+        cpu.y = 0x10;
+        bus.poke(0x00_1010, 0xD1);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.a8(), 0xD1);
+    }
+
+    #[test]
+    fn lda_long_x() {
+        // LDA $7E1000,X with X=4
+        let (mut cpu, mut bus) = run(&[0xBF, 0x00, 0x10, 0x7E]);
+        cpu.x = 0x04;
+        bus.poke(0x7E_1004, 0xE2);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.a8(), 0xE2);
+    }
+
+    #[test]
+    fn lda_sr_s() {
+        // LDA $04,S — reads $00:SP+4
+        let (mut cpu, mut bus) = run(&[0xA3, 0x04]);
+        cpu.sp = 0x01F0;
+        bus.poke(0x00_01F4, 0x42);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.a8(), 0x42);
+    }
+
+    #[test]
+    fn ldx_imm_8bit() {
+        let (mut cpu, mut bus) = run(&[0xA2, 0x55]);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.x8(), 0x55);
+    }
+
+    #[test]
+    fn ldx_imm_16bit_with_x_cleared() {
+        // CLC, XCE, REP #$10, LDX #$ABCD
+        let (mut cpu, mut bus) = run(&[0x18, 0xFB, 0xC2, 0x10, 0xA2, 0xCD, 0xAB]);
+        cpu.step(&mut bus); // CLC
+        cpu.step(&mut bus); // XCE → native
+        cpu.step(&mut bus); // REP #$10 → X cleared
+        cpu.step(&mut bus); // LDX #$ABCD (16-bit)
+        assert_eq!(cpu.x, 0xABCD);
+    }
+
+    #[test]
+    fn ldx_abs() {
+        let (mut cpu, mut bus) = run(&[0xAE, 0x00, 0x20]); // LDX $2000
+        cpu.db = 0;
+        bus.poke(0x00_2000, 0x33);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.x8(), 0x33);
+    }
+
+    #[test]
+    fn ldx_dp_y() {
+        let (mut cpu, mut bus) = run(&[0xB6, 0x10]); // LDX $10,Y
+        cpu.dp = 0x0100;
+        cpu.y = 0x04;
+        bus.poke(0x00_0114, 0x77);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.x8(), 0x77);
+    }
+
+    #[test]
+    fn ldy_imm_8bit() {
+        let (mut cpu, mut bus) = run(&[0xA0, 0x99]);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.y8(), 0x99);
+        assert!(cpu.p.contains(bit::N));
+    }
+
+    #[test]
+    fn ldy_abs() {
+        let (mut cpu, mut bus) = run(&[0xAC, 0x00, 0x20]); // LDY $2000
+        cpu.db = 0;
+        bus.poke(0x00_2000, 0x44);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.y8(), 0x44);
+    }
+
+    #[test]
+    fn ldy_dp_x() {
+        let (mut cpu, mut bus) = run(&[0xB4, 0x10]); // LDY $10,X
+        cpu.dp = 0x0100;
+        cpu.x = 0x04;
+        bus.poke(0x00_0114, 0xCC);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.y8(), 0xCC);
     }
 
     // -------------------------------------------------------------------
