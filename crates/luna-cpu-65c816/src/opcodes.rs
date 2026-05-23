@@ -1241,13 +1241,37 @@ impl Cpu {
     // ===================================================================
     // ADC / SBC core
     //
-    // Binary mode (D=0) is implemented here. Decimal-mode arithmetic
-    // (D=1, BCD) is deferred to P0.4b.4.1 — see the TODO in is_implemented
-    // (tom_harte.rs) which excludes ADC/SBC for now.
+    // Both binary (D=0) and BCD (D=1) modes are implemented. The 65C816
+    // BCD adjustment is applied per nibble (4 nibbles in 16-bit mode).
+    // Reference: WDC 65C816 manual + matched against Tom Harte
+    // ProcessorTests.
     // ===================================================================
 
-    /// Add `value` to A with carry; sets N/V/Z/C per width.
+    /// Add `value` to A with carry; sets N/V/Z/C per width. Dispatches
+    /// between binary (D=0) and BCD (D=1) modes.
     fn adc_value(&mut self, value: u16) {
+        if self.p.contains(bit::D) {
+            self.adc_value_bcd(value);
+        } else {
+            self.adc_value_binary(value);
+        }
+    }
+
+    /// Subtract `value` from A with borrow (carry inverted). Dispatches
+    /// between binary (D=0) and BCD (D=1) modes.
+    fn sbc_value(&mut self, value: u16) {
+        if self.p.contains(bit::D) {
+            self.sbc_value_bcd(value);
+        } else if self.p.acc8() {
+            // Binary SBC = ADC of one's complement (carry is "not borrow").
+            self.adc_value_binary(u16::from(!(value as u8)));
+        } else {
+            self.adc_value_binary(!value);
+        }
+    }
+
+    /// Binary ADC: full-width add with carry.
+    fn adc_value_binary(&mut self, value: u16) {
         let c_in = u32::from(self.p.contains(bit::C));
         if self.p.acc8() {
             let a = u32::from(self.a8());
@@ -1255,8 +1279,6 @@ impl Cpu {
             let raw = a + v + c_in;
             let result = raw as u8;
             self.p.set(bit::C, raw > 0xFF);
-            // Two's-complement overflow: signs of operands match but
-            // differ from result sign.
             let overflow = (!(a ^ v) & (a ^ u32::from(result))) & 0x80 != 0;
             self.p.set(bit::V, overflow);
             self.set_a_low(result);
@@ -1274,14 +1296,134 @@ impl Cpu {
         }
     }
 
-    /// Subtract `value` from A with borrow (carry inverted).
-    /// On the 65C816, `SBC v` is equivalent to `ADC ~v` (one's complement),
-    /// with the carry interpreted as "not borrow".
-    fn sbc_value(&mut self, value: u16) {
+    /// BCD ADC: nibble-by-nibble decimal add. Reference WDC 65C816
+    /// manual §5.4 and the corresponding cases in the Tom Harte
+    /// ProcessorTests dataset.
+    fn adc_value_bcd(&mut self, value: u16) {
+        let c_in = u32::from(self.p.contains(bit::C));
         if self.p.acc8() {
-            self.adc_value(u16::from(!(value as u8)));
+            let a = u32::from(self.a8());
+            let b = u32::from(value as u8);
+
+            // Low nibble.
+            let mut lo = (a & 0xF) + (b & 0xF) + c_in;
+            if lo > 9 {
+                lo += 6;
+            }
+            // High nibble; carry from low nibble enters here.
+            let mut hi = ((a >> 4) & 0xF) + ((b >> 4) & 0xF) + (lo >> 4);
+
+            // V flag from the unadjusted-high partial result.
+            let unadj = (hi << 4) | (lo & 0xF);
+            let overflow = (!(a ^ b) & (a ^ unadj)) & 0x80 != 0;
+            self.p.set(bit::V, overflow);
+
+            if hi > 9 {
+                hi += 6;
+            }
+            let result = (((hi & 0xF) << 4) | (lo & 0xF)) as u8;
+            self.p.set(bit::C, hi > 0xF);
+            self.set_a_low(result);
+            self.set_nz8(result);
         } else {
-            self.adc_value(!value);
+            let a = u32::from(self.a);
+            let b = u32::from(value);
+
+            let mut n0 = (a & 0xF) + (b & 0xF) + c_in;
+            if n0 > 9 {
+                n0 += 6;
+            }
+            let mut n1 = ((a >> 4) & 0xF) + ((b >> 4) & 0xF) + (n0 >> 4);
+            if n1 > 9 {
+                n1 += 6;
+            }
+            let mut n2 = ((a >> 8) & 0xF) + ((b >> 8) & 0xF) + (n1 >> 4);
+            if n2 > 9 {
+                n2 += 6;
+            }
+            let mut n3 = ((a >> 12) & 0xF) + ((b >> 12) & 0xF) + (n2 >> 4);
+
+            let unadj = (n3 << 12) | ((n2 & 0xF) << 8) | ((n1 & 0xF) << 4) | (n0 & 0xF);
+            let overflow = (!(a ^ b) & (a ^ unadj)) & 0x8000 != 0;
+            self.p.set(bit::V, overflow);
+
+            if n3 > 9 {
+                n3 += 6;
+            }
+            let result =
+                (((n3 & 0xF) << 12) | ((n2 & 0xF) << 8) | ((n1 & 0xF) << 4) | (n0 & 0xF)) as u16;
+            self.p.set(bit::C, n3 > 0xF);
+            self.a = result;
+            self.set_nz16(result);
+        }
+    }
+
+    /// BCD SBC: nibble-by-nibble decimal subtract. Operates as a binary
+    /// subtract with per-nibble adjustment when a nibble's "tens
+    /// borrow" bit is set.
+    fn sbc_value_bcd(&mut self, value: u16) {
+        let c_in = self.p.contains(bit::C);
+        let borrow = u32::from(!c_in);
+        if self.p.acc8() {
+            let a = u32::from(self.a8());
+            let b = u32::from(value as u8);
+
+            // Standard binary subtract first.
+            let raw = a.wrapping_sub(b).wrapping_sub(borrow);
+
+            // V flag from the raw (binary) intermediate.
+            let overflow = ((a ^ b) & (a ^ raw)) & 0x80 != 0;
+            self.p.set(bit::V, overflow);
+
+            // Per-nibble BCD adjustment: if a nibble borrowed (its
+            // "tens" bit is set), subtract 6 from that position.
+            let mut result = raw;
+            if (a & 0xF).wrapping_sub(b & 0xF).wrapping_sub(borrow) & 0x10 != 0 {
+                result = result.wrapping_sub(6);
+            }
+            if raw & 0x100 != 0 {
+                result = result.wrapping_sub(0x60);
+            }
+
+            self.p.set(bit::C, raw & 0x100 == 0);
+            let result_u8 = result as u8;
+            self.set_a_low(result_u8);
+            self.set_nz8(result_u8);
+        } else {
+            let a = u32::from(self.a);
+            let b = u32::from(value);
+
+            let raw = a.wrapping_sub(b).wrapping_sub(borrow);
+
+            let overflow = ((a ^ b) & (a ^ raw)) & 0x8000 != 0;
+            self.p.set(bit::V, overflow);
+
+            let mut result = raw;
+            // Check tens borrow at each nibble boundary.
+            let n0_borrow = (a & 0xF).wrapping_sub(b & 0xF).wrapping_sub(borrow);
+            if n0_borrow & 0x10 != 0 {
+                result = result.wrapping_sub(6);
+            }
+            let n1_borrow = ((a >> 4) & 0xF)
+                .wrapping_sub((b >> 4) & 0xF)
+                .wrapping_sub(n0_borrow >> 4 & 1);
+            if n1_borrow & 0x10 != 0 {
+                result = result.wrapping_sub(0x60);
+            }
+            let n2_borrow = ((a >> 8) & 0xF)
+                .wrapping_sub((b >> 8) & 0xF)
+                .wrapping_sub(n1_borrow >> 4 & 1);
+            if n2_borrow & 0x10 != 0 {
+                result = result.wrapping_sub(0x600);
+            }
+            if raw & 0x10000 != 0 {
+                result = result.wrapping_sub(0x6000);
+            }
+
+            self.p.set(bit::C, raw & 0x10000 == 0);
+            let result_u16 = result as u16;
+            self.a = result_u16;
+            self.set_nz16(result_u16);
         }
     }
 
@@ -3705,6 +3847,85 @@ mod tests {
         cpu.step(&mut bus); // CMP #$1234
         assert!(cpu.p.contains(bit::Z));
         assert!(cpu.p.contains(bit::C));
+    }
+
+    // -------------------------------------------------------------------
+    // BCD mode (ADC/SBC with D=1)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn adc_bcd_simple() {
+        // SED, CLC, LDA #$19, ADC #$25 → A=$44 (BCD), C=0
+        let (mut cpu, mut bus) = run(&[0xF8, 0x18, 0xA9, 0x19, 0x69, 0x25]);
+        cpu.step(&mut bus); // SED
+        cpu.step(&mut bus); // CLC
+        cpu.step(&mut bus); // LDA #$19
+        cpu.step(&mut bus); // ADC #$25
+        assert_eq!(cpu.a8(), 0x44);
+        assert!(!cpu.p.contains(bit::C));
+    }
+
+    #[test]
+    fn adc_bcd_carries_at_99_plus_01() {
+        // SED, CLC, LDA #$99, ADC #$01 → A=$00, C=1
+        let (mut cpu, mut bus) = run(&[0xF8, 0x18, 0xA9, 0x99, 0x69, 0x01]);
+        for _ in 0..4 {
+            cpu.step(&mut bus);
+        }
+        assert_eq!(cpu.a8(), 0x00);
+        assert!(cpu.p.contains(bit::C));
+        assert!(cpu.p.contains(bit::Z));
+    }
+
+    #[test]
+    fn adc_bcd_low_nibble_carries() {
+        // SED, CLC, LDA #$08, ADC #$05 → low nibble 8+5=13 → +6 = $13
+        let (mut cpu, mut bus) = run(&[0xF8, 0x18, 0xA9, 0x08, 0x69, 0x05]);
+        for _ in 0..4 {
+            cpu.step(&mut bus);
+        }
+        assert_eq!(cpu.a8(), 0x13);
+        assert!(!cpu.p.contains(bit::C));
+    }
+
+    #[test]
+    fn sbc_bcd_simple() {
+        // SED, SEC (no borrow), LDA #$45, SBC #$19 → A=$26
+        let (mut cpu, mut bus) = run(&[0xF8, 0x38, 0xA9, 0x45, 0xE9, 0x19]);
+        cpu.step(&mut bus); // SED
+        cpu.step(&mut bus); // SEC
+        cpu.step(&mut bus); // LDA #$45
+        cpu.step(&mut bus); // SBC #$19
+        assert_eq!(cpu.a8(), 0x26);
+        assert!(cpu.p.contains(bit::C), "no borrow → C stays set");
+    }
+
+    #[test]
+    fn sbc_bcd_borrows() {
+        // SED, SEC, LDA #$10, SBC #$25 → A=$85, C=0 (borrow into 100s)
+        let (mut cpu, mut bus) = run(&[0xF8, 0x38, 0xA9, 0x10, 0xE9, 0x25]);
+        for _ in 0..4 {
+            cpu.step(&mut bus);
+        }
+        assert_eq!(cpu.a8(), 0x85);
+        assert!(!cpu.p.contains(bit::C), "borrow → C clear");
+    }
+
+    #[test]
+    fn adc_bcd_16bit() {
+        // CLC, XCE, REP #$20, SED, CLC, LDA #$1234, ADC #$5678 → A=$6912
+        let prog = &[
+            0x18, 0xFB, 0xC2, 0x20, 0xF8, 0x18, 0xA9, 0x34, 0x12, 0x69, 0x78, 0x56,
+        ];
+        let (mut cpu, mut bus) = run(prog);
+        cpu.step(&mut bus); // CLC
+        cpu.step(&mut bus); // XCE → native
+        cpu.step(&mut bus); // REP #$20 → M cleared
+        cpu.step(&mut bus); // SED
+        cpu.step(&mut bus); // CLC (XCE may have changed C)
+        cpu.step(&mut bus); // LDA #$1234
+        cpu.step(&mut bus); // ADC #$5678
+        assert_eq!(cpu.a, 0x6912);
     }
 
     #[test]
