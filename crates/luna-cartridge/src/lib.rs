@@ -27,7 +27,9 @@ pub enum CartError {
     TooSmall(usize),
     /// No internal header at the expected offsets passed the
     /// checksum-complement validation.
-    #[error("could not detect cartridge layout (LoROM / HiROM): both internal headers fail the checksum complement check")]
+    #[error(
+        "could not detect cartridge layout (LoROM / HiROM): both internal headers fail the checksum complement check"
+    )]
     LayoutUnknown,
 }
 
@@ -145,7 +147,11 @@ const HEADER_OFFSET_EXHIROM: usize = 0x40_FFC0;
 /// checksums will be rejected; that's an acceptable trade-off for
 /// avoiding false positives on all-zero or non-ROM input.
 fn detect_and_parse(rom: &[u8]) -> Option<Header> {
-    for off in [HEADER_OFFSET_LOROM, HEADER_OFFSET_HIROM, HEADER_OFFSET_EXHIROM] {
+    for off in [
+        HEADER_OFFSET_LOROM,
+        HEADER_OFFSET_HIROM,
+        HEADER_OFFSET_EXHIROM,
+    ] {
         if off + 0x20 > rom.len() {
             continue;
         }
@@ -169,7 +175,9 @@ fn parse_at(rom: &[u8], off: usize) -> Header {
     // (or our wrong-offset probing) can produce byte values like 0xEA
     // which would overflow `1 << byte`. Clamp to 31 — far above any real
     // SNES ROM (4 GB) — to keep the parser total even on bogus input.
-    let rom_size_kb = 1u32.checked_shl(u32::from(rom[off + 0x17]).min(31)).unwrap_or(0);
+    let rom_size_kb = 1u32
+        .checked_shl(u32::from(rom[off + 0x17]).min(31))
+        .unwrap_or(0);
     let sram_byte = rom[off + 0x18];
     let sram_size_kb = if sram_byte == 0 {
         0
@@ -235,11 +243,11 @@ mod tests {
             .take(21)
             .collect();
         rom[header_off..header_off + 21].copy_from_slice(&title_bytes);
-        rom[header_off + 0x15] = 0x20;          // LoROM, slow
-        rom[header_off + 0x16] = 0x00;          // ROM only
-        rom[header_off + 0x17] = 0x05;          // 32 KB
+        rom[header_off + 0x15] = 0x20; // LoROM, slow
+        rom[header_off + 0x16] = 0x00; // ROM only
+        rom[header_off + 0x17] = 0x05; // 32 KB
         rom[header_off + 0x18] = sram_kb_log2;
-        rom[header_off + 0x19] = 0x01;          // USA (NTSC)
+        rom[header_off + 0x19] = 0x01; // USA (NTSC)
         rom[header_off + 0x1A] = 0x33;
         rom[header_off + 0x1B] = 0x00;
         // Checksum complement = 0x1234, checksum = !0x1234 = 0xEDCB
@@ -294,7 +302,7 @@ mod tests {
     fn region_decoding() {
         assert_eq!(Region::from_country(0x00), Region::Ntsc); // Japan
         assert_eq!(Region::from_country(0x01), Region::Ntsc); // USA
-        assert_eq!(Region::from_country(0x02), Region::Pal);  // EU (Australia)
+        assert_eq!(Region::from_country(0x02), Region::Pal); // EU (Australia)
         assert_eq!(Region::from_country(0x42), Region::Unknown);
     }
 

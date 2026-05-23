@@ -42,8 +42,7 @@ impl LoRomMapper {
         // mirror $00-$7F (with FastROM speed if MEMSEL is set, but speed
         // is the bus's concern).
         let normalized_bank = bank & 0x7F;
-        let rom_offset =
-            (usize::from(normalized_bank) * 0x8000) + (usize::from(offset) - 0x8000);
+        let rom_offset = (usize::from(normalized_bank) * 0x8000) + (usize::from(offset) - 0x8000);
         if rom_offset < self.rom.len() {
             Some(rom_offset)
         } else {

@@ -105,31 +105,64 @@ mod tests {
 
     #[test]
     fn fast_rom_only_kicks_in_above_0x80() {
-        assert_eq!(address_speed(make_addr(0x00, 0x8000), true), MemorySpeed::Slow);
-        assert_eq!(address_speed(make_addr(0x80, 0x8000), true), MemorySpeed::Fast);
-        assert_eq!(address_speed(make_addr(0x80, 0x8000), false), MemorySpeed::Slow);
+        assert_eq!(
+            address_speed(make_addr(0x00, 0x8000), true),
+            MemorySpeed::Slow
+        );
+        assert_eq!(
+            address_speed(make_addr(0x80, 0x8000), true),
+            MemorySpeed::Fast
+        );
+        assert_eq!(
+            address_speed(make_addr(0x80, 0x8000), false),
+            MemorySpeed::Slow
+        );
     }
 
     #[test]
     fn joypad_registers_are_xslow() {
-        assert_eq!(address_speed(make_addr(0x00, 0x4016), false), MemorySpeed::XSlow);
-        assert_eq!(address_speed(make_addr(0x00, 0x4017), false), MemorySpeed::XSlow);
+        assert_eq!(
+            address_speed(make_addr(0x00, 0x4016), false),
+            MemorySpeed::XSlow
+        );
+        assert_eq!(
+            address_speed(make_addr(0x00, 0x4017), false),
+            MemorySpeed::XSlow
+        );
         // Mirror in $80-$BF banks.
-        assert_eq!(address_speed(make_addr(0x80, 0x4016), false), MemorySpeed::XSlow);
+        assert_eq!(
+            address_speed(make_addr(0x80, 0x4016), false),
+            MemorySpeed::XSlow
+        );
         // FastROM bit shouldn't override the XSLOW joypad cost.
-        assert_eq!(address_speed(make_addr(0x80, 0x4016), true), MemorySpeed::XSlow);
+        assert_eq!(
+            address_speed(make_addr(0x80, 0x4016), true),
+            MemorySpeed::XSlow
+        );
     }
 
     #[test]
     fn wram_is_always_slow() {
-        assert_eq!(address_speed(make_addr(0x7E, 0x0000), true), MemorySpeed::Slow);
-        assert_eq!(address_speed(make_addr(0x7F, 0xFFFF), true), MemorySpeed::Slow);
+        assert_eq!(
+            address_speed(make_addr(0x7E, 0x0000), true),
+            MemorySpeed::Slow
+        );
+        assert_eq!(
+            address_speed(make_addr(0x7F, 0xFFFF), true),
+            MemorySpeed::Slow
+        );
     }
 
     #[test]
     fn ppu_registers_are_slow() {
-        assert_eq!(address_speed(make_addr(0x00, 0x2100), false), MemorySpeed::Slow);
-        assert_eq!(address_speed(make_addr(0x00, 0x213F), false), MemorySpeed::Slow);
+        assert_eq!(
+            address_speed(make_addr(0x00, 0x2100), false),
+            MemorySpeed::Slow
+        );
+        assert_eq!(
+            address_speed(make_addr(0x00, 0x213F), false),
+            MemorySpeed::Slow
+        );
     }
 
     #[test]
