@@ -24,8 +24,22 @@ impl Cpu {
             // an interrupt and the wrapper would call clear_wai/clear_stp.
             return;
         }
+        // 65C816 invariant: in emulation mode, the high byte of S is
+        // always $01. The Tom Harte test suite supplies arbitrary
+        // initial SP values, so we normalize at the START of every
+        // step — that way pushes inside the instruction write to the
+        // right page, and operations that read SP directly (TSC,
+        // stack-relative addressing) see the canonical value.
+        if self.e {
+            self.sp = 0x0100 | (self.sp & 0x00FF);
+        }
         let opcode = self.fetch_u8(bus);
         self.execute(opcode, bus);
+        // Defensive re-pin at end-of-step in case any inner sequence
+        // momentarily violated the invariant.
+        if self.e {
+            self.sp = 0x0100 | (self.sp & 0x00FF);
+        }
     }
 
     /// Dispatch on a fetched opcode. Inlined into the match by LLVM.
@@ -944,9 +958,12 @@ impl Cpu {
 
     fn cop<B: Bus>(&mut self, bus: &mut B) {
         let _signature = self.fetch_u8(bus);
+        // Per fullsnes / Tom Harte, COP sets B=1 in the pushed P byte
+        // in emulation mode (same as BRK). The B=0 case only applies
+        // to hardware IRQ/NMI, which we don't yet service.
         self.service_software_interrupt(
             bus, /* vec_native */ 0xFFE4, /* vec_emulation */ 0xFFF4,
-            /* set_b_bit_in_emulation */ false,
+            /* set_b_bit_in_emulation */ true,
         );
     }
 
@@ -1042,37 +1059,49 @@ impl Cpu {
     // on DB after MVN/MVP must be aware.
     // ===================================================================
 
-    fn block_move_step<B: Bus>(&mut self, bus: &mut B, increment: bool) {
+    /// Execute a full MVN / MVP block move in one step.
+    ///
+    /// The Tom Harte 65816 test suite models a single MVN/MVP test case
+    /// as the **entire** block transfer (not one iteration). Each
+    /// iteration writes one byte at `dest_bank:Y` from `src_bank:X`,
+    /// then ±1 on X and Y, -1 on A. The loop terminates when A wraps
+    /// from $0000 to $FFFF.
+    ///
+    /// DB is updated to `dest_bank` as a side effect. Index registers
+    /// are truncated to 8-bit if the X flag is set during the move.
+    fn block_move<B: Bus>(&mut self, bus: &mut B, increment: bool) {
         let dest_bank = self.fetch_u8(bus);
         let src_bank = self.fetch_u8(bus);
-        let byte = bus.read(make_addr(src_bank, self.x));
-        bus.write(make_addr(dest_bank, self.y), byte);
-        if increment {
-            self.x = self.x.wrapping_add(1);
-            self.y = self.y.wrapping_add(1);
-        } else {
-            self.x = self.x.wrapping_sub(1);
-            self.y = self.y.wrapping_sub(1);
-        }
-        // X-flag width truncation per spec.
-        if self.p.idx8() {
-            self.x &= 0x00FF;
-            self.y &= 0x00FF;
-        }
-        self.a = self.a.wrapping_sub(1);
         self.db = dest_bank;
-        if self.a != 0xFFFF {
-            // Rewind PC to re-execute the same MVN/MVP next step.
-            self.pc = self.pc.wrapping_sub(3);
+        loop {
+            let byte = bus.read(make_addr(src_bank, self.x));
+            bus.write(make_addr(dest_bank, self.y), byte);
+            if increment {
+                self.x = self.x.wrapping_add(1);
+                self.y = self.y.wrapping_add(1);
+            } else {
+                self.x = self.x.wrapping_sub(1);
+                self.y = self.y.wrapping_sub(1);
+            }
+            if self.p.idx8() {
+                self.x &= 0x00FF;
+                self.y &= 0x00FF;
+            }
+            let prev_a = self.a;
+            self.a = self.a.wrapping_sub(1);
+            if prev_a == 0 {
+                // A just wrapped from $0000 to $FFFF — we're done.
+                break;
+            }
         }
     }
 
     fn mvn<B: Bus>(&mut self, bus: &mut B) {
-        self.block_move_step(bus, true);
+        self.block_move(bus, true);
     }
 
     fn mvp<B: Bus>(&mut self, bus: &mut B) {
-        self.block_move_step(bus, false);
+        self.block_move(bus, false);
     }
 
     // ===================================================================
@@ -2988,9 +3017,14 @@ mod tests {
         bus.poke_slice(0x00_FFF4, &[0x00, 0x90]);
         cpu.step(&mut bus);
         assert_eq!(cpu.pc, 0x9000);
-        // P was pushed with B clear.
+        // Per Tom Harte / fullsnes, both BRK and COP set B=1 in the
+        // pushed P byte in emulation mode. The B=0 distinction only
+        // applies to hardware IRQ/NMI (not yet serviced).
         let pushed_p = bus.peek(0x00_01FD);
-        assert!(pushed_p & 0x10 == 0, "B bit must be clear for COP");
+        assert!(
+            pushed_p & 0x10 != 0,
+            "B bit must be set for COP in emulation"
+        );
     }
 
     #[test]
@@ -3015,51 +3049,45 @@ mod tests {
     }
 
     #[test]
-    fn mvn_copies_one_byte_and_rewinds_pc_until_done() {
-        // MVN dest_bank src_bank — let's copy 3 bytes from $7E:0000 to
-        // $7E:0100, with A=2 (= len - 1).
+    fn mvn_copies_full_block_in_one_step() {
+        // MVN dest_bank src_bank — copy 3 bytes from $7E:0000 to $7E:0100.
+        // Tom Harte models the entire block move as one CPU step.
         let (mut cpu, mut bus) = run(&[0x54, 0x7E, 0x7E]);
         bus.poke_slice(0x7E_0000, &[0xAA, 0xBB, 0xCC]);
         cpu.x = 0x0000;
         cpu.y = 0x0100;
-        cpu.a = 0x0002; // copy 3 bytes total
+        cpu.a = 0x0002; // copy 3 bytes total (len - 1)
         cpu.p.remove(bit::X); // 16-bit X/Y
 
-        cpu.step(&mut bus); // iteration 1: write $7E:0100 ← $7E:0000 ($AA)
+        cpu.step(&mut bus); // single step copies all 3 bytes
+
         assert_eq!(bus.peek(0x7E_0100), 0xAA);
-        assert_eq!(cpu.x, 1);
-        assert_eq!(cpu.y, 0x0101);
-        assert_eq!(cpu.a, 0x0001);
-        assert_eq!(cpu.pc, 0x8000, "PC rewound to MVN until A wraps");
-
-        cpu.step(&mut bus); // iteration 2: $7E:0101 ← $7E:0001 ($BB)
         assert_eq!(bus.peek(0x7E_0101), 0xBB);
-        assert_eq!(cpu.a, 0x0000);
-        assert_eq!(cpu.pc, 0x8000);
-
-        cpu.step(&mut bus); // iteration 3: $7E:0102 ← $7E:0002 ($CC), A wraps
         assert_eq!(bus.peek(0x7E_0102), 0xCC);
-        assert_eq!(cpu.a, 0xFFFF);
-        assert_eq!(cpu.pc, 0x8003, "PC finally advances past MVN");
+        assert_eq!(cpu.x, 0x0003);
+        assert_eq!(cpu.y, 0x0103);
+        assert_eq!(cpu.a, 0xFFFF, "A wraps from $0000 → $FFFF at end of move");
+        assert_eq!(cpu.pc, 0x8003, "PC advances past the 3-byte MVN");
         assert_eq!(cpu.db, 0x7E, "MVN updates DB to the destination bank");
     }
 
     #[test]
-    fn mvp_copies_backward() {
-        // MVP dest src — same as MVN but X/Y decrement.
+    fn mvp_copies_full_block_backward_in_one_step() {
+        // MVP — same as MVN but X/Y decrement. Copy 1 byte (A=$0000).
         let (mut cpu, mut bus) = run(&[0x44, 0x7E, 0x7E]);
-        bus.poke_slice(0x7E_0002, &[0xCC]);
+        bus.poke(0x7E_0002, 0xCC);
         cpu.x = 0x0002;
         cpu.y = 0x0102;
-        cpu.a = 0x0000; // copy 1 byte (and A then wraps to $FFFF)
+        cpu.a = 0x0000;
         cpu.p.remove(bit::X);
 
         cpu.step(&mut bus);
+
         assert_eq!(bus.peek(0x7E_0102), 0xCC);
         assert_eq!(cpu.x, 0x0001);
         assert_eq!(cpu.y, 0x0101);
         assert_eq!(cpu.a, 0xFFFF);
-        assert_eq!(cpu.pc, 0x8003, "single-byte MVP completes in one step");
+        assert_eq!(cpu.pc, 0x8003);
     }
 
     #[test]
