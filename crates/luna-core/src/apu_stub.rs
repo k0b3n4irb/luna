@@ -1,70 +1,55 @@
-//! Smart APU mailbox stub — a state machine that mimics enough of the
-//! IPL ROM upload protocol and the post-upload command/ack dance for
-//! many SNES games to progress past their boot phase **without** a
-//! real SPC700 + DSP emulation.
+//! Smart APU mailbox stub — minimal state needed to let real games
+//! progress past the boot handshake and the IPL upload phase
+//! **without** a real SPC700 + DSP emulation.
 //!
-//! # Why this exists
+//! # Hardware model
 //!
-//! Real games talk to the APU through the four mailbox ports
-//! `$2140-$2143`. A naïve "echo" stub (return whatever the CPU last
-//! wrote) is enough to fake the initial `$AA / $BB` handshake and even
-//! the IPL ROM byte-by-byte upload loop (which spins on the counter
-//! matching what the CPU just wrote). **But** it fails for the
-//! *post-upload* phase: most music drivers ack a command by writing a
-//! *different* byte back to `$2140` (typically `$00` for "idle/done").
-//! Pure echo keeps `$2140 == command code`, so the game's
-//! "wait-for-ack" loop spins forever.
+//! The four `$2140-$2143` mailbox ports are actually **two**
+//! registers per port on real hardware: one CPU→SPC (CPU writes, SPC
+//! reads) and one SPC→CPU (SPC writes, CPU reads). Our stub models
+//! this with two arrays:
 //!
-//! # State machine
+//! - `to_cpu` is what the CPU **reads** at each port.
+//! - `from_cpu` is what the CPU has **written** at each port
+//!   (diagnostic only; in real hardware the SPC would read it).
 //!
-//! ```text
-//!     ┌────────────┐  write $CC to $2140   ┌────────────┐
-//!     │ PreKick    │ ────────────────────▶ │ Uploading  │
-//!     │ ($AA/$BB)  │                       │ (echo)     │
-//!     └────────────┘                       └────────────┘
-//!           │                                     │
-//!           │ any non-$CC write to $2140          │ non-incremental
-//!           │ (game skips IPL upload entirely)    │ write to $2140
-//!           ▼                                     ▼
-//!     ┌─────────────────────────────────────────────┐
-//!     │              PostUpload                     │
-//!     │  $2140 reads ← $00 (fake "driver idle" ack) │
-//!     │  $2141-$2143 reads ← echo of last write     │
-//!     └─────────────────────────────────────────────┘
-//!                          │
-//!                          │ write $CC to $2140 (new upload)
-//!                          ▼
-//!                     Uploading
-//! ```
+//! On a fresh reset, `to_cpu = [AA, BB, 00, 00]` — the canonical IPL
+//! ROM ready signal. CPU writes do **not** propagate to `to_cpu`
+//! until the game performs the `$CC` kick on `$2140`. This protects
+//! the handshake from games that clear MMIO by writing `$00`
+//! everywhere during init (Super Bomberman is the textbook case).
 //!
-//! Heuristic: the IPL upload writes monotonically-incrementing counters
-//! to `$2140` (`$CC, $00, $01, $02, ...`). The moment we see a write
-//! that is **not** `prev + 1` (and isn't a `$CC` kick), we conclude
-//! the upload has ended and switch to `PostUpload`.
+//! Post-kick, we fall into pure-echo behaviour: every CPU write to a
+//! port also lands in `to_cpu` at the same index. That matches both
+//! the IPL counter-ACK protocol (CPU writes counter, IPL writes the
+//! same value back so the CPU's `CMP $2140 / BNE wait` exits) and
+//! the typical music-driver command pattern (game writes command
+//! code, reads it back to confirm "command transferred").
 
 /// Phase of the APU stub's state machine. See module docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     /// Post-reset. `$2140`/`$2141` return the canonical IPL ROM ready
-    /// values `$AA` / `$BB`. We're waiting for the game to write `$CC`
-    /// to `$2140` to kick off an upload.
+    /// values `$AA` / `$BB`. CPU writes are recorded in `from_cpu`
+    /// but do **not** propagate to `to_cpu` — this protects the
+    /// handshake from init routines that write `$00` everywhere
+    /// during MMIO clearing.
     PreKick,
-    /// The game is uploading bytes through the IPL ROM protocol.
-    /// `$2140` echoes the last value written (which is the counter
-    /// from the CPU's perspective).
-    Uploading,
-    /// Upload has terminated (or the game never used IPL upload at
-    /// all). `$2140` reads return `$00` to fake "driver idle / ack".
-    PostUpload,
+    /// CPU has performed the `$CC` kick on `$2140`. All subsequent
+    /// CPU writes echo through to the to-CPU side (= what the CPU
+    /// reads back). This covers IPL upload counter ACKs, target-
+    /// address staging, and the typical post-upload command/echo
+    /// pattern most music drivers use.
+    PostKick,
 }
 
-/// The smart APU stub.
+/// The smart APU stub. See module-level docs.
 pub struct ApuStub {
-    /// Last value the CPU wrote to each mailbox port. `$2141-$2143` are
-    /// always echoed back as-is; `$2140`'s read behaviour depends on
-    /// the current [`Phase`].
-    ports: [u8; 4],
-    /// Current state-machine phase.
+    /// What the CPU reads at each port.
+    to_cpu: [u8; 4],
+    /// What the CPU has last written at each port.
+    from_cpu: [u8; 4],
+    /// Phase — see [`Phase`].
     phase: Phase,
 }
 
@@ -75,12 +60,13 @@ impl Default for ApuStub {
 }
 
 impl ApuStub {
-    /// Build a freshly-reset stub. `$2140` reads return `$AA`,
-    /// `$2141` reads return `$BB`. Phase = `PreKick`.
+    /// Build a freshly-reset stub: `$2140` reads return `$AA`,
+    /// `$2141` reads return `$BB`, phase = `PreKick`.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            ports: [0xAA, 0xBB, 0x00, 0x00],
+            to_cpu: [0xAA, 0xBB, 0x00, 0x00],
+            from_cpu: [0; 4],
             phase: Phase::PreKick,
         }
     }
@@ -91,77 +77,39 @@ impl ApuStub {
         self.phase
     }
 
-    /// Direct view of the four mailbox bytes — exposed for the GUI
-    /// Stubs panel. Note that `$2140` *reads* don't always return
-    /// `ports[0]` — see [`Self::read`].
+    /// The four bytes the CPU currently reads from `$2140-$2143`.
     #[must_use]
     pub fn ports(&self) -> &[u8; 4] {
-        &self.ports
+        &self.to_cpu
+    }
+
+    /// The four bytes the CPU last wrote to `$2140-$2143`. On real
+    /// hardware these would be on the SPC700's side of the mailbox.
+    #[must_use]
+    pub fn last_writes(&self) -> &[u8; 4] {
+        &self.from_cpu
     }
 
     /// CPU-side read of mailbox port `port` (0..=3).
-    ///
-    /// Behaviour:
-    /// - Port 0 (`$2140`): depends on phase (see module docs).
-    /// - Ports 1-3: always echo last value written.
     #[must_use]
     pub fn read(&self, port: usize) -> u8 {
-        if port != 0 {
-            return self.ports[port];
-        }
-        match self.phase {
-            Phase::PreKick | Phase::Uploading => self.ports[0],
-            Phase::PostUpload => 0x00,
-        }
+        self.to_cpu[port]
     }
 
     /// CPU-side write of `value` to mailbox port `port` (0..=3).
     pub fn write(&mut self, port: usize, value: u8) {
-        if port == 0 {
-            self.transition_on_p0_write(value);
+        self.from_cpu[port] = value;
+        if port == 0 && value == 0xCC && self.phase == Phase::PreKick {
+            self.phase = Phase::PostKick;
         }
-        self.ports[port] = value;
-    }
-
-    /// Advance the phase state machine for a write to `$2140`.
-    fn transition_on_p0_write(&mut self, value: u8) {
-        self.phase = match self.phase {
-            Phase::PreKick => {
-                if value == 0xCC {
-                    // Standard IPL kick — start of upload.
-                    Phase::Uploading
-                } else {
-                    // Game writes a command directly to $2140 without
-                    // ever doing an IPL upload (rare but possible —
-                    // some demos / homebrew). Jump straight to ack.
-                    Phase::PostUpload
-                }
-            }
-            Phase::Uploading => {
-                let expected_next = self.ports[0].wrapping_add(1);
-                if value == expected_next {
-                    // Normal counter increment — still uploading.
-                    Phase::Uploading
-                } else if value == self.ports[0] {
-                    // Same counter rewritten (CPU retry in some
-                    // drivers — keep uploading).
-                    Phase::Uploading
-                } else {
-                    // Non-sequential write → upload terminated, game
-                    // has entered its post-upload command phase.
-                    Phase::PostUpload
-                }
-            }
-            Phase::PostUpload => {
-                if value == 0xCC {
-                    // Some games kick a NEW upload (e.g. switching
-                    // music banks). Restart upload state.
-                    Phase::Uploading
-                } else {
-                    Phase::PostUpload
-                }
-            }
-        };
+        // Once past the kick, every CPU write echoes through to the
+        // to-CPU side (matches IPL counter-ACK behaviour and the
+        // typical music-driver "command then echo confirmation"
+        // pattern). PreKick writes are absorbed so the $AA/$BB
+        // handshake bytes survive games' init MMIO clearing.
+        if self.phase == Phase::PostKick {
+            self.to_cpu[port] = value;
+        }
     }
 }
 
@@ -184,121 +132,77 @@ mod tests {
     }
 
     #[test]
-    fn kick_enters_uploading_and_acks_with_cc() {
+    fn handshake_16bit_read_matches_bbaa() {
+        // The Super Bomberman handshake: 16-bit `CMP $002140` reads
+        // both $2140 (low) and $2141 (high) — should equal $BBAA.
+        let s = ApuStub::new();
+        let lo = s.read(0);
+        let hi = s.read(1);
+        let combined = (u16::from(hi) << 8) | u16::from(lo);
+        assert_eq!(combined, 0xBBAA);
+    }
+
+    #[test]
+    fn pre_kick_writes_dont_clobber_handshake() {
+        // Crucial: real hardware has separate registers per direction.
+        // A game's init routine writing $00 to every MMIO reg must
+        // **not** wipe out the IPL handshake bytes. Super Bomberman
+        // is the textbook case for this regression.
+        let mut s = ApuStub::new();
+        s.write(0, 0x00);
+        s.write(1, 0x00);
+        s.write(2, 0x00);
+        s.write(3, 0x00);
+        // Phase still PreKick, handshake bytes intact.
+        assert_eq!(s.phase(), Phase::PreKick);
+        assert_eq!(s.read(0), 0xAA);
+        assert_eq!(s.read(1), 0xBB);
+        // last_writes shows what the CPU actually wrote.
+        assert_eq!(s.last_writes(), &[0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn cc_kick_enters_post_kick() {
         let mut s = ApuStub::new();
         s.write(0, 0xCC);
-        assert_eq!(s.phase(), Phase::Uploading);
-        // The IPL ROM ack to the kick is just $CC echoed back.
+        assert_eq!(s.phase(), Phase::PostKick);
+        // After the kick, the IPL ROM echoes $CC back.
         assert_eq!(s.read(0), 0xCC);
     }
 
     #[test]
-    fn upload_counter_echoes() {
+    fn post_kick_propagates_all_writes() {
         let mut s = ApuStub::new();
-        s.write(0, 0xCC); // kick
-        // First byte: write data to $2141, counter to $2140.
+        s.write(0, 0xCC);
         s.write(1, 0x42);
-        s.write(0, 0xCD); // wraps from $CC + 1 = $CD
-        assert_eq!(s.phase(), Phase::Uploading);
-        assert_eq!(s.read(0), 0xCD);
-        // Second byte.
-        s.write(1, 0x43);
-        s.write(0, 0xCE);
-        assert_eq!(s.phase(), Phase::Uploading);
-        assert_eq!(s.read(0), 0xCE);
+        s.write(2, 0x80);
+        s.write(3, 0x00);
+        s.write(0, 0x00); // counter
+        s.write(0, 0x01);
+        assert_eq!(s.read(0), 0x01);
+        assert_eq!(s.read(1), 0x42);
+        assert_eq!(s.read(2), 0x80);
+        assert_eq!(s.read(3), 0x00);
     }
 
     #[test]
-    fn upload_counter_wraps_through_zero() {
+    fn ipl_counter_walk() {
         let mut s = ApuStub::new();
         s.write(0, 0xCC);
-        // Walk counter from $CD all the way around to confirm wrap-add.
-        let mut prev = 0xCCu8;
-        for _ in 0..512 {
-            let next = prev.wrapping_add(1);
-            s.write(0, next);
-            assert_eq!(s.phase(), Phase::Uploading);
-            prev = next;
+        for counter in 0u8..=0xFFu8 {
+            s.write(1, counter ^ 0x55);
+            s.write(0, counter);
+            assert_eq!(s.read(0), counter);
         }
     }
 
     #[test]
-    fn non_sequential_write_terminates_upload() {
+    fn last_writes_reflects_pre_kick_writes_even_though_to_cpu_doesnt() {
         let mut s = ApuStub::new();
-        s.write(0, 0xCC); // kick
-        s.write(0, 0xCD); // counter+1
-        s.write(0, 0xCE); // counter+1 again
-        // Now CPU writes a value that's not $CF — termination.
-        s.write(0, 0x42);
-        assert_eq!(s.phase(), Phase::PostUpload);
-    }
-
-    #[test]
-    fn post_upload_reads_return_zero_on_p0() {
-        let mut s = ApuStub::new();
-        s.write(0, 0xCC);
-        s.write(0, 0x05); // termination
-        assert_eq!(s.phase(), Phase::PostUpload);
-        // Game sends a music command.
-        s.write(0, 0xFF);
-        // Game waits for ack — we fake $00.
-        assert_eq!(s.read(0), 0x00);
-    }
-
-    #[test]
-    fn post_upload_ports_1_2_3_still_echo() {
-        let mut s = ApuStub::new();
-        s.write(0, 0x42); // game skips IPL, goes straight to commands
-        assert_eq!(s.phase(), Phase::PostUpload);
-        s.write(1, 0xAA);
-        s.write(2, 0xBB);
-        s.write(3, 0xCC);
-        assert_eq!(s.read(1), 0xAA);
-        assert_eq!(s.read(2), 0xBB);
-        assert_eq!(s.read(3), 0xCC);
-    }
-
-    #[test]
-    fn skipping_ipl_kicks_straight_to_post_upload() {
-        // If the very first write to $2140 isn't $CC, we conclude the
-        // game isn't going to use IPL upload and switch to ack mode.
-        let mut s = ApuStub::new();
-        s.write(0, 0x42);
-        assert_eq!(s.phase(), Phase::PostUpload);
-        assert_eq!(s.read(0), 0x00);
-    }
-
-    #[test]
-    fn new_kick_after_post_upload_restarts_upload() {
-        let mut s = ApuStub::new();
-        s.write(0, 0xCC);
-        s.write(0, 0x42); // terminate
-        assert_eq!(s.phase(), Phase::PostUpload);
-        // New upload (e.g. switching music banks).
-        s.write(0, 0xCC);
-        assert_eq!(s.phase(), Phase::Uploading);
-        assert_eq!(s.read(0), 0xCC);
-    }
-
-    #[test]
-    fn ct_style_command_loop_unsticks() {
-        // Reproduce the CT scenario: game writes $F0 to $2141, $FF to
-        // $2140, then loops reading $2140 expecting a non-$FF ack.
-        // With echo we returned $FF forever. With our stub, reading
-        // $2140 once it's in PostUpload returns $00 → game's
-        // `CMP #$FF / BEQ wait` exits.
-        let mut s = ApuStub::new();
-        // (Game might have done an IPL upload first — short version
-        // here.)
-        s.write(0, 0xCC);
-        s.write(0, 0x00); // wraps from $CC
-        s.write(1, 0x42);
-        // Termination by writing a non-sequential code.
-        s.write(0, 0x80);
-        // CT's music command sequence.
-        s.write(1, 0xF0);
-        s.write(0, 0xFF);
-        // The wait loop:
-        assert_eq!(s.read(0), 0x00); // ack — exits the BEQ wait
+        s.write(0, 0x55);
+        s.write(2, 0x66);
+        assert_eq!(s.last_writes(), &[0x55, 0x00, 0x66, 0x00]);
+        assert_eq!(s.read(0), 0xAA); // still the handshake byte
+        assert_eq!(s.read(2), 0x00); // unchanged from init
     }
 }

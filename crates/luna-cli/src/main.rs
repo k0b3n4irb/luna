@@ -103,6 +103,7 @@ fn run(rom_path: &std::path::Path, steps: u64, screenshot: Option<&std::path::Pa
 
     println!("--- final state ---");
     print_cpu_state(&snes);
+    print_diag_state(&mut snes);
     println!("Instructions executed: {executed}");
     println!("Total master cycles:   {}", snes.total_mclk);
     if let Some(msg) = panic_msg {
@@ -166,6 +167,42 @@ fn print_cpu_state(snes: &Snes) {
         u8::from(cpu.e)
     );
     println!("flags: {}", flag_string(cpu.p.bits(), cpu.e));
+}
+
+fn print_diag_state(snes: &mut Snes) {
+    let p = &snes.ppu;
+    println!(
+        "PPU:  INIDISP=${:02X} (blanked={}, brightness={})  BGMODE=${:02X}  VRAM_addr=${:04X}",
+        p.inidisp,
+        p.inidisp & 0x80 != 0,
+        p.inidisp & 0x0F,
+        p.bgmode,
+        p.vram.address
+    );
+    println!(
+        "PPU:  INIDISP_writes={}  Backdrop=${:04X}",
+        p.inidisp_write_count,
+        p.cgram.color(0)
+    );
+    println!(
+        "CPU regs:  NMITIMEN=${:02X}  HVBJOY=${:02X}  fake_frames={}  NMIs_served={}",
+        snes.cpu_regs.nmitimen, snes.cpu_regs.hvbjoy, snes.fake_frame_count, snes.nmis_serviced
+    );
+    let ports = snes.apu.ports();
+    println!(
+        "APU stub:  phase={:?}  $2140=${:02X} $2141=${:02X} $2142=${:02X} $2143=${:02X}",
+        snes.apu.phase(),
+        ports[0],
+        ports[1],
+        ports[2],
+        ports[3]
+    );
+    let pc_bytes = snes.peek_pc_bytes(8);
+    print!("@PC bytes:");
+    for b in &pc_bytes {
+        print!(" {b:02X}");
+    }
+    println!();
 }
 
 fn flag_string(p: u8, e: bool) -> String {
