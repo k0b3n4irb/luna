@@ -1714,6 +1714,7 @@ version = "0.0.1"
 dependencies = [
  "eframe",
  "egui",
+ "luna-bus",
  "luna-cartridge",
  "luna-core",
  "luna-ppu",

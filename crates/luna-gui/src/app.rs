@@ -63,12 +63,45 @@ impl LunaApp {
     }
 
     /// Load a ROM from disk and reset the emulator.
+    ///
+    /// Wrapped in `catch_unwind` so that unsupported cartridge types
+    /// (e.g. HiROM, SA-1, Super FX — anything past P0.6) surface as a
+    /// friendly error in the status bar instead of crashing the GUI.
     fn load_rom(&mut self, path: &Path) {
-        match Cartridge::load(path) {
-            Ok(cart) => {
-                let title = cart.header.title.clone();
-                let mut snes = Snes::from_cartridge(cart);
-                snes.reset();
+        let cart = match Cartridge::load(path) {
+            Ok(c) => c,
+            Err(e) => {
+                self.last_error = Some(format!("Failed to load ROM: {e}"));
+                return;
+            }
+        };
+        // Reject everything we can't construct without a panic. The
+        // upstream `Snes::from_cartridge` still panics on these, but
+        // catching here lets us deliver a useful diagnostic.
+        if !matches!(cart.header.mapper_kind, luna_bus::MapperKind::LoRom) {
+            self.last_error = Some(format!(
+                "Unsupported cartridge type: {:?}. \
+                 Only LoROM is wired up so far — \
+                 HiROM / SA-1 / Super FX land in later phases.",
+                cart.header.mapper_kind
+            ));
+            self.snes = None;
+            self.rom_title = Some(cart.header.title.clone());
+            self.rom_path = Some(path.to_path_buf());
+            self.framebuffer = None;
+            return;
+        }
+        let title = cart.header.title.clone();
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let mut snes = Snes::from_cartridge(cart);
+            snes.reset();
+            snes
+        }));
+        std::panic::set_hook(prev_hook);
+        match result {
+            Ok(snes) => {
                 self.snes = Some(snes);
                 self.rom_title = Some(title);
                 self.rom_path = Some(path.to_path_buf());
@@ -76,7 +109,16 @@ impl LunaApp {
                 self.last_error = None;
                 self.framebuffer = None;
             }
-            Err(e) => self.last_error = Some(format!("Failed to load ROM: {e}")),
+            Err(payload) => {
+                self.snes = None;
+                self.last_error = Some(format!(
+                    "Could not initialise emulator for this ROM: {}",
+                    payload_to_string(payload)
+                ));
+                self.rom_title = Some(title);
+                self.rom_path = Some(path.to_path_buf());
+                self.framebuffer = None;
+            }
         }
     }
 
@@ -250,14 +292,41 @@ impl App for LunaApp {
             });
         });
 
+        // ---------------- Error banner ----------------
+        if let Some(err) = self.last_error.clone() {
+            egui::TopBottomPanel::top("error_banner")
+                .frame(
+                    egui::Frame::new()
+                        .fill(Color32::from_rgb(60, 24, 30))
+                        .inner_margin(8.0),
+                )
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("⚠")
+                                .size(18.0)
+                                .color(Color32::from_rgb(255, 140, 140)),
+                        );
+                        ui.label(RichText::new(&err).color(Color32::from_rgb(255, 200, 200)));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.small_button("Dismiss").clicked() {
+                                self.last_error = None;
+                            }
+                        });
+                    });
+                });
+        }
+
         // ---------------- Central panel (screen) ----------------
         let mut requested_path: Option<PathBuf> = None;
+        let cpu_stopped = self.snes.as_ref().map(|s| s.cpu.stopped).unwrap_or(false);
+        let cpu_paused = self.paused;
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.snes.is_none() {
                 requested_path = draw_landing_page(ui);
                 return;
             }
-            draw_screen(ui, self.framebuffer.as_ref());
+            draw_screen(ui, self.framebuffer.as_ref(), cpu_stopped, cpu_paused);
         });
         if let Some(path) = requested_path {
             self.load_rom(&path);
@@ -360,10 +429,12 @@ fn flag_string(p: u8, e: bool) -> String {
     )
 }
 
-fn draw_screen(ui: &mut egui::Ui, texture: Option<&TextureHandle>) {
+fn draw_screen(ui: &mut egui::Ui, texture: Option<&TextureHandle>, stopped: bool, paused: bool) {
     let Some(tex) = texture else {
         ui.centered_and_justified(|ui| {
-            ui.label("Waiting for first frame…");
+            ui.label(
+                RichText::new("Waiting for first frame…").color(Color32::from_rgb(160, 160, 180)),
+            );
         });
         return;
     };
@@ -386,6 +457,24 @@ fn draw_screen(ui: &mut egui::Ui, texture: Option<&TextureHandle>) {
             egui::Stroke::new(1.5, Color32::from_rgb(80, 80, 110)),
             egui::StrokeKind::Outside,
         );
+        // Overlay: STOPPED / PAUSED badge — tells the user why the
+        // screen looks frozen.
+        if stopped || paused {
+            let (text, color) = if stopped {
+                ("CPU HALTED (STP)", Color32::from_rgb(255, 120, 120))
+            } else {
+                ("PAUSED", Color32::from_rgb(255, 200, 80))
+            };
+            let painter = ui.painter();
+            let pos = rect.center_bottom() + egui::vec2(0.0, -24.0);
+            painter.text(
+                pos,
+                egui::Align2::CENTER_CENTER,
+                text,
+                egui::FontId::proportional(16.0),
+                color,
+            );
+        }
     });
 }
 
