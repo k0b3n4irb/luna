@@ -232,6 +232,72 @@ impl Cpu {
             0xCC => self.cpy_abs(bus),
 
             // -----------------------------------------------------------
+            // Logical — AND (M-width, sets N/Z)
+            // -----------------------------------------------------------
+            0x29 => self.and_imm(bus),
+            0x25 => self.and_dp(bus),
+            0x27 => self.and_dp_indirect_long(bus),
+            0x2D => self.and_abs(bus),
+            0x2F => self.and_long(bus),
+            0x35 => self.and_dp_x(bus),
+            0x32 => self.and_dp_indirect(bus),
+            0x37 => self.and_dp_indirect_long_y(bus),
+            0x3D => self.and_abs_x(bus),
+            0x3F => self.and_long_x(bus),
+            0x39 => self.and_abs_y(bus),
+            0x31 => self.and_dp_indirect_y(bus),
+            0x23 => self.and_sr_s(bus),
+            0x33 => self.and_sr_s_y(bus),
+            0x21 => self.and_dp_x_indirect(bus),
+
+            // -----------------------------------------------------------
+            // Logical — ORA (M-width, sets N/Z)
+            // -----------------------------------------------------------
+            0x09 => self.ora_imm(bus),
+            0x05 => self.ora_dp(bus),
+            0x07 => self.ora_dp_indirect_long(bus),
+            0x0D => self.ora_abs(bus),
+            0x0F => self.ora_long(bus),
+            0x15 => self.ora_dp_x(bus),
+            0x12 => self.ora_dp_indirect(bus),
+            0x17 => self.ora_dp_indirect_long_y(bus),
+            0x1D => self.ora_abs_x(bus),
+            0x1F => self.ora_long_x(bus),
+            0x19 => self.ora_abs_y(bus),
+            0x11 => self.ora_dp_indirect_y(bus),
+            0x03 => self.ora_sr_s(bus),
+            0x13 => self.ora_sr_s_y(bus),
+            0x01 => self.ora_dp_x_indirect(bus),
+
+            // -----------------------------------------------------------
+            // Logical — EOR (M-width, sets N/Z)
+            // -----------------------------------------------------------
+            0x49 => self.eor_imm(bus),
+            0x45 => self.eor_dp(bus),
+            0x47 => self.eor_dp_indirect_long(bus),
+            0x4D => self.eor_abs(bus),
+            0x4F => self.eor_long(bus),
+            0x55 => self.eor_dp_x(bus),
+            0x52 => self.eor_dp_indirect(bus),
+            0x57 => self.eor_dp_indirect_long_y(bus),
+            0x5D => self.eor_abs_x(bus),
+            0x5F => self.eor_long_x(bus),
+            0x59 => self.eor_abs_y(bus),
+            0x51 => self.eor_dp_indirect_y(bus),
+            0x43 => self.eor_sr_s(bus),
+            0x53 => self.eor_sr_s_y(bus),
+            0x41 => self.eor_dp_x_indirect(bus),
+
+            // -----------------------------------------------------------
+            // Logical — BIT (test bits, special flag semantics)
+            // -----------------------------------------------------------
+            0x89 => self.bit_imm(bus),
+            0x24 => self.bit_dp(bus),
+            0x2C => self.bit_abs(bus),
+            0x34 => self.bit_dp_x(bus),
+            0x3C => self.bit_abs_x(bus),
+
+            // -----------------------------------------------------------
             // Misc
             // -----------------------------------------------------------
             0xEA => { /* NOP */ }
@@ -1181,6 +1247,338 @@ impl Cpu {
         let v = self.index_read_from(bus, a);
         self.compare_index(self.y, v);
     }
+
+    // ===================================================================
+    // Logical (AND / ORA / EOR)
+    //
+    // All three operate on the accumulator at M-width, set N and Z based
+    // on the result, and leave V/C alone.
+    // ===================================================================
+
+    fn logical_imm_fetch<B: Bus>(&mut self, bus: &mut B) -> u16 {
+        if self.p.acc8() {
+            u16::from(self.fetch_u8(bus))
+        } else {
+            self.fetch_u16(bus)
+        }
+    }
+
+    fn and_value(&mut self, value: u16) {
+        if self.p.acc8() {
+            let v = self.a8() & (value as u8);
+            self.set_a_low(v);
+            self.set_nz8(v);
+        } else {
+            let v = self.a & value;
+            self.a = v;
+            self.set_nz16(v);
+        }
+    }
+
+    fn ora_value(&mut self, value: u16) {
+        if self.p.acc8() {
+            let v = self.a8() | (value as u8);
+            self.set_a_low(v);
+            self.set_nz8(v);
+        } else {
+            let v = self.a | value;
+            self.a = v;
+            self.set_nz16(v);
+        }
+    }
+
+    fn eor_value(&mut self, value: u16) {
+        if self.p.acc8() {
+            let v = self.a8() ^ (value as u8);
+            self.set_a_low(v);
+            self.set_nz8(v);
+        } else {
+            let v = self.a ^ value;
+            self.a = v;
+            self.set_nz16(v);
+        }
+    }
+
+    // AND dispatch.
+    fn and_imm<B: Bus>(&mut self, bus: &mut B) {
+        let v = self.logical_imm_fetch(bus);
+        self.and_value(v);
+    }
+    fn and_dp<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.and_value(v);
+    }
+    fn and_dp_indirect_long<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indirect_long(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.and_value(v);
+    }
+    fn and_abs<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.and_value(v);
+    }
+    fn and_long<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_long(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.and_value(v);
+    }
+    fn and_dp_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indexed_x(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.and_value(v);
+    }
+    fn and_dp_indirect<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indirect(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.and_value(v);
+    }
+    fn and_dp_indirect_long_y<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indirect_long_y(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.and_value(v);
+    }
+    fn and_abs_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_indexed_x(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.and_value(v);
+    }
+    fn and_abs_y<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_indexed_y(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.and_value(v);
+    }
+    fn and_long_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_long_indexed_x(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.and_value(v);
+    }
+    fn and_dp_indirect_y<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indirect_y(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.and_value(v);
+    }
+    fn and_sr_s<B: Bus>(&mut self, bus: &mut B) {
+        let a = stack_relative(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.and_value(v);
+    }
+    fn and_sr_s_y<B: Bus>(&mut self, bus: &mut B) {
+        let a = stack_relative_indirect_y(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.and_value(v);
+    }
+    fn and_dp_x_indirect<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indexed_indirect(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.and_value(v);
+    }
+
+    // ORA dispatch.
+    fn ora_imm<B: Bus>(&mut self, bus: &mut B) {
+        let v = self.logical_imm_fetch(bus);
+        self.ora_value(v);
+    }
+    fn ora_dp<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.ora_value(v);
+    }
+    fn ora_dp_indirect_long<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indirect_long(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.ora_value(v);
+    }
+    fn ora_abs<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.ora_value(v);
+    }
+    fn ora_long<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_long(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.ora_value(v);
+    }
+    fn ora_dp_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indexed_x(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.ora_value(v);
+    }
+    fn ora_dp_indirect<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indirect(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.ora_value(v);
+    }
+    fn ora_dp_indirect_long_y<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indirect_long_y(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.ora_value(v);
+    }
+    fn ora_abs_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_indexed_x(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.ora_value(v);
+    }
+    fn ora_abs_y<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_indexed_y(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.ora_value(v);
+    }
+    fn ora_long_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_long_indexed_x(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.ora_value(v);
+    }
+    fn ora_dp_indirect_y<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indirect_y(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.ora_value(v);
+    }
+    fn ora_sr_s<B: Bus>(&mut self, bus: &mut B) {
+        let a = stack_relative(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.ora_value(v);
+    }
+    fn ora_sr_s_y<B: Bus>(&mut self, bus: &mut B) {
+        let a = stack_relative_indirect_y(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.ora_value(v);
+    }
+    fn ora_dp_x_indirect<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indexed_indirect(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.ora_value(v);
+    }
+
+    // EOR dispatch.
+    fn eor_imm<B: Bus>(&mut self, bus: &mut B) {
+        let v = self.logical_imm_fetch(bus);
+        self.eor_value(v);
+    }
+    fn eor_dp<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.eor_value(v);
+    }
+    fn eor_dp_indirect_long<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indirect_long(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.eor_value(v);
+    }
+    fn eor_abs<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.eor_value(v);
+    }
+    fn eor_long<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_long(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.eor_value(v);
+    }
+    fn eor_dp_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indexed_x(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.eor_value(v);
+    }
+    fn eor_dp_indirect<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indirect(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.eor_value(v);
+    }
+    fn eor_dp_indirect_long_y<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indirect_long_y(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.eor_value(v);
+    }
+    fn eor_abs_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_indexed_x(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.eor_value(v);
+    }
+    fn eor_abs_y<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_indexed_y(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.eor_value(v);
+    }
+    fn eor_long_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_long_indexed_x(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.eor_value(v);
+    }
+    fn eor_dp_indirect_y<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indirect_y(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.eor_value(v);
+    }
+    fn eor_sr_s<B: Bus>(&mut self, bus: &mut B) {
+        let a = stack_relative(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.eor_value(v);
+    }
+    fn eor_sr_s_y<B: Bus>(&mut self, bus: &mut B) {
+        let a = stack_relative_indirect_y(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.eor_value(v);
+    }
+    fn eor_dp_x_indirect<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indexed_indirect(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.eor_value(v);
+    }
+
+    // ===================================================================
+    // BIT — test bits (special flag semantics)
+    //
+    // - Z is set based on (A & M) — like AND.
+    // - N is bit 7 (or 15) of M (NOT of A & M).
+    // - V is bit 6 (or 14) of M.
+    // - **Exception**: BIT #imm only updates Z; N and V are unchanged.
+    // ===================================================================
+
+    fn bit_value(&mut self, value: u16, immediate: bool) {
+        if self.p.acc8() {
+            let v = value as u8;
+            let result = self.a8() & v;
+            self.p.set(bit::Z, result == 0);
+            if !immediate {
+                self.p.set(bit::N, v & 0x80 != 0);
+                self.p.set(bit::V, v & 0x40 != 0);
+            }
+        } else {
+            let result = self.a & value;
+            self.p.set(bit::Z, result == 0);
+            if !immediate {
+                self.p.set(bit::N, value & 0x8000 != 0);
+                self.p.set(bit::V, value & 0x4000 != 0);
+            }
+        }
+    }
+
+    fn bit_imm<B: Bus>(&mut self, bus: &mut B) {
+        let v = self.logical_imm_fetch(bus);
+        self.bit_value(v, true);
+    }
+    fn bit_dp<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.bit_value(v, false);
+    }
+    fn bit_abs<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.bit_value(v, false);
+    }
+    fn bit_dp_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indexed_x(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.bit_value(v, false);
+    }
+    fn bit_abs_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_indexed_x(self, bus);
+        let v = self.arithmetic_read_from(bus, a);
+        self.bit_value(v, false);
+    }
 }
 
 #[cfg(test)]
@@ -1703,6 +2101,91 @@ mod tests {
         cpu.step(&mut bus);
         assert_eq!(cpu.x8(), 0x00);
         assert!(cpu.p.contains(bit::Z));
+    }
+
+    // -------------------------------------------------------------------
+    // AND / ORA / EOR
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn and_imm_masks_a() {
+        // LDA #$F0, AND #$0F → A=0, Z=1
+        let (mut cpu, mut bus) = run(&[0xA9, 0xF0, 0x29, 0x0F]);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.a8(), 0x00);
+        assert!(cpu.p.contains(bit::Z));
+    }
+
+    #[test]
+    fn ora_imm_combines() {
+        // LDA #$10, ORA #$01 → A=$11
+        let (mut cpu, mut bus) = run(&[0xA9, 0x10, 0x09, 0x01]);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.a8(), 0x11);
+        assert!(!cpu.p.contains(bit::Z));
+    }
+
+    #[test]
+    fn eor_imm_xors() {
+        // LDA #$FF, EOR #$0F → A=$F0
+        let (mut cpu, mut bus) = run(&[0xA9, 0xFF, 0x49, 0x0F]);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.a8(), 0xF0);
+        assert!(cpu.p.contains(bit::N));
+    }
+
+    #[test]
+    fn and_abs_reads_memory() {
+        let (mut cpu, mut bus) = run(&[0xA9, 0xFF, 0x2D, 0x00, 0x20]);
+        cpu.db = 0;
+        bus.poke(0x00_2000, 0x55);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.a8(), 0x55);
+    }
+
+    // -------------------------------------------------------------------
+    // BIT (special flag semantics)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn bit_abs_sets_n_and_v_from_memory() {
+        // BIT $2000 where memory = $C0 (N=1, V=1), A=$00 → Z=1
+        let (mut cpu, mut bus) = run(&[0x2C, 0x00, 0x20]);
+        cpu.db = 0;
+        cpu.a = 0;
+        bus.poke(0x00_2000, 0xC0);
+        cpu.step(&mut bus);
+        assert!(cpu.p.contains(bit::N));
+        assert!(cpu.p.contains(bit::V));
+        assert!(cpu.p.contains(bit::Z));
+    }
+
+    #[test]
+    fn bit_imm_only_touches_zero() {
+        // Pre-set N and V. BIT #$00 with A=$FF → Z=1, N/V untouched.
+        let (mut cpu, mut bus) = run(&[0x89, 0x00]);
+        cpu.p.insert(bit::N);
+        cpu.p.insert(bit::V);
+        cpu.a = 0xFF;
+        cpu.step(&mut bus);
+        assert!(cpu.p.contains(bit::Z));
+        assert!(cpu.p.contains(bit::N), "BIT #imm must NOT change N");
+        assert!(cpu.p.contains(bit::V), "BIT #imm must NOT change V");
+    }
+
+    #[test]
+    fn bit_abs_clears_zero_when_overlap() {
+        // BIT $2000, memory = $0F, A = $01 → Z=0 (overlap), N=0, V=0
+        let (mut cpu, mut bus) = run(&[0x2C, 0x00, 0x20]);
+        cpu.db = 0;
+        cpu.a = 0x01;
+        bus.poke(0x00_2000, 0x0F);
+        cpu.step(&mut bus);
+        assert!(!cpu.p.contains(bit::Z));
     }
 
     #[test]
