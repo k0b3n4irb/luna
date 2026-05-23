@@ -19,6 +19,13 @@ if [ -d "$DEST/v1" ]; then
     exit 0
 fi
 
+# tests/tom-harte/ may contain only a .gitkeep placeholder (the dir is
+# tracked but empty). Clear it so `git clone` can create the directory.
+if [ -d "$DEST" ] && [ -z "$(ls -A "$DEST" | grep -v '^\.gitkeep$')" ]; then
+    rm -f "$DEST/.gitkeep"
+    rmdir "$DEST" 2>/dev/null || true
+fi
+
 mkdir -p "$DEST_PARENT"
 echo "Cloning $REPO into $DEST (shallow)…"
 git clone --depth 1 "$REPO" "$DEST"
