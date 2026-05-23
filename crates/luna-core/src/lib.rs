@@ -7,6 +7,8 @@
 //!
 //! See `ARCHITECTURE.md` §6 and §6.6 for the target architecture.
 
+pub mod cpu_regs;
 pub mod snes;
 
+pub use cpu_regs::CpuRegs;
 pub use snes::Snes;

@@ -5,6 +5,7 @@
 //! from their registers return `0xFF` (open-bus convention) and writes
 //! are silently dropped.
 
+use crate::cpu_regs::CpuRegs;
 use luna_bus::lorom::LoRomMapper;
 use luna_bus::{Addr24, Bus, MCycles, Mapper, MapperKind, address_speed, bank_of, offset_of};
 use luna_cartridge::Cartridge;
@@ -20,6 +21,9 @@ pub struct Snes {
     pub ppu: Ppu,
     /// DMA controller — 8 channels at `$4300-$437F` plus `$420B/$420C`.
     pub dma: Dma,
+    /// CPU-system registers at `$4200-$421F` (NMITIMEN, multiplication,
+    /// division, IRQ status, etc.).
+    pub cpu_regs: CpuRegs,
     /// 128 KB Work RAM (banks `$7E-$7F` and the LowRAM mirror).
     pub wram: Box<[u8; 0x20000]>,
     /// Cartridge mapper (LoROM in P0.6; other mappers in V1+).
@@ -59,6 +63,7 @@ impl Snes {
             cpu: Cpu::new(),
             ppu: Ppu::new(),
             dma: Dma::new(),
+            cpu_regs: CpuRegs::new(),
             wram: Box::new([0; 0x20000]),
             mapper,
             fast_rom: cart.header.fast_rom,
@@ -75,6 +80,7 @@ impl Snes {
             cpu,
             ppu,
             dma,
+            cpu_regs,
             wram,
             mapper,
             fast_rom,
@@ -87,6 +93,7 @@ impl Snes {
             mapper: mapper.as_mut(),
             ppu,
             dma,
+            cpu_regs,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
@@ -103,6 +110,7 @@ impl Snes {
             cpu,
             ppu,
             dma,
+            cpu_regs,
             wram,
             mapper,
             fast_rom,
@@ -115,6 +123,7 @@ impl Snes {
             mapper: mapper.as_mut(),
             ppu,
             dma,
+            cpu_regs,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
@@ -137,6 +146,7 @@ struct SnesBus<'a> {
     mapper: &'a mut dyn Mapper,
     ppu: &'a mut Ppu,
     dma: &'a mut Dma,
+    cpu_regs: &'a mut CpuRegs,
     fast_rom: bool,
     nmi: &'a mut bool,
     irq: &'a mut bool,
@@ -200,6 +210,19 @@ impl<'a> SnesBus<'a> {
         let bank = bank_of(addr);
         let offset = offset_of(addr);
         matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && offset == 0x420C
+    }
+
+    /// Returns `Some(offset)` if `addr` is a CPU-system register at
+    /// `$4200-$421F` (excluding the DMA-enable registers, which are
+    /// routed to the DMA controller).
+    fn cpu_reg_offset(addr: Addr24) -> Option<u16> {
+        let bank = bank_of(addr);
+        let offset = offset_of(addr);
+        if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && matches!(offset, 0x4200..=0x421F) {
+            Some(offset)
+        } else {
+            None
+        }
     }
 }
 
@@ -267,6 +290,13 @@ impl<'a> Bus for SnesBus<'a> {
             // MDMAEN / HDMAEN are write-only; reads return open bus.
             return 0xFF;
         }
+        if let Some(reg_off) = Self::cpu_reg_offset(addr) {
+            if let Some(v) = self.cpu_regs.read(reg_off) {
+                return v;
+            }
+            // Write-only registers fall through to open bus.
+            return 0xFF;
+        }
         if let Some(v) = self.mapper.read(addr) {
             return v;
         }
@@ -306,6 +336,17 @@ impl<'a> Bus for SnesBus<'a> {
         }
         if Self::is_hdmaen(addr) {
             self.dma.hdmaen = value;
+            return;
+        }
+        if let Some(reg_off) = Self::cpu_reg_offset(addr) {
+            if self.cpu_regs.write(reg_off, value) {
+                return;
+            }
+            // CpuRegs returned false → maybe a register that lives
+            // elsewhere (e.g. $420D MEMSEL → fast_rom). Handle here.
+            if reg_off == 0x420D {
+                self.fast_rom = value & 0x01 != 0;
+            }
             return;
         }
         // Mapper claims SRAM writes; anything not yet routed drops.
@@ -412,6 +453,7 @@ mod tests {
         let Snes {
             ppu,
             dma,
+            cpu_regs,
             wram,
             mapper,
             fast_rom,
@@ -425,6 +467,7 @@ mod tests {
             mapper: mapper.as_mut(),
             ppu,
             dma,
+            cpu_regs,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,

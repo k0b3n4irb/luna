@@ -19,10 +19,17 @@ use luna_bus::{Addr24, Bus, make_addr};
 impl Cpu {
     /// Execute one instruction: fetch opcode at `PB:PC` and dispatch.
     pub fn step<B: Bus>(&mut self, bus: &mut B) {
-        if self.stopped || self.waiting {
-            // Spin doing nothing; in production, the bus should signal
-            // an interrupt and the wrapper would call clear_wai/clear_stp.
+        if self.stopped {
             return;
+        }
+        // WAI: the CPU pauses until an interrupt arrives. A latched NMI
+        // wakes us up; otherwise just spin.
+        if self.waiting {
+            if self.pending_nmi {
+                self.waiting = false;
+            } else {
+                return;
+            }
         }
         // 65C816 invariant: in emulation mode, the high byte of S is
         // always $01. The Tom Harte test suite supplies arbitrary
@@ -33,6 +40,17 @@ impl Cpu {
         if self.e {
             self.sp = 0x0100 | (self.sp & 0x00FF);
         }
+        // Service a pending NMI BEFORE fetching the next opcode. NMI
+        // is edge-triggered; we consume the latch and run the standard
+        // 65C816 NMI sequence (push PB(native)/PC/P, jump to vector).
+        if self.pending_nmi {
+            self.pending_nmi = false;
+            self.service_nmi(bus);
+            if self.e {
+                self.sp = 0x0100 | (self.sp & 0x00FF);
+            }
+            return;
+        }
         let opcode = self.fetch_u8(bus);
         self.execute(opcode, bus);
         // Defensive re-pin at end-of-step in case any inner sequence
@@ -40,6 +58,19 @@ impl Cpu {
         if self.e {
             self.sp = 0x0100 | (self.sp & 0x00FF);
         }
+    }
+
+    /// Run the NMI service sequence.
+    ///
+    /// Pushes PB (native only), PC and P; sets I, clears D; jumps to
+    /// the NMI vector ($FFEA native / $FFFA emulation). The pushed P
+    /// has the B bit CLEARED — that's how the handler distinguishes a
+    /// BRK from an NMI/IRQ in emulation mode.
+    fn service_nmi<B: Bus>(&mut self, bus: &mut B) {
+        self.service_software_interrupt(
+            bus, /* vec_native */ 0xFFEA, /* vec_emulation */ 0xFFFA,
+            /* set_b_bit_in_emulation */ false,
+        );
     }
 
     /// Dispatch on a fetched opcode. Inlined into the match by LLVM.
@@ -3134,6 +3165,54 @@ mod tests {
     // -------------------------------------------------------------------
     // BRK / COP / RTI / WDM / MVN / MVP
     // -------------------------------------------------------------------
+
+    #[test]
+    fn nmi_in_emulation_jumps_via_fffa_vector_with_b_clear() {
+        // After reset (E=1), set up the NMI vector at $00:FFFA → $9000.
+        let (mut cpu, mut bus) = run(&[0xEA]); // NOP padding
+        bus.poke_slice(0x00_FFFA, &[0x00, 0x90]);
+        // Pretend the hardware just raised NMI.
+        cpu.trigger_nmi();
+        cpu.step(&mut bus);
+        assert_eq!(cpu.pc, 0x9000, "NMI jumped via $FFFA vector");
+        assert_eq!(cpu.pb, 0);
+        assert!(cpu.p.contains(bit::I), "I set after NMI");
+        assert!(!cpu.p.contains(bit::D), "D cleared after NMI");
+        // P pushed with B = 0 (this is what tells the handler "I'm an
+        // NMI, not a BRK").
+        let pushed_p = bus.peek(0x00_01FD);
+        assert_eq!(pushed_p & 0x10, 0, "B bit must be clear in NMI-pushed P");
+    }
+
+    #[test]
+    fn trigger_nmi_is_idempotent_pending_until_step() {
+        let (mut cpu, _bus) = run(&[0xEA]);
+        cpu.trigger_nmi();
+        cpu.trigger_nmi();
+        cpu.trigger_nmi();
+        assert!(cpu.pending_nmi, "still latched as a single pending edge");
+    }
+
+    #[test]
+    fn nmi_wakes_a_waiting_cpu() {
+        // CPU executes WAI → waiting = true. Trigger NMI → next step
+        // services it and clears waiting.
+        let (mut cpu, mut bus) = run(&[0xCB]); // WAI
+        bus.poke_slice(0x00_FFFA, &[0x00, 0x90]);
+        cpu.step(&mut bus); // WAI sets waiting
+        assert!(cpu.waiting);
+        let pc_after_wai = cpu.pc;
+
+        // Without NMI: step does nothing.
+        cpu.step(&mut bus);
+        assert_eq!(cpu.pc, pc_after_wai);
+
+        // With NMI: WAI clears, then NMI services on the same step.
+        cpu.trigger_nmi();
+        cpu.step(&mut bus);
+        assert!(!cpu.waiting);
+        assert_eq!(cpu.pc, 0x9000);
+    }
 
     #[test]
     fn brk_in_emulation_jumps_via_fffe_vector() {
