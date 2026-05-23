@@ -114,7 +114,11 @@ fn is_implemented(opcode: u8) -> bool {
 /// `00 e.json`. Returns the leading 2-hex-digit byte if present.
 fn opcode_from_filename(stem: &str) -> Option<u8> {
     let hex: String = stem.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
-    if hex.len() == 2 { u8::from_str_radix(&hex, 16).ok() } else { None }
+    if hex.len() == 2 {
+        u8::from_str_radix(&hex, 16).ok()
+    } else {
+        None
+    }
 }
 
 // =============================================================================
@@ -181,7 +185,9 @@ fn compare_state(cpu: &Cpu, bus: &RamBus, expected: &State) -> Result<(), String
         let want = entry[1] as u8;
         let got = bus.peek(addr);
         if got != want {
-            return Err(format!("RAM[${addr:06X}]: got ${got:02X}, want ${want:02X}"));
+            return Err(format!(
+                "RAM[${addr:06X}]: got ${got:02X}, want ${want:02X}"
+            ));
         }
     }
     Ok(())
@@ -242,8 +248,7 @@ fn tom_harte() {
         };
 
         let bytes = fs::read(&path).expect("read json");
-        let cases: Vec<TestCase> =
-            serde_json::from_slice(&bytes).expect("parse Tom Harte json");
+        let cases: Vec<TestCase> = serde_json::from_slice(&bytes).expect("parse Tom Harte json");
 
         let op = stats.entry(stem.clone()).or_default();
         for case in &cases {
@@ -305,23 +310,15 @@ fn print_report(stats: &BTreeMap<String, OpStats>, unknown: usize) {
 
     let implemented_ok: u32 = stats
         .iter()
-        .filter(|(name, _)| {
-            opcode_from_filename(name)
-                .is_some_and(is_implemented)
-        })
+        .filter(|(name, _)| opcode_from_filename(name).is_some_and(is_implemented))
         .map(|(_, s)| s.passed)
         .sum();
     let implemented_ko: u32 = stats
         .iter()
-        .filter(|(name, _)| {
-            opcode_from_filename(name)
-                .is_some_and(is_implemented)
-        })
+        .filter(|(name, _)| opcode_from_filename(name).is_some_and(is_implemented))
         .map(|(_, s)| s.failed)
         .sum();
-    eprintln!(
-        "Among implemented opcodes: {implemented_ok} pass / {implemented_ko} fail"
-    );
+    eprintln!("Among implemented opcodes: {implemented_ok} pass / {implemented_ko} fail");
 }
 
 fn enforce_baseline(stats: &BTreeMap<String, OpStats>) {
@@ -330,9 +327,7 @@ fn enforce_baseline(stats: &BTreeMap<String, OpStats>) {
     }
     let regressions: Vec<&String> = stats
         .iter()
-        .filter(|(name, s)| {
-            opcode_from_filename(name).is_some_and(is_implemented) && s.failed > 0
-        })
+        .filter(|(name, s)| opcode_from_filename(name).is_some_and(is_implemented) && s.failed > 0)
         .map(|(name, _)| name)
         .collect();
     assert!(

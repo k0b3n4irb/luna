@@ -37,13 +37,13 @@ impl Cpu {
             // -----------------------------------------------------------
             // Flag toggles
             // -----------------------------------------------------------
-            0x18 => self.p.remove(bit::C),  // CLC
-            0x38 => self.p.insert(bit::C),  // SEC
-            0x58 => self.p.remove(bit::I),  // CLI
-            0x78 => self.p.insert(bit::I),  // SEI
-            0xB8 => self.p.remove(bit::V),  // CLV
-            0xD8 => self.p.remove(bit::D),  // CLD
-            0xF8 => self.p.insert(bit::D),  // SED
+            0x18 => self.p.remove(bit::C), // CLC
+            0x38 => self.p.insert(bit::C), // SEC
+            0x58 => self.p.remove(bit::I), // CLI
+            0x78 => self.p.insert(bit::I), // SEI
+            0xB8 => self.p.remove(bit::V), // CLV
+            0xD8 => self.p.remove(bit::D), // CLD
+            0xF8 => self.p.insert(bit::D), // SED
 
             // -----------------------------------------------------------
             // Loads (LDA)
@@ -69,15 +69,15 @@ impl Cpu {
             // -----------------------------------------------------------
             // Branches (8-bit signed PC-relative)
             // -----------------------------------------------------------
-            0x80 => self.branch_if(bus, true),                              // BRA
-            0x10 => self.branch_if(bus, !self.p.contains(bit::N)),          // BPL
-            0x30 => self.branch_if(bus, self.p.contains(bit::N)),           // BMI
-            0x50 => self.branch_if(bus, !self.p.contains(bit::V)),          // BVC
-            0x70 => self.branch_if(bus, self.p.contains(bit::V)),           // BVS
-            0x90 => self.branch_if(bus, !self.p.contains(bit::C)),          // BCC
-            0xB0 => self.branch_if(bus, self.p.contains(bit::C)),           // BCS
-            0xD0 => self.branch_if(bus, !self.p.contains(bit::Z)),          // BNE
-            0xF0 => self.branch_if(bus, self.p.contains(bit::Z)),           // BEQ
+            0x80 => self.branch_if(bus, true), // BRA
+            0x10 => self.branch_if(bus, !self.p.contains(bit::N)), // BPL
+            0x30 => self.branch_if(bus, self.p.contains(bit::N)), // BMI
+            0x50 => self.branch_if(bus, !self.p.contains(bit::V)), // BVC
+            0x70 => self.branch_if(bus, self.p.contains(bit::V)), // BVS
+            0x90 => self.branch_if(bus, !self.p.contains(bit::C)), // BCC
+            0xB0 => self.branch_if(bus, self.p.contains(bit::C)), // BCS
+            0xD0 => self.branch_if(bus, !self.p.contains(bit::Z)), // BNE
+            0xF0 => self.branch_if(bus, self.p.contains(bit::Z)), // BEQ
 
             // -----------------------------------------------------------
             // Increment / decrement A
@@ -430,7 +430,9 @@ mod tests {
     #[test]
     fn sta_long_16bit_writes_two_bytes() {
         // CLC, XCE, REP #$20, LDA #$ABCD, STA $7E1234
-        let prog = &[0x18, 0xFB, 0xC2, 0x20, 0xA9, 0xCD, 0xAB, 0x8F, 0x34, 0x12, 0x7E];
+        let prog = &[
+            0x18, 0xFB, 0xC2, 0x20, 0xA9, 0xCD, 0xAB, 0x8F, 0x34, 0x12, 0x7E,
+        ];
         let (mut cpu, mut bus) = run(prog);
         cpu.step(&mut bus); // CLC
         cpu.step(&mut bus); // XCE → native
