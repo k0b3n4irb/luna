@@ -13,11 +13,17 @@ use luna_cartridge::Cartridge;
 use luna_core::Snes;
 use luna_ppu::{FRAME_H, FRAME_W};
 
-/// Steps to attempt per UI frame (~16 ms at 60Hz). 60 k is comfortable
-/// on modern hardware and gives the synthetic-VBlank counter (every
-/// 30 k inside Snes::step) two synthetic frames per UI tick — enough
-/// to make games with double-vblank handlers progress.
-const STEPS_PER_FRAME: u32 = 60_000;
+/// Hard ceiling on instructions per UI frame — purely a safety belt
+/// against runaway loops. The real budget is wall-clock time
+/// ([`FRAME_TIME_BUDGET_MS`]) so the UI stays responsive even on slow
+/// hardware or ROMs that spend a lot of cycles per instruction.
+const STEPS_PER_FRAME: u32 = 200_000;
+
+/// How many milliseconds we're willing to spend stepping the CPU
+/// before yielding back to the UI thread. ~8 ms leaves half of a 60 Hz
+/// frame for compositing, layout, and event handling, which is what
+/// keeps the window from showing "Not Responding" under heavy load.
+const FRAME_TIME_BUDGET_MS: u128 = 8;
 
 /// The Luna desktop application.
 pub(crate) struct LunaApp {
@@ -147,12 +153,14 @@ impl LunaApp {
         }
     }
 
-    /// Step the CPU `STEPS_PER_FRAME` times, catching panics so a
-    /// not-yet-implemented opcode doesn't kill the GUI.
+    /// Step the CPU under a **wall-clock time budget** so the UI
+    /// thread never starves. Panics are caught so an unimplemented
+    /// opcode just pauses emulation instead of killing the window.
     ///
-    /// A single `catch_unwind` wraps the *whole* batch — the previous
-    /// per-step variant cost ~60 k unwind-setup calls per UI frame and
-    /// noticeably throttled emulation throughput.
+    /// We check the clock every `BATCH_SIZE` steps rather than every
+    /// step — calling `Instant::now()` 60 000+ times per frame would
+    /// itself eat the budget. A batch of 256 is small enough to
+    /// stay within budget even on slow ROMs.
     fn step_cpu(&mut self) {
         if self.paused {
             return;
@@ -160,13 +168,24 @@ impl LunaApp {
         let Some(snes) = self.snes.as_mut() else {
             return;
         };
+        const BATCH_SIZE: u32 = 256;
+        let deadline =
+            Instant::now() + std::time::Duration::from_millis(FRAME_TIME_BUDGET_MS as u64);
         let prev_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         let result = catch_unwind(AssertUnwindSafe(|| {
-            let mut executed = 0u32;
+            let mut executed: u32 = 0;
             while executed < STEPS_PER_FRAME && !snes.cpu.stopped {
-                snes.step();
-                executed += 1;
+                for _ in 0..BATCH_SIZE {
+                    if snes.cpu.stopped {
+                        break;
+                    }
+                    snes.step();
+                    executed += 1;
+                }
+                if Instant::now() >= deadline {
+                    break;
+                }
             }
             executed
         }));
