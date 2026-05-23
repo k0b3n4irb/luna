@@ -76,6 +76,9 @@ gloo-timers          = { version = "0.3", features = ["futures"] }
 # CLI
 clap                 = { version = "4", features = ["derive"] }
 
+# Image encoding (CLI screenshots, golden tests)
+image                = { version = "0.25", default-features = false, features = ["png"] }
+
 [profile.release]
 opt-level = 3
 lto = "thin"
