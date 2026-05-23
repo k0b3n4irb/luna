@@ -1,9 +1,15 @@
 //! SNES Picture Processing Unit.
 //!
-//! 8 graphics modes (including Mode 7), 4 background layers, 128 sprites,
-//! OAM, CGRAM palette, windowing, color math.
+//! P1.1 scope: data-flow plumbing only — VRAM (64 KB), CGRAM (512 B)
+//! and OAM (544 B) with the corresponding MMIO registers and auto-
+//! increment behaviour. No rendering yet (lands in P1.4+).
 //!
-//! Rendering is scanline-based in V1; dot-based renderer planned for V2 to
-//! support demos that change registers mid-scanline.
+//! Reference: <https://problemkaputt.de/fullsnes.htm> §"PPU Registers".
 //!
 //! See `ARCHITECTURE.md` §6.2.
+
+mod memory;
+mod ppu;
+
+pub use memory::{Cgram, Oam, Vram};
+pub use ppu::{Ppu, register};
