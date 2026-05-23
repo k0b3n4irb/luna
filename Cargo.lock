@@ -143,6 +143,9 @@ version = "0.0.1"
 [[package]]
 name = "luna-cpu-65c816"
 version = "0.0.1"
+dependencies = [
+ "luna-bus",
+]
 
 [[package]]
 name = "luna-cpu-spc700"

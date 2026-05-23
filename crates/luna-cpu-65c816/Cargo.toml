@@ -9,5 +9,11 @@ authors.workspace = true
 repository.workspace = true
 readme.workspace = true
 
+[dependencies]
+luna-bus = { workspace = true }
+
+[dev-dependencies]
+luna-bus = { workspace = true, features = ["test-utils"] }
+
 [lints]
 workspace = true
