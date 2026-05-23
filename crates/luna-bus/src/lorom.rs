@@ -191,7 +191,7 @@ mod tests {
 
     #[test]
     fn sram_addresses_outside_window_dont_claim() {
-        let mut m = LoRomMapper::new(ramp_rom(32 * 1024), 8 * 1024);
+        let m = LoRomMapper::new(ramp_rom(32 * 1024), 8 * 1024);
         // Bank $70 offset $8000 is ROM territory, not SRAM.
         assert!(m.sram_offset(0x70, 0x8000).is_none());
         // Bank $00 offset $0000 is LowRAM territory, not SRAM.
