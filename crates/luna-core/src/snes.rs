@@ -9,6 +9,7 @@ use luna_bus::lorom::LoRomMapper;
 use luna_bus::{Addr24, Bus, MCycles, Mapper, MapperKind, address_speed, bank_of, offset_of};
 use luna_cartridge::Cartridge;
 use luna_cpu_65c816::Cpu;
+use luna_dma::{Dma, DmaBus};
 use luna_ppu::Ppu;
 
 /// Top-level SNES machine.
@@ -17,6 +18,8 @@ pub struct Snes {
     pub cpu: Cpu,
     /// Picture Processing Unit — VRAM / CGRAM / OAM + registers.
     pub ppu: Ppu,
+    /// DMA controller — 8 channels at `$4300-$437F` plus `$420B/$420C`.
+    pub dma: Dma,
     /// 128 KB Work RAM (banks `$7E-$7F` and the LowRAM mirror).
     pub wram: Box<[u8; 0x20000]>,
     /// Cartridge mapper (LoROM in P0.6; other mappers in V1+).
@@ -55,6 +58,7 @@ impl Snes {
         Self {
             cpu: Cpu::new(),
             ppu: Ppu::new(),
+            dma: Dma::new(),
             wram: Box::new([0; 0x20000]),
             mapper,
             fast_rom: cart.header.fast_rom,
@@ -70,6 +74,7 @@ impl Snes {
         let Snes {
             cpu,
             ppu,
+            dma,
             wram,
             mapper,
             fast_rom,
@@ -81,6 +86,7 @@ impl Snes {
             wram,
             mapper: mapper.as_mut(),
             ppu,
+            dma,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
@@ -96,6 +102,7 @@ impl Snes {
         let Snes {
             cpu,
             ppu,
+            dma,
             wram,
             mapper,
             fast_rom,
@@ -107,6 +114,7 @@ impl Snes {
             wram,
             mapper: mapper.as_mut(),
             ppu,
+            dma,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
@@ -128,6 +136,7 @@ struct SnesBus<'a> {
     wram: &'a mut [u8; 0x20000],
     mapper: &'a mut dyn Mapper,
     ppu: &'a mut Ppu,
+    dma: &'a mut Dma,
     fast_rom: bool,
     nmi: &'a mut bool,
     irq: &'a mut bool,
@@ -166,6 +175,78 @@ impl<'a> SnesBus<'a> {
             None
         }
     }
+
+    /// Returns `Some(offset)` if `addr` falls in the DMA register
+    /// window (`$00-$3F:$4300-$437F` and the `$80-$BF` mirror).
+    fn dma_offset(addr: Addr24) -> Option<u16> {
+        let bank = bank_of(addr);
+        let offset = offset_of(addr);
+        if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && matches!(offset, 0x4300..=0x437F) {
+            Some(offset)
+        } else {
+            None
+        }
+    }
+
+    /// `true` if `addr` is the `MDMAEN` register `$420B`.
+    fn is_mdmaen(addr: Addr24) -> bool {
+        let bank = bank_of(addr);
+        let offset = offset_of(addr);
+        matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && offset == 0x420B
+    }
+
+    /// `true` if `addr` is the `HDMAEN` register `$420C`.
+    fn is_hdmaen(addr: Addr24) -> bool {
+        let bank = bank_of(addr);
+        let offset = offset_of(addr);
+        matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && offset == 0x420C
+    }
+}
+
+/// DMA-side view of the system: holds the minimum needed for a sync
+/// transfer (WRAM + cartridge + PPU) **without** carrying a reference
+/// to the [`Dma`] controller, so the controller can borrow itself
+/// mutably while running.
+struct DmaBusView<'a> {
+    wram: &'a mut [u8; 0x20000],
+    mapper: &'a mut dyn Mapper,
+    ppu: &'a mut Ppu,
+}
+
+impl<'a> DmaBus for DmaBusView<'a> {
+    fn read_a(&mut self, addr: Addr24) -> u8 {
+        if let Some(o) = SnesBus::wram_offset(addr) {
+            return self.wram[o];
+        }
+        // A-side ROM / SRAM reads via mapper; everything else is open
+        // bus until those subsystems land.
+        self.mapper.read(addr).unwrap_or(0xFF)
+    }
+
+    fn write_a(&mut self, addr: Addr24, value: u8) {
+        if let Some(o) = SnesBus::wram_offset(addr) {
+            self.wram[o] = value;
+            return;
+        }
+        // SRAM writes go through the mapper; ROM writes drop.
+        let _ = self.mapper.write(addr, value);
+    }
+
+    fn read_b(&mut self, b_offset: u8) -> u8 {
+        // B-bus range $00-$3F = PPU. Other regions (APU $40-$43, WRAM
+        // port $80-$83) read open-bus until those subsystems land.
+        if b_offset <= 0x3F {
+            self.ppu.read(b_offset)
+        } else {
+            0xFF
+        }
+    }
+
+    fn write_b(&mut self, b_offset: u8, value: u8) {
+        if b_offset <= 0x3F {
+            self.ppu.write(b_offset, value);
+        }
+    }
 }
 
 impl<'a> Bus for SnesBus<'a> {
@@ -179,13 +260,17 @@ impl<'a> Bus for SnesBus<'a> {
         if let Some(off) = Self::ppu_offset(addr) {
             return self.ppu.read(off);
         }
+        if let Some(offset) = Self::dma_offset(addr) {
+            return self.dma.read_register(offset).unwrap_or(0xFF);
+        }
+        if Self::is_mdmaen(addr) || Self::is_hdmaen(addr) {
+            // MDMAEN / HDMAEN are write-only; reads return open bus.
+            return 0xFF;
+        }
         if let Some(v) = self.mapper.read(addr) {
             return v;
         }
-        // Open bus stub — anything we don't yet route returns 0xFF.
-        // Real hardware exposes the last value on the data bus, which
-        // we'll model when it matters (CPU-internal registers $4200+
-        // land in P1.3).
+        // Open bus stub.
         0xFF
     }
 
@@ -195,13 +280,36 @@ impl<'a> Bus for SnesBus<'a> {
 
         if let Some(o) = Self::wram_offset(addr) {
             self.wram[o] = value;
-        } else if let Some(off) = Self::ppu_offset(addr) {
-            self.ppu.write(off, value);
-        } else if self.mapper.write(addr, value) {
-            // Mapper claims SRAM writes; ROM writes are silently dropped.
-        } else {
-            // MMIO writes outside PPU still dropped in P1.1.
+            return;
         }
+        if let Some(off) = Self::ppu_offset(addr) {
+            self.ppu.write(off, value);
+            return;
+        }
+        if let Some(offset) = Self::dma_offset(addr) {
+            self.dma.write_register(offset, value);
+            return;
+        }
+        if Self::is_mdmaen(addr) {
+            // Trigger sync DMA on every channel selected in `value`.
+            // We splat the SnesBus borrows: `dma` is mutated by
+            // run_mdma, and the other refs flow into DmaBusView. This
+            // is the borrow-split that lets the DMA call itself
+            // recursively without re-entering the Bus impl.
+            let mut view = DmaBusView {
+                wram: self.wram,
+                mapper: self.mapper,
+                ppu: self.ppu,
+            };
+            self.dma.run_mdma(&mut view, value);
+            return;
+        }
+        if Self::is_hdmaen(addr) {
+            self.dma.hdmaen = value;
+            return;
+        }
+        // Mapper claims SRAM writes; anything not yet routed drops.
+        let _ = self.mapper.write(addr, value);
     }
 
     fn io_cycle(&mut self, mcycles: MCycles) {
@@ -303,6 +411,7 @@ mod tests {
         let mut snes = Snes::from_cartridge(cart);
         let Snes {
             ppu,
+            dma,
             wram,
             mapper,
             fast_rom,
@@ -315,6 +424,7 @@ mod tests {
             wram,
             mapper: mapper.as_mut(),
             ppu,
+            dma,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
@@ -325,6 +435,67 @@ mod tests {
         assert_eq!(bus.read(make_addr(0x00, 0x0100)), 0xAA);
         // And from $7E (full WRAM):
         assert_eq!(bus.read(make_addr(0x7E, 0x0100)), 0xAA);
+    }
+
+    #[test]
+    fn dma_uploads_palette_via_mdmaen_trigger() {
+        // End-to-end integration: CPU writes the DMA channel 0 setup
+        // bytes, then writes $01 to $420B → the DMA controller pulls
+        // 4 bytes from WRAM and pumps them through PPU $2122 (CGDATA).
+        //
+        // Program at $8000 (long-hand because we don't yet have
+        // store-immediate; we LDA / STA each byte):
+        //   LDA #$22 ; STA $4301  ; channel 0 BBAD = $22 → $2122
+        //   LDA #$00 ; STA $4302  ; A1TL = $00
+        //   LDA #$20 ; STA $4303  ; A1TH = $20 → A-bus addr $002000
+        //   LDA #$7E ; STA $4304  ; A1B  = $7E
+        //   LDA #$04 ; STA $4305  ; DAS  = $0004
+        //   LDA #$00 ; STA $4300  ; DMAP = mode 0, +1, A→B
+        //   LDA #$01 ; STA $420B  ; MDMAEN bit 0
+        //   STP
+        //
+        // (DAS high byte stays at 0 from reset.)
+        let cart = demo_lorom();
+        let mut rom = cart.rom.clone();
+        let prog = [
+            0xA9, 0x22, 0x8D, 0x01, 0x43, // LDA #$22 ; STA $4301
+            0xA9, 0x00, 0x8D, 0x02, 0x43, // LDA #$00 ; STA $4302
+            0xA9, 0x20, 0x8D, 0x03, 0x43, // LDA #$20 ; STA $4303
+            0xA9, 0x7E, 0x8D, 0x04, 0x43, // LDA #$7E ; STA $4304
+            0xA9, 0x04, 0x8D, 0x05, 0x43, // LDA #$04 ; STA $4305
+            0xA9, 0x00, 0x8D, 0x00, 0x43, // LDA #$00 ; STA $4300
+            0xA9, 0x01, 0x8D, 0x0B, 0x42, // LDA #$01 ; STA $420B (trigger)
+            0xDB, // STP
+        ];
+        rom[..prog.len()].copy_from_slice(&prog);
+        let cart = Cartridge::from_bytes(rom).unwrap();
+        let mut snes = Snes::from_cartridge(cart);
+        snes.reset();
+        snes.cpu.db = 0;
+        // Seed the palette bytes in WRAM at $7E:2000.
+        // (CGRAM expects a low/high pair per color → 2 colors here.)
+        snes.wram[0x2000] = 0x1F; // red.low
+        snes.wram[0x2001] = 0x00; // red.high  → BGR555 = 0x001F (pure red)
+        snes.wram[0x2002] = 0xE0; // green.low
+        snes.wram[0x2003] = 0x03; // green.high → 0x03E0 (pure green)
+        // Make sure the CGRAM word address starts at 0.
+        snes.ppu.cgram.set_address(0);
+
+        // Run until the STP halts the CPU. The longest path is 8
+        // groups of LDA+STA = 16 instructions, plus the STP.
+        for _ in 0..32 {
+            if snes.cpu.stopped {
+                break;
+            }
+            snes.step();
+        }
+        assert!(snes.cpu.stopped, "program should reach STP");
+
+        // After the DMA, CGRAM colors 0 and 1 should be red then green.
+        assert_eq!(snes.ppu.cgram.color(0), 0x001F, "color 0 = red");
+        assert_eq!(snes.ppu.cgram.color(1), 0x03E0, "color 1 = green");
+        // DAS is zeroed by hardware on completion.
+        assert_eq!(snes.dma.channels[0].das, 0);
     }
 
     #[test]
