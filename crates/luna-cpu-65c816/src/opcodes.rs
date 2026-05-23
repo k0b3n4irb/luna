@@ -394,13 +394,21 @@ impl Cpu {
             0xCB => self.waiting = true, // WAI
             0xDB => self.stopped = true, // STP
 
-            // Everything else: P0.4b territory.
-            other => panic!(
-                "luna-cpu-65c816: opcode 0x{other:02X} not yet implemented \
-                 (PB:PC=${:02X}:{:04X})",
-                self.pb,
-                self.pc.wrapping_sub(1),
-            ),
+            // -----------------------------------------------------------
+            // Interrupts & misc
+            // -----------------------------------------------------------
+            0x00 => self.brk(bus),
+            0x02 => self.cop(bus),
+            0x40 => self.rti(bus),
+            0x42 => self.wdm(bus),
+
+            // -----------------------------------------------------------
+            // Block moves
+            // -----------------------------------------------------------
+            0x54 => self.mvn(bus),
+            0x44 => self.mvp(bus),
+            // All 256 opcode values are explicitly handled above.
+            // The compiler validates exhaustiveness; no catch-all needed.
         }
     }
 
@@ -906,6 +914,165 @@ impl Cpu {
     fn brl<B: Bus>(&mut self, bus: &mut B) {
         let rel = self.fetch_u16(bus) as i16;
         self.pc = self.pc.wrapping_add_signed(rel);
+    }
+
+    // ===================================================================
+    // BRK / COP — software interrupts
+    //
+    // Each is a 2-byte instruction: opcode + "signature" byte (ignored
+    // by the CPU but available to the handler via the saved PC).
+    //
+    // Vectors (native mode):
+    //   BRK: $00:FFE6/FFE7   COP: $00:FFE4/FFE5
+    // Vectors (emulation mode):
+    //   BRK: $00:FFFE/FFFF (shared with IRQ)   COP: $00:FFF4/FFF5
+    //
+    // Native mode: push PB, PC (16-bit, post-signature), P; clear PB;
+    //   set I, clear D; PC ← vector.
+    // Emulation mode: push PC (16-bit), P with the B (break) bit set
+    //   for BRK; clear PB; set I, clear D; PC ← vector.
+    // ===================================================================
+
+    fn brk<B: Bus>(&mut self, bus: &mut B) {
+        // Skip the signature byte (CPU "consumes" but doesn't use it).
+        let _signature = self.fetch_u8(bus);
+        self.service_software_interrupt(
+            bus, /* vec_native */ 0xFFE6, /* vec_emulation */ 0xFFFE,
+            /* set_b_bit_in_emulation */ true,
+        );
+    }
+
+    fn cop<B: Bus>(&mut self, bus: &mut B) {
+        let _signature = self.fetch_u8(bus);
+        self.service_software_interrupt(
+            bus, /* vec_native */ 0xFFE4, /* vec_emulation */ 0xFFF4,
+            /* set_b_bit_in_emulation */ false,
+        );
+    }
+
+    fn service_software_interrupt<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        vec_native: u16,
+        vec_emulation: u16,
+        set_b_bit_in_emulation: bool,
+    ) {
+        if self.e {
+            // Emulation mode: 6502-compatible stack frame.
+            self.push_u16(bus, self.pc);
+            let pushed_p = if set_b_bit_in_emulation {
+                self.p.bits() | 0x10 // "B" flag set on stack for BRK
+            } else {
+                self.p.bits() & !0x10 // B clear for hardware-style IRQ/COP
+            };
+            self.push_u8(bus, pushed_p);
+            let lo = bus.read(make_addr(0, vec_emulation));
+            let hi = bus.read(make_addr(0, vec_emulation.wrapping_add(1)));
+            self.pc = u16::from(lo) | (u16::from(hi) << 8);
+        } else {
+            // Native mode: full 65816 stack frame.
+            self.push_u8(bus, self.pb);
+            self.push_u16(bus, self.pc);
+            self.push_u8(bus, self.p.bits());
+            let lo = bus.read(make_addr(0, vec_native));
+            let hi = bus.read(make_addr(0, vec_native.wrapping_add(1)));
+            self.pc = u16::from(lo) | (u16::from(hi) << 8);
+        }
+        self.pb = 0;
+        self.p.remove(bit::D);
+        self.p.insert(bit::I);
+    }
+
+    // ===================================================================
+    // RTI — return from interrupt
+    //
+    // Pulls P (and, in native mode, PB as well). E mode pulls the
+    // standard 6502 frame.
+    // ===================================================================
+
+    fn rti<B: Bus>(&mut self, bus: &mut B) {
+        let new_p = self.pull_u8(bus);
+        self.pc = self.pull_u16(bus);
+        // Emulation forces M and X to stay set in P.
+        let effective = if self.e {
+            new_p | bit::M | bit::X
+        } else {
+            new_p
+        };
+        self.p = crate::flags::StatusFlags(effective);
+        if !self.e {
+            self.pb = self.pull_u8(bus);
+        }
+        if self.p.idx8() {
+            self.x &= 0x00FF;
+            self.y &= 0x00FF;
+        }
+    }
+
+    // ===================================================================
+    // WDM — reserved opcode, treated as a 2-byte NOP.
+    //
+    // It still consumes one operand byte (read but ignored), preserving
+    // PC alignment for any code that uses it as a placeholder.
+    // ===================================================================
+
+    fn wdm<B: Bus>(&mut self, bus: &mut B) {
+        let _operand = self.fetch_u8(bus);
+    }
+
+    // ===================================================================
+    // MVN / MVP — block move
+    //
+    // 3-byte instructions: opcode, dest_bank, src_bank.
+    // Per iteration: write one byte from `src_bank:X` to `dest_bank:Y`,
+    // then ±1 on X and Y, -1 on A. If A != $FFFF the PC is rewound by
+    // 3 so the *next* CPU step re-executes the same instruction. This
+    // matches the hardware's behavior of being interruptible mid-block
+    // and is the granularity at which the Tom Harte test suite expects
+    // single-step state to advance.
+    //
+    // MVN (Move Negative): X and Y increment; copy proceeds from low
+    //   addresses to high. Despite the name "negative", the semantics
+    //   are forward copy — the source/destination operands are encoded
+    //   in the order dest, src in the instruction stream.
+    // MVP (Move Positive): X and Y decrement; backward copy. Used to
+    //   move overlapping regions toward higher addresses.
+    //
+    // DB is updated to dest_bank as a side effect — software relying
+    // on DB after MVN/MVP must be aware.
+    // ===================================================================
+
+    fn block_move_step<B: Bus>(&mut self, bus: &mut B, increment: bool) {
+        let dest_bank = self.fetch_u8(bus);
+        let src_bank = self.fetch_u8(bus);
+        let byte = bus.read(make_addr(src_bank, self.x));
+        bus.write(make_addr(dest_bank, self.y), byte);
+        if increment {
+            self.x = self.x.wrapping_add(1);
+            self.y = self.y.wrapping_add(1);
+        } else {
+            self.x = self.x.wrapping_sub(1);
+            self.y = self.y.wrapping_sub(1);
+        }
+        // X-flag width truncation per spec.
+        if self.p.idx8() {
+            self.x &= 0x00FF;
+            self.y &= 0x00FF;
+        }
+        self.a = self.a.wrapping_sub(1);
+        self.db = dest_bank;
+        if self.a != 0xFFFF {
+            // Rewind PC to re-execute the same MVN/MVP next step.
+            self.pc = self.pc.wrapping_sub(3);
+        }
+    }
+
+    fn mvn<B: Bus>(&mut self, bus: &mut B) {
+        self.block_move_step(bus, true);
+    }
+
+    fn mvp<B: Bus>(&mut self, bus: &mut B) {
+        self.block_move_step(bus, false);
     }
 
     // ===================================================================
@@ -2791,6 +2958,108 @@ mod tests {
         cpu.step(&mut bus); // RTL
         assert_eq!(cpu.pc, 0x8004);
         assert_eq!(cpu.pb, 0x00);
+    }
+
+    // -------------------------------------------------------------------
+    // BRK / COP / RTI / WDM / MVN / MVP
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn brk_in_emulation_jumps_via_fffe_vector() {
+        let (mut cpu, mut bus) = run(&[0x00, 0xAA]); // BRK + signature
+        // BRK vector at $FFFE/$FFFF → $9000.
+        bus.poke_slice(0x00_FFFE, &[0x00, 0x90]);
+        cpu.step(&mut bus); // BRK
+        assert_eq!(cpu.pc, 0x9000);
+        assert_eq!(cpu.pb, 0);
+        assert!(cpu.p.contains(bit::I));
+        assert!(!cpu.p.contains(bit::D));
+        // P was pushed with B set (emulation, BRK-style).
+        let pushed_p = bus.peek(0x00_01FD);
+        assert!(
+            pushed_p & 0x10 != 0,
+            "B bit must be set in pushed P for BRK"
+        );
+    }
+
+    #[test]
+    fn cop_uses_fff4_vector_in_emulation() {
+        let (mut cpu, mut bus) = run(&[0x02, 0xAA]);
+        bus.poke_slice(0x00_FFF4, &[0x00, 0x90]);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.pc, 0x9000);
+        // P was pushed with B clear.
+        let pushed_p = bus.peek(0x00_01FD);
+        assert!(pushed_p & 0x10 == 0, "B bit must be clear for COP");
+    }
+
+    #[test]
+    fn rti_pulls_p_and_pc_in_emulation() {
+        // Push fake interrupt frame: P=$24, PC=$9000.
+        let (mut cpu, mut bus) = run(&[0x40]); // RTI
+        bus.poke(0x00_01FD, 0x24); // P (pulled first)
+        bus.poke(0x00_01FE, 0x00); // PCL
+        bus.poke(0x00_01FF, 0x90); // PCH
+        cpu.sp = 0x01FC;
+        cpu.step(&mut bus);
+        assert_eq!(cpu.pc, 0x9000);
+        // P was pulled, but M/X are forced on in emulation mode.
+        assert_eq!(cpu.p.bits(), 0x24 | bit::M | bit::X);
+    }
+
+    #[test]
+    fn wdm_consumes_one_operand_byte() {
+        let (mut cpu, mut bus) = run(&[0x42, 0xAA]);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.pc, 0x8002, "WDM advances PC by 2 like other 2-byte ops");
+    }
+
+    #[test]
+    fn mvn_copies_one_byte_and_rewinds_pc_until_done() {
+        // MVN dest_bank src_bank — let's copy 3 bytes from $7E:0000 to
+        // $7E:0100, with A=2 (= len - 1).
+        let (mut cpu, mut bus) = run(&[0x54, 0x7E, 0x7E]);
+        bus.poke_slice(0x7E_0000, &[0xAA, 0xBB, 0xCC]);
+        cpu.x = 0x0000;
+        cpu.y = 0x0100;
+        cpu.a = 0x0002; // copy 3 bytes total
+        cpu.p.remove(bit::X); // 16-bit X/Y
+
+        cpu.step(&mut bus); // iteration 1: write $7E:0100 ← $7E:0000 ($AA)
+        assert_eq!(bus.peek(0x7E_0100), 0xAA);
+        assert_eq!(cpu.x, 1);
+        assert_eq!(cpu.y, 0x0101);
+        assert_eq!(cpu.a, 0x0001);
+        assert_eq!(cpu.pc, 0x8000, "PC rewound to MVN until A wraps");
+
+        cpu.step(&mut bus); // iteration 2: $7E:0101 ← $7E:0001 ($BB)
+        assert_eq!(bus.peek(0x7E_0101), 0xBB);
+        assert_eq!(cpu.a, 0x0000);
+        assert_eq!(cpu.pc, 0x8000);
+
+        cpu.step(&mut bus); // iteration 3: $7E:0102 ← $7E:0002 ($CC), A wraps
+        assert_eq!(bus.peek(0x7E_0102), 0xCC);
+        assert_eq!(cpu.a, 0xFFFF);
+        assert_eq!(cpu.pc, 0x8003, "PC finally advances past MVN");
+        assert_eq!(cpu.db, 0x7E, "MVN updates DB to the destination bank");
+    }
+
+    #[test]
+    fn mvp_copies_backward() {
+        // MVP dest src — same as MVN but X/Y decrement.
+        let (mut cpu, mut bus) = run(&[0x44, 0x7E, 0x7E]);
+        bus.poke_slice(0x7E_0002, &[0xCC]);
+        cpu.x = 0x0002;
+        cpu.y = 0x0102;
+        cpu.a = 0x0000; // copy 1 byte (and A then wraps to $FFFF)
+        cpu.p.remove(bit::X);
+
+        cpu.step(&mut bus);
+        assert_eq!(bus.peek(0x7E_0102), 0xCC);
+        assert_eq!(cpu.x, 0x0001);
+        assert_eq!(cpu.y, 0x0101);
+        assert_eq!(cpu.a, 0xFFFF);
+        assert_eq!(cpu.pc, 0x8003, "single-byte MVP completes in one step");
     }
 
     #[test]
