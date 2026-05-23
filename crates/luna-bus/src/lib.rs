@@ -19,6 +19,7 @@
 //! See `ARCHITECTURE.md` §5.
 
 pub mod bus;
+pub mod hirom;
 pub mod lorom;
 pub mod mapper;
 pub mod speed;
