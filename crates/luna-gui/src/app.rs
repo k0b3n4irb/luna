@@ -495,11 +495,14 @@ fn stubs_panel(ui: &mut egui::Ui, snes: &Snes) {
         .num_columns(2)
         .striped(true)
         .show(ui, |ui| {
-            for (i, v) in snes.apu_mailbox_to_cpu.iter().enumerate() {
+            for (i, v) in snes.apu.ports().iter().enumerate() {
                 ui.label(format!("APU $214{i}"));
                 ui.label(mono(format!("${v:02X}")));
                 ui.end_row();
             }
+            ui.label("APU phase");
+            ui.label(mono(format!("{:?}", snes.apu.phase())));
+            ui.end_row();
             ui.label("Fake frames");
             ui.label(mono(snes.fake_frame_count.to_string()));
             ui.end_row();

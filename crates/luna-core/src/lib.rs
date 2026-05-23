@@ -7,8 +7,10 @@
 //!
 //! See `ARCHITECTURE.md` §6 and §6.6 for the target architecture.
 
+pub mod apu_stub;
 pub mod cpu_regs;
 pub mod snes;
 
+pub use apu_stub::{ApuStub, Phase as ApuPhase};
 pub use cpu_regs::CpuRegs;
 pub use snes::Snes;
