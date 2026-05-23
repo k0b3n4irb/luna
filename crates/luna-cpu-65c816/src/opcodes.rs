@@ -298,6 +298,50 @@ impl Cpu {
             0x3C => self.bit_abs_x(bus),
 
             // -----------------------------------------------------------
+            // Shifts — ASL (Arithmetic Shift Left)
+            // -----------------------------------------------------------
+            0x0A => self.asl_a(),
+            0x06 => self.asl_dp(bus),
+            0x0E => self.asl_abs(bus),
+            0x16 => self.asl_dp_x(bus),
+            0x1E => self.asl_abs_x(bus),
+
+            // -----------------------------------------------------------
+            // Shifts — LSR (Logical Shift Right)
+            // -----------------------------------------------------------
+            0x4A => self.lsr_a(),
+            0x46 => self.lsr_dp(bus),
+            0x4E => self.lsr_abs(bus),
+            0x56 => self.lsr_dp_x(bus),
+            0x5E => self.lsr_abs_x(bus),
+
+            // -----------------------------------------------------------
+            // Shifts — ROL (Rotate Left through Carry)
+            // -----------------------------------------------------------
+            0x2A => self.rol_a(),
+            0x26 => self.rol_dp(bus),
+            0x2E => self.rol_abs(bus),
+            0x36 => self.rol_dp_x(bus),
+            0x3E => self.rol_abs_x(bus),
+
+            // -----------------------------------------------------------
+            // Shifts — ROR (Rotate Right through Carry)
+            // -----------------------------------------------------------
+            0x6A => self.ror_a(),
+            0x66 => self.ror_dp(bus),
+            0x6E => self.ror_abs(bus),
+            0x76 => self.ror_dp_x(bus),
+            0x7E => self.ror_abs_x(bus),
+
+            // -----------------------------------------------------------
+            // TSB / TRB — test-and-{set,reset} bits in memory
+            // -----------------------------------------------------------
+            0x04 => self.tsb_dp(bus),
+            0x0C => self.tsb_abs(bus),
+            0x14 => self.trb_dp(bus),
+            0x1C => self.trb_abs(bus),
+
+            // -----------------------------------------------------------
             // Misc
             // -----------------------------------------------------------
             0xEA => { /* NOP */ }
@@ -1579,6 +1623,262 @@ impl Cpu {
         let v = self.arithmetic_read_from(bus, a);
         self.bit_value(v, false);
     }
+
+    // ===================================================================
+    // ASL / LSR / ROL / ROR
+    //
+    // Each acts on a u16 value (M-width-aware); returns the new value.
+    // C is set to the bit shifted out. N and Z reflect the result.
+    // Accumulator forms reuse the helper; memory forms wrap it in a
+    // read-modify-write.
+    // ===================================================================
+
+    fn asl_compute(&mut self, value: u16) -> u16 {
+        if self.p.acc8() {
+            let v = value as u8;
+            let carry = v & 0x80 != 0;
+            let result = v << 1;
+            self.p.set(bit::C, carry);
+            self.set_nz8(result);
+            u16::from(result)
+        } else {
+            let carry = value & 0x8000 != 0;
+            let result = value << 1;
+            self.p.set(bit::C, carry);
+            self.set_nz16(result);
+            result
+        }
+    }
+
+    fn lsr_compute(&mut self, value: u16) -> u16 {
+        if self.p.acc8() {
+            let v = value as u8;
+            let carry = v & 1 != 0;
+            let result = v >> 1;
+            self.p.set(bit::C, carry);
+            self.set_nz8(result);
+            u16::from(result)
+        } else {
+            let carry = value & 1 != 0;
+            let result = value >> 1;
+            self.p.set(bit::C, carry);
+            self.set_nz16(result);
+            result
+        }
+    }
+
+    fn rol_compute(&mut self, value: u16) -> u16 {
+        let c_in = u16::from(self.p.contains(bit::C));
+        if self.p.acc8() {
+            let v = value as u8;
+            let carry = v & 0x80 != 0;
+            let result = (v << 1) | (c_in as u8);
+            self.p.set(bit::C, carry);
+            self.set_nz8(result);
+            u16::from(result)
+        } else {
+            let carry = value & 0x8000 != 0;
+            let result = (value << 1) | c_in;
+            self.p.set(bit::C, carry);
+            self.set_nz16(result);
+            result
+        }
+    }
+
+    fn ror_compute(&mut self, value: u16) -> u16 {
+        let c_in = self.p.contains(bit::C);
+        if self.p.acc8() {
+            let v = value as u8;
+            let carry = v & 1 != 0;
+            let result = (v >> 1) | (if c_in { 0x80 } else { 0 });
+            self.p.set(bit::C, carry);
+            self.set_nz8(result);
+            u16::from(result)
+        } else {
+            let carry = value & 1 != 0;
+            let result = (value >> 1) | (if c_in { 0x8000 } else { 0 });
+            self.p.set(bit::C, carry);
+            self.set_nz16(result);
+            result
+        }
+    }
+
+    fn modify_memory_with<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        addr: Addr24,
+        op: fn(&mut Cpu, u16) -> u16,
+    ) {
+        if self.p.acc8() {
+            let v = u16::from(bus.read(addr));
+            let new = op(self, v) as u8;
+            bus.write(addr, new);
+        } else {
+            let v = read_word(bus, addr);
+            let new = op(self, v);
+            bus.write(addr, new as u8);
+            bus.write(addr.wrapping_add(1), (new >> 8) as u8);
+        }
+    }
+
+    fn asl_a(&mut self) {
+        let v = if self.p.acc8() {
+            u16::from(self.a8())
+        } else {
+            self.a
+        };
+        let new = self.asl_compute(v);
+        self.assign_a(new);
+    }
+    fn lsr_a(&mut self) {
+        let v = if self.p.acc8() {
+            u16::from(self.a8())
+        } else {
+            self.a
+        };
+        let new = self.lsr_compute(v);
+        self.assign_a(new);
+    }
+    fn rol_a(&mut self) {
+        let v = if self.p.acc8() {
+            u16::from(self.a8())
+        } else {
+            self.a
+        };
+        let new = self.rol_compute(v);
+        self.assign_a(new);
+    }
+    fn ror_a(&mut self) {
+        let v = if self.p.acc8() {
+            u16::from(self.a8())
+        } else {
+            self.a
+        };
+        let new = self.ror_compute(v);
+        self.assign_a(new);
+    }
+
+    fn assign_a(&mut self, value: u16) {
+        if self.p.acc8() {
+            self.set_a_low(value as u8);
+        } else {
+            self.a = value;
+        }
+    }
+
+    fn asl_dp<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page(self, bus);
+        self.modify_memory_with(bus, a, Self::asl_compute);
+    }
+    fn asl_abs<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute(self, bus);
+        self.modify_memory_with(bus, a, Self::asl_compute);
+    }
+    fn asl_dp_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indexed_x(self, bus);
+        self.modify_memory_with(bus, a, Self::asl_compute);
+    }
+    fn asl_abs_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_indexed_x(self, bus);
+        self.modify_memory_with(bus, a, Self::asl_compute);
+    }
+    fn lsr_dp<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page(self, bus);
+        self.modify_memory_with(bus, a, Self::lsr_compute);
+    }
+    fn lsr_abs<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute(self, bus);
+        self.modify_memory_with(bus, a, Self::lsr_compute);
+    }
+    fn lsr_dp_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indexed_x(self, bus);
+        self.modify_memory_with(bus, a, Self::lsr_compute);
+    }
+    fn lsr_abs_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_indexed_x(self, bus);
+        self.modify_memory_with(bus, a, Self::lsr_compute);
+    }
+    fn rol_dp<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page(self, bus);
+        self.modify_memory_with(bus, a, Self::rol_compute);
+    }
+    fn rol_abs<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute(self, bus);
+        self.modify_memory_with(bus, a, Self::rol_compute);
+    }
+    fn rol_dp_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indexed_x(self, bus);
+        self.modify_memory_with(bus, a, Self::rol_compute);
+    }
+    fn rol_abs_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_indexed_x(self, bus);
+        self.modify_memory_with(bus, a, Self::rol_compute);
+    }
+    fn ror_dp<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page(self, bus);
+        self.modify_memory_with(bus, a, Self::ror_compute);
+    }
+    fn ror_abs<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute(self, bus);
+        self.modify_memory_with(bus, a, Self::ror_compute);
+    }
+    fn ror_dp_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page_indexed_x(self, bus);
+        self.modify_memory_with(bus, a, Self::ror_compute);
+    }
+    fn ror_abs_x<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute_indexed_x(self, bus);
+        self.modify_memory_with(bus, a, Self::ror_compute);
+    }
+
+    // ===================================================================
+    // TSB / TRB — test bits in memory, then set/reset them.
+    //
+    // - Z is set based on (A & M), BEFORE the write.
+    // - Memory becomes M | A (TSB) or M & ~A (TRB).
+    // - N and V are NOT affected.
+    // ===================================================================
+
+    fn tsb_compute(&mut self, value: u16) -> u16 {
+        if self.p.acc8() {
+            let v = value as u8;
+            let a = self.a8();
+            self.p.set(bit::Z, (v & a) == 0);
+            u16::from(v | a)
+        } else {
+            self.p.set(bit::Z, (value & self.a) == 0);
+            value | self.a
+        }
+    }
+
+    fn trb_compute(&mut self, value: u16) -> u16 {
+        if self.p.acc8() {
+            let v = value as u8;
+            let a = self.a8();
+            self.p.set(bit::Z, (v & a) == 0);
+            u16::from(v & !a)
+        } else {
+            self.p.set(bit::Z, (value & self.a) == 0);
+            value & !self.a
+        }
+    }
+
+    fn tsb_dp<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page(self, bus);
+        self.modify_memory_with(bus, a, Self::tsb_compute);
+    }
+    fn tsb_abs<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute(self, bus);
+        self.modify_memory_with(bus, a, Self::tsb_compute);
+    }
+    fn trb_dp<B: Bus>(&mut self, bus: &mut B) {
+        let a = direct_page(self, bus);
+        self.modify_memory_with(bus, a, Self::trb_compute);
+    }
+    fn trb_abs<B: Bus>(&mut self, bus: &mut B) {
+        let a = absolute(self, bus);
+        self.modify_memory_with(bus, a, Self::trb_compute);
+    }
 }
 
 #[cfg(test)]
@@ -2175,6 +2475,96 @@ mod tests {
         assert!(cpu.p.contains(bit::Z));
         assert!(cpu.p.contains(bit::N), "BIT #imm must NOT change N");
         assert!(cpu.p.contains(bit::V), "BIT #imm must NOT change V");
+    }
+
+    // -------------------------------------------------------------------
+    // ASL / LSR / ROL / ROR
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn asl_a_shifts_left_and_sets_carry_from_msb() {
+        // LDA #$81, ASL A → A=$02, C=1, N=0
+        let (mut cpu, mut bus) = run(&[0xA9, 0x81, 0x0A]);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.a8(), 0x02);
+        assert!(cpu.p.contains(bit::C));
+        assert!(!cpu.p.contains(bit::N));
+    }
+
+    #[test]
+    fn lsr_a_shifts_right_and_sets_carry_from_lsb() {
+        // LDA #$03, LSR A → A=$01, C=1
+        let (mut cpu, mut bus) = run(&[0xA9, 0x03, 0x4A]);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.a8(), 0x01);
+        assert!(cpu.p.contains(bit::C));
+    }
+
+    #[test]
+    fn rol_a_rotates_through_carry() {
+        // SEC, LDA #$40, ROL A → A=($40<<1)|1 = $81, C=0, N=1
+        let (mut cpu, mut bus) = run(&[0x38, 0xA9, 0x40, 0x2A]);
+        cpu.step(&mut bus); // SEC
+        cpu.step(&mut bus); // LDA
+        cpu.step(&mut bus); // ROL A
+        assert_eq!(cpu.a8(), 0x81);
+        assert!(!cpu.p.contains(bit::C));
+        assert!(cpu.p.contains(bit::N));
+    }
+
+    #[test]
+    fn ror_a_rotates_carry_into_msb() {
+        // SEC, LDA #$02, ROR A → A=$81 ($02>>1 | $80), C=0, N=1
+        let (mut cpu, mut bus) = run(&[0x38, 0xA9, 0x02, 0x6A]);
+        cpu.step(&mut bus); // SEC
+        cpu.step(&mut bus); // LDA
+        cpu.step(&mut bus); // ROR A
+        assert_eq!(cpu.a8(), 0x81);
+        assert!(!cpu.p.contains(bit::C));
+        assert!(cpu.p.contains(bit::N));
+    }
+
+    #[test]
+    fn asl_abs_modifies_memory_in_place() {
+        let (mut cpu, mut bus) = run(&[0x0E, 0x00, 0x20]);
+        cpu.db = 0;
+        bus.poke(0x00_2000, 0x40);
+        cpu.step(&mut bus);
+        assert_eq!(bus.peek(0x00_2000), 0x80);
+        assert!(!cpu.p.contains(bit::C));
+        assert!(cpu.p.contains(bit::N));
+    }
+
+    // -------------------------------------------------------------------
+    // TSB / TRB
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn tsb_sets_bits_and_z_reflects_pre_state() {
+        // A=$0F, memory $20 = $30 — pre-AND = $00, so Z=0 after TSB?
+        // Wait: $0F & $30 = $00 → Z=1. Then memory becomes $0F|$30 = $3F.
+        let (mut cpu, mut bus) = run(&[0x0C, 0x00, 0x20]);
+        cpu.db = 0;
+        cpu.a = 0x0F;
+        bus.poke(0x00_2000, 0x30);
+        cpu.step(&mut bus);
+        assert!(cpu.p.contains(bit::Z));
+        assert_eq!(bus.peek(0x00_2000), 0x3F);
+    }
+
+    #[test]
+    fn trb_clears_bits() {
+        // A=$0F, memory = $3F → A&M = $0F (≠0) so Z=0, memory becomes
+        // $3F & ~$0F = $30.
+        let (mut cpu, mut bus) = run(&[0x1C, 0x00, 0x20]);
+        cpu.db = 0;
+        cpu.a = 0x0F;
+        bus.poke(0x00_2000, 0x3F);
+        cpu.step(&mut bus);
+        assert!(!cpu.p.contains(bit::Z));
+        assert_eq!(bus.peek(0x00_2000), 0x30);
     }
 
     #[test]
