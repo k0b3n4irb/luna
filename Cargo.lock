@@ -267,6 +267,7 @@ dependencies = [
  "luna-bus",
  "luna-cartridge",
  "luna-cpu-65c816",
+ "luna-dma",
  "luna-ppu",
 ]
 
@@ -286,6 +287,9 @@ version = "0.0.1"
 [[package]]
 name = "luna-dma"
 version = "0.0.1"
+dependencies = [
+ "luna-bus",
+]
 
 [[package]]
 name = "luna-gui"
