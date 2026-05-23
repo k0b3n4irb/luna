@@ -84,11 +84,40 @@ impl Cpu {
             0xBC => self.ldy_abs_x(bus),
 
             // -----------------------------------------------------------
-            // Stores (STA)
+            // Stores (STA — accumulator-width)
             // -----------------------------------------------------------
             0x85 => self.sta_dp(bus),
+            0x87 => self.sta_dp_indirect_long(bus),
             0x8D => self.sta_abs(bus),
             0x8F => self.sta_long(bus),
+            0x95 => self.sta_dp_x(bus),
+            0x92 => self.sta_dp_indirect(bus),
+            0x97 => self.sta_dp_indirect_long_y(bus),
+            0x9D => self.sta_abs_x(bus),
+            0x9F => self.sta_long_x(bus),
+            0x99 => self.sta_abs_y(bus),
+            0x91 => self.sta_dp_indirect_y(bus),
+            0x83 => self.sta_sr_s(bus),
+            0x93 => self.sta_sr_s_y(bus),
+            0x81 => self.sta_dp_x_indirect(bus),
+
+            // -----------------------------------------------------------
+            // Stores (STX, STY — index-register width)
+            // -----------------------------------------------------------
+            0x86 => self.stx_dp(bus),
+            0x8E => self.stx_abs(bus),
+            0x96 => self.stx_dp_y(bus),
+            0x84 => self.sty_dp(bus),
+            0x8C => self.sty_abs(bus),
+            0x94 => self.sty_dp_x(bus),
+
+            // -----------------------------------------------------------
+            // Store-zero (STZ — accumulator-width zero write)
+            // -----------------------------------------------------------
+            0x64 => self.stz_dp(bus),
+            0x74 => self.stz_dp_x(bus),
+            0x9C => self.stz_abs(bus),
+            0x9E => self.stz_abs_x(bus),
 
             // -----------------------------------------------------------
             // Jumps
@@ -393,6 +422,144 @@ impl Cpu {
     fn sta_long<B: Bus>(&mut self, bus: &mut B) {
         let addr = absolute_long(self, bus);
         self.sta_to_addr(bus, addr);
+    }
+
+    fn sta_dp_x<B: Bus>(&mut self, bus: &mut B) {
+        let addr = direct_page_indexed_x(self, bus);
+        self.sta_to_addr(bus, addr);
+    }
+
+    fn sta_dp_indirect<B: Bus>(&mut self, bus: &mut B) {
+        let addr = direct_page_indirect(self, bus);
+        self.sta_to_addr(bus, addr);
+    }
+
+    fn sta_dp_indirect_long<B: Bus>(&mut self, bus: &mut B) {
+        let addr = direct_page_indirect_long(self, bus);
+        self.sta_to_addr(bus, addr);
+    }
+
+    fn sta_dp_indirect_y<B: Bus>(&mut self, bus: &mut B) {
+        let addr = direct_page_indirect_y(self, bus);
+        self.sta_to_addr(bus, addr);
+    }
+
+    fn sta_dp_indirect_long_y<B: Bus>(&mut self, bus: &mut B) {
+        let addr = direct_page_indirect_long_y(self, bus);
+        self.sta_to_addr(bus, addr);
+    }
+
+    fn sta_dp_x_indirect<B: Bus>(&mut self, bus: &mut B) {
+        let addr = direct_page_indexed_indirect(self, bus);
+        self.sta_to_addr(bus, addr);
+    }
+
+    fn sta_abs_x<B: Bus>(&mut self, bus: &mut B) {
+        let addr = absolute_indexed_x(self, bus);
+        self.sta_to_addr(bus, addr);
+    }
+
+    fn sta_abs_y<B: Bus>(&mut self, bus: &mut B) {
+        let addr = absolute_indexed_y(self, bus);
+        self.sta_to_addr(bus, addr);
+    }
+
+    fn sta_long_x<B: Bus>(&mut self, bus: &mut B) {
+        let addr = absolute_long_indexed_x(self, bus);
+        self.sta_to_addr(bus, addr);
+    }
+
+    fn sta_sr_s<B: Bus>(&mut self, bus: &mut B) {
+        let addr = stack_relative(self, bus);
+        self.sta_to_addr(bus, addr);
+    }
+
+    fn sta_sr_s_y<B: Bus>(&mut self, bus: &mut B) {
+        let addr = stack_relative_indirect_y(self, bus);
+        self.sta_to_addr(bus, addr);
+    }
+
+    // ===================================================================
+    // Stores (STX, STY — width gated by the X flag)
+    // ===================================================================
+
+    fn stx_to_addr<B: Bus>(&mut self, bus: &mut B, addr: Addr24) {
+        if self.p.idx8() {
+            bus.write(addr, self.x8());
+        } else {
+            bus.write(addr, self.x as u8);
+            bus.write(addr.wrapping_add(1), (self.x >> 8) as u8);
+        }
+    }
+
+    fn sty_to_addr<B: Bus>(&mut self, bus: &mut B, addr: Addr24) {
+        if self.p.idx8() {
+            bus.write(addr, self.y8());
+        } else {
+            bus.write(addr, self.y as u8);
+            bus.write(addr.wrapping_add(1), (self.y >> 8) as u8);
+        }
+    }
+
+    fn stx_dp<B: Bus>(&mut self, bus: &mut B) {
+        let addr = direct_page(self, bus);
+        self.stx_to_addr(bus, addr);
+    }
+
+    fn stx_abs<B: Bus>(&mut self, bus: &mut B) {
+        let addr = absolute(self, bus);
+        self.stx_to_addr(bus, addr);
+    }
+
+    fn stx_dp_y<B: Bus>(&mut self, bus: &mut B) {
+        let addr = direct_page_indexed_y(self, bus);
+        self.stx_to_addr(bus, addr);
+    }
+
+    fn sty_dp<B: Bus>(&mut self, bus: &mut B) {
+        let addr = direct_page(self, bus);
+        self.sty_to_addr(bus, addr);
+    }
+
+    fn sty_abs<B: Bus>(&mut self, bus: &mut B) {
+        let addr = absolute(self, bus);
+        self.sty_to_addr(bus, addr);
+    }
+
+    fn sty_dp_x<B: Bus>(&mut self, bus: &mut B) {
+        let addr = direct_page_indexed_x(self, bus);
+        self.sty_to_addr(bus, addr);
+    }
+
+    // ===================================================================
+    // Store-zero (width gated by the M flag, like STA)
+    // ===================================================================
+
+    fn stz_to_addr<B: Bus>(&mut self, bus: &mut B, addr: Addr24) {
+        bus.write(addr, 0);
+        if !self.p.acc8() {
+            bus.write(addr.wrapping_add(1), 0);
+        }
+    }
+
+    fn stz_dp<B: Bus>(&mut self, bus: &mut B) {
+        let addr = direct_page(self, bus);
+        self.stz_to_addr(bus, addr);
+    }
+
+    fn stz_dp_x<B: Bus>(&mut self, bus: &mut B) {
+        let addr = direct_page_indexed_x(self, bus);
+        self.stz_to_addr(bus, addr);
+    }
+
+    fn stz_abs<B: Bus>(&mut self, bus: &mut B) {
+        let addr = absolute(self, bus);
+        self.stz_to_addr(bus, addr);
+    }
+
+    fn stz_abs_x<B: Bus>(&mut self, bus: &mut B) {
+        let addr = absolute_indexed_x(self, bus);
+        self.stz_to_addr(bus, addr);
     }
 
     // ===================================================================
@@ -733,6 +900,49 @@ mod tests {
     }
 
     #[test]
+    fn stx_abs_writes_x() {
+        // LDX #$77, STX $2000
+        let (mut cpu, mut bus) = run(&[0xA2, 0x77, 0x8E, 0x00, 0x20]);
+        cpu.db = 0;
+        cpu.step(&mut bus); // LDX
+        cpu.step(&mut bus); // STX $2000
+        assert_eq!(bus.peek(0x00_2000), 0x77);
+    }
+
+    #[test]
+    fn sty_dp_writes_y() {
+        let (mut cpu, mut bus) = run(&[0xA0, 0x88, 0x84, 0x10]);
+        cpu.dp = 0x0100;
+        cpu.step(&mut bus); // LDY #$88
+        cpu.step(&mut bus); // STY $10 → $0110
+        assert_eq!(bus.peek(0x00_0110), 0x88);
+    }
+
+    #[test]
+    fn stz_abs_writes_zero() {
+        // Pre-fill memory then STZ over it.
+        let (mut cpu, mut bus) = run(&[0x9C, 0x00, 0x20]); // STZ $2000
+        cpu.db = 0;
+        bus.poke(0x00_2000, 0xFF);
+        cpu.step(&mut bus);
+        assert_eq!(bus.peek(0x00_2000), 0x00);
+    }
+
+    #[test]
+    fn stz_abs_16bit_clears_two_bytes() {
+        // CLC, XCE, REP #$20, STZ $2000
+        let (mut cpu, mut bus) = run(&[0x18, 0xFB, 0xC2, 0x20, 0x9C, 0x00, 0x20]);
+        cpu.db = 0;
+        bus.poke_slice(0x00_2000, &[0xAA, 0xBB]);
+        cpu.step(&mut bus); // CLC
+        cpu.step(&mut bus); // XCE
+        cpu.step(&mut bus); // REP #$20
+        cpu.step(&mut bus); // STZ $2000
+        assert_eq!(bus.peek(0x00_2000), 0x00);
+        assert_eq!(bus.peek(0x00_2001), 0x00);
+    }
+
+    #[test]
     fn ldy_dp_x() {
         let (mut cpu, mut bus) = run(&[0xB4, 0x10]); // LDY $10,X
         cpu.dp = 0x0100;
@@ -754,6 +964,41 @@ mod tests {
         cpu.step(&mut bus); // LDA #$42
         cpu.step(&mut bus); // STA $2000
         assert_eq!(bus.peek(0x00_2000), 0x42);
+    }
+
+    #[test]
+    fn sta_dp_x_writes_at_indexed_dp() {
+        // LDA #$42, STA $10,X
+        let (mut cpu, mut bus) = run(&[0xA9, 0x42, 0x95, 0x10]);
+        cpu.dp = 0x0100;
+        cpu.x = 0x04;
+        cpu.step(&mut bus); // LDA #$42
+        cpu.step(&mut bus); // STA $10,X → $0114
+        assert_eq!(bus.peek(0x00_0114), 0x42);
+    }
+
+    #[test]
+    fn sta_dp_indirect_writes_through_pointer() {
+        // LDA #$55, STA ($10)
+        let (mut cpu, mut bus) = run(&[0xA9, 0x55, 0x92, 0x10]);
+        cpu.dp = 0x0100;
+        cpu.db = 0x7E;
+        bus.poke_slice(0x00_0110, &[0x00, 0x20]); // pointer = $2000
+        cpu.step(&mut bus); // LDA
+        cpu.step(&mut bus); // STA ($10) → $7E:2000
+        assert_eq!(bus.peek(0x7E_2000), 0x55);
+    }
+
+    #[test]
+    fn sta_dp_indirect_y_writes_with_y_offset() {
+        let (mut cpu, mut bus) = run(&[0xA9, 0x66, 0x91, 0x10]);
+        cpu.dp = 0x0100;
+        cpu.db = 0x7E;
+        cpu.y = 0x05;
+        bus.poke_slice(0x00_0110, &[0x00, 0x20]);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        assert_eq!(bus.peek(0x7E_2005), 0x66);
     }
 
     #[test]
