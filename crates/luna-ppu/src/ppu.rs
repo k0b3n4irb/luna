@@ -73,6 +73,28 @@ pub mod register {
     pub const VMDATAHREAD: u8 = 0x3A;
     /// `$213B` — CGDATAREAD.
     pub const CGDATAREAD: u8 = 0x3B;
+    /// `$211A` M7SEL — Mode-7 H/V flip + screen-over mode.
+    pub const M7SEL: u8 = 0x1A;
+    /// `$211B` M7A — Mode-7 matrix element A (signed 8.8, write-twice).
+    pub const M7A: u8 = 0x1B;
+    /// `$211C` M7B — matrix B. Writing also triggers the M7A×M7B
+    /// multiplication and updates MPYL/M/H.
+    pub const M7B: u8 = 0x1C;
+    /// `$211D` M7C — matrix C.
+    pub const M7C: u8 = 0x1D;
+    /// `$211E` M7D — matrix D.
+    pub const M7D: u8 = 0x1E;
+    /// `$211F` M7X — Mode-7 centre X (signed 13-bit, write-twice).
+    pub const M7X: u8 = 0x1F;
+    /// `$2120` M7Y — Mode-7 centre Y.
+    pub const M7Y: u8 = 0x20;
+    /// `$2134` MPYL — low byte of the Mode-7 hardware multiplier
+    /// result (signed-16 M7A × signed-8 M7B[high], 24-bit total).
+    pub const MPYL: u8 = 0x34;
+    /// `$2135` MPYM — middle byte.
+    pub const MPYM: u8 = 0x35;
+    /// `$2136` MPYH — high byte.
+    pub const MPYH: u8 = 0x36;
     /// `$2123` W12SEL — windows-1/2 enable + invert for BG1 and BG2.
     pub const W12SEL: u8 = 0x23;
     /// `$2124` W34SEL — same for BG3 and BG4.
@@ -176,7 +198,11 @@ pub struct Ppu {
     /// `w12sel` packs BG1 (low nibble) + BG2 (high nibble),
     /// `w34sel` packs BG3 + BG4, `wobjsel` packs OBJ + math.
     pub w12sel: u8,
+    /// `$2124` W34SEL — same control word for BG3 (low nibble) and
+    /// BG4 (high nibble). See [`Self::w12sel`] for bit semantics.
     pub w34sel: u8,
+    /// `$2125` WOBJSEL — OBJ (low nibble) and the dedicated colour-
+    /// math window (high nibble). Same per-nibble layout.
     pub wobjsel: u8,
     /// `$2126` WH0 — window 1 left X (inclusive).
     pub wh0: u8,
@@ -204,6 +230,33 @@ pub struct Ppu {
     pub tsw: u8,
     /// BG1-4 derived state ($2107-$2114).
     pub bg: [BgState; 4],
+    /// `$211A` M7SEL: bit 7 = V-flip, bit 6 = H-flip, bits 1:0 =
+    /// screen-over mode (00 wrap, 01 wrap-tile0, 10 transparent,
+    /// 11 use-tile-0).
+    pub m7sel: u8,
+    /// Mode-7 matrix element A — signed 8.8, scales the horizontal
+    /// component of the projected X axis.
+    pub m7a: i16,
+    /// Mode-7 matrix element B — signed 8.8, scales the vertical
+    /// component of the projected X axis. Writes also retrigger the
+    /// hardware multiplier (see [`Self::mpy_result`]).
+    pub m7b: i16,
+    /// Mode-7 matrix element C — horizontal component of Y axis.
+    pub m7c: i16,
+    /// Mode-7 matrix element D — vertical component of Y axis.
+    pub m7d: i16,
+    /// Mode-7 centre X (signed 13-bit, sign-extended to i16).
+    pub m7x: i16,
+    /// Mode-7 centre Y.
+    pub m7y: i16,
+    /// `$2134-$2136 MPYL/M/H` — 24-bit hardware multiplier result.
+    /// Updated whenever M7A or M7B's high byte is written:
+    /// `M7A (signed 16) × M7B_high (signed 8) → 24-bit signed`.
+    pub mpy_result: i32,
+    /// Shared latch for the Mode-7 write-twice registers
+    /// (\$211B-\$2120). Each write `value` shifts the latch and
+    /// stores the 16-bit pair `(latch_low, value_high)`.
+    pub m7_latch: u8,
     /// Latch for the BG H/V scroll write-twice protocol.
     /// `$210D-$2114` are written low byte first, then high byte (bits
     /// 0-1 land as the top 2 bits of the 10-bit scroll). The PPU keeps
@@ -265,6 +318,15 @@ impl Ppu {
             tmw: 0,
             tsw: 0,
             bg: [BgState::default(); 4],
+            m7sel: 0,
+            m7a: 0,
+            m7b: 0,
+            m7c: 0,
+            m7d: 0,
+            m7x: 0,
+            m7y: 0,
+            mpy_result: 0,
+            m7_latch: 0,
             bg_scroll_latch: 0,
             open_bus: 0,
             inidisp_write_count: 0,
@@ -282,6 +344,12 @@ impl Ppu {
             register::VMDATALREAD => self.vram.read_lo(),
             register::VMDATAHREAD => self.vram.read_hi(),
             register::CGDATAREAD => self.cgram.read(),
+            // Mode-7 hardware-multiplier result (also driven by
+            // M7A / M7B writes outside Mode 7 — used as a fast
+            // multiplier).
+            register::MPYL => self.mpy_result as u8,
+            register::MPYM => (self.mpy_result >> 8) as u8,
+            register::MPYH => (self.mpy_result >> 16) as u8,
             // Everything else: open bus. The renderer's status registers
             // ($2134-$213F apart from those above) will be implemented
             // alongside the renderer.
@@ -322,6 +390,29 @@ impl Ppu {
         self.bg_scroll_latch = value;
     }
 
+    /// Mode-7 write-twice helper. Returns the new 16-bit value
+    /// composed of `(latch_low, value_high)` and advances the
+    /// shared latch. The Mode-7 latch is *separate* from the BG
+    /// scroll latch — per fullsnes, every M7A-M7D / M7X / M7Y
+    /// write feeds (and reads from) this single 8-bit register.
+    fn write_m7_pair(&mut self, value: u8) -> u16 {
+        let composed = (u16::from(value) << 8) | u16::from(self.m7_latch);
+        self.m7_latch = value;
+        composed
+    }
+
+    /// Re-run the Mode-7 hardware multiplier. Triggered by writes
+    /// to M7A or the high byte of M7B (i.e. the second of the two
+    /// M7B writes). Computes `signed(M7A) × signed(M7B_high) →
+    /// 24-bit signed result`; reads at MPYL/M/H expose it.
+    fn update_mpy(&mut self) {
+        // `M7B`'s upper byte is what the hardware uses; that's
+        // bits 8..15 of our stored i16, i.e. (self.m7b >> 8) as i8.
+        let a = i32::from(self.m7a);
+        let b = i32::from((self.m7b >> 8) as i8);
+        self.mpy_result = a * b;
+    }
+
     /// Write a PPU register. `offset` is the byte offset from `$2100`.
     pub fn write(&mut self, offset: u8, value: u8) {
         self.open_bus = value;
@@ -356,6 +447,26 @@ impl Ppu {
             register::BG3VOFS => self.write_bg_v_scroll(2, value),
             register::BG4HOFS => self.write_bg_h_scroll(3, value),
             register::BG4VOFS => self.write_bg_v_scroll(3, value),
+            register::M7SEL => self.m7sel = value,
+            register::M7A => {
+                self.m7a = self.write_m7_pair(value) as i16;
+                self.update_mpy();
+            }
+            register::M7B => {
+                self.m7b = self.write_m7_pair(value) as i16;
+                self.update_mpy();
+            }
+            register::M7C => self.m7c = self.write_m7_pair(value) as i16,
+            register::M7D => self.m7d = self.write_m7_pair(value) as i16,
+            register::M7X => {
+                // 13-bit signed value, sign-extended for arithmetic.
+                let raw = self.write_m7_pair(value) & 0x1FFF;
+                self.m7x = ((raw as i16) << 3) >> 3;
+            }
+            register::M7Y => {
+                let raw = self.write_m7_pair(value) & 0x1FFF;
+                self.m7y = ((raw as i16) << 3) >> 3;
+            }
             register::VMAIN => self.vram.vmain = VmainSettings::from_byte(value),
             register::VMADDL => {
                 let hi = (self.vram.address >> 8) as u8;
