@@ -807,9 +807,21 @@ pub fn render_bg_scanline_indexed_with(
         3 => (64u16, 64u16),
         _ => (32u16, 32u16),
     };
+    // MOSAIC ($2106): high nibble = block size N (0..15 means 1..16
+    // pixels per side), low nibble bit `bg_idx` enables mosaic for
+    // that BG. Within a block we replicate the top-left pixel —
+    // implemented by snapping both X and Y to the block boundary
+    // before sampling the tile.
+    let mosaic_size = if ppu.mosaic & (1 << bg_idx) != 0 {
+        u16::from((ppu.mosaic >> 4) & 0x0F) + 1
+    } else {
+        1
+    };
+    let mosaic_y = (y / mosaic_size) * mosaic_size;
     for x in 0..256u16 {
-        let src_x = x.wrapping_add(bg.h_scroll);
-        let src_y = y.wrapping_add(bg.v_scroll);
+        let mosaic_x = (x / mosaic_size) * mosaic_size;
+        let src_x = mosaic_x.wrapping_add(bg.h_scroll);
+        let src_y = mosaic_y.wrapping_add(bg.v_scroll);
         let tile_col_full = (src_x / 8) & (cols - 1);
         let tile_row_full = (src_y / 8) & (rows - 1);
         let sub_x = (tile_col_full >> 5) as usize;
@@ -1721,6 +1733,45 @@ mod tests {
         // Inside (x=8): math fires → blue channel boosted.
         // The two pixels must differ on the blue channel.
         assert_ne!(out[0][2], out[8][2], "math should fire inside, not outside");
+    }
+
+    // -------------------------------------------------------------------
+    // Mosaic
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn mosaic_disabled_when_low_nibble_bit_clear() {
+        // MOSAIC.bit(bg) clear → BG renders at native resolution.
+        let mut p = setup_demo_tile();
+        p.write(register::BGMODE, 0x01);
+        p.write(register::INIDISP, 0x0F);
+        // MOSAIC = 0xF0 = size 16, BUT bit 0 (BG1) clear.
+        p.write(register::MOSAIC, 0xF0);
+        let scan = render_bg_scanline_indexed_with(&p, 0, 0, RenderOptions::default());
+        // Pixels 0 and 1 land on different tile-internal columns
+        // (the demo tile has different colours per column), so they
+        // should differ — proof that mosaic ISN'T snapping.
+        assert_ne!(scan[0], scan[1]);
+    }
+
+    #[test]
+    fn mosaic_size_4_repeats_pixel_in_4_pixel_blocks() {
+        // MOSAIC = 0x31 = size 3+1 = 4, BG1 enabled. Pixels 0..3
+        // should all show the same CGRAM index as pixel 0.
+        let mut p = setup_demo_tile();
+        p.write(register::BGMODE, 0x01);
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::MOSAIC, 0x31);
+        let scan = render_bg_scanline_indexed_with(&p, 0, 0, RenderOptions::default());
+        let block0 = scan[0];
+        for i in 1..4 {
+            assert_eq!(
+                scan[i], block0,
+                "x={i} should match block-start pixel; mosaic snap failed",
+            );
+        }
+        // Pixel 4 is the start of the next block — likely differs.
+        assert_ne!(scan[4], block0, "block 1 must read from a fresh source");
     }
 
     #[test]
