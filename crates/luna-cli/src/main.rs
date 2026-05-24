@@ -59,7 +59,13 @@ enum Command {
         #[arg(long)]
         audio_out: Option<PathBuf>,
     },
-    /// MCP server stub (real implementation lands in Phase 3).
+    /// Serve the Luna MCP server on stdio.
+    ///
+    /// Once started, Luna exposes a tool catalogue (load_rom, reset,
+    /// step, state, screenshot, drain_audio, peek_memory, peek_aram)
+    /// to any connected MCP client (Claude Desktop, Claude Code,
+    /// custom clients). The process stays alive until the client
+    /// closes the stream.
     Mcp,
     /// Run the emulator through `luna-api` and emit a JSON state
     /// snapshot — the same data the MCP `get_state` tool returns.
@@ -103,10 +109,7 @@ fn main() -> ExitCode {
             bg,
             audio_out.as_deref(),
         ),
-        Command::Mcp => {
-            eprintln!("MCP server not implemented yet — see ARCHITECTURE.md §14 (Phase 3).");
-            ExitCode::from(2)
-        }
+        Command::Mcp => serve_mcp(),
         Command::State {
             rom,
             steps,
@@ -120,6 +123,30 @@ fn main() -> ExitCode {
             screenshot.as_deref(),
             audio_out.as_deref(),
         ),
+    }
+}
+
+/// `luna mcp` — serve the Luna MCP server on stdio until the client
+/// disconnects.
+fn serve_mcp() -> ExitCode {
+    // Build a fresh tokio runtime here rather than `#[tokio::main]` so
+    // the rest of the CLI (which doesn't need async) stays sync.
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("error: building tokio runtime: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match rt.block_on(luna_mcp_server::serve_stdio()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: MCP server: {e}");
+            ExitCode::from(1)
+        }
     }
 }
 
