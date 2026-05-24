@@ -215,7 +215,7 @@ impl LunaApp {
         let opts = luna_ppu::RenderOptions {
             bypass_forced_blank: self.force_display,
         };
-        let frame = luna_ppu::render_frame_bg1_with(&snes.ppu, opts);
+        let frame = luna_ppu::render_frame_with(&snes.ppu, opts);
         let mut rgba = Vec::with_capacity(FRAME_W * FRAME_H * 4);
         for px in frame {
             rgba.extend_from_slice(&[px[0], px[1], px[2], 0xFF]);

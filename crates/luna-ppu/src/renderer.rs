@@ -223,13 +223,148 @@ pub fn render_frame_bg1(ppu: &Ppu) -> Vec<[u8; 3]> {
 /// Same as [`render_frame_bg1`] but with debug options.
 #[must_use]
 pub fn render_frame_bg1_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
+    render_frame_with(ppu, opts)
+}
+
+/// Render the full visible frame composited from BG3 (top) over BG2
+/// over BG1 over backdrop. This is the right priority order for the
+/// common Mode 1 title-screen pattern (BG3 = text overlay, BG2 =
+/// background, BG1 = (sprite-substitute) foreground) and is good
+/// enough to display Super Mario World's, Tetris 2's and similar
+/// title screens cleanly without a full per-pixel priority engine.
+///
+/// Internally we render each layer's scanline, then for each pixel
+/// take the top-most non-backdrop value.
+#[must_use]
+pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
     let mut buf = vec![[0u8; 3]; FRAME_W * FRAME_H];
     for y in 0..FRAME_H {
-        let line = render_bg1_scanline_with(ppu, y as u16, opts);
+        let bg1 = render_bg_scanline_with(ppu, 0, y as u16, opts);
+        let bg2 = render_bg_scanline_with(ppu, 1, y as u16, opts);
+        let bg3 = render_bg_scanline_with(ppu, 2, y as u16, opts);
+        let backdrop = bg1[0]; // each scanline writes backdrop where idx==0
+        let off = y * FRAME_W;
+        for x in 0..FRAME_W {
+            // Top-most non-backdrop wins.
+            buf[off + x] = if bg3[x] != backdrop {
+                bg3[x]
+            } else if bg1[x] != backdrop {
+                bg1[x]
+            } else if bg2[x] != backdrop {
+                bg2[x]
+            } else {
+                backdrop
+            };
+        }
+    }
+    buf
+}
+
+/// Render a specific BG layer (`bg_idx` = 0..=3 → BG1..=BG4) into a
+/// full frame. Useful for debugging which layer of a multi-BG game
+/// actually carries the visible content. Honours that BG's per-bgmode
+/// bit depth, its scroll, tile-map and char-base addresses.
+#[must_use]
+pub fn render_frame_bg_with(ppu: &Ppu, bg_idx: usize, opts: RenderOptions) -> Vec<[u8; 3]> {
+    let mut buf = vec![[0u8; 3]; FRAME_W * FRAME_H];
+    for y in 0..FRAME_H {
+        let line = render_bg_scanline_with(ppu, bg_idx, y as u16, opts);
         let off = y * FRAME_W;
         buf[off..off + FRAME_W].copy_from_slice(&line);
     }
     buf
+}
+
+/// Bits-per-pixel for any BG in any mode (cf. [`bg1_bpp`]).
+#[must_use]
+pub fn bg_bpp(bgmode: u8, bg_idx: usize) -> u8 {
+    let m = bgmode & 0x07;
+    match (m, bg_idx) {
+        (0, _) => 2,
+        (1, 0) | (1, 1) => 4,
+        (1, 2) => 2,
+        (2, 0) | (2, 1) => 4,
+        (3, 0) => 8,
+        (3, 1) => 4,
+        (4, 0) => 8,
+        (4, 1) => 2,
+        (5, 0) => 4,
+        (5, 1) => 2,
+        (6, 0) => 4,
+        (7, 0) => 8,
+        _ => 0, // BG disabled in this mode
+    }
+}
+
+/// Render one scanline for the requested BG layer.
+#[must_use]
+pub fn render_bg_scanline_with(ppu: &Ppu, bg_idx: usize, y: u16, opts: RenderOptions) -> Scanline {
+    let mut out = [[0u8; 3]; 256];
+    if ppu.inidisp & 0x80 != 0 && !opts.bypass_forced_blank {
+        return out;
+    }
+    let brightness = if opts.bypass_forced_blank {
+        0x0F
+    } else {
+        ppu.inidisp & 0x0F
+    };
+    let bpp = bg_bpp(ppu.bgmode, bg_idx);
+    if bpp == 0 {
+        // BG disabled in this mode → fill with backdrop.
+        let backdrop = decode_palette(ppu, 0, brightness);
+        for px in out.iter_mut() {
+            *px = backdrop;
+        }
+        return out;
+    }
+    let bytes_per_tile = match bpp {
+        2 => 16,
+        4 => 32,
+        8 => 64,
+        _ => 16,
+    };
+    let bg = bg_state(ppu, bg_idx);
+    let tilemap_words = 32u16;
+    let tilemap_base = (bg.tilemap_addr_words as usize) << 1;
+    let char_base = (bg.char_addr_words as usize) << 1;
+    let backdrop = decode_palette(ppu, 0, brightness);
+
+    for x in 0..256u16 {
+        let src_x = x.wrapping_add(bg.h_scroll);
+        let src_y = y.wrapping_add(bg.v_scroll);
+        let tile_col = (src_x / 8) & 0x1F;
+        let tile_row = (src_y / 8) & 0x1F;
+        let entry_off = tilemap_base + ((tile_row * tilemap_words + tile_col) as usize) * 2;
+        let entry_lo = ppu.vram.peek(entry_off as u16);
+        let entry_hi = ppu.vram.peek(entry_off.wrapping_add(1) as u16);
+        let entry = u16::from(entry_lo) | (u16::from(entry_hi) << 8);
+        let tile_num = entry & 0x03FF;
+        let palette_off = ((entry >> 10) & 0x07) as u8;
+        let h_flip = entry & 0x4000 != 0;
+        let v_flip = entry & 0x8000 != 0;
+        let mut row_in_tile = (src_y & 7) as usize;
+        let mut col_in_tile = (src_x & 7) as usize;
+        if v_flip {
+            row_in_tile = 7 - row_in_tile;
+        }
+        if h_flip {
+            col_in_tile = 7 - col_in_tile;
+        }
+        let tile_base = char_base + (tile_num as usize) * bytes_per_tile;
+        let idx = decode_tile_pixel(ppu, tile_base, row_in_tile, col_in_tile, bpp);
+
+        out[x as usize] = if idx == 0 {
+            backdrop
+        } else {
+            let cgram_idx = match bpp {
+                2 => palette_off * 4 + idx,
+                4 => palette_off.wrapping_mul(16).wrapping_add(idx),
+                _ => idx,
+            };
+            decode_palette(ppu, cgram_idx, brightness)
+        };
+    }
+    out
 }
 
 /// Look up a CGRAM index and apply master brightness.

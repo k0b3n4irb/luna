@@ -48,6 +48,11 @@ enum Command {
         /// SPC700 we don't fully emulate yet).
         #[arg(long)]
         force_display: bool,
+        /// If set (1..=4), render ONLY that BG layer. Default is the
+        /// composited BG3-over-BG1-over-BG2 frame (right for most
+        /// Mode-1 title screens).
+        #[arg(long)]
+        bg: Option<u8>,
     },
     /// MCP server stub (real implementation lands in Phase 3).
     Mcp,
@@ -61,7 +66,8 @@ fn main() -> ExitCode {
             steps,
             screenshot,
             force_display,
-        } => run(&rom, steps, screenshot.as_deref(), force_display),
+            bg,
+        } => run(&rom, steps, screenshot.as_deref(), force_display, bg),
         Command::Mcp => {
             eprintln!("MCP server not implemented yet — see ARCHITECTURE.md §14 (Phase 3).");
             ExitCode::from(2)
@@ -74,6 +80,7 @@ fn run(
     steps: u64,
     screenshot: Option<&std::path::Path>,
     force_display: bool,
+    bg: Option<u8>,
 ) -> ExitCode {
     let cart = match Cartridge::load(rom_path) {
         Ok(c) => c,
@@ -128,7 +135,7 @@ fn run(
 
     // Screenshot dump: render whatever the PPU has accumulated.
     if let Some(out_path) = screenshot {
-        match save_screenshot(&snes, out_path, force_display) {
+        match save_screenshot(&snes, out_path, force_display, bg) {
             Ok(()) => println!("\nScreenshot written to {}", out_path.display()),
             Err(e) => {
                 eprintln!("\nerror: could not write screenshot: {e}");
@@ -196,6 +203,28 @@ fn print_diag_state(snes: &mut Snes) {
         p.inidisp_write_count,
         p.cgram.color(0)
     );
+    for (i, bg) in p.bg.iter().enumerate() {
+        let base = (bg.tilemap_addr_words as usize) << 1;
+        let mut nonzero = 0usize;
+        for off in 0..(32 * 32 * 2) {
+            let a = (base + off) & 0xFFFF;
+            if p.vram.peek(a as u16) != 0 {
+                nonzero += 1;
+            }
+        }
+        println!(
+            "BG{}:  tile=${:04X} (byte ${:04X})  char=${:04X} (byte ${:04X})  hscroll={} vscroll={}  tilemap_nonzero={}/{}",
+            i + 1,
+            bg.tilemap_addr_words,
+            base,
+            bg.char_addr_words,
+            (bg.char_addr_words as usize) << 1,
+            bg.h_scroll,
+            bg.v_scroll,
+            nonzero,
+            32 * 32 * 2,
+        );
+    }
     println!(
         "CPU regs:  NMITIMEN=${:02X}  HVBJOY=${:02X}  fake_frames={}  NMIs_served={}",
         snes.cpu_regs.nmitimen, snes.cpu_regs.hvbjoy, snes.fake_frame_count, snes.nmis_serviced
@@ -256,11 +285,18 @@ fn save_screenshot(
     snes: &Snes,
     path: &std::path::Path,
     force_display: bool,
+    bg: Option<u8>,
 ) -> Result<(), image::ImageError> {
     let opts = luna_ppu::RenderOptions {
         bypass_forced_blank: force_display,
     };
-    let frame = luna_ppu::render_frame_bg1_with(&snes.ppu, opts);
+    let frame = match bg {
+        Some(n) => {
+            let idx = (n.saturating_sub(1).min(3)) as usize;
+            luna_ppu::render_frame_bg_with(&snes.ppu, idx, opts)
+        }
+        None => luna_ppu::render_frame_with(&snes.ppu, opts),
+    };
     let mut buf = Vec::with_capacity(luna_ppu::FRAME_W * luna_ppu::FRAME_H * 3);
     for px in frame {
         buf.extend_from_slice(&px);
