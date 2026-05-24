@@ -238,12 +238,42 @@ fn print_diag_state(snes: &mut Snes) {
         ports[2],
         ports[3]
     );
-    let pc_bytes = snes.peek_pc_bytes(8);
-    print!("@PC bytes:");
-    for b in &pc_bytes {
-        print!(" {b:02X}");
+    // OAM occupancy + first few sprite entries (uses immutable `p`).
+    let mut oam_non_zero = 0usize;
+    for off in 0..0x220u16 {
+        if p.oam.peek(off) != 0 {
+            oam_non_zero += 1;
+        }
     }
-    println!();
+    println!(
+        "OAM:   {oam_non_zero}/544 non-zero  |  OBSEL=${:02X}",
+        p.obsel
+    );
+    let all_sprites = luna_ppu::decode_all_sprites(p);
+    let visible_count = all_sprites.iter().filter(|sp| sp.y < 224).count();
+    println!("  visible sprites (y<224): {visible_count}");
+    let mut shown = 0;
+    for (i, sp) in all_sprites.iter().enumerate() {
+        if sp.y >= 224 {
+            continue;
+        }
+        if shown >= 12 {
+            break;
+        }
+        shown += 1;
+        println!(
+            "  sprite #{i:>3}: x={:>4} y={:>3} tile=${:03X} pal={} pri={} {}x{} {}{}",
+            sp.x,
+            sp.y,
+            sp.tile,
+            sp.palette,
+            sp.priority,
+            sp.w,
+            sp.h,
+            if sp.h_flip { "H" } else { "-" },
+            if sp.v_flip { "V" } else { "-" },
+        );
+    }
 
     // VRAM / CGRAM occupancy digest: how many non-zero bytes in each.
     // Lets us tell "the game has uploaded graphics" from "VRAM is
@@ -263,6 +293,15 @@ fn print_diag_state(snes: &mut Snes) {
     println!(
         "VRAM:  {vram_non_zero}/65536 non-zero bytes  |  CGRAM: {cgram_non_zero}/256 non-zero colours"
     );
+
+    // @PC bytes need mutable bus access — run after all immutable
+    // PPU diagnostics are done.
+    let pc_bytes = snes.peek_pc_bytes(8);
+    print!("@PC bytes:");
+    for b in &pc_bytes {
+        print!(" {b:02X}");
+    }
+    println!();
 }
 
 fn flag_string(p: u8, e: bool) -> String {
