@@ -17,8 +17,8 @@ Thumbs.db
 /tests/tom-harte/*.json
 /tests/tom-harte/*.zip
 !/tests/tom-harte/.gitkeep
-/tests/roms/*.sfc
-/tests/roms/*.smc
+# Proprietary game ROMs — never commit.
+/tests/roms/*
 !/tests/roms/.gitkeep
 /tests/golden/*.png
 !/tests/golden/.gitkeep
