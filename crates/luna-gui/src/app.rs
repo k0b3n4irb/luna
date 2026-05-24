@@ -292,6 +292,40 @@ impl App for LunaApp {
             self.load_rom(&file);
         }
 
+        // ---------------- Joypad polling ----------------
+        //
+        // Push the current keyboard state into the SPC700-side
+        // joypad latch every frame. The SNES driver actually sees
+        // this mask only at the next VBlank auto-read (16 ms or so).
+        //
+        // Default layout (player 1):
+        //   D-pad   = arrow keys
+        //   B / A   = Z / X
+        //   Y / X   = A / S
+        //   Start   = Enter
+        //   Select  = Right-Shift
+        //   L / R   = Q / W
+        if let Some(snes) = self.snes.as_mut() {
+            use egui::Key;
+            let mask = ctx.input(|i| {
+                let mut m: u16 = 0;
+                if i.key_down(Key::Z)            { m |= 0x8000; } // B
+                if i.key_down(Key::A)            { m |= 0x4000; } // Y
+                if i.modifiers.shift             { m |= 0x2000; } // Select
+                if i.key_down(Key::Enter)        { m |= 0x1000; } // Start
+                if i.key_down(Key::ArrowUp)      { m |= 0x0800; }
+                if i.key_down(Key::ArrowDown)    { m |= 0x0400; }
+                if i.key_down(Key::ArrowLeft)    { m |= 0x0200; }
+                if i.key_down(Key::ArrowRight)   { m |= 0x0100; }
+                if i.key_down(Key::X)            { m |= 0x0080; } // A
+                if i.key_down(Key::S)            { m |= 0x0040; } // X
+                if i.key_down(Key::Q)            { m |= 0x0020; } // L
+                if i.key_down(Key::W)            { m |= 0x0010; } // R
+                m
+            });
+            snes.set_joypad(0, mask);
+        }
+
         // ---------------- FPS bookkeeping ----------------
         let now = Instant::now();
         let dt = now
