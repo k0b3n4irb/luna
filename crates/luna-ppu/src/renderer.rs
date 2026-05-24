@@ -324,17 +324,41 @@ pub fn render_bg_scanline_with(ppu: &Ppu, bg_idx: usize, y: u16, opts: RenderOpt
         _ => 16,
     };
     let bg = bg_state(ppu, bg_idx);
-    let tilemap_words = 32u16;
     let tilemap_base = (bg.tilemap_addr_words as usize) << 1;
     let char_base = (bg.char_addr_words as usize) << 1;
     let backdrop = decode_palette(ppu, 0, brightness);
 
+    // SC bits 0-1 from BG*SC: 0 = 32×32, 1 = 64×32 (extra screen to
+    // the right), 2 = 32×64 (extra screen below), 3 = 64×64 (extra
+    // screens right + below + diagonal). Each "extra screen" is a
+    // full 32×32 sub-tilemap stored at `base + N*0x800` bytes.
+    let (cols, rows) = match bg.tilemap_size & 0x03 {
+        0 => (32u16, 32u16),
+        1 => (64u16, 32u16),
+        2 => (32u16, 64u16),
+        3 => (64u16, 64u16),
+        _ => (32u16, 32u16),
+    };
+
     for x in 0..256u16 {
         let src_x = x.wrapping_add(bg.h_scroll);
         let src_y = y.wrapping_add(bg.v_scroll);
-        let tile_col = (src_x / 8) & 0x1F;
-        let tile_row = (src_y / 8) & 0x1F;
-        let entry_off = tilemap_base + ((tile_row * tilemap_words + tile_col) as usize) * 2;
+        let tile_col_full = (src_x / 8) & (cols - 1);
+        let tile_row_full = (src_y / 8) & (rows - 1);
+        // Within which 32×32 sub-screen does this (col, row) live?
+        let sub_x = (tile_col_full >> 5) as usize; // 0 or 1
+        let sub_y = (tile_row_full >> 5) as usize; // 0 or 1
+        let sub_index = match bg.tilemap_size & 0x03 {
+            0 => 0,
+            1 => sub_x,             // 64x32: right sub-screen offset
+            2 => sub_y,             // 32x64: bottom sub-screen offset
+            3 => sub_y * 2 + sub_x, // 64x64: TL/TR/BL/BR
+            _ => 0,
+        };
+        let tile_col = tile_col_full & 0x1F;
+        let tile_row = tile_row_full & 0x1F;
+        let entry_off =
+            tilemap_base + sub_index * 0x0800 + ((tile_row * 32 + tile_col) as usize) * 2;
         let entry_lo = ppu.vram.peek(entry_off as u16);
         let entry_hi = ppu.vram.peek(entry_off.wrapping_add(1) as u16);
         let entry = u16::from(entry_lo) | (u16::from(entry_hi) << 8);
