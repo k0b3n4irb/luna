@@ -15,6 +15,7 @@
 pub mod bus;
 pub mod cpu;
 pub mod flags;
+pub mod iplrom;
 pub mod opcodes;
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -23,3 +24,4 @@ pub mod testing;
 pub use bus::SpcBus;
 pub use cpu::Spc700;
 pub use flags::Psw;
+pub use iplrom::{IPL_ROM, IPL_ROM_BASE};
