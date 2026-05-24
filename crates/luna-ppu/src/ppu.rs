@@ -129,6 +129,15 @@ pub mod register {
     /// `$2132` COLDATA — fixed sub-screen colour, written one (R/G/B)
     /// channel at a time via the top 3 bits.
     pub const COLDATA: u8 = 0x32;
+    /// `$2133` SETINI — interlace / hi-res / overscan flags.
+    pub const SETINI: u8 = 0x33;
+    /// `$213E` STAT77 — PPU1 status: interlace field, OBJ range/time
+    /// over, chip ID.
+    pub const STAT77: u8 = 0x3E;
+    /// `$213F` STAT78 — PPU2 status: interlace odd-field, region
+    /// bit (PAL/NTSC), chip rev. Reads ALSO reset the BG scroll
+    /// write-twice latch (a documented hardware side effect).
+    pub const STAT78: u8 = 0x3F;
 }
 
 /// Per-layer state derived from `$2107-$2114`.
@@ -249,6 +258,18 @@ pub struct Ppu {
     pub m7x: i16,
     /// Mode-7 centre Y.
     pub m7y: i16,
+    /// `$2133` SETINI — bit 7: external sync, bit 6: EXTBG (Mode-7
+    /// BG2 overlay), bit 5: hi-res 512×448, bit 4: overscan,
+    /// bit 3: pseudo-512, bit 2: V-mosaic disable, bit 1: interlace.
+    pub setini: u8,
+    /// `$213E` STAT77 — read-side latch for the PPU1 status byte.
+    /// Bit 7 toggles per field in interlace mode; bits 0-3 = chip ID
+    /// (we return 1 — model 5C77).
+    pub stat77: u8,
+    /// `$213F` STAT78 — read-side latch for the PPU2 status byte.
+    /// Bit 7 = interlace odd-field flag, bit 4 = region (1 = PAL,
+    /// 0 = NTSC), bits 0-3 = chip revision (= 2).
+    pub stat78: u8,
     /// `$2134-$2136 MPYL/M/H` — 24-bit hardware multiplier result.
     /// Updated whenever M7A or M7B's high byte is written:
     /// `M7A (signed 16) × M7B_high (signed 8) → 24-bit signed`.
@@ -327,6 +348,12 @@ impl Ppu {
             m7y: 0,
             mpy_result: 0,
             m7_latch: 0,
+            setini: 0,
+            // Initial PPU1 chip-ID = 1, no over flags, interlace field 0.
+            stat77: 0x01,
+            // Initial PPU2 chip rev = 2; region bit (4) defaults to 0
+            // (NTSC). PAL emulation can flip this on cart load.
+            stat78: 0x02,
             bg_scroll_latch: 0,
             open_bus: 0,
             inidisp_write_count: 0,
@@ -350,6 +377,14 @@ impl Ppu {
             register::MPYL => self.mpy_result as u8,
             register::MPYM => (self.mpy_result >> 8) as u8,
             register::MPYH => (self.mpy_result >> 16) as u8,
+            register::STAT77 => self.stat77,
+            register::STAT78 => {
+                // Reading $213F is documented to clear the shared
+                // BG-scroll write-twice latch as a side effect.
+                let v = self.stat78;
+                self.bg_scroll_latch = 0;
+                v
+            }
             // Everything else: open bus. The renderer's status registers
             // ($2134-$213F apart from those above) will be implemented
             // alongside the renderer.
@@ -467,6 +502,7 @@ impl Ppu {
                 let raw = self.write_m7_pair(value) & 0x1FFF;
                 self.m7y = ((raw as i16) << 3) >> 3;
             }
+            register::SETINI => self.setini = value,
             register::VMAIN => self.vram.vmain = VmainSettings::from_byte(value),
             register::VMADDL => {
                 let hi = (self.vram.address >> 8) as u8;
@@ -520,6 +556,51 @@ impl Ppu {
                 // renderer needs it.
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod stat_tests {
+    use super::*;
+
+    #[test]
+    fn stat77_returns_chip_id_1() {
+        let mut p = Ppu::new();
+        assert_eq!(p.read(register::STAT77) & 0x0F, 0x01);
+    }
+
+    #[test]
+    fn stat78_returns_chip_rev_2_and_ntsc_by_default() {
+        let mut p = Ppu::new();
+        let v = p.read(register::STAT78);
+        assert_eq!(v & 0x0F, 0x02, "chip rev = 2");
+        assert_eq!(v & 0x10, 0x00, "region bit clear = NTSC");
+    }
+
+    #[test]
+    fn stat78_read_clears_bg_scroll_latch() {
+        let mut p = Ppu::new();
+        // Push a value into the BG scroll latch by writing BG1HOFS once.
+        p.write(register::BG1HOFS, 0x42);
+        // Reading STAT78 should reset the latch — verified
+        // indirectly by checking the next BG scroll write doesn't
+        // see the stale 0x42 in the high byte.
+        let _ = p.read(register::STAT78);
+        // Write a single BG2HOFS value; if the latch was cleared,
+        // BG2 H scroll's high byte sees 0.
+        p.write(register::BG2HOFS, 0x10);
+        // h_scroll = (value << 8 | latch) & 0x3FF.
+        // latch was cleared → expect 0x1000 & 0x3FF = 0.
+        // (The 0x10 byte becomes the high byte of a 10-bit value
+        // → bits 8-9 of that byte land in the scroll.)
+        assert_eq!(p.bg[1].h_scroll & 0xFF, 0x00, "low byte = cleared latch");
+    }
+
+    #[test]
+    fn setini_stores_byte_verbatim() {
+        let mut p = Ppu::new();
+        p.write(register::SETINI, 0x55);
+        assert_eq!(p.setini, 0x55);
     }
 }
 
