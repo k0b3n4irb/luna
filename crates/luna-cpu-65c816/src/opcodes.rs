@@ -38,7 +38,10 @@ impl Cpu {
         // would never reach line 225. 8 mclk ≈ one "slow" bus tick; the
         // exact value doesn't matter as long as it's > 0.
         if self.waiting {
-            if self.pending_nmi {
+            // Both NMI and (unmasked) IRQ wake the CPU from WAI. The
+            // service of either fires below in the normal interrupt
+            // path; here we just clear the waiting flag.
+            if self.pending_nmi || (self.pending_irq && !self.p.contains(bit::I)) {
                 self.waiting = false;
             } else {
                 bus.io_cycle(WAI_TICK_MCYCLES);
@@ -65,6 +68,16 @@ impl Cpu {
             }
             return;
         }
+        // IRQ is checked after NMI (NMI always wins) and only fires
+        // when the `I` mask flag is clear.
+        if self.pending_irq && !self.p.contains(bit::I) {
+            self.pending_irq = false;
+            self.service_irq(bus);
+            if self.e {
+                self.sp = 0x0100 | (self.sp & 0x00FF);
+            }
+            return;
+        }
         let opcode = self.fetch_u8(bus);
         self.execute(opcode, bus);
         // Defensive re-pin at end-of-step in case any inner sequence
@@ -83,6 +96,17 @@ impl Cpu {
     fn service_nmi<B: Bus>(&mut self, bus: &mut B) {
         self.service_software_interrupt(
             bus, /* vec_native */ 0xFFEA, /* vec_emulation */ 0xFFFA,
+            /* set_b_bit_in_emulation */ false,
+        );
+    }
+
+    /// Run the IRQ service sequence — identical to NMI but jumps
+    /// through the IRQ vector ($FFEE native / $FFFE emulation).
+    /// The B bit is CLEARED on the pushed status so the handler can
+    /// tell apart a BRK from an IRQ/NMI in emulation mode.
+    fn service_irq<B: Bus>(&mut self, bus: &mut B) {
+        self.service_software_interrupt(
+            bus, /* vec_native */ 0xFFEE, /* vec_emulation */ 0xFFFE,
             /* set_b_bit_in_emulation */ false,
         );
     }
@@ -3205,6 +3229,59 @@ mod tests {
         cpu.trigger_nmi();
         cpu.trigger_nmi();
         assert!(cpu.pending_nmi, "still latched as a single pending edge");
+    }
+
+    #[test]
+    fn irq_services_via_fffe_vector_when_i_clear() {
+        // Place IRQ vector at $00:FFFE/FFFF and trigger an IRQ with
+        // I clear. The CPU should jump through the vector.
+        let (mut cpu, mut bus) = run(&[0xEA]); // NOP — never executes
+        bus.poke_slice(0x00_FFFE, &[0x00, 0x80]);
+        cpu.p.remove(bit::I);
+        cpu.trigger_irq();
+        cpu.step(&mut bus);
+        assert_eq!(cpu.pc, 0x8000, "IRQ should redirect through $FFFE");
+        assert!(!cpu.pending_irq, "edge consumed");
+    }
+
+    #[test]
+    fn irq_is_masked_when_i_flag_set() {
+        let (mut cpu, mut bus) = run(&[0xEA]); // NOP
+        bus.poke_slice(0x00_FFFE, &[0x00, 0x80]);
+        cpu.p.insert(bit::I);
+        cpu.trigger_irq();
+        let pc_before = cpu.pc;
+        cpu.step(&mut bus);
+        // The NOP ran, the IRQ stayed pending.
+        assert_eq!(cpu.pc, pc_before.wrapping_add(1));
+        assert!(cpu.pending_irq, "still latched while I masks it");
+    }
+
+    #[test]
+    fn nmi_wins_over_pending_irq() {
+        // Both edges latched; NMI runs first.
+        let (mut cpu, mut bus) = run(&[0xEA]);
+        bus.poke_slice(0x00_FFFA, &[0x00, 0x90]); // NMI vector
+        bus.poke_slice(0x00_FFFE, &[0x00, 0xA0]); // IRQ vector
+        cpu.p.remove(bit::I);
+        cpu.trigger_nmi();
+        cpu.trigger_irq();
+        cpu.step(&mut bus);
+        assert_eq!(cpu.pc, 0x9000, "NMI vector wins over IRQ");
+        assert!(cpu.pending_irq, "IRQ stays pending for the next step");
+    }
+
+    #[test]
+    fn irq_wakes_a_waiting_cpu_when_i_clear() {
+        let (mut cpu, mut bus) = run(&[0xCB]); // WAI
+        bus.poke_slice(0x00_FFFE, &[0x00, 0x80]);
+        cpu.step(&mut bus); // WAI
+        assert!(cpu.waiting);
+        cpu.p.remove(bit::I);
+        cpu.trigger_irq();
+        cpu.step(&mut bus);
+        assert!(!cpu.waiting);
+        assert_eq!(cpu.pc, 0x8000);
     }
 
     #[test]

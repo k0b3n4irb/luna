@@ -2,13 +2,13 @@
   "rom": "Super Bomberman (USA).sfc",
   "insns": 60000000,
   "note": "title screen, ~63 s of audio",
-  "duration_s": 63.395,
+  "duration_s": 63.386,
   "stats": {
-    "peak_pos": 12864,
-    "peak_neg": -15843,
-    "rms": 764.09,
-    "mean_abs": 340.6,
-    "non_zero": 0.4898
+    "peak_pos": 12923,
+    "peak_neg": -15954,
+    "rms": 763.35,
+    "mean_abs": 340.69,
+    "non_zero": 0.4899
   },
   "spectrum_peaks": [
     {
@@ -16,40 +16,40 @@
       "mag_db": 113.9
     },
     {
-      "hz": 976.6,
-      "mag_db": 112.8
-    },
-    {
-      "hz": 195.3,
-      "mag_db": 111.8
+      "hz": 1023.4,
+      "mag_db": 112.4
     },
     {
       "hz": 1031.2,
-      "mag_db": 111.8
+      "mag_db": 112.4
     },
     {
-      "hz": 1023.4,
-      "mag_db": 111.0
-    },
-    {
-      "hz": 1039.1,
-      "mag_db": 110.9
+      "hz": 195.3,
+      "mag_db": 111.7
     },
     {
       "hz": 1046.9,
-      "mag_db": 110.8
+      "mag_db": 111.4
     },
     {
-      "hz": 984.4,
-      "mag_db": 110.8
-    },
-    {
-      "hz": 187.5,
-      "mag_db": 110.4
+      "hz": 976.6,
+      "mag_db": 111.2
     },
     {
       "hz": 960.9,
-      "mag_db": 110.1
+      "mag_db": 111.1
+    },
+    {
+      "hz": 1039.1,
+      "mag_db": 110.7
+    },
+    {
+      "hz": 984.4,
+      "mag_db": 110.4
+    },
+    {
+      "hz": 1054.7,
+      "mag_db": 110.2
     }
   ]
 }
