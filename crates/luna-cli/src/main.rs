@@ -61,6 +61,28 @@ enum Command {
     },
     /// MCP server stub (real implementation lands in Phase 3).
     Mcp,
+    /// Run the emulator through `luna-api` and emit a JSON state
+    /// snapshot — the same data the MCP `get_state` tool returns.
+    ///
+    /// This is the dogfood path: the API surface that the CLI, GUI
+    /// and (eventually) MCP server all share. Use it to test the
+    /// API directly without going through any transport.
+    State {
+        /// Path to the .sfc / .smc ROM file.
+        rom: PathBuf,
+        /// CPU instructions to execute before snapshotting.
+        #[arg(short = 'n', long, default_value_t = 1000)]
+        steps: u64,
+        /// Where to write the JSON state. Use `-` for stdout.
+        #[arg(long, default_value = "-")]
+        out: PathBuf,
+        /// Optional screenshot output path (PNG).
+        #[arg(long)]
+        screenshot: Option<PathBuf>,
+        /// Optional audio dump path (32 kHz stereo WAV).
+        #[arg(long)]
+        audio_out: Option<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -85,7 +107,96 @@ fn main() -> ExitCode {
             eprintln!("MCP server not implemented yet — see ARCHITECTURE.md §14 (Phase 3).");
             ExitCode::from(2)
         }
+        Command::State {
+            rom,
+            steps,
+            out,
+            screenshot,
+            audio_out,
+        } => run_state(
+            &rom,
+            steps,
+            &out,
+            screenshot.as_deref(),
+            audio_out.as_deref(),
+        ),
     }
+}
+
+/// `luna state` — exercise the public `luna-api` surface end-to-end.
+fn run_state(
+    rom: &std::path::Path,
+    steps: u64,
+    out: &std::path::Path,
+    screenshot: Option<&std::path::Path>,
+    audio_out: Option<&std::path::Path>,
+) -> ExitCode {
+    let mut em = luna_api::Emulator::new();
+    if let Err(e) = em.load_rom(rom) {
+        eprintln!("error: {e}");
+        return ExitCode::from(1);
+    }
+    match em.step(steps) {
+        Ok(_) => {}
+        Err(e) => {
+            // Step errors are informational — we still want a state
+            // snapshot.
+            eprintln!("step warning: {e}");
+        }
+    }
+
+    let state = em.state();
+    let json = match serde_json::to_string_pretty(&state) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: serialising state: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    if out.as_os_str() == "-" {
+        println!("{json}");
+    } else if let Err(e) = std::fs::write(out, &json) {
+        eprintln!("error: writing state JSON: {e}");
+        return ExitCode::from(1);
+    } else {
+        eprintln!("State JSON written to {}", out.display());
+    }
+
+    if let Some(p) = screenshot {
+        match em.render_frame_png(false) {
+            Ok(png) => {
+                if let Err(e) = std::fs::write(p, &png) {
+                    eprintln!("error: writing screenshot: {e}");
+                    return ExitCode::from(1);
+                }
+                eprintln!("Screenshot written to {}", p.display());
+            }
+            Err(e) => {
+                eprintln!("error: render_frame_png: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    if let Some(p) = audio_out {
+        match em.drain_audio(usize::MAX) {
+            Ok(samples) => {
+                if let Err(e) = write_wav(p, &samples) {
+                    eprintln!("error: writing WAV: {e}");
+                    return ExitCode::from(1);
+                }
+                eprintln!(
+                    "Audio WAV written to {}  ({} samples @ 32 kHz stereo)",
+                    p.display(),
+                    samples.len()
+                );
+            }
+            Err(e) => {
+                eprintln!("error: drain_audio: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 fn run(
