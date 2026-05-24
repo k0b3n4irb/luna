@@ -1,6 +1,6 @@
-//! HiROM (Mode 21) cartridge mapping.
+//! HiROM (Mode 21) and ExHiROM (Mode 25) cartridge mapping.
 //!
-//! # Mapping
+//! # HiROM mapping (Mode 21)
 //!
 //! HiROM places **full 64 KB pages** in the upper banks of the SNES
 //! address space:
@@ -14,6 +14,24 @@
 //! - `$80..$BF:$8000-$FFFF` — same mirror as `$00..$3F` (FastROM
 //!   eligible when `MEMSEL` is set).
 //!
+//! # ExHiROM mapping (Mode 25)
+//!
+//! ExHiROM splits the cart into two 4 MB halves. The `$C0..$FF` /
+//! `$80..$BF` banks reach the **lower** half (ROM banks 0..63);
+//! the `$40..$7D` / `$00..$3F` banks reach the **upper** half
+//! (ROM banks 64..125). Concretely:
+//!
+//! - `$C0..$FF:$0000-$FFFF` → ROM banks 0..63 (lower 4 MB)
+//! - `$80..$BF:$8000-$FFFF` → upper half of ROM banks 0..63
+//!   (FastROM mirror of `$C0..$FF`)
+//! - `$40..$7D:$0000-$FFFF` → ROM banks 64..125 (upper 4 MB)
+//! - `$00..$3F:$8000-$FFFF` → upper half of ROM banks 64..127
+//!   (mirror of `$40..$7D` — slow)
+//!
+//! Equivalently: when the mapper is in ExHiROM mode and the high bit
+//! of the bank is clear (banks `$00..$7F`), the ROM bank index is
+//! offset by `64` to point into the upper 4 MB.
+//!
 //! # SRAM
 //!
 //! Banks `$20..$3F` and `$A0..$BF` at offsets `$6000-$7FFF` expose
@@ -22,10 +40,13 @@
 use crate::mapper::{Mapper, MapperKind};
 use crate::types::{Addr24, bank_of, offset_of};
 
-/// HiROM mapper.
+/// HiROM / ExHiROM mapper.
 pub struct HiRomMapper {
     rom: Vec<u8>,
     sram: Vec<u8>,
+    /// `HiRom` or `ExHiRom`. Selects whether banks `$00..$7F` reach
+    /// the lower 4 MB (HiROM) or the upper 4 MB (ExHiROM).
+    kind: MapperKind,
 }
 
 impl HiRomMapper {
@@ -34,20 +55,47 @@ impl HiRomMapper {
     /// `sram_size` is in bytes (0 / 2K / 8K / 32K / 64K / 128K).
     #[must_use]
     pub fn new(rom: Vec<u8>, sram_size: usize) -> Self {
+        Self::with_kind(MapperKind::HiRom, rom, sram_size)
+    }
+
+    /// Build an ExHiROM mapper (Mode 25) — same as [`Self::new`] but
+    /// routes banks `$00..$7F` to the upper 4 MB of ROM.
+    #[must_use]
+    pub fn new_exhirom(rom: Vec<u8>, sram_size: usize) -> Self {
+        Self::with_kind(MapperKind::ExHiRom, rom, sram_size)
+    }
+
+    /// Build a HiROM-family mapper with an explicit kind. Panics if
+    /// `kind` is not `HiRom` or `ExHiRom`.
+    #[must_use]
+    pub fn with_kind(kind: MapperKind, rom: Vec<u8>, sram_size: usize) -> Self {
+        assert!(
+            matches!(kind, MapperKind::HiRom | MapperKind::ExHiRom),
+            "HiRomMapper only supports HiRom and ExHiRom kinds, got {kind:?}"
+        );
         Self {
             rom,
             sram: vec![0; sram_size],
+            kind,
         }
     }
 
     /// Translate (bank, offset) → ROM byte offset, or `None` if the
     /// address doesn't fall in a HiROM-mapped region.
     fn rom_offset(&self, bank: u8, offset: u16) -> Option<usize> {
-        // Which ROM "logical bank" is this?
+        // In ExHiROM mode, banks $00..$7F reach the upper 4 MB —
+        // i.e. ROM banks 64..127.  Banks $80..$FF keep the standard
+        // HiROM mapping (lower 4 MB).
+        let exhirom_offset: usize = if matches!(self.kind, MapperKind::ExHiRom) && bank & 0x80 == 0
+        {
+            64
+        } else {
+            0
+        };
         let rom_bank: usize = match bank {
             0xC0..=0xFF => usize::from(bank - 0xC0),
-            0x40..=0x7D => usize::from(bank - 0x40),
-            0x00..=0x3F if offset >= 0x8000 => usize::from(bank),
+            0x40..=0x7D => usize::from(bank - 0x40) + exhirom_offset,
+            0x00..=0x3F if offset >= 0x8000 => usize::from(bank) + exhirom_offset,
             0x80..=0xBF if offset >= 0x8000 => usize::from(bank - 0x80),
             _ => return None,
         };
@@ -78,7 +126,7 @@ impl HiRomMapper {
 
 impl Mapper for HiRomMapper {
     fn kind(&self) -> MapperKind {
-        MapperKind::HiRom
+        self.kind
     }
 
     fn read(&mut self, addr: Addr24) -> Option<u8> {
@@ -215,5 +263,113 @@ mod tests {
     fn kind_is_hirom() {
         let m = HiRomMapper::new(ramp_rom(0x1_0000), 0);
         assert_eq!(m.kind(), MapperKind::HiRom);
+    }
+
+    // ---------- ExHiROM (Mode 25) ----------
+
+    /// In ExHiROM, banks `$40..$7D` reach ROM bank 64+, i.e. the
+    /// upper 4 MB. Test against an 8 MB ramp so we can tell the two
+    /// halves apart.
+    ///
+    /// `ramp_rom` makes `rom[i] = (i & 0xFF) as u8`, so a 64 KB-step
+    /// crossing always lands on `0x00`. To distinguish bank 0 from
+    /// bank 64 we instead seed `rom[bank * 0x10000] = bank as u8`.
+    fn marked_rom_8mb() -> Vec<u8> {
+        let mut rom = vec![0u8; 128 * 0x1_0000];
+        for bank in 0..128 {
+            rom[bank * 0x1_0000] = bank as u8;
+        }
+        rom
+    }
+
+    #[test]
+    fn exhirom_bank_c0_reaches_lower_half() {
+        let mut m = HiRomMapper::new_exhirom(marked_rom_8mb(), 0);
+        // $C0:0000 → ROM bank 0 → marker $00
+        assert_eq!(m.read(make_addr(0xC0, 0x0000)), Some(0x00));
+        // $C5:0000 → ROM bank 5 → marker $05
+        assert_eq!(m.read(make_addr(0xC5, 0x0000)), Some(0x05));
+    }
+
+    #[test]
+    fn exhirom_bank_40_reaches_upper_half() {
+        let mut m = HiRomMapper::new_exhirom(marked_rom_8mb(), 0);
+        // $40:0000 → ROM bank 64 → marker $40
+        assert_eq!(m.read(make_addr(0x40, 0x0000)), Some(0x40));
+        // $45:0000 → ROM bank 69 → marker $45
+        assert_eq!(m.read(make_addr(0x45, 0x0000)), Some(0x45));
+    }
+
+    #[test]
+    fn exhirom_bank_00_high_half_mirrors_upper() {
+        // $00:8000 should read the upper half of ROM bank 64 in
+        // ExHiROM, i.e. file offset $40 * $10000 + $8000.
+        let mut rom = marked_rom_8mb();
+        rom[0x40 * 0x1_0000 + 0x8000] = 0xAB;
+        let mut m = HiRomMapper::new_exhirom(rom, 0);
+        assert_eq!(m.read(make_addr(0x00, 0x8000)), Some(0xAB));
+        // And via the FastROM mirror, $80:$8000 reaches the upper
+        // half of ROM bank 0 (lower 4 MB), which we marked with $00.
+        assert_eq!(m.read(make_addr(0x80, 0x8000)), Some(0x00));
+    }
+
+    #[test]
+    fn exhirom_bank_80_high_half_mirrors_lower() {
+        let mut m = HiRomMapper::new_exhirom(marked_rom_8mb(), 0);
+        // $80:8000 → upper half of ROM bank 0 (lower 4 MB), marker $00
+        assert_eq!(m.read(make_addr(0x80, 0x8000)), Some(0x00));
+        // $85:8000 → upper half of ROM bank 5, marker is not at offset 0x8000 but $05
+        // is at offset 0x50000, so $85:8000 reads rom[0x58000] which we haven't
+        // marked — sanity check it doesn't return the wrong half.
+        // The relevant distinction: this must equal $C5:8000.
+        assert_eq!(
+            m.read(make_addr(0x85, 0x8000)),
+            m.read(make_addr(0xC5, 0x8000))
+        );
+    }
+
+    #[test]
+    fn exhirom_hi_and_lo_halves_are_distinct() {
+        // Cross-check: bank $40 (upper half) and $C0 (lower half)
+        // must NOT read the same ROM byte.
+        let mut m = HiRomMapper::new_exhirom(marked_rom_8mb(), 0);
+        assert_ne!(
+            m.read(make_addr(0x40, 0x0000)),
+            m.read(make_addr(0xC0, 0x0000)),
+        );
+    }
+
+    #[test]
+    fn hirom_and_exhirom_agree_on_lower_4mb() {
+        // For banks $C0..$FF the two modes are identical.
+        let hi = HiRomMapper::new(marked_rom_8mb(), 0);
+        let mut hi = hi;
+        let mut ex = HiRomMapper::new_exhirom(marked_rom_8mb(), 0);
+        for b in [0xC0u8, 0xC5, 0xFD] {
+            assert_eq!(hi.read(make_addr(b, 0x1234)), ex.read(make_addr(b, 0x1234)));
+        }
+    }
+
+    #[test]
+    fn exhirom_sram_window_is_same_as_hirom() {
+        // SRAM placement is independent of the lower/upper-4MB split.
+        let mut ex = HiRomMapper::new_exhirom(marked_rom_8mb(), 8 * 1024);
+        let addr = make_addr(0x20, 0x6000);
+        assert!(ex.write(addr, 0x42));
+        assert_eq!(ex.read(addr), Some(0x42));
+        // Mirror at $A0.
+        assert_eq!(ex.read(make_addr(0xA0, 0x6000)), Some(0x42));
+    }
+
+    #[test]
+    fn exhirom_kind_is_exhirom() {
+        let m = HiRomMapper::new_exhirom(marked_rom_8mb(), 0);
+        assert_eq!(m.kind(), MapperKind::ExHiRom);
+    }
+
+    #[test]
+    #[should_panic(expected = "HiRomMapper only supports")]
+    fn with_kind_rejects_non_hirom_family() {
+        let _ = HiRomMapper::with_kind(MapperKind::LoRom, vec![0u8; 0x1_0000], 0);
     }
 }
