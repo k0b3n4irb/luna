@@ -73,6 +73,13 @@ pub mod register {
     pub const VMDATAHREAD: u8 = 0x3A;
     /// `$213B` — CGDATAREAD.
     pub const CGDATAREAD: u8 = 0x3B;
+    /// `$2130` CGWSEL — color-math window / sub-screen-mix flags.
+    pub const CGWSEL: u8 = 0x30;
+    /// `$2131` CGADSUB — color-math operator + per-layer enable mask.
+    pub const CGADSUB: u8 = 0x31;
+    /// `$2132` COLDATA — fixed sub-screen colour, written one (R/G/B)
+    /// channel at a time via the top 3 bits.
+    pub const COLDATA: u8 = 0x32;
 }
 
 /// Per-layer state derived from `$2107-$2114`.
@@ -119,6 +126,20 @@ pub struct Ppu {
     pub bgmode: u8,
     /// `$2106` MOSAIC.
     pub mosaic: u8,
+    /// `$2130` CGWSEL — bit 7:6 force-main-black region, bit 5:4
+    /// math-enable region (both reference the colour-math window),
+    /// bit 1 sub-BG/OBJ enable, bit 0 direct-colour mode for 8bpp.
+    pub cgwsel: u8,
+    /// `$2131` CGADSUB — bit 7 add/subtract, bit 6 half-color, bit 5
+    /// backdrop, bit 4 OBJ palettes 4-7, bits 3:0 BG4..BG1 enables.
+    pub cgadsub: u8,
+    /// `$2132` COLDATA: red channel of the fixed sub-screen colour
+    /// (5 bits, 0-31). Updated by writes whose bit 5 is set.
+    pub coldata_r: u8,
+    /// `$2132` COLDATA: green channel (5 bits). Bit 6 selects.
+    pub coldata_g: u8,
+    /// `$2132` COLDATA: blue channel (5 bits). Bit 7 selects.
+    pub coldata_b: u8,
     /// BG1-4 derived state ($2107-$2114).
     pub bg: [BgState; 4],
     /// Latch for the BG H/V scroll write-twice protocol.
@@ -158,6 +179,11 @@ impl Ppu {
             obsel: 0,
             bgmode: 0,
             mosaic: 0,
+            cgwsel: 0,
+            cgadsub: 0,
+            coldata_r: 0,
+            coldata_g: 0,
+            coldata_b: 0,
             bg: [BgState::default(); 4],
             bg_scroll_latch: 0,
             open_bus: 0,
@@ -263,6 +289,25 @@ impl Ppu {
             register::VMDATAH => self.vram.write_hi(value),
             register::CGADD => self.cgram.set_address(value),
             register::CGDATA => self.cgram.write(value),
+            register::CGWSEL => self.cgwsel = value,
+            register::CGADSUB => self.cgadsub = value,
+            register::COLDATA => {
+                // Multiple channels can be selected per write (the
+                // high 3 bits act as a per-channel write-enable mask),
+                // and writes ACCUMULATE — drivers set R then G then B
+                // with three sequential writes, and reads of any
+                // unaddressed channel are preserved.
+                let intensity = value & 0x1F;
+                if value & 0x20 != 0 {
+                    self.coldata_r = intensity;
+                }
+                if value & 0x40 != 0 {
+                    self.coldata_g = intensity;
+                }
+                if value & 0x80 != 0 {
+                    self.coldata_b = intensity;
+                }
+            }
             // FALLTHROUGH for unmodelled registers.
             // Other registers are stored as raw bytes for now (BG
             // scroll, window state, etc. — wired here in P1.4+).
