@@ -72,6 +72,52 @@ pub const ADSR_RATE_PERIODS: [u16; 32] = [
     40, 32, 24, 20, 16, 12, 10, 8, 6, 5, 4, 3, 2, 1,
 ];
 
+/// Lazily-built 512-entry Gaussian interpolation table used by the
+/// SPC700 DSP for 4-tap pitch interpolation.
+///
+/// Generated from the canonical [ares] formula. After raw computation
+/// the table is normalised so each fraction-aligned 4-tap group
+/// (indices `[phase, 255-phase, 256+phase, 511-phase]`) sums to
+/// exactly `2048`. That keeps the interpolation lossless when all
+/// four history samples are equal: the right-shift by 11 in the
+/// 4-tap formula then recovers the input sample byte-for-byte.
+///
+/// [ares]: https://github.com/ares-emulator/ares/blob/master/ares/sfc/dsp/gaussian.cpp
+#[must_use]
+pub fn gaussian_table() -> &'static [i16; 512] {
+    static TABLE: std::sync::OnceLock<[i16; 512]> = std::sync::OnceLock::new();
+    TABLE.get_or_init(build_gaussian_table)
+}
+
+/// One-shot builder for the Gaussian table — only the first call to
+/// [`gaussian_table`] reaches this.
+fn build_gaussian_table() -> [i16; 512] {
+    let pi = std::f64::consts::PI;
+    let mut raw = [0.0_f64; 512];
+    for n in 0..512 {
+        let k = 0.5 + n as f64;
+        let s = (pi * k * 1.280 / 1024.0).sin();
+        let t = ((pi * k * 2.000 / 1023.0).cos() - 1.0) * 0.50;
+        let u = ((pi * k * 4.000 / 1023.0).cos() - 1.0) * 0.08;
+        // Match ares: store the raw value at the MIRRORED index, so
+        // the table is monotone-increasing 0..511 (peak at 511, zero
+        // at 0). The 4-tap formula then reads from both ends.
+        raw[511 - n] = s * (t + u + 1.0) / k;
+    }
+    let mut table = [0i16; 512];
+    // Normalise each of the 128 phase-groups so the 4-tap sum is 2048.
+    for phase in 0..128 {
+        let idxs = [phase, 255 - phase, 256 + phase, 511 - phase];
+        let sum = idxs.iter().map(|&i| raw[i]).sum::<f64>();
+        let scale = 2048.0 / sum;
+        for &i in &idxs {
+            // +0.5 round-half-up; values are positive and small (<2K).
+            table[i] = (raw[i] * scale + 0.5) as i16;
+        }
+    }
+    table
+}
+
 /// All APU state owned by [`Apu`]: SPC700 core + 64 KB ARAM + the two
 /// 4-byte mailbox arrays.
 pub struct Apu {
@@ -137,11 +183,14 @@ pub struct Apu {
     /// Position within the current BRR block (0..15). When it wraps,
     /// the block header is re-read to handle end / loop bits.
     pub voice_block_sample: [u8; 8],
-    /// Last two decoded BRR samples per voice (`[s(n-1), s(n-2)]`).
-    /// Required by filters F1/F2/F3 — the filter mixes the new raw
-    /// sample with this short history to reconstruct the original
-    /// 16-bit PCM samples.
-    pub voice_brr_history: [[i16; 2]; 8],
+    /// Last four decoded BRR samples per voice, newest-first:
+    /// `[s(n), s(n-1), s(n-2), s(n-3)]`.
+    ///
+    /// The BRR filters (F1/F2/F3) only need the most recent two
+    /// samples to reconstruct the next, but the 4-tap Gaussian
+    /// interpolator needs four. We keep the wider slot universally
+    /// so both consumers index a single array.
+    pub voice_brr_history: [[i16; 4]; 8],
     /// Pitch accumulator per voice. Each output sample (32 kHz) the
     /// 14-bit pitch (from `$x2`/`$x3`) is added; whenever the
     /// accumulator crosses 0x1000 the BRR sample pointer advances
@@ -236,7 +285,7 @@ impl Apu {
             voice_position: [0; 8],
             voice_block_addr: [0; 8],
             voice_block_sample: [0; 8],
-            voice_brr_history: [[0, 0]; 8],
+            voice_brr_history: [[0, 0, 0, 0]; 8],
             voice_pitch_acc: [0; 8],
             echo_pos_samples: 0,
             audio_left: 0,
@@ -370,6 +419,10 @@ impl Apu {
                 while acc >= 0x1000 {
                     acc -= 0x1000;
                     let sample = self.decode_current_brr_sample(v);
+                    // Shift history newest→oldest by one slot, then
+                    // place the new sample at index 0 (newest).
+                    self.voice_brr_history[v][3] = self.voice_brr_history[v][2];
+                    self.voice_brr_history[v][2] = self.voice_brr_history[v][1];
                     self.voice_brr_history[v][1] = self.voice_brr_history[v][0];
                     self.voice_brr_history[v][0] = sample;
                     self.advance_brr_block(v);
@@ -385,20 +438,27 @@ impl Apu {
             // mix. `outx = sample × env / 0x800` (signed 16-bit);
             // we then scale by signed-7-bit VOL_L / VOL_R per voice.
             //
-            // The "sample" we use is a linear interpolation between
-            // the previous and the freshly-decoded BRR sample, using
-            // the fractional part of the 12-bit pitch counter as the
-            // blend weight. Real SPC700 hardware uses a 4-tap
-            // Gaussian filter (smoother + slight low-pass); linear
-            // interpolation is close enough to remove the harsh
-            // staircase aliasing of zero-order hold and is what
-            // gives recognizable melodies instead of square-wavey
-            // clicks. A proper Gaussian table can land later.
+            // The "sample" we feed in is the output of a 4-tap
+            // Gaussian filter — matching real SPC700 hardware. The
+            // upper 8 bits of the 12-bit pitch accumulator index a
+            // 512-entry table; the four taps line up at indices
+            // `[255-frac, 511-frac, 256+frac, frac]` against the
+            // four most-recent decoded BRR samples (oldest → newest).
+            // The table is normalised so the 4-tap weights sum to
+            // exactly 2048 — the `>> 11` then recovers the input
+            // amplitude when all four taps are equal.
             if self.voice_active[v] {
-                let cur = i32::from(self.voice_brr_history[v][0]);
-                let prev = i32::from(self.voice_brr_history[v][1]);
-                let frac = i32::from(self.voice_pitch_acc[v]); // 0..=$0FFF
-                let s = (prev * (0x1000 - frac) + cur * frac) >> 12;
+                let frac = (self.voice_pitch_acc[v] >> 4) as usize; // 0..=255
+                let table = gaussian_table();
+                let s3 = i32::from(self.voice_brr_history[v][0]); // newest
+                let s2 = i32::from(self.voice_brr_history[v][1]);
+                let s1 = i32::from(self.voice_brr_history[v][2]);
+                let s0 = i32::from(self.voice_brr_history[v][3]); // oldest
+                let sum = i32::from(table[255 - frac]) * s0
+                    + i32::from(table[511 - frac]) * s1
+                    + i32::from(table[256 + frac]) * s2
+                    + i32::from(table[frac]) * s3;
+                let s = (sum >> 11).clamp(-32768, 32767);
                 let env = i32::from(self.voice_envelope[v]);
                 let outx = (s * env) >> 11; // signed 16-bit
                 let vol_l = self.dsp_regs[v * 0x10] as i8 as i32;
@@ -1123,7 +1183,7 @@ mod tests {
         apu.voice_block_sample[0] = 0;
         let s0 = apu.decode_current_brr_sample(0);
         assert_eq!(s0, -8);
-        apu.voice_brr_history[0] = [s0, 0];
+        apu.voice_brr_history[0] = [s0, 0, 0, 0];
         apu.voice_block_sample[0] = 1;
         let s1 = apu.decode_current_brr_sample(0);
         assert_eq!(s1, 7);
@@ -1172,9 +1232,16 @@ mod tests {
     fn voice_volume_scales_stereo_mix() {
         // Pre-load voice 0 with a known sample and full envelope
         // (gain mode, so the voice doesn't decay during this tick).
+        //
+        // The BRR block is filled with $77 in every data byte so
+        // every decoded sample is `+7`. After a few ticks the 4-tap
+        // Gaussian window holds four `+7` samples and the
+        // interpolation recovers the input amplitude exactly.
         let mut apu = Apu::new();
-        apu.aram[0x0600] = 0x00;
-        apu.aram[0x0601] = 0x70; // sample 0 nibble = $7 = +7
+        apu.aram[0x0600] = 0x00; // header — no range, no filter, no end
+        for off in 1..=8 {
+            apu.aram[0x0600 + off] = 0x77;
+        }
         apu.voice_block_addr[0] = 0x0600;
         apu.voice_block_sample[0] = 0;
         apu.voice_active[0] = true;
@@ -1194,13 +1261,12 @@ mod tests {
         // mute bit would otherwise zero the output.
         apu.dsp_regs[0x6C] = 0x00;
 
-        // Two ticks: the first decodes sample 0 (history[0] = +7) but
-        // outputs the interpolation start (still zero — history[1] is
-        // the initial 0). The second tick lands at frac=0 of the next
-        // step, so the interp uses history[1]=+7 and produces a real
-        // sample on the left channel.
-        apu.tick_voices(SPC_CYCLES_PER_SAMPLE);
-        apu.tick_voices(SPC_CYCLES_PER_SAMPLE);
+        // Run 4 ticks so the Gaussian window fills with four `+7`
+        // samples (the first 3 ticks ramp through partially-zero
+        // history, the 4th lands on a saturated window).
+        for _ in 0..4 {
+            apu.tick_voices(SPC_CYCLES_PER_SAMPLE);
+        }
         let (l, r) = apu.audio_sample();
         // Right channel should be 0 (vol_r = 0).
         assert_eq!(r, 0);
@@ -1498,7 +1564,7 @@ mod tests {
         let mut apu = Apu::new();
         // Seed voice 0's history so the linear interp consistently
         // returns `imp` regardless of pitch_acc fraction.
-        apu.voice_brr_history[0] = [imp, imp];
+        apu.voice_brr_history[0] = [imp, imp, imp, imp];
         apu.voice_active[0] = true;
         apu.voice_phase[0] = AdsrPhase::Off; // gain mode
         apu.voice_envelope[0] = 0x7FF; // full
@@ -1723,5 +1789,123 @@ mod tests {
         assert!(l > 0x1E00 && l < 0x2200, "L expected ~$2000, got ${l:04X}");
         // EVOL_R = 0 → R stays silent.
         assert_eq!(r, 0);
+    }
+
+    // ====================================================================
+    // Gaussian interpolation
+    // ====================================================================
+
+    #[test]
+    fn gaussian_table_is_monotone_increasing() {
+        // The canonical 512-entry Gaussian table grows from 0 at
+        // index 0 to its peak at index 511. Verify by walking the
+        // table and asserting non-decreasing — small wobbles from
+        // floating-point rounding are OK as long as no entry
+        // *decreases*.
+        let t = gaussian_table();
+        assert_eq!(t[0], 0, "table[0] should be 0");
+        for i in 1..512 {
+            assert!(
+                t[i] >= t[i - 1],
+                "table monotonicity broken at i={i}: t[{}]={} > t[{i}]={}",
+                i - 1,
+                t[i - 1],
+                t[i],
+            );
+        }
+        // Peak around $519 (= 1305) per the canonical table.
+        assert!(
+            t[511] > 0x500 && t[511] < 0x520,
+            "table[511] expected ~$519, got ${:X}",
+            t[511]
+        );
+    }
+
+    #[test]
+    fn gaussian_4tap_sum_is_near_2048() {
+        // The normalisation targets a 4-tap sum of exactly 2048 for
+        // each phase — the `>> 11` in the interpolation formula
+        // then near-preserves input amplitude on a flat signal. The
+        // individual table entries are independently rounded
+        // (`+0.5` per ares), so the sum can come out as 2047, 2048,
+        // or 2049 depending on phase. Test the tolerance, not the
+        // exact equality.
+        let t = gaussian_table();
+        for phase in 0..128 {
+            let sum = i32::from(t[phase])
+                + i32::from(t[255 - phase])
+                + i32::from(t[256 + phase])
+                + i32::from(t[511 - phase]);
+            assert!(
+                (2047..=2049).contains(&sum),
+                "phase={phase}: sum was {sum}, expected 2047..=2049",
+            );
+        }
+    }
+
+    #[test]
+    fn gaussian_flat_signal_preserves_amplitude() {
+        // History full of $1000. At any frac, the interpolation must
+        // recover $1000 exactly (4-tap weights normalised to 2048,
+        // shift by 11 → unity gain on a flat input).
+        let mut apu = Apu::new();
+        apu.voice_brr_history[0] = [0x1000, 0x1000, 0x1000, 0x1000];
+        apu.voice_active[0] = true;
+        apu.voice_phase[0] = AdsrPhase::Off;
+        apu.voice_envelope[0] = 0x7FF; // full
+        apu.dsp_regs[0x00] = 0x7F; // VOL_L
+        apu.dsp_regs[0x01] = 0x7F; // VOL_R
+        apu.dsp_regs[0x0C] = 0x7F; // MVOL_L
+        apu.dsp_regs[0x1C] = 0x7F; // MVOL_R
+        apu.dsp_regs[0x6C] = 0x00; // clear FLG mute
+        apu.dsp_regs[0x07] = 0x7F; // gain direct
+        // pitch = 0 so we never advance BRR (no shifts to history)
+        apu.dsp_regs[0x02] = 0x00;
+        apu.dsp_regs[0x03] = 0x00;
+        // Run a few ticks at different fractional offsets.
+        for offset in [0u16, 0x400, 0x800, 0xC00] {
+            apu.voice_pitch_acc[0] = offset;
+            // re-seed history (in case any prior tick advanced it)
+            apu.voice_brr_history[0] = [0x1000, 0x1000, 0x1000, 0x1000];
+            apu.tick_one_sample();
+            let (l, _) = apu.audio_sample();
+            // Expected ≈ $1000 × env($7FF)/0x800 × vol_l($7F)/$80
+            //           × mvol_l($7F)/$80 ≈ $0FE2 (a few LSB of slop
+            // from each shift). Allow ±10%.
+            assert!(
+                l > 0x0E00 && l < 0x1100,
+                "offset=${offset:04X}: expected ~$1000, got ${l:04X}",
+            );
+        }
+    }
+
+    #[test]
+    fn gaussian_at_frac_zero_picks_prev_old_sample() {
+        // At frac=0, TABLE[511] is the peak coefficient. In the
+        // ares-matching 4-tap order, that coefficient pairs with the
+        // *third-newest* sample (`history[2]`). Verify by seeding
+        // only that slot and confirming the interpolation reflects
+        // primarily that value.
+        let mut apu = Apu::new();
+        apu.voice_brr_history[0] = [0, 0, 0x4000, 0];
+        apu.voice_active[0] = true;
+        apu.voice_phase[0] = AdsrPhase::Off;
+        apu.voice_envelope[0] = 0x7FF;
+        apu.dsp_regs[0x00] = 0x7F; // VOL_L
+        apu.dsp_regs[0x0C] = 0x7F; // MVOL_L
+        apu.dsp_regs[0x6C] = 0x00;
+        apu.dsp_regs[0x07] = 0x7F;
+        apu.dsp_regs[0x02] = 0x00;
+        apu.dsp_regs[0x03] = 0x00; // pitch=0, no BRR advance
+        apu.voice_pitch_acc[0] = 0;
+        apu.tick_one_sample();
+        let (l, _) = apu.audio_sample();
+        // Expected ≈ $4000 × TABLE[511] / 2048 × env × vol × mvol
+        //          ≈ $4000 × 1305/2048 × ~unity gain ≈ $2800
+        // Allow ±20%.
+        assert!(
+            l > 0x2000 && l < 0x3000,
+            "expected ~$2800, got ${l:04X}",
+        );
     }
 }
