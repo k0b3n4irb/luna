@@ -446,15 +446,28 @@ pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
     // by the layer's effective window region.
     let masks = compute_window_masks(ppu);
 
+    // Mode 7 uses a dedicated affine renderer for BG1 instead of
+    // the planar tilemap path. BG2-4 are unused in Mode 7.
+    let is_mode7 = ppu.bgmode & 0x07 == 0x07;
+
     for y in 0..FRAME_H as u16 {
         // Indexed scanlines for the 4 BG layers (transparent = `None`)
         // plus sprites carrying their 0-3 priority value.
-        let bgs: [IndexedScanline; 4] = [
-            render_bg_scanline_indexed_with(ppu, 0, y, opts),
-            render_bg_scanline_indexed_with(ppu, 1, y, opts),
-            render_bg_scanline_indexed_with(ppu, 2, y, opts),
-            render_bg_scanline_indexed_with(ppu, 3, y, opts),
-        ];
+        let bgs: [IndexedScanline; 4] = if is_mode7 {
+            [
+                render_mode7_scanline_indexed(ppu, y, opts),
+                [None; 256],
+                [None; 256],
+                [None; 256],
+            ]
+        } else {
+            [
+                render_bg_scanline_indexed_with(ppu, 0, y, opts),
+                render_bg_scanline_indexed_with(ppu, 1, y, opts),
+                render_bg_scanline_indexed_with(ppu, 2, y, opts),
+                render_bg_scanline_indexed_with(ppu, 3, y, opts),
+            ]
+        };
         let sprites = render_sprites_scanline_indexed_with(ppu, y, opts);
 
         let off = y as usize * FRAME_W;
@@ -632,6 +645,124 @@ fn compute_window_masks(ppu: &Ppu) -> WindowMasks {
     out
 }
 
+// =============================================================================
+// Mode 7 — affine BG1 renderer
+// =============================================================================
+
+/// Render one Mode-7 scanline into an [`IndexedScanline`].
+///
+/// Mode 7 has just one BG layer (BG1) which is the entire VRAM
+/// interpreted as a 128×128-tile field with 8×8 8bpp tiles. The
+/// affine transform per pixel is:
+///
+/// ```text
+///   sx = ScreenX + BG1HOFS - M7X
+///   sy = ScreenY + BG1VOFS - M7Y
+///   vram_x = M7A · sx + M7B · sy + (M7X << 8)
+///   vram_y = M7C · sx + M7D · sy + (M7Y << 8)
+/// ```
+///
+/// where matrix values are signed 8.8 fixed point and the result
+/// lives in 16.8 fixed point. The integer part (top 16 bits) is a
+/// VRAM byte address into the tilemap (low byte) and pixel data
+/// (high byte) of the interleaved 64 KB tilemap / tileset.
+///
+/// `M7SEL` bits 1:0 control the wrap / transparent behaviour when
+/// the sampled coordinate falls outside the 128×128 tilemap:
+///
+///   * `00` — coordinates wrap (mod 128)
+///   * `01` — wrap, but force tile 0 outside the tilemap
+///   * `10` — return transparent (the compositor falls through)
+///   * `11` — use tile 0 outside the tilemap
+///
+/// Horizontal and vertical flips (`M7SEL` bits 6, 7) negate the
+/// screen-space coordinate before the matrix multiply.
+#[must_use]
+pub fn render_mode7_scanline_indexed(
+    ppu: &Ppu,
+    y: u16,
+    opts: RenderOptions,
+) -> IndexedScanline {
+    let mut out: IndexedScanline = [None; 256];
+    if ppu.inidisp & 0x80 != 0 && !opts.bypass_forced_blank {
+        return out;
+    }
+    let h_scroll = bg_state(ppu, 0).h_scroll as i32 & 0x1FFF; // 13-bit
+    let v_scroll = bg_state(ppu, 0).v_scroll as i32 & 0x1FFF;
+    let m7a = i32::from(ppu.m7a);
+    let m7b = i32::from(ppu.m7b);
+    let m7c = i32::from(ppu.m7c);
+    let m7d = i32::from(ppu.m7d);
+    let cx = i32::from(ppu.m7x);
+    let cy = i32::from(ppu.m7y);
+    let v_flip = ppu.m7sel & 0x80 != 0;
+    let h_flip = ppu.m7sel & 0x40 != 0;
+    let screen_over = ppu.m7sel & 0x03;
+
+    let screen_y_raw = if v_flip { 255 - y as i32 } else { y as i32 };
+    let sy_term = screen_y_raw + v_scroll - cy;
+
+    // Pre-compute the y-only column of the affine product so the
+    // inner loop only needs the x-term.
+    let bx = m7b * sy_term;
+    let dy = m7d * sy_term;
+
+    for x in 0..256i32 {
+        let screen_x_raw = if h_flip { 255 - x } else { x };
+        let sx_term = screen_x_raw + h_scroll - cx;
+        // 16.8 fixed-point coordinates into the conceptual texture.
+        let vx = m7a * sx_term + bx + (cx << 8);
+        let vy = m7c * sx_term + dy + (cy << 8);
+
+        // Drop the fractional 8 bits → pixel grid coordinates.
+        let pix_x = vx >> 8;
+        let pix_y = vy >> 8;
+
+        // Out-of-bounds handling per M7SEL[1:0].
+        let outside = !(0..1024).contains(&pix_x) || !(0..1024).contains(&pix_y);
+        let (sample_x, sample_y, force_tile_zero) = if outside {
+            match screen_over {
+                0b00 => (pix_x & 0x3FF, pix_y & 0x3FF, false),
+                0b01 => (pix_x & 0x3FF, pix_y & 0x3FF, true),
+                0b10 => {
+                    continue; // transparent
+                }
+                _ => (pix_x & 0x3FF, pix_y & 0x3FF, true),
+            }
+        } else {
+            (pix_x, pix_y, false)
+        };
+
+        let tile_x = (sample_x >> 3) & 0x7F;
+        let tile_y = (sample_y >> 3) & 0x7F;
+        let in_tile_x = (sample_x & 7) as usize;
+        let in_tile_y = (sample_y & 7) as usize;
+
+        // VRAM layout: byte address 2n + 0 = tilemap entry n,
+        // 2n + 1 = tile data. Tilemap is 128×128 entries; each
+        // entry is 1 byte.
+        let tilemap_entry_addr = ((tile_y * 128 + tile_x) as u16) * 2;
+        let tile_id = if force_tile_zero {
+            0
+        } else {
+            ppu.vram.peek(tilemap_entry_addr)
+        };
+        // Tileset starts at byte 1 of word 0 (i.e. odd byte 1).
+        // Each tile is 64 bytes (8×8 × 8bpp), stride 64 in tile-
+        // data byte space → stride 128 in interleaved VRAM bytes.
+        let tile_byte_off = (tile_id as u16).wrapping_mul(128); // 64 tile bytes × 2 (interleave)
+        let pixel_byte_addr = tile_byte_off
+            .wrapping_add(((in_tile_y * 8 + in_tile_x) as u16) * 2)
+            .wrapping_add(1);
+        let palette_idx = ppu.vram.peek(pixel_byte_addr);
+        if palette_idx == 0 {
+            continue; // transparent
+        }
+        out[x as usize] = Some((palette_idx, 0));
+    }
+    out
+}
+
 /// Mark every pixel between `left` and `right` (inclusive) as
 /// "inside" the window. If `left > right` the window is empty,
 /// matching the documented hardware behaviour.
@@ -750,6 +881,13 @@ const MODE2OR3_TABLE: &[LayerSlot] = &[
     obj(3), bg(0, 1), obj(2), bg(1, 1), obj(1), bg(0, 0), obj(0), bg(1, 0),
 ];
 
+// Mode 7: just BG1 (affine) and OBJ. Standard hardware convention:
+//   OBJ3, OBJ2, OBJ1, BG1, OBJ0
+// — i.e. only sprite priority 0 falls below the Mode-7 plane.
+const MODE7_TABLE: &[LayerSlot] = &[
+    obj(3), obj(2), obj(1), bg(0, 0), obj(0),
+];
+
 /// Pick the priority table for the current BGMODE.
 fn priority_table(bgmode: u8) -> &'static [LayerSlot] {
     match bgmode & 0x07 {
@@ -764,9 +902,9 @@ fn priority_table(bgmode: u8) -> &'static [LayerSlot] {
             }
         }
         2 | 3 | 4 => MODE2OR3_TABLE,
-        // Modes 5/6/7 not yet wired into the priority engine; fall
-        // back to the Mode-1 layout so the games that do reach them
-        // at least produce something.
+        7 => MODE7_TABLE,
+        // Modes 5/6 not yet wired into the priority engine; fall
+        // back to the Mode-1 layout.
         _ => MODE1_BG3LO_TABLE,
     }
 }
@@ -1733,6 +1871,92 @@ mod tests {
         // Inside (x=8): math fires → blue channel boosted.
         // The two pixels must differ on the blue channel.
         assert_ne!(out[0][2], out[8][2], "math should fire inside, not outside");
+    }
+
+    // -------------------------------------------------------------------
+    // Mode 7
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn m7_latch_is_shared_across_m7a_m7b() {
+        // The Mode-7 latch is sticky across ALL M7A-M7D / M7X / M7Y
+        // writes — it carries the most-recently-written byte, full
+        // stop. After a low-then-high pair on M7A the latch holds
+        // M7A's high byte, so M7B's "first" write composes as
+        // (new << 8) | prior_latch — which is M7A's high byte.
+        let mut p = Ppu::new();
+        p.write(register::M7A, 0x34); // latch = 0x34
+        p.write(register::M7A, 0x12); // M7A = 0x1234, latch = 0x12
+        assert_eq!(p.m7a, 0x1234);
+        // Next write picks up the sticky latch from M7A's high byte.
+        p.write(register::M7B, 0xCD); // pair = (0xCD << 8) | 0x12 = 0xCD12
+        assert_eq!(p.m7b, 0xCD12_u16 as i16);
+    }
+
+    #[test]
+    fn m7_hardware_multiplier_uses_m7a_signed_times_m7b_high() {
+        // M7A = 0x0080 (=128 positive), M7B = 0x0100 (high byte = 1).
+        // Result = 128 × 1 = 128.
+        let mut p = Ppu::new();
+        // Write M7A = 0x0080.
+        p.write(register::M7A, 0x80); // latch = 0x80
+        p.write(register::M7A, 0x00); // M7A = 0x0080
+        // Write M7B = 0x0100 (the high byte 1 is what the multiplier uses).
+        p.write(register::M7B, 0x00); // latch = 0x00
+        p.write(register::M7B, 0x01); // M7B = 0x0100
+        assert_eq!(p.mpy_result, 128, "got {:#X}", p.mpy_result);
+        // MPYL/MPYM/MPYH read back the same.
+        assert_eq!(p.read(register::MPYL), 0x80);
+        assert_eq!(p.read(register::MPYM), 0x00);
+        assert_eq!(p.read(register::MPYH), 0x00);
+    }
+
+    #[test]
+    fn m7_hardware_multiplier_handles_negative_m7a() {
+        // M7A = 0xFFFF (=-1), M7B high = 0x40 (= 64). Result = -64.
+        let mut p = Ppu::new();
+        p.write(register::M7A, 0xFF);
+        p.write(register::M7A, 0xFF); // M7A = -1
+        p.write(register::M7B, 0x00);
+        p.write(register::M7B, 0x40); // M7B high = 0x40
+        assert_eq!(p.mpy_result, -64);
+    }
+
+    #[test]
+    fn mode7_renders_identity_transform() {
+        // Configure Mode 7 with the identity matrix
+        //   A=$0100 (= 1.0), B=0, C=0, D=$0100 (= 1.0)
+        // and seed the tilemap/tileset so screen (0,0) reads a
+        // known palette index.
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::BGMODE, 0x07);
+        // M7A = $0100, M7D = $0100, B/C = 0.
+        p.write(register::M7A, 0x00);
+        p.write(register::M7A, 0x01);
+        p.write(register::M7B, 0x00);
+        p.write(register::M7B, 0x00);
+        p.write(register::M7C, 0x00);
+        p.write(register::M7C, 0x00);
+        p.write(register::M7D, 0x00);
+        p.write(register::M7D, 0x01);
+        p.write(register::M7X, 0x00);
+        p.write(register::M7X, 0x00);
+        p.write(register::M7Y, 0x00);
+        p.write(register::M7Y, 0x00);
+        // Tilemap entry (0,0) = tile id 0; pixel (0,0) of tile 0 = $05.
+        // VRAM layout: byte 0 = tilemap[0,0], byte 1 = tileset[0].
+        p.vram.poke(0, 0); // tile id 0
+        p.vram.poke(1, 0x05); // pixel value
+        // Mode 7 reads palette directly from CGRAM (no sub-palette
+        // offset, no priority). Make CGRAM[5] non-backdrop.
+        p.cgram.poke(10, 0xFF); // index 5 low byte
+        p.cgram.poke(11, 0x7F); // index 5 high byte → BGR555 = 0x7FFF white
+        let scan = render_mode7_scanline_indexed(&p, 0, RenderOptions::default());
+        assert!(scan[0].is_some(), "Mode 7 should render at (0, 0)");
+        let (idx, prio) = scan[0].unwrap();
+        assert_eq!(idx, 5);
+        assert_eq!(prio, 0);
     }
 
     // -------------------------------------------------------------------
