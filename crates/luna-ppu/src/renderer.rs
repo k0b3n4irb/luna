@@ -394,41 +394,316 @@ pub fn render_frame_bg1_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
     render_frame_with(ppu, opts)
 }
 
-/// Render the full visible frame composited from BG3 (top) over BG2
-/// over BG1 over backdrop. This is the right priority order for the
-/// common Mode 1 title-screen pattern (BG3 = text overlay, BG2 =
-/// background, BG1 = (sprite-substitute) foreground) and is good
-/// enough to display Super Mario World's, Tetris 2's and similar
-/// title screens cleanly without a full per-pixel priority engine.
+/// Render the full visible frame using the SNES per-pixel priority
+/// engine. For each pixel we walk a per-BGMODE priority table from
+/// top to bottom; the first layer with a non-transparent pixel at
+/// that x wins. If no layer contributes, the CGRAM backdrop (index 0)
+/// shows through.
 ///
-/// Internally we render each layer's scanline, then for each pixel
-/// take the top-most non-backdrop value.
+/// The implementation differs from the previous "back-to-front layer
+/// overlay" by:
+///   * tracking transparency vs backdrop explicitly through
+///     [`IndexedScanline`] (CGRAM index + priority bit, `None` =
+///     transparent — not "backdrop colour");
+///   * routing sprites BETWEEN BG layers based on their per-sprite
+///     priority (0-3), not always on top;
+///   * honouring the BG-priority bit from each tilemap entry so a
+///     tile marked "high" sits above a tile marked "low" of the same
+///     BG layer (e.g. SMW status-bar text in front of clouds);
+///   * routing BG3 to the top in Mode 1 when BGMODE bit 3 is set.
+///
+/// Modes 0-4 are fully wired through this engine; modes 5, 6 and 7
+/// fall back to the Mode-1 table (close enough for the games in our
+/// test corpus until a dedicated path lands).
 #[must_use]
 pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
     let mut buf = vec![[0u8; 3]; FRAME_W * FRAME_H];
-    for y in 0..FRAME_H {
-        let bg1 = render_bg_scanline_with(ppu, 0, y as u16, opts);
-        let bg2 = render_bg_scanline_with(ppu, 1, y as u16, opts);
-        let bg3 = render_bg_scanline_with(ppu, 2, y as u16, opts);
-        let sprites = render_sprites_scanline(ppu, y as u16, opts);
-        let backdrop = bg1[0]; // each scanline writes backdrop where idx==0
-        let off = y * FRAME_W;
+
+    // INIDISP bit 7: forced blank → all black, ignoring brightness.
+    if ppu.inidisp & 0x80 != 0 && !opts.bypass_forced_blank {
+        return buf;
+    }
+    let brightness = if opts.bypass_forced_blank {
+        0x0F
+    } else {
+        ppu.inidisp & 0x0F
+    };
+
+    // Precompute the priority table for this BGMODE. The 4th bit of
+    // BGMODE flips BG3's slots to the top in Mode 1 — handled inside.
+    let table = priority_table(ppu.bgmode);
+    let backdrop = decode_palette(ppu, 0, brightness);
+
+    for y in 0..FRAME_H as u16 {
+        // Indexed scanlines for the 4 BG layers (transparent = `None`)
+        // plus sprites carrying their 0-3 priority value.
+        let bgs: [IndexedScanline; 4] = [
+            render_bg_scanline_indexed_with(ppu, 0, y, opts),
+            render_bg_scanline_indexed_with(ppu, 1, y, opts),
+            render_bg_scanline_indexed_with(ppu, 2, y, opts),
+            render_bg_scanline_indexed_with(ppu, 3, y, opts),
+        ];
+        let sprites = render_sprites_scanline_indexed_with(ppu, y, opts);
+
+        let off = y as usize * FRAME_W;
         for x in 0..FRAME_W {
-            // Priority order (top to bottom): sprites → BG3 → BG1 → BG2 → backdrop.
-            buf[off + x] = if let Some(rgb) = sprites[x] {
-                rgb
-            } else if bg3[x] != backdrop {
-                bg3[x]
-            } else if bg1[x] != backdrop {
-                bg1[x]
-            } else if bg2[x] != backdrop {
-                bg2[x]
-            } else {
-                backdrop
-            };
+            // Walk the priority table top-to-bottom; first hit wins.
+            let mut pixel = backdrop;
+            for slot in table {
+                let candidate = match slot.kind {
+                    LayerKind::Bg => {
+                        let scan = &bgs[slot.idx as usize];
+                        scan[x].and_then(|(cgram, prio_bit)| {
+                            (prio_bit == slot.bg_prio).then_some(cgram)
+                        })
+                    }
+                    LayerKind::Obj => sprites[x].and_then(|(cgram, prio)| {
+                        (prio == slot.idx).then_some(cgram)
+                    }),
+                };
+                if let Some(cgram_idx) = candidate {
+                    pixel = decode_palette(ppu, cgram_idx, brightness);
+                    break;
+                }
+            }
+            buf[off + x] = pixel;
         }
     }
     buf
+}
+
+// =============================================================================
+// Per-pixel priority engine — indexed scanlines + priority tables
+// =============================================================================
+
+/// One opaque pixel in a per-layer scanline buffer: `(cgram_idx,
+/// priority)`. For BGs the priority is the tile-entry priority bit
+/// (0 or 1). For sprites it's the OBJ priority (0..=3 from the OAM
+/// attribute byte). `None` represents a transparent pixel — colour 0
+/// in any sub-palette / sprite palette.
+pub type IndexedPixel = Option<(u8, u8)>;
+
+/// Indexed scanline buffer for one layer — 256 pixels.
+pub type IndexedScanline = [IndexedPixel; 256];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LayerKind {
+    Bg,
+    Obj,
+}
+
+/// One slot in a priority table. For `Bg`, `idx` is the BG layer
+/// index (0..=3) and `bg_prio` is the tilemap priority bit (0 or 1).
+/// For `Obj`, `idx` is the sprite priority being matched (0..=3) and
+/// `bg_prio` is unused.
+#[derive(Debug, Clone, Copy)]
+struct LayerSlot {
+    kind: LayerKind,
+    idx: u8,
+    bg_prio: u8,
+}
+
+const fn bg(idx: u8, prio: u8) -> LayerSlot {
+    LayerSlot {
+        kind: LayerKind::Bg,
+        idx,
+        bg_prio: prio,
+    }
+}
+
+const fn obj(prio: u8) -> LayerSlot {
+    LayerSlot {
+        kind: LayerKind::Obj,
+        idx: prio,
+        bg_prio: 0,
+    }
+}
+
+// Mode 0: BG1, BG2, BG3, BG4 all 2bpp. Real-hardware order:
+//   OBJ3, BG1H, BG2H, OBJ2, BG1L, BG2L, OBJ1, BG3H, BG4H, OBJ0, BG3L, BG4L
+const MODE0_TABLE: &[LayerSlot] = &[
+    obj(3), bg(0, 1), bg(1, 1), obj(2), bg(0, 0), bg(1, 0), obj(1),
+    bg(2, 1), bg(3, 1), obj(0), bg(2, 0), bg(3, 0),
+];
+
+// Mode 1, BG3 priority bit 0:
+//   OBJ3, BG1H, BG2H, OBJ2, BG1L, BG2L, OBJ1, BG3H, OBJ0, BG3L
+const MODE1_BG3LO_TABLE: &[LayerSlot] = &[
+    obj(3), bg(0, 1), bg(1, 1), obj(2), bg(0, 0), bg(1, 0), obj(1),
+    bg(2, 1), obj(0), bg(2, 0),
+];
+
+// Mode 1, BG3 priority bit 1 — BG3 high gets promoted above OBJ3:
+//   BG3H, OBJ3, BG1H, BG2H, OBJ2, BG1L, BG2L, OBJ1, OBJ0, BG3L
+const MODE1_BG3HI_TABLE: &[LayerSlot] = &[
+    bg(2, 1), obj(3), bg(0, 1), bg(1, 1), obj(2), bg(0, 0), bg(1, 0),
+    obj(1), obj(0), bg(2, 0),
+];
+
+// Modes 2 and 3 (BG1+BG2 only):
+//   OBJ3, BG1H, OBJ2, BG2H, OBJ1, BG1L, OBJ0, BG2L
+const MODE2OR3_TABLE: &[LayerSlot] = &[
+    obj(3), bg(0, 1), obj(2), bg(1, 1), obj(1), bg(0, 0), obj(0), bg(1, 0),
+];
+
+/// Pick the priority table for the current BGMODE.
+fn priority_table(bgmode: u8) -> &'static [LayerSlot] {
+    match bgmode & 0x07 {
+        0 => MODE0_TABLE,
+        1 => {
+            // BGMODE bit 3 = "BG3 priority": when set, BG3 high
+            // slot moves to the top of the table.
+            if bgmode & 0x08 != 0 {
+                MODE1_BG3HI_TABLE
+            } else {
+                MODE1_BG3LO_TABLE
+            }
+        }
+        2 | 3 | 4 => MODE2OR3_TABLE,
+        // Modes 5/6/7 not yet wired into the priority engine; fall
+        // back to the Mode-1 layout so the games that do reach them
+        // at least produce something.
+        _ => MODE1_BG3LO_TABLE,
+    }
+}
+
+/// Same as [`render_bg_scanline_with`] but returns CGRAM indices
+/// (instead of decoded RGB) and tags each pixel with its tilemap
+/// priority bit. Transparent pixels (colour 0 in the relevant
+/// sub-palette) return `None` so the compositor can route them to
+/// a lower-priority layer instead of the backdrop.
+#[must_use]
+pub fn render_bg_scanline_indexed_with(
+    ppu: &Ppu,
+    bg_idx: usize,
+    y: u16,
+    opts: RenderOptions,
+) -> IndexedScanline {
+    let mut out: IndexedScanline = [None; 256];
+    if ppu.inidisp & 0x80 != 0 && !opts.bypass_forced_blank {
+        return out;
+    }
+    let bpp = bg_bpp(ppu.bgmode, bg_idx);
+    if bpp == 0 {
+        return out;
+    }
+    let bytes_per_tile = match bpp {
+        2 => 16,
+        4 => 32,
+        8 => 64,
+        _ => 16,
+    };
+    let bg = bg_state(ppu, bg_idx);
+    let tilemap_base = (bg.tilemap_addr_words as usize) << 1;
+    let char_base = (bg.char_addr_words as usize) << 1;
+    let (cols, rows) = match bg.tilemap_size & 0x03 {
+        0 => (32u16, 32u16),
+        1 => (64u16, 32u16),
+        2 => (32u16, 64u16),
+        3 => (64u16, 64u16),
+        _ => (32u16, 32u16),
+    };
+    for x in 0..256u16 {
+        let src_x = x.wrapping_add(bg.h_scroll);
+        let src_y = y.wrapping_add(bg.v_scroll);
+        let tile_col_full = (src_x / 8) & (cols - 1);
+        let tile_row_full = (src_y / 8) & (rows - 1);
+        let sub_x = (tile_col_full >> 5) as usize;
+        let sub_y = (tile_row_full >> 5) as usize;
+        let sub_index = match bg.tilemap_size & 0x03 {
+            0 => 0,
+            1 => sub_x,
+            2 => sub_y,
+            3 => sub_y * 2 + sub_x,
+            _ => 0,
+        };
+        let tile_col = tile_col_full & 0x1F;
+        let tile_row = tile_row_full & 0x1F;
+        let entry_off =
+            tilemap_base + sub_index * 0x0800 + ((tile_row * 32 + tile_col) as usize) * 2;
+        let entry_lo = ppu.vram.peek(entry_off as u16);
+        let entry_hi = ppu.vram.peek(entry_off.wrapping_add(1) as u16);
+        let entry = u16::from(entry_lo) | (u16::from(entry_hi) << 8);
+        let tile_num = entry & 0x03FF;
+        let palette_off = ((entry >> 10) & 0x07) as u8;
+        let prio_bit = ((entry >> 13) & 0x01) as u8;
+        let h_flip = entry & 0x4000 != 0;
+        let v_flip = entry & 0x8000 != 0;
+        let mut row_in_tile = (src_y & 7) as usize;
+        let mut col_in_tile = (src_x & 7) as usize;
+        if v_flip {
+            row_in_tile = 7 - row_in_tile;
+        }
+        if h_flip {
+            col_in_tile = 7 - col_in_tile;
+        }
+        let tile_base = char_base + (tile_num as usize) * bytes_per_tile;
+        let idx = decode_tile_pixel(ppu, tile_base, row_in_tile, col_in_tile, bpp);
+        if idx == 0 {
+            // Transparent within this BG → leave `None`.
+            continue;
+        }
+        let cgram_idx = match bpp {
+            2 => palette_off * 4 + idx,
+            4 => palette_off.wrapping_mul(16).wrapping_add(idx),
+            _ => idx,
+        };
+        out[x as usize] = Some((cgram_idx, prio_bit));
+    }
+    out
+}
+
+/// Same as [`render_sprites_scanline`] but returns CGRAM indices
+/// and the sprite's 2-bit priority value. Allows the compositor to
+/// interleave sprites with BG layers per the mode's priority table
+/// instead of always painting them on top.
+#[must_use]
+pub fn render_sprites_scanline_indexed_with(
+    ppu: &Ppu,
+    y: u16,
+    opts: RenderOptions,
+) -> IndexedScanline {
+    let mut out: IndexedScanline = [None; 256];
+    if ppu.inidisp & 0x80 != 0 && !opts.bypass_forced_blank {
+        return out;
+    }
+    let sprite_tile_base_bytes = ((ppu.obsel as usize) & 0x07) << 13;
+    let sprites = decode_all_sprites(ppu);
+    // Iterate highest-OAM-index first so lower indices visually win
+    // (sprite 0 = front-most for the same screen pixel).
+    for sp in sprites.iter().rev() {
+        let row_in_sprite = y.wrapping_sub(sp.y as u16);
+        if usize::from(row_in_sprite) >= sp.h as usize {
+            continue;
+        }
+        for col in 0..sp.w {
+            let screen_x = sp.x + col as i16;
+            if !(0..256).contains(&screen_x) {
+                continue;
+            }
+            let mut sc = col as usize;
+            let mut sr = row_in_sprite as usize;
+            if sp.h_flip {
+                sc = (sp.w - 1) as usize - sc;
+            }
+            if sp.v_flip {
+                sr = (sp.h - 1) as usize - sr;
+            }
+            let tile_x = sc / 8;
+            let tile_y = sr / 8;
+            let pix_x = sc % 8;
+            let pix_y = sr % 8;
+            let tile_id = (sp.tile.wrapping_add(((tile_y * 16) + tile_x) as u16)) & 0x01FF;
+            let tile_off = sprite_tile_base_bytes + (tile_id as usize) * 32;
+            let idx = decode_tile_pixel(ppu, tile_off, pix_y, pix_x, 4);
+            if idx == 0 {
+                continue;
+            }
+            let cgram_idx = 128u16 + (sp.palette as u16) * 16 + (idx as u16);
+            out[screen_x as usize] = Some((cgram_idx as u8, sp.priority));
+        }
+    }
+    out
 }
 
 /// Render a specific BG layer (`bg_idx` = 0..=3 → BG1..=BG4) into a
@@ -868,5 +1143,96 @@ mod tests {
                 assert!(px.is_none(), "y={y} x={xi} had visible sprite pixel");
             }
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Per-pixel priority engine
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn indexed_bg_returns_none_for_palette_index_zero() {
+        // A blank PPU (all VRAM zero, default palette) decodes every
+        // pixel as palette index 0 — which the indexed renderer must
+        // report as `None` (transparent), not as the backdrop colour.
+        let p = Ppu::new();
+        let scan = render_bg_scanline_indexed_with(&p, 0, 0, RenderOptions::default());
+        assert!(scan.iter().all(|px| px.is_none()), "all-zero tile should be transparent");
+    }
+
+    #[test]
+    fn indexed_bg_tags_priority_bit_from_tilemap_entry() {
+        // Pre-seed BG1 with a single tile whose entry has priority
+        // bit set ($2000 = bit 13). Verify the renderer reads that
+        // bit and tags every opaque pixel of the tile with prio = 1.
+        let mut p = setup_demo_tile();
+        // The demo tile is at tilemap entry 0. Add priority bit (bit 13)
+        // to the existing entry.
+        let entry_off = (bg_state(&p, 0).tilemap_addr_words as usize) << 1;
+        let lo = p.vram.peek(entry_off as u16);
+        let hi = p.vram.peek(entry_off as u16 + 1);
+        let entry = u16::from(lo) | (u16::from(hi) << 8) | 0x2000;
+        p.vram.poke(entry_off as u16, entry as u8);
+        p.vram.poke(entry_off as u16 + 1, (entry >> 8) as u8);
+        let scan = render_bg_scanline_indexed_with(&p, 0, 0, RenderOptions::default());
+        // Find any opaque pixel — should be tagged prio = 1.
+        let any_opaque = scan.iter().filter_map(|p| *p).next();
+        let (_, prio) = any_opaque.expect("at least one opaque pixel");
+        assert_eq!(prio, 1, "priority bit should propagate from entry bit 13");
+    }
+
+    #[test]
+    fn full_frame_respects_sprite_priority_under_high_bg() {
+        // Set up Mode 1 with BG3 priority bit = 0. Place a BG3 entry
+        // with priority bit 1 at (0,0) — that tile lives in the
+        // BG3.hi slot, ABOVE sprite priority 0. Then place a sprite
+        // at (0,0) with priority 0 (= the lowest sprite slot, below
+        // BG3.hi). The output at (0,0) must be the BG3 colour, not
+        // the sprite colour.
+        let mut p = setup_demo_tile();
+        // Configure: bgmode = 1 (BG1 4bpp, BG2 4bpp, BG3 2bpp), no
+        // BG3-prio bit.
+        p.write(register::BGMODE, 0x01);
+        // Move the demo tile (whose default palette gives colour ≠ 0
+        // for the top-left pixel) to BG3 instead of BG1.
+        // BG3SC = tilemap base — point at the same location as BG1.
+        p.write(register::BG3SC, p.bg[0].tilemap_addr_words as u8);
+        // Tag the BG3 entry with priority bit 1.
+        let entry_off = (bg_state(&p, 0).tilemap_addr_words as usize) << 1;
+        let lo = p.vram.peek(entry_off as u16);
+        let hi = p.vram.peek(entry_off as u16 + 1);
+        let entry = u16::from(lo) | (u16::from(hi) << 8) | 0x2000;
+        p.vram.poke(entry_off as u16, entry as u8);
+        p.vram.poke(entry_off as u16 + 1, (entry >> 8) as u8);
+        // Drop a sprite at (0, 0) with priority 0. With our compositor
+        // it must NOT cover the BG3-high pixel.
+        // (Setting OAM directly — full sprite plumbing is in
+        // dedicated tests above.)
+        p.oam.poke(0, 0); // x_low
+        p.oam.poke(1, 0); // y
+        p.oam.poke(2, 0); // tile_low
+        p.oam.poke(3, 0b0000_0000); // attrs: priority 0
+        let frame = render_frame_with(&p, RenderOptions::default());
+        // The (0,0) pixel should be a BG3 colour (= non-backdrop).
+        // We don't assert the exact RGB; instead verify it's not the
+        // CGRAM[0] backdrop, which is what we'd see if the sprite
+        // had won.
+        let backdrop_rgb = decode_palette(&p, 0, 0x0F);
+        assert_ne!(
+            frame[0], backdrop_rgb,
+            "BG3.hi should win over OBJ.0 in Mode 1"
+        );
+    }
+
+    #[test]
+    fn priority_table_mode1_bg3_lo_vs_hi_differs() {
+        // The BG3-priority bit (BGMODE bit 3) selects a different
+        // table. Sanity-check that they're not the same slice.
+        let lo = priority_table(0x01); // mode 1, BG3-prio = 0
+        let hi = priority_table(0x09); // mode 1, BG3-prio = 1
+        assert!(!std::ptr::eq(lo, hi), "different table when BG3.pri bit flips");
+        // BG3.hi at the very top of the high-table.
+        assert!(matches!(hi[0].kind, LayerKind::Bg));
+        assert_eq!(hi[0].idx, 2);
+        assert_eq!(hi[0].bg_prio, 1);
     }
 }
