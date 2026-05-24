@@ -153,14 +153,20 @@ impl LunaApp {
         }
     }
 
-    /// Step the CPU under a **wall-clock time budget** so the UI
-    /// thread never starves. Panics are caught so an unimplemented
-    /// opcode just pauses emulation instead of killing the window.
+    /// Step the CPU under a **wall-clock time budget**, preferring
+    /// to stop at PPU frame boundaries so the framebuffer snapshot
+    /// catches a settled image instead of mid-NMI-handler garbage.
     ///
-    /// We check the clock every `BATCH_SIZE` steps rather than every
-    /// step — calling `Instant::now()` 60 000+ times per frame would
-    /// itself eat the budget. A batch of 256 is small enough to
-    /// stay within budget even on slow ROMs.
+    /// Strategy:
+    ///   - Run instructions in batches of 256.
+    ///   - After each batch, if we've just crossed into a new PPU
+    ///     frame (`frame_count` advanced), stop — the PPU state is
+    ///     "settled" for the just-completed frame and the GUI sees
+    ///     a stable image.
+    ///   - If we hit the wall-clock deadline first, stop anyway
+    ///     (mid-frame). UI responsiveness wins over frame stability
+    ///     in the worst case.
+    ///   - The hard `STEPS_PER_FRAME` cap is the runaway-loop guard.
     fn step_cpu(&mut self) {
         if self.paused {
             return;
@@ -175,6 +181,7 @@ impl LunaApp {
         std::panic::set_hook(Box::new(|_| {}));
         let result = catch_unwind(AssertUnwindSafe(|| {
             let mut executed: u32 = 0;
+            let start_frame = snes.frame_count;
             while executed < STEPS_PER_FRAME && !snes.cpu.stopped {
                 for _ in 0..BATCH_SIZE {
                     if snes.cpu.stopped {
@@ -182,6 +189,12 @@ impl LunaApp {
                     }
                     snes.step();
                     executed += 1;
+                }
+                // Frame-boundary stop: the moment we've crossed at
+                // least one frame and we're now in early visible
+                // scanlines (PPU state is fresh, NMI handler done).
+                if snes.frame_count != start_frame && snes.ppu_line < 10 {
+                    break;
                 }
                 if Instant::now() >= deadline {
                     break;
