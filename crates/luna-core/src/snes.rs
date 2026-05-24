@@ -76,6 +76,19 @@ pub struct Snes {
 
 /// Master cycles per PPU scanline on NTSC (1364 mclk = 4 dots × 341).
 pub const MCYCLES_PER_SCANLINE: u32 = 1364;
+
+/// Convert the running master-clock counter into the PPU's current
+/// (H, V) dot coordinate. NTSC: 1364 master cycles per scanline,
+/// 262 scanlines per frame. Each "dot" is 4 master cycles, so H is
+/// the line-relative master clock divided by 4 (range 0..340).
+#[inline]
+fn current_hv(mclk_total: u64) -> (u16, u16) {
+    let per_frame = u64::from(MCYCLES_PER_SCANLINE) * u64::from(NTSC_SCANLINES_PER_FRAME);
+    let in_frame = mclk_total % per_frame;
+    let v = (in_frame / u64::from(MCYCLES_PER_SCANLINE)) as u16;
+    let h = ((in_frame % u64::from(MCYCLES_PER_SCANLINE)) / 4) as u16;
+    (h, v)
+}
 /// Total scanlines per NTSC frame (visible + post + vblank).
 pub const NTSC_SCANLINES_PER_FRAME: u16 = 262;
 /// Scanline on which VBlank begins on NTSC. The PPU writes the
@@ -551,6 +564,13 @@ impl<'a> Bus for SnesBus<'a> {
             return self.wram[o];
         }
         if let Some(off) = Self::ppu_offset(addr) {
+            // $2137 SLHV — reading also latches the H/V counters
+            // into OPHCT / OPVCT. The actual returned byte is open
+            // bus (we hand back the PPU's open-bus latch).
+            if off == luna_ppu::register::SLHV {
+                let (h, v) = current_hv(*self.mclk_total);
+                self.ppu.latch_counters(h, v);
+            }
             return self.ppu.read(off);
         }
         if let Some(port) = Self::apu_port(addr) {
@@ -641,6 +661,16 @@ impl<'a> Bus for SnesBus<'a> {
             return;
         }
         if let Some(reg_off) = Self::cpu_reg_offset(addr) {
+            // WRIO ($4201) bit 7 0→1 transition latches the PPU H/V
+            // counters. Check BEFORE handing off to CpuRegs::write so
+            // we can see the previous value.
+            if reg_off == 0x4201 {
+                let prev = self.cpu_regs.wrio;
+                if prev & 0x80 == 0 && value & 0x80 != 0 {
+                    let (h, v) = current_hv(*self.mclk_total);
+                    self.ppu.latch_counters(h, v);
+                }
+            }
             if self.cpu_regs.write(reg_off, value) {
                 return;
             }

@@ -138,6 +138,13 @@ pub mod register {
     /// bit (PAL/NTSC), chip rev. Reads ALSO reset the BG scroll
     /// write-twice latch (a documented hardware side effect).
     pub const STAT78: u8 = 0x3F;
+    /// `$2137` SLHV — latches the current H/V counters when read,
+    /// returning open-bus.
+    pub const SLHV: u8 = 0x37;
+    /// `$213C` OPHCT — latched H counter (9-bit, read low then high).
+    pub const OPHCT: u8 = 0x3C;
+    /// `$213D` OPVCT — latched V counter (9-bit, read low then high).
+    pub const OPVCT: u8 = 0x3D;
 }
 
 /// Per-layer state derived from `$2107-$2114`.
@@ -270,6 +277,20 @@ pub struct Ppu {
     /// Bit 7 = interlace odd-field flag, bit 4 = region (1 = PAL,
     /// 0 = NTSC), bits 0-3 = chip revision (= 2).
     pub stat78: u8,
+    /// Latched H counter (9-bit) from the last $2137/$4201-bit7
+    /// trigger. Exposed at OPHCT.
+    pub ophct: u16,
+    /// Latched V counter (9-bit). Exposed at OPVCT.
+    pub opvct: u16,
+    /// "High-byte pending" flag for OPHCT — first read returns the
+    /// low byte (and sets this), second returns the high byte (and
+    /// clears it).
+    pub ophct_hi_pending: bool,
+    /// Same for OPVCT.
+    pub opvct_hi_pending: bool,
+    /// "Latch hit" bit: set when the H/V counters were latched
+    /// since the last STAT78 read. Exposed at STAT78 bit 6.
+    pub external_latch_hit: bool,
     /// `$2134-$2136 MPYL/M/H` — 24-bit hardware multiplier result.
     /// Updated whenever M7A or M7B's high byte is written:
     /// `M7A (signed 16) × M7B_high (signed 8) → 24-bit signed`.
@@ -354,6 +375,11 @@ impl Ppu {
             // Initial PPU2 chip rev = 2; region bit (4) defaults to 0
             // (NTSC). PAL emulation can flip this on cart load.
             stat78: 0x02,
+            ophct: 0,
+            opvct: 0,
+            ophct_hi_pending: false,
+            opvct_hi_pending: false,
+            external_latch_hit: false,
             bg_scroll_latch: 0,
             open_bus: 0,
             inidisp_write_count: 0,
@@ -380,10 +406,33 @@ impl Ppu {
             register::STAT77 => self.stat77,
             register::STAT78 => {
                 // Reading $213F is documented to clear the shared
-                // BG-scroll write-twice latch as a side effect.
-                let v = self.stat78;
+                // BG-scroll write-twice latch AND the "latch hit"
+                // status bit as side effects.
+                let v = self.stat78
+                    | if self.external_latch_hit { 0x40 } else { 0 };
                 self.bg_scroll_latch = 0;
+                self.external_latch_hit = false;
                 v
+            }
+            register::OPHCT => {
+                // Read low byte first, then high byte (only bit 0
+                // of the high byte is meaningful — H is 9-bit).
+                if self.ophct_hi_pending {
+                    self.ophct_hi_pending = false;
+                    ((self.ophct >> 8) & 0x01) as u8
+                } else {
+                    self.ophct_hi_pending = true;
+                    self.ophct as u8
+                }
+            }
+            register::OPVCT => {
+                if self.opvct_hi_pending {
+                    self.opvct_hi_pending = false;
+                    ((self.opvct >> 8) & 0x01) as u8
+                } else {
+                    self.opvct_hi_pending = true;
+                    self.opvct as u8
+                }
             }
             // Everything else: open bus. The renderer's status registers
             // ($2134-$213F apart from those above) will be implemented
@@ -434,6 +483,18 @@ impl Ppu {
         let composed = (u16::from(value) << 8) | u16::from(self.m7_latch);
         self.m7_latch = value;
         composed
+    }
+
+    /// Latch the current PPU H/V counters into OPHCT/OPVCT. Called
+    /// by the SnesBus on:
+    ///   * a WRIO (\$4201) write whose bit 7 transitions from 0 to 1
+    ///   * a read of SLHV (\$2137) — also returns open bus
+    /// Both paths feed the SAME pair of latched values; the read
+    /// protocol on OPHCT/OPVCT is separately tracked (low-then-high).
+    pub fn latch_counters(&mut self, h: u16, v: u16) {
+        self.ophct = h & 0x1FF;
+        self.opvct = v & 0x1FF;
+        self.external_latch_hit = true;
     }
 
     /// Re-run the Mode-7 hardware multiplier. Triggered by writes
@@ -601,6 +662,32 @@ mod stat_tests {
         let mut p = Ppu::new();
         p.write(register::SETINI, 0x55);
         assert_eq!(p.setini, 0x55);
+    }
+
+    #[test]
+    fn ophct_opvct_use_write_twice_read_protocol() {
+        let mut p = Ppu::new();
+        p.latch_counters(0x123, 0x0AB);
+        // First read = low byte; second = bit 0 of high byte.
+        assert_eq!(p.read(register::OPHCT), 0x23);
+        assert_eq!(p.read(register::OPHCT), 0x01); // high bit 0 of 0x123
+        // Third read cycles back to low again.
+        assert_eq!(p.read(register::OPHCT), 0x23);
+        // OPVCT independent.
+        assert_eq!(p.read(register::OPVCT), 0xAB);
+        assert_eq!(p.read(register::OPVCT), 0x00); // 0x0AB high bit 0
+    }
+
+    #[test]
+    fn latch_counters_sets_latch_hit_bit_visible_via_stat78() {
+        let mut p = Ppu::new();
+        // Before any latch the hit bit is clear.
+        assert_eq!(p.read(register::STAT78) & 0x40, 0);
+        p.latch_counters(100, 50);
+        let v = p.read(register::STAT78);
+        assert_eq!(v & 0x40, 0x40, "latch hit should be set");
+        // Reading STAT78 clears the bit.
+        assert_eq!(p.read(register::STAT78) & 0x40, 0);
     }
 }
 
