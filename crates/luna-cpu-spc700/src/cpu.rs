@@ -18,10 +18,17 @@ pub struct Spc700 {
     pub pc: u16,
     /// Program status word.
     pub psw: Psw,
-    /// `true` after `STOP` until reset.
+    /// `true` after `STOP` until reset. Also set when the dispatcher
+    /// hits an opcode we haven't implemented yet (with the offender
+    /// captured in [`Self::unimplemented_opcode`]).
     pub stopped: bool,
     /// `true` after `SLEEP` until an interrupt wakes us up.
     pub sleeping: bool,
+    /// If the CPU stopped because of an unimplemented opcode, this
+    /// holds `(opcode, pc_of_opcode)`. Lets the host emulator surface
+    /// "added opcode $XX at PC=$YYYY would unblock the next driver
+    /// instruction" diagnostics instead of a generic panic.
+    pub unimplemented_opcode: Option<(u8, u16)>,
 }
 
 impl Spc700 {
@@ -47,6 +54,7 @@ impl Spc700 {
         self.pc = u16::from(lo) | (u16::from(hi) << 8);
         self.stopped = false;
         self.sleeping = false;
+        self.unimplemented_opcode = None;
     }
 
     // -----------------------------------------------------------------
