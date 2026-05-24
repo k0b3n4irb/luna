@@ -476,6 +476,26 @@ fn print_diag_state(snes: &mut Snes) {
          active_voices={active_count}  any_env_nonzero={any_envelope}  \
          queue_len={queue_len}  last_sample=({last_l},{last_r})"
     );
+    // Echo subsystem state — useful for verifying the music driver
+    // actually configured echo (most SNES tracks use it heavily).
+    let flg = snes.apu_real.dsp_regs[0x6C];
+    let esa = snes.apu_real.dsp_regs[0x6D];
+    let edl = snes.apu_real.dsp_regs[0x7D] & 0x0F;
+    let efb = snes.apu_real.dsp_regs[0x0D] as i8;
+    let evol_l = snes.apu_real.dsp_regs[0x2C] as i8;
+    let evol_r = snes.apu_real.dsp_regs[0x3C] as i8;
+    let eon = snes.apu_real.dsp_regs[0x4D];
+    let pmon = snes.apu_real.dsp_regs[0x2D];
+    let non = snes.apu_real.dsp_regs[0x3D];
+    println!(
+        "Echo:   FLG=${flg:02X} (reset={} mute={} ECEN={}) \
+         ESA=${esa:02X} (=${esa:02X}00) EDL=${edl:X} ({} samples) \
+         EFB={efb} EVOL=({evol_l},{evol_r}) EON=${eon:02X} PMON=${pmon:02X} NON=${non:02X}",
+        flg >> 7 & 1,
+        flg >> 6 & 1,
+        flg >> 5 & 1,
+        if edl == 0 { 1 } else { (edl as u16) * 512 }
+    );
     if let Some((op, pc)) = snes.apu_real.cpu.unimplemented_opcode {
         // Dump 4 bytes around the offending PC so we can see the
         // operand pattern and recognise the addressing mode.
