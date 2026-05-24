@@ -148,6 +148,14 @@ pub struct Apu {
     /// once. So pitch 0x1000 = 1:1 (32 kHz reproduction); pitch
     /// 0x0800 plays at half speed; pitch 0x2000 plays at double.
     pub voice_pitch_acc: [u16; 8],
+    /// Echo ring buffer position, in stereo samples. The ring lives
+    /// in ARAM starting at `(ESA << 8)` and is `max(1, EDL) * 512`
+    /// stereo samples long (each sample = 4 bytes: lo_L, hi_L, lo_R,
+    /// hi_R). On each sample tick the FIR taps read the 8 most-recent
+    /// samples relative to this index, then the echo write-back (if
+    /// `FLG.5` is clear) overwrites the buffer at this index and
+    /// the index advances modulo the buffer size.
+    pub echo_pos_samples: u16,
     /// Mixed L/R audio output for the current sample, post voice and
     /// master volume. Updated each `tick_one_sample`; consumers
     /// (future audio backend) can read it via [`Self::audio_sample`].
@@ -210,7 +218,17 @@ impl Apu {
             control: 0x80, // bit 7: IPL ROM exposed
             past_iplrom: false,
             dsp_index: 0,
-            dsp_regs: [0; 128],
+            // Real hardware resets the DSP register file with FLG=$E0
+            // (soft reset + mute amp + echo write disable). Without
+            // this, the echo subsystem starts writing into ARAM[0..3]
+            // before the SPC driver has had a chance to configure
+            // ESA/EDL, corrupting the SPC's zero page. Every commercial
+            // driver clears these bits explicitly once it's safe.
+            dsp_regs: {
+                let mut r = [0u8; 128];
+                r[0x6C] = 0xE0;
+                r
+            },
             voice_active: [false; 8],
             voice_age: [0; 8],
             voice_phase: [AdsrPhase::Off; 8],
@@ -220,6 +238,7 @@ impl Apu {
             voice_block_sample: [0; 8],
             voice_brr_history: [[0, 0]; 8],
             voice_pitch_acc: [0; 8],
+            echo_pos_samples: 0,
             audio_left: 0,
             audio_right: 0,
             audio_queue: std::collections::VecDeque::with_capacity(8192),
@@ -323,6 +342,12 @@ impl Apu {
         // Reset accumulated stereo mix; voices add to it below.
         let mut mix_l: i32 = 0;
         let mut mix_r: i32 = 0;
+        // Echo input — voices whose `EON` bit is set also dump their
+        // post-volume output here. After the voice loop we run the
+        // FIR filter and feedback path.
+        let mut echo_in_l: i32 = 0;
+        let mut echo_in_r: i32 = 0;
+        let eon = self.dsp_regs[0x4D];
 
         for v in 0..8 {
             if !self.voice_active[v] && self.voice_phase[v] == AdsrPhase::Off {
@@ -378,8 +403,18 @@ impl Apu {
                 let outx = (s * env) >> 11; // signed 16-bit
                 let vol_l = self.dsp_regs[v * 0x10] as i8 as i32;
                 let vol_r = self.dsp_regs[v * 0x10 + 1] as i8 as i32;
-                mix_l += (outx * vol_l) >> 7;
-                mix_r += (outx * vol_r) >> 7;
+                let contrib_l = (outx * vol_l) >> 7;
+                let contrib_r = (outx * vol_r) >> 7;
+                mix_l += contrib_l;
+                mix_r += contrib_r;
+                // Per-voice echo routing: if EON.v is set, this voice's
+                // post-volume output is also added to the echo input.
+                // Real hardware mixes BEFORE clamping; we accumulate
+                // i32 here and clamp at the FIR write-back below.
+                if eon & (1 << v) != 0 {
+                    echo_in_l += contrib_l;
+                    echo_in_r += contrib_r;
+                }
             }
             // When the envelope hits zero, the voice is done. Latch
             // its ENDX bit and deactivate.
@@ -405,16 +440,35 @@ impl Apu {
             }
         }
 
+        // ---------------- Echo subsystem ----------------
+        //
+        // The echo buffer lives in ARAM as a circular ring of stereo
+        // samples (4 bytes each — lo_L, hi_L, lo_R, hi_R), starting
+        // at `(ESA << 8)` and `max(1, EDL) * 512` samples long.
+        // Each output sample we:
+        //   1. read 8 historical samples to feed the FIR filter,
+        //   2. compute the FIR-filtered echo output,
+        //   3. (if `FLG.5` is clear) write the new sample —
+        //      `echo_in + echo_out * EFB / 128` — back to the ring,
+        //   4. mix `echo_out * EVOL_L/R / 128` into the final output.
+        let (echo_out_l, echo_out_r) = self.process_echo(echo_in_l, echo_in_r);
+
         // Apply master volume — MVOL_L (\$0C) and MVOL_R (\$1C) are
         // signed 7-bit master gain for the left / right outputs.
         let mvol_l = self.dsp_regs[0x0C] as i8 as i32;
         let mvol_r = self.dsp_regs[0x1C] as i8 as i32;
-        let mut final_l = (mix_l * mvol_l) >> 7;
-        let mut final_r = (mix_r * mvol_r) >> 7;
+        let main_l = (mix_l * mvol_l) >> 7;
+        let main_r = (mix_r * mvol_r) >> 7;
+        // Echo volume: EVOL_L ($2C) / EVOL_R ($3C) are signed 7-bit
+        // gain on the FIR output, added to the main mix.
+        let evol_l = self.dsp_regs[0x2C] as i8 as i32;
+        let evol_r = self.dsp_regs[0x3C] as i8 as i32;
+        let mut final_l = main_l + ((echo_out_l * evol_l) >> 7);
+        let mut final_r = main_r + ((echo_out_r * evol_r) >> 7);
         // FLG register at $6C:
         //   bit 7 — soft reset (mute output + keep voices off)
         //   bit 6 — mute amp (silence all output)
-        //   bit 5 — echo write disable (echo not yet implemented)
+        //   bit 5 — echo write disable (handled inside `process_echo`)
         //   bits 4..0 — noise frequency (noise not yet implemented)
         let flg = self.dsp_regs[0x6C];
         if flg & 0xC0 != 0 {
@@ -455,6 +509,91 @@ impl Apu {
     #[must_use]
     pub fn audio_sample(&self) -> (i16, i16) {
         (self.audio_left, self.audio_right)
+    }
+
+    /// Run one sample tick's worth of echo processing.
+    ///
+    /// Reads 8 historical samples from the ARAM ring buffer at
+    /// `(ESA << 8)` (with size `max(1, EDL) * 512` stereo samples),
+    /// applies the 8-tap FIR filter from the coefficient registers
+    /// at `$0F, $1F, $2F, ..., $7F`, optionally writes the
+    /// `echo_in + echo_out * EFB / 128` blend back to the buffer
+    /// (gated by `FLG.5`), and advances the ring position.
+    ///
+    /// Returns the clipped stereo FIR output, which the caller
+    /// scales by `EVOL_L / EVOL_R` before adding to the main mix.
+    fn process_echo(&mut self, echo_in_l: i32, echo_in_r: i32) -> (i32, i32) {
+        let esa = self.dsp_regs[0x6D];
+        let edl = self.dsp_regs[0x7D] & 0x0F; // 4 bits — spec says 0..=15
+        // EDL=0 still gives a 1-sample (4-byte) buffer. Otherwise
+        // EDL * 0x800 bytes = EDL * 512 stereo samples.
+        let size_samples: u16 = if edl == 0 { 1 } else { u16::from(edl) * 512 };
+        let echo_base: u16 = u16::from(esa) << 8;
+
+        // Position is recomputed modulo the (possibly changed) size
+        // each tick; real hardware corrupts ARAM if the size shrinks
+        // mid-song, but most games never touch EDL after init.
+        let pos = self.echo_pos_samples % size_samples;
+
+        // Read 8 FIR taps. Convention (matches fullsnes + ares):
+        //   tap[0] = oldest sample (pos - 8)
+        //   tap[7] = newest sample (pos - 1) — the slot most recently
+        //                                       written in the *previous*
+        //                                       tick. The current `pos`
+        //                                       is the slot we're about
+        //                                       to overwrite, so it never
+        //                                       enters the FIR.
+        let mut tap_l = [0i32; 8];
+        let mut tap_r = [0i32; 8];
+        for i in 0..8 {
+            // (pos + size - 8 + i) % size; using i32 to avoid u16 underflow.
+            let off_back = 8 - i as i32;
+            let idx = ((pos as i32) - off_back).rem_euclid(size_samples as i32) as u16;
+            let addr = echo_base.wrapping_add(idx.wrapping_mul(4));
+            let lo_l = self.aram[addr as usize];
+            let hi_l = self.aram[addr.wrapping_add(1) as usize];
+            let lo_r = self.aram[addr.wrapping_add(2) as usize];
+            let hi_r = self.aram[addr.wrapping_add(3) as usize];
+            tap_l[i] = i32::from(i16::from_le_bytes([lo_l, hi_l]));
+            tap_r[i] = i32::from(i16::from_le_bytes([lo_r, hi_r]));
+        }
+
+        // FIR convolution. Coefficients are at $0F, $1F, ..., $7F
+        // (one per voice block, low nibble = $F). Each is a signed
+        // 8-bit gain; the sum is shifted right by 7 to normalize
+        // (so a single $7F coefficient ≈ unity gain).
+        let mut out_l: i32 = 0;
+        let mut out_r: i32 = 0;
+        for i in 0..8 {
+            let coef = self.dsp_regs[0x0F + i * 0x10] as i8 as i32;
+            out_l += tap_l[i] * coef;
+            out_r += tap_r[i] * coef;
+        }
+        out_l >>= 7;
+        out_r >>= 7;
+        let out_l = out_l.clamp(-32768, 32767);
+        let out_r = out_r.clamp(-32768, 32767);
+
+        // Write-back: `new = echo_in + echo_out * EFB / 128`, gated
+        // by `FLG.5` (ECEN = echo write enable when 0, disable when 1).
+        let flg = self.dsp_regs[0x6C];
+        if flg & 0x20 == 0 {
+            let efb = self.dsp_regs[0x0D] as i8 as i32;
+            let wl = (echo_in_l + ((out_l * efb) >> 7)).clamp(-32768, 32767) as i16;
+            let wr = (echo_in_r + ((out_r * efb) >> 7)).clamp(-32768, 32767) as i16;
+            let addr = echo_base.wrapping_add(pos.wrapping_mul(4));
+            let [llo, lhi] = wl.to_le_bytes();
+            let [rlo, rhi] = wr.to_le_bytes();
+            self.aram[addr as usize] = llo;
+            self.aram[addr.wrapping_add(1) as usize] = lhi;
+            self.aram[addr.wrapping_add(2) as usize] = rlo;
+            self.aram[addr.wrapping_add(3) as usize] = rhi;
+        }
+
+        // Advance ring position.
+        self.echo_pos_samples = (pos + 1) % size_samples;
+
+        (out_l, out_r)
     }
 
     /// Decode the current BRR sample for voice `v` — the one at
@@ -1051,6 +1190,9 @@ mod tests {
         // Master = $7F / $7F.
         apu.dsp_regs[0x0C] = 0x7F;
         apu.dsp_regs[0x1C] = 0x7F;
+        // Clear FLG (default is $E0 = soft-reset + mute + ECEN); the
+        // mute bit would otherwise zero the output.
+        apu.dsp_regs[0x6C] = 0x00;
 
         // Two ticks: the first decodes sample 0 (history[0] = +7) but
         // outputs the interpolation start (still zero — history[1] is
@@ -1342,5 +1484,244 @@ mod tests {
         apu.step(200 * MASTER_CYCLES_PER_SPC_STEP);
         // After kick, the IPL is in the transfer loop. We're not
         // verifying anything else here — just that no panic fired.
+    }
+
+    // ====================================================================
+    // Echo subsystem
+    // ====================================================================
+
+    /// Build a hand-loaded APU with voice 0 wired up to produce a
+    /// known impulse value `imp` on its mix output every sample tick
+    /// (no ADSR, gain mode, fully open VOL_L/R/MVOL_L/R). Returns
+    /// the assembled APU.
+    fn apu_with_impulse_voice(imp: i16) -> Apu {
+        let mut apu = Apu::new();
+        // Seed voice 0's history so the linear interp consistently
+        // returns `imp` regardless of pitch_acc fraction.
+        apu.voice_brr_history[0] = [imp, imp];
+        apu.voice_active[0] = true;
+        apu.voice_phase[0] = AdsrPhase::Off; // gain mode
+        apu.voice_envelope[0] = 0x7FF; // full
+        apu.dsp_regs[0x00] = 0x7F; // VOL_L
+        apu.dsp_regs[0x01] = 0x7F; // VOL_R
+        apu.dsp_regs[0x05] = 0x00; // ADSR disabled
+        apu.dsp_regs[0x07] = 0x7F; // gain = direct $7F
+        apu.dsp_regs[0x02] = 0x00; // pitch low
+        apu.dsp_regs[0x03] = 0x10; // pitch high → $1000 = unity rate
+        // Master volume open.
+        apu.dsp_regs[0x0C] = 0x7F;
+        apu.dsp_regs[0x1C] = 0x7F;
+        // Clear FLG (default $E0 = soft-reset + mute + ECEN). Tests
+        // that want to assert echo writes must clear it themselves.
+        apu.dsp_regs[0x6C] = 0x00;
+        // ARAM zero everywhere; echo buffer starts clean.
+        apu.echo_pos_samples = 0;
+        apu
+    }
+
+    /// Read one stereo sample from the echo buffer at the given
+    /// position (in samples).
+    fn read_echo_sample(apu: &Apu, esa: u8, pos: u16) -> (i16, i16) {
+        let base = u16::from(esa) << 8;
+        let addr = base.wrapping_add(pos.wrapping_mul(4));
+        let l = i16::from_le_bytes([
+            apu.aram[addr as usize],
+            apu.aram[addr.wrapping_add(1) as usize],
+        ]);
+        let r = i16::from_le_bytes([
+            apu.aram[addr.wrapping_add(2) as usize],
+            apu.aram[addr.wrapping_add(3) as usize],
+        ]);
+        (l, r)
+    }
+
+    #[test]
+    fn echo_with_eon_off_leaves_buffer_untouched() {
+        // EON=0 means no voice contributes to echo_in; with a clean
+        // (zeroed) buffer and no FIR taps loaded, the echo path
+        // writes back `0 + 0*EFB = 0`. The buffer must remain a
+        // sea of zeros after many ticks.
+        let mut apu = apu_with_impulse_voice(0x2000);
+        apu.dsp_regs[0x6D] = 0x10; // ESA = $1000
+        apu.dsp_regs[0x7D] = 0x01; // EDL = 1 → 512-sample buffer
+        apu.dsp_regs[0x4D] = 0x00; // EON = 0
+        for _ in 0..600 {
+            apu.tick_one_sample();
+        }
+        // Spot-check 4 buffer slots — all still zero.
+        for pos in [0u16, 1, 100, 500] {
+            assert_eq!(read_echo_sample(&apu, 0x10, pos), (0, 0));
+        }
+    }
+
+    #[test]
+    fn echo_eon_writes_voice_output_into_buffer() {
+        // Wire the voice to feed echo (EON.0 = 1), kill the FIR so
+        // we don't get any feedback, and verify a freshly-written
+        // buffer slot carries the voice's post-volume output.
+        let mut apu = apu_with_impulse_voice(0x1000);
+        apu.dsp_regs[0x6D] = 0x10; // ESA = $1000
+        apu.dsp_regs[0x7D] = 0x01;
+        apu.dsp_regs[0x4D] = 0x01; // EON voice 0
+        apu.dsp_regs[0x0D] = 0x00; // EFB = 0
+        // All FIR taps = 0 → echo_out = 0 → write-back = echo_in.
+        for i in 0..8 {
+            apu.dsp_regs[0x0F + i * 0x10] = 0x00;
+        }
+        // One tick — pos 0 gets written, then advances.
+        apu.tick_one_sample();
+        // The buffer at position 0 should now hold ~ the voice's
+        // L/R contribution. With history=[0x1000, 0x1000] and
+        // pitch_acc=0 the interp lands on the previous sample
+        // (0x1000), env=0x7FF → outx ≈ 0x1000 * 0x7FF / 0x800 ≈ 0x0FFF,
+        // then * VOL_L($7F) / 128 ≈ 0x0FFF. Allow some slop.
+        let (l, r) = read_echo_sample(&apu, 0x10, 0);
+        assert!(l > 0x0F00 && l < 0x1100, "expected ~$1000, got ${l:04X}");
+        assert!(r > 0x0F00 && r < 0x1100, "expected ~$1000, got ${r:04X}");
+        // Next buffer slot still zero (we only ticked once).
+        assert_eq!(read_echo_sample(&apu, 0x10, 1), (0, 0));
+        // Ring position has advanced.
+        assert_eq!(apu.echo_pos_samples, 1);
+    }
+
+    #[test]
+    fn echo_fir_identity_replays_buffer_to_output() {
+        // FIR with only the newest tap = $7F (≈ unity) reads back
+        // whatever was previously written. We pre-seed the buffer
+        // and confirm `process_echo` returns that seed (modulo the
+        // signed-7-bit shift).
+        let mut apu = Apu::new();
+        apu.dsp_regs[0x6D] = 0x20; // ESA = $2000
+        apu.dsp_regs[0x7D] = 0x01;
+        apu.dsp_regs[0x4D] = 0x00;
+        apu.dsp_regs[0x0D] = 0x00;
+        // FIR: only tap 7 (newest) = $7F.
+        for i in 0..7 {
+            apu.dsp_regs[0x0F + i * 0x10] = 0x00;
+        }
+        apu.dsp_regs[0x0F + 7 * 0x10] = 0x7F;
+        // FLG = $20 (ECEN = 1, echo write disabled) so the buffer
+        // doesn't get clobbered by this tick's `echo_in=0` write.
+        apu.dsp_regs[0x6C] = 0x20;
+        // Pre-seed the "newest" tap slot. With echo_pos_samples = 1
+        // the FIR's tap[7] reads pos - 1 = 0, where we put the seed.
+        apu.echo_pos_samples = 1;
+        let base: u16 = 0x2000;
+        apu.aram[base as usize] = 0x00;
+        apu.aram[(base + 1) as usize] = 0x10; // L = $1000
+        apu.aram[(base + 2) as usize] = 0x00;
+        apu.aram[(base + 3) as usize] = 0xF0; // R = $F000 (= -4096)
+        let (l, r) = apu.process_echo(0, 0);
+        // out = (sample * $7F) >> 7 ≈ sample.
+        assert!(l > 0x0F00 && l < 0x1100, "expected ~+$1000, got {l}");
+        assert!(r < -0x0F00 && r > -0x1100, "expected ~-$1000, got {r}");
+    }
+
+    #[test]
+    fn echo_efb_creates_exponential_decay() {
+        // Single sample seeded in a 4-sample buffer (so it cycles
+        // fast). FIR identity on newest, EFB = $40 (half feedback),
+        // EON = 0 (no new input). The buffer should decay by ~50%
+        // per cycle through the ring.
+        let mut apu = Apu::new();
+        apu.dsp_regs[0x6D] = 0x30; // ESA = $3000
+        // EDL=1 = 512 samples; for the test we just need it > 8 so
+        // the FIR doesn't wrap onto itself within the first cycle.
+        apu.dsp_regs[0x7D] = 0x01;
+        apu.dsp_regs[0x4D] = 0x00;
+        apu.dsp_regs[0x0D] = 0x40; // EFB ≈ 1/2
+        apu.dsp_regs[0x6C] = 0x00; // ECEN = 0 (writes enabled)
+        for i in 0..7 {
+            apu.dsp_regs[0x0F + i * 0x10] = 0x00;
+        }
+        apu.dsp_regs[0x0F + 7 * 0x10] = 0x7F;
+        // Seed sample at position 0 with a large positive value.
+        apu.echo_pos_samples = 1; // so the seed (pos 0) is the
+                                  // "newest" tap on the first call
+        let base: u16 = 0x3000;
+        apu.aram[base as usize] = 0x00;
+        apu.aram[(base + 1) as usize] = 0x40; // L = $4000
+        apu.aram[(base + 2) as usize] = 0x00;
+        apu.aram[(base + 3) as usize] = 0x40;
+        // Run one tick. The FIR reads $4000 at the newest tap, so
+        // echo_out ≈ $4000, write-back = echo_in(0) + ($4000 * $40)/128
+        //   ≈ $2000. The new sample lands at pos 1.
+        let (out_l, _) = apu.process_echo(0, 0);
+        assert!(out_l > 0x3F00 && out_l < 0x4100, "FIR pass-through: got ${out_l:04X}");
+        let (l1, _) = read_echo_sample(&apu, 0x30, 1);
+        assert!(l1 > 0x1F00 && l1 < 0x2100, "1st feedback: got ${l1:04X}");
+        // Second tick — the FIR's newest tap is now the $2000 we
+        // just wrote. New write ≈ ($2000 * $40)/128 = $1000.
+        let (_, _) = apu.process_echo(0, 0);
+        let (l2, _) = read_echo_sample(&apu, 0x30, 2);
+        assert!(l2 > 0x0F00 && l2 < 0x1100, "2nd feedback: got ${l2:04X}");
+    }
+
+    #[test]
+    fn echo_write_disable_freezes_buffer_but_reads_still_fir() {
+        // Pre-seed a buffer slot, set FLG.5 (ECEN=1 → echo writes
+        // disabled), and verify that:
+        //   (a) the FIR output reflects what's in the buffer, and
+        //   (b) the buffer is NOT overwritten by the would-be
+        //       echo_in + EFB*out write-back.
+        let mut apu = apu_with_impulse_voice(0x2000);
+        apu.dsp_regs[0x6D] = 0x40; // ESA = $4000
+        apu.dsp_regs[0x7D] = 0x01;
+        apu.dsp_regs[0x4D] = 0x01; // EON voice 0 — would write echo_in
+        apu.dsp_regs[0x0D] = 0x7F; // EFB high — would amplify feedback
+        apu.dsp_regs[0x6C] = 0x20; // ECEN = 1 → writes disabled
+        for i in 0..7 {
+            apu.dsp_regs[0x0F + i * 0x10] = 0x00;
+        }
+        apu.dsp_regs[0x0F + 7 * 0x10] = 0x7F;
+        // Seed: position 0 holds $1234 / $5678.
+        let base: u16 = 0x4000;
+        apu.aram[base as usize] = 0x34;
+        apu.aram[(base + 1) as usize] = 0x12;
+        apu.aram[(base + 2) as usize] = 0x78;
+        apu.aram[(base + 3) as usize] = 0x56;
+        apu.echo_pos_samples = 1; // so pos 0 is the "newest" tap
+        let (out_l, out_r) = apu.process_echo(0x7FFF, 0x7FFF); // huge echo_in
+        // FIR pass-through delivers the seed values.
+        assert!(out_l > 0x1100 && out_l < 0x1300, "FIR L: got ${out_l:04X}");
+        assert!(out_r > 0x5500 && out_r < 0x5800, "FIR R: got ${out_r:04X}");
+        // Buffer at position 1 (the write slot) must still be all
+        // zero — the write was suppressed by ECEN.
+        assert_eq!(read_echo_sample(&apu, 0x40, 1), (0, 0));
+        // Original seed at position 0 is untouched.
+        assert_eq!(read_echo_sample(&apu, 0x40, 0), (0x1234, 0x5678));
+    }
+
+    #[test]
+    fn echo_volume_scales_fir_output_into_main_mix() {
+        // EVOL_L / EVOL_R scale the FIR output before it's mixed
+        // with the main signal. We drive an impulse voice (no EON),
+        // pre-seed the echo buffer, and verify the FIR output ends
+        // up in the audio_sample via EVOL.
+        let mut apu = apu_with_impulse_voice(0); // silent main
+        apu.dsp_regs[0x6D] = 0x50;
+        apu.dsp_regs[0x7D] = 0x01;
+        apu.dsp_regs[0x4D] = 0x00; // EON = 0
+        apu.dsp_regs[0x0D] = 0x00; // EFB = 0
+        apu.dsp_regs[0x6C] = 0x20; // ECEN = 1 (don't clobber seed)
+        apu.dsp_regs[0x2C] = 0x40; // EVOL_L = $40 (≈ half)
+        apu.dsp_regs[0x3C] = 0x00; // EVOL_R = 0
+        for i in 0..7 {
+            apu.dsp_regs[0x0F + i * 0x10] = 0x00;
+        }
+        apu.dsp_regs[0x0F + 7 * 0x10] = 0x7F;
+        // Seed: buffer slot 0 has L=$4000, R=$4000.
+        let base: u16 = 0x5000;
+        apu.aram[(base) as usize] = 0x00;
+        apu.aram[(base + 1) as usize] = 0x40;
+        apu.aram[(base + 2) as usize] = 0x00;
+        apu.aram[(base + 3) as usize] = 0x40;
+        apu.echo_pos_samples = 1;
+        apu.tick_one_sample();
+        let (l, r) = apu.audio_sample();
+        // FIR gives ≈ $4000, EVOL_L half → final_l ≈ $2000.
+        assert!(l > 0x1E00 && l < 0x2200, "L expected ~$2000, got ${l:04X}");
+        // EVOL_R = 0 → R stays silent.
+        assert_eq!(r, 0);
     }
 }
