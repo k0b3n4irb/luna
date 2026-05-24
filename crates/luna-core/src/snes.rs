@@ -245,6 +245,14 @@ impl Snes {
                 self.cpu.trigger_nmi();
                 self.nmis_serviced = self.nmis_serviced.saturating_add(1);
             }
+            // Joypad auto-read: hardware copies the live pad state
+            // into $4218-$421F at the start of every VBlank when
+            // NMITIMEN.0 is set. Busy bit clears a few lines later.
+            self.cpu_regs.latch_joypad_auto_read();
+        } else if self.ppu_line == NTSC_VBLANK_START_LINE + 3 {
+            // ~3 scanlines after VBlank entry the auto-read sequence
+            // is done. Drop HVBJOY.0 so polling games see ready.
+            self.cpu_regs.clear_joypad_busy();
         } else if self.ppu_line >= NTSC_SCANLINES_PER_FRAME {
             // Frame wrap: back to line 0, clear VBlank bit, and re-
             // initialise HDMA tables for the new frame.
@@ -281,6 +289,16 @@ impl Snes {
             ppu: &mut self.ppu,
         };
         self.dma.hdma_run_line(&mut view);
+    }
+
+    /// Set the live joypad state for controller `idx` (0 = pad 1,
+    /// 1 = pad 2). The new mask becomes visible to the game on the
+    /// next VBlank auto-read latch — typically within ~16.7 ms.
+    ///
+    /// Bit layout (matches SNES hardware, MSB → LSB):
+    /// `B Y SEL START Up Down Left Right A X L R 0 0 0 0`.
+    pub fn set_joypad(&mut self, idx: usize, mask: u16) {
+        self.cpu_regs.set_joypad(idx, mask);
     }
 
     /// Read 8 bytes starting at the current `PB:PC`. Used by the GUI to

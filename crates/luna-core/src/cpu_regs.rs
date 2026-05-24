@@ -52,6 +52,21 @@ pub struct CpuRegs {
     pub rdmpy: u16,
     /// Result of the division ($4214/$4215).
     pub rddiv: u16,
+
+    // ---------- Joypad auto-read ----------
+    /// Current bitmask for player 1 (16-bit). Bit layout per SNES
+    /// hardware: B Y SEL START Up Down Left Right A X L R 0 0 0 0
+    /// (MSB → LSB). The front-end pushes this via [`Self::set_joypad`].
+    pub joypad1: u16,
+    /// Same for player 2.
+    pub joypad2: u16,
+    /// `$4218/$4219` — latched player-1 state copied here at the
+    /// start of every VBlank when `NMITIMEN.0` is set. Stays put
+    /// between latches, so games that read these registers see a
+    /// stable per-frame snapshot.
+    pub joypad1_latched: u16,
+    /// `$421A/$421B` — latched player-2 state.
+    pub joypad2_latched: u16,
 }
 
 impl CpuRegs {
@@ -86,10 +101,54 @@ impl CpuRegs {
             0x4215 => (self.rddiv >> 8) as u8,
             0x4216 => self.rdmpy as u8,
             0x4217 => (self.rdmpy >> 8) as u8,
-            0x4200..=0x420F | 0x4213 | 0x4218..=0x421F => return None,
+            // Joypad auto-read latches at $4218-$421F. Standard SNES
+            // only has 2 controller ports, so $421C-$421F (joypads 3
+            // and 4 via multitap) return 0.
+            0x4218 => self.joypad1_latched as u8,
+            0x4219 => (self.joypad1_latched >> 8) as u8,
+            0x421A => self.joypad2_latched as u8,
+            0x421B => (self.joypad2_latched >> 8) as u8,
+            0x421C..=0x421F => 0x00,
+            0x4200..=0x420F | 0x4213 => return None,
             _ => return None,
         };
         Some(v)
+    }
+
+    /// Push the current per-frame joypad state into the auto-read
+    /// latches. Called by [`crate::Snes::advance_one_scanline`] when
+    /// the scheduler crosses the VBlank entry line, IF `NMITIMEN.0`
+    /// is set. Also raises `HVBJOY.0` (auto-read busy) for the few
+    /// scanlines the hardware spends in the auto-read sequence — see
+    /// [`Self::clear_joypad_busy`].
+    pub fn latch_joypad_auto_read(&mut self) {
+        if self.nmitimen & 0x01 == 0 {
+            return;
+        }
+        self.joypad1_latched = self.joypad1;
+        self.joypad2_latched = self.joypad2;
+        self.hvbjoy |= 0x01;
+    }
+
+    /// Drop the auto-read busy bit. Called a few scanlines after
+    /// [`Self::latch_joypad_auto_read`] so games polling
+    /// `$4212 & 0x01` see it clear before they continue.
+    pub fn clear_joypad_busy(&mut self) {
+        self.hvbjoy &= !0x01;
+    }
+
+    /// Set the current button bitmask for controller `idx` (`0` or
+    /// `1`). The bitmask isn't visible to game code until the next
+    /// auto-read latch (typically the next VBlank).
+    ///
+    /// Bit layout (high → low): B Y SEL START Up Down Left Right
+    /// A X L R 0 0 0 0.
+    pub fn set_joypad(&mut self, idx: usize, mask: u16) {
+        match idx {
+            0 => self.joypad1 = mask,
+            1 => self.joypad2 = mask,
+            _ => {}
+        }
     }
 
     /// Write a register at the 16-bit CPU bank-0 offset.
@@ -278,5 +337,54 @@ mod tests {
         let mut r = CpuRegs::new();
         assert!(!r.write(0x420B, 0xFF), "$420B is DMA, not CpuRegs");
         assert!(!r.write(0x420C, 0xFF), "$420C is HDMA, not CpuRegs");
+    }
+
+    // ---------------------------------------------------------------
+    // Joypad auto-read
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn joypad_latch_copies_live_state_when_nmitimen_0_set() {
+        let mut r = CpuRegs::new();
+        r.write(0x4200, 0x01); // NMITIMEN.0 = auto-read enable
+        r.set_joypad(0, 0xAA55);
+        r.set_joypad(1, 0x1234);
+        r.latch_joypad_auto_read();
+        // Latched mirrors live; reads expose them at $4218-$421B.
+        assert_eq!(r.read(0x4218).unwrap(), 0x55);
+        assert_eq!(r.read(0x4219).unwrap(), 0xAA);
+        assert_eq!(r.read(0x421A).unwrap(), 0x34);
+        assert_eq!(r.read(0x421B).unwrap(), 0x12);
+        // HVBJOY.0 = busy raised.
+        assert_eq!(r.hvbjoy & 0x01, 0x01);
+    }
+
+    #[test]
+    fn joypad_latch_is_a_noop_when_nmitimen_0_clear() {
+        let mut r = CpuRegs::new();
+        r.write(0x4200, 0x00); // bit 0 cleared
+        r.set_joypad(0, 0xFFFF);
+        r.latch_joypad_auto_read();
+        // Latches stay at their default 0; reads see no buttons.
+        assert_eq!(r.read(0x4218).unwrap(), 0x00);
+        assert_eq!(r.read(0x4219).unwrap(), 0x00);
+        assert_eq!(r.hvbjoy & 0x01, 0x00);
+    }
+
+    #[test]
+    fn joypad_3_and_4_return_zero() {
+        let mut r = CpuRegs::new();
+        // No multitap modelled — $421C-$421F always read 0.
+        for off in 0x421C..=0x421F {
+            assert_eq!(r.read(off).unwrap(), 0x00);
+        }
+    }
+
+    #[test]
+    fn clear_joypad_busy_drops_hvbjoy_0_only() {
+        let mut r = CpuRegs::new();
+        r.hvbjoy = 0xFF;
+        r.clear_joypad_busy();
+        assert_eq!(r.hvbjoy, 0xFE, "only bit 0 should clear");
     }
 }
