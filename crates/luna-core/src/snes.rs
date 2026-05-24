@@ -326,12 +326,7 @@ struct SnesBus<'a> {
     /// `true` (i.e. the real SPC700 hit an unimplemented opcode).
     apu_stub_fallback: &'a mut ApuStub,
     /// Mirror of `Snes::apu_panicked` — captured at the start of the
-    /// bus borrow so we know which mailbox path to use. Currently
-    /// unused because mailbox reads always go through
-    /// `apu_stub_fallback` regardless of SPC state (the real SPC's
-    /// driver doesn't produce the right ack bytes yet — kept on the
-    /// struct for the day when it does).
-    #[allow(dead_code)]
+    /// bus borrow so we know which mailbox path to use.
     apu_panicked: bool,
     fast_rom: bool,
     nmi: &'a mut bool,
@@ -482,18 +477,15 @@ impl<'a> Bus for SnesBus<'a> {
             return self.ppu.read(off);
         }
         if let Some(port) = Self::apu_port(addr) {
-            // Mailbox reads ALWAYS go through the heuristic stub —
-            // even though the real SPC is running its IPL ROM (and,
-            // after upload, the music driver) in parallel, our SPC
-            // opcode coverage isn't deep enough yet to make most
-            // music drivers produce the right "ready" / "ack" bytes
-            // back. The stub's handshake-respin heuristic *does*
-            // produce those bytes, and that's what real games
-            // observe at `$2140-$2143`. The SPC still runs in the
-            // background — handy for diagnostics and as the future
-            // path once opcode coverage catches up — but its
-            // mailbox writes don't currently drive the main game.
-            return self.apu_stub_fallback.read(port);
+            // Mailbox reads: prefer the real SPC (now timer-driven,
+            // so its driver actually loops). Fall back to the
+            // heuristic stub only if the SPC has stopped on an
+            // unimplemented opcode.
+            return if self.apu_panicked {
+                self.apu_stub_fallback.read(port)
+            } else {
+                self.apu_real.cpu_read_port(port)
+            };
         }
         if let Some(offset) = Self::dma_offset(addr) {
             return self.dma.read_register(offset).unwrap_or(0xFF);
