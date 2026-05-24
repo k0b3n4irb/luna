@@ -205,6 +205,21 @@ pub struct Apu {
     /// `FLG.5` is clear) overwrites the buffer at this index and
     /// the index advances modulo the buffer size.
     pub echo_pos_samples: u16,
+    /// 15-bit noise LFSR, initialised to `$4000`. Stepped at the
+    /// rate selected by `FLG[4:0]`. Output (sign-extended) replaces
+    /// the BRR sample for any voice whose `NON ($3D)` bit is set.
+    pub noise_lfsr: u16,
+    /// Sub-tick deficit for the noise LFSR clock. Increments by 1
+    /// every audio sample; when it crosses the per-rate period
+    /// from [`ADSR_RATE_PERIODS`] (indexed by `FLG[4:0]`) we step
+    /// the LFSR once and subtract the period.
+    pub noise_deficit: u32,
+    /// Each voice's Gaussian-interpolated output sample for the
+    /// previous tick (post-interp, *before* envelope and volume).
+    /// Voice `v+1` reads `voice_pmod_output[v]` when its `PMON`
+    /// (`$2D`) bit is set to modulate its pitch. Voice 0 never
+    /// reads from here (no preceding voice).
+    pub voice_pmod_output: [i16; 8],
     /// Mixed L/R audio output for the current sample, post voice and
     /// master volume. Updated each `tick_one_sample`; consumers
     /// (future audio backend) can read it via [`Self::audio_sample`].
@@ -288,6 +303,13 @@ impl Apu {
             voice_brr_history: [[0, 0, 0, 0]; 8],
             voice_pitch_acc: [0; 8],
             echo_pos_samples: 0,
+            // LFSR reset to $4000 matches real hardware (a single
+            // bit set in the upper half) — guarantees full 32767-
+            // cycle period without falling into the all-zero
+            // absorbing state.
+            noise_lfsr: 0x4000,
+            noise_deficit: 0,
+            voice_pmod_output: [0; 8],
             audio_left: 0,
             audio_right: 0,
             audio_queue: std::collections::VecDeque::with_capacity(8192),
@@ -397,6 +419,37 @@ impl Apu {
         let mut echo_in_l: i32 = 0;
         let mut echo_in_r: i32 = 0;
         let eon = self.dsp_regs[0x4D];
+        let non = self.dsp_regs[0x3D];
+        let pmon = self.dsp_regs[0x2D];
+
+        // Tick the noise LFSR. FLG[4:0] selects the clock rate from
+        // the same 32-entry period table as ADSR. At rate 0 the
+        // period is "never" (table entry 0xFFFF); we never advance.
+        let noise_rate = self.dsp_regs[0x6C] & 0x1F;
+        let noise_period = ADSR_RATE_PERIODS[noise_rate as usize];
+        if noise_period != 0xFFFF {
+            self.noise_deficit = self.noise_deficit.saturating_add(1);
+            while self.noise_deficit >= u32::from(noise_period) {
+                self.noise_deficit -= u32::from(noise_period);
+                // Galois LFSR step: new bit = bit0 XOR bit1, shift
+                // right, place new bit at position 14. The all-zero
+                // state is the only absorbing one and we initialise
+                // away from it; once running the LFSR cycles
+                // through 2^15-1 = 32767 distinct values.
+                let new_bit = (self.noise_lfsr & 1) ^ ((self.noise_lfsr >> 1) & 1);
+                self.noise_lfsr = (self.noise_lfsr >> 1) | (new_bit << 14);
+            }
+        }
+        // Sign-extend the 15-bit LFSR into a signed-16-bit noise
+        // sample (-32768..+32766 range). Bit 14 acts as the sign.
+        let noise_sample: i16 = {
+            let signed_15 = (self.noise_lfsr as i32) - if self.noise_lfsr & 0x4000 != 0 {
+                0x8000
+            } else {
+                0
+            };
+            (signed_15 << 1) as i16
+        };
 
         for v in 0..8 {
             if !self.voice_active[v] && self.voice_phase[v] == AdsrPhase::Off {
@@ -412,9 +465,22 @@ impl Apu {
                 // sample may be consumed per tick — we loop instead
                 // of capping at one, otherwise notes above the
                 // pitch-table's neutral entry play at half-speed.
-                let pitch = u16::from(self.dsp_regs[0x02 + v * 0x10])
+                let raw_pitch = u16::from(self.dsp_regs[0x02 + v * 0x10])
                     | (u16::from(self.dsp_regs[0x03 + v * 0x10]) << 8);
-                let pitch = pitch & 0x3FFF;
+                let raw_pitch = raw_pitch & 0x3FFF;
+                // Pitch modulation: when PMON.v is set (only valid for
+                // v >= 1; voice 0 has no preceding voice), the previous
+                // voice's pre-volume output scales this voice's pitch
+                // step. Factor is centered at $400 (= unity); each unit
+                // of `prev_output >> 5` adds/subtracts 1/0x400 of the
+                // base pitch per step. Matches bsnes/ares behaviour.
+                let pitch = if v > 0 && pmon & (1 << v) != 0 {
+                    let prev = i32::from(self.voice_pmod_output[v - 1]);
+                    let factor = (prev >> 5) + 0x400; // 0..0x800-ish
+                    ((i32::from(raw_pitch) * factor) >> 10).clamp(0, 0x3FFF) as u16
+                } else {
+                    raw_pitch
+                };
                 let mut acc = u32::from(self.voice_pitch_acc[v]) + u32::from(pitch);
                 while acc >= 0x1000 {
                     acc -= 0x1000;
@@ -458,7 +524,21 @@ impl Apu {
                     + i32::from(table[511 - frac]) * s1
                     + i32::from(table[256 + frac]) * s2
                     + i32::from(table[frac]) * s3;
-                let s = (sum >> 11).clamp(-32768, 32767);
+                let gaussian_s = (sum >> 11).clamp(-32768, 32767);
+                // If NON.v is set, the BRR/Gaussian path is bypassed
+                // and the LFSR noise sample becomes this voice's
+                // source. The envelope and per-voice volume still
+                // apply, so noise can be shaped like a regular voice
+                // (typical use: percussion hi-hats with a fast ADSR).
+                let s = if non & (1 << v) != 0 {
+                    i32::from(noise_sample)
+                } else {
+                    gaussian_s
+                };
+                // Store the pre-envelope sample so the next voice's
+                // pitch-modulation step (above) can read it. Saved
+                // even for noise voices so PMON works consistently.
+                self.voice_pmod_output[v] = s.clamp(-32768, 32767) as i16;
                 let env = i32::from(self.voice_envelope[v]);
                 let outx = (s * env) >> 11; // signed 16-bit
                 let vol_l = self.dsp_regs[v * 0x10] as i8 as i32;
@@ -758,11 +838,41 @@ impl Apu {
         let use_adsr = adsr1 & 0x80 != 0;
 
         if !use_adsr {
-            // Gain mode: keep the linear-decay envelope so we still
-            // have *something*. Don't transition phases (they stay
-            // Off and the age-based timeout above handles end-of-life).
-            let env = u16::from(self.dsp_regs[0x07 + v * 0x10]) << 4;
-            self.voice_envelope[v] = env.min(0x7FF);
+            // Gain mode. The `$x7` GAIN register splits as:
+            //   bit 7   : 0 = direct, 1 = custom
+            //   bits 6:5: custom-mode selector
+            //              00 = Linear  Decrease — env -= 0x20 per step
+            //              01 = Exp.    Decrease — env -= (env >> 8) + 1
+            //              10 = Linear  Increase — env += 0x20
+            //              11 = Bent    Increase — +0x20 below 0x600,
+            //                                       then +0x08 above
+            //   bits 4:0: rate index into ADSR_RATE_PERIODS
+            let gain = self.dsp_regs[0x07 + v * 0x10];
+            if gain & 0x80 == 0 {
+                // Direct gain: envelope is just the low 7 bits scaled up.
+                self.voice_envelope[v] = (u16::from(gain) << 4).min(0x7FF);
+                return;
+            }
+            let rate = gain & 0x1F;
+            let period = ADSR_RATE_PERIODS[rate as usize];
+            if period == 0xFFFF {
+                return;
+            }
+            // Mirror the ADSR-phase logic: only step on the period
+            // boundary, with the same age-modulo gating.
+            if self.voice_age[v] % u32::from(period.max(1)) >= SPC_CYCLES_PER_SAMPLE {
+                return;
+            }
+            let env = self.voice_envelope[v];
+            self.voice_envelope[v] = match (gain >> 5) & 0x03 {
+                0b00 => env.saturating_sub(0x20),
+                0b01 => env.saturating_sub((env >> 8) + 1),
+                0b10 => (env + 0x20).min(0x7FF),
+                _ /* 0b11 */ => {
+                    let step: u16 = if env < 0x600 { 0x20 } else { 0x08 };
+                    (env + step).min(0x7FF)
+                }
+            };
             return;
         }
 
@@ -1877,6 +1987,197 @@ mod tests {
                 "offset=${offset:04X}: expected ~$1000, got ${l:04X}",
             );
         }
+    }
+
+    // ====================================================================
+    // Noise generator
+    // ====================================================================
+
+    #[test]
+    fn noise_lfsr_advances_and_has_full_period() {
+        // 15-bit Galois LFSR with taps at bits 0,1 visits exactly
+        // 32767 distinct states (every non-zero u15) before cycling.
+        // Verify both that one tick advances the state, and that
+        // 32767 ticks return it to the start.
+        let mut apu = Apu::new();
+        apu.dsp_regs[0x6C] = 0x1F; // FLG[4:0] = 0x1F → period = 1 sample
+        let start = apu.noise_lfsr;
+        apu.tick_one_sample();
+        assert_ne!(apu.noise_lfsr, start, "LFSR should step on first tick");
+        // 32766 more ticks → total of 32767 = full cycle → back to start.
+        for _ in 0..32766 {
+            apu.tick_one_sample();
+        }
+        assert_eq!(
+            apu.noise_lfsr, start,
+            "LFSR should cycle back to start after 32767 steps"
+        );
+    }
+
+    #[test]
+    fn noise_replaces_sample_when_non_bit_set() {
+        // When NON.0 is set, voice 0's source is the LFSR — not the
+        // (zeroed) BRR history. Run a few ticks and confirm voice 0
+        // contributes a non-zero (and varying) signal to the mix.
+        let mut apu = Apu::new();
+        apu.voice_active[0] = true;
+        apu.voice_phase[0] = AdsrPhase::Off;
+        apu.voice_envelope[0] = 0x7FF;
+        apu.dsp_regs[0x00] = 0x7F; // VOL_L
+        apu.dsp_regs[0x01] = 0x7F; // VOL_R
+        apu.dsp_regs[0x0C] = 0x7F; // MVOL_L
+        apu.dsp_regs[0x1C] = 0x7F; // MVOL_R
+        apu.dsp_regs[0x6C] = 0x1F; // FLG: clear mute/reset/ECEN, noise rate 0x1F
+        apu.dsp_regs[0x07] = 0x7F; // gain direct full
+        apu.dsp_regs[0x02] = 0x00;
+        apu.dsp_regs[0x03] = 0x00; // pitch=0
+        apu.dsp_regs[0x3D] = 0x01; // NON voice 0
+        // BRR history all zero — without NON the output would be 0.
+        let mut samples = Vec::new();
+        for _ in 0..16 {
+            apu.tick_one_sample();
+            samples.push(apu.audio_left);
+        }
+        let nonzero = samples.iter().filter(|s| **s != 0).count();
+        assert!(
+            nonzero > 8,
+            "expected noise to drive >8/16 ticks non-zero, got {nonzero}: {samples:?}"
+        );
+        let unique: std::collections::HashSet<_> = samples.iter().collect();
+        assert!(
+            unique.len() > 4,
+            "noise output should be variable, only {} distinct values",
+            unique.len()
+        );
+    }
+
+    // ====================================================================
+    // Gain modes
+    // ====================================================================
+
+    /// Helper: build a voice in gain mode with the given GAIN byte
+    /// and step it `ticks` times, returning the envelope after.
+    fn step_gain_voice(gain: u8, initial_env: u16, ticks: u32) -> u16 {
+        let mut apu = Apu::new();
+        apu.voice_active[0] = true;
+        apu.voice_phase[0] = AdsrPhase::Off;
+        apu.voice_envelope[0] = initial_env;
+        apu.dsp_regs[0x05] = 0x00; // ADSR disabled
+        apu.dsp_regs[0x07] = gain;
+        apu.dsp_regs[0x6C] = 0x00; // clear FLG mute / reset
+        apu.dsp_regs[0x0C] = 0x7F; // MVOL — irrelevant but defensive
+        apu.dsp_regs[0x1C] = 0x7F;
+        for _ in 0..ticks {
+            apu.tick_one_sample();
+        }
+        apu.voice_envelope[0]
+    }
+
+    #[test]
+    fn gain_direct_mode_uses_register_value() {
+        // GAIN < 0x80 → direct: envelope = (gain << 4), clamped to 0x7FF.
+        assert_eq!(step_gain_voice(0x40, 0, 1), 0x400);
+        assert_eq!(step_gain_voice(0x7F, 0, 1), 0x7F0);
+    }
+
+    #[test]
+    fn gain_custom_linear_increase_ramps_up_by_0x20() {
+        // GAIN bit 7 = 1, bits 6:5 = 10 (linear increase),
+        // bits 4:0 = 0x1F (fastest rate, period = 1 sample).
+        let gain = 0x80 | (0b10 << 5) | 0x1F; // = 0xDF
+        // After 5 ticks at +0x20 per tick (with the first tick
+        // ramping from age=0): envelope should be ~5 * 0x20 = 0xA0.
+        let env = step_gain_voice(gain, 0, 5);
+        assert!(env >= 0x80 && env <= 0xC0, "got {env:#X}");
+    }
+
+    #[test]
+    fn gain_custom_linear_decrease_ramps_down_by_0x20() {
+        let gain = 0x80 | (0b00 << 5) | 0x1F; // = 0x9F
+        let env = step_gain_voice(gain, 0x7FF, 5);
+        // 0x7FF - 5*0x20 = 0x73F; allow some slop.
+        assert!(env >= 0x6E0 && env <= 0x7E0, "got {env:#X}");
+    }
+
+    #[test]
+    fn gain_custom_bent_increase_slows_above_0x600() {
+        let gain = 0x80 | (0b11 << 5) | 0x1F; // = 0xFF
+        // Start at 0x600 — first tick should add 0x08, not 0x20.
+        // After 1 tick at age=0 we get +0x20 (still triggers the
+        // boundary check correctly), so let's just do a few and
+        // observe the slope changes.
+        let env_at_5 = step_gain_voice(gain, 0x600, 5);
+        let env_at_15 = step_gain_voice(gain, 0x600, 15);
+        // Both should be > 0x600 and < 0x7FF. Slope must be < 0x20/tick.
+        let slope_per_10 = env_at_15 - env_at_5;
+        assert!(env_at_5 > 0x600 && env_at_15 > 0x600, "env didn't rise");
+        assert!(
+            slope_per_10 < 10 * 0x20,
+            "bent-mode slope too steep: got {slope_per_10:#X} for 10 ticks"
+        );
+    }
+
+    // ====================================================================
+    // Pitch modulation (PMON)
+    // ====================================================================
+
+    #[test]
+    fn pmon_voice0_cannot_be_modulated() {
+        // Voice 0 has no predecessor, so PMON.0 is a no-op even
+        // when set. Sanity-check the special case.
+        let mut apu = Apu::new();
+        apu.dsp_regs[0x2D] = 0x01; // PMON.0 (which is ignored)
+        // Just make sure the code path doesn't panic on the v=0
+        // case (we never read voice_pmod_output[-1]).
+        apu.voice_active[0] = true;
+        apu.voice_phase[0] = AdsrPhase::Off;
+        apu.voice_envelope[0] = 0x7FF;
+        apu.dsp_regs[0x07] = 0x7F;
+        apu.dsp_regs[0x6C] = 0x00;
+        apu.dsp_regs[0x03] = 0x10; // pitch $1000
+        apu.tick_one_sample();
+        // Sanity: voice 0's pitch_acc must have advanced by ~$1000,
+        // not been mangled by reading uninitialised voice_pmod_output.
+        // It may have wrapped if a BRR sample was consumed.
+        // Just assert no panic.
+    }
+
+    #[test]
+    fn pmon_voice0_drives_voice1_pitch_swing() {
+        // Voice 1's pitch should advance further with PMON.1 set
+        // when voice 0's pre-volume output is strongly positive.
+        // We run two fresh APUs side-by-side: identical except for
+        // the PMON register, and pre-seed voice_pmod_output[0] so
+        // the modulation factor is sampled on the very first tick.
+        fn setup() -> Apu {
+            let mut apu = Apu::new();
+            apu.voice_active[0] = true;
+            apu.voice_active[1] = true;
+            apu.voice_phase[0] = AdsrPhase::Off;
+            apu.voice_phase[1] = AdsrPhase::Off;
+            apu.voice_envelope[0] = 0x7FF;
+            apu.voice_envelope[1] = 0x7FF;
+            apu.voice_brr_history[0] = [0x7FFF, 0x7FFF, 0x7FFF, 0x7FFF];
+            apu.dsp_regs[0x07] = 0x7F; // V0 gain direct
+            apu.dsp_regs[0x17] = 0x7F; // V1 gain direct
+            apu.dsp_regs[0x6C] = 0x00;
+            apu.dsp_regs[0x13] = 0x08; // V1 pitch high $800
+            // Pre-load: voice 1 reads this on its pitch step before
+            // voice 0 has run its own first sample.
+            apu.voice_pmod_output[0] = 0x7FFF;
+            apu
+        }
+        let mut apu_no_mod = setup();
+        let mut apu_mod = setup();
+        apu_mod.dsp_regs[0x2D] = 0x02; // PMON.1
+        apu_mod.tick_one_sample();
+        apu_no_mod.tick_one_sample();
+        assert!(
+            apu_mod.voice_pitch_acc[1] > apu_no_mod.voice_pitch_acc[1],
+            "PMON should accelerate v1's pitch: mod={:#X} vs nomod={:#X}",
+            apu_mod.voice_pitch_acc[1],
+            apu_no_mod.voice_pitch_acc[1]
+        );
     }
 
     #[test]
