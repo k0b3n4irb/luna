@@ -154,6 +154,11 @@ pub struct Apu {
     pub audio_left: i16,
     /// Mixed R audio (see [`Self::audio_left`]).
     pub audio_right: i16,
+    /// FIFO of stereo PCM samples ready for the host audio backend
+    /// to consume. Sized to a few frames at 32 kHz so brief audio
+    /// underruns don't cause sustained drift; the host drains it on
+    /// every UI frame.
+    pub audio_queue: std::collections::VecDeque<(i16, i16)>,
     /// SPC cycles owed to the audio-sample tick (32-cycle base
     /// clock). Drives both ADSR rate progression and the per-voice
     /// position counter.
@@ -217,6 +222,7 @@ impl Apu {
             voice_pitch_acc: [0; 8],
             audio_left: 0,
             audio_right: 0,
+            audio_queue: std::collections::VecDeque::with_capacity(8192),
             sample_tick_deficit: 0,
             timer_reload: [0; 3],
             timer_output: [0; 3],
@@ -392,6 +398,29 @@ impl Apu {
         let final_r = (mix_r * mvol_r) >> 7;
         self.audio_left = final_l.clamp(-32768, 32767) as i16;
         self.audio_right = final_r.clamp(-32768, 32767) as i16;
+        // Enqueue the sample for the host audio backend. Bound the
+        // queue so a paused or slow consumer can't grow it without
+        // limit; we drop oldest samples on overflow (audible click,
+        // far better than allocating forever).
+        const MAX_QUEUED: usize = 16_384;
+        if self.audio_queue.len() >= MAX_QUEUED {
+            self.audio_queue.pop_front();
+        }
+        self.audio_queue
+            .push_back((self.audio_left, self.audio_right));
+    }
+
+    /// Drain up to `max` queued stereo samples into `out`, in oldest-
+    /// first order. The caller (audio backend) typically calls this
+    /// every UI frame and pushes results into a SPSC ring read by
+    /// the cpal callback.
+    pub fn drain_audio(&mut self, out: &mut Vec<(i16, i16)>, max: usize) {
+        let n = self.audio_queue.len().min(max);
+        for _ in 0..n {
+            if let Some(s) = self.audio_queue.pop_front() {
+                out.push(s);
+            }
+        }
     }
 
     /// Snapshot of the most recent stereo audio sample produced by
