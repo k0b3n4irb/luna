@@ -93,12 +93,8 @@ impl Snes {
         let sram_bytes = (cart.header.sram_size_kb as usize) * 1024;
         let mapper: Box<dyn Mapper + Send> = match cart.header.mapper_kind {
             MapperKind::LoRom => Box::new(LoRomMapper::new(cart.rom, sram_bytes)),
-            // ExHiROM uses the same byte-level layout as HiROM for the
-            // lower 32 Mbit; we treat them identically here. Real
-            // ExHiROM extended-bank addressing (banks 64+) is not yet
-            // modelled but is rare in the wild.
-            MapperKind::HiRom | MapperKind::ExHiRom => {
-                Box::new(HiRomMapper::new(cart.rom, sram_bytes))
+            kind @ (MapperKind::HiRom | MapperKind::ExHiRom) => {
+                Box::new(HiRomMapper::with_kind(kind, cart.rom, sram_bytes))
             }
             other => {
                 panic!(
