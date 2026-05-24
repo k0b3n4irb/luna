@@ -208,10 +208,31 @@ impl LunaApp {
     }
 
     /// Render the PPU framebuffer into an egui texture.
+    ///
+    /// Most SNES games toggle `INIDISP` bit 7 every frame to *force-
+    /// blank* the screen during their VBlank handler so they can
+    /// upload tiles / palette / OAM safely, then clear bit 7 before
+    /// rendering resumes. Our UI thread samples the PPU at an
+    /// arbitrary moment within each emulated second — when that
+    /// happens to land *inside* a forced-blank window we'd see an
+    /// all-black frame, which to the user looks like the screen is
+    /// blinking once per second.
+    ///
+    /// Fix: when forced-blank is on (and the user hasn't asked for
+    /// bypass), keep the previous good texture. The eye sees a
+    /// stable rendered frame; the game's blanking is invisible.
     fn refresh_framebuffer(&mut self, ctx: &Context) {
         let Some(snes) = self.snes.as_ref() else {
             return;
         };
+        if !self.force_display
+            && snes.ppu.inidisp & 0x80 != 0
+            && self.framebuffer.is_some()
+        {
+            // Forced blank — preserve the last non-blanked texture so
+            // the screen doesn't flicker every NMI handler tick.
+            return;
+        }
         let opts = luna_ppu::RenderOptions {
             bypass_forced_blank: self.force_display,
         };
