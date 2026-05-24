@@ -246,11 +246,41 @@ impl Snes {
                 self.nmis_serviced = self.nmis_serviced.saturating_add(1);
             }
         } else if self.ppu_line >= NTSC_SCANLINES_PER_FRAME {
-            // Frame wrap: back to line 0, clear VBlank bit.
+            // Frame wrap: back to line 0, clear VBlank bit, and re-
+            // initialise HDMA tables for the new frame.
             self.ppu_line = 0;
             self.cpu_regs.hvbjoy &= !0x80;
             self.frame_count = self.frame_count.saturating_add(1);
+            self.hdma_init_frame();
         }
+        // After the line counter has advanced, fire HDMA on every
+        // active channel for any visible scanline (0..=224 NTSC).
+        // HDMA transfers happen during the line's H-blank, so doing
+        // them once per scanline transition is the canonical place.
+        if self.ppu_line < NTSC_VBLANK_START_LINE {
+            self.hdma_run_line();
+        }
+    }
+
+    /// Borrow-split helper: build a [`DmaBusView`] for HDMA against
+    /// the same WRAM / mapper / PPU references DMA uses. Mirrors the
+    /// pattern in the `$420B` write path.
+    fn hdma_init_frame(&mut self) {
+        let mut view = DmaBusView {
+            wram: &mut self.wram,
+            mapper: self.mapper.as_mut(),
+            ppu: &mut self.ppu,
+        };
+        self.dma.hdma_init(&mut view);
+    }
+
+    fn hdma_run_line(&mut self) {
+        let mut view = DmaBusView {
+            wram: &mut self.wram,
+            mapper: self.mapper.as_mut(),
+            ppu: &mut self.ppu,
+        };
+        self.dma.hdma_run_line(&mut view);
     }
 
     /// Read 8 bytes starting at the current `PB:PC`. Used by the GUI to
