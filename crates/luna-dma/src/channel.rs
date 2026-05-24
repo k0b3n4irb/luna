@@ -181,11 +181,21 @@ pub struct DmaChannel {
     pub dasb: u8,
     /// `$43x8/$43x9` — HDMA table pointer (HDMA only).
     pub a2a: u16,
-    /// `$43xA` — HDMA line counter (HDMA only).
+    /// `$43xA` — HDMA line counter (HDMA only). Bit 7 = repeat flag,
+    /// bits 6:0 = lines remaining in the current entry. The whole
+    /// byte is the most-recently-fetched header; bits 6:0 are
+    /// decremented each scanline while the channel is active.
     pub ntlr: u8,
     /// `$43xB` / `$43xF` — unused mirror byte exposed in real hardware
     /// (some games rely on the open-bus value).
     pub unused: u8,
+    /// HDMA: whether the channel can still fire this frame. Set true
+    /// by [`Self::hdma_start_frame`] iff the table didn't start with a
+    /// terminator byte; cleared when the table runs out.
+    pub hdma_active: bool,
+    /// HDMA: whether **this** scanline fires a transfer. Reload-on-
+    /// entry always sets this; in between it's the repeat flag's value.
+    pub hdma_do_transfer: bool,
 }
 
 impl Default for DmaParams {
@@ -290,6 +300,102 @@ impl DmaChannel {
         }
         // Hardware leaves `das = 0` at the end of a sync DMA.
         self.das = 0;
+        transferred
+    }
+
+    // ---------------------------------------------------------------
+    // HDMA — per-scanline transfers
+    // ---------------------------------------------------------------
+
+    /// Frame-start HDMA setup for this channel. Resets the running
+    /// table pointer (`a2a`) to `a_addr`, reads the first header byte
+    /// into `ntlr`, and in indirect mode also reads the 16-bit data
+    /// pointer into `das`.
+    ///
+    /// Sets `hdma_active = true` and `hdma_do_transfer = true` if the
+    /// channel has at least one entry; sets them false (channel
+    /// disabled for the frame) if the table starts with a 0 byte.
+    pub fn hdma_start_frame<B: DmaBus>(&mut self, bus: &mut B) {
+        self.a2a = self.a_addr;
+        let header = bus.read_a(make_addr(self.a_bank, self.a2a));
+        self.a2a = self.a2a.wrapping_add(1);
+        self.ntlr = header;
+        if header == 0 {
+            self.hdma_active = false;
+            self.hdma_do_transfer = false;
+            return;
+        }
+        if self.params.hdma_indirect {
+            let lo = bus.read_a(make_addr(self.a_bank, self.a2a));
+            self.a2a = self.a2a.wrapping_add(1);
+            let hi = bus.read_a(make_addr(self.a_bank, self.a2a));
+            self.a2a = self.a2a.wrapping_add(1);
+            self.das = u16::from(lo) | (u16::from(hi) << 8);
+        }
+        self.hdma_active = true;
+        self.hdma_do_transfer = true;
+    }
+
+    /// One HDMA scanline step. If `hdma_do_transfer` is set, transfers
+    /// one "unit" (1, 2, or 4 bytes per [`TransferMode`]) from the
+    /// table/data pointer to the B-bus. Decrements the line counter
+    /// (`ntlr` bits 6:0); when it reaches 0, reads the next header
+    /// byte and either reloads from a new entry, or terminates the
+    /// channel for the rest of the frame.
+    ///
+    /// Returns the number of bytes transferred on this line (0 if
+    /// the channel is done or this line was a non-repeat gap).
+    pub fn hdma_step_line<B: DmaBus>(&mut self, bus: &mut B) -> u32 {
+        if !self.hdma_active {
+            return 0;
+        }
+        let mut transferred: u32 = 0;
+        if self.hdma_do_transfer {
+            // Emit one full mode "unit". Pattern length = unit size.
+            let pattern = self.params.mode.pattern();
+            for &b_off in pattern {
+                let b_offset = self.bbad.wrapping_add(b_off);
+                let value = if self.params.hdma_indirect {
+                    let v = bus.read_a(make_addr(self.dasb, self.das));
+                    self.das = self.das.wrapping_add(1);
+                    v
+                } else {
+                    let v = bus.read_a(make_addr(self.a_bank, self.a2a));
+                    self.a2a = self.a2a.wrapping_add(1);
+                    v
+                };
+                bus.write_b(b_offset, value);
+                transferred += 1;
+            }
+        }
+        // Decrement the 7-bit line count. The repeat bit (bit 7) is
+        // preserved so we can read it back next line for `do_transfer`.
+        let count = (self.ntlr & 0x7F).saturating_sub(1);
+        let repeat = self.ntlr & 0x80;
+        self.ntlr = repeat | count;
+        if count == 0 {
+            // Entry exhausted: read next header byte.
+            let next = bus.read_a(make_addr(self.a_bank, self.a2a));
+            self.a2a = self.a2a.wrapping_add(1);
+            self.ntlr = next;
+            if next == 0 {
+                self.hdma_active = false;
+                self.hdma_do_transfer = false;
+            } else {
+                if self.params.hdma_indirect {
+                    let lo = bus.read_a(make_addr(self.a_bank, self.a2a));
+                    self.a2a = self.a2a.wrapping_add(1);
+                    let hi = bus.read_a(make_addr(self.a_bank, self.a2a));
+                    self.a2a = self.a2a.wrapping_add(1);
+                    self.das = u16::from(lo) | (u16::from(hi) << 8);
+                }
+                // A fresh entry always transfers on its first line.
+                self.hdma_do_transfer = true;
+            }
+        } else {
+            // Continuation line. Transfer only if the repeat flag is set.
+            self.hdma_do_transfer = repeat != 0;
+        }
         transferred
     }
 }
@@ -535,6 +641,135 @@ mod tests {
     // -------------------------------------------------------------------
     // Register read-back symmetry
     // -------------------------------------------------------------------
+
+    // -------------------------------------------------------------------
+    // HDMA — per-scanline transfers
+    // -------------------------------------------------------------------
+
+    /// Builder helper: a fresh channel pointed at `(bank:addr)` with the
+    /// given mode and B-bus offset, ready for HDMA setup.
+    fn hdma_channel(bank: u8, addr: u16, bbad: u8, mode: u8) -> DmaChannel {
+        let mut ch = DmaChannel::new();
+        ch.params = DmaParams::from_byte(mode);
+        ch.bbad = bbad;
+        ch.a_addr = addr;
+        ch.a_bank = bank;
+        ch
+    }
+
+    #[test]
+    fn hdma_direct_non_repeat_transfers_once_then_pauses() {
+        // Table: `02 11 00` — non-repeat 2-line entry (transfer ONCE
+        // on line 1, gap on line 2), then terminator. Mode 0 (1-byte
+        // unit) to BBAD $22.
+        let mut bus = MockBus::new();
+        bus.poke_a(0x00_2000, &[0x02, 0x11, 0x00]);
+        let mut ch = hdma_channel(0x00, 0x2000, 0x22, 0x00);
+        ch.hdma_start_frame(&mut bus);
+        assert!(ch.hdma_active, "table starts non-empty → active");
+        assert!(ch.hdma_do_transfer, "first line of new entry transfers");
+        assert_eq!(ch.ntlr, 0x02, "header byte cached as-is");
+
+        // Line 1: transfer $11, count → 1, continuation gap (no repeat).
+        let n = ch.hdma_step_line(&mut bus);
+        assert_eq!(n, 1, "mode 0 transfers 1 byte/line");
+        assert_eq!(bus.b[0x22], 0x11);
+        assert!(ch.hdma_active);
+        assert!(!ch.hdma_do_transfer, "non-repeat continuation skips");
+
+        // Line 2: no transfer; count drops to 0 → reads terminator → done.
+        let n = ch.hdma_step_line(&mut bus);
+        assert_eq!(n, 0);
+        assert!(!ch.hdma_active);
+    }
+
+    #[test]
+    fn hdma_direct_repeat_entry_transfers_every_line() {
+        // Header `$83 11 22 33` = repeat, 3 lines, three 1-byte units.
+        let mut bus = MockBus::new();
+        bus.poke_a(0x00_3000, &[0x83, 0x11, 0x22, 0x33, 0x00]);
+        let mut ch = hdma_channel(0x00, 0x3000, 0x22, 0x00);
+        ch.hdma_start_frame(&mut bus);
+
+        // 3 lines, each transferring one byte; count goes 3→2→1→0
+        // then terminator fetch.
+        ch.hdma_step_line(&mut bus); // line 1
+        assert_eq!(bus.b[0x22], 0x11);
+        ch.hdma_step_line(&mut bus); // line 2
+        assert_eq!(bus.b[0x22], 0x22);
+        ch.hdma_step_line(&mut bus); // line 3 + reads terminator
+        assert_eq!(bus.b[0x22], 0x33);
+        assert!(!ch.hdma_active, "terminator at offset 4 ends channel");
+    }
+
+    #[test]
+    fn hdma_indirect_reads_data_via_dasb_pointer() {
+        // Table at $00:4000: `82 56 34 00`  (repeat 2-line entry,
+        // pointer = $3456 in bank `dasb`, then terminator). Data at
+        // $7E:3456 = $AA $BB. Repeat mode → both lines transfer, so
+        // the data pointer walks across both bytes.
+        let mut bus = MockBus::new();
+        bus.poke_a(0x00_4000, &[0x82, 0x56, 0x34, 0x00]);
+        bus.poke_a(0x7E_3456, &[0xAA, 0xBB]);
+        let mut ch = hdma_channel(0x00, 0x4000, 0x22, 0x40); // mode 0 + indirect
+        ch.dasb = 0x7E;
+        ch.hdma_start_frame(&mut bus);
+        assert_eq!(ch.das, 0x3456, "indirect pointer loaded from table");
+        assert!(ch.hdma_active);
+
+        ch.hdma_step_line(&mut bus); // line 1: reads $7E:3456 = $AA
+        assert_eq!(bus.b[0x22], 0xAA);
+        assert_eq!(ch.das, 0x3457, "data pointer advanced past the byte");
+        ch.hdma_step_line(&mut bus); // line 2: reads $7E:3457 = $BB, then term.
+        assert_eq!(bus.b[0x22], 0xBB);
+        assert!(!ch.hdma_active);
+    }
+
+    #[test]
+    fn hdma_terminator_header_disables_channel_at_frame_start() {
+        // Table that starts with a 0 byte → channel is disabled right
+        // away.
+        let mut bus = MockBus::new();
+        bus.poke_a(0x00_5000, &[0x00]);
+        let mut ch = hdma_channel(0x00, 0x5000, 0x22, 0x00);
+        ch.hdma_start_frame(&mut bus);
+        assert!(!ch.hdma_active);
+        // Stepping is a no-op.
+        assert_eq!(ch.hdma_step_line(&mut bus), 0);
+    }
+
+    #[test]
+    fn hdma_multiple_entries_chain_correctly() {
+        // Two entries: `01 AA` (1 line, write $AA) then
+        // `81 BB` (repeat, 1 line, write $BB), then `00`.
+        let mut bus = MockBus::new();
+        bus.poke_a(0x00_6000, &[0x01, 0xAA, 0x81, 0xBB, 0x00]);
+        let mut ch = hdma_channel(0x00, 0x6000, 0x22, 0x00);
+        ch.hdma_start_frame(&mut bus);
+
+        ch.hdma_step_line(&mut bus); // line 1: write $AA, fetch entry 2
+        assert_eq!(bus.b[0x22], 0xAA);
+        assert!(ch.hdma_active);
+        assert_eq!(ch.ntlr & 0x7F, 0x01, "second entry has 1 line");
+
+        ch.hdma_step_line(&mut bus); // line 2: write $BB, fetch terminator
+        assert_eq!(bus.b[0x22], 0xBB);
+        assert!(!ch.hdma_active);
+    }
+
+    #[test]
+    fn hdma_mode1_emits_two_bytes_per_line() {
+        // Mode 1: each line emits 2 bytes to BBAD, BBAD+1.
+        // Header `01 11 22 00` → 1 line × 1 unit (= 2 bytes), then end.
+        let mut bus = MockBus::new();
+        bus.poke_a(0x00_7000, &[0x01, 0x11, 0x22, 0x00]);
+        let mut ch = hdma_channel(0x00, 0x7000, 0x18, 0x01); // mode 1
+        ch.hdma_start_frame(&mut bus);
+        let n = ch.hdma_step_line(&mut bus);
+        assert_eq!(n, 2);
+        assert_eq!(bus.b[0x18], 0x11);
+        assert_eq!(bus.b[0x19], 0x22);
+    }
 
     #[test]
     fn write_then_read_round_trip_on_every_offset() {
