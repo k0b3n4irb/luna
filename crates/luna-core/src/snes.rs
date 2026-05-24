@@ -7,6 +7,7 @@
 
 use crate::apu_stub::ApuStub;
 use crate::cpu_regs::CpuRegs;
+use luna_apu::Apu;
 use luna_bus::hirom::HiRomMapper;
 use luna_bus::lorom::LoRomMapper;
 use luna_bus::{
@@ -16,6 +17,7 @@ use luna_cartridge::Cartridge;
 use luna_cpu_65c816::Cpu;
 use luna_dma::{Dma, DmaBus};
 use luna_ppu::Ppu;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 /// Top-level SNES machine.
 pub struct Snes {
@@ -42,12 +44,19 @@ pub struct Snes {
     /// Total master cycles consumed since reset.
     pub total_mclk: MCycles,
 
-    // ------------- "Compat stubs" — replaced by real subsystems later -------------
-    /// Smart APU mailbox stub — a state machine that mimics enough of
-    /// the IPL ROM upload protocol and the post-upload command/ack
-    /// dance for many games to progress past their boot phase without
-    /// a real SPC700 + DSP. See [`crate::apu_stub`].
-    pub apu: ApuStub,
+    // ------------- APU -------------
+    /// Real SPC700 + 64 KB ARAM + IPL ROM + mailboxes. Runs in
+    /// parallel with the main CPU at a 21 mclk : 1 spc-cycle ratio.
+    pub apu_real: Apu,
+    /// `true` once the SPC700 has hit an opcode our handler doesn't
+    /// implement (panic-caught). Subsequent reads of `$2140-$2143`
+    /// fall back to the cached state and the dumb mailbox stub takes
+    /// over for any further CPU writes so the game doesn't deadlock.
+    pub apu_panicked: bool,
+    /// Legacy heuristic mailbox stub — used only after the real APU
+    /// has stopped (panic) so commercial games that depend on
+    /// driver-specific acks still have *some* fallback.
+    pub apu_stub_fallback: ApuStub,
 
     // ------------- Scanline-accurate scheduler -------------
     /// Current PPU scanline (0..=261 for NTSC). Lines 0-223 are the
@@ -113,7 +122,9 @@ impl Snes {
             total_mclk: 0,
             // Compat: post-reset, the IPL ROM has dropped these into
             // the CPU-facing mailbox to signal "audio CPU ready".
-            apu: ApuStub::new(),
+            apu_real: Apu::new(),
+            apu_panicked: false,
+            apu_stub_fallback: ApuStub::new(),
             ppu_line: 0,
             mcycles_in_line: 0,
             frame_count: 0,
@@ -129,7 +140,9 @@ impl Snes {
             ppu,
             dma,
             cpu_regs,
-            apu,
+            apu_real,
+            apu_stub_fallback,
+            apu_panicked,
             wram,
             mapper,
             fast_rom,
@@ -144,7 +157,9 @@ impl Snes {
             ppu,
             dma,
             cpu_regs,
-            apu,
+            apu_real,
+            apu_stub_fallback,
+            apu_panicked: *apu_panicked,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
@@ -162,7 +177,9 @@ impl Snes {
             ppu,
             dma,
             cpu_regs,
-            apu,
+            apu_real,
+            apu_stub_fallback,
+            apu_panicked,
             wram,
             mapper,
             fast_rom,
@@ -177,7 +194,9 @@ impl Snes {
             ppu,
             dma,
             cpu_regs,
-            apu,
+            apu_real,
+            apu_stub_fallback,
+            apu_panicked: *apu_panicked,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
@@ -190,6 +209,23 @@ impl Snes {
         // line-tick events; crossing into line 225 fires VBlank/NMI.
         let consumed = self.total_mclk - before;
         self.advance_scheduler(consumed as u32);
+
+        // Catch up the APU by the same amount. If the SPC700 hits an
+        // opcode we haven't implemented yet, catch the panic and mark
+        // the APU as dead — future mailbox traffic falls through to
+        // the legacy heuristic stub so games don't deadlock.
+        if !self.apu_panicked {
+            let mclk = consumed as u32;
+            let apu = &mut self.apu_real;
+            let prev_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(|_| {}));
+            let result = catch_unwind(AssertUnwindSafe(|| apu.step(mclk)));
+            std::panic::set_hook(prev_hook);
+            if result.is_err() {
+                self.apu_panicked = true;
+            }
+        }
+
         consumed
     }
 
@@ -241,7 +277,9 @@ impl Snes {
             ppu,
             dma,
             cpu_regs,
-            apu,
+            apu_real,
+            apu_stub_fallback,
+            apu_panicked,
             wram,
             mapper,
             fast_rom,
@@ -256,7 +294,9 @@ impl Snes {
             ppu,
             dma,
             cpu_regs,
-            apu,
+            apu_real,
+            apu_stub_fallback,
+            apu_panicked: *apu_panicked,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
@@ -284,7 +324,15 @@ struct SnesBus<'a> {
     ppu: &'a mut Ppu,
     dma: &'a mut Dma,
     cpu_regs: &'a mut CpuRegs,
-    apu: &'a mut ApuStub,
+    /// Real SPC700 + ARAM + IPL ROM. CPU mailbox reads pull from
+    /// `apu_real.to_cpu_ports`; writes land in `apu_real.to_spc_ports`.
+    apu_real: &'a mut Apu,
+    /// Legacy heuristic stub — used when [`Snes::apu_panicked`] is
+    /// `true` (i.e. the real SPC700 hit an unimplemented opcode).
+    apu_stub_fallback: &'a mut ApuStub,
+    /// Mirror of `Snes::apu_panicked` — captured at the start of the
+    /// bus borrow so we know which mailbox path to use.
+    apu_panicked: bool,
     fast_rom: bool,
     nmi: &'a mut bool,
     irq: &'a mut bool,
@@ -434,9 +482,15 @@ impl<'a> Bus for SnesBus<'a> {
             return self.ppu.read(off);
         }
         if let Some(port) = Self::apu_port(addr) {
-            // Smart APU stub: handshake bytes, then IPL counter echo,
-            // then post-upload fake-ack. See `crate::apu_stub`.
-            return self.apu.read(port);
+            // Read the mailbox byte the SPC last wrote on its side.
+            // After the SPC has panicked (unimpl opcode) we fall back
+            // to the legacy heuristic stub so games don't deadlock on
+            // missing music-driver responses.
+            return if self.apu_panicked {
+                self.apu_stub_fallback.read(port)
+            } else {
+                self.apu_real.cpu_read_port(port)
+            };
         }
         if let Some(offset) = Self::dma_offset(addr) {
             return self.dma.read_register(offset).unwrap_or(0xFF);
@@ -472,10 +526,13 @@ impl<'a> Bus for SnesBus<'a> {
             return;
         }
         if let Some(port) = Self::apu_port(addr) {
-            // Smart APU stub: tracks the IPL upload phase to choose
-            // between counter echo (during upload) and fake-ack
-            // (post-upload). See `crate::apu_stub`.
-            self.apu.write(port, value);
+            // CPU writes the byte to BOTH the real APU's to_spc port
+            // (so the SPC700 reads it at $F4-$F7) and the fallback
+            // stub (in case the SPC has panicked and we need it
+            // later). Cheap, no consistency issues since the stub
+            // is only consulted when the real APU is dead.
+            self.apu_real.cpu_write_port(port, value);
+            self.apu_stub_fallback.write(port, value);
             return;
         }
         if let Some(offset) = Self::dma_offset(addr) {
@@ -616,7 +673,9 @@ mod tests {
             ppu,
             dma,
             cpu_regs,
-            apu,
+            apu_real,
+            apu_stub_fallback,
+            apu_panicked,
             wram,
             mapper,
             fast_rom,
@@ -631,7 +690,9 @@ mod tests {
             ppu,
             dma,
             cpu_regs,
-            apu,
+            apu_real,
+            apu_stub_fallback,
+            apu_panicked: *apu_panicked,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,

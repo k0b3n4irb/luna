@@ -545,13 +545,19 @@ fn stubs_panel(ui: &mut egui::Ui, snes: &Snes) {
         .num_columns(2)
         .striped(true)
         .show(ui, |ui| {
-            for (i, v) in snes.apu.ports().iter().enumerate() {
+            for (i, v) in snes.apu_real.to_cpu_ports.iter().enumerate() {
                 ui.label(format!("APU $214{i}"));
                 ui.label(mono(format!("${v:02X}")));
                 ui.end_row();
             }
-            ui.label("APU phase");
-            ui.label(mono(format!("{:?}", snes.apu.phase())));
+            ui.label("SPC PC");
+            ui.label(mono(format!("${:04X}", snes.apu_real.cpu.pc)));
+            ui.end_row();
+            ui.label("APU panicked");
+            ui.label(mono(snes.apu_panicked.to_string()));
+            ui.end_row();
+            ui.label("Past IPL");
+            ui.label(mono(snes.apu_real.past_iplrom.to_string()));
             ui.end_row();
             ui.label("Frames");
             ui.label(mono(snes.frame_count.to_string()));

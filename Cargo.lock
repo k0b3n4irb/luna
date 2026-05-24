@@ -1638,6 +1638,9 @@ version = "0.0.1"
 [[package]]
 name = "luna-apu"
 version = "0.0.1"
+dependencies = [
+ "luna-cpu-spc700",
+]
 
 [[package]]
 name = "luna-async"
@@ -1681,6 +1684,7 @@ version = "0.0.1"
 name = "luna-core"
 version = "0.0.1"
 dependencies = [
+ "luna-apu",
  "luna-bus",
  "luna-cartridge",
  "luna-cpu-65c816",

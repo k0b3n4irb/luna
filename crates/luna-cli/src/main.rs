@@ -233,10 +233,12 @@ fn print_diag_state(snes: &mut Snes) {
         snes.nmis_serviced,
         snes.ppu_line,
     );
-    let ports = snes.apu.ports();
+    let ports = &snes.apu_real.to_cpu_ports;
     println!(
-        "APU stub:  phase={:?}  $2140=${:02X} $2141=${:02X} $2142=${:02X} $2143=${:02X}",
-        snes.apu.phase(),
+        "APU:  SPC PC=${:04X}  panicked={}  past_ipl={}  $2140=${:02X} $2141=${:02X} $2142=${:02X} $2143=${:02X}",
+        snes.apu_real.cpu.pc,
+        snes.apu_panicked,
+        snes.apu_real.past_iplrom,
         ports[0],
         ports[1],
         ports[2],
