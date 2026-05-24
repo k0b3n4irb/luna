@@ -67,6 +67,18 @@ pub struct Apu {
     /// is mostly informational.
     pub past_iplrom: bool,
 
+    // ------------- DSP (audio synth) — memory-backed stub -------------
+    /// Last value written to `$F2` — the DSP register-index port.
+    /// `$F3` reads / writes the byte at `dsp_regs[dsp_index & 0x7F]`.
+    pub dsp_index: u8,
+    /// The 128 DSP registers (voice params, KON / KOF, echo, etc.).
+    /// We back them as plain memory: every write stores the value,
+    /// every read returns it. That isn't sample-accurate but is
+    /// enough for music drivers to not crash and to track their own
+    /// state — they typically write voice parameters then read them
+    /// back as part of their main loop.
+    pub dsp_regs: [u8; 128],
+
     // ------------- Timers -------------
     /// Reload values at `$FA` (T0), `$FB` (T1), `$FC` (T2). A value
     /// of `0` is treated as `256` per the SPC700 spec.
@@ -112,6 +124,8 @@ impl Apu {
             mclk_deficit: 0,
             control: 0x80, // bit 7: IPL ROM exposed
             past_iplrom: false,
+            dsp_index: 0,
+            dsp_regs: [0; 128],
             timer_reload: [0; 3],
             timer_output: [0; 3],
             timer_internal: [0; 3],
@@ -125,6 +139,8 @@ impl Apu {
             to_spc_ports: &apu.to_spc_ports,
             to_cpu_ports: &mut apu.to_cpu_ports,
             control: &mut apu.control,
+            dsp_index: &mut apu.dsp_index,
+            dsp_regs: &mut apu.dsp_regs,
             timer_reload: &mut apu.timer_reload,
             timer_output: &mut apu.timer_output,
             timer_internal: &mut apu.timer_internal,
@@ -210,6 +226,8 @@ impl Apu {
                 to_spc_ports: &self.to_spc_ports,
                 to_cpu_ports: &mut self.to_cpu_ports,
                 control: &mut self.control,
+                dsp_index: &mut self.dsp_index,
+                dsp_regs: &mut self.dsp_regs,
                 timer_reload: &mut self.timer_reload,
                 timer_output: &mut self.timer_output,
                 timer_internal: &mut self.timer_internal,
@@ -232,6 +250,8 @@ struct ApuBusView<'a> {
     to_spc_ports: &'a [u8; 4],
     to_cpu_ports: &'a mut [u8; 4],
     control: &'a mut u8,
+    dsp_index: &'a mut u8,
+    dsp_regs: &'a mut [u8; 128],
     timer_reload: &'a mut [u8; 3],
     timer_output: &'a mut [u8; 3],
     timer_internal: &'a mut [u16; 3],
@@ -246,10 +266,14 @@ impl SpcBus for ApuBusView<'_> {
             // $F1 — control register. Reads return... 0 on real HW
             // (it's effectively write-only). Match that.
             0x00F1 => 0,
-            // $F2 — DSP register-index port. Stubbed.
-            0x00F2 => 0,
-            // $F3 — DSP register-data port. Stubbed.
-            0x00F3 => 0,
+            // $F2 — DSP register-index port. Real HW returns the
+            // last value written; we model that.
+            0x00F2 => *self.dsp_index,
+            // $F3 — DSP register-data port. Returns the byte at
+            // `dsp_regs[index & 0x7F]`. The high bit of the index
+            // distinguishes read (0) from write (1) on real DSP,
+            // but software always reads via index 0-127.
+            0x00F3 => self.dsp_regs[(*self.dsp_index & 0x7F) as usize],
             // $F4-$F7 — mailbox FROM the main CPU.
             0x00F4..=0x00F7 => self.to_spc_ports[(addr - 0x00F4) as usize],
             // $F8-$F9 — RAM-mapped scratch bytes (auxiliary regs).
@@ -295,10 +319,13 @@ impl SpcBus for ApuBusView<'_> {
                 }
                 *self.control = value;
             }
-            // $F2 — DSP index port, stubbed.
-            0x00F2 => {}
-            // $F3 — DSP data port, stubbed.
-            0x00F3 => {}
+            // $F2 — DSP register-index port.
+            0x00F2 => *self.dsp_index = value,
+            // $F3 — DSP register-data port. Only low 7 bits of the
+            // index actually select the register; bit 7 distinguishes
+            // read vs write on real HW, but for our memory-backed
+            // stub a write always stores.
+            0x00F3 => self.dsp_regs[(*self.dsp_index & 0x7F) as usize] = value,
             // $F4-$F7 — mailbox TO the main CPU.
             0x00F4..=0x00F7 => self.to_cpu_ports[(addr - 0x00F4) as usize] = value,
             // $F8-$F9 — auxiliary RAM-mapped regs. Store in ARAM so
@@ -353,6 +380,37 @@ mod tests {
         // Step further — IPL ROM should leave the wait loop at $FFCF.
         apu.step(200 * MASTER_CYCLES_PER_SPC_STEP);
         assert_ne!(apu.cpu.pc, 0xFFCF, "SPC still stuck in wait loop");
+    }
+
+    #[test]
+    fn dsp_register_round_trip_via_index_and_data_ports() {
+        // Drivers use $F2 / $F3 a *lot*: write index, write data, or
+        // write index, read data. We verify both sides — write
+        // through one register slot, read back, plus a sanity check
+        // that the index advances on neither port (the driver
+        // increments it manually when stepping voices).
+        let mut apu = Apu::new();
+        let mut bus = ApuBusView {
+            aram: &mut apu.aram,
+            to_spc_ports: &apu.to_spc_ports,
+            to_cpu_ports: &mut apu.to_cpu_ports,
+            control: &mut apu.control,
+            dsp_index: &mut apu.dsp_index,
+            dsp_regs: &mut apu.dsp_regs,
+            timer_reload: &mut apu.timer_reload,
+            timer_output: &mut apu.timer_output,
+            timer_internal: &mut apu.timer_internal,
+            timer_enabled: &mut apu.timer_enabled,
+        };
+        // Pick voice 0 envelope-X output register ($08).
+        bus.write(0x00F2, 0x08);
+        bus.write(0x00F3, 0x42);
+        // Reading $F2 returns the index; $F3 returns the stored data.
+        assert_eq!(bus.read(0x00F2), 0x08);
+        assert_eq!(bus.read(0x00F3), 0x42);
+        // Index bit 7 is masked when indexing the register array.
+        bus.write(0x00F2, 0x88); // bit 7 set + same index 8
+        assert_eq!(bus.read(0x00F3), 0x42, "bit 7 of index should be masked");
     }
 
     #[test]
@@ -412,6 +470,8 @@ mod tests {
                 to_spc_ports: &apu.to_spc_ports,
                 to_cpu_ports: &mut apu.to_cpu_ports,
                 control: &mut apu.control,
+                dsp_index: &mut apu.dsp_index,
+                dsp_regs: &mut apu.dsp_regs,
                 timer_reload: &mut apu.timer_reload,
                 timer_output: &mut apu.timer_output,
                 timer_internal: &mut apu.timer_internal,
@@ -430,6 +490,8 @@ mod tests {
             to_spc_ports: &apu.to_spc_ports,
             to_cpu_ports: &mut apu.to_cpu_ports,
             control: &mut apu.control,
+            dsp_index: &mut apu.dsp_index,
+            dsp_regs: &mut apu.dsp_regs,
             timer_reload: &mut apu.timer_reload,
             timer_output: &mut apu.timer_output,
             timer_internal: &mut apu.timer_internal,
