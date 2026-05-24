@@ -381,6 +381,172 @@ impl Spc700 {
             }
 
             // ---------------------------------------------------------
+            // Shifts / inc / dec on direct page and absolute memory.
+            // Each does read-modify-write and updates N/Z (plus C for
+            // shifts).
+            // ---------------------------------------------------------
+            0x0B => {
+                // ASL dp
+                let dp = self.fetch_u8(bus);
+                let addr = self.direct_addr(dp);
+                let v = bus.read(addr);
+                self.psw.set(bit::C, v & 0x80 != 0);
+                let v = v << 1;
+                bus.write(addr, v);
+                self.set_nz(v);
+            }
+            0x1B => {
+                // ASL dp+X
+                let dp = self.fetch_u8(bus);
+                let addr = self.direct_addr(dp.wrapping_add(self.x));
+                let v = bus.read(addr);
+                self.psw.set(bit::C, v & 0x80 != 0);
+                let v = v << 1;
+                bus.write(addr, v);
+                self.set_nz(v);
+            }
+            0x0C => {
+                // ASL !abs
+                let addr = self.fetch_u16(bus);
+                let v = bus.read(addr);
+                self.psw.set(bit::C, v & 0x80 != 0);
+                let v = v << 1;
+                bus.write(addr, v);
+                self.set_nz(v);
+            }
+            0x4B => {
+                // LSR dp
+                let dp = self.fetch_u8(bus);
+                let addr = self.direct_addr(dp);
+                let v = bus.read(addr);
+                self.psw.set(bit::C, v & 0x01 != 0);
+                let v = v >> 1;
+                bus.write(addr, v);
+                self.set_nz(v);
+            }
+            0x5B => {
+                // LSR dp+X
+                let dp = self.fetch_u8(bus);
+                let addr = self.direct_addr(dp.wrapping_add(self.x));
+                let v = bus.read(addr);
+                self.psw.set(bit::C, v & 0x01 != 0);
+                let v = v >> 1;
+                bus.write(addr, v);
+                self.set_nz(v);
+            }
+            0x4C => {
+                // LSR !abs
+                let addr = self.fetch_u16(bus);
+                let v = bus.read(addr);
+                self.psw.set(bit::C, v & 0x01 != 0);
+                let v = v >> 1;
+                bus.write(addr, v);
+                self.set_nz(v);
+            }
+            0x2B => {
+                // ROL dp
+                let dp = self.fetch_u8(bus);
+                let addr = self.direct_addr(dp);
+                let v = bus.read(addr);
+                let c_in = u8::from(self.psw.contains(bit::C));
+                self.psw.set(bit::C, v & 0x80 != 0);
+                let v = (v << 1) | c_in;
+                bus.write(addr, v);
+                self.set_nz(v);
+            }
+            0x3B => {
+                // ROL dp+X
+                let dp = self.fetch_u8(bus);
+                let addr = self.direct_addr(dp.wrapping_add(self.x));
+                let v = bus.read(addr);
+                let c_in = u8::from(self.psw.contains(bit::C));
+                self.psw.set(bit::C, v & 0x80 != 0);
+                let v = (v << 1) | c_in;
+                bus.write(addr, v);
+                self.set_nz(v);
+            }
+            0x2C => {
+                // ROL !abs
+                let addr = self.fetch_u16(bus);
+                let v = bus.read(addr);
+                let c_in = u8::from(self.psw.contains(bit::C));
+                self.psw.set(bit::C, v & 0x80 != 0);
+                let v = (v << 1) | c_in;
+                bus.write(addr, v);
+                self.set_nz(v);
+            }
+            0x6B => {
+                // ROR dp
+                let dp = self.fetch_u8(bus);
+                let addr = self.direct_addr(dp);
+                let v = bus.read(addr);
+                let c_in = u8::from(self.psw.contains(bit::C));
+                self.psw.set(bit::C, v & 0x01 != 0);
+                let v = (v >> 1) | (c_in << 7);
+                bus.write(addr, v);
+                self.set_nz(v);
+            }
+            0x7B => {
+                // ROR dp+X
+                let dp = self.fetch_u8(bus);
+                let addr = self.direct_addr(dp.wrapping_add(self.x));
+                let v = bus.read(addr);
+                let c_in = u8::from(self.psw.contains(bit::C));
+                self.psw.set(bit::C, v & 0x01 != 0);
+                let v = (v >> 1) | (c_in << 7);
+                bus.write(addr, v);
+                self.set_nz(v);
+            }
+            0x6C => {
+                // ROR !abs
+                let addr = self.fetch_u16(bus);
+                let v = bus.read(addr);
+                let c_in = u8::from(self.psw.contains(bit::C));
+                self.psw.set(bit::C, v & 0x01 != 0);
+                let v = (v >> 1) | (c_in << 7);
+                bus.write(addr, v);
+                self.set_nz(v);
+            }
+            0x8B => {
+                // DEC dp
+                let dp = self.fetch_u8(bus);
+                let addr = self.direct_addr(dp);
+                let v = bus.read(addr).wrapping_sub(1);
+                bus.write(addr, v);
+                self.set_nz(v);
+            }
+            0x9B => {
+                // DEC dp+X
+                let dp = self.fetch_u8(bus);
+                let addr = self.direct_addr(dp.wrapping_add(self.x));
+                let v = bus.read(addr).wrapping_sub(1);
+                bus.write(addr, v);
+                self.set_nz(v);
+            }
+            0x8C => {
+                // DEC !abs
+                let addr = self.fetch_u16(bus);
+                let v = bus.read(addr).wrapping_sub(1);
+                bus.write(addr, v);
+                self.set_nz(v);
+            }
+            0xBB => {
+                // INC dp+X
+                let dp = self.fetch_u8(bus);
+                let addr = self.direct_addr(dp.wrapping_add(self.x));
+                let v = bus.read(addr).wrapping_add(1);
+                bus.write(addr, v);
+                self.set_nz(v);
+            }
+            0xAC => {
+                // INC !abs
+                let addr = self.fetch_u16(bus);
+                let v = bus.read(addr).wrapping_add(1);
+                bus.write(addr, v);
+                self.set_nz(v);
+            }
+
+            // ---------------------------------------------------------
             // Shifts on accumulator
             // ---------------------------------------------------------
             0x1C => {
@@ -571,6 +737,211 @@ impl Spc700 {
                 let a = self.a;
                 self.a = self.sbc_u8(a, v);
             }
+            // OR/AND/EOR/ADC/SBC A,dp+X
+            0x14 => {
+                let dp = self.fetch_u8(bus);
+                let v = bus.read(self.direct_addr(dp.wrapping_add(self.x)));
+                self.a |= v;
+                let r = self.a;
+                self.set_nz(r);
+            }
+            0x34 => {
+                let dp = self.fetch_u8(bus);
+                let v = bus.read(self.direct_addr(dp.wrapping_add(self.x)));
+                self.a &= v;
+                let r = self.a;
+                self.set_nz(r);
+            }
+            0x54 => {
+                let dp = self.fetch_u8(bus);
+                let v = bus.read(self.direct_addr(dp.wrapping_add(self.x)));
+                self.a ^= v;
+                let r = self.a;
+                self.set_nz(r);
+            }
+            0x94 => {
+                let dp = self.fetch_u8(bus);
+                let v = bus.read(self.direct_addr(dp.wrapping_add(self.x)));
+                let a = self.a;
+                self.a = self.adc_u8(a, v);
+            }
+            0xB4 => {
+                let dp = self.fetch_u8(bus);
+                let v = bus.read(self.direct_addr(dp.wrapping_add(self.x)));
+                let a = self.a;
+                self.a = self.sbc_u8(a, v);
+            }
+            // OR/AND/EOR/ADC/SBC A,!abs+X
+            0x15 => {
+                let base = self.fetch_u16(bus);
+                let v = bus.read(base.wrapping_add(u16::from(self.x)));
+                self.a |= v;
+                let r = self.a;
+                self.set_nz(r);
+            }
+            0x35 => {
+                let base = self.fetch_u16(bus);
+                let v = bus.read(base.wrapping_add(u16::from(self.x)));
+                self.a &= v;
+                let r = self.a;
+                self.set_nz(r);
+            }
+            0x55 => {
+                let base = self.fetch_u16(bus);
+                let v = bus.read(base.wrapping_add(u16::from(self.x)));
+                self.a ^= v;
+                let r = self.a;
+                self.set_nz(r);
+            }
+            0x95 => {
+                let base = self.fetch_u16(bus);
+                let v = bus.read(base.wrapping_add(u16::from(self.x)));
+                let a = self.a;
+                self.a = self.adc_u8(a, v);
+            }
+            0xB5 => {
+                let base = self.fetch_u16(bus);
+                let v = bus.read(base.wrapping_add(u16::from(self.x)));
+                let a = self.a;
+                self.a = self.sbc_u8(a, v);
+            }
+            // OR/AND/EOR/ADC/SBC A,!abs+Y
+            0x16 => {
+                let base = self.fetch_u16(bus);
+                let v = bus.read(base.wrapping_add(u16::from(self.y)));
+                self.a |= v;
+                let r = self.a;
+                self.set_nz(r);
+            }
+            0x36 => {
+                let base = self.fetch_u16(bus);
+                let v = bus.read(base.wrapping_add(u16::from(self.y)));
+                self.a &= v;
+                let r = self.a;
+                self.set_nz(r);
+            }
+            0x56 => {
+                let base = self.fetch_u16(bus);
+                let v = bus.read(base.wrapping_add(u16::from(self.y)));
+                self.a ^= v;
+                let r = self.a;
+                self.set_nz(r);
+            }
+            0x96 => {
+                let base = self.fetch_u16(bus);
+                let v = bus.read(base.wrapping_add(u16::from(self.y)));
+                let a = self.a;
+                self.a = self.adc_u8(a, v);
+            }
+            0xB6 => {
+                let base = self.fetch_u16(bus);
+                let v = bus.read(base.wrapping_add(u16::from(self.y)));
+                let a = self.a;
+                self.a = self.sbc_u8(a, v);
+            }
+            // OR/AND/EOR/ADC/SBC A,(X) — register-indirect
+            0x06 => {
+                let v = bus.read(self.direct_addr(self.x));
+                self.a |= v;
+                let r = self.a;
+                self.set_nz(r);
+            }
+            0x26 => {
+                let v = bus.read(self.direct_addr(self.x));
+                self.a &= v;
+                let r = self.a;
+                self.set_nz(r);
+            }
+            0x46 => {
+                let v = bus.read(self.direct_addr(self.x));
+                self.a ^= v;
+                let r = self.a;
+                self.set_nz(r);
+            }
+            0x66 => {
+                // CMP A,(X)
+                let v = bus.read(self.direct_addr(self.x));
+                let a = self.a;
+                self.cmp_u8(a, v);
+            }
+            0x86 => {
+                let v = bus.read(self.direct_addr(self.x));
+                let a = self.a;
+                self.a = self.adc_u8(a, v);
+            }
+            0xA6 => {
+                let v = bus.read(self.direct_addr(self.x));
+                let a = self.a;
+                self.a = self.sbc_u8(a, v);
+            }
+            // OR/AND/EOR/CMP/ADC/SBC A,[dp+X]
+            0x07 => {
+                let v = self.read_indirect_x(bus);
+                self.a |= v;
+                let r = self.a;
+                self.set_nz(r);
+            }
+            0x27 => {
+                let v = self.read_indirect_x(bus);
+                self.a &= v;
+                let r = self.a;
+                self.set_nz(r);
+            }
+            0x47 => {
+                let v = self.read_indirect_x(bus);
+                self.a ^= v;
+                let r = self.a;
+                self.set_nz(r);
+            }
+            0x67 => {
+                let v = self.read_indirect_x(bus);
+                let a = self.a;
+                self.cmp_u8(a, v);
+            }
+            0x87 => {
+                let v = self.read_indirect_x(bus);
+                let a = self.a;
+                self.a = self.adc_u8(a, v);
+            }
+            0xA7 => {
+                let v = self.read_indirect_x(bus);
+                let a = self.a;
+                self.a = self.sbc_u8(a, v);
+            }
+            // OR/AND/EOR/CMP/ADC/SBC A,[dp]+Y
+            0x17 => {
+                let v = self.read_indirect_y(bus);
+                self.a |= v;
+                let r = self.a;
+                self.set_nz(r);
+            }
+            0x37 => {
+                let v = self.read_indirect_y(bus);
+                self.a &= v;
+                let r = self.a;
+                self.set_nz(r);
+            }
+            0x57 => {
+                let v = self.read_indirect_y(bus);
+                self.a ^= v;
+                let r = self.a;
+                self.set_nz(r);
+            }
+            0x77 => {
+                let v = self.read_indirect_y(bus);
+                let a = self.a;
+                self.cmp_u8(a, v);
+            }
+            0x97 => {
+                let v = self.read_indirect_y(bus);
+                let a = self.a;
+                self.a = self.adc_u8(a, v);
+            }
+            0xB7 => {
+                let v = self.read_indirect_y(bus);
+                let a = self.a;
+                self.a = self.sbc_u8(a, v);
+            }
 
             // ---------------------------------------------------------
             // Memory-to-memory ops (dp,dp). Object-code order is
@@ -709,6 +1080,35 @@ impl Spc700 {
                 let v = self.y;
                 self.set_nz(v);
             }
+            0x9E => {
+                // DIV YA,X — unsigned 16/8 division.
+                //   A = YA / X (quotient, low byte)
+                //   Y = YA % X (remainder)
+                // Real SPC700 quirks: the result can overflow when
+                // Y >= X (sets V). Behaviour for X == 0 is hardware-
+                // specific; we mirror the common emulator convention
+                // of returning (A=$FF, Y=A) and setting V.
+                let ya = u16::from(self.a) | (u16::from(self.y) << 8);
+                let x = u16::from(self.x);
+                match ya.checked_div(x) {
+                    Some(q) => {
+                        let r = ya % x;
+                        self.psw.set(bit::V, q > 0xFF);
+                        self.a = q as u8;
+                        self.y = r as u8;
+                    }
+                    None => {
+                        // X = 0 on real HW gives undefined-but-
+                        // observed (A = $FF, Y = $FF) with V set.
+                        self.a = 0xFF;
+                        self.y = 0xFF;
+                        self.psw.insert(bit::V);
+                    }
+                }
+                self.psw.set(bit::H, (self.y & 0x0F) >= (self.x & 0x0F));
+                let a = self.a;
+                self.set_nz(a);
+            }
 
             // ---------------------------------------------------------
             // Bit-set / bit-clear on direct page (SET1 / CLR1).
@@ -815,6 +1215,12 @@ impl Spc700 {
             0x9C => {
                 // DEC A
                 self.a = self.a.wrapping_sub(1);
+                let v = self.a;
+                self.set_nz(v);
+            }
+            0x9F => {
+                // XCN A — exchange nibbles of A.
+                self.a = self.a.rotate_left(4);
                 let v = self.a;
                 self.set_nz(v);
             }
@@ -1116,6 +1522,28 @@ impl Spc700 {
     fn pop_u8<B: SpcBus>(&mut self, bus: &mut B) -> u8 {
         self.sp = self.sp.wrapping_add(1);
         bus.read(0x0100 | u16::from(self.sp))
+    }
+
+    /// Fetch a `dp` byte, resolve `[dp+X]` as a 16-bit pointer in
+    /// direct page, and read the byte the pointer points to.
+    fn read_indirect_x<B: SpcBus>(&mut self, bus: &mut B) -> u8 {
+        let dp = self.fetch_u8(bus);
+        let dpx = dp.wrapping_add(self.x);
+        let lo = bus.read(self.direct_addr(dpx));
+        let hi = bus.read(self.direct_addr(dpx.wrapping_add(1)));
+        let target = u16::from(lo) | (u16::from(hi) << 8);
+        bus.read(target)
+    }
+
+    /// Fetch a `dp` byte, resolve `[dp]` as a 16-bit pointer, then
+    /// read the byte at `pointer + Y`.
+    fn read_indirect_y<B: SpcBus>(&mut self, bus: &mut B) -> u8 {
+        let dp = self.fetch_u8(bus);
+        let lo = bus.read(self.direct_addr(dp));
+        let hi = bus.read(self.direct_addr(dp.wrapping_add(1)));
+        let ptr = u16::from(lo) | (u16::from(hi) << 8);
+        let target = ptr.wrapping_add(u16::from(self.y));
+        bus.read(target)
     }
 }
 
