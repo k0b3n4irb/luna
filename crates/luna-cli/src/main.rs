@@ -249,6 +249,36 @@ fn print_diag_state(snes: &mut Snes) {
         "OAM:   {oam_non_zero}/544 non-zero  |  OBSEL=${:02X}",
         p.obsel
     );
+    // What's actually been written into OAM that *isn't* the hide
+    // value? Helps distinguish "game uploaded N sprites" from
+    // "game wrote the hide marker over everything".
+    print!("OAM non-$F0/non-zero bytes: ");
+    let mut shown = 0;
+    for off in 0..0x220u16 {
+        let b = p.oam.peek(off);
+        if b != 0 && b != 0xF0 {
+            print!("[${off:03X}=${b:02X}] ");
+            shown += 1;
+            if shown >= 20 {
+                print!("...");
+                break;
+            }
+        }
+    }
+    println!();
+    print!("OAM shadow Y (non-$F0): ");
+    let mut shown2 = 0;
+    for (i, y) in p.oam.shadow_y.iter().enumerate() {
+        if *y != 0xF0 {
+            print!("[#{i}=${y:02X}] ");
+            shown2 += 1;
+            if shown2 >= 20 {
+                print!("...");
+                break;
+            }
+        }
+    }
+    println!();
     let all_sprites = luna_ppu::decode_all_sprites(p);
     let visible_count = all_sprites.iter().filter(|sp| sp.y < 224).count();
     println!("  visible sprites (y<224): {visible_count}");
