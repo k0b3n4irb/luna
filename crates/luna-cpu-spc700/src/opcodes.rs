@@ -1453,19 +1453,264 @@ impl Spc700 {
             0xD0 => self.branch_if(bus, !self.psw.contains(bit::Z)), // BNE
             0xF0 => self.branch_if(bus, self.psw.contains(bit::Z)), // BEQ
 
-            // Everything else: we haven't implemented this opcode yet.
-            // Record it for diagnostics and stop the CPU gracefully so
-            // the host emulator doesn't deadlock and the user can see
-            // exactly which byte to add next.
-            other => {
-                let pc_of_opcode = self.pc.wrapping_sub(1);
-                self.unimplemented_opcode = Some((other, pc_of_opcode));
-                self.stopped = true;
-                // Rewind PC so re-stepping after we *add* the opcode
-                // starts at the right place (caller's responsibility
-                // to clear `stopped` + `unimplemented_opcode`).
-                self.pc = pc_of_opcode;
+            // ---------------------------------------------------------
+            // TCALL N — table call. Single-byte opcode `$X1`, where the
+            // high nibble selects one of 16 vectors at `$FFC0..=$FFDF`
+            // (TCALL 0 reads `$FFDE/$FFDF`, TCALL 15 reads
+            // `$FFC0/$FFC1`). Push return PC, jump through the vector.
+            // ---------------------------------------------------------
+            0x01 | 0x11 | 0x21 | 0x31 | 0x41 | 0x51 | 0x61 | 0x71 | 0x81 | 0x91 | 0xA1 | 0xB1
+            | 0xC1 | 0xD1 | 0xE1 | 0xF1 => {
+                let n = (opcode >> 4) & 0x0F;
+                let vec_addr = 0xFFDE_u16.wrapping_sub(u16::from(n) * 2);
+                let return_pc = self.pc;
+                self.push_u8(bus, (return_pc >> 8) as u8);
+                self.push_u8(bus, return_pc as u8);
+                let lo = bus.read(vec_addr);
+                let hi = bus.read(vec_addr.wrapping_add(1));
+                self.pc = u16::from(lo) | (u16::from(hi) << 8);
             }
+
+            // ---------------------------------------------------------
+            // ALU on (X),(Y) — memory-memory ALU through register-
+            // indirect addressing. `(X)` resolves to `direct_addr(X)`;
+            // `(Y)` to `direct_addr(Y)`. The result lands at `(X)`,
+            // except for CMP which only updates flags. Each opcode is
+            // a single byte (no operands).
+            // ---------------------------------------------------------
+            0x19 => {
+                // OR (X),(Y)
+                let dx = self.direct_addr(self.x);
+                let dy = self.direct_addr(self.y);
+                let v = bus.read(dx) | bus.read(dy);
+                bus.write(dx, v);
+                self.set_nz(v);
+            }
+            0x39 => {
+                // AND (X),(Y)
+                let dx = self.direct_addr(self.x);
+                let dy = self.direct_addr(self.y);
+                let v = bus.read(dx) & bus.read(dy);
+                bus.write(dx, v);
+                self.set_nz(v);
+            }
+            0x59 => {
+                // EOR (X),(Y)
+                let dx = self.direct_addr(self.x);
+                let dy = self.direct_addr(self.y);
+                let v = bus.read(dx) ^ bus.read(dy);
+                bus.write(dx, v);
+                self.set_nz(v);
+            }
+            0x79 => {
+                // CMP (X),(Y)
+                let dx = self.direct_addr(self.x);
+                let dy = self.direct_addr(self.y);
+                let lhs = bus.read(dx);
+                let rhs = bus.read(dy);
+                self.cmp_u8(lhs, rhs);
+            }
+            0x99 => {
+                // ADC (X),(Y)
+                let dx = self.direct_addr(self.x);
+                let dy = self.direct_addr(self.y);
+                let lhs = bus.read(dx);
+                let rhs = bus.read(dy);
+                let r = self.adc_u8(lhs, rhs);
+                bus.write(dx, r);
+            }
+            0xB9 => {
+                // SBC (X),(Y)
+                let dx = self.direct_addr(self.x);
+                let dy = self.direct_addr(self.y);
+                let lhs = bus.read(dx);
+                let rhs = bus.read(dy);
+                let r = self.sbc_u8(lhs, rhs);
+                bus.write(dx, r);
+            }
+
+            // ---------------------------------------------------------
+            // ALU dp,#imm — read-modify-write on direct page with an
+            // immediate right-hand operand. Object-code order matches
+            // the existing OR/AND/EOR/CMP dp,#imm family above: imm
+            // first, then dp. ADC and SBC update N/V/H/Z/C.
+            // ---------------------------------------------------------
+            0x98 => {
+                // ADC dp,#imm — needed by DKC and Secret of Mana.
+                let imm = self.fetch_u8(bus);
+                let dp = self.fetch_u8(bus);
+                let addr = self.direct_addr(dp);
+                let mem = bus.read(addr);
+                let v = self.adc_u8(mem, imm);
+                bus.write(addr, v);
+            }
+            0xB8 => {
+                // SBC dp,#imm
+                let imm = self.fetch_u8(bus);
+                let dp = self.fetch_u8(bus);
+                let addr = self.direct_addr(dp);
+                let mem = bus.read(addr);
+                let v = self.sbc_u8(mem, imm);
+                bus.write(addr, v);
+            }
+
+            // ---------------------------------------------------------
+            // MOV dp,dp — direct-page byte copy. Source first, then
+            // destination, in object code. Does NOT update flags on
+            // real SPC700. Needed by Chrono Trigger / Super Bomberman.
+            // ---------------------------------------------------------
+            0xFA => {
+                let src = self.fetch_u8(bus);
+                let dst = self.fetch_u8(bus);
+                let v = bus.read(self.direct_addr(src));
+                bus.write(self.direct_addr(dst), v);
+            }
+
+            // ---------------------------------------------------------
+            // Bit operations against memory.bit / Carry. The operand
+            // is a 16-bit word: low 13 bits = absolute address, high
+            // 3 bits = bit index. See [`Self::fetch_mem_bit`].
+            // ---------------------------------------------------------
+            0x0A => {
+                // OR1 C, m.b
+                let (addr, b) = self.fetch_mem_bit(bus);
+                let bit_set = (bus.read(addr) >> b) & 1 != 0;
+                let c = self.psw.contains(bit::C);
+                self.psw.set(bit::C, c | bit_set);
+            }
+            0x2A => {
+                // OR1 C, /m.b (inverted source bit)
+                let (addr, b) = self.fetch_mem_bit(bus);
+                let bit_set = (bus.read(addr) >> b) & 1 != 0;
+                let c = self.psw.contains(bit::C);
+                self.psw.set(bit::C, c | !bit_set);
+            }
+            0x4A => {
+                // AND1 C, m.b
+                let (addr, b) = self.fetch_mem_bit(bus);
+                let bit_set = (bus.read(addr) >> b) & 1 != 0;
+                let c = self.psw.contains(bit::C);
+                self.psw.set(bit::C, c & bit_set);
+            }
+            0x6A => {
+                // AND1 C, /m.b
+                let (addr, b) = self.fetch_mem_bit(bus);
+                let bit_set = (bus.read(addr) >> b) & 1 != 0;
+                let c = self.psw.contains(bit::C);
+                self.psw.set(bit::C, c & !bit_set);
+            }
+            0x8A => {
+                // EOR1 C, m.b
+                let (addr, b) = self.fetch_mem_bit(bus);
+                let bit_set = (bus.read(addr) >> b) & 1 != 0;
+                let c = self.psw.contains(bit::C);
+                self.psw.set(bit::C, c ^ bit_set);
+            }
+            0xAA => {
+                // MOV1 C, m.b — load C from bit.
+                let (addr, b) = self.fetch_mem_bit(bus);
+                let bit_set = (bus.read(addr) >> b) & 1 != 0;
+                self.psw.set(bit::C, bit_set);
+            }
+            0xCA => {
+                // MOV1 m.b, C — store C into bit.
+                let (addr, b) = self.fetch_mem_bit(bus);
+                let mem = bus.read(addr);
+                let mask = 1u8 << b;
+                let v = if self.psw.contains(bit::C) {
+                    mem | mask
+                } else {
+                    mem & !mask
+                };
+                bus.write(addr, v);
+            }
+            0xEA => {
+                // NOT1 m.b — toggle a bit in memory.
+                let (addr, b) = self.fetch_mem_bit(bus);
+                let mem = bus.read(addr);
+                bus.write(addr, mem ^ (1u8 << b));
+            }
+
+            // ---------------------------------------------------------
+            // TSET1 / TCLR1 !abs — test-and-set / test-and-clear all
+            // bits selected by A on a memory byte. Both update N/Z
+            // from `A - mem` (without writing the subtraction back).
+            // ---------------------------------------------------------
+            0x0E => {
+                // TSET1 !abs — mem |= A, flags from A - mem (the
+                // value *before* the OR is used for the compare).
+                let addr = self.fetch_u16(bus);
+                let mem = bus.read(addr);
+                // N/Z come from the subtraction A - mem, but C is NOT
+                // updated by TSET1.
+                let diff = self.a.wrapping_sub(mem);
+                self.set_nz(diff);
+                bus.write(addr, mem | self.a);
+            }
+            0x4E => {
+                // TCLR1 !abs — mem &= !A, flags from A - mem.
+                let addr = self.fetch_u16(bus);
+                let mem = bus.read(addr);
+                let diff = self.a.wrapping_sub(mem);
+                self.set_nz(diff);
+                bus.write(addr, mem & !self.a);
+            }
+
+            // ---------------------------------------------------------
+            // BCD adjust — DAA after add, DAS after sub. Both update
+            // C and N/Z and consume one byte (no operand).
+            // ---------------------------------------------------------
+            0xDF => {
+                // DAA — decimal adjust accumulator after addition.
+                if self.psw.contains(bit::C) || self.a > 0x99 {
+                    self.a = self.a.wrapping_add(0x60);
+                    self.psw.insert(bit::C);
+                }
+                if self.psw.contains(bit::H) || (self.a & 0x0F) > 0x09 {
+                    self.a = self.a.wrapping_add(0x06);
+                }
+                let v = self.a;
+                self.set_nz(v);
+            }
+            0xBE => {
+                // DAS — decimal adjust accumulator after subtraction.
+                if !self.psw.contains(bit::C) || self.a > 0x99 {
+                    self.a = self.a.wrapping_sub(0x60);
+                    self.psw.remove(bit::C);
+                }
+                if !self.psw.contains(bit::H) || (self.a & 0x0F) > 0x09 {
+                    self.a = self.a.wrapping_sub(0x06);
+                }
+                let v = self.a;
+                self.set_nz(v);
+            }
+
+            // ---------------------------------------------------------
+            // BRK / RETI — software interrupt and return.
+            // BRK pushes PC and PSW, sets B, clears I, then jumps
+            // through the vector at `$FFDE`. RETI pops PSW then PC.
+            // ---------------------------------------------------------
+            0x0F => {
+                // BRK
+                let return_pc = self.pc;
+                self.push_u8(bus, (return_pc >> 8) as u8);
+                self.push_u8(bus, return_pc as u8);
+                let p = self.psw.0;
+                self.push_u8(bus, p);
+                self.psw.insert(bit::B);
+                self.psw.remove(bit::I);
+                let lo = bus.read(0xFFDE);
+                let hi = bus.read(0xFFDF);
+                self.pc = u16::from(lo) | (u16::from(hi) << 8);
+            }
+            0x7F => {
+                // RETI
+                self.psw.0 = self.pop_u8(bus);
+                let lo = self.pop_u8(bus);
+                let hi = self.pop_u8(bus);
+                self.pc = u16::from(lo) | (u16::from(hi) << 8);
+            }
+
         }
     }
 
@@ -1533,6 +1778,19 @@ impl Spc700 {
         let hi = bus.read(self.direct_addr(dpx.wrapping_add(1)));
         let target = u16::from(lo) | (u16::from(hi) << 8);
         bus.read(target)
+    }
+
+    /// Fetch the 2-byte `m.b` operand used by bit-on-memory ops
+    /// (`MOV1 C, m.b`, `AND1 C, m.b`, etc.).
+    ///
+    /// The operand is laid out little-endian: low 13 bits give the
+    /// absolute byte address (0..=$1FFF), top 3 bits the bit index
+    /// within that byte. Returns `(address, bit_index)`.
+    fn fetch_mem_bit<B: SpcBus>(&mut self, bus: &mut B) -> (u16, u8) {
+        let word = self.fetch_u16(bus);
+        let addr = word & 0x1FFF;
+        let bit = ((word >> 13) & 0x07) as u8;
+        (addr, bit)
     }
 
     /// Fetch a `dp` byte, resolve `[dp]` as a 16-bit pointer, then
@@ -2089,18 +2347,339 @@ mod tests {
         );
     }
 
+    // (The "unimplemented-opcode safety net" test was retired when
+    // SPC700 reached full 256/256 opcode coverage; the dispatch is
+    // now exhaustive and the catch-all arm was removed in favour of
+    // compile-time exhaustiveness checking.)
+
+    // -------------------------------------------------------------------
+    // P3.SPC.X batch — fill out the remaining 39 opcodes that real-world
+    // SNES audio drivers (DKC, Chrono Trigger, Secret of Mana, Super
+    // Bomberman, etc.) actually use.
+    // -------------------------------------------------------------------
+
     #[test]
-    fn unimplemented_opcode_records_and_stops() {
-        // $EA (NOT1 abs.bit, not yet implemented) — running it
-        // should NOT panic and instead leave the CPU stopped with
-        // the opcode captured.
-        let (mut cpu, mut bus) = run(&[0xEA]);
+    fn adc_dp_imm_adds_immediate_to_direct_page() {
+        // $98 — needed by DKC and Secret of Mana.
+        // $10 ← 5 ; CLRC ; ADC $10,#3 → $10 == 8.
+        let mut cpu = Spc700::new();
+        let mut bus = RamBus::new();
+        bus.poke(0xFFFE, 0x00);
+        bus.poke(0xFFFF, 0x02);
+        bus.poke_slice(0x0200, &[0x8F, 0x05, 0x10, 0x60, 0x98, 0x03, 0x10]);
+        cpu.reset(&mut bus);
+        cpu.step(&mut bus); // MOV $10,#$05
+        cpu.step(&mut bus); // CLRC
+        cpu.step(&mut bus); // ADC $10,#$03
+        assert_eq!(bus.peek(0x0010), 0x08);
+    }
+
+    #[test]
+    fn sbc_dp_imm_subtracts_immediate_from_direct_page() {
+        // $B8.
+        let mut cpu = Spc700::new();
+        let mut bus = RamBus::new();
+        bus.poke(0xFFFE, 0x00);
+        bus.poke(0xFFFF, 0x02);
+        // $10 ← $20 ; SETC (no borrow) ; SBC $10,#$05 → $1B.
+        bus.poke_slice(0x0200, &[0x8F, 0x20, 0x10, 0x80, 0xB8, 0x05, 0x10]);
+        cpu.reset(&mut bus);
         cpu.step(&mut bus);
-        assert!(cpu.stopped);
-        assert_eq!(cpu.unimplemented_opcode, Some((0xEA, 0x0200)));
-        // PC rewinds so adding the opcode and re-stepping picks it up
-        // again from the same spot.
-        assert_eq!(cpu.pc, 0x0200);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        assert_eq!(bus.peek(0x0010), 0x1B);
+    }
+
+    #[test]
+    fn mov_dp_dp_copies_without_flags() {
+        // $FA — needed by Chrono Trigger and Super Bomberman.
+        // Seed $10=$AB and $20=$00; MOV $20,$10 should leave $20=$AB.
+        // Object code order is (src=$10, dst=$20).
+        let mut cpu = Spc700::new();
+        let mut bus = RamBus::new();
+        bus.poke(0xFFFE, 0x00);
+        bus.poke(0xFFFF, 0x02);
+        bus.poke(0x0010, 0xAB);
+        bus.poke(0x0020, 0x00);
+        bus.poke_slice(0x0200, &[0xFA, 0x10, 0x20]);
+        cpu.reset(&mut bus);
+        // Pre-set a known flag pattern (without `P` so direct page
+        // stays at $00xx); confirm MOV dp,dp doesn't touch it.
+        cpu.psw.0 = 0x85; // N + I + C, no P
+        cpu.step(&mut bus);
+        assert_eq!(bus.peek(0x0020), 0xAB);
+        assert_eq!(cpu.psw.0, 0x85, "MOV dp,dp must not touch flags");
+    }
+
+    #[test]
+    fn tcall_pushes_return_pc_and_jumps_via_vector() {
+        // TCALL 5 ($51) reads vector at $FFDE - 2*5 = $FFD4. Place a
+        // target there and confirm the jump.
+        let mut cpu = Spc700::new();
+        let mut bus = RamBus::new();
+        bus.poke(0xFFFE, 0x00);
+        bus.poke(0xFFFF, 0x02);
+        bus.poke(0xFFD4, 0x80);
+        bus.poke(0xFFD5, 0x03); // vector → $0380
+        bus.poke_slice(0x0200, &[0x51]); // TCALL 5
+        cpu.reset(&mut bus);
+        cpu.sp = 0xFF;
+        cpu.step(&mut bus);
+        assert_eq!(cpu.pc, 0x0380);
+        // Return PC pushed = $0201 (after the 1-byte TCALL).
+        assert_eq!(bus.peek(0x01FF), 0x02);
+        assert_eq!(bus.peek(0x01FE), 0x01);
+        assert_eq!(cpu.sp, 0xFD);
+    }
+
+    #[test]
+    fn tcall_zero_uses_vector_at_ffde() {
+        // TCALL 0 ($01) — boundary check, reads $FFDE itself.
+        let mut cpu = Spc700::new();
+        let mut bus = RamBus::new();
+        bus.poke(0xFFFE, 0x00);
+        bus.poke(0xFFFF, 0x02);
+        bus.poke(0xFFDE, 0x77);
+        bus.poke(0xFFDF, 0x12);
+        bus.poke_slice(0x0200, &[0x01]);
+        cpu.reset(&mut bus);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.pc, 0x1277);
+    }
+
+    #[test]
+    fn tcall_fifteen_uses_vector_at_ffc0() {
+        // TCALL 15 ($F1) — opposite boundary.
+        let mut cpu = Spc700::new();
+        let mut bus = RamBus::new();
+        bus.poke(0xFFFE, 0x00);
+        bus.poke(0xFFFF, 0x02);
+        bus.poke(0xFFC0, 0x55);
+        bus.poke(0xFFC1, 0xAA);
+        bus.poke_slice(0x0200, &[0xF1]);
+        cpu.reset(&mut bus);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.pc, 0xAA55);
+    }
+
+    #[test]
+    fn or_x_y_combines_two_dp_bytes() {
+        // $19 OR (X),(Y) — needed by Chrono Trigger sound driver.
+        // X=$10, Y=$20 ; $10=$0F, $20=$F0 ; OR (X),(Y) → $10 = $FF.
+        let mut cpu = Spc700::new();
+        let mut bus = RamBus::new();
+        bus.poke(0xFFFE, 0x00);
+        bus.poke(0xFFFF, 0x02);
+        bus.poke(0x0010, 0x0F);
+        bus.poke(0x0020, 0xF0);
+        bus.poke_slice(0x0200, &[0xCD, 0x10, 0x8D, 0x20, 0x19]);
+        cpu.reset(&mut bus);
+        cpu.step(&mut bus); // MOV X,#$10
+        cpu.step(&mut bus); // MOV Y,#$20
+        cpu.step(&mut bus); // OR (X),(Y)
+        assert_eq!(bus.peek(0x0010), 0xFF);
+        assert!(cpu.psw.contains(bit::N));
+    }
+
+    #[test]
+    fn cmp_x_y_sets_zero_when_equal() {
+        // $79 CMP (X),(Y) — flag-only variant.
+        let mut cpu = Spc700::new();
+        let mut bus = RamBus::new();
+        bus.poke(0xFFFE, 0x00);
+        bus.poke(0xFFFF, 0x02);
+        bus.poke(0x0010, 0x42);
+        bus.poke(0x0020, 0x42);
+        bus.poke_slice(0x0200, &[0xCD, 0x10, 0x8D, 0x20, 0x79]);
+        cpu.reset(&mut bus);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus); // CMP (X),(Y)
+        assert!(cpu.psw.contains(bit::Z));
+        assert!(cpu.psw.contains(bit::C));
+        // The memory was NOT written.
+        assert_eq!(bus.peek(0x0010), 0x42);
+    }
+
+    #[test]
+    fn mov1_c_mem_bit_loads_bit_into_c() {
+        // $AA MOV1 C, m.b — operand $A012 = address $0012, bit 5.
+        let mut cpu = Spc700::new();
+        let mut bus = RamBus::new();
+        bus.poke(0xFFFE, 0x00);
+        bus.poke(0xFFFF, 0x02);
+        bus.poke(0x0012, 0b0010_0000); // bit 5 set
+        bus.poke_slice(0x0200, &[0xAA, 0x12, 0xA0]);
+        cpu.reset(&mut bus);
+        cpu.step(&mut bus);
+        assert!(cpu.psw.contains(bit::C));
+    }
+
+    #[test]
+    fn mov1_mem_bit_c_stores_c_into_bit() {
+        // $CA MOV1 m.b, C — store. Operand $4012 = address $0012, bit 2.
+        let mut cpu = Spc700::new();
+        let mut bus = RamBus::new();
+        bus.poke(0xFFFE, 0x00);
+        bus.poke(0xFFFF, 0x02);
+        bus.poke(0x0012, 0b1111_0000); // bit 2 clear initially
+        bus.poke_slice(0x0200, &[0x80, 0xCA, 0x12, 0x40]); // SETC then MOV1
+        cpu.reset(&mut bus);
+        cpu.step(&mut bus); // SETC
+        cpu.step(&mut bus); // MOV1 $0012.bit2, C
+        assert_eq!(bus.peek(0x0012), 0b1111_0100);
+    }
+
+    #[test]
+    fn not1_mem_bit_toggles_bit_in_memory() {
+        // $EA NOT1 m.b — toggle bit 7 of $0015.
+        let mut cpu = Spc700::new();
+        let mut bus = RamBus::new();
+        bus.poke(0xFFFE, 0x00);
+        bus.poke(0xFFFF, 0x02);
+        bus.poke(0x0015, 0b0000_1111);
+        // Bit 7, address $0015. Operand word = (7 << 13) | $0015 = $E015.
+        bus.poke_slice(0x0200, &[0xEA, 0x15, 0xE0]);
+        cpu.reset(&mut bus);
+        cpu.step(&mut bus);
+        assert_eq!(bus.peek(0x0015), 0b1000_1111);
+        // Run it again — bit 7 toggles back.
+        bus.poke_slice(0x0203, &[0xEA, 0x15, 0xE0]);
+        cpu.step(&mut bus);
+        assert_eq!(bus.peek(0x0015), 0b0000_1111);
+    }
+
+    #[test]
+    fn tset1_abs_or_with_a_and_sets_flags_from_compare() {
+        // $0E. A=$F0, mem at $1234 = $0F. TSET1 sets mem |= A = $FF,
+        // and N/Z come from A - mem (= $F0 - $0F = $E1; N set, Z clear).
+        let mut cpu = Spc700::new();
+        let mut bus = RamBus::new();
+        bus.poke(0xFFFE, 0x00);
+        bus.poke(0xFFFF, 0x02);
+        bus.poke(0x1234, 0x0F);
+        bus.poke_slice(0x0200, &[0xE8, 0xF0, 0x0E, 0x34, 0x12]);
+        cpu.reset(&mut bus);
+        cpu.step(&mut bus); // MOV A,#$F0
+        cpu.step(&mut bus); // TSET1 !$1234
+        assert_eq!(bus.peek(0x1234), 0xFF);
+        assert!(cpu.psw.contains(bit::N));
+        assert!(!cpu.psw.contains(bit::Z));
+    }
+
+    #[test]
+    fn tclr1_abs_and_with_not_a() {
+        // $4E. A=$0F, mem=$FF. TCLR1 sets mem &= !A = $F0, and N/Z
+        // from A - mem = $0F - $FF = $10 (N clear, Z clear).
+        let mut cpu = Spc700::new();
+        let mut bus = RamBus::new();
+        bus.poke(0xFFFE, 0x00);
+        bus.poke(0xFFFF, 0x02);
+        bus.poke(0x1234, 0xFF);
+        bus.poke_slice(0x0200, &[0xE8, 0x0F, 0x4E, 0x34, 0x12]);
+        cpu.reset(&mut bus);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        assert_eq!(bus.peek(0x1234), 0xF0);
+    }
+
+    #[test]
+    fn daa_after_bcd_add() {
+        // 0x19 + 0x28 = 0x41 in binary; DAA should turn it into 0x47.
+        let mut cpu = Spc700::new();
+        let mut bus = RamBus::new();
+        bus.poke(0xFFFE, 0x00);
+        bus.poke(0xFFFF, 0x02);
+        bus.poke_slice(0x0200, &[0xE8, 0x19, 0x60, 0x88, 0x28, 0xDF]);
+        cpu.reset(&mut bus);
+        cpu.step(&mut bus); // MOV A,#$19
+        cpu.step(&mut bus); // CLRC
+        cpu.step(&mut bus); // ADC A,#$28 → $41 (with H set since 9+8=17)
+        cpu.step(&mut bus); // DAA → $47
+        assert_eq!(cpu.a, 0x47);
+    }
+
+    #[test]
+    fn das_after_bcd_sub() {
+        // 0x50 - 0x25 = 0x2B binary; DAS adjusts to 0x25.
+        let mut cpu = Spc700::new();
+        let mut bus = RamBus::new();
+        bus.poke(0xFFFE, 0x00);
+        bus.poke(0xFFFF, 0x02);
+        bus.poke_slice(0x0200, &[0xE8, 0x50, 0x80, 0xA8, 0x25, 0xBE]);
+        cpu.reset(&mut bus);
+        cpu.step(&mut bus); // MOV A,#$50
+        cpu.step(&mut bus); // SETC (no borrow)
+        cpu.step(&mut bus); // SBC A,#$25 → $2B (H clear: 0-5 borrows)
+        cpu.step(&mut bus); // DAS → $25
+        assert_eq!(cpu.a, 0x25);
+    }
+
+    #[test]
+    fn reti_pops_psw_then_pc() {
+        // Push PSW=$AB and PC=$1234, then RETI.
+        let mut cpu = Spc700::new();
+        let mut bus = RamBus::new();
+        bus.poke(0xFFFE, 0x00);
+        bus.poke(0xFFFF, 0x02);
+        bus.poke_slice(0x0200, &[0x7F]);
+        cpu.reset(&mut bus);
+        cpu.sp = 0xFC;
+        // Stack grows downward; RETI pops in order PSW, lo, hi.
+        bus.poke(0x01FD, 0xAB); // PSW
+        bus.poke(0x01FE, 0x34); // PC lo
+        bus.poke(0x01FF, 0x12); // PC hi
+        cpu.step(&mut bus);
+        assert_eq!(cpu.pc, 0x1234);
+        assert_eq!(cpu.psw.0, 0xAB);
+        assert_eq!(cpu.sp, 0xFF);
+    }
+
+    #[test]
+    fn brk_pushes_state_and_jumps_via_ffde() {
+        // BRK ($0F) — push PC then PSW, jump through $FFDE/$FFDF.
+        let mut cpu = Spc700::new();
+        let mut bus = RamBus::new();
+        bus.poke(0xFFFE, 0x00);
+        bus.poke(0xFFFF, 0x02);
+        bus.poke(0xFFDE, 0x77);
+        bus.poke(0xFFDF, 0x12);
+        bus.poke_slice(0x0200, &[0x0F]);
+        cpu.reset(&mut bus);
+        cpu.sp = 0xFF;
+        cpu.psw.0 = 0x42;
+        cpu.step(&mut bus);
+        assert_eq!(cpu.pc, 0x1277);
+        // Stack: $01FF=PC hi, $01FE=PC lo, $01FD=PSW.
+        assert_eq!(bus.peek(0x01FF), 0x02);
+        assert_eq!(bus.peek(0x01FE), 0x01);
+        assert_eq!(bus.peek(0x01FD), 0x42);
+        assert!(cpu.psw.contains(bit::B));
+        assert!(!cpu.psw.contains(bit::I));
+    }
+
+    #[test]
+    fn full_256_opcode_coverage_compile_check() {
+        // Compile-time/structural check: the `execute` match no
+        // longer has a catch-all, which means the compiler must see
+        // arms for all 256 byte values. If a future change drops one,
+        // this file won't build — that's the regression we want.
+        // The runtime side of the check just exercises the formerly-
+        // missing opcodes to make sure they don't panic.
+        let mut cpu = Spc700::new();
+        let mut bus = RamBus::new();
+        for op in [0x01u8, 0x0A, 0x0E, 0x0F, 0x19, 0x39, 0x4A, 0x4E, 0x59, 0x6A, 0x79, 0x7F,
+                   0x8A, 0x98, 0x99, 0xAA, 0xB8, 0xB9, 0xBE, 0xCA, 0xDF, 0xEA, 0xF1, 0xFA]
+        {
+            bus.poke(0xFFFE, 0x00);
+            bus.poke(0xFFFF, 0x02);
+            bus.poke_slice(0x0200, &[op, 0x00, 0x00]);
+            cpu.reset(&mut bus);
+            cpu.step(&mut bus);
+            // No assertion about state — only that no panic + the CPU
+            // didn't get stuck on `unimplemented_opcode`.
+            assert!(cpu.unimplemented_opcode.is_none(), "opcode ${op:02X}");
+        }
     }
 
     /// After the kick wait loop, drop $CC into $F4 (= what the main
