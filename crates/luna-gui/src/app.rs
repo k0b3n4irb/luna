@@ -225,10 +225,7 @@ impl LunaApp {
         let Some(snes) = self.snes.as_ref() else {
             return;
         };
-        if !self.force_display
-            && snes.ppu.inidisp & 0x80 != 0
-            && self.framebuffer.is_some()
-        {
+        if !self.force_display && snes.ppu.inidisp & 0x80 != 0 && self.framebuffer.is_some() {
             // Forced blank — preserve the last non-blanked texture so
             // the screen doesn't flicker every NMI handler tick.
             return;
