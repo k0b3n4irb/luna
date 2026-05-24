@@ -253,7 +253,40 @@ impl Snes {
             // ~3 scanlines after VBlank entry the auto-read sequence
             // is done. Drop HVBJOY.0 so polling games see ready.
             self.cpu_regs.clear_joypad_busy();
-        } else if self.ppu_line >= NTSC_SCANLINES_PER_FRAME {
+        }
+        // H- / V-counter IRQ. NMITIMEN bits 5:4 select the trigger:
+        //   00 = disabled
+        //   01 = H-counter match (every scanline at H = HTIME)
+        //   10 = V-counter match (line N == VTIME, H == 0)
+        //   11 = H AND V match (line N == VTIME AND H == HTIME)
+        //
+        // Our scheduler only fires events at scanline boundaries, so
+        // H-counter-precise IRQ timing isn't dot-accurate yet. The
+        // tracking we do model:
+        //   * V-only (mode 10): raise IRQ when we enter `vtime`.
+        //   * H+V (mode 11):   same as V-only here — at scanline
+        //                       boundary the H-counter is implicitly
+        //                       0; if HTIME is also 0 the match is
+        //                       exact, otherwise we're a few mclk
+        //                       off. Enough for games that just
+        //                       want a per-scanline raster IRQ.
+        //   * H-only (mode 01): fire on every scanline transition.
+        //                       Most games use this with HTIME = 0
+        //                       which lands on the canonical
+        //                       scanline-start raster point.
+        let irq_mode = (self.cpu_regs.nmitimen >> 4) & 0x03;
+        let fire_irq = match irq_mode {
+            0b00 => false,
+            0b01 => true,
+            0b10 => self.ppu_line == self.cpu_regs.vtime,
+            0b11 => self.ppu_line == self.cpu_regs.vtime && self.cpu_regs.htime == 0,
+            _ => false,
+        };
+        if fire_irq {
+            self.cpu_regs.irq_flag = true;
+            self.cpu.trigger_irq();
+        }
+        if self.ppu_line >= NTSC_SCANLINES_PER_FRAME {
             // Frame wrap: back to line 0, clear VBlank bit, and re-
             // initialise HDMA tables for the new frame.
             self.ppu_line = 0;

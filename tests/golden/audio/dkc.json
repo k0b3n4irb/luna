@@ -2,30 +2,30 @@
   "rom": "Donkey Kong Country (U) (V1.2) [!].smc",
   "insns": 80000000,
   "note": "past Rareware logo, ~36 s of audio with echo + voices 4-6",
-  "duration_s": 35.807,
+  "duration_s": 35.822,
   "stats": {
-    "peak_pos": 16735,
-    "peak_neg": -15086,
-    "rms": 767.81,
-    "mean_abs": 241.3,
-    "non_zero": 0.5035
+    "peak_pos": 17098,
+    "peak_neg": -14785,
+    "rms": 767.7,
+    "mean_abs": 241.18,
+    "non_zero": 0.5037
   },
   "spectrum_peaks": [
     {
       "hz": 1164.1,
-      "mag_db": 116.2
+      "mag_db": 116.8
     },
     {
       "hz": 1156.2,
-      "mag_db": 115.9
-    },
-    {
-      "hz": 1148.4,
-      "mag_db": 113.5
+      "mag_db": 116.2
     },
     {
       "hz": 1171.9,
-      "mag_db": 113.5
+      "mag_db": 113.9
+    },
+    {
+      "hz": 1148.4,
+      "mag_db": 113.6
     },
     {
       "hz": 578.1,
@@ -33,23 +33,23 @@
     },
     {
       "hz": 570.3,
-      "mag_db": 112.1
+      "mag_db": 112.3
     },
     {
       "hz": 1140.6,
-      "mag_db": 111.3
-    },
-    {
-      "hz": 585.9,
-      "mag_db": 110.3
+      "mag_db": 111.4
     },
     {
       "hz": 148.4,
-      "mag_db": 109.7
+      "mag_db": 110.5
+    },
+    {
+      "hz": 585.9,
+      "mag_db": 110.4
     },
     {
       "hz": 156.2,
-      "mag_db": 109.6
+      "mag_db": 110.3
     }
   ]
 }

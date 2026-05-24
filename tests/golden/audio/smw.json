@@ -2,54 +2,54 @@
   "rom": "Super Mario World (U) [!].smc",
   "insns": 10000000,
   "note": "title screen, ~10 s of audio (no echo on this driver)",
-  "duration_s": 9.821,
+  "duration_s": 9.913,
   "stats": {
-    "peak_pos": 8297,
-    "peak_neg": -7613,
-    "rms": 460.22,
-    "mean_abs": 165.36,
-    "non_zero": 0.3966
+    "peak_pos": 10560,
+    "peak_neg": -10706,
+    "rms": 527.9,
+    "mean_abs": 178.52,
+    "non_zero": 0.3995
   },
   "spectrum_peaks": [
     {
       "hz": 1976.6,
-      "mag_db": 115.0
-    },
-    {
-      "hz": 1984.4,
-      "mag_db": 114.9
-    },
-    {
-      "hz": 1968.8,
-      "mag_db": 114.7
-    },
-    {
-      "hz": 1992.2,
-      "mag_db": 114.2
-    },
-    {
-      "hz": 1960.9,
-      "mag_db": 113.9
-    },
-    {
-      "hz": 2000.0,
-      "mag_db": 113.2
-    },
-    {
-      "hz": 1953.1,
-      "mag_db": 112.8
-    },
-    {
-      "hz": 2007.8,
       "mag_db": 112.0
     },
     {
+      "hz": 1984.4,
+      "mag_db": 111.9
+    },
+    {
+      "hz": 1968.8,
+      "mag_db": 111.6
+    },
+    {
+      "hz": 1992.2,
+      "mag_db": 111.1
+    },
+    {
+      "hz": 1960.9,
+      "mag_db": 110.6
+    },
+    {
+      "hz": 2000.0,
+      "mag_db": 109.9
+    },
+    {
+      "hz": 1953.1,
+      "mag_db": 109.5
+    },
+    {
+      "hz": 2007.8,
+      "mag_db": 108.5
+    },
+    {
       "hz": 1945.3,
-      "mag_db": 111.7
+      "mag_db": 108.1
     },
     {
       "hz": 1937.5,
-      "mag_db": 111.0
+      "mag_db": 107.4
     }
   ]
 }
