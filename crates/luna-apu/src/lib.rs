@@ -128,6 +128,15 @@ pub struct Apu {
     /// it through OUTX (`$x9`) so the music engine sees a bouncing
     /// signal rather than a static 0.
     pub voice_position: [u32; 8],
+    /// Per-voice current BRR block start address in ARAM. Set on
+    /// KON from the sample directory at `DIR + SRCN*4`; advances by
+    /// 9 bytes each time a block of 16 samples is consumed; jumps
+    /// to the loop address from the directory when an end-of-sample
+    /// block has the loop bit set.
+    pub voice_block_addr: [u16; 8],
+    /// Position within the current BRR block (0..15). When it wraps,
+    /// the block header is re-read to handle end / loop bits.
+    pub voice_block_sample: [u8; 8],
     /// SPC cycles owed to the audio-sample tick (32-cycle base
     /// clock). Drives both ADSR rate progression and the per-voice
     /// position counter.
@@ -185,6 +194,8 @@ impl Apu {
             voice_phase: [AdsrPhase::Off; 8],
             voice_envelope: [0; 8],
             voice_position: [0; 8],
+            voice_block_addr: [0; 8],
+            voice_block_sample: [0; 8],
             sample_tick_deficit: 0,
             timer_reload: [0; 3],
             timer_output: [0; 3],
@@ -206,6 +217,8 @@ impl Apu {
             voice_phase: &mut apu.voice_phase,
             voice_envelope: &mut apu.voice_envelope,
             voice_position: &mut apu.voice_position,
+            voice_block_addr: &mut apu.voice_block_addr,
+            voice_block_sample: &mut apu.voice_block_sample,
             timer_reload: &mut apu.timer_reload,
             timer_output: &mut apu.timer_output,
             timer_internal: &mut apu.timer_internal,
@@ -282,6 +295,7 @@ impl Apu {
             self.voice_age[v] = self.voice_age[v].saturating_add(SPC_CYCLES_PER_SAMPLE);
             if self.voice_active[v] {
                 self.voice_position[v] = self.voice_position[v].wrapping_add(1);
+                self.advance_brr_block(v);
             }
             self.advance_voice_envelope(v);
             // When the envelope hits zero, the voice is done. Latch
@@ -306,6 +320,47 @@ impl Apu {
                 self.voice_active[v] = false;
                 self.dsp_regs[0x7C] |= 1 << v;
             }
+        }
+    }
+
+    /// Advance voice `v` by one sample within its current BRR block.
+    /// When we cross a 16-sample boundary, we read the *current*
+    /// block's header byte (in ARAM at `voice_block_addr[v]`),
+    /// react to its end/loop bits, and either jump to the next
+    /// block (`addr + 9`), loop back via the directory, or end the
+    /// sample (latch ENDX, deactivate or move to Release).
+    fn advance_brr_block(&mut self, v: usize) {
+        self.voice_block_sample[v] = self.voice_block_sample[v].wrapping_add(1);
+        if self.voice_block_sample[v] < 16 {
+            return;
+        }
+        self.voice_block_sample[v] = 0;
+        let header = self.aram[self.voice_block_addr[v] as usize];
+        let end = header & 0x01 != 0;
+        let loop_bit = header & 0x02 != 0;
+        if end {
+            // Latch ENDX every time we cross an end block.
+            self.dsp_regs[0x7C] |= 1 << v;
+            if loop_bit {
+                // Jump to the loop address from the sample directory.
+                let dir_base = u16::from(self.dsp_regs[0x5D]) << 8;
+                let srcn = self.dsp_regs[0x04 + v * 0x10];
+                let entry = dir_base.wrapping_add(u16::from(srcn).wrapping_mul(4));
+                let loop_lo = self.aram[entry.wrapping_add(2) as usize];
+                let loop_hi = self.aram[entry.wrapping_add(3) as usize];
+                self.voice_block_addr[v] = u16::from(loop_lo) | (u16::from(loop_hi) << 8);
+            } else {
+                // No loop → voice ends. ADSR path moves to Release
+                // so the envelope fades; gain mode deactivates.
+                if self.voice_phase[v] == AdsrPhase::Off {
+                    self.voice_active[v] = false;
+                } else {
+                    self.voice_phase[v] = AdsrPhase::Release;
+                }
+            }
+        } else {
+            // Plain block: move to the next 9-byte BRR block in ARAM.
+            self.voice_block_addr[v] = self.voice_block_addr[v].wrapping_add(9);
         }
     }
 
@@ -439,6 +494,8 @@ impl Apu {
                 voice_phase: &mut self.voice_phase,
                 voice_envelope: &mut self.voice_envelope,
                 voice_position: &mut self.voice_position,
+                voice_block_addr: &mut self.voice_block_addr,
+                voice_block_sample: &mut self.voice_block_sample,
                 timer_reload: &mut self.timer_reload,
                 timer_output: &mut self.timer_output,
                 timer_internal: &mut self.timer_internal,
@@ -468,6 +525,8 @@ struct ApuBusView<'a> {
     voice_phase: &'a mut [AdsrPhase; 8],
     voice_envelope: &'a mut [u16; 8],
     voice_position: &'a mut [u32; 8],
+    voice_block_addr: &'a mut [u16; 8],
+    voice_block_sample: &'a mut [u8; 8],
     timer_reload: &'a mut [u8; 3],
     timer_output: &'a mut [u8; 3],
     timer_internal: &'a mut [u16; 3],
@@ -555,11 +614,12 @@ impl SpcBus for ApuBusView<'_> {
                 self.dsp_regs[idx] = value;
                 match idx {
                     0x4C => {
-                        // KON: each `1` bit in `value` keys the
-                        // corresponding voice ON. The envelope
-                        // starts at 0 and enters Attack phase if
-                        // ADSR is enabled; in gain mode the legacy
-                        // linear path runs (AdsrPhase::Off).
+                        // KON: each `1` bit keys the matching voice
+                        // ON. We also walk the BRR sample directory
+                        // to find that voice's starting block, so
+                        // tick_one_sample can advance through real
+                        // BRR data and latch ENDX correctly at the
+                        // sample's end / loop boundaries.
                         for v in 0..8 {
                             if value & (1 << v) != 0 {
                                 self.voice_active[v] = true;
@@ -572,6 +632,18 @@ impl SpcBus for ApuBusView<'_> {
                                 } else {
                                     AdsrPhase::Off
                                 };
+                                // Sample directory at `DIR << 8`.
+                                // Each entry: 4 bytes — start_lo,
+                                // start_hi, loop_lo, loop_hi. SRCN
+                                // selects the entry index.
+                                let dir_base = u16::from(self.dsp_regs[0x5D]) << 8;
+                                let srcn = self.dsp_regs[0x04 + v * 0x10];
+                                let entry = dir_base.wrapping_add(u16::from(srcn).wrapping_mul(4));
+                                let start_lo = self.aram[entry as usize];
+                                let start_hi = self.aram[entry.wrapping_add(1) as usize];
+                                self.voice_block_addr[v] =
+                                    u16::from(start_lo) | (u16::from(start_hi) << 8);
+                                self.voice_block_sample[v] = 0;
                                 self.dsp_regs[0x7C] &= !(1 << v); // clear stale ENDX
                             }
                         }
@@ -667,6 +739,8 @@ mod tests {
                 voice_phase: &mut apu.voice_phase,
                 voice_envelope: &mut apu.voice_envelope,
                 voice_position: &mut apu.voice_position,
+                voice_block_addr: &mut apu.voice_block_addr,
+                voice_block_sample: &mut apu.voice_block_sample,
                 timer_reload: &mut apu.timer_reload,
                 timer_output: &mut apu.timer_output,
                 timer_internal: &mut apu.timer_internal,
@@ -700,6 +774,8 @@ mod tests {
                 voice_phase: &mut apu.voice_phase,
                 voice_envelope: &mut apu.voice_envelope,
                 voice_position: &mut apu.voice_position,
+                voice_block_addr: &mut apu.voice_block_addr,
+                voice_block_sample: &mut apu.voice_block_sample,
                 timer_reload: &mut apu.timer_reload,
                 timer_output: &mut apu.timer_output,
                 timer_internal: &mut apu.timer_internal,
@@ -714,6 +790,77 @@ mod tests {
                 "second read sees 0 (real HW: read clears ENDX)"
             );
         }
+    }
+
+    #[test]
+    fn brr_block_advance_lands_on_end_bit_and_loops() {
+        // Build a tiny "sample": directory at $0100, sample at $0200
+        // with the first block having end + loop set, loop address
+        // pointing back at itself. KON voice 0, run enough samples
+        // to cross the 16-sample boundary, then verify ENDX was
+        // latched and the voice still plays (looping).
+        let mut apu = Apu::new();
+        // ARAM directory entry 0 at DIR << 8 = $0100:
+        //   $0100/$0101 = sample start = $0200
+        //   $0102/$0103 = loop start   = $0200
+        apu.aram[0x0100] = 0x00;
+        apu.aram[0x0101] = 0x02;
+        apu.aram[0x0102] = 0x00;
+        apu.aram[0x0103] = 0x02;
+        // Sample at $0200: header byte $03 = end + loop bits, no
+        // range, no filter. Body (8 bytes of zero) doesn't matter
+        // since we don't decode samples.
+        apu.aram[0x0200] = 0x03;
+
+        // Wire DSP registers: DIR ($5D) = 1 (page $0100); SRCN of
+        // voice 0 ($04) = 0 → uses directory entry 0; ADSR enabled
+        // so the voice stays alive through Release rather than
+        // dying via the age-based timeout.
+        {
+            let mut bus = ApuBusView {
+                aram: &mut apu.aram,
+                to_spc_ports: &apu.to_spc_ports,
+                to_cpu_ports: &mut apu.to_cpu_ports,
+                control: &mut apu.control,
+                dsp_index: &mut apu.dsp_index,
+                dsp_regs: &mut apu.dsp_regs,
+                voice_active: &mut apu.voice_active,
+                voice_age: &mut apu.voice_age,
+                voice_phase: &mut apu.voice_phase,
+                voice_envelope: &mut apu.voice_envelope,
+                voice_position: &mut apu.voice_position,
+                voice_block_addr: &mut apu.voice_block_addr,
+                voice_block_sample: &mut apu.voice_block_sample,
+                timer_reload: &mut apu.timer_reload,
+                timer_output: &mut apu.timer_output,
+                timer_internal: &mut apu.timer_internal,
+                timer_enabled: &mut apu.timer_enabled,
+            };
+            // DIR = 1 (sample dir at $0100).
+            bus.write(0x00F2, 0x5D);
+            bus.write(0x00F3, 0x01);
+            // Voice 0 ADSR1 = $80 (ADSR enabled, attack 0 = stays
+            // near 0 envelope so the voice doesn't immediately end
+            // via envelope-to-zero).
+            bus.write(0x00F2, 0x05);
+            bus.write(0x00F3, 0x8F);
+            // Voice 0 SRCN = 0.
+            bus.write(0x00F2, 0x04);
+            bus.write(0x00F3, 0x00);
+            // KON voice 0.
+            bus.write(0x00F2, 0x4C);
+            bus.write(0x00F3, 0x01);
+        }
+        // Voice now points at sample $0200.
+        assert_eq!(apu.voice_block_addr[0], 0x0200);
+        assert_eq!(apu.voice_block_sample[0], 0);
+
+        // Run 16 samples — exactly one block boundary. Header has
+        // end + loop, so ENDX bit 0 should fire and block_addr
+        // should jump to loop_addr = $0200.
+        apu.tick_voices(SPC_CYCLES_PER_SAMPLE * 16);
+        assert!(apu.dsp_regs[0x7C] & 0x01 != 0, "ENDX bit 0 should be set");
+        assert_eq!(apu.voice_block_addr[0], 0x0200, "loop back to sample start");
     }
 
     #[test]
@@ -736,6 +883,8 @@ mod tests {
                 voice_phase: &mut apu.voice_phase,
                 voice_envelope: &mut apu.voice_envelope,
                 voice_position: &mut apu.voice_position,
+                voice_block_addr: &mut apu.voice_block_addr,
+                voice_block_sample: &mut apu.voice_block_sample,
                 timer_reload: &mut apu.timer_reload,
                 timer_output: &mut apu.timer_output,
                 timer_internal: &mut apu.timer_internal,
@@ -780,6 +929,8 @@ mod tests {
             voice_phase: &mut apu.voice_phase,
             voice_envelope: &mut apu.voice_envelope,
             voice_position: &mut apu.voice_position,
+            voice_block_addr: &mut apu.voice_block_addr,
+            voice_block_sample: &mut apu.voice_block_sample,
             timer_reload: &mut apu.timer_reload,
             timer_output: &mut apu.timer_output,
             timer_internal: &mut apu.timer_internal,
@@ -860,6 +1011,8 @@ mod tests {
                 voice_phase: &mut apu.voice_phase,
                 voice_envelope: &mut apu.voice_envelope,
                 voice_position: &mut apu.voice_position,
+                voice_block_addr: &mut apu.voice_block_addr,
+                voice_block_sample: &mut apu.voice_block_sample,
                 timer_reload: &mut apu.timer_reload,
                 timer_output: &mut apu.timer_output,
                 timer_internal: &mut apu.timer_internal,
@@ -885,6 +1038,8 @@ mod tests {
             voice_phase: &mut apu.voice_phase,
             voice_envelope: &mut apu.voice_envelope,
             voice_position: &mut apu.voice_position,
+            voice_block_addr: &mut apu.voice_block_addr,
+            voice_block_sample: &mut apu.voice_block_sample,
             timer_reload: &mut apu.timer_reload,
             timer_output: &mut apu.timer_output,
             timer_internal: &mut apu.timer_internal,
