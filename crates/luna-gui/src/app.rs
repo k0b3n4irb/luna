@@ -64,6 +64,14 @@ pub(crate) struct LunaApp {
     /// looping on. Zero-initialised; refreshed after each frame's
     /// `step_cpu`.
     pc_bytes: [u8; 8],
+
+    /// Host audio backend. `None` if cpal couldn't open the default
+    /// output device — emulation keeps going silently. We try to
+    /// re-init lazily on the first ROM load if it failed at startup.
+    audio: Option<crate::audio::AudioBackend>,
+    /// Reusable scratch vector to drain APU samples without
+    /// allocating every frame.
+    audio_scratch: Vec<(i16, i16)>,
 }
 
 impl LunaApp {
@@ -83,6 +91,8 @@ impl LunaApp {
             show_stubs_panel: true,
             force_display: false,
             pc_bytes: [0; 8],
+            audio: crate::audio::AudioBackend::try_start(),
+            audio_scratch: Vec::with_capacity(2048),
         }
     }
 
@@ -211,6 +221,19 @@ impl LunaApp {
                 self.paused = true;
             }
         }
+
+        // Drain any PCM samples the APU produced this frame into the
+        // audio backend's SPSC ring. If the backend failed to start
+        // at boot, samples are dropped (silent emulation).
+        if let (Some(snes), Some(audio)) = (self.snes.as_mut(), self.audio.as_mut()) {
+            self.audio_scratch.clear();
+            snes.apu_real.drain_audio(&mut self.audio_scratch, 4096);
+            audio.feed(&self.audio_scratch);
+        } else if let Some(snes) = self.snes.as_mut() {
+            // No backend — discard so the queue doesn't grow.
+            snes.apu_real.audio_queue.clear();
+        }
+
         // Diagnostic: snapshot the 8 bytes at PB:PC for the CPU panel.
         if let Some(snes) = self.snes.as_mut() {
             let bytes = snes.peek_pc_bytes(8);

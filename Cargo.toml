@@ -84,6 +84,10 @@ eframe               = { version = "0.32", default-features = false, features = 
 egui                 = "0.32"
 rfd                  = "0.15"
 
+# Audio output — cpal cross-platform stream + ringbuf SPSC.
+cpal                 = "0.16"
+ringbuf              = { version = "0.4", default-features = false, features = ["std"] }
+
 [profile.release]
 opt-level = 3
 lto = "thin"

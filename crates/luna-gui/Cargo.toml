@@ -14,14 +14,17 @@ name = "luna-gui"
 path = "src/main.rs"
 
 [dependencies]
+luna-apu       = { workspace = true }
 luna-bus       = { workspace = true }
 luna-cartridge = { workspace = true }
 luna-core      = { workspace = true }
 luna-ppu       = { workspace = true }
 
-eframe = { workspace = true }
-egui   = { workspace = true }
-rfd    = { workspace = true }
+eframe  = { workspace = true }
+egui    = { workspace = true }
+rfd     = { workspace = true }
+cpal    = { workspace = true }
+ringbuf = { workspace = true }
 
 [lints]
 workspace = true
