@@ -40,6 +40,12 @@ pub struct Cpu {
     /// cleared automatically when the CPU services the NMI sequence at
     /// the next instruction boundary.
     pub pending_nmi: bool,
+    /// Edge-latched IRQ line. Set externally via [`Cpu::trigger_irq`]
+    /// (by the scheduler when an H- or V-timer match fires, gated by
+    /// NMITIMEN bits 5:4); cleared automatically when the CPU
+    /// services the IRQ at an instruction boundary, IF the `I` flag
+    /// allows it. NMI always wins over IRQ.
+    pub pending_irq: bool,
 }
 
 impl Default for Cpu {
@@ -67,6 +73,7 @@ impl Cpu {
             stopped: false,
             waiting: false,
             pending_nmi: false,
+            pending_irq: false,
         }
     }
 
@@ -76,6 +83,16 @@ impl Cpu {
     /// has no effect (NMI is edge-triggered on the 65C816).
     pub fn trigger_nmi(&mut self) {
         self.pending_nmi = true;
+    }
+
+    /// Latch an IRQ for servicing at the next instruction boundary,
+    /// gated by the `I` mask flag. The system bus calls this when an
+    /// H- or V-counter match fires per NMITIMEN bits 5:4. IRQ is
+    /// level-triggered on real hardware but we model it as edge-
+    /// triggered here for simplicity — the bus clears it explicitly
+    /// when `$4211 TIMEUP` is read or the trigger condition lapses.
+    pub fn trigger_irq(&mut self) {
+        self.pending_irq = true;
     }
 
     /// Perform a reset sequence: read the reset vector at `$00:FFFC` and
