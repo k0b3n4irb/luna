@@ -40,12 +40,37 @@ use luna_cpu_spc700::{IPL_ROM, IPL_ROM_BASE, Spc700, SpcBus};
 pub const MASTER_CYCLES_PER_SPC_STEP: u32 = 84;
 
 /// After how many SPC cycles a "playing" voice transitions to
-/// "ended" and lights up its bit in `ENDX` (`$7C`). Real timing
-/// depends on the sample's BRR loop length + ADSR rate; we pick a
-/// reasonable midpoint so music drivers see voices finish often
-/// enough to free up channels for new notes without churning so
-/// fast that voices never actually "play".
+/// "ended" and lights up its bit in `ENDX` (`$7C`) when ADSR is
+/// disabled (i.e. gain mode). With ADSR enabled the phase machine
+/// drives the end time instead.
 pub const VOICE_END_SPC_CYCLES: u32 = 16_000;
+
+/// SPC cycles per audio sample (32 kHz output at 1.024 MHz).
+pub const SPC_CYCLES_PER_SAMPLE: u32 = 32;
+
+/// Phase of one voice's ADSR envelope generator. Real hardware
+/// uses 11-bit envelope values; we keep that resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdsrPhase {
+    /// Voice is silent — KOF or post-release.
+    Off,
+    /// Attack: envelope rises linearly from 0 to 0x7FF.
+    Attack,
+    /// Decay: envelope falls from 0x7FF toward the sustain level.
+    Decay,
+    /// Sustain: envelope drifts down at the sustain rate.
+    Sustain,
+    /// Release: KOF gated the voice; envelope drops fast to 0.
+    Release,
+}
+
+/// ADSR rate table — sample periods (at 32 kHz) for each 5-bit
+/// rate index. Lifted from fullsnes + ares; rate 0 = "never advance"
+/// (we approximate that with a huge value).
+pub const ADSR_RATE_PERIODS: [u16; 32] = [
+    0xFFFF, 2048, 1536, 1280, 1024, 768, 640, 512, 384, 320, 256, 192, 160, 128, 96, 80, 64, 48,
+    40, 32, 24, 20, 16, 12, 10, 8, 6, 5, 4, 3, 2, 1,
+];
 
 /// All APU state owned by [`Apu`]: SPC700 core + 64 KB ARAM + the two
 /// 4-byte mailbox arrays.
@@ -85,12 +110,28 @@ pub struct Apu {
     /// envelope tracker can update voice state.
     pub dsp_regs: [u8; 128],
     /// Per-voice "is this voice currently playing" flag (0..7).
-    /// Set by a `1` bit in KON ($4C); cleared when the voice ages
-    /// past `VOICE_END_SPC_CYCLES` or KOF ($5C) gates it off.
+    /// Set by a `1` bit in KON ($4C); cleared when the envelope
+    /// hits 0 or KOF ($5C) gates the voice into Release.
     pub voice_active: [bool; 8],
-    /// Per-voice age in SPC cycles since KON. Drives the
-    /// "fake envelope" used to populate ENDX after a sample-time.
+    /// Per-voice age in SPC cycles since KON. Used by the gain-mode
+    /// fallback when ADSR is disabled.
     pub voice_age: [u32; 8],
+    /// Current ADSR phase for each voice.
+    pub voice_phase: [AdsrPhase; 8],
+    /// 11-bit envelope value per voice (0..0x7FF). `dsp_regs[$x8]`
+    /// (ENVX) is the upper 7 bits of this value.
+    pub voice_envelope: [u16; 8],
+    /// Per-voice "sample-position counter" — increments once per
+    /// audio sample (every 32 SPC cycles) while the voice plays.
+    /// Real hardware doesn't expose this on a register, but some
+    /// driver-visualisation paths read auxiliary slots; we expose
+    /// it through OUTX (`$x9`) so the music engine sees a bouncing
+    /// signal rather than a static 0.
+    pub voice_position: [u32; 8],
+    /// SPC cycles owed to the audio-sample tick (32-cycle base
+    /// clock). Drives both ADSR rate progression and the per-voice
+    /// position counter.
+    sample_tick_deficit: u32,
 
     // ------------- Timers -------------
     /// Reload values at `$FA` (T0), `$FB` (T1), `$FC` (T2). A value
@@ -141,6 +182,10 @@ impl Apu {
             dsp_regs: [0; 128],
             voice_active: [false; 8],
             voice_age: [0; 8],
+            voice_phase: [AdsrPhase::Off; 8],
+            voice_envelope: [0; 8],
+            voice_position: [0; 8],
+            sample_tick_deficit: 0,
             timer_reload: [0; 3],
             timer_output: [0; 3],
             timer_internal: [0; 3],
@@ -158,6 +203,9 @@ impl Apu {
             dsp_regs: &mut apu.dsp_regs,
             voice_active: &mut apu.voice_active,
             voice_age: &mut apu.voice_age,
+            voice_phase: &mut apu.voice_phase,
+            voice_envelope: &mut apu.voice_envelope,
+            voice_position: &mut apu.voice_position,
             timer_reload: &mut apu.timer_reload,
             timer_output: &mut apu.timer_output,
             timer_internal: &mut apu.timer_internal,
@@ -194,35 +242,143 @@ impl Apu {
         }
     }
 
-    /// Age every active voice by `spc_cycles` cycles. When a voice
-    /// passes [`VOICE_END_SPC_CYCLES`], it deactivates and its bit
-    /// gets latched into the ENDX register at `dsp_regs[0x7C]`.
+    /// Tick the per-voice envelope state machines. We accumulate SPC
+    /// cycles in `sample_tick_deficit`; each time it crosses a
+    /// 32-cycle boundary the DSP advances by one 32 kHz audio sample
+    /// — which is when the ADSR phase machine actually moves and
+    /// the per-voice position counter increments.
     fn tick_voices(&mut self, spc_cycles: u32) {
+        self.sample_tick_deficit = self.sample_tick_deficit.saturating_add(spc_cycles);
+        while self.sample_tick_deficit >= SPC_CYCLES_PER_SAMPLE {
+            self.sample_tick_deficit -= SPC_CYCLES_PER_SAMPLE;
+            self.tick_one_sample();
+        }
+        // Refresh per-voice DSP register slots so polling drivers
+        // see live values.
         for v in 0..8 {
-            if !self.voice_active[v] {
+            let envx_idx = 0x08 + v * 0x10;
+            let outx_idx = 0x09 + v * 0x10;
+            // ENVX = upper 7 bits of the 11-bit envelope.
+            self.dsp_regs[envx_idx] = (self.voice_envelope[v] >> 4) as u8;
+            // OUTX: a coarse proxy for "what's coming out of this
+            // voice right now". We mix the per-voice position
+            // counter's low bits with the envelope so polling
+            // drivers see a moving non-zero signal during playback.
+            self.dsp_regs[outx_idx] = if self.voice_active[v] {
+                ((self.voice_position[v] as u8).wrapping_mul(13))
+                    .wrapping_add((self.voice_envelope[v] >> 4) as u8)
+            } else {
+                0
+            };
+        }
+    }
+
+    /// Advance every voice's ADSR state by one 32 kHz audio sample.
+    fn tick_one_sample(&mut self) {
+        for v in 0..8 {
+            if !self.voice_active[v] && self.voice_phase[v] == AdsrPhase::Off {
                 continue;
             }
-            self.voice_age[v] = self.voice_age[v].saturating_add(spc_cycles);
-            if self.voice_age[v] >= VOICE_END_SPC_CYCLES {
+            self.voice_age[v] = self.voice_age[v].saturating_add(SPC_CYCLES_PER_SAMPLE);
+            if self.voice_active[v] {
+                self.voice_position[v] = self.voice_position[v].wrapping_add(1);
+            }
+            self.advance_voice_envelope(v);
+            // When the envelope hits zero, the voice is done. Latch
+            // its ENDX bit and deactivate.
+            if self.voice_envelope[v] == 0
+                && matches!(
+                    self.voice_phase[v],
+                    AdsrPhase::Release | AdsrPhase::Decay | AdsrPhase::Sustain
+                )
+            {
+                self.voice_active[v] = false;
+                self.voice_phase[v] = AdsrPhase::Off;
+                self.dsp_regs[0x7C] |= 1 << v;
+            }
+            // Fallback: if a voice runs without ADSR enabled (gain
+            // mode), we use the legacy age-based timeout so it
+            // still finishes eventually.
+            if self.voice_active[v]
+                && self.voice_phase[v] == AdsrPhase::Off
+                && self.voice_age[v] >= VOICE_END_SPC_CYCLES
+            {
                 self.voice_active[v] = false;
                 self.dsp_regs[0x7C] |= 1 << v;
             }
         }
-        // Fold the live ENVX (a coarse linear ramp from $7F → 0
-        // over the voice's lifetime) back into each voice's `$x8`
-        // ENVX register so music drivers that poll it see a
-        // decreasing value rather than whatever they last wrote.
-        for v in 0..8 {
-            let envx_idx = 0x08 + v * 0x10;
-            if self.voice_active[v] {
-                // Linear decay from $7F at age 0 → 0 at the end
-                // threshold.
-                let remaining = VOICE_END_SPC_CYCLES.saturating_sub(self.voice_age[v]);
-                let env = (remaining as u64 * 0x7F / VOICE_END_SPC_CYCLES as u64) as u8;
-                self.dsp_regs[envx_idx] = env;
-            } else {
-                self.dsp_regs[envx_idx] = 0;
+    }
+
+    /// Step one voice's envelope by one audio sample.
+    ///
+    /// Each phase has its own progression:
+    ///
+    ///   - **Attack**: env += `0x20` per sample-period of the attack
+    ///     rate, clamped to `0x7FF`. When the cap is hit we transition
+    ///     to Decay.
+    ///   - **Decay**: env steps down by `(env >> 8) + 1` per sample-
+    ///     period of the decay rate (an exponential-ish curve in
+    ///     8 stages). Reaches sustain level → moves to Sustain.
+    ///   - **Sustain**: env steps down by `(env >> 8) + 1` per sample-
+    ///     period of the sustain rate (usually slow).
+    ///   - **Release**: env -= `8` per sample (KOF-gated).
+    fn advance_voice_envelope(&mut self, v: usize) {
+        let adsr1 = self.dsp_regs[0x05 + v * 0x10];
+        let adsr2 = self.dsp_regs[0x06 + v * 0x10];
+        let use_adsr = adsr1 & 0x80 != 0;
+
+        if !use_adsr {
+            // Gain mode: keep the linear-decay envelope so we still
+            // have *something*. Don't transition phases (they stay
+            // Off and the age-based timeout above handles end-of-life).
+            let env = u16::from(self.dsp_regs[0x07 + v * 0x10]) << 4;
+            self.voice_envelope[v] = env.min(0x7FF);
+            return;
+        }
+
+        let attack_rate = (adsr1 & 0x0F) | 0x10; // attack uses indices 16..31
+        let decay_rate = ((adsr1 >> 4) & 0x07) | 0x10; // decay uses indices 16..23
+        let sustain_rate = adsr2 & 0x1F;
+        let sustain_level = u16::from(adsr2 >> 5);
+        let sustain_target = (sustain_level + 1) * 0x100; // 1/8..8/8 of 0x800
+
+        match self.voice_phase[v] {
+            AdsrPhase::Attack => {
+                let period = ADSR_RATE_PERIODS[attack_rate as usize];
+                if self.voice_age[v] % u32::from(period.max(1)) < SPC_CYCLES_PER_SAMPLE {
+                    let env = self.voice_envelope[v];
+                    self.voice_envelope[v] = (env + 0x20).min(0x7FF);
+                    if self.voice_envelope[v] == 0x7FF {
+                        self.voice_phase[v] = AdsrPhase::Decay;
+                    }
+                }
             }
+            AdsrPhase::Decay => {
+                let period = ADSR_RATE_PERIODS[decay_rate as usize];
+                if self.voice_age[v] % u32::from(period.max(1)) < SPC_CYCLES_PER_SAMPLE {
+                    let env = self.voice_envelope[v];
+                    let step = (env >> 8) + 1;
+                    self.voice_envelope[v] = env.saturating_sub(step);
+                    if self.voice_envelope[v] <= sustain_target {
+                        self.voice_envelope[v] = sustain_target;
+                        self.voice_phase[v] = AdsrPhase::Sustain;
+                    }
+                }
+            }
+            AdsrPhase::Sustain => {
+                let period = ADSR_RATE_PERIODS[sustain_rate as usize];
+                if period < 0xFFFF
+                    && self.voice_age[v] % u32::from(period.max(1)) < SPC_CYCLES_PER_SAMPLE
+                {
+                    let env = self.voice_envelope[v];
+                    let step = (env >> 8) + 1;
+                    self.voice_envelope[v] = env.saturating_sub(step);
+                }
+            }
+            AdsrPhase::Release => {
+                self.voice_envelope[v] = self.voice_envelope[v].saturating_sub(8);
+            }
+            AdsrPhase::Off => {}
         }
     }
 
@@ -280,6 +436,9 @@ impl Apu {
                 dsp_regs: &mut self.dsp_regs,
                 voice_active: &mut self.voice_active,
                 voice_age: &mut self.voice_age,
+                voice_phase: &mut self.voice_phase,
+                voice_envelope: &mut self.voice_envelope,
+                voice_position: &mut self.voice_position,
                 timer_reload: &mut self.timer_reload,
                 timer_output: &mut self.timer_output,
                 timer_internal: &mut self.timer_internal,
@@ -306,6 +465,9 @@ struct ApuBusView<'a> {
     dsp_regs: &'a mut [u8; 128],
     voice_active: &'a mut [bool; 8],
     voice_age: &'a mut [u32; 8],
+    voice_phase: &'a mut [AdsrPhase; 8],
+    voice_envelope: &'a mut [u16; 8],
+    voice_position: &'a mut [u32; 8],
     timer_reload: &'a mut [u8; 3],
     timer_output: &'a mut [u8; 3],
     timer_internal: &'a mut [u16; 3],
@@ -394,21 +556,33 @@ impl SpcBus for ApuBusView<'_> {
                 match idx {
                     0x4C => {
                         // KON: each `1` bit in `value` keys the
-                        // corresponding voice ON.
+                        // corresponding voice ON. The envelope
+                        // starts at 0 and enters Attack phase if
+                        // ADSR is enabled; in gain mode the legacy
+                        // linear path runs (AdsrPhase::Off).
                         for v in 0..8 {
                             if value & (1 << v) != 0 {
                                 self.voice_active[v] = true;
                                 self.voice_age[v] = 0;
+                                self.voice_position[v] = 0;
+                                self.voice_envelope[v] = 0;
+                                let adsr1 = self.dsp_regs[0x05 + v * 0x10];
+                                self.voice_phase[v] = if adsr1 & 0x80 != 0 {
+                                    AdsrPhase::Attack
+                                } else {
+                                    AdsrPhase::Off
+                                };
                                 self.dsp_regs[0x7C] &= !(1 << v); // clear stale ENDX
                             }
                         }
                     }
                     0x5C => {
                         // KOF: each `1` bit gates the voice into
-                        // release (we just deactivate).
+                        // Release. The envelope falls to 0 from
+                        // there; ENDX fires when it does.
                         for v in 0..8 {
                             if value & (1 << v) != 0 {
-                                self.voice_active[v] = false;
+                                self.voice_phase[v] = AdsrPhase::Release;
                             }
                         }
                     }
@@ -490,6 +664,9 @@ mod tests {
                 dsp_regs: &mut apu.dsp_regs,
                 voice_active: &mut apu.voice_active,
                 voice_age: &mut apu.voice_age,
+                voice_phase: &mut apu.voice_phase,
+                voice_envelope: &mut apu.voice_envelope,
+                voice_position: &mut apu.voice_position,
                 timer_reload: &mut apu.timer_reload,
                 timer_output: &mut apu.timer_output,
                 timer_internal: &mut apu.timer_internal,
@@ -520,6 +697,9 @@ mod tests {
                 dsp_regs: &mut apu.dsp_regs,
                 voice_active: &mut apu.voice_active,
                 voice_age: &mut apu.voice_age,
+                voice_phase: &mut apu.voice_phase,
+                voice_envelope: &mut apu.voice_envelope,
+                voice_position: &mut apu.voice_position,
                 timer_reload: &mut apu.timer_reload,
                 timer_output: &mut apu.timer_output,
                 timer_internal: &mut apu.timer_internal,
@@ -537,9 +717,12 @@ mod tests {
     }
 
     #[test]
-    fn envx_decays_linearly_while_voice_plays() {
+    fn envx_rises_during_attack_phase() {
+        // With ADSR enabled and a fast attack rate, KON should put
+        // the voice in Attack phase where the envelope rises from 0
+        // toward $7FF. Verify by reading ENVX before and after some
+        // sample ticks.
         let mut apu = Apu::new();
-        // KON voice 2.
         {
             let mut bus = ApuBusView {
                 aram: &mut apu.aram,
@@ -550,22 +733,31 @@ mod tests {
                 dsp_regs: &mut apu.dsp_regs,
                 voice_active: &mut apu.voice_active,
                 voice_age: &mut apu.voice_age,
+                voice_phase: &mut apu.voice_phase,
+                voice_envelope: &mut apu.voice_envelope,
+                voice_position: &mut apu.voice_position,
                 timer_reload: &mut apu.timer_reload,
                 timer_output: &mut apu.timer_output,
                 timer_internal: &mut apu.timer_internal,
                 timer_enabled: &mut apu.timer_enabled,
             };
+            // Voice 2 ADSR1 = $8F (bit 7 = ADSR on, attack rate $F).
+            bus.write(0x00F2, 0x25);
+            bus.write(0x00F3, 0x8F);
+            // Voice 2 ADSR2 = $1F (sustain rate fast, sustain level 0).
+            bus.write(0x00F2, 0x26);
+            bus.write(0x00F3, 0x1F);
+            // KON voice 2.
             bus.write(0x00F2, 0x4C);
             bus.write(0x00F3, 1 << 2);
         }
+        assert_eq!(apu.voice_phase[2], AdsrPhase::Attack);
         apu.tick_voices(0);
         let envx_at_0 = apu.dsp_regs[0x08 + 2 * 0x10];
-        apu.tick_voices(VOICE_END_SPC_CYCLES / 2);
-        let envx_at_half = apu.dsp_regs[0x08 + 2 * 0x10];
-        // ENVX should decay roughly linearly: start near $7F,
-        // half-life near $3F, end at 0.
-        assert!(envx_at_0 > envx_at_half);
-        assert!(envx_at_half > 0);
+        // Tick a bunch of samples — envelope should rise.
+        apu.tick_voices(SPC_CYCLES_PER_SAMPLE * 200);
+        let envx_after = apu.dsp_regs[0x08 + 2 * 0x10];
+        assert!(envx_after > envx_at_0, "ENVX should rise during attack");
     }
 
     #[test]
@@ -585,6 +777,9 @@ mod tests {
             dsp_regs: &mut apu.dsp_regs,
             voice_active: &mut apu.voice_active,
             voice_age: &mut apu.voice_age,
+            voice_phase: &mut apu.voice_phase,
+            voice_envelope: &mut apu.voice_envelope,
+            voice_position: &mut apu.voice_position,
             timer_reload: &mut apu.timer_reload,
             timer_output: &mut apu.timer_output,
             timer_internal: &mut apu.timer_internal,
@@ -662,6 +857,9 @@ mod tests {
                 dsp_regs: &mut apu.dsp_regs,
                 voice_active: &mut apu.voice_active,
                 voice_age: &mut apu.voice_age,
+                voice_phase: &mut apu.voice_phase,
+                voice_envelope: &mut apu.voice_envelope,
+                voice_position: &mut apu.voice_position,
                 timer_reload: &mut apu.timer_reload,
                 timer_output: &mut apu.timer_output,
                 timer_internal: &mut apu.timer_internal,
@@ -684,6 +882,9 @@ mod tests {
             dsp_regs: &mut apu.dsp_regs,
             voice_active: &mut apu.voice_active,
             voice_age: &mut apu.voice_age,
+            voice_phase: &mut apu.voice_phase,
+            voice_envelope: &mut apu.voice_envelope,
+            voice_position: &mut apu.voice_position,
             timer_reload: &mut apu.timer_reload,
             timer_output: &mut apu.timer_output,
             timer_internal: &mut apu.timer_internal,
