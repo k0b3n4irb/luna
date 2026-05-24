@@ -142,6 +142,18 @@ pub struct Apu {
     /// sample with this short history to reconstruct the original
     /// 16-bit PCM samples.
     pub voice_brr_history: [[i16; 2]; 8],
+    /// Pitch accumulator per voice. Each output sample (32 kHz) the
+    /// 14-bit pitch (from `$x2`/`$x3`) is added; whenever the
+    /// accumulator crosses 0x1000 the BRR sample pointer advances
+    /// once. So pitch 0x1000 = 1:1 (32 kHz reproduction); pitch
+    /// 0x0800 plays at half speed; pitch 0x2000 plays at double.
+    pub voice_pitch_acc: [u16; 8],
+    /// Mixed L/R audio output for the current sample, post voice and
+    /// master volume. Updated each `tick_one_sample`; consumers
+    /// (future audio backend) can read it via [`Self::audio_sample`].
+    pub audio_left: i16,
+    /// Mixed R audio (see [`Self::audio_left`]).
+    pub audio_right: i16,
     /// SPC cycles owed to the audio-sample tick (32-cycle base
     /// clock). Drives both ADSR rate progression and the per-voice
     /// position counter.
@@ -202,6 +214,9 @@ impl Apu {
             voice_block_addr: [0; 8],
             voice_block_sample: [0; 8],
             voice_brr_history: [[0, 0]; 8],
+            voice_pitch_acc: [0; 8],
+            audio_left: 0,
+            audio_right: 0,
             sample_tick_deficit: 0,
             timer_reload: [0; 3],
             timer_output: [0; 3],
@@ -299,6 +314,10 @@ impl Apu {
 
     /// Advance every voice's ADSR state by one 32 kHz audio sample.
     fn tick_one_sample(&mut self) {
+        // Reset accumulated stereo mix; voices add to it below.
+        let mut mix_l: i32 = 0;
+        let mut mix_r: i32 = 0;
+
         for v in 0..8 {
             if !self.voice_active[v] && self.voice_phase[v] == AdsrPhase::Off {
                 continue;
@@ -306,15 +325,41 @@ impl Apu {
             self.voice_age[v] = self.voice_age[v].saturating_add(SPC_CYCLES_PER_SAMPLE);
             if self.voice_active[v] {
                 self.voice_position[v] = self.voice_position[v].wrapping_add(1);
-                // Decode the current BRR sample BEFORE we advance to
-                // the next block — the just-decoded sample feeds the
-                // filter history and drives the OUTX value below.
-                let sample = self.decode_current_brr_sample(v);
-                self.voice_brr_history[v][1] = self.voice_brr_history[v][0];
-                self.voice_brr_history[v][0] = sample;
-                self.advance_brr_block(v);
+                // Pitch counter: 14-bit pitch register added each
+                // output tick. Every time the accumulator crosses
+                // $1000 we consume one BRR sample (= "1:1 rate" at
+                // pitch $1000). Higher pitch consumes more samples
+                // per output tick; we cap at 1 advance per tick for
+                // simplicity (audible artefact on very high pitches
+                // but irrelevant for typical music playback).
+                let pitch = u16::from(self.dsp_regs[0x02 + v * 0x10])
+                    | (u16::from(self.dsp_regs[0x03 + v * 0x10]) << 8);
+                let pitch = pitch & 0x3FFF;
+                let new_acc = self.voice_pitch_acc[v].wrapping_add(pitch);
+                if new_acc >= 0x1000 {
+                    self.voice_pitch_acc[v] = new_acc - 0x1000;
+                    let sample = self.decode_current_brr_sample(v);
+                    self.voice_brr_history[v][1] = self.voice_brr_history[v][0];
+                    self.voice_brr_history[v][0] = sample;
+                    self.advance_brr_block(v);
+                } else {
+                    self.voice_pitch_acc[v] = new_acc;
+                }
             }
             self.advance_voice_envelope(v);
+
+            // Fold this voice's contribution into the global stereo
+            // mix. `outx = sample × env / 0x800` (signed 16-bit);
+            // we then scale by signed-7-bit VOL_L / VOL_R per voice.
+            if self.voice_active[v] {
+                let s = i32::from(self.voice_brr_history[v][0]);
+                let env = i32::from(self.voice_envelope[v]);
+                let outx = (s * env) >> 11; // signed 16-bit
+                let vol_l = self.dsp_regs[v * 0x10] as i8 as i32;
+                let vol_r = self.dsp_regs[v * 0x10 + 1] as i8 as i32;
+                mix_l += (outx * vol_l) >> 7;
+                mix_r += (outx * vol_r) >> 7;
+            }
             // When the envelope hits zero, the voice is done. Latch
             // its ENDX bit and deactivate.
             if self.voice_envelope[v] == 0
@@ -338,6 +383,24 @@ impl Apu {
                 self.dsp_regs[0x7C] |= 1 << v;
             }
         }
+
+        // Apply master volume — MVOL_L (\$0C) and MVOL_R (\$1C) are
+        // signed 7-bit master gain for the left / right outputs.
+        let mvol_l = self.dsp_regs[0x0C] as i8 as i32;
+        let mvol_r = self.dsp_regs[0x1C] as i8 as i32;
+        let final_l = (mix_l * mvol_l) >> 7;
+        let final_r = (mix_r * mvol_r) >> 7;
+        self.audio_left = final_l.clamp(-32768, 32767) as i16;
+        self.audio_right = final_r.clamp(-32768, 32767) as i16;
+    }
+
+    /// Snapshot of the most recent stereo audio sample produced by
+    /// the DSP. Returns `(left, right)` 16-bit signed PCM at 32 kHz.
+    /// Future audio backends can consume this in a tight loop;
+    /// today it's mostly a sanity-check probe.
+    #[must_use]
+    pub fn audio_sample(&self) -> (i16, i16) {
+        (self.audio_left, self.audio_right)
     }
 
     /// Decode the current BRR sample for voice `v` — the one at
@@ -886,6 +949,64 @@ mod tests {
     }
 
     #[test]
+    fn pitch_below_1000_slows_sample_advance() {
+        // Set up a sample at $0500. Pitch = $0800 means we should
+        // consume one BRR sample every TWO output ticks. Use gain
+        // mode with a non-zero direct gain so the envelope stays
+        // up and the voice doesn't deactivate.
+        let mut apu = Apu::new();
+        apu.aram[0x0500] = 0x00; // header: no end, F0, no shift
+        apu.aram[0x0501] = 0x12; // samples 0,1 = $1, $2
+        apu.voice_block_addr[0] = 0x0500;
+        apu.voice_block_sample[0] = 0;
+        apu.voice_active[0] = true;
+        apu.voice_phase[0] = AdsrPhase::Off; // gain mode
+        apu.voice_envelope[0] = 0x7F0;
+        apu.dsp_regs[0x02] = 0x00;
+        apu.dsp_regs[0x03] = 0x08; // pitch = $0800
+        apu.dsp_regs[0x05] = 0x00; // ADSR disabled
+        apu.dsp_regs[0x07] = 0x7F; // gain = direct $7F
+
+        // After one sample tick, accumulator = $0800, no advance yet.
+        apu.tick_voices(SPC_CYCLES_PER_SAMPLE);
+        assert_eq!(apu.voice_block_sample[0], 0);
+        // Second tick: accumulator overflows $1000, advances by 1.
+        apu.tick_voices(SPC_CYCLES_PER_SAMPLE);
+        assert_eq!(apu.voice_block_sample[0], 1);
+    }
+
+    #[test]
+    fn voice_volume_scales_stereo_mix() {
+        // Pre-load voice 0 with a known sample and full envelope
+        // (gain mode, so the voice doesn't decay during this tick).
+        let mut apu = Apu::new();
+        apu.aram[0x0600] = 0x00;
+        apu.aram[0x0601] = 0x70; // sample 0 nibble = $7 = +7
+        apu.voice_block_addr[0] = 0x0600;
+        apu.voice_block_sample[0] = 0;
+        apu.voice_active[0] = true;
+        apu.voice_phase[0] = AdsrPhase::Off; // gain mode
+        apu.voice_envelope[0] = 0x7F0;
+        apu.dsp_regs[0x02] = 0x00;
+        apu.dsp_regs[0x03] = 0x10; // pitch $1000 = 1:1
+        apu.dsp_regs[0x05] = 0x00; // ADSR disabled
+        apu.dsp_regs[0x07] = 0x7F; // gain direct = $7F
+        // VOL_L = $7F (max positive), VOL_R = 0.
+        apu.dsp_regs[0x00] = 0x7F;
+        apu.dsp_regs[0x01] = 0x00;
+        // Master = $7F / $7F.
+        apu.dsp_regs[0x0C] = 0x7F;
+        apu.dsp_regs[0x1C] = 0x7F;
+
+        apu.tick_voices(SPC_CYCLES_PER_SAMPLE);
+        let (l, r) = apu.audio_sample();
+        // Right channel should be 0 (vol_r = 0).
+        assert_eq!(r, 0);
+        // Left channel should be non-zero.
+        assert!(l.abs() > 0, "left should carry the voice's output");
+    }
+
+    #[test]
     fn brr_block_advance_lands_on_end_bit_and_loops() {
         // Build a tiny "sample": directory at $0100, sample at $0200
         // with the first block having end + loop set, loop address
@@ -932,14 +1053,19 @@ mod tests {
             // DIR = 1 (sample dir at $0100).
             bus.write(0x00F2, 0x5D);
             bus.write(0x00F3, 0x01);
-            // Voice 0 ADSR1 = $80 (ADSR enabled, attack 0 = stays
-            // near 0 envelope so the voice doesn't immediately end
-            // via envelope-to-zero).
+            // Voice 0 ADSR1 = $8F (ADSR enabled, fast attack so the
+            // envelope stays well above 0 while we run the test).
             bus.write(0x00F2, 0x05);
             bus.write(0x00F3, 0x8F);
             // Voice 0 SRCN = 0.
             bus.write(0x00F2, 0x04);
             bus.write(0x00F3, 0x00);
+            // Voice 0 pitch = $1000 (1:1 rate so each tick advances
+            // one BRR sample).
+            bus.write(0x00F2, 0x02);
+            bus.write(0x00F3, 0x00);
+            bus.write(0x00F2, 0x03);
+            bus.write(0x00F3, 0x10);
             // KON voice 0.
             bus.write(0x00F2, 0x4C);
             bus.write(0x00F3, 0x01);
