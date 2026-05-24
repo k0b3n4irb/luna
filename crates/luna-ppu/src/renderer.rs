@@ -8,7 +8,9 @@
 //! depend on the PPU's internal mutability.
 
 use crate::ppu::{Ppu, bg_state};
-use crate::tile::{apply_brightness, bgr555_to_rgb888, decode_2bpp_row, decode_4bpp_row};
+use crate::tile::{
+    apply_brightness, bgr555_to_rgb888, decode_2bpp_row, decode_4bpp_row, scale_5_to_8,
+};
 
 /// One scanline of pixels (256 wide, RGB888).
 pub type Scanline = [[u8; 3]; 256];
@@ -432,7 +434,12 @@ pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
     // Precompute the priority table for this BGMODE. The 4th bit of
     // BGMODE flips BG3's slots to the top in Mode 1 — handled inside.
     let table = priority_table(ppu.bgmode);
-    let backdrop = decode_palette(ppu, 0, brightness);
+    let backdrop_bgr5 = cgram_to_bgr5(ppu, 0);
+
+    // Sub-screen colour: in this phase we don't render an actual
+    // sub-screen, just the fixed COLDATA backdrop. CGWSEL bit 1
+    // would enable BG/OBJ on the sub-screen; that's a stretch goal.
+    let sub_bgr5 = (ppu.coldata_r, ppu.coldata_g, ppu.coldata_b);
 
     for y in 0..FRAME_H as u16 {
         // Indexed scanlines for the 4 BG layers (transparent = `None`)
@@ -448,28 +455,104 @@ pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
         let off = y as usize * FRAME_W;
         for x in 0..FRAME_W {
             // Walk the priority table top-to-bottom; first hit wins.
-            let mut pixel = backdrop;
+            // Track which layer won so colour math can consult the
+            // corresponding CGADSUB enable bit. `winner_layer` =
+            //   0..=3 → BG1..BG4
+            //   4     → OBJ
+            //   5     → backdrop
+            let mut main_bgr5 = backdrop_bgr5;
+            let mut winner_layer: u8 = 5;
+            let mut winner_cgram: u8 = 0;
             for slot in table {
                 let candidate = match slot.kind {
-                    LayerKind::Bg => {
-                        let scan = &bgs[slot.idx as usize];
-                        scan[x].and_then(|(cgram, prio_bit)| {
-                            (prio_bit == slot.bg_prio).then_some(cgram)
-                        })
-                    }
-                    LayerKind::Obj => sprites[x].and_then(|(cgram, prio)| {
-                        (prio == slot.idx).then_some(cgram)
-                    }),
+                    LayerKind::Bg => bgs[slot.idx as usize][x]
+                        .and_then(|(cg, prio)| (prio == slot.bg_prio).then_some(cg)),
+                    LayerKind::Obj => sprites[x]
+                        .and_then(|(cg, prio)| (prio == slot.idx).then_some(cg)),
                 };
                 if let Some(cgram_idx) = candidate {
-                    pixel = decode_palette(ppu, cgram_idx, brightness);
+                    main_bgr5 = cgram_to_bgr5(ppu, cgram_idx);
+                    winner_layer = match slot.kind {
+                        LayerKind::Bg => slot.idx,
+                        LayerKind::Obj => 4,
+                    };
+                    winner_cgram = cgram_idx;
                     break;
                 }
             }
-            buf[off + x] = pixel;
+            // Colour math: CGADSUB layer-enable bits gate whether
+            // THIS pixel's main-screen layer participates.
+            //   bit 0..=3 = BG1..BG4
+            //   bit 4 = OBJ (palettes 4-7 only)
+            //   bit 5 = backdrop
+            // CGWSEL bits 5:4 = math-enable region (00=always,
+            // 11=never; 01/10 depend on the colour-math window,
+            // which we don't model yet — fall back to "always").
+            let math_globally_enabled = (ppu.cgwsel >> 4) & 0x03 != 0x03;
+            let layer_enabled_for_math = if math_globally_enabled {
+                match winner_layer {
+                    0..=3 => ppu.cgadsub & (1 << winner_layer) != 0,
+                    4 => {
+                        // Only OBJ palettes 4-7 participate. Sprite
+                        // CGRAM indices start at 128; palette `p`
+                        // begins at 128 + p*16. So palette ≥ 4 ⇒
+                        // CGRAM index ≥ 192.
+                        (ppu.cgadsub & 0x10) != 0 && winner_cgram >= 192
+                    }
+                    _ => ppu.cgadsub & 0x20 != 0, // backdrop
+                }
+            } else {
+                false
+            };
+            let rgb5 = if layer_enabled_for_math {
+                color_math(main_bgr5, sub_bgr5, ppu.cgadsub)
+            } else {
+                main_bgr5
+            };
+            // CGWSEL bits 7:6 — "force main screen black" region.
+            // 00 = never, 11 = always; 01/10 are window-gated and
+            // also collapse to "never" without windowing.
+            let force_black = (ppu.cgwsel >> 6) & 0x03 == 0x03;
+            let final_bgr5 = if force_black { (0, 0, 0) } else { rgb5 };
+
+            let rgb888 = [
+                scale_5_to_8(final_bgr5.0),
+                scale_5_to_8(final_bgr5.1),
+                scale_5_to_8(final_bgr5.2),
+            ];
+            buf[off + x] = apply_brightness(rgb888, brightness);
         }
     }
     buf
+}
+
+/// Look up a CGRAM index and return the raw 5-bit BGR triple, with
+/// no brightness scaling. Used by the colour-math path so math
+/// happens in 5-bit space (matching real hardware).
+fn cgram_to_bgr5(ppu: &Ppu, cgram_index: u8) -> (u8, u8, u8) {
+    let color = ppu.cgram.color(cgram_index);
+    let r5 = (color & 0x001F) as u8;
+    let g5 = ((color >> 5) & 0x001F) as u8;
+    let b5 = ((color >> 10) & 0x001F) as u8;
+    (r5, g5, b5)
+}
+
+/// SNES colour-math arithmetic — add or subtract a 5-bit sub-screen
+/// colour from a 5-bit main-screen colour, optionally halving the
+/// result. CGADSUB bit 7 = subtract, bit 6 = half.
+fn color_math(main: (u8, u8, u8), sub: (u8, u8, u8), cgadsub: u8) -> (u8, u8, u8) {
+    let subtract = cgadsub & 0x80 != 0;
+    let half = cgadsub & 0x40 != 0;
+    let combine = |m: u8, s: u8| -> u8 {
+        let m = i32::from(m);
+        let s = i32::from(s);
+        let mut r = if subtract { m - s } else { m + s };
+        if half {
+            r >>= 1;
+        }
+        r.clamp(0, 31) as u8
+    };
+    (combine(main.0, sub.0), combine(main.1, sub.1), combine(main.2, sub.2))
 }
 
 // =============================================================================
@@ -1221,6 +1304,150 @@ mod tests {
             frame[0], backdrop_rgb,
             "BG3.hi should win over OBJ.0 in Mode 1"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Colour math (CGADSUB / CGWSEL / COLDATA)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn coldata_writes_accumulate_per_channel() {
+        // COLDATA bits 7/6/5 = (B, G, R) enable masks; bits 4:0 = value.
+        // Three sequential writes set the three channels independently.
+        let mut p = Ppu::new();
+        p.write(register::COLDATA, 0x25); // R-only, value 5
+        p.write(register::COLDATA, 0x47); // G-only, value 7
+        p.write(register::COLDATA, 0x8B); // B-only, value 11
+        assert_eq!(p.coldata_r, 5);
+        assert_eq!(p.coldata_g, 7);
+        assert_eq!(p.coldata_b, 11);
+        // A 0x00 write is a no-op (no enable bits set).
+        p.write(register::COLDATA, 0x00);
+        assert_eq!(p.coldata_r, 5);
+    }
+
+    #[test]
+    fn color_math_add_brightens_main_with_fixed_color() {
+        // Set up: BG1 tile (the demo), COLDATA blue half-max, CGADSUB
+        // = "add BG1, no half". Output blue channel of (0,0) should
+        // be increased by COLDATA's blue value.
+        let mut p = setup_demo_tile();
+        p.write(register::BGMODE, 0x01);
+        // Force brightness to 15 so we measure the math, not the
+        // brightness ramp.
+        p.write(register::INIDISP, 0x0F);
+        // Capture the baseline (no math).
+        let baseline = render_frame_with(&p, RenderOptions::default());
+        // Enable colour math on BG1, +, no-half. Add a strong blue
+        // via COLDATA.
+        p.write(register::CGADSUB, 0x01); // BG1 enabled, add, no half
+        p.write(register::COLDATA, 0x9F); // B = 0x1F (max), other channels untouched
+        let with_math = render_frame_with(&p, RenderOptions::default());
+        // The (0,0) pixel must have a higher blue channel post-math.
+        // We don't assert the exact RGB; the inequality alone proves
+        // math is firing on the BG1 winner.
+        assert!(
+            with_math[0][2] > baseline[0][2],
+            "blue should rise: baseline {:?} with_math {:?}",
+            baseline[0],
+            with_math[0],
+        );
+    }
+
+    #[test]
+    fn color_math_subtract_darkens_main() {
+        let mut p = setup_demo_tile();
+        p.write(register::BGMODE, 0x01);
+        p.write(register::INIDISP, 0x0F);
+        // Saturate COLDATA so subtract pulls the main toward zero.
+        p.write(register::CGADSUB, 0x81); // BG1, subtract, no half
+        p.write(register::COLDATA, 0x9F); // B = max
+        p.write(register::COLDATA, 0x5F); // G = max
+        p.write(register::COLDATA, 0x3F); // R = max
+        let out = render_frame_with(&p, RenderOptions::default());
+        // With max sub on every channel, subtract clamps to 0 → black.
+        assert_eq!(out[0], [0, 0, 0]);
+    }
+
+    #[test]
+    fn color_math_half_clips_to_unsharp_blend() {
+        // The demo tile's leftmost pixel uses CGRAM[1] = $001F
+        // (pure red). With half-add and a pure-blue COLDATA the
+        // result per-channel is ((R+0)/2, (G+0)/2, (B+31)/2) =
+        // (15, 0, 15) in 5-bit space.
+        let mut p = setup_demo_tile();
+        p.write(register::BGMODE, 0x01);
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::CGADSUB, 0x41); // BG1, add, half
+        p.write(register::COLDATA, 0x9F); // B = max only
+        let out = render_frame_with(&p, RenderOptions::default());
+        assert_eq!(
+            out[0],
+            [scale_5_to_8(15), 0, scale_5_to_8(15)],
+            "half-add B onto red BG1 pixel: got {:?}",
+            out[0],
+        );
+    }
+
+    #[test]
+    fn color_math_obj_palette_0_3_excluded() {
+        // CGADSUB bit 4 enables math on OBJ — but only palettes 4-7.
+        // We drop a sprite using palette 0 (the CGRAM index lands in
+        // 128..160). Even with bit 4 set, the math must NOT fire.
+        let mut p = setup_demo_tile();
+        // Configure: clear BG1 from math, OBJ enabled.
+        p.write(register::CGADSUB, 0x10); // OBJ-only, add, no half
+        p.write(register::COLDATA, 0x9F);
+        p.write(register::INIDISP, 0x0F);
+        // Sprite at (0,0) palette 0 (attrs bits 1:3 = 0).
+        p.oam.poke(0, 0); // x
+        p.oam.poke(1, 0); // y
+        p.oam.poke(2, 0); // tile
+        p.oam.poke(3, 0); // attrs: palette = 0, prio = 0
+        // Without OBJ math, the sprite produces whatever colour it
+        // produces. We just need: the rendered pixel = unmodified
+        // sprite colour, not sprite + COLDATA.
+        // We get the "no math" baseline by also clearing the CGADSUB
+        // bit.
+        let baseline = {
+            p.cgadsub = 0;
+            render_frame_with(&p, RenderOptions::default())[0]
+        };
+        p.cgadsub = 0x10; // OBJ math on
+        let with_math_on_palette_0 = render_frame_with(&p, RenderOptions::default())[0];
+        // Palette-0 sprite is excluded from math by spec → output
+        // unchanged.
+        assert_eq!(baseline, with_math_on_palette_0);
+    }
+
+    #[test]
+    fn cgwsel_never_disables_color_math() {
+        // CGWSEL bits 5:4 = 11 means "never enable math". Even with
+        // CGADSUB set we should see the plain main pixel.
+        let mut p = setup_demo_tile();
+        p.write(register::BGMODE, 0x01);
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::CGADSUB, 0x01); // BG1 add no-half
+        p.write(register::COLDATA, 0x9F); // max blue
+        p.write(register::CGWSEL, 0b0011_0000); // bits 5:4 = 11 → never
+        let out = render_frame_with(&p, RenderOptions::default());
+        // No math → output blue equals what the BG1 alone would give.
+        let baseline = {
+            p.cgwsel = 0; // always-on
+            p.cgadsub = 0; // math off
+            render_frame_with(&p, RenderOptions::default())[0]
+        };
+        assert_eq!(out[0], baseline);
+    }
+
+    #[test]
+    fn cgwsel_force_main_black_blanks_output() {
+        let mut p = setup_demo_tile();
+        p.write(register::BGMODE, 0x01);
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::CGWSEL, 0b1100_0000); // bits 7:6 = 11 → always force black
+        let out = render_frame_with(&p, RenderOptions::default());
+        assert_eq!(out[0], [0, 0, 0]);
     }
 
     #[test]
