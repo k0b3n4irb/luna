@@ -212,6 +212,164 @@ fn decode_tile_pixel(
     lo | (hi_p4 << 4) | (hi_p5 << 5) | (hi_p6 << 6) | (hi_p7 << 7)
 }
 
+/// Sprite-table decoded entry — what we need to draw one sprite.
+#[derive(Debug, Clone, Copy)]
+pub struct SpriteEntry {
+    /// Signed X position (-256..=255 after high-table sign extension).
+    pub x: i16,
+    /// 8-bit Y position (compared to scanline modulo 256).
+    pub y: u8,
+    /// 9-bit tile number (low byte from low table, bit 8 from attrs).
+    pub tile: u16,
+    /// 3-bit palette index (sprites use the upper half of CGRAM, so
+    /// final CGRAM index = `128 + palette * 16 + pixel_idx`).
+    pub palette: u8,
+    /// 2-bit priority (0-3). Compared against BG priorities.
+    pub priority: u8,
+    /// Horizontal flip flag.
+    pub h_flip: bool,
+    /// Vertical flip flag.
+    pub v_flip: bool,
+    /// Sprite width in pixels (from OBSEL size pair).
+    pub w: u16,
+    /// Sprite height in pixels (from OBSEL size pair).
+    pub h: u16,
+}
+
+/// Sprite size pair selected by `OBSEL.bits[7:5]` — small vs large.
+#[must_use]
+pub fn sprite_size_pair(obsel: u8) -> ((u16, u16), (u16, u16)) {
+    match (obsel >> 5) & 0x07 {
+        0 => ((8, 8), (16, 16)),
+        1 => ((8, 8), (32, 32)),
+        2 => ((8, 8), (64, 64)),
+        3 => ((16, 16), (32, 32)),
+        4 => ((16, 16), (64, 64)),
+        5 => ((32, 32), (64, 64)),
+        6 | 7 => ((16, 32), (32, 64)),
+        _ => ((8, 8), (16, 16)),
+    }
+}
+
+/// Decode all 128 OAM entries into [`SpriteEntry`].
+#[must_use]
+pub fn decode_all_sprites(ppu: &Ppu) -> [SpriteEntry; 128] {
+    let (small, large) = sprite_size_pair(ppu.obsel);
+    let mut out = [SpriteEntry {
+        x: 0,
+        y: 0,
+        tile: 0,
+        palette: 0,
+        priority: 0,
+        h_flip: false,
+        v_flip: false,
+        w: 8,
+        h: 8,
+    }; 128];
+    for (idx, slot) in out.iter_mut().enumerate() {
+        let base = (idx * 4) as u16;
+        let x_low = ppu.oam.peek(base);
+        let y_pos = ppu.oam.peek(base + 1);
+        let tile_low = ppu.oam.peek(base + 2);
+        let attrs = ppu.oam.peek(base + 3);
+        // High table: 32 bytes at OAM[$200..$220], 2 bits per sprite.
+        let high_byte_idx = 0x200 + (idx / 4);
+        let high_bit_off = (idx % 4) * 2;
+        let high = (ppu.oam.peek(high_byte_idx as u16) >> high_bit_off) & 0x03;
+        let x_high_bit = (high & 0x01) as i16;
+        let is_large = (high & 0x02) != 0;
+        // 9-bit X with sign extension: bit 8 set => x is negative.
+        let mut x = (x_high_bit << 8) | (x_low as i16);
+        if x >= 256 {
+            x -= 512;
+        }
+        let (w, h) = if is_large { large } else { small };
+        *slot = SpriteEntry {
+            x,
+            y: y_pos,
+            tile: (tile_low as u16) | ((attrs as u16 & 0x01) << 8),
+            palette: (attrs >> 1) & 0x07,
+            priority: (attrs >> 4) & 0x03,
+            h_flip: attrs & 0x40 != 0,
+            v_flip: attrs & 0x80 != 0,
+            w,
+            h,
+        };
+    }
+    out
+}
+
+/// Render one scanline of sprite output.
+///
+/// Returns, for each of the 256 visible columns, either `Some(rgb)`
+/// when a non-transparent sprite covers that pixel, or `None` when
+/// no sprite contributes. The caller composites this on top of the
+/// BG layers.
+///
+/// Per-sprite priority bits *are* decoded but not yet used to slot
+/// sprites between BG layers — that lands once the per-pixel priority
+/// engine is in place. For now the simple "sprites on top of all
+/// BGs" rule is enough for title-screen Mario/Yoshi visibility.
+#[must_use]
+pub fn render_sprites_scanline(ppu: &Ppu, y: u16, opts: RenderOptions) -> [Option<[u8; 3]>; 256] {
+    let mut out: [Option<[u8; 3]>; 256] = [None; 256];
+    if ppu.inidisp & 0x80 != 0 && !opts.bypass_forced_blank {
+        return out;
+    }
+    let brightness = if opts.bypass_forced_blank {
+        0x0F
+    } else {
+        ppu.inidisp & 0x0F
+    };
+    // OBSEL bits 0-2: name select base in 8K-byte chunks (= 16 KB
+    // word steps). 0..7 → byte base 0 / $2000 / ... / $E000.
+    let sprite_tile_base_bytes = ((ppu.obsel as usize) & 0x07) << 13;
+    // Iterate sprites highest-OAM-index first so lower indices win
+    // (real PPU draws sprite 0 last; we emulate by drawing 127 first
+    // and overwriting with lower indices).
+    let sprites = decode_all_sprites(ppu);
+    for sp in sprites.iter().rev() {
+        // Does this scanline cross the sprite?
+        let row_in_sprite = y.wrapping_sub(sp.y as u16);
+        if usize::from(row_in_sprite) >= sp.h as usize {
+            continue;
+        }
+        for col in 0..sp.w {
+            let screen_x = sp.x + col as i16;
+            if !(0..256).contains(&screen_x) {
+                continue;
+            }
+            // Apply flip to find tile-local coordinates.
+            let mut sc = col as usize;
+            let mut sr = row_in_sprite as usize;
+            if sp.h_flip {
+                sc = (sp.w - 1) as usize - sc;
+            }
+            if sp.v_flip {
+                sr = (sp.h - 1) as usize - sr;
+            }
+            // SNES sprites use a 16-tile-wide "sprite plane" — each 8×8
+            // tile-block of a big sprite is at `(base_tile + row*16 + col)`
+            // with col/row in tile units within the sprite, all mod 256.
+            let tile_x = sc / 8;
+            let tile_y = sr / 8;
+            let pix_x = sc % 8;
+            let pix_y = sr % 8;
+            let tile_id = (sp.tile.wrapping_add(((tile_y * 16) + tile_x) as u16)) & 0x01FF;
+            let tile_off = sprite_tile_base_bytes + (tile_id as usize) * 32;
+            let idx = decode_tile_pixel(ppu, tile_off, pix_y, pix_x, 4);
+            if idx == 0 {
+                continue; // transparent
+            }
+            // Sprite palette: upper half of CGRAM.
+            let cgram_idx = 128u16 + (sp.palette as u16) * 16 + (idx as u16);
+            let rgb = decode_palette(ppu, cgram_idx as u8, brightness);
+            out[screen_x as usize] = Some(rgb);
+        }
+    }
+    out
+}
+
 /// Render the full visible frame for BG1-only Mode 0.
 ///
 /// 224 scanlines (NTSC native). For 239-line PAL we'll extend later.
@@ -242,11 +400,14 @@ pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
         let bg1 = render_bg_scanline_with(ppu, 0, y as u16, opts);
         let bg2 = render_bg_scanline_with(ppu, 1, y as u16, opts);
         let bg3 = render_bg_scanline_with(ppu, 2, y as u16, opts);
+        let sprites = render_sprites_scanline(ppu, y as u16, opts);
         let backdrop = bg1[0]; // each scanline writes backdrop where idx==0
         let off = y * FRAME_W;
         for x in 0..FRAME_W {
-            // Top-most non-backdrop wins.
-            buf[off + x] = if bg3[x] != backdrop {
+            // Priority order (top to bottom): sprites → BG3 → BG1 → BG2 → backdrop.
+            buf[off + x] = if let Some(rgb) = sprites[x] {
+                rgb
+            } else if bg3[x] != backdrop {
                 bg3[x]
             } else if bg1[x] != backdrop {
                 bg1[x]
@@ -610,5 +771,65 @@ mod tests {
         p.cgram.poke(0x0B, 0x7C);
         let line = render_bg1_scanline(&p, 0);
         assert_eq!(line[0], [0, 0, 255]);
+    }
+
+    #[test]
+    fn sprite_size_pair_table() {
+        assert_eq!(sprite_size_pair(0x00), ((8, 8), (16, 16)));
+        assert_eq!(sprite_size_pair(0x20), ((8, 8), (32, 32)));
+        assert_eq!(sprite_size_pair(0x60), ((16, 16), (32, 32)));
+        assert_eq!(sprite_size_pair(0x80), ((16, 16), (64, 64)));
+    }
+
+    #[test]
+    fn sprite_renders_at_known_position_with_known_palette() {
+        // Seed OAM #0: x=16, y=20, tile=0, palette=0, small (8x8).
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F); // visible, full brightness
+        // OBSEL = $00 → sprite tile base = $0000, sizes (8x8, 16x16).
+        // Default small = 8x8.
+        p.oam.poke(0, 16); // x.low
+        p.oam.poke(1, 20); // y
+        p.oam.poke(2, 0); // tile.low
+        p.oam.poke(3, 0); // attrs: palette 0, priority 0, no flip
+        // 4bpp tile #0 at VRAM byte $0000-$001F.
+        // Pixel (0, 0): planes (0,1,2,3) bits = (1,0,0,0) → palette idx 1.
+        p.vram.poke(0x0000, 0x80); // plane 0 row 0
+        p.vram.poke(0x0001, 0x00); // plane 1 row 0
+        p.vram.poke(0x0010, 0x00); // plane 2 row 0
+        p.vram.poke(0x0011, 0x00); // plane 3 row 0
+        // Sprite palette starts at CGRAM[128]. Palette offset 0,
+        // index 1 → CGRAM[129] = $001F (red).
+        p.cgram.poke(258, 0x1F);
+        p.cgram.poke(259, 0x00);
+        let line = render_sprites_scanline(&p, 20, RenderOptions::default());
+        // At screen X=16 (sprite's x), pixel 0 should be red.
+        assert_eq!(line[16], Some([0xFF, 0, 0]));
+        // Pixels outside the sprite are None.
+        assert_eq!(line[0], None);
+    }
+
+    #[test]
+    fn hidden_sprite_at_y_240_does_not_appear_on_visible_lines() {
+        // OAM #0 hidden at Y = 240, which is past the visible 224
+        // scanlines — should produce nothing on any screen row. To
+        // make this test isolating, we hide ALL 128 sprites at Y=240
+        // (else the default zeroed OAM has 127 sprites at (0,0) with
+        // tile 0, which would draw all over scanline 0).
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F);
+        for i in 0..128u16 {
+            p.oam.poke(i * 4 + 1, 240); // every sprite's Y = 240
+        }
+        p.oam.poke(0, 16); // sprite #0 keeps its x=16
+        p.vram.poke(0x0000, 0xFF);
+        p.cgram.poke(258, 0x1F);
+        p.cgram.poke(259, 0x00);
+        for y in 0..224u16 {
+            let line = render_sprites_scanline(&p, y, RenderOptions::default());
+            for (xi, px) in line.iter().enumerate() {
+                assert!(px.is_none(), "y={y} x={xi} had visible sprite pixel");
+            }
+        }
     }
 }
