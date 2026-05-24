@@ -68,6 +68,39 @@ impl Dma {
         }
         total
     }
+
+    /// Frame-start HDMA initialisation. Called once per frame
+    /// (typically at the entry of the pre-render scanline). For each
+    /// channel whose bit is set in `$420C HDMAEN`, copies the table
+    /// start pointer, reads the first header byte, and in indirect
+    /// mode the first data pointer. Channels not enabled in
+    /// [`Self::hdmaen`] are left untouched.
+    pub fn hdma_init<B: DmaBus>(&mut self, bus: &mut B) {
+        for ch in 0..8 {
+            if self.hdmaen & (1 << ch) != 0 {
+                self.channels[ch].hdma_start_frame(bus);
+            } else {
+                self.channels[ch].hdma_active = false;
+                self.channels[ch].hdma_do_transfer = false;
+            }
+        }
+    }
+
+    /// Per-scanline HDMA step. Called once per visible scanline
+    /// (lines 0..=224 NTSC). Each enabled, still-active channel
+    /// fires up to one mode-pattern's worth of bytes through its
+    /// configured B-bus offset. Returns the total bytes transferred
+    /// across all channels this line — useful for CPU stall accounting
+    /// in a later phase.
+    pub fn hdma_run_line<B: DmaBus>(&mut self, bus: &mut B) -> u32 {
+        let mut total = 0u32;
+        for ch in 0..8 {
+            if self.hdmaen & (1 << ch) != 0 {
+                total += self.channels[ch].hdma_step_line(bus);
+            }
+        }
+        total
+    }
 }
 
 #[cfg(test)]
