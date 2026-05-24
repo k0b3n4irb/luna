@@ -51,7 +51,25 @@ pub struct ApuStub {
     from_cpu: [u8; 4],
     /// Phase — see [`Phase`].
     phase: Phase,
+    /// Consecutive CPU reads of `$2140` or `$2141` since the last
+    /// write to either of those two ports. Lets us detect the
+    /// "wait for SPC ready" busy-spin pattern most games do
+    /// between IPL upload phases — a real SPC's music driver
+    /// writes `$BBAA` back to `$2140:$2141` after its own init, but
+    /// our stub can't run the driver. When the CPU has been polling
+    /// for [`HANDSHAKE_RESPIN_THRESHOLD`] reads without writing, we
+    /// assume it's waiting for that ready signal and restore the
+    /// IPL bytes.
+    p01_reads_since_write: u32,
 }
+
+/// How many consecutive `$2140`/`$2141` reads (without any write to
+/// either port) trip the "wait for SPC ready" heuristic. The IPL
+/// counter-ACK loop only ever sees a couple of reads before the next
+/// write, so 100 is comfortably above that floor while still being
+/// short enough that a real `wait_for_BBAA` spin unblocks in well
+/// under one frame of emulated time.
+pub const HANDSHAKE_RESPIN_THRESHOLD: u32 = 100;
 
 impl Default for ApuStub {
     fn default() -> Self {
@@ -68,6 +86,7 @@ impl ApuStub {
             to_cpu: [0xAA, 0xBB, 0x00, 0x00],
             from_cpu: [0; 4],
             phase: Phase::PreKick,
+            p01_reads_since_write: 0,
         }
     }
 
@@ -91,14 +110,31 @@ impl ApuStub {
     }
 
     /// CPU-side read of mailbox port `port` (0..=3).
-    #[must_use]
-    pub fn read(&self, port: usize) -> u8 {
+    ///
+    /// Side effect: keeps a running count of consecutive
+    /// `$2140`/`$2141` reads since the last write to either port.
+    /// Once that exceeds [`HANDSHAKE_RESPIN_THRESHOLD`] in `PostKick`
+    /// phase, we restore the `$BBAA` IPL signal so games waiting for
+    /// the SPC music driver's "ready" handshake can proceed.
+    pub fn read(&mut self, port: usize) -> u8 {
+        if port < 2 {
+            self.p01_reads_since_write = self.p01_reads_since_write.saturating_add(1);
+            if self.phase == Phase::PostKick
+                && self.p01_reads_since_write > HANDSHAKE_RESPIN_THRESHOLD
+            {
+                self.to_cpu[0] = 0xAA;
+                self.to_cpu[1] = 0xBB;
+            }
+        }
         self.to_cpu[port]
     }
 
     /// CPU-side write of `value` to mailbox port `port` (0..=3).
     pub fn write(&mut self, port: usize, value: u8) {
         self.from_cpu[port] = value;
+        if port < 2 {
+            self.p01_reads_since_write = 0;
+        }
         if port == 0 && value == 0xCC && self.phase == Phase::PreKick {
             self.phase = Phase::PostKick;
         }
@@ -123,7 +159,7 @@ mod tests {
 
     #[test]
     fn boot_returns_handshake_pattern() {
-        let s = ApuStub::new();
+        let mut s = ApuStub::new();
         assert_eq!(s.read(0), 0xAA);
         assert_eq!(s.read(1), 0xBB);
         assert_eq!(s.read(2), 0x00);
@@ -135,7 +171,7 @@ mod tests {
     fn handshake_16bit_read_matches_bbaa() {
         // The Super Bomberman handshake: 16-bit `CMP $002140` reads
         // both $2140 (low) and $2141 (high) — should equal $BBAA.
-        let s = ApuStub::new();
+        let mut s = ApuStub::new();
         let lo = s.read(0);
         let hi = s.read(1);
         let combined = (u16::from(hi) << 8) | u16::from(lo);
@@ -197,11 +233,59 @@ mod tests {
     }
 
     #[test]
+    fn handshake_respin_restores_bbaa_after_many_reads_without_writes() {
+        // SMW pattern: after one IPL upload, the game loops on
+        // `LDA #$BBAA / CMP $2140 / BNE` waiting for the (real) SPC
+        // music driver to write $BBAA back to the mailbox. With pure
+        // echo our stub keeps whatever the last counter write put
+        // there ($00 / $FF / etc.), so the spin runs forever. After
+        // the threshold of consecutive read-only iterations elapses,
+        // we forcibly restore the IPL ready signal.
+        let mut s = ApuStub::new();
+        // Get into PostKick first via the standard kick.
+        s.write(0, 0xCC);
+        // Upload one byte to put something other than $BBAA into the
+        // mailbox.
+        s.write(0, 0x00);
+        s.write(1, 0x42);
+        s.write(0, 0x01);
+        assert_ne!(s.read(0), 0xAA);
+        // Now the game spin-reads $2140/$2141 without writing. After
+        // enough iterations we should see $BBAA.
+        for _ in 0..(HANDSHAKE_RESPIN_THRESHOLD + 2) {
+            let _ = s.read(0);
+        }
+        assert_eq!(s.read(0), 0xAA);
+        assert_eq!(s.read(1), 0xBB);
+    }
+
+    #[test]
+    fn ipl_byte_loop_doesnt_trigger_respin_heuristic() {
+        // Crucial regression: the per-byte upload writes counter then
+        // does `CMP $2140 / BNE wait` — but the BNE wait only spins a
+        // few times before matching, so the read counter must NOT
+        // reach the threshold during normal upload activity.
+        let mut s = ApuStub::new();
+        s.write(0, 0xCC);
+        s.write(0, 0x00);
+        for counter in 1u8..=200u8 {
+            s.write(1, counter ^ 0x55); // data byte
+            s.write(0, counter); // counter (also resets read-count)
+            // Simulate the inner `CMP $2140 / BNE wait` — just one or
+            // two reads is realistic since echo matches immediately.
+            let v = s.read(0);
+            assert_eq!(v, counter);
+        }
+    }
+
+    #[test]
     fn last_writes_reflects_pre_kick_writes_even_though_to_cpu_doesnt() {
         let mut s = ApuStub::new();
         s.write(0, 0x55);
         s.write(2, 0x66);
         assert_eq!(s.last_writes(), &[0x55, 0x00, 0x66, 0x00]);
+        // In PreKick, the read heuristic doesn't apply (we never
+        // promised "ready signal" yet — we ARE the ready signal).
         assert_eq!(s.read(0), 0xAA); // still the handshake byte
         assert_eq!(s.read(2), 0x00); // unchanged from init
     }
