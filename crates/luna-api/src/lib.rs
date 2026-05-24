@@ -44,7 +44,7 @@ pub enum ApiError {
 }
 
 /// Cartridge metadata returned by [`Emulator::load_rom`].
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct RomInfo {
     /// Title field from the internal SNES header.
     pub title: String,
@@ -62,7 +62,7 @@ pub struct RomInfo {
 
 /// Snapshot of the emulator's observable state. Every field maps to
 /// something the GUI / debugger / tests want to inspect.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct EmulatorState {
     /// `null` until a ROM is loaded.
     pub rom: Option<RomInfo>,
@@ -81,7 +81,7 @@ pub struct EmulatorState {
 }
 
 /// 65C816 register snapshot.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct CpuState {
     /// Accumulator (16-bit, low byte active in 8-bit M mode).
     pub a: u16,
@@ -110,7 +110,7 @@ pub struct CpuState {
 }
 
 /// PPU register snapshot + memory occupancy stats.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct PpuState {
     /// `$2100` — bit 7 forced-blank, bits 0-3 brightness.
     pub inidisp: u8,
@@ -133,7 +133,7 @@ pub struct PpuState {
 }
 
 /// CPU-system register snapshot (`$4200-$421F`).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct CpuRegsState {
     /// `$4200`.
     pub nmitimen: u8,
@@ -146,7 +146,7 @@ pub struct CpuRegsState {
 }
 
 /// Scanline scheduler snapshot.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct SchedulerState {
     /// 0..=261 on NTSC; 225..=261 is VBlank.
     pub ppu_line: u16,
@@ -159,7 +159,7 @@ pub struct SchedulerState {
 }
 
 /// APU / SPC700 / DSP snapshot.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ApuState {
     /// SPC700 program counter.
     pub spc_pc: u16,
@@ -191,7 +191,7 @@ pub struct ApuState {
 
 /// Diagnostic info for an SPC700 opcode that the emulator hasn't
 /// implemented yet.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct UnimplementedOp {
     /// Offending opcode byte.
     pub opcode: u8,
@@ -200,7 +200,7 @@ pub struct UnimplementedOp {
 }
 
 /// Cumulative metrics since reset.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Stats {
     /// Total CPU instructions executed.
     pub instructions_executed: u64,

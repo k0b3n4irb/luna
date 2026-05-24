@@ -1,6 +1,6 @@
 [package]
 name = "luna-mcp-server"
-description = "MCP server for Luna — native-only (rmcp + tokio + axum). Does NOT build for wasm32-unknown-unknown."
+description = "MCP server for Luna — native-only (rmcp + tokio). Does NOT build for wasm32-unknown-unknown."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,21 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 readme.workspace = true
+
+[dependencies]
+luna-api   = { workspace = true }
+
+rmcp       = { workspace = true }
+schemars   = { workspace = true }
+base64     = { workspace = true }
+serde      = { workspace = true, features = ["std", "derive"] }
+serde_json = { workspace = true, features = ["std"] }
+thiserror  = { workspace = true }
+
+# Tokio runtime — we need the multi-thread runtime + io-std for stdio
+# transport. The workspace default has `default-features = false`, so
+# enable the bits we actually need here.
+tokio      = { workspace = true, features = ["macros", "rt-multi-thread", "io-std", "sync"] }
 
 [lints]
 workspace = true
