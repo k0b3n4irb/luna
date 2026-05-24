@@ -10,6 +10,7 @@ repository.workspace = true
 readme.workspace = true
 
 [dependencies]
+luna-apu        = { workspace = true }
 luna-bus        = { workspace = true }
 luna-cartridge  = { workspace = true }
 luna-cpu-65c816 = { workspace = true }
