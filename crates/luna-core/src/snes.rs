@@ -622,7 +622,18 @@ impl<'a> Bus for SnesBus<'a> {
                 mapper: self.mapper,
                 ppu: self.ppu,
             };
-            self.dma.run_mdma(&mut view, value);
+            let bytes = self.dma.run_mdma(&mut view, value);
+            // DMA stalls the CPU during the transfer. Cost model
+            // (per fullsnes §"SNES DMA Timing"):
+            //   * 8 mclk one-shot overhead at the start of the burst
+            //   * 8 mclk per channel that runs (already implicit in
+            //     the per-byte cost since we lump the bus overhead
+            //     into each byte)
+            //   * 8 mclk per byte transferred
+            // We charge `8 + 8 × bytes` — close enough for game
+            // compatibility without modelling the per-channel
+            // header explicitly.
+            self.io_cycle(u64::from(8 + bytes.saturating_mul(8)));
             return;
         }
         if Self::is_hdmaen(addr) {
