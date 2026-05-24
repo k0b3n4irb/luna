@@ -8,7 +8,7 @@
 //! depend on the PPU's internal mutability.
 
 use crate::ppu::{Ppu, bg_state};
-use crate::tile::{apply_brightness, bgr555_to_rgb888, decode_2bpp_row};
+use crate::tile::{apply_brightness, bgr555_to_rgb888, decode_2bpp_row, decode_4bpp_row};
 
 /// One scanline of pixels (256 wide, RGB888).
 pub type Scanline = [[u8; 3]; 256];
@@ -46,7 +46,47 @@ pub fn render_bg1_scanline(ppu: &Ppu, y: u16) -> Scanline {
     render_bg1_scanline_with(ppu, y, RenderOptions::default())
 }
 
+/// BG1's bit-depth derived from `BGMODE` (the low 3 bits select the
+/// PPU mode). Returns 2, 4 or 8 — matching the SNES per-mode mapping
+/// from <https://problemkaputt.de/fullsnes.htm> §"PPU Background
+/// Modes":
+///
+/// | Mode | BG1 | BG2 | BG3 | BG4 |
+/// |:----:|----:|----:|----:|----:|
+/// |  0   | 2   | 2   | 2   | 2   |
+/// |  1   | 4   | 4   | 2   | —   |
+/// |  2   | 4   | 4   | —   | —   |
+/// |  3   | 8   | 4   | —   | —   |
+/// |  4   | 8   | 2   | —   | —   |
+/// |  5   | 4   | 2   | —   | —   |
+/// |  6   | 4   | —   | —   | —   |
+/// |  7   | 8   | —   | —   | —   |
+///
+/// Modes 5/6 are high-res (512px); Mode 7 is affine. We render either
+/// the way Mode 1/2/3 would (planar tiles + tilemap) for now.
+#[must_use]
+pub fn bg1_bpp(bgmode: u8) -> u8 {
+    match bgmode & 0x07 {
+        0 => 2,
+        1 | 2 | 5 | 6 => 4,
+        3 | 4 | 7 => 8,
+        _ => unreachable!(),
+    }
+}
+
 /// Same as [`render_bg1_scanline`] but with debug options.
+///
+/// Honours `BGMODE` for BG1 bit-depth:
+///
+/// - **2bpp** (Mode 0): 16 bytes/tile, 4-color sub-palettes at
+///   `CGRAM[palette_off * 4 + idx]`.
+/// - **4bpp** (Mode 1/2/5/6): 32 bytes/tile, 16-color sub-palettes
+///   at `CGRAM[palette_off * 16 + idx]`.
+/// - **8bpp** (Mode 3/4/7): 64 bytes/tile, full 256-colour palette
+///   indexed straight by `idx` (tilemap palette offset ignored).
+///
+/// Mode 7 affine is still handled the planar way for now — close
+/// enough to show *something* until the real Mode-7 path lands.
 #[must_use]
 pub fn render_bg1_scanline_with(ppu: &Ppu, y: u16, opts: RenderOptions) -> Scanline {
     let mut out = [[0u8; 3]; 256];
@@ -63,6 +103,13 @@ pub fn render_bg1_scanline_with(ppu: &Ppu, y: u16, opts: RenderOptions) -> Scanl
     };
 
     let bg = bg_state(ppu, 0);
+    let bpp = bg1_bpp(ppu.bgmode);
+    let bytes_per_tile = match bpp {
+        2 => 16,
+        4 => 32,
+        8 => 64,
+        _ => 16,
+    };
     // 32x32 tilemap layout only for now. (SC bits in $2107 not modelled.)
     let tilemap_words = 32u16;
     // VRAM byte address of the tilemap base.
@@ -99,24 +146,70 @@ pub fn render_bg1_scanline_with(ppu: &Ppu, y: u16, opts: RenderOptions) -> Scanl
             col_in_tile = 7 - col_in_tile;
         }
 
-        // 2bpp: 16 bytes per tile, 2 bytes per row.
-        let tile_off = char_base + (tile_num as usize) * 16 + row_in_tile * 2;
-        let lo = ppu.vram.peek(tile_off as u16);
-        let hi = ppu.vram.peek(tile_off.wrapping_add(1) as u16);
-        let row = decode_2bpp_row(lo, hi);
-        let idx = row[col_in_tile];
+        let tile_base = char_base + (tile_num as usize) * bytes_per_tile;
+        let idx = decode_tile_pixel(ppu, tile_base, row_in_tile, col_in_tile, bpp);
 
         out[x as usize] = if idx == 0 {
             // Transparent — fall through to backdrop.
             backdrop
         } else {
-            // Mode 0 BG1 palette range: CGRAM[0..32]. Palette offset
-            // selects which 4-entry sub-palette (× 4 colors).
-            let cgram_idx = palette_off * 4 + idx;
+            let cgram_idx = match bpp {
+                // 2bpp: 4-color sub-palettes at CGRAM[palette_off*4].
+                2 => palette_off * 4 + idx,
+                // 4bpp: 16-color sub-palettes at CGRAM[palette_off*16].
+                4 => palette_off.wrapping_mul(16).wrapping_add(idx),
+                // 8bpp: full 256-color palette; palette offset is
+                // ignored by hardware.
+                _ => idx,
+            };
             decode_palette(ppu, cgram_idx, brightness)
         };
     }
     out
+}
+
+/// Decode a single pixel's palette index out of a planar tile in VRAM.
+///
+/// SNES tile layout is *planar bitplane-pair* in VRAM:
+///
+/// - 2bpp: rows 0..7 each have planes (0, 1) packed as two bytes →
+///   16 bytes per tile, addressed `tile_base + row*2`.
+/// - 4bpp: planes (0, 1) for rows 0..7 fill the first 16 bytes; planes
+///   (2, 3) for rows 0..7 fill the next 16 bytes. So a row's four
+///   plane bytes live at `tile_base + row*2`, `+1`, `+16+row*2`, `+17`.
+/// - 8bpp: same as 4bpp but with planes (4, 5, 6, 7) in the next 32
+///   bytes.
+fn decode_tile_pixel(
+    ppu: &Ppu,
+    tile_base: usize,
+    row_in_tile: usize,
+    col_in_tile: usize,
+    bpp: u8,
+) -> u8 {
+    let row_off = tile_base + row_in_tile * 2;
+    let p0 = ppu.vram.peek(row_off as u16);
+    let p1 = ppu.vram.peek(row_off.wrapping_add(1) as u16);
+    if bpp == 2 {
+        return decode_2bpp_row(p0, p1)[col_in_tile];
+    }
+    let p2 = ppu.vram.peek(row_off.wrapping_add(16) as u16);
+    let p3 = ppu.vram.peek(row_off.wrapping_add(17) as u16);
+    if bpp == 4 {
+        return decode_4bpp_row(p0, p1, p2, p3)[col_in_tile];
+    }
+    // 8bpp: fold in the upper four planes too.
+    let p4 = ppu.vram.peek(row_off.wrapping_add(32) as u16);
+    let p5 = ppu.vram.peek(row_off.wrapping_add(33) as u16);
+    let p6 = ppu.vram.peek(row_off.wrapping_add(48) as u16);
+    let p7 = ppu.vram.peek(row_off.wrapping_add(49) as u16);
+    let bit = 7 - col_in_tile;
+    let mask = 1u8 << bit;
+    let lo = decode_4bpp_row(p0, p1, p2, p3)[col_in_tile];
+    let hi_p4 = (p4 & mask) >> bit;
+    let hi_p5 = (p5 & mask) >> bit;
+    let hi_p6 = (p6 & mask) >> bit;
+    let hi_p7 = (p7 & mask) >> bit;
+    lo | (hi_p4 << 4) | (hi_p5 << 5) | (hi_p6 << 6) | (hi_p7 << 7)
 }
 
 /// Render the full visible frame for BG1-only Mode 0.
@@ -231,6 +324,57 @@ mod tests {
         // Color 1 in our setup is $001F → red at brightness 15.
         // scale_5_to_8(0x1F) = 0xFF; brightness 15 keeps full value.
         assert_eq!(line[0], [0xFF, 0, 0]);
+    }
+
+    #[test]
+    fn bg1_bpp_table_matches_snes_modes() {
+        assert_eq!(bg1_bpp(0), 2);
+        assert_eq!(bg1_bpp(1), 4);
+        assert_eq!(bg1_bpp(2), 4);
+        assert_eq!(bg1_bpp(3), 8);
+        assert_eq!(bg1_bpp(4), 8);
+        assert_eq!(bg1_bpp(5), 4);
+        assert_eq!(bg1_bpp(6), 4);
+        assert_eq!(bg1_bpp(7), 8);
+        // Mode 1 with high bit set (BG3 priority) still mode 1 = 4bpp.
+        assert_eq!(bg1_bpp(0x09), 4);
+    }
+
+    #[test]
+    fn mode1_4bpp_decodes_correctly_with_16_color_palette() {
+        // Set up a 4bpp BG1 with one tile that uses an index in the
+        // upper 4-bit range (e.g. index 10), which can ONLY be reached
+        // when planes 2-3 are non-zero. With a 2bpp decoder this pixel
+        // would only see planes 0-1 and read the wrong value.
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F); // no forced blank, full bright
+        p.write(register::BGMODE, 0x01); // Mode 1
+        p.write(0x07, 0x00); // BG1SC: tilemap at word 0
+        p.write(0x0B, 0x01); // BG12NBA: BG1 char base = word $1000 (= byte $2000)
+
+        // 4bpp tile #0 at VRAM byte $2000-$201F (32 bytes).
+        // Row 0, pixel 0 = palette index 10 = 0b1010.
+        //   plane bits, left-to-right pixel 0:
+        //     p0=0 (bit 0), p1=1 (bit 1), p2=0 (bit 2), p3=1 (bit 3)
+        //   So the MSB of each plane byte is the matching bit value.
+        // p0=0 → byte $00, p1=$80, p2=$00, p3=$80.
+        p.vram.poke(0x2000, 0x00); // plane 0, row 0
+        p.vram.poke(0x2001, 0x80); // plane 1, row 0
+        p.vram.poke(0x2010, 0x00); // plane 2, row 0
+        p.vram.poke(0x2011, 0x80); // plane 3, row 0
+
+        // Tilemap entry at byte $0000-$0001: tile 0, palette offset 0.
+        p.vram.poke(0x0000, 0x00);
+        p.vram.poke(0x0001, 0x00);
+
+        // CGRAM[10] = colour we expect to see ($7FFF = white).
+        p.cgram.poke(20, 0xFF);
+        p.cgram.poke(21, 0x7F);
+        // CGRAM[0] = black (backdrop default).
+
+        let line = render_bg1_scanline(&p, 0);
+        // First pixel should be white (index 10 → CGRAM[10] = $7FFF).
+        assert_eq!(line[0], [0xFF, 0xFF, 0xFF]);
     }
 
     #[test]
