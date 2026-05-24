@@ -14,7 +14,14 @@ use crate::addressing::{
 };
 use crate::cpu::Cpu;
 use crate::flags::bit;
-use luna_bus::{Addr24, Bus, make_addr};
+use luna_bus::{Addr24, Bus, MCycles, make_addr};
+
+/// Master-cycle cost of one "WAI poll" step. The 65C816 in WAI does
+/// nothing useful, but the system master clock keeps running — so
+/// the scheduler must keep advancing or NMI never fires. Anything
+/// `> 0` works; 8 mclk (one slow bus access) keeps WAI loops cheap
+/// while still letting a frame complete in O(scanlines × dots).
+const WAI_TICK_MCYCLES: MCycles = 8;
 
 impl Cpu {
     /// Execute one instruction: fetch opcode at `PB:PC` and dispatch.
@@ -23,11 +30,18 @@ impl Cpu {
             return;
         }
         // WAI: the CPU pauses until an interrupt arrives. A latched NMI
-        // wakes us up; otherwise just spin.
+        // wakes us up; otherwise we keep the CPU clock running so the
+        // scheduler can advance through scanlines and eventually deliver
+        // an NMI at VBlank (line 225 on NTSC). Skipping the io_cycle
+        // here would deadlock games that sit in a `WAI; BRA -3` VBlank-
+        // wait loop — they'd never get an NMI because the scheduler
+        // would never reach line 225. 8 mclk ≈ one "slow" bus tick; the
+        // exact value doesn't matter as long as it's > 0.
         if self.waiting {
             if self.pending_nmi {
                 self.waiting = false;
             } else {
+                bus.io_cycle(WAI_TICK_MCYCLES);
                 return;
             }
         }
