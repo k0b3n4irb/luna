@@ -226,8 +226,12 @@ fn print_diag_state(snes: &mut Snes) {
         );
     }
     println!(
-        "CPU regs:  NMITIMEN=${:02X}  HVBJOY=${:02X}  fake_frames={}  NMIs_served={}",
-        snes.cpu_regs.nmitimen, snes.cpu_regs.hvbjoy, snes.fake_frame_count, snes.nmis_serviced
+        "CPU regs:  NMITIMEN=${:02X}  HVBJOY=${:02X}  frames={}  NMIs_served={}  ppu_line={}",
+        snes.cpu_regs.nmitimen,
+        snes.cpu_regs.hvbjoy,
+        snes.frame_count,
+        snes.nmis_serviced,
+        snes.ppu_line,
     );
     let ports = snes.apu.ports();
     println!(
