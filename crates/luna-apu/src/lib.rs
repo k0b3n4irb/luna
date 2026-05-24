@@ -137,6 +137,11 @@ pub struct Apu {
     /// Position within the current BRR block (0..15). When it wraps,
     /// the block header is re-read to handle end / loop bits.
     pub voice_block_sample: [u8; 8],
+    /// Last two decoded BRR samples per voice (`[s(n-1), s(n-2)]`).
+    /// Required by filters F1/F2/F3 — the filter mixes the new raw
+    /// sample with this short history to reconstruct the original
+    /// 16-bit PCM samples.
+    pub voice_brr_history: [[i16; 2]; 8],
     /// SPC cycles owed to the audio-sample tick (32-cycle base
     /// clock). Drives both ADSR rate progression and the per-voice
     /// position counter.
@@ -196,6 +201,7 @@ impl Apu {
             voice_position: [0; 8],
             voice_block_addr: [0; 8],
             voice_block_sample: [0; 8],
+            voice_brr_history: [[0, 0]; 8],
             sample_tick_deficit: 0,
             timer_reload: [0; 3],
             timer_output: [0; 3],
@@ -273,13 +279,18 @@ impl Apu {
             let outx_idx = 0x09 + v * 0x10;
             // ENVX = upper 7 bits of the 11-bit envelope.
             self.dsp_regs[envx_idx] = (self.voice_envelope[v] >> 4) as u8;
-            // OUTX: a coarse proxy for "what's coming out of this
-            // voice right now". We mix the per-voice position
-            // counter's low bits with the envelope so polling
-            // drivers see a moving non-zero signal during playback.
+            // OUTX = signed-8-bit (latest decoded sample × envelope).
+            // Real DSP: out = sample × env / 0x800 (envelope is
+            // 11-bit). We then keep only the upper byte for the
+            // signed-8 OUTX. Voices that aren't playing or have
+            // 0 envelope output 0.
             self.dsp_regs[outx_idx] = if self.voice_active[v] {
-                ((self.voice_position[v] as u8).wrapping_mul(13))
-                    .wrapping_add((self.voice_envelope[v] >> 4) as u8)
+                let s = i32::from(self.voice_brr_history[v][0]);
+                let e = i32::from(self.voice_envelope[v]);
+                let mixed = (s * e) >> 11; // ≈ sample × env / 2048
+                let clipped = mixed.clamp(-32768, 32767);
+                // Top byte of the 16-bit mix → signed-8 OUTX.
+                ((clipped >> 8) & 0xFF) as u8
             } else {
                 0
             };
@@ -295,6 +306,12 @@ impl Apu {
             self.voice_age[v] = self.voice_age[v].saturating_add(SPC_CYCLES_PER_SAMPLE);
             if self.voice_active[v] {
                 self.voice_position[v] = self.voice_position[v].wrapping_add(1);
+                // Decode the current BRR sample BEFORE we advance to
+                // the next block — the just-decoded sample feeds the
+                // filter history and drives the OUTX value below.
+                let sample = self.decode_current_brr_sample(v);
+                self.voice_brr_history[v][1] = self.voice_brr_history[v][0];
+                self.voice_brr_history[v][0] = sample;
                 self.advance_brr_block(v);
             }
             self.advance_voice_envelope(v);
@@ -321,6 +338,48 @@ impl Apu {
                 self.dsp_regs[0x7C] |= 1 << v;
             }
         }
+    }
+
+    /// Decode the current BRR sample for voice `v` — the one at
+    /// `voice_block_sample[v]` within `voice_block_addr[v]`. Applies
+    /// the block's range shift and one of the four standard SPC700
+    /// filters (F0..F3) using the per-voice history.
+    fn decode_current_brr_sample(&self, v: usize) -> i16 {
+        let block_addr = self.voice_block_addr[v];
+        let header = self.aram[block_addr as usize];
+        let range = (header >> 4) & 0x0F;
+        let filter = (header >> 2) & 0x03;
+        let sample_idx = self.voice_block_sample[v];
+        // Nibble layout: byte 1 holds samples 0,1 (high, low); byte
+        // 2 holds 2,3; ...; byte 8 holds 14,15.
+        let byte_off = 1 + u16::from(sample_idx / 2);
+        let byte = self.aram[block_addr.wrapping_add(byte_off) as usize];
+        let nibble = if sample_idx & 1 == 0 {
+            byte >> 4
+        } else {
+            byte & 0x0F
+        };
+        // Sign-extend a 4-bit signed value to i32.
+        let signed_nibble = ((nibble as i8) << 4) >> 4;
+        // Range shift: 0..12 are normal; 13..15 clamp to 0 or 0xF800
+        // per real hardware.
+        let raw = if range <= 12 {
+            i32::from(signed_nibble) << range
+        } else if signed_nibble < 0 {
+            -2048
+        } else {
+            0
+        };
+        let p1 = i32::from(self.voice_brr_history[v][0]);
+        let p2 = i32::from(self.voice_brr_history[v][1]);
+        let mixed = match filter {
+            0 => raw,
+            1 => raw + p1 + ((-p1) >> 4),
+            2 => raw + p1 * 2 + ((-p1 * 3) >> 5) - p2 + (p2 >> 4),
+            3 => raw + p1 * 2 + ((-p1 * 13) >> 6) - p2 + ((p2 * 3) >> 4),
+            _ => raw, // unreachable but defensive
+        };
+        mixed.clamp(-32768, 32767) as i16
     }
 
     /// Advance voice `v` by one sample within its current BRR block.
@@ -790,6 +849,40 @@ mod tests {
                 "second read sees 0 (real HW: read clears ENDX)"
             );
         }
+    }
+
+    #[test]
+    fn brr_decode_f0_with_no_shift_is_signed_nibble_extension() {
+        // Filter 0, range 0 — the decoded sample should be just the
+        // signed-extended nibble (no history mix, no shift). We craft
+        // a single block of 8 alternating high/low nibbles ($08 = -8
+        // and $07 = +7) and verify two consecutive samples decode to
+        // those values.
+        let mut apu = Apu::new();
+        // Header: range 0, filter 0, no end, no loop.
+        apu.aram[0x0500] = 0x00;
+        // Sample 0 = $8 (= -8), sample 1 = $7 (= +7).
+        apu.aram[0x0501] = 0x87;
+        apu.voice_block_addr[0] = 0x0500;
+        apu.voice_block_sample[0] = 0;
+        let s0 = apu.decode_current_brr_sample(0);
+        assert_eq!(s0, -8);
+        apu.voice_brr_history[0] = [s0, 0];
+        apu.voice_block_sample[0] = 1;
+        let s1 = apu.decode_current_brr_sample(0);
+        assert_eq!(s1, 7);
+    }
+
+    #[test]
+    fn brr_decode_f0_range_4_shifts_nibble_left() {
+        // Range 4 means each nibble shifts left by 4 bits before
+        // becoming the sample.
+        let mut apu = Apu::new();
+        apu.aram[0x0500] = 0x40; // range 4, filter 0
+        apu.aram[0x0501] = 0x10; // sample 0 nibble = 1 → 1 << 4 = 16
+        apu.voice_block_addr[0] = 0x0500;
+        apu.voice_block_sample[0] = 0;
+        assert_eq!(apu.decode_current_brr_sample(0), 16);
     }
 
     #[test]
