@@ -14,13 +14,15 @@ name = "luna"
 path = "src/main.rs"
 
 [dependencies]
+luna-api       = { workspace = true }
 luna-cartridge = { workspace = true }
 luna-core      = { workspace = true }
 luna-ppu       = { workspace = true }
 
-clap      = { workspace = true }
-image     = { workspace = true }
-thiserror = { workspace = true }
+clap       = { workspace = true }
+image      = { workspace = true }
+thiserror  = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
 
 [lints]
 workspace = true

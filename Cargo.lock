@@ -1724,6 +1724,16 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 [[package]]
 name = "luna-api"
 version = "0.0.1"
+dependencies = [
+ "image",
+ "luna-bus",
+ "luna-cartridge",
+ "luna-core",
+ "luna-ppu",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "luna-apu"
@@ -1760,9 +1770,11 @@ version = "0.0.1"
 dependencies = [
  "clap",
  "image",
+ "luna-api",
  "luna-cartridge",
  "luna-core",
  "luna-ppu",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 

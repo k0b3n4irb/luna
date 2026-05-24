@@ -9,5 +9,16 @@ authors.workspace = true
 repository.workspace = true
 readme.workspace = true
 
+[dependencies]
+luna-bus       = { workspace = true }
+luna-cartridge = { workspace = true }
+luna-core      = { workspace = true }
+luna-ppu       = { workspace = true }
+
+serde      = { workspace = true, features = ["std", "derive"] }
+serde_json = { workspace = true, features = ["std"] }
+thiserror  = { workspace = true }
+image      = { workspace = true }
+
 [lints]
 workspace = true
