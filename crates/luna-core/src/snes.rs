@@ -17,7 +17,6 @@ use luna_cartridge::Cartridge;
 use luna_cpu_65c816::Cpu;
 use luna_dma::{Dma, DmaBus};
 use luna_ppu::Ppu;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 
 /// Top-level SNES machine.
 pub struct Snes {
@@ -210,18 +209,14 @@ impl Snes {
         let consumed = self.total_mclk - before;
         self.advance_scheduler(consumed as u32);
 
-        // Catch up the APU by the same amount. If the SPC700 hits an
-        // opcode we haven't implemented yet, catch the panic and mark
-        // the APU as dead — future mailbox traffic falls through to
-        // the legacy heuristic stub so games don't deadlock.
+        // Catch up the APU by the same amount. The SPC700 now stops
+        // gracefully when it hits an unimplemented opcode (no more
+        // panics) — `Apu::step` simply returns early once
+        // `cpu.stopped == true`. We mirror that into `apu_panicked`
+        // so the mailbox bus path knows to use the fallback stub.
         if !self.apu_panicked {
-            let mclk = consumed as u32;
-            let apu = &mut self.apu_real;
-            let prev_hook = std::panic::take_hook();
-            std::panic::set_hook(Box::new(|_| {}));
-            let result = catch_unwind(AssertUnwindSafe(|| apu.step(mclk)));
-            std::panic::set_hook(prev_hook);
-            if result.is_err() {
+            self.apu_real.step(consumed as u32);
+            if self.apu_real.cpu.stopped {
                 self.apu_panicked = true;
             }
         }
@@ -331,7 +326,12 @@ struct SnesBus<'a> {
     /// `true` (i.e. the real SPC700 hit an unimplemented opcode).
     apu_stub_fallback: &'a mut ApuStub,
     /// Mirror of `Snes::apu_panicked` — captured at the start of the
-    /// bus borrow so we know which mailbox path to use.
+    /// bus borrow so we know which mailbox path to use. Currently
+    /// unused because mailbox reads always go through
+    /// `apu_stub_fallback` regardless of SPC state (the real SPC's
+    /// driver doesn't produce the right ack bytes yet — kept on the
+    /// struct for the day when it does).
+    #[allow(dead_code)]
     apu_panicked: bool,
     fast_rom: bool,
     nmi: &'a mut bool,
@@ -482,15 +482,18 @@ impl<'a> Bus for SnesBus<'a> {
             return self.ppu.read(off);
         }
         if let Some(port) = Self::apu_port(addr) {
-            // Read the mailbox byte the SPC last wrote on its side.
-            // After the SPC has panicked (unimpl opcode) we fall back
-            // to the legacy heuristic stub so games don't deadlock on
-            // missing music-driver responses.
-            return if self.apu_panicked {
-                self.apu_stub_fallback.read(port)
-            } else {
-                self.apu_real.cpu_read_port(port)
-            };
+            // Mailbox reads ALWAYS go through the heuristic stub —
+            // even though the real SPC is running its IPL ROM (and,
+            // after upload, the music driver) in parallel, our SPC
+            // opcode coverage isn't deep enough yet to make most
+            // music drivers produce the right "ready" / "ack" bytes
+            // back. The stub's handshake-respin heuristic *does*
+            // produce those bytes, and that's what real games
+            // observe at `$2140-$2143`. The SPC still runs in the
+            // background — handy for diagnostics and as the future
+            // path once opcode coverage catches up — but its
+            // mailbox writes don't currently drive the main game.
+            return self.apu_stub_fallback.read(port);
         }
         if let Some(offset) = Self::dma_offset(addr) {
             return self.dma.read_register(offset).unwrap_or(0xFF);

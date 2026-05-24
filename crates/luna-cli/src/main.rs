@@ -235,15 +235,27 @@ fn print_diag_state(snes: &mut Snes) {
     );
     let ports = &snes.apu_real.to_cpu_ports;
     println!(
-        "APU:  SPC PC=${:04X}  panicked={}  past_ipl={}  $2140=${:02X} $2141=${:02X} $2142=${:02X} $2143=${:02X}",
+        "APU:  SPC PC=${:04X}  stopped={}  past_ipl={}  $2140=${:02X} $2141=${:02X} $2142=${:02X} $2143=${:02X}",
         snes.apu_real.cpu.pc,
-        snes.apu_panicked,
+        snes.apu_real.cpu.stopped,
         snes.apu_real.past_iplrom,
         ports[0],
         ports[1],
         ports[2],
         ports[3]
     );
+    if let Some((op, pc)) = snes.apu_real.cpu.unimplemented_opcode {
+        // Dump 4 bytes around the offending PC so we can see the
+        // operand pattern and recognise the addressing mode.
+        let aram = &snes.apu_real.aram;
+        println!(
+            "APU:  STOPPED on unimplemented opcode ${op:02X} at SPC PC=${pc:04X}  (bytes: {:02X} {:02X} {:02X} {:02X})",
+            aram[pc as usize],
+            aram[pc.wrapping_add(1) as usize],
+            aram[pc.wrapping_add(2) as usize],
+            aram[pc.wrapping_add(3) as usize],
+        );
+    }
     // OAM occupancy + first few sprite entries (uses immutable `p`).
     let mut oam_non_zero = 0usize;
     for off in 0..0x220u16 {
