@@ -53,6 +53,11 @@ enum Command {
         /// Mode-1 title screens).
         #[arg(long)]
         bg: Option<u8>,
+        /// If set, capture the APU's stereo 32 kHz output and write
+        /// it to a WAV file at the end of the run. Lets the
+        /// emulator be audio-verified without a GUI / sound card.
+        #[arg(long)]
+        audio_out: Option<PathBuf>,
     },
     /// MCP server stub (real implementation lands in Phase 3).
     Mcp,
@@ -67,7 +72,15 @@ fn main() -> ExitCode {
             screenshot,
             force_display,
             bg,
-        } => run(&rom, steps, screenshot.as_deref(), force_display, bg),
+            audio_out,
+        } => run(
+            &rom,
+            steps,
+            screenshot.as_deref(),
+            force_display,
+            bg,
+            audio_out.as_deref(),
+        ),
         Command::Mcp => {
             eprintln!("MCP server not implemented yet — see ARCHITECTURE.md §14 (Phase 3).");
             ExitCode::from(2)
@@ -81,6 +94,7 @@ fn run(
     screenshot: Option<&std::path::Path>,
     force_display: bool,
     bg: Option<u8>,
+    audio_out: Option<&std::path::Path>,
 ) -> ExitCode {
     let cart = match Cartridge::load(rom_path) {
         Ok(c) => c,
@@ -104,6 +118,13 @@ fn run(
 
     let mut executed: u64 = 0;
     let mut panic_msg: Option<String> = None;
+    // If we're recording audio, drain the APU queue every batch of
+    // steps so it doesn't overflow (capped at 16 384 samples).
+    let mut audio_samples: Vec<(i16, i16)> = if audio_out.is_some() {
+        Vec::with_capacity(1 << 20)
+    } else {
+        Vec::new()
+    };
     while executed < steps {
         if snes.cpu.stopped {
             println!("CPU halted by STP after {executed} instructions.");
@@ -116,6 +137,15 @@ fn run(
                 break;
             }
         }
+        // Drain audio every 4 096 instructions so the queue never
+        // saturates (= ~250 audio samples produced per batch).
+        if audio_out.is_some() && executed % 4_096 == 0 {
+            snes.apu_real.drain_audio(&mut audio_samples, 8_192);
+        }
+    }
+    // Final drain.
+    if audio_out.is_some() {
+        snes.apu_real.drain_audio(&mut audio_samples, usize::MAX);
     }
 
     std::panic::set_hook(prev_hook);
@@ -143,7 +173,55 @@ fn run(
             }
         }
     }
+    if let Some(out_path) = audio_out {
+        match write_wav(out_path, &audio_samples) {
+            Ok(_) => println!(
+                "Audio WAV written to {}  ({} samples @ 32 kHz stereo, {} s)",
+                out_path.display(),
+                audio_samples.len(),
+                audio_samples.len() as f64 / 32_000.0,
+            ),
+            Err(e) => {
+                eprintln!("\nerror: could not write audio WAV: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    }
     ExitCode::SUCCESS
+}
+
+/// Minimal RIFF/WAVE writer for 16-bit signed PCM stereo at 32 kHz.
+/// We hand-roll instead of pulling a `hound` dependency just for
+/// one diagnostic path.
+fn write_wav(path: &std::path::Path, samples: &[(i16, i16)]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    let sample_rate: u32 = 32_000;
+    let channels: u16 = 2;
+    let bits_per_sample: u16 = 16;
+    let byte_rate = sample_rate * u32::from(channels) * u32::from(bits_per_sample) / 8;
+    let block_align = channels * bits_per_sample / 8;
+    let data_size =
+        (samples.len() * usize::from(channels) * usize::from(bits_per_sample) / 8) as u32;
+    let riff_size = 36 + data_size;
+    f.write_all(b"RIFF")?;
+    f.write_all(&riff_size.to_le_bytes())?;
+    f.write_all(b"WAVE")?;
+    f.write_all(b"fmt ")?;
+    f.write_all(&16u32.to_le_bytes())?; // PCM chunk size
+    f.write_all(&1u16.to_le_bytes())?; // PCM format
+    f.write_all(&channels.to_le_bytes())?;
+    f.write_all(&sample_rate.to_le_bytes())?;
+    f.write_all(&byte_rate.to_le_bytes())?;
+    f.write_all(&block_align.to_le_bytes())?;
+    f.write_all(&bits_per_sample.to_le_bytes())?;
+    f.write_all(b"data")?;
+    f.write_all(&data_size.to_le_bytes())?;
+    for (l, r) in samples {
+        f.write_all(&l.to_le_bytes())?;
+        f.write_all(&r.to_le_bytes())?;
+    }
+    Ok(())
 }
 
 fn print_header(cart: &Cartridge) {
@@ -243,6 +321,22 @@ fn print_diag_state(snes: &mut Snes) {
         ports[1],
         ports[2],
         ports[3]
+    );
+    // Audio pipeline diagnostic — show whether the music driver is
+    // actually producing audio. If MVOL or active voices stay at 0,
+    // we *can't* hear anything regardless of the audio backend.
+    let mvol_l = snes.apu_real.dsp_regs[0x0C] as i8;
+    let mvol_r = snes.apu_real.dsp_regs[0x1C] as i8;
+    let kon = snes.apu_real.dsp_regs[0x4C];
+    let endx = snes.apu_real.dsp_regs[0x7C];
+    let active_count = snes.apu_real.voice_active.iter().filter(|a| **a).count();
+    let any_envelope = snes.apu_real.voice_envelope.iter().any(|e| *e != 0);
+    let queue_len = snes.apu_real.audio_queue.len();
+    let (last_l, last_r) = snes.apu_real.audio_sample();
+    println!(
+        "Audio:  MVOL_L={mvol_l} MVOL_R={mvol_r}  KON=${kon:02X} ENDX=${endx:02X}  \
+         active_voices={active_count}  any_env_nonzero={any_envelope}  \
+         queue_len={queue_len}  last_sample=({last_l},{last_r})"
     );
     if let Some((op, pc)) = snes.apu_real.cpu.unimplemented_opcode {
         // Dump 4 bytes around the offending PC so we can see the
