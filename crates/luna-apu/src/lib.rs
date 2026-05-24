@@ -333,32 +333,47 @@ impl Apu {
                 self.voice_position[v] = self.voice_position[v].wrapping_add(1);
                 // Pitch counter: 14-bit pitch register added each
                 // output tick. Every time the accumulator crosses
-                // $1000 we consume one BRR sample (= "1:1 rate" at
-                // pitch $1000). Higher pitch consumes more samples
-                // per output tick; we cap at 1 advance per tick for
-                // simplicity (audible artefact on very high pitches
-                // but irrelevant for typical music playback).
+                // `$1000` we consume one BRR sample (`$1000` = 1:1
+                // rate). For high pitches (`> $1000`) more than one
+                // sample may be consumed per tick — we loop instead
+                // of capping at one, otherwise notes above the
+                // pitch-table's neutral entry play at half-speed.
                 let pitch = u16::from(self.dsp_regs[0x02 + v * 0x10])
                     | (u16::from(self.dsp_regs[0x03 + v * 0x10]) << 8);
                 let pitch = pitch & 0x3FFF;
-                let new_acc = self.voice_pitch_acc[v].wrapping_add(pitch);
-                if new_acc >= 0x1000 {
-                    self.voice_pitch_acc[v] = new_acc - 0x1000;
+                let mut acc = u32::from(self.voice_pitch_acc[v]) + u32::from(pitch);
+                while acc >= 0x1000 {
+                    acc -= 0x1000;
                     let sample = self.decode_current_brr_sample(v);
                     self.voice_brr_history[v][1] = self.voice_brr_history[v][0];
                     self.voice_brr_history[v][0] = sample;
                     self.advance_brr_block(v);
-                } else {
-                    self.voice_pitch_acc[v] = new_acc;
+                    if !self.voice_active[v] {
+                        break;
+                    }
                 }
+                self.voice_pitch_acc[v] = acc as u16;
             }
             self.advance_voice_envelope(v);
 
             // Fold this voice's contribution into the global stereo
             // mix. `outx = sample × env / 0x800` (signed 16-bit);
             // we then scale by signed-7-bit VOL_L / VOL_R per voice.
+            //
+            // The "sample" we use is a linear interpolation between
+            // the previous and the freshly-decoded BRR sample, using
+            // the fractional part of the 12-bit pitch counter as the
+            // blend weight. Real SPC700 hardware uses a 4-tap
+            // Gaussian filter (smoother + slight low-pass); linear
+            // interpolation is close enough to remove the harsh
+            // staircase aliasing of zero-order hold and is what
+            // gives recognizable melodies instead of square-wavey
+            // clicks. A proper Gaussian table can land later.
             if self.voice_active[v] {
-                let s = i32::from(self.voice_brr_history[v][0]);
+                let cur = i32::from(self.voice_brr_history[v][0]);
+                let prev = i32::from(self.voice_brr_history[v][1]);
+                let frac = i32::from(self.voice_pitch_acc[v]); // 0..=$0FFF
+                let s = (prev * (0x1000 - frac) + cur * frac) >> 12;
                 let env = i32::from(self.voice_envelope[v]);
                 let outx = (s * env) >> 11; // signed 16-bit
                 let vol_l = self.dsp_regs[v * 0x10] as i8 as i32;
@@ -394,8 +409,18 @@ impl Apu {
         // signed 7-bit master gain for the left / right outputs.
         let mvol_l = self.dsp_regs[0x0C] as i8 as i32;
         let mvol_r = self.dsp_regs[0x1C] as i8 as i32;
-        let final_l = (mix_l * mvol_l) >> 7;
-        let final_r = (mix_r * mvol_r) >> 7;
+        let mut final_l = (mix_l * mvol_l) >> 7;
+        let mut final_r = (mix_r * mvol_r) >> 7;
+        // FLG register at $6C:
+        //   bit 7 — soft reset (mute output + keep voices off)
+        //   bit 6 — mute amp (silence all output)
+        //   bit 5 — echo write disable (echo not yet implemented)
+        //   bits 4..0 — noise frequency (noise not yet implemented)
+        let flg = self.dsp_regs[0x6C];
+        if flg & 0xC0 != 0 {
+            final_l = 0;
+            final_r = 0;
+        }
         self.audio_left = final_l.clamp(-32768, 32767) as i16;
         self.audio_right = final_r.clamp(-32768, 32767) as i16;
         // Enqueue the sample for the host audio backend. Bound the
@@ -1027,6 +1052,12 @@ mod tests {
         apu.dsp_regs[0x0C] = 0x7F;
         apu.dsp_regs[0x1C] = 0x7F;
 
+        // Two ticks: the first decodes sample 0 (history[0] = +7) but
+        // outputs the interpolation start (still zero — history[1] is
+        // the initial 0). The second tick lands at frac=0 of the next
+        // step, so the interp uses history[1]=+7 and produces a real
+        // sample on the left channel.
+        apu.tick_voices(SPC_CYCLES_PER_SAMPLE);
         apu.tick_voices(SPC_CYCLES_PER_SAMPLE);
         let (l, r) = apu.audio_sample();
         // Right channel should be 0 (vol_r = 0).
