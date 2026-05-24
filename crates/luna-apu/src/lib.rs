@@ -39,6 +39,14 @@ use luna_cpu_spc700::{IPL_ROM, IPL_ROM_BASE, Spc700, SpcBus};
 /// SPC instruction every (21.477 / 1.024) × 4 ≈ 84 master cycles.
 pub const MASTER_CYCLES_PER_SPC_STEP: u32 = 84;
 
+/// After how many SPC cycles a "playing" voice transitions to
+/// "ended" and lights up its bit in `ENDX` (`$7C`). Real timing
+/// depends on the sample's BRR loop length + ADSR rate; we pick a
+/// reasonable midpoint so music drivers see voices finish often
+/// enough to free up channels for new notes without churning so
+/// fast that voices never actually "play".
+pub const VOICE_END_SPC_CYCLES: u32 = 16_000;
+
 /// All APU state owned by [`Apu`]: SPC700 core + 64 KB ARAM + the two
 /// 4-byte mailbox arrays.
 pub struct Apu {
@@ -72,12 +80,17 @@ pub struct Apu {
     /// `$F3` reads / writes the byte at `dsp_regs[dsp_index & 0x7F]`.
     pub dsp_index: u8,
     /// The 128 DSP registers (voice params, KON / KOF, echo, etc.).
-    /// We back them as plain memory: every write stores the value,
-    /// every read returns it. That isn't sample-accurate but is
-    /// enough for music drivers to not crash and to track their own
-    /// state — they typically write voice parameters then read them
-    /// back as part of their main loop.
+    /// Memory-backed: every write stores, every read returns. Some
+    /// addresses get special treatment (KON, KOF, ENDX) so the
+    /// envelope tracker can update voice state.
     pub dsp_regs: [u8; 128],
+    /// Per-voice "is this voice currently playing" flag (0..7).
+    /// Set by a `1` bit in KON ($4C); cleared when the voice ages
+    /// past `VOICE_END_SPC_CYCLES` or KOF ($5C) gates it off.
+    pub voice_active: [bool; 8],
+    /// Per-voice age in SPC cycles since KON. Drives the
+    /// "fake envelope" used to populate ENDX after a sample-time.
+    pub voice_age: [u32; 8],
 
     // ------------- Timers -------------
     /// Reload values at `$FA` (T0), `$FB` (T1), `$FC` (T2). A value
@@ -126,6 +139,8 @@ impl Apu {
             past_iplrom: false,
             dsp_index: 0,
             dsp_regs: [0; 128],
+            voice_active: [false; 8],
+            voice_age: [0; 8],
             timer_reload: [0; 3],
             timer_output: [0; 3],
             timer_internal: [0; 3],
@@ -141,6 +156,8 @@ impl Apu {
             control: &mut apu.control,
             dsp_index: &mut apu.dsp_index,
             dsp_regs: &mut apu.dsp_regs,
+            voice_active: &mut apu.voice_active,
+            voice_age: &mut apu.voice_age,
             timer_reload: &mut apu.timer_reload,
             timer_output: &mut apu.timer_output,
             timer_internal: &mut apu.timer_internal,
@@ -174,6 +191,38 @@ impl Apu {
         for _ in 0..slow_ticks {
             self.tick_one_timer(0);
             self.tick_one_timer(1);
+        }
+    }
+
+    /// Age every active voice by `spc_cycles` cycles. When a voice
+    /// passes [`VOICE_END_SPC_CYCLES`], it deactivates and its bit
+    /// gets latched into the ENDX register at `dsp_regs[0x7C]`.
+    fn tick_voices(&mut self, spc_cycles: u32) {
+        for v in 0..8 {
+            if !self.voice_active[v] {
+                continue;
+            }
+            self.voice_age[v] = self.voice_age[v].saturating_add(spc_cycles);
+            if self.voice_age[v] >= VOICE_END_SPC_CYCLES {
+                self.voice_active[v] = false;
+                self.dsp_regs[0x7C] |= 1 << v;
+            }
+        }
+        // Fold the live ENVX (a coarse linear ramp from $7F → 0
+        // over the voice's lifetime) back into each voice's `$x8`
+        // ENVX register so music drivers that poll it see a
+        // decreasing value rather than whatever they last wrote.
+        for v in 0..8 {
+            let envx_idx = 0x08 + v * 0x10;
+            if self.voice_active[v] {
+                // Linear decay from $7F at age 0 → 0 at the end
+                // threshold.
+                let remaining = VOICE_END_SPC_CYCLES.saturating_sub(self.voice_age[v]);
+                let env = (remaining as u64 * 0x7F / VOICE_END_SPC_CYCLES as u64) as u8;
+                self.dsp_regs[envx_idx] = env;
+            } else {
+                self.dsp_regs[envx_idx] = 0;
+            }
         }
     }
 
@@ -221,6 +270,7 @@ impl Apu {
             // That gives T0/T1 a tick every 128 / 4 = 32 instructions
             // and T2 a tick every 16 / 4 = 4 instructions.
             self.tick_timers(4);
+            self.tick_voices(4);
             let mut bus = ApuBusView {
                 aram: &mut self.aram,
                 to_spc_ports: &self.to_spc_ports,
@@ -228,6 +278,8 @@ impl Apu {
                 control: &mut self.control,
                 dsp_index: &mut self.dsp_index,
                 dsp_regs: &mut self.dsp_regs,
+                voice_active: &mut self.voice_active,
+                voice_age: &mut self.voice_age,
                 timer_reload: &mut self.timer_reload,
                 timer_output: &mut self.timer_output,
                 timer_internal: &mut self.timer_internal,
@@ -252,6 +304,8 @@ struct ApuBusView<'a> {
     control: &'a mut u8,
     dsp_index: &'a mut u8,
     dsp_regs: &'a mut [u8; 128],
+    voice_active: &'a mut [bool; 8],
+    voice_age: &'a mut [u32; 8],
     timer_reload: &'a mut [u8; 3],
     timer_output: &'a mut [u8; 3],
     timer_internal: &'a mut [u16; 3],
@@ -269,11 +323,19 @@ impl SpcBus for ApuBusView<'_> {
             // $F2 — DSP register-index port. Real HW returns the
             // last value written; we model that.
             0x00F2 => *self.dsp_index,
-            // $F3 — DSP register-data port. Returns the byte at
-            // `dsp_regs[index & 0x7F]`. The high bit of the index
-            // distinguishes read (0) from write (1) on real DSP,
-            // but software always reads via index 0-127.
-            0x00F3 => self.dsp_regs[(*self.dsp_index & 0x7F) as usize],
+            // $F3 — DSP register-data port.
+            0x00F3 => {
+                let idx = (*self.dsp_index & 0x7F) as usize;
+                let v = self.dsp_regs[idx];
+                if idx == 0x7C {
+                    // ENDX — read **clears** the register on real
+                    // hardware. Music drivers spam-read this in
+                    // their main loop, processing each `1` bit by
+                    // freeing the corresponding voice.
+                    self.dsp_regs[0x7C] = 0;
+                }
+                v
+            }
             // $F4-$F7 — mailbox FROM the main CPU.
             0x00F4..=0x00F7 => self.to_spc_ports[(addr - 0x00F4) as usize],
             // $F8-$F9 — RAM-mapped scratch bytes (auxiliary regs).
@@ -321,11 +383,43 @@ impl SpcBus for ApuBusView<'_> {
             }
             // $F2 — DSP register-index port.
             0x00F2 => *self.dsp_index = value,
-            // $F3 — DSP register-data port. Only low 7 bits of the
-            // index actually select the register; bit 7 distinguishes
-            // read vs write on real HW, but for our memory-backed
-            // stub a write always stores.
-            0x00F3 => self.dsp_regs[(*self.dsp_index & 0x7F) as usize] = value,
+            // $F3 — DSP register-data port. Most writes just store,
+            // but KON ($4C) and KOF ($5C) drive our voice state
+            // tracker so ENDX gets populated correctly. Writing
+            // ENDX ($7C) clears the bits that the value has set
+            // (this is the "ack the voice end" pattern).
+            0x00F3 => {
+                let idx = (*self.dsp_index & 0x7F) as usize;
+                self.dsp_regs[idx] = value;
+                match idx {
+                    0x4C => {
+                        // KON: each `1` bit in `value` keys the
+                        // corresponding voice ON.
+                        for v in 0..8 {
+                            if value & (1 << v) != 0 {
+                                self.voice_active[v] = true;
+                                self.voice_age[v] = 0;
+                                self.dsp_regs[0x7C] &= !(1 << v); // clear stale ENDX
+                            }
+                        }
+                    }
+                    0x5C => {
+                        // KOF: each `1` bit gates the voice into
+                        // release (we just deactivate).
+                        for v in 0..8 {
+                            if value & (1 << v) != 0 {
+                                self.voice_active[v] = false;
+                            }
+                        }
+                    }
+                    0x7C => {
+                        // Writes to ENDX clear the bits set in
+                        // `value` (driver-style acknowledgement).
+                        self.dsp_regs[0x7C] &= !value;
+                    }
+                    _ => {}
+                }
+            }
             // $F4-$F7 — mailbox TO the main CPU.
             0x00F4..=0x00F7 => self.to_cpu_ports[(addr - 0x00F4) as usize] = value,
             // $F8-$F9 — auxiliary RAM-mapped regs. Store in ARAM so
@@ -383,6 +477,98 @@ mod tests {
     }
 
     #[test]
+    fn kon_then_age_sets_endx_then_read_clears_it() {
+        let mut apu = Apu::new();
+        // Construct a bus view long enough to KON voice 0 + voice 3.
+        {
+            let mut bus = ApuBusView {
+                aram: &mut apu.aram,
+                to_spc_ports: &apu.to_spc_ports,
+                to_cpu_ports: &mut apu.to_cpu_ports,
+                control: &mut apu.control,
+                dsp_index: &mut apu.dsp_index,
+                dsp_regs: &mut apu.dsp_regs,
+                voice_active: &mut apu.voice_active,
+                voice_age: &mut apu.voice_age,
+                timer_reload: &mut apu.timer_reload,
+                timer_output: &mut apu.timer_output,
+                timer_internal: &mut apu.timer_internal,
+                timer_enabled: &mut apu.timer_enabled,
+            };
+            bus.write(0x00F2, 0x4C); // index = KON
+            bus.write(0x00F3, 0b0000_1001); // KON voices 0 and 3
+        }
+        assert!(apu.voice_active[0]);
+        assert!(apu.voice_active[3]);
+        assert!(!apu.voice_active[1]);
+
+        // Age past the threshold for both — ENDX should light up
+        // bits 0 and 3.
+        apu.tick_voices(VOICE_END_SPC_CYCLES + 100);
+        assert_eq!(apu.dsp_regs[0x7C], 0b0000_1001);
+        assert!(!apu.voice_active[0]);
+        assert!(!apu.voice_active[3]);
+
+        // Driver reads ENDX → clears.
+        {
+            let mut bus = ApuBusView {
+                aram: &mut apu.aram,
+                to_spc_ports: &apu.to_spc_ports,
+                to_cpu_ports: &mut apu.to_cpu_ports,
+                control: &mut apu.control,
+                dsp_index: &mut apu.dsp_index,
+                dsp_regs: &mut apu.dsp_regs,
+                voice_active: &mut apu.voice_active,
+                voice_age: &mut apu.voice_age,
+                timer_reload: &mut apu.timer_reload,
+                timer_output: &mut apu.timer_output,
+                timer_internal: &mut apu.timer_internal,
+                timer_enabled: &mut apu.timer_enabled,
+            };
+            bus.write(0x00F2, 0x7C);
+            let v = bus.read(0x00F3);
+            assert_eq!(v, 0b0000_1001, "first read returns ENDX bits");
+            assert_eq!(
+                bus.read(0x00F3),
+                0,
+                "second read sees 0 (real HW: read clears ENDX)"
+            );
+        }
+    }
+
+    #[test]
+    fn envx_decays_linearly_while_voice_plays() {
+        let mut apu = Apu::new();
+        // KON voice 2.
+        {
+            let mut bus = ApuBusView {
+                aram: &mut apu.aram,
+                to_spc_ports: &apu.to_spc_ports,
+                to_cpu_ports: &mut apu.to_cpu_ports,
+                control: &mut apu.control,
+                dsp_index: &mut apu.dsp_index,
+                dsp_regs: &mut apu.dsp_regs,
+                voice_active: &mut apu.voice_active,
+                voice_age: &mut apu.voice_age,
+                timer_reload: &mut apu.timer_reload,
+                timer_output: &mut apu.timer_output,
+                timer_internal: &mut apu.timer_internal,
+                timer_enabled: &mut apu.timer_enabled,
+            };
+            bus.write(0x00F2, 0x4C);
+            bus.write(0x00F3, 1 << 2);
+        }
+        apu.tick_voices(0);
+        let envx_at_0 = apu.dsp_regs[0x08 + 2 * 0x10];
+        apu.tick_voices(VOICE_END_SPC_CYCLES / 2);
+        let envx_at_half = apu.dsp_regs[0x08 + 2 * 0x10];
+        // ENVX should decay roughly linearly: start near $7F,
+        // half-life near $3F, end at 0.
+        assert!(envx_at_0 > envx_at_half);
+        assert!(envx_at_half > 0);
+    }
+
+    #[test]
     fn dsp_register_round_trip_via_index_and_data_ports() {
         // Drivers use $F2 / $F3 a *lot*: write index, write data, or
         // write index, read data. We verify both sides — write
@@ -397,6 +583,8 @@ mod tests {
             control: &mut apu.control,
             dsp_index: &mut apu.dsp_index,
             dsp_regs: &mut apu.dsp_regs,
+            voice_active: &mut apu.voice_active,
+            voice_age: &mut apu.voice_age,
             timer_reload: &mut apu.timer_reload,
             timer_output: &mut apu.timer_output,
             timer_internal: &mut apu.timer_internal,
@@ -472,6 +660,8 @@ mod tests {
                 control: &mut apu.control,
                 dsp_index: &mut apu.dsp_index,
                 dsp_regs: &mut apu.dsp_regs,
+                voice_active: &mut apu.voice_active,
+                voice_age: &mut apu.voice_age,
                 timer_reload: &mut apu.timer_reload,
                 timer_output: &mut apu.timer_output,
                 timer_internal: &mut apu.timer_internal,
@@ -492,6 +682,8 @@ mod tests {
             control: &mut apu.control,
             dsp_index: &mut apu.dsp_index,
             dsp_regs: &mut apu.dsp_regs,
+            voice_active: &mut apu.voice_active,
+            voice_age: &mut apu.voice_age,
             timer_reload: &mut apu.timer_reload,
             timer_output: &mut apu.timer_output,
             timer_internal: &mut apu.timer_internal,
