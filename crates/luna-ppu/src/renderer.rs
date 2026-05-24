@@ -441,6 +441,11 @@ pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
     // would enable BG/OBJ on the sub-screen; that's a stretch goal.
     let sub_bgr5 = (ppu.coldata_r, ppu.coldata_g, ppu.coldata_b);
 
+    // Pre-compute the per-layer window masks once per frame. Each
+    // [bool; 256] tells us whether the layer is BLANKED at that x
+    // by the layer's effective window region.
+    let masks = compute_window_masks(ppu);
+
     for y in 0..FRAME_H as u16 {
         // Indexed scanlines for the 4 BG layers (transparent = `None`)
         // plus sprites carrying their 0-3 priority value.
@@ -454,6 +459,25 @@ pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
 
         let off = y as usize * FRAME_W;
         for x in 0..FRAME_W {
+            // Layer-enabled-at-this-pixel decision combines:
+            //   * TM (`$212C`) — global per-layer main-screen enable.
+            //   * TMW (`$212E`) — disable layer INSIDE the combined
+            //     window region for that layer.
+            // If TM.layer = 0, the layer never shows on the main
+            // screen. If TM.layer = 1 AND TMW.layer = 1, the layer
+            // is shown except inside its window. If TM.layer = 1
+            // AND TMW.layer = 0, the layer is always shown.
+            let main_layer_enabled = |layer_idx: usize| -> bool {
+                let layer_bit = 1u8 << layer_idx;
+                if ppu.tm & layer_bit == 0 {
+                    return false;
+                }
+                if ppu.tmw & layer_bit != 0 && masks.combined[layer_idx][x] {
+                    return false;
+                }
+                true
+            };
+
             // Walk the priority table top-to-bottom; first hit wins.
             // Track which layer won so colour math can consult the
             // corresponding CGADSUB enable bit. `winner_layer` =
@@ -464,6 +488,13 @@ pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
             let mut winner_layer: u8 = 5;
             let mut winner_cgram: u8 = 0;
             for slot in table {
+                let layer_idx = match slot.kind {
+                    LayerKind::Bg => slot.idx as usize,
+                    LayerKind::Obj => 4,
+                };
+                if !main_layer_enabled(layer_idx) {
+                    continue;
+                }
                 let candidate = match slot.kind {
                     LayerKind::Bg => bgs[slot.idx as usize][x]
                         .and_then(|(cg, prio)| (prio == slot.bg_prio).then_some(cg)),
@@ -472,10 +503,7 @@ pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
                 };
                 if let Some(cgram_idx) = candidate {
                     main_bgr5 = cgram_to_bgr5(ppu, cgram_idx);
-                    winner_layer = match slot.kind {
-                        LayerKind::Bg => slot.idx,
-                        LayerKind::Obj => 4,
-                    };
+                    winner_layer = layer_idx as u8;
                     winner_cgram = cgram_idx;
                     break;
                 }
@@ -485,10 +513,17 @@ pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
             //   bit 0..=3 = BG1..BG4
             //   bit 4 = OBJ (palettes 4-7 only)
             //   bit 5 = backdrop
-            // CGWSEL bits 5:4 = math-enable region (00=always,
-            // 11=never; 01/10 depend on the colour-math window,
-            // which we don't model yet — fall back to "always").
-            let math_globally_enabled = (ppu.cgwsel >> 4) & 0x03 != 0x03;
+            // CGWSEL bits 5:4 select the math-enable region using
+            // the dedicated colour-math window mask (layer 5):
+            //   00 = always; 01 = inside math window;
+            //   10 = outside math window; 11 = never.
+            let in_math_window = masks.combined[5][x];
+            let math_globally_enabled = match (ppu.cgwsel >> 4) & 0x03 {
+                0 => true,
+                1 => in_math_window,
+                2 => !in_math_window,
+                _ => false,
+            };
             let layer_enabled_for_math = if math_globally_enabled {
                 match winner_layer {
                     0..=3 => ppu.cgadsub & (1 << winner_layer) != 0,
@@ -510,9 +545,15 @@ pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
                 main_bgr5
             };
             // CGWSEL bits 7:6 — "force main screen black" region.
-            // 00 = never, 11 = always; 01/10 are window-gated and
-            // also collapse to "never" without windowing.
-            let force_black = (ppu.cgwsel >> 6) & 0x03 == 0x03;
+            // Same 4-value semantics as the math-enable region,
+            // referencing the same math-window mask:
+            //   00 = never; 01 = inside; 10 = outside; 11 = always.
+            let force_black = match (ppu.cgwsel >> 6) & 0x03 {
+                0 => false,
+                1 => in_math_window,
+                2 => !in_math_window,
+                _ => true,
+            };
             let final_bgr5 = if force_black { (0, 0, 0) } else { rgb5 };
 
             let rgb888 = [
@@ -524,6 +565,86 @@ pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
         }
     }
     buf
+}
+
+// =============================================================================
+// Window masking
+// =============================================================================
+
+/// Per-layer combined window masks for one frame.
+///
+/// `combined[layer][x]` is `true` when pixel `x` is "inside" the
+/// effective window region for that layer (W1 ∪/∩/⊕/⊕̄ W2, modulated
+/// by per-window invert bits). It's used by:
+///
+///   * `TMW` / `TSW` to gate which pixels of a layer reach the
+///     main / sub screen.
+///   * `CGWSEL` to decide where colour math applies and where the
+///     main screen is forced to black.
+///
+/// Layers are indexed `0..=3` for BG1..BG4, `4` for OBJ, `5` for
+/// the dedicated colour-math window.
+struct WindowMasks {
+    combined: [[bool; FRAME_W]; 6],
+}
+
+fn compute_window_masks(ppu: &Ppu) -> WindowMasks {
+    let mut out = WindowMasks {
+        combined: [[false; FRAME_W]; 6],
+    };
+    let in_w1 = make_window(ppu.wh0, ppu.wh1);
+    let in_w2 = make_window(ppu.wh2, ppu.wh3);
+    // Per-layer (W?SEL nibble, log bits): {W1 invert, W1 enable,
+    // W2 invert, W2 enable} packed in `sel`'s low 4 bits, plus a
+    // 2-bit logic op selecting OR / AND / XOR / XNOR.
+    let layer_cfg = [
+        (ppu.w12sel & 0x0F, ppu.wbglog & 0x03),
+        (ppu.w12sel >> 4, (ppu.wbglog >> 2) & 0x03),
+        (ppu.w34sel & 0x0F, (ppu.wbglog >> 4) & 0x03),
+        (ppu.w34sel >> 4, (ppu.wbglog >> 6) & 0x03),
+        (ppu.wobjsel & 0x0F, ppu.wobjlog & 0x03),
+        (ppu.wobjsel >> 4, (ppu.wobjlog >> 2) & 0x03),
+    ];
+    for (layer, &(sel, logic_bits)) in layer_cfg.iter().enumerate() {
+        let w1_invert = sel & 0x01 != 0;
+        let w1_enable = sel & 0x02 != 0;
+        let w2_invert = sel & 0x04 != 0;
+        let w2_enable = sel & 0x08 != 0;
+        if !w1_enable && !w2_enable {
+            continue; // no window for this layer → mask stays all-false
+        }
+        for x in 0..FRAME_W {
+            let r1 = if w1_enable { in_w1[x] ^ w1_invert } else { false };
+            let r2 = if w2_enable { in_w2[x] ^ w2_invert } else { false };
+            out.combined[layer][x] = match (w1_enable, w2_enable) {
+                (true, false) => r1,
+                (false, true) => r2,
+                (true, true) => match logic_bits {
+                    0 => r1 || r2,
+                    1 => r1 && r2,
+                    2 => r1 ^ r2,
+                    _ => !(r1 ^ r2),
+                },
+                _ => unreachable!(),
+            };
+        }
+    }
+    out
+}
+
+/// Mark every pixel between `left` and `right` (inclusive) as
+/// "inside" the window. If `left > right` the window is empty,
+/// matching the documented hardware behaviour.
+fn make_window(left: u8, right: u8) -> [bool; FRAME_W] {
+    let mut out = [false; FRAME_W];
+    if left <= right {
+        let l = left as usize;
+        let r = (right as usize).min(FRAME_W - 1);
+        for x in l..=r {
+            out[x] = true;
+        }
+    }
+    out
 }
 
 /// Look up a CGRAM index and return the raw 5-bit BGR triple, with
@@ -1448,6 +1569,158 @@ mod tests {
         p.write(register::CGWSEL, 0b1100_0000); // bits 7:6 = 11 → always force black
         let out = render_frame_with(&p, RenderOptions::default());
         assert_eq!(out[0], [0, 0, 0]);
+    }
+
+    // -------------------------------------------------------------------
+    // Window masking
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn make_window_inclusive_range() {
+        let w = make_window(8, 15);
+        for x in 0..256 {
+            let expected = (8..=15).contains(&x);
+            assert_eq!(w[x], expected, "x={x}");
+        }
+    }
+
+    #[test]
+    fn make_window_empty_when_left_greater_than_right() {
+        let w = make_window(100, 50);
+        assert!(w.iter().all(|b| !b), "left > right => no pixels inside");
+    }
+
+    #[test]
+    fn tmw_disables_bg1_inside_window() {
+        // BG1 main-enabled but TMW masks it inside W1.
+        // Outside the window the BG1 pixel shows; inside, the
+        // backdrop colour wins because BG1 is gated off.
+        let mut p = setup_demo_tile();
+        p.write(register::BGMODE, 0x01); // mode 1
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::TM, 0x01); // BG1 enabled
+        p.write(register::TMW, 0x01); // BG1 mask on
+        p.write(register::W12SEL, 0x02); // BG1 W1-enable, no invert
+        p.write(register::WH0, 8);
+        p.write(register::WH1, 15);
+        let out = render_frame_with(&p, RenderOptions::default());
+        let backdrop_rgb = {
+            // Backdrop colour after master brightness (15 = full).
+            let (r, g, b) = cgram_to_bgr5(&p, 0);
+            apply_brightness(
+                [scale_5_to_8(r), scale_5_to_8(g), scale_5_to_8(b)],
+                0x0F,
+            )
+        };
+        // Outside the window (x < 8 and x > 15): BG1 shows.
+        assert_ne!(out[0], backdrop_rgb, "x=0 (outside window) shows BG1");
+        // Inside the window (x in 8..=15): BG1 masked, backdrop shows.
+        assert_eq!(out[8], backdrop_rgb, "x=8 (inside window) is gated off");
+        assert_eq!(out[15], backdrop_rgb, "x=15 (inside window) is gated off");
+        assert_ne!(out[16], backdrop_rgb, "x=16 (outside window) shows BG1");
+    }
+
+    #[test]
+    fn tmw_invert_flips_window_direction() {
+        // W1 invert flag = "outside" semantics. Same test but with
+        // the invert bit set — now the window's REVERSE is masked.
+        let mut p = setup_demo_tile();
+        p.write(register::BGMODE, 0x01);
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::TM, 0x01);
+        p.write(register::TMW, 0x01);
+        // W12SEL bit 0 = W1 invert, bit 1 = W1 enable.
+        p.write(register::W12SEL, 0x03);
+        p.write(register::WH0, 8);
+        p.write(register::WH1, 15);
+        let out = render_frame_with(&p, RenderOptions::default());
+        let backdrop_rgb = {
+            let (r, g, b) = cgram_to_bgr5(&p, 0);
+            apply_brightness(
+                [scale_5_to_8(r), scale_5_to_8(g), scale_5_to_8(b)],
+                0x0F,
+            )
+        };
+        // Inverted: x in [8..15] is NOT masked; outside IS.
+        assert_eq!(out[0], backdrop_rgb, "x=0 now masked (outside window inverted in)");
+        assert_ne!(out[8], backdrop_rgb, "x=8 (inside window, inverted = no mask)");
+        assert_eq!(out[16], backdrop_rgb, "x=16 (outside window, masked)");
+    }
+
+    #[test]
+    fn two_windows_and_logic() {
+        // Both W1 and W2 enabled with AND logic; layer is masked
+        // only where BOTH windows agree. We pick non-overlapping
+        // windows → AND is always false → mask is empty → BG1
+        // always shows.
+        let mut p = setup_demo_tile();
+        p.write(register::BGMODE, 0x01);
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::TM, 0x01);
+        p.write(register::TMW, 0x01);
+        p.write(register::W12SEL, 0x0A); // W1 enable + W2 enable, no invert
+        p.write(register::WH0, 8);  // W1 = 8..15
+        p.write(register::WH1, 15);
+        p.write(register::WH2, 200); // W2 = 200..220
+        p.write(register::WH3, 220);
+        p.write(register::WBGLOG, 0x01); // BG1 logic = AND
+        let out = render_frame_with(&p, RenderOptions::default());
+        let backdrop_rgb = {
+            let (r, g, b) = cgram_to_bgr5(&p, 0);
+            apply_brightness(
+                [scale_5_to_8(r), scale_5_to_8(g), scale_5_to_8(b)],
+                0x0F,
+            )
+        };
+        // No pixel is inside BOTH windows → BG1 never masked.
+        assert_ne!(out[8], backdrop_rgb);
+        assert_ne!(out[200], backdrop_rgb);
+    }
+
+    #[test]
+    fn tm_layer_disabled_falls_through_to_backdrop() {
+        // TM bit cleared → layer never renders, even outside any
+        // window. The whole scanline is the backdrop colour.
+        let mut p = setup_demo_tile();
+        p.write(register::BGMODE, 0x01);
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::TM, 0x00); // BG1 disabled
+        let out = render_frame_with(&p, RenderOptions::default());
+        let backdrop_rgb = {
+            let (r, g, b) = cgram_to_bgr5(&p, 0);
+            apply_brightness(
+                [scale_5_to_8(r), scale_5_to_8(g), scale_5_to_8(b)],
+                0x0F,
+            )
+        };
+        for &px in &out[0..16] {
+            assert_eq!(px, backdrop_rgb);
+        }
+    }
+
+    #[test]
+    fn cgwsel_math_inside_window_only_fires_inside() {
+        // CGWSEL bits 5:4 = 01 → math fires only inside the math
+        // window. With math window = 8..15, colour math (+blue)
+        // applies only there.
+        let mut p = setup_demo_tile();
+        p.write(register::BGMODE, 0x01);
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::TM, 0x01);
+        p.write(register::CGADSUB, 0x01); // BG1 add no-half
+        p.write(register::COLDATA, 0x9F); // B = max
+        // Configure math window: WOBJSEL bits 4-7 = math window
+        // controls, low 4 bits handle OBJ. Set W1-enable on the
+        // math window.
+        p.write(register::WOBJSEL, 0x20);
+        p.write(register::WH0, 8);
+        p.write(register::WH1, 15);
+        p.write(register::CGWSEL, 0b0001_0000); // bits 5:4 = 01 (inside)
+        let out = render_frame_with(&p, RenderOptions::default());
+        // Outside (x=0): no math → BG1 only.
+        // Inside (x=8): math fires → blue channel boosted.
+        // The two pixels must differ on the blue channel.
+        assert_ne!(out[0][2], out[8][2], "math should fire inside, not outside");
     }
 
     #[test]
