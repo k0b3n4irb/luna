@@ -48,21 +48,32 @@ pub struct Snes {
     /// dance for many games to progress past their boot phase without
     /// a real SPC700 + DSP. See [`crate::apu_stub`].
     pub apu: ApuStub,
-    /// Instructions executed since the last synthetic VBlank.
-    pub fake_vblank_counter: u32,
-    /// Counter of synthetic VBlanks since reset (= a rough "frame"
-    /// count until the PPU drives this).
-    pub fake_frame_count: u64,
-    /// How many NMIs we have actually delivered to the CPU (i.e. the
-    /// game's NMI handler was entered). When `NMITIMEN.7` is off this
-    /// stays at zero even though `fake_frame_count` keeps rising —
-    /// the GUI uses the discrepancy to diagnose stuck boot sequences.
+
+    // ------------- Scanline-accurate scheduler -------------
+    /// Current PPU scanline (0..=261 for NTSC). Lines 0-223 are the
+    /// visible region; 224 is the post-visible "1 dot of overlap"
+    /// line; 225-261 are vertical blank. VBlank-NMI fires on entry
+    /// to line 225.
+    pub ppu_line: u16,
+    /// Master cycles consumed within the current scanline (0..1364).
+    /// Wraps to 0 each time we cross a scanline boundary.
+    pub mcycles_in_line: u32,
+    /// Number of full PPU frames completed since reset. Increments
+    /// once per wrap from line 261 → line 0.
+    pub frame_count: u64,
+    /// How many NMIs we have actually delivered to the CPU. Stays
+    /// behind `frame_count` if `NMITIMEN.7` is off.
     pub nmis_serviced: u64,
 }
 
-/// How many CPU instructions between two synthetic VBlanks. Close to
-/// the ~30 k typical NTSC frame size at our (instruction-step) clock.
-pub const FAKE_VBLANK_INTERVAL: u32 = 30_000;
+/// Master cycles per PPU scanline on NTSC (1364 mclk = 4 dots × 341).
+pub const MCYCLES_PER_SCANLINE: u32 = 1364;
+/// Total scanlines per NTSC frame (visible + post + vblank).
+pub const NTSC_SCANLINES_PER_FRAME: u16 = 262;
+/// Scanline on which VBlank begins on NTSC. The PPU writes the
+/// `$4210` "NMI flag" bit and (if `NMITIMEN.7` is set) raises the NMI
+/// pin at the start of this line.
+pub const NTSC_VBLANK_START_LINE: u16 = 225;
 
 impl Snes {
     /// Build a new machine from a parsed cartridge.
@@ -103,8 +114,9 @@ impl Snes {
             // Compat: post-reset, the IPL ROM has dropped these into
             // the CPU-facing mailbox to signal "audio CPU ready".
             apu: ApuStub::new(),
-            fake_vblank_counter: 0,
-            fake_frame_count: 0,
+            ppu_line: 0,
+            mcycles_in_line: 0,
+            frame_count: 0,
             nmis_serviced: 0,
         }
     }
@@ -173,27 +185,45 @@ impl Snes {
         };
         cpu.step(&mut bus);
 
-        // Compat stub: synthesise a VBlank every FAKE_VBLANK_INTERVAL
-        // instructions. Real timing comes from the PPU's scanline
-        // counter once the renderer drives the frame clock — for now
-        // this lets games' VBlank-wait loops eventually proceed.
-        self.fake_vblank_counter = self.fake_vblank_counter.wrapping_add(1);
-        if self.fake_vblank_counter >= FAKE_VBLANK_INTERVAL {
-            self.fake_vblank_counter = 0;
-            self.fake_frame_count = self.fake_frame_count.wrapping_add(1);
-            // Set the VBlank-pending flag visible at $4210 and HVBJOY.
+        // Advance the PPU scanline counter by the master cycles this
+        // instruction consumed. Crossing a scanline boundary triggers
+        // line-tick events; crossing into line 225 fires VBlank/NMI.
+        let consumed = self.total_mclk - before;
+        self.advance_scheduler(consumed as u32);
+        consumed
+    }
+
+    /// Drive the scanline scheduler by `mcycles` of consumed master
+    /// cycles. Inspired by bsnes / ares' line-tick approach: we keep
+    /// a `(ppu_line, mcycles_in_line)` cursor and walk it forward,
+    /// firing events at each line boundary.
+    fn advance_scheduler(&mut self, mcycles: u32) {
+        self.mcycles_in_line += mcycles;
+        while self.mcycles_in_line >= MCYCLES_PER_SCANLINE {
+            self.mcycles_in_line -= MCYCLES_PER_SCANLINE;
+            self.advance_one_scanline();
+        }
+    }
+
+    /// Cross one scanline boundary and apply the per-line events the
+    /// SNES PPU drives.
+    fn advance_one_scanline(&mut self) {
+        self.ppu_line += 1;
+        if self.ppu_line == NTSC_VBLANK_START_LINE {
+            // Entering VBlank. Latch the NMI flag visible at $4210
+            // and set the VBlank bit of HVBJOY.
             self.cpu_regs.nmi_flag = true;
             self.cpu_regs.hvbjoy |= 0x80;
-            // If the game has enabled NMI, raise it now.
             if self.cpu_regs.nmitimen & 0x80 != 0 {
                 self.cpu.trigger_nmi();
                 self.nmis_serviced = self.nmis_serviced.saturating_add(1);
             }
-        } else {
-            // Outside vblank — clear the HVBJOY vblank bit.
+        } else if self.ppu_line >= NTSC_SCANLINES_PER_FRAME {
+            // Frame wrap: back to line 0, clear VBlank bit.
+            self.ppu_line = 0;
             self.cpu_regs.hvbjoy &= !0x80;
+            self.frame_count = self.frame_count.saturating_add(1);
         }
-        self.total_mclk - before
     }
 
     /// Read 8 bytes starting at the current `PB:PC`. Used by the GUI to
@@ -715,5 +745,73 @@ mod tests {
         snes.step(); // LDA #$42
         let after = snes.total_mclk;
         assert!(after > before, "step should advance master clock");
+    }
+
+    #[test]
+    fn scheduler_advances_to_next_scanline_after_one_line_of_mcycles() {
+        let cart = demo_lorom();
+        let mut snes = Snes::from_cartridge(cart);
+        snes.reset();
+        let line_before = snes.ppu_line;
+        snes.advance_scheduler(MCYCLES_PER_SCANLINE);
+        assert_eq!(snes.ppu_line, line_before + 1);
+        assert_eq!(snes.mcycles_in_line, 0);
+    }
+
+    #[test]
+    fn scheduler_fires_nmi_at_vblank_start_when_nmitimen_set() {
+        let cart = demo_lorom();
+        let mut snes = Snes::from_cartridge(cart);
+        snes.reset();
+        snes.cpu_regs.nmitimen = 0x80; // NMI on VBlank enabled
+        snes.ppu_line = NTSC_VBLANK_START_LINE - 1;
+        snes.advance_scheduler(MCYCLES_PER_SCANLINE);
+        assert_eq!(snes.ppu_line, NTSC_VBLANK_START_LINE);
+        assert!(snes.cpu_regs.nmi_flag);
+        assert_eq!(snes.cpu_regs.hvbjoy & 0x80, 0x80);
+        assert_eq!(snes.nmis_serviced, 1);
+    }
+
+    #[test]
+    fn scheduler_does_not_trigger_nmi_when_masked_but_still_sets_flag() {
+        let cart = demo_lorom();
+        let mut snes = Snes::from_cartridge(cart);
+        snes.reset();
+        snes.cpu_regs.nmitimen = 0x00; // NMI masked
+        snes.ppu_line = NTSC_VBLANK_START_LINE - 1;
+        snes.advance_scheduler(MCYCLES_PER_SCANLINE);
+        assert_eq!(snes.ppu_line, NTSC_VBLANK_START_LINE);
+        assert!(snes.cpu_regs.nmi_flag);
+        assert_eq!(snes.nmis_serviced, 0);
+    }
+
+    #[test]
+    fn scheduler_wraps_to_line_zero_after_full_frame_and_clears_vblank() {
+        let cart = demo_lorom();
+        let mut snes = Snes::from_cartridge(cart);
+        snes.reset();
+        // Pretend we're at the last scanline of the frame, with VBlank
+        // currently set (as it would be).
+        snes.ppu_line = NTSC_SCANLINES_PER_FRAME - 1;
+        snes.cpu_regs.hvbjoy = 0x80;
+        let frame_before = snes.frame_count;
+        snes.advance_scheduler(MCYCLES_PER_SCANLINE);
+        assert_eq!(snes.ppu_line, 0);
+        assert_eq!(snes.cpu_regs.hvbjoy & 0x80, 0);
+        assert_eq!(snes.frame_count, frame_before + 1);
+    }
+
+    #[test]
+    fn scheduler_handles_multi_line_advance_in_a_single_call() {
+        // A single instruction can in theory consume more than one
+        // scanline's worth of mcycles (e.g. inside a DMA burst). The
+        // scheduler must run all line ticks instead of dropping them.
+        let cart = demo_lorom();
+        let mut snes = Snes::from_cartridge(cart);
+        snes.reset();
+        let line_before = snes.ppu_line;
+        snes.advance_scheduler(MCYCLES_PER_SCANLINE * 5 + 100);
+        assert_eq!(snes.ppu_line, line_before + 5);
+        assert_eq!(snes.mcycles_in_line, 100);
     }
 }

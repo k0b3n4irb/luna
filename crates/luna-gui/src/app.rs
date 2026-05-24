@@ -540,8 +540,11 @@ fn stubs_panel(ui: &mut egui::Ui, snes: &Snes) {
             ui.label("APU phase");
             ui.label(mono(format!("{:?}", snes.apu.phase())));
             ui.end_row();
-            ui.label("Fake frames");
-            ui.label(mono(snes.fake_frame_count.to_string()));
+            ui.label("Frames");
+            ui.label(mono(snes.frame_count.to_string()));
+            ui.end_row();
+            ui.label("PPU line");
+            ui.label(mono(snes.ppu_line.to_string()));
             ui.end_row();
             ui.label("NMIs served");
             ui.label(mono(snes.nmis_serviced.to_string()));
