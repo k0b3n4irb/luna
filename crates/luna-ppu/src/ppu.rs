@@ -73,6 +73,33 @@ pub mod register {
     pub const VMDATAHREAD: u8 = 0x3A;
     /// `$213B` — CGDATAREAD.
     pub const CGDATAREAD: u8 = 0x3B;
+    /// `$2123` W12SEL — windows-1/2 enable + invert for BG1 and BG2.
+    pub const W12SEL: u8 = 0x23;
+    /// `$2124` W34SEL — same for BG3 and BG4.
+    pub const W34SEL: u8 = 0x24;
+    /// `$2125` WOBJSEL — same for OBJ and the color-math window.
+    pub const WOBJSEL: u8 = 0x25;
+    /// `$2126` WH0 — window 1 left X coordinate.
+    pub const WH0: u8 = 0x26;
+    /// `$2127` WH1 — window 1 right X coordinate.
+    pub const WH1: u8 = 0x27;
+    /// `$2128` WH2 — window 2 left X coordinate.
+    pub const WH2: u8 = 0x28;
+    /// `$2129` WH3 — window 2 right X coordinate.
+    pub const WH3: u8 = 0x29;
+    /// `$212A` WBGLOG — 2-bit window-combine logic for each BG layer.
+    pub const WBGLOG: u8 = 0x2A;
+    /// `$212B` WOBJLOG — combine logic for OBJ and math windows.
+    pub const WOBJLOG: u8 = 0x2B;
+    /// `$212C` TM — main-screen layer enable mask.
+    pub const TM: u8 = 0x2C;
+    /// `$212D` TS — sub-screen layer enable mask.
+    pub const TS: u8 = 0x2D;
+    /// `$212E` TMW — main-screen window mask (1 = disable layer
+    /// inside the combined window region).
+    pub const TMW: u8 = 0x2E;
+    /// `$212F` TSW — sub-screen window mask.
+    pub const TSW: u8 = 0x2F;
     /// `$2130` CGWSEL — color-math window / sub-screen-mix flags.
     pub const CGWSEL: u8 = 0x30;
     /// `$2131` CGADSUB — color-math operator + per-layer enable mask.
@@ -140,6 +167,41 @@ pub struct Ppu {
     pub coldata_g: u8,
     /// `$2132` COLDATA: blue channel (5 bits). Bit 7 selects.
     pub coldata_b: u8,
+    /// `$2123-$2125` — per-region window enable / invert bits.
+    /// Layout, per layer (BG1, BG2, BG3, BG4, OBJ, math):
+    ///   bit 0 = window-1 invert (1 = use "outside" semantics)
+    ///   bit 1 = window-1 enable
+    ///   bit 2 = window-2 invert
+    ///   bit 3 = window-2 enable
+    /// `w12sel` packs BG1 (low nibble) + BG2 (high nibble),
+    /// `w34sel` packs BG3 + BG4, `wobjsel` packs OBJ + math.
+    pub w12sel: u8,
+    pub w34sel: u8,
+    pub wobjsel: u8,
+    /// `$2126` WH0 — window 1 left X (inclusive).
+    pub wh0: u8,
+    /// `$2127` WH1 — window 1 right X (inclusive).
+    pub wh1: u8,
+    /// `$2128` WH2 — window 2 left X.
+    pub wh2: u8,
+    /// `$2129` WH3 — window 2 right X.
+    pub wh3: u8,
+    /// `$212A` WBGLOG — 2-bit window-combine logic per BG.
+    /// Layout: bits 0-1 = BG1, 2-3 = BG2, 4-5 = BG3, 6-7 = BG4.
+    /// Values: 0 = OR, 1 = AND, 2 = XOR, 3 = XNOR.
+    pub wbglog: u8,
+    /// `$212B` WOBJLOG — bits 0-1 = OBJ logic, bits 2-3 = math.
+    pub wobjlog: u8,
+    /// `$212C` TM — main-screen layer enable mask
+    /// (bit 0..4 = BG1..BG4, OBJ).
+    pub tm: u8,
+    /// `$212D` TS — sub-screen layer enable mask.
+    pub ts: u8,
+    /// `$212E` TMW — main-screen window mask
+    /// (1 bit = disable that layer inside the combined window).
+    pub tmw: u8,
+    /// `$212F` TSW — sub-screen window mask.
+    pub tsw: u8,
     /// BG1-4 derived state ($2107-$2114).
     pub bg: [BgState; 4],
     /// Latch for the BG H/V scroll write-twice protocol.
@@ -184,6 +246,24 @@ impl Ppu {
             coldata_r: 0,
             coldata_g: 0,
             coldata_b: 0,
+            w12sel: 0,
+            w34sel: 0,
+            wobjsel: 0,
+            wh0: 0,
+            wh1: 0,
+            wh2: 0,
+            wh3: 0,
+            wbglog: 0,
+            wobjlog: 0,
+            // TM default to "all main layers on" matches the most
+            // common driver-init pattern (drivers explicitly write
+            // their final mask before un-blanking, so the default
+            // mostly affects bring-up correctness; "all on" gives
+            // us back-compat with the pre-window-aware renderer).
+            tm: 0x1F,
+            ts: 0,
+            tmw: 0,
+            tsw: 0,
             bg: [BgState::default(); 4],
             bg_scroll_latch: 0,
             open_bus: 0,
@@ -289,6 +369,19 @@ impl Ppu {
             register::VMDATAH => self.vram.write_hi(value),
             register::CGADD => self.cgram.set_address(value),
             register::CGDATA => self.cgram.write(value),
+            register::W12SEL => self.w12sel = value,
+            register::W34SEL => self.w34sel = value,
+            register::WOBJSEL => self.wobjsel = value,
+            register::WH0 => self.wh0 = value,
+            register::WH1 => self.wh1 = value,
+            register::WH2 => self.wh2 = value,
+            register::WH3 => self.wh3 = value,
+            register::WBGLOG => self.wbglog = value,
+            register::WOBJLOG => self.wobjlog = value,
+            register::TM => self.tm = value,
+            register::TS => self.ts = value,
+            register::TMW => self.tmw = value,
+            register::TSW => self.tsw = value,
             register::CGWSEL => self.cgwsel = value,
             register::CGADSUB => self.cgadsub = value,
             register::COLDATA => {
