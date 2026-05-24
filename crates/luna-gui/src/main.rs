@@ -16,6 +16,12 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Luna — SNES Emulator")
+            // X11 / Wayland app id — without this, GNOME and KDE
+            // initially label the window as "Unknown" and may pop up
+            // an "application not responding" notification while
+            // wgpu finishes initialising (≈3 s on aarch64). Setting
+            // it pins the WM identity to our binary immediately.
+            .with_app_id("luna-gui")
             .with_inner_size([1024.0, 720.0])
             .with_min_inner_size([640.0, 480.0])
             .with_drag_and_drop(true)
