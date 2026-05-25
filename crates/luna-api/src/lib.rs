@@ -130,6 +130,15 @@ pub struct PpuState {
     pub cgram_non_zero: usize,
     /// How many of OAM's 544 bytes are non-zero.
     pub oam_non_zero: usize,
+    /// First 16 sprites' OAM low-table entries (64 bytes total, 4
+    /// bytes per sprite: X.lo, Y, Tile.lo, Attrs). Lets debuggers
+    /// see at a glance whether sprite 0 (e.g. Mario in SMW) has
+    /// been written without dumping the full 544 bytes.
+    pub oam_low_excerpt: Vec<u8>,
+    /// High-table excerpt (first 4 bytes = sprites 0..15 size +
+    /// X-bit-8). Together with `oam_low_excerpt` reconstructs the
+    /// full state for the first 16 sprites.
+    pub oam_high_excerpt: Vec<u8>,
 }
 
 /// CPU-system register snapshot (`$4200-$421F`).
@@ -291,6 +300,19 @@ impl Emulator {
         Ok(())
     }
 
+    /// Set the joypad button bitmask for controller `port` (`0` or
+    /// `1`). The mask is the SNES JOY1L/JOY1H layout — bit 15 = B,
+    /// 14 = Y, 13 = Select, 12 = Start, 11..8 = Up/Down/Left/Right,
+    /// 7..4 = A/X/L/R, 3..0 = 0 (signature). The mask is latched on
+    /// the next auto-read pulse (VBlank entry when `NMITIMEN.0` is
+    /// set), so callers should hold the mask for at least one frame
+    /// before reading state.
+    pub fn set_joypad(&mut self, port: u8, mask: u16) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.cpu_regs.set_joypad(usize::from(port), mask);
+        Ok(())
+    }
+
     /// Step the CPU `count` instructions (or stop early if the CPU
     /// halts or panics). Returns the number actually executed.
     pub fn step(&mut self, count: u64) -> Result<u64, ApiError> {
@@ -389,6 +411,10 @@ impl Emulator {
                     oam_nz += 1;
                 }
             }
+            // First 16 sprites = 64 bytes of low table + 4 bytes
+            // of high table.
+            let oam_low_excerpt: Vec<u8> = (0..64u16).map(|i| s.ppu.oam.peek(i)).collect();
+            let oam_high_excerpt: Vec<u8> = (0..4u16).map(|i| s.ppu.oam.peek(0x200 + i)).collect();
             PpuState {
                 inidisp: s.ppu.inidisp,
                 bgmode: s.ppu.bgmode,
@@ -399,6 +425,8 @@ impl Emulator {
                 vram_non_zero: vram_nz,
                 cgram_non_zero: cgram_nz,
                 oam_non_zero: oam_nz,
+                oam_low_excerpt,
+                oam_high_excerpt,
             }
         });
         let cpu_regs = self
@@ -543,6 +571,8 @@ fn default_ppu_state() -> PpuState {
         vram_non_zero: 0,
         cgram_non_zero: 0,
         oam_non_zero: 0,
+        oam_low_excerpt: Vec::new(),
+        oam_high_excerpt: Vec::new(),
     }
 }
 
