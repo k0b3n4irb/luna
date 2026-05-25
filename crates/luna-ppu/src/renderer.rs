@@ -608,13 +608,15 @@ pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
                 main_bgr5
             };
             // CGWSEL bits 7:6 — "force main screen black" region.
-            // Same 4-value semantics as the math-enable region,
-            // referencing the same math-window mask:
-            //   00 = never; 01 = inside; 10 = outside; 11 = always.
+            // Per ares (window.cpp:36-38 + dac.cpp:120-122) and Mesen2
+            // (SnesPpuTypes.h:13-19 + SnesPpu.cpp:1307-1326), value 1
+            // = OutsideWindow (force black outside the math window),
+            // value 2 = InsideWindow (force black inside):
+            //   00 = never; 01 = outside; 10 = inside; 11 = always.
             let force_black = match (ppu.cgwsel >> 6) & 0x03 {
                 0 => false,
-                1 => in_math_window,
-                2 => !in_math_window,
+                1 => !in_math_window,
+                2 => in_math_window,
                 _ => true,
             };
             let final_bgr5 = if force_black { (0, 0, 0) } else { rgb5 };
@@ -1869,6 +1871,52 @@ mod tests {
         p.write(register::CGWSEL, 0b1100_0000); // bits 7:6 = 11 → always force black
         let out = render_frame_with(&p, RenderOptions::default());
         assert_eq!(out[0], [0, 0, 0]);
+    }
+
+    #[test]
+    fn cgwsel_force_main_black_outside_window() {
+        // CGWSEL bits 7:6 = 01 → "OutsideWindow": force black OUTSIDE
+        // the math window, normal main pixel INSIDE.
+        // Both ares (window.cpp:36-38 + dac.cpp:120-122) and Mesen2
+        // (SnesPpuTypes.h:13-19 + SnesPpu.cpp:1307-1326) agree on
+        // this polarity.
+        let mut p = setup_demo_tile();
+        p.write(register::BGMODE, 0x01);
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::TM, 0x01); // BG1 on main
+        // Math window = WOBJSEL high nibble, W1-enable bit.
+        p.write(register::WOBJSEL, 0x20);
+        p.write(register::WH0, 8);
+        p.write(register::WH1, 15);
+        p.write(register::CGWSEL, 0b0100_0000); // bits 7:6 = 01
+        let out = render_frame_with(&p, RenderOptions::default());
+        // Inside the window (x=8..=15): main pixel survives.
+        assert_ne!(out[8], [0, 0, 0], "x=8 inside window: main visible");
+        assert_ne!(out[15], [0, 0, 0], "x=15 inside window: main visible");
+        // Outside the window (x<8 and x>15): forced black.
+        assert_eq!(out[0], [0, 0, 0], "x=0 outside window: forced black");
+        assert_eq!(out[16], [0, 0, 0], "x=16 outside window: forced black");
+    }
+
+    #[test]
+    fn cgwsel_force_main_black_inside_window() {
+        // CGWSEL bits 7:6 = 10 → "InsideWindow": force black INSIDE
+        // the math window, normal main pixel OUTSIDE.
+        let mut p = setup_demo_tile();
+        p.write(register::BGMODE, 0x01);
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::TM, 0x01);
+        p.write(register::WOBJSEL, 0x20);
+        p.write(register::WH0, 8);
+        p.write(register::WH1, 15);
+        p.write(register::CGWSEL, 0b1000_0000); // bits 7:6 = 10
+        let out = render_frame_with(&p, RenderOptions::default());
+        // Inside the window (x=8..=15): forced black.
+        assert_eq!(out[8], [0, 0, 0], "x=8 inside window: forced black");
+        assert_eq!(out[15], [0, 0, 0], "x=15 inside window: forced black");
+        // Outside the window: main pixel survives.
+        assert_ne!(out[0], [0, 0, 0], "x=0 outside window: main visible");
+        assert_ne!(out[16], [0, 0, 0], "x=16 outside window: main visible");
     }
 
     // -------------------------------------------------------------------
