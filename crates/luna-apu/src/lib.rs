@@ -193,10 +193,22 @@ pub struct Apu {
     pub voice_brr_history: [[i16; 4]; 8],
     /// Pitch accumulator per voice. Each output sample (32 kHz) the
     /// 14-bit pitch (from `$x2`/`$x3`) is added; whenever the
-    /// accumulator crosses 0x1000 the BRR sample pointer advances
-    /// once. So pitch 0x1000 = 1:1 (32 kHz reproduction); pitch
-    /// 0x0800 plays at half speed; pitch 0x2000 plays at double.
+    /// accumulator crosses 0x4000 the BRR sample pointer advances
+    /// once (gap A2 — canonical SNES DSP behaviour, see
+    /// `docs/apu_dsp_reference.md` §4). So pitch 0x4000 = 1 BRR
+    /// per output sample; pitch 0x1000 = 1 BRR per 4 outputs (= 8
+    /// kHz playback, the typical "natural" pitch).
     pub voice_pitch_acc: [u16; 8],
+    /// Per-voice KON setup countdown. Set to 5 when KON ($4C)
+    /// latches a `1` for the voice; decremented each sample. While
+    /// nonzero, BRR decoding is suppressed, pitch contribution is
+    /// 0, and the envelope stays at 0 — exactly what ares
+    /// `dsp/voice.cpp` voice3c and Mesen2 `DspVoice.cpp:245-261`
+    /// do. Real hardware needs this so the gaussian interpolator
+    /// has 4 priming samples before the voice's audible output
+    /// begins. Skipping it produces a click on every note onset
+    /// + the first samples are garbage (uninitialised BRR state).
+    pub voice_key_on_delay: [u8; 8],
     /// Echo ring buffer position, in stereo samples. The ring lives
     /// in ARAM starting at `(ESA << 8)` and is `max(1, EDL) * 512`
     /// stereo samples long (each sample = 4 bytes: lo_L, hi_L, lo_R,
@@ -294,6 +306,7 @@ impl Apu {
                 r
             },
             voice_active: [false; 8],
+            voice_key_on_delay: [0; 8],
             voice_age: [0; 8],
             voice_phase: [AdsrPhase::Off; 8],
             voice_envelope: [0; 8],
@@ -336,6 +349,7 @@ impl Apu {
             voice_position: &mut apu.voice_position,
             voice_block_addr: &mut apu.voice_block_addr,
             voice_block_sample: &mut apu.voice_block_sample,
+            voice_key_on_delay: &mut apu.voice_key_on_delay,
             timer_reload: &mut apu.timer_reload,
             timer_output: &mut apu.timer_output,
             timer_internal: &mut apu.timer_internal,
@@ -454,6 +468,19 @@ impl Apu {
 
         for v in 0..8 {
             if !self.voice_active[v] && self.voice_phase[v] == AdsrPhase::Off {
+                continue;
+            }
+            // Gap A4: KON 5-sample setup delay. While counting down,
+            // suppress BRR / pitch / envelope updates and emit no
+            // contribution from this voice. This gives the gaussian
+            // interpolator 4 sample periods of priming before the
+            // first audible output, eliminating the click-and-noise-
+            // burst characteristic of every key-on.
+            // Source: ares dsp/voice.cpp voice3c, Mesen2
+            // DspVoice.cpp:245-261.
+            if self.voice_key_on_delay[v] > 0 {
+                self.voice_key_on_delay[v] -= 1;
+                self.voice_pmod_output[v] = 0;
                 continue;
             }
             self.voice_age[v] = self.voice_age[v].saturating_add(SPC_CYCLES_PER_SAMPLE);
@@ -1014,6 +1041,7 @@ impl Apu {
                 voice_position: &mut self.voice_position,
                 voice_block_addr: &mut self.voice_block_addr,
                 voice_block_sample: &mut self.voice_block_sample,
+                voice_key_on_delay: &mut self.voice_key_on_delay,
                 timer_reload: &mut self.timer_reload,
                 timer_output: &mut self.timer_output,
                 timer_internal: &mut self.timer_internal,
@@ -1045,6 +1073,7 @@ struct ApuBusView<'a> {
     voice_position: &'a mut [u32; 8],
     voice_block_addr: &'a mut [u16; 8],
     voice_block_sample: &'a mut [u8; 8],
+    voice_key_on_delay: &'a mut [u8; 8],
     timer_reload: &'a mut [u8; 3],
     timer_output: &'a mut [u8; 3],
     timer_internal: &'a mut [u16; 3],
@@ -1144,6 +1173,15 @@ impl SpcBus for ApuBusView<'_> {
                                 self.voice_age[v] = 0;
                                 self.voice_position[v] = 0;
                                 self.voice_envelope[v] = 0;
+                                // Gap A4: 5-sample KON setup delay.
+                                // tick_one_sample sees this and
+                                // suppresses BRR / pitch / envelope
+                                // for 5 samples so the gaussian
+                                // interpolator gets its priming
+                                // window before the voice is heard.
+                                // Matches ares dsp/voice.cpp voice3c
+                                // and Mesen2 DspVoice.cpp:245-261.
+                                self.voice_key_on_delay[v] = 5;
                                 let adsr1 = self.dsp_regs[0x05 + v * 0x10];
                                 self.voice_phase[v] = if adsr1 & 0x80 != 0 {
                                     AdsrPhase::Attack
@@ -1259,6 +1297,7 @@ mod tests {
                 voice_position: &mut apu.voice_position,
                 voice_block_addr: &mut apu.voice_block_addr,
                 voice_block_sample: &mut apu.voice_block_sample,
+                voice_key_on_delay: &mut apu.voice_key_on_delay,
                 timer_reload: &mut apu.timer_reload,
                 timer_output: &mut apu.timer_output,
                 timer_internal: &mut apu.timer_internal,
@@ -1272,8 +1311,9 @@ mod tests {
         assert!(!apu.voice_active[1]);
 
         // Age past the threshold for both — ENDX should light up
-        // bits 0 and 3.
-        apu.tick_voices(VOICE_END_SPC_CYCLES + 100);
+        // bits 0 and 3. Budget includes the post-A4 5-sample KON
+        // delay during which voice_age does NOT increment.
+        apu.tick_voices(VOICE_END_SPC_CYCLES + 5 * SPC_CYCLES_PER_SAMPLE + 100);
         assert_eq!(apu.dsp_regs[0x7C], 0b0000_1001);
         assert!(!apu.voice_active[0]);
         assert!(!apu.voice_active[3]);
@@ -1294,6 +1334,7 @@ mod tests {
                 voice_position: &mut apu.voice_position,
                 voice_block_addr: &mut apu.voice_block_addr,
                 voice_block_sample: &mut apu.voice_block_sample,
+                voice_key_on_delay: &mut apu.voice_key_on_delay,
                 timer_reload: &mut apu.timer_reload,
                 timer_output: &mut apu.timer_output,
                 timer_internal: &mut apu.timer_internal,
@@ -1456,6 +1497,7 @@ mod tests {
                 voice_position: &mut apu.voice_position,
                 voice_block_addr: &mut apu.voice_block_addr,
                 voice_block_sample: &mut apu.voice_block_sample,
+                voice_key_on_delay: &mut apu.voice_key_on_delay,
                 timer_reload: &mut apu.timer_reload,
                 timer_output: &mut apu.timer_output,
                 timer_internal: &mut apu.timer_internal,
@@ -1484,11 +1526,11 @@ mod tests {
         assert_eq!(apu.voice_block_addr[0], 0x0200);
         assert_eq!(apu.voice_block_sample[0], 0);
 
-        // Run 64 samples — exactly one block boundary post-A2
-        // (pitch $1000 = 1 BRR / 4 ticks → 16 BRR = 64 ticks).
-        // Header has end + loop, so ENDX bit 0 should fire and
-        // block_addr should jump to loop_addr = $0200.
-        apu.tick_voices(SPC_CYCLES_PER_SAMPLE * 64);
+        // Run 69 samples — exactly one block boundary post-A2/A4.
+        // Budget: 5 (A4 KON setup delay) + 64 (16 BRR @ pitch $1000
+        // = 1 BRR / 4 output ticks). Header has end + loop, so ENDX
+        // bit 0 should fire and block_addr should jump to loop_addr.
+        apu.tick_voices(SPC_CYCLES_PER_SAMPLE * 69);
         assert!(apu.dsp_regs[0x7C] & 0x01 != 0, "ENDX bit 0 should be set");
         assert_eq!(apu.voice_block_addr[0], 0x0200, "loop back to sample start");
     }
@@ -1515,6 +1557,7 @@ mod tests {
                 voice_position: &mut apu.voice_position,
                 voice_block_addr: &mut apu.voice_block_addr,
                 voice_block_sample: &mut apu.voice_block_sample,
+                voice_key_on_delay: &mut apu.voice_key_on_delay,
                 timer_reload: &mut apu.timer_reload,
                 timer_output: &mut apu.timer_output,
                 timer_internal: &mut apu.timer_internal,
@@ -1561,6 +1604,7 @@ mod tests {
             voice_position: &mut apu.voice_position,
             voice_block_addr: &mut apu.voice_block_addr,
             voice_block_sample: &mut apu.voice_block_sample,
+            voice_key_on_delay: &mut apu.voice_key_on_delay,
             timer_reload: &mut apu.timer_reload,
             timer_output: &mut apu.timer_output,
             timer_internal: &mut apu.timer_internal,
@@ -1643,6 +1687,7 @@ mod tests {
                 voice_position: &mut apu.voice_position,
                 voice_block_addr: &mut apu.voice_block_addr,
                 voice_block_sample: &mut apu.voice_block_sample,
+                voice_key_on_delay: &mut apu.voice_key_on_delay,
                 timer_reload: &mut apu.timer_reload,
                 timer_output: &mut apu.timer_output,
                 timer_internal: &mut apu.timer_internal,
@@ -1670,6 +1715,7 @@ mod tests {
             voice_position: &mut apu.voice_position,
             voice_block_addr: &mut apu.voice_block_addr,
             voice_block_sample: &mut apu.voice_block_sample,
+            voice_key_on_delay: &mut apu.voice_key_on_delay,
             timer_reload: &mut apu.timer_reload,
             timer_output: &mut apu.timer_output,
             timer_internal: &mut apu.timer_internal,
