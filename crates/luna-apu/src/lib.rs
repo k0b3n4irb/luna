@@ -482,9 +482,20 @@ impl Apu {
                 } else {
                     raw_pitch
                 };
+                // Gap A2 (canonical pitch threshold): the BRR-advance
+                // bit on the gaussianOffset accumulator is bit 14
+                // (= 0x4000). Source: ares' `dsp/voice.cpp` voice4 path
+                // ("if(v.gaussianOffset >= 0x4000) brrDecode(v); ...
+                //   v.gaussianOffset = (v.gaussianOffset & 0x3fff) + pitch")
+                // and Mesen2 `DspVoice.cpp:198`. With a 14-bit pitch
+                // register against a 14-bit threshold, pitch = $1000
+                // produces ~8 kHz playback (= 1 BRR / 4 output samples).
+                // The previous threshold of $1000 advanced BRR 4× too
+                // fast, putting every note two octaves above the
+                // intended pitch.
                 let mut acc = u32::from(self.voice_pitch_acc[v]) + u32::from(pitch);
-                while acc >= 0x1000 {
-                    acc -= 0x1000;
+                while acc >= 0x4000 {
+                    acc -= 0x4000;
                     let sample = self.decode_current_brr_sample(v);
                     // Shift history newest→oldest by one slot, then
                     // place the new sample at index 0 (newest).
@@ -515,7 +526,12 @@ impl Apu {
             // exactly 2048 — the `>> 11` then recovers the input
             // amplitude when all four taps are equal.
             if self.voice_active[v] {
-                let frac = (self.voice_pitch_acc[v] >> 4) as usize; // 0..=255
+                // Per ares `gaussian.cpp:25-26`: `n8 offset = gaussianOffset >> 4`.
+                // The `n8` truncates to 8 bits; the explicit `& 0xFF` here
+                // is the equivalent in Rust now that the accumulator can
+                // legally hold values up to 0x3FFF (post-A2 fix) — without
+                // the mask we'd index up to 0x3FF into a 1024-bounded table.
+                let frac = ((self.voice_pitch_acc[v] >> 4) as usize) & 0xFF;
                 let table = gaussian_table();
                 let s3 = i32::from(self.voice_brr_history[v][0]); // newest
                 let s2 = i32::from(self.voice_brr_history[v][1]);
@@ -1329,11 +1345,11 @@ mod tests {
     }
 
     #[test]
-    fn pitch_below_1000_slows_sample_advance() {
-        // Set up a sample at $0500. Pitch = $0800 means we should
-        // consume one BRR sample every TWO output ticks. Use gain
-        // mode with a non-zero direct gain so the envelope stays
-        // up and the voice doesn't deactivate.
+    fn pitch_half_threshold_advances_every_two_ticks() {
+        // Post-A2: BRR-advance threshold is $4000 (matches ares /
+        // Mesen2). Pitch $2000 = half threshold → one BRR sample per
+        // two output ticks. Use gain mode with a non-zero direct gain
+        // so the envelope stays up and the voice doesn't deactivate.
         let mut apu = Apu::new();
         apu.aram[0x0500] = 0x00; // header: no end, F0, no shift
         apu.aram[0x0501] = 0x12; // samples 0,1 = $1, $2
@@ -1343,14 +1359,14 @@ mod tests {
         apu.voice_phase[0] = AdsrPhase::Off; // gain mode
         apu.voice_envelope[0] = 0x7F0;
         apu.dsp_regs[0x02] = 0x00;
-        apu.dsp_regs[0x03] = 0x08; // pitch = $0800
+        apu.dsp_regs[0x03] = 0x20; // pitch = $2000 (= half of $4000 threshold)
         apu.dsp_regs[0x05] = 0x00; // ADSR disabled
         apu.dsp_regs[0x07] = 0x7F; // gain = direct $7F
 
-        // After one sample tick, accumulator = $0800, no advance yet.
+        // After one sample tick, accumulator = $2000, no advance yet.
         apu.tick_voices(SPC_CYCLES_PER_SAMPLE);
         assert_eq!(apu.voice_block_sample[0], 0);
-        // Second tick: accumulator overflows $1000, advances by 1.
+        // Second tick: accumulator hits $4000, advances by 1.
         apu.tick_voices(SPC_CYCLES_PER_SAMPLE);
         assert_eq!(apu.voice_block_sample[0], 1);
     }
@@ -1375,7 +1391,7 @@ mod tests {
         apu.voice_phase[0] = AdsrPhase::Off; // gain mode
         apu.voice_envelope[0] = 0x7F0;
         apu.dsp_regs[0x02] = 0x00;
-        apu.dsp_regs[0x03] = 0x10; // pitch $1000 = 1:1
+        apu.dsp_regs[0x03] = 0x10; // pitch $1000 (post-A2 = 1 BRR per 4 output ticks)
         apu.dsp_regs[0x05] = 0x00; // ADSR disabled
         apu.dsp_regs[0x07] = 0x7F; // gain direct = $7F
         // VOL_L = $7F (max positive), VOL_R = 0.
@@ -1388,10 +1404,10 @@ mod tests {
         // mute bit would otherwise zero the output.
         apu.dsp_regs[0x6C] = 0x00;
 
-        // Run 4 ticks so the Gaussian window fills with four `+7`
-        // samples (the first 3 ticks ramp through partially-zero
-        // history, the 4th lands on a saturated window).
-        for _ in 0..4 {
+        // Run 16 ticks so the Gaussian window fills with four `+7`
+        // samples (post-A2: pitch $1000 → 1 BRR / 4 ticks; need 4
+        // BRR advances to populate all four history slots).
+        for _ in 0..16 {
             apu.tick_voices(SPC_CYCLES_PER_SAMPLE);
         }
         let (l, r) = apu.audio_sample();
@@ -1455,8 +1471,7 @@ mod tests {
             // Voice 0 SRCN = 0.
             bus.write(0x00F2, 0x04);
             bus.write(0x00F3, 0x00);
-            // Voice 0 pitch = $1000 (1:1 rate so each tick advances
-            // one BRR sample).
+            // Voice 0 pitch = $1000 (post-A2: 1 BRR per 4 output ticks).
             bus.write(0x00F2, 0x02);
             bus.write(0x00F3, 0x00);
             bus.write(0x00F2, 0x03);
@@ -1469,10 +1484,11 @@ mod tests {
         assert_eq!(apu.voice_block_addr[0], 0x0200);
         assert_eq!(apu.voice_block_sample[0], 0);
 
-        // Run 16 samples — exactly one block boundary. Header has
-        // end + loop, so ENDX bit 0 should fire and block_addr
-        // should jump to loop_addr = $0200.
-        apu.tick_voices(SPC_CYCLES_PER_SAMPLE * 16);
+        // Run 64 samples — exactly one block boundary post-A2
+        // (pitch $1000 = 1 BRR / 4 ticks → 16 BRR = 64 ticks).
+        // Header has end + loop, so ENDX bit 0 should fire and
+        // block_addr should jump to loop_addr = $0200.
+        apu.tick_voices(SPC_CYCLES_PER_SAMPLE * 64);
         assert!(apu.dsp_regs[0x7C] & 0x01 != 0, "ENDX bit 0 should be set");
         assert_eq!(apu.voice_block_addr[0], 0x0200, "loop back to sample start");
     }
