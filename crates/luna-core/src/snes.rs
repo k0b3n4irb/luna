@@ -111,6 +111,12 @@ pub struct Snes {
     /// until the log fills (capped at `max_events`). Enable via
     /// [`Snes::enable_cpu_trace`].
     pub cpu_trace_log: Option<CpuTraceLog>,
+
+    /// Optional memory access trace. When `Some`, every CPU bus
+    /// read/write is appended until the log fills. Filterable by
+    /// bank to avoid drowning in ROM fetches. Enable via
+    /// [`Snes::enable_mem_trace`].
+    pub mem_trace_log: Option<MemTraceLog>,
 }
 
 /// One CPU↔APU mailbox transfer, captured at `$2140-$2143`. luna-core
@@ -182,6 +188,43 @@ pub struct CpuTraceLog {
     /// no-op until the buffer is taken (the cap exists to avoid
     /// blowing out memory on long runs).
     pub max_events: usize,
+}
+
+/// One CPU bus access, captured by the optional memory tracer.
+#[derive(Debug, Clone, Copy)]
+pub struct MemTraceEvent {
+    /// Master cycles since reset.
+    pub mclk_total: u64,
+    /// 24-bit CPU PC of the instruction performing the access.
+    pub pc_full: u32,
+    /// 24-bit bus address (`bank << 16 | offset`).
+    pub addr_full: u32,
+    /// Read or write.
+    pub kind: MemEventKind,
+    /// Byte transferred.
+    pub value: u8,
+}
+
+/// Direction of a CPU bus access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemEventKind {
+    /// CPU read.
+    Read,
+    /// CPU write.
+    Write,
+}
+
+/// Bounded ring for the memory access tracer.
+pub struct MemTraceLog {
+    /// Recorded events.
+    pub events: Vec<MemTraceEvent>,
+    /// Hard cap on event count.
+    pub max_events: usize,
+    /// Optional bank-filter. `None` captures everything; `Some(b)`
+    /// only captures accesses where the high byte of the address
+    /// equals `b`. Useful for focusing on WRAM (bank `$7E` or `$7F`)
+    /// without drowning in ROM fetches.
+    pub bank_filter: Option<u8>,
 }
 
 /// Master cycles per PPU scanline on NTSC (1364 mclk = 4 dots × 341).
@@ -296,6 +339,7 @@ impl Snes {
             joypad2_shift: 0,
             mailbox_log: None,
             cpu_trace_log: None,
+            mem_trace_log: None,
         }
     }
 
@@ -342,6 +386,25 @@ impl Snes {
         }
     }
 
+    /// Enable memory access tracing. Every CPU bus read/write
+    /// matching `bank_filter` (or every access when `None`) is
+    /// appended to the log until it fills.
+    pub fn enable_mem_trace(&mut self, max_events: usize, bank_filter: Option<u8>) {
+        self.mem_trace_log = Some(MemTraceLog {
+            events: Vec::new(),
+            max_events,
+            bank_filter,
+        });
+    }
+
+    /// Drain the memory access trace buffer.
+    pub fn take_mem_trace_log(&mut self) -> Vec<MemTraceEvent> {
+        match self.mem_trace_log.as_mut() {
+            Some(log) => std::mem::take(&mut log.events),
+            None => Vec::new(),
+        }
+    }
+
     /// Cached scanlines-per-frame for the current region — propagates
     /// into every [`SnesBus`] borrow.
     #[inline]
@@ -375,6 +438,7 @@ impl Snes {
             joypad1_shift,
             joypad2_shift,
             mailbox_log,
+            mem_trace_log,
             ..
         } = self;
         let mut bus = SnesBus {
@@ -395,6 +459,7 @@ impl Snes {
             vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
+            mem_trace_log,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -448,6 +513,7 @@ impl Snes {
             joypad1_shift,
             joypad2_shift,
             mailbox_log,
+            mem_trace_log,
             ..
         } = self;
         let mut bus = SnesBus {
@@ -468,6 +534,7 @@ impl Snes {
             vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
+            mem_trace_log,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -680,6 +747,7 @@ impl Snes {
             joypad1_shift,
             joypad2_shift,
             mailbox_log,
+            mem_trace_log,
             ..
         } = self;
         let mut bus = SnesBus {
@@ -700,6 +768,7 @@ impl Snes {
             vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
+            mem_trace_log,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -762,6 +831,8 @@ struct SnesBus<'a> {
     /// Mailbox traffic log for `$2140-$2143`. `None` = disabled (the
     /// common path); `Some` = capturing events. See [`Snes::enable_mailbox_log`].
     mailbox_log: &'a mut Option<Vec<MailboxEvent>>,
+    /// Memory access trace. `None` = disabled. See [`Snes::enable_mem_trace`].
+    mem_trace_log: &'a mut Option<MemTraceLog>,
 }
 
 impl<'a> SnesBus<'a> {
@@ -922,8 +993,54 @@ impl<'a> DmaBus for DmaBusView<'a> {
     }
 }
 
+impl<'a> SnesBus<'a> {
+    /// Push a memory access event to the optional tracer, honouring
+    /// the bank filter. Cheap when disabled.
+    #[inline]
+    fn trace_mem_access(&mut self, addr: Addr24, kind: MemEventKind, value: u8) {
+        if let Some(log) = self.mem_trace_log.as_mut() {
+            if log.events.len() >= log.max_events {
+                return;
+            }
+            if let Some(filter) = log.bank_filter {
+                if bank_of(addr) != filter {
+                    return;
+                }
+            }
+            log.events.push(MemTraceEvent {
+                mclk_total: *self.mclk_total,
+                pc_full: self.cpu_pc_full,
+                addr_full: addr,
+                kind,
+                value,
+            });
+        }
+    }
+}
+
 impl<'a> Bus for SnesBus<'a> {
     fn read(&mut self, addr: Addr24) -> u8 {
+        let value = self.read_inner(addr);
+        self.trace_mem_access(addr, MemEventKind::Read, value);
+        value
+    }
+    fn write(&mut self, addr: Addr24, value: u8) {
+        self.trace_mem_access(addr, MemEventKind::Write, value);
+        self.write_inner(addr, value);
+    }
+    fn io_cycle(&mut self, mcycles: MCycles) {
+        *self.mclk_total = self.mclk_total.saturating_add(mcycles);
+    }
+    fn nmi_pending(&self) -> bool {
+        *self.nmi
+    }
+    fn irq_pending(&self) -> bool {
+        *self.irq || self.mapper.coproc_main_irq_pending()
+    }
+}
+
+impl<'a> SnesBus<'a> {
+    fn read_inner(&mut self, addr: Addr24) -> u8 {
         let speed = address_speed(addr, self.fast_rom);
         self.io_cycle(speed.mcycles());
 
@@ -1026,7 +1143,7 @@ impl<'a> Bus for SnesBus<'a> {
         0xFF
     }
 
-    fn write(&mut self, addr: Addr24, value: u8) {
+    fn write_inner(&mut self, addr: Addr24, value: u8) {
         let speed = address_speed(addr, self.fast_rom);
         self.io_cycle(speed.mcycles());
 
@@ -1197,18 +1314,6 @@ impl<'a> Bus for SnesBus<'a> {
         // Mapper claims SRAM writes; anything not yet routed drops.
         let _ = self.mapper.write(addr, value);
     }
-
-    fn io_cycle(&mut self, mcycles: MCycles) {
-        *self.mclk_total = self.mclk_total.saturating_add(mcycles);
-    }
-
-    fn nmi_pending(&self) -> bool {
-        *self.nmi
-    }
-
-    fn irq_pending(&self) -> bool {
-        *self.irq || self.mapper.coproc_main_irq_pending()
-    }
 }
 
 // =============================================================================
@@ -1339,6 +1444,7 @@ mod tests {
             joypad1_shift,
             joypad2_shift,
             mailbox_log,
+            mem_trace_log,
             ..
         } = &mut snes;
         let mut bus = SnesBus {
@@ -1359,6 +1465,7 @@ mod tests {
             vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
+            mem_trace_log,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -1401,6 +1508,7 @@ mod tests {
             joypad1_shift,
             joypad2_shift,
             mailbox_log,
+            mem_trace_log,
             ..
         } = &mut snes;
         let mut bus = SnesBus {
@@ -1421,6 +1529,7 @@ mod tests {
             vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
+            mem_trace_log,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -1470,6 +1579,7 @@ mod tests {
             joypad1_shift,
             joypad2_shift,
             mailbox_log,
+            mem_trace_log,
             ..
         } = &mut snes;
         let mut bus = SnesBus {
@@ -1490,6 +1600,7 @@ mod tests {
             vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
+            mem_trace_log,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -1741,6 +1852,7 @@ mod tests {
             joypad1_shift,
             joypad2_shift,
             mailbox_log,
+            mem_trace_log,
             ..
         } = &mut snes;
         let mut bus = SnesBus {
@@ -1761,6 +1873,7 @@ mod tests {
             vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
+            mem_trace_log,
             wm_addr,
             joypad_strobe,
             joypad1_shift,

@@ -17,7 +17,10 @@ use std::path::Path;
 
 use luna_cartridge::{CartError, Cartridge};
 use luna_core::Snes;
-pub use luna_core::{CpuTraceEvent, CpuTraceLog, MailboxEvent, MailboxEventKind};
+pub use luna_core::{
+    CpuTraceEvent, CpuTraceLog, MailboxEvent, MailboxEventKind, MemEventKind, MemTraceEvent,
+    MemTraceLog,
+};
 use luna_ppu::FRAME_H;
 use luna_ppu::FRAME_W;
 use serde::Serialize;
@@ -667,6 +670,26 @@ impl Emulator {
     #[must_use]
     pub fn instructions_executed(&self) -> u64 {
         self.instructions_executed
+    }
+
+    /// Enable per-access memory tracing. Every CPU bus read/write
+    /// from this point matching `bank_filter` (or every access when
+    /// `None`) is captured into the log until `max_events` is
+    /// reached. Drain with [`Emulator::take_mem_trace_log`].
+    pub fn enable_mem_trace(
+        &mut self,
+        max_events: usize,
+        bank_filter: Option<u8>,
+    ) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.enable_mem_trace(max_events, bank_filter);
+        Ok(())
+    }
+
+    /// Take ownership of the accumulated memory access events.
+    pub fn take_mem_trace_log(&mut self) -> Result<Vec<MemTraceEvent>, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        Ok(snes.take_mem_trace_log())
     }
 
     /// Direct read of the SPC700's ARAM. Read-only, no bus side
