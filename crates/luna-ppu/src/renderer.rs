@@ -238,7 +238,47 @@ pub struct SpriteEntry {
     pub h: u16,
 }
 
+/// Byte offset into VRAM for an SNES sprite tile.
+///
+/// Sprite CHR data lives in two 8 KB pages of 256 tiles × 32 bytes
+/// each, selected by **bit 8 of the 9-bit tile number**:
+///
+/// * Page 0 base: `OBSEL[0..2] << 13` bytes.
+/// * Page 1 base: `page0 + ((nameselect + 1) << 12)` bytes, where
+///   `nameselect = OBSEL[3..4]`.
+///
+/// The page-1 offset can be `0x1000`, `0x2000`, `0x3000` or
+/// `0x4000`. The `0x2000` (nameselect = 1) case places page 1
+/// immediately after page 0; the others either overlap page 0 or
+/// leave a gap. Hardware-faithful per ares' `oam.cpp` and
+/// Mesen2's `_state.OamBaseAddress` + `_state.OamAddressOffset`.
+///
+/// luna previously addressed all 512 tiles linearly from page 0
+/// (equivalent to nameselect = 1, regardless of the register
+/// value) — broken for games that configure the second page
+/// elsewhere.
+#[inline]
+#[must_use]
+pub(crate) fn sprite_tile_byte_offset(obsel: u8, tile: u16) -> usize {
+    let page0 = (usize::from(obsel) & 0x07) << 13;
+    let nameselect = usize::from(obsel >> 3) & 0x03;
+    let page1 = page0.wrapping_add((nameselect + 1) << 12);
+    let tile_in_page = usize::from(tile & 0xFF) * 32;
+    if (tile & 0x100) == 0 {
+        page0 + tile_in_page
+    } else {
+        // VRAM is 64 KB — wrap if the configured offset overshoots.
+        (page1 + tile_in_page) & 0xFFFF
+    }
+}
+
 /// Sprite size pair selected by `OBSEL.bits[7:5]` — small vs large.
+///
+/// Per ares' `oam.cpp` `width()`/`height()` + Mesen2's `oamWidth[]`/
+/// `oamHeight[]` tables (`SnesPpuTypes.h`). The two emulators agree
+/// exactly, including the non-square non-square pairs for codes 6
+/// and 7 — and **code 7's large size is `32×32` (not `32×64`)**, an
+/// easy-to-miss hardware quirk.
 #[must_use]
 pub fn sprite_size_pair(obsel: u8) -> ((u16, u16), (u16, u16)) {
     match (obsel >> 5) & 0x07 {
@@ -248,8 +288,9 @@ pub fn sprite_size_pair(obsel: u8) -> ((u16, u16), (u16, u16)) {
         3 => ((16, 16), (32, 32)),
         4 => ((16, 16), (64, 64)),
         5 => ((32, 32), (64, 64)),
-        6 | 7 => ((16, 32), (32, 64)),
-        _ => ((8, 8), (16, 16)),
+        6 => ((16, 32), (32, 64)),
+        7 => ((16, 32), (32, 32)),
+        _ => unreachable!(),
     }
 }
 
@@ -333,9 +374,6 @@ pub fn render_sprites_scanline(ppu: &Ppu, y: u16, opts: RenderOptions) -> [Optio
     } else {
         ppu.inidisp & 0x0F
     };
-    // OBSEL bits 0-2: name select base in 8K-byte chunks (= 16 KB
-    // word steps). 0..7 → byte base 0 / $2000 / ... / $E000.
-    let sprite_tile_base_bytes = ((ppu.obsel as usize) & 0x07) << 13;
     // Iterate sprites highest-OAM-index first so lower indices win
     // (real PPU draws sprite 0 last; we emulate by drawing 127 first
     // and overwriting with lower indices).
@@ -368,7 +406,7 @@ pub fn render_sprites_scanline(ppu: &Ppu, y: u16, opts: RenderOptions) -> [Optio
             let pix_x = sc % 8;
             let pix_y = sr % 8;
             let tile_id = (sp.tile.wrapping_add(((tile_y * 16) + tile_x) as u16)) & 0x01FF;
-            let tile_off = sprite_tile_base_bytes + (tile_id as usize) * 32;
+            let tile_off = sprite_tile_byte_offset(ppu.obsel, tile_id);
             let idx = decode_tile_pixel(ppu, tile_off, pix_y, pix_x, 4);
             if idx == 0 {
                 continue; // transparent
@@ -1109,7 +1147,6 @@ pub fn render_sprites_scanline_indexed_with(
     if ppu.inidisp & 0x80 != 0 && !opts.bypass_forced_blank {
         return out;
     }
-    let sprite_tile_base_bytes = ((ppu.obsel as usize) & 0x07) << 13;
     let sprites = decode_all_sprites(ppu);
     // Iterate highest-OAM-index first so lower indices visually win
     // (sprite 0 = front-most for the same screen pixel).
@@ -1136,7 +1173,7 @@ pub fn render_sprites_scanline_indexed_with(
             let pix_x = sc % 8;
             let pix_y = sr % 8;
             let tile_id = (sp.tile.wrapping_add(((tile_y * 16) + tile_x) as u16)) & 0x01FF;
-            let tile_off = sprite_tile_base_bytes + (tile_id as usize) * 32;
+            let tile_off = sprite_tile_byte_offset(ppu.obsel, tile_id);
             let idx = decode_tile_pixel(ppu, tile_off, pix_y, pix_x, 4);
             if idx == 0 {
                 continue;
@@ -1502,10 +1539,32 @@ mod tests {
 
     #[test]
     fn sprite_size_pair_table() {
+        // Full table per ares + Mesen2.
         assert_eq!(sprite_size_pair(0x00), ((8, 8), (16, 16)));
         assert_eq!(sprite_size_pair(0x20), ((8, 8), (32, 32)));
+        assert_eq!(sprite_size_pair(0x40), ((8, 8), (64, 64)));
         assert_eq!(sprite_size_pair(0x60), ((16, 16), (32, 32)));
         assert_eq!(sprite_size_pair(0x80), ((16, 16), (64, 64)));
+        assert_eq!(sprite_size_pair(0xA0), ((32, 32), (64, 64)));
+        assert_eq!(sprite_size_pair(0xC0), ((16, 32), (32, 64)));
+        // baseSize=7: large is 32x32, **not** 32x64 (hardware quirk).
+        assert_eq!(sprite_size_pair(0xE0), ((16, 32), (32, 32)));
+    }
+
+    #[test]
+    fn sprite_tile_byte_offset_two_page_addressing() {
+        // OBSEL with base=0, nameselect=0: page 1 at $1000.
+        assert_eq!(sprite_tile_byte_offset(0x00, 0x000), 0);
+        assert_eq!(sprite_tile_byte_offset(0x00, 0x0FF), 0xFF * 32);
+        assert_eq!(sprite_tile_byte_offset(0x00, 0x100), 0x1000);
+        assert_eq!(sprite_tile_byte_offset(0x00, 0x1FF), 0x1000 + 0xFF * 32);
+        // nameselect=1: page 1 at +$2000 — adjacent to page 0 (no gap).
+        assert_eq!(sprite_tile_byte_offset(0x08, 0x100), 0x2000);
+        // nameselect=3: page 1 at +$4000.
+        assert_eq!(sprite_tile_byte_offset(0x18, 0x100), 0x4000);
+        // base = 2 (OBSEL bit 1): page 0 at $4000.
+        assert_eq!(sprite_tile_byte_offset(0x02, 0x000), 0x4000);
+        assert_eq!(sprite_tile_byte_offset(0x02, 0x100), 0x4000 + 0x1000);
     }
 
     #[test]
