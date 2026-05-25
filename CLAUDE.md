@@ -1,118 +1,74 @@
-# luna — agent rules
+# CLAUDE.md
 
-## Reference-first implementation
+This file provides guidance to Claude Code when working in the luna
+repository. Keep it lean — workflow detail belongs in `.claude/rules/`
+(auto-loaded) and `.claude/commands/` (slash commands). Reference data
+belongs in `docs/`.
 
-Before writing or rewriting **any** SNES subsystem feature — bus
-dispatch, CPU opcode timing, PPU register, DMA mode, DSP envelope,
-SA-1 coprocessor logic, joypad scan, etc. — consult the
-corresponding implementation in both reference emulators **and
-understand it fully** before touching luna code.
+## What luna is
 
-The two canonical references:
+A cycle-accurate-ish SNES emulator written in Rust. Workspace layout:
 
-* **ares** — `https://raw.githubusercontent.com/ares-emulator/ares/master/ares/sfc/...`
-  Gold standard for hardware accuracy.
-* **Mesen2** — `https://raw.githubusercontent.com/SourMesen/Mesen2/master/Core/SNES/...`
-  Independent second source; cross-check when ares is unclear.
+- `crates/luna-core/` — system glue, CPU bus, scheduler.
+- `crates/luna-cpu-65c816/`, `crates/luna-cpu-spc700/` — CPU cores.
+- `crates/luna-ppu/` — PPU + renderer + compositor.
+- `crates/luna-dma/`, `crates/luna-bus/`, `crates/luna-coproc/` —
+  data movement + memory map + SA-1 / SuperFX / DSP-N copro shims.
+- `crates/luna-cartridge/`, `crates/luna-apu/` — ROM parser + APU.
+- `crates/luna-api/` — the introspection / driving surface used by the
+  CLI, GUI, and MCP server.
+- `crates/luna-cli/` — `luna run`, `luna state`, `luna mcp`.
+- `crates/luna-gui/` — eframe-based debugger UI.
+- `crates/luna-mcp-server/`, `crates/luna-mcp-client/` — MCP transport.
+- `crates/luna-async/`, `crates/luna-overlay/` — runtime helpers.
 
-Workflow per feature:
+## Mandates (auto-loaded from `.claude/rules/`)
 
-1. **Fetch** the relevant files from both repos (`curl -s`) into
-   `/tmp/` for diffing. For a directory listing use the GH API:
-   `gh api repos/ares-emulator/ares/contents/ares/sfc/<subsys> --jq '.[].name'`.
-2. **Read** the actual source — register decoders, state machines,
-   bit layouts. Quote line numbers when summarising.
-3. **Both references must agree** on the semantic before luna
-   adopts it. When they diverge, document the discrepancy and
-   pick the one with more clarity (usually ares' verified
-   behaviour).
-4. **Write up a short spec** to `/tmp/<feature>_reference.md`:
-   register table, state-transition diagram, edge cases. This
-   is the diff target.
-5. **Inventory** what luna currently does (`Explore` agent works
-   well for this) into `/tmp/luna_<feature>_inventory.md`.
-6. **Then** implement against the spec — never from memory or
-   from `fullsnes.htm` paraphrases alone. The bit layouts and
-   timing quirks differ between secondary docs and what real
-   hardware does; ares + Mesen2 are the empirical truth.
+| Rule | Source | When it applies |
+|---|---|---|
+| Reference-first implementation | `.claude/rules/reference-first.md` | Any SNES subsystem feature change |
+| Rebuild + lint discipline | `.claude/rules/rebuild-discipline.md` | Every code change before commit |
+| Coprocessor / DMA / PPU test sweep | `.claude/rules/coproc-testing.md` | Edits to luna-ppu, luna-dma, luna-bus/sa1.rs, luna-coproc/sa1.rs |
 
-Patches that skip this step have caused real regressions in the
-luna history (the SA-1 CCNT bit-5 vs bit-7 inversion, the CC1/CC2
-cdsel inversion, the echo FIR half-scale precision bug). Always
-read the source first.
+Read the matching rule before touching the relevant code, not after.
 
-## Rebuild discipline
+## Slash commands (`.claude/commands/`)
 
-After *every* code change in this repo, before declaring a task done or
-committing, run the full workspace rebuild — **debug + release, all crates
-including `luna-gui` and the binaries** — so a stale binary is never the
-reason a feature appears broken at runtime.
+| Command | Purpose |
+|---|---|
+| `/rebuild` | Canonical workspace rebuild (debug + release, all targets) |
+| `/smoke-test [smrpg\|smw\|both]` | Visual regression screenshot via luna-cli |
+| `/reference-fetch <subsys>` | Fetch ares + Mesen2 sources for a subsystem into `/tmp/` |
 
-The canonical command is:
+## Code style
 
-```
-cargo build --workspace --all-targets \
-  && cargo build --release --workspace --all-targets
-```
+- Rust edition + toolchain version live in `rust-toolchain.toml` and
+  the workspace `Cargo.toml`. Don't pin elsewhere.
+- `cargo fmt` is the formatter; `cargo clippy --workspace --all-targets
+  -- -D warnings` is the lint gate.
+- Public items get a one-line doc comment minimum. Don't write
+  multi-paragraph docstrings for internal helpers — the code is the
+  contract.
+- Commit subjects follow `type(scope): description` —
+  `feat(ppu): ...`, `fix(core): ...`, `chore(ci): ...`. Backslash-
+  escape `$` in commit subjects (e.g. `\$4212`).
 
-This catches:
-- conditional `#[cfg]` paths that only compile in release.
-- `luna-gui` regressions (it pulls many transitive crates; easy to miss with
-  per-crate builds).
-- example/test/benchmark targets that don't get hit by `cargo test`.
+## Reference docs (in `docs/`)
 
-Run `cargo test --workspace --lib` separately when relevant — the rebuild
-above does not run tests, only compiles.
+- `CONTROLLER_BINDINGS.md` — keyboard → SNES button mapping (GUI).
+- `ppu_compositor_reference.md` — synthesised ares + Mesen2 spec for
+  the PPU compositor, color math, windows, DMA, NMI.
+- `luna_ppu_gaps.md` — prioritised correctness gap list against the
+  spec.
+- `luna_ppu_inventory.md`, `ares_ppu_notes.md`, `mesen2_ppu_notes.md`
+  — per-source research notes the spec was built from.
 
-When the work is purely refactoring a single crate's internals, you may
-still run a per-crate build first to iterate fast, but the workspace
-rebuild **must** pass before you commit.
+## What NOT to put here
 
-## Linting
-
-CI runs `cargo fmt --all --check` and `cargo clippy --workspace --all-targets
--- -D warnings`. Run both before commit.
-
-## Tests on coprocessor / DMA / PPU edits
-
-Anything touching `luna-bus/src/sa1.rs`, `luna-coproc/src/sa1.rs`,
-`luna-dma`, or `luna-ppu` needs a full `cargo test --workspace --lib`
-sweep — these crates have tight cross-coupling and silent regressions
-elsewhere are common.
-
-## Controller bindings (GUI)
-
-Player 1 keyboard layout, wired in `luna-gui/src/app.rs`:
-
-| Keyboard | SNES button | JOY1 bit |
-|---|---|---:|
-| `Z`        | B      | 15 |
-| `A`        | Y      | 14 |
-| Right `Shift` | Select | 13 |
-| `Enter`    | Start  | 12 |
-| `↑` `↓` `←` `→` | D-pad | 11..8 |
-| `X`        | A      | 7 |
-| `S`        | X      | 6 |
-| `Q`        | L      | 5 |
-| `W`        | R      | 4 |
-
-The SNES auto-read latch fires once per VBlank (line 225 NTSC, 240 PAL)
-when `NMITIMEN.0` is set; the same pulse also re-arms the manual-mode
-$4016/$4017 shift register (per ares' `controllerPort.latch()`). Real
-hardware physically locks out conflicting D-pad directions (Up + Down,
-Left + Right) — luna drops both opposing bits when the auto-read
-latches.
-
-## ROM smoke tests
-
-When DMA / PPU / SA-1 logic changes, screenshot Super Mario RPG via the
-CLI as a quick visual regression check:
-
-```
-cargo build --release -p luna-cli
-./target/release/luna state -n 30000000 --screenshot /tmp/smrpg.png \
-  "tests/roms/Super Mario RPG - Legend of the Seven Stars (USA).sfc"
-```
-
-A working build should reach the sky-coloured title scene (frame ~2000+,
-NMI service rate ≥80%).
+- Long workflows — use `.claude/commands/` or `.claude/skills/`.
+- Reference tables (key bindings, register maps, build matrices) —
+  use `docs/`.
+- Per-subsystem deep-dives — use `docs/` and link from the
+  matching rule file.
+- Anything Claude can derive from `git log`, `Cargo.toml`, or a
+  one-shot read of the source.

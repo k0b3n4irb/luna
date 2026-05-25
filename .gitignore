@@ -28,3 +28,7 @@ Thumbs.db
 /.direnv
 .env
 .mcp.json
+
+# Claude Code — personal overrides only; .claude/settings.json + rules/
+# + commands/ are checked in.
+.claude/settings.local.json
