@@ -99,8 +99,10 @@ impl LunaApp {
     /// Load a ROM from disk and reset the emulator.
     ///
     /// Wrapped in `catch_unwind` so that unsupported cartridge types
-    /// (e.g. HiROM, SA-1, Super FX — anything past P0.6) surface as a
-    /// friendly error in the status bar instead of crashing the GUI.
+    /// (Super FX / S-DD1 / SPC7110 etc., none of which luna ships
+    /// yet) surface as a friendly error in the status bar instead of
+    /// crashing the GUI. LoROM / HiROM / ExHiROM / SA-1 are all
+    /// wired through [`Snes::from_cartridge`].
     fn load_rom(&mut self, path: &Path) {
         let cart = match Cartridge::load(path) {
             Ok(c) => c,
@@ -109,21 +111,16 @@ impl LunaApp {
                 return;
             }
         };
-        // Mapper compatibility check.
-        // LoROM / HiROM / ExHiROM are wired through `Snes::from_cartridge`.
-        // Coprocessor carts (SA-1 / Super FX / S-DD1 / SPC7110) need
-        // their own subsystem implementation — refuse them with a
-        // clear message rather than half-loading.
         use luna_bus::MapperKind;
         match cart.header.mapper_kind {
-            MapperKind::LoRom | MapperKind::HiRom | MapperKind::ExHiRom => {}
+            MapperKind::LoRom | MapperKind::HiRom | MapperKind::ExHiRom | MapperKind::Sa1 => {}
             other => {
                 self.last_error = Some(format!(
                     "Cartridge needs the {other:?} coprocessor, which isn't yet \
-                     emulated. Star Fox / Yoshi's Island (Super FX), Super Mario \
-                     RPG / Kirby Super Star (SA-1) and friends will land in \
-                     their own dedicated phase. Plain LoROM, HiROM and ExHiROM \
-                     carts work today."
+                     emulated. Star Fox / Yoshi's Island (Super FX), Street \
+                     Fighter Alpha 2 (S-DD1) and Far East of Eden Zero (SPC7110) \
+                     will land in their own dedicated phases. LoROM, HiROM, \
+                     ExHiROM and SA-1 carts work today."
                 ));
                 self.snes = None;
                 self.rom_title = Some(cart.header.title.clone());
