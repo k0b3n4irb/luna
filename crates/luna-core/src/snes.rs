@@ -781,6 +781,24 @@ impl<'a> Bus for SnesBus<'a> {
             return 0xFF;
         }
         if let Some(reg_off) = Self::cpu_reg_offset(addr) {
+            // $4212 HVBJOY: bit 7 = vblank (latched in `cpu_regs.hvbjoy`),
+            // bit 6 = hblank (live H-counter), bit 0 = auto-read busy
+            // (latched in `cpu_regs.hvbjoy`).
+            //
+            // Per ares' `cpu/io.cpp`:
+            //   data.bit(6) = hcounter() <= 2 || hcounter() >= 1096;
+            // The `hcounter()` is in master cycles (0..1364); our
+            // `current_hv` returns H in *dots* (`mclk / 4`, 0..341),
+            // so the equivalent threshold is `h == 0 || h >= 274`.
+            //
+            // Without the live hblank bit, games that do `BIT $4212;
+            // BVC -5` (SMW, many others) hang in an infinite busy-wait.
+            if reg_off == 0x4212 {
+                let (h, _) = current_hv(*self.mclk_total, self.scanlines_per_frame);
+                let in_hblank = h == 0 || h >= 274;
+                let hblank_bit = if in_hblank { 0x40 } else { 0x00 };
+                return (self.cpu_regs.hvbjoy & !0x40) | hblank_bit;
+            }
             if let Some(v) = self.cpu_regs.read(reg_off) {
                 return v;
             }
