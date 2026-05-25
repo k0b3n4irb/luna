@@ -276,13 +276,23 @@ impl LunaApp {
             // the screen doesn't flicker every NMI handler tick.
             return;
         }
-        let opts = luna_ppu::RenderOptions {
-            bypass_forced_blank: self.force_display,
-        };
-        let frame = luna_ppu::render_frame_with(&snes.ppu, opts);
         let mut rgba = Vec::with_capacity(FRAME_W * FRAME_H * 4);
-        for px in frame {
-            rgba.extend_from_slice(&[px[0], px[1], px[2], 0xFF]);
+        if self.force_display {
+            // Debug bypass: re-render the whole frame with forced-blank
+            // ignored so the user can see VRAM contents.
+            let opts = luna_ppu::RenderOptions {
+                bypass_forced_blank: true,
+            };
+            let frame = luna_ppu::render_frame_with(&snes.ppu, opts);
+            for px in frame {
+                rgba.extend_from_slice(&[px[0], px[1], px[2], 0xFF]);
+            }
+        } else {
+            // Default path (G6 Phase 1): copy the persistent
+            // framebuffer the scheduler maintains per-scanline.
+            for px in snes.ppu.framebuffer() {
+                rgba.extend_from_slice(&[px[0], px[1], px[2], 0xFF]);
+            }
         }
         let image = ColorImage::from_rgba_unmultiplied([FRAME_W, FRAME_H], &rgba);
         if let Some(tex) = self.framebuffer.as_mut() {

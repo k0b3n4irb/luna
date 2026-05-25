@@ -756,16 +756,26 @@ fn save_screenshot(
     let opts = luna_ppu::RenderOptions {
         bypass_forced_blank: force_display,
     };
-    let frame = match bg {
-        Some(n) => {
-            let idx = (n.saturating_sub(1).min(3)) as usize;
-            luna_ppu::render_frame_bg_with(&snes.ppu, idx, opts)
-        }
-        None => luna_ppu::render_frame_with(&snes.ppu, opts),
-    };
     let mut buf = Vec::with_capacity(luna_ppu::FRAME_W * luna_ppu::FRAME_H * 3);
-    for px in frame {
-        buf.extend_from_slice(&px);
+    // Default path (no --bg, no --force-display): copy the persistent
+    // framebuffer that the scheduler maintains per-scanline (gap G6
+    // Phase 1). Debug paths (`--force-display` or single-BG render)
+    // still go through the one-shot renderer.
+    if bg.is_none() && !force_display {
+        for px in snes.ppu.framebuffer() {
+            buf.extend_from_slice(px);
+        }
+    } else {
+        let frame = match bg {
+            Some(n) => {
+                let idx = (n.saturating_sub(1).min(3)) as usize;
+                luna_ppu::render_frame_bg_with(&snes.ppu, idx, opts)
+            }
+            None => luna_ppu::render_frame_with(&snes.ppu, opts),
+        };
+        for px in frame {
+            buf.extend_from_slice(&px);
+        }
     }
     let img = image::RgbImage::from_raw(luna_ppu::FRAME_W as u32, luna_ppu::FRAME_H as u32, buf)
         .expect("frame buffer size matches dims");

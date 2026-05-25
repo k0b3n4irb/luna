@@ -363,6 +363,18 @@ impl Snes {
     fn advance_one_scanline(&mut self) {
         let vblank_start = vblank_start_line(self.region);
         let scanlines = scanlines_per_frame(self.region);
+
+        // Gap G6 Phase 1: render the visible line that just finished
+        // into the PPU's persistent framebuffer, using its end-of-line
+        // register state. HDMA fires AFTER the ppu_line increment below
+        // (canonical "HDMA at end-of-HBlank" ordering), so register
+        // values from any HDMA write that targets line N+1 are still
+        // unapplied here — line N gets the right state.
+        if self.ppu_line < vblank_start {
+            self.ppu
+                .render_current_scanline(self.ppu_line, luna_ppu::RenderOptions::default());
+        }
+
         self.ppu_line += 1;
         if self.ppu_line == vblank_start {
             // Entering VBlank. Latch the NMI flag visible at $4210

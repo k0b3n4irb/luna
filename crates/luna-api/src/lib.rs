@@ -567,15 +567,30 @@ impl Emulator {
 
     /// Render the current PPU framebuffer (256×224, composited
     /// BG3-over-BG1-over-BG2 + sprites) as a PNG-encoded byte vector.
+    ///
+    /// Default path (`force_display=false`) is zero-cost — it copies
+    /// the persistent framebuffer that the scheduler has been
+    /// populating one scanline at a time (gap G6 Phase 1). The
+    /// force-display debug path still re-renders the whole frame
+    /// via `render_frame_with` with `bypass_forced_blank: true`.
     pub fn render_frame_png(&self, force_display: bool) -> Result<Vec<u8>, ApiError> {
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
-        let opts = luna_ppu::RenderOptions {
-            bypass_forced_blank: force_display,
-        };
-        let frame = luna_ppu::render_frame_with(&snes.ppu, opts);
         let mut buf = Vec::with_capacity(FRAME_W * FRAME_H * 3);
-        for px in frame {
-            buf.extend_from_slice(&px);
+        if force_display {
+            // Debug-only path: rebuild the frame with forced-blank
+            // bypass so the user can see VRAM contents even when the
+            // game is keeping the screen blanked.
+            let opts = luna_ppu::RenderOptions {
+                bypass_forced_blank: true,
+            };
+            let frame = luna_ppu::render_frame_with(&snes.ppu, opts);
+            for px in frame {
+                buf.extend_from_slice(&px);
+            }
+        } else {
+            for px in snes.ppu.framebuffer() {
+                buf.extend_from_slice(px);
+            }
         }
         let img =
             image::RgbImage::from_raw(FRAME_W as u32, FRAME_H as u32, buf).expect("size matches");
