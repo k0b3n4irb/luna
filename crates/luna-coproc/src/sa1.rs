@@ -161,7 +161,9 @@ impl<'a> Bus for Sa1Bus<'a> {
     }
 
     fn write(&mut self, addr: Addr24, value: u8) {
-        let _ = self.mapper.write(addr, value);
+        // Route through the SA-1-side entry so I-RAM / BW-RAM
+        // protection consults CIWP / CBWE instead of SIWP / SBWE.
+        let _ = self.mapper.write_from_sa1(addr, value);
     }
 
     fn io_cycle(&mut self, _mcycles: MCycles) {
