@@ -17,7 +17,7 @@ use std::path::Path;
 
 use luna_cartridge::{CartError, Cartridge};
 use luna_core::Snes;
-pub use luna_core::{MailboxEvent, MailboxEventKind};
+pub use luna_core::{CpuTraceEvent, CpuTraceLog, MailboxEvent, MailboxEventKind};
 use luna_ppu::FRAME_H;
 use luna_ppu::FRAME_W;
 use serde::Serialize;
@@ -644,6 +644,29 @@ impl Emulator {
     pub fn take_mailbox_log(&mut self) -> Result<Vec<MailboxEvent>, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         Ok(snes.take_mailbox_log())
+    }
+
+    /// Enable per-instruction CPU tracing. Every subsequent
+    /// [`Emulator::step`] / [`Emulator::step_until_frame`] tick
+    /// captures a register-file snapshot until `max_events` events
+    /// have been recorded. Drain with [`Emulator::take_cpu_trace_log`].
+    pub fn enable_cpu_trace(&mut self, max_events: usize) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.enable_cpu_trace(max_events);
+        Ok(())
+    }
+
+    /// Take ownership of the accumulated CPU trace events.
+    pub fn take_cpu_trace_log(&mut self) -> Result<Vec<CpuTraceEvent>, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        Ok(snes.take_cpu_trace_log())
+    }
+
+    /// Current cumulative instruction count since the last reset /
+    /// rom-load. Used by the CLI to gate "start tracing at instr N".
+    #[must_use]
+    pub fn instructions_executed(&self) -> u64 {
+        self.instructions_executed
     }
 
     /// Direct read of the SPC700's ARAM. Read-only, no bus side

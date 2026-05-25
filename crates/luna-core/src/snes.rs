@@ -105,6 +105,12 @@ pub struct Snes {
     /// a [`MailboxEvent`] for later analysis (e.g. diagnosing the
     /// SMW music-driver handshake). Enable via [`Snes::enable_mailbox_log`].
     pub mailbox_log: Option<Vec<MailboxEvent>>,
+
+    /// Optional CPU instruction trace. When `Some`, every call to
+    /// [`Snes::step`] appends a pre-instruction register snapshot
+    /// until the log fills (capped at `max_events`). Enable via
+    /// [`Snes::enable_cpu_trace`].
+    pub cpu_trace_log: Option<CpuTraceLog>,
 }
 
 /// One CPU↔APU mailbox transfer, captured at `$2140-$2143`. luna-core
@@ -134,6 +140,48 @@ pub enum MailboxEventKind {
     Read,
     /// CPU write to `$2140-$2143`.
     Write,
+}
+
+/// One pre-instruction CPU snapshot, captured by the optional CPU
+/// trace. Records the live 65C816 register file at the moment just
+/// before the upcoming opcode is fetched and executed. luna-core
+/// keeps this plain (no serde derives) for the same reason
+/// [`MailboxEvent`] does.
+#[derive(Debug, Clone, Copy)]
+pub struct CpuTraceEvent {
+    /// Master cycles since reset, snapshot of `total_mclk`.
+    pub mclk_total: u64,
+    /// 24-bit CPU PC (`pb << 16 | pc`) — the about-to-execute instruction.
+    pub pc_full: u32,
+    /// Accumulator (16-bit; low byte is the M-flag view).
+    pub a: u16,
+    /// X index register.
+    pub x: u16,
+    /// Y index register.
+    pub y: u16,
+    /// Stack pointer.
+    pub sp: u16,
+    /// Processor status flags.
+    pub p: u8,
+    /// Data bank.
+    pub db: u8,
+    /// Direct page register.
+    pub dp: u16,
+    /// Emulation mode flag.
+    pub e: bool,
+}
+
+/// Bounded buffer for the CPU instruction tracer. Stops accepting new
+/// events once `events.len() == max_events`; the caller is expected to
+/// drain the buffer at the end of a run via [`Snes::take_cpu_trace_log`].
+pub struct CpuTraceLog {
+    /// Recorded events. Owned by the log so [`Snes::take_cpu_trace_log`]
+    /// can `mem::take` them cheaply.
+    pub events: Vec<CpuTraceEvent>,
+    /// Hard cap on event count. Once reached, the tracer becomes a
+    /// no-op until the buffer is taken (the cap exists to avoid
+    /// blowing out memory on long runs).
+    pub max_events: usize,
 }
 
 /// Master cycles per PPU scanline on NTSC (1364 mclk = 4 dots × 341).
@@ -247,6 +295,7 @@ impl Snes {
             joypad1_shift: 0,
             joypad2_shift: 0,
             mailbox_log: None,
+            cpu_trace_log: None,
         }
     }
 
@@ -267,6 +316,28 @@ impl Snes {
     pub fn take_mailbox_log(&mut self) -> Vec<MailboxEvent> {
         match self.mailbox_log.as_mut() {
             Some(log) => std::mem::take(log),
+            None => Vec::new(),
+        }
+    }
+
+    /// Enable CPU instruction tracing. From this point onward each
+    /// call to [`Snes::step`] appends a pre-instruction register
+    /// snapshot until the log fills (`max_events` events). Use
+    /// [`Snes::take_cpu_trace_log`] to drain.
+    pub fn enable_cpu_trace(&mut self, max_events: usize) {
+        self.cpu_trace_log = Some(CpuTraceLog {
+            events: Vec::new(),
+            max_events,
+        });
+    }
+
+    /// Drain the CPU trace buffer. Returns an empty `Vec` if tracing
+    /// is disabled. The log itself stays in place with an empty
+    /// events vector — subsequent [`Snes::step`] calls continue to
+    /// fill it until `max_events`.
+    pub fn take_cpu_trace_log(&mut self) -> Vec<CpuTraceEvent> {
+        match self.cpu_trace_log.as_mut() {
+            Some(log) => std::mem::take(&mut log.events),
             None => Vec::new(),
         }
     }
@@ -336,6 +407,24 @@ impl Snes {
     /// that instruction (accumulated through [`Bus::io_cycle`]).
     pub fn step(&mut self) -> MCycles {
         let before = self.total_mclk;
+        // Capture the pre-instruction snapshot for the CPU tracer
+        // before the destructure below moves `cpu` out of `self`.
+        if let Some(log) = self.cpu_trace_log.as_mut() {
+            if log.events.len() < log.max_events {
+                log.events.push(CpuTraceEvent {
+                    mclk_total: before,
+                    pc_full: (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc),
+                    a: self.cpu.a,
+                    x: self.cpu.x,
+                    y: self.cpu.y,
+                    sp: self.cpu.sp,
+                    p: self.cpu.p.bits(),
+                    db: self.cpu.db,
+                    dp: self.cpu.dp,
+                    e: self.cpu.e,
+                });
+            }
+        }
         let scanlines = self.region_scanlines();
         let ppu_line_snapshot = self.ppu_line;
         let vblank_start_snapshot = vblank_start_line(self.region);
