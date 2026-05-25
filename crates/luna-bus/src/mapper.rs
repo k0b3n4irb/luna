@@ -50,4 +50,15 @@ pub trait Mapper {
 
     /// Size of the SRAM in bytes (0 if none).
     fn sram_size(&self) -> usize;
+
+    /// Step the cartridge coprocessor (SA-1 / Super FX / DSP-1 / …)
+    /// forward by approximately `main_mclk` master cycles of main-CPU
+    /// progress. Default = no-op for plain LoROM / HiROM carts.
+    ///
+    /// Coproc mappers translate that to the right number of coproc
+    /// instructions internally (e.g. SA-1 is 10.74 MHz ≈ 2× the main
+    /// CPU's max FastROM rate, so it consumes ~2 SA-1 instructions
+    /// per main-CPU \`mclk\`). Implementations should be safely
+    /// callable even when their coprocessor is reset / stopped.
+    fn step_coproc(&mut self, _main_mclk: u32) {}
 }
