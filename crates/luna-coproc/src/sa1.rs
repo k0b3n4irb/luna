@@ -1,9 +1,10 @@
-//! SA-1 chip — phase-2 minimum viable CPU step.
+//! SA-1 chip — own 65C816 + cross-CPU IRQ / timer / DMA wiring.
 //!
 //! Wraps [`luna_bus::sa1::Sa1Mapper`] (which owns the shared memory
-//! state — ROM, I-RAM, BW-RAM, MMIO regs, hardware multiplier) and
-//! adds the SA-1's own 65C816 CPU plus a `running` flag controlled
-//! by the main-CPU's writes to `$2200 CCNT`:
+//! state — ROM, I-RAM, BW-RAM, MMIO regs, hardware multiplier, IRQ
+//! latches, timer, DMA engine) and adds the SA-1's own 65C816 CPU
+//! plus a `running` flag controlled by the main-CPU's writes to
+//! `$2200 CCNT`:
 //!
 //!   * On reset, the SA-1 CPU is held in reset (CCNT.7 = 1 default).
 //!   * When the main CPU clears CCNT.7 (1 → 0 edge), the SA-1 CPU
@@ -11,15 +12,14 @@
 //!   * Setting CCNT.7 back to 1 halts the SA-1 again.
 //!
 //! Each main-CPU master cycle, [`Sa1Chip::step_coproc`] runs roughly
-//! `mclk / 6` SA-1 instructions — the SA-1 clocks at 10.74 MHz vs the
-//! main CPU's ~3.58 MHz (max FastROM), giving the SA-1 a 3× speed
-//! advantage. The per-instruction master-cycle accounting on real
-//! hardware is far more nuanced; we approximate.
+//! `mclk / 6` SA-1 instructions and ticks the SA-1 timer at full
+//! main-cycle resolution so timer IRQs fire even while the SA-1 CPU
+//! is held in reset. The chip's [`Sa1Chip::coproc_main_irq_pending`]
+//! implementation surfaces the `Sa1Mapper`'s `main_irq_line()` to
+//! the host bus so the main CPU can be IRQ'd by the SA-1 directly.
 //!
-//! This is the minimum viable substrate — it lets the SA-1 actually
-//! execute its uploaded code path. Full coherent I-RAM arbitration,
-//! the character-conversion DMA engine, the SA-1's own timer, and
-//! the per-IRQ message system are deferred to later phases.
+//! Character-conversion DMA (Type-1 / Type-2) remains the one
+//! larger piece deferred — non-CC bulk DMA already works.
 
 use luna_bus::sa1::Sa1Mapper;
 use luna_bus::{Addr24, Bus, MCycles, Mapper, MapperKind, make_addr};
@@ -116,6 +116,10 @@ impl Mapper for Sa1Chip {
     }
 
     fn step_coproc(&mut self, main_mclk: u32) {
+        // Timer ticks even while the SA-1 CPU is held in reset — that's
+        // how games can sit in CCNT.7-asserted "wait" mode and still
+        // generate timer IRQs.
+        self.inner.tick_timer(main_mclk);
         if !self.running {
             return;
         }
@@ -131,6 +135,10 @@ impl Mapper for Sa1Chip {
             self.cpu.step(&mut bus);
         }
     }
+
+    fn coproc_main_irq_pending(&self) -> bool {
+        self.inner.main_irq_line()
+    }
 }
 
 /// Bus exposed to the SA-1 CPU during one of its instruction steps.
@@ -143,6 +151,12 @@ struct Sa1Bus<'a> {
 
 impl<'a> Bus for Sa1Bus<'a> {
     fn read(&mut self, addr: Addr24) -> u8 {
+        let bank = (addr >> 16) as u8;
+        let offset = (addr & 0xFFFF) as u16;
+        // SA-1 vector fetches at bank 0 redirect through CRV/CNV/CIV.
+        if let Some(v) = self.mapper.sa1_vector_override(bank, offset) {
+            return v;
+        }
         self.mapper.read(addr).unwrap_or(0xFF)
     }
 
@@ -157,11 +171,11 @@ impl<'a> Bus for Sa1Bus<'a> {
     }
 
     fn nmi_pending(&self) -> bool {
-        false
+        self.mapper.sa1_nmi_line()
     }
 
     fn irq_pending(&self) -> bool {
-        false
+        self.mapper.sa1_irq_line()
     }
 }
 
@@ -245,5 +259,80 @@ mod tests {
         let mut chip = sa1_chip();
         // Default CXB = 0 → $00:8000 → ROM[0].
         assert_eq!(chip.read(make_addr(0x00, 0x8000)), Some(0));
+    }
+
+    #[test]
+    fn sa1_raises_main_irq_line_through_chip() {
+        // SA-1 writes SCNT bit 7 (after the main CPU has enabled SIE.7);
+        // `coproc_main_irq_pending()` on the chip must reflect that so
+        // the SnesBus ORs it into the main CPU's IRQ line.
+        let mut chip = sa1_chip();
+        // S-CPU side: enable SA-1 → S-CPU IRQ.
+        chip.write(make_addr(0x00, 0x2201), 0x80);
+        assert!(!chip.coproc_main_irq_pending());
+        // SA-1 side: assert SCNT bit 7.
+        chip.write(make_addr(0x00, 0x2209), 0x80);
+        assert!(
+            chip.coproc_main_irq_pending(),
+            "chip should expose the SA-1 → S-CPU IRQ line"
+        );
+        // S-CPU side: SIC bit 7 clears the latch.
+        chip.write(make_addr(0x00, 0x2202), 0x80);
+        assert!(!chip.coproc_main_irq_pending());
+    }
+
+    #[test]
+    fn sa1_bus_irq_pending_reflects_main_to_sa1_latch() {
+        let mut chip = sa1_chip();
+        // SA-1 enables S-CPU → SA-1 IRQ.
+        chip.write(make_addr(0x00, 0x220A), 0x80);
+        // Main side asserts CCNT bit 4 (0→1 edge).
+        chip.write(make_addr(0x00, 0x2200), 0x10);
+        let bus = Sa1Bus {
+            mapper: &mut chip.inner,
+        };
+        assert!(bus.irq_pending());
+        assert!(!bus.nmi_pending());
+    }
+
+    #[test]
+    fn step_coproc_advances_timer_even_with_sa1_in_reset() {
+        // Even before the SA-1 CPU is released, the timer should run
+        // and fire IRQs — games rely on this to gate work outside the
+        // SA-1's reset window.
+        let mut chip = sa1_chip();
+        chip.write(make_addr(0x00, 0x220A), 0x20); // CIE timer
+        chip.write(make_addr(0x00, 0x2210), 0x81); // linear mode, H enable
+        chip.write(make_addr(0x00, 0x2212), 100); // compare lo
+        chip.write(make_addr(0x00, 0x2213), 0);
+        chip.write(make_addr(0x00, 0x2214), 0);
+        assert!(!chip.running, "still in reset");
+        // Step enough to cross 100.
+        chip.step_coproc(200);
+        assert!(chip.inner.sa1_irq_line(), "timer should fire during reset");
+    }
+
+    #[test]
+    fn dma_complete_raises_sa1_irq_via_inner_path() {
+        let mut chip = sa1_chip();
+        chip.write(make_addr(0x00, 0x220A), 0x10); // CIE DMA bit
+        // Seed I-RAM source.
+        chip.write(make_addr(0x00, 0x3100), 0x77);
+        // SDA = $00:3100
+        chip.write(make_addr(0x00, 0x2232), 0x00);
+        chip.write(make_addr(0x00, 0x2233), 0x31);
+        chip.write(make_addr(0x00, 0x2234), 0x00);
+        // DDA = $40:0000 (linear BW-RAM)
+        chip.write(make_addr(0x00, 0x2235), 0x00);
+        chip.write(make_addr(0x00, 0x2236), 0x00);
+        chip.write(make_addr(0x00, 0x2237), 0x40);
+        chip.write(make_addr(0x00, 0x2238), 1);
+        chip.write(make_addr(0x00, 0x2239), 0);
+        chip.write(make_addr(0x00, 0x2230), 0x80); // DMA enable
+        assert_eq!(chip.read(make_addr(0x40, 0)), Some(0x77));
+        let bus = Sa1Bus {
+            mapper: &mut chip.inner,
+        };
+        assert!(bus.irq_pending());
     }
 }

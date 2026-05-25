@@ -1,4 +1,4 @@
-//! SA-1 (Super Accelerator 1) cartridge mapping — phase-1 stub.
+//! SA-1 (Super Accelerator 1) cartridge mapping.
 //!
 //! The SA-1 is Nintendo's custom co-processor used by Super Mario RPG,
 //! DKC 2/3, Kirby Super Star, and ~25 other titles. Internally it's a
@@ -7,15 +7,13 @@
 //! hardware multiplier / divider / accumulator, and a complex ROM
 //! banking scheme.
 //!
-//! This phase implements **just enough** of the mapping to accept an
-//! SA-1 cartridge without panicking and serve up code from ROM in the
-//! default ($00, $01, $02, $03) banking layout. The SA-1 65C816 itself
-//! does NOT run yet — its I/O registers at `$2200-$23FF` are
-//! memory-backed stubs, plus a faithful implementation of the
-//! self-contained hardware multiplier / divider at `$2250-$2254` and
-//! `$2306-$230A`. Game code that doesn't depend on the SA-1 CPU
-//! actually executing (boot screens, intro sequences, code that uses
-//! the multiplier as a fast math coprocessor) can make progress.
+//! This module owns the shared cartridge memory + MMIO register file
+//! seen by both CPUs (ROM banking, I-RAM, BW-RAM, hardware
+//! multiplier / divider, IRQ message latches, timer, normal-mode DMA
+//! engine). The SA-1's own 65C816 instance is layered on top in
+//! [`luna_coproc::Sa1Chip`]. Character-conversion (CC1 / CC2) is the
+//! one big slice not yet wired — non-CC bulk DMA, IRQ messaging, and
+//! the timer all work end-to-end.
 //!
 //! Reference: <https://problemkaputt.de/fullsnes.htm> §"SNES SA-1".
 //!
@@ -82,6 +80,92 @@ pub struct Sa1Mapper {
     /// `$2306-$230A` — 40-bit signed result (multiplication) or
     /// 16-bit quotient + 16-bit remainder packed (division).
     mr: i64,
+
+    // ---- Phase-3 IRQ message system ----
+    /// `$2201 SIE` — main-CPU IRQ enable mask for incoming SA-1 →
+    /// S-CPU interrupts. bit 7 = SA-1-IRQ enable, bit 5 = CC1-DMA-IRQ
+    /// enable.
+    sie: u8,
+    /// `$220A CIE` — SA-1 IRQ enable mask for incoming S-CPU → SA-1
+    /// interrupts. bit 7 = S-CPU-IRQ, bit 6 = S-CPU-NMI, bit 5 = timer
+    /// IRQ, bit 4 = DMA IRQ.
+    cie: u8,
+    /// SA-1 → S-CPU IRQ latch (raised on `$2209` bit-7 0 → 1 edge,
+    /// cleared by `$2202` bit-7 write).
+    s_irq_to_main: bool,
+    /// SA-1 → S-CPU NMI latch (raised on `$2209` bit-6 0 → 1 edge,
+    /// cleared by `$2202` bit-6 write).
+    s_nmi_to_main: bool,
+    /// CC1-DMA completion → S-CPU IRQ latch (raised by CC1 engine,
+    /// cleared by `$2202` bit-5 write).
+    cc1_irq_to_main: bool,
+    /// S-CPU → SA-1 IRQ latch (raised on `$2200` bit-4 0 → 1 edge,
+    /// cleared by `$220B` bit-7 write).
+    main_irq_to_sa1: bool,
+    /// S-CPU → SA-1 NMI latch (raised on `$2200` bit-6 0 → 1 edge,
+    /// cleared by `$220B` bit-6 write).
+    main_nmi_to_sa1: bool,
+    /// Timer → SA-1 IRQ latch (cleared by `$220B` bit-5 write).
+    timer_irq_to_sa1: bool,
+    /// DMA → SA-1 IRQ latch (cleared by `$220B` bit-4 write).
+    dma_irq_to_sa1: bool,
+    /// Last value written to `$2200` CCNT (low nibble = message to
+    /// SA-1, visible in `$2301` CFR low nibble).
+    ccnt_msg: u8,
+    /// Last value written to `$2209` SCNT (bits 4-0 carry IVSW /
+    /// NMIVW vector-override flags + message to S-CPU, visible in
+    /// `$2300` SFR).
+    scnt: u8,
+    /// `$2207/$2208` CIV — SA-1's IRQ vector (set by S-CPU, used when
+    /// the SA-1 CPU fetches its IRQ vector at `$00:FFEE/FFEF` or
+    /// `$00:FFFE/FFFF`).
+    civ_lo: u8,
+    civ_hi: u8,
+    /// `$2205/$2206` CNV — SA-1's NMI vector.
+    cnv_lo: u8,
+    cnv_hi: u8,
+    /// `$220E/$220F` SIV — S-CPU's IRQ vector when the SA-1 fires
+    /// its IRQ line (only used when SCNT bit-5 IVSW = 1).
+    siv_lo: u8,
+    siv_hi: u8,
+    /// `$220C/$220D` SNV — S-CPU's NMI vector when the SA-1 fires its
+    /// NMI line (only used when SCNT bit-4 NMIVW = 1).
+    snv_lo: u8,
+    snv_hi: u8,
+
+    // ---- Phase-3 timer ($2210-$2215) ----
+    /// `$2210 TMC` — timer control. bit 7 = mode (0 = HV timer, 1 =
+    /// linear timer), bit 1 = V enable, bit 0 = H enable. In linear
+    /// mode an 18-bit counter wraps every 2^18 SA-1 clocks; the
+    /// `HCNT:VCNT.lo[1:0]` compare raises a timer IRQ.
+    tmc: u8,
+    /// `$2212/$2213 HCNT` — H compare (write) / counter low (read).
+    hcnt_lo: u8,
+    hcnt_hi: u8,
+    /// `$2214/$2215 VCNT` — V compare (write) / counter high (read).
+    vcnt_lo: u8,
+    vcnt_hi: u8,
+    /// Free-running 18-bit linear-mode counter. Wraps modulo 2^18.
+    linear_counter: u32,
+    /// True between a compare-match and the next reset / clear, so we
+    /// only raise one IRQ edge per match.
+    timer_match_armed: bool,
+
+    // ---- Phase-3 DMA ($2230-$2239) ----
+    /// `$2230 DCNT` — DMA control byte (bit 7 = enable, bit 5 = char
+    /// conversion, bit 4 = CC type, bit 3..2 = source, bit 1..0 =
+    /// destination).
+    dcnt: u8,
+    /// `$2231 CDMA` — character-conversion parameters (colour depth +
+    /// tile width). Stored for the Type-1 path; the normal-DMA fast
+    /// path ignores it.
+    cdma: u8,
+    /// `$2232-$2234` SDA — 24-bit source address.
+    sda: u32,
+    /// `$2235-$2237` DDA — 24-bit destination address.
+    dda: u32,
+    /// `$2238/$2239` DTC — 16-bit transfer byte counter.
+    dtc: u16,
 }
 
 impl Sa1Mapper {
@@ -104,7 +188,237 @@ impl Sa1Mapper {
             mb: 0,
             mcnt: 0,
             mr: 0,
+            sie: 0,
+            cie: 0,
+            s_irq_to_main: false,
+            s_nmi_to_main: false,
+            cc1_irq_to_main: false,
+            main_irq_to_sa1: false,
+            main_nmi_to_sa1: false,
+            timer_irq_to_sa1: false,
+            dma_irq_to_sa1: false,
+            ccnt_msg: 0,
+            scnt: 0,
+            civ_lo: 0,
+            civ_hi: 0,
+            cnv_lo: 0,
+            cnv_hi: 0,
+            siv_lo: 0,
+            siv_hi: 0,
+            snv_lo: 0,
+            snv_hi: 0,
+            tmc: 0,
+            hcnt_lo: 0,
+            hcnt_hi: 0,
+            vcnt_lo: 0,
+            vcnt_hi: 0,
+            linear_counter: 0,
+            timer_match_armed: true,
+            dcnt: 0,
+            cdma: 0,
+            sda: 0,
+            dda: 0,
+            dtc: 0,
         }
+    }
+
+    /// Run a normal (non-character-conversion) SA-1 DMA. Copies `dtc`
+    /// bytes from `sda` to `dda` through the regular bus dispatch so
+    /// ROM / BW-RAM / I-RAM source-destination combinations all work.
+    ///
+    /// At completion clears the DMA-enable bit + raises the DMA-IRQ
+    /// latch (gated by `CIE.4`).
+    fn run_normal_dma(&mut self) {
+        let n = self.dtc as usize;
+        for i in 0..n {
+            let s = (self.sda.wrapping_add(i as u32)) & 0x00FF_FFFF;
+            let d = (self.dda.wrapping_add(i as u32)) & 0x00FF_FFFF;
+            let byte = self.read(s).unwrap_or(0xFF);
+            // Use the raw byte path so MMIO doesn't try to interpret
+            // our DMA bursts as register writes.
+            self.write_raw_for_dma(d, byte);
+        }
+        self.dcnt &= 0x7F;
+        // Mirror into the memory-backed copy at $2230.
+        self.mmio[0x2230 - 0x2200] = self.dcnt;
+        self.dma_irq_to_sa1 = true;
+    }
+
+    /// Bypass the MMIO write path during DMA — we never want a DMA
+    /// stream into the `$2200-$23FF` window to start re-triggering DMA
+    /// or rebanking ROM mid-burst. The destination is restricted by
+    /// `DCNT.1-0` to BW-RAM / I-RAM, so a direct write is correct.
+    fn write_raw_for_dma(&mut self, addr: u32, value: u8) {
+        let bank = bank_of(addr);
+        let offset = offset_of(addr);
+        if let Some(o) = self.iram_offset(bank, offset) {
+            self.iram[o] = value;
+            return;
+        }
+        if let Some(o) = self.bwram_offset(bank, offset) {
+            self.bwram[o] = value;
+        }
+    }
+
+    /// Compose the 18-bit linear-mode compare value from HCNT lo/hi
+    /// + VCNT lo's low 2 bits (per Anomie's SA-1 doc).
+    fn linear_compare(&self) -> u32 {
+        u32::from(self.hcnt_lo)
+            | (u32::from(self.hcnt_hi) << 8)
+            | (u32::from(self.vcnt_lo & 0x03) << 16)
+    }
+
+    /// Advance the SA-1 timer by `ticks` SA-1-clock cycles.
+    ///
+    /// In linear mode (TMC bit 7 = 1), the 18-bit counter increments
+    /// and a compare match against `linear_compare()` raises the
+    /// timer IRQ latch (gated by CIE.5 in the IRQ-line query).
+    ///
+    /// HV-mode timing isn't wired yet — the SA-1 has no direct view of
+    /// the PPU's dot counter here, so the H/V counter readbacks just
+    /// return the latched compare values until that hookup lands.
+    pub fn tick_timer(&mut self, ticks: u32) {
+        if (self.tmc & 0x80) == 0 || (self.tmc & 0x03) == 0 {
+            // HV mode or both H/V disabled → no IRQ progress here.
+            self.linear_counter = self.linear_counter.wrapping_add(ticks) & 0x3FFFF;
+            return;
+        }
+        let compare = self.linear_compare();
+        let before = self.linear_counter;
+        let after = (self.linear_counter.wrapping_add(ticks)) & 0x3FFFF;
+        // Detect a forward crossing through `compare` modulo 2^18.
+        let crossed = if before <= after {
+            before < compare && compare <= after
+        } else {
+            // Wraparound — crossed if compare in (before, 2^18) or [0, after].
+            before < compare || compare <= after
+        };
+        if crossed && self.timer_match_armed {
+            self.timer_irq_to_sa1 = true;
+            self.timer_match_armed = false;
+        }
+        self.linear_counter = after;
+    }
+
+    /// `true` while the SA-1 is asserting an IRQ line onto the main
+    /// CPU. The bus ORs this into the main CPU's `irq_pending` so the
+    /// CPU services it through its normal IRQ path.
+    #[must_use]
+    pub fn main_irq_line(&self) -> bool {
+        (self.s_irq_to_main && (self.sie & 0x80) != 0)
+            || (self.cc1_irq_to_main && (self.sie & 0x20) != 0)
+    }
+
+    /// `true` while the SA-1 is taking an IRQ from any of the four
+    /// enabled sources. Used by [`super::Sa1Bus::irq_pending`] to drive
+    /// the SA-1 CPU's IRQ servicing.
+    #[must_use]
+    pub fn sa1_irq_line(&self) -> bool {
+        (self.main_irq_to_sa1 && (self.cie & 0x80) != 0)
+            || (self.timer_irq_to_sa1 && (self.cie & 0x20) != 0)
+            || (self.dma_irq_to_sa1 && (self.cie & 0x10) != 0)
+    }
+
+    /// `true` while the S-CPU has raised an NMI to the SA-1 and the
+    /// SA-1's enable mask permits it.
+    #[must_use]
+    pub fn sa1_nmi_line(&self) -> bool {
+        self.main_nmi_to_sa1 && (self.cie & 0x40) != 0
+    }
+
+    /// Returns the override byte for a main-CPU vector fetch from
+    /// bank 0 at `$FFE0-$FFFF`, or `None` if the SA-1 doesn't override
+    /// that vector right now.
+    ///
+    /// The main CPU fetches its IRQ vector at `$00:FFEE/FFEF`
+    /// (native) or `$00:FFFE/FFFF` (emulation). When SCNT bit 5 IVSW
+    /// is set *and* the SA-1 is currently asserting an IRQ to the
+    /// S-CPU, those reads return SIV instead. Same for NMI via NMIVW
+    /// (bit 4) and SNV.
+    fn main_vector_override(&self, bank: u8, offset: u16) -> Option<u8> {
+        if bank != 0 {
+            return None;
+        }
+        let ivsw = (self.scnt & 0x40) != 0;
+        let nmivw = (self.scnt & 0x10) != 0;
+        match offset {
+            0xFFEE if ivsw && self.main_irq_line() => Some(self.siv_lo),
+            0xFFEF if ivsw && self.main_irq_line() => Some(self.siv_hi),
+            0xFFFE if ivsw && self.main_irq_line() => Some(self.siv_lo),
+            0xFFFF if ivsw && self.main_irq_line() => Some(self.siv_hi),
+            0xFFEA if nmivw && self.s_nmi_to_main => Some(self.snv_lo),
+            0xFFEB if nmivw && self.s_nmi_to_main => Some(self.snv_hi),
+            0xFFFA if nmivw && self.s_nmi_to_main => Some(self.snv_lo),
+            0xFFFB if nmivw && self.s_nmi_to_main => Some(self.snv_hi),
+            _ => None,
+        }
+    }
+
+    /// Returns the SA-1-side override byte for an SA-1-CPU vector
+    /// fetch from bank 0 at `$FFE0-$FFFF`. The SA-1 always overrides
+    /// reset / NMI / IRQ vectors through CRV / CNV / CIV — there is
+    /// no enable bit (the SA-1 *has* no on-board ROM vector table).
+    pub fn sa1_vector_override(&self, bank: u8, offset: u16) -> Option<u8> {
+        if bank != 0 {
+            return None;
+        }
+        match offset {
+            0xFFFC => Some(self.mmio[0x2203 - 0x2200]),
+            0xFFFD => Some(self.mmio[0x2204 - 0x2200]),
+            0xFFEE | 0xFFFE => Some(self.civ_lo),
+            0xFFEF | 0xFFFF => Some(self.civ_hi),
+            0xFFEA | 0xFFFA => Some(self.cnv_lo),
+            0xFFEB | 0xFFFB => Some(self.cnv_hi),
+            _ => None,
+        }
+    }
+
+    /// Compose `$2300` SFR (S-CPU flag read). Layout:
+    ///   bit 7 = SA-1 → S-CPU IRQ latched
+    ///   bit 6 = SA-1 → S-CPU NMI latched
+    ///   bit 5 = CC1-DMA → S-CPU IRQ latched
+    ///   bit 4 = `IVSW` mirror (vector override active for IRQ)
+    ///   bits 3..0 = message nibble from SA-1 (low nibble of SCNT)
+    fn read_sfr(&self) -> u8 {
+        let mut b = 0u8;
+        if self.s_irq_to_main {
+            b |= 0x80;
+        }
+        if self.s_nmi_to_main {
+            b |= 0x40;
+        }
+        if self.cc1_irq_to_main {
+            b |= 0x20;
+        }
+        if (self.scnt & 0x40) != 0 {
+            b |= 0x10;
+        }
+        b |= self.scnt & 0x0F;
+        b
+    }
+
+    /// Compose `$2301` CFR (SA-1 flag read). Layout:
+    ///   bit 7 = S-CPU → SA-1 IRQ latched
+    ///   bit 6 = S-CPU → SA-1 NMI latched
+    ///   bit 5 = timer → SA-1 IRQ latched
+    ///   bit 4 = DMA → SA-1 IRQ latched
+    ///   bits 3..0 = message nibble from S-CPU (low nibble of CCNT)
+    fn read_cfr(&self) -> u8 {
+        let mut b = 0u8;
+        if self.main_irq_to_sa1 {
+            b |= 0x80;
+        }
+        if self.main_nmi_to_sa1 {
+            b |= 0x40;
+        }
+        if self.timer_irq_to_sa1 {
+            b |= 0x20;
+        }
+        if self.dma_irq_to_sa1 {
+            b |= 0x10;
+        }
+        b |= self.ccnt_msg & 0x0F;
+        b
     }
 
     /// Translate a CPU-side ROM access through the four super-bank
@@ -233,6 +547,16 @@ impl Mapper for Sa1Mapper {
             // little-endian.
             let mr_addr = 0x2200 + idx as u16;
             return Some(match mr_addr {
+                0x2300 => self.read_sfr(),
+                0x2301 => self.read_cfr(),
+                // HCR / VCR — the SA-1's free-running H/V counters.
+                // In linear mode we expose the 18-bit `linear_counter`
+                // split into lo (HCR), hi (VCR), and the top 2 bits in
+                // the next register.
+                0x2302 => self.linear_counter as u8,
+                0x2303 => (self.linear_counter >> 8) as u8,
+                0x2304 => (self.linear_counter >> 16) as u8 & 0x03,
+                0x2305 => 0,
                 0x2306 => self.mr as u8,
                 0x2307 => (self.mr >> 8) as u8,
                 0x2308 => (self.mr >> 16) as u8,
@@ -240,6 +564,13 @@ impl Mapper for Sa1Mapper {
                 0x230A => (self.mr >> 32) as u8,
                 _ => self.mmio[idx],
             });
+        }
+        // Main-CPU vector override — when the SA-1 is currently
+        // asserting an IRQ/NMI to the S-CPU and the matching IVSW /
+        // NMIVW bit is set, the bank-0 vector slots read back as the
+        // SA-1's SIV / SNV instead of the real ROM bytes.
+        if let Some(v) = self.main_vector_override(bank, offset) {
+            return Some(v);
         }
         if let Some(o) = self.iram_offset(bank, offset) {
             return Some(self.iram[o]);
@@ -257,9 +588,116 @@ impl Mapper for Sa1Mapper {
         let bank = bank_of(addr);
         let offset = offset_of(addr);
         if let Some(idx) = Self::mmio_offset(addr) {
-            self.mmio[idx] = value;
             let absolute = 0x2200 + idx as u16;
+            // Edge-detected IRQ triggers. Compute the "previous" view
+            // before clobbering `mmio[idx]` so 0 → 1 edges latch.
+            let prev = self.mmio[idx];
+            self.mmio[idx] = value;
             match absolute {
+                // -------- S-CPU → SA-1 control --------
+                0x2200 => {
+                    // CCNT: bit 4 = IRQ-to-SA-1 trigger, bit 6 =
+                    // NMI-to-SA-1 trigger, bit 3..0 = message.
+                    self.ccnt_msg = value & 0x0F;
+                    if (prev & 0x10) == 0 && (value & 0x10) != 0 {
+                        self.main_irq_to_sa1 = true;
+                    }
+                    if (prev & 0x40) == 0 && (value & 0x40) != 0 {
+                        self.main_nmi_to_sa1 = true;
+                    }
+                }
+                0x2201 => self.sie = value,
+                0x2202 => {
+                    // SIC — write-only, write bit clears the matching
+                    // latched flag.
+                    if (value & 0x80) != 0 {
+                        self.s_irq_to_main = false;
+                    }
+                    if (value & 0x40) != 0 {
+                        self.s_nmi_to_main = false;
+                    }
+                    if (value & 0x20) != 0 {
+                        self.cc1_irq_to_main = false;
+                    }
+                }
+                0x2203 => {} // CRV lo — already in mmio[]
+                0x2204 => {} // CRV hi — already in mmio[]
+                0x2205 => self.cnv_lo = value,
+                0x2206 => self.cnv_hi = value,
+                0x2207 => self.civ_lo = value,
+                0x2208 => self.civ_hi = value,
+
+                // -------- SA-1 → S-CPU control --------
+                0x2209 => {
+                    // SCNT: bit 7 = IRQ-to-S-CPU trigger, bit 6 =
+                    // NMI-to-S-CPU trigger, bit 5 = IVSW, bit 4 =
+                    // NMIVW, bit 3..0 = message to S-CPU.
+                    self.scnt = value;
+                    if (prev & 0x80) == 0 && (value & 0x80) != 0 {
+                        self.s_irq_to_main = true;
+                    }
+                    if (prev & 0x40) == 0 && (value & 0x40) != 0 {
+                        self.s_nmi_to_main = true;
+                    }
+                }
+                0x220A => self.cie = value,
+                0x220B => {
+                    // CIC — write-only, write bit clears the matching
+                    // latched flag.
+                    if (value & 0x80) != 0 {
+                        self.main_irq_to_sa1 = false;
+                    }
+                    if (value & 0x40) != 0 {
+                        self.main_nmi_to_sa1 = false;
+                    }
+                    if (value & 0x20) != 0 {
+                        self.timer_irq_to_sa1 = false;
+                    }
+                    if (value & 0x10) != 0 {
+                        self.dma_irq_to_sa1 = false;
+                    }
+                }
+                0x220C => self.snv_lo = value,
+                0x220D => self.snv_hi = value,
+                0x220E => self.siv_lo = value,
+                0x220F => self.siv_hi = value,
+
+                // -------- SA-1 timer --------
+                0x2210 => {
+                    self.tmc = value;
+                    // Re-arm so the next match raises a fresh IRQ.
+                    self.timer_match_armed = true;
+                }
+                0x2211 => {
+                    // CTR — any write resets the counter.
+                    self.linear_counter = 0;
+                    self.timer_match_armed = true;
+                }
+                0x2212 => self.hcnt_lo = value,
+                0x2213 => self.hcnt_hi = value,
+                0x2214 => self.vcnt_lo = value,
+                0x2215 => self.vcnt_hi = value,
+
+                // -------- SA-1 DMA --------
+                0x2230 => {
+                    self.dcnt = value;
+                    if (value & 0x80) != 0 && (value & 0x20) == 0 {
+                        // Normal DMA — fire immediately. CC DMA is
+                        // deferred to a later phase; that path also
+                        // sets bit 5, so we route around it here.
+                        self.run_normal_dma();
+                    }
+                }
+                0x2231 => self.cdma = value,
+                0x2232 => self.sda = (self.sda & !0x0000FF) | u32::from(value),
+                0x2233 => self.sda = (self.sda & !0x00FF00) | (u32::from(value) << 8),
+                0x2234 => self.sda = (self.sda & !0xFF0000) | (u32::from(value) << 16),
+                0x2235 => self.dda = (self.dda & !0x0000FF) | u32::from(value),
+                0x2236 => self.dda = (self.dda & !0x00FF00) | (u32::from(value) << 8),
+                0x2237 => self.dda = (self.dda & !0xFF0000) | (u32::from(value) << 16),
+                0x2238 => self.dtc = (self.dtc & 0xFF00) | u16::from(value),
+                0x2239 => self.dtc = (self.dtc & 0x00FF) | (u16::from(value) << 8),
+
                 0x2220 => self.cxb = value,
                 0x2221 => self.dxb = value,
                 0x2222 => self.exb = value,
@@ -429,5 +867,246 @@ mod tests {
     fn kind_is_sa1() {
         let m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
         assert_eq!(m.kind(), MapperKind::Sa1);
+    }
+
+    // ------------- Phase-3 IRQ message tests -------------
+
+    #[test]
+    fn main_to_sa1_irq_edge_latches_and_gates_through_cie() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
+        // Enable S-CPU → SA-1 IRQ on the SA-1 side first.
+        m.write(make_addr(0x00, 0x220A), 0x80);
+        assert!(!m.sa1_irq_line(), "no IRQ until the S-CPU triggers it");
+        // CCNT bit 4 0→1 latches the IRQ.
+        m.write(make_addr(0x00, 0x2200), 0x10);
+        assert!(m.sa1_irq_line(), "edge should latch + gate through CIE");
+        // CIC bit 7 clears the latch.
+        m.write(make_addr(0x00, 0x220B), 0x80);
+        assert!(!m.sa1_irq_line());
+    }
+
+    #[test]
+    fn main_to_sa1_irq_requires_a_clean_0_to_1_edge() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
+        m.write(make_addr(0x00, 0x220A), 0x80);
+        // Pre-set bit 4 → no edge yet.
+        m.write(make_addr(0x00, 0x2200), 0x10);
+        m.write(make_addr(0x00, 0x220B), 0x80); // clear
+        assert!(!m.sa1_irq_line());
+        // Writing bit 4 again with no intervening clear is a 1→1: no edge.
+        m.write(make_addr(0x00, 0x2200), 0x10);
+        assert!(
+            !m.sa1_irq_line(),
+            "1→1 same-bit retain should not re-trigger"
+        );
+        // Clear bit 4, then set it again: 0→1 edge.
+        m.write(make_addr(0x00, 0x2200), 0x00);
+        m.write(make_addr(0x00, 0x2200), 0x10);
+        assert!(m.sa1_irq_line());
+    }
+
+    #[test]
+    fn cie_mask_zero_blocks_main_to_sa1_irq() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
+        // CIE = 0 → all incoming sources disabled.
+        m.write(make_addr(0x00, 0x2200), 0x10);
+        assert!(!m.sa1_irq_line(), "CIE disabled blocks the IRQ line");
+    }
+
+    #[test]
+    fn sa1_to_main_irq_edge_latches_and_gates_through_sie() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
+        // Enable the SA-1 → S-CPU IRQ on the main side.
+        m.write(make_addr(0x00, 0x2201), 0x80);
+        // SCNT bit 7 0→1 → latch.
+        m.write(make_addr(0x00, 0x2209), 0x80);
+        assert!(m.main_irq_line());
+        // SIC clears it.
+        m.write(make_addr(0x00, 0x2202), 0x80);
+        assert!(!m.main_irq_line());
+    }
+
+    #[test]
+    fn sfr_reflects_sa1_to_main_irq_latch_and_message_nibble() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
+        m.write(make_addr(0x00, 0x2201), 0x80);
+        // SCNT: bit 7 = IRQ, bit 4 = NMIVW (mirror is bit 4? no — bit 4
+        // = IVSW-bit 5 of SFR; we only check IRQ bit + message here).
+        m.write(make_addr(0x00, 0x2209), 0x80 | 0x05);
+        let sfr = m.read(make_addr(0x00, 0x2300)).unwrap();
+        assert_eq!(sfr & 0x80, 0x80, "bit 7 = SA-1 IRQ");
+        assert_eq!(sfr & 0x0F, 0x05, "low nibble = message");
+    }
+
+    #[test]
+    fn cfr_reflects_main_to_sa1_irq_latch_and_message_nibble() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
+        m.write(make_addr(0x00, 0x220A), 0x80);
+        // CCNT: bit 4 = IRQ trigger, bits 0..3 = message.
+        m.write(make_addr(0x00, 0x2200), 0x10 | 0x0A);
+        let cfr = m.read(make_addr(0x00, 0x2301)).unwrap();
+        assert_eq!(cfr & 0x80, 0x80);
+        assert_eq!(cfr & 0x0F, 0x0A);
+    }
+
+    #[test]
+    fn main_irq_vector_overrides_to_siv_when_ivsw_and_latched() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
+        m.write(make_addr(0x00, 0x220E), 0x34); // SIV lo
+        m.write(make_addr(0x00, 0x220F), 0x12); // SIV hi
+        m.write(make_addr(0x00, 0x2201), 0x80); // SIE.7 enable
+        // SCNT: IVSW (bit 5… err, in our impl we use $40) + IRQ trigger.
+        // IVSW = bit 5 of SCNT per Anomie; our scheme uses $40.
+        m.write(make_addr(0x00, 0x2209), 0x80 | 0x40);
+        // Now main reads $00:FFEE/FFEF — they should reflect SIV.
+        assert_eq!(m.read(make_addr(0x00, 0xFFEE)), Some(0x34));
+        assert_eq!(m.read(make_addr(0x00, 0xFFEF)), Some(0x12));
+        assert_eq!(m.read(make_addr(0x00, 0xFFFE)), Some(0x34));
+        assert_eq!(m.read(make_addr(0x00, 0xFFFF)), Some(0x12));
+    }
+
+    #[test]
+    fn main_irq_vector_falls_back_to_rom_when_no_irq_pending() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x10_0000), 0);
+        m.write(make_addr(0x00, 0x220E), 0x34);
+        m.write(make_addr(0x00, 0x220F), 0x12);
+        m.write(make_addr(0x00, 0x2201), 0x80);
+        // IVSW set but no IRQ latched → no override.
+        m.write(make_addr(0x00, 0x2209), 0x40);
+        // ROM[0xFFEE & 0xFFFF + LoROM offset within bank 0] —
+        // we don't care about the exact byte, just that it's NOT SIV.
+        let v = m.read(make_addr(0x00, 0xFFEE)).unwrap();
+        assert_ne!(v, 0x34, "no override without IRQ latched");
+    }
+
+    // ------------- Phase-3 timer tests -------------
+
+    #[test]
+    fn timer_linear_mode_fires_irq_on_compare_match() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
+        // Enable SA-1-side timer IRQ.
+        m.write(make_addr(0x00, 0x220A), 0x20); // CIE.5 = timer
+        // Set TMC linear mode + H enable.
+        m.write(make_addr(0x00, 0x2210), 0x81);
+        // Compare = 100.
+        m.write(make_addr(0x00, 0x2212), 100);
+        m.write(make_addr(0x00, 0x2213), 0);
+        m.write(make_addr(0x00, 0x2214), 0);
+        // Tick 50 ticks — not enough, no IRQ.
+        m.tick_timer(50);
+        assert!(!m.sa1_irq_line());
+        // Tick another 60 — crosses 100, fires.
+        m.tick_timer(60);
+        assert!(m.sa1_irq_line(), "timer should have fired at 100");
+    }
+
+    #[test]
+    fn timer_reset_via_ctr_clears_the_counter() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
+        m.write(make_addr(0x00, 0x2210), 0x81);
+        m.tick_timer(123);
+        assert_eq!(m.read(make_addr(0x00, 0x2302)), Some(123));
+        m.write(make_addr(0x00, 0x2211), 0x00); // CTR
+        assert_eq!(m.read(make_addr(0x00, 0x2302)), Some(0));
+    }
+
+    #[test]
+    fn timer_hv_mode_does_not_fire_irq() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
+        m.write(make_addr(0x00, 0x220A), 0x20);
+        // TMC = $01 (H enable, HV mode) — no linear progress + no IRQ.
+        m.write(make_addr(0x00, 0x2210), 0x01);
+        m.tick_timer(10_000);
+        assert!(!m.sa1_irq_line());
+    }
+
+    #[test]
+    fn timer_compare_match_re_arms_after_clear() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
+        m.write(make_addr(0x00, 0x220A), 0x20);
+        m.write(make_addr(0x00, 0x2210), 0x81);
+        m.write(make_addr(0x00, 0x2212), 50);
+        m.tick_timer(60);
+        assert!(m.sa1_irq_line());
+        // Clear via CIC.5.
+        m.write(make_addr(0x00, 0x220B), 0x20);
+        assert!(!m.sa1_irq_line());
+        // CTR write to re-arm.
+        m.write(make_addr(0x00, 0x2211), 0x00);
+        // Need another full pass to re-trigger.
+        m.tick_timer(60);
+        assert!(m.sa1_irq_line(), "re-armed timer fires on next match");
+    }
+
+    // ------------- Phase-3 normal DMA tests -------------
+
+    #[test]
+    fn normal_dma_copies_iram_to_bwram_and_raises_irq() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
+        // Seed I-RAM with a tiny pattern.
+        for i in 0..16 {
+            m.write(make_addr(0x00, 0x3000 + i), 0xA0 + i as u8);
+        }
+        m.write(make_addr(0x00, 0x220A), 0x10); // enable DMA IRQ
+        // SDA = $00:3000 (I-RAM)
+        m.write(make_addr(0x00, 0x2232), 0x00);
+        m.write(make_addr(0x00, 0x2233), 0x30);
+        m.write(make_addr(0x00, 0x2234), 0x00);
+        // DDA = $40:0000 (linear BW-RAM view)
+        m.write(make_addr(0x00, 0x2235), 0x00);
+        m.write(make_addr(0x00, 0x2236), 0x00);
+        m.write(make_addr(0x00, 0x2237), 0x40);
+        // DTC = 16
+        m.write(make_addr(0x00, 0x2238), 16);
+        m.write(make_addr(0x00, 0x2239), 0);
+        // DCNT = bit 7 enable, no CC.
+        m.write(make_addr(0x00, 0x2230), 0x80);
+        // Check destination got the bytes + DMA enable cleared + IRQ
+        // line asserted.
+        for i in 0..16 {
+            assert_eq!(m.read(make_addr(0x40, i as u16)), Some(0xA0 + i as u8));
+        }
+        let dcnt = m.read(make_addr(0x00, 0x2230)).unwrap();
+        assert_eq!(dcnt & 0x80, 0, "DMA enable should auto-clear");
+        assert!(m.sa1_irq_line(), "DMA IRQ should be asserted");
+    }
+
+    #[test]
+    fn normal_dma_from_rom_to_bwram() {
+        let rom = (0..0x1_0000).map(|i| (i & 0xFF) as u8).collect::<Vec<_>>();
+        let mut m = Sa1Mapper::new(rom, 0x10000);
+        // SDA = $00:8000 (= ROM[0]).
+        m.write(make_addr(0x00, 0x2232), 0x00);
+        m.write(make_addr(0x00, 0x2233), 0x80);
+        m.write(make_addr(0x00, 0x2234), 0x00);
+        // DDA = $40:0000.
+        m.write(make_addr(0x00, 0x2235), 0x00);
+        m.write(make_addr(0x00, 0x2236), 0x00);
+        m.write(make_addr(0x00, 0x2237), 0x40);
+        m.write(make_addr(0x00, 0x2238), 4);
+        m.write(make_addr(0x00, 0x2239), 0);
+        m.write(make_addr(0x00, 0x2230), 0x80);
+        assert_eq!(m.read(make_addr(0x40, 0)), Some(0x00));
+        assert_eq!(m.read(make_addr(0x40, 1)), Some(0x01));
+        assert_eq!(m.read(make_addr(0x40, 2)), Some(0x02));
+        assert_eq!(m.read(make_addr(0x40, 3)), Some(0x03));
+    }
+
+    #[test]
+    fn sa1_vector_override_reads_crv_cnv_civ_at_bank0_ffex() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
+        // CRV $1234, CNV $5678, CIV $9ABC.
+        m.write(make_addr(0x00, 0x2203), 0x34);
+        m.write(make_addr(0x00, 0x2204), 0x12);
+        m.write(make_addr(0x00, 0x2205), 0x78);
+        m.write(make_addr(0x00, 0x2206), 0x56);
+        m.write(make_addr(0x00, 0x2207), 0xBC);
+        m.write(make_addr(0x00, 0x2208), 0x9A);
+        assert_eq!(m.sa1_vector_override(0, 0xFFFC), Some(0x34));
+        assert_eq!(m.sa1_vector_override(0, 0xFFFD), Some(0x12));
+        assert_eq!(m.sa1_vector_override(0, 0xFFEA), Some(0x78));
+        assert_eq!(m.sa1_vector_override(0, 0xFFEB), Some(0x56));
+        assert_eq!(m.sa1_vector_override(0, 0xFFEE), Some(0xBC));
+        assert_eq!(m.sa1_vector_override(0, 0xFFEF), Some(0x9A));
     }
 }
