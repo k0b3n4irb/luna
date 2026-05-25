@@ -198,12 +198,25 @@ mod tests {
     fn sa1_starts_reset_then_writes_to_ccnt_release_it() {
         let mut chip = sa1_chip();
         assert!(!chip.running, "default: held in reset");
-        // The Sa1Mapper's MMIO is zero-initialised, so the "previous
-        // CCNT" value is already 0 — clearing bit 7 isn't a 1→0
-        // edge unless we first set bit 7. Write 0x80 then 0x00.
-        chip.write(make_addr(0x00, 0x2200), 0x80);
+        // The Sa1Mapper seeds CCNT to $80 at construction (matching
+        // the real-hardware power-on state), so writing $00 produces
+        // the 1→0 edge that releases the SA-1.
         chip.write(make_addr(0x00, 0x2200), 0x00);
         assert!(chip.running);
+    }
+
+    #[test]
+    fn sa1_release_works_when_main_only_writes_zero_to_ccnt() {
+        // Real-world boot path used by opensnes test ROMs: the main
+        // CPU sets CRV via $2203/$2204, then stores `$00` to CCNT
+        // *without* setting bit 7 first. Real HW boots with CCNT=$80
+        // so this is the 1→0 release edge; luna must match.
+        let mut chip = sa1_chip();
+        chip.write(make_addr(0x00, 0x2203), 0x34);
+        chip.write(make_addr(0x00, 0x2204), 0x12);
+        chip.write(make_addr(0x00, 0x2200), 0x00);
+        assert!(chip.running, "SA-1 must release on the first $00 write");
+        assert_eq!(chip.cpu.pc, 0x1234);
     }
 
     #[test]
