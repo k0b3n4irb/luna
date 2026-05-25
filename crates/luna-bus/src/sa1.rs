@@ -275,11 +275,19 @@ impl Sa1Mapper {
     #[must_use]
     pub fn new(rom: Vec<u8>, sram_size: usize) -> Self {
         let bwram_bytes = sram_size.clamp(0x800, BWRAM_SIZE);
+        // CCNT defaults to $80 on real hardware (SA-1 held in reset
+        // until the main CPU clears bit 7). Without this seed the
+        // first write of `$00` to `$2200` doesn't produce a 1→0 edge
+        // and the SA-1 never starts — opensnes test ROMs hit exactly
+        // that path: they write CRV and then store $00 to CCNT
+        // without first setting bit 7.
+        let mut mmio = [0u8; MMIO_SIZE];
+        mmio[0] = 0x80; // CCNT slot at $2200
         Self {
             rom,
             bwram: vec![0; bwram_bytes],
             iram: [0; IRAM_SIZE],
-            mmio: [0; MMIO_SIZE],
+            mmio,
             cxb: 0x00,
             dxb: 0x01,
             exb: 0x02,
