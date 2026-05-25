@@ -152,10 +152,26 @@ pub struct Sa1Mapper {
     timer_match_armed: bool,
 
     // ---- Phase-3 DMA ($2230-$2239) ----
-    /// `$2230 DCNT` — DMA control byte (bit 7 = enable, bit 5 = char
-    /// conversion, bit 4 = CC type, bit 3..2 = source, bit 1..0 =
-    /// destination).
+    /// `$2230 DCNT` — DMA control byte (bit 7 = enable, bit 6 =
+    /// priority, bit 5 = CC enable, bit 4 = CC type select, bit 2 =
+    /// destination device, bits 1..0 = source device).
+    ///
+    /// Per ares + Mesen2, DCNT writes only *configure* the DMA — the
+    /// actual trigger is on the final DDA byte write ($2236 for I-RAM
+    /// destinations + CC1, $2237 for BW-RAM destinations) or on the
+    /// trailing BRF write ($2247 / $224F) for CC2.
     dcnt: u8,
+    /// DCNT bit 7 — DMA enable. Carried in `dcnt` too, broken out
+    /// here for fast checking in the DDA-write trigger path.
+    dma_en: bool,
+    /// DCNT bit 5 — character-conversion enable.
+    dma_cden: bool,
+    /// DCNT bit 4 — CC type select. `false` = Type-2 streaming
+    /// (CC2), `true` = Type-1 one-shot (CC1) per ares' `io.cpp`.
+    dma_cdsel: bool,
+    /// DCNT bit 2 — destination device. `false` = I-RAM, `true` =
+    /// BW-RAM. Selects which DDA byte fires normal-mode DMA.
+    dma_dd: bool,
     /// `$2231 CDMA` — character-conversion parameters (colour depth +
     /// tile width). Stored for the Type-1 path; the normal-DMA fast
     /// path ignores it.
@@ -321,6 +337,10 @@ impl Sa1Mapper {
             linear_counter: 0,
             timer_match_armed: true,
             dcnt: 0,
+            dma_en: false,
+            dma_cden: false,
+            dma_cdsel: false,
+            dma_dd: false,
             cdma: 0,
             sda: 0,
             dda: 0,
@@ -1107,19 +1127,31 @@ impl Sa1Mapper {
                 0x2215 => self.vcnt_hi = value,
 
                 // -------- SA-1 DMA --------
+                //
+                // DCNT only *configures* the DMA. Per ares' `io.cpp`
+                // and Mesen2's `WriteSharedRegisters`, the actual
+                // trigger is on the final DDA byte for normal /
+                // CC1 DMA, and on BRF[7] / BRF[15] for CC2.
                 0x2230 => {
                     self.dcnt = value;
-                    if (value & 0x80) != 0 {
-                        match (value & 0x30) >> 4 {
-                            0 | 1 => self.run_normal_dma(), // bit 5 = 0 → normal
-                            2 => self.run_cc1_dma(),        // CC enable + Type-1
-                            3 => self.cc2_arm(),            // CC enable + Type-2
-                            _ => unreachable!(),
-                        }
-                    } else if self.cc2_active {
-                        // Game cleared DCNT.7 → terminate any in-flight
-                        // CC2 stream.
+                    let prev_en = self.dma_en;
+                    self.dma_en = (value & 0x80) != 0;
+                    self.dma_cden = (value & 0x20) != 0;
+                    self.dma_cdsel = (value & 0x10) != 0;
+                    self.dma_dd = (value & 0x04) != 0;
+                    // Clearing DMA enable also terminates any in-flight
+                    // CC2 stream.
+                    if prev_en && !self.dma_en && self.cc2_active {
                         self.cc2_end();
+                    }
+                    // If the game arms CC2 (cden=1, cdsel=0), prep the
+                    // streaming buffer. Real hardware doesn't *need*
+                    // this — CC2 also auto-arms on the first BRF write
+                    // — but priming here matches our existing CC2
+                    // model and lets the streaming buffer track bpp
+                    // captured from CDMA.
+                    if self.dma_en && self.dma_cden && !self.dma_cdsel && !self.cc2_active {
+                        self.cc2_arm();
                     }
                 }
                 0x2231 => {
@@ -1134,11 +1166,34 @@ impl Sa1Mapper {
                 0x2233 => self.sda = (self.sda & !0x00FF00) | (u32::from(value) << 8),
                 0x2234 => self.sda = (self.sda & !0xFF0000) | (u32::from(value) << 16),
                 0x2235 => self.dda = (self.dda & !0x0000FF) | u32::from(value),
-                0x2236 => self.dda = (self.dda & !0x00FF00) | (u32::from(value) << 8),
-                0x2237 => self.dda = (self.dda & !0xFF0000) | (u32::from(value) << 16),
+                0x2236 => {
+                    self.dda = (self.dda & !0x00FF00) | (u32::from(value) << 8);
+                    // Trigger: normal DMA → I-RAM, or CC1.
+                    if self.dma_en {
+                        if !self.dma_cden && !self.dma_dd {
+                            self.run_normal_dma();
+                        } else if self.dma_cden && self.dma_cdsel {
+                            self.run_cc1_dma();
+                        }
+                    }
+                }
+                0x2237 => {
+                    self.dda = (self.dda & !0xFF0000) | (u32::from(value) << 16);
+                    // Trigger: normal DMA → BW-RAM.
+                    if self.dma_en && !self.dma_cden && self.dma_dd {
+                        self.run_normal_dma();
+                    }
+                }
                 0x2238 => self.dtc = (self.dtc & 0xFF00) | u16::from(value),
                 0x2239 => self.dtc = (self.dtc & 0x00FF) | (u16::from(value) << 8),
-                0x223F => self.cc2_consume_byte(value),
+                // $223F BBF is the BW-RAM bitmap-format selector on
+                // real hardware. We also accept it as a luna-internal
+                // CC2 byte feed for back-compat with existing tests.
+                // BRF[7] / BRF[15] ($2247 / $224F) are the real-HW
+                // CC2 row triggers — same per-byte staging path.
+                0x223F | 0x2247 | 0x224F if self.cc2_active => {
+                    self.cc2_consume_byte(value);
+                }
 
                 0x2220 => self.cxb = value,
                 0x2221 => self.dxb = value,
@@ -1513,17 +1568,18 @@ mod tests {
         m.write(make_addr(0x00, 0x2232), 0x00);
         m.write(make_addr(0x00, 0x2233), 0x30);
         m.write(make_addr(0x00, 0x2234), 0x00);
-        // DDA = $40:0000 (linear BW-RAM view)
-        m.write(make_addr(0x00, 0x2235), 0x00);
-        m.write(make_addr(0x00, 0x2236), 0x00);
-        m.write(make_addr(0x00, 0x2237), 0x40);
         // DTC = 16
         m.write(make_addr(0x00, 0x2238), 16);
         m.write(make_addr(0x00, 0x2239), 0);
-        // DCNT = bit 7 enable, no CC.
-        m.write(make_addr(0x00, 0x2230), 0x80);
-        // Check destination got the bytes + DMA enable cleared + IRQ
-        // line asserted.
+        // DCNT = bit 7 enable + bit 2 dd=1 (dest = BW-RAM). DMA only
+        // *configures* on this write — the actual byte-copy is
+        // triggered when the final DDA byte ($2237 for BW-RAM dest)
+        // is written. Per ares + Mesen2.
+        m.write(make_addr(0x00, 0x2230), 0x84);
+        // DDA = $40:0000 — writing $2237 fires the burst.
+        m.write(make_addr(0x00, 0x2235), 0x00);
+        m.write(make_addr(0x00, 0x2236), 0x00);
+        m.write(make_addr(0x00, 0x2237), 0x40);
         for i in 0..16 {
             assert_eq!(m.read(make_addr(0x40, i as u16)), Some(0xA0 + i as u8));
         }
@@ -1540,13 +1596,14 @@ mod tests {
         m.write(make_addr(0x00, 0x2232), 0x00);
         m.write(make_addr(0x00, 0x2233), 0x80);
         m.write(make_addr(0x00, 0x2234), 0x00);
-        // DDA = $40:0000.
+        m.write(make_addr(0x00, 0x2238), 4);
+        m.write(make_addr(0x00, 0x2239), 0);
+        // DCNT first: enable + dest = BW-RAM (dd=1, bit 2).
+        m.write(make_addr(0x00, 0x2230), 0x84);
+        // DDA = $40:0000; $2237 write fires.
         m.write(make_addr(0x00, 0x2235), 0x00);
         m.write(make_addr(0x00, 0x2236), 0x00);
         m.write(make_addr(0x00, 0x2237), 0x40);
-        m.write(make_addr(0x00, 0x2238), 4);
-        m.write(make_addr(0x00, 0x2239), 0);
-        m.write(make_addr(0x00, 0x2230), 0x80);
         assert_eq!(m.read(make_addr(0x40, 0)), Some(0x00));
         assert_eq!(m.read(make_addr(0x40, 1)), Some(0x01));
         assert_eq!(m.read(make_addr(0x40, 2)), Some(0x02));
@@ -1556,7 +1613,9 @@ mod tests {
     // ------------- Phase-4 CC1 DMA tests -------------
 
     /// Helper — set up a CC1 DMA so the caller can pre-fill the
-    /// source and read the converted tile back.
+    /// source and read the converted tile back. Fires the trigger
+    /// itself by writing $2236 last (DDA mid-byte — the CC1 trigger
+    /// per ares + Mesen2).
     fn cc1_setup(m: &mut Sa1Mapper, cdma: u8, dtc: u16) {
         // Enable CC1 IRQ on the S-CPU side.
         m.write(make_addr(0x00, 0x2201), 0x20);
@@ -1564,13 +1623,15 @@ mod tests {
         m.write(make_addr(0x00, 0x2232), 0x00);
         m.write(make_addr(0x00, 0x2233), 0x00);
         m.write(make_addr(0x00, 0x2234), 0x40);
-        // DDA = $00:3000 (I-RAM start).
-        m.write(make_addr(0x00, 0x2235), 0x00);
-        m.write(make_addr(0x00, 0x2236), 0x30);
-        m.write(make_addr(0x00, 0x2237), 0x00);
         m.write(make_addr(0x00, 0x2231), cdma);
         m.write(make_addr(0x00, 0x2238), (dtc & 0xFF) as u8);
         m.write(make_addr(0x00, 0x2239), (dtc >> 8) as u8);
+        // DCNT = enable + CC + CC1 (cdsel = 1) + dest = I-RAM (dd = 0).
+        m.write(make_addr(0x00, 0x2230), 0xB0);
+        // DDA = $00:3000. Write $2235 + $2237, then $2236 to fire.
+        m.write(make_addr(0x00, 0x2235), 0x00);
+        m.write(make_addr(0x00, 0x2237), 0x00);
+        m.write(make_addr(0x00, 0x2236), 0x30);
     }
 
     #[test]
@@ -1586,7 +1647,6 @@ mod tests {
         }
         cc1_setup(&mut m, 0b0000_0100, 32);
         // Fire CC1.
-        m.write(make_addr(0x00, 0x2230), 0xA0);
         // Read converted tile from $00:3000.
         let mut read = |off: u16| m.read(make_addr(0x00, 0x3000 + off)).unwrap();
         // bp0 / bp2 → all 0xFF (bits 0 and 2 of 5 = 1).
@@ -1614,7 +1674,6 @@ mod tests {
         m.write(make_addr(0x40, 2), 0x56);
         m.write(make_addr(0x40, 3), 0x78);
         cc1_setup(&mut m, 0b0000_0100, 32);
-        m.write(make_addr(0x00, 0x2230), 0xA0);
         let mut read = |off: u16| m.read(make_addr(0x00, 0x3000 + off)).unwrap();
         // Anomie-correct planar values: bp0=0xAA, bp1=0x66, bp2=0x1E,
         // bp3=0x01 (computed offline).
@@ -1636,7 +1695,6 @@ mod tests {
             }
         }
         cc1_setup(&mut m, 0b0000_1000, 16);
-        m.write(make_addr(0x00, 0x2230), 0xA0);
         let mut read = |off: u16| m.read(make_addr(0x00, 0x3000 + off)).unwrap();
         // bp0 / bp1 both all 0xFF for 8 rows.
         for row in 0..8 {
@@ -1657,7 +1715,6 @@ mod tests {
             }
         }
         cc1_setup(&mut m, 0b0000_0000, 64);
-        m.write(make_addr(0x00, 0x2230), 0xA0);
         let mut read = |off: u16| m.read(make_addr(0x00, 0x3000 + off)).unwrap();
         // Only bp0 should be 0xFF; bp1..bp7 should be 0.
         for row in 0..8 {
@@ -1689,7 +1746,6 @@ mod tests {
             }
         }
         cc1_setup(&mut m, 0b0000_0101, 64);
-        m.write(make_addr(0x00, 0x2230), 0xA0);
         // Tile 0 → all 0x00 in I-RAM at $3000..$3020.
         for off in 0u16..32 {
             assert_eq!(
@@ -1714,12 +1770,15 @@ mod tests {
     /// given colour mode in CDMA (bits 4..2).
     fn cc2_setup(m: &mut Sa1Mapper, cdma: u8) {
         m.write(make_addr(0x00, 0x2201), 0x20); // SIE — enable CC-IRQ
-        m.write(make_addr(0x00, 0x2235), 0x00); // DDA lo
+        m.write(make_addr(0x00, 0x2231), cdma);
+        // DCNT = enable + CC + CC2 (cdsel=0). Arms the streaming
+        // buffer; the DDA writes that follow set the destination and
+        // do not fire (CC2 fires on BRF[7]/BRF[15] or BBF writes).
+        m.write(make_addr(0x00, 0x2230), 0xA0);
+        // DDA = $00:3000.
+        m.write(make_addr(0x00, 0x2235), 0x00);
         m.write(make_addr(0x00, 0x2236), 0x30);
         m.write(make_addr(0x00, 0x2237), 0x00);
-        m.write(make_addr(0x00, 0x2231), cdma);
-        // DCNT bit 7 + bit 5 + bit 4 = arm CC2.
-        m.write(make_addr(0x00, 0x2230), 0xB0);
     }
 
     #[test]
