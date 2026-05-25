@@ -377,6 +377,17 @@ impl Oam {
         self.address = (self.word_address & 0x01FF) << 1;
     }
 
+    /// Reload the internal byte address from the latched `word_address`.
+    ///
+    /// Hardware does this at vcounter == vdisp when forced-blank is off,
+    /// and on a `$2100` write that exits forced-blank at the same line.
+    /// See ares `object.cpp:1-4, 31-32` (`addressReset()`) and Mesen2
+    /// `SnesPpu.cpp:464-472, 1889-1896` (`UpdateOamAddress`). The scheduler
+    /// gates the call on force-blank; this method just performs the reload.
+    pub fn reload_address_from_latch(&mut self) {
+        self.reset_byte_address();
+    }
+
     /// `$2102` write — low 8 bits of the word address.
     pub fn set_address_low(&mut self, value: u8) {
         self.word_address = (self.word_address & 0xFF00) | u16::from(value);
@@ -577,5 +588,30 @@ mod tests {
         o.write(0x77);
         // Advance from $21F wraps to 0 (since $220 is one past the end).
         assert_eq!(o.address, 0);
+    }
+
+    #[test]
+    fn oam_reload_address_from_latch_restores_word_address() {
+        // After $2102/$2103 set the word address, several $2104 writes
+        // advance the internal byte address. `reload_address_from_latch`
+        // is what hardware does at vblank entry (force-blank off) — it
+        // jumps back to the latched word_address << 1.
+        let mut o = Oam::new();
+        o.set_address_low(0x10); // word_address = $0010 → byte addr = $0020
+        assert_eq!(o.address, 0x0020);
+        // Stream a sprite (4 bytes) via $2104 → byte addr advances.
+        o.write(0x11);
+        o.write(0x22);
+        o.write(0x33);
+        o.write(0x44);
+        assert_eq!(o.address, 0x0024);
+        // Hardware-style reload at vblank.
+        o.reload_address_from_latch();
+        assert_eq!(
+            o.address, 0x0020,
+            "address should snap back to word_address << 1"
+        );
+        // word_address itself must be untouched.
+        assert_eq!(o.word_address, 0x0010);
     }
 }

@@ -225,6 +225,8 @@ impl Snes {
     /// via the bus and load `PC`.
     pub fn reset(&mut self) {
         let scanlines = self.region_scanlines();
+        let ppu_line_snapshot = self.ppu_line;
+        let vblank_start_snapshot = vblank_start_line(self.region);
         let Snes {
             cpu,
             ppu,
@@ -259,6 +261,8 @@ impl Snes {
             irq: irq_pending,
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
+            ppu_line: ppu_line_snapshot,
+            vblank_start_line: vblank_start_snapshot,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -272,6 +276,8 @@ impl Snes {
     pub fn step(&mut self) -> MCycles {
         let before = self.total_mclk;
         let scanlines = self.region_scanlines();
+        let ppu_line_snapshot = self.ppu_line;
+        let vblank_start_snapshot = vblank_start_line(self.region);
         let Snes {
             cpu,
             ppu,
@@ -306,6 +312,8 @@ impl Snes {
             irq: irq_pending,
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
+            ppu_line: ppu_line_snapshot,
+            vblank_start_line: vblank_start_snapshot,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -364,6 +372,14 @@ impl Snes {
             if self.cpu_regs.nmitimen & 0x80 != 0 {
                 self.cpu.trigger_nmi();
                 self.nmis_serviced = self.nmis_serviced.saturating_add(1);
+            }
+            // OAM address auto-reset: hardware reloads the internal byte
+            // address from the latched word_address at vcounter == vdisp,
+            // unless forced-blank is active. SMW (and most games) rely on
+            // this so each NMI's OAM-DMA into $2104 starts at index 0.
+            // See ares `object.cpp:31-32` and Mesen2 `SnesPpu.cpp:464-472`.
+            if self.ppu.inidisp & 0x80 == 0 {
+                self.ppu.oam.reload_address_from_latch();
             }
             // Joypad auto-read: hardware copies the live pad state
             // into $4218-$421F at the start of every VBlank when
@@ -477,6 +493,8 @@ impl Snes {
         let pc = self.cpu.pc;
         let pb = self.cpu.pb;
         let scanlines = self.region_scanlines();
+        let ppu_line_snapshot = self.ppu_line;
+        let vblank_start_snapshot = vblank_start_line(self.region);
         let Snes {
             ppu,
             dma,
@@ -510,6 +528,8 @@ impl Snes {
             irq: irq_pending,
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
+            ppu_line: ppu_line_snapshot,
+            vblank_start_line: vblank_start_snapshot,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -558,6 +578,12 @@ struct SnesBus<'a> {
     /// used by the H/V counter latch path (\$2137 / WRIO) to wrap
     /// the V coordinate at the right boundary.
     scanlines_per_frame: u16,
+    /// Current scanline (snapshot at the start of the bus borrow).
+    /// Used by the $2100 INIDISP write path to gate the OAM address
+    /// auto-reset on the vblank-entry line.
+    ppu_line: u16,
+    /// First vblank scanline for the current region (225 NTSC / 240 PAL).
+    vblank_start_line: u16,
 }
 
 impl<'a> SnesBus<'a> {
@@ -821,6 +847,17 @@ impl<'a> Bus for SnesBus<'a> {
             return;
         }
         if let Some(off) = Self::ppu_offset(addr) {
+            // $2100 INIDISP — a write that exits forced-blank exactly
+            // at the vblank-entry scanline triggers the OAM address
+            // auto-reset, same as the per-line vblank hook. ares
+            // `ppu_io.cpp:194`, Mesen2 `SnesPpu.cpp:1889-1896`.
+            if off == 0x00 {
+                let was_force_blank = self.ppu.inidisp & 0x80 != 0;
+                let will_force_blank = value & 0x80 != 0;
+                if was_force_blank && !will_force_blank && self.ppu_line == self.vblank_start_line {
+                    self.ppu.oam.reload_address_from_latch();
+                }
+            }
             self.ppu.write(off, value);
             return;
         }
@@ -1060,6 +1097,8 @@ mod tests {
         let cart = demo_lorom();
         let mut snes = Snes::from_cartridge(cart);
         let scanlines = snes.region_scanlines();
+        let ppu_line_snapshot = snes.ppu_line;
+        let vblank_start_snapshot = vblank_start_line(snes.region);
         let Snes {
             ppu,
             dma,
@@ -1093,6 +1132,8 @@ mod tests {
             irq: irq_pending,
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
+            ppu_line: ppu_line_snapshot,
+            vblank_start_line: vblank_start_snapshot,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -1113,6 +1154,8 @@ mod tests {
         let mut snes = Snes::from_cartridge(cart);
         snes.reset();
         let scanlines = snes.region_scanlines();
+        let ppu_line_snapshot = snes.ppu_line;
+        let vblank_start_snapshot = vblank_start_line(snes.region);
         let Snes {
             cpu: _,
             ppu,
@@ -1147,6 +1190,8 @@ mod tests {
             irq: irq_pending,
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
+            ppu_line: ppu_line_snapshot,
+            vblank_start_line: vblank_start_snapshot,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -1174,6 +1219,8 @@ mod tests {
         snes.reset();
         snes.cpu_regs.set_joypad(0, 0x8001);
         let scanlines = snes.region_scanlines();
+        let ppu_line_snapshot = snes.ppu_line;
+        let vblank_start_snapshot = vblank_start_line(snes.region);
         let Snes {
             cpu: _,
             ppu,
@@ -1208,6 +1255,8 @@ mod tests {
             irq: irq_pending,
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
+            ppu_line: ppu_line_snapshot,
+            vblank_start_line: vblank_start_snapshot,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -1367,6 +1416,124 @@ mod tests {
         assert_eq!(snes.ppu_line, NTSC_VBLANK_START_LINE);
         assert!(snes.cpu_regs.nmi_flag);
         assert_eq!(snes.nmis_serviced, 0);
+    }
+
+    #[test]
+    fn vblank_entry_reloads_oam_address_from_latch_when_not_force_blanked() {
+        // Mirrors ares `object.cpp:31-32` (`addressReset()` at vcounter==vdisp
+        // when force-blank is off) and Mesen2 `SnesPpu.cpp:464-472`. Games
+        // (SMW etc.) rely on this so every NMI's OAM stream lands at index 0.
+        let cart = demo_lorom();
+        let mut snes = Snes::from_cartridge(cart);
+        snes.reset();
+        // Force-blank OFF, brightness max.
+        snes.ppu.write(luna_ppu::register::INIDISP, 0x0F);
+        // Latch word address = $0010 → byte addr should be $0020.
+        snes.ppu.oam.set_address_low(0x10);
+        assert_eq!(snes.ppu.oam.address, 0x0020);
+        // Streaming 4 bytes advances the byte address.
+        snes.ppu.oam.write(0x11);
+        snes.ppu.oam.write(0x22);
+        snes.ppu.oam.write(0x33);
+        snes.ppu.oam.write(0x44);
+        assert_eq!(snes.ppu.oam.address, 0x0024);
+        // Cross the vblank-entry scanline.
+        snes.ppu_line = NTSC_VBLANK_START_LINE - 1;
+        snes.advance_scheduler(MCYCLES_PER_SCANLINE);
+        assert_eq!(snes.ppu_line, NTSC_VBLANK_START_LINE);
+        // Address has been reloaded from the latched word_address.
+        assert_eq!(
+            snes.ppu.oam.address, 0x0020,
+            "vblank entry must reload OAM byte address from word_address << 1"
+        );
+    }
+
+    #[test]
+    fn vblank_entry_does_not_reload_oam_address_when_force_blanked() {
+        // Same scenario but force-blank ON — both refs skip the reload.
+        let cart = demo_lorom();
+        let mut snes = Snes::from_cartridge(cart);
+        snes.reset();
+        snes.ppu.write(luna_ppu::register::INIDISP, 0x80); // force-blank on
+        snes.ppu.oam.set_address_low(0x10);
+        snes.ppu.oam.write(0x11);
+        snes.ppu.oam.write(0x22);
+        snes.ppu.oam.write(0x33);
+        snes.ppu.oam.write(0x44);
+        assert_eq!(snes.ppu.oam.address, 0x0024);
+        snes.ppu_line = NTSC_VBLANK_START_LINE - 1;
+        snes.advance_scheduler(MCYCLES_PER_SCANLINE);
+        assert_eq!(
+            snes.ppu.oam.address, 0x0024,
+            "force-blank suppresses the OAM address auto-reset"
+        );
+    }
+
+    #[test]
+    fn inidisp_write_exiting_force_blank_at_vblank_line_reloads_oam_address() {
+        // ares `ppu_io.cpp:194` and Mesen2 `SnesPpu.cpp:1889-1896`:
+        // a $2100 write that turns off forced-blank while sitting on
+        // the vblank-entry scanline triggers the same auto-reset.
+        let cart = demo_lorom();
+        let mut snes = Snes::from_cartridge(cart);
+        snes.reset();
+        // Start with force-blank ON and the byte address advanced.
+        snes.ppu.write(luna_ppu::register::INIDISP, 0x80);
+        snes.ppu.oam.set_address_low(0x10);
+        snes.ppu.oam.write(0x11);
+        snes.ppu.oam.write(0x22);
+        assert_eq!(snes.ppu.oam.address, 0x0022);
+        // Park on the vblank-entry scanline.
+        snes.ppu_line = NTSC_VBLANK_START_LINE;
+        // Drive the bus write for $2100 = $0F (force-blank OFF).
+        let scanlines = snes.region_scanlines();
+        let ppu_line_snapshot = snes.ppu_line;
+        let vblank_start_snapshot = vblank_start_line(snes.region);
+        let Snes {
+            ppu,
+            dma,
+            cpu_regs,
+            apu_real,
+            apu_stub_fallback,
+            apu_panicked,
+            wram,
+            mapper,
+            fast_rom,
+            nmi_pending,
+            irq_pending,
+            total_mclk,
+            wm_addr,
+            joypad_strobe,
+            joypad1_shift,
+            joypad2_shift,
+            ..
+        } = &mut snes;
+        let mut bus = SnesBus {
+            wram,
+            mapper: mapper.as_mut(),
+            ppu,
+            dma,
+            cpu_regs,
+            apu_real,
+            apu_stub_fallback,
+            apu_panicked: *apu_panicked,
+            fast_rom: *fast_rom,
+            nmi: nmi_pending,
+            irq: irq_pending,
+            mclk_total: total_mclk,
+            scanlines_per_frame: scanlines,
+            ppu_line: ppu_line_snapshot,
+            vblank_start_line: vblank_start_snapshot,
+            wm_addr,
+            joypad_strobe,
+            joypad1_shift,
+            joypad2_shift,
+        };
+        bus.write(make_addr(0x00, 0x2100), 0x0F);
+        assert_eq!(
+            snes.ppu.oam.address, 0x0020,
+            "exiting force-blank at vdisp must reload OAM address"
+        );
     }
 
     #[test]
