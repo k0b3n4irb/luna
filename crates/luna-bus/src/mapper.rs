@@ -61,4 +61,13 @@ pub trait Mapper {
     /// per main-CPU \`mclk\`). Implementations should be safely
     /// callable even when their coprocessor is reset / stopped.
     fn step_coproc(&mut self, _main_mclk: u32) {}
+
+    /// `true` while the cartridge coprocessor is asserting an IRQ line
+    /// onto the main CPU (SA-1 SCNT bit 7 latched + SIE bit 7 enabled,
+    /// for instance). The main-CPU bus ORs this into its own
+    /// `irq_pending` so the CPU services it through its normal IRQ path.
+    /// Plain LoROM / HiROM carts return `false`.
+    fn coproc_main_irq_pending(&self) -> bool {
+        false
+    }
 }
