@@ -72,29 +72,59 @@ pub struct Snes {
     /// How many NMIs we have actually delivered to the CPU. Stays
     /// behind `frame_count` if `NMITIMEN.7` is off.
     pub nmis_serviced: u64,
+    /// Video region as decoded from the cartridge header. Drives
+    /// the scheduler's scanlines-per-frame + VBlank-entry line and
+    /// the PPU's `STAT78` region bit (bit 4).
+    pub region: luna_cartridge::Region,
 }
 
 /// Master cycles per PPU scanline on NTSC (1364 mclk = 4 dots × 341).
 pub const MCYCLES_PER_SCANLINE: u32 = 1364;
 
 /// Convert the running master-clock counter into the PPU's current
-/// (H, V) dot coordinate. NTSC: 1364 master cycles per scanline,
-/// 262 scanlines per frame. Each "dot" is 4 master cycles, so H is
-/// the line-relative master clock divided by 4 (range 0..340).
+/// (H, V) dot coordinate. 1364 master cycles per scanline; the
+/// scanline count depends on region (262 NTSC / 312 PAL). Each
+/// "dot" is 4 master cycles, so H is the line-relative master
+/// clock divided by 4 (range 0..340).
 #[inline]
-fn current_hv(mclk_total: u64) -> (u16, u16) {
-    let per_frame = u64::from(MCYCLES_PER_SCANLINE) * u64::from(NTSC_SCANLINES_PER_FRAME);
+fn current_hv(mclk_total: u64, scanlines: u16) -> (u16, u16) {
+    let per_frame = u64::from(MCYCLES_PER_SCANLINE) * u64::from(scanlines);
     let in_frame = mclk_total % per_frame;
     let v = (in_frame / u64::from(MCYCLES_PER_SCANLINE)) as u16;
     let h = ((in_frame % u64::from(MCYCLES_PER_SCANLINE)) / 4) as u16;
     (h, v)
 }
+
+/// Region-aware scanline parameters.
+#[inline]
+#[must_use]
+pub fn scanlines_per_frame(region: luna_cartridge::Region) -> u16 {
+    match region {
+        luna_cartridge::Region::Pal => PAL_SCANLINES_PER_FRAME,
+        _ => NTSC_SCANLINES_PER_FRAME,
+    }
+}
+
+#[inline]
+#[must_use]
+pub fn vblank_start_line(region: luna_cartridge::Region) -> u16 {
+    match region {
+        luna_cartridge::Region::Pal => PAL_VBLANK_START_LINE,
+        _ => NTSC_VBLANK_START_LINE,
+    }
+}
 /// Total scanlines per NTSC frame (visible + post + vblank).
 pub const NTSC_SCANLINES_PER_FRAME: u16 = 262;
+/// Total scanlines per PAL frame.
+pub const PAL_SCANLINES_PER_FRAME: u16 = 312;
 /// Scanline on which VBlank begins on NTSC. The PPU writes the
 /// `$4210` "NMI flag" bit and (if `NMITIMEN.7` is set) raises the NMI
 /// pin at the start of this line.
 pub const NTSC_VBLANK_START_LINE: u16 = 225;
+/// PAL is identical except it has more total scanlines, all of which
+/// fall inside VBlank — the visible region is still 224 lines (or
+/// 239 with overscan, which we don't model yet).
+pub const PAL_VBLANK_START_LINE: u16 = 240;
 
 impl Snes {
     /// Build a new machine from a parsed cartridge.
@@ -104,6 +134,7 @@ impl Snes {
     /// later phases.
     pub fn from_cartridge(cart: Cartridge) -> Self {
         let sram_bytes = (cart.header.sram_size_kb as usize) * 1024;
+        let region = cart.header.region;
         let mapper: Box<dyn Mapper + Send> = match cart.header.mapper_kind {
             MapperKind::LoRom => Box::new(LoRomMapper::new(cart.rom, sram_bytes)),
             kind @ (MapperKind::HiRom | MapperKind::ExHiRom) => {
@@ -117,9 +148,16 @@ impl Snes {
             }
         };
 
+        let mut ppu = Ppu::new();
+        // Flip STAT78's region bit (bit 4) for PAL carts. NTSC and
+        // "Unknown" land at the same default (bit clear).
+        if matches!(region, luna_cartridge::Region::Pal) {
+            ppu.stat78 |= 0x10;
+        }
+
         Self {
             cpu: Cpu::new(),
-            ppu: Ppu::new(),
+            ppu,
             dma: Dma::new(),
             cpu_regs: CpuRegs::new(),
             wram: Box::new([0; 0x20000]),
@@ -137,12 +175,21 @@ impl Snes {
             mcycles_in_line: 0,
             frame_count: 0,
             nmis_serviced: 0,
+            region,
         }
+    }
+
+    /// Cached scanlines-per-frame for the current region — propagates
+    /// into every [`SnesBus`] borrow.
+    #[inline]
+    fn region_scanlines(&self) -> u16 {
+        scanlines_per_frame(self.region)
     }
 
     /// Run the CPU reset sequence: read the reset vector at `$00:FFFC`
     /// via the bus and load `PC`.
     pub fn reset(&mut self) {
+        let scanlines = self.region_scanlines();
         let Snes {
             cpu,
             ppu,
@@ -172,6 +219,7 @@ impl Snes {
             nmi: nmi_pending,
             irq: irq_pending,
             mclk_total: total_mclk,
+            scanlines_per_frame: scanlines,
         };
         cpu.reset(&mut bus);
     }
@@ -180,6 +228,7 @@ impl Snes {
     /// that instruction (accumulated through [`Bus::io_cycle`]).
     pub fn step(&mut self) -> MCycles {
         let before = self.total_mclk;
+        let scanlines = self.region_scanlines();
         let Snes {
             cpu,
             ppu,
@@ -209,6 +258,7 @@ impl Snes {
             nmi: nmi_pending,
             irq: irq_pending,
             mclk_total: total_mclk,
+            scanlines_per_frame: scanlines,
         };
         cpu.step(&mut bus);
 
@@ -248,8 +298,10 @@ impl Snes {
     /// Cross one scanline boundary and apply the per-line events the
     /// SNES PPU drives.
     fn advance_one_scanline(&mut self) {
+        let vblank_start = vblank_start_line(self.region);
+        let scanlines = scanlines_per_frame(self.region);
         self.ppu_line += 1;
-        if self.ppu_line == NTSC_VBLANK_START_LINE {
+        if self.ppu_line == vblank_start {
             // Entering VBlank. Latch the NMI flag visible at $4210
             // and set the VBlank bit of HVBJOY.
             self.cpu_regs.nmi_flag = true;
@@ -262,7 +314,7 @@ impl Snes {
             // into $4218-$421F at the start of every VBlank when
             // NMITIMEN.0 is set. Busy bit clears a few lines later.
             self.cpu_regs.latch_joypad_auto_read();
-        } else if self.ppu_line == NTSC_VBLANK_START_LINE + 3 {
+        } else if self.ppu_line == vblank_start + 3 {
             // ~3 scanlines after VBlank entry the auto-read sequence
             // is done. Drop HVBJOY.0 so polling games see ready.
             self.cpu_regs.clear_joypad_busy();
@@ -299,7 +351,7 @@ impl Snes {
             self.cpu_regs.irq_flag = true;
             self.cpu.trigger_irq();
         }
-        if self.ppu_line >= NTSC_SCANLINES_PER_FRAME {
+        if self.ppu_line >= scanlines {
             // Frame wrap: back to line 0, clear VBlank bit, and re-
             // initialise HDMA tables for the new frame.
             self.ppu_line = 0;
@@ -308,10 +360,10 @@ impl Snes {
             self.hdma_init_frame();
         }
         // After the line counter has advanced, fire HDMA on every
-        // active channel for any visible scanline (0..=224 NTSC).
-        // HDMA transfers happen during the line's H-blank, so doing
-        // them once per scanline transition is the canonical place.
-        if self.ppu_line < NTSC_VBLANK_START_LINE {
+        // active visible scanline. HDMA transfers happen during the
+        // line's H-blank, so doing them once per scanline transition
+        // is the canonical place.
+        if self.ppu_line < vblank_start {
             self.hdma_run_line();
         }
     }
@@ -358,6 +410,7 @@ impl Snes {
     pub fn peek_pc_bytes(&mut self, count: usize) -> Vec<u8> {
         let pc = self.cpu.pc;
         let pb = self.cpu.pb;
+        let scanlines = self.region_scanlines();
         let Snes {
             ppu,
             dma,
@@ -386,6 +439,7 @@ impl Snes {
             nmi: nmi_pending,
             irq: irq_pending,
             mclk_total: total_mclk,
+            scanlines_per_frame: scanlines,
         };
         (0..count)
             .map(|i| {
@@ -422,6 +476,10 @@ struct SnesBus<'a> {
     nmi: &'a mut bool,
     irq: &'a mut bool,
     mclk_total: &'a mut MCycles,
+    /// Total scanlines per frame for the current cart's region —
+    /// used by the H/V counter latch path (\$2137 / WRIO) to wrap
+    /// the V coordinate at the right boundary.
+    scanlines_per_frame: u16,
 }
 
 impl<'a> SnesBus<'a> {
@@ -568,7 +626,7 @@ impl<'a> Bus for SnesBus<'a> {
             // into OPHCT / OPVCT. The actual returned byte is open
             // bus (we hand back the PPU's open-bus latch).
             if off == luna_ppu::register::SLHV {
-                let (h, v) = current_hv(*self.mclk_total);
+                let (h, v) = current_hv(*self.mclk_total, self.scanlines_per_frame);
                 self.ppu.latch_counters(h, v);
             }
             return self.ppu.read(off);
@@ -667,7 +725,7 @@ impl<'a> Bus for SnesBus<'a> {
             if reg_off == 0x4201 {
                 let prev = self.cpu_regs.wrio;
                 if prev & 0x80 == 0 && value & 0x80 != 0 {
-                    let (h, v) = current_hv(*self.mclk_total);
+                    let (h, v) = current_hv(*self.mclk_total, self.scanlines_per_frame);
                     self.ppu.latch_counters(h, v);
                 }
             }
@@ -752,6 +810,28 @@ mod tests {
     }
 
     #[test]
+    fn scanline_helpers_pick_per_region_constants() {
+        assert_eq!(scanlines_per_frame(luna_cartridge::Region::Ntsc), 262);
+        assert_eq!(scanlines_per_frame(luna_cartridge::Region::Pal), 312);
+        assert_eq!(vblank_start_line(luna_cartridge::Region::Ntsc), 225);
+        assert_eq!(vblank_start_line(luna_cartridge::Region::Pal), 240);
+    }
+
+    #[test]
+    fn pal_cart_flips_stat78_region_bit_and_propagates_scanlines() {
+        // Patch the country byte in our demo ROM to PAL (0x02 = EU).
+        let mut rom = demo_lorom().rom;
+        rom[0x7FD9] = 0x02;
+        let cart = Cartridge::from_bytes(rom).unwrap();
+        assert_eq!(cart.header.region, luna_cartridge::Region::Pal);
+        let snes = Snes::from_cartridge(cart);
+        assert_eq!(snes.region, luna_cartridge::Region::Pal);
+        assert_eq!(snes.region_scanlines(), 312);
+        // STAT78 bit 4 should reflect the region.
+        assert_eq!(snes.ppu.stat78 & 0x10, 0x10);
+    }
+
+    #[test]
     fn reset_loads_pc_from_vector_via_lorom_mapper() {
         let cart = demo_lorom();
         let mut snes = Snes::from_cartridge(cart);
@@ -782,6 +862,7 @@ mod tests {
         // in WRAM[0x100] and be visible from bank 0x7E offset 0x100.
         let cart = demo_lorom();
         let mut snes = Snes::from_cartridge(cart);
+        let scanlines = snes.region_scanlines();
         let Snes {
             ppu,
             dma,
@@ -810,6 +891,7 @@ mod tests {
             nmi: nmi_pending,
             irq: irq_pending,
             mclk_total: total_mclk,
+            scanlines_per_frame: scanlines,
         };
         bus.write(make_addr(0x00, 0x0100), 0xAA);
         // Read back from the mirror in $00:
