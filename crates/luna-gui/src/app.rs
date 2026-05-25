@@ -72,6 +72,16 @@ pub(crate) struct LunaApp {
     /// Reusable scratch vector to drain APU samples without
     /// allocating every frame.
     audio_scratch: Vec<(i16, i16)>,
+
+    /// Keyboard → SNES button mapping. Defaults to the Mesen2 "Arrow
+    /// keys" preset; users can remap via Input → Configure controller.
+    key_bindings: crate::input::KeyBindings,
+    /// `true` while the Input → Configure controller modal is open.
+    show_input_modal: bool,
+    /// When the user clicks "Rebind" next to a SNES button, this is
+    /// set to the button being remapped — the next key press in the
+    /// modal becomes its binding.
+    pending_rebind: Option<crate::input::SnesButton>,
 }
 
 impl LunaApp {
@@ -93,6 +103,9 @@ impl LunaApp {
             pc_bytes: [0; 8],
             audio: crate::audio::AudioBackend::try_start(),
             audio_scratch: Vec::with_capacity(2048),
+            key_bindings: crate::input::KeyBindings::load_or_default(),
+            show_input_modal: false,
+            pending_rebind: None,
         }
     }
 
@@ -293,57 +306,13 @@ impl App for LunaApp {
         //
         // Push the current keyboard state into the SPC700-side
         // joypad latch every frame. The SNES driver actually sees
-        // this mask only at the next VBlank auto-read (16 ms or so).
+        // this mask only at the next VBlank auto-read (~16 ms).
         //
-        // Default layout (player 1):
-        //   D-pad   = arrow keys
-        //   B / A   = Z / X
-        //   Y / X   = A / S
-        //   Start   = Enter
-        //   Select  = Right-Shift
-        //   L / R   = Q / W
+        // Default layout matches Mesen2's "Arrow keys" preset
+        // (`UI/Config/KeyPresets.cs::ApplyArrowLayout`); users can
+        // remap via Input → Configure controller. See `crate::input`.
         if let Some(snes) = self.snes.as_mut() {
-            use egui::Key;
-            let mask = ctx.input(|i| {
-                let mut m: u16 = 0;
-                if i.key_down(Key::Z) {
-                    m |= 0x8000;
-                } // B
-                if i.key_down(Key::A) {
-                    m |= 0x4000;
-                } // Y
-                if i.modifiers.shift {
-                    m |= 0x2000;
-                } // Select
-                if i.key_down(Key::Enter) {
-                    m |= 0x1000;
-                } // Start
-                if i.key_down(Key::ArrowUp) {
-                    m |= 0x0800;
-                }
-                if i.key_down(Key::ArrowDown) {
-                    m |= 0x0400;
-                }
-                if i.key_down(Key::ArrowLeft) {
-                    m |= 0x0200;
-                }
-                if i.key_down(Key::ArrowRight) {
-                    m |= 0x0100;
-                }
-                if i.key_down(Key::X) {
-                    m |= 0x0080;
-                } // A
-                if i.key_down(Key::S) {
-                    m |= 0x0040;
-                } // X
-                if i.key_down(Key::Q) {
-                    m |= 0x0020;
-                } // L
-                if i.key_down(Key::W) {
-                    m |= 0x0010;
-                } // R
-                m
-            });
+            let mask = ctx.input(|i| self.key_bindings.mask_from_input(i));
             snes.set_joypad(0, mask);
         }
 
@@ -407,6 +376,18 @@ impl App for LunaApp {
                          clamped to $0F. Useful to see what's in VRAM \
                          when a game stays blanked during boot.",
                         );
+                });
+                ui.menu_button("Input", |ui| {
+                    if ui.button("Configure controller…").clicked() {
+                        self.show_input_modal = true;
+                        self.pending_rebind = None;
+                        ui.close();
+                    }
+                    if ui.button("Reset to Mesen2 default (arrow keys)").clicked() {
+                        self.key_bindings = crate::input::KeyBindings::default();
+                        let _ = self.key_bindings.save();
+                        ui.close();
+                    }
                 });
                 ui.menu_button("Help", |ui| {
                     ui.label("Luna SNES — 2026");
@@ -516,6 +497,8 @@ impl App for LunaApp {
         if let Some(path) = requested_path {
             self.load_rom(&path);
         }
+
+        self.draw_input_modal(ctx);
 
         // 60 fps repaint target.
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
@@ -669,6 +652,87 @@ fn stubs_panel(ui: &mut egui::Ui, snes: &Snes) {
             ui.label(mono(format!("${:02X}", snes.cpu_regs.hvbjoy)));
             ui.end_row();
         });
+}
+
+impl LunaApp {
+    /// Render the **Input → Configure controller** modal: a table
+    /// of the 12 SNES buttons with the currently-bound keyboard
+    /// key and a `Rebind` button. While a rebind is pending the
+    /// next non-modifier key press becomes the new binding. The
+    /// bindings are persisted to disk on every successful rebind.
+    fn draw_input_modal(&mut self, ctx: &Context) {
+        if !self.show_input_modal {
+            return;
+        }
+        // If a rebind is pending, capture the next key press as the
+        // new binding. We grab it from the raw input so it works
+        // even when the modal doesn't focus a widget.
+        if let Some(button) = self.pending_rebind {
+            let captured = ctx.input(|i| {
+                i.events.iter().find_map(|ev| match ev {
+                    egui::Event::Key {
+                        key, pressed: true, ..
+                    } => Some(*key),
+                    _ => None,
+                })
+            });
+            if let Some(key) = captured {
+                if key != egui::Key::Escape {
+                    self.key_bindings.set(button, key);
+                    let _ = self.key_bindings.save();
+                }
+                self.pending_rebind = None;
+            }
+        }
+
+        let mut open = true;
+        egui::Window::new("Configure controller (Player 1)")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.label(
+                    "Click Rebind, then press the new key (Escape to cancel). \
+                     Defaults match Mesen2's \"Arrow keys\" SNES preset.",
+                );
+                ui.add_space(4.0);
+                egui::Grid::new("input_grid")
+                    .num_columns(3)
+                    .spacing([16.0, 4.0])
+                    .show(ui, |ui| {
+                        for &button in crate::input::SnesButton::ALL.iter() {
+                            ui.label(button.label());
+                            let key = self.key_bindings.get(button);
+                            let label = if self.pending_rebind == Some(button) {
+                                "press a key…".to_owned()
+                            } else {
+                                key.name().to_owned()
+                            };
+                            ui.monospace(label);
+                            if ui.button("Rebind").clicked() {
+                                self.pending_rebind = Some(button);
+                            }
+                            ui.end_row();
+                        }
+                    });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Reset to defaults").clicked() {
+                        self.key_bindings = crate::input::KeyBindings::default();
+                        let _ = self.key_bindings.save();
+                        self.pending_rebind = None;
+                    }
+                    if ui.button("Close").clicked() {
+                        self.show_input_modal = false;
+                        self.pending_rebind = None;
+                    }
+                });
+            });
+        if !open {
+            self.show_input_modal = false;
+            self.pending_rebind = None;
+        }
+    }
 }
 
 fn flag_string(p: u8, e: bool) -> String {
