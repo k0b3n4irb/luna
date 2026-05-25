@@ -16,18 +16,31 @@ use crate::cpu::Spc700;
 use crate::flags::bit;
 
 impl Spc700 {
-    /// Execute one instruction.
-    pub fn step<B: SpcBus>(&mut self, bus: &mut B) {
+    /// Execute one instruction. Returns the canonical SPC bus-cycle
+    /// cost of that opcode (gap A1 — was previously a flat 4 in the
+    /// caller, which silently broke music tempo + DSP pitch by the
+    /// same factor).
+    ///
+    /// The returned value is the **base** cost — it does not include
+    /// the +2 penalty for branches/CBNE/DBNZ when taken. A future
+    /// pass can layer that on by having branch handlers stash a
+    /// "branch taken" flag the caller reads.
+    pub fn step<B: SpcBus>(&mut self, bus: &mut B) -> u8 {
         if self.stopped {
-            return;
+            // Stopped processor still consumes wall-clock time;
+            // return a conservative tick so the caller can advance
+            // its scheduler.
+            return 2;
         }
         if self.sleeping {
-            // Sleep until an interrupt wakes us — we'll wire that
-            // when timers/mailboxes are in.
-            return;
+            // Same idea for SLEEP — keep the scheduler moving so
+            // an eventual interrupt wakes us.
+            return 2;
         }
         let opcode = self.fetch_u8(bus);
+        let cycles = crate::cycles::SPC700_CYCLES[opcode as usize];
         self.execute(opcode, bus);
+        cycles
     }
 
     #[allow(clippy::too_many_lines)]
