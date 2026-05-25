@@ -88,6 +88,19 @@ enum Command {
         /// Optional audio dump path (32 kHz stereo WAV).
         #[arg(long)]
         audio_out: Option<PathBuf>,
+        /// Scripted joypad-1 input. Format: comma-separated
+        /// `frame:hex` checkpoints (frame number in decimal, hex
+        /// mask with optional `0x` prefix). The mask is latched at
+        /// the start of the named PPU frame and held until the next
+        /// checkpoint overrides it.
+        ///
+        /// Example: `--input "100:0x1000,110:0"` holds Start
+        /// (`$1000`) for frames 100..=109 then releases.
+        ///
+        /// JOY1 bit layout: B(15) Y(14) Sel(13) Start(12)
+        /// Up/Down/Left/Right(11..8) A(7) X(6) L(5) R(4).
+        #[arg(long)]
+        input: Option<String>,
     },
 }
 
@@ -116,12 +129,14 @@ fn main() -> ExitCode {
             out,
             screenshot,
             audio_out,
+            input,
         } => run_state(
             &rom,
             steps,
             &out,
             screenshot.as_deref(),
             audio_out.as_deref(),
+            input.as_deref(),
         ),
     }
 }
@@ -150,6 +165,36 @@ fn serve_mcp() -> ExitCode {
     }
 }
 
+/// Parse a `--input` script: comma-separated `frame:hex` entries.
+/// Returns the checkpoints sorted by ascending frame. The frame
+/// number is decimal; the hex mask accepts an optional `0x` prefix
+/// and is read as a 16-bit value.
+fn parse_input_script(script: &str) -> Result<Vec<(u64, u16)>, String> {
+    let mut out: Vec<(u64, u16)> = Vec::new();
+    for entry in script.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let (frame_str, mask_str) = entry
+            .split_once(':')
+            .ok_or_else(|| format!("missing ':' in entry `{entry}`"))?;
+        let frame: u64 = frame_str
+            .trim()
+            .parse()
+            .map_err(|e| format!("bad frame `{frame_str}`: {e}"))?;
+        let mask_str = mask_str
+            .trim()
+            .trim_start_matches("0x")
+            .trim_start_matches("0X");
+        let mask: u16 = u16::from_str_radix(mask_str, 16)
+            .map_err(|e| format!("bad hex mask `{mask_str}`: {e}"))?;
+        out.push((frame, mask));
+    }
+    out.sort_by_key(|(f, _)| *f);
+    Ok(out)
+}
+
 /// `luna state` — exercise the public `luna-api` surface end-to-end.
 fn run_state(
     rom: &std::path::Path,
@@ -157,11 +202,42 @@ fn run_state(
     out: &std::path::Path,
     screenshot: Option<&std::path::Path>,
     audio_out: Option<&std::path::Path>,
+    input_script: Option<&str>,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
     if let Err(e) = em.load_rom(rom) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
+    }
+    // Parse `frame:hex` checkpoints into a sorted vector. We apply
+    // them by stepping `step_until_frame` between checkpoints — a
+    // ~30k-instruction budget per frame is enough for any real ROM,
+    // including SA-1 carts.
+    let checkpoints: Vec<(u64, u16)> = match input_script {
+        None => Vec::new(),
+        Some(script) => match parse_input_script(script) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("error: --input: {e}");
+                return ExitCode::from(1);
+            }
+        },
+    };
+    if !checkpoints.is_empty() {
+        const PER_FRAME_BUDGET: u64 = 60_000;
+        for (frame, mask) in &checkpoints {
+            // Step until we reach `frame` (no-op if we already crossed it).
+            while em.state().scheduler.frame_count < *frame {
+                let executed = em.step_until_frame(PER_FRAME_BUDGET).unwrap_or(0);
+                if executed == 0 {
+                    break;
+                }
+            }
+            if let Err(e) = em.set_joypad(0, *mask) {
+                eprintln!("error: set_joypad: {e}");
+                return ExitCode::from(1);
+            }
+        }
     }
     match em.step(steps) {
         Ok(_) => {}

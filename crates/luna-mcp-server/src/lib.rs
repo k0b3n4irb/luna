@@ -67,6 +67,19 @@ pub struct StepParams {
     pub count: u64,
 }
 
+/// `set_joypad` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SetJoypadParams {
+    /// Controller index: `0` = Player 1 (`$4218/$4219`),
+    /// `1` = Player 2 (`$421A/$421B`).
+    pub port: u8,
+    /// 16-bit JOY1 bitmask. Bit layout (high → low):
+    /// B, Y, Select, Start, Up, Down, Left, Right, A, X, L, R,
+    /// 0, 0, 0, 0. So `0x1000` = Start, `0x8000` = B,
+    /// `0xF000` = Start + Select + Y + B, etc.
+    pub mask: u16,
+}
+
 /// `step_until_frame` parameters.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct StepUntilFrameParams {
@@ -200,6 +213,25 @@ impl LunaServer {
     async fn reset(&self) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
         let mut em = self.emulator.lock().await;
         em.reset().map_err(api_err_to_mcp)?;
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Set the joypad button bitmask for controller `port` (0 = P1, \
+                                1 = P2). Bit layout matches the SNES JOY1L/JOY1H pair: \
+                                B(15) Y(14) Select(13) Start(12) Up(11) Down(10) Left(9) \
+                                Right(8) A(7) X(6) L(5) R(4) + 4-bit signature. The press \
+                                is latched on the next VBlank auto-read (one frame later) \
+                                — hold the mask for at least 2 frames before reading back \
+                                game state, then write 0 to release."
+    )]
+    async fn set_joypad(
+        &self,
+        Parameters(params): Parameters<SetJoypadParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        let mut em = self.emulator.lock().await;
+        em.set_joypad(params.port, params.mask)
+            .map_err(api_err_to_mcp)?;
         Ok(rmcp::Json(EmptyOk { ok: true }))
     }
 
