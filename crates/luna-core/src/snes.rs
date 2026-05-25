@@ -99,6 +99,41 @@ pub struct Snes {
     pub joypad1_shift: u16,
     /// 16-bit shift register for controller 2 manual-mode reads.
     pub joypad2_shift: u16,
+
+    /// Optional CPU↔APU mailbox traffic log (`$2140-$2143`). When
+    /// `Some`, every CPU read/write of those four ports is appended as
+    /// a [`MailboxEvent`] for later analysis (e.g. diagnosing the
+    /// SMW music-driver handshake). Enable via [`Snes::enable_mailbox_log`].
+    pub mailbox_log: Option<Vec<MailboxEvent>>,
+}
+
+/// One CPU↔APU mailbox transfer, captured at `$2140-$2143`. luna-core
+/// keeps this plain (no serde/schemars derives) — downstream crates
+/// that want JSON output can convert/serialize themselves. Frame count
+/// is derivable from `mclk_total / (MCYCLES_PER_SCANLINE * scanlines)`.
+#[derive(Debug, Clone, Copy)]
+pub struct MailboxEvent {
+    /// Master cycles since reset at the time of the access.
+    pub mclk_total: u64,
+    /// 24-bit CPU PC (`pb << 16 | pc`) of the instruction executing
+    /// this access. Snapshot at the start of the instruction step.
+    pub pc_full: u32,
+    /// `Read` (CPU reading from the APU) or `Write` (CPU writing to
+    /// the APU).
+    pub kind: MailboxEventKind,
+    /// Mailbox port number `0..=3` (i.e. `$2140` + `port`).
+    pub port: u8,
+    /// The byte transferred.
+    pub value: u8,
+}
+
+/// Direction of an APU mailbox transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MailboxEventKind {
+    /// CPU read from `$2140-$2143`.
+    Read,
+    /// CPU write to `$2140-$2143`.
+    Write,
 }
 
 /// Master cycles per PPU scanline on NTSC (1364 mclk = 4 dots × 341).
@@ -211,6 +246,28 @@ impl Snes {
             joypad_strobe: false,
             joypad1_shift: 0,
             joypad2_shift: 0,
+            mailbox_log: None,
+        }
+    }
+
+    /// Enable APU mailbox event logging. From this point every CPU
+    /// read/write of `$2140-$2143` is appended to the log. Use
+    /// [`Snes::take_mailbox_log`] at the end of a run to retrieve and
+    /// reset the captured events. Cheap when disabled (the
+    /// `Option::is_some` check in the bus hot path is the only cost).
+    pub fn enable_mailbox_log(&mut self) {
+        if self.mailbox_log.is_none() {
+            self.mailbox_log = Some(Vec::new());
+        }
+    }
+
+    /// Take ownership of the accumulated mailbox events, resetting the
+    /// buffer to empty (but keeping logging enabled). Returns an empty
+    /// `Vec` if logging is disabled.
+    pub fn take_mailbox_log(&mut self) -> Vec<MailboxEvent> {
+        match self.mailbox_log.as_mut() {
+            Some(log) => std::mem::take(log),
+            None => Vec::new(),
         }
     }
 
@@ -227,6 +284,7 @@ impl Snes {
         let scanlines = self.region_scanlines();
         let ppu_line_snapshot = self.ppu_line;
         let vblank_start_snapshot = vblank_start_line(self.region);
+        let cpu_pc_snapshot = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
         let Snes {
             cpu,
             ppu,
@@ -245,6 +303,7 @@ impl Snes {
             joypad_strobe,
             joypad1_shift,
             joypad2_shift,
+            mailbox_log,
             ..
         } = self;
         let mut bus = SnesBus {
@@ -263,6 +322,8 @@ impl Snes {
             scanlines_per_frame: scanlines,
             ppu_line: ppu_line_snapshot,
             vblank_start_line: vblank_start_snapshot,
+            cpu_pc_full: cpu_pc_snapshot,
+            mailbox_log,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -278,6 +339,7 @@ impl Snes {
         let scanlines = self.region_scanlines();
         let ppu_line_snapshot = self.ppu_line;
         let vblank_start_snapshot = vblank_start_line(self.region);
+        let cpu_pc_snapshot = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
         let Snes {
             cpu,
             ppu,
@@ -296,6 +358,7 @@ impl Snes {
             joypad_strobe,
             joypad1_shift,
             joypad2_shift,
+            mailbox_log,
             ..
         } = self;
         let mut bus = SnesBus {
@@ -314,6 +377,8 @@ impl Snes {
             scanlines_per_frame: scanlines,
             ppu_line: ppu_line_snapshot,
             vblank_start_line: vblank_start_snapshot,
+            cpu_pc_full: cpu_pc_snapshot,
+            mailbox_log,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -507,6 +572,7 @@ impl Snes {
         let scanlines = self.region_scanlines();
         let ppu_line_snapshot = self.ppu_line;
         let vblank_start_snapshot = vblank_start_line(self.region);
+        let cpu_pc_snapshot = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
         let Snes {
             ppu,
             dma,
@@ -524,6 +590,7 @@ impl Snes {
             joypad_strobe,
             joypad1_shift,
             joypad2_shift,
+            mailbox_log,
             ..
         } = self;
         let mut bus = SnesBus {
@@ -542,6 +609,8 @@ impl Snes {
             scanlines_per_frame: scanlines,
             ppu_line: ppu_line_snapshot,
             vblank_start_line: vblank_start_snapshot,
+            cpu_pc_full: cpu_pc_snapshot,
+            mailbox_log,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -596,6 +665,14 @@ struct SnesBus<'a> {
     ppu_line: u16,
     /// First vblank scanline for the current region (225 NTSC / 240 PAL).
     vblank_start_line: u16,
+    /// CPU PC snapshot at the start of the instruction step that owns
+    /// this bus borrow. Used by the APU mailbox tracer (and any future
+    /// debug hook) to attribute reads/writes to the calling
+    /// instruction.
+    cpu_pc_full: u32,
+    /// Mailbox traffic log for `$2140-$2143`. `None` = disabled (the
+    /// common path); `Some` = capturing events. See [`Snes::enable_mailbox_log`].
+    mailbox_log: &'a mut Option<Vec<MailboxEvent>>,
 }
 
 impl<'a> SnesBus<'a> {
@@ -779,11 +856,21 @@ impl<'a> Bus for SnesBus<'a> {
             // so its driver actually loops). Fall back to the
             // heuristic stub only if the SPC has stopped on an
             // unimplemented opcode.
-            return if self.apu_panicked {
+            let value = if self.apu_panicked {
                 self.apu_stub_fallback.read(port)
             } else {
                 self.apu_real.cpu_read_port(port)
             };
+            if let Some(log) = self.mailbox_log.as_mut() {
+                log.push(MailboxEvent {
+                    mclk_total: *self.mclk_total,
+                    pc_full: self.cpu_pc_full,
+                    kind: MailboxEventKind::Read,
+                    port: port as u8,
+                    value,
+                });
+            }
+            return value;
         }
         if let Some(off) = Self::wram_port_offset(addr) {
             // $2180 WMDATA — read byte at the 17-bit counter, advance.
@@ -905,6 +992,15 @@ impl<'a> Bus for SnesBus<'a> {
             // is only consulted when the real APU is dead.
             self.apu_real.cpu_write_port(port, value);
             self.apu_stub_fallback.write(port, value);
+            if let Some(log) = self.mailbox_log.as_mut() {
+                log.push(MailboxEvent {
+                    mclk_total: *self.mclk_total,
+                    pc_full: self.cpu_pc_full,
+                    kind: MailboxEventKind::Write,
+                    port: port as u8,
+                    value,
+                });
+            }
             return;
         }
         if let Some(off) = Self::wram_port_offset(addr) {
@@ -1135,6 +1231,7 @@ mod tests {
         let scanlines = snes.region_scanlines();
         let ppu_line_snapshot = snes.ppu_line;
         let vblank_start_snapshot = vblank_start_line(snes.region);
+        let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
         let Snes {
             ppu,
             dma,
@@ -1152,6 +1249,7 @@ mod tests {
             joypad_strobe,
             joypad1_shift,
             joypad2_shift,
+            mailbox_log,
             ..
         } = &mut snes;
         let mut bus = SnesBus {
@@ -1170,6 +1268,8 @@ mod tests {
             scanlines_per_frame: scanlines,
             ppu_line: ppu_line_snapshot,
             vblank_start_line: vblank_start_snapshot,
+            cpu_pc_full: cpu_pc_snapshot,
+            mailbox_log,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -1192,6 +1292,7 @@ mod tests {
         let scanlines = snes.region_scanlines();
         let ppu_line_snapshot = snes.ppu_line;
         let vblank_start_snapshot = vblank_start_line(snes.region);
+        let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
         let Snes {
             cpu: _,
             ppu,
@@ -1210,6 +1311,7 @@ mod tests {
             joypad_strobe,
             joypad1_shift,
             joypad2_shift,
+            mailbox_log,
             ..
         } = &mut snes;
         let mut bus = SnesBus {
@@ -1228,6 +1330,8 @@ mod tests {
             scanlines_per_frame: scanlines,
             ppu_line: ppu_line_snapshot,
             vblank_start_line: vblank_start_snapshot,
+            cpu_pc_full: cpu_pc_snapshot,
+            mailbox_log,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -1257,6 +1361,7 @@ mod tests {
         let scanlines = snes.region_scanlines();
         let ppu_line_snapshot = snes.ppu_line;
         let vblank_start_snapshot = vblank_start_line(snes.region);
+        let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
         let Snes {
             cpu: _,
             ppu,
@@ -1275,6 +1380,7 @@ mod tests {
             joypad_strobe,
             joypad1_shift,
             joypad2_shift,
+            mailbox_log,
             ..
         } = &mut snes;
         let mut bus = SnesBus {
@@ -1293,6 +1399,8 @@ mod tests {
             scanlines_per_frame: scanlines,
             ppu_line: ppu_line_snapshot,
             vblank_start_line: vblank_start_snapshot,
+            cpu_pc_full: cpu_pc_snapshot,
+            mailbox_log,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -1525,6 +1633,7 @@ mod tests {
         let scanlines = snes.region_scanlines();
         let ppu_line_snapshot = snes.ppu_line;
         let vblank_start_snapshot = vblank_start_line(snes.region);
+        let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
         let Snes {
             ppu,
             dma,
@@ -1542,6 +1651,7 @@ mod tests {
             joypad_strobe,
             joypad1_shift,
             joypad2_shift,
+            mailbox_log,
             ..
         } = &mut snes;
         let mut bus = SnesBus {
@@ -1560,6 +1670,8 @@ mod tests {
             scanlines_per_frame: scanlines,
             ppu_line: ppu_line_snapshot,
             vblank_start_line: vblank_start_snapshot,
+            cpu_pc_full: cpu_pc_snapshot,
+            mailbox_log,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
