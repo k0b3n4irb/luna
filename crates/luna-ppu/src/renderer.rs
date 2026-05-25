@@ -458,10 +458,36 @@ pub fn render_frame_bg1_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
 #[must_use]
 pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
     let mut buf = vec![[0u8; 3]; FRAME_W * FRAME_H];
+    for y in 0..FRAME_H as u16 {
+        let off = y as usize * FRAME_W;
+        render_scanline_into(ppu, y, opts, &mut buf[off..off + FRAME_W]);
+    }
+    buf
+}
 
-    // INIDISP bit 7: forced blank → all black, ignoring brightness.
+/// Render one visible scanline `y` into a 256-pixel slice.
+///
+/// This is the canonical per-line entry point used by the scheduler's
+/// per-scanline render hook. `render_frame_with` is a thin wrapper that
+/// calls it in a loop; both share identical pixel semantics. The window
+/// mask is recomputed per call — required for correctness once mid-frame
+/// window-register writes are honoured (Phase 1+ of gap G6).
+///
+/// If forced blank is active (and not bypassed), the slice is filled
+/// with `[0, 0, 0]` and the function returns immediately.
+pub fn render_scanline_into(ppu: &Ppu, y: u16, opts: RenderOptions, out: &mut [[u8; 3]]) {
+    debug_assert_eq!(
+        out.len(),
+        FRAME_W,
+        "render_scanline_into requires a slice of FRAME_W ({FRAME_W}) pixels"
+    );
+
+    // INIDISP bit 7: forced blank → scanline is all black.
     if ppu.inidisp & 0x80 != 0 && !opts.bypass_forced_blank {
-        return buf;
+        for px in out.iter_mut() {
+            *px = [0, 0, 0];
+        }
+        return;
     }
     let brightness = if opts.bypass_forced_blank {
         0x0F
@@ -469,8 +495,6 @@ pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
         ppu.inidisp & 0x0F
     };
 
-    // Precompute the priority table for this BGMODE. The 4th bit of
-    // BGMODE flips BG3's slots to the top in Mode 1 — handled inside.
     let table = priority_table(ppu.bgmode);
     let backdrop_bgr5 = cgram_to_bgr5(ppu, 0);
 
@@ -479,137 +503,123 @@ pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
     // fallback per ares dac.cpp:124-130 / Mesen2 SnesPpu.cpp:1354-1364).
     let coldata_bgr5 = (ppu.coldata_r, ppu.coldata_g, ppu.coldata_b);
 
-    // Pre-compute the per-layer window masks once per frame. Each
-    // [bool; 256] tells us whether the layer is BLANKED at that x
-    // by the layer's effective window region.
+    // Per-layer window masks for THIS scanline. Once mid-frame window-
+    // register writes are honoured, this must be per-line not per-frame.
     let masks = compute_window_masks(ppu);
 
-    // Mode 7 uses a dedicated affine renderer for BG1 instead of
-    // the planar tilemap path. BG2-4 are unused in Mode 7.
+    // Mode 7 uses a dedicated affine renderer for BG1 instead of the
+    // planar tilemap path. BG2-4 are unused in Mode 7.
     let is_mode7 = ppu.bgmode & 0x07 == 0x07;
 
-    for y in 0..FRAME_H as u16 {
-        // Indexed scanlines for the 4 BG layers (transparent = `None`)
-        // plus sprites carrying their 0-3 priority value. The same
-        // per-layer pixel data drives both the main and sub screens —
-        // only the per-screen TM/TS + TMW/TSW gating differs.
-        let bgs: [IndexedScanline; 4] = if is_mode7 {
-            [
-                render_mode7_scanline_indexed(ppu, y, opts),
-                [None; 256],
-                [None; 256],
-                [None; 256],
-            ]
-        } else {
-            [
-                render_bg_scanline_indexed_with(ppu, 0, y, opts),
-                render_bg_scanline_indexed_with(ppu, 1, y, opts),
-                render_bg_scanline_indexed_with(ppu, 2, y, opts),
-                render_bg_scanline_indexed_with(ppu, 3, y, opts),
-            ]
+    // Indexed scanlines for the 4 BG layers (transparent = `None`) plus
+    // sprites carrying their 0-3 priority. Same per-layer pixel data
+    // drives both screens — only TM/TS + TMW/TSW gating differs.
+    let bgs: [IndexedScanline; 4] = if is_mode7 {
+        [
+            render_mode7_scanline_indexed(ppu, y, opts),
+            [None; 256],
+            [None; 256],
+            [None; 256],
+        ]
+    } else {
+        [
+            render_bg_scanline_indexed_with(ppu, 0, y, opts),
+            render_bg_scanline_indexed_with(ppu, 1, y, opts),
+            render_bg_scanline_indexed_with(ppu, 2, y, opts),
+            render_bg_scanline_indexed_with(ppu, 3, y, opts),
+        ]
+    };
+    let sprites = render_sprites_scanline_indexed_with(ppu, y, opts);
+
+    for (x, out_pixel) in out.iter_mut().enumerate() {
+        // Per-screen layer enable. TM/TMW gate the main screen, TS/TSW
+        // gate the sub screen. If TM.layer = 1 AND TMW.layer = 1 the
+        // layer is hidden inside its window; if TM.layer = 0 the layer
+        // never appears on main. (Same for TS/TSW.)
+        let screen_layer_enabled = |layer_idx: usize, en_mask: u8, win_mask: u8| -> bool {
+            let layer_bit = 1u8 << layer_idx;
+            if en_mask & layer_bit == 0 {
+                return false;
+            }
+            if win_mask & layer_bit != 0 && masks.combined[layer_idx][x] {
+                return false;
+            }
+            true
         };
-        let sprites = render_sprites_scanline_indexed_with(ppu, y, opts);
 
-        let off = y as usize * FRAME_W;
-        for x in 0..FRAME_W {
-            // Per-screen layer enable. TM/TMW gate the main screen,
-            // TS/TSW gate the sub screen. If TM.layer = 1 AND TMW.layer
-            // = 1 the layer is hidden inside its window; if TM.layer
-            // = 0 the layer never appears on main. (Same for TS/TSW.)
-            let screen_layer_enabled = |layer_idx: usize, en_mask: u8, win_mask: u8| -> bool {
-                let layer_bit = 1u8 << layer_idx;
-                if en_mask & layer_bit == 0 {
-                    return false;
-                }
-                if win_mask & layer_bit != 0 && masks.combined[layer_idx][x] {
-                    return false;
-                }
-                true
-            };
+        let main = pick_pixel_winner(ppu, table, &bgs, &sprites, x, backdrop_bgr5, |li| {
+            screen_layer_enabled(li, ppu.tm, ppu.tmw)
+        });
+        let sub = pick_pixel_winner(ppu, table, &bgs, &sprites, x, backdrop_bgr5, |li| {
+            screen_layer_enabled(li, ppu.ts, ppu.tsw)
+        });
 
-            // Pick the main-screen winner using TM/TMW.
-            let main = pick_pixel_winner(ppu, table, &bgs, &sprites, x, backdrop_bgr5, |li| {
-                screen_layer_enabled(li, ppu.tm, ppu.tmw)
-            });
+        // Colour math gates:
+        //   * CGADSUB bits 0..4 = per-layer enable; bit 5 = backdrop.
+        //   * CGWSEL bits 5:4 = per-region enable using the colour-math
+        //     window mask (layer index 5).
+        //   * OBJ math also requires the winner palette ≥ 4 (CGRAM index
+        //     ≥ 192) — see ares dac.cpp:103-107.
+        let in_math_window = masks.combined[5][x];
+        let math_globally_enabled = match (ppu.cgwsel >> 4) & 0x03 {
+            0 => true,
+            1 => in_math_window,
+            2 => !in_math_window,
+            _ => false,
+        };
+        let layer_enabled_for_math = if math_globally_enabled {
+            match main.layer {
+                0..=3 => ppu.cgadsub & (1 << main.layer) != 0,
+                4 => (ppu.cgadsub & 0x10) != 0 && main.cgram_idx >= 192,
+                _ => ppu.cgadsub & 0x20 != 0, // backdrop
+            }
+        } else {
+            false
+        };
 
-            // Pick the sub-screen winner using TS/TSW. Same priority
-            // table as the main screen — both refs walk the same
-            // BG/OBJ slot order (ares dac.cpp:43-80 / Mesen2 RenderTilemap
-            // with drawSub=true).
-            let sub = pick_pixel_winner(ppu, table, &bgs, &sprites, x, backdrop_bgr5, |li| {
-                screen_layer_enabled(li, ppu.ts, ppu.tsw)
-            });
-
-            // Colour math gates:
-            //   * CGADSUB bits 0..4 = per-layer enable; bit 5 = backdrop.
-            //   * CGWSEL bits 5:4 = per-region enable using the colour-
-            //     math window mask (layer index 5).
-            //   * OBJ math also requires the winner palette ≥ 4 (i.e.
-            //     CGRAM index ≥ 192) — see ares dac.cpp:103-107.
-            let in_math_window = masks.combined[5][x];
-            let math_globally_enabled = match (ppu.cgwsel >> 4) & 0x03 {
-                0 => true,
-                1 => in_math_window,
-                2 => !in_math_window,
-                _ => false,
-            };
-            let layer_enabled_for_math = if math_globally_enabled {
-                match main.layer {
-                    0..=3 => ppu.cgadsub & (1 << main.layer) != 0,
-                    4 => (ppu.cgadsub & 0x10) != 0 && main.cgram_idx >= 192,
-                    _ => ppu.cgadsub & 0x20 != 0, // backdrop
-                }
+        // CGWSEL bit 1 selects the math operand source:
+        //   0 → fixed COLDATA always.
+        //   1 → sub-screen winner pixel; if the sub had no real layer
+        //       winner (just the sub backdrop), fall back to COLDATA AND
+        //       disable halve for this dot. ares dac.cpp:124-130 / Mesen2
+        //       SnesPpu.cpp:1354-1364.
+        let subtract = ppu.cgadsub & 0x80 != 0;
+        let mut half = ppu.cgadsub & 0x40 != 0;
+        let math_operand = if ppu.cgwsel & 0x02 != 0 {
+            if sub.real_layer {
+                sub.bgr5
             } else {
-                false
-            };
-
-            // CGWSEL bit 1 selects the math operand source:
-            //   0 → fixed COLDATA always.
-            //   1 → sub-screen winner pixel; if the sub had no real
-            //       layer winner (just the sub backdrop), fall back to
-            //       COLDATA AND disable halve for this dot. ares
-            //       dac.cpp:124-130 / Mesen2 SnesPpu.cpp:1354-1364.
-            let subtract = ppu.cgadsub & 0x80 != 0;
-            let mut half = ppu.cgadsub & 0x40 != 0;
-            let math_operand = if ppu.cgwsel & 0x02 != 0 {
-                if sub.real_layer {
-                    sub.bgr5
-                } else {
-                    half = false;
-                    coldata_bgr5
-                }
-            } else {
+                half = false;
                 coldata_bgr5
-            };
+            }
+        } else {
+            coldata_bgr5
+        };
 
-            let rgb5 = if layer_enabled_for_math {
-                color_math(main.bgr5, math_operand, subtract, half)
-            } else {
-                main.bgr5
-            };
-            // CGWSEL bits 7:6 — "force main screen black" region.
-            // Per ares (window.cpp:36-38 + dac.cpp:120-122) and Mesen2
-            // (SnesPpuTypes.h:13-19 + SnesPpu.cpp:1307-1326), value 1
-            // = OutsideWindow (force black outside the math window),
-            // value 2 = InsideWindow (force black inside):
-            //   00 = never; 01 = outside; 10 = inside; 11 = always.
-            let force_black = match (ppu.cgwsel >> 6) & 0x03 {
-                0 => false,
-                1 => !in_math_window,
-                2 => in_math_window,
-                _ => true,
-            };
-            let final_bgr5 = if force_black { (0, 0, 0) } else { rgb5 };
+        let rgb5 = if layer_enabled_for_math {
+            color_math(main.bgr5, math_operand, subtract, half)
+        } else {
+            main.bgr5
+        };
+        // CGWSEL bits 7:6 — force-main-black region. Per ares
+        // (window.cpp:36-38 + dac.cpp:120-122) and Mesen2
+        // (SnesPpuTypes.h:13-19 + SnesPpu.cpp:1307-1326), value 1 =
+        // OutsideWindow, value 2 = InsideWindow.
+        let force_black = match (ppu.cgwsel >> 6) & 0x03 {
+            0 => false,
+            1 => !in_math_window,
+            2 => in_math_window,
+            _ => true,
+        };
+        let final_bgr5 = if force_black { (0, 0, 0) } else { rgb5 };
 
-            let rgb888 = [
-                scale_5_to_8(final_bgr5.0),
-                scale_5_to_8(final_bgr5.1),
-                scale_5_to_8(final_bgr5.2),
-            ];
-            buf[off + x] = apply_brightness(rgb888, brightness);
-        }
+        let rgb888 = [
+            scale_5_to_8(final_bgr5.0),
+            scale_5_to_8(final_bgr5.1),
+            scale_5_to_8(final_bgr5.2),
+        ];
+        *out_pixel = apply_brightness(rgb888, brightness);
     }
-    buf
 }
 
 // =============================================================================

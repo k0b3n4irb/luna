@@ -6,6 +6,7 @@
 //! is responsible for the bank/region routing.
 
 use crate::memory::{Cgram, Oam, VmainSettings, Vram};
+use crate::renderer::{FRAME_H, FRAME_W, RenderOptions, render_scanline_into};
 
 /// PPU register offsets (relative to `$2100`).
 pub mod register {
@@ -316,6 +317,17 @@ pub struct Ppu {
     /// Used by the GUI's Stubs panel to detect "the game never touched
     /// INIDISP again after init" (= NMI handler not running).
     pub inidisp_write_count: u64,
+
+    /// Persistent framebuffer, written one scanline at a time by the
+    /// scheduler via [`Ppu::render_current_scanline`]. Consumers
+    /// (`luna-api::Emulator::render_frame_png`, the GUI, etc.) read
+    /// this directly for zero-cost frame access — they no longer need
+    /// to re-render the whole frame on every request.
+    ///
+    /// Tests that hand-build a `Ppu` and call
+    /// [`render_frame_with`](crate::render_frame_with) bypass this
+    /// buffer entirely and get a freshly-computed `Vec`.
+    pub framebuffer: Vec<[u8; 3]>,
 }
 
 impl Default for Ppu {
@@ -383,7 +395,35 @@ impl Ppu {
             bg_scroll_latch: 0,
             open_bus: 0,
             inidisp_write_count: 0,
+            framebuffer: vec![[0u8; 3]; FRAME_W * FRAME_H],
         }
+    }
+
+    /// Render the current visible scanline `y` into the persistent
+    /// framebuffer, using the live PPU register state. Called by the
+    /// scheduler at the end of every visible scanline (gap G6 Phase 1).
+    ///
+    /// Out-of-range `y` (≥ `FRAME_H`) is a no-op.
+    pub fn render_current_scanline(&mut self, y: u16, opts: RenderOptions) {
+        let yi = usize::from(y);
+        if yi >= FRAME_H {
+            return;
+        }
+        // Render into a stack-allocated scratch row first, then copy
+        // into the persistent framebuffer. Avoids the borrow-checker
+        // conflict between `&self` (read by renderer) and `&mut
+        // self.framebuffer` (write target). 256 × 3 = 768 bytes.
+        let mut row = [[0u8; 3]; FRAME_W];
+        render_scanline_into(self, y, opts, &mut row);
+        let off = yi * FRAME_W;
+        self.framebuffer[off..off + FRAME_W].copy_from_slice(&row);
+    }
+
+    /// Borrow the current persistent framebuffer (256 × 224 BGR888
+    /// pixels). Cheap accessor — no rendering happens here.
+    #[must_use]
+    pub fn framebuffer(&self) -> &[[u8; 3]] {
+        &self.framebuffer
     }
 
     /// Read a PPU register. `offset` is the byte offset from `$2100`
@@ -770,5 +810,158 @@ mod tests {
         // First reads return the pre-fetched bytes.
         assert_eq!(p.read(register::VMDATALREAD), 0x42);
         assert_eq!(p.read(register::VMDATAHREAD), 0x84);
+    }
+
+    /// Stand up a PPU rendering a solid-red BG1 tile across the
+    /// whole screen — used by several G6 per-scanline tests.
+    fn ppu_with_solid_bg1_tile() -> Ppu {
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F); // unblanked, full brightness
+        p.write(register::BGMODE, 0x01); // mode 1
+        p.write(register::TM, 0x01); // BG1 on main
+        p.write(0x07, 0x00); // BG1SC: tilemap at word $0000
+        p.write(0x0B, 0x01); // BG12NBA: BG1 char base = word $1000
+        // Tilemap entry 0 at byte $0000: tile 0, palette 0.
+        p.vram.poke(0x0000, 0x00);
+        p.vram.poke(0x0001, 0x00);
+        // Tile 0 at VRAM byte $2000: each row = all colour 1 (2bpp).
+        //   pix:  1 1 1 1 1 1 1 1
+        //   bit0: 1 1 1 1 1 1 1 1 → 0xFF
+        //   bit1: 0 0 0 0 0 0 0 0 → 0x00
+        for row in 0..8 {
+            p.vram.poke(0x2000 + row * 2, 0xFF);
+            p.vram.poke(0x2001 + row * 2, 0x00);
+        }
+        // CGRAM[1] = red ($001F).
+        p.cgram.poke(2, 0x1F);
+        p.cgram.poke(3, 0x00);
+        // CGRAM[0] = backdrop = black ($0000), default.
+        p
+    }
+
+    #[test]
+    fn per_scanline_picks_up_mid_frame_tm_change() {
+        // Render lines 0..100 with TM=BG1 on, then disable BG1, then
+        // render 100..224. The persistent framebuffer should show BG1
+        // red on the top, backdrop black on the bottom — proving that
+        // a TM change between scanlines is honoured.
+        let mut p = ppu_with_solid_bg1_tile();
+        for y in 0..100u16 {
+            p.render_current_scanline(y, RenderOptions::default());
+        }
+        p.write(register::TM, 0x00); // BG1 off
+        for y in 100..crate::FRAME_H as u16 {
+            p.render_current_scanline(y, RenderOptions::default());
+        }
+        // Top half: BG1 red (non-black).
+        assert_ne!(p.framebuffer()[0], [0, 0, 0], "line 0 should show BG1");
+        assert_ne!(
+            p.framebuffer()[99 * crate::FRAME_W],
+            [0, 0, 0],
+            "line 99 should still show BG1"
+        );
+        // Bottom half: backdrop black.
+        assert_eq!(
+            p.framebuffer()[100 * crate::FRAME_W],
+            [0, 0, 0],
+            "line 100 should be backdrop after TM=0"
+        );
+        assert_eq!(
+            p.framebuffer()[(crate::FRAME_H - 1) * crate::FRAME_W],
+            [0, 0, 0],
+            "last line should be backdrop"
+        );
+    }
+
+    #[test]
+    fn per_scanline_cgwsel_change_splits_color_math() {
+        // With BG1 on both main and sub, CGADSUB add-no-halve and
+        // COLDATA = max blue: cgwsel bit 1 = 0 adds blue COLDATA;
+        // cgwsel bit 1 = 1 uses the sub winner (BG1 red) so blue
+        // stays 0. Toggle at line 100 and verify the split.
+        let mut p = ppu_with_solid_bg1_tile();
+        p.write(register::TS, 0x01); // BG1 on sub too
+        p.write(register::CGADSUB, 0x01); // BG1 math add, no halve
+        p.write(register::COLDATA, 0x9F); // B = max
+        p.write(register::CGWSEL, 0x00); // bit 1 = 0 → operand = COLDATA blue
+        for y in 0..100u16 {
+            p.render_current_scanline(y, RenderOptions::default());
+        }
+        p.write(register::CGWSEL, 0x02); // bit 1 = 1 → operand = sub pixel (red)
+        for y in 100..crate::FRAME_H as u16 {
+            p.render_current_scanline(y, RenderOptions::default());
+        }
+        // Line 0..99: blue channel non-zero (COLDATA blue added).
+        // Line 100..: blue channel zero (operand was red, not blue).
+        let top_blue = p.framebuffer()[0][2];
+        let bottom_blue = p.framebuffer()[150 * crate::FRAME_W][2];
+        assert!(
+            top_blue > 0,
+            "top half should have COLDATA blue, got {top_blue}"
+        );
+        assert_eq!(
+            bottom_blue, 0,
+            "bottom half should have zero blue (sub pixel was red)"
+        );
+    }
+
+    #[test]
+    fn framebuffer_persists_force_blank_lines_as_black() {
+        // Render line 50 with display on, then force-blank, then
+        // render line 51. Line 50 should be non-black, line 51 black.
+        let mut p = ppu_with_solid_bg1_tile();
+        p.render_current_scanline(50, RenderOptions::default());
+        assert_ne!(
+            p.framebuffer()[50 * crate::FRAME_W],
+            [0, 0, 0],
+            "line 50 rendered with display on should be visible"
+        );
+        p.write(register::INIDISP, 0x80); // force-blank on
+        p.render_current_scanline(51, RenderOptions::default());
+        assert_eq!(
+            p.framebuffer()[51 * crate::FRAME_W],
+            [0, 0, 0],
+            "line 51 rendered during force-blank must be black"
+        );
+        // Line 50 must still be visible (the force-blank only affects
+        // lines rendered after it landed).
+        assert_ne!(
+            p.framebuffer()[50 * crate::FRAME_W],
+            [0, 0, 0],
+            "line 50 must persist across the force-blank toggle"
+        );
+    }
+
+    #[test]
+    fn framebuffer_default_is_all_zero_and_render_scanline_writes_into_it() {
+        // Powered-on PPU starts with forced blank ($2100 bit 7 = 1)
+        // and an all-zero framebuffer.
+        let mut p = Ppu::new();
+        assert_eq!(p.framebuffer().len(), crate::FRAME_W * crate::FRAME_H);
+        assert!(p.framebuffer().iter().all(|px| *px == [0, 0, 0]));
+
+        // Forced-blank scanline render still produces all-zero output,
+        // and the framebuffer remains all-zero.
+        p.render_current_scanline(0, RenderOptions::default());
+        assert!(
+            p.framebuffer()[..crate::FRAME_W]
+                .iter()
+                .all(|px| *px == [0, 0, 0]),
+            "force-blanked scanline must write black into the framebuffer"
+        );
+
+        // Disable forced blank, max brightness, put a non-zero backdrop
+        // colour (CGRAM[0]) so the scanline renders a visible value.
+        p.write(register::INIDISP, 0x0F);
+        p.cgram.poke(0, 0xFF); // CGRAM[0] = $00FF → BGR555 R = 31
+        p.cgram.poke(1, 0x7F);
+        p.render_current_scanline(42, RenderOptions::default());
+        // Line 42 now holds the backdrop colour; lines 0..41 are still
+        // black (forced-blank render written above) / never touched.
+        let off = 42 * crate::FRAME_W;
+        let pixel = p.framebuffer()[off];
+        assert_ne!(pixel, [0, 0, 0], "scanline 42 should now be non-zero");
+        // Out-of-range y is a no-op (doesn't panic).
+        p.render_current_scanline(crate::FRAME_H as u16, RenderOptions::default());
     }
 }
