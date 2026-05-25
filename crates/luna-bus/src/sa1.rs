@@ -8,12 +8,12 @@
 //! banking scheme.
 //!
 //! This module owns the shared cartridge memory + MMIO register file
-//! seen by both CPUs (ROM banking, I-RAM, BW-RAM, hardware
-//! multiplier / divider, IRQ message latches, timer, normal-mode DMA
-//! engine). The SA-1's own 65C816 instance is layered on top in
-//! [`luna_coproc::Sa1Chip`]. Character-conversion (CC1 / CC2) is the
-//! one big slice not yet wired — non-CC bulk DMA, IRQ messaging, and
-//! the timer all work end-to-end.
+//! seen by both CPUs: ROM banking, I-RAM, BW-RAM, hardware
+//! multiplier / divider / accumulator, IRQ message latches, timer,
+//! normal-mode DMA, CC1 + CC2 character-conversion DMA, VLBP
+//! bit-stream reader, and the per-side I-RAM / BW-RAM
+//! write-protection masks. The SA-1's own 65C816 instance is
+//! layered on top in [`luna_coproc::Sa1Chip`].
 //!
 //! Reference: <https://problemkaputt.de/fullsnes.htm> §"SNES SA-1".
 //!
@@ -166,6 +166,18 @@ pub struct Sa1Mapper {
     dda: u32,
     /// `$2238/$2239` DTC — 16-bit transfer byte counter.
     dtc: u16,
+    /// `true` while a Type-2 character-conversion DMA is armed and
+    /// the SA-1 is streaming pixel bytes through BBF.
+    cc2_active: bool,
+    /// Resolved bpp at the time CC2 was armed — captured here so a
+    /// mid-stream CDMA write can't change it under the staging buffer.
+    cc2_bpp: usize,
+    /// Source pixel bytes accumulated for the current in-flight tile.
+    /// Filled `bpp` bytes per row; on the last row the staged 8×bpp
+    /// bytes are planarized and emitted to DDA.
+    cc2_buf: [u8; 64],
+    /// Number of bytes staged into `cc2_buf` for the current tile.
+    cc2_byte_idx: usize,
 
     // ---- Phase-5 VLBP (Variable-Length Bit Processor) ----
     /// `$2258 VBD` — variable-length bit-data control. bit 7 = mode
@@ -206,6 +218,55 @@ enum WriteSide {
     Main,
     /// Write originated from the SA-1's own 65C816 via [`super::Sa1Bus`].
     Sa1,
+}
+
+/// Decode `bpp` source bytes (one bitmap pixel-row's worth) into SNES
+/// planar format inside `tile_buf` at the slot for `row`.
+///
+/// `tile_buf` is a 64-byte working buffer covering up to 8bpp; for
+/// shallower colour depths only the relevant prefix is touched.
+/// Plane interleaving matches the SNES tile layout — bp0/bp1 in
+/// bytes 0..16, bp2/bp3 in 16..32, bp4/bp5 in 32..48, bp6/bp7 in
+/// 48..64.
+///
+/// Shared by Type-1 ([`Sa1Mapper::run_cc1_dma`]) and Type-2
+/// ([`Sa1Mapper::cc2_consume_byte`]) character-conversion DMA.
+fn planarize_row(bpp: usize, src: &[u8], row: usize, tile_buf: &mut [u8; 64]) {
+    let mut pixels = [0u8; 8];
+    match bpp {
+        2 => {
+            for byte_idx in 0..2 {
+                let b = src[byte_idx];
+                pixels[byte_idx * 4] = (b >> 6) & 0x03;
+                pixels[byte_idx * 4 + 1] = (b >> 4) & 0x03;
+                pixels[byte_idx * 4 + 2] = (b >> 2) & 0x03;
+                pixels[byte_idx * 4 + 3] = b & 0x03;
+            }
+        }
+        4 => {
+            for byte_idx in 0..4 {
+                let b = src[byte_idx];
+                pixels[byte_idx * 2] = b >> 4;
+                pixels[byte_idx * 2 + 1] = b & 0x0F;
+            }
+        }
+        _ => {
+            for (i, b) in src.iter().enumerate().take(8) {
+                pixels[i] = *b;
+            }
+        }
+    }
+    for plane in 0..bpp {
+        let mut planar = 0u8;
+        for (col, p) in pixels.iter().enumerate() {
+            let bit = (p >> plane) & 1;
+            planar |= bit << (7 - col);
+        }
+        let plane_group = plane / 2;
+        let plane_inside = plane % 2;
+        let byte_off = plane_group * 16 + row * 2 + plane_inside;
+        tile_buf[byte_off] = planar;
+    }
 }
 
 impl Sa1Mapper {
@@ -259,6 +320,10 @@ impl Sa1Mapper {
             sda: 0,
             dda: 0,
             dtc: 0,
+            cc2_active: false,
+            cc2_bpp: 0,
+            cc2_buf: [0; 64],
+            cc2_byte_idx: 0,
             vbd: 0,
             vda_base: 0,
             vbit_offset: 0,
@@ -373,6 +438,62 @@ impl Sa1Mapper {
         }
     }
 
+    /// Arm a Type-2 character-conversion stream. Captures the current
+    /// `cdma` colour mode and resets the staging buffer; subsequent
+    /// writes to BBF (`$223F`) feed pixel bytes in scanline order.
+    fn cc2_arm(&mut self) {
+        self.cc2_bpp = match (self.cdma >> 2) & 0x07 {
+            0 => 8,
+            1 => 4,
+            2 => 2,
+            _ => 8,
+        };
+        self.cc2_buf = [0; 64];
+        self.cc2_byte_idx = 0;
+        self.cc2_active = true;
+    }
+
+    /// End an in-flight CC2 stream. Triggered by `CDMA.7` (CDEND) or
+    /// a DCNT write that drops bit 5.
+    fn cc2_end(&mut self) {
+        self.cc2_active = false;
+        self.dcnt &= 0x7F;
+        self.mmio[0x2230 - 0x2200] = self.dcnt;
+    }
+
+    /// Consume one source pixel byte streamed by the SA-1 CPU into
+    /// BBF. When `bpp × 8` bytes have been staged we have a complete
+    /// 8×8 tile worth of source data — planarize it, write it to
+    /// `DDA`, auto-increment DDA, raise the CC IRQ latch, and reset
+    /// the staging buffer for the next tile.
+    fn cc2_consume_byte(&mut self, byte: u8) {
+        if !self.cc2_active {
+            return;
+        }
+        let bytes_per_tile = self.cc2_bpp * 8;
+        self.cc2_buf[self.cc2_byte_idx] = byte;
+        self.cc2_byte_idx += 1;
+        if self.cc2_byte_idx < bytes_per_tile {
+            return;
+        }
+        // Tile complete — planarize row-by-row.
+        let bpp = self.cc2_bpp;
+        let buf = self.cc2_buf;
+        let mut planar = [0u8; 64];
+        for row in 0..8 {
+            let src = &buf[row * bpp..(row + 1) * bpp];
+            planarize_row(bpp, src, row, &mut planar);
+        }
+        // Write planar tile to DDA, advance DDA.
+        let dst_base = self.dda & 0x00FF_FFFF;
+        for (k, b) in planar.iter().enumerate().take(bytes_per_tile) {
+            self.write_raw_for_dma(dst_base.wrapping_add(k as u32) & 0x00FF_FFFF, *b);
+        }
+        self.dda = self.dda.wrapping_add(bytes_per_tile as u32) & 0x00FF_FFFF;
+        self.cc2_byte_idx = 0;
+        self.cc1_irq_to_main = true;
+    }
+
     /// Run a Type-1 Character-Conversion DMA — convert a linear
     /// `bpp`-packed bitmap at SDA into SNES planar tile data at DDA.
     /// Tile data is laid out in raster (left-to-right, top-to-bottom)
@@ -412,58 +533,20 @@ impl Sa1Mapper {
             let tile_row = tile_idx / tile_width_tiles;
             let mut tile_buf = [0u8; 64];
 
-            for row in 0u32..8 {
-                let pixel_row = tile_row * 8 + row;
-                let src_row_off = pixel_row
-                    .wrapping_mul(row_stride)
-                    .wrapping_add(tile_col * (bpp as u32));
+            for row in 0..8 {
+                let pixel_row = (tile_row as usize) * 8 + row;
+                let src_row_off = pixel_row * (row_stride as usize) + (tile_col as usize) * bpp;
 
                 // Pull `bpp` source bytes for one pixel-row of one tile.
                 let mut src_bytes = [0u8; 8];
                 for (k, slot) in src_bytes.iter_mut().enumerate().take(bpp) {
-                    let a = self.sda.wrapping_add(src_row_off + k as u32) & 0x00FF_FFFF;
+                    let a = self
+                        .sda
+                        .wrapping_add(u32::try_from(src_row_off + k).unwrap_or(0))
+                        & 0x00FF_FFFF;
                     *slot = self.read(a).unwrap_or(0);
                 }
-
-                // Decode 8 pixel indices.
-                let mut pixels = [0u8; 8];
-                match bpp {
-                    2 => {
-                        for byte_idx in 0..2 {
-                            let b = src_bytes[byte_idx];
-                            pixels[byte_idx * 4] = (b >> 6) & 0x03;
-                            pixels[byte_idx * 4 + 1] = (b >> 4) & 0x03;
-                            pixels[byte_idx * 4 + 2] = (b >> 2) & 0x03;
-                            pixels[byte_idx * 4 + 3] = b & 0x03;
-                        }
-                    }
-                    4 => {
-                        for byte_idx in 0..4 {
-                            let b = src_bytes[byte_idx];
-                            pixels[byte_idx * 2] = b >> 4;
-                            pixels[byte_idx * 2 + 1] = b & 0x0F;
-                        }
-                    }
-                    _ => {
-                        // 8bpp — direct passthrough.
-                        pixels.copy_from_slice(&src_bytes);
-                    }
-                }
-
-                // Compose planar bytes. SNES tile format: per-row
-                // bp0/bp1 interleaved in bytes 0..16, bp2/bp3 in
-                // bytes 16..32, bp4/bp5 in 32..48, bp6/bp7 in 48..64.
-                for plane in 0..bpp {
-                    let mut planar = 0u8;
-                    for (col, p) in pixels.iter().enumerate() {
-                        let bit = (p >> plane) & 1;
-                        planar |= bit << (7 - col);
-                    }
-                    let plane_group = plane / 2;
-                    let plane_inside = plane % 2;
-                    let byte_off = plane_group * 16 + (row as usize) * 2 + plane_inside;
-                    tile_buf[byte_off] = planar;
-                }
+                planarize_row(bpp, &src_bytes[..bpp], row, &mut tile_buf);
             }
 
             // Spill the converted tile to the destination buffer.
@@ -934,14 +1017,26 @@ impl Sa1Mapper {
                 0x2230 => {
                     self.dcnt = value;
                     if (value & 0x80) != 0 {
-                        if (value & 0x20) == 0 {
-                            self.run_normal_dma();
-                        } else if (value & 0x10) == 0 {
-                            self.run_cc1_dma();
+                        match (value & 0x30) >> 4 {
+                            0 | 1 => self.run_normal_dma(), // bit 5 = 0 → normal
+                            2 => self.run_cc1_dma(),        // CC enable + Type-1
+                            3 => self.cc2_arm(),            // CC enable + Type-2
+                            _ => unreachable!(),
                         }
+                    } else if self.cc2_active {
+                        // Game cleared DCNT.7 → terminate any in-flight
+                        // CC2 stream.
+                        self.cc2_end();
                     }
                 }
-                0x2231 => self.cdma = value,
+                0x2231 => {
+                    self.cdma = value;
+                    // CDMA bit 7 = CDEND. Writing 1 terminates a CC2
+                    // stream immediately.
+                    if (value & 0x80) != 0 && self.cc2_active {
+                        self.cc2_end();
+                    }
+                }
                 0x2232 => self.sda = (self.sda & !0x0000FF) | u32::from(value),
                 0x2233 => self.sda = (self.sda & !0x00FF00) | (u32::from(value) << 8),
                 0x2234 => self.sda = (self.sda & !0xFF0000) | (u32::from(value) << 16),
@@ -950,6 +1045,7 @@ impl Sa1Mapper {
                 0x2237 => self.dda = (self.dda & !0xFF0000) | (u32::from(value) << 16),
                 0x2238 => self.dtc = (self.dtc & 0xFF00) | u16::from(value),
                 0x2239 => self.dtc = (self.dtc & 0x00FF) | (u16::from(value) << 8),
+                0x223F => self.cc2_consume_byte(value),
 
                 0x2220 => self.cxb = value,
                 0x2221 => self.dxb = value,
@@ -1507,6 +1603,131 @@ mod tests {
                 "tile 1 should be all-set at {off:#x}"
             );
         }
+    }
+
+    // ------------- Phase-6 CC2 tests -------------
+
+    /// Helper — arm a CC2 stream targeting I-RAM `$00:3000` with the
+    /// given colour mode in CDMA (bits 4..2).
+    fn cc2_setup(m: &mut Sa1Mapper, cdma: u8) {
+        m.write(make_addr(0x00, 0x2201), 0x20); // SIE — enable CC-IRQ
+        m.write(make_addr(0x00, 0x2235), 0x00); // DDA lo
+        m.write(make_addr(0x00, 0x2236), 0x30);
+        m.write(make_addr(0x00, 0x2237), 0x00);
+        m.write(make_addr(0x00, 0x2231), cdma);
+        // DCNT bit 7 + bit 5 + bit 4 = arm CC2.
+        m.write(make_addr(0x00, 0x2230), 0xB0);
+    }
+
+    #[test]
+    fn cc2_4bpp_solid_color_5_produces_expected_planar_bytes() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
+        cc2_setup(&mut m, 0b0000_0100); // CDMA = 4bpp
+        // 4bpp tile = 32 source bytes (4 per row × 8 rows). Each byte
+        // packs two 4bpp pixels of value 5 → 0x55.
+        for _ in 0..32 {
+            m.write(make_addr(0x00, 0x223F), 0x55);
+        }
+        let mut read = |off: u16| m.read(make_addr(0x00, 0x3000 + off)).unwrap();
+        for row in 0..8 {
+            let b = row as u16 * 2;
+            assert_eq!(read(b), 0xFF, "bp0 row {row}");
+            assert_eq!(read(b + 1), 0x00, "bp1 row {row}");
+            assert_eq!(read(b + 16), 0xFF, "bp2 row {row}");
+            assert_eq!(read(b + 17), 0x00, "bp3 row {row}");
+        }
+        assert!(m.main_irq_line(), "CC2 must raise the CC IRQ");
+    }
+
+    #[test]
+    fn cc2_advances_dda_per_tile() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
+        cc2_setup(&mut m, 0b0000_0100);
+        // Tile 0 — pixels all = 5.
+        for _ in 0..32 {
+            m.write(make_addr(0x00, 0x223F), 0x55);
+        }
+        // Tile 1 — pixels all = 10 (`0xAA`).
+        for _ in 0..32 {
+            m.write(make_addr(0x00, 0x223F), 0xAA);
+        }
+        // Tile 0 at $3000..=$301F: bp0=FF, bp1=00, bp2=FF, bp3=00.
+        assert_eq!(m.read(make_addr(0x00, 0x3000)), Some(0xFF));
+        // Tile 1 at $3020..=$303F: pixel 10 = 0b1010, so bp0=00, bp1=FF,
+        // bp2=00, bp3=FF.
+        assert_eq!(m.read(make_addr(0x00, 0x3020)), Some(0x00));
+        assert_eq!(m.read(make_addr(0x00, 0x3021)), Some(0xFF));
+        assert_eq!(m.read(make_addr(0x00, 0x3030)), Some(0x00));
+        assert_eq!(m.read(make_addr(0x00, 0x3031)), Some(0xFF));
+    }
+
+    #[test]
+    fn cc2_2bpp_stream_one_tile() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
+        cc2_setup(&mut m, 0b0000_1000); // 2bpp
+        // 2bpp: 2 source bytes per row × 8 rows = 16 bytes. All
+        // pixels = 3 → packed byte 0xFF.
+        for _ in 0..16 {
+            m.write(make_addr(0x00, 0x223F), 0xFF);
+        }
+        for row in 0..8 {
+            let b = row as u16 * 2;
+            assert_eq!(m.read(make_addr(0x00, 0x3000 + b)), Some(0xFF));
+            assert_eq!(m.read(make_addr(0x00, 0x3000 + b + 1)), Some(0xFF));
+        }
+    }
+
+    #[test]
+    fn cc2_8bpp_stream_one_tile() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
+        cc2_setup(&mut m, 0b0000_0000); // 8bpp
+        // 8bpp: 8 source bytes per row × 8 rows = 64 bytes. Pixel = 1
+        // → only bp0 lights.
+        for _ in 0..64 {
+            m.write(make_addr(0x00, 0x223F), 0x01);
+        }
+        for row in 0..8 {
+            let b = row as u16 * 2;
+            assert_eq!(m.read(make_addr(0x00, 0x3000 + b)), Some(0xFF));
+            assert_eq!(m.read(make_addr(0x00, 0x3000 + b + 1)), Some(0x00));
+        }
+        // bp2..bp7 quiet.
+        for off in 16u16..64 {
+            assert_eq!(m.read(make_addr(0x00, 0x3000 + off)), Some(0x00));
+        }
+    }
+
+    #[test]
+    fn cc2_partial_tile_does_not_emit_yet() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
+        cc2_setup(&mut m, 0b0000_0100); // 4bpp, 32 B/tile
+        for _ in 0..16 {
+            m.write(make_addr(0x00, 0x223F), 0x55);
+        }
+        // Half a tile streamed — destination still empty, no IRQ yet.
+        assert_eq!(m.read(make_addr(0x00, 0x3000)), Some(0x00));
+        assert!(!m.main_irq_line(), "no IRQ until a full tile is staged");
+    }
+
+    #[test]
+    fn cc2_cdend_terminates_stream_mid_flight() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
+        cc2_setup(&mut m, 0b0000_0100);
+        // Stream half a tile.
+        for _ in 0..16 {
+            m.write(make_addr(0x00, 0x223F), 0x55);
+        }
+        // CDEND.
+        m.write(make_addr(0x00, 0x2231), 0x80);
+        // DCNT.7 cleared and further BBF writes don't do anything.
+        let dcnt = m.read(make_addr(0x00, 0x2230)).unwrap();
+        assert_eq!(dcnt & 0x80, 0);
+        // Subsequent BBF writes get dropped (cc2_active = false).
+        for _ in 0..32 {
+            m.write(make_addr(0x00, 0x223F), 0xFF);
+        }
+        // Destination remains untouched.
+        assert_eq!(m.read(make_addr(0x00, 0x3000)), Some(0x00));
     }
 
     // ------------- Phase-5 VLBP tests -------------
