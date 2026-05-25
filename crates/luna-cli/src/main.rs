@@ -116,6 +116,24 @@ enum Command {
         /// music-driver "wait for ack" deadlock).
         #[arg(long = "apu-log")]
         apu_log: Option<PathBuf>,
+        /// Optional CPU instruction trace. When set, captures a
+        /// per-instruction register snapshot (PC, A, X, Y, SP, P, DB,
+        /// DP, e) into the given CSV file. Capture starts at instr
+        /// count `--cpu-trace-from` (default 0) and stops after
+        /// `--cpu-trace-max` events (default 100 000). Memory cost is
+        /// ≈ 40 bytes × max-events.
+        #[arg(long = "cpu-trace")]
+        cpu_trace: Option<PathBuf>,
+        /// Instruction count at which to begin populating
+        /// `--cpu-trace`. Default 0 (= capture from the very first
+        /// step). Set to a value near the scene you want to debug to
+        /// keep the buffer small.
+        #[arg(long = "cpu-trace-from", default_value_t = 0)]
+        cpu_trace_from: u64,
+        /// Max number of trace events to capture (hard cap on log
+        /// size). Default 100 000 ≈ 4 MB CSV.
+        #[arg(long = "cpu-trace-max", default_value_t = 100_000)]
+        cpu_trace_max: usize,
     },
 }
 
@@ -147,6 +165,9 @@ fn main() -> ExitCode {
             input,
             peek,
             apu_log,
+            cpu_trace,
+            cpu_trace_from,
+            cpu_trace_max,
         } => run_state(
             &rom,
             steps,
@@ -156,6 +177,9 @@ fn main() -> ExitCode {
             input.as_deref(),
             &peek,
             apu_log.as_deref(),
+            cpu_trace.as_deref(),
+            cpu_trace_from,
+            cpu_trace_max,
         ),
     }
 }
@@ -260,6 +284,37 @@ fn write_mailbox_log_csv(
     Ok(())
 }
 
+/// Write per-instruction CPU trace events as CSV. Columns:
+/// `mclk_total, frame_ntsc, pc, a, x, y, sp, p_hex, db, dp, e`.
+fn write_cpu_trace_csv(
+    path: &std::path::Path,
+    events: &[luna_api::CpuTraceEvent],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    writeln!(f, "mclk_total,frame_ntsc,pc,a,x,y,sp,p,db,dp,e")?;
+    for ev in events {
+        let frame_ntsc = ev.mclk_total / (1364 * 262);
+        writeln!(
+            f,
+            "{},{},${:02X}:{:04X},${:04X},${:04X},${:04X},${:04X},${:02X},${:02X},${:04X},{}",
+            ev.mclk_total,
+            frame_ntsc,
+            (ev.pc_full >> 16) & 0xFF,
+            ev.pc_full & 0xFFFF,
+            ev.a,
+            ev.x,
+            ev.y,
+            ev.sp,
+            ev.p,
+            ev.db,
+            ev.dp,
+            ev.e as u8
+        )?;
+    }
+    Ok(())
+}
+
 /// Print a 16-bytes-per-row hex dump to stderr.
 fn print_hex_dump(bank: u8, base: u16, bytes: &[u8]) {
     for (row_idx, chunk) in bytes.chunks(16).enumerate() {
@@ -284,6 +339,9 @@ fn run_state(
     input_script: Option<&str>,
     peek_specs: &[String],
     apu_log_path: Option<&std::path::Path>,
+    cpu_trace_path: Option<&std::path::Path>,
+    cpu_trace_from: u64,
+    cpu_trace_max: usize,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
     if let Err(e) = em.load_rom(rom) {
@@ -326,7 +384,27 @@ fn run_state(
             }
         }
     }
-    match em.step(steps) {
+    // CPU trace gating: if --cpu-trace is set with a non-zero
+    // --cpu-trace-from, bridge to that instruction count first, then
+    // enable the trace and run the remaining steps. The trace caps
+    // itself at --cpu-trace-max events regardless of how much
+    // stepping remains.
+    let mut remaining = steps;
+    if cpu_trace_path.is_some() {
+        let current = em.instructions_executed();
+        if cpu_trace_from > current {
+            let bridge = (cpu_trace_from - current).min(remaining);
+            if let Err(e) = em.step(bridge) {
+                eprintln!("step warning (pre-trace bridge): {e}");
+            }
+            remaining = remaining.saturating_sub(bridge);
+        }
+        if let Err(e) = em.enable_cpu_trace(cpu_trace_max) {
+            eprintln!("error: enable_cpu_trace: {e}");
+            return ExitCode::from(1);
+        }
+    }
+    match em.step(remaining) {
         Ok(_) => {}
         Err(e) => {
             // Step errors are informational — we still want a state
@@ -359,6 +437,19 @@ fn run_state(
                 Err(e) => eprintln!("error: writing APU log: {e}"),
             },
             Err(e) => eprintln!("error: take_mailbox_log: {e}"),
+        }
+    }
+    if let Some(path) = cpu_trace_path {
+        match em.take_cpu_trace_log() {
+            Ok(events) => match write_cpu_trace_csv(path, &events) {
+                Ok(()) => eprintln!(
+                    "CPU trace written to {} ({} events)",
+                    path.display(),
+                    events.len()
+                ),
+                Err(e) => eprintln!("error: writing CPU trace: {e}"),
+            },
+            Err(e) => eprintln!("error: take_cpu_trace_log: {e}"),
         }
     }
 
