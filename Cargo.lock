@@ -1954,6 +1954,8 @@ dependencies = [
  "luna-ppu",
  "rfd",
  "ringbuf",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
