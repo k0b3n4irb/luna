@@ -8,3 +8,7 @@
 //! ST010+.
 //!
 //! See `ARCHITECTURE.md` §6.5.
+
+pub mod sa1;
+
+pub use sa1::Sa1Chip;
