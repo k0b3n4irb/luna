@@ -521,11 +521,16 @@ impl Apu {
                 let s2 = i32::from(self.voice_brr_history[v][1]);
                 let s1 = i32::from(self.voice_brr_history[v][2]);
                 let s0 = i32::from(self.voice_brr_history[v][3]); // oldest
-                let sum = i32::from(table[255 - frac]) * s0
-                    + i32::from(table[511 - frac]) * s1
-                    + i32::from(table[256 + frac]) * s2
-                    + i32::from(table[frac]) * s3;
-                let gaussian_s = (sum >> 11).clamp(-32768, 32767);
+                // Per ares' `gaussian.cpp`: each tap is `>>11` and then
+                // accumulated; the 3-tap partial sum is cast to i16
+                // (wrap) before adding the 4th tap; the final result is
+                // sclamped to i16 with bit 0 cleared.
+                let mut acc: i32 = (i32::from(table[255 - frac]) * s0) >> 11;
+                acc += (i32::from(table[511 - frac]) * s1) >> 11;
+                acc += (i32::from(table[256 + frac]) * s2) >> 11;
+                acc = i32::from(acc as i16);
+                acc = acc.wrapping_add((i32::from(table[frac]) * s3) >> 11);
+                let gaussian_s = acc.clamp(-32768, 32767) & !1;
                 // If NON.v is set, the BRR/Gaussian path is bypassed
                 // and the LFSR noise sample becomes this voice's
                 // source. The envelope and per-voice volume still
@@ -699,21 +704,32 @@ impl Apu {
             tap_r[i] = i32::from(i16::from_le_bytes([lo_r, hi_r]));
         }
 
-        // FIR convolution. Coefficients are at $0F, $1F, ..., $7F
-        // (one per voice block, low nibble = $F). Each is a signed
-        // 8-bit gain; the sum is shifted right by 7 to normalize
-        // (so a single $7F coefficient ≈ unity gain).
+        // FIR convolution. Per ares' `echo.cpp` (`calculateFIR` and
+        // the staged `echo22`/`echo23`/`echo24`/`echo25` accumulator):
+        //   * each tap contributes `(sample × coef) >> 6` (NOT a
+        //     single `>>7` on the summed total — that was the luna
+        //     pre-rewrite form and produced half-scale output)
+        //   * before adding the last tap, the 7-tap partial sum is
+        //     wrapped to 16-bit (i16 cast) — a real-hardware quirk
+        //     that lets loud echo content roll over instead of
+        //     saturating ("Echo wrap")
+        //   * the final clamped sample has bit 0 cleared (`& ~1`)
         let mut out_l: i32 = 0;
         let mut out_r: i32 = 0;
-        for i in 0..8 {
+        for i in 0..7 {
             let coef = self.dsp_regs[0x0F + i * 0x10] as i8 as i32;
-            out_l += tap_l[i] * coef;
-            out_r += tap_r[i] * coef;
+            out_l += (tap_l[i] * coef) >> 6;
+            out_r += (tap_r[i] * coef) >> 6;
         }
-        out_l >>= 7;
-        out_r >>= 7;
-        let out_l = out_l.clamp(-32768, 32767);
-        let out_r = out_r.clamp(-32768, 32767);
+        // Intermediate i16 wrap before the last (newest) tap.
+        out_l = i32::from(out_l as i16);
+        out_r = i32::from(out_r as i16);
+        let coef7 = self.dsp_regs[0x0F + 7 * 0x10] as i8 as i32;
+        out_l = out_l.wrapping_add((tap_l[7] * coef7) >> 6);
+        out_r = out_r.wrapping_add((tap_r[7] * coef7) >> 6);
+        // Saturate to i16 then clear bit 0.
+        let out_l = out_l.clamp(-32768, 32767) & !1;
+        let out_r = out_r.clamp(-32768, 32767) & !1;
 
         // Write-back: `new = echo_in + echo_out * EFB / 128`, gated
         // by `FLG.5` (ECEN = echo write enable when 0, disable when 1).
@@ -1763,20 +1779,19 @@ mod tests {
 
     #[test]
     fn echo_fir_identity_replays_buffer_to_output() {
-        // FIR with only the newest tap = $7F (≈ unity) reads back
-        // whatever was previously written. We pre-seed the buffer
-        // and confirm `process_echo` returns that seed (modulo the
-        // signed-7-bit shift).
+        // FIR with only the newest tap = $40 (real-HW unity per ares:
+        // each tap contributes `sample × coef >> 6`, so coef $40 ≡
+        // sample × 1). We pre-seed the buffer and confirm
+        // `process_echo` returns that seed.
         let mut apu = Apu::new();
         apu.dsp_regs[0x6D] = 0x20; // ESA = $2000
         apu.dsp_regs[0x7D] = 0x01;
         apu.dsp_regs[0x4D] = 0x00;
         apu.dsp_regs[0x0D] = 0x00;
-        // FIR: only tap 7 (newest) = $7F.
         for i in 0..7 {
             apu.dsp_regs[0x0F + i * 0x10] = 0x00;
         }
-        apu.dsp_regs[0x0F + 7 * 0x10] = 0x7F;
+        apu.dsp_regs[0x0F + 7 * 0x10] = 0x40;
         // FLG = $20 (ECEN = 1, echo write disabled) so the buffer
         // doesn't get clobbered by this tick's `echo_in=0` write.
         apu.dsp_regs[0x6C] = 0x20;
@@ -1789,7 +1804,7 @@ mod tests {
         apu.aram[(base + 2) as usize] = 0x00;
         apu.aram[(base + 3) as usize] = 0xF0; // R = $F000 (= -4096)
         let (l, r) = apu.process_echo(0, 0);
-        // out = (sample * $7F) >> 7 ≈ sample.
+        // out = (sample × $40) >> 6 = sample (real-HW unity).
         assert!(l > 0x0F00 && l < 0x1100, "expected ~+$1000, got {l}");
         assert!(r < -0x0F00 && r > -0x1100, "expected ~-$1000, got {r}");
     }
@@ -1811,7 +1826,7 @@ mod tests {
         for i in 0..7 {
             apu.dsp_regs[0x0F + i * 0x10] = 0x00;
         }
-        apu.dsp_regs[0x0F + 7 * 0x10] = 0x7F;
+        apu.dsp_regs[0x0F + 7 * 0x10] = 0x40; // real-HW unity (sample × $40 >> 6)
         // Seed sample at position 0 with a large positive value.
         apu.echo_pos_samples = 1; // so the seed (pos 0) is the
         // "newest" tap on the first call
@@ -1853,7 +1868,7 @@ mod tests {
         for i in 0..7 {
             apu.dsp_regs[0x0F + i * 0x10] = 0x00;
         }
-        apu.dsp_regs[0x0F + 7 * 0x10] = 0x7F;
+        apu.dsp_regs[0x0F + 7 * 0x10] = 0x40; // real-HW unity (sample × $40 >> 6)
         // Seed: position 0 holds $1234 / $5678.
         let base: u16 = 0x4000;
         apu.aram[base as usize] = 0x34;
@@ -1889,7 +1904,7 @@ mod tests {
         for i in 0..7 {
             apu.dsp_regs[0x0F + i * 0x10] = 0x00;
         }
-        apu.dsp_regs[0x0F + 7 * 0x10] = 0x7F;
+        apu.dsp_regs[0x0F + 7 * 0x10] = 0x40; // real-HW unity (sample × $40 >> 6)
         // Seed: buffer slot 0 has L=$4000, R=$4000.
         let base: u16 = 0x5000;
         apu.aram[(base) as usize] = 0x00;
@@ -2163,14 +2178,17 @@ mod tests {
             apu.voice_phase[1] = AdsrPhase::Off;
             apu.voice_envelope[0] = 0x7FF;
             apu.voice_envelope[1] = 0x7FF;
-            apu.voice_brr_history[0] = [0x7FFF, 0x7FFF, 0x7FFF, 0x7FFF];
+            // Use mid-amplitude samples ($4000) to avoid the
+            // gaussian "3-tap i16 wrap" quirk that flips sign at
+            // peak amplitude (real-HW behaviour per ares).
+            apu.voice_brr_history[0] = [0x4000, 0x4000, 0x4000, 0x4000];
             apu.dsp_regs[0x07] = 0x7F; // V0 gain direct
             apu.dsp_regs[0x17] = 0x7F; // V1 gain direct
             apu.dsp_regs[0x6C] = 0x00;
             apu.dsp_regs[0x13] = 0x08; // V1 pitch high $800
             // Pre-load: voice 1 reads this on its pitch step before
             // voice 0 has run its own first sample.
-            apu.voice_pmod_output[0] = 0x7FFF;
+            apu.voice_pmod_output[0] = 0x4000;
             apu
         }
         let mut apu_no_mod = setup();
