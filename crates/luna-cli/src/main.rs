@@ -134,6 +134,21 @@ enum Command {
         /// size). Default 100 000 ≈ 4 MB CSV.
         #[arg(long = "cpu-trace-max", default_value_t = 100_000)]
         cpu_trace_max: usize,
+        /// Optional memory access trace. When set, captures every
+        /// CPU bus read/write into a CSV at PATH. Default: all
+        /// banks. Combine with `--mem-trace-bank 7E` to focus on
+        /// WRAM and skip ROM fetches. Gated by `--mem-trace-from`
+        /// and `--mem-trace-max` analogous to `--cpu-trace-*`.
+        #[arg(long = "mem-trace")]
+        mem_trace: Option<PathBuf>,
+        #[arg(long = "mem-trace-from", default_value_t = 0)]
+        mem_trace_from: u64,
+        #[arg(long = "mem-trace-max", default_value_t = 100_000)]
+        mem_trace_max: usize,
+        /// Hex bank to filter the memory trace on (e.g. `7E` for
+        /// WRAM main page). Omit to capture every access.
+        #[arg(long = "mem-trace-bank")]
+        mem_trace_bank: Option<String>,
     },
 }
 
@@ -168,6 +183,10 @@ fn main() -> ExitCode {
             cpu_trace,
             cpu_trace_from,
             cpu_trace_max,
+            mem_trace,
+            mem_trace_from,
+            mem_trace_max,
+            mem_trace_bank,
         } => run_state(
             &rom,
             steps,
@@ -180,6 +199,10 @@ fn main() -> ExitCode {
             cpu_trace.as_deref(),
             cpu_trace_from,
             cpu_trace_max,
+            mem_trace.as_deref(),
+            mem_trace_from,
+            mem_trace_max,
+            mem_trace_bank.as_deref(),
         ),
     }
 }
@@ -315,6 +338,37 @@ fn write_cpu_trace_csv(
     Ok(())
 }
 
+/// Write per-access memory trace events as CSV. Columns:
+/// `mclk_total, frame_ntsc, pc, addr, kind, value_hex`.
+fn write_mem_trace_csv(
+    path: &std::path::Path,
+    events: &[luna_api::MemTraceEvent],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    writeln!(f, "mclk_total,frame_ntsc,pc,addr,kind,value")?;
+    for ev in events {
+        let frame_ntsc = ev.mclk_total / (1364 * 262);
+        let kind = match ev.kind {
+            luna_api::MemEventKind::Read => "R",
+            luna_api::MemEventKind::Write => "W",
+        };
+        writeln!(
+            f,
+            "{},{},${:02X}:{:04X},${:02X}:{:04X},{},${:02X}",
+            ev.mclk_total,
+            frame_ntsc,
+            (ev.pc_full >> 16) & 0xFF,
+            ev.pc_full & 0xFFFF,
+            (ev.addr_full >> 16) & 0xFF,
+            ev.addr_full & 0xFFFF,
+            kind,
+            ev.value
+        )?;
+    }
+    Ok(())
+}
+
 /// Print a 16-bytes-per-row hex dump to stderr.
 fn print_hex_dump(bank: u8, base: u16, bytes: &[u8]) {
     for (row_idx, chunk) in bytes.chunks(16).enumerate() {
@@ -342,6 +396,10 @@ fn run_state(
     cpu_trace_path: Option<&std::path::Path>,
     cpu_trace_from: u64,
     cpu_trace_max: usize,
+    mem_trace_path: Option<&std::path::Path>,
+    mem_trace_from: u64,
+    mem_trace_max: usize,
+    mem_trace_bank: Option<&str>,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
     if let Err(e) = em.load_rom(rom) {
@@ -384,24 +442,68 @@ fn run_state(
             }
         }
     }
-    // CPU trace gating: if --cpu-trace is set with a non-zero
-    // --cpu-trace-from, bridge to that instruction count first, then
-    // enable the trace and run the remaining steps. The trace caps
-    // itself at --cpu-trace-max events regardless of how much
-    // stepping remains.
+    // Trace gating: bridge to the earliest of the two "trace-from"
+    // targets, enable whichever crossed; bridge to the later one if
+    // it's still ahead, enable that. Each trace caps itself at its
+    // own --*-trace-max events regardless of remaining steps.
     let mut remaining = steps;
+    let mut bridge_target = u64::MAX;
     if cpu_trace_path.is_some() {
+        bridge_target = bridge_target.min(cpu_trace_from);
+    }
+    if mem_trace_path.is_some() {
+        bridge_target = bridge_target.min(mem_trace_from);
+    }
+    let parsed_mem_bank: Option<u8> = match mem_trace_bank {
+        None => None,
+        Some(s) => match u8::from_str_radix(s.trim_start_matches("0x"), 16) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                eprintln!("error: --mem-trace-bank `{s}`: {e}");
+                return ExitCode::from(1);
+            }
+        },
+    };
+    if bridge_target != u64::MAX {
         let current = em.instructions_executed();
-        if cpu_trace_from > current {
-            let bridge = (cpu_trace_from - current).min(remaining);
+        if bridge_target > current {
+            let bridge = (bridge_target - current).min(remaining);
             if let Err(e) = em.step(bridge) {
-                eprintln!("step warning (pre-trace bridge): {e}");
+                eprintln!("step warning (pre-trace bridge 1): {e}");
             }
             remaining = remaining.saturating_sub(bridge);
         }
+    }
+    // Enable whichever traces are at or past their target now.
+    if cpu_trace_path.is_some() && em.instructions_executed() >= cpu_trace_from {
         if let Err(e) = em.enable_cpu_trace(cpu_trace_max) {
             eprintln!("error: enable_cpu_trace: {e}");
             return ExitCode::from(1);
+        }
+    }
+    if mem_trace_path.is_some() && em.instructions_executed() >= mem_trace_from {
+        if let Err(e) = em.enable_mem_trace(mem_trace_max, parsed_mem_bank) {
+            eprintln!("error: enable_mem_trace: {e}");
+            return ExitCode::from(1);
+        }
+    }
+    // If the two targets differ, bridge to the second one and enable.
+    if cpu_trace_path.is_some() && mem_trace_path.is_some() && cpu_trace_from != mem_trace_from {
+        let second_target = cpu_trace_from.max(mem_trace_from);
+        let current = em.instructions_executed();
+        if second_target > current {
+            let bridge = (second_target - current).min(remaining);
+            if let Err(e) = em.step(bridge) {
+                eprintln!("step warning (pre-trace bridge 2): {e}");
+            }
+            remaining = remaining.saturating_sub(bridge);
+            // Re-check enables (whichever wasn't enabled yet).
+            if cpu_trace_path.is_some() && em.instructions_executed() >= cpu_trace_from {
+                let _ = em.enable_cpu_trace(cpu_trace_max);
+            }
+            if mem_trace_path.is_some() && em.instructions_executed() >= mem_trace_from {
+                let _ = em.enable_mem_trace(mem_trace_max, parsed_mem_bank);
+            }
         }
     }
     match em.step(remaining) {
@@ -450,6 +552,19 @@ fn run_state(
                 Err(e) => eprintln!("error: writing CPU trace: {e}"),
             },
             Err(e) => eprintln!("error: take_cpu_trace_log: {e}"),
+        }
+    }
+    if let Some(path) = mem_trace_path {
+        match em.take_mem_trace_log() {
+            Ok(events) => match write_mem_trace_csv(path, &events) {
+                Ok(()) => eprintln!(
+                    "Memory trace written to {} ({} events)",
+                    path.display(),
+                    events.len()
+                ),
+                Err(e) => eprintln!("error: writing memory trace: {e}"),
+            },
+            Err(e) => eprintln!("error: take_mem_trace_log: {e}"),
         }
     }
 
