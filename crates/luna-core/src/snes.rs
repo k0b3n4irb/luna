@@ -78,6 +78,27 @@ pub struct Snes {
     /// the scheduler's scanlines-per-frame + VBlank-entry line and
     /// the PPU's `STAT78` region bit (bit 4).
     pub region: luna_cartridge::Region,
+
+    /// 17-bit WRAM address counter accessed through the
+    /// `$2180`/`$2181`/`$2182`/`$2183` (WMDATA / WMADDL / WMADDM /
+    /// WMADDH) bus surface. Auto-increments on every WMDATA read or
+    /// write; wraps modulo `0x20000`.
+    pub wm_addr: u32,
+    /// Manual-mode joypad shift state.
+    ///
+    /// Per ares' `joypad.cpp` + Mesen2's `ControlManager`, when the
+    /// game writes bit 0 of `$4016` it pulses LATCH on both
+    /// controllers; while LATCH is held high the shift register
+    /// stays loaded with the live button mask. Subsequent reads of
+    /// `$4016` / `$4017` shift out one bit per access from the
+    /// 16-bit register, MSB-first. After 16 reads the register
+    /// returns 1 (open-but-pulled-high) as the shift train is
+    /// exhausted.
+    pub joypad_strobe: bool,
+    /// 16-bit shift register for controller 1 manual-mode reads.
+    pub joypad1_shift: u16,
+    /// 16-bit shift register for controller 2 manual-mode reads.
+    pub joypad2_shift: u16,
 }
 
 /// Master cycles per PPU scanline on NTSC (1364 mclk = 4 dots × 341).
@@ -186,6 +207,10 @@ impl Snes {
             frame_count: 0,
             nmis_serviced: 0,
             region,
+            wm_addr: 0,
+            joypad_strobe: false,
+            joypad1_shift: 0,
+            joypad2_shift: 0,
         }
     }
 
@@ -214,6 +239,10 @@ impl Snes {
             nmi_pending,
             irq_pending,
             total_mclk,
+            wm_addr,
+            joypad_strobe,
+            joypad1_shift,
+            joypad2_shift,
             ..
         } = self;
         let mut bus = SnesBus {
@@ -230,6 +259,10 @@ impl Snes {
             irq: irq_pending,
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
+            wm_addr,
+            joypad_strobe,
+            joypad1_shift,
+            joypad2_shift,
         };
         cpu.reset(&mut bus);
     }
@@ -253,6 +286,10 @@ impl Snes {
             nmi_pending,
             irq_pending,
             total_mclk,
+            wm_addr,
+            joypad_strobe,
+            joypad1_shift,
+            joypad2_shift,
             ..
         } = self;
         let mut bus = SnesBus {
@@ -269,6 +306,10 @@ impl Snes {
             irq: irq_pending,
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
+            wm_addr,
+            joypad_strobe,
+            joypad1_shift,
+            joypad2_shift,
         };
         cpu.step(&mut bus);
 
@@ -438,6 +479,10 @@ impl Snes {
             nmi_pending,
             irq_pending,
             total_mclk,
+            wm_addr,
+            joypad_strobe,
+            joypad1_shift,
+            joypad2_shift,
             ..
         } = self;
         let mut bus = SnesBus {
@@ -454,6 +499,10 @@ impl Snes {
             irq: irq_pending,
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
+            wm_addr,
+            joypad_strobe,
+            joypad1_shift,
+            joypad2_shift,
         };
         (0..count)
             .map(|i| {
@@ -489,6 +538,10 @@ struct SnesBus<'a> {
     fast_rom: bool,
     nmi: &'a mut bool,
     irq: &'a mut bool,
+    wm_addr: &'a mut u32,
+    joypad_strobe: &'a mut bool,
+    joypad1_shift: &'a mut u16,
+    joypad2_shift: &'a mut u16,
     mclk_total: &'a mut MCycles,
     /// Total scanlines per frame for the current cart's region —
     /// used by the H/V counter latch path (\$2137 / WRIO) to wrap
@@ -579,6 +632,33 @@ impl<'a> SnesBus<'a> {
             None
         }
     }
+
+    /// `Some(low_byte_of_offset)` if `addr` is one of the four WRAM-port
+    /// registers ($2180-$2183): `0x80` = WMDATA, `0x81` = WMADDL,
+    /// `0x82` = WMADDM, `0x83` = WMADDH. Mirror banks $80-BF apply.
+    fn wram_port_offset(addr: Addr24) -> Option<u8> {
+        let bank = bank_of(addr);
+        let offset = offset_of(addr);
+        if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && matches!(offset, 0x2180..=0x2183) {
+            Some((offset & 0xFF) as u8)
+        } else {
+            None
+        }
+    }
+
+    /// `true` if `addr` is the manual-mode joypad serial port at
+    /// $4016 (JOYSER0 — write LATCH / read controller-1 bit) or
+    /// $4017 (JOYSER1 — read controller-2 bit; writes drive the
+    /// expansion port and are ignored).
+    fn is_joypad_serial(addr: Addr24) -> Option<u16> {
+        let bank = bank_of(addr);
+        let offset = offset_of(addr);
+        if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && matches!(offset, 0x4016..=0x4017) {
+            Some(offset)
+        } else {
+            None
+        }
+    }
 }
 
 /// DMA-side view of the system: holds the minimum needed for a sync
@@ -656,6 +736,32 @@ impl<'a> Bus for SnesBus<'a> {
                 self.apu_real.cpu_read_port(port)
             };
         }
+        if let Some(off) = Self::wram_port_offset(addr) {
+            // $2180 WMDATA — read byte at the 17-bit counter, advance.
+            // $2181-$2183 are write-only; reads return open bus.
+            if off == 0x80 {
+                let a = (*self.wm_addr & 0x1FFFF) as usize;
+                let v = self.wram[a];
+                *self.wm_addr = (*self.wm_addr + 1) & 0x1FFFF;
+                return v;
+            }
+            return 0xFF;
+        }
+        if let Some(offset) = Self::is_joypad_serial(addr) {
+            // While LATCH ($4016 bit 0) is held high, both controllers
+            // are continuously reloaded — reads return the live D-pad
+            // state. Once LATCH falls, each read shifts one MSB-first
+            // bit out of the 16-bit shift register; subsequent reads
+            // past 16 return 1 (pulled-high serial line).
+            let shift = if offset == 0x4016 {
+                &mut *self.joypad1_shift
+            } else {
+                &mut *self.joypad2_shift
+            };
+            let bit = (*shift >> 15) & 1;
+            *shift = shift.wrapping_shl(1) | 1;
+            return bit as u8;
+        }
         if let Some(offset) = Self::dma_offset(addr) {
             return self.dma.read_register(offset).unwrap_or(0xFF);
         }
@@ -697,6 +803,54 @@ impl<'a> Bus for SnesBus<'a> {
             // is only consulted when the real APU is dead.
             self.apu_real.cpu_write_port(port, value);
             self.apu_stub_fallback.write(port, value);
+            return;
+        }
+        if let Some(off) = Self::wram_port_offset(addr) {
+            match off {
+                // $2180 WMDATA — write byte at the 17-bit counter,
+                // auto-advance.
+                0x80 => {
+                    let a = (*self.wm_addr & 0x1FFFF) as usize;
+                    self.wram[a] = value;
+                    *self.wm_addr = (*self.wm_addr + 1) & 0x1FFFF;
+                }
+                // $2181 WMADDL — counter bits 0..7.
+                0x81 => *self.wm_addr = (*self.wm_addr & !0x000FF) | u32::from(value),
+                // $2182 WMADDM — counter bits 8..15.
+                0x82 => {
+                    *self.wm_addr = (*self.wm_addr & !0x0FF00) | (u32::from(value) << 8);
+                }
+                // $2183 WMADDH — counter bit 16 (only bit 0 of the
+                // value is used; upper bits ignored).
+                0x83 => {
+                    *self.wm_addr = (*self.wm_addr & !0x10000) | (u32::from(value & 0x01) << 16);
+                }
+                _ => {}
+            }
+            return;
+        }
+        if let Some(offset) = Self::is_joypad_serial(addr) {
+            // $4016 bit 0: write 1 → reload both shift registers
+            // from the live joypad state and assert LATCH (continuous
+            // refresh). Write 0 → de-assert LATCH (shift register
+            // freezes; subsequent reads shift it out).
+            if offset == 0x4016 {
+                let next_strobe = (value & 0x01) != 0;
+                if !*self.joypad_strobe && next_strobe {
+                    // Rising edge or held-high: reload.
+                    *self.joypad1_shift = self.cpu_regs.joypad1;
+                    *self.joypad2_shift = self.cpu_regs.joypad2;
+                }
+                *self.joypad_strobe = next_strobe;
+                if next_strobe {
+                    // Keep the shift register sync'd with the live
+                    // state while strobe is held high.
+                    *self.joypad1_shift = self.cpu_regs.joypad1;
+                    *self.joypad2_shift = self.cpu_regs.joypad2;
+                }
+            }
+            // $4017 writes drive the expansion-port output pins —
+            // ignored by an emulator that doesn't model the expansion.
             return;
         }
         if let Some(offset) = Self::dma_offset(addr) {
@@ -890,6 +1044,10 @@ mod tests {
             nmi_pending,
             irq_pending,
             total_mclk,
+            wm_addr,
+            joypad_strobe,
+            joypad1_shift,
+            joypad2_shift,
             ..
         } = &mut snes;
         let mut bus = SnesBus {
@@ -906,12 +1064,139 @@ mod tests {
             irq: irq_pending,
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
+            wm_addr,
+            joypad_strobe,
+            joypad1_shift,
+            joypad2_shift,
         };
         bus.write(make_addr(0x00, 0x0100), 0xAA);
         // Read back from the mirror in $00:
         assert_eq!(bus.read(make_addr(0x00, 0x0100)), 0xAA);
         // And from $7E (full WRAM):
         assert_eq!(bus.read(make_addr(0x7E, 0x0100)), 0xAA);
+    }
+
+    #[test]
+    fn wram_port_round_trips_through_2180_and_address_registers() {
+        // Set WMADD to $1F00 (a low-RAM mirror), write 0xAB via $2180,
+        // re-set the address, read back via $2180.
+        let cart = demo_lorom();
+        let mut snes = Snes::from_cartridge(cart);
+        snes.reset();
+        let scanlines = snes.region_scanlines();
+        let Snes {
+            cpu: _,
+            ppu,
+            dma,
+            cpu_regs,
+            apu_real,
+            apu_stub_fallback,
+            apu_panicked,
+            wram,
+            mapper,
+            fast_rom,
+            nmi_pending,
+            irq_pending,
+            total_mclk,
+            wm_addr,
+            joypad_strobe,
+            joypad1_shift,
+            joypad2_shift,
+            ..
+        } = &mut snes;
+        let mut bus = SnesBus {
+            wram,
+            mapper: mapper.as_mut(),
+            ppu,
+            dma,
+            cpu_regs,
+            apu_real,
+            apu_stub_fallback,
+            apu_panicked: *apu_panicked,
+            fast_rom: *fast_rom,
+            nmi: nmi_pending,
+            irq: irq_pending,
+            mclk_total: total_mclk,
+            scanlines_per_frame: scanlines,
+            wm_addr,
+            joypad_strobe,
+            joypad1_shift,
+            joypad2_shift,
+        };
+        // WMADD = $00:1F00.
+        bus.write(make_addr(0x00, 0x2181), 0x00);
+        bus.write(make_addr(0x00, 0x2182), 0x1F);
+        bus.write(make_addr(0x00, 0x2183), 0x00);
+        // Write 0xAB via WMDATA (auto-increments).
+        bus.write(make_addr(0x00, 0x2180), 0xAB);
+        // Reset address back to $1F00.
+        bus.write(make_addr(0x00, 0x2181), 0x00);
+        bus.write(make_addr(0x00, 0x2182), 0x1F);
+        // Read it back.
+        assert_eq!(bus.read(make_addr(0x00, 0x2180)), 0xAB);
+    }
+
+    #[test]
+    fn manual_joypad_serial_shifts_msb_first() {
+        // Set joypad1 = $8001 (just bit 15 + bit 0 lit), then drive
+        // the $4016 strobe (1 → 0) and shift MSB-first via reads.
+        let cart = demo_lorom();
+        let mut snes = Snes::from_cartridge(cart);
+        snes.reset();
+        snes.cpu_regs.set_joypad(0, 0x8001);
+        let scanlines = snes.region_scanlines();
+        let Snes {
+            cpu: _,
+            ppu,
+            dma,
+            cpu_regs,
+            apu_real,
+            apu_stub_fallback,
+            apu_panicked,
+            wram,
+            mapper,
+            fast_rom,
+            nmi_pending,
+            irq_pending,
+            total_mclk,
+            wm_addr,
+            joypad_strobe,
+            joypad1_shift,
+            joypad2_shift,
+            ..
+        } = &mut snes;
+        let mut bus = SnesBus {
+            wram,
+            mapper: mapper.as_mut(),
+            ppu,
+            dma,
+            cpu_regs,
+            apu_real,
+            apu_stub_fallback,
+            apu_panicked: *apu_panicked,
+            fast_rom: *fast_rom,
+            nmi: nmi_pending,
+            irq: irq_pending,
+            mclk_total: total_mclk,
+            scanlines_per_frame: scanlines,
+            wm_addr,
+            joypad_strobe,
+            joypad1_shift,
+            joypad2_shift,
+        };
+        // Latch then de-strobe.
+        bus.write(make_addr(0x00, 0x4016), 0x01);
+        bus.write(make_addr(0x00, 0x4016), 0x00);
+        // First read = bit 15 of joypad1 = 1.
+        assert_eq!(bus.read(make_addr(0x00, 0x4016)) & 1, 1);
+        // Next 14 reads = bits 14..1 = 0.
+        for _ in 0..14 {
+            assert_eq!(bus.read(make_addr(0x00, 0x4016)) & 1, 0);
+        }
+        // 16th read = bit 0 = 1.
+        assert_eq!(bus.read(make_addr(0x00, 0x4016)) & 1, 1);
+        // Shift exhausted — subsequent reads return 1 (pulled-high).
+        assert_eq!(bus.read(make_addr(0x00, 0x4016)) & 1, 1);
     }
 
     #[test]
