@@ -94,13 +94,15 @@ impl Mapper for Sa1Chip {
         };
         let claimed = self.inner.write(addr, value);
         if is_ccnt {
-            let was_reset = prev_ccnt & 0x80 != 0;
-            let now_reset = value & 0x80 != 0;
+            // Per ares + Mesen2: CCNT bit 5 is the SA-1 reset bit.
+            // 1 = held in reset, 0 = released. The 1 → 0 edge starts
+            // the SA-1 at CRV; the 0 → 1 edge re-asserts reset.
+            let was_reset = prev_ccnt & 0x20 != 0;
+            let now_reset = value & 0x20 != 0;
             if was_reset && !now_reset {
-                // Reset → run edge: jump to CRV.
                 self.load_reset_vector();
                 self.running = true;
-            } else if now_reset {
+            } else if !was_reset && now_reset {
                 self.running = false;
             }
         }
@@ -157,7 +159,9 @@ impl<'a> Bus for Sa1Bus<'a> {
         if let Some(v) = self.mapper.sa1_vector_override(bank, offset) {
             return v;
         }
-        self.mapper.read(addr).unwrap_or(0xFF)
+        // Use the SA-1-side read path so the I-RAM mirror at
+        // $00-3F/$80-BF:$0000-07FF resolves.
+        self.mapper.read_from_sa1(addr).unwrap_or(0xFF)
     }
 
     fn write(&mut self, addr: Addr24, value: u8) {
@@ -260,12 +264,14 @@ mod tests {
     }
 
     #[test]
-    fn re_asserting_ccnt_7_halts_the_cpu() {
+    fn re_asserting_ccnt_5_halts_the_cpu() {
+        // Per ares + Mesen2, CCNT bit 5 (not bit 7) is the reset bit.
         let mut chip = sa1_chip();
-        chip.write(make_addr(0x00, 0x2200), 0x80);
+        // Default mmio[$2200] = $20 (bit 5 set). Clear it → release.
         chip.write(make_addr(0x00, 0x2200), 0x00);
         assert!(chip.running);
-        chip.write(make_addr(0x00, 0x2200), 0x80);
+        // Set bit 5 again → SA-1 back into reset.
+        chip.write(make_addr(0x00, 0x2200), 0x20);
         assert!(!chip.running);
     }
 
@@ -299,10 +305,11 @@ mod tests {
     #[test]
     fn sa1_bus_irq_pending_reflects_main_to_sa1_latch() {
         let mut chip = sa1_chip();
-        // SA-1 enables S-CPU → SA-1 IRQ.
+        // SA-1 enables S-CPU → SA-1 IRQ (CIE bit 7).
         chip.write(make_addr(0x00, 0x220A), 0x80);
-        // Main side asserts CCNT bit 4 (0→1 edge).
-        chip.write(make_addr(0x00, 0x2200), 0x10);
+        // Main side asserts CCNT bit 7 (0→1 IRQ trigger). Keep bit 5
+        // set so the SA-1 stays in reset for this isolated test.
+        chip.write(make_addr(0x00, 0x2200), 0xA0);
         let bus = Sa1Bus {
             mapper: &mut chip.inner,
         };
@@ -316,7 +323,7 @@ mod tests {
         // and fire IRQs — games rely on this to gate work outside the
         // SA-1's reset window.
         let mut chip = sa1_chip();
-        chip.write(make_addr(0x00, 0x220A), 0x20); // CIE timer
+        chip.write(make_addr(0x00, 0x220A), 0x40); // CIE bit 6 = timer
         chip.write(make_addr(0x00, 0x2210), 0x81); // linear mode, H enable
         chip.write(make_addr(0x00, 0x2212), 100); // compare lo
         chip.write(make_addr(0x00, 0x2213), 0);
@@ -330,7 +337,7 @@ mod tests {
     #[test]
     fn dma_complete_raises_sa1_irq_via_inner_path() {
         let mut chip = sa1_chip();
-        chip.write(make_addr(0x00, 0x220A), 0x10); // CIE DMA bit
+        chip.write(make_addr(0x00, 0x220A), 0x20); // CIE bit 5 = DMA
         // Seed I-RAM source.
         chip.write(make_addr(0x00, 0x3100), 0x77);
         // SDA = $00:3100

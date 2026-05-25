@@ -1190,7 +1190,7 @@ mod tests {
     ///   3. Enables CIE.7 (S-CPU → SA-1 IRQ).
     ///   4. Releases the SA-1 via CCNT 1→0 edge.
     ///   5. Burns through a NOP run-up so the SA-1 has time to start.
-    ///   6. Triggers the SA-1 IRQ via CCNT.4 0→1 edge.
+    ///   6. Triggers the SA-1 IRQ via CCNT.7 0→1 edge.
     ///   7. NOP-pauses then `STP`s.
     fn demo_sa1_irq_cart() -> Cartridge {
         let mut rom = vec![0xEA; 32 * 1024];
@@ -1283,9 +1283,8 @@ mod tests {
             );
         }
 
-        // Release SA-1: CCNT $80, then CCNT $00.
-        emit(&[0xA9, 0x80], &mut rom, &mut p);
-        emit(&[0x8F, 0x00, 0x22, 0x00], &mut rom, &mut p);
+        // Release SA-1: default CCNT is $20 (bit 5 = reset). A write
+        // of $00 clears bit 5, producing the 1→0 release edge.
         emit(&[0xA9, 0x00], &mut rom, &mut p);
         emit(&[0x8F, 0x00, 0x22, 0x00], &mut rom, &mut p);
 
@@ -1294,8 +1293,8 @@ mod tests {
             emit(&[0xEA], &mut rom, &mut p);
         }
 
-        // Trigger SA-1 IRQ: CCNT $10.
-        emit(&[0xA9, 0x10], &mut rom, &mut p);
+        // Trigger SA-1 IRQ: CCNT bit 7 0→1 edge.
+        emit(&[0xA9, 0x80], &mut rom, &mut p);
         emit(&[0x8F, 0x00, 0x22, 0x00], &mut rom, &mut p);
 
         // More NOPs to give the SA-1 time to service the IRQ.
