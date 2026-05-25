@@ -6,7 +6,9 @@
 //! is responsible for the bank/region routing.
 
 use crate::memory::{Cgram, Oam, VmainSettings, Vram};
-use crate::renderer::{FRAME_H, FRAME_W, RenderOptions, render_scanline_into};
+use crate::renderer::{FRAME_H, FRAME_W, RenderOptions, render_scanline_partial_into};
+// `render_scanline_into` is no longer used directly here — full-line
+// renders go through `flush_partial_scanline`.
 
 /// PPU register offsets (relative to `$2100`).
 pub mod register {
@@ -328,6 +330,14 @@ pub struct Ppu {
     /// [`render_frame_with`](crate::render_frame_with) bypass this
     /// buffer entirely and get a freshly-computed `Vec`.
     pub framebuffer: Vec<[u8; 3]>,
+
+    /// How far the current scanline has been rendered into the
+    /// framebuffer. Phase 2 of gap G6: a `$21xx` write that lands
+    /// mid-scanline calls [`Ppu::flush_partial_scanline`] to commit
+    /// pixels `last_flushed_dot..current_dot` with the OLD state
+    /// BEFORE the write takes effect. Reset to 0 by
+    /// [`Ppu::scanline_reset`] at every scanline boundary.
+    pub last_flushed_dot: u16,
 }
 
 impl Default for Ppu {
@@ -396,6 +406,7 @@ impl Ppu {
             open_bus: 0,
             inidisp_write_count: 0,
             framebuffer: vec![[0u8; 3]; FRAME_W * FRAME_H],
+            last_flushed_dot: 0,
         }
     }
 
@@ -403,20 +414,46 @@ impl Ppu {
     /// framebuffer, using the live PPU register state. Called by the
     /// scheduler at the end of every visible scanline (gap G6 Phase 1).
     ///
+    /// Equivalent to a full-line flush: renders pixels
+    /// `last_flushed_dot..FRAME_W` and resets the partial-flush cursor.
     /// Out-of-range `y` (≥ `FRAME_H`) is a no-op.
     pub fn render_current_scanline(&mut self, y: u16, opts: RenderOptions) {
+        self.flush_partial_scanline(y, FRAME_W as u16, opts);
+        self.scanline_reset();
+    }
+
+    /// Render pixels `last_flushed_dot..end_x` of scanline `y` into the
+    /// persistent framebuffer using the current PPU register state, and
+    /// advance `last_flushed_dot` to `end_x`. Phase 2 of gap G6 — the
+    /// bus layer calls this BEFORE applying a `$21xx` write so the
+    /// in-progress scanline gets the pre-write pixels committed.
+    ///
+    /// Out-of-range `y` (≥ `FRAME_H`) or `end_x <= last_flushed_dot`
+    /// is a no-op.
+    pub fn flush_partial_scanline(&mut self, y: u16, end_x: u16, opts: RenderOptions) {
         let yi = usize::from(y);
         if yi >= FRAME_H {
             return;
         }
-        // Render into a stack-allocated scratch row first, then copy
-        // into the persistent framebuffer. Avoids the borrow-checker
-        // conflict between `&self` (read by renderer) and `&mut
-        // self.framebuffer` (write target). 256 × 3 = 768 bytes.
+        let start = self.last_flushed_dot.min(FRAME_W as u16);
+        let end = end_x.min(FRAME_W as u16);
+        if start >= end {
+            return;
+        }
+        // Stack scratch row → partial render → copy into framebuffer.
         let mut row = [[0u8; 3]; FRAME_W];
-        render_scanline_into(self, y, opts, &mut row);
+        render_scanline_partial_into(self, y, start, end, opts, &mut row);
         let off = yi * FRAME_W;
-        self.framebuffer[off..off + FRAME_W].copy_from_slice(&row);
+        let si = usize::from(start);
+        let ei = usize::from(end);
+        self.framebuffer[off + si..off + ei].copy_from_slice(&row[si..ei]);
+        self.last_flushed_dot = end;
+    }
+
+    /// Reset the partial-flush cursor to 0. Called by the scheduler at
+    /// every scanline boundary so the next line starts from dot 0.
+    pub fn scanline_reset(&mut self) {
+        self.last_flushed_dot = 0;
     }
 
     /// Borrow the current persistent framebuffer (256 × 224 BGR888
@@ -837,6 +874,52 @@ mod tests {
         p.cgram.poke(3, 0x00);
         // CGRAM[0] = backdrop = black ($0000), default.
         p
+    }
+
+    #[test]
+    fn partial_flush_splits_one_scanline_at_dot_x() {
+        // Gap G6 Phase 2 — intra-line partial flush. Build a BG1 red
+        // line. Render the first 128 dots with COLDATA=0, then turn
+        // on CGADSUB+BG1 math + COLDATA blue and finish the line.
+        // Result: left half pure red, right half red + COLDATA blue.
+        let mut p = ppu_with_solid_bg1_tile();
+        // First half — no math.
+        p.flush_partial_scanline(10, 128, RenderOptions::default());
+        assert_eq!(p.last_flushed_dot, 128);
+        // Enable math + add blue.
+        p.write(register::CGADSUB, 0x01); // BG1 add, no halve
+        p.write(register::COLDATA, 0x9F); // B = max
+        // Finish the line.
+        p.render_current_scanline(10, RenderOptions::default());
+        assert_eq!(p.last_flushed_dot, 0, "scanline_reset clears cursor");
+        // Left half (dot 0): no blue. Right half (dot 200): blue.
+        let row_start = 10 * crate::FRAME_W;
+        assert_eq!(
+            p.framebuffer()[row_start][2],
+            0,
+            "left half rendered before COLDATA write should have no blue"
+        );
+        assert!(
+            p.framebuffer()[row_start + 200][2] > 0,
+            "right half rendered after COLDATA write should have COLDATA blue"
+        );
+    }
+
+    #[test]
+    fn partial_flush_clamps_end_x_and_is_idempotent() {
+        // end_x > FRAME_W is clamped; end_x <= last_flushed_dot is a no-op.
+        let mut p = ppu_with_solid_bg1_tile();
+        p.flush_partial_scanline(20, 50, RenderOptions::default());
+        assert_eq!(p.last_flushed_dot, 50);
+        // Same end_x → no-op.
+        p.flush_partial_scanline(20, 50, RenderOptions::default());
+        assert_eq!(p.last_flushed_dot, 50);
+        // Smaller end_x → no-op.
+        p.flush_partial_scanline(20, 20, RenderOptions::default());
+        assert_eq!(p.last_flushed_dot, 50);
+        // end_x > FRAME_W clamps to FRAME_W.
+        p.flush_partial_scanline(20, 1000, RenderOptions::default());
+        assert_eq!(p.last_flushed_dot, crate::FRAME_W as u16);
     }
 
     #[test]

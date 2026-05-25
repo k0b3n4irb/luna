@@ -476,15 +476,39 @@ pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
 /// If forced blank is active (and not bypassed), the slice is filled
 /// with `[0, 0, 0]` and the function returns immediately.
 pub fn render_scanline_into(ppu: &Ppu, y: u16, opts: RenderOptions, out: &mut [[u8; 3]]) {
+    render_scanline_partial_into(ppu, y, 0, FRAME_W as u16, opts, out);
+}
+
+/// Render only the pixel range `start_x..end_x` of scanline `y` into
+/// the slice. Pixels outside that range are left untouched. Used by
+/// the intra-line partial-flush path (Phase 2 of gap G6) so a register
+/// write that lands mid-scanline can commit the pixels rendered with
+/// the OLD state before the write takes effect.
+///
+/// `start_x` and `end_x` are clamped to `[0, FRAME_W]`. If forced blank
+/// is active (and not bypassed), only the requested range is zeroed.
+pub fn render_scanline_partial_into(
+    ppu: &Ppu,
+    y: u16,
+    start_x: u16,
+    end_x: u16,
+    opts: RenderOptions,
+    out: &mut [[u8; 3]],
+) {
     debug_assert_eq!(
         out.len(),
         FRAME_W,
-        "render_scanline_into requires a slice of FRAME_W ({FRAME_W}) pixels"
+        "render_scanline_partial_into requires a slice of FRAME_W ({FRAME_W}) pixels"
     );
+    let start = usize::from(start_x).min(FRAME_W);
+    let end = usize::from(end_x).min(FRAME_W);
+    if start >= end {
+        return;
+    }
 
-    // INIDISP bit 7: forced blank → scanline is all black.
+    // INIDISP bit 7: forced blank → range is all black.
     if ppu.inidisp & 0x80 != 0 && !opts.bypass_forced_blank {
-        for px in out.iter_mut() {
+        for px in &mut out[start..end] {
             *px = [0, 0, 0];
         }
         return;
@@ -531,7 +555,11 @@ pub fn render_scanline_into(ppu: &Ppu, y: u16, opts: RenderOptions, out: &mut [[
     };
     let sprites = render_sprites_scanline_indexed_with(ppu, y, opts);
 
-    for (x, out_pixel) in out.iter_mut().enumerate() {
+    for (x, out_pixel) in out[start..end]
+        .iter_mut()
+        .enumerate()
+        .map(|(i, p)| (i + start, p))
+    {
         // Per-screen layer enable. TM/TMW gate the main screen, TS/TSW
         // gate the sub screen. If TM.layer = 1 AND TMW.layer = 1 the
         // layer is hidden inside its window; if TM.layer = 0 the layer
