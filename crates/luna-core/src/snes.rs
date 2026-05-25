@@ -766,7 +766,7 @@ impl<'a> Bus for SnesBus<'a> {
     }
 
     fn irq_pending(&self) -> bool {
-        *self.irq
+        *self.irq || self.mapper.coproc_main_irq_pending()
     }
 }
 
@@ -1180,5 +1180,156 @@ mod tests {
         assert_eq!(iram_3002, Some(0xEA), "NOP should be in SA-1 I-RAM");
         let ccnt = snes.mapper.read(luna_bus::make_addr(0x00, 0x2200));
         assert_eq!(ccnt, Some(0x00), "CCNT should reflect SA-1 release");
+    }
+
+    /// Build an SA-1 cart where the main CPU:
+    ///   1. Seeds I-RAM with a small SA-1 program: `CLI` then a NOP
+    ///      loop at $3000, and an IRQ handler at $3010 that writes
+    ///      sentinel `$AA` to I-RAM `$3500` then `STP`s.
+    ///   2. Sets CRV = $3000 and CIV = $3010.
+    ///   3. Enables CIE.7 (S-CPU → SA-1 IRQ).
+    ///   4. Releases the SA-1 via CCNT 1→0 edge.
+    ///   5. Burns through a NOP run-up so the SA-1 has time to start.
+    ///   6. Triggers the SA-1 IRQ via CCNT.4 0→1 edge.
+    ///   7. NOP-pauses then `STP`s.
+    fn demo_sa1_irq_cart() -> Cartridge {
+        let mut rom = vec![0xEA; 32 * 1024];
+        rom[0x7FFC] = 0x00;
+        rom[0x7FFD] = 0x80;
+        let off = 0x7FC0;
+        for (i, b) in b"LUNA SA1 IRQ DEMO    ".iter().enumerate() {
+            rom[off + i] = *b;
+        }
+        rom[off + 0x15] = 0x23;
+        rom[off + 0x17] = 0x05;
+        rom[off + 0x18] = 0x00;
+        rom[off + 0x19] = 0x01;
+        rom[off + 0x1C] = 0x34;
+        rom[off + 0x1D] = 0x12;
+        rom[off + 0x1E] = 0xCB;
+        rom[off + 0x1F] = 0xED;
+
+        let mut p = 0usize;
+        let emit = |bytes: &[u8], rom: &mut [u8], p: &mut usize| {
+            for b in bytes {
+                rom[*p] = *b;
+                *p += 1;
+            }
+        };
+        // SEI, native mode, 16-bit A/X/Y.
+        emit(&[0x78], &mut rom, &mut p);
+        emit(&[0x18, 0xFB], &mut rom, &mut p);
+        emit(&[0xC2, 0x30], &mut rom, &mut p);
+
+        // CRV = $3000:  LDA #$3000 ; STA $002203
+        emit(&[0xA9, 0x00, 0x30], &mut rom, &mut p);
+        emit(&[0x8F, 0x03, 0x22, 0x00], &mut rom, &mut p);
+        // CIV = $3010:  LDA #$3010 ; STA $002207
+        emit(&[0xA9, 0x10, 0x30], &mut rom, &mut p);
+        emit(&[0x8F, 0x07, 0x22, 0x00], &mut rom, &mut p);
+
+        // Back to 8-bit accumulator for byte writes.
+        emit(&[0xE2, 0x20], &mut rom, &mut p);
+
+        // CIE = $80 — enable S-CPU → SA-1 IRQ.
+        emit(&[0xA9, 0x80], &mut rom, &mut p);
+        emit(&[0x8F, 0x0A, 0x22, 0x00], &mut rom, &mut p);
+
+        // Seed SA-1 program at I-RAM $3000:
+        //   $3000: CLI                          58
+        //   $3001..$300F: NOP loop              EA…
+        //   $3010 (IRQ handler):
+        //         LDA #$AA                       A9 AA
+        //         STA $3500                      8D 00 35
+        //         STP                            DB
+        // We store byte-by-byte with STA absolute long ($8F).
+        let writes: &[(u32, u8)] = &[
+            (0x003000, 0x58), // CLI
+            (0x003001, 0xEA),
+            (0x003002, 0xEA),
+            (0x003003, 0xEA),
+            (0x003004, 0xEA),
+            (0x003005, 0xEA),
+            (0x003006, 0xEA),
+            (0x003007, 0xEA),
+            (0x003008, 0xEA),
+            (0x003009, 0xEA),
+            (0x00300A, 0xEA),
+            (0x00300B, 0xEA),
+            (0x00300C, 0xEA),
+            (0x00300D, 0xEA),
+            (0x00300E, 0xEA),
+            (0x00300F, 0xEA),
+            (0x003010, 0xA9), // LDA #
+            (0x003011, 0xAA),
+            (0x003012, 0x8D), // STA abs
+            (0x003013, 0x00),
+            (0x003014, 0x35),
+            (0x003015, 0xDB), // STP
+        ];
+        for (addr, byte) in writes {
+            // LDA #imm
+            emit(&[0xA9, *byte], &mut rom, &mut p);
+            // STA $aabbcc (absolute long: 8F lo mid hi)
+            emit(
+                &[
+                    0x8F,
+                    (*addr & 0xFF) as u8,
+                    ((*addr >> 8) & 0xFF) as u8,
+                    ((*addr >> 16) & 0xFF) as u8,
+                ],
+                &mut rom,
+                &mut p,
+            );
+        }
+
+        // Release SA-1: CCNT $80, then CCNT $00.
+        emit(&[0xA9, 0x80], &mut rom, &mut p);
+        emit(&[0x8F, 0x00, 0x22, 0x00], &mut rom, &mut p);
+        emit(&[0xA9, 0x00], &mut rom, &mut p);
+        emit(&[0x8F, 0x00, 0x22, 0x00], &mut rom, &mut p);
+
+        // Run-up: 40 NOPs so the SA-1 can reach its NOP loop.
+        for _ in 0..40 {
+            emit(&[0xEA], &mut rom, &mut p);
+        }
+
+        // Trigger SA-1 IRQ: CCNT $10.
+        emit(&[0xA9, 0x10], &mut rom, &mut p);
+        emit(&[0x8F, 0x00, 0x22, 0x00], &mut rom, &mut p);
+
+        // More NOPs to give the SA-1 time to service the IRQ.
+        for _ in 0..60 {
+            emit(&[0xEA], &mut rom, &mut p);
+        }
+
+        // STP — main CPU done.
+        emit(&[0xDB], &mut rom, &mut p);
+        let _ = p;
+        Cartridge::from_bytes(rom).unwrap()
+    }
+
+    #[test]
+    fn sa1_main_triggers_irq_and_sa1_handler_runs() {
+        // End-to-end IRQ message: main CPU writes CCNT.4 → SA-1 takes
+        // an IRQ → SA-1 IRQ handler writes a sentinel into I-RAM. We
+        // verify the sentinel landed and the SA-1 has STP'd.
+        let cart = demo_sa1_irq_cart();
+        let mut snes = Snes::from_cartridge(cart);
+        snes.reset();
+        for _ in 0..1500 {
+            snes.step();
+            if snes.cpu.stopped {
+                break;
+            }
+        }
+        assert!(snes.cpu.stopped, "main CPU should have STP'd");
+        // The IRQ handler wrote $AA at I-RAM $3500.
+        let sentinel = snes.mapper.read(luna_bus::make_addr(0x00, 0x3500));
+        assert_eq!(
+            sentinel,
+            Some(0xAA),
+            "SA-1 IRQ handler should have written sentinel"
+        );
     }
 }
