@@ -9,5 +9,9 @@ authors.workspace = true
 repository.workspace = true
 readme.workspace = true
 
+[dependencies]
+luna-bus = { path = "../luna-bus" }
+luna-cpu-65c816 = { path = "../luna-cpu-65c816" }
+
 [lints]
 workspace = true
