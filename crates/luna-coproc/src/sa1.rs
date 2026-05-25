@@ -344,13 +344,14 @@ mod tests {
         chip.write(make_addr(0x00, 0x2232), 0x00);
         chip.write(make_addr(0x00, 0x2233), 0x31);
         chip.write(make_addr(0x00, 0x2234), 0x00);
-        // DDA = $40:0000 (linear BW-RAM)
+        chip.write(make_addr(0x00, 0x2238), 1);
+        chip.write(make_addr(0x00, 0x2239), 0);
+        // Configure DCNT first: enable + dest = BW-RAM (bit 2 = dd = 1).
+        chip.write(make_addr(0x00, 0x2230), 0x84);
+        // DDA = $40:0000 — the $2237 write fires the burst.
         chip.write(make_addr(0x00, 0x2235), 0x00);
         chip.write(make_addr(0x00, 0x2236), 0x00);
         chip.write(make_addr(0x00, 0x2237), 0x40);
-        chip.write(make_addr(0x00, 0x2238), 1);
-        chip.write(make_addr(0x00, 0x2239), 0);
-        chip.write(make_addr(0x00, 0x2230), 0x80); // DMA enable
         assert_eq!(chip.read(make_addr(0x40, 0)), Some(0x77));
         let bus = Sa1Bus {
             mapper: &mut chip.inner,
