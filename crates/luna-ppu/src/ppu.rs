@@ -408,8 +408,7 @@ impl Ppu {
                 // Reading $213F is documented to clear the shared
                 // BG-scroll write-twice latch AND the "latch hit"
                 // status bit as side effects.
-                let v = self.stat78
-                    | if self.external_latch_hit { 0x40 } else { 0 };
+                let v = self.stat78 | if self.external_latch_hit { 0x40 } else { 0 };
                 self.bg_scroll_latch = 0;
                 self.external_latch_hit = false;
                 v
@@ -489,6 +488,7 @@ impl Ppu {
     /// by the SnesBus on:
     ///   * a WRIO (\$4201) write whose bit 7 transitions from 0 to 1
     ///   * a read of SLHV (\$2137) — also returns open bus
+    ///
     /// Both paths feed the SAME pair of latched values; the read
     /// protocol on OPHCT/OPVCT is separately tracked (low-then-high).
     pub fn latch_counters(&mut self, h: u16, v: u16) {

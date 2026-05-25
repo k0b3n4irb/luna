@@ -511,8 +511,9 @@ pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
                 let candidate = match slot.kind {
                     LayerKind::Bg => bgs[slot.idx as usize][x]
                         .and_then(|(cg, prio)| (prio == slot.bg_prio).then_some(cg)),
-                    LayerKind::Obj => sprites[x]
-                        .and_then(|(cg, prio)| (prio == slot.idx).then_some(cg)),
+                    LayerKind::Obj => {
+                        sprites[x].and_then(|(cg, prio)| (prio == slot.idx).then_some(cg))
+                    }
                 };
                 if let Some(cgram_idx) = candidate {
                     // Direct colour mode (CGWSEL.0) — only applies to
@@ -638,8 +639,16 @@ fn compute_window_masks(ppu: &Ppu) -> WindowMasks {
             continue; // no window for this layer → mask stays all-false
         }
         for x in 0..FRAME_W {
-            let r1 = if w1_enable { in_w1[x] ^ w1_invert } else { false };
-            let r2 = if w2_enable { in_w2[x] ^ w2_invert } else { false };
+            let r1 = if w1_enable {
+                in_w1[x] ^ w1_invert
+            } else {
+                false
+            };
+            let r2 = if w2_enable {
+                in_w2[x] ^ w2_invert
+            } else {
+                false
+            };
             out.combined[layer][x] = match (w1_enable, w2_enable) {
                 (true, false) => r1,
                 (false, true) => r2,
@@ -689,11 +698,7 @@ fn compute_window_masks(ppu: &Ppu) -> WindowMasks {
 /// Horizontal and vertical flips (`M7SEL` bits 6, 7) negate the
 /// screen-space coordinate before the matrix multiply.
 #[must_use]
-pub fn render_mode7_scanline_indexed(
-    ppu: &Ppu,
-    y: u16,
-    opts: RenderOptions,
-) -> IndexedScanline {
+pub fn render_mode7_scanline_indexed(ppu: &Ppu, y: u16, opts: RenderOptions) -> IndexedScanline {
     let mut out: IndexedScanline = [None; 256];
     if ppu.inidisp & 0x80 != 0 && !opts.bypass_forced_blank {
         return out;
@@ -782,9 +787,7 @@ fn make_window(left: u8, right: u8) -> [bool; FRAME_W] {
     if left <= right {
         let l = left as usize;
         let r = (right as usize).min(FRAME_W - 1);
-        for x in l..=r {
-            out[x] = true;
-        }
+        out[l..=r].fill(true);
     }
     out
 }
@@ -831,7 +834,11 @@ fn color_math(main: (u8, u8, u8), sub: (u8, u8, u8), cgadsub: u8) -> (u8, u8, u8
         }
         r.clamp(0, 31) as u8
     };
-    (combine(main.0, sub.0), combine(main.1, sub.1), combine(main.2, sub.2))
+    (
+        combine(main.0, sub.0),
+        combine(main.1, sub.1),
+        combine(main.2, sub.2),
+    )
 }
 
 // =============================================================================
@@ -884,36 +891,67 @@ const fn obj(prio: u8) -> LayerSlot {
 // Mode 0: BG1, BG2, BG3, BG4 all 2bpp. Real-hardware order:
 //   OBJ3, BG1H, BG2H, OBJ2, BG1L, BG2L, OBJ1, BG3H, BG4H, OBJ0, BG3L, BG4L
 const MODE0_TABLE: &[LayerSlot] = &[
-    obj(3), bg(0, 1), bg(1, 1), obj(2), bg(0, 0), bg(1, 0), obj(1),
-    bg(2, 1), bg(3, 1), obj(0), bg(2, 0), bg(3, 0),
+    obj(3),
+    bg(0, 1),
+    bg(1, 1),
+    obj(2),
+    bg(0, 0),
+    bg(1, 0),
+    obj(1),
+    bg(2, 1),
+    bg(3, 1),
+    obj(0),
+    bg(2, 0),
+    bg(3, 0),
 ];
 
 // Mode 1, BG3 priority bit 0:
 //   OBJ3, BG1H, BG2H, OBJ2, BG1L, BG2L, OBJ1, BG3H, OBJ0, BG3L
 const MODE1_BG3LO_TABLE: &[LayerSlot] = &[
-    obj(3), bg(0, 1), bg(1, 1), obj(2), bg(0, 0), bg(1, 0), obj(1),
-    bg(2, 1), obj(0), bg(2, 0),
+    obj(3),
+    bg(0, 1),
+    bg(1, 1),
+    obj(2),
+    bg(0, 0),
+    bg(1, 0),
+    obj(1),
+    bg(2, 1),
+    obj(0),
+    bg(2, 0),
 ];
 
 // Mode 1, BG3 priority bit 1 — BG3 high gets promoted above OBJ3:
 //   BG3H, OBJ3, BG1H, BG2H, OBJ2, BG1L, BG2L, OBJ1, OBJ0, BG3L
 const MODE1_BG3HI_TABLE: &[LayerSlot] = &[
-    bg(2, 1), obj(3), bg(0, 1), bg(1, 1), obj(2), bg(0, 0), bg(1, 0),
-    obj(1), obj(0), bg(2, 0),
+    bg(2, 1),
+    obj(3),
+    bg(0, 1),
+    bg(1, 1),
+    obj(2),
+    bg(0, 0),
+    bg(1, 0),
+    obj(1),
+    obj(0),
+    bg(2, 0),
 ];
 
 // Modes 2 and 3 (BG1+BG2 only):
 //   OBJ3, BG1H, OBJ2, BG2H, OBJ1, BG1L, OBJ0, BG2L
 const MODE2OR3_TABLE: &[LayerSlot] = &[
-    obj(3), bg(0, 1), obj(2), bg(1, 1), obj(1), bg(0, 0), obj(0), bg(1, 0),
+    obj(3),
+    bg(0, 1),
+    obj(2),
+    bg(1, 1),
+    obj(1),
+    bg(0, 0),
+    obj(0),
+    bg(1, 0),
 ];
 
 // Mode 7: just BG1 (affine) and OBJ. Standard hardware convention:
 //   OBJ3, OBJ2, OBJ1, BG1, OBJ0
 // — i.e. only sprite priority 0 falls below the Mode-7 plane.
-const MODE7_TABLE: &[LayerSlot] = &[
-    obj(3), obj(2), obj(1), bg(0, 0), obj(0),
-];
+const MODE7_TABLE: &[LayerSlot] = &[obj(3), obj(2), obj(1), bg(0, 0), obj(0)];
 
 /// Pick the priority table for the current BGMODE.
 fn priority_table(bgmode: u8) -> &'static [LayerSlot] {
@@ -928,7 +966,7 @@ fn priority_table(bgmode: u8) -> &'static [LayerSlot] {
                 MODE1_BG3LO_TABLE
             }
         }
-        2 | 3 | 4 => MODE2OR3_TABLE,
+        2..=4 => MODE2OR3_TABLE,
         7 => MODE7_TABLE,
         // Modes 5/6 not yet wired into the priority engine; fall
         // back to the Mode-1 layout.
@@ -1019,7 +1057,7 @@ pub fn render_bg_scanline_indexed_with(
         let h_flip = entry & 0x4000 != 0;
         let v_flip = entry & 0x8000 != 0;
         // Pixel position within the (possibly 16-wide) block.
-        let mask = (tile_pixels - 1) as u16;
+        let mask = tile_pixels - 1;
         let mut col_in_block = (src_x & mask) as usize;
         let mut row_in_block = (src_y & mask) as usize;
         if h_flip {
@@ -1032,8 +1070,8 @@ pub fn render_bg_scanline_indexed_with(
         // top-left, with the canonical sprite-plane offset of
         // +1 right, +16 down, +17 diagonal.
         let quadrant_offset: u16 = if big_tiles {
-            let q = (if col_in_block >= 8 { 1 } else { 0 })
-                + (if row_in_block >= 8 { 16 } else { 0 });
+            let q =
+                (if col_in_block >= 8 { 1 } else { 0 }) + (if row_in_block >= 8 { 16 } else { 0 });
             q as u16
         } else {
             0
@@ -1560,7 +1598,10 @@ mod tests {
         // report as `None` (transparent), not as the backdrop colour.
         let p = Ppu::new();
         let scan = render_bg_scanline_indexed_with(&p, 0, 0, RenderOptions::default());
-        assert!(scan.iter().all(|px| px.is_none()), "all-zero tile should be transparent");
+        assert!(
+            scan.iter().all(|px| px.is_none()),
+            "all-zero tile should be transparent"
+        );
     }
 
     #[test]
@@ -1778,9 +1819,9 @@ mod tests {
     #[test]
     fn make_window_inclusive_range() {
         let w = make_window(8, 15);
-        for x in 0..256 {
+        for (x, &b) in w.iter().enumerate() {
             let expected = (8..=15).contains(&x);
-            assert_eq!(w[x], expected, "x={x}");
+            assert_eq!(b, expected, "x={x}");
         }
     }
 
@@ -1807,10 +1848,7 @@ mod tests {
         let backdrop_rgb = {
             // Backdrop colour after master brightness (15 = full).
             let (r, g, b) = cgram_to_bgr5(&p, 0);
-            apply_brightness(
-                [scale_5_to_8(r), scale_5_to_8(g), scale_5_to_8(b)],
-                0x0F,
-            )
+            apply_brightness([scale_5_to_8(r), scale_5_to_8(g), scale_5_to_8(b)], 0x0F)
         };
         // Outside the window (x < 8 and x > 15): BG1 shows.
         assert_ne!(out[0], backdrop_rgb, "x=0 (outside window) shows BG1");
@@ -1836,14 +1874,17 @@ mod tests {
         let out = render_frame_with(&p, RenderOptions::default());
         let backdrop_rgb = {
             let (r, g, b) = cgram_to_bgr5(&p, 0);
-            apply_brightness(
-                [scale_5_to_8(r), scale_5_to_8(g), scale_5_to_8(b)],
-                0x0F,
-            )
+            apply_brightness([scale_5_to_8(r), scale_5_to_8(g), scale_5_to_8(b)], 0x0F)
         };
         // Inverted: x in [8..15] is NOT masked; outside IS.
-        assert_eq!(out[0], backdrop_rgb, "x=0 now masked (outside window inverted in)");
-        assert_ne!(out[8], backdrop_rgb, "x=8 (inside window, inverted = no mask)");
+        assert_eq!(
+            out[0], backdrop_rgb,
+            "x=0 now masked (outside window inverted in)"
+        );
+        assert_ne!(
+            out[8], backdrop_rgb,
+            "x=8 (inside window, inverted = no mask)"
+        );
         assert_eq!(out[16], backdrop_rgb, "x=16 (outside window, masked)");
     }
 
@@ -1859,7 +1900,7 @@ mod tests {
         p.write(register::TM, 0x01);
         p.write(register::TMW, 0x01);
         p.write(register::W12SEL, 0x0A); // W1 enable + W2 enable, no invert
-        p.write(register::WH0, 8);  // W1 = 8..15
+        p.write(register::WH0, 8); // W1 = 8..15
         p.write(register::WH1, 15);
         p.write(register::WH2, 200); // W2 = 200..220
         p.write(register::WH3, 220);
@@ -1867,10 +1908,7 @@ mod tests {
         let out = render_frame_with(&p, RenderOptions::default());
         let backdrop_rgb = {
             let (r, g, b) = cgram_to_bgr5(&p, 0);
-            apply_brightness(
-                [scale_5_to_8(r), scale_5_to_8(g), scale_5_to_8(b)],
-                0x0F,
-            )
+            apply_brightness([scale_5_to_8(r), scale_5_to_8(g), scale_5_to_8(b)], 0x0F)
         };
         // No pixel is inside BOTH windows → BG1 never masked.
         assert_ne!(out[8], backdrop_rgb);
@@ -1888,10 +1926,7 @@ mod tests {
         let out = render_frame_with(&p, RenderOptions::default());
         let backdrop_rgb = {
             let (r, g, b) = cgram_to_bgr5(&p, 0);
-            apply_brightness(
-                [scale_5_to_8(r), scale_5_to_8(g), scale_5_to_8(b)],
-                0x0F,
-            )
+            apply_brightness([scale_5_to_8(r), scale_5_to_8(g), scale_5_to_8(b)], 0x0F)
         };
         for &px in &out[0..16] {
             assert_eq!(px, backdrop_rgb);
@@ -2035,7 +2070,10 @@ mod tests {
         let scan_left = render_bg_scanline_indexed_with(&p, 0, 0, RenderOptions::default());
         // Pixel 0..7 should fall on tile 0; pixel 8..15 on tile 1.
         // We mostly want: pixel 8's CGRAM idx differs from pixel 0's.
-        assert_ne!(scan_left[0], scan_left[8], "quadrant offset should pick a different tile");
+        assert_ne!(
+            scan_left[0], scan_left[8],
+            "quadrant offset should pick a different tile"
+        );
     }
 
     #[test]
@@ -2103,9 +2141,9 @@ mod tests {
         p.write(register::MOSAIC, 0x31);
         let scan = render_bg_scanline_indexed_with(&p, 0, 0, RenderOptions::default());
         let block0 = scan[0];
-        for i in 1..4 {
+        for (i, &px) in scan.iter().enumerate().take(4).skip(1) {
             assert_eq!(
-                scan[i], block0,
+                px, block0,
                 "x={i} should match block-start pixel; mosaic snap failed",
             );
         }
@@ -2119,7 +2157,10 @@ mod tests {
         // table. Sanity-check that they're not the same slice.
         let lo = priority_table(0x01); // mode 1, BG3-prio = 0
         let hi = priority_table(0x09); // mode 1, BG3-prio = 1
-        assert!(!std::ptr::eq(lo, hi), "different table when BG3.pri bit flips");
+        assert!(
+            !std::ptr::eq(lo, hi),
+            "different table when BG3.pri bit flips"
+        );
         // BG3.hi at the very top of the high-table.
         assert!(matches!(hi[0].kind, LayerKind::Bg));
         assert_eq!(hi[0].idx, 2);
