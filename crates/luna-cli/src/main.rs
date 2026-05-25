@@ -108,6 +108,14 @@ enum Command {
         /// 544 bytes of SMW shadow-OAM.
         #[arg(long = "peek")]
         peek: Vec<String>,
+        /// Optional CPU↔APU mailbox traffic log. When set, every
+        /// CPU read/write of `$2140-$2143` during the run is captured
+        /// and written to the given path as CSV with columns:
+        /// `mclk_total,frame,pc,kind,port,value` (one row per event).
+        /// Useful for diagnosing APU handshake stalls (e.g. SMW's
+        /// music-driver "wait for ack" deadlock).
+        #[arg(long = "apu-log")]
+        apu_log: Option<PathBuf>,
     },
 }
 
@@ -138,6 +146,7 @@ fn main() -> ExitCode {
             audio_out,
             input,
             peek,
+            apu_log,
         } => run_state(
             &rom,
             steps,
@@ -146,6 +155,7 @@ fn main() -> ExitCode {
             audio_out.as_deref(),
             input.as_deref(),
             &peek,
+            apu_log.as_deref(),
         ),
     }
 }
@@ -219,6 +229,37 @@ fn parse_peek_spec(spec: &str) -> Result<(u8, u16, u16), String> {
     Ok((bank, offset, count))
 }
 
+/// Write APU mailbox events as CSV. Columns:
+/// `mclk_total, frame_ntsc, pc_bank_offset, kind, port, value_hex`.
+/// `frame_ntsc` assumes NTSC (262 lines × 1364 mclk = 357 368 mclk/frame).
+fn write_mailbox_log_csv(
+    path: &std::path::Path,
+    events: &[luna_api::MailboxEvent],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    writeln!(f, "mclk_total,frame_ntsc,pc,kind,port,value")?;
+    for ev in events {
+        let frame_ntsc = ev.mclk_total / (1364 * 262);
+        let kind = match ev.kind {
+            luna_api::MailboxEventKind::Read => "R",
+            luna_api::MailboxEventKind::Write => "W",
+        };
+        writeln!(
+            f,
+            "{},{},${:02X}:{:04X},{},{},${:02X}",
+            ev.mclk_total,
+            frame_ntsc,
+            (ev.pc_full >> 16) & 0xFF,
+            ev.pc_full & 0xFFFF,
+            kind,
+            ev.port,
+            ev.value
+        )?;
+    }
+    Ok(())
+}
+
 /// Print a 16-bytes-per-row hex dump to stderr.
 fn print_hex_dump(bank: u8, base: u16, bytes: &[u8]) {
     for (row_idx, chunk) in bytes.chunks(16).enumerate() {
@@ -233,6 +274,7 @@ fn print_hex_dump(bank: u8, base: u16, bytes: &[u8]) {
 }
 
 /// `luna state` — exercise the public `luna-api` surface end-to-end.
+#[allow(clippy::too_many_arguments)]
 fn run_state(
     rom: &std::path::Path,
     steps: u64,
@@ -241,11 +283,18 @@ fn run_state(
     audio_out: Option<&std::path::Path>,
     input_script: Option<&str>,
     peek_specs: &[String],
+    apu_log_path: Option<&std::path::Path>,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
     if let Err(e) = em.load_rom(rom) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
+    }
+    if apu_log_path.is_some() {
+        if let Err(e) = em.enable_mailbox_log() {
+            eprintln!("error: enable_mailbox_log: {e}");
+            return ExitCode::from(1);
+        }
     }
     // Parse `frame:hex` checkpoints into a sorted vector. We apply
     // them by stepping `step_until_frame` between checkpoints — a
@@ -296,6 +345,20 @@ fn run_state(
                 Err(e) => eprintln!("error: peek_memory `{spec}`: {e}"),
             },
             Err(e) => eprintln!("error: --peek `{spec}`: {e}"),
+        }
+    }
+
+    if let Some(path) = apu_log_path {
+        match em.take_mailbox_log() {
+            Ok(events) => match write_mailbox_log_csv(path, &events) {
+                Ok(()) => eprintln!(
+                    "APU mailbox log written to {} ({} events)",
+                    path.display(),
+                    events.len()
+                ),
+                Err(e) => eprintln!("error: writing APU log: {e}"),
+            },
+            Err(e) => eprintln!("error: take_mailbox_log: {e}"),
         }
     }
 

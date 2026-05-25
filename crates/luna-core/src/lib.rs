@@ -13,4 +13,4 @@ pub mod snes;
 
 pub use apu_stub::{ApuStub, Phase as ApuPhase};
 pub use cpu_regs::CpuRegs;
-pub use snes::Snes;
+pub use snes::{MailboxEvent, MailboxEventKind, Snes};
