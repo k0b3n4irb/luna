@@ -859,6 +859,15 @@ impl<'a> Bus for SnesBus<'a> {
             return;
         }
         if let Some(off) = Self::ppu_offset(addr) {
+            // Gap G7: refresh the PPU's "active display" flag before
+            // every register write so VMDATA / OAMDATA / CGDATA writes
+            // that land during the visible portion of a non-blanked
+            // frame silently drop the data (the address/latch state
+            // still advances). ares `ppu_io.cpp:19-45` / Mesen2
+            // `SnesPpu.cpp:2046-2057`.
+            self.ppu.active_display =
+                self.ppu_line < self.vblank_start_line && (self.ppu.inidisp & 0x80) == 0;
+
             // Phase 2 of gap G6 — intra-line partial flush. If the
             // CPU is writing a render-affecting PPU register ($2100..$2133)
             // mid-scanline, commit the in-progress dots with the OLD

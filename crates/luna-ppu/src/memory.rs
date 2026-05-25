@@ -86,17 +86,34 @@ impl Vram {
     /// Write the low byte (`$2118`) at the current address. Increments
     /// the address if VMAIN says "increment on low".
     pub fn write_lo(&mut self, value: u8) {
-        let byte_addr = self.byte_addr();
-        self.data[byte_addr] = value;
+        self.write_lo_gated(value, true);
+    }
+
+    /// Write the high byte (`$2119`) at the current address + 1.
+    pub fn write_hi(&mut self, value: u8) {
+        self.write_hi_gated(value, true);
+    }
+
+    /// `$2118` write variant honouring gap G7: the byte is committed
+    /// only when `allow_data` is `true` (i.e. forced-blank or VBlank).
+    /// The address counter advances regardless, matching ares
+    /// (`ppu_io.cpp:397-401`) and Mesen2 (`SnesPpu.cpp:2046-2057`).
+    pub fn write_lo_gated(&mut self, value: u8, allow_data: bool) {
+        if allow_data {
+            let byte_addr = self.byte_addr();
+            self.data[byte_addr] = value;
+        }
         if !self.vmain.increment_on_high {
             self.advance();
         }
     }
 
-    /// Write the high byte (`$2119`) at the current address + 1.
-    pub fn write_hi(&mut self, value: u8) {
-        let byte_addr = self.byte_addr().wrapping_add(1) & 0xFFFF;
-        self.data[byte_addr] = value;
+    /// `$2119` write variant with the same active-display gate.
+    pub fn write_hi_gated(&mut self, value: u8, allow_data: bool) {
+        if allow_data {
+            let byte_addr = self.byte_addr().wrapping_add(1) & 0xFFFF;
+            self.data[byte_addr] = value;
+        }
         if self.vmain.increment_on_high {
             self.advance();
         }
@@ -239,13 +256,27 @@ impl Cgram {
     /// `$2122` write — first call latches the low byte, second call
     /// stores both bytes and advances the address.
     pub fn write(&mut self, value: u8) {
+        self.write_gated(value, true);
+    }
+
+    /// `$2122` write variant honouring gap G7: the byte pair commits
+    /// only when `allow_data` is `true`. The high/low latch toggle
+    /// and address advance still happen regardless, so a stream of
+    /// `$2122` writes during active display effectively drops every
+    /// colour but keeps the cursor in lockstep with the CPU.
+    pub fn write_gated(&mut self, value: u8, allow_data: bool) {
         if self.high_pending {
-            let off = usize::from(self.address) << 1;
-            self.data[off] = self.latch;
-            self.data[off + 1] = value;
+            if allow_data {
+                let off = usize::from(self.address) << 1;
+                self.data[off] = self.latch;
+                self.data[off + 1] = value;
+            }
             self.address = self.address.wrapping_add(1);
             self.high_pending = false;
         } else {
+            // The low-byte latch is updated whether or not we'll
+            // commit later — that's how real hardware behaves and
+            // also keeps semantics simple.
             self.latch = value;
             self.high_pending = true;
         }
@@ -405,22 +436,31 @@ impl Oam {
     /// `$2104` write — OAM data write with the even/odd dance for the
     /// low table and direct byte write for the high table.
     pub fn write(&mut self, value: u8) {
+        self.write_gated(value, true);
+    }
+
+    /// `$2104` variant honouring gap G7: when `allow_data` is `false`
+    /// (active display), the byte is dropped but the even/odd latch
+    /// and the address counter still advance, matching the spirit of
+    /// ares (`ppu_io.cpp:40-45`) and Mesen2 (`SnesPpu.cpp:1916-1927`).
+    pub fn write_gated(&mut self, value: u8, allow_data: bool) {
         let addr = self.address;
         if addr & 0x200 != 0 {
-            // High table: direct byte write at the wrapped offset.
-            let off = usize::from(addr & 0x21F);
-            self.data[off] = value;
+            // High table.
+            if allow_data {
+                let off = usize::from(addr & 0x21F);
+                self.data[off] = value;
+            }
         } else if addr & 1 == 0 {
-            // Low table even byte — latch until the odd-byte commit.
+            // Even byte: always update the latch (kept identical to
+            // the un-gated path so the next odd-byte commit composes
+            // correctly when display turns back on).
             self.latch = value;
-        } else {
-            // Low table odd byte — commit the latched pair atomically.
+        } else if allow_data {
+            // Odd byte: commit the pair only when allowed.
             let even_off = usize::from(addr.wrapping_sub(1) & 0x1FF);
             self.data[even_off] = self.latch;
             self.data[even_off + 1] = value;
-            // The pair we just committed lives at `even_off` (even
-            // byte) and `even_off + 1` (the byte we just wrote). If
-            // that's a sprite's Y, refresh the shadow.
             self.update_shadow(even_off + 1, value);
         }
         self.advance();
@@ -588,6 +628,55 @@ mod tests {
         o.write(0x77);
         // Advance from $21F wraps to 0 (since $220 is one past the end).
         assert_eq!(o.address, 0);
+    }
+
+    #[test]
+    fn vram_write_gated_drops_data_but_advances_address() {
+        // Gap G7: VRAM writes during active display silently drop the
+        // data byte. The address counter still advances so the CPU's
+        // next $2118 lands at the expected slot when display ends.
+        let mut v = Vram::new();
+        v.set_address(0x00, 0x00);
+        v.write_lo_gated(0xAA, false);
+        // Data not committed.
+        assert_eq!(v.peek(0), 0, "active-display VRAM write must drop data");
+        // Address advanced (VMAIN default increments on lo).
+        assert_eq!(
+            v.address, 1,
+            "active-display VRAM write still advances address"
+        );
+        // Now allow data through — should land at the new address.
+        v.write_lo_gated(0xBB, true);
+        assert_eq!(v.peek(2), 0xBB);
+    }
+
+    #[test]
+    fn cgram_write_gated_drops_pair_but_advances_address() {
+        // CGRAM is a 2-byte write-pair. Gated path drops the data on
+        // commit (odd write) but still advances the address.
+        let mut c = Cgram::new();
+        c.set_address(0x10);
+        c.write_gated(0x12, false); // low latch — no commit yet
+        c.write_gated(0x34, false); // commit — discarded
+        assert_eq!(c.peek(0x20), 0, "first byte of dropped pair stays zero");
+        assert_eq!(c.peek(0x21), 0, "second byte of dropped pair stays zero");
+        assert_eq!(c.address, 0x11, "address advanced past the dropped pair");
+    }
+
+    #[test]
+    fn oam_write_gated_drops_pair_but_advances_address() {
+        let mut o = Oam::new();
+        o.set_address_low(0x00);
+        o.write_gated(0x11, false); // even — latch only
+        o.write_gated(0x22, false); // odd — would commit, but dropped
+        assert_eq!(o.peek(0), 0, "low-table byte 0 must stay zero");
+        assert_eq!(o.peek(1), 0, "low-table byte 1 must stay zero");
+        assert_eq!(o.address, 2, "address advanced past the dropped pair");
+        // Re-enable data path: next pair lands at addr 2/3.
+        o.write_gated(0x33, true);
+        o.write_gated(0x44, true);
+        assert_eq!(o.peek(2), 0x33);
+        assert_eq!(o.peek(3), 0x44);
     }
 
     #[test]
