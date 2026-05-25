@@ -10,6 +10,7 @@
 
 mod app;
 mod audio;
+mod input;
 
 use app::LunaApp;
 

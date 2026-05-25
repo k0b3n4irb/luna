@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "luna": {
+      "type": "stdio",
+      "command": "/home/kobenairb/workspace/luna/target/release/luna",
+      "args": [
+        "mcp"
+      ],
+      "env": {}
+    }
+  }
+}

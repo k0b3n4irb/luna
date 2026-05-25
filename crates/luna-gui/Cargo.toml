@@ -20,11 +20,13 @@ luna-cartridge = { workspace = true }
 luna-core      = { workspace = true }
 luna-ppu       = { workspace = true }
 
-eframe  = { workspace = true }
-egui    = { workspace = true }
-rfd     = { workspace = true }
-cpal    = { workspace = true }
-ringbuf = { workspace = true }
+eframe     = { workspace = true }
+egui       = { workspace = true }
+rfd        = { workspace = true }
+cpal       = { workspace = true }
+ringbuf    = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
