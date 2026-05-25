@@ -1,5 +1,46 @@
 # luna — agent rules
 
+## Reference-first implementation
+
+Before writing or rewriting **any** SNES subsystem feature — bus
+dispatch, CPU opcode timing, PPU register, DMA mode, DSP envelope,
+SA-1 coprocessor logic, joypad scan, etc. — consult the
+corresponding implementation in both reference emulators **and
+understand it fully** before touching luna code.
+
+The two canonical references:
+
+* **ares** — `https://raw.githubusercontent.com/ares-emulator/ares/master/ares/sfc/...`
+  Gold standard for hardware accuracy.
+* **Mesen2** — `https://raw.githubusercontent.com/SourMesen/Mesen2/master/Core/SNES/...`
+  Independent second source; cross-check when ares is unclear.
+
+Workflow per feature:
+
+1. **Fetch** the relevant files from both repos (`curl -s`) into
+   `/tmp/` for diffing. For a directory listing use the GH API:
+   `gh api repos/ares-emulator/ares/contents/ares/sfc/<subsys> --jq '.[].name'`.
+2. **Read** the actual source — register decoders, state machines,
+   bit layouts. Quote line numbers when summarising.
+3. **Both references must agree** on the semantic before luna
+   adopts it. When they diverge, document the discrepancy and
+   pick the one with more clarity (usually ares' verified
+   behaviour).
+4. **Write up a short spec** to `/tmp/<feature>_reference.md`:
+   register table, state-transition diagram, edge cases. This
+   is the diff target.
+5. **Inventory** what luna currently does (`Explore` agent works
+   well for this) into `/tmp/luna_<feature>_inventory.md`.
+6. **Then** implement against the spec — never from memory or
+   from `fullsnes.htm` paraphrases alone. The bit layouts and
+   timing quirks differ between secondary docs and what real
+   hardware does; ares + Mesen2 are the empirical truth.
+
+Patches that skip this step have caused real regressions in the
+luna history (the SA-1 CCNT bit-5 vs bit-7 inversion, the CC1/CC2
+cdsel inversion, the echo FIR half-scale precision bug). Always
+read the source first.
+
 ## Rebuild discipline
 
 After *every* code change in this repo, before declaring a task done or
