@@ -859,6 +859,21 @@ impl<'a> Bus for SnesBus<'a> {
             return;
         }
         if let Some(off) = Self::ppu_offset(addr) {
+            // Phase 2 of gap G6 — intra-line partial flush. If the
+            // CPU is writing a render-affecting PPU register ($2100..$2133)
+            // mid-scanline, commit the in-progress dots with the OLD
+            // state BEFORE applying the write so the partial line gets
+            // the pre-write pixels. (Mesen2 SnesPpu.cpp:1884-1886
+            // RenderScanline-before-write pattern.)
+            if off < 0x34 && self.ppu_line < self.vblank_start_line {
+                let (h, _) = current_hv(*self.mclk_total, self.scanlines_per_frame);
+                let dot = h.min(luna_ppu::FRAME_W as u16);
+                self.ppu.flush_partial_scanline(
+                    self.ppu_line,
+                    dot,
+                    luna_ppu::RenderOptions::default(),
+                );
+            }
             // $2100 INIDISP — a write that exits forced-blank exactly
             // at the vblank-entry scanline triggers the OAM address
             // auto-reset, same as the per-line vblank hook. ares
