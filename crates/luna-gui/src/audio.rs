@@ -69,28 +69,47 @@ pub(crate) struct AudioBackend {
 
 impl AudioBackend {
     /// Try to start an audio stream on the default output device.
-    /// Returns `None` (with a logged warning) if any setup step
+    /// Returns `None` (with a logged reason) if any setup step
     /// fails — emulation continues silently in that case.
     #[must_use]
     pub(crate) fn try_start() -> Option<Self> {
         let host = cpal::default_host();
-        let device = host.default_output_device()?;
-        let default_cfg = device.default_output_config().ok()?;
+        let Some(device) = host.default_output_device() else {
+            eprintln!("luna-gui audio: no default output device — running silent");
+            return None;
+        };
+        let default_cfg = match device.default_output_config() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("luna-gui audio: default_output_config failed: {e} — running silent");
+                return None;
+            }
+        };
         // Pick the best matching config: target rate first, else
-        // device default.
+        // device default. Prefer higher-fidelity formats (F32 → I16 →
+        // U8) so a device whose *default* is U8 (some PulseAudio /
+        // ALSA configs) still picks I16/F32 when available.
         let mut config: StreamConfig = default_cfg.config();
         let mut chosen_format = default_cfg.sample_format();
+        let format_rank = |fmt: SampleFormat| -> u8 {
+            match fmt {
+                SampleFormat::F32 => 3,
+                SampleFormat::I16 => 2,
+                SampleFormat::U8 => 1,
+                _ => 0,
+            }
+        };
         if let Ok(supported) = device.supported_output_configs() {
             for c in supported {
                 if c.channels() == 2
                     && c.min_sample_rate().0 <= TARGET_SAMPLE_RATE
                     && c.max_sample_rate().0 >= TARGET_SAMPLE_RATE
+                    && format_rank(c.sample_format()) > format_rank(chosen_format)
                 {
                     config = c
                         .with_sample_rate(cpal::SampleRate(TARGET_SAMPLE_RATE))
                         .config();
                     chosen_format = c.sample_format();
-                    break;
                 }
             }
         }
@@ -104,7 +123,7 @@ impl AudioBackend {
         let device_rate = config.sample_rate.0;
         let mut resampler = Resampler::new(TARGET_SAMPLE_RATE, device_rate);
 
-        let stream = match chosen_format {
+        let stream_result = match chosen_format {
             SampleFormat::F32 => {
                 let primed_inner = primed_cb;
                 device.build_output_stream(
@@ -127,14 +146,37 @@ impl AudioBackend {
                     None,
                 )
             }
+            SampleFormat::U8 => {
+                let primed_inner = primed_cb;
+                device.build_output_stream(
+                    &config,
+                    move |data: &mut [u8], _| {
+                        fill_buffer_u8(data, &mut consumer, &mut resampler, &primed_inner);
+                    },
+                    |err| eprintln!("luna-gui audio error: {err}"),
+                    None,
+                )
+            }
             other => {
-                eprintln!("luna-gui audio: unsupported sample format {other:?}");
+                eprintln!("luna-gui audio: unsupported sample format {other:?} — running silent");
                 return None;
             }
+        };
+        let stream = match stream_result {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("luna-gui audio: build_output_stream failed: {e} — running silent");
+                return None;
+            }
+        };
+        if let Err(e) = stream.play() {
+            eprintln!("luna-gui audio: stream.play failed: {e} — running silent");
+            return None;
         }
-        .ok()?;
-
-        stream.play().ok()?;
+        eprintln!(
+            "luna-gui audio: started ({:?}, {} Hz, 2 ch)",
+            chosen_format, config.sample_rate.0
+        );
         Some(Self {
             producer,
             _stream: stream,
@@ -205,6 +247,31 @@ fn fill_buffer_i16(
         // overshoot by an LSB on certain frac/sample combinations.
         data[idx] = (l * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
         data[idx + 1] = (r * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
+        idx += 2;
+    }
+}
+
+/// U8 device-format variant. cpal's u8 sample convention is offset-
+/// binary: silence is `128` (`0x80`), the full positive scale is
+/// `255`, and the full negative scale is `0`. Maps the resampled
+/// `f32 ∈ [-1, 1]` into that range.
+fn fill_buffer_u8(
+    data: &mut [u8],
+    consumer: &mut ringbuf::HeapCons<(i16, i16)>,
+    resampler: &mut Resampler,
+    primed: &AtomicBool,
+) {
+    if !primed.load(Ordering::Relaxed) {
+        for s in data.iter_mut() {
+            *s = 0x80;
+        }
+        return;
+    }
+    let mut idx = 0;
+    while idx + 1 < data.len() {
+        let (l, r) = resampler.pull(|| pop_input(consumer));
+        data[idx] = (l * 128.0 + 128.0).round().clamp(0.0, 255.0) as u8;
+        data[idx + 1] = (r * 128.0 + 128.0).round().clamp(0.0, 255.0) as u8;
         idx += 2;
     }
 }
