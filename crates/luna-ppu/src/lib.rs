@@ -19,7 +19,7 @@ pub use renderer::{
     FRAME_H, FRAME_W, IndexedPixel, IndexedScanline, RenderOptions, Scanline, SpriteEntry, bg_bpp,
     bg1_bpp, decode_all_sprites, render_bg_scanline_indexed_with, render_bg_scanline_with,
     render_bg1_scanline, render_bg1_scanline_with, render_frame_bg_with, render_frame_bg1,
-    render_frame_bg1_with, render_frame_with, render_mode7_scanline_indexed,
+    render_frame_bg1_with, render_frame_with, render_mode7_scanline_indexed, render_scanline_into,
     render_sprites_scanline, render_sprites_scanline_indexed_with, sprite_size_pair,
 };
 pub use tile::{
