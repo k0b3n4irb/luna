@@ -89,7 +89,7 @@ impl Sa1Mapper {
     /// see at power-on).
     #[must_use]
     pub fn new(rom: Vec<u8>, sram_size: usize) -> Self {
-        let bwram_bytes = sram_size.max(0x800).min(BWRAM_SIZE);
+        let bwram_bytes = sram_size.clamp(0x800, BWRAM_SIZE);
         Self {
             rom,
             bwram: vec![0; bwram_bytes],
@@ -211,8 +211,8 @@ impl Sa1Mapper {
             } else {
                 let q = self.ma / self.mb;
                 let r = self.ma % self.mb;
-                self.mr = i64::from((u16::from(q as u16) as i32) & 0xFFFF)
-                    | (i64::from((u16::from(r as u16) as i32) & 0xFFFF) << 16);
+                self.mr = i64::from(i32::from(q as u16) & 0xFFFF)
+                    | (i64::from(i32::from(r as u16) & 0xFFFF) << 16);
             }
         }
     }

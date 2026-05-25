@@ -443,11 +443,12 @@ impl Apu {
         // Sign-extend the 15-bit LFSR into a signed-16-bit noise
         // sample (-32768..+32766 range). Bit 14 acts as the sign.
         let noise_sample: i16 = {
-            let signed_15 = (self.noise_lfsr as i32) - if self.noise_lfsr & 0x4000 != 0 {
-                0x8000
-            } else {
-                0
-            };
+            let signed_15 = (self.noise_lfsr as i32)
+                - if self.noise_lfsr & 0x4000 != 0 {
+                    0x8000
+                } else {
+                    0
+                };
             (signed_15 << 1) as i16
         };
 
@@ -1813,7 +1814,7 @@ mod tests {
         apu.dsp_regs[0x0F + 7 * 0x10] = 0x7F;
         // Seed sample at position 0 with a large positive value.
         apu.echo_pos_samples = 1; // so the seed (pos 0) is the
-                                  // "newest" tap on the first call
+        // "newest" tap on the first call
         let base: u16 = 0x3000;
         apu.aram[base as usize] = 0x00;
         apu.aram[(base + 1) as usize] = 0x40; // L = $4000
@@ -1823,7 +1824,10 @@ mod tests {
         // echo_out ≈ $4000, write-back = echo_in(0) + ($4000 * $40)/128
         //   ≈ $2000. The new sample lands at pos 1.
         let (out_l, _) = apu.process_echo(0, 0);
-        assert!(out_l > 0x3F00 && out_l < 0x4100, "FIR pass-through: got ${out_l:04X}");
+        assert!(
+            out_l > 0x3F00 && out_l < 0x4100,
+            "FIR pass-through: got ${out_l:04X}"
+        );
         let (l1, _) = read_echo_sample(&apu, 0x30, 1);
         assert!(l1 > 0x1F00 && l1 < 0x2100, "1st feedback: got ${l1:04X}");
         // Second tick — the FIR's newest tap is now the $2000 we
@@ -2088,15 +2092,17 @@ mod tests {
         // After 5 ticks at +0x20 per tick (with the first tick
         // ramping from age=0): envelope should be ~5 * 0x20 = 0xA0.
         let env = step_gain_voice(gain, 0, 5);
-        assert!(env >= 0x80 && env <= 0xC0, "got {env:#X}");
+        assert!((0x80..=0xC0).contains(&env), "got {env:#X}");
     }
 
     #[test]
     fn gain_custom_linear_decrease_ramps_down_by_0x20() {
-        let gain = 0x80 | (0b00 << 5) | 0x1F; // = 0x9F
+        // bits 6:5 = 0b00 → linear decrease (no need to OR in, but
+        // keep the bit layout explicit by writing `0x80` directly).
+        let gain: u8 = 0x80 | 0x1F; // = 0x9F
         let env = step_gain_voice(gain, 0x7FF, 5);
         // 0x7FF - 5*0x20 = 0x73F; allow some slop.
-        assert!(env >= 0x6E0 && env <= 0x7E0, "got {env:#X}");
+        assert!((0x6E0..=0x7E0).contains(&env), "got {env:#X}");
     }
 
     #[test]
@@ -2204,9 +2210,6 @@ mod tests {
         // Expected ≈ $4000 × TABLE[511] / 2048 × env × vol × mvol
         //          ≈ $4000 × 1305/2048 × ~unity gain ≈ $2800
         // Allow ±20%.
-        assert!(
-            l > 0x2000 && l < 0x3000,
-            "expected ~$2800, got ${l:04X}",
-        );
+        assert!(l > 0x2000 && l < 0x3000, "expected ~$2800, got ${l:04X}",);
     }
 }

@@ -106,6 +106,9 @@ pub fn scanlines_per_frame(region: luna_cartridge::Region) -> u16 {
     }
 }
 
+/// Scanline on which VBlank starts for the given region (the line
+/// the scheduler latches the NMI flag, sets HVBJOY.7, and — if
+/// NMITIMEN.7 is on — triggers an NMI).
 #[inline]
 #[must_use]
 pub fn vblank_start_line(region: luna_cartridge::Region) -> u16 {
