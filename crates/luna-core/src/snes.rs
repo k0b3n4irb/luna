@@ -10,6 +10,7 @@ use crate::cpu_regs::CpuRegs;
 use luna_apu::Apu;
 use luna_bus::hirom::HiRomMapper;
 use luna_bus::lorom::LoRomMapper;
+use luna_bus::sa1::Sa1Mapper;
 use luna_bus::{
     Addr24, Bus, MCycles, Mapper, MapperKind, address_speed, bank_of, make_addr, offset_of,
 };
@@ -140,10 +141,15 @@ impl Snes {
             kind @ (MapperKind::HiRom | MapperKind::ExHiRom) => {
                 Box::new(HiRomMapper::with_kind(kind, cart.rom, sram_bytes))
             }
+            // SA-1 — phase-1 stub: ROM banking + I-RAM + BW-RAM +
+            // multiplier MMIO. The SA-1 65C816 itself doesn't run
+            // yet; games that depend on it making forward progress
+            // will hang past their boot screens.
+            MapperKind::Sa1 => Box::new(Sa1Mapper::new(cart.rom, sram_bytes)),
             other => {
                 panic!(
                     "Cartridge requires coprocessor support not yet implemented: {other:?}. \
-                     SA-1 / Super FX / S-DD1 / SPC7110 will land in their own dedicated phases."
+                     Super FX / S-DD1 / SPC7110 will land in their own dedicated phases."
                 );
             }
         };
