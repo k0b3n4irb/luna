@@ -338,6 +338,16 @@ pub struct Ppu {
     /// BEFORE the write takes effect. Reset to 0 by
     /// [`Ppu::scanline_reset`] at every scanline boundary.
     pub last_flushed_dot: u16,
+
+    /// `true` when the screen is currently being scanned out — i.e.
+    /// not in forced blank (`INIDISP.7 == 0`) AND the current scanline
+    /// is visible (`< vblank_start_line`). Updated by the bus layer
+    /// before every PPU register write. Gap G7: writes to VRAM
+    /// (`$2118/$2119`), CGRAM (`$2122`), and OAM (`$2104`) during
+    /// active display silently DROP the data byte on real hardware —
+    /// the address/latch counter still advances. ares ppu_io.cpp:19-45,
+    /// Mesen2 SnesPpu.cpp:2046-2057 (`CanAccessVram`).
+    pub active_display: bool,
 }
 
 impl Default for Ppu {
@@ -407,6 +417,9 @@ impl Ppu {
             inidisp_write_count: 0,
             framebuffer: vec![[0u8; 3]; FRAME_W * FRAME_H],
             last_flushed_dot: 0,
+            // Post-reset state is forced-blanked (INIDISP=$80), so
+            // active_display starts false.
+            active_display: false,
         }
     }
 
@@ -597,7 +610,7 @@ impl Ppu {
             register::OBSEL => self.obsel = value,
             register::OAMADDL => self.oam.set_address_low(value),
             register::OAMADDH => self.oam.set_address_high(value),
-            register::OAMDATA => self.oam.write(value),
+            register::OAMDATA => self.oam.write_gated(value, !self.active_display),
             register::BGMODE => self.bgmode = value,
             register::MOSAIC => self.mosaic = value,
             register::BG1SC => self.set_bg_tilemap(0, value),
@@ -650,10 +663,10 @@ impl Ppu {
                 let lo = self.vram.address as u8;
                 self.vram.set_address(lo, value);
             }
-            register::VMDATAL => self.vram.write_lo(value),
-            register::VMDATAH => self.vram.write_hi(value),
+            register::VMDATAL => self.vram.write_lo_gated(value, !self.active_display),
+            register::VMDATAH => self.vram.write_hi_gated(value, !self.active_display),
             register::CGADD => self.cgram.set_address(value),
-            register::CGDATA => self.cgram.write(value),
+            register::CGDATA => self.cgram.write_gated(value, !self.active_display),
             register::W12SEL => self.w12sel = value,
             register::W34SEL => self.w34sel = value,
             register::WOBJSEL => self.wobjsel = value,
