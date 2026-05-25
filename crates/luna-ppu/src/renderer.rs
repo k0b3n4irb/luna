@@ -474,10 +474,10 @@ pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
     let table = priority_table(ppu.bgmode);
     let backdrop_bgr5 = cgram_to_bgr5(ppu, 0);
 
-    // Sub-screen colour: in this phase we don't render an actual
-    // sub-screen, just the fixed COLDATA backdrop. CGWSEL bit 1
-    // would enable BG/OBJ on the sub-screen; that's a stretch goal.
-    let sub_bgr5 = (ppu.coldata_r, ppu.coldata_g, ppu.coldata_b);
+    // Fixed COLDATA — the sub operand when CGWSEL bit 1 = 0, or when
+    // bit 1 = 1 but the sub had no real winner (math.transparent
+    // fallback per ares dac.cpp:124-130 / Mesen2 SnesPpu.cpp:1354-1364).
+    let coldata_bgr5 = (ppu.coldata_r, ppu.coldata_g, ppu.coldata_b);
 
     // Pre-compute the per-layer window masks once per frame. Each
     // [bool; 256] tells us whether the layer is BLANKED at that x
@@ -490,7 +490,9 @@ pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
 
     for y in 0..FRAME_H as u16 {
         // Indexed scanlines for the 4 BG layers (transparent = `None`)
-        // plus sprites carrying their 0-3 priority value.
+        // plus sprites carrying their 0-3 priority value. The same
+        // per-layer pixel data drives both the main and sub screens —
+        // only the per-screen TM/TS + TMW/TSW gating differs.
         let bgs: [IndexedScanline; 4] = if is_mode7 {
             [
                 render_mode7_scanline_indexed(ppu, y, opts),
@@ -510,76 +512,40 @@ pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
 
         let off = y as usize * FRAME_W;
         for x in 0..FRAME_W {
-            // Layer-enabled-at-this-pixel decision combines:
-            //   * TM (`$212C`) — global per-layer main-screen enable.
-            //   * TMW (`$212E`) — disable layer INSIDE the combined
-            //     window region for that layer.
-            // If TM.layer = 0, the layer never shows on the main
-            // screen. If TM.layer = 1 AND TMW.layer = 1, the layer
-            // is shown except inside its window. If TM.layer = 1
-            // AND TMW.layer = 0, the layer is always shown.
-            let main_layer_enabled = |layer_idx: usize| -> bool {
+            // Per-screen layer enable. TM/TMW gate the main screen,
+            // TS/TSW gate the sub screen. If TM.layer = 1 AND TMW.layer
+            // = 1 the layer is hidden inside its window; if TM.layer
+            // = 0 the layer never appears on main. (Same for TS/TSW.)
+            let screen_layer_enabled = |layer_idx: usize, en_mask: u8, win_mask: u8| -> bool {
                 let layer_bit = 1u8 << layer_idx;
-                if ppu.tm & layer_bit == 0 {
+                if en_mask & layer_bit == 0 {
                     return false;
                 }
-                if ppu.tmw & layer_bit != 0 && masks.combined[layer_idx][x] {
+                if win_mask & layer_bit != 0 && masks.combined[layer_idx][x] {
                     return false;
                 }
                 true
             };
 
-            // Walk the priority table top-to-bottom; first hit wins.
-            // Track which layer won so colour math can consult the
-            // corresponding CGADSUB enable bit. `winner_layer` =
-            //   0..=3 → BG1..BG4
-            //   4     → OBJ
-            //   5     → backdrop
-            let mut main_bgr5 = backdrop_bgr5;
-            let mut winner_layer: u8 = 5;
-            let mut winner_cgram: u8 = 0;
-            for slot in table {
-                let layer_idx = match slot.kind {
-                    LayerKind::Bg => slot.idx as usize,
-                    LayerKind::Obj => 4,
-                };
-                if !main_layer_enabled(layer_idx) {
-                    continue;
-                }
-                let candidate = match slot.kind {
-                    LayerKind::Bg => bgs[slot.idx as usize][x]
-                        .and_then(|(cg, prio)| (prio == slot.bg_prio).then_some(cg)),
-                    LayerKind::Obj => {
-                        sprites[x].and_then(|(cg, prio)| (prio == slot.idx).then_some(cg))
-                    }
-                };
-                if let Some(cgram_idx) = candidate {
-                    // Direct colour mode (CGWSEL.0) — only applies to
-                    // 8bpp BG layers (and Mode-7, which is the only
-                    // 8bpp layer in mode 7). The would-be CGRAM index
-                    // is reinterpreted as a packed BBGGGRRR triplet.
-                    let direct = ppu.cgwsel & 0x01 != 0
-                        && matches!(slot.kind, LayerKind::Bg)
-                        && bg_bpp(ppu.bgmode, slot.idx as usize) == 8;
-                    main_bgr5 = if direct {
-                        direct_color_to_bgr5(cgram_idx)
-                    } else {
-                        cgram_to_bgr5(ppu, cgram_idx)
-                    };
-                    winner_layer = layer_idx as u8;
-                    winner_cgram = cgram_idx;
-                    break;
-                }
-            }
-            // Colour math: CGADSUB layer-enable bits gate whether
-            // THIS pixel's main-screen layer participates.
-            //   bit 0..=3 = BG1..BG4
-            //   bit 4 = OBJ (palettes 4-7 only)
-            //   bit 5 = backdrop
-            // CGWSEL bits 5:4 select the math-enable region using
-            // the dedicated colour-math window mask (layer 5):
-            //   00 = always; 01 = inside math window;
-            //   10 = outside math window; 11 = never.
+            // Pick the main-screen winner using TM/TMW.
+            let main = pick_pixel_winner(ppu, table, &bgs, &sprites, x, backdrop_bgr5, |li| {
+                screen_layer_enabled(li, ppu.tm, ppu.tmw)
+            });
+
+            // Pick the sub-screen winner using TS/TSW. Same priority
+            // table as the main screen — both refs walk the same
+            // BG/OBJ slot order (ares dac.cpp:43-80 / Mesen2 RenderTilemap
+            // with drawSub=true).
+            let sub = pick_pixel_winner(ppu, table, &bgs, &sprites, x, backdrop_bgr5, |li| {
+                screen_layer_enabled(li, ppu.ts, ppu.tsw)
+            });
+
+            // Colour math gates:
+            //   * CGADSUB bits 0..4 = per-layer enable; bit 5 = backdrop.
+            //   * CGWSEL bits 5:4 = per-region enable using the colour-
+            //     math window mask (layer index 5).
+            //   * OBJ math also requires the winner palette ≥ 4 (i.e.
+            //     CGRAM index ≥ 192) — see ares dac.cpp:103-107.
             let in_math_window = masks.combined[5][x];
             let math_globally_enabled = match (ppu.cgwsel >> 4) & 0x03 {
                 0 => true,
@@ -588,24 +554,38 @@ pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
                 _ => false,
             };
             let layer_enabled_for_math = if math_globally_enabled {
-                match winner_layer {
-                    0..=3 => ppu.cgadsub & (1 << winner_layer) != 0,
-                    4 => {
-                        // Only OBJ palettes 4-7 participate. Sprite
-                        // CGRAM indices start at 128; palette `p`
-                        // begins at 128 + p*16. So palette ≥ 4 ⇒
-                        // CGRAM index ≥ 192.
-                        (ppu.cgadsub & 0x10) != 0 && winner_cgram >= 192
-                    }
+                match main.layer {
+                    0..=3 => ppu.cgadsub & (1 << main.layer) != 0,
+                    4 => (ppu.cgadsub & 0x10) != 0 && main.cgram_idx >= 192,
                     _ => ppu.cgadsub & 0x20 != 0, // backdrop
                 }
             } else {
                 false
             };
-            let rgb5 = if layer_enabled_for_math {
-                color_math(main_bgr5, sub_bgr5, ppu.cgadsub)
+
+            // CGWSEL bit 1 selects the math operand source:
+            //   0 → fixed COLDATA always.
+            //   1 → sub-screen winner pixel; if the sub had no real
+            //       layer winner (just the sub backdrop), fall back to
+            //       COLDATA AND disable halve for this dot. ares
+            //       dac.cpp:124-130 / Mesen2 SnesPpu.cpp:1354-1364.
+            let subtract = ppu.cgadsub & 0x80 != 0;
+            let mut half = ppu.cgadsub & 0x40 != 0;
+            let math_operand = if ppu.cgwsel & 0x02 != 0 {
+                if sub.real_layer {
+                    sub.bgr5
+                } else {
+                    half = false;
+                    coldata_bgr5
+                }
             } else {
-                main_bgr5
+                coldata_bgr5
+            };
+
+            let rgb5 = if layer_enabled_for_math {
+                color_math(main.bgr5, math_operand, subtract, half)
+            } else {
+                main.bgr5
             };
             // CGWSEL bits 7:6 — "force main screen black" region.
             // Per ares (window.cpp:36-38 + dac.cpp:120-122) and Mesen2
@@ -860,11 +840,81 @@ fn direct_color_to_bgr5(palette_index: u8) -> (u8, u8, u8) {
 }
 
 /// SNES colour-math arithmetic — add or subtract a 5-bit sub-screen
+/// Winner record for a single pixel on one screen (main or sub).
+#[derive(Debug, Clone, Copy)]
+struct PixelWinner {
+    /// 5-bit BGR triplet for this pixel.
+    bgr5: (u8, u8, u8),
+    /// Which layer drew it. `0..=3` = BG1..BG4, `4` = OBJ, `5` = backdrop.
+    layer: u8,
+    /// CGRAM index of the winning pixel — needed for the OBJ palette
+    /// ≥ 4 gate (only sprites with palette ≥ 4, i.e. CGRAM index ≥ 192,
+    /// participate in color math; ares dac.cpp:103-107).
+    cgram_idx: u8,
+    /// `true` when a BG or OBJ layer drew, `false` when only the
+    /// backdrop is the result. Used by the math.transparent fallback
+    /// for the sub screen (ares dac.cpp:69, 124-130 / Mesen2
+    /// SnesPpu.cpp:1354-1364).
+    real_layer: bool,
+}
+
+/// Walk the priority table for one screen and return the winning pixel.
+/// The screen-specific enable+window gating is supplied via the
+/// `is_enabled` predicate (TM/TMW for main, TS/TSW for sub). Direct
+/// color (CGWSEL bit 0) is applied here for 8bpp BG layers.
+fn pick_pixel_winner(
+    ppu: &Ppu,
+    table: &[LayerSlot],
+    bgs: &[IndexedScanline; 4],
+    sprites: &IndexedScanline,
+    x: usize,
+    backdrop_bgr5: (u8, u8, u8),
+    is_enabled: impl Fn(usize) -> bool,
+) -> PixelWinner {
+    for slot in table {
+        let layer_idx = match slot.kind {
+            LayerKind::Bg => slot.idx as usize,
+            LayerKind::Obj => 4,
+        };
+        if !is_enabled(layer_idx) {
+            continue;
+        }
+        let candidate = match slot.kind {
+            LayerKind::Bg => bgs[slot.idx as usize][x]
+                .and_then(|(cg, prio)| (prio == slot.bg_prio).then_some(cg)),
+            LayerKind::Obj => sprites[x].and_then(|(cg, prio)| (prio == slot.idx).then_some(cg)),
+        };
+        if let Some(cgram_idx) = candidate {
+            let direct = ppu.cgwsel & 0x01 != 0
+                && matches!(slot.kind, LayerKind::Bg)
+                && bg_bpp(ppu.bgmode, slot.idx as usize) == 8;
+            let bgr5 = if direct {
+                direct_color_to_bgr5(cgram_idx)
+            } else {
+                cgram_to_bgr5(ppu, cgram_idx)
+            };
+            return PixelWinner {
+                bgr5,
+                layer: layer_idx as u8,
+                cgram_idx,
+                real_layer: true,
+            };
+        }
+    }
+    PixelWinner {
+        bgr5: backdrop_bgr5,
+        layer: 5,
+        cgram_idx: 0,
+        real_layer: false,
+    }
+}
+
 /// colour from a 5-bit main-screen colour, optionally halving the
-/// result. CGADSUB bit 7 = subtract, bit 6 = half.
-fn color_math(main: (u8, u8, u8), sub: (u8, u8, u8), cgadsub: u8) -> (u8, u8, u8) {
-    let subtract = cgadsub & 0x80 != 0;
-    let half = cgadsub & 0x40 != 0;
+/// result. `subtract` and `half` are passed explicitly so the caller
+/// can override `half` (the math.transparent empty-sub fallback wants
+/// to disable halve even though CGADSUB bit 6 is set — see ares
+/// dac.cpp:124-130 / Mesen2 SnesPpu.cpp:1354-1364).
+fn color_math(main: (u8, u8, u8), sub: (u8, u8, u8), subtract: bool, half: bool) -> (u8, u8, u8) {
     let combine = |m: u8, s: u8| -> u8 {
         let m = i32::from(m);
         let s = i32::from(s);
@@ -1841,6 +1891,96 @@ mod tests {
         // Palette-0 sprite is excluded from math by spec → output
         // unchanged.
         assert_eq!(baseline, with_math_on_palette_0);
+    }
+
+    #[test]
+    fn cgwsel_bit1_clear_uses_coldata_even_when_sub_has_winner() {
+        // CGWSEL bit 1 = 0 → math operand is the fixed COLDATA,
+        // regardless of whether the sub-screen has a real winner.
+        // Setup: BG1 (red) visible on BOTH main and sub (TM=TS=0x01)
+        // so the sub HAS a real winner; CGADSUB+BG1 add; COLDATA =
+        // max blue. With bit 1 = 0 the operand is COLDATA = blue,
+        // result has a blue contribution. Flip bit 1 = 1 and the
+        // operand becomes the sub BG1 pixel (red), blue stays 0.
+        let mut p = setup_demo_tile();
+        p.write(register::BGMODE, 0x01);
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::TM, 0x01);
+        p.write(register::TS, 0x01);
+        p.write(register::CGADSUB, 0x01); // BG1 add, no halve
+        p.write(register::COLDATA, 0x9F); // B = max
+        p.write(register::CGWSEL, 0b0000_0000); // bit 1 = 0 → COLDATA
+        let coldata_path = render_frame_with(&p, RenderOptions::default());
+        p.write(register::CGWSEL, 0b0000_0010); // bit 1 = 1 → sub pixel
+        let sub_path = render_frame_with(&p, RenderOptions::default());
+        // x=0 → BG1 red. Blue channel discriminates: COLDATA path
+        // gains blue from the fixed colour; sub path stays blue=0
+        // because the sub BG1 winner is also red.
+        assert!(
+            coldata_path[0][2] > sub_path[0][2],
+            "bit1=0 must add COLDATA blue: coldata_path {:?} sub_path {:?}",
+            coldata_path[0],
+            sub_path[0],
+        );
+        assert_eq!(sub_path[0][2], 0, "sub-pixel operand carries no blue");
+    }
+
+    #[test]
+    fn cgwsel_bit1_set_uses_sub_pixel_when_sub_has_winner() {
+        // CGWSEL bit 1 = 1 + a real sub-screen layer winner → math
+        // operand is the sub pixel, not COLDATA. Setup: BG1 on TM,
+        // BG1 on TS, COLDATA = max blue, CGADSUB BG1 add. Bit 1 = 0
+        // would yield main_red + blue_coldata = magenta-ish. Bit 1 = 1
+        // yields main_red + sub_red (red doubled), no blue from COLDATA.
+        let mut p = setup_demo_tile();
+        p.write(register::BGMODE, 0x01);
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::TM, 0x01);
+        p.write(register::TS, 0x01);
+        p.write(register::CGADSUB, 0x01); // BG1 add, no halve
+        p.write(register::COLDATA, 0x9F); // B = max
+        p.write(register::CGWSEL, 0b0000_0010); // bit 1 = 1
+        let out = render_frame_with(&p, RenderOptions::default());
+        // x=0 → BG1 colour 1 (red, $001F = R=31 G=0 B=0).
+        // Sub winner at x=0 is also BG1 red. operand = red, NOT blue.
+        // So the blue channel does NOT pick up COLDATA's blue.
+        assert_eq!(
+            out[0][2], 0,
+            "operand from sub winner, COLDATA blue must NOT contribute; got {:?}",
+            out[0],
+        );
+    }
+
+    #[test]
+    fn cgwsel_bit1_set_falls_back_to_coldata_with_halve_disabled_when_sub_empty() {
+        // G4 / math.transparent fallback: when CGWSEL bit 1 = 1 but
+        // the sub has no real layer winner (only the sub backdrop),
+        // both ares (dac.cpp:124-130) and Mesen2 (SnesPpu.cpp:1354-1364)
+        // substitute the FIXED COLDATA as the math operand AND disable
+        // the halve for that dot. Without G4, the empty-sub case would
+        // still halve, darkening pixels incorrectly.
+        let mut p = setup_demo_tile();
+        p.write(register::BGMODE, 0x01);
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::TM, 0x01); // BG1 on main
+        p.write(register::TS, 0x00); // nothing on sub → sub winner = backdrop
+        // CGADSUB: BG1 add, HALVE ON. Without G4, halve would survive
+        // and the result would be (main+coldata)/2.
+        p.write(register::CGADSUB, 0x41); // bit 6 halve + bit 0 BG1
+        p.write(register::COLDATA, 0x9F); // B = max
+        p.write(register::CGWSEL, 0b0000_0010); // bit 1 = 1
+        let out = render_frame_with(&p, RenderOptions::default());
+        // Baseline: same configuration but with halve OFF and bit 1
+        // = 0 (so operand is forced to COLDATA via the other branch).
+        // If G4 is honoured, the two paths produce the SAME result.
+        p.write(register::CGADSUB, 0x01); // halve off, BG1 still add
+        p.write(register::CGWSEL, 0b0000_0000); // bit 1 = 0 → COLDATA
+        let baseline = render_frame_with(&p, RenderOptions::default());
+        assert_eq!(
+            out[0], baseline[0],
+            "G4: empty-sub fallback must use COLDATA with halve off; got {:?} baseline {:?}",
+            out[0], baseline[0],
+        );
     }
 
     #[test]
