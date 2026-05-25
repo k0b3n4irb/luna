@@ -38,10 +38,13 @@ impl Cpu {
         // would never reach line 225. 8 mclk ≈ one "slow" bus tick; the
         // exact value doesn't matter as long as it's > 0.
         if self.waiting {
-            // Both NMI and (unmasked) IRQ wake the CPU from WAI. The
-            // service of either fires below in the normal interrupt
-            // path; here we just clear the waiting flag.
-            if self.pending_nmi || (self.pending_irq && !self.p.contains(bit::I)) {
+            // Per ares' `irq.cpp` `nmiTest()` / `irqTest()`: both NMI
+            // and IRQ wake the CPU from WAI, *regardless of the I
+            // flag*. The I flag only gates whether the IRQ vector is
+            // actually taken; the WAI wake-up is unconditional. Games
+            // that `SEI; WAI; BRA -3` rely on this — the IRQ wakes
+            // them but the handler isn't entered.
+            if self.pending_nmi || self.pending_irq {
                 self.waiting = false;
             } else {
                 bus.io_cycle(WAI_TICK_MCYCLES);
