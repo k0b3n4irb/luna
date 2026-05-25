@@ -17,6 +17,7 @@ use std::path::Path;
 
 use luna_cartridge::{CartError, Cartridge};
 use luna_core::Snes;
+pub use luna_core::{MailboxEvent, MailboxEventKind};
 use luna_ppu::FRAME_H;
 use luna_ppu::FRAME_W;
 use serde::Serialize;
@@ -625,6 +626,24 @@ impl Emulator {
         snes.cpu.pb = saved_pb;
         out.extend_from_slice(&bytes);
         Ok(out)
+    }
+
+    /// Enable APU mailbox (`$2140-$2143`) event logging. Every CPU
+    /// read or write of those ports from this point onward is captured
+    /// in an in-memory ring buffer that the caller can drain with
+    /// [`Emulator::take_mailbox_log`]. Cheap when disabled.
+    pub fn enable_mailbox_log(&mut self) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.enable_mailbox_log();
+        Ok(())
+    }
+
+    /// Take ownership of the accumulated mailbox events, resetting the
+    /// buffer to empty. Returns an empty `Vec` if logging is disabled
+    /// or no events were captured.
+    pub fn take_mailbox_log(&mut self) -> Result<Vec<MailboxEvent>, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        Ok(snes.take_mailbox_log())
     }
 
     /// Direct read of the SPC700's ARAM. Read-only, no bus side
