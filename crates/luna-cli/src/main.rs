@@ -101,6 +101,13 @@ enum Command {
         /// Up/Down/Left/Right(11..8) A(7) X(6) L(5) R(4).
         #[arg(long)]
         input: Option<String>,
+        /// Optional memory peek(s) after snapshot.  Format:
+        /// `BANK:OFFSET:COUNT` (all hex, no `0x` prefix).  Can be
+        /// specified multiple times.  Output goes to stderr as a
+        /// labelled hex dump.  Example: `--peek 7E:0200:220` reads
+        /// 544 bytes of SMW shadow-OAM.
+        #[arg(long = "peek")]
+        peek: Vec<String>,
     },
 }
 
@@ -130,6 +137,7 @@ fn main() -> ExitCode {
             screenshot,
             audio_out,
             input,
+            peek,
         } => run_state(
             &rom,
             steps,
@@ -137,6 +145,7 @@ fn main() -> ExitCode {
             screenshot.as_deref(),
             audio_out.as_deref(),
             input.as_deref(),
+            &peek,
         ),
     }
 }
@@ -195,6 +204,34 @@ fn parse_input_script(script: &str) -> Result<Vec<(u64, u16)>, String> {
     Ok(out)
 }
 
+/// Parse a `BANK:OFFSET:COUNT` peek spec (all hex, no `0x` prefix).
+fn parse_peek_spec(spec: &str) -> Result<(u8, u16, u16), String> {
+    let parts: Vec<&str> = spec.split(':').collect();
+    if parts.len() != 3 {
+        return Err(format!("expected BANK:OFFSET:COUNT, got `{spec}`"));
+    }
+    let bank = u8::from_str_radix(parts[0].trim(), 16)
+        .map_err(|e| format!("bad bank `{}`: {e}", parts[0]))?;
+    let offset = u16::from_str_radix(parts[1].trim(), 16)
+        .map_err(|e| format!("bad offset `{}`: {e}", parts[1]))?;
+    let count = u16::from_str_radix(parts[2].trim(), 16)
+        .map_err(|e| format!("bad count `{}`: {e}", parts[2]))?;
+    Ok((bank, offset, count))
+}
+
+/// Print a 16-bytes-per-row hex dump to stderr.
+fn print_hex_dump(bank: u8, base: u16, bytes: &[u8]) {
+    for (row_idx, chunk) in bytes.chunks(16).enumerate() {
+        let addr = (u32::from(bank) << 16) | (u32::from(base) + (row_idx as u32 * 16));
+        let hex: String = chunk
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        eprintln!("  ${addr:06X}  {hex}");
+    }
+}
+
 /// `luna state` — exercise the public `luna-api` surface end-to-end.
 fn run_state(
     rom: &std::path::Path,
@@ -203,6 +240,7 @@ fn run_state(
     screenshot: Option<&std::path::Path>,
     audio_out: Option<&std::path::Path>,
     input_script: Option<&str>,
+    peek_specs: &[String],
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
     if let Err(e) = em.load_rom(rom) {
@@ -245,6 +283,19 @@ fn run_state(
             // Step errors are informational — we still want a state
             // snapshot.
             eprintln!("step warning: {e}");
+        }
+    }
+
+    for spec in peek_specs {
+        match parse_peek_spec(spec) {
+            Ok((bank, offset, count)) => match em.peek_memory(bank, offset, count) {
+                Ok(bytes) => {
+                    eprintln!("peek ${:02X}:{:04X} +{:04X}:", bank, offset, bytes.len());
+                    print_hex_dump(bank, offset, &bytes);
+                }
+                Err(e) => eprintln!("error: peek_memory `{spec}`: {e}"),
+            },
+            Err(e) => eprintln!("error: --peek `{spec}`: {e}"),
         }
     }
 

@@ -139,6 +139,59 @@ pub struct PpuState {
     /// X-bit-8). Together with `oam_low_excerpt` reconstructs the
     /// full state for the first 16 sprites.
     pub oam_high_excerpt: Vec<u8>,
+    /// `$212C` TM — main-screen layer enable (bits 0..4 = BG1..BG4, OBJ).
+    pub tm: u8,
+    /// `$212D` TS — sub-screen layer enable.
+    pub ts: u8,
+    /// `$212E` TMW — main-screen window-clip mask.
+    pub tmw: u8,
+    /// `$212F` TSW — sub-screen window-clip mask.
+    pub tsw: u8,
+    /// `$2130` CGWSEL.
+    pub cgwsel: u8,
+    /// `$2131` CGADSUB.
+    pub cgadsub: u8,
+    /// `$2132` COLDATA red channel.
+    pub coldata_r: u8,
+    /// `$2132` COLDATA green channel.
+    pub coldata_g: u8,
+    /// `$2132` COLDATA blue channel.
+    pub coldata_b: u8,
+    /// `$2133` SETINI.
+    pub setini: u8,
+    /// `$2123` W12SEL.
+    pub w12sel: u8,
+    /// `$2124` W34SEL.
+    pub w34sel: u8,
+    /// `$2125` WOBJSEL.
+    pub wobjsel: u8,
+    /// `$212A` WBGLOG.
+    pub wbglog: u8,
+    /// `$212B` WOBJLOG.
+    pub wobjlog: u8,
+    /// `$2126..$2129` window left/right edges (WH0..WH3).
+    pub windows: [u8; 4],
+    /// Per-BG state: tilemap base, char base, scrolls, tilemap size.
+    pub bgs: [BgInfo; 4],
+    /// CGRAM dump — 256 BGR555 colours.
+    pub cgram: Vec<u16>,
+    /// Full OAM dump — 544 bytes (512 low table + 32 high table).
+    pub oam_full: Vec<u8>,
+}
+
+/// Per-BG serialisable view.
+#[derive(Debug, Clone, Copy, Serialize, schemars::JsonSchema)]
+pub struct BgInfo {
+    /// VRAM word address of the tilemap base ($2107..$210A).
+    pub tilemap_addr_words: u16,
+    /// VRAM word address of the character (tile) base.
+    pub char_addr_words: u16,
+    /// 10-bit horizontal scroll.
+    pub h_scroll: u16,
+    /// 10-bit vertical scroll.
+    pub v_scroll: u16,
+    /// BG*SC tilemap-size bits (0=32×32, 1=64×32, 2=32×64, 3=64×64).
+    pub tilemap_size: u8,
 }
 
 /// CPU-system register snapshot (`$4200-$421F`).
@@ -415,6 +468,15 @@ impl Emulator {
             // of high table.
             let oam_low_excerpt: Vec<u8> = (0..64u16).map(|i| s.ppu.oam.peek(i)).collect();
             let oam_high_excerpt: Vec<u8> = (0..4u16).map(|i| s.ppu.oam.peek(0x200 + i)).collect();
+            let cgram: Vec<u16> = (0..256u16).map(|i| s.ppu.cgram.color(i as u8)).collect();
+            let oam_full: Vec<u8> = (0..0x220u16).map(|i| s.ppu.oam.peek(i)).collect();
+            let bgs = std::array::from_fn(|i| BgInfo {
+                tilemap_addr_words: s.ppu.bg[i].tilemap_addr_words,
+                char_addr_words: s.ppu.bg[i].char_addr_words,
+                h_scroll: s.ppu.bg[i].h_scroll,
+                v_scroll: s.ppu.bg[i].v_scroll,
+                tilemap_size: s.ppu.bg[i].tilemap_size,
+            });
             PpuState {
                 inidisp: s.ppu.inidisp,
                 bgmode: s.ppu.bgmode,
@@ -427,6 +489,25 @@ impl Emulator {
                 oam_non_zero: oam_nz,
                 oam_low_excerpt,
                 oam_high_excerpt,
+                tm: s.ppu.tm,
+                ts: s.ppu.ts,
+                tmw: s.ppu.tmw,
+                tsw: s.ppu.tsw,
+                cgwsel: s.ppu.cgwsel,
+                cgadsub: s.ppu.cgadsub,
+                coldata_r: s.ppu.coldata_r,
+                coldata_g: s.ppu.coldata_g,
+                coldata_b: s.ppu.coldata_b,
+                setini: s.ppu.setini,
+                w12sel: s.ppu.w12sel,
+                w34sel: s.ppu.w34sel,
+                wobjsel: s.ppu.wobjsel,
+                wbglog: s.ppu.wbglog,
+                wobjlog: s.ppu.wobjlog,
+                windows: [s.ppu.wh0, s.ppu.wh1, s.ppu.wh2, s.ppu.wh3],
+                bgs,
+                cgram,
+                oam_full,
             }
         });
         let cpu_regs = self
@@ -573,6 +654,31 @@ fn default_ppu_state() -> PpuState {
         oam_non_zero: 0,
         oam_low_excerpt: Vec::new(),
         oam_high_excerpt: Vec::new(),
+        tm: 0,
+        ts: 0,
+        tmw: 0,
+        tsw: 0,
+        cgwsel: 0,
+        cgadsub: 0,
+        coldata_r: 0,
+        coldata_g: 0,
+        coldata_b: 0,
+        setini: 0,
+        w12sel: 0,
+        w34sel: 0,
+        wobjsel: 0,
+        wbglog: 0,
+        wobjlog: 0,
+        windows: [0; 4],
+        bgs: [BgInfo {
+            tilemap_addr_words: 0,
+            char_addr_words: 0,
+            h_scroll: 0,
+            v_scroll: 0,
+            tilemap_size: 0,
+        }; 4],
+        cgram: Vec::new(),
+        oam_full: Vec::new(),
     }
 }
 
