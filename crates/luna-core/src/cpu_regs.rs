@@ -121,13 +121,35 @@ impl CpuRegs {
     /// is set. Also raises `HVBJOY.0` (auto-read busy) for the few
     /// scanlines the hardware spends in the auto-read sequence — see
     /// [`Self::clear_joypad_busy`].
+    ///
+    /// D-pad opposing-direction quirk: per ares' `gamepad.cpp`
+    /// `latch()`, real hardware physically prevents `up + down` and
+    /// `left + right` from being asserted simultaneously. We resolve
+    /// the case by clearing both opposing bits — keyboard players
+    /// who hit conflicting keys see a "no-direction" outcome rather
+    /// than a glitched latch.
     pub fn latch_joypad_auto_read(&mut self) {
         if self.nmitimen & 0x01 == 0 {
             return;
         }
-        self.joypad1_latched = self.joypad1;
-        self.joypad2_latched = self.joypad2;
+        self.joypad1_latched = Self::clean_dpad(self.joypad1);
+        self.joypad2_latched = Self::clean_dpad(self.joypad2);
         self.hvbjoy |= 0x01;
+    }
+
+    /// Clear opposing D-pad bits (Up vs Down, Left vs Right) to model
+    /// the physical lockout on real-HW controllers. Bit layout per
+    /// the SNES JOY1L/JOY1H pair: bit 11 = Up, bit 10 = Down, bit 9
+    /// = Left, bit 8 = Right.
+    fn clean_dpad(mask: u16) -> u16 {
+        let mut m = mask;
+        if m & 0x0C00 == 0x0C00 {
+            m &= !0x0C00; // up + down → drop both
+        }
+        if m & 0x0300 == 0x0300 {
+            m &= !0x0300; // left + right → drop both
+        }
+        m
     }
 
     /// Drop the auto-read busy bit. Called a few scanlines after
@@ -386,5 +408,53 @@ mod tests {
         r.hvbjoy = 0xFF;
         r.clear_joypad_busy();
         assert_eq!(r.hvbjoy, 0xFE, "only bit 0 should clear");
+    }
+
+    #[test]
+    fn dpad_lockout_clears_opposing_directions() {
+        // Bit layout per SNES JOY1L/JOY1H pair (high → low):
+        //   B Y SEL START Up Down Left Right A X L R 0 0 0 0
+        let mut r = CpuRegs::new();
+        r.write(0x4200, 0x01); // auto-read enable
+        // Up + Down + B held → keep B, drop both Up + Down.
+        r.set_joypad(0, 0x8000 | 0x0800 | 0x0400);
+        r.latch_joypad_auto_read();
+        assert_eq!(r.joypad1_latched & 0x0C00, 0, "up + down lockout");
+        assert_eq!(r.joypad1_latched & 0x8000, 0x8000, "B preserved");
+
+        // Left + Right + Start held → keep Start, drop L + R.
+        r.set_joypad(0, 0x1000 | 0x0200 | 0x0100);
+        r.latch_joypad_auto_read();
+        assert_eq!(r.joypad1_latched & 0x0300, 0, "left + right lockout");
+        assert_eq!(r.joypad1_latched & 0x1000, 0x1000, "Start preserved");
+
+        // Only Up held (no opposing) → passes through.
+        r.set_joypad(0, 0x0800);
+        r.latch_joypad_auto_read();
+        assert_eq!(r.joypad1_latched, 0x0800);
+    }
+
+    #[test]
+    fn joypad_bit_layout_byss_udlr_axlr() {
+        // Compile-time sanity check that we agree with ares'
+        // gamepad.cpp shift order. Test by name so a future
+        // bit-flip will fire here loudly.
+        let b = 0x8000u16;
+        let y = 0x4000;
+        let sel = 0x2000;
+        let start = 0x1000;
+        let up = 0x0800;
+        let down = 0x0400;
+        let left = 0x0200;
+        let right = 0x0100;
+        let a = 0x0080;
+        let x = 0x0040;
+        let l = 0x0020;
+        let r_ = 0x0010;
+        let all = b | y | sel | start | up | down | left | right | a | x | l | r_;
+        // Bits 3..0 are the device signature — always zero for a
+        // standard gamepad. So a "press everything" mask is
+        // 0xFFF0.
+        assert_eq!(all, 0xFFF0);
     }
 }

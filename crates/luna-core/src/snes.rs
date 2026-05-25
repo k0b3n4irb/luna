@@ -368,7 +368,18 @@ impl Snes {
             // Joypad auto-read: hardware copies the live pad state
             // into $4218-$421F at the start of every VBlank when
             // NMITIMEN.0 is set. Busy bit clears a few lines later.
+            //
+            // Per ares' `controllerPort.latch()` chained off the
+            // auto-poll counter rollover, the same auto-read pulse
+            // also re-arms the manual-mode shift register. Games
+            // that read $4016/$4017 right after the auto-read
+            // window expect the shift register to reflect the
+            // just-latched controller state.
             self.cpu_regs.latch_joypad_auto_read();
+            if self.cpu_regs.nmitimen & 0x01 != 0 {
+                self.joypad1_shift = self.cpu_regs.joypad1_latched;
+                self.joypad2_shift = self.cpu_regs.joypad2_latched;
+            }
         } else if self.ppu_line == vblank_start + 3 {
             // ~3 scanlines after VBlank entry the auto-read sequence
             // is done. Drop HVBJOY.0 so polling games see ready.
