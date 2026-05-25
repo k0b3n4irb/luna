@@ -213,7 +213,9 @@ fn fill_buffer_i16(
 /// `[-1.0, 1.0]`. Returns `None` on an empty ring so the resampler
 /// can hold its current sample rather than ramp toward zero.
 fn pop_input(consumer: &mut ringbuf::HeapCons<(i16, i16)>) -> Option<(f32, f32)> {
-    consumer.try_pop().map(|(l, r)| (i16_to_f32(l), i16_to_f32(r)))
+    consumer
+        .try_pop()
+        .map(|(l, r)| (i16_to_f32(l), i16_to_f32(r)))
 }
 
 fn i16_to_f32(v: i16) -> f32 {
@@ -253,10 +255,7 @@ impl Resampler {
         }
     }
 
-    pub(crate) fn pull(
-        &mut self,
-        mut pop_input: impl FnMut() -> Option<(f32, f32)>,
-    ) -> (f32, f32) {
+    pub(crate) fn pull(&mut self, mut pop_input: impl FnMut() -> Option<(f32, f32)>) -> (f32, f32) {
         let l = self.cur.0 + (self.next.0 - self.cur.0) * self.frac;
         let r = self.cur.1 + (self.next.1 - self.cur.1) * self.frac;
         self.frac += self.step;
@@ -332,11 +331,7 @@ mod tests {
         for _ in 0..200 {
             r.pull(|| {
                 count += 1;
-                if count <= 2 {
-                    Some((0.5, -0.5))
-                } else {
-                    None
-                }
+                if count <= 2 { Some((0.5, -0.5)) } else { None }
             });
         }
         // After 200 outputs at step=0.667 we've asked for 0.667*200
