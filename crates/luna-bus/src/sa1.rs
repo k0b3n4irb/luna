@@ -260,6 +260,112 @@ impl Sa1Mapper {
         }
     }
 
+    /// Run a Type-1 Character-Conversion DMA — convert a linear
+    /// `bpp`-packed bitmap at SDA into SNES planar tile data at DDA.
+    /// Tile data is laid out in raster (left-to-right, top-to-bottom)
+    /// order so destination consumers can stream it straight into a
+    /// VRAM-bound DMA channel.
+    ///
+    /// CDMA layout:
+    ///   * bits 4..2 = colour mode (`0`=8bpp, `1`=4bpp, `2`=2bpp)
+    ///   * bits 1..0 = virtual bitmap width
+    ///     (`0`=8 / `1`=16 / `2`=32 / `3`=64 tiles wide)
+    ///
+    /// Source pixel-byte packing (per Anomie's SA-1 reference):
+    ///   * 8bpp — 1 byte/pixel
+    ///   * 4bpp — 2 pixels/byte, leftmost pixel in high nibble
+    ///   * 2bpp — 4 pixels/byte, leftmost pixel in bits 7..6
+    ///
+    /// DTC defines the number of *output* bytes to produce; we floor
+    /// that to a whole-tile multiple.
+    ///
+    /// On completion: clears DCNT.7, raises `cc1_irq_to_main`.
+    fn run_cc1_dma(&mut self) {
+        let bpp = match (self.cdma >> 2) & 0x07 {
+            0 => 8,
+            1 => 4,
+            2 => 2,
+            _ => 8, // reserved → keep going at 8bpp rather than panic
+        };
+        let tile_width_tiles: u32 = 8u32 << (self.cdma & 0x03);
+        let bytes_per_tile: u32 = (bpp as u32) * 8;
+        let total_out = u32::from(self.dtc);
+        let num_tiles = total_out / bytes_per_tile;
+        // Pixel-row stride within the source bitmap (bytes per row).
+        let row_stride = tile_width_tiles * (bpp as u32);
+
+        for tile_idx in 0..num_tiles {
+            let tile_col = tile_idx % tile_width_tiles;
+            let tile_row = tile_idx / tile_width_tiles;
+            let mut tile_buf = [0u8; 64];
+
+            for row in 0u32..8 {
+                let pixel_row = tile_row * 8 + row;
+                let src_row_off = pixel_row
+                    .wrapping_mul(row_stride)
+                    .wrapping_add(tile_col * (bpp as u32));
+
+                // Pull `bpp` source bytes for one pixel-row of one tile.
+                let mut src_bytes = [0u8; 8];
+                for (k, slot) in src_bytes.iter_mut().enumerate().take(bpp) {
+                    let a = self.sda.wrapping_add(src_row_off + k as u32) & 0x00FF_FFFF;
+                    *slot = self.read(a).unwrap_or(0);
+                }
+
+                // Decode 8 pixel indices.
+                let mut pixels = [0u8; 8];
+                match bpp {
+                    2 => {
+                        for byte_idx in 0..2 {
+                            let b = src_bytes[byte_idx];
+                            pixels[byte_idx * 4] = (b >> 6) & 0x03;
+                            pixels[byte_idx * 4 + 1] = (b >> 4) & 0x03;
+                            pixels[byte_idx * 4 + 2] = (b >> 2) & 0x03;
+                            pixels[byte_idx * 4 + 3] = b & 0x03;
+                        }
+                    }
+                    4 => {
+                        for byte_idx in 0..4 {
+                            let b = src_bytes[byte_idx];
+                            pixels[byte_idx * 2] = b >> 4;
+                            pixels[byte_idx * 2 + 1] = b & 0x0F;
+                        }
+                    }
+                    _ => {
+                        // 8bpp — direct passthrough.
+                        pixels.copy_from_slice(&src_bytes);
+                    }
+                }
+
+                // Compose planar bytes. SNES tile format: per-row
+                // bp0/bp1 interleaved in bytes 0..16, bp2/bp3 in
+                // bytes 16..32, bp4/bp5 in 32..48, bp6/bp7 in 48..64.
+                for plane in 0..bpp {
+                    let mut planar = 0u8;
+                    for (col, p) in pixels.iter().enumerate() {
+                        let bit = (p >> plane) & 1;
+                        planar |= bit << (7 - col);
+                    }
+                    let plane_group = plane / 2;
+                    let plane_inside = plane % 2;
+                    let byte_off = plane_group * 16 + (row as usize) * 2 + plane_inside;
+                    tile_buf[byte_off] = planar;
+                }
+            }
+
+            // Spill the converted tile to the destination buffer.
+            let tile_dst_base =
+                self.dda.wrapping_add(tile_idx.wrapping_mul(bytes_per_tile)) & 0x00FF_FFFF;
+            for (k, byte) in tile_buf.iter().enumerate().take(bytes_per_tile as usize) {
+                self.write_raw_for_dma(tile_dst_base.wrapping_add(k as u32) & 0x00FF_FFFF, *byte);
+            }
+        }
+
+        self.dcnt &= 0x7F;
+        self.mmio[0x2230 - 0x2200] = self.dcnt;
+        self.cc1_irq_to_main = true;
+    }
+
     /// Compose the 18-bit linear-mode compare value from HCNT lo/hi
     /// + VCNT lo's low 2 bits (per Anomie's SA-1 doc).
     fn linear_compare(&self) -> u32 {
@@ -681,11 +787,19 @@ impl Mapper for Sa1Mapper {
                 // -------- SA-1 DMA --------
                 0x2230 => {
                     self.dcnt = value;
-                    if (value & 0x80) != 0 && (value & 0x20) == 0 {
-                        // Normal DMA — fire immediately. CC DMA is
-                        // deferred to a later phase; that path also
-                        // sets bit 5, so we route around it here.
-                        self.run_normal_dma();
+                    if (value & 0x80) != 0 {
+                        if (value & 0x20) == 0 {
+                            // Normal bulk DMA.
+                            self.run_normal_dma();
+                        } else if (value & 0x10) == 0 {
+                            // Character-Conversion Type-1.
+                            self.run_cc1_dma();
+                        }
+                        // Type-2 (CC, bit 4 set) is the SA-1-side
+                        // streaming variant and lands in a later
+                        // phase — for now we just acknowledge the
+                        // enable and leave DCNT.7 set so callers can
+                        // tell we didn't actually run it.
                     }
                 }
                 0x2231 => self.cdma = value,
@@ -1090,6 +1204,161 @@ mod tests {
         assert_eq!(m.read(make_addr(0x40, 1)), Some(0x01));
         assert_eq!(m.read(make_addr(0x40, 2)), Some(0x02));
         assert_eq!(m.read(make_addr(0x40, 3)), Some(0x03));
+    }
+
+    // ------------- Phase-4 CC1 DMA tests -------------
+
+    /// Helper — set up a CC1 DMA so the caller can pre-fill the
+    /// source and read the converted tile back.
+    fn cc1_setup(m: &mut Sa1Mapper, cdma: u8, dtc: u16) {
+        // Enable CC1 IRQ on the S-CPU side.
+        m.write(make_addr(0x00, 0x2201), 0x20);
+        // SDA = $40:0000 (linear BW-RAM start).
+        m.write(make_addr(0x00, 0x2232), 0x00);
+        m.write(make_addr(0x00, 0x2233), 0x00);
+        m.write(make_addr(0x00, 0x2234), 0x40);
+        // DDA = $00:3000 (I-RAM start).
+        m.write(make_addr(0x00, 0x2235), 0x00);
+        m.write(make_addr(0x00, 0x2236), 0x30);
+        m.write(make_addr(0x00, 0x2237), 0x00);
+        m.write(make_addr(0x00, 0x2231), cdma);
+        m.write(make_addr(0x00, 0x2238), (dtc & 0xFF) as u8);
+        m.write(make_addr(0x00, 0x2239), (dtc >> 8) as u8);
+    }
+
+    #[test]
+    fn cc1_4bpp_solid_color_5_produces_expected_planar_bytes() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
+        // 4bpp, tile_width=8 → bitmap row stride = 8 tiles × 4 B = 32
+        // bytes. Tile 0 occupies bytes [row*32 + 0..=3]. Each pixel =
+        // 5 → packed-byte value 0x55.
+        for row in 0..8u32 {
+            for c in 0..4u32 {
+                m.write(make_addr(0x40, (row * 32 + c) as u16), 0x55);
+            }
+        }
+        cc1_setup(&mut m, 0b0000_0100, 32);
+        // Fire CC1.
+        m.write(make_addr(0x00, 0x2230), 0xA0);
+        // Read converted tile from $00:3000.
+        let mut read = |off: u16| m.read(make_addr(0x00, 0x3000 + off)).unwrap();
+        // bp0 / bp2 → all 0xFF (bits 0 and 2 of 5 = 1).
+        // bp1 / bp3 → all 0x00 (bits 1 and 3 of 5 = 0).
+        for row in 0..8 {
+            let b = row as u16 * 2;
+            assert_eq!(read(b), 0xFF, "bp0 row {row}");
+            assert_eq!(read(b + 1), 0x00, "bp1 row {row}");
+            assert_eq!(read(b + 16), 0xFF, "bp2 row {row}");
+            assert_eq!(read(b + 17), 0x00, "bp3 row {row}");
+        }
+        // CC1 IRQ + DCNT auto-cleared.
+        assert!(m.main_irq_line(), "CC1 IRQ must reach the main CPU");
+        let dcnt = m.read(make_addr(0x00, 0x2230)).unwrap();
+        assert_eq!(dcnt & 0x80, 0);
+    }
+
+    #[test]
+    fn cc1_4bpp_first_row_gradient_matches_anomie_layout() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
+        // 4bpp, tile_width=8 → row stride 32 bytes. Tile-0 row-0
+        // occupies bytes [0..=3] and represents pixels [1..=8].
+        m.write(make_addr(0x40, 0), 0x12);
+        m.write(make_addr(0x40, 1), 0x34);
+        m.write(make_addr(0x40, 2), 0x56);
+        m.write(make_addr(0x40, 3), 0x78);
+        cc1_setup(&mut m, 0b0000_0100, 32);
+        m.write(make_addr(0x00, 0x2230), 0xA0);
+        let mut read = |off: u16| m.read(make_addr(0x00, 0x3000 + off)).unwrap();
+        // Anomie-correct planar values: bp0=0xAA, bp1=0x66, bp2=0x1E,
+        // bp3=0x01 (computed offline).
+        assert_eq!(read(0), 0xAA);
+        assert_eq!(read(1), 0x66);
+        assert_eq!(read(16), 0x1E);
+        assert_eq!(read(17), 0x01);
+    }
+
+    #[test]
+    fn cc1_2bpp_one_tile_solid_color_3() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
+        // 2bpp, tile_width=8 → row stride = 8 tiles × 2 B = 16 bytes.
+        // Tile 0 occupies bytes [row*16 + 0..=1]. All pixels = 3 →
+        // packed-byte = 0xFF.
+        for row in 0..8u32 {
+            for c in 0..2u32 {
+                m.write(make_addr(0x40, (row * 16 + c) as u16), 0xFF);
+            }
+        }
+        cc1_setup(&mut m, 0b0000_1000, 16);
+        m.write(make_addr(0x00, 0x2230), 0xA0);
+        let mut read = |off: u16| m.read(make_addr(0x00, 0x3000 + off)).unwrap();
+        // bp0 / bp1 both all 0xFF for 8 rows.
+        for row in 0..8 {
+            let b = row as u16 * 2;
+            assert_eq!(read(b), 0xFF);
+            assert_eq!(read(b + 1), 0xFF);
+        }
+    }
+
+    #[test]
+    fn cc1_8bpp_one_tile_color_1_only_bp0_lights_up() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
+        // 8bpp, tile_width=8 → row stride = 64. Tile 0 occupies bytes
+        // [row*64 + 0..=7]. All pixels = 1.
+        for row in 0..8u32 {
+            for c in 0..8u32 {
+                m.write(make_addr(0x40, (row * 64 + c) as u16), 0x01);
+            }
+        }
+        cc1_setup(&mut m, 0b0000_0000, 64);
+        m.write(make_addr(0x00, 0x2230), 0xA0);
+        let mut read = |off: u16| m.read(make_addr(0x00, 0x3000 + off)).unwrap();
+        // Only bp0 should be 0xFF; bp1..bp7 should be 0.
+        for row in 0..8 {
+            let b = row as u16 * 2;
+            assert_eq!(read(b), 0xFF, "bp0 row {row}");
+            assert_eq!(read(b + 1), 0x00, "bp1 row {row}");
+        }
+        // Higher plane groups (bp2..bp7) all-zero.
+        for off in 16..64u16 {
+            assert_eq!(read(off), 0x00, "high plane at {off:#x}");
+        }
+    }
+
+    #[test]
+    fn cc1_two_tiles_wide_16_layout_reads_tile1_from_correct_offset() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
+        // 4bpp, tile_width = 16 (bits 1..0 = 1). Each pixel-row of the
+        // bitmap spans 16 tiles × 4 bytes = 64 bytes. Tile 1 starts at
+        // byte 4 of each pixel-row.
+        // Fill tile 0 (cols 0..3 of each row) with 0x00; tile 1 (cols
+        // 4..7) with 0xFF (= pixel value 15 everywhere).
+        for row in 0..8 {
+            let row_off = row * 64;
+            for c in 0..4 {
+                m.write(make_addr(0x40, (row_off + c) as u16), 0x00);
+            }
+            for c in 4..8 {
+                m.write(make_addr(0x40, (row_off + c) as u16), 0xFF);
+            }
+        }
+        cc1_setup(&mut m, 0b0000_0101, 64);
+        m.write(make_addr(0x00, 0x2230), 0xA0);
+        // Tile 0 → all 0x00 in I-RAM at $3000..$3020.
+        for off in 0u16..32 {
+            assert_eq!(
+                m.read(make_addr(0x00, 0x3000 + off)),
+                Some(0x00),
+                "tile 0 should be empty at {off:#x}"
+            );
+        }
+        // Tile 1 → all 0xFF (pixel 15 = 0b1111 sets all four planes).
+        for off in 0u16..32 {
+            assert_eq!(
+                m.read(make_addr(0x00, 0x3020 + off)),
+                Some(0xFF),
+                "tile 1 should be all-set at {off:#x}"
+            );
+        }
     }
 
     #[test]
