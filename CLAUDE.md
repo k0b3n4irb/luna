@@ -7,20 +7,31 @@ belongs in `docs/`.
 
 ## What luna is
 
-A cycle-accurate-ish SNES emulator written in Rust. Workspace layout:
+A cycle-accurate-ish SNES emulator written in Rust. 11-crate workspace:
 
-- `crates/luna-core/` — system glue, CPU bus, scheduler.
+- `crates/luna-bus/` — foundation: `Bus` trait, `Addr24`, `MapperKind`
+  enum, the per-mapper shims (LoROM / HiROM / ExHiROM / SA-1). Used by
+  every CPU and the system glue.
+- `crates/luna-cartridge/` — ROM header parser, mapper detection.
 - `crates/luna-cpu-65c816/`, `crates/luna-cpu-spc700/` — CPU cores.
+  Standalone, no SNES-specific glue — usable from any consumer.
+- `crates/luna-apu/` — SPC700 bridge + S-DSP (cycle-accurate ares port
+  in `src/dsp.rs`, see commit `0f46f47`).
 - `crates/luna-ppu/` — PPU + renderer + compositor.
-- `crates/luna-dma/`, `crates/luna-bus/`, `crates/luna-coproc/` —
-  data movement + memory map + SA-1 / SuperFX / DSP-N copro shims.
-- `crates/luna-cartridge/`, `crates/luna-apu/` — ROM parser + APU.
-- `crates/luna-api/` — the introspection / driving surface used by the
-  CLI, GUI, and MCP server.
-- `crates/luna-cli/` — `luna run`, `luna state`, `luna mcp`.
-- `crates/luna-gui/` — eframe-based debugger UI.
-- `crates/luna-mcp-server/`, `crates/luna-mcp-client/` — MCP transport.
-- `crates/luna-async/`, `crates/luna-overlay/` — runtime helpers.
+- `crates/luna-core/` — system glue. Owns the top-level `Snes` struct,
+  the CPU-driven master-clock scheduler, and the **DMA + SA-1 / future
+  coprocessor** subsystems as `crate::dma` and `crate::coproc` modules
+  (merged from the former `luna-dma` / `luna-coproc` crates in
+  commit `eb3267f`).
+- `crates/luna-api/` — introspection surface; produces serialisable
+  `EmulatorState` snapshots for the CLI, GUI, and MCP server.
+- `crates/luna-mcp-server/` — MCP transport (the GUI does not use it;
+  invoked from `luna mcp` in the CLI binary).
+- `crates/luna-cli/` — `luna run` / `luna state` / `luna mcp` binary.
+- `crates/luna-gui/` — eframe-based debugger UI. Owns the dedicated
+  emu thread (`src/emu_thread.rs`, audio-as-clock pacing) and the cpal
+  output stream (`src/audio.rs`, with 6-point cubic Hermite resampler
+  + 5 Hz DC blocker).
 
 ## Mandates (auto-loaded from `.claude/rules/`)
 
@@ -28,7 +39,7 @@ A cycle-accurate-ish SNES emulator written in Rust. Workspace layout:
 |---|---|---|
 | Reference-first implementation | `.claude/rules/reference-first.md` | Any SNES subsystem feature change |
 | Rebuild + lint discipline | `.claude/rules/rebuild-discipline.md` | Every code change before commit |
-| Coprocessor / DMA / PPU test sweep | `.claude/rules/coproc-testing.md` | Edits to luna-ppu, luna-dma, luna-bus/sa1.rs, luna-coproc/sa1.rs |
+| Coprocessor / DMA / PPU test sweep | `.claude/rules/coproc-testing.md` | Edits to luna-ppu, luna-core/src/dma/, luna-core/src/coproc/, luna-bus/sa1.rs |
 | Test audible / visible fixes before commit | `.claude/rules/audible-fixes-test-first.md` | Any change to APU / PPU rendering / GUI audio or framebuffer |
 
 Read the matching rule before touching the relevant code, not after.
