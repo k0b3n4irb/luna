@@ -22,4 +22,16 @@ pub trait DmaBus {
 
     /// Write one byte to the PPU's B-bus at `$2100 + b_offset`.
     fn write_b(&mut self, b_offset: u8, value: u8);
+
+    /// Per-byte cooperative tick — called by the DMA channel after
+    /// every transferred byte so cartridge coprocessors (SA-1, Super
+    /// FX, DSP-N, …) get a chance to run *during* the burst instead
+    /// of being frozen until the main CPU's instruction step
+    /// completes ~4 kHz of mclks later.
+    ///
+    /// Matches ares (`coprocessor/sa1/sa1.cpp:63-94` — `Thread::step(2) + Thread::synchronize(cpu)` interleaved by the cooperative scheduler) and Mesen2 (`SnesDmaController::CopyDmaByte` → `IncMasterClock4` → `_memoryManager->Exec()` → `cart->SyncCoprocessors()` → `Sa1::Run()` every 2 mclks during DMA).
+    ///
+    /// Default `no-op` for the test mock buses; production buses
+    /// override to forward to the coprocessor's `step_coproc`.
+    fn tick(&mut self, _mcycles: u32) {}
 }

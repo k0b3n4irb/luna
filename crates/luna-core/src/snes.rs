@@ -992,6 +992,17 @@ impl<'a> DmaBus for DmaBusView<'a> {
             self.ppu.write(b_offset, value);
         }
     }
+
+    fn tick(&mut self, mcycles: u32) {
+        // Forward the per-byte DMA tick into the mapper so SA-1 (and
+        // future coprocs) advance at DMA cadence instead of being
+        // frozen until the next main-CPU instruction step. Without
+        // this, ~544-byte OAM DMAs leave the SA-1 paused for ~4 kHz
+        // mclks and then catch up in one ~700-instruction burst —
+        // ruining the synchronisation the demo's `$3001 SA1_SYNC`
+        // handshake depends on.
+        self.mapper.step_coproc(mcycles);
+    }
 }
 
 impl<'a> SnesBus<'a> {
