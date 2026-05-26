@@ -1844,6 +1844,7 @@ name = "luna-api"
 version = "0.0.1"
 dependencies = [
  "image",
+ "luna-apu",
  "luna-bus",
  "luna-cartridge",
  "luna-core",
@@ -1890,6 +1891,7 @@ dependencies = [
  "clap",
  "image",
  "luna-api",
+ "luna-apu",
  "luna-cartridge",
  "luna-core",
  "luna-mcp-server",

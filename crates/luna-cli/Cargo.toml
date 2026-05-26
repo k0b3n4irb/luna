@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 luna-api        = { workspace = true }
+luna-apu        = { workspace = true }
 luna-cartridge  = { workspace = true }
 luna-core       = { workspace = true }
 luna-mcp-server = { workspace = true }
