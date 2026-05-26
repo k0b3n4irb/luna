@@ -2,6 +2,10 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::Ordering;
+use std::thread::JoinHandle;
 use std::time::Instant;
 
 use eframe::App;
@@ -13,22 +17,25 @@ use luna_cartridge::Cartridge;
 use luna_core::Snes;
 use luna_ppu::{FRAME_H, FRAME_W};
 
-/// Hard ceiling on instructions per UI frame — purely a safety belt
-/// against runaway loops. The real budget is wall-clock time
-/// ([`FRAME_TIME_BUDGET_MS`]) so the UI stays responsive even on slow
-/// hardware or ROMs that spend a lot of cycles per instruction.
-const STEPS_PER_FRAME: u32 = 200_000;
+use crate::audio::AudioStreamArtifacts;
+use crate::emu_thread::EmuShared;
 
-/// How many milliseconds we're willing to spend stepping the CPU
-/// before yielding back to the UI thread. ~8 ms leaves half of a 60 Hz
-/// frame for compositing, layout, and event handling, which is what
-/// keeps the window from showing "Not Responding" under heavy load.
-const FRAME_TIME_BUDGET_MS: u128 = 8;
+/// Convenience alias — the Snes lives behind an `Arc<Mutex<>>` shared
+/// between the UI thread and the dedicated emu thread.
+type SharedSnes = Arc<Mutex<Option<Snes>>>;
 
 /// The Luna desktop application.
 pub(crate) struct LunaApp {
-    /// Currently-loaded emulator, if any.
-    snes: Option<Snes>,
+    /// Currently-loaded emulator, behind a Mutex shared with the
+    /// dedicated emu thread (see `emu_thread.rs`). The UI uses
+    /// `try_lock` to read state without ever blocking the redraw.
+    snes: SharedSnes,
+    /// Handle to the spawned emu thread (one per loaded ROM).
+    emu_join: Option<JoinHandle<()>>,
+    /// State shared between UI, emu thread, and the cpal callback —
+    /// shutdown / pause flags + the unpark handle that the cpal
+    /// callback uses to wake the emu thread.
+    emu_shared: Arc<EmuShared>,
     /// Path of the loaded ROM (for the title bar / recents).
     rom_path: Option<PathBuf>,
     /// Title extracted from the cartridge header.
@@ -39,9 +46,20 @@ pub(crate) struct LunaApp {
     /// Last error message — shown in a banner if set.
     last_error: Option<String>,
 
-    /// Pause toggle (true = CPU isn't stepped on update()).
+    /// Pause toggle. Mirrored into `emu_shared.paused` so the emu
+    /// thread sleeps when set.
     paused: bool,
-    /// Total instructions executed since load.
+    /// Cached "a ROM is loaded" flag. We can't poll the Snes Mutex
+    /// every frame to answer "should the central panel show the
+    /// landing page?" — `try_lock` fails half the time when the emu
+    /// thread is busy, which would flicker the central panel between
+    /// the rendered ROM and the landing page at the UI's repaint
+    /// rate. This bool is set on load_rom success and cleared on
+    /// unload_snes.
+    rom_loaded: bool,
+    /// Cumulative main-CPU instruction counter, surfaced in the status
+    /// bar. Now informational only — the emu thread tracks this
+    /// internally; the UI just polls it (TODO).
     instructions_executed: u64,
     /// FPS bookkeeping.
     last_frame: Instant,
@@ -66,12 +84,19 @@ pub(crate) struct LunaApp {
     pc_bytes: [u8; 8],
 
     /// Host audio backend. `None` if cpal couldn't open the default
-    /// output device — emulation keeps going silently. We try to
-    /// re-init lazily on the first ROM load if it failed at startup.
+    /// output device — emulation keeps going silently. Held by the
+    /// app even when the emu thread is the actual producer, so the
+    /// cpal stream stays alive for the program's lifetime.
+    #[allow(dead_code)]
     audio: Option<crate::audio::AudioBackend>,
-    /// Reusable scratch vector to drain APU samples without
-    /// allocating every frame.
-    audio_scratch: Vec<(i16, i16)>,
+    /// Producer end of the cpal SPSC ring, held here only until the
+    /// emu thread is spawned (which moves it into the thread). `None`
+    /// after the first ROM load, or if audio init failed.
+    audio_producer: Option<ringbuf::HeapProd<(i16, i16)>>,
+    /// Shared "audio primed" flag handed to the emu thread alongside
+    /// the producer. The emu flips it on first push so the cpal
+    /// callback's silence-until-primed gate opens.
+    audio_primed: Option<Arc<std::sync::atomic::AtomicBool>>,
 
     /// Keyboard → SNES button mapping. Defaults to the Mesen2 "Arrow
     /// keys" preset; users can remap via Input → Configure controller.
@@ -86,13 +111,26 @@ pub(crate) struct LunaApp {
 
 impl LunaApp {
     pub(crate) fn new() -> Self {
+        let emu_shared = Arc::new(EmuShared::new());
+        let (audio, audio_producer, audio_primed) =
+            match crate::audio::AudioBackend::try_start(emu_shared.clone()) {
+                Some(AudioStreamArtifacts {
+                    backend,
+                    producer,
+                    primed,
+                }) => (Some(backend), Some(producer), Some(primed)),
+                None => (None, None, None),
+            };
         Self {
-            snes: None,
+            snes: Arc::new(Mutex::new(None)),
+            emu_join: None,
+            emu_shared,
             rom_path: None,
             rom_title: None,
             framebuffer: None,
             last_error: None,
             paused: false,
+            rom_loaded: false,
             instructions_executed: 0,
             last_frame: Instant::now(),
             fps: 0.0,
@@ -101,8 +139,9 @@ impl LunaApp {
             show_stubs_panel: true,
             force_display: false,
             pc_bytes: [0; 8],
-            audio: crate::audio::AudioBackend::try_start(),
-            audio_scratch: Vec::with_capacity(2048),
+            audio,
+            audio_producer,
+            audio_primed,
             key_bindings: crate::input::KeyBindings::load_or_default(),
             show_input_modal: false,
             pending_rebind: None,
@@ -116,6 +155,12 @@ impl LunaApp {
     /// yet) surface as a friendly error in the status bar instead of
     /// crashing the GUI. LoROM / HiROM / ExHiROM / SA-1 are all
     /// wired through [`Snes::from_cartridge`].
+    /// Public wrapper around `load_rom` so `main.rs` can auto-load
+    /// a ROM passed on the command line at startup.
+    pub(crate) fn load_rom_path(&mut self, path: &Path) {
+        self.load_rom(path);
+    }
+
     fn load_rom(&mut self, path: &Path) {
         let cart = match Cartridge::load(path) {
             Ok(c) => c,
@@ -135,7 +180,7 @@ impl LunaApp {
                      will land in their own dedicated phases. LoROM, HiROM, \
                      ExHiROM and SA-1 carts work today."
                 ));
-                self.snes = None;
+                self.unload_snes();
                 self.rom_title = Some(cart.header.title.clone());
                 self.rom_path = Some(path.to_path_buf());
                 self.framebuffer = None;
@@ -153,15 +198,33 @@ impl LunaApp {
         std::panic::set_hook(prev_hook);
         match result {
             Ok(snes) => {
-                self.snes = Some(snes);
+                self.unload_snes();
+                if let Ok(mut guard) = self.snes.lock() {
+                    *guard = Some(snes);
+                }
+                // Spawn the dedicated emu thread now that a Snes is
+                // present. It pulls samples into the producer ring
+                // (held aside since AudioBackend::try_start) at the
+                // rate cpal drains it; the UI thread does not pace.
+                if let (Some(producer), Some(primed)) =
+                    (self.audio_producer.take(), self.audio_primed.take())
+                {
+                    self.emu_join = Some(crate::emu_thread::spawn(
+                        self.snes.clone(),
+                        self.emu_shared.clone(),
+                        producer,
+                        primed,
+                    ));
+                }
                 self.rom_title = Some(title);
                 self.rom_path = Some(path.to_path_buf());
                 self.instructions_executed = 0;
                 self.last_error = None;
                 self.framebuffer = None;
+                self.rom_loaded = true;
             }
             Err(payload) => {
-                self.snes = None;
+                self.unload_snes();
                 self.last_error = Some(format!(
                     "Could not initialise emulator for this ROM: {}",
                     payload_to_string(payload)
@@ -173,82 +236,36 @@ impl LunaApp {
         }
     }
 
-    /// Step the CPU under a **wall-clock time budget**, preferring
-    /// to stop at PPU frame boundaries so the framebuffer snapshot
-    /// catches a settled image instead of mid-NMI-handler garbage.
-    ///
-    /// Strategy:
-    ///   - Run instructions in batches of 256.
-    ///   - After each batch, if we've just crossed into a new PPU
-    ///     frame (`frame_count` advanced), stop — the PPU state is
-    ///     "settled" for the just-completed frame and the GUI sees
-    ///     a stable image.
-    ///   - If we hit the wall-clock deadline first, stop anyway
-    ///     (mid-frame). UI responsiveness wins over frame stability
-    ///     in the worst case.
-    ///   - The hard `STEPS_PER_FRAME` cap is the runaway-loop guard.
-    fn step_cpu(&mut self) {
-        if self.paused {
-            return;
+    /// Tear down the emu thread (if running) and clear the Snes slot
+    /// so a fresh ROM can be loaded.
+    fn unload_snes(&mut self) {
+        // Tell the emu thread to exit, then wake it in case it's parked.
+        self.emu_shared.shutdown.store(true, Ordering::Release);
+        self.emu_shared.unpark_emu();
+        if let Some(join) = self.emu_join.take() {
+            let _ = join.join();
         }
-        let Some(snes) = self.snes.as_mut() else {
-            return;
-        };
-        const BATCH_SIZE: u32 = 256;
-        let deadline =
-            Instant::now() + std::time::Duration::from_millis(FRAME_TIME_BUDGET_MS as u64);
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            let mut executed: u32 = 0;
-            let start_frame = snes.frame_count;
-            while executed < STEPS_PER_FRAME && !snes.cpu.stopped {
-                for _ in 0..BATCH_SIZE {
-                    if snes.cpu.stopped {
-                        break;
-                    }
-                    snes.step();
-                    executed += 1;
-                }
-                // Frame-boundary stop: the moment we've crossed at
-                // least one frame and we're now in early visible
-                // scanlines (PPU state is fresh, NMI handler done).
-                if snes.frame_count != start_frame && snes.ppu_line < 10 {
-                    break;
-                }
-                if Instant::now() >= deadline {
-                    break;
-                }
-            }
-            executed
-        }));
-        std::panic::set_hook(prev_hook);
-        match result {
-            Ok(n) => self.instructions_executed += u64::from(n),
-            Err(payload) => {
-                let msg = payload_to_string(payload);
-                self.last_error = Some(format!("CPU panic: {msg}"));
-                self.paused = true;
-            }
+        self.emu_shared.shutdown.store(false, Ordering::Release);
+        if let Ok(mut guard) = self.snes.lock() {
+            *guard = None;
         }
+        self.rom_loaded = false;
+    }
 
-        // Drain any PCM samples the APU produced this frame into the
-        // audio backend's SPSC ring. If the backend failed to start
-        // at boot, samples are dropped (silent emulation).
-        if let (Some(snes), Some(audio)) = (self.snes.as_mut(), self.audio.as_mut()) {
-            self.audio_scratch.clear();
-            snes.apu_real.drain_audio(&mut self.audio_scratch, 4096);
-            audio.feed(&self.audio_scratch);
-        } else if let Some(snes) = self.snes.as_mut() {
-            // No backend — discard so the queue doesn't grow.
-            snes.apu_real.audio_queue.clear();
-        }
+    /// Snapshot per-UI-frame state (FPS, PC bytes) from the Snes
+    /// without blocking. If the emu thread currently holds the lock,
+    /// the snapshot is skipped this frame — stale data shown until
+    /// the next successful `try_lock`. Imperceptible at 60 Hz UI.
+    fn snapshot_state(&mut self) {
+        // Mirror the pause flag into the emu thread.
+        self.emu_shared.paused.store(self.paused, Ordering::Release);
 
-        // Diagnostic: snapshot the 8 bytes at PB:PC for the CPU panel.
-        if let Some(snes) = self.snes.as_mut() {
-            let bytes = snes.peek_pc_bytes(8);
-            for (slot, b) in self.pc_bytes.iter_mut().zip(bytes.iter()) {
-                *slot = *b;
+        if let Ok(mut guard) = self.snes.lock() {
+            if let Some(snes) = guard.as_mut() {
+                let bytes = snes.peek_pc_bytes(8);
+                for (slot, b) in self.pc_bytes.iter_mut().zip(bytes.iter()) {
+                    *slot = *b;
+                }
             }
         }
     }
@@ -268,18 +285,20 @@ impl LunaApp {
     /// bypass), keep the previous good texture. The eye sees a
     /// stable rendered frame; the game's blanking is invisible.
     fn refresh_framebuffer(&mut self, ctx: &Context) {
-        let Some(snes) = self.snes.as_ref() else {
+        // Blocking lock: brief wait (≤ 1 ms) for the emu thread to
+        // finish its current batch. Cheaper than the flicker that
+        // a try_lock-and-skip would produce.
+        let Ok(guard) = self.snes.lock() else {
+            return;
+        };
+        let Some(snes) = guard.as_ref() else {
             return;
         };
         if !self.force_display && snes.ppu.inidisp & 0x80 != 0 && self.framebuffer.is_some() {
-            // Forced blank — preserve the last non-blanked texture so
-            // the screen doesn't flicker every NMI handler tick.
             return;
         }
         let mut rgba = Vec::with_capacity(FRAME_W * FRAME_H * 4);
         if self.force_display {
-            // Debug bypass: re-render the whole frame with forced-blank
-            // ignored so the user can see VRAM contents.
             let opts = luna_ppu::RenderOptions {
                 bypass_forced_blank: true,
             };
@@ -288,12 +307,11 @@ impl LunaApp {
                 rgba.extend_from_slice(&[px[0], px[1], px[2], 0xFF]);
             }
         } else {
-            // Default path (G6 Phase 1): copy the persistent
-            // framebuffer the scheduler maintains per-scanline.
             for px in snes.ppu.framebuffer() {
                 rgba.extend_from_slice(&[px[0], px[1], px[2], 0xFF]);
             }
         }
+        drop(guard);
         let image = ColorImage::from_rgba_unmultiplied([FRAME_W, FRAME_H], &rgba);
         if let Some(tex) = self.framebuffer.as_mut() {
             tex.set(image, TextureOptions::NEAREST);
@@ -321,9 +339,13 @@ impl App for LunaApp {
         // Default layout matches Mesen2's "Arrow keys" preset
         // (`UI/Config/KeyPresets.cs::ApplyArrowLayout`); users can
         // remap via Input → Configure controller. See `crate::input`.
-        if let Some(snes) = self.snes.as_mut() {
+        {
             let mask = ctx.input(|i| self.key_bindings.mask_from_input(i));
-            snes.set_joypad(0, mask);
+            if let Ok(mut guard) = self.snes.lock() {
+                if let Some(snes) = guard.as_mut() {
+                    snes.set_joypad(0, mask);
+                }
+            }
         }
 
         // ---------------- FPS bookkeeping ----------------
@@ -335,8 +357,11 @@ impl App for LunaApp {
         self.fps = 0.9 * self.fps + 0.1 * (1.0 / dt);
         self.last_frame = now;
 
-        // ---------------- Emulation step ----------------
-        self.step_cpu();
+        // ---------------- Snapshot + framebuffer ----------------
+        // Emulation runs on the dedicated emu thread; the UI only
+        // snapshots state under `try_lock` and re-renders the
+        // framebuffer.
+        self.snapshot_state();
         self.refresh_framebuffer(ctx);
 
         // ---------------- Top menu bar ----------------
@@ -362,15 +387,27 @@ impl App for LunaApp {
                     let label = if self.paused { "Resume" } else { "Pause" };
                     if ui.button(label).clicked() {
                         self.paused = !self.paused;
+                        // Mirror into the shared flag so the emu thread
+                        // sleeps / wakes. Also unpark so a parked thread
+                        // notices the new pause state immediately.
+                        self.emu_shared.paused.store(self.paused, Ordering::Release);
+                        self.emu_shared.unpark_emu();
                         ui.close_kind(UiKind::Menu);
                     }
                     if ui.button("Reset").clicked() {
-                        if let Some(snes) = self.snes.as_mut() {
-                            snes.reset();
-                            self.instructions_executed = 0;
-                            self.last_error = None;
-                            self.paused = false;
+                        // Reset goes through the emu thread by briefly
+                        // taking the Snes lock. Safe to block here —
+                        // it's a menu click, not the per-frame path.
+                        if let Ok(mut guard) = self.snes.lock() {
+                            if let Some(snes) = guard.as_mut() {
+                                snes.reset();
+                                self.instructions_executed = 0;
+                                self.last_error = None;
+                                self.paused = false;
+                                self.emu_shared.paused.store(false, Ordering::Release);
+                            }
                         }
+                        self.emu_shared.unpark_emu();
                         ui.close_kind(UiKind::Menu);
                     }
                 });
@@ -421,7 +458,14 @@ impl App for LunaApp {
                 .min_width(220.0)
                 .show(ctx, |ui| {
                     ui.add_space(8.0);
-                    if let Some(snes) = self.snes.as_ref() {
+                    // Blocking lock for the panels. The emu thread
+                    // holds the lock for at most ~1 batch (≤ 1 ms),
+                    // so the UI waits a negligible amount and gets a
+                    // consistent snapshot every frame — no flicker.
+                    let Ok(guard) = self.snes.lock() else {
+                        return;
+                    };
+                    if let Some(snes) = guard.as_ref() {
                         if self.show_cpu_panel {
                             egui::CollapsingHeader::new(RichText::new("CPU 65C816").strong())
                                 .default_open(true)
@@ -457,9 +501,11 @@ impl App for LunaApp {
                     ui.separator();
                 }
                 ui.label(format!("Instructions: {}", self.instructions_executed));
-                if let Some(snes) = self.snes.as_ref() {
-                    ui.separator();
-                    ui.label(format!("MCycles: {}", snes.total_mclk));
+                if let Ok(guard) = self.snes.lock() {
+                    if let Some(snes) = guard.as_ref() {
+                        ui.separator();
+                        ui.label(format!("MCycles: {}", snes.total_mclk));
+                    }
                 }
                 if let Some(err) = &self.last_error {
                     ui.separator();
@@ -495,10 +541,15 @@ impl App for LunaApp {
 
         // ---------------- Central panel (screen) ----------------
         let mut requested_path: Option<PathBuf> = None;
-        let cpu_stopped = self.snes.as_ref().map(|s| s.cpu.stopped).unwrap_or(false);
+        let cpu_stopped = self
+            .snes
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|s| s.cpu.stopped))
+            .unwrap_or(false);
         let cpu_paused = self.paused;
         egui::CentralPanel::default().show(ctx, |ui| {
-            if self.snes.is_none() {
+            if !self.rom_loaded {
                 requested_path = draw_landing_page(ui);
                 return;
             }
