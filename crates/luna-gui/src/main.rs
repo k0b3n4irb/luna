@@ -10,11 +10,17 @@
 
 mod app;
 mod audio;
+mod emu_thread;
 mod input;
 
 use app::LunaApp;
 
 fn main() -> eframe::Result<()> {
+    // Optional first argument: ROM path to auto-load on startup.
+    // Lets `cargo run -- /path/to/game.sfc` drop the user straight into
+    // emulation, matching what most emulators do.
+    let auto_rom = std::env::args().nth(1).map(std::path::PathBuf::from);
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Luna — SNES Emulator")
@@ -34,9 +40,13 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Luna",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             install_dark_theme(&cc.egui_ctx);
-            Ok(Box::new(LunaApp::new()))
+            let mut app = LunaApp::new();
+            if let Some(path) = auto_rom {
+                app.load_rom_path(&path);
+            }
+            Ok(Box::new(app))
         }),
     )
 }
