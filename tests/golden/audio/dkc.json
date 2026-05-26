@@ -1,15 +1,8 @@
 {
-  "rom": "Donkey Kong Country (U) (V1.2) [!].smc",
+  "duration_s": 24.687,
   "insns": 80000000,
   "note": "past Rareware logo, ~36 s of audio with echo + voices 4-6",
-  "duration_s": 36.94,
-  "stats": {
-    "peak_pos": 15678,
-    "peak_neg": -14699,
-    "rms": 771.75,
-    "mean_abs": 243.13,
-    "non_zero": 0.5104
-  },
+  "rom": "Donkey Kong Country (U) (V1.2) [!].smc",
   "spectrum_peaks": [
     {
       "hz": 117.2,
@@ -51,5 +44,12 @@
       "hz": 132.8,
       "mag_db": 116.9
     }
-  ]
+  ],
+  "stats": {
+    "mean_abs": 1253.82,
+    "non_zero": 0.7857,
+    "peak_neg": -16302,
+    "peak_pos": 16342,
+    "rms": 2242.93
+  }
 }
