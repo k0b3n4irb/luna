@@ -506,12 +506,37 @@ fn run_state(
             }
         }
     }
-    match em.step(remaining) {
-        Ok(_) => {}
-        Err(e) => {
-            // Step errors are informational — we still want a state
-            // snapshot.
-            eprintln!("step warning: {e}");
+    // When --audio-out is set, step in chunks and drain the APU's
+    // ~16k-sample bounded queue after each chunk; otherwise we'd lose
+    // ~99% of audio on any run longer than ~0.5 s of emulated time.
+    // The accumulated Vec is written to disk after the run.
+    let mut audio_accum: Vec<(i16, i16)> = Vec::new();
+    if audio_out.is_some() {
+        // Chunk = 100k instructions ≈ ~10 ms of emulated SPC time
+        // (well under the 512 ms queue capacity even at peak DSP
+        // output rate). Drain the full queue after each chunk.
+        const AUDIO_CHUNK: u64 = 100_000;
+        let mut left = remaining;
+        while left > 0 {
+            let take = left.min(AUDIO_CHUNK);
+            if let Err(e) = em.step(take) {
+                eprintln!("step warning: {e}");
+                break;
+            }
+            left -= take;
+            match em.drain_audio(usize::MAX) {
+                Ok(mut chunk) => audio_accum.append(&mut chunk),
+                Err(e) => eprintln!("warning: drain_audio mid-run: {e}"),
+            }
+        }
+    } else {
+        match em.step(remaining) {
+            Ok(_) => {}
+            Err(e) => {
+                // Step errors are informational — we still want a state
+                // snapshot.
+                eprintln!("step warning: {e}");
+            }
         }
     }
 
@@ -601,23 +626,23 @@ fn run_state(
         }
     }
     if let Some(p) = audio_out {
+        // Drain anything still queued at end-of-run, then write the
+        // full accumulated stream.
         match em.drain_audio(usize::MAX) {
-            Ok(samples) => {
-                if let Err(e) = write_wav(p, &samples) {
-                    eprintln!("error: writing WAV: {e}");
-                    return ExitCode::from(1);
-                }
-                eprintln!(
-                    "Audio WAV written to {}  ({} samples @ 32 kHz stereo)",
-                    p.display(),
-                    samples.len()
-                );
-            }
-            Err(e) => {
-                eprintln!("error: drain_audio: {e}");
-                return ExitCode::from(1);
-            }
+            Ok(mut tail) => audio_accum.append(&mut tail),
+            Err(e) => eprintln!("warning: final drain_audio: {e}"),
         }
+        if let Err(e) = write_wav(p, &audio_accum) {
+            eprintln!("error: writing WAV: {e}");
+            return ExitCode::from(1);
+        }
+        let secs = audio_accum.len() as f64 / 32_000.0;
+        eprintln!(
+            "Audio WAV written to {}  ({} samples = {:.2}s @ 32 kHz stereo)",
+            p.display(),
+            audio_accum.len(),
+            secs
+        );
     }
     ExitCode::SUCCESS
 }
@@ -859,12 +884,18 @@ fn print_diag_state(snes: &mut Snes) {
     // Audio pipeline diagnostic — show whether the music driver is
     // actually producing audio. If MVOL or active voices stay at 0,
     // we *can't* hear anything regardless of the audio backend.
-    let mvol_l = snes.apu_real.dsp_regs[0x0C] as i8;
-    let mvol_r = snes.apu_real.dsp_regs[0x1C] as i8;
-    let kon = snes.apu_real.dsp_regs[0x4C];
-    let endx = snes.apu_real.dsp_regs[0x7C];
-    let active_count = snes.apu_real.voice_active.iter().filter(|a| **a).count();
-    let any_envelope = snes.apu_real.voice_envelope.iter().any(|e| *e != 0);
+    let mvol_l = snes.apu_real.dsp.registers[0x0C] as i8;
+    let mvol_r = snes.apu_real.dsp.registers[0x1C] as i8;
+    let kon = snes.apu_real.dsp.registers[0x4C];
+    let endx = snes.apu_real.dsp.registers[0x7C];
+    let active_count = snes
+        .apu_real
+        .dsp
+        .voices
+        .iter()
+        .filter(|v| v.envelope_mode != luna_apu::dsp::EnvelopeMode::Release || v.envelope != 0)
+        .count();
+    let any_envelope = snes.apu_real.dsp.voices.iter().any(|v| v.envelope != 0);
     let queue_len = snes.apu_real.audio_queue.len();
     let (last_l, last_r) = snes.apu_real.audio_sample();
     println!(
@@ -874,15 +905,15 @@ fn print_diag_state(snes: &mut Snes) {
     );
     // Echo subsystem state — useful for verifying the music driver
     // actually configured echo (most SNES tracks use it heavily).
-    let flg = snes.apu_real.dsp_regs[0x6C];
-    let esa = snes.apu_real.dsp_regs[0x6D];
-    let edl = snes.apu_real.dsp_regs[0x7D] & 0x0F;
-    let efb = snes.apu_real.dsp_regs[0x0D] as i8;
-    let evol_l = snes.apu_real.dsp_regs[0x2C] as i8;
-    let evol_r = snes.apu_real.dsp_regs[0x3C] as i8;
-    let eon = snes.apu_real.dsp_regs[0x4D];
-    let pmon = snes.apu_real.dsp_regs[0x2D];
-    let non = snes.apu_real.dsp_regs[0x3D];
+    let flg = snes.apu_real.dsp.registers[0x6C];
+    let esa = snes.apu_real.dsp.registers[0x6D];
+    let edl = snes.apu_real.dsp.registers[0x7D] & 0x0F;
+    let efb = snes.apu_real.dsp.registers[0x0D] as i8;
+    let evol_l = snes.apu_real.dsp.registers[0x2C] as i8;
+    let evol_r = snes.apu_real.dsp.registers[0x3C] as i8;
+    let eon = snes.apu_real.dsp.registers[0x4D];
+    let pmon = snes.apu_real.dsp.registers[0x2D];
+    let non = snes.apu_real.dsp.registers[0x3D];
     println!(
         "Echo:   FLG=${flg:02X} (reset={} mute={} ECEN={}) \
          ESA=${esa:02X} (=${esa:02X}00) EDL=${edl:X} ({} samples) \

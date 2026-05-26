@@ -253,6 +253,40 @@ pub struct ApuState {
     pub audio_queue_len: usize,
     /// The most recent mixed stereo sample.
     pub last_audio_sample: (i16, i16),
+    /// Full 128-byte DSP register file (`$00..$7F`). Lets debuggers see
+    /// per-voice volume/pitch/SRCN/ADSR/GAIN + global DIR/EVOL/EON/PMON
+    /// without re-reading via the bus port.
+    pub dsp_regs: Vec<u8>,
+    /// First 64 bytes of ARAM at the BRR sample directory base
+    /// (`DIR << 8`). Each 4-byte entry is start_lo/start_hi/loop_lo/
+    /// loop_hi; 64 bytes covers 16 SRCN entries — enough to see what
+    /// samples the driver has set up.
+    pub dir_excerpt: Vec<u8>,
+    /// Per-voice "is currently playing" (mirror of `voice_active`).
+    pub voice_active: [bool; 8],
+    /// Per-voice ADSR phase as a string for easy reading.
+    pub voice_phase: [String; 8],
+    /// Per-voice 11-bit envelope value (0..0x7FF). Independent of
+    /// the `ENVX` register reading — this is the live value the DSP
+    /// is using right now.
+    pub voice_envelope: [u16; 8],
+    /// Per-voice current BRR block address in ARAM. Set on KON from
+    /// the sample directory and advanced by 9 bytes per consumed
+    /// BRR block.
+    pub voice_block_addr: [u16; 8],
+    /// First 36 bytes of ARAM at each voice's current BRR block (4
+    /// blocks of 9 bytes per voice) — lets debuggers spot whether the
+    /// SPC has actually uploaded BRR data with sane headers (scale
+    /// 0..12, varying filter, end/loop bits sparse).
+    pub voice_brr_dump: Vec<Vec<u8>>,
+    /// Per-voice 4-sample BRR history (newest first). Direct view of
+    /// the post-IIR-decoded samples used as input to the Gaussian
+    /// interpolator. If this is all zeros for an active voice with a
+    /// non-zero envelope, decoding is failing somewhere upstream.
+    pub voice_brr_history: Vec<Vec<i16>>,
+    /// Per-voice 14-bit pitch accumulator. Threshold 0x4000 = 1 BRR
+    /// sample per output tick.
+    pub voice_pitch_acc: [u16; 8],
 }
 
 /// Diagnostic info for an SPC700 opcode that the emulator hasn't
@@ -546,13 +580,51 @@ impl Emulator {
                     .map(|(o, p)| UnimplementedOp { opcode: o, pc: p }),
                 to_cpu_ports: s.apu_real.to_cpu_ports,
                 to_spc_ports: s.apu_real.to_spc_ports,
-                mvol_l: s.apu_real.dsp_regs[0x0C] as i8,
-                mvol_r: s.apu_real.dsp_regs[0x1C] as i8,
-                kon: s.apu_real.dsp_regs[0x4C],
-                endx: s.apu_real.dsp_regs[0x7C],
-                active_voices: s.apu_real.voice_active.iter().filter(|a| **a).count() as u8,
+                mvol_l: s.apu_real.dsp.registers[0x0C] as i8,
+                mvol_r: s.apu_real.dsp.registers[0x1C] as i8,
+                kon: s.apu_real.dsp.registers[0x4C],
+                endx: s.apu_real.dsp.registers[0x7C],
+                active_voices: s
+                    .apu_real
+                    .dsp
+                    .voices
+                    .iter()
+                    .filter(|v| {
+                        v.envelope_mode != luna_apu::dsp::EnvelopeMode::Release || v.envelope != 0
+                    })
+                    .count() as u8,
                 audio_queue_len: s.apu_real.audio_queue.len(),
                 last_audio_sample: s.apu_real.audio_sample(),
+                dsp_regs: s.apu_real.dsp.registers.to_vec(),
+                dir_excerpt: {
+                    let base = (s.apu_real.dsp.registers[0x5D] as usize) << 8;
+                    let mut v = Vec::with_capacity(64);
+                    for i in 0..64 {
+                        v.push(s.apu_real.aram[(base + i) & 0xFFFF]);
+                    }
+                    v
+                },
+                voice_active: std::array::from_fn(|i| {
+                    let v = &s.apu_real.dsp.voices[i];
+                    v.envelope_mode != luna_apu::dsp::EnvelopeMode::Release || v.envelope != 0
+                }),
+                voice_phase: std::array::from_fn(|i| {
+                    format!("{:?}", s.apu_real.dsp.voices[i].envelope_mode)
+                }),
+                voice_envelope: std::array::from_fn(|i| s.apu_real.dsp.voices[i].envelope),
+                voice_block_addr: std::array::from_fn(|i| s.apu_real.dsp.voices[i].brr_address),
+                voice_brr_dump: (0..8)
+                    .map(|v| {
+                        let base = s.apu_real.dsp.voices[v].brr_address as usize;
+                        (0..36)
+                            .map(|i| s.apu_real.aram[(base + i) & 0xFFFF])
+                            .collect()
+                    })
+                    .collect(),
+                voice_brr_history: (0..8)
+                    .map(|v| s.apu_real.dsp.voices[v].buffer.to_vec())
+                    .collect(),
+                voice_pitch_acc: std::array::from_fn(|i| s.apu_real.dsp.voices[i].gaussian_offset),
             });
         let stats = Stats {
             instructions_executed: self.instructions_executed,
@@ -795,6 +867,15 @@ fn default_apu_state() -> ApuState {
         active_voices: 0,
         audio_queue_len: 0,
         last_audio_sample: (0, 0),
+        dsp_regs: vec![0; 128],
+        dir_excerpt: vec![0; 64],
+        voice_active: [false; 8],
+        voice_phase: std::array::from_fn(|_| "Off".to_string()),
+        voice_envelope: [0; 8],
+        voice_block_addr: [0; 8],
+        voice_brr_dump: vec![vec![0; 36]; 8],
+        voice_brr_history: vec![vec![0; 4]; 8],
+        voice_pitch_acc: [0; 8],
     }
 }
 
