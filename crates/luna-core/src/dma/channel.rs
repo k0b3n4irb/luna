@@ -1,6 +1,6 @@
 //! Per-channel DMA state and transfer logic.
 
-use crate::bus::DmaBus;
+use super::bus::DmaBus;
 use luna_bus::{Addr24, make_addr};
 
 // =============================================================================

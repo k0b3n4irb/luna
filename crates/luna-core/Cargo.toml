@@ -10,12 +10,14 @@ repository.workspace = true
 readme.workspace = true
 
 [dependencies]
+# luna-coproc and luna-dma used to be separate crates; they were
+# only ever consumed by luna-core and have been folded in as
+# `crate::coproc` and `crate::dma` modules (see `src/coproc/` and
+# `src/dma/`).
 luna-apu        = { workspace = true }
 luna-bus        = { workspace = true }
 luna-cartridge  = { workspace = true }
-luna-coproc     = { workspace = true }
 luna-cpu-65c816 = { workspace = true }
-luna-dma        = { workspace = true }
 luna-ppu        = { workspace = true }
 
 [lints]

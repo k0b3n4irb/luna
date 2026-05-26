@@ -4,8 +4,8 @@
 //! semantics. `Dma::run_mdma` is the entry point invoked by the bus
 //! when software writes `$420B`.
 
-use crate::bus::DmaBus;
-use crate::channel::DmaChannel;
+use super::bus::DmaBus;
+use super::channel::DmaChannel;
 
 /// The SNES DMA controller — 8 channels + a pair of global registers.
 #[derive(Default)]
@@ -105,9 +105,9 @@ impl Dma {
 
 #[cfg(test)]
 mod tests {
+    use super::super::bus::DmaBus;
+    use super::super::channel::DmaParams;
     use super::*;
-    use crate::bus::DmaBus;
-    use crate::channel::DmaParams;
 
     struct MockBus {
         a: Vec<u8>,
