@@ -15,10 +15,11 @@ use luna_bus::{
     Addr24, Bus, MCycles, Mapper, MapperKind, address_speed, bank_of, make_addr, offset_of,
 };
 use luna_cartridge::Cartridge;
-use luna_coproc::Sa1Chip;
 use luna_cpu_65c816::Cpu;
-use luna_dma::{Dma, DmaBus};
 use luna_ppu::Ppu;
+
+use crate::coproc::Sa1Chip;
+use crate::dma::{Dma, DmaBus};
 
 /// Top-level SNES machine.
 pub struct Snes {

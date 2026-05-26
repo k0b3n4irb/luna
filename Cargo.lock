@@ -1880,23 +1880,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "luna-coproc"
-version = "0.0.1"
-dependencies = [
- "luna-bus",
- "luna-cpu-65c816",
-]
-
-[[package]]
 name = "luna-core"
 version = "0.0.1"
 dependencies = [
  "luna-apu",
  "luna-bus",
  "luna-cartridge",
- "luna-coproc",
  "luna-cpu-65c816",
- "luna-dma",
  "luna-ppu",
 ]
 
@@ -1912,13 +1902,6 @@ dependencies = [
 [[package]]
 name = "luna-cpu-spc700"
 version = "0.0.1"
-
-[[package]]
-name = "luna-dma"
-version = "0.0.1"
-dependencies = [
- "luna-bus",
-]
 
 [[package]]
 name = "luna-gui"

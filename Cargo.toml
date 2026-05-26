@@ -6,11 +6,9 @@ members = [
     "crates/luna-bus",
     "crates/luna-cartridge",
     "crates/luna-cli",
-    "crates/luna-coproc",
     "crates/luna-core",
     "crates/luna-cpu-65c816",
     "crates/luna-cpu-spc700",
-    "crates/luna-dma",
     "crates/luna-gui",
     "crates/luna-mcp-server",
     "crates/luna-ppu",
@@ -45,11 +43,9 @@ luna-api          = { path = "crates/luna-api", version = "0.0.1" }
 luna-apu          = { path = "crates/luna-apu", version = "0.0.1" }
 luna-bus          = { path = "crates/luna-bus", version = "0.0.1" }
 luna-cartridge    = { path = "crates/luna-cartridge", version = "0.0.1" }
-luna-coproc       = { path = "crates/luna-coproc", version = "0.0.1" }
 luna-core         = { path = "crates/luna-core", version = "0.0.1" }
 luna-cpu-65c816   = { path = "crates/luna-cpu-65c816", version = "0.0.1" }
 luna-cpu-spc700   = { path = "crates/luna-cpu-spc700", version = "0.0.1" }
-luna-dma          = { path = "crates/luna-dma", version = "0.0.1" }
 luna-mcp-server   = { path = "crates/luna-mcp-server", version = "0.0.1" }
 luna-ppu          = { path = "crates/luna-ppu", version = "0.0.1" }
 
