@@ -267,6 +267,12 @@ impl DmaChannel {
         let pattern = self.params.mode.pattern();
         let mut byte_idx: usize = 0;
         let mut transferred: u32 = 0;
+        // Each byte transfer is ~8 master cycles on real hardware.
+        // We feed that to the bus's per-byte tick so coprocessors
+        // (SA-1, etc.) run interleaved with the DMA instead of waking
+        // up after a multi-kilocycle freeze — matches ares + Mesen2
+        // scheduling. See `DmaBus::tick` doc for citations.
+        const MCLK_PER_DMA_BYTE: u32 = 8;
         // 0x0000 means 64 KB (transfer count is computed as
         // `((das as u32 + 0xFFFF) % 0x10000) + 1` effectively); we
         // model it by looping with a u32 counter that initialises
@@ -297,6 +303,8 @@ impl DmaChannel {
             };
             byte_idx = (byte_idx + 1) % pattern.len();
             transferred += 1;
+            // Cooperative coprocessor tick after each byte.
+            bus.tick(MCLK_PER_DMA_BYTE);
         }
         // Hardware leaves `das = 0` at the end of a sync DMA.
         self.das = 0;
