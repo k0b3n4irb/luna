@@ -1341,18 +1341,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gloo-timers"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbb143cf96099802033e0d4f4963b19fd2e0b728bcf076cd9cf7f6634f092994"
-dependencies = [
- "futures-channel",
- "futures-core",
- "js-sys",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "glow"
 version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1863,16 +1851,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "luna-async"
-version = "0.0.1"
-dependencies = [
- "futures",
- "gloo-timers",
- "tokio",
- "wasm-bindgen-futures",
-]
-
-[[package]]
 name = "luna-bus"
 version = "0.0.1"
 
@@ -1961,14 +1939,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "luna-mcp-client"
-version = "0.0.1"
-
-[[package]]
-name = "luna-mcp-core"
-version = "0.0.1"
-
-[[package]]
 name = "luna-mcp-server"
 version = "0.0.1"
 dependencies = [
@@ -1981,10 +1951,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
 ]
-
-[[package]]
-name = "luna-overlay"
-version = "0.0.1"
 
 [[package]]
 name = "luna-ppu"

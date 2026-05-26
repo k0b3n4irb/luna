@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/luna-async",
     "crates/luna-api",
     "crates/luna-apu",
     "crates/luna-bus",
@@ -13,10 +12,7 @@ members = [
     "crates/luna-cpu-spc700",
     "crates/luna-dma",
     "crates/luna-gui",
-    "crates/luna-mcp-client",
-    "crates/luna-mcp-core",
     "crates/luna-mcp-server",
-    "crates/luna-overlay",
     "crates/luna-ppu",
 ]
 
@@ -47,7 +43,6 @@ all = { level = "warn", priority = -1 }
 # Cœur d'émulation
 luna-api          = { path = "crates/luna-api", version = "0.0.1" }
 luna-apu          = { path = "crates/luna-apu", version = "0.0.1" }
-luna-async        = { path = "crates/luna-async", version = "0.0.1" }
 luna-bus          = { path = "crates/luna-bus", version = "0.0.1" }
 luna-cartridge    = { path = "crates/luna-cartridge", version = "0.0.1" }
 luna-coproc       = { path = "crates/luna-coproc", version = "0.0.1" }
@@ -55,10 +50,7 @@ luna-core         = { path = "crates/luna-core", version = "0.0.1" }
 luna-cpu-65c816   = { path = "crates/luna-cpu-65c816", version = "0.0.1" }
 luna-cpu-spc700   = { path = "crates/luna-cpu-spc700", version = "0.0.1" }
 luna-dma          = { path = "crates/luna-dma", version = "0.0.1" }
-luna-mcp-client   = { path = "crates/luna-mcp-client", version = "0.0.1" }
-luna-mcp-core     = { path = "crates/luna-mcp-core", version = "0.0.1" }
 luna-mcp-server   = { path = "crates/luna-mcp-server", version = "0.0.1" }
-luna-overlay      = { path = "crates/luna-overlay", version = "0.0.1" }
 luna-ppu          = { path = "crates/luna-ppu", version = "0.0.1" }
 
 # Externals (versions pinned plus tard quand on les utilisera vraiment)
@@ -68,10 +60,8 @@ thiserror   = "2"
 tracing     = "0.1"
 futures     = { version = "0.3", default-features = false, features = ["alloc"] }
 
-# Async runtimes — pour la façade luna-async
-tokio                = { version = "1", default-features = false }
-wasm-bindgen-futures = "0.4"
-gloo-timers          = { version = "0.3", features = ["futures"] }
+# Async runtime — needed by luna-cli (tokio main) and luna-mcp-server.
+tokio       = { version = "1", default-features = false }
 
 # CLI
 clap                 = { version = "4", features = ["derive"] }
