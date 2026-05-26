@@ -774,6 +774,18 @@ impl Emulator {
         }
         Ok(out)
     }
+
+    /// Direct read of PPU VRAM. `offset` is a *byte* address (0..0xFFFF
+    /// — VRAM is 64 KB), `count` how many consecutive bytes to read.
+    /// Read-only, no bus side effects.
+    pub fn peek_vram(&self, offset: u16, count: u16) -> Result<Vec<u8>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let mut out = Vec::with_capacity(usize::from(count));
+        for i in 0..count {
+            out.push(snes.ppu.vram.peek(offset.wrapping_add(i)));
+        }
+        Ok(out)
+    }
 }
 
 fn default_cpu_state() -> CpuState {
