@@ -38,7 +38,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Sample, SampleFormat, Stream, StreamConfig};
 use ringbuf::HeapRb;
-use ringbuf::traits::{Consumer, Producer, Split};
+use ringbuf::traits::{Consumer, Split};
 
 /// Target SNES audio sample rate. The host stream is configured to
 /// this rate when the device supports it.
@@ -49,22 +49,37 @@ pub(crate) const TARGET_SAMPLE_RATE: u32 = 32_000;
 /// adding too much latency).
 const RING_CAPACITY: usize = 4_096;
 
-/// Host audio output. Owns the cpal stream + the ring-buffer
-/// producer; the consumer is moved into the audio callback.
+/// Host audio output. Owns the cpal stream + a flag that flips on
+/// first sample push; the consumer end of the SPSC ring lives inside
+/// the cpal callback, and the producer end is handed to the dedicated
+/// emulator thread (see `emu_thread.rs`).
 pub(crate) struct AudioBackend {
-    producer: ringbuf::HeapProd<(i16, i16)>,
     /// Held just to keep the stream alive — dropping the `Stream`
     /// stops the callback.
     _stream: Stream,
-    /// `true` after at least one successful `feed` call. The audio
-    /// callback emits silence until this flips, avoiding a startup
-    /// pop while the ring buffer is empty.
-    primed: Arc<AtomicBool>,
+    /// `true` after the emu thread has pushed at least one sample.
+    /// The audio callback emits silence until this flips, avoiding a
+    /// startup pop while the ring buffer is empty. Cloned into the
+    /// callback closures; this end of the Arc is currently unused
+    /// (kept so a future UI status row can display it).
+    #[allow(dead_code)]
+    pub(crate) primed: Arc<AtomicBool>,
     /// Output device sample rate (might not match
     /// [`TARGET_SAMPLE_RATE`]). Stored for diagnostics; the Stubs
-    /// panel will surface it once the GUI gets a "host SR" row.
+    /// panel surfaces it as "host SR".
     #[allow(dead_code)]
     pub(crate) host_sample_rate: u32,
+}
+
+/// What [`AudioBackend::try_start`] returns — the backend itself, the
+/// producer end of the SPSC ring (handed to the dedicated emu thread),
+/// and the shared `primed` flag (also handed to the emu thread so it
+/// can flip on first push, unblocking the cpal callback's gated
+/// "emit silence until ready" branch).
+pub(crate) struct AudioStreamArtifacts {
+    pub backend: AudioBackend,
+    pub producer: ringbuf::HeapProd<(i16, i16)>,
+    pub primed: Arc<AtomicBool>,
 }
 
 impl AudioBackend {
@@ -72,7 +87,9 @@ impl AudioBackend {
     /// Returns `None` (with a logged reason) if any setup step
     /// fails — emulation continues silently in that case.
     #[must_use]
-    pub(crate) fn try_start() -> Option<Self> {
+    pub(crate) fn try_start(
+        emu_shared: Arc<crate::emu_thread::EmuShared>,
+    ) -> Option<AudioStreamArtifacts> {
         let host = cpal::default_host();
         let Some(device) = host.default_output_device() else {
             eprintln!("luna-gui audio: no default output device — running silent");
@@ -126,10 +143,15 @@ impl AudioBackend {
         let stream_result = match chosen_format {
             SampleFormat::F32 => {
                 let primed_inner = primed_cb;
+                let emu_inner = emu_shared.clone();
                 device.build_output_stream(
                     &config,
                     move |data: &mut [f32], _| {
                         fill_buffer_f32(data, &mut consumer, &mut resampler, &primed_inner);
+                        // Audio-as-clock: each callback drained samples
+                        // from the ring → tell the emu thread it can
+                        // push more (it parks on a full ring).
+                        emu_inner.unpark_emu();
                     },
                     |err| eprintln!("luna-gui audio error: {err}"),
                     None,
@@ -137,10 +159,12 @@ impl AudioBackend {
             }
             SampleFormat::I16 => {
                 let primed_inner = primed_cb;
+                let emu_inner = emu_shared.clone();
                 device.build_output_stream(
                     &config,
                     move |data: &mut [i16], _| {
                         fill_buffer_i16(data, &mut consumer, &mut resampler, &primed_inner);
+                        emu_inner.unpark_emu();
                     },
                     |err| eprintln!("luna-gui audio error: {err}"),
                     None,
@@ -148,10 +172,12 @@ impl AudioBackend {
             }
             SampleFormat::U8 => {
                 let primed_inner = primed_cb;
+                let emu_inner = emu_shared.clone();
                 device.build_output_stream(
                     &config,
                     move |data: &mut [u8], _| {
                         fill_buffer_u8(data, &mut consumer, &mut resampler, &primed_inner);
+                        emu_inner.unpark_emu();
                     },
                     |err| eprintln!("luna-gui audio error: {err}"),
                     None,
@@ -177,32 +203,15 @@ impl AudioBackend {
             "luna-gui audio: started ({:?}, {} Hz, 2 ch)",
             chosen_format, config.sample_rate.0
         );
-        Some(Self {
+        Some(AudioStreamArtifacts {
+            backend: Self {
+                _stream: stream,
+                primed: primed.clone(),
+                host_sample_rate: config.sample_rate.0,
+            },
             producer,
-            _stream: stream,
             primed,
-            host_sample_rate: config.sample_rate.0,
         })
-    }
-
-    /// Push as many of the given samples into the SPSC ring as fit.
-    /// Anything that doesn't fit is dropped (ring already full =
-    /// audio thread is ahead of consumption rate — extremely rare
-    /// in practice; we'd rather drop than starve emulation).
-    pub(crate) fn feed(&mut self, samples: &[(i16, i16)]) {
-        if samples.is_empty() {
-            return;
-        }
-        for s in samples {
-            if self.producer.try_push(*s).is_err() {
-                // Ring full — drop the oldest by reading one out via
-                // a peek-style trick isn't trivial with our crate;
-                // we just stop pushing. Emulation continues; the
-                // audio thread will catch up shortly.
-                break;
-            }
-        }
-        self.primed.store(true, Ordering::Relaxed);
     }
 }
 

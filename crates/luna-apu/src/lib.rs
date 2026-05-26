@@ -401,12 +401,6 @@ impl Apu {
                 timer_internal: &mut self.timer_internal,
                 timer_enabled: &mut self.timer_enabled,
             };
-            // Gap A1: ask the SPC700 for its actual per-opcode cost.
-            // Previously a flat 4 cycles per instruction; that drove
-            // T0/T1/T2 timer counters (music tempo) AND the DSP
-            // sample tick (overall pitch progression) wrong by the
-            // same multiplicative factor. See SPC700_CYCLES in
-            // luna_cpu_spc700::cycles for the canonical table.
             let cycles = u32::from(self.cpu.step(&mut bus));
             self.tick_timers(cycles);
             self.tick_voices(cycles);
