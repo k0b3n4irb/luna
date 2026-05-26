@@ -139,6 +139,13 @@ impl AudioBackend {
 
         let device_rate = config.sample_rate.0;
         let mut resampler = Resampler::new(TARGET_SAMPLE_RATE, device_rate);
+        // Sit a 5 Hz first-order high-pass between the SPSC ring and
+        // the resampler. The SNES DSP accumulates slow DC drift through
+        // echo feedback and per-voice mix rounding; left unchecked it
+        // adds a barely-audible low rumble and consumes headroom that
+        // could clip a transient. Corner well below any musical
+        // content; -3 dB only at 5 Hz, slope 6 dB/oct.
+        let mut dc_blocker = DcBlocker::new(5.0, TARGET_SAMPLE_RATE);
 
         let stream_result = match chosen_format {
             SampleFormat::F32 => {
@@ -147,7 +154,13 @@ impl AudioBackend {
                 device.build_output_stream(
                     &config,
                     move |data: &mut [f32], _| {
-                        fill_buffer_f32(data, &mut consumer, &mut resampler, &primed_inner);
+                        fill_buffer_f32(
+                            data,
+                            &mut consumer,
+                            &mut resampler,
+                            &mut dc_blocker,
+                            &primed_inner,
+                        );
                         // Audio-as-clock: each callback drained samples
                         // from the ring → tell the emu thread it can
                         // push more (it parks on a full ring).
@@ -163,7 +176,13 @@ impl AudioBackend {
                 device.build_output_stream(
                     &config,
                     move |data: &mut [i16], _| {
-                        fill_buffer_i16(data, &mut consumer, &mut resampler, &primed_inner);
+                        fill_buffer_i16(
+                            data,
+                            &mut consumer,
+                            &mut resampler,
+                            &mut dc_blocker,
+                            &primed_inner,
+                        );
                         emu_inner.unpark_emu();
                     },
                     |err| eprintln!("luna-gui audio error: {err}"),
@@ -176,7 +195,13 @@ impl AudioBackend {
                 device.build_output_stream(
                     &config,
                     move |data: &mut [u8], _| {
-                        fill_buffer_u8(data, &mut consumer, &mut resampler, &primed_inner);
+                        fill_buffer_u8(
+                            data,
+                            &mut consumer,
+                            &mut resampler,
+                            &mut dc_blocker,
+                            &primed_inner,
+                        );
                         emu_inner.unpark_emu();
                     },
                     |err| eprintln!("luna-gui audio error: {err}"),
@@ -219,6 +244,7 @@ fn fill_buffer_f32(
     data: &mut [f32],
     consumer: &mut ringbuf::HeapCons<(i16, i16)>,
     resampler: &mut Resampler,
+    dc_blocker: &mut DcBlocker,
     primed: &AtomicBool,
 ) {
     if !primed.load(Ordering::Relaxed) {
@@ -229,7 +255,7 @@ fn fill_buffer_f32(
     }
     let mut idx = 0;
     while idx + 1 < data.len() {
-        let (l, r) = resampler.pull(|| pop_input(consumer));
+        let (l, r) = resampler.pull(|| pop_input(consumer).map(|s| dc_blocker.process(s)));
         data[idx] = l;
         data[idx + 1] = r;
         idx += 2;
@@ -240,6 +266,7 @@ fn fill_buffer_i16(
     data: &mut [i16],
     consumer: &mut ringbuf::HeapCons<(i16, i16)>,
     resampler: &mut Resampler,
+    dc_blocker: &mut DcBlocker,
     primed: &AtomicBool,
 ) {
     if !primed.load(Ordering::Relaxed) {
@@ -250,10 +277,10 @@ fn fill_buffer_i16(
     }
     let mut idx = 0;
     while idx + 1 < data.len() {
-        let (l, r) = resampler.pull(|| pop_input(consumer));
+        let (l, r) = resampler.pull(|| pop_input(consumer).map(|s| dc_blocker.process(s)));
         // The resampler works in normalised f32 [-1, 1]; round back
-        // to i16. Clamp because the linear interp can mathematically
-        // overshoot by an LSB on certain frac/sample combinations.
+        // to i16. Clamp because the cubic Hermite interp can
+        // mathematically overshoot by an LSB on extreme transients.
         data[idx] = (l * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
         data[idx + 1] = (r * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
         idx += 2;
@@ -268,6 +295,7 @@ fn fill_buffer_u8(
     data: &mut [u8],
     consumer: &mut ringbuf::HeapCons<(i16, i16)>,
     resampler: &mut Resampler,
+    dc_blocker: &mut DcBlocker,
     primed: &AtomicBool,
 ) {
     if !primed.load(Ordering::Relaxed) {
@@ -278,7 +306,7 @@ fn fill_buffer_u8(
     }
     let mut idx = 0;
     while idx + 1 < data.len() {
-        let (l, r) = resampler.pull(|| pop_input(consumer));
+        let (l, r) = resampler.pull(|| pop_input(consumer).map(|s| dc_blocker.process(s)));
         data[idx] = (l * 128.0 + 128.0).round().clamp(0.0, 255.0) as u8;
         data[idx + 1] = (r * 128.0 + 128.0).round().clamp(0.0, 255.0) as u8;
         idx += 2;
@@ -385,9 +413,59 @@ impl Resampler {
     }
 }
 
+// =============================================================================
+// DC offset filter
+// =============================================================================
+
+/// First-order IIR high-pass filter ("DC blocker"), applied to each
+/// stereo channel independently before resampling. Standard difference
+/// equation `y[n] = x[n] - x[n-1] + R · y[n-1]` with
+/// `R = exp(-2π · fc / fs)`. A first-order Butterworth at the same
+/// corner has the same magnitude response; this form is just one
+/// formulation of it.
+///
+/// Rationale: the SNES DSP accumulates slow DC drift through echo
+/// feedback (EFB factor < 1 but the feedback path's quantisation noise
+/// is not zero-mean) and per-voice mix rounding. Left unchecked, the
+/// drift consumes headroom that could otherwise hold a transient, and
+/// adds a barely-audible low rumble that imaging-sensitive ears pick
+/// up as "muddy bass." Filtering at 5 Hz keeps the entire musical
+/// range untouched (slope is only -3 dB at 5 Hz, → -0.05 dB at 50 Hz).
+pub(crate) struct DcBlocker {
+    r: f32,
+    x_prev_l: f32,
+    y_prev_l: f32,
+    x_prev_r: f32,
+    y_prev_r: f32,
+}
+
+impl DcBlocker {
+    pub(crate) fn new(cutoff_hz: f32, sample_rate: u32) -> Self {
+        let r = (-2.0 * std::f32::consts::PI * cutoff_hz / sample_rate as f32).exp();
+        Self {
+            r,
+            x_prev_l: 0.0,
+            y_prev_l: 0.0,
+            x_prev_r: 0.0,
+            y_prev_r: 0.0,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn process(&mut self, (l, r): (f32, f32)) -> (f32, f32) {
+        let yl = l - self.x_prev_l + self.r * self.y_prev_l;
+        let yr = r - self.x_prev_r + self.r * self.y_prev_r;
+        self.x_prev_l = l;
+        self.y_prev_l = yl;
+        self.x_prev_r = r;
+        self.y_prev_r = yr;
+        (yl, yr)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Resampler;
+    use super::{DcBlocker, Resampler};
 
     #[test]
     fn resampler_step_is_below_one_when_upsampling() {
@@ -462,5 +540,45 @@ mod tests {
         let final_sample = r.pull(|| None);
         assert!((final_sample.0 - 0.5).abs() < 0.01);
         assert!((final_sample.1 - (-0.5)).abs() < 0.01);
+    }
+
+    #[test]
+    fn dc_blocker_removes_pure_dc() {
+        // Feed a constant non-zero signal. After many samples (well
+        // past the filter's time constant ≈ 32 ms at fc=5 Hz, fs=32k),
+        // the output must converge to ~ 0.
+        let mut f = DcBlocker::new(5.0, 32_000);
+        for _ in 0..32_000 {
+            f.process((0.7, -0.3));
+        }
+        let out = f.process((0.7, -0.3));
+        assert!(out.0.abs() < 1e-3, "L should be ≈ 0, got {}", out.0);
+        assert!(out.1.abs() < 1e-3, "R should be ≈ 0, got {}", out.1);
+    }
+
+    #[test]
+    fn dc_blocker_passes_passband_through_at_unit_gain() {
+        // 1 kHz sine at 32 kHz is well above the 5 Hz corner; the
+        // filter should pass it with essentially no amplitude change
+        // and no phase distortion at this frequency.
+        let mut f = DcBlocker::new(5.0, 32_000);
+        let fs = 32_000.0_f32;
+        let freq = 1_000.0_f32;
+        // Run a few periods first to settle, then measure peak.
+        for n in 0..96 {
+            let t = n as f32 / fs;
+            let s = (2.0 * std::f32::consts::PI * freq * t).sin();
+            f.process((s, s));
+        }
+        let mut peak = 0.0_f32;
+        for n in 96..(96 + 320) {
+            let t = n as f32 / fs;
+            let s = (2.0 * std::f32::consts::PI * freq * t).sin();
+            let out = f.process((s, s));
+            peak = peak.max(out.0.abs());
+        }
+        // Magnitude response at 1 kHz is ≈ 1.000 for fc=5 Hz; ≥ 0.99
+        // after settling is comfortably within tolerance.
+        assert!(peak > 0.99, "expected ≥ 0.99, got {peak}");
     }
 }
