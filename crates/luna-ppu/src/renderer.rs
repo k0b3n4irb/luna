@@ -260,14 +260,22 @@ pub struct SpriteEntry {
 #[inline]
 #[must_use]
 pub(crate) fn sprite_tile_byte_offset(obsel: u8, tile: u16) -> usize {
-    let page0 = (usize::from(obsel) & 0x07) << 13;
+    // OBSEL bits 0..2 give the OBJ tile base address in 8K-**word**
+    // units (= 16K-byte units, since VRAM is word-addressed by the
+    // PPU). Same interpretation as ares' `tiledataAddress = (n & 7)
+    // << 13` followed by word-indexed `vram[address]`, and as
+    // Mesen2's `OamBaseAddress = (value & 7) << 13` indexed against
+    // `_vram[FetchAddress]` (a `uint16_t*` array). luna's `vram.peek`
+    // is byte-addressed so we double the shift here (`<< 14`) to
+    // convert from word-base to byte-base in one step. Same applies
+    // to the name-select offset (`<< 13` = 8K-byte step per +1).
+    let page0 = ((usize::from(obsel) & 0x07) << 14) & 0xFFFF;
     let nameselect = usize::from(obsel >> 3) & 0x03;
-    let page1 = page0.wrapping_add((nameselect + 1) << 12);
+    let page1 = page0.wrapping_add((nameselect + 1) << 13) & 0xFFFF;
     let tile_in_page = usize::from(tile & 0xFF) * 32;
     if (tile & 0x100) == 0 {
-        page0 + tile_in_page
+        (page0 + tile_in_page) & 0xFFFF
     } else {
-        // VRAM is 64 KB — wrap if the configured offset overshoots.
         (page1 + tile_in_page) & 0xFFFF
     }
 }
@@ -1643,18 +1651,23 @@ mod tests {
 
     #[test]
     fn sprite_tile_byte_offset_two_page_addressing() {
-        // OBSEL with base=0, nameselect=0: page 1 at $1000.
+        // OBSEL.bits[0..2] map to byte address × 0x4000 (= word × 0x2000)
+        // per ares + Mesen2. Nameselect contributes (n+1) × 0x2000 byte
+        // gap between page 0 and page 1.
+        //
+        // OBSEL=0, nameselect=0: page 0 at $0000, page 1 at $2000.
         assert_eq!(sprite_tile_byte_offset(0x00, 0x000), 0);
         assert_eq!(sprite_tile_byte_offset(0x00, 0x0FF), 0xFF * 32);
-        assert_eq!(sprite_tile_byte_offset(0x00, 0x100), 0x1000);
-        assert_eq!(sprite_tile_byte_offset(0x00, 0x1FF), 0x1000 + 0xFF * 32);
-        // nameselect=1: page 1 at +$2000 — adjacent to page 0 (no gap).
-        assert_eq!(sprite_tile_byte_offset(0x08, 0x100), 0x2000);
-        // nameselect=3: page 1 at +$4000.
-        assert_eq!(sprite_tile_byte_offset(0x18, 0x100), 0x4000);
-        // base = 2 (OBSEL bit 1): page 0 at $4000.
-        assert_eq!(sprite_tile_byte_offset(0x02, 0x000), 0x4000);
-        assert_eq!(sprite_tile_byte_offset(0x02, 0x100), 0x4000 + 0x1000);
+        assert_eq!(sprite_tile_byte_offset(0x00, 0x100), 0x2000);
+        assert_eq!(sprite_tile_byte_offset(0x00, 0x1FF), 0x2000 + 0xFF * 32);
+        // nameselect=1: page 1 at +$4000.
+        assert_eq!(sprite_tile_byte_offset(0x08, 0x100), 0x4000);
+        // nameselect=3: page 1 at +$8000.
+        assert_eq!(sprite_tile_byte_offset(0x18, 0x100), 0x8000);
+        // base = 2 (OBSEL bit 1): page 0 at byte $8000 (= word $4000),
+        // page 1 at $A000.
+        assert_eq!(sprite_tile_byte_offset(0x02, 0x000), 0x8000);
+        assert_eq!(sprite_tile_byte_offset(0x02, 0x100), 0xA000);
     }
 
     #[test]
