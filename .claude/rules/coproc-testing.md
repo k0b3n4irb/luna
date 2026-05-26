@@ -1,12 +1,12 @@
 # Coprocessor / DMA / PPU Test Discipline (auto-loaded)
 
-Anything touching these crates has tight cross-coupling and silent
+Anything touching these paths has tight cross-coupling and silent
 regressions elsewhere are common:
 
-- `crates/luna-bus/src/sa1.rs`
-- `crates/luna-coproc/src/sa1.rs`
-- `crates/luna-dma`
-- `crates/luna-ppu`
+- `crates/luna-bus/src/sa1.rs` (the bus-side SA-1 mapper)
+- `crates/luna-core/src/coproc/sa1.rs` (the chip-side SA-1 state)
+- `crates/luna-core/src/dma/` (DMA + HDMA controllers)
+- `crates/luna-ppu/`
 
 A change in any of these requires a full `cargo test --workspace --lib`
 sweep, not just the per-crate test set. Run after the rebuild discipline
