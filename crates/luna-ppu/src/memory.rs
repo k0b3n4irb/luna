@@ -392,14 +392,23 @@ impl Oam {
     }
 
     /// Direct read for tests and the renderer.
+    ///
+    /// `addr` is taken modulo the 544-byte OAM ring (512 bytes of low
+    /// table + 32 bytes of high table). The earlier `& 0x21F` mask
+    /// was wrong: `0x21F` is `bits 0..4 + bit 9`, so addresses like
+    /// `32` (just bit 5) AND'd to `0`, making every read at byte 32+
+    /// alias back to byte 0..31. Visible regression on any game that
+    /// uses sprites past slot 7 — every sprite 8..15 rendered with
+    /// sprite 0..7's pixel data, sprite 16..23 with sprite 0..7's,
+    /// etc. (the 32-byte OAM wrap the SA-1 starfield demo surfaced).
     #[must_use]
     pub fn peek(&self, addr: u16) -> u8 {
-        self.data[usize::from(addr) & 0x21F]
+        self.data[usize::from(addr) % self.data.len()]
     }
 
     /// Direct write for tests and DMA fast paths.
     pub fn poke(&mut self, addr: u16, value: u8) {
-        let a = usize::from(addr) & 0x21F;
+        let a = usize::from(addr) % self.data.len();
         self.data[a] = value;
         self.update_shadow(a, value);
     }
@@ -469,7 +478,7 @@ impl Oam {
     /// `$2138` read — OAM data read at the current byte address.
     /// Advances by one byte per read; no latching on reads.
     pub fn read(&mut self) -> u8 {
-        let value = self.data[usize::from(self.address) & 0x21F];
+        let value = self.data[usize::from(self.address) % self.data.len()];
         self.advance();
         value
     }
