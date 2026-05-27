@@ -70,4 +70,29 @@ pub trait Mapper {
     fn coproc_main_irq_pending(&self) -> bool {
         false
     }
+
+    /// Snapshot the SA-1 coprocessor's CPU state, if this mapper hosts
+    /// one. Plain LoROM / HiROM / Super FX / DSP-N return `None`.
+    /// Used by luna-api to expose SA-1 PC / running state to debug
+    /// integrations diagnosing main↔SA-1 mailbox deadlocks.
+    fn sa1_snapshot(&self) -> Option<Sa1Snapshot> {
+        None
+    }
+}
+
+/// Minimal SA-1 CPU snapshot for diagnostics. Captures the just-fetched
+/// `PB:PC`, the processor status flags, and whether the chip is
+/// released from reset. Enough to tell at a glance whether the SA-1
+/// is stuck in a polling loop, running random ROM bytes after a bad
+/// bank mapping, or genuinely halted.
+#[derive(Debug, Clone, Copy)]
+pub struct Sa1Snapshot {
+    /// Program counter within the program bank.
+    pub pc: u16,
+    /// Program bank.
+    pub pb: u8,
+    /// Processor status (N V M X D I Z C).
+    pub p: u8,
+    /// `true` while CCNT.5 is clear (chip released from reset).
+    pub running: bool,
 }

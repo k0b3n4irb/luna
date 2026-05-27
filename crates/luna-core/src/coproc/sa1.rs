@@ -22,7 +22,7 @@
 //! larger piece deferred — non-CC bulk DMA already works.
 
 use luna_bus::sa1::Sa1Mapper;
-use luna_bus::{Addr24, Bus, MCycles, Mapper, MapperKind, make_addr};
+use luna_bus::{Addr24, Bus, MCycles, Mapper, MapperKind, Sa1Snapshot, make_addr};
 use luna_cpu_65c816::Cpu;
 
 /// SA-1 chip — a `Sa1Mapper` (shared cart memory) wrapped with its
@@ -140,6 +140,15 @@ impl Mapper for Sa1Chip {
 
     fn coproc_main_irq_pending(&self) -> bool {
         self.inner.main_irq_line()
+    }
+
+    fn sa1_snapshot(&self) -> Option<Sa1Snapshot> {
+        Some(Sa1Snapshot {
+            pc: self.cpu.pc,
+            pb: self.cpu.pb,
+            p: self.cpu.p.bits(),
+            running: self.running,
+        })
     }
 }
 
