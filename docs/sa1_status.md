@@ -41,13 +41,16 @@ Bug #1 was the visible cause of the starfield collapse. Bug #2 is
 architecturally correct independent of #1 — without it the SA-1
 sees a frozen timeline during long DMAs.
 
-## Known remaining audit gaps
+## Deliberate deviations from ares + Mesen2
 
-- **CIWP/SIWP defaults** (`luna-bus/src/sa1.rs:355-363`) initialise to
-  `0xFF` (all-allow); ares + Mesen2 reset both to `0x00` (all-block).
-  No observable regression in current test ROMs, but this is a
-  semantic deviation worth fixing for any future code that probes
-  the reset state.
+- **CIWP/SIWP reset defaults** (`luna-bus/src/sa1.rs:355-373`). ares +
+  Mesen2 reset both protections to `0x00` (block-all); luna ships
+  `0xFF` (allow-all). Attempted to switch to the reference defaults
+  on 2026-05-27 and the opensnes sa1_starfield demo went black in
+  luna-gui — its `sa1_boot.asm` writes `CIWP = $FF` but never touches
+  `SIWP`, so it depends on the open default. The 0xFF deviation is
+  the practical choice until we hit a real cart that probes the
+  reset state.
 
 ## Related references
 
