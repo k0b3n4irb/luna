@@ -120,6 +120,10 @@ pub(crate) struct LunaApp {
     /// set to the button being remapped — the next key press in the
     /// modal becomes its binding.
     pending_rebind: Option<crate::input::SnesButton>,
+    /// Last directory the user opened a ROM from. Persisted to
+    /// `~/.config/luna/last_rom_dir` so the file dialog reopens
+    /// where the user left off across app restarts.
+    last_rom_dir: Option<PathBuf>,
 }
 
 impl LunaApp {
@@ -160,6 +164,17 @@ impl LunaApp {
             key_bindings: crate::input::KeyBindings::load_or_default(),
             show_input_modal: false,
             pending_rebind: None,
+            last_rom_dir: load_last_rom_dir(),
+        }
+    }
+
+    /// Update the remembered ROM directory from a freshly-picked path
+    /// and persist it. Best-effort: I/O errors are swallowed so a
+    /// read-only HOME doesn't block ROM loading.
+    fn remember_rom_dir(&mut self, rom_path: &Path) {
+        if let Some(dir) = rom_path.parent() {
+            self.last_rom_dir = Some(dir.to_path_buf());
+            let _ = save_last_rom_dir(dir);
         }
     }
 
@@ -335,6 +350,7 @@ impl App for LunaApp {
         // ---------------- File-drop handling ----------------
         let dropped_files = ctx.input(|i| i.raw.dropped_files.clone());
         if let Some(file) = dropped_files.into_iter().find_map(|f| f.path) {
+            self.remember_rom_dir(&file);
             self.load_rom(&file);
         }
 
@@ -377,11 +393,14 @@ impl App for LunaApp {
             MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Open ROM…").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
+                        let mut dialog = rfd::FileDialog::new()
                             .add_filter("SNES ROM", &["sfc", "smc"])
-                            .add_filter("All files", &["*"])
-                            .pick_file()
-                        {
+                            .add_filter("All files", &["*"]);
+                        if let Some(dir) = self.last_rom_dir.as_deref() {
+                            dialog = dialog.set_directory(dir);
+                        }
+                        if let Some(path) = dialog.pick_file() {
+                            self.remember_rom_dir(&path);
                             self.load_rom(&path);
                         }
                         ui.close_kind(UiKind::Menu);
@@ -558,12 +577,13 @@ impl App for LunaApp {
         let cpu_paused = self.paused;
         egui::CentralPanel::default().show(ctx, |ui| {
             if !self.rom_loaded {
-                requested_path = draw_landing_page(ui);
+                requested_path = draw_landing_page(ui, self.last_rom_dir.as_deref());
                 return;
             }
             draw_screen(ui, self.framebuffer.as_ref(), cpu_stopped, cpu_paused);
         });
         if let Some(path) = requested_path {
+            self.remember_rom_dir(&path);
             self.load_rom(&path);
         }
 
@@ -872,7 +892,7 @@ fn draw_screen(ui: &mut egui::Ui, texture: Option<&TextureHandle>, stopped: bool
 /// Draw the no-ROM startup screen. Returns the picked path if the
 /// user clicked "Open ROM…", so the caller (which owns `self`) can
 /// call `load_rom` without running into closure-borrow conflicts.
-fn draw_landing_page(ui: &mut egui::Ui) -> Option<PathBuf> {
+fn draw_landing_page(ui: &mut egui::Ui, last_rom_dir: Option<&Path>) -> Option<PathBuf> {
     let mut picked: Option<PathBuf> = None;
     ui.vertical_centered(|ui| {
         ui.add_space(48.0);
@@ -890,10 +910,13 @@ fn draw_landing_page(ui: &mut egui::Ui) -> Option<PathBuf> {
             )
             .clicked()
         {
-            picked = rfd::FileDialog::new()
+            let mut dialog = rfd::FileDialog::new()
                 .add_filter("SNES ROM", &["sfc", "smc"])
-                .add_filter("All files", &["*"])
-                .pick_file();
+                .add_filter("All files", &["*"]);
+            if let Some(dir) = last_rom_dir {
+                dialog = dialog.set_directory(dir);
+            }
+            picked = dialog.pick_file();
         }
         ui.add_space(16.0);
         ui.label(
@@ -904,6 +927,36 @@ fn draw_landing_page(ui: &mut egui::Ui) -> Option<PathBuf> {
         );
     });
     picked
+}
+
+/// `~/.config/luna/last_rom_dir` — single-line text file holding the
+/// directory the user last opened a ROM from. Mirrors the resolution
+/// of [`crate::input::config_path`] (XDG → `$HOME/.config`).
+fn last_rom_dir_path() -> Option<PathBuf> {
+    let base = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        PathBuf::from(xdg)
+    } else if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".config")
+    } else {
+        return None;
+    };
+    Some(base.join("luna").join("last_rom_dir"))
+}
+
+fn load_last_rom_dir() -> Option<PathBuf> {
+    let path = last_rom_dir_path()?;
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let dir = PathBuf::from(raw.trim());
+    if dir.is_dir() { Some(dir) } else { None }
+}
+
+fn save_last_rom_dir(dir: &Path) -> std::io::Result<()> {
+    let path = last_rom_dir_path()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no config dir"))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, dir.to_string_lossy().as_ref())
 }
 
 fn payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
