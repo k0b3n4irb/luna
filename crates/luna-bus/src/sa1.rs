@@ -385,20 +385,37 @@ impl Sa1Mapper {
         (mask >> page) & 1 != 0
     }
 
-    fn bwram_writable_for(&self, byte_off: usize, side: WriteSide) -> bool {
-        match side {
-            WriteSide::Main => {
-                if (self.sbwe & 0x80) == 0 {
-                    return false;
-                }
-                // BWPA is linear-by-256: $00 = no protection, $0F =
-                // 3840 bytes protected at the start of BW-RAM. Per
-                // fullsnes "SA-1 SBWE/CBWE/BWPA registers".
-                let prot_bytes = usize::from(self.bwpa & 0x0F) * 256;
-                byte_off >= prot_bytes
-            }
-            WriteSide::Sa1 => (self.cbwe & 0x80) != 0,
+    fn bwram_writable_for(&self, byte_off: usize, _side: WriteSide) -> bool {
+        // Per ares (`coprocessor/sa1/bwram.cpp:40-43, 73-84`) and
+        // Mesen2 (`CpuBwRamHandler.h:45-57`, `Sa1BwRamHandler.h:41-50`):
+        // BWRAM writes are gated by the **OR** of SBWE and CBWE bit 7,
+        // not each side independently. If EITHER enable is set, the
+        // write goes through from BOTH sides. Only when both are
+        // cleared does BWPA's protected first-region check kick in,
+        // and even then writes OUTSIDE the protected area still
+        // succeed. ares quotes Kirby's Dream Land 3 as the witness
+        // game: `BWPA=$02, SWEN=$80, CWEN=$00`, SA-1 writes to
+        // `$4001Ax`/`$40032x` must succeed.
+        //
+        // luna previously treated SBWE/CBWE as per-side hard gates;
+        // SMRPG (which never writes SBWE/CBWE during init, trusting
+        // the real-hardware default) had every main-CPU BWRAM write
+        // silently dropped, deadlocking the main↔SA-1 mailbox at
+        // `$40:3D00`. The reset-time backing-mmio default of `$00`
+        // also made the broken-gate case the default, so the bug
+        // affected most SA-1 carts.
+        //
+        // BWPA size formula `0x100 << min(bwp, 10)` matches Mesen2's
+        // clamp (max 256 KiB protection); ares uses the raw 4-bit
+        // value but no real cart sets `bwp > 10` so both behave the
+        // same in practice. `_side` is kept in the signature for
+        // call-site clarity but ignored — the gate is symmetric.
+        if (self.sbwe & 0x80) != 0 || (self.cbwe & 0x80) != 0 {
+            return true;
         }
+        let bwp = (self.bwpa & 0x0F).min(0x0A);
+        let prot_bytes = 0x100usize << bwp;
+        byte_off >= prot_bytes
     }
 
     /// Effective bit-length for VLBP reads. VBD bits 0..3 carry the
@@ -1998,41 +2015,57 @@ mod tests {
     // ------------- Phase-5 write-protection tests -------------
 
     #[test]
-    fn sbwe_clear_blocks_main_bwram_writes() {
+    fn bwram_write_passes_when_either_enable_is_set() {
+        // Per ares (`coprocessor/sa1/bwram.cpp:40-43, 73-84`) and
+        // Mesen2 (`CpuBwRamHandler.h:45-57`): SBWE alone never gates
+        // BWRAM writes — the gate is the OR of SBWE and CBWE. Killing
+        // one side leaves the other free to keep writing.
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
-        // Disable main-CPU BW-RAM writes.
+        // SBWE off, CBWE still $80 (default) → main write still lands.
         m.write(make_addr(0x00, 0x2226), 0x00);
         m.write(make_addr(0x40, 0x0000), 0xAA);
-        assert_eq!(
-            m.read(make_addr(0x40, 0x0000)),
-            Some(0x00),
-            "write was supposed to be blocked"
-        );
-        // Re-enable and confirm.
-        m.write(make_addr(0x00, 0x2226), 0x80);
-        m.write(make_addr(0x40, 0x0000), 0xAA);
         assert_eq!(m.read(make_addr(0x40, 0x0000)), Some(0xAA));
-    }
-
-    #[test]
-    fn bwpa_protects_first_n_pages_of_bwram_from_main() {
-        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
-        // Protect the first 256 bytes from main.
-        m.write(make_addr(0x00, 0x2228), 0x01);
-        m.write(make_addr(0x40, 0x0000), 0xAA);
+        // Kill CBWE too and write outside the BWPA-protected first
+        // 256 bytes (BWPA=0 → prot zone = 0x100 bytes).
+        m.write(make_addr(0x00, 0x2227), 0x00);
         m.write(make_addr(0x40, 0x0100), 0xBB);
-        assert_eq!(m.read(make_addr(0x40, 0x0000)), Some(0x00));
         assert_eq!(m.read(make_addr(0x40, 0x0100)), Some(0xBB));
+        // Write INSIDE the protected zone → blocked now (both disabled).
+        m.write(make_addr(0x40, 0x0040), 0xCC);
+        assert_eq!(m.read(make_addr(0x40, 0x0040)), Some(0x00));
     }
 
     #[test]
-    fn cbwe_protection_is_independent_of_sbwe() {
-        // BW-RAM writes from the SA-1 side are gated by CBWE only;
-        // BWPA never applies, and SBWE has no effect.
+    fn bwpa_protects_first_n_pages_only_when_both_enables_disabled() {
+        // Per ares/Mesen2: BWPA's first-block protect zone applies
+        // only when SBWE AND CBWE are both cleared. With either
+        // enable set, BWPA is inert.
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
+        // Disable both enables so BWPA actually gates.
+        m.write(make_addr(0x00, 0x2226), 0x00);
+        m.write(make_addr(0x00, 0x2227), 0x00);
+        // BWPA = 1 → prot_bytes = 0x100 << 1 = 512 bytes.
+        m.write(make_addr(0x00, 0x2228), 0x01);
+        m.write(make_addr(0x40, 0x0000), 0xAA); // inside → blocked
+        m.write(make_addr(0x40, 0x0200), 0xBB); // outside → lands
+        assert_eq!(m.read(make_addr(0x40, 0x0000)), Some(0x00));
+        assert_eq!(m.read(make_addr(0x40, 0x0200)), Some(0xBB));
+        // Re-enable either side → BWPA goes inert, protected slot writes.
+        m.write(make_addr(0x00, 0x2226), 0x80);
+        m.write(make_addr(0x40, 0x0000), 0xDD);
+        assert_eq!(m.read(make_addr(0x40, 0x0000)), Some(0xDD));
+    }
+
+    #[test]
+    fn sa1_side_bwram_write_uses_the_same_or_of_enables_gate() {
+        // BW-RAM writes from the SA-1 side are gated by the same
+        // OR-of-enables as main writes (per ares/Mesen2 — the gate
+        // is symmetric). Test the both-disabled-in-BWPA-zone path
+        // here too.
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
         m.write(make_addr(0x00, 0x2226), 0x00); // SBWE disabled
-        m.write(make_addr(0x00, 0x2228), 0x0F); // BWPA = 15 (3840 B)
-        // CBWE disabled → SA-1 side write fails.
+        m.write(make_addr(0x00, 0x2228), 0x0F); // BWPA = 15 → 256<<10 prot
+        // CBWE disabled → both off → write inside protect zone fails.
         m.write(make_addr(0x00, 0x2227), 0x00);
         assert!(
             !m.write_from_sa1(make_addr(0x40, 0x0010), 0xAA) || {
