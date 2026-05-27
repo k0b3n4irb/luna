@@ -352,10 +352,22 @@ impl Sa1Mapper {
             vbd: 0,
             vda_base: 0,
             vbit_offset: 0,
-            // Default protections to "allow all" — real hardware boots
-            // with these enables clear and games immediately
-            // re-configure them, but starting from "allow" keeps the
-            // luna integration tests + naive carts working out-of-box.
+            // Deliberate deviation from ares (`coprocessor/sa1/sa1.cpp:239
+            // → io.siwp = 0; io.cpp:112-113 → io.ciwp = 0`) and Mesen2
+            // (`Sa1Types.h::CpuIRamWriteProtect/Sa1IRamWriteProtect`
+            // value-init to 0, plus Sa1::CpuRegisterWrite case $2200
+            // reset path setting `Sa1IRamWriteProtect = 0`): both
+            // reference emulators reset CIWP/SIWP to `0x00` (block-all).
+            //
+            // luna starts from "allow all" because home-brew SA-1 carts
+            // routinely write only CIWP at init and leave SIWP untouched,
+            // expecting an open default. opensnes' sa1_starfield demo is
+            // one such (sa1_boot.asm only stores $FF into $222A, never
+            // touches $2229) — switching to the reference 0x00 default
+            // makes the main CPU's IRAM seed silently drop and the
+            // screen go black in luna-gui. The 0xFF default keeps those
+            // carts working at the cost of one reset-time bit-pattern
+            // mismatch that no test ROM yet observes.
             sbwe: 0x80,
             cbwe: 0x80,
             bwpa: 0x00,
