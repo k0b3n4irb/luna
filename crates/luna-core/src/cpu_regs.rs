@@ -86,6 +86,13 @@ impl CpuRegs {
             // the SnesBus level.
             0x4210 => {
                 // RDNMI: bit 7 = nmi flag (cleared by this read).
+                // For the cleared-on-read semantics with the 4-cycle
+                // hold window at the start of the NMI scanline, use
+                // [`Self::read_rdnmi`] from a bus-level caller that
+                // knows the current hclock. Plain `read()` always
+                // clears — fine for direct test callers, not for games
+                // that race a `BPL $4210` mainline against an NMI
+                // handler that ACKs the same flag (CT, Terranigma).
                 let v = if self.nmi_flag { 0x80 } else { 0x00 } | 0x02; // CPU rev 2
                 self.nmi_flag = false;
                 v
@@ -113,6 +120,29 @@ impl CpuRegs {
             _ => return None,
         };
         Some(v)
+    }
+
+    /// `$4210` RDNMI read with the hardware 4-cycle hold window honoured.
+    ///
+    /// Per Mesen2 (`InternalRegisters.cpp:229-241`) and ares
+    /// (`cpu_irq.cpp::rdnmi`): reading `$4210` clears the NMI flag on
+    /// every cycle EXCEPT the first ~6 master cycles of the NMI
+    /// scanline. During that brief window the hardware forces the flag
+    /// to stay set, so a CPU mainline that polls `BPL $4210` is not
+    /// starved by its own NMI handler ACKing the same flag a few cycles
+    /// earlier. Mesen2's comment explicitly names Terranigma; Chrono
+    /// Trigger uses the same Square/Quintet idiom and hangs in luna
+    /// without the hold window.
+    ///
+    /// `in_hold` should be `true` only when the bus knows the current
+    /// scanline is the NMI scanline AND the H-clock is < 6 master
+    /// cycles (= < 2 dots at luna's H resolution).
+    pub fn read_rdnmi(&mut self, in_hold: bool) -> u8 {
+        let v = if self.nmi_flag { 0x80 } else { 0x00 } | 0x02; // CPU rev 2
+        if !in_hold {
+            self.nmi_flag = false;
+        }
+        v
     }
 
     /// Push the current per-frame joypad state into the auto-read
