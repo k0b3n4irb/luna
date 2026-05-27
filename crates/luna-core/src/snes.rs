@@ -1159,6 +1159,16 @@ impl<'a> SnesBus<'a> {
                 let hblank_bit = if in_hblank { 0x40 } else { 0x00 };
                 return (self.cpu_regs.hvbjoy & !0x40) | hblank_bit;
             }
+            if reg_off == 0x4210 {
+                // RDNMI 4-cycle hold window. Mesen2 keeps the flag
+                // set when HClock < 6 on the NMI scanline, so a
+                // mainline `BPL $4210` after the NMI handler ACKed
+                // the same flag still sees the bit. luna's H is in
+                // dots (4 mclk each), so < 6 mclks ≈ < 2 dots.
+                let (h, _) = current_hv(*self.mclk_total, self.scanlines_per_frame);
+                let in_hold = self.ppu_line == self.vblank_start_line && h < 2;
+                return self.cpu_regs.read_rdnmi(in_hold);
+            }
             if let Some(v) = self.cpu_regs.read(reg_off) {
                 return v;
             }
