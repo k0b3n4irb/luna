@@ -1068,17 +1068,26 @@ impl Sa1Mapper {
             match absolute {
                 // -------- S-CPU → SA-1 control --------
                 0x2200 => {
-                    // CCNT bit layout (per ares + Mesen2):
-                    //   bit 7 = SA-1 IRQ request (0 → 1 edge latches)
+                    // CCNT bit layout (per ares `io.cpp` $2200 +
+                    // Mesen2 `Sa1.cpp:240-258`):
+                    //   bit 7 = SA-1 IRQ request (level-driven)
                     //   bit 6 = SA-1 wait (not modelled)
                     //   bit 5 = SA-1 reset (handled in Sa1Chip::write)
-                    //   bit 4 = SA-1 NMI request (0 → 1 edge latches)
+                    //   bit 4 = SA-1 NMI request (level-driven)
                     //   bits 3..0 = message to SA-1
+                    // Both refs latch the IRQ/NMI flag on every write
+                    // whose corresponding bit is set, regardless of the
+                    // previous value. luna previously edge-detected
+                    // (0→1) which silently dropped re-trigger requests
+                    // — games that re-write CCNT=$80 after a single ack
+                    // never got the second IRQ. Acks are explicit via
+                    // CIC ($220B), not implicit on a CCNT clear.
+                    let _ = prev;
                     self.ccnt_msg = value & 0x0F;
-                    if (prev & 0x80) == 0 && (value & 0x80) != 0 {
+                    if (value & 0x80) != 0 {
                         self.main_irq_to_sa1 = true;
                     }
-                    if (prev & 0x10) == 0 && (value & 0x10) != 0 {
+                    if (value & 0x10) != 0 {
                         self.main_nmi_to_sa1 = true;
                     }
                 }
@@ -1102,16 +1111,22 @@ impl Sa1Mapper {
 
                 // -------- SA-1 → S-CPU control --------
                 0x2209 => {
-                    // SCNT bit layout (per ares + Mesen2):
-                    //   bit 7 = SA-1 → S-CPU IRQ request (0 → 1 edge)
+                    // SCNT bit layout (per ares `io.cpp` $2209 lines
+                    // ~233-246 + Mesen2 `Sa1.cpp:84-110`):
+                    //   bit 7 = SA-1 → S-CPU IRQ request (level-driven)
                     //   bit 6 = IVSW (vector override for S-CPU IRQ)
                     //   bit 4 = NMIVW (vector override for S-CPU NMI)
                     //   bits 3..0 = message to S-CPU
-                    // Real hardware has no SA-1 → S-CPU NMI trigger
-                    // path; only the NMIVW override re-routes the
-                    // S-CPU's own NMI vector to SNV.
+                    // The IRQ latch is set on every write whose bit 7
+                    // is set, regardless of prior value. luna's old
+                    // edge-detect dropped SMRPG's repeated SCNT=$87
+                    // pulses — after the first ack via SIC, the second
+                    // and subsequent SCNT writes never re-latched, so
+                    // the main↔SA-1 mailbox deadlocked on the second
+                    // handshake. Acks are explicit through SIC ($2202).
+                    let _ = prev;
                     self.scnt = value;
-                    if (prev & 0x80) == 0 && (value & 0x80) != 0 {
+                    if (value & 0x80) != 0 {
                         self.s_irq_to_main = true;
                     }
                 }
@@ -1430,24 +1445,28 @@ mod tests {
     }
 
     #[test]
-    fn main_to_sa1_irq_requires_a_clean_0_to_1_edge() {
+    fn main_to_sa1_irq_relatches_on_every_set_write() {
+        // Per ares + Mesen2: CCNT bit 7 is level-driven — every write
+        // whose bit 7 is set raises the IRQ flag, regardless of the
+        // previous value. The ack path is explicit through CIC ($220B
+        // bit 7), not implicit on a 1→1 retain. luna previously
+        // edge-detected, which silently dropped re-trigger requests
+        // and deadlocked SMRPG's second mailbox handshake.
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
         m.write(make_addr(0x00, 0x220A), 0x80);
-        // Pre-set bit 7 → first 0→1 edge latches.
+        // First write with bit 7 set → latch.
         m.write(make_addr(0x00, 0x2200), 0x80);
-        m.write(make_addr(0x00, 0x220B), 0x80); // CIC bit 7 = clear IRQ
+        assert!(m.sa1_irq_line());
+        // CIC bit 7 acks the flag.
+        m.write(make_addr(0x00, 0x220B), 0x80);
         assert!(!m.sa1_irq_line());
-        // Writing bit 7 again with no intervening clear is a 1→1: no edge.
+        // Re-writing $80 with no intervening clear must re-latch
+        // (level-driven, not edge-detect).
         m.write(make_addr(0x00, 0x2200), 0x80);
         assert!(
-            !m.sa1_irq_line(),
-            "1→1 same-bit retain should not re-trigger"
+            m.sa1_irq_line(),
+            "1→1 same-bit retain MUST re-trigger under level semantics"
         );
-        // Clear bit 7, then set it again: 0→1 edge.
-        // (Mind the bit-5 reset bit — leave the default $20 alone.)
-        m.write(make_addr(0x00, 0x2200), 0x20);
-        m.write(make_addr(0x00, 0x2200), 0xA0);
-        assert!(m.sa1_irq_line());
     }
 
     #[test]

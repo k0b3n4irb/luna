@@ -565,6 +565,23 @@ impl Snes {
         // / …). Plain LoROM/HiROM mappers no-op here.
         self.mapper.step_coproc(consumed as u32);
 
+        // Bridge the coprocessor's level-driven IRQ line into the
+        // 65C816's edge-latched `pending_irq` model. Per ares
+        // (`coprocessor/sa1/io.cpp:134-163, 233-246`) the SA-1 drives
+        // the S-CPU IRQ pin to a level (high until SIC ack); the CPU
+        // polls it each step. luna's CPU only services on edge, so we
+        // re-arm the latch every step whenever the level is still
+        // high. Without this, SCNT.7 writes by the SA-1 raise SFR
+        // bit 7 + `coproc_main_irq_pending()` but the main CPU never
+        // services the IRQ → SMRPG hangs forever in forced-blank on
+        // its first SA-1↔main mailbox handshake. The CPU's own
+        // edge-consume + I-mask check still gates the actual service,
+        // so this is safe to call even when the handler hasn't yet
+        // acked: it just keeps the latch true until the level drops.
+        if self.mapper.coproc_main_irq_pending() {
+            self.cpu.trigger_irq();
+        }
+
         consumed
     }
 
