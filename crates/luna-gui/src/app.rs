@@ -4,7 +4,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -73,8 +73,21 @@ pub(crate) struct LunaApp {
     /// Debug: render with `INIDISP` forced-blank ignored and master
     /// brightness clamped to $0F. Lets the user see whatever the game
     /// has uploaded to VRAM/CGRAM even when boot init keeps the screen
-    /// blanked. Off by default.
+    /// blanked. Off by default. Mirrored into `force_display_shared`
+    /// so the emu thread sees toggles without taking a lock.
     force_display: bool,
+    /// Shared mirror of `force_display` handed to the emu thread.
+    /// The producer side checks this flag every batch to decide
+    /// whether to honour INIDISP forced-blank or bypass it.
+    force_display_shared: Arc<AtomicBool>,
+
+    /// Latest RGBA framebuffer published by the emu thread. The UI
+    /// thread memcpy's this out under a brief lock (microseconds)
+    /// each repaint and uploads it to the GPU. Producer-fills once
+    /// per emulated frame, so the UI no longer needs the Snes lock
+    /// to render the screen — that's what kept the GUI judder-prone
+    /// the same way audio was before the dedicated emu thread.
+    framebuffer_rgba: Arc<Mutex<Vec<u8>>>,
 
     /// Snapshot of the 8 bytes at `PB:PC`, captured once per UI frame
     /// and displayed in the CPU panel. Lets the user (and Claude
@@ -138,6 +151,8 @@ impl LunaApp {
             show_ppu_panel: true,
             show_stubs_panel: true,
             force_display: false,
+            force_display_shared: Arc::new(AtomicBool::new(false)),
+            framebuffer_rgba: Arc::new(Mutex::new(vec![0u8; FRAME_W * FRAME_H * 4])),
             pc_bytes: [0; 8],
             audio,
             audio_producer,
@@ -214,6 +229,8 @@ impl LunaApp {
                         self.emu_shared.clone(),
                         producer,
                         primed,
+                        self.framebuffer_rgba.clone(),
+                        self.force_display_shared.clone(),
                     ));
                 }
                 self.rom_title = Some(title);
@@ -249,6 +266,11 @@ impl LunaApp {
         if let Ok(mut guard) = self.snes.lock() {
             *guard = None;
         }
+        // Zero the shared framebuffer so the next ROM's first frame
+        // isn't briefly shown over the previous ROM's last frame.
+        if let Ok(mut fb) = self.framebuffer_rgba.lock() {
+            fb.iter_mut().for_each(|b| *b = 0);
+        }
         self.rom_loaded = false;
     }
 
@@ -259,6 +281,11 @@ impl LunaApp {
     fn snapshot_state(&mut self) {
         // Mirror the pause flag into the emu thread.
         self.emu_shared.paused.store(self.paused, Ordering::Release);
+        // Mirror force_display into the emu thread so it knows
+        // whether to bypass INIDISP forced-blank when publishing
+        // frames. Cheap atomic store, no lock.
+        self.force_display_shared
+            .store(self.force_display, Ordering::Release);
 
         if let Ok(mut guard) = self.snes.lock() {
             if let Some(snes) = guard.as_mut() {
@@ -272,47 +299,28 @@ impl LunaApp {
 
     /// Render the PPU framebuffer into an egui texture.
     ///
-    /// Most SNES games toggle `INIDISP` bit 7 every frame to *force-
-    /// blank* the screen during their VBlank handler so they can
-    /// upload tiles / palette / OAM safely, then clear bit 7 before
-    /// rendering resumes. Our UI thread samples the PPU at an
-    /// arbitrary moment within each emulated second — when that
-    /// happens to land *inside* a forced-blank window we'd see an
-    /// all-black frame, which to the user looks like the screen is
-    /// blinking once per second.
+    /// The actual RGBA conversion happens on the dedicated emu
+    /// thread (see `emu_thread::run`), which publishes a fresh
+    /// 256×224×4 RGBA buffer into `self.framebuffer_rgba` once per
+    /// emulated frame. The UI thread only does a brief memcpy out
+    /// of that buffer and a GPU upload — it does **not** touch the
+    /// `Snes` Mutex here. That's what was making the UI judder:
+    /// the per-pixel `extend_from_slice` loop ran with the Snes
+    /// lock held for tens of milliseconds, blocking the emu
+    /// thread.
     ///
-    /// Fix: when forced-blank is on (and the user hasn't asked for
-    /// bypass), keep the previous good texture. The eye sees a
-    /// stable rendered frame; the game's blanking is invisible.
+    /// Forced-blank handling (the "don't show a black flash every
+    /// frame while the game uploads tiles in VBlank") is now done
+    /// on the producer side — the emu thread simply doesn't
+    /// publish a new buffer when `INIDISP` bit 7 is set, so the UI
+    /// re-uploads the previous (unchanged) RGBA bytes. Tiny cost,
+    /// no flicker.
     fn refresh_framebuffer(&mut self, ctx: &Context) {
-        // Blocking lock: brief wait (≤ 1 ms) for the emu thread to
-        // finish its current batch. Cheaper than the flicker that
-        // a try_lock-and-skip would produce.
-        let Ok(guard) = self.snes.lock() else {
+        let Ok(shared_fb) = self.framebuffer_rgba.lock() else {
             return;
         };
-        let Some(snes) = guard.as_ref() else {
-            return;
-        };
-        if !self.force_display && snes.ppu.inidisp & 0x80 != 0 && self.framebuffer.is_some() {
-            return;
-        }
-        let mut rgba = Vec::with_capacity(FRAME_W * FRAME_H * 4);
-        if self.force_display {
-            let opts = luna_ppu::RenderOptions {
-                bypass_forced_blank: true,
-            };
-            let frame = luna_ppu::render_frame_with(&snes.ppu, opts);
-            for px in frame {
-                rgba.extend_from_slice(&[px[0], px[1], px[2], 0xFF]);
-            }
-        } else {
-            for px in snes.ppu.framebuffer() {
-                rgba.extend_from_slice(&[px[0], px[1], px[2], 0xFF]);
-            }
-        }
-        drop(guard);
-        let image = ColorImage::from_rgba_unmultiplied([FRAME_W, FRAME_H], &rgba);
+        let image = ColorImage::from_rgba_unmultiplied([FRAME_W, FRAME_H], &shared_fb);
+        drop(shared_fb);
         if let Some(tex) = self.framebuffer.as_mut() {
             tex.set(image, TextureOptions::NEAREST);
         } else {
