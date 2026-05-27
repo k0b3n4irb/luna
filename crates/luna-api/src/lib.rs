@@ -82,6 +82,24 @@ pub struct EmulatorState {
     pub apu: ApuState,
     /// Cumulative metrics.
     pub stats: Stats,
+    /// SA-1 coprocessor CPU state, if the loaded cartridge hosts one.
+    /// `None` for non-SA-1 carts. Diagnostic for main↔SA-1 mailbox
+    /// debugging — lets you see at a glance whether the SA-1 PC is
+    /// stuck in a polling loop, running random ROM bytes, or halted.
+    pub sa1: Option<Sa1State>,
+}
+
+/// SA-1 coprocessor CPU snapshot.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct Sa1State {
+    /// Program counter within the program bank.
+    pub pc: u16,
+    /// Program bank.
+    pub pb: u8,
+    /// Processor status flags (N V M X D I Z C).
+    pub p: u8,
+    /// `true` while the SA-1 is released from reset (CCNT.5 clear).
+    pub running: bool,
 }
 
 /// 65C816 register snapshot.
@@ -630,6 +648,16 @@ impl Emulator {
             instructions_executed: self.instructions_executed,
             total_mclk: self.snes.as_ref().map_or(0, |s| s.total_mclk),
         };
+        let sa1 = self
+            .snes
+            .as_ref()
+            .and_then(|s| s.mapper.sa1_snapshot())
+            .map(|snap| Sa1State {
+                pc: snap.pc,
+                pb: snap.pb,
+                p: snap.p,
+                running: snap.running,
+            });
         EmulatorState {
             rom: self.rom_info.clone(),
             cpu,
@@ -638,6 +666,7 @@ impl Emulator {
             scheduler,
             apu,
             stats,
+            sa1,
         }
     }
 
