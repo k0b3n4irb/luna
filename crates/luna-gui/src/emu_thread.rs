@@ -161,9 +161,9 @@ fn run(
             };
 
             // catch_unwind so an emulator panic kills the batch, not
-            // the whole thread. The shared.shutdown flag stays false
-            // so the UI sees the emu thread is "alive but idle"; we
-            // surface the panic by storing it for the next snapshot.
+            // the whole thread. We surface the actual panic message
+            // (instead of dropping it silently) so freeze-debug runs
+            // can identify the exact site that died.
             let stepped: Result<usize, _> = catch_unwind(AssertUnwindSafe(|| {
                 let mut done = 0usize;
                 while done < BATCH && !snes_ref.cpu.stopped {
@@ -174,9 +174,18 @@ fn run(
             }));
             let done = match stepped {
                 Ok(n) => n,
-                Err(_payload) => {
-                    eprintln!("luna-emu: emulator panic — stopping batch");
-                    // Stop the emulator so we don't loop hard.
+                Err(payload) => {
+                    let msg = if let Some(s) = payload.downcast_ref::<&'static str>() {
+                        (*s).to_string()
+                    } else if let Some(s) = payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "(unknown panic payload)".to_string()
+                    };
+                    eprintln!(
+                        "luna-emu: EMULATOR PANIC at PB:PC=${:02X}:{:04X} — {}",
+                        snes_ref.cpu.pb, snes_ref.cpu.pc, msg
+                    );
                     snes_ref.cpu.stopped = true;
                     0
                 }
