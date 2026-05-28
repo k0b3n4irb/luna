@@ -1119,16 +1119,39 @@ impl<'a> SnesBus<'a> {
             return 0xFF;
         }
         if let Some(offset) = Self::is_joypad_serial(addr) {
-            // While LATCH ($4016 bit 0) is held high, both controllers
-            // are continuously reloaded — reads return the live D-pad
-            // state. Once LATCH falls, each read shifts one MSB-first
-            // bit out of the 16-bit shift register; subsequent reads
-            // past 16 return 1 (pulled-high serial line).
+            // $4016/$4017 manual serial read.
+            //
+            // Per Mesen2 (`BaseControlDevice.cpp::StrobeProcessRead`
+            // + `SnesController.cpp::ReadRam`) and ares
+            // (`controller/gamepad/gamepad.cpp::data`): while strobe
+            // is high, the shift register is continuously re-latched
+            // from the live controller state — so every read while
+            // strobe is high returns bit B (the MSB in luna's MSB-
+            // first layout). Once strobe falls, the buffer freezes
+            // and subsequent reads shift one MSB-first bit out per
+            // call; reads past slot 16 return 1 (pulled-high serial
+            // line — the "device signature" 4 zeros at slots 12-15
+            // already live in the upper bits, then the shift fills
+            // 1s from the LSB).
+            //
+            // luna used to ALWAYS shift, regardless of strobe, so
+            // games that polled "write 1; read 16x" (Bomberman's
+            // title-menu pattern) drained the buffer into all-1s
+            // after the first sweep and saw a phantom "every button
+            // pressed" state forever — instant menu auto-advance.
             let shift = if offset == 0x4016 {
                 &mut *self.joypad1_shift
             } else {
                 &mut *self.joypad2_shift
             };
+            let live = if offset == 0x4016 {
+                self.cpu_regs.joypad1
+            } else {
+                self.cpu_regs.joypad2
+            };
+            if *self.joypad_strobe {
+                *shift = live;
+            }
             let bit = (*shift >> 15) & 1;
             *shift = shift.wrapping_shl(1) | 1;
             return bit as u8;
@@ -1273,24 +1296,28 @@ impl<'a> SnesBus<'a> {
             return;
         }
         if let Some(offset) = Self::is_joypad_serial(addr) {
-            // $4016 bit 0: write 1 → reload both shift registers
-            // from the live joypad state and assert LATCH (continuous
-            // refresh). Write 0 → de-assert LATCH (shift register
-            // freezes; subsequent reads shift it out).
+            // $4016 strobe write.
+            //
+            // Per Mesen2 (`BaseControlDevice.cpp::StrobeProcessWrite`)
+            // and ares (`controller/gamepad/gamepad.cpp` latch path):
+            // the buffer parallel-loads on the **falling** edge
+            // (strobe 1→0), NOT on the rising edge. Rising-edge and
+            // held-high writes leave the buffer alone — the live
+            // refresh during reads (handled in the read path above)
+            // is what keeps the strobe-high reads in sync.
+            //
+            // luna used to reload on rising edge and on hold, which
+            // wasn't observable on its own but combined with the
+            // missing read-side refresh produced the Bomberman menu
+            // glitch.
             if offset == 0x4016 {
                 let next_strobe = (value & 0x01) != 0;
-                if !*self.joypad_strobe && next_strobe {
-                    // Rising edge or held-high: reload.
+                if *self.joypad_strobe && !next_strobe {
+                    // Falling edge — latch live state.
                     *self.joypad1_shift = self.cpu_regs.joypad1;
                     *self.joypad2_shift = self.cpu_regs.joypad2;
                 }
                 *self.joypad_strobe = next_strobe;
-                if next_strobe {
-                    // Keep the shift register sync'd with the live
-                    // state while strobe is held high.
-                    *self.joypad1_shift = self.cpu_regs.joypad1;
-                    *self.joypad2_shift = self.cpu_regs.joypad2;
-                }
             }
             // $4017 writes drive the expansion-port output pins —
             // ignored by an emulator that doesn't model the expansion.
