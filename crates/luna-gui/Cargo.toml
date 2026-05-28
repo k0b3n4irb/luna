@@ -1,6 +1,6 @@
 [package]
 name = "luna-gui"
-description = "Luna SNES emulator — desktop GUI (eframe / egui / wgpu)"
+description = "Luna SNES emulator — desktop GUI (winit / pixels / wgpu)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,9 +20,12 @@ luna-cartridge = { workspace = true }
 luna-core      = { workspace = true }
 luna-ppu       = { workspace = true }
 
-eframe     = { workspace = true }
-egui       = { workspace = true }
+winit      = { workspace = true }
+pixels     = { workspace = true }
 rfd        = { workspace = true }
+egui       = { workspace = true }
+egui-wgpu  = { workspace = true }
+egui-winit = { workspace = true }
 cpal       = { workspace = true }
 ringbuf    = { workspace = true }
 serde      = { workspace = true }
