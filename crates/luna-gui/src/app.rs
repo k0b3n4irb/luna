@@ -31,7 +31,7 @@ pub(crate) struct LunaApp {
     /// `try_lock` to read state without ever blocking the redraw.
     snes: SharedSnes,
     /// Handle to the spawned emu thread (one per loaded ROM).
-    emu_join: Option<JoinHandle<()>>,
+    emu_join: Option<JoinHandle<crate::emu_thread::AudioReclaim>>,
     /// State shared between UI, emu thread, and the cpal callback —
     /// shutdown / pause flags + the unpark handle that the cpal
     /// callback uses to wake the emu thread.
@@ -269,13 +269,23 @@ impl LunaApp {
     }
 
     /// Tear down the emu thread (if running) and clear the Snes slot
-    /// so a fresh ROM can be loaded.
+    /// so a fresh ROM can be loaded. Reclaims the audio producer +
+    /// primed gate from the exiting thread so the next ROM's
+    /// emu_thread::spawn can be wired to the same cpal stream.
     fn unload_snes(&mut self) {
         // Tell the emu thread to exit, then wake it in case it's parked.
         self.emu_shared.shutdown.store(true, Ordering::Release);
         self.emu_shared.unpark_emu();
         if let Some(join) = self.emu_join.take() {
-            let _ = join.join();
+            // Reset the primed gate so the next ROM's first emu-thread
+            // sample-push re-opens it. The cpal callback reads `primed`
+            // each callback and emits silence until it flips back to
+            // true on the new thread's first push.
+            if let Ok((producer, primed)) = join.join() {
+                primed.store(false, Ordering::Release);
+                self.audio_producer = Some(producer);
+                self.audio_primed = Some(primed);
+            }
         }
         self.emu_shared.shutdown.store(false, Ordering::Release);
         if let Ok(mut guard) = self.snes.lock() {
