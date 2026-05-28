@@ -33,6 +33,11 @@ use luna_ppu::{FRAME_H, FRAME_W};
 use ringbuf::HeapProd;
 use ringbuf::traits::Producer;
 
+/// Reclaimed audio-side state the emu thread hands back to the UI on
+/// exit, so the next ROM's [`spawn`] can reuse the same cpal-bound
+/// producer + the silence-gate flag.
+pub(crate) type AudioReclaim = (HeapProd<(i16, i16)>, Arc<AtomicBool>);
+
 /// State shared between the UI thread, the emu thread, and the cpal
 /// callback. Cheaply clonable via `Arc<Self>`.
 pub(crate) struct EmuShared {
@@ -90,22 +95,22 @@ impl EmuShared {
 pub(crate) fn spawn(
     snes: Arc<Mutex<Option<Snes>>>,
     shared: Arc<EmuShared>,
-    mut producer: HeapProd<(i16, i16)>,
+    producer: HeapProd<(i16, i16)>,
     primed: Arc<AtomicBool>,
     framebuffer_rgba: Arc<Mutex<Vec<u8>>>,
     force_display: Arc<AtomicBool>,
-) -> JoinHandle<()> {
+) -> JoinHandle<AudioReclaim> {
     thread::Builder::new()
         .name("luna-emu".into())
         .spawn(move || {
             run(
                 snes,
                 shared,
-                &mut producer,
+                producer,
                 primed,
                 framebuffer_rgba,
                 force_display,
-            );
+            )
         })
         .expect("failed to spawn luna-emu thread")
 }
@@ -113,11 +118,11 @@ pub(crate) fn spawn(
 fn run(
     snes: Arc<Mutex<Option<Snes>>>,
     shared: Arc<EmuShared>,
-    producer: &mut HeapProd<(i16, i16)>,
+    mut producer: HeapProd<(i16, i16)>,
     primed: Arc<AtomicBool>,
     framebuffer_rgba: Arc<Mutex<Vec<u8>>>,
     force_display: Arc<AtomicBool>,
-) {
+) -> AudioReclaim {
     if let Ok(mut g) = shared.thread_handle.lock() {
         *g = Some(thread::current());
     }
@@ -283,4 +288,10 @@ fn run(
     if let Ok(mut g) = shared.thread_handle.lock() {
         *g = None;
     }
+    // Hand back the audio-side ownership so the next ROM's emu thread
+    // can re-spawn with the same producer + primed gate. cpal's
+    // consumer is permanently held by the audio callback (registered
+    // once at app start), so we can't recreate the ring; the producer
+    // must round-trip across ROM swaps.
+    (producer, primed)
 }
