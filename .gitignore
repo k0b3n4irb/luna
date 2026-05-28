@@ -32,3 +32,11 @@ Thumbs.db
 # Claude Code — personal overrides only; .claude/settings.json + rules/
 # + commands/ are checked in.
 .claude/settings.local.json
+
+# Reference emulator clones (for hand-comparing against ares/Mesen2/etc.
+# during reference-first investigations — not part of luna's source).
+/franlmsp-snes
+/ness
+/pinky
+/rsnes
+/snes-apu

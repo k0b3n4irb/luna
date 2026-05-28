@@ -89,29 +89,20 @@ impl EmuShared {
 /// holds for the duration of each ~1024-instruction batch). This is
 /// the visual analogue of the audio-as-clock decoupling.
 ///
-/// `force_display` is the GUI's "render even when INIDISP forced-blank
-/// is set" debug flag — checked on the producer side so the UI never
-/// needs the Snes lock to honour it.
+/// Forced-blank (INIDISP bit 7) frames are NOT published — the UI
+/// keeps showing the previous good frame. Most games toggle bit 7
+/// every VBlank to upload tiles/OAM safely, so without this the
+/// screen would flash black once per second.
 pub(crate) fn spawn(
     snes: Arc<Mutex<Option<Snes>>>,
     shared: Arc<EmuShared>,
     producer: HeapProd<(i16, i16)>,
     primed: Arc<AtomicBool>,
     framebuffer_rgba: Arc<Mutex<Vec<u8>>>,
-    force_display: Arc<AtomicBool>,
 ) -> JoinHandle<AudioReclaim> {
     thread::Builder::new()
         .name("luna-emu".into())
-        .spawn(move || {
-            run(
-                snes,
-                shared,
-                producer,
-                primed,
-                framebuffer_rgba,
-                force_display,
-            )
-        })
+        .spawn(move || run(snes, shared, producer, primed, framebuffer_rgba))
         .expect("failed to spawn luna-emu thread")
 }
 
@@ -121,7 +112,6 @@ fn run(
     mut producer: HeapProd<(i16, i16)>,
     primed: Arc<AtomicBool>,
     framebuffer_rgba: Arc<Mutex<Vec<u8>>>,
-    force_display: Arc<AtomicBool>,
 ) -> AudioReclaim {
     if let Ok(mut g) = shared.thread_handle.lock() {
         *g = Some(thread::current());
@@ -219,39 +209,22 @@ fn run(
             // state directly. Only refreshes when the emulated frame
             // has advanced.
             //
-            // Forced-blank handling: when INIDISP bit 7 is set and the
-            // user hasn't asked for force_display, skip the publish
-            // so the consumer keeps showing the last good frame
-            // (most games toggle bit 7 every frame during their
-            // VBlank tile / OAM uploads; without this we'd flash
-            // black once per second).
+            // Forced-blank handling: when INIDISP bit 7 is set, skip
+            // the publish so the consumer keeps showing the last good
+            // frame (most games toggle bit 7 every VBlank during their
+            // tile / OAM upload; without this we'd flash black once
+            // per second).
             let cur_frame = snes_ref.frame_count;
-            let fd = force_display.load(Ordering::Acquire);
             let blanked = snes_ref.ppu.inidisp & 0x80 != 0;
-            if cur_frame != last_emu_frame && (fd || !blanked) {
-                if fd {
-                    let opts = luna_ppu::RenderOptions {
-                        bypass_forced_blank: true,
-                    };
-                    let frame = luna_ppu::render_frame_with(&snes_ref.ppu, opts);
-                    for (i, px) in frame.iter().enumerate() {
-                        let off = i * 4;
-                        rgba_scratch[off] = px[0];
-                        rgba_scratch[off + 1] = px[1];
-                        rgba_scratch[off + 2] = px[2];
-                        rgba_scratch[off + 3] = 0xFF;
-                    }
-                } else {
-                    for (i, px) in snes_ref.ppu.framebuffer().iter().enumerate() {
-                        let off = i * 4;
-                        rgba_scratch[off] = px[0];
-                        rgba_scratch[off + 1] = px[1];
-                        rgba_scratch[off + 2] = px[2];
-                        rgba_scratch[off + 3] = 0xFF;
-                    }
+            if cur_frame != last_emu_frame && !blanked {
+                for (i, px) in snes_ref.ppu.framebuffer().iter().enumerate() {
+                    let off = i * 4;
+                    rgba_scratch[off] = px[0];
+                    rgba_scratch[off + 1] = px[1];
+                    rgba_scratch[off + 2] = px[2];
+                    rgba_scratch[off + 3] = 0xFF;
                 }
                 last_emu_frame = cur_frame;
-                // Publish: brief lock on the shared buffer (microseconds).
                 if let Ok(mut shared_fb) = framebuffer_rgba.lock() {
                     shared_fb.copy_from_slice(&rgba_scratch);
                 }
