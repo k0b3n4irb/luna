@@ -40,5 +40,23 @@
       "Bash(./target/release/luna run*)",
       "Bash(./target/release/luna --help)"
     ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=$(jq -r '.tool_input.file_path // empty' 2>/dev/null); case \"$f\" in *.rs) cd \"${CLAUDE_PROJECT_DIR:-.}\" || exit 0; out=$(cargo clippy --workspace --all-targets --all-features -- -D warnings 2>&1) || { printf '%s\\n' \"$out\" >&2; exit 2; } ;; esac; exit 0",
+            "asyncRewake": true,
+            "timeout": 300,
+            "statusMessage": "clippy --all-features (rust-lint-discipline)",
+            "rewakeSummary": "clippy found warnings",
+            "rewakeMessage": "rust-lint-discipline hook: `cargo clippy --workspace --all-targets --all-features -- -D warnings` FAILED after your .rs edit. Fix these warnings before continuing:"
+          }
+        ]
+      }
+    ]
   }
 }
