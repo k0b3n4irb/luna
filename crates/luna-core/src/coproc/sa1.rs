@@ -50,7 +50,7 @@ const MCLK_PER_SA1_INSN: u32 = 6;
 impl Sa1Chip {
     /// Build a new SA-1 chip wrapping the given mapper.
     #[must_use]
-    pub fn new(inner: Sa1Mapper) -> Self {
+    pub const fn new(inner: Sa1Mapper) -> Self {
         Self {
             inner,
             cpu: Cpu::new(),
@@ -160,7 +160,7 @@ struct Sa1Bus<'a> {
     mapper: &'a mut Sa1Mapper,
 }
 
-impl<'a> Bus for Sa1Bus<'a> {
+impl Bus for Sa1Bus<'_> {
     fn read(&mut self, addr: Addr24) -> u8 {
         let bank = (addr >> 16) as u8;
         let offset = (addr & 0xFFFF) as u16;

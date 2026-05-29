@@ -1,10 +1,10 @@
-//! LoROM (Mode 20) cartridge mapping.
+//! `LoROM` (Mode 20) cartridge mapping.
 //!
 //! # Mapping
 //!
 //! ROM is split into 32 KB pages. Each bank `$00-$7D` exposes one such
 //! page at `$8000-$FFFF`. Banks `$80-$FD` are mirrors. The bottom half of
-//! each bank (`$0000-$7FFF`) is **not** ROM — it routes to LowRAM / MMIO /
+//! each bank (`$0000-$7FFF`) is **not** ROM — it routes to `LowRAM` / MMIO /
 //! SRAM depending on the bank.
 //!
 //! SRAM, when present, lives in banks `$70-$7D` (mirror `$F0-$FD`) at
@@ -13,14 +13,14 @@
 use crate::mapper::{Mapper, MapperKind};
 use crate::types::{Addr24, bank_of, offset_of};
 
-/// LoROM mapper.
+/// `LoROM` mapper.
 pub struct LoRomMapper {
     rom: Vec<u8>,
     sram: Vec<u8>,
 }
 
 impl LoRomMapper {
-    /// Build a new LoROM mapper around the given ROM bytes.
+    /// Build a new `LoROM` mapper around the given ROM bytes.
     ///
     /// `sram_size` is the SRAM size in bytes (typically 0 / 2 KB / 8 KB
     /// / 32 KB / 64 KB / 128 KB).

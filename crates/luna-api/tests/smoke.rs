@@ -262,6 +262,7 @@ fn write_screenshot_golden(case: &Case, png: &[u8]) {
 
 #[test]
 fn smoke() {
+    const AUDIO_CHUNK: u64 = 100_000;
     let update = std::env::var("UPDATE_GOLDENS").is_ok();
     let mut violations: Vec<String> = Vec::new();
     let mut ran = 0;
@@ -285,7 +286,6 @@ fn smoke() {
         // long run with a single `step()` overflows and drops most of
         // the audio. Chunk the step + drain incrementally, same trick
         // luna-cli uses when emitting `--audio-out`.
-        const AUDIO_CHUNK: u64 = 100_000;
         let mut audio: Vec<(i16, i16)> = Vec::new();
         let mut left = case.insns;
         let mut step_err: Option<String> = None;
@@ -356,11 +356,10 @@ fn smoke() {
         );
         return;
     }
-    if !violations.is_empty() {
-        panic!(
-            "smoke test failed ({} violation(s)):\n  {}",
-            violations.len(),
-            violations.join("\n  ")
-        );
-    }
+    assert!(
+        violations.is_empty(),
+        "smoke test failed ({} violation(s)):\n  {}",
+        violations.len(),
+        violations.join("\n  ")
+    );
 }

@@ -168,7 +168,7 @@ pub struct BgState {
 
 /// Convenience accessor for the renderer.
 #[must_use]
-pub fn bg_state(ppu: &Ppu, idx: usize) -> BgState {
+pub const fn bg_state(ppu: &Ppu, idx: usize) -> BgState {
     ppu.bg[idx]
 }
 
@@ -465,7 +465,7 @@ impl Ppu {
 
     /// Reset the partial-flush cursor to 0. Called by the scheduler at
     /// every scanline boundary so the next line starts from dot 0.
-    pub fn scanline_reset(&mut self) {
+    pub const fn scanline_reset(&mut self) {
         self.last_flushed_dot = 0;
     }
 
@@ -575,13 +575,13 @@ impl Ppu {
     }
 
     /// Latch the current PPU H/V counters into OPHCT/OPVCT. Called
-    /// by the SnesBus on:
+    /// by the `SnesBus` on:
     ///   * a WRIO (\$4201) write whose bit 7 transitions from 0 to 1
     ///   * a read of SLHV (\$2137) — also returns open bus
     ///
     /// Both paths feed the SAME pair of latched values; the read
     /// protocol on OPHCT/OPVCT is separately tracked (low-then-high).
-    pub fn latch_counters(&mut self, h: u16, v: u16) {
+    pub const fn latch_counters(&mut self, h: u16, v: u16) {
         self.ophct = h & 0x1FF;
         self.opvct = v & 0x1FF;
         self.external_latch_hit = true;

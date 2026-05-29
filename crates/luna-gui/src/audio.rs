@@ -150,7 +150,7 @@ impl AudioBackend {
         let stream_result = match chosen_format {
             SampleFormat::F32 => {
                 let primed_inner = primed_cb;
-                let emu_inner = emu_shared.clone();
+                let emu_inner = emu_shared;
                 device.build_output_stream(
                     &config,
                     move |data: &mut [f32], _| {
@@ -172,7 +172,7 @@ impl AudioBackend {
             }
             SampleFormat::I16 => {
                 let primed_inner = primed_cb;
-                let emu_inner = emu_shared.clone();
+                let emu_inner = emu_shared;
                 device.build_output_stream(
                     &config,
                     move |data: &mut [i16], _| {
@@ -191,7 +191,7 @@ impl AudioBackend {
             }
             SampleFormat::U8 => {
                 let primed_inner = primed_cb;
-                let emu_inner = emu_shared.clone();
+                let emu_inner = emu_shared;
                 device.build_output_stream(
                     &config,
                     move |data: &mut [u8], _| {
@@ -307,8 +307,8 @@ fn fill_buffer_u8(
     let mut idx = 0;
     while idx + 1 < data.len() {
         let (l, r) = resampler.pull(|| pop_input(consumer).map(|s| dc_blocker.process(s)));
-        data[idx] = (l * 128.0 + 128.0).round().clamp(0.0, 255.0) as u8;
-        data[idx + 1] = (r * 128.0 + 128.0).round().clamp(0.0, 255.0) as u8;
+        data[idx] = l.mul_add(128.0, 128.0).round().clamp(0.0, 255.0) as u8;
+        data[idx + 1] = r.mul_add(128.0, 128.0).round().clamp(0.0, 255.0) as u8;
         idx += 2;
     }
 }
@@ -382,12 +382,22 @@ impl Resampler {
     #[inline]
     fn hermite6(ym2: f32, ym1: f32, y0: f32, y1: f32, y2: f32, y3: f32, x: f32) -> f32 {
         let c0 = y0;
-        let c1 = (ym2 - y2) * (1.0 / 12.0) + (y1 - ym1) * (2.0 / 3.0);
-        let c2 = ym1 * (5.0 / 4.0) - y0 * (7.0 / 3.0) + y1 * (5.0 / 3.0) - y2 * 0.5
-            + y3 * (1.0 / 12.0)
-            - ym2 * (1.0 / 6.0);
-        let c3 = (ym2 - y3) * (1.0 / 12.0) + (y2 - ym1) * (7.0 / 12.0) + (y0 - y1) * (4.0 / 3.0);
-        ((c3 * x + c2) * x + c1) * x + c0
+        let c1 = (ym2 - y2).mul_add(1.0 / 12.0, (y1 - ym1) * (2.0 / 3.0));
+        let c2 = ym2.mul_add(
+            -(1.0 / 6.0),
+            y3.mul_add(
+                1.0 / 12.0,
+                y2.mul_add(
+                    -0.5,
+                    y1.mul_add(5.0 / 3.0, ym1.mul_add(5.0 / 4.0, -(y0 * (7.0 / 3.0)))),
+                ),
+            ),
+        );
+        let c3 = (y0 - y1).mul_add(
+            4.0 / 3.0,
+            (ym2 - y3).mul_add(1.0 / 12.0, (y2 - ym1) * (7.0 / 12.0)),
+        );
+        (c3 * x + c2).mul_add(x, c1).mul_add(x, c0)
     }
 
     pub(crate) fn pull(&mut self, mut pop_input: impl FnMut() -> Option<(f32, f32)>) -> (f32, f32) {
@@ -395,6 +405,11 @@ impl Resampler {
         let l = Self::hermite6(h[0].0, h[1].0, h[2].0, h[3].0, h[4].0, h[5].0, self.frac);
         let r = Self::hermite6(h[0].1, h[1].1, h[2].1, h[3].1, h[4].1, h[5].1, self.frac);
         self.frac += self.step;
+        // Subtract whole steps off `frac` until it sits in [0, 1). The
+        // float-while is the standard resampler idiom — frac stays a
+        // small fraction by construction, the comparison is exact for
+        // the integer endpoint.
+        #[allow(clippy::while_float)]
         while self.frac >= 1.0 {
             self.frac -= 1.0;
             // Shift oldest out, append newest. On underrun, repeat the
@@ -453,8 +468,8 @@ impl DcBlocker {
 
     #[inline]
     pub(crate) fn process(&mut self, (l, r): (f32, f32)) -> (f32, f32) {
-        let yl = l - self.x_prev_l + self.r * self.y_prev_l;
-        let yr = r - self.x_prev_r + self.r * self.y_prev_r;
+        let yl = self.r.mul_add(self.y_prev_l, l - self.x_prev_l);
+        let yr = self.r.mul_add(self.y_prev_r, r - self.x_prev_r);
         self.x_prev_l = l;
         self.y_prev_l = yl;
         self.x_prev_r = r;

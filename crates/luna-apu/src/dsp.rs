@@ -1,3 +1,15 @@
+// The `pub _name: T` fields mirror ares' S-DSP `n3 _name;` placeholders
+// — internal latches the upstream pipeline writes / reads, kept on the
+// Voice / Echo / Latch structs so the 32-step pipeline transliteration
+// stays line-for-line with ares. Some are not wired yet on the luna
+// side; the `_` prefix marks them as "ares-port scaffold, not part of
+// the luna public API". Removing them now would diverge from
+// `ares/sfc/dsp/dsp.hpp` and make the next round-trip review (when we
+// re-port from ares head) noisier.
+#![allow(clippy::pub_underscore_fields)]
+#![allow(clippy::used_underscore_binding)]
+#![allow(clippy::used_underscore_items)]
+
 //! Cycle-accurate port of ares' S-DSP (Sony CXD1222Q-1).
 //!
 //! Mirrors `ares/sfc/dsp/` 1-for-1: the `Dsp` struct holds the same
@@ -34,12 +46,12 @@ fn sclamp16(v: i32) -> i32 {
 
 /// Bit-extract `[lo, hi]` (inclusive) of `v` (matches ares' `.bit(lo, hi)`).
 #[inline]
-fn bits(v: u8, lo: u8, hi: u8) -> u8 {
+const fn bits(v: u8, lo: u8, hi: u8) -> u8 {
     (v >> lo) & ((1u8 << (hi - lo + 1)) - 1)
 }
 
 #[inline]
-fn bit(v: u8, n: u8) -> bool {
+const fn bit(v: u8, n: u8) -> bool {
     (v >> n) & 1 != 0
 }
 
@@ -57,8 +69,8 @@ impl EnvelopeMode {
     /// `EnvelopeMode >= Decay` per ares' enum ordering (Release=0,
     /// Attack=1, Decay=2, Sustain=3).
     #[inline]
-    fn at_least_decay(self) -> bool {
-        self as u32 >= EnvelopeMode::Decay as u32
+    const fn at_least_decay(self) -> bool {
+        self as u32 >= Self::Decay as u32
     }
 }
 
@@ -268,10 +280,10 @@ fn build_gaussian_table() -> [i16; 512] {
     for phase in 0..128 {
         let sum = table[phase] + table[phase + 256] + table[511 - phase] + table[255 - phase];
         let scale = 2048.0 / sum;
-        out[phase] = (table[phase] * scale + 0.5) as i16;
-        out[phase + 256] = (table[phase + 256] * scale + 0.5) as i16;
-        out[511 - phase] = (table[511 - phase] * scale + 0.5) as i16;
-        out[255 - phase] = (table[255 - phase] * scale + 0.5) as i16;
+        out[phase] = table[phase].mul_add(scale, 0.5) as i16;
+        out[phase + 256] = table[phase + 256].mul_add(scale, 0.5) as i16;
+        out[511 - phase] = table[511 - phase].mul_add(scale, 0.5) as i16;
+        out[255 - phase] = table[255 - phase].mul_add(scale, 0.5) as i16;
     }
     out
 }
@@ -339,7 +351,7 @@ impl Dsp {
 
     // ---------------- memory.cpp -----------------
 
-    pub fn read(&self, address: u8) -> u8 {
+    pub const fn read(&self, address: u8) -> u8 {
         self.registers[(address & 0x7F) as usize]
     }
 
@@ -421,7 +433,7 @@ impl Dsp {
     // ---------------- counter.cpp ----------------
 
     #[inline]
-    fn counter_tick(&mut self) {
+    const fn counter_tick(&mut self) {
         if self.clock.counter == 0 {
             self.clock.counter = COUNTER_RELOAD;
         }
@@ -429,7 +441,7 @@ impl Dsp {
     }
 
     #[inline]
-    fn counter_poll(&self, rate: u32) -> bool {
+    const fn counter_poll(&self, rate: u32) -> bool {
         if rate == 0 {
             return false;
         }
@@ -644,7 +656,7 @@ impl Dsp {
         self.voice3c(vi);
     }
 
-    fn voice3a(&mut self, vi: usize) {
+    const fn voice3a(&mut self, vi: usize) {
         self.latch.pitch |= self.voices[vi].pitch & !0xFFu16;
     }
 
@@ -684,10 +696,11 @@ impl Dsp {
         }
 
         // gaussian interpolation (immutable borrow → take a snapshot)
-        let mut output = Self::gaussian_interpolate(&self.voices[vi]);
-        if self.voices[vi]._noise {
-            output = i32::from((self.noise.lfsr << 1) as i16);
-        }
+        let output = if self.voices[vi]._noise {
+            i32::from((self.noise.lfsr << 1) as i16)
+        } else {
+            Self::gaussian_interpolate(&self.voices[vi])
+        };
 
         // apply envelope
         self.latch.output = (((output * i32::from(self.voices[vi].envelope)) >> 11) & !1) as i16;
@@ -748,7 +761,7 @@ impl Dsp {
         }
     }
 
-    fn voice6(&mut self, _vi: usize) {
+    const fn voice6(&mut self, _vi: usize) {
         self.latch.outx = ((self.latch.output as i32) >> 8) as u8;
     }
 
@@ -764,19 +777,19 @@ impl Dsp {
         self.latch.envx = self.voices[vi].envx;
     }
 
-    fn voice8(&mut self, vi: usize) {
+    const fn voice8(&mut self, vi: usize) {
         let idx = self.voices[vi].index | 0x09;
         self.registers[idx as usize] = self.latch.outx;
     }
 
-    fn voice9(&mut self, vi: usize) {
+    const fn voice9(&mut self, vi: usize) {
         let idx = self.voices[vi].index | 0x08;
         self.registers[idx as usize] = self.latch.envx;
     }
 
     // ---------------- echo.cpp -------------------
 
-    fn calculate_fir(&self, channel: usize, index: i32) -> i32 {
+    const fn calculate_fir(&self, channel: usize, index: i32) -> i32 {
         let hist_idx = (self.echo._history_offset as i32 + index + 1) & 7;
         let sample = self.echo.history[channel][hist_idx as usize] as i32;
         (sample * self.echo.fir[index as usize] as i32) >> 6
@@ -798,7 +811,7 @@ impl Dsp {
         self.echo.history[channel][self.echo._history_offset as usize] = half as i16;
     }
 
-    fn echo_write(&mut self, channel: usize, apuram: &mut [u8; 0x10000]) {
+    const fn echo_write(&mut self, channel: usize, apuram: &mut [u8; 0x10000]) {
         if !self.echo._readonly {
             let address = self.echo._address.wrapping_add((channel as u16) * 2);
             let sample = self.echo.output[channel];
@@ -826,7 +839,7 @@ impl Dsp {
         self.echo_read(1, apuram);
     }
 
-    fn echo24(&mut self) {
+    const fn echo24(&mut self) {
         let l = self.calculate_fir(0, 3) + self.calculate_fir(0, 4) + self.calculate_fir(0, 5);
         let r = self.calculate_fir(1, 3) + self.calculate_fir(1, 4) + self.calculate_fir(1, 5);
         self.echo.input[0] += l;
@@ -867,11 +880,11 @@ impl Dsp {
         self.last_sample = (outl, outr);
     }
 
-    fn echo28(&mut self) {
+    const fn echo28(&mut self) {
         self.echo._readonly = self.echo.readonly;
     }
 
-    fn echo29(&mut self, apuram: &mut [u8; 0x10000]) {
+    const fn echo29(&mut self, apuram: &mut [u8; 0x10000]) {
         self.echo._page = self.echo.page;
         if self.echo._offset == 0 {
             self.echo._length = (self.echo.delay as u16) << 11;
@@ -884,7 +897,7 @@ impl Dsp {
         self.echo._readonly = self.echo.readonly;
     }
 
-    fn echo30(&mut self, apuram: &mut [u8; 0x10000]) {
+    const fn echo30(&mut self, apuram: &mut [u8; 0x10000]) {
         self.echo_write(1, apuram);
     }
 
@@ -1031,7 +1044,10 @@ mod tests {
     #[test]
     fn new_dsp_outputs_silence_on_first_sample() {
         let mut dsp = Dsp::new();
-        let mut aram = Box::new([0u8; 0x10000]);
+        let mut aram: Box<[u8; 0x10000]> = vec![0u8; 0x10000]
+            .into_boxed_slice()
+            .try_into()
+            .expect("64 KB slice into fixed array");
         // With FLG.7 (reset) set on new, mainvol.mute is true → silence.
         let (l, r) = dsp.main(&mut aram);
         assert_eq!(l, 0);

@@ -11,7 +11,7 @@
 ///
 /// Reads from write-only registers return open-bus (we return the last
 /// value seen on the CPU bus, which the calling [`crate::Snes`]
-/// SnesBus tracks). Writes to read-only registers are silently dropped.
+/// `SnesBus` tracks). Writes to read-only registers are silently dropped.
 #[derive(Debug, Default)]
 pub struct CpuRegs {
     /// `$4200` — NMITIMEN: NMI enable (bit 7), V-IRQ (bit 5),
@@ -61,7 +61,7 @@ pub struct CpuRegs {
     /// Same for player 2.
     pub joypad2: u16,
     /// `$4218/$4219` — latched player-1 state copied here at the
-    /// start of every VBlank when `NMITIMEN.0` is set. Stays put
+    /// start of every `VBlank` when `NMITIMEN.0` is set. Stays put
     /// between latches, so games that read these registers see a
     /// stable per-frame snapshot.
     pub joypad1_latched: u16,
@@ -78,7 +78,7 @@ impl CpuRegs {
 
     /// Read a register at the 16-bit CPU bank-0 offset (`$4200-$421F`).
     /// Returns `None` if `offset` is outside that range.
-    pub fn read(&mut self, offset: u16) -> Option<u8> {
+    pub const fn read(&mut self, offset: u16) -> Option<u8> {
         let v = match offset {
             // Most $4200-$420A registers are write-only; reads return
             // open-bus on real hardware. We return 0 so tests can
@@ -129,7 +129,7 @@ impl CpuRegs {
     /// every cycle EXCEPT the first ~6 master cycles of the NMI
     /// scanline. During that brief window the hardware forces the flag
     /// to stay set, so a CPU mainline that polls `BPL $4210` is not
-    /// starved by its own NMI handler ACKing the same flag a few cycles
+    /// starved by its own NMI handler `ACKing` the same flag a few cycles
     /// earlier. Mesen2's comment explicitly names Terranigma; Chrono
     /// Trigger uses the same Square/Quintet idiom and hangs in luna
     /// without the hold window.
@@ -137,7 +137,7 @@ impl CpuRegs {
     /// `in_hold` should be `true` only when the bus knows the current
     /// scanline is the NMI scanline AND the H-clock is < 6 master
     /// cycles (= < 2 dots at luna's H resolution).
-    pub fn read_rdnmi(&mut self, in_hold: bool) -> u8 {
+    pub const fn read_rdnmi(&mut self, in_hold: bool) -> u8 {
         let v = if self.nmi_flag { 0x80 } else { 0x00 } | 0x02; // CPU rev 2
         if !in_hold {
             self.nmi_flag = false;
@@ -147,7 +147,7 @@ impl CpuRegs {
 
     /// Push the current per-frame joypad state into the auto-read
     /// latches. Called by [`crate::Snes::advance_one_scanline`] when
-    /// the scheduler crosses the VBlank entry line, IF `NMITIMEN.0`
+    /// the scheduler crosses the `VBlank` entry line, IF `NMITIMEN.0`
     /// is set. Also raises `HVBJOY.0` (auto-read busy) for the few
     /// scanlines the hardware spends in the auto-read sequence — see
     /// [`Self::clear_joypad_busy`].
@@ -158,7 +158,7 @@ impl CpuRegs {
     /// the case by clearing both opposing bits — keyboard players
     /// who hit conflicting keys see a "no-direction" outcome rather
     /// than a glitched latch.
-    pub fn latch_joypad_auto_read(&mut self) {
+    pub const fn latch_joypad_auto_read(&mut self) {
         if self.nmitimen & 0x01 == 0 {
             return;
         }
@@ -171,7 +171,7 @@ impl CpuRegs {
     /// the physical lockout on real-HW controllers. Bit layout per
     /// the SNES JOY1L/JOY1H pair: bit 11 = Up, bit 10 = Down, bit 9
     /// = Left, bit 8 = Right.
-    fn clean_dpad(mask: u16) -> u16 {
+    const fn clean_dpad(mask: u16) -> u16 {
         let mut m = mask;
         if m & 0x0C00 == 0x0C00 {
             m &= !0x0C00; // up + down → drop both
@@ -185,17 +185,17 @@ impl CpuRegs {
     /// Drop the auto-read busy bit. Called a few scanlines after
     /// [`Self::latch_joypad_auto_read`] so games polling
     /// `$4212 & 0x01` see it clear before they continue.
-    pub fn clear_joypad_busy(&mut self) {
+    pub const fn clear_joypad_busy(&mut self) {
         self.hvbjoy &= !0x01;
     }
 
     /// Set the current button bitmask for controller `idx` (`0` or
     /// `1`). The bitmask isn't visible to game code until the next
-    /// auto-read latch (typically the next VBlank).
+    /// auto-read latch (typically the next `VBlank`).
     ///
     /// Bit layout (high → low): B Y SEL START Up Down Left Right
     /// A X L R 0 0 0 0.
-    pub fn set_joypad(&mut self, idx: usize, mask: u16) {
+    pub const fn set_joypad(&mut self, idx: usize, mask: u16) {
         match idx {
             0 => self.joypad1 = mask,
             1 => self.joypad2 = mask,
