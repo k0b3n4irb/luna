@@ -39,6 +39,7 @@ A cycle-accurate-ish SNES emulator written in Rust. 11-crate workspace:
 |---|---|---|
 | Reference-first implementation | `.claude/rules/reference-first.md` | Any SNES subsystem feature change |
 | Rebuild + lint discipline | `.claude/rules/rebuild-discipline.md` | Every code change before commit |
+| Rust lint discipline (clippy `--all-features`) | `.claude/rules/rust-lint-discipline.md` | Every code change before commit (extends rebuild) |
 | Coprocessor / DMA / PPU test sweep | `.claude/rules/coproc-testing.md` | Edits to luna-ppu, luna-core/src/dma/, luna-core/src/coproc/, luna-bus/sa1.rs |
 | Test audible / visible fixes before commit | `.claude/rules/audible-fixes-test-first.md` | Any change to APU / PPU rendering / GUI audio or framebuffer |
 
