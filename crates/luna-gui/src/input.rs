@@ -39,56 +39,56 @@ pub(crate) enum SnesButton {
 }
 
 impl SnesButton {
-    pub(crate) const ALL: [SnesButton; 12] = [
-        SnesButton::B,
-        SnesButton::Y,
-        SnesButton::Select,
-        SnesButton::Start,
-        SnesButton::Up,
-        SnesButton::Down,
-        SnesButton::Left,
-        SnesButton::Right,
-        SnesButton::A,
-        SnesButton::X,
-        SnesButton::L,
-        SnesButton::R,
+    pub(crate) const ALL: [Self; 12] = [
+        Self::B,
+        Self::Y,
+        Self::Select,
+        Self::Start,
+        Self::Up,
+        Self::Down,
+        Self::Left,
+        Self::Right,
+        Self::A,
+        Self::X,
+        Self::L,
+        Self::R,
     ];
 
     /// Display label for the rebind UI.
     #[must_use]
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
-            SnesButton::B => "B",
-            SnesButton::Y => "Y",
-            SnesButton::Select => "Select",
-            SnesButton::Start => "Start",
-            SnesButton::Up => "Up",
-            SnesButton::Down => "Down",
-            SnesButton::Left => "Left",
-            SnesButton::Right => "Right",
-            SnesButton::A => "A",
-            SnesButton::X => "X",
-            SnesButton::L => "L",
-            SnesButton::R => "R",
+            Self::B => "B",
+            Self::Y => "Y",
+            Self::Select => "Select",
+            Self::Start => "Start",
+            Self::Up => "Up",
+            Self::Down => "Down",
+            Self::Left => "Left",
+            Self::Right => "Right",
+            Self::A => "A",
+            Self::X => "X",
+            Self::L => "L",
+            Self::R => "R",
         }
     }
 
     /// Bitmask within the 16-bit `JOY1` shift register.
     #[must_use]
-    pub(crate) fn mask(self) -> u16 {
+    pub(crate) const fn mask(self) -> u16 {
         match self {
-            SnesButton::B => 0x8000,
-            SnesButton::Y => 0x4000,
-            SnesButton::Select => 0x2000,
-            SnesButton::Start => 0x1000,
-            SnesButton::Up => 0x0800,
-            SnesButton::Down => 0x0400,
-            SnesButton::Left => 0x0200,
-            SnesButton::Right => 0x0100,
-            SnesButton::A => 0x0080,
-            SnesButton::X => 0x0040,
-            SnesButton::L => 0x0020,
-            SnesButton::R => 0x0010,
+            Self::B => 0x8000,
+            Self::Y => 0x4000,
+            Self::Select => 0x2000,
+            Self::Start => 0x1000,
+            Self::Up => 0x0800,
+            Self::Down => 0x0400,
+            Self::Left => 0x0200,
+            Self::Right => 0x0100,
+            Self::A => 0x0080,
+            Self::X => 0x0040,
+            Self::L => 0x0020,
+            Self::R => 0x0010,
         }
     }
 }
@@ -137,14 +137,13 @@ impl KeyBindings {
         self.bindings
             .iter()
             .find(|(b, _)| *b == button)
-            .map(|(_, k)| *k)
-            .unwrap_or(KeyCode::Space)
+            .map_or(KeyCode::Space, |(_, k)| *k)
     }
 
     /// Rebind `button` to `key`. Multiple SNES buttons sharing one
     /// keyboard key is harmless on the SNES side.
     pub(crate) fn set(&mut self, button: SnesButton, key: KeyCode) {
-        for slot in self.bindings.iter_mut() {
+        for slot in &mut self.bindings {
             if slot.0 == button {
                 slot.1 = key;
                 return;
@@ -177,7 +176,7 @@ impl KeyBindings {
     #[must_use]
     pub(crate) fn mask_from_pressed(&self, pressed: &HashSet<KeyCode>) -> u16 {
         let mut m: u16 = 0;
-        for (button, key) in self.bindings.iter() {
+        for (button, key) in &self.bindings {
             if pressed.contains(key) {
                 m |= button.mask();
             }
@@ -186,20 +185,18 @@ impl KeyBindings {
     }
 
     pub(crate) fn load_or_default() -> Self {
-        let path = match config_path() {
-            Ok(p) => p,
-            Err(_) => return Self::default(),
+        let Ok(path) = config_path() else {
+            return Self::default();
         };
         let Ok(json) = fs::read_to_string(&path) else {
             return Self::default();
         };
-        let entries: Vec<Binding> = match serde_json::from_str(&json) {
-            Ok(v) => v,
-            Err(_) => return Self::default(),
+        let Ok(entries) = serde_json::from_str::<Vec<Binding>>(&json) else {
+            return Self::default();
         };
         let mut out = Self::default();
         for entry in entries {
-            for slot in out.bindings.iter_mut() {
+            for slot in &mut out.bindings {
                 if slot.0 == entry.button {
                     slot.1 = entry.key;
                 }

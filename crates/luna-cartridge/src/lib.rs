@@ -1,7 +1,7 @@
 //! SNES ROM file parsing.
 //!
 //! Detects an optional 512-byte SMC "copier" header, infers the internal
-//! header location (`$7FC0` for LoROM, `$FFC0` for HiROM), parses the
+//! header location (`$7FC0` for `LoROM`, `$FFC0` for `HiROM`), parses the
 //! title / mapper / sizes / region, and builds a [`Cartridge`] ready to
 //! be wrapped in a `luna-bus` mapper.
 //!
@@ -51,7 +51,7 @@ pub enum Region {
 impl Region {
     /// Decode region from the SNES country byte at offset `$xxD9`.
     #[must_use]
-    pub fn from_country(byte: u8) -> Self {
+    pub const fn from_country(byte: u8) -> Self {
         match byte {
             // NTSC: Japan, USA, Canada, South Korea, Brazil
             0x00 | 0x01 | 0x0D | 0x0F | 0x10 => Self::Ntsc,
@@ -69,7 +69,7 @@ pub struct Header {
     pub title: String,
     /// Cartridge mapping mode.
     pub mapper_kind: MapperKind,
-    /// `true` if the FastROM bit is set in the mapping byte.
+    /// `true` if the `FastROM` bit is set in the mapping byte.
     pub fast_rom: bool,
     /// ROM size in kilobytes (advertised by the cartridge, may exceed the
     /// actual file size for over-dumped or padded ROMs).
@@ -90,9 +90,9 @@ pub struct Header {
 
 impl Header {
     /// `true` iff `checksum ^ complement == 0xFFFF`. Used as the primary
-    /// signal to disambiguate LoROM vs HiROM.
+    /// signal to disambiguate `LoROM` vs `HiROM`.
     #[must_use]
-    pub fn checksum_valid(&self) -> bool {
+    pub const fn checksum_valid(&self) -> bool {
         self.checksum ^ self.checksum_complement == 0xFFFF
     }
 }
@@ -199,7 +199,7 @@ fn parse_at(rom: &[u8], off: usize) -> Header {
     }
 }
 
-fn mapper_from_byte(byte: u8) -> Option<MapperKind> {
+const fn mapper_from_byte(byte: u8) -> Option<MapperKind> {
     match byte & 0x0F {
         0 => Some(MapperKind::LoRom),
         1 => Some(MapperKind::HiRom),
@@ -232,7 +232,7 @@ fn decode_title(bytes: &[u8; 21]) -> String {
 mod tests {
     use super::*;
 
-    /// Build a 32 KB synthetic LoROM with a valid header.
+    /// Build a 32 KB synthetic `LoROM` with a valid header.
     fn synth_lorom(title: &str, sram_kb_log2: u8) -> Vec<u8> {
         let mut rom = vec![0xEA; 32 * 1024]; // NOP-padded
         let header_off = HEADER_OFFSET_LOROM;

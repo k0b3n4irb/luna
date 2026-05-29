@@ -5,7 +5,7 @@
 //! [`crate::Bus::io_cycle`] at every read or write.
 //!
 //! References: <https://problemkaputt.de/fullsnes.htm> §"SNES Memory Map"
-//! and §"SNES Mem Speed (FastROM / SlowROM)".
+//! and §"SNES Mem Speed (`FastROM` / `SlowROM`)".
 
 use crate::types::{Addr24, MCycles, bank_of, offset_of};
 
@@ -13,7 +13,7 @@ use crate::types::{Addr24, MCycles, bank_of, offset_of};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemorySpeed {
     /// 6 master cycles. ROM in banks `$80-$BF` / `$C0-$FF` at `$8000-$FFFF`
-    /// if the FastROM `MEMSEL` bit is set, and a few other fast regions.
+    /// if the `FastROM` `MEMSEL` bit is set, and a few other fast regions.
     Fast,
     /// 8 master cycles. Default speed for most of the memory map (WRAM,
     /// MMIO, SRAM, ROM in slow banks).
@@ -28,16 +28,16 @@ impl MemorySpeed {
     #[must_use]
     pub const fn mcycles(self) -> MCycles {
         match self {
-            MemorySpeed::Fast => 6,
-            MemorySpeed::Slow => 8,
-            MemorySpeed::XSlow => 12,
+            Self::Fast => 6,
+            Self::Slow => 8,
+            Self::XSlow => 12,
         }
     }
 }
 
 /// Look up the access speed for a given 24-bit address.
 ///
-/// `fast_rom` indicates whether the FastROM `MEMSEL` bit is currently set
+/// `fast_rom` indicates whether the `FastROM` `MEMSEL` bit is currently set
 /// (register `$420D`): when true, ROM accesses in banks `$80-$FF` at
 /// `$8000-$FFFF` are FAST (6 mclk) instead of SLOW (8 mclk).
 ///
@@ -45,7 +45,7 @@ impl MemorySpeed {
 /// a region is RAM, ROM, MMIO, etc. The bus implementation handles that
 /// routing separately.
 #[must_use]
-pub fn address_speed(addr: Addr24, fast_rom: bool) -> MemorySpeed {
+pub const fn address_speed(addr: Addr24, fast_rom: bool) -> MemorySpeed {
     let bank = bank_of(addr);
     let offset = offset_of(addr);
 

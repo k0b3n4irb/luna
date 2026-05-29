@@ -29,13 +29,84 @@ missing_docs = "warn"
 unreachable_pub = "warn"
 
 [workspace.lints.clippy]
-# `all` covers correctness + suspicious + complexity + style + perf — the
-# real-bug groups. `pedantic` is intentionally off for now: many of its
-# lints are stylistic and would create noise during Phase 0; we'll
-# evaluate switching it on once the codebase is mature.
+# `all` covers correctness + suspicious + complexity + style + perf —
+# the real-bug groups. `pedantic` is on so style/clarity nits get
+# flagged too. `nursery` collects unstable but generally useful lints.
 all = { level = "warn", priority = -1 }
-# Specific opt-ins (uncomment as we're ready to triage):
-# pedantic = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+# ── Domain-legitimate suppressions ──────────────────────────────────
+# luna emulates 8/16-bit SNES hardware. Truncating + wrapping casts on
+# integer types are the *operation* we're modelling, not a bug. The
+# alternatives (TryFrom + unreachable / Wrapping<u8>) would clutter
+# every PPU / CPU register store without making the code safer.
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+cast_lossless = "allow"
+
+# Opcode dispatchers, scheduler tables, PPU tile decoders and similar
+# data-driven routines are large by nature. The structural-length
+# pedantic lints would force a refactor that obscures the per-opcode
+# layout that mirrors the SNES manual.
+too_many_lines = "allow"
+too_many_arguments = "allow"
+
+# bools-in-struct heuristic flags state machines (PPU window enables,
+# CPU flag bytes, joypad mask containers). Those are deliberate.
+struct_excessive_bools = "allow"
+fn_params_excessive_bools = "allow"
+
+# Inline format args is style-only and explosively common in print!
+# tracers; not worth the diff churn.
+uninlined_format_args = "allow"
+
+# Pedantic flags `if let Some(x) = … else { … }` chains; rewriting them
+# as `map_or` reads worse for the kind of two-branch register dispatch
+# we have throughout.
+option_if_let_else = "allow"
+
+# Many SNES register decoders mirror the bit/byte structure of the
+# real hardware (e.g. NMITIMEN bits 7/5/4/0 each going to a distinct
+# field). The "missing examples" / "must use" lints add noise to those
+# without improving clarity.
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+# Nursery: redundant_pub_crate flags `pub(crate)` items used in only
+# one module — true on V0 internals that will grow into the public API.
+redundant_pub_crate = "allow"
+
+# `(x & 0xFF) == 0` reads as "low byte is zero" — the form the SNES
+# manual uses. The trailing_zeros rewrite is a less-direct expression
+# of the same intent. Style-only lint.
+verbose_bit_mask = "allow"
+
+# Audio path converts i16 PCM samples to f32 via `as f32`, which
+# pedantic flags as precision loss. The conversion is exact for the
+# i16 input range; we depend on it for resampling math.
+cast_precision_loss = "allow"
+
+# DSP / opcode code uses single-letter math symbols (l, r, a, n, t)
+# that mirror the textbook formulas. Renaming them to verbose forms
+# would obscure rather than clarify.
+similar_names = "allow"
+many_single_char_names = "allow"
+
+# MMIO register decoders and memory-speed tables explicitly enumerate
+# bank ranges + register addresses we accept-but-don't-yet-model.
+# The repetition is documentation — merging arms would hide which
+# registers / banks are intentionally noted vs. silently caught by
+# the wildcard.
+match_same_arms = "allow"
+
+# SNES register / instruction docs naturally describe the full
+# mechanic in the first paragraph (bit layout, side effects, the
+# canonical fullsnes / ares reference). Forcing a synthetic break
+# after one sentence would split related context.
+too_long_first_doc_paragraph = "allow"
 
 [workspace.dependencies]
 # Cœur d'émulation

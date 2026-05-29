@@ -878,7 +878,7 @@ fn cgram_to_bgr5(ppu: &Ppu, cgram_index: u8) -> (u8, u8, u8) {
 ///   * bits 0-2 = red intensity (3 bits → 5-bit space scaled ×4)
 ///   * bits 3-5 = green intensity (3 bits)
 ///   * bits 6-7 = blue intensity (2 bits → 5-bit space scaled ×8)
-fn direct_color_to_bgr5(palette_index: u8) -> (u8, u8, u8) {
+const fn direct_color_to_bgr5(palette_index: u8) -> (u8, u8, u8) {
     let r3 = palette_index & 0x07;
     let g3 = (palette_index >> 3) & 0x07;
     let b2 = (palette_index >> 6) & 0x03;
@@ -1090,7 +1090,7 @@ const MODE2OR3_TABLE: &[LayerSlot] = &[
 const MODE7_TABLE: &[LayerSlot] = &[obj(3), obj(2), obj(1), bg(0, 0), obj(0)];
 
 /// Pick the priority table for the current BGMODE.
-fn priority_table(bgmode: u8) -> &'static [LayerSlot] {
+const fn priority_table(bgmode: u8) -> &'static [LayerSlot] {
     match bgmode & 0x07 {
         0 => MODE0_TABLE,
         1 => {
@@ -1206,8 +1206,7 @@ pub fn render_bg_scanline_indexed_with(
         // top-left, with the canonical sprite-plane offset of
         // +1 right, +16 down, +17 diagonal.
         let quadrant_offset: u16 = if big_tiles {
-            let q =
-                (if col_in_block >= 8 { 1 } else { 0 }) + (if row_in_block >= 8 { 16 } else { 0 });
+            let q = i32::from(col_in_block >= 8) + (if row_in_block >= 8 { 16 } else { 0 });
             q as u16
         } else {
             0
@@ -1300,13 +1299,13 @@ pub fn render_frame_bg_with(ppu: &Ppu, bg_idx: usize, opts: RenderOptions) -> Ve
 
 /// Bits-per-pixel for any BG in any mode (cf. [`bg1_bpp`]).
 #[must_use]
-pub fn bg_bpp(bgmode: u8, bg_idx: usize) -> u8 {
+pub const fn bg_bpp(bgmode: u8, bg_idx: usize) -> u8 {
     let m = bgmode & 0x07;
     match (m, bg_idx) {
         (0, _) => 2,
-        (1, 0) | (1, 1) => 4,
+        (1, 0 | 1) => 4,
         (1, 2) => 2,
-        (2, 0) | (2, 1) => 4,
+        (2, 0 | 1) => 4,
         (3, 0) => 8,
         (3, 1) => 4,
         (4, 0) => 8,
@@ -1335,9 +1334,7 @@ pub fn render_bg_scanline_with(ppu: &Ppu, bg_idx: usize, y: u16, opts: RenderOpt
     if bpp == 0 {
         // BG disabled in this mode → fill with backdrop.
         let backdrop = decode_palette(ppu, 0, brightness);
-        for px in out.iter_mut() {
-            *px = backdrop;
-        }
+        out.fill(backdrop);
         return out;
     }
     let bytes_per_tile = match bpp {
@@ -1761,7 +1758,7 @@ mod tests {
         let p = Ppu::new();
         let scan = render_bg_scanline_indexed_with(&p, 0, 0, RenderOptions::default());
         assert!(
-            scan.iter().all(|px| px.is_none()),
+            scan.iter().all(std::option::Option::is_none),
             "all-zero tile should be transparent"
         );
     }
@@ -1782,7 +1779,7 @@ mod tests {
         p.vram.poke(entry_off as u16 + 1, (entry >> 8) as u8);
         let scan = render_bg_scanline_indexed_with(&p, 0, 0, RenderOptions::default());
         // Find any opaque pixel — should be tagged prio = 1.
-        let any_opaque = scan.iter().filter_map(|p| *p).next();
+        let any_opaque = scan.iter().find_map(|p| *p);
         let (_, prio) = any_opaque.expect("at least one opaque pixel");
         assert_eq!(prio, 1, "priority bit should propagate from entry bit 13");
     }

@@ -1103,20 +1103,17 @@ impl Spc700 {
                 // of returning (A=$FF, Y=A) and setting V.
                 let ya = u16::from(self.a) | (u16::from(self.y) << 8);
                 let x = u16::from(self.x);
-                match ya.checked_div(x) {
-                    Some(q) => {
-                        let r = ya % x;
-                        self.psw.set(bit::V, q > 0xFF);
-                        self.a = q as u8;
-                        self.y = r as u8;
-                    }
-                    None => {
-                        // X = 0 on real HW gives undefined-but-
-                        // observed (A = $FF, Y = $FF) with V set.
-                        self.a = 0xFF;
-                        self.y = 0xFF;
-                        self.psw.insert(bit::V);
-                    }
+                if let Some(q) = ya.checked_div(x) {
+                    let r = ya % x;
+                    self.psw.set(bit::V, q > 0xFF);
+                    self.a = q as u8;
+                    self.y = r as u8;
+                } else {
+                    // X = 0 on real HW gives undefined-but-
+                    // observed (A = $FF, Y = $FF) with V set.
+                    self.a = 0xFF;
+                    self.y = 0xFF;
+                    self.psw.insert(bit::V);
                 }
                 self.psw.set(bit::H, (self.y & 0x0F) >= (self.x & 0x0F));
                 let a = self.a;
@@ -1596,7 +1593,7 @@ impl Spc700 {
                 let (addr, b) = self.fetch_mem_bit(bus);
                 let bit_set = (bus.read(addr) >> b) & 1 != 0;
                 let c = self.psw.contains(bit::C);
-                self.psw.set(bit::C, c | !bit_set);
+                self.psw.set(bit::C, c || !bit_set);
             }
             0x4A => {
                 // AND1 C, m.b
@@ -1610,7 +1607,7 @@ impl Spc700 {
                 let (addr, b) = self.fetch_mem_bit(bus);
                 let bit_set = (bus.read(addr) >> b) & 1 != 0;
                 let c = self.psw.contains(bit::C);
-                self.psw.set(bit::C, c & !bit_set);
+                self.psw.set(bit::C, c && !bit_set);
             }
             0x8A => {
                 // EOR1 C, m.b
@@ -1736,7 +1733,7 @@ impl Spc700 {
     /// Update N / Z / C for an 8-bit compare `lhs - rhs`. No value is
     /// stored back — only flags change. C is set when `lhs >= rhs`
     /// (unsigned), matching 65C816 / SPC700 semantics.
-    fn cmp_u8(&mut self, lhs: u8, rhs: u8) {
+    const fn cmp_u8(&mut self, lhs: u8, rhs: u8) {
         let result = lhs.wrapping_sub(rhs);
         self.set_nz(result);
         self.psw.set(bit::C, lhs >= rhs);

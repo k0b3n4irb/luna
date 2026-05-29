@@ -61,8 +61,8 @@ enum Command {
     },
     /// Serve the Luna MCP server on stdio.
     ///
-    /// Once started, Luna exposes a tool catalogue (load_rom, reset,
-    /// step, state, screenshot, drain_audio, peek_memory, peek_aram)
+    /// Once started, Luna exposes a tool catalogue (`load_rom`, reset,
+    /// step, state, screenshot, `drain_audio`, `peek_memory`, `peek_aram`)
     /// to any connected MCP client (Claude Desktop, Claude Code,
     /// custom clients). The process stays alive until the client
     /// closes the stream.
@@ -692,7 +692,7 @@ fn run(
         match catch_unwind(AssertUnwindSafe(|| snes.step())) {
             Ok(_) => executed += 1,
             Err(payload) => {
-                panic_msg = Some(payload_to_string(payload));
+                panic_msg = Some(payload_to_string(&payload));
                 break;
             }
         }
@@ -734,7 +734,7 @@ fn run(
     }
     if let Some(out_path) = audio_out {
         match write_wav(out_path, &audio_samples) {
-            Ok(_) => println!(
+            Ok(()) => println!(
                 "Audio WAV written to {}  ({} samples @ 32 kHz stereo, {} s)",
                 out_path.display(),
                 audio_samples.len(),
@@ -1082,7 +1082,7 @@ fn save_screenshot(
     img.save(path)
 }
 
-fn payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+fn payload_to_string(payload: &Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         (*s).to_string()
     } else if let Some(s) = payload.downcast_ref::<String>() {

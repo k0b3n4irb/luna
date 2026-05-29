@@ -32,11 +32,11 @@ pub struct Snes {
     /// CPU-system registers at `$4200-$421F` (NMITIMEN, multiplication,
     /// division, IRQ status, etc.).
     pub cpu_regs: CpuRegs,
-    /// 128 KB Work RAM (banks `$7E-$7F` and the LowRAM mirror).
+    /// 128 KB Work RAM (banks `$7E-$7F` and the `LowRAM` mirror).
     pub wram: Box<[u8; 0x20000]>,
-    /// Cartridge mapper (LoROM in P0.6; other mappers in V1+).
+    /// Cartridge mapper (`LoROM` in P0.6; other mappers in V1+).
     pub mapper: Box<dyn Mapper + Send>,
-    /// FastROM `MEMSEL` bit — when set, ROM in banks `$80-$FF` at
+    /// `FastROM` `MEMSEL` bit — when set, ROM in banks `$80-$FF` at
     /// `$8000-$FFFF` is FAST (6 mclk) instead of SLOW (8 mclk).
     pub fast_rom: bool,
     /// Latched NMI line (`$4210` read clears it).
@@ -248,19 +248,19 @@ fn current_hv(mclk_total: u64, scanlines: u16) -> (u16, u16) {
 /// Region-aware scanline parameters.
 #[inline]
 #[must_use]
-pub fn scanlines_per_frame(region: luna_cartridge::Region) -> u16 {
+pub const fn scanlines_per_frame(region: luna_cartridge::Region) -> u16 {
     match region {
         luna_cartridge::Region::Pal => PAL_SCANLINES_PER_FRAME,
         _ => NTSC_SCANLINES_PER_FRAME,
     }
 }
 
-/// Scanline on which VBlank starts for the given region (the line
+/// Scanline on which `VBlank` starts for the given region (the line
 /// the scheduler latches the NMI flag, sets HVBJOY.7, and — if
 /// NMITIMEN.7 is on — triggers an NMI).
 #[inline]
 #[must_use]
-pub fn vblank_start_line(region: luna_cartridge::Region) -> u16 {
+pub const fn vblank_start_line(region: luna_cartridge::Region) -> u16 {
     match region {
         luna_cartridge::Region::Pal => PAL_VBLANK_START_LINE,
         _ => NTSC_VBLANK_START_LINE,
@@ -270,12 +270,12 @@ pub fn vblank_start_line(region: luna_cartridge::Region) -> u16 {
 pub const NTSC_SCANLINES_PER_FRAME: u16 = 262;
 /// Total scanlines per PAL frame.
 pub const PAL_SCANLINES_PER_FRAME: u16 = 312;
-/// Scanline on which VBlank begins on NTSC. The PPU writes the
+/// Scanline on which `VBlank` begins on NTSC. The PPU writes the
 /// `$4210` "NMI flag" bit and (if `NMITIMEN.7` is set) raises the NMI
 /// pin at the start of this line.
 pub const NTSC_VBLANK_START_LINE: u16 = 225;
 /// PAL is identical except it has more total scanlines, all of which
-/// fall inside VBlank — the visible region is still 224 lines (or
+/// fall inside `VBlank` — the visible region is still 224 lines (or
 /// 239 with overscan, which we don't model yet).
 pub const PAL_VBLANK_START_LINE: u16 = 240;
 
@@ -283,7 +283,7 @@ impl Snes {
     /// Build a new machine from a parsed cartridge.
     ///
     /// Panics if the cartridge layout is not supported by the V1 mapper
-    /// set — currently LoROM only. HiROM / SA-1 / Super FX land in
+    /// set — currently `LoROM` only. `HiROM` / SA-1 / Super FX land in
     /// later phases.
     pub fn from_cartridge(cart: Cartridge) -> Self {
         let sram_bytes = (cart.header.sram_size_kb as usize) * 1024;
@@ -318,7 +318,10 @@ impl Snes {
             ppu,
             dma: Dma::new(),
             cpu_regs: CpuRegs::new(),
-            wram: Box::new([0; 0x20000]),
+            wram: vec![0u8; 0x20000]
+                .into_boxed_slice()
+                .try_into()
+                .expect("128 KB slice into fixed array"),
             mapper,
             fast_rom: cart.header.fast_rom,
             nmi_pending: false,
@@ -409,7 +412,7 @@ impl Snes {
     /// Cached scanlines-per-frame for the current region — propagates
     /// into every [`SnesBus`] borrow.
     #[inline]
-    fn region_scanlines(&self) -> u16 {
+    const fn region_scanlines(&self) -> u16 {
         scanlines_per_frame(self.region)
     }
 
@@ -420,7 +423,7 @@ impl Snes {
         let ppu_line_snapshot = self.ppu_line;
         let vblank_start_snapshot = vblank_start_line(self.region);
         let cpu_pc_snapshot = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
-        let Snes {
+        let Self {
             cpu,
             ppu,
             dma,
@@ -495,7 +498,7 @@ impl Snes {
         let ppu_line_snapshot = self.ppu_line;
         let vblank_start_snapshot = vblank_start_line(self.region);
         let cpu_pc_snapshot = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
-        let Snes {
+        let Self {
             cpu,
             ppu,
             dma,
@@ -724,11 +727,11 @@ impl Snes {
 
     /// Set the live joypad state for controller `idx` (0 = pad 1,
     /// 1 = pad 2). The new mask becomes visible to the game on the
-    /// next VBlank auto-read latch — typically within ~16.7 ms.
+    /// next `VBlank` auto-read latch — typically within ~16.7 ms.
     ///
     /// Bit layout (matches SNES hardware, MSB → LSB):
     /// `B Y SEL START Up Down Left Right A X L R 0 0 0 0`.
-    pub fn set_joypad(&mut self, idx: usize, mask: u16) {
+    pub const fn set_joypad(&mut self, idx: usize, mask: u16) {
         self.cpu_regs.set_joypad(idx, mask);
     }
 
@@ -747,7 +750,7 @@ impl Snes {
         let ppu_line_snapshot = self.ppu_line;
         let vblank_start_snapshot = vblank_start_line(self.region);
         let cpu_pc_snapshot = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
-        let Snes {
+        let Self {
             ppu,
             dma,
             cpu_regs,
@@ -853,7 +856,7 @@ struct SnesBus<'a> {
     mem_trace_log: &'a mut Option<MemTraceLog>,
 }
 
-impl<'a> SnesBus<'a> {
+impl SnesBus<'_> {
     /// Resolve `addr` against the WRAM regions; returns the in-array
     /// offset if it maps to WRAM, else `None`.
     fn wram_offset(addr: Addr24) -> Option<usize> {
@@ -872,11 +875,11 @@ impl<'a> SnesBus<'a> {
     }
 }
 
-impl<'a> SnesBus<'a> {
+impl SnesBus<'_> {
     /// Returns `Some(offset)` if `addr` falls in the PPU MMIO range
     /// (`$00-$3F:$2100-$213F` and the `$80-$BF` mirror). The offset is
     /// relative to `$2100` (0x00-0x3F).
-    fn ppu_offset(addr: Addr24) -> Option<u8> {
+    const fn ppu_offset(addr: Addr24) -> Option<u8> {
         let bank = bank_of(addr);
         let offset = offset_of(addr);
         if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && matches!(offset, 0x2100..=0x213F) {
@@ -888,7 +891,7 @@ impl<'a> SnesBus<'a> {
 
     /// Returns `Some(offset)` if `addr` falls in the DMA register
     /// window (`$00-$3F:$4300-$437F` and the `$80-$BF` mirror).
-    fn dma_offset(addr: Addr24) -> Option<u16> {
+    const fn dma_offset(addr: Addr24) -> Option<u16> {
         let bank = bank_of(addr);
         let offset = offset_of(addr);
         if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && matches!(offset, 0x4300..=0x437F) {
@@ -899,14 +902,14 @@ impl<'a> SnesBus<'a> {
     }
 
     /// `true` if `addr` is the `MDMAEN` register `$420B`.
-    fn is_mdmaen(addr: Addr24) -> bool {
+    const fn is_mdmaen(addr: Addr24) -> bool {
         let bank = bank_of(addr);
         let offset = offset_of(addr);
         matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && offset == 0x420B
     }
 
     /// `true` if `addr` is the `HDMAEN` register `$420C`.
-    fn is_hdmaen(addr: Addr24) -> bool {
+    const fn is_hdmaen(addr: Addr24) -> bool {
         let bank = bank_of(addr);
         let offset = offset_of(addr);
         matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && offset == 0x420C
@@ -915,7 +918,7 @@ impl<'a> SnesBus<'a> {
     /// Returns `Some(offset)` if `addr` is a CPU-system register at
     /// `$4200-$421F` (excluding the DMA-enable registers, which are
     /// routed to the DMA controller).
-    fn cpu_reg_offset(addr: Addr24) -> Option<u16> {
+    const fn cpu_reg_offset(addr: Addr24) -> Option<u16> {
         let bank = bank_of(addr);
         let offset = offset_of(addr);
         if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && matches!(offset, 0x4200..=0x421F) {
@@ -940,7 +943,7 @@ impl<'a> SnesBus<'a> {
     /// `Some(low_byte_of_offset)` if `addr` is one of the four WRAM-port
     /// registers ($2180-$2183): `0x80` = WMDATA, `0x81` = WMADDL,
     /// `0x82` = WMADDM, `0x83` = WMADDH. Mirror banks $80-BF apply.
-    fn wram_port_offset(addr: Addr24) -> Option<u8> {
+    const fn wram_port_offset(addr: Addr24) -> Option<u8> {
         let bank = bank_of(addr);
         let offset = offset_of(addr);
         if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && matches!(offset, 0x2180..=0x2183) {
@@ -954,7 +957,7 @@ impl<'a> SnesBus<'a> {
     /// $4016 (JOYSER0 — write LATCH / read controller-1 bit) or
     /// $4017 (JOYSER1 — read controller-2 bit; writes drive the
     /// expansion port and are ignored).
-    fn is_joypad_serial(addr: Addr24) -> Option<u16> {
+    const fn is_joypad_serial(addr: Addr24) -> Option<u16> {
         let bank = bank_of(addr);
         let offset = offset_of(addr);
         if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && matches!(offset, 0x4016..=0x4017) {
@@ -975,7 +978,7 @@ struct DmaBusView<'a> {
     ppu: &'a mut Ppu,
 }
 
-impl<'a> DmaBus for DmaBusView<'a> {
+impl DmaBus for DmaBusView<'_> {
     fn read_a(&mut self, addr: Addr24) -> u8 {
         if let Some(o) = SnesBus::wram_offset(addr) {
             return self.wram[o];
@@ -1022,7 +1025,7 @@ impl<'a> DmaBus for DmaBusView<'a> {
     }
 }
 
-impl<'a> SnesBus<'a> {
+impl SnesBus<'_> {
     /// Push a memory access event to the optional tracer, honouring
     /// the bank filter. Cheap when disabled.
     #[inline]
@@ -1047,7 +1050,7 @@ impl<'a> SnesBus<'a> {
     }
 }
 
-impl<'a> Bus for SnesBus<'a> {
+impl Bus for SnesBus<'_> {
     fn read(&mut self, addr: Addr24) -> u8 {
         let value = self.read_inner(addr);
         self.trace_mem_access(addr, MemEventKind::Read, value);
@@ -1068,7 +1071,7 @@ impl<'a> Bus for SnesBus<'a> {
     }
 }
 
-impl<'a> SnesBus<'a> {
+impl SnesBus<'_> {
     fn read_inner(&mut self, addr: Addr24) -> u8 {
         let speed = address_speed(addr, self.fast_rom);
         self.io_cycle(speed.mcycles());
@@ -1391,7 +1394,7 @@ mod tests {
     use super::*;
     use luna_bus::make_addr;
 
-    /// Build a 32 KB LoROM that starts with `LDA #$42 ; STA $7E0000 ; STP`
+    /// Build a 32 KB `LoROM` that starts with `LDA #$42 ; STA $7E0000 ; STP`
     /// and has its reset vector pointing at `$8000`.
     fn demo_lorom() -> Cartridge {
         let mut rom = vec![0xEA; 32 * 1024]; // NOP-padded
@@ -1706,7 +1709,7 @@ mod tests {
         //
         // (DAS high byte stays at 0 from reset.)
         let cart = demo_lorom();
-        let mut rom = cart.rom.clone();
+        let mut rom = cart.rom;
         let prog = [
             0xA9, 0x22, 0x8D, 0x01, 0x43, // LDA #$22 ; STA $4301
             0xA9, 0x00, 0x8D, 0x02, 0x43, // LDA #$00 ; STA $4302
@@ -1754,7 +1757,7 @@ mod tests {
         // Reuse demo_lorom() so the SRAM exponent / checksum etc. are
         // all set correctly — then patch in the program bytes.
         let cart = demo_lorom();
-        let mut rom = cart.rom.clone();
+        let mut rom = cart.rom;
         // Program at $8000 (file offset 0): LDA #$42, STA $2100
         rom[0] = 0xA9;
         rom[1] = 0x42;
@@ -2141,28 +2144,28 @@ mod tests {
         //         STP                            DB
         // We store byte-by-byte with STA absolute long ($8F).
         let writes: &[(u32, u8)] = &[
-            (0x003000, 0x58), // CLI
-            (0x003001, 0xEA),
-            (0x003002, 0xEA),
-            (0x003003, 0xEA),
-            (0x003004, 0xEA),
-            (0x003005, 0xEA),
-            (0x003006, 0xEA),
-            (0x003007, 0xEA),
-            (0x003008, 0xEA),
-            (0x003009, 0xEA),
-            (0x00300A, 0xEA),
-            (0x00300B, 0xEA),
-            (0x00300C, 0xEA),
-            (0x00300D, 0xEA),
-            (0x00300E, 0xEA),
-            (0x00300F, 0xEA),
-            (0x003010, 0xA9), // LDA #
-            (0x003011, 0xAA),
-            (0x003012, 0x8D), // STA abs
-            (0x003013, 0x00),
-            (0x003014, 0x35),
-            (0x003015, 0xDB), // STP
+            (0x00_3000, 0x58), // CLI
+            (0x00_3001, 0xEA),
+            (0x00_3002, 0xEA),
+            (0x00_3003, 0xEA),
+            (0x00_3004, 0xEA),
+            (0x00_3005, 0xEA),
+            (0x00_3006, 0xEA),
+            (0x00_3007, 0xEA),
+            (0x00_3008, 0xEA),
+            (0x00_3009, 0xEA),
+            (0x00_300A, 0xEA),
+            (0x00_300B, 0xEA),
+            (0x00_300C, 0xEA),
+            (0x00_300D, 0xEA),
+            (0x00_300E, 0xEA),
+            (0x00_300F, 0xEA),
+            (0x00_3010, 0xA9), // LDA #
+            (0x00_3011, 0xAA),
+            (0x00_3012, 0x8D), // STA abs
+            (0x00_3013, 0x00),
+            (0x00_3014, 0x35),
+            (0x00_3015, 0xDB), // STP
         ];
         for (addr, byte) in writes {
             // LDA #imm

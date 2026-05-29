@@ -63,20 +63,20 @@ impl TransferMode {
     /// Per-byte B-bus offset increments within one "cycle" of the
     /// pattern. The pattern length is the slice's len.
     #[must_use]
-    pub fn pattern(self) -> &'static [u8] {
+    pub const fn pattern(self) -> &'static [u8] {
         match self {
-            TransferMode::OneByteOneReg => &[0],
-            TransferMode::TwoBytesTwoRegs => &[0, 1],
-            TransferMode::TwoBytesOneReg | TransferMode::TwoBytesOneRegAlt => &[0, 0],
-            TransferMode::FourBytesTwoPairs | TransferMode::FourBytesTwoPairsAlt => &[0, 0, 1, 1],
-            TransferMode::FourBytesFourRegs => &[0, 1, 2, 3],
-            TransferMode::FourBytesTwoRegsAlt => &[0, 1, 0, 1],
+            Self::OneByteOneReg => &[0],
+            Self::TwoBytesTwoRegs => &[0, 1],
+            Self::TwoBytesOneReg | Self::TwoBytesOneRegAlt => &[0, 0],
+            Self::FourBytesTwoPairs | Self::FourBytesTwoPairsAlt => &[0, 0, 1, 1],
+            Self::FourBytesFourRegs => &[0, 1, 2, 3],
+            Self::FourBytesTwoRegsAlt => &[0, 1, 0, 1],
         }
     }
 
     /// Decode the low 3 bits of `$43x0`.
     #[must_use]
-    pub fn from_bits(bits: u8) -> Self {
+    pub const fn from_bits(bits: u8) -> Self {
         match bits & 0x07 {
             0 => Self::OneByteOneReg,
             1 => Self::TwoBytesTwoRegs,
@@ -107,7 +107,7 @@ pub struct DmaParams {
 impl DmaParams {
     /// Decode `$43x0` into a `DmaParams`.
     #[must_use]
-    pub fn from_byte(byte: u8) -> Self {
+    pub const fn from_byte(byte: u8) -> Self {
         let direction = if byte & 0x80 != 0 {
             Direction::BToA
         } else {
@@ -264,15 +264,16 @@ impl DmaChannel {
     ///
     /// Returns the number of bytes transferred.
     pub fn run<B: DmaBus>(&mut self, bus: &mut B) -> u32 {
-        let pattern = self.params.mode.pattern();
-        let mut byte_idx: usize = 0;
-        let mut transferred: u32 = 0;
         // Each byte transfer is ~8 master cycles on real hardware.
         // We feed that to the bus's per-byte tick so coprocessors
         // (SA-1, etc.) run interleaved with the DMA instead of waking
         // up after a multi-kilocycle freeze — matches ares + Mesen2
         // scheduling. See `DmaBus::tick` doc for citations.
         const MCLK_PER_DMA_BYTE: u32 = 8;
+
+        let pattern = self.params.mode.pattern();
+        let mut byte_idx: usize = 0;
+        let mut transferred: u32 = 0;
         // 0x0000 means 64 KB (transfer count is computed as
         // `((das as u32 + 0xFFFF) % 0x10000) + 1` effectively); we
         // model it by looping with a u32 counter that initialises

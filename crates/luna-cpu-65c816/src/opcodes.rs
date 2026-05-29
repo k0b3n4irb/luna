@@ -1,3 +1,11 @@
+// Every opcode handler takes `&mut self` for uniformity with the dispatch
+// table. The store-family handlers (sta, stx, sty, stz) only read self
+// — they don't mutate registers — but downgrading them to `&self`
+// would create a mixed signature set that complicates `execute()`'s
+// per-opcode arm. Trait-style consistency wins over per-method
+// minimization here.
+#![allow(clippy::needless_pass_by_ref_mut)]
+
 //! Opcode dispatch and a representative subset of instruction handlers.
 //!
 //! P0.4a covers loads / stores (LDA/STA in multiple modes), jumps and
@@ -504,7 +512,7 @@ impl Cpu {
 
     /// `XCE` — exchange C and E flags. The canonical way to switch the
     /// CPU between emulation (E=1) and native (E=0) mode.
-    fn xce(&mut self) {
+    const fn xce(&mut self) {
         let c = self.p.contains(bit::C);
         let e = self.e;
         self.p.set(bit::C, e);
@@ -1370,7 +1378,7 @@ impl Cpu {
 
     /// BCD ADC: nibble-by-nibble decimal add. Reference WDC 65C816
     /// manual §5.4 and the corresponding cases in the Tom Harte
-    /// ProcessorTests dataset.
+    /// `ProcessorTests` dataset.
     fn adc_value_bcd(&mut self, value: u16) {
         let c_in = u32::from(self.p.contains(bit::C));
         if self.p.acc8() {
@@ -1677,20 +1685,20 @@ impl Cpu {
     // is not affected (unlike SBC).
     // ===================================================================
 
-    fn compare_8(&mut self, reg: u8, value: u8) {
+    const fn compare_8(&mut self, reg: u8, value: u8) {
         let result = reg.wrapping_sub(value);
         self.p.set(bit::C, reg >= value);
         self.set_nz8(result);
     }
 
-    fn compare_16(&mut self, reg: u16, value: u16) {
+    const fn compare_16(&mut self, reg: u16, value: u16) {
         let result = reg.wrapping_sub(value);
         self.p.set(bit::C, reg >= value);
         self.set_nz16(result);
     }
 
     /// CMP core: compare A with `value` at the M-flag width.
-    fn cmp_value(&mut self, value: u16) {
+    const fn cmp_value(&mut self, value: u16) {
         if self.p.acc8() {
             self.compare_8(self.a8(), value as u8);
         } else {
@@ -1700,7 +1708,7 @@ impl Cpu {
 
     /// CPX/CPY core: compare an index register with `value` at the
     /// X-flag width.
-    fn compare_index(&mut self, reg: u16, value: u16) {
+    const fn compare_index(&mut self, reg: u16, value: u16) {
         if self.p.idx8() {
             self.compare_8(reg as u8, value as u8);
         } else {
@@ -2124,7 +2132,7 @@ impl Cpu {
     // - **Exception**: BIT #imm only updates Z; N and V are unchanged.
     // ===================================================================
 
-    fn bit_value(&mut self, value: u16, immediate: bool) {
+    const fn bit_value(&mut self, value: u16, immediate: bool) {
         if self.p.acc8() {
             let v = value as u8;
             let result = self.a8() & v;
@@ -2251,7 +2259,7 @@ impl Cpu {
         &mut self,
         bus: &mut B,
         addr: Addr24,
-        op: fn(&mut Cpu, u16) -> u16,
+        op: fn(&mut Self, u16) -> u16,
     ) {
         if self.p.acc8() {
             let v = u16::from(bus.read(addr));
@@ -2530,19 +2538,19 @@ impl Cpu {
         // TXS does NOT update flags.
     }
 
-    fn tcd(&mut self) {
+    const fn tcd(&mut self) {
         // Always 16-bit: DP ← full A (regardless of M flag).
         self.dp = self.a;
         self.set_nz16(self.dp);
     }
 
-    fn tdc(&mut self) {
+    const fn tdc(&mut self) {
         // Always 16-bit: A ← DP.
         self.a = self.dp;
         self.set_nz16(self.a);
     }
 
-    fn tcs(&mut self) {
+    const fn tcs(&mut self) {
         // Always 16-bit, except emulation pins SP.high to 0x01.
         self.sp = if self.e {
             0x0100 | (self.a & 0x00FF)
@@ -2552,13 +2560,13 @@ impl Cpu {
         // TCS does NOT update flags.
     }
 
-    fn tsc(&mut self) {
+    const fn tsc(&mut self) {
         // Always 16-bit: A ← SP.
         self.a = self.sp;
         self.set_nz16(self.a);
     }
 
-    fn xba(&mut self) {
+    const fn xba(&mut self) {
         // Swap the two bytes of the full 16-bit A. Flags reflect the
         // NEW low byte (the previous high byte). M flag does not gate
         // the swap itself, but the flags use the 8-bit-result formula.

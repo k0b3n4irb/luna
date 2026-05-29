@@ -36,7 +36,7 @@ pub struct Cpu {
     /// Set by `WAI`; CPU pauses until an interrupt.
     pub waiting: bool,
     /// Edge-latched NMI line. Set externally via [`Cpu::trigger_nmi`]
-    /// (typically by the system at VBlank when NMITIMEN.7 is on);
+    /// (typically by the system at `VBlank` when NMITIMEN.7 is on);
     /// cleared automatically when the CPU services the NMI sequence at
     /// the next instruction boundary.
     pub pending_nmi: bool,
@@ -58,7 +58,7 @@ impl Cpu {
     /// Build a CPU in its post-reset state (registers cleared, PC will be
     /// loaded from the reset vector on the next [`Cpu::reset`] call).
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             a: 0,
             x: 0,
@@ -81,7 +81,7 @@ impl Cpu {
     ///
     /// Idempotent: calling this when `pending_nmi` is already `true`
     /// has no effect (NMI is edge-triggered on the 65C816).
-    pub fn trigger_nmi(&mut self) {
+    pub const fn trigger_nmi(&mut self) {
         self.pending_nmi = true;
     }
 
@@ -91,7 +91,7 @@ impl Cpu {
     /// level-triggered on real hardware but we model it as edge-
     /// triggered here for simplicity — the bus clears it explicitly
     /// when `$4211 TIMEUP` is read or the trigger condition lapses.
-    pub fn trigger_irq(&mut self) {
+    pub const fn trigger_irq(&mut self) {
         self.pending_irq = true;
     }
 
@@ -150,14 +150,14 @@ impl Cpu {
 
     /// Update N and Z based on an 8-bit value.
     #[inline]
-    pub fn set_nz8(&mut self, value: u8) {
+    pub const fn set_nz8(&mut self, value: u8) {
         self.p.set(bit::Z, value == 0);
         self.p.set(bit::N, value & 0x80 != 0);
     }
 
     /// Update N and Z based on a 16-bit value.
     #[inline]
-    pub fn set_nz16(&mut self, value: u16) {
+    pub const fn set_nz16(&mut self, value: u16) {
         self.p.set(bit::Z, value == 0);
         self.p.set(bit::N, value & 0x8000 != 0);
     }
@@ -165,21 +165,21 @@ impl Cpu {
     /// 8-bit view of the accumulator.
     #[inline]
     #[must_use]
-    pub fn a8(&self) -> u8 {
+    pub const fn a8(&self) -> u8 {
         self.a as u8
     }
 
     /// 8-bit view of X.
     #[inline]
     #[must_use]
-    pub fn x8(&self) -> u8 {
+    pub const fn x8(&self) -> u8 {
         self.x as u8
     }
 
     /// 8-bit view of Y.
     #[inline]
     #[must_use]
-    pub fn y8(&self) -> u8 {
+    pub const fn y8(&self) -> u8 {
         self.y as u8
     }
 

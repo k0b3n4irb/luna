@@ -81,7 +81,7 @@ impl ApuStub {
     /// Build a freshly-reset stub: `$2140` reads return `$AA`,
     /// `$2141` reads return `$BB`, phase = `PreKick`.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             to_cpu: [0xAA, 0xBB, 0x00, 0x00],
             from_cpu: [0; 4],
@@ -92,20 +92,20 @@ impl ApuStub {
 
     /// Current phase — exposed for the GUI Stubs panel.
     #[must_use]
-    pub fn phase(&self) -> Phase {
+    pub const fn phase(&self) -> Phase {
         self.phase
     }
 
     /// The four bytes the CPU currently reads from `$2140-$2143`.
     #[must_use]
-    pub fn ports(&self) -> &[u8; 4] {
+    pub const fn ports(&self) -> &[u8; 4] {
         &self.to_cpu
     }
 
     /// The four bytes the CPU last wrote to `$2140-$2143`. On real
     /// hardware these would be on the SPC700's side of the mailbox.
     #[must_use]
-    pub fn last_writes(&self) -> &[u8; 4] {
+    pub const fn last_writes(&self) -> &[u8; 4] {
         &self.from_cpu
     }
 

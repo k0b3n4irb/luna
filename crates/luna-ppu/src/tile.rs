@@ -51,7 +51,7 @@ pub fn decode_4bpp_row(p0: u8, p1: u8, p2: u8, p3: u8) -> [u8; 8] {
 /// bit 10-14, green bit 5-9, red bit 0-4). The bit-15 high bit is
 /// ignored by the renderer.
 #[must_use]
-pub fn bgr555_to_rgb888(color: u16) -> [u8; 3] {
+pub const fn bgr555_to_rgb888(color: u16) -> [u8; 3] {
     let r5 = (color & 0x001F) as u8;
     let g5 = ((color >> 5) & 0x001F) as u8;
     let b5 = ((color >> 10) & 0x001F) as u8;
@@ -63,7 +63,7 @@ pub fn bgr555_to_rgb888(color: u16) -> [u8; 3] {
 /// with smooth quantization in between.
 #[inline]
 #[must_use]
-pub fn scale_5_to_8(c5: u8) -> u8 {
+pub const fn scale_5_to_8(c5: u8) -> u8 {
     let c5 = c5 & 0x1F;
     (c5 << 3) | (c5 >> 2)
 }

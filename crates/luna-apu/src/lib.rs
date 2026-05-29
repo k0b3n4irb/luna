@@ -140,7 +140,7 @@ fn build_gaussian_table() -> [i16; 512] {
         let scale = 2048.0 / sum;
         for &i in &idxs {
             // +0.5 round-half-up; values are positive and small (<2K).
-            table[i] = (raw[i] * scale + 0.5) as i16;
+            table[i] = raw[i].mul_add(scale, 0.5) as i16;
         }
     }
     table
@@ -153,7 +153,7 @@ pub struct Apu {
     pub cpu: Spc700,
     /// Cycle-accurate ares-port S-DSP. Owns its own register file
     /// (mirrored into `dsp_regs` for legacy introspection), Voice[8],
-    /// Echo, Noise, BRR, Latch, Clock, MainVol state. `tick_voices`
+    /// Echo, Noise, BRR, Latch, Clock, `MainVol` state. `tick_voices`
     /// drives one `dsp.main()` per 32 SPC cycles → one stereo sample.
     pub dsp: dsp::Dsp,
     /// 64 KB of audio RAM. The IPL ROM is *also* mapped into
@@ -235,7 +235,10 @@ impl Apu {
     /// its reset vector from the IPL ROM and lands at `$FFC0`).
     #[must_use]
     pub fn new() -> Self {
-        let mut aram = Box::new([0u8; 0x10000]);
+        let mut aram: Box<[u8; 0x10000]> = vec![0u8; 0x10000]
+            .into_boxed_slice()
+            .try_into()
+            .expect("64 KB slice into fixed array");
         for (i, b) in IPL_ROM.iter().enumerate() {
             aram[IPL_ROM_BASE as usize + i] = *b;
         }
@@ -347,13 +350,13 @@ impl Apu {
     /// Read a byte from the CPU side of the mailbox (port 0..=3).
     /// This is what the main CPU sees at `$2140 + port`.
     #[must_use]
-    pub fn cpu_read_port(&self, port: usize) -> u8 {
+    pub const fn cpu_read_port(&self, port: usize) -> u8 {
         self.to_cpu_ports[port]
     }
 
     /// Main CPU writes `value` to mailbox port (0..=3). The byte
     /// becomes visible to the SPC700 the next time it reads `$F4 + port`.
-    pub fn cpu_write_port(&mut self, port: usize, value: u8) {
+    pub const fn cpu_write_port(&mut self, port: usize, value: u8) {
         self.to_spc_ports[port] = value;
     }
 
@@ -375,7 +378,7 @@ impl Apu {
     /// Future audio backends can consume this in a tight loop;
     /// today it's mostly a sanity-check probe.
     #[must_use]
-    pub fn audio_sample(&self) -> (i16, i16) {
+    pub const fn audio_sample(&self) -> (i16, i16) {
         (self.audio_left, self.audio_right)
     }
 

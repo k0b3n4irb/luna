@@ -49,19 +49,19 @@ impl StatusFlags {
 
     /// Set every bit in `mask`.
     #[inline]
-    pub fn insert(&mut self, mask: u8) {
+    pub const fn insert(&mut self, mask: u8) {
         self.0 |= mask;
     }
 
     /// Clear every bit in `mask`.
     #[inline]
-    pub fn remove(&mut self, mask: u8) {
+    pub const fn remove(&mut self, mask: u8) {
         self.0 &= !mask;
     }
 
     /// Set every bit in `mask` to `value`.
     #[inline]
-    pub fn set(&mut self, mask: u8, value: bool) {
+    pub const fn set(&mut self, mask: u8, value: bool) {
         if value {
             self.insert(mask);
         } else {
