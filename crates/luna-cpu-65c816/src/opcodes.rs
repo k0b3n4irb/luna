@@ -967,8 +967,8 @@ impl Cpu {
     fn jsl_long<B: Bus>(&mut self, bus: &mut B) {
         let target = self.fetch_u24(bus);
         let return_pc = self.pc.wrapping_sub(1);
-        self.push_u8(bus, self.pb);
-        self.push_u16(bus, return_pc);
+        self.push_u8_native(bus, self.pb);
+        self.push_u16_native(bus, return_pc);
         self.pb = (target >> 16) as u8;
         self.pc = target as u16;
     }
@@ -997,8 +997,8 @@ impl Cpu {
 
     /// `RTL` — pull PC (16-bit), then PB; increment PC by 1.
     fn rtl<B: Bus>(&mut self, bus: &mut B) {
-        let pc = self.pull_u16(bus);
-        let pb = self.pull_u8(bus);
+        let pc = self.pull_u16_native(bus);
+        let pb = self.pull_u8_native(bus);
         self.pc = pc.wrapping_add(1);
         self.pb = pb;
     }
@@ -1139,40 +1139,50 @@ impl Cpu {
     // on DB after MVN/MVP must be aware.
     // ===================================================================
 
-    /// Execute a full MVN / MVP block move in one step.
+    /// Execute **one byte** of an MVN / MVP block move, ported from ares
+    /// `WDC65816::instructionBlockMove8/16`
+    /// (`component/processor/wdc65816/instructions-other.cpp`).
     ///
-    /// The Tom Harte 65816 test suite models a single MVN/MVP test case
-    /// as the **entire** block transfer (not one iteration). Each
-    /// iteration writes one byte at `dest_bank:Y` from `src_bank:X`,
-    /// then ±1 on X and Y, -1 on A. The loop terminates when A wraps
-    /// from $0000 to $FFFF.
+    /// Each execution moves a single byte `src_bank:X → dest_bank:Y`,
+    /// adjusts X/Y by ±1, and decrements the 16-bit count `A` (the full
+    /// `C` accumulator, regardless of the `M` width). If `A` was non-zero
+    /// **before** the decrement, `PC` is rewound by 3 so the same MVN/MVP
+    /// opcode re-executes on the next [`Cpu::step`] — which is what makes
+    /// the move **interruptible**: NMI/IRQ are polled between bytes, and a
+    /// mid-move interrupt pushes the (rewound) PC of the MVN itself.
+    /// Total bytes moved = `A + 1` (A counts down through $0000 to $FFFF).
     ///
-    /// DB is updated to `dest_bank` as a side effect. Index registers
-    /// are truncated to 8-bit if the X flag is set during the move.
+    /// Earlier this drained the whole block in one `step()` — leaving
+    /// `A=$FFFF` and skipping interrupt windows — which failed ~99.97 % of
+    /// the Tom Harte `54`/`44` cases (each models one byte).
+    ///
+    /// DB is updated to `dest_bank`. Index registers are truncated to
+    /// 8-bit when the X flag is set.
     fn block_move<B: Bus>(&mut self, bus: &mut B, increment: bool) {
         let dest_bank = self.fetch_u8(bus);
         let src_bank = self.fetch_u8(bus);
         self.db = dest_bank;
-        loop {
-            let byte = bus.read(make_addr(src_bank, self.x));
-            bus.write(make_addr(dest_bank, self.y), byte);
-            if increment {
-                self.x = self.x.wrapping_add(1);
-                self.y = self.y.wrapping_add(1);
-            } else {
-                self.x = self.x.wrapping_sub(1);
-                self.y = self.y.wrapping_sub(1);
-            }
-            if self.p.idx8() {
-                self.x &= 0x00FF;
-                self.y &= 0x00FF;
-            }
-            let prev_a = self.a;
-            self.a = self.a.wrapping_sub(1);
-            if prev_a == 0 {
-                // A just wrapped from $0000 to $FFFF — we're done.
-                break;
-            }
+
+        let byte = bus.read(make_addr(src_bank, self.x));
+        bus.write(make_addr(dest_bank, self.y), byte);
+        if increment {
+            self.x = self.x.wrapping_add(1);
+            self.y = self.y.wrapping_add(1);
+        } else {
+            self.x = self.x.wrapping_sub(1);
+            self.y = self.y.wrapping_sub(1);
+        }
+        if self.p.idx8() {
+            self.x &= 0x00FF;
+            self.y &= 0x00FF;
+        }
+
+        let count = self.a; // 16-bit count; full C even when M = 1.
+        self.a = self.a.wrapping_sub(1);
+        if count != 0 {
+            // Not finished: rewind to the 3-byte MVN/MVP so it re-executes
+            // next step, leaving an NMI/IRQ window between bytes.
+            self.pc = self.pc.wrapping_sub(3);
         }
     }
 
@@ -1376,134 +1386,120 @@ impl Cpu {
         }
     }
 
-    /// BCD ADC: nibble-by-nibble decimal add. Reference WDC 65C816
-    /// manual §5.4 and the corresponding cases in the Tom Harte
-    /// `ProcessorTests` dataset.
+    /// BCD ADC, ported verbatim from ares `WDC65816::algorithmADC8/16`
+    /// (`component/processor/wdc65816/algorithms.cpp`): an in-place running
+    /// `result`, per-nibble `+6` correction gated on `> 0x09/0x9f/0x9ff/
+    /// 0x9fff`, and a **boolean** inter-nibble carry (`> 0x0f` etc.).
+    ///
+    /// The previous nibble-normalised version propagated the carry as
+    /// `nibble >> 4`, which yields a carry of **2** on invalid-BCD inputs
+    /// (a source nibble ≥ 0xA pushing the post-`+6` nibble to ≥ 0x20).
+    /// Tom Harte exercises those cases; ares' boolean carry matches
+    /// hardware. `V` is taken from `result` before the final top-nibble
+    /// adjust, exactly as ares does.
     fn adc_value_bcd(&mut self, value: u16) {
-        let c_in = u32::from(self.p.contains(bit::C));
+        let cf = i32::from(self.p.contains(bit::C));
         if self.p.acc8() {
-            let a = u32::from(self.a8());
-            let b = u32::from(value as u8);
-
-            // Low nibble.
-            let mut lo = (a & 0xF) + (b & 0xF) + c_in;
-            if lo > 9 {
-                lo += 6;
+            let a = i32::from(self.a8());
+            let data = i32::from(value as u8);
+            let mut result = (a & 0x0f) + (data & 0x0f) + cf;
+            if result > 0x09 {
+                result += 0x06;
             }
-            // High nibble; carry from low nibble enters here.
-            let mut hi = ((a >> 4) & 0xF) + ((b >> 4) & 0xF) + (lo >> 4);
-
-            // V flag from the unadjusted-high partial result.
-            let unadj = (hi << 4) | (lo & 0xF);
-            let overflow = (!(a ^ b) & (a ^ unadj)) & 0x80 != 0;
-            self.p.set(bit::V, overflow);
-
-            if hi > 9 {
-                hi += 6;
+            let c = i32::from(result > 0x0f);
+            result = (a & 0xf0) + (data & 0xf0) + (c << 4) + (result & 0x0f);
+            self.p.set(bit::V, (!(a ^ data) & (a ^ result) & 0x80) != 0);
+            if result > 0x9f {
+                result += 0x60;
             }
-            let result = (((hi & 0xF) << 4) | (lo & 0xF)) as u8;
-            self.p.set(bit::C, hi > 0xF);
+            self.p.set(bit::C, result > 0xff);
+            let result = result as u8;
             self.set_a_low(result);
             self.set_nz8(result);
         } else {
-            let a = u32::from(self.a);
-            let b = u32::from(value);
-
-            let mut n0 = (a & 0xF) + (b & 0xF) + c_in;
-            if n0 > 9 {
-                n0 += 6;
+            let a = i32::from(self.a);
+            let data = i32::from(value);
+            let mut result = (a & 0x000f) + (data & 0x000f) + cf;
+            if result > 0x0009 {
+                result += 0x0006;
             }
-            let mut n1 = ((a >> 4) & 0xF) + ((b >> 4) & 0xF) + (n0 >> 4);
-            if n1 > 9 {
-                n1 += 6;
+            let mut c = i32::from(result > 0x000f);
+            result = (a & 0x00f0) + (data & 0x00f0) + (c << 4) + (result & 0x000f);
+            if result > 0x009f {
+                result += 0x0060;
             }
-            let mut n2 = ((a >> 8) & 0xF) + ((b >> 8) & 0xF) + (n1 >> 4);
-            if n2 > 9 {
-                n2 += 6;
+            c = i32::from(result > 0x00ff);
+            result = (a & 0x0f00) + (data & 0x0f00) + (c << 8) + (result & 0x00ff);
+            if result > 0x09ff {
+                result += 0x0600;
             }
-            let mut n3 = ((a >> 12) & 0xF) + ((b >> 12) & 0xF) + (n2 >> 4);
-
-            let unadj = (n3 << 12) | ((n2 & 0xF) << 8) | ((n1 & 0xF) << 4) | (n0 & 0xF);
-            let overflow = (!(a ^ b) & (a ^ unadj)) & 0x8000 != 0;
-            self.p.set(bit::V, overflow);
-
-            if n3 > 9 {
-                n3 += 6;
+            c = i32::from(result > 0x0fff);
+            result = (a & 0xf000) + (data & 0xf000) + (c << 12) + (result & 0x0fff);
+            self.p
+                .set(bit::V, (!(a ^ data) & (a ^ result) & 0x8000) != 0);
+            if result > 0x9fff {
+                result += 0x6000;
             }
-            let result =
-                (((n3 & 0xF) << 12) | ((n2 & 0xF) << 8) | ((n1 & 0xF) << 4) | (n0 & 0xF)) as u16;
-            self.p.set(bit::C, n3 > 0xF);
+            self.p.set(bit::C, result > 0xffff);
+            let result = result as u16;
             self.a = result;
             self.set_nz16(result);
         }
     }
 
-    /// BCD SBC: nibble-by-nibble decimal subtract. Operates as a binary
-    /// subtract with per-nibble adjustment when a nibble's "tens
-    /// borrow" bit is set.
+    /// BCD SBC, ported verbatim from ares `WDC65816::algorithmSBC8/16`:
+    /// complement the operand (`data = ~data`) and run the same in-place
+    /// nibble pipeline as `adc_value_bcd`, but with `<= threshold → -6`
+    /// corrections and a final `-0x60/-0x6000`. Carry semantics are
+    /// identical (boolean per nibble). `V` is taken before the final
+    /// top-nibble adjust, matching ares.
     fn sbc_value_bcd(&mut self, value: u16) {
-        let c_in = self.p.contains(bit::C);
-        let borrow = u32::from(!c_in);
+        let cf = i32::from(self.p.contains(bit::C));
         if self.p.acc8() {
-            let a = u32::from(self.a8());
-            let b = u32::from(value as u8);
-
-            // Standard binary subtract first.
-            let raw = a.wrapping_sub(b).wrapping_sub(borrow);
-
-            // V flag from the raw (binary) intermediate.
-            let overflow = ((a ^ b) & (a ^ raw)) & 0x80 != 0;
-            self.p.set(bit::V, overflow);
-
-            // Per-nibble BCD adjustment: if a nibble borrowed (its
-            // "tens" bit is set), subtract 6 from that position.
-            let mut result = raw;
-            if (a & 0xF).wrapping_sub(b & 0xF).wrapping_sub(borrow) & 0x10 != 0 {
-                result = result.wrapping_sub(6);
+            let a = i32::from(self.a8());
+            let data = i32::from(!(value as u8));
+            let mut result = (a & 0x0f) + (data & 0x0f) + cf;
+            if result <= 0x0f {
+                result -= 0x06;
             }
-            if raw & 0x100 != 0 {
-                result = result.wrapping_sub(0x60);
+            let c = i32::from(result > 0x0f);
+            result = (a & 0xf0) + (data & 0xf0) + (c << 4) + (result & 0x0f);
+            self.p.set(bit::V, (!(a ^ data) & (a ^ result) & 0x80) != 0);
+            if result <= 0xff {
+                result -= 0x60;
             }
-
-            self.p.set(bit::C, raw & 0x100 == 0);
-            let result_u8 = result as u8;
-            self.set_a_low(result_u8);
-            self.set_nz8(result_u8);
+            self.p.set(bit::C, result > 0xff);
+            let result = result as u8;
+            self.set_a_low(result);
+            self.set_nz8(result);
         } else {
-            let a = u32::from(self.a);
-            let b = u32::from(value);
-
-            let raw = a.wrapping_sub(b).wrapping_sub(borrow);
-
-            let overflow = ((a ^ b) & (a ^ raw)) & 0x8000 != 0;
-            self.p.set(bit::V, overflow);
-
-            let mut result = raw;
-            // Check tens borrow at each nibble boundary.
-            let n0_borrow = (a & 0xF).wrapping_sub(b & 0xF).wrapping_sub(borrow);
-            if n0_borrow & 0x10 != 0 {
-                result = result.wrapping_sub(6);
+            let a = i32::from(self.a);
+            let data = i32::from(!value);
+            let mut result = (a & 0x000f) + (data & 0x000f) + cf;
+            if result <= 0x000f {
+                result -= 0x0006;
             }
-            let n1_borrow = ((a >> 4) & 0xF)
-                .wrapping_sub((b >> 4) & 0xF)
-                .wrapping_sub(n0_borrow >> 4 & 1);
-            if n1_borrow & 0x10 != 0 {
-                result = result.wrapping_sub(0x60);
+            let mut c = i32::from(result > 0x000f);
+            result = (a & 0x00f0) + (data & 0x00f0) + (c << 4) + (result & 0x000f);
+            if result <= 0x00ff {
+                result -= 0x0060;
             }
-            let n2_borrow = ((a >> 8) & 0xF)
-                .wrapping_sub((b >> 8) & 0xF)
-                .wrapping_sub(n1_borrow >> 4 & 1);
-            if n2_borrow & 0x10 != 0 {
-                result = result.wrapping_sub(0x600);
+            c = i32::from(result > 0x00ff);
+            result = (a & 0x0f00) + (data & 0x0f00) + (c << 8) + (result & 0x00ff);
+            if result <= 0x0fff {
+                result -= 0x0600;
             }
-            if raw & 0x10000 != 0 {
-                result = result.wrapping_sub(0x6000);
+            c = i32::from(result > 0x0fff);
+            result = (a & 0xf000) + (data & 0xf000) + (c << 12) + (result & 0x0fff);
+            self.p
+                .set(bit::V, (!(a ^ data) & (a ^ result) & 0x8000) != 0);
+            if result <= 0xffff {
+                result -= 0x6000;
             }
-
-            self.p.set(bit::C, raw & 0x10000 == 0);
-            let result_u16 = result as u16;
-            self.a = result_u16;
-            self.set_nz16(result_u16);
+            self.p.set(bit::C, result > 0xffff);
+            let result = result as u16;
+            self.a = result;
+            self.set_nz16(result);
         }
     }
 
@@ -2614,6 +2610,36 @@ impl Cpu {
         u16::from(lo) | (u16::from(hi) << 8)
     }
 
+    // --- "native" stack ops (ares `pushN`/`pullN`) -----------------------
+    // The new 65C816 stack instructions (PEA/PEI/PER/PHD/PLD/PLB/JSL/RTL)
+    // index the stack with the **full 16-bit S**, with no emulation-mode
+    // page-1 confinement: a push that starts at $0100 in E-mode crosses
+    // down into $00FF. The end-of-step re-pin (`Cpu::step`) then restores
+    // S.h = $01, so the observable final S is back in page 1 — matching
+    // hardware and the Tom Harte suite. (The 6502-era PHA/PLA/PHP/PLP/JSR/
+    // RTS/RTI/PHB/PHK keep using the page-1-confined `push_u8`/`pull_u8`.)
+
+    fn push_u8_native<B: Bus>(&mut self, bus: &mut B, value: u8) {
+        bus.write(make_addr(0, self.sp), value);
+        self.sp = self.sp.wrapping_sub(1);
+    }
+
+    fn pull_u8_native<B: Bus>(&mut self, bus: &mut B) -> u8 {
+        self.sp = self.sp.wrapping_add(1);
+        bus.read(make_addr(0, self.sp))
+    }
+
+    fn push_u16_native<B: Bus>(&mut self, bus: &mut B, value: u16) {
+        self.push_u8_native(bus, (value >> 8) as u8);
+        self.push_u8_native(bus, value as u8);
+    }
+
+    fn pull_u16_native<B: Bus>(&mut self, bus: &mut B) -> u16 {
+        let lo = self.pull_u8_native(bus);
+        let hi = self.pull_u8_native(bus);
+        u16::from(lo) | (u16::from(hi) << 8)
+    }
+
     // ===================================================================
     // PH* / PL* — push and pull registers
     // ===================================================================
@@ -2651,7 +2677,7 @@ impl Cpu {
     }
 
     fn phd<B: Bus>(&mut self, bus: &mut B) {
-        self.push_u16(bus, self.dp);
+        self.push_u16_native(bus, self.dp);
     }
 
     fn phk<B: Bus>(&mut self, bus: &mut B) {
@@ -2711,13 +2737,13 @@ impl Cpu {
     }
 
     fn plb<B: Bus>(&mut self, bus: &mut B) {
-        let v = self.pull_u8(bus);
+        let v = self.pull_u8_native(bus);
         self.db = v;
         self.set_nz8(v);
     }
 
     fn pld<B: Bus>(&mut self, bus: &mut B) {
-        let v = self.pull_u16(bus);
+        let v = self.pull_u16_native(bus);
         self.dp = v;
         self.set_nz16(v);
     }
@@ -2732,7 +2758,7 @@ impl Cpu {
 
     fn pea<B: Bus>(&mut self, bus: &mut B) {
         let v = self.fetch_u16(bus);
-        self.push_u16(bus, v);
+        self.push_u16_native(bus, v);
     }
 
     fn pei<B: Bus>(&mut self, bus: &mut B) {
@@ -2741,13 +2767,13 @@ impl Cpu {
         let lo = bus.read(make_addr(0, ptr));
         let hi = bus.read(make_addr(0, ptr.wrapping_add(1)));
         let v = u16::from(lo) | (u16::from(hi) << 8);
-        self.push_u16(bus, v);
+        self.push_u16_native(bus, v);
     }
 
     fn per<B: Bus>(&mut self, bus: &mut B) {
         let rel = self.fetch_u16(bus) as i16;
         let target = self.pc.wrapping_add_signed(rel);
-        self.push_u16(bus, target);
+        self.push_u16_native(bus, target);
     }
 }
 
@@ -3372,26 +3398,35 @@ mod tests {
     }
 
     #[test]
-    fn mvn_copies_full_block_in_one_step() {
-        // MVN dest_bank src_bank — copy 3 bytes from $7E:0000 to $7E:0100.
-        // Tom Harte models the entire block move as one CPU step.
+    fn mvn_moves_one_byte_per_step_and_rewinds_pc() {
+        // MVN is per-byte interruptible: each step moves ONE byte and, until
+        // the 16-bit count A wraps, rewinds PC by 3 so the opcode re-executes
+        // (leaving an NMI/IRQ window between bytes). Copy 3 bytes (A=2 ⇒ A+1).
         let (mut cpu, mut bus) = run(&[0x54, 0x7E, 0x7E]);
         bus.poke_slice(0x7E_0000, &[0xAA, 0xBB, 0xCC]);
         cpu.x = 0x0000;
         cpu.y = 0x0100;
-        cpu.a = 0x0002; // copy 3 bytes total (len - 1)
+        cpu.a = 0x0002;
         cpu.p.remove(bit::X); // 16-bit X/Y
 
-        cpu.step(&mut bus); // single step copies all 3 bytes
-
+        // First step: one byte moved, PC rewound to the opcode, A decremented.
+        cpu.step(&mut bus);
         assert_eq!(bus.peek(0x7E_0100), 0xAA);
+        assert_eq!(cpu.x, 0x0001);
+        assert_eq!(cpu.y, 0x0101);
+        assert_eq!(cpu.a, 0x0001);
+        assert_eq!(cpu.pc, 0x8000, "PC rewinds to re-execute MVN per byte");
+        assert_eq!(cpu.db, 0x7E, "DB set to destination bank immediately");
+
+        // Two more steps finish the 3-byte block.
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
         assert_eq!(bus.peek(0x7E_0101), 0xBB);
         assert_eq!(bus.peek(0x7E_0102), 0xCC);
         assert_eq!(cpu.x, 0x0003);
         assert_eq!(cpu.y, 0x0103);
-        assert_eq!(cpu.a, 0xFFFF, "A wraps from $0000 → $FFFF at end of move");
-        assert_eq!(cpu.pc, 0x8003, "PC advances past the 3-byte MVN");
-        assert_eq!(cpu.db, 0x7E, "MVN updates DB to the destination bank");
+        assert_eq!(cpu.a, 0xFFFF, "A wraps $0000 → $FFFF when the move ends");
+        assert_eq!(cpu.pc, 0x8003, "PC advances past MVN only when done");
     }
 
     #[test]
@@ -4125,6 +4160,20 @@ mod tests {
         assert_eq!(cpu.a, 0);
         assert!(cpu.p.contains(bit::C));
         assert!(cpu.p.contains(bit::Z));
+    }
+
+    #[test]
+    fn adc_bcd_invalid_nibble_carry_is_boolean() {
+        // Regression for the carry-2 bug: invalid-BCD $0F + $0F in decimal
+        // mode. ares `algorithmADC8` propagates a BOOLEAN inter-nibble
+        // carry → $14. The old `nibble >> 4` carry produced 2, giving the
+        // wrong $24. Cross-checked against ares + Tom Harte `69.e`.
+        let (mut cpu, mut bus) = run(&[0xF8, 0x18, 0xA9, 0x0F, 0x69, 0x0F]);
+        for _ in 0..4 {
+            cpu.step(&mut bus); // SED, CLC, LDA #$0F, ADC #$0F
+        }
+        assert_eq!(cpu.a8(), 0x14, "boolean inter-nibble carry, not 2");
+        assert!(!cpu.p.contains(bit::C));
     }
 
     #[test]

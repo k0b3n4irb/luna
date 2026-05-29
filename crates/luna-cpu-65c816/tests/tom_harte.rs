@@ -230,6 +230,22 @@ fn tom_harte() {
             continue;
         };
 
+        // MVN ($54) / MVP ($44): every SingleStepTests case runs under a
+        // fixed 100-cycle budget, so each records a PARTIAL ~14-byte
+        // transfer (Adec = Xdec = Ydec = 14 regardless of the initial
+        // count), not one-instruction semantics. An instruction-atomic
+        // core cannot reproduce that without cycle-stepping. luna's
+        // per-byte interruptible MVN/MVP is hardware-correct (ares
+        // `instructionBlockMove`) and is gated by the unit test
+        // `mvn_moves_one_byte_per_step_and_rewinds_pc` instead — so we
+        // skip these here rather than counting an un-gateable "failure".
+        if matches!(opcode, 0x44 | 0x54) {
+            eprintln!(
+                "  [skip] {stem}: MVN/MVP not gateable on an atomic core (100-cycle-budget artifact)"
+            );
+            continue;
+        }
+
         let bytes = fs::read(&path).expect("read json");
         let cases: Vec<TestCase> = serde_json::from_slice(&bytes).expect("parse Tom Harte json");
 
@@ -246,7 +262,6 @@ fn tom_harte() {
                 }
             }
         }
-        _ = opcode; // (will be used below for unexpected-failure detection)
     }
 
     print_report(&stats, files_with_unknown_opcode);

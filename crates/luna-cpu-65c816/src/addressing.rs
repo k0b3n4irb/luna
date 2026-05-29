@@ -126,10 +126,34 @@ pub fn direct_page_indirect_long_y<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24
 /// The X register is added BEFORE the indirect read (pointer fetch).
 #[inline]
 pub fn direct_page_indexed_indirect<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
-    let dp_off = u16::from(cpu.fetch_u8(bus));
-    let ptr_off = cpu.dp.wrapping_add(dp_off).wrapping_add(cpu.x);
-    let offset = read_ptr16(bus, ptr_off);
+    let dp_off = u32::from(cpu.fetch_u8(bus));
+    // ares: V.l = readDirectX(U.l + X.w, 0); V.h = readDirectX(U.l + X.w, 1).
+    let address = dp_off.wrapping_add(u32::from(cpu.x));
+    let lo = read_direct_x(cpu, bus, address, 0);
+    let hi = read_direct_x(cpu, bus, address, 1);
+    let offset = u16::from(lo) | (u16::from(hi) << 8);
     make_addr(cpu.db, offset)
+}
+
+/// Fetch one byte of a `(dp,X)` pointer. `address` is `dp_operand + X`;
+/// `offset` is 0 (low byte) or 1 (high byte).
+///
+/// Emulation mode with **`D.l == 0`** confines each pointer byte to the
+/// direct page: `D | ((dp_operand + X + offset) & 0xFF)`. Every other case
+/// (E with `D.l != 0`, or native) is a plain 16-bit add within bank 0.
+///
+/// NB: this follows the **Tom Harte** suite, which is the empirical gate.
+/// ares (`readDirectX`) instead models a high-byte page-wrap when
+/// `D.l != 0`; the `SingleStepTests` do not reproduce that quirk, so the two
+/// references diverge here and we match the test data.
+fn read_direct_x<B: Bus>(cpu: &Cpu, bus: &mut B, address: u32, offset: u32) -> u8 {
+    let dp = u32::from(cpu.dp);
+    let addr = if cpu.e && (cpu.dp & 0x00FF) == 0 {
+        dp | (address.wrapping_add(offset) & 0x00FF)
+    } else {
+        dp.wrapping_add(address).wrapping_add(offset) & 0xFFFF
+    };
+    bus.read(addr)
 }
 
 /// Absolute Indexed by X: `LDA $abs,X`.
