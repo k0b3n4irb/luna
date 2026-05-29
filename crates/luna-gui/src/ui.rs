@@ -204,7 +204,7 @@ fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<
                 .spacing([16.0, 6.0])
                 .striped(true)
                 .show(ui, |ui| {
-                    for &button in SnesButton::ALL.iter() {
+                    for &button in &SnesButton::ALL {
                         ui.label(egui::RichText::new(button.label()).strong());
                         let key = state.key_bindings.get(button);
                         let label = if state.pending_rebind == Some(button) {

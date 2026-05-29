@@ -8,7 +8,7 @@
 //!
 //! ## Stability
 //!
-//! From V1 onward this crate carries strict SemVer guarantees: new
+//! From V1 onward this crate carries strict `SemVer` guarantees: new
 //! methods are additive, breaking changes bump the major version.
 //! Today (P3.3) we're still pre-V1 and the surface is allowed to
 //! churn freely.
@@ -60,7 +60,7 @@ pub struct RomInfo {
     pub sram_kb: u32,
     /// `Ntsc`, `Pal`, or `Unknown`.
     pub region: String,
-    /// FastROM (`MEMSEL`) eligibility from the header.
+    /// `FastROM` (`MEMSEL`) eligibility from the header.
     pub fast_rom: bool,
 }
 
@@ -232,7 +232,7 @@ pub struct CpuRegsState {
 /// Scanline scheduler snapshot.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct SchedulerState {
-    /// 0..=261 on NTSC; 225..=261 is VBlank.
+    /// 0..=261 on NTSC; 225..=261 is `VBlank`.
     pub ppu_line: u16,
     /// Master cycles consumed within the current scanline.
     pub mcycles_in_line: u32,
@@ -276,8 +276,8 @@ pub struct ApuState {
     /// without re-reading via the bus port.
     pub dsp_regs: Vec<u8>,
     /// First 64 bytes of ARAM at the BRR sample directory base
-    /// (`DIR << 8`). Each 4-byte entry is start_lo/start_hi/loop_lo/
-    /// loop_hi; 64 bytes covers 16 SRCN entries — enough to see what
+    /// (`DIR << 8`). Each 4-byte entry is `start_lo/start_hi/loop_lo`/
+    /// `loop_hi`; 64 bytes covers 16 SRCN entries — enough to see what
     /// samples the driver has set up.
     pub dir_excerpt: Vec<u8>,
     /// Per-voice "is currently playing" (mirror of `voice_active`).
@@ -343,7 +343,7 @@ impl Default for Emulator {
 impl Emulator {
     /// Build a fresh emulator with no ROM loaded yet.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             snes: None,
             rom_info: None,
@@ -353,7 +353,7 @@ impl Emulator {
 
     /// Whether a ROM is currently loaded.
     #[must_use]
-    pub fn has_rom(&self) -> bool {
+    pub const fn has_rom(&self) -> bool {
         self.snes.is_some()
     }
 
@@ -396,7 +396,7 @@ impl Emulator {
                 self.instructions_executed = 0;
                 Ok(info)
             }
-            Err(payload) => Err(ApiError::Panic(panic_message(payload))),
+            Err(payload) => Err(ApiError::Panic(panic_message(&payload))),
         }
     }
 
@@ -413,7 +413,7 @@ impl Emulator {
     /// `1`). The mask is the SNES JOY1L/JOY1H layout — bit 15 = B,
     /// 14 = Y, 13 = Select, 12 = Start, 11..8 = Up/Down/Left/Right,
     /// 7..4 = A/X/L/R, 3..0 = 0 (signature). The mask is latched on
-    /// the next auto-read pulse (VBlank entry when `NMITIMEN.0` is
+    /// the next auto-read pulse (`VBlank` entry when `NMITIMEN.0` is
     /// set), so callers should hold the mask for at least one frame
     /// before reading state.
     pub fn set_joypad(&mut self, port: u8, mask: u16) -> Result<(), ApiError> {
@@ -447,7 +447,7 @@ impl Emulator {
             }
             Err(payload) => {
                 self.instructions_executed += executed;
-                Err(ApiError::Panic(panic_message(payload)))
+                Err(ApiError::Panic(panic_message(&payload)))
             }
         }
     }
@@ -476,7 +476,7 @@ impl Emulator {
             }
             Err(payload) => {
                 self.instructions_executed += executed;
-                Err(ApiError::Panic(panic_message(payload)))
+                Err(ApiError::Panic(panic_message(&payload)))
             }
         }
     }
@@ -769,7 +769,7 @@ impl Emulator {
     /// Current cumulative instruction count since the last reset /
     /// rom-load. Used by the CLI to gate "start tracing at instr N".
     #[must_use]
-    pub fn instructions_executed(&self) -> u64 {
+    pub const fn instructions_executed(&self) -> u64 {
         self.instructions_executed
     }
 
@@ -817,7 +817,7 @@ impl Emulator {
     }
 }
 
-fn default_cpu_state() -> CpuState {
+const fn default_cpu_state() -> CpuState {
     CpuState {
         a: 0,
         x: 0,
@@ -834,7 +834,7 @@ fn default_cpu_state() -> CpuState {
     }
 }
 
-fn default_ppu_state() -> PpuState {
+const fn default_ppu_state() -> PpuState {
     PpuState {
         inidisp: 0,
         bgmode: 0,
@@ -875,7 +875,7 @@ fn default_ppu_state() -> PpuState {
     }
 }
 
-fn default_cpu_regs_state() -> CpuRegsState {
+const fn default_cpu_regs_state() -> CpuRegsState {
     CpuRegsState {
         nmitimen: 0,
         hvbjoy: 0,
@@ -884,7 +884,7 @@ fn default_cpu_regs_state() -> CpuRegsState {
     }
 }
 
-fn default_scheduler_state() -> SchedulerState {
+const fn default_scheduler_state() -> SchedulerState {
     SchedulerState {
         ppu_line: 0,
         mcycles_in_line: 0,
@@ -920,7 +920,7 @@ fn default_apu_state() -> ApuState {
     }
 }
 
-fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         (*s).to_string()
     } else if let Some(s) = payload.downcast_ref::<String>() {
@@ -938,7 +938,7 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 mod tests {
     use super::*;
 
-    /// Build a minimal 32 KB LoROM cart for tests. Has a valid reset
+    /// Build a minimal 32 KB `LoROM` cart for tests. Has a valid reset
     /// vector + cartridge-checksum so the parser accepts it.
     fn demo_lorom() -> Vec<u8> {
         let mut rom = vec![0u8; 0x8000];

@@ -29,7 +29,7 @@
 //!
 //! Within each LoROM-style super-bank region the byte mapping is the
 //! standard "32 KB at `$8000-$FFFF`, mirrored across 32 banks" used
-//! by the LoROM mapper, scaled by the super-bank offset (`bank << 20`
+//! by the `LoROM` mapper, scaled by the super-bank offset (`bank << 20`
 //! into ROM).
 //!
 //! BW-RAM (up to 256 KB) appears as the cart's SRAM window at
@@ -66,7 +66,7 @@ pub struct Sa1Mapper {
     /// $2223 FXB super-bank selector for `$60-$7D`.
     fxb: u8,
     /// $2224 BMAPS — BW-RAM 8 KB window select for the `$6000-$7FFF`
-    /// window in main-CPU LoROM space.
+    /// window in main-CPU `LoROM` space.
     bmaps: u8,
     /// Multiplier / divider operands and result.
     /// `$2251/$2252 MA` — multiplicand (signed 16-bit, write-twice).
@@ -376,7 +376,7 @@ impl Sa1Mapper {
         }
     }
 
-    fn iram_writable_for(&self, byte_off: usize, side: WriteSide) -> bool {
+    const fn iram_writable_for(&self, byte_off: usize, side: WriteSide) -> bool {
         let mask = match side {
             WriteSide::Main => self.siwp,
             WriteSide::Sa1 => self.ciwp,
@@ -483,7 +483,7 @@ impl Sa1Mapper {
     fn write_raw_for_dma(&mut self, addr: u32, value: u8) {
         let bank = bank_of(addr);
         let offset = offset_of(addr);
-        if let Some(o) = self.iram_offset(bank, offset) {
+        if let Some(o) = Self::iram_offset(bank, offset) {
             self.iram[o] = value;
             return;
         }
@@ -495,9 +495,8 @@ impl Sa1Mapper {
     /// Arm a Type-2 character-conversion stream. Captures the current
     /// `cdma` colour mode and resets the staging buffer; subsequent
     /// writes to BBF (`$223F`) feed pixel bytes in scanline order.
-    fn cc2_arm(&mut self) {
+    const fn cc2_arm(&mut self) {
         self.cc2_bpp = match (self.cdma >> 2) & 0x07 {
-            0 => 8,
             1 => 4,
             2 => 2,
             _ => 8,
@@ -509,7 +508,7 @@ impl Sa1Mapper {
 
     /// End an in-flight CC2 stream. Triggered by `CDMA.7` (CDEND) or
     /// a DCNT write that drops bit 5.
-    fn cc2_end(&mut self) {
+    const fn cc2_end(&mut self) {
         self.cc2_active = false;
         self.dcnt &= 0x7F;
         self.mmio[0x2230 - 0x2200] = self.dcnt;
@@ -570,10 +569,9 @@ impl Sa1Mapper {
     /// On completion: clears DCNT.7, raises `cc1_irq_to_main`.
     fn run_cc1_dma(&mut self) {
         let bpp = match (self.cdma >> 2) & 0x07 {
-            0 => 8,
             1 => 4,
             2 => 2,
-            _ => 8, // reserved → keep going at 8bpp rather than panic
+            _ => 8, // 0 + reserved (3..=7) → 8bpp rather than panic
         };
         let tile_width_tiles: u32 = 8u32 << (self.cdma & 0x03);
         let bytes_per_tile: u32 = (bpp as u32) * 8;
@@ -660,7 +658,7 @@ impl Sa1Mapper {
     /// CPU. The bus ORs this into the main CPU's `irq_pending` so the
     /// CPU services it through its normal IRQ path.
     #[must_use]
-    pub fn main_irq_line(&self) -> bool {
+    pub const fn main_irq_line(&self) -> bool {
         // SIE layout (per ares + Mesen2):
         //   bit 7 = SA-1 → S-CPU IRQ enable
         //   bit 5 = CC IRQ (Type-1 char-conv) enable
@@ -671,7 +669,7 @@ impl Sa1Mapper {
     /// `true` while the SA-1 is taking an IRQ from any of the three
     /// enabled sources (S-CPU IRQ, timer, DMA).
     #[must_use]
-    pub fn sa1_irq_line(&self) -> bool {
+    pub const fn sa1_irq_line(&self) -> bool {
         // CIE layout (per ares + Mesen2):
         //   bit 7 = S-CPU → SA-1 IRQ enable
         //   bit 6 = timer IRQ enable
@@ -685,7 +683,7 @@ impl Sa1Mapper {
     /// `true` while the S-CPU has raised an NMI to the SA-1 and the
     /// SA-1's enable mask permits it.
     #[must_use]
-    pub fn sa1_nmi_line(&self) -> bool {
+    pub const fn sa1_nmi_line(&self) -> bool {
         self.main_nmi_to_sa1 && (self.cie & 0x10) != 0
     }
 
@@ -697,7 +695,7 @@ impl Sa1Mapper {
     /// IVSW / NMIVW bits of SCNT — *not* gated by whether the SA-1
     /// is currently asserting its IRQ line. While the bit is set,
     /// the matching vector reads return SIV / SNV.
-    fn main_vector_override(&self, bank: u8, offset: u16) -> Option<u8> {
+    const fn main_vector_override(&self, bank: u8, offset: u16) -> Option<u8> {
         if bank != 0 {
             return None;
         }
@@ -716,7 +714,7 @@ impl Sa1Mapper {
     /// fetch from bank 0 at `$FFE0-$FFFF`. The SA-1 always overrides
     /// reset / NMI / IRQ vectors through CRV / CNV / CIV — there is
     /// no enable bit (the SA-1 *has* no on-board ROM vector table).
-    pub fn sa1_vector_override(&self, bank: u8, offset: u16) -> Option<u8> {
+    pub const fn sa1_vector_override(&self, bank: u8, offset: u16) -> Option<u8> {
         if bank != 0 {
             return None;
         }
@@ -737,7 +735,7 @@ impl Sa1Mapper {
     ///   bit 5 = CC IRQ latched
     ///   bit 4 = NMIVW mirror (vector override active for NMI)
     ///   bits 3..0 = message nibble from SA-1 (low nibble of SCNT)
-    fn read_sfr(&self) -> u8 {
+    const fn read_sfr(&self) -> u8 {
         let mut b = 0u8;
         if self.s_irq_to_main {
             b |= 0x80;
@@ -761,7 +759,7 @@ impl Sa1Mapper {
     ///   bit 5 = DMA → SA-1 IRQ latched
     ///   bit 4 = S-CPU → SA-1 NMI latched
     ///   bits 3..0 = message nibble from S-CPU (low nibble of CCNT)
-    fn read_cfr(&self) -> u8 {
+    const fn read_cfr(&self) -> u8 {
         let mut b = 0u8;
         if self.main_irq_to_sa1 {
             b |= 0x80;
@@ -791,12 +789,12 @@ impl Sa1Mapper {
     /// * `$A0-BF:8000-FFFF` + `$F0-FF:0000-FFFF` → bank F (FXB / `Banks[3]`)
     ///
     /// Each super-bank register has bit 7 = "remap mode" flag:
-    /// * Cleared → LoROM half-bank windows use the *default* MB
+    /// * Cleared → `LoROM` half-bank windows use the *default* MB
     ///   slot for that bank (Banks[0]→MB0, [1]→MB1, [2]→MB2, [3]→MB3).
-    /// * Set → LoROM half-bank windows use the MB selected by bits
+    /// * Set → `LoROM` half-bank windows use the MB selected by bits
     ///   0..2 of the bank register.
     ///
-    /// The HiROM full-bank windows (`$C0+`) always use the banked MB
+    /// The `HiROM` full-bank windows (`$C0+`) always use the banked MB
     /// regardless of the mode flag.
     fn rom_offset(&self, bank: u8, offset: u16) -> Option<usize> {
         const MB: usize = 0x10_0000;
@@ -839,7 +837,7 @@ impl Sa1Mapper {
 
     /// I-RAM access from the **main** CPU's view: 2 KB at
     /// `$3000-$37FF` of banks `$00-$3F` and `$80-$BF`.
-    fn iram_offset(&self, bank: u8, offset: u16) -> Option<usize> {
+    fn iram_offset(bank: u8, offset: u16) -> Option<usize> {
         let bank_ok = matches!(bank, 0x00..=0x3F | 0x80..=0xBF);
         let offset_ok = (0x3000..=0x37FF).contains(&offset);
         if bank_ok && offset_ok {
@@ -855,7 +853,7 @@ impl Sa1Mapper {
     /// Mesen2's `RegisterHandler(0x00, 0x3F, 0x0000, 0x0FFF, ...)`).
     /// The `$0000-$07FF` mirror is what the SA-1's direct-page mode
     /// reaches when DP is in low memory.
-    fn iram_offset_sa1(&self, bank: u8, offset: u16) -> Option<usize> {
+    fn iram_offset_sa1(bank: u8, offset: u16) -> Option<usize> {
         let bank_ok = matches!(bank, 0x00..=0x3F | 0x80..=0xBF);
         if !bank_ok {
             return None;
@@ -992,7 +990,7 @@ impl Mapper for Sa1Mapper {
         if let Some(v) = self.main_vector_override(bank, offset) {
             return Some(v);
         }
-        if let Some(o) = self.iram_offset(bank, offset) {
+        if let Some(o) = Self::iram_offset(bank, offset) {
             return Some(self.iram[o]);
         }
         if let Some(o) = self.bwram_offset(bank, offset) {
@@ -1038,7 +1036,7 @@ impl Sa1Mapper {
             let _ = idx;
             return self.read(addr);
         }
-        if let Some(o) = self.iram_offset_sa1(bank, offset) {
+        if let Some(o) = Self::iram_offset_sa1(bank, offset) {
             return Some(self.iram[o]);
         }
         if let Some(o) = self.bwram_offset(bank, offset) {
@@ -1206,12 +1204,12 @@ impl Sa1Mapper {
                         self.cc2_end();
                     }
                 }
-                0x2232 => self.sda = (self.sda & !0x0000FF) | u32::from(value),
-                0x2233 => self.sda = (self.sda & !0x00FF00) | (u32::from(value) << 8),
-                0x2234 => self.sda = (self.sda & !0xFF0000) | (u32::from(value) << 16),
-                0x2235 => self.dda = (self.dda & !0x0000FF) | u32::from(value),
+                0x2232 => self.sda = (self.sda & !0x00_00FF) | u32::from(value),
+                0x2233 => self.sda = (self.sda & !0x00_FF00) | (u32::from(value) << 8),
+                0x2234 => self.sda = (self.sda & !0xFF_0000) | (u32::from(value) << 16),
+                0x2235 => self.dda = (self.dda & !0x00_00FF) | u32::from(value),
                 0x2236 => {
-                    self.dda = (self.dda & !0x00FF00) | (u32::from(value) << 8);
+                    self.dda = (self.dda & !0x00_FF00) | (u32::from(value) << 8);
                     // Trigger: normal DMA → I-RAM, or CC1.
                     if self.dma_en {
                         if !self.dma_cden && !self.dma_dd {
@@ -1222,7 +1220,7 @@ impl Sa1Mapper {
                     }
                 }
                 0x2237 => {
-                    self.dda = (self.dda & !0xFF0000) | (u32::from(value) << 16);
+                    self.dda = (self.dda & !0xFF_0000) | (u32::from(value) << 16);
                     // Trigger: normal DMA → BW-RAM.
                     if self.dma_en && !self.dma_cden && self.dma_dd {
                         self.run_normal_dma();
@@ -1267,13 +1265,13 @@ impl Sa1Mapper {
                 // -------- VLBP (Variable-Length Bit Processor) --------
                 0x2258 => self.vbd = value,
                 0x2259 => {
-                    self.vda_base = (self.vda_base & !0x0000FF) | u32::from(value);
+                    self.vda_base = (self.vda_base & !0x00_00FF) | u32::from(value);
                 }
                 0x225A => {
-                    self.vda_base = (self.vda_base & !0x00FF00) | (u32::from(value) << 8);
+                    self.vda_base = (self.vda_base & !0x00_FF00) | (u32::from(value) << 8);
                 }
                 0x225B => {
-                    self.vda_base = (self.vda_base & !0xFF0000) | (u32::from(value) << 16);
+                    self.vda_base = (self.vda_base & !0xFF_0000) | (u32::from(value) << 16);
                     self.vbit_offset = 0;
                 }
                 _ => {}
@@ -1284,8 +1282,8 @@ impl Sa1Mapper {
         // the main CPU only sees I-RAM at $3000-$37FF (so its writes
         // into $0000-$07FF should fall through to the bus's WRAM).
         let iram = match side {
-            WriteSide::Main => self.iram_offset(bank, offset),
-            WriteSide::Sa1 => self.iram_offset_sa1(bank, offset),
+            WriteSide::Main => Self::iram_offset(bank, offset),
+            WriteSide::Sa1 => Self::iram_offset_sa1(bank, offset),
         };
         if let Some(o) = iram {
             if self.iram_writable_for(o, side) {

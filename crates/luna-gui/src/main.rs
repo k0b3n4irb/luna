@@ -41,6 +41,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 
+use luna_bus::MapperKind;
 use luna_cartridge::Cartridge;
 use luna_core::Snes;
 use luna_ppu::{FRAME_H, FRAME_W};
@@ -176,7 +177,6 @@ impl LunaApp {
                 return;
             }
         };
-        use luna_bus::MapperKind;
         match cart.header.mapper_kind {
             MapperKind::LoRom | MapperKind::HiRom | MapperKind::ExHiRom | MapperKind::Sa1 => {}
             other => {
@@ -245,7 +245,7 @@ impl LunaApp {
     }
 
     /// Push the current keyboard mask into the loaded Snes.
-    fn push_joypad(&mut self) {
+    fn push_joypad(&self) {
         if !self.rom_loaded {
             return;
         }
@@ -314,7 +314,7 @@ impl LunaApp {
         self.emu_shared.unpark_emu();
     }
 
-    fn reset(&mut self) {
+    fn reset(&self) {
         if let Ok(mut guard) = self.snes.lock() {
             if let Some(snes) = guard.as_mut() {
                 snes.reset();
@@ -399,12 +399,8 @@ impl ApplicationHandler for LunaApp {
             }
             WindowEvent::Resized(size) => {
                 if let Some(pixels) = self.pixels.as_mut() {
-                    let w = NonZeroU32::new(size.width)
-                        .map(NonZeroU32::get)
-                        .unwrap_or(1);
-                    let h = NonZeroU32::new(size.height)
-                        .map(NonZeroU32::get)
-                        .unwrap_or(1);
+                    let w = NonZeroU32::new(size.width).map_or(1, NonZeroU32::get);
+                    let h = NonZeroU32::new(size.height).map_or(1, NonZeroU32::get);
                     if let Err(e) = pixels.resize_surface(w, h) {
                         eprintln!("luna-gui: pixels resize failed: {e}");
                     }
@@ -481,7 +477,7 @@ impl ApplicationHandler for LunaApp {
 
 impl LunaApp {
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(window) = self.window.as_ref().cloned() else {
+        let Some(window) = self.window.clone() else {
             return;
         };
         // Disjoint borrows: pixels and ui live in separate fields so the

@@ -1,34 +1,34 @@
-//! HiROM (Mode 21) and ExHiROM (Mode 25) cartridge mapping.
+//! `HiROM` (Mode 21) and `ExHiROM` (Mode 25) cartridge mapping.
 //!
-//! # HiROM mapping (Mode 21)
+//! # `HiROM` mapping (Mode 21)
 //!
-//! HiROM places **full 64 KB pages** in the upper banks of the SNES
+//! `HiROM` places **full 64 KB pages** in the upper banks of the SNES
 //! address space:
 //!
 //! - `$C0..$FF:$0000-$FFFF` — sequential ROM banks 0..63 (the
-//!   primary mapping for `> 32 Mbit` HiROM carts).
+//!   primary mapping for `> 32 Mbit` `HiROM` carts).
 //! - `$40..$7D:$0000-$FFFF` — mirror of the same banks (used when
 //!   the cart is small enough that the mirror is reachable).
 //! - `$00..$3F:$8000-$FFFF` — the **upper half** of bank N at
 //!   ROM bytes `N * $10000 + $8000..=N * $10000 + $FFFF`.
-//! - `$80..$BF:$8000-$FFFF` — same mirror as `$00..$3F` (FastROM
+//! - `$80..$BF:$8000-$FFFF` — same mirror as `$00..$3F` (`FastROM`
 //!   eligible when `MEMSEL` is set).
 //!
-//! # ExHiROM mapping (Mode 25)
+//! # `ExHiROM` mapping (Mode 25)
 //!
-//! ExHiROM splits the cart into two 4 MB halves. The `$C0..$FF` /
+//! `ExHiROM` splits the cart into two 4 MB halves. The `$C0..$FF` /
 //! `$80..$BF` banks reach the **lower** half (ROM banks 0..63);
 //! the `$40..$7D` / `$00..$3F` banks reach the **upper** half
 //! (ROM banks 64..125). Concretely:
 //!
 //! - `$C0..$FF:$0000-$FFFF` → ROM banks 0..63 (lower 4 MB)
 //! - `$80..$BF:$8000-$FFFF` → upper half of ROM banks 0..63
-//!   (FastROM mirror of `$C0..$FF`)
+//!   (`FastROM` mirror of `$C0..$FF`)
 //! - `$40..$7D:$0000-$FFFF` → ROM banks 64..125 (upper 4 MB)
 //! - `$00..$3F:$8000-$FFFF` → upper half of ROM banks 64..127
 //!   (mirror of `$40..$7D` — slow)
 //!
-//! Equivalently: when the mapper is in ExHiROM mode and the high bit
+//! Equivalently: when the mapper is in `ExHiROM` mode and the high bit
 //! of the bank is clear (banks `$00..$7F`), the ROM bank index is
 //! offset by `64` to point into the upper 4 MB.
 //!
@@ -40,17 +40,17 @@
 use crate::mapper::{Mapper, MapperKind};
 use crate::types::{Addr24, bank_of, offset_of};
 
-/// HiROM / ExHiROM mapper.
+/// `HiROM` / `ExHiROM` mapper.
 pub struct HiRomMapper {
     rom: Vec<u8>,
     sram: Vec<u8>,
     /// `HiRom` or `ExHiRom`. Selects whether banks `$00..$7F` reach
-    /// the lower 4 MB (HiROM) or the upper 4 MB (ExHiROM).
+    /// the lower 4 MB (`HiROM`) or the upper 4 MB (`ExHiROM`).
     kind: MapperKind,
 }
 
 impl HiRomMapper {
-    /// Build a HiROM mapper around the given ROM bytes.
+    /// Build a `HiROM` mapper around the given ROM bytes.
     ///
     /// `sram_size` is in bytes (0 / 2K / 8K / 32K / 64K / 128K).
     #[must_use]
@@ -58,7 +58,7 @@ impl HiRomMapper {
         Self::with_kind(MapperKind::HiRom, rom, sram_size)
     }
 
-    /// Build an ExHiROM mapper (Mode 25) — same as [`Self::new`] but
+    /// Build an `ExHiROM` mapper (Mode 25) — same as [`Self::new`] but
     /// routes banks `$00..$7F` to the upper 4 MB of ROM.
     #[must_use]
     pub fn new_exhirom(rom: Vec<u8>, sram_size: usize) -> Self {
@@ -267,7 +267,7 @@ mod tests {
 
     // ---------- ExHiROM (Mode 25) ----------
 
-    /// In ExHiROM, banks `$40..$7D` reach ROM bank 64+, i.e. the
+    /// In `ExHiROM`, banks `$40..$7D` reach ROM bank 64+, i.e. the
     /// upper 4 MB. Test against an 8 MB ramp so we can tell the two
     /// halves apart.
     ///

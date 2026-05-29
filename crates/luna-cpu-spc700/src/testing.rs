@@ -15,8 +15,14 @@ impl Default for RamBus {
 
 impl RamBus {
     /// Build an empty bus (all zeroes).
+    ///
+    /// `const fn` so test fixtures can spin one up at compile time. The
+    /// 64 KB array lives in the struct's storage; callers typically
+    /// `Box::new(RamBus::new())` or stash it in a static to keep it off
+    /// the stack frame.
     #[must_use]
-    pub fn new() -> Self {
+    #[allow(clippy::large_stack_arrays)]
+    pub const fn new() -> Self {
         Self { mem: [0; 0x1_0000] }
     }
 

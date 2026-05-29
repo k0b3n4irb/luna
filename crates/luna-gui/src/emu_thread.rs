@@ -54,7 +54,7 @@ pub(crate) struct EmuShared {
 }
 
 impl EmuShared {
-    pub(crate) fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             shutdown: AtomicBool::new(false),
             paused: AtomicBool::new(false),
@@ -91,7 +91,7 @@ impl EmuShared {
 ///
 /// Forced-blank (INIDISP bit 7) frames are NOT published — the UI
 /// keeps showing the previous good frame. Most games toggle bit 7
-/// every VBlank to upload tiles/OAM safely, so without this the
+/// every `VBlank` to upload tiles/OAM safely, so without this the
 /// screen would flash black once per second.
 pub(crate) fn spawn(
     snes: Arc<Mutex<Option<Snes>>>,
@@ -106,6 +106,12 @@ pub(crate) fn spawn(
         .expect("failed to spawn luna-emu thread")
 }
 
+/// The `Arc<...>` params take ownership so the thread closure can move
+/// them across the `spawn` boundary; pedantic flags them as "not
+/// consumed" because the body only borrows, but a `&Arc` signature
+/// would force every caller to outlive the thread, defeating the
+/// owned-handle design.
+#[allow(clippy::needless_pass_by_value)]
 fn run(
     snes: Arc<Mutex<Option<Snes>>>,
     shared: Arc<EmuShared>,
@@ -113,12 +119,12 @@ fn run(
     primed: Arc<AtomicBool>,
     framebuffer_rgba: Arc<Mutex<Vec<u8>>>,
 ) -> AudioReclaim {
+    const BATCH: usize = 1024;
+
     if let Ok(mut g) = shared.thread_handle.lock() {
         *g = Some(thread::current());
     }
     eprintln!("luna-emu: started");
-
-    const BATCH: usize = 1024;
 
     // Diagnostic counters — log every second so we can tell whether
     // the emu thread is actually making progress when the user

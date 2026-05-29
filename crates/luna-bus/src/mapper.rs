@@ -14,7 +14,7 @@ pub enum MapperKind {
     /// Mode 21 — 64 KB ROM pages at `$0000-$FFFF` of banks `$40-$7D`
     /// (and mirrors). Used for larger games.
     HiRom,
-    /// Mode 25 — extended HiROM allowing > 32 Mbit ROMs.
+    /// Mode 25 — extended `HiROM` allowing > 32 Mbit ROMs.
     ExHiRom,
     /// SA-1 mapping (Super Mario RPG, Kirby Super Star, etc.).
     Sa1,
@@ -53,11 +53,11 @@ pub trait Mapper {
 
     /// Step the cartridge coprocessor (SA-1 / Super FX / DSP-1 / …)
     /// forward by approximately `main_mclk` master cycles of main-CPU
-    /// progress. Default = no-op for plain LoROM / HiROM carts.
+    /// progress. Default = no-op for plain `LoROM` / `HiROM` carts.
     ///
     /// Coproc mappers translate that to the right number of coproc
     /// instructions internally (e.g. SA-1 is 10.74 MHz ≈ 2× the main
-    /// CPU's max FastROM rate, so it consumes ~2 SA-1 instructions
+    /// CPU's max `FastROM` rate, so it consumes ~2 SA-1 instructions
     /// per main-CPU \`mclk\`). Implementations should be safely
     /// callable even when their coprocessor is reset / stopped.
     fn step_coproc(&mut self, _main_mclk: u32) {}
@@ -66,13 +66,13 @@ pub trait Mapper {
     /// onto the main CPU (SA-1 SCNT bit 7 latched + SIE bit 7 enabled,
     /// for instance). The main-CPU bus ORs this into its own
     /// `irq_pending` so the CPU services it through its normal IRQ path.
-    /// Plain LoROM / HiROM carts return `false`.
+    /// Plain `LoROM` / `HiROM` carts return `false`.
     fn coproc_main_irq_pending(&self) -> bool {
         false
     }
 
     /// Snapshot the SA-1 coprocessor's CPU state, if this mapper hosts
-    /// one. Plain LoROM / HiROM / Super FX / DSP-N return `None`.
+    /// one. Plain `LoROM` / `HiROM` / Super FX / DSP-N return `None`.
     /// Used by luna-api to expose SA-1 PC / running state to debug
     /// integrations diagnosing main↔SA-1 mailbox deadlocks.
     fn sa1_snapshot(&self) -> Option<Sa1Snapshot> {

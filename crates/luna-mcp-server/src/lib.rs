@@ -201,18 +201,21 @@ impl LunaServer {
         &self,
         Parameters(params): Parameters<LoadRomParams>,
     ) -> Result<rmcp::Json<LoadRomResult>, ErrorData> {
-        let mut em = self.emulator.lock().await;
-        let info = em
-            .load_rom(&PathBuf::from(params.path))
-            .map_err(api_err_to_mcp)?;
+        let info = {
+            let mut em = self.emulator.lock().await;
+            em.load_rom(&PathBuf::from(params.path))
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
         Ok(rmcp::Json(LoadRomResult { rom: info }))
     }
 
     #[rmcp::tool(description = "Reset the loaded emulator to its power-on state. \
                                 Errors if no ROM is currently loaded.")]
     async fn reset(&self) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
-        let mut em = self.emulator.lock().await;
-        em.reset().map_err(api_err_to_mcp)?;
+        {
+            let mut em = self.emulator.lock().await;
+            em.reset().map_err(|e| api_err_to_mcp(&e))?;
+        }
         Ok(rmcp::Json(EmptyOk { ok: true }))
     }
 
@@ -229,9 +232,11 @@ impl LunaServer {
         &self,
         Parameters(params): Parameters<SetJoypadParams>,
     ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
-        let mut em = self.emulator.lock().await;
-        em.set_joypad(params.port, params.mask)
-            .map_err(api_err_to_mcp)?;
+        {
+            let mut em = self.emulator.lock().await;
+            em.set_joypad(params.port, params.mask)
+                .map_err(|e| api_err_to_mcp(&e))?;
+        }
         Ok(rmcp::Json(EmptyOk { ok: true }))
     }
 
@@ -243,8 +248,10 @@ impl LunaServer {
         &self,
         Parameters(params): Parameters<StepParams>,
     ) -> Result<rmcp::Json<StepResult>, ErrorData> {
-        let mut em = self.emulator.lock().await;
-        let executed = em.step(params.count).map_err(api_err_to_mcp)?;
+        let executed = {
+            let mut em = self.emulator.lock().await;
+            em.step(params.count).map_err(|e| api_err_to_mcp(&e))?
+        };
         Ok(rmcp::Json(StepResult { executed }))
     }
 
@@ -257,10 +264,11 @@ impl LunaServer {
         &self,
         Parameters(params): Parameters<StepUntilFrameParams>,
     ) -> Result<rmcp::Json<StepResult>, ErrorData> {
-        let mut em = self.emulator.lock().await;
-        let executed = em
-            .step_until_frame(params.max_steps)
-            .map_err(api_err_to_mcp)?;
+        let executed = {
+            let mut em = self.emulator.lock().await;
+            em.step_until_frame(params.max_steps)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
         Ok(rmcp::Json(StepResult { executed }))
     }
 
@@ -283,10 +291,11 @@ impl LunaServer {
         &self,
         Parameters(params): Parameters<ScreenshotParams>,
     ) -> Result<rmcp::Json<ScreenshotResult>, ErrorData> {
-        let em = self.emulator.lock().await;
-        let png = em
-            .render_frame_png(params.force_display)
-            .map_err(api_err_to_mcp)?;
+        let png = {
+            let em = self.emulator.lock().await;
+            em.render_frame_png(params.force_display)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
         let png_base64 = base64::engine::general_purpose::STANDARD.encode(&png);
         Ok(rmcp::Json(ScreenshotResult {
             png_base64,
@@ -304,8 +313,10 @@ impl LunaServer {
         &self,
         Parameters(params): Parameters<DrainAudioParams>,
     ) -> Result<rmcp::Json<DrainAudioResult>, ErrorData> {
-        let mut em = self.emulator.lock().await;
-        let samples = em.drain_audio(params.max).map_err(api_err_to_mcp)?;
+        let samples = {
+            let mut em = self.emulator.lock().await;
+            em.drain_audio(params.max).map_err(|e| api_err_to_mcp(&e))?
+        };
         let frames = samples.len();
         let mut flat = Vec::with_capacity(frames * 2);
         for (l, r) in samples {
@@ -327,10 +338,11 @@ impl LunaServer {
         &self,
         Parameters(params): Parameters<PeekMemoryParams>,
     ) -> Result<rmcp::Json<MemoryResult>, ErrorData> {
-        let mut em = self.emulator.lock().await;
-        let bytes = em
-            .peek_memory(params.bank, params.offset, params.count)
-            .map_err(api_err_to_mcp)?;
+        let bytes = {
+            let mut em = self.emulator.lock().await;
+            em.peek_memory(params.bank, params.offset, params.count)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
         Ok(rmcp::Json(MemoryResult { bytes }))
     }
 
@@ -342,10 +354,11 @@ impl LunaServer {
         &self,
         Parameters(params): Parameters<PeekAramParams>,
     ) -> Result<rmcp::Json<MemoryResult>, ErrorData> {
-        let em = self.emulator.lock().await;
-        let bytes = em
-            .peek_aram(params.offset, params.count)
-            .map_err(api_err_to_mcp)?;
+        let bytes = {
+            let em = self.emulator.lock().await;
+            em.peek_aram(params.offset, params.count)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
         Ok(rmcp::Json(MemoryResult { bytes }))
     }
 }
@@ -368,7 +381,7 @@ pub struct EmptyOk {
 impl ServerHandler for LunaServer {}
 
 /// Map [`luna_api::ApiError`] onto an MCP `internal_error` payload.
-fn api_err_to_mcp(e: ApiError) -> ErrorData {
+fn api_err_to_mcp(e: &ApiError) -> ErrorData {
     ErrorData::internal_error(e.to_string(), None)
 }
 
@@ -407,15 +420,14 @@ mod tests {
         assert!(result.0.state.rom.is_none());
     }
 
-    /// `step` without a ROM returns a `NoRom` ApiError mapped to an
+    /// `step` without a ROM returns a `NoRom` `ApiError` mapped to an
     /// MCP error.
     #[tokio::test]
     async fn server_step_without_rom_returns_error() {
         let s = LunaServer::new();
         let result = s.step(Parameters(StepParams { count: 1 })).await;
-        let err = match result {
-            Ok(_) => panic!("expected error for stepping without a ROM"),
-            Err(e) => e,
+        let Err(err) = result else {
+            panic!("expected error for stepping without a ROM");
         };
         assert!(err.message.contains("no ROM"));
     }
@@ -430,9 +442,8 @@ mod tests {
                 path: "/tmp/luna-this-file-does-not-exist.smc".into(),
             }))
             .await;
-        let err = match result {
-            Ok(_) => panic!("expected error for missing ROM"),
-            Err(e) => e,
+        let Err(err) = result else {
+            panic!("expected error for missing ROM");
         };
         let msg = err.message.to_lowercase();
         assert!(msg.contains("i/o") || msg.contains("io"));

@@ -95,7 +95,7 @@ impl Vram {
     }
 
     /// `$2118` write variant honouring gap G7: the byte is committed
-    /// only when `allow_data` is `true` (i.e. forced-blank or VBlank).
+    /// only when `allow_data` is `true` (i.e. forced-blank or `VBlank`).
     /// The address counter advances regardless, matching ares
     /// (`ppu_io.cpp:397-401`) and Mesen2 (`SnesPpu.cpp:2046-2057`).
     pub fn write_lo_gated(&mut self, value: u8, allow_data: bool) {
@@ -146,7 +146,7 @@ impl Vram {
         self.prefetch_hi = self.data[byte_addr.wrapping_add(1) & 0xFFFF];
     }
 
-    fn advance(&mut self) {
+    const fn advance(&mut self) {
         self.address = self.address.wrapping_add(self.vmain.step);
     }
 }
@@ -169,7 +169,7 @@ pub struct VmainSettings {
 impl VmainSettings {
     /// Decode a `$2115` byte.
     #[must_use]
-    pub fn from_byte(byte: u8) -> Self {
+    pub const fn from_byte(byte: u8) -> Self {
         let step = match byte & 0x03 {
             0 => 1,
             1 => 32,
@@ -226,7 +226,7 @@ impl Default for Cgram {
 impl Cgram {
     /// Build an empty palette.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             data: [0; 0x200],
             address: 0,
@@ -248,7 +248,7 @@ impl Cgram {
 
     /// `$2121` write — set the word address. Also resets the
     /// low/high latch so the next `$2122` write is the low byte.
-    pub fn set_address(&mut self, value: u8) {
+    pub const fn set_address(&mut self, value: u8) {
         self.address = value;
         self.high_pending = false;
     }
@@ -362,7 +362,7 @@ impl Default for Oam {
 impl Oam {
     /// Build an empty OAM.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             data: [0; 0x220],
             word_address: 0,
@@ -378,7 +378,7 @@ impl Oam {
     /// sprite (`offset & 3 == 1`, `offset < 0x200`) **and** the
     /// value isn't the hide signal `$F0`, update [`Self::shadow_y`]
     /// for the corresponding sprite slot.
-    fn update_shadow(&mut self, byte_addr: usize, value: u8) {
+    const fn update_shadow(&mut self, byte_addr: usize, value: u8) {
         if byte_addr >= 0x200 {
             return;
         }
@@ -413,7 +413,7 @@ impl Oam {
         self.update_shadow(a, value);
     }
 
-    fn reset_byte_address(&mut self) {
+    const fn reset_byte_address(&mut self) {
         self.address = (self.word_address & 0x01FF) << 1;
     }
 
@@ -424,7 +424,7 @@ impl Oam {
     /// See ares `object.cpp:1-4, 31-32` (`addressReset()`) and Mesen2
     /// `SnesPpu.cpp:464-472, 1889-1896` (`UpdateOamAddress`). The scheduler
     /// gates the call on force-blank; this method just performs the reload.
-    pub fn reload_address_from_latch(&mut self) {
+    pub const fn reload_address_from_latch(&mut self) {
         self.reset_byte_address();
     }
 
@@ -483,7 +483,7 @@ impl Oam {
         value
     }
 
-    fn advance(&mut self) {
+    const fn advance(&mut self) {
         // Byte address wraps modulo 0x220 (low table 0x000-0x1FF + high
         // table 0x200-0x21F = 544 bytes). Past that, the hardware
         // re-enters the low table at byte 0.

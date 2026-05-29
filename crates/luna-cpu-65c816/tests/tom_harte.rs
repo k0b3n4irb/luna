@@ -1,4 +1,4 @@
-//! Tom Harte ProcessorTests integration for the 65C816.
+//! Tom Harte `ProcessorTests` integration for the 65C816.
 //!
 //! Dataset: <https://github.com/SingleStepTests/65816> (~5 M cases, ~600 MB
 //! uncompressed). Not committed to this repo; fetch with:
@@ -88,7 +88,7 @@ fn dataset_path() -> Option<PathBuf> {
 /// Kept in sync with the dispatch table in `src/opcodes.rs`. Any
 /// implemented opcode that fails a Tom Harte case is a real regression
 /// and should be flagged (via `LUNA_TOM_HARTE_REQUIRE=1`).
-fn is_implemented(_opcode: u8) -> bool {
+const fn is_implemented(_opcode: u8) -> bool {
     // As of P0.4b.13 (full 256-opcode coverage including BCD ADC/SBC),
     // every opcode is dispatched. The earlier per-opcode allow-list
     // existed so the strict-mode regression gate could exclude
@@ -99,7 +99,7 @@ fn is_implemented(_opcode: u8) -> bool {
 /// Parse an opcode from a Tom Harte filename like `ea.n.json` or
 /// `00 e.json`. Returns the leading 2-hex-digit byte if present.
 fn opcode_from_filename(stem: &str) -> Option<u8> {
-    let hex: String = stem.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+    let hex: String = stem.chars().take_while(char::is_ascii_hexdigit).collect();
     if hex.len() == 2 {
         u8::from_str_radix(&hex, 16).ok()
     } else {
@@ -194,14 +194,11 @@ struct OpStats {
 #[test]
 #[ignore = "requires Tom Harte dataset; run with --ignored"]
 fn tom_harte() {
-    let dir = match dataset_path() {
-        Some(d) => d,
-        None => {
-            eprintln!("Tom Harte dataset not found.");
-            eprintln!("Run `tools/fetch-tom-harte.sh` from the workspace root");
-            eprintln!("or set LUNA_TOM_HARTE_DIR to point at the `v1/` directory.");
-            return;
-        }
+    let Some(dir) = dataset_path() else {
+        eprintln!("Tom Harte dataset not found.");
+        eprintln!("Run `tools/fetch-tom-harte.sh` from the workspace root");
+        eprintln!("or set LUNA_TOM_HARTE_DIR to point at the `v1/` directory.");
+        return;
     };
 
     eprintln!("Reading Tom Harte tests from {}", dir.display());

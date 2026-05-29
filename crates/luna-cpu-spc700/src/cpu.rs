@@ -101,7 +101,7 @@ impl Spc700 {
 
     /// Set N and Z based on an 8-bit value.
     #[inline]
-    pub fn set_nz(&mut self, value: u8) {
+    pub const fn set_nz(&mut self, value: u8) {
         self.psw.set(bit::Z, value == 0);
         self.psw.set(bit::N, value & 0x80 != 0);
     }
