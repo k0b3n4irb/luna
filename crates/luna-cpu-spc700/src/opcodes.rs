@@ -1094,28 +1094,29 @@ impl Spc700 {
                 self.set_nz(v);
             }
             0x9E => {
-                // DIV YA,X — unsigned 16/8 division.
-                //   A = YA / X (quotient, low byte)
-                //   Y = YA % X (remainder)
-                // Real SPC700 quirks: the result can overflow when
-                // Y >= X (sets V). Behaviour for X == 0 is hardware-
-                // specific; we mirror the common emulator convention
-                // of returning (A=$FF, Y=A) and setting V.
+                // DIV YA,X — ported verbatim from ares SPC700::instructionDIV
+                // (component/processor/spc700/instructions.cpp). H and V are
+                // taken from the ORIGINAL Y/X (before A/Y are overwritten).
+                // When the quotient won't fit in 9 bits (Y >= X<<1) the S-SMP
+                // produces a documented odd result via the 256-X branch —
+                // which also covers X == 0 with no division by zero (the
+                // branch divides by 256-X, never X). Mesen2's 9-bit loop
+                // agrees on every flag and value.
                 let ya = u16::from(self.a) | (u16::from(self.y) << 8);
                 let x = u16::from(self.x);
-                if let Some(q) = ya.checked_div(x) {
-                    let r = ya % x;
-                    self.psw.set(bit::V, q > 0xFF);
-                    self.a = q as u8;
-                    self.y = r as u8;
+                let y = u16::from(self.y);
+                self.psw.set(bit::H, (y & 0x0F) >= (x & 0x0F));
+                self.psw.set(bit::V, y >= x);
+                if y < (x << 1) {
+                    // Quotient fits in 9 bits (X >= 1 here, so X != 0).
+                    self.a = (ya / x) as u8;
+                    self.y = (ya % x) as u8;
                 } else {
-                    // X = 0 on real HW gives undefined-but-
-                    // observed (A = $FF, Y = $FF) with V set.
-                    self.a = 0xFF;
-                    self.y = 0xFF;
-                    self.psw.insert(bit::V);
+                    let ya = i32::from(ya);
+                    let x = i32::from(x);
+                    self.a = (255 - (ya - (x << 9)) / (256 - x)) as u8;
+                    self.y = (x + (ya - (x << 9)) % (256 - x)) as u8;
                 }
-                self.psw.set(bit::H, (self.y & 0x0F) >= (self.x & 0x0F));
                 let a = self.a;
                 self.set_nz(a);
             }
@@ -1856,6 +1857,57 @@ mod tests {
         let (mut cpu, mut bus) = run(&[0xFF]);
         cpu.step(&mut bus);
         assert!(cpu.stopped);
+    }
+
+    // -------------------------------------------------------------------
+    // DIV YA,X — ares-faithful (flags from original Y; 256-X overflow
+    // branch; no division by zero when X == 0).
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn div_simple_quotient_and_remainder() {
+        // YA=100, X=9 → A=11, Y=1; quotient fits, no V/H.
+        let (mut cpu, mut bus) = run(&[0x9E]);
+        cpu.a = 100;
+        cpu.y = 0;
+        cpu.x = 9;
+        cpu.step(&mut bus);
+        assert_eq!(cpu.a, 11);
+        assert_eq!(cpu.y, 1);
+        assert!(!cpu.psw.contains(bit::V));
+        assert!(!cpu.psw.contains(bit::H));
+    }
+
+    #[test]
+    fn div_overflow_branch_uses_256_minus_x() {
+        // YA=$FF00, X=2 → quotient won't fit (Y >= X<<1): A=$03, Y=$FA,
+        // V and H set (from the original Y=$FF).
+        let (mut cpu, mut bus) = run(&[0x9E]);
+        cpu.a = 0x00;
+        cpu.y = 0xFF;
+        cpu.x = 0x02;
+        cpu.step(&mut bus);
+        assert_eq!(cpu.a, 0x03);
+        assert_eq!(cpu.y, 0xFA);
+        assert!(cpu.psw.contains(bit::V));
+        assert!(cpu.psw.contains(bit::H));
+    }
+
+    #[test]
+    fn div_by_zero_x_takes_overflow_branch_no_panic() {
+        // X=0 is NOT a special case: Y < X<<1 is false, so the 256-X
+        // branch runs (dividing by 256, never X). YA=$1234, X=0 →
+        // A=$ED, Y=$34, V and H set, N set (A bit 7).
+        let (mut cpu, mut bus) = run(&[0x9E]);
+        cpu.a = 0x34;
+        cpu.y = 0x12;
+        cpu.x = 0x00;
+        cpu.step(&mut bus);
+        assert_eq!(cpu.a, 0xED);
+        assert_eq!(cpu.y, 0x34);
+        assert!(cpu.psw.contains(bit::V));
+        assert!(cpu.psw.contains(bit::H));
+        assert!(cpu.psw.contains(bit::N));
     }
 
     // -------------------------------------------------------------------
