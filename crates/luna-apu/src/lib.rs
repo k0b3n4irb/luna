@@ -41,10 +41,18 @@ use luna_cpu_spc700::{IPL_ROM, IPL_ROM_BASE, Spc700, SpcBus};
 /// legacy path remains live.
 pub mod dsp;
 
-/// Master cycles per SPC instruction step. SNES master = 21.477 MHz,
-/// SPC = 1.024 MHz, average SPC instruction = ~4 SPC cycles. So one
-/// SPC instruction every (21.477 / 1.024) × 4 ≈ 84 master cycles.
+/// Nominal master cycles per SPC instruction (~4 SPC cycles × the
+/// 20.97 master/SPC ratio). Since Phase 2 this is **no longer** the
+/// scheduler quantum — `Apu::step` charges each instruction its real
+/// per-opcode cost — but it is kept as a convenience multiplier for
+/// tests that want "≈N instructions of headroom".
 pub const MASTER_CYCLES_PER_SPC_STEP: u32 = 84;
+
+/// NTSC SNES master clock (Hz) — the CPU/PPU timebase.
+pub const MASTER_CLOCK_HZ: u64 = 21_477_272;
+
+/// SPC700 / S-DSP clock (Hz): the 24.576 MHz APU crystal ÷ 24.
+pub const SPC_CLOCK_HZ: u64 = 1_024_000;
 
 /// After how many SPC cycles a "playing" voice transitions to
 /// "ended" and lights up its bit in `ENDX` (`$7C`) when ADSR is
@@ -165,9 +173,15 @@ pub struct Apu {
     pub to_spc_ports: [u8; 4],
     /// SPC → CPU mailbox (SPC writes `$F4-$F7`, CPU reads `$2140-$2143`).
     pub to_cpu_ports: [u8; 4],
-    /// Accumulator for the SPC catch-up scheduler. Holds master
-    /// cycles owed to the SPC since the last instruction step.
-    pub mclk_deficit: u32,
+    /// Fractional master→SPC cycle accumulator: holds
+    /// `Σ(master cycles) × SPC_CLOCK_HZ` modulo `MASTER_CLOCK_HZ`, so
+    /// the long-run SPC rate is exactly `SPC_CLOCK_HZ / MASTER_CLOCK_HZ`
+    /// with zero drift.
+    spc_cycle_num: u64,
+    /// Signed SPC-cycle budget carried between `step` calls. Negative
+    /// means the last instruction overran; the debt is repaid from the
+    /// next batch of converted cycles.
+    spc_cycle_debt: i64,
     /// `$F1` SPC control register — bit 7 (use IPL ROM) is the only
     /// bit we honour for now; the rest are stored verbatim for round-
     /// trip diagnostics.
@@ -248,7 +262,8 @@ impl Apu {
             aram,
             to_spc_ports: [0; 4],
             to_cpu_ports: [0; 4],
-            mclk_deficit: 0,
+            spc_cycle_num: 0,
+            spc_cycle_debt: 0,
             control: 0x80, // bit 7: IPL ROM exposed
             past_iplrom: false,
             dsp_index: 0,
@@ -382,16 +397,26 @@ impl Apu {
         (self.audio_left, self.audio_right)
     }
 
-    /// Advance the SPC700 by `mclk` master cycles of headroom. Runs
-    /// one SPC instruction per [`MASTER_CYCLES_PER_SPC_STEP`] in the
-    /// deficit, ticking the three SPC timers between steps.
+    /// Advance the SPC700 by `mclk` master cycles. Converts master
+    /// cycles into an SPC-cycle budget at the exact 21.477 MHz : 1.024
+    /// MHz ratio (with fractional carry), then runs SPC instructions —
+    /// each charged its **actual** per-opcode cost (incl. the taken-
+    /// branch penalty) — until the budget is spent. Timers and the DSP
+    /// voice clock advance by the same real per-instruction cycles.
     pub fn step(&mut self, mclk: u32) {
-        self.mclk_deficit = self.mclk_deficit.saturating_add(mclk);
-        while self.mclk_deficit >= MASTER_CYCLES_PER_SPC_STEP {
+        // Convert this batch of master cycles into whole SPC cycles,
+        // carrying the fractional remainder so the rate has no drift.
+        self.spc_cycle_num += u64::from(mclk) * SPC_CLOCK_HZ;
+        let gained = (self.spc_cycle_num / MASTER_CLOCK_HZ) as i64;
+        self.spc_cycle_num %= MASTER_CLOCK_HZ;
+        let mut budget = self.spc_cycle_debt + gained;
+        while budget > 0 {
             if self.cpu.stopped {
+                // SPC halted: drop the budget rather than let it pile up
+                // into a burst if it ever un-stops.
+                budget = 0;
                 break;
             }
-            self.mclk_deficit -= MASTER_CYCLES_PER_SPC_STEP;
             let mut bus = ApuBusView {
                 aram: &mut self.aram,
                 to_spc_ports: &self.to_spc_ports,
@@ -405,12 +430,14 @@ impl Apu {
                 timer_enabled: &mut self.timer_enabled,
             };
             let cycles = u32::from(self.cpu.step(&mut bus));
+            budget -= i64::from(cycles);
             self.tick_timers(cycles);
             self.tick_voices(cycles);
             if self.cpu.pc < IPL_ROM_BASE {
                 self.past_iplrom = true;
             }
         }
+        self.spc_cycle_debt = budget;
     }
 }
 

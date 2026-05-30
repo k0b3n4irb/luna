@@ -24,6 +24,10 @@ pub struct Spc700 {
     pub stopped: bool,
     /// `true` after `SLEEP` until an interrupt wakes us up.
     pub sleeping: bool,
+    /// Set by a branch-family handler (BRA / Bcc / CBNE / DBNZ / BBS /
+    /// BBC) when it takes the branch. `step` reads it to add the `+2`
+    /// taken penalty, then clears it before the next instruction.
+    pub branch_taken: bool,
     /// If the CPU stopped because of an unimplemented opcode, this
     /// holds `(opcode, pc_of_opcode)`. Lets the host emulator surface
     /// "added opcode $XX at PC=$YYYY would unblock the next driver

@@ -37,9 +37,15 @@ impl Spc700 {
             // an eventual interrupt wakes us.
             return 2;
         }
+        // Reset before execute so a branch handler can set it for
+        // this opcode; read back below to add the taken penalty.
+        self.branch_taken = false;
         let opcode = self.fetch_u8(bus);
-        let cycles = crate::cycles::SPC700_CYCLES[opcode as usize];
+        let mut cycles = crate::cycles::SPC700_CYCLES[opcode as usize];
         self.execute(opcode, bus);
+        if self.branch_taken {
+            cycles += crate::cycles::SPC700_BRANCH_TAKEN_PENALTY;
+        }
         cycles
     }
 
@@ -1058,6 +1064,7 @@ impl Spc700 {
                 let rel = self.fetch_u8(bus) as i8;
                 if self.a != v {
                     self.pc = self.pc.wrapping_add_signed(i16::from(rel));
+                    self.branch_taken = true;
                 }
             }
             0xDE => {
@@ -1067,6 +1074,7 @@ impl Spc700 {
                 let rel = self.fetch_u8(bus) as i8;
                 if self.a != v {
                     self.pc = self.pc.wrapping_add_signed(i16::from(rel));
+                    self.branch_taken = true;
                 }
             }
 
@@ -1160,6 +1168,7 @@ impl Spc700 {
                 let rel = self.fetch_u8(bus) as i8;
                 if v & (1 << bit) != 0 {
                     self.pc = self.pc.wrapping_add_signed(i16::from(rel));
+                    self.branch_taken = true;
                 }
             }
             0x13 | 0x33 | 0x53 | 0x73 | 0x93 | 0xB3 | 0xD3 | 0xF3 => {
@@ -1171,6 +1180,7 @@ impl Spc700 {
                 let rel = self.fetch_u8(bus) as i8;
                 if v & (1 << bit) == 0 {
                     self.pc = self.pc.wrapping_add_signed(i16::from(rel));
+                    self.branch_taken = true;
                 }
             }
 
@@ -1245,6 +1255,7 @@ impl Spc700 {
                 let rel = self.fetch_u8(bus) as i8;
                 if v != 0 {
                     self.pc = self.pc.wrapping_add_signed(i16::from(rel));
+                    self.branch_taken = true;
                 }
             }
             0xFE => {
@@ -1253,6 +1264,7 @@ impl Spc700 {
                 let rel = self.fetch_u8(bus) as i8;
                 if self.y != 0 {
                     self.pc = self.pc.wrapping_add_signed(i16::from(rel));
+                    self.branch_taken = true;
                 }
             }
 
@@ -1728,6 +1740,7 @@ impl Spc700 {
         let offset = self.fetch_u8(bus) as i8;
         if condition {
             self.pc = self.pc.wrapping_add_signed(i16::from(offset));
+            self.branch_taken = true;
         }
     }
 
@@ -1820,6 +1833,27 @@ mod tests {
     use super::*;
     use crate::iplrom::{IPL_ROM, IPL_ROM_BASE};
     use crate::testing::RamBus;
+
+    /// Phase 2: `step` must add the +2 taken-branch penalty on top of the
+    /// not-taken base in `SPC700_CYCLES`. Values cross-checked against
+    /// ares (`instructionBranch`: two idles when taken) and rsnes
+    /// (`branch`: `cycles += 2` "branch taken costs 2 extra cycles").
+    #[test]
+    fn branch_taken_penalty_is_applied() {
+        // BRA ($2F) is unconditional → base 2 + taken 2 = 4.
+        let (mut cpu, mut bus) = run(&[0x2F, 0x00]);
+        assert_eq!(cpu.step(&mut bus), 4, "BRA always taken");
+
+        // DBNZ Y,rel ($FE) taken (Y 2->1) → base 4 + 2 = 6.
+        let (mut cpu, mut bus) = run(&[0xFE, 0x00]);
+        cpu.y = 2;
+        assert_eq!(cpu.step(&mut bus), 6, "DBNZ Y taken");
+
+        // DBNZ Y,rel NOT taken (Y 1->0) → base 4, no penalty.
+        let (mut cpu, mut bus) = run(&[0xFE, 0x00]);
+        cpu.y = 1;
+        assert_eq!(cpu.step(&mut bus), 4, "DBNZ Y not taken");
+    }
 
     /// Build a CPU sitting at $0200 with the given program bytes.
     fn run(program: &[u8]) -> (Spc700, RamBus) {
