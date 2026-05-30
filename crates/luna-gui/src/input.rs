@@ -100,12 +100,49 @@ struct Binding {
     key: KeyCode,
 }
 
+/// Non-gamepad emulator hotkeys (screenshot, …). Remappable through
+/// the same Input → Configure controller… modal as the pad buttons
+/// and persisted next to them, but kept in their own file so an older
+/// `input.json` without hotkeys keeps loading unchanged.
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Hash, Serialize, Deserialize)]
+pub(crate) enum Hotkey {
+    /// Save a PNG of the current frame (default `F12`, like Mesen2).
+    Screenshot,
+}
+
+impl Hotkey {
+    pub(crate) const ALL: [Self; 1] = [Self::Screenshot];
+
+    /// Display label for the rebind UI.
+    #[must_use]
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Screenshot => "Screenshot",
+        }
+    }
+
+    /// Factory default key. Mesen2 binds screenshot to `F12`.
+    const fn default_key(self) -> KeyCode {
+        match self {
+            Self::Screenshot => KeyCode::F12,
+        }
+    }
+}
+
+/// One pair `(Hotkey, KeyCode)` flattened for JSON.
+#[derive(Serialize, Deserialize)]
+struct HotkeyBinding {
+    hotkey: Hotkey,
+    key: KeyCode,
+}
+
 /// Player-1 keyboard binding map. Each entry pairs a SNES button to a
 /// winit `KeyCode` (physical key). Defaults to the Mesen2 "Arrow keys"
 /// preset.
 #[derive(Clone)]
 pub(crate) struct KeyBindings {
     bindings: [(SnesButton, KeyCode); 12],
+    hotkeys: [(Hotkey, KeyCode); 1],
 }
 
 impl Default for KeyBindings {
@@ -127,6 +164,7 @@ impl Default for KeyBindings {
                 (SnesButton::L, KeyCode::KeyQ),
                 (SnesButton::R, KeyCode::KeyW),
             ],
+            hotkeys: [(Hotkey::Screenshot, Hotkey::Screenshot.default_key())],
         }
     }
 }
@@ -151,6 +189,35 @@ impl KeyBindings {
         }
     }
 
+    /// Key currently bound to `hotkey`.
+    #[must_use]
+    pub(crate) fn get_hotkey(&self, hotkey: Hotkey) -> KeyCode {
+        self.hotkeys
+            .iter()
+            .find(|(h, _)| *h == hotkey)
+            .map_or_else(|| hotkey.default_key(), |(_, k)| *k)
+    }
+
+    /// Rebind `hotkey` to `key`.
+    pub(crate) fn set_hotkey(&mut self, hotkey: Hotkey, key: KeyCode) {
+        for slot in &mut self.hotkeys {
+            if slot.0 == hotkey {
+                slot.1 = key;
+                return;
+            }
+        }
+    }
+
+    /// Reverse lookup: the hotkey bound to `key`, if any. Used by the
+    /// event loop to dispatch a key press to its emulator action.
+    #[must_use]
+    pub(crate) fn hotkey_for(&self, key: KeyCode) -> Option<Hotkey> {
+        self.hotkeys
+            .iter()
+            .find(|(_, k)| *k == key)
+            .map(|(h, _)| *h)
+    }
+
     /// Persist the binding to `~/.config/luna/input.json`. Best-effort:
     /// I/O errors bubble up so the caller can log but not panic.
     pub(crate) fn save(&self) -> std::io::Result<PathBuf> {
@@ -169,6 +236,21 @@ impl KeyBindings {
         let json = serde_json::to_string_pretty(&entries)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         fs::write(&path, json)?;
+
+        // Hotkeys live in their own file so a pre-existing `input.json`
+        // (pad bindings only) keeps round-tripping untouched.
+        let hk_path = hotkeys_path()?;
+        let hk_entries: Vec<HotkeyBinding> = self
+            .hotkeys
+            .iter()
+            .map(|(h, k)| HotkeyBinding {
+                hotkey: *h,
+                key: *k,
+            })
+            .collect();
+        let hk_json = serde_json::to_string_pretty(&hk_entries)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        fs::write(&hk_path, hk_json)?;
         Ok(path)
     }
 
@@ -202,13 +284,26 @@ impl KeyBindings {
                 }
             }
         }
+        // Hotkeys are optional: a missing / unparsable file leaves the
+        // factory defaults (Screenshot = F12) in place.
+        if let Ok(hk_path) = hotkeys_path()
+            && let Ok(hk_json) = fs::read_to_string(&hk_path)
+            && let Ok(hk_entries) = serde_json::from_str::<Vec<HotkeyBinding>>(&hk_json)
+        {
+            for entry in hk_entries {
+                for slot in &mut out.hotkeys {
+                    if slot.0 == entry.hotkey {
+                        slot.1 = entry.key;
+                    }
+                }
+            }
+        }
         out
     }
 }
 
-/// `~/.config/luna/input.json` on Linux / equivalent on macOS &
-/// Windows.
-fn config_path() -> std::io::Result<PathBuf> {
+/// `~/.config/luna/<file>` on Linux / equivalent on macOS & Windows.
+fn config_file(file: &str) -> std::io::Result<PathBuf> {
     let base = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         PathBuf::from(xdg)
     } else if let Ok(home) = std::env::var("HOME") {
@@ -219,7 +314,17 @@ fn config_path() -> std::io::Result<PathBuf> {
             "no $HOME / $XDG_CONFIG_HOME",
         ));
     };
-    Ok(base.join("luna").join("input.json"))
+    Ok(base.join("luna").join(file))
+}
+
+/// `~/.config/luna/input.json` — pad bindings.
+fn config_path() -> std::io::Result<PathBuf> {
+    config_file("input.json")
+}
+
+/// `~/.config/luna/hotkeys.json` — remappable emulator hotkeys.
+fn hotkeys_path() -> std::io::Result<PathBuf> {
+    config_file("hotkeys.json")
 }
 
 #[cfg(test)]
@@ -241,6 +346,18 @@ mod tests {
         assert_eq!(b.get(SnesButton::Down), KeyCode::ArrowDown);
         assert_eq!(b.get(SnesButton::Left), KeyCode::ArrowLeft);
         assert_eq!(b.get(SnesButton::Right), KeyCode::ArrowRight);
+    }
+
+    #[test]
+    fn screenshot_hotkey_defaults_to_f12_and_reverse_resolves() {
+        let mut b = KeyBindings::default();
+        assert_eq!(b.get_hotkey(Hotkey::Screenshot), KeyCode::F12);
+        assert_eq!(b.hotkey_for(KeyCode::F12), Some(Hotkey::Screenshot));
+        // Remap and confirm both directions follow.
+        b.set_hotkey(Hotkey::Screenshot, KeyCode::F2);
+        assert_eq!(b.get_hotkey(Hotkey::Screenshot), KeyCode::F2);
+        assert_eq!(b.hotkey_for(KeyCode::F2), Some(Hotkey::Screenshot));
+        assert_eq!(b.hotkey_for(KeyCode::F12), None);
     }
 
     #[test]

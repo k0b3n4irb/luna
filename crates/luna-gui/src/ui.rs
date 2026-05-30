@@ -25,6 +25,8 @@ pub(crate) enum MenuAction {
     Reset,
     ToggleInputConfig,
     StartRebind(crate::input::SnesButton),
+    StartRebindHotkey(crate::input::Hotkey),
+    TakeScreenshot,
     SaveBindings,
 }
 
@@ -38,6 +40,11 @@ pub(crate) struct UiState<'a> {
     /// When `Some`, the input modal is waiting on the user to press a
     /// key to rebind the named SNES button.
     pub pending_rebind: Option<crate::input::SnesButton>,
+    /// When `Some`, the input modal is waiting on a key to rebind the
+    /// named hotkey (screenshot, …).
+    pub pending_hotkey_rebind: Option<crate::input::Hotkey>,
+    /// Last screenshot filename, shown briefly in the menu bar.
+    pub screenshot_status: Option<String>,
 }
 
 /// All the egui plumbing wired up against pixels' wgpu device.
@@ -184,11 +191,12 @@ fn install_dark_theme(ctx: &egui::Context) {
 }
 
 fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>, emit: &mut F) {
-    use crate::input::SnesButton;
+    use crate::input::{Hotkey, SnesButton};
     egui::Window::new("Controller bindings")
         .collapsible(false)
         .resizable(false)
         .default_width(360.0)
+        .max_height(520.0)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
             ui.label(
@@ -199,29 +207,62 @@ fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<
                 .color(egui::Color32::from_rgb(160, 160, 180)),
             );
             ui.add_space(8.0);
-            egui::Grid::new("luna-bindings-grid")
-                .num_columns(3)
-                .spacing([16.0, 6.0])
-                .striped(true)
+            // Scroll so the Hotkeys section below the 12 pad rows stays
+            // reachable on short windows.
+            egui::ScrollArea::vertical()
+                .max_height(380.0)
                 .show(ui, |ui| {
-                    for &button in &SnesButton::ALL {
-                        ui.label(egui::RichText::new(button.label()).strong());
-                        let key = state.key_bindings.get(button);
-                        let label = if state.pending_rebind == Some(button) {
-                            "Press a key…".to_string()
-                        } else {
-                            format!("{key:?}")
-                        };
-                        if ui
-                            .button(egui::RichText::new(label).monospace())
-                            .on_hover_text("Click to rebind")
-                            .clicked()
-                        {
-                            emit(MenuAction::StartRebind(button));
-                        }
-                        ui.allocate_space(egui::vec2(1.0, 1.0));
-                        ui.end_row();
-                    }
+                    egui::Grid::new("luna-bindings-grid")
+                        .num_columns(3)
+                        .spacing([16.0, 6.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for &button in &SnesButton::ALL {
+                                ui.label(egui::RichText::new(button.label()).strong());
+                                let key = state.key_bindings.get(button);
+                                let label = if state.pending_rebind == Some(button) {
+                                    "Press a key…".to_string()
+                                } else {
+                                    format!("{key:?}")
+                                };
+                                if ui
+                                    .button(egui::RichText::new(label).monospace())
+                                    .on_hover_text("Click to rebind")
+                                    .clicked()
+                                {
+                                    emit(MenuAction::StartRebind(button));
+                                }
+                                ui.allocate_space(egui::vec2(1.0, 1.0));
+                                ui.end_row();
+                            }
+                        });
+                    ui.add_space(10.0);
+                    ui.label(egui::RichText::new("Hotkeys").strong());
+                    ui.add_space(4.0);
+                    egui::Grid::new("luna-hotkeys-grid")
+                        .num_columns(3)
+                        .spacing([16.0, 6.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for &hotkey in &Hotkey::ALL {
+                                ui.label(egui::RichText::new(hotkey.label()).strong());
+                                let key = state.key_bindings.get_hotkey(hotkey);
+                                let label = if state.pending_hotkey_rebind == Some(hotkey) {
+                                    "Press a key…".to_string()
+                                } else {
+                                    format!("{key:?}")
+                                };
+                                if ui
+                                    .button(egui::RichText::new(label).monospace())
+                                    .on_hover_text("Click to rebind")
+                                    .clicked()
+                                {
+                                    emit(MenuAction::StartRebindHotkey(hotkey));
+                                }
+                                ui.allocate_space(egui::vec2(1.0, 1.0));
+                                ui.end_row();
+                            }
+                        });
                 });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -270,12 +311,27 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>,
                         ui.close();
                     }
                 });
+                ui.menu_button("Tools", |ui| {
+                    let key = state
+                        .key_bindings
+                        .get_hotkey(crate::input::Hotkey::Screenshot);
+                    if ui.button(format!("Take screenshot ({key:?})")).clicked() {
+                        emit(MenuAction::TakeScreenshot);
+                        ui.close();
+                    }
+                });
                 if let Some(title) = state.rom_title.as_deref() {
                     ui.add_space(20.0);
                     ui.label(
                         egui::RichText::new(title)
                             .color(egui::Color32::from_rgb(150, 150, 170))
                             .italics(),
+                    );
+                }
+                if let Some(status) = state.screenshot_status.as_deref() {
+                    ui.add_space(16.0);
+                    ui.label(
+                        egui::RichText::new(status).color(egui::Color32::from_rgb(120, 200, 120)),
                     );
                 }
             });

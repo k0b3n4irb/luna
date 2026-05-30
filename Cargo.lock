@@ -1876,6 +1876,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "egui-winit",
+ "image",
  "luna-apu",
  "luna-bus",
  "luna-cartridge",
