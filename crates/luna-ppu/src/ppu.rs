@@ -283,6 +283,13 @@ pub struct Ppu {
     /// Bit 7 toggles per field in interlace mode; bits 0-3 = chip ID
     /// (we return 1 — model 5C77).
     pub stat77: u8,
+    /// OBJ range-over: more than 32 sprites evaluated on some scanline
+    /// this frame. Exposed at `$213E` bit 6; cleared at frame start
+    /// (ares `object.cpp:11-14`).
+    pub obj_range_over: bool,
+    /// OBJ time-over: more than 34 sprite tiles on some scanline this
+    /// frame. Exposed at `$213E` bit 7.
+    pub obj_time_over: bool,
     /// `$213F` STAT78 — read-side latch for the PPU2 status byte.
     /// Bit 7 = interlace odd-field flag, bit 4 = region (1 = PAL,
     /// 0 = NTSC), bits 0-3 = chip revision (= 2).
@@ -413,6 +420,8 @@ impl Ppu {
             setini: 0,
             // Initial PPU1 chip-ID = 1, no over flags, interlace field 0.
             stat77: 0x01,
+            obj_range_over: false,
+            obj_time_over: false,
             // Initial PPU2 chip rev = 2; region bit (4) defaults to 0
             // (NTSC). PAL emulation can flip this on cart load.
             stat78: 0x02,
@@ -440,6 +449,16 @@ impl Ppu {
     /// `last_flushed_dot..FRAME_W` and resets the partial-flush cursor.
     /// Out-of-range `y` (≥ `FRAME_H`) is a no-op.
     pub fn render_current_scanline(&mut self, y: u16, opts: RenderOptions) {
+        // OBJ range/time-over flags accumulate over the frame and clear
+        // at its start (ares object.cpp:11-14). Evaluate per line and OR
+        // in; the renderer applies the matching 32/34 drop.
+        if y == 0 {
+            self.obj_range_over = false;
+            self.obj_time_over = false;
+        }
+        let (range, time) = crate::renderer::sprite_line_overflow(self, y);
+        self.obj_range_over |= range;
+        self.obj_time_over |= time;
         self.flush_partial_scanline(y, FRAME_W as u16, opts);
         self.scanline_reset();
     }
@@ -502,7 +521,11 @@ impl Ppu {
             register::MPYL => self.mpy_result as u8,
             register::MPYM => (self.mpy_result >> 8) as u8,
             register::MPYH => (self.mpy_result >> 16) as u8,
-            register::STAT77 => self.stat77,
+            register::STAT77 => {
+                self.stat77
+                    | (u8::from(self.obj_time_over) << 7)
+                    | (u8::from(self.obj_range_over) << 6)
+            }
             register::STAT78 => {
                 // Reading $213F is documented to clear the shared
                 // BG-scroll write-twice latch AND the "latch hit"

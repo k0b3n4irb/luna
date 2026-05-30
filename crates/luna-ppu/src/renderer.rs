@@ -1438,6 +1438,115 @@ fn render_bg_scanline_indexed_hires(
     (above, below)
 }
 
+/// 9-bit X of a sprite (luna's signed X folded into the hardware
+/// 0..511 range).
+const fn sprite_x9(sp: &SpriteEntry) -> i32 {
+    sp.x as i32 & 0x1FF
+}
+
+/// Is the sprite on scanline `y`? The row-in-sprite is taken mod 256
+/// (vertical wrap) and the sprite must not sit fully in the right
+/// off-screen dead zone (ares `object.cpp:51-55`).
+fn sprite_on_line(sp: &SpriteEntry, y: u16) -> bool {
+    let x9 = sprite_x9(sp);
+    if x9 > 256 && x9 + i32::from(sp.w) - 1 < 512 {
+        return false;
+    }
+    let row = y.wrapping_sub(sp.y as u16) & 0xFF;
+    usize::from(row) < sp.h as usize
+}
+
+/// Count of the sprite's 8-px tiles that are not in the off-screen dead
+/// zone — the unit charged against the 34-tile/line budget (ares
+/// `object.cpp:133-136`).
+fn sprite_onscreen_tiles(sp: &SpriteEntry) -> usize {
+    let tiles = i32::from(sp.w) / 8;
+    (0..tiles)
+        .filter(|&tx| {
+            let sx9 = (i32::from(sp.x) + tx * 8) & 0x1FF;
+            !(sx9 >= 256 && sx9 + 7 < 512)
+        })
+        .count()
+}
+
+/// Result of per-line sprite evaluation.
+struct SpriteEval {
+    /// Surviving sprite indices in *fetch* order (back-most first), so
+    /// the renderer draws them back-to-front and the front sprite wins.
+    survivors: [u8; 32],
+    survivor_count: usize,
+    /// More than 32 sprites on this line ($213E.6).
+    range_over: bool,
+    /// More than 34 sprite tiles on this line ($213E.7).
+    time_over: bool,
+}
+
+/// Evaluate one scanline's sprites: the 32-sprite range limit and the
+/// 34-tile time limit, starting from `firstSprite` (OAM priority
+/// rotation). ares `object.cpp:35-49,91-161`, Mesen2
+/// `SnesPpu.cpp:595-625,693-741`.
+fn evaluate_sprite_line(ppu: &Ppu, sprites: &[SpriteEntry; 128], y: u16) -> SpriteEval {
+    let first = ppu.oam.first_sprite() as usize;
+    // Pass 1: first 32 on-line sprites, in evaluation order from
+    // firstSprite (= priority order, items[0] front-most).
+    let mut items = [0u8; 32];
+    let mut count = 0usize;
+    let mut range_over = false;
+    for k in 0..128usize {
+        let i = (first + k) & 0x7F;
+        if !sprite_on_line(&sprites[i], y) {
+            continue;
+        }
+        if count < 32 {
+            items[count] = i as u8;
+            count += 1;
+        } else {
+            range_over = true;
+            break;
+        }
+    }
+    // Time over: total on-screen tiles of the kept sprites > 34.
+    let total_tiles: usize = items[..count]
+        .iter()
+        .map(|&it| sprite_onscreen_tiles(&sprites[it as usize]))
+        .sum();
+    let time_over = total_tiles > 34;
+    // Pass 2: fetch in reverse (back-most first); keep sprites while the
+    // cumulative tile count stays within 34. The front sprites that
+    // overflow the budget are dropped — the SNES "tile over" quirk.
+    let mut survivors = [0u8; 32];
+    let mut sc = 0usize;
+    let mut budget = 0usize;
+    for idx in (0..count).rev() {
+        let it = items[idx];
+        let tiles = sprite_onscreen_tiles(&sprites[it as usize]);
+        if budget + tiles > 34 {
+            break;
+        }
+        budget += tiles;
+        survivors[sc] = it;
+        sc += 1;
+    }
+    SpriteEval {
+        survivors,
+        survivor_count: sc,
+        range_over,
+        time_over,
+    }
+}
+
+/// Per-line OBJ overflow flags ($213E bits 6/7). Used by the scanline
+/// scheduler to set the status bits; the renderer applies the matching
+/// 32/34 drop.
+pub(crate) fn sprite_line_overflow(ppu: &Ppu, y: u16) -> (bool, bool) {
+    if ppu.inidisp & 0x80 != 0 {
+        return (false, false);
+    }
+    let sprites = decode_all_sprites(ppu);
+    let eval = evaluate_sprite_line(ppu, &sprites, y);
+    (eval.range_over, eval.time_over)
+}
+
 /// Same as [`render_sprites_scanline`] but returns CGRAM indices
 /// and the sprite's 2-bit priority value. Allows the compositor to
 /// interleave sprites with BG layers per the mode's priority table
@@ -1453,17 +1562,12 @@ pub fn render_sprites_scanline_indexed_with(
         return out;
     }
     let sprites = decode_all_sprites(ppu);
-    // Iterate highest-OAM-index first so lower indices visually win
-    // (sprite 0 = front-most for the same screen pixel).
-    for sp in sprites.iter().rev() {
-        // Row within the sprite, mod 256 — a sprite near the bottom
-        // wraps to the top of the screen (ares object.cpp:51-55
-        // `within<0,255>`). Without the `& 0xFF` the wrapped rows are
-        // lost.
+    let eval = evaluate_sprite_line(ppu, &sprites, y);
+    // Draw survivors in fetch order: back-most first, front-most last,
+    // so the front sprite overwrites and wins the pixel.
+    for s in 0..eval.survivor_count {
+        let sp = &sprites[eval.survivors[s] as usize];
         let row_in_sprite = y.wrapping_sub(sp.y as u16) & 0xFF;
-        if usize::from(row_in_sprite) >= sp.h as usize {
-            continue;
-        }
         for col in 0..sp.w {
             let screen_x = sp.x + col as i16;
             if !(0..256).contains(&screen_x) {
@@ -1977,6 +2081,84 @@ mod tests {
             Some(129),
             "sprite wraps mod 256 to the top"
         );
+    }
+
+    #[test]
+    fn sprite_range_over_drops_33rd_sprite() {
+        // 33 sprites on line 0: the 32-limit keeps the first 32 (from
+        // firstSprite 0) and drops the 33rd; range-over ($213E.6) sets.
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F);
+        for i in 0..128u16 {
+            p.oam.poke(i * 4 + 1, 200); // hide all off line 0
+        }
+        for i in 0..33u16 {
+            p.oam.poke(i * 4, if i == 32 { 100 } else { 0 }); // #32 alone at x=100
+            p.oam.poke(i * 4 + 1, 0);
+            p.oam.poke(i * 4 + 2, 0);
+            p.oam.poke(i * 4 + 3, 0);
+        }
+        p.vram.poke(0x00, 0x80); // tile 0 pixel (0,0) = idx 1
+        let (range, time) = sprite_line_overflow(&p, 0);
+        assert!(range, "33 sprites → range over");
+        assert!(!time, "33 tiles ≤ 34 → no time over");
+        let scan = render_sprites_scanline_indexed_with(&p, 0, RenderOptions::default());
+        assert!(scan[0].is_some(), "the first 32 sprites render");
+        assert_eq!(scan[100], None, "33rd sprite dropped by the range limit");
+    }
+
+    #[test]
+    fn sprite_time_over_drops_front_sprite() {
+        // 5 × 64-wide sprites at x=0 → 40 tiles > 34. Fetch is back-to-
+        // front, so the front sprite (#0) overflows the budget and is
+        // dropped — sprite 1 becomes the front survivor. Time-over sets.
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::OBSEL, 0x40); // baseSize 2 → large = 64×64
+        for i in 0..128u16 {
+            p.oam.poke(i * 4 + 1, 200);
+        }
+        for i in 0..5u16 {
+            p.oam.poke(i * 4, 0);
+            p.oam.poke(i * 4 + 1, 0);
+            p.oam.poke(i * 4 + 2, 0);
+            p.oam.poke(i * 4 + 3, (i as u8) << 1); // palette = i
+        }
+        p.oam.poke(0x200, 0xAA); // size bits for sprites 0-3
+        p.oam.poke(0x201, 0x02); // size bit for sprite 4
+        p.vram.poke(0x00, 0x80);
+        let (range, time) = sprite_line_overflow(&p, 0);
+        assert!(!range, "5 sprites ≤ 32");
+        assert!(time, "40 tiles > 34 → time over");
+        let scan = render_sprites_scanline_indexed_with(&p, 0, RenderOptions::default());
+        assert_eq!(
+            scan[0],
+            Some((145, 0)),
+            "front sprite dropped, sprite 1 wins"
+        );
+    }
+
+    #[test]
+    fn oam_priority_rotation_changes_winner() {
+        // Two overlapping sprites at x=0. Normally sprite 0 (front)
+        // wins; with OAM priority rotation starting at sprite 1, sprite
+        // 1 becomes front-most ($2103 bit 7).
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F);
+        for i in 0..128u16 {
+            p.oam.poke(i * 4 + 1, 200);
+        }
+        p.oam.poke(3, 0x00); // sprite 0 palette 0 → cgram 129
+        p.oam.poke(7, 0x02); // sprite 1 palette 1 → cgram 145
+        p.oam.poke(1, 0); // sprite 0 y=0
+        p.oam.poke(5, 0); // sprite 1 y=0
+        p.vram.poke(0x00, 0x80);
+        let scan = render_sprites_scanline_indexed_with(&p, 0, RenderOptions::default());
+        assert_eq!(scan[0], Some((129, 0)), "default: sprite 0 wins");
+        p.write(register::OAMADDL, 0x04); // word addr 4 → firstSprite 1
+        p.write(register::OAMADDH, 0x80); // priority rotation
+        let scan = render_sprites_scanline_indexed_with(&p, 0, RenderOptions::default());
+        assert_eq!(scan[0], Some((145, 0)), "rotation → sprite 1 wins");
     }
 
     #[test]
