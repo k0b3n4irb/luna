@@ -22,7 +22,7 @@ findings are edge-case hardware *restrictions* and timing
 
 ---
 
-## 🟠 1. A-bus access restrictions (`validA`) not enforced
+## ✅ 1. A-bus access restrictions (`validA`) — DONE
 
 ares `dma.cpp:54-83`: the DMA A-bus **cannot** reach the B-bus or CPU
 I/O — reads there return open bus (`0x00`/MDR) and writes are dropped.
@@ -35,13 +35,13 @@ The blocked ranges (banks `00-3f`/`80-bf`) are:
 | `4200-421f` | CPU I/O (NMITIMEN…) |
 | `4300-437f` | DMA registers |
 
-luna's `DmaChannel::run` (`channel.rs:286-309`) and the HDMA paths read
-/ write the A-bus with no `validA` gate, so a DMA whose A-address lands
-in these ranges sees real register data instead of open bus (and a
-write hits the register instead of being dropped). Rare, but a
-documented restriction (and used by a few protection tricks).
+**Done**: `valid_a()` + `read_a_valid`/`write_a_valid` wrap every DMA
+and HDMA A-bus access (blocked read → 0, blocked write → dropped).
+Tests `dma_a_bus_read_blocked_in_io_region_returns_open_bus`,
+`dma_a_bus_write_blocked_in_b_bus_region_is_dropped`. (Surfaced a test
+that had put its HDMA table at the forbidden `$4000` — fixed to `$8000`.)
 
-## 🟠 2. WRAM→WRAM transfer not blocked
+## ✅ 2. WRAM→WRAM transfer — DONE (blocked)
 
 ares `dma.cpp:94`: a transfer to B-bus `$2180` (WMDATA) from a WRAM
 A-address is **invalid** — the byte is dropped:
@@ -51,8 +51,10 @@ bool valid = addressB != 0x80
   || ((addressA & 0xfe0000) != 0x7e0000 && (addressA & 0x40e000) != 0x0000);
 ```
 
-luna performs the write unconditionally, so a WRAM→WRAM DMA via `$2180`
-would corrupt WRAM where hardware no-ops it. Rare.
+**Done**: a transfer whose computed B-offset is `$80` and whose A-source
+is WRAM now suppresses the B-bus side (`is_wram_a()` in `run` + the HDMA
+loop). Test `dma_wram_to_wmdata_is_blocked` (and the inverse: non-WRAM →
+`$2180` is allowed).
 
 ---
 
@@ -88,8 +90,7 @@ would corrupt WRAM where hardware no-ops it. Rare.
 
 ## Suggested order
 
-1. **#1 validA** — the cleanest real restriction; one gate in the
-   A-bus read/write helpers.
-2. **#2 WRAM→WRAM block** — small, well-defined.
+1. ~~#1 validA~~ — **done**.
+2. ~~#2 WRAM→WRAM block~~ — **done**.
 3. 🟡 #3-#6 — timing approximations; low real-world return (the current
-   model is game-compatible).
+   model is game-compatible). Left as documented approximations.
