@@ -472,15 +472,11 @@ impl SpcBus for ApuBusView<'_> {
             // $F3 — DSP register-data port. Now routed through the
             // cycle-accurate ares-port S-DSP (`crates/luna-apu/dsp.rs`).
             0x00F3 => {
-                let idx = *self.dsp_index & 0x7F;
-                let v = self.dsp.read(idx);
-                if idx == 0x7C {
-                    // ENDX — read clears the register on real hardware.
-                    // Music drivers spam-read this; each `1` bit means
-                    // "voice N has reached end of its sample."
-                    self.dsp.registers[0x7C] = 0;
-                }
-                v
+                // DSP reads have NO side effects (ares dsp/memory.cpp:1-3).
+                // ENDX ($7C) is cleared only by a write to $7C or by KON —
+                // never on read. Clearing it here drops end-of-sample bits
+                // a driver may read more than once.
+                self.dsp.read(*self.dsp_index & 0x7F)
             }
             // $F4-$F7 — mailbox FROM the main CPU.
             0x00F4..=0x00F7 => self.to_spc_ports[(addr - 0x00F4) as usize],
@@ -623,6 +619,37 @@ mod tests {
         // Index bit 7 is masked when indexing the register array.
         bus.write(0x00F2, 0x88); // bit 7 set + same index 8
         assert_eq!(bus.read(0x00F3), 0x42, "bit 7 of index should be masked");
+    }
+
+    #[test]
+    fn endx_is_not_cleared_on_f3_read() {
+        // ares dsp/memory.cpp:1-3 — DSP reads have no side effects. ENDX
+        // ($7C) must persist across repeated reads (it's cleared only by
+        // a write to $7C or by KON).
+        let mut apu = Apu::new();
+        apu.dsp.registers[0x7C] = 0b0000_0101; // voices 0 and 2 ended
+        let mut bus = ApuBusView {
+            aram: &mut apu.aram,
+            to_spc_ports: &apu.to_spc_ports,
+            to_cpu_ports: &mut apu.to_cpu_ports,
+            control: &mut apu.control,
+            dsp_index: &mut apu.dsp_index,
+            dsp: &mut apu.dsp,
+            timer_reload: &mut apu.timer_reload,
+            timer_output: &mut apu.timer_output,
+            timer_internal: &mut apu.timer_internal,
+            timer_enabled: &mut apu.timer_enabled,
+        };
+        bus.write(0x00F2, 0x7C); // point the index at ENDX
+        assert_eq!(bus.read(0x00F3), 0b0000_0101);
+        assert_eq!(
+            bus.read(0x00F3),
+            0b0000_0101,
+            "ENDX must survive repeated reads"
+        );
+        // A write to $7C clears it (the real reset path).
+        bus.write(0x00F3, 0xFF);
+        assert_eq!(bus.read(0x00F3), 0, "write to $7C clears ENDX");
     }
 
     #[test]
