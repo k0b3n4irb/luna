@@ -1579,7 +1579,21 @@ pub fn render_sprites_scanline_indexed_with(
                 sc = (sp.w - 1) as usize - sc;
             }
             if sp.v_flip {
-                sr = (sp.h - 1) as usize - sr;
+                // Vertical flip. For square sprites this is the plain
+                // `h-1-row`. For the rectangular (taller-than-wide)
+                // sizes it's the *buggy* hardware flip: the top and
+                // bottom width-sized halves mirror separately and don't
+                // swap (ares object.cpp:111-119, Mesen2
+                // SnesPpu.cpp:716-732 — `pos = 3*w-1-row`).
+                let w = sp.w as usize;
+                let h = sp.h as usize;
+                sr = if w == h {
+                    h - 1 - sr
+                } else if sr < w {
+                    w - 1 - sr
+                } else {
+                    3 * w - 1 - sr
+                };
             }
             let tile_x = (sc / 8) as u16;
             let tile_y = (sr / 8) as u16;
@@ -2135,6 +2149,34 @@ mod tests {
             scan[0],
             Some((145, 0)),
             "front sprite dropped, sprite 1 wins"
+        );
+    }
+
+    #[test]
+    fn sprite_nonsquare_vflip_mirrors_halves_separately() {
+        // 16×32 sprite with vflip. The buggy hardware flip mirrors the
+        // top and bottom 16-row halves *separately*: screen row 0 reads
+        // source row 15 (top half), NOT row 31 (a full flip). Seed
+        // source row 15 = idx 1 and row 31 = idx 2 to tell them apart.
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::OBSEL, 0xC0); // baseSize 6 → small = 16×32
+        for i in 0..128u16 {
+            p.oam.poke(i * 4 + 1, 200);
+        }
+        p.oam.poke(0, 0); // x
+        p.oam.poke(1, 0); // y
+        p.oam.poke(2, 0); // char 0
+        p.oam.poke(3, 0x80); // vflip
+        // Source row 15 = tile 0x10 (row 1), pix row 7, plane 0 → idx 1.
+        p.vram.poke(0x20E, 0x80);
+        // Source row 31 = tile 0x30 (row 3), pix row 7, plane 1 → idx 2.
+        p.vram.poke(0x60F, 0x80);
+        let scan = render_sprites_scanline_indexed_with(&p, 0, RenderOptions::default());
+        assert_eq!(
+            scan[0],
+            Some((129, 0)),
+            "rectangular vflip mirrors within the top half (row 15, not 31)"
         );
     }
 
