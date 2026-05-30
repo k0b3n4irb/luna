@@ -102,6 +102,13 @@ impl Mapper for Sa1Chip {
             if was_reset && !now_reset {
                 self.load_reset_vector();
                 self.running = true;
+                // NOTE: ares io.cpp:113 also clears CIWP=0 here. luna does
+                // NOT — it deliberately deviates on the I-RAM write-
+                // protection model (CIWP/SIWP default 0xFF; see
+                // docs/sa1_status.md). Clearing CIWP here breaks SA-1 code
+                // that doesn't pre-arm it (and is the fragile, GUI-blackout-
+                // prone area flagged in that doc). Deferred until the
+                // protection model is revisited holistically. (#4)
             } else if !was_reset && now_reset {
                 self.running = false;
             }
