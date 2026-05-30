@@ -938,19 +938,20 @@ fn cgram_to_bgr5(ppu: &Ppu, cgram_index: u8) -> (u8, u8, u8) {
 }
 
 /// Direct-color-mode decode (CGWSEL bit 0). When set, 8bpp BG /
-/// Mode-7 pixels skip the CGRAM lookup — the palette index byte
-/// is treated as a packed `BBGGGRRR`-ish triplet directly, giving
-/// 256 distinct RGB values without burning CGRAM entries.
+/// Mode-7 pixels skip the CGRAM lookup — the pixel byte
+/// (`BBGGGRRR`) plus the tilemap palette group (`bgr`) form the colour
+/// directly, giving more than 256 distinct RGB values without burning
+/// CGRAM entries.
 ///
-/// Per fullsnes the layout is:
-///   * bits 0-2 = red intensity (3 bits → 5-bit space scaled ×4)
-///   * bits 3-5 = green intensity (3 bits)
-///   * bits 6-7 = blue intensity (2 bits → 5-bit space scaled ×8)
-const fn direct_color_to_bgr5(palette_index: u8) -> (u8, u8, u8) {
-    let r3 = palette_index & 0x07;
-    let g3 = (palette_index >> 3) & 0x07;
-    let b2 = (palette_index >> 6) & 0x03;
-    (r3 << 2, g3 << 2, b2 << 3)
+/// Per ares `dac.cpp:163-170` the output is `0BBb00GG Gg0RRRr0`: the
+/// pixel supplies the high bits of each channel and the 3-bit palette
+/// group supplies one extra low bit each (R←g0, G←g1, B←g2). With
+/// group 0 this reduces to the plain `BBGGGRRR` decode.
+const fn direct_color_to_bgr5(palette_index: u8, group: u8) -> (u8, u8, u8) {
+    let r = ((palette_index & 0x07) << 2) | ((group & 0x01) << 1);
+    let g = (((palette_index >> 3) & 0x07) << 2) | (((group >> 1) & 0x01) << 1);
+    let b = (((palette_index >> 6) & 0x03) << 3) | (((group >> 2) & 0x01) << 2);
+    (r, g, b)
 }
 
 /// SNES colour-math arithmetic — add or subtract a 5-bit sub-screen
@@ -993,17 +994,23 @@ fn pick_pixel_winner(
         if !is_enabled(layer_idx) {
             continue;
         }
-        let candidate = match slot.kind {
-            LayerKind::Bg => bgs[slot.idx as usize][x]
-                .and_then(|(cg, prio)| (prio == slot.bg_prio).then_some(cg)),
-            LayerKind::Obj => sprites[x].and_then(|(cg, prio)| (prio == slot.idx).then_some(cg)),
+        // BG pixels pack the 3-bit tilemap palette group into prio bits
+        // 1-3 (bit 0 = the tile priority bit) so direct colour can read
+        // it; sprites carry their 0-3 priority unpacked with no group.
+        let candidate: Option<(u8, u8)> = match slot.kind {
+            LayerKind::Bg => bgs[slot.idx as usize][x].and_then(|(cg, prio)| {
+                ((prio & 1) == slot.bg_prio).then_some((cg, (prio >> 1) & 0x07))
+            }),
+            LayerKind::Obj => {
+                sprites[x].and_then(|(cg, prio)| (prio == slot.idx).then_some((cg, 0)))
+            }
         };
-        if let Some(cgram_idx) = candidate {
+        if let Some((cgram_idx, palette_group)) = candidate {
             let direct = ppu.cgwsel & 0x01 != 0
                 && matches!(slot.kind, LayerKind::Bg)
                 && bg_bpp(ppu.bgmode, slot.idx as usize) == 8;
             let bgr5 = if direct {
-                direct_color_to_bgr5(cgram_idx)
+                direct_color_to_bgr5(cgram_idx, palette_group)
             } else {
                 cgram_to_bgr5(ppu, cgram_idx)
             };
@@ -1327,7 +1334,10 @@ fn sample_bg_pixel(ppu: &Ppu, g: &BgGeom, src_x: u16, src_y: u16) -> IndexedPixe
         4 => palette_off.wrapping_mul(16).wrapping_add(idx),
         _ => idx,
     };
-    Some((cgram_idx, prio_bit))
+    // Pack the 3-bit palette group into prio bits 1-3 (bit 0 = tile
+    // priority) so 8bpp direct colour can recover it; for 2/4bpp the
+    // group is already folded into cgram_idx and these bits are ignored.
+    Some((cgram_idx, prio_bit | (palette_off << 1)))
 }
 
 /// Read one raw 16-bit tilemap word from BG3, used as offset-per-tile
@@ -2838,9 +2848,25 @@ mod tests {
         let _ = scan;
         // Sanity: direct_color_to_bgr5 on its own returns the
         // expected BBGGGRRR decomposition.
-        assert_eq!(direct_color_to_bgr5(0xC0), (0, 0, 24)); // pure blue (5-bit b=24)
-        assert_eq!(direct_color_to_bgr5(0x07), (28, 0, 0)); // pure red (5-bit r=28)
-        assert_eq!(direct_color_to_bgr5(0x38), (0, 28, 0)); // pure green (5-bit g=28)
+        assert_eq!(direct_color_to_bgr5(0xC0, 0), (0, 0, 24)); // pure blue (5-bit b=24)
+        assert_eq!(direct_color_to_bgr5(0x07, 0), (28, 0, 0)); // pure red (5-bit r=28)
+        assert_eq!(direct_color_to_bgr5(0x38, 0), (0, 28, 0)); // pure green (5-bit g=28)
+    }
+
+    #[test]
+    fn direct_color_uses_palette_group_low_bits() {
+        // ares dac.cpp:163-170 — the 3-bit tilemap palette group adds
+        // one extra low bit per channel (R←g0, G←g1, B←g2). With group
+        // 0 the result matches the plain decode; with group 7 each
+        // channel gains its extra bit.
+        assert_eq!(
+            direct_color_to_bgr5(0x00, 0b111),
+            (0b00010, 0b00010, 0b00100)
+        );
+        // Group bit only lands in its own channel: group=1 → red +bit1.
+        assert_eq!(direct_color_to_bgr5(0x00, 0b001), (0b00010, 0, 0));
+        // Pixel + group combine: pixel red 0x07 (=28) | group r → 30.
+        assert_eq!(direct_color_to_bgr5(0x07, 0b001), (30, 0, 0));
     }
 
     // -------------------------------------------------------------------
