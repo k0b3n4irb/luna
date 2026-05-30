@@ -547,6 +547,13 @@ pub fn render_scanline_partial_into(
     // 256-wide sample sets and downsample by averaging the pair (the
     // chosen "Option A" — keeps the framebuffer 256 wide).
     let is_hires = matches!(ppu.bgmode & 0x07, 5 | 6);
+    // Pseudo-hires ($2133 bit 3) interleaves the sub and main screens
+    // per dot in *non*-5/6 modes — the transparency trick (Kirby
+    // waterfalls, etc.). BG content stays lores (256); only the
+    // main/sub blend kicks in (ares dac.cpp:34). It reuses the exact
+    // same averaging output as true hi-res.
+    let is_pseudo_hires = ppu.setini & 0x08 != 0;
+    let blend_hires = is_hires || is_pseudo_hires;
 
     // Indexed scanlines for the 4 BG layers (transparent = `None`).
     // `bgs_above` feeds the main-screen winner, `bgs_below` the sub-
@@ -666,12 +673,12 @@ pub fn render_scanline_partial_into(
         };
         let main_bgr5 = if force_black { (0, 0, 0) } else { rgb5 };
 
-        // Hi-res (Mode 5/6): the dot's left subpixel is the sub-screen
-        // winner (`sub`), the right is the main-screen result. Option A
-        // collapses the 512-wide line to 256 by averaging the pair —
-        // matching a CRT's horizontal blend (ares dac.cpp:39-40 emits
-        // below then above). Outside hi-res the main result stands alone.
-        let final_bgr5 = if is_hires {
+        // Hi-res / pseudo-hires: the dot's left subpixel is the sub-
+        // screen winner (`sub`), the right is the main-screen result.
+        // Option A collapses the 512-wide line to 256 by averaging the
+        // pair — matching a CRT's horizontal blend (ares dac.cpp:39-40
+        // emits below then above). Otherwise the main result stands alone.
+        let final_bgr5 = if blend_hires {
             average_bgr5(sub.bgr5, main_bgr5)
         } else {
             main_bgr5
@@ -2564,6 +2571,44 @@ mod tests {
             above[0],
             Some((2, 0)),
             "main subpixel = hires col 1 = idx 2"
+        );
+    }
+
+    #[test]
+    fn pseudo_hires_blends_main_with_sub() {
+        // Mode 1 (lores) + pseudo-hires ($2133 bit 3). Main screen
+        // shows BG1 = white; the sub screen is empty → backdrop = black.
+        // The dot must come out as the average (mid-grey), not pure
+        // white. Without the bit it stays white.
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::BGMODE, 0x01); // Mode 1, BG1 4bpp
+        p.write(0x07, 0x00); // BG1SC: tilemap word base 0
+        p.write(0x0B, 0x01); // BG12NBA: BG1 char base byte $2000
+        p.write(register::TM, 0x01); // main = BG1 only
+        p.write(register::TS, 0x00); // sub = nothing → backdrop
+        // BG1 tile 0, row 0, pixel 0 = colour index 1 (plane 0 bit 7).
+        p.vram.poke(0x2000, 0x80);
+        // CGRAM: backdrop (0) = black, colour 1 = white.
+        p.cgram.poke(0, 0x00);
+        p.cgram.poke(1, 0x00);
+        p.cgram.poke(2, 0xFF);
+        p.cgram.poke(3, 0x7F); // idx 1 = 0x7FFF white
+
+        let mut line = [[0u8; 3]; FRAME_W];
+
+        // Pseudo-hires OFF → pure white.
+        p.write(register::SETINI, 0x00);
+        render_scanline_into(&p, 0, RenderOptions::default(), &mut line);
+        assert_eq!(line[0], [255, 255, 255], "no pseudo-hires → main only");
+
+        // Pseudo-hires ON → average(black, white) = 5-bit 15 → 123.
+        p.write(register::SETINI, 0x08);
+        render_scanline_into(&p, 0, RenderOptions::default(), &mut line);
+        assert_eq!(
+            line[0],
+            [123, 123, 123],
+            "pseudo-hires → blend of sub (backdrop) and main"
         );
     }
 
