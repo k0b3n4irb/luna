@@ -542,24 +542,41 @@ pub fn render_scanline_partial_into(
     // Mode 7 uses a dedicated affine renderer for BG1 instead of the
     // planar tilemap path. BG2-4 are unused in Mode 7.
     let is_mode7 = ppu.bgmode & 0x07 == 0x07;
+    // Modes 5/6 are hi-res: each dot has two BG subpixels (left = sub
+    // screen, right = main screen). We render 512-wide content as two
+    // 256-wide sample sets and downsample by averaging the pair (the
+    // chosen "Option A" — keeps the framebuffer 256 wide).
+    let is_hires = matches!(ppu.bgmode & 0x07, 5 | 6);
 
-    // Indexed scanlines for the 4 BG layers (transparent = `None`) plus
-    // sprites carrying their 0-3 priority. Same per-layer pixel data
-    // drives both screens — only TM/TS + TMW/TSW gating differs.
-    let bgs: [IndexedScanline; 4] = if is_mode7 {
-        [
+    // Indexed scanlines for the 4 BG layers (transparent = `None`).
+    // `bgs_above` feeds the main-screen winner, `bgs_below` the sub-
+    // screen winner. Outside hi-res the two are identical — only TM/TS
+    // + TMW/TSW gating differs.
+    let (bgs_above, bgs_below): ([IndexedScanline; 4], [IndexedScanline; 4]) = if is_mode7 {
+        let m7 = [
             render_mode7_scanline_indexed(ppu, y, opts),
             [None; 256],
             [None; 256],
             [None; 256],
-        ]
+        ];
+        (m7, m7)
+    } else if is_hires {
+        let mut above = [[None; 256]; 4];
+        let mut below = [[None; 256]; 4];
+        for i in 0..4 {
+            let (a, b) = render_bg_scanline_indexed_hires(ppu, i, y, opts);
+            above[i] = a;
+            below[i] = b;
+        }
+        (above, below)
     } else {
-        [
+        let s = [
             render_bg_scanline_indexed_with(ppu, 0, y, opts),
             render_bg_scanline_indexed_with(ppu, 1, y, opts),
             render_bg_scanline_indexed_with(ppu, 2, y, opts),
             render_bg_scanline_indexed_with(ppu, 3, y, opts),
-        ]
+        ];
+        (s, s)
     };
     let sprites = render_sprites_scanline_indexed_with(ppu, y, opts);
 
@@ -583,10 +600,10 @@ pub fn render_scanline_partial_into(
             true
         };
 
-        let main = pick_pixel_winner(ppu, table, &bgs, &sprites, x, backdrop_bgr5, |li| {
+        let main = pick_pixel_winner(ppu, table, &bgs_above, &sprites, x, backdrop_bgr5, |li| {
             screen_layer_enabled(li, ppu.tm, ppu.tmw)
         });
-        let sub = pick_pixel_winner(ppu, table, &bgs, &sprites, x, backdrop_bgr5, |li| {
+        let sub = pick_pixel_winner(ppu, table, &bgs_below, &sprites, x, backdrop_bgr5, |li| {
             screen_layer_enabled(li, ppu.ts, ppu.tsw)
         });
 
@@ -647,7 +664,18 @@ pub fn render_scanline_partial_into(
             2 => in_math_window,
             _ => true,
         };
-        let final_bgr5 = if force_black { (0, 0, 0) } else { rgb5 };
+        let main_bgr5 = if force_black { (0, 0, 0) } else { rgb5 };
+
+        // Hi-res (Mode 5/6): the dot's left subpixel is the sub-screen
+        // winner (`sub`), the right is the main-screen result. Option A
+        // collapses the 512-wide line to 256 by averaging the pair —
+        // matching a CRT's horizontal blend (ares dac.cpp:39-40 emits
+        // below then above). Outside hi-res the main result stands alone.
+        let final_bgr5 = if is_hires {
+            average_bgr5(sub.bgr5, main_bgr5)
+        } else {
+            main_bgr5
+        };
 
         let rgb888 = [
             scale_5_to_8(final_bgr5.0),
@@ -972,6 +1000,12 @@ fn pick_pixel_winner(
 /// can override `half` (the math.transparent empty-sub fallback wants
 /// to disable halve even though CGADSUB bit 6 is set — see ares
 /// dac.cpp:124-130 / Mesen2 SnesPpu.cpp:1354-1364).
+/// Average two 5-bit BGR triples — the hi-res 512→256 horizontal
+/// downsample (left/sub + right/main subpixels collapsed into one dot).
+const fn average_bgr5(a: (u8, u8, u8), b: (u8, u8, u8)) -> (u8, u8, u8) {
+    ((a.0 + b.0) >> 1, (a.1 + b.1) >> 1, (a.2 + b.2) >> 1)
+}
+
 fn color_math(main: (u8, u8, u8), sub: (u8, u8, u8), subtract: bool, half: bool) -> (u8, u8, u8) {
     let combine = |m: u8, s: u8| -> u8 {
         let m = i32::from(m);
@@ -1096,6 +1130,20 @@ const MODE2OR3_TABLE: &[LayerSlot] = &[
     bg(1, 0),
 ];
 
+// Modes 5/6 (hi-res, BG1 + BG2 only) — same layer order as Mode 1
+// minus BG3:
+//   OBJ3, BG1H, BG2H, OBJ2, BG1L, BG2L, OBJ1, OBJ0
+const MODE56_TABLE: &[LayerSlot] = &[
+    obj(3),
+    bg(0, 1),
+    bg(1, 1),
+    obj(2),
+    bg(0, 0),
+    bg(1, 0),
+    obj(1),
+    obj(0),
+];
+
 // Mode 7: just BG1 (affine) and OBJ. Standard hardware convention:
 //   OBJ3, OBJ2, OBJ1, BG1, OBJ0
 // — i.e. only sprite priority 0 falls below the Mode-7 plane.
@@ -1115,11 +1163,136 @@ const fn priority_table(bgmode: u8) -> &'static [LayerSlot] {
             }
         }
         2..=4 => MODE2OR3_TABLE,
+        5 | 6 => MODE56_TABLE,
         7 => MODE7_TABLE,
-        // Modes 5/6 not yet wired into the priority engine; fall
-        // back to the Mode-1 layout.
-        _ => MODE1_BG3LO_TABLE,
+        _ => MODE1_BG3LO_TABLE, // unreachable (bgmode & 7 ∈ 0..=7)
     }
+}
+
+/// Static per-BG geometry, resolved once per scanline and shared by
+/// the lores and hires samplers so they can't drift apart.
+struct BgGeom {
+    bpp: u8,
+    bytes_per_tile: usize,
+    tilemap_base: usize,
+    char_base: usize,
+    cols: u16,
+    rows: u16,
+    /// `BG*SC` screen-size bits (0..3).
+    tilemap_size: u8,
+    /// 8 or 16 — pixels per tile side (BGMODE size bit).
+    tile_pixels: u16,
+    /// `log2(tile_pixels)` — 3 or 4.
+    tile_shift: u16,
+    big_tiles: bool,
+    /// Mode-0 per-BG palette region offset (`id << 5`), else 0.
+    mode0_palette_base: u8,
+}
+
+/// Resolve a BG layer's geometry, or `None` if the layer is disabled
+/// in the current mode (bpp 0).
+const fn bg_geom(ppu: &Ppu, bg_idx: usize) -> Option<BgGeom> {
+    let bpp = bg_bpp(ppu.bgmode, bg_idx);
+    if bpp == 0 {
+        return None;
+    }
+    let bytes_per_tile = match bpp {
+        2 => 16,
+        4 => 32,
+        8 => 64,
+        _ => 16,
+    };
+    let bg = bg_state(ppu, bg_idx);
+    let (cols, rows) = match bg.tilemap_size & 0x03 {
+        1 => (64u16, 32u16),
+        2 => (32u16, 64u16),
+        3 => (64u16, 64u16),
+        _ => (32u16, 32u16),
+    };
+    let big_tiles = ppu.bgmode & (0x10 << bg_idx) != 0;
+    Some(BgGeom {
+        bpp,
+        bytes_per_tile,
+        tilemap_base: (bg.tilemap_addr_words as usize) << 1,
+        char_base: (bg.char_addr_words as usize) << 1,
+        cols,
+        rows,
+        tilemap_size: bg.tilemap_size & 0x03,
+        tile_pixels: if big_tiles { 16 } else { 8 },
+        tile_shift: if big_tiles { 4 } else { 3 },
+        big_tiles,
+        mode0_palette_base: if ppu.bgmode & 0x07 == 0 {
+            (bg_idx as u8) << 5
+        } else {
+            0
+        },
+    })
+}
+
+/// Sample one BG pixel at a source position (in BG pixels). Returns the
+/// CGRAM index + tilemap priority bit, or `None` if transparent. Shared
+/// by the lores (256) and hires (512) renderers — for hires the caller
+/// passes a doubled-scroll, 2×-density source coordinate; tiles stay
+/// 8 source-pixels wide so no other change is needed.
+///
+/// Mode 0 gives each BG its own 32-colour CGRAM region (BG1→0, BG2→32,
+/// BG3→64, BG4→96; ares `background.cpp:111`). Only Mode 0 has that
+/// offset and Mode 0 is 2bpp on every BG, so it only touches the 2bpp
+/// arm — max index 96 + 7*4 + 3 = 127.
+fn sample_bg_pixel(ppu: &Ppu, g: &BgGeom, src_x: u16, src_y: u16) -> IndexedPixel {
+    // Tile coordinates in TILE units (8 or 16 pixels per side).
+    let tile_col_full = (src_x >> g.tile_shift) & (g.cols - 1);
+    let tile_row_full = (src_y >> g.tile_shift) & (g.rows - 1);
+    let sub_x = (tile_col_full >> 5) as usize;
+    let sub_y = (tile_row_full >> 5) as usize;
+    let sub_index = match g.tilemap_size {
+        1 => sub_x,
+        2 => sub_y,
+        3 => sub_y * 2 + sub_x,
+        _ => 0,
+    };
+    let tile_col = tile_col_full & 0x1F;
+    let tile_row = tile_row_full & 0x1F;
+    let entry_off = g.tilemap_base + sub_index * 0x0800 + ((tile_row * 32 + tile_col) as usize) * 2;
+    let entry_lo = ppu.vram.peek(entry_off as u16);
+    let entry_hi = ppu.vram.peek(entry_off.wrapping_add(1) as u16);
+    let entry = u16::from(entry_lo) | (u16::from(entry_hi) << 8);
+    let tile_num = entry & 0x03FF;
+    let palette_off = ((entry >> 10) & 0x07) as u8;
+    let prio_bit = ((entry >> 13) & 0x01) as u8;
+    let h_flip = entry & 0x4000 != 0;
+    let v_flip = entry & 0x8000 != 0;
+    // Pixel position within the (possibly 16-wide) block.
+    let mask = g.tile_pixels - 1;
+    let mut col_in_block = (src_x & mask) as usize;
+    let mut row_in_block = (src_y & mask) as usize;
+    if h_flip {
+        col_in_block = (g.tile_pixels as usize - 1) - col_in_block;
+    }
+    if v_flip {
+        row_in_block = (g.tile_pixels as usize - 1) - row_in_block;
+    }
+    // For 16x16 the four quadrants share `tile_num` as the top-left,
+    // with the canonical sprite-plane offset of +1 right, +16 down.
+    let quadrant_offset: u16 = if g.big_tiles {
+        u16::from(col_in_block >= 8) + if row_in_block >= 8 { 16 } else { 0 }
+    } else {
+        0
+    };
+    let final_tile = tile_num.wrapping_add(quadrant_offset) & 0x03FF;
+    let row_in_tile = row_in_block & 7;
+    let col_in_tile = col_in_block & 7;
+    let tile_base = g.char_base + (final_tile as usize) * g.bytes_per_tile;
+    let idx = decode_tile_pixel(ppu, tile_base, row_in_tile, col_in_tile, g.bpp);
+    if idx == 0 {
+        return None;
+    }
+    let cgram_idx = match g.bpp {
+        2 => g.mode0_palette_base + palette_off * 4 + idx,
+        4 => palette_off.wrapping_mul(16).wrapping_add(idx),
+        _ => idx,
+    };
+    Some((cgram_idx, prio_bit))
 }
 
 /// Same as [`render_bg_scanline_with`] but returns CGRAM indices
@@ -1138,118 +1311,58 @@ pub fn render_bg_scanline_indexed_with(
     if ppu.inidisp & 0x80 != 0 && !opts.bypass_forced_blank {
         return out;
     }
-    let bpp = bg_bpp(ppu.bgmode, bg_idx);
-    if bpp == 0 {
+    let Some(g) = bg_geom(ppu, bg_idx) else {
         return out;
-    }
-    let bytes_per_tile = match bpp {
-        2 => 16,
-        4 => 32,
-        8 => 64,
-        _ => 16,
     };
     let bg = bg_state(ppu, bg_idx);
-    let tilemap_base = (bg.tilemap_addr_words as usize) << 1;
-    let char_base = (bg.char_addr_words as usize) << 1;
-    let (cols, rows) = match bg.tilemap_size & 0x03 {
-        0 => (32u16, 32u16),
-        1 => (64u16, 32u16),
-        2 => (32u16, 64u16),
-        3 => (64u16, 64u16),
-        _ => (32u16, 32u16),
-    };
     // MOSAIC ($2106): high nibble = block size N (0..15 means 1..16
-    // pixels per side), low nibble bit `bg_idx` enables mosaic for
-    // that BG. Within a block we replicate the top-left pixel —
-    // implemented by snapping both X and Y to the block boundary
-    // before sampling the tile.
+    // pixels per side), low nibble bit `bg_idx` enables mosaic for that
+    // BG. Within a block we replicate the top-left pixel — implemented
+    // by snapping both X and Y to the block boundary before sampling.
     let mosaic_size = if ppu.mosaic & (1 << bg_idx) != 0 {
         u16::from((ppu.mosaic >> 4) & 0x0F) + 1
     } else {
         1
     };
     let mosaic_y = (y / mosaic_size) * mosaic_size;
-    // BGMODE bits 4..7 select per-BG tile size: 0 = 8x8, 1 = 16x16.
-    // A 16x16 tile is laid out as a 2x2 quadrant of 8x8 tiles in
-    // the same sprite-style 16-tile-wide plane (top-left = base,
-    // top-right = base+1, bottom-left = base+16, bottom-right = +17).
-    let big_tiles = ppu.bgmode & (0x10 << bg_idx) != 0;
-    let tile_pixels: u16 = if big_tiles { 16 } else { 8 };
-    let tile_shift: u16 = if big_tiles { 4 } else { 3 };
     for x in 0..256u16 {
         let mosaic_x = (x / mosaic_size) * mosaic_size;
         let src_x = mosaic_x.wrapping_add(bg.h_scroll);
         let src_y = mosaic_y.wrapping_add(bg.v_scroll);
-        // Tile coordinates in TILE units (8 or 16 pixels per side).
-        let tile_col_full = (src_x >> tile_shift) & (cols - 1);
-        let tile_row_full = (src_y >> tile_shift) & (rows - 1);
-        let sub_x = (tile_col_full >> 5) as usize;
-        let sub_y = (tile_row_full >> 5) as usize;
-        let sub_index = match bg.tilemap_size & 0x03 {
-            0 => 0,
-            1 => sub_x,
-            2 => sub_y,
-            3 => sub_y * 2 + sub_x,
-            _ => 0,
-        };
-        let tile_col = tile_col_full & 0x1F;
-        let tile_row = tile_row_full & 0x1F;
-        let entry_off =
-            tilemap_base + sub_index * 0x0800 + ((tile_row * 32 + tile_col) as usize) * 2;
-        let entry_lo = ppu.vram.peek(entry_off as u16);
-        let entry_hi = ppu.vram.peek(entry_off.wrapping_add(1) as u16);
-        let entry = u16::from(entry_lo) | (u16::from(entry_hi) << 8);
-        let tile_num = entry & 0x03FF;
-        let palette_off = ((entry >> 10) & 0x07) as u8;
-        let prio_bit = ((entry >> 13) & 0x01) as u8;
-        let h_flip = entry & 0x4000 != 0;
-        let v_flip = entry & 0x8000 != 0;
-        // Pixel position within the (possibly 16-wide) block.
-        let mask = tile_pixels - 1;
-        let mut col_in_block = (src_x & mask) as usize;
-        let mut row_in_block = (src_y & mask) as usize;
-        if h_flip {
-            col_in_block = (tile_pixels as usize - 1) - col_in_block;
-        }
-        if v_flip {
-            row_in_block = (tile_pixels as usize - 1) - row_in_block;
-        }
-        // For 16x16 the four quadrants share `tile_num` as the
-        // top-left, with the canonical sprite-plane offset of
-        // +1 right, +16 down, +17 diagonal.
-        let quadrant_offset: u16 = if big_tiles {
-            let q = i32::from(col_in_block >= 8) + (if row_in_block >= 8 { 16 } else { 0 });
-            q as u16
-        } else {
-            0
-        };
-        let final_tile = (tile_num.wrapping_add(quadrant_offset)) & 0x03FF;
-        let row_in_tile = row_in_block & 7;
-        let col_in_tile = col_in_block & 7;
-        let tile_base = char_base + (final_tile as usize) * bytes_per_tile;
-        let idx = decode_tile_pixel(ppu, tile_base, row_in_tile, col_in_tile, bpp);
-        if idx == 0 {
-            // Transparent within this BG → leave `None`.
-            continue;
-        }
-        // Mode 0 gives each BG its own 32-colour CGRAM region
-        // (BG1→0, BG2→32, BG3→64, BG4→96). ares background.cpp:111
-        // (`paletteOffset = bgMode == 0 ? id << 5 : 0`). Only Mode 0
-        // has this offset, and Mode 0 is 2bpp on every BG, so it only
-        // affects the 2bpp arm. Max index = 96 + 7*4 + 3 = 127.
-        let mode0_palette_base = if ppu.bgmode & 0x07 == 0 {
-            (bg_idx as u8) << 5
-        } else {
-            0
-        };
-        let cgram_idx = match bpp {
-            2 => mode0_palette_base + palette_off * 4 + idx,
-            4 => palette_off.wrapping_mul(16).wrapping_add(idx),
-            _ => idx,
-        };
-        out[x as usize] = Some((cgram_idx, prio_bit));
+        out[x as usize] = sample_bg_pixel(ppu, &g, src_x, src_y);
     }
     out
+}
+
+/// Render a hi-res (Mode 5/6) BG layer, returning `(above, below)`
+/// 256-wide sample sets. `above[x]` is the main-screen subpixel sampled
+/// at hires column `2x+1`; `below[x]` is the sub-screen subpixel at
+/// `2x`. Horizontal scroll is doubled (ares `background.cpp:39`, Mesen2
+/// `SnesPpu.cpp:984`); tiles are 8 hires pixels wide. Mosaic is not
+/// applied here (rare in combination with hi-res).
+fn render_bg_scanline_indexed_hires(
+    ppu: &Ppu,
+    bg_idx: usize,
+    y: u16,
+    opts: RenderOptions,
+) -> (IndexedScanline, IndexedScanline) {
+    let mut above: IndexedScanline = [None; 256];
+    let mut below: IndexedScanline = [None; 256];
+    if ppu.inidisp & 0x80 != 0 && !opts.bypass_forced_blank {
+        return (above, below);
+    }
+    let Some(g) = bg_geom(ppu, bg_idx) else {
+        return (above, below);
+    };
+    let bg = bg_state(ppu, bg_idx);
+    let h2 = bg.h_scroll << 1;
+    let src_y = y.wrapping_add(bg.v_scroll);
+    for x in 0..256u16 {
+        let cx = (x << 1).wrapping_add(h2);
+        below[x as usize] = sample_bg_pixel(ppu, &g, cx, src_y);
+        above[x as usize] = sample_bg_pixel(ppu, &g, cx.wrapping_add(1), src_y);
+    }
+    (above, below)
 }
 
 /// Same as [`render_sprites_scanline`] but returns CGRAM indices
@@ -2424,6 +2537,34 @@ mod tests {
         let scan = render_bg_scanline_indexed_with(&p, 1, 0, RenderOptions::default());
         let (cgram_idx, _) = scan[0].expect("BG2 pixel 0 should be opaque");
         assert_eq!(cgram_idx, 33, "Mode 0 BG2 must offset into CGRAM by 32");
+    }
+
+    #[test]
+    fn hires_samples_two_distinct_subpixels_per_dot() {
+        // Mode 5 (hi-res). At hires scroll 0, dot 0's sub subpixel
+        // samples hires column 0 (= tile col 0) and its main subpixel
+        // samples column 1 (= tile col 1). Seed those two tile columns
+        // with different 4bpp indices and prove below[0] != above[0] —
+        // i.e. the renderer truly samples at 512, not 256.
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::BGMODE, 0x05); // Mode 5, BG1 4bpp
+        p.write(0x07, 0x00); // BG1SC: tilemap word base 0
+        p.write(0x0B, 0x01); // BG12NBA: BG1 char base word $1000 = byte $2000
+        // Tile 0, row 0: col 0 → index 1 (plane 0), col 1 → index 2 (plane 1).
+        p.vram.poke(0x2000, 0x80); // plane 0, col 0 bit
+        p.vram.poke(0x2001, 0x40); // plane 1, col 1 bit
+        // Tilemap entry 0 = tile 0, palette 0.
+        p.vram.poke(0x0000, 0x00);
+        p.vram.poke(0x0001, 0x00);
+
+        let (above, below) = render_bg_scanline_indexed_hires(&p, 0, 0, RenderOptions::default());
+        assert_eq!(below[0], Some((1, 0)), "sub subpixel = hires col 0 = idx 1");
+        assert_eq!(
+            above[0],
+            Some((2, 0)),
+            "main subpixel = hires col 1 = idx 2"
+        );
     }
 
     #[test]

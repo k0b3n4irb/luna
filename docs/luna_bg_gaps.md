@@ -48,15 +48,25 @@ this; Modes 2/4/6 render as plain BGs. Affects OPT parallax effects
 (Tales of Phantasia title, etc.). Mode 4 uses a single offset word
 whose bit 15 selects H-vs-V; Modes 2/6 use two words.
 
-## 🟠 3. Hi-res Modes 5/6 (512 px) — not implemented
+## ✅ 3. Hi-res Modes 5/6 (512 px) — DONE (Option A, downsample 512→256)
 
-ares `background.cpp:1` `hires()` doubles horizontal resolution and
-emits two sub-screen pixels per dot (`run(Screen::Above/Below)`).
-luna renders 256-wide planar and the priority table falls back to
-Mode 1 (`renderer.rs:1119-1121`). Mode 5/6 hi-res menus/text render
-wrong (Kirby's Dream Land 3, Jurassic Park, RPM Racing, SD3 menus).
-**Pseudo-hires** (`$2133` bit 3, sub/main interleave for transparency)
-is also absent.
+Implemented as a per-dot two-subpixel render (left = sub screen, right
+= main screen) averaged down into the 256-wide framebuffer — the CRT
+horizontal blend. Faithful to ares `dac.cpp:39-40` and Mesen2
+`SnesPpu.cpp:984,1010-1016`:
+
+- `render_bg_scanline_indexed_hires` samples 512 columns (scroll
+  doubled, 8-px hires tiles) → `(above[x]=col 2x+1, below[x]=col 2x)`.
+- Compositor: hires `main`←`bgs_above`, `sub`←`bgs_below`, then
+  `out[x] = average_bgr5(sub, main)`.
+- `MODE56_TABLE` (Mode-1 order minus BG3) wired into `priority_table`.
+- Shared `BgGeom` + `sample_bg_pixel` keep lores/hires in lockstep.
+- Gated on `is_hires` → modes 0-4/7 are byte-identical to before.
+- Tests: `hires_samples_two_distinct_subpixels_per_dot`; full suite
+  (96) green. Not GUI-validated — no Mode 5/6 test ROM available.
+
+Still pending (follow-ups, see 🟡 below): **pseudo-hires** (`$2133`
+bit 3), **mosaic in hi-res**, and exact color-math on the sub subpixel.
 
 ## 🟠 4. Mode 7 EXTBG (BG2 overlay) — not implemented
 
@@ -74,6 +84,9 @@ second priority layer rendered as BG2. luna renders BG1 only.
 | 7 | No per-mode character-address mask (VRAM wrap) | `background.cpp:104-106` | wraps only at 64 KB |
 | 8 | Brightness 0 ≠ black — uses `(b+1)/16`, hw is `b/15` | dac LUT | `tile.rs:78` (all layers) |
 | 9 | Legacy `render_bg1_scanline_with` is 32×32-only, diverged from runtime path | — | `renderer.rs:93` (trap for API consumers) |
+| 10 | Pseudo-hires (`$2133` bit 3) — sub/main interleave for transparency | `dac.cpp:34` | absent (hi-res path only triggers on modes 5/6) |
+| 11 | Mosaic not applied in the hi-res path | Mesen2 `SnesPpu.cpp:1026-1044` | `render_bg_scanline_indexed_hires` skips it |
+| 12 | Hi-res sub-subpixel uses raw winner, not its own color-math | `dac.cpp:43-80` | approximated |
 
 ---
 
@@ -92,6 +105,7 @@ second priority layer rendered as BG2. luna renders BG1 only.
 
 ## Suggested order
 
-1. **#1 Mode 0 palette** — done.
-2. **#3 hi-res 5/6** — breaks the most games visually.
-3. **#2 offset-per-tile**, then **#4 EXTBG**, then the 🟡 tail.
+1. **#1 Mode 0 palette** — done (`f4e3d9b`).
+2. **#3 hi-res 5/6** — done (Option A downsample).
+3. **#2 offset-per-tile**, then **#4 EXTBG**, then the 🟡 tail
+   (pseudo-hires #10 is a near-free extension of the hi-res path).
