@@ -249,9 +249,9 @@ pub struct Ppu {
     pub tsw: u8,
     /// BG1-4 derived state ($2107-$2114).
     pub bg: [BgState; 4],
-    /// `$211A` M7SEL: bit 7 = V-flip, bit 6 = H-flip, bits 1:0 =
-    /// screen-over mode (00 wrap, 01 wrap-tile0, 10 transparent,
-    /// 11 use-tile-0).
+    /// `$211A` M7SEL: bit 0 = H-flip, bit 1 = V-flip, bits 7:6 =
+    /// screen-over mode (00/01 wrap, 10 transparent, 11 use-tile-0).
+    /// (ares io.cpp:411-414 — NOT the bit 7/6/1:0 layout some docs imply.)
     pub m7sel: u8,
     /// Mode-7 matrix element A — signed 8.8, scales the horizontal
     /// component of the projected X axis.
@@ -268,6 +268,13 @@ pub struct Ppu {
     pub m7x: i16,
     /// Mode-7 centre Y.
     pub m7y: i16,
+    /// Mode-7 horizontal scroll `M7HOFS` (`$210D`), signed 13-bit,
+    /// sign-extended to i16. Distinct from `bg[0].h_scroll`: `$210D`
+    /// feeds *both* the 10-bit BG1 scroll and this 13-bit Mode-7
+    /// scroll, which uses the shared Mode-7 latch (ares io.cpp:308).
+    pub m7_hofs: i16,
+    /// Mode-7 vertical scroll `M7VOFS` (`$210E`), signed 13-bit.
+    pub m7_vofs: i16,
     /// `$2133` SETINI — bit 7: external sync, bit 6: EXTBG (Mode-7
     /// BG2 overlay), bit 5: hi-res 512×448, bit 4: overscan,
     /// bit 3: pseudo-512, bit 2: V-mosaic disable, bit 1: interlace.
@@ -399,6 +406,8 @@ impl Ppu {
             m7d: 0,
             m7x: 0,
             m7y: 0,
+            m7_hofs: 0,
+            m7_vofs: 0,
             mpy_result: 0,
             m7_latch: 0,
             setini: 0,
@@ -574,6 +583,21 @@ impl Ppu {
         composed
     }
 
+    /// `$210D` also writes the 13-bit Mode-7 H scroll `M7HOFS`, which
+    /// uses the *shared Mode-7 latch* — NOT the BG scroll latch
+    /// (ares io.cpp:308-310). The value is `data << 8 | latch`, masked
+    /// to 13 bits and sign-extended.
+    fn write_m7_hofs(&mut self, value: u8) {
+        let raw = self.write_m7_pair(value) & 0x1FFF;
+        self.m7_hofs = ((raw as i16) << 3) >> 3;
+    }
+
+    /// `$210E` Mode-7 V scroll `M7VOFS` — see [`Self::write_m7_hofs`].
+    fn write_m7_vofs(&mut self, value: u8) {
+        let raw = self.write_m7_pair(value) & 0x1FFF;
+        self.m7_vofs = ((raw as i16) << 3) >> 3;
+    }
+
     /// Latch the current PPU H/V counters into OPHCT/OPVCT. Called
     /// by the `SnesBus` on:
     ///   * a WRIO (\$4201) write whose bit 7 transitions from 0 to 1
@@ -625,8 +649,16 @@ impl Ppu {
                 self.bg[2].char_addr_words = u16::from(value & 0x0F) << 12;
                 self.bg[3].char_addr_words = u16::from((value >> 4) & 0x0F) << 12;
             }
-            register::BG1HOFS => self.write_bg_h_scroll(0, value),
-            register::BG1VOFS => self.write_bg_v_scroll(0, value),
+            register::BG1HOFS => {
+                // $210D feeds both the BG1 (10-bit) and Mode-7 (13-bit)
+                // scrolls, each with its own latch.
+                self.write_bg_h_scroll(0, value);
+                self.write_m7_hofs(value);
+            }
+            register::BG1VOFS => {
+                self.write_bg_v_scroll(0, value);
+                self.write_m7_vofs(value);
+            }
             register::BG2HOFS => self.write_bg_h_scroll(1, value),
             register::BG2VOFS => self.write_bg_v_scroll(1, value),
             register::BG3HOFS => self.write_bg_h_scroll(2, value),

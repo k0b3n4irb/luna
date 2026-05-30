@@ -738,28 +738,31 @@ fn compute_window_masks(ppu: &Ppu) -> WindowMasks {
 /// Render one Mode-7 scanline into an [`IndexedScanline`].
 ///
 /// Mode 7 has just one BG layer (BG1) which is the entire VRAM
-/// interpreted as a 128×128-tile field with 8×8 8bpp tiles. The
-/// affine transform per pixel is:
+/// interpreted as a 128×128-tile field with 8×8 8bpp tiles. This is a
+/// direct port of ares `mode7.cpp`. The per-scanline affine origin is:
 ///
 /// ```text
-///   sx = ScreenX + BG1HOFS - M7X
-///   sy = ScreenY + BG1VOFS - M7Y
-///   vram_x = M7A · sx + M7B · sy + (M7X << 8)
-///   vram_y = M7C · sx + M7D · sy + (M7Y << 8)
+///   origin_x = M7A·clip(M7HOFS - M7X) + M7B·clip(M7VOFS - M7Y)
+///              + M7B·y + (M7X << 8)
+///   origin_y = M7C·clip(M7HOFS - M7X) + M7D·clip(M7VOFS - M7Y)
+///              + M7D·y + (M7Y << 8)
+///   pixel_x  = (origin_x + M7A·x) >> 8
+///   pixel_y  = (origin_y + M7C·x) >> 8
 /// ```
 ///
-/// where matrix values are signed 8.8 fixed point and the result
-/// lives in 16.8 fixed point. The integer part (top 16 bits) is a
-/// VRAM byte address into the tilemap (low byte) and pixel data
-/// (high byte) of the interleaved 64 KB tilemap / tileset.
+/// where matrix values are signed 8.8 fixed point, `clip()` keeps the
+/// 10-bit magnitude + bit-13 sign of the scroll/centre difference, and
+/// each partial product drops its low 6 bits (`& !63`) to match the
+/// hardware multiplier. The integer part is a VRAM byte address into
+/// the tilemap (low byte) and pixel data (high byte) of the interleaved
+/// 64 KB tilemap / tileset.
 ///
-/// `M7SEL` bits 1:0 control the wrap / transparent behaviour when
-/// the sampled coordinate falls outside the 128×128 tilemap:
+/// `M7SEL` bits 1:0 control the wrap / transparent behaviour outside
+/// the 128×128 field:
 ///
-///   * `00` — coordinates wrap (mod 128)
-///   * `01` — wrap, but force tile 0 outside the tilemap
-///   * `10` — return transparent (the compositor falls through)
-///   * `11` — use tile 0 outside the tilemap
+///   * `00` / `01` — coordinates wrap (the 7-bit tile mask repeats)
+///   * `10` — return transparent (force palette 0)
+///   * `11` — use tile 0 outside the field
 ///
 /// Horizontal and vertical flips (`M7SEL` bits 6, 7) negate the
 /// screen-space coordinate before the matrix multiply.
@@ -769,74 +772,83 @@ pub fn render_mode7_scanline_indexed(ppu: &Ppu, y: u16, opts: RenderOptions) -> 
     if ppu.inidisp & 0x80 != 0 && !opts.bypass_forced_blank {
         return out;
     }
-    let h_scroll = bg_state(ppu, 0).h_scroll as i32 & 0x1FFF; // 13-bit
-    let v_scroll = bg_state(ppu, 0).v_scroll as i32 & 0x1FFF;
     let m7a = i32::from(ppu.m7a);
     let m7b = i32::from(ppu.m7b);
     let m7c = i32::from(ppu.m7c);
     let m7d = i32::from(ppu.m7d);
-    let cx = i32::from(ppu.m7x);
-    let cy = i32::from(ppu.m7y);
-    let v_flip = ppu.m7sel & 0x80 != 0;
-    let h_flip = ppu.m7sel & 0x40 != 0;
-    let screen_over = ppu.m7sel & 0x03;
+    // Centre and scroll are signed 13-bit (already sign-extended in i16).
+    let hcenter = i32::from(ppu.m7x);
+    let vcenter = i32::from(ppu.m7y);
+    let hoffset = i32::from(ppu.m7_hofs);
+    let voffset = i32::from(ppu.m7_vofs);
+    // M7SEL bit layout (ares io.cpp:411-414): bit 0 = H-flip,
+    // bit 1 = V-flip, bits 7:6 = screen-over. NOT bits 7/6/1:0.
+    let h_flip = ppu.m7sel & 0x01 != 0;
+    let v_flip = ppu.m7sel & 0x02 != 0;
+    let screen_over = (ppu.m7sel >> 6) & 0x03;
 
-    let screen_y_raw = if v_flip { 255 - y as i32 } else { y as i32 };
-    let sy_term = screen_y_raw + v_scroll - cy;
+    // 13-bit sign extend with a 10-bit magnitude (ares mode7.cpp:26-27):
+    // `--s---nnnnnnnnnn` -> `ssssssnnnnnnnnnn`. The Mode-7 multiplier
+    // only keeps a 10-bit magnitude plus the bit-13 sign of the
+    // scroll/centre difference.
+    let clip = |n: i32| -> i32 { if n & 0x2000 != 0 { n | !1023 } else { n & 1023 } };
 
-    // Pre-compute the y-only column of the affine product so the
-    // inner loop only needs the x-term.
-    let bx = m7b * sy_term;
-    let dy = m7d * sy_term;
+    // V-flip mirrors the screen-space scanline (ares mode7.cpp:24).
+    let yy = if v_flip {
+        255 - i32::from(y)
+    } else {
+        i32::from(y)
+    };
+
+    // Per-scanline affine origin. Each partial product drops its low 6
+    // bits (`& !63`) to match the hardware multiplier (ares
+    // mode7.cpp:28-29).
+    let origin_x = ((m7a * clip(hoffset - hcenter)) & !63)
+        + ((m7b * clip(voffset - vcenter)) & !63)
+        + ((m7b * yy) & !63)
+        + (hcenter << 8);
+    let origin_y = ((m7c * clip(hoffset - hcenter)) & !63)
+        + ((m7d * clip(voffset - vcenter)) & !63)
+        + ((m7d * yy) & !63)
+        + (vcenter << 8);
 
     for x in 0..256i32 {
-        let screen_x_raw = if h_flip { 255 - x } else { x };
-        let sx_term = screen_x_raw + h_scroll - cx;
-        // 16.8 fixed-point coordinates into the conceptual texture.
-        let vx = m7a * sx_term + bx + (cx << 8);
-        let vy = m7c * sx_term + dy + (cy << 8);
+        // H-flip mirrors the screen-space dot (ares mode7.cpp:23).
+        let xx = if h_flip { 255 - x } else { x };
 
-        // Drop the fractional 8 bits → pixel grid coordinates.
-        let pix_x = vx >> 8;
-        let pix_y = vy >> 8;
+        // 16.8 fixed point -> integer pixel grid (ares mode7.cpp:31-32).
+        let pix_x = (origin_x + m7a * xx) >> 8;
+        let pix_y = (origin_y + m7c * xx) >> 8;
 
-        // Out-of-bounds handling per M7SEL[1:0].
-        let outside = !(0..1024).contains(&pix_x) || !(0..1024).contains(&pix_y);
-        let (sample_x, sample_y, force_tile_zero) = if outside {
-            match screen_over {
-                0b00 => (pix_x & 0x3FF, pix_y & 0x3FF, false),
-                0b01 => (pix_x & 0x3FF, pix_y & 0x3FF, true),
-                0b10 => {
-                    continue; // transparent
-                }
-                _ => (pix_x & 0x3FF, pix_y & 0x3FF, true),
-            }
-        } else {
-            (pix_x, pix_y, false)
-        };
+        // OOB if either coordinate leaves the 1024×1024 field (ares
+        // mode7.cpp:39) — the sign bits of a negative value also trip
+        // the `& !1023` test.
+        let out_of_bounds = ((pix_x | pix_y) & !1023) != 0;
 
-        let tile_x = (sample_x >> 3) & 0x7F;
-        let tile_y = (sample_y >> 3) & 0x7F;
-        let in_tile_x = (sample_x & 7) as usize;
-        let in_tile_y = (sample_y & 7) as usize;
+        // Tile coordinates wrap into the 128×128 tilemap via the 7-bit
+        // mask; in-tile coordinates take the low 3 bits (ares
+        // mode7.cpp:33-37).
+        let tile_x = ((pix_x >> 3) & 0x7F) as u16;
+        let tile_y = ((pix_y >> 3) & 0x7F) as u16;
+        let palette_address = (((pix_y & 7) << 3) | (pix_x & 7)) as u16;
 
-        // VRAM layout: byte address 2n + 0 = tilemap entry n,
-        // 2n + 1 = tile data. Tilemap is 128×128 entries; each
-        // entry is 1 byte.
-        let tilemap_entry_addr = ((tile_y * 128 + tile_x) as u16) * 2;
-        let tile_id = if force_tile_zero {
+        // VRAM layout: byte 2n+0 = tilemap entry n, byte 2n+1 = char
+        // data. Screen-over 3 forces tile 0 outside the field; screen-
+        // over 2 forces a transparent pixel (ares mode7.cpp:41-42).
+        let tilemap_entry_addr = (tile_y << 7 | tile_x) * 2;
+        let tile_id = if screen_over == 3 && out_of_bounds {
             0
         } else {
             ppu.vram.peek(tilemap_entry_addr)
         };
-        // Tileset starts at byte 1 of word 0 (i.e. odd byte 1).
-        // Each tile is 64 bytes (8×8 × 8bpp), stride 64 in tile-
-        // data byte space → stride 128 in interleaved VRAM bytes.
-        let tile_byte_off = (tile_id as u16).wrapping_mul(128); // 64 tile bytes × 2 (interleave)
-        let pixel_byte_addr = tile_byte_off
-            .wrapping_add(((in_tile_y * 8 + in_tile_x) as u16) * 2)
-            .wrapping_add(1);
-        let palette_idx = ppu.vram.peek(pixel_byte_addr);
+        let pixel_byte_addr = (u16::from(tile_id) << 7) // tile * 64 words = * 128 bytes
+            .wrapping_add(palette_address * 2)
+            .wrapping_add(1); // odd byte = char data
+        let palette_idx = if screen_over == 2 && out_of_bounds {
+            0
+        } else {
+            ppu.vram.peek(pixel_byte_addr)
+        };
         if palette_idx == 0 {
             continue; // transparent
         }
