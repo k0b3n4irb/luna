@@ -1232,8 +1232,18 @@ pub fn render_bg_scanline_indexed_with(
             // Transparent within this BG → leave `None`.
             continue;
         }
+        // Mode 0 gives each BG its own 32-colour CGRAM region
+        // (BG1→0, BG2→32, BG3→64, BG4→96). ares background.cpp:111
+        // (`paletteOffset = bgMode == 0 ? id << 5 : 0`). Only Mode 0
+        // has this offset, and Mode 0 is 2bpp on every BG, so it only
+        // affects the 2bpp arm. Max index = 96 + 7*4 + 3 = 127.
+        let mode0_palette_base = if ppu.bgmode & 0x07 == 0 {
+            (bg_idx as u8) << 5
+        } else {
+            0
+        };
         let cgram_idx = match bpp {
-            2 => palette_off * 4 + idx,
+            2 => mode0_palette_base + palette_off * 4 + idx,
             4 => palette_off.wrapping_mul(16).wrapping_add(idx),
             _ => idx,
         };
@@ -1412,8 +1422,15 @@ pub fn render_bg_scanline_with(ppu: &Ppu, bg_idx: usize, y: u16, opts: RenderOpt
         out[x as usize] = if idx == 0 {
             backdrop
         } else {
+            // Mode 0: per-BG palette region (id << 5). See the
+            // matching note in render_bg_scanline_indexed_with.
+            let mode0_palette_base = if ppu.bgmode & 0x07 == 0 {
+                (bg_idx as u8) << 5
+            } else {
+                0
+            };
             let cgram_idx = match bpp {
-                2 => palette_off * 4 + idx,
+                2 => mode0_palette_base + palette_off * 4 + idx,
                 4 => palette_off.wrapping_mul(16).wrapping_add(idx),
                 _ => idx,
             };
@@ -2381,6 +2398,32 @@ mod tests {
             scan_left[0], scan_left[8],
             "quadrant offset should pick a different tile"
         );
+    }
+
+    #[test]
+    fn mode0_bg2_uses_offset_palette_region() {
+        // ares background.cpp:111 — in Mode 0 each BG occupies its own
+        // 32-colour CGRAM region (BG1→0, BG2→32, BG3→64, BG4→96). A
+        // BG2 pixel of sub-palette 0, colour index 1 must resolve to
+        // CGRAM index 33 (= 32 + 1), not 1.
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::BGMODE, 0x00); // Mode 0 — all BGs 2bpp
+        // BG2SC: tilemap base (value & 0xFC) << 8 words = word $0400
+        // → byte $0800.
+        p.write(0x08, 0x04);
+        // BG12NBA high nibble = BG2 char base → word $1000 = byte $2000.
+        p.write(0x0B, 0x10);
+        // BG2 tile 0, row 0: pixel 0 = colour index 1 (lo bit7 set).
+        p.vram.poke(0x2000, 0x80);
+        p.vram.poke(0x2001, 0x00);
+        // Tilemap entry (byte $0800): tile 0, sub-palette 0, no flip.
+        p.vram.poke(0x0800, 0x00);
+        p.vram.poke(0x0801, 0x00);
+
+        let scan = render_bg_scanline_indexed_with(&p, 1, 0, RenderOptions::default());
+        let (cgram_idx, _) = scan[0].expect("BG2 pixel 0 should be opaque");
+        assert_eq!(cgram_idx, 33, "Mode 0 BG2 must offset into CGRAM by 32");
     }
 
     #[test]
