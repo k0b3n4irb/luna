@@ -40,13 +40,27 @@ BG half of CGRAM. **(Being fixed now.)**
 
 ---
 
-## 🟠 2. Offset-per-tile (Modes 2 / 4 / 6) — not implemented
+## ✅ 2. Offset-per-tile (Modes 2 / 4) — DONE (Mode 6 deferred)
 
-ares `background.cpp:52-69` + `fetchOffset()` reinterpret BG3's
-tilemap as per-column H/V offset words for BG1/BG2. luna has none of
-this; Modes 2/4/6 render as plain BGs. Affects OPT parallax effects
-(Tales of Phantasia title, etc.). Mode 4 uses a single offset word
-whose bit 15 selects H-vs-V; Modes 2/6 use two words.
+ares `background.cpp:52-69` + `fetchOffset()` reinterpret BG3's tilemap
+as per-column H/V offset words for BG1/BG2. Implemented in
+`opt_scroll` + `bg3_tilemap_word`:
+
+- Column D≥1 reads BG3 one tile to the left (the fetch-pipeline lag);
+  column 0 always uses the plain scroll.
+- H replaces scroll bits 3-9 keeping fine `&7`; V replaces fully.
+  Mode 4 = one word (bit 15 picks H/V); Modes 2/6 = two words. Enable
+  bit `0x2000` (BG1) / `0x4000` (BG2). Per-column, BG1/BG2 only.
+- The two refs diverge on the BG3 lookup for 64-wide tilemaps (Mesen2
+  linear vs ares quadrant); followed **ares** (matches `sample_bg_pixel`).
+- Gated on modes 2/4 — modes 0/1/3/5/7 byte-identical (98 tests).
+- Test `offset_per_tile_shifts_bg1_column`; **GUI-validated** on the
+  Chrono Trigger title (the "TRIGGER" logo now waves per-column instead
+  of rendering flat).
+
+**Mode 6 deferred**: it is hi-res *and* OPT, so OPT must move into the
+512-sampling path — rare (≈no commercial game uses Mode 6). Tracked
+in 🟡 below.
 
 ## ✅ 3. Hi-res Modes 5/6 (512 px) — DONE (Option A, downsample 512→256)
 
@@ -91,6 +105,7 @@ second priority layer rendered as BG2. luna renders BG1 only.
 | 9 | Legacy `render_bg1_scanline_with` is 32×32-only, diverged from runtime path | — | `renderer.rs:93` (trap for API consumers) |
 | 11 | Mosaic not applied in the hi-res path | Mesen2 `SnesPpu.cpp:1026-1044` | `render_bg_scanline_indexed_hires` skips it |
 | 12 | Hi-res sub-subpixel uses raw winner, not its own color-math | `dac.cpp:43-80` | approximated |
+| 13 | Offset-per-tile in Mode 6 (hi-res + OPT) | `background.cpp:52-69` | OPT only wired into the lores path (modes 2/4) |
 
 ---
 
@@ -111,4 +126,5 @@ second priority layer rendered as BG2. luna renders BG1 only.
 
 1. **#1 Mode 0 palette** — done (`f4e3d9b`).
 2. **#3 hi-res 5/6 + pseudo-hires** — done (Option A downsample).
-3. **#2 offset-per-tile**, then **#4 EXTBG**, then the 🟡 tail.
+3. **#2 offset-per-tile (modes 2/4)** — done, GUI-validated on CT title.
+4. **#4 Mode 7 EXTBG**, then the 🟡 tail (#13 Mode-6 OPT, mosaic, etc.).
