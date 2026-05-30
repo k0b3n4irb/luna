@@ -46,6 +46,13 @@ pub struct Cpu {
     /// services the IRQ at an instruction boundary, IF the `I` flag
     /// allows it. NMI always wins over IRQ.
     pub pending_irq: bool,
+    /// Per-instruction latch: when set, a 16-bit data access wraps its
+    /// high byte within bank 0 (ares `readDirect`/`readStack`, masked to
+    /// `n16`) instead of carrying into the next bank (ares `readBank`).
+    /// Set by the direct-page and stack-relative addressing helpers;
+    /// reset to `false` at the start of every instruction in
+    /// [`Cpu::execute`].
+    pub bank0_wrap: bool,
 }
 
 impl Default for Cpu {
@@ -74,6 +81,7 @@ impl Cpu {
             waiting: false,
             pending_nmi: false,
             pending_irq: false,
+            bank0_wrap: false,
         }
     }
 

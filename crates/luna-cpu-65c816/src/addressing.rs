@@ -32,6 +32,7 @@ pub fn absolute_long<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
 #[inline]
 pub fn direct_page<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
     let offset = u16::from(cpu.fetch_u8(bus));
+    cpu.bank0_wrap = true;
     make_addr(0, cpu.dp.wrapping_add(offset))
 }
 
@@ -41,6 +42,7 @@ pub fn direct_page<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
 #[inline]
 pub fn direct_page_indexed_x<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
     let base = u16::from(cpu.fetch_u8(bus));
+    cpu.bank0_wrap = true;
     let off = if cpu.e && (cpu.dp & 0xFF) == 0 {
         // Emulation: wrap within the 256-byte direct page.
         let dp_high = cpu.dp & 0xFF00;
@@ -56,6 +58,7 @@ pub fn direct_page_indexed_x<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
 #[inline]
 pub fn direct_page_indexed_y<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
     let base = u16::from(cpu.fetch_u8(bus));
+    cpu.bank0_wrap = true;
     let off = if cpu.e && (cpu.dp & 0xFF) == 0 {
         let dp_high = cpu.dp & 0xFF00;
         let wrapped = (base as u8).wrapping_add(cpu.y8());
@@ -138,18 +141,28 @@ pub fn direct_page_indexed_indirect<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr2
 /// Fetch one byte of a `(dp,X)` pointer. `address` is `dp_operand + X`;
 /// `offset` is 0 (low byte) or 1 (high byte).
 ///
-/// Emulation mode with **`D.l == 0`** confines each pointer byte to the
-/// direct page: `D | ((dp_operand + X + offset) & 0xFF)`. Every other case
-/// (E with `D.l != 0`, or native) is a plain 16-bit add within bank 0.
+/// Resolve one byte of a `(direct,X)` pointer.
 ///
-/// NB: this follows the **Tom Harte** suite, which is the empirical gate.
-/// ares (`readDirectX`) instead models a high-byte page-wrap when
-/// `D.l != 0`; the `SingleStepTests` do not reproduce that quirk, so the two
-/// references diverge here and we match the test data.
+/// In **emulation mode with `D.l == 0`** the index addition wraps within
+/// the 256-byte direct page to form the pointer *base* (`D.w | n8(dp+X)`);
+/// the two pointer bytes are then read **linearly** from `base` and
+/// `base+1` (bank-0 wrap). Every other case (E with `D.l != 0`, or native)
+/// is a plain 16-bit add within bank 0.
+///
+/// This diverges subtly from ares `readDirectX` (`memory.cpp:62-67`), which
+/// re-applies the page-wrap to the *high* byte (`D.w | n8(dp+X+1)`). The
+/// `SingleStepTests/65816` suite — hardware-derived, so the empirical gate —
+/// disagrees only when `n8(dp+X) == 0xFF`:
+/// - case `e1.e 125` (`D=0x7700`, `dp+X=0x197`) needs the base wrap: bytes
+///   at `0x7797`/`0x7798`;
+/// - case `e1.e 8669` (`D=0xF400`, `dp+X=0xFF`) needs the linear high byte:
+///   `0xF4FF`/`0xF500`, not the page-wrapped `0xF400`.
+///
+/// Wrapping the base once and adding `offset` linearly satisfies both.
 fn read_direct_x<B: Bus>(cpu: &Cpu, bus: &mut B, address: u32, offset: u32) -> u8 {
     let dp = u32::from(cpu.dp);
     let addr = if cpu.e && (cpu.dp & 0x00FF) == 0 {
-        dp | (address.wrapping_add(offset) & 0x00FF)
+        (dp | (address & 0x00FF)).wrapping_add(offset) & 0xFFFF
     } else {
         dp.wrapping_add(address).wrapping_add(offset) & 0xFFFF
     };
@@ -193,6 +206,7 @@ pub fn absolute_long_indexed_x<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
 #[inline]
 pub fn stack_relative<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
     let off = u16::from(cpu.fetch_u8(bus));
+    cpu.bank0_wrap = true;
     make_addr(0, cpu.sp.wrapping_add(off))
 }
 
@@ -221,16 +235,17 @@ pub fn read_byte<B: Bus>(bus: &mut B, addr: Addr24) -> u8 {
     bus.read(addr)
 }
 
-/// Read 16 bits little-endian, with the bus advancing PB/DB-correct
-/// offsets internally.
+/// Read 16 bits little-endian with the high byte carrying into the next
+/// bank (ares `readBank`: `addr + 1`). This is the bank/long-mode rule.
+///
+/// Direct-page and stack-relative accesses instead wrap the high byte
+/// within bank 0; the opcode handlers use [`crate::cpu::Cpu::read_word16`],
+/// which honors the per-instruction `bank0_wrap` latch. Kept here as the
+/// pure bank-carrying primitive for tests.
 #[inline]
 pub fn read_word<B: Bus>(bus: &mut B, addr: Addr24) -> u16 {
     let lo = bus.read(addr);
-    // High byte at addr+1; the upper byte of `addr` increments within
-    // the same bank only — the SNES 65C816 wraps within the bank for
-    // 16-bit reads on absolute, but does NOT bank-cross on direct-page
-    // accesses. For now we use plain +1 and revisit edge cases later.
-    let hi = bus.read(addr.wrapping_add(1));
+    let hi = bus.read(addr.wrapping_add(1) & 0x00FF_FFFF);
     u16::from(lo) | (u16::from(hi) << 8)
 }
 
