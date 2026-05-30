@@ -53,13 +53,22 @@ CPU→SMP ports 0/1 (what the SPC reads at `$F4/$F5`); bit 5 zeroes ports
 2/3. Implemented in the `$F1` handler (the bus view's `to_spc_ports`
 was made writable). Test `control_bits_4_5_clear_input_ports`.
 
-## 🟠 3. `$F0` TEST register not modelled
+## 🟢 3. `$F0` TEST register — timer gating DONE (wait-state bits → #6)
 
 ares `smp/io.cpp:81-94`: `$F0` carries `timersDisable` (bit 0),
 `ramWritable` (1), `ramDisable` (2), `timersEnable` (3), and the
-external/internal wait-state dividers (bits 4-7), and writes are gated
-on the P flag. luna drops `$F0` writes entirely (`lib.rs:512`), so timer
-enable/disable gating and wait-state timing are not honoured.
+external/internal wait-state dividers (bits 4-7), gated on the P flag.
+
+**Done**: the `$F0` value is stored (`test`, reset `0x0A` = the ares
+power-on `timersEnable`+`ramWritable` state) and the **timer gating** is
+modelled — `tick_timers` freezes when `timersEnable` is clear or
+`timersDisable` is set (ares `timing.cpp:45-49`), with the clock divider
+still running so phase resumes on re-enable. Test
+`test_register_gates_timer_advance`.
+
+**Remaining** (folds into #6): the wait-state dividers (bits 4-7) and
+`ramWritable`/`ramDisable` (bits 1-2) are stored but not acted on; the
+P-flag write gate is omitted (pathological for `$F0`).
 
 ## ✅ 4. IPL ROM overlay (not baked into ARAM) — DONE
 
@@ -110,7 +119,7 @@ underlying RAM. Tests `ipl_rom_overlay_toggles_with_f1_bit7`,
 2. ~~#7 dead scaffolding~~, ~~#2 `$F1` port-clear~~, ~~#5 `$F8/$F9`~~ —
    **done**.
 3. ~~#4 IPL overlay~~ — **done**.
-4. **#3 `$F0` TEST** — remaining 🟠 (timer enable/disable gating + the
-   wait-state inputs).
-5. 🟡 #6 wait-state timing — approximation, lowest priority (couples
-   with #3).
+4. ~~#3 `$F0` timer gating~~ — **done** (timersEnable/Disable).
+5. 🟡 #6 wait-state timing (incl. the `$F0` wait-state + RAM bits) —
+   approximation, lowest priority; a timing-model refactor for low
+   real-world return (few drivers deviate from the default wait states).
