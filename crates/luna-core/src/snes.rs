@@ -453,7 +453,7 @@ impl Snes {
             cpu_regs,
             apu_real,
             apu_stub_fallback,
-            apu_panicked: *apu_panicked,
+            apu_panicked,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
@@ -528,7 +528,7 @@ impl Snes {
             cpu_regs,
             apu_real,
             apu_stub_fallback,
-            apu_panicked: *apu_panicked,
+            apu_panicked,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
@@ -552,17 +552,8 @@ impl Snes {
         let consumed = self.total_mclk - before;
         self.advance_scheduler(consumed as u32);
 
-        // Catch up the APU by the same amount. The SPC700 now stops
-        // gracefully when it hits an unimplemented opcode (no more
-        // panics) — `Apu::step` simply returns early once
-        // `cpu.stopped == true`. We mirror that into `apu_panicked`
-        // so the mailbox bus path knows to use the fallback stub.
-        if !self.apu_panicked {
-            self.apu_real.step(consumed as u32);
-            if self.apu_real.cpu.stopped {
-                self.apu_panicked = true;
-            }
-        }
+        // (APU catch-up now happens per bus access in `SnesBus::io_cycle`,
+        // not as an end-of-instruction lump — see Phase 1.)
 
         // Catch up any cartridge coprocessor (SA-1 / Super FX / DSP-1
         // / …). Plain LoROM/HiROM mappers no-op here.
@@ -779,7 +770,7 @@ impl Snes {
             cpu_regs,
             apu_real,
             apu_stub_fallback,
-            apu_panicked: *apu_panicked,
+            apu_panicked,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
@@ -823,9 +814,10 @@ struct SnesBus<'a> {
     /// Legacy heuristic stub — used when [`Snes::apu_panicked`] is
     /// `true` (i.e. the real SPC700 hit an unimplemented opcode).
     apu_stub_fallback: &'a mut ApuStub,
-    /// Mirror of `Snes::apu_panicked` — captured at the start of the
-    /// bus borrow so we know which mailbox path to use.
-    apu_panicked: bool,
+    /// Live handle to `Snes::apu_panicked`. Phase 1 advances the real APU
+    /// inside [`Bus::io_cycle`], so this must be a mutable borrow (not a
+    /// snapshot) to propagate the SPC700 "stopped" transition back.
+    apu_panicked: &'a mut bool,
     fast_rom: bool,
     nmi: &'a mut bool,
     irq: &'a mut bool,
@@ -1062,6 +1054,19 @@ impl Bus for SnesBus<'_> {
     }
     fn io_cycle(&mut self, mcycles: MCycles) {
         *self.mclk_total = self.mclk_total.saturating_add(mcycles);
+        // Phase 1 (cycle-accuracy milestone): advance the real APU in
+        // lockstep with the CPU at bus-access granularity, instead of one
+        // end-of-instruction lump. `Apu::step` carries the sub-84-mclk
+        // remainder in `mclk_deficit`, so per-access stepping composes
+        // exactly with the old lump (same SPC instruction count) — the only
+        // change is finer CPU↔APU port interleaving. The end-of-`step`
+        // catch-up has been removed accordingly.
+        if !*self.apu_panicked {
+            self.apu_real.step(mcycles as u32);
+            if self.apu_real.cpu.stopped {
+                *self.apu_panicked = true;
+            }
+        }
     }
     fn nmi_pending(&self) -> bool {
         *self.nmi
@@ -1094,7 +1099,7 @@ impl SnesBus<'_> {
             // so its driver actually loops). Fall back to the
             // heuristic stub only if the SPC has stopped on an
             // unimplemented opcode.
-            let value = if self.apu_panicked {
+            let value = if *self.apu_panicked {
                 self.apu_stub_fallback.read(port)
             } else {
                 self.apu_real.cpu_read_port(port)
@@ -1524,7 +1529,7 @@ mod tests {
             cpu_regs,
             apu_real,
             apu_stub_fallback,
-            apu_panicked: *apu_panicked,
+            apu_panicked,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
@@ -1588,7 +1593,7 @@ mod tests {
             cpu_regs,
             apu_real,
             apu_stub_fallback,
-            apu_panicked: *apu_panicked,
+            apu_panicked,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
@@ -1659,7 +1664,7 @@ mod tests {
             cpu_regs,
             apu_real,
             apu_stub_fallback,
-            apu_panicked: *apu_panicked,
+            apu_panicked,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
@@ -1932,7 +1937,7 @@ mod tests {
             cpu_regs,
             apu_real,
             apu_stub_fallback,
-            apu_panicked: *apu_panicked,
+            apu_panicked,
             fast_rom: *fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
