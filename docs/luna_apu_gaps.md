@@ -46,12 +46,12 @@ reflection at `dsp.rs:769-776`).
 
 ---
 
-## 🟠 2. `$F1` bits 4/5 — clear the input mailbox ports
+## ✅ 2. `$F1` bits 4/5 — clear the input mailbox ports — DONE
 
 ares `smp/io.cpp:113-123`: a `$F1` write with bit 4 set zeroes the
 CPU→SMP ports 0/1 (what the SPC reads at `$F4/$F5`); bit 5 zeroes ports
-2/3. luna's `$F1` handler only touches timer enables — the port-clear
-is absent, so a driver using the clear bits keeps reading stale input.
+2/3. Implemented in the `$F1` handler (the bus view's `to_spc_ports`
+was made writable). Test `control_bits_4_5_clear_input_ports`.
 
 ## 🟠 3. `$F0` TEST register not modelled
 
@@ -76,9 +76,9 @@ after boot read IPL bytes instead.
 
 | # | Issue | ares ref | luna |
 |---|---|---|---|
-| 5 | `$F8/$F9` AUXIO read returns 0 instead of the last value written | `smp/io.cpp:49-53` (`io.aux4/aux5`) | `lib.rs:489` returns 0 (write lands in ARAM, read ignores it) |
+| ~~5~~ | ~~`$F8/$F9` AUXIO read returns 0~~ — **DONE**: read returns the stored value (`auxio_f8_f9_read_back_written_value`) | `smp/io.cpp:49-53` | ✅ |
 | 6 | Wait-state cycle dividers `{2,4,10,20}` (and the 8/16→10/20 glitch) not modelled; fixed master:SPC ratio used instead | `smp/timing.cpp:9-20` | `lib.rs` step() converts at a fixed ratio + per-opcode cost |
-| 7 | Dead legacy DSP scaffolding in `lib.rs` — a **duplicate** gaussian table plus unused `ADSR_RATE_PERIODS` / `COUNTER_OFFSET` / `COUNTER_RELOAD` / `VOICE_END_SPC_CYCLES` / `AdsrPhase` (pre-port leftovers; the module doc is also stale) | — | divergence trap: two gaussian tables to keep in sync |
+| ~~7~~ | ~~Dead legacy DSP scaffolding in `lib.rs`~~ — **DONE**: removed the duplicate gaussian table + unused `ADSR_RATE_PERIODS` / `COUNTER_OFFSET` / `COUNTER_RELOAD` / `VOICE_END_SPC_CYCLES` / `AdsrPhase`; refreshed the stale module docs | — | ✅ |
 
 ---
 
@@ -103,10 +103,9 @@ after boot read IPL bytes instead.
 
 ## Suggested order
 
-1. **#1 ENDX read-clear** — real bug, one-line fix.
-2. **#7 dead scaffolding** — low-risk cleanup, removes the gaussian
-   divergence trap.
-3. **#2 `$F1` port-clear**, **#5 `$F8/$F9`** — small, well-defined.
-4. **#3 `$F0` TEST**, **#4 IPL overlay** — larger (touch timing / the
-   memory map).
-5. 🟡 #6 wait-state timing — approximation, lowest priority.
+1. ~~#1 ENDX read-clear~~ — **done** (`cd3d934`).
+2. ~~#7 dead scaffolding~~, ~~#2 `$F1` port-clear~~, ~~#5 `$F8/$F9`~~ —
+   **done**.
+3. **#3 `$F0` TEST**, **#4 IPL overlay** — larger (touch timing / the
+   memory map); remaining 🟠.
+4. 🟡 #6 wait-state timing — approximation, lowest priority.
