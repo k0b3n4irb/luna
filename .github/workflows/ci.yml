@@ -121,11 +121,11 @@ jobs:
   # they don't run in the `test` job above. LUNA_TOM_HARTE_REQUIRE=1 turns
   # any mismatch into a hard failure (otherwise the test just reports).
   #
-  # Datasets:
-  #   - 65C816 (`tests/tom-harte/v1`) is committed, so it's present after
-  #     checkout — no fetch needed.
-  #   - SPC700 (`tests/tom-harte-spc700/v1`) is an external shallow clone;
-  #     fetch it on a cache miss and cache it across runs.
+  # Both datasets are large external shallow clones (not committed):
+  # fetch each on a cache miss and cache it across runs, keyed on the
+  # corresponding fetch script.
+  #   - 65C816  → tests/tom-harte/v1         (tools/fetch-tom-harte.sh)
+  #   - SPC700  → tests/tom-harte-spc700/v1  (tools/fetch-tom-harte-spc700.sh)
   # ---------------------------------------------------------------------
   tom-harte:
     name: tom-harte (cpu suites)
@@ -139,6 +139,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: tom-harte
+      - name: Cache 65C816 Tom Harte dataset
+        id: snes-cache
+        uses: actions/cache@v4
+        with:
+          path: tests/tom-harte/v1
+          key: tom-harte-65816-${{ hashFiles('tools/fetch-tom-harte.sh') }}
+      - name: Fetch 65C816 dataset (on cache miss)
+        if: steps.snes-cache.outputs.cache-hit != 'true'
+        run: tools/fetch-tom-harte.sh
       - name: Cache SPC700 Tom Harte dataset
         id: spc-cache
         uses: actions/cache@v4
