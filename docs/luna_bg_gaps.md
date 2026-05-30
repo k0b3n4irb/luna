@@ -87,10 +87,19 @@ so the existing test ROMs (all `setini & 8 == 0`) are unchanged.
 Still pending (follow-ups, see 🟡 below): **mosaic in hi-res** and
 exact color-math on the sub subpixel.
 
-## 🟠 4. Mode 7 EXTBG (BG2 overlay) — not implemented
+## ✅ 4. Mode 7 EXTBG (BG2 overlay) — DONE
 
-ares `mode7.cpp:45-49`: the 8bpp Mode 7 pixel's bit 7 selects a
-second priority layer rendered as BG2. luna renders BG1 only.
+ares `mode7.cpp:44-52` + `io.cpp:733-738`. When `$2133` bit 6 is set in
+Mode 7, the affine plane is also exposed as BG2: colour = pixel bits
+0-6, priority = bit 7 (transparent when the low 7 bits are zero); BG1
+keeps the full 8-bit colour. luna derives BG2 from the same rendered
+plane in the compositor and selects a dedicated `MODE7_EXTBG_TABLE`
+(numeric priorities OBJ3=7, OBJ2=6, BG2hi=5, OBJ1=4, BG1=3, OBJ0=2,
+BG2lo=1).
+
+Gated on `setini & 0x40` in Mode 7 — every other case is byte-identical
+(99 tests). Test `mode7_extbg_splits_plane_into_bg1_and_bg2`. Not
+GUI-validated (no test ROM enables EXTBG).
 
 ---
 
@@ -127,4 +136,9 @@ second priority layer rendered as BG2. luna renders BG1 only.
 1. **#1 Mode 0 palette** — done (`f4e3d9b`).
 2. **#3 hi-res 5/6 + pseudo-hires** — done (Option A downsample).
 3. **#2 offset-per-tile (modes 2/4)** — done, GUI-validated on CT title.
-4. **#4 Mode 7 EXTBG**, then the 🟡 tail (#13 Mode-6 OPT, mosaic, etc.).
+4. **#4 Mode 7 EXTBG** — done.
+
+All 🟠 gaps closed. Remaining work is the 🟡 tail: #6 direct-colour
+palette-group bits, #7 character-address VRAM mask, #8 brightness
+0=black, #5/#11 mosaic (Mode 7 / hi-res), #12 hi-res sub color-math,
+#13 Mode-6 OPT, #9 legacy `render_bg1_scanline_with` cleanup.

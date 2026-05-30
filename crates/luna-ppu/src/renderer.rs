@@ -527,7 +527,16 @@ pub fn render_scanline_partial_into(
         ppu.inidisp & 0x0F
     };
 
-    let table = priority_table(ppu.bgmode);
+    // Mode 7 EXTBG ($2133 bit 6): the affine plane is *also* exposed as
+    // BG2, with bit 7 of each pixel selecting a priority and bits 0-6 as
+    // the colour (ares mode7.cpp:44-52 + io.cpp:733-738). It gets its own
+    // priority table.
+    let extbg = ppu.bgmode & 0x07 == 0x07 && ppu.setini & 0x40 != 0;
+    let table = if extbg {
+        MODE7_EXTBG_TABLE
+    } else {
+        priority_table(ppu.bgmode)
+    };
     let backdrop_bgr5 = cgram_to_bgr5(ppu, 0);
 
     // Fixed COLDATA — the sub operand when CGWSEL bit 1 = 0, or when
@@ -560,12 +569,24 @@ pub fn render_scanline_partial_into(
     // screen winner. Outside hi-res the two are identical — only TM/TS
     // + TMW/TSW gating differs.
     let (bgs_above, bgs_below): ([IndexedScanline; 4], [IndexedScanline; 4]) = if is_mode7 {
-        let m7 = [
-            render_mode7_scanline_indexed(ppu, y, opts),
-            [None; 256],
-            [None; 256],
-            [None; 256],
-        ];
+        let bg1 = render_mode7_scanline_indexed(ppu, y, opts);
+        // EXTBG: derive BG2 from the same plane — colour = low 7 bits,
+        // priority = bit 7, transparent when the low 7 bits are zero.
+        let bg2 = if extbg {
+            let mut b2: IndexedScanline = [None; 256];
+            for (x, px) in bg1.iter().enumerate() {
+                if let Some((full, _)) = px {
+                    let low7 = full & 0x7F;
+                    if low7 != 0 {
+                        b2[x] = Some((low7, full >> 7));
+                    }
+                }
+            }
+            b2
+        } else {
+            [None; 256]
+        };
+        let m7 = [bg1, bg2, [None; 256], [None; 256]];
         (m7, m7)
     } else if is_hires {
         let mut above = [[None; 256]; 4];
@@ -1155,6 +1176,13 @@ const MODE56_TABLE: &[LayerSlot] = &[
 //   OBJ3, OBJ2, OBJ1, BG1, OBJ0
 // — i.e. only sprite priority 0 falls below the Mode-7 plane.
 const MODE7_TABLE: &[LayerSlot] = &[obj(3), obj(2), obj(1), bg(0, 0), obj(0)];
+
+// Mode 7 EXTBG ($2133.6): the plane is also exposed as BG2, split by
+// pixel bit 7 into two priorities (ares io.cpp:733-738, numeric
+// priorities OBJ3=7, OBJ2=6, BG2hi=5, OBJ1=4, BG1=3, OBJ0=2, BG2lo=1):
+//   OBJ3, OBJ2, BG2H, OBJ1, BG1, OBJ0, BG2L
+const MODE7_EXTBG_TABLE: &[LayerSlot] =
+    &[obj(3), obj(2), bg(1, 1), obj(1), bg(0, 0), obj(0), bg(1, 0)];
 
 /// Pick the priority table for the current BGMODE.
 const fn priority_table(bgmode: u8) -> &'static [LayerSlot] {
@@ -2570,6 +2598,46 @@ mod tests {
         let (idx, prio) = scan[0].unwrap();
         assert_eq!(idx, 5);
         assert_eq!(prio, 0);
+    }
+
+    #[test]
+    fn mode7_extbg_splits_plane_into_bg1_and_bg2() {
+        // Mode 7 + EXTBG ($2133.6). Pixel (0,0) = 0x83 → bit 7 set, low
+        // 7 bits = 3. BG1 sees the full 8-bit colour (CGRAM 131); BG2
+        // sees the low 7 bits (CGRAM 3) with priority from bit 7.
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::BGMODE, 0x07);
+        p.write(register::SETINI, 0x40); // EXTBG
+        // Identity matrix.
+        p.write(register::M7A, 0x00);
+        p.write(register::M7A, 0x01);
+        p.write(register::M7B, 0x00);
+        p.write(register::M7B, 0x00);
+        p.write(register::M7C, 0x00);
+        p.write(register::M7C, 0x00);
+        p.write(register::M7D, 0x00);
+        p.write(register::M7D, 0x01);
+        // Pixel (0,0) = 0x83.
+        p.vram.poke(0, 0);
+        p.vram.poke(1, 0x83);
+        // CGRAM[3] = red, CGRAM[131] = green.
+        p.cgram.poke(6, 0x1F);
+        p.cgram.poke(7, 0x00); // idx 3 = 0x001F
+        p.cgram.poke(262, 0xE0);
+        p.cgram.poke(263, 0x03); // idx 131 = 0x03E0
+
+        let mut line = [[0u8; 3]; FRAME_W];
+
+        // BG2 only → low 7 bits (idx 3 = red).
+        p.write(register::TM, 0x02);
+        render_scanline_into(&p, 0, RenderOptions::default(), &mut line);
+        assert_eq!(line[0], [255, 0, 0], "EXTBG BG2 → low 7 bits (idx 3)");
+
+        // BG1 only → full 8 bits (idx 131 = green).
+        p.write(register::TM, 0x01);
+        render_scanline_into(&p, 0, RenderOptions::default(), &mut line);
+        assert_eq!(line[0], [0, 255, 0], "EXTBG BG1 → full 8 bits (idx 131)");
     }
 
     // -------------------------------------------------------------------
