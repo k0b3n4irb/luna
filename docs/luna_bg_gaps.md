@@ -105,16 +105,21 @@ GUI-validated (no test ROM enables EXTBG).
 
 ## 🟡 Precision / edge deviations
 
-| # | Issue | ares ref | luna |
+| # | Issue | ares ref | status |
 |---|---|---|---|
-| 5 | Mode 7 mosaic not applied | `mode7.cpp:12-21` | absent |
-| ~~6~~ | ~~Direct-colour palette-group low bits~~ — **DONE**: pixel + 3-bit group (`R←g0,G←g1,B←g2`) per `dac.cpp:163-170`; group packed into the BG prio byte | `dac.cpp:163-170` | ✅ |
-| 7 | No per-mode character-address mask (VRAM wrap) | `background.cpp:104-106` | wraps only at 64 KB |
-| ~~8~~ | ~~Brightness 0~~ — **DONE**: ares `color.cpp` `L=(1+l)/16*(l?1:0.25)`; b=0 is an extra ÷4 (1/64), not pure black. b≥1 was already correct | `color.cpp` | ✅ |
-| 9 | Legacy `render_bg1_scanline_with` is 32×32-only, diverged from runtime path | — | `renderer.rs:93` (trap for API consumers) |
-| 11 | Mosaic not applied in the hi-res path | Mesen2 `SnesPpu.cpp:1026-1044` | `render_bg_scanline_indexed_hires` skips it |
-| 12 | Hi-res sub-subpixel uses raw winner, not its own color-math | `dac.cpp:43-80` | approximated |
-| 13 | Offset-per-tile in Mode 6 (hi-res + OPT) | `background.cpp:52-69` | OPT only wired into the lores path (modes 2/4) |
+| ~~5~~ | ~~Mode 7 mosaic~~ — **DONE**: BG1 mosaic snaps screen x/y to the block before the affine transform | `mode7.cpp:12-21` | ✅ |
+| ~~6~~ | ~~Direct-colour palette-group low bits~~ — **DONE**: pixel + 3-bit group (`R←g0,G←g1,B←g2`); group packed into the BG prio byte | `dac.cpp:163-170` | ✅ |
+| ~~7~~ | ~~Per-mode character-address mask~~ — **NON-ISSUE**: luna's 64 KB byte wrap (`&0xFFFF` = words `&0x7FFF`) is algebraically identical to ares' `vram.mask >> (3+mode)` because the char base is always `4096`-word aligned | `background.cpp:104-106` | ✅ (equiv.) |
+| ~~8~~ | ~~Brightness 0~~ — **DONE**: ares `L=(1+l)/16*(l?1:0.25)`; b=0 is an extra ÷4 (1/64). b≥1 was already correct | `color.cpp` | ✅ |
+| ~~9~~ | ~~Legacy `render_bg1_scanline_with` divergence~~ — **DONE**: now routes through the runtime indexed renderer (tilemap sizes, 16×16, mosaic, Mode-0 palette) | — | ✅ |
+| ~~11~~ | ~~Mosaic in the hi-res path~~ — **DONE**: snaps the dot/scanline to the block before doubling | Mesen2 `SnesPpu.cpp:1026-1044` | ✅ |
+| 12 | Hi-res sub-subpixel uses raw winner, not its own color-math | `dac.cpp:43-80` | **approximation accepted** — the common case (pseudo-hires transparency, color-math off) averages correctly; only hi-res *with* color-math (rare) is approximate |
+| ~~13~~ | ~~Offset-per-tile in Mode 6~~ — **DONE**: OPT now wired into the hi-res path for Mode 6 (BG1) | `background.cpp:52-69` | ✅ |
+
+#12 is the only remaining item, kept as a deliberate approximation: ares'
+`below()` blend for the sub subpixel is intricate and hi-res+color-math is
+vanishingly rare; a half-correct port would risk regressions for no real
+game.
 
 ---
 
@@ -138,7 +143,6 @@ GUI-validated (no test ROM enables EXTBG).
 3. **#2 offset-per-tile (modes 2/4)** — done, GUI-validated on CT title.
 4. **#4 Mode 7 EXTBG** — done.
 
-All 🟠 gaps closed; #6 (direct-colour group) and #8 (brightness 0)
-done. Remaining 🟡 tail: #7 character-address VRAM mask, #5/#11 mosaic
-(Mode 7 / hi-res), #12 hi-res sub color-math, #13 Mode-6 OPT, #9 legacy
-`render_bg1_scanline_with` cleanup.
+**All gaps closed** except #12 (hi-res sub-subpixel color-math), kept as
+a deliberate, documented approximation. The 🟠 set and the entire 🟡
+tail (#5/#6/#7/#8/#9/#11/#13) are done.
