@@ -2,9 +2,8 @@
 //! the IPL ROM mapped over the top page, and the four mailbox ports
 //! facing the main CPU.
 //!
-//! The audio DSP (sample generation, voice mixing) is a separate
-//! P2.SPC.4+ effort — for now the DSP register file is just a stub
-//! so writes from the SPC700 don't blow up.
+//! The audio DSP (sample generation, voice mixing) is the
+//! cycle-accurate ares port in [`dsp`]; `$F2`/`$F3` route through it.
 //!
 //! # Mailbox direction model
 //!
@@ -34,11 +33,8 @@
 
 use luna_cpu_spc700::{IPL_ROM, IPL_ROM_BASE, Spc700, SpcBus};
 
-/// Cycle-accurate ares port of the S-DSP. Built as a side-by-side
-/// alternative to the legacy in-line DSP that lives in the rest of
-/// this file; see `dsp.rs` for the 1-for-1 transliteration. The
-/// migration to it is in progress — until [`Apu`] swaps over, the
-/// legacy path remains live.
+/// Cycle-accurate ares port of the S-DSP — the live audio path. See
+/// `dsp.rs` for the 1-for-1 transliteration of `ares/sfc/dsp/*`.
 pub mod dsp;
 
 /// Nominal master cycles per SPC instruction (~4 SPC cycles × the
@@ -54,12 +50,6 @@ pub const MASTER_CLOCK_HZ: u64 = 21_477_272;
 /// SPC700 / S-DSP clock (Hz): the 24.576 MHz APU crystal ÷ 24.
 pub const SPC_CLOCK_HZ: u64 = 1_024_000;
 
-/// After how many SPC cycles a "playing" voice transitions to
-/// "ended" and lights up its bit in `ENDX` (`$7C`) when ADSR is
-/// disabled (i.e. gain mode). With ADSR enabled the phase machine
-/// drives the end time instead.
-pub const VOICE_END_SPC_CYCLES: u32 = 16_000;
-
 /// SPC cycles per audio sample (32 kHz output at 1.024 MHz).
 pub const SPC_CYCLES_PER_SAMPLE: u32 = 32;
 
@@ -68,91 +58,6 @@ pub const SPC_CYCLES_PER_SAMPLE: u32 = 32;
 /// dropped to keep emulator-side memory bounded. ~16k samples = 512 ms
 /// at 32 kHz, plenty of headroom for normal frame cadence.
 pub const AUDIO_QUEUE_CAPACITY: usize = 16384;
-
-/// Phase of one voice's ADSR envelope generator. Real hardware
-/// uses 11-bit envelope values; we keep that resolution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AdsrPhase {
-    /// Voice is silent — KOF or post-release.
-    Off,
-    /// Attack: envelope rises linearly from 0 to 0x7FF.
-    Attack,
-    /// Decay: envelope falls from 0x7FF toward the sustain level.
-    Decay,
-    /// Sustain: envelope drifts down at the sustain rate.
-    Sustain,
-    /// Release: KOF gated the voice; envelope drops fast to 0.
-    Release,
-}
-
-/// ADSR rate table — sample periods (at 32 kHz) for each 5-bit
-/// rate index. Lifted from fullsnes + ares; rate 0 = "never advance"
-/// (we approximate that with a huge value).
-pub const ADSR_RATE_PERIODS: [u16; 32] = [
-    0xFFFF, 2048, 1536, 1280, 1024, 768, 640, 512, 384, 320, 256, 192, 160, 128, 96, 80, 64, 48,
-    40, 32, 24, 20, 16, 12, 10, 8, 6, 5, 4, 3, 2, 1,
-];
-
-/// Per-rate counter offset used by the canonical ares/Mesen2
-/// `counter_poll` formula `(global_counter + OFFSET[rate]) % RATE[rate] == 0`.
-/// Source: ares `dsp/counter.cpp::CounterOffset`. Rate 0 is special-cased
-/// to "never fire" and the offset for it is irrelevant.
-pub const COUNTER_OFFSET: [u16; 32] = [
-    0, 0, 1040, 536, 0, 1040, 536, 0, 1040, 536, 0, 1040, 536, 0, 1040, 536, 0, 1040, 536, 0, 1040,
-    536, 0, 1040, 536, 0, 1040, 536, 0, 1040, 0, 0,
-];
-
-/// Global DSP counter reload value. The counter starts at 30720
-/// (`0x7800` = 2048 × 5 × 3) and decrements once per DSP sample; on
-/// reaching 0 it reloads from this value. Source: ares
-/// `dsp/counter.cpp::counterTick`.
-pub const COUNTER_RELOAD: u16 = 30_720;
-
-/// Lazily-built 512-entry Gaussian interpolation table used by the
-/// SPC700 DSP for 4-tap pitch interpolation.
-///
-/// Generated from the canonical [ares] formula. After raw computation
-/// the table is normalised so each fraction-aligned 4-tap group
-/// (indices `[phase, 255-phase, 256+phase, 511-phase]`) sums to
-/// exactly `2048`. That keeps the interpolation lossless when all
-/// four history samples are equal: the right-shift by 11 in the
-/// 4-tap formula then recovers the input sample byte-for-byte.
-///
-/// [ares]: https://github.com/ares-emulator/ares/blob/master/ares/sfc/dsp/gaussian.cpp
-#[must_use]
-pub fn gaussian_table() -> &'static [i16; 512] {
-    static TABLE: std::sync::OnceLock<[i16; 512]> = std::sync::OnceLock::new();
-    TABLE.get_or_init(build_gaussian_table)
-}
-
-/// One-shot builder for the Gaussian table — only the first call to
-/// [`gaussian_table`] reaches this.
-fn build_gaussian_table() -> [i16; 512] {
-    let pi = std::f64::consts::PI;
-    let mut raw = [0.0_f64; 512];
-    for n in 0..512 {
-        let k = 0.5 + n as f64;
-        let s = (pi * k * 1.280 / 1024.0).sin();
-        let t = ((pi * k * 2.000 / 1023.0).cos() - 1.0) * 0.50;
-        let u = ((pi * k * 4.000 / 1023.0).cos() - 1.0) * 0.08;
-        // Match ares: store the raw value at the MIRRORED index, so
-        // the table is monotone-increasing 0..511 (peak at 511, zero
-        // at 0). The 4-tap formula then reads from both ends.
-        raw[511 - n] = s * (t + u + 1.0) / k;
-    }
-    let mut table = [0i16; 512];
-    // Normalise each of the 128 phase-groups so the 4-tap sum is 2048.
-    for phase in 0..128 {
-        let idxs = [phase, 255 - phase, 256 + phase, 511 - phase];
-        let sum = idxs.iter().map(|&i| raw[i]).sum::<f64>();
-        let scale = 2048.0 / sum;
-        for &i in &idxs {
-            // +0.5 round-half-up; values are positive and small (<2K).
-            table[i] = raw[i].mul_add(scale, 0.5) as i16;
-        }
-    }
-    table
-}
 
 /// All APU state owned by [`Apu`]: SPC700 core + 64 KB ARAM + the two
 /// 4-byte mailbox arrays.
@@ -281,7 +186,7 @@ impl Apu {
         // which the IPL ROM populates as $FFC0.
         let mut bus = ApuBusView {
             aram: &mut apu.aram,
-            to_spc_ports: &apu.to_spc_ports,
+            to_spc_ports: &mut apu.to_spc_ports,
             to_cpu_ports: &mut apu.to_cpu_ports,
             control: &mut apu.control,
             dsp_index: &mut apu.dsp_index,
@@ -419,7 +324,7 @@ impl Apu {
             }
             let mut bus = ApuBusView {
                 aram: &mut self.aram,
-                to_spc_ports: &self.to_spc_ports,
+                to_spc_ports: &mut self.to_spc_ports,
                 to_cpu_ports: &mut self.to_cpu_ports,
                 control: &mut self.control,
                 dsp_index: &mut self.dsp_index,
@@ -447,7 +352,7 @@ impl Apu {
 /// is read-only from the SPC's side (the CPU writes those).
 struct ApuBusView<'a> {
     aram: &'a mut [u8; 0x10000],
-    to_spc_ports: &'a [u8; 4],
+    to_spc_ports: &'a mut [u8; 4],
     to_cpu_ports: &'a mut [u8; 4],
     control: &'a mut u8,
     dsp_index: &'a mut u8,
@@ -480,9 +385,10 @@ impl SpcBus for ApuBusView<'_> {
             }
             // $F4-$F7 — mailbox FROM the main CPU.
             0x00F4..=0x00F7 => self.to_spc_ports[(addr - 0x00F4) as usize],
-            // $F8-$F9 — RAM-mapped scratch bytes (auxiliary regs).
-            // Stubbed to 0 for now.
-            0x00F8..=0x00F9 => 0,
+            // $F8-$F9 — AUXIO4/5 scratch registers. ares io.cpp:49-53
+            // returns the last value written; we keep it in ARAM (the
+            // write path stores it there) and read it straight back.
+            0x00F8..=0x00F9 => self.aram[addr as usize],
             // $FA-$FC — timer reload values. Write-only on real HW,
             // reads return 0.
             0x00FA..=0x00FC => 0,
@@ -520,6 +426,17 @@ impl SpcBus for ApuBusView<'_> {
                         self.timer_output[i] = 0;
                     }
                     self.timer_enabled[i] = now_enabled;
+                }
+                // Bits 4/5 clear the CPU→SMP input mailbox ports the SPC
+                // reads at $F4-$F7 (ares io.cpp:113-123): bit 4 → ports
+                // 0/1, bit 5 → ports 2/3.
+                if value & 0x10 != 0 {
+                    self.to_spc_ports[0] = 0;
+                    self.to_spc_ports[1] = 0;
+                }
+                if value & 0x20 != 0 {
+                    self.to_spc_ports[2] = 0;
+                    self.to_spc_ports[3] = 0;
                 }
                 *self.control = value;
             }
@@ -600,7 +517,7 @@ mod tests {
         let mut apu = Apu::new();
         let mut bus = ApuBusView {
             aram: &mut apu.aram,
-            to_spc_ports: &apu.to_spc_ports,
+            to_spc_ports: &mut apu.to_spc_ports,
             to_cpu_ports: &mut apu.to_cpu_ports,
             control: &mut apu.control,
             dsp_index: &mut apu.dsp_index,
@@ -630,7 +547,7 @@ mod tests {
         apu.dsp.registers[0x7C] = 0b0000_0101; // voices 0 and 2 ended
         let mut bus = ApuBusView {
             aram: &mut apu.aram,
-            to_spc_ports: &apu.to_spc_ports,
+            to_spc_ports: &mut apu.to_spc_ports,
             to_cpu_ports: &mut apu.to_cpu_ports,
             control: &mut apu.control,
             dsp_index: &mut apu.dsp_index,
@@ -706,7 +623,7 @@ mod tests {
         {
             let mut bus = ApuBusView {
                 aram: &mut apu.aram,
-                to_spc_ports: &apu.to_spc_ports,
+                to_spc_ports: &mut apu.to_spc_ports,
                 to_cpu_ports: &mut apu.to_cpu_ports,
                 control: &mut apu.control,
                 dsp_index: &mut apu.dsp_index,
@@ -726,7 +643,7 @@ mod tests {
         let mut apu = Apu::new();
         let mut bus = ApuBusView {
             aram: &mut apu.aram,
-            to_spc_ports: &apu.to_spc_ports,
+            to_spc_ports: &mut apu.to_spc_ports,
             to_cpu_ports: &mut apu.to_cpu_ports,
             control: &mut apu.control,
             dsp_index: &mut apu.dsp_index,
@@ -741,6 +658,72 @@ mod tests {
         assert!(apu.timer_enabled[0]);
         assert!(apu.timer_enabled[1]);
         assert!(apu.timer_enabled[2]);
+    }
+
+    #[test]
+    fn control_bits_4_5_clear_input_ports() {
+        // ares io.cpp:113-123 — $F1 bit 4 clears CPU→SMP ports 0/1, bit
+        // 5 clears 2/3 (the ports the SPC reads at $F4-$F7).
+        let mut apu = Apu::new();
+        apu.cpu_write_port(0, 0x11);
+        apu.cpu_write_port(1, 0x22);
+        apu.cpu_write_port(2, 0x33);
+        apu.cpu_write_port(3, 0x44);
+        {
+            let mut bus = ApuBusView {
+                aram: &mut apu.aram,
+                to_spc_ports: &mut apu.to_spc_ports,
+                to_cpu_ports: &mut apu.to_cpu_ports,
+                control: &mut apu.control,
+                dsp_index: &mut apu.dsp_index,
+                dsp: &mut apu.dsp,
+                timer_reload: &mut apu.timer_reload,
+                timer_output: &mut apu.timer_output,
+                timer_internal: &mut apu.timer_internal,
+                timer_enabled: &mut apu.timer_enabled,
+            };
+            bus.write(0x00F1, 0x10); // bit 4 → clear ports 0/1
+        }
+        assert_eq!(apu.to_spc_ports, [0, 0, 0x33, 0x44]);
+        {
+            let mut bus = ApuBusView {
+                aram: &mut apu.aram,
+                to_spc_ports: &mut apu.to_spc_ports,
+                to_cpu_ports: &mut apu.to_cpu_ports,
+                control: &mut apu.control,
+                dsp_index: &mut apu.dsp_index,
+                dsp: &mut apu.dsp,
+                timer_reload: &mut apu.timer_reload,
+                timer_output: &mut apu.timer_output,
+                timer_internal: &mut apu.timer_internal,
+                timer_enabled: &mut apu.timer_enabled,
+            };
+            bus.write(0x00F1, 0x20); // bit 5 → clear ports 2/3
+        }
+        assert_eq!(apu.to_spc_ports, [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn auxio_f8_f9_read_back_written_value() {
+        // ares io.cpp:49-53 — $F8/$F9 (AUXIO4/5) read back the last
+        // value written, not 0.
+        let mut apu = Apu::new();
+        let mut bus = ApuBusView {
+            aram: &mut apu.aram,
+            to_spc_ports: &mut apu.to_spc_ports,
+            to_cpu_ports: &mut apu.to_cpu_ports,
+            control: &mut apu.control,
+            dsp_index: &mut apu.dsp_index,
+            dsp: &mut apu.dsp,
+            timer_reload: &mut apu.timer_reload,
+            timer_output: &mut apu.timer_output,
+            timer_internal: &mut apu.timer_internal,
+            timer_enabled: &mut apu.timer_enabled,
+        };
+        bus.write(0x00F8, 0x42);
+        bus.write(0x00F9, 0x99);
+        assert_eq!(bus.read(0x00F8), 0x42);
+        assert_eq!(bus.read(0x00F9), 0x99);
     }
 
     #[test]
