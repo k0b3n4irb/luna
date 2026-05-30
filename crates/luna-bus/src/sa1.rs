@@ -77,9 +77,12 @@ pub struct Sa1Mapper {
     /// `$2250 MCNT` — operation select (bit 0 = arithmetic mode:
     /// 0 = multiply, 1 = divide; bit 1 = accumulator mode).
     mcnt: u8,
-    /// `$2306-$230A` — 40-bit signed result (multiplication) or
-    /// 16-bit quotient + 16-bit remainder packed (division).
+    /// `$2306-$230A` — 32-bit multiply / quotient+remainder result, or a
+    /// 40-bit cumulative-sum accumulator (sigma mode).
     mr: i64,
+    /// `$230B` (OF) — sigma-mode overflow flag (set when the 40-bit
+    /// accumulator overflows; ares `io.cpp:420`).
+    overflow: bool,
 
     // ---- Phase-3 IRQ message system ----
     /// `$2201 SIE` — main-CPU IRQ enable mask for incoming SA-1 →
@@ -310,6 +313,7 @@ impl Sa1Mapper {
             mb: 0,
             mcnt: 0,
             mr: 0,
+            overflow: false,
             sie: 0,
             cie: 0,
             s_irq_to_main: false,
@@ -902,29 +906,44 @@ impl Sa1Mapper {
 
     /// Re-run the multiplier / divider per `mcnt`. Triggered by a
     /// write to `$2254` MB-high.
+    /// Run the arithmetic op latched by the `$2254` (MBH) write — a
+    /// direct port of ares `io.cpp:398-423`. The accumulate flag
+    /// (`acm`, MCNT bit 1) takes precedence over the multiply/divide
+    /// select (`md`, bit 0).
     fn update_arith(&mut self) {
-        let mode = self.mcnt & 0x01;
-        if mode == 0 {
-            // Multiply: signed 16 × signed 16 → 32-bit signed.
-            // Accumulate when mcnt bit 1 is set (chained MAC).
-            let product = i32::from(self.ma) * i32::from(self.mb);
-            self.mr = if self.mcnt & 0x02 != 0 {
-                self.mr.saturating_add(i64::from(product))
-            } else {
-                i64::from(product)
-            };
-        } else {
-            // Divide: signed 16 dividend (ma) / signed 16 divisor (mb).
-            // Result packs quotient (low 16 bits) and remainder (high).
+        let acm = self.mcnt & 0x02 != 0;
+        let md = self.mcnt & 0x01 != 0;
+        if acm {
+            // Sigma: cumulative MAC into a 40-bit accumulator with an
+            // overflow flag (ares io.cpp:419-422).
+            let product = i64::from(self.ma) * i64::from(self.mb);
+            let acc = (self.mr as u64).wrapping_add(product as u64);
+            self.overflow = (acc >> 40) & 1 != 0;
+            self.mr = (acc & ((1u64 << 40) - 1)) as i64;
+        } else if md {
+            // Division: SIGNED dividend ÷ UNSIGNED divisor, floored
+            // (non-negative remainder). MA is reset (MB below).
             if self.mb == 0 {
                 self.mr = 0;
             } else {
-                let q = self.ma / self.mb;
-                let r = self.ma % self.mb;
-                self.mr = i64::from(i32::from(q as u16) & 0xFFFF)
-                    | (i64::from(i32::from(r as u16) & 0xFFFF) << 16);
+                let dividend = i32::from(self.ma);
+                let divisor = i32::from(self.mb as u16);
+                let remainder = if dividend >= 0 {
+                    dividend % divisor
+                } else {
+                    (dividend % divisor + divisor) % divisor
+                };
+                let quotient = (dividend - remainder) / divisor;
+                self.mr = (i64::from(remainder as u16) << 16) | i64::from(quotient as u16);
             }
+            self.ma = 0;
+        } else {
+            // Signed 16×16 → unsigned-32-bit multiply.
+            let product = i32::from(self.ma) * i32::from(self.mb);
+            self.mr = i64::from(product as u32);
         }
+        // Every op resets MB (ares io.cpp:402,415,422).
+        self.mb = 0;
     }
 }
 
@@ -980,6 +999,8 @@ impl Mapper for Sa1Mapper {
                 0x2308 => (self.mr >> 16) as u8,
                 0x2309 => (self.mr >> 24) as u8,
                 0x230A => (self.mr >> 32) as u8,
+                // (OF) sigma-mode overflow flag in bit 7.
+                0x230B => u8::from(self.overflow) << 7,
                 _ => self.mmio[idx],
             });
         }
@@ -1251,7 +1272,9 @@ impl Sa1Mapper {
                 0x222A => self.ciwp = value,
                 0x2250 => {
                     self.mcnt = value;
-                    if value & 0x02 != 0 && value == 0x02 {
+                    // ares io.cpp:374 — entering sigma mode (acm, bit 1)
+                    // clears the accumulator, regardless of the other bits.
+                    if value & 0x02 != 0 {
                         self.mr = 0;
                     }
                 }
@@ -1408,6 +1431,78 @@ mod tests {
         assert_eq!(m.read(make_addr(0x00, 0x2307)), Some(0xFF));
         assert_eq!(m.read(make_addr(0x00, 0x2308)), Some(0xFF));
         assert_eq!(m.read(make_addr(0x00, 0x2309)), Some(0xFF));
+    }
+
+    /// Read the packed 32-bit MR (quotient = low 16, remainder = high 16).
+    fn read_mr_lo32(m: &mut Sa1Mapper) -> (u16, u16) {
+        let q = u16::from(m.read(make_addr(0x00, 0x2306)).unwrap())
+            | (u16::from(m.read(make_addr(0x00, 0x2307)).unwrap()) << 8);
+        let r = u16::from(m.read(make_addr(0x00, 0x2308)).unwrap())
+            | (u16::from(m.read(make_addr(0x00, 0x2309)).unwrap()) << 8);
+        (q, r)
+    }
+
+    #[test]
+    fn divider_negative_dividend_is_floored() {
+        // ares: signed dividend ÷ unsigned divisor, floored (remainder
+        // ≥ 0). MA = -100 ($FF9C) ÷ MB = 7 → q = -15 ($FFF1), r = 5.
+        // (The old signed/signed truncated path gave q = -14, r = -2.)
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
+        m.write(make_addr(0x00, 0x2250), 0x01);
+        m.write(make_addr(0x00, 0x2251), 0x9C);
+        m.write(make_addr(0x00, 0x2252), 0xFF);
+        m.write(make_addr(0x00, 0x2253), 7);
+        m.write(make_addr(0x00, 0x2254), 0);
+        assert_eq!(read_mr_lo32(&mut m), (0xFFF1, 5));
+    }
+
+    #[test]
+    fn divider_treats_divisor_as_unsigned() {
+        // MB = $8000 is 32768 (unsigned), not -32768. MA = 100 → q = 0,
+        // r = 100.
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
+        m.write(make_addr(0x00, 0x2250), 0x01);
+        m.write(make_addr(0x00, 0x2251), 100);
+        m.write(make_addr(0x00, 0x2252), 0);
+        m.write(make_addr(0x00, 0x2253), 0x00);
+        m.write(make_addr(0x00, 0x2254), 0x80);
+        assert_eq!(read_mr_lo32(&mut m), (0, 100));
+    }
+
+    #[test]
+    fn multiply_resets_mb_after_op() {
+        // ares zeroes MB after a multiply. Triggering a second op with
+        // only MBH written (=0) leaves MB = 0 → product 0. (Old code kept
+        // MB and gave 15 again.)
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
+        m.write(make_addr(0x00, 0x2250), 0x00);
+        m.write(make_addr(0x00, 0x2251), 5);
+        m.write(make_addr(0x00, 0x2252), 0);
+        m.write(make_addr(0x00, 0x2253), 3);
+        m.write(make_addr(0x00, 0x2254), 0);
+        assert_eq!(m.read(make_addr(0x00, 0x2306)), Some(15));
+        m.write(make_addr(0x00, 0x2254), 0); // MB low was reset to 0
+        assert_eq!(m.read(make_addr(0x00, 0x2306)), Some(0));
+    }
+
+    #[test]
+    fn sigma_accumulates_into_40_bit_result() {
+        // acm mode (MCNT bit 1) clears MR then accumulates ma·mb. MB is
+        // reset each op, so it's re-loaded for the second accumulation.
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
+        m.write(make_addr(0x00, 0x2250), 0x02); // acm → clears MR
+        m.write(make_addr(0x00, 0x2251), 0xE8); // MA = 1000
+        m.write(make_addr(0x00, 0x2252), 0x03);
+        m.write(make_addr(0x00, 0x2253), 0xE8); // MB = 1000
+        m.write(make_addr(0x00, 0x2254), 0x03); // MR += 1_000_000
+        m.write(make_addr(0x00, 0x2253), 0xE8); // re-load MB (was reset)
+        m.write(make_addr(0x00, 0x2254), 0x03); // MR += 1_000_000
+        let mr = (0u64..5).fold(0u64, |acc, i| {
+            acc | (u64::from(m.read(make_addr(0x00, 0x2306 + i as u16)).unwrap()) << (8 * i))
+        });
+        assert_eq!(mr, 2_000_000);
+        // No overflow at this magnitude.
+        assert_eq!(m.read(make_addr(0x00, 0x230B)), Some(0));
     }
 
     #[test]

@@ -19,10 +19,17 @@ Authored 2026-05-30.
 
 ---
 
-## 🔴 1. Math unit (`$2250-$2254`) — division & sigma wrong
+## ✅ 1. Math unit (`$2250-$2254`) — DONE
 
-ares `io.cpp:398-423`. luna's `update_arith` (`sa1.rs:905-928`) diverges
-in three ways:
+ares `io.cpp:398-423`. `update_arith` was rewritten as a verbatim port;
+the four divergences below are fixed. New tests
+`divider_negative_dividend_is_floored`,
+`divider_treats_divisor_as_unsigned`, `multiply_resets_mb_after_op`,
+`sigma_accumulates_into_40_bit_result`. SMRPG (an SA-1 game) is a
+0-pixel before/after diff — the fix makes the math hardware-correct so
+it can only help.
+
+The original divergences:
 
 ### 1a. Division is signed/signed truncated, not signed-÷-unsigned floored
 
@@ -98,9 +105,5 @@ accumulator produces visibly wrong geometry.
 
 ## Suggested order
 
-1. **#1a division** — the highest-impact correctness bug; port ares'
-   signed-÷-unsigned Euclidean algorithm verbatim + add negative /
-   bit-15-divisor tests.
-2. **#1b/#1c/#1d** — sigma 40-bit mask + overflow flag, MA/MB reset,
-   MCNT clear — small, in the same function.
-3. 🟡 #2-#4 — minor.
+1. ~~#1 math unit (a/b/c/d)~~ — **done**.
+2. 🟡 #2-#4 — minor; left as notes.
