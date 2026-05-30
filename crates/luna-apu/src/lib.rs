@@ -103,6 +103,12 @@ pub struct Apu {
     /// bit we honour for now; the rest are stored verbatim for round-
     /// trip diagnostics.
     pub control: u8,
+    /// `$F0` TEST register. Bit 0 = `timersDisable`, bit 3 =
+    /// `timersEnable` (ares io.cpp:81-94) — together they gate timer
+    /// advance. Reset default `0x0A` (timersEnable + ramWritable set)
+    /// keeps timers running, matching the ares power-on state. The
+    /// RAM-writable/disable and wait-state bits are stored, not modelled.
+    pub test: u8,
     /// `true` once the SPC has executed at least one instruction past
     /// the IPL ROM region (i.e. it `JMP`'d into user code). When that
     /// happens we expect uploaded music driver code; until our
@@ -184,6 +190,7 @@ impl Apu {
             spc_cycle_num: 0,
             spc_cycle_debt: 0,
             control: 0x80, // bit 7: IPL ROM exposed
+            test: 0x0A,    // timersEnable + ramWritable (ares power-on)
             past_iplrom: false,
             dsp_index: 0,
             audio_left: 0,
@@ -203,6 +210,7 @@ impl Apu {
             to_spc_ports: &mut apu.to_spc_ports,
             to_cpu_ports: &mut apu.to_cpu_ports,
             control: &mut apu.control,
+            test: &mut apu.test,
             dsp_index: &mut apu.dsp_index,
             dsp: &mut apu.dsp,
             timer_reload: &mut apu.timer_reload,
@@ -227,6 +235,15 @@ impl Apu {
         let before = self.timer_subdivider;
         self.timer_subdivider = self.timer_subdivider.wrapping_add(spc_cycles);
         let after = self.timer_subdivider;
+
+        // $F0 TEST master gate (ares timing.cpp:45-49): when timersEnable
+        // (bit 3) is clear or timersDisable (bit 0) is set, the stage→
+        // output propagation is suppressed (timers freeze). The clock
+        // divider (`timer_subdivider`) keeps running above, so phase
+        // resumes when re-enabled.
+        if self.test & 0x08 == 0 || self.test & 0x01 != 0 {
+            return;
+        }
 
         // T2 ticks at the 16-cycle boundary.
         let t2_ticks = (after / 16) - (before / 16);
@@ -349,6 +366,7 @@ impl Apu {
                 to_spc_ports: &mut self.to_spc_ports,
                 to_cpu_ports: &mut self.to_cpu_ports,
                 control: &mut self.control,
+                test: &mut self.test,
                 dsp_index: &mut self.dsp_index,
                 dsp: &mut self.dsp,
                 timer_reload: &mut self.timer_reload,
@@ -377,6 +395,7 @@ struct ApuBusView<'a> {
     to_spc_ports: &'a mut [u8; 4],
     to_cpu_ports: &'a mut [u8; 4],
     control: &'a mut u8,
+    test: &'a mut u8,
     dsp_index: &'a mut u8,
     dsp: &'a mut dsp::Dsp,
     timer_reload: &'a mut [u8; 3],
@@ -431,8 +450,12 @@ impl SpcBus for ApuBusView<'_> {
 
     fn write(&mut self, addr: u16, value: u8) {
         match addr {
-            // $F0 — test register, accept and drop.
-            0x00F0 => {}
+            // $F0 — TEST register. Bit 0 = timersDisable, bit 3 =
+            // timersEnable gate the timers (ares io.cpp:81-94); the
+            // other bits (RAM writable/disable, wait states) are stored
+            // but not yet modelled. The P-flag write gate is omitted
+            // (writes with PSW.P set are pathological for $F0).
+            0x00F0 => *self.test = value,
             // $F1 — control register. Bit 7 controls IPL ROM
             // visibility (we don't yet model un-mapping). Bits 0-2
             // enable timers T0/T1/T2; a 0→1 transition resets the
@@ -558,6 +581,7 @@ mod tests {
             to_spc_ports: &mut apu.to_spc_ports,
             to_cpu_ports: &mut apu.to_cpu_ports,
             control: &mut apu.control,
+            test: &mut apu.test,
             dsp_index: &mut apu.dsp_index,
             dsp: &mut apu.dsp,
             timer_reload: &mut apu.timer_reload,
@@ -588,6 +612,7 @@ mod tests {
             to_spc_ports: &mut apu.to_spc_ports,
             to_cpu_ports: &mut apu.to_cpu_ports,
             control: &mut apu.control,
+            test: &mut apu.test,
             dsp_index: &mut apu.dsp_index,
             dsp: &mut apu.dsp,
             timer_reload: &mut apu.timer_reload,
@@ -651,6 +676,31 @@ mod tests {
     }
 
     #[test]
+    fn test_register_gates_timer_advance() {
+        // $F0 bit 3 (timersEnable) must be set and bit 0 (timersDisable)
+        // clear for timers to advance (ares timing.cpp:45-49).
+        let mut apu = Apu::new();
+        apu.timer_reload[2] = 1;
+        apu.timer_enabled[2] = true;
+        // Default test = 0x0A → timers run.
+        apu.tick_timers(16 * 2);
+        assert_eq!(apu.timer_output[2], 2);
+        // timersDisable (bit 0) set → frozen.
+        apu.test = 0x0B;
+        apu.tick_timers(16 * 4);
+        assert_eq!(apu.timer_output[2], 2, "timersDisable freezes the timer");
+        // timersEnable (bit 3) clear → also frozen.
+        apu.test = 0x00;
+        apu.tick_timers(16 * 4);
+        assert_eq!(apu.timer_output[2], 2, "!timersEnable freezes the timer");
+        // Re-enable → advances again (the clock divider kept running, so
+        // it picks up from the current phase).
+        apu.test = 0x08;
+        apu.tick_timers(16 * 3);
+        assert_eq!(apu.timer_output[2], 5, "re-enabled timer advances");
+    }
+
+    #[test]
     fn timer_output_clears_on_read_via_bus() {
         let mut apu = Apu::new();
         apu.timer_reload[2] = 1;
@@ -664,6 +714,7 @@ mod tests {
                 to_spc_ports: &mut apu.to_spc_ports,
                 to_cpu_ports: &mut apu.to_cpu_ports,
                 control: &mut apu.control,
+                test: &mut apu.test,
                 dsp_index: &mut apu.dsp_index,
                 dsp: &mut apu.dsp,
                 timer_reload: &mut apu.timer_reload,
@@ -684,6 +735,7 @@ mod tests {
             to_spc_ports: &mut apu.to_spc_ports,
             to_cpu_ports: &mut apu.to_cpu_ports,
             control: &mut apu.control,
+            test: &mut apu.test,
             dsp_index: &mut apu.dsp_index,
             dsp: &mut apu.dsp,
             timer_reload: &mut apu.timer_reload,
@@ -713,6 +765,7 @@ mod tests {
                 to_spc_ports: &mut apu.to_spc_ports,
                 to_cpu_ports: &mut apu.to_cpu_ports,
                 control: &mut apu.control,
+                test: &mut apu.test,
                 dsp_index: &mut apu.dsp_index,
                 dsp: &mut apu.dsp,
                 timer_reload: &mut apu.timer_reload,
@@ -729,6 +782,7 @@ mod tests {
                 to_spc_ports: &mut apu.to_spc_ports,
                 to_cpu_ports: &mut apu.to_cpu_ports,
                 control: &mut apu.control,
+                test: &mut apu.test,
                 dsp_index: &mut apu.dsp_index,
                 dsp: &mut apu.dsp,
                 timer_reload: &mut apu.timer_reload,
@@ -751,6 +805,7 @@ mod tests {
             to_spc_ports: &mut apu.to_spc_ports,
             to_cpu_ports: &mut apu.to_cpu_ports,
             control: &mut apu.control,
+            test: &mut apu.test,
             dsp_index: &mut apu.dsp_index,
             dsp: &mut apu.dsp,
             timer_reload: &mut apu.timer_reload,
