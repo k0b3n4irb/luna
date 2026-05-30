@@ -83,7 +83,7 @@ accumulator produces visibly wrong geometry.
 |---|---|---|---|
 | 2 | `$2202` (SIC) models a bit-6 "S-CPU NMI clear" that hardware doesn't have (SIC only has chdma=bit5, cpu=bit7) | `io.cpp:155-163` | `sa1.rs:1097-1099` |
 | 3 | CIWP/SIWP reset default is `0xFF` (allow-all) not `0x00` — a **deliberate** deviation (an opensnes demo depends on it); see `sa1_status.md` | `io.cpp` reset | intentional |
-| 4 | CCNT reset path sets `CIWP = 0` on the SA-1-reset edge — verify luna does this (it's chip-side) | `io.cpp:103-114` | check `coproc/sa1.rs` |
+| 4 | CCNT reset edge sets `CIWP = 0` (`io.cpp:113`) | `io.cpp:103-114` | **deferred** — verified absent, but it lives in the deliberately-deviated I-RAM protection model (CIWP/SIWP default `0xFF`, `sa1_status.md`). Adding it broke an SA-1 I-RAM test (synthetic handler doesn't pre-arm CIWP) and is the GUI-blackout-prone area the status doc warns about. Revisit with the protection model holistically + GUI validation. |
 
 ---
 
