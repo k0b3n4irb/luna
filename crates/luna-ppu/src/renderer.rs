@@ -332,47 +332,13 @@ pub fn render_sprites_scanline(ppu: &Ppu, y: u16, opts: RenderOptions) -> [Optio
     } else {
         ppu.inidisp & 0x0F
     };
-    // Iterate sprites highest-OAM-index first so lower indices win
-    // (real PPU draws sprite 0 last; we emulate by drawing 127 first
-    // and overwriting with lower indices).
-    let sprites = decode_all_sprites(ppu);
-    for sp in sprites.iter().rev() {
-        // Does this scanline cross the sprite?
-        let row_in_sprite = y.wrapping_sub(sp.y as u16);
-        if usize::from(row_in_sprite) >= sp.h as usize {
-            continue;
-        }
-        for col in 0..sp.w {
-            let screen_x = sp.x + col as i16;
-            if !(0..256).contains(&screen_x) {
-                continue;
-            }
-            // Apply flip to find tile-local coordinates.
-            let mut sc = col as usize;
-            let mut sr = row_in_sprite as usize;
-            if sp.h_flip {
-                sc = (sp.w - 1) as usize - sc;
-            }
-            if sp.v_flip {
-                sr = (sp.h - 1) as usize - sr;
-            }
-            // SNES sprites use a 16-tile-wide "sprite plane" — each 8×8
-            // tile-block of a big sprite is at `(base_tile + row*16 + col)`
-            // with col/row in tile units within the sprite, all mod 256.
-            let tile_x = sc / 8;
-            let tile_y = sr / 8;
-            let pix_x = sc % 8;
-            let pix_y = sr % 8;
-            let tile_id = (sp.tile.wrapping_add(((tile_y * 16) + tile_x) as u16)) & 0x01FF;
-            let tile_off = sprite_tile_byte_offset(ppu.obsel, tile_id);
-            let idx = decode_tile_pixel(ppu, tile_off, pix_y, pix_x, 4);
-            if idx == 0 {
-                continue; // transparent
-            }
-            // Sprite palette: upper half of CGRAM.
-            let cgram_idx = 128u16 + (sp.palette as u16) * 16 + (idx as u16);
-            let rgb = decode_palette(ppu, cgram_idx as u8, brightness);
-            out[screen_x as usize] = Some(rgb);
+    // Delegate to the runtime indexed sprite renderer and decode to RGB,
+    // so this debug/API view stays in lockstep with the real compositor
+    // (tile wrap, Y-wrap, palette, priority) instead of re-implementing.
+    let indexed = render_sprites_scanline_indexed_with(ppu, y, opts);
+    for (x, px) in indexed.iter().enumerate() {
+        if let Some((cgram_idx, _)) = *px {
+            out[x] = Some(decode_palette(ppu, cgram_idx, brightness));
         }
     }
     out
@@ -1490,7 +1456,11 @@ pub fn render_sprites_scanline_indexed_with(
     // Iterate highest-OAM-index first so lower indices visually win
     // (sprite 0 = front-most for the same screen pixel).
     for sp in sprites.iter().rev() {
-        let row_in_sprite = y.wrapping_sub(sp.y as u16);
+        // Row within the sprite, mod 256 — a sprite near the bottom
+        // wraps to the top of the screen (ares object.cpp:51-55
+        // `within<0,255>`). Without the `& 0xFF` the wrapped rows are
+        // lost.
+        let row_in_sprite = y.wrapping_sub(sp.y as u16) & 0xFF;
         if usize::from(row_in_sprite) >= sp.h as usize {
             continue;
         }
@@ -1507,11 +1477,20 @@ pub fn render_sprites_scanline_indexed_with(
             if sp.v_flip {
                 sr = (sp.h - 1) as usize - sr;
             }
-            let tile_x = sc / 8;
-            let tile_y = sr / 8;
+            let tile_x = (sc / 8) as u16;
+            let tile_y = (sr / 8) as u16;
             let pix_x = sc % 8;
             let pix_y = sr % 8;
-            let tile_id = (sp.tile.wrapping_add(((tile_y * 16) + tile_x) as u16)) & 0x01FF;
+            // Component tile within the 16×16 name page: the low and
+            // high nibbles of the OAM character byte wrap independently
+            // and the page (nameselect, bit 8) is held fixed — ares
+            // object.cpp:130-146, Mesen2 SnesPpu.cpp:735-741. A linear
+            // add would carry across rows / flip the page at page edges.
+            let char_byte = sp.tile & 0xFF;
+            let name_select = sp.tile & 0x100;
+            let col_nib = ((char_byte & 0x0F) + tile_x) & 0x0F;
+            let row_nib = ((char_byte >> 4) + tile_y) & 0x0F;
+            let tile_id = name_select | (row_nib << 4) | col_nib;
             let tile_off = sprite_tile_byte_offset(ppu.obsel, tile_id);
             let idx = decode_tile_pixel(ppu, tile_off, pix_y, pix_x, 4);
             if idx == 0 {
@@ -1942,6 +1921,62 @@ mod tests {
         assert_eq!(line[16], Some([0xFF, 0, 0]));
         // Pixels outside the sprite are None.
         assert_eq!(line[0], None);
+    }
+
+    #[test]
+    fn sprite_tile_index_wraps_within_name_page() {
+        // A 16×16 sprite with char byte 0x0F (tile column 15). The right
+        // 8-pixel half must wrap to column 0 of the *same* row (page
+        // fixed), not carry into row 1. ares object.cpp:130-146 /
+        // Mesen2 SnesPpu.cpp:735-741.
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F);
+        for i in 0..128u16 {
+            p.oam.poke(i * 4 + 1, 100); // park other sprites off scanline 0
+        }
+        p.oam.poke(0, 0); // x.low
+        p.oam.poke(1, 0); // y
+        p.oam.poke(2, 0x0F); // tile.low = char 0x0F (column 15)
+        p.oam.poke(3, 0); // attrs
+        p.oam.poke(0x200, 0x02); // high table sprite 0: size bit → 16×16
+        // Tile 0x0F (byte $1E0) pixel (0,0) = idx 1; tile 0x00 = idx 2.
+        p.vram.poke(0x1E0, 0x80); // plane 0
+        p.vram.poke(0x0001, 0x80); // plane 1 of tile 0
+        let scan = render_sprites_scanline_indexed_with(&p, 0, RenderOptions::default());
+        assert_eq!(
+            scan[0].map(|(c, _)| c),
+            Some(129),
+            "left = tile col 15 → idx 1"
+        );
+        assert_eq!(
+            scan[8].map(|(c, _)| c),
+            Some(130),
+            "right wraps to tile col 0 (not row 1) → idx 2"
+        );
+    }
+
+    #[test]
+    fn sprite_wraps_from_bottom_to_top() {
+        // 8×8 sprite at y=252. At scanline 0 the row-in-sprite is
+        // (0 - 252) mod 256 = 4, so its lower rows wrap to the top of
+        // the screen (ares object.cpp:51-55). Without the `& 0xFF` it
+        // would be skipped.
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F);
+        for i in 0..128u16 {
+            p.oam.poke(i * 4 + 1, 100);
+        }
+        p.oam.poke(0, 0); // x.low
+        p.oam.poke(1, 252); // y
+        p.oam.poke(2, 0); // char 0
+        p.oam.poke(3, 0);
+        p.vram.poke(0x0008, 0x80); // tile 0, row 4, plane 0 → idx 1
+        let scan = render_sprites_scanline_indexed_with(&p, 0, RenderOptions::default());
+        assert_eq!(
+            scan[0].map(|(c, _)| c),
+            Some(129),
+            "sprite wraps mod 256 to the top"
+        );
     }
 
     #[test]
