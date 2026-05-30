@@ -23,11 +23,10 @@
 /// (`SPC700_CYCLES[opcode] = cycles`).
 ///
 /// Values follow the canonical SPC700 cycle reference (see
-/// `docs/apu_dsp_reference.md` §2). Branches use the **not-taken**
-/// cost; taken branches consume +2 cycles. The dispatcher in
-/// [`crate::Spc700::step`] currently returns this base cost and lets
-/// the higher-level scheduler treat it as the per-instruction
-/// average — Phase 2 will add the conditional taken-penalty.
+/// `docs/apu_dsp_reference.md` §2). Branches list the **not-taken**
+/// cost; `Spc700::step` adds the +2 taken-branch penalty
+/// ([`SPC700_BRANCH_TAKEN_PENALTY`]) when a branch / `CBNE` / `DBNZ`
+/// is taken.
 #[rustfmt::skip]
 pub const SPC700_CYCLES: [u8; 256] = [
     // 0x00-0x0F
