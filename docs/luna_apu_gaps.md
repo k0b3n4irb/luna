@@ -61,14 +61,17 @@ external/internal wait-state dividers (bits 4-7), and writes are gated
 on the P flag. luna drops `$F0` writes entirely (`lib.rs:512`), so timer
 enable/disable gating and wait-state timing are not honoured.
 
-## 🟠 4. IPL ROM baked into ARAM — `$F1` bit 7 toggle is a no-op
+## ✅ 4. IPL ROM overlay (not baked into ARAM) — DONE
 
 ares maps the 64-byte IPL ROM as a separate overlay over
-`$FFC0-$FFFF`, gated by `$F1` bit 7 (`io.iplromEnable`). luna copies the
-IPL bytes *into* ARAM at reset (`lib.rs:256-258`), so (a) toggling bit 7
-off doesn't expose the underlying RAM, and (b) that RAM is permanently
-shadowed by the IPL image. Games that reclaim `$FFC0-$FFFF` as RAM
-after boot read IPL bytes instead.
+`$FFC0-$FFFF`, gated by `$F1` bit 7 (`io.iplromEnable`). luna used to
+copy the IPL bytes *into* ARAM at reset. Now ARAM is physical RAM only
+and the IPL ROM is a read overlay (`aram_with_ipl`) applied on the SPC
+bus path; the DSP reads physical ARAM directly (it bypasses the
+overlay, matching hardware — and fixing a latent bug where a sample at
+`$FFC0` would have read IPL bytes). Clearing bit 7 now exposes the
+underlying RAM. Tests `ipl_rom_overlay_toggles_with_f1_bit7`,
+`new_resets_spc_into_ipl_rom` (+ boot handshake unchanged).
 
 ---
 
@@ -106,6 +109,8 @@ after boot read IPL bytes instead.
 1. ~~#1 ENDX read-clear~~ — **done** (`cd3d934`).
 2. ~~#7 dead scaffolding~~, ~~#2 `$F1` port-clear~~, ~~#5 `$F8/$F9`~~ —
    **done**.
-3. **#3 `$F0` TEST**, **#4 IPL overlay** — larger (touch timing / the
-   memory map); remaining 🟠.
-4. 🟡 #6 wait-state timing — approximation, lowest priority.
+3. ~~#4 IPL overlay~~ — **done**.
+4. **#3 `$F0` TEST** — remaining 🟠 (timer enable/disable gating + the
+   wait-state inputs).
+5. 🟡 #6 wait-state timing — approximation, lowest priority (couples
+   with #3).
