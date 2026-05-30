@@ -13,6 +13,10 @@
 .DS_Store
 Thumbs.db
 
+# GUI screenshots: default to $HOME/.local/luna/screenshots (outside the
+# repo); this only catches the cwd fallback used when $HOME is unset.
+/screenshots/
+
 # Tests
 /tests/tom-harte/*.json
 /tests/tom-harte/*.zip

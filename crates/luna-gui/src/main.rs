@@ -54,7 +54,7 @@ use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::audio::AudioStreamArtifacts;
 use crate::emu_thread::EmuShared;
-use crate::input::KeyBindings;
+use crate::input::{Hotkey, KeyBindings};
 use crate::ui::{MenuAction, UiOverlay, UiState};
 
 const WINDOW_TITLE: &str = "Luna — SNES Emulator";
@@ -128,6 +128,11 @@ struct LunaApp {
     /// When `Some(button)`, the next key press is captured as that
     /// SNES button's new binding and the field is cleared.
     pending_rebind: Option<crate::input::SnesButton>,
+    /// When `Some(hotkey)`, the next key press is captured as that
+    /// hotkey's new binding (screenshot, …) and the field is cleared.
+    pending_hotkey_rebind: Option<Hotkey>,
+    /// Last screenshot filename, surfaced in the menu bar as feedback.
+    screenshot_status: Option<String>,
 }
 
 impl LunaApp {
@@ -162,6 +167,8 @@ impl LunaApp {
             rom_picker_rx: None,
             show_input_config: false,
             pending_rebind: None,
+            pending_hotkey_rebind: None,
+            screenshot_status: None,
         };
         if let Some(path) = auto_rom {
             app.load_rom(&path);
@@ -420,9 +427,9 @@ impl ApplicationHandler for LunaApp {
                 ..
             } => {
                 let pressed = state == ElementState::Pressed;
-                // Rebind capture: when the input-config modal armed
-                // `pending_rebind`, swallow the next key press and
-                // assign it to that button. Esc cancels.
+                // Rebind capture: when the input-config modal armed a
+                // pending rebind, swallow the next key press and assign
+                // it to that button / hotkey. Esc cancels.
                 if pressed
                     && !repeat
                     && let Some(button) = self.pending_rebind
@@ -431,6 +438,26 @@ impl ApplicationHandler for LunaApp {
                         self.key_bindings.set(button, code);
                     }
                     self.pending_rebind = None;
+                    return;
+                }
+                if pressed
+                    && !repeat
+                    && let Some(hotkey) = self.pending_hotkey_rebind
+                {
+                    if code != KeyCode::Escape {
+                        self.key_bindings.set_hotkey(hotkey, code);
+                    }
+                    self.pending_hotkey_rebind = None;
+                    return;
+                }
+                // Emulator hotkeys (remappable; default Screenshot = F12).
+                if pressed
+                    && !repeat
+                    && let Some(hotkey) = self.key_bindings.hotkey_for(code)
+                {
+                    match hotkey {
+                        Hotkey::Screenshot => self.take_screenshot(),
+                    }
                     return;
                 }
                 if consumed_by_ui {
@@ -501,6 +528,8 @@ impl LunaApp {
             show_input_config: self.show_input_config,
             key_bindings: &self.key_bindings,
             pending_rebind: self.pending_rebind,
+            pending_hotkey_rebind: self.pending_hotkey_rebind,
+            screenshot_status: self.screenshot_status.clone(),
         };
         let win_size = window.inner_size();
         let scale = window.scale_factor() as f32;
@@ -543,11 +572,18 @@ impl LunaApp {
                 self.show_input_config = !self.show_input_config;
                 if !self.show_input_config {
                     self.pending_rebind = None;
+                    self.pending_hotkey_rebind = None;
                 }
             }
             MenuAction::StartRebind(button) => {
                 self.pending_rebind = Some(button);
+                self.pending_hotkey_rebind = None;
             }
+            MenuAction::StartRebindHotkey(hotkey) => {
+                self.pending_hotkey_rebind = Some(hotkey);
+                self.pending_rebind = None;
+            }
+            MenuAction::TakeScreenshot => self.take_screenshot(),
             MenuAction::SaveBindings => {
                 if let Err(e) = self.key_bindings.save() {
                     eprintln!("luna-gui: save bindings failed: {e}");
@@ -555,6 +591,70 @@ impl LunaApp {
             }
         }
     }
+
+    /// Save the current on-screen frame to a PNG. Ports Mesen2's
+    /// `BaseVideoFilter::TakeScreenshot(romName, …)`: snapshot the
+    /// output buffer, then write `<rom>_NNN.png` with a zero-padded
+    /// auto-incrementing counter into [`screenshot_dir`]
+    /// (`$HOME/.local/luna/screenshots`).
+    ///
+    /// We capture the GUI's published RGBA framebuffer (256×224) — the
+    /// exact pixels on screen — so the PNG matches what the user sees.
+    fn take_screenshot(&mut self) {
+        let Ok(buf) = self.framebuffer_rgba.lock().map(|fb| fb.clone()) else {
+            return;
+        };
+        let Some(img) = image::RgbaImage::from_raw(FRAME_W as u32, FRAME_H as u32, buf) else {
+            eprintln!("luna-gui: screenshot skipped — framebuffer size mismatch");
+            return;
+        };
+        // ROM filename without extension, or "luna" if nothing loaded.
+        let base = self.rom_title.as_deref().unwrap_or("luna");
+        let base = base.rsplit_once('.').map_or(base, |(stem, _)| stem);
+        let path = next_screenshot_path(base);
+        match img.save(&path) {
+            Ok(()) => {
+                let shown = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("?")
+                    .to_string();
+                eprintln!("luna-gui: screenshot saved → {}", path.display());
+                self.screenshot_status = Some(format!("\u{1F4F7} {shown}"));
+            }
+            Err(e) => eprintln!("luna-gui: screenshot save failed: {e}"),
+        }
+    }
+}
+
+/// Directory screenshots are written to: `$HOME/.local/luna/screenshots`
+/// (a fixed location, like Mesen2's `~/Screenshots`, so captures land in
+/// the same place regardless of the launch directory). Falls back to a
+/// cwd-relative `screenshots/` if `$HOME` is unset.
+fn screenshot_dir() -> PathBuf {
+    std::env::var_os("HOME").map_or_else(
+        || PathBuf::from("screenshots"),
+        |home| {
+            PathBuf::from(home)
+                .join(".local")
+                .join("luna")
+                .join("screenshots")
+        },
+    )
+}
+
+/// Pick `<screenshot_dir>/<base>_NNN.png` with the lowest free 3-digit
+/// counter, creating the folder if needed (Mesen2's numbering scheme).
+fn next_screenshot_path(base: &str) -> PathBuf {
+    let dir = screenshot_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    for counter in 0..1000 {
+        let candidate = dir.join(format!("{base}_{counter:03}.png"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    dir.join(format!("{base}_overflow.png"))
 }
 
 fn main() {
