@@ -1302,6 +1302,77 @@ fn sample_bg_pixel(ppu: &Ppu, g: &BgGeom, src_x: u16, src_y: u16) -> IndexedPixe
     Some((cgram_idx, prio_bit))
 }
 
+/// Read one raw 16-bit tilemap word from BG3, used as offset-per-tile
+/// (OPT) data in Modes 2/4/6. `hpixel`/`vpixel` are BG3 source pixels;
+/// addressing mirrors [`sample_bg_pixel`] (ares-style 32×32 sub-screen
+/// quadrants), which the two references prefer over Mesen2's linear
+/// 64-wide form.
+fn bg3_tilemap_word(ppu: &Ppu, bg3: &crate::ppu::BgState, hpixel: u16, vpixel: u16) -> u16 {
+    let (cols, rows) = match bg3.tilemap_size & 0x03 {
+        1 => (64u16, 32u16),
+        2 => (32u16, 64u16),
+        3 => (64u16, 64u16),
+        _ => (32u16, 32u16),
+    };
+    let htile = (hpixel >> 3) & (cols - 1);
+    let vtile = (vpixel >> 3) & (rows - 1);
+    let sub_x = (htile >> 5) as usize;
+    let sub_y = (vtile >> 5) as usize;
+    let sub_index = match bg3.tilemap_size & 0x03 {
+        1 => sub_x,
+        2 => sub_y,
+        3 => sub_y * 2 + sub_x,
+        _ => 0,
+    };
+    let tile_col = htile & 0x1F;
+    let tile_row = vtile & 0x1F;
+    let base = (bg3.tilemap_addr_words as usize) << 1;
+    let off = base + sub_index * 0x0800 + ((tile_row * 32 + tile_col) as usize) * 2;
+    u16::from(ppu.vram.peek(off as u16))
+        | (u16::from(ppu.vram.peek(off.wrapping_add(1) as u16)) << 8)
+}
+
+/// Offset-per-tile (Modes 2/4/6): replace BG1/BG2's scroll for one
+/// screen tile column with values read from BG3's tilemap. Returns the
+/// effective `(h_scroll, v_scroll)` for column `screen_col`.
+///
+/// The leftmost column (0) always uses the plain scroll; column D≥1
+/// uses BG3 data one tile to the left (the hardware fetch-pipeline lag
+/// — ares `background.cpp:52-69` + `fetchOffset`, Mesen2
+/// `SnesPpu.cpp:153-169,257-276`). H replaces scroll bits 3-9 keeping
+/// the fine `&7`; V replaces fully. Mode 4 packs both into one word
+/// (bit 15 picks H vs V); Modes 2/6 use two words. Enable bit =
+/// `0x2000` for BG1, `0x4000` for BG2.
+fn opt_scroll(ppu: &Ppu, bg_idx: usize, screen_col: u16, base_h: u16, base_v: u16) -> (u16, u16) {
+    if screen_col == 0 {
+        return (base_h, base_v);
+    }
+    let bg3 = bg_state(ppu, 2);
+    let h_lookup = ((screen_col - 1) << 3).wrapping_add(bg3.h_scroll & !7);
+    let h_word = bg3_tilemap_word(ppu, &bg3, h_lookup, bg3.v_scroll);
+    let v_word = bg3_tilemap_word(ppu, &bg3, h_lookup, bg3.v_scroll.wrapping_add(8));
+    let enable = if bg_idx == 0 { 0x2000u16 } else { 0x4000u16 };
+    let mut eff_h = base_h;
+    let mut eff_v = base_v;
+    if ppu.bgmode & 0x07 == 4 {
+        if h_word & enable != 0 {
+            if h_word & 0x8000 == 0 {
+                eff_h = (base_h & 0x07) | (h_word & 0x3F8);
+            } else {
+                eff_v = h_word & 0x3FF;
+            }
+        }
+    } else {
+        if h_word & enable != 0 {
+            eff_h = (base_h & 0x07) | (h_word & 0x3F8);
+        }
+        if v_word & enable != 0 {
+            eff_v = v_word & 0x3FF;
+        }
+    }
+    (eff_h, eff_v)
+}
+
 /// Same as [`render_bg_scanline_with`] but returns CGRAM indices
 /// (instead of decoded RGB) and tags each pixel with its tilemap
 /// priority bit. Transparent pixels (colour 0 in the relevant
@@ -1332,10 +1403,23 @@ pub fn render_bg_scanline_indexed_with(
         1
     };
     let mosaic_y = (y / mosaic_size) * mosaic_size;
+    // Offset-per-tile applies to BG1/BG2 in Modes 2/4 (Mode 6 is hi-res,
+    // handled elsewhere). Effective scroll is recomputed per 8-pixel
+    // screen column.
+    let is_opt = matches!(ppu.bgmode & 0x07, 2 | 4) && bg_idx < 2;
+    let mut opt_col = u16::MAX;
+    let mut eff = (bg.h_scroll, bg.v_scroll);
     for x in 0..256u16 {
         let mosaic_x = (x / mosaic_size) * mosaic_size;
-        let src_x = mosaic_x.wrapping_add(bg.h_scroll);
-        let src_y = mosaic_y.wrapping_add(bg.v_scroll);
+        if is_opt {
+            let col = mosaic_x >> 3;
+            if col != opt_col {
+                opt_col = col;
+                eff = opt_scroll(ppu, bg_idx, col, bg.h_scroll, bg.v_scroll);
+            }
+        }
+        let src_x = mosaic_x.wrapping_add(eff.0);
+        let src_y = mosaic_y.wrapping_add(eff.1);
         out[x as usize] = sample_bg_pixel(ppu, &g, src_x, src_y);
     }
     out
@@ -2571,6 +2655,49 @@ mod tests {
             above[0],
             Some((2, 0)),
             "main subpixel = hires col 1 = idx 2"
+        );
+    }
+
+    #[test]
+    fn offset_per_tile_shifts_bg1_column() {
+        // Mode 2 OPT. BG1 columns 1 and 2 hold tiles 1 (idx 2) and 2
+        // (idx 3). BG3's tilemap word for screen column 1 carries an
+        // H-offset of +8 with the BG1 enable bit (0x2000) set, so dot 8
+        // should sample one tile to the right (tile 2 = idx 3) instead
+        // of tile 1 (idx 2). Clearing the enable bit must undo it.
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::BGMODE, 0x02); // Mode 2 (OPT), BG1 4bpp
+        p.write(0x07, 0x00); // BG1SC: tilemap byte base 0
+        p.write(0x09, 0x04); // BG3SC: tilemap word base $0400 = byte $0800
+        p.write(0x0B, 0x01); // BG12NBA: BG1 char base byte $2000
+        // BG1 tilemap: col1 → tile 1, col2 → tile 2.
+        p.vram.poke(0x0002, 0x01); // entry col 1 = tile 1
+        p.vram.poke(0x0004, 0x02); // entry col 2 = tile 2
+        // BG1 tile 1 (byte $2020) row 0 = idx 2 (plane 1); tile 2
+        // (byte $2040) = idx 3 (planes 0+1).
+        p.vram.poke(0x2021, 0xFF);
+        p.vram.poke(0x2040, 0xFF);
+        p.vram.poke(0x2041, 0xFF);
+        // BG3 OPT word for screen column 1 (lookup column 0, byte $0800):
+        // H-offset 8 + BG1 enable (0x2000).
+        p.vram.poke(0x0800, 0x08);
+        p.vram.poke(0x0801, 0x20); // 0x2008
+
+        let scan = render_bg_scanline_indexed_with(&p, 0, 0, RenderOptions::default());
+        assert_eq!(
+            scan[8],
+            Some((3, 0)),
+            "OPT +8 → dot 8 samples tile 2 (idx 3)"
+        );
+
+        // Clear the enable bit → no offset → dot 8 sees tile 1 (idx 2).
+        p.vram.poke(0x0801, 0x00); // 0x0008, enable bit cleared
+        let scan = render_bg_scanline_indexed_with(&p, 0, 0, RenderOptions::default());
+        assert_eq!(
+            scan[8],
+            Some((2, 0)),
+            "enable cleared → no offset, tile 1 (idx 2)"
         );
     }
 
