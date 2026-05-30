@@ -12,7 +12,8 @@ landed (see history below).
 As of the SPC700 Tom Harte harness (`crates/luna-cpu-spc700/tests/
 tom_harte.rs`, commit `b70bf07`), the **instruction semantics are
 machine-proven**: the `SingleStepTests/spc700` suite passes
-**256,000 / 256,000** (all 256 opcodes × 1000 cases). That covers, per
+**256,000 / 256,000 — 100%, 0 failures** (all 256 opcodes × 1000 cases;
+full suite re-verified green 2026-05-30). That covers, per
 opcode, the full register + PSW + RAM state transition — including the
 8-bit ALU half-carry/overflow, `DAA`/`DAS`, `DIV`/`MUL`, the 16-bit
 `ADDW`/`SUBW`/`CMPW` half-carry (the suspect the first draft of this doc
