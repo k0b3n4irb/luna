@@ -66,20 +66,34 @@ two no longer diverge.)
 
 ---
 
-## 🟠 3. No per-line 32-sprite / 34-tile limits (+ range/time over)
+## ✅ 3. Per-line 32-sprite / 34-tile limits (+ range/time over) — DONE
 
 Hardware evaluates at most **32 sprites** and fetches at most **34
 8×8 tiles** per scanline; excess is dropped (the source of sprite
 flicker) and the overflow sets `$213E` bit 6 (range over) / bit 7
 (time over) — ares `object.cpp:159-160`, Mesen2 `SnesPpu.cpp:610-614,
-695-698`. luna renders **all 128 sprites** every line with no cap, so
-games that rely on intentional flicker show none, and the status bits
-read 0.
+695-698`. Implemented in `evaluate_sprite_line`:
 
-## 🟠 4. OAM priority rotation (`$2103` bit 7)
+- Pass 1 keeps the first 32 on-line sprites from `firstSprite`
+  (priority order) → range over.
+- Pass 2 fetches **back-to-front** and keeps sprites while the
+  cumulative on-screen tile count stays within 34 — so the *front*
+  sprites overflow the budget and drop (the SNES tile-over quirk). Tile
+  total > 34 → time over.
+- `$213E` bits 6/7 now reflect the flags (accumulated per frame, reset
+  at line 0). The renderer draws only the survivors.
+
+Tests `sprite_range_over_drops_33rd_sprite`, `sprite_time_over_drops_
+front_sprite`. (Drop is at sprite granularity, not ares' per-tile — a
+boundary sprite drops whole rather than partial; negligible and only
+in already-overflowing scenes.)
+
+## ✅ 4. OAM priority rotation (`$2103` bit 7) — DONE
 
 When OAM priority is set, the first sprite evaluated rotates to
-`OAMADDR >> 2` (ares `object.cpp:6-9`, `setFirstSprite`). luna always
+`word_address >> 2` (ares `object.cpp:6-9`, `setFirstSprite`).
+Implemented via `Oam::first_sprite()`, feeding `evaluate_sprite_line`.
+Test `oam_priority_rotation_changes_winner`. Previously luna always
 evaluates sprite 0..127 in fixed order. Coupled with #3 — it changes
 which sprites survive the per-line cap.
 
@@ -111,5 +125,6 @@ which sprites survive the per-line cap.
 
 1. ~~#1 tile `&0x0F` wrap~~ — **done**.
 2. ~~#2 Y-wrap~~ — **done**.
-3. **#3 per-line limits + range/time over**, then **#4 OAM rotation**.
-4. 🟡 tail (#5 non-square vflip, #6 interlace).
+3. ~~#3 per-line limits + range/time over~~ — **done**.
+4. ~~#4 OAM priority rotation~~ — **done**.
+5. 🟡 tail remaining: #5 non-square vflip, #6 interlace.
