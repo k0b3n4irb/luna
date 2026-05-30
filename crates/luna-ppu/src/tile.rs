@@ -71,17 +71,24 @@ pub const fn scale_5_to_8(c5: u8) -> u8 {
 /// Apply SNES master brightness (`$2100` bits 0-3, 0..15) to an
 /// already-converted RGB888 triple.
 ///
-/// Brightness 0 produces black; brightness 15 is "full" (identity).
-/// Intermediate values are linearly scaled: `out = in * (brightness + 1) / 16`.
+/// Per ares `color.cpp`, `L = (1 + l)/16 * (l ? 1.0 : 0.25)`:
+/// brightness 1..15 scale linearly as `in * (brightness + 1) / 16`
+/// (full at 15), and brightness **0** is an extra ÷4 darker — i.e.
+/// `in / 64`, not pure black. ares notes this is hardware-measured
+/// ("luma=0 is not 100% black; but much darker than linear scaling");
+/// Mesen2 models it as pure black (`in * b / 15`), but ares is the
+/// hardware reference here.
 #[inline]
 #[must_use]
 pub fn apply_brightness(rgb: [u8; 3], brightness: u8) -> [u8; 3] {
     let b = u16::from(brightness & 0x0F);
     let scale = b + 1;
+    // Brightness 0 gets an additional right-shift of 2 (the ×0.25).
+    let extra = if b == 0 { 2 } else { 0 };
     [
-        ((u16::from(rgb[0]) * scale) >> 4) as u8,
-        ((u16::from(rgb[1]) * scale) >> 4) as u8,
-        ((u16::from(rgb[2]) * scale) >> 4) as u8,
+        (((u16::from(rgb[0]) * scale) >> 4) >> extra) as u8,
+        (((u16::from(rgb[1]) * scale) >> 4) >> extra) as u8,
+        (((u16::from(rgb[2]) * scale) >> 4) >> extra) as u8,
     ]
 }
 
@@ -194,14 +201,13 @@ mod tests {
     }
 
     #[test]
-    fn brightness_0_is_black() {
-        // out = in * (0+1) / 16 = in / 16.
-        // For in=255: 255 / 16 = 15 (not zero!). The "0 = black" claim
-        // only holds approximately; the canonical formula is the one
-        // above. Document the truth:
-        assert_eq!(apply_brightness([255, 255, 255], 0), [15, 15, 15]);
+    fn brightness_0_is_near_black() {
+        // ares color.cpp: brightness 0 = in / 64 (extra ÷4 over the
+        // linear in/16). Hardware-measured "much darker than linear",
+        // not pure black. For in=255: 255/64 = 3.
+        assert_eq!(apply_brightness([255, 255, 255], 0), [3, 3, 3]);
         // Anything dim enough rounds to 0:
-        assert_eq!(apply_brightness([15, 15, 15], 0), [0, 0, 0]);
+        assert_eq!(apply_brightness([63, 63, 63], 0), [0, 0, 0]);
     }
 
     #[test]

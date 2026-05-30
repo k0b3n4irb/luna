@@ -108,9 +108,9 @@ GUI-validated (no test ROM enables EXTBG).
 | # | Issue | ares ref | luna |
 |---|---|---|---|
 | 5 | Mode 7 mosaic not applied | `mode7.cpp:12-21` | absent |
-| 6 | Direct-colour ignores tilemap palette-group low bits | `dac.cpp` | `renderer.rs:893` drops them |
+| ~~6~~ | ~~Direct-colour palette-group low bits~~ — **DONE**: pixel + 3-bit group (`R←g0,G←g1,B←g2`) per `dac.cpp:163-170`; group packed into the BG prio byte | `dac.cpp:163-170` | ✅ |
 | 7 | No per-mode character-address mask (VRAM wrap) | `background.cpp:104-106` | wraps only at 64 KB |
-| 8 | Brightness 0 ≠ black — uses `(b+1)/16`, hw is `b/15` | dac LUT | `tile.rs:78` (all layers) |
+| ~~8~~ | ~~Brightness 0~~ — **DONE**: ares `color.cpp` `L=(1+l)/16*(l?1:0.25)`; b=0 is an extra ÷4 (1/64), not pure black. b≥1 was already correct | `color.cpp` | ✅ |
 | 9 | Legacy `render_bg1_scanline_with` is 32×32-only, diverged from runtime path | — | `renderer.rs:93` (trap for API consumers) |
 | 11 | Mosaic not applied in the hi-res path | Mesen2 `SnesPpu.cpp:1026-1044` | `render_bg_scanline_indexed_hires` skips it |
 | 12 | Hi-res sub-subpixel uses raw winner, not its own color-math | `dac.cpp:43-80` | approximated |
@@ -138,7 +138,7 @@ GUI-validated (no test ROM enables EXTBG).
 3. **#2 offset-per-tile (modes 2/4)** — done, GUI-validated on CT title.
 4. **#4 Mode 7 EXTBG** — done.
 
-All 🟠 gaps closed. Remaining work is the 🟡 tail: #6 direct-colour
-palette-group bits, #7 character-address VRAM mask, #8 brightness
-0=black, #5/#11 mosaic (Mode 7 / hi-res), #12 hi-res sub color-math,
-#13 Mode-6 OPT, #9 legacy `render_bg1_scanline_with` cleanup.
+All 🟠 gaps closed; #6 (direct-colour group) and #8 (brightness 0)
+done. Remaining 🟡 tail: #7 character-address VRAM mask, #5/#11 mosaic
+(Mode 7 / hi-res), #12 hi-res sub color-math, #13 Mode-6 OPT, #9 legacy
+`render_bg1_scanline_with` cleanup.
