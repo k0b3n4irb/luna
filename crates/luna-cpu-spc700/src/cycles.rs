@@ -132,7 +132,10 @@ mod tests {
         assert_eq!(SPC700_CYCLES[0x7F], 6, "RETI");
         assert_eq!(SPC700_CYCLES[0x0F], 8, "BRK");
         assert_eq!(SPC700_CYCLES[0x10], 2, "BPL not-taken");
-        assert_eq!(SPC700_CYCLES[0x2F], 2, "BRA not-taken base; step() adds +2 taken = 4");
+        assert_eq!(
+            SPC700_CYCLES[0x2F], 2,
+            "BRA not-taken base; step() adds +2 taken = 4"
+        );
         assert_eq!(SPC700_CYCLES[0xCF], 9, "MUL YA");
         assert_eq!(SPC700_CYCLES[0x9E], 12, "DIV YA,X");
         assert_eq!(SPC700_CYCLES[0xDF], 3, "DAA");
