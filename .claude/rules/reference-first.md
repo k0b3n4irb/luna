@@ -42,6 +42,9 @@ luna history:
 - CC1/CC2 cdsel inversion
 - Echo FIR half-scale precision bug
 - CGWSEL bits 7:6 force-main-black polarity (fixed 2026-05)
+- M7SEL H-flip/V-flip/screen-over bit-swap — implemented as bits
+  6/7/1:0 instead of the real bits 0/1/7:6 (ares io.cpp:411-414);
+  Chrono Trigger's intro pendulum pivoted from the bottom (fixed 2026-05)
 
 Always read the source first.
 
