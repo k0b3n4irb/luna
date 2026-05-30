@@ -18,7 +18,10 @@ Authored 2026-05-30.
 
 ---
 
-## 🔴 1. Sprite tile index must wrap per-nibble (`& 0x0F`), page fixed
+> **Status:** #1 and #2 fixed (commit pending). The remaining open
+> items are #3, #4 (🟠) and #5, #6 (🟡).
+
+## ✅ 1. Sprite tile index per-nibble wrap (`& 0x0F`), page fixed — DONE
 
 Both refs (ares `object.cpp:130-146`, Mesen2 `SnesPpu.cpp:735-741`)
 build the component tile index by wrapping the **low and high nibbles
@@ -40,10 +43,11 @@ let tile_id = (sp.tile.wrapping_add((tile_y * 16 + tile_x) as u16)) & 0x01FF;
 with `sp.tile` already folding `nameselect` into bit 8. So a sprite
 whose tiles sit at the right or bottom edge of the name page carries
 into the next tile **row** (or flips the page via bit 8) instead of
-wrapping within the page. Visible on multi-tile sprites placed at page
-edges. **Real bug — the headline finding.**
+wrapping within the page. **Fixed**: nibbles now wrap independently
+(`(charLow + tile_x) & 0x0F`, `(charHigh + tile_y) & 0x0F`) with the
+page held fixed. Test `sprite_tile_index_wraps_within_name_page`.
 
-## 🔴 2. Vertical Y-wrap at 256 dropped
+## ✅ 2. Vertical Y-wrap at 256 — DONE
 
 ares `onScanline` (`object.cpp:51-55`) uses `within<0,255>` — the
 row-in-sprite is computed **mod 256**, so a sprite near the bottom
@@ -54,8 +58,11 @@ let row_in_sprite = y.wrapping_sub(sp.y as u16);
 if usize::from(row_in_sprite) >= sp.h as usize { continue; }
 ```
 
-uses `u16` wrapping (mod 65536), not mod 256, so `y < sp.y` yields a
-huge value and the wrapped rows are never drawn. Fix: mask `& 0xFF`.
+used `u16` wrapping (mod 65536), not mod 256, so `y < sp.y` yielded a
+huge value and the wrapped rows were never drawn. **Fixed**: mask
+`& 0xFF`. Test `sprite_wraps_from_bottom_to_top`. (Also: the legacy
+`render_sprites_scanline` now delegates to the indexed renderer, so the
+two no longer diverge.)
 
 ---
 
@@ -102,7 +109,7 @@ which sprites survive the per-line cap.
 
 ## Suggested order
 
-1. **#1 tile `&0x0F` wrap** — real visible bug, the priority.
-2. **#2 Y-wrap** — one-line fix.
+1. ~~#1 tile `&0x0F` wrap~~ — **done**.
+2. ~~#2 Y-wrap~~ — **done**.
 3. **#3 per-line limits + range/time over**, then **#4 OAM rotation**.
 4. 🟡 tail (#5 non-square vflip, #6 interlace).
