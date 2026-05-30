@@ -3,6 +3,45 @@
 use super::bus::DmaBus;
 use luna_bus::{Addr24, make_addr};
 
+/// Can the DMA A-bus reach `addr`? It cannot touch the B-bus or CPU
+/// I/O — invalid reads return open bus and invalid writes are dropped
+/// (ares `dma.cpp:54-60`). Blocked in banks `00-3f`/`80-bf`:
+/// `2100-21ff` (B-bus), `4000-41ff`, `4200-421f`, `4300-437f`.
+const fn valid_a(addr: Addr24) -> bool {
+    if addr & 0x40_FF00 == 0x2100 {
+        return false;
+    }
+    if addr & 0x40_FE00 == 0x4000 {
+        return false;
+    }
+    if addr & 0x40_FFE0 == 0x4200 {
+        return false;
+    }
+    if addr & 0x40_FF80 == 0x4300 {
+        return false;
+    }
+    true
+}
+
+/// Is `addr` in WRAM — `$7E/$7F:xxxx` or the `$00-3f/$80-bf:0000-1fff`
+/// mirror? A transfer from WRAM to B-bus `$2180` (WMDATA) is invalid
+/// (ares `dma.cpp:94`).
+const fn is_wram_a(addr: Addr24) -> bool {
+    addr & 0xFE_0000 == 0x7E_0000 || addr & 0x40_E000 == 0x0000
+}
+
+/// A-bus read with the `validA` gate (open bus = 0 when blocked).
+fn read_a_valid<B: DmaBus>(bus: &mut B, addr: Addr24) -> u8 {
+    if valid_a(addr) { bus.read_a(addr) } else { 0 }
+}
+
+/// A-bus write with the `validA` gate (dropped when blocked).
+fn write_a_valid<B: DmaBus>(bus: &mut B, addr: Addr24, value: u8) {
+    if valid_a(addr) {
+        bus.write_a(addr, value);
+    }
+}
+
 // =============================================================================
 // Decoded `$43x0` (DMAPx) register.
 // =============================================================================
@@ -286,14 +325,19 @@ impl DmaChannel {
         while transferred < total {
             let b_offset = self.bbad.wrapping_add(pattern[byte_idx]);
             let a_addr: Addr24 = make_addr(self.a_bank, self.a_addr);
+            // A WRAM→WMDATA ($2180) transfer is invalid: the B-bus side
+            // is suppressed (ares dma.cpp:94).
+            let b_valid = !(b_offset == 0x80 && is_wram_a(a_addr));
             match self.params.direction {
                 Direction::AToB => {
-                    let v = bus.read_a(a_addr);
-                    bus.write_b(b_offset, v);
+                    let v = read_a_valid(bus, a_addr);
+                    if b_valid {
+                        bus.write_b(b_offset, v);
+                    }
                 }
                 Direction::BToA => {
-                    let v = bus.read_b(b_offset);
-                    bus.write_a(a_addr, v);
+                    let v = if b_valid { bus.read_b(b_offset) } else { 0 };
+                    write_a_valid(bus, a_addr, v);
                 }
             }
             // Advance A-bus address per params.
@@ -326,7 +370,7 @@ impl DmaChannel {
     /// disabled for the frame) if the table starts with a 0 byte.
     pub fn hdma_start_frame<B: DmaBus>(&mut self, bus: &mut B) {
         self.a2a = self.a_addr;
-        let header = bus.read_a(make_addr(self.a_bank, self.a2a));
+        let header = read_a_valid(bus, make_addr(self.a_bank, self.a2a));
         self.a2a = self.a2a.wrapping_add(1);
         self.ntlr = header;
         if header == 0 {
@@ -335,9 +379,9 @@ impl DmaChannel {
             return;
         }
         if self.params.hdma_indirect {
-            let lo = bus.read_a(make_addr(self.a_bank, self.a2a));
+            let lo = read_a_valid(bus, make_addr(self.a_bank, self.a2a));
             self.a2a = self.a2a.wrapping_add(1);
-            let hi = bus.read_a(make_addr(self.a_bank, self.a2a));
+            let hi = read_a_valid(bus, make_addr(self.a_bank, self.a2a));
             self.a2a = self.a2a.wrapping_add(1);
             self.das = u16::from(lo) | (u16::from(hi) << 8);
         }
@@ -364,16 +408,21 @@ impl DmaChannel {
             let pattern = self.params.mode.pattern();
             for &b_off in pattern {
                 let b_offset = self.bbad.wrapping_add(b_off);
-                let value = if self.params.hdma_indirect {
-                    let v = bus.read_a(make_addr(self.dasb, self.das));
-                    self.das = self.das.wrapping_add(1);
-                    v
+                let src = if self.params.hdma_indirect {
+                    make_addr(self.dasb, self.das)
                 } else {
-                    let v = bus.read_a(make_addr(self.a_bank, self.a2a));
-                    self.a2a = self.a2a.wrapping_add(1);
-                    v
+                    make_addr(self.a_bank, self.a2a)
                 };
-                bus.write_b(b_offset, value);
+                let value = read_a_valid(bus, src);
+                if self.params.hdma_indirect {
+                    self.das = self.das.wrapping_add(1);
+                } else {
+                    self.a2a = self.a2a.wrapping_add(1);
+                }
+                // Suppress the WRAM→WMDATA ($2180) B-bus write.
+                if !(b_offset == 0x80 && is_wram_a(src)) {
+                    bus.write_b(b_offset, value);
+                }
                 transferred += 1;
             }
         }
@@ -384,7 +433,7 @@ impl DmaChannel {
         self.ntlr = repeat | count;
         if count == 0 {
             // Entry exhausted: read next header byte.
-            let next = bus.read_a(make_addr(self.a_bank, self.a2a));
+            let next = read_a_valid(bus, make_addr(self.a_bank, self.a2a));
             self.a2a = self.a2a.wrapping_add(1);
             self.ntlr = next;
             if next == 0 {
@@ -392,9 +441,9 @@ impl DmaChannel {
                 self.hdma_do_transfer = false;
             } else {
                 if self.params.hdma_indirect {
-                    let lo = bus.read_a(make_addr(self.a_bank, self.a2a));
+                    let lo = read_a_valid(bus, make_addr(self.a_bank, self.a2a));
                     self.a2a = self.a2a.wrapping_add(1);
-                    let hi = bus.read_a(make_addr(self.a_bank, self.a2a));
+                    let hi = read_a_valid(bus, make_addr(self.a_bank, self.a2a));
                     self.a2a = self.a2a.wrapping_add(1);
                     self.das = u16::from(lo) | (u16::from(hi) << 8);
                 }
@@ -629,6 +678,70 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
+    // A-bus access restrictions (validA) + WRAM→WMDATA block
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn dma_a_bus_read_blocked_in_io_region_returns_open_bus() {
+        // Reading from $00:4200 (CPU I/O, blocked by validA) yields open
+        // bus 0, not the byte sitting there in the mock A-bus.
+        let mut bus = MockBus::new();
+        bus.poke_a(0x00_4200, &[0xCC]);
+        let mut ch = DmaChannel::new();
+        ch.params = DmaParams::from_byte(0x08); // mode 0, FIXED, A→B
+        ch.bbad = 0x22;
+        ch.a_addr = 0x4200;
+        ch.a_bank = 0x00;
+        ch.das = 1;
+        ch.run(&mut bus);
+        assert_eq!(bus.b[0x22], 0x00, "blocked A read returns open bus");
+    }
+
+    #[test]
+    fn dma_a_bus_write_blocked_in_b_bus_region_is_dropped() {
+        // A B→A write whose A-address is $00:2100 (B-bus, blocked) is
+        // dropped.
+        let mut bus = MockBus::new();
+        bus.b[0x39] = 0xAB;
+        let mut ch = DmaChannel::new();
+        ch.params = DmaParams::from_byte(0x88); // mode 0, FIXED, B→A
+        ch.bbad = 0x39;
+        ch.a_addr = 0x2100;
+        ch.a_bank = 0x00;
+        ch.das = 1;
+        ch.run(&mut bus);
+        assert_eq!(bus.a[0x00_2100], 0x00, "blocked A write dropped");
+    }
+
+    #[test]
+    fn dma_wram_to_wmdata_is_blocked() {
+        // A→B to BBAD $80 ($2180 WMDATA) from WRAM ($7E) is invalid: the
+        // B write is suppressed (ares dma.cpp:94).
+        let mut bus = MockBus::new();
+        bus.poke_a(0x7E_1000, &[0x5A]);
+        let mut ch = DmaChannel::new();
+        ch.params = DmaParams::from_byte(0x00);
+        ch.bbad = 0x80;
+        ch.a_addr = 0x1000;
+        ch.a_bank = 0x7E;
+        ch.das = 1;
+        ch.run(&mut bus);
+        assert_eq!(bus.b[0x80], 0x00, "WRAM→WMDATA write suppressed");
+
+        // From a non-WRAM bank ($80) the same transfer IS allowed.
+        let mut bus2 = MockBus::new();
+        bus2.poke_a(0x80_8000, &[0x5A]);
+        let mut ch2 = DmaChannel::new();
+        ch2.params = DmaParams::from_byte(0x00);
+        ch2.bbad = 0x80;
+        ch2.a_addr = 0x8000;
+        ch2.a_bank = 0x80;
+        ch2.das = 1;
+        ch2.run(&mut bus2);
+        assert_eq!(bus2.b[0x80], 0x5A, "non-WRAM→WMDATA allowed");
+    }
+
+    // -------------------------------------------------------------------
     // 64 KB special case
     // -------------------------------------------------------------------
 
@@ -713,14 +826,15 @@ mod tests {
 
     #[test]
     fn hdma_indirect_reads_data_via_dasb_pointer() {
-        // Table at $00:4000: `82 56 34 00`  (repeat 2-line entry,
+        // Table at $00:8000 (a valid A-bus address — $4000-41FF is
+        // blocked by validA): `82 56 34 00` (repeat 2-line entry,
         // pointer = $3456 in bank `dasb`, then terminator). Data at
         // $7E:3456 = $AA $BB. Repeat mode → both lines transfer, so
         // the data pointer walks across both bytes.
         let mut bus = MockBus::new();
-        bus.poke_a(0x00_4000, &[0x82, 0x56, 0x34, 0x00]);
+        bus.poke_a(0x00_8000, &[0x82, 0x56, 0x34, 0x00]);
         bus.poke_a(0x7E_3456, &[0xAA, 0xBB]);
-        let mut ch = hdma_channel(0x00, 0x4000, 0x22, 0x40); // mode 0 + indirect
+        let mut ch = hdma_channel(0x00, 0x8000, 0x22, 0x40); // mode 0 + indirect
         ch.dasb = 0x7E;
         ch.hdma_start_frame(&mut bus);
         assert_eq!(ch.das, 0x3456, "indirect pointer loaded from table");
