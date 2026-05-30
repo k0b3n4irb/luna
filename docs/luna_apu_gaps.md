@@ -110,8 +110,10 @@ underlying RAM. Tests `ipl_rom_overlay_toggles_with_f1_bit7`,
   folded in.
 - **Mailbox** direction model (`to_spc`/`to_cpu`), `$F2` DSPADDR
   read-back, `$F3` index masking (`& 0x7F` mirror region).
-- **SPC700 core** validated against the Tom Harte SPC700 test suite
-  (`crates/luna-cpu-spc700/tests/tom_harte.rs`).
+- **SPC700 core** — semantically audited against ares (ALU, DAA/DAS/
+  DIV/MUL exact; see `luna_spc700_gaps.md`). NOTE: it has *no* Tom Harte
+  test (unlike the 65c816) — only inline unit tests; that gap is tracked
+  in `luna_spc700_gaps.md`.
 
 ## Suggested order
 
