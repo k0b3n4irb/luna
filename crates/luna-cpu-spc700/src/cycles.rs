@@ -41,7 +41,7 @@ pub const SPC700_CYCLES: [u8; 256] = [
     // 0x20-0x2F
     //  20:CLRP 21:TCALL2 22:SET1 23:BBS1 24:AND_d 25:AND_!a 26:AND_(X) 27:AND_[d+X]
     //  28:AND_#i 29:AND_dd,ds 2A:OR1_/m 2B:ROL_d 2C:ROL_!a 2D:PUSH_A 2E:CBNE_d 2F:BRA
-        2, 8, 4, 5, 3, 4, 3, 6, 2, 6, 6, 4, 5, 4, 5, 4,
+        2, 8, 4, 5, 3, 4, 3, 6, 2, 6, 6, 4, 5, 4, 5, 2,
     // 0x30-0x3F
     //  30:BMI 31:TCALL3 32:CLR1 33:BBC1 34:AND_d+X 35:AND_!a+X 36:AND_!a+Y 37:AND_[d]+Y
     //  38:AND_d,#i 39:AND_(X)(Y) 3A:INCW_d 3B:ROL_d+X 3C:ROL_A 3D:INC_X 3E:CMP_X_d 3F:CALL_!a
@@ -96,6 +96,13 @@ pub const SPC700_CYCLES: [u8; 256] = [
         2, 8, 4, 5, 4, 5, 5, 6, 3, 4, 5, 4, 2, 2, 4, 2,
 ];
 
+/// Extra SPC cycles a branch-family opcode costs when the branch is
+/// **taken** — two pipeline idles on real hardware (ares
+/// `instructionBranch`: two `idle()` calls past the condition). Added
+/// by [`crate::Spc700::step`] on top of the not-taken base in
+/// [`SPC700_CYCLES`] for BRA / Bcc / CBNE / DBNZ / BBS / BBC.
+pub const SPC700_BRANCH_TAKEN_PENALTY: u8 = 2;
+
 /// Quick sanity check: every entry must be in [2, 12]. Used by the
 /// build-time test below.
 #[cfg(test)]
@@ -125,7 +132,7 @@ mod tests {
         assert_eq!(SPC700_CYCLES[0x7F], 6, "RETI");
         assert_eq!(SPC700_CYCLES[0x0F], 8, "BRK");
         assert_eq!(SPC700_CYCLES[0x10], 2, "BPL not-taken");
-        assert_eq!(SPC700_CYCLES[0x2F], 4, "BRA always (taken)");
+        assert_eq!(SPC700_CYCLES[0x2F], 2, "BRA not-taken base; step() adds +2 taken = 4");
         assert_eq!(SPC700_CYCLES[0xCF], 9, "MUL YA");
         assert_eq!(SPC700_CYCLES[0x9E], 12, "DIV YA,X");
         assert_eq!(SPC700_CYCLES[0xDF], 3, "DAA");
