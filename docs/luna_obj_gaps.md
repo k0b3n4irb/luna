@@ -101,10 +101,10 @@ which sprites survive the per-line cap.
 
 ## 🟡 Precision / rare
 
-| # | Issue | refs | luna |
+| # | Issue | refs | status |
 |---|---|---|---|
-| 5 | Non-square (16×32 / 32×64) vflip is the *buggy* hardware flip — top/bottom halves mirror separately (`pos = W*3-1-yGap`) | ares `object.cpp:111-119`, Mesen2 `SnesPpu.cpp:716-732` | does a clean full-height flip |
-| 6 | OBJ interlace — `height >> 1`, y-doubling, and the `baseSize≥6 → height 16` quirk | ares `oam.cpp:67`, `object.cpp:109,121-123` | not modelled |
+| ~~5~~ | ~~Non-square (16×32 / 32×64) vflip~~ — **DONE**: rectangular sprites now use the buggy hardware flip (top/bottom halves mirror separately, `3*w-1-row`); square sprites keep the plain `h-1-row` | ares `object.cpp:111-119`, Mesen2 `SnesPpu.cpp:716-732` | ✅ |
+| 6 | OBJ interlace — `height >> 1`, y-doubling, `baseSize≥6 → height 16` quirk | ares `oam.cpp:67`, `object.cpp:109,121-123` | **deferred** — blocked on luna's missing interlace framework (no fields / 448-line rendering); OBJ-interlace code would be unreachable until that lands |
 
 ---
 
@@ -127,4 +127,8 @@ which sprites survive the per-line cap.
 2. ~~#2 Y-wrap~~ — **done**.
 3. ~~#3 per-line limits + range/time over~~ — **done**.
 4. ~~#4 OAM priority rotation~~ — **done**.
-5. 🟡 tail remaining: #5 non-square vflip, #6 interlace.
+5. ~~#5 non-square vflip~~ — **done**.
+
+Only #6 (OBJ interlace) remains, deferred until luna grows an interlace
+rendering framework (a system-wide gap, not OBJ-specific). The entire
+actionable sprite audit is complete.
