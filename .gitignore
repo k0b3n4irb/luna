@@ -18,11 +18,12 @@ Thumbs.db
 /screenshots/
 
 # Tests
-/tests/tom-harte/*.json
-/tests/tom-harte/*.zip
-!/tests/tom-harte/.gitkeep
-# SPC700 Tom Harte dataset — shallow git clone, fetched on demand.
+# Tom Harte / SingleStepTests CPU datasets — large external shallow
+# clones, fetched on demand (tools/fetch-tom-harte*.sh). Never committed.
+/tests/tom-harte/
 /tests/tom-harte-spc700/
+# Peter Lemon SNES test ROMs — external clone, fetched on demand.
+/tests/peterlemon-snes/
 # Proprietary game ROMs — never commit.
 /tests/roms/*
 !/tests/roms/.gitkeep
