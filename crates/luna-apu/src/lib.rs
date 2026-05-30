@@ -33,6 +33,18 @@
 
 use luna_cpu_spc700::{IPL_ROM, IPL_ROM_BASE, Spc700, SpcBus};
 
+/// Read one ARAM byte as the **SPC700** sees it: `$FFC0-$FFFF` returns
+/// the 64-byte IPL ROM while `$F1` bit 7 is set, otherwise the physical
+/// RAM underneath. The DSP reads physical ARAM directly and bypasses
+/// this overlay (ares: the IPL mapping is SMP-side only).
+const fn aram_with_ipl(aram: &[u8; 0x10000], control: u8, addr: u16) -> u8 {
+    if addr >= IPL_ROM_BASE && control & 0x80 != 0 {
+        IPL_ROM[(addr - IPL_ROM_BASE) as usize]
+    } else {
+        aram[addr as usize]
+    }
+}
+
 /// Cycle-accurate ares port of the S-DSP — the live audio path. See
 /// `dsp.rs` for the 1-for-1 transliteration of `ares/sfc/dsp/*`.
 pub mod dsp;
@@ -69,10 +81,10 @@ pub struct Apu {
     /// Echo, Noise, BRR, Latch, Clock, `MainVol` state. `tick_voices`
     /// drives one `dsp.main()` per 32 SPC cycles → one stereo sample.
     pub dsp: dsp::Dsp,
-    /// 64 KB of audio RAM. The IPL ROM is *also* mapped into
-    /// `$FFC0..=$FFFF` on top of the ARAM — controlled by the SPC's
-    /// `$F1` "control" register (bit 7 = use IPL ROM). We model "IPL
-    /// ROM always exposed" for now; toggling lives behind that bit.
+    /// 64 KB of physical audio RAM. The 64-byte IPL ROM is *not* baked
+    /// in — it's a read overlay over `$FFC0..=$FFFF` on the SPC side,
+    /// gated on `$F1` bit 7 (see [`aram_with_ipl`] / [`Apu::peek`]). The
+    /// DSP reads this array directly, bypassing the overlay.
     pub aram: Box<[u8; 0x10000]>,
     /// CPU → SPC mailbox (CPU writes `$2140-$2143`, SPC reads `$F4-$F7`).
     pub to_spc_ports: [u8; 4],
@@ -154,13 +166,15 @@ impl Apu {
     /// its reset vector from the IPL ROM and lands at `$FFC0`).
     #[must_use]
     pub fn new() -> Self {
-        let mut aram: Box<[u8; 0x10000]> = vec![0u8; 0x10000]
+        // ARAM is physical RAM only. The 64-byte IPL ROM is a separate
+        // read overlay over $FFC0-$FFFF (gated on $F1 bit 7, applied in
+        // the bus read path) rather than baked in — so a game that
+        // clears bit 7 reclaims the underlying RAM, and the DSP always
+        // reads physical ARAM.
+        let aram: Box<[u8; 0x10000]> = vec![0u8; 0x10000]
             .into_boxed_slice()
             .try_into()
             .expect("64 KB slice into fixed array");
-        for (i, b) in IPL_ROM.iter().enumerate() {
-            aram[IPL_ROM_BASE as usize + i] = *b;
-        }
         let mut apu = Self {
             cpu: Spc700::new(),
             dsp: dsp::Dsp::new(),
@@ -272,6 +286,14 @@ impl Apu {
     #[must_use]
     pub const fn cpu_read_port(&self, port: usize) -> u8 {
         self.to_cpu_ports[port]
+    }
+
+    /// Read an ARAM byte as the SPC700 sees it — i.e. with the IPL ROM
+    /// overlaid over `$FFC0-$FFFF` while `$F1` bit 7 is set. (The DSP
+    /// reads physical ARAM directly; use [`Self::aram`] for that.)
+    #[must_use]
+    pub const fn peek(&self, addr: u16) -> u8 {
+        aram_with_ipl(&self.aram, self.control, addr)
     }
 
     /// Main CPU writes `value` to mailbox port (0..=3). The byte
@@ -401,10 +423,9 @@ impl SpcBus for ApuBusView<'_> {
                 self.timer_output[idx] = 0;
                 v
             }
-            // Everything else — ARAM. The IPL ROM lives at $FFC0
-            // and is pre-baked into ARAM, so the read just goes
-            // through.
-            _ => self.aram[addr as usize],
+            // Everything else — ARAM, with the IPL ROM overlaid over
+            // $FFC0-$FFFF while $F1 bit 7 is set.
+            _ => aram_with_ipl(self.aram, *self.control, addr),
         }
     }
 
@@ -481,8 +502,25 @@ mod tests {
     fn new_resets_spc_into_ipl_rom() {
         let apu = Apu::new();
         assert_eq!(apu.cpu.pc, IPL_ROM_BASE);
-        // ARAM at $FFC0 holds the first byte of the IPL ROM.
-        assert_eq!(apu.aram[IPL_ROM_BASE as usize], IPL_ROM[0]);
+        // The SPC sees the IPL ROM at $FFC0 (overlay), while the physical
+        // ARAM underneath is still zero (not baked in).
+        assert_eq!(apu.peek(IPL_ROM_BASE), IPL_ROM[0]);
+        assert_eq!(apu.aram[IPL_ROM_BASE as usize], 0);
+    }
+
+    #[test]
+    fn ipl_rom_overlay_toggles_with_f1_bit7() {
+        let mut apu = Apu::new();
+        // Write some RAM under the IPL ROM region.
+        apu.aram[IPL_ROM_BASE as usize] = 0x42;
+        // Bit 7 set (reset default) → SPC reads the IPL ROM.
+        assert_eq!(apu.peek(IPL_ROM_BASE), IPL_ROM[0]);
+        // Clear bit 7 → the underlying RAM is exposed.
+        apu.control = 0x00;
+        assert_eq!(apu.peek(IPL_ROM_BASE), 0x42);
+        // Re-enable → IPL ROM again.
+        apu.control = 0x80;
+        assert_eq!(apu.peek(IPL_ROM_BASE), IPL_ROM[0]);
     }
 
     #[test]
