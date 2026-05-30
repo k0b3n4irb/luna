@@ -460,6 +460,10 @@ impl Snes {
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
             ppu_line: ppu_line_snapshot,
+            mcycles_in_line: 0,
+            frame_count: 0,
+            nmis_serviced: 0,
+            sched_enabled: false,
             vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
@@ -498,222 +502,191 @@ impl Snes {
         let ppu_line_snapshot = self.ppu_line;
         let vblank_start_snapshot = vblank_start_line(self.region);
         let cpu_pc_snapshot = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
-        let Self {
-            cpu,
-            ppu,
-            dma,
-            cpu_regs,
-            apu_real,
-            apu_stub_fallback,
-            apu_panicked,
-            wram,
-            mapper,
-            fast_rom,
-            nmi_pending,
-            irq_pending,
-            total_mclk,
-            wm_addr,
-            joypad_strobe,
-            joypad1_shift,
-            joypad2_shift,
-            mailbox_log,
-            mem_trace_log,
-            ..
-        } = self;
-        let mut bus = SnesBus {
-            wram,
-            mapper: mapper.as_mut(),
-            ppu,
-            dma,
-            cpu_regs,
-            apu_real,
-            apu_stub_fallback,
-            apu_panicked,
-            fast_rom: *fast_rom,
-            nmi: nmi_pending,
-            irq: irq_pending,
-            mclk_total: total_mclk,
-            scanlines_per_frame: scanlines,
-            ppu_line: ppu_line_snapshot,
-            vblank_start_line: vblank_start_snapshot,
-            cpu_pc_full: cpu_pc_snapshot,
-            mailbox_log,
-            mem_trace_log,
-            wm_addr,
-            joypad_strobe,
-            joypad1_shift,
-            joypad2_shift,
-        };
-        cpu.step(&mut bus);
+        let (rb_line, rb_mil, rb_fc, rb_ns);
+        {
+            let Self {
+                cpu,
+                ppu,
+                dma,
+                cpu_regs,
+                apu_real,
+                apu_stub_fallback,
+                apu_panicked,
+                wram,
+                mapper,
+                fast_rom,
+                nmi_pending,
+                irq_pending,
+                total_mclk,
+                wm_addr,
+                joypad_strobe,
+                joypad1_shift,
+                joypad2_shift,
+                mailbox_log,
+                mem_trace_log,
+                mcycles_in_line,
+                frame_count,
+                nmis_serviced,
+                ..
+            } = self;
+            let mut bus = SnesBus {
+                wram,
+                mapper: mapper.as_mut(),
+                ppu,
+                dma,
+                cpu_regs,
+                apu_real,
+                apu_stub_fallback,
+                apu_panicked,
+                fast_rom: *fast_rom,
+                nmi: nmi_pending,
+                irq: irq_pending,
+                mclk_total: total_mclk,
+                scanlines_per_frame: scanlines,
+                ppu_line: ppu_line_snapshot,
+                mcycles_in_line: *mcycles_in_line,
+                frame_count: *frame_count,
+                nmis_serviced: *nmis_serviced,
+                sched_enabled: true,
+                vblank_start_line: vblank_start_snapshot,
+                cpu_pc_full: cpu_pc_snapshot,
+                mailbox_log,
+                mem_trace_log,
+                wm_addr,
+                joypad_strobe,
+                joypad1_shift,
+                joypad2_shift,
+            };
+            // The scanline scheduler now advances per bus access inside
+            // `bus.io_cycle` (per-scanline rendering: each line is drawn
+            // with the register state live at that point, not the end-of-
+            // instruction snapshot). Read the live cursor back out below.
+            cpu.step(&mut bus);
+            rb_line = bus.ppu_line;
+            rb_mil = bus.mcycles_in_line;
+            rb_fc = bus.frame_count;
+            rb_ns = bus.nmis_serviced;
+        }
+        self.ppu_line = rb_line;
+        self.mcycles_in_line = rb_mil;
+        self.frame_count = rb_fc;
+        self.nmis_serviced = rb_ns;
 
-        // Advance the PPU scanline counter by the master cycles this
-        // instruction consumed. Crossing a scanline boundary triggers
-        // line-tick events; crossing into line 225 fires VBlank/NMI.
         let consumed = self.total_mclk - before;
-        self.advance_scheduler(consumed as u32);
-
-        // (APU catch-up now happens per bus access in `SnesBus::io_cycle`,
-        // not as an end-of-instruction lump — see Phase 1.)
 
         // Catch up any cartridge coprocessor (SA-1 / Super FX / DSP-1
         // / …). Plain LoROM/HiROM mappers no-op here.
         self.mapper.step_coproc(consumed as u32);
 
         // Bridge the coprocessor's level-driven IRQ line into the
-        // 65C816's edge-latched `pending_irq` model. Per ares
-        // (`coprocessor/sa1/io.cpp:134-163, 233-246`) the SA-1 drives
-        // the S-CPU IRQ pin to a level (high until SIC ack); the CPU
-        // polls it each step. luna's CPU only services on edge, so we
-        // re-arm the latch every step whenever the level is still
-        // high. Without this, SCNT.7 writes by the SA-1 raise SFR
-        // bit 7 + `coproc_main_irq_pending()` but the main CPU never
-        // services the IRQ → SMRPG hangs forever in forced-blank on
-        // its first SA-1↔main mailbox handshake. The CPU's own
-        // edge-consume + I-mask check still gates the actual service,
-        // so this is safe to call even when the handler hasn't yet
-        // acked: it just keeps the latch true until the level drops.
+        // 65C816's edge-latched `pending_irq` model (ares
+        // `coprocessor/sa1/io.cpp:134-163`): the SA-1 holds the S-CPU IRQ
+        // pin high until SIC ack, so re-arm the latch each step while the
+        // level is still asserted. The CPU's edge-consume + I-mask still
+        // gates actual service.
         if self.mapper.coproc_main_irq_pending() {
+            self.cpu.trigger_irq();
+        }
+
+        // Apply interrupt edges the scanline scheduler latched during this
+        // instruction's bus accesses. Deferring the CPU poke to the
+        // instruction boundary keeps NMI/IRQ delivery timing identical to
+        // the old end-of-step model — the CPU only services interrupts
+        // between instructions anyway.
+        if self.nmi_pending {
+            self.nmi_pending = false;
+            self.cpu.trigger_nmi();
+        }
+        if self.irq_pending {
+            self.irq_pending = false;
             self.cpu.trigger_irq();
         }
 
         consumed
     }
 
-    /// Drive the scanline scheduler by `mcycles` of consumed master
-    /// cycles. Inspired by bsnes / ares' line-tick approach: we keep
-    /// a `(ppu_line, mcycles_in_line)` cursor and walk it forward,
-    /// firing events at each line boundary.
+    /// Test-only helper: advance the scanline scheduler directly by
+    /// `mcycles` (a mini `step` with no instruction), then apply any
+    /// latched NMI/IRQ edge. Production advances the scheduler inside
+    /// [`Bus::io_cycle`]; this is the entry point the scheduler tests poke.
+    #[cfg(test)]
     fn advance_scheduler(&mut self, mcycles: u32) {
-        self.mcycles_in_line += mcycles;
-        while self.mcycles_in_line >= MCYCLES_PER_SCANLINE {
-            self.mcycles_in_line -= MCYCLES_PER_SCANLINE;
-            self.advance_one_scanline();
+        let scanlines = self.region_scanlines();
+        let ppu_line_snapshot = self.ppu_line;
+        let vblank_start_snapshot = vblank_start_line(self.region);
+        let cpu_pc_snapshot = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
+        let (rb_line, rb_mil, rb_fc, rb_ns);
+        {
+            let Self {
+                ppu,
+                dma,
+                cpu_regs,
+                apu_real,
+                apu_stub_fallback,
+                apu_panicked,
+                wram,
+                mapper,
+                fast_rom,
+                nmi_pending,
+                irq_pending,
+                total_mclk,
+                wm_addr,
+                joypad_strobe,
+                joypad1_shift,
+                joypad2_shift,
+                mailbox_log,
+                mem_trace_log,
+                mcycles_in_line,
+                frame_count,
+                nmis_serviced,
+                ..
+            } = self;
+            let mut bus = SnesBus {
+                wram,
+                mapper: mapper.as_mut(),
+                ppu,
+                dma,
+                cpu_regs,
+                apu_real,
+                apu_stub_fallback,
+                apu_panicked,
+                fast_rom: *fast_rom,
+                nmi: nmi_pending,
+                irq: irq_pending,
+                mclk_total: total_mclk,
+                scanlines_per_frame: scanlines,
+                ppu_line: ppu_line_snapshot,
+                mcycles_in_line: *mcycles_in_line,
+                frame_count: *frame_count,
+                nmis_serviced: *nmis_serviced,
+                sched_enabled: true,
+                vblank_start_line: vblank_start_snapshot,
+                cpu_pc_full: cpu_pc_snapshot,
+                mailbox_log,
+                mem_trace_log,
+                wm_addr,
+                joypad_strobe,
+                joypad1_shift,
+                joypad2_shift,
+            };
+            bus.sched_advance(mcycles);
+            rb_line = bus.ppu_line;
+            rb_mil = bus.mcycles_in_line;
+            rb_fc = bus.frame_count;
+            rb_ns = bus.nmis_serviced;
         }
-    }
-
-    /// Cross one scanline boundary and apply the per-line events the
-    /// SNES PPU drives.
-    fn advance_one_scanline(&mut self) {
-        let vblank_start = vblank_start_line(self.region);
-        let scanlines = scanlines_per_frame(self.region);
-
-        // Gap G6 Phase 1: render the visible line that just finished
-        // into the PPU's persistent framebuffer, using its end-of-line
-        // register state. HDMA fires AFTER the ppu_line increment below
-        // (canonical "HDMA at end-of-HBlank" ordering), so register
-        // values from any HDMA write that targets line N+1 are still
-        // unapplied here — line N gets the right state.
-        if self.ppu_line < vblank_start {
-            self.ppu
-                .render_current_scanline(self.ppu_line, luna_ppu::RenderOptions::default());
+        self.ppu_line = rb_line;
+        self.mcycles_in_line = rb_mil;
+        self.frame_count = rb_fc;
+        self.nmis_serviced = rb_ns;
+        if self.nmi_pending {
+            self.nmi_pending = false;
+            self.cpu.trigger_nmi();
         }
-
-        self.ppu_line += 1;
-        if self.ppu_line == vblank_start {
-            // Entering VBlank. Latch the NMI flag visible at $4210
-            // and set the VBlank bit of HVBJOY.
-            self.cpu_regs.nmi_flag = true;
-            self.cpu_regs.hvbjoy |= 0x80;
-            if self.cpu_regs.nmitimen & 0x80 != 0 {
-                self.cpu.trigger_nmi();
-                self.nmis_serviced = self.nmis_serviced.saturating_add(1);
-            }
-            // OAM address auto-reset: hardware reloads the internal byte
-            // address from the latched word_address at vcounter == vdisp,
-            // unless forced-blank is active. SMW (and most games) rely on
-            // this so each NMI's OAM-DMA into $2104 starts at index 0.
-            // See ares `object.cpp:31-32` and Mesen2 `SnesPpu.cpp:464-472`.
-            if self.ppu.inidisp & 0x80 == 0 {
-                self.ppu.oam.reload_address_from_latch();
-            }
-            // Joypad auto-read: hardware copies the live pad state
-            // into $4218-$421F at the start of every VBlank when
-            // NMITIMEN.0 is set. Busy bit clears a few lines later.
-            //
-            // Per ares' `controllerPort.latch()` chained off the
-            // auto-poll counter rollover, the same auto-read pulse
-            // also re-arms the manual-mode shift register. Games
-            // that read $4016/$4017 right after the auto-read
-            // window expect the shift register to reflect the
-            // just-latched controller state.
-            self.cpu_regs.latch_joypad_auto_read();
-            if self.cpu_regs.nmitimen & 0x01 != 0 {
-                self.joypad1_shift = self.cpu_regs.joypad1_latched;
-                self.joypad2_shift = self.cpu_regs.joypad2_latched;
-            }
-        } else if self.ppu_line == vblank_start + 3 {
-            // ~3 scanlines after VBlank entry the auto-read sequence
-            // is done. Drop HVBJOY.0 so polling games see ready.
-            self.cpu_regs.clear_joypad_busy();
-        }
-        // H- / V-counter IRQ. NMITIMEN bits 5:4 select the trigger:
-        //   00 = disabled
-        //   01 = H-counter match (every scanline at H = HTIME)
-        //   10 = V-counter match (line N == VTIME, H == 0)
-        //   11 = H AND V match (line N == VTIME AND H == HTIME)
-        //
-        // Our scheduler only fires events at scanline boundaries, so
-        // H-counter-precise IRQ timing isn't dot-accurate yet. The
-        // tracking we do model:
-        //   * V-only (mode 10): raise IRQ when we enter `vtime`.
-        //   * H+V (mode 11):   same as V-only here — at scanline
-        //                       boundary the H-counter is implicitly
-        //                       0; if HTIME is also 0 the match is
-        //                       exact, otherwise we're a few mclk
-        //                       off. Enough for games that just
-        //                       want a per-scanline raster IRQ.
-        //   * H-only (mode 01): fire on every scanline transition.
-        //                       Most games use this with HTIME = 0
-        //                       which lands on the canonical
-        //                       scanline-start raster point.
-        let irq_mode = (self.cpu_regs.nmitimen >> 4) & 0x03;
-        let fire_irq = match irq_mode {
-            0b00 => false,
-            0b01 => true,
-            0b10 => self.ppu_line == self.cpu_regs.vtime,
-            0b11 => self.ppu_line == self.cpu_regs.vtime && self.cpu_regs.htime == 0,
-            _ => false,
-        };
-        if fire_irq {
-            self.cpu_regs.irq_flag = true;
+        if self.irq_pending {
+            self.irq_pending = false;
             self.cpu.trigger_irq();
         }
-        if self.ppu_line >= scanlines {
-            // Frame wrap: back to line 0, clear VBlank bit, and re-
-            // initialise HDMA tables for the new frame.
-            self.ppu_line = 0;
-            self.cpu_regs.hvbjoy &= !0x80;
-            self.frame_count = self.frame_count.saturating_add(1);
-            self.hdma_init_frame();
-        }
-        // After the line counter has advanced, fire HDMA on every
-        // active visible scanline. HDMA transfers happen during the
-        // line's H-blank, so doing them once per scanline transition
-        // is the canonical place.
-        if self.ppu_line < vblank_start {
-            self.hdma_run_line();
-        }
-    }
-
-    /// Borrow-split helper: build a [`DmaBusView`] for HDMA against
-    /// the same WRAM / mapper / PPU references DMA uses. Mirrors the
-    /// pattern in the `$420B` write path.
-    fn hdma_init_frame(&mut self) {
-        let mut view = DmaBusView {
-            wram: &mut self.wram,
-            mapper: self.mapper.as_mut(),
-            ppu: &mut self.ppu,
-        };
-        self.dma.hdma_init(&mut view);
-    }
-
-    fn hdma_run_line(&mut self) {
-        let mut view = DmaBusView {
-            wram: &mut self.wram,
-            mapper: self.mapper.as_mut(),
-            ppu: &mut self.ppu,
-        };
-        self.dma.hdma_run_line(&mut view);
     }
 
     /// Set the live joypad state for controller `idx` (0 = pad 1,
@@ -777,6 +750,10 @@ impl Snes {
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
             ppu_line: ppu_line_snapshot,
+            mcycles_in_line: 0,
+            frame_count: 0,
+            nmis_serviced: 0,
+            sched_enabled: false,
             vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
@@ -830,10 +807,21 @@ struct SnesBus<'a> {
     /// used by the H/V counter latch path (\$2137 / WRIO) to wrap
     /// the V coordinate at the right boundary.
     scanlines_per_frame: u16,
-    /// Current scanline (snapshot at the start of the bus borrow).
-    /// Used by the $2100 INIDISP write path to gate the OAM address
-    /// auto-reset on the vblank-entry line.
+    /// Live current scanline. When `sched_enabled`, [`Bus::io_cycle`]
+    /// advances this mid-instruction (per-scanline rendering); otherwise
+    /// it's a read-only snapshot for the RDNMI / INIDISP gates. Written
+    /// back into [`Snes::ppu_line`] after the instruction.
     ppu_line: u16,
+    /// Live master-cycle position within the current scanline.
+    mcycles_in_line: u32,
+    /// Live completed-frame counter.
+    frame_count: u64,
+    /// Live delivered-NMI counter.
+    nmis_serviced: u64,
+    /// When `true`, `io_cycle` ticks the scanline scheduler per bus
+    /// access. `false` for debug peeks / mapping tests so they never
+    /// advance emulation.
+    sched_enabled: bool,
     /// First vblank scanline for the current region (225 NTSC / 240 PAL).
     vblank_start_line: u16,
     /// CPU PC snapshot at the start of the instruction step that owns
@@ -1042,6 +1030,95 @@ impl SnesBus<'_> {
     }
 }
 
+impl SnesBus<'_> {
+    /// Advance the scanline scheduler by `mcycles`, firing per-line events
+    /// at each boundary. Called from [`Bus::io_cycle`] mid-instruction.
+    fn sched_advance(&mut self, mcycles: u32) {
+        self.mcycles_in_line += mcycles;
+        while self.mcycles_in_line >= MCYCLES_PER_SCANLINE {
+            self.mcycles_in_line -= MCYCLES_PER_SCANLINE;
+            self.sched_one_line();
+        }
+    }
+
+    /// Cross one scanline boundary, applying the per-line PPU events.
+    /// Mirrors the former `Snes::advance_one_scanline`, but raises NMI/IRQ
+    /// via the bus `nmi`/`irq` latches (the CPU is borrowed here; `step`
+    /// applies the edge at the instruction boundary).
+    fn sched_one_line(&mut self) {
+        let vblank_start = self.vblank_start_line;
+        let scanlines = self.scanlines_per_frame;
+
+        // Render the visible line that just finished, with its end-of-line
+        // register state (HDMA for the next line fires after the increment).
+        if self.ppu_line < vblank_start {
+            self.ppu
+                .render_current_scanline(self.ppu_line, luna_ppu::RenderOptions::default());
+        }
+
+        self.ppu_line += 1;
+        if self.ppu_line == vblank_start {
+            // Entering VBlank: latch the $4210 NMI flag + HVBJOY.7.
+            self.cpu_regs.nmi_flag = true;
+            self.cpu_regs.hvbjoy |= 0x80;
+            if self.cpu_regs.nmitimen & 0x80 != 0 {
+                *self.nmi = true;
+                self.nmis_serviced = self.nmis_serviced.saturating_add(1);
+            }
+            // OAM address auto-reset (ares `object.cpp:31-32`), unless
+            // forced-blank.
+            if self.ppu.inidisp & 0x80 == 0 {
+                self.ppu.oam.reload_address_from_latch();
+            }
+            // Joypad auto-read latch + manual-mode shift reload.
+            self.cpu_regs.latch_joypad_auto_read();
+            if self.cpu_regs.nmitimen & 0x01 != 0 {
+                *self.joypad1_shift = self.cpu_regs.joypad1_latched;
+                *self.joypad2_shift = self.cpu_regs.joypad2_latched;
+            }
+        } else if self.ppu_line == vblank_start + 3 {
+            self.cpu_regs.clear_joypad_busy();
+        }
+
+        // H/V-counter IRQ (scanline-boundary granularity).
+        let irq_mode = (self.cpu_regs.nmitimen >> 4) & 0x03;
+        let fire_irq = match irq_mode {
+            0b00 => false,
+            0b01 => true,
+            0b10 => self.ppu_line == self.cpu_regs.vtime,
+            0b11 => self.ppu_line == self.cpu_regs.vtime && self.cpu_regs.htime == 0,
+            _ => false,
+        };
+        if fire_irq {
+            self.cpu_regs.irq_flag = true;
+            *self.irq = true;
+        }
+
+        if self.ppu_line >= scanlines {
+            // Frame wrap.
+            self.ppu_line = 0;
+            self.cpu_regs.hvbjoy &= !0x80;
+            self.frame_count = self.frame_count.saturating_add(1);
+            let mut view = DmaBusView {
+                wram: &mut *self.wram,
+                mapper: &mut *self.mapper,
+                ppu: &mut *self.ppu,
+            };
+            self.dma.hdma_init(&mut view);
+        }
+
+        // HDMA on every visible scanline (end-of-HBlank ordering).
+        if self.ppu_line < vblank_start {
+            let mut view = DmaBusView {
+                wram: &mut *self.wram,
+                mapper: &mut *self.mapper,
+                ppu: &mut *self.ppu,
+            };
+            self.dma.hdma_run_line(&mut view);
+        }
+    }
+}
+
 impl Bus for SnesBus<'_> {
     fn read(&mut self, addr: Addr24) -> u8 {
         let value = self.read_inner(addr);
@@ -1066,6 +1143,13 @@ impl Bus for SnesBus<'_> {
             if self.apu_real.cpu.stopped {
                 *self.apu_panicked = true;
             }
+        }
+        // Phase: per-scanline PPU. Advance the scanline scheduler at bus-
+        // access granularity so each line renders with the register state
+        // live at that access, not the end-of-instruction snapshot. Off
+        // for debug peeks / mapping tests (`sched_enabled == false`).
+        if self.sched_enabled {
+            self.sched_advance(mcycles as u32);
         }
     }
     fn nmi_pending(&self) -> bool {
@@ -1536,6 +1620,10 @@ mod tests {
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
             ppu_line: ppu_line_snapshot,
+            mcycles_in_line: 0,
+            frame_count: 0,
+            nmis_serviced: 0,
+            sched_enabled: false,
             vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
@@ -1600,6 +1688,10 @@ mod tests {
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
             ppu_line: ppu_line_snapshot,
+            mcycles_in_line: 0,
+            frame_count: 0,
+            nmis_serviced: 0,
+            sched_enabled: false,
             vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
@@ -1671,6 +1763,10 @@ mod tests {
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
             ppu_line: ppu_line_snapshot,
+            mcycles_in_line: 0,
+            frame_count: 0,
+            nmis_serviced: 0,
+            sched_enabled: false,
             vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
@@ -1944,6 +2040,10 @@ mod tests {
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
             ppu_line: ppu_line_snapshot,
+            mcycles_in_line: 0,
+            frame_count: 0,
+            nmis_serviced: 0,
+            sched_enabled: false,
             vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
