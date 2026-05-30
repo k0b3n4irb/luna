@@ -21,6 +21,8 @@ Thumbs.db
 /tests/tom-harte/*.json
 /tests/tom-harte/*.zip
 !/tests/tom-harte/.gitkeep
+# SPC700 Tom Harte dataset — shallow git clone, fetched on demand.
+/tests/tom-harte-spc700/
 # Proprietary game ROMs — never commit.
 /tests/roms/*
 !/tests/roms/.gitkeep
