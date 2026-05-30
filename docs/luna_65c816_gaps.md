@@ -11,7 +11,8 @@ Reference-first audit of `crates/luna-cpu-65c816` against ares
 Unlike the other subsystems, the 65C816 **instruction semantics** are
 exhaustively validated by the Tom Harte `SingleStepTests/65816` suite
 (`crates/luna-cpu-65c816/tests/tom_harte.rs`): **5,080,000 / 5,080,000
-cases pass** (commit `f23d5cd`). That covers, per-opcode, the full
+cases pass — 100%, 0 failures** (since commit `f23d5cd`; full suite
+re-verified green 2026-05-30). That covers, per-opcode, the full
 register + flag + RAM state transition for all 256 opcodes — including
 the BCD `ADC`/`SBC` pipeline, `REP`/`SEP`/`XCE`, every addressing mode
 (including the direct-page / stack bank-0 wrap and the `(dp,X)` base-wrap
