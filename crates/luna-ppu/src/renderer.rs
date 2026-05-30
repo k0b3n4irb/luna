@@ -104,67 +104,17 @@ pub fn render_bg1_scanline_with(ppu: &Ppu, y: u16, opts: RenderOptions) -> Scanl
         ppu.inidisp & 0x0F
     };
 
-    let bg = bg_state(ppu, 0);
-    let bpp = bg1_bpp(ppu.bgmode);
-    let bytes_per_tile = match bpp {
-        2 => 16,
-        4 => 32,
-        8 => 64,
-        _ => 16,
-    };
-    // 32x32 tilemap layout only for now. (SC bits in $2107 not modelled.)
-    let tilemap_words = 32u16;
-    // VRAM byte address of the tilemap base.
-    let tilemap_base = (bg.tilemap_addr_words as usize) << 1;
-    // VRAM byte address of the BG1 character base.
-    let char_base = (bg.char_addr_words as usize) << 1;
-
     // Backdrop colour (CGRAM index 0).
     let backdrop = decode_palette(ppu, 0, brightness);
 
-    for x in 0..256u16 {
-        let src_x = x.wrapping_add(bg.h_scroll);
-        let src_y = y.wrapping_add(bg.v_scroll);
-
-        let tile_col = (src_x / 8) & 0x1F; // 32-tile wrap
-        let tile_row = (src_y / 8) & 0x1F;
-        let entry_off = tilemap_base + ((tile_row * tilemap_words + tile_col) as usize) * 2;
-        let entry_lo = ppu.vram.peek(entry_off as u16);
-        let entry_hi = ppu.vram.peek(entry_off.wrapping_add(1) as u16);
-        let entry = u16::from(entry_lo) | (u16::from(entry_hi) << 8);
-
-        let tile_num = entry & 0x03FF;
-        let palette_off = ((entry >> 10) & 0x07) as u8;
-        let h_flip = entry & 0x4000 != 0;
-        let v_flip = entry & 0x8000 != 0;
-
-        // Pixel within the tile (with flip).
-        let mut row_in_tile = (src_y & 7) as usize;
-        let mut col_in_tile = (src_x & 7) as usize;
-        if v_flip {
-            row_in_tile = 7 - row_in_tile;
-        }
-        if h_flip {
-            col_in_tile = 7 - col_in_tile;
-        }
-
-        let tile_base = char_base + (tile_num as usize) * bytes_per_tile;
-        let idx = decode_tile_pixel(ppu, tile_base, row_in_tile, col_in_tile, bpp);
-
-        out[x as usize] = if idx == 0 {
-            // Transparent — fall through to backdrop.
-            backdrop
-        } else {
-            let cgram_idx = match bpp {
-                // 2bpp: 4-color sub-palettes at CGRAM[palette_off*4].
-                2 => palette_off * 4 + idx,
-                // 4bpp: 16-color sub-palettes at CGRAM[palette_off*16].
-                4 => palette_off.wrapping_mul(16).wrapping_add(idx),
-                // 8bpp: full 256-color palette; palette offset is
-                // ignored by hardware.
-                _ => idx,
-            };
-            decode_palette(ppu, cgram_idx, brightness)
+    // Route through the runtime indexed renderer (tilemap sizes, 16×16
+    // tiles, mosaic, Mode-0 palette region) and decode to RGB, so this
+    // debug/API view no longer diverges from the real compositor.
+    let indexed = render_bg_scanline_indexed_with(ppu, 0, y, opts);
+    for (x, px) in indexed.iter().enumerate() {
+        out[x] = match *px {
+            Some((cgram_idx, _)) => decode_palette(ppu, cgram_idx, brightness),
+            None => backdrop,
         };
     }
     out
@@ -849,12 +799,19 @@ pub fn render_mode7_scanline_indexed(ppu: &Ppu, y: u16, opts: RenderOptions) -> 
     // scroll/centre difference.
     let clip = |n: i32| -> i32 { if n & 0x2000 != 0 { n | !1023 } else { n & 1023 } };
 
-    // V-flip mirrors the screen-space scanline (ares mode7.cpp:24).
-    let yy = if v_flip {
-        255 - i32::from(y)
+    // Mosaic (ares mode7.cpp:12-21): Mode 7 uses BG1's mosaic enable
+    // (MOSAIC bit 0). The screen x/y are snapped to the block's top-left
+    // before the affine transform, replicating that pixel across the
+    // block.
+    let mosaic_size = if ppu.mosaic & 0x01 != 0 {
+        i32::from((ppu.mosaic >> 4) & 0x0F) + 1
     } else {
-        i32::from(y)
+        1
     };
+    let mosaic_y = i32::from(y) / mosaic_size * mosaic_size;
+
+    // V-flip mirrors the screen-space scanline (ares mode7.cpp:24).
+    let yy = if v_flip { 255 - mosaic_y } else { mosaic_y };
 
     // Per-scanline affine origin. Each partial product drops its low 6
     // bits (`& !63`) to match the hardware multiplier (ares
@@ -869,8 +826,9 @@ pub fn render_mode7_scanline_indexed(ppu: &Ppu, y: u16, opts: RenderOptions) -> 
         + (vcenter << 8);
 
     for x in 0..256i32 {
+        let mosaic_x = x / mosaic_size * mosaic_size;
         // H-flip mirrors the screen-space dot (ares mode7.cpp:23).
-        let xx = if h_flip { 255 - x } else { x };
+        let xx = if h_flip { 255 - mosaic_x } else { mosaic_x };
 
         // 16.8 fixed point -> integer pixel grid (ares mode7.cpp:31-32).
         let pix_x = (origin_x + m7a * xx) >> 8;
@@ -1484,10 +1442,30 @@ fn render_bg_scanline_indexed_hires(
         return (above, below);
     };
     let bg = bg_state(ppu, bg_idx);
-    let h2 = bg.h_scroll << 1;
-    let src_y = y.wrapping_add(bg.v_scroll);
+    // Mosaic snaps the screen dot/scanline to the block before doubling.
+    let mosaic_size = if ppu.mosaic & (1 << bg_idx) != 0 {
+        u16::from((ppu.mosaic >> 4) & 0x0F) + 1
+    } else {
+        1
+    };
+    let mosaic_y = y / mosaic_size * mosaic_size;
+    // Mode 6 is hi-res *and* offset-per-tile (BG1 only; Mode 5 has no
+    // OPT, Modes 2/4 use the lores path). Effective scroll is per column.
+    let is_opt = ppu.bgmode & 0x07 == 6 && bg_idx < 2;
+    let mut opt_col = u16::MAX;
+    let mut eff = (bg.h_scroll, bg.v_scroll);
     for x in 0..256u16 {
-        let cx = (x << 1).wrapping_add(h2);
+        let mosaic_x = x / mosaic_size * mosaic_size;
+        if is_opt {
+            let col = mosaic_x >> 3;
+            if col != opt_col {
+                opt_col = col;
+                eff = opt_scroll(ppu, bg_idx, col, bg.h_scroll, bg.v_scroll);
+            }
+        }
+        let h2 = eff.0 << 1;
+        let src_y = mosaic_y.wrapping_add(eff.1);
+        let cx = (mosaic_x << 1).wrapping_add(h2);
         below[x as usize] = sample_bg_pixel(ppu, &g, cx, src_y);
         above[x as usize] = sample_bg_pixel(ppu, &g, cx.wrapping_add(1), src_y);
     }
@@ -2608,6 +2586,42 @@ mod tests {
         let (idx, prio) = scan[0].unwrap();
         assert_eq!(idx, 5);
         assert_eq!(prio, 0);
+    }
+
+    #[test]
+    fn mode7_mosaic_replicates_block_pixel() {
+        // Identity Mode 7, texture pixel (0,0)=5 and (1,0)=6. With BG1
+        // mosaic size 2 (MOSAIC=0x11), screen dots 0 and 1 both snap to
+        // texture (0,0) → both show 5. Without mosaic, dot 1 shows 6.
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::BGMODE, 0x07);
+        p.write(register::M7A, 0x00);
+        p.write(register::M7A, 0x01);
+        p.write(register::M7B, 0x00);
+        p.write(register::M7B, 0x00);
+        p.write(register::M7C, 0x00);
+        p.write(register::M7C, 0x00);
+        p.write(register::M7D, 0x00);
+        p.write(register::M7D, 0x01);
+        p.vram.poke(0, 0); // tile id 0 at (0,0)
+        p.vram.poke(1, 5); // texture pixel (0,0) = 5
+        p.vram.poke(3, 6); // texture pixel (1,0) = 6
+
+        // No mosaic → dots differ.
+        let scan = render_mode7_scanline_indexed(&p, 0, RenderOptions::default());
+        assert_eq!(scan[0].map(|(i, _)| i), Some(5));
+        assert_eq!(scan[1].map(|(i, _)| i), Some(6));
+
+        // Mosaic size 2 on BG1 → dot 1 replicates dot 0.
+        p.write(register::MOSAIC, 0x11);
+        let scan = render_mode7_scanline_indexed(&p, 0, RenderOptions::default());
+        assert_eq!(scan[0].map(|(i, _)| i), Some(5));
+        assert_eq!(
+            scan[1].map(|(i, _)| i),
+            Some(5),
+            "mosaic replicates the block"
+        );
     }
 
     #[test]
