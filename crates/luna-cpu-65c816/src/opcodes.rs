@@ -18,7 +18,7 @@ use crate::addressing::{
     absolute, absolute_indexed_x, absolute_indexed_y, absolute_long, absolute_long_indexed_x,
     direct_page, direct_page_indexed_indirect, direct_page_indexed_x, direct_page_indexed_y,
     direct_page_indirect, direct_page_indirect_long, direct_page_indirect_long_y,
-    direct_page_indirect_y, read_word, stack_relative, stack_relative_indirect_y,
+    direct_page_indirect_y, stack_relative, stack_relative_indirect_y,
 };
 use crate::cpu::Cpu;
 use crate::flags::bit;
@@ -125,6 +125,10 @@ impl Cpu {
     /// Dispatch on a fetched opcode. Inlined into the match by LLVM.
     #[allow(clippy::too_many_lines)]
     fn execute<B: Bus>(&mut self, opcode: u8, bus: &mut B) {
+        // Default 16-bit accesses to bank-carrying (ares readBank/read);
+        // the direct-page / stack-relative addressing helpers flip this on
+        // when they resolve a bank-0 effective address.
+        self.bank0_wrap = false;
         match opcode {
             // -----------------------------------------------------------
             // Mode control
@@ -573,7 +577,7 @@ impl Cpu {
             self.set_a_low(v);
             self.set_nz8(v);
         } else {
-            let v = read_word(bus, addr);
+            let v = self.read_word16(bus, addr);
             self.a = v;
             self.set_nz16(v);
         }
@@ -671,7 +675,7 @@ impl Cpu {
             self.set_x_low(v);
             self.set_nz8(v);
         } else {
-            let v = read_word(bus, addr);
+            let v = self.read_word16(bus, addr);
             self.x = v;
             self.set_nz16(v);
         }
@@ -715,7 +719,7 @@ impl Cpu {
             self.set_y_low(v);
             self.set_nz8(v);
         } else {
-            let v = read_word(bus, addr);
+            let v = self.read_word16(bus, addr);
             self.y = v;
             self.set_nz16(v);
         }
@@ -750,7 +754,7 @@ impl Cpu {
             bus.write(addr, self.a8());
         } else {
             bus.write(addr, self.a as u8);
-            bus.write(addr.wrapping_add(1), (self.a >> 8) as u8);
+            bus.write(self.hi_addr(addr), (self.a >> 8) as u8);
         }
     }
 
@@ -833,7 +837,7 @@ impl Cpu {
             bus.write(addr, self.x8());
         } else {
             bus.write(addr, self.x as u8);
-            bus.write(addr.wrapping_add(1), (self.x >> 8) as u8);
+            bus.write(self.hi_addr(addr), (self.x >> 8) as u8);
         }
     }
 
@@ -842,7 +846,7 @@ impl Cpu {
             bus.write(addr, self.y8());
         } else {
             bus.write(addr, self.y as u8);
-            bus.write(addr.wrapping_add(1), (self.y >> 8) as u8);
+            bus.write(self.hi_addr(addr), (self.y >> 8) as u8);
         }
     }
 
@@ -883,7 +887,7 @@ impl Cpu {
     fn stz_to_addr<B: Bus>(&mut self, bus: &mut B, addr: Addr24) {
         bus.write(addr, 0);
         if !self.p.acc8() {
-            bus.write(addr.wrapping_add(1), 0);
+            bus.write(self.hi_addr(addr), 0);
         }
     }
 
@@ -1242,10 +1246,10 @@ impl Cpu {
             bus.write(addr, new);
             self.set_nz8(new);
         } else {
-            let v = read_word(bus, addr);
+            let v = self.read_word16(bus, addr);
             let new = op(v);
             bus.write(addr, new as u8);
-            bus.write(addr.wrapping_add(1), (new >> 8) as u8);
+            bus.write(self.hi_addr(addr), (new >> 8) as u8);
             self.set_nz16(new);
         }
     }
@@ -1521,11 +1525,31 @@ impl Cpu {
         self.sbc_value(v);
     }
 
+    /// High-byte address of a 16-bit data access, honoring the
+    /// per-instruction [`Cpu::bank0_wrap`] latch: direct-page and
+    /// stack-relative accesses wrap the high byte within bank 0 (ares
+    /// `readDirect`/`readStack`, masked to `n16`); every other mode carries
+    /// into the next bank (ares `readBank`/`read`).
+    fn hi_addr(&self, addr: Addr24) -> Addr24 {
+        if self.bank0_wrap {
+            Addr24::from((addr as u16).wrapping_add(1))
+        } else {
+            addr.wrapping_add(1) & 0x00FF_FFFF
+        }
+    }
+
+    /// Read 16 bits little-endian, wrapping the high byte per [`Self::hi_addr`].
+    fn read_word16<B: Bus>(&self, bus: &mut B, addr: Addr24) -> u16 {
+        let lo = bus.read(addr);
+        let hi = bus.read(self.hi_addr(addr));
+        u16::from(lo) | (u16::from(hi) << 8)
+    }
+
     fn arithmetic_read_from<B: Bus>(&mut self, bus: &mut B, addr: Addr24) -> u16 {
         if self.p.acc8() {
             u16::from(bus.read(addr))
         } else {
-            read_word(bus, addr)
+            self.read_word16(bus, addr)
         }
     }
 
@@ -1799,7 +1823,7 @@ impl Cpu {
         if self.p.idx8() {
             u16::from(bus.read(addr))
         } else {
-            read_word(bus, addr)
+            self.read_word16(bus, addr)
         }
     }
 
@@ -2262,10 +2286,10 @@ impl Cpu {
             let new = op(self, v) as u8;
             bus.write(addr, new);
         } else {
-            let v = read_word(bus, addr);
+            let v = self.read_word16(bus, addr);
             let new = op(self, v);
             bus.write(addr, new as u8);
-            bus.write(addr.wrapping_add(1), (new >> 8) as u8);
+            bus.write(self.hi_addr(addr), (new >> 8) as u8);
         }
     }
 
