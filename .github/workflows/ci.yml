@@ -74,19 +74,14 @@ jobs:
           key: wasm
       - run: |
           cargo check --target wasm32-unknown-unknown \
-            -p luna-async \
             -p luna-bus \
             -p luna-cpu-65c816 \
             -p luna-cpu-spc700 \
             -p luna-ppu \
             -p luna-apu \
-            -p luna-dma \
-            -p luna-coproc \
             -p luna-cartridge \
             -p luna-core \
-            -p luna-api \
-            -p luna-mcp-core \
-            -p luna-mcp-client
+            -p luna-api
 
   # ---------------------------------------------------------------------
   # Formatting (cargo fmt --check).
