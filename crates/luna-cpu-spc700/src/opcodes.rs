@@ -21,10 +21,10 @@ impl Spc700 {
     /// caller, which silently broke music tempo + DSP pitch by the
     /// same factor).
     ///
-    /// The returned value is the **base** cost — it does not include
-    /// the +2 penalty for branches/CBNE/DBNZ when taken. A future
-    /// pass can layer that on by having branch handlers stash a
-    /// "branch taken" flag the caller reads.
+    /// The returned value is the base cost plus the **+2 taken-branch
+    /// penalty** when a branch / `CBNE` / `DBNZ` was taken: the handlers
+    /// set `branch_taken` and `step` adds `SPC700_BRANCH_TAKEN_PENALTY`
+    /// below.
     pub fn step<B: SpcBus>(&mut self, bus: &mut B) -> u8 {
         if self.stopped {
             // Stopped processor still consumes wall-clock time;
