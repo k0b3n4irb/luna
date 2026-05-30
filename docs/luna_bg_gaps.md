@@ -65,8 +65,13 @@ horizontal blend. Faithful to ares `dac.cpp:39-40` and Mesen2
 - Tests: `hires_samples_two_distinct_subpixels_per_dot`; full suite
   (96) green. Not GUI-validated — no Mode 5/6 test ROM available.
 
-Still pending (follow-ups, see 🟡 below): **pseudo-hires** (`$2133`
-bit 3), **mosaic in hi-res**, and exact color-math on the sub subpixel.
+**Pseudo-hires** (`$2133` bit 3) is also done: it reuses the same
+main/sub interleave-and-average but with lores (256) BG content — the
+transparency trick (Kirby waterfalls, Jurassic Park). Gated on the bit,
+so the existing test ROMs (all `setini & 8 == 0`) are unchanged.
+
+Still pending (follow-ups, see 🟡 below): **mosaic in hi-res** and
+exact color-math on the sub subpixel.
 
 ## 🟠 4. Mode 7 EXTBG (BG2 overlay) — not implemented
 
@@ -84,7 +89,6 @@ second priority layer rendered as BG2. luna renders BG1 only.
 | 7 | No per-mode character-address mask (VRAM wrap) | `background.cpp:104-106` | wraps only at 64 KB |
 | 8 | Brightness 0 ≠ black — uses `(b+1)/16`, hw is `b/15` | dac LUT | `tile.rs:78` (all layers) |
 | 9 | Legacy `render_bg1_scanline_with` is 32×32-only, diverged from runtime path | — | `renderer.rs:93` (trap for API consumers) |
-| 10 | Pseudo-hires (`$2133` bit 3) — sub/main interleave for transparency | `dac.cpp:34` | absent (hi-res path only triggers on modes 5/6) |
 | 11 | Mosaic not applied in the hi-res path | Mesen2 `SnesPpu.cpp:1026-1044` | `render_bg_scanline_indexed_hires` skips it |
 | 12 | Hi-res sub-subpixel uses raw winner, not its own color-math | `dac.cpp:43-80` | approximated |
 
@@ -106,6 +110,5 @@ second priority layer rendered as BG2. luna renders BG1 only.
 ## Suggested order
 
 1. **#1 Mode 0 palette** — done (`f4e3d9b`).
-2. **#3 hi-res 5/6** — done (Option A downsample).
-3. **#2 offset-per-tile**, then **#4 EXTBG**, then the 🟡 tail
-   (pseudo-hires #10 is a near-free extension of the hi-res path).
+2. **#3 hi-res 5/6 + pseudo-hires** — done (Option A downsample).
+3. **#2 offset-per-tile**, then **#4 EXTBG**, then the 🟡 tail.
