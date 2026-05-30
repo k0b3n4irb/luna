@@ -335,6 +335,11 @@ pub struct Oam {
     /// OAMADDL/H write.
     pub address: u16,
     latch: u8,
+    /// `$2103` bit 7 — OAM priority rotation. When set, sprite
+    /// evaluation starts from `word_address >> 2` instead of sprite 0,
+    /// rotating which sprites win the per-line priority/limit contest
+    /// (ares `object.cpp:6-9`).
+    pub priority_rotation: bool,
     /// Per-sprite "last non-hidden Y" shadow.
     ///
     /// Many games keep their sprites at `Y = $F0` (off-screen)
@@ -368,6 +373,7 @@ impl Oam {
             word_address: 0,
             address: 0,
             latch: 0,
+            priority_rotation: false,
             // Start with everything hidden — nothing renders until
             // the game does its first frame of OAM uploads.
             shadow_y: [0xF0; 128],
@@ -435,11 +441,23 @@ impl Oam {
     }
 
     /// `$2103` write — bit 8 of the word address (lives in bit 0 of the
-    /// written byte). Bit 7 of the value is the priority-rotation flag
-    /// (not yet modeled).
+    /// written byte). Bit 7 is the OAM priority-rotation flag.
     pub fn set_address_high(&mut self, value: u8) {
         self.word_address = (self.word_address & 0x00FF) | (u16::from(value & 0x01) << 8);
+        self.priority_rotation = value & 0x80 != 0;
         self.reset_byte_address();
+    }
+
+    /// Index of the first sprite evaluated each scanline (0, or
+    /// `word_address >> 2` when priority rotation is enabled). ares
+    /// `object.cpp:6-9` `setFirstSprite`.
+    #[must_use]
+    pub const fn first_sprite(&self) -> u8 {
+        if self.priority_rotation {
+            ((self.word_address >> 2) & 0x7F) as u8
+        } else {
+            0
+        }
     }
 
     /// `$2104` write — OAM data write with the even/odd dance for the
