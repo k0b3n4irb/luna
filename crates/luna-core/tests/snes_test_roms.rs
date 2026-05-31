@@ -502,17 +502,51 @@ ppu_test!(
     hold = PAD_R
 );
 // Mode 5 hi-res + INTERLACE (SETINI bit 0): the Moogle figure. Interlace
-// Phase B made this render the full 448-line figure (the screen line y now
-// samples logical line y*2+field, ares background.cpp:40) — previously the
-// interlaced image was sampled as progressive, showing only the top 224
-// rows stretched 2x (a zoomed-in head). Validated against the ROM's 512x448
-// reference: the full figure now matches. Single-field per frame (parity
-// flickers via Ppu::field; near-identical for this static image); a stable
-// 448->224 blend is a later interlace phase.
+// renders the full 448-line image collapsed to 224 by averaging both fields
+// (logical lines y*2 and y*2+1, ares background.cpp:40 + Phase C blend) —
+// previously sampled as progressive, showing only the top 224 rows stretched
+// 2x (a zoomed-in head). Validated against the ROM's 512x448 reference.
 ppu_test!(
     ppu_mosaic_mode5,
     "Mosaic/Mode5/MosaicMode5.sfc",
-    "8ba58b2bc3a43363655a5359e94384665258759d349641f430f4cebb865c771b"
+    "2a64e595a9c7d6f37326ac2c305b7c5895e999be27abb5a813f68cecb30e0aac"
+);
+
+// -----------------------------------------------------------------------
+// Interlace scenes (512x448 = Mode 5/6 hi-res + SETINI bit 0). luna
+// collapses to 256x224 by averaging both fields (Phase C). Validated
+// against each ROM's 512x448 reference (downsampled). BG-driven demos are
+// wired; sprite-heavy ones await OBJ-interlace (obj_gaps #6, Phase D).
+// -----------------------------------------------------------------------
+ppu_test!(
+    ppu_interlace_font,
+    "Interlace/InterlaceFont/InterlaceFont.sfc",
+    "c94d7ae1117f59cb5ba247039297047debef9b0a0744d2a12f58800c3a19fe39"
+);
+ppu_test!(
+    ppu_interlace_scroll,
+    "Interlace/InterlaceScroll/InterlaceScroll.sfc",
+    "6b9454710ae9131852cdb4a818272b73fa7bd3bb98814f032fa7e17bc1cc952d"
+);
+ppu_test!(
+    ppu_interlace_rpg,
+    "Interlace/InterlaceRPG/InterlaceRPG.sfc",
+    "74c90ac46097e53a5c51ead65d4b0f639397fcdb80ec4f2f2428fe70d20851ba"
+);
+ppu_test!(
+    ppu_interlace_moogle,
+    "Interlace/InterlaceMoogle/InterlaceMoogle.sfc",
+    "2a64e595a9c7d6f37326ac2c305b7c5895e999be27abb5a813f68cecb30e0aac"
+);
+ppu_test!(
+    ppu_interlace_myst_hdma,
+    "Interlace/InterlaceMystHDMA/InterlaceMystHDMA.sfc",
+    "2ade4b5840e988bdd181d11dc8083bee84762e0e2edef9c49c792695b4549aa1"
+);
+ppu_test!(
+    ppu_interlace_simpsons_hdma,
+    "Interlace/InterlaceSimpsonsHDMA/InterlaceSimpsonsHDMA.sfc",
+    "d3d1c97d1c2ab7749da08d01a75c6619e9f1ef0c4acf175b7dc79ae4361bb35a"
 );
 
 // -----------------------------------------------------------------------
