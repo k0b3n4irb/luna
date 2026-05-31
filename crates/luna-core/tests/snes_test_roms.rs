@@ -501,12 +501,18 @@ ppu_test!(
     "3a57695004fa0a4068fa68ca26e2ff2db0288ecd3ff8ee45073144aa4d5a0b72",
     hold = PAD_R
 );
-// Mode 5 hi-res: renders the single 512px figure (one cat), matching the
-// reference — the fixed 16-px-wide hi-res tile columns (renderer.rs).
+// Mode 5 hi-res + INTERLACE (SETINI bit 0): the Moogle figure. Interlace
+// Phase B made this render the full 448-line figure (the screen line y now
+// samples logical line y*2+field, ares background.cpp:40) — previously the
+// interlaced image was sampled as progressive, showing only the top 224
+// rows stretched 2x (a zoomed-in head). Validated against the ROM's 512x448
+// reference: the full figure now matches. Single-field per frame (parity
+// flickers via Ppu::field; near-identical for this static image); a stable
+// 448->224 blend is a later interlace phase.
 ppu_test!(
     ppu_mosaic_mode5,
     "Mosaic/Mode5/MosaicMode5.sfc",
-    "235eec5ea4b208cf7f010311d95316605b1de6950640e86992d4a60c53faad83"
+    "8ba58b2bc3a43363655a5359e94384665258759d349641f430f4cebb865c771b"
 );
 
 // -----------------------------------------------------------------------
