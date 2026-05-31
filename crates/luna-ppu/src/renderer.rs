@@ -295,6 +295,14 @@ pub fn decode_all_sprites(ppu: &Ppu) -> [SpriteEntry; 128] {
             x -= 512;
         }
         let (w, h) = if is_large { large } else { small };
+        // Interlace small-sprite height quirk (ares oam.cpp:67): in
+        // interlace a *small* sprite (size bit 0) with baseSize >= 6 is
+        // forced to height 16 (the table would give 32).
+        let h = if ppu.setini & 0x01 != 0 && !is_large && (ppu.obsel >> 5) & 0x07 >= 6 {
+            16
+        } else {
+            h
+        };
         *slot = SpriteEntry {
             x,
             y: y_pos,
@@ -1502,14 +1510,17 @@ const fn sprite_x9(sp: &SpriteEntry) -> i32 {
 
 /// Is the sprite on scanline `y`? The row-in-sprite is taken mod 256
 /// (vertical wrap) and the sprite must not sit fully in the right
-/// off-screen dead zone (ares `object.cpp:51-55`).
-fn sprite_on_line(sp: &SpriteEntry, y: u16) -> bool {
+/// off-screen dead zone (ares `object.cpp:51-55`). In interlace the
+/// sprite's *screen* extent is halved (`height >> io.interlace`,
+/// `object.cpp:53`) — each screen line spans two logical sprite rows.
+fn sprite_on_line(sp: &SpriteEntry, y: u16, interlace: bool) -> bool {
     let x9 = sprite_x9(sp);
     if x9 > 256 && x9 + i32::from(sp.w) - 1 < 512 {
         return false;
     }
     let row = y.wrapping_sub(sp.y as u16) & 0xFF;
-    usize::from(row) < sp.h as usize
+    let screen_h = if interlace { sp.h >> 1 } else { sp.h };
+    usize::from(row) < screen_h as usize
 }
 
 /// Count of the sprite's 8-px tiles that are not in the off-screen dead
@@ -1543,6 +1554,7 @@ struct SpriteEval {
 /// `SnesPpu.cpp:595-625,693-741`.
 fn evaluate_sprite_line(ppu: &Ppu, sprites: &[SpriteEntry; 128], y: u16) -> SpriteEval {
     let first = ppu.oam.first_sprite() as usize;
+    let interlace = ppu.setini & 0x01 != 0;
     // Pass 1: first 32 on-line sprites, in evaluation order from
     // firstSprite (= priority order, items[0] front-most).
     let mut items = [0u8; 32];
@@ -1550,7 +1562,7 @@ fn evaluate_sprite_line(ppu: &Ppu, sprites: &[SpriteEntry; 128], y: u16) -> Spri
     let mut range_over = false;
     for k in 0..128usize {
         let i = (first + k) & 0x7F;
-        if !sprite_on_line(&sprites[i], y) {
+        if !sprite_on_line(&sprites[i], y, interlace) {
             continue;
         }
         if count < 32 {
@@ -1619,6 +1631,12 @@ pub fn render_sprites_scanline_indexed_with(
     }
     let sprites = decode_all_sprites(ppu);
     let eval = evaluate_sprite_line(ppu, &sprites, y);
+    // Interlace (Phase D): the sprite occupies half the screen lines, and a
+    // screen row samples logical sprite row `screen_row*2 + field` (ares
+    // object.cpp:109,121-122). Each field is rendered in its own blend pass
+    // (Phase C), so `Ppu::field` selects the even/odd logical row here.
+    let interlace = ppu.setini & 0x01 != 0;
+    let field = usize::from(ppu.field);
     // Draw survivors in fetch order: back-most first, front-most last,
     // so the front sprite overwrites and wins the pixel.
     for s in 0..eval.survivor_count {
@@ -1631,6 +1649,9 @@ pub fn render_sprites_scanline_indexed_with(
             }
             let mut sc = col as usize;
             let mut sr = row_in_sprite as usize;
+            if interlace {
+                sr <<= 1; // logical (even) sprite row — ares object.cpp:109
+            }
             if sp.h_flip {
                 sc = (sp.w - 1) as usize - sc;
             }
@@ -1650,6 +1671,16 @@ pub fn render_sprites_scanline_indexed_with(
                 } else {
                     3 * w - 1 - sr
                 };
+            }
+            if interlace {
+                // Pick the field's interleaved logical row: +field when not
+                // flipped, -field when flipped (ares object.cpp:121-122),
+                // masked to 8 bits like ares' `y &= 255`.
+                sr = if sp.v_flip {
+                    sr.wrapping_sub(field)
+                } else {
+                    sr + field
+                } & 0xFF;
             }
             let tile_x = (sc / 8) as u16;
             let tile_y = (sr / 8) as u16;
@@ -2046,6 +2077,29 @@ mod tests {
         assert_eq!(sprite_size_pair(0xC0), ((16, 32), (32, 64)));
         // baseSize=7: large is 32x32, **not** 32x64 (hardware quirk).
         assert_eq!(sprite_size_pair(0xE0), ((16, 32), (32, 32)));
+    }
+
+    #[test]
+    fn sprite_on_line_halves_screen_height_in_interlace() {
+        // Interlace Phase D: a sprite's *screen* extent is height>>1, since
+        // each screen line spans two logical sprite rows (ares object.cpp:53).
+        let sp = SpriteEntry {
+            x: 0,
+            y: 10,
+            tile: 0,
+            palette: 0,
+            priority: 0,
+            h_flip: false,
+            v_flip: false,
+            w: 16,
+            h: 32,
+        };
+        // Progressive: occupies screen rows 10..42.
+        assert!(sprite_on_line(&sp, 41, false));
+        assert!(!sprite_on_line(&sp, 42, false));
+        // Interlace: screen extent halved to 16 → rows 10..26.
+        assert!(sprite_on_line(&sp, 25, true));
+        assert!(!sprite_on_line(&sp, 26, true));
     }
 
     #[test]
