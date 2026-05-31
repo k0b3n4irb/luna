@@ -15,9 +15,8 @@
 set -euo pipefail
 
 REPO="https://github.com/PeterLemon/SNES.git"
-# Subdirs the harness pulls ROMs from. Add more here (e.g. SPC700) as
-# tests for those categories are written.
-SPARSE_PATHS=(CPUTest PPU)
+# Subdirs the harness pulls ROMs from.
+SPARSE_PATHS=(CPUTest PPU SPC700)
 
 DEST="${LUNA_SNES_TEST_DIR:-$(cd "$(dirname "$0")/.." && pwd)/../luna_tests}"
 
