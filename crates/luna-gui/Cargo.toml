@@ -14,7 +14,6 @@ name = "luna-gui"
 path = "src/main.rs"
 
 [dependencies]
-luna-apu       = { workspace = true }
 luna-bus       = { workspace = true }
 luna-cartridge = { workspace = true }
 luna-core      = { workspace = true }
