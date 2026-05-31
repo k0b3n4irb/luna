@@ -1102,6 +1102,10 @@ impl SnesBus<'_> {
             self.ppu_line = 0;
             self.cpu_regs.hvbjoy &= !0x80;
             self.frame_count = self.frame_count.saturating_add(1);
+            // Interlace field parity flips every frame at the V-counter wrap
+            // (ares counter/inline.hpp:32), exposed at STAT78 bit 7. Phase A:
+            // flag only — no vertical doubling yet.
+            self.ppu.field = !self.ppu.field;
             let mut view = DmaBusView {
                 wram: &mut *self.wram,
                 mapper: &mut *self.mapper,
@@ -1933,6 +1937,23 @@ mod tests {
         assert_eq!(snes.ppu_line, NTSC_VBLANK_START_LINE);
         assert!(snes.cpu_regs.nmi_flag);
         assert_eq!(snes.nmis_serviced, 0);
+    }
+
+    #[test]
+    fn interlace_field_toggles_each_frame_wrap() {
+        // Interlace Phase A: STAT78 bit-7 field parity flips every frame at
+        // the V-counter wrap (ares counter/inline.hpp:32), unconditionally.
+        let cart = demo_lorom();
+        let mut snes = Snes::from_cartridge(cart);
+        snes.reset();
+        let f0 = snes.ppu.field;
+        snes.ppu_line = NTSC_SCANLINES_PER_FRAME - 1;
+        snes.advance_scheduler(MCYCLES_PER_SCANLINE);
+        assert_eq!(snes.ppu_line, 0, "frame wrapped");
+        assert_eq!(snes.ppu.field, !f0, "field flipped at frame wrap");
+        snes.ppu_line = NTSC_SCANLINES_PER_FRAME - 1;
+        snes.advance_scheduler(MCYCLES_PER_SCANLINE);
+        assert_eq!(snes.ppu.field, f0, "field flipped back next frame");
     }
 
     #[test]
