@@ -1314,9 +1314,19 @@ fn bg3_tilemap_word(ppu: &Ppu, bg3: &crate::ppu::BgState, hpixel: u16, vpixel: u
 /// the fine `&7`; V replaces fully. Mode 4 packs both into one word
 /// (bit 15 picks H vs V); Modes 2/6 use two words. Enable bit =
 /// `0x2000` for BG1, `0x4000` for BG2.
-fn opt_scroll(ppu: &Ppu, bg_idx: usize, screen_col: u16, base_h: u16, base_v: u16) -> (u16, u16) {
+/// Returns `(eff_h, eff_v, h_from_opt)` — the effective scroll for a
+/// screen column, and whether the H component was overridden by OPT (the
+/// hi-res caller needs that: the base scroll doubles in hi-res but the OPT
+/// override does not — ares `background.cpp:66`).
+fn opt_scroll(
+    ppu: &Ppu,
+    bg_idx: usize,
+    screen_col: u16,
+    base_h: u16,
+    base_v: u16,
+) -> (u16, u16, bool) {
     if screen_col == 0 {
-        return (base_h, base_v);
+        return (base_h, base_v, false);
     }
     let bg3 = bg_state(ppu, 2);
     let h_lookup = ((screen_col - 1) << 3).wrapping_add(bg3.h_scroll & !7);
@@ -1325,10 +1335,12 @@ fn opt_scroll(ppu: &Ppu, bg_idx: usize, screen_col: u16, base_h: u16, base_v: u1
     let enable = if bg_idx == 0 { 0x2000u16 } else { 0x4000u16 };
     let mut eff_h = base_h;
     let mut eff_v = base_v;
+    let mut h_from_opt = false;
     if ppu.bgmode & 0x07 == 4 {
         if h_word & enable != 0 {
             if h_word & 0x8000 == 0 {
                 eff_h = (base_h & 0x07) | (h_word & 0x3F8);
+                h_from_opt = true;
             } else {
                 eff_v = h_word & 0x3FF;
             }
@@ -1336,12 +1348,13 @@ fn opt_scroll(ppu: &Ppu, bg_idx: usize, screen_col: u16, base_h: u16, base_v: u1
     } else {
         if h_word & enable != 0 {
             eff_h = (base_h & 0x07) | (h_word & 0x3F8);
+            h_from_opt = true;
         }
         if v_word & enable != 0 {
             eff_v = v_word & 0x3FF;
         }
     }
-    (eff_h, eff_v)
+    (eff_h, eff_v, h_from_opt)
 }
 
 /// Same as [`render_bg_scanline_with`] but returns CGRAM indices
@@ -1386,7 +1399,10 @@ pub fn render_bg_scanline_indexed_with(
             let col = mosaic_x >> 3;
             if col != opt_col {
                 opt_col = col;
-                eff = opt_scroll(ppu, bg_idx, col, bg.h_scroll, bg.v_scroll);
+                // Lores (Modes 2/4): the OPT high bits and the scroll low
+                // bits combine directly — `h_from_opt` is irrelevant.
+                let (h, v, _) = opt_scroll(ppu, bg_idx, col, bg.h_scroll, bg.v_scroll);
+                eff = (h, v);
             }
         }
         let src_x = mosaic_x.wrapping_add(eff.0);
@@ -1429,16 +1445,26 @@ fn render_bg_scanline_indexed_hires(
     let is_opt = ppu.bgmode & 0x07 == 6 && bg_idx < 2;
     let mut opt_col = u16::MAX;
     let mut eff = (bg.h_scroll, bg.v_scroll);
+    let mut h_from_opt = false;
     for x in 0..256u16 {
         let mosaic_x = x / mosaic_size * mosaic_size;
         if is_opt {
             let col = mosaic_x >> 3;
             if col != opt_col {
                 opt_col = col;
-                eff = opt_scroll(ppu, bg_idx, col, bg.h_scroll, bg.v_scroll);
+                let (h, v, ho) = opt_scroll(ppu, bg_idx, col, bg.h_scroll, bg.v_scroll);
+                eff = (h, v);
+                h_from_opt = ho;
             }
         }
-        let h2 = eff.0 << 1;
+        // Hi-res H offset (ares `background.cpp:49,66`): the base scroll
+        // doubles, but an OPT override does NOT. Non-OPT → `hscroll << 1`;
+        // OPT-active → `(opt & ~7) + ((hscroll << 1) & 7)`.
+        let h2 = if h_from_opt {
+            (eff.0 & 0x3F8).wrapping_add((bg.h_scroll << 1) & 0x07)
+        } else {
+            eff.0 << 1
+        };
         let src_y = mosaic_y.wrapping_add(eff.1);
         let cx = (mosaic_x << 1).wrapping_add(h2);
         below[x as usize] = sample_bg_pixel(ppu, &g, cx, src_y);
@@ -3049,6 +3075,52 @@ mod tests {
             below[128].map(|(i, _)| i),
             Some(17),
             "dot 128 is tile column 16 (16-px hi-res tiles), not a repeat of column 0"
+        );
+    }
+
+    #[test]
+    fn mode6_opt_offset_is_not_doubled_in_hires() {
+        // Mode 6 (hi-res) offset-per-tile. In hi-res the base scroll
+        // doubles but an OPT override does NOT (ares background.cpp:66:
+        // `hoffset = hpixel + (hlookup & ~7) + (hscroll & 7)`, hscroll
+        // already doubled, hlookup raw). BG1 columns carry palette group
+        // C&3 (one colour per column). BG3 gives screen column 4 an
+        // H-offset of 16 (one 16-px hi-res tile). Correct: column 4 shows
+        // the colour 1 tile over (palette 1 → cgram 17). The doubling bug
+        // shifted 2 tiles (palette 2 → cgram 33).
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::BGMODE, 0x06); // Mode 6 (hi-res + OPT)
+        p.write(0x07, 0x00); // BG1SC: tilemap word base 0
+        p.write(0x09, 0x04); // BG3SC: tilemap word base $0400 = byte $0800
+        p.write(0x0B, 0x01); // BG12NBA: BG1 char base byte $2000
+        // Char 0 solid index 1 (all 8 columns of plane 0 set).
+        for r in 0..8u16 {
+            p.vram.poke(0x2000 + r * 2, 0xFF);
+        }
+        // BG1 tilemap: entry C = char 0, palette group C & 3 (bits 10-12
+        // live in the entry's high byte, value (C&3) << 2).
+        for c in 0..8u16 {
+            p.vram.poke(c * 2 + 1, ((c & 3) << 2) as u8);
+        }
+        // BG3 OPT word for screen column 4 (lookup column 3, byte $0806):
+        // H-offset 16 + BG1 enable (0x2000) = 0x2010.
+        p.vram.poke(0x0806, 0x10);
+        p.vram.poke(0x0807, 0x20);
+
+        let (_above, below) = render_bg_scanline_indexed_hires(&p, 0, 0, RenderOptions::default());
+        // Column 3 has no OPT → its own colour, palette 3 → cgram 49.
+        assert_eq!(
+            below[24].map(|(i, _)| i),
+            Some(49),
+            "col 3 (no OPT) unshifted"
+        );
+        // Column 4 with OPT +16 → shifted 1 tile → palette 1 → cgram 17.
+        // The doubling bug would shift 2 tiles → palette 2 → cgram 33.
+        assert_eq!(
+            below[32].map(|(i, _)| i),
+            Some(17),
+            "OPT +16 shifts hi-res column 4 by ONE 16-px tile, not two"
         );
     }
 
