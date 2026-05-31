@@ -105,12 +105,31 @@ resolved:
   was already applied in `step()`); `docs/luna_apu_gaps.md`'s false
   "SPC700 is Tom-Harte-validated" claim was corrected.
 
+## 🔴 IPL boot ROM — corrupt byte broke every multi-block upload (FIXED)
+
+`src/iplrom.rs` had `$FB` at `$FFEE` where the canonical SNES boot ROM
+has `$EB` — a one-bit flip in the operand of `$FFED: BPL`. The real
+instruction is `BPL $FFDA` (back into the byte-transfer loop, the
+"continue current block vs. fall through to the new-block / execute
+dispatch" branch); the corrupt `$FB` made it `BPL $FFEA`, jumping into
+the *middle* of the previous instruction.
+
+Single-block uploads never hit it fatally, so most audio worked. But
+**multi-block uploads** (driver in one `TransferBlockSPC`, samples in
+another — extremely common in real games) executed garbage at the block
+transition, deadlocked the SPC700 in the IPL ROM, and never reached the
+music driver → silence. Surfaced by the Peter Lemon SPC700 audio ROMs
+(`test_corpora.md`): the 4 silent ones all used `TransferBlockSPC` ×2,
+the 5 playing ones ×1. Fixing the byte made 3 of the 4 play (verified by
+ear); `PlayTwoSong` remains silent for an unrelated reason (the 65816
+never initiates the upload).
+
 ## Verdict
 
-No correctness (🔴) defects. The instruction core is machine-proven
-(Tom Harte 100%) and the `BRK`/`SLEEP`/`STOP`/PSW/reset paths are a
-faithful match to ares. The only residue is cosmetic reset values and
-the cycle-granularity inherent to the atomic / per-opcode-tick timing
-model (the same trade-off documented for the 65C816, APU, and PPU
-cores) — not worth point-fixing outside a deliberate cycle-timing
-rewrite.
+The instruction core is machine-proven (Tom Harte 100%) and the
+`BRK`/`SLEEP`/`STOP`/PSW/reset paths are a faithful match to ares. One
+real defect was found and fixed (the IPL-ROM byte above) — note it lived
+in the boot ROM data, not the CPU logic, so Tom Harte could never catch
+it. The remaining residue is cosmetic reset values and the
+cycle-granularity inherent to the atomic / per-opcode-tick timing model
+(the same trade-off documented for the 65C816, APU, and PPU cores).
