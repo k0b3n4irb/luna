@@ -144,8 +144,11 @@ fn run_to_stable(rom: Vec<u8>, hold: u16) -> Vec<u8> {
         let bg1 = snes.ppu.bg[0];
         let bg2 = snes.ppu.bg[1];
         eprintln!(
-            "PPUDIAG BGMODE=${:02X} MOSAIC=${:02X} TM=${:02X} TS=${:02X} SETINI=${:02X} \
+            "PPUDIAG cpu=${:02X}:{:04X} stp={} BGMODE=${:02X} MOSAIC=${:02X} TM=${:02X} TS=${:02X} SETINI=${:02X} \
              BG1[sz={} map_w=${:04X} chr_w=${:04X} h={}] BG2[sz={} map_w=${:04X} h={}]",
+            snes.cpu.pb,
+            snes.cpu.pc,
+            snes.cpu.stopped,
             snes.ppu.bgmode,
             snes.ppu.mosaic,
             snes.ppu.tm,
