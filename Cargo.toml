@@ -136,6 +136,9 @@ clap                 = { version = "4", features = ["derive"] }
 # Image encoding (CLI screenshots, golden tests)
 image                = { version = "0.25", default-features = false, features = ["png"] }
 
+# SHA-256 of framebuffers for the SNES test-ROM golden suite.
+sha2                 = "0.10"
+
 # GUI (luna-gui — desktop application)
 # Minimal pixel-rendering stack for the SNES framebuffer: winit owns
 # the window + input event loop, pixels uploads a 256×224 RGBA buffer

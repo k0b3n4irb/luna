@@ -129,6 +129,36 @@ impl Cartridge {
         let header = detect_and_parse(&rom).ok_or(CartError::LayoutUnknown)?;
         Ok(Self { rom, header })
     }
+
+    /// Parse a ROM image but **force** the mapper layout and skip the
+    /// checksum-complement validation that [`Self::from_bytes`] requires.
+    ///
+    /// For headerless / homebrew / hardware-test ROMs (e.g. the Peter
+    /// Lemon SNES suite) whose internal checksum is blank or wrong, where
+    /// layout auto-detection would reject them. The header fields are
+    /// still parsed at the forced mapper's offset (best effort), but
+    /// `mapper_kind` is overridden to `mapper`.
+    pub fn from_bytes_forced(mut rom: Vec<u8>, mapper: MapperKind) -> Result<Self, CartError> {
+        if rom.len() % 1024 == 512 {
+            rom.drain(..512);
+        }
+        if rom.len() < 0x8000 {
+            return Err(CartError::TooSmall(rom.len()));
+        }
+        let off = match mapper {
+            // LoROM-region layouts (header at $7FC0).
+            MapperKind::LoRom | MapperKind::Sa1 | MapperKind::SuperFx => HEADER_OFFSET_LOROM,
+            // HiROM-region layouts (header at $FFC0).
+            MapperKind::HiRom | MapperKind::Sdd1 | MapperKind::Spc7110 => HEADER_OFFSET_HIROM,
+            MapperKind::ExHiRom => HEADER_OFFSET_EXHIROM,
+        };
+        if off + 0x20 > rom.len() {
+            return Err(CartError::LayoutUnknown);
+        }
+        let mut header = parse_at(&rom, off);
+        header.mapper_kind = mapper;
+        Ok(Self { rom, header })
+    }
 }
 
 // =============================================================================

@@ -165,3 +165,33 @@ jobs:
         env:
           LUNA_TOM_HARTE_REQUIRE: "1"
         run: cargo test -p luna-cpu-65c816 --test tom_harte --release -- --ignored --nocapture
+
+  # ---------------------------------------------------------------------
+  # SNES test-ROM golden suite (Peter Lemon hardware tests). Following the
+  # twvd/siena convention the ROM corpus lives in a sibling checkout
+  # (../luna_tests), sparse-cloned on demand. The harness boots each ROM
+  # and compares a SHA-256 of the framebuffer to a committed golden hash.
+  # ---------------------------------------------------------------------
+  snes-test-roms:
+    name: snes-test-roms
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: snes-test-roms
+      - name: Cache SNES test-ROM corpus
+        id: rom-cache
+        uses: actions/cache@v4
+        with:
+          path: ../luna_tests
+          key: snes-test-roms-${{ hashFiles('tools/fetch-snes-test-roms.sh') }}
+      - name: Fetch corpus (on cache miss)
+        if: steps.rom-cache.outputs.cache-hit != 'true'
+        run: tools/fetch-snes-test-roms.sh
+      - name: Run golden suite
+        run: cargo test -p luna-core --test snes_test_roms --release
