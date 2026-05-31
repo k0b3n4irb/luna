@@ -477,6 +477,17 @@ ppu_test!(
     "Mode7/Perspective/Perspective.sfc",
     "10ce69859a5828d80d0b8af768a233694414c76743aa5cffdc962d52eb9dab0d"
 );
+// Animated Mode-7 Star Wars intro. luna's run settles on the static
+// "A long time ago in a galaxy far, far away...." opening-text hold (blue
+// text + starfield), rendered cleanly. The ROM's reference `StarWars.png`
+// captures a later phase (the STAR WARS logo), so a direct pixel match is
+// N/A (eye-validated as a correct intro frame); the golden is luna's own
+// deterministic settled frame as a regression baseline.
+ppu_test!(
+    ppu_mode7_starwars,
+    "Mode7/StarWars/StarWars.sfc",
+    "ed496efc8c84512041910419eaee12fc4d941067a942fd1ad403cead1c5bef05"
+);
 ppu_test!(
     ppu_greenspace,
     "GreenSpace/GreenSpace.sfc",
