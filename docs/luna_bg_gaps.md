@@ -115,12 +115,12 @@ GUI-validated (no test ROM enables EXTBG).
 | ~~11~~ | ~~Mosaic in the hi-res path~~ — **DONE**: snaps the dot/scanline to the block before doubling | Mesen2 `SnesPpu.cpp:1026-1044` | ✅ |
 | 12 | Hi-res sub-subpixel uses raw winner, not its own color-math | `dac.cpp:43-80` | **approximation accepted** — the common case (pseudo-hires transparency, color-math off) averages correctly; only hi-res *with* color-math (rare) is approximate |
 | ~~13~~ | ~~Offset-per-tile in Mode 6~~ — **DONE**: OPT now wired into the hi-res path for Mode 6 (BG1) | `background.cpp:52-69` | ✅ |
-| 14 | **Mode 5 hi-res scene rendered duplicated** — Peter Lemon's `MosaicMode5` shows one 512px figure; luna renders it as two side-by-side copies (the 512→256 downsample mis-handles the even/odd-column split). Tracked by the `#[ignore]`d `ppu_mosaic_mode5` golden test. NB: mosaic itself works (verified by `MosaicMode3`). | Mesen2 hi-res split | 🟡 open |
+| ~~14~~ | ~~Mode 5 hi-res scene rendered duplicated~~ — **DONE**: in hi-res, BG tile columns are always 16 *hires* px wide regardless of the tile-size bit (ares `background.cpp:79` `htiles = 4`), with the right 8-px half from `character + 1`. luna treated them as 8-wide, so a 32-wide map filled only 256 of the 512 hires px and repeated. `sample_bg_pixel` now decouples horizontal/vertical tile span (`force_wide`). `MosaicMode5` renders the single figure, matching the reference. | `background.cpp:78-101` | ✅ |
 
-#12 and #14 are the remaining items. #12 is a deliberate approximation
-(ares' `below()` blend for the sub subpixel is intricate and
-hi-res+color-math is vanishingly rare). #14 surfaced from the SNES test-ROM
-suite (`test_corpora.md`) and wants a look at the Mode 5/6 column split.
+#12 is the only remaining item, kept as a deliberate approximation (ares'
+`below()` blend for the sub subpixel is intricate and hi-res+color-math is
+vanishingly rare). #14 surfaced from the SNES test-ROM suite
+(`test_corpora.md`).
 
 ---
 

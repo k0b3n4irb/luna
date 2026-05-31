@@ -1150,7 +1150,11 @@ struct BgGeom {
     tile_pixels: u16,
     /// `log2(tile_pixels)` — 3 or 4.
     tile_shift: u16,
-    big_tiles: bool,
+    /// Hi-res (Mode 5/6): tile columns are always 16 *hires* pixels wide
+    /// regardless of the tile-size bit (ares `background.cpp:79`
+    /// `htiles = 4`), with the right 8-px half taken from `character + 1`.
+    /// Only affects horizontal addressing; vertical stays per the size bit.
+    force_wide: bool,
     /// Mode-0 per-BG palette region offset (`id << 5`), else 0.
     mode0_palette_base: u8,
 }
@@ -1186,7 +1190,7 @@ const fn bg_geom(ppu: &Ppu, bg_idx: usize) -> Option<BgGeom> {
         tilemap_size: bg.tilemap_size & 0x03,
         tile_pixels: if big_tiles { 16 } else { 8 },
         tile_shift: if big_tiles { 4 } else { 3 },
-        big_tiles,
+        force_wide: matches!(ppu.bgmode & 0x07, 5 | 6),
         mode0_palette_base: if ppu.bgmode & 0x07 == 0 {
             (bg_idx as u8) << 5
         } else {
@@ -1206,8 +1210,15 @@ const fn bg_geom(ppu: &Ppu, bg_idx: usize) -> Option<BgGeom> {
 /// offset and Mode 0 is 2bpp on every BG, so it only touches the 2bpp
 /// arm — max index 96 + 7*4 + 3 = 127.
 fn sample_bg_pixel(ppu: &Ppu, g: &BgGeom, src_x: u16, src_y: u16) -> IndexedPixel {
+    // Horizontal tile span: hi-res (Mode 5/6) forces 16-px-wide columns
+    // (ares `background.cpp:79` `htiles = 4`); vertical follows the size bit.
+    let (h_shift, h_pixels) = if g.force_wide {
+        (4u16, 16u16)
+    } else {
+        (g.tile_shift, g.tile_pixels)
+    };
     // Tile coordinates in TILE units (8 or 16 pixels per side).
-    let tile_col_full = (src_x >> g.tile_shift) & (g.cols - 1);
+    let tile_col_full = (src_x >> h_shift) & (g.cols - 1);
     let tile_row_full = (src_y >> g.tile_shift) & (g.rows - 1);
     let sub_x = (tile_col_full >> 5) as usize;
     let sub_y = (tile_row_full >> 5) as usize;
@@ -1228,23 +1239,21 @@ fn sample_bg_pixel(ppu: &Ppu, g: &BgGeom, src_x: u16, src_y: u16) -> IndexedPixe
     let prio_bit = ((entry >> 13) & 0x01) as u8;
     let h_flip = entry & 0x4000 != 0;
     let v_flip = entry & 0x8000 != 0;
-    // Pixel position within the (possibly 16-wide) block.
-    let mask = g.tile_pixels - 1;
-    let mut col_in_block = (src_x & mask) as usize;
-    let mut row_in_block = (src_y & mask) as usize;
+    // Pixel position within the block, masked per-axis (horizontal may be
+    // 16 even when vertical is 8, in hi-res).
+    let mut col_in_block = (src_x & (h_pixels - 1)) as usize;
+    let mut row_in_block = (src_y & (g.tile_pixels - 1)) as usize;
     if h_flip {
-        col_in_block = (g.tile_pixels as usize - 1) - col_in_block;
+        col_in_block = (h_pixels as usize - 1) - col_in_block;
     }
     if v_flip {
         row_in_block = (g.tile_pixels as usize - 1) - row_in_block;
     }
-    // For 16x16 the four quadrants share `tile_num` as the top-left,
-    // with the canonical sprite-plane offset of +1 right, +16 down.
-    let quadrant_offset: u16 = if g.big_tiles {
-        u16::from(col_in_block >= 8) + if row_in_block >= 8 { 16 } else { 0 }
-    } else {
-        0
-    };
+    // A 16-wide/tall block's halves share `tile_num` as the top-left, with
+    // the canonical sprite-plane offset of +1 right, +16 down. The
+    // conditions are naturally false for an 8-px axis (col/row never ≥ 8).
+    let quadrant_offset: u16 =
+        u16::from(col_in_block >= 8) + if row_in_block >= 8 { 16 } else { 0 };
     let final_tile = tile_num.wrapping_add(quadrant_offset) & 0x03FF;
     let row_in_tile = row_in_block & 7;
     let col_in_tile = col_in_block & 7;
