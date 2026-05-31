@@ -114,15 +114,49 @@ GUI-validated (no test ROM enables EXTBG).
 | ~~9~~ | ~~Legacy `render_bg1_scanline_with` divergence~~ — **DONE**: now routes through the runtime indexed renderer (tilemap sizes, 16×16, mosaic, Mode-0 palette) | — | ✅ |
 | ~~11~~ | ~~Mosaic in the hi-res path~~ — **DONE**: snaps the dot/scanline to the block before doubling | Mesen2 `SnesPpu.cpp:1026-1044` | ✅ |
 | 12 | Hi-res sub-subpixel uses raw winner, not its own color-math | `dac.cpp:43-80` | **approximation accepted** — the common case (pseudo-hires transparency, color-math off) averages correctly; only hi-res *with* color-math (rare) is approximate |
+| 16 | Interlace vertical doubling in hi-res (`vpixel = vpixel<<1 \| field`, mosaic `voffset << (hires&&interlace)`) | `background.cpp:40,43` | **whole-feature gap, documented** — luna renders a 224-line progressive framebuffer and has no interlaced (448-line) output mode at all, so the SETINI bit-0 vertical doubling is moot. Affects only the rare hi-res *interlace* menus (e.g. RPM Racing, some BG3 text screens); not a hi-res regression |
 | ~~13~~ | ~~Offset-per-tile in Mode 6~~ — **DONE**: OPT now wired into the hi-res path for Mode 6 (BG1) | `background.cpp:52-69` | ✅ |
 | ~~14~~ | ~~Mode 5 hi-res scene rendered duplicated~~ — **DONE**: in hi-res, BG tile columns are always 16 *hires* px wide regardless of the tile-size bit (ares `background.cpp:79` `htiles = 4`), with the right 8-px half from `character + 1`. luna treated them as 8-wide, so a 32-wide map filled only 256 of the 512 hires px and repeated. `sample_bg_pixel` now decouples horizontal/vertical tile span (`force_wide`). `MosaicMode5` renders the single figure, matching the reference. Mode 6 shares the same path — covered by the `mode6_hires_tile_columns_are_16_wide_no_duplication` unit test (no Mode 6 ROM exists). | `background.cpp:78-101` | ✅ |
 | ~~15~~ | ~~Mode 6 OPT-in-hi-res scroll math~~ — **DONE**: in hi-res the base scroll doubles but an OPT override does **not** (ares `background.cpp:66`: `hoffset = hpixel + (hlookup & ~7) + (hscroll & 7)` — `hscroll` already doubled, `hlookup`/OPT raw). luna doubled the whole effective scroll (`eff.0 << 1`), shifting OPT columns twice as far. Fixed: `opt_scroll` now reports `h_from_opt`, and the hi-res path uses `(opt & ~7) + ((hscroll << 1) & 7)` for OPT-active columns. Built a minimal Mode 6 OPT repro (`tests/mode6opt/`) to settle it — the right half now shifts by ONE tile (was two). Guarded by `mode6_opt_offset_is_not_doubled_in_hires`. | `background.cpp:49,66` | ✅ |
 
-#12 is the only remaining item — a deliberate approximation (ares'
-`below()` blend for the sub subpixel is intricate and hi-res+color-math is
-vanishingly rare). #14/#15 surfaced from the SNES test-ROM work
-(`test_corpora.md`); #15 was settled with the hand-built repro in
+#12 and #16 are the remaining items, both intentional: #12 a deliberate
+approximation (ares' `below()` blend for the sub subpixel is intricate
+and hi-res+color-math is vanishingly rare), #16 a whole-feature gap
+(luna has no interlaced output). #14/#15 surfaced from the SNES test-ROM
+work (`test_corpora.md`); #15 was settled with the hand-built repro in
 `tests/mode6opt/`.
+
+### Full hi-res / Mode 6 audit (2026-05-31)
+
+A line-by-line re-read of `render_bg_scanline_indexed_hires` + the hi-res
+compositor against ares `background.cpp` (run/fetch loop) and `dac.cpp`
+(run/below/above) confirmed every remaining element matches:
+
+- **H scroll doubled, OPT override not** — `hscroll <<= 1`
+  (`background.cpp:39`); OPT-active columns use `(opt & ~7) +
+  ((hscroll<<1) & 7)` (`background.cpp:66`). ✓ (#15)
+- **16-px hi-res tiles + hflip** — `htiles = 4`; right half from
+  `character + 1` selected by `(hoffset&8) != hmirror`
+  (`background.cpp:79,101`). luna flips `col_in_block` then tests `>= 8`,
+  which swaps the halves under hmirror identically. ✓ (#14)
+- **V offset / V-OPT not doubled** — only `hscroll` doubles; `voffset =
+  vpixel + vlookup` raw (`background.cpp:67`). luna leaves `src_y`
+  undoubled. ✓
+- **Mosaic** — snaps dot/scanline to the block before doubling
+  (`background.cpp:42-43`); luna's `mosaic_x/mosaic_y` block-snap matches
+  (the `<< (hires&&interlace)` factor is interlace-only → #16). ✓ (#11)
+- **Sub/main subpixel order** — `below[x]` = col 2x (sub, emitted first
+  per `dac.cpp:39`), `above[x]` = col 2x+1 (main); compositor averages
+  `sub + main`. ✓ (#3)
+- **Pseudo-hires gating** — BG fetch doubles only for modes 5/6; the
+  main/sub average also fires for SETINI bit 3 (`dac.cpp:34`). ✓
+- **Mode 6 = BG1-only + BG3-as-OPT** — `is_opt` gated on mode 6, OPT
+  enable bit `0x2000`/`0x4000` = ares `valid = 13 + id`. ✓ (#13)
+
+Only deviations: #12 (sub-subpixel color-math approximation) and #16
+(no interlaced output). No new bugs found; the stale "Mosaic is not
+applied here" doc-comment in `render_bg_scanline_indexed_hires` was
+corrected (mosaic *is* applied since #11).
 
 ---
 

@@ -1416,8 +1416,11 @@ pub fn render_bg_scanline_indexed_with(
 /// 256-wide sample sets. `above[x]` is the main-screen subpixel sampled
 /// at hires column `2x+1`; `below[x]` is the sub-screen subpixel at
 /// `2x`. Horizontal scroll is doubled (ares `background.cpp:39`, Mesen2
-/// `SnesPpu.cpp:984`); tiles are 8 hires pixels wide. Mosaic is not
-/// applied here (rare in combination with hi-res).
+/// `SnesPpu.cpp:984`); tiles are 16 hires pixels wide (ares
+/// `background.cpp:79` `htiles = 4`). Mosaic snaps the dot/scanline to
+/// the block before doubling (ares `background.cpp:42-43`). Interlace
+/// vertical doubling (ares `background.cpp:40,43`) is **not** applied —
+/// luna has no interlaced output mode (224-line progressive only).
 fn render_bg_scanline_indexed_hires(
     ppu: &Ppu,
     bg_idx: usize,
