@@ -63,12 +63,13 @@ Coverage:
 - **`SPC700/*`** (9): audio ROMs — these play music / sounds rather than
   draw a screen, so they assert a SHA-256 of the APU's **32 kHz PCM
   output** (first 3 s) instead of the framebuffer (`test_audio` /
-  `spc_test!`). All 8 wired-up ROMs play (auditioned by ear before
-  blessing). `PlayTwoSong` is intentionally omitted — it only uploads a
-  song in response to an A/B button press, so it stays silent headless
-  (by design, not a bug). `LUNA_SNES_TEST_PNG=<dir>` in record mode dumps
-  a `.wav` to audition. NB: these surfaced the IPL-ROM multi-block bug
-  (the `$FFEE` byte) — see `luna_spc700_gaps.md`.
+  `spc_test!`). All 9 play (auditioned by ear before blessing).
+  `PlayTwoSong` only plays on a button press, so its test holds **A**
+  (song 1) until the driver boots, then releases (`hold = PAD_A`) — the
+  harness injects controller input via `Snes::set_joypad`.
+  `LUNA_SNES_TEST_PNG=<dir>` in record mode dumps a `.wav` to audition.
+  NB: these surfaced the IPL-ROM multi-block bug (the `$FFEE` byte) — see
+  `luna_spc700_gaps.md`.
 
 ```bash
 tools/fetch-snes-test-roms.sh                  # sparse-clone → ../luna_tests
