@@ -3019,6 +3019,40 @@ mod tests {
     }
 
     #[test]
+    fn mode6_hires_tile_columns_are_16_wide_no_duplication() {
+        // Mode 6 (hi-res, BG1 4bpp). In hi-res a BG tile column spans 16
+        // *hires* pixels regardless of the tile-size bit (ares
+        // background.cpp:79 `htiles = 4`), so a 32-wide tilemap fills all
+        // 512 hires columns once. Output dot x = hires column 2x; dot 128 =
+        // hires column 256 = tile column 16. Give tilemap entry 0 palette
+        // group 0 and entry 16 palette group 1 (same character): dot 128
+        // must resolve through entry 16 (cgram 16+idx), not wrap back to
+        // entry 0 (the 8-wide bug rendered the scene as two copies).
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::BGMODE, 0x06); // Mode 6
+        p.write(0x07, 0x00); // BG1SC: tilemap word base 0, 32x32
+        p.write(0x0B, 0x01); // BG12NBA: BG1 char base word $1000 = byte $2000
+        // Character 0, row 0, col 0 → 4bpp index 1 (plane-0 bit 7).
+        p.vram.poke(0x2000, 0x80);
+        // Tilemap entry 0 = char 0, palette group 0 ($0000, already zero).
+        // Tilemap entry 16 (byte $0020) = char 0, palette group 1 ($0400).
+        p.vram.poke(0x0020, 0x00);
+        p.vram.poke(0x0021, 0x04);
+
+        let (_above, below) = render_bg_scanline_indexed_hires(&p, 0, 0, RenderOptions::default());
+        // Tile column 0 → palette 0 → cgram 0*16 + 1.
+        assert_eq!(below[0].map(|(i, _)| i), Some(1), "dot 0 is tile column 0");
+        // Tile column 16 → palette 1 → cgram 1*16 + 1 = 17. The old 8-wide
+        // path would wrap to column 0 and return cgram 1 here.
+        assert_eq!(
+            below[128].map(|(i, _)| i),
+            Some(17),
+            "dot 128 is tile column 16 (16-px hi-res tiles), not a repeat of column 0"
+        );
+    }
+
+    #[test]
     fn offset_per_tile_shifts_bg1_column() {
         // Mode 2 OPT. BG1 columns 1 and 2 hold tiles 1 (idx 2) and 2
         // (idx 3). BG3's tilemap word for screen column 1 carries an
