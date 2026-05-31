@@ -20,5 +20,11 @@ luna-cartridge  = { workspace = true }
 luna-cpu-65c816 = { workspace = true }
 luna-ppu        = { workspace = true }
 
+[dev-dependencies]
+# SNES test-ROM golden suite (tests/snes_test_roms.rs): hash the
+# framebuffer and, in record mode, dump a PNG to eyeball.
+sha2  = { workspace = true }
+image = { workspace = true }
+
 [lints]
 workspace = true
