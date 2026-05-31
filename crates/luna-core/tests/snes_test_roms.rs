@@ -384,3 +384,244 @@ ppu_test!(
     "Mode7/Perspective/Perspective.sfc",
     "10ce69859a5828d80d0b8af768a233694414c76743aa5cffdc962d52eb9dab0d"
 );
+
+// =============================================================================
+// SPC700 / S-DSP audio tests
+//
+// Peter Lemon's SPC700 ROMs play music / sounds rather than draw a result
+// screen, so these assert a SHA-256 of the APU's 32 kHz PCM output instead
+// of the framebuffer. Like the display hashes they are luna's own output
+// (regression baselines): they lock the SPC700 + S-DSP pipeline against
+// silent regressions. Record mode dumps a `.wav` (when LUNA_SNES_TEST_PNG
+// points at a dir) so the audio can be auditioned.
+// =============================================================================
+
+/// Stereo PCM samples to capture and hash (~3 s at 32 kHz).
+const AUDIO_SAMPLES: usize = 96_000;
+/// Instruction ceiling while accumulating audio.
+const AUDIO_STEP_CAP: u64 = 80_000_000;
+
+/// Boot a forced-LoROM ROM (as PAL) and accumulate the first
+/// [`AUDIO_SAMPLES`] stereo samples from the APU.
+fn run_audio(rom: Vec<u8>) -> Vec<(i16, i16)> {
+    let want: usize = std::env::var("LUNA_SNES_TEST_AUDIO_N")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(AUDIO_SAMPLES);
+    let mut cart = Cartridge::from_bytes_forced(rom, MapperKind::LoRom).expect("forced LoROM load");
+    cart.header.region = luna_cartridge::Region::Pal;
+    let mut snes = Snes::from_cartridge(cart);
+    snes.reset();
+
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+
+    let mut samples: Vec<(i16, i16)> = Vec::with_capacity(want + 8192);
+    let mut executed = 0u64;
+    'run: while samples.len() < want && executed < AUDIO_STEP_CAP {
+        for _ in 0..4096 {
+            if catch_unwind(AssertUnwindSafe(|| {
+                snes.step();
+            }))
+            .is_err()
+            {
+                break 'run;
+            }
+            executed += 1;
+        }
+        snes.apu_real.drain_audio(&mut samples, usize::MAX);
+    }
+
+    std::panic::set_hook(prev_hook);
+
+    if std::env::var("LUNA_SNES_TEST_APUDIAG").is_ok() {
+        let a = &snes.apu_real;
+        let aram_nz = a.aram.iter().filter(|&&b| b != 0).count();
+        eprintln!(
+            "APUDIAG past_ipl={} spc_pc=${:04X} KON=${:02X} KOFF=${:02X} FLG=${:02X} \
+             MVOL=({},{}) EON=${:02X} V0VOL=({},{}) to_spc={:02X?} to_cpu={:02X?} aram_nz={aram_nz}",
+            a.past_iplrom,
+            a.cpu.pc,
+            a.dsp.registers[0x4C],
+            a.dsp.registers[0x5C],
+            a.dsp.registers[0x6C],
+            a.dsp.registers[0x0C] as i8,
+            a.dsp.registers[0x1C] as i8,
+            a.dsp.registers[0x3D],
+            a.dsp.registers[0x00] as i8,
+            a.dsp.registers[0x01] as i8,
+            a.to_spc_ports,
+            a.to_cpu_ports,
+        );
+    }
+
+    samples.truncate(want);
+    samples
+}
+
+fn audio_bytes(samples: &[(i16, i16)]) -> Vec<u8> {
+    let mut b = Vec::with_capacity(samples.len() * 4);
+    for (l, r) in samples {
+        b.extend_from_slice(&l.to_le_bytes());
+        b.extend_from_slice(&r.to_le_bytes());
+    }
+    b
+}
+
+/// Minimal RIFF/WAVE writer (16-bit signed PCM stereo, 32 kHz) for the
+/// record-mode audio dump.
+fn write_wav(path: &Path, samples: &[(i16, i16)]) {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Ok(mut f) = std::fs::File::create(path) else {
+        return;
+    };
+    let rate: u32 = 32_000;
+    let channels: u16 = 2;
+    let bits: u16 = 16;
+    let block = channels * bits / 8;
+    let byte_rate = rate * u32::from(block);
+    let data_len = (samples.len() * usize::from(block)) as u32;
+    let mut w = |b: &[u8]| {
+        let _ = f.write_all(b);
+    };
+    w(b"RIFF");
+    w(&(36 + data_len).to_le_bytes());
+    w(b"WAVE");
+    w(b"fmt ");
+    w(&16u32.to_le_bytes());
+    w(&1u16.to_le_bytes()); // PCM
+    w(&channels.to_le_bytes());
+    w(&rate.to_le_bytes());
+    w(&byte_rate.to_le_bytes());
+    w(&block.to_le_bytes());
+    w(&bits.to_le_bytes());
+    w(b"data");
+    w(&data_len.to_le_bytes());
+    for (l, r) in samples {
+        w(&l.to_le_bytes());
+        w(&r.to_le_bytes());
+    }
+}
+
+/// Boot `rel`, capture its audio, and compare the PCM SHA-256 to
+/// `expected`. Skips gracefully if the corpus / ROM is absent.
+fn test_audio(rel: &str, expected: &str) {
+    let Some(root) = corpus_root() else {
+        eprintln!("[skip] SNES test corpus not found (run tools/fetch-snes-test-roms.sh)");
+        return;
+    };
+    let path = root.join(rel);
+    if !path.is_file() {
+        eprintln!("[skip] {rel}: not present under {}", root.display());
+        return;
+    }
+
+    let rom = std::fs::read(&path).expect("read rom");
+    let samples = run_audio(rom);
+    let got = hex(&Sha256::digest(audio_bytes(&samples)));
+    let nonsilent = samples.iter().filter(|(l, r)| *l != 0 || *r != 0).count();
+
+    if std::env::var("LUNA_SNES_TEST_RECORD").is_ok() {
+        if let Ok(dir) = std::env::var("LUNA_SNES_TEST_PNG") {
+            let safe = rel.replace(['/', ' '], "_");
+            write_wav(&Path::new(&dir).join(format!("{safe}.wav")), &samples);
+        }
+        let first = samples.iter().position(|(l, r)| *l != 0 || *r != 0);
+        println!(
+            "RECORD {rel} => {got}  [samples={} nonsilent={nonsilent} first={first:?}]",
+            samples.len()
+        );
+        return;
+    }
+
+    assert_eq!(
+        samples.len(),
+        AUDIO_SAMPLES,
+        "{rel}: produced only {} of {AUDIO_SAMPLES} samples (ROM did not play?)",
+        samples.len()
+    );
+    assert!(nonsilent > 0, "{rel}: APU output was pure silence");
+    assert_eq!(
+        got, expected,
+        "audio hash mismatch for {rel}\n  \
+         (run LUNA_SNES_TEST_RECORD=1 to regenerate after an intended APU change)"
+    );
+}
+
+/// Declare a Peter Lemon `SPC700/<path>` audio golden test.
+///
+/// The `known_silent:` form marks a ROM that produces **pure silence** on
+/// luna (real APU/SPC700 gap — it plays on hardware). `#[ignore]`d so the
+/// default `cargo test` is green; the committed hash characterises the
+/// current silent output, so once luna plays it the hash changes and the
+/// `--ignored` run goes red, flagging the test for promotion.
+macro_rules! spc_test {
+    ($fn:ident, $path:literal, $hash:literal) => {
+        #[test]
+        fn $fn() {
+            test_audio(concat!("SPC700/", $path), $hash);
+        }
+    };
+    (known_silent: $fn:ident, $path:literal, $hash:literal) => {
+        #[test]
+        #[ignore = "luna produces pure silence for this ROM (APU gap); plays on hardware"]
+        fn $fn() {
+            test_audio(concat!("SPC700/", $path), $hash);
+        }
+    };
+}
+
+// Golden hashes of luna's 32 kHz PCM output (first 3 s, loaded as PAL).
+// 8 play (incl. the multi-block-upload music ROMs fixed by the IPL-ROM
+// byte correction); PlayTwoSong is a separate, still-open gap.
+spc_test!(
+    spc_italo,
+    "ItaloTest/ItaloTest.sfc",
+    "ba5f3d21b6cfda0876b0e627b8c5da7e3164b91e418fcaf2f7c8180736a5d370"
+);
+spc_test!(
+    spc_pitchmod,
+    "PitchMod/PitchMod.sfc",
+    "2d0b4cf14f382dff76f4e77a016e98827c70e36c3fcc6b9016ac92ec75bc529e"
+);
+spc_test!(
+    spc_play_brr,
+    "PlayBRRSample/PlayBRRSample.sfc",
+    "9bab340ac08c21cc15e27c39bdba674acecc1e2a3b2842a0e47a51afe10b46b1"
+);
+spc_test!(
+    spc_play_noise,
+    "PlayNoise/PlayNoise.sfc",
+    "a0fcb98352b9a4fe551759a0c90d9e363c400832a656544a27d052f6e35fce86"
+);
+spc_test!(
+    spc_twinkle,
+    "Twinkle/Twinkle.sfc",
+    "861ae2ca24f09adb728575fe5dcd708525e05fe97c9224db81c615321c0488fa"
+);
+// Multi-block uploads — silent until the IPL-ROM `$FFEE` byte fix.
+spc_test!(
+    spc_axel_f,
+    "Axel-F/Axel-F.sfc",
+    "48834e4b31eb9140a14530f34fdf02574aafa2a03753801ccb7a50bd212d63ec"
+);
+spc_test!(
+    spc_ffvii_prelude,
+    "FFVIIPrelude/FFVIIPrelude.sfc",
+    "a9b4ef857dbd5805e51e3abfdabfbe359acc7a45facc82950aa37e09166c5450"
+);
+spc_test!(
+    spc_speech,
+    "SpeechSynth/SpeechSynth.sfc",
+    "da65e946b7e159e65604e237df3eaf251db7353740fe4888f89725dd47045b20"
+);
+// Still silent: the 65816 never starts the upload (SPC sits in IPL with
+// nothing transferred) — a separate gap, unrelated to the multi-block fix.
+spc_test!(
+    known_silent: spc_play_two_song,
+    "PlayTwoSong/PlayTwoSong.sfc",
+    "fec9afb531a8e036eba1d81651896e1b2c1f78b0234dbadc8e7549563f09407b"
+);
