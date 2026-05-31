@@ -989,7 +989,24 @@ impl DmaBus for DmaBusView<'_> {
 
     fn write_b(&mut self, b_offset: u8, value: u8) {
         if b_offset <= 0x3F {
-            self.ppu.write(b_offset, value);
+            // DMA/HDMA B-bus writes happen in H-blank. CGRAM ($2122 CGDATA)
+            // accepts writes there and is *never* fully dropped on hardware —
+            // ares `io.cpp:55-60` always commits the byte (only the address is
+            // latched during active display), which is exactly how the HiColor
+            // per-tile-row palette HDMA works. luna's `active_display` gate
+            // (set on the CPU write path) is stale during HDMA and was wrongly
+            // dropping these. VRAM ($2118/9) and OAM ($2104) *do* drop during
+            // active display (`io.cpp:26,40`), so leave those gated. Bypass
+            // the gate for CGDATA only, restoring the flag afterward so a
+            // later VRAM/OAM channel in the same line stays gated.
+            if b_offset == 0x22 {
+                let prev = self.ppu.active_display;
+                self.ppu.active_display = false;
+                self.ppu.write(b_offset, value);
+                self.ppu.active_display = prev;
+            } else {
+                self.ppu.write(b_offset, value);
+            }
         }
     }
 
