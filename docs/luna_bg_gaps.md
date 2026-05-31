@@ -116,13 +116,13 @@ GUI-validated (no test ROM enables EXTBG).
 | 12 | Hi-res sub-subpixel uses raw winner, not its own color-math | `dac.cpp:43-80` | **approximation accepted** — the common case (pseudo-hires transparency, color-math off) averages correctly; only hi-res *with* color-math (rare) is approximate |
 | ~~13~~ | ~~Offset-per-tile in Mode 6~~ — **DONE**: OPT now wired into the hi-res path for Mode 6 (BG1) | `background.cpp:52-69` | ✅ |
 | ~~14~~ | ~~Mode 5 hi-res scene rendered duplicated~~ — **DONE**: in hi-res, BG tile columns are always 16 *hires* px wide regardless of the tile-size bit (ares `background.cpp:79` `htiles = 4`), with the right 8-px half from `character + 1`. luna treated them as 8-wide, so a 32-wide map filled only 256 of the 512 hires px and repeated. `sample_bg_pixel` now decouples horizontal/vertical tile span (`force_wide`). `MosaicMode5` renders the single figure, matching the reference. Mode 6 shares the same path — covered by the `mode6_hires_tile_columns_are_16_wide_no_duplication` unit test (no Mode 6 ROM exists). | `background.cpp:78-101` | ✅ |
-| 15 | **Mode 6 OPT-in-hi-res scroll math — unverified.** The non-OPT hi-res scroll matches ares (`hoffset = hpixel + hscroll`, both doubled); the OPT-active case differs structurally — ares applies OPT at the per-tile *fetch* (`fetchNameTable`/`fetchOffset`, htiles 4 vs 3) where luna applies it per output pixel via `opt_scroll` + a doubled `eff.0`. Whether luna's result diverges couldn't be confirmed: no Mode 6 ROM exists and only ~1 game (Tetris Battle Gaiden) uses Mode 6 OPT, so it wasn't changed speculatively. | `background.cpp:38-67,123-148` | 🟡 unverified |
+| ~~15~~ | ~~Mode 6 OPT-in-hi-res scroll math~~ — **DONE**: in hi-res the base scroll doubles but an OPT override does **not** (ares `background.cpp:66`: `hoffset = hpixel + (hlookup & ~7) + (hscroll & 7)` — `hscroll` already doubled, `hlookup`/OPT raw). luna doubled the whole effective scroll (`eff.0 << 1`), shifting OPT columns twice as far. Fixed: `opt_scroll` now reports `h_from_opt`, and the hi-res path uses `(opt & ~7) + ((hscroll << 1) & 7)` for OPT-active columns. Built a minimal Mode 6 OPT repro (`tests/mode6opt/`) to settle it — the right half now shifts by ONE tile (was two). Guarded by `mode6_opt_offset_is_not_doubled_in_hires`. | `background.cpp:49,66` | ✅ |
 
-#12 and #15 are the open items. #12 is a deliberate approximation (ares'
+#12 is the only remaining item — a deliberate approximation (ares'
 `below()` blend for the sub subpixel is intricate and hi-res+color-math is
-vanishingly rare). #15 is left as-is on purpose — flagged for scrutiny but
-not patched without a repro to validate against. #14 surfaced from the
-SNES test-ROM suite (`test_corpora.md`).
+vanishingly rare). #14/#15 surfaced from the SNES test-ROM work
+(`test_corpora.md`); #15 was settled with the hand-built repro in
+`tests/mode6opt/`.
 
 ---
 
