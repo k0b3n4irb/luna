@@ -114,15 +114,16 @@ GUI-validated (no test ROM enables EXTBG).
 | ~~9~~ | ~~Legacy `render_bg1_scanline_with` divergence~~ — **DONE**: now routes through the runtime indexed renderer (tilemap sizes, 16×16, mosaic, Mode-0 palette) | — | ✅ |
 | ~~11~~ | ~~Mosaic in the hi-res path~~ — **DONE**: snaps the dot/scanline to the block before doubling | Mesen2 `SnesPpu.cpp:1026-1044` | ✅ |
 | 12 | Hi-res sub-subpixel uses raw winner, not its own color-math | `dac.cpp:43-80` | **approximation accepted** — the common case (pseudo-hires transparency, color-math off) averages correctly; only hi-res *with* color-math (rare) is approximate |
-| 16 | Interlace vertical doubling in hi-res (`vpixel = vpixel<<1 \| field`, mosaic `voffset << (hires&&interlace)`) | `background.cpp:40,43` | **whole-feature gap, documented** — luna renders a 224-line progressive framebuffer and has no interlaced (448-line) output mode at all, so the SETINI bit-0 vertical doubling is moot. Affects only the rare hi-res *interlace* menus (e.g. RPM Racing, some BG3 text screens); not a hi-res regression |
+| ~~16~~ | ~~Interlace vertical doubling~~ — **DONE (Phases A-C)**: `field` parity toggles each frame at the V-counter wrap, exposed at STAT78 bit 7 (Phase A); a screen line `y` samples logical line `y*2+field` (Phase B, ares `background.cpp:40`); interlace collapses 448→224 by averaging both fields in `flush_partial_scanline`, the vertical analog of the hi-res 512→256 Option A (Phase C). All 6 `PPU/Interlace/*` ROMs (512×448) wired + validated vs their references. Remaining: OBJ interlace (`obj_gaps` #6, Phase D) + the mosaic `voffset << (hires&&interlace)` sub-case. | `background.cpp:40,43` | ✅ |
 | ~~13~~ | ~~Offset-per-tile in Mode 6~~ — **DONE**: OPT now wired into the hi-res path for Mode 6 (BG1) | `background.cpp:52-69` | ✅ |
 | ~~14~~ | ~~Mode 5 hi-res scene rendered duplicated~~ — **DONE**: in hi-res, BG tile columns are always 16 *hires* px wide regardless of the tile-size bit (ares `background.cpp:79` `htiles = 4`), with the right 8-px half from `character + 1`. luna treated them as 8-wide, so a 32-wide map filled only 256 of the 512 hires px and repeated. `sample_bg_pixel` now decouples horizontal/vertical tile span (`force_wide`). `MosaicMode5` renders the single figure, matching the reference. Mode 6 shares the same path — covered by the `mode6_hires_tile_columns_are_16_wide_no_duplication` unit test (no Mode 6 ROM exists). | `background.cpp:78-101` | ✅ |
 | ~~15~~ | ~~Mode 6 OPT-in-hi-res scroll math~~ — **DONE**: in hi-res the base scroll doubles but an OPT override does **not** (ares `background.cpp:66`: `hoffset = hpixel + (hlookup & ~7) + (hscroll & 7)` — `hscroll` already doubled, `hlookup`/OPT raw). luna doubled the whole effective scroll (`eff.0 << 1`), shifting OPT columns twice as far. Fixed: `opt_scroll` now reports `h_from_opt`, and the hi-res path uses `(opt & ~7) + ((hscroll << 1) & 7)` for OPT-active columns. Built a minimal Mode 6 OPT repro (`tests/mode6opt/`) to settle it — the right half now shifts by ONE tile (was two). Guarded by `mode6_opt_offset_is_not_doubled_in_hires`. | `background.cpp:49,66` | ✅ |
 
-#12 and #16 are the remaining items, both intentional: #12 a deliberate
-approximation (ares' `below()` blend for the sub subpixel is intricate
-and hi-res+color-math is vanishingly rare), #16 a whole-feature gap
-(luna has no interlaced output). #14/#15 surfaced from the SNES test-ROM
+#12 is the remaining intentional item: a deliberate approximation (ares'
+`below()` blend for the sub subpixel is intricate and hi-res+color-math is
+vanishingly rare). #16 (interlace) is now DONE through Phase C — see the
+table; OBJ interlace (Phase D) is tracked in `obj_gaps` #6.
+#14/#15 surfaced from the SNES test-ROM
 work (`test_corpora.md`); #15 was settled with the hand-built repro in
 `tests/mode6opt/`.
 
