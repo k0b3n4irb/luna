@@ -21,6 +21,9 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
   CARGO_INCREMENTAL: "0"
+  # actions/cache@v4 still ships a Node.js 20 entrypoint (deprecated). Opt
+  # into Node 24 now to clear the runner warning (github.blog 2025-09-19).
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   tom-harte:
