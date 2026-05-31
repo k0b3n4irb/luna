@@ -499,35 +499,38 @@ ppu_test!(
     "HDMA/Mode7HDMA/Mode7HDMA.sfc",
     "736a61ba11eeb963d4c78129669c7a3dee511d3a482646cf60eb7c17e7061d89"
 );
-// The 3 HiColor "per-tile-row" demos rewrite CGRAM via HDMA every 8 lines
-// to show a full-colour photo. luna renders the image (the mandrill is
-// recognisable in the pseudo-hires variant) but with horizontal banding:
-// HDMA writes land ONE scanline late. Root cause is verified in
-// `Snes::sched_one_line` (snes.rs:1048-1118) — the line is rendered before
-// that line's HDMA transfer runs, so the first transfer only takes effect
-// after line 0 (hardware applies it in the H-blank *before* line 0). The
-// fix is a core-scheduler reorder (HDMA-before-render) that touches every
-// HDMA golden, so it's deferred to a dedicated reference-first + GUI-
-// validated change. These are `#[ignore]`d with the current (banded) hash
-// so the `--ignored` run goes red once the off-by-one is fixed. See
-// docs/luna_dma_gaps.md #7.
+// The HiColor "per-tile-row" demos rewrite CGRAM via HDMA mid-frame to
+// exceed 256 colours. luna was DROPPING those CGRAM writes: the `$2122`
+// CGDATA `write_gated(!active_display)` gate (a CPU-write-path flag) is
+// stale during HDMA, so the per-line palette never landed and the photo
+// rendered with heavy horizontal banding. Fixed in `DmaBusView::write_b`
+// (snes.rs) — CGDATA via DMA/HDMA bypasses the gate (CGRAM is never
+// dropped on hardware, ares `io.cpp:55-60`), while VRAM/OAM stay gated
+// (`io.cpp:26,40`). The pseudo-hires variant now renders the full-colour
+// mandrill cleanly → promoted to a passing golden. See docs/luna_dma_gaps.md #7.
+ppu_test!(
+    ppu_hdma_hicolor64_pseudohires,
+    "HDMA/HiColor64PerTileRowPseudoHiRes/HiColor64PerTileRowPseudoHiRes.sfc",
+    "610fbfa6a0566c809708ff380d1a2f972b10b1d343d82310646fd1c91297072c"
+);
+// The two non-pseudo-hires variants display an RGB colour-test *chart*
+// (gradients + bars, not a photo). The CGDATA fix corrects HiColor64;
+// HiColor128 is unaffected by it (its ~2-line palette cadence needs finer
+// per-scanline CGRAM HDMA timing than luna's coarse per-line model). Both
+// still show residual striping that can't be validated pixel-exact without
+// a reference image, so they stay `#[ignore]`d with the current hash as a
+// characterisation baseline (gap #7, remaining sub-item).
 ppu_test!(
     ppu_hdma_hicolor64,
     "HDMA/HiColor64PerTileRow/HiColor64PerTileRow.sfc",
-    "5b944a2deb9c23397e22dc0878a8ab22c535819ec91b8af27866d2c1fd968234",
-    ignore = "HiColor banding: HDMA applied one scanline late (gap #7)"
+    "ab7a0324251a2b7c87ede33af6b707dc3e4aa08891dfecd42121ec5f5f36e06a",
+    ignore = "HiColor chart: residual striping, no reference image (gap #7)"
 );
 ppu_test!(
     ppu_hdma_hicolor128,
     "HDMA/HiColor128PerTileRow/HiColor128PerTileRow.sfc",
     "54495c7af30fa3cda2734230351396254d5ea2b64095b444082087888b539bc5",
-    ignore = "HiColor banding: HDMA applied one scanline late (gap #7)"
-);
-ppu_test!(
-    ppu_hdma_hicolor64_pseudohires,
-    "HDMA/HiColor64PerTileRowPseudoHiRes/HiColor64PerTileRowPseudoHiRes.sfc",
-    "979e4345c73313568061a9ac0f1814f8093766c9f48397b01bcf0faed44a3b1b",
-    ignore = "HiColor banding: HDMA applied one scanline late (gap #7)"
+    ignore = "HiColor chart: needs finer per-scanline CGRAM HDMA timing (gap #7)"
 );
 
 // =============================================================================

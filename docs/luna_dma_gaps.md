@@ -10,11 +10,11 @@ frame/scanline HDMA hooks).
 Authored 2026-05-30.
 
 **Headline:** the DMA/HDMA *core* (table walk, transfer modes, indirect
-addressing, A-bus restrictions) is faithful and well-covered. But the
-2026-05-31 HDMA-ROM coverage work surfaced one **real visible bug** in
-the scheduler wiring — HDMA register writes are applied one scanline late
-(#7 below). The rest are edge-case hardware *restrictions* and timing
-*approximations*.
+addressing, A-bus restrictions) is faithful and well-covered. The
+2026-05-31 HDMA-ROM coverage work surfaced and **fixed** one real visible
+bug — HDMA writes to CGRAM were dropped during active display, breaking
+the HiColor per-tile-row palette technique (#7 below). The rest are
+edge-case hardware *restrictions* and timing *approximations*.
 
 ## Severity legend
 
@@ -60,48 +60,55 @@ loop). Test `dma_wram_to_wmdata_is_blocked` (and the inverse: non-WRAM →
 
 ---
 
-## 🔴 7. HDMA register writes applied one scanline late
+## ✅ 7. HDMA writes to CGRAM ($2122) were dropped during active display — FIXED
 
 Surfaced 2026-05-31 wiring the `PPU/HDMA/*` test ROMs into the golden
 suite. The five smooth-effect demos (WaveHDMA scroll-per-line, RedSpace
-fixed-colour gradient ×3, Mode7HDMA matrix) render correctly, but the
-three **HiColor per-tile-row** demos — which rewrite CGRAM via HDMA every
-8 scanlines to show a full-colour photo — render the image with
-horizontal **banding**: the mandrill is recognisable in the pseudo-hires
-variant, but every palette band is shifted down by one line.
+fixed-colour gradient ×3, Mode7HDMA matrix) rendered correctly, but the
+**HiColor per-tile-row** demos — which rewrite CGRAM via HDMA mid-frame
+to exceed 256 colours — rendered the photo with heavy horizontal
+**banding** (the mandrill was recognisable but striped).
 
-**Root cause** (verified in `Snes::sched_one_line`, `snes.rs:1048-1118`):
+**First hypothesis was wrong.** It looked like a one-scanline-late
+ordering bug in `Snes::sched_one_line` (render-before-HDMA). Empirically
+disproved: reordering HDMA *before* the render produced a **byte-identical
+frame**, and disabling per-line HDMA entirely *also* produced the
+identical frame. So the per-line HDMA transfer was contributing **nothing**
+to CGRAM — the writes were being dropped, not mis-timed. (ares confirms
+the per-line model already matches: setup at line 0 H≈16 with no transfer,
+`hdmaRun` at H=1104 affecting the next line ⇒ line N sees N transfers, same
+as luna. `timing.cpp:31-46,62-78`, `dma.cpp:28-41,142-150`.)
 
-```text
-1. render_current_scanline(ppu_line)   // line N drawn with CURRENT CGRAM
-2. ppu_line += 1
-3. hdma_run_line()                      // HDMA transfer for the new line
-```
+**Real root cause.** `PPU::write` gates CGDATA on `active_display`:
+`CGDATA => cgram.write_gated(value, !active_display)` (`ppu.rs:724`). That
+flag is set **only on the CPU write path** (`snes.rs:1315`) and is `true`
+for the whole visible region. HDMA writes go through `DmaBusView::write_b`,
+which never refreshed it — so during a HiColor frame the stale-`true` flag
+made every HDMA CGDATA write **drop**, leaving the per-line palette
+unapplied. (The 5 smooth demos were unaffected because scroll/fixed-colour/
+Mode-7 matrix registers aren't gated.)
 
-The line is rendered **before** its HDMA transfer runs, so the first
-transfer only takes effect after line 0, and every write lands one
-scanline late. On real hardware HDMA transfers happen in the H-blank
-*before* a line is displayed (ares `ppu.cpp` / `dma.cpp` — HDMA setup at
-frame start, then per-line transfer ahead of the visible line), so line N
-already reflects its HDMA write. luna is off by exactly one line.
+ares `io.cpp:55-60` shows CGRAM is **never** fully dropped —
+`dac.cgram[address] = data` runs unconditionally (only the *address* is
+latched during active display). VRAM (`io.cpp:26`, early `return`) and OAM
+(`io.cpp:40`) **do** drop during active display.
 
-The deviation is invisible on smooth effects (a 1-line shift in a wave,
-gradient, or Mode-7 matrix is imperceptible — those 5 goldens pass) but
-obvious on a per-8-line palette swap.
+**Fix** (`DmaBusView::write_b`, `snes.rs`): CGDATA (`$2122`) via DMA/HDMA
+bypasses the `active_display` gate (CGRAM is never dropped), with the flag
+saved/restored so a later VRAM/OAM channel on the same line stays gated.
+VRAM/OAM behaviour is unchanged. The pseudo-hires HiColor demo now renders
+the mandrill **pixel-clean** (`ppu_hdma_hicolor64_pseudohires` promoted to
+a passing golden); SMRPG + Chrono Trigger smoke screenshots are unchanged
+(CT byte-identical, SMRPG correct); full `--lib` + golden suites green.
 
-**Fix** (deferred): reorder `sched_one_line` so the line's HDMA transfer
-runs *before* `render_current_scanline`, matching hardware. This is a
-core-scheduler change that shifts **every** HDMA golden by a line and
-alters visible rendering, so it needs the reference-first treatment
-(confirm ares' exact init-vs-first-transfer dot timing), a full
-`coproc-testing` sweep + SMRPG smoke test, and GUI validation per
-`audible-fixes-test-first` before commit. Tracked by the three
-`#[ignore]`d `ppu_hdma_hicolor*` goldens (`snes_test_roms.rs`), which
-characterise the current banded output and go red once the fix lands.
+**Remaining sub-item** (kept `#[ignore]`d): the two *non*-pseudo-hires
+HiColor demos display an RGB colour *chart* and still show residual
+striping — HiColor128's ~2-line palette cadence needs finer per-scanline
+CGRAM HDMA timing than luna's coarse per-line model, and neither can be
+validated pixel-exact without a reference image.
 
-This **corrects the prior "no clear visible bug" headline** and the
-"per-scanline HDMA hooked at every visible line" verified-correct note
-below — the hook exists but fires one line too late.
+This **corrects the prior "no clear visible bug" headline** — the bug was
+real, just not the ordering issue first suspected.
 
 ---
 
@@ -131,8 +138,9 @@ below — the hook exists but fires one line too late.
 - **`$43x5/6` shared** between the DMA byte count and the HDMA indirect
   address — correct (hardware shares the register pair).
 - Channel register read/write (`$43x0-$43xF`); `$420B` ascending
-  channel order; per-scanline HDMA hooked at every visible line (but
-  fired one line too late — see 🔴 #7).
+  channel order; per-scanline HDMA hooked at every visible line, line
+  timing matches ares (line N sees N transfers — see #7, which was a
+  CGRAM gating bug, not a timing one).
 - Per-byte cooperative `bus.tick(8)` so coprocessors (SA-1) interleave
   with the DMA instead of freezing.
 
@@ -140,8 +148,9 @@ below — the hook exists but fires one line too late.
 
 1. ~~#1 validA~~ — **done**.
 2. ~~#2 WRAM→WRAM block~~ — **done**.
-3. 🔴 **#7 HDMA one-line-late** — the only real bug; fixes the HiColor
-   per-tile-row banding. Deferred pending reference-first + GUI
-   validation (core-scheduler reorder).
+3. ~~#7 HDMA CGRAM drop~~ — **done**: CGDATA via DMA/HDMA no longer gated
+   by `active_display`; fixed the HiColor per-tile-row banding (pseudo-hires
+   mandrill now pixel-clean). HiColor64/128 charts remain (finer per-scanline
+   timing + no reference image).
 4. 🟡 #3-#6 — timing approximations; low real-world return (the current
    model is game-compatible). Left as documented approximations.
