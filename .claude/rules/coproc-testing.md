@@ -34,3 +34,27 @@ A working build should reach the sky-coloured title scene (frame
 For PPU compositor / color-math changes the equivalent SMW Yoshi's
 House intro repro is also useful — see `/smoke-test` for the
 scripted-input variant.
+
+## Interlace smoke test (RPM Racing)
+
+For any change to interlace, hi-res (mode 5/6), or sprite rendering,
+screenshot **RPM Racing** — the canonical commercial interlace title
+(runs Mode 5 hi-res + BG interlace, `SETINI=$01`, the whole time):
+
+```
+./target/release/luna state -n 12000000 --screenshot /tmp/rpm.png \
+  "tests/roms/RPM Racing (U).smc"
+```
+
+A working build shows the **R.P.M. RACING / Interplay** title with a
+crisp, readable sprite logo (no horizontal banding, no ghosted/doubled
+letters). RPM Racing exposed a real bug the homebrew `PPU/Interlace/*`
+ROMs could not: it sets BG interlace (SETINI bit 0) **without** OBJ
+interlace (bit 1), so gating OBJ interlace on the wrong bit garbled its
+sprites (fixed `0cc6da4`). No public corpus covers that combination, so
+this commercial smoke is worth keeping.
+
+The ROM is copyrighted and **not committed** (`tests/roms/*` is
+gitignored — dump your own cart); the command skips if it is absent. The
+homebrew `ppu_interlace_*` goldens in `snes_test_roms.rs` are the
+committed, CI-run interlace coverage.
