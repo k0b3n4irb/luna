@@ -553,21 +553,13 @@ fn test_audio(rel: &str, expected: &str) {
 
 /// Declare a Peter Lemon `SPC700/<path>` audio golden test.
 ///
-/// The `known_silent:` form marks a ROM that produces **pure silence** on
-/// luna (real APU/SPC700 gap — it plays on hardware). `#[ignore]`d so the
-/// default `cargo test` is green; the committed hash characterises the
-/// current silent output, so once luna plays it the hash changes and the
-/// `--ignored` run goes red, flagging the test for promotion.
+/// `PlayTwoSong` is intentionally **not** wired up: it only uploads/plays
+/// a song in response to an A/B button press (`ReadJOY`), so headless it
+/// just spins in its input loop and stays silent — by design, not a bug.
+/// Testing it would mean injecting controller input.
 macro_rules! spc_test {
     ($fn:ident, $path:literal, $hash:literal) => {
         #[test]
-        fn $fn() {
-            test_audio(concat!("SPC700/", $path), $hash);
-        }
-    };
-    (known_silent: $fn:ident, $path:literal, $hash:literal) => {
-        #[test]
-        #[ignore = "luna produces pure silence for this ROM (APU gap); plays on hardware"]
         fn $fn() {
             test_audio(concat!("SPC700/", $path), $hash);
         }
@@ -618,10 +610,5 @@ spc_test!(
     "SpeechSynth/SpeechSynth.sfc",
     "da65e946b7e159e65604e237df3eaf251db7353740fe4888f89725dd47045b20"
 );
-// Still silent: the 65816 never starts the upload (SPC sits in IPL with
-// nothing transferred) — a separate gap, unrelated to the multi-block fix.
-spc_test!(
-    known_silent: spc_play_two_song,
-    "PlayTwoSong/PlayTwoSong.sfc",
-    "fec9afb531a8e036eba1d81651896e1b2c1f78b0234dbadc8e7549563f09407b"
-);
+// (PlayTwoSong is omitted — it needs A/B controller input to play; see
+// the `spc_test!` doc comment.)
