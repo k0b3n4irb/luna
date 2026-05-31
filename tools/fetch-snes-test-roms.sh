@@ -15,15 +15,19 @@
 set -euo pipefail
 
 REPO="https://github.com/PeterLemon/SNES.git"
-# Subdirs the harness pulls ROMs from. Add more here (e.g. PPU, SPC700)
-# as tests for those categories are written.
-SPARSE_PATHS=(CPUTest)
+# Subdirs the harness pulls ROMs from. Add more here (e.g. SPC700) as
+# tests for those categories are written.
+SPARSE_PATHS=(CPUTest PPU)
 
 DEST="${LUNA_SNES_TEST_DIR:-$(cd "$(dirname "$0")/.." && pwd)/../luna_tests}"
 
-if [ -d "$DEST/CPUTest" ]; then
-    echo "Corpus already present at $DEST"
-    echo "Delete the directory and rerun to refresh."
+if [ -d "$DEST/.git" ]; then
+    # Already cloned — just (re)apply the sparse set so newly-added paths
+    # (e.g. PPU) get pulled into an existing checkout.
+    echo "Corpus present at $DEST; ensuring paths: ${SPARSE_PATHS[*]}"
+    git -C "$DEST" sparse-checkout set "${SPARSE_PATHS[@]}"
+    git -C "$DEST" checkout
+    echo "Done."
     exit 0
 fi
 

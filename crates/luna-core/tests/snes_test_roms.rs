@@ -305,3 +305,82 @@ cpu_test!(
     "TRN",
     "4499f14b4497b7522691a4ac5ac8f9d5731976f89be27167091fe25a19cc9b68"
 );
+
+/// Declare a Peter Lemon `PPU/<path>` golden test. The PPU suite has an
+/// irregular directory layout, so the full relative path is given.
+macro_rules! ppu_test {
+    ($fn:ident, $path:literal, $hash:literal) => {
+        #[test]
+        fn $fn() {
+            test_display(concat!("PPU/", $path), $hash);
+        }
+    };
+}
+
+// Curated PPU scenes (the twvd/siena selection): BG maps, hi-colour
+// blending, windows, and Mode 7. Golden hashes are luna's own PAL render.
+ppu_test!(
+    ppu_bg1_2bpp,
+    "BGMAP/8x8/2BPP/8x8BG1Map2BPP32x328PAL/8x8BG1Map2BPP32x328PAL.sfc",
+    "d0c931e79fb78ae46471674155dabbbcaedddb8f082ccc54c4e02a1a8617fe57"
+);
+ppu_test!(
+    ppu_bg2_2bpp,
+    "BGMAP/8x8/2BPP/8x8BG2Map2BPP32x328PAL/8x8BG2Map2BPP32x328PAL.sfc",
+    "347f7663c3cfdc347a323c64c7c4e80ad3873b8b211aefa12919e245a99b2ff8"
+);
+ppu_test!(
+    ppu_bg3_2bpp,
+    "BGMAP/8x8/2BPP/8x8BG3Map2BPP32x328PAL/8x8BG3Map2BPP32x328PAL.sfc",
+    "347f7663c3cfdc347a323c64c7c4e80ad3873b8b211aefa12919e245a99b2ff8"
+);
+ppu_test!(
+    ppu_bg4_2bpp,
+    "BGMAP/8x8/2BPP/8x8BG4Map2BPP32x328PAL/8x8BG4Map2BPP32x328PAL.sfc",
+    "347f7663c3cfdc347a323c64c7c4e80ad3873b8b211aefa12919e245a99b2ff8"
+);
+ppu_test!(
+    ppu_bg_4bpp,
+    "BGMAP/8x8/4BPP/8x8BGMap4BPP32x328PAL/8x8BGMap4BPP32x328PAL.sfc",
+    "156220da11d227e5a5f0447b36d4923a3b1b04bfd435584fa13b50a6153462e5"
+);
+ppu_test!(
+    ppu_rings,
+    "Rings/Rings.sfc",
+    "a8353b5531c6173b46636544e5a6838a97b38b2d2f03bcb11c887054bf3ec15e"
+);
+ppu_test!(
+    ppu_hicolor_dlair,
+    "Blend/HiColor/HiColor1241DLair/HiColor1241DLair.sfc",
+    "32c758e0238f8de9717cff1351f083545c4423a90a5aad4bc8ebeea493ff2555"
+);
+ppu_test!(
+    ppu_hicolor_3840,
+    "Blend/HiColor/HiColor3840/HiColor3840.sfc",
+    "bc2c00d8d889753a1f22548191fd87ba6dad6f9b63ce861358bedb34393a5bb2"
+);
+ppu_test!(
+    ppu_hicolor_myst,
+    "Blend/HiColor/HiColor575Myst/HiColor575Myst.sfc",
+    "0125ae2f592c0cb4a00a31b156b95085b7e6a6026bb8c86cc4e55d13e449acf3"
+);
+ppu_test!(
+    ppu_window_hdma,
+    "Window/WindowHDMA/WindowHDMA.sfc",
+    "2bae131ba2086640751142164246aadaf54c147dfd732839b8f0a7c91f7b2521"
+);
+ppu_test!(
+    ppu_window_multi,
+    "Window/WindowMultiHDMA/WindowMultiHDMA.sfc",
+    "885273a42c4f466571ff0db04f180b6cc08f988022c52a596d50aa6c700dfc18"
+);
+ppu_test!(
+    ppu_mode7_rotzoom,
+    "Mode7/RotZoom/RotZoom.sfc",
+    "6f8deb68ff3ad378cbcab75310272e2b152862ad01d286a7c0780b7df693001b"
+);
+ppu_test!(
+    ppu_mode7_persp,
+    "Mode7/Perspective/Perspective.sfc",
+    "10ce69859a5828d80d0b8af768a233694414c76743aa5cffdc962d52eb9dab0d"
+);
