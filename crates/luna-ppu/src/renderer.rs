@@ -295,10 +295,12 @@ pub fn decode_all_sprites(ppu: &Ppu) -> [SpriteEntry; 128] {
             x -= 512;
         }
         let (w, h) = if is_large { large } else { small };
-        // Interlace small-sprite height quirk (ares oam.cpp:67): in
+        // Interlace small-sprite height quirk (ares oam.cpp:67): in OBJ
         // interlace a *small* sprite (size bit 0) with baseSize >= 6 is
-        // forced to height 16 (the table would give 32).
-        let h = if ppu.setini & 0x01 != 0 && !is_large && (ppu.obsel >> 5) & 0x07 >= 6 {
+        // forced to height 16 (the table would give 32). OBJ interlace is
+        // SETINI **bit 1** (`obj.io.interlace = data.bit(1)`, ares io.cpp) —
+        // SEPARATE from the BG/screen interlace in bit 0.
+        let h = if ppu.setini & 0x02 != 0 && !is_large && (ppu.obsel >> 5) & 0x07 >= 6 {
             16
         } else {
             h
@@ -1565,7 +1567,8 @@ struct SpriteEval {
 /// `SnesPpu.cpp:595-625,693-741`.
 fn evaluate_sprite_line(ppu: &Ppu, sprites: &[SpriteEntry; 128], y: u16) -> SpriteEval {
     let first = ppu.oam.first_sprite() as usize;
-    let interlace = ppu.setini & 0x01 != 0;
+    // OBJ interlace = SETINI bit 1 (separate from BG interlace, bit 0).
+    let interlace = ppu.setini & 0x02 != 0;
     // Pass 1: first 32 on-line sprites, in evaluation order from
     // firstSprite (= priority order, items[0] front-most).
     let mut items = [0u8; 32];
@@ -1642,11 +1645,12 @@ pub fn render_sprites_scanline_indexed_with(
     }
     let sprites = decode_all_sprites(ppu);
     let eval = evaluate_sprite_line(ppu, &sprites, y);
-    // Interlace (Phase D): the sprite occupies half the screen lines, and a
+    // OBJ interlace (Phase D) = SETINI **bit 1** (not bit 0, which is BG
+    // interlace). When on, the sprite occupies half the screen lines and a
     // screen row samples logical sprite row `screen_row*2 + field` (ares
     // object.cpp:109,121-122). Each field is rendered in its own blend pass
     // (Phase C), so `Ppu::field` selects the even/odd logical row here.
-    let interlace = ppu.setini & 0x01 != 0;
+    let interlace = ppu.setini & 0x02 != 0;
     let field = usize::from(ppu.field);
     // Draw survivors in fetch order: back-most first, front-most last,
     // so the front sprite overwrites and wins the pixel.
@@ -2111,6 +2115,30 @@ mod tests {
         // Interlace: screen extent halved to 16 → rows 10..26.
         assert!(sprite_on_line(&sp, 25, true));
         assert!(!sprite_on_line(&sp, 26, true));
+    }
+
+    #[test]
+    fn obj_interlace_gates_on_setini_bit1_not_bit0() {
+        // OBJ interlace is SETINI bit 1 (`obj.io.interlace = data.bit(1)`,
+        // ares io.cpp), SEPARATE from BG/screen interlace in bit 0. RPM
+        // Racing sets bit 0 only (BG hi-res interlace) — its sprites must
+        // render normally; gating OBJ interlace on bit 0 garbled the logo.
+        // Probe via the small-sprite height quirk (baseSize 6 → 16x32; OBJ
+        // interlace forces height 16).
+        let mut p = Ppu::new();
+        p.obsel = 0xC0; // baseSize 6 → small sprite 16x32
+        p.setini = 0x01; // BG interlace only → OBJ unaffected
+        assert_eq!(
+            decode_all_sprites(&p)[0].h,
+            32,
+            "SETINI bit 0 (BG interlace) must NOT trigger the OBJ height quirk"
+        );
+        p.setini = 0x02; // OBJ interlace → quirk applies
+        assert_eq!(
+            decode_all_sprites(&p)[0].h,
+            16,
+            "SETINI bit 1 (OBJ interlace) applies the small-sprite height quirk"
+        );
     }
 
     #[test]
