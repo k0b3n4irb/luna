@@ -164,7 +164,12 @@ corrected (mosaic *is* applied since #11).
 
 - Tilemap base/size decode incl. 64×32 / 32×64 / 64×64 quadrant
   offsets (`+0x800/0x1000/0x1800`) — matches `background.cpp:84-89`.
-- 16×16 tiles + flip-aware quadrant selection (`+1/+16/+17`).
+  **Empirically confirmed** 2026-05-31 against the Peter Lemon 8bpp
+  `BGMAP/8x8/8BPP/{32x32,32x64,64x32,64x64}` ROMs (100% match to each
+  ROM's reference art, incl. the 32×32 wrapping scroll).
+- 16×16 tiles + flip-aware quadrant selection (`+1/+16/+17`); 8bpp H/V
+  flip empirically confirmed against the `BGMAP/8x8/8BPP/TileFlip` ROM
+  (pixel-identical flip pattern).
 - 2/4/8 bpp planar decode (`tile.rs`).
 - 10-bit scroll; char base `(v&0xF)<<12` words; tilemap base
   `(v&0xFC)<<8` words (= ares `data.bit(2,7)<<10`).

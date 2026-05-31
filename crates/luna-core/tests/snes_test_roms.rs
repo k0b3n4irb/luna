@@ -401,6 +401,42 @@ ppu_test!(
     "BGMAP/8x8/4BPP/8x8BGMap4BPP32x328PAL/8x8BGMap4BPP32x328PAL.sfc",
     "156220da11d227e5a5f0447b36d4923a3b1b04bfd435584fa13b50a6153462e5"
 );
+// 8bpp (256-colour) BG maps across all four tilemap sizes + tile flip —
+// exercises the 64-wide/64-tall quadrant offsets (+0x800/0x1000/0x1800)
+// and the H/V-flip path in 8bpp. Each validated against the reference art
+// that ships with the ROM (`GFX/BG.png`; TileFlip also a full-screen
+// capture): all five match at 100% (tol 24, the only delta being the
+// 8→5→8-bit palette roundtrip). The 32x32 demo scrolls (140,140) into its
+// wrapping 256-px map; 32x64/64x32/64x64 show the un-scrolled top-left —
+// since the visible 256×224 only touches the first quadrant, those three
+// produce the *same* framebuffer (hence the identical hash, not a typo).
+// TileFlip's flip pattern is pixel-identical (same colour histogram) at a
+// 15-px vertical framing offset vs the PAL capture.
+ppu_test!(
+    ppu_bg_8bpp_32x32,
+    "BGMAP/8x8/8BPP/32x32/8x8BGMap8BPP32x32.sfc",
+    "4ae985ae657c906941e01a8775a51d362a9e0bb6624264c8db81158986504839"
+);
+ppu_test!(
+    ppu_bg_8bpp_32x64,
+    "BGMAP/8x8/8BPP/32x64/8x8BGMap8BPP32x64.sfc",
+    "fd2abf80a33c3145d5b3ce0aff45168f7e55790012ce09ca6de1e4af5d86b51e"
+);
+ppu_test!(
+    ppu_bg_8bpp_64x32,
+    "BGMAP/8x8/8BPP/64x32/8x8BGMap8BPP64x32.sfc",
+    "fd2abf80a33c3145d5b3ce0aff45168f7e55790012ce09ca6de1e4af5d86b51e"
+);
+ppu_test!(
+    ppu_bg_8bpp_64x64,
+    "BGMAP/8x8/8BPP/64x64/8x8BGMap8BPP64x64.sfc",
+    "fd2abf80a33c3145d5b3ce0aff45168f7e55790012ce09ca6de1e4af5d86b51e"
+);
+ppu_test!(
+    ppu_bg_8bpp_tileflip,
+    "BGMAP/8x8/8BPP/TileFlip/8x8BGMapTileFlip.sfc",
+    "04202031bf187476cd32c2e7e6851b128372986b126fbe499c851cbf41b73929"
+);
 ppu_test!(
     ppu_rings,
     "Rings/Rings.sfc",
