@@ -134,8 +134,9 @@ pub mod register {
     pub const COLDATA: u8 = 0x32;
     /// `$2133` SETINI — interlace / hi-res / overscan flags.
     pub const SETINI: u8 = 0x33;
-    /// `$213E` STAT77 — PPU1 status: interlace field, OBJ range/time
-    /// over, chip ID.
+    /// `$213E` STAT77 — PPU1 status: OBJ range-over (bit 6) / time-over
+    /// (bit 7), chip ID (bits 0-3). The interlace field flag lives in
+    /// STAT78 bit 7, not here (ares `io.cpp:157-178`).
     pub const STAT77: u8 = 0x3E;
     /// `$213F` STAT78 — PPU2 status: interlace odd-field, region
     /// bit (PAL/NTSC), chip rev. Reads ALSO reset the BG scroll
@@ -308,6 +309,11 @@ pub struct Ppu {
     /// "Latch hit" bit: set when the H/V counters were latched
     /// since the last STAT78 read. Exposed at STAT78 bit 6.
     pub external_latch_hit: bool,
+    /// Interlace field parity, exposed at STAT78 ($213F) bit 7. Toggles
+    /// every frame at the V-counter wrap (ares `counter/inline.hpp:32`
+    /// `time.field ^= 1`) — unconditionally, even in progressive mode.
+    /// Interlace Phase A: state + flag only; vertical doubling is later.
+    pub field: bool,
     /// `$2134-$2136 MPYL/M/H` — 24-bit hardware multiplier result.
     /// Updated whenever M7A or M7B's high byte is written:
     /// `M7A (signed 16) × M7B_high (signed 8) → 24-bit signed`.
@@ -430,6 +436,7 @@ impl Ppu {
             ophct_hi_pending: false,
             opvct_hi_pending: false,
             external_latch_hit: false,
+            field: false,
             bg_scroll_latch: 0,
             open_bus: 0,
             inidisp_write_count: 0,
@@ -530,7 +537,9 @@ impl Ppu {
                 // Reading $213F is documented to clear the shared
                 // BG-scroll write-twice latch AND the "latch hit"
                 // status bit as side effects.
-                let v = self.stat78 | if self.external_latch_hit { 0x40 } else { 0 };
+                let v = self.stat78
+                    | (u8::from(self.field) << 7)
+                    | if self.external_latch_hit { 0x40 } else { 0 };
                 self.bg_scroll_latch = 0;
                 self.external_latch_hit = false;
                 v
@@ -786,6 +795,18 @@ mod stat_tests {
         let v = p.read(register::STAT78);
         assert_eq!(v & 0x0F, 0x02, "chip rev = 2");
         assert_eq!(v & 0x10, 0x00, "region bit clear = NTSC");
+    }
+
+    #[test]
+    fn stat78_bit7_reflects_interlace_field() {
+        let mut p = Ppu::new();
+        assert_eq!(
+            p.read(register::STAT78) & 0x80,
+            0x00,
+            "field 0 → bit 7 clear"
+        );
+        p.field = true;
+        assert_eq!(p.read(register::STAT78) & 0x80, 0x80, "field 1 → bit 7 set");
     }
 
     #[test]
