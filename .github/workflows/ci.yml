@@ -17,6 +17,10 @@ env:
   RUSTFLAGS: "-D warnings"
   # Reduce noise from incremental compilation when caches are warm.
   CARGO_INCREMENTAL: "0"
+  # actions/cache@v4 still ships a Node.js 20 entrypoint (deprecated; forced
+  # to Node 24 by the runner from 2026-06-16). Opt into Node 24 now to clear
+  # the deprecation warning. See github.blog/changelog/2025-09-19.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   # ---------------------------------------------------------------------
