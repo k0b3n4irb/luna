@@ -43,12 +43,23 @@ from there:
 ```
 
 Source: [PeterLemon/SNES](https://github.com/PeterLemon/SNES) — sparse
-clone of only the test-relevant subdirs (not the multi-GB whole repo).
-Harness: `crates/luna-core/tests/snes_test_roms.rs`. Each test boots a
-ROM with a forced LoROM mapper (`Cartridge::from_bytes_forced` — these
-homebrew ROMs have no valid header checksum), runs it until the 256×224
-framebuffer settles, and asserts a SHA-256 of the framebuffer against a
+clone of only the test-relevant subdirs (`CPUTest`, `PPU`; not the
+multi-GB whole repo). Harness: `crates/luna-core/tests/snes_test_roms.rs`.
+Each test boots a ROM with a forced LoROM mapper
+(`Cartridge::from_bytes_forced` — these homebrew ROMs have no valid
+header checksum), runs it until the 256×224 framebuffer settles (or a
+fixed instruction cap for continuously-animated scenes — deterministic
+by instruction count), and asserts a SHA-256 of the framebuffer against a
 committed golden hash.
+
+Coverage:
+
+- **`CPUTest/CPU/*`** (23): every opcode-group result screen (ADC … TRN),
+  each an all-PASS table.
+- **`PPU/*`** (13, the twvd/siena selection): BG maps (2BPP BG1-4, 4BPP),
+  hi-colour blend (`HiColor*`), windows (`WindowHDMA`, `WindowMultiHDMA`),
+  and Mode 7 (`RotZoom`, `Perspective`, `Rings`). Each luna render was
+  eyeballed against the bundled reference `*.png` before blessing.
 
 ```bash
 tools/fetch-snes-test-roms.sh                  # sparse-clone → ../luna_tests
