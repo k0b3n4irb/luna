@@ -1,0 +1,63 @@
+name: Tom Harte CPU suites
+
+# The exhaustive SingleStepTests instruction-semantics gate for both CPU
+# cores. The 65C816 release run of 5.08M cases is ~8 min locally but ~25 min
+# on GitHub's 2-core runners, so it's NOT part of the per-push `CI` workflow
+# — run it on demand (Actions → this workflow → "Run workflow"), e.g. before
+# merging any change to a CPU core (luna-cpu-65c816 / luna-cpu-spc700).
+#
+# These tests are #[ignore] by default and need large external datasets.
+# LUNA_TOM_HARTE_REQUIRE=1 turns any mismatch into a hard failure.
+#
+# Datasets are large external shallow clones (not committed): fetched on a
+# cache miss and cached across runs, keyed on the corresponding fetch script.
+#   - 65C816  → tests/tom-harte/v1         (tools/fetch-tom-harte.sh)
+#   - SPC700  → tests/tom-harte-spc700/v1  (tools/fetch-tom-harte-spc700.sh)
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  tom-harte:
+    name: tom-harte (cpu suites)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: tom-harte
+      - name: Cache 65C816 Tom Harte dataset
+        id: snes-cache
+        uses: actions/cache@v4
+        with:
+          path: tests/tom-harte/v1
+          key: tom-harte-65816-${{ hashFiles('tools/fetch-tom-harte.sh') }}
+      - name: Fetch 65C816 dataset (on cache miss)
+        if: steps.snes-cache.outputs.cache-hit != 'true'
+        run: tools/fetch-tom-harte.sh
+      - name: Cache SPC700 Tom Harte dataset
+        id: spc-cache
+        uses: actions/cache@v4
+        with:
+          path: tests/tom-harte-spc700/v1
+          key: tom-harte-spc700-${{ hashFiles('tools/fetch-tom-harte-spc700.sh') }}
+      - name: Fetch SPC700 dataset (on cache miss)
+        if: steps.spc-cache.outputs.cache-hit != 'true'
+        run: tools/fetch-tom-harte-spc700.sh
+      - name: SPC700 suite (strict)
+        env:
+          LUNA_TOM_HARTE_REQUIRE: "1"
+        run: cargo test -p luna-cpu-spc700 --test tom_harte --release -- --ignored --nocapture
+      - name: 65C816 suite (strict)
+        env:
+          LUNA_TOM_HARTE_REQUIRE: "1"
+        run: cargo test -p luna-cpu-65c816 --test tom_harte --release -- --ignored --nocapture
