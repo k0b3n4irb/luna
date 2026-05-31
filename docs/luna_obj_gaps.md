@@ -104,7 +104,7 @@ which sprites survive the per-line cap.
 | # | Issue | refs | status |
 |---|---|---|---|
 | ~~5~~ | ~~Non-square (16×32 / 32×64) vflip~~ — **DONE**: rectangular sprites now use the buggy hardware flip (top/bottom halves mirror separately, `3*w-1-row`); square sprites keep the plain `h-1-row` | ares `object.cpp:111-119`, Mesen2 `SnesPpu.cpp:716-732` | ✅ |
-| ~~6~~ | ~~OBJ interlace~~ — **DONE (Phase D)**: screen height halved (`height>>1`, `object.cpp:53`); a screen row samples sprite row `screen_row*2+field`, vflip-aware (`object.cpp:109,121-122`); `baseSize≥6 → height 16` quirk (`oam.cpp:67`). All gated on SETINI bit 0; validated on InterlaceRPG's hero (was 2× too tall, now half-height matching the reference). | ares `oam.cpp:67`, `object.cpp:109,121-123` | ✅ |
+| ~~6~~ | ~~OBJ interlace~~ — **DONE (Phase D)**: screen height halved (`height>>1`, `object.cpp:53`); a screen row samples sprite row `screen_row*2+field`, vflip-aware (`object.cpp:109,121-122`); `baseSize≥6 → height 16` quirk (`oam.cpp:67`). **Gated on SETINI bit 1** (`obj.io.interlace = data.bit(1)`, ares `io.cpp`) — SEPARATE from BG/screen interlace (bit 0). The first cut wrongly gated on bit 0, which garbled RPM Racing's sprite logo (sets bit 0 only, no OBJ interlace); fixed to bit 1. Validated: InterlaceRPG hero (sets `%11`, both bits) half-height ✓; RPM Racing logo crisp (GUI-confirmed) ✓. Guard `obj_interlace_gates_on_setini_bit1_not_bit0`. | ares `oam.cpp:67`, `object.cpp:109,121-123`, `io.cpp` | ✅ |
 
 ---
 
