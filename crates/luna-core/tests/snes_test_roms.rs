@@ -87,11 +87,22 @@ fn fb_bytes(snes: &Snes) -> Vec<u8> {
 /// correctly drops the writes that overflow into active display and the
 /// screen stays blank — so PAL is required to reproduce the reference
 /// output.
-fn run_to_stable(rom: Vec<u8>) -> Vec<u8> {
+fn run_to_stable(rom: Vec<u8>, hold: u16) -> Vec<u8> {
     let mut cart = Cartridge::from_bytes_forced(rom, MapperKind::LoRom).expect("forced LoROM load");
     cart.header.region = luna_cartridge::Region::Pal;
     let mut snes = Snes::from_cartridge(cart);
     snes.reset();
+
+    // Hold a controller-1 button for the whole run (e.g. the Mosaic demos
+    // ramp the mosaic size while R is held). `LUNA_SNES_TEST_HOLD` (hex)
+    // overrides it for ad-hoc experimentation.
+    let hold: u16 = std::env::var("LUNA_SNES_TEST_HOLD")
+        .ok()
+        .and_then(|s| u16::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .unwrap_or(hold);
+    if hold != 0 {
+        snes.set_joypad(0, hold);
+    }
 
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
@@ -129,6 +140,12 @@ fn run_to_stable(rom: Vec<u8>) -> Vec<u8> {
     }
 
     std::panic::set_hook(prev_hook);
+    if std::env::var("LUNA_SNES_TEST_PPUDIAG").is_ok() {
+        eprintln!(
+            "PPUDIAG BGMODE=${:02X} MOSAIC=${:02X}",
+            snes.ppu.bgmode, snes.ppu.mosaic
+        );
+    }
     fb_bytes(&snes)
 }
 
@@ -144,7 +161,7 @@ fn dump_png(bytes: &[u8], path: &Path) {
 /// Boot `rel` (relative to the corpus root), settle, and compare the
 /// framebuffer SHA-256 to `expected`. Skips gracefully if the corpus or
 /// the specific ROM is absent.
-fn test_display(rel: &str, expected: &str) {
+fn test_display(rel: &str, expected: &str, hold: u16) {
     let Some(root) = corpus_root() else {
         eprintln!(
             "[skip] SNES test corpus not found — checkout ../luna_tests \
@@ -159,7 +176,7 @@ fn test_display(rel: &str, expected: &str) {
     }
 
     let rom = std::fs::read(&path).expect("read rom");
-    let bytes = run_to_stable(rom);
+    let bytes = run_to_stable(rom, hold);
     let got = hex(&Sha256::digest(&bytes));
 
     if std::env::var("LUNA_SNES_TEST_RECORD").is_ok() {
@@ -183,7 +200,11 @@ macro_rules! cpu_test {
     ($fn:ident, $name:literal, $hash:literal) => {
         #[test]
         fn $fn() {
-            test_display(concat!("CPUTest/CPU/", $name, "/CPU", $name, ".sfc"), $hash);
+            test_display(
+                concat!("CPUTest/CPU/", $name, "/CPU", $name, ".sfc"),
+                $hash,
+                0,
+            );
         }
     };
 }
@@ -312,7 +333,26 @@ macro_rules! ppu_test {
     ($fn:ident, $path:literal, $hash:literal) => {
         #[test]
         fn $fn() {
-            test_display(concat!("PPU/", $path), $hash);
+            test_display(concat!("PPU/", $path), $hash, 0);
+        }
+    };
+    // `hold = <mask>` holds a controller-1 button for the whole run — for
+    // demos driven by input (the Mosaic demos ramp the mosaic size while R
+    // is held).
+    ($fn:ident, $path:literal, $hash:literal, hold = $mask:expr) => {
+        #[test]
+        fn $fn() {
+            test_display(concat!("PPU/", $path), $hash, $mask);
+        }
+    };
+    // A scene luna renders wrong (tracked PPU gap). `#[ignore]`d, with the
+    // committed hash characterising the current (wrong) output — once the
+    // gap is fixed the render changes, the `--ignored` run goes red.
+    ($fn:ident, $path:literal, $hash:literal, ignore = $reason:literal) => {
+        #[test]
+        #[ignore = $reason]
+        fn $fn() {
+            test_display(concat!("PPU/", $path), $hash, 0);
         }
     };
 }
@@ -384,6 +424,27 @@ ppu_test!(
     "Mode7/Perspective/Perspective.sfc",
     "10ce69859a5828d80d0b8af768a233694414c76743aa5cffdc962d52eb9dab0d"
 );
+ppu_test!(
+    ppu_greenspace,
+    "GreenSpace/GreenSpace.sfc",
+    "26b8e01e014df9777a8a7afed5c7f713f12048af50c3cd8b3168ee1639928734"
+);
+// MosaicMode3 ramps the BG mosaic size while R is held — hold R so the
+// captured frame exercises the $2106 mosaic (verified pixelated). Mode 5
+// renders the hi-res scene duplicated (reference is one 512px figure) —
+// a tracked Mode-5 hi-res gap, independent of mosaic.
+ppu_test!(
+    ppu_mosaic_mode3,
+    "Mosaic/Mode3/MosaicMode3.sfc",
+    "3a57695004fa0a4068fa68ca26e2ff2db0288ecd3ff8ee45073144aa4d5a0b72",
+    hold = PAD_R
+);
+ppu_test!(
+    ppu_mosaic_mode5,
+    "Mosaic/Mode5/MosaicMode5.sfc",
+    "b8882f72cb21653828ea99827648c6fd42ac19ac2d7665757279eefa88f04d57",
+    ignore = "Mode 5 hi-res renders the scene duplicated vs the reference's single 512px image"
+);
 
 // =============================================================================
 // SPC700 / S-DSP audio tests
@@ -404,6 +465,7 @@ const AUDIO_STEP_CAP: u64 = 80_000_000;
 /// SNES controller button masks for [`Snes::set_joypad`]
 /// (`B Y SEL START Up Down Left Right A X L R 0 0 0 0`, MSB→LSB).
 const PAD_A: u16 = 0x0080;
+const PAD_R: u16 = 0x0010;
 
 /// Boot a forced-LoROM ROM (as PAL) and accumulate the first
 /// [`AUDIO_SAMPLES`] stereo samples from the APU.
