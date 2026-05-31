@@ -9,9 +9,11 @@ frame/scanline HDMA hooks).
 
 Authored 2026-05-30.
 
-**Headline:** unlike the BG/OBJ/APU audits, there's no clear visible
-bug here — the DMA/HDMA core is faithful and well-covered by tests. The
-findings are edge-case hardware *restrictions* and timing
+**Headline:** the DMA/HDMA *core* (table walk, transfer modes, indirect
+addressing, A-bus restrictions) is faithful and well-covered. But the
+2026-05-31 HDMA-ROM coverage work surfaced one **real visible bug** in
+the scheduler wiring — HDMA register writes are applied one scanline late
+(#7 below). The rest are edge-case hardware *restrictions* and timing
 *approximations*.
 
 ## Severity legend
@@ -58,6 +60,51 @@ loop). Test `dma_wram_to_wmdata_is_blocked` (and the inverse: non-WRAM →
 
 ---
 
+## 🔴 7. HDMA register writes applied one scanline late
+
+Surfaced 2026-05-31 wiring the `PPU/HDMA/*` test ROMs into the golden
+suite. The five smooth-effect demos (WaveHDMA scroll-per-line, RedSpace
+fixed-colour gradient ×3, Mode7HDMA matrix) render correctly, but the
+three **HiColor per-tile-row** demos — which rewrite CGRAM via HDMA every
+8 scanlines to show a full-colour photo — render the image with
+horizontal **banding**: the mandrill is recognisable in the pseudo-hires
+variant, but every palette band is shifted down by one line.
+
+**Root cause** (verified in `Snes::sched_one_line`, `snes.rs:1048-1118`):
+
+```text
+1. render_current_scanline(ppu_line)   // line N drawn with CURRENT CGRAM
+2. ppu_line += 1
+3. hdma_run_line()                      // HDMA transfer for the new line
+```
+
+The line is rendered **before** its HDMA transfer runs, so the first
+transfer only takes effect after line 0, and every write lands one
+scanline late. On real hardware HDMA transfers happen in the H-blank
+*before* a line is displayed (ares `ppu.cpp` / `dma.cpp` — HDMA setup at
+frame start, then per-line transfer ahead of the visible line), so line N
+already reflects its HDMA write. luna is off by exactly one line.
+
+The deviation is invisible on smooth effects (a 1-line shift in a wave,
+gradient, or Mode-7 matrix is imperceptible — those 5 goldens pass) but
+obvious on a per-8-line palette swap.
+
+**Fix** (deferred): reorder `sched_one_line` so the line's HDMA transfer
+runs *before* `render_current_scanline`, matching hardware. This is a
+core-scheduler change that shifts **every** HDMA golden by a line and
+alters visible rendering, so it needs the reference-first treatment
+(confirm ares' exact init-vs-first-transfer dot timing), a full
+`coproc-testing` sweep + SMRPG smoke test, and GUI validation per
+`audible-fixes-test-first` before commit. Tracked by the three
+`#[ignore]`d `ppu_hdma_hicolor*` goldens (`snes_test_roms.rs`), which
+characterise the current banded output and go red once the fix lands.
+
+This **corrects the prior "no clear visible bug" headline** and the
+"per-scanline HDMA hooked at every visible line" verified-correct note
+below — the hook exists but fires one line too late.
+
+---
+
 ## 🟡 Precision / timing
 
 | # | Issue | ares ref | luna |
@@ -84,7 +131,8 @@ loop). Test `dma_wram_to_wmdata_is_blocked` (and the inverse: non-WRAM →
 - **`$43x5/6` shared** between the DMA byte count and the HDMA indirect
   address — correct (hardware shares the register pair).
 - Channel register read/write (`$43x0-$43xF`); `$420B` ascending
-  channel order; per-scanline HDMA hooked at every visible line.
+  channel order; per-scanline HDMA hooked at every visible line (but
+  fired one line too late — see 🔴 #7).
 - Per-byte cooperative `bus.tick(8)` so coprocessors (SA-1) interleave
   with the DMA instead of freezing.
 
@@ -92,5 +140,8 @@ loop). Test `dma_wram_to_wmdata_is_blocked` (and the inverse: non-WRAM →
 
 1. ~~#1 validA~~ — **done**.
 2. ~~#2 WRAM→WRAM block~~ — **done**.
-3. 🟡 #3-#6 — timing approximations; low real-world return (the current
+3. 🔴 **#7 HDMA one-line-late** — the only real bug; fixes the HiColor
+   per-tile-row banding. Deferred pending reference-first + GUI
+   validation (core-scheduler reorder).
+4. 🟡 #3-#6 — timing approximations; low real-world return (the current
    model is game-compatible). Left as documented approximations.
