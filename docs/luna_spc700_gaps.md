@@ -119,10 +119,11 @@ Single-block uploads never hit it fatally, so most audio worked. But
 another — extremely common in real games) executed garbage at the block
 transition, deadlocked the SPC700 in the IPL ROM, and never reached the
 music driver → silence. Surfaced by the Peter Lemon SPC700 audio ROMs
-(`test_corpora.md`): the 4 silent ones all used `TransferBlockSPC` ×2,
-the 5 playing ones ×1. Fixing the byte made 3 of the 4 play (verified by
-ear); `PlayTwoSong` remains silent for an unrelated reason (the 65816
-never initiates the upload).
+(`test_corpora.md`): 3 silent ones (Axel-F, FFVIIPrelude, SpeechSynth)
+did a genuine two-block `TransferBlockSPC`; fixing the byte made all
+three play (verified by ear). (`PlayTwoSong` was also silent but for an
+unrelated, non-bug reason — it only uploads on an A/B button press, so it
+stays silent headless; it is omitted from the suite rather than tracked.)
 
 ## Verdict
 
