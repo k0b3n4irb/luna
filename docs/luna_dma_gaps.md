@@ -119,6 +119,13 @@ striping vs the reference PNG that ships with each ROM
   atomically from a single CGRAM snapshot and only partial-flushes on the
   **CPU** write path (`snes.rs:1318-1329`), not the DMA path — so it cannot
   reproduce the mid-line split.
+- **Quantified vs the reference PNG** (`HiColor64PerTileRow.png`): luna is
+  **81.2% pixel-exact** (88.2% within tol 24, MAE 7/255), and the diff is
+  confined to the **tile-row boundary scanlines** (rows 0,8,16,24,…; 15 of
+  224). Each 8-line tile-row has 7 pixel-exact lines and 1 wrong boundary
+  line — exactly the line whose palette the H-IRQ splits mid-dot. Neither
+  the pre-swap nor the post-swap palette matches the mix, so the boundary
+  line can't be made exact without the mid-line split.
 - **Not** a render-order lag: deferring the scanline render by one line was
   tried and neither fixed the stripes nor survived the suite (broke 9 other
   HDMA/Window/Mode-7 goldens). A real fix needs sub-scanline CGRAM tracking
