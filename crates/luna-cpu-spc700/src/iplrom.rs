@@ -76,8 +76,13 @@ pub const IPL_ROM: [u8; 64] = [
     0x10, 0xEF, //
     // $FFEB: CMP Y,$F4
     0x7E, 0xF4, //
-    // $FFED: BPL $FFEB          ; (loop forever once at end of upload)
-    0x10, 0xFB, //
+    // $FFED: BPL $FFDA          ; index still ahead → keep receiving;
+    //                            falls through to the new-block / execute
+    //                            dispatch only when the CPU signals it.
+    //                            (was $FB = BPL $FFEA, branching into the
+    //                            middle of the prior instruction — broke
+    //                            every multi-block IPL upload.)
+    0x10, 0xEB, //
     // $FFEF: BA $F6             ; MOVW YA,$F6 = read target address
     0xBA, 0xF6, //
     // $FFF1: DA $00             ; MOVW $00,YA = store as transfer target
