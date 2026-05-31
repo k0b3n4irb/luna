@@ -104,7 +104,7 @@ which sprites survive the per-line cap.
 | # | Issue | refs | status |
 |---|---|---|---|
 | ~~5~~ | ~~Non-square (16×32 / 32×64) vflip~~ — **DONE**: rectangular sprites now use the buggy hardware flip (top/bottom halves mirror separately, `3*w-1-row`); square sprites keep the plain `h-1-row` | ares `object.cpp:111-119`, Mesen2 `SnesPpu.cpp:716-732` | ✅ |
-| 6 | OBJ interlace — `height >> 1`, y-doubling, `baseSize≥6 → height 16` quirk | ares `oam.cpp:67`, `object.cpp:109,121-123` | **Phase D (next)** — the interlace framework now exists (`field` + BG vertical doubling + both-field blend, `bg_gaps` #16 Phases A-C). Sprites still render at screen-y in interlace; the 6 wired `PPU/Interlace/*` ROMs are BG-driven so it isn't visible there, but OBJ y-doubling is the remaining piece |
+| ~~6~~ | ~~OBJ interlace~~ — **DONE (Phase D)**: screen height halved (`height>>1`, `object.cpp:53`); a screen row samples sprite row `screen_row*2+field`, vflip-aware (`object.cpp:109,121-122`); `baseSize≥6 → height 16` quirk (`oam.cpp:67`). All gated on SETINI bit 0; validated on InterlaceRPG's hero (was 2× too tall, now half-height matching the reference). | ares `oam.cpp:67`, `object.cpp:109,121-123` | ✅ |
 
 ---
 
@@ -129,6 +129,6 @@ which sprites survive the per-line cap.
 4. ~~#4 OAM priority rotation~~ — **done**.
 5. ~~#5 non-square vflip~~ — **done**.
 
-Only #6 (OBJ interlace) remains. The interlace framework it was blocked
-on now exists (`bg_gaps` #16 Phases A-C), so #6 is the next actionable
-step (Phase D): sprite y-doubling in interlace mode.
+All items are now done, including #6 (OBJ interlace, Phase D). The entire
+sprite audit is complete; interlace is implemented end-to-end (`bg_gaps`
+#16 Phases A-C for BG/blend, this #6 for OBJ).
