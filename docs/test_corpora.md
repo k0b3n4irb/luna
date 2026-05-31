@@ -60,6 +60,14 @@ Coverage:
   hi-colour blend (`HiColor*`), windows (`WindowHDMA`, `WindowMultiHDMA`),
   and Mode 7 (`RotZoom`, `Perspective`, `Rings`). Each luna render was
   eyeballed against the bundled reference `*.png` before blessing.
+- **`SPC700/*`** (9): audio ROMs — these play music / sounds rather than
+  draw a screen, so they assert a SHA-256 of the APU's **32 kHz PCM
+  output** (first 3 s) instead of the framebuffer (`test_audio` /
+  `spc_test!`). 8 play (auditioned by ear before blessing); `PlayTwoSong`
+  is `known_silent` (the 65816 never starts the upload — a separate open
+  gap). `LUNA_SNES_TEST_PNG=<dir>` in record mode dumps a `.wav` to
+  audition. NB: these surfaced the IPL-ROM multi-block bug (the `$FFEE`
+  byte) — see `luna_spc700_gaps.md`.
 
 ```bash
 tools/fetch-snes-test-roms.sh                  # sparse-clone → ../luna_tests
