@@ -141,9 +141,23 @@ fn run_to_stable(rom: Vec<u8>, hold: u16) -> Vec<u8> {
 
     std::panic::set_hook(prev_hook);
     if std::env::var("LUNA_SNES_TEST_PPUDIAG").is_ok() {
+        let bg1 = snes.ppu.bg[0];
+        let bg2 = snes.ppu.bg[1];
         eprintln!(
-            "PPUDIAG BGMODE=${:02X} MOSAIC=${:02X}",
-            snes.ppu.bgmode, snes.ppu.mosaic
+            "PPUDIAG BGMODE=${:02X} MOSAIC=${:02X} TM=${:02X} TS=${:02X} SETINI=${:02X} \
+             BG1[sz={} map_w=${:04X} chr_w=${:04X} h={}] BG2[sz={} map_w=${:04X} h={}]",
+            snes.ppu.bgmode,
+            snes.ppu.mosaic,
+            snes.ppu.tm,
+            snes.ppu.ts,
+            snes.ppu.setini,
+            bg1.tilemap_size,
+            bg1.tilemap_addr_words,
+            bg1.char_addr_words,
+            bg1.h_scroll,
+            bg2.tilemap_size,
+            bg2.tilemap_addr_words,
+            bg2.h_scroll,
         );
     }
     fb_bytes(&snes)
@@ -430,20 +444,19 @@ ppu_test!(
     "26b8e01e014df9777a8a7afed5c7f713f12048af50c3cd8b3168ee1639928734"
 );
 // MosaicMode3 ramps the BG mosaic size while R is held — hold R so the
-// captured frame exercises the $2106 mosaic (verified pixelated). Mode 5
-// renders the hi-res scene duplicated (reference is one 512px figure) —
-// a tracked Mode-5 hi-res gap, independent of mosaic.
+// captured frame exercises the $2106 mosaic (verified pixelated).
 ppu_test!(
     ppu_mosaic_mode3,
     "Mosaic/Mode3/MosaicMode3.sfc",
     "3a57695004fa0a4068fa68ca26e2ff2db0288ecd3ff8ee45073144aa4d5a0b72",
     hold = PAD_R
 );
+// Mode 5 hi-res: renders the single 512px figure (one cat), matching the
+// reference — the fixed 16-px-wide hi-res tile columns (renderer.rs).
 ppu_test!(
     ppu_mosaic_mode5,
     "Mosaic/Mode5/MosaicMode5.sfc",
-    "b8882f72cb21653828ea99827648c6fd42ac19ac2d7665757279eefa88f04d57",
-    ignore = "Mode 5 hi-res renders the scene duplicated vs the reference's single 512px image"
+    "235eec5ea4b208cf7f010311d95316605b1de6950640e86992d4a60c53faad83"
 );
 
 // =============================================================================
