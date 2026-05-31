@@ -520,16 +520,19 @@ ppu_test!(
     "610fbfa6a0566c809708ff380d1a2f972b10b1d343d82310646fd1c91297072c"
 );
 // The two non-pseudo-hires variants display an RGB colour *chart* (sharp
-// gradient bands; reference image ships as `HiColor*PerTileRow.png`). They
-// still show residual striping vs that reference: the H-IRQ fires mid-line,
-// so on hardware the left/right halves of each scanline use *different*
-// palettes (intra-scanline CGRAM change). luna renders each scanline
-// atomically from one CGRAM snapshot and only partial-flushes on the CPU
-// write path, not the DMA path, so it can't reproduce the mid-line split.
-// A real fix needs sub-scanline CGRAM tracking tied to the CPU's H-position
-// during the DMA — a deep change to the coarse per-line model, ~no
-// commercial game needs it. Kept `#[ignore]`d as a characterisation
-// baseline (gap #7, remaining sub-item). Confirmed not a render-order lag:
+// gradient bands; reference image ships as `HiColor*PerTileRow.png`).
+// Validated HiColor64 against that reference: 81.2% pixel-exact, 88.2%
+// within tol 24, MAE 7/255 — and the diff is confined to the *tile-row
+// boundary* scanlines (rows 0,8,16,24,…, 15 of 224). The H-IRQ fires
+// mid-line, so on hardware each 8-line boundary scanline is split (old
+// palette above the IRQ dot, new below). luna renders each scanline
+// atomically from one CGRAM snapshot (and only partial-flushes on the CPU
+// write path, not the DMA path), so it draws the boundary line with the
+// pre-swap palette — only that 1 line per tile-row is wrong, the other 7
+// are pixel-exact. No cheap fix: neither pure-old nor pure-new palette
+// matches the mid-line mix; an exact fix needs sub-scanline CGRAM tracking
+// tied to the CPU H-position during the DMA — deep change, ~no commercial
+// payoff. Kept `#[ignore]`d (gap #7). Confirmed not a render-order lag:
 // deferring the render by one line neither fixed it nor survived the suite.
 ppu_test!(
     ppu_hdma_hicolor64,
