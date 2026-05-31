@@ -462,6 +462,74 @@ ppu_test!(
     "235eec5ea4b208cf7f010311d95316605b1de6950640e86992d4a60c53faad83"
 );
 
+// -----------------------------------------------------------------------
+// HDMA scenes (per-scanline register transfers). HDMA had no direct
+// coverage before — only the two Window*HDMA demos exercised it indirectly.
+// Goldens are luna's PAL render, each eyeballed against the expected
+// effect before committing (coproc-testing discipline).
+//
+// These 5 render correctly: a per-line scroll water ripple (Wave), a
+// vertical red→black fixed-colour gradient (RedSpace, direct / indirect /
+// 9-bit-per-line — direct and indirect produce the *same* hash, as they
+// must), and a Mode-7 perspective floor with per-line matrix HDMA. They
+// validate the HDMA engine: table walk, indirect addressing, per-line
+// fixed-colour ($2132), and Mode-7 matrix writes ($211B-$2120).
+ppu_test!(
+    ppu_hdma_wave,
+    "HDMA/WaveHDMA/WaveHDMA.sfc",
+    "c1f4f776ee1985c768b7a075aee07d25ffbd19811d6375e3c2a8bc0059be94bd"
+);
+ppu_test!(
+    ppu_hdma_redspace,
+    "HDMA/RedSpaceHDMA/RedSpaceHDMA.sfc",
+    "45419aa9755b9a7229b4d4457c4adea0fff7b94193da29cfaf270f14dd38966e"
+);
+ppu_test!(
+    ppu_hdma_redspace_indirect,
+    "HDMA/RedSpaceIndirectHDMA/RedSpaceIndirectHDMA.sfc",
+    "45419aa9755b9a7229b4d4457c4adea0fff7b94193da29cfaf270f14dd38966e"
+);
+ppu_test!(
+    ppu_hdma_redspace_9bit,
+    "HDMA/RedSpace9BitHDMA/RedSpace9BitHDMA.sfc",
+    "8aa57ff15d8cdc7343924b25796182b8b317d0cce809d006e7d8ada7fe41f843"
+);
+ppu_test!(
+    ppu_hdma_mode7,
+    "HDMA/Mode7HDMA/Mode7HDMA.sfc",
+    "736a61ba11eeb963d4c78129669c7a3dee511d3a482646cf60eb7c17e7061d89"
+);
+// The 3 HiColor "per-tile-row" demos rewrite CGRAM via HDMA every 8 lines
+// to show a full-colour photo. luna renders the image (the mandrill is
+// recognisable in the pseudo-hires variant) but with horizontal banding:
+// HDMA writes land ONE scanline late. Root cause is verified in
+// `Snes::sched_one_line` (snes.rs:1048-1118) — the line is rendered before
+// that line's HDMA transfer runs, so the first transfer only takes effect
+// after line 0 (hardware applies it in the H-blank *before* line 0). The
+// fix is a core-scheduler reorder (HDMA-before-render) that touches every
+// HDMA golden, so it's deferred to a dedicated reference-first + GUI-
+// validated change. These are `#[ignore]`d with the current (banded) hash
+// so the `--ignored` run goes red once the off-by-one is fixed. See
+// docs/luna_dma_gaps.md #7.
+ppu_test!(
+    ppu_hdma_hicolor64,
+    "HDMA/HiColor64PerTileRow/HiColor64PerTileRow.sfc",
+    "5b944a2deb9c23397e22dc0878a8ab22c535819ec91b8af27866d2c1fd968234",
+    ignore = "HiColor banding: HDMA applied one scanline late (gap #7)"
+);
+ppu_test!(
+    ppu_hdma_hicolor128,
+    "HDMA/HiColor128PerTileRow/HiColor128PerTileRow.sfc",
+    "54495c7af30fa3cda2734230351396254d5ea2b64095b444082087888b539bc5",
+    ignore = "HiColor banding: HDMA applied one scanline late (gap #7)"
+);
+ppu_test!(
+    ppu_hdma_hicolor64_pseudohires,
+    "HDMA/HiColor64PerTileRowPseudoHiRes/HiColor64PerTileRowPseudoHiRes.sfc",
+    "979e4345c73313568061a9ac0f1814f8093766c9f48397b01bcf0faed44a3b1b",
+    ignore = "HiColor banding: HDMA applied one scanline late (gap #7)"
+);
+
 // =============================================================================
 // SPC700 / S-DSP audio tests
 //
