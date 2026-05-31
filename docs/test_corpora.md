@@ -62,10 +62,10 @@ Coverage:
   (Mode 3 / Mode 5). Each luna render was eyeballed against the bundled
   reference `*.png` before blessing. `MosaicMode3` holds **R** so the
   demo ramps the `$2106` mosaic size (luna's mosaic is verified working
-  — the captured frame is pixelated). `MosaicMode5` is `#[ignore]`d:
-  mosaic is fine there too, but luna renders the **Mode 5 hi-res** scene
-  duplicated (the reference is a single 512px figure) — a tracked hi-res
-  gap, independent of mosaic.
+  — the captured frame is pixelated). `MosaicMode5` exercises **Mode 5
+  hi-res**; it surfaced (and now passes after) the hi-res 16-px-tile-width
+  fix (bg-gap #14) — luna renders the single 512px figure matching the
+  reference.
 - **`SPC700/*`** (9): audio ROMs — these play music / sounds rather than
   draw a screen, so they assert a SHA-256 of the APU's **32 kHz PCM
   output** (first 3 s) instead of the framebuffer (`test_audio` /
