@@ -103,9 +103,31 @@ a passing golden); SMRPG + Chrono Trigger smoke screenshots are unchanged
 
 **Remaining sub-item** (kept `#[ignore]`d): the two *non*-pseudo-hires
 HiColor demos display an RGB colour *chart* and still show residual
-striping — HiColor128's ~2-line palette cadence needs finer per-scanline
-CGRAM HDMA timing than luna's coarse per-line model, and neither can be
-validated pixel-exact without a reference image.
+striping vs the reference PNG that ships with each ROM
+(`HiColor*PerTileRow.png`). Dug in 2026-05-31:
+
+- The palette is **not** pushed by HDMA. It's an **H-IRQ-driven general
+  DMA**: an H-counter IRQ fires every scanline (`$4207` HTIME ≈ 170-190,
+  mid active-display) and its ISR triggers a DMA of N colours into CGDATA.
+  (The HDMA channel in these ROMs only drives OAM/sprite size.)
+- The CGDATA writes **do land** (confirmed by instrumentation: the gate is
+  already open because the ISR's mid-line behaviour differs per demo). The
+  cadence is correct (CGADD advances +N colours per DMA).
+- Root cause of the residual stripes: the IRQ fires **mid-line**, so on
+  hardware the **left and right halves of each scanline use different
+  palettes** (an intra-scanline CGRAM change). luna renders each scanline
+  atomically from a single CGRAM snapshot and only partial-flushes on the
+  **CPU** write path (`snes.rs:1318-1329`), not the DMA path — so it cannot
+  reproduce the mid-line split.
+- **Not** a render-order lag: deferring the scanline render by one line was
+  tried and neither fixed the stripes nor survived the suite (broke 9 other
+  HDMA/Window/Mode-7 goldens). A real fix needs sub-scanline CGRAM tracking
+  tied to the CPU's H-position during the DMA — a deep change to the coarse
+  per-line model, with ~no commercial-game payoff. Deferred.
+
+The pseudo-hires variant uses the same H-IRQ DMA but a per-8-line ("per
+tile row") cadence on photo content, which hides the sub-line error — it
+renders the mandrill pixel-clean and is a passing golden.
 
 This **corrects the prior "no clear visible bug" headline** — the bug was
 real, just not the ordering issue first suspected.
