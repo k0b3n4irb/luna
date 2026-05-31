@@ -1357,6 +1357,21 @@ fn opt_scroll(
     (eff_h, eff_v, h_from_opt)
 }
 
+/// Interlace ($2133 bit 0): a screen scanline `y` (0..223) samples the
+/// logical line `y*2 + field` of the 448-line interlaced image — ares
+/// `background.cpp:40` (`vpixel = vpixel<<1 | field`). Progressive returns
+/// `y` unchanged. The output is still 224 lines (one field per frame, the
+/// parity alternating via [`Ppu::field`]); a stable 448→224 blend is a
+/// later phase.
+#[inline]
+pub(crate) fn interlace_src_line(ppu: &Ppu, y: u16) -> u16 {
+    if ppu.setini & 0x01 != 0 {
+        (y << 1) | u16::from(ppu.field)
+    } else {
+        y
+    }
+}
+
 /// Same as [`render_bg_scanline_with`] but returns CGRAM indices
 /// (instead of decoded RGB) and tags each pixel with its tilemap
 /// priority bit. Transparent pixels (colour 0 in the relevant
@@ -1377,6 +1392,7 @@ pub fn render_bg_scanline_indexed_with(
         return out;
     };
     let bg = bg_state(ppu, bg_idx);
+    let y = interlace_src_line(ppu, y);
     // MOSAIC ($2106): high nibble = block size N (0..15 means 1..16
     // pixels per side), low nibble bit `bg_idx` enables mosaic for that
     // BG. Within a block we replicate the top-left pixel — implemented
@@ -1436,6 +1452,8 @@ fn render_bg_scanline_indexed_hires(
         return (above, below);
     };
     let bg = bg_state(ppu, bg_idx);
+    // Interlace (mode 5/6 + $2133 bit 0): sample logical line y*2+field.
+    let y = interlace_src_line(ppu, y);
     // Mosaic snaps the screen dot/scanline to the block before doubling.
     let mosaic_size = if ppu.mosaic & (1 << bg_idx) != 0 {
         u16::from((ppu.mosaic >> 4) & 0x0F) + 1
@@ -3017,6 +3035,21 @@ mod tests {
         let scan = render_bg_scanline_indexed_with(&p, 1, 0, RenderOptions::default());
         let (cgram_idx, _) = scan[0].expect("BG2 pixel 0 should be opaque");
         assert_eq!(cgram_idx, 33, "Mode 0 BG2 must offset into CGRAM by 32");
+    }
+
+    #[test]
+    fn interlace_src_line_doubles_with_field_when_enabled() {
+        let mut p = Ppu::new();
+        // Progressive: identity.
+        assert_eq!(interlace_src_line(&p, 10), 10);
+        // Interlace on, field 0: y*2.
+        p.setini |= 0x01;
+        p.field = false;
+        assert_eq!(interlace_src_line(&p, 10), 20);
+        // Field 1: y*2 + 1 (odd field).
+        p.field = true;
+        assert_eq!(interlace_src_line(&p, 10), 21);
+        assert_eq!(interlace_src_line(&p, 223), 447, "screen 223 → logical 447");
     }
 
     #[test]
