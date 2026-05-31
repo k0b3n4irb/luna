@@ -528,10 +528,13 @@ ppu_test!(
     "Interlace/InterlaceScroll/InterlaceScroll.sfc",
     "6b9454710ae9131852cdb4a818272b73fa7bd3bb98814f032fa7e17bc1cc952d"
 );
+// The only wired Interlace ROM with a sprite (the hero). Phase D made its
+// sprite render half-height (interlace), matching the reference — pre-Phase-D
+// it was drawn 2x too tall at screen-y.
 ppu_test!(
     ppu_interlace_rpg,
     "Interlace/InterlaceRPG/InterlaceRPG.sfc",
-    "74c90ac46097e53a5c51ead65d4b0f639397fcdb80ec4f2f2428fe70d20851ba"
+    "139abe05a6f67e5057e472e031eab7ef6cff80e2acf66507cbb29a2d051b1e63"
 );
 ppu_test!(
     ppu_interlace_moogle,
