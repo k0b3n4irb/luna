@@ -130,7 +130,10 @@ jobs:
   tom-harte:
     name: tom-harte (cpu suites)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The 65C816 release run of 5.08M cases is ~8 min locally but much
+    # slower on GitHub's 2-core runners; 30 min was borderline and flaked
+    # into timeout cancellations, so give it real headroom.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master
