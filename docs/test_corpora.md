@@ -59,29 +59,32 @@ Or point `LUNA_SNES_TEST_DIR` at a corpus root. If the corpus is absent
 the tests skip with a notice and pass. CI runs them in the
 `snes-test-roms` job.
 
+All 23 CPUTest ROMs render the correct all-PASS result screen and are
+committed as golden tests.
+
+### Loaded as PAL
+
+The harness forces **`Region::Pal`** (`run_to_stable`), matching the
+`twvd/siena` convention. Peter Lemon's suite is PAL-timed: some tests
+(BRA, JMP, PSR, RET) do a single `WaitNMI` then write the entire result
+table in one burst that only fits inside PAL's longer V-blank (~72 lines
+vs NTSC's 37). Run as NTSC, luna *correctly* drops the writes that
+overflow into active display (`active_display` gating, ares-accurate) and
+those screens stay blank. The other 19 re-sync to V-blank per row (e.g.
+ADC issues 33 `WaitNMI`s) and render on any region. luna's NTSC timing is
+correct — these ROMs simply target PAL, so the suite loads them as PAL to
+reproduce the reference output.
+
 ### Golden hashes are luna's own output
 
 Unlike the Tom Harte vectors (hardware truth), these hashes are captured
 from **luna's renderer**, so they are **regression baselines**, not an
 independent correctness oracle. Each ROM ships a reference `CPU<NAME>.png`
 (real-hardware output) — eyeball luna's render against it when blessing a
-baseline. Regenerate after an intended render change:
+baseline (verified: e.g. BRA shows the full BCC…BRL PASS table). Regenerate
+after an intended render change:
 
 ```bash
 LUNA_SNES_TEST_RECORD=1 LUNA_SNES_TEST_PNG=/tmp/snes \
   cargo test -p luna-core --test snes_test_roms -- --nocapture
 ```
-
-### Known gaps surfaced by this suite
-
-- **`BRA` / `JMP` / `PSR` / `RET` render blank.** luna runs these four
-  CPUTest ROMs for 30M instructions without ever drawing the result
-  table (the reference PNGs show a full PASS table). Tracked as
-  `#[ignore]`d `known_blank` tests — the committed hash characterises the
-  current broken (blank) output, so when luna is fixed the hash changes
-  and the `--ignored` run goes red. Notably the *instructions* themselves
-  are perfect under Tom Harte, so this is a full-system issue (display
-  kernel / control-flow loop), not an ALU bug.
-- The 19 passing CPU tests render the correct all-PASS data but luna
-  drops the top title line + column-header separators vs the reference
-  (a minor PPU compositing gap; the regression hash still holds).
