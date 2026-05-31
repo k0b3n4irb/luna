@@ -57,18 +57,6 @@ pub(crate) struct AudioBackend {
     /// Held just to keep the stream alive — dropping the `Stream`
     /// stops the callback.
     _stream: Stream,
-    /// `true` after the emu thread has pushed at least one sample.
-    /// The audio callback emits silence until this flips, avoiding a
-    /// startup pop while the ring buffer is empty. Cloned into the
-    /// callback closures; this end of the Arc is currently unused
-    /// (kept so a future UI status row can display it).
-    #[allow(dead_code)]
-    pub(crate) primed: Arc<AtomicBool>,
-    /// Output device sample rate (might not match
-    /// [`TARGET_SAMPLE_RATE`]). Stored for diagnostics; the Stubs
-    /// panel surfaces it as "host SR".
-    #[allow(dead_code)]
-    pub(crate) host_sample_rate: u32,
 }
 
 /// What [`AudioBackend::try_start`] returns — the backend itself, the
@@ -229,11 +217,7 @@ impl AudioBackend {
             chosen_format, config.sample_rate.0
         );
         Some(AudioStreamArtifacts {
-            backend: Self {
-                _stream: stream,
-                primed: primed.clone(),
-                host_sample_rate: config.sample_rate.0,
-            },
+            backend: Self { _stream: stream },
             producer,
             primed,
         })

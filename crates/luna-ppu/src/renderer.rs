@@ -43,8 +43,13 @@ pub struct RenderOptions {
 /// Color index 0 in any BG palette is **transparent**; this rendering
 /// pass replaces it with CGRAM index 0 (the backdrop / "color 0"
 /// global), which matches the behaviour of a single-BG composite.
+// Legacy RGB-output renderers, kept only as convenience helpers for the
+// unit tests below — the production pipeline uses the `*_indexed_*`
+// renderers + the compositor in `ppu.rs`. `#[cfg(test)]` so they neither
+// ship in the library nor pollute its public API.
+#[cfg(test)]
 #[must_use]
-pub fn render_bg1_scanline(ppu: &Ppu, y: u16) -> Scanline {
+fn render_bg1_scanline(ppu: &Ppu, y: u16) -> Scanline {
     render_bg1_scanline_with(ppu, y, RenderOptions::default())
 }
 
@@ -66,8 +71,9 @@ pub fn render_bg1_scanline(ppu: &Ppu, y: u16) -> Scanline {
 ///
 /// Modes 5/6 are high-res (512px); Mode 7 is affine. We render either
 /// the way Mode 1/2/3 would (planar tiles + tilemap) for now.
+#[cfg(test)]
 #[must_use]
-pub fn bg1_bpp(bgmode: u8) -> u8 {
+fn bg1_bpp(bgmode: u8) -> u8 {
     match bgmode & 0x07 {
         0 => 2,
         1 | 2 | 5 | 6 => 4,
@@ -89,8 +95,9 @@ pub fn bg1_bpp(bgmode: u8) -> u8 {
 ///
 /// Mode 7 affine is still handled the planar way for now — close
 /// enough to show *something* until the real Mode-7 path lands.
+#[cfg(test)]
 #[must_use]
-pub fn render_bg1_scanline_with(ppu: &Ppu, y: u16, opts: RenderOptions) -> Scanline {
+fn render_bg1_scanline_with(ppu: &Ppu, y: u16, opts: RenderOptions) -> Scanline {
     let mut out = [[0u8; 3]; 256];
 
     // INIDISP bit 7: forced blank — entire scanline is black, ignoring
@@ -331,8 +338,9 @@ pub fn decode_all_sprites(ppu: &Ppu) -> [SpriteEntry; 128] {
 /// sprites between BG layers — that lands once the per-pixel priority
 /// engine is in place. For now the simple "sprites on top of all
 /// BGs" rule is enough for title-screen Mario/Yoshi visibility.
+#[cfg(test)]
 #[must_use]
-pub fn render_sprites_scanline(ppu: &Ppu, y: u16, opts: RenderOptions) -> [Option<[u8; 3]>; 256] {
+fn render_sprites_scanline(ppu: &Ppu, y: u16, opts: RenderOptions) -> [Option<[u8; 3]>; 256] {
     let mut out: [Option<[u8; 3]>; 256] = [None; 256];
     if ppu.inidisp & 0x80 != 0 && !opts.bypass_forced_blank {
         return out;
@@ -357,14 +365,16 @@ pub fn render_sprites_scanline(ppu: &Ppu, y: u16, opts: RenderOptions) -> [Optio
 /// Render the full visible frame for BG1-only Mode 0.
 ///
 /// 224 scanlines (NTSC native). For 239-line PAL we'll extend later.
+#[cfg(test)]
 #[must_use]
-pub fn render_frame_bg1(ppu: &Ppu) -> Vec<[u8; 3]> {
+fn render_frame_bg1(ppu: &Ppu) -> Vec<[u8; 3]> {
     render_frame_bg1_with(ppu, RenderOptions::default())
 }
 
 /// Same as [`render_frame_bg1`] but with debug options.
+#[cfg(test)]
 #[must_use]
-pub fn render_frame_bg1_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
+fn render_frame_bg1_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
     render_frame_with(ppu, opts)
 }
 
