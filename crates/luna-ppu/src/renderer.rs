@@ -1365,18 +1365,27 @@ fn opt_scroll(
     (eff_h, eff_v, h_from_opt)
 }
 
-/// Interlace ($2133 bit 0): a screen scanline `y` (0..223) samples the
-/// logical line `y*2 + field` of the 448-line interlaced image — ares
-/// `background.cpp:40` (`vpixel = vpixel<<1 | field`). Progressive returns
-/// `y` unchanged. The output is still 224 lines (one field per frame, the
-/// parity alternating via [`Ppu::field`]); a stable 448→224 blend is a
-/// later phase.
+/// Hi-res interlace vertical source ($2133 bit 0, modes 5/6): the logical
+/// line a screen scanline `y` samples, with mosaic in ares' order
+/// (`background.cpp:38-44`). Mosaic snaps the *screen* line to its block
+/// first; hi-res interlace then doubles (`block<<1`), adding the field bit
+/// only when mosaic is off (`vpixel<<1 | (field && !mosaic.enable)`) — the
+/// mosaic offset doubling (`voffset << (hires&&interlace)`) falls out of
+/// snapping in screen space before the `<<1`. Progressive / non-interlace
+/// reduces to the plain block. Lores interlace does **not** double (line 40
+/// lives inside `if(hires())`), so the lores renderer skips this entirely.
 #[inline]
-pub(crate) fn interlace_src_line(ppu: &Ppu, y: u16) -> u16 {
+pub(crate) fn hires_interlace_src(ppu: &Ppu, y: u16, mosaic_size: u16) -> u16 {
+    let block = (y / mosaic_size) * mosaic_size;
     if ppu.setini & 0x01 != 0 {
-        (y << 1) | u16::from(ppu.field)
+        let field_bit = if mosaic_size > 1 {
+            0
+        } else {
+            u16::from(ppu.field)
+        };
+        (block << 1) | field_bit
     } else {
-        y
+        block
     }
 }
 
@@ -1400,7 +1409,9 @@ pub fn render_bg_scanline_indexed_with(
         return out;
     };
     let bg = bg_state(ppu, bg_idx);
-    let y = interlace_src_line(ppu, y);
+    // No interlace doubling on the lores path: ares `background.cpp:40`
+    // (`vpixel <<= 1`) is inside `if(hires())`, so lores interlace shows the
+    // same 224 content on both fields. `y` stays the screen line.
     // MOSAIC ($2106): high nibble = block size N (0..15 means 1..16
     // pixels per side), low nibble bit `bg_idx` enables mosaic for that
     // BG. Within a block we replicate the top-left pixel — implemented
@@ -1460,15 +1471,15 @@ fn render_bg_scanline_indexed_hires(
         return (above, below);
     };
     let bg = bg_state(ppu, bg_idx);
-    // Interlace (mode 5/6 + $2133 bit 0): sample logical line y*2+field.
-    let y = interlace_src_line(ppu, y);
-    // Mosaic snaps the screen dot/scanline to the block before doubling.
+    // Mosaic snaps the screen dot/scanline to the block.
     let mosaic_size = if ppu.mosaic & (1 << bg_idx) != 0 {
         u16::from((ppu.mosaic >> 4) & 0x0F) + 1
     } else {
         1
     };
-    let mosaic_y = y / mosaic_size * mosaic_size;
+    // Interlace (mode 5/6 + $2133 bit 0): mosaic-snap in screen space, THEN
+    // double (field bit dropped when mosaic is on) — ares background.cpp:38-44.
+    let mosaic_y = hires_interlace_src(ppu, y, mosaic_size);
     // Mode 6 is hi-res *and* offset-per-tile (BG1 only; Mode 5 has no
     // OPT, Modes 2/4 use the lores path). Effective scroll is per column.
     let is_opt = ppu.bgmode & 0x07 == 6 && bg_idx < 2;
@@ -3092,18 +3103,32 @@ mod tests {
     }
 
     #[test]
-    fn interlace_src_line_doubles_with_field_when_enabled() {
+    fn hires_interlace_src_doubles_and_handles_mosaic() {
         let mut p = Ppu::new();
-        // Progressive: identity.
-        assert_eq!(interlace_src_line(&p, 10), 10);
-        // Interlace on, field 0: y*2.
+        // Progressive, no mosaic: identity.
+        assert_eq!(hires_interlace_src(&p, 10, 1), 10);
+        // Interlace on, no mosaic, field 0/1: y*2 (+ field).
         p.setini |= 0x01;
         p.field = false;
-        assert_eq!(interlace_src_line(&p, 10), 20);
-        // Field 1: y*2 + 1 (odd field).
+        assert_eq!(hires_interlace_src(&p, 10, 1), 20);
         p.field = true;
-        assert_eq!(interlace_src_line(&p, 10), 21);
-        assert_eq!(interlace_src_line(&p, 223), 447, "screen 223 → logical 447");
+        assert_eq!(hires_interlace_src(&p, 10, 1), 21);
+        assert_eq!(
+            hires_interlace_src(&p, 223, 1),
+            447,
+            "screen 223 → logical 447"
+        );
+        // Mosaic on (size 4) + interlace: snap screen line to the block
+        // FIRST (8), THEN double (16) — and the field bit is dropped, so
+        // both parities give the same value (ares background.cpp:40,43).
+        p.field = false;
+        assert_eq!(hires_interlace_src(&p, 10, 4), 16);
+        p.field = true;
+        assert_eq!(
+            hires_interlace_src(&p, 10, 4),
+            16,
+            "field dropped under mosaic"
+        );
     }
 
     #[test]
