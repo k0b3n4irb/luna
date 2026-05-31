@@ -721,7 +721,12 @@ impl Ppu {
             register::VMDATAL => self.vram.write_lo_gated(value, !self.active_display),
             register::VMDATAH => self.vram.write_hi_gated(value, !self.active_display),
             register::CGADD => self.cgram.set_address(value),
-            register::CGDATA => self.cgram.write_gated(value, !self.active_display),
+            // CGRAM is never dropped on hardware — unlike VRAM/OAM, a CGDATA
+            // write during active display always commits (ares io.cpp:55-60;
+            // only the address is latched, which luna doesn't model). Gating
+            // it broke ROMs that set the backdrop mid-frame (ControllerLatency)
+            // and the HiColor CPU-IRQ palette streams.
+            register::CGDATA => self.cgram.write(value),
             register::W12SEL => self.w12sel = value,
             register::W34SEL => self.w34sel = value,
             register::WOBJSEL => self.wobjsel = value,

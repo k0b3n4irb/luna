@@ -254,29 +254,18 @@ impl Cgram {
     }
 
     /// `$2122` write — first call latches the low byte, second call
-    /// stores both bytes and advances the address.
+    /// stores both bytes and advances the address. CGRAM is *never*
+    /// gated by active display (unlike VRAM/OAM): a write mid-frame
+    /// always commits (ares `io.cpp:55-60` — only the address is
+    /// latched during rendering, which luna doesn't model).
     pub fn write(&mut self, value: u8) {
-        self.write_gated(value, true);
-    }
-
-    /// `$2122` write variant honouring gap G7: the byte pair commits
-    /// only when `allow_data` is `true`. The high/low latch toggle
-    /// and address advance still happen regardless, so a stream of
-    /// `$2122` writes during active display effectively drops every
-    /// colour but keeps the cursor in lockstep with the CPU.
-    pub fn write_gated(&mut self, value: u8, allow_data: bool) {
         if self.high_pending {
-            if allow_data {
-                let off = usize::from(self.address) << 1;
-                self.data[off] = self.latch;
-                self.data[off + 1] = value;
-            }
+            let off = usize::from(self.address) << 1;
+            self.data[off] = self.latch;
+            self.data[off + 1] = value;
             self.address = self.address.wrapping_add(1);
             self.high_pending = false;
         } else {
-            // The low-byte latch is updated whether or not we'll
-            // commit later — that's how real hardware behaves and
-            // also keeps semantics simple.
             self.latch = value;
             self.high_pending = true;
         }
@@ -678,16 +667,18 @@ mod tests {
     }
 
     #[test]
-    fn cgram_write_gated_drops_pair_but_advances_address() {
-        // CGRAM is a 2-byte write-pair. Gated path drops the data on
-        // commit (odd write) but still advances the address.
+    fn cgram_write_commits_even_during_active_display() {
+        // CGRAM is a 2-byte write-pair and is NEVER gated by active
+        // display (unlike VRAM/OAM) — a mid-frame write always commits
+        // (ares io.cpp:55-60). Regression guard for the ControllerLatency
+        // backdrop-write fix.
         let mut c = Cgram::new();
         c.set_address(0x10);
-        c.write_gated(0x12, false); // low latch — no commit yet
-        c.write_gated(0x34, false); // commit — discarded
-        assert_eq!(c.peek(0x20), 0, "first byte of dropped pair stays zero");
-        assert_eq!(c.peek(0x21), 0, "second byte of dropped pair stays zero");
-        assert_eq!(c.address, 0x11, "address advanced past the dropped pair");
+        c.write(0x12); // low latch
+        c.write(0x34); // commit — lands
+        assert_eq!(c.peek(0x20), 0x12, "low byte committed");
+        assert_eq!(c.peek(0x21), 0x34, "high byte committed");
+        assert_eq!(c.address, 0x11, "address advanced past the pair");
     }
 
     #[test]

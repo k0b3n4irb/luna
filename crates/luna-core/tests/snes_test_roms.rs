@@ -594,6 +594,19 @@ ppu_test!(
     ignore = "HiColor chart: needs intra-scanline CGRAM (mid-line H-IRQ DMA) (gap #7)"
 );
 
+// INPUT/ControllerLatency: "any button → white screen, none → black". Held
+// with A, the joypad auto-read ($4218 JOY1L, NMI-driven) must report the
+// press so the ROM draws white — matching the reference capture. Exercises
+// the joypad auto-read latch + NMI joypad-enable ($4200 bit 0) end-to-end.
+#[test]
+fn input_controller_latency() {
+    test_display(
+        "INPUT/ControllerLatency/ControllerLatency.sfc",
+        "5fcaea3e9a96bd542b161537c280f82dc131be0498b738564f53cd256a1c601d",
+        PAD_A,
+    );
+}
+
 // =============================================================================
 // SPC700 / S-DSP audio tests
 //
