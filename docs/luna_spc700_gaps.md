@@ -122,8 +122,8 @@ music driver → silence. Surfaced by the Peter Lemon SPC700 audio ROMs
 (`test_corpora.md`): 3 silent ones (Axel-F, FFVIIPrelude, SpeechSynth)
 did a genuine two-block `TransferBlockSPC`; fixing the byte made all
 three play (verified by ear). (`PlayTwoSong` was also silent but for an
-unrelated, non-bug reason — it only uploads on an A/B button press, so it
-stays silent headless; it is omitted from the suite rather than tracked.)
+unrelated, non-bug reason — it only uploads on an A/B button press; its
+test now injects a held A press to play song 1.)
 
 ## Verdict
 

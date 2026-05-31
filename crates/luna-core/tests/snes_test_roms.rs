@@ -401,9 +401,19 @@ const AUDIO_SAMPLES: usize = 96_000;
 /// Instruction ceiling while accumulating audio.
 const AUDIO_STEP_CAP: u64 = 80_000_000;
 
+/// SNES controller button masks for [`Snes::set_joypad`]
+/// (`B Y SEL START Up Down Left Right A X L R 0 0 0 0`, MSB→LSB).
+const PAD_A: u16 = 0x0080;
+
 /// Boot a forced-LoROM ROM (as PAL) and accumulate the first
 /// [`AUDIO_SAMPLES`] stereo samples from the APU.
-fn run_audio(rom: Vec<u8>) -> Vec<(i16, i16)> {
+///
+/// `hold` is a controller-1 button mask held from reset until the SPC700
+/// finishes booting the uploaded driver (`past_iplrom`), then released —
+/// for ROMs that only start playing on a button press (e.g. `PlayTwoSong`'s
+/// A = song 1). `0` means no input. The `LUNA_SNES_TEST_HOLD` env var
+/// (hex) overrides it for ad-hoc experimentation.
+fn run_audio(rom: Vec<u8>, hold: u16) -> Vec<(i16, i16)> {
     let want: usize = std::env::var("LUNA_SNES_TEST_AUDIO_N")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -413,11 +423,20 @@ fn run_audio(rom: Vec<u8>) -> Vec<(i16, i16)> {
     let mut snes = Snes::from_cartridge(cart);
     snes.reset();
 
+    let hold: u16 = std::env::var("LUNA_SNES_TEST_HOLD")
+        .ok()
+        .and_then(|s| u16::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .unwrap_or(hold);
+    if hold != 0 {
+        snes.set_joypad(0, hold);
+    }
+
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
 
     let mut samples: Vec<(i16, i16)> = Vec::with_capacity(want + 8192);
     let mut executed = 0u64;
+    let mut released = hold == 0;
     'run: while samples.len() < want && executed < AUDIO_STEP_CAP {
         for _ in 0..4096 {
             if catch_unwind(AssertUnwindSafe(|| {
@@ -428,6 +447,13 @@ fn run_audio(rom: Vec<u8>) -> Vec<(i16, i16)> {
                 break 'run;
             }
             executed += 1;
+        }
+        // Release the held button once the upload has landed (the SPC700
+        // left the IPL ROM into the driver), so the ROM's input loop
+        // doesn't re-trigger the upload and reset the song.
+        if !released && snes.apu_real.past_iplrom {
+            snes.set_joypad(0, 0);
+            released = true;
         }
         snes.apu_real.drain_audio(&mut samples, usize::MAX);
     }
@@ -508,7 +534,7 @@ fn write_wav(path: &Path, samples: &[(i16, i16)]) {
 
 /// Boot `rel`, capture its audio, and compare the PCM SHA-256 to
 /// `expected`. Skips gracefully if the corpus / ROM is absent.
-fn test_audio(rel: &str, expected: &str) {
+fn test_audio(rel: &str, expected: &str, hold: u16) {
     let Some(root) = corpus_root() else {
         eprintln!("[skip] SNES test corpus not found (run tools/fetch-snes-test-roms.sh)");
         return;
@@ -520,7 +546,7 @@ fn test_audio(rel: &str, expected: &str) {
     }
 
     let rom = std::fs::read(&path).expect("read rom");
-    let samples = run_audio(rom);
+    let samples = run_audio(rom, hold);
     let got = hex(&Sha256::digest(audio_bytes(&samples)));
     let nonsilent = samples.iter().filter(|(l, r)| *l != 0 || *r != 0).count();
 
@@ -551,17 +577,21 @@ fn test_audio(rel: &str, expected: &str) {
     );
 }
 
-/// Declare a Peter Lemon `SPC700/<path>` audio golden test.
-///
-/// `PlayTwoSong` is intentionally **not** wired up: it only uploads/plays
-/// a song in response to an A/B button press (`ReadJOY`), so headless it
-/// just spins in its input loop and stays silent — by design, not a bug.
-/// Testing it would mean injecting controller input.
+/// Declare a Peter Lemon `SPC700/<path>` audio golden test. The optional
+/// `hold = <mask>` form holds a controller-1 button (e.g. [`PAD_A`]) until
+/// the driver boots, then releases — for ROMs that only play on a button
+/// press (`PlayTwoSong`: A = song 1).
 macro_rules! spc_test {
     ($fn:ident, $path:literal, $hash:literal) => {
         #[test]
         fn $fn() {
-            test_audio(concat!("SPC700/", $path), $hash);
+            test_audio(concat!("SPC700/", $path), $hash, 0);
+        }
+    };
+    ($fn:ident, $path:literal, $hash:literal, hold = $mask:expr) => {
+        #[test]
+        fn $fn() {
+            test_audio(concat!("SPC700/", $path), $hash, $mask);
         }
     };
 }
@@ -610,5 +640,10 @@ spc_test!(
     "SpeechSynth/SpeechSynth.sfc",
     "da65e946b7e159e65604e237df3eaf251db7353740fe4888f89725dd47045b20"
 );
-// (PlayTwoSong is omitted — it needs A/B controller input to play; see
-// the `spc_test!` doc comment.)
+// Plays only on a button press — hold A (song 1) until the driver boots.
+spc_test!(
+    spc_play_two_song,
+    "PlayTwoSong/PlayTwoSong.sfc",
+    "259e14fb18fe7de1b4c6403b5d3a4680e86a1439e8972eaf7d8a43042d4ec2d3",
+    hold = PAD_A
+);
