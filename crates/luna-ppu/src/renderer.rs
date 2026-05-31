@@ -3005,6 +3005,52 @@ mod tests {
     }
 
     #[test]
+    fn mode7_is_field_independent_under_interlace() {
+        // ares mode7.cpp:13 uses `y = vcounter()` directly — NO interlace
+        // doubling or field offset (unlike the hi-res BG path). So Mode 7 +
+        // interlace renders the same affine line for both fields; luna's
+        // both-field blend then averages two identical passes. This guards
+        // against accidentally adding y-doubling to the affine renderer
+        // (which would make screen line 5 sample texture row 10/11, not 5).
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::BGMODE, 0x07);
+        p.write(register::M7A, 0x00);
+        p.write(register::M7A, 0x01); // M7A = $0100
+        p.write(register::M7B, 0x00);
+        p.write(register::M7B, 0x00);
+        p.write(register::M7C, 0x00);
+        p.write(register::M7C, 0x00);
+        p.write(register::M7D, 0x00);
+        p.write(register::M7D, 0x01); // M7D = $0100
+        // Tile 0 pixel (col 0, row 5) = 5 → screen line 5 (identity) reads
+        // it. Texture rows 10/11 (a doubling bug's targets) stay 0 =
+        // transparent, so a bug would turn the pixel into None.
+        p.vram.poke(81, 5);
+        p.cgram.poke(10, 0xFF);
+        p.cgram.poke(11, 0x7F);
+        let prog = render_mode7_scanline_indexed(&p, 5, RenderOptions::default());
+        p.setini |= 0x01; // interlace on
+        p.field = false;
+        let f0 = render_mode7_scanline_indexed(&p, 5, RenderOptions::default());
+        p.field = true;
+        let f1 = render_mode7_scanline_indexed(&p, 5, RenderOptions::default());
+        assert_eq!(
+            prog[0].map(|(i, _)| i),
+            Some(5),
+            "progressive samples texture row 5"
+        );
+        assert_eq!(
+            f0[0], prog[0],
+            "interlace field 0 == progressive (no y-doubling)"
+        );
+        assert_eq!(
+            f1[0], prog[0],
+            "interlace field 1 == progressive (field-independent)"
+        );
+    }
+
+    #[test]
     fn mode7_extbg_splits_plane_into_bg1_and_bg2() {
         // Mode 7 + EXTBG ($2133.6). Pixel (0,0) = 0x83 → bit 7 set, low
         // 7 bits = 3. BG1 sees the full 8-bit colour (CGRAM 131); BG2

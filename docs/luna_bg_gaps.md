@@ -178,6 +178,12 @@ corrected (mosaic *is* applied since #11).
 - Direct-colour gating (8bpp + BG + CGWSEL bit 0); window / colour-math
   (already audited in `ppu_compositor_reference.md`).
 - Mode 7 affine (fixed `35be343`).
+- **Mode 7 + interlace** — intentionally a no-op: ares `mode7.cpp:13` uses
+  `y = vcounter()` directly, with no `<<1`/field (unlike the hi-res BG
+  path). So Mode 7 interlace shows the same affine line on both fields (a
+  "fake" 448, no added vertical detail); luna's both-field blend averages
+  two identical passes → already correct. Do NOT add y-doubling to the
+  affine renderer. Guarded by `mode7_is_field_independent_under_interlace`.
 
 ## Suggested order
 
