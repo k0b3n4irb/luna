@@ -490,10 +490,31 @@ impl Ppu {
         }
         // Stack scratch row → partial render → copy into framebuffer.
         let mut row = [[0u8; 3]; FRAME_W];
-        render_scanline_partial_into(self, y, start, end, opts, &mut row);
-        let off = yi * FRAME_W;
         let si = usize::from(start);
         let ei = usize::from(end);
+        if self.setini & 0x01 != 0 {
+            // Interlace (Phase C): the 448-line image is collapsed to 224 by
+            // averaging the two fields (logical lines y*2 and y*2+1) — the
+            // vertical analog of the hi-res 512→256 "Option A" downsample.
+            // Render the range once per field parity and blend → stable,
+            // flicker-free output. (`field` still toggles for STAT78 reads;
+            // the rendered frame uses both parities regardless.)
+            let saved_field = self.field;
+            let mut row_odd = [[0u8; 3]; FRAME_W];
+            self.field = false;
+            render_scanline_partial_into(self, y, start, end, opts, &mut row);
+            self.field = true;
+            render_scanline_partial_into(self, y, start, end, opts, &mut row_odd);
+            self.field = saved_field;
+            for x in si..ei {
+                for c in 0..3 {
+                    row[x][c] = u8::midpoint(row[x][c], row_odd[x][c]);
+                }
+            }
+        } else {
+            render_scanline_partial_into(self, y, start, end, opts, &mut row);
+        }
+        let off = yi * FRAME_W;
         self.framebuffer[off + si..off + ei].copy_from_slice(&row[si..ei]);
         self.last_flushed_dot = end;
     }
