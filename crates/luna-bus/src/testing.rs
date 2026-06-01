@@ -15,6 +15,7 @@ use crate::types::{Addr24, MCycles};
 pub struct RamBus {
     mem: Box<[u8; 1 << 24]>,
     io_cycles_paid: MCycles,
+    io_cycle_calls: u64,
     nmi: bool,
     irq: bool,
 }
@@ -36,6 +37,7 @@ impl RamBus {
         Self {
             mem,
             io_cycles_paid: 0,
+            io_cycle_calls: 0,
             nmi: false,
             irq: false,
         }
@@ -48,9 +50,22 @@ impl RamBus {
         self.io_cycles_paid
     }
 
-    /// Reset the cycle counter to zero. Useful between assertions.
+    /// Number of [`Bus::io_cycle`] invocations since the bus was created
+    /// (or the last `reset_cycle_counter` call). Because the CPU cores
+    /// call `io_cycle` exactly once per bus cycle (each read, each write,
+    /// and each internal/idle cycle), this is the instruction's hardware
+    /// cycle count — the quantity a Tom Harte `cycles[]` trace length
+    /// encodes — independent of per-access mclk speed.
+    #[must_use]
+    pub const fn io_cycle_calls(&self) -> u64 {
+        self.io_cycle_calls
+    }
+
+    /// Reset both cycle counters (mclk total and invocation count) to
+    /// zero. Useful between assertions.
     pub const fn reset_cycle_counter(&mut self) {
         self.io_cycles_paid = 0;
+        self.io_cycle_calls = 0;
     }
 
     /// Mark the NMI line as asserted (latched until cleared by the CPU
@@ -100,6 +115,7 @@ impl Bus for RamBus {
 
     fn io_cycle(&mut self, mcycles: MCycles) {
         self.io_cycles_paid = self.io_cycles_paid.saturating_add(mcycles);
+        self.io_cycle_calls = self.io_cycle_calls.saturating_add(1);
     }
 
     fn nmi_pending(&self) -> bool {
