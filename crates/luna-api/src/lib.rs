@@ -19,7 +19,7 @@ use luna_cartridge::{CartError, Cartridge};
 use luna_core::Snes;
 pub use luna_core::{
     CpuTraceEvent, CpuTraceLog, MailboxEvent, MailboxEventKind, MemEventKind, MemTraceEvent,
-    MemTraceLog, Sa1LogEvent,
+    MemTraceLog, Sa1LogEvent, Sa1SideEvent,
 };
 use luna_ppu::FRAME_H;
 use luna_ppu::FRAME_W;
@@ -764,6 +764,21 @@ impl Emulator {
     pub fn take_sa1_log(&mut self) -> Result<Vec<Sa1LogEvent>, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         Ok(snes.take_sa1_log())
+    }
+
+    /// Enable SA-1-*side* execution logging (the SA-1's own `$2200-$23FF`
+    /// accesses with its PC). Complements [`Emulator::enable_sa1_log`].
+    /// No-op for non-SA-1 carts.
+    pub fn enable_sa1_side_log(&mut self) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.enable_sa1_side_log();
+        Ok(())
+    }
+
+    /// Drain the SA-1-side execution log (empty if disabled / not SA-1).
+    pub fn take_sa1_side_log(&mut self) -> Result<Vec<Sa1SideEvent>, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        Ok(snes.take_sa1_side_log())
     }
 
     /// Enable per-instruction CPU tracing. Every subsequent
