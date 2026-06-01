@@ -22,7 +22,9 @@
 //! larger piece deferred — non-CC bulk DMA already works.
 
 use luna_bus::sa1::Sa1Mapper;
-use luna_bus::{Addr24, Bus, MCycles, Mapper, MapperKind, Sa1SideEvent, Sa1Snapshot, make_addr};
+use luna_bus::{
+    Addr24, Bus, MCycles, Mapper, MapperKind, Sa1SideEvent, Sa1Snapshot, Sa1TraceEvent, make_addr,
+};
 use luna_cpu_65c816::Cpu;
 
 /// SA-1 chip — a `Sa1Mapper` (shared cart memory) wrapped with its
@@ -47,6 +49,10 @@ pub struct Sa1Chip {
     /// accesses to its MMIO window (`$2200-$23FF`) are recorded with the
     /// SA-1 PC. Enabled via [`Mapper::enable_sa1_side_log`].
     sa1_side_log: Option<Vec<Sa1SideEvent>>,
+    /// Optional full SA-1 instruction trace: `(events, max_events)`. A
+    /// pre-instruction register snapshot per SA-1 opcode, capped at
+    /// `max_events`. Enabled via [`Mapper::enable_sa1_trace`].
+    sa1_trace: Option<(Vec<Sa1TraceEvent>, usize)>,
 }
 
 const MCLK_PER_SA1_INSN: u32 = 6;
@@ -61,6 +67,7 @@ impl Sa1Chip {
             running: false,
             deficit: 0,
             sa1_side_log: None,
+            sa1_trace: None,
         }
     }
 
@@ -146,6 +153,28 @@ impl Mapper for Sa1Chip {
             // mutates itself. Snapshot the SA-1 PC before the step so the
             // optional trace can attribute each MMIO access to its code.
             let sa1_pc = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
+            // Full instruction tracer: pre-opcode register snapshot. Ring
+            // buffer — keeps the most recent `max` events (drops the oldest
+            // half when full, amortised O(1)), so a long run captures the
+            // SA-1's *current* loop (the hang) rather than early boot.
+            if let Some((events, max)) = self.sa1_trace.as_mut() {
+                if *max > 0 {
+                    if events.len() >= *max {
+                        events.drain(0..*max / 2);
+                    }
+                    events.push(Sa1TraceEvent {
+                        pc_full: sa1_pc,
+                        a: self.cpu.a,
+                        x: self.cpu.x,
+                        y: self.cpu.y,
+                        sp: self.cpu.sp,
+                        p: self.cpu.p.bits(),
+                        db: self.cpu.db,
+                        dp: self.cpu.dp,
+                        e: self.cpu.e,
+                    });
+                }
+            }
             let mut bus = Sa1Bus {
                 mapper: &mut self.inner,
                 log: self.sa1_side_log.as_mut(),
@@ -177,6 +206,17 @@ impl Mapper for Sa1Chip {
     fn take_sa1_side_log(&mut self) -> Vec<Sa1SideEvent> {
         match self.sa1_side_log.as_mut() {
             Some(log) => std::mem::take(log),
+            None => Vec::new(),
+        }
+    }
+
+    fn enable_sa1_trace(&mut self, max_events: usize) {
+        self.sa1_trace = Some((Vec::new(), max_events));
+    }
+
+    fn take_sa1_trace(&mut self) -> Vec<Sa1TraceEvent> {
+        match self.sa1_trace.as_mut() {
+            Some((events, _)) => std::mem::take(events),
             None => Vec::new(),
         }
     }

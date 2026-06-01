@@ -90,6 +90,43 @@ pub trait Mapper {
     fn take_sa1_side_log(&mut self) -> Vec<Sa1SideEvent> {
         Vec::new()
     }
+
+    /// Enable a full SA-1 instruction trace: a pre-instruction register
+    /// snapshot per SA-1 opcode (up to `max_events`), for diffing luna's
+    /// SA-1 PC/register stream against a reference emulator (bsnes/Mesen2)
+    /// to localise the SMRPG deadlock. No-op for non-SA-1 mappers.
+    fn enable_sa1_trace(&mut self, _max_events: usize) {}
+
+    /// Drain the SA-1 instruction trace (empty if disabled / not SA-1).
+    fn take_sa1_trace(&mut self) -> Vec<Sa1TraceEvent> {
+        Vec::new()
+    }
+}
+
+/// One pre-instruction snapshot of the SA-1's 65C816 register file —
+/// the SA-1 analogue of luna-core's `CpuTraceEvent`. Diffing this PC +
+/// register stream against a reference SA-1 trace pinpoints the first
+/// divergence.
+#[derive(Debug, Clone, Copy)]
+pub struct Sa1TraceEvent {
+    /// 24-bit SA-1 PC (`pb << 16 | pc`) before the opcode runs.
+    pub pc_full: u32,
+    /// Accumulator (16-bit; low byte when M=1).
+    pub a: u16,
+    /// X index.
+    pub x: u16,
+    /// Y index.
+    pub y: u16,
+    /// Stack pointer.
+    pub sp: u16,
+    /// Processor status (`P`).
+    pub p: u8,
+    /// Data bank.
+    pub db: u8,
+    /// Direct page.
+    pub dp: u16,
+    /// Emulation flag.
+    pub e: bool,
 }
 
 /// One SA-1-side access to an SA-1 MMIO register (`$2200-$23FF`), tagged

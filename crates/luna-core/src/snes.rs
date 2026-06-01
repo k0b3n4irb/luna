@@ -423,6 +423,18 @@ impl Snes {
         self.mapper.take_sa1_side_log()
     }
 
+    /// Enable a full SA-1 instruction trace (pre-opcode register snapshot
+    /// per SA-1 instruction, capped at `max_events`). No-op for non-SA-1
+    /// carts. Drain with [`Snes::take_sa1_trace`].
+    pub fn enable_sa1_trace(&mut self, max_events: usize) {
+        self.mapper.enable_sa1_trace(max_events);
+    }
+
+    /// Drain the SA-1 instruction trace (empty if disabled / not SA-1).
+    pub fn take_sa1_trace(&mut self) -> Vec<luna_bus::Sa1TraceEvent> {
+        self.mapper.take_sa1_trace()
+    }
+
     /// Enable CPU instruction tracing. From this point onward each
     /// call to [`Snes::step`] appends a pre-instruction register
     /// snapshot until the log fills (`max_events` events). Use
