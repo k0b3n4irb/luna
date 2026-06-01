@@ -17,5 +17,5 @@ pub use apu_stub::{ApuStub, Phase as ApuPhase};
 pub use cpu_regs::CpuRegs;
 pub use snes::{
     CpuTraceEvent, CpuTraceLog, MailboxEvent, MailboxEventKind, MemEventKind, MemTraceEvent,
-    MemTraceLog, Snes,
+    MemTraceLog, Sa1LogEvent, Snes,
 };

@@ -24,6 +24,11 @@ struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+// The `State` variant carries many optional diagnostic-output paths (one
+// per trace/log kind); adding `--sa1-log` tipped it past the 200-byte
+// variant-size delta. This enum is parsed exactly once at startup, so the
+// size is irrelevant — boxing CLI-arg fields would only add noise.
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Load a ROM, step the CPU N instructions, optionally dump a
     /// screenshot of the resulting PPU state.
@@ -116,6 +121,14 @@ enum Command {
         /// music-driver "wait for ack" deadlock).
         #[arg(long = "apu-log")]
         apu_log: Option<PathBuf>,
+        /// Optional SA-1 MMIO traffic log. When set, every CPU read/write
+        /// of an SA-1 register `$2200-$23FF` during the run is captured and
+        /// written to the given path as CSV with columns:
+        /// `mclk_total,frame_ntsc,pc,kind,reg,value` (one row per event).
+        /// Useful for diagnosing the CPU↔SA-1 handshake (e.g. the SMRPG
+        /// intro deadlock).
+        #[arg(long = "sa1-log")]
+        sa1_log: Option<PathBuf>,
         /// Optional CPU instruction trace. When set, captures a
         /// per-instruction register snapshot (PC, A, X, Y, SP, P, DB,
         /// DP, e) into the given CSV file. Capture starts at instr
@@ -180,6 +193,7 @@ fn main() -> ExitCode {
             input,
             peek,
             apu_log,
+            sa1_log,
             cpu_trace,
             cpu_trace_from,
             cpu_trace_max,
@@ -196,6 +210,7 @@ fn main() -> ExitCode {
             input.as_deref(),
             &peek,
             apu_log.as_deref(),
+            sa1_log.as_deref(),
             cpu_trace.as_deref(),
             cpu_trace_from,
             cpu_trace_max,
@@ -307,6 +322,37 @@ fn write_mailbox_log_csv(
     Ok(())
 }
 
+/// Write SA-1 MMIO events as CSV. Columns:
+/// `mclk_total, frame_ntsc, pc, kind, reg, value`. `reg` is the register
+/// address (`$2200-$23FF`); `frame_ntsc` assumes NTSC.
+fn write_sa1_log_csv(
+    path: &std::path::Path,
+    events: &[luna_api::Sa1LogEvent],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    writeln!(f, "mclk_total,frame_ntsc,pc,kind,reg,value")?;
+    for ev in events {
+        let frame_ntsc = ev.mclk_total / (1364 * 262);
+        let kind = match ev.kind {
+            luna_api::MailboxEventKind::Read => "R",
+            luna_api::MailboxEventKind::Write => "W",
+        };
+        writeln!(
+            f,
+            "{},{},${:02X}:{:04X},{},${:04X},${:02X}",
+            ev.mclk_total,
+            frame_ntsc,
+            (ev.pc_full >> 16) & 0xFF,
+            ev.pc_full & 0xFFFF,
+            kind,
+            ev.reg,
+            ev.value
+        )?;
+    }
+    Ok(())
+}
+
 /// Write per-instruction CPU trace events as CSV. Columns:
 /// `mclk_total, frame_ntsc, pc, a, x, y, sp, p_hex, db, dp, e`.
 fn write_cpu_trace_csv(
@@ -393,6 +439,7 @@ fn run_state(
     input_script: Option<&str>,
     peek_specs: &[String],
     apu_log_path: Option<&std::path::Path>,
+    sa1_log_path: Option<&std::path::Path>,
     cpu_trace_path: Option<&std::path::Path>,
     cpu_trace_from: u64,
     cpu_trace_max: usize,
@@ -409,6 +456,12 @@ fn run_state(
     if apu_log_path.is_some() {
         if let Err(e) = em.enable_mailbox_log() {
             eprintln!("error: enable_mailbox_log: {e}");
+            return ExitCode::from(1);
+        }
+    }
+    if sa1_log_path.is_some() {
+        if let Err(e) = em.enable_sa1_log() {
+            eprintln!("error: enable_sa1_log: {e}");
             return ExitCode::from(1);
         }
     }
@@ -564,6 +617,19 @@ fn run_state(
                 Err(e) => eprintln!("error: writing APU log: {e}"),
             },
             Err(e) => eprintln!("error: take_mailbox_log: {e}"),
+        }
+    }
+    if let Some(path) = sa1_log_path {
+        match em.take_sa1_log() {
+            Ok(events) => match write_sa1_log_csv(path, &events) {
+                Ok(()) => eprintln!(
+                    "SA-1 MMIO log written to {} ({} events)",
+                    path.display(),
+                    events.len()
+                ),
+                Err(e) => eprintln!("error: writing SA-1 log: {e}"),
+            },
+            Err(e) => eprintln!("error: take_sa1_log: {e}"),
         }
     }
     if let Some(path) = cpu_trace_path {

@@ -107,6 +107,12 @@ pub struct Snes {
     /// SMW music-driver handshake). Enable via [`Snes::enable_mailbox_log`].
     pub mailbox_log: Option<Vec<MailboxEvent>>,
 
+    /// Optional SA-1 MMIO traffic log (`$2200-$23FF`). When `Some`, every
+    /// CPU read/write of an SA-1 control/status register is appended as a
+    /// [`Sa1LogEvent`] for diagnosing the CPU↔SA-1 handshake (e.g. the
+    /// SMRPG intro deadlock). Enable via [`Snes::enable_sa1_log`].
+    pub sa1_log: Option<Vec<Sa1LogEvent>>,
+
     /// Optional CPU instruction trace. When `Some`, every call to
     /// [`Snes::step`] appends a pre-instruction register snapshot
     /// until the log fills (capped at `max_events`). Enable via
@@ -147,6 +153,23 @@ pub enum MailboxEventKind {
     Read,
     /// CPU write to `$2140-$2143`.
     Write,
+}
+
+/// One CPU access to an SA-1 MMIO register (`$2200-$23FF`), captured for
+/// CPU↔SA-1 handshake diagnosis. Reuses [`MailboxEventKind`] for the
+/// direction. Kept plain (no serde) like [`MailboxEvent`].
+#[derive(Debug, Clone, Copy)]
+pub struct Sa1LogEvent {
+    /// Master cycles since reset at the time of the access.
+    pub mclk_total: u64,
+    /// 24-bit CPU PC (`pb << 16 | pc`) of the instruction doing the access.
+    pub pc_full: u32,
+    /// `Read` (CPU reading the SA-1) or `Write` (CPU writing the SA-1).
+    pub kind: MailboxEventKind,
+    /// The register address in `$2200..=$23FF` (low 16 bits).
+    pub reg: u16,
+    /// The byte transferred.
+    pub value: u8,
 }
 
 /// One pre-instruction CPU snapshot, captured by the optional CPU
@@ -342,6 +365,7 @@ impl Snes {
             joypad1_shift: 0,
             joypad2_shift: 0,
             mailbox_log: None,
+            sa1_log: None,
             cpu_trace_log: None,
             mem_trace_log: None,
         }
@@ -363,6 +387,24 @@ impl Snes {
     /// `Vec` if logging is disabled.
     pub fn take_mailbox_log(&mut self) -> Vec<MailboxEvent> {
         match self.mailbox_log.as_mut() {
+            Some(log) => std::mem::take(log),
+            None => Vec::new(),
+        }
+    }
+
+    /// Enable SA-1 MMIO event logging. From this point every CPU read/write
+    /// of an SA-1 register (`$2200-$23FF`) is appended to the log. Use
+    /// [`Snes::take_sa1_log`] at the end of a run. Cheap when disabled.
+    pub fn enable_sa1_log(&mut self) {
+        if self.sa1_log.is_none() {
+            self.sa1_log = Some(Vec::new());
+        }
+    }
+
+    /// Take ownership of the accumulated SA-1 MMIO events, resetting the
+    /// buffer (but keeping logging enabled). Empty `Vec` if disabled.
+    pub fn take_sa1_log(&mut self) -> Vec<Sa1LogEvent> {
+        match self.sa1_log.as_mut() {
             Some(log) => std::mem::take(log),
             None => Vec::new(),
         }
@@ -442,6 +484,7 @@ impl Snes {
             joypad1_shift,
             joypad2_shift,
             mailbox_log,
+            sa1_log,
             mem_trace_log,
             ..
         } = self;
@@ -467,6 +510,7 @@ impl Snes {
             vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
+            sa1_log,
             mem_trace_log,
             wm_addr,
             joypad_strobe,
@@ -523,6 +567,7 @@ impl Snes {
                 joypad1_shift,
                 joypad2_shift,
                 mailbox_log,
+                sa1_log,
                 mem_trace_log,
                 mcycles_in_line,
                 frame_count,
@@ -551,6 +596,7 @@ impl Snes {
                 vblank_start_line: vblank_start_snapshot,
                 cpu_pc_full: cpu_pc_snapshot,
                 mailbox_log,
+                sa1_log,
                 mem_trace_log,
                 wm_addr,
                 joypad_strobe,
@@ -640,6 +686,7 @@ impl Snes {
                 joypad1_shift,
                 joypad2_shift,
                 mailbox_log,
+                sa1_log,
                 mem_trace_log,
                 mcycles_in_line,
                 frame_count,
@@ -668,6 +715,7 @@ impl Snes {
                 vblank_start_line: vblank_start_snapshot,
                 cpu_pc_full: cpu_pc_snapshot,
                 mailbox_log,
+                sa1_log,
                 mem_trace_log,
                 wm_addr,
                 joypad_strobe,
@@ -737,6 +785,7 @@ impl Snes {
             joypad1_shift,
             joypad2_shift,
             mailbox_log,
+            sa1_log,
             mem_trace_log,
             ..
         } = self;
@@ -762,6 +811,7 @@ impl Snes {
             vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
+            sa1_log,
             mem_trace_log,
             wm_addr,
             joypad_strobe,
@@ -837,6 +887,8 @@ struct SnesBus<'a> {
     /// Mailbox traffic log for `$2140-$2143`. `None` = disabled (the
     /// common path); `Some` = capturing events. See [`Snes::enable_mailbox_log`].
     mailbox_log: &'a mut Option<Vec<MailboxEvent>>,
+    /// SA-1 MMIO trace sink (`$2200-$23FF`); `None` = disabled.
+    sa1_log: &'a mut Option<Vec<Sa1LogEvent>>,
     /// Memory access trace. `None` = disabled. See [`Snes::enable_mem_trace`].
     mem_trace_log: &'a mut Option<MemTraceLog>,
 }
@@ -1317,10 +1369,35 @@ impl SnesBus<'_> {
             return 0xFF;
         }
         if let Some(v) = self.mapper.read(addr) {
+            if let Some(reg) = Self::sa1_reg(addr) {
+                if let Some(log) = self.sa1_log.as_mut() {
+                    log.push(Sa1LogEvent {
+                        mclk_total: *self.mclk_total,
+                        pc_full: self.cpu_pc_full,
+                        kind: MailboxEventKind::Read,
+                        reg,
+                        value: v,
+                    });
+                }
+            }
             return v;
         }
         // Open bus stub.
         0xFF
+    }
+
+    /// SA-1 MMIO register address (`$2200-$23FF`) if `addr` targets the
+    /// coprocessor register window (banks `$00-$3F` / `$80-$BF`). Used only
+    /// to gate the optional SA-1 trace log.
+    const fn sa1_reg(addr: Addr24) -> Option<u16> {
+        let bank = (addr >> 16) as u8;
+        let off = addr as u16;
+        let bank_ok = bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF);
+        if bank_ok && off >= 0x2200 && off <= 0x23FF {
+            Some(off)
+        } else {
+            None
+        }
     }
 
     fn write_inner(&mut self, addr: Addr24, value: u8) {
@@ -1497,6 +1574,17 @@ impl SnesBus<'_> {
             }
             return;
         }
+        if let Some(reg) = Self::sa1_reg(addr) {
+            if let Some(log) = self.sa1_log.as_mut() {
+                log.push(Sa1LogEvent {
+                    mclk_total: *self.mclk_total,
+                    pc_full: self.cpu_pc_full,
+                    kind: MailboxEventKind::Write,
+                    reg,
+                    value,
+                });
+            }
+        }
         // Mapper claims SRAM writes; anything not yet routed drops.
         let _ = self.mapper.write(addr, value);
     }
@@ -1630,6 +1718,7 @@ mod tests {
             joypad1_shift,
             joypad2_shift,
             mailbox_log,
+            sa1_log,
             mem_trace_log,
             ..
         } = &mut snes;
@@ -1655,6 +1744,7 @@ mod tests {
             vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
+            sa1_log,
             mem_trace_log,
             wm_addr,
             joypad_strobe,
@@ -1698,6 +1788,7 @@ mod tests {
             joypad1_shift,
             joypad2_shift,
             mailbox_log,
+            sa1_log,
             mem_trace_log,
             ..
         } = &mut snes;
@@ -1723,6 +1814,7 @@ mod tests {
             vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
+            sa1_log,
             mem_trace_log,
             wm_addr,
             joypad_strobe,
@@ -1773,6 +1865,7 @@ mod tests {
             joypad1_shift,
             joypad2_shift,
             mailbox_log,
+            sa1_log,
             mem_trace_log,
             ..
         } = &mut snes;
@@ -1798,6 +1891,7 @@ mod tests {
             vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
+            sa1_log,
             mem_trace_log,
             wm_addr,
             joypad_strobe,
@@ -2067,6 +2161,7 @@ mod tests {
             joypad1_shift,
             joypad2_shift,
             mailbox_log,
+            sa1_log,
             mem_trace_log,
             ..
         } = &mut snes;
@@ -2092,6 +2187,7 @@ mod tests {
             vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
+            sa1_log,
             mem_trace_log,
             wm_addr,
             joypad_strobe,

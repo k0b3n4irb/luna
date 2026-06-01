@@ -19,7 +19,7 @@ use luna_cartridge::{CartError, Cartridge};
 use luna_core::Snes;
 pub use luna_core::{
     CpuTraceEvent, CpuTraceLog, MailboxEvent, MailboxEventKind, MemEventKind, MemTraceEvent,
-    MemTraceLog,
+    MemTraceLog, Sa1LogEvent,
 };
 use luna_ppu::FRAME_H;
 use luna_ppu::FRAME_W;
@@ -748,6 +748,22 @@ impl Emulator {
     pub fn take_mailbox_log(&mut self) -> Result<Vec<MailboxEvent>, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         Ok(snes.take_mailbox_log())
+    }
+
+    /// Enable SA-1 MMIO (`$2200-$23FF`) event logging. Every CPU read or
+    /// write of an SA-1 register from this point is captured for draining
+    /// with [`Emulator::take_sa1_log`]. Cheap when disabled.
+    pub fn enable_sa1_log(&mut self) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.enable_sa1_log();
+        Ok(())
+    }
+
+    /// Take ownership of the accumulated SA-1 MMIO events, resetting the
+    /// buffer. Returns an empty `Vec` if logging is disabled.
+    pub fn take_sa1_log(&mut self) -> Result<Vec<Sa1LogEvent>, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        Ok(snes.take_sa1_log())
     }
 
     /// Enable per-instruction CPU tracing. Every subsequent
