@@ -1,506 +1,505 @@
-# Émulateurs SNES — Panorama comparatif
+# SNES Emulators — Comparative Survey
 
-Tour d'horizon des principaux émulateurs Super Nintendo (SNES / Super Famicom),
-classés par niveau de maturité, fidélité matérielle et richesse fonctionnelle.
-L'objectif : aider à choisir l'émulateur adapté à un usage donné (jeu casual,
-préservation, développement homebrew, intégration multi-systèmes…).
+An overview of the principal Super Nintendo (SNES / Super Famicom) emulators,
+ranked by level of maturity, hardware fidelity, and feature richness.
+The goal: to help choose the emulator suited to a given use case (casual
+gaming, preservation, homebrew development, multi-system integration…).
 
 ---
 
-## Sommaire
+## Contents
 
-- [Critères d'évaluation](#critères-dévaluation)
-- [Classement synthétique](#classement-synthétique)
-- [Fiches détaillées](#fiches-détaillées)
+- [Evaluation Criteria](#evaluation-criteria)
+- [Summary Ranking](#summary-ranking)
+- [Detailed Profiles](#detailed-profiles)
   - [ares](#ares)
   - [bsnes](#bsnes)
   - [Mesen-S / Mesen 2](#mesen-s--mesen-2)
   - [no$sns](#nosns)
   - [Snes9x](#snes9x)
-  - [bsnes-mercury (core RetroArch)](#bsnes-mercury-core-retroarch)
+  - [bsnes-mercury (RetroArch core)](#bsnes-mercury-retroarch-core)
   - [higan](#higan)
   - [ZSNES](#zsnes)
-- [Stacks techniques en un coup d'œil](#stacks-techniques-en-un-coup-dœil)
-- [Tableau récapitulatif](#tableau-récapitulatif)
-- [Recommandations par usage](#recommandations-par-usage)
-- [Glossaire](#glossaire)
+- [Technical Stacks at a Glance](#technical-stacks-at-a-glance)
+- [Summary Table](#summary-table)
+- [Recommendations by Use Case](#recommendations-by-use-case)
+- [Glossary](#glossary)
 - [Sources](#sources)
 
 ---
 
-## Critères d'évaluation
+## Evaluation Criteria
 
-Chaque émulateur est noté selon trois axes :
+Each emulator is rated along three axes:
 
-- **Maturité** : ancienneté du projet, stabilité, activité du développement,
-  taille de la communauté.
-- **Fidélité matérielle** : exactitude de la simulation du hardware
-  (cycle-accurate vs HLE), gestion des puces d'extension (Super FX, SA-1,
-  DSP, SPC7110…), comportements audio/vidéo conformes à la console réelle.
-- **Fonctionnalités** : save states, rewind, netplay, shaders, outils de
-  debug, support multi-plateformes, customisation…
+- **Maturity**: project age, stability, development activity,
+  size of the community.
+- **Hardware fidelity**: accuracy of the hardware simulation
+  (cycle-accurate vs HLE), handling of expansion chips (Super FX, SA-1,
+  DSP, SPC7110…), audio/video behaviors matching the real console.
+- **Features**: save states, rewind, netplay, shaders, debugging
+  tools, multi-platform support, customization…
 
 ---
 
-## Classement synthétique
+## Summary Ranking
 
-| Rang | Émulateur        | Maturité | Fidélité HW | Fonctionnalités | Profil       |
+| Rank | Emulator         | Maturity | HW Fidelity | Features        | Profile       |
 |------|------------------|----------|-------------|-----------------|--------------|
-| 🥇   | **ares**         | ★★★★★    | ★★★★★       | ★★★★☆           | Précision moderne |
-| 🥈   | **bsnes**        | ★★★★☆    | ★★★★★       | ★★★☆☆           | Référence accuracy |
+| 🥇   | **ares**         | ★★★★★    | ★★★★★       | ★★★★☆           | Modern accuracy |
+| 🥈   | **bsnes**        | ★★★★☆    | ★★★★★       | ★★★☆☆           | Accuracy reference |
 | 🥉   | **Mesen-S**      | ★★★★☆    | ★★★★★       | ★★★★★ (debug)   | Dev / homebrew |
-| 4    | **Snes9x**       | ★★★★★    | ★★★★☆       | ★★★★☆           | Polyvalent grand public |
-| 5    | **bsnes-mercury**| ★★★★☆    | ★★★★★       | ★★★★☆ (RA)      | Intégration RetroArch |
-| 6    | **no$sns**       | ★★★☆☆    | ★★★★☆       | ★★★★☆ (debug)   | Reverse engineering / doc |
-| 7    | **higan**        | ★★☆☆☆    | ★★★★★       | ★★★☆☆           | Obsolète (→ ares) |
-| 8    | **ZSNES**        | ★☆☆☆☆    | ★★☆☆☆       | ★★☆☆☆           | Historique uniquement |
+| 4    | **Snes9x**       | ★★★★★    | ★★★★☆       | ★★★★☆           | Versatile mainstream |
+| 5    | **bsnes-mercury**| ★★★★☆    | ★★★★★       | ★★★★☆ (RA)      | RetroArch integration |
+| 6    | **no$sns**       | ★★★☆☆    | ★★★★☆       | ★★★★☆ (debug)   | Reverse engineering / docs |
+| 7    | **higan**        | ★★☆☆☆    | ★★★★★       | ★★★☆☆           | Obsolete (→ ares) |
+| 8    | **ZSNES**        | ★☆☆☆☆    | ★★☆☆☆       | ★★☆☆☆           | Historical only |
 
 ---
 
-## Fiches détaillées
+## Detailed Profiles
 
 ### ares
 
-Émulateur multi-systèmes open source, fork de higan, considéré comme son
-successeur spirituel. Maintient le cœur d'émulation très précis de bsnes/higan
-tout en restant activement développé et plus accessible.
+An open-source multi-system emulator, a fork of higan, regarded as its
+spiritual successor. It retains the highly accurate emulation core of
+bsnes/higan while remaining actively developed and more accessible.
 
-**Points forts**
-- Émulation cycle-accurate du SNES (intègre le cœur bsnes).
-- Compatibilité quasi totale, y compris les puces exotiques
+**Strengths**
+- Cycle-accurate emulation of the SNES (incorporates the bsnes core).
+- Near-total compatibility, including exotic chips
   (Super FX, SA-1, DSP-1/2/3/4, SPC7110, S-DD1, Cx4…).
-- Interface moderne, configuration plus simple que higan.
-- Fonctionnalités modernes : run-ahead (réduit la latence d'entrée),
-  rewind, save states, shaders CRT, correction des couleurs.
-- Couvre de nombreux systèmes en plus du SNES (NES, GB/GBC, GBA, N64, PSX
-  expérimental, Master System, Mega Drive, PC Engine, etc.).
-- Développement actif.
+- Modern interface, simpler to configure than higan.
+- Modern features: run-ahead (reduces input latency),
+  rewind, save states, CRT shaders, color correction.
+- Covers many systems beyond the SNES (NES, GB/GBC, GBA, N64, experimental
+  PSX, Master System, Mega Drive, PC Engine, etc.).
+- Active development.
 
-**Points faibles**
-- Plus gourmand en CPU que Snes9x.
-- Pas de core RetroArch officiel (restrictions de licence).
-- Disponibilité limitée à Windows / Linux / macOS (pas d'Android, iOS, ni
-  consoles portables).
-- Moins de plugins / extensions communautaires que RetroArch.
+**Weaknesses**
+- More CPU-hungry than Snes9x.
+- No official RetroArch core (licensing restrictions).
+- Availability limited to Windows / Linux / macOS (no Android, iOS, or
+  handheld consoles).
+- Fewer community plugins / extensions than RetroArch.
 
-**Ce qui le distingue** : c'est aujourd'hui *la* combinaison optimale entre
-précision et ergonomie. Si l'on veut "le bsnes 2026", c'est ares.
+**What sets it apart**: it is today *the* optimal combination of
+accuracy and ergonomics. If you want "the bsnes of 2026," that's ares.
 
-**Stack technique**
+**Technical stack**
 
-- Langage principal : **C++** (~94,6%), avec ~4% de C, plus du CMake,
-  GLSL et un peu d'Objective-C pour le glue code macOS.
-- Philosophie de code affichée : **clarté avant performance** (ce qui
-  explique en partie l'exigence CPU vs Snes9x).
-- N'utilise **pas la STL standard** — repose sur un écosystème de
-  bibliothèques maison héritées de higan/bsnes (écrites par Near) :
+- Primary language: **C++** (~94.6%), with ~4% C, plus CMake,
+  GLSL, and a bit of Objective-C for the macOS glue code.
+- Stated coding philosophy: **clarity over performance** (which
+  partly explains the CPU demands vs Snes9x).
+- Does **not use the standard STL** — it relies on an ecosystem of
+  in-house libraries inherited from higan/bsnes (written by Near):
 
-  | Bibliothèque | Rôle |
+  | Library | Role |
   |---|---|
-  | **nall** | Alternative à la STL (containers, strings, utilitaires) |
-  | **hiro** | Toolkit GUI cross-platform utilisant les API natives (Win32, GTK, Cocoa) |
-  | **ruby** | Couche d'abstraction vidéo/audio/input (Direct3D, OpenGL, ALSA…) |
-  | **libco** | Multi-threading coopératif (coroutines) |
-  | **mia** | Base de données ROM et loader interne |
+  | **nall** | STL alternative (containers, strings, utilities) |
+  | **hiro** | Cross-platform GUI toolkit using native APIs (Win32, GTK, Cocoa) |
+  | **ruby** | Video/audio/input abstraction layer (Direct3D, OpenGL, ALSA…) |
+  | **libco** | Cooperative multi-threading (coroutines) |
+  | **mia** | ROM database and internal loader |
 
-- Le choix de **libco** (coroutines coopératives) est l'astuce
-  architecturale clé : chaque composant émulé (CPU, PPU, APU,
-  coprocesseurs) est écrit comme un "thread" qui rend la main au
-  scheduler après X cycles, ce qui rend le code cycle-accurate lisible
-  plutôt qu'une machine à états imbriquée.
-- Build system : GNU make (avec profils `debug` / `stable` / `release` /
-  `minified` / `optimized`).
-- Dépôt : [github.com/ares-emulator/ares](https://github.com/ares-emulator/ares).
+- The choice of **libco** (cooperative coroutines) is the key
+  architectural trick: each emulated component (CPU, PPU, APU,
+  coprocessors) is written as a "thread" that yields control to the
+  scheduler after X cycles, which makes the cycle-accurate code readable
+  rather than a nested state machine.
+- Build system: GNU make (with `debug` / `stable` / `release` /
+  `minified` / `optimized` profiles).
+- Repository: [github.com/ares-emulator/ares](https://github.com/ares-emulator/ares).
 
 ---
 
 ### bsnes
 
-Émulateur SNES historique créé par byuu (Near). Conçu dès l'origine pour
-être l'émulateur le plus précis possible, au prix d'exigences CPU élevées.
+A landmark SNES emulator created by byuu (Near). Designed from the outset to
+be the most accurate emulator possible, at the cost of high CPU demands.
 
-**Points forts**
-- Pionnier de l'émulation cycle-accurate SNES.
-- Trois profils historiques : *Performance*, *Balanced*, *Accuracy*.
-- Excellente compatibilité (proche du 100%).
-- Options graphiques expérimentales (upscaling Mode 7 HD, widescreen
-  hacks sur certains jeux).
-- Code source de référence pour la documentation du hardware SNES.
+**Strengths**
+- Pioneer of cycle-accurate SNES emulation.
+- Three historical profiles: *Performance*, *Balanced*, *Accuracy*.
+- Excellent compatibility (close to 100%).
+- Experimental graphics options (HD Mode 7 upscaling, widescreen
+  hacks on certain games).
+- Reference source code for SNES hardware documentation.
 
-**Points faibles**
-- Développement ralenti depuis la disparition de Near (2021).
-- Les forks récents convergent désormais vers ares.
-- Moins d'outils intégrés que Mesen-S côté debug.
-- Interface moins moderne qu'ares.
+**Weaknesses**
+- Development slowed since the passing of Near (2021).
+- Recent forks now converge toward ares.
+- Fewer built-in tools than Mesen-S on the debugging side.
+- Less modern interface than ares.
 
-**Ce qui le distingue** : le projet fondateur de l'émulation SNES haute
-fidélité. Toujours pertinent, mais ares est généralement recommandé à sa
-place pour bénéficier d'un développement actif.
+**What sets it apart**: the founding project of high-fidelity SNES
+emulation. Still relevant, but ares is generally recommended in its
+place to benefit from active development.
 
-**Stack technique**
+**Technical stack**
 
-- Langage principal : **C++**.
-- Partage la même base technique que ares/higan : utilise **nall**
-  (alternative à la STL), **hiro** (GUI native cross-platform), **ruby**
-  (couche vidéo/audio/input) et **libco** (coroutines coopératives) —
-  toutes développées par Near.
-- Architecture cycle-accurate basée sur libco, exactement comme ares.
-- Licence : **GPLv3**.
-- Build : GNU make.
-- Dépôt actuel : [github.com/bsnes-emu/bsnes](https://github.com/bsnes-emu/bsnes).
+- Primary language: **C++**.
+- Shares the same technical base as ares/higan: uses **nall**
+  (STL alternative), **hiro** (native cross-platform GUI), **ruby**
+  (video/audio/input layer), and **libco** (cooperative coroutines) —
+  all developed by Near.
+- Cycle-accurate architecture based on libco, exactly like ares.
+- License: **GPLv3**.
+- Build: GNU make.
+- Current repository: [github.com/bsnes-emu/bsnes](https://github.com/bsnes-emu/bsnes).
 
 ---
 
 ### Mesen-S / Mesen 2
 
-Mesen-S est l'extension SNES du célèbre émulateur NES "Mesen". Depuis
-Mesen 2, les deux ont fusionné dans un émulateur multi-systèmes unique
+Mesen-S is the SNES extension of the well-known NES emulator "Mesen." Since
+Mesen 2, the two have merged into a single multi-system emulator
 (NES, SNES, GB/GBC, PC Engine).
 
-**Points forts**
-- Émulation cycle-accurate du SNES.
-- **Outils de debug exceptionnels**, parmi les meilleurs tous émulateurs
-  confondus :
-  - Debugger avec breakpoints, watch, labels.
-  - Assembleur intégré.
+**Strengths**
+- Cycle-accurate emulation of the SNES.
+- **Exceptional debugging tools**, among the best of all emulators
+  combined:
+  - Debugger with breakpoints, watch, labels.
+  - Built-in assembler.
   - Event Viewer (raster, DMA, IRQ…).
   - Tile / Sprite / Palette / Tilemap viewers.
   - Trace Logger, Performance Profiler.
   - Script window (Lua).
-- HD packs, video filters, netplay, rewind, overclocking, palettes
-  personnalisées.
-- Interface claire, configuration par jeu sauvegardée automatiquement.
+- HD packs, video filters, netplay, rewind, overclocking, custom
+  palettes.
+- Clear interface, per-game configuration saved automatically.
 
-**Points faibles**
-- Plateformes limitées (Windows principalement, Linux via build).
-- Pas de version mobile.
-- Communauté plus petite que Snes9x.
-- Moins orienté "joueur lambda" — la richesse de l'UI peut intimider.
+**Weaknesses**
+- Limited platforms (mainly Windows, Linux via build).
+- No mobile version.
+- Smaller community than Snes9x.
+- Less geared toward the "average gamer" — the richness of the UI can be intimidating.
 
-**Ce qui le distingue** : c'est l'émulateur de référence pour le
-**développement homebrew** et le **ROM hacking**. Aucun concurrent n'offre
-un tel niveau d'outillage de debug intégré.
+**What sets it apart**: it is the reference emulator for
+**homebrew development** and **ROM hacking**. No competitor offers
+such a level of integrated debugging tooling.
 
-**Stack technique**
+**Technical stack**
 
-- **Architecture bi-langage** typique de Mesen :
-  - **Cœur d'émulation en C++** (CPU, PPU, APU, coprocesseurs) pour la
+- **Dual-language architecture** typical of Mesen:
+  - **Emulation core in C++** (CPU, PPU, APU, coprocessors) for
     performance.
-  - **Interface graphique et outils de debug en C#** (.NET) — d'abord
-    WinForms, puis Avalonia pour Mesen 2 afin de gagner en
-    portabilité Linux/macOS.
-- Cette séparation explique la richesse de l'UI debug : C# permet de
-  développer rapidement les nombreuses fenêtres d'outils sans
-  compromettre la perf du cœur.
-- Licence : **GPLv3**.
-- Dépôts :
-  - [github.com/SourMesen/Mesen-S](https://github.com/SourMesen/Mesen-S) (historique, plus maintenu)
-  - [github.com/SourMesen/Mesen2](https://github.com/SourMesen/Mesen2) (actif, recommandé)
+  - **Graphical interface and debugging tools in C#** (.NET) — first
+    WinForms, then Avalonia for Mesen 2 to gain
+    Linux/macOS portability.
+- This separation explains the richness of the debug UI: C# allows
+  rapid development of the many tool windows without
+  compromising the core's performance.
+- License: **GPLv3**.
+- Repositories:
+  - [github.com/SourMesen/Mesen-S](https://github.com/SourMesen/Mesen-S) (historical, no longer maintained)
+  - [github.com/SourMesen/Mesen2](https://github.com/SourMesen/Mesen2) (active, recommended)
 
 ---
 
 ### no$sns
 
-Émulateur/debugger Windows développé par **Martin Korth** (alias "Martin
-Korth de Problemkaputt"), auteur de la lignée no$ (no$gba, no$gmb, no$nes,
-no$psx…), longtemps réputée pour la précision technique et la qualité
-inégalée de la documentation hardware associée.
+A Windows emulator/debugger developed by **Martin Korth** (alias "Martin
+Korth de Problemkaputt"), author of the no$ lineage (no$gba, no$gmb, no$nes,
+no$psx…), long renowned for its technical accuracy and the unmatched
+quality of the associated hardware documentation.
 
-**Points forts**
-- **Documentation hardware "fullsnes" exceptionnelle** : la
-  [référence fullsnes.htm](https://problemkaputt.de/fullsnes.htm) est
-  considérée comme **la** spec officieuse du SNES par la communauté
-  homebrew/reverse — utilisée par les autres émulateurs eux-mêmes comme
-  source primaire (registres, timings, comportements des coprocesseurs).
-- Debugger très soigné : assembleur, désassembleur intégrés.
-- **Seul émulateur** offrant un debug poussé des coprocesseurs au-delà du
-  SPC700 (SA-1, Super FX, DSP, CX4, ST018, SPC7110…).
-- Émulation très large des add-ons et accessoires exotiques :
+**Strengths**
+- **Exceptional "fullsnes" hardware documentation**: the
+  [fullsnes.htm reference](https://problemkaputt.de/fullsnes.htm) is
+  regarded as **the** unofficial SNES spec by the
+  homebrew/reverse community — used by the other emulators themselves as a
+  primary source (registers, timings, coprocessor behaviors).
+- A very polished debugger: built-in assembler, disassembler.
+- **The only emulator** offering in-depth debugging of coprocessors beyond
+  the SPC700 (SA-1, Super FX, DSP, CX4, ST018, SPC7110…).
+- Very broad emulation of exotic add-ons and accessories:
   Satellaview, Super Disc CDROM, Turbofile, lightguns, Exertainment Bike,
   Barcode Battler, X-Band Keyboard, NTT Data Pad…
-- **Xboo-Upload** : permet d'envoyer du code directement sur du vrai
-  hardware SNES pour test (rare).
-- Compact, démarre instantanément, interface "old-school" dense mais
-  efficace.
+- **Xboo-Upload**: allows sending code directly to real
+  SNES hardware for testing (rare).
+- Compact, starts instantly, dense but efficient "old-school" interface.
 
-**Points faibles**
-- **Closed source** (contrairement à tous les autres émulateurs sérieux
-  de cette liste).
-- Développement très lent : dernière version 1.9 en 2017, peu de mises à
-  jour depuis (le projet est en quasi-hibernation).
-- Pas de **watchpoints** (data breakpoints) — limite forte pour le debug,
-  obligeant à compléter avec bsnes/Mesen-S.
-- Précision réputée bonne sur les jeux courants mais inférieure à
-  bsnes/ares/Mesen-S sur les cas limites.
-- Windows uniquement (fonctionne via Wine sur Linux/macOS).
-- Interface très datée, ergonomie déroutante pour les nouveaux venus.
-- Version "gratuite" bridée, version "no$sns debug" payante (donation
-  via le site de l'auteur).
+**Weaknesses**
+- **Closed source** (unlike all the other serious emulators
+  on this list).
+- Very slow development: latest version 1.9 in 2017, few updates
+  since (the project is in near-hibernation).
+- No **watchpoints** (data breakpoints) — a strong limitation for debugging,
+  forcing one to supplement it with bsnes/Mesen-S.
+- Accuracy reputed to be good on common games but inferior to
+  bsnes/ares/Mesen-S on edge cases.
+- Windows only (works via Wine on Linux/macOS).
+- Very dated interface, confusing ergonomics for newcomers.
+- The "free" version is restricted, the paid "no$sns debug" version requires payment
+  (donation via the author's site).
 
-**Ce qui le distingue** : son **apport majeur à l'écosystème SNES n'est
-pas l'émulateur lui-même mais la documentation fullsnes**, qui a permis
-à toute une génération de développeurs et d'émulateurs concurrents
-(bsnes, Mesen-S, ares) de progresser. C'est aussi le seul à pousser le
-debug des coprocesseurs à ce niveau.
+**What sets it apart**: its **major contribution to the SNES ecosystem is
+not the emulator itself but the fullsnes documentation**, which has enabled
+a whole generation of developers and competing emulators
+(bsnes, Mesen-S, ares) to advance. It is also the only one to push
+coprocessor debugging to this level.
 
-À utiliser en **complément** d'un autre émulateur (typiquement Mesen-S
-pour les watchpoints, no$sns pour la doc et le debug coprocesseur).
+To be used as a **complement** to another emulator (typically Mesen-S
+for watchpoints, no$sns for the docs and coprocessor debugging).
 
-**Stack technique**
+**Technical stack**
 
-- **100% assembleur x86** — c'est la signature de toute la lignée no$ de
+- **100% x86 assembly** — this is the signature of the entire no$ lineage by
   Martin Korth (no$gba, no$gmb, no$nes, no$psx, no$sns).
-- Conséquence directe : **empreinte mémoire minuscule** et performances
-  extrêmes. Martin Korth indique que "sur des PC à 1 GHz, la plupart des
-  jeux tournent 5 à 10× plus vite que sur le hardware réel".
-- **Closed source** — code source non publié.
-- **x86 32 bits uniquement**, ce qui rend impossible tout portage natif
-  vers ARM, x86-64 pur, ou autre architecture. Sous Linux/macOS, il faut
-  passer par Wine.
-- Pas de build system standard, pas de dépôt public — distribution
-  uniquement via binaires sur [problemkaputt.de](https://problemkaputt.de/sns.htm).
-- À noter : l'auteur a libéré certains de ses émulateurs (no$gba 2.7c+)
-  en freeware, mais pas le code source.
+- Direct consequence: a **tiny memory footprint** and extreme
+  performance. Martin Korth states that "on 1 GHz PCs, most
+  games run 5 to 10× faster than on real hardware."
+- **Closed source** — source code not published.
+- **32-bit x86 only**, which makes any native port to
+  ARM, pure x86-64, or other architectures impossible. On Linux/macOS, you must
+  go through Wine.
+- No standard build system, no public repository — distribution
+  only via binaries on [problemkaputt.de](https://problemkaputt.de/sns.htm).
+- Of note: the author has released some of his emulators (no$gba 2.7c+)
+  as freeware, but not the source code.
 
 ---
 
 ### Snes9x
 
-Émulateur SNES historique, le plus populaire pour le grand public. Existe
-depuis 1997 et continue d'évoluer.
+A landmark SNES emulator, the most popular for the general public. It has
+existed since 1997 and continues to evolve.
 
-**Points forts**
-- Compatibilité élevée (~99,5% du catalogue SNES).
-- Très léger en CPU, tourne sur du matériel modeste.
-- Disponible sur quasiment toutes les plateformes :
+**Strengths**
+- High compatibility (~99.5% of the SNES catalog).
+- Very light on CPU, runs on modest hardware.
+- Available on nearly every platform:
   Windows, Linux, macOS, Android, iOS, 3DS, PSP, Wii, Xbox, Switch
-  (homebrew), navigateurs (WASM), etc.
-- Save states, netplay, cheats, fast-forward, slow motion, support
-  manettes, multijoueur, customisation très poussée.
-- Développement actif, communauté large.
-- Forks dérivés extrêmement nombreux.
+  (homebrew), browsers (WASM), etc.
+- Save states, netplay, cheats, fast-forward, slow motion, controller
+  support, multiplayer, very extensive customization.
+- Active development, large community.
+- Extremely numerous derivative forks.
 
-**Points faibles**
-- Pas cycle-accurate : utilise quelques approximations HLE pour la
+**Weaknesses**
+- Not cycle-accurate: uses a few HLE approximations for
   performance.
-- Quelques jeux à effets pointus ou démos techniques peuvent présenter
-  des défauts subtils invisibles pour le joueur lambda.
-- Outils de debug nettement plus rudimentaires que Mesen-S.
+- A few games with intricate effects or technical demos may exhibit
+  subtle flaws invisible to the average gamer.
+- Debugging tools markedly more rudimentary than Mesen-S.
 
-**Ce qui le distingue** : le meilleur rapport
-**compatibilité / performance / portabilité**. C'est *le* choix par défaut
-recommandé à 95% des utilisateurs.
+**What sets it apart**: the best
+**compatibility / performance / portability** ratio. It is *the* default
+choice recommended for 95% of users.
 
-**Stack technique**
+**Technical stack**
 
-- Langage principal : **C++**, avec quelques portions historiques en C et
-  d'anciens cœurs CPU partiellement en assembleur (largement retirés au
-  fil des versions au profit de la portabilité).
-- **Pas de dépendance à un toolkit GUI unique** : le cœur est un moteur
-  d'émulation pur, et plusieurs front-ends officiels ou tiers coexistent
-  (GTK, Qt, Windows natif, Cocoa, SDL, Android…).
-- Cette architecture découplée est ce qui explique la **portabilité
-  exceptionnelle** : il est trivial pour un développeur tiers de greffer
-  le cœur Snes9x sur n'importe quelle plateforme.
-- Licence : **non-commerciale** (custom, dérivée d'un esprit BSD mais
-  avec clause interdisant l'usage commercial sans accord — d'où l'absence
-  de Snes9x dans certaines distributions Linux commerciales).
-- Build : Autotools / Make selon la plateforme.
-- Dépôt : [github.com/snes9xgit/snes9x](https://github.com/snes9xgit/snes9x).
+- Primary language: **C++**, with some historical portions in C and
+  old CPU cores partially in assembly (largely removed over
+  the versions in favor of portability).
+- **No dependence on a single GUI toolkit**: the core is a pure
+  emulation engine, and several official or third-party front-ends coexist
+  (GTK, Qt, native Windows, Cocoa, SDL, Android…).
+- This decoupled architecture is what explains the **exceptional
+  portability**: it is trivial for a third-party developer to graft
+  the Snes9x core onto any platform.
+- License: **non-commercial** (custom, derived from a BSD spirit but
+  with a clause prohibiting commercial use without agreement — hence the absence
+  of Snes9x from certain commercial Linux distributions).
+- Build: Autotools / Make depending on the platform.
+- Repository: [github.com/snes9xgit/snes9x](https://github.com/snes9xgit/snes9x).
 
 ---
 
-### bsnes-mercury (core RetroArch)
+### bsnes-mercury (RetroArch core)
 
-Fork de bsnes maintenu par la communauté libretro, conçu pour s'intégrer
-dans RetroArch en restant aussi précis que le bsnes officiel.
+A fork of bsnes maintained by the libretro community, designed to integrate
+into RetroArch while remaining as accurate as the official bsnes.
 
-**Points forts**
-- Précision identique à bsnes par défaut (les HLE optionnels sont
-  désactivés).
-- Trois cores disponibles : Performance / Balanced / Accuracy.
-- Bénéficie de tout l'écosystème RetroArch :
+**Strengths**
+- Accuracy identical to bsnes by default (optional HLE is
+  disabled).
+- Three cores available: Performance / Balanced / Accuracy.
+- Benefits from the entire RetroArch ecosystem:
   shaders, netplay, achievements (RetroAchievements), run-ahead,
-  rewind, gestion unifiée des manettes, sauvegardes cloud.
-- Disponible sur toutes les plateformes RetroArch
-  (incluant Android, consoles, Raspberry Pi).
-- FPS et taux d'échantillonnage conformes à la norme SNES NTSC/PAL.
+  rewind, unified controller management, cloud saves.
+- Available on all RetroArch platforms
+  (including Android, consoles, Raspberry Pi).
+- FPS and sample rates conforming to the SNES NTSC/PAL standard.
 
-**Points faibles**
-- Nécessite RetroArch (UI déroutante pour les débutants).
-- Le core "Accuracy" reste exigeant en CPU.
-- Pas d'outils de debug avancés.
+**Weaknesses**
+- Requires RetroArch (UI confusing for beginners).
+- The "Accuracy" core remains CPU-demanding.
+- No advanced debugging tools.
 
-**Ce qui le distingue** : c'est la seule façon d'avoir une précision
-type bsnes **dans RetroArch**, donc dans un environnement multi-systèmes
-unifié.
+**What sets it apart**: it is the only way to have bsnes-type
+accuracy **within RetroArch**, hence in a unified multi-system
+environment.
 
-**Stack technique**
+**Technical stack**
 
-- Langage principal : **C++**, hérité directement de bsnes (et donc des
-  libs nall/libco).
-- **Wrappé en core libretro** : le code expose l'API libretro standard,
-  ce qui permet à RetroArch (et tout front-end libretro) de le charger
-  comme une bibliothèque dynamique (`.so` / `.dll` / `.dylib`).
-- Les modifications par rapport au bsnes officiel concernent surtout :
-  fonctionnalités restaurées, optimisations ciblées, intégration des
-  hooks libretro (input, audio, video callbacks).
-- Licence : **GPLv3** (héritée de bsnes).
-- Build : GNU make avec adaptations libretro.
-- Dépôt : [github.com/libretro/bsnes-mercury](https://github.com/libretro/bsnes-mercury).
+- Primary language: **C++**, inherited directly from bsnes (and therefore from the
+  nall/libco libs).
+- **Wrapped as a libretro core**: the code exposes the standard libretro
+  API, which allows RetroArch (and any libretro front-end) to load it
+  as a dynamic library (`.so` / `.dll` / `.dylib`).
+- The modifications relative to the official bsnes mainly concern:
+  restored features, targeted optimizations, integration of
+  libretro hooks (input, audio, video callbacks).
+- License: **GPLv3** (inherited from bsnes).
+- Build: GNU make with libretro adaptations.
+- Repository: [github.com/libretro/bsnes-mercury](https://github.com/libretro/bsnes-mercury).
 
 ---
 
 ### higan
 
-Évolution historique de bsnes par Near, ayant élargi le projet à plusieurs
-systèmes Nintendo (NES, SNES, GB/GBC/GBA, Famicom Disk System, Super Game
+The historical evolution of bsnes by Near, which expanded the project to several
+Nintendo systems (NES, SNES, GB/GBC/GBA, Famicom Disk System, Super Game
 Boy, Satellaview…).
 
-**Points forts (historiques)**
-- Premier émulateur à atteindre 100% de compatibilité SNES.
-- Premier à émuler correctement SPC7110, cycle-accurate SPC700,
+**Strengths (historical)**
+- First emulator to reach 100% SNES compatibility.
+- First to correctly emulate SPC7110, cycle-accurate SPC700,
   Super FX, Super Game Boy.
-- Renderer dot-based pour le GBA (au lieu de scanline).
+- Dot-based renderer for the GBA (instead of scanline).
 
-**Points faibles**
-- Plus maintenu : remplacé par ares.
-- Interface réputée austère et déroutante.
-- Configuration des ROMs (Game Pak) compliquée pour les nouveaux venus.
+**Weaknesses**
+- No longer maintained: replaced by ares.
+- Interface reputed to be austere and confusing.
+- ROM (Game Pak) configuration complicated for newcomers.
 
-**Ce qui le distingue** : intérêt historique uniquement. Tous les
-avantages techniques de higan sont aujourd'hui présents dans ares, avec
-en plus un développement actif et une UI plus accessible.
+**What sets it apart**: historical interest only. All the
+technical advantages of higan are today present in ares, with
+the addition of active development and a more accessible UI.
 
-**Stack technique**
+**Technical stack**
 
-- Langage principal : **C++**, écrit par Near.
-- **Origine de l'écosystème nall / hiro / ruby / libco** : ces
-  bibliothèques ont été conçues pour higan, et sont aujourd'hui
-  réutilisées par bsnes et ares.
-- Architecture cycle-accurate basée sur libco (coroutines coopératives).
-- Licence : **GPLv3**.
-- Build : GNU make.
-- Statut : **archivé** — le développement a basculé vers ares.
+- Primary language: **C++**, written by Near.
+- **Origin of the nall / hiro / ruby / libco ecosystem**: these
+  libraries were designed for higan, and are today
+  reused by bsnes and ares.
+- Cycle-accurate architecture based on libco (cooperative coroutines).
+- License: **GPLv3**.
+- Build: GNU make.
+- Status: **archived** — development has shifted to ares.
 
 ---
 
 ### ZSNES
 
-L'un des tout premiers émulateurs SNES grand public (1997). Très
-populaire dans les années 2000 grâce à ses performances sur les machines
-de l'époque.
+One of the very first mainstream SNES emulators (1997). Very
+popular in the 2000s thanks to its performance on the machines
+of the era.
 
-**Points forts (historiques)**
-- Très performant sur du matériel d'époque.
-- Interface visuelle "console" appréciée à l'époque.
-- Énorme bibliothèque de ROM hacks compatibles.
+**Strengths (historical)**
+- Very performant on period hardware.
+- A "console"-style visual interface appreciated at the time.
+- Enormous library of compatible ROM hacks.
 
-**Points faibles**
-- Développement abandonné depuis 2007.
-- Beaucoup d'imprécisions hardware (utilisait des hacks haute fidélité
-  absente).
-- Vulnérabilités de sécurité connues dans le code x86 hand-written.
-- Compatibilité inférieure aux émulateurs modernes.
+**Weaknesses**
+- Development abandoned since 2007.
+- Many hardware inaccuracies (used hacks lacking high fidelity).
+- Known security vulnerabilities in the hand-written x86 code.
+- Compatibility inferior to modern emulators.
 
-**Ce qui le distingue** : intérêt purement historique / nostalgique.
-**À éviter** pour tout usage sérieux aujourd'hui.
+**What sets it apart**: purely historical / nostalgic interest.
+**To be avoided** for any serious use today.
 
-**Stack technique**
+**Technical stack**
 
-- **Massivement écrit en assembleur x86** (la signature emblématique de
-  ZSNES), avec un peu de C et C++ pour le glue code et la GUI.
-- En version 1.50 (2006), environ **15%** seulement du code asm avait
-  été porté en C — le reste était (et est resté) en assembleur x86 32
-  bits.
-- Conséquences directes :
-  - Performances spectaculaires sur le matériel des années 1990–2000.
-  - **Portage quasi impossible** vers d'autres architectures (ARM,
-    x86-64 pur, PowerPC…), ce qui a scellé son obsolescence.
-  - **Vulnérabilités de sécurité** : le code asm hand-written contient
-    plusieurs failles de type buffer overflow exploitables via des ROMs
-    malicieuses (CVE documentées).
-- Licence : **GPLv2**.
-- Statut : **abandonné depuis 2007**. Quelques forks tentent de
-  maintenir une build moderne (ex.
+- **Massively written in x86 assembly** (the emblematic signature of
+  ZSNES), with a bit of C and C++ for the glue code and the GUI.
+- In version 1.50 (2006), only about **15%** of the asm code had
+  been ported to C — the rest was (and remained) in 32-bit x86
+  assembly.
+- Direct consequences:
+  - Spectacular performance on 1990s–2000s hardware.
+  - **Porting nearly impossible** to other architectures (ARM,
+    pure x86-64, PowerPC…), which sealed its obsolescence.
+  - **Security vulnerabilities**: the hand-written asm code contains
+    several buffer overflow flaws exploitable via malicious
+    ROMs (documented CVEs).
+- License: **GPLv2**.
+- Status: **abandoned since 2007**. A few forks attempt to
+  maintain a modern build (e.g.
   [github.com/xyproto/zsnes](https://github.com/xyproto/zsnes)).
 
 ---
 
-## Stacks techniques en un coup d'œil
+## Technical Stacks at a Glance
 
-| Émulateur      | Langage(s) principal(aux)       | Licence        | Open source | Toolkit GUI            | Source notable                              |
+| Emulator       | Primary language(s)              | License        | Open source | GUI toolkit            | Notable source                              |
 |----------------|----------------------------------|----------------|-------------|------------------------|---------------------------------------------|
-| ares           | C++ (~95%)                       | GPLv3 / ISC    | ✅          | hiro (natif)           | nall / hiro / ruby / libco / mia (Near)     |
-| bsnes          | C++                              | GPLv3          | ✅          | hiro (natif)           | nall / hiro / ruby / libco (Near)           |
-| Mesen-S / 2    | **C++ (cœur) + C# (.NET / Avalonia pour Mesen 2)** | GPLv3 | ✅ | WinForms → Avalonia    | Architecture bi-langage cœur/UI             |
-| no$sns         | **100% assembleur x86 (32-bit)** | Propriétaire   | ❌          | Win32 natif (asm)      | Lignée no$ de Martin Korth                   |
-| Snes9x         | C++ (peu de C, ex-asm retiré)    | Non-commerciale custom | ✅  | Multiple (GTK, Qt, Win32…) | Cœur portable, front-ends découplés     |
-| bsnes-mercury  | C++ (fork bsnes)                 | GPLv3          | ✅          | Aucun (core libretro)  | Wrap libretro                                |
-| higan          | C++                              | GPLv3          | ✅          | hiro (natif)           | Origine de nall / hiro / ruby / libco       |
-| ZSNES          | **Assembleur x86 (~85%) + C/C++** | GPLv2         | ✅          | Custom (mode console)  | Quasi-impossible à porter ailleurs que x86  |
+| ares           | C++ (~95%)                       | GPLv3 / ISC    | ✅          | hiro (native)          | nall / hiro / ruby / libco / mia (Near)     |
+| bsnes          | C++                              | GPLv3          | ✅          | hiro (native)          | nall / hiro / ruby / libco (Near)           |
+| Mesen-S / 2    | **C++ (core) + C# (.NET / Avalonia for Mesen 2)** | GPLv3 | ✅ | WinForms → Avalonia    | Dual-language core/UI architecture          |
+| no$sns         | **100% x86 assembly (32-bit)**   | Proprietary    | ❌          | native Win32 (asm)     | Martin Korth's no$ lineage                   |
+| Snes9x         | C++ (little C, ex-asm removed)   | Custom non-commercial | ✅   | Multiple (GTK, Qt, Win32…) | Portable core, decoupled front-ends     |
+| bsnes-mercury  | C++ (bsnes fork)                 | GPLv3          | ✅          | None (libretro core)   | libretro wrap                                |
+| higan          | C++                              | GPLv3          | ✅          | hiro (native)          | Origin of nall / hiro / ruby / libco        |
+| ZSNES          | **x86 assembly (~85%) + C/C++**  | GPLv2          | ✅          | Custom (console mode)  | Nearly impossible to port beyond x86         |
 
-> **À retenir** :
-> - Quatre familles techniques se dégagent :
->   1. **L'école Near** (ares, bsnes, higan, bsnes-mercury) : C++ + nall + hiro + libco, cycle-accurate via coroutines coopératives.
->   2. **L'école Mesen** (Mesen-S, Mesen 2) : cœur C++ haute perf + UI C# riche en outils.
->   3. **L'école portable** (Snes9x) : C++ pur, cœur découplé de la GUI, optimisé pour la portabilité maximale.
->   4. **L'école assembleur** (no$sns, ZSNES) : performances brutes au prix de la portabilité et de la maintenabilité.
+> **Key takeaways**:
+> - Four technical families emerge:
+>   1. **The Near school** (ares, bsnes, higan, bsnes-mercury): C++ + nall + hiro + libco, cycle-accurate via cooperative coroutines.
+>   2. **The Mesen school** (Mesen-S, Mesen 2): high-performance C++ core + tool-rich C# UI.
+>   3. **The portable school** (Snes9x): pure C++, core decoupled from the GUI, optimized for maximum portability.
+>   4. **The assembly school** (no$sns, ZSNES): raw performance at the cost of portability and maintainability.
 
 ---
 
-## Tableau récapitulatif
+## Summary Table
 
-| Émulateur      | Type        | Cycle-accurate | Multi-plateforme           | Debug | Netplay | Shaders | Run-ahead | RetroArch core |
+| Emulator       | Type        | Cycle-accurate | Multi-platform             | Debug | Netplay | Shaders | Run-ahead | RetroArch core |
 |----------------|-------------|----------------|----------------------------|-------|---------|---------|-----------|----------------|
-| ares           | Multi-sys   | ✅             | Win / Linux / macOS         | Basique | ❌      | ✅      | ✅        | ❌             |
-| bsnes          | SNES dédié  | ✅             | Win / Linux / macOS         | Basique | ❌      | ⚠️ Limité | ❌      | ✅ (officiel)  |
+| ares           | Multi-sys   | ✅             | Win / Linux / macOS         | Basic | ❌      | ✅      | ✅        | ❌             |
+| bsnes          | SNES-only   | ✅             | Win / Linux / macOS         | Basic | ❌      | ⚠️ Limited | ❌      | ✅ (official)  |
 | Mesen-S        | Multi-sys   | ✅             | Win / Linux                 | ✅✅✅ | ✅      | ✅      | ❌        | ❌             |
-| no$sns         | SNES dédié  | ≈ (bonne)      | Windows (Wine ailleurs)     | ✅✅ (coproc.) | ❌ | ❌      | ❌        | ❌             |
-| Snes9x         | SNES dédié  | ❌ (HLE part.) | Tout                        | Basique | ✅      | ✅      | ✅ (via RA) | ✅           |
-| bsnes-mercury  | SNES dédié  | ✅             | Tout (via RetroArch)        | ❌    | ✅ (RA) | ✅ (RA) | ✅ (RA)   | ✅             |
-| higan          | Multi-sys   | ✅             | Win / Linux / macOS         | Basique | ❌      | ❌      | ❌        | ❌             |
-| ZSNES          | SNES dédié  | ❌             | Win / DOS (legacy)          | ❌    | ✅ (LAN) | ❌    | ❌        | ❌             |
+| no$sns         | SNES-only   | ≈ (good)       | Windows (Wine elsewhere)    | ✅✅ (coproc.) | ❌ | ❌      | ❌        | ❌             |
+| Snes9x         | SNES-only   | ❌ (partial HLE) | Everywhere                | Basic | ✅      | ✅      | ✅ (via RA) | ✅           |
+| bsnes-mercury  | SNES-only   | ✅             | Everywhere (via RetroArch)  | ❌    | ✅ (RA) | ✅ (RA) | ✅ (RA)   | ✅             |
+| higan          | Multi-sys   | ✅             | Win / Linux / macOS         | Basic | ❌      | ❌      | ❌        | ❌             |
+| ZSNES          | SNES-only   | ❌             | Win / DOS (legacy)          | ❌    | ✅ (LAN) | ❌    | ❌        | ❌             |
 
 ---
 
-## Recommandations par usage
+## Recommendations by Use Case
 
-| Usage                                                  | Recommandation principale            | Alternative              |
+| Use case                                               | Primary recommendation               | Alternative              |
 |--------------------------------------------------------|--------------------------------------|--------------------------|
-| Jouer sur PC moderne, expérience fidèle                | **ares**                             | bsnes / bsnes-mercury    |
-| Jouer sur matériel modeste / Raspberry Pi              | **Snes9x**                           | bsnes-mercury Performance|
-| Jouer sur mobile (Android / iOS)                       | **Snes9x EX+** (Android)             | RetroArch + Snes9x core  |
-| Développement homebrew / ROM hacking                   | **Mesen-S / Mesen 2**                | bsnes (debug build)      |
-| Reverse engineering hardware / doc des coprocesseurs   | **no$sns** + fullsnes.htm            | Mesen-S                  |
-| Multi-systèmes + shaders + achievements                | **RetroArch** (core bsnes-mercury)   | RetroArch + Snes9x       |
-| Préservation / archivage (référence académique)        | **ares** ou **bsnes**                | Mesen-S                  |
-| Speedrun (lag input minimal)                           | **ares** ou **Snes9x** + run-ahead   | bsnes-mercury            |
-| Netplay / multijoueur en ligne                         | **RetroArch** (Snes9x ou bsnes-mercury) | Snes9x natif          |
+| Playing on a modern PC, faithful experience            | **ares**                             | bsnes / bsnes-mercury    |
+| Playing on modest hardware / Raspberry Pi              | **Snes9x**                           | bsnes-mercury Performance|
+| Playing on mobile (Android / iOS)                      | **Snes9x EX+** (Android)             | RetroArch + Snes9x core  |
+| Homebrew development / ROM hacking                     | **Mesen-S / Mesen 2**                | bsnes (debug build)      |
+| Hardware reverse engineering / coprocessor docs        | **no$sns** + fullsnes.htm            | Mesen-S                  |
+| Multi-system + shaders + achievements                  | **RetroArch** (bsnes-mercury core)   | RetroArch + Snes9x       |
+| Preservation / archiving (academic reference)          | **ares** or **bsnes**                | Mesen-S                  |
+| Speedrun (minimal input lag)                           | **ares** or **Snes9x** + run-ahead   | bsnes-mercury            |
+| Online netplay / multiplayer                           | **RetroArch** (Snes9x or bsnes-mercury) | native Snes9x         |
 
 ---
 
-## Glossaire
+## Glossary
 
-- **Cycle-accurate** : simulation du processeur cycle par cycle, reproduisant
-  fidèlement le comportement temporel du hardware. S'oppose aux approches
-  HLE qui simulent les résultats sans reproduire la chronologie réelle.
-- **HLE (High-Level Emulation)** : émulation "haut niveau" où certaines
-  parties du hardware (puces audio, coprocesseurs) sont remplacées par des
-  équivalents logiciels plus rapides mais moins précis.
-- **Run-ahead** : technique consistant à exécuter plusieurs frames à
-  l'avance puis revenir en arrière, pour cacher la latence d'entrée
-  inhérente à l'émulation.
-- **Save state** : sauvegarde de l'état complet de la machine émulée à un
-  instant donné, restaurable instantanément.
-- **Puces d'extension SNES** : Super FX (Star Fox), SA-1 (Super Mario RPG),
+- **Cycle-accurate**: cycle-by-cycle simulation of the processor, faithfully
+  reproducing the temporal behavior of the hardware. Opposed to
+  HLE approaches that simulate the results without reproducing the real
+  timing.
+- **HLE (High-Level Emulation)**: "high-level" emulation where certain
+  parts of the hardware (audio chips, coprocessors) are replaced by
+  faster but less accurate software equivalents.
+- **Run-ahead**: a technique consisting of executing several frames
+  ahead and then rolling back, to hide the input latency
+  inherent to emulation.
+- **Save state**: a save of the complete state of the emulated machine at a
+  given instant, instantly restorable.
+- **SNES expansion chips**: Super FX (Star Fox), SA-1 (Super Mario RPG),
   DSP-1/2/3/4 (Super Mario Kart, Pilotwings…), SPC7110 (Far East of Eden
   Zero), S-DD1 (Star Ocean), Cx4 (Mega Man X2/X3).
-- **Mode 7** : mode graphique du SNES permettant la rotation et la mise à
-  l'échelle d'un plan de tiles (sol de F-Zero, Mario Kart…).
-- **Libretro / RetroArch** : framework open source d'émulation multi-systèmes
-  utilisant des "cores" (les émulateurs eux-mêmes) chargés dans une UI
-  unifiée.
+- **Mode 7**: a SNES graphics mode allowing rotation and scaling
+  of a tile plane (the ground in F-Zero, Mario Kart…).
+- **Libretro / RetroArch**: an open-source multi-system emulation framework
+  using "cores" (the emulators themselves) loaded into a
+  unified UI.
 
 ---
 
@@ -515,5 +514,5 @@ de l'époque.
 - [ares vs Snes9x EX — Comparison](https://sugggest.com/compare/ares-formerly-higan-bsnes--vs-snes9x-ex)
 - [Snes9x Alternatives — AlternativeTo](https://alternativeto.net/software/snes9x/)
 - [no$sns — Problemkaputt (Martin Korth)](https://problemkaputt.de/sns.htm)
-- [fullsnes.htm — Specification SNES de référence](https://problemkaputt.de/fullsnes.htm)
+- [fullsnes.htm — Reference SNES Specification](https://problemkaputt.de/fullsnes.htm)
 - [No$ — Emulation General Wiki](https://emulation.gametechwiki.com/index.php/No$)

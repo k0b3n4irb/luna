@@ -132,9 +132,6 @@ is documented in **[`ARCHITECTURE.md`](ARCHITECTURE.md)**.
 | [`docs/`](docs/) | PPU/APU/SA-1 reference specs, accuracy scorecard, gap lists |
 | [`docs/emulator_landscape.md`](docs/emulator_landscape.md) | Comparative survey of existing SNES emulators |
 
-> Note: most design documents are currently written in French; the codebase
-> and the public API are in English.
-
 ## Development
 
 The canonical sequence before any commit (rebuild + tests + lint):
