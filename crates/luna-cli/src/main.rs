@@ -129,6 +129,13 @@ enum Command {
         /// intro deadlock).
         #[arg(long = "sa1-log")]
         sa1_log: Option<PathBuf>,
+        /// Optional SA-1-*side* execution log. When set, the SA-1's own
+        /// reads/writes of its registers `$2200-$23FF` are captured with
+        /// the SA-1 PC and written as CSV (`seq,sa1_pc,kind,reg,value`).
+        /// Complements `--sa1-log` (S-CPU side) to see why the SA-1
+        /// (re)asserts a register, e.g. the SMRPG SCNT=$87 loop.
+        #[arg(long = "sa1-side-log")]
+        sa1_side_log: Option<PathBuf>,
         /// Optional CPU instruction trace. When set, captures a
         /// per-instruction register snapshot (PC, A, X, Y, SP, P, DB,
         /// DP, e) into the given CSV file. Capture starts at instr
@@ -194,6 +201,7 @@ fn main() -> ExitCode {
             peek,
             apu_log,
             sa1_log,
+            sa1_side_log,
             cpu_trace,
             cpu_trace_from,
             cpu_trace_max,
@@ -211,6 +219,7 @@ fn main() -> ExitCode {
             &peek,
             apu_log.as_deref(),
             sa1_log.as_deref(),
+            sa1_side_log.as_deref(),
             cpu_trace.as_deref(),
             cpu_trace_from,
             cpu_trace_max,
@@ -353,6 +362,31 @@ fn write_sa1_log_csv(
     Ok(())
 }
 
+/// Write SA-1-side execution events as CSV. Columns:
+/// `seq, sa1_pc, kind, reg, value`. `seq` is the event index (the SA-1
+/// side has no master-clock handle); ordering is what reveals the loop.
+fn write_sa1_side_log_csv(
+    path: &std::path::Path,
+    events: &[luna_api::Sa1SideEvent],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    writeln!(f, "seq,sa1_pc,kind,reg,value")?;
+    for (i, ev) in events.iter().enumerate() {
+        writeln!(
+            f,
+            "{},${:02X}:{:04X},{},${:04X},${:02X}",
+            i,
+            (ev.sa1_pc >> 16) & 0xFF,
+            ev.sa1_pc & 0xFFFF,
+            if ev.write { "W" } else { "R" },
+            ev.reg,
+            ev.value
+        )?;
+    }
+    Ok(())
+}
+
 /// Write per-instruction CPU trace events as CSV. Columns:
 /// `mclk_total, frame_ntsc, pc, a, x, y, sp, p_hex, db, dp, e`.
 fn write_cpu_trace_csv(
@@ -440,6 +474,7 @@ fn run_state(
     peek_specs: &[String],
     apu_log_path: Option<&std::path::Path>,
     sa1_log_path: Option<&std::path::Path>,
+    sa1_side_log_path: Option<&std::path::Path>,
     cpu_trace_path: Option<&std::path::Path>,
     cpu_trace_from: u64,
     cpu_trace_max: usize,
@@ -462,6 +497,12 @@ fn run_state(
     if sa1_log_path.is_some() {
         if let Err(e) = em.enable_sa1_log() {
             eprintln!("error: enable_sa1_log: {e}");
+            return ExitCode::from(1);
+        }
+    }
+    if sa1_side_log_path.is_some() {
+        if let Err(e) = em.enable_sa1_side_log() {
+            eprintln!("error: enable_sa1_side_log: {e}");
             return ExitCode::from(1);
         }
     }
@@ -630,6 +671,19 @@ fn run_state(
                 Err(e) => eprintln!("error: writing SA-1 log: {e}"),
             },
             Err(e) => eprintln!("error: take_sa1_log: {e}"),
+        }
+    }
+    if let Some(path) = sa1_side_log_path {
+        match em.take_sa1_side_log() {
+            Ok(events) => match write_sa1_side_log_csv(path, &events) {
+                Ok(()) => eprintln!(
+                    "SA-1-side log written to {} ({} events)",
+                    path.display(),
+                    events.len()
+                ),
+                Err(e) => eprintln!("error: writing SA-1-side log: {e}"),
+            },
+            Err(e) => eprintln!("error: take_sa1_side_log: {e}"),
         }
     }
     if let Some(path) = cpu_trace_path {

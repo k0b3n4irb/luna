@@ -410,6 +410,19 @@ impl Snes {
         }
     }
 
+    /// Enable SA-1-*side* execution logging: the coprocessor records its
+    /// own MMIO accesses (`$2200-$23FF`) with the SA-1 PC. Complements
+    /// [`Snes::enable_sa1_log`] (which is the S-CPU side). No-op for
+    /// non-SA-1 carts. Drain with [`Snes::take_sa1_side_log`].
+    pub fn enable_sa1_side_log(&mut self) {
+        self.mapper.enable_sa1_side_log();
+    }
+
+    /// Drain the SA-1-side execution log (empty if disabled / not SA-1).
+    pub fn take_sa1_side_log(&mut self) -> Vec<luna_bus::Sa1SideEvent> {
+        self.mapper.take_sa1_side_log()
+    }
+
     /// Enable CPU instruction tracing. From this point onward each
     /// call to [`Snes::step`] appends a pre-instruction register
     /// snapshot until the log fills (`max_events` events). Use

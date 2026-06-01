@@ -78,6 +78,34 @@ pub trait Mapper {
     fn sa1_snapshot(&self) -> Option<Sa1Snapshot> {
         None
     }
+
+    /// Enable SA-1-*side* execution logging: from now the coprocessor
+    /// records its own accesses to the SA-1 MMIO window (`$2200-$23FF`)
+    /// with its PC, for diagnosing why the SA-1 (re)asserts registers
+    /// like SCNT. Complements the S-CPU-side `--sa1-log`. No-op for
+    /// non-SA-1 mappers.
+    fn enable_sa1_side_log(&mut self) {}
+
+    /// Drain the SA-1-side execution log (empty if disabled / not SA-1).
+    fn take_sa1_side_log(&mut self) -> Vec<Sa1SideEvent> {
+        Vec::new()
+    }
+}
+
+/// One SA-1-side access to an SA-1 MMIO register (`$2200-$23FF`), tagged
+/// with the SA-1's pre-instruction `PB:PC`. Lets a trace show *which*
+/// SA-1 code reads/writes a register (e.g. the SCNT=$87 re-raise loop).
+#[derive(Debug, Clone, Copy)]
+pub struct Sa1SideEvent {
+    /// 24-bit SA-1 PC (`pb << 16 | pc`) at the start of the instruction
+    /// performing the access.
+    pub sa1_pc: u32,
+    /// `true` = write, `false` = read.
+    pub write: bool,
+    /// Register address in `$2200..=$23FF`.
+    pub reg: u16,
+    /// The byte transferred.
+    pub value: u8,
 }
 
 /// Minimal SA-1 CPU snapshot for diagnostics. Captures the just-fetched

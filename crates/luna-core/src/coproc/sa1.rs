@@ -22,7 +22,7 @@
 //! larger piece deferred — non-CC bulk DMA already works.
 
 use luna_bus::sa1::Sa1Mapper;
-use luna_bus::{Addr24, Bus, MCycles, Mapper, MapperKind, Sa1Snapshot, make_addr};
+use luna_bus::{Addr24, Bus, MCycles, Mapper, MapperKind, Sa1SideEvent, Sa1Snapshot, make_addr};
 use luna_cpu_65c816::Cpu;
 
 /// SA-1 chip — a `Sa1Mapper` (shared cart memory) wrapped with its
@@ -43,6 +43,10 @@ pub struct Sa1Chip {
     /// SNES master cycles). We accumulate and dispatch one
     /// instruction per `MCLK_PER_SA1_INSN` units.
     deficit: u32,
+    /// Optional SA-1-side execution log: when `Some`, the SA-1's own
+    /// accesses to its MMIO window (`$2200-$23FF`) are recorded with the
+    /// SA-1 PC. Enabled via [`Mapper::enable_sa1_side_log`].
+    sa1_side_log: Option<Vec<Sa1SideEvent>>,
 }
 
 const MCLK_PER_SA1_INSN: u32 = 6;
@@ -56,6 +60,7 @@ impl Sa1Chip {
             cpu: Cpu::new(),
             running: false,
             deficit: 0,
+            sa1_side_log: None,
         }
     }
 
@@ -135,11 +140,16 @@ impl Mapper for Sa1Chip {
         self.deficit = self.deficit.saturating_add(main_mclk);
         while self.deficit >= MCLK_PER_SA1_INSN && !self.cpu.stopped {
             self.deficit -= MCLK_PER_SA1_INSN;
-            // Self-referential bus borrow: `cpu` and `inner` are
-            // disjoint fields of `Sa1Chip`, so we can lend `inner`
-            // mutably to the bus view while `cpu` mutates itself.
+            // Self-referential bus borrow: `cpu`, `inner` and
+            // `sa1_side_log` are disjoint fields of `Sa1Chip`, so we can
+            // lend `inner`/`sa1_side_log` to the bus view while `cpu`
+            // mutates itself. Snapshot the SA-1 PC before the step so the
+            // optional trace can attribute each MMIO access to its code.
+            let sa1_pc = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
             let mut bus = Sa1Bus {
                 mapper: &mut self.inner,
+                log: self.sa1_side_log.as_mut(),
+                sa1_pc,
             };
             self.cpu.step(&mut bus);
         }
@@ -157,6 +167,19 @@ impl Mapper for Sa1Chip {
             running: self.running,
         })
     }
+
+    fn enable_sa1_side_log(&mut self) {
+        if self.sa1_side_log.is_none() {
+            self.sa1_side_log = Some(Vec::new());
+        }
+    }
+
+    fn take_sa1_side_log(&mut self) -> Vec<Sa1SideEvent> {
+        match self.sa1_side_log.as_mut() {
+            Some(log) => std::mem::take(log),
+            None => Vec::new(),
+        }
+    }
 }
 
 /// Bus exposed to the SA-1 CPU during one of its instruction steps.
@@ -165,6 +188,20 @@ impl Mapper for Sa1Chip {
 /// view.
 struct Sa1Bus<'a> {
     mapper: &'a mut Sa1Mapper,
+    /// Optional SA-1-side trace sink (the chip's `sa1_side_log`).
+    log: Option<&'a mut Vec<Sa1SideEvent>>,
+    /// SA-1 PC at the start of the executing instruction, for the trace.
+    sa1_pc: u32,
+}
+
+/// SA-1 MMIO register (`$2200-$23FF`) if `addr` hits the register window.
+const fn sa1_reg(addr: Addr24) -> Option<u16> {
+    let off = addr as u16;
+    if off >= 0x2200 && off <= 0x23FF {
+        Some(off)
+    } else {
+        None
+    }
 }
 
 impl Bus for Sa1Bus<'_> {
@@ -177,10 +214,27 @@ impl Bus for Sa1Bus<'_> {
         }
         // Use the SA-1-side read path so the I-RAM mirror at
         // $00-3F/$80-BF:$0000-07FF resolves.
-        self.mapper.read_from_sa1(addr).unwrap_or(0xFF)
+        let value = self.mapper.read_from_sa1(addr).unwrap_or(0xFF);
+        if let (Some(log), Some(reg)) = (self.log.as_deref_mut(), sa1_reg(addr)) {
+            log.push(Sa1SideEvent {
+                sa1_pc: self.sa1_pc,
+                write: false,
+                reg,
+                value,
+            });
+        }
+        value
     }
 
     fn write(&mut self, addr: Addr24, value: u8) {
+        if let (Some(log), Some(reg)) = (self.log.as_deref_mut(), sa1_reg(addr)) {
+            log.push(Sa1SideEvent {
+                sa1_pc: self.sa1_pc,
+                write: true,
+                reg,
+                value,
+            });
+        }
         // Route through the SA-1-side entry so I-RAM / BW-RAM
         // protection consults CIWP / CBWE instead of SIWP / SBWE.
         let _ = self.mapper.write_from_sa1(addr, value);
@@ -328,6 +382,8 @@ mod tests {
         chip.write(make_addr(0x00, 0x2200), 0xA0);
         let bus = Sa1Bus {
             mapper: &mut chip.inner,
+            log: None,
+            sa1_pc: 0,
         };
         assert!(bus.irq_pending());
         assert!(!bus.nmi_pending());
@@ -371,6 +427,8 @@ mod tests {
         assert_eq!(chip.read(make_addr(0x40, 0)), Some(0x77));
         let bus = Sa1Bus {
             mapper: &mut chip.inner,
+            log: None,
+            sa1_pc: 0,
         };
         assert!(bus.irq_pending());
     }
