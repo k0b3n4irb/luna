@@ -1,135 +1,133 @@
 # Luna — Architecture
 
-> Émulateur SNES en Rust avec API d'introspection et serveur MCP intégré,
-> conçu pour qu'un agent IA puisse **jouer**, **développer** et **déboguer**
-> des jeux Super Nintendo de manière autonome.
+> A SNES emulator in Rust with an introspection API and a built-in MCP
+> server, designed so that an AI agent can **play**, **develop** and
+> **debug** Super Nintendo games autonomously.
 
 ---
 
-## Sommaire
+## Table of contents
 
-- [1. Vision & objectifs](#1-vision--objectifs)
-- [2. Non-objectifs](#2-non-objectifs)
-- [3. Vue d'ensemble](#3-vue-densemble)
-  - [3.1 Architecture en couches](#31-architecture-en-couches)
-  - [3.2 Modes d'exécution](#32-modes-dexécution)
-- [4. Organisation du workspace Rust](#4-organisation-du-workspace-rust)
-  - [4.1 Stratégie cross-target async](#41-stratégie-cross-target-async)
-- [5. Couche 1 — Bus & mémoire](#5-couche-1--bus--mémoire)
-- [6. Couche 2 — Cœur d'émulation](#6-couche-2--cœur-démulation)
-  - [6.1 CPU 65C816](#61-cpu-65c816)
+- [1. Vision & goals](#1-vision--goals)
+- [2. Non-goals](#2-non-goals)
+- [3. Overview](#3-overview)
+  - [3.1 Layered architecture](#31-layered-architecture)
+  - [3.2 Execution modes](#32-execution-modes)
+- [4. Rust workspace organization](#4-rust-workspace-organization)
+  - [4.1 Cross-target async strategy](#41-cross-target-async-strategy)
+- [5. Layer 1 — Bus & memory](#5-layer-1--bus--memory)
+- [6. Layer 2 — Emulation core](#6-layer-2--emulation-core)
+  - [6.1 65C816 CPU](#61-65c816-cpu)
   - [6.2 PPU](#62-ppu)
   - [6.3 APU / SPC700](#63-apu--spc700)
   - [6.4 DMA & HDMA](#64-dma--hdma)
-  - [6.5 Coprocesseurs](#65-coprocesseurs)
-  - [6.6 Scheduler & synchro cycle-accurate](#66-scheduler--synchro-cycle-accurate)
-- [7. Couche 3 — Control & introspection API](#7-couche-3--control--introspection-api)
+  - [6.5 Coprocessors](#65-coprocessors)
+  - [6.6 Scheduler & cycle-accurate sync](#66-scheduler--cycle-accurate-sync)
+- [7. Layer 3 — Control & introspection API](#7-layer-3--control--introspection-api)
   - [7.1 Control plane](#71-control-plane)
   - [7.2 Debug API](#72-debug-api)
-  - [7.3 Semantic API (pour l'IA)](#73-semantic-api-pour-lia)
+  - [7.3 Semantic API (for the AI)](#73-semantic-api-for-the-ai)
   - [7.4 Events & subscriptions](#74-events--subscriptions)
-- [8. Couche 4 — Serveur MCP](#8-couche-4--serveur-mcp)
+- [8. Layer 4 — MCP server](#8-layer-4--mcp-server)
   - [8.1 Transport & runtime](#81-transport--runtime)
-  - [8.2 Catalogue de tools](#82-catalogue-de-tools)
-  - [8.3 Catalogue de resources](#83-catalogue-de-resources)
+  - [8.2 Tool catalogue](#82-tool-catalogue)
+  - [8.3 Resource catalogue](#83-resource-catalogue)
   - [8.4 Notifications & streaming](#84-notifications--streaming)
-  - [8.5 Économie de tokens & coûts MCP](#85-économie-de-tokens--coûts-mcp)
-- [9. API-first & écosystème d'usages](#9-api-first--écosystème-dusages)
-  - [9.1 L'API est le produit, pas MCP](#91-lapi-est-le-produit-pas-mcp)
-  - [9.2 Catalogue de transports](#92-catalogue-de-transports)
-  - [9.3 Cas d'usage produit déverrouillés](#93-cas-dusage-produit-déverrouillés)
-  - [9.4 Implications architecturales](#94-implications-architecturales)
-  - [9.5 `luna-api` comme contrat public stable](#95-luna-api-comme-contrat-public-stable)
-- [10. Modèle de threading](#10-modèle-de-threading)
-  - [10.1 Cible native](#101-cible-native-linux--macos--windows)
-  - [10.2 Cible WASM (Luna Studio Web — V2)](#102-cible-wasm-luna-studio-web--v2)
-  - [10.3 Discipline stricte](#103-discipline-stricte)
-- [11. Déterminisme & reproductibilité](#11-déterminisme--reproductibilité)
-- [12. Stratégie de test](#12-stratégie-de-test)
-- [13. Build, distribution, licence](#13-build-distribution-licence)
-- [14. Roadmap & phasage](#14-roadmap--phasage)
-- [15. Risques & questions ouvertes](#15-risques--questions-ouvertes)
-- [16. Glossaire](#16-glossaire)
+  - [8.5 Token economy & MCP costs](#85-token-economy--mcp-costs)
+- [9. API-first & ecosystem of use cases](#9-api-first--ecosystem-of-use-cases)
+  - [9.1 The API is the product, not MCP](#91-the-api-is-the-product-not-mcp)
+  - [9.2 Transport catalogue](#92-transport-catalogue)
+  - [9.3 Unlocked product use cases](#93-unlocked-product-use-cases)
+  - [9.4 Architectural implications](#94-architectural-implications)
+  - [9.5 `luna-api` as a stable public contract](#95-luna-api-as-a-stable-public-contract)
+- [10. Threading model](#10-threading-model)
+  - [10.1 Native target](#101-native-target-linux--macos--windows)
+  - [10.2 WASM target (Luna Studio Web — V2)](#102-wasm-target-luna-studio-web--v2)
+  - [10.3 Strict discipline](#103-strict-discipline)
+- [11. Determinism & reproducibility](#11-determinism--reproducibility)
+- [12. Testing strategy](#12-testing-strategy)
+- [13. Build, distribution, license](#13-build-distribution-license)
+- [14. Roadmap & phasing](#14-roadmap--phasing)
+- [15. Risks & open questions](#15-risks--open-questions)
+- [16. Glossary](#16-glossary)
 
 ---
 
-## 1. Vision & objectifs
+## 1. Vision & goals
 
-**Luna** est un émulateur SNES en Rust qui expose la console comme un
-**environnement programmable de première classe** pour les agents IA. Là où
-les émulateurs traditionnels considèrent l'IA comme un cas d'usage
-secondaire (à brancher via OCR sur des screenshots), Luna fait du dialogue
-agent ↔ machine un objectif central de design.
+**Luna** is a SNES emulator in Rust that exposes the console as a
+**first-class programmable environment** for AI agents. Where traditional
+emulators treat AI as a secondary use case (to be bolted on via OCR over
+screenshots), Luna makes the agent ↔ machine dialogue a central design goal.
 
-**Objectifs**
+**Goals**
 
-1. **Fidélité matérielle élevée** : émulation cycle-accurate du CPU 65C816,
-   du PPU, du SPC700 et des principaux coprocesseurs (SA-1, Super FX, DSP-1
-   en priorité).
-2. **API d'introspection riche** : exposer l'état complet de la machine
-   (registres, VRAM, OAM, palette, scroll, tilemap, sprites) sous forme
-   structurée.
-3. **Serveur MCP intégré** : un agent IA (Claude, Cursor, etc.) peut piloter
-   l'émulateur via un catalogue de *tools* JSON-RPC standardisés.
-4. **Trois modes d'usage assumés** :
-   - 🎮 **Play mode** — l'agent joue à un jeu existant.
-   - 🛠️ **Dev mode** — l'agent développe un homebrew (hot-reload, profiler).
-   - 🐛 **Debug mode** — l'agent débogue un ROM hack (breakpoints, trace,
+1. **High hardware fidelity**: cycle-accurate emulation of the 65C816 CPU,
+   the PPU, the SPC700 and the main coprocessors (SA-1, Super FX, DSP-1
+   as a priority).
+2. **Rich introspection API**: expose the full machine state (registers,
+   VRAM, OAM, palette, scroll, tilemap, sprites) in a structured form.
+3. **Built-in MCP server**: an AI agent (Claude, Cursor, etc.) can drive
+   the emulator through a catalogue of standardized JSON-RPC *tools*.
+4. **Three assumed usage modes**:
+   - 🎮 **Play mode** — the agent plays an existing game.
+   - 🛠️ **Dev mode** — the agent develops a homebrew (hot-reload, profiler).
+   - 🐛 **Debug mode** — the agent debugs a ROM hack (breakpoints, trace,
      time-travel).
-5. **Triple mode d'exécution** : *headless* (pour l'IA en production /
-   CI), *standalone* (pour un humain qui joue), *spectator* (l'IA joue,
-   l'humain observe avec retours visuels et overlays d'activité).
-6. **Économie de tokens MCP** : design intentionnel pour qu'une session
-   IA de plusieurs heures tienne dans un budget raisonnable (cf. §8.5).
-7. **Déterminisme strict** en mode `replay` : un même input + même seed
-   produit la même séquence de frames bit à bit.
-8. **API-first** : MCP n'est qu'un des transports. La couche 3
-   (`luna-api`) est conçue dès le départ comme un contrat public stable
-   qui pourra être exposé via REST, WebSocket, WASM, FFI… pour
-   débloquer un écosystème d'outils tiers (IDE web homebrew, client
-   desktop dev studio, extensions VSCode, etc. — cf. §9).
+5. **Triple execution mode**: *headless* (for AI in production / CI),
+   *standalone* (for a human who plays), *spectator* (the AI plays, the
+   human observes with visual feedback and activity overlays).
+6. **MCP token economy**: intentional design so that a multi-hour AI
+   session fits within a reasonable budget (see §8.5).
+7. **Strict determinism** in `replay` mode: the same input + same seed
+   produces the same sequence of frames bit for bit.
+8. **API-first**: MCP is just one of the transports. Layer 3
+   (`luna-api`) is designed from the start as a stable public contract
+   that can be exposed via REST, WebSocket, WASM, FFI… to unlock an
+   ecosystem of third-party tools (homebrew web IDE, desktop dev studio
+   client, VSCode extensions, etc. — see §9).
 
-**Critères de succès mesurables**
+**Measurable success criteria**
 
-| Métrique                              | Cible                              |
-|---------------------------------------|------------------------------------|
-| Compatibilité SNES (test suite)       | ≥ 99% des ROMs commerciales        |
-| Tests bsnes/ares passés                | ≥ 95%                              |
-| Performance (release, x86-64 moderne) | 60 fps cycle-accurate à < 30% CPU  |
-| Latence MCP tool round-trip           | < 5 ms (stdio local)               |
-| Démarrage à froid → ROM chargée       | < 200 ms                           |
-| Taille binaire (release stripped)     | < 15 MB                            |
-| Budget tokens / heure (profil balanced, gameplay actif) | < 10 M tokens    |
-| Latence GUI spectator (event → rendu) | < 16 ms (1 frame)                  |
-
----
-
-## 2. Non-objectifs
-
-- **Vitesse au détriment de la précision** : Luna n'est pas Snes9x ; on
-  privilégie systématiquement la fidélité.
-- **Netplay multi-joueurs en ligne** : hors scope V1.
-- **Émulation d'autres consoles** : SNES uniquement. (Une factorisation
-  future est possible mais ce n'est pas un objectif.)
-- **GUI immersive et complexe** : `luna-gui` est volontairement minimal et
-  fonctionnel (framebuffer + overlays debug). On ne fait pas concurrence à
-  RetroArch côté shaders, post-processing, frontend multimédia.
-- **Compatibilité avec les hacks de bas niveau** (overclocking, MSU-1,
-  widescreen patches) : possible en V2.
+| Metric                                 | Target                             |
+|----------------------------------------|------------------------------------|
+| SNES compatibility (test suite)        | ≥ 99% of commercial ROMs           |
+| bsnes/ares tests passed                | ≥ 95%                              |
+| Performance (release, modern x86-64)   | 60 fps cycle-accurate at < 30% CPU |
+| MCP tool round-trip latency            | < 5 ms (local stdio)               |
+| Cold start → ROM loaded                | < 200 ms                           |
+| Binary size (release, stripped)        | < 15 MB                            |
+| Token budget / hour (balanced profile, active gameplay) | < 10M tokens      |
+| Spectator GUI latency (event → render) | < 16 ms (1 frame)                  |
 
 ---
 
-## 3. Vue d'ensemble
+## 2. Non-goals
 
-### 3.1 Architecture en couches
+- **Speed at the expense of accuracy**: Luna is not Snes9x; we
+  systematically favor fidelity.
+- **Online multiplayer netplay**: out of scope for V1.
+- **Emulation of other consoles**: SNES only. (A future factorization is
+  possible but it is not a goal.)
+- **Immersive, complex GUI**: `luna-gui` is deliberately minimal and
+  functional (framebuffer + debug overlays). We do not compete with
+  RetroArch on shaders, post-processing, or multimedia frontends.
+- **Compatibility with low-level hacks** (overclocking, MSU-1,
+  widescreen patches): possible in V2.
+
+---
+
+## 3. Overview
+
+### 3.1 Layered architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                  Couche 4 — Serveur MCP (luna-mcp)                  │
+│                  Layer 4 — MCP server (luna-mcp)                   │
 │         JSON-RPC 2.0 over stdio / SSE / Streamable HTTP             │
 │                            (tokio async)                            │
 ├─────────────────────────────────────────────────────────────────────┤
-│        Couche 3 — Control & Introspection API (luna-api)            │
+│        Layer 3 — Control & Introspection API (luna-api)            │
 │   ┌───────────────┬────────────────┬─────────────┬──────────────┐   │
 │   │ Control plane │   Debug API    │ Semantic API│   Events     │   │
 │   │ (lifecycle)   │ (breakpoints,  │ (sprites,   │  (vblank,    │   │
@@ -137,13 +135,13 @@ agent ↔ machine un objectif central de design.
 │   │               │  trace, mem)   │  scroll…)   │   hits, …)   │   │
 │   └───────────────┴────────────────┴─────────────┴──────────────┘   │
 ├─────────────────────────────────────────────────────────────────────┤
-│           Couche 2 — Cœur d'émulation (luna-core)                   │
+│             Layer 2 — Emulation core (luna-core)                   │
 │  ┌────────┬────────┬────────────┬─────┬───────────┬───────────────┐ │
 │  │ 65C816 │  PPU   │ SPC700/DSP │ DMA │ Coproc.   │   Scheduler   │ │
 │  │        │        │            │     │ (SA-1, FX)│ (coroutines)  │ │
 │  └────────┴────────┴────────────┴─────┴───────────┴───────────────┘ │
 ├─────────────────────────────────────────────────────────────────────┤
-│           Couche 1 — Bus & memory map (luna-bus)                    │
+│            Layer 1 — Bus & memory map (luna-bus)                   │
 │        Mappers (LoROM, HiROM, ExHiROM, SA-1, SDD-1, …)              │
 └─────────────────────────────────────────────────────────────────────┘
                             ▲
@@ -154,89 +152,85 @@ agent ↔ machine un objectif central de design.
                    └─────────────────┘
 ```
 
-Les couches communiquent uniquement par contrats Rust (traits + types
-sérialisables). Aucune dépendance directe d'une couche basse vers une
-couche haute.
+The layers communicate only through Rust contracts (traits + serializable
+types). No direct dependency from a lower layer to a higher one.
 
-### 3.2 Modes d'exécution
+### 3.2 Execution modes
 
-Luna est conçu pour fonctionner sous **quatre modes** combinables, qui ne
-sont pas des binaires séparés mais des configurations du même binaire
-`luna`. Cela vient du principe que **le cœur d'émulation, l'API
-d'introspection et la GUI sont totalement découplés** : on peut allumer ou
-éteindre indépendamment chaque "consommateur" du cœur.
+Luna is designed to run under **four** combinable modes, which are not
+separate binaries but configurations of the same `luna` binary. This stems
+from the principle that **the emulation core, the introspection API and the
+GUI are fully decoupled**: each "consumer" of the core can be turned on or
+off independently.
 
-#### Mode 1 — Headless (production IA, CI)
+#### Mode 1 — Headless (AI production, CI)
 
 ```bash
 $ luna mcp --rom game.sfc
 ```
 
-- Aucune fenêtre, aucune dépendance graphique (sur Linux, pas besoin de X
-  ou Wayland).
-- Serveur MCP stdio en sortie standard.
-- Inputs uniquement via `emu_send_input` MCP.
-- Outputs uniquement via les tools/resources MCP.
-- **Usage** : intégration dans Claude Code/Cursor, déploiement cloud,
-  benchmarks AI batch, suite de tests CI.
+- No window, no graphics dependency (on Linux, no need for X or Wayland).
+- MCP stdio server on standard output.
+- Inputs only via the `emu_send_input` MCP tool.
+- Outputs only via MCP tools/resources.
+- **Use**: integration into Claude Code/Cursor, cloud deployment, batch AI
+  benchmarks, CI test suite.
 
-#### Mode 2 — Standalone (humain joue)
+#### Mode 2 — Standalone (human plays)
 
 ```bash
 $ luna run game.sfc
 ```
 
-- Fenêtre native, framebuffer à 60 fps, audio.
-- Inputs clavier/manette.
-- Pas de serveur MCP démarré.
-- Menu : save states, reset, charger ROM, options vidéo (filtre intégral,
-  ratio 4:3, etc.).
-- **Usage** : retrogaming classique, vérification manuelle d'un
-  comportement, debug humain.
+- Native window, framebuffer at 60 fps, audio.
+- Keyboard/gamepad inputs.
+- No MCP server started.
+- Menu: save states, reset, load ROM, video options (integer filter, 4:3
+  ratio, etc.).
+- **Use**: classic retrogaming, manual verification of a behavior, human
+  debugging.
 
-#### Mode 3 — Spectator (l'IA joue, l'humain observe)
+#### Mode 3 — Spectator (the AI plays, the human observes)
 
 ```bash
 $ luna mcp --rom game.sfc --spectate
 ```
 
-- Le serveur MCP est actif (l'IA contrôle).
-- **Une fenêtre GUI est ouverte en parallèle**, abonnée au même bus
-  d'événements que l'agent.
-- L'humain voit en temps réel :
-  - le framebuffer (ce que voit l'agent)
-  - **un panneau "Agent activity"** : timeline des tool calls récents
+- The MCP server is active (the AI is in control).
+- **A GUI window is open in parallel**, subscribed to the same event bus
+  as the agent.
+- The human sees in real time:
+  - the framebuffer (what the agent sees)
+  - **an "Agent activity" panel**: a timeline of recent tool calls
     (`emu_send_input(B, 30 frames)`, `sem_get_sprites()`, …)
-  - **des overlays visuels** : surbrillance des sprites/régions mémoire
-    que l'agent a interrogés dans les N dernières secondes
-  - les notifications d'événements (`BreakpointHit`, `RomLoaded`)
-- L'humain peut à tout moment :
-  - **mettre en pause** (l'agent voit sa prochaine requête mise en file
-    d'attente)
-  - **inspecter** l'état (registres, mémoire) côte-à-côte avec l'agent
-  - **reprendre la main** (toggle "human override") pour rejouer une
-    section difficile
-- **Usage** : **debug de l'agent lui-même** (pourquoi a-t-il choisi cet
-  input ?), démos publiques, observation pédagogique.
+  - **visual overlays**: highlighting of the sprites/memory regions the
+    agent queried in the last N seconds
+  - event notifications (`BreakpointHit`, `RomLoaded`)
+- The human can at any time:
+  - **pause** (the agent sees its next request queued)
+  - **inspect** the state (registers, memory) side by side with the agent
+  - **take over** (toggle "human override") to replay a difficult section
+- **Use**: **debugging the agent itself** (why did it choose that input?),
+  public demos, educational observation.
 
-#### Mode 4 — Coop (humain + IA simultanément, V2)
+#### Mode 4 — Coop (human + AI simultaneously, V2)
 
 ```bash
 $ luna mcp --rom game.sfc --spectate --coop
 ```
 
-- Inputs humain + inputs MCP fusionnés.
-- Cas d'usage : humain pilote P1, IA pilote P2 dans un jeu coop (Joe &
-  Mac, Sunset Riders…), ou l'IA suggère et l'humain valide.
-- Hors scope V1, mais l'architecture le permet nativement (le sous-système
-  d'input agrège déjà plusieurs sources).
+- Human inputs + MCP inputs merged.
+- Use case: human drives P1, AI drives P2 in a coop game (Joe & Mac,
+  Sunset Riders…), or the AI suggests and the human validates.
+- Out of scope for V1, but the architecture allows it natively (the input
+  subsystem already aggregates multiple sources).
 
-#### Architecture du découplage
+#### Decoupling architecture
 
 ```
-                      Cœur d'émulation
+                      Emulation core
                   ┌─────────────────────┐
-                  │  Bus d'événements   │ (broadcast tokio)
+                  │     Event bus       │ (tokio broadcast)
                   └─────────┬───────────┘
                             │
             ┌───────────────┼───────────────┐
@@ -246,113 +240,112 @@ $ luna mcp --rom game.sfc --spectate --coop
        │   MCP   │    │   GUI   │    │  Replay  │
        │ server  │    │ (egui)  │    │ recorder │
        └─────────┘    └─────────┘    └──────────┘
-       (optionnel)   (optionnel)    (optionnel)
+       (optional)    (optional)     (optional)
 ```
 
-Chaque consommateur est **opt-in**. Le mode `--spectate` allume simplement
-GUI + MCP simultanément. La GUI ne passe **jamais** par MCP : elle parle
-au cœur via le bus interne (latence < 1ms, zéro coût token).
+Each consumer is **opt-in**. The `--spectate` mode simply turns on GUI +
+MCP simultaneously. The GUI **never** goes through MCP: it talks to the
+core via the internal bus (latency < 1 ms, zero token cost).
 
 ---
 
-## 4. Organisation du workspace Rust
+## 4. Rust workspace organization
 
-Workspace Cargo avec ~15 crates. Chaque crate est annoté **cross-target**
-(compile en natif et `wasm32-unknown-unknown`) ou **native-only** (interdit
-en WASM). Cette discipline est vérifiée en CI : `cargo check --target
-wasm32-unknown-unknown` sur les crates cross-target.
+Cargo workspace with ~15 crates. Each crate is annotated **cross-target**
+(compiles natively and to `wasm32-unknown-unknown`) or **native-only**
+(forbidden under WASM). This discipline is verified in CI: `cargo check
+--target wasm32-unknown-unknown` on the cross-target crates.
 
 ```
 luna/
 ├── Cargo.toml                       # workspace root
-├── ARCHITECTURE.md                  # ce document
-├── README.md                        # présentation du projet (porte d'entrée)
-├── RESEARCH.md                      # synthèse des recherches pré-Phase-0
-├── docs/emulator_landscape.md       # panorama comparatif des émulateurs SNES
+├── ARCHITECTURE.md                  # this document
+├── README.md                        # project introduction (front door)
+├── RESEARCH.md                      # pre-Phase-0 research synthesis
+├── docs/emulator_landscape.md       # comparative survey of SNES emulators
 │
 ├── crates/
-│   │── # ──────────── CŒUR D'ÉMULATION (cross-target, !Send, no_std-ready) ────
-│   ├── luna-bus/                    # ✅ memory map, mappers cartouche
-│   ├── luna-cpu-65c816/             # ✅ CPU principal, cycle-accurate
-│   ├── luna-cpu-spc700/             # ✅ CPU audio
+│   │── # ──────────── EMULATION CORE (cross-target, !Send, no_std-ready) ────
+│   ├── luna-bus/                    # ✅ memory map, cartridge mappers
+│   ├── luna-cpu-65c816/             # ✅ main CPU, cycle-accurate
+│   ├── luna-cpu-spc700/             # ✅ audio CPU
 │   ├── luna-ppu/                    # ✅ Picture Processing Unit
-│   ├── luna-apu/                    # ✅ SPC700 + DSP audio (orchestre spc700)
+│   ├── luna-apu/                    # ✅ SPC700 + audio DSP (orchestrates spc700)
 │   ├── luna-dma/                    # ✅ DMA + HDMA
 │   ├── luna-coproc/                 # ✅ SA-1, Super FX, DSP-1/2/3/4, etc.
-│   ├── luna-cartridge/              # ✅ parsing ROM, détection header, SRAM
-│   ├── luna-core/                   # ✅ assemble les composants, scheduler
+│   ├── luna-cartridge/              # ✅ ROM parsing, header detection, SRAM
+│   ├── luna-core/                   # ✅ assembles the components, scheduler
 │   │
-│   │── # ──────────── ABSTRACTIONS CROSS-TARGET ─────────────────────
-│   ├── luna-async/                  # ✅ façade runtime (spawn/sleep/channels)
-│   ├── luna-api/                    # ✅ ★ contrat public stable (couche 3)
+│   │── # ──────────── CROSS-TARGET ABSTRACTIONS ─────────────────────
+│   ├── luna-async/                  # ✅ runtime facade (spawn/sleep/channels)
+│   ├── luna-api/                    # ✅ ★ stable public contract (layer 3)
 │   │
 │   │── # ──────────── TRANSPORTS (mix cross-target / native-only) ────
-│   ├── luna-mcp-core/               # ✅ types Tool/Resource, schemas
+│   ├── luna-mcp-core/               # ✅ Tool/Resource types, schemas
 │   ├── luna-mcp-server/             # ❌ rmcp + tokio mainline (native-only)
-│   ├── luna-mcp-client/             # ✅ transport WebSocket cross-target
+│   ├── luna-mcp-client/             # ✅ cross-target WebSocket transport
 │   ├── luna-rest/                   # ❌ axum + OpenAPI (V1.1, native-only)
 │   ├── luna-ws/                     # ❌ tokio-tungstenite (V1.1, native-only)
-│   ├── luna-wasm/                   # ⚠️ WASM-only, bindings JS (V2)
+│   ├── luna-wasm/                   # ⚠️ WASM-only, JS bindings (V2)
 │   ├── luna-ffi/                    # ❌ cdylib C/Python (V2, native-only)
-│   ├── luna-libretro/               # ❌ core libretro (V2, native-only)
+│   ├── luna-libretro/               # ❌ libretro core (V2, native-only)
 │   │
-│   │── # ──────────── BINAIRES & GUI ───────────────────────────────
-│   ├── luna-cli/                    # ❌ binaire `luna`, dispatche les modes
-│   ├── luna-gui/                    # ⚠️ egui/wgpu (natif + WASM via eframe)
-│   └── luna-overlay/                # ⚠️ overlays spectator (natif + WASM)
+│   │── # ──────────── BINARIES & GUI ───────────────────────────────
+│   ├── luna-cli/                    # ❌ `luna` binary, dispatches the modes
+│   ├── luna-gui/                    # ⚠️ egui/wgpu (native + WASM via eframe)
+│   └── luna-overlay/                # ⚠️ spectator overlays (native + WASM)
 │
 ├── tests/
 │   ├── roms/                        # test ROMs (krom, blargg, peter_lemon)
-│   ├── tom-harte/                   # JSON suite ProcessorTests pour 65C816
-│   └── golden/                      # frames de référence pour tests visuels
+│   ├── tom-harte/                   # JSON ProcessorTests suite for the 65C816
+│   └── golden/                      # reference frames for visual tests
 │
 └── tools/
-    └── disasm/                      # désassembleur 65C816 standalone
+    └── disasm/                      # standalone 65C816 disassembler
 ```
 
-Légende : ✅ cross-target / ⚠️ cross-target avec features cfg-gated /
+Legend: ✅ cross-target / ⚠️ cross-target with cfg-gated features /
 ❌ native-only.
 
-**Choix de dépendances clés** (révisés après recherche, cf. RESEARCH.md)
+**Key dependency choices** (revised after research, see RESEARCH.md)
 
-| Domaine             | Crate(s)                                       | Rationale                                                   |
+| Domain              | Crate(s)                                       | Rationale                                                   |
 |---------------------|------------------------------------------------|-------------------------------------------------------------|
-| Async runtime natif | `tokio` (rt-multi-thread, sync, macros)        | Standard de facto                                           |
-| Async runtime web   | `wasm-bindgen-futures` + `gloo-timers`         | Single-thread, microtask queue                              |
-| **Façade async**    | **`luna-async`** (crate maison)                | **Évite `#[cfg(target_arch)]` partout — obligatoire**       |
-| Channels (cross)    | `futures::channel::mpsc` / `async-channel`     | `crossbeam-channel` **panique** en WASM (cf. RESEARCH.md)   |
-| Sérialisation       | `serde` + `serde_json`                         | Indispensable pour MCP                                      |
-| MCP serveur         | `rmcp` (officiel Anthropic) — natif uniquement | Pas de support `wasm32-unknown-unknown`                     |
-| Schemas             | `schemars` + `ts-rs` (build-time) + `utoipa`   | Génération JSON Schema / TS / OpenAPI                       |
-| Rendu (gui)         | `wgpu` + `egui` / `eframe`                     | Cross-platform natif + WASM via WebGPU/WebGL                |
-| Audio natif         | `cpal`                                         | Cross-platform low-latency                                  |
-| Audio web           | `cpal` (backend wasm-bindgen, output only)     | Bridge Web Audio API ; latence ~50-100ms                    |
-| Test 65C816         | `tom-harte/ProcessorTests` (JSON)              | Suite utilisée par jgenesis, dr.beer, etc.                  |
-| Tests visuels       | `image` + `pixelmatch`                         | Comparaison golden frames                                   |
-| Tracing             | `tracing` + `tracing-subscriber`               | Logs structurés                                             |
+| Native async runtime| `tokio` (rt-multi-thread, sync, macros)        | De facto standard                                           |
+| Web async runtime   | `wasm-bindgen-futures` + `gloo-timers`         | Single-thread, microtask queue                              |
+| **Async facade**    | **`luna-async`** (in-house crate)              | **Avoids `#[cfg(target_arch)]` everywhere — mandatory**     |
+| Channels (cross)    | `futures::channel::mpsc` / `async-channel`     | `crossbeam-channel` **panics** under WASM (see RESEARCH.md) |
+| Serialization       | `serde` + `serde_json`                         | Essential for MCP                                           |
+| MCP server          | `rmcp` (official Anthropic) — native only      | No `wasm32-unknown-unknown` support                         |
+| Schemas             | `schemars` + `ts-rs` (build-time) + `utoipa`   | JSON Schema / TS / OpenAPI generation                       |
+| Rendering (gui)     | `wgpu` + `egui` / `eframe`                     | Cross-platform native + WASM via WebGPU/WebGL               |
+| Native audio        | `cpal`                                         | Cross-platform low-latency                                  |
+| Web audio           | `cpal` (wasm-bindgen backend, output only)     | Web Audio API bridge; ~50-100ms latency                     |
+| 65C816 testing      | `tom-harte/ProcessorTests` (JSON)              | Suite used by jgenesis, dr.beer, etc.                       |
+| Visual tests        | `image` + `pixelmatch`                         | Golden-frame comparison                                     |
+| Tracing             | `tracing` + `tracing-subscriber`               | Structured logs                                             |
 | CLI args            | `clap` (derive)                                | Standard                                                    |
-| Coroutines          | **aucune** (`genawaiter` rejeté)               | Pattern static dispatch préféré, cf. §6.6                   |
+| Coroutines          | **none** (`genawaiter` rejected)               | Static-dispatch pattern preferred, see §6.6                 |
 
-**Décision sur l'architecture interne** : contrairement à ares qui utilise
-libco, et contrairement à certains émulateurs Rust qui tentent
-`#[coroutine]` (nightly, save-states cassés), Luna utilise le pattern
-**CPU-driven master-clock catch-up** validé par jgenesis et tetanes. Cf.
-§6.6 pour les détails.
+**Decision on the internal architecture**: unlike ares which uses libco,
+and unlike some Rust emulators that attempt `#[coroutine]` (nightly, broken
+save-states), Luna uses the **CPU-driven master-clock catch-up** pattern
+validated by jgenesis and tetanes. See §6.6 for the details.
 
-### 4.1 Stratégie cross-target async
+### 4.1 Cross-target async strategy
 
-Le cœur (`luna-core`, `luna-api`, `luna-mcp-core`) doit pouvoir compiler
-en `wasm32-unknown-unknown`. Or :
+The core (`luna-core`, `luna-api`, `luna-mcp-core`) must be able to compile
+to `wasm32-unknown-unknown`. However:
 
-- `tokio` mainline ne supporte que partiellement WASM
-  (`tokio::time` *panique* à l'exécution).
-- `crossbeam-channel` ne fonctionne **pas** en WASM (parking primitive
-  absente, panic "unreachable").
-- `std::thread::spawn` indisponible en WASM single-thread.
+- mainline `tokio` only partially supports WASM
+  (`tokio::time` *panics* at runtime).
+- `crossbeam-channel` does **not** work under WASM (parking primitive
+  absent, panic "unreachable").
+- `std::thread::spawn` is unavailable under single-thread WASM.
 
-**Solution adoptée** : un crate `luna-async` qui expose une API minimale
-(`spawn`, `sleep`, `yield_now`, `mpsc`, `oneshot`) avec deux
-implémentations conditionnelles :
+**Adopted solution**: a `luna-async` crate that exposes a minimal API
+(`spawn`, `sleep`, `yield_now`, `mpsc`, `oneshot`) with two conditional
+implementations:
 
 ```rust
 // crates/luna-async/src/lib.rs
@@ -375,53 +368,53 @@ mod imp {
 
 pub use imp::{spawn, sleep};
 
-// Channels cross-target — `futures::channel` fonctionne partout
+// Cross-target channels — `futures::channel` works everywhere
 pub use futures::channel::{mpsc, oneshot};
 ```
 
-**Discipline `!Send` partout dans le cœur** : single-thread compatible
-WASM. Le parallélisme natif passe par des workers explicites
-(threads dédiés) dans `luna-mcp-server` natif, jamais dans `luna-core`.
+**`!Send` discipline throughout the core**: single-thread, WASM-compatible.
+Native parallelism goes through explicit workers (dedicated threads) in the
+native `luna-mcp-server`, never in `luna-core`.
 
-**Conséquence sur la boucle 60Hz** : voir §10 (thread dédié en natif,
-`requestAnimationFrame` en WASM, abstrait par un trait `Frontend`).
+**Consequence for the 60 Hz loop**: see §10 (dedicated thread on native,
+`requestAnimationFrame` under WASM, abstracted by a `Frontend` trait).
 
 ---
 
-## 5. Couche 1 — Bus & mémoire
+## 5. Layer 1 — Bus & memory
 
-Le **bus** est l'objet central qui route les lectures/écritures vers les
-bons composants selon l'adresse 24 bits du 65C816 (`$bb:aaaa`).
+The **bus** is the central object that routes reads/writes to the right
+components according to the 65C816's 24-bit address (`$bb:aaaa`).
 
-### Trait `Bus` (vue exposée au CPU)
+### `Bus` trait (the view exposed to the CPU)
 
 ```rust
 pub type MCycles = u64;
 
 pub trait Bus {
-    /// Lit un octet. DÉCLENCHE `io_cycle()` en interne avec le coût
-    /// d'accès (SLOW=8 / FAST=6 / XSLOW=12 mclk selon la région).
+    /// Reads a byte. TRIGGERS `io_cycle()` internally with the access
+    /// cost (SLOW=8 / FAST=6 / XSLOW=12 mclk depending on the region).
     fn read(&mut self, addr: u32) -> u8;
 
-    /// Écrit un octet. Peut avoir des effets de bord (registres MMIO).
-    /// Déclenche également `io_cycle()` avec le coût d'accès.
+    /// Writes a byte. May have side effects (MMIO registers).
+    /// Also triggers `io_cycle()` with the access cost.
     fn write(&mut self, addr: u32, value: u8);
 
-    /// **PRIMITIVE CLÉ POUR LA MID-INSTRUCTION ACCURACY.**
-    /// Appelée par le CPU à chaque accès bus (lecture, écriture, ou
-    /// cycle interne sans accès). Le bus en profite pour rattraper
-    /// immédiatement le PPU, traiter HDMA, et tester NMI/IRQ.
+    /// **KEY PRIMITIVE FOR MID-INSTRUCTION ACCURACY.**
+    /// Called by the CPU on every bus access (read, write, or internal
+    /// cycle without an access). The bus uses it to immediately catch
+    /// the PPU up, process HDMA, and test NMI/IRQ.
     ///
-    /// C'est ce qui rend Mario Kart, F-Zero, et tous les jeux à
-    /// HDMA/mid-frame effects corrects.
+    /// This is what makes Mario Kart, F-Zero, and all games with
+    /// HDMA/mid-frame effects correct.
     fn io_cycle(&mut self, mcycles: MCycles);
 
-    /// Sondage des lignes d'interruption après accumulation via io_cycle.
+    /// Probes the interrupt lines after accumulation via io_cycle.
     fn nmi_pending(&self) -> bool;
     fn irq_pending(&self) -> bool;
 }
 
-/// Trait pour les composants stockés derrière le bus (PPU, DMA, etc.)
+/// Trait for components stored behind the bus (PPU, DMA, etc.)
 pub trait BusDevice {
     fn read(&mut self, addr: u32) -> u8;
     fn write(&mut self, addr: u32, value: u8);
@@ -430,18 +423,18 @@ pub trait BusDevice {
 }
 ```
 
-**Pourquoi `io_cycle()` ?** C'est la primitive qui distingue un émulateur
-SNES "moderately accurate" d'un cycle-accurate vrai. Sans elle, le PPU
-n'est rattrapé qu'entre les instructions CPU — ce qui rate les effets
-HDMA, le timing exact des IRQ H/V, et les bugs Mario Kart. Avec elle,
-chaque accès mémoire du CPU déclenche un catch-up du PPU jusqu'au cycle
-exact, ce qui garantit la précision tout en restant zero-alloc dans la
-hot loop. Pattern validé par jgenesis et tetanes.
+**Why `io_cycle()`?** It is the primitive that separates a "moderately
+accurate" SNES emulator from a truly cycle-accurate one. Without it, the
+PPU is only caught up between CPU instructions — which misses HDMA
+effects, the exact timing of H/V IRQs, and the Mario Kart bugs. With it,
+every CPU memory access triggers a PPU catch-up to the exact cycle, which
+guarantees accuracy while staying zero-alloc in the hot loop. Pattern
+validated by jgenesis and tetanes.
 
-### Mappers de cartouche
+### Cartridge mappers
 
-Trait `Mapper` qui implémente `BusDevice` et expose la topologie spécifique
-au type de cartouche :
+A `Mapper` trait that implements `BusDevice` and exposes the topology
+specific to the cartridge type:
 
 - `LoRom` (mode 20)
 - `HiRom` (mode 21)
@@ -451,10 +444,10 @@ au type de cartouche :
 - `SDD1Mapper`
 - `SPC7110Mapper`
 
-La détection se fait via `luna-cartridge::detect_mapper(&rom_bytes)` qui
-parse l'internal header SNES (offset 0x7FC0 ou 0xFFC0).
+Detection is done via `luna-cartridge::detect_mapper(&rom_bytes)` which
+parses the SNES internal header (offset 0x7FC0 or 0xFFC0).
 
-### Memory map résumée
+### Memory map summary
 
 ```
 $00–$3F:$0000–$1FFF  → WRAM mirror (LowRAM)
@@ -469,109 +462,109 @@ $F0–$FF:...          → SRAM (via mapper)
 
 ---
 
-## 6. Couche 2 — Cœur d'émulation
+## 6. Layer 2 — Emulation core
 
-### 6.1 CPU 65C816
+### 6.1 65C816 CPU
 
-Implémentation cycle-accurate du Western Design Center 65C816 (variante du
-6502 16 bits utilisée dans le SNES).
+Cycle-accurate implementation of the Western Design Center 65C816 (the
+16-bit 6502 variant used in the SNES).
 
-**Particularités du 65C816 à gérer correctement**
+**65C816 quirks to handle correctly**
 
-- Modes 8/16 bits indépendants pour A et X/Y (via flags M et X du
-  registre de statut).
-- Banks de 64 KB séparées pour le programme (PB) et les données (DB).
-- Mode emulation (E) qui le fait se comporter comme un 6502.
-- Tous les modes d'adressage exotiques (direct page, stack relative,
-  long indexed…).
+- Independent 8/16-bit modes for A and X/Y (via the M and X flags of the
+  status register).
+- Separate 64 KB banks for program (PB) and data (DB).
+- Emulation mode (E) that makes it behave like a 6502.
+- All the exotic addressing modes (direct page, stack relative, long
+  indexed…).
 
-**Cœur de l'implémentation**
+**Core of the implementation**
 
 ```rust
 pub struct Cpu65C816 {
-    // Registres
+    // Registers
     a: u16, x: u16, y: u16,
     pc: u16, pb: u8, db: u8,
     sp: u16, dp: u16,
     p: StatusFlags,        // N V M X D I Z C + E
     
-    // État de stepping cycle-accurate
+    // Cycle-accurate stepping state
     pending_cycles: u8,
     current_instr: Option<Instruction>,
     micro_op_index: u8,
 }
 
 impl Cpu65C816 {
-    /// Avance d'un cycle maître. Peut être au milieu d'une instruction.
+    /// Advances by one master cycle. May be in the middle of an instruction.
     pub fn tick(&mut self, bus: &mut Bus) -> CycleResult;
 }
 ```
 
-Chaque instruction est décomposée en **micro-ops** datées en cycles, ce
-qui permet :
-- des breakpoints au cycle près
-- une interruption (IRQ/NMI) gérée au timing exact du hardware
-- un débogueur "step" qui peut step instruction ou step cycle
+Each instruction is broken down into cycle-dated **micro-ops**, which
+allows:
+- cycle-precise breakpoints
+- an interrupt (IRQ/NMI) handled at the exact hardware timing
+- a "step" debugger that can step by instruction or by cycle
 
 ### 6.2 PPU
 
-Le PPU SNES est *complexe* : 8 modes graphiques (dont le fameux Mode 7),
-4 plans de tiles, 128 sprites, OAM, palette CGRAM, fenêtres de masquage,
-mosaïque, color math…
+The SNES PPU is *complex*: 8 graphics modes (including the famous Mode 7),
+4 tile planes, 128 sprites, OAM, CGRAM palette, masking windows, mosaic,
+color math…
 
-**Décomposition en sous-modules**
+**Breakdown into sub-modules**
 
 ```
 luna-ppu/
 ├── src/
 │   ├── lib.rs           # struct Ppu, tick()
-│   ├── modes/           # rendu des modes 0–7
+│   ├── modes/           # rendering of modes 0–7
 │   │   ├── mode0.rs ... mode7.rs
 │   ├── sprites.rs       # OAM, sprite renderer
 │   ├── window.rs        # window masking, color math
 │   ├── vram.rs          # VRAM 64 KB
-│   ├── cgram.rs         # palette 512 octets
+│   ├── cgram.rs         # palette 512 bytes
 │   └── registers.rs     # $2100-$213F
 ```
 
-**Rendu** : scanline-based en V1 (plus simple et 99% suffisant), évoluable
-vers dot-based pour les démos qui changent les registres en plein milieu
-d'un scanline.
+**Rendering**: scanline-based in V1 (simpler and 99% sufficient),
+upgradable to dot-based for the demos that change registers in the middle
+of a scanline.
 
-**Framebuffer exposé** : `[u8; 256 * 224 * 4]` (RGBA8) accessible en
-lecture seule via la couche 3.
+**Exposed framebuffer**: `[u8; 256 * 224 * 4]` (RGBA8) accessible
+read-only via layer 3.
 
 ### 6.3 APU / SPC700
 
-L'APU SNES est un sous-système quasi-indépendant : un CPU SPC700 (variante
-8-bit dérivée du 6502) avec sa propre RAM 64 KB et un DSP audio. Il
-communique avec le CPU principal via 4 registres "boîte aux lettres".
+The SNES APU is a near-independent subsystem: an SPC700 CPU (an 8-bit
+variant derived from the 6502) with its own 64 KB RAM and an audio DSP. It
+communicates with the main CPU via 4 "mailbox" registers.
 
-**Implication architecturale critique** : le SPC700 tourne à 1.024 MHz
-alors que le 65C816 tourne à ~3.58 MHz, et les deux doivent rester
-synchronisés. C'est le rôle du scheduler (§6.6).
+**Critical architectural implication**: the SPC700 runs at 1.024 MHz while
+the 65C816 runs at ~3.58 MHz, and the two must stay synchronized. That is
+the scheduler's job (§6.6).
 
 ```rust
 pub struct Apu {
     spc700: Spc700,
     dsp: AudioDsp,
     ram: [u8; 65536],
-    ports: [u8; 4],      // $2140–$2143 côté CPU
+    ports: [u8; 4],      // $2140–$2143 on the CPU side
 }
 ```
 
 ### 6.4 DMA & HDMA
 
-8 canaux DMA (transferts mémoire ↔ MMIO en burst) + leurs équivalents
-HDMA (transferts synchronisés sur le rendu PPU, scanline par scanline).
+8 DMA channels (memory ↔ MMIO burst transfers) + their HDMA equivalents
+(transfers synchronized to PPU rendering, scanline by scanline).
 
-C'est crucial : la quasi-totalité des effets visuels SNES (parallaxe,
-mode 7 dynamique, color math sur fenêtres) repose sur HDMA. Une émulation
-incorrecte casse Final Fantasy VI, Chrono Trigger, etc.
+This is crucial: nearly all SNES visual effects (parallax, dynamic mode 7,
+color math over windows) rely on HDMA. Incorrect emulation breaks Final
+Fantasy VI, Chrono Trigger, etc.
 
-### 6.5 Coprocesseurs
+### 6.5 Coprocessors
 
-| Puce         | Jeux emblématiques            | Priorité |
+| Chip         | Iconic games                  | Priority |
 |--------------|-------------------------------|----------|
 | SA-1         | Super Mario RPG, Kirby Super Star | V1   |
 | Super FX     | Star Fox, Yoshi's Island, Doom | V1     |
@@ -580,54 +573,53 @@ incorrecte casse Final Fantasy VI, Chrono Trigger, etc.
 | Cx4          | Mega Man X2, X3               | V2       |
 | SPC7110      | Far East of Eden Zero         | V3       |
 | S-DD1        | Star Ocean, Street Fighter Alpha 2 | V2  |
-| OBC1, ST010+ | Quelques niches               | V3       |
+| OBC1, ST010+ | A few niche titles            | V3       |
 
-Chaque coprocesseur est un crate-feature de `luna-coproc`, ce qui permet
-de compiler une build minimale si on cible un jeu spécifique.
+Each coprocessor is a crate-feature of `luna-coproc`, which allows building
+a minimal build when targeting a specific game.
 
-### 6.6 Scheduler & synchro cycle-accurate
+### 6.6 Scheduler & cycle-accurate sync
 
-**Le problème** : faire avancer dans le bon ordre un CPU principal
-(21.477 MHz NTSC), un PPU (cadencé par dots/scanlines), un APU à
-fréquence indépendante (3.072 MHz SPC700), des DMAs qui volent des
-cycles au CPU, et potentiellement un coprocesseur — le tout en restant
-déterministe et performant.
+**The problem**: advance, in the right order, a main CPU (21.477 MHz NTSC),
+a PPU (clocked by dots/scanlines), an APU at an independent frequency
+(3.072 MHz SPC700), DMAs that steal cycles from the CPU, and potentially a
+coprocessor — all while staying deterministic and performant.
 
-**Décision** : on adopte le pattern **CPU-driven master-clock catch-up**
-validé par [jgenesis](https://github.com/jsgroth/jgenesis) et
-[tetanes](https://github.com/lukexor/tetanes), considérés comme l'état
-de l'art Rust en émulation cycle-accurate.
+**Decision**: we adopt the **CPU-driven master-clock catch-up** pattern
+validated by [jgenesis](https://github.com/jsgroth/jgenesis) and
+[tetanes](https://github.com/lukexor/tetanes), considered the Rust state of
+the art in cycle-accurate emulation.
 
-**Patterns rejetés et pourquoi**
+**Rejected patterns and why**
 
-| Pattern | Verdict | Raison |
+| Pattern | Verdict | Reason |
 |---|---|---|
-| Event-queue `BinaryHeap` (style moa) | ❌ | À 21M cycles/s, l'overhead heap + `Box<dyn>` consomme 50% du budget cycle |
-| Coroutines `#[coroutine]` (Lochnes) | ❌ | Nightly only, save-states impossibles (closures non-sérialisables), perf marginale |
-| `genawaiter` (stable, mais...) | ❌ | LLVM peine à inliner ; save-states cassés |
-| Instruction-step naïf (rboy GB) | ❌ | Pas de mid-instruction accuracy, casse Mario Kart |
-| Lazy + `next_event` (gameroy GB) | ⚠️ | À utiliser **en complément** pour optimiser WAI/STP |
-| **CPU master-clock catch-up + `io_cycle()` (jgenesis)** | ✅ | **Notre choix** |
-| State-machine pure par cycle (DaveTCode NES) | ⚠️ | Excellent pour le CPU isolé, à utiliser dans `luna-cpu-65c816` |
+| Event-queue `BinaryHeap` (moa style) | ❌ | At 21M cycles/s, the heap + `Box<dyn>` overhead eats 50% of the cycle budget |
+| Coroutines `#[coroutine]` (Lochnes) | ❌ | Nightly only, save-states impossible (non-serializable closures), marginal perf |
+| `genawaiter` (stable, but...) | ❌ | LLVM struggles to inline it; broken save-states |
+| Naive instruction-step (rboy GB) | ❌ | No mid-instruction accuracy, breaks Mario Kart |
+| Lazy + `next_event` (gameroy GB) | ⚠️ | To be used **in addition** to optimize WAI/STP |
+| **CPU master-clock catch-up + `io_cycle()` (jgenesis)** | ✅ | **Our choice** |
+| Pure per-cycle state-machine (DaveTCode NES) | ⚠️ | Excellent for the isolated CPU, to be used in `luna-cpu-65c816` |
 
-**Pattern adopté — vue d'ensemble**
+**Adopted pattern — overview**
 
 ```
 loop {
   delta_mclk = if memory_refresh_pending { 40 }                  // DRAM refresh
-              else if dma.active() { dma.tick(bus) }             // DMA vole les cycles
-              else { cpu.step(bus) }                             // 1 instruction CPU
-                       ↑ pendant cette étape, le CPU appelle
-                         bus.io_cycle(n) à chaque accès,
-                         ce qui rattrape PPU/HDMA en cours d'instruction
-  apu.tick(delta_mclk)                                           // catch-up rationnel
-  ppu.catch_up_to(total_mclk + delta_mclk)                       // résidu cycles internes
+              else if dma.active() { dma.tick(bus) }             // DMA steals the cycles
+              else { cpu.step(bus) }                             // 1 CPU instruction
+                       ↑ during this step, the CPU calls
+                         bus.io_cycle(n) on every access,
+                         which catches PPU/HDMA up mid-instruction
+  apu.tick(delta_mclk)                                           // rational catch-up
+  ppu.catch_up_to(total_mclk + delta_mclk)                       // internal-cycle residue
   total_mclk += delta_mclk
   if ppu.frame_complete() { return }
 }
 ```
 
-**Croquis Rust complet**
+**Full Rust sketch**
 
 ```rust
 // crates/luna-core/src/scheduler.rs
@@ -639,7 +631,7 @@ pub const APU_MASTER_HZ:  u64 = 24_576_000;
 pub struct Snes {
     pub cpu: Cpu65816,
     pub ppu: Ppu,
-    pub apu: Apu,             // SPC700 + DSP, fréquence indépendante
+    pub apu: Apu,             // SPC700 + DSP, independent frequency
     pub dma: DmaUnit,
     pub cart: Cartridge,
     pub wram: Box<[u8; 0x20000]>,
@@ -649,30 +641,30 @@ pub struct Snes {
 }
 
 impl Snes {
-    /// Une itération = soit 1 instruction CPU, soit 1 cycle DMA, soit
-    /// 1 refresh DRAM. Zero-alloc dans la hot loop.
+    /// One iteration = either 1 CPU instruction, or 1 DMA cycle, or
+    /// 1 DRAM refresh. Zero-alloc in the hot loop.
     #[inline]
     pub fn step(&mut self) -> TickEffect {
         let delta = if self.memory_refresh_pending {
             self.memory_refresh_pending = false;
             MEMORY_REFRESH_CYCLES                                    // ~40 mclk
         } else if self.dma.active() {
-            // DMA vole les cycles au CPU. Unité = 8 mclk (1 transfert byte)
+            // DMA steals cycles from the CPU. Unit = 8 mclk (1 byte transfer)
             self.dma.tick(&mut self.snes_bus())
         } else {
-            // CPU exécute UNE instruction. Pendant `step`, bus.io_cycle()
-            // rattrape immédiatement PPU + HDMA + IRQ check.
+            // CPU executes ONE instruction. During `step`, bus.io_cycle()
+            // immediately catches up PPU + HDMA + IRQ check.
             let mut bus = self.snes_bus();
             self.cpu.step(&mut bus);
             bus.access_master_cycles_total
         };
 
-        // APU à fréquence différente : catch-up à arithmétique
-        // RATIONNELLE u64 (pas de float, pas de dérive).
+        // APU at a different frequency: catch-up using RATIONAL u64
+        // arithmetic (no float, no drift).
         let apu_eff = self.apu.tick(delta);
 
-        // Résidu PPU (cycles internes CPU sans accès bus → pas rattrapés
-        // par io_cycle). Habituellement 0-2 mclk.
+        // PPU residue (internal CPU cycles with no bus access → not caught
+        // up by io_cycle). Usually 0-2 mclk.
         let ppu_eff = self.ppu.catch_up_to(self.total_mclk + delta);
 
         self.total_mclk += delta;
@@ -693,7 +685,7 @@ impl Snes {
     }
 }
 
-// APU catch-up à arithmétique rationnelle — PAS DE FLOAT
+// APU catch-up using rational arithmetic — NO FLOAT
 impl Apu {
     pub fn tick(&mut self, main_mcycles: MCycles) -> TickEffect {
         // master CPU = 21.477272 MHz, master APU = 24.576 MHz
@@ -709,47 +701,46 @@ impl Apu {
 }
 ```
 
-**Pourquoi ça marche** (à conserver en tête lors de l'implémentation) :
+**Why this works** (to keep in mind while implementing):
 
-1. **Zero-alloc dans la hot loop** — pas de `Box<dyn>`, pas de
-   `BinaryHeap`, pas de `Vec::push` par cycle. Static dispatch partout.
-2. **Mid-instruction accuracy gratuite** — `bus.io_cycle()` rattrape le
-   PPU à chaque accès, donc HDMA scanline-précis, IRQ H/V exacts, et
-   les bugs Mario Kart sont correctement reproduits.
-3. **Pas de dérive APU/CPU** — arithmétique rationnelle u64 (pas de
-   float). Vérifiable : après 1h d'émulation, `apu.cycle_count() ≈
-   apu_freq * elapsed`.
-4. **Save states triviaux** — tous les champs sont des `struct` concrets
-   `serde::Serialize` (impossible avec coroutines/closures).
-5. **Run-ahead / netplay possibles** — `step()` est pur, on peut cloner
-   l'état entier et le rejouer.
-6. **Borrow checker compatible** — pattern `SnesBus<'a>` créé à chaque
-   step qui emprunte les champs séparément (`&mut self.ppu, &mut
-   self.wram, …`). Pas de `Rc<RefCell>` dans la hot loop.
+1. **Zero-alloc in the hot loop** — no `Box<dyn>`, no `BinaryHeap`, no
+   `Vec::push` per cycle. Static dispatch everywhere.
+2. **Free mid-instruction accuracy** — `bus.io_cycle()` catches up the PPU
+   on every access, so scanline-precise HDMA, exact H/V IRQs, and the
+   Mario Kart bugs are correctly reproduced.
+3. **No APU/CPU drift** — rational u64 arithmetic (no float). Verifiable:
+   after 1h of emulation, `apu.cycle_count() ≈ apu_freq * elapsed`.
+4. **Trivial save states** — all fields are concrete `serde::Serialize`
+   structs (impossible with coroutines/closures).
+5. **Run-ahead / netplay possible** — `step()` is pure, the entire state
+   can be cloned and replayed.
+6. **Borrow-checker compatible** — `SnesBus<'a>` pattern created on every
+   step that borrows the fields separately (`&mut self.ppu, &mut
+   self.wram, …`). No `Rc<RefCell>` in the hot loop.
 
-**Risques résiduels & mitigations** : cf. §15.
+**Residual risks & mitigations**: see §15.
 
-**Fichiers de référence à étudier en Phase 0** (lecture seule, GPL-3.0
-incompatible avec copie) :
+**Reference files to study in Phase 0** (read-only, GPL-3.0 incompatible
+with copying):
 
 - [`jgenesis/backend/snes-core/src/api.rs`](https://github.com/jsgroth/jgenesis/blob/master/backend/snes-core/src/api.rs#L284)
-  — `Snes::tick` ligne 284 (modèle direct)
+  — `Snes::tick` line 284 (direct model)
 - [`jgenesis/backend/snes-core/src/apu.rs`](https://github.com/jsgroth/jgenesis/blob/master/backend/snes-core/src/apu.rs#L274)
-  — catch-up rationnel ligne 274
+  — rational catch-up line 274
 - [`jgenesis/backend/snes-core/src/memory/dma.rs`](https://github.com/jsgroth/jgenesis/blob/master/backend/snes-core/src/memory/dma.rs)
   — DMA/HDMA timing
 - [`jgenesis/backend/snes-core/src/bus.rs`](https://github.com/jsgroth/jgenesis/blob/master/backend/snes-core/src/bus.rs)
-  — calcul `access_master_cycles` par région mémoire
+  — `access_master_cycles` computation per memory region
 - [`tetanes-core/src/cpu.rs`](https://github.com/lukexor/tetanes/blob/main/tetanes-core/src/cpu.rs#L280)
-  — pattern `start_cycle`/`end_cycle` (NES mais transposable)
+  — `start_cycle`/`end_cycle` pattern (NES but transposable)
 
 ---
 
-## 7. Couche 3 — Control & introspection API
+## 7. Layer 3 — Control & introspection API
 
-C'est la couche qui définit **ce qu'on peut faire avec la machine** sans
-parler de MCP encore. Elle est exposée par le crate `luna-api` sous forme
-de traits Rust async, indépendants du protocole.
+This is the layer that defines **what you can do with the machine** without
+yet talking about MCP. It is exposed by the `luna-api` crate as async Rust
+traits, independent of the protocol.
 
 ### 7.1 Control plane
 
@@ -779,12 +770,12 @@ pub trait EmulatorControl {
 ```rust
 #[async_trait]
 pub trait EmulatorDebug {
-    // Registres
+    // Registers
     async fn cpu_registers(&self) -> CpuRegisters;
     async fn apu_registers(&self) -> ApuRegisters;
     async fn ppu_registers(&self) -> PpuRegisters;
 
-    // Mémoire
+    // Memory
     async fn read_memory(&self, space: MemSpace, addr: u32, len: u32) -> Vec<u8>;
     async fn write_memory(&self, space: MemSpace, addr: u32, data: Vec<u8>) -> Result<()>;
 
@@ -793,7 +784,7 @@ pub trait EmulatorDebug {
     async fn remove_breakpoint(&self, id: BpId) -> Result<()>;
     async fn list_breakpoints(&self) -> Vec<BreakpointInfo>;
 
-    // Désassemblage
+    // Disassembly
     async fn disassemble(&self, addr: u24, count: u32) -> Vec<DisasmLine>;
 
     // Trace
@@ -813,31 +804,31 @@ pub enum Breakpoint {
 }
 ```
 
-### 7.3 Semantic API (pour l'IA)
+### 7.3 Semantic API (for the AI)
 
-**C'est ici que Luna se différencie de tous les autres émulateurs.** On
-expose la *sémantique* du frame courant, pas seulement ses pixels, pour
-qu'un agent puisse "comprendre" la scène sans pipeline de vision.
+**This is where Luna differentiates itself from every other emulator.** We
+expose the *semantics* of the current frame, not just its pixels, so that
+an agent can "understand" the scene without a vision pipeline.
 
 ```rust
 #[async_trait]
 pub trait EmulatorSemantic {
-    /// Tous les sprites OAM avec leur état décodé.
+    /// All OAM sprites with their decoded state.
     async fn sprites(&self) -> Vec<Sprite>;
 
-    /// Les 4 backgrounds, leur mode, leurs registres de scroll.
+    /// The 4 backgrounds, their mode, their scroll registers.
     async fn backgrounds(&self) -> [Background; 4];
 
-    /// La région de tilemap actuellement visible pour un BG donné.
+    /// The currently visible tilemap region for a given BG.
     async fn visible_tilemap(&self, bg: u8) -> Tilemap;
 
-    /// Palette CGRAM décodée en couleurs RGB.
+    /// CGRAM palette decoded into RGB colors.
     async fn palette(&self) -> [Color; 256];
 
-    /// Mode graphique actif ($2105).
+    /// Active graphics mode ($2105).
     async fn graphics_mode(&self) -> GraphicsMode;
 
-    /// État des fenêtres et color math.
+    /// Window and color-math state.
     async fn window_state(&self) -> WindowState;
 }
 
@@ -853,8 +844,8 @@ pub struct Sprite {
 }
 ```
 
-**Bonus** : un système optionnel de **annotations par jeu** (`game_maps/`),
-qui mappe des adresses RAM connues à des noms sémantiques :
+**Bonus**: an optional system of **per-game annotations** (`game_maps/`),
+which maps known RAM addresses to semantic names:
 
 ```toml
 # game_maps/super_mario_world.toml
@@ -867,13 +858,13 @@ qui mappe des adresses RAM connues à des noms sémantiques :
 "lives"        = { addr = 0x7E0DBE, type = "u8" }
 ```
 
-L'agent peut alors faire `read_named("player_x")` au lieu de mémoriser des
-adresses hex.
+The agent can then call `read_named("player_x")` instead of memorizing hex
+addresses.
 
 ### 7.4 Events & subscriptions
 
-Beaucoup de cas d'usage nécessitent que l'agent réagisse à un événement
-plutôt que de poller. On expose un canal d'événements async :
+Many use cases require the agent to react to an event rather than poll. We
+expose an async event channel:
 
 ```rust
 #[async_trait]
@@ -892,99 +883,99 @@ pub enum EmulatorEvent {
 }
 ```
 
-Côté MCP, ces événements sont publiés comme **notifications** JSON-RPC
-(messages serveur→client non-sollicités).
+On the MCP side, these events are published as JSON-RPC **notifications**
+(unsolicited server→client messages).
 
 ---
 
-## 8. Couche 4 — Serveur MCP
+## 8. Layer 4 — MCP server
 
 ### 8.1 Transport & runtime
 
-**Transports supportés** (dans cet ordre de priorité) :
+**Supported transports** (in this priority order):
 
-1. **stdio** — pour intégration locale Claude Code, Cursor, etc.
-2. **Streamable HTTP** — pour intégration web / cloud.
-3. **SSE** — fallback historique.
+1. **stdio** — for local integration with Claude Code, Cursor, etc.
+2. **Streamable HTTP** — for web / cloud integration.
+3. **SSE** — historical fallback.
 
-Le binaire `luna` lance le serveur MCP en mode stdio par défaut :
+The `luna` binary launches the MCP server in stdio mode by default:
 
 ```bash
-$ luna mcp                            # mode stdio (par défaut)
-$ luna mcp --http --port 7878         # mode HTTP
-$ luna mcp --rom path/to/game.sfc     # charge la ROM au démarrage
+$ luna mcp                            # stdio mode (default)
+$ luna mcp --http --port 7878         # HTTP mode
+$ luna mcp --rom path/to/game.sfc     # load the ROM at startup
 ```
 
-Le runtime tokio multi-thread gère la concurrence : un thread dédié pour
-le cœur d'émulation (60 fps cadencé), N threads pour les handlers MCP qui
-parlent au cœur via canaux crossbeam.
+The multi-thread tokio runtime handles concurrency: a dedicated thread for
+the emulation core (clocked at 60 fps), N threads for the MCP handlers that
+talk to the core via crossbeam channels.
 
-### 8.2 Catalogue de tools
+### 8.2 Tool catalogue
 
-Chaque tool MCP est une fine couche de mapping JSON ↔ appel à `luna-api`.
-Schémas JSON générés à partir des structs Rust via `schemars`.
+Each MCP tool is a thin JSON ↔ `luna-api` call mapping layer. JSON schemas
+generated from the Rust structs via `schemars`.
 
-**Tools "control"**
-
-| Tool                    | Description                                  |
-|-------------------------|----------------------------------------------|
-| `emu_load_rom`          | Charge une ROM depuis un chemin              |
-| `emu_reset`             | Reset console                                |
-| `emu_pause` / `emu_resume` | Pause/reprise                             |
-| `emu_step`              | Avance de N instructions / cycles / frames   |
-| `emu_send_input`        | Envoie une séquence de boutons               |
-| `emu_screenshot`        | PNG du framebuffer courant                   |
-| `emu_save_state`        | Crée un save state, retourne un ID           |
-| `emu_load_state`        | Restaure un save state                       |
-
-**Tools "debug"**
+**"Control" tools**
 
 | Tool                    | Description                                  |
 |-------------------------|----------------------------------------------|
-| `dbg_read_memory`       | Lit N octets dans un espace mémoire          |
-| `dbg_write_memory`      | Écrit N octets                               |
-| `dbg_get_registers`     | Tous les registres CPU/PPU/APU               |
-| `dbg_add_breakpoint`    | Pose un breakpoint typé                      |
-| `dbg_remove_breakpoint` | Retire un breakpoint                         |
-| `dbg_list_breakpoints`  | Liste les breakpoints actifs                 |
-| `dbg_disassemble`       | Désassemble N instructions à une adresse     |
-| `dbg_trace_start`       | Démarre un trace log filtré                  |
-| `dbg_trace_stop`        | Stoppe et retourne le trace                  |
+| `emu_load_rom`          | Loads a ROM from a path                      |
+| `emu_reset`             | Resets the console                           |
+| `emu_pause` / `emu_resume` | Pause/resume                              |
+| `emu_step`              | Advances by N instructions / cycles / frames |
+| `emu_send_input`        | Sends a button sequence                      |
+| `emu_screenshot`        | PNG of the current framebuffer               |
+| `emu_save_state`        | Creates a save state, returns an ID          |
+| `emu_load_state`        | Restores a save state                        |
 
-**Tools "semantic"** (l'avantage différenciant de Luna)
+**"Debug" tools**
 
 | Tool                    | Description                                  |
 |-------------------------|----------------------------------------------|
-| `sem_get_sprites`       | Liste structurée des 128 sprites actifs      |
-| `sem_get_backgrounds`   | Les 4 BG avec mode + scroll                  |
-| `sem_get_tilemap`       | Tilemap visible pour un BG                   |
-| `sem_get_palette`       | Palette CGRAM décodée                        |
-| `sem_read_named`        | Lit une adresse via le mapping nommé du jeu  |
-| `sem_load_game_map`     | Charge un fichier d'annotations              |
+| `dbg_read_memory`       | Reads N bytes in a memory space              |
+| `dbg_write_memory`      | Writes N bytes                               |
+| `dbg_get_registers`     | All CPU/PPU/APU registers                    |
+| `dbg_add_breakpoint`    | Sets a typed breakpoint                      |
+| `dbg_remove_breakpoint` | Removes a breakpoint                         |
+| `dbg_list_breakpoints`  | Lists the active breakpoints                 |
+| `dbg_disassemble`       | Disassembles N instructions at an address    |
+| `dbg_trace_start`       | Starts a filtered trace log                  |
+| `dbg_trace_stop`        | Stops and returns the trace                  |
 
-### 8.3 Catalogue de resources
+**"Semantic" tools** (Luna's differentiating advantage)
 
-Les **resources** MCP exposent des contenus que l'agent peut "lire"
-(différent des tools qui sont des actions).
+| Tool                    | Description                                  |
+|-------------------------|----------------------------------------------|
+| `sem_get_sprites`       | Structured list of the 128 active sprites    |
+| `sem_get_backgrounds`   | The 4 BGs with mode + scroll                 |
+| `sem_get_tilemap`       | Visible tilemap for a BG                     |
+| `sem_get_palette`       | Decoded CGRAM palette                        |
+| `sem_read_named`        | Reads an address via the game's named mapping|
+| `sem_load_game_map`     | Loads an annotation file                     |
 
-| URI                                     | Contenu                              |
+### 8.3 Resource catalogue
+
+MCP **resources** expose content the agent can "read" (different from
+tools, which are actions).
+
+| URI                                     | Content                              |
 |-----------------------------------------|--------------------------------------|
-| `luna://state/cpu`                      | JSON registres CPU                   |
-| `luna://state/ppu`                      | JSON registres PPU                   |
-| `luna://state/framebuffer.png`          | Frame courante en PNG                |
-| `luna://state/sprites`                  | JSON sprites OAM                     |
-| `luna://memory/wram?addr=…&len=…`       | Dump mémoire                         |
-| `luna://disasm?addr=…&count=…`          | Désassemblage texte                  |
-| `luna://docs/65c816-opcodes`            | Référence opcodes 65C816 intégrée    |
-| `luna://docs/ppu-registers`             | Référence registres PPU              |
+| `luna://state/cpu`                      | JSON CPU registers                   |
+| `luna://state/ppu`                      | JSON PPU registers                   |
+| `luna://state/framebuffer.png`          | Current frame as PNG                 |
+| `luna://state/sprites`                  | JSON OAM sprites                     |
+| `luna://memory/wram?addr=…&len=…`       | Memory dump                          |
+| `luna://disasm?addr=…&count=…`          | Text disassembly                     |
+| `luna://docs/65c816-opcodes`            | Built-in 65C816 opcode reference     |
+| `luna://docs/ppu-registers`             | PPU register reference               |
 
-Ces docs intégrées permettent à l'agent de consulter la spec sans réseau,
-ce qui accélère énormément les itérations debug.
+These built-in docs let the agent consult the spec without a network,
+which dramatically speeds up debug iterations.
 
 ### 8.4 Notifications & streaming
 
-Le serveur émet des notifications JSON-RPC pour les événements abonnés.
-Le client MCP les reçoit en push :
+The server emits JSON-RPC notifications for subscribed events. The MCP
+client receives them as a push:
 
 ```json
 {
@@ -999,87 +990,84 @@ Le client MCP les reçoit en push :
 }
 ```
 
-Côté agent, cela permet le pattern :
+On the agent side, this enables the pattern:
 
 ```
 1. add_breakpoint(exec, 0x808012)
 2. resume()
-3. (attente passive de la notification "BreakpointHit")
+3. (passive wait for the "BreakpointHit" notification)
 4. get_registers() / read_memory() / disassemble()
 5. step / continue
 ```
 
-### 8.5 Économie de tokens & coûts MCP
+### 8.5 Token economy & MCP costs
 
-#### 8.5.1 Le problème
+#### 8.5.1 The problem
 
-Un agent qui pilote un émulateur peut très rapidement saturer un quota de
-tokens si l'API est designée naïvement. Quelques ordres de grandeur pour
-fixer les idées (base : ~4 caractères par token, encodage base64 ajoute
-~33% de volume) :
+An agent driving an emulator can saturate a token quota very quickly if the
+API is designed naively. A few orders of magnitude to set the scene (basis:
+~4 characters per token, base64 encoding adds ~33% of volume):
 
-| Donnée brute SNES                       | Taille  | Tokens (naive) |
+| Raw SNES data                           | Size    | Tokens (naive) |
 |-----------------------------------------|---------|----------------|
-| Framebuffer RGBA 256×224                | 224 KB  | ~76 000        |
-| Framebuffer PNG (couleurs limitées)     | 5–20 KB | ~1 700–6 800   |
-| VRAM dump complet                       | 64 KB   | ~22 000        |
-| WRAM dump complet                       | 128 KB  | ~44 000        |
-| OAM complet (128 sprites, raw)          | 544 B   | ~180           |
-| 1 seconde de trace CPU non filtrée      | ~1 MB   | ~340 000       |
+| RGBA framebuffer 256×224                | 224 KB  | ~76,000        |
+| PNG framebuffer (limited colors)        | 5–20 KB | ~1,700–6,800   |
+| Full VRAM dump                          | 64 KB   | ~22,000        |
+| Full WRAM dump                          | 128 KB  | ~44,000        |
+| Full OAM (128 sprites, raw)             | 544 B   | ~180           |
+| 1 second of unfiltered CPU trace        | ~1 MB   | ~340,000       |
 
-À titre de comparaison, un appel Claude Sonnet typique a un *context window*
-de l'ordre de 200k tokens. **Un screenshot raw consommerait déjà ~38% de
-ce budget** ; un trace log brut, plus que le budget entier. Sans
-discipline, un agent jouant 5 minutes peut consommer plusieurs millions
-de tokens.
+For comparison, a typical Claude Sonnet call has a *context window* on the
+order of 200k tokens. **A raw screenshot would already consume ~38% of that
+budget**; a raw trace log, more than the entire budget. Without discipline,
+an agent playing for 5 minutes can consume several million tokens.
 
-#### 8.5.2 Sept principes de design
+#### 8.5.2 Seven design principles
 
-1. **Sémantique avant pixels** : par défaut, retourner des structures
-   décodées (sprites, scroll, named RAM), pas des bytes.
-2. **Filtrer côté serveur** : `visible_only`, `region`, `since_frame`,
-   `kind` — pas à l'agent de jeter ce qu'il n'a pas demandé.
-3. **Hash + diff** : avant un gros payload, exposer un hash de l'état ;
-   l'agent ne fetche que si ça a changé.
-4. **Resources plutôt qu'inline** : les gros blobs (PNG, dumps mémoire)
-   sont exposés comme **MCP resources** (URI), pas inline dans la
-   réponse — l'agent ne paie le coût que s'il choisit explicitement de
-   lire la resource.
-5. **Niveaux de détail explicites** : tout tool potentiellement coûteux
-   expose un paramètre `detail: "thumbnail" | "low" | "medium" | "full"`,
-   avec `low` par défaut.
-6. **Plafonds durs** : chaque tool a un `max_bytes` interne et tronque
-   avec un avertissement structuré plutôt que de retourner 100 KB sans
-   prévenir.
-7. **Budget annoncé** : chaque réponse inclut un champ
-   `estimated_output_tokens` (calculé côté serveur) qui permet à l'agent
-   et à l'humain de suivre la consommation en temps réel.
+1. **Semantics before pixels**: by default, return decoded structures
+   (sprites, scroll, named RAM), not bytes.
+2. **Filter server-side**: `visible_only`, `region`, `since_frame`,
+   `kind` — it is not the agent's job to throw away what it did not ask
+   for.
+3. **Hash + diff**: before a large payload, expose a hash of the state;
+   the agent only fetches if it changed.
+4. **Resources rather than inline**: large blobs (PNG, memory dumps) are
+   exposed as **MCP resources** (URI), not inline in the response — the
+   agent only pays the cost if it explicitly chooses to read the resource.
+5. **Explicit detail levels**: every potentially costly tool exposes a
+   `detail: "thumbnail" | "low" | "medium" | "full"` parameter, with `low`
+   as the default.
+6. **Hard caps**: each tool has an internal `max_bytes` and truncates with
+   a structured warning rather than returning 100 KB without notice.
+7. **Announced budget**: every response includes an
+   `estimated_output_tokens` field (computed server-side) that lets the
+   agent and the human track consumption in real time.
 
-#### 8.5.3 Stratégies concrètes par tool
+#### 8.5.3 Concrete strategies per tool
 
-| Tool                | Naive                  | Avec stratégie Luna       | Économie  |
+| Tool                | Naive                  | With the Luna strategy    | Savings   |
 |---------------------|------------------------|---------------------------|-----------|
-| `emu_screenshot`    | PNG inline base64 (~5k)| Resource URI (~50 tokens) ; PNG accessible via `luna://state/framebuffer.png` si besoin | ~99% |
-| `sem_get_sprites`   | 128 sprites tous champs (~3k) | `{visible_only: true, fields: ["x","y","tile"]}` → ~500 | ~85% |
-| `dbg_read_memory`   | 1 KB de bytes (~340)   | Hash si inchangé (~30) ; bytes si changé | ~90% en régime stable |
-| `dbg_trace_start`   | Brut (~340k/s)         | Filtre `{pc_range, ops}` + limite `max_lines` | ~99% |
-| `sem_get_tilemap`   | Tilemap complet 32×32×4 (~5k) | Auto-crop à la région visible (~1k) | ~80% |
-| `dbg_get_registers` | Tous les registres détaillés (~600) | Catégories : `cpu`, `ppu_minimal`, `apu` (~150 chacun) | ~75% |
+| `emu_screenshot`    | Inline base64 PNG (~5k)| Resource URI (~50 tokens); PNG available via `luna://state/framebuffer.png` if needed | ~99% |
+| `sem_get_sprites`   | 128 sprites all fields (~3k) | `{visible_only: true, fields: ["x","y","tile"]}` → ~500 | ~85% |
+| `dbg_read_memory`   | 1 KB of bytes (~340)   | Hash if unchanged (~30); bytes if changed | ~90% in steady state |
+| `dbg_trace_start`   | Raw (~340k/s)          | Filter `{pc_range, ops}` + `max_lines` limit | ~99% |
+| `sem_get_tilemap`   | Full tilemap 32×32×4 (~5k) | Auto-crop to the visible region (~1k) | ~80% |
+| `dbg_get_registers` | All registers in detail (~600) | Categories: `cpu`, `ppu_minimal`, `apu` (~150 each) | ~75% |
 
-#### 8.5.4 Mécanismes mis en œuvre dans l'API
+#### 8.5.4 Mechanisms implemented in the API
 
-**a) Niveaux de détail standardisés**
+**a) Standardized detail levels**
 
 ```rust
 #[derive(Deserialize)]
 pub struct ScreenshotParams {
     /// "thumbnail" (32×28, ~150 tokens),
     /// "low" (128×112, ~1.5k tokens),
-    /// "full" (256×224, via resource URI seulement)
+    /// "full" (256×224, via resource URI only)
     #[serde(default = "default_low")]
     detail: DetailLevel,
-    /// Si true, retourne juste un hash si la frame n'a pas changé
-    /// depuis le dernier appel
+    /// If true, return just a hash if the frame has not changed
+    /// since the last call
     #[serde(default)]
     if_changed_since: Option<FrameHash>,
 }
@@ -1092,64 +1080,63 @@ pub struct ScreenshotParams {
 pub struct MemoryReadResponse {
     pub addr: u32,
     pub len: u32,
-    pub hash: u64,             // toujours retourné
-    pub data: Option<Vec<u8>>, // None si hash == precedent_hash (économie)
+    pub hash: u64,             // always returned
+    pub data: Option<Vec<u8>>, // None if hash == previous_hash (savings)
     pub estimated_output_tokens: u32,
 }
 ```
 
-L'agent peut donc faire : "lis 1KB à 0x7E0000, mais juste le hash si rien
-n'a changé". Sur une boucle de polling, ça réduit le coût d'un facteur
+The agent can therefore say: "read 1KB at 0x7E0000, but just the hash if
+nothing changed". On a polling loop, this cuts the cost by a factor of
 10–100x.
 
-**c) Resources pour les gros payloads**
+**c) Resources for large payloads**
 
-Plutôt que d'inliner un PNG dans une réponse de tool, Luna expose :
+Rather than inlining a PNG in a tool response, Luna exposes:
 
 ```
-luna://state/framebuffer.png        → PNG complet
+luna://state/framebuffer.png        → full PNG
 luna://state/vram.bin               → 64 KB VRAM
-luna://state/sprites.json           → JSON détaillé tous sprites
-luna://state/disasm?addr=…&count=…  → désassemblage texte
+luna://state/sprites.json           → detailed JSON of all sprites
+luna://state/disasm?addr=…&count=…  → text disassembly
 ```
 
-Le tool `emu_screenshot` retourne par défaut **uniquement** l'URI de la
-resource + un thumbnail. L'agent décide s'il "ouvre" la resource. Les
-clients MCP comme Claude Code peuvent même prévisualiser sans charger en
-contexte.
+The `emu_screenshot` tool returns, by default, **only** the resource URI +
+a thumbnail. The agent decides whether to "open" the resource. MCP clients
+like Claude Code can even preview without loading into context.
 
-**d) Filtres standardisés**
+**d) Standardized filters**
 
-Tous les tools "list" supportent des filtres uniformes :
+All "list" tools support uniform filters:
 
 ```jsonc
 {
-  "visible_only": true,        // sprites/tiles à l'écran uniquement
+  "visible_only": true,        // on-screen sprites/tiles only
   "region": { "x": 0, "y": 0, "w": 128, "h": 128 },
-  "since_frame": 1234,          // delta depuis une frame
-  "fields": ["x", "y", "tile"], // projection (économie majeure)
+  "since_frame": 1234,          // delta since a frame
+  "fields": ["x", "y", "tile"], // projection (major savings)
   "limit": 50
 }
 ```
 
-**e) Subscriptions plutôt que polling**
+**e) Subscriptions rather than polling**
 
-Polling coûte cher (1 tool call/frame × 60 frames/s). On encourage
-l'agent à utiliser les notifications MCP pour les events fréquents :
+Polling is expensive (1 tool call/frame × 60 frames/s). We encourage the
+agent to use MCP notifications for frequent events:
 
 ```
-✘ Mauvais (polling) :
+✘ Bad (polling):
   while True: screenshot(); analyze(); sleep(...)
   → 60 tools/s × 1k tokens = 60k tokens/s
 
-✓ Bon (event-driven) :
+✓ Good (event-driven):
   subscribe("FrameComplete", every=30)
   → 2 notifications/s × 200 tokens = 400 tokens/s
 ```
 
-**f) Budget tracking transparent**
+**f) Transparent budget tracking**
 
-Chaque réponse contient :
+Each response contains:
 
 ```json
 {
@@ -1162,179 +1149,176 @@ Chaque réponse contient :
 }
 ```
 
-L'agent (et la GUI spectator) peut afficher la consommation en temps
-réel. Quand on approche du budget, on peut soit alerter, soit dégrader
-gracieusement (forcer `detail: thumbnail` automatiquement).
+The agent (and the spectator GUI) can display consumption in real time.
+When the budget is approached, we can either alert or degrade gracefully
+(automatically force `detail: thumbnail`).
 
-#### 8.5.5 Modes de coût configurables
+#### 8.5.5 Configurable cost modes
 
-Au démarrage du serveur MCP, l'utilisateur choisit un profil :
+At MCP server startup, the user picks a profile:
 
 ```bash
 $ luna mcp --rom game.sfc --cost-profile economy
-$ luna mcp --rom game.sfc --cost-profile balanced     # défaut
+$ luna mcp --rom game.sfc --cost-profile balanced     # default
 $ luna mcp --rom game.sfc --cost-profile generous
 ```
 
-| Profil      | Screenshot default | Memory default      | Trace default     |
-|-------------|--------------------|---------------------|-------------------|
-| `economy`   | thumbnail          | hash-only           | refusé sans filtre|
-| `balanced`  | low                | hash-then-data      | 1k lignes max     |
-| `generous`  | medium             | full data           | 10k lignes max    |
+| Profile     | Screenshot default | Memory default      | Trace default        |
+|-------------|--------------------|---------------------|----------------------|
+| `economy`   | thumbnail          | hash-only           | refused without filter|
+| `balanced`  | low                | hash-then-data      | 1k lines max         |
+| `generous`  | medium             | full data           | 10k lines max        |
 
-Le profil `economy` est conçu pour qu'une session de plusieurs heures
-tienne dans un budget raisonnable (typiquement < 5M tokens / heure de
-gameplay actif).
+The `economy` profile is designed so that a multi-hour session fits within
+a reasonable budget (typically < 5M tokens / hour of active gameplay).
 
-#### 8.5.6 Estimation budget de session
+#### 8.5.6 Session budget estimate
 
-Sur un cas d'usage typique "agent qui apprend à jouer Super Mario World"
-avec profil `balanced` et boucle event-driven :
+On a typical "agent learning to play Super Mario World" use case with the
+`balanced` profile and an event-driven loop:
 
-| Action                            | Fréquence       | Tokens/appel | Total/min  |
+| Action                            | Frequency       | Tokens/call  | Total/min  |
 |-----------------------------------|-----------------|--------------|------------|
-| FrameComplete subscription        | 2/s (filtré)    | 200          | 24 000     |
-| sem_get_sprites (visible)         | 2/s             | 500          | 60 000     |
-| sem_read_named (player_x/y/lives) | 2/s             | 80           | 9 600      |
-| emu_send_input                    | ~5/s            | 50           | 15 000     |
-| emu_screenshot (low) occasionnel  | 0.1/s           | 1 500        | 9 000      |
-| **Total**                         |                 |              | **~120 k/min** |
+| FrameComplete subscription        | 2/s (filtered)  | 200          | 24,000     |
+| sem_get_sprites (visible)         | 2/s             | 500          | 60,000     |
+| sem_read_named (player_x/y/lives) | 2/s             | 80           | 9,600      |
+| emu_send_input                    | ~5/s            | 50           | 15,000     |
+| emu_screenshot (low) occasional   | 0.1/s           | 1,500        | 9,000      |
+| **Total**                         |                 |              | **~120k/min** |
 
-→ **~7M tokens/heure** d'agent actif sur ce profil. C'est tenable sur un
-plan API "pro" Anthropic, et nettement plus que les ~80M tokens/heure
-qu'on consommerait avec un design naïf à base de PNG full + dumps RAM.
+→ **~7M tokens/hour** of an active agent on this profile. That is
+sustainable on an Anthropic "pro" API plan, and far below the ~80M
+tokens/hour a naive design based on full PNGs + RAM dumps would consume.
 
 ---
 
-## 9. API-first & écosystème d'usages
+## 9. API-first & ecosystem of use cases
 
-L'agent IA via MCP n'est qu'un client parmi d'autres possibles. Exposer
-Luna comme une API stable ouvre tout un éventail d'outils que la
-communauté SNES n'a jamais eu : IDE web pour homebrew, client desktop de
-développement, CI pour ROM hacks, plateforme TAS, extension VSCode, etc.
-Cette section explicite cette ouverture et ses implications.
+The AI agent via MCP is only one possible client among many. Exposing Luna
+as a stable API opens up a whole range of tools the SNES community has
+never had: a web IDE for homebrew, a desktop development client, CI for ROM
+hacks, a TAS platform, a VSCode extension, etc. This section spells out that
+openness and its implications.
 
-### 9.1 L'API est le produit, pas MCP
+### 9.1 The API is the product, not MCP
 
-Quand on regarde l'architecture en couches (§3.1), on constate que les
-couches 1 à 3 ne dépendent **jamais** de la couche 4. Le serveur MCP
-n'est qu'un **adaptateur** qui traduit JSON-RPC ↔ appels Rust de
-`luna-api`.
+Looking at the layered architecture (§3.1), one notices that layers 1 to 3
+**never** depend on layer 4. The MCP server is only an **adapter** that
+translates JSON-RPC ↔ `luna-api` Rust calls.
 
 ```
-   Vision naïve                       Vision Luna
-   ────────────                       ───────────
+   Naive view                         Luna view
+   ──────────                         ─────────
    ┌─────────────┐                    ┌─────────────┐
-   │  Émulateur  │                    │  API stable │ ← le produit public
+   │  Emulator   │                    │ Stable API  │ ← the public product
    └──────┬──────┘                    ├─────────────┤
-          │                           │  Émulateur  │ ← l'implémentation
+          │                           │  Emulator   │ ← the implementation
    ┌──────▼──────┐                    └─────────────┘
-   │   API MCP   │ ← le produit
+   │   MCP API   │ ← the product
    └─────────────┘            ┌─MCP─┬─REST─┬─WS─┬─WASM─┬─FFI─┐
                               └─────┴──────┴────┴──────┴─────┘
-                                     ↑ adaptateurs interchangeables
+                                     ↑ interchangeable adapters
 ```
 
-C'est le pattern **Ports & Adapters** (architecture hexagonale), adapté à
-un produit où le cœur (l'émulation) doit survivre aux évolutions des
-protocoles d'accès. Concrètement :
+This is the **Ports & Adapters** pattern (hexagonal architecture), adapted
+to a product where the core (the emulation) must outlive the evolution of
+access protocols. Concretely:
 
-- Le crate `luna-api` n'importe **rien de spécifique MCP**.
-- Les types publics sont sérialisables avec `serde` mais agnostiques au
-  format (JSON, MessagePack, bincode, protobuf possibles).
-- Tout nouveau transport est un crate `luna-transport-X` qui dépend
-  uniquement de `luna-api`, jamais l'inverse.
+- The `luna-api` crate imports **nothing MCP-specific**.
+- The public types are serializable with `serde` but format-agnostic
+  (JSON, MessagePack, bincode, protobuf possible).
+- Every new transport is a `luna-transport-X` crate that depends only on
+  `luna-api`, never the other way around.
 
-### 9.2 Catalogue de transports
+### 9.2 Transport catalogue
 
-| Transport          | Cas d'usage typique                      | Statut    |
+| Transport          | Typical use case                         | Status    |
 |--------------------|------------------------------------------|-----------|
-| **MCP stdio**      | Agent IA local (Claude Code, Cursor)     | V1        |
-| **MCP HTTP/SSE**   | Agent IA distant, multi-client           | V1        |
-| **REST / HTTP**    | Frontends web, intégrations enterprise   | V1.1      |
-| **WebSocket**      | Web temps réel (Luna Studio Web)         | V1.1      |
-| **gRPC**           | Clients haute perf, microservices        | V2        |
-| **WASM / JS bindings** | Émulateur dans le navigateur         | V2        |
-| **FFI / cdylib**   | Intégrations C / Python / Lua / …        | V2        |
-| **libretro core**  | Intégration RetroArch                    | V2        |
+| **MCP stdio**      | Local AI agent (Claude Code, Cursor)     | V1        |
+| **MCP HTTP/SSE**   | Remote AI agent, multi-client            | V1        |
+| **REST / HTTP**    | Web frontends, enterprise integrations   | V1.1      |
+| **WebSocket**      | Real-time web (Luna Studio Web)          | V1.1      |
+| **gRPC**           | High-perf clients, microservices         | V2        |
+| **WASM / JS bindings** | Emulator in the browser              | V2        |
+| **FFI / cdylib**   | C / Python / Lua / … integrations        | V2        |
+| **libretro core**  | RetroArch integration                    | V2        |
 
-**Principe** : *un schéma source, plusieurs adaptateurs générés*. À
-partir des types `luna-api` annotés avec `schemars::JsonSchema`, on
-dérive automatiquement :
+**Principle**: *one source schema, several generated adapters*. From the
+`luna-api` types annotated with `schemars::JsonSchema`, we automatically
+derive:
 
-- JSON Schema pour les tools MCP.
-- OpenAPI 3 pour REST (via `utoipa`).
-- Fichiers `.proto` pour gRPC.
-- Types TypeScript pour les clients web (via `ts-rs`).
-- Bindings Python (via `pyo3`).
+- JSON Schema for the MCP tools.
+- OpenAPI 3 for REST (via `utoipa`).
+- `.proto` files for gRPC.
+- TypeScript types for web clients (via `ts-rs`).
+- Python bindings (via `pyo3`).
 
-Une seule source de vérité, plusieurs surfaces. Le risque de
-désynchronisation entre client et serveur est éliminé à la compilation.
+A single source of truth, several surfaces. The risk of desynchronization
+between client and server is eliminated at compile time.
 
-**⚠️ Contrainte WASM importante** : `rmcp` (le SDK MCP Rust officiel) ne
-supporte pas `wasm32-unknown-unknown` (dépend de `tokio` mainline avec
-features non-WASM). Conséquence pour Luna Studio Web :
+**⚠️ Important WASM constraint**: `rmcp` (the official Rust MCP SDK) does
+not support `wasm32-unknown-unknown` (it depends on mainline `tokio` with
+non-WASM features). Consequence for Luna Studio Web:
 
-- Le binaire WASM **n'embarque pas de serveur MCP**.
-- L'agent IA distant se connecte à un Luna **natif** (qui héberge le
-  serveur MCP officiel), via WebSocket relayé par le client web.
-- Architecture cible pour la V2 web :
+- The WASM binary **does not embed an MCP server**.
+- The remote AI agent connects to a **native** Luna (which hosts the
+  official MCP server), via WebSocket relayed by the web client.
+- Target architecture for the web V2:
 
   ```
-  Agent IA ──MCP stdio──► Luna natif ──WebSocket──► Luna Studio Web (WASM)
+  AI agent ──MCP stdio──► native Luna ──WebSocket──► Luna Studio Web (WASM)
                                                           │
                                                           ▼
-                                                   Vue partagée du même
-                                                   état d'émulation
+                                                   Shared view of the same
+                                                   emulation state
   ```
 
-- Alternative future : attendre `wasm32-wasip2` + Component Model
-  (maturité mi-2026 selon paiml/rust-mcp-sdk).
+- Future alternative: wait for `wasm32-wasip2` + the Component Model
+  (maturity mid-2026 per paiml/rust-mcp-sdk).
 
-Cf. RESEARCH.md pour les détails de l'audit WASM.
+See RESEARCH.md for the details of the WASM audit.
 
-### 9.3 Cas d'usage produit déverrouillés
+### 9.3 Unlocked product use cases
 
-Au-delà de l'agent IA, voici l'écosystème d'outils que l'API rend
-possible. Listés par potentiel d'impact pour la communauté SNES.
+Beyond the AI agent, here is the ecosystem of tools the API makes possible.
+Listed by impact potential for the SNES community.
 
-#### A — Luna Studio Web (IDE homebrew dans le navigateur)
+#### A — Luna Studio Web (homebrew IDE in the browser)
 
-**Priorité haute** post-V1. Un environnement intégré dans le navigateur
-pour développer son propre jeu SNES :
+**High priority** post-V1. An integrated environment in the browser to
+develop your own SNES game:
 
-- Éditeur de code (Monaco/CodeMirror) avec coloration syntaxique 65C816.
-- Assembleur intégré (`wla-dx`, `ca65`) compilé en WASM.
-- **Émulateur Luna en WASM** dans la même page, exécution locale.
-- **Hot-reload** : `Ctrl+R` ré-assemble et relance le ROM en cours.
-- Outils de debug visuels : VRAM viewer, palette editor, sprite editor,
-  tilemap painter.
-- Versioning Git via libgit2 (in-browser) ou backend serveur.
-- Partage de projets via URL (sandboxed).
+- Code editor (Monaco/CodeMirror) with 65C816 syntax highlighting.
+- Built-in assembler (`wla-dx`, `ca65`) compiled to WASM.
+- **Luna emulator in WASM** on the same page, local execution.
+- **Hot-reload**: `Ctrl+R` re-assembles and relaunches the current ROM.
+- Visual debug tools: VRAM viewer, palette editor, sprite editor, tilemap
+  painter.
+- Git versioning via libgit2 (in-browser) or a server backend.
+- Project sharing via URL (sandboxed).
 
-Tout l'IDE est une SPA qui parle à Luna WASM via JS bindings — aucune
-latence réseau dans la boucle dev/test. **C'est de loin le cas d'usage
-le plus impactant pour la communauté homebrew SNES**, qui n'a aujourd'hui
-aucun équivalent à Godot/Unity pour ses besoins.
+The entire IDE is a SPA that talks to Luna WASM via JS bindings — no
+network latency in the dev/test loop. **This is by far the most impactful
+use case for the SNES homebrew community**, which today has no equivalent
+to Godot/Unity for its needs.
 
-#### B — Luna Studio Desktop (client lourd dev studio)
+#### B — Luna Studio Desktop (heavy dev-studio client)
 
-Pour les devs qui veulent les performances natives et l'intégration
-système :
+For devs who want native performance and system integration:
 
-- Cycle-accurate sans overhead JS/WASM.
-- Filesystem natif, Git natif, pipelines de build pluggable.
-- Plugin system (importeurs Aseprite, Tiled, Pyxel…).
-- Debugger plus puissant (memory inspector multi-fenêtres, watchpoints
-  conditionnels riches).
+- Cycle-accurate with no JS/WASM overhead.
+- Native filesystem, native Git, pluggable build pipelines.
+- Plugin system (Aseprite, Tiled, Pyxel importers…).
+- More powerful debugger (multi-window memory inspector, rich conditional
+  watchpoints).
 
-Construit avec `egui` + appels directs à `luna-api` (pas de transport
-JSON, juste Rust ↔ Rust). C'est l'équivalent SNES de "Visual Studio Code
-+ extension émulateur intégrée".
+Built with `egui` + direct calls to `luna-api` (no JSON transport, just
+Rust ↔ Rust). It is the SNES equivalent of "Visual Studio Code + integrated
+emulator extension".
 
-#### C — Tests d'intégration CI pour ROM hacks et homebrew
+#### C — CI integration tests for ROM hacks and homebrew
 
-Une crate `luna-test` qui permet d'écrire des tests pour son propre jeu :
+A `luna-test` crate that lets you write tests for your own game:
 
 ```rust
 #[luna_test]
@@ -1348,203 +1332,201 @@ fn level_1_can_be_completed() {
 }
 ```
 
-Les devs homebrew n'ont aujourd'hui aucune CI sérieuse. Luna y apporte
-un standard : commit → GitHub Actions → tests joués sur émulateur
-cycle-accurate → résultat en ≤ 30s.
+Homebrew devs have no serious CI today. Luna brings a standard: commit →
+GitHub Actions → tests played on a cycle-accurate emulator → result in
+≤ 30s.
 
-#### D — Cloud streaming léger
+#### D — Lightweight cloud streaming
 
-WebSocket + framebuffer compressé (PNG diff ou H.264 simple) → streamer
-une session Luna depuis un serveur vers un client web mince. Pas un
-concurrent de Stadia, mais utile pour : "ouvre cette ROM dans un onglet
-sans rien installer" (démos, partage, archives interactives).
+WebSocket + compressed framebuffer (PNG diff or simple H.264) → stream a
+Luna session from a server to a thin web client. Not a Stadia competitor,
+but useful for: "open this ROM in a tab without installing anything"
+(demos, sharing, interactive archives).
 
-#### E — Extension VSCode
+#### E — VSCode extension
 
-Plugin qui détecte les projets SNES homebrew et :
-- Lance Luna en sous-processus (transport REST local).
-- Affiche le framebuffer dans un webview panel.
-- Branche le debugger VSCode sur l'API de breakpoints/registres.
-- Permet edit → assemble → test sans quitter l'éditeur.
+A plugin that detects SNES homebrew projects and:
+- Launches Luna as a subprocess (local REST transport).
+- Displays the framebuffer in a webview panel.
+- Wires the VSCode debugger to the breakpoint/register API.
+- Allows edit → assemble → test without leaving the editor.
 
-#### F — Plateforme éducative
+#### F — Educational platform
 
-Cours d'architecture machine 16 bits, Luna comme bac à sable interactif
-en temps réel : élèves voient simultanément l'état des registres CPU, la
-VRAM, le fetch d'instructions, l'effet pixel par pixel.
+16-bit machine architecture courses, Luna as an interactive, real-time
+sandbox: students simultaneously see the state of the CPU registers, the
+VRAM, the instruction fetch, the pixel-by-pixel effect.
 
-#### G — Speedrunning & TAS moderne
+#### G — Modern speedrunning & TAS
 
-Mode `replay` déterministe + frame-stepping + save states + scripting →
-plateforme de Tool-Assisted Speedruns. Concurrent sérieux de BizHawk
-pour le SNES, avec en plus l'écosystème Rust moderne et l'API
-scriptable.
+Deterministic `replay` mode + frame-stepping + save states + scripting → a
+Tool-Assisted Speedrun platform. A serious competitor to BizHawk for the
+SNES, with the added modern Rust ecosystem and scriptable API.
 
-#### H — Auto-arbitrage de tournois
+#### H — Automated tournament refereeing
 
-Multi-instances Luna en parallèle (un container par match) + replays
-signés cryptographiquement → tournois SNES avec preuves d'intégrité.
-Élimine le cheating côté client.
+Multiple Luna instances in parallel (one container per match) +
+cryptographically signed replays → SNES tournaments with integrity proofs.
+Eliminates client-side cheating.
 
-#### I — Embarqué / hardware
+#### I — Embedded / hardware
 
-Une fois `luna-core` stable en `no_std` (objectif V2), portage possible
-sur SBC type Raspberry Pi en mode "console rétro intelligente" :
-émulateur + serveur MCP local qui répond aux requêtes d'un assistant
-vocal ("Claude, garde mon save state avant le boss").
+Once `luna-core` is stable in `no_std` (V2 goal), a port becomes possible
+on a Raspberry Pi-type SBC in "smart retro console" mode: emulator + local
+MCP server that answers a voice assistant's requests ("Claude, save my
+state before the boss").
 
-### 9.4 Implications architecturales
+### 9.4 Architectural implications
 
-Pour que cet écosystème reste cohérent et maintenable :
+For this ecosystem to stay coherent and maintainable:
 
-1. **Zéro logique applicative dans les transports** : les crates
-   `luna-mcp`, `luna-rest`, `luna-wasm` font *uniquement* du marshalling.
-   Toute logique métier reste dans `luna-api`.
+1. **Zero application logic in the transports**: the `luna-mcp`,
+   `luna-rest`, `luna-wasm` crates do *only* marshalling. All business
+   logic stays in `luna-api`.
 
-2. **Schéma source unique** : tous les types publics de `luna-api` sont
-   annotés `JsonSchema`. La doc OpenAPI, les types TS, les `.proto` sont
-   tous **générés**, pas écrits à la main.
+2. **Single source schema**: all `luna-api` public types are annotated
+   `JsonSchema`. The OpenAPI docs, TS types, and `.proto` files are all
+   **generated**, not hand-written.
 
-3. **Compilation conditionnelle** : chaque transport est une feature
-   Cargo désactivable. Build "headless minimal" = MCP seul. Build
-   "Luna Studio Desktop" = tout activé.
+3. **Conditional compilation**: each transport is a toggleable Cargo
+   feature. "Minimal headless" build = MCP only. "Luna Studio Desktop"
+   build = everything enabled.
 
-4. **Authentification & autorisation** : critique dès qu'on sort de
-   stdio local. Design V1.1 :
-   - Token API (`Authorization: Bearer …`).
-   - Capabilities granulaires (`read_state`, `write_memory`, `load_rom`).
-   - Rate limiting + quotas par session.
+4. **Authentication & authorization**: critical as soon as we leave local
+   stdio. V1.1 design:
+   - API token (`Authorization: Bearer …`).
+   - Granular capabilities (`read_state`, `write_memory`, `load_rom`).
+   - Rate limiting + per-session quotas.
 
-5. **Multi-tenancy** : V1 = un binaire, une émulation. V1.1+ envisage un
-   **mode session manager** pour le cloud (N sessions isolées par
-   instance serveur, chacune avec son cœur d'émulation dans un thread).
+5. **Multi-tenancy**: V1 = one binary, one emulation. V1.1+ considers a
+   **session manager mode** for the cloud (N isolated sessions per server
+   instance, each with its own emulation core in a thread).
 
-6. **Versioning d'API** : pin de version dans les requêtes, dépréciation
-   propre (≥ 1 mineure de transition), breaking changes annoncés.
+6. **API versioning**: version pin in requests, clean deprecation (≥ 1
+   minor of transition), announced breaking changes.
 
-7. **Observabilité** : tracing structuré (`tracing` crate), métriques
-   Prometheus optionnelles pour les déploiements serveur. Indispensable
-   en multi-tenancy.
+7. **Observability**: structured tracing (`tracing` crate), optional
+   Prometheus metrics for server deployments. Essential in multi-tenancy.
 
-### 9.5 `luna-api` comme contrat public stable
+### 9.5 `luna-api` as a stable public contract
 
-Conséquence directe : `luna-api` devient le **crate phare** de
-l'écosystème, celui qui doit avoir la stabilité la plus forte. On y
-applique une discipline supérieure aux autres crates :
+Direct consequence: `luna-api` becomes the **flagship crate** of the
+ecosystem, the one that must have the strongest stability. We apply a
+discipline to it that is stricter than the other crates:
 
-- **SemVer strict** : aucun changement breaking sans bump majeur.
-- **Politique de dépréciation** : ≥ 1 mineure avec `#[deprecated]` avant
-  suppression.
-- **Tests d'API publique** : `cargo-public-api` en CI, détecte tout
-  changement non documenté.
-- **Documentation exhaustive** : chaque trait/struct documenté, exemples
-  dans des `///` doctests exécutés en test.
-- **Re-exports stratégiques** : `luna::api::prelude::*` rassemble les
-  types nécessaires aux clients, isolant des détails internes.
-- **Changelog tenu** au format Keep a Changelog, avec section
-  "API changes" séparée du reste.
+- **Strict SemVer**: no breaking change without a major bump.
+- **Deprecation policy**: ≥ 1 minor with `#[deprecated]` before removal.
+- **Public API tests**: `cargo-public-api` in CI, detects any undocumented
+  change.
+- **Exhaustive documentation**: every trait/struct documented, examples in
+  `///` doctests run as tests.
+- **Strategic re-exports**: `luna::api::prelude::*` gathers the types
+  clients need, isolating internal details.
+- **Maintained changelog** in the Keep a Changelog format, with an "API
+  changes" section separate from the rest.
 
-C'est le seul crate dont la stabilité d'API est garantie au niveau
-"release product 1.0". Les autres (`luna-cpu`, `luna-ppu`, …) peuvent
-évoluer plus librement entre versions tant que `luna-api` reste stable.
+It is the only crate whose API stability is guaranteed at the "release
+product 1.0" level. The others (`luna-cpu`, `luna-ppu`, …) can evolve more
+freely between versions as long as `luna-api` stays stable.
 
 ---
 
-## 10. Modèle de threading
+## 10. Threading model
 
-Le modèle diffère selon la cible (natif vs WASM). Le code partagé passe
-par la façade `luna-async` (§4.1) pour rester cross-target.
+The model differs depending on the target (native vs WASM). The shared code
+goes through the `luna-async` facade (§4.1) to stay cross-target.
 
-### 10.1 Cible native (Linux / macOS / Windows)
+### 10.1 Native target (Linux / macOS / Windows)
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│            Thread "emulation" (dédié, 60 Hz)                   │
-│  - Scheduler CPU master-clock catch-up (§6.6)                  │
-│  - bus.io_cycle() rattrape PPU/HDMA mid-instruction            │
-│  - Vérifie les breakpoints                                     │
-│  - Lit les Command entre les frames                            │
-│  - Publie les Event sur le bus                                 │
+│            "emulation" thread (dedicated, 60 Hz)              │
+│  - CPU master-clock catch-up scheduler (§6.6)                 │
+│  - bus.io_cycle() catches PPU/HDMA up mid-instruction         │
+│  - Checks breakpoints                                         │
+│  - Reads Commands between frames                              │
+│  - Publishes Events on the bus                                │
 └───────┬────────────────────────────────────────────┬───────────┘
-        │ futures::channel::mpsc<Command> (entrée)   │ broadcast<Event>
+        │ futures::channel::mpsc<Command> (input)    │ broadcast<Event>
         ▲                                            ▼
 ┌───────┴──────────────┐                  ┌──────────────────────┐
-│  Tokio runtime       │                  │  Bus d'événements    │
-│  (thread principal)  │                  │  (tokio broadcast)   │
-│  - luna-mcp-server   │◄─── Event ──────►│  diffusion fan-out   │
-│  - handlers async    │                  └──────┬───────────────┘
+│  Tokio runtime       │                  │  Event bus           │
+│  (main thread)       │                  │  (tokio broadcast)   │
+│  - luna-mcp-server   │◄─── Event ──────►│  fan-out broadcast   │
+│  - async handlers    │                  └──────┬───────────────┘
 │  - parse JSON-RPC    │                         │
 └──────────────────────┘                         │
                                                  ▼
                                 ┌────────────────────────────────┐
-                                │     Thread "GUI" (optionnel)   │
+                                │     "GUI" thread (optional)    │
                                 │  - winit/egui/wgpu             │
-                                │  - rendu framebuffer 60 fps    │
-                                │  - overlays spectator          │
-                                │  - inputs clavier/manette →    │
-                                │    Command vers cœur           │
+                                │  - 60 fps framebuffer render   │
+                                │  - spectator overlays          │
+                                │  - keyboard/gamepad inputs →   │
+                                │    Command to the core         │
                                 └────────────────────────────────┘
 ```
 
-### 10.2 Cible WASM (Luna Studio Web — V2)
+### 10.2 WASM target (Luna Studio Web — V2)
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│              Tâches single-thread (Web Worker ou main)         │
+│              Single-thread tasks (Web Worker or main)         │
 │  ┌─────────────────────────────────────────────────────────┐   │
-│  │ Émulation cadencée par requestAnimationFrame()           │   │
-│  │  - Scheduler CPU master-clock catch-up (§6.6)            │   │
-│  │  - bus.io_cycle() rattrape PPU/HDMA mid-instruction      │   │
+│  │ Emulation clocked by requestAnimationFrame()             │   │
+│  │  - CPU master-clock catch-up scheduler (§6.6)            │   │
+│  │  - bus.io_cycle() catches PPU/HDMA up mid-instruction    │   │
 │  └────────────────┬────────────────────────────────────────┘   │
 │                   │ Rc<RefCell<EmuState>>                       │
 │                   ▼                                             │
 │  ┌─────────────────────────────────────────────────────────┐   │
-│  │ Microtask queue : luna-mcp-client + GUI eframe          │   │
-│  │  - WebSocket vers Luna natif distant (PAS de serveur    │   │
-│  │    MCP embarqué — rmcp incompatible WASM)               │   │
-│  │  - egui/wgpu via eframe (WebGPU ou WebGL2)              │   │
+│  │ Microtask queue: luna-mcp-client + GUI eframe           │   │
+│  │  - WebSocket to a remote native Luna (NO embedded MCP   │   │
+│  │    server — rmcp incompatible with WASM)                │   │
+│  │  - egui/wgpu via eframe (WebGPU or WebGL2)              │   │
 │  └─────────────────────────────────────────────────────────┘   │
 └────────────────────────────────────────────────────────────────┘
 ```
 
-### 10.3 Discipline stricte
+### 10.3 Strict discipline
 
-- Le cœur n'accède à *aucune* ressource async ni GUI directement.
-  Toute interaction avec le monde extérieur passe par les canaux
-  (`Command` en entrée, `Event` broadcast en sortie).
-- **Pas de `crossbeam-channel` dans le cœur** — il panique en WASM.
-  Utiliser `futures::channel::mpsc` partout (compatible cross-target).
-- **`!Send` partout** dans `luna-core` et `luna-mcp-core` — single-thread
-  pour compat WASM. Le parallélisme natif passe par des threads
-  explicites dans `luna-mcp-server` natif uniquement.
-- **Pas de `borrow_mut()` à travers un `await`** côté WASM — risque de
-  panic `RefCell already borrowed`.
+- The core accesses *no* async or GUI resource directly. All interaction
+  with the outside world goes through the channels (`Command` in,
+  `Event` broadcast out).
+- **No `crossbeam-channel` in the core** — it panics under WASM. Use
+  `futures::channel::mpsc` everywhere (cross-target compatible).
+- **`!Send` everywhere** in `luna-core` and `luna-mcp-core` — single-thread
+  for WASM compat. Native parallelism goes through explicit threads in the
+  native `luna-mcp-server` only.
+- **No `borrow_mut()` across an `await`** on the WASM side — risk of a
+  `RefCell already borrowed` panic.
 
-Avantages structurels :
+Structural advantages:
 
-- Le cœur reste testable sans tokio ni winit ni WebSocket.
-- La latence MCP n'impacte pas le timing d'émulation.
-- On peut figer le cœur (pause) sans déranger le serveur MCP ni la GUI.
-- **GUI et MCP sont symétriques** : tous deux sont des consommateurs du
-  même bus, ce qui rend le mode `spectate` trivial (= activer les deux).
-- L'humain peut prendre la main en mode spectator en envoyant des
-  `Command::Input` depuis la GUI exactement comme le ferait l'agent MCP
-  — l'origine de la commande est tracée pour le panneau "Agent activity".
+- The core stays testable without tokio, winit, or WebSocket.
+- MCP latency does not affect emulation timing.
+- The core can be frozen (paused) without disturbing the MCP server or the
+  GUI.
+- **GUI and MCP are symmetric**: both are consumers of the same bus, which
+  makes the `spectate` mode trivial (= enable both).
+- The human can take over in spectator mode by sending `Command::Input`
+  from the GUI exactly as the MCP agent would — the command's origin is
+  traced for the "Agent activity" panel.
 
 ---
 
-## 11. Déterminisme & reproductibilité
+## 11. Determinism & reproducibility
 
-**Garanties par défaut**
+**Default guarantees**
 
-- Même ROM + même séquence d'inputs + même seed RNG initial → exactement
-  la même séquence de frames.
-- Les save states encodent l'état *complet* de la machine (RAM, VRAM,
-  OAM, CGRAM, APU RAM, registres, scheduler queue, cycle counter).
+- Same ROM + same input sequence + same initial RNG seed → exactly the same
+  sequence of frames.
+- Save states encode the *complete* machine state (RAM, VRAM, OAM, CGRAM,
+  APU RAM, registers, scheduler queue, cycle counter).
 
 **Replay**
 
-Format de fichier `.lreplay` (TOML + binaire) :
+`.lreplay` file format (TOML + binary):
 
 ```toml
 [meta]
@@ -1560,278 +1542,272 @@ created_at = "2026-05-23T11:00:00Z"
 # ...
 ```
 
-Un replay peut être rejoué avec :
+A replay can be played back with:
 ```bash
 $ luna replay session.lreplay --verify
 ```
 
-Le flag `--verify` re-calcule le hash des framebuffers et le compare à un
-manifeste de référence — utile en CI.
+The `--verify` flag re-computes the hash of the framebuffers and compares it
+to a reference manifest — useful in CI.
 
-**Time travel** : un buffer circulaire de N save states pris toutes les
-secondes (configurable) permet à l'agent de faire `rewind(seconds: 5)`.
-Coût : ~200 KB × N en RAM (négligeable jusqu'à plusieurs minutes).
-
----
-
-## 12. Stratégie de test
-
-### Tests unitaires
-
-- Un crate = un module de tests.
-- Chaque opcode 65C816 testé sur des cas connus (flags, edge cases du
-  mode E, BCD, etc.).
-- Chaque registre PPU testé sur les comportements de lecture/écriture.
-
-### Tests d'intégration
-
-- **Test ROMs** open-source dans `tests/roms/` :
-  - Suite **krom** (CPU, PPU, DMA, HDMA, ADC, etc.)
-  - Suite **blargg** (APU)
-  - Suite **peter_lemon** (PPU avancé)
-- Chaque ROM affiche "PASS" ou "FAIL" via texte/écran. On capture la
-  frame N et on cherche le pattern attendu.
-
-### Tests visuels (golden)
-
-- Pour chaque jeu de référence (~20 jeux), une frame à un point précis
-  (après séquence d'inputs déterministe) est stockée comme PNG dans
-  `tests/golden/`.
-- En CI, on rejoue la séquence et on compare pixel-par-pixel (tolérance
-  zéro en mode cycle-accurate).
-
-### Tests de performance
-
-- `cargo bench` (criterion) sur les hot paths : CPU step, PPU scanline,
-  APU sample generation.
-- Régression de perf détectée si > 5% sur deux commits consécutifs.
-
-### Tests MCP
-
-- Mock client MCP qui rejoue des scénarios scriptés et vérifie les
-  réponses (schemas + valeurs attendues).
+**Time travel**: a circular buffer of N save states taken every second
+(configurable) lets the agent do `rewind(seconds: 5)`. Cost: ~200 KB × N in
+RAM (negligible up to several minutes).
 
 ---
 
-## 13. Build, distribution, licence
+## 12. Testing strategy
+
+### Unit tests
+
+- One crate = one test module.
+- Each 65C816 opcode tested on known cases (flags, E-mode edge cases, BCD,
+  etc.).
+- Each PPU register tested on read/write behaviors.
+
+### Integration tests
+
+- **Open-source test ROMs** in `tests/roms/`:
+  - **krom** suite (CPU, PPU, DMA, HDMA, ADC, etc.)
+  - **blargg** suite (APU)
+  - **peter_lemon** suite (advanced PPU)
+- Each ROM displays "PASS" or "FAIL" via text/screen. We capture frame N
+  and look for the expected pattern.
+
+### Visual tests (golden)
+
+- For each reference game (~20 games), a frame at a precise point (after a
+  deterministic input sequence) is stored as a PNG in `tests/golden/`.
+- In CI, we replay the sequence and compare pixel-by-pixel (zero tolerance
+  in cycle-accurate mode).
+
+### Performance tests
+
+- `cargo bench` (criterion) on the hot paths: CPU step, PPU scanline, APU
+  sample generation.
+- A perf regression is flagged if > 5% over two consecutive commits.
+
+### MCP tests
+
+- A mock MCP client that replays scripted scenarios and checks the
+  responses (schemas + expected values).
+
+---
+
+## 13. Build, distribution, license
 
 **Build**
 
 ```bash
-# développement
+# development
 cargo build
 
-# release optimisé
+# optimized release
 cargo build --release
 
-# build minimal (sans GUI, sans coprocesseurs niche)
+# minimal build (no GUI, no niche coprocessors)
 cargo build --release --no-default-features --features "core,mcp,sa1,superfx,dsp1"
 ```
 
 **Distribution**
 
-- **Binaires** : Linux x86-64/aarch64, macOS Intel/ARM, Windows x86-64.
-- **Crates.io** : tous les crates `luna-*` publiés indépendamment.
-- **GitHub Releases** : tagged + checksums signés.
-- **Docker** : image `ghcr.io/<org>/luna:latest` pour intégration CI.
+- **Binaries**: Linux x86-64/aarch64, macOS Intel/ARM, Windows x86-64.
+- **Crates.io**: all the `luna-*` crates published independently.
+- **GitHub Releases**: tagged + signed checksums.
+- **Docker**: image `ghcr.io/<org>/luna:latest` for CI integration.
 
-**Licence**
+**License**
 
-Recommandation : **MPL-2.0** (Mozilla Public License 2.0). Justification :
+Recommendation: **MPL-2.0** (Mozilla Public License 2.0). Rationale:
 
-- Plus permissive que GPL (compatible avec usage commercial).
-- File-level copyleft : modifications du code de Luna doivent être
-  partagées, mais l'intégration dans un projet plus large (par ex. un
-  outil dev propriétaire) reste possible.
-- Compatible avec une éventuelle adoption par la communauté libretro /
-  Anthropic.
+- More permissive than the GPL (compatible with commercial use).
+- File-level copyleft: modifications to Luna's code must be shared, but
+  integration into a larger project (e.g. a proprietary dev tool) remains
+  possible.
+- Compatible with potential adoption by the libretro / Anthropic community.
 
-À discuter : GPL-3.0 (plus protecteur) ou Apache-2.0 (plus permissif).
+To discuss: GPL-3.0 (more protective) or Apache-2.0 (more permissive).
 
 ---
 
-## 14. Roadmap & phasage
+## 14. Roadmap & phasing
 
-### Phase 0 — Validation des patterns & squelette (3 semaines)
+### Phase 0 — Pattern validation & skeleton (3 weeks)
 
-**Recherche & validation** (1 semaine — préalable à tout code de production) :
+**Research & validation** (1 week — a prerequisite to any production code):
 
-- Lecture du code de référence (lecture seule, GPL-3.0, pas de copie) :
-  - `jgenesis/backend/snes-core/src/api.rs` (modèle `Snes::tick`)
-  - `jgenesis/backend/snes-core/src/apu.rs` (catch-up rationnel)
+- Reading the reference code (read-only, GPL-3.0, no copying):
+  - `jgenesis/backend/snes-core/src/api.rs` (`Snes::tick` model)
+  - `jgenesis/backend/snes-core/src/apu.rs` (rational catch-up)
   - `jgenesis/backend/snes-core/src/bus.rs` (`access_master_cycles`)
   - `jgenesis/backend/snes-core/src/memory/dma.rs` (DMA/HDMA timing)
-  - `tetanes-core/src/cpu.rs` (pattern `start_cycle`/`end_cycle`)
-  - `jgenesis/ARCHITECTURE.md` (modèle d'organisation du workspace)
-- Vérifier la licence de `emu-rs/snes-apu` (MIT/Apache attendu) — si
-  compatible, planifier son intégration en Phase 2 pour économiser ~1
-  mois.
-- Cloner et faire tourner [Tom Harte 65816 ProcessorTests](https://github.com/SingleStepTests/65816)
-  pour valider le format de la suite de test.
+  - `tetanes-core/src/cpu.rs` (`start_cycle`/`end_cycle` pattern)
+  - `jgenesis/ARCHITECTURE.md` (workspace organization model)
+- Verify the license of `emu-rs/snes-apu` (MIT/Apache expected) — if
+  compatible, plan its integration in Phase 2 to save ~1 month.
+- Clone and run [Tom Harte 65816 ProcessorTests](https://github.com/SingleStepTests/65816)
+  to validate the test-suite format.
 
-**Squelette code** (2 semaines) :
+**Code skeleton** (2 weeks):
 
-- Workspace Cargo avec les ~15 crates (cf. §4), tous compilent vide.
-- CI GitHub Actions : `cargo check` + `cargo check --target
-  wasm32-unknown-unknown` (échoue si un crate cross-target casse).
-- `luna-async` : façade runtime (spawn/sleep/channels) avec
-  implémentations natif (tokio) + web (wasm-bindgen-futures).
-- `luna-bus` : memory map basique + LoROM mapper + trait `Bus` avec
+- Cargo workspace with the ~15 crates (see §4), all compiling empty.
+- GitHub Actions CI: `cargo check` + `cargo check --target
+  wasm32-unknown-unknown` (fails if a cross-target crate breaks).
+- `luna-async`: runtime facade (spawn/sleep/channels) with native (tokio) +
+  web (wasm-bindgen-futures) implementations.
+- `luna-bus`: basic memory map + LoROM mapper + `Bus` trait with
   `io_cycle()`.
-- `luna-cpu-65c816` : décodeur d'instructions complet (sans timing fin
-  encore). Jump-table `[fn(&mut Cpu, &mut Bus); 256]`.
-- `luna-cli` : charge une ROM, exécute 1 frame, dump l'état CPU.
-- Tests : premier passage de quelques tests Tom Harte.
+- `luna-cpu-65c816`: complete instruction decoder (without fine timing
+  yet). Jump-table `[fn(&mut Cpu, &mut Bus); 256]`.
+- `luna-cli`: loads a ROM, runs 1 frame, dumps the CPU state.
+- Tests: first pass of a few Tom Harte tests.
 
-### Phase 1 — Premier rendu (4 semaines)
+### Phase 1 — First render (4 weeks)
 
-- `luna-ppu` : modes 0 et 1, scanline-based, sprites basiques.
-- `luna-dma` : DMA (sans HDMA).
-- `luna-core::Snes::step()` complet (cf. §6.6) — CPU + DMA + PPU
-  catch-up via `bus.io_cycle()`.
-- 1000+ tests Tom Harte passent (cible : 100% du 65C816).
-- Une ROM de test (krom CPUMSC) affiche "PASS".
+- `luna-ppu`: modes 0 and 1, scanline-based, basic sprites.
+- `luna-dma`: DMA (without HDMA).
+- `luna-core::Snes::step()` complete (see §6.6) — CPU + DMA + PPU catch-up
+  via `bus.io_cycle()`.
+- 1000+ Tom Harte tests pass (target: 100% of the 65C816).
+- A test ROM (krom CPUMSC) displays "PASS".
 
-### Phase 2 — Audio + jeux simples (4 semaines)
+### Phase 2 — Audio + simple games (4 weeks)
 
-- `luna-apu` : SPC700 + DSP basique.
-- HDMA fonctionnel.
-- **Super Mario World** jouable end-to-end (sans bugs visuels majeurs).
+- `luna-apu`: SPC700 + basic DSP.
+- Working HDMA.
+- **Super Mario World** playable end-to-end (without major visual bugs).
 
-### Phase 3 — API, MCP, GUI standalone (4 semaines)
+### Phase 3 — API, MCP, standalone GUI (4 weeks)
 
-- `luna-api` : Control + Debug + Semantic.
-- `luna-mcp` : serveur stdio avec ~15 tools de base.
-- `luna-gui` v0 : mode **standalone** (humain joue avec clavier/manette).
-- Démo : Claude Code charge une ROM, prend un screenshot, lit la RAM.
-- Implémentation des principes d'économie de tokens dès le départ :
-  resources, niveaux de détail, hash-then-fetch.
+- `luna-api`: Control + Debug + Semantic.
+- `luna-mcp`: stdio server with ~15 base tools.
+- `luna-gui` v0: **standalone** mode (human plays with keyboard/gamepad).
+- Demo: Claude Code loads a ROM, takes a screenshot, reads the RAM.
+- Implementation of the token-economy principles from the start:
+  resources, detail levels, hash-then-fetch.
 
-### Phase 4 — Coprocesseurs prioritaires (6 semaines)
+### Phase 4 — Priority coprocessors (6 weeks)
 
 - SA-1, Super FX, DSP-1.
-- **Star Fox**, **Super Mario RPG**, **Yoshi's Island** jouables.
+- **Star Fox**, **Super Mario RPG**, **Yoshi's Island** playable.
 
-### Phase 5 — Debug avancé & mode spectator (5 semaines)
+### Phase 5 — Advanced debug & spectator mode (5 weeks)
 
-- Breakpoints conditionnels, trace logging, time travel.
-- Semantic API enrichie (palette decoded, window state).
-- Resources MCP (`luna://docs/...`).
-- `luna-gui` v1 : **mode spectator** avec overlays — timeline d'activité
-  agent, surbrillance des sprites/régions interrogés, panneau de budget
-  tokens en direct.
-- `luna-overlay` : composants réutilisables (timeline, mini-map mémoire).
+- Conditional breakpoints, trace logging, time travel.
+- Enriched Semantic API (decoded palette, window state).
+- MCP resources (`luna://docs/...`).
+- `luna-gui` v1: **spectator mode** with overlays — agent activity
+  timeline, highlighting of queried sprites/regions, live token-budget
+  panel.
+- `luna-overlay`: reusable components (timeline, memory mini-map).
 
-### Phase 6 — Polish & 1.0 (4 semaines)
+### Phase 6 — Polish & 1.0 (4 weeks)
 
-- Tests visuels golden sur 20 jeux.
-- Documentation utilisateur.
-- Stabilisation de `luna-api` (SemVer figé, `cargo-public-api` en CI).
-- Démos AI publiques :
-  1. Claude joue Super Mario World en autonomie.
-  2. Claude débogue un crash sur un ROM hack.
-  3. Claude développe un homebrew "hello world" en assemblant + testant
-     dans la boucle.
+- Golden visual tests over 20 games.
+- User documentation.
+- Stabilization of `luna-api` (frozen SemVer, `cargo-public-api` in CI).
+- Public AI demos:
+  1. Claude plays Super Mario World autonomously.
+  2. Claude debugs a crash on a ROM hack.
+  3. Claude develops a "hello world" homebrew by assembling + testing in
+     the loop.
 
-**Total estimé** : ~6 mois pour V1.0.
+**Estimated total**: ~6 months for V1.0.
 
-### Post-1.0 — Ouverture de l'écosystème
+### Post-1.0 — Opening up the ecosystem
 
-Phases optionnelles selon traction & feedback communauté :
+Optional phases depending on traction & community feedback:
 
-- **Phase 7 — Transports additionnels** (~4 sem.) : `luna-rest`,
-  `luna-ws`, génération OpenAPI + types TS. Débloque les frontends web
-  tiers.
-- **Phase 8 — Luna Studio Web** (~8 sem.) : `luna-wasm` + SPA IDE
-  homebrew. L'objectif "killer app" pour la communauté SNES.
-- **Phase 9 — Luna Studio Desktop** (~6 sem.) : evolution de `luna-gui`
-  en IDE complet avec assembleur intégré, plugin system.
-- **Phase 10 — Bindings & intégrations** (~6 sem.) : FFI Python/C,
-  extension VSCode, core libretro.
-- **Phase 11 — Cloud & multi-tenancy** (~6 sem.) : auth, session
-  manager, observabilité, déploiement Kubernetes.
+- **Phase 7 — Additional transports** (~4 wk): `luna-rest`, `luna-ws`,
+  OpenAPI + TS type generation. Unlocks third-party web frontends.
+- **Phase 8 — Luna Studio Web** (~8 wk): `luna-wasm` + homebrew IDE SPA.
+  The "killer app" goal for the SNES community.
+- **Phase 9 — Luna Studio Desktop** (~6 wk): evolution of `luna-gui` into a
+  full IDE with integrated assembler, plugin system.
+- **Phase 10 — Bindings & integrations** (~6 wk): Python/C FFI, VSCode
+  extension, libretro core.
+- **Phase 11 — Cloud & multi-tenancy** (~6 wk): auth, session manager,
+  observability, Kubernetes deployment.
 
 ---
 
-## 15. Risques & questions ouvertes
+## 15. Risks & open questions
 
-### Risques techniques
+### Technical risks
 
-| Risque                                          | Mitigation                                                                          |
+| Risk                                            | Mitigation                                                                          |
 |-------------------------------------------------|-------------------------------------------------------------------------------------|
-| Performance cycle-accurate trop lente           | Pattern jgenesis static dispatch zero-alloc (§6.6), profiling criterion, SIMD PPU   |
-| Sync CPU↔APU difficile à stabiliser             | Arithmétique rationnelle u64 (pas de float, §6.6), tests blargg APU                 |
-| Schémas MCP qui changent (spec en évolution)    | Pinner sur version stable, abstraire derrière `luna-mcp-core`                       |
-| Coprocesseurs sous-documentés (Super FX)        | S'appuyer sur fullsnes.htm + code jgenesis (lecture, pas copie GPL)                 |
-| **Explosion de coûts tokens en usage IA**       | Profils `economy/balanced/generous`, hash-then-fetch, resources MCP, budget tracker (§8.5) |
-| GUI spectator qui ralentit le cœur              | Thread GUI séparé, framebuffer partagé via `arc-swap` ou triple-buffer              |
-| **Borrow checker hostile** (CPU + bus + PPU mut simultanés) | Pattern `SnesBus<'a>` créé à chaque step, emprunts séparés. Pas de `Rc<RefCell>` dans la hot loop |
-| **`tokio::time` panique en WASM**               | Façade `luna-async` obligatoire dès V1 (§4.1) — bannir `tokio::*` direct dans le cœur |
-| **`crossbeam-channel` panique en WASM**         | Utiliser `futures::channel::mpsc` partout, jamais crossbeam dans le cœur            |
-| **`rmcp` ne tourne pas en WASM**                | V2 Luna Studio Web = client WebSocket vers Luna natif distant (cf. §9.2)            |
-| **Mid-instruction effects manqués** (Mario Kart, F-Zero) | Pattern `bus.io_cycle()` à chaque accès CPU (§5, §6.6). Tester contre Tom Harte ProcessorTests |
-| **NMI/IRQ timing 1-cycle off**                  | Latcher l'état IRQ/NMI au début d'instruction, le servir avant fetch suivant (cf. jgenesis api.rs:323) |
+| Cycle-accurate performance too slow             | jgenesis static-dispatch zero-alloc pattern (§6.6), criterion profiling, SIMD PPU   |
+| CPU↔APU sync hard to stabilize                  | Rational u64 arithmetic (no float, §6.6), blargg APU tests                          |
+| MCP schemas that change (evolving spec)         | Pin to a stable version, abstract behind `luna-mcp-core`                            |
+| Under-documented coprocessors (Super FX)        | Rely on fullsnes.htm + jgenesis code (reading, not GPL copying)                     |
+| **Token cost explosion in AI usage**            | `economy/balanced/generous` profiles, hash-then-fetch, MCP resources, budget tracker (§8.5) |
+| Spectator GUI slowing down the core             | Separate GUI thread, framebuffer shared via `arc-swap` or triple-buffer            |
+| **Hostile borrow checker** (CPU + bus + PPU mut simultaneously) | `SnesBus<'a>` pattern created on every step, separate borrows. No `Rc<RefCell>` in the hot loop |
+| **`tokio::time` panics under WASM**             | `luna-async` facade mandatory from V1 (§4.1) — ban direct `tokio::*` in the core    |
+| **`crossbeam-channel` panics under WASM**       | Use `futures::channel::mpsc` everywhere, never crossbeam in the core               |
+| **`rmcp` does not run under WASM**              | V2 Luna Studio Web = WebSocket client to a remote native Luna (see §9.2)            |
+| **Missed mid-instruction effects** (Mario Kart, F-Zero) | `bus.io_cycle()` pattern on every CPU access (§5, §6.6). Test against Tom Harte ProcessorTests |
+| **NMI/IRQ timing 1-cycle off**                  | Latch the IRQ/NMI state at instruction start, serve it before the next fetch (see jgenesis api.rs:323) |
 
-### Questions ouvertes (à trancher en Phase 0)
+### Open questions (to be settled in Phase 0)
 
-1. **Licence finale** : MPL-2.0 (proposée) vs Apache-2.0 (plus permissif).
-   Validation après revue des contraintes commerciales souhaitées.
-2. **Intégration `emu-rs/snes-apu`** : vérifier la licence en Phase 0. Si
-   MIT/Apache, planifier l'intégration Phase 2 (économie ~1 mois). Sinon,
-   APU from-scratch.
-3. **Compatibilité libretro core** : reportée à la Phase 10. À confirmer
-   que les contraintes libretro (sync API, threading) sont compatibles
-   avec notre cœur `!Send`.
-4. **WASM target dès V1 ?** : recommandé — la façade `luna-async` doit
-   être en place dès le départ pour éviter les retours en arrière
-   coûteux. La compilation WASM peut rester "compile + tests basiques"
-   en V1, sans GUI complète.
-5. **Format des game maps** : TOML, JSON, ou format custom ? Comment
-   partager dans la communauté (registre GitHub, marketplace) ?
-6. **Stratégie de stabilisation `luna-api`** : à quel moment figer
-   l'API publique ? Cible : Phase 6.
-7. **Multi-tenancy en V1.1 ou V2** : un seul cœur d'émulation par binaire
-   (simple) ou plusieurs sessions parallèles (débloque "cloud sandbox") ?
-8. **`!Send` partout vs cfg-gate** : la simplicité de `!Send` partout
-   l'emporte-t-elle sur le parallélisme natif perdu ? Recommandation
-   recherche : `!Send` partout (cf. eframe, la majorité des émulateurs
-   Rust cross-target).
+1. **Final license**: MPL-2.0 (proposed) vs Apache-2.0 (more permissive).
+   Validation after reviewing the desired commercial constraints.
+2. **`emu-rs/snes-apu` integration**: verify the license in Phase 0. If
+   MIT/Apache, plan the integration in Phase 2 (saves ~1 month).
+   Otherwise, APU from scratch.
+3. **libretro core compatibility**: deferred to Phase 10. To confirm that
+   the libretro constraints (sync API, threading) are compatible with our
+   `!Send` core.
+4. **WASM target from V1?**: recommended — the `luna-async` facade must be
+   in place from the start to avoid costly backtracking. WASM compilation
+   can stay "compile + basic tests" in V1, without a full GUI.
+5. **Game-map format**: TOML, JSON, or a custom format? How to share in the
+   community (GitHub registry, marketplace)?
+6. **`luna-api` stabilization strategy**: at what point do we freeze the
+   public API? Target: Phase 6.
+7. **Multi-tenancy in V1.1 or V2**: a single emulation core per binary
+   (simple) or several parallel sessions (unlocks "cloud sandbox")?
+8. **`!Send` everywhere vs cfg-gate**: does the simplicity of `!Send`
+   everywhere outweigh the lost native parallelism? Research recommendation:
+   `!Send` everywhere (see eframe, the majority of cross-target Rust
+   emulators).
 
-### Questions de produit
+### Product questions
 
-- **Modèle de licence dual** (open source + commercial) si entreprises
-  veulent intégrer Luna ?
-- **Marketplace de game maps** annotés par la communauté ?
-- **Benchmarks publics** : suite de défis ("battre Super Mario World
-  niveau 1") pour comparer les performances des LLMs ?
+- **Dual license model** (open source + commercial) if companies want to
+  integrate Luna?
+- **Marketplace of community-annotated game maps**?
+- **Public benchmarks**: a suite of challenges ("beat Super Mario World
+  level 1") to compare LLM performance?
 
 ---
 
-## 16. Glossaire
+## 16. Glossary
 
-- **65C816** : CPU 16 bits du SNES, dérivé du 6502.
-- **APU** (Audio Processing Unit) : sous-système son du SNES, composé du
-  SPC700 et du DSP.
-- **CGRAM** : 512 octets de mémoire palette (256 couleurs × 16 bits).
-- **Coprocesseur** : puce additionnelle dans une cartouche SNES
-  (SA-1, Super FX, DSP-1, etc.).
-- **Cycle-accurate** : émulation où chaque cycle d'horloge est simulé,
-  pas juste les résultats finaux d'une instruction.
-- **DMA** (Direct Memory Access) : transfert mémoire rapide sans CPU.
-- **DSP** : Digital Signal Processor (ici, soit le DSP audio APU, soit
-  un coprocesseur DSP-N).
-- **HDMA** : DMA synchronisé sur les scanlines PPU.
-- **HLE** (High-Level Emulation) : émulation simplifiée des comportements
-  (vs cycle-accurate).
-- **MCP** (Model Context Protocol) : protocole standardisé pour qu'un
-  LLM communique avec des outils externes.
-- **MMIO** (Memory-Mapped I/O) : registres exposés comme adresses
-  mémoire.
-- **OAM** (Object Attribute Memory) : mémoire qui décrit les 128
-  sprites du SNES (512 octets + 32 octets de table 2).
-- **PPU** (Picture Processing Unit) : sous-système vidéo du SNES.
-- **Scanline** : ligne horizontale de pixels rendue par le PPU.
-- **SPC700** : CPU 8 bits dédié à l'audio dans le SNES.
-- **Tilemap** : grille de tiles qui compose un background.
-- **VRAM** : 64 KB de mémoire vidéo (tiles, tilemaps).
-- **WRAM** (Work RAM) : 128 KB de RAM de travail du CPU principal.
+- **65C816**: the SNES's 16-bit CPU, derived from the 6502.
+- **APU** (Audio Processing Unit): the SNES's sound subsystem, made up of
+  the SPC700 and the DSP.
+- **CGRAM**: 512 bytes of palette memory (256 colors × 16 bits).
+- **Coprocessor**: an additional chip in a SNES cartridge (SA-1, Super FX,
+  DSP-1, etc.).
+- **Cycle-accurate**: emulation where every clock cycle is simulated, not
+  just the final results of an instruction.
+- **DMA** (Direct Memory Access): fast memory transfer without the CPU.
+- **DSP**: Digital Signal Processor (here, either the APU audio DSP or a
+  DSP-N coprocessor).
+- **HDMA**: DMA synchronized to PPU scanlines.
+- **HLE** (High-Level Emulation): simplified emulation of behaviors (vs
+  cycle-accurate).
+- **MCP** (Model Context Protocol): a standardized protocol for an LLM to
+  communicate with external tools.
+- **MMIO** (Memory-Mapped I/O): registers exposed as memory addresses.
+- **OAM** (Object Attribute Memory): the memory that describes the SNES's
+  128 sprites (512 bytes + 32 bytes of table 2).
+- **PPU** (Picture Processing Unit): the SNES's video subsystem.
+- **Scanline**: a horizontal line of pixels rendered by the PPU.
+- **SPC700**: the 8-bit CPU dedicated to audio in the SNES.
+- **Tilemap**: a grid of tiles that composes a background.
+- **VRAM**: 64 KB of video memory (tiles, tilemaps).
+- **WRAM** (Work RAM): the main CPU's 128 KB of work RAM.
