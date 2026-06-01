@@ -266,8 +266,9 @@ wasm32-unknown-unknown` sur les crates cross-target.
 luna/
 ├── Cargo.toml                       # workspace root
 ├── ARCHITECTURE.md                  # ce document
-├── README.md                        # panorama émulateurs (existant)
+├── README.md                        # présentation du projet (porte d'entrée)
 ├── RESEARCH.md                      # synthèse des recherches pré-Phase-0
+├── docs/emulator_landscape.md       # panorama comparatif des émulateurs SNES
 │
 ├── crates/
 │   │── # ──────────── CŒUR D'ÉMULATION (cross-target, !Send, no_std-ready) ────
