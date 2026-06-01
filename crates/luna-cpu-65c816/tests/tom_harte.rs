@@ -59,8 +59,12 @@ struct TestCase {
     initial: State,
     #[serde(rename = "final")]
     final_: State,
-    // `cycles` field intentionally ignored for now — our CPU is not
-    // cycle-accurate yet (Phase 0 says "sans timing fin").
+    /// Per-bus-cycle activity trace (`[addr, value, state-flags]` per
+    /// entry; internal cycles appear as entries with `addr`/`value` null).
+    /// Its **length** is the instruction's exact hardware cycle count,
+    /// which (Phase 3) we assert against the number of `io_cycle`
+    /// invocations the core emits — the cycle backstop.
+    cycles: Vec<serde_json::Value>,
 }
 
 // =============================================================================
@@ -117,18 +121,33 @@ enum CaseResult {
     Skip,
 }
 
-fn run_case(case: &TestCase) -> Result<CaseResult, String> {
+/// Cycle-backstop outcome for one executed case: the number of `io_cycle`
+/// invocations the core emitted vs. the authoritative bus-cycle count.
+#[derive(Debug, Clone, Copy)]
+struct CycleCheck {
+    got: u64,
+    want: usize,
+}
+
+fn run_case(case: &TestCase) -> (Result<CaseResult, String>, Option<CycleCheck>) {
     let mut cpu = Cpu::new();
     let mut bus = RamBus::new();
     apply_state(&mut cpu, &mut bus, &case.initial);
+    bus.reset_cycle_counter();
 
     // Catch the panic that unimplemented opcodes raise (P0.4b territory).
     if catch_unwind(AssertUnwindSafe(|| cpu.step(&mut bus))).is_err() {
-        return Ok(CaseResult::Skip);
+        return (Ok(CaseResult::Skip), None);
     }
 
-    compare_state(&cpu, &bus, &case.final_)?;
-    Ok(CaseResult::Pass)
+    let cyc = CycleCheck {
+        got: bus.io_cycle_calls(),
+        want: case.cycles.len(),
+    };
+    match compare_state(&cpu, &bus, &case.final_) {
+        Ok(()) => (Ok(CaseResult::Pass), Some(cyc)),
+        Err(e) => (Err(e), Some(cyc)),
+    }
 }
 
 fn apply_state(cpu: &mut Cpu, bus: &mut RamBus, s: &State) {
@@ -189,6 +208,11 @@ struct OpStats {
     failed: u32,
     skipped: u32,
     first_failure: Option<String>,
+    /// Cycle backstop: executed cases whose emitted `io_cycle` count
+    /// matched the bus-cycle trace length, vs. those that didn't.
+    cycle_passed: u32,
+    cycle_failed: u32,
+    first_cycle_failure: Option<String>,
 }
 
 #[test]
@@ -201,7 +225,18 @@ fn tom_harte() {
         return;
     };
 
+    // Cap cases per opcode file. The full dataset is ~10k cases/file × 512
+    // files (minutes to run); `LUNA_TOM_HARTE_SAMPLE=N` runs only the first
+    // N per file for fast iteration on the cycle backstop. Default: all.
+    let sample = std::env::var("LUNA_TOM_HARTE_SAMPLE")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(usize::MAX);
+
     eprintln!("Reading Tom Harte tests from {}", dir.display());
+    if sample != usize::MAX {
+        eprintln!("Sampling first {sample} case(s) per opcode file");
+    }
     let mut stats: BTreeMap<String, OpStats> = BTreeMap::new();
     let mut files_with_unknown_opcode = 0;
 
@@ -250,14 +285,28 @@ fn tom_harte() {
         let cases: Vec<TestCase> = serde_json::from_slice(&bytes).expect("parse Tom Harte json");
 
         let op = stats.entry(stem.clone()).or_default();
-        for case in &cases {
-            match run_case(case) {
+        for case in cases.iter().take(sample) {
+            let (state, cycle) = run_case(case);
+            match state {
                 Ok(CaseResult::Pass) => op.passed += 1,
                 Ok(CaseResult::Skip) => op.skipped += 1,
                 Err(reason) => {
                     op.failed += 1;
                     if op.first_failure.is_none() {
                         op.first_failure = Some(format!("{}: {reason}", case.name));
+                    }
+                }
+            }
+            if let Some(c) = cycle {
+                if u64::try_from(c.want) == Ok(c.got) {
+                    op.cycle_passed += 1;
+                } else {
+                    op.cycle_failed += 1;
+                    if op.first_cycle_failure.is_none() {
+                        op.first_cycle_failure = Some(format!(
+                            "{}: emitted {} io_cycles, trace has {}",
+                            case.name, c.got, c.want
+                        ));
                     }
                 }
             }
@@ -289,6 +338,14 @@ fn print_report(stats: &BTreeMap<String, OpStats>, unknown: usize) {
     eprintln!("  Pass:    {pass}");
     eprintln!("  Fail:    {fail}");
     eprintln!("  Skipped: {skip}   (panic = opcode not yet implemented)");
+
+    let (cyc_pass, cyc_fail): (u64, u64) = stats.values().fold((0, 0), |(p, f), o| {
+        (p + u64::from(o.cycle_passed), f + u64::from(o.cycle_failed))
+    });
+    eprintln!();
+    eprintln!("  Cycle-count backstop (io_cycle invocations == bus-cycle trace length):");
+    eprintln!("    Match:    {cyc_pass}");
+    eprintln!("    Mismatch: {cyc_fail}");
     eprintln!();
 
     let mut failing: Vec<(&String, &OpStats)> =
@@ -296,11 +353,31 @@ fn print_report(stats: &BTreeMap<String, OpStats>, unknown: usize) {
     failing.sort_by_key(|(_, s)| std::cmp::Reverse(s.failed));
 
     if !failing.is_empty() {
-        eprintln!("Files with failures (top 20 by count):");
+        eprintln!("Files with state failures (top 20 by count):");
         for (name, s) in failing.iter().take(20) {
             eprintln!("  {name:>12} : {} fail / {} pass", s.failed, s.passed);
             if let Some(ref f) = s.first_failure {
                 eprintln!("                  first: {f}");
+            }
+        }
+        eprintln!();
+    }
+
+    let mut cyc_failing: Vec<(&String, &OpStats)> =
+        stats.iter().filter(|(_, s)| s.cycle_failed > 0).collect();
+    cyc_failing.sort_by_key(|(_, s)| std::cmp::Reverse(s.cycle_failed));
+
+    if !cyc_failing.is_empty() {
+        eprintln!(
+            "Files with cycle mismatches ({} opcodes; showing up to 40):",
+            cyc_failing.len()
+        );
+        for (name, s) in cyc_failing.iter().take(40) {
+            eprint!("  {name:>12} : {} mismatch", s.cycle_failed);
+            if let Some(ref f) = s.first_cycle_failure {
+                eprintln!("  ({f})");
+            } else {
+                eprintln!();
             }
         }
         eprintln!();
@@ -330,7 +407,23 @@ fn enforce_baseline(stats: &BTreeMap<String, OpStats>) {
         .collect();
     assert!(
         regressions.is_empty(),
-        "Tom Harte: regressions on implemented opcodes: {regressions:?}\n\
+        "Tom Harte: state regressions on implemented opcodes: {regressions:?}\n\
          (run without LUNA_TOM_HARTE_REQUIRE to see the full report)"
     );
+    // Cycle backstop gate is opt-in separately: the 65c816 internal/idle
+    // cycles land incrementally (Phase 3), so only enforce zero cycle
+    // mismatches once asked, to avoid blocking state-correctness CI on a
+    // mid-migration cycle table.
+    if std::env::var("LUNA_TOM_HARTE_CYCLES").is_ok() {
+        let cycle_regressions: Vec<&String> = stats
+            .iter()
+            .filter(|(_, s)| s.cycle_failed > 0)
+            .map(|(name, _)| name)
+            .collect();
+        assert!(
+            cycle_regressions.is_empty(),
+            "Tom Harte: cycle-count mismatches: {cycle_regressions:?}\n\
+             (run without LUNA_TOM_HARTE_CYCLES to see the full report)"
+        );
+    }
 }
