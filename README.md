@@ -54,7 +54,7 @@ Project under **active development, pre-1.0** (`v0.0.1`). What runs today:
 | GUI debugger (eframe, audio-as-clock pacing) | `luna-gui` | ✅ |
 
 Coprocessors beyond SA-1 (Super FX, DSP-1…), REST/WebSocket transports and a
-WASM target are on the [roadmap](ARCHITECTURE.md#14-roadmap--phasage), not yet
+WASM target are on the [roadmap](ARCHITECTURE.md#14-roadmap--phasing), not yet
 shipped.
 
 ## Platform support
