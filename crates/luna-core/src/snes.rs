@@ -574,9 +574,14 @@ impl Snes {
 
         let consumed = self.total_mclk - before;
 
-        // Catch up any cartridge coprocessor (SA-1 / Super FX / DSP-1
-        // / …). Plain LoROM/HiROM mappers no-op here.
-        self.mapper.step_coproc(consumed as u32);
+        // The cartridge coprocessor (SA-1 / Super FX / DSP-1 / …) now
+        // advances per bus access inside `bus.io_cycle` (Phase 1
+        // cycle-accuracy milestone), in lockstep with the APU and the
+        // PPU scanline scheduler — not as one end-of-instruction lump.
+        // This also removes the old DMA double-charge: the coproc used
+        // to be advanced both per-byte during a transfer (DmaBusView::
+        // tick) *and* again by this lump, running it ~2× too fast
+        // through DMA-heavy code.
 
         // Bridge the coprocessor's level-driven IRQ line into the
         // 65C816's edge-latched `pending_irq` model (ares
@@ -1137,27 +1142,7 @@ impl Bus for SnesBus<'_> {
         self.write_inner(addr, value);
     }
     fn io_cycle(&mut self, mcycles: MCycles) {
-        *self.mclk_total = self.mclk_total.saturating_add(mcycles);
-        // Phase 1 (cycle-accuracy milestone): advance the real APU in
-        // lockstep with the CPU at bus-access granularity, instead of one
-        // end-of-instruction lump. `Apu::step` carries the sub-84-mclk
-        // remainder in `mclk_deficit`, so per-access stepping composes
-        // exactly with the old lump (same SPC instruction count) — the only
-        // change is finer CPU↔APU port interleaving. The end-of-`step`
-        // catch-up has been removed accordingly.
-        if !*self.apu_panicked {
-            self.apu_real.step(mcycles as u32);
-            if self.apu_real.cpu.stopped {
-                *self.apu_panicked = true;
-            }
-        }
-        // Phase: per-scanline PPU. Advance the scanline scheduler at bus-
-        // access granularity so each line renders with the register state
-        // live at that access, not the end-of-instruction snapshot. Off
-        // for debug peeks / mapping tests (`sched_enabled == false`).
-        if self.sched_enabled {
-            self.sched_advance(mcycles as u32);
-        }
+        self.advance_time(mcycles, true);
     }
     fn nmi_pending(&self) -> bool {
         *self.nmi
@@ -1168,6 +1153,40 @@ impl Bus for SnesBus<'_> {
 }
 
 impl SnesBus<'_> {
+    /// Advance the master clock and the time-driven subsystems by
+    /// `mcycles` (Phase 1 cycle-accuracy: per-bus-access synchronisation
+    /// instead of one end-of-instruction lump).
+    ///
+    /// `advance_coproc` is `false` only on the DMA accounting path: the
+    /// coprocessor already advanced per transferred byte inside
+    /// [`DmaBusView::tick`], so charging it again with the lumped DMA
+    /// cost here would double-count it.
+    fn advance_time(&mut self, mcycles: MCycles, advance_coproc: bool) {
+        *self.mclk_total = self.mclk_total.saturating_add(mcycles);
+        // APU in lockstep with the CPU at bus-access granularity.
+        // `Apu::step` carries the sub-84-mclk remainder in `mclk_deficit`,
+        // so per-access stepping composes exactly with the old lump (same
+        // SPC instruction count) — only the CPU↔APU port interleaving is
+        // finer.
+        if !*self.apu_panicked {
+            self.apu_real.step(mcycles as u32);
+            if self.apu_real.cpu.stopped {
+                *self.apu_panicked = true;
+            }
+        }
+        // PPU scanline scheduler + cartridge coprocessor (SA-1 / Super FX
+        // / …). Both render/run with the register state live at this
+        // access, not an end-of-instruction snapshot. Gated by
+        // `sched_enabled` so debug peeks / mapping tests
+        // (`peek_pc_bytes`, `reset`) don't tick emulation forward.
+        if self.sched_enabled {
+            self.sched_advance(mcycles as u32);
+            if advance_coproc {
+                self.mapper.step_coproc(mcycles as u32);
+            }
+        }
+    }
+
     fn read_inner(&mut self, addr: Addr24) -> u8 {
         let speed = address_speed(addr, self.fast_rom);
         self.io_cycle(speed.mcycles());
@@ -1447,8 +1466,10 @@ impl SnesBus<'_> {
             //   * 8 mclk per byte transferred
             // We charge `8 + 8 × bytes` — close enough for game
             // compatibility without modelling the per-channel
-            // header explicitly.
-            self.io_cycle(u64::from(8 + bytes.saturating_mul(8)));
+            // header explicitly. `advance_coproc = false`: the SA-1 (and
+            // future coprocs) already advanced per byte during the burst
+            // via `DmaBusView::tick`, so this lump must not re-charge it.
+            self.advance_time(u64::from(8 + bytes.saturating_mul(8)), false);
             return;
         }
         if Self::is_hdmaen(addr) {
