@@ -1,103 +1,108 @@
 # Luna
 
-> Émulateur SNES **cycle-accurate** écrit en Rust, conçu pour qu'un agent IA
-> puisse **jouer**, **développer** et **déboguer** des jeux Super Nintendo de
-> manière autonome — via une API d'introspection riche et un serveur MCP
-> intégré.
+> A **cycle-accurate** SNES emulator written in Rust, designed so that an AI
+> agent can **play**, **develop** and **debug** Super Nintendo games
+> autonomously — through a rich introspection API and a built-in MCP server.
 
-[![Édition Rust](https://img.shields.io/badge/Rust-2024-orange)](rust-toolchain.toml)
-[![Licence](https://img.shields.io/badge/licence-MPL--2.0-blue)](LICENSE)
-[![Statut](https://img.shields.io/badge/statut-pré--1.0-yellow)](#statut)
+[![Rust edition](https://img.shields.io/badge/Rust-2024-orange)](rust-toolchain.toml)
+[![License](https://img.shields.io/badge/license-MPL--2.0-blue)](LICENSE)
+[![Status](https://img.shields.io/badge/status-pre--1.0-yellow)](#status)
+[![Platform](https://img.shields.io/badge/platform-Linux-informational)](#platform-support)
 
 ---
 
-## Pourquoi Luna ?
+## Why Luna?
 
-Les émulateurs SNES traditionnels considèrent l'IA comme un cas d'usage
-secondaire — à brancher *a posteriori* via de l'OCR sur des captures d'écran.
-Luna inverse la priorité : le dialogue **agent ↔ machine** est un objectif
-central de design.
+Traditional SNES emulators treat AI as a second-class use case — something you
+bolt on afterwards via OCR over screenshots. Luna flips that priority: the
+**agent ↔ machine** dialogue is a central design goal.
 
-Concrètement, l'état complet de la console (registres CPU, VRAM, OAM, palette,
-scroll, tilemap, sprites, mémoire) est exposé sous forme **structurée et
-sérialisable**, et un serveur **MCP** (Model Context Protocol) permet à un
-agent comme Claude de piloter la machine via un catalogue d'outils JSON-RPC
-standardisés — sans jamais regarder un pixel s'il ne le souhaite pas.
+In practice, the full machine state (CPU registers, VRAM, OAM, palette,
+scroll, tilemap, sprites, memory) is exposed in a **structured, serializable**
+form, and a built-in **MCP** (Model Context Protocol) server lets an agent like
+Claude drive the machine through a catalogue of standardized JSON-RPC tools —
+without ever looking at a single pixel if it doesn't want to.
 
-Trois usages sont assumés dès la conception :
+Three use cases are first-class from the start:
 
-- 🎮 **Play** — l'agent joue à un jeu existant.
-- 🛠️ **Dev** — l'agent développe un homebrew.
-- 🐛 **Debug** — l'agent inspecte un ROM hack (breakpoints, trace, mémoire).
+- 🎮 **Play** — the agent plays an existing game.
+- 🛠️ **Dev** — the agent develops a homebrew.
+- 🐛 **Debug** — the agent inspects a ROM hack (breakpoints, trace, memory).
 
-La fidélité matérielle n'est pas sacrifiée pour autant : les cœurs CPU sont
-validés contre les suites de tests de référence, et chaque sous-système est
-implémenté en relisant les émulateurs de référence (ares, Mesen2) avant
-d'écrire la moindre ligne — voir [`docs/emulator_landscape.md`](docs/emulator_landscape.md)
-pour le panorama qui a motivé ces choix de référence.
+Hardware fidelity is not sacrificed for it: the CPU cores are validated
+against reference test suites, and every subsystem is implemented by reading
+the reference emulators (ares, Mesen2) before writing a single line — see
+[`docs/emulator_landscape.md`](docs/emulator_landscape.md) for the survey that
+motivated those reference choices.
 
-## Statut
+## Status
 
-Projet **en développement actif, pré-1.0** (`v0.0.1`). Ce qui tourne
-aujourd'hui :
+Project under **active development, pre-1.0** (`v0.0.1`). What runs today:
 
-| Sous-système | Crate | État |
+| Subsystem | Crate | State |
 |---|---|---|
 | Bus & memory map (LoROM / HiROM / ExHiROM / SA-1) | `luna-bus` | ✅ |
-| Parsing ROM & détection de mapper | `luna-cartridge` | ✅ |
-| CPU 65C816 (cycle-accurate, suite SingleStepTests 100 %) | `luna-cpu-65c816` | ✅ |
-| CPU SPC700 (cycle-accurate, suite SingleStepTests 100 %) | `luna-cpu-spc700` | ✅ |
-| APU — SPC700 + S-DSP (port cycle-accurate d'ares) | `luna-apu` | ✅ |
+| ROM parsing & mapper detection | `luna-cartridge` | ✅ |
+| 65C816 CPU (cycle-accurate, SingleStepTests suite 100%) | `luna-cpu-65c816` | ✅ |
+| SPC700 CPU (cycle-accurate, SingleStepTests suite 100%) | `luna-cpu-spc700` | ✅ |
+| APU — SPC700 + S-DSP (cycle-accurate ares port) | `luna-apu` | ✅ |
 | PPU + renderer + compositor | `luna-ppu` | ✅ |
-| Glue système, scheduler, DMA / HDMA, coprocesseur SA-1 | `luna-core` | ✅ |
-| API d'introspection (snapshots `EmulatorState`) | `luna-api` | ✅ |
-| Serveur MCP (stdio) | `luna-mcp-server` | ✅ |
-| Binaire CLI (`run` / `state` / `mcp`) | `luna-cli` | ✅ |
-| GUI debugger (eframe, pacing audio-as-clock) | `luna-gui` | ✅ |
+| System glue, scheduler, DMA / HDMA, SA-1 coprocessor | `luna-core` | ✅ |
+| Introspection API (`EmulatorState` snapshots) | `luna-api` | ✅ |
+| MCP server (stdio) | `luna-mcp-server` | ✅ |
+| CLI binary (`run` / `state` / `mcp`) | `luna-cli` | ✅ |
+| GUI debugger (eframe, audio-as-clock pacing) | `luna-gui` | ✅ |
 
-Coprocesseurs au-delà de SA-1 (Super FX, DSP-1…), transports REST/WebSocket
-et cible WASM sont sur la [roadmap](ARCHITECTURE.md#14-roadmap--phasage), pas
-encore livrés.
+Coprocessors beyond SA-1 (Super FX, DSP-1…), REST/WebSocket transports and a
+WASM target are on the [roadmap](ARCHITECTURE.md#14-roadmap--phasage), not yet
+shipped.
 
-## Démarrage rapide
+## Platform support
 
-Prérequis : la toolchain Rust épinglée dans [`rust-toolchain.toml`](rust-toolchain.toml)
-(édition 2024, Rust ≥ 1.85).
+Luna is currently **developed and tested on Linux only**. The stack
+(eframe/wgpu for the GUI, cpal for audio) is cross-platform in principle, but
+macOS and Windows are **not tested or supported yet** — they may build and run,
+but no guarantees. Contributions to validate other platforms are welcome.
+
+## Quick start
+
+Prerequisites: the Rust toolchain pinned in [`rust-toolchain.toml`](rust-toolchain.toml)
+(2024 edition, Rust ≥ 1.85), on Linux.
 
 ```bash
-# Build complet (debug + release)
+# Full build (debug + release)
 cargo build --release --workspace
 
-# Lancer le debugger graphique sur une ROM
-cargo run --release -p luna-gui -- "chemin/vers/jeu.sfc"
+# Launch the graphical debugger on a ROM
+cargo run --release -p luna-gui -- "path/to/game.sfc"
 ```
 
-### Le binaire `luna` (CLI)
+### The `luna` binary (CLI)
 
 ```bash
-# Exécuter N instructions et dumper une capture d'écran (headless, sans GUI)
-./target/release/luna run "jeu.sfc" -n 2000000 --screenshot /tmp/frame.png
+# Run N instructions and dump a screenshot (headless, no GUI)
+./target/release/luna run "game.sfc" -n 2000000 --screenshot /tmp/frame.png
 
-# Émettre un snapshot JSON de l'état machine (la même donnée que l'outil MCP get_state)
-./target/release/luna state "jeu.sfc" -n 30000 --out -
+# Emit a JSON snapshot of the machine state (the same data the MCP get_state tool returns)
+./target/release/luna state "game.sfc" -n 30000 --out -
 
-# Servir le serveur MCP sur stdio (pour Claude Desktop / Claude Code / client custom)
+# Serve the MCP server over stdio (for Claude Desktop / Claude Code / custom clients)
 ./target/release/luna mcp
 ```
 
-## Architecture en bref
+## Architecture at a glance
 
-Luna est un workspace Cargo de 11 crates, organisé en couches qui ne
-communiquent que par contrats Rust (traits + types sérialisables) — aucune
-dépendance d'une couche basse vers une couche haute.
+Luna is an 11-crate Cargo workspace, organized in layers that communicate only
+through Rust contracts (traits + serializable types) — no lower layer ever
+depends on a higher one.
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│  Serveur MCP (luna-mcp-server)  — JSON-RPC sur stdio       │
+│  MCP server (luna-mcp-server)  — JSON-RPC over stdio       │
 ├──────────────────────────────────────────────────────────┤
-│  API d'introspection (luna-api) — contrat public stable    │
+│  Introspection API (luna-api)  — stable public contract    │
 ├──────────────────────────────────────────────────────────┤
-│  Cœur d'émulation (luna-core)                              │
+│  Emulation core (luna-core)                                │
 │   65C816 · PPU · SPC700/DSP · DMA · SA-1 · scheduler       │
 ├──────────────────────────────────────────────────────────┤
 │  Bus & mappers (luna-bus)                                  │
@@ -106,30 +111,33 @@ dépendance d'une couche basse vers une couche haute.
    luna-cli (headless)              luna-gui (egui/wgpu)
 ```
 
-Ce découplage permet trois **modes d'exécution** combinables sur le même
-binaire :
+This decoupling enables three **execution modes**, combinable on the same
+binary:
 
-- **Headless** — aucune fenêtre, pilotage 100 % via MCP (production IA, CI).
-- **Standalone** — fenêtre native, clavier/manette (un humain joue).
-- **Spectator** — l'IA joue, l'humain observe le framebuffer et l'activité de
-  l'agent en temps réel.
+- **Headless** — no window, driven 100% via MCP (AI in production, CI).
+- **Standalone** — native window, keyboard/gamepad (a human plays).
+- **Spectator** — the AI plays, the human watches the framebuffer and the
+  agent's activity in real time.
 
-Le design complet (vision, non-objectifs, couches, threading, déterminisme,
-roadmap) est documenté dans **[`ARCHITECTURE.md`](ARCHITECTURE.md)**.
+The full design (vision, non-goals, layers, threading, determinism, roadmap)
+is documented in **[`ARCHITECTURE.md`](ARCHITECTURE.md)**.
 
 ## Documentation
 
-| Document | Contenu |
+| Document | Contents |
 |---|---|
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Design complet du système, couches, roadmap |
-| [`RESEARCH.md`](RESEARCH.md) | Recherche pré-Phase-0 (fork vs from-scratch, WASM, scheduler) |
-| [`CLAUDE.md`](CLAUDE.md) | Conventions du dépôt pour les contributeurs (et les agents) |
-| [`docs/`](docs/) | Specs de référence PPU/APU/SA-1, scorecard de précision, gap lists |
-| [`docs/emulator_landscape.md`](docs/emulator_landscape.md) | Panorama comparatif des émulateurs SNES existants |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Full system design, layers, roadmap |
+| [`RESEARCH.md`](RESEARCH.md) | Pre-Phase-0 research (fork vs from-scratch, WASM, scheduler) |
+| [`CLAUDE.md`](CLAUDE.md) | Repository conventions for contributors (and agents) |
+| [`docs/`](docs/) | PPU/APU/SA-1 reference specs, accuracy scorecard, gap lists |
+| [`docs/emulator_landscape.md`](docs/emulator_landscape.md) | Comparative survey of existing SNES emulators |
 
-## Développement
+> Note: most design documents are currently written in French; the codebase
+> and the public API are in English.
 
-La séquence canonique avant tout commit (rebuild + tests + lint) :
+## Development
+
+The canonical sequence before any commit (rebuild + tests + lint):
 
 ```bash
 cargo build --workspace --all-targets \
@@ -139,10 +147,10 @@ cargo build --workspace --all-targets \
   && cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-Les conventions détaillées (reference-first, discipline de test des
-coprocesseurs, workflow de validation audio/vidéo) vivent dans
-[`CLAUDE.md`](CLAUDE.md) et `.claude/rules/`.
+Detailed conventions (reference-first, coprocessor test discipline,
+audio/video validation workflow) live in [`CLAUDE.md`](CLAUDE.md) and
+`.claude/rules/`.
 
-## Licence
+## License
 
-Distribué sous licence **Mozilla Public License 2.0** — voir [`LICENSE`](LICENSE).
+Distributed under the **Mozilla Public License 2.0** — see [`LICENSE`](LICENSE).
