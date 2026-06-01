@@ -153,6 +153,53 @@ impl Cpu {
     }
 
     // -------------------------------------------------------------------
+    // Internal (idle) cycles — Phase 3 cycle accuracy.
+    //
+    // The CPU spends some cycles doing no bus access (effective-address
+    // math, RMW dead cycle, branch/stack pipeline). On hardware these run
+    // at the fast (6-mclk) rate. We charge them via `bus.io_cycle` so the
+    // master-clock advances correctly and the Tom Harte `cycles[]` count
+    // matches. Names/conditions mirror ares `wdc65816/memory.cpp`.
+    // -------------------------------------------------------------------
+
+    /// Master cycles of one internal CPU cycle (the fast/internal rate).
+    pub const INTERNAL_CYCLE_MCLK: luna_bus::MCycles = 6;
+
+    /// One internal cycle (ares `idle()`).
+    #[inline]
+    pub fn io<B: Bus>(&self, bus: &mut B) {
+        bus.io_cycle(Self::INTERNAL_CYCLE_MCLK);
+    }
+
+    /// Direct-page add cycle (ares `idle2()`): charged only when the
+    /// direct-page register's low byte is non-zero.
+    #[inline]
+    pub fn idle2<B: Bus>(&self, bus: &mut B) {
+        if self.dp & 0xFF != 0 {
+            self.io(bus);
+        }
+    }
+
+    /// Indexed-read page-cross cycle (ares `idle4()`): charged when the
+    /// index register is 16-bit (`!idx8`) or the index addition crossed a
+    /// page. `base`/`indexed` are the pre-/post-index 16-bit offsets.
+    #[inline]
+    pub fn idle4<B: Bus>(&self, bus: &mut B, base: u16, indexed: u16) {
+        if !self.p.idx8() || (base >> 8) != (indexed >> 8) {
+            self.io(bus);
+        }
+    }
+
+    /// Emulation-mode branch page-cross cycle (ares `idle6()`): charged
+    /// only in emulation mode when the taken branch crosses a page.
+    #[inline]
+    pub fn idle6<B: Bus>(&self, bus: &mut B, target: u16) {
+        if self.e && (self.pc >> 8) != (target >> 8) {
+            self.io(bus);
+        }
+    }
+
+    // -------------------------------------------------------------------
     // Flag-update helpers (used by many opcodes).
     // -------------------------------------------------------------------
 
