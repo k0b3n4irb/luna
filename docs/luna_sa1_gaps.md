@@ -77,6 +77,31 @@ accumulator produces visibly wrong geometry.
 
 ---
 
+## 🟠 5. Timer HV mode (`$2210` hvselb=0) unimplemented
+
+ares `sa1.cpp:63-94` runs the SA-1 timer in two modes selected by TMC
+(`$2210`) bit 7 (`hvselb`):
+
+- **Linear** (hvselb=1): an 18-bit counter; IRQ on a compare match.
+  luna implements this (`tick_timer`, `sa1.rs:638`).
+- **HV** (hvselb=0): `hcounter += 2` per 2 clocks, wraps at 1364;
+  `vcounter++` wraps at `scanlines`; IRQ when `hcounter == hcnt<<2`
+  (hen) and/or `vcounter == vcnt` (ven). luna **does not implement
+  this** — `tick_timer` early-returns with no IRQ when TMC.7 == 0
+  (the in-code comment admits it: "HV-mode timing isn't wired yet").
+
+The HV timer needs the SA-1 to see the PPU dot/scanline position, which
+isn't plumbed to the chip yet (related to cycle-accuracy Phase 4). The
+HCR/VCR read-backs (`$2306`-region) are also stubbed for HV mode.
+
+**Audited 2026-06-01 during the SMRPG deadlock hunt — NOT the cause
+there:** SMRPG writes TMC exactly once (`= $00`, timer off) and never
+touches `$2211-$2215`, so its hang is unrelated. But other SA-1 titles
+that use HV-mode raster timing would mis-fire. Wiring it requires the
+PPU H/V dot view (do it with Phase 4).
+
+---
+
 ## 🟡 Minor deviations / notes
 
 | # | Issue | ares ref | luna |
@@ -106,4 +131,5 @@ accumulator produces visibly wrong geometry.
 ## Suggested order
 
 1. ~~#1 math unit (a/b/c/d)~~ — **done**.
-2. 🟡 #2-#4 — minor; left as notes.
+2. 🟠 #5 timer HV mode — needs the PPU H/V dot view; pair with cycle-accuracy Phase 4.
+3. 🟡 #2-#4 — minor; left as notes.
