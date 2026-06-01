@@ -129,7 +129,7 @@ struct CycleCheck {
     want: usize,
 }
 
-fn run_case(case: &TestCase) -> (Result<CaseResult, String>, Option<CycleCheck>) {
+fn run_case(case: &TestCase, opcode: u8) -> (Result<CaseResult, String>, Option<CycleCheck>) {
     let mut cpu = Cpu::new();
     let mut bus = RamBus::new();
     apply_state(&mut cpu, &mut bus, &case.initial);
@@ -140,13 +140,17 @@ fn run_case(case: &TestCase) -> (Result<CaseResult, String>, Option<CycleCheck>)
         return (Ok(CaseResult::Skip), None);
     }
 
-    let cyc = CycleCheck {
+    // WAI (0xCB) / STP (0xDB) halt the CPU: their Tom Harte trace is a
+    // fixed halt-window (4 entries), not a completing instruction cost, so
+    // there is no meaningful single-total to match. Skip the cycle check
+    // (state is still validated).
+    let cyc = (opcode != 0xCB && opcode != 0xDB).then(|| CycleCheck {
         got: bus.io_cycle_calls(),
         want: case.cycles.len(),
-    };
+    });
     match compare_state(&cpu, &bus, &case.final_) {
-        Ok(()) => (Ok(CaseResult::Pass), Some(cyc)),
-        Err(e) => (Err(e), Some(cyc)),
+        Ok(()) => (Ok(CaseResult::Pass), cyc),
+        Err(e) => (Err(e), cyc),
     }
 }
 
@@ -286,7 +290,7 @@ fn tom_harte() {
 
         let op = stats.entry(stem.clone()).or_default();
         for case in cases.iter().take(sample) {
-            let (state, cycle) = run_case(case);
+            let (state, cycle) = run_case(case, opcode);
             match state {
                 Ok(CaseResult::Pass) => op.passed += 1,
                 Ok(CaseResult::Skip) => op.skipped += 1,

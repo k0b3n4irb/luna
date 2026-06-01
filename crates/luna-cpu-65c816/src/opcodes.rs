@@ -15,10 +15,10 @@
 //! tests can be wired up in P0.4b without further plumbing changes.
 
 use crate::addressing::{
-    absolute, absolute_indexed_x, absolute_indexed_y, absolute_long, absolute_long_indexed_x,
-    direct_page, direct_page_indexed_indirect, direct_page_indexed_x, direct_page_indexed_y,
-    direct_page_indirect, direct_page_indirect_long, direct_page_indirect_long_y,
-    direct_page_indirect_y, stack_relative, stack_relative_indirect_y,
+    Access, absolute, absolute_indexed_x, absolute_indexed_y, absolute_long,
+    absolute_long_indexed_x, direct_page, direct_page_indexed_indirect, direct_page_indexed_x,
+    direct_page_indexed_y, direct_page_indirect, direct_page_indirect_long,
+    direct_page_indirect_long_y, direct_page_indirect_y, stack_relative, stack_relative_indirect_y,
 };
 use crate::cpu::Cpu;
 use crate::flags::bit;
@@ -30,6 +30,28 @@ use luna_bus::{Addr24, Bus, MCycles, make_addr};
 /// `> 0` works; 8 mclk (one slow bus access) keeps WAI loops cheap
 /// while still letting a frame complete in O(scanlines × dots).
 const WAI_TICK_MCYCLES: MCycles = 8;
+
+/// Opcodes that spend exactly one internal "dead" cycle with no operand
+/// bus access (ares `idleIRQ` — the implied / register-only 2-cycle ops).
+/// `step` charges this after the op runs. XBA (`0xEB`) is handled
+/// separately as it spends two such cycles.
+const fn is_implied_io(opcode: u8) -> bool {
+    matches!(
+        opcode,
+        // Flag set/clear: CLC SEC CLI SEI CLV CLD SED
+        0x18 | 0x38 | 0x58 | 0x78 | 0xB8 | 0xD8 | 0xF8
+        // REP / SEP (immediate operand fetched, then one internal cycle)
+        | 0xC2 | 0xE2
+        // NOP, XCE
+        | 0xEA | 0xFB
+        // INC/DEC A and index inc/dec: INC A DEC A DEX DEY INX INY
+        | 0x1A | 0x3A | 0xCA | 0x88 | 0xE8 | 0xC8
+        // Accumulator shifts/rotates: ASL LSR ROL ROR (A)
+        | 0x0A | 0x4A | 0x2A | 0x6A
+        // Register transfers: TAX TAY TXA TYA TXY TYX TCD TDC TSC TCS TSX TXS
+        | 0xAA | 0xA8 | 0x8A | 0x98 | 0x9B | 0xBB | 0x5B | 0x7B | 0x3B | 0x1B | 0xBA | 0x9A
+    )
+}
 
 impl Cpu {
     /// Execute one instruction: fetch opcode at `PB:PC` and dispatch.
@@ -508,6 +530,17 @@ impl Cpu {
             // All 256 opcode values are explicitly handled above.
             // The compiler validates exhaustiveness; no catch-all needed.
         }
+        // Implied / register-only ops spend one internal "dead" cycle that
+        // does no operand bus access (ares `idleIRQ`). XBA spends two. The
+        // op above already updated the registers; the cycle is charged here.
+        match opcode {
+            0xEB => {
+                self.io(bus);
+                self.io(bus);
+            }
+            _ if is_implied_io(opcode) => self.io(bus),
+            _ => {}
+        }
     }
 
     // ===================================================================
@@ -614,7 +647,7 @@ impl Cpu {
     }
 
     fn lda_dp_indirect_y<B: Bus>(&mut self, bus: &mut B) {
-        let addr = direct_page_indirect_y(self, bus);
+        let addr = direct_page_indirect_y(self, bus, Access::Read);
         self.lda_from_addr(bus, addr);
     }
 
@@ -629,12 +662,12 @@ impl Cpu {
     }
 
     fn lda_abs_x<B: Bus>(&mut self, bus: &mut B) {
-        let addr = absolute_indexed_x(self, bus);
+        let addr = absolute_indexed_x(self, bus, Access::Read);
         self.lda_from_addr(bus, addr);
     }
 
     fn lda_abs_y<B: Bus>(&mut self, bus: &mut B) {
-        let addr = absolute_indexed_y(self, bus);
+        let addr = absolute_indexed_y(self, bus, Access::Read);
         self.lda_from_addr(bus, addr);
     }
 
@@ -697,7 +730,7 @@ impl Cpu {
     }
 
     fn ldx_abs_y<B: Bus>(&mut self, bus: &mut B) {
-        let addr = absolute_indexed_y(self, bus);
+        let addr = absolute_indexed_y(self, bus, Access::Read);
         self.ldx_from_addr(bus, addr);
     }
 
@@ -741,7 +774,7 @@ impl Cpu {
     }
 
     fn ldy_abs_x<B: Bus>(&mut self, bus: &mut B) {
-        let addr = absolute_indexed_x(self, bus);
+        let addr = absolute_indexed_x(self, bus, Access::Read);
         self.ldy_from_addr(bus, addr);
     }
 
@@ -789,7 +822,7 @@ impl Cpu {
     }
 
     fn sta_dp_indirect_y<B: Bus>(&mut self, bus: &mut B) {
-        let addr = direct_page_indirect_y(self, bus);
+        let addr = direct_page_indirect_y(self, bus, Access::Write);
         self.sta_to_addr(bus, addr);
     }
 
@@ -804,12 +837,12 @@ impl Cpu {
     }
 
     fn sta_abs_x<B: Bus>(&mut self, bus: &mut B) {
-        let addr = absolute_indexed_x(self, bus);
+        let addr = absolute_indexed_x(self, bus, Access::Write);
         self.sta_to_addr(bus, addr);
     }
 
     fn sta_abs_y<B: Bus>(&mut self, bus: &mut B) {
-        let addr = absolute_indexed_y(self, bus);
+        let addr = absolute_indexed_y(self, bus, Access::Write);
         self.sta_to_addr(bus, addr);
     }
 
@@ -907,7 +940,7 @@ impl Cpu {
     }
 
     fn stz_abs_x<B: Bus>(&mut self, bus: &mut B) {
-        let addr = absolute_indexed_x(self, bus);
+        let addr = absolute_indexed_x(self, bus, Access::Write);
         self.stz_to_addr(bus, addr);
     }
 
@@ -950,6 +983,7 @@ impl Cpu {
     /// Program bank stays the same.
     fn jmp_abs_indexed_indirect<B: Bus>(&mut self, bus: &mut B) {
         let base = self.fetch_u16(bus);
+        self.io(bus); // ares JumpIndexedIndirect internal cycle
         let ptr_off = base.wrapping_add(self.x);
         let lo = bus.read(make_addr(self.pb, ptr_off));
         let hi = bus.read(make_addr(self.pb, ptr_off.wrapping_add(1)));
@@ -961,6 +995,7 @@ impl Cpu {
     /// RTS will increment by 1 to land on the next instruction).
     fn jsr_abs<B: Bus>(&mut self, bus: &mut B) {
         let target = self.fetch_u16(bus);
+        self.io(bus); // ares CallShort internal cycle
         let return_addr = self.pc.wrapping_sub(1);
         self.push_u16(bus, return_addr);
         self.pc = target;
@@ -972,6 +1007,7 @@ impl Cpu {
         let target = self.fetch_u24(bus);
         let return_pc = self.pc.wrapping_sub(1);
         self.push_u8_native(bus, self.pb);
+        self.io(bus); // ares CallLong internal cycle (between PBR push and PC push)
         self.push_u16_native(bus, return_pc);
         self.pb = (target >> 16) as u8;
         self.pc = target as u16;
@@ -987,6 +1023,7 @@ impl Cpu {
         // of the operand we just fetched).
         let return_addr = self.pc.wrapping_sub(1);
         self.push_u16(bus, return_addr);
+        self.io(bus); // ares CallIndexedIndirect internal cycle
         let ptr_off = base.wrapping_add(self.x);
         let lo = bus.read(make_addr(self.pb, ptr_off));
         let hi = bus.read(make_addr(self.pb, ptr_off.wrapping_add(1)));
@@ -995,12 +1032,19 @@ impl Cpu {
 
     /// `RTS` — pull PC, increment by 1, stay in the same program bank.
     fn rts<B: Bus>(&mut self, bus: &mut B) {
+        // ares ReturnShort: two internal cycles, pull PC, one more.
+        self.io(bus);
+        self.io(bus);
         let pc = self.pull_u16(bus);
+        self.io(bus);
         self.pc = pc.wrapping_add(1);
     }
 
     /// `RTL` — pull PC (16-bit), then PB; increment PC by 1.
     fn rtl<B: Bus>(&mut self, bus: &mut B) {
+        // ares ReturnLong: two internal cycles before the pulls.
+        self.io(bus);
+        self.io(bus);
         let pc = self.pull_u16_native(bus);
         let pb = self.pull_u8_native(bus);
         self.pc = pc.wrapping_add(1);
@@ -1011,6 +1055,7 @@ impl Cpu {
     /// displacement.
     fn brl<B: Bus>(&mut self, bus: &mut B) {
         let rel = self.fetch_u16(bus) as i16;
+        self.io(bus); // ares BranchLong internal cycle
         self.pc = self.pc.wrapping_add_signed(rel);
     }
 
@@ -1092,6 +1137,9 @@ impl Cpu {
     // ===================================================================
 
     fn rti<B: Bus>(&mut self, bus: &mut B) {
+        // ares ReturnInterrupt: two internal cycles before the pulls.
+        self.io(bus);
+        self.io(bus);
         let new_p = self.pull_u8(bus);
         self.pc = self.pull_u16(bus);
         // Emulation forces M and X to stay set in P.
@@ -1205,7 +1253,13 @@ impl Cpu {
     fn branch_if<B: Bus>(&mut self, bus: &mut B, condition: bool) {
         let offset = self.fetch_u8(bus) as i8;
         if condition {
-            self.pc = self.pc.wrapping_add_signed(i16::from(offset));
+            // ares instructionBranch(take): when taken, an emulation-mode
+            // page-cross cycle (idle6, comparing the not-yet-updated PC to
+            // the target) then one fixed taken-branch internal cycle.
+            let target = self.pc.wrapping_add_signed(i16::from(offset));
+            self.idle6(bus, target);
+            self.io(bus);
+            self.pc = target;
         }
     }
 
@@ -1242,11 +1296,15 @@ impl Cpu {
     fn modify_memory<B: Bus>(&mut self, bus: &mut B, addr: Addr24, op: fn(u16) -> u16) {
         if self.p.acc8() {
             let v = bus.read(addr);
+            // RMW dead cycle (ares `instruction*Modify`: one `idle()`
+            // between the read and the write-back).
+            self.io(bus);
             let new = op(u16::from(v)) as u8;
             bus.write(addr, new);
             self.set_nz8(new);
         } else {
             let v = self.read_word16(bus, addr);
+            self.io(bus);
             let new = op(v);
             bus.write(addr, new as u8);
             bus.write(self.hi_addr(addr), (new >> 8) as u8);
@@ -1267,7 +1325,7 @@ impl Cpu {
         self.modify_memory(bus, a, |v| v.wrapping_add(1));
     }
     fn inc_abs_x<B: Bus>(&mut self, bus: &mut B) {
-        let a = absolute_indexed_x(self, bus);
+        let a = absolute_indexed_x(self, bus, Access::Write);
         self.modify_memory(bus, a, |v| v.wrapping_add(1));
     }
     fn dec_dp<B: Bus>(&mut self, bus: &mut B) {
@@ -1283,7 +1341,7 @@ impl Cpu {
         self.modify_memory(bus, a, |v| v.wrapping_sub(1));
     }
     fn dec_abs_x<B: Bus>(&mut self, bus: &mut B) {
-        let a = absolute_indexed_x(self, bus);
+        let a = absolute_indexed_x(self, bus, Access::Write);
         self.modify_memory(bus, a, |v| v.wrapping_sub(1));
     }
 
@@ -1590,12 +1648,12 @@ impl Cpu {
         self.adc_value(v);
     }
     fn adc_abs_x<B: Bus>(&mut self, bus: &mut B) {
-        let a = absolute_indexed_x(self, bus);
+        let a = absolute_indexed_x(self, bus, Access::Read);
         let v = self.arithmetic_read_from(bus, a);
         self.adc_value(v);
     }
     fn adc_abs_y<B: Bus>(&mut self, bus: &mut B) {
-        let a = absolute_indexed_y(self, bus);
+        let a = absolute_indexed_y(self, bus, Access::Read);
         let v = self.arithmetic_read_from(bus, a);
         self.adc_value(v);
     }
@@ -1605,7 +1663,7 @@ impl Cpu {
         self.adc_value(v);
     }
     fn adc_dp_indirect_y<B: Bus>(&mut self, bus: &mut B) {
-        let a = direct_page_indirect_y(self, bus);
+        let a = direct_page_indirect_y(self, bus, Access::Read);
         let v = self.arithmetic_read_from(bus, a);
         self.adc_value(v);
     }
@@ -1662,12 +1720,12 @@ impl Cpu {
         self.sbc_value(v);
     }
     fn sbc_abs_x<B: Bus>(&mut self, bus: &mut B) {
-        let a = absolute_indexed_x(self, bus);
+        let a = absolute_indexed_x(self, bus, Access::Read);
         let v = self.arithmetic_read_from(bus, a);
         self.sbc_value(v);
     }
     fn sbc_abs_y<B: Bus>(&mut self, bus: &mut B) {
-        let a = absolute_indexed_y(self, bus);
+        let a = absolute_indexed_y(self, bus, Access::Read);
         let v = self.arithmetic_read_from(bus, a);
         self.sbc_value(v);
     }
@@ -1677,7 +1735,7 @@ impl Cpu {
         self.sbc_value(v);
     }
     fn sbc_dp_indirect_y<B: Bus>(&mut self, bus: &mut B) {
-        let a = direct_page_indirect_y(self, bus);
+        let a = direct_page_indirect_y(self, bus, Access::Read);
         let v = self.arithmetic_read_from(bus, a);
         self.sbc_value(v);
     }
@@ -1782,12 +1840,12 @@ impl Cpu {
         self.cmp_value(v);
     }
     fn cmp_abs_x<B: Bus>(&mut self, bus: &mut B) {
-        let a = absolute_indexed_x(self, bus);
+        let a = absolute_indexed_x(self, bus, Access::Read);
         let v = self.arithmetic_read_from(bus, a);
         self.cmp_value(v);
     }
     fn cmp_abs_y<B: Bus>(&mut self, bus: &mut B) {
-        let a = absolute_indexed_y(self, bus);
+        let a = absolute_indexed_y(self, bus, Access::Read);
         let v = self.arithmetic_read_from(bus, a);
         self.cmp_value(v);
     }
@@ -1797,7 +1855,7 @@ impl Cpu {
         self.cmp_value(v);
     }
     fn cmp_dp_indirect_y<B: Bus>(&mut self, bus: &mut B) {
-        let a = direct_page_indirect_y(self, bus);
+        let a = direct_page_indirect_y(self, bus, Access::Read);
         let v = self.arithmetic_read_from(bus, a);
         self.cmp_value(v);
     }
@@ -1956,12 +2014,12 @@ impl Cpu {
         self.and_value(v);
     }
     fn and_abs_x<B: Bus>(&mut self, bus: &mut B) {
-        let a = absolute_indexed_x(self, bus);
+        let a = absolute_indexed_x(self, bus, Access::Read);
         let v = self.arithmetic_read_from(bus, a);
         self.and_value(v);
     }
     fn and_abs_y<B: Bus>(&mut self, bus: &mut B) {
-        let a = absolute_indexed_y(self, bus);
+        let a = absolute_indexed_y(self, bus, Access::Read);
         let v = self.arithmetic_read_from(bus, a);
         self.and_value(v);
     }
@@ -1971,7 +2029,7 @@ impl Cpu {
         self.and_value(v);
     }
     fn and_dp_indirect_y<B: Bus>(&mut self, bus: &mut B) {
-        let a = direct_page_indirect_y(self, bus);
+        let a = direct_page_indirect_y(self, bus, Access::Read);
         let v = self.arithmetic_read_from(bus, a);
         self.and_value(v);
     }
@@ -2032,12 +2090,12 @@ impl Cpu {
         self.ora_value(v);
     }
     fn ora_abs_x<B: Bus>(&mut self, bus: &mut B) {
-        let a = absolute_indexed_x(self, bus);
+        let a = absolute_indexed_x(self, bus, Access::Read);
         let v = self.arithmetic_read_from(bus, a);
         self.ora_value(v);
     }
     fn ora_abs_y<B: Bus>(&mut self, bus: &mut B) {
-        let a = absolute_indexed_y(self, bus);
+        let a = absolute_indexed_y(self, bus, Access::Read);
         let v = self.arithmetic_read_from(bus, a);
         self.ora_value(v);
     }
@@ -2047,7 +2105,7 @@ impl Cpu {
         self.ora_value(v);
     }
     fn ora_dp_indirect_y<B: Bus>(&mut self, bus: &mut B) {
-        let a = direct_page_indirect_y(self, bus);
+        let a = direct_page_indirect_y(self, bus, Access::Read);
         let v = self.arithmetic_read_from(bus, a);
         self.ora_value(v);
     }
@@ -2108,12 +2166,12 @@ impl Cpu {
         self.eor_value(v);
     }
     fn eor_abs_x<B: Bus>(&mut self, bus: &mut B) {
-        let a = absolute_indexed_x(self, bus);
+        let a = absolute_indexed_x(self, bus, Access::Read);
         let v = self.arithmetic_read_from(bus, a);
         self.eor_value(v);
     }
     fn eor_abs_y<B: Bus>(&mut self, bus: &mut B) {
-        let a = absolute_indexed_y(self, bus);
+        let a = absolute_indexed_y(self, bus, Access::Read);
         let v = self.arithmetic_read_from(bus, a);
         self.eor_value(v);
     }
@@ -2123,7 +2181,7 @@ impl Cpu {
         self.eor_value(v);
     }
     fn eor_dp_indirect_y<B: Bus>(&mut self, bus: &mut B) {
-        let a = direct_page_indirect_y(self, bus);
+        let a = direct_page_indirect_y(self, bus, Access::Read);
         let v = self.arithmetic_read_from(bus, a);
         self.eor_value(v);
     }
@@ -2191,7 +2249,7 @@ impl Cpu {
         self.bit_value(v, false);
     }
     fn bit_abs_x<B: Bus>(&mut self, bus: &mut B) {
-        let a = absolute_indexed_x(self, bus);
+        let a = absolute_indexed_x(self, bus, Access::Read);
         let v = self.arithmetic_read_from(bus, a);
         self.bit_value(v, false);
     }
@@ -2283,10 +2341,12 @@ impl Cpu {
     ) {
         if self.p.acc8() {
             let v = u16::from(bus.read(addr));
+            self.io(bus); // RMW dead cycle
             let new = op(self, v) as u8;
             bus.write(addr, new);
         } else {
             let v = self.read_word16(bus, addr);
+            self.io(bus); // RMW dead cycle
             let new = op(self, v);
             bus.write(addr, new as u8);
             bus.write(self.hi_addr(addr), (new >> 8) as u8);
@@ -2351,7 +2411,7 @@ impl Cpu {
         self.modify_memory_with(bus, a, Self::asl_compute);
     }
     fn asl_abs_x<B: Bus>(&mut self, bus: &mut B) {
-        let a = absolute_indexed_x(self, bus);
+        let a = absolute_indexed_x(self, bus, Access::Write);
         self.modify_memory_with(bus, a, Self::asl_compute);
     }
     fn lsr_dp<B: Bus>(&mut self, bus: &mut B) {
@@ -2367,7 +2427,7 @@ impl Cpu {
         self.modify_memory_with(bus, a, Self::lsr_compute);
     }
     fn lsr_abs_x<B: Bus>(&mut self, bus: &mut B) {
-        let a = absolute_indexed_x(self, bus);
+        let a = absolute_indexed_x(self, bus, Access::Write);
         self.modify_memory_with(bus, a, Self::lsr_compute);
     }
     fn rol_dp<B: Bus>(&mut self, bus: &mut B) {
@@ -2383,7 +2443,7 @@ impl Cpu {
         self.modify_memory_with(bus, a, Self::rol_compute);
     }
     fn rol_abs_x<B: Bus>(&mut self, bus: &mut B) {
-        let a = absolute_indexed_x(self, bus);
+        let a = absolute_indexed_x(self, bus, Access::Write);
         self.modify_memory_with(bus, a, Self::rol_compute);
     }
     fn ror_dp<B: Bus>(&mut self, bus: &mut B) {
@@ -2399,7 +2459,7 @@ impl Cpu {
         self.modify_memory_with(bus, a, Self::ror_compute);
     }
     fn ror_abs_x<B: Bus>(&mut self, bus: &mut B) {
-        let a = absolute_indexed_x(self, bus);
+        let a = absolute_indexed_x(self, bus, Access::Write);
         self.modify_memory_with(bus, a, Self::ror_compute);
     }
 
@@ -2669,6 +2729,8 @@ impl Cpu {
     // ===================================================================
 
     fn pha<B: Bus>(&mut self, bus: &mut B) {
+        self.io(bus); // stack-op internal cycle (ares Push)
+
         if self.p.acc8() {
             self.push_u8(bus, self.a8());
         } else {
@@ -2677,6 +2739,8 @@ impl Cpu {
     }
 
     fn phx<B: Bus>(&mut self, bus: &mut B) {
+        self.io(bus); // stack-op internal cycle (ares Push)
+
         if self.p.idx8() {
             self.push_u8(bus, self.x8());
         } else {
@@ -2685,6 +2749,8 @@ impl Cpu {
     }
 
     fn phy<B: Bus>(&mut self, bus: &mut B) {
+        self.io(bus); // stack-op internal cycle (ares Push)
+
         if self.p.idx8() {
             self.push_u8(bus, self.y8());
         } else {
@@ -2693,22 +2759,33 @@ impl Cpu {
     }
 
     fn php<B: Bus>(&mut self, bus: &mut B) {
+        self.io(bus); // stack-op internal cycle (ares Push)
+
         self.push_u8(bus, self.p.bits());
     }
 
     fn phb<B: Bus>(&mut self, bus: &mut B) {
+        self.io(bus); // stack-op internal cycle (ares Push)
+
         self.push_u8(bus, self.db);
     }
 
     fn phd<B: Bus>(&mut self, bus: &mut B) {
+        self.io(bus); // stack-op internal cycle (ares Push)
+
         self.push_u16_native(bus, self.dp);
     }
 
     fn phk<B: Bus>(&mut self, bus: &mut B) {
+        self.io(bus); // stack-op internal cycle (ares Push)
+
         self.push_u8(bus, self.pb);
     }
 
     fn pla<B: Bus>(&mut self, bus: &mut B) {
+        self.io(bus); // stack-op internal cycles (ares Pull)
+        self.io(bus);
+
         if self.p.acc8() {
             let v = self.pull_u8(bus);
             self.set_a_low(v);
@@ -2721,6 +2798,9 @@ impl Cpu {
     }
 
     fn plx<B: Bus>(&mut self, bus: &mut B) {
+        self.io(bus); // stack-op internal cycles (ares Pull)
+        self.io(bus);
+
         if self.p.idx8() {
             let v = self.pull_u8(bus);
             self.set_x_low(v);
@@ -2733,6 +2813,9 @@ impl Cpu {
     }
 
     fn ply<B: Bus>(&mut self, bus: &mut B) {
+        self.io(bus); // stack-op internal cycles (ares Pull)
+        self.io(bus);
+
         if self.p.idx8() {
             let v = self.pull_u8(bus);
             self.set_y_low(v);
@@ -2745,6 +2828,9 @@ impl Cpu {
     }
 
     fn plp<B: Bus>(&mut self, bus: &mut B) {
+        self.io(bus); // stack-op internal cycles (ares Pull)
+        self.io(bus);
+
         let new_p = self.pull_u8(bus);
         // Emulation mode forces M and X to 1 in P (they cannot be
         // cleared while E=1).
@@ -2761,12 +2847,18 @@ impl Cpu {
     }
 
     fn plb<B: Bus>(&mut self, bus: &mut B) {
+        self.io(bus); // stack-op internal cycles (ares Pull)
+        self.io(bus);
+
         let v = self.pull_u8_native(bus);
         self.db = v;
         self.set_nz8(v);
     }
 
     fn pld<B: Bus>(&mut self, bus: &mut B) {
+        self.io(bus); // stack-op internal cycles (ares Pull)
+        self.io(bus);
+
         let v = self.pull_u16_native(bus);
         self.dp = v;
         self.set_nz16(v);
@@ -2787,6 +2879,7 @@ impl Cpu {
 
     fn pei<B: Bus>(&mut self, bus: &mut B) {
         let dp_off = u16::from(self.fetch_u8(bus));
+        self.idle2(bus); // PEI direct-page add cycle (ares idle2)
         let ptr = self.dp.wrapping_add(dp_off);
         let lo = bus.read(make_addr(0, ptr));
         let hi = bus.read(make_addr(0, ptr.wrapping_add(1)));
@@ -2796,6 +2889,7 @@ impl Cpu {
 
     fn per<B: Bus>(&mut self, bus: &mut B) {
         let rel = self.fetch_u16(bus) as i16;
+        self.io(bus); // PER internal cycle (ares PushEffectiveRelativeAddress)
         let target = self.pc.wrapping_add_signed(rel);
         self.push_u16_native(bus, target);
     }

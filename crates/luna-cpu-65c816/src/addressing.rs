@@ -10,6 +10,20 @@
 use crate::cpu::Cpu;
 use luna_bus::{Addr24, Bus, make_addr};
 
+/// Access kind for indexed addressing modes. Only `abs,X`/`abs,Y` and
+/// `(dp),Y` charge a different internal cycle for reads vs. stores/RMW:
+/// a **read** pays the page-cross cycle only when the page actually
+/// changed (or the index is 16-bit) — ares `idle4()` — whereas a
+/// **write** always pays one fixed internal cycle. (The extra RMW dead
+/// cycle is charged separately in `modify_memory`.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// Loads / comparisons: pay the page-cross cycle conditionally.
+    Read,
+    /// Stores and read-modify-write: pay one fixed index cycle.
+    Write,
+}
+
 /// Absolute: `LDA $abs` — operand is a 16-bit address in the data bank.
 #[inline]
 pub fn absolute<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
@@ -32,6 +46,7 @@ pub fn absolute_long<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
 #[inline]
 pub fn direct_page<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
     let offset = u16::from(cpu.fetch_u8(bus));
+    cpu.idle2(bus);
     cpu.bank0_wrap = true;
     make_addr(0, cpu.dp.wrapping_add(offset))
 }
@@ -42,6 +57,8 @@ pub fn direct_page<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
 #[inline]
 pub fn direct_page_indexed_x<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
     let base = u16::from(cpu.fetch_u8(bus));
+    cpu.idle2(bus);
+    cpu.io(bus);
     cpu.bank0_wrap = true;
     let off = if cpu.e && (cpu.dp & 0xFF) == 0 {
         // Emulation: wrap within the 256-byte direct page.
@@ -58,6 +75,8 @@ pub fn direct_page_indexed_x<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
 #[inline]
 pub fn direct_page_indexed_y<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
     let base = u16::from(cpu.fetch_u8(bus));
+    cpu.idle2(bus);
+    cpu.io(bus);
     cpu.bank0_wrap = true;
     let off = if cpu.e && (cpu.dp & 0xFF) == 0 {
         let dp_high = cpu.dp & 0xFF00;
@@ -84,6 +103,7 @@ fn read_ptr16<B: Bus>(bus: &mut B, ptr_off: u16) -> u16 {
 #[inline]
 pub fn direct_page_indirect<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
     let dp_off = u16::from(cpu.fetch_u8(bus));
+    cpu.idle2(bus);
     let ptr_off = cpu.dp.wrapping_add(dp_off);
     let offset = read_ptr16(bus, ptr_off);
     make_addr(cpu.db, offset)
@@ -93,6 +113,7 @@ pub fn direct_page_indirect<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
 #[inline]
 pub fn direct_page_indirect_long<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
     let dp_off = u16::from(cpu.fetch_u8(bus));
+    cpu.idle2(bus);
     let ptr_off = cpu.dp.wrapping_add(dp_off);
     let lo = bus.read(make_addr(0, ptr_off));
     let mid = bus.read(make_addr(0, ptr_off.wrapping_add(1)));
@@ -103,11 +124,16 @@ pub fn direct_page_indirect_long<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
 /// Direct Page Indirect Y: `LDA ($dp),Y` — read pointer, add Y with
 /// bank carry into the data bank.
 #[inline]
-pub fn direct_page_indirect_y<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
+pub fn direct_page_indirect_y<B: Bus>(cpu: &mut Cpu, bus: &mut B, acc: Access) -> Addr24 {
     let dp_off = u16::from(cpu.fetch_u8(bus));
+    cpu.idle2(bus);
     let ptr_off = cpu.dp.wrapping_add(dp_off);
     let base_off = read_ptr16(bus, ptr_off);
     let new_off = base_off.wrapping_add(cpu.y);
+    match acc {
+        Access::Read => cpu.idle4(bus, base_off, new_off),
+        Access::Write => cpu.io(bus),
+    }
     let bank = if new_off < base_off {
         cpu.db.wrapping_add(1)
     } else {
@@ -130,6 +156,8 @@ pub fn direct_page_indirect_long_y<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24
 #[inline]
 pub fn direct_page_indexed_indirect<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
     let dp_off = u32::from(cpu.fetch_u8(bus));
+    cpu.idle2(bus);
+    cpu.io(bus);
     // ares: V.l = readDirectX(U.l + X.w, 0); V.h = readDirectX(U.l + X.w, 1).
     let address = dp_off.wrapping_add(u32::from(cpu.x));
     let lo = read_direct_x(cpu, bus, address, 0);
@@ -171,9 +199,13 @@ fn read_direct_x<B: Bus>(cpu: &Cpu, bus: &mut B, address: u32, offset: u32) -> u
 
 /// Absolute Indexed by X: `LDA $abs,X`.
 #[inline]
-pub fn absolute_indexed_x<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
+pub fn absolute_indexed_x<B: Bus>(cpu: &mut Cpu, bus: &mut B, acc: Access) -> Addr24 {
     let base_off = cpu.fetch_u16(bus);
     let effective = base_off.wrapping_add(cpu.x);
+    match acc {
+        Access::Read => cpu.idle4(bus, base_off, effective),
+        Access::Write => cpu.io(bus),
+    }
     // Carry into the data bank.
     if effective < base_off {
         make_addr(cpu.db.wrapping_add(1), effective)
@@ -184,9 +216,13 @@ pub fn absolute_indexed_x<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
 
 /// Absolute Indexed by Y: `LDA $abs,Y`.
 #[inline]
-pub fn absolute_indexed_y<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
+pub fn absolute_indexed_y<B: Bus>(cpu: &mut Cpu, bus: &mut B, acc: Access) -> Addr24 {
     let base_off = cpu.fetch_u16(bus);
     let effective = base_off.wrapping_add(cpu.y);
+    match acc {
+        Access::Read => cpu.idle4(bus, base_off, effective),
+        Access::Write => cpu.io(bus),
+    }
     if effective < base_off {
         make_addr(cpu.db.wrapping_add(1), effective)
     } else {
@@ -206,6 +242,7 @@ pub fn absolute_long_indexed_x<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
 #[inline]
 pub fn stack_relative<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
     let off = u16::from(cpu.fetch_u8(bus));
+    cpu.io(bus);
     cpu.bank0_wrap = true;
     make_addr(0, cpu.sp.wrapping_add(off))
 }
@@ -214,8 +251,10 @@ pub fn stack_relative<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
 #[inline]
 pub fn stack_relative_indirect_y<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
     let off = u16::from(cpu.fetch_u8(bus));
+    cpu.io(bus);
     let ptr_off = cpu.sp.wrapping_add(off);
     let base_off = read_ptr16(bus, ptr_off);
+    cpu.io(bus);
     let new_off = base_off.wrapping_add(cpu.y);
     let bank = if new_off < base_off {
         cpu.db.wrapping_add(1)
@@ -296,7 +335,7 @@ mod tests {
         cpu.x = 0x0010;
         cpu.p.remove(bit::X); // 16-bit index
         bus.poke_slice(0x00_8000, &[0x00, 0x10]);
-        let addr = absolute_indexed_x(&mut cpu, &mut bus);
+        let addr = absolute_indexed_x(&mut cpu, &mut bus, Access::Read);
         assert_eq!(addr, 0x7E_1010);
     }
 
@@ -307,7 +346,7 @@ mod tests {
         cpu.x = 0x0001;
         cpu.p.remove(bit::X);
         bus.poke_slice(0x00_8000, &[0xFF, 0xFF]); // base offset $FFFF
-        let addr = absolute_indexed_x(&mut cpu, &mut bus);
+        let addr = absolute_indexed_x(&mut cpu, &mut bus, Access::Read);
         assert_eq!(addr, 0x7F_0000);
     }
 
@@ -392,7 +431,10 @@ mod tests {
         bus.poke(0x00_8000, 0x10);
         bus.poke_slice(0x00_0110, &[0x00, 0x12]); // pointer = $1200
         // $1200 + $0010 = $1210 in bank $7E.
-        assert_eq!(direct_page_indirect_y(&mut cpu, &mut bus), 0x7E_1210);
+        assert_eq!(
+            direct_page_indirect_y(&mut cpu, &mut bus, Access::Read),
+            0x7E_1210
+        );
     }
 
     #[test]
@@ -404,7 +446,10 @@ mod tests {
         cpu.y = 0x0001;
         bus.poke(0x00_8000, 0x10);
         bus.poke_slice(0x00_0110, &[0xFF, 0xFF]); // pointer = $FFFF
-        assert_eq!(direct_page_indirect_y(&mut cpu, &mut bus), 0x7F_0000);
+        assert_eq!(
+            direct_page_indirect_y(&mut cpu, &mut bus, Access::Read),
+            0x7F_0000
+        );
     }
 
     #[test]
