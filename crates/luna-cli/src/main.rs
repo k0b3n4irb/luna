@@ -136,6 +136,16 @@ enum Command {
         /// (re)asserts a register, e.g. the SMRPG SCNT=$87 loop.
         #[arg(long = "sa1-side-log")]
         sa1_side_log: Option<PathBuf>,
+        /// Optional FULL SA-1 instruction trace: a pre-opcode register
+        /// snapshot per SA-1 instruction, written as CSV
+        /// (`seq,pc,a,x,y,sp,p,db,dp,e`). Diff this PC stream against a
+        /// bsnes/Mesen2 SA-1 trace to localise the SMRPG deadlock.
+        #[arg(long = "sa1-trace")]
+        sa1_trace: Option<PathBuf>,
+        /// Cap the SA-1 instruction trace at this many events (default
+        /// 200 000).
+        #[arg(long = "sa1-trace-max", default_value_t = 200_000)]
+        sa1_trace_max: usize,
         /// Optional CPU instruction trace. When set, captures a
         /// per-instruction register snapshot (PC, A, X, Y, SP, P, DB,
         /// DP, e) into the given CSV file. Capture starts at instr
@@ -202,6 +212,8 @@ fn main() -> ExitCode {
             apu_log,
             sa1_log,
             sa1_side_log,
+            sa1_trace,
+            sa1_trace_max,
             cpu_trace,
             cpu_trace_from,
             cpu_trace_max,
@@ -220,6 +232,8 @@ fn main() -> ExitCode {
             apu_log.as_deref(),
             sa1_log.as_deref(),
             sa1_side_log.as_deref(),
+            sa1_trace.as_deref(),
+            sa1_trace_max,
             cpu_trace.as_deref(),
             cpu_trace_from,
             cpu_trace_max,
@@ -387,6 +401,36 @@ fn write_sa1_side_log_csv(
     Ok(())
 }
 
+/// Write the full SA-1 instruction trace as CSV. Columns:
+/// `seq, pc, a, x, y, sp, p, db, dp, e`. Diff the `pc` column against a
+/// reference (bsnes/Mesen2) SA-1 trace to find the first divergence.
+fn write_sa1_trace_csv(
+    path: &std::path::Path,
+    events: &[luna_api::Sa1TraceEvent],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    writeln!(f, "seq,pc,a,x,y,sp,p,db,dp,e")?;
+    for (i, ev) in events.iter().enumerate() {
+        writeln!(
+            f,
+            "{},${:02X}:{:04X},${:04X},${:04X},${:04X},${:04X},${:02X},${:02X},${:04X},{}",
+            i,
+            (ev.pc_full >> 16) & 0xFF,
+            ev.pc_full & 0xFFFF,
+            ev.a,
+            ev.x,
+            ev.y,
+            ev.sp,
+            ev.p,
+            ev.db,
+            ev.dp,
+            u8::from(ev.e),
+        )?;
+    }
+    Ok(())
+}
+
 /// Write per-instruction CPU trace events as CSV. Columns:
 /// `mclk_total, frame_ntsc, pc, a, x, y, sp, p_hex, db, dp, e`.
 fn write_cpu_trace_csv(
@@ -475,6 +519,8 @@ fn run_state(
     apu_log_path: Option<&std::path::Path>,
     sa1_log_path: Option<&std::path::Path>,
     sa1_side_log_path: Option<&std::path::Path>,
+    sa1_trace_path: Option<&std::path::Path>,
+    sa1_trace_max: usize,
     cpu_trace_path: Option<&std::path::Path>,
     cpu_trace_from: u64,
     cpu_trace_max: usize,
@@ -503,6 +549,12 @@ fn run_state(
     if sa1_side_log_path.is_some() {
         if let Err(e) = em.enable_sa1_side_log() {
             eprintln!("error: enable_sa1_side_log: {e}");
+            return ExitCode::from(1);
+        }
+    }
+    if sa1_trace_path.is_some() {
+        if let Err(e) = em.enable_sa1_trace(sa1_trace_max) {
+            eprintln!("error: enable_sa1_trace: {e}");
             return ExitCode::from(1);
         }
     }
@@ -684,6 +736,19 @@ fn run_state(
                 Err(e) => eprintln!("error: writing SA-1-side log: {e}"),
             },
             Err(e) => eprintln!("error: take_sa1_side_log: {e}"),
+        }
+    }
+    if let Some(path) = sa1_trace_path {
+        match em.take_sa1_trace() {
+            Ok(events) => match write_sa1_trace_csv(path, &events) {
+                Ok(()) => eprintln!(
+                    "SA-1 instruction trace written to {} ({} events)",
+                    path.display(),
+                    events.len()
+                ),
+                Err(e) => eprintln!("error: writing SA-1 trace: {e}"),
+            },
+            Err(e) => eprintln!("error: take_sa1_trace: {e}"),
         }
     }
     if let Some(path) = cpu_trace_path {
