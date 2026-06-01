@@ -1,11 +1,14 @@
 # Cycle-Accuracy Milestone — APU↔CPU↔PPU Synchronization Plan
 
-**Status:** in progress — **Phases 1 & 2 landed**; Phase 3 active.
+**Status:** in progress — **Phases 1, 2 & 3 landed**; Phase 4 next.
 - Phase 1 (io_cycle-driven per-access catch-up + DMA coproc double-charge
   fix): done — APU `cfef84a`/snes.rs, PPU sched, coproc `7c5bef0`.
 - Phase 2 (SPC700 per-opcode cycles + branch-taken penalty + master-clock
   cadence): done `cfef84a`; cycle backstop + 9 off-by-one fixes `081e78d`.
-- Phases 3–5: see the table in §5.
+- Phase 3 (65c816 internal/idle cycles): done `82893a5`; Tom Harte cycle
+  backstop `fe405b5` (0 mismatches, 100% state). Surfaced the pre-existing
+  SMRPG SA-1 deadlock (not a regression — HEAD A/B confirmed).
+- Phases 4–5: see the table in §5.
 **Author:** synthesized from the ares + Mesen2 timing correlation
 (`docs/accuracy_scorecard.md` §"DMA / HDMA / timing") and the Chrono
 Trigger APU-deadlock investigation.
@@ -105,7 +108,7 @@ branch-taken penalty), not a flat 84.
 |---|---|---|---|
 | **1. io_cycle-driven catch-up** ✅ done | Move PPU/APU/coproc advancement out of the end-of-`step()` lump and into `io_cycle`, advancing per access. Collapses the three lump calls into one per-access sync. **Naturally fixes the DMA coproc double-charge.** | Mid-instruction PPU/APU/coproc accuracy; foundation for all later phases | Med — hottest path; perf-sensitive |
 | **2. SPC700 cycle accuracy** ✅ done | Real per-opcode cycles + branch-taken penalty; drive the APU from the master clock (mclk→SPC-cycle ratio) instead of a flat rate. | **CT/Akao handshake**, SPC700 B→A−, Tom Harte SPC `cycles[]` | Med |
-| **3. 65c816 cycle accuracy** 🔨 active | Have the CPU core call `io_cycle` at the correct *intra-instruction* points with correct per-cycle costs (read/write/idle ordering). The core already emits `io_cycle` per **bus** access (Phase 1 relies on it); what's missing is the **internal/idle** cycles — RMW dead cycles, branch-taken / page-cross penalties, MVN/MVP register-adjust cycles — plus the Tom Harte `cycles[]` backstop to drive them out (cf. the SPC700 Phase-2 method). | Tom Harte 65c816 `cycles[]`, MVN/MVP gateable, A−→A | High — touches every opcode/addressing path |
+| **3. 65c816 cycle accuracy** ✅ done | Have the CPU core call `io_cycle` at the correct *intra-instruction* points with correct per-cycle costs (read/write/idle ordering). The core already emits `io_cycle` per **bus** access (Phase 1 relies on it); what was missing was the **internal/idle** cycles — RMW dead cycles, branch-taken / page-cross penalties, etc. — plus the Tom Harte `cycles[]` backstop to drive them out (cf. the SPC700 Phase-2 method). Landed `82893a5`. | Tom Harte 65c816 `cycles[]`, A−→A | High — touched every opcode/addressing path |
 | **4. Per-access IRQ/NMI/HDMA** | Poll interrupts + HDMA in `io_cycle`: dot-precise H/V-IRQ (HTIME respected), H≈278 HDMA-vs-DMA preemption, RDNMI as a true 4-cycle hold. | Raster-IRQ games, DMA/timing C+→B+ | Med |
 | **5. DMA/HDMA cycle-stepping** | Per-byte DMA interleaved with the master clock; mid-DMA HDMA preemption; single coproc sync. | DMA/timing → A−; SA-1 contention | Med |
 
@@ -129,32 +132,33 @@ against the core's per-instruction cycle total (SPC700 lands this in
   master loop) but is the prerequisite for everything else.
 - **Scope.** This is a multi-PR, multi-session milestone — not one change.
 
-## 7. Next step — Phase 3 (65c816 internal/idle cycles)
+## 7. Next step — Phase 4 (per-access IRQ/NMI/HDMA)
 
-Phases 1 & 2 are done (see the status header). The active work is Phase 3.
-The 65c816 core is **already per-access** (every `read`/`write` calls
-`io_cycle`), so this is not a rewrite — it is filling in the **internal
-(non-bus) cycles** the core currently skips. Concretely:
-1. Add an idle-cycle primitive to the core (an `io(bus)` that charges one
-   internal cycle, ~6 mclk FAST, per ares `memory.cpp` `io()`), and a way
-   to total cycles per instruction for validation.
-2. Insert idle cycles at the ares-accurate points: RMW dead cycles,
-   branch-taken (+1) and page-cross (+1) penalties, indexed page-cross
-   reads, MVN/MVP register-adjust cycles, RTI/RTS/JSR internal cycles, etc.
-3. Wire the Tom Harte `cycles[]` backstop (count `io_cycle` invocations in
-   the harness bus, assert `== cycles.len()`; strict under
-   `LUNA_TOM_HARTE_REQUIRE=1`) — let it drive out every missing idle cycle,
-   exactly as the SPC700 Phase-2 backstop surfaced its 9 off-by-ones.
-4. Validate: full Tom Harte (state unchanged, cycles now gated), CT/SMW
-   audio smoke, coproc/DMA/PPU sweep, SMRPG screenshot.
+Phases 1–3 are done (see the status header). The active work is Phase 4:
+poll interrupts + HDMA **inside `io_cycle`** instead of only at
+instruction boundaries — dot-precise H/V-IRQ (HTIME respected), H≈278
+HDMA-vs-DMA preemption, RDNMI as a true 4-cycle hold. Now that the master
+clock advances per cycle (Phases 1–3), interrupt *latching* is the last
+piece still pinned to instruction boundaries; that mismatch is the prime
+suspect for the **pre-existing SMRPG SA-1 deadlock** (a CPU↔SA-1 handshake
+that hangs ~frame 2150 — see `docs/` / the SA-1 sources). A good first
+move: reproduce the SMRPG hang under a per-access coproc-IRQ poll and see
+if finer SA-1↔S-CPU sync resolves it.
 
 ### History (completed)
 
-**Phase 1 — io_cycle-driven catch-up** (done). Moved PPU/APU/coproc
-advancement out of the end-of-`step()` lump into `io_cycle` (per access),
-collapsing the three lump calls into one per-access sync and removing the
-DMA coproc double-charge.
+**Phase 1 — io_cycle-driven catch-up** (`7c5bef0` + earlier). Moved
+PPU/APU/coproc advancement out of the end-of-`step()` lump into `io_cycle`
+(per access), collapsing the three lump calls into one per-access sync and
+removing the DMA coproc double-charge.
 
-**Phase 2 — SPC700 cycle accuracy** (done). Real per-opcode cycle table +
-branch-taken penalty, APU driven from the master clock. The Tom Harte
-cycle backstop then caught 9 opcodes charging one cycle too many.
+**Phase 2 — SPC700 cycle accuracy** (`cfef84a`, `081e78d`). Real per-opcode
+cycle table + branch-taken penalty, APU driven from the master clock. The
+Tom Harte cycle backstop then caught 9 opcodes charging one cycle too many.
+
+**Phase 3 — 65c816 internal/idle cycles** (`82893a5`, backstop `fe405b5`).
+Added `Cpu::io`/`idle2`/`idle4`/`idle6` and the RMW/branch/stack/jump
+idles per ares `wdc65816/memory.cpp`; the Tom Harte cycle backstop (count
+`io_cycle` invocations == `cycles[].len()`, gated by `LUNA_TOM_HARTE_CYCLES`,
+sampled via `LUNA_TOM_HARTE_SAMPLE=N`) drove it to 0 mismatches at 100%
+state. WAI/STP excluded as halt artifacts.
