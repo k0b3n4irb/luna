@@ -244,6 +244,29 @@ const fn sa1_reg(addr: Addr24) -> Option<u16> {
     }
 }
 
+/// Canonical I-RAM address (`$3000-$37FF`) if `addr` hits the SA-1's
+/// view of I-RAM — either the `$3000-$37FF` window or the `$0000-$07FF`
+/// direct-page mirror, in banks `$00-$3F` / `$80-$BF` (mirrors
+/// [`Sa1Mapper::iram_offset_sa1`]). Used by the SA-1-side log so a trace
+/// shows the SA-1's *I-RAM* writes (the cross-CPU handshake flags like
+/// `$300A`/`$300E`), not just its `$2200-23FF` MMIO. Reported under the
+/// `$3000+offset` alias regardless of which mirror the access used.
+const fn sa1_iram_addr(addr: Addr24) -> Option<u16> {
+    let bank = (addr >> 16) as u8;
+    let off = addr as u16;
+    let bank_ok = matches!(bank, 0x00..=0x3F | 0x80..=0xBF);
+    if !bank_ok {
+        return None;
+    }
+    if off >= 0x3000 && off <= 0x37FF {
+        Some(off)
+    } else if off < 0x0800 {
+        Some(0x3000 + off)
+    } else {
+        None
+    }
+}
+
 impl Bus for Sa1Bus<'_> {
     fn read(&mut self, addr: Addr24) -> u8 {
         let bank = (addr >> 16) as u8;
@@ -267,13 +290,20 @@ impl Bus for Sa1Bus<'_> {
     }
 
     fn write(&mut self, addr: Addr24, value: u8) {
-        if let (Some(log), Some(reg)) = (self.log.as_deref_mut(), sa1_reg(addr)) {
-            log.push(Sa1SideEvent {
-                sa1_pc: self.sa1_pc,
-                write: true,
-                reg,
-                value,
-            });
+        // Log SA-1-side writes to MMIO ($2200-23FF) AND to I-RAM
+        // ($3000-37FF / $0000-07FF mirror). The I-RAM writes are the
+        // cross-CPU handshake flags (e.g. Kirby's $300A/$300E) that the
+        // MMIO-only log could never show — only writes are traced (reads
+        // would flood the log when the SA-1 spins polling a flag).
+        if let Some(log) = self.log.as_deref_mut() {
+            if let Some(reg) = sa1_reg(addr).or_else(|| sa1_iram_addr(addr)) {
+                log.push(Sa1SideEvent {
+                    sa1_pc: self.sa1_pc,
+                    write: true,
+                    reg,
+                    value,
+                });
+            }
         }
         // Route through the SA-1-side entry so I-RAM / BW-RAM
         // protection consults CIWP / CBWE instead of SIWP / SBWE.
