@@ -14,22 +14,49 @@ sequence has passed.
 
 ## ROM smoke test
 
-When DMA / PPU / SA-1 logic changes, also screenshot Super Mario RPG
-via the CLI as a quick visual regression check:
+> **A black / forced-blank smoke screenshot is NOT proof of a bug.**
+> Commercial titles play an intro and then **wait at a title/demo
+> screen for a Start press**. The CLI injects no input by default, so a
+> game that is working perfectly will sit there forever (often
+> forced-blank → black) and read as a "hang." Before suspecting the
+> emulator, **inject Start** with `--input` (see below). This is the
+> inverse of the [[feedback_audit_deviations_test_in_gui]] gotcha: there
+> a CLI pass hid a real bug; here a CLI "fail" hid a working emulator.
+> (Cost us several sessions chasing a phantom "SA-1 deadlock" in SMRPG
+> that was just the title screen waiting for Start — see the
+> `project_smrpg_sa1_deadlock` memory.)
+
+When DMA / PPU / SA-1 logic changes, screenshot Super Mario RPG via the
+CLI as a quick visual regression check:
 
 ```
 /smoke-test
 ```
 
-Or run the underlying command directly:
+Two checkpoints — the no-input intro **and** the post-Start path,
+because SA-1 graphics are exercised by both:
 
 ```
-./target/release/luna state -n 30000000 --screenshot /tmp/smrpg.png \
+# 1. Intro cinematic (no input): the Peach-in-the-garden scene at ~frame 392.
+./target/release/luna state -n 12000000 --screenshot /tmp/smrpg_intro.png \
+  "tests/roms/Super Mario RPG - Legend of the Seven Stars (USA).sfc"
+
+# 2. Past the title: pulse Start to reach New Game → the "Your name?"
+#    name-entry screen (Mario + alphabet grid). Start = $1000.
+./target/release/luna state -n 55000000 \
+  --input "1600:0x1000,1610:0,1700:0x1000,1710:0,2000:0x1000,2010:0,2500:0x1000,2510:0" \
+  --screenshot /tmp/smrpg_name.png \
   "tests/roms/Super Mario RPG - Legend of the Seven Stars (USA).sfc"
 ```
 
-A working build should reach the sky-coloured title scene (frame
-~2000+, NMI service rate ≥ 80%).
+A working build:
+- **#1** shows the intro cinematic (Peach in the garden — bird, treehouse,
+  bushes), rendered cleanly.
+- **#2** reaches the **"Your name?"** name-entry screen, and crucially
+  `nmis_serviced` keeps climbing past the title (≥ ~5000 at `-n
+  55000000`, NMI service rate ≥ 80%). Without the `--input` the run
+  **freezes at `nmis_serviced` ≈ 1598** — that plateau is the title
+  wait, not a deadlock.
 
 For PPU compositor / color-math changes the equivalent SMW Yoshi's
 House intro repro is also useful — see `/smoke-test` for the
