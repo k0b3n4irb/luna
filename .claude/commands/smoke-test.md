@@ -13,14 +13,31 @@ first if it isn't built.
 
 ## Targets
 
-### `smrpg` (default) — Super Mario RPG title scene
+### `smrpg` (default) — Super Mario RPG
+
+> SMRPG plays an intro and then **waits at its title/demo screen for a
+> Start press**. With no input it sits there forever (forced-blank →
+> black) and reads as a hang — that is NOT a bug (it cost us several
+> sessions; see `.claude/rules/coproc-testing.md` and the
+> `project_smrpg_sa1_deadlock` memory). Two checkpoints:
 
 ```bash
-./target/release/luna state -n 30000000 --screenshot /tmp/smrpg.png \
+# 1. Intro cinematic (no input): Peach-in-the-garden scene at ~frame 392.
+./target/release/luna state -n 12000000 --screenshot /tmp/smrpg_intro.png \
+  "tests/roms/Super Mario RPG - Legend of the Seven Stars (USA).sfc"
+
+# 2. Past the title: pulse Start ($1000) to reach New Game → name entry.
+./target/release/luna state -n 55000000 \
+  --input "1600:0x1000,1610:0,1700:0x1000,1710:0,2000:0x1000,2010:0,2500:0x1000,2510:0" \
+  --screenshot /tmp/smrpg_name.png \
   "tests/roms/Super Mario RPG - Legend of the Seven Stars (USA).sfc"
 ```
 
-Expected: sky-coloured title scene, frame ≥ 2000, NMI service rate ≥ 80%.
+Expected: **#1** the intro cinematic (Peach in the garden — bird,
+treehouse, bushes); **#2** the **"Your name?"** name-entry screen (Mario
++ alphabet grid), with `nmis_serviced` climbing past the title (≥ ~5000,
+NMI rate ≥ 80%). A no-input run freezing at `nmis_serviced` ≈ 1598 is the
+title wait, not a deadlock.
 
 ### `smw` — Super Mario World Yoshi's House intro
 
