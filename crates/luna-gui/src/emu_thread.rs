@@ -21,17 +21,15 @@
 //! [`unpark`]: std::thread::Thread::unpark
 //! [`yield_now`]: std::thread::yield_now
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use luna_core::Snes;
-use luna_ppu::{FRAME_H, FRAME_W};
+use luna_api::Emulator;
 use ringbuf::HeapProd;
-use ringbuf::traits::Producer;
+use ringbuf::traits::{Observer, Producer};
 
 /// Reclaimed audio-side state the emu thread hands back to the UI on
 /// exit, so the next ROM's [`spawn`] can reuse the same cpal-bound
@@ -94,7 +92,7 @@ impl EmuShared {
 /// every `VBlank` to upload tiles/OAM safely, so without this the
 /// screen would flash black once per second.
 pub(crate) fn spawn(
-    snes: Arc<Mutex<Option<Snes>>>,
+    emu: Arc<Mutex<Option<Emulator>>>,
     shared: Arc<EmuShared>,
     producer: HeapProd<(i16, i16)>,
     primed: Arc<AtomicBool>,
@@ -102,7 +100,7 @@ pub(crate) fn spawn(
 ) -> JoinHandle<AudioReclaim> {
     thread::Builder::new()
         .name("luna-emu".into())
-        .spawn(move || run(snes, shared, producer, primed, framebuffer_rgba))
+        .spawn(move || run(emu, shared, producer, primed, framebuffer_rgba))
         .expect("failed to spawn luna-emu thread")
 }
 
@@ -113,7 +111,7 @@ pub(crate) fn spawn(
 /// owned-handle design.
 #[allow(clippy::needless_pass_by_value)]
 fn run(
-    snes: Arc<Mutex<Option<Snes>>>,
+    emu: Arc<Mutex<Option<Emulator>>>,
     shared: Arc<EmuShared>,
     mut producer: HeapProd<(i16, i16)>,
     primed: Arc<AtomicBool>,
@@ -138,9 +136,9 @@ fn run(
     // We only refresh the shared buffer when the PPU's frame_count has
     // advanced, so we don't pay the conversion cost on every batch.
     let mut last_emu_frame: u64 = u64::MAX;
-    // Local scratch buffer for the RGBA conversion. Built outside the
-    // shared lock, then swapped in with a single memcpy.
-    let mut rgba_scratch: Vec<u8> = vec![0; FRAME_W * FRAME_H * 4];
+    // Set once the emulator panics: we stop stepping it (to avoid
+    // re-panicking) but keep the thread alive so the UI stays responsive.
+    let mut emu_dead = false;
 
     loop {
         if shared.shutdown.load(Ordering::Acquire) {
@@ -152,56 +150,49 @@ fn run(
         }
 
         let outcome = {
-            let Ok(mut guard) = snes.lock() else {
+            let Ok(mut guard) = emu.lock() else {
                 break;
             };
-            let Some(snes_ref) = guard.as_mut() else {
+            let Some(em) = guard.as_mut() else {
                 drop(guard);
                 thread::park_timeout(Duration::from_millis(50));
                 continue;
             };
 
-            // catch_unwind so an emulator panic kills the batch, not
-            // the whole thread. We surface the actual panic message
-            // (instead of dropping it silently) so freeze-debug runs
-            // can identify the exact site that died.
-            let stepped: Result<usize, _> = catch_unwind(AssertUnwindSafe(|| {
-                let mut done = 0usize;
-                while done < BATCH && !snes_ref.cpu.stopped {
-                    snes_ref.step();
-                    done += 1;
-                }
-                done
-            }));
-            let done = match stepped {
-                Ok(n) => n,
-                Err(payload) => {
-                    let msg = if let Some(s) = payload.downcast_ref::<&'static str>() {
-                        (*s).to_string()
-                    } else if let Some(s) = payload.downcast_ref::<String>() {
-                        s.clone()
-                    } else {
-                        "(unknown panic payload)".to_string()
-                    };
-                    eprintln!(
-                        "luna-emu: EMULATOR PANIC at PB:PC=${:02X}:{:04X} — {}",
-                        snes_ref.cpu.pb, snes_ref.cpu.pc, msg
-                    );
-                    snes_ref.cpu.stopped = true;
-                    0
+            // Step a batch through the API. `Emulator::step` catches an
+            // emulator panic and halts on STP internally; on a panic we
+            // stop stepping (to avoid re-panicking) but keep the thread
+            // alive so the UI stays responsive. The PB:PC is read back
+            // from the API state snapshot for the freeze-debug log.
+            let done: u64 = if emu_dead {
+                0
+            } else {
+                match em.step(BATCH as u64) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        let st = em.state();
+                        eprintln!(
+                            "luna-emu: EMULATOR PANIC at PB:PC=${:02X}:{:04X} — {}",
+                            st.cpu.pb, st.cpu.pc, e
+                        );
+                        emu_dead = true;
+                        0
+                    }
                 }
             };
 
-            let mut pushed = 0u64;
-            let mut full = false;
-            while let Some(sample) = snes_ref.apu_real.audio_queue.pop_front() {
-                if producer.try_push(sample).is_err() {
-                    snes_ref.apu_real.audio_queue.push_front(sample);
-                    full = true;
-                    break;
-                }
-                pushed += 1;
+            // Audio (audio-as-clock backpressure): drain only as many
+            // samples as the host ring can accept, so none are lost. If
+            // the API queue still holds more afterwards, the ring (not
+            // the queue) was the limiter → `full` → we park until cpal
+            // consumes and unparks us.
+            let free = producer.vacant_len();
+            let samples = em.drain_audio(free).unwrap_or_default();
+            let pushed = samples.len() as u64;
+            for s in samples {
+                let _ = producer.try_push(s);
             }
+            let full = em.audio_queue_len().unwrap_or(0) > 0;
             // Open the cpal callback's silence gate the moment we have
             // pushed any sample at all. Without this, the callback
             // returns zeros forever, the SPSC ring stays full of the
@@ -210,29 +201,20 @@ fn run(
                 primed.store(true, Ordering::Release);
             }
 
-            // Producer-side framebuffer publication. Done while we
-            // still hold the Snes lock — the conversion reads PPU
-            // state directly. Only refreshes when the emulated frame
-            // has advanced.
-            //
-            // Forced-blank handling: when INIDISP bit 7 is set, skip
-            // the publish so the consumer keeps showing the last good
-            // frame (most games toggle bit 7 every VBlank during their
-            // tile / OAM upload; without this we'd flash black once
-            // per second).
-            let cur_frame = snes_ref.frame_count;
-            let blanked = snes_ref.ppu.inidisp & 0x80 != 0;
+            // Framebuffer publication via the SAME API render path the
+            // CLI/MCP use (`render_frame_rgba`) — so the GUI and CLI
+            // cannot disagree on pixels. Only refresh on a new frame;
+            // skip forced-blank frames so the UI holds the last good
+            // frame instead of flashing black (most games toggle INIDISP
+            // bit 7 every VBlank during tile/OAM upload).
+            let cur_frame = em.frame_count().unwrap_or(last_emu_frame);
+            let blanked = em.forced_blank().unwrap_or(false);
             if cur_frame != last_emu_frame && !blanked {
-                for (i, px) in snes_ref.ppu.framebuffer().iter().enumerate() {
-                    let off = i * 4;
-                    rgba_scratch[off] = px[0];
-                    rgba_scratch[off + 1] = px[1];
-                    rgba_scratch[off + 2] = px[2];
-                    rgba_scratch[off + 3] = 0xFF;
-                }
-                last_emu_frame = cur_frame;
-                if let Ok(mut shared_fb) = framebuffer_rgba.lock() {
-                    shared_fb.copy_from_slice(&rgba_scratch);
+                if let Ok(rgba) = em.render_frame_rgba(false) {
+                    last_emu_frame = cur_frame;
+                    if let Ok(mut shared_fb) = framebuffer_rgba.lock() {
+                        shared_fb.copy_from_slice(&rgba);
+                    }
                 }
             }
             (done, pushed, full)

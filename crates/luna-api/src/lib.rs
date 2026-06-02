@@ -21,8 +21,9 @@ pub use luna_core::{
     CpuTraceEvent, CpuTraceLog, MailboxEvent, MailboxEventKind, MemEventKind, MemTraceEvent,
     MemTraceLog, Sa1LogEvent, Sa1SideEvent, Sa1TraceEvent,
 };
-use luna_ppu::FRAME_H;
-use luna_ppu::FRAME_W;
+/// Framebuffer dimensions (256×224), re-exported so front-ends size their
+/// texture/window through `luna-api` rather than depending on `luna-ppu`.
+pub use luna_ppu::{FRAME_H, FRAME_W};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -703,6 +704,62 @@ impl Emulator {
         let dyn_image: image::DynamicImage = img.into();
         dyn_image.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)?;
         Ok(out)
+    }
+
+    /// Render the current PPU framebuffer as raw **RGBA** bytes
+    /// (`256 × 224 × 4`, row-major, alpha forced to `0xFF`) — the
+    /// uncompressed form a GUI uploads straight to a texture, sharing the
+    /// exact render path as [`Emulator::render_frame_png`] so the CLI and
+    /// GUI cannot disagree on pixels. `force_display` bypasses INIDISP
+    /// forced-blank (debug: see VRAM even while the game blanks).
+    pub fn render_frame_rgba(&self, force_display: bool) -> Result<Vec<u8>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let mut out = Vec::with_capacity(FRAME_W * FRAME_H * 4);
+        let mut push_rgb = |px: &[u8; 3]| {
+            out.extend_from_slice(px);
+            out.push(0xFF);
+        };
+        if force_display {
+            let opts = luna_ppu::RenderOptions {
+                bypass_forced_blank: true,
+            };
+            for px in luna_ppu::render_frame_with(&snes.ppu, opts) {
+                push_rgb(&px);
+            }
+        } else {
+            for px in snes.ppu.framebuffer() {
+                push_rgb(px);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The emulated PPU frame counter — cheap, for a GUI's frame-boundary
+    /// detection without a full [`Emulator::state`] snapshot.
+    pub fn frame_count(&self) -> Result<u64, ApiError> {
+        Ok(self.snes.as_ref().ok_or(ApiError::NoRom)?.frame_count)
+    }
+
+    /// Whether the screen is in INIDISP forced-blank (bit 7) right now —
+    /// cheap accessor so a GUI can hold the last non-blank frame without
+    /// snapshotting full state. The forced-blank *render* policy itself
+    /// lives in [`Emulator::render_frame_rgba`]; this only reports it.
+    pub fn forced_blank(&self) -> Result<bool, ApiError> {
+        Ok(self.snes.as_ref().ok_or(ApiError::NoRom)?.ppu.inidisp & 0x80 != 0)
+    }
+
+    /// Number of stereo samples currently waiting in the APU output
+    /// queue — cheap, lets an audio-paced GUI drain exactly the host
+    /// ring's free space and tell whether the ring (not the queue) was
+    /// the limiter, without re-queuing rejected samples.
+    pub fn audio_queue_len(&self) -> Result<usize, ApiError> {
+        Ok(self
+            .snes
+            .as_ref()
+            .ok_or(ApiError::NoRom)?
+            .apu_real
+            .audio_queue
+            .len())
     }
 
     /// Drain up to `max` stereo (i16, i16) audio samples from the

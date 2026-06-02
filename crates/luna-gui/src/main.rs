@@ -41,10 +41,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 
-use luna_bus::MapperKind;
-use luna_cartridge::Cartridge;
-use luna_core::Snes;
-use luna_ppu::{FRAME_H, FRAME_W};
+use luna_api::{Emulator, FRAME_H, FRAME_W};
 use pixels::{Pixels, SurfaceTexture};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -74,7 +71,7 @@ struct LunaApp {
 
     /// Currently-loaded emulator, behind a Mutex shared with the
     /// dedicated emu thread (`emu_thread.rs`).
-    snes: Arc<Mutex<Option<Snes>>>,
+    emu: Arc<Mutex<Option<Emulator>>>,
     /// Handle to the spawned emu thread (one per loaded ROM). The
     /// thread returns the audio producer + primed gate on exit so the
     /// next ROM's spawn can reuse the same cpal stream.
@@ -106,7 +103,7 @@ struct LunaApp {
     /// `~/.config/luna/input.json`.
     key_bindings: KeyBindings,
 
-    /// `true` after a successful `load_rom` until `unload_snes`.
+    /// `true` after a successful `load_rom` until `unload_emu`.
     rom_loaded: bool,
     /// Last-opened ROM directory, persisted to
     /// `~/.config/luna/last_rom_dir` so the file dialog re-opens
@@ -150,7 +147,7 @@ impl LunaApp {
         let mut app = Self {
             window: None,
             pixels: None,
-            snes: Arc::new(Mutex::new(None)),
+            emu: Arc::new(Mutex::new(None)),
             emu_join: None,
             emu_shared,
             framebuffer_rgba: Arc::new(Mutex::new(vec![0u8; FRAME_W * FRAME_H * 4])),
@@ -177,35 +174,28 @@ impl LunaApp {
     }
 
     fn load_rom(&mut self, path: &Path) {
-        let cart = match Cartridge::load(path) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("luna-gui: failed to load ROM: {e}");
-                return;
-            }
-        };
-        match cart.header.mapper_kind {
-            MapperKind::LoRom | MapperKind::HiRom | MapperKind::ExHiRom | MapperKind::Sa1 => {}
-            other => {
-                eprintln!("luna-gui: cartridge needs unsupported coprocessor: {other:?}");
-                self.unload_snes();
-                return;
-            }
+        // Tear down the previous emulator first — this reclaims the audio
+        // producer + primed gate from the old emu thread so the new thread
+        // can be spawned with them.
+        self.unload_emu();
+        // Drive everything through luna-api (.claude/rules/api-first.md).
+        // `Emulator::load_rom` parses the cart, builds the core, and
+        // returns RomInfo; it returns Err for a missing/bad file OR an
+        // unsupported coprocessor cart (it catches `from_cartridge`'s
+        // panic), so one check covers both.
+        let mut em = Emulator::new();
+        if let Err(e) = em.load_rom(path) {
+            eprintln!("luna-gui: cannot load ROM (bad file or unsupported coprocessor): {e}");
+            return;
         }
-        let mut snes = Snes::from_cartridge(cart);
-        snes.reset();
-        // Tear down the previous emulator before installing the new one.
-        // This reclaims the audio producer + primed gate from the old
-        // emu thread so the new thread can be spawned with them.
-        self.unload_snes();
-        if let Ok(mut guard) = self.snes.lock() {
-            *guard = Some(snes);
+        if let Ok(mut guard) = self.emu.lock() {
+            *guard = Some(em);
         }
         if let (Some(producer), Some(primed)) =
             (self.audio_producer.take(), self.audio_primed.take())
         {
             self.emu_join = Some(crate::emu_thread::spawn(
-                self.snes.clone(),
+                self.emu.clone(),
                 self.emu_shared.clone(),
                 producer,
                 primed,
@@ -228,7 +218,7 @@ impl LunaApp {
         }
     }
 
-    fn unload_snes(&mut self) {
+    fn unload_emu(&mut self) {
         self.emu_shared.shutdown.store(true, Ordering::Release);
         self.emu_shared.unpark_emu();
         if let Some(join) = self.emu_join.take() {
@@ -242,7 +232,7 @@ impl LunaApp {
             }
         }
         self.emu_shared.shutdown.store(false, Ordering::Release);
-        if let Ok(mut guard) = self.snes.lock() {
+        if let Ok(mut guard) = self.emu.lock() {
             *guard = None;
         }
         if let Ok(mut fb) = self.framebuffer_rgba.lock() {
@@ -257,9 +247,9 @@ impl LunaApp {
             return;
         }
         let mask = self.key_bindings.mask_from_pressed(&self.pressed_keys);
-        if let Ok(mut guard) = self.snes.lock() {
-            if let Some(snes) = guard.as_mut() {
-                snes.set_joypad(0, mask);
+        if let Ok(mut guard) = self.emu.lock() {
+            if let Some(em) = guard.as_mut() {
+                let _ = em.set_joypad(0, mask);
             }
         }
     }
@@ -322,9 +312,9 @@ impl LunaApp {
     }
 
     fn reset(&self) {
-        if let Ok(mut guard) = self.snes.lock() {
-            if let Some(snes) = guard.as_mut() {
-                snes.reset();
+        if let Ok(mut guard) = self.emu.lock() {
+            if let Some(em) = guard.as_mut() {
+                let _ = em.reset();
             }
         }
         self.emu_shared.paused.store(false, Ordering::Release);
@@ -401,7 +391,7 @@ impl ApplicationHandler for LunaApp {
         };
         match event {
             WindowEvent::CloseRequested => {
-                self.unload_snes();
+                self.unload_emu();
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
@@ -469,7 +459,7 @@ impl ApplicationHandler for LunaApp {
                         KeyCode::KeyR => self.reset(),
                         KeyCode::KeyP => self.toggle_pause(),
                         KeyCode::KeyQ => {
-                            self.unload_snes();
+                            self.unload_emu();
                             event_loop.exit();
                             return;
                         }
@@ -563,7 +553,7 @@ impl LunaApp {
         match action {
             MenuAction::OpenRom => self.open_rom_dialog(),
             MenuAction::Quit => {
-                self.unload_snes();
+                self.unload_emu();
                 event_loop.exit();
             }
             MenuAction::PauseToggle => self.toggle_pause(),

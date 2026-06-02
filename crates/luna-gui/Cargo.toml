@@ -14,10 +14,11 @@ name = "luna-gui"
 path = "src/main.rs"
 
 [dependencies]
-luna-bus       = { workspace = true }
-luna-cartridge = { workspace = true }
-luna-core      = { workspace = true }
-luna-ppu       = { workspace = true }
+# API-first (.claude/rules/api-first.md): the GUI drives the emulator
+# only through luna-api, never luna-core / luna-ppu / luna-bus /
+# luna-cartridge directly. That keeps the CLI/MCP/GUI on one shared
+# observation+control surface so they cannot diverge.
+luna-api = { workspace = true }
 
 winit      = { workspace = true }
 pixels     = { workspace = true }
