@@ -42,6 +42,7 @@ A cycle-accurate-ish SNES emulator written in Rust. 11-crate workspace:
 | Rust lint discipline (clippy `--all-features`) | `.claude/rules/rust-lint-discipline.md` | Every code change before commit (extends rebuild) |
 | Coprocessor / DMA / PPU test sweep | `.claude/rules/coproc-testing.md` | Edits to luna-ppu, luna-core/src/dma/, luna-core/src/coproc/, luna-bus/sa1.rs |
 | Test audible / visible fixes before commit | `.claude/rules/audible-fixes-test-first.md` | Any change to APU / PPU rendering / GUI audio or framebuffer |
+| API-first (CLI / MCP / GUI all drive `luna-api`, never `luna-core` directly) | `.claude/rules/api-first.md` | Any `luna-gui` change touching emulation / input / audio / framebuffer, or any front-end need for core state |
 
 Read the matching rule before touching the relevant code, not after.
 
