@@ -130,10 +130,15 @@ enum Command {
         #[arg(long = "sa1-log")]
         sa1_log: Option<PathBuf>,
         /// Optional SA-1-*side* execution log. When set, the SA-1's own
-        /// reads/writes of its registers `$2200-$23FF` are captured with
-        /// the SA-1 PC and written as CSV (`seq,sa1_pc,kind,reg,value`).
-        /// Complements `--sa1-log` (S-CPU side) to see why the SA-1
-        /// (re)asserts a register, e.g. the SMRPG SCNT=$87 loop.
+        /// reads/writes of its registers `$2200-$23FF` AND its *writes*
+        /// to I-RAM (`$3000-$37FF`, reported as `$30xx` even via the
+        /// `$0000-$07FF` mirror) are captured with the SA-1 PC and
+        /// written as CSV (`seq,sa1_pc,kind,reg,value`). The I-RAM
+        /// writes expose the cross-CPU handshake flags (e.g. Kirby's
+        /// `$300A`/`$300E`) that the MMIO-only view can't show. Reads of
+        /// I-RAM are NOT logged (they flood when the SA-1 spins on a
+        /// flag). Complements `--sa1-log` (S-CPU side) to see why the
+        /// SA-1 (re)asserts a register, e.g. the SMRPG SCNT=$87 loop.
         #[arg(long = "sa1-side-log")]
         sa1_side_log: Option<PathBuf>,
         /// Optional FULL SA-1 instruction trace: a pre-opcode register
