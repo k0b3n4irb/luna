@@ -6,8 +6,11 @@
 - Phase 2 (SPC700 per-opcode cycles + branch-taken penalty + master-clock
   cadence): done `cfef84a`; cycle backstop + 9 off-by-one fixes `081e78d`.
 - Phase 3 (65c816 internal/idle cycles): done `82893a5`; Tom Harte cycle
-  backstop `fe405b5` (0 mismatches, 100% state). Surfaced the pre-existing
-  SMRPG SA-1 deadlock (not a regression — HEAD A/B confirmed).
+  backstop `fe405b5` (0 mismatches, 100% state). It made a fixed-instr
+  SMRPG smoke land on a black post-intro frame, which *looked* like a
+  regression but was not (HEAD A/B confirmed) — and which a later (2026-06)
+  investigation showed was **never an SA-1 deadlock at all** (see §7
+  "SA-1 game status").
 - Phases 4–5: see the table in §5.
 **Author:** synthesized from the ares + Mesen2 timing correlation
 (`docs/accuracy_scorecard.md` §"DMA / HDMA / timing") and the Chrono
@@ -139,11 +142,42 @@ poll interrupts + HDMA **inside `io_cycle`** instead of only at
 instruction boundaries — dot-precise H/V-IRQ (HTIME respected), H≈278
 HDMA-vs-DMA preemption, RDNMI as a true 4-cycle hold. Now that the master
 clock advances per cycle (Phases 1–3), interrupt *latching* is the last
-piece still pinned to instruction boundaries; that mismatch is the prime
-suspect for the **pre-existing SMRPG SA-1 deadlock** (a CPU↔SA-1 handshake
-that hangs ~frame 2150 — see `docs/` / the SA-1 sources). A good first
-move: reproduce the SMRPG hang under a per-access coproc-IRQ poll and see
-if finer SA-1↔S-CPU sync resolves it.
+piece still pinned to instruction boundaries. Phase 4 is justified on its
+own merits — raster-IRQ effects and HDMA-vs-DMA timing (scorecard DMA
+section C+→B+) — **not** by any SA-1 game (see below).
+
+### SA-1 game status (investigated 2026-06-02) — NOT cycle-accuracy bugs
+
+The "SA-1 deadlock" that earlier drafts of this plan named as the Phase 4
+payoff **does not exist**. Re-investigation with the SA-1 tracers
+(`--sa1-log`/`--sa1-side-log`/`--sa1-trace`, the I-RAM-write trace added in
+`2940ebe`) plus `--cpu-trace`/`--mem-trace`/`--peek` showed:
+
+- **Super Mario RPG — works.** The "intro hang at ~frame 2150 / NMIs
+  frozen at 1598" is just the **title/demo screen waiting for a Start
+  press** the CLI never sends. `luna state --input "1600:0x1000,1610:0,…"`
+  reaches New Game → the name-entry screen. The SA-1↔S-CPU mailbox
+  round-trips correctly every frame. No scheduler change needed.
+- **Kirby Super Star — a real S-CPU *crash*, unrelated to timing.** The
+  S-CPU boots, completes its SPC700 audio upload, then `JMP $000E` — but
+  WRAM `$00:000E` is `$00` (the boot never populates the stub it expects).
+  It executes `BRK` → the game's crash-trap vector `$00:FFE6 = $5FFF` →
+  runs away into uninitialised BW-RAM → a push loop overflows SP into ROM
+  → the next IRQ `RTI`s from a garbage "stack" → executes ROM as garbage
+  forever, INIDISP stuck forced-blank (black screen). The SA-1 idling at
+  `$C0:8CB8` waiting on I-RAM `$300E` is a **downstream effect** of the
+  crashed S-CPU, not the cause. Root = luna's boot **diverges from real
+  hardware and skips the WRAM-stub setup**; finer SA-1/IRQ sync will not
+  help. Pinning the divergence needs a reference (Mesen2/bsnes) boot trace
+  to diff against luna's PC stream — tooling + checklist in
+  `tools/kirby-boot-ref-trace.lua` and `tools/capture-kirby-ref-trace.md`.
+
+So: **do not validate Phase 4 against SMRPG/Kirby as "deadlock fixes."**
+Use the SMRPG name-entry smoke (with `--input`, per
+`.claude/rules/coproc-testing.md`) only as a *no-regression* check, and
+treat Kirby as a separate boot-divergence bug tracked outside this
+milestone. The full Kirby crash chain is recorded in the
+`project_smrpg_sa1_deadlock` memory.
 
 ### History (completed)
 
