@@ -151,6 +151,16 @@ enum Command {
         /// 200 000).
         #[arg(long = "sa1-trace-max", default_value_t = 200_000)]
         sa1_trace_max: usize,
+        /// Optional FULL Super FX (GSU) instruction trace: a per-opcode
+        /// snapshot written as CSV (`seq,pc,opcode,sfr,r0..r15`). Diff this
+        /// PC/register stream against a bsnes/siena GSU trace to localise
+        /// rendering divergences.
+        #[arg(long = "superfx-trace")]
+        superfx_trace: Option<PathBuf>,
+        /// Cap the Super FX instruction trace at this many events (default
+        /// 200 000).
+        #[arg(long = "superfx-trace-max", default_value_t = 200_000)]
+        superfx_trace_max: usize,
         /// Optional CPU instruction trace. When set, captures a
         /// per-instruction register snapshot (PC, A, X, Y, SP, P, DB,
         /// DP, e) into the given CSV file. Capture starts at instr
@@ -219,6 +229,8 @@ fn main() -> ExitCode {
             sa1_side_log,
             sa1_trace,
             sa1_trace_max,
+            superfx_trace,
+            superfx_trace_max,
             cpu_trace,
             cpu_trace_from,
             cpu_trace_max,
@@ -239,6 +251,8 @@ fn main() -> ExitCode {
             sa1_side_log.as_deref(),
             sa1_trace.as_deref(),
             sa1_trace_max,
+            superfx_trace.as_deref(),
+            superfx_trace_max,
             cpu_trace.as_deref(),
             cpu_trace_from,
             cpu_trace_max,
@@ -436,6 +450,39 @@ fn write_sa1_trace_csv(
     Ok(())
 }
 
+/// Write per-opcode Super FX (GSU) trace events as CSV. Columns:
+/// `seq, pc, opcode, sfr, r0..r15`. Diff the `pc` / register columns
+/// against a reference (bsnes / siena) GSU trace to find the first
+/// divergence in the rendering.
+fn write_superfx_trace_csv(
+    path: &std::path::Path,
+    events: &[luna_api::SuperFxTraceEvent],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    write!(f, "seq,pc,opcode,sfr")?;
+    for n in 0..16 {
+        write!(f, ",r{n}")?;
+    }
+    writeln!(f)?;
+    for (i, ev) in events.iter().enumerate() {
+        write!(
+            f,
+            "{},${:02X}:{:04X},${:02X},${:04X}",
+            i,
+            (ev.pc_full >> 16) & 0xFF,
+            ev.pc_full & 0xFFFF,
+            ev.opcode,
+            ev.sfr,
+        )?;
+        for r in ev.r {
+            write!(f, ",${r:04X}")?;
+        }
+        writeln!(f)?;
+    }
+    Ok(())
+}
+
 /// Write per-instruction CPU trace events as CSV. Columns:
 /// `mclk_total, frame_ntsc, pc, a, x, y, sp, p_hex, db, dp, e`.
 fn write_cpu_trace_csv(
@@ -526,6 +573,8 @@ fn run_state(
     sa1_side_log_path: Option<&std::path::Path>,
     sa1_trace_path: Option<&std::path::Path>,
     sa1_trace_max: usize,
+    superfx_trace_path: Option<&std::path::Path>,
+    superfx_trace_max: usize,
     cpu_trace_path: Option<&std::path::Path>,
     cpu_trace_from: u64,
     cpu_trace_max: usize,
@@ -560,6 +609,12 @@ fn run_state(
     if sa1_trace_path.is_some() {
         if let Err(e) = em.enable_sa1_trace(sa1_trace_max) {
             eprintln!("error: enable_sa1_trace: {e}");
+            return ExitCode::from(1);
+        }
+    }
+    if superfx_trace_path.is_some() {
+        if let Err(e) = em.enable_superfx_trace(superfx_trace_max) {
+            eprintln!("error: enable_superfx_trace: {e}");
             return ExitCode::from(1);
         }
     }
@@ -754,6 +809,19 @@ fn run_state(
                 Err(e) => eprintln!("error: writing SA-1 trace: {e}"),
             },
             Err(e) => eprintln!("error: take_sa1_trace: {e}"),
+        }
+    }
+    if let Some(path) = superfx_trace_path {
+        match em.take_superfx_trace() {
+            Ok(events) => match write_superfx_trace_csv(path, &events) {
+                Ok(()) => eprintln!(
+                    "Super FX instruction trace written to {} ({} events)",
+                    path.display(),
+                    events.len()
+                ),
+                Err(e) => eprintln!("error: writing Super FX trace: {e}"),
+            },
+            Err(e) => eprintln!("error: take_superfx_trace: {e}"),
         }
     }
     if let Some(path) = cpu_trace_path {

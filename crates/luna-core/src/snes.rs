@@ -450,6 +450,16 @@ impl Snes {
         self.mapper.take_sa1_trace()
     }
 
+    /// Enable a per-opcode Super FX (GSU) instruction trace.
+    pub fn enable_superfx_trace(&mut self, max_events: usize) {
+        self.mapper.enable_superfx_trace(max_events);
+    }
+
+    /// Drain the Super FX instruction trace (empty if disabled / not GSU).
+    pub fn take_superfx_trace(&mut self) -> Vec<luna_bus::SuperFxTraceEvent> {
+        self.mapper.take_superfx_trace()
+    }
+
     /// Enable CPU instruction tracing. From this point onward each
     /// call to [`Snes::step`] appends a pre-instruction register
     /// snapshot until the log fills (`max_events` events). Use

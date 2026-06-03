@@ -19,7 +19,7 @@
 //! ares `ares/sfc/coprocessor/superfx/*` + `ares/component/processor/gsu/*`
 //! and Mesen2 `Core/SNES/Coprocessors/GSU`.
 
-use crate::mapper::{Mapper, MapperKind};
+use crate::mapper::{Mapper, MapperKind, SuperFxTraceEvent};
 use crate::types::{Addr24, bank_of, offset_of};
 
 // --- SFR (Status Flag Register) bit masks (spec §1.2) ---------------------
@@ -243,6 +243,10 @@ pub struct SuperFxMapper {
     /// superfx.cpp:35-44).
     modified_r14: bool,
     modified_r15: bool,
+    /// Optional per-opcode trace: `(events, max_events)`. A ring buffer
+    /// (drops the oldest half when full) so a long run captures the GSU's
+    /// *current* activity. Enabled via [`Mapper::enable_superfx_trace`].
+    trace: Option<(Vec<SuperFxTraceEvent>, usize)>,
 }
 
 impl SuperFxMapper {
@@ -271,6 +275,7 @@ impl SuperFxMapper {
             cycles: 0,
             modified_r14: false,
             modified_r15: false,
+            trace: None,
         }
     }
 
@@ -703,6 +708,22 @@ impl SuperFxMapper {
         self.modified_r14 = false;
         self.modified_r15 = false;
         let opcode = self.peekpipe();
+        if self.trace.is_some() {
+            let ev = SuperFxTraceEvent {
+                pc_full: (u32::from(self.regs.pbr) << 16) | u32::from(self.regs.r[15]),
+                opcode,
+                sfr: self.regs.sfr,
+                r: self.regs.r,
+            };
+            if let Some((events, max)) = self.trace.as_mut() {
+                if *max > 0 {
+                    if events.len() >= *max {
+                        events.drain(0..*max / 2);
+                    }
+                    events.push(ev);
+                }
+            }
+        }
         self.execute(opcode);
         if self.modified_r14 {
             self.update_rom_buffer();
@@ -1492,6 +1513,17 @@ impl Mapper for SuperFxMapper {
     /// SNES read of SFR high byte ($3031).
     fn coproc_main_irq_pending(&self) -> bool {
         self.sfr_get(SFR_IRQ)
+    }
+
+    fn enable_superfx_trace(&mut self, max_events: usize) {
+        self.trace = Some((Vec::new(), max_events));
+    }
+
+    fn take_superfx_trace(&mut self) -> Vec<SuperFxTraceEvent> {
+        match self.trace.as_mut() {
+            Some((events, _)) => std::mem::take(events),
+            None => Vec::new(),
+        }
     }
 }
 
