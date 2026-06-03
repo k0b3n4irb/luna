@@ -326,15 +326,14 @@ impl Snes {
             // the whole chip lives in `SuperFxMapper`, driven by the
             // `step_coproc` hook. The Game Pak work RAM (the GSU's plot
             // target) isn't reliably encoded in the LoROM header — Star Fox
-            // and Yoshi's Island both report 0 — so default to 128 KB when
-            // the header is silent. Board-accurate RAM sizing is a later-
-            // phase refinement.
+            // and Yoshi's Island both report 0 — so default to 32 KB, the
+            // GSU-1 board size that is correct for Star Fox. The size sets
+            // `ram_mask`, and the plot tile address `(scbr<<10)+…` relies on
+            // wrapping at the real RAM boundary, so an oversized RAM garbles
+            // graphics. Larger GSU-2 boards (Doom 128 KB, …) need a board
+            // table — a later refinement.
             MapperKind::SuperFx => {
-                let gsu_ram = if sram_bytes == 0 {
-                    0x2_0000
-                } else {
-                    sram_bytes
-                };
+                let gsu_ram = if sram_bytes == 0 { 0x8000 } else { sram_bytes };
                 Box::new(SuperFxMapper::new(cart.rom, gsu_ram))
             }
             other => {
