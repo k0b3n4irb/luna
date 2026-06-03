@@ -1153,19 +1153,6 @@ fn print_diag_state(snes: &mut Snes) {
         }
     }
     println!();
-    print!("OAM shadow Y (non-$F0): ");
-    let mut shown2 = 0;
-    for (i, y) in p.oam.shadow_y.iter().enumerate() {
-        if *y != 0xF0 {
-            print!("[#{i}=${y:02X}] ");
-            shown2 += 1;
-            if shown2 >= 20 {
-                print!("...");
-                break;
-            }
-        }
-    }
-    println!();
     let all_sprites = luna_ppu::decode_all_sprites(p);
     let visible_count = all_sprites.iter().filter(|sp| sp.y < 224).count();
     println!("  visible sprites (y<224): {visible_count}");

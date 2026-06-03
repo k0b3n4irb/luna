@@ -329,22 +329,6 @@ pub struct Oam {
     /// rotating which sprites win the per-line priority/limit contest
     /// (ares `object.cpp:6-9`).
     pub priority_rotation: bool,
-    /// Per-sprite "last non-hidden Y" shadow.
-    ///
-    /// Many games keep their sprites at `Y = $F0` (off-screen)
-    /// throughout most of the visible frame and only briefly place
-    /// them at a real position during their NMI handler before
-    /// hiding them again. Without cycle-accurate scheduling, a free-
-    /// running renderer that samples the live OAM almost always
-    /// catches the "all hidden" phase — every sprite ends up
-    /// invisible despite the game clearly meaning to draw it.
-    ///
-    /// The shadow captures, for each of 128 sprites, the **last Y
-    /// value that wasn't `$F0`**. The renderer falls back to it when
-    /// the live Y is `$F0`. This gives a stable "last seen" view of
-    /// each sprite — close enough to display Mario, Yoshi, the menu
-    /// cursor, etc. on real title screens until proper timing lands.
-    pub shadow_y: [u8; 128],
 }
 
 impl Default for Oam {
@@ -363,27 +347,7 @@ impl Oam {
             address: 0,
             latch: 0,
             priority_rotation: false,
-            // Start with everything hidden — nothing renders until
-            // the game does its first frame of OAM uploads.
-            shadow_y: [0xF0; 128],
         }
-    }
-
-    /// Helper: if this byte address is the Y byte of a low-table
-    /// sprite (`offset & 3 == 1`, `offset < 0x200`) **and** the
-    /// value isn't the hide signal `$F0`, update [`Self::shadow_y`]
-    /// for the corresponding sprite slot.
-    const fn update_shadow(&mut self, byte_addr: usize, value: u8) {
-        if byte_addr >= 0x200 {
-            return;
-        }
-        if byte_addr & 3 != 1 {
-            return;
-        }
-        if value == 0xF0 {
-            return;
-        }
-        self.shadow_y[byte_addr / 4] = value;
     }
 
     /// Direct read for tests and the renderer.
@@ -405,7 +369,6 @@ impl Oam {
     pub fn poke(&mut self, addr: u16, value: u8) {
         let a = usize::from(addr) % self.data.len();
         self.data[a] = value;
-        self.update_shadow(a, value);
     }
 
     const fn reset_byte_address(&mut self) {
@@ -477,7 +440,6 @@ impl Oam {
             let even_off = usize::from(addr.wrapping_sub(1) & 0x1FF);
             self.data[even_off] = self.latch;
             self.data[even_off + 1] = value;
-            self.update_shadow(even_off + 1, value);
         }
         self.advance();
     }
