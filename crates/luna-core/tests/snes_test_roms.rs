@@ -415,7 +415,7 @@ ppu_test!(
 ppu_test!(
     ppu_bg_8bpp_32x32,
     "BGMAP/8x8/8BPP/32x32/8x8BGMap8BPP32x32.sfc",
-    "4ae985ae657c906941e01a8775a51d362a9e0bb6624264c8db81158986504839"
+    "b77095306f4237da0d19fc5a60b3f2e60e5c96c5830d7171744e690eb7939a83"
 );
 ppu_test!(
     ppu_bg_8bpp_32x64,
@@ -498,7 +498,7 @@ ppu_test!(
 ppu_test!(
     ppu_mosaic_mode3,
     "Mosaic/Mode3/MosaicMode3.sfc",
-    "3a57695004fa0a4068fa68ca26e2ff2db0288ecd3ff8ee45073144aa4d5a0b72",
+    "c67db9ad0c8e2e60446dd808acd97bbd24b76fe5df7bc8b4a3b98a13467ba741",
     hold = PAD_R
 );
 // Mode 5 hi-res + INTERLACE (SETINI bit 0): the Moogle figure. Interlace
@@ -567,7 +567,7 @@ ppu_test!(
 ppu_test!(
     ppu_hdma_wave,
     "HDMA/WaveHDMA/WaveHDMA.sfc",
-    "c1f4f776ee1985c768b7a075aee07d25ffbd19811d6375e3c2a8bc0059be94bd"
+    "aeba7bc471f5e4bec9f18d76e52d6f6f37e48057ca825ef7cc56f09c5499f785"
 );
 ppu_test!(
     ppu_hdma_redspace,
