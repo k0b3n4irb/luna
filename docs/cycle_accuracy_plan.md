@@ -1,6 +1,7 @@
 # Cycle-Accuracy Milestone — APU↔CPU↔PPU Synchronization Plan
 
-**Status:** in progress — **Phases 1, 2 & 3 landed**; Phase 4 next.
+**Status:** in progress — **Phases 1, 2, 3 landed; Phase 4 in progress**
+(dot-precise H/V IRQ + HDMA time cost done; DMA↔HDMA preemption → Phase 5).
 - Phase 1 (io_cycle-driven per-access catch-up + DMA coproc double-charge
   fix): done — APU `cfef84a`/snes.rs, PPU sched, coproc `7c5bef0`.
 - Phase 2 (SPC700 per-opcode cycles + branch-taken penalty + master-clock
@@ -11,7 +12,13 @@
   regression but was not (HEAD A/B confirmed) — and which a later (2026-06)
   investigation showed was **never an SA-1 deadlock at all** (see §7
   "SA-1 game status").
-- Phases 4–5: see the table in §5.
+- Phase 4 (per-access IRQ/NMI/HDMA): **partially done.** Dot-precise H/V
+  IRQ `f1ef75e` (fixes modes 01/11; unblocks DKC's H-IRQ raster) + HDMA
+  time cost (18 mclk/line + 8/byte, charged via the `sched_advance` stall
+  loop). Remaining: $4211 TIMEUP hold, the ares "last dot" guard, htime==0
+  delay. The DMA↔HDMA preemption part needs steppable DMA → moved to
+  Phase 5.
+- Phase 5: see the table in §5.
 **Author:** synthesized from the ares + Mesen2 timing correlation
 (`docs/accuracy_scorecard.md` §"DMA / HDMA / timing") and the Chrono
 Trigger APU-deadlock investigation.
