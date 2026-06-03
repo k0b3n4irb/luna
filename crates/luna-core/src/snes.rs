@@ -1124,8 +1124,11 @@ impl SnesBus<'_> {
     /// (dot-precise), instead of only at the boundary. Boundary crossing
     /// is otherwise identical to before (chunks never overshoot a line, so
     /// the per-line events in `sched_one_line` still fire exactly once).
-    fn sched_advance(&mut self, mcycles: u32) {
+    /// Returns the total HDMA master-cycle stall accumulated across the
+    /// line crossings in this advance (Phase 4); the caller charges it.
+    fn sched_advance(&mut self, mcycles: u32) -> u32 {
         let mut remaining = mcycles;
+        let mut hdma_stall = 0u32;
         while remaining > 0 {
             let room = MCYCLES_PER_SCANLINE - self.mcycles_in_line;
             let chunk = remaining.min(room);
@@ -1136,9 +1139,10 @@ impl SnesBus<'_> {
             remaining -= chunk;
             if self.mcycles_in_line >= MCYCLES_PER_SCANLINE {
                 self.mcycles_in_line -= MCYCLES_PER_SCANLINE;
-                self.sched_one_line();
+                hdma_stall += self.sched_one_line();
             }
         }
+        hdma_stall
     }
 
     /// Dot-precise H/V-counter IRQ poll over the half-open master-cycle
@@ -1186,9 +1190,13 @@ impl SnesBus<'_> {
     /// Mirrors the former `Snes::advance_one_scanline`, but raises NMI/IRQ
     /// via the bus `nmi`/`irq` latches (the CPU is borrowed here; `step`
     /// applies the edge at the instruction boundary).
-    fn sched_one_line(&mut self) {
+    /// Returns the master-cycle cost of any HDMA performed on this line
+    /// crossing (frame-start setup + per-line transfer), so the caller can
+    /// charge the CPU the stall (Phase 4).
+    fn sched_one_line(&mut self) -> u32 {
         let vblank_start = self.vblank_start_line;
         let scanlines = self.scanlines_per_frame;
+        let mut hdma_stall = 0u32;
 
         // Render the visible line that just finished, with its end-of-line
         // register state (HDMA for the next line fires after the increment).
@@ -1238,7 +1246,7 @@ impl SnesBus<'_> {
                 mapper: &mut *self.mapper,
                 ppu: &mut *self.ppu,
             };
-            self.dma.hdma_init(&mut view);
+            hdma_stall += self.dma.hdma_init(&mut view);
         }
 
         // HDMA on every visible scanline (end-of-HBlank ordering).
@@ -1248,8 +1256,9 @@ impl SnesBus<'_> {
                 mapper: &mut *self.mapper,
                 ppu: &mut *self.ppu,
             };
-            self.dma.hdma_run_line(&mut view);
+            hdma_stall += self.dma.hdma_run_line(&mut view);
         }
+        hdma_stall
     }
 }
 
@@ -1284,28 +1293,44 @@ impl SnesBus<'_> {
     /// [`DmaBusView::tick`], so charging it again with the lumped DMA
     /// cost here would double-count it.
     fn advance_time(&mut self, mcycles: MCycles, advance_coproc: bool) {
-        *self.mclk_total = self.mclk_total.saturating_add(mcycles);
-        // APU in lockstep with the CPU at bus-access granularity.
-        // `Apu::step` carries the sub-84-mclk remainder in `mclk_deficit`,
-        // so per-access stepping composes exactly with the old lump (same
-        // SPC instruction count) — only the CPU↔APU port interleaving is
-        // finer.
-        if !*self.apu_panicked {
-            self.apu_real.step(mcycles as u32);
-            if self.apu_real.cpu.stopped {
-                *self.apu_panicked = true;
+        // Phase 4: HDMA steals master cycles. `sched_advance` returns the
+        // HDMA cost of any line crossed; the CPU is halted for that long,
+        // so we re-advance everything (master clock, APU, PPU, coproc, IRQ
+        // poll) by the stall in a follow-up pass. The loop converges —
+        // each scanline's HDMA runs once and a stall rarely spans a full
+        // 1364-mclk line.
+        let mut step = mcycles;
+        loop {
+            *self.mclk_total = self.mclk_total.saturating_add(step);
+            // APU in lockstep with the CPU at bus-access granularity.
+            // `Apu::step` carries the sub-84-mclk remainder in
+            // `mclk_deficit`, so per-access stepping composes exactly with
+            // the old lump (same SPC instruction count) — only the CPU↔APU
+            // port interleaving is finer.
+            if !*self.apu_panicked {
+                self.apu_real.step(step as u32);
+                if self.apu_real.cpu.stopped {
+                    *self.apu_panicked = true;
+                }
             }
-        }
-        // PPU scanline scheduler + cartridge coprocessor (SA-1 / Super FX
-        // / …). Both render/run with the register state live at this
-        // access, not an end-of-instruction snapshot. Gated by
-        // `sched_enabled` so debug peeks / mapping tests
-        // (`peek_pc_bytes`, `reset`) don't tick emulation forward.
-        if self.sched_enabled {
-            self.sched_advance(mcycles as u32);
+            // PPU scanline scheduler + cartridge coprocessor. Gated by
+            // `sched_enabled` so debug peeks / mapping tests don't tick
+            // emulation forward.
+            if !self.sched_enabled {
+                return;
+            }
+            let hdma_stall = self.sched_advance(step as u32);
             if advance_coproc {
-                self.mapper.step_coproc(mcycles as u32);
+                self.mapper.step_coproc(step as u32);
             }
+            // Charge the HDMA stall only on the CPU-instruction path. The
+            // DMA-lump path (`advance_coproc == false`) lets HDMA fire but
+            // accounts its own lumped time; proper DMA↔HDMA interleaving is
+            // Phase 5, so don't re-loop there.
+            if hdma_stall == 0 || !advance_coproc {
+                return;
+            }
+            step = MCycles::from(hdma_stall);
         }
     }
 

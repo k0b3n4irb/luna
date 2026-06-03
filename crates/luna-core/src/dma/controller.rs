@@ -75,33 +75,58 @@ impl Dma {
     /// start pointer, reads the first header byte, and in indirect
     /// mode the first data pointer. Channels not enabled in
     /// [`Self::hdmaen`] are left untouched.
-    pub fn hdma_init<B: DmaBus>(&mut self, bus: &mut B) {
+    /// Returns the master-cycle cost of the frame-start setup so the CPU
+    /// can be charged the stall (Phase 4). Per ares `cpu/dma.cpp`
+    /// `hdmaSetup`: `step(8)` overhead + one header read per enabled
+    /// channel; folded here into the canonical `18 + 8·channels` figure.
+    pub fn hdma_init<B: DmaBus>(&mut self, bus: &mut B) -> u32 {
+        let mut enabled = 0u32;
         for ch in 0..8 {
             if self.hdmaen & (1 << ch) != 0 {
                 self.channels[ch].hdma_start_frame(bus);
+                enabled += 1;
             } else {
                 self.channels[ch].hdma_active = false;
                 self.channels[ch].hdma_do_transfer = false;
             }
         }
+        if enabled > 0 {
+            HDMA_OVERHEAD_MCLK + 8 * enabled
+        } else {
+            0
+        }
     }
 
     /// Per-scanline HDMA step. Called once per visible scanline
-    /// (lines 0..=224 NTSC). Each enabled, still-active channel
-    /// fires up to one mode-pattern's worth of bytes through its
-    /// configured B-bus offset. Returns the total bytes transferred
-    /// across all channels this line — useful for CPU stall accounting
-    /// in a later phase.
+    /// (lines 0..=224 NTSC). Each enabled, still-active channel fires up
+    /// to one mode-pattern's worth of bytes through its configured B-bus
+    /// offset. Returns the **master-cycle cost** of the line's HDMA so the
+    /// CPU can be charged the stall (Phase 4): `18 + 8·bytes` when any
+    /// channel was active, else 0 (ares `cpu/dma.cpp` `hdmaRun`: `step(8)`
+    /// overhead + 8 mclk per transferred byte, folded into the canonical
+    /// 18-mclk per-scanline overhead).
     pub fn hdma_run_line<B: DmaBus>(&mut self, bus: &mut B) -> u32 {
-        let mut total = 0u32;
+        let mut bytes = 0u32;
+        let mut any_active = false;
         for ch in 0..8 {
             if self.hdmaen & (1 << ch) != 0 {
-                total += self.channels[ch].hdma_step_line(bus);
+                // A channel active at line start does work this line.
+                any_active |= self.channels[ch].hdma_active;
+                bytes += self.channels[ch].hdma_step_line(bus);
             }
         }
-        total
+        if any_active {
+            HDMA_OVERHEAD_MCLK + 8 * bytes
+        } else {
+            0
+        }
     }
 }
+
+/// Fixed per-scanline HDMA overhead in master cycles when ≥1 channel is
+/// active — the canonical hardware figure (anomie / bsnes / higan),
+/// folding ares' `step(8)` + DMA-clock alignment + reload reads.
+const HDMA_OVERHEAD_MCLK: u32 = 18;
 
 #[cfg(test)]
 mod tests {
@@ -178,6 +203,46 @@ mod tests {
         assert_eq!(n, 4, "only channel 0 transferred");
         assert_eq!(bus.b[0x22], 0x44, "last byte landed at $2122");
         assert_eq!(bus.b[0xFF], 0x00, "channel 1 did not run");
+    }
+
+    #[test]
+    fn hdma_charges_overhead_plus_per_byte_stall() {
+        // Phase 4 HDMA time cost: 18 mclk/scanline overhead when any
+        // channel is active, + 8 mclk per transferred byte. Table
+        // `02 11 00` = non-repeat 2-line entry (transfer line 1, gap
+        // line 2), then terminator. Mode 0 (1 byte/line) → BBAD $22.
+        let mut bus = MockBus::new();
+        bus.a[0x00_2000] = 0x02; // line count
+        bus.a[0x00_2001] = 0x11; // data byte
+        bus.a[0x00_2002] = 0x00; // terminator
+        let mut dma = Dma::new();
+        dma.channels[0].params = DmaParams::from_byte(0); // mode 0, direct
+        dma.channels[0].bbad = 0x22;
+        dma.channels[0].a_addr = 0x2000;
+        dma.channels[0].a_bank = 0x00;
+        dma.hdmaen = 0b0000_0001; // channel 0 HDMA enabled
+
+        // Frame setup: 18 overhead + 8 per enabled channel (1).
+        assert_eq!(dma.hdma_init(&mut bus), HDMA_OVERHEAD_MCLK + 8);
+
+        // Line 1 transfers 1 byte → 18 + 8.
+        assert_eq!(dma.hdma_run_line(&mut bus), HDMA_OVERHEAD_MCLK + 8);
+        assert_eq!(bus.b[0x22], 0x11);
+
+        // Line 2 is an active gap (still active at line start, 0 bytes,
+        // reads the terminator) → overhead only.
+        assert_eq!(dma.hdma_run_line(&mut bus), HDMA_OVERHEAD_MCLK);
+
+        // Channel terminated → no cost on subsequent lines.
+        assert_eq!(dma.hdma_run_line(&mut bus), 0);
+    }
+
+    #[test]
+    fn hdma_with_no_enabled_channels_costs_nothing() {
+        let mut bus = MockBus::new();
+        let mut dma = Dma::new(); // hdmaen == 0
+        assert_eq!(dma.hdma_init(&mut bus), 0);
+        assert_eq!(dma.hdma_run_line(&mut bus), 0);
     }
 
     #[test]
