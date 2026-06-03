@@ -1038,6 +1038,10 @@ struct DmaBusView<'a> {
     wram: &'a mut [u8; 0x20000],
     mapper: &'a mut dyn Mapper,
     ppu: &'a mut Ppu,
+    /// Shared 17-bit WRAM-port address (`$2181-$2183` WMADD), so a DMA to
+    /// `$2180` (WMDATA) writes WRAM and auto-increments — the same state
+    /// the CPU port uses.
+    wm_addr: &'a mut u32,
 }
 
 impl DmaBus for DmaBusView<'_> {
@@ -1060,10 +1064,17 @@ impl DmaBus for DmaBusView<'_> {
     }
 
     fn read_b(&mut self, b_offset: u8) -> u8 {
-        // B-bus range $00-$3F = PPU. Other regions (APU $40-$43, WRAM
-        // port $80-$83) read open-bus until those subsystems land.
+        // B-bus range $00-$3F = PPU. $80 = WMDATA ($2180): a DMA reading
+        // WRAM via the port returns WRAM[WMADD] and auto-increments — same
+        // as the CPU port (`read_inner` $2180). APU $40-$43 is still open
+        // bus on the DMA path.
         if b_offset <= 0x3F {
             self.ppu.read(b_offset)
+        } else if b_offset == 0x80 {
+            let a = (*self.wm_addr & 0x1FFFF) as usize;
+            let v = self.wram[a];
+            *self.wm_addr = (*self.wm_addr + 1) & 0x1FFFF;
+            v
         } else {
             0xFF
         }
@@ -1075,6 +1086,22 @@ impl DmaBus for DmaBusView<'_> {
             // at the source in Ppu::write — ares io.cpp:55-60); VRAM/OAM still
             // drop via their own `active_display` gates.
             self.ppu.write(b_offset, value);
+        } else if matches!(b_offset, 0x80..=0x83) {
+            // WRAM port ($2180-$2183), mirroring the CPU path: $80 WMDATA
+            // writes WRAM[WMADD]++ ; $81-$83 set the 17-bit WMADD. Games
+            // (e.g. Kirby Super Star's boot) DMA ROM→WRAM through $2180 to
+            // populate low WRAM — dropping it left WRAM $0000+ zero, so the
+            // boot's `JMP $000E` hit a `$00` (BRK) and crashed.
+            match b_offset {
+                0x80 => {
+                    let a = (*self.wm_addr & 0x1FFFF) as usize;
+                    self.wram[a] = value;
+                    *self.wm_addr = (*self.wm_addr + 1) & 0x1FFFF;
+                }
+                0x81 => *self.wm_addr = (*self.wm_addr & !0x000FF) | u32::from(value),
+                0x82 => *self.wm_addr = (*self.wm_addr & !0x0FF00) | (u32::from(value) << 8),
+                _ => *self.wm_addr = (*self.wm_addr & !0x10000) | (u32::from(value & 1) << 16),
+            }
         }
     }
 
@@ -1245,6 +1272,7 @@ impl SnesBus<'_> {
                 wram: &mut *self.wram,
                 mapper: &mut *self.mapper,
                 ppu: &mut *self.ppu,
+                wm_addr: &mut *self.wm_addr,
             };
             hdma_stall += self.dma.hdma_init(&mut view);
         }
@@ -1255,6 +1283,7 @@ impl SnesBus<'_> {
                 wram: &mut *self.wram,
                 mapper: &mut *self.mapper,
                 ppu: &mut *self.ppu,
+                wm_addr: &mut *self.wm_addr,
             };
             hdma_stall += self.dma.hdma_run_line(&mut view);
         }
@@ -1627,6 +1656,7 @@ impl SnesBus<'_> {
                 wram: self.wram,
                 mapper: self.mapper,
                 ppu: self.ppu,
+                wm_addr: self.wm_addr,
             };
             let bytes = self.dma.run_mdma(&mut view, value);
             // DMA stalls the CPU during the transfer. Cost model
