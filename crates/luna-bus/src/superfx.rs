@@ -79,8 +79,15 @@ struct Registers {
     sreg: usize,
     /// Destination register selector for the next ALU/move op (spec §2.2).
     dreg: usize,
-    // The delayed ROM/RAM buffers (romcl/romdr/ramcl/ramar/ramdr/ramaddr)
-    // and their LD/ST plumbing land with the memory-op phase (2b).
+    /// Last RAM address used by LD/ST (for SBK) (spec §1.7).
+    ramaddr: u16,
+    /// ROM buffer: clocks until `romdr` is valid, and the data latch (§6.2).
+    romcl: u32,
+    romdr: u8,
+    /// RAM buffer (delayed write): clocks pending, address, data (§6.3).
+    ramcl: u32,
+    ramar: u16,
+    ramdr: u8,
 }
 
 impl Registers {
@@ -107,6 +114,12 @@ impl Registers {
             pipeline: 0x01,
             sreg: 0,
             dreg: 0,
+            ramaddr: 0,
+            romcl: 0,
+            romdr: 0,
+            ramcl: 0,
+            ramar: 0,
+            ramdr: 0,
         }
     }
 
@@ -384,10 +397,9 @@ impl SuperFxMapper {
                 self.regs.r[reg] = (u16::from(data) << 8) | (self.regs.r[reg] & 0x00FF);
             }
             if reg == 14 {
-                // Arm the R14 ROM-buffer fetch (spec §6.2). The countdown +
-                // latch land with the engine phase; here we just raise the
-                // pending flag so the SNES sees `sfr.r`.
-                self.sfr_set(SFR_R, true);
+                // Writing R14 from the SNES arms the ROM-buffer fetch
+                // (spec §6.2, ares io.cpp:68).
+                self.update_rom_buffer();
             }
             // Writing R15 high byte ($301F) launches the GSU (spec §7.1).
             if a == 0x301F {
@@ -526,13 +538,81 @@ impl SuperFxMapper {
         0 // open bus
     }
 
-    // --- timing (spec §6.1) ----------------------------------------------
+    /// GSU writes only reach Game Pak RAM at $70-71 (spec §3.1).
+    fn gsu_write(&mut self, addr: u32, data: u8) {
+        let a = (addr & 0xFF_FFFF) as usize;
+        if a & 0xFE_0000 == 0x70_0000 {
+            self.ram[a & self.ram_mask] = data;
+        }
+    }
 
-    /// Advance the GSU clock by `clocks`, accumulating into the per-
-    /// instruction cost. The delayed ROM/RAM buffer servicing lands with
-    /// the memory-op phase (2b).
-    const fn step(&mut self, clocks: u32) {
+    // --- timing + delayed ROM/RAM buffers (spec §6) ----------------------
+
+    /// Advance the GSU clock by `clocks`, servicing the delayed ROM read
+    /// and RAM write as their countdowns expire (ares timing.cpp:1-19).
+    fn step(&mut self, clocks: u32) {
+        if self.regs.romcl > 0 {
+            self.regs.romcl -= clocks.min(self.regs.romcl);
+            if self.regs.romcl == 0 {
+                self.sfr_set(SFR_R, false);
+                let a = (u32::from(self.regs.rombr) << 16) + u32::from(self.regs.r[14]);
+                let v = self.gsu_read(a);
+                self.regs.romdr = v;
+            }
+        }
+        if self.regs.ramcl > 0 {
+            self.regs.ramcl -= clocks.min(self.regs.ramcl);
+            if self.regs.ramcl == 0 {
+                let a = 0x70_0000 + (u32::from(self.regs.rambr) << 16) + u32::from(self.regs.ramar);
+                let d = self.regs.ramdr;
+                self.gsu_write(a, d);
+            }
+        }
         self.cycles = self.cycles.saturating_add(clocks);
+    }
+
+    /// Arm the R14-triggered ROM-buffer fetch (spec §6.2).
+    const fn update_rom_buffer(&mut self) {
+        self.sfr_set(SFR_R, true);
+        self.regs.romcl = self.mem_cycles();
+    }
+
+    /// Drain any pending ROM-buffer fetch to completion.
+    fn sync_rom_buffer(&mut self) {
+        if self.regs.romcl > 0 {
+            let c = self.regs.romcl;
+            self.step(c);
+        }
+    }
+
+    /// Read the ROM buffer (draining first). Used by GETB / GETC.
+    fn read_rom_buffer(&mut self) -> u8 {
+        self.sync_rom_buffer();
+        self.regs.romdr
+    }
+
+    /// Drain any pending delayed RAM write to completion.
+    fn sync_ram_buffer(&mut self) {
+        if self.regs.ramcl > 0 {
+            let c = self.regs.ramcl;
+            self.step(c);
+        }
+    }
+
+    /// Read a Game Pak RAM byte (reads aren't delayed, but a pending write
+    /// must drain first) (spec §6.3).
+    fn read_ram_buffer(&mut self, addr: u16) -> u8 {
+        self.sync_ram_buffer();
+        let a = 0x70_0000 + (u32::from(self.regs.rambr) << 16) + u32::from(addr);
+        self.gsu_read(a)
+    }
+
+    /// Arm a delayed RAM write (lands `ramcl` cycles later) (spec §6.3).
+    fn write_ram_buffer(&mut self, addr: u16, data: u8) {
+        self.sync_ram_buffer();
+        self.regs.ramcl = self.mem_cycles();
+        self.regs.ramar = addr;
+        self.regs.ramdr = data;
     }
 
     // --- fetch / pipeline / instruction cache (spec §2.3, §5) ------------
@@ -560,7 +640,13 @@ impl SuperFxMapper {
             }
             return self.cache[offset as usize];
         }
-        // Outside the cache window: fetch straight from ROM/RAM.
+        // Outside the cache window: fetch straight from ROM/RAM, draining
+        // any pending buffer first.
+        if self.regs.pbr <= 0x5F {
+            self.sync_rom_buffer();
+        } else {
+            self.sync_ram_buffer();
+        }
         let mc = self.mem_cycles();
         self.step(mc);
         self.gsu_read((u32::from(self.regs.pbr) << 16) | u32::from(address))
@@ -594,9 +680,7 @@ impl SuperFxMapper {
         let opcode = self.peekpipe();
         self.execute(opcode);
         if self.modified_r14 {
-            // Arm the ROM-read-pending flag (the full buffered fetch +
-            // countdown lands with the memory-op phase, 2b).
-            self.sfr_set(SFR_R, true);
+            self.update_rom_buffer();
         }
         if !self.modified_r15 {
             self.regs.r[15] = self.regs.r[15].wrapping_add(1);
@@ -655,13 +739,13 @@ impl SuperFxMapper {
             }
             0x10..=0x1F => self.op_to_move(n),
             0x20..=0x2F => self.op_with(n),
-            0x30..=0x3B => self.todo_no_operand(), // store (2b)
+            0x30..=0x3B => self.op_store(n),
             0x3C => self.op_loop(),
             0x3D => self.op_alt1(),
             0x3E => self.op_alt2(),
             0x3F => self.op_alt3(),
-            0x40..=0x4B => self.todo_no_operand(), // load (2b)
-            0x4C => self.todo_no_operand(),        // plot/rpix (phase 3)
+            0x40..=0x4B => self.op_load(n),
+            0x4C => self.todo_no_operand(), // plot/rpix (phase 3)
             0x4D => self.op_swap(),
             0x4E => self.op_color_cmode(),
             0x4F => self.op_not(),
@@ -669,38 +753,29 @@ impl SuperFxMapper {
             0x60..=0x6F => self.op_sub_sbc_cmp(n),
             0x70 => self.op_merge(),
             0x71..=0x7F => self.op_and_bic(n),
-            0x80..=0x8F => self.todo_no_operand(), // mult/umult (2b)
-            0x90 => self.todo_no_operand(),        // sbk (2b)
+            0x80..=0x8F => self.op_mult_umult(n),
+            0x90 => self.op_sbk(),
             0x91..=0x94 => self.op_link(n),
             0x95 => self.op_sex(),
             0x96 => self.op_asr_div2(),
             0x97 => self.op_ror(),
             0x98..=0x9D => self.op_jmp_ljmp(n),
             0x9E => self.op_lob(),
-            0x9F => self.todo_no_operand(), // fmult/lmult (2b)
-            0xA0..=0xAF => self.todo_one_operand(), // ibt/lms/sms (2b)
+            0x9F => self.op_fmult_lmult(),
+            0xA0..=0xAF => self.op_ibt_lms_sms(n),
             0xB0..=0xBF => self.op_from_moves(n),
             0xC0 => self.op_hib(),
             0xC1..=0xCF => self.op_or_xor(n),
             0xD0..=0xDE => self.op_inc(n),
-            0xDF => self.todo_no_operand(), // getc/ramb/romb (2b)
+            0xDF => self.op_getc_ramb_romb(),
             0xE0..=0xEE => self.op_dec(n),
-            0xEF => self.todo_no_operand(),         // getb (2b)
-            0xF0..=0xFF => self.todo_two_operand(), // iwt/lm/sm (2b)
+            0xEF => self.op_getb(),
+            0xF0..=0xFF => self.op_iwt_lm_sm(n),
         }
     }
 
-    // --- placeholders for phase 2b / 3 (operand-aligned, no effect) ------
+    // --- placeholder for the pixel-plot op (phase 3) ---------------------
     const fn todo_no_operand(&mut self) {
-        self.regs.reset_prefix();
-    }
-    fn todo_one_operand(&mut self) {
-        let _ = self.pipe();
-        self.regs.reset_prefix();
-    }
-    fn todo_two_operand(&mut self) {
-        let _ = self.pipe();
-        let _ = self.pipe();
         self.regs.reset_prefix();
     }
 
@@ -1002,6 +1077,164 @@ impl SuperFxMapper {
         } else {
             let c = self.color((self.sr() & 0xFF) as u8);
             self.regs.colr = c;
+        }
+        self.regs.reset_prefix();
+    }
+
+    // --- memory ops: LD/ST + RAM buffer (spec §2.6) ----------------------
+
+    fn op_store(&mut self, n: usize) {
+        self.regs.ramaddr = self.regs.r[n];
+        let s = self.sr();
+        let addr = self.regs.ramaddr;
+        self.write_ram_buffer(addr, s as u8); // STB / STW low byte
+        if !self.sfr_get(SFR_ALT1) {
+            self.write_ram_buffer(addr ^ 1, (s >> 8) as u8); // STW high byte
+        }
+        self.regs.reset_prefix();
+    }
+
+    fn op_load(&mut self, n: usize) {
+        self.regs.ramaddr = self.regs.r[n];
+        let addr = self.regs.ramaddr;
+        let mut v = u16::from(self.read_ram_buffer(addr)); // LDB / LDW low
+        if !self.sfr_get(SFR_ALT1) {
+            v |= u16::from(self.read_ram_buffer(addr ^ 1)) << 8; // LDW high
+        }
+        self.write_dr(v);
+        self.regs.reset_prefix();
+    }
+
+    fn op_sbk(&mut self) {
+        let s = self.sr();
+        let addr = self.regs.ramaddr;
+        self.write_ram_buffer(addr, s as u8);
+        self.write_ram_buffer(addr ^ 1, (s >> 8) as u8);
+        self.regs.reset_prefix();
+    }
+
+    // --- multiplies (spec §2.5) ------------------------------------------
+
+    fn op_mult_umult(&mut self, n: usize) {
+        let op = if self.sfr_get(SFR_ALT2) {
+            n as u16
+        } else {
+            self.regs.r[n]
+        };
+        let s = self.sr();
+        let v = if self.sfr_get(SFR_ALT1) {
+            // UMULT: unsigned 8×8 → 16.
+            (s as u8 as u16).wrapping_mul(op as u8 as u16)
+        } else {
+            // MULT: signed 8×8 → 16.
+            ((s as u8 as i8 as i16).wrapping_mul(op as u8 as i8 as i16)) as u16
+        };
+        self.write_dr(v);
+        self.set_sz(v);
+        self.regs.reset_prefix();
+        if self.regs.cfgr & 0x20 == 0 {
+            // !ms0: high-speed multiply not selected → extra cycle.
+            let c = if self.regs.clsr { 1 } else { 2 };
+            self.step(c);
+        }
+    }
+
+    fn op_fmult_lmult(&mut self) {
+        let s = self.sr() as i16;
+        let r6 = self.regs.r[6] as i16;
+        let result = (i32::from(s) * i32::from(r6)) as u32;
+        if self.sfr_get(SFR_ALT1) {
+            self.write_r(4, result as u16); // LMULT: low 16 → R4
+        }
+        let v = (result >> 16) as u16;
+        self.write_dr(v);
+        self.sfr_set(SFR_S, v & 0x8000 != 0);
+        self.sfr_set(SFR_CY, result & 0x8000 != 0);
+        self.sfr_set(SFR_Z, v == 0);
+        self.regs.reset_prefix();
+        let mul = if self.regs.cfgr & 0x20 != 0 { 3 } else { 7 };
+        let clk = if self.regs.clsr { 1 } else { 2 };
+        self.step(mul * clk);
+    }
+
+    // --- ROM buffer ops: GETB / GETC / RAMB / ROMB (spec §2.7) -----------
+
+    fn op_getc_ramb_romb(&mut self) {
+        if !self.sfr_get(SFR_ALT2) {
+            let b = self.read_rom_buffer();
+            self.regs.colr = self.color(b); // GETC
+        } else if self.sfr_get(SFR_ALT1) {
+            self.sync_rom_buffer();
+            self.regs.rombr = (self.sr() & 0x7F) as u8; // ROMB
+        } else {
+            self.sync_ram_buffer();
+            self.regs.rambr = self.sr() & 0x01 != 0; // RAMB
+        }
+        self.regs.reset_prefix();
+    }
+
+    fn op_getb(&mut self) {
+        let rom = self.read_rom_buffer();
+        let sel = (u8::from(self.sfr_get(SFR_ALT2)) << 1) | u8::from(self.sfr_get(SFR_ALT1));
+        let v = match sel {
+            0 => u16::from(rom),                               // GETB
+            1 => (u16::from(rom) << 8) | (self.sr() & 0x00FF), // GETBH
+            2 => (self.sr() & 0xFF00) | u16::from(rom),        // GETBL
+            _ => (rom as i8 as i16) as u16,                    // GETBS
+        };
+        self.write_dr(v);
+        self.regs.reset_prefix();
+    }
+
+    // --- immediate loads (spec §2.6) -------------------------------------
+
+    fn op_ibt_lms_sms(&mut self, n: usize) {
+        if self.sfr_get(SFR_ALT1) {
+            // LMS: load word from short address (yy << 1).
+            self.regs.ramaddr = u16::from(self.pipe()) << 1;
+            let addr = self.regs.ramaddr;
+            let lo = self.read_ram_buffer(addr);
+            let hi = self.read_ram_buffer(addr ^ 1);
+            self.write_r(n, (u16::from(hi) << 8) | u16::from(lo));
+        } else if self.sfr_get(SFR_ALT2) {
+            // SMS: store word to short address.
+            self.regs.ramaddr = u16::from(self.pipe()) << 1;
+            let addr = self.regs.ramaddr;
+            let v = self.regs.r[n];
+            self.write_ram_buffer(addr, v as u8);
+            self.write_ram_buffer(addr ^ 1, (v >> 8) as u8);
+        } else {
+            // IBT: sign-extended immediate byte → r[n].
+            let b = self.pipe();
+            self.write_r(n, (b as i8 as i16) as u16);
+        }
+        self.regs.reset_prefix();
+    }
+
+    fn op_iwt_lm_sm(&mut self, n: usize) {
+        if self.sfr_get(SFR_ALT1) {
+            // LM: load word from 16-bit immediate address.
+            let lo_a = self.pipe();
+            let hi_a = self.pipe();
+            self.regs.ramaddr = u16::from(lo_a) | (u16::from(hi_a) << 8);
+            let addr = self.regs.ramaddr;
+            let lo = self.read_ram_buffer(addr);
+            let hi = self.read_ram_buffer(addr ^ 1);
+            self.write_r(n, (u16::from(hi) << 8) | u16::from(lo));
+        } else if self.sfr_get(SFR_ALT2) {
+            // SM: store word to 16-bit immediate address.
+            let lo_a = self.pipe();
+            let hi_a = self.pipe();
+            self.regs.ramaddr = u16::from(lo_a) | (u16::from(hi_a) << 8);
+            let addr = self.regs.ramaddr;
+            let v = self.regs.r[n];
+            self.write_ram_buffer(addr, v as u8);
+            self.write_ram_buffer(addr ^ 1, (v >> 8) as u8);
+        } else {
+            // IWT: 16-bit immediate word → r[n].
+            let lo = self.pipe();
+            let hi = self.pipe();
+            self.write_r(n, u16::from(lo) | (u16::from(hi) << 8));
         }
         self.regs.reset_prefix();
     }
@@ -1449,5 +1682,87 @@ mod tests {
         m.step_coproc(1000); // ample budget
         assert!(!m.snapshot().running, "GSU halted on STOP");
         assert_eq!(m.snapshot().r[0], 1, "INC r0 executed exactly once");
+    }
+
+    // ----- phase 2b: memory ops, multiplies, immediate loads -------------
+
+    #[test]
+    fn engine_store_then_load_word() {
+        let mut m = fx();
+        m.regs.r[1] = 0x0010; // RAM address
+        m.regs.r[2] = 0xABCD; // data
+        m.regs.sreg = 2;
+        m.execute(0x31); // stw (r1) ← r2
+        m.regs.sreg = 0;
+        m.regs.dreg = 3;
+        m.execute(0x41); // ldw r3 ← (r1)
+        assert_eq!(m.regs.r[3], 0xABCD);
+        assert_eq!(m.ram[0x10], 0xCD, "little-endian low byte");
+        assert_eq!(m.ram[0x11], 0xAB, "little-endian high byte");
+    }
+
+    #[test]
+    fn engine_store_byte_only_writes_one() {
+        let mut m = fx();
+        m.ram[0x21] = 0x99;
+        m.regs.r[1] = 0x0020;
+        m.regs.r[2] = 0x12CD;
+        m.regs.sreg = 2;
+        m.sfr_set(SFR_ALT1, true);
+        m.execute(0x31); // stb (r1) ← r2 low byte
+        m.sync_ram_buffer(); // flush the pending delayed write
+        assert_eq!(m.ram[0x20], 0xCD);
+        assert_eq!(m.ram[0x21], 0x99, "STB must not touch the high byte");
+    }
+
+    #[test]
+    fn engine_mult_signed() {
+        let mut m = fx();
+        m.regs.r[1] = 0x00FF; // low byte 0xFF = -1
+        m.regs.r[2] = 0x0002;
+        m.regs.sreg = 1;
+        m.regs.dreg = 3;
+        m.execute(0x82); // mult r2 → (i8)-1 * (i8)2 = -2
+        assert_eq!(m.regs.r[3], 0xFFFE);
+    }
+
+    #[test]
+    fn engine_umult_unsigned() {
+        let mut m = fx();
+        m.regs.r[1] = 0x00FF; // 255
+        m.regs.r[2] = 0x0002;
+        m.regs.sreg = 1;
+        m.regs.dreg = 3;
+        m.sfr_set(SFR_ALT1, true);
+        m.execute(0x82); // umult r2 → 255 * 2 = 510
+        assert_eq!(m.regs.r[3], 0x01FE);
+    }
+
+    #[test]
+    fn engine_getb_reads_rom_buffer() {
+        let mut m = fx();
+        // ramp ROM: rom[i] == i & 0xFF. Point the ROM buffer at byte 5.
+        m.regs.rombr = 0x00;
+        m.regs.r[14] = 0x0005;
+        m.update_rom_buffer();
+        m.regs.dreg = 3;
+        m.execute(0xEF); // getb → dr = romdr
+        assert_eq!(m.regs.r[3], 5);
+    }
+
+    #[test]
+    fn engine_iwt_loads_immediate_word() {
+        let mut m = fx();
+        load_and_go(&mut m, &[0xF3, 0x34, 0x12]); // iwt r3, #$1234
+        m.run_one();
+        assert_eq!(m.regs.r[3], 0x1234);
+    }
+
+    #[test]
+    fn engine_ibt_sign_extends_immediate_byte() {
+        let mut m = fx();
+        load_and_go(&mut m, &[0xA3, 0x80]); // ibt r3, #$80
+        m.run_one();
+        assert_eq!(m.regs.r[3], 0xFF80);
     }
 }
