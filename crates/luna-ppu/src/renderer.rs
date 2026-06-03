@@ -277,17 +277,16 @@ pub fn decode_all_sprites(ppu: &Ppu) -> [SpriteEntry; 128] {
     for (idx, slot) in out.iter_mut().enumerate() {
         let base = (idx * 4) as u16;
         let x_low = ppu.oam.peek(base);
-        let y_live = ppu.oam.peek(base + 1);
-        // When the live Y is the off-screen hide signal $F0, fall
-        // back to the shadow — the last visible Y the game ever
-        // wrote into this slot. This lets games that toggle their
-        // sprites hide/show every frame still show their latest
-        // intended position even if we sampled mid-update.
-        let y_pos = if y_live == 0xF0 {
-            ppu.oam.shadow_y[idx]
-        } else {
-            y_live
-        };
+        // The live OAM Y is the truth: `$F0` (240) just parks the sprite
+        // off-screen (visible Y is 0..223), the standard hide. We render
+        // sprites per scanline against live OAM (Phase 1), so the game's
+        // VBlank hide-then-repopulate has already settled by the time the
+        // visible lines draw — no resurrection needed. (Removed the P1.19
+        // `$F0 → shadow_y` fallback `6c06f64`, a band-aid for the old
+        // free-running snapshot renderer; it wrongly resurrected genuinely
+        // hidden sprites, e.g. DKC's parked sprites leaking 1-px slivers at
+        // x=255.)
+        let y_pos = ppu.oam.peek(base + 1);
         let tile_low = ppu.oam.peek(base + 2);
         let attrs = ppu.oam.peek(base + 3);
         // High table: 32 bytes at OAM[$200..$220], 2 bits per sprite.
@@ -2363,30 +2362,27 @@ mod tests {
     }
 
     #[test]
-    fn oam_shadow_resurrects_sprite_after_y_is_set_to_f0() {
-        // Simulate the SMW pattern: game shows a sprite at y=20,
-        // then later hides it by writing y=$F0. With shadow logic
-        // active, the renderer should still draw the sprite at its
-        // last visible position (y=20).
+    fn oam_y_f0_hides_the_sprite() {
+        // Writing y=$F0 (240) parks a sprite off-screen — it must NOT
+        // render. (Regression guard for the removed P1.19 `$F0 → shadow_y`
+        // resurrection hack `6c06f64`, which wrongly redrew hidden sprites
+        // at their last position — e.g. DKC's parked sprites leaked 1-px
+        // slivers at x=255.)
         let mut p = Ppu::new();
         p.write(register::INIDISP, 0x0F);
-        // Hide ALL 128 sprites first so the default-zero sprites
-        // don't pollute scanline 0.
         for i in 0..128u16 {
             p.oam.poke(i * 4 + 1, 0xF0);
         }
-        // Now place sprite #0 at (16, 20) → shadow_y[0] = 20.
+        // Place sprite #0 at (16, 20), then hide it with y=$F0.
         p.oam.poke(0, 16);
         p.oam.poke(1, 20);
-        // ... game later hides the sprite by writing $F0 to its Y.
         p.oam.poke(1, 0xF0);
-        // VRAM tile #0 + sprite palette so the pixel decodes to red.
         p.vram.poke(0x0000, 0x80);
         p.cgram.poke(258, 0x1F);
         p.cgram.poke(259, 0x00);
-        // Render at y=20 — the shadow should resurrect the sprite.
+        // y=$F0 → off-screen → scanline 20 must be empty at x=16.
         let line = render_sprites_scanline(&p, 20, RenderOptions::default());
-        assert_eq!(line[16], Some([0xFF, 0, 0]));
+        assert_eq!(line[16], None, "y=$F0 sprite must stay hidden");
     }
 
     #[test]
