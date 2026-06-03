@@ -23,10 +23,15 @@ use crate::mapper::{Mapper, MapperKind};
 use crate::types::{Addr24, bank_of, offset_of};
 
 // --- SFR (Status Flag Register) bit masks (spec §1.2) ---------------------
-// Only the bits the scaffolding handshake touches are defined here; the ALU
-// flag bits (z/cy/s/ov/alt1/alt2/il/ih/b) arrive with the engine phase.
+const SFR_Z: u16 = 1 << 1; // zero
+const SFR_CY: u16 = 1 << 2; // carry
+const SFR_S: u16 = 1 << 3; // sign
+const SFR_OV: u16 = 1 << 4; // overflow
 const SFR_G: u16 = 1 << 5; // go (GSU running)
 const SFR_R: u16 = 1 << 6; // ROM-read pending (R14 fetch in flight)
+const SFR_ALT1: u16 = 1 << 8; // ALT1 prefix mode
+const SFR_ALT2: u16 = 1 << 9; // ALT2 prefix mode
+const SFR_B: u16 = 1 << 12; // "with" prefix flag
 const SFR_IRQ: u16 = 1 << 15; // interrupt asserted to SNES
 
 /// The GSU register file (spec §1). Owned by [`SuperFxMapper`]; MMIO at
@@ -67,6 +72,15 @@ struct Registers {
     cfgr: u8,
     /// Clock Select — false = 10.7 MHz, true = 21.4 MHz.
     clsr: bool,
+    // --- engine-only state (consumed by the instruction interpreter) -----
+    /// The 1-stage prefetched opcode (reset 0x01 = NOP) (spec §2.3).
+    pipeline: u8,
+    /// Source register selector for the next ALU/move op (spec §2.2).
+    sreg: usize,
+    /// Destination register selector for the next ALU/move op (spec §2.2).
+    dreg: usize,
+    // The delayed ROM/RAM buffers (romcl/romdr/ramcl/ramar/ramdr/ramaddr)
+    // and their LD/ST plumbing land with the memory-op phase (2b).
 }
 
 impl Registers {
@@ -90,7 +104,20 @@ impl Registers {
             vcr: 0x04,
             cfgr: 0,
             clsr: false,
+            pipeline: 0x01,
+            sreg: 0,
+            dreg: 0,
         }
+    }
+
+    /// Clear the per-instruction prefix state (spec §2.1): `b`, `alt1`,
+    /// `alt2` flags and the source/dest selectors. Every *non-prefix*
+    /// instruction ends with this, so the ALT/WITH prefixes are consumed by
+    /// exactly one following op.
+    const fn reset_prefix(&mut self) {
+        self.sfr &= !(SFR_B | SFR_ALT1 | SFR_ALT2);
+        self.sreg = 0;
+        self.dreg = 0;
     }
 
     /// SCMR wire byte ← fields (spec §1.4): `bit5=ht_hi, bit4=ron,
@@ -170,6 +197,16 @@ pub struct SuperFxMapper {
     /// 512-byte instruction cache + 32 line-valid flags (spec §5).
     cache: Box<[u8; 512]>,
     cache_valid: [bool; 32],
+    /// GSU-clock budget carried across `step_coproc` calls. The engine runs
+    /// instructions while this is positive, deducting each op's cycle cost.
+    clock_deficit: i64,
+    /// Per-instruction cycle accumulator (set by `step`), read by `run_one`.
+    cycles: u32,
+    /// Did the just-executed instruction write R14 / R15? Drives the R14
+    /// ROM-buffer re-arm and the R15 post-increment (spec §1.1, ares
+    /// superfx.cpp:35-44).
+    modified_r14: bool,
+    modified_r15: bool,
 }
 
 impl SuperFxMapper {
@@ -193,6 +230,10 @@ impl SuperFxMapper {
             regs: Registers::reset(),
             cache: Box::new([0; 512]),
             cache_valid: [false; 32],
+            clock_deficit: 0,
+            cycles: 0,
+            modified_r14: false,
+            modified_r15: false,
         }
     }
 
@@ -388,6 +429,584 @@ const fn round_up_pow2(n: usize) -> usize {
     1usize << bits
 }
 
+// --- POR (Plot Option Register) bits consumed by color() (spec §1.5) ------
+// The remaining bits (transparent / dither / obj) are consumed by the plot
+// pipeline in a later phase.
+const POR_HIGHNIBBLE: u8 = 1 << 2;
+const POR_FREEZEHIGH: u8 = 1 << 3;
+
+// ===========================================================================
+// GSU instruction engine — phase 2a
+//
+// The execution spine: fetch / pipeline / instruction-cache, the ALT1/2/3
+// prefix mechanism, the TO/FROM/WITH register-select prefixes, the ALU +
+// shift ops, branches, and control flow (NOP/STOP/CACHE/LOOP/LINK/JMP/LJMP)
+// plus COLOR/CMODE (register-only). The memory ops (LD/ST + RAM/ROM
+// buffers), the MULT family and the immediate loads land in phase 2b; the
+// pixel-plot pipeline (PLOT/RPIX) in phase 3. Those opcodes are dispatched
+// here to operand-aligned placeholders so the pipeline never desyncs.
+//
+// Semantics are a direct port of ares `component/processor/gsu` +
+// `sfc/coprocessor/superfx` (see docs/superfx_reference.md §2, §6).
+// ===========================================================================
+impl SuperFxMapper {
+    /// Source register value (`sr` = `r[sreg]`, spec §2.2).
+    const fn sr(&self) -> u16 {
+        self.regs.r[self.regs.sreg]
+    }
+
+    /// Write `val` to `r[n]`, flagging R14/R15 writes for the post-step
+    /// ROM-buffer re-arm / PC-increment logic (spec §1.1).
+    const fn write_r(&mut self, n: usize, val: u16) {
+        self.regs.r[n] = val;
+        if n == 14 {
+            self.modified_r14 = true;
+        }
+        if n == 15 {
+            self.modified_r15 = true;
+        }
+    }
+
+    /// Write the destination register `dr` = `r[dreg]`.
+    const fn write_dr(&mut self, val: u16) {
+        self.write_r(self.regs.dreg, val);
+    }
+
+    /// Set the S (sign, bit 15) and Z (zero) flags from a 16-bit result.
+    const fn set_sz(&mut self, val: u16) {
+        self.sfr_set(SFR_S, val & 0x8000 != 0);
+        self.sfr_set(SFR_Z, val == 0);
+    }
+
+    /// `true` when CFGR's IRQ-mask bit (bit 7) is set, suppressing the
+    /// STOP IRQ (spec §1.6, §7.3 — note the inverted sense).
+    const fn cfgr_irq_masked(&self) -> bool {
+        self.regs.cfgr & 0x80 != 0
+    }
+
+    /// Memory cycle cost (F5 / S6) for the current clock select (spec §6.1).
+    const fn mem_cycles(&self) -> u32 {
+        if self.regs.clsr { 5 } else { 6 }
+    }
+    /// Cache-hit fetch cost (F1 / S2).
+    const fn hit_cycles(&self) -> u32 {
+        if self.regs.clsr { 1 } else { 2 }
+    }
+
+    /// Resolve [`color`](Self::color) of a source byte using COLR + POR
+    /// (spec §4.2). Used by COLOR ($4E) and GETC ($DF, phase 2b).
+    const fn color(&self, source: u8) -> u8 {
+        if self.regs.por & POR_HIGHNIBBLE != 0 {
+            return (self.regs.colr & 0xF0) | (source >> 4);
+        }
+        if self.regs.por & POR_FREEZEHIGH != 0 {
+            return (self.regs.colr & 0xF0) | (source & 0x0F);
+        }
+        source
+    }
+
+    // --- GSU-side memory bus (spec §3.1) ---------------------------------
+
+    /// The GSU's own view of ROM / Game Pak RAM. Phase 2 skips the ron/ran
+    /// access-stall spin (a timing nicety) and accesses directly.
+    fn gsu_read(&self, addr: u32) -> u8 {
+        let a = (addr & 0xFF_FFFF) as usize;
+        if a & 0xC0_0000 == 0x00_0000 {
+            // $00-3F: pack the upper-half $8000-$FFFF of each LoROM bank.
+            return self.rom[(((a & 0x3F_0000) >> 1) | (a & 0x7FFF)) & self.rom_mask];
+        }
+        if a & 0xE0_0000 == 0x40_0000 {
+            // $40-5F: linear ROM.
+            return self.rom[a & self.rom_mask];
+        }
+        if a & 0xFE_0000 == 0x70_0000 {
+            // $70-71: Game Pak RAM.
+            return self.ram[a & self.ram_mask];
+        }
+        0 // open bus
+    }
+
+    // --- timing (spec §6.1) ----------------------------------------------
+
+    /// Advance the GSU clock by `clocks`, accumulating into the per-
+    /// instruction cost. The delayed ROM/RAM buffer servicing lands with
+    /// the memory-op phase (2b).
+    const fn step(&mut self, clocks: u32) {
+        self.cycles = self.cycles.saturating_add(clocks);
+    }
+
+    // --- fetch / pipeline / instruction cache (spec §2.3, §5) ------------
+
+    /// Fetch the opcode/operand byte at `address` through the 512-byte
+    /// instruction cache (ares memory.cpp:43-71).
+    fn read_opcode(&mut self, address: u16) -> u8 {
+        let offset = address.wrapping_sub(self.regs.cbr);
+        if offset < 512 {
+            let line = (offset >> 4) as usize;
+            if self.cache_valid[line] {
+                let hc = self.hit_cycles();
+                self.step(hc);
+            } else {
+                let dp = (offset & 0xFFF0) as usize;
+                let sp = (u32::from(self.regs.pbr) << 16)
+                    + u32::from(self.regs.cbr.wrapping_add(offset & 0xFFF0) & 0xFFF0);
+                for n in 0..16u32 {
+                    let mc = self.mem_cycles();
+                    self.step(mc);
+                    let b = self.gsu_read(sp + n);
+                    self.cache[dp + n as usize] = b;
+                }
+                self.cache_valid[line] = true;
+            }
+            return self.cache[offset as usize];
+        }
+        // Outside the cache window: fetch straight from ROM/RAM.
+        let mc = self.mem_cycles();
+        self.step(mc);
+        self.gsu_read((u32::from(self.regs.pbr) << 16) | u32::from(address))
+    }
+
+    /// Return the prefetched opcode and prefetch the next byte at the
+    /// *current* R15 (no increment) (ares memory.cpp:73-78).
+    fn peekpipe(&mut self) -> u8 {
+        let result = self.regs.pipeline;
+        self.regs.pipeline = self.read_opcode(self.regs.r[15]);
+        result
+    }
+
+    /// Return the prefetched byte and prefetch from `++R15` (ares
+    /// memory.cpp:80-85). Used for operand bytes.
+    fn pipe(&mut self) -> u8 {
+        let result = self.regs.pipeline;
+        self.regs.r[15] = self.regs.r[15].wrapping_add(1);
+        self.regs.pipeline = self.read_opcode(self.regs.r[15]);
+        result
+    }
+
+    // --- top-level execution loop ----------------------------------------
+
+    /// Execute exactly one GSU instruction (one pass of ares `main()` with
+    /// `sfr.g` set). The per-instruction cycle cost is left in `self.cycles`.
+    fn run_one(&mut self) {
+        self.cycles = 0;
+        self.modified_r14 = false;
+        self.modified_r15 = false;
+        let opcode = self.peekpipe();
+        self.execute(opcode);
+        if self.modified_r14 {
+            // Arm the ROM-read-pending flag (the full buffered fetch +
+            // countdown lands with the memory-op phase, 2b).
+            self.sfr_set(SFR_R, true);
+        }
+        if !self.modified_r15 {
+            self.regs.r[15] = self.regs.r[15].wrapping_add(1);
+        }
+    }
+
+    /// Dispatch one opcode under the active ALT mode (ares instruction.cpp).
+    fn execute(&mut self, opcode: u8) {
+        let n = (opcode & 0x0F) as usize;
+        match opcode {
+            0x00 => self.op_stop(),
+            0x01 => self.op_nop(),
+            0x02 => self.op_cache(),
+            0x03 => self.op_lsr(),
+            0x04 => self.op_rol(),
+            0x05 => self.op_branch(true), // bra
+            0x06 => {
+                let t = self.sfr_get(SFR_S) ^ self.sfr_get(SFR_OV);
+                self.op_branch(!t); // (s^ov)==0
+            }
+            0x07 => {
+                let t = self.sfr_get(SFR_S) ^ self.sfr_get(SFR_OV);
+                self.op_branch(t); // (s^ov)==1
+            }
+            0x08 => {
+                let z = self.sfr_get(SFR_Z);
+                self.op_branch(!z); // bne
+            }
+            0x09 => {
+                let z = self.sfr_get(SFR_Z);
+                self.op_branch(z); // beq
+            }
+            0x0A => {
+                let s = self.sfr_get(SFR_S);
+                self.op_branch(!s); // bpl
+            }
+            0x0B => {
+                let s = self.sfr_get(SFR_S);
+                self.op_branch(s); // bmi
+            }
+            0x0C => {
+                let c = self.sfr_get(SFR_CY);
+                self.op_branch(!c); // bcc
+            }
+            0x0D => {
+                let c = self.sfr_get(SFR_CY);
+                self.op_branch(c); // bcs
+            }
+            0x0E => {
+                let o = self.sfr_get(SFR_OV);
+                self.op_branch(!o); // bvc
+            }
+            0x0F => {
+                let o = self.sfr_get(SFR_OV);
+                self.op_branch(o); // bvs
+            }
+            0x10..=0x1F => self.op_to_move(n),
+            0x20..=0x2F => self.op_with(n),
+            0x30..=0x3B => self.todo_no_operand(), // store (2b)
+            0x3C => self.op_loop(),
+            0x3D => self.op_alt1(),
+            0x3E => self.op_alt2(),
+            0x3F => self.op_alt3(),
+            0x40..=0x4B => self.todo_no_operand(), // load (2b)
+            0x4C => self.todo_no_operand(),        // plot/rpix (phase 3)
+            0x4D => self.op_swap(),
+            0x4E => self.op_color_cmode(),
+            0x4F => self.op_not(),
+            0x50..=0x5F => self.op_add_adc(n),
+            0x60..=0x6F => self.op_sub_sbc_cmp(n),
+            0x70 => self.op_merge(),
+            0x71..=0x7F => self.op_and_bic(n),
+            0x80..=0x8F => self.todo_no_operand(), // mult/umult (2b)
+            0x90 => self.todo_no_operand(),        // sbk (2b)
+            0x91..=0x94 => self.op_link(n),
+            0x95 => self.op_sex(),
+            0x96 => self.op_asr_div2(),
+            0x97 => self.op_ror(),
+            0x98..=0x9D => self.op_jmp_ljmp(n),
+            0x9E => self.op_lob(),
+            0x9F => self.todo_no_operand(), // fmult/lmult (2b)
+            0xA0..=0xAF => self.todo_one_operand(), // ibt/lms/sms (2b)
+            0xB0..=0xBF => self.op_from_moves(n),
+            0xC0 => self.op_hib(),
+            0xC1..=0xCF => self.op_or_xor(n),
+            0xD0..=0xDE => self.op_inc(n),
+            0xDF => self.todo_no_operand(), // getc/ramb/romb (2b)
+            0xE0..=0xEE => self.op_dec(n),
+            0xEF => self.todo_no_operand(),         // getb (2b)
+            0xF0..=0xFF => self.todo_two_operand(), // iwt/lm/sm (2b)
+        }
+    }
+
+    // --- placeholders for phase 2b / 3 (operand-aligned, no effect) ------
+    const fn todo_no_operand(&mut self) {
+        self.regs.reset_prefix();
+    }
+    fn todo_one_operand(&mut self) {
+        let _ = self.pipe();
+        self.regs.reset_prefix();
+    }
+    fn todo_two_operand(&mut self) {
+        let _ = self.pipe();
+        let _ = self.pipe();
+        self.regs.reset_prefix();
+    }
+
+    // --- control flow ----------------------------------------------------
+
+    const fn op_stop(&mut self) {
+        if !self.cfgr_irq_masked() {
+            // Raise the SNES IRQ (surfaced via coproc_main_irq_pending).
+            self.sfr_set(SFR_IRQ, true);
+        }
+        self.sfr_set(SFR_G, false);
+        self.regs.pipeline = 0x01; // nop
+        self.regs.reset_prefix();
+    }
+
+    const fn op_nop(&mut self) {
+        self.regs.reset_prefix();
+    }
+
+    const fn op_cache(&mut self) {
+        if self.regs.cbr != (self.regs.r[15] & 0xFFF0) {
+            self.regs.cbr = self.regs.r[15] & 0xFFF0;
+            self.flush_cache();
+        }
+        self.regs.reset_prefix();
+    }
+
+    const fn op_loop(&mut self) {
+        let v = self.regs.r[12].wrapping_sub(1);
+        self.write_r(12, v);
+        self.sfr_set(SFR_S, v & 0x8000 != 0);
+        self.sfr_set(SFR_Z, v == 0);
+        if !self.sfr_get(SFR_Z) {
+            let target = self.regs.r[13];
+            self.write_r(15, target);
+        }
+        self.regs.reset_prefix();
+    }
+
+    const fn op_link(&mut self, n: usize) {
+        let v = self.regs.r[15].wrapping_add(n as u16);
+        self.write_r(11, v);
+        self.regs.reset_prefix();
+    }
+
+    const fn op_jmp_ljmp(&mut self, n: usize) {
+        if self.sfr_get(SFR_ALT1) {
+            self.regs.pbr = (self.regs.r[n] & 0x7F) as u8;
+            let target = self.sr();
+            self.write_r(15, target);
+            self.regs.cbr = self.regs.r[15] & 0xFFF0;
+            self.flush_cache();
+        } else {
+            let target = self.regs.r[n];
+            self.write_r(15, target);
+        }
+        self.regs.reset_prefix();
+    }
+
+    fn op_branch(&mut self, take: bool) {
+        let disp = self.pipe() as i8;
+        if take {
+            let target = (i32::from(self.regs.r[15]) + i32::from(disp)) as u16;
+            self.write_r(15, target);
+        }
+    }
+
+    // --- ALT / register-select prefixes ----------------------------------
+
+    const fn op_alt1(&mut self) {
+        self.sfr_set(SFR_B, false);
+        self.sfr_set(SFR_ALT1, true);
+    }
+    const fn op_alt2(&mut self) {
+        self.sfr_set(SFR_B, false);
+        self.sfr_set(SFR_ALT2, true);
+    }
+    const fn op_alt3(&mut self) {
+        self.sfr_set(SFR_B, false);
+        self.sfr_set(SFR_ALT1, true);
+        self.sfr_set(SFR_ALT2, true);
+    }
+
+    const fn op_to_move(&mut self, n: usize) {
+        if self.sfr_get(SFR_B) {
+            let v = self.sr();
+            self.write_r(n, v);
+            self.regs.reset_prefix();
+        } else {
+            self.regs.dreg = n;
+        }
+    }
+
+    const fn op_with(&mut self, n: usize) {
+        self.regs.sreg = n;
+        self.regs.dreg = n;
+        self.sfr_set(SFR_B, true);
+    }
+
+    const fn op_from_moves(&mut self, n: usize) {
+        if self.sfr_get(SFR_B) {
+            let v = self.regs.r[n];
+            self.write_dr(v);
+            self.sfr_set(SFR_OV, v & 0x80 != 0);
+            self.sfr_set(SFR_S, v & 0x8000 != 0);
+            self.sfr_set(SFR_Z, v == 0);
+            self.regs.reset_prefix();
+        } else {
+            self.regs.sreg = n;
+        }
+    }
+
+    // --- ALU + shifts ----------------------------------------------------
+
+    fn op_add_adc(&mut self, n: usize) {
+        let op = if self.sfr_get(SFR_ALT2) {
+            n as u32
+        } else {
+            u32::from(self.regs.r[n])
+        };
+        let carry_in = if self.sfr_get(SFR_ALT1) {
+            u32::from(self.sfr_get(SFR_CY))
+        } else {
+            0
+        };
+        let src = u32::from(self.sr());
+        let r = src + op + carry_in;
+        self.sfr_set(SFR_OV, (!(src ^ op) & (op ^ r) & 0x8000) != 0);
+        self.sfr_set(SFR_S, r & 0x8000 != 0);
+        self.sfr_set(SFR_CY, r >= 0x10000);
+        self.sfr_set(SFR_Z, (r & 0xFFFF) == 0);
+        self.write_dr((r & 0xFFFF) as u16);
+        self.regs.reset_prefix();
+    }
+
+    fn op_sub_sbc_cmp(&mut self, n: usize) {
+        let alt1 = self.sfr_get(SFR_ALT1);
+        let alt2 = self.sfr_get(SFR_ALT2);
+        let op = if !alt2 || alt1 {
+            i32::from(self.regs.r[n])
+        } else {
+            n as i32
+        };
+        let borrow = if !alt2 && alt1 {
+            i32::from(!self.sfr_get(SFR_CY))
+        } else {
+            0
+        };
+        let src = i32::from(self.sr());
+        let r = src - op - borrow;
+        self.sfr_set(SFR_OV, ((src ^ op) & (src ^ r) & 0x8000) != 0);
+        self.sfr_set(SFR_S, r & 0x8000 != 0);
+        self.sfr_set(SFR_CY, r >= 0);
+        self.sfr_set(SFR_Z, (r & 0xFFFF) == 0);
+        // CMP (alt3 = alt2 && alt1) does not write the result.
+        if !alt2 || !alt1 {
+            self.write_dr((r & 0xFFFF) as u16);
+        }
+        self.regs.reset_prefix();
+    }
+
+    const fn op_and_bic(&mut self, n: usize) {
+        let op = if self.sfr_get(SFR_ALT2) {
+            n as u16
+        } else {
+            self.regs.r[n]
+        };
+        let operand = if self.sfr_get(SFR_ALT1) { !op } else { op };
+        let v = self.sr() & operand;
+        self.write_dr(v);
+        self.set_sz(v);
+        self.regs.reset_prefix();
+    }
+
+    const fn op_or_xor(&mut self, n: usize) {
+        let op = if self.sfr_get(SFR_ALT2) {
+            n as u16
+        } else {
+            self.regs.r[n]
+        };
+        let v = if self.sfr_get(SFR_ALT1) {
+            self.sr() ^ op
+        } else {
+            self.sr() | op
+        };
+        self.write_dr(v);
+        self.set_sz(v);
+        self.regs.reset_prefix();
+    }
+
+    const fn op_merge(&mut self) {
+        let v = (self.regs.r[7] & 0xFF00) | (self.regs.r[8] >> 8);
+        self.write_dr(v);
+        self.sfr_set(SFR_OV, v & 0xC0C0 != 0);
+        self.sfr_set(SFR_S, v & 0x8080 != 0);
+        self.sfr_set(SFR_CY, v & 0xE0E0 != 0);
+        self.sfr_set(SFR_Z, v & 0xF0F0 != 0);
+        self.regs.reset_prefix();
+    }
+
+    const fn op_lsr(&mut self) {
+        let src = self.sr();
+        self.sfr_set(SFR_CY, src & 1 != 0);
+        let v = src >> 1;
+        self.write_dr(v);
+        self.set_sz(v);
+        self.regs.reset_prefix();
+    }
+
+    fn op_rol(&mut self) {
+        let src = self.sr();
+        let carry = src & 0x8000 != 0;
+        let v = (src << 1) | u16::from(self.sfr_get(SFR_CY));
+        self.write_dr(v);
+        self.sfr_set(SFR_S, v & 0x8000 != 0);
+        self.sfr_set(SFR_CY, carry);
+        self.sfr_set(SFR_Z, v == 0);
+        self.regs.reset_prefix();
+    }
+
+    fn op_ror(&mut self) {
+        let src = self.sr();
+        let carry = src & 1 != 0;
+        let v = (u16::from(self.sfr_get(SFR_CY)) << 15) | (src >> 1);
+        self.write_dr(v);
+        self.sfr_set(SFR_S, v & 0x8000 != 0);
+        self.sfr_set(SFR_CY, carry);
+        self.sfr_set(SFR_Z, v == 0);
+        self.regs.reset_prefix();
+    }
+
+    fn op_asr_div2(&mut self) {
+        let src = self.sr();
+        self.sfr_set(SFR_CY, src & 1 != 0);
+        let mut v = ((src as i16) >> 1) as u16;
+        if self.sfr_get(SFR_ALT1) {
+            // DIV2 rounding correction (+1 only when src == 0xFFFF).
+            v = v.wrapping_add(((u32::from(src) + 1) >> 16) as u16);
+        }
+        self.write_dr(v);
+        self.set_sz(v);
+        self.regs.reset_prefix();
+    }
+
+    const fn op_swap(&mut self) {
+        let v = self.sr().rotate_left(8);
+        self.write_dr(v);
+        self.set_sz(v);
+        self.regs.reset_prefix();
+    }
+
+    const fn op_not(&mut self) {
+        let v = !self.sr();
+        self.write_dr(v);
+        self.set_sz(v);
+        self.regs.reset_prefix();
+    }
+
+    const fn op_sex(&mut self) {
+        let v = ((self.sr() as u8) as i8 as i16) as u16;
+        self.write_dr(v);
+        self.set_sz(v);
+        self.regs.reset_prefix();
+    }
+
+    const fn op_lob(&mut self) {
+        let v = self.sr() & 0x00FF;
+        self.write_dr(v);
+        self.sfr_set(SFR_S, v & 0x80 != 0); // sign from bit 7
+        self.sfr_set(SFR_Z, v == 0);
+        self.regs.reset_prefix();
+    }
+
+    const fn op_hib(&mut self) {
+        let v = self.sr() >> 8;
+        self.write_dr(v);
+        self.sfr_set(SFR_S, v & 0x80 != 0); // sign from bit 7
+        self.sfr_set(SFR_Z, v == 0);
+        self.regs.reset_prefix();
+    }
+
+    const fn op_inc(&mut self, n: usize) {
+        let v = self.regs.r[n].wrapping_add(1);
+        self.write_r(n, v);
+        self.set_sz(v);
+        self.regs.reset_prefix();
+    }
+
+    const fn op_dec(&mut self, n: usize) {
+        let v = self.regs.r[n].wrapping_sub(1);
+        self.write_r(n, v);
+        self.set_sz(v);
+        self.regs.reset_prefix();
+    }
+
+    const fn op_color_cmode(&mut self) {
+        if self.sfr_get(SFR_ALT1) {
+            self.regs.por = (self.sr() & 0xFF) as u8;
+        } else {
+            let c = self.color((self.sr() & 0xFF) as u8);
+            self.regs.colr = c;
+        }
+        self.regs.reset_prefix();
+    }
+}
+
 impl Mapper for SuperFxMapper {
     fn kind(&self) -> MapperKind {
         MapperKind::SuperFx
@@ -448,11 +1067,23 @@ impl Mapper for SuperFxMapper {
 
     /// Advance the GSU by `main_mclk` master cycles of main-CPU progress.
     ///
-    /// The instruction engine lands in the next phase; for now this is a
-    /// no-op. The GO flag, MMIO surface and IRQ handshake are all live, so
-    /// a game can arm the GSU and the SNES side behaves correctly — the
-    /// GSU simply executes no opcodes yet.
-    fn step_coproc(&mut self, _main_mclk: u32) {}
+    /// Phase-2 timing model: accumulate a GSU-clock budget and run
+    /// instructions while it stays positive, deducting each op's cycle cost
+    /// (roughly 1 master clock ≈ 1 GSU clock at the fast rate; the exact
+    /// clsr ratio is the timing phase's job). The loop also exits the moment
+    /// a STOP clears the GO flag.
+    fn step_coproc(&mut self, main_mclk: u32) {
+        if !self.sfr_get(SFR_G) {
+            return;
+        }
+        self.clock_deficit += i64::from(main_mclk);
+        while self.sfr_get(SFR_G) && self.clock_deficit > 0 {
+            self.run_one();
+            // Every instruction fetches at least one byte (≥ 1 cycle), so
+            // this always makes progress and the budget bounds the loop.
+            self.clock_deficit -= i64::from(self.cycles.max(1));
+        }
+    }
 
     /// The GSU asserts the main-CPU IRQ line while `sfr.irq` is latched
     /// (spec §7.3). Set by the STOP opcode (next phase); acknowledged by a
@@ -633,5 +1264,190 @@ mod tests {
             m.snapshot().sfr & SFR_R != 0,
             "R14 write arms ROM-read pending"
         );
+    }
+
+    // ----- phase 2a: instruction engine ----------------------------------
+
+    /// Load a GSU program into the instruction cache at CBR=0 and prime the
+    /// pipeline so the first `run_one()` executes `program[0]`. PBR=0, GO set.
+    fn load_and_go(m: &mut SuperFxMapper, program: &[u8]) {
+        for (i, &b) in program.iter().enumerate() {
+            m.cache[i] = b;
+        }
+        for line in 0..=(program.len() / 16) {
+            m.cache_valid[line] = true;
+        }
+        m.regs.cbr = 0;
+        m.regs.pbr = 0;
+        m.regs.r[15] = 1;
+        m.regs.pipeline = program[0];
+        m.sfr_set(SFR_G, true);
+    }
+
+    #[test]
+    fn engine_add_registers() {
+        let mut m = fx();
+        m.regs.r[1] = 10;
+        m.regs.r[2] = 20;
+        m.regs.sreg = 1;
+        m.regs.dreg = 3;
+        m.execute(0x52); // add r2 → r3 = r1 + r2
+        assert_eq!(m.regs.r[3], 30);
+        assert!(!m.sfr_get(SFR_Z));
+        assert!(!m.sfr_get(SFR_CY));
+    }
+
+    #[test]
+    fn engine_sub_sets_carry_and_zero() {
+        let mut m = fx();
+        m.regs.r[1] = 5;
+        m.regs.sreg = 1;
+        m.regs.dreg = 1;
+        m.execute(0x61); // sub r1 → r1 - r1 = 0
+        assert_eq!(m.regs.r[1], 0);
+        assert!(m.sfr_get(SFR_Z));
+        assert!(m.sfr_get(SFR_CY), "no borrow → carry set");
+    }
+
+    #[test]
+    fn engine_cmp_does_not_write_dr() {
+        let mut m = fx();
+        m.regs.r[1] = 5;
+        m.regs.r[2] = 5;
+        m.regs.sreg = 1;
+        m.regs.dreg = 1;
+        // CMP = alt3 (alt1 + alt2).
+        m.sfr_set(SFR_ALT1, true);
+        m.sfr_set(SFR_ALT2, true);
+        m.execute(0x62); // cmp r2
+        assert_eq!(m.regs.r[1], 5, "CMP must not write dr");
+        assert!(m.sfr_get(SFR_Z), "5 - 5 == 0");
+    }
+
+    #[test]
+    fn engine_and_then_bic() {
+        let mut m = fx();
+        m.regs.r[1] = 0xFF0F;
+        m.regs.r[2] = 0x0F0F;
+        m.regs.sreg = 1;
+        m.regs.dreg = 3;
+        m.execute(0x72); // and r2
+        assert_eq!(m.regs.r[3], 0x0F0F);
+        m.regs.sreg = 1;
+        m.regs.dreg = 4;
+        m.sfr_set(SFR_ALT1, true);
+        m.execute(0x72); // bic r2 → r1 & ~r2
+        assert_eq!(m.regs.r[4], 0xFF0F & !0x0F0F);
+    }
+
+    #[test]
+    fn engine_inc_dec_wrap_and_flags() {
+        let mut m = fx();
+        m.regs.r[5] = 0xFFFF;
+        m.execute(0xD5); // inc r5 → 0
+        assert_eq!(m.regs.r[5], 0);
+        assert!(m.sfr_get(SFR_Z));
+        m.execute(0xE5); // dec r5 → 0xFFFF
+        assert_eq!(m.regs.r[5], 0xFFFF);
+        assert!(m.sfr_get(SFR_S));
+    }
+
+    #[test]
+    fn engine_lsr_shifts_out_carry() {
+        let mut m = fx();
+        m.regs.r[1] = 0x0003;
+        m.regs.sreg = 1;
+        m.regs.dreg = 1;
+        m.execute(0x03); // lsr
+        assert_eq!(m.regs.r[1], 1);
+        assert!(m.sfr_get(SFR_CY), "bit 0 was 1");
+    }
+
+    #[test]
+    fn engine_swap_bytes() {
+        let mut m = fx();
+        m.regs.r[1] = 0x1234;
+        m.regs.sreg = 1;
+        m.regs.dreg = 1;
+        m.execute(0x4D); // swap
+        assert_eq!(m.regs.r[1], 0x3412);
+    }
+
+    #[test]
+    fn engine_sex_sign_extends_low_byte() {
+        let mut m = fx();
+        m.regs.r[1] = 0x0080;
+        m.regs.sreg = 1;
+        m.regs.dreg = 1;
+        m.execute(0x95); // sex
+        assert_eq!(m.regs.r[1], 0xFF80);
+        assert!(m.sfr_get(SFR_S));
+    }
+
+    #[test]
+    fn engine_merge_packs_r7_r8() {
+        let mut m = fx();
+        m.regs.r[7] = 0xAB00;
+        m.regs.r[8] = 0xCD00;
+        m.regs.dreg = 3;
+        m.execute(0x70); // merge → (r7 & 0xff00) | (r8 >> 8)
+        assert_eq!(m.regs.r[3], 0xABCD);
+    }
+
+    #[test]
+    fn engine_alt_prefix_consumed_by_one_op() {
+        let mut m = fx();
+        m.regs.r[0] = 0;
+        // ALT2 ; ADD #3 ; ADD r0
+        load_and_go(&mut m, &[0x3E, 0x53, 0x50]);
+        m.run_one(); // ALT2
+        m.run_one(); // ADD #3 → r0 = 0 + 3 (immediate)
+        assert_eq!(m.regs.r[0], 3, "immediate add");
+        m.run_one(); // ADD r0 → r0 = 3 + 3 (register mode proves alt2 cleared)
+        assert_eq!(m.regs.r[0], 6, "second add is register-mode");
+    }
+
+    #[test]
+    fn engine_loop_branches_until_zero() {
+        let mut m = fx();
+        m.regs.r[12] = 2; // loop count
+        m.regs.r[13] = 0x40; // branch target
+        m.execute(0x3C); // loop: r12-- = 1 (non-zero) → r15 = r13
+        assert_eq!(m.regs.r[12], 1);
+        assert!(m.modified_r15, "branch taken");
+        assert_eq!(m.regs.r[15], 0x40);
+        m.modified_r15 = false;
+        m.execute(0x3C); // r12-- = 0 → no branch
+        assert_eq!(m.regs.r[12], 0);
+        assert!(!m.modified_r15, "no branch at zero");
+        assert!(m.sfr_get(SFR_Z));
+    }
+
+    #[test]
+    fn engine_stop_clears_go_and_irqs() {
+        let mut m = fx();
+        m.sfr_set(SFR_G, true);
+        m.execute(0x00); // stop, cfgr.irq = 0 → raises IRQ
+        assert!(!m.sfr_get(SFR_G), "STOP clears GO");
+        assert!(m.coproc_main_irq_pending(), "unmasked STOP raises IRQ");
+
+        let mut masked = fx();
+        masked.regs.cfgr = 0x80; // IRQ mask
+        masked.sfr_set(SFR_G, true);
+        masked.execute(0x00);
+        assert!(!masked.sfr_get(SFR_G));
+        assert!(
+            !masked.coproc_main_irq_pending(),
+            "masked STOP does not raise IRQ"
+        );
+    }
+
+    #[test]
+    fn engine_step_coproc_runs_until_stop() {
+        let mut m = fx();
+        load_and_go(&mut m, &[0xD0, 0x00]); // inc r0 ; stop
+        m.step_coproc(1000); // ample budget
+        assert!(!m.snapshot().running, "GSU halted on STOP");
+        assert_eq!(m.snapshot().r[0], 1, "INC r0 executed exactly once");
     }
 }
