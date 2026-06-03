@@ -165,25 +165,26 @@ payoff **does not exist**. Re-investigation with the SA-1 tracers
   press** the CLI never sends. `luna state --input "1600:0x1000,1610:0,…"`
   reaches New Game → the name-entry screen. The SA-1↔S-CPU mailbox
   round-trips correctly every frame. No scheduler change needed.
-- **Kirby Super Star — a real S-CPU *crash*, unrelated to timing.** The
-  S-CPU boots, completes its SPC700 audio upload, then `JMP $000E` — but
-  WRAM `$00:000E` is `$00` (the boot never populates the stub it expects).
-  It executes `BRK` → the game's crash-trap vector `$00:FFE6 = $5FFF` →
-  runs away into uninitialised BW-RAM → a push loop overflows SP into ROM
-  → the next IRQ `RTI`s from a garbage "stack" → executes ROM as garbage
-  forever, INIDISP stuck forced-blank (black screen). The SA-1 idling at
-  `$C0:8CB8` waiting on I-RAM `$300E` is a **downstream effect** of the
-  crashed S-CPU, not the cause. Root = luna's boot **diverges from real
-  hardware and skips the WRAM-stub setup**; finer SA-1/IRQ sync will not
-  help. Pinning the divergence needs a reference (Mesen2/bsnes) boot trace
-  to diff against luna's PC stream — tooling + checklist in
-  `tools/kirby-boot-ref-trace.lua` and `tools/capture-kirby-ref-trace.md`.
+- **Kirby Super Star — FIXED (`7fa6549`), was a DMA bus-decode bug, not
+  timing.** The S-CPU boots, then DMAs a small stub into WRAM through the
+  `$2180` (WMDATA) port and `JMP $000E` into it. But `DmaBusView` (the
+  DMA-side bus view in `snes.rs`) only decoded `b_offset <= $3F` (PPU
+  regs) and **silently dropped `$2180-$2183`** — the CPU-side `SnesBus`
+  handled the WRAM port, DMA did not. So WRAM `$00:000E` stayed `$00`, the
+  `JMP $000E` ran a `BRK` → crash-trap vector `$00:FFE6 = $5FFF` → runaway
+  → INIDISP stuck forced-blank (black). The SA-1 idling at `$C0:8CB8` on
+  I-RAM `$300E` was a **downstream effect** of the crashed S-CPU. Fix:
+  added a `wm_addr` field to `DmaBusView` and wired `$80-$83` into its
+  `read_b`/`write_b`, mirroring the CPU-side port. Kirby now boots to its
+  title and is playable; `inidisp_write_count` 1 → 1911, NMI service ~93%.
+  (The earlier "boot diverges / skips the WRAM-stub setup" hypothesis was
+  wrong — luna *did* DMA the stub; the writes were dropped on the floor.)
 
 So: **do not validate Phase 4 against SMRPG/Kirby as "deadlock fixes."**
 Use the SMRPG name-entry smoke (with `--input`, per
-`.claude/rules/coproc-testing.md`) only as a *no-regression* check, and
-treat Kirby as a separate boot-divergence bug tracked outside this
-milestone. The full Kirby crash chain is recorded in the
+`.claude/rules/coproc-testing.md`) only as a *no-regression* check; SMRPG's
+remaining "hang" is the title screen waiting for Start, not a luna bug.
+The Kirby crash chain (now resolved) is recorded in the
 `project_smrpg_sa1_deadlock` memory.
 
 ### History (completed)
