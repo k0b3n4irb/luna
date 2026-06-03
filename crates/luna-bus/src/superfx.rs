@@ -189,6 +189,27 @@ pub struct SuperFxSnapshot {
     pub running: bool,
 }
 
+/// One 8-pixel plot run awaiting writeback to Game Pak RAM (spec §4.1).
+/// `offset` = `(y << 5) + (x >> 3)` (the 8-pixel tile-row slot), `bitpend`
+/// = per-x written-bit mask, `data` = the colour index per x in the run.
+#[derive(Debug, Clone, Copy)]
+struct PixelCache {
+    offset: u16,
+    bitpend: u8,
+    data: [u8; 8],
+}
+
+impl PixelCache {
+    /// Power state: offset = ~0, nothing pending (ares superfx.cpp:73-76).
+    const fn reset() -> Self {
+        Self {
+            offset: 0xFFFF,
+            bitpend: 0,
+            data: [0; 8],
+        }
+    }
+}
+
 /// Super FX (GSU) mapper + coprocessor state.
 pub struct SuperFxMapper {
     /// ROM image, zero-padded up to `rom_mask + 1` (a power of two) so
@@ -210,6 +231,8 @@ pub struct SuperFxMapper {
     /// 512-byte instruction cache + 32 line-valid flags (spec §5).
     cache: Box<[u8; 512]>,
     cache_valid: [bool; 32],
+    /// Primary (`[0]`) + secondary (`[1]`) pixel-plot caches (spec §4.1).
+    pixelcache: [PixelCache; 2],
     /// GSU-clock budget carried across `step_coproc` calls. The engine runs
     /// instructions while this is positive, deducting each op's cycle cost.
     clock_deficit: i64,
@@ -243,6 +266,7 @@ impl SuperFxMapper {
             regs: Registers::reset(),
             cache: Box::new([0; 512]),
             cache_valid: [false; 32],
+            pixelcache: [PixelCache::reset(); 2],
             clock_deficit: 0,
             cycles: 0,
             modified_r14: false,
@@ -441,11 +465,12 @@ const fn round_up_pow2(n: usize) -> usize {
     1usize << bits
 }
 
-// --- POR (Plot Option Register) bits consumed by color() (spec §1.5) ------
-// The remaining bits (transparent / dither / obj) are consumed by the plot
-// pipeline in a later phase.
+// --- POR (Plot Option Register) bits (spec §1.5) --------------------------
+const POR_TRANSPARENT: u8 = 1 << 0; // plot even color-0 (transparent) pixels
+const POR_DITHER: u8 = 1 << 1; // dither by (x^y)&1 (non-8bpp)
 const POR_HIGHNIBBLE: u8 = 1 << 2;
 const POR_FREEZEHIGH: u8 = 1 << 3;
+const POR_OBJ: u8 = 1 << 4; // OBJ mode — forces the ht==3 tile layout
 
 // ===========================================================================
 // GSU instruction engine — phase 2a
@@ -745,7 +770,7 @@ impl SuperFxMapper {
             0x3E => self.op_alt2(),
             0x3F => self.op_alt3(),
             0x40..=0x4B => self.op_load(n),
-            0x4C => self.todo_no_operand(), // plot/rpix (phase 3)
+            0x4C => self.op_plot_rpix(),
             0x4D => self.op_swap(),
             0x4E => self.op_color_cmode(),
             0x4F => self.op_not(),
@@ -772,11 +797,6 @@ impl SuperFxMapper {
             0xEF => self.op_getb(),
             0xF0..=0xFF => self.op_iwt_lm_sm(n),
         }
-    }
-
-    // --- placeholder for the pixel-plot op (phase 3) ---------------------
-    const fn todo_no_operand(&mut self) {
-        self.regs.reset_prefix();
     }
 
     // --- control flow ----------------------------------------------------
@@ -1235,6 +1255,155 @@ impl SuperFxMapper {
             let lo = self.pipe();
             let hi = self.pipe();
             self.write_r(n, u16::from(lo) | (u16::from(hi) << 8));
+        }
+        self.regs.reset_prefix();
+    }
+
+    // ===================== pixel-plot pipeline (phase 3, spec §4) =========
+
+    /// Colour depth in bitplanes for the current SCMR mode (spec §4.6):
+    /// md{0,1,2,3} → bpp{2,4,4,8}.
+    const fn bpp(&self) -> u32 {
+        2u32 << (self.regs.scmr_md - (self.regs.scmr_md >> 1))
+    }
+
+    /// Tile (character) number for pixel (x, y) under the active height
+    /// mode (`por.obj` forces ht==3) (spec §4.6, ares core.cpp:53-58).
+    const fn tile_index(&self, x: u8, y: u8) -> u32 {
+        let x = x as u32;
+        let y = y as u32;
+        let mode = if self.regs.por & POR_OBJ != 0 {
+            3
+        } else {
+            self.regs.scmr_ht
+        };
+        match mode {
+            0 => ((x & 0xF8) << 1) + ((y & 0xF8) >> 3),
+            1 => ((x & 0xF8) << 1) + ((x & 0xF8) >> 1) + ((y & 0xF8) >> 3),
+            2 => ((x & 0xF8) << 1) + (x & 0xF8) + ((y & 0xF8) >> 3),
+            _ => ((y & 0x80) << 2) + ((x & 0x80) << 1) + ((y & 0x78) << 1) + ((x & 0x78) >> 3),
+        }
+    }
+
+    /// Tile byte address in Game Pak RAM for pixel-row `y` of tile `cn`.
+    const fn tile_addr(&self, cn: u32, y: u8) -> u32 {
+        0x70_0000 + cn * (self.bpp() << 3) + ((self.regs.scbr as u32) << 10) + ((y & 7) as u32 * 2)
+    }
+
+    /// PLOT colour `regs.colr` (with dither) into pixel (x, y) of the
+    /// primary pixel cache, flushing the secondary as the run advances
+    /// (spec §4.3, ares core.cpp:11-46).
+    fn plot(&mut self, x: u8, y: u8) {
+        // Transparency: skip color-0 pixels unless POR.transparent.
+        if self.regs.por & POR_TRANSPARENT == 0 {
+            let transparent = if self.regs.scmr_md == 3 {
+                if self.regs.por & POR_FREEZEHIGH != 0 {
+                    self.regs.colr & 0x0F == 0
+                } else {
+                    self.regs.colr == 0
+                }
+            } else {
+                self.regs.colr & 0x0F == 0
+            };
+            if transparent {
+                return;
+            }
+        }
+
+        let mut color = self.regs.colr;
+        if self.regs.por & POR_DITHER != 0 && self.regs.scmr_md != 3 {
+            if (x ^ y) & 1 != 0 {
+                color >>= 4;
+            }
+            color &= 0x0F;
+        }
+
+        let offset = (u16::from(y) << 5) + (u16::from(x) >> 3);
+        if offset != self.pixelcache[0].offset {
+            self.flush_pixel_cache(1);
+            self.pixelcache[1] = self.pixelcache[0];
+            self.pixelcache[0].bitpend = 0;
+            self.pixelcache[0].offset = offset;
+        }
+
+        let xi = ((x & 7) ^ 7) as usize;
+        self.pixelcache[0].data[xi] = color;
+        self.pixelcache[0].bitpend |= 1 << xi;
+        if self.pixelcache[0].bitpend == 0xFF {
+            self.flush_pixel_cache(1);
+            self.pixelcache[1] = self.pixelcache[0];
+            self.pixelcache[0].bitpend = 0;
+        }
+    }
+
+    /// RPIX: flush both caches, then read back the colour index of pixel
+    /// (x, y) from the bitplanes in Game Pak RAM (spec §4.5).
+    fn rpix(&mut self, x: u8, y: u8) -> u16 {
+        self.flush_pixel_cache(1);
+        self.flush_pixel_cache(0);
+
+        let cn = self.tile_index(x, y);
+        let bpp = self.bpp();
+        let addr = self.tile_addr(cn, y);
+        let xi = (x & 7) ^ 7;
+        let mut data: u8 = 0;
+        for n in 0..bpp {
+            let byte = ((n >> 1) << 4) + (n & 1);
+            let mc = self.mem_cycles();
+            self.step(mc);
+            let b = self.gsu_read(addr + byte);
+            data |= ((b >> xi) & 1) << n;
+        }
+        u16::from(data)
+    }
+
+    /// Flush one pixel cache's pending run to its tile in Game Pak RAM,
+    /// converting the planar colour indices to bitplane bytes with a
+    /// read-modify-write on partial runs (spec §4.4, ares core.cpp:73-103).
+    fn flush_pixel_cache(&mut self, idx: usize) {
+        let cache = self.pixelcache[idx];
+        if cache.bitpend == 0 {
+            return;
+        }
+        let x = (cache.offset << 3) as u8;
+        let y = (cache.offset >> 5) as u8;
+        let cn = self.tile_index(x, y);
+        let bpp = self.bpp();
+        let addr = self.tile_addr(cn, y);
+
+        for n in 0..bpp {
+            let byte = ((n >> 1) << 4) + (n & 1);
+            let mut data: u8 = 0;
+            for (xi, &px) in cache.data.iter().enumerate() {
+                data |= ((px >> n) & 1) << xi;
+            }
+            if cache.bitpend != 0xFF {
+                // Partial run: read-modify-write the untouched pixels.
+                let mc = self.mem_cycles();
+                self.step(mc);
+                data &= cache.bitpend;
+                data |= self.gsu_read(addr + byte) & !cache.bitpend;
+            }
+            let mc = self.mem_cycles();
+            self.step(mc);
+            self.gsu_write(addr + byte, data);
+        }
+        self.pixelcache[idx].bitpend = 0;
+    }
+
+    /// `$4C` PLOT (alt0) / RPIX (alt1) (ares instructions.cpp:127-137).
+    fn op_plot_rpix(&mut self) {
+        let x = self.regs.r[1] as u8;
+        let y = self.regs.r[2] as u8;
+        if self.sfr_get(SFR_ALT1) {
+            let v = self.rpix(x, y);
+            self.write_dr(v);
+            self.sfr_set(SFR_S, v & 0x8000 != 0);
+            self.sfr_set(SFR_Z, v == 0);
+        } else {
+            self.plot(x, y);
+            let r1 = self.regs.r[1].wrapping_add(1);
+            self.write_r(1, r1);
         }
         self.regs.reset_prefix();
     }
@@ -1764,5 +1933,68 @@ mod tests {
         load_and_go(&mut m, &[0xA3, 0x80]); // ibt r3, #$80
         m.run_one();
         assert_eq!(m.regs.r[3], 0xFF80);
+    }
+
+    // ----- phase 3: pixel-plot pipeline ----------------------------------
+
+    #[test]
+    fn engine_plot_then_rpix_roundtrip() {
+        let mut m = fx();
+        m.regs.scmr_md = 3; // 8bpp
+        m.regs.scbr = 0;
+        m.regs.por = 0;
+        m.regs.colr = 0x42;
+        m.regs.r[1] = 3; // x
+        m.regs.r[2] = 5; // y
+        m.execute(0x4C); // PLOT (x, y)
+        // PLOT incremented r1; restore for the read-back.
+        m.regs.r[1] = 3;
+        m.regs.r[2] = 5;
+        m.regs.dreg = 4;
+        m.sfr_set(SFR_ALT1, true);
+        m.execute(0x4C); // RPIX → r4
+        assert_eq!(m.regs.r[4], 0x42, "RPIX reads back the plotted colour");
+    }
+
+    #[test]
+    fn engine_plot_skips_transparent_color() {
+        let mut m = fx();
+        m.regs.scmr_md = 1; // 4bpp
+        m.regs.por = 0;
+        m.regs.colr = 0x00; // low nibble 0 → transparent
+        m.regs.r[1] = 0;
+        m.regs.r[2] = 0;
+        m.execute(0x4C); // PLOT
+        assert_eq!(
+            m.pixelcache[0].bitpend, 0,
+            "a colour-0 pixel is not plotted"
+        );
+    }
+
+    #[test]
+    fn engine_plot_writes_bitplanes_to_ram() {
+        let mut m = fx();
+        m.regs.scmr_md = 1; // 4bpp → 4 bitplanes
+        m.regs.scbr = 0;
+        m.regs.por = 0;
+        m.regs.colr = 0x0F; // all four low planes set
+        // Plot a full 8-pixel run at y=0, then force the flush via RPIX.
+        for x in 0..8u16 {
+            m.regs.r[1] = x;
+            m.regs.r[2] = 0;
+            m.execute(0x4C);
+        }
+        m.regs.r[1] = 0;
+        m.regs.r[2] = 0;
+        m.regs.dreg = 5;
+        m.sfr_set(SFR_ALT1, true);
+        m.execute(0x4C); // RPIX flushes both caches
+        // tile 0, row 0: planes 0..3 at byte offsets {0,1,16,17}; a full
+        // run of colour 0x0F sets every bit of planes 0..3.
+        assert_eq!(m.ram[0], 0xFF, "plane 0 full");
+        assert_eq!(m.ram[1], 0xFF, "plane 1 full");
+        assert_eq!(m.ram[16], 0xFF, "plane 2 full");
+        assert_eq!(m.ram[17], 0xFF, "plane 3 full");
+        assert_eq!(m.regs.r[5], 0x0F, "RPIX reads colour 0x0F back");
     }
 }
