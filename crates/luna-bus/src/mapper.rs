@@ -101,6 +101,32 @@ pub trait Mapper {
     fn take_sa1_trace(&mut self) -> Vec<Sa1TraceEvent> {
         Vec::new()
     }
+
+    /// Enable a full Super FX (GSU) instruction trace: a per-opcode
+    /// snapshot of the GSU PC + register file (up to `max_events`), for
+    /// diffing luna's GSU stream against a reference (bsnes / siena) to
+    /// localise rendering divergences. No-op for non-Super-FX mappers.
+    fn enable_superfx_trace(&mut self, _max_events: usize) {}
+
+    /// Drain the Super FX instruction trace (empty if disabled / not GSU).
+    fn take_superfx_trace(&mut self) -> Vec<SuperFxTraceEvent> {
+        Vec::new()
+    }
+}
+
+/// One per-opcode snapshot of the GSU register file — the Super FX
+/// analogue of [`Sa1TraceEvent`]. Diffing this PC + register stream against
+/// a reference GSU trace (bsnes / siena) pinpoints the first divergence.
+#[derive(Debug, Clone, Copy)]
+pub struct SuperFxTraceEvent {
+    /// GSU PC (`pbr << 16 | r15`) at the fetch of this opcode.
+    pub pc_full: u32,
+    /// The opcode byte being executed.
+    pub opcode: u8,
+    /// Status flag register (raw 16-bit).
+    pub sfr: u16,
+    /// General-purpose registers R0–R15 (R15 = PC).
+    pub r: [u16; 16],
 }
 
 /// One pre-instruction snapshot of the SA-1's 65C816 register file —

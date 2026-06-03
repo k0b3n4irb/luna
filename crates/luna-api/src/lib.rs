@@ -19,7 +19,7 @@ use luna_cartridge::{CartError, Cartridge};
 use luna_core::Snes;
 pub use luna_core::{
     CpuTraceEvent, CpuTraceLog, MailboxEvent, MailboxEventKind, MemEventKind, MemTraceEvent,
-    MemTraceLog, Sa1LogEvent, Sa1SideEvent, Sa1TraceEvent,
+    MemTraceLog, Sa1LogEvent, Sa1SideEvent, Sa1TraceEvent, SuperFxTraceEvent,
 };
 /// Framebuffer dimensions (256×224), re-exported so front-ends size their
 /// texture/window through `luna-api` rather than depending on `luna-ppu`.
@@ -850,6 +850,20 @@ impl Emulator {
     pub fn take_sa1_trace(&mut self) -> Result<Vec<Sa1TraceEvent>, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         Ok(snes.take_sa1_trace())
+    }
+
+    /// Enable a per-opcode Super FX (GSU) instruction trace (PC + register
+    /// file per opcode), for diffing the GSU stream against a reference.
+    pub fn enable_superfx_trace(&mut self, max_events: usize) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.enable_superfx_trace(max_events);
+        Ok(())
+    }
+
+    /// Drain the Super FX instruction trace (empty if disabled / not GSU).
+    pub fn take_superfx_trace(&mut self) -> Result<Vec<SuperFxTraceEvent>, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        Ok(snes.take_superfx_trace())
     }
 
     /// Enable per-instruction CPU tracing. Every subsequent
