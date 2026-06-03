@@ -199,7 +199,18 @@ fn parse_at(rom: &[u8], off: usize) -> Header {
     let title = decode_title(&title_bytes);
 
     let map_byte = rom[off + 0x15];
-    let mapper_kind = mapper_from_byte(map_byte).unwrap_or(MapperKind::LoRom);
+    let chipset = rom[off + 0x16];
+    // Coprocessor override from the chipset byte ($FFD6): when the low
+    // nibble flags a coprocessor (>= 3) the high nibble selects which.
+    // Super FX games (Star Fox = $13, Yoshi's Island = $15) carry a LoROM
+    // map mode ($20), so the GSU is only visible via this byte — high
+    // nibble 1 = GSU. (Empirically verified against both ROMs' headers.)
+    let is_superfx = (chipset & 0x0F) >= 0x03 && (chipset & 0xF0) == 0x10;
+    let mapper_kind = if is_superfx {
+        MapperKind::SuperFx
+    } else {
+        mapper_from_byte(map_byte).unwrap_or(MapperKind::LoRom)
+    };
     let fast_rom = (map_byte & 0x10) != 0;
     // The size bytes are exponents (KB = 1 << byte). Garbage cartridges
     // (or our wrong-offset probing) can produce arbitrary byte values

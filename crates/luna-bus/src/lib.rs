@@ -24,6 +24,7 @@ pub mod lorom;
 pub mod mapper;
 pub mod sa1;
 pub mod speed;
+pub mod superfx;
 pub mod types;
 
 #[cfg(any(test, feature = "test-utils"))]
