@@ -1118,11 +1118,67 @@ impl SnesBus<'_> {
 impl SnesBus<'_> {
     /// Advance the scanline scheduler by `mcycles`, firing per-line events
     /// at each boundary. Called from [`Bus::io_cycle`] mid-instruction.
+    ///
+    /// Phase 4: the advance is split at scanline boundaries so the H/V-IRQ
+    /// can be polled over the H-range each chunk covers *within* one line
+    /// (dot-precise), instead of only at the boundary. Boundary crossing
+    /// is otherwise identical to before (chunks never overshoot a line, so
+    /// the per-line events in `sched_one_line` still fire exactly once).
     fn sched_advance(&mut self, mcycles: u32) {
-        self.mcycles_in_line += mcycles;
-        while self.mcycles_in_line >= MCYCLES_PER_SCANLINE {
-            self.mcycles_in_line -= MCYCLES_PER_SCANLINE;
-            self.sched_one_line();
+        let mut remaining = mcycles;
+        while remaining > 0 {
+            let room = MCYCLES_PER_SCANLINE - self.mcycles_in_line;
+            let chunk = remaining.min(room);
+            // Poll the IRQ over [lo, lo+chunk) on the CURRENT line before
+            // any boundary crossing advances `ppu_line` (the V-counter).
+            self.poll_hv_irq(self.mcycles_in_line, self.mcycles_in_line + chunk);
+            self.mcycles_in_line += chunk;
+            remaining -= chunk;
+            if self.mcycles_in_line >= MCYCLES_PER_SCANLINE {
+                self.mcycles_in_line -= MCYCLES_PER_SCANLINE;
+                self.sched_one_line();
+            }
+        }
+    }
+
+    /// Dot-precise H/V-counter IRQ poll over the half-open master-cycle
+    /// range `[mclk_lo, mclk_hi)` of the current scanline (`ppu_line` =
+    /// V-counter). Mirrors ares `cpu/irq.cpp:18-31` and Mesen2
+    /// `InternalRegisters::UpdateIrqLevel`: the trigger is a level
+    /// `(!hirq || h == htime) && (!virq || v == vtime)` whose **rising
+    /// edge** sets the flag. Within a line H is monotonic, so the H-IRQ
+    /// level is a one-dot pulse → exactly one edge per line at
+    /// `h == htime`; V-only is a whole-line block → one edge at the
+    /// matching line's start (`mclk_lo == 0`). The half-open interval
+    /// crosses each dot once, so this needs no persistent level state and
+    /// never double-fires. NMITIMEN bit 4 = H-IRQ enable, bit 5 = V-IRQ
+    /// enable; HTIME/VTIME are 9-bit (dots / lines).
+    ///
+    /// Deferred (gaps, not regressions): the ares "no trigger on the last
+    /// dot of the field" guard, the htime==0 / detect→assert delay, and
+    /// the $4211 TIMEUP hold window (mirror of the RDNMI hold).
+    fn poll_hv_irq(&mut self, mclk_lo: u32, mclk_hi: u32) {
+        let hirq = self.cpu_regs.nmitimen & 0x10 != 0;
+        let virq = self.cpu_regs.nmitimen & 0x20 != 0;
+        if !hirq && !virq {
+            return;
+        }
+        // V gate: with V-IRQ enabled the line must match, else the level
+        // can never rise on this scanline.
+        if virq && self.ppu_line != self.cpu_regs.vtime {
+            return;
+        }
+        let fire = if hirq {
+            // H-IRQ: fire when this chunk crosses the `htime` dot.
+            let trig = u32::from(self.cpu_regs.htime) * 4;
+            mclk_lo <= trig && trig < mclk_hi
+        } else {
+            // V-only: H is irrelevant; fire at the matching line's start.
+            mclk_lo == 0
+        };
+        if fire {
+            self.cpu_regs.irq_flag = true;
+            *self.irq = true;
         }
     }
 
@@ -1165,19 +1221,8 @@ impl SnesBus<'_> {
             self.cpu_regs.clear_joypad_busy();
         }
 
-        // H/V-counter IRQ (scanline-boundary granularity).
-        let irq_mode = (self.cpu_regs.nmitimen >> 4) & 0x03;
-        let fire_irq = match irq_mode {
-            0b00 => false,
-            0b01 => true,
-            0b10 => self.ppu_line == self.cpu_regs.vtime,
-            0b11 => self.ppu_line == self.cpu_regs.vtime && self.cpu_regs.htime == 0,
-            _ => false,
-        };
-        if fire_irq {
-            self.cpu_regs.irq_flag = true;
-            *self.irq = true;
-        }
+        // H/V-counter IRQ is now polled dot-precisely per bus access in
+        // `poll_hv_irq` (Phase 4), not latched at the scanline boundary.
 
         if self.ppu_line >= scanlines {
             // Frame wrap.
@@ -2077,6 +2122,107 @@ mod tests {
         assert_eq!(snes.ppu_line, NTSC_VBLANK_START_LINE);
         assert!(snes.cpu_regs.nmi_flag);
         assert_eq!(snes.nmis_serviced, 0);
+    }
+
+    // ---- Phase 4: dot-precise H/V-counter IRQ (poll_hv_irq) ----
+    // Reference: ares cpu/irq.cpp:18-31, Mesen2 InternalRegisters::UpdateIrqLevel.
+    // NMITIMEN bit 4 = H-IRQ enable, bit 5 = V-IRQ enable. A dot = 4 mclk.
+
+    fn irq_snes() -> Snes {
+        let mut snes = Snes::from_cartridge(demo_lorom());
+        snes.reset();
+        snes.ppu_line = 0;
+        snes.mcycles_in_line = 0;
+        snes.cpu_regs.irq_flag = false;
+        snes.irq_pending = false;
+        snes
+    }
+
+    #[test]
+    fn hv_irq_mode00_never_fires() {
+        let mut snes = irq_snes();
+        snes.cpu_regs.nmitimen = 0x00; // neither H nor V IRQ
+        snes.cpu_regs.htime = 100;
+        snes.cpu_regs.vtime = 50;
+        snes.ppu_line = 50;
+        snes.advance_scheduler(MCYCLES_PER_SCANLINE);
+        assert!(!snes.cpu_regs.irq_flag, "mode 00 must never raise IRQ");
+    }
+
+    #[test]
+    fn hv_irq_h_only_fires_at_htime_dot_every_line() {
+        // Mode 01: fire once per scanline at h == htime, regardless of line.
+        // (Old code fired every scanline boundary — wrong dot.)
+        let mut snes = irq_snes();
+        snes.cpu_regs.nmitimen = 0x10; // H-IRQ only
+        snes.cpu_regs.htime = 100; // dot 100 → mclk 400
+        snes.ppu_line = 10;
+        snes.advance_scheduler(399); // up to mclk 399, dot-100 not crossed
+        assert!(!snes.cpu_regs.irq_flag, "not yet at htime dot");
+        snes.advance_scheduler(2); // crosses mclk 400
+        assert!(snes.cpu_regs.irq_flag, "fires at htime dot 100");
+        // Next scanline fires again (H-IRQ is per-line).
+        snes.cpu_regs.irq_flag = false;
+        snes.ppu_line = 11;
+        snes.mcycles_in_line = 0;
+        snes.advance_scheduler(MCYCLES_PER_SCANLINE);
+        assert!(snes.cpu_regs.irq_flag, "fires on the next line too");
+    }
+
+    #[test]
+    fn hv_irq_v_only_fires_at_matching_line_start() {
+        // Mode 10: fire once, at the start of line == vtime; H irrelevant.
+        let mut snes = irq_snes();
+        snes.cpu_regs.nmitimen = 0x20; // V-IRQ only
+        snes.cpu_regs.vtime = 50;
+        // On the wrong line: no fire across the whole line.
+        snes.ppu_line = 49;
+        snes.advance_scheduler(MCYCLES_PER_SCANLINE);
+        assert!(!snes.cpu_regs.irq_flag, "no fire on line 49");
+        // Crossing into line 50 fires at its start.
+        assert_eq!(snes.ppu_line, 50);
+        snes.advance_scheduler(8); // first dots of line 50
+        assert!(snes.cpu_regs.irq_flag, "V-IRQ fires at line 50 start");
+    }
+
+    #[test]
+    fn hv_irq_hv_mode_fires_at_h_and_v_with_nonzero_htime() {
+        // Mode 11 with htime != 0 — the exact case the old code got wrong
+        // (it only fired when htime == 0). Must fire at (h=htime, v=vtime).
+        let mut snes = irq_snes();
+        snes.cpu_regs.nmitimen = 0x30; // H+V IRQ
+        snes.cpu_regs.htime = 80; // dot 80 → mclk 320
+        snes.cpu_regs.vtime = 60;
+        // Wrong line: V gate blocks it entirely.
+        snes.ppu_line = 59;
+        snes.advance_scheduler(MCYCLES_PER_SCANLINE);
+        assert!(!snes.cpu_regs.irq_flag, "no fire on line 59");
+        // Right line, before the htime dot: still no fire.
+        assert_eq!(snes.ppu_line, 60);
+        snes.advance_scheduler(319);
+        assert!(!snes.cpu_regs.irq_flag, "not yet at htime on line 60");
+        // Cross the htime dot on line 60 → fire.
+        snes.advance_scheduler(2);
+        assert!(
+            snes.cpu_regs.irq_flag,
+            "H+V IRQ fires at htime!=0 on the vtime line"
+        );
+    }
+
+    #[test]
+    fn hv_irq_hv_mode_does_not_fire_off_the_htime_dot() {
+        // Mode 11: advancing a full vtime line but with htime beyond the
+        // line's dot range must NOT fire (htime never crossed).
+        let mut snes = irq_snes();
+        snes.cpu_regs.nmitimen = 0x30;
+        snes.cpu_regs.htime = 350; // dot 350 → mclk 1400 > line length (1364)
+        snes.cpu_regs.vtime = 70;
+        snes.ppu_line = 70;
+        snes.advance_scheduler(MCYCLES_PER_SCANLINE);
+        assert!(
+            !snes.cpu_regs.irq_flag,
+            "htime past the line never matches → no IRQ"
+        );
     }
 
     #[test]
