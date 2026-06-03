@@ -11,6 +11,7 @@ use luna_apu::Apu;
 use luna_bus::hirom::HiRomMapper;
 use luna_bus::lorom::LoRomMapper;
 use luna_bus::sa1::Sa1Mapper;
+use luna_bus::superfx::SuperFxMapper;
 use luna_bus::{
     Addr24, Bus, MCycles, Mapper, MapperKind, address_speed, bank_of, make_addr, offset_of,
 };
@@ -321,10 +322,25 @@ impl Snes {
             // own 65C816 (released from reset by main-CPU writes to
             // `$2200 CCNT`).
             MapperKind::Sa1 => Box::new(Sa1Chip::new(Sa1Mapper::new(cart.rom, sram_bytes))),
+            // Super FX — the GSU is self-contained (no embedded 65C816), so
+            // the whole chip lives in `SuperFxMapper`, driven by the
+            // `step_coproc` hook. The Game Pak work RAM (the GSU's plot
+            // target) isn't reliably encoded in the LoROM header — Star Fox
+            // and Yoshi's Island both report 0 — so default to 128 KB when
+            // the header is silent. Board-accurate RAM sizing is a later-
+            // phase refinement.
+            MapperKind::SuperFx => {
+                let gsu_ram = if sram_bytes == 0 {
+                    0x2_0000
+                } else {
+                    sram_bytes
+                };
+                Box::new(SuperFxMapper::new(cart.rom, gsu_ram))
+            }
             other => {
                 panic!(
                     "Cartridge requires coprocessor support not yet implemented: {other:?}. \
-                     Super FX / S-DD1 / SPC7110 will land in their own dedicated phases."
+                     S-DD1 / SPC7110 will land in their own dedicated phases."
                 );
             }
         };
