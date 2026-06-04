@@ -18,8 +18,8 @@ use std::path::Path;
 use luna_cartridge::{CartError, Cartridge};
 use luna_core::Snes;
 pub use luna_core::{
-    CpuTraceEvent, CpuTraceLog, MailboxEvent, MailboxEventKind, MemEventKind, MemTraceEvent,
-    MemTraceLog, Sa1LogEvent, Sa1SideEvent, Sa1TraceEvent, SuperFxTraceEvent,
+    CpuTraceEvent, CpuTraceLog, MailboxEvent, MailboxEventKind, MapperKind, MemEventKind,
+    MemTraceEvent, MemTraceLog, Sa1LogEvent, Sa1SideEvent, Sa1TraceEvent, SuperFxTraceEvent,
 };
 /// Framebuffer dimensions (256×224), re-exported so front-ends size their
 /// texture/window through `luna-api` rather than depending on `luna-ppu`.
@@ -370,6 +370,18 @@ impl Emulator {
     /// already parsed into bytes (skips filesystem I/O).
     pub fn load_rom_bytes(&mut self, bytes: Vec<u8>) -> Result<RomInfo, ApiError> {
         let cart = Cartridge::from_bytes(bytes)?;
+        self.load_cartridge(cart)
+    }
+
+    /// Load a ROM blob with a **forced** mapper, bypassing header
+    /// auto-detection. Needed for headerless homebrew test ROMs (e.g. the
+    /// `PeterLemon` Super FX / GSU plot tests) that carry no chipset byte.
+    pub fn load_rom_bytes_forced(
+        &mut self,
+        bytes: Vec<u8>,
+        mapper: luna_core::MapperKind,
+    ) -> Result<RomInfo, ApiError> {
+        let cart = Cartridge::from_bytes_forced(bytes, mapper)?;
         self.load_cartridge(cart)
     }
 

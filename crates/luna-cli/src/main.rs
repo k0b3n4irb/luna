@@ -84,6 +84,12 @@ enum Command {
         /// CPU instructions to execute before snapshotting.
         #[arg(short = 'n', long, default_value_t = 1000)]
         steps: u64,
+        /// Force a cartridge mapper, bypassing header auto-detection.
+        /// Needed for headerless homebrew test ROMs (e.g. the `PeterLemon`
+        /// Super FX / GSU plot tests). One of: lorom, hirom, exhirom, sa1,
+        /// superfx.
+        #[arg(long = "force-mapper")]
+        force_mapper: Option<String>,
         /// Where to write the JSON state. Use `-` for stdout.
         #[arg(long, default_value = "-")]
         out: PathBuf,
@@ -219,6 +225,7 @@ fn main() -> ExitCode {
         Command::State {
             rom,
             steps,
+            force_mapper,
             out,
             screenshot,
             audio_out,
@@ -241,6 +248,7 @@ fn main() -> ExitCode {
         } => run_state(
             &rom,
             steps,
+            force_mapper.as_deref(),
             &out,
             screenshot.as_deref(),
             audio_out.as_deref(),
@@ -563,6 +571,7 @@ fn print_hex_dump(bank: u8, base: u16, bytes: &[u8]) {
 fn run_state(
     rom: &std::path::Path,
     steps: u64,
+    force_mapper: Option<&str>,
     out: &std::path::Path,
     screenshot: Option<&std::path::Path>,
     audio_out: Option<&std::path::Path>,
@@ -584,7 +593,29 @@ fn run_state(
     mem_trace_bank: Option<&str>,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
-    if let Err(e) = em.load_rom(rom) {
+    let load_result = if let Some(kind_str) = force_mapper {
+        let kind = match kind_str.to_ascii_lowercase().as_str() {
+            "lorom" => luna_api::MapperKind::LoRom,
+            "hirom" => luna_api::MapperKind::HiRom,
+            "exhirom" => luna_api::MapperKind::ExHiRom,
+            "sa1" => luna_api::MapperKind::Sa1,
+            "superfx" => luna_api::MapperKind::SuperFx,
+            other => {
+                eprintln!("error: unknown --force-mapper '{other}'");
+                return ExitCode::from(1);
+            }
+        };
+        match std::fs::read(rom) {
+            Ok(bytes) => em.load_rom_bytes_forced(bytes, kind),
+            Err(e) => {
+                eprintln!("error: reading {}: {e}", rom.display());
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        em.load_rom(rom)
+    };
+    if let Err(e) = load_result {
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }

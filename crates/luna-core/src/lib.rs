@@ -15,7 +15,7 @@ pub mod snes;
 
 pub use apu_stub::{ApuStub, Phase as ApuPhase};
 pub use cpu_regs::CpuRegs;
-pub use luna_bus::{Sa1SideEvent, Sa1TraceEvent, SuperFxTraceEvent};
+pub use luna_bus::{MapperKind, Sa1SideEvent, Sa1TraceEvent, SuperFxTraceEvent};
 pub use snes::{
     CpuTraceEvent, CpuTraceLog, MailboxEvent, MailboxEventKind, MemEventKind, MemTraceEvent,
     MemTraceLog, Sa1LogEvent, Snes,
