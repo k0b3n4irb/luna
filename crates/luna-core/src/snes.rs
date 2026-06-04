@@ -324,18 +324,16 @@ impl Snes {
             MapperKind::Sa1 => Box::new(Sa1Chip::new(Sa1Mapper::new(cart.rom, sram_bytes))),
             // Super FX — the GSU is self-contained (no embedded 65C816), so
             // the whole chip lives in `SuperFxMapper`, driven by the
-            // `step_coproc` hook. The Game Pak work RAM (the GSU's plot
-            // target) isn't reliably encoded in the LoROM header — Star Fox
-            // and Yoshi's Island both report 0 — so default to 32 KB, the
-            // GSU-1 board size that is correct for Star Fox. The size sets
-            // `ram_mask`, and the plot tile address `(scbr<<10)+…` relies on
-            // wrapping at the real RAM boundary, so an oversized RAM garbles
-            // graphics. Larger GSU-2 boards (Doom 128 KB, …) need a board
-            // table — a later refinement.
-            MapperKind::SuperFx => {
-                let gsu_ram = if sram_bytes == 0 { 0x8000 } else { sram_bytes };
-                Box::new(SuperFxMapper::new(cart.rom, gsu_ram))
-            }
+            // `step_coproc` hook. The Game Pak **work** RAM (the GSU's plot
+            // target) is NOT the header SRAM byte — that byte is battery
+            // *save* RAM (Star Fox reports 0; the PeterLemon GSU test ROMs
+            // report 1 KB, far too small for a 256×192 framebuffer). The
+            // real work RAM is a board property (Star Fox 32 KB, Doom
+            // 128 KB); without a board table, allocate the 128 KB upper
+            // bound so every framebuffer mode fits. (Over-allocation is
+            // harmless for the games tested — their plot addresses never
+            // reach the larger wrap boundary.)
+            MapperKind::SuperFx => Box::new(SuperFxMapper::new(cart.rom, 0x2_0000)),
             other => {
                 panic!(
                     "Cartridge requires coprocessor support not yet implemented: {other:?}. \
