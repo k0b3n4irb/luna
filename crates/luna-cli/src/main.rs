@@ -90,6 +90,10 @@ enum Command {
         /// superfx.
         #[arg(long = "force-mapper")]
         force_mapper: Option<String>,
+        /// Dump all 64 KB of PPU VRAM (raw bytes) to this file after the
+        /// run. For diagnosing the framebuffer DMA → VRAM → display path.
+        #[arg(long = "dump-vram")]
+        dump_vram: Option<PathBuf>,
         /// Where to write the JSON state. Use `-` for stdout.
         #[arg(long, default_value = "-")]
         out: PathBuf,
@@ -226,6 +230,7 @@ fn main() -> ExitCode {
             rom,
             steps,
             force_mapper,
+            dump_vram,
             out,
             screenshot,
             audio_out,
@@ -249,6 +254,7 @@ fn main() -> ExitCode {
             &rom,
             steps,
             force_mapper.as_deref(),
+            dump_vram.as_deref(),
             &out,
             screenshot.as_deref(),
             audio_out.as_deref(),
@@ -572,6 +578,7 @@ fn run_state(
     rom: &std::path::Path,
     steps: u64,
     force_mapper: Option<&str>,
+    dump_vram_path: Option<&std::path::Path>,
     out: &std::path::Path,
     screenshot: Option<&std::path::Path>,
     audio_out: Option<&std::path::Path>,
@@ -853,6 +860,15 @@ fn run_state(
                 Err(e) => eprintln!("error: writing Super FX trace: {e}"),
             },
             Err(e) => eprintln!("error: take_superfx_trace: {e}"),
+        }
+    }
+    if let Some(path) = dump_vram_path {
+        match em.vram_bytes() {
+            Ok(bytes) => match std::fs::write(path, &bytes) {
+                Ok(()) => eprintln!("VRAM ({} bytes) written to {}", bytes.len(), path.display()),
+                Err(e) => eprintln!("error: writing VRAM dump: {e}"),
+            },
+            Err(e) => eprintln!("error: vram_bytes: {e}"),
         }
     }
     if let Some(path) = cpu_trace_path {
