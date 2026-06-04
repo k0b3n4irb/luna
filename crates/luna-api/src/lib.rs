@@ -878,6 +878,15 @@ impl Emulator {
         Ok(snes.take_superfx_trace())
     }
 
+    /// Dump all 64 KB of PPU VRAM (byte-addressed). For diagnosing the
+    /// framebuffer DMA → VRAM → display path of coprocessor renderers.
+    pub fn vram_bytes(&self) -> Result<Vec<u8>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        Ok((0u32..0x1_0000)
+            .map(|a| snes.ppu.vram.peek(a as u16))
+            .collect())
+    }
+
     /// Enable per-instruction CPU tracing. Every subsequent
     /// [`Emulator::step`] / [`Emulator::step_until_frame`] tick
     /// captures a register-file snapshot until `max_events` events
