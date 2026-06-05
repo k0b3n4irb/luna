@@ -127,7 +127,9 @@ fn render_bg1_scanline_with(ppu: &Ppu, y: u16, opts: RenderOptions) -> Scanline 
     out
 }
 
-/// Decode a single pixel's palette index out of a planar tile in VRAM.
+/// Decode one full 8-pixel tile row of palette indices out of a planar
+/// tile in VRAM (left-to-right, pre-flip). The BG sampler caches the
+/// result so 8 consecutive same-tile pixels decode the row once (PERF-1).
 ///
 /// SNES tile layout is *planar bitplane-pair* in VRAM:
 ///
@@ -138,6 +140,38 @@ fn render_bg1_scanline_with(ppu: &Ppu, y: u16, opts: RenderOptions) -> Scanline 
 ///   plane bytes live at `tile_base + row*2`, `+1`, `+16+row*2`, `+17`.
 /// - 8bpp: same as 4bpp but with planes (4, 5, 6, 7) in the next 32
 ///   bytes.
+fn decode_tile_row(ppu: &Ppu, tile_base: usize, row_in_tile: usize, bpp: u8) -> [u8; 8] {
+    let row_off = tile_base + row_in_tile * 2;
+    let p0 = ppu.vram.peek(row_off as u16);
+    let p1 = ppu.vram.peek(row_off.wrapping_add(1) as u16);
+    if bpp == 2 {
+        return decode_2bpp_row(p0, p1);
+    }
+    let p2 = ppu.vram.peek(row_off.wrapping_add(16) as u16);
+    let p3 = ppu.vram.peek(row_off.wrapping_add(17) as u16);
+    let mut row = decode_4bpp_row(p0, p1, p2, p3);
+    if bpp == 4 {
+        return row;
+    }
+    // 8bpp: fold in the upper four planes too.
+    let p4 = ppu.vram.peek(row_off.wrapping_add(32) as u16);
+    let p5 = ppu.vram.peek(row_off.wrapping_add(33) as u16);
+    let p6 = ppu.vram.peek(row_off.wrapping_add(48) as u16);
+    let p7 = ppu.vram.peek(row_off.wrapping_add(49) as u16);
+    for (col, px) in row.iter_mut().enumerate() {
+        let bit = 7 - col;
+        let mask = 1u8 << bit;
+        *px |= ((p4 & mask) >> bit) << 4
+            | ((p5 & mask) >> bit) << 5
+            | ((p6 & mask) >> bit) << 6
+            | ((p7 & mask) >> bit) << 7;
+    }
+    row
+}
+
+/// Decode a single tile pixel: `decode_tile_row(...)[col_in_tile]`.
+/// Used by the sprite path, which samples scattered pixels with no row
+/// locality to exploit.
 fn decode_tile_pixel(
     ppu: &Ppu,
     tile_base: usize,
@@ -145,30 +179,7 @@ fn decode_tile_pixel(
     col_in_tile: usize,
     bpp: u8,
 ) -> u8 {
-    let row_off = tile_base + row_in_tile * 2;
-    let p0 = ppu.vram.peek(row_off as u16);
-    let p1 = ppu.vram.peek(row_off.wrapping_add(1) as u16);
-    if bpp == 2 {
-        return decode_2bpp_row(p0, p1)[col_in_tile];
-    }
-    let p2 = ppu.vram.peek(row_off.wrapping_add(16) as u16);
-    let p3 = ppu.vram.peek(row_off.wrapping_add(17) as u16);
-    if bpp == 4 {
-        return decode_4bpp_row(p0, p1, p2, p3)[col_in_tile];
-    }
-    // 8bpp: fold in the upper four planes too.
-    let p4 = ppu.vram.peek(row_off.wrapping_add(32) as u16);
-    let p5 = ppu.vram.peek(row_off.wrapping_add(33) as u16);
-    let p6 = ppu.vram.peek(row_off.wrapping_add(48) as u16);
-    let p7 = ppu.vram.peek(row_off.wrapping_add(49) as u16);
-    let bit = 7 - col_in_tile;
-    let mask = 1u8 << bit;
-    let lo = decode_4bpp_row(p0, p1, p2, p3)[col_in_tile];
-    let hi_p4 = (p4 & mask) >> bit;
-    let hi_p5 = (p5 & mask) >> bit;
-    let hi_p6 = (p6 & mask) >> bit;
-    let hi_p7 = (p7 & mask) >> bit;
-    lo | (hi_p4 << 4) | (hi_p5 << 5) | (hi_p6 << 6) | (hi_p7 << 7)
+    decode_tile_row(ppu, tile_base, row_in_tile, bpp)[col_in_tile]
 }
 
 /// Sprite-table decoded entry — what we need to draw one sprite.
@@ -1228,7 +1239,23 @@ const fn bg_geom(ppu: &Ppu, bg_idx: usize) -> Option<BgGeom> {
 /// BG3→64, BG4→96; ares `background.cpp:111`). Only Mode 0 has that
 /// offset and Mode 0 is 2bpp on every BG, so it only touches the 2bpp
 /// arm — max index 96 + 7*4 + 3 = 127.
-fn sample_bg_pixel(ppu: &Ppu, g: &BgGeom, src_x: u16, src_y: u16) -> IndexedPixel {
+/// Per-scanline memo for [`sample_bg_pixel`]: the most-recent tilemap
+/// entry (keyed by its VRAM byte offset) and decoded tile row (keyed by
+/// tile base + row + bpp). Consecutive same-tile pixels reuse both
+/// instead of re-fetching the entry and re-decoding the row 8× (PERF-1).
+#[derive(Default)]
+struct BgSampleCache {
+    entry: Option<(usize, u16)>,
+    row: Option<(usize, usize, u8, [u8; 8])>,
+}
+
+fn sample_bg_pixel(
+    ppu: &Ppu,
+    g: &BgGeom,
+    src_x: u16,
+    src_y: u16,
+    cache: &mut BgSampleCache,
+) -> IndexedPixel {
     // Horizontal tile span: hi-res (Mode 5/6) forces 16-px-wide columns
     // (ares `background.cpp:79` `htiles = 4`); vertical follows the size bit.
     let (h_shift, h_pixels) = if g.force_wide {
@@ -1250,9 +1277,16 @@ fn sample_bg_pixel(ppu: &Ppu, g: &BgGeom, src_x: u16, src_y: u16) -> IndexedPixe
     let tile_col = tile_col_full & 0x1F;
     let tile_row = tile_row_full & 0x1F;
     let entry_off = g.tilemap_base + sub_index * 0x0800 + ((tile_row * 32 + tile_col) as usize) * 2;
-    let entry_lo = ppu.vram.peek(entry_off as u16);
-    let entry_hi = ppu.vram.peek(entry_off.wrapping_add(1) as u16);
-    let entry = u16::from(entry_lo) | (u16::from(entry_hi) << 8);
+    let entry = match cache.entry {
+        Some((k, w)) if k == entry_off => w,
+        _ => {
+            let entry_lo = ppu.vram.peek(entry_off as u16);
+            let entry_hi = ppu.vram.peek(entry_off.wrapping_add(1) as u16);
+            let w = u16::from(entry_lo) | (u16::from(entry_hi) << 8);
+            cache.entry = Some((entry_off, w));
+            w
+        }
+    };
     let tile_num = entry & 0x03FF;
     let palette_off = ((entry >> 10) & 0x07) as u8;
     let prio_bit = ((entry >> 13) & 0x01) as u8;
@@ -1277,7 +1311,15 @@ fn sample_bg_pixel(ppu: &Ppu, g: &BgGeom, src_x: u16, src_y: u16) -> IndexedPixe
     let row_in_tile = row_in_block & 7;
     let col_in_tile = col_in_block & 7;
     let tile_base = g.char_base + (final_tile as usize) * g.bytes_per_tile;
-    let idx = decode_tile_pixel(ppu, tile_base, row_in_tile, col_in_tile, g.bpp);
+    let row = match cache.row {
+        Some((b, r, bp, data)) if b == tile_base && r == row_in_tile && bp == g.bpp => data,
+        _ => {
+            let data = decode_tile_row(ppu, tile_base, row_in_tile, g.bpp);
+            cache.row = Some((tile_base, row_in_tile, g.bpp, data));
+            data
+        }
+    };
+    let idx = row[col_in_tile];
     if idx == 0 {
         return None;
     }
@@ -1439,6 +1481,7 @@ pub fn render_bg_scanline_indexed_with(
     let is_opt = matches!(ppu.bgmode & 0x07, 2 | 4) && bg_idx < 2;
     let mut opt_col = u16::MAX;
     let mut eff = (bg.h_scroll, bg.v_scroll);
+    let mut cache = BgSampleCache::default();
     for x in 0..256u16 {
         let mosaic_x = (x / mosaic_size) * mosaic_size;
         if is_opt {
@@ -1453,7 +1496,7 @@ pub fn render_bg_scanline_indexed_with(
         }
         let src_x = mosaic_x.wrapping_add(eff.0);
         let src_y = mosaic_y.wrapping_add(eff.1);
-        out[x as usize] = sample_bg_pixel(ppu, &g, src_x, src_y);
+        out[x as usize] = sample_bg_pixel(ppu, &g, src_x, src_y, &mut cache);
     }
     out
 }
@@ -1497,6 +1540,7 @@ fn render_bg_scanline_indexed_hires(
     let mut opt_col = u16::MAX;
     let mut eff = (bg.h_scroll, bg.v_scroll);
     let mut h_from_opt = false;
+    let mut cache = BgSampleCache::default();
     for x in 0..256u16 {
         let mosaic_x = x / mosaic_size * mosaic_size;
         if is_opt {
@@ -1518,8 +1562,8 @@ fn render_bg_scanline_indexed_hires(
         };
         let src_y = mosaic_y.wrapping_add(eff.1);
         let cx = (mosaic_x << 1).wrapping_add(h2);
-        below[x as usize] = sample_bg_pixel(ppu, &g, cx, src_y);
-        above[x as usize] = sample_bg_pixel(ppu, &g, cx.wrapping_add(1), src_y);
+        below[x as usize] = sample_bg_pixel(ppu, &g, cx, src_y, &mut cache);
+        above[x as usize] = sample_bg_pixel(ppu, &g, cx.wrapping_add(1), src_y, &mut cache);
     }
     (above, below)
 }
