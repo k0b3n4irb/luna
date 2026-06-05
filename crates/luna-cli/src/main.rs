@@ -414,6 +414,34 @@ fn parse_peek_spec(spec: &str) -> Result<(u8, u16, u16), String> {
     Ok((bank, offset, count))
 }
 
+/// Master clocks per NTSC frame: 262 scanlines × 1364 mclk = 357 368.
+const NTSC_MCLK_PER_FRAME: u64 = 1364 * 262;
+
+/// Format a 24-bit program counter / bus address as `$BB:OOOO`
+/// (bank:offset) — the canonical PC column shared by the trace writers.
+fn fmt_pc(pc_full: u32) -> String {
+    format!("${:02X}:{:04X}", (pc_full >> 16) & 0xFF, pc_full & 0xFFFF)
+}
+
+/// Shared skeleton for the trace CSV writers: create `path`, write the
+/// `header` line, then format each event via `row` (handed the writer,
+/// the event index, and the event). Centralises the
+/// File/BufWriter/header boilerplate every writer repeated.
+fn write_csv<T>(
+    path: &std::path::Path,
+    header: &str,
+    rows: &[T],
+    mut row: impl FnMut(&mut dyn std::io::Write, usize, &T) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    writeln!(f, "{header}")?;
+    for (i, ev) in rows.iter().enumerate() {
+        row(&mut f, i, ev)?;
+    }
+    f.flush()
+}
+
 /// Write APU mailbox events as CSV. Columns:
 /// `mclk_total, frame_ntsc, pc_bank_offset, kind, port, value_hex`.
 /// `frame_ntsc` assumes NTSC (262 lines × 1364 mclk = 357 368 mclk/frame).
@@ -421,28 +449,27 @@ fn write_mailbox_log_csv(
     path: &std::path::Path,
     events: &[luna_api::MailboxEvent],
 ) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut f = std::fs::File::create(path)?;
-    writeln!(f, "mclk_total,frame_ntsc,pc,kind,port,value")?;
-    for ev in events {
-        let frame_ntsc = ev.mclk_total / (1364 * 262);
-        let kind = match ev.kind {
-            luna_api::MailboxEventKind::Read => "R",
-            luna_api::MailboxEventKind::Write => "W",
-        };
-        writeln!(
-            f,
-            "{},{},${:02X}:{:04X},{},{},${:02X}",
-            ev.mclk_total,
-            frame_ntsc,
-            (ev.pc_full >> 16) & 0xFF,
-            ev.pc_full & 0xFFFF,
-            kind,
-            ev.port,
-            ev.value
-        )?;
-    }
-    Ok(())
+    write_csv(
+        path,
+        "mclk_total,frame_ntsc,pc,kind,port,value",
+        events,
+        |f, _, ev| {
+            let kind = match ev.kind {
+                luna_api::MailboxEventKind::Read => "R",
+                luna_api::MailboxEventKind::Write => "W",
+            };
+            writeln!(
+                f,
+                "{},{},{},{},{},${:02X}",
+                ev.mclk_total,
+                ev.mclk_total / NTSC_MCLK_PER_FRAME,
+                fmt_pc(ev.pc_full),
+                kind,
+                ev.port,
+                ev.value
+            )
+        },
+    )
 }
 
 /// Write SA-1 MMIO events as CSV. Columns:
@@ -452,28 +479,27 @@ fn write_sa1_log_csv(
     path: &std::path::Path,
     events: &[luna_api::Sa1LogEvent],
 ) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut f = std::fs::File::create(path)?;
-    writeln!(f, "mclk_total,frame_ntsc,pc,kind,reg,value")?;
-    for ev in events {
-        let frame_ntsc = ev.mclk_total / (1364 * 262);
-        let kind = match ev.kind {
-            luna_api::MailboxEventKind::Read => "R",
-            luna_api::MailboxEventKind::Write => "W",
-        };
-        writeln!(
-            f,
-            "{},{},${:02X}:{:04X},{},${:04X},${:02X}",
-            ev.mclk_total,
-            frame_ntsc,
-            (ev.pc_full >> 16) & 0xFF,
-            ev.pc_full & 0xFFFF,
-            kind,
-            ev.reg,
-            ev.value
-        )?;
-    }
-    Ok(())
+    write_csv(
+        path,
+        "mclk_total,frame_ntsc,pc,kind,reg,value",
+        events,
+        |f, _, ev| {
+            let kind = match ev.kind {
+                luna_api::MailboxEventKind::Read => "R",
+                luna_api::MailboxEventKind::Write => "W",
+            };
+            writeln!(
+                f,
+                "{},{},{},{},${:04X},${:02X}",
+                ev.mclk_total,
+                ev.mclk_total / NTSC_MCLK_PER_FRAME,
+                fmt_pc(ev.pc_full),
+                kind,
+                ev.reg,
+                ev.value
+            )
+        },
+    )
 }
 
 /// Write SA-1-side execution events as CSV. Columns:
@@ -483,22 +509,17 @@ fn write_sa1_side_log_csv(
     path: &std::path::Path,
     events: &[luna_api::Sa1SideEvent],
 ) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut f = std::fs::File::create(path)?;
-    writeln!(f, "seq,sa1_pc,kind,reg,value")?;
-    for (i, ev) in events.iter().enumerate() {
+    write_csv(path, "seq,sa1_pc,kind,reg,value", events, |f, i, ev| {
         writeln!(
             f,
-            "{},${:02X}:{:04X},{},${:04X},${:02X}",
+            "{},{},{},${:04X},${:02X}",
             i,
-            (ev.sa1_pc >> 16) & 0xFF,
-            ev.sa1_pc & 0xFFFF,
+            fmt_pc(ev.sa1_pc),
             if ev.write { "W" } else { "R" },
             ev.reg,
             ev.value
-        )?;
-    }
-    Ok(())
+        )
+    })
 }
 
 /// Write the full SA-1 instruction trace as CSV. Columns:
@@ -508,16 +529,12 @@ fn write_sa1_trace_csv(
     path: &std::path::Path,
     events: &[luna_api::Sa1TraceEvent],
 ) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
-    writeln!(f, "seq,pc,a,x,y,sp,p,db,dp,e")?;
-    for (i, ev) in events.iter().enumerate() {
+    write_csv(path, "seq,pc,a,x,y,sp,p,db,dp,e", events, |f, i, ev| {
         writeln!(
             f,
-            "{},${:02X}:{:04X},${:04X},${:04X},${:04X},${:04X},${:02X},${:02X},${:04X},{}",
+            "{},{},${:04X},${:04X},${:04X},${:04X},${:02X},${:02X},${:04X},{}",
             i,
-            (ev.pc_full >> 16) & 0xFF,
-            ev.pc_full & 0xFFFF,
+            fmt_pc(ev.pc_full),
             ev.a,
             ev.x,
             ev.y,
@@ -526,9 +543,8 @@ fn write_sa1_trace_csv(
             ev.db,
             ev.dp,
             u8::from(ev.e),
-        )?;
-    }
-    Ok(())
+        )
+    })
 }
 
 /// Write per-opcode Super FX (GSU) trace events as CSV. Columns:
@@ -539,29 +555,25 @@ fn write_superfx_trace_csv(
     path: &std::path::Path,
     events: &[luna_api::SuperFxTraceEvent],
 ) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
-    write!(f, "seq,pc,opcode,sfr")?;
+    let mut header = String::from("seq,pc,opcode,sfr");
     for n in 0..16 {
-        write!(f, ",r{n}")?;
+        header.push_str(",r");
+        header.push_str(&n.to_string());
     }
-    writeln!(f)?;
-    for (i, ev) in events.iter().enumerate() {
+    write_csv(path, &header, events, |f, i, ev| {
         write!(
             f,
-            "{},${:02X}:{:04X},${:02X},${:04X}",
+            "{},{},${:02X},${:04X}",
             i,
-            (ev.pc_full >> 16) & 0xFF,
-            ev.pc_full & 0xFFFF,
+            fmt_pc(ev.pc_full),
             ev.opcode,
             ev.sfr,
         )?;
         for r in ev.r {
             write!(f, ",${r:04X}")?;
         }
-        writeln!(f)?;
-    }
-    Ok(())
+        writeln!(f)
+    })
 }
 
 /// Write DMA→VRAM transfer-time trace events as CSV. Columns:
@@ -572,22 +584,17 @@ fn write_dma_trace_csv(
     path: &std::path::Path,
     events: &[luna_api::DmaTraceEvent],
 ) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
-    writeln!(f, "seq,src,vram_word,reg,value")?;
-    for (i, ev) in events.iter().enumerate() {
+    write_csv(path, "seq,src,vram_word,reg,value", events, |f, i, ev| {
         writeln!(
             f,
-            "{},${:02X}:{:04X},${:04X},${:02X},${:02X}",
+            "{},{},${:04X},${:02X},${:02X}",
             i,
-            (ev.src_full >> 16) & 0xFF,
-            ev.src_full & 0xFFFF,
+            fmt_pc(ev.src_full),
             ev.vram_word,
             ev.b_offset,
             ev.value,
-        )?;
-    }
-    Ok(())
+        )
+    })
 }
 
 /// Write per-instruction CPU trace events as CSV. Columns:
@@ -596,29 +603,28 @@ fn write_cpu_trace_csv(
     path: &std::path::Path,
     events: &[luna_api::CpuTraceEvent],
 ) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut f = std::fs::File::create(path)?;
-    writeln!(f, "mclk_total,frame_ntsc,pc,a,x,y,sp,p,db,dp,e")?;
-    for ev in events {
-        let frame_ntsc = ev.mclk_total / (1364 * 262);
-        writeln!(
-            f,
-            "{},{},${:02X}:{:04X},${:04X},${:04X},${:04X},${:04X},${:02X},${:02X},${:04X},{}",
-            ev.mclk_total,
-            frame_ntsc,
-            (ev.pc_full >> 16) & 0xFF,
-            ev.pc_full & 0xFFFF,
-            ev.a,
-            ev.x,
-            ev.y,
-            ev.sp,
-            ev.p,
-            ev.db,
-            ev.dp,
-            ev.e as u8
-        )?;
-    }
-    Ok(())
+    write_csv(
+        path,
+        "mclk_total,frame_ntsc,pc,a,x,y,sp,p,db,dp,e",
+        events,
+        |f, _, ev| {
+            writeln!(
+                f,
+                "{},{},{},${:04X},${:04X},${:04X},${:04X},${:02X},${:02X},${:04X},{}",
+                ev.mclk_total,
+                ev.mclk_total / NTSC_MCLK_PER_FRAME,
+                fmt_pc(ev.pc_full),
+                ev.a,
+                ev.x,
+                ev.y,
+                ev.sp,
+                ev.p,
+                ev.db,
+                ev.dp,
+                ev.e as u8
+            )
+        },
+    )
 }
 
 /// Write per-access memory trace events as CSV. Columns:
@@ -627,29 +633,27 @@ fn write_mem_trace_csv(
     path: &std::path::Path,
     events: &[luna_api::MemTraceEvent],
 ) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut f = std::fs::File::create(path)?;
-    writeln!(f, "mclk_total,frame_ntsc,pc,addr,kind,value")?;
-    for ev in events {
-        let frame_ntsc = ev.mclk_total / (1364 * 262);
-        let kind = match ev.kind {
-            luna_api::MemEventKind::Read => "R",
-            luna_api::MemEventKind::Write => "W",
-        };
-        writeln!(
-            f,
-            "{},{},${:02X}:{:04X},${:02X}:{:04X},{},${:02X}",
-            ev.mclk_total,
-            frame_ntsc,
-            (ev.pc_full >> 16) & 0xFF,
-            ev.pc_full & 0xFFFF,
-            (ev.addr_full >> 16) & 0xFF,
-            ev.addr_full & 0xFFFF,
-            kind,
-            ev.value
-        )?;
-    }
-    Ok(())
+    write_csv(
+        path,
+        "mclk_total,frame_ntsc,pc,addr,kind,value",
+        events,
+        |f, _, ev| {
+            let kind = match ev.kind {
+                luna_api::MemEventKind::Read => "R",
+                luna_api::MemEventKind::Write => "W",
+            };
+            writeln!(
+                f,
+                "{},{},{},{},{},${:02X}",
+                ev.mclk_total,
+                ev.mclk_total / NTSC_MCLK_PER_FRAME,
+                fmt_pc(ev.pc_full),
+                fmt_pc(ev.addr_full),
+                kind,
+                ev.value
+            )
+        },
+    )
 }
 
 /// Print a 16-bytes-per-row hex dump to stderr.
