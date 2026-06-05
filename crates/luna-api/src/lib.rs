@@ -60,14 +60,25 @@ pub struct RomInfo {
     pub title: String,
     /// Detected mapper kind, e.g. `"LoRom"`, `"HiRom"`, `"ExHiRom"`.
     pub mapper: String,
-    /// Cartridge ROM size in bytes.
+    /// Cartridge ROM size in bytes (on disk).
     pub rom_bytes: usize,
+    /// ROM size in KB as declared in the internal header (distinct from
+    /// the on-disk byte count `rom_bytes`).
+    pub header_rom_size_kb: u32,
     /// Battery-backed SRAM size in kilobytes.
     pub sram_kb: u32,
     /// `Ntsc`, `Pal`, or `Unknown`.
     pub region: String,
     /// `FastROM` (`MEMSEL`) eligibility from the header.
     pub fast_rom: bool,
+    /// Mask-ROM version byte from the header.
+    pub version: u8,
+    /// 16-bit header checksum.
+    pub checksum: u16,
+    /// 16-bit header checksum complement.
+    pub checksum_complement: u16,
+    /// Whether `checksum` and `checksum_complement` are bitwise complements.
+    pub checksum_valid: bool,
 }
 
 /// Snapshot of the emulator's observable state. Every field maps to
@@ -323,6 +334,33 @@ pub struct UnimplementedOp {
     pub pc: u16,
 }
 
+/// One decoded OAM sprite (size, flips, and high-table bits resolved),
+/// mirroring `luna_ppu::SpriteEntry` so front-ends can list sprites
+/// without depending on `luna-ppu` directly.
+#[derive(Debug, Clone, Copy, Serialize, schemars::JsonSchema)]
+pub struct SpriteInfo {
+    /// OAM index (0..=127).
+    pub index: usize,
+    /// Signed X position (-256..=255 after high-table sign extension).
+    pub x: i16,
+    /// 8-bit Y position.
+    pub y: u8,
+    /// 9-bit tile number.
+    pub tile: u16,
+    /// 3-bit palette index.
+    pub palette: u8,
+    /// 2-bit priority (0-3).
+    pub priority: u8,
+    /// Horizontal flip flag.
+    pub h_flip: bool,
+    /// Vertical flip flag.
+    pub v_flip: bool,
+    /// Sprite width in pixels.
+    pub w: u16,
+    /// Sprite height in pixels.
+    pub h: u16,
+}
+
 /// Cumulative metrics since reset.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Stats {
@@ -395,9 +433,14 @@ impl Emulator {
             title: cart.header.title.clone(),
             mapper: format!("{:?}", cart.header.mapper_kind),
             rom_bytes: cart.rom.len(),
+            header_rom_size_kb: cart.header.rom_size_kb,
             sram_kb: cart.header.sram_size_kb,
             region: format!("{:?}", cart.header.region),
             fast_rom: cart.header.fast_rom,
+            version: cart.header.version,
+            checksum: cart.header.checksum,
+            checksum_complement: cart.header.checksum_complement,
+            checksum_valid: cart.header.checksum_valid(),
         };
         // Unsupported coprocessor carts surface as a typed
         // `UnsupportedMapper` error (no longer a panic). The
@@ -724,6 +767,61 @@ impl Emulator {
         let dyn_image: image::DynamicImage = img.into();
         dyn_image.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)?;
         Ok(out)
+    }
+
+    /// Render a single BG layer (`bg_idx` 0..=3) in isolation as a
+    /// PNG-encoded byte vector — the `luna run --bg N` debug path.
+    /// `force_display` bypasses INIDISP forced-blank.
+    pub fn render_frame_bg_png(
+        &self,
+        bg_idx: usize,
+        force_display: bool,
+    ) -> Result<Vec<u8>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let opts = luna_ppu::RenderOptions {
+            bypass_forced_blank: force_display,
+        };
+        let mut buf = Vec::with_capacity(FRAME_W * FRAME_H * 3);
+        for px in luna_ppu::render_frame_bg_with(&snes.ppu, bg_idx, opts) {
+            buf.extend_from_slice(&px);
+        }
+        let img =
+            image::RgbImage::from_raw(FRAME_W as u32, FRAME_H as u32, buf).expect("size matches");
+        let mut out = Vec::with_capacity(FRAME_W * FRAME_H);
+        let dyn_image: image::DynamicImage = img.into();
+        dyn_image.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)?;
+        Ok(out)
+    }
+
+    /// Peek `count` bytes starting at the current CPU program counter
+    /// (`PB:PC`), through the CPU bus view. Diagnostic (needs `&mut` for
+    /// the bus). Wraps the core's `peek_pc_bytes`.
+    pub fn peek_pc_bytes(&mut self, count: usize) -> Result<Vec<u8>, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        Ok(snes.peek_pc_bytes(count))
+    }
+
+    /// Decode all 128 OAM sprites (size, flips, and high-table bits
+    /// resolved). Diagnostic surface so front-ends needn't import
+    /// `luna-ppu`'s renderer to list sprites.
+    pub fn decode_sprites(&self) -> Result<Vec<SpriteInfo>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        Ok(luna_ppu::decode_all_sprites(&snes.ppu)
+            .iter()
+            .enumerate()
+            .map(|(index, s)| SpriteInfo {
+                index,
+                x: s.x,
+                y: s.y,
+                tile: s.tile,
+                palette: s.palette,
+                priority: s.priority,
+                h_flip: s.h_flip,
+                v_flip: s.v_flip,
+                w: s.w,
+                h: s.h,
+            })
+            .collect())
     }
 
     /// Render the current PPU framebuffer as raw **RGBA** bytes
