@@ -3,13 +3,10 @@
 //! Dispatches between execution modes (run / mcp / replay).
 //! See `ARCHITECTURE.md` §3.2.
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use luna_cartridge::Cartridge;
-use luna_core::Snes;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -1171,28 +1168,26 @@ fn run(
     bg: Option<u8>,
     audio_out: Option<&std::path::Path>,
 ) -> ExitCode {
-    let cart = match Cartridge::load(rom_path) {
-        Ok(c) => c,
+    let mut em = luna_api::Emulator::new();
+    let info = match em.load_rom(rom_path) {
+        Ok(i) => i,
         Err(e) => {
             eprintln!("error: {e}");
             return ExitCode::from(1);
         }
     };
 
-    print_header(&cart);
+    print_header(&info);
 
-    let mut snes = Snes::from_cartridge(cart);
-    snes.reset();
-    println!("After reset: PC=${:02X}:{:04X}", snes.cpu.pb, snes.cpu.pc);
+    // `load_rom` already runs the reset vector; report where it landed.
+    {
+        let cpu = em.state().cpu;
+        println!("After reset: PC=${:02X}:{:04X}", cpu.pb, cpu.pc);
+    }
     println!();
 
-    // Silence the default panic printer so we own the panic message
-    // output (catch_unwind doesn't suppress the hook by itself).
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-
-    let mut executed: u64 = 0;
     let mut panic_msg: Option<String> = None;
+    let mut stopped = false;
     // If we're recording audio, drain the APU queue every batch of
     // steps so it doesn't overflow (capped at 16 384 samples).
     let mut audio_samples: Vec<(i16, i16)> = if audio_out.is_some() {
@@ -1200,36 +1195,65 @@ fn run(
     } else {
         Vec::new()
     };
-    while executed < steps {
-        if snes.cpu.stopped {
-            println!("CPU halted by STP after {executed} instructions.");
-            break;
-        }
-        match catch_unwind(AssertUnwindSafe(|| snes.step())) {
-            Ok(_) => executed += 1,
-            Err(payload) => {
-                panic_msg = Some(payload_to_string(&payload));
+    if audio_out.is_some() {
+        // Step in 4 096-instruction batches, draining the APU's bounded
+        // queue after each so it never saturates over a long run. A
+        // short batch (`ran < want`) means the CPU hit STP.
+        const BATCH: u64 = 4_096;
+        loop {
+            let done = em.instructions_executed();
+            if done >= steps {
                 break;
             }
+            let want = (steps - done).min(BATCH);
+            match em.step(want) {
+                Ok(ran) => {
+                    match em.drain_audio(8_192) {
+                        Ok(mut chunk) => audio_samples.append(&mut chunk),
+                        Err(e) => eprintln!("warning: drain_audio mid-run: {e}"),
+                    }
+                    if ran < want {
+                        stopped = true;
+                        break;
+                    }
+                }
+                Err(luna_api::ApiError::Panic(msg)) => {
+                    panic_msg = Some(msg);
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("error: step: {e}");
+                    return ExitCode::from(1);
+                }
+            }
         }
-        // Drain audio every 4 096 instructions so the queue never
-        // saturates (= ~250 audio samples produced per batch).
-        if audio_out.is_some() && executed % 4_096 == 0 {
-            snes.apu_real.drain_audio(&mut audio_samples, 8_192);
+        // Final drain.
+        match em.drain_audio(usize::MAX) {
+            Ok(mut chunk) => audio_samples.append(&mut chunk),
+            Err(e) => eprintln!("warning: drain_audio final: {e}"),
+        }
+    } else {
+        match em.step(steps) {
+            Ok(ran) => stopped = ran < steps,
+            Err(luna_api::ApiError::Panic(msg)) => panic_msg = Some(msg),
+            Err(e) => {
+                eprintln!("error: step: {e}");
+                return ExitCode::from(1);
+            }
         }
     }
-    // Final drain.
-    if audio_out.is_some() {
-        snes.apu_real.drain_audio(&mut audio_samples, usize::MAX);
+    if stopped {
+        println!(
+            "CPU halted by STP after {} instructions.",
+            em.instructions_executed()
+        );
     }
-
-    std::panic::set_hook(prev_hook);
 
     println!("--- final state ---");
-    print_cpu_state(&snes);
-    print_diag_state(&mut snes);
-    println!("Instructions executed: {executed}");
-    println!("Total master cycles:   {}", snes.total_mclk);
+    print_cpu_state(&em.state().cpu);
+    print_diag_state(&mut em);
+    println!("Instructions executed: {}", em.instructions_executed());
+    println!("Total master cycles:   {}", em.state().stats.total_mclk);
     if let Some(msg) = panic_msg {
         println!();
         println!("Stopped on CPU panic:");
@@ -1240,7 +1264,7 @@ fn run(
 
     // Screenshot dump: render whatever the PPU has accumulated.
     if let Some(out_path) = screenshot {
-        match save_screenshot(&snes, out_path, force_display, bg) {
+        match save_screenshot(&em, out_path, force_display, bg) {
             Ok(()) => println!("\nScreenshot written to {}", out_path.display()),
             Err(e) => {
                 eprintln!("\nerror: could not write screenshot: {e}");
@@ -1299,33 +1323,28 @@ fn write_wav(path: &std::path::Path, samples: &[(i16, i16)]) -> std::io::Result<
     Ok(())
 }
 
-fn print_header(cart: &Cartridge) {
-    let h = &cart.header;
+fn print_header(info: &luna_api::RomInfo) {
     println!("=== ROM ===");
-    println!("Title:       {:?}", h.title);
+    println!("Title:       {:?}", info.title);
     println!(
-        "Mapper:      {:?}{}",
-        h.mapper_kind,
-        if h.fast_rom { " (FastROM)" } else { "" }
+        "Mapper:      {}{}",
+        info.mapper,
+        if info.fast_rom { " (FastROM)" } else { "" }
     );
     println!(
         "ROM size:    {} KB ({} bytes on disk)",
-        h.rom_size_kb,
-        cart.rom.len()
+        info.header_rom_size_kb, info.rom_bytes
     );
-    println!("SRAM size:   {} KB", h.sram_size_kb);
-    println!("Region:      {:?}", h.region);
-    println!("Version:     v{}", h.version);
+    println!("SRAM size:   {} KB", info.sram_kb);
+    println!("Region:      {}", info.region);
+    println!("Version:     v{}", info.version);
     println!(
         "Checksum:    ${:04X} / complement ${:04X} (valid: {})",
-        h.checksum,
-        h.checksum_complement,
-        h.checksum_valid()
+        info.checksum, info.checksum_complement, info.checksum_valid
     );
 }
 
-fn print_cpu_state(snes: &Snes) {
-    let cpu = &snes.cpu;
+fn print_cpu_state(cpu: &luna_api::CpuState) {
     println!(
         "A=${:04X}  X=${:04X}  Y=${:04X}  SP=${:04X}  DP=${:04X}",
         cpu.a, cpu.x, cpu.y, cpu.sp, cpu.dp
@@ -1335,33 +1354,35 @@ fn print_cpu_state(snes: &Snes) {
         cpu.pb,
         cpu.pc,
         cpu.db,
-        cpu.p.bits(),
+        cpu.p,
         u8::from(cpu.e)
     );
-    println!("flags: {}", flag_string(cpu.p.bits(), cpu.e));
+    println!("flags: {}", flag_string(cpu.p, cpu.e));
 }
 
-fn print_diag_state(snes: &mut Snes) {
-    let p = &snes.ppu;
+fn print_diag_state(em: &mut luna_api::Emulator) {
+    let st = em.state();
+    let p = &st.ppu;
     println!(
         "PPU:  INIDISP=${:02X} (blanked={}, brightness={})  BGMODE=${:02X}  VRAM_addr=${:04X}",
         p.inidisp,
         p.inidisp & 0x80 != 0,
         p.inidisp & 0x0F,
         p.bgmode,
-        p.vram.address
+        p.vram_addr_words
     );
     println!(
         "PPU:  INIDISP_writes={}  Backdrop=${:04X}",
-        p.inidisp_write_count,
-        p.cgram.color(0)
+        p.inidisp_write_count, p.backdrop
     );
-    for (i, bg) in p.bg.iter().enumerate() {
+    // Tilemap occupancy per BG, scanned from a one-shot VRAM dump.
+    let vram = em.vram_bytes().unwrap_or_default();
+    for (i, bg) in p.bgs.iter().enumerate() {
         let base = (bg.tilemap_addr_words as usize) << 1;
         let mut nonzero = 0usize;
         for off in 0..(32 * 32 * 2) {
             let a = (base + off) & 0xFFFF;
-            if p.vram.peek(a as u16) != 0 {
+            if vram.get(a).copied().unwrap_or(0) != 0 {
                 nonzero += 1;
             }
         }
@@ -1380,18 +1401,18 @@ fn print_diag_state(snes: &mut Snes) {
     }
     println!(
         "CPU regs:  NMITIMEN=${:02X}  HVBJOY=${:02X}  frames={}  NMIs_served={}  ppu_line={}",
-        snes.cpu_regs.nmitimen,
-        snes.cpu_regs.hvbjoy,
-        snes.frame_count,
-        snes.nmis_serviced,
-        snes.ppu_line,
+        st.cpu_regs.nmitimen,
+        st.cpu_regs.hvbjoy,
+        st.scheduler.frame_count,
+        st.scheduler.nmis_serviced,
+        st.scheduler.ppu_line,
     );
-    let ports = &snes.apu_real.to_cpu_ports;
+    let ports = &st.apu.to_cpu_ports;
     println!(
         "APU:  SPC PC=${:04X}  stopped={}  past_ipl={}  $2140=${:02X} $2141=${:02X} $2142=${:02X} $2143=${:02X}",
-        snes.apu_real.cpu.pc,
-        snes.apu_real.cpu.stopped,
-        snes.apu_real.past_iplrom,
+        st.apu.spc_pc,
+        st.apu.spc_stopped,
+        st.apu.past_iplrom,
         ports[0],
         ports[1],
         ports[2],
@@ -1400,20 +1421,14 @@ fn print_diag_state(snes: &mut Snes) {
     // Audio pipeline diagnostic — show whether the music driver is
     // actually producing audio. If MVOL or active voices stay at 0,
     // we *can't* hear anything regardless of the audio backend.
-    let mvol_l = snes.apu_real.dsp.registers[0x0C] as i8;
-    let mvol_r = snes.apu_real.dsp.registers[0x1C] as i8;
-    let kon = snes.apu_real.dsp.registers[0x4C];
-    let endx = snes.apu_real.dsp.registers[0x7C];
-    let active_count = snes
-        .apu_real
-        .dsp
-        .voices
-        .iter()
-        .filter(|v| v.envelope_mode != luna_apu::dsp::EnvelopeMode::Release || v.envelope != 0)
-        .count();
-    let any_envelope = snes.apu_real.dsp.voices.iter().any(|v| v.envelope != 0);
-    let queue_len = snes.apu_real.audio_queue.len();
-    let (last_l, last_r) = snes.apu_real.audio_sample();
+    let mvol_l = st.apu.mvol_l;
+    let mvol_r = st.apu.mvol_r;
+    let kon = st.apu.kon;
+    let endx = st.apu.endx;
+    let active_count = st.apu.active_voices;
+    let any_envelope = st.apu.voice_envelope.iter().any(|&e| e != 0);
+    let queue_len = st.apu.audio_queue_len;
+    let (last_l, last_r) = st.apu.last_audio_sample;
     println!(
         "Audio:  MVOL_L={mvol_l} MVOL_R={mvol_r}  KON=${kon:02X} ENDX=${endx:02X}  \
          active_voices={active_count}  any_env_nonzero={any_envelope}  \
@@ -1421,15 +1436,16 @@ fn print_diag_state(snes: &mut Snes) {
     );
     // Echo subsystem state — useful for verifying the music driver
     // actually configured echo (most SNES tracks use it heavily).
-    let flg = snes.apu_real.dsp.registers[0x6C];
-    let esa = snes.apu_real.dsp.registers[0x6D];
-    let edl = snes.apu_real.dsp.registers[0x7D] & 0x0F;
-    let efb = snes.apu_real.dsp.registers[0x0D] as i8;
-    let evol_l = snes.apu_real.dsp.registers[0x2C] as i8;
-    let evol_r = snes.apu_real.dsp.registers[0x3C] as i8;
-    let eon = snes.apu_real.dsp.registers[0x4D];
-    let pmon = snes.apu_real.dsp.registers[0x2D];
-    let non = snes.apu_real.dsp.registers[0x3D];
+    let dsp = &st.apu.dsp_regs;
+    let flg = dsp[0x6C];
+    let esa = dsp[0x6D];
+    let edl = dsp[0x7D] & 0x0F;
+    let efb = dsp[0x0D] as i8;
+    let evol_l = dsp[0x2C] as i8;
+    let evol_r = dsp[0x3C] as i8;
+    let eon = dsp[0x4D];
+    let pmon = dsp[0x2D];
+    let non = dsp[0x3D];
     println!(
         "Echo:   FLG=${flg:02X} (reset={} mute={} ECEN={}) \
          ESA=${esa:02X} (=${esa:02X}00) EDL=${edl:X} ({} samples) \
@@ -1439,36 +1455,33 @@ fn print_diag_state(snes: &mut Snes) {
         flg >> 5 & 1,
         if edl == 0 { 1 } else { (edl as u16) * 512 }
     );
-    if let Some((op, pc)) = snes.apu_real.cpu.unimplemented_opcode {
+    if let Some(op) = &st.apu.unimplemented_opcode {
         // Dump 4 bytes around the offending PC so we can see the
         // operand pattern and recognise the addressing mode.
-        let aram = &snes.apu_real.aram;
+        let aram = em.peek_aram(op.pc, 4).unwrap_or_default();
         println!(
-            "APU:  STOPPED on unimplemented opcode ${op:02X} at SPC PC=${pc:04X}  (bytes: {:02X} {:02X} {:02X} {:02X})",
-            aram[pc as usize],
-            aram[pc.wrapping_add(1) as usize],
-            aram[pc.wrapping_add(2) as usize],
-            aram[pc.wrapping_add(3) as usize],
+            "APU:  STOPPED on unimplemented opcode ${:02X} at SPC PC=${:04X}  (bytes: {:02X} {:02X} {:02X} {:02X})",
+            op.opcode,
+            op.pc,
+            aram.first().copied().unwrap_or(0),
+            aram.get(1).copied().unwrap_or(0),
+            aram.get(2).copied().unwrap_or(0),
+            aram.get(3).copied().unwrap_or(0),
         );
     }
-    // OAM occupancy + first few sprite entries (uses immutable `p`).
-    let mut oam_non_zero = 0usize;
-    for off in 0..0x220u16 {
-        if p.oam.peek(off) != 0 {
-            oam_non_zero += 1;
-        }
-    }
+    // OAM occupancy + first few sprite entries.
+    let oam = &p.oam_full;
     println!(
-        "OAM:   {oam_non_zero}/544 non-zero  |  OBSEL=${:02X}",
-        p.obsel
+        "OAM:   {}/544 non-zero  |  OBSEL=${:02X}",
+        p.oam_non_zero, p.obsel
     );
     // What's actually been written into OAM that *isn't* the hide
     // value? Helps distinguish "game uploaded N sprites" from
     // "game wrote the hide marker over everything".
     print!("OAM non-$F0/non-zero bytes: ");
     let mut shown = 0;
-    for off in 0..0x220u16 {
-        let b = p.oam.peek(off);
+    for off in 0..0x220usize {
+        let b = oam.get(off).copied().unwrap_or(0);
         if b != 0 && b != 0xF0 {
             print!("[${off:03X}=${b:02X}] ");
             shown += 1;
@@ -1479,11 +1492,11 @@ fn print_diag_state(snes: &mut Snes) {
         }
     }
     println!();
-    let all_sprites = luna_ppu::decode_all_sprites(p);
+    let all_sprites = em.decode_sprites().unwrap_or_default();
     let visible_count = all_sprites.iter().filter(|sp| sp.y < 224).count();
     println!("  visible sprites (y<224): {visible_count}");
     let mut shown = 0;
-    for (i, sp) in all_sprites.iter().enumerate() {
+    for sp in &all_sprites {
         if sp.y >= 224 {
             continue;
         }
@@ -1492,7 +1505,8 @@ fn print_diag_state(snes: &mut Snes) {
         }
         shown += 1;
         println!(
-            "  sprite #{i:>3}: x={:>4} y={:>3} tile=${:03X} pal={} pri={} {}x{} {}{}",
+            "  sprite #{:>3}: x={:>4} y={:>3} tile=${:03X} pal={} pri={} {}x{} {}{}",
+            sp.index,
             sp.x,
             sp.y,
             sp.tile,
@@ -1508,25 +1522,14 @@ fn print_diag_state(snes: &mut Snes) {
     // VRAM / CGRAM occupancy digest: how many non-zero bytes in each.
     // Lets us tell "the game has uploaded graphics" from "VRAM is
     // empty" — important for diagnosing why the screen stays black.
-    let mut vram_non_zero = 0usize;
-    for off in 0..0x10000u32 {
-        if snes.ppu.vram.peek(off as u16) != 0 {
-            vram_non_zero += 1;
-        }
-    }
-    let mut cgram_non_zero = 0usize;
-    for idx in 0..256u16 {
-        if snes.ppu.cgram.color(idx as u8) != 0 {
-            cgram_non_zero += 1;
-        }
-    }
     println!(
-        "VRAM:  {vram_non_zero}/65536 non-zero bytes  |  CGRAM: {cgram_non_zero}/256 non-zero colours"
+        "VRAM:  {}/65536 non-zero bytes  |  CGRAM: {}/256 non-zero colours",
+        p.vram_non_zero, p.cgram_non_zero
     );
 
     // @PC bytes need mutable bus access — run after all immutable
     // PPU diagnostics are done.
-    let pc_bytes = snes.peek_pc_bytes(8);
+    let pc_bytes = em.peek_pc_bytes(8).unwrap_or_default();
     print!("@PC bytes:");
     for b in &pc_bytes {
         print!(" {b:02X}");
@@ -1551,46 +1554,22 @@ fn flag_string(p: u8, e: bool) -> String {
 }
 
 fn save_screenshot(
-    snes: &Snes,
+    em: &luna_api::Emulator,
     path: &std::path::Path,
     force_display: bool,
     bg: Option<u8>,
-) -> Result<(), image::ImageError> {
-    let opts = luna_ppu::RenderOptions {
-        bypass_forced_blank: force_display,
+) -> Result<(), luna_api::ApiError> {
+    // Default path (no --bg, no --force-display) copies the persistent
+    // framebuffer; debug paths (`--force-display` or single-BG render)
+    // go through the one-shot renderer. All routed through luna-api so
+    // the CLI and GUI render the exact same pixels.
+    let png = match bg {
+        Some(n) => {
+            let idx = (n.saturating_sub(1).min(3)) as usize;
+            em.render_frame_bg_png(idx, force_display)?
+        }
+        None => em.render_frame_png(force_display)?,
     };
-    let mut buf = Vec::with_capacity(luna_ppu::FRAME_W * luna_ppu::FRAME_H * 3);
-    // Default path (no --bg, no --force-display): copy the persistent
-    // framebuffer that the scheduler maintains per-scanline (gap G6
-    // Phase 1). Debug paths (`--force-display` or single-BG render)
-    // still go through the one-shot renderer.
-    if bg.is_none() && !force_display {
-        for px in snes.ppu.framebuffer() {
-            buf.extend_from_slice(px);
-        }
-    } else {
-        let frame = match bg {
-            Some(n) => {
-                let idx = (n.saturating_sub(1).min(3)) as usize;
-                luna_ppu::render_frame_bg_with(&snes.ppu, idx, opts)
-            }
-            None => luna_ppu::render_frame_with(&snes.ppu, opts),
-        };
-        for px in frame {
-            buf.extend_from_slice(&px);
-        }
-    }
-    let img = image::RgbImage::from_raw(luna_ppu::FRAME_W as u32, luna_ppu::FRAME_H as u32, buf)
-        .expect("frame buffer size matches dims");
-    img.save(path)
-}
-
-fn payload_to_string(payload: &Box<dyn std::any::Any + Send>) -> String {
-    if let Some(s) = payload.downcast_ref::<&'static str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "(unknown panic payload)".to_string()
-    }
+    std::fs::write(path, png)?;
+    Ok(())
 }
