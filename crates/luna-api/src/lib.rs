@@ -18,8 +18,9 @@ use std::path::Path;
 use luna_cartridge::{CartError, Cartridge};
 use luna_core::Snes;
 pub use luna_core::{
-    CpuTraceEvent, CpuTraceLog, MailboxEvent, MailboxEventKind, MapperKind, MemEventKind,
-    MemTraceEvent, MemTraceLog, Sa1LogEvent, Sa1SideEvent, Sa1TraceEvent, SuperFxTraceEvent,
+    CpuTraceEvent, CpuTraceLog, DmaTraceEvent, DmaTraceLog, MailboxEvent, MailboxEventKind,
+    MapperKind, MemEventKind, MemTraceEvent, MemTraceLog, Sa1LogEvent, Sa1SideEvent, Sa1TraceEvent,
+    SuperFxTraceEvent,
 };
 /// Framebuffer dimensions (256×224), re-exported so front-ends size their
 /// texture/window through `luna-api` rather than depending on `luna-ppu`.
@@ -37,7 +38,11 @@ pub enum ApiError {
     /// Cartridge parsing or layout detection failed.
     #[error("cartridge: {0}")]
     Cart(#[from] CartError),
-    /// `from_cartridge` / `step` / etc. panicked inside the core.
+    /// Cartridge needs a coprocessor luna does not yet emulate
+    /// (S-DD1, SPC7110) — reachable via a forced mapper.
+    #[error("{0}")]
+    UnsupportedMapper(#[from] luna_core::UnsupportedMapper),
+    /// `step` / etc. panicked inside the core.
     #[error("emulator panicked: {0}")]
     Panic(String),
     /// PNG encoding failed during `render_frame`.
@@ -394,21 +399,24 @@ impl Emulator {
             region: format!("{:?}", cart.header.region),
             fast_rom: cart.header.fast_rom,
         };
-        // `Snes::from_cartridge` panics on coprocessor cart types;
-        // surface that as a clean error rather than tearing down the
-        // whole transport.
+        // Unsupported coprocessor carts surface as a typed
+        // `UnsupportedMapper` error (no longer a panic). The
+        // `catch_unwind` stays as a backstop for any *other* panic
+        // during construction / `reset`, so a malformed ROM can't tear
+        // down the whole transport.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut snes = Snes::from_cartridge(cart);
+            let mut snes = Snes::try_from_cartridge(cart)?;
             snes.reset();
-            snes
+            Ok::<_, luna_core::UnsupportedMapper>(snes)
         }));
         match result {
-            Ok(snes) => {
+            Ok(Ok(snes)) => {
                 self.snes = Some(snes);
                 self.rom_info = Some(info.clone());
                 self.instructions_executed = 0;
                 Ok(info)
             }
+            Ok(Err(unsupported)) => Err(ApiError::UnsupportedMapper(unsupported)),
             Err(payload) => Err(ApiError::Panic(panic_message(&payload))),
         }
     }
@@ -876,6 +884,23 @@ impl Emulator {
     pub fn take_superfx_trace(&mut self) -> Result<Vec<SuperFxTraceEvent>, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         Ok(snes.take_superfx_trace())
+    }
+
+    /// Enable the DMA→VRAM transfer-time trace: every byte an MDMA writes
+    /// to `$2118/$2119` is captured as (source A-bus address → VMADD word
+    /// → byte) AT transfer time. Lets a coprocessor framebuffer
+    /// (Super FX) be checked against the VRAM it produced without the
+    /// double-buffer confound of a post-hoc source dump.
+    pub fn enable_dma_trace(&mut self, max_events: usize) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.dma.enable_dma_trace(max_events);
+        Ok(())
+    }
+
+    /// Drain the DMA→VRAM trace (empty if disabled).
+    pub fn take_dma_trace(&mut self) -> Result<Vec<DmaTraceEvent>, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        Ok(snes.dma.take_dma_trace())
     }
 
     /// Dump all 64 KB of PPU VRAM (byte-addressed). For diagnosing the

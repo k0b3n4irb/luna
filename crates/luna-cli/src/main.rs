@@ -204,6 +204,22 @@ enum Command {
         /// WRAM main page). Omit to capture every access.
         #[arg(long = "mem-trace-bank")]
         mem_trace_bank: Option<String>,
+        /// Optional DMA→VRAM transfer-time trace. Captures every byte an
+        /// MDMA writes to `$2118/$2119` as CSV
+        /// (`seq,src,vram_word,reg,value`) — `src` is the 24-bit A-bus
+        /// source, `vram_word` the VMADD word the byte lands at, `reg`
+        /// $18/$19. The byte is captured AS READ during the transfer, so a
+        /// coprocessor (Super FX) overwriting its source buffer afterwards
+        /// can't confound the source→VRAM comparison. Gated by
+        /// `--dma-trace-from`/`--dma-trace-max`.
+        #[arg(long = "dma-trace")]
+        dma_trace: Option<PathBuf>,
+        /// Instruction count at which to begin the DMA→VRAM trace.
+        #[arg(long = "dma-trace-from", default_value_t = 0)]
+        dma_trace_from: u64,
+        /// Max DMA→VRAM trace events (default 500 000).
+        #[arg(long = "dma-trace-max", default_value_t = 500_000)]
+        dma_trace_max: usize,
     },
 }
 
@@ -250,6 +266,9 @@ fn main() -> ExitCode {
             mem_trace_from,
             mem_trace_max,
             mem_trace_bank,
+            dma_trace,
+            dma_trace_from,
+            dma_trace_max,
         } => run_state(
             &rom,
             steps,
@@ -274,6 +293,9 @@ fn main() -> ExitCode {
             mem_trace_from,
             mem_trace_max,
             mem_trace_bank.as_deref(),
+            dma_trace.as_deref(),
+            dma_trace_from,
+            dma_trace_max,
         ),
     }
 }
@@ -497,6 +519,32 @@ fn write_superfx_trace_csv(
     Ok(())
 }
 
+/// Write DMA→VRAM transfer-time trace events as CSV. Columns:
+/// `seq,src,vram_word,reg,value` — `src` is the 24-bit A-bus source
+/// (`bank:offset`), `vram_word` the VMADD word the byte landed at, `reg`
+/// the B-bus port ($2118 low / $2119 high), `value` the transferred byte.
+fn write_dma_trace_csv(
+    path: &std::path::Path,
+    events: &[luna_api::DmaTraceEvent],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    writeln!(f, "seq,src,vram_word,reg,value")?;
+    for (i, ev) in events.iter().enumerate() {
+        writeln!(
+            f,
+            "{},${:02X}:{:04X},${:04X},${:02X},${:02X}",
+            i,
+            (ev.src_full >> 16) & 0xFF,
+            ev.src_full & 0xFFFF,
+            ev.vram_word,
+            ev.b_offset,
+            ev.value,
+        )?;
+    }
+    Ok(())
+}
+
 /// Write per-instruction CPU trace events as CSV. Columns:
 /// `mclk_total, frame_ntsc, pc, a, x, y, sp, p_hex, db, dp, e`.
 fn write_cpu_trace_csv(
@@ -598,19 +646,15 @@ fn run_state(
     mem_trace_from: u64,
     mem_trace_max: usize,
     mem_trace_bank: Option<&str>,
+    dma_trace_path: Option<&std::path::Path>,
+    dma_trace_from: u64,
+    dma_trace_max: usize,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
     let load_result = if let Some(kind_str) = force_mapper {
-        let kind = match kind_str.to_ascii_lowercase().as_str() {
-            "lorom" => luna_api::MapperKind::LoRom,
-            "hirom" => luna_api::MapperKind::HiRom,
-            "exhirom" => luna_api::MapperKind::ExHiRom,
-            "sa1" => luna_api::MapperKind::Sa1,
-            "superfx" => luna_api::MapperKind::SuperFx,
-            other => {
-                eprintln!("error: unknown --force-mapper '{other}'");
-                return ExitCode::from(1);
-            }
+        let Some(kind) = luna_api::MapperKind::from_cli_str(kind_str) else {
+            eprintln!("error: unknown --force-mapper '{kind_str}'");
+            return ExitCode::from(1);
         };
         match std::fs::read(rom) {
             Ok(bytes) => em.load_rom_bytes_forced(bytes, kind),
@@ -748,6 +792,23 @@ fn run_state(
             if mem_trace_path.is_some() && em.instructions_executed() >= mem_trace_from {
                 let _ = em.enable_mem_trace(mem_trace_max, parsed_mem_bank);
             }
+        }
+    }
+    // DMA→VRAM trace: bridge to its start instruction independently of the
+    // cpu/mem traces, then enable. Capturing from boot would drown the
+    // window of interest, so `--dma-trace-from` skips the early uploads.
+    if dma_trace_path.is_some() {
+        let current = em.instructions_executed();
+        if dma_trace_from > current {
+            let bridge = (dma_trace_from - current).min(remaining);
+            if let Err(e) = em.step(bridge) {
+                eprintln!("step warning (pre-dma-trace bridge): {e}");
+            }
+            remaining = remaining.saturating_sub(bridge);
+        }
+        if let Err(e) = em.enable_dma_trace(dma_trace_max) {
+            eprintln!("error: enable_dma_trace: {e}");
+            return ExitCode::from(1);
         }
     }
     // When --audio-out is set, step in chunks and drain the APU's
@@ -895,6 +956,19 @@ fn run_state(
                 Err(e) => eprintln!("error: writing memory trace: {e}"),
             },
             Err(e) => eprintln!("error: take_mem_trace_log: {e}"),
+        }
+    }
+    if let Some(path) = dma_trace_path {
+        match em.take_dma_trace() {
+            Ok(events) => match write_dma_trace_csv(path, &events) {
+                Ok(()) => eprintln!(
+                    "DMA→VRAM trace written to {} ({} events)",
+                    path.display(),
+                    events.len()
+                ),
+                Err(e) => eprintln!("error: writing DMA trace: {e}"),
+            },
+            Err(e) => eprintln!("error: take_dma_trace: {e}"),
         }
     }
 
