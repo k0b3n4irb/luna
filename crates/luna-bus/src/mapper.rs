@@ -26,6 +26,29 @@ pub enum MapperKind {
     Spc7110,
 }
 
+impl MapperKind {
+    /// Parse a `--force-mapper` CLI token (case-insensitive) into a
+    /// [`MapperKind`]. This is the canonical name table; front-ends must
+    /// not re-implement it. Returns `None` for an unknown token.
+    ///
+    /// `sdd1` / `spc7110` parse successfully even though the core cannot
+    /// build them yet — that surfaces as a clean "unsupported mapper"
+    /// error at load time rather than "unknown --force-mapper".
+    #[must_use]
+    pub fn from_cli_str(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "lorom" => Some(Self::LoRom),
+            "hirom" => Some(Self::HiRom),
+            "exhirom" => Some(Self::ExHiRom),
+            "sa1" => Some(Self::Sa1),
+            "superfx" => Some(Self::SuperFx),
+            "sdd1" => Some(Self::Sdd1),
+            "spc7110" => Some(Self::Spc7110),
+            _ => None,
+        }
+    }
+}
+
 /// A cartridge mapper: routes CPU bus accesses to ROM, SRAM, and
 /// coprocessor regions as defined by the mapping mode.
 ///

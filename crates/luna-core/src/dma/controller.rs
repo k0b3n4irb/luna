@@ -7,6 +7,32 @@
 use super::bus::DmaBus;
 use super::channel::DmaChannel;
 
+/// One DMA byte landing in VRAM (`$2118`/`$2119`), captured at transfer
+/// time. The byte value is the one the DMA actually read from the
+/// source this instant — immune to a coprocessor (e.g. Super FX)
+/// overwriting its source buffer between the transfer and a later VRAM
+/// dump (the double-buffer confound).
+#[derive(Debug, Clone, Copy)]
+pub struct DmaTraceEvent {
+    /// 24-bit A-bus source address of this byte.
+    pub src_full: u32,
+    /// PPU VRAM word address (`$2116/7` VMADD) the byte targets.
+    pub vram_word: u16,
+    /// B-bus register: `0x18` (`$2118`, low byte) or `0x19` (`$2119`, high).
+    pub b_offset: u8,
+    /// The transferred byte.
+    pub value: u8,
+}
+
+/// Bounded ring for the DMA→VRAM transfer-time tracer.
+#[derive(Default)]
+pub struct DmaTraceLog {
+    /// Recorded VRAM-write events, in transfer order.
+    pub events: Vec<DmaTraceEvent>,
+    /// Hard cap on event count.
+    pub max_events: usize,
+}
+
 /// The SNES DMA controller — 8 channels + a pair of global registers.
 #[derive(Default)]
 pub struct Dma {
@@ -19,6 +45,10 @@ pub struct Dma {
     /// `$420C HDMAEN` — HDMA enable mask. Stored but not yet acted upon
     /// (HDMA is in a later phase).
     pub hdmaen: u8,
+    /// Optional DMA→VRAM transfer-time trace. `None` = disabled. The
+    /// bus moves this into the per-transfer [`DmaBus`] view so the
+    /// view's `$2118/9` writes can record (source → VMADD → byte).
+    pub dma_trace: Option<DmaTraceLog>,
 }
 
 impl Dma {
@@ -26,6 +56,23 @@ impl Dma {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Enable the DMA→VRAM transfer-time trace, capped at `max_events`.
+    pub fn enable_dma_trace(&mut self, max_events: usize) {
+        self.dma_trace = Some(DmaTraceLog {
+            events: Vec::new(),
+            max_events,
+        });
+    }
+
+    /// Drain the captured DMA→VRAM trace (leaves tracing enabled but
+    /// empty). Returns an empty vec if tracing was never enabled.
+    pub fn take_dma_trace(&mut self) -> Vec<DmaTraceEvent> {
+        match self.dma_trace.as_mut() {
+            Some(log) => std::mem::take(&mut log.events),
+            None => Vec::new(),
+        }
     }
 
     /// Read a channel register at the 24-bit B-bus(-style) offset

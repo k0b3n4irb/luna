@@ -20,7 +20,7 @@ use luna_cpu_65c816::Cpu;
 use luna_ppu::Ppu;
 
 use crate::coproc::Sa1Chip;
-use crate::dma::{Dma, DmaBus};
+use crate::dma::{Dma, DmaBus, DmaTraceEvent, DmaTraceLog};
 
 /// Top-level SNES machine.
 pub struct Snes {
@@ -303,13 +303,32 @@ pub const NTSC_VBLANK_START_LINE: u16 = 225;
 /// 239 with overscan, which we don't model yet).
 pub const PAL_VBLANK_START_LINE: u16 = 240;
 
+/// The cartridge's mapper needs a coprocessor luna does not yet
+/// emulate (S-DD1, SPC7110). Returned by [`Snes::try_from_cartridge`]
+/// so callers can surface a clean error instead of catching a panic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsupportedMapper(pub MapperKind);
+
+impl std::fmt::Display for UnsupportedMapper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "cartridge requires coprocessor support not yet implemented: {:?} \
+             (S-DD1 / SPC7110 land in their own dedicated phases)",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for UnsupportedMapper {}
+
 impl Snes {
     /// Build a new machine from a parsed cartridge.
     ///
-    /// Panics if the cartridge layout is not supported by the V1 mapper
-    /// set — currently `LoROM` only. `HiROM` / SA-1 / Super FX land in
-    /// later phases.
-    pub fn from_cartridge(cart: Cartridge) -> Self {
+    /// Returns [`UnsupportedMapper`] if the cartridge needs a coprocessor
+    /// luna does not yet emulate (S-DD1, SPC7110). All currently supported
+    /// mappers (`LoROM` / `HiROM` / `ExHiROM` / SA-1 / Super FX) succeed.
+    pub fn try_from_cartridge(cart: Cartridge) -> Result<Self, UnsupportedMapper> {
         let sram_bytes = (cart.header.sram_size_kb as usize) * 1024;
         let region = cart.header.region;
         let mapper: Box<dyn Mapper + Send> = match cart.header.mapper_kind {
@@ -334,12 +353,7 @@ impl Snes {
             // harmless for the games tested — their plot addresses never
             // reach the larger wrap boundary.)
             MapperKind::SuperFx => Box::new(SuperFxMapper::new(cart.rom, 0x2_0000)),
-            other => {
-                panic!(
-                    "Cartridge requires coprocessor support not yet implemented: {other:?}. \
-                     S-DD1 / SPC7110 will land in their own dedicated phases."
-                );
-            }
+            other => return Err(UnsupportedMapper(other)),
         };
 
         let mut ppu = Ppu::new();
@@ -349,7 +363,7 @@ impl Snes {
             ppu.stat78 |= 0x10;
         }
 
-        Self {
+        Ok(Self {
             cpu: Cpu::new(),
             ppu,
             dma: Dma::new(),
@@ -381,7 +395,15 @@ impl Snes {
             sa1_log: None,
             cpu_trace_log: None,
             mem_trace_log: None,
-        }
+        })
+    }
+
+    /// Build a new machine from a parsed cartridge, panicking on an
+    /// unsupported coprocessor mapper. Convenience wrapper over
+    /// [`Snes::try_from_cartridge`] for tests and internal callers that
+    /// have already validated the mapper.
+    pub fn from_cartridge(cart: Cartridge) -> Self {
+        Self::try_from_cartridge(cart).unwrap_or_else(|e| panic!("{e}"))
     }
 
     /// Enable APU mailbox event logging. From this point every CPU
@@ -1065,10 +1087,20 @@ struct DmaBusView<'a> {
     /// `$2180` (WMDATA) writes WRAM and auto-increments — the same state
     /// the CPU port uses.
     wm_addr: &'a mut u32,
+    /// Optional DMA→VRAM transfer-time trace (moved in from the [`Dma`]
+    /// controller for the duration of one MDMA burst). `None` = off.
+    dma_trace: Option<&'a mut DmaTraceLog>,
+    /// A-bus source address of the most recent `read_a` — paired with
+    /// the immediately-following `write_b` to record a VRAM byte's
+    /// source (DMA reads then writes each byte in lockstep, A→B).
+    last_a_addr: u32,
 }
 
 impl DmaBus for DmaBusView<'_> {
     fn read_a(&mut self, addr: Addr24) -> u8 {
+        // Remember this byte's source so the paired write_b (A→B runs
+        // read-then-write per byte) can record where a VRAM byte came from.
+        self.last_a_addr = addr;
         if let Some(o) = SnesBus::wram_offset(addr) {
             return self.wram[o];
         }
@@ -1105,6 +1137,19 @@ impl DmaBus for DmaBusView<'_> {
 
     fn write_b(&mut self, b_offset: u8, value: u8) {
         if b_offset <= 0x3F {
+            // DMA→VRAM trace: capture (source → VMADD → byte) BEFORE the
+            // write, since the $2119 (high) write auto-increments VMADD.
+            // Only VRAM data ports ($2118/$2119) are of interest.
+            if let Some(log) = self.dma_trace.as_mut() {
+                if matches!(b_offset, 0x18 | 0x19) && log.events.len() < log.max_events {
+                    log.events.push(DmaTraceEvent {
+                        src_full: self.last_a_addr,
+                        vram_word: self.ppu.vram.address,
+                        b_offset,
+                        value,
+                    });
+                }
+            }
             // CGDATA ($2122) is never dropped during active display (handled
             // at the source in Ppu::write — ares io.cpp:55-60); VRAM/OAM still
             // drop via their own `active_display` gates.
@@ -1296,6 +1341,9 @@ impl SnesBus<'_> {
                 mapper: &mut *self.mapper,
                 ppu: &mut *self.ppu,
                 wm_addr: &mut *self.wm_addr,
+                // HDMA is not traced (the Super FX framebuffer upload is MDMA).
+                dma_trace: None,
+                last_a_addr: 0,
             };
             hdma_stall += self.dma.hdma_init(&mut view);
         }
@@ -1307,6 +1355,9 @@ impl SnesBus<'_> {
                 mapper: &mut *self.mapper,
                 ppu: &mut *self.ppu,
                 wm_addr: &mut *self.wm_addr,
+                // HDMA is not traced (the Super FX framebuffer upload is MDMA).
+                dma_trace: None,
+                last_a_addr: 0,
             };
             hdma_stall += self.dma.hdma_run_line(&mut view);
         }
@@ -1675,13 +1726,22 @@ impl SnesBus<'_> {
             // run_mdma, and the other refs flow into DmaBusView. This
             // is the borrow-split that lets the DMA call itself
             // recursively without re-entering the Bus impl.
-            let mut view = DmaBusView {
-                wram: self.wram,
-                mapper: self.mapper,
-                ppu: self.ppu,
-                wm_addr: self.wm_addr,
+            // Move the DMA→VRAM trace into the view for this burst (so its
+            // $2118/9 writes are captured), then restore it: we can't borrow
+            // `self.dma` for the trace AND for `run_mdma` simultaneously.
+            let mut trace = self.dma.dma_trace.take();
+            let bytes = {
+                let mut view = DmaBusView {
+                    wram: self.wram,
+                    mapper: self.mapper,
+                    ppu: self.ppu,
+                    wm_addr: self.wm_addr,
+                    dma_trace: trace.as_mut(),
+                    last_a_addr: 0,
+                };
+                self.dma.run_mdma(&mut view, value)
             };
-            let bytes = self.dma.run_mdma(&mut view, value);
+            self.dma.dma_trace = trace;
             // DMA stalls the CPU during the transfer. Cost model
             // (per fullsnes §"SNES DMA Timing"):
             //   * 8 mclk one-shot overhead at the start of the burst
