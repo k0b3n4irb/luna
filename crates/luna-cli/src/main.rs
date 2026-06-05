@@ -221,6 +221,36 @@ enum Command {
         #[arg(long = "dma-trace-max", default_value_t = 500_000)]
         dma_trace_max: usize,
     },
+    /// Capture a sequence of EXACTLY-consecutive PPU frames as PNGs in
+    /// one run, via the same `luna-api` render path the GUI uses. Use
+    /// this to diagnose *temporal* artefacts (flicker / double-buffer
+    /// page-flip desync) that a single `state --screenshot` cannot show
+    /// — it samples one frame, so a frame-to-frame "blink" is invisible
+    /// to it. Each frame's PNG is tagged with its frame number and the
+    /// INIDISP forced-blank flag, so you can see exactly what the GUI
+    /// would (and would not) display.
+    Frames {
+        /// Path to the .sfc / .smc ROM file.
+        rom: PathBuf,
+        /// Warm-up CPU instructions to execute before capturing begins.
+        #[arg(short = 'n', long, default_value_t = 1000)]
+        steps: u64,
+        /// Number of consecutive frames to capture.
+        #[arg(short = 'c', long = "count", default_value_t = 8)]
+        count: u64,
+        /// Output directory for the PNG sequence (created if absent).
+        #[arg(long = "out-dir", default_value = "/tmp/luna_frames")]
+        out_dir: PathBuf,
+        /// Force a cartridge mapper, bypassing header auto-detection
+        /// (lorom, hirom, exhirom, sa1, superfx).
+        #[arg(long = "force-mapper")]
+        force_mapper: Option<String>,
+        /// Scripted joypad-1 input, same `frame:hex` format as
+        /// `state --input`, applied during the warm-up so the capture
+        /// can land in gameplay rather than at a title screen.
+        #[arg(long)]
+        input: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -296,6 +326,21 @@ fn main() -> ExitCode {
             dma_trace.as_deref(),
             dma_trace_from,
             dma_trace_max,
+        ),
+        Command::Frames {
+            rom,
+            steps,
+            count,
+            out_dir,
+            force_mapper,
+            input,
+        } => run_frames(
+            &rom,
+            steps,
+            count,
+            &out_dir,
+            force_mapper.as_deref(),
+            input.as_deref(),
         ),
     }
 }
@@ -618,6 +663,100 @@ fn print_hex_dump(bank: u8, base: u16, bytes: &[u8]) {
             .join(" ");
         eprintln!("  ${addr:06X}  {hex}");
     }
+}
+
+/// `luna frames` — capture `count` exactly-consecutive PPU frames as
+/// PNGs via the same `luna-api` render path the GUI uses, tagging each
+/// with its frame number and forced-blank flag. Lets us reproduce the
+/// temporal artefacts (flicker / page-flip desync) that a single
+/// `state --screenshot` is structurally blind to.
+fn run_frames(
+    rom: &std::path::Path,
+    steps: u64,
+    count: u64,
+    out_dir: &std::path::Path,
+    force_mapper: Option<&str>,
+    input_script: Option<&str>,
+) -> ExitCode {
+    const FRAME_BUDGET: u64 = 200_000;
+    let mut em = luna_api::Emulator::new();
+    let load_result = if let Some(kind_str) = force_mapper {
+        let Some(kind) = luna_api::MapperKind::from_cli_str(kind_str) else {
+            eprintln!("error: unknown --force-mapper '{kind_str}'");
+            return ExitCode::from(1);
+        };
+        match std::fs::read(rom) {
+            Ok(bytes) => em.load_rom_bytes_forced(bytes, kind),
+            Err(e) => {
+                eprintln!("error: reading {}: {e}", rom.display());
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        em.load_rom(rom)
+    };
+    if let Err(e) = load_result {
+        eprintln!("error: {e}");
+        return ExitCode::from(1);
+    }
+    if let Err(e) = std::fs::create_dir_all(out_dir) {
+        eprintln!("error: creating {}: {e}", out_dir.display());
+        return ExitCode::from(1);
+    }
+    // Scripted input during warm-up (same semantics as `state --input`),
+    // so the capture can land in gameplay rather than at a title screen.
+    let checkpoints: Vec<(u64, u16)> = match input_script {
+        None => Vec::new(),
+        Some(script) => match parse_input_script(script) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("error: --input: {e}");
+                return ExitCode::from(1);
+            }
+        },
+    };
+    for (frame, mask) in &checkpoints {
+        while em.state().scheduler.frame_count < *frame {
+            if em.step_until_frame(FRAME_BUDGET).unwrap_or(0) == 0 {
+                break;
+            }
+        }
+        if let Err(e) = em.set_joypad(0, *mask) {
+            eprintln!("error: set_joypad: {e}");
+            return ExitCode::from(1);
+        }
+    }
+    if let Err(e) = em.step(steps) {
+        eprintln!("step warning (warm-up): {e}");
+    }
+    // Capture loop: one PNG per consecutive frame, tagged frame# + blank.
+    for i in 0..count {
+        let executed = em.step_until_frame(FRAME_BUDGET).unwrap_or(0);
+        let frame = em.frame_count().unwrap_or(0);
+        let blanked = em.forced_blank().unwrap_or(false);
+        let png = match em.render_frame_png(false) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("error: render_frame_png: {e}");
+                return ExitCode::from(1);
+            }
+        };
+        let tag = if blanked { "blank" } else { "live" };
+        let path = out_dir.join(format!("frame_{i:03}_f{frame}_{tag}.png"));
+        if let Err(e) = std::fs::write(&path, &png) {
+            eprintln!("error: writing {}: {e}", path.display());
+            return ExitCode::from(1);
+        }
+        println!(
+            "frame {i:>3}: ppu_frame={frame} forced_blank={blanked} (+{executed} instr) -> {}",
+            path.display()
+        );
+        if executed == 0 {
+            eprintln!("note: step_until_frame returned 0 (emulator halted?) — stopping early");
+            break;
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 /// `luna state` — exercise the public `luna-api` surface end-to-end.
