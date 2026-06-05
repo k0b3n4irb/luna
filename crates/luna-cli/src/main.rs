@@ -669,6 +669,30 @@ fn print_hex_dump(bank: u8, base: u16, bytes: &[u8]) {
     }
 }
 
+/// Load `rom` into `em`, honouring an optional `--force-mapper` override.
+/// Centralises the force-mapper parse + file read shared by the `state`
+/// and `frames` subcommands. Returns a human-facing error string.
+fn load_rom_into(
+    em: &mut luna_api::Emulator,
+    rom: &std::path::Path,
+    force_mapper: Option<&str>,
+) -> Result<(), String> {
+    match force_mapper {
+        Some(kind_str) => {
+            let kind = luna_api::MapperKind::from_cli_str(kind_str)
+                .ok_or_else(|| format!("unknown --force-mapper '{kind_str}'"))?;
+            let bytes =
+                std::fs::read(rom).map_err(|e| format!("reading {}: {e}", rom.display()))?;
+            em.load_rom_bytes_forced(bytes, kind)
+                .map_err(|e| e.to_string())?;
+        }
+        None => {
+            em.load_rom(rom).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 /// `luna frames` — capture `count` exactly-consecutive PPU frames as
 /// PNGs via the same `luna-api` render path the GUI uses, tagging each
 /// with its frame number and forced-blank flag. Lets us reproduce the
@@ -684,22 +708,7 @@ fn run_frames(
 ) -> ExitCode {
     const FRAME_BUDGET: u64 = 200_000;
     let mut em = luna_api::Emulator::new();
-    let load_result = if let Some(kind_str) = force_mapper {
-        let Some(kind) = luna_api::MapperKind::from_cli_str(kind_str) else {
-            eprintln!("error: unknown --force-mapper '{kind_str}'");
-            return ExitCode::from(1);
-        };
-        match std::fs::read(rom) {
-            Ok(bytes) => em.load_rom_bytes_forced(bytes, kind),
-            Err(e) => {
-                eprintln!("error: reading {}: {e}", rom.display());
-                return ExitCode::from(1);
-            }
-        }
-    } else {
-        em.load_rom(rom)
-    };
-    if let Err(e) = load_result {
+    if let Err(e) = load_rom_into(&mut em, rom, force_mapper) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }
@@ -794,22 +803,7 @@ fn run_state(
     dma_trace_max: usize,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
-    let load_result = if let Some(kind_str) = force_mapper {
-        let Some(kind) = luna_api::MapperKind::from_cli_str(kind_str) else {
-            eprintln!("error: unknown --force-mapper '{kind_str}'");
-            return ExitCode::from(1);
-        };
-        match std::fs::read(rom) {
-            Ok(bytes) => em.load_rom_bytes_forced(bytes, kind),
-            Err(e) => {
-                eprintln!("error: reading {}: {e}", rom.display());
-                return ExitCode::from(1);
-            }
-        }
-    } else {
-        em.load_rom(rom)
-    };
-    if let Err(e) = load_result {
+    if let Err(e) = load_rom_into(&mut em, rom, force_mapper) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }
