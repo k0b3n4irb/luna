@@ -1003,6 +1003,15 @@ impl Emulator {
         Ok(snes.take_superfx_trace())
     }
 
+    /// Diagnostic: the coprocessor's work RAM (Super FX Game Pak RAM) read
+    /// directly, bypassing the SNES-side ownership gating that returns
+    /// open-bus while the GSU owns it. `None` if the cart has no coproc RAM.
+    /// Lets a front-end compare luna's CPU-prepared GSU inputs vs a reference.
+    pub fn coproc_ram(&self) -> Result<Option<Vec<u8>>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        Ok(snes.mapper.coproc_ram().map(<[u8]>::to_vec))
+    }
+
     /// Enable the DMA→VRAM transfer-time trace: every byte an MDMA writes
     /// to `$2118/$2119` is captured as (source A-bus address → VMADD word
     /// → byte) AT transfer time. Lets a coprocessor framebuffer

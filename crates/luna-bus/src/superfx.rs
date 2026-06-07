@@ -1515,6 +1515,10 @@ impl Mapper for SuperFxMapper {
         self.sfr_get(SFR_IRQ)
     }
 
+    fn coproc_ram(&self) -> Option<&[u8]> {
+        Some(&self.ram)
+    }
+
     fn enable_superfx_trace(&mut self, max_events: usize) {
         self.trace = Some((Vec::new(), max_events));
     }

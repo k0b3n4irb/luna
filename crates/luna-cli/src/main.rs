@@ -91,6 +91,11 @@ enum Command {
         /// run. For diagnosing the framebuffer DMA → VRAM → display path.
         #[arg(long = "dump-vram")]
         dump_vram: Option<PathBuf>,
+        /// Dump the coprocessor work RAM (Super FX Game Pak RAM) raw bytes
+        /// to this file, bypassing GSU ownership gating. For comparing
+        /// luna's CPU-prepared GSU inputs against a reference.
+        #[arg(long = "dump-coproc-ram")]
+        dump_coproc_ram: Option<PathBuf>,
         /// Where to write the JSON state. Use `-` for stdout.
         #[arg(long, default_value = "-")]
         out: PathBuf,
@@ -296,11 +301,13 @@ fn main() -> ExitCode {
             dma_trace,
             dma_trace_from,
             dma_trace_max,
+            dump_coproc_ram,
         } => run_state(
             &rom,
             steps,
             force_mapper.as_deref(),
             dump_vram.as_deref(),
+            dump_coproc_ram.as_deref(),
             &out,
             screenshot.as_deref(),
             audio_out.as_deref(),
@@ -780,6 +787,7 @@ fn run_state(
     steps: u64,
     force_mapper: Option<&str>,
     dump_vram_path: Option<&std::path::Path>,
+    dump_coproc_ram_path: Option<&std::path::Path>,
     out: &std::path::Path,
     screenshot: Option<&std::path::Path>,
     audio_out: Option<&std::path::Path>,
@@ -1068,6 +1076,20 @@ fn run_state(
                 Err(e) => eprintln!("error: writing VRAM dump: {e}"),
             },
             Err(e) => eprintln!("error: vram_bytes: {e}"),
+        }
+    }
+    if let Some(path) = dump_coproc_ram_path {
+        match em.coproc_ram() {
+            Ok(Some(bytes)) => match std::fs::write(path, &bytes) {
+                Ok(()) => eprintln!(
+                    "coproc work RAM ({} bytes) written to {}",
+                    bytes.len(),
+                    path.display()
+                ),
+                Err(e) => eprintln!("error: writing coproc RAM dump: {e}"),
+            },
+            Ok(None) => eprintln!("note: cart has no coprocessor work RAM"),
+            Err(e) => eprintln!("error: coproc_ram: {e}"),
         }
     }
     if let Some(path) = cpu_trace_path {
