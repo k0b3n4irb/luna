@@ -94,6 +94,15 @@ pub trait Mapper {
         false
     }
 
+    /// Diagnostic: the coprocessor's work RAM (e.g. Super FX Game Pak RAM)
+    /// read directly, bypassing the SNES-side ownership gating that returns
+    /// open-bus while the coprocessor owns the RAM. `None` if the mapper has
+    /// no coprocessor RAM. Used to compare luna's CPU-prepared GSU inputs
+    /// against a reference.
+    fn coproc_ram(&self) -> Option<&[u8]> {
+        None
+    }
+
     /// Snapshot the SA-1 coprocessor's CPU state, if this mapper hosts
     /// one. Plain `LoROM` / `HiROM` / Super FX / DSP-N return `None`.
     /// Used by luna-api to expose SA-1 PC / running state to debug
