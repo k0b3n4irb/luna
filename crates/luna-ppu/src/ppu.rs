@@ -371,6 +371,21 @@ pub struct Ppu {
     /// the address/latch counter still advances. ares ppu_io.cpp:19-45,
     /// Mesen2 SnesPpu.cpp:2046-2057 (`CanAccessVram`).
     pub active_display: bool,
+
+    /// Accumulator: set `true` whenever a *visible* scanline is rendered
+    /// with forced-blank OFF during the current frame. Snapshotted into
+    /// [`Ppu::frame_visible_content`] (and cleared) at each frame wrap by
+    /// [`Ppu::latch_frame_content`].
+    pub frame_visible_content_accum: bool,
+
+    /// Whether the just-completed frame showed any visible (non-forced-
+    /// blank) content. Distinct from the *instantaneous* INIDISP bit 7:
+    /// a game that re-blanks during `VBlank` every frame (e.g. Super FX
+    /// titles preparing the next double-buffer) reads forced-blank at the
+    /// frame boundary yet *did* display content during active scanout.
+    /// Front-ends gate "publish this frame vs hold the last good one" on
+    /// this, not on the instantaneous flag, so such frames aren't dropped.
+    pub frame_visible_content: bool,
 }
 
 impl Default for Ppu {
@@ -448,7 +463,20 @@ impl Ppu {
             // Post-reset state is forced-blanked (INIDISP=$80), so
             // active_display starts false.
             active_display: false,
+            // Post-reset: nothing displayed yet.
+            frame_visible_content_accum: false,
+            frame_visible_content: false,
         }
+    }
+
+    /// Snapshot the current frame's "visible content shown" accumulator
+    /// into [`Ppu::frame_visible_content`] and reset it for the next
+    /// frame. Called by the scheduler at the frame wrap, so the published
+    /// value always describes the frame whose framebuffer is now complete
+    /// — pairing race-free with the frame counter.
+    pub const fn latch_frame_content(&mut self) {
+        self.frame_visible_content = self.frame_visible_content_accum;
+        self.frame_visible_content_accum = false;
     }
 
     /// Render the current visible scanline `y` into the persistent

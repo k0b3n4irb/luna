@@ -744,6 +744,7 @@ fn run_frames(
         let executed = em.step_until_frame(FRAME_BUDGET).unwrap_or(0);
         let frame = em.frame_count().unwrap_or(0);
         let blanked = em.forced_blank().unwrap_or(false);
+        let showed = em.frame_showed_content().unwrap_or(true);
         let png = match em.render_frame_png(false) {
             Ok(p) => p,
             Err(e) => {
@@ -751,14 +752,17 @@ fn run_frames(
                 return ExitCode::from(1);
             }
         };
-        let tag = if blanked { "blank" } else { "live" };
+        // Tag on the per-frame "showed visible content" latch (what the GUI
+        // publishes), not the instantaneous forced-blank bit — the latter
+        // mislabels Super FX frames that re-blank at VBlank as "blank".
+        let tag = if showed { "live" } else { "blank" };
         let path = out_dir.join(format!("frame_{i:03}_f{frame}_{tag}.png"));
         if let Err(e) = std::fs::write(&path, &png) {
             eprintln!("error: writing {}: {e}", path.display());
             return ExitCode::from(1);
         }
         println!(
-            "frame {i:>3}: ppu_frame={frame} forced_blank={blanked} (+{executed} instr) -> {}",
+            "frame {i:>3}: ppu_frame={frame} showed_content={showed} forced_blank={blanked} (+{executed} instr) -> {}",
             path.display()
         );
         if executed == 0 {

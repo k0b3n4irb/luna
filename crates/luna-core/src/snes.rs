@@ -1298,6 +1298,14 @@ impl SnesBus<'_> {
         if self.ppu_line < vblank_start {
             self.ppu
                 .render_current_scanline(self.ppu_line, luna_ppu::RenderOptions::default());
+            // Latch that this frame showed visible content if the line was
+            // scanned out un-blanked. Front-ends use the per-frame snapshot
+            // (not the instantaneous INIDISP bit, which a Super FX title
+            // re-asserts every VBlank to prep its next buffer) to decide
+            // whether to publish the frame.
+            if self.ppu.inidisp & 0x80 == 0 {
+                self.ppu.frame_visible_content_accum = true;
+            }
         }
 
         self.ppu_line += 1;
@@ -1332,6 +1340,10 @@ impl SnesBus<'_> {
             self.ppu_line = 0;
             self.cpu_regs.hvbjoy &= !0x80;
             self.frame_count = self.frame_count.saturating_add(1);
+            // Snapshot whether the frame that just completed showed any
+            // visible content, paired with the frame counter bump so a
+            // front-end polling at this boundary reads a consistent value.
+            self.ppu.latch_frame_content();
             // Interlace field parity flips every frame at the V-counter wrap
             // (ares counter/inline.hpp:32), exposed at STAT78 bit 7. Phase A:
             // flag only — no vertical doubling yet.

@@ -866,6 +866,25 @@ impl Emulator {
         Ok(self.snes.as_ref().ok_or(ApiError::NoRom)?.ppu.inidisp & 0x80 != 0)
     }
 
+    /// Whether the just-completed frame scanned out any visible (non-
+    /// forced-blank) content. Unlike [`Emulator::forced_blank`] — the
+    /// *instantaneous* INIDISP bit, which a Super FX title re-asserts
+    /// every `VBlank` to prep its next double-buffer — this is a per-frame
+    /// latch describing the frame whose framebuffer is now complete. A
+    /// front-end should gate "publish this frame vs hold the last good
+    /// one" on this, so frames that displayed content during active
+    /// scanout but re-blanked at the boundary aren't dropped (the Star Fox
+    /// "blink": its framebuffer is correct every frame, yet the
+    /// instantaneous flag reads blank ~14 frames in 15).
+    pub fn frame_showed_content(&self) -> Result<bool, ApiError> {
+        Ok(self
+            .snes
+            .as_ref()
+            .ok_or(ApiError::NoRom)?
+            .ppu
+            .frame_visible_content)
+    }
+
     /// Number of stereo samples currently waiting in the APU output
     /// queue — cheap, lets an audio-paced GUI drain exactly the host
     /// ring's free space and tell whether the ring (not the queue) was
