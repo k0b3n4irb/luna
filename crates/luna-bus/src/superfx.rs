@@ -1545,6 +1545,178 @@ mod tests {
         assert_eq!(fx().kind(), MapperKind::SuperFx);
     }
 
+    /// One reference GSU instruction snapshot for the differential harness.
+    struct Row {
+        pc: u32,
+        opcode: u8,
+        sfr: u16,
+        sreg: usize,
+        dreg: usize,
+        pbr: u8,
+        r: [u16; 16],
+    }
+
+    // GSU differential harness: replay a reference (Mesen) GSU instruction
+    // trace one op at a time and flag opcodes whose register output diverges.
+    // Diagnostic — skips silently unless both the reference CSV and the ROM
+    // are present (so CI is unaffected). Run with:
+    //   cargo test -p luna-bus gsu_differential -- --nocapture
+    #[test]
+    fn gsu_differential_vs_mesen() {
+        use std::path::Path;
+        let csv_path =
+            std::env::var("LUNA_GSU_DIFF_CSV").unwrap_or_else(|_| "/tmp/mesen_gsu_full.csv".into());
+        // ROM is gitignored; default to the repo-relative path, override
+        // with LUNA_SF_ROM. Test skips silently if either file is absent.
+        let rom_path = std::env::var("LUNA_SF_ROM")
+            .unwrap_or_else(|_| "../../tests/roms/Star Fox (USA) (Rev 2).sfc".into());
+        if !Path::new(&csv_path).exists() || !Path::new(&rom_path).exists() {
+            eprintln!("gsu_differential: reference CSV or ROM absent — skipping");
+            return;
+        }
+        let rom = std::fs::read(&rom_path).expect("read ROM");
+        let text = std::fs::read_to_string(&csv_path).expect("read CSV");
+
+        // Parse rows: seq,pc,opcode,sfr,sreg,dreg,pbr,rombr,colr,r0..r15
+        let mut rows: Vec<Row> = Vec::new();
+        for (i, line) in text.lines().enumerate() {
+            if i == 0 {
+                continue; // header
+            }
+            let f: Vec<&str> = line.split(',').collect();
+            if f.len() < 25 {
+                continue;
+            }
+            let g = |k: usize| f[k].trim().parse::<i64>().unwrap_or(0);
+            let mut r = [0u16; 16];
+            for (j, rr) in r.iter_mut().enumerate() {
+                *rr = g(9 + j) as u16;
+            }
+            rows.push(Row {
+                pc: g(1) as u32,
+                opcode: (g(2) & 0xFF) as u8,
+                sfr: g(3) as u16,
+                sreg: g(4) as usize,
+                dreg: g(5) as usize,
+                pbr: g(6) as u8,
+                r,
+            });
+        }
+
+        // Skip opcodes whose register output depends on un-injected state
+        // (RAM/ROM reads, pixel cache) — v1 covers pure-register ops.
+        let skip = |op: u8| {
+            matches!(op, 0x00 | 0x02 | 0x4C | 0x90 | 0xDF | 0xEF)
+                || (0x30..=0x3B).contains(&op) // store
+                || (0x40..=0x4B).contains(&op) // load
+                || (0xA0..=0xAF).contains(&op) // ibt/lms/sms (mem)
+                || (0xF0..=0xFF).contains(&op) // iwt/lm/sm (mem)
+        };
+
+        let mut m = SuperFxMapper::new(rom, 0x8000);
+        let flag_mask: u16 = SFR_Z | SFR_CY | SFR_S | SFR_OV | SFR_ALT1 | SFR_ALT2 | SFR_B;
+        let (mut tested, mut data_div, mut flag_div, mut pc_div) = (0u64, 0u64, 0u64, 0u64);
+        // per opcode: (tested, data_diverged, pc_diverged)
+        let mut by_op: std::collections::BTreeMap<u8, (u64, u64, u64)> =
+            std::collections::BTreeMap::new();
+        let mut samples: Vec<String> = Vec::new();
+        let mut pc_samples: Vec<String> = Vec::new();
+
+        for w in rows.windows(2) {
+            let (pre, post) = (&w[0], &w[1]);
+            if skip(pre.opcode) {
+                continue;
+            }
+            // Inject pre-state.
+            m.regs.r = pre.r;
+            m.regs.sfr = pre.sfr;
+            m.regs.sreg = pre.sreg;
+            m.regs.dreg = pre.dreg;
+            m.regs.pbr = pre.pbr;
+            m.regs.cbr = 0; // keep PC out of the cache window → ROM fetch
+            m.regs.romcl = 0;
+            m.regs.ramcl = 0;
+            m.regs.pipeline = pre.opcode; // peekpipe() returns this as the opcode
+            m.regs.r[15] = (pre.pc & 0xFFFF) as u16 + 1; // luna: r15 = opcode_addr+1
+            m.run_one(); // peekpipe (→ operand prefetch from ROM) + execute + r15++
+
+            tested += 1;
+            let e = by_op.entry(pre.opcode).or_insert((0, 0, 0));
+            e.0 += 1;
+            // Compare data registers r0..r14.
+            let data_ok = (0..15).all(|k| m.regs.r[k] == post.r[k]);
+            // Compare control-flow r15 ONLY for control-flow opcodes. For
+            // ordinary ops the next PC is trivial, and single-step replay
+            // can't reproduce the GSU's 1-instruction branch *delay slot*
+            // (the op physically after a taken branch runs, then the target
+            // is taken) — so a NOP/INC/DEC in a delay slot would false-flag.
+            let is_branch = matches!(pre.opcode, 0x05..=0x0F | 0x3C | 0x91..=0x94 | 0x98..=0x9D);
+            // On a TAKEN branch luna writes r15 = target (= mesen's next
+            // opcode addr); on fall-through luna keeps r15 = opcode_addr+1.
+            let pc_ok = !is_branch
+                || (if m.modified_r15 {
+                    m.regs.r[15] == post.r[15]
+                } else {
+                    m.regs.r[15] == post.r[15].wrapping_add(1)
+                });
+            // Compare flag bits.
+            let flag_ok = (m.regs.sfr & flag_mask) == (post.sfr & flag_mask);
+            if !data_ok {
+                data_div += 1;
+                e.1 += 1;
+                if samples.len() < 25 {
+                    let diffs: Vec<String> = (0..15)
+                        .filter(|&k| m.regs.r[k] != post.r[k])
+                        .map(|k| format!("r{k}: got {:04X} exp {:04X}", m.regs.r[k], post.r[k]))
+                        .collect();
+                    samples.push(format!(
+                        "op {:02X} @pc {:06X} sreg{} dreg{}: {}",
+                        pre.opcode,
+                        pre.pc,
+                        pre.sreg,
+                        pre.dreg,
+                        diffs.join(", ")
+                    ));
+                }
+            }
+            if !pc_ok {
+                pc_div += 1;
+                e.2 += 1;
+                if pc_samples.len() < 25 {
+                    pc_samples.push(format!(
+                        "op {:02X} @pc {:06X}: r15 got {:04X} exp {:04X} (mesen-next {:04X})",
+                        pre.opcode,
+                        pre.pc,
+                        m.regs.r[15],
+                        post.r[15].wrapping_add(1),
+                        post.r[15]
+                    ));
+                }
+            }
+            if !flag_ok {
+                flag_div += 1;
+            }
+        }
+
+        eprintln!(
+            "\n=== GSU differential: {tested} ops tested | data-diverge {data_div} | flag-diverge {flag_div} | pc-diverge {pc_div} ==="
+        );
+        eprintln!("per-opcode divergence (op: data/pc/tested):");
+        for (op, (t, d, p)) in &by_op {
+            if *d > 0 || *p > 0 {
+                eprintln!("  {op:02X}: data {d}, pc {p} / {t}");
+            }
+        }
+        eprintln!("\nsample data divergences:");
+        for s in &samples {
+            eprintln!("  {s}");
+        }
+        eprintln!("\nsample pc divergences:");
+        for s in &pc_samples {
+            eprintln!("  {s}");
+        }
+    }
+
     #[test]
     fn round_up_pow2_works() {
         assert_eq!(round_up_pow2(0), 1);
