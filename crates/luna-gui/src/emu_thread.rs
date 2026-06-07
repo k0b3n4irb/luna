@@ -203,13 +203,20 @@ fn run(
 
             // Framebuffer publication via the SAME API render path the
             // CLI/MCP use (`render_frame_rgba`) — so the GUI and CLI
-            // cannot disagree on pixels. Only refresh on a new frame;
-            // skip forced-blank frames so the UI holds the last good
-            // frame instead of flashing black (most games toggle INIDISP
-            // bit 7 every VBlank during tile/OAM upload).
+            // cannot disagree on pixels. Only refresh on a new frame; hold
+            // the last good frame when the completed frame showed NO
+            // visible content (genuine full-frame blank: loading, fade),
+            // so the UI doesn't flash black. We gate on the per-frame
+            // `frame_showed_content` latch, NOT the instantaneous
+            // `forced_blank` — a Super FX title (Star Fox) re-asserts
+            // INIDISP bit 7 every VBlank to prep its next double-buffer, so
+            // the instantaneous flag reads blank ~14/15 frames even though
+            // each frame's framebuffer is fully and correctly drawn.
+            // Gating on the instantaneous flag dropped those good frames →
+            // the ~8.5 fps "blink+lag". The per-frame latch keeps them.
             let cur_frame = em.frame_count().unwrap_or(last_emu_frame);
-            let blanked = em.forced_blank().unwrap_or(false);
-            if cur_frame != last_emu_frame && !blanked {
+            let showed_content = em.frame_showed_content().unwrap_or(true);
+            if cur_frame != last_emu_frame && showed_content {
                 if let Ok(rgba) = em.render_frame_rgba(false) {
                     last_emu_frame = cur_frame;
                     if let Ok(mut shared_fb) = framebuffer_rgba.lock() {
