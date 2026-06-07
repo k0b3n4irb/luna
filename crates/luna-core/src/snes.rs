@@ -531,63 +531,91 @@ impl Snes {
     /// Run the CPU reset sequence: read the reset vector at `$00:FFFC`
     /// via the bus and load `PC`.
     pub fn reset(&mut self) {
+        // 1. CPU: re-read the reset vector through the bus. VRAM / WRAM /
+        //    SRAM persist across a reset (real hardware doesn't clear them).
         let scanlines = self.region_scanlines();
         let ppu_line_snapshot = self.ppu_line;
         let vblank_start_snapshot = vblank_start_line(self.region);
         let cpu_pc_snapshot = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
-        let Self {
-            cpu,
-            ppu,
-            dma,
-            cpu_regs,
-            apu_real,
-            apu_stub_fallback,
-            apu_panicked,
-            wram,
-            mapper,
-            fast_rom,
-            nmi_pending,
-            irq_pending,
-            total_mclk,
-            wm_addr,
-            joypad_strobe,
-            joypad1_shift,
-            joypad2_shift,
-            mailbox_log,
-            sa1_log,
-            mem_trace_log,
-            ..
-        } = self;
-        let mut bus = SnesBus {
-            wram,
-            mapper: mapper.as_mut(),
-            ppu,
-            dma,
-            cpu_regs,
-            apu_real,
-            apu_stub_fallback,
-            apu_panicked,
-            fast_rom: *fast_rom,
-            nmi: nmi_pending,
-            irq: irq_pending,
-            mclk_total: total_mclk,
-            scanlines_per_frame: scanlines,
-            ppu_line: ppu_line_snapshot,
-            mcycles_in_line: 0,
-            frame_count: 0,
-            nmis_serviced: 0,
-            sched_enabled: false,
-            vblank_start_line: vblank_start_snapshot,
-            cpu_pc_full: cpu_pc_snapshot,
-            mailbox_log,
-            sa1_log,
-            mem_trace_log,
-            wm_addr,
-            joypad_strobe,
-            joypad1_shift,
-            joypad2_shift,
-        };
-        cpu.reset(&mut bus);
+        {
+            let Self {
+                cpu,
+                ppu,
+                dma,
+                cpu_regs,
+                apu_real,
+                apu_stub_fallback,
+                apu_panicked,
+                wram,
+                mapper,
+                fast_rom,
+                nmi_pending,
+                irq_pending,
+                total_mclk,
+                wm_addr,
+                joypad_strobe,
+                joypad1_shift,
+                joypad2_shift,
+                mailbox_log,
+                sa1_log,
+                mem_trace_log,
+                ..
+            } = self;
+            let mut bus = SnesBus {
+                wram,
+                mapper: mapper.as_mut(),
+                ppu,
+                dma,
+                cpu_regs,
+                apu_real,
+                apu_stub_fallback,
+                apu_panicked,
+                fast_rom: *fast_rom,
+                nmi: nmi_pending,
+                irq: irq_pending,
+                mclk_total: total_mclk,
+                scanlines_per_frame: scanlines,
+                ppu_line: ppu_line_snapshot,
+                mcycles_in_line: 0,
+                frame_count: 0,
+                nmis_serviced: 0,
+                sched_enabled: false,
+                vblank_start_line: vblank_start_snapshot,
+                cpu_pc_full: cpu_pc_snapshot,
+                mailbox_log,
+                sa1_log,
+                mem_trace_log,
+                wm_addr,
+                joypad_strobe,
+                joypad1_shift,
+                joypad2_shift,
+            };
+            cpu.reset(&mut bus);
+        }
+
+        // 2. Power-on-style reset of the rest of the system. CRITICAL: the
+        //    APU. A reset re-runs the game's boot sound-driver upload, whose
+        //    IPL-ROM handshake deadlocks unless the SPC700 is back at its
+        //    ready state — leaving the APU running its driver made `Reset`
+        //    appear to do nothing (the main CPU spun on the upload forever).
+        //    CPU registers ($42xx), master clock, frame/scanline counters
+        //    and pending interrupts also return to power-on; VRAM/WRAM/SRAM
+        //    and the cartridge mapper persist (re-initialised by boot code).
+        self.apu_real = Apu::new();
+        self.apu_panicked = false;
+        self.apu_stub_fallback = ApuStub::new();
+        self.cpu_regs = CpuRegs::new();
+        self.total_mclk = 0;
+        self.ppu_line = 0;
+        self.mcycles_in_line = 0;
+        self.frame_count = 0;
+        self.nmis_serviced = 0;
+        self.nmi_pending = false;
+        self.irq_pending = false;
+        self.wm_addr = 0;
+        self.joypad_strobe = false;
+        self.joypad1_shift = 0;
+        self.joypad2_shift = 0;
     }
 
     /// Execute one CPU instruction. Returns the master-cycle cost of
