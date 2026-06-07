@@ -449,6 +449,23 @@ pub fn render_scanline_partial_into(
     opts: RenderOptions,
     out: &mut [[u8; 3]],
 ) {
+    render_scanline_partial_into_from(ppu, y, start_x, end_x, opts, out, None);
+}
+
+/// Core of [`render_scanline_partial_into`]. `precomp` optionally
+/// supplies a pre-decoded sprite set + line evaluation so the scheduler
+/// decodes sprites once per scanline and shares them across the
+/// overflow-flag read and (in interlace) both field renders (PERF-2).
+/// `None` decodes sprites internally, as the full-frame paths do.
+pub(crate) fn render_scanline_partial_into_from(
+    ppu: &Ppu,
+    y: u16,
+    start_x: u16,
+    end_x: u16,
+    opts: RenderOptions,
+    out: &mut [[u8; 3]],
+    precomp: Option<(&[SpriteEntry; 128], &SpriteEval)>,
+) {
     debug_assert_eq!(
         out.len(),
         FRAME_W,
@@ -552,7 +569,10 @@ pub fn render_scanline_partial_into(
         ];
         (s, s)
     };
-    let sprites = render_sprites_scanline_indexed_with(ppu, y, opts);
+    let sprites = match precomp {
+        Some((s, e)) => render_sprites_scanline_indexed_from(ppu, y, opts, s, e),
+        None => render_sprites_scanline_indexed_with(ppu, y, opts),
+    };
 
     for (x, out_pixel) in out[start..end]
         .iter_mut()
@@ -1602,23 +1622,25 @@ fn sprite_onscreen_tiles(sp: &SpriteEntry) -> usize {
         .count()
 }
 
-/// Result of per-line sprite evaluation.
-struct SpriteEval {
+/// Result of per-line sprite evaluation. Shared (pre-computed once per
+/// scanline) between the overflow-flag read and the flush render so the
+/// 128-entry decode + evaluation isn't repeated (PERF-2).
+pub(crate) struct SpriteEval {
     /// Surviving sprite indices in *fetch* order (back-most first), so
     /// the renderer draws them back-to-front and the front sprite wins.
     survivors: [u8; 32],
     survivor_count: usize,
     /// More than 32 sprites on this line ($213E.6).
-    range_over: bool,
+    pub(crate) range_over: bool,
     /// More than 34 sprite tiles on this line ($213E.7).
-    time_over: bool,
+    pub(crate) time_over: bool,
 }
 
 /// Evaluate one scanline's sprites: the 32-sprite range limit and the
 /// 34-tile time limit, starting from `firstSprite` (OAM priority
 /// rotation). ares `object.cpp:35-49,91-161`, Mesen2
 /// `SnesPpu.cpp:595-625,693-741`.
-fn evaluate_sprite_line(ppu: &Ppu, sprites: &[SpriteEntry; 128], y: u16) -> SpriteEval {
+pub(crate) fn evaluate_sprite_line(ppu: &Ppu, sprites: &[SpriteEntry; 128], y: u16) -> SpriteEval {
     let first = ppu.oam.first_sprite() as usize;
     // OBJ interlace = SETINI bit 1 (separate from BG interlace, bit 0).
     let interlace = ppu.setini & 0x02 != 0;
@@ -1670,9 +1692,10 @@ fn evaluate_sprite_line(ppu: &Ppu, sprites: &[SpriteEntry; 128], y: u16) -> Spri
     }
 }
 
-/// Per-line OBJ overflow flags ($213E bits 6/7). Used by the scanline
-/// scheduler to set the status bits; the renderer applies the matching
-/// 32/34 drop.
+/// Per-line OBJ overflow flags ($213E bits 6/7). Test-only helper now
+/// that the scheduler shares one scanline evaluation between the flag
+/// read and the render (PERF-2) instead of calling this separately.
+#[cfg(test)]
 pub(crate) fn sprite_line_overflow(ppu: &Ppu, y: u16) -> (bool, bool) {
     if ppu.inidisp & 0x80 != 0 {
         return (false, false);
@@ -1692,12 +1715,29 @@ pub fn render_sprites_scanline_indexed_with(
     y: u16,
     opts: RenderOptions,
 ) -> IndexedScanline {
+    if ppu.inidisp & 0x80 != 0 && !opts.bypass_forced_blank {
+        return [None; 256];
+    }
+    let sprites = decode_all_sprites(ppu);
+    let eval = evaluate_sprite_line(ppu, &sprites, y);
+    render_sprites_scanline_indexed_from(ppu, y, opts, &sprites, &eval)
+}
+
+/// Core of [`render_sprites_scanline_indexed_with`] over a pre-decoded
+/// sprite set + line evaluation, so the per-scanline decode is shared
+/// across the overflow-flag read and the (possibly doubled, in
+/// interlace) flush render instead of repeated 2-4× (PERF-2).
+fn render_sprites_scanline_indexed_from(
+    ppu: &Ppu,
+    y: u16,
+    opts: RenderOptions,
+    sprites: &[SpriteEntry; 128],
+    eval: &SpriteEval,
+) -> IndexedScanline {
     let mut out: IndexedScanline = [None; 256];
     if ppu.inidisp & 0x80 != 0 && !opts.bypass_forced_blank {
         return out;
     }
-    let sprites = decode_all_sprites(ppu);
-    let eval = evaluate_sprite_line(ppu, &sprites, y);
     // OBJ interlace (Phase D) = SETINI **bit 1** (not bit 0, which is BG
     // interlace). When on, the sprite occupies half the screen lines and a
     // screen row samples logical sprite row `screen_row*2 + field` (ares

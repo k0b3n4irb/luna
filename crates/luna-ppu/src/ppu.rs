@@ -6,7 +6,10 @@
 //! is responsible for the bank/region routing.
 
 use crate::memory::{Cgram, Oam, VmainSettings, Vram};
-use crate::renderer::{FRAME_H, FRAME_W, RenderOptions, render_scanline_partial_into};
+use crate::renderer::{
+    FRAME_H, FRAME_W, RenderOptions, SpriteEntry, SpriteEval, decode_all_sprites,
+    evaluate_sprite_line, render_scanline_partial_into_from,
+};
 // `render_scanline_into` is no longer used directly here — full-line
 // renders go through `flush_partial_scanline`.
 
@@ -463,10 +466,20 @@ impl Ppu {
             self.obj_range_over = false;
             self.obj_time_over = false;
         }
-        let (range, time) = crate::renderer::sprite_line_overflow(self, y);
-        self.obj_range_over |= range;
-        self.obj_time_over |= time;
-        self.flush_partial_scanline(y, FRAME_W as u16, opts);
+        // Decode + evaluate this line's sprites ONCE and share the result
+        // with the flush render (PERF-2). Previously a separate
+        // `sprite_line_overflow` redid the full 128-entry OAM decode just
+        // to read these two overflow flags. Blank lines contribute no
+        // flags (matching the old guard) and need no sprite decode.
+        if self.inidisp & 0x80 == 0 {
+            let sprites = decode_all_sprites(self);
+            let eval = evaluate_sprite_line(self, &sprites, y);
+            self.obj_range_over |= eval.range_over;
+            self.obj_time_over |= eval.time_over;
+            self.flush_partial_scanline_inner(y, FRAME_W as u16, opts, Some((&sprites, &eval)));
+        } else {
+            self.flush_partial_scanline_inner(y, FRAME_W as u16, opts, None);
+        }
         self.scanline_reset();
     }
 
@@ -479,6 +492,20 @@ impl Ppu {
     /// Out-of-range `y` (≥ `FRAME_H`) or `end_x <= last_flushed_dot`
     /// is a no-op.
     pub fn flush_partial_scanline(&mut self, y: u16, end_x: u16, opts: RenderOptions) {
+        self.flush_partial_scanline_inner(y, end_x, opts, None);
+    }
+
+    /// Core of [`flush_partial_scanline`]. `precomp` lets the scheduler
+    /// supply a once-per-scanline sprite decode + evaluation so the
+    /// (interlace-doubled) render reuses it instead of re-decoding all
+    /// 128 OAM entries per render (PERF-2). `None` decodes internally.
+    fn flush_partial_scanline_inner(
+        &mut self,
+        y: u16,
+        end_x: u16,
+        opts: RenderOptions,
+        precomp: Option<(&[SpriteEntry; 128], &SpriteEval)>,
+    ) {
         let yi = usize::from(y);
         if yi >= FRAME_H {
             return;
@@ -502,9 +529,9 @@ impl Ppu {
             let saved_field = self.field;
             let mut row_odd = [[0u8; 3]; FRAME_W];
             self.field = false;
-            render_scanline_partial_into(self, y, start, end, opts, &mut row);
+            render_scanline_partial_into_from(self, y, start, end, opts, &mut row, precomp);
             self.field = true;
-            render_scanline_partial_into(self, y, start, end, opts, &mut row_odd);
+            render_scanline_partial_into_from(self, y, start, end, opts, &mut row_odd, precomp);
             self.field = saved_field;
             for x in si..ei {
                 for c in 0..3 {
@@ -512,7 +539,7 @@ impl Ppu {
                 }
             }
         } else {
-            render_scanline_partial_into(self, y, start, end, opts, &mut row);
+            render_scanline_partial_into_from(self, y, start, end, opts, &mut row, precomp);
         }
         let off = yi * FRAME_W;
         self.framebuffer[off + si..off + ei].copy_from_slice(&row[si..ei]);
