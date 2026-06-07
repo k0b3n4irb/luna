@@ -425,7 +425,16 @@ impl Oam {
     pub fn write_gated(&mut self, value: u8, allow_data: bool) {
         let addr = self.address;
         if addr & 0x200 != 0 {
-            // High table.
+            // High table. The byte is `0x200 | (addr & 0x1F)` — the high
+            // table is indexed by the LOW 5 bits of the address only,
+            // confirmed by both references: ares `ppu/oam.cpp` `OAM::write`
+            // (`n = (n5)address << 2` for the bit-9 branch) and Mesen2
+            // `SnesPpu.cpp:1747` (`_oamRam[0x200 | (oamAddr & 0x1F)]`).
+            // So `addr & 0x21F` is CORRECT here — do NOT "simplify" it to
+            // `% self.data.len()`: for an `addr >= 0x220` (reachable when
+            // OAMADD points past the high table) that modulo wraps into
+            // the low table (e.g. 0x3FE → 0x1DE) instead of the hardware
+            // high-table byte (0x21E).
             if allow_data {
                 let off = usize::from(addr & 0x21F);
                 self.data[off] = value;
@@ -446,8 +455,21 @@ impl Oam {
 
     /// `$2138` read — OAM data read at the current byte address.
     /// Advances by one byte per read; no latching on reads.
+    ///
+    /// The high table uses the same low-5-bits indexing as the write path
+    /// (`0x200 | addr & 0x1F`) rather than a flat `% 0x220` — matching
+    /// ares `ppu/oam.cpp` `OAM::read` and Mesen2 `SnesPpu.cpp:1743-1748`
+    /// (`oamAddr < 512 ? _oamRam[oamAddr] : _oamRam[0x200 | (oamAddr &
+    /// 0x1F)]`). Identical to a modulo for every `addr < 0x220`; differs
+    /// only when OAMADD points past the high table (then the modulo would
+    /// wrongly wrap into the low table).
     pub fn read(&mut self) -> u8 {
-        let value = self.data[usize::from(self.address) % self.data.len()];
+        let off = if self.address & 0x200 != 0 {
+            0x200 | usize::from(self.address & 0x1F)
+        } else {
+            usize::from(self.address) % self.data.len()
+        };
+        let value = self.data[off];
         self.advance();
         value
     }
