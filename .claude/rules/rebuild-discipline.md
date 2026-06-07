@@ -5,6 +5,14 @@ committing, run the full workspace rebuild — **debug + release, all
 crates including `luna-gui` and the binaries** — so a stale binary is
 never the reason a feature appears broken at runtime.
 
+## Enforced automatically (hook)
+
+A `PostToolUse` hook in `.claude/settings.json` runs the **full rebuild
+(debug + release, all targets) followed by clippy `--all-features`** after
+*every* `*.rs` edit, asynchronously, and re-wakes on failure. This makes
+"rebuild after each change" mechanical, not a thing to remember — a stale
+binary can never silently survive an edit. Do not remove or weaken it.
+
 ## Canonical rebuild command
 
 ```
