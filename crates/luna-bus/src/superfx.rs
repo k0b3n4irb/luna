@@ -1717,6 +1717,198 @@ mod tests {
         }
     }
 
+    // GSU TRAJECTORY harness: inject the full engine state + work RAM ONCE,
+    // then run luna's GSU FREELY (accumulating) and compare each step to the
+    // reference trace. Unlike the single-step harness, this catches bugs in
+    // loads / accumulation / control flow that only surface over a run. Stops
+    // at the first GSU STOP (no CPU to re-GO). Skips silently w/o the files.
+    // Run: cargo test -p luna-bus gsu_trajectory -- --nocapture
+    #[test]
+    fn gsu_trajectory_vs_mesen() {
+        use std::path::Path;
+        let dir = std::env::var("LUNA_GSU_DIFF_DIR").unwrap_or_else(|_| "/tmp".into());
+        let csv = format!("{dir}/mesen_gsu_full.csv");
+        let initp = format!("{dir}/mesen_gsu_init.txt");
+        let ramp = format!("{dir}/mesen_gsu_ram_start.bin");
+        let rom_path = std::env::var("LUNA_SF_ROM")
+            .unwrap_or_else(|_| "../../tests/roms/Star Fox (USA) (Rev 2).sfc".into());
+        if ![&csv, &initp, &ramp, &rom_path]
+            .iter()
+            .all(|p| Path::new(p).exists())
+        {
+            eprintln!("gsu_trajectory: reference files or ROM absent — skipping");
+            return;
+        }
+        let rom = std::fs::read(&rom_path).expect("rom");
+        let ram_start = std::fs::read(&ramp).expect("ram");
+        let init: std::collections::HashMap<String, i64> = std::fs::read_to_string(&initp)
+            .expect("init")
+            .lines()
+            .filter_map(|l| {
+                let (k, v) = l.split_once('=')?;
+                Some((k.to_string(), v.trim().parse().ok()?))
+            })
+            .collect();
+        let g = |k: &str| *init.get(k).unwrap_or(&0);
+
+        // Parse the reference instruction trace.
+        let text = std::fs::read_to_string(&csv).expect("csv");
+        let mut rows: Vec<Row> = Vec::new();
+        for (i, line) in text.lines().enumerate() {
+            if i == 0 {
+                continue;
+            }
+            let f: Vec<&str> = line.split(',').collect();
+            if f.len() < 25 {
+                continue;
+            }
+            let gv = |k: usize| f[k].trim().parse::<i64>().unwrap_or(0);
+            let mut r = [0u16; 16];
+            for (j, rr) in r.iter_mut().enumerate() {
+                *rr = gv(9 + j) as u16;
+            }
+            rows.push(Row {
+                pc: gv(1) as u32,
+                opcode: (gv(2) & 0xFF) as u8,
+                sfr: gv(3) as u16,
+                sreg: gv(4) as usize,
+                dreg: gv(5) as usize,
+                pbr: gv(6) as u8,
+                r,
+            });
+        }
+        assert!(rows.len() > 2, "need a trace");
+
+        let ram_size = g("ramSize") as usize;
+        let mut m = SuperFxMapper::new(rom, ram_size);
+        assert_eq!(m.ram.len(), ram_start.len(), "ram size mismatch");
+        m.ram.copy_from_slice(&ram_start);
+
+        // Inject the full engine + register state from row 0 + init.txt.
+        let r0 = &rows[0];
+        m.regs.r = r0.r;
+        m.regs.sfr = r0.sfr | SFR_G; // ensure running
+        m.regs.sreg = r0.sreg;
+        m.regs.dreg = r0.dreg;
+        m.regs.pbr = r0.pbr;
+        m.regs.cbr = g("cbr") as u16;
+        m.regs.scbr = g("scbr") as u8;
+        m.regs.scmr_ht = g("ht") as u8;
+        m.regs.scmr_md = g("md") as u8;
+        m.regs.scmr_ron = g("ron") != 0;
+        m.regs.scmr_ran = g("ran") != 0;
+        m.regs.colr = g("colr") as u8;
+        m.regs.por = g("por") as u8;
+        m.regs.cfgr = g("cfgr") as u8;
+        m.regs.clsr = g("clsr") != 0;
+        m.regs.rombr = g("rombr") as u8;
+        m.regs.rambr = g("rambr") != 0;
+        m.regs.romdr = g("romdr") as u8;
+        m.regs.ramaddr = g("ramaddr") as u16;
+        m.regs.ramar = g("ramar") as u16;
+        m.regs.ramdr = g("ramdr") as u8;
+        m.regs.romcl = 0;
+        m.regs.ramcl = 0;
+        for v in &mut m.cache_valid {
+            *v = false; // force ROM/RAM refetch (cache mirrors them)
+        }
+        m.regs.pipeline = r0.opcode;
+        m.regs.r[15] = (r0.pc & 0xFFFF) as u16 + 1;
+
+        let flag_mask: u16 = SFR_Z | SFR_CY | SFR_S | SFR_OV | SFR_ALT1 | SFR_ALT2 | SFR_B;
+        let mut steps = 0usize;
+        let mut diverged = false;
+        for i in 0..rows.len() - 1 {
+            // Control-flow sync: the op luna is about to run must match the ref.
+            let luna_op = m.regs.pipeline;
+            if luna_op != rows[i].opcode {
+                eprintln!(
+                    "\nTRAJECTORY DIVERGE @step {i}: luna about to run op {:02X} but ref ran {:02X} @pc {:06X} (control-flow drift)",
+                    luna_op, rows[i].opcode, rows[i].pc
+                );
+                diverged = true;
+                break;
+            }
+            m.run_one();
+            steps += 1;
+            if m.regs.sfr & SFR_G == 0 {
+                eprintln!(
+                    "\nreached GSU STOP at step {i} (op {:02X}) — end of GO run",
+                    rows[i].opcode
+                );
+                break;
+            }
+            let post = &rows[i + 1];
+            let data_diff: Vec<String> = (0..15)
+                .filter(|&k| m.regs.r[k] != post.r[k])
+                .map(|k| format!("r{k}: luna {:04X} ref {:04X}", m.regs.r[k], post.r[k]))
+                .collect();
+            let flag_diff = (m.regs.sfr & flag_mask) != (post.sfr & flag_mask);
+            if !data_diff.is_empty() || flag_diff {
+                eprintln!(
+                    "\nTRAJECTORY DIVERGE @step {i}: op {:02X} @pc {:06X} sreg{} dreg{}",
+                    rows[i].opcode, rows[i].pc, rows[i].sreg, rows[i].dreg
+                );
+                eprintln!("  data: {}", data_diff.join(", "));
+                if flag_diff {
+                    eprintln!(
+                        "  flags: luna {:04X} ref {:04X}",
+                        m.regs.sfr & flag_mask,
+                        post.sfr & flag_mask
+                    );
+                }
+                // a little context: the few preceding ops
+                let lo = i.saturating_sub(6);
+                eprintln!("  preceding ops:");
+                for (j, row) in rows.iter().enumerate().take(i + 1).skip(lo) {
+                    eprintln!(
+                        "    [{j}] {:02X} @pc {:06X} sreg{} dreg{}",
+                        row.opcode, row.pc, row.sreg, row.dreg
+                    );
+                }
+                diverged = true;
+                break;
+            }
+        }
+        eprintln!(
+            "\n=== GSU trajectory: replayed {steps} instrs, diverged={diverged} ===\n(clean = loads/compute/control-flow all match the reference over a free run)"
+        );
+
+        // RAM (PLOT/store) check: registers don't reveal framebuffer writes,
+        // so compare luna's work RAM after the GO-run to the reference's RAM
+        // at its first STOP. This is where a PLOT/flush bug would surface.
+        let stop_ram = format!("{dir}/mesen_gsu_ram_stop1.bin");
+        if !diverged && Path::new(&stop_ram).exists() {
+            let ref_ram = std::fs::read(&stop_ram).expect("stop ram");
+            if ref_ram.len() == m.ram.len() {
+                let diffs: Vec<usize> = (0..m.ram.len())
+                    .filter(|&i| m.ram[i] != ref_ram[i])
+                    .collect();
+                eprintln!(
+                    "RAM after GO-run: {} / {} bytes differ from reference ({:.2}%)",
+                    diffs.len(),
+                    m.ram.len(),
+                    100.0 * diffs.len() as f64 / m.ram.len() as f64
+                );
+                // Cluster the diffs into 0x100-byte regions to localize.
+                let mut region: std::collections::BTreeMap<usize, usize> =
+                    std::collections::BTreeMap::new();
+                for &i in &diffs {
+                    *region.entry(i & !0xFF).or_insert(0) += 1;
+                }
+                eprintln!("differing RAM regions ($base: count):");
+                for (base, n) in region.iter().take(40) {
+                    eprintln!("  ${base:05X}: {n}");
+                }
+                // Show a few concrete differing bytes.
+                eprintln!("sample differing bytes (addr: luna vs ref):");
+                for &i in diffs.iter().take(20) {
+                    eprintln!("  ${:05X}: {:02X} vs {:02X}", i, m.ram[i], ref_ram[i]);
+                }
+            }
+        }
+    }
+
     #[test]
     fn round_up_pow2_works() {
         assert_eq!(round_up_pow2(0), 1);
