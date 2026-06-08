@@ -49,19 +49,20 @@ pub const fn address_speed(addr: Addr24, fast_rom: bool) -> MemorySpeed {
     let bank = bank_of(addr);
     let offset = offset_of(addr);
 
-    // Joypad registers are XSLOW. They live in banks $00-$3F (mirrored at
-    // $80-$BF) at offsets $4016-$4017.
-    if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && matches!(offset, 0x4016..=0x4017) {
-        return MemorySpeed::XSlow;
-    }
-
     match bank {
-        // System area in banks $00-$3F (and mirror $80-$BF).
+        // System area in banks $00-$3F (and mirror $80-$BF). Sub-region
+        // costs are a faithful port of ares `CPU::wait` (sfc/cpu/memory.cpp):
+        // `$2000-$3FFF` and `$4200-$5FFF` are FAST (6); `$4000-$41FF` is
+        // XSLOW (12); the WRAM mirror and `$6000-$7FFF` are SLOW (8).
         0x00..=0x3F | 0x80..=0xBF => match offset {
             // LowRAM mirror.
             0x0000..=0x1FFF => MemorySpeed::Slow,
-            // PPU / APU / CPU / DMA MMIO.
-            0x2000..=0x5FFF => MemorySpeed::Slow,
+            // B-bus I/O: PPU ($21xx), APU ($2140-3), WRAM port ($2180-3).
+            0x2000..=0x3FFF => MemorySpeed::Fast,
+            // Joypad + auto-joypad strobe region (incl. $4016/$4017).
+            0x4000..=0x41FF => MemorySpeed::XSlow,
+            // CPU / DMA / IRQ / hardware-math registers ($42xx-$43xx).
+            0x4200..=0x5FFF => MemorySpeed::Fast,
             // Open bus / expansion.
             0x6000..=0x7FFF => MemorySpeed::Slow,
             // ROM cartridge area.
@@ -154,13 +155,52 @@ mod tests {
     }
 
     #[test]
-    fn ppu_registers_are_slow() {
+    fn io_region_speeds_match_ares_wait() {
+        // $2000-$3FFF (B-bus I/O: PPU/APU/WRAM port) is FAST (6) — ares
+        // `CPU::wait` `address - 0x4000 & 0x7e00`. The $2118/$2119 VRAM
+        // ports live here; charging SLOW (8) slowed CPU VRAM uploads ~33%
+        // per access and drifted GSU launches by a frame.
         assert_eq!(
             address_speed(make_addr(0x00, 0x2100), false),
-            MemorySpeed::Slow
+            MemorySpeed::Fast
+        );
+        assert_eq!(
+            address_speed(make_addr(0x00, 0x2118), false),
+            MemorySpeed::Fast
         );
         assert_eq!(
             address_speed(make_addr(0x00, 0x213F), false),
+            MemorySpeed::Fast
+        );
+        // $4000-$41FF (joypad / auto-joypad) is XSLOW (12).
+        assert_eq!(
+            address_speed(make_addr(0x00, 0x4000), false),
+            MemorySpeed::XSlow
+        );
+        assert_eq!(
+            address_speed(make_addr(0x00, 0x41FF), false),
+            MemorySpeed::XSlow
+        );
+        // $4200-$5FFF (CPU/DMA/IRQ/math regs) is FAST (6).
+        assert_eq!(
+            address_speed(make_addr(0x00, 0x4200), false),
+            MemorySpeed::Fast
+        );
+        assert_eq!(
+            address_speed(make_addr(0x00, 0x420B), false),
+            MemorySpeed::Fast
+        );
+        assert_eq!(
+            address_speed(make_addr(0x80, 0x4300), false),
+            MemorySpeed::Fast
+        );
+        // $0000-$1FFF and $6000-$7FFF stay SLOW (8).
+        assert_eq!(
+            address_speed(make_addr(0x00, 0x0000), false),
+            MemorySpeed::Slow
+        );
+        assert_eq!(
+            address_speed(make_addr(0x00, 0x6000), false),
             MemorySpeed::Slow
         );
     }
