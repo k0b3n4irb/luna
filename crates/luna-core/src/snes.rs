@@ -1356,8 +1356,20 @@ impl SnesBus<'_> {
             // Joypad auto-read latch + manual-mode shift reload.
             self.cpu_regs.latch_joypad_auto_read();
             if self.cpu_regs.nmitimen & 0x01 != 0 {
-                *self.joypad1_shift = self.cpu_regs.joypad1_latched;
-                *self.joypad2_shift = self.cpu_regs.joypad2_latched;
+                // The hardware auto-read strobes and clocks BOTH controllers
+                // 16 times, leaving their shift registers EXHAUSTED. A
+                // subsequent *un-strobed* manual read of $4016/$4017 then
+                // returns 1 on the data line (ares `controller/gamepad`
+                // `data()` returns 1 past 16 clocks; ares `cpu/io.cpp:16,20`
+                // `data.bit(0,1) = controllerPort.data()`), NOT the button
+                // bits. Reloading the latched value here made idle reads
+                // return B=0, so any game that polls $4016/$4017.d0 for the
+                // idle-high data line took the wrong branch — e.g. Donkey
+                // Kong Country's controller/autofire routine at $80:C13D /
+                // $80:C16C, which then corrupted its debounce counters and
+                // looped the attract/game-start sequence.
+                *self.joypad1_shift = 0xFFFF;
+                *self.joypad2_shift = 0xFFFF;
             }
         } else if self.ppu_line == vblank_start + 3 {
             self.cpu_regs.clear_joypad_busy();
