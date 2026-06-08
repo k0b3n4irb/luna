@@ -37,6 +37,7 @@ A cycle-accurate-ish SNES emulator written in Rust. 11-crate workspace:
 
 | Rule | Source | When it applies |
 |---|---|---|
+| **Faithful port + step-by-step dichotomy (THE method)** | `.claude/rules/faithful-port-and-dichotomy.md` | Any accuracy/timing bug; any subsystem that misbehaves vs hardware. Supersedes ad-hoc debugging. |
 | Reference-first implementation | `.claude/rules/reference-first.md` | Any SNES subsystem feature change |
 | Rebuild + lint discipline | `.claude/rules/rebuild-discipline.md` | Every code change before commit |
 | Rust lint discipline (clippy `--all-features`) | `.claude/rules/rust-lint-discipline.md` | Every code change before commit (extends rebuild) |
