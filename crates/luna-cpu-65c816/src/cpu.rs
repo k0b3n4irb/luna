@@ -46,6 +46,18 @@ pub struct Cpu {
     /// services the IRQ at an instruction boundary, IF the `I` flag
     /// allows it. NMI always wins over IRQ.
     pub pending_irq: bool,
+    /// **Level**-sensitive IRQ line, distinct from the edge-latched
+    /// [`Cpu::pending_irq`]. A coprocessor (Super FX / SA-1) holds the
+    /// S-CPU `/IRQ` pin asserted until the program acknowledges it
+    /// (Super FX: read `$3031`; SA-1: write `$2200` SIC) — that is a
+    /// *level*, not an edge. The bus re-samples it every instruction via
+    /// [`Cpu::set_irq_line`] (set AND clear), so once the device
+    /// deasserts there is nothing left pending. Modelling it as a sticky
+    /// edge on `pending_irq` re-armed the latch *during* the handler
+    /// (while `I` masked it) and then double-serviced one IRQ after the
+    /// `RTI` — the Star Fox object-flag corruption. Service consumes
+    /// `pending_irq` but never this line; the device clears it.
+    pub irq_line: bool,
     /// Per-instruction latch: when set, a 16-bit data access wraps its
     /// high byte within bank 0 (ares `readDirect`/`readStack`, masked to
     /// `n16`) instead of carrying into the next bank (ares `readBank`).
@@ -81,6 +93,7 @@ impl Cpu {
             waiting: false,
             pending_nmi: false,
             pending_irq: false,
+            irq_line: false,
             bank0_wrap: false,
         }
     }
@@ -101,6 +114,16 @@ impl Cpu {
     /// when `$4211 TIMEUP` is read or the trigger condition lapses.
     pub const fn trigger_irq(&mut self) {
         self.pending_irq = true;
+    }
+
+    /// Sample the **level**-sensitive coprocessor `/IRQ` line. Called by
+    /// the bus every instruction with the device's *current* line state,
+    /// so the line is set when asserted and cleared as soon as the device
+    /// deasserts (Super FX `$3031` read / SA-1 SIC). Unlike
+    /// [`Cpu::trigger_irq`] this never sticks — that is what prevents one
+    /// coprocessor IRQ from being serviced twice. See [`Cpu::irq_line`].
+    pub const fn set_irq_line(&mut self, asserted: bool) {
+        self.irq_line = asserted;
     }
 
     /// Perform a reset sequence: read the reset vector at `$00:FFFC` and

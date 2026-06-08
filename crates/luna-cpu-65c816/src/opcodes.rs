@@ -74,7 +74,7 @@ impl Cpu {
             // actually taken; the WAI wake-up is unconditional. Games
             // that `SEI; WAI; BRA -3` rely on this — the IRQ wakes
             // them but the handler isn't entered.
-            if self.pending_nmi || self.pending_irq {
+            if self.pending_nmi || self.pending_irq || self.irq_line {
                 self.waiting = false;
             } else {
                 bus.io_cycle(WAI_TICK_MCYCLES);
@@ -102,8 +102,13 @@ impl Cpu {
             return;
         }
         // IRQ is checked after NMI (NMI always wins) and only fires
-        // when the `I` mask flag is clear.
-        if self.pending_irq && !self.p.contains(bit::I) {
+        // when the `I` mask flag is clear. Two sources: the edge-latched
+        // `pending_irq` (H/V timer) and the level-sensitive `irq_line`
+        // (coprocessor, held until the program acks). Servicing consumes
+        // only the edge latch — the device controls the level line, so a
+        // still-asserted coproc line correctly re-fires while an acked one
+        // does not (no double-service).
+        if (self.pending_irq || self.irq_line) && !self.p.contains(bit::I) {
             self.pending_irq = false;
             self.service_irq(bus);
             if self.e {

@@ -727,15 +727,18 @@ impl Snes {
         // tick) *and* again by this lump, running it ~2× too fast
         // through DMA-heavy code.
 
-        // Bridge the coprocessor's level-driven IRQ line into the
-        // 65C816's edge-latched `pending_irq` model (ares
-        // `coprocessor/sa1/io.cpp:134-163`): the SA-1 holds the S-CPU IRQ
-        // pin high until SIC ack, so re-arm the latch each step while the
-        // level is still asserted. The CPU's edge-consume + I-mask still
-        // gates actual service.
-        if self.mapper.coproc_main_irq_pending() {
-            self.cpu.trigger_irq();
-        }
+        // Sample the coprocessor's level-driven IRQ line into the CPU's
+        // dedicated *level* input (ares `coprocessor/sa1/io.cpp:134-163`,
+        // Super FX `coprocessor/superfx/io.cpp:18-22`): the device holds
+        // the S-CPU IRQ pin until the program acks (Super FX `$3031` read,
+        // SA-1 SIC), so this is a level, not an edge. Sampling it fresh
+        // each instruction (set AND clear) — rather than re-arming the
+        // sticky `pending_irq` — means a single coproc IRQ is serviced
+        // exactly once: re-arming `pending_irq` while `I` masked the
+        // handler used to leave a stale latch that double-serviced after
+        // the `RTI`, corrupting Star Fox's object table. The edge-latched
+        // `pending_irq` below is left for the H/V timer alone.
+        self.cpu.set_irq_line(self.mapper.coproc_main_irq_pending());
 
         // Apply interrupt edges the scanline scheduler latched during this
         // instruction's bus accesses. Deferring the CPU poke to the
