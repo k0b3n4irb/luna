@@ -871,24 +871,26 @@ fn run_wram_trace(
             }
         },
     };
-    for (frame, mask) in &checkpoints {
-        while em.state().scheduler.frame_count < *frame {
-            if em.step_until_frame(FRAME_BUDGET).unwrap_or(0) == 0 {
-                break;
-            }
-        }
-        if let Err(e) = em.set_joypad(0, *mask) {
-            eprintln!("error: set_joypad: {e}");
-            return ExitCode::from(1);
-        }
-    }
     if steps > 0 {
         if let Err(e) = em.step(steps) {
             eprintln!("step warning (warm-up): {e}");
         }
     }
+    // Input checkpoints are applied DURING the capture loop, keyed by the
+    // current PPU frame — so a scripted joypad pulse can span the frames
+    // being hashed (front-loading them would consume the pulse before the
+    // capture even starts).
+    let mut ck_idx = 0usize;
     let mut buf = String::new();
     for _ in 0..count {
+        let cur_frame = em.frame_count().unwrap_or(0);
+        while ck_idx < checkpoints.len() && checkpoints[ck_idx].0 <= cur_frame {
+            if let Err(e) = em.set_joypad(0, checkpoints[ck_idx].1) {
+                eprintln!("error: set_joypad: {e}");
+                return ExitCode::from(1);
+            }
+            ck_idx += 1;
+        }
         let executed = em.step_until_frame(FRAME_BUDGET).unwrap_or(0);
         let frame = em.frame_count().unwrap_or(0);
         let hashes = match em.wram_page_hashes(page_size) {
