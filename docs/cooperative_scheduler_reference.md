@@ -104,23 +104,29 @@ Before the risky resumable-engine rewrite, the dichotomy measurement
 - luna's GSU runs **12-30× more instructions per STOP** than Mesen (~19-46k vs
   ~1.5k). Opcode mix: luna is branch/loop+NOP heavy (a long path); Mesen is
   store-heavy (real work).
-- **Root divergence pinned:** luna's GSU executes a **phantom plot loop at
-  `$01:CFxx-$D017`** for **38%** of its work; Mesen runs `$1D004` **ZERO**
-  times across multiple windows (verified, not a window artifact) — luna runs
-  it *in addition to* the real `$1B0DC` loop both use.
-- The loop is entered after a GO at PC `$8295` (common to both) where luna's
-  **r14** (ROM/display-list pointer) = `$8845` vs Mesen `$87F1` (and r8 `$11D0`
-  vs `$11B8`). Same engine + same GO PC + different input ⟹ luna's GSU branches
-  into the phantom loop. **The CPU feeds the GSU a wrong r14 pointer.**
+- A plot loop at `$01:CFxx-$D017` is **38%** of luna's GSU work in its window.
+  An initial finding "Mesen never runs `$1D004`" was a **FRAME-MISALIGNMENT
+  ARTIFACT** — CORRECTED: Mesen runs `$1D004` heavily at frames **200-206**
+  (its hottest PC, 1136×); luna runs it at frames **202-217**. So it is a
+  REAL, shared routine, NOT phantom. r14/r8 differing at the `$8295` GO is
+  likewise the two emulators at different scene moments, NOT a CPU-fed bug
+  (verified: the CPU writes ZERO to R14/R8 via MMIO — they're GSU-internal).
 
-**Conclusion: the residual is NOT GSU cycle-timing → the cooperative cycle-port
-(steps 3-5) is the WRONG tool and is SHELVED.** The cause is a CPU-prepared
-GSU-input divergence (wrong r14/r8 at the `$8295` GO → phantom redundant draw →
-12× wasted GSU work → frame timing skewed → 2-half-DMA mixes inconsistent
-frames → garble + lag). Steps 1-2 (explicit clock/scalar) remain as clean,
-behaviour-preserving foundation. **Next investigation is CPU-side:** why does
-luna's CPU compute r14 = `$8845` (≠ `$87F1`)? Bisect the CPU writes to the GSU
-R14 register (`$301C/$301D`) before that GO, vs Mesen.
+**Honest conclusion:** dichotomy confirmed (a) the residual is NOT GSU
+cycle-timing (cooperative cycle-port steps 3-5 SHELVED; steps 1-2 kept as clean
+foundation), and (b) it is FRAME-LEVEL — luna spends ~2× more PPU frames in the
+`$D0xx` phase (202-217 vs 200-206) ⟹ luna's scene/reveal progresses at a
+different rate. BUT the specific cause is **NOT cleanly isolable by scene-level
+differential** because luna and Mesen have an irreducible boot-frame offset:
+every "luna vs Mesen at frame N" comparison is confounded. The ONLY clean
+differential is **state injection** (the gsu_trajectory harness injects Mesen's
+GSU state and gets BYTE-EXACT output — engine + first GO-run proven). To find
+the cross-GO / CPU-side divergence cleanly, the differential must be extended to
+**full-system state injection** (CPU + WRAM + PPU + GSU from a Mesen savestate,
+run both forward, bisect the first divergence) — a large undertaking. Without
+it, scene-level comparisons keep producing misalignment artifacts (as the
+"phantom routine" did). **Next, if pursued:** full-system differential via
+savestate injection; OR accept the residual as a scene-rate cycle-accuracy gap.
 
 ## 5. Open architectural question (decide at Step 3)
 
