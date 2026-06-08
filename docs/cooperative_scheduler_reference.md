@@ -93,6 +93,29 @@ Mesen reference trace BEFORE the next step. Revert any step that regresses.
 
 Stop and measure at each step. Never land more than one deviation-fix at a time.
 
+## 4c. RESOLVED — the garble was a level-vs-edge coprocessor IRQ bug (2026-06-08)
+
+The dichotomy below (§4b) correctly concluded the garble is NOT GSU cycle-timing.
+The actual root cause, pinned confound-free by the NMI-aligned WRAM differential
+(`luna wram-trace` vs Mesen2), was in the **CPU IRQ model**, not the GSU:
+
+luna bridged the coprocessor's **level** `/IRQ` line into the 65C816's **sticky
+edge** `pending_irq`, re-arming it every step. During Star Fox's IRQ handler, the
+latch was re-armed (while `I` masked it) and survived the `RTI`, so one GSU IRQ
+was serviced **twice** (frame 43: handler ran 2× vs Mesen's 1×). The spurious
+2nd pass set three object-table flags the hardware keeps clear → garble by frame
+200 (832 divergent WRAM bytes). **Fix (commit 86e9702):** a dedicated level
+`Cpu::irq_line` sampled fresh each instruction; the H/V-timer keeps its edge
+latch. GUI-validated "le jour et la nuit" across all GSU 3D titles. 832→21
+divergent bytes @ frame 200.
+
+**The cooperative cycle-scheduler (steps 3-5) is now confirmed unnecessary for
+the garble.** A tiny residual remains: a one-time ~1-frame phase slip around
+frame 142 (luna frame 142 == Mesen frame 141, byte-exact), re-syncing by frame
+200 and leaving ~16 off-by-one counter bytes. THAT residual *is* GSU completion-
+timing (cycle-rate) — cosmetically invisible. If ever pursued, the harness
+(`luna wram-trace`) makes the cycle-rate port measurable; but it is low-priority.
+
 ## 4b. STEP 3 DICHOTOMY RESULT — cycle-timing is NOT the cause (2026-06-08)
 
 Before the risky resumable-engine rewrite, the dichotomy measurement
