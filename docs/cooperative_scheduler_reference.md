@@ -93,6 +93,35 @@ Mesen reference trace BEFORE the next step. Revert any step that regresses.
 
 Stop and measure at each step. Never land more than one deviation-fix at a time.
 
+## 4b. STEP 3 DICHOTOMY RESULT — cycle-timing is NOT the cause (2026-06-08)
+
+Before the risky resumable-engine rewrite, the dichotomy measurement
+**redirected** us (this is the method working):
+
+- GSU overshoot distribution: ~89% of `step_coproc` calls already within ares'
+  ~6-cycle granularity; tail ≤96 cycles. A ≤96-cycle refinement cannot fix a
+  **frame-level** (357,368-cycle) phenomenon.
+- luna's GSU runs **12-30× more instructions per STOP** than Mesen (~19-46k vs
+  ~1.5k). Opcode mix: luna is branch/loop+NOP heavy (a long path); Mesen is
+  store-heavy (real work).
+- **Root divergence pinned:** luna's GSU executes a **phantom plot loop at
+  `$01:CFxx-$D017`** for **38%** of its work; Mesen runs `$1D004` **ZERO**
+  times across multiple windows (verified, not a window artifact) — luna runs
+  it *in addition to* the real `$1B0DC` loop both use.
+- The loop is entered after a GO at PC `$8295` (common to both) where luna's
+  **r14** (ROM/display-list pointer) = `$8845` vs Mesen `$87F1` (and r8 `$11D0`
+  vs `$11B8`). Same engine + same GO PC + different input ⟹ luna's GSU branches
+  into the phantom loop. **The CPU feeds the GSU a wrong r14 pointer.**
+
+**Conclusion: the residual is NOT GSU cycle-timing → the cooperative cycle-port
+(steps 3-5) is the WRONG tool and is SHELVED.** The cause is a CPU-prepared
+GSU-input divergence (wrong r14/r8 at the `$8295` GO → phantom redundant draw →
+12× wasted GSU work → frame timing skewed → 2-half-DMA mixes inconsistent
+frames → garble + lag). Steps 1-2 (explicit clock/scalar) remain as clean,
+behaviour-preserving foundation. **Next investigation is CPU-side:** why does
+luna's CPU compute r14 = `$8845` (≠ `$87F1`)? Bisect the CPU writes to the GSU
+R14 register (`$301C/$301D`) before that GO, vs Mesen.
+
 ## 5. Open architectural question (decide at Step 3)
 
 luna stays **CPU-driven** (no global cothread rewrite) — the GSU becomes a
