@@ -253,6 +253,44 @@ enum Command {
         #[arg(long)]
         input: Option<String>,
     },
+    /// Emit per-frame (vblank-aligned) WRAM page hashes for a
+    /// confound-free cross-emulator differential. Each line is
+    /// `<ppu_frame> <h0> <h1> ... <hN>` where each `h` is the FNV-1a
+    /// hash of one WRAM page (`--page-size` bytes, default 4 KiB → 32
+    /// pages). Because WRAM-at-vblank-N is the SAME game-frame in both
+    /// luna and a reference emulator (no input ⟹ game logic advances
+    /// once per NMI), the first frame whose page hash differs from the
+    /// reference pins the first REAL state divergence — unlike scene-
+    /// level windows the boot-frame offset confounds.
+    WramTrace {
+        /// Path to the .sfc / .smc ROM file.
+        rom: PathBuf,
+        /// Warm-up CPU instructions before frame-0 of the trace.
+        #[arg(short = 'n', long, default_value_t = 0)]
+        steps: u64,
+        /// Number of consecutive frames to hash.
+        #[arg(short = 'c', long = "count", default_value_t = 300)]
+        count: u64,
+        /// WRAM page size in bytes (power of two dividing 0x20000).
+        #[arg(long = "page-size", default_value_t = 0x1000)]
+        page_size: usize,
+        /// Output path for the hash table (one line per frame).
+        #[arg(long = "out", default_value = "/tmp/luna_wram_hashes.txt")]
+        out: PathBuf,
+        /// Optionally also dump the full 128 KiB WRAM as a raw .bin when the
+        /// trace reaches this PPU frame (for byte-level diffing).
+        #[arg(long = "dump-frame")]
+        dump_frame: Option<u64>,
+        /// Output path for the `--dump-frame` raw WRAM snapshot.
+        #[arg(long = "dump-out", default_value = "/tmp/luna_wram_frame.bin")]
+        dump_out: PathBuf,
+        /// Force a cartridge mapper (lorom, hirom, exhirom, sa1, superfx).
+        #[arg(long = "force-mapper")]
+        force_mapper: Option<String>,
+        /// Scripted joypad-1 input, same `frame:hex` format as `state --input`.
+        #[arg(long)]
+        input: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -343,6 +381,27 @@ fn main() -> ExitCode {
             steps,
             count,
             &out_dir,
+            force_mapper.as_deref(),
+            input.as_deref(),
+        ),
+        Command::WramTrace {
+            rom,
+            steps,
+            count,
+            page_size,
+            out,
+            dump_frame,
+            dump_out,
+            force_mapper,
+            input,
+        } => run_wram_trace(
+            &rom,
+            steps,
+            count,
+            page_size,
+            &out,
+            dump_frame,
+            &dump_out,
             force_mapper.as_deref(),
             input.as_deref(),
         ),
@@ -777,6 +836,106 @@ fn run_frames(
             break;
         }
     }
+    ExitCode::SUCCESS
+}
+
+/// `luna wram-trace` — emit per-frame (vblank-aligned) WRAM page hashes
+/// for a confound-free cross-emulator differential (see the subcommand
+/// doc). One line per frame: `<ppu_frame> <h0> <h1> ...`.
+#[allow(clippy::too_many_arguments)]
+fn run_wram_trace(
+    rom: &std::path::Path,
+    steps: u64,
+    count: u64,
+    page_size: usize,
+    out: &std::path::Path,
+    dump_frame: Option<u64>,
+    dump_out: &std::path::Path,
+    force_mapper: Option<&str>,
+    input_script: Option<&str>,
+) -> ExitCode {
+    use std::fmt::Write as _;
+    const FRAME_BUDGET: u64 = 200_000;
+    let mut em = luna_api::Emulator::new();
+    if let Err(e) = load_rom_into(&mut em, rom, force_mapper) {
+        eprintln!("error: {e}");
+        return ExitCode::from(1);
+    }
+    let checkpoints: Vec<(u64, u16)> = match input_script {
+        None => Vec::new(),
+        Some(script) => match parse_input_script(script) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("error: --input: {e}");
+                return ExitCode::from(1);
+            }
+        },
+    };
+    for (frame, mask) in &checkpoints {
+        while em.state().scheduler.frame_count < *frame {
+            if em.step_until_frame(FRAME_BUDGET).unwrap_or(0) == 0 {
+                break;
+            }
+        }
+        if let Err(e) = em.set_joypad(0, *mask) {
+            eprintln!("error: set_joypad: {e}");
+            return ExitCode::from(1);
+        }
+    }
+    if steps > 0 {
+        if let Err(e) = em.step(steps) {
+            eprintln!("step warning (warm-up): {e}");
+        }
+    }
+    let mut buf = String::new();
+    for _ in 0..count {
+        let executed = em.step_until_frame(FRAME_BUDGET).unwrap_or(0);
+        let frame = em.frame_count().unwrap_or(0);
+        let hashes = match em.wram_page_hashes(page_size) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("error: wram_page_hashes: {e}");
+                return ExitCode::from(1);
+            }
+        };
+        let _ = write!(buf, "{frame}");
+        for h in &hashes {
+            let _ = write!(buf, " {h:016x}");
+        }
+        buf.push('\n');
+        if dump_frame == Some(frame) {
+            match em.wram_snapshot() {
+                Ok(bytes) => {
+                    if let Err(e) = std::fs::write(dump_out, &bytes) {
+                        eprintln!("error: writing {}: {e}", dump_out.display());
+                        return ExitCode::from(1);
+                    }
+                    println!(
+                        "dumped {} WRAM bytes at frame {frame} -> {}",
+                        bytes.len(),
+                        dump_out.display()
+                    );
+                }
+                Err(e) => {
+                    eprintln!("error: wram_snapshot: {e}");
+                    return ExitCode::from(1);
+                }
+            }
+        }
+        if executed == 0 {
+            eprintln!("note: step_until_frame returned 0 (emulator halted?) — stopping early");
+            break;
+        }
+    }
+    if let Err(e) = std::fs::write(out, &buf) {
+        eprintln!("error: writing {}: {e}", out.display());
+        return ExitCode::from(1);
+    }
+    println!(
+        "wrote {count} frames x {} pages of {page_size}-byte WRAM hashes -> {}",
+        0x2_0000 / page_size,
+        out.display()
+    );
     ExitCode::SUCCESS
 }
 

@@ -1012,6 +1012,44 @@ impl Emulator {
         Ok(snes.mapper.coproc_ram().map(<[u8]>::to_vec))
     }
 
+    /// Diagnostic: a full copy of the 128 KiB WRAM (`$7E0000`-`$7FFFFF`).
+    /// For byte-level cross-emulator diffing once `wram_page_hashes` has
+    /// localised the first diverging frame + page.
+    pub fn wram_snapshot(&self) -> Result<Vec<u8>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        Ok(snes.wram.to_vec())
+    }
+
+    /// Diagnostic: per-page FNV-1a hashes of the 128 KiB WRAM (`$7E0000`-
+    /// `$7FFFFF`), one `u64` per `page_size` bytes (default 4 KiB → 32
+    /// pages). Frame-aligned (NMI-count) hashing of these is the
+    /// confound-free way to bisect a CPU-state divergence vs a reference
+    /// emulator: WRAM-at-vblank-N is the same game-frame in both, so the
+    /// first diverging page pins the first real divergence — unlike scene-
+    /// level windows which the boot-frame offset confounds. `page_size` must
+    /// be a power of two that divides `0x20000`.
+    pub fn wram_page_hashes(&self, page_size: usize) -> Result<Vec<u64>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let ps = if page_size == 0 { 0x1000 } else { page_size };
+        assert!(
+            ps.is_power_of_two() && 0x2_0000 % ps == 0,
+            "page_size must be a power of two dividing 0x20000"
+        );
+        Ok(snes
+            .wram
+            .chunks_exact(ps)
+            .map(|page| {
+                // FNV-1a 64-bit
+                let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+                for &b in page {
+                    h ^= u64::from(b);
+                    h = h.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+                h
+            })
+            .collect())
+    }
+
     /// Enable the DMA→VRAM transfer-time trace: every byte an MDMA writes
     /// to `$2118/$2119` is captured as (source A-bus address → VMADD word
     /// → byte) AT transfer time. Lets a coprocessor framebuffer
