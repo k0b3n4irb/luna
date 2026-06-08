@@ -233,8 +233,12 @@ pub struct SuperFxMapper {
     cache_valid: [bool; 32],
     /// Primary (`[0]`) + secondary (`[1]`) pixel-plot caches (spec §4.1).
     pixelcache: [PixelCache; 2],
-    /// GSU-clock budget carried across `step_coproc` calls. The engine runs
-    /// instructions while this is positive, deducting each op's cycle cost.
+    /// GSU clock lag behind the CPU on the shared master-clock time axis:
+    /// `cpu_clock − gsu_clock` in master-clock units (the ares `Thread::_clock`
+    /// relationship). `step_coproc` runs the GSU until it catches up
+    /// (`deficit ≤ 0`) — i.e. ares `cpu.synchronize(gsu)` (run the GSU until
+    /// `gsu.clock ≥ cpu.clock`). Positive ⇒ GSU behind ⇒ run it. See
+    /// `docs/cooperative_scheduler_reference.md`.
     clock_deficit: i64,
     /// Per-instruction cycle accumulator (set by `step`), read by `run_one`.
     cycles: u32,
@@ -1499,12 +1503,22 @@ impl Mapper for SuperFxMapper {
         if !self.sfr_get(SFR_G) {
             return;
         }
+        // The CPU advanced `main_mclk` master clocks; add that to the GSU's
+        // lag, then run the GSU until it catches up to the CPU's clock — ares
+        // `cpu.synchronize(gsu)` (run `gsu` until `gsu.clock ≥ cpu.clock`).
         self.clock_deficit += i64::from(main_mclk);
+        // ares `Thread` scalar for the GSU = master clocks per GSU clock. The
+        // GSU runs at master/1 (fast, `clsr` = 1) or master/2 (slow,
+        // `clsr` = 0), so faithfully one GSU clock costs `clsr ? 1 : 2` master
+        // clocks. Kept at 1 (behaviour-preserving) until the cooperative
+        // interleave is exact; the faithful value lands at step 5
+        // (`docs/cooperative_scheduler_reference.md`).
+        let mclk_per_gsu_clock: i64 = 1; // faithful: if self.regs.clsr { 1 } else { 2 }
         while self.sfr_get(SFR_G) && self.clock_deficit > 0 {
             self.run_one();
-            // Every instruction fetches at least one byte (≥ 1 cycle), so
-            // this always makes progress and the budget bounds the loop.
-            self.clock_deficit -= i64::from(self.cycles.max(1));
+            // Each instruction is ≥ 1 GSU clock, so this always progresses and
+            // the deficit bounds the loop.
+            self.clock_deficit -= i64::from(self.cycles.max(1)) * mclk_per_gsu_clock;
         }
     }
 
