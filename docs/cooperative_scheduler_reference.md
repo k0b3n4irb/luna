@@ -201,10 +201,41 @@ pins the exact cost, likely a much smaller fix than a GSU-engine rewrite. The
 resumable engine is still wanted for full sub-frame fidelity, but it is NOT what
 unblocks refresh; exact CPU timing is.
 
+### 6.4d UPLOAD-DURATION DIFFERENTIAL (2026-06-09) — it's a SUB-FRAME phase residual
+Drilled further into the §6.4c 1-frame-late launch:
+- **Upload loop timing is EXACT.** luna+refresh and Mesen+refresh both do a steady
+  **~9620 `$2118/$2119` writes/frame** through the upload — same rate, same total
+  (~101 k writes). No per-iteration cycle gap.
+- **Per-frame instruction counts MATCH.** Intro frame 99: luna 14230 vs Mesen
+  14231. No per-frame CPU-rate difference.
+- Yet luna's upload **starts ~0.84 frame later** (Mesen first writes ~70 % into
+  f131; luna ~54 % into f132). A **sub-frame phase offset** — matching WRAM,
+  matching per-frame instruction counts — introduced at the intro→upload
+  transition, quantized by the vblank boundary to the 1-frame-late GSU launch
+  (f143 vs f142) once refresh is added.
+
+**Final diagnosis:** the refresh blocker is neither the GSU engine, nor the
+upload loop, nor a per-frame rate error — it is a **~0.84-frame sub-frame phase
+offset** between luna and Mesen (both refreshed, both matching at frame and
+instruction granularity) that refresh tips across a vblank boundary. This is the
+deepest layer of cycle accuracy: a discrete sub-frame lag (likely a wait at the
+intro→upload transition — a GSU-completion / timer poll) that needs sub-cycle
+CPU-position fidelity to pin, far below WRAM/instruction-count resolution.
+
+**Recommendation (revised, final):** do NOT land DRAM refresh. It is faithful and
+helps non-GSU timing, but it regresses GSU titles via this sub-frame residual,
+and closing the residual requires comprehensive sub-cycle accuracy (a dedicated
+project, uncertain scope) for an **invisible** payoff (all games already play
+fine). Keep the refresh patch in git history; revisit only as part of a
+deliberate full-cycle-accuracy effort. The chain engine→upload-loop→per-frame-
+rate→sub-frame-phase is fully bisected and documented; nothing is mysterious,
+nothing is hacked.
+
 ### 6.5 Staged plan (each oracle-gated)
-- **Spike (DONE, see §6.4b):** strategy (b) refuted as the *stall* fix.
-- **Bisection (DONE, see §6.4c):** blocker is CPU/upload timing (1-frame-late GSU
-  launch), not the GSU engine. Pursue exact CPU timing first.
+- **Spike (DONE, §6.4b):** the *stall* fix — refuted.
+- **Bisection (DONE, §6.4c):** blocker is CPU/upload timing, not the engine.
+- **Upload differential (DONE, §6.4d):** it's a sub-frame phase residual; refresh
+  shelved as net-negative for GSU titles. Frontier work, invisible payoff.
 - **Stage 1:** land the chosen granularity fix. Oracle: trajectory byte-exact;
   Star Fox `wram-trace` @f200 with refresh DROPS toward 0 (not 2087); GUI clean.
 - **Stage 2:** land DRAM refresh (§4d patch) + `clsr` scalar — now they compose.
