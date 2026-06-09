@@ -736,9 +736,20 @@ impl Snes {
         // sticky `pending_irq` — means a single coproc IRQ is serviced
         // exactly once: re-arming `pending_irq` while `I` masked the
         // handler used to leave a stale latch that double-serviced after
-        // the `RTI`, corrupting Star Fox's object table. The edge-latched
-        // `pending_irq` below is left for the H/V timer alone.
-        self.cpu.set_irq_line(self.mapper.coproc_main_irq_pending());
+        // the `RTI`, corrupting Star Fox's object table.
+        //
+        // The **H/V-timer IRQ is also a level**, not an edge (ares
+        // `cpu/irq.cpp`: `status.irqLine` held until `timeup()`/$4211 read;
+        // Mesen2 `_irqFlag` -> `SetIrqSource(Ppu)` held until `ClearIrqSource`).
+        // `cpu_regs.irq_flag` IS that level — raised at the H/V coincidence in
+        // `poll_hv_irq`, lowered when the program reads $4211. Sampling it into
+        // the CPU's level input (instead of the old one-shot `pending_irq`
+        // edge) means an H/V IRQ that fires while `I` is masked is HELD and
+        // serviced the moment `I` clears, never lost. Doom chains H+V IRQs
+        // (re-arming VTIME) to write INIDISP every frame; the edge model
+        // dropped ~64% of those writes -> its letterbox border flickered.
+        self.cpu
+            .set_irq_line(self.cpu_regs.irq_flag || self.mapper.coproc_main_irq_pending());
 
         // Apply interrupt edges the scanline scheduler latched during this
         // instruction's bus accesses. Deferring the CPU poke to the
@@ -1307,8 +1318,13 @@ impl SnesBus<'_> {
             mclk_lo == 0
         };
         if fire {
+            // Raise the held level only (ares `status.irqLine`, Mesen `_irqFlag`).
+            // `irq_flag` stays set until the program reads $4211; the CPU samples
+            // it as a *level* via `set_irq_line` at each instruction boundary, so
+            // the IRQ is never lost to `I`-masking the way the old one-shot
+            // `*self.irq` edge was (it coalesced/dropped ~64% of Doom's chained
+            // H+V writes). No edge latch is set here any more.
             self.cpu_regs.irq_flag = true;
-            *self.irq = true;
         }
     }
 
@@ -1437,7 +1453,9 @@ impl Bus for SnesBus<'_> {
         *self.nmi
     }
     fn irq_pending(&self) -> bool {
-        *self.irq || self.mapper.coproc_main_irq_pending()
+        // H/V-timer IRQ is the held level `cpu_regs.irq_flag` (no longer the
+        // one-shot `*self.irq` edge); coproc holds its own level line.
+        *self.irq || self.cpu_regs.irq_flag || self.mapper.coproc_main_irq_pending()
     }
 }
 
