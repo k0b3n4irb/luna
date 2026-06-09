@@ -173,8 +173,38 @@ build: bisect WHERE luna+refresh first diverges from Mesen+refresh (the
 `wram-trace` first-divergence frame) to pin the exact integration error the
 resumable engine must fix — that turns the rewrite from speculative to targeted.
 
+### 6.4c TARGETED BISECTION (2026-06-09) — it's CPU/upload timing, NOT the GSU engine
+Bisected the FIRST divergence of luna+refresh vs Mesen+refresh (both have refresh
+now). Result CONVERGES and REFINES the scope:
+- First divergence: **frame 142** — the *exact same bytes* (`$7E0045/0047/004D`,
+  `$7E188B/188D`, luna `00` vs Mesen `2C/30/68/10`) and the *exact same event* as
+  the original Star Fox slip from the I/O-timing work: the **GSU-launch /
+  VRAM-upload phase**.
+- luna+refresh launches the GSU (`$301F` GO) at **frame 143, scanline 55**;
+  Mesen+refresh at **frame 142, scanline 55**. **Same scanline, ONE FRAME LATE.**
+- So it is NOT a sub-frame interleave error — it's a clean 1-frame lateness:
+  luna's CPU/VRAM-upload runs slightly slower than Mesen's (both refreshed), so
+  the multi-frame upload finishes one frame later and the GSU launch tips over
+  the vblank boundary, then cascades to the black crash. The MISSING refresh
+  masked it (no-refresh = faster CPU = upload on time = launch f142, re-synced).
+
+**Revised conclusion:** the resumable GSU engine (§6.4) is NOT the frame-level
+blocker — the GSU isn't even running yet at the divergence (it's the CPU's
+pre-launch upload). The blocker is a **residual CPU instruction/access timing
+inaccuracy** (luna ~1 upload-frame slower than Mesen WITH the same refresh),
+amplified to a whole frame by vblank quantization. Candidates: a remaining
+per-instruction or per-access cycle cost (the upload loop is `STA $2118`/`$2119`
+@6 + loop control), or a small over/under in the refresh amount/position vs ares
+(40 @ hcounter 538). NEXT: differential the VRAM-upload *duration* (mclk for the
+upload) luna vs Mesen frame-by-frame to find the per-iteration cycle gap — that
+pins the exact cost, likely a much smaller fix than a GSU-engine rewrite. The
+resumable engine is still wanted for full sub-frame fidelity, but it is NOT what
+unblocks refresh; exact CPU timing is.
+
 ### 6.5 Staged plan (each oracle-gated)
-- **Spike (DONE, see §6.4b):** strategy (b) refuted — resumable engine required.
+- **Spike (DONE, see §6.4b):** strategy (b) refuted as the *stall* fix.
+- **Bisection (DONE, see §6.4c):** blocker is CPU/upload timing (1-frame-late GSU
+  launch), not the GSU engine. Pursue exact CPU timing first.
 - **Stage 1:** land the chosen granularity fix. Oracle: trajectory byte-exact;
   Star Fox `wram-trace` @f200 with refresh DROPS toward 0 (not 2087); GUI clean.
 - **Stage 2:** land DRAM refresh (§4d patch) + `clsr` scalar — now they compose.
