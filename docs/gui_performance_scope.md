@@ -66,11 +66,46 @@ candidates:
 4. **If present/vsync:** check eframe repaint requests + texture upload path;
    ensure the emu thread isn't blocked on the render thread's mutex.
 
+## DIAGNOSIS (2026-06-09, from the user's GUI stderr) — it's the video present
+
+Doom GUI stats: `samples/s ≈ 32770` rock-steady, `ring_full×24` constant, `batches/s`
+swinging 680↔2654. Reading:
+- **Emulation is CLEARED.** Steady 32770 samples/s = real-time SNES audio; the emu
+  keeps up. `ring_full×24` = the emu OUTpaces audio and is paced down (healthy 6×
+  headroom). The `batches/s` 4× swing is NOT a slowdown — it's the instruction
+  mix: at constant cycles/sec, cheap spin-loops (e.g. a vblank/GSU wait) execute
+  far more instr/sec than heavy code. A red herring.
+- **The lag is the video present, and it is NOT frame-synced.** `main.rs`:
+  `ControlFlow::Poll` (659) busy-spins; `about_to_wait` (486) calls
+  `request_redraw()` every iteration (the "~16 ms" comment is wrong); `pixels`
+  presents vsync-limited (Fifo default). So the render presents at the display's
+  60 Hz reading `framebuffer_rgba`, while the emu publishes frames at its own
+  audio-paced 60 Hz. **Two unsynchronised 60 Hz clocks → phase drift → a frame
+  shown twice / skipped every few seconds → judder.** Same path for all games,
+  but vastly more visible in Doom's continuous 3D panning than Star Fox's
+  discrete motion — exactly the reported "Doom laggy, Star Fox good".
+- Secondary: `ControlFlow::Poll` busy-spins the main thread (wastes a core; can
+  contend with the emu thread).
+
+## Fix plan (ranked, oracle = smooth Doom panning in GUI)
+1. **Frame-sync the present to the emu's frame production** (highest value). The
+   emu thread signals "new frame ready" (e.g. an `AtomicU64` frame counter +
+   `window.request_redraw()` from the publish site, or a small triple-buffer);
+   the render presents a NEW emu frame each vsync, no double/skip. Switch
+   `ControlFlow::Poll`→`Wait` and drive redraws from the new-frame signal +
+   window events — kills the busy-spin AND the judder.
+2. **Dynamic rate control** (if 1 leaves residual drift): nudge the audio
+   resample ratio slightly so the emu's 60 Hz locks to the display's vsync
+   (standard emulator A/V-sync technique). The resampler already exists
+   (`audio.rs`, 6-point Hermite).
+3. **Triple-buffer the framebuffer** to drop the `framebuffer_rgba` Mutex from the
+   present path (avoid emu↔render lock contention / tearing).
+
 ## Effort / risk
-Low-to-medium. This is GUI-runtime tuning, not an emulation rewrite — much more
-tractable (and more *felt*) than the GSU cycle-timing frontier. The one blocker
-is the diagnostic: it needs a GUI run (display), which the headless tooling here
-can't do. Get the stderr stats first; the fix follows directly.
+Low-to-medium, HIGH felt impact. This is GUI-runtime tuning (present sync), not an
+emulation rewrite — far more tractable and more *felt* than the GSU cycle-timing
+frontier, and it improves EVERY game's smoothness. Fix (1) alone likely resolves
+the reported lag. Perception-affecting → GUI-validate per `audible-fixes-test-first`.
 
 ## Reference
 - `crates/luna-gui/src/emu_thread.rs` — the audio-as-clock pacing loop.
