@@ -93,6 +93,90 @@ Mesen reference trace BEFORE the next step. Revert any step that regresses.
 
 Stop and measure at each step. Never land more than one deviation-fix at a time.
 
+## 6. SCOPE — faithful GSU cooperative scheduler (2026-06-09, evidence-backed)
+
+Prerequisite for landing DRAM refresh (§4d) and closing the cycle residual.
+This scope is grounded in two measured experiments, not theory.
+
+### 6.1 What is already faithful (do NOT touch)
+- **Engine: byte-exact** vs Mesen (`gsu_trajectory_vs_mesen`, `gsu_differential_
+  vs_mesen`). Opcode logic, `romcl`/`ramcl` ROM/RAM-buffer latency, the internal
+  `step(clocks)` that services buffers + accumulates `self.cycles` — all mirror
+  ares. **Any scheduler change must keep these green.**
+- **`clock_deficit` IS ares `synchronize`** at instruction granularity:
+  `step_coproc(mclk)` adds `mclk` to the deficit and runs the GSU until
+  `gsu_clock ≥ cpu_clock`. Called per CPU bus access (≈ synchronize-before-access)
+  and per DMA byte.
+
+### 6.2 The deviations, RE-RANKED by evidence (not the old §3 order)
+1. **Granularity / stall-interleave (PRIMARY — the Star Fox blocker).**
+   `run_one()` is atomic and `step_coproc` runs *whole instructions* until the
+   deficit clears. Worse, CPU **stalls** (refresh/DMA/HDMA) are charged as a
+   single lump at the scanline boundary, so the GSU is advanced in a **40-mclk
+   burst** there instead of smoothly. ares yields after *every* `step()` (each
+   memory access, ≈ ≤6 GSU clocks). **Measured:** adding DRAM refresh (§4d)
+   blacked out Star Fox (WRAM @f200 21→2087) — the lump-burst GSU stepping can't
+   interleave at the fidelity refresh demands.
+2. **Rate / scalar (SECONDARY — NOT the Star Fox blocker).**
+   `mclk_per_gsu_clock = 1`; faithful is `clsr ? 1 : 2`. **Measured:** setting it
+   to `clsr?1:2` did NOT fix the refresh regression — Star Fox's *intro runs
+   clsr=fast* (rate already 1). Matters for clsr=slow scenes (some Stunt Race FX
+   / Doom), but is not the architectural blocker. Cheap to land once granularity
+   is fixed.
+3. **Bus arbitration (TERTIARY).** `gsu_read`/`gsu_write` skip the `ron`/`ran`
+   blocking (`while(!ron) step`). The `scmr_ron`/`scmr_ran` bits exist but Phase 2
+   skipped enforcement. Add only if a divergence pins to it.
+
+### 6.3 Architecture decision: scoped CPU-driven, NOT a cothread rewrite
+luna's `clock_deficit` already reproduces `synchronize` for the GSU↔CPU pair, so
+a full ares cothread scheduler (converting the whole emulator loop to
+`co_switch`) is unnecessary and Rust-hostile (no native `co_switch`; huge blast
+radius). Keep the CPU as driver. The one real change: make the GSU **resumable at
+`step()` (memory-access) granularity** so `step_coproc` advances it to an EXACT
+master-clock target, pausing mid-instruction — ares' per-step yield WITHOUT
+cothreads.
+
+### 6.4 The hard part — resumable engine (three strategies)
+`run_one()` today runs a whole instruction atomically (each internal `step()`
+just accrues cycles). To suspend mid-instruction at a `step()` boundary:
+- **(a) Explicit cycle-state machine** — thread "clocks remaining to target"
+  through `execute()`; on hitting 0 mid-op, save a resume point. Most faithful,
+  but every opcode becomes resumable. HIGH effort/risk (~1-2 wk).
+- **(b) Smooth-stall distribution (the SPIKE)** — keep atomic `run_one`, but
+  STOP lump-stepping the GSU at stall boundaries: distribute the refresh/DMA
+  stall into the GSU's normal per-access deficit so it advances smoothly, and/or
+  cap `step_coproc` to ≤6-clock sub-steps. If the Star Fox break is the *burst*
+  (not the per-instruction overshoot), this alone fixes it. LOW effort, decides
+  everything. **DO THIS FIRST.**
+- **(c) Stackful coroutine** (`corosensei`/`generator` crate) — wrap the engine
+  in a coroutine that yields at each `step()`. Closest to ares, minimal engine-
+  code change, adds a dep + per-yield cost. MEDIUM effort (~3-5 d).
+
+### 6.5 Staged plan (each oracle-gated)
+- **Spike (½-1 day):** strategy (b) — distribute the stall, re-test Star Fox +
+  refresh. Outcome decides whether granularity-burst was the issue (cheap fix) or
+  full sub-instruction resumability (a/c) is required.
+- **Stage 1:** land the chosen granularity fix. Oracle: trajectory byte-exact;
+  Star Fox `wram-trace` @f200 with refresh DROPS toward 0 (not 2087); GUI clean.
+- **Stage 2:** land DRAM refresh (§4d patch) + `clsr` scalar — now they compose.
+  Oracle: DKC frame-89/`$0028` aligned; all GSU titles render+play; SA-1 (SMRPG)
+  + non-GSU no regression.
+- **Stage 3:** `ron`/`ran` arbitration, only if a residual pins to it.
+
+### 6.6 Oracles (must hold throughout)
+`gsu_trajectory`/`gsu_differential` byte-exact · Star Fox `wram-trace` vs Mesen
+@f200 → toward 0 (≤21 floor, never up) · GUI: Star Fox / Doom / Stunt Race FX /
+SF2 render+play clean (user-validated, non-negotiable) · DKC frame-89 aligned ·
+full `--lib` + smoke (SMRPG SA-1, RPM interlace).
+
+### 6.7 Effort / risk / recommendation
+Spike = ½-1 day, low risk, decides the strategy. If (b) works: total ≈ 2-3 days
+incl. refresh. If (a)/(c) needed: ≈ 1-2 weeks. **Recommendation: run the spike
+first** — it's cheap and converts this scope from plan to validated path. Don't
+commit to the resumable-engine rewrite until the spike rules out the cheap fix.
+
+---
+
 ## 4d. Cycle-timing residual — DRAM refresh found, but blocked on GSU timing (2026-06-09)
 
 Chasing the residual cycle-timing drift (DKC intro fires ~2 frames early; Star
