@@ -152,10 +152,29 @@ just accrues cycles). To suspend mid-instruction at a `step()` boundary:
   in a coroutine that yields at each `step()`. Closest to ares, minimal engine-
   code change, adds a dep + per-yield cost. MEDIUM effort (~3-5 d).
 
+### 6.4b SPIKE RESULT (2026-06-09) — cheap path REFUTED, resumable engine required
+Ran strategy (b): re-applied refresh, then stopped lump-stepping the GSU during
+the stall (`is_stall` guard so `step_coproc` only runs on real CPU-instruction
+time). **No change** — Star Fox still black, WRAM @f200 still **2087** (identical
+to the lump version). So the burst-stepping is NOT the cause. Two decisive facts:
+- **Refresh itself is correct** for non-GSU: DKC frame_count 1593→1647 (CPU
+  correctly slowed), frame-89 divergence → 0. The implementation is sound.
+- **luna+refresh matches Mesen *worse* (2087) than luna-without-refresh (21)** —
+  even though Mesen HAS refresh. The only explanation: luna's GSU integration
+  carries an error that the *missing* refresh was COMPENSATING for. Adding the
+  correct CPU slowdown unmasks it; Star Fox crashes into a black spin-loop
+  (frame_count went the wrong way: 3026→2655 = CPU *faster*, i.e. stuck looping).
+
+**Verdict:** the blocker is NOT stall-stepping and NOT the clsr rate — it is the
+GSU integration's coarse interleave masking a latent timing error. The cheap fix
+(b) is ruled out. **The faithful sub-instruction resumable engine (strategy a or
+c) is required** — there is no shortcut. Next step before committing the 1-2 week
+build: bisect WHERE luna+refresh first diverges from Mesen+refresh (the
+`wram-trace` first-divergence frame) to pin the exact integration error the
+resumable engine must fix — that turns the rewrite from speculative to targeted.
+
 ### 6.5 Staged plan (each oracle-gated)
-- **Spike (½-1 day):** strategy (b) — distribute the stall, re-test Star Fox +
-  refresh. Outcome decides whether granularity-burst was the issue (cheap fix) or
-  full sub-instruction resumability (a/c) is required.
+- **Spike (DONE, see §6.4b):** strategy (b) refuted — resumable engine required.
 - **Stage 1:** land the chosen granularity fix. Oracle: trajectory byte-exact;
   Star Fox `wram-trace` @f200 with refresh DROPS toward 0 (not 2087); GUI clean.
 - **Stage 2:** land DRAM refresh (§4d patch) + `clsr` scalar — now they compose.
