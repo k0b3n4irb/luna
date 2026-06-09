@@ -112,3 +112,30 @@ the reported lag. Perception-affecting → GUI-validate per `audible-fixes-test-
 - `crates/luna-gui/src/audio.rs` — cpal output + 6-point cubic Hermite resampler
   + 5 Hz DC blocker.
 - `crates/luna-api/src/lib.rs::render_frame_rgba` — the cheap framebuffer copy.
+
+## CORRECTION (2026-06-09) — the present-cadence diagnosis was WRONG
+
+The "two unsynchronised 60 Hz clocks → judder" hypothesis above was TESTED and
+REFUTED. A present-on-new-frame change (emu bumps a `frame_seq`, GUI requests a
+redraw only when it advances) was implemented and GUI-validated: **no visible
+change** on Doom. It is a *no-op* for appearance because the old code already
+presented the latest framebuffer at vsync — the new code just does fewer
+`request_redraw` calls. So the judder is **not** in the present cadence. Reverted.
+
+What is actually established (solid):
+- luna emulates Doom at real-time (audio 32770 samples/s steady, 6× headless
+  headroom) — NOT slow at the emulation/core level.
+- The present path is correct (latest framebuffer @ vsync).
+- Doom's top/bottom **border rows flicker** (luna-specific; Mesen renders them
+  constant black) — the INIDISP forced-blank scanline JITTER from the CPU/GSU
+  cycle-timing imprecision (see `av_sync`/cooperative-scheduler notes). At 60 Hz
+  in continuous motion this reads as judder.
+- Star Fox is smooth on the SAME present/pacing path.
+
+NOT cleanly measured (headless): Doom's in-game 3D framerate vs Mesen — every
+attempt was confounded by a static attract scene or scripted input that didn't
+hold motion. The open dichotomy is therefore: is the "laggy" (a) the border
+flicker (→ cycle-timing/GSU frontier, or an overscan-crop mitigation), or (b) a
+genuinely lower 3D framerate than Mesen (→ luna's GSU rendering Doom slower)?
+Needs either a continuous-motion capture or the user's direct observation.
+The lag is content-level, NOT the GUI present layer — do not patch the present.
