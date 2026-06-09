@@ -60,6 +60,15 @@ struct Registers {
     scmr_ran: bool,
     /// SCMR colour-depth mode (0..3 → bpp 2/4/4/8).
     scmr_md: u8,
+    /// Bus-arbitration stall (Mesen `_waitForRomAccess`/`_waitForRamAccess`,
+    /// ares `while(!ron) step`): set when the running GSU touches ROM/RAM it
+    /// does NOT own (SCMR `ron`/`ran` = 0 → the SNES CPU holds it). While set,
+    /// the GSU stops executing instructions until the CPU grants access by
+    /// writing SCMR. Doom toggles `ran` every frame (takes RAM to DMA the GSU
+    /// framebuffer to VRAM, then releases it); without this stall luna's GSU
+    /// kept working through that window and the per-frame timing drifted.
+    wait_for_rom_access: bool,
+    wait_for_ram_access: bool,
     /// Colour register (PLOT colour).
     colr: u8,
     /// Plot Option Register — raw 5 bits (decoded by the plot phase).
@@ -105,6 +114,8 @@ impl Registers {
             scmr_ron: false,
             scmr_ran: false,
             scmr_md: 0,
+            wait_for_rom_access: false,
+            wait_for_ram_access: false,
             colr: 0,
             por: 0,
             bramr: false,
@@ -149,6 +160,14 @@ impl Registers {
         self.scmr_ron = data & 0x10 != 0;
         self.scmr_ran = data & 0x08 != 0;
         self.scmr_md = data & 0x03;
+        // Granting the GSU a bus releases the matching arbitration stall
+        // (Mesen SCMR write: clear `_waitForRom/RamAccess` when access returns).
+        if self.scmr_ron {
+            self.wait_for_rom_access = false;
+        }
+        if self.scmr_ran {
+            self.wait_for_ram_access = false;
+        }
     }
 }
 
@@ -555,18 +574,40 @@ impl SuperFxMapper {
 
     /// The GSU's own view of ROM / Game Pak RAM. Phase 2 skips the ron/ran
     /// access-stall spin (a timing nicety) and accesses directly.
-    fn gsu_read(&self, addr: u32) -> u8 {
+    /// Bus arbitration (Mesen `WaitForRomAccess`/`WaitForRamAccess`): a running
+    /// GSU touching ROM/RAM it does not own (SCMR `ron`/`ran` = 0) raises the
+    /// stall flag; `step_coproc` then stops it until the CPU grants access.
+    const fn check_rom_access(&mut self) {
+        if self.sfr_get(SFR_G) && !self.regs.scmr_ron {
+            self.regs.wait_for_rom_access = true;
+        }
+    }
+    const fn check_ram_access(&mut self) {
+        if self.sfr_get(SFR_G) && !self.regs.scmr_ran {
+            self.regs.wait_for_ram_access = true;
+        }
+    }
+
+    /// True while the GSU is parked waiting for the CPU to release ROM or RAM.
+    const fn stalled(&self) -> bool {
+        self.regs.wait_for_rom_access || self.regs.wait_for_ram_access
+    }
+
+    fn gsu_read(&mut self, addr: u32) -> u8 {
         let a = (addr & 0xFF_FFFF) as usize;
         if a & 0xC0_0000 == 0x00_0000 {
             // $00-3F: pack the upper-half $8000-$FFFF of each LoROM bank.
+            self.check_rom_access();
             return self.rom[(((a & 0x3F_0000) >> 1) | (a & 0x7FFF)) & self.rom_mask];
         }
         if a & 0xE0_0000 == 0x40_0000 {
             // $40-5F: linear ROM.
+            self.check_rom_access();
             return self.rom[a & self.rom_mask];
         }
         if a & 0xFE_0000 == 0x70_0000 {
             // $70-71: Game Pak RAM.
+            self.check_ram_access();
             return self.ram[a & self.ram_mask];
         }
         0 // open bus
@@ -576,6 +617,7 @@ impl SuperFxMapper {
     fn gsu_write(&mut self, addr: u32, data: u8) {
         let a = (addr & 0xFF_FFFF) as usize;
         if a & 0xFE_0000 == 0x70_0000 {
+            self.check_ram_access();
             self.ram[a & self.ram_mask] = data;
         }
     }
@@ -1514,11 +1556,21 @@ impl Mapper for SuperFxMapper {
         // interleave is exact; the faithful value lands at step 5
         // (`docs/cooperative_scheduler_reference.md`).
         let mclk_per_gsu_clock: i64 = 1; // faithful: if self.regs.clsr { 1 } else { 2 }
-        while self.sfr_get(SFR_G) && self.clock_deficit > 0 {
+        // Mirror Mesen `Gsu::Run`: run whole instructions until caught up to the
+        // CPU clock, but STOP the moment the GSU parks on a bus it doesn't own.
+        while self.sfr_get(SFR_G) && !self.stalled() && self.clock_deficit > 0 {
             self.run_one();
             // Each instruction is ≥ 1 GSU clock, so this always progresses and
             // the deficit bounds the loop.
             self.clock_deficit -= i64::from(self.cycles.max(1)) * mclk_per_gsu_clock;
+        }
+        // While parked (waiting for the CPU to release ROM/RAM), the GSU still
+        // advances its clock with no work — Mesen `Run`'s trailing
+        // `Step(targetCycle - CycleCount)`. Draining the deficit keeps it
+        // clock-synced to the CPU so it resumes in phase, with no catch-up
+        // burst of instructions when SCMR grants access back.
+        if self.stalled() {
+            self.clock_deficit = 0;
         }
     }
 

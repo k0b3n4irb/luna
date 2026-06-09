@@ -353,3 +353,86 @@ reproduces ares' synchronize semantics for the GSU↔CPU pair WITHOUT converting
 PPU/APU to cothreads. If Steps 2-5 don't fix it, the fallback is the full
 cothread scheduler (convert the whole loop) — but try the scoped model first
 (smaller blast radius, same grammar for the GSU↔CPU pair that matters).
+
+## 7. STRUCTURAL REFRAME (2026-06-09, session 2) — read Mesen first, it changes everything
+
+Per the user's method ("when blocked, read how ares+Mesen STRUCTURE it; refactor
+beats days of isolating"), we read **Mesen's** GSU (`Core/SNES/Coprocessors/GSU/`)
+— the right reference because **luna is CPU-driven cycle-stepped, like Mesen, NOT
+cothread like ares.** The result overturns this doc's §3/§6 ranking:
+
+### 7.1 Mesen is ALSO whole-instruction — the "resumable engine" premise is WRONG
+`Gsu::Run()`:
+```cpp
+uint64_t targetCycle = _memoryManager->GetMasterClock() * _clockMultiplier;
+while(!_stopped && _state.CycleCount < targetCycle) { Exec(); }   // Exec = ONE instruction
+if(targetCycle > _state.CycleCount) { Step(targetCycle - _state.CycleCount); }
+```
+This is **exactly luna's `step_coproc`/`clock_deficit`**: run whole instructions
+until the GSU clock catches the master clock. **Mesen does NOT step sub-instruction.**
+So §6.4's strategies (a) explicit cycle-state machine / (c) stackful coroutine — the
+1-2 week "resumable engine" — are **NOT what the gold-standard does and NOT needed.**
+The §6.4b spike that "proved the resumable engine is required" was chasing the wrong
+axis. Granularity is a non-issue; luna already matches Mesen here.
+
+### 7.2 The REAL missing grammar — GSU-side bus arbitration (the `_stopped` stall)
+Mesen's only structural addition over luna is the **SCMR ron/ran bus arbitration**:
+```cpp
+void Gsu::WaitForRomAccess(){ if(!_state.GsuRomAccess){ _waitForRomAccess=true; _stopped=true; } }
+void Gsu::WaitForRamAccess(){ if(!_state.GsuRamAccess){ _waitForRamAccess=true; _stopped=true; } }
+void Gsu::UpdateRunningState(){ _stopped = !SFR.Running || _waitForRamAccess || _waitForRomAccess; }
+// SCMR write: GsuRamAccess=(v&8); GsuRomAccess=(v&0x10); if granted, clear _waitFor*; UpdateRunningState.
+```
+When the GSU accesses ROM/RAM it does **not own** (SCMR ron/ran=0), it STOPS — `Run()`'s
+loop exits, `Step()` advances the clock with no work. It resumes when the CPU grants
+access via SCMR. The stall is at **instruction granularity** (current Exec finishes,
+then no more) — **no mid-instruction resumability needed.**
+
+### 7.3 luna's exact gap (inventoried)
+luna ALREADY has: `scmr_ron`/`scmr_ran` bits, the CPU-side `busy_rom_vector` returned
+on CPU ROM reads during GSU run (superfx.rs:1453), RAM-busy gating (1461). **luna
+LACKS only the GSU-SIDE STALL:** `gsu_read`/`gsu_write` (superfx.rs:558,576) read/write
+ROM/RAM directly and NEVER stall on `!scmr_ron`/`!scmr_ran`; `step_coproc` has no
+`_stopped`/`wait_for_access` gate.
+
+### 7.4 Evidence it is the lever (Doom)
+Doom toggles SCMR **every frame**: `$17` (ron=1, **ran=0**) to take RAM and DMA the
+GSU framebuffer to VRAM, then `$1F` (ran=1) to release. During the `ran=0` window
+**Mesen stalls the GSU; luna keeps running** (reads/writes RAM it doesn't own) → luna's
+GSU does more work / finishes at a different phase → the per-frame CPU timing (and the
+H/V-IRQ raster chain) drifts → the irregular 4-IRQ/frame cadence == the Doom border
+flicker (bisected §6 above; Mesen is flawless 35/35).
+
+### 7.5 Revised plan (bounded — arbitration, not resumable engine)
+- **Stage 1 — GSU-side stall.** Add `wait_for_rom_access`/`wait_for_ram_access`. In the
+  GSU's ROM/RAM access path, if running and `!scmr_ron`/`!scmr_ran`, set the wait flag;
+  `step_coproc`'s loop gates on `!stopped` (mirror Mesen `Run`). `set_scmr` clears the
+  wait flags when access is granted and resumes. Oracle: Doom → 4 IRQ/frame REGULAR
+  like Mesen (the §6 bisection oracle); `gsu_trajectory`/`gsu_differential` byte-exact;
+  Star Fox `wram-trace` @f200 ≤21; all GSU titles render+play (GUI).
+- **Stage 2 — DRAM refresh** (§4d patch) now composes: the GSU stalls correctly during
+  the CPU's framebuffer window, so refresh no longer over-advances it. Oracle: DKC
+  frame-89 / `$0028`; no GSU regression.
+- The clsr scalar (§3.1) and any residual stay tertiary.
+
+This is the faithful translation of the actual gold-standard structure, found by
+reading Mesen's source in minutes — exactly [[feedback_pivot_to_reference_architecture]].
+
+### 7.6 Stage 1 RESULT (2026-06-09) — implemented, faithful, byte-exact, but NEUTRAL on the flicker
+Stage 1 (GSU-side stall) is done (superfx.rs: `wait_for_rom/ram_access`,
+`check_rom/ram_access` at every `gsu_read`/`gsu_write`, `step_coproc` gates on
+`!stalled()` and drains the deficit while parked, `set_scmr` releases on grant).
+Verified: `gsu_trajectory`/`gsu_differential` still byte-exact; Star Fox renders
+(non-regression); the stall ENGAGES (~23 RAM stalls/frame on Doom, `ram=true` as
+expected — Doom keeps the GSU rendering the next frame while the CPU reads the
+framebuffer under `ran=0`). **But the Doom oracle is UNCHANGED: 0.74 INIDISP
+writes/frame, 52% empty frames** (was 0.73-0.75). So the bus arbitration — though a
+genuine missing piece, now correct — is **NOT the flicker lever.** The "proven"
+claim was overstated: Doom *exercises* SCMR, but fixing the GSU stall does not fix
+the cadence. The flicker is the **H/V-IRQ raster CHAIN desyncing** (empty frames =
+the `vtime` 23↔199 re-arm alternation breaking), i.e. **CPU/IRQ timing precision,
+NOT GSU contention.** Keep Stage 1 (faithful + the documented refresh prerequisite).
+Stage 2 (DRAM refresh §4d, the CPU-cycle residual) is now the relevant lever to
+test — its prerequisite (the GSU stall) is in place, so it may compose without the
+old Star Fox blackout. The arbitration alone is a faithful standalone correctness
+fix, neutral on visible output.
