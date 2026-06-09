@@ -93,6 +93,36 @@ Mesen reference trace BEFORE the next step. Revert any step that regresses.
 
 Stop and measure at each step. Never land more than one deviation-fix at a time.
 
+## 4d. Cycle-timing residual — DRAM refresh found, but blocked on GSU timing (2026-06-09)
+
+Chasing the residual cycle-timing drift (DKC intro fires ~2 frames early; Star
+Fox 1-frame slip): the dichotomy pinned a **real missing feature — DRAM
+refresh**. ares (`cpu/timing.cpp:21-29,70-72`) halts the S-CPU **40 master
+cycles every scanline** (5×`step(6)+step(2)`, hcounter ≈ 538) to refresh work
+RAM. luna omitted it, so the CPU ran ~40 mclk/line (≈2.9 %/frame) too fast and
+multi-frame tasks finished early. luna ≡ Mesen byte-exact through DKC frame 88,
+then the intro-setup phase fired early — a non-WRAM cycle-budget difference.
+
+Implemented faithfully (per-scanline 40-mclk CPU stall, charged like the HDMA
+stall in `sched_one_line`). Result:
+- **Helped non-GSU timing:** DKC first divergence moved frame 89 → gone (0 diffs
+  at f89, was 8); residual 17 → 13 bytes; CPU per-frame rate correctly dropped.
+- **REGRESSED the GSU titles — reverted.** Star Fox went BLACK (title + level);
+  WRAM diff @ frame 200 blew up 21 → 2087. Cause: the refresh re-advance also
+  steps the coprocessor (correct — the GSU runs on its own clock during the
+  S-CPU work-RAM refresh pause), so the GSU gains ~40 mclk/line *relative to the
+  CPU*. luna's GSU integration timing (batched `step_coproc` / `clock_deficit`)
+  is approximate and was implicitly tuned WITHOUT refresh; composing the two
+  re-misaligns the GSU launch and breaks rendering.
+
+**Conclusion:** DRAM refresh is a genuine missing piece and the residual's main
+cause, but it **cannot land until the GSU timing is itself faithful** (the
+cooperative cycle-interleave model, §1-5 above) so the two compose. This is the
+exact "translate the whole grammar" point: a faithful CPU-timing fix exposes the
+un-translated GSU scheduling. Landing order must be: faithful GSU cooperative
+scheduler FIRST, then DRAM refresh. Until then the residual stays (invisible;
+games play fine). Patch kept in git history / reflog for when the GSU port lands.
+
 ## 4c. RESOLVED — the garble was a level-vs-edge coprocessor IRQ bug (2026-06-08)
 
 The dichotomy below (§4b) correctly concluded the garble is NOT GSU cycle-timing.
