@@ -81,9 +81,12 @@ struct LunaApp {
     /// callback uses to wake the emu thread.
     emu_shared: Arc<EmuShared>,
 
-    /// Latest RGBA framebuffer published by the emu thread. The UI
-    /// thread memcpy's this out under a brief lock and blits it.
-    framebuffer_rgba: Arc<Mutex<Vec<u8>>>,
+    /// Read side of a lock-free triple buffer the emu thread publishes
+    /// completed RGBA frames into (replaces the old `Arc<Mutex<Vec<u8>>>`).
+    /// The producer never blocks on the UI and the UI never sees a
+    /// half-written frame — no lock contention between the two ~60 Hz
+    /// clocks (ness `triple_buffer`).
+    framebuffer_out: triple_buffer::Output<Vec<u8>>,
 
     /// Audio backend kept alive for the program's lifetime. cpal owns
     /// the ring's consumer end internally; we hand the producer to the
@@ -130,6 +133,15 @@ struct LunaApp {
     pending_hotkey_rebind: Option<Hotkey>,
     /// Last screenshot filename, surfaced in the menu bar as feedback.
     screenshot_status: Option<String>,
+
+    /// Debug panels (Debug menu). Data is pulled through `luna-api` each
+    /// frame only while a panel is open.
+    show_cpu_state: bool,
+    show_sprites: bool,
+    show_memory: bool,
+    /// Hex-viewer cursor: WRAM bank ($7E/$7F) + page offset.
+    mem_bank: u8,
+    mem_offset: u16,
 }
 
 impl LunaApp {
@@ -150,7 +162,7 @@ impl LunaApp {
             emu: Arc::new(Mutex::new(None)),
             emu_join: None,
             emu_shared,
-            framebuffer_rgba: Arc::new(Mutex::new(vec![0u8; FRAME_W * FRAME_H * 4])),
+            framebuffer_out: triple_buffer::triple_buffer(&vec![0u8; FRAME_W * FRAME_H * 4]).1,
             audio,
             audio_producer,
             audio_primed,
@@ -166,6 +178,11 @@ impl LunaApp {
             pending_rebind: None,
             pending_hotkey_rebind: None,
             screenshot_status: None,
+            show_cpu_state: false,
+            show_sprites: false,
+            show_memory: false,
+            mem_bank: 0x7E,
+            mem_offset: 0x0000,
         };
         if let Some(path) = auto_rom {
             app.load_rom(&path);
@@ -194,12 +211,14 @@ impl LunaApp {
         if let (Some(producer), Some(primed)) =
             (self.audio_producer.take(), self.audio_primed.take())
         {
+            let (fb_in, fb_out) = triple_buffer::triple_buffer(&vec![0u8; FRAME_W * FRAME_H * 4]);
+            self.framebuffer_out = fb_out;
             self.emu_join = Some(crate::emu_thread::spawn(
                 self.emu.clone(),
                 self.emu_shared.clone(),
                 producer,
                 primed,
-                self.framebuffer_rgba.clone(),
+                fb_in,
             ));
         }
         self.rom_loaded = true;
@@ -235,9 +254,9 @@ impl LunaApp {
         if let Ok(mut guard) = self.emu.lock() {
             *guard = None;
         }
-        if let Ok(mut fb) = self.framebuffer_rgba.lock() {
-            fb.iter_mut().for_each(|b| *b = 0);
-        }
+        // Black the screen with a fresh empty triple buffer (the old one's
+        // producer was the emu thread we just joined).
+        self.framebuffer_out = triple_buffer::triple_buffer(&vec![0u8; FRAME_W * FRAME_H * 4]).1;
         self.rom_loaded = false;
     }
 
@@ -506,17 +525,51 @@ impl LunaApp {
         let ui = self.ui.as_mut();
         // Copy the latest published SNES frame into the pixels canvas
         // (256×224). pixels handles the upscaling to the window.
-        if let Ok(fb) = self.framebuffer_rgba.lock() {
-            let dst = pixels.frame_mut();
+        {
             let len = FRAME_W * FRAME_H * 4;
-            dst[..len].copy_from_slice(&fb[..len]);
+            // Lock-free fetch of the latest published frame (no Mutex).
+            let fb = self.framebuffer_out.read();
+            pixels.frame_mut()[..len].copy_from_slice(&fb[..len]);
         }
+        // Build the debug-panel snapshot through luna-api (api-first), only
+        // while a panel is open. Copy the flags out first so the lock closure
+        // borrows none of `self`.
+        let (sc, ss, sm, mb, mo) = (
+            self.show_cpu_state,
+            self.show_sprites,
+            self.show_memory,
+            self.mem_bank,
+            self.mem_offset,
+        );
+        let debug = if sc || ss || sm {
+            self.emu
+                .lock()
+                .ok()
+                .and_then(|mut g| {
+                    g.as_mut().map(|em| crate::ui::DebugSnapshot {
+                        cpu: if sc { Some(em.state().cpu) } else { None },
+                        sprites: if ss { em.decode_sprites().ok() } else { None },
+                        memory: if sm {
+                            em.peek_memory(mb, mo, 256).ok().map(|b| (mb, mo, b))
+                        } else {
+                            None
+                        },
+                    })
+                })
+                .unwrap_or_default()
+        } else {
+            crate::ui::DebugSnapshot::default()
+        };
         let pending: Mutex<Vec<MenuAction>> = Mutex::new(Vec::new());
         let ui_state = UiState {
             paused: self.emu_shared.paused.load(Ordering::Acquire),
             rom_title: self.rom_title.clone(),
             show_input_config: self.show_input_config,
             key_bindings: &self.key_bindings,
+            show_cpu_state: sc,
+            show_sprites: ss,
+            show_memory: sm,
+            debug,
             pending_rebind: self.pending_rebind,
             pending_hotkey_rebind: self.pending_hotkey_rebind,
             screenshot_status: self.screenshot_status.clone(),
@@ -558,6 +611,14 @@ impl LunaApp {
             }
             MenuAction::PauseToggle => self.toggle_pause(),
             MenuAction::Reset => self.reset(),
+            MenuAction::ToggleCpuState => self.show_cpu_state = !self.show_cpu_state,
+            MenuAction::ToggleSprites => self.show_sprites = !self.show_sprites,
+            MenuAction::ToggleMemory => self.show_memory = !self.show_memory,
+            MenuAction::MemPagePrev => self.mem_offset = self.mem_offset.wrapping_sub(256),
+            MenuAction::MemPageNext => self.mem_offset = self.mem_offset.wrapping_add(256),
+            MenuAction::MemBankToggle => {
+                self.mem_bank = if self.mem_bank == 0x7E { 0x7F } else { 0x7E };
+            }
             MenuAction::ToggleInputConfig => {
                 self.show_input_config = !self.show_input_config;
                 if !self.show_input_config {
@@ -591,9 +652,7 @@ impl LunaApp {
     /// We capture the GUI's published RGBA framebuffer (256×224) — the
     /// exact pixels on screen — so the PNG matches what the user sees.
     fn take_screenshot(&mut self) {
-        let Ok(buf) = self.framebuffer_rgba.lock().map(|fb| fb.clone()) else {
-            return;
-        };
+        let buf = self.framebuffer_out.read().clone();
         let Some(img) = image::RgbaImage::from_raw(FRAME_W as u32, FRAME_H as u32, buf) else {
             eprintln!("luna-gui: screenshot skipped — framebuffer size mismatch");
             return;

@@ -38,7 +38,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Sample, SampleFormat, Stream, StreamConfig};
 use ringbuf::HeapRb;
-use ringbuf::traits::{Consumer, Split};
+use ringbuf::traits::{Consumer, Observer, Split};
 
 /// Target SNES audio sample rate. The host stream is configured to
 /// this rate when the device supports it.
@@ -237,6 +237,7 @@ fn fill_buffer_f32(
         }
         return;
     }
+    apply_drc(consumer, resampler);
     let mut idx = 0;
     while idx + 1 < data.len() {
         let (l, r) = resampler.pull(|| pop_input(consumer).map(|s| dc_blocker.process(s)));
@@ -244,6 +245,22 @@ fn fill_buffer_f32(
         data[idx + 1] = r;
         idx += 2;
     }
+}
+
+/// Dynamic rate control, run once per device callback: measure the input
+/// ring's fill level and nudge the resampler step toward keeping it at
+/// half capacity. A too-full ring (emulator ahead of the device clock)
+/// raises the step so the callback consumes input faster; the emulator,
+/// paced by the ring backpressure, then slows to match the device — and
+/// vice versa. Bounded to ±0.5 % so the pitch shift is inaudible. This
+/// locks the SNES 60.0988 Hz to the real audio-device clock, killing the
+/// slow drift/beat between the two ~60 Hz clocks (jgenesis DRC).
+fn apply_drc(consumer: &ringbuf::HeapCons<(i16, i16)>, resampler: &mut Resampler) {
+    let occupied = consumer.occupied_len() as f32;
+    let target = (RING_CAPACITY / 2) as f32;
+    // Proportional: ±half-capacity error maps to the full ±0.5 % range.
+    let correction = (occupied - target) / RING_CAPACITY as f32 * 0.01;
+    resampler.set_drc_correction(correction);
 }
 
 fn fill_buffer_i16(
@@ -259,6 +276,7 @@ fn fill_buffer_i16(
         }
         return;
     }
+    apply_drc(consumer, resampler);
     let mut idx = 0;
     while idx + 1 < data.len() {
         let (l, r) = resampler.pull(|| pop_input(consumer).map(|s| dc_blocker.process(s)));
@@ -288,6 +306,7 @@ fn fill_buffer_u8(
         }
         return;
     }
+    apply_drc(consumer, resampler);
     let mut idx = 0;
     while idx + 1 < data.len() {
         let (l, r) = resampler.pull(|| pop_input(consumer).map(|s| dc_blocker.process(s)));
@@ -348,15 +367,32 @@ pub(crate) struct Resampler {
     /// Per-output-sample step in input-sample units.
     /// `source_rate / device_rate`. For 32 k → 48 k → `≈ 0.667`.
     step: f32,
+    /// Nominal `source/device` ratio. Dynamic rate control (DRC) warps
+    /// `step` around this by ≤±0.5 % to lock the emulator's frame-
+    /// production rate to the real audio-device clock (jgenesis
+    /// `DynamicResamplingRate`), eliminating the slow drift/beat between
+    /// the two ~60 Hz clocks. ≤0.5 % is inaudible pitch-wise.
+    base_step: f32,
 }
 
 impl Resampler {
     pub(crate) fn new(source_rate: u32, device_rate: u32) -> Self {
+        let base = source_rate as f32 / device_rate as f32;
         Self {
             history: [(0.0, 0.0); 6],
             frac: 0.0,
-            step: source_rate as f32 / device_rate as f32,
+            step: base,
+            base_step: base,
         }
+    }
+
+    /// Dynamic rate control: nudge the resample step around its nominal
+    /// ratio by `correction` (clamped to ±0.5 %). Positive = consume the
+    /// input ring faster (drain a too-full ring → emulator, paced by the
+    /// ring, slows to match the device); negative = let the ring fill.
+    pub(crate) fn set_drc_correction(&mut self, correction: f32) {
+        let c = correction.clamp(-0.005, 0.005);
+        self.step = self.base_step * (1.0 + c);
     }
 
     /// Closed-form 6-point cubic Hermite interpolation in one
