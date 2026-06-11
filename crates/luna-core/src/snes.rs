@@ -955,7 +955,8 @@ impl Snes {
             } else if matches!(bank, 0x7E..=0x7F) {
                 // Full WRAM ($7E-$7F).
                 self.wram[(usize::from(bank - 0x7E) << 16) | usize::from(off)]
-            } else if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && (0x2000..=0x5FFF).contains(&off) {
+            } else if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && (0x2000..=0x5FFF).contains(&off)
+            {
                 // PPU/APU/CPU/coproc register band — read side effects, so 0.
                 0
             } else {
