@@ -261,6 +261,13 @@ pub struct SuperFxMapper {
     clock_deficit: i64,
     /// Per-instruction cycle accumulator (set by `step`), read by `run_one`.
     cycles: u32,
+    /// Cumulative main-CPU master clocks since reset (advanced by every
+    /// `step_coproc`, even while the GSU is stopped). The shared time axis the
+    /// GSU clock is read against — see [`SuperFxTraceEvent::mclk`].
+    cpu_mclk: u64,
+    /// Was the GSU running (`sfr.g`) at the previous executed instruction?
+    /// Drives the `go_start` task-boundary marker in the trace.
+    gsu_running_prev: bool,
     /// Did the just-executed instruction write R14 / R15? Drives the R14
     /// ROM-buffer re-arm and the R15 post-increment (spec §1.1, ares
     /// superfx.cpp:35-44).
@@ -296,6 +303,8 @@ impl SuperFxMapper {
             pixelcache: [PixelCache::reset(); 2],
             clock_deficit: 0,
             cycles: 0,
+            cpu_mclk: 0,
+            gsu_running_prev: false,
             modified_r14: false,
             modified_r15: false,
             trace: None,
@@ -754,12 +763,28 @@ impl SuperFxMapper {
         self.modified_r14 = false;
         self.modified_r15 = false;
         let opcode = self.peekpipe();
-        if self.trace.is_some() {
+        // `go_start` = first instruction since the GSU was last stopped (task
+        // boundary). The GSU is running by definition inside `run_one`.
+        let go_start = !self.gsu_running_prev;
+        self.gsu_running_prev = true;
+        // Record the pushed event's index so `stop` can be patched in once
+        // `execute` reveals whether this op cleared `sfr.g`.
+        let traced_idx = if self.trace.is_some() {
+            // GSU clock on the shared master axis = CPU timeline minus the GSU's
+            // lag (`clock_deficit`); decremented per op below ⇒ per-instruction
+            // resolution, and idle-time jumps across GO/STOP boundaries.
+            let mclk = i64::try_from(self.cpu_mclk)
+                .unwrap_or(i64::MAX)
+                .saturating_sub(self.clock_deficit)
+                .max(0) as u64;
             let ev = SuperFxTraceEvent {
                 pc_full: (u32::from(self.regs.pbr) << 16) | u32::from(self.regs.r[15]),
                 opcode,
                 sfr: self.regs.sfr,
                 r: self.regs.r,
+                mclk,
+                go_start,
+                stop: false,
             };
             if let Some((events, max)) = self.trace.as_mut() {
                 if *max > 0 {
@@ -767,15 +792,34 @@ impl SuperFxMapper {
                         events.drain(0..*max / 2);
                     }
                     events.push(ev);
+                    Some(events.len() - 1)
+                } else {
+                    None
                 }
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
         self.execute(opcode);
         if self.modified_r14 {
             self.update_rom_buffer();
         }
         if !self.modified_r15 {
             self.regs.r[15] = self.regs.r[15].wrapping_add(1);
+        }
+        // A cleared GO flag means this instruction ended the GO task (STOP).
+        // Mark the next executed op as a fresh task start.
+        if !self.sfr_get(SFR_G) {
+            self.gsu_running_prev = false;
+            if let Some(idx) = traced_idx {
+                if let Some((events, _)) = self.trace.as_mut() {
+                    if let Some(e) = events.get_mut(idx) {
+                        e.stop = true;
+                    }
+                }
+            }
         }
     }
 
@@ -1542,6 +1586,10 @@ impl Mapper for SuperFxMapper {
     /// clsr ratio is the timing phase's job). The loop also exits the moment
     /// a STOP clears the GO flag.
     fn step_coproc(&mut self, main_mclk: u32) {
+        // Advance the shared CPU timeline unconditionally — even while the GSU
+        // is stopped — so the trace's `mclk` stamp reflects idle (CPU-only)
+        // time between GO tasks, not just GSU-active time.
+        self.cpu_mclk = self.cpu_mclk.wrapping_add(u64::from(main_mclk));
         if !self.sfr_get(SFR_G) {
             return;
         }

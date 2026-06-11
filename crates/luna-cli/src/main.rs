@@ -618,7 +618,7 @@ fn write_superfx_trace_csv(
     path: &std::path::Path,
     events: &[luna_api::SuperFxTraceEvent],
 ) -> std::io::Result<()> {
-    let mut header = String::from("seq,pc,opcode,sfr");
+    let mut header = String::from("seq,mclk,go,stop,pc,opcode,sfr");
     for n in 0..16 {
         header.push_str(",r");
         header.push_str(&n.to_string());
@@ -626,8 +626,11 @@ fn write_superfx_trace_csv(
     write_csv(path, &header, events, |f, i, ev| {
         write!(
             f,
-            "{},{},${:02X},${:04X}",
+            "{},{},{},{},{},${:02X},${:04X}",
             i,
+            ev.mclk,
+            u8::from(ev.go_start),
+            u8::from(ev.stop),
             fmt_pc(ev.pc_full),
             ev.opcode,
             ev.sfr,
