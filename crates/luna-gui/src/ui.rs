@@ -127,14 +127,18 @@ impl UiOverlay {
             if state.show_input_config {
                 draw_input_config(ui.ctx(), state, &mut emit);
             }
-            if state.show_cpu_state {
-                draw_cpu_state(ui.ctx(), state);
+            // Each panel renders only when its flag is set, and returns its
+            // window's open-state. egui's title-bar X clears that, which we
+            // translate back into the normal Toggle action so the flag stays
+            // the single source of truth.
+            if state.show_cpu_state && !draw_cpu_state(ui.ctx(), state) {
+                emit(MenuAction::ToggleCpuState);
             }
-            if state.show_sprites {
-                draw_sprites(ui.ctx(), state);
+            if state.show_sprites && !draw_sprites(ui.ctx(), state) {
+                emit(MenuAction::ToggleSprites);
             }
-            if state.show_memory {
-                draw_memory(ui.ctx(), state, &mut emit);
+            if state.show_memory && !draw_memory(ui.ctx(), state, &mut emit) {
+                emit(MenuAction::ToggleMemory);
             }
         });
         self.winit_state
@@ -310,8 +314,10 @@ fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<
 }
 
 /// Debug panel: 65c816 register file + decoded flags (read-only).
-fn draw_cpu_state(ctx: &egui::Context, state: &UiState<'_>) {
+fn draw_cpu_state(ctx: &egui::Context, state: &UiState<'_>) -> bool {
+    let mut open = true;
     egui::Window::new("CPU — 65c816")
+        .open(&mut open)
         .default_pos([24.0, 48.0])
         .resizable(false)
         .show(ctx, |ui| {
@@ -362,11 +368,15 @@ fn draw_cpu_state(ctx: &egui::Context, state: &UiState<'_>) {
                 ui.colored_label(egui::Color32::YELLOW, "WAITING (WAI)");
             }
         });
+    open
 }
 
 /// Debug panel: the 128 OAM sprites, decoded via `decode_sprites()`.
-fn draw_sprites(ctx: &egui::Context, state: &UiState<'_>) {
+fn draw_sprites(ctx: &egui::Context, state: &UiState<'_>) -> bool {
+    let mut open = true;
     egui::Window::new("Sprites (OAM)")
+        .open(&mut open)
+        .default_pos([280.0, 48.0])
         .default_size([360.0, 420.0])
         .show(ctx, |ui| {
             let Some(sprites) = state.debug.sprites.as_ref() else {
@@ -394,11 +404,15 @@ fn draw_sprites(ctx: &egui::Context, state: &UiState<'_>) {
                     });
             });
         });
+    open
 }
 
 /// Debug panel: a 256-byte hex window of WRAM, paged via the toolbar.
-fn draw_memory<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>, emit: &mut F) {
+fn draw_memory<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>, emit: &mut F) -> bool {
+    let mut open = true;
     egui::Window::new("Memory (hex)")
+        .open(&mut open)
+        .default_pos([280.0, 480.0])
         .default_size([560.0, 340.0])
         .show(ctx, |ui| {
             let Some((bank, offset, bytes)) = state.debug.memory.as_ref() else {
@@ -440,6 +454,7 @@ fn draw_memory<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>, e
                 }
             });
         });
+    open
 }
 
 #[allow(deprecated)]
