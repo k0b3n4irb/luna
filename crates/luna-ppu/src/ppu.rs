@@ -328,9 +328,12 @@ pub struct Ppu {
     /// Latch for the BG H/V scroll write-twice protocol.
     /// `$210D-$2114` are written low byte first, then high byte (bits
     /// 0-1 land as the top 2 bits of the 10-bit scroll). The PPU keeps
-    /// a single shared latch across all eight registers — every write
-    /// to any of them updates that latch.
-    bg_scroll_latch: u8,
+    /// TWO shared latches across all eight BG-scroll registers (ares
+    /// `latch.bgofsPPU1`/`bgofsPPU2`): every H write updates both, every V
+    /// write updates only PPU1. The H formula reads bits 3-9 from PPU1 and
+    /// bits 0-2 from PPU2 — the genuine write-twice cross-latch quirk.
+    bgofs_ppu1: u8,
+    bgofs_ppu2: u8,
 
     // ---------- Open-bus tracking ----------
     /// Last value seen on the PPU data bus — returned for reads of
@@ -455,7 +458,8 @@ impl Ppu {
             opvct_hi_pending: false,
             external_latch_hit: false,
             field: false,
-            bg_scroll_latch: 0,
+            bgofs_ppu1: 0,
+            bgofs_ppu2: 0,
             open_bus: 0,
             inidisp_write_count: 0,
             framebuffer: vec![[0u8; 3]; FRAME_W * FRAME_H],
@@ -616,7 +620,8 @@ impl Ppu {
                 let v = self.stat78
                     | (u8::from(self.field) << 7)
                     | if self.external_latch_hit { 0x40 } else { 0 };
-                self.bg_scroll_latch = 0;
+                self.bgofs_ppu1 = 0;
+                self.bgofs_ppu2 = 0;
                 self.external_latch_hit = false;
                 // Reading $213F also resets the OPHCT/OPVCT byte-read
                 // flip-flop (ares `io.cpp` $213f: `latch.hcounter = 0;
@@ -671,24 +676,27 @@ impl Ppu {
 
     /// `$210D/$210F/$2111/$2113` H-scroll write-twice protocol.
     fn write_bg_h_scroll(&mut self, bg_idx: usize, value: u8) {
-        // New H scroll = (value << 8) | (prev_latch & ~7) | (h_scroll & 7).
-        // Per fullsnes: the bottom 3 bits of the *previous* H scroll
-        // value are OR'd back in, and the bottom 5 bits of the latch
-        // contribute to bits 0-2 ... actually this is one of the more
-        // notoriously buggy SNES PPU behaviours. We model the canonical
-        // form used by most games: prev = (value as low) | (latch as high).
-        let lo = self.bg_scroll_latch;
-        let hi = value;
-        self.bg[bg_idx].h_scroll = (u16::from(hi) << 8 | u16::from(lo)) & 0x03FF;
-        self.bg_scroll_latch = value;
+        // ares ppu/io.cpp:312-314 (BG1HOFS et al.). The H offset uses BOTH
+        // shared scroll latches: bits 3-9 from the *previous* write
+        // (`bgofs_ppu1 & ~7`), bits 0-2 from the write *two before*
+        // (`bgofs_ppu2 & 7`), bits 8-9 from the new high byte. Both latches
+        // then take the new byte. The two-latch cross is the real hardware
+        // write-twice quirk (it only shows when scroll registers interleave;
+        // a single latch mis-scrolled the sub-tile H offset in many games).
+        self.bg[bg_idx].h_scroll = ((u16::from(value) << 8)
+            | (u16::from(self.bgofs_ppu1) & !7)
+            | (u16::from(self.bgofs_ppu2) & 7))
+            & 0x03FF;
+        self.bgofs_ppu1 = value;
+        self.bgofs_ppu2 = value;
     }
 
     /// `$210E/$2110/$2112/$2114` V-scroll write-twice protocol.
     fn write_bg_v_scroll(&mut self, bg_idx: usize, value: u8) {
-        let lo = self.bg_scroll_latch;
-        let hi = value;
-        self.bg[bg_idx].v_scroll = (u16::from(hi) << 8 | u16::from(lo)) & 0x03FF;
-        self.bg_scroll_latch = value;
+        // ares ppu/io.cpp:323-324 (BG1VOFS): V uses the FULL previous-write
+        // latch (no PPU2 cross) and updates only `bgofs_ppu1`.
+        self.bg[bg_idx].v_scroll = ((u16::from(value) << 8) | u16::from(self.bgofs_ppu1)) & 0x03FF;
+        self.bgofs_ppu1 = value;
     }
 
     /// Mode-7 write-twice helper. Returns the new 16-bit value
@@ -913,6 +921,24 @@ mod stat_tests {
         // (The 0x10 byte becomes the high byte of a 10-bit value
         // → bits 8-9 of that byte land in the scroll.)
         assert_eq!(p.bg[1].h_scroll & 0xFF, 0x00, "low byte = cleared latch");
+    }
+
+    #[test]
+    fn bg_h_scroll_uses_two_shared_latches() {
+        // ares ppu/io.cpp:312 — H offset = data<<8 | (ppu1 & ~7) | (ppu2 & 7).
+        let mut p = Ppu::new();
+        // Seed both shared latches via a BG1 H write (ppu1 = ppu2 = 0x05).
+        p.write(register::BG1HOFS, 0x05);
+        // A V write updates ONLY ppu1 (→ 0xF8); ppu2 stays 0x05.
+        p.write(register::BG1VOFS, 0xF8);
+        // The next H write takes bits 3-9 from ppu1 (0xF8) and bits 0-2 from
+        // ppu2 (0x05) — the cross-latch quirk. A single latch would give
+        // 0x02F8; the two-latch hardware gives 0x02FD.
+        p.write(register::BG2HOFS, 0x02);
+        assert_eq!(
+            p.bg[1].h_scroll, 0x02FD,
+            "two-latch cross: hi=0x02, bits3-7 from ppu1=0xF8, bits0-2 from ppu2=0x05"
+        );
     }
 
     #[test]
