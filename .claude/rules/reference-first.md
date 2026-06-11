@@ -53,6 +53,6 @@ Always read the source first.
 For a recent end-to-end application of this workflow, see:
 
 - `docs/ppu_compositor_reference.md` — the synthesised ares + Mesen2 spec
-- `docs/luna_ppu_gaps.md` — prioritised gap list against that spec
-- `docs/luna_ppu_inventory.md` — luna's pre-fix state
+- `docs/accuracy_scorecard.md` + the per-subsystem `docs/luna_*_gaps.md` —
+  the current correctness grades + open-gap lists against that spec
 - `docs/ares_ppu_notes.md`, `docs/mesen2_ppu_notes.md` — raw per-reference notes

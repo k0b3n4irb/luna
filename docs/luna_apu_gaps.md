@@ -117,7 +117,7 @@ underlying RAM. Tests `ipl_rom_overlay_toggles_with_f1_bit7`,
 
 ## Suggested order
 
-1. ~~#1 ENDX read-clear~~ — **done** (`cd3d934`).
+1. ~~#1 ENDX read-clear~~ — **done** (`036f65f`).
 2. ~~#7 dead scaffolding~~, ~~#2 `$F1` port-clear~~, ~~#5 `$F8/$F9`~~ —
    **done**.
 3. ~~#4 IPL overlay~~ — **done**.

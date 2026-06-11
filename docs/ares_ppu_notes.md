@@ -628,7 +628,7 @@ case 0x4212:  //HVBJOY
 ```
 
 - **bit 0**: auto-joypad busy. Set only when polling is enabled AND counter < 33.
-- **bit 6**: H-blank. **Live** (hcounter-driven), not latched. True when `hcounter() <= 2 || hcounter() >= 1096`. Notice this includes the brief window at the very start of the scanline (dots 0..2). HCounter range is 0..1363, visible/render region roughly 22..1096. So bit-6 is "outside the visible-dot zone". This matches the project's recent fix commit (`6694e1d fix(core): $4212 HVBJOY bit 6 = live Hblank (ares)`).
+- **bit 6**: H-blank. **Live** (hcounter-driven), not latched. True when `hcounter() <= 2 || hcounter() >= 1096`. Notice this includes the brief window at the very start of the scanline (dots 0..2). HCounter range is 0..1363, visible/render region roughly 22..1096. So bit-6 is "outside the visible-dot zone". This matches the project's recent fix commit (`9d801f8 fix(core): $4212 HVBJOY bit 6 = live Hblank (ares)`).
 - **bit 7**: V-blank. True when `vcounter() >= vdisp()`.
 
 Bits 1..5 are unimplemented (returned as input `data`, i.e. open-bus from previous read).
@@ -824,7 +824,7 @@ OBJ tile fetch happens after rendering, at `obj.fetch()` (main.cpp:93), and popu
 4. **VRAM/OAM write-discard on active display** (`ppu_io.cpp:19-45`). These return 0 / discard unless force-blank.
 5. **OAM $2104 even-byte latch** (`ppu_io.cpp:223-236`). The low byte of an even-aligned write is held until the high byte arrives.
 6. **OAM addressReset on entering VBlank** (`object.cpp:31`). And on `INIDISP` write exiting force-blank at vcounter==vdisp (`ppu_io.cpp:194`).
-7. **HVBJOY bit 6 is live Hblank, not latched** (`cpu/io.cpp:35`) — luna's recent fix commit `6694e1d` already addresses this; just confirming the ares behaviour.
+7. **HVBJOY bit 6 is live Hblank, not latched** (`cpu/io.cpp:35`) — luna's recent fix commit `9d801f8` already addresses this; just confirming the ares behaviour.
 8. **The `window.run` clobbers layer priority to 0** to mask (`window.cpp:11-33`) — luna's window may be implementing a separate "mask" bit, which would still work but be a different shape. Either is correct; verify the data path.
 9. **DAC scanline init sets `math.above.colorEnable = false`** then `above()` overwrites it from `window.output.above.colorEnable`. So the *initial* state for the first dot of a line has main forced black — this is the "first hires pixel is transparent" hardware quirk.
 10. **`math.below.color` defaults to palette[0] on each scanline**, then is updated by `below()` only when a layer wins. So if luna initialises `math.below.color` to zero, a sub-backdrop dot in math will use 0 instead of CGRAM[0] — wrong colour by however much CGRAM[0] differs from 0.

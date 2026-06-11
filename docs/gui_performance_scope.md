@@ -126,16 +126,23 @@ What is actually established (solid):
 - luna emulates Doom at real-time (audio 32770 samples/s steady, 6× headless
   headroom) — NOT slow at the emulation/core level.
 - The present path is correct (latest framebuffer @ vsync).
-- Doom's top/bottom **border rows flicker** (luna-specific; Mesen renders them
-  constant black) — the INIDISP forced-blank scanline JITTER from the CPU/GSU
-  cycle-timing imprecision (see `av_sync`/cooperative-scheduler notes). At 60 Hz
-  in continuous motion this reads as judder.
 - Star Fox is smooth on the SAME present/pacing path.
 
-NOT cleanly measured (headless): Doom's in-game 3D framerate vs Mesen — every
-attempt was confounded by a static attract scene or scripted input that didn't
-hold motion. The open dichotomy is therefore: is the "laggy" (a) the border
-flicker (→ cycle-timing/GSU frontier, or an overscan-crop mitigation), or (b) a
-genuinely lower 3D framerate than Mesen (→ luna's GSU rendering Doom slower)?
-Needs either a continuous-motion capture or the user's direct observation.
-The lag is content-level, NOT the GUI present layer — do not patch the present.
+## UPDATE (2026-06-11) — the border flicker is SOLVED; it was a PPU register bug
+
+The "Doom border rows flicker" item above was attributed to "CPU/GSU
+cycle-timing imprecision / forced-blank scanline jitter." **That was wrong.** The
+border flicker was root-caused and FIXED as a PPU register bug: reading `$213F`
+(STAT78) did not reset the OPHCT/OPVCT byte-read flip-flop (ares `io.cpp:167-169`),
+so V-counter reads were 50% wrong → Doom's raster IRQ handler took a no-ack branch,
+re-firing the H/V IRQ ~200×/frame and pinning the S-CPU at I=1, so the INIDISP
+re-blank of the border was dropped on alternating frames. A surgical one-line PPU
+fix made the borders constant-black and **also smoothed the gameplay** (the CPU no
+longer spins ~90% of alternating frames). NOT a GUI/present-layer issue and NOT a
+GSU/cooperative-scheduler issue. See `docs/accuracy_scorecard.md` and the
+`project_doom_flicker_opvct_latch` memory.
+
+Residual (genuinely open, separate): whether Doom's in-game 3D framerate matches
+Mesen has never been cleanly measured headless (attract-scene / scripted-input
+confounds). That is a GSU-rendering-throughput question, independent of the now-
+fixed border flicker, and is content-level — do not patch the GUI present layer.

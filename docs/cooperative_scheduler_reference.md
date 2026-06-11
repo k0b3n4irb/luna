@@ -1,12 +1,31 @@
-# Cooperative Scheduler — ares reference + luna port plan
+# GSU timing residuals — ares scheduler model + DRAM refresh (reference)
 
-Governed by `.claude/rules/faithful-port-and-dichotomy.md`. This is the
-blueprint for porting ares' cooperative GSU↔CPU timing into luna, **faithfully,
-step by step, by dichotomy**. Written reference-first from the actual ares
-source (`ares/ares/scheduler/{scheduler,thread}.{hpp,cpp}`,
+> **RETRACTED 2026-06-11.** This doc was originally written as a port plan
+> to fix the Doom letterbox-border flicker by faithfully porting ares'
+> cooperative GSU↔CPU scheduler. **That central thesis is retracted.** The
+> flicker was root-caused as a **PPU register bug**: reading `$213F`
+> (STAT78) did not reset the OPHCT/OPVCT byte-read flip-flop (ares
+> `io.cpp:167-169`), so V-counter reads were 50% wrong. That sent Doom's
+> raster IRQ handler down a no-ack branch which re-fired the H/V IRQ
+> ~200×/frame and pinned the S-CPU at `I=1`. It was **NOT** a GSU
+> scheduler / cooperative-thread / "~3.3× slow loop" / state-injection-
+> oracle problem: the GSU engine is byte-exact and its per-task timing
+> matches Mesen within 1%. See `docs/accuracy_scorecard.md` and the
+> `project_doom_flicker_opvct_latch` memory.
+>
+> What survives, and why this doc is kept: the ares Thread/Scheduler
+> cothread model below is an accurate reference for genuine remaining
+> timing residuals, and two real items are recorded here — the missing
+> **DRAM refresh** feature, and the **shipped SCMR GSU-side bus
+> arbitration** stall. Everything that framed the flicker as a scheduling
+> problem has been cut.
+
+Governed by `.claude/rules/faithful-port-and-dichotomy.md`. Written
+reference-first from the actual ares source
+(`ares/ares/scheduler/{scheduler,thread}.{hpp,cpp}`,
 `ares/sfc/coprocessor/superfx/{superfx,timing,bus}.cpp`).
 
-## 1. ares' model (the target grammar)
+## 1. ares' model (the target grammar) — REFERENCE
 
 **Thread** (`thread.hpp/cpp`): each emulated component is a cothread with:
 - `_frequency` (Hz), `_scalar = Second / frequency` (`Second = (u64-1)>>1`),
@@ -37,7 +56,7 @@ source (`ares/ares/scheduler/{scheduler,thread}.{hpp,cpp}`,
 observes the GSU it runs the GSU to the CPU's exact time; the GSU yields to the
 CPU after each memory access; GSU bus accesses arbitrate.
 
-## 2. luna's model (current grammar)
+## 2. luna's model and the mapping to ares
 
 CPU-driven, single-threaded. `total_mclk` is the master clock (master-cycle
 units, the 21.48 MHz domain — the CPU IS the timebase). Per CPU bus access,
@@ -46,393 +65,92 @@ per DMA byte, `DmaBusView::tick` → `step_coproc`. The GSU runs whole
 instructions bounded by `clock_deficit`:
 `clock_deficit += main_mclk; while(g && deficit>0){ run_one(); deficit -= cycles }`.
 
-**`clock_deficit` IS `synchronize`-to-clock in disguise:** it equals
-`cpu_clock_advanced − gsu_clock_advanced`; running until `deficit ≤ 0` ==
-running the GSU until `gsu_clock ≥ cpu_clock`. So luna already does
-synchronize-before-access (via io_cycle) and per-DMA-byte interleave.
+**`clock_deficit` IS ares' `synchronize`-to-clock at instruction
+granularity.** It equals `cpu_clock_advanced − gsu_clock_advanced`; running
+until `deficit ≤ 0` == running the GSU until `gsu_clock ≥ cpu_clock`. Called
+per CPU bus access (≈ synchronize-before-access) and per DMA byte, luna already
+reproduces ares' synchronize semantics for the GSU↔CPU pair without converting
+the whole emulator loop to cothreads. Mesen's `Gsu::Run()` (run whole
+instructions until `_state.CycleCount < masterClock * _clockMultiplier`) is the
+same whole-instruction model — luna matches the gold standard here, and no
+sub-instruction "resumable engine" is needed.
 
-## 3. The precise deviations (what to translate)
+The GSU engine logic itself is **proven byte-exact** (`gsu_differential` /
+`gsu_trajectory` harnesses, 0 divergence vs Mesen) — opcode logic, `romcl`/
+`ramcl` ROM/RAM-buffer latency, and the internal `step(clocks)` that services
+buffers + accumulates `self.cycles` all mirror ares. Do NOT touch it.
 
-1. **Rate / scalar missing.** luna deducts `cycles` (1 master clock per GSU
-   clock) regardless of clsr. Faithful: a GSU clock costs `clsr?1:2` master
-   clocks (slow = master/2). Equivalent to ares' scalar. *(Tested standalone in
-   the batched model → authentic but laggy; land it only as part of the whole
-   faithful model, GUI-validated.)*
-2. **Granularity: instruction vs step.** luna's `run_one` is atomic
-   (overshoot ≤ one instruction ≈ ≤40 cycles). ares yields/synchronises after
-   each `step()` (each memory access ≈ ≤6 cycles). The GSU must become
-   **sub-instruction steppable** with an exact clock.
-3. **No bus arbitration.** luna's `gsu_read`/`gsu_write` are instantaneous and
-   never block; the SNES/DMA side returns open-bus on contention but the GSU
-   never stalls waiting to own ROM/RAM.
+## 3. Real residual — DRAM refresh (missing feature)
 
-Engine logic itself is **proven byte-exact** (gsu_differential / gsu_trajectory
-harnesses, 0 divergence) — do NOT touch it; only the grammar above.
+A genuine missing ares feature, independent of the (retracted) flicker thesis.
 
-## 4. Incremental plan (dichotomy into landable steps)
+ares (`cpu/timing.cpp:21-29,70-72`) halts the S-CPU **40 master cycles every
+scanline** (5×`step(6)+step(2)`, hcounter ≈ 538) to refresh work RAM. luna
+omits it, so the CPU runs ~40 mclk/line (≈2.9 %/frame) too fast and multi-frame
+tasks finish slightly early.
 
-Each step: build (hook) + `cargo test --workspace --lib` + GUI-validate the GSU
-titles (Star Fox / Yoshi / Doom / Stunt Race / SF2) + differential-measure vs a
-Mesen reference trace BEFORE the next step. Revert any step that regresses.
+A faithful implementation (per-scanline 40-mclk CPU stall, charged like the HDMA
+stall in `sched_one_line`) was prototyped and **helped non-GSU timing**: DKC's
+first WRAM divergence moved from frame 89 → gone (0 diffs at f89, was 8);
+residual 17 → 13 bytes; the CPU per-frame rate correctly dropped.
 
-- **Step 1 (this doc).** Establish the target architecture + plan. ✅
-- **Step 2.** Introduce an explicit GSU `Thread`-like clock (absolute,
-  master-cycle units) + `scalar` (clsr), replacing the bare `clock_deficit`
-  counter with a named, documented abstraction. Behaviour-preserving (keep the
-  1:1 rate active by default; rate change lands in a later, validated step) so
-  it cannot regress on its own.
-- **Step 3.** Make the GSU sub-instruction steppable: `step_coproc` advances the
-  GSU to the exact target clock, the GSU pausing at `step()` (memory-access)
-  boundaries — the ares granularity. Requires resumable instruction execution
-  (explicit cycle-state, no co_switch needed since luna stays CPU-driven).
-- **Step 4.** Bus arbitration: the GSU stalls (advances its own clock) while it
-  doesn't own ROM/RAM, mirroring ares' `while(!ron){step}`; the SNES/DMA side
-  reads the GSU RAM at the exact synchronised cycle.
-- **Step 5.** Land the faithful scalar (clsr rate) as the final piece, now that
-  the interleave is exact, and GUI-validate the whole.
+It is **not landed.** When refresh re-advances the master clock it also steps
+the coprocessor (correct — the GSU runs on its own clock during the S-CPU
+work-RAM refresh pause), so composing it with luna's GSU integration shifts the
+GSU launch phase and regressed the GSU titles (Star Fox blacked out, WRAM diff
+@ frame 200: 21 → 2087). The regression was bisected to a **sub-frame phase
+residual** in luna's pre-GSU-launch CPU/VRAM-upload timing that refresh tips
+across a vblank boundary, not to the GSU engine or the upload loop (both match
+Mesen at frame and instruction granularity). Closing that residual requires
+comprehensive sub-cycle CPU-position fidelity for an **invisible** payoff (all
+games already play fine).
 
-Stop and measure at each step. Never land more than one deviation-fix at a time.
+**Status:** DRAM refresh is a real, faithful missing piece. Keep the patch in
+git history; revisit only as part of a deliberate full-cycle-accuracy effort.
+Until then the residual stays — invisible, games play fine.
 
-## 6. SCOPE — faithful GSU cooperative scheduler (2026-06-09, evidence-backed)
+## 4. Shipped — SCMR GSU-side bus arbitration (faithful correctness fix)
 
-Prerequisite for landing DRAM refresh (§4d) and closing the cycle residual.
-This scope is grounded in two measured experiments, not theory.
+The one structural piece luna was genuinely missing relative to both
+references, ported and **shipped**. Faithful, byte-exact-preserving, and a real
+correctness improvement (though, per the retraction, neutral on the Doom
+flicker — that was the PPU OPVCT bug).
 
-### 6.1 What is already faithful (do NOT touch)
-- **Engine: byte-exact** vs Mesen (`gsu_trajectory_vs_mesen`, `gsu_differential_
-  vs_mesen`). Opcode logic, `romcl`/`ramcl` ROM/RAM-buffer latency, the internal
-  `step(clocks)` that services buffers + accumulates `self.cycles` — all mirror
-  ares. **Any scheduler change must keep these green.**
-- **`clock_deficit` IS ares `synchronize`** at instruction granularity:
-  `step_coproc(mclk)` adds `mclk` to the deficit and runs the GSU until
-  `gsu_clock ≥ cpu_clock`. Called per CPU bus access (≈ synchronize-before-access)
-  and per DMA byte.
-
-### 6.2 The deviations, RE-RANKED by evidence (not the old §3 order)
-1. **Granularity / stall-interleave (PRIMARY — the Star Fox blocker).**
-   `run_one()` is atomic and `step_coproc` runs *whole instructions* until the
-   deficit clears. Worse, CPU **stalls** (refresh/DMA/HDMA) are charged as a
-   single lump at the scanline boundary, so the GSU is advanced in a **40-mclk
-   burst** there instead of smoothly. ares yields after *every* `step()` (each
-   memory access, ≈ ≤6 GSU clocks). **Measured:** adding DRAM refresh (§4d)
-   blacked out Star Fox (WRAM @f200 21→2087) — the lump-burst GSU stepping can't
-   interleave at the fidelity refresh demands.
-2. **Rate / scalar (SECONDARY — NOT the Star Fox blocker).**
-   `mclk_per_gsu_clock = 1`; faithful is `clsr ? 1 : 2`. **Measured:** setting it
-   to `clsr?1:2` did NOT fix the refresh regression — Star Fox's *intro runs
-   clsr=fast* (rate already 1). Matters for clsr=slow scenes (some Stunt Race FX
-   / Doom), but is not the architectural blocker. Cheap to land once granularity
-   is fixed.
-3. **Bus arbitration (TERTIARY).** `gsu_read`/`gsu_write` skip the `ron`/`ran`
-   blocking (`while(!ron) step`). The `scmr_ron`/`scmr_ran` bits exist but Phase 2
-   skipped enforcement. Add only if a divergence pins to it.
-
-### 6.3 Architecture decision: scoped CPU-driven, NOT a cothread rewrite
-luna's `clock_deficit` already reproduces `synchronize` for the GSU↔CPU pair, so
-a full ares cothread scheduler (converting the whole emulator loop to
-`co_switch`) is unnecessary and Rust-hostile (no native `co_switch`; huge blast
-radius). Keep the CPU as driver. The one real change: make the GSU **resumable at
-`step()` (memory-access) granularity** so `step_coproc` advances it to an EXACT
-master-clock target, pausing mid-instruction — ares' per-step yield WITHOUT
-cothreads.
-
-### 6.4 The hard part — resumable engine (three strategies)
-`run_one()` today runs a whole instruction atomically (each internal `step()`
-just accrues cycles). To suspend mid-instruction at a `step()` boundary:
-- **(a) Explicit cycle-state machine** — thread "clocks remaining to target"
-  through `execute()`; on hitting 0 mid-op, save a resume point. Most faithful,
-  but every opcode becomes resumable. HIGH effort/risk (~1-2 wk).
-- **(b) Smooth-stall distribution (the SPIKE)** — keep atomic `run_one`, but
-  STOP lump-stepping the GSU at stall boundaries: distribute the refresh/DMA
-  stall into the GSU's normal per-access deficit so it advances smoothly, and/or
-  cap `step_coproc` to ≤6-clock sub-steps. If the Star Fox break is the *burst*
-  (not the per-instruction overshoot), this alone fixes it. LOW effort, decides
-  everything. **DO THIS FIRST.**
-- **(c) Stackful coroutine** (`corosensei`/`generator` crate) — wrap the engine
-  in a coroutine that yields at each `step()`. Closest to ares, minimal engine-
-  code change, adds a dep + per-yield cost. MEDIUM effort (~3-5 d).
-
-### 6.4b SPIKE RESULT (2026-06-09) — cheap path REFUTED, resumable engine required
-Ran strategy (b): re-applied refresh, then stopped lump-stepping the GSU during
-the stall (`is_stall` guard so `step_coproc` only runs on real CPU-instruction
-time). **No change** — Star Fox still black, WRAM @f200 still **2087** (identical
-to the lump version). So the burst-stepping is NOT the cause. Two decisive facts:
-- **Refresh itself is correct** for non-GSU: DKC frame_count 1593→1647 (CPU
-  correctly slowed), frame-89 divergence → 0. The implementation is sound.
-- **luna+refresh matches Mesen *worse* (2087) than luna-without-refresh (21)** —
-  even though Mesen HAS refresh. The only explanation: luna's GSU integration
-  carries an error that the *missing* refresh was COMPENSATING for. Adding the
-  correct CPU slowdown unmasks it; Star Fox crashes into a black spin-loop
-  (frame_count went the wrong way: 3026→2655 = CPU *faster*, i.e. stuck looping).
-
-**Verdict:** the blocker is NOT stall-stepping and NOT the clsr rate — it is the
-GSU integration's coarse interleave masking a latent timing error. The cheap fix
-(b) is ruled out. **The faithful sub-instruction resumable engine (strategy a or
-c) is required** — there is no shortcut. Next step before committing the 1-2 week
-build: bisect WHERE luna+refresh first diverges from Mesen+refresh (the
-`wram-trace` first-divergence frame) to pin the exact integration error the
-resumable engine must fix — that turns the rewrite from speculative to targeted.
-
-### 6.4c TARGETED BISECTION (2026-06-09) — it's CPU/upload timing, NOT the GSU engine
-Bisected the FIRST divergence of luna+refresh vs Mesen+refresh (both have refresh
-now). Result CONVERGES and REFINES the scope:
-- First divergence: **frame 142** — the *exact same bytes* (`$7E0045/0047/004D`,
-  `$7E188B/188D`, luna `00` vs Mesen `2C/30/68/10`) and the *exact same event* as
-  the original Star Fox slip from the I/O-timing work: the **GSU-launch /
-  VRAM-upload phase**.
-- luna+refresh launches the GSU (`$301F` GO) at **frame 143, scanline 55**;
-  Mesen+refresh at **frame 142, scanline 55**. **Same scanline, ONE FRAME LATE.**
-- So it is NOT a sub-frame interleave error — it's a clean 1-frame lateness:
-  luna's CPU/VRAM-upload runs slightly slower than Mesen's (both refreshed), so
-  the multi-frame upload finishes one frame later and the GSU launch tips over
-  the vblank boundary, then cascades to the black crash. The MISSING refresh
-  masked it (no-refresh = faster CPU = upload on time = launch f142, re-synced).
-
-**Revised conclusion:** the resumable GSU engine (§6.4) is NOT the frame-level
-blocker — the GSU isn't even running yet at the divergence (it's the CPU's
-pre-launch upload). The blocker is a **residual CPU instruction/access timing
-inaccuracy** (luna ~1 upload-frame slower than Mesen WITH the same refresh),
-amplified to a whole frame by vblank quantization. Candidates: a remaining
-per-instruction or per-access cycle cost (the upload loop is `STA $2118`/`$2119`
-@6 + loop control), or a small over/under in the refresh amount/position vs ares
-(40 @ hcounter 538). NEXT: differential the VRAM-upload *duration* (mclk for the
-upload) luna vs Mesen frame-by-frame to find the per-iteration cycle gap — that
-pins the exact cost, likely a much smaller fix than a GSU-engine rewrite. The
-resumable engine is still wanted for full sub-frame fidelity, but it is NOT what
-unblocks refresh; exact CPU timing is.
-
-### 6.4d UPLOAD-DURATION DIFFERENTIAL (2026-06-09) — it's a SUB-FRAME phase residual
-Drilled further into the §6.4c 1-frame-late launch:
-- **Upload loop timing is EXACT.** luna+refresh and Mesen+refresh both do a steady
-  **~9620 `$2118/$2119` writes/frame** through the upload — same rate, same total
-  (~101 k writes). No per-iteration cycle gap.
-- **Per-frame instruction counts MATCH.** Intro frame 99: luna 14230 vs Mesen
-  14231. No per-frame CPU-rate difference.
-- Yet luna's upload **starts ~0.84 frame later** (Mesen first writes ~70 % into
-  f131; luna ~54 % into f132). A **sub-frame phase offset** — matching WRAM,
-  matching per-frame instruction counts — introduced at the intro→upload
-  transition, quantized by the vblank boundary to the 1-frame-late GSU launch
-  (f143 vs f142) once refresh is added.
-
-**Final diagnosis:** the refresh blocker is neither the GSU engine, nor the
-upload loop, nor a per-frame rate error — it is a **~0.84-frame sub-frame phase
-offset** between luna and Mesen (both refreshed, both matching at frame and
-instruction granularity) that refresh tips across a vblank boundary. This is the
-deepest layer of cycle accuracy: a discrete sub-frame lag (likely a wait at the
-intro→upload transition — a GSU-completion / timer poll) that needs sub-cycle
-CPU-position fidelity to pin, far below WRAM/instruction-count resolution.
-
-**Recommendation (revised, final):** do NOT land DRAM refresh. It is faithful and
-helps non-GSU timing, but it regresses GSU titles via this sub-frame residual,
-and closing the residual requires comprehensive sub-cycle accuracy (a dedicated
-project, uncertain scope) for an **invisible** payoff (all games already play
-fine). Keep the refresh patch in git history; revisit only as part of a
-deliberate full-cycle-accuracy effort. The chain engine→upload-loop→per-frame-
-rate→sub-frame-phase is fully bisected and documented; nothing is mysterious,
-nothing is hacked.
-
-### 6.5 Staged plan (each oracle-gated)
-- **Spike (DONE, §6.4b):** the *stall* fix — refuted.
-- **Bisection (DONE, §6.4c):** blocker is CPU/upload timing, not the engine.
-- **Upload differential (DONE, §6.4d):** it's a sub-frame phase residual; refresh
-  shelved as net-negative for GSU titles. Frontier work, invisible payoff.
-- **Stage 1:** land the chosen granularity fix. Oracle: trajectory byte-exact;
-  Star Fox `wram-trace` @f200 with refresh DROPS toward 0 (not 2087); GUI clean.
-- **Stage 2:** land DRAM refresh (§4d patch) + `clsr` scalar — now they compose.
-  Oracle: DKC frame-89/`$0028` aligned; all GSU titles render+play; SA-1 (SMRPG)
-  + non-GSU no regression.
-- **Stage 3:** `ron`/`ran` arbitration, only if a residual pins to it.
-
-### 6.6 Oracles (must hold throughout)
-`gsu_trajectory`/`gsu_differential` byte-exact · Star Fox `wram-trace` vs Mesen
-@f200 → toward 0 (≤21 floor, never up) · GUI: Star Fox / Doom / Stunt Race FX /
-SF2 render+play clean (user-validated, non-negotiable) · DKC frame-89 aligned ·
-full `--lib` + smoke (SMRPG SA-1, RPM interlace).
-
-### 6.7 Effort / risk / recommendation
-Spike = ½-1 day, low risk, decides the strategy. If (b) works: total ≈ 2-3 days
-incl. refresh. If (a)/(c) needed: ≈ 1-2 weeks. **Recommendation: run the spike
-first** — it's cheap and converts this scope from plan to validated path. Don't
-commit to the resumable-engine rewrite until the spike rules out the cheap fix.
-
----
-
-## 4d. Cycle-timing residual — DRAM refresh found, but blocked on GSU timing (2026-06-09)
-
-Chasing the residual cycle-timing drift (DKC intro fires ~2 frames early; Star
-Fox 1-frame slip): the dichotomy pinned a **real missing feature — DRAM
-refresh**. ares (`cpu/timing.cpp:21-29,70-72`) halts the S-CPU **40 master
-cycles every scanline** (5×`step(6)+step(2)`, hcounter ≈ 538) to refresh work
-RAM. luna omitted it, so the CPU ran ~40 mclk/line (≈2.9 %/frame) too fast and
-multi-frame tasks finished early. luna ≡ Mesen byte-exact through DKC frame 88,
-then the intro-setup phase fired early — a non-WRAM cycle-budget difference.
-
-Implemented faithfully (per-scanline 40-mclk CPU stall, charged like the HDMA
-stall in `sched_one_line`). Result:
-- **Helped non-GSU timing:** DKC first divergence moved frame 89 → gone (0 diffs
-  at f89, was 8); residual 17 → 13 bytes; CPU per-frame rate correctly dropped.
-- **REGRESSED the GSU titles — reverted.** Star Fox went BLACK (title + level);
-  WRAM diff @ frame 200 blew up 21 → 2087. Cause: the refresh re-advance also
-  steps the coprocessor (correct — the GSU runs on its own clock during the
-  S-CPU work-RAM refresh pause), so the GSU gains ~40 mclk/line *relative to the
-  CPU*. luna's GSU integration timing (batched `step_coproc` / `clock_deficit`)
-  is approximate and was implicitly tuned WITHOUT refresh; composing the two
-  re-misaligns the GSU launch and breaks rendering.
-
-**Conclusion:** DRAM refresh is a genuine missing piece and the residual's main
-cause, but it **cannot land until the GSU timing is itself faithful** (the
-cooperative cycle-interleave model, §1-5 above) so the two compose. This is the
-exact "translate the whole grammar" point: a faithful CPU-timing fix exposes the
-un-translated GSU scheduling. Landing order must be: faithful GSU cooperative
-scheduler FIRST, then DRAM refresh. Until then the residual stays (invisible;
-games play fine). Patch kept in git history / reflog for when the GSU port lands.
-
-## 4c. RESOLVED — the garble was a level-vs-edge coprocessor IRQ bug (2026-06-08)
-
-The dichotomy below (§4b) correctly concluded the garble is NOT GSU cycle-timing.
-The actual root cause, pinned confound-free by the NMI-aligned WRAM differential
-(`luna wram-trace` vs Mesen2), was in the **CPU IRQ model**, not the GSU:
-
-luna bridged the coprocessor's **level** `/IRQ` line into the 65C816's **sticky
-edge** `pending_irq`, re-arming it every step. During Star Fox's IRQ handler, the
-latch was re-armed (while `I` masked it) and survived the `RTI`, so one GSU IRQ
-was serviced **twice** (frame 43: handler ran 2× vs Mesen's 1×). The spurious
-2nd pass set three object-table flags the hardware keeps clear → garble by frame
-200 (832 divergent WRAM bytes). **Fix (commit 86e9702):** a dedicated level
-`Cpu::irq_line` sampled fresh each instruction; the H/V-timer keeps its edge
-latch. GUI-validated "le jour et la nuit" across all GSU 3D titles. 832→21
-divergent bytes @ frame 200.
-
-**The cooperative cycle-scheduler (steps 3-5) is now confirmed unnecessary for
-the garble.** A tiny residual remains: a one-time ~1-frame phase slip around
-frame 142 (luna frame 142 == Mesen frame 141, byte-exact), re-syncing by frame
-200 and leaving ~16 off-by-one counter bytes. THAT residual *is* GSU completion-
-timing (cycle-rate) — cosmetically invisible. If ever pursued, the harness
-(`luna wram-trace`) makes the cycle-rate port measurable; but it is low-priority.
-
-## 4b. STEP 3 DICHOTOMY RESULT — cycle-timing is NOT the cause (2026-06-08)
-
-Before the risky resumable-engine rewrite, the dichotomy measurement
-**redirected** us (this is the method working):
-
-- GSU overshoot distribution: ~89% of `step_coproc` calls already within ares'
-  ~6-cycle granularity; tail ≤96 cycles. A ≤96-cycle refinement cannot fix a
-  **frame-level** (357,368-cycle) phenomenon.
-- luna's GSU runs **12-30× more instructions per STOP** than Mesen (~19-46k vs
-  ~1.5k). Opcode mix: luna is branch/loop+NOP heavy (a long path); Mesen is
-  store-heavy (real work).
-- A plot loop at `$01:CFxx-$D017` is **38%** of luna's GSU work in its window.
-  An initial finding "Mesen never runs `$1D004`" was a **FRAME-MISALIGNMENT
-  ARTIFACT** — CORRECTED: Mesen runs `$1D004` heavily at frames **200-206**
-  (its hottest PC, 1136×); luna runs it at frames **202-217**. So it is a
-  REAL, shared routine, NOT phantom. r14/r8 differing at the `$8295` GO is
-  likewise the two emulators at different scene moments, NOT a CPU-fed bug
-  (verified: the CPU writes ZERO to R14/R8 via MMIO — they're GSU-internal).
-
-**Honest conclusion:** dichotomy confirmed (a) the residual is NOT GSU
-cycle-timing (cooperative cycle-port steps 3-5 SHELVED; steps 1-2 kept as clean
-foundation), and (b) it is FRAME-LEVEL — luna spends ~2× more PPU frames in the
-`$D0xx` phase (202-217 vs 200-206) ⟹ luna's scene/reveal progresses at a
-different rate. BUT the specific cause is **NOT cleanly isolable by scene-level
-differential** because luna and Mesen have an irreducible boot-frame offset:
-every "luna vs Mesen at frame N" comparison is confounded. The ONLY clean
-differential is **state injection** (the gsu_trajectory harness injects Mesen's
-GSU state and gets BYTE-EXACT output — engine + first GO-run proven). To find
-the cross-GO / CPU-side divergence cleanly, the differential must be extended to
-**full-system state injection** (CPU + WRAM + PPU + GSU from a Mesen savestate,
-run both forward, bisect the first divergence) — a large undertaking. Without
-it, scene-level comparisons keep producing misalignment artifacts (as the
-"phantom routine" did). **Next, if pursued:** full-system differential via
-savestate injection; OR accept the residual as a scene-rate cycle-accuracy gap.
-
-## 5. Open architectural question (decide at Step 3)
-
-luna stays **CPU-driven** (no global cothread rewrite) — the GSU becomes a
-finely-steppable state machine the CPU drives to an exact clock, which
-reproduces ares' synchronize semantics for the GSU↔CPU pair WITHOUT converting
-PPU/APU to cothreads. If Steps 2-5 don't fix it, the fallback is the full
-cothread scheduler (convert the whole loop) — but try the scoped model first
-(smaller blast radius, same grammar for the GSU↔CPU pair that matters).
-
-## 7. STRUCTURAL REFRAME (2026-06-09, session 2) — read Mesen first, it changes everything
-
-Per the user's method ("when blocked, read how ares+Mesen STRUCTURE it; refactor
-beats days of isolating"), we read **Mesen's** GSU (`Core/SNES/Coprocessors/GSU/`)
-— the right reference because **luna is CPU-driven cycle-stepped, like Mesen, NOT
-cothread like ares.** The result overturns this doc's §3/§6 ranking:
-
-### 7.1 Mesen is ALSO whole-instruction — the "resumable engine" premise is WRONG
-`Gsu::Run()`:
-```cpp
-uint64_t targetCycle = _memoryManager->GetMasterClock() * _clockMultiplier;
-while(!_stopped && _state.CycleCount < targetCycle) { Exec(); }   // Exec = ONE instruction
-if(targetCycle > _state.CycleCount) { Step(targetCycle - _state.CycleCount); }
-```
-This is **exactly luna's `step_coproc`/`clock_deficit`**: run whole instructions
-until the GSU clock catches the master clock. **Mesen does NOT step sub-instruction.**
-So §6.4's strategies (a) explicit cycle-state machine / (c) stackful coroutine — the
-1-2 week "resumable engine" — are **NOT what the gold-standard does and NOT needed.**
-The §6.4b spike that "proved the resumable engine is required" was chasing the wrong
-axis. Granularity is a non-issue; luna already matches Mesen here.
-
-### 7.2 The REAL missing grammar — GSU-side bus arbitration (the `_stopped` stall)
-Mesen's only structural addition over luna is the **SCMR ron/ran bus arbitration**:
+**The reference (Mesen `Core/SNES/Coprocessors/GSU/`):**
 ```cpp
 void Gsu::WaitForRomAccess(){ if(!_state.GsuRomAccess){ _waitForRomAccess=true; _stopped=true; } }
 void Gsu::WaitForRamAccess(){ if(!_state.GsuRamAccess){ _waitForRamAccess=true; _stopped=true; } }
 void Gsu::UpdateRunningState(){ _stopped = !SFR.Running || _waitForRamAccess || _waitForRomAccess; }
 // SCMR write: GsuRamAccess=(v&8); GsuRomAccess=(v&0x10); if granted, clear _waitFor*; UpdateRunningState.
 ```
-When the GSU accesses ROM/RAM it does **not own** (SCMR ron/ran=0), it STOPS — `Run()`'s
-loop exits, `Step()` advances the clock with no work. It resumes when the CPU grants
-access via SCMR. The stall is at **instruction granularity** (current Exec finishes,
-then no more) — **no mid-instruction resumability needed.**
+When the GSU accesses ROM/RAM it does **not own** (SCMR ron/ran=0), it stops —
+`Run()`'s loop exits, `Step()` advances the clock with no work — and resumes
+when the CPU grants access via SCMR. The stall is at **instruction
+granularity** (the current `Exec()` finishes, then no more); no mid-instruction
+resumability is needed. ares uses the same idea via the blocking
+`while(!regs.scmr.ron){ step(...); }` in its GSU bus path.
 
-### 7.3 luna's exact gap (inventoried)
-luna ALREADY has: `scmr_ron`/`scmr_ran` bits, the CPU-side `busy_rom_vector` returned
-on CPU ROM reads during GSU run (superfx.rs:1453), RAM-busy gating (1461). **luna
-LACKS only the GSU-SIDE STALL:** `gsu_read`/`gsu_write` (superfx.rs:558,576) read/write
-ROM/RAM directly and NEVER stall on `!scmr_ron`/`!scmr_ran`; `step_coproc` has no
-`_stopped`/`wait_for_access` gate.
+**luna's gap (was):** luna already had the `scmr_ron`/`scmr_ran` bits, the
+CPU-side `busy_rom_vector` returned on CPU ROM reads during GSU run
+(`superfx.rs:1453`), and RAM-busy gating (`1461`). It **lacked only the
+GSU-SIDE stall**: `gsu_read`/`gsu_write` read/write ROM/RAM directly and never
+stalled on `!scmr_ron`/`!scmr_ran`.
 
-### 7.4 Evidence it is the lever (Doom)
-Doom toggles SCMR **every frame**: `$17` (ron=1, **ran=0**) to take RAM and DMA the
-GSU framebuffer to VRAM, then `$1F` (ran=1) to release. During the `ran=0` window
-**Mesen stalls the GSU; luna keeps running** (reads/writes RAM it doesn't own) → luna's
-GSU does more work / finishes at a different phase → the per-frame CPU timing (and the
-H/V-IRQ raster chain) drifts → the irregular 4-IRQ/frame cadence == the Doom border
-flicker (bisected §6 above; Mesen is flawless 35/35).
+**The fix (shipped):** `superfx.rs` gained `wait_for_rom_access` /
+`wait_for_ram_access`, with `check_rom/ram_access` at every `gsu_read`/
+`gsu_write`; `step_coproc` gates its loop on `!stalled()` and drains the deficit
+while parked; `set_scmr` releases the wait flags on grant and resumes. Verified:
+`gsu_trajectory` / `gsu_differential` still byte-exact; Star Fox renders
+(non-regression); the stall engages as expected (~23 RAM stalls/frame on Doom,
+where the GSU renders the next frame while the CPU reads the framebuffer under
+`ran=0`). A faithful standalone correctness fix, neutral on visible output.
 
-### 7.5 Revised plan (bounded — arbitration, not resumable engine)
-- **Stage 1 — GSU-side stall.** Add `wait_for_rom_access`/`wait_for_ram_access`. In the
-  GSU's ROM/RAM access path, if running and `!scmr_ron`/`!scmr_ran`, set the wait flag;
-  `step_coproc`'s loop gates on `!stopped` (mirror Mesen `Run`). `set_scmr` clears the
-  wait flags when access is granted and resumes. Oracle: Doom → 4 IRQ/frame REGULAR
-  like Mesen (the §6 bisection oracle); `gsu_trajectory`/`gsu_differential` byte-exact;
-  Star Fox `wram-trace` @f200 ≤21; all GSU titles render+play (GUI).
-- **Stage 2 — DRAM refresh** (§4d patch) now composes: the GSU stalls correctly during
-  the CPU's framebuffer window, so refresh no longer over-advances it. Oracle: DKC
-  frame-89 / `$0028`; no GSU regression.
-- The clsr scalar (§3.1) and any residual stay tertiary.
+## 5. Architecture note
 
-This is the faithful translation of the actual gold-standard structure, found by
-reading Mesen's source in minutes — exactly [[feedback_pivot_to_reference_architecture]].
-
-### 7.6 Stage 1 RESULT (2026-06-09) — implemented, faithful, byte-exact, but NEUTRAL on the flicker
-Stage 1 (GSU-side stall) is done (superfx.rs: `wait_for_rom/ram_access`,
-`check_rom/ram_access` at every `gsu_read`/`gsu_write`, `step_coproc` gates on
-`!stalled()` and drains the deficit while parked, `set_scmr` releases on grant).
-Verified: `gsu_trajectory`/`gsu_differential` still byte-exact; Star Fox renders
-(non-regression); the stall ENGAGES (~23 RAM stalls/frame on Doom, `ram=true` as
-expected — Doom keeps the GSU rendering the next frame while the CPU reads the
-framebuffer under `ran=0`). **But the Doom oracle is UNCHANGED: 0.74 INIDISP
-writes/frame, 52% empty frames** (was 0.73-0.75). So the bus arbitration — though a
-genuine missing piece, now correct — is **NOT the flicker lever.** The "proven"
-claim was overstated: Doom *exercises* SCMR, but fixing the GSU stall does not fix
-the cadence. The flicker is the **H/V-IRQ raster CHAIN desyncing** (empty frames =
-the `vtime` 23↔199 re-arm alternation breaking), i.e. **CPU/IRQ timing precision,
-NOT GSU contention.** Keep Stage 1 (faithful + the documented refresh prerequisite).
-Stage 2 (DRAM refresh §4d, the CPU-cycle residual) is now the relevant lever to
-test — its prerequisite (the GSU stall) is in place, so it may compose without the
-old Star Fox blackout. The arbitration alone is a faithful standalone correctness
-fix, neutral on visible output.
+luna stays **CPU-driven** (no global cothread rewrite). The `clock_deficit`
+mechanism already reproduces ares' `synchronize` for the GSU↔CPU pair, and both
+references run the GSU at whole-instruction granularity, so a full ares cothread
+scheduler is unnecessary and Rust-hostile (no native `co_switch`, huge blast
+radius). The remaining real residual is the sub-frame CPU-timing precision that
+gates DRAM refresh (§3); it is a frontier full-cycle-accuracy item with an
+invisible payoff, not a scheduling-architecture problem.

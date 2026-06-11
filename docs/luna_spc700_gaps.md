@@ -10,7 +10,7 @@ landed (see history below).
 ## Methodology note — what is already gated
 
 As of the SPC700 Tom Harte harness (`crates/luna-cpu-spc700/tests/
-tom_harte.rs`, commit `b70bf07`), the **instruction semantics are
+tom_harte.rs`, commit `4fc559f`), the **instruction semantics are
 machine-proven**: the `SingleStepTests/spc700` suite passes
 **256,000 / 256,000 — 100%, 0 failures** (all 256 opcodes × 1000 cases;
 full suite re-verified green 2026-05-30). That covers, per
@@ -95,7 +95,7 @@ implemented (the `TCALL` family is handled via grouped arms).
 The original (2026-05-30 morning) draft listed two open items, both now
 resolved:
 
-- ~~🟠 **#1 No Tom Harte test**~~ — **DONE** (`b70bf07`): the harness was
+- ~~🟠 **#1 No Tom Harte test**~~ — **DONE** (`4fc559f`): the harness was
   added mirroring the 65C816 one (`#[ignore]`, fetch via
   `tools/fetch-tom-harte-spc700.sh`, `LUNA_TOM_HARTE_REQUIRE=1` strict
   gate). Passes 256,000/256,000. This retroactively verified the

@@ -132,3 +132,20 @@ which sprites survive the per-line cap.
 All items are now done, including #6 (OBJ interlace, Phase D). The entire
 sprite audit is complete; interlace is implemented end-to-end (`bg_gaps`
 #16 Phases A-C for BG/blend, this #6 for OBJ).
+
+## Salvaged PPU-compositor residuals (from the retired `luna_ppu_gaps.md`)
+
+The old SMW-Yoshi's-House worksheet (`luna_ppu_gaps.md`) was deleted — its
+marquee bugs (force-black polarity, sub-screen compositor, OAM auto-reset,
+empty-sub fallback, direct-color group bits, EXTBG, hi-res) are all FIXED and
+verified in `renderer.rs`. Three genuinely-open, minor items are preserved here
+so they aren't lost:
+
+- **OBJ cross-scanline sprite fetch-ahead** — ares evaluates line N+1's sprites
+  during line N; luna decodes once per scanline with no fetch-ahead. Cosmetic
+  at most (affects only exact mid-OAM-write timing).
+- **PPU register read open-bus** — reads of write-only / unmapped `$21xx` return
+  a fixed value, not the PPU MDR open-bus latch (`ppu.rs` read fallthrough).
+- **General mid-scanline register latching** — per-scanline render + a partial
+  mid-scanline flush exist (`flush_partial_scanline`), but not every register is
+  latched at its exact dot.
