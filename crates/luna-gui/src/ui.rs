@@ -28,6 +28,24 @@ pub(crate) enum MenuAction {
     StartRebindHotkey(crate::input::Hotkey),
     TakeScreenshot,
     SaveBindings,
+    // Debug panels (api-first: data comes from `luna_api::Emulator`).
+    ToggleCpuState,
+    ToggleSprites,
+    ToggleMemory,
+    MemPagePrev,
+    MemPageNext,
+    MemBankToggle,
+}
+
+/// Per-frame snapshot of `luna-api` introspection, built by `LunaApp` only
+/// when a debug panel is open (closed panels cost nothing). All data is
+/// pulled through `luna_api::Emulator` — the GUI never touches `luna-core`.
+#[derive(Default)]
+pub(crate) struct DebugSnapshot {
+    pub cpu: Option<luna_api::CpuState>,
+    pub sprites: Option<Vec<luna_api::SpriteInfo>>,
+    /// `(bank, offset, bytes)` for the hex viewer.
+    pub memory: Option<(u8, u16, Vec<u8>)>,
 }
 
 /// State the egui overlay reads to drive its widgets — passed in by
@@ -37,6 +55,11 @@ pub(crate) struct UiState<'a> {
     pub rom_title: Option<String>,
     pub show_input_config: bool,
     pub key_bindings: &'a crate::input::KeyBindings,
+    /// Which debug panels are open + their snapshotted data.
+    pub show_cpu_state: bool,
+    pub show_sprites: bool,
+    pub show_memory: bool,
+    pub debug: DebugSnapshot,
     /// When `Some`, the input modal is waiting on the user to press a
     /// key to rebind the named SNES button.
     pub pending_rebind: Option<crate::input::SnesButton>,
@@ -103,6 +126,15 @@ impl UiOverlay {
             draw_menu_bar(ui.ctx(), state, &mut emit);
             if state.show_input_config {
                 draw_input_config(ui.ctx(), state, &mut emit);
+            }
+            if state.show_cpu_state {
+                draw_cpu_state(ui.ctx(), state);
+            }
+            if state.show_sprites {
+                draw_sprites(ui.ctx(), state);
+            }
+            if state.show_memory {
+                draw_memory(ui.ctx(), state, &mut emit);
             }
         });
         self.winit_state
@@ -277,6 +309,139 @@ fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<
         });
 }
 
+/// Debug panel: 65c816 register file + decoded flags (read-only).
+fn draw_cpu_state(ctx: &egui::Context, state: &UiState<'_>) {
+    egui::Window::new("CPU — 65c816")
+        .default_pos([24.0, 48.0])
+        .resizable(false)
+        .show(ctx, |ui| {
+            let Some(c) = state.debug.cpu.as_ref() else {
+                ui.label("(no ROM loaded)");
+                return;
+            };
+            egui::Grid::new("cpu_regs").num_columns(2).show(ui, |ui| {
+                let row = |ui: &mut egui::Ui, k: &str, v: String| {
+                    ui.monospace(k);
+                    ui.monospace(v);
+                    ui.end_row();
+                };
+                row(ui, "A", format!("{:04X}", c.a));
+                row(ui, "X", format!("{:04X}", c.x));
+                row(ui, "Y", format!("{:04X}", c.y));
+                row(ui, "SP", format!("{:04X}", c.sp));
+                row(ui, "DP", format!("{:04X}", c.dp));
+                row(ui, "PB:PC", format!("{:02X}:{:04X}", c.pb, c.pc));
+                row(ui, "DB", format!("{:02X}", c.db));
+            });
+            ui.separator();
+            let p = c.p;
+            let f = |bit: u8, name: char| {
+                if p & bit != 0 {
+                    name.to_ascii_uppercase()
+                } else {
+                    name.to_ascii_lowercase()
+                }
+            };
+            ui.monospace(format!(
+                "P={:02X}  {}{}{}{}{}{}{}{}  E={}",
+                p,
+                f(0x80, 'N'),
+                f(0x40, 'V'),
+                f(0x20, 'M'),
+                f(0x10, 'X'),
+                f(0x08, 'D'),
+                f(0x04, 'I'),
+                f(0x02, 'Z'),
+                f(0x01, 'C'),
+                u8::from(c.e),
+            ));
+            if c.stopped {
+                ui.colored_label(egui::Color32::RED, "STOPPED");
+            }
+            if c.waiting {
+                ui.colored_label(egui::Color32::YELLOW, "WAITING (WAI)");
+            }
+        });
+}
+
+/// Debug panel: the 128 OAM sprites, decoded via `decode_sprites()`.
+fn draw_sprites(ctx: &egui::Context, state: &UiState<'_>) {
+    egui::Window::new("Sprites (OAM)")
+        .default_size([360.0, 420.0])
+        .show(ctx, |ui| {
+            let Some(sprites) = state.debug.sprites.as_ref() else {
+                ui.label("(no ROM loaded)");
+                return;
+            };
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                egui::Grid::new("spr")
+                    .num_columns(6)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for h in ["#", "X", "Y", "tile", "pal", "pri"] {
+                            ui.monospace(h);
+                        }
+                        ui.end_row();
+                        for s in sprites {
+                            ui.monospace(format!("{:3}", s.index));
+                            ui.monospace(format!("{:4}", s.x));
+                            ui.monospace(format!("{:3}", s.y));
+                            ui.monospace(format!("{:03X}", s.tile));
+                            ui.monospace(format!("{}", s.palette));
+                            ui.monospace(format!("{}", s.priority));
+                            ui.end_row();
+                        }
+                    });
+            });
+        });
+}
+
+/// Debug panel: a 256-byte hex window of WRAM, paged via the toolbar.
+fn draw_memory<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>, emit: &mut F) {
+    egui::Window::new("Memory (hex)")
+        .default_size([560.0, 340.0])
+        .show(ctx, |ui| {
+            let Some((bank, offset, bytes)) = state.debug.memory.as_ref() else {
+                ui.label("(no ROM loaded)");
+                return;
+            };
+            let (bank, offset) = (*bank, *offset);
+            ui.horizontal(|ui| {
+                if ui.button("◀ −256").clicked() {
+                    emit(MenuAction::MemPagePrev);
+                }
+                if ui.button("+256 ▶").clicked() {
+                    emit(MenuAction::MemPageNext);
+                }
+                if ui.button(format!("bank ${bank:02X}")).clicked() {
+                    emit(MenuAction::MemBankToggle);
+                }
+            });
+            ui.separator();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for (r, chunk) in bytes.chunks(16).enumerate() {
+                    let addr = offset.wrapping_add((r * 16) as u16);
+                    let hex = chunk
+                        .iter()
+                        .map(|b| format!("{b:02X}"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let ascii: String = chunk
+                        .iter()
+                        .map(|&b| {
+                            if (0x20..0x7F).contains(&b) {
+                                b as char
+                            } else {
+                                '.'
+                            }
+                        })
+                        .collect();
+                    ui.monospace(format!("{bank:02X}:{addr:04X}  {hex:<48}{ascii}"));
+                }
+            });
+        });
+}
+
 #[allow(deprecated)]
 fn draw_menu_bar<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>, emit: &mut F) {
     egui::TopBottomPanel::top("luna-menu")
@@ -317,6 +482,29 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>,
                         .get_hotkey(crate::input::Hotkey::Screenshot);
                     if ui.button(format!("Take screenshot ({key:?})")).clicked() {
                         emit(MenuAction::TakeScreenshot);
+                        ui.close();
+                    }
+                });
+                ui.menu_button("Debug", |ui| {
+                    if ui
+                        .selectable_label(state.show_cpu_state, "CPU state")
+                        .clicked()
+                    {
+                        emit(MenuAction::ToggleCpuState);
+                        ui.close();
+                    }
+                    if ui
+                        .selectable_label(state.show_sprites, "Sprites (OAM)")
+                        .clicked()
+                    {
+                        emit(MenuAction::ToggleSprites);
+                        ui.close();
+                    }
+                    if ui
+                        .selectable_label(state.show_memory, "Memory (hex)")
+                        .clicked()
+                    {
+                        emit(MenuAction::ToggleMemory);
                         ui.close();
                     }
                 });

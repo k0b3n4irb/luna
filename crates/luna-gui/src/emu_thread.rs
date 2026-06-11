@@ -96,11 +96,11 @@ pub(crate) fn spawn(
     shared: Arc<EmuShared>,
     producer: HeapProd<(i16, i16)>,
     primed: Arc<AtomicBool>,
-    framebuffer_rgba: Arc<Mutex<Vec<u8>>>,
+    framebuffer_in: triple_buffer::Input<Vec<u8>>,
 ) -> JoinHandle<AudioReclaim> {
     thread::Builder::new()
         .name("luna-emu".into())
-        .spawn(move || run(emu, shared, producer, primed, framebuffer_rgba))
+        .spawn(move || run(emu, shared, producer, primed, framebuffer_in))
         .expect("failed to spawn luna-emu thread")
 }
 
@@ -115,9 +115,14 @@ fn run(
     shared: Arc<EmuShared>,
     mut producer: HeapProd<(i16, i16)>,
     primed: Arc<AtomicBool>,
-    framebuffer_rgba: Arc<Mutex<Vec<u8>>>,
+    mut framebuffer_in: triple_buffer::Input<Vec<u8>>,
 ) -> AudioReclaim {
     const BATCH: usize = 1024;
+    // Hold the last content frame across up to this many consecutive
+    // full-frame forced-blank frames (absorbs the transient per-frame blanks
+    // of double-buffered Super FX titles); a longer run is a real
+    // transition/fade and is shown as black, like Mesen2.
+    const BLANK_HOLD_FRAMES: u32 = 8;
 
     if let Ok(mut g) = shared.thread_handle.lock() {
         *g = Some(thread::current());
@@ -136,6 +141,11 @@ fn run(
     // We only refresh the shared buffer when the PPU's frame_count has
     // advanced, so we don't pay the conversion cost on every batch.
     let mut last_emu_frame: u64 = u64::MAX;
+    // Consecutive full-frame forced-blank frames seen so far. A short run is a
+    // transient double-buffer blank (Super FX) → hold the last content frame so
+    // the screen doesn't strobe; a sustained run is a real transition/fade →
+    // publish the black so it matches Mesen instead of freezing greyed.
+    let mut blank_run: u32 = 0;
     // Set once the emulator panics: we stop stepping it (to avoid
     // re-panicking) but keep the thread alive so the UI stays responsive.
     let mut emu_dead = false;
@@ -202,25 +212,37 @@ fn run(
             }
 
             // Framebuffer publication via the SAME API render path the
-            // CLI/MCP use (`render_frame_rgba`) — so the GUI and CLI
-            // cannot disagree on pixels. Only refresh on a new frame; hold
-            // the last good frame when the completed frame showed NO
-            // visible content (genuine full-frame blank: loading, fade),
-            // so the UI doesn't flash black. We gate on the per-frame
-            // `frame_showed_content` latch, NOT the instantaneous
-            // `forced_blank` — a Super FX title (Star Fox) re-asserts
-            // INIDISP bit 7 every VBlank to prep its next double-buffer, so
-            // the instantaneous flag reads blank ~14/15 frames even though
-            // each frame's framebuffer is fully and correctly drawn.
-            // Gating on the instantaneous flag dropped those good frames →
-            // the ~8.5 fps "blink+lag". The per-frame latch keeps them.
+            // CLI/MCP use (`render_frame_rgba`) — so the GUI and CLI cannot
+            // disagree on pixels. The hard part is the full-frame forced-blank:
+            //   - a SUSTAINED blank is a real transition / fade / loading screen
+            //     → show the black, like Mesen2 (holding the last content frame
+            //     there froze it as a grey "stuck" screen — the original bug);
+            //   - a TRANSIENT blank (1-few frames) is a double-buffered Super FX
+            //     title swapping buffers; the visible frame is momentarily
+            //     blank ~every other frame → publishing it would strobe the
+            //     whole screen. So HOLD across short blank runs.
+            // We tell them apart by run length: hold up to BLANK_HOLD_FRAMES
+            // consecutive blanks, then publish the black once. (Verified
+            // 2026-06-10: the CLI render path, which never held, shows
+            // Williams→black→DOOM at full brightness — the core is correct.)
             let cur_frame = em.frame_count().unwrap_or(last_emu_frame);
-            let showed_content = em.frame_showed_content().unwrap_or(true);
-            if cur_frame != last_emu_frame && showed_content {
-                if let Ok(rgba) = em.render_frame_rgba(false) {
-                    last_emu_frame = cur_frame;
-                    if let Ok(mut shared_fb) = framebuffer_rgba.lock() {
-                        shared_fb.copy_from_slice(&rgba);
+            if cur_frame != last_emu_frame {
+                last_emu_frame = cur_frame;
+                let publish = if em.frame_showed_content().unwrap_or(true) {
+                    blank_run = 0;
+                    true
+                } else {
+                    blank_run += 1;
+                    // Publish the black exactly once, when the run crosses the
+                    // threshold (a genuine transition); hold otherwise.
+                    blank_run == BLANK_HOLD_FRAMES
+                };
+                if publish {
+                    if let Ok(rgba) = em.render_frame_rgba(false) {
+                        // Lock-free publish into the triple buffer (moves
+                        // `rgba`, no copy; the UI reads the latest contention-
+                        // free).
+                        framebuffer_in.write(rgba);
                     }
                 }
             }
