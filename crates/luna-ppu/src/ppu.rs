@@ -618,6 +618,17 @@ impl Ppu {
                     | if self.external_latch_hit { 0x40 } else { 0 };
                 self.bg_scroll_latch = 0;
                 self.external_latch_hit = false;
+                // Reading $213F also resets the OPHCT/OPVCT byte-read
+                // flip-flop (ares `io.cpp` $213f: `latch.hcounter = 0;
+                // latch.vcounter = 0;`), so the next OPHCT/OPVCT read
+                // returns the LOW byte. Without this the toggle drifts and
+                // every other V-counter read returns the high byte (0 for
+                // lines < 256) — which made Doom's raster IRQ handler read
+                // V≈0, mis-dispatch to its no-ack branch, and re-fire the
+                // H/V IRQ ~200×/frame, freezing the CPU at I=1 and
+                // flickering the letterbox border.
+                self.ophct_hi_pending = false;
+                self.opvct_hi_pending = false;
                 v
             }
             register::OPHCT => {
