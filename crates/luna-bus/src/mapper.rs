@@ -159,6 +159,16 @@ pub struct SuperFxTraceEvent {
     pub sfr: u16,
     /// General-purpose registers R0–R15 (R15 = PC).
     pub r: [u16; 16],
+    /// GSU clock position on the shared master-clock axis at this opcode
+    /// (`cpu_mclk − clock_deficit`). Per-instruction deltas give each op's
+    /// cycle cost; jumps across a GO/STOP boundary expose CPU↔GSU idle time —
+    /// the timing dimension the per-op register stream alone cannot show.
+    pub mclk: u64,
+    /// First executed instruction of a GO task (the GSU had been stopped).
+    /// Counting `go_start` per frame = number of GSU tasks that frame.
+    pub go_start: bool,
+    /// This instruction cleared `sfr.g` (STOP) — the end of a GO task.
+    pub stop: bool,
 }
 
 /// One pre-instruction snapshot of the SA-1's 65C816 register file —
