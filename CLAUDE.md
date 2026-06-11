@@ -16,13 +16,13 @@ A cycle-accurate-ish SNES emulator written in Rust. 11-crate workspace:
 - `crates/luna-cpu-65c816/`, `crates/luna-cpu-spc700/` — CPU cores.
   Standalone, no SNES-specific glue — usable from any consumer.
 - `crates/luna-apu/` — SPC700 bridge + S-DSP (cycle-accurate ares port
-  in `src/dsp.rs`, see commit `0f46f47`).
+  in `src/dsp.rs`, see commit `25c3691`).
 - `crates/luna-ppu/` — PPU + renderer + compositor.
 - `crates/luna-core/` — system glue. Owns the top-level `Snes` struct,
   the CPU-driven master-clock scheduler, and the **DMA + SA-1 / future
   coprocessor** subsystems as `crate::dma` and `crate::coproc` modules
   (merged from the former `luna-dma` / `luna-coproc` crates in
-  commit `eb3267f`).
+  commit `5cf2220`).
 - `crates/luna-api/` — introspection surface; produces serialisable
   `EmulatorState` snapshots for the CLI, GUI, and MCP server.
 - `crates/luna-mcp-server/` — MCP transport (the GUI does not use it;
@@ -73,10 +73,10 @@ Read the matching rule before touching the relevant code, not after.
 - `CONTROLLER_BINDINGS.md` — keyboard → SNES button mapping (GUI).
 - `ppu_compositor_reference.md` — synthesised ares + Mesen2 spec for
   the PPU compositor, color math, windows, DMA, NMI.
-- `luna_ppu_gaps.md` — prioritised correctness gap list against the
-  spec.
-- `luna_ppu_inventory.md`, `ares_ppu_notes.md`, `mesen2_ppu_notes.md`
-  — per-source research notes the spec was built from.
+- `ares_ppu_notes.md`, `mesen2_ppu_notes.md` — raw per-source research
+  notes the spec was built from.
+- `accuracy_scorecard.md` + the per-subsystem `luna_*_gaps.md` — current
+  correctness grades and open-work lists (the source of truth for gaps).
 
 ## What NOT to put here
 

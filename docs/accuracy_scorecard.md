@@ -1,7 +1,7 @@
 # luna — Emulation Accuracy Scorecard vs ares & Mesen2
 
 **Reviewer:** Claude (Opus 4.8) — source-level accuracy correlation
-**Date:** 2026-05-29 · **Commit:** `f690f74` (`main`)
+**Date:** 2026-05-29 · **Commit:** `6b9d6da` (`main`)
 **⟳ RE-GROUNDED vs HEAD: 2026-06-10** — see the re-grounded banner under §1.
 The May grades were markedly pessimistic: **16 of 27 flagged bugs are now
 fixed**, and the "self-consistent but wrong" family is nearly emptied.
@@ -38,7 +38,7 @@ truly-open list is short.** Use *this* table, not §1, as current truth.
 | Bus/mappers | C+ | **C+** | ROM mirroring, open-bus MDR, mapper-detect scoring |
 
 **Truly-open work list (was 6, now 4 after the OPVCT + BG-scroll fixes):**
-0. ~~PPU OPHCT/OPVCT read-latch not reset on $213F~~ — **FIXED 2026-06-11** (`d6cc09a`, ares io.cpp:167-169). This was the **Doom border-flicker root** (see below).
+0. ~~PPU OPHCT/OPVCT read-latch not reset on $213F~~ — **FIXED 2026-06-11** (`08e68fe`, ares io.cpp:167-169). This was the **Doom border-flicker root** (see below).
 1. ~~PPU BG scroll write-twice~~ — **FIXED** (two shared latches, ares io.cpp:312; `ppu.rs:bg H/V scroll`, test `bg_h_scroll_uses_two_shared_latches`).
 2. DSP golden-vector PCM tests absent — highest unique value (the most faithful port is unverified by a real BRR→PCM assertion).
 3. Bus: ROM mirroring of non-pow2 images returns open-bus instead of wrapping (`lorom.rs`/`hirom.rs`).
@@ -52,7 +52,7 @@ HDMA preemption) — genuine HDMA-accuracy items.
 **UPDATE 2026-06-11 — the Doom flicker is SOLVED, and it was NOT a scheduler/timing
 problem.** The earlier theory here (Doom loop "~3.3× slow", attack only with the
 state-injection oracle / cooperative-scheduler port) was **wrong** and is retracted.
-Root cause: the `$213F`/OPVCT read-latch bug above (`d6cc09a`). A 50%-wrong V-counter
+Root cause: the `$213F`/OPVCT read-latch bug above (`08e68fe`). A 50%-wrong V-counter
 read sent Doom's raster IRQ handler down its no-ack branch, re-firing the H/V IRQ
 ~200×/frame and pinning the S-CPU at I=1 ~90% of alternating frames (which *looked*
 like a 3.3×-slow loop). Fixed surgically — the cooperative-scheduler port was NOT
@@ -137,6 +137,18 @@ bigger, clearer bug than first stated.
 ---
 
 ## 4. Per-subsystem correlation detail
+
+> **⚠️ SUPERSEDED (May 2026 snapshot).** The grades and per-row "D/F" findings
+> below are the original May review. The **RE-GROUNDED banner** at the top and
+> the per-subsystem `docs/luna_*_gaps.md` are the current source of truth. Many
+> "D/F" items here are **now FIXED in code** and retired in the gap docs,
+> including: PPU sprite-Y 8-bit wrap, per-nibble sprite tile addressing, BG
+> scroll write-twice (two shared latches), hi-res modes 5/6, Mode-7 EXTBG, and
+> the `$213F`/OPVCT read-latch (the Doom-flicker root); the DMA coprocessor
+> double-charge and dot-precise H/V-IRQ (HTIME); SA-1 divider signedness,
+> MAC-clear guard, and CC1 bpp/width field swap; and the `$2000-5FFF` /
+> `$4000-41FF` access-speed table. The reasoning and ares/Mesen citations below
+> remain useful; the grades do not.
 
 ### CPU — 65c816 · Grade B
 

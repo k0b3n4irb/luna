@@ -1,43 +1,34 @@
-# Challenging luna's fundamentals — ness + jgenesis dissection (2026-06-10)
+# ness & jgenesis — Rust SNES emulator dissection (backend reference + frontend backlog)
 
-Two Rust SNES emulators dissected backend + frontend to challenge luna's
-architecture: **ness** (kelpsyberry, github) and **jgenesis** (jsgroth, github).
-Rust → directly portable (no ares cothread problem). All claims are `file:line`
-in the respective trees (cloned to /tmp during the study).
+> **RETRACTED 2026-06-11.** This doc's original §0/§6 conclusion — that the Doom
+> border flicker is luna's lumped DMA / a "~3.3× slow loop" needing the
+> state-injection oracle or a cycle-based rearchitecture — is WRONG. The flicker
+> was root-caused as a PPU register bug: reading `$213F` (STAT78) did not reset
+> the OPHCT/OPVCT byte-read flip-flop (ares `io.cpp:167-169`), so V-counter reads
+> were 50% wrong → Doom's raster IRQ handler took a no-ack branch, re-firing the
+> H/V IRQ ~200×/frame and pinning the S-CPU at I=1. A surgical PPU fix solved it;
+> no DMA/scheduler rearchitecture was needed. See `docs/accuracy_scorecard.md`
+> and the `project_doom_flicker_opvct_latch` memory.
 
-## 0. THE convergent verdict — the Doom flicker is luna's LUMPED DMA
+Two Rust SNES emulators dissected backend + frontend as a reference comparison
+for luna's architecture: **ness** (kelpsyberry, github) and **jgenesis**
+(jsgroth, github). Rust → directly portable (no ares cothread problem). All
+claims are `file:line` in the respective trees (cloned to /tmp during the study).
 
-**Both references, independently, fix the straddling-IRQ flicker at the DMA /
-scheduler layer — and BOTH say a cycle-based CPU is NOT the requirement.**
+What remains valuable here, independent of the (retracted) flicker theory:
 
-- **ness** steps GP-DMA per byte (`+= 8` each) inside `while cur_time <
-  next_event_time() { transfer 1 unit }` (`core/src/cpu/dma.rs:336-356`). The
-  H/V IRQ is a **pre-scheduled event** with an exact computed dot
-  (`ppu/counters.rs:185-217`); the DMA loop yields at that event's timestamp, so
-  the coincidence is honored *inside* the DMA.
-- **jgenesis** steps GP-DMA one byte per `Emulator::tick`, returning
-  `DmaStatus::InProgress { master_cycles_elapsed: 8 }` (`backend/snes-core/src/
-  memory/dma.rs:339-388`); the outer loop advances the PPU H/V counters + the
-  H/V-IRQ evaluator **between every DMA byte** (`api.rs:343-386`). IRQ latches on
-  the rising edge `irq.pending |= !line && new_line` (`memory.rs:941`) and holds
-  until the CPU services it after DMA releases the bus.
+- §1 as a **neutral** reference for how ness/jgenesis structure CPU / scheduler /
+  DMA / H-V IRQ — useful background, not a flicker diagnosis.
+- §2 the **frontend backlog** (DRC audio resampling, triple-buffer / present
+  handshake framebuffer) — real, still-relevant work, now partly implemented.
+- §3 luna's genuine advantages, §4 game-specific quirks to port carefully.
 
-luna **lumps** the whole DMA (charges its time at once, no per-byte interleave),
-so the H/V-IRQ evaluator runs **once after** the transfer — a coincidence buried
-inside the DMA (or pushed past the frame boundary by the DMA's duration) is
-silently skipped. That is precisely the "~50% of frames get neither raster IRQ →
-border flicker" symptom, now confirmed by two independent references.
+## 1. Backend — how the references structure CPU / scheduler / DMA
 
-> jgenesis agent, verbatim: *"the straddling-IRQ flicker is fixed at the DMA/
-> scheduler layer … A cycle-based CPU helps the residual sub-instruction cases,
-> but the straddling-IRQ flicker is fixed at the DMA/scheduler layer."*
+Neutral comparison. (Do **not** read a flicker cause into this section — the Doom
+flicker was a PPU OPVCT-latch bug, not any of these structural differences.)
 
-**So Phase 5 (DMA cycle-stepping) is THE fix, and it is BOUNDED — not the
-1-2-week cycle-by-cycle 65c816 rewrite I had feared.**
-
-## 1. Backend — the fundamentals challenged
-
-### 1a. CPU timing model (verdict: luna's is *defensible*, not the bug)
+### 1a. CPU timing model
 - **ness**: whole instructions run back-to-back but **capped at
   `next_event_time()`** (`cpu/interpreter.rs:40,44,62`); time advances inside
   every access (`interpreter/common.rs:9-19`) and every idle. Event-queue driven.
@@ -47,10 +38,8 @@ border flicker" symptom, now confirmed by two independent references.
   that one access's mclk after every cycle (`api.rs:312-386`).
 - **luna**: whole-instruction `run_one` + per-bus-access hooks advancing
   APU/PPU/coproc. The ness agent calls luna "similar in spirit" — both charge
-  cycles per access. **luna's CPU model is NOT the flicker cause.** The
-  difference that matters is (i) luna doesn't *bound* CPU execution at the next
-  IRQ event, and (ii) lumped DMA. A full cycle-CPU is a later, separate accuracy
-  project, not required for the flicker.
+  cycles per access. A full cycle-CPU is a later, separate accuracy project
+  (writes-lead-reads, sub-instruction interrupt cases), not a flicker lever.
 
 ### 1b. Scheduler / interleave
 - **ness** = global **event queue** on one master clock (`schedule.rs:25-114`);
@@ -65,7 +54,7 @@ border flicker" symptom, now confirmed by two independent references.
   coprocessor interleave** (unlike ness).
 - **luna** = CPU-driven, lumped DMA, IRQ polled per-access (not a barrier).
 
-### 1c. H/V-timer IRQ delivery (the flicker mechanism)
+### 1c. H/V-timer IRQ delivery
 - **ness**: compute the **exact next-coincidence timestamp** on every
   HTIME/VTIME/$4200/scanline change and schedule it (`counters.rs:185-217`);
   sticky/level request held until $4211 read; gated by I-flag at instruction
@@ -76,12 +65,17 @@ border flicker" symptom, now confirmed by two independent references.
   wrap? (`memory.rs:887-934`). Rising-edge latch `pending |= !line && new_line`
   (`memory.rs:941`); poll on the instruction's **final cycle**
   (`instructions.rs:39-42`); $4211 read clears pending (`memory.rs:416-424`).
-- **luna**: polls the coincidence per-bus-access, delivers a level — but with
-  lumped DMA the poll can skip across the coincidence dot entirely.
+- **luna**: polls the coincidence per-bus-access, delivers a level.
 
-## 2. Frontend — the fundamentals challenged
+The references step GP-DMA per byte (ness `cpu/dma.rs:336-356`; jgenesis
+`memory/dma.rs:339-388`, IRQ evaluated between bytes via `api.rs:343-386`), where
+luna lumps the whole transfer. That is a real architectural difference worth
+noting for general accuracy — but it was **not** the Doom flicker (the framebuffer
+DMAs sit at lines 200-262, not over the raster IRQ lines 23/199).
 
-### 2a. A/V sync — luna's BIGGEST gap: no Dynamic Rate Control
+## 2. Frontend — the backlog (independent of the flicker, still relevant)
+
+### 2a. A/V sync — Dynamic Rate Control
 - **jgenesis**: audio-as-clock (park/unpark, like luna) **+ DRC**: every 20
   frames, nudge the audio resample ratio by ≤±0.5% based on queue depth
   (`common/jgenesis-common/src/audio.rs:64-91`), fed back via
@@ -92,11 +86,10 @@ border flicker" symptom, now confirmed by two independent references.
 - **ness**: audio-as-clock too, but a **spin_loop busy-wait inside the DSP
   callback** (`audio.rs:70-81`) + an independent fixed-timer accumulator cap
   (`emu.rs:183-199`). No DRC.
-- **luna**: audio-as-clock only, **no DRC, no fixed-timer fallback** → two
-  free-running 60 Hz clocks drift/beat. Borrow jgenesis's DRC (luna already has
-  the resampler + audio clock; needs the queue-depth→ratio loop + an API method).
+- **luna**: audio-as-clock; DRC is the model to follow (luna already has the
+  resampler + audio clock; needs the queue-depth→ratio loop + an API method).
 
-### 2b. Frame presentation — luna's Mutex framebuffer is the weakest link
+### 2b. Frame presentation — retire the Mutex framebuffer
 - **ness**: lock-free **triple buffer** (`triple_buffer.rs:9-46`) — producer
   never blocks, consumer skips re-upload when no fresh frame (`ui.rs:576`). No
   tearing, no torn/half-written frames, zero lock contention.
@@ -138,56 +131,3 @@ border flicker" symptom, now confirmed by two independent references.
   trigger on the last dot of a field" (`counters.rs:227-228`).
 - Both: interrupt **poll on the instruction's last cycle**; NMI true-edge, IRQ
   level; open bus is a real modeled value (jgenesis `cpu_open_bus()`).
-
-## 5. The plan this produces
-
-- **Phase 5 (DMA cycle-stepping) = THE bounded flicker fix.** Port the per-unit
-  DMA state machine (jgenesis `dma.rs` / ness `dma.rs:336`): DMA yields after
-  each transfer unit; run the PPU H/V-counter advance + the H/V-IRQ **windowed
-  level eval** (jgenesis `memory.rs:887-942`: rising-edge latch held until
-  serviced) on each yielded slice. This decouples IRQ latching (at the true dot,
-  even mid-DMA) from IRQ servicing (after DMA releases the bus). Oracle: Doom →
-  4 IRQ/frame regular like Mesen (the bisection oracle), `gsu_*` byte-exact, DKC,
-  no GSU/SA-1 regression.
-- **Frontend backlog (independent, high felt-value):** (1) DRC; (2) lock-free
-  triple buffer or sync_channel(1) present handshake to retire the Mutex
-  framebuffer; both added to `luna-api`.
-- **Not required for the flicker:** the full cycle-by-cycle 65c816 rewrite. It's
-  a later accuracy project (writes-lead-reads, sub-instruction interrupt cases),
-  not the lever.
-
-## 6. Phase 5 DE-RISKED AND REFUTED for luna's Doom flicker (2026-06-10)
-
-Before the Phase 5 refactor, instrumented luna's Doom: logged every GP-DMA
-($420B) with start scanline + duration, correlated with the INIDISP raster
-writes. Result **refutes the lumped-DMA-causes-the-flicker hypothesis for this
-specific case**:
-- **Only 2 of 1556 GP-DMAs span scanline 23 or 199** (the raster IRQ lines).
-  The big framebuffer DMAs are at lines **200-262** (bottom + vblank), NOT over
-  the IRQ lines. So per-byte DMA stepping would NOT change the IRQ timing — the
-  DMA doesn't overlap the IRQ. **The de-risk saved a multi-day refactor.**
-
-But it surfaced the real, **confound-free** signal (a rate over 2000 frames, so
-the boot offset doesn't bias it):
-- **luna: ~0.6 GP-DMA triggers/frame and 0.74 INIDISP writes/frame.**
-- **Mesen: 2.01 GP-DMA/frame and 2.00 INIDISP/frame, every frame.**
-
-So **Doom's entire main loop runs ~3.3× less often on luna** (the GP-DMA +
-raster pair is one loop iteration). This is BOTH the flicker (border re-blanked
-0.6×/frame not 2×) AND the user's "Doom is a bit slower than Mesen" — one root.
-
-Hypotheses now REFUTED for the flicker: (1) H/V-IRQ level model, (2) GSU bus
-arbitration, (3) DRAM refresh (marginal), (4) lumped DMA / Phase 5 (DMAs don't
-span the IRQ lines), (5) GSU clock speed (a 3× spike made it *worse*, but that
-test is confounded by the demo being GSU-driven → different scene). The
-Mesen-instr/frame measurement (to decide CPU-rate vs Doom-waiting) could not be
-captured (Mesen Lua exec callback config kept failing).
-
-**Verdict: the flicker is a deep, multi-factor emulated-timing deficit (Doom's
-loop runs 3.3× slow), NOT isolable by surgical per-subsystem tests because every
-luna-vs-Mesen comparison is confounded by the irreducible boot-frame offset
-(docs/cooperative_scheduler_reference.md §4b).** The only confound-free oracle is
-**full-system state injection** (inject a Mesen savestate — CPU+WRAM+PPU+GSU+APU
-— into luna, run both forward, bisect the first divergence in the loop). That, or
-commit to the **cycle-based rearchitecture** (§0/§1 — jgenesis's model) as the
-fundamental fix. Surgical patching is exhausted.

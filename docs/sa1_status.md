@@ -22,7 +22,7 @@ the reference output from Mesen2:
 
 Two independent bugs were uncovered by the starfield reproducer:
 
-1. **OAM peek mask was bit-AND not modulo** (commit `0ae7249`).
+1. **OAM peek mask was bit-AND not modulo** (commit `4632488`).
    `Oam::peek/poke/read` used `data[addr & 0x21F]` where `0x21F` is
    the ring SIZE (544 = 0x220 in exclusive, 0x21F inclusive), not a
    wrap mask. Since 0x21F bit-patterns to `bits 0..4 + bit 9`, any
@@ -31,7 +31,7 @@ Two independent bugs were uncovered by the starfield reproducer:
    with sprite 0..7's bytes, sprites 16..23 with sprite 0..7's, etc.
    — a clean 32-byte sprite wrap.
 2. **DMA bursts didn't catch the coprocessor up between bytes**
-   (commit `2ee0cbe`). `DmaChannel::run` held the bus for the full
+   (commit `2b8ab8e`). `DmaChannel::run` held the bus for the full
    transfer (up to ~262k mclks) without stepping the SA-1. Now
    `DmaBus::tick(8)` runs per byte transferred, matching ares
    (`Thread::step(2) + synchronize`) and Mesen2 (`IncMasterClock4

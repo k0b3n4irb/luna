@@ -3,17 +3,17 @@
 **Status:** in progress — **Phases 1, 2, 3 landed; Phase 4 in progress**
 (dot-precise H/V IRQ + HDMA time cost done; DMA↔HDMA preemption → Phase 5).
 - Phase 1 (io_cycle-driven per-access catch-up + DMA coproc double-charge
-  fix): done — APU `cfef84a`/snes.rs, PPU sched, coproc `7c5bef0`.
+  fix): done — APU `db19ca8`/snes.rs, PPU sched, coproc `535d2e7`.
 - Phase 2 (SPC700 per-opcode cycles + branch-taken penalty + master-clock
-  cadence): done `cfef84a`; cycle backstop + 9 off-by-one fixes `081e78d`.
-- Phase 3 (65c816 internal/idle cycles): done `82893a5`; Tom Harte cycle
-  backstop `fe405b5` (0 mismatches, 100% state). It made a fixed-instr
+  cadence): done `db19ca8`; cycle backstop + 9 off-by-one fixes `3ab5e21`.
+- Phase 3 (65c816 internal/idle cycles): done `2da74fc`; Tom Harte cycle
+  backstop `990c255` (0 mismatches, 100% state). It made a fixed-instr
   SMRPG smoke land on a black post-intro frame, which *looked* like a
   regression but was not (HEAD A/B confirmed) — and which a later (2026-06)
   investigation showed was **never an SA-1 deadlock at all** (see §7
   "SA-1 game status").
 - Phase 4 (per-access IRQ/NMI/HDMA): **partially done.** Dot-precise H/V
-  IRQ `f1ef75e` (fixes modes 01/11; unblocks DKC's H-IRQ raster) + HDMA
+  IRQ `d4b0bb6` (fixes modes 01/11; unblocks DKC's H-IRQ raster) + HDMA
   time cost (18 mclk/line + 8/byte, charged via the `sched_advance` stall
   loop). Remaining: $4211 TIMEUP hold, the ares "last dot" guard, htime==0
   delay. The DMA↔HDMA preemption part needs steppable DMA → moved to
@@ -118,9 +118,16 @@ branch-taken penalty), not a flat 84.
 |---|---|---|---|
 | **1. io_cycle-driven catch-up** ✅ done | Move PPU/APU/coproc advancement out of the end-of-`step()` lump and into `io_cycle`, advancing per access. Collapses the three lump calls into one per-access sync. **Naturally fixes the DMA coproc double-charge.** | Mid-instruction PPU/APU/coproc accuracy; foundation for all later phases | Med — hottest path; perf-sensitive |
 | **2. SPC700 cycle accuracy** ✅ done | Real per-opcode cycles + branch-taken penalty; drive the APU from the master clock (mclk→SPC-cycle ratio) instead of a flat rate. | **CT/Akao handshake**, SPC700 B→A−, Tom Harte SPC `cycles[]` | Med |
-| **3. 65c816 cycle accuracy** ✅ done | Have the CPU core call `io_cycle` at the correct *intra-instruction* points with correct per-cycle costs (read/write/idle ordering). The core already emits `io_cycle` per **bus** access (Phase 1 relies on it); what was missing was the **internal/idle** cycles — RMW dead cycles, branch-taken / page-cross penalties, etc. — plus the Tom Harte `cycles[]` backstop to drive them out (cf. the SPC700 Phase-2 method). Landed `82893a5`. | Tom Harte 65c816 `cycles[]`, A−→A | High — touched every opcode/addressing path |
+| **3. 65c816 cycle accuracy** ✅ done | Have the CPU core call `io_cycle` at the correct *intra-instruction* points with correct per-cycle costs (read/write/idle ordering). The core already emits `io_cycle` per **bus** access (Phase 1 relies on it); what was missing was the **internal/idle** cycles — RMW dead cycles, branch-taken / page-cross penalties, etc. — plus the Tom Harte `cycles[]` backstop to drive them out (cf. the SPC700 Phase-2 method). Landed `2da74fc`. | Tom Harte 65c816 `cycles[]`, A−→A | High — touched every opcode/addressing path |
 | **4. Per-access IRQ/NMI/HDMA** | Poll interrupts + HDMA in `io_cycle`: dot-precise H/V-IRQ (HTIME respected), H≈278 HDMA-vs-DMA preemption, RDNMI as a true 4-cycle hold. | Raster-IRQ games, DMA/timing C+→B+ | Med |
 | **5. DMA/HDMA cycle-stepping** | Per-byte DMA interleaved with the master clock; mid-DMA HDMA preemption; single coproc sync. | DMA/timing → A−; SA-1 contention | Med |
+
+> **Note (2026-06-11):** the marquee raster-IRQ bug — Doom's letterbox-border
+> flicker — turned out **not** to be a Phase 4/5 item. It was a PPU register-latch
+> bug (reading `$213F` did not reset the OPHCT/OPVCT byte flip-flop; ares
+> `io.cpp:167-169`), fixed surgically. Phases 4–5 remain genuine HDMA/DMA-timing
+> accuracy work (mid-line HDMA preemption, per-byte DMA grid, `$4211` hold), but
+> they are not what fixed Doom. See `accuracy_scorecard.md`.
 
 **Validation per phase:** the Tom Harte harness, the CT/SMW/SMRPG
 audio+visual smoke, `cargo test --workspace --lib`, and the coproc/DMA/PPU
@@ -158,14 +165,14 @@ section C+→B+) — **not** by any SA-1 game (see below).
 The "SA-1 deadlock" that earlier drafts of this plan named as the Phase 4
 payoff **does not exist**. Re-investigation with the SA-1 tracers
 (`--sa1-log`/`--sa1-side-log`/`--sa1-trace`, the I-RAM-write trace added in
-`2940ebe`) plus `--cpu-trace`/`--mem-trace`/`--peek` showed:
+`cc00aaa`) plus `--cpu-trace`/`--mem-trace`/`--peek` showed:
 
 - **Super Mario RPG — works.** The "intro hang at ~frame 2150 / NMIs
   frozen at 1598" is just the **title/demo screen waiting for a Start
   press** the CLI never sends. `luna state --input "1600:0x1000,1610:0,…"`
   reaches New Game → the name-entry screen. The SA-1↔S-CPU mailbox
   round-trips correctly every frame. No scheduler change needed.
-- **Kirby Super Star — FIXED (`7fa6549`), was a DMA bus-decode bug, not
+- **Kirby Super Star — FIXED (`b4a4525`), was a DMA bus-decode bug, not
   timing.** The S-CPU boots, then DMAs a small stub into WRAM through the
   `$2180` (WMDATA) port and `JMP $000E` into it. But `DmaBusView` (the
   DMA-side bus view in `snes.rs`) only decoded `b_offset <= $3F` (PPU
@@ -189,16 +196,16 @@ The Kirby crash chain (now resolved) is recorded in the
 
 ### History (completed)
 
-**Phase 1 — io_cycle-driven catch-up** (`7c5bef0` + earlier). Moved
+**Phase 1 — io_cycle-driven catch-up** (`535d2e7` + earlier). Moved
 PPU/APU/coproc advancement out of the end-of-`step()` lump into `io_cycle`
 (per access), collapsing the three lump calls into one per-access sync and
 removing the DMA coproc double-charge.
 
-**Phase 2 — SPC700 cycle accuracy** (`cfef84a`, `081e78d`). Real per-opcode
+**Phase 2 — SPC700 cycle accuracy** (`db19ca8`, `3ab5e21`). Real per-opcode
 cycle table + branch-taken penalty, APU driven from the master clock. The
 Tom Harte cycle backstop then caught 9 opcodes charging one cycle too many.
 
-**Phase 3 — 65c816 internal/idle cycles** (`82893a5`, backstop `fe405b5`).
+**Phase 3 — 65c816 internal/idle cycles** (`2da74fc`, backstop `990c255`).
 Added `Cpu::io`/`idle2`/`idle4`/`idle6` and the RMW/branch/stack/jump
 idles per ares `wdc65816/memory.cpp`; the Tom Harte cycle backstop (count
 `io_cycle` invocations == `cycles[].len()`, gated by `LUNA_TOM_HARTE_CYCLES`,

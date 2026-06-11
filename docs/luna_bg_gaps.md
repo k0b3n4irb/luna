@@ -7,7 +7,7 @@ covering all 8 BG modes. Scope: the **runtime** path
 `render_scanline_partial_into`), not the legacy single-BG helpers.
 
 Authored 2026-05-30. Mode 7 affine + M7SEL already fixed (commit
-`35be343`); this list tracks the remainder.
+`3bd208e`); this list tracks the remainder.
 
 ## Severity legend
 
@@ -177,7 +177,7 @@ corrected (mosaic *is* applied since #11).
 - Priority tables for Modes 0/1 (both BG3-prio variants)/2/3.
 - Direct-colour gating (8bpp + BG + CGWSEL bit 0); window / colour-math
   (already audited in `ppu_compositor_reference.md`).
-- Mode 7 affine (fixed `35be343`).
+- Mode 7 affine (fixed `3bd208e`).
 - **Mode 7 + interlace** — intentionally a no-op: ares `mode7.cpp:13` uses
   `y = vcounter()` directly, with no `<<1`/field (unlike the hi-res BG
   path). So Mode 7 interlace shows the same affine line on both fields (a
@@ -187,7 +187,7 @@ corrected (mosaic *is* applied since #11).
 
 ## Suggested order
 
-1. **#1 Mode 0 palette** — done (`f4e3d9b`).
+1. **#1 Mode 0 palette** — done (`88db236`).
 2. **#3 hi-res 5/6 + pseudo-hires** — done (Option A downsample).
 3. **#2 offset-per-tile (modes 2/4)** — done, GUI-validated on CT title.
 4. **#4 Mode 7 EXTBG** — done.

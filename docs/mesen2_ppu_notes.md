@@ -1252,7 +1252,7 @@ HBlank signal, not just a vblank-derived value. Per-pixel sample.
 **Bit 0** = auto-joypad-read in progress.
 **Bits 1..5** = open-bus (`0x3E` mask).
 
-luna's recent fix in commit `6694e1d` ("HVBJOY bit 6 = live Hblank") is
+luna's recent fix in commit `9d801f8` ("HVBJOY bit 6 = live Hblank") is
 exactly what Mesen2 does here.
 
 ### 8.3 Open-bus behavior for PPU reads

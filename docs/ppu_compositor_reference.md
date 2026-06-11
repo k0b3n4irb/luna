@@ -203,7 +203,10 @@ When set, BG1 in modes 3/4/7 reinterprets its palette byte as a packed BGR tripl
 - Optional `paletteGroup = -----bgr` (low 3 bits from tilemap's palette field).
 - Both refs combine these to produce a 15-bit color: see ares `dac.cpp:159-167`.
 
-luna currently uses the 8-bit palette only and drops the paletteGroup bits — minor but real divergence.
+luna implements this: `direct_color_to_bgr5(palette_index, group)`
+(renderer.rs:924) decodes the 8-bit `BBGGGRRR` palette byte AND folds in
+the 3-bit tilemap palette group (R←g0, G←g1, B←g2), so the paletteGroup
+low bits are NOT dropped.
 
 ---
 
@@ -255,7 +258,14 @@ if(address.bit(9)) {
 obj.setFirstSprite();                   // refresh OAM-priority rotation
 ```
 
-luna's `memory.rs:396-416` implements the even-byte latch correctly. luna does NOT call the equivalent of `setFirstSprite()` on every write.
+luna's `memory.rs:425-454` (`Oam::write_gated`) implements the even-byte
+latch correctly. luna does not maintain a *cached* firstSprite refreshed
+on every `$2104` write the way ares' `setFirstSprite()` does; instead it
+derives it on demand each scanline from the priority-rotation flag and
+`$2103` word address — `Oam::first_sprite()` (memory.rs:407) returns
+`(word_address >> 2) & 0x7F` when priority rotation is on, else 0. Same
+observable result; the firstSprite index is just recomputed lazily rather
+than stamped per write.
 
 ### 6.4 Sprite double-buffering
 
@@ -263,7 +273,16 @@ ares double-buffers the per-line tile cache: `t.active ^= 1` at start of each sc
 
 Mesen2 evaluates sprites for line N at the end of line N-1 — same effective behavior, different code shape.
 
-luna's renderer evaluates sprites synchronously for each scanline with no double-buffer. For dot-by-dot accuracy this is wrong, but most games don't rely on the timing.
+luna decodes the sprite set **once per scanline** and shares it across the
+whole line: `render_current_scanline` (ppu.rs:493) evaluates sprites once
+and threads the decode into `render_scanline_partial_into_from` via the
+`precomp` argument (renderer.rs:460, ppu.rs:511), so per-pixel composition
+does not re-walk OAM. What luna does NOT do is ares' cross-scanline
+double-buffer (fetch line N's tiles while running line N-1); it evaluates
+the current line's sprites against live OAM at the start of that line. The
+practical effect is the same for static OAM; only a game that rewrites OAM
+mid-scanline expecting the previous line's fetched tiles to already be
+latched would differ — and no commercial title in the corpus relies on it.
 
 ---
 
@@ -295,7 +314,7 @@ While the auto-read is in progress, `$4212` bit 0 reads 1 ("auto-joypad-read bus
 ### 7.4 HVBJOY ($4212)
 
 - bit 0: auto-joypad-read busy.
-- bit 6: HBlank — TRUE during HBlank (hcounter ≥ 274) of *every* line including non-visible. The recent luna commit (af748c9-prev: `6694e1d fix(core): $4212 HVBJOY bit 6 = live Hblank (ares)`) was about this.
+- bit 6: HBlank — TRUE during HBlank (hcounter ≥ 274) of *every* line including non-visible. The recent luna commit (a802112-prev: `9d801f8 fix(core): $4212 HVBJOY bit 6 = live Hblank (ares)`) was about this.
 - bit 7: VBlank — TRUE from scanline vdisp until line 261/311 (NTSC/PAL).
 
 ---
@@ -308,13 +327,75 @@ While the auto-read is in progress, `$4212` bit 0 reads 1 ("auto-joypad-read bus
 
 ---
 
+## 8b. Read/write latches and write-twice quirks
+
+### 8b.1 STAT78 ($213F) read resets the OPHCT/OPVCT byte flip-flop
+
+OPHCT ($213C) and OPVCT ($213D) are 9-bit latched counters read one byte
+at a time via a shared low/high **byte flip-flop**: the first read returns
+the low byte and arms the flip-flop, the second returns bit 0 of the high
+byte and disarms it.
+
+Reading **STAT78 ($213F)** resets that flip-flop as a side effect, so the
+*next* OPHCT/OPVCT read is guaranteed to return the LOW byte:
+
+ares (`io.cpp:167-169`, the `$213f` case):
+```
+latch.hcounter = 0;
+latch.vcounter = 0;
+```
+
+A handler that does not re-sync via $213F can desync the toggle and read
+the high byte (0 for lines < 256) when it expected the low byte. This is
+the **Doom-flicker root cause**: Doom's raster IRQ read V≈0, mis-dispatched
+to its no-ack branch, and re-fired the H/V IRQ ~200×/frame.
+
+luna implements this: reading STAT78 clears `ophct_hi_pending` /
+`opvct_hi_pending` (ppu.rs:635-636) — the same read also clears the shared
+BG-scroll write-twice latch and the external-latch-hit status bit
+(ppu.rs:623-625).
+
+### 8b.2 BG scroll ($210D-$2114) write-twice — TWO shared latches
+
+The regular-BG scroll registers are write-twice into a pair of shared
+8-bit latches `bgofs_ppu1` / `bgofs_ppu2` (ares `io.cpp:312-324`):
+
+- **H-scroll write ($210D/$210F/$2111/$2113):** the composed 10-bit offset
+  takes bits 3-9 from PPU1's *previous* byte (`bgofs_ppu1 & ~7`), bits 0-2
+  from PPU2's *byte-before-that* (`bgofs_ppu2 & 7`), and bits 8-9 from the
+  newly written high byte. **Both** latches then take the new byte. The
+  cross-latch on the low 3 bits is the real hardware quirk — it only
+  manifests when scroll registers interleave; a single latch mis-scrolls
+  the sub-tile H offset.
+- **V-scroll write ($210E/$2110/$2112/$2114):** uses the FULL previous-write
+  latch (`bgofs_ppu1`, no PPU2 cross) and updates ONLY `bgofs_ppu1`.
+
+luna implements both: `write_bg_h_scroll` (ppu.rs:678-691, dual-latch
+cross) and `write_bg_v_scroll` (ppu.rs:695-699, PPU1-only). The Mode-7
+M7HOFS/M7VOFS write-twice uses a *separate* `m7_latch` (ppu.rs:707-726),
+not these BG-scroll latches.
+
+---
+
 ## 9. Mid-frame register write latching
 
 Both refs treat PPU register writes as **instantaneous, mid-scanline**. The pixel up to the write x position uses the OLD state; the rest of the scanline uses the NEW state. Implementation:
 - ares dispatches per-cycle, so writes naturally interleave with rendering.
 - Mesen2 calls `RenderScanline()` before applying a register write that affects rendering (`SnesPpu.cpp:1712-1714, 1884-1886`).
 
-luna renders whole frames in one pass at end-of-frame, so all PPU writes between frames "win" — for static screens this is fine, but games that change tilemap base / palette mid-frame (very common for status bar separation, parallax effects, level transitions with HDMA) will render wrong.
+luna renders **per scanline**, not in one end-of-frame pass: the scheduler
+calls `Ppu::render_current_scanline` (ppu.rs:493) at the end of every
+visible line, committing it to the persistent framebuffer. So a register
+write on line N is already seen by lines N+1.. — mid-frame tilemap/palette
+changes for status-bar split, parallax, and HDMA-driven effects render
+correctly at scanline granularity.
+
+luna additionally models **mid-scanline** writes: a rendering-affecting
+register write flushes the in-progress line up to the current dot via
+`Ppu::flush_partial_scanline` (ppu.rs:526) so pixels left of the write
+keep the OLD state and pixels right of it use the NEW state — matching
+Mesen2's `RenderScanline()`-before-write model. The remaining gap vs ares
+is purely sub-dot ordering, not whole-frame staleness.
 
 ---
 
@@ -325,7 +406,21 @@ Both refs implement (ares `ppu_io.cpp:19-61`, Mesen2 also enforced):
 - CGRAM write during active display lands at `latch.cgramAddress` (the address-mux updated by `DAC::paletteColor()` per pixel), not the address the game programmed.
 - OAM read/write during active display routes through `latch.oamAddress` (updated by the OBJ evaluator).
 
-luna implements none of these gates currently. The level-load artifacts likely come from games that write VRAM/CGRAM just slightly too late (a CPU cycle into the next visible scanline) — real hardware silently rejects; luna silently accepts, scrambling tiles.
+luna implements the VRAM and OAM gates: it tracks `Ppu::active_display`
+(true when not forced-blank AND on a visible scanline) and routes the data
+ports through gated writers — VRAM via `Vram::write_lo_gated` /
+`write_hi_gated` (ppu.rs:825-826) and OAM via `Oam::write_gated`
+(ppu.rs:764). When `active_display` is true the byte is dropped but the
+address counter (and OAM even/odd latch) still advance, matching ares
+(`ppu_io.cpp:40-45`) and Mesen2 (`SnesPpu.cpp:1916-1927`).
+
+CGRAM is **deliberately ungated** (`Cgram::write`, memory.rs:261): on real
+hardware an active-display CGRAM write still commits, just at the
+DAC's `latch.cgramAddress` rather than the programmed address. luna commits
+at the programmed address — it does not yet model the per-pixel
+address-mux, so the *value* lands but at the wrong slot only in the rare
+case a game writes CGRAM mid-active-line. This is the one remaining
+sub-quirk; the blanket "implements none of these gates" was stale.
 
 ---
 
@@ -333,9 +428,14 @@ luna implements none of these gates currently. The level-load artifacts likely c
 
 Mode 7 (BGMODE=7): BG1 is a 1024×1024 affine-transformed 8bpp tilemap. M7A/M7B/M7C/M7D matrix (signed 8.8), M7X/M7Y center (signed 13-bit).
 
-EXTBG (SETINI bit 6): BG2 reuses the Mode-7 framebuffer with priority bits from the high tile-byte — used by F-Zero, Pilotwings.
+EXTBG (SETINI bit 6): BG2 reuses the Mode-7 framebuffer with priority bits
+from the high tile-byte — used by F-Zero, Pilotwings.
 
-luna implements Mode 7 BG1 only.
+luna implements EXTBG: when `BGMODE == 7 && (setini & 0x40) != 0`
+(renderer.rs:497) it exposes the affine plane as BG2, deriving the colour
+from the low 7 bits of the 8bpp pixel and the priority from bit 7
+(renderer.rs:536-538), and composites it via `MODE7_EXTBG_TABLE`
+(renderer.rs:1165). Mode 7 is no longer BG1-only.
 
 ---
 
