@@ -16,8 +16,7 @@ rmcp       = { workspace = true }
 schemars   = { workspace = true }
 base64     = { workspace = true }
 serde      = { workspace = true, features = ["std", "derive"] }
-serde_json = { workspace = true, features = ["std"] }
-thiserror  = { workspace = true }
+serde_json = { workspace = true, features = ["std"] } # used by the rmcp::tool macro expansion
 
 # Tokio runtime — we need the multi-thread runtime + io-std for stdio
 # transport. The workspace default has `default-features = false`, so

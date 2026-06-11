@@ -11,7 +11,6 @@ readme.workspace = true
 
 [dependencies]
 luna-apu       = { workspace = true }
-luna-bus       = { workspace = true }
 luna-cartridge = { workspace = true }
 luna-core      = { workspace = true }
 luna-ppu       = { workspace = true }

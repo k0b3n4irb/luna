@@ -1846,7 +1846,6 @@ version = "0.0.1"
 dependencies = [
  "image",
  "luna-apu",
- "luna-bus",
  "luna-cartridge",
  "luna-core",
  "luna-ppu",
@@ -1880,15 +1879,9 @@ name = "luna-cli"
 version = "0.0.1"
 dependencies = [
  "clap",
- "image",
  "luna-api",
- "luna-apu",
- "luna-cartridge",
- "luna-core",
  "luna-mcp-server",
- "luna-ppu",
  "serde_json",
- "thiserror 2.0.18",
  "tokio",
 ]
 
@@ -1937,6 +1930,7 @@ dependencies = [
  "ringbuf",
  "serde",
  "serde_json",
+ "triple_buffer",
  "winit",
 ]
 
@@ -1950,7 +1944,6 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "tokio",
 ]
 
@@ -3498,6 +3491,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
+]
+
+[[package]]
+name = "triple_buffer"
+version = "8.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "420466259f9fa5decc654c490b9ab538400e5420df8237f84ecbe20368bcf72b"
+dependencies = [
+ "crossbeam-utils",
 ]
 
 [[package]]

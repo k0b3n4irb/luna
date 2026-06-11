@@ -14,16 +14,12 @@ name = "luna"
 path = "src/main.rs"
 
 [dependencies]
+# API-first: the CLI drives the emulator only through luna-api (+ the MCP
+# transport). No direct deps on luna-core / luna-ppu / luna-apu / luna-cartridge.
 luna-api        = { workspace = true }
-luna-apu        = { workspace = true }
-luna-cartridge  = { workspace = true }
-luna-core       = { workspace = true }
 luna-mcp-server = { workspace = true }
-luna-ppu        = { workspace = true }
 
 clap       = { workspace = true }
-image      = { workspace = true }
-thiserror  = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }
 tokio      = { workspace = true, features = ["macros", "rt-multi-thread", "io-std"] }
 
