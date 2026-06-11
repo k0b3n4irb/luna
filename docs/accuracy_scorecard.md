@@ -2,6 +2,9 @@
 
 **Reviewer:** Claude (Opus 4.8) — source-level accuracy correlation
 **Date:** 2026-05-29 · **Commit:** `f690f74` (`main`)
+**⟳ RE-GROUNDED vs HEAD: 2026-06-10** — see the re-grounded banner under §1.
+The May grades were markedly pessimistic: **16 of 27 flagged bugs are now
+fixed**, and the "self-consistent but wrong" family is nearly emptied.
 **References (fetched live, read in full — not paraphrased from memory):**
 - **ares** `master` — `ares/sfc/{cpu,smp,dsp,ppu,coprocessor/sa1,memory,cartridge}` + `ares/component/processor/{wdc65816,spc700}` + `mia/medium/super-famicom.cpp`
 - **Mesen2** `master` — `Core/SNES/{SnesCpu,Spc,DSP,SnesPpu,SnesDmaController,SnesMemoryManager,BaseCartridge,Coprocessors/SA1}`
@@ -18,7 +21,51 @@ references*, not code quality.
 
 ---
 
-## 1. Scorecard at a glance
+## ⟳ RE-GROUNDED BANNER (2026-06-10 vs HEAD)
+
+The May grades below (§1) were verified against current code by per-subsystem
+re-grounding. **16 of 27 flagged bugs are fixed, 5 partial, and the residual
+truly-open list is short.** Use *this* table, not §1, as current truth.
+
+| Subsystem | May | **Re-grounded** | Still truly open |
+|---|:---:|:---:|---|
+| DSP S-DSP | A− | **A−** | golden-vector PCM tests absent (latent risk) |
+| CPU 65c816 | A− | **A−** | none functional (DP-8 bare wrap is inert → comment fix) |
+| SPC700 | B | **B+** | fine cycle ordering only (branch penalty fixed) |
+| PPU | C+ | **A−** | *(OPHCT/OPVCT read-latch **+** BG scroll write-twice — both **FIXED 2026-06-11**; the OPVCT latch was the Doom-flicker root)* |
+| DMA/HDMA | C+ | **B−** | mid-line HDMA preemption + atomic burst (Phase 5) |
+| SA-1 | C+ | **B** | flat instruction timing (architectural, with Phase 5) |
+| Bus/mappers | C+ | **C+** | ROM mirroring, open-bus MDR, mapper-detect scoring |
+
+**Truly-open work list (was 6, now 4 after the OPVCT + BG-scroll fixes):**
+0. ~~PPU OPHCT/OPVCT read-latch not reset on $213F~~ — **FIXED 2026-06-11** (`d6cc09a`, ares io.cpp:167-169). This was the **Doom border-flicker root** (see below).
+1. ~~PPU BG scroll write-twice~~ — **FIXED** (two shared latches, ares io.cpp:312; `ppu.rs:bg H/V scroll`, test `bg_h_scroll_uses_two_shared_latches`).
+2. DSP golden-vector PCM tests absent — highest unique value (the most faithful port is unverified by a real BRR→PCM assertion).
+3. Bus: ROM mirroring of non-pow2 images returns open-bus instead of wrapping (`lorom.rs`/`hirom.rs`).
+4. Bus: open-bus is a fixed `0xFF`, not the last MDR latch (`snes.rs` `unwrap_or(0xFF)`).
+5. Bus: mapper detection is first-checksum-pass-wins, no weighted scoring; SA-1 detected via low-nibble MapMode not hi-nibble RomType.
+6. SA-1 flat instruction timing (`coproc/sa1.rs` `MCLK_PER_SA1_INSN=6`) — architectural, fold into the timing rework, not isolated.
+
+Plus the 2 architectural residuals (Phase 5: DMA per-byte grid stepping, mid-line
+HDMA preemption) — genuine HDMA-accuracy items.
+
+**UPDATE 2026-06-11 — the Doom flicker is SOLVED, and it was NOT a scheduler/timing
+problem.** The earlier theory here (Doom loop "~3.3× slow", attack only with the
+state-injection oracle / cooperative-scheduler port) was **wrong** and is retracted.
+Root cause: the `$213F`/OPVCT read-latch bug above (`d6cc09a`). A 50%-wrong V-counter
+read sent Doom's raster IRQ handler down its no-ack branch, re-firing the H/V IRQ
+~200×/frame and pinning the S-CPU at I=1 ~90% of alternating frames (which *looked*
+like a 3.3×-slow loop). Fixed surgically — the cooperative-scheduler port was NOT
+needed (the GSU engine is byte-exact and its task timing matches Mesen within 1%).
+The differential method (luna CLI traces vs Mesen oracles) localised it; see the
+`project_doom_flicker_opvct_latch` memory.
+
+> The detailed §1+ tables below are the **May 2026 snapshot** — kept for the
+> per-area reasoning, but superseded by this banner where they disagree.
+
+---
+
+## 1. Scorecard at a glance *(May 2026 — superseded by the banner above)*
 
 | Subsystem | Grade | One-line correlation summary |
 |---|:---:|---|
