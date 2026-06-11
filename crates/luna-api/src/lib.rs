@@ -908,22 +908,15 @@ impl Emulator {
         Ok(out)
     }
 
-    /// Read `count` bytes starting at the 24-bit CPU address
-    /// `bank:offset`. Reads go through the real bus, so MMIO reads
-    /// have their normal side effects — pass non-MMIO ranges if you
-    /// just want a memory dump.
+    /// Read `count` bytes starting at the 24-bit CPU address `bank:offset`,
+    /// **side-effect-free**: charges no cycles (does not advance the master
+    /// clock / APU) and never reads MMIO (no latch toggles, flag clears, or
+    /// address-port advances). Safe to poll every frame from a debugger
+    /// memory view. WRAM and ROM/SRAM/coproc-work-RAM return real bytes; the
+    /// `$2000-$5FFF` register band reads back as `0`.
     pub fn peek_memory(&mut self, bank: u8, offset: u16, count: u16) -> Result<Vec<u8>, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
-        let mut out = Vec::with_capacity(usize::from(count));
-        let saved_pc = snes.cpu.pc;
-        let saved_pb = snes.cpu.pb;
-        snes.cpu.pc = offset;
-        snes.cpu.pb = bank;
-        let bytes = snes.peek_pc_bytes(count as usize);
-        snes.cpu.pc = saved_pc;
-        snes.cpu.pb = saved_pb;
-        out.extend_from_slice(&bytes);
-        Ok(out)
+        Ok(snes.dbg_peek_bytes(bank, offset, usize::from(count)))
     }
 
     /// Enable APU mailbox (`$2140-$2143`) event logging. Every CPU

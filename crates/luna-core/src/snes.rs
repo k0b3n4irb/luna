@@ -937,6 +937,35 @@ impl Snes {
             })
             .collect()
     }
+
+    /// Side-effect-free, no-clock debug peek of `count` bytes from `bank:offset`
+    /// (16-bit offset wraps). For memory inspectors: unlike a real bus read it
+    /// charges **no** `io_cycle` (so it never advances the master clock / APU)
+    /// and never touches MMIO (so it never toggles the OPHCT/OPVCT or BG-scroll
+    /// latches, clears the NMI/IRQ flags, or advances VMADD/OAMADD/the WRAM
+    /// port). WRAM and ROM/SRAM/coproc-work-RAM return their real bytes; the
+    /// `$2000-$5FFF` register band returns `0`.
+    pub fn dbg_peek_bytes(&mut self, bank: u8, offset: u16, count: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(count);
+        for i in 0..count {
+            let off = offset.wrapping_add(i as u16);
+            let v = if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && off < 0x2000 {
+                // Low-RAM WRAM mirror.
+                self.wram[usize::from(off)]
+            } else if matches!(bank, 0x7E..=0x7F) {
+                // Full WRAM ($7E-$7F).
+                self.wram[(usize::from(bank - 0x7E) << 16) | usize::from(off)]
+            } else if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && (0x2000..=0x5FFF).contains(&off) {
+                // PPU/APU/CPU/coproc register band — read side effects, so 0.
+                0
+            } else {
+                // ROM / SRAM / coproc work-RAM — side-effect-free here.
+                self.mapper.read(make_addr(bank, off)).unwrap_or(0xFF)
+            };
+            out.push(v);
+        }
+        out
+    }
 }
 
 // =============================================================================
