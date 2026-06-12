@@ -34,6 +34,7 @@ const COLLAPSED_H: f32 = TITLE_BAR_H;
 pub(crate) enum DebugPanel {
     Cpu,
     CpuMemory,
+    CpuDisasm,
     Spc700,
     Spc700Memory,
     Spc700Disasm,
@@ -45,6 +46,7 @@ impl DebugPanel {
         match self {
             Self::Cpu => "CPU — 65c816",
             Self::CpuMemory => "CPU memory",
+            Self::CpuDisasm => "CPU disassembly",
             Self::Spc700 => "SPC700 — audio CPU",
             Self::Spc700Memory => "SPC700 memory",
             Self::Spc700Disasm => "SPC700 disassembly",
@@ -59,6 +61,7 @@ impl DebugPanel {
             Self::Spc700 => (250, 320),
             Self::CpuMemory | Self::Spc700Memory => (660, 420),
             Self::Spc700Disasm => (420, 440),
+            Self::CpuDisasm => (460, 440),
             Self::Sprites => (340, 460),
         }
     }
@@ -431,6 +434,7 @@ impl DebugWindows {
                             DebugPanel::Spc700 => ui::spc700_body(ui, snap),
                             DebugPanel::Sprites => ui::sprites_body(ui, snap),
                             DebugPanel::Spc700Disasm => nav = ui::spc700_disasm_body(ui, snap),
+                            DebugPanel::CpuDisasm => nav = ui::cpu_disasm_body(ui, snap),
                             DebugPanel::CpuMemory => nav = ui::cpu_memory_body(ui, snap),
                             DebugPanel::Spc700Memory => {
                                 nav = ui::spc700_memory_body(ui, snap);

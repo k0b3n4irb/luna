@@ -144,10 +144,12 @@ struct LunaApp {
     cpu_mem_addr: u32,
     /// SPC700-memory viewer cursor — 16-bit ARAM address.
     spc_mem_addr: u16,
-    /// SPC700 disassembly: frozen start address, follow-PC flag, line count.
+    /// SPC700 disassembly: start address + line count.
     spc_disasm_addr: u16,
-    spc_disasm_follow: bool,
     spc_disasm_lines: u16,
+    /// CPU (65c816) disassembly: 24-bit start address + line count.
+    cpu_disasm_addr: u32,
+    cpu_disasm_lines: u16,
 }
 
 impl LunaApp {
@@ -188,8 +190,9 @@ impl LunaApp {
             cpu_mem_addr: 0x7E_0000,
             spc_mem_addr: 0x0000,
             spc_disasm_addr: 0x0000,
-            spc_disasm_follow: true,
             spc_disasm_lines: 32,
+            cpu_disasm_addr: 0x00_8000,
+            cpu_disasm_lines: 32,
         };
         if let Some(path) = auto_rom {
             app.load_rom(&path);
@@ -561,6 +564,7 @@ impl LunaApp {
             key_bindings: &self.key_bindings,
             show_cpu_state: self.debug_windows.is_open(DebugPanel::Cpu),
             show_cpu_memory: self.debug_windows.is_open(DebugPanel::CpuMemory),
+            show_cpu_disasm: self.debug_windows.is_open(DebugPanel::CpuDisasm),
             show_spc700: self.debug_windows.is_open(DebugPanel::Spc700),
             show_spc700_memory: self.debug_windows.is_open(DebugPanel::Spc700Memory),
             show_spc700_disasm: self.debug_windows.is_open(DebugPanel::Spc700Disasm),
@@ -623,14 +627,24 @@ impl LunaApp {
                                 em.peek_aram(spc_addr, 256).ok().map(|b| (spc_addr, b));
                         }
                         DebugPanel::Spc700Disasm => {
-                            let start = if self.spc_disasm_follow {
-                                em.spc700_state().map_or(self.spc_disasm_addr, |s| s.pc)
-                            } else {
-                                self.spc_disasm_addr
-                            };
-                            snap.spc_disasm = em.disassemble_spc(start, self.spc_disasm_lines).ok();
-                            snap.spc_disasm_follow = self.spc_disasm_follow;
+                            snap.spc_disasm = em
+                                .disassemble_spc(self.spc_disasm_addr, self.spc_disasm_lines)
+                                .ok();
                             snap.spc_disasm_lines = self.spc_disasm_lines;
+                        }
+                        DebugPanel::CpuDisasm => {
+                            let (m8, x8) = em.cpu_state().ok().map_or((true, true), |c| {
+                                (c.e || c.p & 0x20 != 0, c.e || c.p & 0x10 != 0)
+                            });
+                            snap.cpu_disasm = em
+                                .disassemble_cpu(
+                                    self.cpu_disasm_addr,
+                                    self.cpu_disasm_lines,
+                                    m8,
+                                    x8,
+                                )
+                                .ok();
+                            snap.cpu_disasm_lines = self.cpu_disasm_lines;
                         }
                     }
                     snap
@@ -646,13 +660,6 @@ impl LunaApp {
             return;
         };
         let snap = self.build_panel_snapshot(panel);
-        // While following, keep the frozen start synced to the live PC, so
-        // toggling "Follow PC" off freezes the view right where it is.
-        if panel == DebugPanel::Spc700Disasm && self.spc_disasm_follow {
-            if let Some(first) = snap.spc_disasm.as_ref().and_then(|l| l.first()) {
-                self.spc_disasm_addr = first.addr;
-            }
-        }
         let (nav, close) = self.debug_windows.render(id, &snap);
         match nav {
             Some(PanelNav::MemAddr(d)) => match panel {
@@ -666,14 +673,41 @@ impl LunaApp {
                 }
                 _ => {}
             },
-            Some(PanelNav::DisasmFollow) => self.spc_disasm_follow = !self.spc_disasm_follow,
-            Some(PanelNav::DisasmMove(d)) => {
-                self.spc_disasm_follow = false;
-                self.spc_disasm_addr =
-                    (i64::from(self.spc_disasm_addr) + d).rem_euclid(0x1_0000) as u16;
+            Some(PanelNav::DisasmGotoPc) => {
+                // Re-anchor at the live PC, read fresh from the emulator.
+                let pc = self.emu.lock().ok().and_then(|mut g| {
+                    g.as_mut().and_then(|em| {
+                        if panel == DebugPanel::CpuDisasm {
+                            em.cpu_state()
+                                .ok()
+                                .map(|c| (u32::from(c.pb) << 16) | u32::from(c.pc))
+                        } else {
+                            em.spc700_state().ok().map(|s| u32::from(s.pc))
+                        }
+                    })
+                });
+                if let Some(pc) = pc {
+                    if panel == DebugPanel::CpuDisasm {
+                        self.cpu_disasm_addr = pc & 0xFF_FFFF;
+                    } else {
+                        self.spc_disasm_addr = pc as u16;
+                    }
+                }
             }
-            Some(PanelNav::DisasmLines(d)) => {
-                self.spc_disasm_lines = (i32::from(self.spc_disasm_lines) + d).clamp(8, 64) as u16;
+            Some(PanelNav::DisasmSetAddr(a)) => {
+                if panel == DebugPanel::CpuDisasm {
+                    self.cpu_disasm_addr = a & 0xFF_FFFF;
+                } else {
+                    self.spc_disasm_addr = a as u16;
+                }
+            }
+            Some(PanelNav::DisasmSetLines(n)) => {
+                let n = n.clamp(4, 128);
+                if panel == DebugPanel::CpuDisasm {
+                    self.cpu_disasm_lines = n;
+                } else {
+                    self.spc_disasm_lines = n;
+                }
             }
             None => {}
         }
@@ -694,6 +728,9 @@ impl LunaApp {
             MenuAction::ToggleCpuState => self.debug_windows.toggle(event_loop, DebugPanel::Cpu),
             MenuAction::ToggleCpuMemory => {
                 self.debug_windows.toggle(event_loop, DebugPanel::CpuMemory);
+            }
+            MenuAction::ToggleCpuDisasm => {
+                self.debug_windows.toggle(event_loop, DebugPanel::CpuDisasm);
             }
             MenuAction::ToggleSpc700 => self.debug_windows.toggle(event_loop, DebugPanel::Spc700),
             MenuAction::ToggleSpc700Memory => {

@@ -13,6 +13,7 @@ readme.workspace = true
 luna-apu         = { workspace = true }
 luna-cartridge   = { workspace = true }
 luna-core        = { workspace = true }
+luna-cpu-65c816  = { workspace = true }
 luna-cpu-spc700  = { workspace = true }
 luna-ppu         = { workspace = true }
 
