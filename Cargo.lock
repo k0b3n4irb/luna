@@ -1926,6 +1926,7 @@ dependencies = [
  "image",
  "luna-api",
  "pixels",
+ "pollster",
  "rfd",
  "ringbuf",
  "serde",
