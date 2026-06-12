@@ -21,7 +21,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{ResizeDirection, Window, WindowAttributes, WindowId};
 
-use crate::ui::{self, DebugSnapshot, MenuAction};
+use crate::ui::{self, DebugSnapshot};
 
 /// Height (logical px) of the custom egui title bar drawn at the top of
 /// each borderless debug window.
@@ -33,18 +33,20 @@ const COLLAPSED_H: f32 = TITLE_BAR_H;
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub(crate) enum DebugPanel {
     Cpu,
+    CpuMemory,
     Spc700,
+    Spc700Memory,
     Sprites,
-    Memory,
 }
 
 impl DebugPanel {
     const fn title(self) -> &'static str {
         match self {
             Self::Cpu => "CPU — 65c816",
+            Self::CpuMemory => "CPU memory",
             Self::Spc700 => "SPC700 — audio CPU",
+            Self::Spc700Memory => "SPC700 memory",
             Self::Sprites => "Sprites (OAM)",
-            Self::Memory => "Memory (hex)",
         }
     }
 
@@ -53,8 +55,8 @@ impl DebugPanel {
         match self {
             Self::Cpu => (250, 340),
             Self::Spc700 => (250, 320),
+            Self::CpuMemory | Self::Spc700Memory => (660, 420),
             Self::Sprites => (340, 460),
-            Self::Memory => (530, 380),
         }
     }
 }
@@ -257,16 +259,16 @@ impl DebugWindows {
     }
 
     /// Repaint one debug window with the freshest snapshot. Returns the
-    /// menu actions its body emitted (memory page / bank navigation) and
+    /// signed byte delta a memory panel's nav toolbar requested (if any) and
     /// whether the title-bar ✕ asked to close the window.
-    pub(crate) fn render(&mut self, id: WindowId, snap: &DebugSnapshot) -> (Vec<MenuAction>, bool) {
-        let mut actions: Vec<MenuAction> = Vec::new();
+    pub(crate) fn render(&mut self, id: WindowId, snap: &DebugSnapshot) -> (Option<i64>, bool) {
+        let mut mem_delta: Option<i64> = None;
         // Disjoint field borrows: `gpu` (immutable) and `wins` (mutable).
         let Some(gpu) = self.gpu.as_ref() else {
-            return (actions, false);
+            return (mem_delta, false);
         };
         let Some(win) = self.wins.get_mut(&id) else {
-            return (actions, false);
+            return (mem_delta, false);
         };
 
         // Reconcile the surface to the window's current size BEFORE acquiring
@@ -293,10 +295,10 @@ impl DebugWindows {
                 match win.surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(f)
                     | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-                    _ => return (actions, false),
+                    _ => return (mem_delta, false),
                 }
             }
-            _ => return (actions, false),
+            _ => return (mem_delta, false),
         };
         let view = frame
             .texture
@@ -417,14 +419,13 @@ impl DebugWindows {
                                 .max_rect(content)
                                 .layout(egui::Layout::top_down(egui::Align::Min)),
                         );
-                        egui::ScrollArea::vertical().show(&mut body, |ui| match panel {
+                        egui::ScrollArea::both().show(&mut body, |ui| match panel {
                             DebugPanel::Cpu => ui::cpu_state_body(ui, snap),
                             DebugPanel::Spc700 => ui::spc700_body(ui, snap),
                             DebugPanel::Sprites => ui::sprites_body(ui, snap),
-                            DebugPanel::Memory => {
-                                if let Some(a) = ui::memory_body(ui, snap) {
-                                    actions.push(a);
-                                }
+                            DebugPanel::CpuMemory => mem_delta = ui::cpu_memory_body(ui, snap),
+                            DebugPanel::Spc700Memory => {
+                                mem_delta = ui::spc700_memory_body(ui, snap);
                             }
                         });
 
@@ -531,7 +532,7 @@ impl DebugWindows {
                 .request_inner_size(LogicalSize::new(logical_w, target_h));
         }
 
-        (actions, want_close)
+        (mem_delta, want_close)
     }
 
     /// Close (and drop) the debug window for `id`, if present.
