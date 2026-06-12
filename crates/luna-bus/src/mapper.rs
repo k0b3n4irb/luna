@@ -74,6 +74,18 @@ pub trait Mapper {
     /// Size of the SRAM in bytes (0 if none).
     fn sram_size(&self) -> usize;
 
+    /// Re-power the cartridge coprocessor to its power-on state, as the
+    /// SNES reset line does on real hardware (ares `SuperFX::power()` /
+    /// `SA1::power()`). ROM and battery-backed SRAM persist; the
+    /// coprocessor's registers, internal RAM, caches and its own CPU
+    /// return to power-on. Default = no-op for plain `LoROM` / `HiROM`
+    /// carts, which have no coprocessor state to clear.
+    ///
+    /// Without this, `Snes::reset` re-runs the main-CPU reset vector but
+    /// leaves a coprocessor (Super FX / SA-1) mid-execution, so a reset
+    /// of a Super FX title (e.g. Doom) freezes instead of rebooting.
+    fn reset(&mut self) {}
+
     /// Step the cartridge coprocessor (SA-1 / Super FX / DSP-1 / …)
     /// forward by approximately `main_mclk` master cycles of main-CPU
     /// progress. Default = no-op for plain `LoROM` / `HiROM` carts.

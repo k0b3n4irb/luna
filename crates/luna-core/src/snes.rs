@@ -531,6 +531,17 @@ impl Snes {
     /// Run the CPU reset sequence: read the reset vector at `$00:FFFC`
     /// via the bus and load `PC`.
     pub fn reset(&mut self) {
+        // 0. Cartridge coprocessor (Super FX / SA-1 / …): re-power it
+        //    first, BEFORE the main CPU re-reads its reset vector. The
+        //    reset line on real hardware resets the cart chip too, not
+        //    just the main CPU. Doing this first guarantees a mid-run GSU
+        //    isn't still owning the ROM bus when the CPU fetches the
+        //    vector. ROM and battery SRAM persist; the coproc registers,
+        //    internal RAM and its own CPU return to power-on. Leaving the
+        //    GSU mid-execution here froze Doom on `Reset` (it never
+        //    rebooted). No-op for plain LoROM / HiROM carts.
+        self.mapper.reset();
+
         // 1. CPU: re-read the reset vector through the bus. VRAM / WRAM /
         //    SRAM persist across a reset (real hardware doesn't clear them).
         let scanlines = self.region_scanlines();
