@@ -28,6 +28,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
+mod debug_window;
 mod emu_thread;
 mod input;
 mod ui;
@@ -50,9 +51,10 @@ use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::audio::AudioStreamArtifacts;
+use crate::debug_window::{DebugPanel, DebugWindows};
 use crate::emu_thread::EmuShared;
 use crate::input::{Hotkey, KeyBindings};
-use crate::ui::{MenuAction, UiOverlay, UiState};
+use crate::ui::{DebugSnapshot, MenuAction, UiOverlay, UiState};
 
 const WINDOW_TITLE: &str = "Luna — SNES Emulator";
 const INITIAL_SCALE: u32 = 3;
@@ -134,11 +136,10 @@ struct LunaApp {
     /// Last screenshot filename, surfaced in the menu bar as feedback.
     screenshot_status: Option<String>,
 
-    /// Debug panels (Debug menu). Data is pulled through `luna-api` each
-    /// frame only while a panel is open.
-    show_cpu_state: bool,
-    show_sprites: bool,
-    show_memory: bool,
+    /// Debug panels (Debug menu) — each is its own native OS window,
+    /// draggable anywhere on the desktop. Data is pulled through
+    /// `luna-api` each frame only while a panel is open.
+    debug_windows: DebugWindows,
     /// Hex-viewer cursor: WRAM bank ($7E/$7F) + page offset.
     mem_bank: u8,
     mem_offset: u16,
@@ -178,9 +179,7 @@ impl LunaApp {
             pending_rebind: None,
             pending_hotkey_rebind: None,
             screenshot_status: None,
-            show_cpu_state: false,
-            show_sprites: false,
-            show_memory: false,
+            debug_windows: DebugWindows::new(),
             mem_bank: 0x7E,
             mem_offset: 0x0000,
         };
@@ -399,7 +398,17 @@ impl ApplicationHandler for LunaApp {
         self.ui = Some(ui);
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // A debug panel's own native window: route the event to it and
+        // stop — none of the game-window handling below applies.
+        if self.debug_windows.owns(id) {
+            if matches!(event, WindowEvent::RedrawRequested) {
+                self.redraw_debug_window(id);
+            } else {
+                self.debug_windows.on_window_event(id, &event);
+            }
+            return;
+        }
         // Let egui consume the event first so menu clicks / hovers
         // don't leak into the game-side joypad path.
         let consumed_by_ui = if let (Some(ui), Some(win)) = (self.ui.as_mut(), self.window.as_ref())
@@ -508,6 +517,8 @@ impl ApplicationHandler for LunaApp {
         if let Some(win) = self.window.as_ref() {
             win.request_redraw();
         }
+        // Keep open debug windows refreshing their live register/memory views.
+        self.debug_windows.request_redraw_all();
     }
 }
 
@@ -531,45 +542,19 @@ impl LunaApp {
             let fb = self.framebuffer_out.read();
             pixels.frame_mut()[..len].copy_from_slice(&fb[..len]);
         }
-        // Build the debug-panel snapshot through luna-api (api-first), only
-        // while a panel is open. Copy the flags out first so the lock closure
-        // borrows none of `self`.
-        let (sc, ss, sm, mb, mo) = (
-            self.show_cpu_state,
-            self.show_sprites,
-            self.show_memory,
-            self.mem_bank,
-            self.mem_offset,
-        );
-        let debug = if sc || ss || sm {
-            self.emu
-                .lock()
-                .ok()
-                .and_then(|mut g| {
-                    g.as_mut().map(|em| crate::ui::DebugSnapshot {
-                        cpu: if sc { Some(em.state().cpu) } else { None },
-                        sprites: if ss { em.decode_sprites().ok() } else { None },
-                        memory: if sm {
-                            em.peek_memory(mb, mo, 256).ok().map(|b| (mb, mo, b))
-                        } else {
-                            None
-                        },
-                    })
-                })
-                .unwrap_or_default()
-        } else {
-            crate::ui::DebugSnapshot::default()
-        };
+        // Debug panels live in their own native windows now (rendered in
+        // `redraw_debug_window`), so the main window only needs the open/
+        // closed state to tick the Debug-menu checkmarks.
         let pending: Mutex<Vec<MenuAction>> = Mutex::new(Vec::new());
         let ui_state = UiState {
             paused: self.emu_shared.paused.load(Ordering::Acquire),
             rom_title: self.rom_title.clone(),
             show_input_config: self.show_input_config,
             key_bindings: &self.key_bindings,
-            show_cpu_state: sc,
-            show_sprites: ss,
-            show_memory: sm,
-            debug,
+            show_cpu_state: self.debug_windows.is_open(DebugPanel::Cpu),
+            show_spc700: self.debug_windows.is_open(DebugPanel::Spc700),
+            show_sprites: self.debug_windows.is_open(DebugPanel::Sprites),
+            show_memory: self.debug_windows.is_open(DebugPanel::Memory),
             pending_rebind: self.pending_rebind,
             pending_hotkey_rebind: self.pending_hotkey_rebind,
             screenshot_status: self.screenshot_status.clone(),
@@ -602,6 +587,50 @@ impl LunaApp {
         }
     }
 
+    /// Build the `luna-api` snapshot for a single debug panel (api-first).
+    /// Only the data that panel renders is fetched, so a CPU/SPC window is
+    /// a couple of cheap register reads, not a full `state()` clone.
+    fn build_panel_snapshot(&self, panel: DebugPanel) -> DebugSnapshot {
+        let (mb, mo) = (self.mem_bank, self.mem_offset);
+        self.emu
+            .lock()
+            .ok()
+            .and_then(|mut g| {
+                g.as_mut().map(|em| {
+                    let mut snap = DebugSnapshot::default();
+                    match panel {
+                        DebugPanel::Cpu => snap.cpu = em.cpu_state().ok(),
+                        DebugPanel::Spc700 => snap.spc700 = em.spc700_state().ok(),
+                        DebugPanel::Sprites => snap.sprites = em.decode_sprites().ok(),
+                        DebugPanel::Memory => {
+                            snap.memory = em.peek_memory(mb, mo, 256).ok().map(|b| (mb, mo, b));
+                        }
+                    }
+                    snap
+                })
+            })
+            .unwrap_or_default()
+    }
+
+    /// Repaint one debug window with fresh data and apply any memory-nav
+    /// actions its body emitted (page / bank buttons).
+    fn redraw_debug_window(&mut self, id: WindowId) {
+        let Some(panel) = self.debug_windows.panel_of(id) else {
+            return;
+        };
+        let snap = self.build_panel_snapshot(panel);
+        for action in self.debug_windows.render(id, &snap) {
+            match action {
+                MenuAction::MemPagePrev => self.mem_offset = self.mem_offset.wrapping_sub(256),
+                MenuAction::MemPageNext => self.mem_offset = self.mem_offset.wrapping_add(256),
+                MenuAction::MemBankToggle => {
+                    self.mem_bank = if self.mem_bank == 0x7E { 0x7F } else { 0x7E };
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn dispatch_menu_action(&mut self, action: MenuAction, event_loop: &ActiveEventLoop) {
         match action {
             MenuAction::OpenRom => self.open_rom_dialog(),
@@ -611,9 +640,10 @@ impl LunaApp {
             }
             MenuAction::PauseToggle => self.toggle_pause(),
             MenuAction::Reset => self.reset(),
-            MenuAction::ToggleCpuState => self.show_cpu_state = !self.show_cpu_state,
-            MenuAction::ToggleSprites => self.show_sprites = !self.show_sprites,
-            MenuAction::ToggleMemory => self.show_memory = !self.show_memory,
+            MenuAction::ToggleCpuState => self.debug_windows.toggle(event_loop, DebugPanel::Cpu),
+            MenuAction::ToggleSpc700 => self.debug_windows.toggle(event_loop, DebugPanel::Spc700),
+            MenuAction::ToggleSprites => self.debug_windows.toggle(event_loop, DebugPanel::Sprites),
+            MenuAction::ToggleMemory => self.debug_windows.toggle(event_loop, DebugPanel::Memory),
             MenuAction::MemPagePrev => self.mem_offset = self.mem_offset.wrapping_sub(256),
             MenuAction::MemPageNext => self.mem_offset = self.mem_offset.wrapping_add(256),
             MenuAction::MemBankToggle => {

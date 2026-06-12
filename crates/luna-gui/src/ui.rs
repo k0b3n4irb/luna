@@ -30,6 +30,7 @@ pub(crate) enum MenuAction {
     SaveBindings,
     // Debug panels (api-first: data comes from `luna_api::Emulator`).
     ToggleCpuState,
+    ToggleSpc700,
     ToggleSprites,
     ToggleMemory,
     MemPagePrev,
@@ -43,6 +44,7 @@ pub(crate) enum MenuAction {
 #[derive(Default)]
 pub(crate) struct DebugSnapshot {
     pub cpu: Option<luna_api::CpuState>,
+    pub spc700: Option<luna_api::Spc700State>,
     pub sprites: Option<Vec<luna_api::SpriteInfo>>,
     /// `(bank, offset, bytes)` for the hex viewer.
     pub memory: Option<(u8, u16, Vec<u8>)>,
@@ -57,9 +59,9 @@ pub(crate) struct UiState<'a> {
     pub key_bindings: &'a crate::input::KeyBindings,
     /// Which debug panels are open + their snapshotted data.
     pub show_cpu_state: bool,
+    pub show_spc700: bool,
     pub show_sprites: bool,
     pub show_memory: bool,
-    pub debug: DebugSnapshot,
     /// When `Some`, the input modal is waiting on the user to press a
     /// key to rebind the named SNES button.
     pub pending_rebind: Option<crate::input::SnesButton>,
@@ -127,11 +129,9 @@ impl UiOverlay {
             if state.show_input_config {
                 draw_input_config(ui.ctx(), state, &mut emit);
             }
-            // All enabled debug views render as a vertical collapsible list in
-            // one "Debug" window (no overlapping per-view windows).
-            if state.show_cpu_state || state.show_sprites || state.show_memory {
-                draw_debug_panel(ui.ctx(), state, &mut emit);
-            }
+            // Debug views live in their own native OS windows (see
+            // `crate::debug_window`), not in this overlay — so they can be
+            // dragged anywhere on the desktop, outside the game window.
         });
         self.winit_state
             .handle_platform_output(window, full_output.platform_output);
@@ -175,7 +175,7 @@ impl UiOverlay {
 }
 
 #[allow(deprecated)]
-fn install_dark_theme(ctx: &egui::Context) {
+pub(crate) fn install_dark_theme(ctx: &egui::Context) {
     use egui::{Color32, Stroke, Visuals, epaint::Shadow};
     let mut visuals = Visuals::dark();
     // Luna palette — quiet purple-blue accent on near-black surfaces.
@@ -306,8 +306,8 @@ fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<
 }
 
 /// Body of the CPU-state debug view (65c816 register file + decoded flags).
-fn cpu_state_body(ui: &mut egui::Ui, state: &UiState<'_>) {
-    let Some(c) = state.debug.cpu.as_ref() else {
+pub(crate) fn cpu_state_body(ui: &mut egui::Ui, snap: &DebugSnapshot) {
+    let Some(c) = snap.cpu.as_ref() else {
         ui.label("(no ROM loaded)");
         return;
     };
@@ -355,9 +355,62 @@ fn cpu_state_body(ui: &mut egui::Ui, state: &UiState<'_>) {
     }
 }
 
+/// Body of the SPC700 (audio CPU) debug view — register file + flags.
+pub(crate) fn spc700_body(ui: &mut egui::Ui, snap: &DebugSnapshot) {
+    let Some(c) = snap.spc700.as_ref() else {
+        ui.label("(no ROM loaded)");
+        return;
+    };
+    egui::Grid::new("spc_regs").num_columns(2).show(ui, |ui| {
+        let row = |ui: &mut egui::Ui, k: &str, v: String| {
+            ui.monospace(k);
+            ui.monospace(v);
+            ui.end_row();
+        };
+        row(ui, "A", format!("{:02X}", c.a));
+        row(ui, "X", format!("{:02X}", c.x));
+        row(ui, "Y", format!("{:02X}", c.y));
+        row(
+            ui,
+            "YA",
+            format!("{:04X}", (u16::from(c.y) << 8) | u16::from(c.a)),
+        );
+        row(ui, "SP", format!("01{:02X}", c.sp));
+        row(ui, "PC", format!("{:04X}", c.pc));
+    });
+    ui.separator();
+    let p = c.psw;
+    let f = |bit: u8, name: char| {
+        if p & bit != 0 {
+            name.to_ascii_uppercase()
+        } else {
+            name.to_ascii_lowercase()
+        }
+    };
+    // SPC700 PSW: N V P B H I Z C.
+    ui.monospace(format!(
+        "PSW={:02X}  {}{}{}{}{}{}{}{}",
+        p,
+        f(0x80, 'N'),
+        f(0x40, 'V'),
+        f(0x20, 'P'),
+        f(0x10, 'B'),
+        f(0x08, 'H'),
+        f(0x04, 'I'),
+        f(0x02, 'Z'),
+        f(0x01, 'C'),
+    ));
+    if c.stopped {
+        ui.colored_label(egui::Color32::RED, "STOPPED");
+    }
+    if c.sleeping {
+        ui.colored_label(egui::Color32::YELLOW, "SLEEPING");
+    }
+}
+
 /// Body of the sprite (OAM) debug view -- the 128 decoded sprites.
-fn sprites_body(ui: &mut egui::Ui, state: &UiState<'_>) {
-    let Some(sprites) = state.debug.sprites.as_ref() else {
+pub(crate) fn sprites_body(ui: &mut egui::Ui, snap: &DebugSnapshot) {
+    let Some(sprites) = snap.sprites.as_ref() else {
         ui.label("(no ROM loaded)");
         return;
     };
@@ -384,8 +437,8 @@ fn sprites_body(ui: &mut egui::Ui, state: &UiState<'_>) {
 /// Body of the memory hex-dump view. Returns the toolbar action (page / bank
 /// navigation) clicked this frame, if any, so the caller can emit it without
 /// the body needing a mutable `emit` borrow.
-fn memory_body(ui: &mut egui::Ui, state: &UiState<'_>) -> Option<MenuAction> {
-    let Some((bank, offset, bytes)) = state.debug.memory.as_ref() else {
+pub(crate) fn memory_body(ui: &mut egui::Ui, snap: &DebugSnapshot) -> Option<MenuAction> {
+    let Some((bank, offset, bytes)) = snap.memory.as_ref() else {
         ui.label("(no ROM loaded)");
         return None;
     };
@@ -423,74 +476,6 @@ fn memory_body(ui: &mut egui::Ui, state: &UiState<'_>) -> Option<MenuAction> {
         ui.monospace(format!("{bank:02X}:{addr:04X}  {hex:<48}{ascii}"));
     }
     action
-}
-
-/// A Debug-list section header: the title plus a right-aligned close button
-/// that sets `close` when clicked (the caller emits the matching Toggle).
-fn section_title(ui: &mut egui::Ui, title: &str, close: &mut bool) {
-    ui.strong(title);
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        if ui.small_button("\u{2715}").on_hover_text("Close").clicked() {
-            *close = true;
-        }
-    });
-}
-
-/// The unified Debug panel: every enabled view stacked as a vertical list of
-/// collapsible sections in one window, instead of separate floating windows.
-fn draw_debug_panel<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>, emit: &mut F) {
-    egui::Window::new("Debug")
-        .default_pos([24.0, 48.0])
-        .default_size([380.0, 520.0])
-        .show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                if state.show_cpu_state {
-                    let mut close = false;
-                    egui::collapsing_header::CollapsingState::load_with_default_open(
-                        ctx,
-                        ui.make_persistent_id("dbg-cpu"),
-                        true,
-                    )
-                    .show_header(ui, |ui| {
-                        section_title(ui, "CPU \u{2014} 65c816", &mut close);
-                    })
-                    .body(|ui| cpu_state_body(ui, state));
-                    if close {
-                        emit(MenuAction::ToggleCpuState);
-                    }
-                }
-                if state.show_sprites {
-                    let mut close = false;
-                    egui::collapsing_header::CollapsingState::load_with_default_open(
-                        ctx,
-                        ui.make_persistent_id("dbg-spr"),
-                        true,
-                    )
-                    .show_header(ui, |ui| section_title(ui, "Sprites (OAM)", &mut close))
-                    .body(|ui| sprites_body(ui, state));
-                    if close {
-                        emit(MenuAction::ToggleSprites);
-                    }
-                }
-                if state.show_memory {
-                    let mut close = false;
-                    let mut mem_action = None;
-                    egui::collapsing_header::CollapsingState::load_with_default_open(
-                        ctx,
-                        ui.make_persistent_id("dbg-mem"),
-                        true,
-                    )
-                    .show_header(ui, |ui| section_title(ui, "Memory (hex)", &mut close))
-                    .body(|ui| mem_action = memory_body(ui, state));
-                    if close {
-                        emit(MenuAction::ToggleMemory);
-                    }
-                    if let Some(a) = mem_action {
-                        emit(a);
-                    }
-                }
-            });
-        });
 }
 
 #[allow(deprecated)]
@@ -538,10 +523,17 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>,
                 });
                 ui.menu_button("Debug", |ui| {
                     if ui
-                        .selectable_label(state.show_cpu_state, "CPU state")
+                        .selectable_label(state.show_cpu_state, "CPU state (65c816)")
                         .clicked()
                     {
                         emit(MenuAction::ToggleCpuState);
+                        ui.close();
+                    }
+                    if ui
+                        .selectable_label(state.show_spc700, "SPC700 state (audio CPU)")
+                        .clicked()
+                    {
+                        emit(MenuAction::ToggleSpc700);
                         ui.close();
                     }
                     if ui

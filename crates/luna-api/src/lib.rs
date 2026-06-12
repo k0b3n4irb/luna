@@ -148,6 +148,28 @@ pub struct CpuState {
     pub waiting: bool,
 }
 
+/// SPC700 (audio CPU) register snapshot — the APU-core analogue of
+/// [`CpuState`], for a debugger panel.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct Spc700State {
+    /// Accumulator.
+    pub a: u8,
+    /// X index register.
+    pub x: u8,
+    /// Y index register.
+    pub y: u8,
+    /// Stack pointer low byte (stack lives at `$0100 + sp`).
+    pub sp: u8,
+    /// Program counter.
+    pub pc: u16,
+    /// Program status word (N V P B H I Z C).
+    pub psw: u8,
+    /// `true` after `STOP` or an unimplemented opcode.
+    pub stopped: bool,
+    /// `true` after `SLEEP`, until an interrupt wakes the core.
+    pub sleeping: bool,
+}
+
 /// PPU register snapshot + memory occupancy stats.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct PpuState {
@@ -850,6 +872,48 @@ impl Emulator {
             }
         }
         Ok(out)
+    }
+
+    /// Cheap 65C816 register snapshot for a debugger panel — reads the
+    /// main CPU directly, without building (and cloning) a full
+    /// [`Emulator::state`] every frame. Same data as
+    /// [`EmulatorState::cpu`].
+    pub fn cpu_state(&self) -> Result<CpuState, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let c = &snes.cpu;
+        Ok(CpuState {
+            a: c.a,
+            x: c.x,
+            y: c.y,
+            sp: c.sp,
+            pc: c.pc,
+            pb: c.pb,
+            db: c.db,
+            dp: c.dp,
+            p: c.p.bits(),
+            e: c.e,
+            stopped: c.stopped,
+            waiting: c.waiting,
+        })
+    }
+
+    /// Cheap SPC700 register snapshot for a debugger panel — reads the
+    /// audio CPU directly, without building a full [`Emulator::state`]
+    /// (which clones the whole DSP register file + BRR excerpts). The
+    /// APU-core analogue of reading [`EmulatorState::cpu`].
+    pub fn spc700_state(&self) -> Result<Spc700State, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let c = &snes.apu_real.cpu;
+        Ok(Spc700State {
+            a: c.a,
+            x: c.x,
+            y: c.y,
+            sp: c.sp,
+            pc: c.pc,
+            psw: c.psw.0,
+            stopped: c.stopped,
+            sleeping: c.sleeping,
+        })
     }
 
     /// The emulated PPU frame counter — cheap, for a GUI's frame-boundary

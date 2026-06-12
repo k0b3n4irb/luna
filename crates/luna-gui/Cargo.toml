@@ -26,6 +26,8 @@ rfd        = { workspace = true }
 egui       = { workspace = true }
 egui-wgpu  = { workspace = true }
 egui-winit = { workspace = true }
+# Blocks on the wgpu adapter/device futures when opening a debug window.
+pollster   = "0.4"
 cpal       = { workspace = true }
 ringbuf    = { workspace = true }
 triple_buffer = "8"
