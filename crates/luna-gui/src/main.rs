@@ -619,7 +619,8 @@ impl LunaApp {
             return;
         };
         let snap = self.build_panel_snapshot(panel);
-        for action in self.debug_windows.render(id, &snap) {
+        let (actions, close) = self.debug_windows.render(id, &snap);
+        for action in actions {
             match action {
                 MenuAction::MemPagePrev => self.mem_offset = self.mem_offset.wrapping_sub(256),
                 MenuAction::MemPageNext => self.mem_offset = self.mem_offset.wrapping_add(256),
@@ -628,6 +629,9 @@ impl LunaApp {
                 }
                 _ => {}
             }
+        }
+        if close {
+            self.debug_windows.close(id);
         }
     }
 

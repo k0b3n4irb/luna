@@ -19,9 +19,15 @@ use egui_wgpu::wgpu;
 use winit::dpi::LogicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
-use winit::window::{Window, WindowAttributes, WindowId};
+use winit::window::{ResizeDirection, Window, WindowAttributes, WindowId};
 
 use crate::ui::{self, DebugSnapshot, MenuAction};
+
+/// Height (logical px) of the custom egui title bar drawn at the top of
+/// each borderless debug window.
+const TITLE_BAR_H: f32 = 26.0;
+/// Window height (logical px) when collapsed to just the title bar.
+const COLLAPSED_H: f32 = TITLE_BAR_H;
 
 /// Which debug view a window shows.
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
@@ -45,8 +51,8 @@ impl DebugPanel {
     /// Default window size (logical px) — sized to each panel's content.
     const fn default_size(self) -> (u32, u32) {
         match self {
-            Self::Cpu => (240, 300),
-            Self::Spc700 => (240, 280),
+            Self::Cpu => (250, 340),
+            Self::Spc700 => (250, 320),
             Self::Sprites => (340, 460),
             Self::Memory => (530, 380),
         }
@@ -70,6 +76,10 @@ struct DebugWin {
     egui_state: egui_winit::State,
     renderer: egui_wgpu::Renderer,
     panel: DebugPanel,
+    /// Folded to just the title bar (the title-bar triangle toggles it).
+    collapsed: bool,
+    /// Logical inner height to restore when un-collapsing.
+    expanded_h: f32,
 }
 
 /// Owns every open debug window plus their shared wgpu device.
@@ -127,7 +137,14 @@ impl DebugWindows {
         let (w, h) = panel.default_size();
         let attrs = WindowAttributes::default()
             .with_title(format!("Luna — {}", panel.title()))
-            .with_inner_size(LogicalSize::new(w, h));
+            // Borderless: the egui chrome (title bar + triangle + resize
+            // grip) is drawn by us, ness-style. Dragging / resizing is
+            // forwarded to the window manager from the egui widgets.
+            .with_decorations(false)
+            .with_inner_size(LogicalSize::new(w, h))
+            // Allow folding down to just the title bar (some WMs otherwise
+            // clamp a borderless window to a larger minimum).
+            .with_min_inner_size(LogicalSize::new(160.0_f32, TITLE_BAR_H));
         let window = match event_loop.create_window(attrs) {
             Ok(win) => Arc::new(win),
             Err(e) => {
@@ -207,6 +224,8 @@ impl DebugWindows {
                 egui_state,
                 renderer,
                 panel,
+                collapsed: false,
+                expanded_h: h as f32,
             },
         );
         self.by_panel.insert(panel, id);
@@ -237,26 +256,47 @@ impl DebugWindows {
         }
     }
 
-    /// Repaint one debug window with the freshest snapshot. Returns any
-    /// menu actions its body emitted (memory page / bank navigation).
-    pub(crate) fn render(&mut self, id: WindowId, snap: &DebugSnapshot) -> Vec<MenuAction> {
+    /// Repaint one debug window with the freshest snapshot. Returns the
+    /// menu actions its body emitted (memory page / bank navigation) and
+    /// whether the title-bar ✕ asked to close the window.
+    pub(crate) fn render(&mut self, id: WindowId, snap: &DebugSnapshot) -> (Vec<MenuAction>, bool) {
         let mut actions: Vec<MenuAction> = Vec::new();
         // Disjoint field borrows: `gpu` (immutable) and `wins` (mutable).
         let Some(gpu) = self.gpu.as_ref() else {
-            return actions;
+            return (actions, false);
         };
         let Some(win) = self.wins.get_mut(&id) else {
-            return actions;
+            return (actions, false);
         };
 
+        // Reconcile the surface to the window's current size BEFORE acquiring
+        // a frame (no `SurfaceTexture` is alive here, so `configure` is safe —
+        // configuring while one is alive panics). This also covers compositors
+        // that apply `request_inner_size` synchronously and emit no `Resized`
+        // event (the collapse fold), where the surface would otherwise stay at
+        // the old size.
+        let phys = win.window.inner_size();
+        let (pw, ph) = (phys.width.max(1), phys.height.max(1));
+        if (pw, ph) != (win.config.width, win.config.height) {
+            win.config.width = pw;
+            win.config.height = ph;
+            win.surface.configure(&gpu.device, &win.config);
+        }
+
+        // Acquire the swapchain image, reconfiguring and retrying once if the
+        // surface went stale so we never present a blank frame.
         let frame = match win.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
             | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 win.surface.configure(&gpu.device, &win.config);
-                return actions;
+                match win.surface.get_current_texture() {
+                    wgpu::CurrentSurfaceTexture::Success(f)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+                    _ => return (actions, false),
+                }
             }
-            _ => return actions,
+            _ => return (actions, false),
         };
         let view = frame
             .texture
@@ -264,21 +304,157 @@ impl DebugWindows {
 
         let raw_input = win.egui_state.take_egui_input(&win.window);
         let panel = win.panel;
+        let collapsed = win.collapsed;
+        let window = win.window.clone();
+        let mut want_close = false;
+        let mut want_toggle = false;
         let full_output = win.egui_ctx.run_ui(raw_input, |ui| {
-            egui::CentralPanel::default().show_inside(ui, |ui| match panel {
-                DebugPanel::Cpu => ui::cpu_state_body(ui, snap),
-                DebugPanel::Spc700 => ui::spc700_body(ui, snap),
-                DebugPanel::Sprites => {
-                    egui::ScrollArea::vertical().show(ui, |ui| ui::sprites_body(ui, snap));
-                }
-                DebugPanel::Memory => {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        if let Some(a) = ui::memory_body(ui, snap) {
-                            actions.push(a);
+            // One custom frame filling the borderless window (egui's
+            // `custom_window_frame` example pattern).
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgb(20, 20, 28))
+                .show(ui, |ui| {
+                    let app = ui.max_rect();
+                    ui.expand_to_include_rect(app);
+
+                    // Title bar. When collapsed it fills the whole window so
+                    // there is never a blank strip (some WMs clamp the
+                    // collapsed height up); the title content stays in the
+                    // top `TITLE_BAR_H` strip either way.
+                    let bar_fill_h = if collapsed { app.height() } else { TITLE_BAR_H };
+                    ui.painter().rect_filled(
+                        egui::Rect::from_min_size(app.min, egui::vec2(app.width(), bar_fill_h)),
+                        0.0,
+                        egui::Color32::from_rgb(30, 30, 42),
+                    );
+                    let bar =
+                        egui::Rect::from_min_size(app.min, egui::vec2(app.width(), TITLE_BAR_H));
+
+                    // Collapse triangle (left): ▶ when collapsed, ▼ otherwise.
+                    let tri =
+                        egui::Rect::from_min_size(bar.min, egui::vec2(TITLE_BAR_H, TITLE_BAR_H));
+                    let tri_resp = ui.interact(tri, ui.id().with("collapse"), egui::Sense::click());
+                    let tri_col = if tri_resp.hovered() {
+                        egui::Color32::from_rgb(150, 120, 255)
+                    } else {
+                        egui::Color32::from_rgb(205, 205, 220)
+                    };
+                    let c = tri.center();
+                    let pts = if collapsed {
+                        vec![
+                            c + egui::vec2(-3.0, -5.0),
+                            c + egui::vec2(4.0, 0.0),
+                            c + egui::vec2(-3.0, 5.0),
+                        ]
+                    } else {
+                        vec![
+                            c + egui::vec2(-5.0, -3.0),
+                            c + egui::vec2(5.0, -3.0),
+                            c + egui::vec2(0.0, 4.0),
+                        ]
+                    };
+                    ui.painter().add(egui::Shape::convex_polygon(
+                        pts,
+                        tri_col,
+                        egui::Stroke::NONE,
+                    ));
+                    if tri_resp.clicked() {
+                        want_toggle = true;
+                    }
+
+                    // Close ✕ (right).
+                    let close = egui::Rect::from_min_size(
+                        egui::pos2(bar.max.x - TITLE_BAR_H, bar.min.y),
+                        egui::vec2(TITLE_BAR_H, TITLE_BAR_H),
+                    );
+                    let close_resp =
+                        ui.interact(close, ui.id().with("close"), egui::Sense::click());
+                    let close_col = if close_resp.hovered() {
+                        egui::Color32::from_rgb(240, 120, 120)
+                    } else {
+                        egui::Color32::from_rgb(205, 205, 220)
+                    };
+                    let cc = close.center();
+                    let r = 4.0;
+                    let s = egui::Stroke::new(1.6, close_col);
+                    ui.painter()
+                        .line_segment([cc + egui::vec2(-r, -r), cc + egui::vec2(r, r)], s);
+                    ui.painter()
+                        .line_segment([cc + egui::vec2(r, -r), cc + egui::vec2(-r, r)], s);
+                    if close_resp.clicked() {
+                        want_close = true;
+                    }
+
+                    // Title text.
+                    ui.painter().text(
+                        egui::pos2(tri.max.x + 2.0, bar.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        panel.title(),
+                        egui::FontId::proportional(14.0),
+                        egui::Color32::from_rgb(228, 228, 238),
+                    );
+
+                    // Drag the OS window via the bar (between the buttons).
+                    let drag = egui::Rect::from_min_max(
+                        egui::pos2(tri.max.x, bar.min.y),
+                        egui::pos2(close.min.x, bar.max.y),
+                    );
+                    let drag_resp =
+                        ui.interact(drag, ui.id().with("drag"), egui::Sense::click_and_drag());
+                    if drag_resp.drag_started() {
+                        let _ = window.drag_window();
+                    }
+
+                    if !collapsed {
+                        // Body in its own child UI under the title bar, kept
+                        // clear of the bottom-right resize grip.
+                        let content = egui::Rect::from_min_max(
+                            egui::pos2(app.min.x + 8.0, bar.max.y + 6.0),
+                            egui::pos2(app.max.x - 8.0, app.max.y - 18.0),
+                        );
+                        let mut body = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(content)
+                                .layout(egui::Layout::top_down(egui::Align::Min)),
+                        );
+                        egui::ScrollArea::vertical().show(&mut body, |ui| match panel {
+                            DebugPanel::Cpu => ui::cpu_state_body(ui, snap),
+                            DebugPanel::Spc700 => ui::spc700_body(ui, snap),
+                            DebugPanel::Sprites => ui::sprites_body(ui, snap),
+                            DebugPanel::Memory => {
+                                if let Some(a) = ui::memory_body(ui, snap) {
+                                    actions.push(a);
+                                }
+                            }
+                        });
+
+                        // Blue resize grip (bottom-right), ness-style.
+                        let g = 16.0;
+                        let grip = egui::Rect::from_min_max(
+                            egui::pos2(app.max.x - g, app.max.y - g),
+                            app.max,
+                        );
+                        let grip_resp =
+                            ui.interact(grip, ui.id().with("resize"), egui::Sense::drag());
+                        let grip_col = if grip_resp.hovered() || grip_resp.dragged() {
+                            egui::Color32::from_rgb(96, 140, 225)
+                        } else {
+                            egui::Color32::from_rgb(56, 86, 150)
+                        };
+                        ui.painter().add(egui::Shape::convex_polygon(
+                            vec![
+                                app.max,
+                                egui::pos2(app.max.x, app.max.y - g),
+                                egui::pos2(app.max.x - g, app.max.y),
+                            ],
+                            grip_col,
+                            egui::Stroke::NONE,
+                        ));
+                        if grip_resp.drag_started() {
+                            let _ = window.drag_resize_window(ResizeDirection::SouthEast);
                         }
-                    });
-                }
-            });
+                    }
+                });
         });
         win.egui_state
             .handle_platform_output(&win.window, full_output.platform_output);
@@ -336,6 +512,32 @@ impl DebugWindows {
         win.window.pre_present_notify();
         frame.present();
 
-        actions
+        // Fold / unfold by resizing the OS window — done AFTER `present()`, so
+        // the just-acquired `SurfaceTexture` is already consumed and we never
+        // reconfigure a live surface (that panics and took the whole app down).
+        // The next render reconciles the surface to the new size at its top.
+        if want_toggle {
+            win.collapsed = !win.collapsed;
+            let scale = win.window.scale_factor() as f32;
+            let logical_w = win.config.width as f32 / scale;
+            let target_h = if win.collapsed {
+                win.expanded_h = win.config.height as f32 / scale;
+                COLLAPSED_H
+            } else {
+                win.expanded_h
+            };
+            let _ = win
+                .window
+                .request_inner_size(LogicalSize::new(logical_w, target_h));
+        }
+
+        (actions, want_close)
+    }
+
+    /// Close (and drop) the debug window for `id`, if present.
+    pub(crate) fn close(&mut self, id: WindowId) {
+        if let Some(win) = self.wins.remove(&id) {
+            self.by_panel.remove(&win.panel);
+        }
     }
 }
