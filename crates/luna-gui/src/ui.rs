@@ -305,48 +305,99 @@ fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<
         });
 }
 
+/// A register value rendered as a blue framed cell — the ness debugger's
+/// signature look for live values.
+fn value_chip(ui: &mut egui::Ui, text: &str) {
+    egui::Frame::new()
+        .fill(egui::Color32::from_rgb(38, 60, 108))
+        .stroke(egui::Stroke::new(
+            1.5,
+            egui::Color32::from_rgb(96, 132, 205),
+        ))
+        .inner_margin(egui::Margin::symmetric(6, 2))
+        .corner_radius(egui::CornerRadius::same(3))
+        .show(ui, |ui| {
+            ui.monospace(egui::RichText::new(text).color(egui::Color32::from_rgb(226, 232, 248)));
+        });
+}
+
+/// `label:` followed by one or more blue value chips, as one grid row.
+fn reg_row(ui: &mut egui::Ui, label: &str, values: &[String]) {
+    ui.monospace(label);
+    ui.horizontal(|ui| {
+        for v in values {
+            value_chip(ui, v);
+        }
+    });
+    ui.end_row();
+}
+
+/// Processor-status flags as a row of blue 0/1 chips with the flag
+/// letter centred beneath each chip (ness style). Each flag is a
+/// fixed-width, centre-aligned mini-column so the chip and its letter
+/// share an axis. `bits` is MSB→LSB.
+fn psw_flags(ui: &mut egui::Ui, p: u8, bits: &[(u8, char)]) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for &(mask, name) in bits {
+            ui.allocate_ui_with_layout(
+                egui::vec2(22.0, 42.0),
+                egui::Layout::top_down(egui::Align::Center),
+                |ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    value_chip(ui, if p & mask != 0 { "1" } else { "0" });
+                    ui.monospace(name.to_string());
+                },
+            );
+        }
+    });
+}
+
 /// Body of the CPU-state debug view (65c816 register file + decoded flags).
 pub(crate) fn cpu_state_body(ui: &mut egui::Ui, snap: &DebugSnapshot) {
     let Some(c) = snap.cpu.as_ref() else {
         ui.label("(no ROM loaded)");
         return;
     };
-    egui::Grid::new("cpu_regs").num_columns(2).show(ui, |ui| {
-        let row = |ui: &mut egui::Ui, k: &str, v: String| {
-            ui.monospace(k);
-            ui.monospace(v);
-            ui.end_row();
-        };
-        row(ui, "A", format!("{:04X}", c.a));
-        row(ui, "X", format!("{:04X}", c.x));
-        row(ui, "Y", format!("{:04X}", c.y));
-        row(ui, "SP", format!("{:04X}", c.sp));
-        row(ui, "DP", format!("{:04X}", c.dp));
-        row(ui, "PB:PC", format!("{:02X}:{:04X}", c.pb, c.pc));
-        row(ui, "DB", format!("{:02X}", c.db));
+    egui::Grid::new("cpu_regs")
+        .num_columns(2)
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| {
+            reg_row(ui, "A", &[format!("{:04X}", c.a)]);
+            reg_row(ui, "X", &[format!("{:04X}", c.x)]);
+            reg_row(ui, "Y", &[format!("{:04X}", c.y)]);
+            reg_row(ui, "SP", &[format!("{:04X}", c.sp)]);
+            reg_row(ui, "DP", &[format!("{:04X}", c.dp)]);
+            reg_row(
+                ui,
+                "PB:PC",
+                &[format!("{:02X}", c.pb), format!("{:04X}", c.pc)],
+            );
+            reg_row(ui, "DB", &[format!("{:02X}", c.db)]);
+        });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.monospace("P");
+        value_chip(ui, &format!("{:02X}", c.p));
+        ui.add_space(8.0);
+        ui.monospace("E");
+        value_chip(ui, &format!("{}", u8::from(c.e)));
     });
-    ui.separator();
-    let p = c.p;
-    let f = |bit: u8, name: char| {
-        if p & bit != 0 {
-            name.to_ascii_uppercase()
-        } else {
-            name.to_ascii_lowercase()
-        }
-    };
-    ui.monospace(format!(
-        "P={:02X}  {}{}{}{}{}{}{}{}  E={}",
-        p,
-        f(0x80, 'N'),
-        f(0x40, 'V'),
-        f(0x20, 'M'),
-        f(0x10, 'X'),
-        f(0x08, 'D'),
-        f(0x04, 'I'),
-        f(0x02, 'Z'),
-        f(0x01, 'C'),
-        u8::from(c.e),
-    ));
+    ui.add_space(4.0);
+    psw_flags(
+        ui,
+        c.p,
+        &[
+            (0x80, 'N'),
+            (0x40, 'V'),
+            (0x20, 'M'),
+            (0x10, 'X'),
+            (0x08, 'D'),
+            (0x04, 'I'),
+            (0x02, 'Z'),
+            (0x01, 'C'),
+        ],
+    );
     if c.stopped {
         ui.colored_label(egui::Color32::RED, "STOPPED");
     }
@@ -361,45 +412,42 @@ pub(crate) fn spc700_body(ui: &mut egui::Ui, snap: &DebugSnapshot) {
         ui.label("(no ROM loaded)");
         return;
     };
-    egui::Grid::new("spc_regs").num_columns(2).show(ui, |ui| {
-        let row = |ui: &mut egui::Ui, k: &str, v: String| {
-            ui.monospace(k);
-            ui.monospace(v);
-            ui.end_row();
-        };
-        row(ui, "A", format!("{:02X}", c.a));
-        row(ui, "X", format!("{:02X}", c.x));
-        row(ui, "Y", format!("{:02X}", c.y));
-        row(
-            ui,
-            "YA",
-            format!("{:04X}", (u16::from(c.y) << 8) | u16::from(c.a)),
-        );
-        row(ui, "SP", format!("01{:02X}", c.sp));
-        row(ui, "PC", format!("{:04X}", c.pc));
+    egui::Grid::new("spc_regs")
+        .num_columns(2)
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| {
+            reg_row(ui, "A", &[format!("{:02X}", c.a)]);
+            reg_row(ui, "X", &[format!("{:02X}", c.x)]);
+            reg_row(ui, "Y", &[format!("{:02X}", c.y)]);
+            reg_row(
+                ui,
+                "YA",
+                &[format!("{:04X}", (u16::from(c.y) << 8) | u16::from(c.a))],
+            );
+            reg_row(ui, "SP", &[format!("01{:02X}", c.sp)]);
+            reg_row(ui, "PC", &[format!("{:04X}", c.pc)]);
+        });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.monospace("PSW");
+        value_chip(ui, &format!("{:02X}", c.psw));
     });
-    ui.separator();
-    let p = c.psw;
-    let f = |bit: u8, name: char| {
-        if p & bit != 0 {
-            name.to_ascii_uppercase()
-        } else {
-            name.to_ascii_lowercase()
-        }
-    };
+    ui.add_space(4.0);
     // SPC700 PSW: N V P B H I Z C.
-    ui.monospace(format!(
-        "PSW={:02X}  {}{}{}{}{}{}{}{}",
-        p,
-        f(0x80, 'N'),
-        f(0x40, 'V'),
-        f(0x20, 'P'),
-        f(0x10, 'B'),
-        f(0x08, 'H'),
-        f(0x04, 'I'),
-        f(0x02, 'Z'),
-        f(0x01, 'C'),
-    ));
+    psw_flags(
+        ui,
+        c.psw,
+        &[
+            (0x80, 'N'),
+            (0x40, 'V'),
+            (0x20, 'P'),
+            (0x10, 'B'),
+            (0x08, 'H'),
+            (0x04, 'I'),
+            (0x02, 'Z'),
+            (0x01, 'C'),
+        ],
+    );
     if c.stopped {
         ui.colored_label(egui::Color32::RED, "STOPPED");
     }
