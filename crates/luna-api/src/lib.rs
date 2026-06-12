@@ -173,8 +173,8 @@ pub struct Spc700State {
 /// One disassembled instruction line, for a disassembly debug panel.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct DisasmLine {
-    /// Address of the instruction.
-    pub addr: u16,
+    /// Address of the instruction (24-bit for the CPU bus; ≤`0xFFFF` for ARAM).
+    pub addr: u32,
     /// The raw instruction bytes (1..=3).
     pub bytes: Vec<u8>,
     /// Canonical mnemonic + operands, e.g. `"MOV A, #$12"`.
@@ -946,12 +946,83 @@ impl Emulator {
                 .map(|i| read(addr.wrapping_add(i)))
                 .collect();
             out.push(DisasmLine {
-                addr,
+                addr: u32::from(addr),
                 bytes,
                 text: insn.text,
                 is_pc: addr == pc,
             });
             addr = addr.wrapping_add(u16::from(insn.length));
+        }
+        Ok(out)
+    }
+
+    /// Disassemble `count` 65C816 instructions starting at the 24-bit address
+    /// `start`, with effective accumulator/index widths `m8`/`x8`. Bytes are
+    /// read side-effect-free through `peek_memory`; the line at the live
+    /// `PB:PC` is flagged `is_pc`. Tracks `REP`/`SEP` forward so immediate
+    /// widths stay correct across a width change inside the window. For a
+    /// CPU disassembly panel.
+    pub fn disassemble_cpu(
+        &mut self,
+        start: u32,
+        count: u16,
+        m8: bool,
+        x8: bool,
+    ) -> Result<Vec<DisasmLine>, ApiError> {
+        let pc_full = {
+            let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+            (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc)
+        };
+        let bank = (start >> 16) as u8;
+        let start_off = start as u16;
+        // One side-effect-free peek of the whole window (instructions are
+        // ≤4 bytes, so over-read a little to cover the last one).
+        let span = u16::try_from(usize::from(count) * 4 + 3).unwrap_or(u16::MAX);
+        let buf = self.peek_memory(bank, start_off, span)?;
+        let read = |o: u16| {
+            buf.get(usize::from(o.wrapping_sub(start_off)))
+                .copied()
+                .unwrap_or(0)
+        };
+
+        let (mut m8, mut x8) = (m8, x8);
+        let mut off = start_off;
+        let mut out = Vec::with_capacity(usize::from(count));
+        for _ in 0..count {
+            let insn = luna_cpu_65c816::disassemble(read, off, m8, x8);
+            let bytes = (0..u16::from(insn.length))
+                .map(|i| read(off.wrapping_add(i)))
+                .collect();
+            let addr_full = (u32::from(bank) << 16) | u32::from(off);
+            out.push(DisasmLine {
+                addr: addr_full,
+                bytes,
+                text: insn.text,
+                is_pc: addr_full == pc_full,
+            });
+            // Track REP/SEP so later lines use the right immediate widths.
+            match read(off) {
+                0xC2 => {
+                    let v = read(off.wrapping_add(1));
+                    if v & 0x20 != 0 {
+                        m8 = false;
+                    }
+                    if v & 0x10 != 0 {
+                        x8 = false;
+                    }
+                }
+                0xE2 => {
+                    let v = read(off.wrapping_add(1));
+                    if v & 0x20 != 0 {
+                        m8 = true;
+                    }
+                    if v & 0x10 != 0 {
+                        x8 = true;
+                    }
+                }
+                _ => {}
+            }
+            off = off.wrapping_add(u16::from(insn.length));
         }
         Ok(out)
     }

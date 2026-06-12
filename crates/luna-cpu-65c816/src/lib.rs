@@ -14,8 +14,10 @@
 
 pub mod addressing;
 pub mod cpu;
+pub mod disasm;
 pub mod flags;
 pub mod opcodes;
 
 pub use cpu::Cpu;
+pub use disasm::{Instruction, disassemble};
 pub use flags::StatusFlags;
