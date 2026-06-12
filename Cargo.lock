@@ -1848,6 +1848,7 @@ dependencies = [
  "luna-apu",
  "luna-cartridge",
  "luna-core",
+ "luna-cpu-spc700",
  "luna-ppu",
  "schemars",
  "serde",

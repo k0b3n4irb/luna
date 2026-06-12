@@ -33,7 +33,22 @@ pub(crate) enum MenuAction {
     ToggleCpuMemory,
     ToggleSpc700,
     ToggleSpc700Memory,
+    ToggleSpc700Disasm,
     ToggleSprites,
+}
+
+/// A navigation request a debug panel's toolbar emits this frame, applied
+/// by `LunaApp` to the panel's cursor state.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum PanelNav {
+    /// Move a memory viewer's address cursor by a signed byte delta.
+    MemAddr(i64),
+    /// Toggle the SPC700 disassembly "follow PC" mode.
+    DisasmFollow,
+    /// Move the (frozen) disassembly start address by a signed byte delta.
+    DisasmMove(i64),
+    /// Change the disassembly line count by a signed delta.
+    DisasmLines(i32),
 }
 
 /// Per-frame snapshot of `luna-api` introspection, built by `LunaApp` only
@@ -48,6 +63,12 @@ pub(crate) struct DebugSnapshot {
     pub cpu_memory: Option<(u32, Vec<u8>)>,
     /// `(addr16, bytes)` — SPC700 ARAM hex viewer.
     pub spc_memory: Option<(u16, Vec<u8>)>,
+    /// Live SPC700 disassembly lines (from the PC, or a frozen address).
+    pub spc_disasm: Option<Vec<luna_api::DisasmLine>>,
+    /// Whether the disassembly is following the live PC.
+    pub spc_disasm_follow: bool,
+    /// The disassembly line count (for the toolbar).
+    pub spc_disasm_lines: u16,
 }
 
 /// State the egui overlay reads to drive its widgets — passed in by
@@ -62,6 +83,7 @@ pub(crate) struct UiState<'a> {
     pub show_cpu_memory: bool,
     pub show_spc700: bool,
     pub show_spc700_memory: bool,
+    pub show_spc700_disasm: bool,
     pub show_sprites: bool,
     /// When `Some`, the input modal is waiting on the user to press a
     /// key to rebind the named SNES button.
@@ -539,10 +561,9 @@ fn mem_hex_grid(ui: &mut egui::Ui, start: u32, bytes: &[u8], addr_digits: usize)
 }
 
 /// Bottom toolbar for a memory view: the current address as a blue chip
-/// plus ±$100 / ±$1000 nav buttons. Returns the signed byte delta to apply
-/// to the panel's cursor, if a button was clicked.
-fn mem_nav(ui: &mut egui::Ui, start: u32, addr_digits: usize) -> Option<i64> {
-    let mut delta = None;
+/// plus ±$100 / ±$1000 nav buttons. Returns the nav request if clicked.
+fn mem_nav(ui: &mut egui::Ui, start: u32, addr_digits: usize) -> Option<PanelNav> {
+    let mut nav = None;
     ui.separator();
     ui.horizontal(|ui| {
         value_chip(ui, &format!("{start:0addr_digits$X}"));
@@ -552,32 +573,32 @@ fn mem_nav(ui: &mut egui::Ui, start: u32, addr_digits: usize) -> Option<i64> {
             .on_hover_text("\u{2212}$1000")
             .clicked()
         {
-            delta = Some(-0x1000);
+            nav = Some(PanelNav::MemAddr(-0x1000));
         }
         if ui
             .button("\u{25c0}")
             .on_hover_text("\u{2212}$100")
             .clicked()
         {
-            delta = Some(-0x100);
+            nav = Some(PanelNav::MemAddr(-0x100));
         }
         if ui.button("\u{25b6}").on_hover_text("+$100").clicked() {
-            delta = Some(0x100);
+            nav = Some(PanelNav::MemAddr(0x100));
         }
         if ui
             .button("\u{25b6}\u{25b6}")
             .on_hover_text("+$1000")
             .clicked()
         {
-            delta = Some(0x1000);
+            nav = Some(PanelNav::MemAddr(0x1000));
         }
     });
-    delta
+    nav
 }
 
 /// Body of the CPU Memory view — 256 bytes of the 24-bit CPU bus at the
-/// current address. Returns the nav delta from the toolbar, if any.
-pub(crate) fn cpu_memory_body(ui: &mut egui::Ui, snap: &DebugSnapshot) -> Option<i64> {
+/// current address. Returns the nav request from the toolbar, if any.
+pub(crate) fn cpu_memory_body(ui: &mut egui::Ui, snap: &DebugSnapshot) -> Option<PanelNav> {
     let Some((addr, bytes)) = snap.cpu_memory.as_ref() else {
         ui.label("(no ROM loaded)");
         return None;
@@ -587,13 +608,92 @@ pub(crate) fn cpu_memory_body(ui: &mut egui::Ui, snap: &DebugSnapshot) -> Option
 }
 
 /// Body of the SPC700 Memory view — 256 bytes of the flat 64 KiB ARAM.
-pub(crate) fn spc700_memory_body(ui: &mut egui::Ui, snap: &DebugSnapshot) -> Option<i64> {
+pub(crate) fn spc700_memory_body(ui: &mut egui::Ui, snap: &DebugSnapshot) -> Option<PanelNav> {
     let Some((addr, bytes)) = snap.spc_memory.as_ref() else {
         ui.label("(no ROM loaded)");
         return None;
     };
     mem_hex_grid(ui, u32::from(*addr), bytes, 4);
     mem_nav(ui, u32::from(*addr), 4)
+}
+
+/// Body of the SPC700 disassembly view — a live listing from the current
+/// PC (`ADDR: BYTES   MNEMONIC`), the PC line given the blue cursor
+/// background. Read-only / follow-execution.
+pub(crate) fn spc700_disasm_body(ui: &mut egui::Ui, snap: &DebugSnapshot) -> Option<PanelNav> {
+    use egui::text::{LayoutJob, TextFormat};
+
+    let Some(lines) = snap.spc_disasm.as_ref() else {
+        ui.label("(no ROM loaded)");
+        return None;
+    };
+    let start = lines.first().map_or(0, |l| l.addr);
+    let mut nav = None;
+
+    // Toolbar: follow-PC toggle, start address, scroll, line count.
+    ui.horizontal(|ui| {
+        if ui
+            .selectable_label(snap.spc_disasm_follow, "Follow PC")
+            .on_hover_text("Track the live SPC700 PC")
+            .clicked()
+        {
+            nav = Some(PanelNav::DisasmFollow);
+        }
+        value_chip(ui, &format!("{start:04X}"));
+        if ui.button("\u{25c0}\u{25c0}").clicked() {
+            nav = Some(PanelNav::DisasmMove(-0x20));
+        }
+        if ui.button("\u{25c0}").clicked() {
+            nav = Some(PanelNav::DisasmMove(-0x08));
+        }
+        if ui.button("\u{25b6}").clicked() {
+            nav = Some(PanelNav::DisasmMove(0x08));
+        }
+        if ui.button("\u{25b6}\u{25b6}").clicked() {
+            nav = Some(PanelNav::DisasmMove(0x20));
+        }
+        ui.add_space(6.0);
+        ui.label(format!("Lines {}", snap.spc_disasm_lines));
+        if ui.small_button("\u{2212}").clicked() {
+            nav = Some(PanelNav::DisasmLines(-8));
+        }
+        if ui.small_button("+").clicked() {
+            nav = Some(PanelNav::DisasmLines(8));
+        }
+    });
+    ui.separator();
+    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+
+    let mono = egui::FontId::monospace(13.0);
+    let c_addr = egui::Color32::from_rgb(118, 128, 150);
+    let c_bytes = egui::Color32::from_rgb(120, 124, 140);
+    let c_text = egui::Color32::from_rgb(222, 226, 238);
+    let cursor_bg = egui::Color32::from_rgb(38, 60, 108);
+
+    for line in lines {
+        let bg = if line.is_pc {
+            cursor_bg
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        let fmt = |color| TextFormat {
+            font_id: mono.clone(),
+            color,
+            background: bg,
+            ..Default::default()
+        };
+        let mut raw = String::with_capacity(line.bytes.len() * 3);
+        for b in &line.bytes {
+            use std::fmt::Write;
+            let _ = write!(raw, "{b:02X} ");
+        }
+        let mut job = LayoutJob::default();
+        job.append(&format!("{:04X}:  ", line.addr), 0.0, fmt(c_addr));
+        job.append(&format!("{raw:<10}"), 0.0, fmt(c_bytes));
+        job.append(&line.text, 0.0, fmt(c_text));
+        ui.label(job);
+    }
+    nav
 }
 
 #[allow(deprecated)]
@@ -671,6 +771,13 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>,
                         .clicked()
                     {
                         emit(MenuAction::ToggleSpc700Memory);
+                        ui.close();
+                    }
+                    if ui
+                        .selectable_label(state.show_spc700_disasm, "SPC700 disassembly")
+                        .clicked()
+                    {
+                        emit(MenuAction::ToggleSpc700Disasm);
                         ui.close();
                     }
                     ui.separator();
