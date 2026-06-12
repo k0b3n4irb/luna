@@ -88,6 +88,18 @@ impl Mapper for Sa1Chip {
         self.inner.kind()
     }
 
+    /// Re-power the SA-1 on a system reset (ares `SA1::power()`): the
+    /// SA-1's own 65C816 returns to power-on, the chip is held in reset
+    /// again (`running = false`, CCNT.5 set by the inner mapper's
+    /// `power_reset`), and the sub-clock budget is cleared. ROM and
+    /// BW-RAM persist (handled by the inner mapper).
+    fn reset(&mut self) {
+        self.inner.power_reset();
+        self.cpu = Cpu::new();
+        self.running = false;
+        self.deficit = 0;
+    }
+
     fn read(&mut self, addr: Addr24) -> Option<u8> {
         self.inner.read(addr)
     }
