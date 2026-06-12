@@ -21,7 +21,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{ResizeDirection, Window, WindowAttributes, WindowId};
 
-use crate::ui::{self, DebugSnapshot};
+use crate::ui::{self, DebugSnapshot, PanelNav};
 
 /// Height (logical px) of the custom egui title bar drawn at the top of
 /// each borderless debug window.
@@ -36,6 +36,7 @@ pub(crate) enum DebugPanel {
     CpuMemory,
     Spc700,
     Spc700Memory,
+    Spc700Disasm,
     Sprites,
 }
 
@@ -46,6 +47,7 @@ impl DebugPanel {
             Self::CpuMemory => "CPU memory",
             Self::Spc700 => "SPC700 — audio CPU",
             Self::Spc700Memory => "SPC700 memory",
+            Self::Spc700Disasm => "SPC700 disassembly",
             Self::Sprites => "Sprites (OAM)",
         }
     }
@@ -56,6 +58,7 @@ impl DebugPanel {
             Self::Cpu => (250, 340),
             Self::Spc700 => (250, 320),
             Self::CpuMemory | Self::Spc700Memory => (660, 420),
+            Self::Spc700Disasm => (420, 440),
             Self::Sprites => (340, 460),
         }
     }
@@ -261,14 +264,18 @@ impl DebugWindows {
     /// Repaint one debug window with the freshest snapshot. Returns the
     /// signed byte delta a memory panel's nav toolbar requested (if any) and
     /// whether the title-bar ✕ asked to close the window.
-    pub(crate) fn render(&mut self, id: WindowId, snap: &DebugSnapshot) -> (Option<i64>, bool) {
-        let mut mem_delta: Option<i64> = None;
+    pub(crate) fn render(
+        &mut self,
+        id: WindowId,
+        snap: &DebugSnapshot,
+    ) -> (Option<PanelNav>, bool) {
+        let mut nav: Option<PanelNav> = None;
         // Disjoint field borrows: `gpu` (immutable) and `wins` (mutable).
         let Some(gpu) = self.gpu.as_ref() else {
-            return (mem_delta, false);
+            return (nav, false);
         };
         let Some(win) = self.wins.get_mut(&id) else {
-            return (mem_delta, false);
+            return (nav, false);
         };
 
         // Reconcile the surface to the window's current size BEFORE acquiring
@@ -295,10 +302,10 @@ impl DebugWindows {
                 match win.surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(f)
                     | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-                    _ => return (mem_delta, false),
+                    _ => return (nav, false),
                 }
             }
-            _ => return (mem_delta, false),
+            _ => return (nav, false),
         };
         let view = frame
             .texture
@@ -423,9 +430,10 @@ impl DebugWindows {
                             DebugPanel::Cpu => ui::cpu_state_body(ui, snap),
                             DebugPanel::Spc700 => ui::spc700_body(ui, snap),
                             DebugPanel::Sprites => ui::sprites_body(ui, snap),
-                            DebugPanel::CpuMemory => mem_delta = ui::cpu_memory_body(ui, snap),
+                            DebugPanel::Spc700Disasm => nav = ui::spc700_disasm_body(ui, snap),
+                            DebugPanel::CpuMemory => nav = ui::cpu_memory_body(ui, snap),
                             DebugPanel::Spc700Memory => {
-                                mem_delta = ui::spc700_memory_body(ui, snap);
+                                nav = ui::spc700_memory_body(ui, snap);
                             }
                         });
 
@@ -532,7 +540,7 @@ impl DebugWindows {
                 .request_inner_size(LogicalSize::new(logical_w, target_h));
         }
 
-        (mem_delta, want_close)
+        (nav, want_close)
     }
 
     /// Close (and drop) the debug window for `id`, if present.

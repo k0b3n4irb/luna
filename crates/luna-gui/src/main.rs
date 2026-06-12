@@ -54,7 +54,7 @@ use crate::audio::AudioStreamArtifacts;
 use crate::debug_window::{DebugPanel, DebugWindows};
 use crate::emu_thread::EmuShared;
 use crate::input::{Hotkey, KeyBindings};
-use crate::ui::{DebugSnapshot, MenuAction, UiOverlay, UiState};
+use crate::ui::{DebugSnapshot, MenuAction, PanelNav, UiOverlay, UiState};
 
 const WINDOW_TITLE: &str = "Luna — SNES Emulator";
 const INITIAL_SCALE: u32 = 3;
@@ -144,6 +144,10 @@ struct LunaApp {
     cpu_mem_addr: u32,
     /// SPC700-memory viewer cursor — 16-bit ARAM address.
     spc_mem_addr: u16,
+    /// SPC700 disassembly: frozen start address, follow-PC flag, line count.
+    spc_disasm_addr: u16,
+    spc_disasm_follow: bool,
+    spc_disasm_lines: u16,
 }
 
 impl LunaApp {
@@ -183,6 +187,9 @@ impl LunaApp {
             debug_windows: DebugWindows::new(),
             cpu_mem_addr: 0x7E_0000,
             spc_mem_addr: 0x0000,
+            spc_disasm_addr: 0x0000,
+            spc_disasm_follow: true,
+            spc_disasm_lines: 32,
         };
         if let Some(path) = auto_rom {
             app.load_rom(&path);
@@ -556,6 +563,7 @@ impl LunaApp {
             show_cpu_memory: self.debug_windows.is_open(DebugPanel::CpuMemory),
             show_spc700: self.debug_windows.is_open(DebugPanel::Spc700),
             show_spc700_memory: self.debug_windows.is_open(DebugPanel::Spc700Memory),
+            show_spc700_disasm: self.debug_windows.is_open(DebugPanel::Spc700Disasm),
             show_sprites: self.debug_windows.is_open(DebugPanel::Sprites),
             pending_rebind: self.pending_rebind,
             pending_hotkey_rebind: self.pending_hotkey_rebind,
@@ -614,6 +622,16 @@ impl LunaApp {
                             snap.spc_memory =
                                 em.peek_aram(spc_addr, 256).ok().map(|b| (spc_addr, b));
                         }
+                        DebugPanel::Spc700Disasm => {
+                            let start = if self.spc_disasm_follow {
+                                em.spc700_state().map_or(self.spc_disasm_addr, |s| s.pc)
+                            } else {
+                                self.spc_disasm_addr
+                            };
+                            snap.spc_disasm = em.disassemble_spc(start, self.spc_disasm_lines).ok();
+                            snap.spc_disasm_follow = self.spc_disasm_follow;
+                            snap.spc_disasm_lines = self.spc_disasm_lines;
+                        }
                     }
                     snap
                 })
@@ -628,9 +646,16 @@ impl LunaApp {
             return;
         };
         let snap = self.build_panel_snapshot(panel);
-        let (mem_delta, close) = self.debug_windows.render(id, &snap);
-        if let Some(d) = mem_delta {
-            match panel {
+        // While following, keep the frozen start synced to the live PC, so
+        // toggling "Follow PC" off freezes the view right where it is.
+        if panel == DebugPanel::Spc700Disasm && self.spc_disasm_follow {
+            if let Some(first) = snap.spc_disasm.as_ref().and_then(|l| l.first()) {
+                self.spc_disasm_addr = first.addr;
+            }
+        }
+        let (nav, close) = self.debug_windows.render(id, &snap);
+        match nav {
+            Some(PanelNav::MemAddr(d)) => match panel {
                 DebugPanel::CpuMemory => {
                     self.cpu_mem_addr =
                         (i64::from(self.cpu_mem_addr) + d).rem_euclid(0x100_0000) as u32;
@@ -640,7 +665,17 @@ impl LunaApp {
                         (i64::from(self.spc_mem_addr) + d).rem_euclid(0x1_0000) as u16;
                 }
                 _ => {}
+            },
+            Some(PanelNav::DisasmFollow) => self.spc_disasm_follow = !self.spc_disasm_follow,
+            Some(PanelNav::DisasmMove(d)) => {
+                self.spc_disasm_follow = false;
+                self.spc_disasm_addr =
+                    (i64::from(self.spc_disasm_addr) + d).rem_euclid(0x1_0000) as u16;
             }
+            Some(PanelNav::DisasmLines(d)) => {
+                self.spc_disasm_lines = (i32::from(self.spc_disasm_lines) + d).clamp(8, 64) as u16;
+            }
+            None => {}
         }
         if close {
             self.debug_windows.close(id);
@@ -664,6 +699,10 @@ impl LunaApp {
             MenuAction::ToggleSpc700Memory => {
                 self.debug_windows
                     .toggle(event_loop, DebugPanel::Spc700Memory);
+            }
+            MenuAction::ToggleSpc700Disasm => {
+                self.debug_windows
+                    .toggle(event_loop, DebugPanel::Spc700Disasm);
             }
             MenuAction::ToggleSprites => self.debug_windows.toggle(event_loop, DebugPanel::Sprites),
             MenuAction::ToggleInputConfig => {

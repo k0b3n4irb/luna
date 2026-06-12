@@ -15,6 +15,7 @@
 pub mod bus;
 pub mod cpu;
 pub mod cycles;
+pub mod disasm;
 pub mod flags;
 pub mod iplrom;
 pub mod opcodes;
@@ -25,5 +26,6 @@ pub mod testing;
 pub use bus::SpcBus;
 pub use cpu::Spc700;
 pub use cycles::SPC700_CYCLES;
+pub use disasm::{Instruction, disassemble};
 pub use flags::Psw;
 pub use iplrom::{IPL_ROM, IPL_ROM_BASE};

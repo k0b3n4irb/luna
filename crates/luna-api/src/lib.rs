@@ -170,6 +170,19 @@ pub struct Spc700State {
     pub sleeping: bool,
 }
 
+/// One disassembled instruction line, for a disassembly debug panel.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct DisasmLine {
+    /// Address of the instruction.
+    pub addr: u16,
+    /// The raw instruction bytes (1..=3).
+    pub bytes: Vec<u8>,
+    /// Canonical mnemonic + operands, e.g. `"MOV A, #$12"`.
+    pub text: String,
+    /// `true` if this line is the live program counter.
+    pub is_pc: bool,
+}
+
 /// PPU register snapshot + memory occupancy stats.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct PpuState {
@@ -914,6 +927,33 @@ impl Emulator {
             stopped: c.stopped,
             sleeping: c.sleeping,
         })
+    }
+
+    /// Disassemble `count` SPC700 instructions starting at `start`.
+    /// Instruction bytes are read from raw ARAM (side-effect-free — never
+    /// touches the SPC I/O ports / timers), and the line at the live SPC
+    /// program counter is flagged `is_pc`. For a disassembly panel.
+    pub fn disassemble_spc(&self, start: u16, count: u16) -> Result<Vec<DisasmLine>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let aram = &snes.apu_real.aram;
+        let read = |a: u16| aram[usize::from(a)];
+        let pc = snes.apu_real.cpu.pc;
+        let mut addr = start;
+        let mut out = Vec::with_capacity(usize::from(count));
+        for _ in 0..count {
+            let insn = luna_cpu_spc700::disassemble(read, addr);
+            let bytes = (0..u16::from(insn.length))
+                .map(|i| read(addr.wrapping_add(i)))
+                .collect();
+            out.push(DisasmLine {
+                addr,
+                bytes,
+                text: insn.text,
+                is_pc: addr == pc,
+            });
+            addr = addr.wrapping_add(u16::from(insn.length));
+        }
+        Ok(out)
     }
 
     /// The emulated PPU frame counter — cheap, for a GUI's frame-boundary
