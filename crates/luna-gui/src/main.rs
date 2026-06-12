@@ -140,9 +140,10 @@ struct LunaApp {
     /// draggable anywhere on the desktop. Data is pulled through
     /// `luna-api` each frame only while a panel is open.
     debug_windows: DebugWindows,
-    /// Hex-viewer cursor: WRAM bank ($7E/$7F) + page offset.
-    mem_bank: u8,
-    mem_offset: u16,
+    /// CPU-memory viewer cursor — full 24-bit CPU-bus address.
+    cpu_mem_addr: u32,
+    /// SPC700-memory viewer cursor — 16-bit ARAM address.
+    spc_mem_addr: u16,
 }
 
 impl LunaApp {
@@ -180,8 +181,8 @@ impl LunaApp {
             pending_hotkey_rebind: None,
             screenshot_status: None,
             debug_windows: DebugWindows::new(),
-            mem_bank: 0x7E,
-            mem_offset: 0x0000,
+            cpu_mem_addr: 0x7E_0000,
+            spc_mem_addr: 0x0000,
         };
         if let Some(path) = auto_rom {
             app.load_rom(&path);
@@ -552,9 +553,10 @@ impl LunaApp {
             show_input_config: self.show_input_config,
             key_bindings: &self.key_bindings,
             show_cpu_state: self.debug_windows.is_open(DebugPanel::Cpu),
+            show_cpu_memory: self.debug_windows.is_open(DebugPanel::CpuMemory),
             show_spc700: self.debug_windows.is_open(DebugPanel::Spc700),
+            show_spc700_memory: self.debug_windows.is_open(DebugPanel::Spc700Memory),
             show_sprites: self.debug_windows.is_open(DebugPanel::Sprites),
-            show_memory: self.debug_windows.is_open(DebugPanel::Memory),
             pending_rebind: self.pending_rebind,
             pending_hotkey_rebind: self.pending_hotkey_rebind,
             screenshot_status: self.screenshot_status.clone(),
@@ -591,7 +593,8 @@ impl LunaApp {
     /// Only the data that panel renders is fetched, so a CPU/SPC window is
     /// a couple of cheap register reads, not a full `state()` clone.
     fn build_panel_snapshot(&self, panel: DebugPanel) -> DebugSnapshot {
-        let (mb, mo) = (self.mem_bank, self.mem_offset);
+        let cpu_addr = self.cpu_mem_addr & 0xFF_FFFF;
+        let spc_addr = self.spc_mem_addr;
         self.emu
             .lock()
             .ok()
@@ -602,8 +605,14 @@ impl LunaApp {
                         DebugPanel::Cpu => snap.cpu = em.cpu_state().ok(),
                         DebugPanel::Spc700 => snap.spc700 = em.spc700_state().ok(),
                         DebugPanel::Sprites => snap.sprites = em.decode_sprites().ok(),
-                        DebugPanel::Memory => {
-                            snap.memory = em.peek_memory(mb, mo, 256).ok().map(|b| (mb, mo, b));
+                        DebugPanel::CpuMemory => {
+                            let (bank, off) = ((cpu_addr >> 16) as u8, cpu_addr as u16);
+                            snap.cpu_memory =
+                                em.peek_memory(bank, off, 256).ok().map(|b| (cpu_addr, b));
+                        }
+                        DebugPanel::Spc700Memory => {
+                            snap.spc_memory =
+                                em.peek_aram(spc_addr, 256).ok().map(|b| (spc_addr, b));
                         }
                     }
                     snap
@@ -619,13 +628,16 @@ impl LunaApp {
             return;
         };
         let snap = self.build_panel_snapshot(panel);
-        let (actions, close) = self.debug_windows.render(id, &snap);
-        for action in actions {
-            match action {
-                MenuAction::MemPagePrev => self.mem_offset = self.mem_offset.wrapping_sub(256),
-                MenuAction::MemPageNext => self.mem_offset = self.mem_offset.wrapping_add(256),
-                MenuAction::MemBankToggle => {
-                    self.mem_bank = if self.mem_bank == 0x7E { 0x7F } else { 0x7E };
+        let (mem_delta, close) = self.debug_windows.render(id, &snap);
+        if let Some(d) = mem_delta {
+            match panel {
+                DebugPanel::CpuMemory => {
+                    self.cpu_mem_addr =
+                        (i64::from(self.cpu_mem_addr) + d).rem_euclid(0x100_0000) as u32;
+                }
+                DebugPanel::Spc700Memory => {
+                    self.spc_mem_addr =
+                        (i64::from(self.spc_mem_addr) + d).rem_euclid(0x1_0000) as u16;
                 }
                 _ => {}
             }
@@ -645,14 +657,15 @@ impl LunaApp {
             MenuAction::PauseToggle => self.toggle_pause(),
             MenuAction::Reset => self.reset(),
             MenuAction::ToggleCpuState => self.debug_windows.toggle(event_loop, DebugPanel::Cpu),
-            MenuAction::ToggleSpc700 => self.debug_windows.toggle(event_loop, DebugPanel::Spc700),
-            MenuAction::ToggleSprites => self.debug_windows.toggle(event_loop, DebugPanel::Sprites),
-            MenuAction::ToggleMemory => self.debug_windows.toggle(event_loop, DebugPanel::Memory),
-            MenuAction::MemPagePrev => self.mem_offset = self.mem_offset.wrapping_sub(256),
-            MenuAction::MemPageNext => self.mem_offset = self.mem_offset.wrapping_add(256),
-            MenuAction::MemBankToggle => {
-                self.mem_bank = if self.mem_bank == 0x7E { 0x7F } else { 0x7E };
+            MenuAction::ToggleCpuMemory => {
+                self.debug_windows.toggle(event_loop, DebugPanel::CpuMemory);
             }
+            MenuAction::ToggleSpc700 => self.debug_windows.toggle(event_loop, DebugPanel::Spc700),
+            MenuAction::ToggleSpc700Memory => {
+                self.debug_windows
+                    .toggle(event_loop, DebugPanel::Spc700Memory);
+            }
+            MenuAction::ToggleSprites => self.debug_windows.toggle(event_loop, DebugPanel::Sprites),
             MenuAction::ToggleInputConfig => {
                 self.show_input_config = !self.show_input_config;
                 if !self.show_input_config {
