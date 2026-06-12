@@ -332,6 +332,23 @@ fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<
         });
 }
 
+/// Restyle the current `ui`'s widget visuals so an interactive widget
+/// (e.g. a `DragValue`) renders as a blue cell, matching [`value_chip`].
+/// Call inside a `ui.scope(...)` so the override is local.
+fn style_blue_field(ui: &mut egui::Ui) {
+    let fill = egui::Color32::from_rgb(38, 60, 108);
+    let stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(96, 132, 205));
+    let text = egui::Color32::from_rgb(226, 232, 248);
+    let w = &mut ui.visuals_mut().widgets;
+    for s in [&mut w.inactive, &mut w.hovered, &mut w.active] {
+        s.weak_bg_fill = fill;
+        s.bg_fill = fill;
+        s.bg_stroke = stroke;
+        s.fg_stroke.color = text;
+    }
+    w.hovered.weak_bg_fill = egui::Color32::from_rgb(50, 78, 140);
+}
+
 /// A register value rendered as a blue framed cell — the ness debugger's
 /// signature look for live values.
 fn value_chip(ui: &mut egui::Ui, text: &str) {
@@ -652,13 +669,18 @@ fn disasm_body(
             nav = Some(PanelNav::DisasmGotoPc);
         }
         let mut addr = start;
-        if ui
-            .add(
-                egui::DragValue::new(&mut addr)
-                    .range(0..=max_addr)
-                    .hexadecimal(addr_digits, false, true)
-                    .speed(1.0),
-            )
+        let addr_resp = ui
+            .scope(|ui| {
+                style_blue_field(ui);
+                ui.add(
+                    egui::DragValue::new(&mut addr)
+                        .range(0..=max_addr)
+                        .hexadecimal(addr_digits, false, true)
+                        .speed(1.0),
+                )
+            })
+            .inner;
+        if addr_resp
             .on_hover_text("Start address (double-click to type)")
             .changed()
         {
@@ -667,10 +689,13 @@ fn disasm_body(
         ui.add_space(8.0);
         ui.label("Lines:");
         let mut n = line_count;
-        if ui
-            .add(egui::DragValue::new(&mut n).range(4..=128).speed(0.25))
-            .changed()
-        {
+        let lines_resp = ui
+            .scope(|ui| {
+                style_blue_field(ui);
+                ui.add(egui::DragValue::new(&mut n).range(4..=128).speed(0.25))
+            })
+            .inner;
+        if lines_resp.changed() {
             nav = Some(PanelNav::DisasmSetLines(n));
         }
     });
