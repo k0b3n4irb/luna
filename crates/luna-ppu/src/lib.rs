@@ -16,10 +16,11 @@ mod tile;
 pub use memory::{Cgram, Oam, Vram};
 pub use ppu::{BgState, Ppu, bg_state, register};
 pub use renderer::{
-    FRAME_H, FRAME_W, IndexedPixel, IndexedScanline, RenderOptions, Scanline, SpriteEntry, bg_bpp,
-    decode_all_sprites, render_bg_scanline_indexed_with, render_bg_scanline_with,
-    render_frame_bg_with, render_frame_with, render_mode7_scanline_indexed, render_scanline_into,
-    render_scanline_partial_into, render_sprites_scanline_indexed_with, sprite_size_pair,
+    FRAME_H, FRAME_W, IndexedPixel, IndexedScanline, RenderOptions, Scanline, SpriteEntry,
+    TilemapImage, bg_bpp, decode_all_sprites, render_bg_scanline_indexed_with,
+    render_bg_scanline_with, render_bg_tilemap, render_frame_bg_with, render_frame_with,
+    render_mode7_scanline_indexed, render_scanline_into, render_scanline_partial_into,
+    render_sprites_scanline_indexed_with, sprite_size_pair,
 };
 pub use tile::{
     apply_brightness, bgr555_to_rgb888, decode_2bpp_row, decode_4bpp_row, scale_5_to_8,

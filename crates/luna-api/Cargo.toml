@@ -10,16 +10,19 @@ repository.workspace = true
 readme.workspace = true
 
 [dependencies]
-luna-apu       = { workspace = true }
-luna-cartridge = { workspace = true }
-luna-core      = { workspace = true }
-luna-ppu       = { workspace = true }
+luna-apu         = { workspace = true }
+luna-cartridge   = { workspace = true }
+luna-core        = { workspace = true }
+luna-cpu-65c816  = { workspace = true }
+luna-cpu-spc700  = { workspace = true }
+luna-ppu         = { workspace = true }
 
 serde      = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
 thiserror  = { workspace = true }
 image      = { workspace = true }
 schemars   = { workspace = true }
+dirs       = { workspace = true }
 
 [lints]
 workspace = true

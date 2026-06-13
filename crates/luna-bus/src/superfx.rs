@@ -1525,6 +1525,25 @@ impl Mapper for SuperFxMapper {
         MapperKind::SuperFx
     }
 
+    /// Re-power the GSU on a system reset (ares `SuperFX::power()` →
+    /// `GSU::power()`): all architectural registers, the instruction
+    /// cache, the pixel caches and the clock accounting return to
+    /// power-on. ROM and Game Pak work RAM persist (the reset line does
+    /// not clear cart RAM; ares `power()` only recomputes the masks,
+    /// which are unchanged here since the sizes don't change).
+    fn reset(&mut self) {
+        self.regs = Registers::reset();
+        *self.cache = [0; 512];
+        self.cache_valid = [false; 32];
+        self.pixelcache = [PixelCache::reset(); 2];
+        self.clock_deficit = 0;
+        self.cycles = 0;
+        self.cpu_mclk = 0;
+        self.gsu_running_prev = false;
+        self.modified_r14 = false;
+        self.modified_r15 = false;
+    }
+
     fn read(&mut self, addr: Addr24) -> Option<u8> {
         let bank = bank_of(addr);
         let offset = offset_of(addr);

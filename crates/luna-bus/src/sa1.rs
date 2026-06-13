@@ -380,6 +380,23 @@ impl Sa1Mapper {
         }
     }
 
+    /// Re-power the SA-1 MMIO / register state on a system reset (ares
+    /// `SA1::power()`): every `$2200-$23FF` register, the IRAM and the
+    /// math/DMA/character-conversion state return to power-on, including
+    /// the CCNT.5 reset bit so the SA-1 boots held in reset again. ROM
+    /// and battery-backed BW-RAM persist (ares clears IRAM but not
+    /// BW-RAM). Implemented by rebuilding from [`Sa1Mapper::new`] — the
+    /// single source of truth for the power-on layout — then restoring
+    /// the ROM and BW-RAM buffers.
+    pub fn power_reset(&mut self) {
+        let rom = std::mem::take(&mut self.rom);
+        let bwram = std::mem::take(&mut self.bwram);
+        // `new` re-derives the clamped BW-RAM size from `bwram.len()`,
+        // so the restored buffer length matches exactly.
+        *self = Self::new(rom, bwram.len());
+        self.bwram = bwram;
+    }
+
     const fn iram_writable_for(&self, byte_off: usize, side: WriteSide) -> bool {
         let mask = match side {
             WriteSide::Main => self.siwp,

@@ -28,6 +28,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
+mod debug_window;
 mod emu_thread;
 mod input;
 mod ui;
@@ -50,9 +51,10 @@ use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::audio::AudioStreamArtifacts;
+use crate::debug_window::{DebugPanel, DebugWindows};
 use crate::emu_thread::EmuShared;
 use crate::input::{Hotkey, KeyBindings};
-use crate::ui::{MenuAction, UiOverlay, UiState};
+use crate::ui::{DebugSnapshot, MenuAction, PanelNav, UiOverlay, UiState};
 
 const WINDOW_TITLE: &str = "Luna — SNES Emulator";
 const INITIAL_SCALE: u32 = 3;
@@ -123,6 +125,10 @@ struct LunaApp {
     /// WM flags the window as "not responding" within ~2 seconds and
     /// pops a "Force Quit / Wait" prompt. Polled each `about_to_wait`.
     rom_picker_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
+    /// Pending coprocessor-firmware file-dialog result (same async pattern
+    /// as `rom_picker_rx`), and the ROM to reload once the user supplies it.
+    firmware_picker_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
+    pending_firmware_rom: Option<PathBuf>,
     /// `true` while the egui input-config modal is open.
     show_input_config: bool,
     /// When `Some(button)`, the next key press is captured as that
@@ -134,14 +140,22 @@ struct LunaApp {
     /// Last screenshot filename, surfaced in the menu bar as feedback.
     screenshot_status: Option<String>,
 
-    /// Debug panels (Debug menu). Data is pulled through `luna-api` each
-    /// frame only while a panel is open.
-    show_cpu_state: bool,
-    show_sprites: bool,
-    show_memory: bool,
-    /// Hex-viewer cursor: WRAM bank ($7E/$7F) + page offset.
-    mem_bank: u8,
-    mem_offset: u16,
+    /// Debug panels (Debug menu) — each is its own native OS window,
+    /// draggable anywhere on the desktop. Data is pulled through
+    /// `luna-api` each frame only while a panel is open.
+    debug_windows: DebugWindows,
+    /// CPU-memory viewer cursor — full 24-bit CPU-bus address.
+    cpu_mem_addr: u32,
+    /// SPC700-memory viewer cursor — 16-bit ARAM address.
+    spc_mem_addr: u16,
+    /// SPC700 disassembly: start address + line count.
+    spc_disasm_addr: u16,
+    spc_disasm_lines: u16,
+    /// CPU (65c816) disassembly: 24-bit start address + line count.
+    cpu_disasm_addr: u32,
+    cpu_disasm_lines: u16,
+    /// Tilemap Viewer: which BG layer (0..3) to render.
+    tilemap_bg: usize,
 }
 
 impl LunaApp {
@@ -174,15 +188,20 @@ impl LunaApp {
             ui: None,
             rom_title: None,
             rom_picker_rx: None,
+            firmware_picker_rx: None,
+            pending_firmware_rom: None,
             show_input_config: false,
             pending_rebind: None,
             pending_hotkey_rebind: None,
             screenshot_status: None,
-            show_cpu_state: false,
-            show_sprites: false,
-            show_memory: false,
-            mem_bank: 0x7E,
-            mem_offset: 0x0000,
+            debug_windows: DebugWindows::new(),
+            cpu_mem_addr: 0x7E_0000,
+            spc_mem_addr: 0x0000,
+            spc_disasm_addr: 0x0000,
+            spc_disasm_lines: 32,
+            cpu_disasm_addr: 0x00_8000,
+            cpu_disasm_lines: 32,
+            tilemap_bg: 0,
         };
         if let Some(path) = auto_rom {
             app.load_rom(&path);
@@ -201,10 +220,13 @@ impl LunaApp {
         // unsupported coprocessor cart (it catches `from_cartridge`'s
         // panic), so one check covers both.
         let mut em = Emulator::new();
-        if let Err(e) = em.load_rom(path) {
-            eprintln!("luna-gui: cannot load ROM (bad file or unsupported coprocessor): {e}");
-            return;
-        }
+        let info = match em.load_rom(path) {
+            Ok(info) => info,
+            Err(e) => {
+                eprintln!("luna-gui: cannot load ROM (bad file or unsupported coprocessor): {e}");
+                return;
+            }
+        };
         if let Ok(mut guard) = self.emu.lock() {
             *guard = Some(em);
         }
@@ -234,6 +256,70 @@ impl LunaApp {
         if let Some(dir) = path.parent() {
             self.last_rom_dir = Some(dir.to_path_buf());
             let _ = save_last_rom_dir(dir);
+        }
+        // DSP / coprocessor cart missing its firmware: the game runs inert
+        // (e.g. flat Mode 7) until the user supplies it. Prompt them to
+        // locate it, Mesen2-style; once installed, reload so it takes effect.
+        if let Some(fw_name) = info.missing_firmware {
+            self.prompt_for_firmware(path.to_path_buf(), fw_name);
+        }
+    }
+
+    /// Pop a file dialog asking the user to locate a coprocessor firmware
+    /// file (e.g. `dsp1b.rom`). On pick it is installed into luna's firmware
+    /// folder and the ROM reloaded. Mirrors [`Self::open_rom_dialog`]'s
+    /// off-thread pattern so the event loop keeps redrawing.
+    fn prompt_for_firmware(&mut self, rom: PathBuf, fw_name: String) {
+        if self.firmware_picker_rx.is_some() {
+            return;
+        }
+        eprintln!(
+            "luna-gui: this cartridge needs coprocessor firmware '{fw_name}' — \
+             prompting for it (the coprocessor is inert until supplied)."
+        );
+        let (tx, rx) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("luna-firmware-picker".into())
+            .spawn(move || {
+                let dialog = rfd::FileDialog::new()
+                    .set_title(format!("Locate coprocessor firmware ({fw_name})"))
+                    .add_filter("Firmware ROM", &["rom", "bin"])
+                    .add_filter("All files", &["*"]);
+                let _ = tx.send(dialog.pick_file());
+            })
+            .expect("spawn luna-firmware-picker thread");
+        self.firmware_picker_rx = Some(rx);
+        self.pending_firmware_rom = Some(rom);
+    }
+
+    /// Pump the firmware file-dialog channel. Called every `about_to_wait`.
+    fn poll_firmware_picker(&mut self) {
+        let Some(rx) = self.firmware_picker_rx.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Some(fw)) => {
+                self.firmware_picker_rx = None;
+                match Emulator::install_firmware(&fw, "dsp1b.rom") {
+                    Ok(dest) => {
+                        eprintln!("luna-gui: installed firmware → {}", dest.display());
+                        if let Some(rom) = self.pending_firmware_rom.take() {
+                            self.load_rom(&rom); // reload — now the firmware is found
+                        }
+                    }
+                    Err(e) => eprintln!("luna-gui: could not install firmware: {e}"),
+                }
+            }
+            Ok(None) => {
+                // Cancelled — leave the game running inert.
+                self.firmware_picker_rx = None;
+                self.pending_firmware_rom = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.firmware_picker_rx = None;
+                self.pending_firmware_rom = None;
+            }
         }
     }
 
@@ -399,7 +485,17 @@ impl ApplicationHandler for LunaApp {
         self.ui = Some(ui);
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // A debug panel's own native window: route the event to it and
+        // stop — none of the game-window handling below applies.
+        if self.debug_windows.owns(id) {
+            if matches!(event, WindowEvent::RedrawRequested) {
+                self.redraw_debug_window(id);
+            } else {
+                self.debug_windows.on_window_event(id, &event);
+            }
+            return;
+        }
         // Let egui consume the event first so menu clicks / hovers
         // don't leak into the game-side joypad path.
         let consumed_by_ui = if let (Some(ui), Some(win)) = (self.ui.as_mut(), self.window.as_ref())
@@ -504,10 +600,13 @@ impl ApplicationHandler for LunaApp {
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         self.poll_rom_picker();
+        self.poll_firmware_picker();
         // Request a redraw every ~16 ms to keep the framebuffer current.
         if let Some(win) = self.window.as_ref() {
             win.request_redraw();
         }
+        // Keep open debug windows refreshing their live register/memory views.
+        self.debug_windows.request_redraw_all();
     }
 }
 
@@ -531,45 +630,25 @@ impl LunaApp {
             let fb = self.framebuffer_out.read();
             pixels.frame_mut()[..len].copy_from_slice(&fb[..len]);
         }
-        // Build the debug-panel snapshot through luna-api (api-first), only
-        // while a panel is open. Copy the flags out first so the lock closure
-        // borrows none of `self`.
-        let (sc, ss, sm, mb, mo) = (
-            self.show_cpu_state,
-            self.show_sprites,
-            self.show_memory,
-            self.mem_bank,
-            self.mem_offset,
-        );
-        let debug = if sc || ss || sm {
-            self.emu
-                .lock()
-                .ok()
-                .and_then(|mut g| {
-                    g.as_mut().map(|em| crate::ui::DebugSnapshot {
-                        cpu: if sc { Some(em.state().cpu) } else { None },
-                        sprites: if ss { em.decode_sprites().ok() } else { None },
-                        memory: if sm {
-                            em.peek_memory(mb, mo, 256).ok().map(|b| (mb, mo, b))
-                        } else {
-                            None
-                        },
-                    })
-                })
-                .unwrap_or_default()
-        } else {
-            crate::ui::DebugSnapshot::default()
-        };
+        // Debug panels live in their own native windows now (rendered in
+        // `redraw_debug_window`), so the main window only needs the open/
+        // closed state to tick the Debug-menu checkmarks.
         let pending: Mutex<Vec<MenuAction>> = Mutex::new(Vec::new());
         let ui_state = UiState {
             paused: self.emu_shared.paused.load(Ordering::Acquire),
             rom_title: self.rom_title.clone(),
             show_input_config: self.show_input_config,
             key_bindings: &self.key_bindings,
-            show_cpu_state: sc,
-            show_sprites: ss,
-            show_memory: sm,
-            debug,
+            show_cpu_state: self.debug_windows.is_open(DebugPanel::Cpu),
+            show_cpu_memory: self.debug_windows.is_open(DebugPanel::CpuMemory),
+            show_cpu_disasm: self.debug_windows.is_open(DebugPanel::CpuDisasm),
+            show_spc700: self.debug_windows.is_open(DebugPanel::Spc700),
+            show_spc700_memory: self.debug_windows.is_open(DebugPanel::Spc700Memory),
+            show_spc700_disasm: self.debug_windows.is_open(DebugPanel::Spc700Disasm),
+            show_sprites: self.debug_windows.is_open(DebugPanel::Sprites),
+            show_registers: self.debug_windows.is_open(DebugPanel::Registers),
+            show_palette: self.debug_windows.is_open(DebugPanel::Palette),
+            show_tilemap: self.debug_windows.is_open(DebugPanel::Tilemap),
             pending_rebind: self.pending_rebind,
             pending_hotkey_rebind: self.pending_hotkey_rebind,
             screenshot_status: self.screenshot_status.clone(),
@@ -602,6 +681,130 @@ impl LunaApp {
         }
     }
 
+    /// Build the `luna-api` snapshot for a single debug panel (api-first).
+    /// Only the data that panel renders is fetched, so a CPU/SPC window is
+    /// a couple of cheap register reads, not a full `state()` clone.
+    fn build_panel_snapshot(&self, panel: DebugPanel) -> DebugSnapshot {
+        let cpu_addr = self.cpu_mem_addr & 0xFF_FFFF;
+        let spc_addr = self.spc_mem_addr;
+        self.emu
+            .lock()
+            .ok()
+            .and_then(|mut g| {
+                g.as_mut().map(|em| {
+                    let mut snap = DebugSnapshot::default();
+                    match panel {
+                        DebugPanel::Cpu => snap.cpu = em.cpu_state().ok(),
+                        DebugPanel::Spc700 => snap.spc700 = em.spc700_state().ok(),
+                        DebugPanel::Sprites => snap.sprites = em.decode_sprites().ok(),
+                        DebugPanel::Registers => snap.registers = Some(em.state()),
+                        DebugPanel::Palette => snap.palette = em.peek_cgram().ok(),
+                        DebugPanel::Tilemap => {
+                            snap.tilemap = em.render_tilemap_rgba(self.tilemap_bg).ok();
+                            snap.tilemap_bg = self.tilemap_bg;
+                        }
+                        DebugPanel::CpuMemory => {
+                            let (bank, off) = ((cpu_addr >> 16) as u8, cpu_addr as u16);
+                            snap.cpu_memory =
+                                em.peek_memory(bank, off, 256).ok().map(|b| (cpu_addr, b));
+                        }
+                        DebugPanel::Spc700Memory => {
+                            snap.spc_memory =
+                                em.peek_aram(spc_addr, 256).ok().map(|b| (spc_addr, b));
+                        }
+                        DebugPanel::Spc700Disasm => {
+                            snap.spc_disasm = em
+                                .disassemble_spc(self.spc_disasm_addr, self.spc_disasm_lines)
+                                .ok();
+                            snap.spc_disasm_lines = self.spc_disasm_lines;
+                        }
+                        DebugPanel::CpuDisasm => {
+                            let (m8, x8) = em.cpu_state().ok().map_or((true, true), |c| {
+                                (c.e || c.p & 0x20 != 0, c.e || c.p & 0x10 != 0)
+                            });
+                            snap.cpu_disasm = em
+                                .disassemble_cpu(
+                                    self.cpu_disasm_addr,
+                                    self.cpu_disasm_lines,
+                                    m8,
+                                    x8,
+                                )
+                                .ok();
+                            snap.cpu_disasm_lines = self.cpu_disasm_lines;
+                        }
+                    }
+                    snap
+                })
+            })
+            .unwrap_or_default()
+    }
+
+    /// Repaint one debug window with fresh data and apply any memory-nav
+    /// actions its body emitted (page / bank buttons).
+    fn redraw_debug_window(&mut self, id: WindowId) {
+        let Some(panel) = self.debug_windows.panel_of(id) else {
+            return;
+        };
+        let snap = self.build_panel_snapshot(panel);
+        let (nav, close) = self.debug_windows.render(id, &snap);
+        match nav {
+            Some(PanelNav::MemAddr(d)) => match panel {
+                DebugPanel::CpuMemory => {
+                    self.cpu_mem_addr =
+                        (i64::from(self.cpu_mem_addr) + d).rem_euclid(0x100_0000) as u32;
+                }
+                DebugPanel::Spc700Memory => {
+                    self.spc_mem_addr =
+                        (i64::from(self.spc_mem_addr) + d).rem_euclid(0x1_0000) as u16;
+                }
+                _ => {}
+            },
+            Some(PanelNav::DisasmGotoPc) => {
+                // Re-anchor at the live PC, read fresh from the emulator.
+                let pc = self.emu.lock().ok().and_then(|mut g| {
+                    g.as_mut().and_then(|em| {
+                        if panel == DebugPanel::CpuDisasm {
+                            em.cpu_state()
+                                .ok()
+                                .map(|c| (u32::from(c.pb) << 16) | u32::from(c.pc))
+                        } else {
+                            em.spc700_state().ok().map(|s| u32::from(s.pc))
+                        }
+                    })
+                });
+                if let Some(pc) = pc {
+                    if panel == DebugPanel::CpuDisasm {
+                        self.cpu_disasm_addr = pc & 0xFF_FFFF;
+                    } else {
+                        self.spc_disasm_addr = pc as u16;
+                    }
+                }
+            }
+            Some(PanelNav::DisasmSetAddr(a)) => {
+                if panel == DebugPanel::CpuDisasm {
+                    self.cpu_disasm_addr = a & 0xFF_FFFF;
+                } else {
+                    self.spc_disasm_addr = a as u16;
+                }
+            }
+            Some(PanelNav::DisasmSetLines(n)) => {
+                let n = n.clamp(4, 128);
+                if panel == DebugPanel::CpuDisasm {
+                    self.cpu_disasm_lines = n;
+                } else {
+                    self.spc_disasm_lines = n;
+                }
+            }
+            Some(PanelNav::TilemapSetBg(bg)) => {
+                self.tilemap_bg = bg.min(3);
+            }
+            None => {}
+        }
+        if close {
+            self.debug_windows.close(id);
+        }
+    }
+
     fn dispatch_menu_action(&mut self, action: MenuAction, event_loop: &ActiveEventLoop) {
         match action {
             MenuAction::OpenRom => self.open_rom_dialog(),
@@ -611,13 +814,31 @@ impl LunaApp {
             }
             MenuAction::PauseToggle => self.toggle_pause(),
             MenuAction::Reset => self.reset(),
-            MenuAction::ToggleCpuState => self.show_cpu_state = !self.show_cpu_state,
-            MenuAction::ToggleSprites => self.show_sprites = !self.show_sprites,
-            MenuAction::ToggleMemory => self.show_memory = !self.show_memory,
-            MenuAction::MemPagePrev => self.mem_offset = self.mem_offset.wrapping_sub(256),
-            MenuAction::MemPageNext => self.mem_offset = self.mem_offset.wrapping_add(256),
-            MenuAction::MemBankToggle => {
-                self.mem_bank = if self.mem_bank == 0x7E { 0x7F } else { 0x7E };
+            MenuAction::ToggleCpuState => self.debug_windows.toggle(event_loop, DebugPanel::Cpu),
+            MenuAction::ToggleCpuMemory => {
+                self.debug_windows.toggle(event_loop, DebugPanel::CpuMemory);
+            }
+            MenuAction::ToggleCpuDisasm => {
+                self.debug_windows.toggle(event_loop, DebugPanel::CpuDisasm);
+            }
+            MenuAction::ToggleSpc700 => self.debug_windows.toggle(event_loop, DebugPanel::Spc700),
+            MenuAction::ToggleSpc700Memory => {
+                self.debug_windows
+                    .toggle(event_loop, DebugPanel::Spc700Memory);
+            }
+            MenuAction::ToggleSpc700Disasm => {
+                self.debug_windows
+                    .toggle(event_loop, DebugPanel::Spc700Disasm);
+            }
+            MenuAction::ToggleSprites => self.debug_windows.toggle(event_loop, DebugPanel::Sprites),
+            MenuAction::ToggleRegisters => {
+                self.debug_windows.toggle(event_loop, DebugPanel::Registers);
+            }
+            MenuAction::TogglePalette => {
+                self.debug_windows.toggle(event_loop, DebugPanel::Palette);
+            }
+            MenuAction::ToggleTilemap => {
+                self.debug_windows.toggle(event_loop, DebugPanel::Tilemap);
             }
             MenuAction::ToggleInputConfig => {
                 self.show_input_config = !self.show_input_config;

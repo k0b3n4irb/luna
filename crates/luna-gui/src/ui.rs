@@ -30,11 +30,31 @@ pub(crate) enum MenuAction {
     SaveBindings,
     // Debug panels (api-first: data comes from `luna_api::Emulator`).
     ToggleCpuState,
+    ToggleCpuMemory,
+    ToggleCpuDisasm,
+    ToggleSpc700,
+    ToggleSpc700Memory,
+    ToggleSpc700Disasm,
     ToggleSprites,
-    ToggleMemory,
-    MemPagePrev,
-    MemPageNext,
-    MemBankToggle,
+    ToggleRegisters,
+    TogglePalette,
+    ToggleTilemap,
+}
+
+/// A navigation request a debug panel's toolbar emits this frame, applied
+/// by `LunaApp` to the panel's cursor state.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum PanelNav {
+    /// Move a memory viewer's address cursor by a signed byte delta.
+    MemAddr(i64),
+    /// Re-anchor the disassembly at the live program counter.
+    DisasmGotoPc,
+    /// Set the disassembly start address (from the editable field).
+    DisasmSetAddr(u32),
+    /// Set the disassembly line count (from the editable field).
+    DisasmSetLines(u16),
+    /// Select which BG layer (0..3) the Tilemap Viewer renders.
+    TilemapSetBg(usize),
 }
 
 /// Per-frame snapshot of `luna-api` introspection, built by `LunaApp` only
@@ -43,9 +63,28 @@ pub(crate) enum MenuAction {
 #[derive(Default)]
 pub(crate) struct DebugSnapshot {
     pub cpu: Option<luna_api::CpuState>,
+    pub spc700: Option<luna_api::Spc700State>,
     pub sprites: Option<Vec<luna_api::SpriteInfo>>,
-    /// `(bank, offset, bytes)` for the hex viewer.
-    pub memory: Option<(u8, u16, Vec<u8>)>,
+    /// `(addr24, bytes)` — CPU-bus hex viewer at a full 24-bit address.
+    pub cpu_memory: Option<(u32, Vec<u8>)>,
+    /// `(addr16, bytes)` — SPC700 ARAM hex viewer.
+    pub spc_memory: Option<(u16, Vec<u8>)>,
+    /// SPC700 disassembly lines from the current start address.
+    pub spc_disasm: Option<Vec<luna_api::DisasmLine>>,
+    /// The SPC700 disassembly line count (for the toolbar).
+    pub spc_disasm_lines: u16,
+    /// 65c816 disassembly lines from the current start address.
+    pub cpu_disasm: Option<Vec<luna_api::DisasmLine>>,
+    /// The CPU disassembly line count (for the toolbar).
+    pub cpu_disasm_lines: u16,
+    /// Full emulator snapshot for the Register Viewer (raw I/O values).
+    pub registers: Option<luna_api::EmulatorState>,
+    /// 256 raw BGR555 CGRAM entries for the Palette Viewer.
+    pub palette: Option<Vec<u16>>,
+    /// Decoded tilemap image for the Tilemap Viewer.
+    pub tilemap: Option<luna_api::TilemapImage>,
+    /// Which BG layer (0..3) the Tilemap Viewer currently shows.
+    pub tilemap_bg: usize,
 }
 
 /// State the egui overlay reads to drive its widgets — passed in by
@@ -57,9 +96,15 @@ pub(crate) struct UiState<'a> {
     pub key_bindings: &'a crate::input::KeyBindings,
     /// Which debug panels are open + their snapshotted data.
     pub show_cpu_state: bool,
+    pub show_cpu_memory: bool,
+    pub show_cpu_disasm: bool,
+    pub show_spc700: bool,
+    pub show_spc700_memory: bool,
+    pub show_spc700_disasm: bool,
     pub show_sprites: bool,
-    pub show_memory: bool,
-    pub debug: DebugSnapshot,
+    pub show_registers: bool,
+    pub show_palette: bool,
+    pub show_tilemap: bool,
     /// When `Some`, the input modal is waiting on the user to press a
     /// key to rebind the named SNES button.
     pub pending_rebind: Option<crate::input::SnesButton>,
@@ -127,11 +172,9 @@ impl UiOverlay {
             if state.show_input_config {
                 draw_input_config(ui.ctx(), state, &mut emit);
             }
-            // All enabled debug views render as a vertical collapsible list in
-            // one "Debug" window (no overlapping per-view windows).
-            if state.show_cpu_state || state.show_sprites || state.show_memory {
-                draw_debug_panel(ui.ctx(), state, &mut emit);
-            }
+            // Debug views live in their own native OS windows (see
+            // `crate::debug_window`), not in this overlay — so they can be
+            // dragged anywhere on the desktop, outside the game window.
         });
         self.winit_state
             .handle_platform_output(window, full_output.platform_output);
@@ -175,7 +218,7 @@ impl UiOverlay {
 }
 
 #[allow(deprecated)]
-fn install_dark_theme(ctx: &egui::Context) {
+pub(crate) fn install_dark_theme(ctx: &egui::Context) {
     use egui::{Color32, Stroke, Visuals, epaint::Shadow};
     let mut visuals = Visuals::dark();
     // Luna palette — quiet purple-blue accent on near-black surfaces.
@@ -305,48 +348,116 @@ fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<
         });
 }
 
+/// Restyle the current `ui`'s widget visuals so an interactive widget
+/// (e.g. a `DragValue`) renders as a blue cell, matching [`value_chip`].
+/// Call inside a `ui.scope(...)` so the override is local.
+fn style_blue_field(ui: &mut egui::Ui) {
+    let fill = egui::Color32::from_rgb(38, 60, 108);
+    let stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(96, 132, 205));
+    let text = egui::Color32::from_rgb(226, 232, 248);
+    let w = &mut ui.visuals_mut().widgets;
+    for s in [&mut w.inactive, &mut w.hovered, &mut w.active] {
+        s.weak_bg_fill = fill;
+        s.bg_fill = fill;
+        s.bg_stroke = stroke;
+        s.fg_stroke.color = text;
+    }
+    w.hovered.weak_bg_fill = egui::Color32::from_rgb(50, 78, 140);
+}
+
+/// A register value rendered as a blue framed cell — the ness debugger's
+/// signature look for live values.
+fn value_chip(ui: &mut egui::Ui, text: &str) {
+    egui::Frame::new()
+        .fill(egui::Color32::from_rgb(38, 60, 108))
+        .stroke(egui::Stroke::new(
+            1.5,
+            egui::Color32::from_rgb(96, 132, 205),
+        ))
+        .inner_margin(egui::Margin::symmetric(6, 2))
+        .corner_radius(egui::CornerRadius::same(3))
+        .show(ui, |ui| {
+            ui.monospace(egui::RichText::new(text).color(egui::Color32::from_rgb(226, 232, 248)));
+        });
+}
+
+/// `label:` followed by one or more blue value chips, as one grid row.
+fn reg_row(ui: &mut egui::Ui, label: &str, values: &[String]) {
+    ui.monospace(label);
+    ui.horizontal(|ui| {
+        for v in values {
+            value_chip(ui, v);
+        }
+    });
+    ui.end_row();
+}
+
+/// Processor-status flags as a row of blue 0/1 chips with the flag
+/// letter centred beneath each chip (ness style). Each flag is a
+/// fixed-width, centre-aligned mini-column so the chip and its letter
+/// share an axis. `bits` is MSB→LSB.
+fn psw_flags(ui: &mut egui::Ui, p: u8, bits: &[(u8, char)]) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for &(mask, name) in bits {
+            ui.allocate_ui_with_layout(
+                egui::vec2(22.0, 42.0),
+                egui::Layout::top_down(egui::Align::Center),
+                |ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    value_chip(ui, if p & mask != 0 { "1" } else { "0" });
+                    ui.monospace(name.to_string());
+                },
+            );
+        }
+    });
+}
+
 /// Body of the CPU-state debug view (65c816 register file + decoded flags).
-fn cpu_state_body(ui: &mut egui::Ui, state: &UiState<'_>) {
-    let Some(c) = state.debug.cpu.as_ref() else {
+pub(crate) fn cpu_state_body(ui: &mut egui::Ui, snap: &DebugSnapshot) {
+    let Some(c) = snap.cpu.as_ref() else {
         ui.label("(no ROM loaded)");
         return;
     };
-    egui::Grid::new("cpu_regs").num_columns(2).show(ui, |ui| {
-        let row = |ui: &mut egui::Ui, k: &str, v: String| {
-            ui.monospace(k);
-            ui.monospace(v);
-            ui.end_row();
-        };
-        row(ui, "A", format!("{:04X}", c.a));
-        row(ui, "X", format!("{:04X}", c.x));
-        row(ui, "Y", format!("{:04X}", c.y));
-        row(ui, "SP", format!("{:04X}", c.sp));
-        row(ui, "DP", format!("{:04X}", c.dp));
-        row(ui, "PB:PC", format!("{:02X}:{:04X}", c.pb, c.pc));
-        row(ui, "DB", format!("{:02X}", c.db));
+    egui::Grid::new("cpu_regs")
+        .num_columns(2)
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| {
+            reg_row(ui, "A", &[format!("{:04X}", c.a)]);
+            reg_row(ui, "X", &[format!("{:04X}", c.x)]);
+            reg_row(ui, "Y", &[format!("{:04X}", c.y)]);
+            reg_row(ui, "SP", &[format!("{:04X}", c.sp)]);
+            reg_row(ui, "DP", &[format!("{:04X}", c.dp)]);
+            reg_row(
+                ui,
+                "PB:PC",
+                &[format!("{:02X}", c.pb), format!("{:04X}", c.pc)],
+            );
+            reg_row(ui, "DB", &[format!("{:02X}", c.db)]);
+        });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.monospace("P");
+        value_chip(ui, &format!("{:02X}", c.p));
+        ui.add_space(8.0);
+        ui.monospace("E");
+        value_chip(ui, &format!("{}", u8::from(c.e)));
     });
-    ui.separator();
-    let p = c.p;
-    let f = |bit: u8, name: char| {
-        if p & bit != 0 {
-            name.to_ascii_uppercase()
-        } else {
-            name.to_ascii_lowercase()
-        }
-    };
-    ui.monospace(format!(
-        "P={:02X}  {}{}{}{}{}{}{}{}  E={}",
-        p,
-        f(0x80, 'N'),
-        f(0x40, 'V'),
-        f(0x20, 'M'),
-        f(0x10, 'X'),
-        f(0x08, 'D'),
-        f(0x04, 'I'),
-        f(0x02, 'Z'),
-        f(0x01, 'C'),
-        u8::from(c.e),
-    ));
+    ui.add_space(4.0);
+    psw_flags(
+        ui,
+        c.p,
+        &[
+            (0x80, 'N'),
+            (0x40, 'V'),
+            (0x20, 'M'),
+            (0x10, 'X'),
+            (0x08, 'D'),
+            (0x04, 'I'),
+            (0x02, 'Z'),
+            (0x01, 'C'),
+        ],
+    );
     if c.stopped {
         ui.colored_label(egui::Color32::RED, "STOPPED");
     }
@@ -355,9 +466,510 @@ fn cpu_state_body(ui: &mut egui::Ui, state: &UiState<'_>) {
     }
 }
 
+/// Body of the SPC700 (audio CPU) debug view — register file + flags.
+pub(crate) fn spc700_body(ui: &mut egui::Ui, snap: &DebugSnapshot) {
+    let Some(c) = snap.spc700.as_ref() else {
+        ui.label("(no ROM loaded)");
+        return;
+    };
+    egui::Grid::new("spc_regs")
+        .num_columns(2)
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| {
+            reg_row(ui, "A", &[format!("{:02X}", c.a)]);
+            reg_row(ui, "X", &[format!("{:02X}", c.x)]);
+            reg_row(ui, "Y", &[format!("{:02X}", c.y)]);
+            reg_row(
+                ui,
+                "YA",
+                &[format!("{:04X}", (u16::from(c.y) << 8) | u16::from(c.a))],
+            );
+            reg_row(ui, "SP", &[format!("01{:02X}", c.sp)]);
+            reg_row(ui, "PC", &[format!("{:04X}", c.pc)]);
+        });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.monospace("PSW");
+        value_chip(ui, &format!("{:02X}", c.psw));
+    });
+    ui.add_space(4.0);
+    // SPC700 PSW: N V P B H I Z C.
+    psw_flags(
+        ui,
+        c.psw,
+        &[
+            (0x80, 'N'),
+            (0x40, 'V'),
+            (0x20, 'P'),
+            (0x10, 'B'),
+            (0x08, 'H'),
+            (0x04, 'I'),
+            (0x02, 'Z'),
+            (0x01, 'C'),
+        ],
+    );
+    if c.stopped {
+        ui.colored_label(egui::Color32::RED, "STOPPED");
+    }
+    if c.sleeping {
+        ui.colored_label(egui::Color32::YELLOW, "SLEEPING");
+    }
+}
+
+/// Egui-memory id holding the Register Viewer's live search filter.
+fn rv_filter_id() -> egui::Id {
+    egui::Id::new("reg_viewer_filter")
+}
+
+/// One `$AAAA  NAME  <chip>` row in a register-viewer grid. Skipped
+/// entirely when the live search filter (egui memory) matches neither
+/// the register name nor its address.
+fn rv_row(ui: &mut egui::Ui, addr: &str, name: &str, value: &str) {
+    let filter: String = ui
+        .ctx()
+        .data(|d| d.get_temp::<String>(rv_filter_id()))
+        .unwrap_or_default();
+    if !filter.is_empty() {
+        let f = filter.to_ascii_lowercase();
+        if !name.to_ascii_lowercase().contains(&f) && !addr.to_ascii_lowercase().contains(&f) {
+            return;
+        }
+    }
+    ui.monospace(addr);
+    ui.monospace(name);
+    value_chip(ui, value);
+    ui.end_row();
+}
+
+/// A faint section header for the register viewer.
+fn rv_header(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new(title).weak().small());
+    ui.separator();
+}
+
+/// Body of the Register Viewer — raw memory-mapped I/O register values
+/// grouped by component (CPU `$42xx`, PPU `$21xx`, DMA `$43xx`, APU/DSP).
+/// v1 is read-only and shows the raw value only (no per-field decoding).
+pub(crate) fn registers_body(ui: &mut egui::Ui, snap: &DebugSnapshot) {
+    let Some(s) = snap.registers.as_ref() else {
+        ui.label("(no ROM loaded)");
+        return;
+    };
+    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+
+    // Search box (filters rows by register name or address). The filter
+    // string lives in egui memory so each rv_row can consult it.
+    let mut filter: String = ui
+        .ctx()
+        .data(|d| d.get_temp::<String>(rv_filter_id()))
+        .unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.monospace("Search:");
+        ui.add(
+            egui::TextEdit::singleline(&mut filter)
+                .hint_text("name or $addr")
+                .desired_width(170.0),
+        );
+        if ui.button("Clear").clicked() {
+            filter.clear();
+        }
+    });
+    ui.ctx().data_mut(|d| d.insert_temp(rv_filter_id(), filter));
+
+    let b = |v: u8| format!("${v:02X}");
+    let w = |v: u16| format!("${v:04X}");
+
+    // --- CPU $4200-$421F ---
+    let c = &s.cpu_regs;
+    rv_header(ui, "CPU  $4200-$421F");
+    egui::Grid::new("rv_cpu")
+        .num_columns(3)
+        .spacing([12.0, 4.0])
+        .show(ui, |ui| {
+            rv_row(ui, "$4200", "NMITIMEN", &b(c.nmitimen));
+            rv_row(ui, "$4201", "WRIO", &b(c.wrio));
+            rv_row(ui, "$4202", "WRMPYA", &b(c.wrmpya));
+            rv_row(ui, "$4203", "WRMPYB", &b(c.wrmpyb));
+            rv_row(ui, "$4204", "WRDIV", &w(c.wrdiv));
+            rv_row(ui, "$4206", "WRDVDD", &b(c.wrdvdd));
+            rv_row(ui, "$4207", "HTIME", &w(c.htime));
+            rv_row(ui, "$4209", "VTIME", &w(c.vtime));
+            rv_row(ui, "$420B", "MDMAEN", &b(s.dma.mdmaen));
+            rv_row(ui, "$420C", "HDMAEN", &b(s.dma.hdmaen));
+            rv_row(ui, "$420D", "MEMSEL", &b(c.memsel));
+            rv_row(ui, "$4210", "RDNMI", &b(u8::from(c.nmi_flag)));
+            rv_row(ui, "$4211", "TIMEUP", &b(u8::from(c.irq_flag)));
+            rv_row(ui, "$4212", "HVBJOY", &b(c.hvbjoy));
+            rv_row(ui, "$4214", "RDDIV", &w(c.rddiv));
+            rv_row(ui, "$4216", "RDMPY", &w(c.rdmpy));
+            rv_row(ui, "$4218", "JOY1", &w(c.joy1));
+            rv_row(ui, "$421A", "JOY2", &w(c.joy2));
+        });
+
+    // --- PPU $2100-$213F ---
+    let p = &s.ppu;
+    rv_header(ui, "PPU  $2100-$213F");
+    egui::Grid::new("rv_ppu")
+        .num_columns(3)
+        .spacing([12.0, 4.0])
+        .show(ui, |ui| {
+            rv_row(ui, "$2100", "INIDISP", &b(p.inidisp));
+            rv_row(ui, "$2101", "OBSEL", &b(p.obsel));
+            rv_row(ui, "$2105", "BGMODE", &b(p.bgmode));
+            rv_row(ui, "$2106", "MOSAIC", &b(p.mosaic));
+            for (i, bg) in p.bgs.iter().enumerate() {
+                let n = i + 1;
+                rv_row(
+                    ui,
+                    &format!("$210{}", 6 + n),
+                    &format!("BG{n}SC"),
+                    &w(bg.tilemap_addr_words),
+                );
+                rv_row(
+                    ui,
+                    &format!("$210{:X}", 0xB + i / 2),
+                    &format!("BG{n}NBA"),
+                    &w(bg.char_addr_words),
+                );
+                rv_row(ui, "", &format!("BG{n}HOFS"), &w(bg.h_scroll));
+                rv_row(ui, "", &format!("BG{n}VOFS"), &w(bg.v_scroll));
+            }
+            rv_row(ui, "$211A", "M7SEL", &b(p.m7sel));
+            rv_row(ui, "$210D", "M7HOFS", &w(p.m7_hofs as u16));
+            rv_row(ui, "$210E", "M7VOFS", &w(p.m7_vofs as u16));
+            rv_row(ui, "$211B", "M7A", &w(p.m7a as u16));
+            rv_row(ui, "$211C", "M7B", &w(p.m7b as u16));
+            rv_row(ui, "$211D", "M7C", &w(p.m7c as u16));
+            rv_row(ui, "$211E", "M7D", &w(p.m7d as u16));
+            rv_row(ui, "$211F", "M7X", &w(p.m7x as u16));
+            rv_row(ui, "$2120", "M7Y", &w(p.m7y as u16));
+            rv_row(ui, "$2123", "W12SEL", &b(p.w12sel));
+            rv_row(ui, "$2124", "W34SEL", &b(p.w34sel));
+            rv_row(ui, "$2125", "WOBJSEL", &b(p.wobjsel));
+            rv_row(ui, "$2126", "WH0", &b(p.windows[0]));
+            rv_row(ui, "$2127", "WH1", &b(p.windows[1]));
+            rv_row(ui, "$2128", "WH2", &b(p.windows[2]));
+            rv_row(ui, "$2129", "WH3", &b(p.windows[3]));
+            rv_row(ui, "$212A", "WBGLOG", &b(p.wbglog));
+            rv_row(ui, "$212B", "WOBJLOG", &b(p.wobjlog));
+            rv_row(ui, "$212C", "TM", &b(p.tm));
+            rv_row(ui, "$212D", "TS", &b(p.ts));
+            rv_row(ui, "$212E", "TMW", &b(p.tmw));
+            rv_row(ui, "$212F", "TSW", &b(p.tsw));
+            rv_row(ui, "$2130", "CGWSEL", &b(p.cgwsel));
+            rv_row(ui, "$2131", "CGADSUB", &b(p.cgadsub));
+            rv_row(
+                ui,
+                "$2132",
+                "COLDATA",
+                &format!(
+                    "R{:02X} G{:02X} B{:02X}",
+                    p.coldata_r, p.coldata_g, p.coldata_b
+                ),
+            );
+            rv_row(ui, "$2133", "SETINI", &b(p.setini));
+            rv_row(
+                ui,
+                "$2134",
+                "MPY",
+                &format!("${:06X}", p.mpy as u32 & 0xFF_FFFF),
+            );
+            rv_row(ui, "$213E", "STAT77", &b(p.stat77));
+            rv_row(ui, "$213F", "STAT78", &b(p.stat78));
+            rv_row(ui, "$213C", "OPHCT", &w(p.ophct));
+            rv_row(ui, "$213D", "OPVCT", &w(p.opvct));
+        });
+
+    // --- DMA / HDMA $4300-$437F ---
+    rv_header(ui, "DMA / HDMA  $4300-$437F");
+    egui::Grid::new("rv_dma")
+        .num_columns(3)
+        .spacing([12.0, 4.0])
+        .show(ui, |ui| {
+            for (i, ch) in s.dma.channels.iter().enumerate() {
+                rv_row(ui, &format!("$43{i}0"), &format!("DMAP{i}"), &b(ch.params));
+                rv_row(ui, &format!("$43{i}1"), &format!("BBAD{i}"), &b(ch.bbad));
+                rv_row(
+                    ui,
+                    &format!("$43{i}2"),
+                    &format!("A1T{i}"),
+                    &format!("${:02X}:{:04X}", ch.a_bank, ch.a_addr),
+                );
+                rv_row(ui, &format!("$43{i}5"), &format!("DAS{i}"), &w(ch.das));
+                rv_row(ui, &format!("$43{i}7"), &format!("DASB{i}"), &b(ch.dasb));
+                rv_row(ui, &format!("$43{i}8"), &format!("A2A{i}"), &w(ch.a2a));
+                rv_row(ui, &format!("$43{i}A"), &format!("NTLR{i}"), &b(ch.ntlr));
+            }
+        });
+
+    // --- APU / DSP ---
+    let a = &s.apu;
+    rv_header(ui, "APU ports  $2140-$2143");
+    egui::Grid::new("rv_apu")
+        .num_columns(3)
+        .spacing([12.0, 4.0])
+        .show(ui, |ui| {
+            for i in 0..4 {
+                rv_row(
+                    ui,
+                    &format!("$214{i}"),
+                    &format!("APUIO{i}"),
+                    &b(a.to_cpu_ports[i]),
+                );
+            }
+        });
+    rv_header(ui, "S-DSP registers");
+    let dsp = |r: usize| a.dsp_regs.get(r).copied().unwrap_or(0);
+    egui::Grid::new("rv_dsp_voices")
+        .num_columns(3)
+        .spacing([12.0, 4.0])
+        .show(ui, |ui| {
+            for v in 0..8usize {
+                let base = v << 4;
+                rv_row(
+                    ui,
+                    &format!("${:02X}", base),
+                    &format!("V{v} VOLL"),
+                    &b(dsp(base)),
+                );
+                rv_row(
+                    ui,
+                    &format!("${:02X}", base + 1),
+                    &format!("V{v} VOLR"),
+                    &b(dsp(base + 1)),
+                );
+                rv_row(
+                    ui,
+                    &format!("${:02X}", base + 2),
+                    &format!("V{v} PITCHL"),
+                    &b(dsp(base + 2)),
+                );
+                rv_row(
+                    ui,
+                    &format!("${:02X}", base + 3),
+                    &format!("V{v} PITCHH"),
+                    &b(dsp(base + 3)),
+                );
+                rv_row(
+                    ui,
+                    &format!("${:02X}", base + 4),
+                    &format!("V{v} SRCN"),
+                    &b(dsp(base + 4)),
+                );
+                rv_row(
+                    ui,
+                    &format!("${:02X}", base + 5),
+                    &format!("V{v} ADSR1"),
+                    &b(dsp(base + 5)),
+                );
+                rv_row(
+                    ui,
+                    &format!("${:02X}", base + 6),
+                    &format!("V{v} ADSR2"),
+                    &b(dsp(base + 6)),
+                );
+                rv_row(
+                    ui,
+                    &format!("${:02X}", base + 7),
+                    &format!("V{v} GAIN"),
+                    &b(dsp(base + 7)),
+                );
+                rv_row(
+                    ui,
+                    &format!("${:02X}", base + 8),
+                    &format!("V{v} ENVX"),
+                    &b(dsp(base + 8)),
+                );
+                rv_row(
+                    ui,
+                    &format!("${:02X}", base + 9),
+                    &format!("V{v} OUTX"),
+                    &b(dsp(base + 9)),
+                );
+            }
+        });
+    egui::Grid::new("rv_dsp_global")
+        .num_columns(3)
+        .spacing([12.0, 4.0])
+        .show(ui, |ui| {
+            rv_row(ui, "$0C", "MVOLL", &b(dsp(0x0C)));
+            rv_row(ui, "$1C", "MVOLR", &b(dsp(0x1C)));
+            rv_row(ui, "$2C", "EVOLL", &b(dsp(0x2C)));
+            rv_row(ui, "$3C", "EVOLR", &b(dsp(0x3C)));
+            rv_row(ui, "$4C", "KON", &b(dsp(0x4C)));
+            rv_row(ui, "$5C", "KOF", &b(dsp(0x5C)));
+            rv_row(ui, "$6C", "FLG", &b(dsp(0x6C)));
+            rv_row(ui, "$7C", "ENDX", &b(dsp(0x7C)));
+            rv_row(ui, "$0D", "EFB", &b(dsp(0x0D)));
+            rv_row(ui, "$2D", "PMON", &b(dsp(0x2D)));
+            rv_row(ui, "$3D", "NON", &b(dsp(0x3D)));
+            rv_row(ui, "$4D", "EON", &b(dsp(0x4D)));
+            rv_row(ui, "$5D", "DIR", &b(dsp(0x5D)));
+            rv_row(ui, "$6D", "ESA", &b(dsp(0x6D)));
+            rv_row(ui, "$7D", "EDL", &b(dsp(0x7D)));
+            for n in 0..8usize {
+                let r = (n << 4) | 0x0F;
+                rv_row(ui, &format!("${r:02X}"), &format!("COEF{n}"), &b(dsp(r)));
+            }
+        });
+
+    // --- DSP-1 (uPD7725), only for DSP cartridges ---
+    if let Some(d) = s.dsp1.as_ref() {
+        rv_header(ui, "DSP-1  (uPD7725)");
+        egui::Grid::new("rv_dsp1")
+            .num_columns(3)
+            .spacing([12.0, 4.0])
+            .show(ui, |ui| {
+                rv_row(ui, "", "PC", &format!("${:04X}", d.pc));
+                rv_row(ui, "", "SR", &w(d.sr));
+                rv_row(ui, "", "DR", &w(d.dr));
+                rv_row(ui, "", "A", &w(d.a as u16));
+                rv_row(ui, "", "B", &w(d.b as u16));
+                rv_row(ui, "", "RQM", &b(u8::from(d.rqm)));
+            });
+    }
+}
+
+/// 5-bit colour channel → 8-bit, replicating the high bits (matches
+/// `luna_ppu::tile::scale_5_to_8`; duplicated here so the GUI stays off
+/// the lower crates — pure presentation maths on an API-provided value).
+const fn c5_to_8(c5: u8) -> u8 {
+    (c5 << 3) | (c5 >> 2)
+}
+
+/// Body of the Palette Viewer — the 256 CGRAM entries as a 16×16 swatch
+/// grid (index 0 top-left = backdrop). Hover a swatch for its index, raw
+/// BGR555 word, and decoded RGB triplet.
+pub(crate) fn palette_body(ui: &mut egui::Ui, snap: &DebugSnapshot) {
+    let Some(cgram) = snap.palette.as_ref() else {
+        ui.label("(no ROM loaded)");
+        return;
+    };
+    let cell = 20.0_f32;
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(1.0, 1.0);
+        for row in 0..16usize {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(1.0, 1.0);
+                for col in 0..16usize {
+                    let idx = row * 16 + col;
+                    let c = cgram.get(idx).copied().unwrap_or(0);
+                    let r = c5_to_8((c & 0x1F) as u8);
+                    let g = c5_to_8(((c >> 5) & 0x1F) as u8);
+                    let b = c5_to_8(((c >> 10) & 0x1F) as u8);
+                    let (rect, resp) =
+                        ui.allocate_exact_size(egui::vec2(cell, cell), egui::Sense::hover());
+                    let painter = ui.painter();
+                    painter.rect_filled(
+                        rect,
+                        egui::CornerRadius::same(2),
+                        egui::Color32::from_rgb(r, g, b),
+                    );
+                    painter.rect_stroke(
+                        rect,
+                        egui::CornerRadius::same(2),
+                        egui::Stroke::new(1.0, egui::Color32::from_gray(40)),
+                        egui::StrokeKind::Inside,
+                    );
+                    resp.on_hover_text(format!(
+                        "#{idx} (${idx:02X})\n${c:04X} BGR555\nRGB {r:02X} {g:02X} {b:02X}"
+                    ));
+                }
+            });
+        }
+    });
+}
+
+/// Body of the Tilemap Viewer — renders the selected BG layer's full
+/// tilemap (Mode 7 = the 128×128 field) as a texture, with a red rectangle
+/// overlay marking the on-screen viewport (from the layer's scroll).
+/// Returns a nav action when the BG selector is clicked.
+pub(crate) fn tilemap_body(ui: &mut egui::Ui, snap: &DebugSnapshot) -> Option<PanelNav> {
+    let mut nav = None;
+    // Mode 7 has a single BG plane, so only BG1 is meaningful — disable the
+    // others and say so, rather than letting all four look selectable.
+    let mode7 = snap.tilemap.as_ref().is_some_and(|t| t.is_mode7);
+    ui.horizontal(|ui| {
+        ui.monospace("BG:");
+        for bg in 0..4usize {
+            let enabled = !mode7 || bg == 0;
+            let selected = if mode7 {
+                bg == 0
+            } else {
+                snap.tilemap_bg == bg
+            };
+            let resp = ui.add_enabled(
+                enabled,
+                egui::Button::selectable(selected, format!("{}", bg + 1)),
+            );
+            if resp.clicked() {
+                nav = Some(PanelNav::TilemapSetBg(bg));
+            }
+        }
+        if mode7 {
+            ui.label(egui::RichText::new("Mode 7 — single plane").weak());
+        }
+    });
+    let Some(t) = snap.tilemap.as_ref() else {
+        ui.label("(no ROM loaded)");
+        return nav;
+    };
+    if t.bpp == 0 {
+        ui.label("(layer disabled in the current BG mode)");
+        return nav;
+    }
+    ui.monospace(format!(
+        "{}{}×{} tiles · {}bpp · {}×{} px",
+        if t.is_mode7 { "Mode 7 · " } else { "" },
+        t.cols,
+        t.rows,
+        t.bpp,
+        t.width,
+        t.height
+    ));
+    ui.separator();
+
+    let img =
+        egui::ColorImage::from_rgba_unmultiplied([t.width as usize, t.height as usize], &t.rgba);
+    let tex = ui
+        .ctx()
+        .load_texture("tilemap_view", img, egui::TextureOptions::NEAREST);
+    // Keep the handle alive past this frame: the debug-window renderer
+    // creates textures then frees them in the same pass, so a handle
+    // dropped here would be freed before the paint (→ black image).
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(egui::Id::new("tilemap_tex_keepalive"), tex.clone()));
+    let size = egui::vec2(t.width as f32, t.height as f32);
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    ui.painter().image(
+        tex.id(),
+        rect,
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        egui::Color32::WHITE,
+    );
+    // Viewport rectangle (skipped for Mode 7, view_w == 0): a single clean
+    // box at the scroll origin. It may run off the right/bottom edge when
+    // the camera straddles the tilemap wrap; the clip rect trims it rather
+    // than drawing a confusing second wrapped copy.
+    if t.view_w > 0 {
+        let painter = ui.painter().with_clip_rect(rect);
+        let stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 90, 90));
+        let min = rect.min + egui::vec2(t.view_x as f32, t.view_y as f32);
+        let vrect = egui::Rect::from_min_size(min, egui::vec2(t.view_w as f32, t.view_h as f32));
+        painter.rect_stroke(
+            vrect,
+            egui::CornerRadius::ZERO,
+            stroke,
+            egui::StrokeKind::Inside,
+        );
+    }
+    nav
+}
+
 /// Body of the sprite (OAM) debug view -- the 128 decoded sprites.
-fn sprites_body(ui: &mut egui::Ui, state: &UiState<'_>) {
-    let Some(sprites) = state.debug.sprites.as_ref() else {
+pub(crate) fn sprites_body(ui: &mut egui::Ui, snap: &DebugSnapshot) {
+    let Some(sprites) = snap.sprites.as_ref() else {
         ui.label("(no ROM loaded)");
         return;
     };
@@ -381,116 +993,234 @@ fn sprites_body(ui: &mut egui::Ui, state: &UiState<'_>) {
         });
 }
 
-/// Body of the memory hex-dump view. Returns the toolbar action (page / bank
-/// navigation) clicked this frame, if any, so the caller can emit it without
-/// the body needing a mutable `emit` borrow.
-fn memory_body(ui: &mut egui::Ui, state: &UiState<'_>) -> Option<MenuAction> {
-    let Some((bank, offset, bytes)) = state.debug.memory.as_ref() else {
+/// Render `bytes` as a Mesen2-style hex grid: a flat zero-padded address
+/// (`addr_digits` wide) per 16-byte row, `00` bytes dimmed and non-zero
+/// bytes bright, a vertical rule, then the ASCII gutter. The view's first
+/// byte (the cursor) gets a blue background. Per-byte colouring is built
+/// with a `LayoutJob` so each row is one galley.
+fn mem_hex_grid(ui: &mut egui::Ui, start: u32, bytes: &[u8], addr_digits: usize) {
+    use egui::text::{LayoutJob, TextFormat};
+
+    // Never wrap: a row's hex and ASCII must stay on one aligned line (the
+    // window/scroll-area handles any overflow).
+    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+
+    let mono = egui::FontId::monospace(13.0);
+    let c_addr = egui::Color32::from_rgb(118, 128, 150);
+    let c_zero = egui::Color32::from_rgb(74, 78, 92);
+    let c_byte = egui::Color32::from_rgb(220, 224, 236);
+    let c_sep = egui::Color32::from_rgb(64, 68, 86);
+    let c_dot = egui::Color32::from_rgb(74, 78, 92);
+    let c_chr = egui::Color32::from_rgb(176, 198, 168);
+    let cursor_bg = egui::Color32::from_rgb(38, 60, 108);
+
+    let fmt = |color: egui::Color32| TextFormat {
+        font_id: mono.clone(),
+        color,
+        ..Default::default()
+    };
+
+    for (r, chunk) in bytes.chunks(16).enumerate() {
+        let addr = start.wrapping_add((r as u32) * 16) & 0xFF_FFFF;
+        let mut job = LayoutJob::default();
+        job.append(&format!("{addr:0addr_digits$X}: "), 0.0, fmt(c_addr));
+        for (i, &b) in chunk.iter().enumerate() {
+            let mut f = fmt(if b == 0 { c_zero } else { c_byte });
+            if r == 0 && i == 0 {
+                f.background = cursor_bg;
+            }
+            job.append(&format!("{b:02X}"), 0.0, f);
+            job.append(" ", 0.0, fmt(c_zero));
+        }
+        for _ in chunk.len()..16 {
+            job.append("   ", 0.0, fmt(c_zero));
+        }
+        job.append("\u{2502} ", 0.0, fmt(c_sep));
+        for &b in chunk {
+            let (ch, col) = if (0x20..0x7F).contains(&b) {
+                (b as char, c_chr)
+            } else {
+                ('.', c_dot)
+            };
+            job.append(&ch.to_string(), 0.0, fmt(col));
+        }
+        ui.label(job);
+    }
+}
+
+/// Bottom toolbar for a memory view: the current address as a blue chip
+/// plus ±$100 / ±$1000 nav buttons. Returns the nav request if clicked.
+fn mem_nav(ui: &mut egui::Ui, start: u32, addr_digits: usize) -> Option<PanelNav> {
+    let mut nav = None;
+    ui.separator();
+    ui.horizontal(|ui| {
+        value_chip(ui, &format!("{start:0addr_digits$X}"));
+        ui.add_space(8.0);
+        if ui
+            .button("\u{25c0}\u{25c0}")
+            .on_hover_text("\u{2212}$1000")
+            .clicked()
+        {
+            nav = Some(PanelNav::MemAddr(-0x1000));
+        }
+        if ui
+            .button("\u{25c0}")
+            .on_hover_text("\u{2212}$100")
+            .clicked()
+        {
+            nav = Some(PanelNav::MemAddr(-0x100));
+        }
+        if ui.button("\u{25b6}").on_hover_text("+$100").clicked() {
+            nav = Some(PanelNav::MemAddr(0x100));
+        }
+        if ui
+            .button("\u{25b6}\u{25b6}")
+            .on_hover_text("+$1000")
+            .clicked()
+        {
+            nav = Some(PanelNav::MemAddr(0x1000));
+        }
+    });
+    nav
+}
+
+/// Body of the CPU Memory view — 256 bytes of the 24-bit CPU bus at the
+/// current address. Returns the nav request from the toolbar, if any.
+pub(crate) fn cpu_memory_body(ui: &mut egui::Ui, snap: &DebugSnapshot) -> Option<PanelNav> {
+    let Some((addr, bytes)) = snap.cpu_memory.as_ref() else {
         ui.label("(no ROM loaded)");
         return None;
     };
-    let (bank, offset) = (*bank, *offset);
-    let mut action = None;
+    mem_hex_grid(ui, *addr, bytes, 6);
+    mem_nav(ui, *addr, 6)
+}
+
+/// Body of the SPC700 Memory view — 256 bytes of the flat 64 KiB ARAM.
+pub(crate) fn spc700_memory_body(ui: &mut egui::Ui, snap: &DebugSnapshot) -> Option<PanelNav> {
+    let Some((addr, bytes)) = snap.spc_memory.as_ref() else {
+        ui.label("(no ROM loaded)");
+        return None;
+    };
+    mem_hex_grid(ui, u32::from(*addr), bytes, 4);
+    mem_nav(ui, u32::from(*addr), 4)
+}
+
+/// Body of the SPC700 disassembly view — a live listing from the current
+/// PC (`ADDR: BYTES   MNEMONIC`), the PC line given the blue cursor
+/// background. Read-only / follow-execution.
+/// Shared body for the SPC700 / CPU disassembly panels: a toolbar
+/// (Follow-PC, address, scroll, line count) over a live instruction
+/// listing with the PC line highlighted. `addr_digits` is 4 for ARAM,
+/// 6 for the 24-bit CPU bus. Returns the toolbar's nav request.
+fn disasm_body(
+    ui: &mut egui::Ui,
+    lines: &[luna_api::DisasmLine],
+    line_count: u16,
+    addr_digits: usize,
+    max_addr: u32,
+) -> Option<PanelNav> {
+    use egui::text::{LayoutJob, TextFormat};
+
+    let start = lines.first().map_or(0, |l| l.addr);
+    let mut nav = None;
+
+    // Toolbar (ness layout): jump-to-PC button, an editable hex start
+    // address, and an editable line count. Type an address + Enter, or
+    // double-click the value to edit / drag to scrub.
     ui.horizontal(|ui| {
-        if ui.button("\u{25c0} \u{2212}256").clicked() {
-            action = Some(MenuAction::MemPagePrev);
+        if ui
+            .button("Disassemble at PC")
+            .on_hover_text("Re-anchor the listing at the live program counter")
+            .clicked()
+        {
+            nav = Some(PanelNav::DisasmGotoPc);
         }
-        if ui.button("+256 \u{25b6}").clicked() {
-            action = Some(MenuAction::MemPageNext);
+        let mut addr = start;
+        let addr_resp = ui
+            .scope(|ui| {
+                style_blue_field(ui);
+                ui.add(
+                    egui::DragValue::new(&mut addr)
+                        .range(0..=max_addr)
+                        .hexadecimal(addr_digits, false, true)
+                        .speed(1.0),
+                )
+            })
+            .inner;
+        if addr_resp
+            .on_hover_text("Start address (double-click to type)")
+            .changed()
+        {
+            nav = Some(PanelNav::DisasmSetAddr(addr));
         }
-        if ui.button(format!("bank ${bank:02X}")).clicked() {
-            action = Some(MenuAction::MemBankToggle);
+        ui.add_space(8.0);
+        ui.label("Lines:");
+        let mut n = line_count;
+        let lines_resp = ui
+            .scope(|ui| {
+                style_blue_field(ui);
+                ui.add(egui::DragValue::new(&mut n).range(4..=128).speed(0.25))
+            })
+            .inner;
+        if lines_resp.changed() {
+            nav = Some(PanelNav::DisasmSetLines(n));
         }
     });
     ui.separator();
-    for (r, chunk) in bytes.chunks(16).enumerate() {
-        let addr = offset.wrapping_add((r * 16) as u16);
-        let hex = chunk
-            .iter()
-            .map(|b| format!("{b:02X}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let ascii: String = chunk
-            .iter()
-            .map(|&b| {
-                if (0x20..0x7F).contains(&b) {
-                    b as char
-                } else {
-                    '.'
-                }
-            })
-            .collect();
-        ui.monospace(format!("{bank:02X}:{addr:04X}  {hex:<48}{ascii}"));
-    }
-    action
-}
+    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
 
-/// A Debug-list section header: the title plus a right-aligned close button
-/// that sets `close` when clicked (the caller emits the matching Toggle).
-fn section_title(ui: &mut egui::Ui, title: &str, close: &mut bool) {
-    ui.strong(title);
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        if ui.small_button("\u{2715}").on_hover_text("Close").clicked() {
-            *close = true;
+    let mono = egui::FontId::monospace(13.0);
+    let c_addr = egui::Color32::from_rgb(118, 128, 150);
+    let c_bytes = egui::Color32::from_rgb(120, 124, 140);
+    let c_text = egui::Color32::from_rgb(222, 226, 238);
+    let cursor_bg = egui::Color32::from_rgb(38, 60, 108);
+
+    for line in lines {
+        let bg = if line.is_pc {
+            cursor_bg
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        let fmt = |color| TextFormat {
+            font_id: mono.clone(),
+            color,
+            background: bg,
+            ..Default::default()
+        };
+        let mut raw = String::with_capacity(line.bytes.len() * 3);
+        for b in &line.bytes {
+            use std::fmt::Write;
+            let _ = write!(raw, "{b:02X} ");
         }
-    });
+        let mut job = LayoutJob::default();
+        job.append(
+            &format!("{:0addr_digits$X}:  ", line.addr),
+            0.0,
+            fmt(c_addr),
+        );
+        job.append(&format!("{raw:<13}"), 0.0, fmt(c_bytes));
+        job.append(&line.text, 0.0, fmt(c_text));
+        ui.label(job);
+    }
+    nav
 }
 
-/// The unified Debug panel: every enabled view stacked as a vertical list of
-/// collapsible sections in one window, instead of separate floating windows.
-fn draw_debug_panel<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>, emit: &mut F) {
-    egui::Window::new("Debug")
-        .default_pos([24.0, 48.0])
-        .default_size([380.0, 520.0])
-        .show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                if state.show_cpu_state {
-                    let mut close = false;
-                    egui::collapsing_header::CollapsingState::load_with_default_open(
-                        ctx,
-                        ui.make_persistent_id("dbg-cpu"),
-                        true,
-                    )
-                    .show_header(ui, |ui| {
-                        section_title(ui, "CPU \u{2014} 65c816", &mut close);
-                    })
-                    .body(|ui| cpu_state_body(ui, state));
-                    if close {
-                        emit(MenuAction::ToggleCpuState);
-                    }
-                }
-                if state.show_sprites {
-                    let mut close = false;
-                    egui::collapsing_header::CollapsingState::load_with_default_open(
-                        ctx,
-                        ui.make_persistent_id("dbg-spr"),
-                        true,
-                    )
-                    .show_header(ui, |ui| section_title(ui, "Sprites (OAM)", &mut close))
-                    .body(|ui| sprites_body(ui, state));
-                    if close {
-                        emit(MenuAction::ToggleSprites);
-                    }
-                }
-                if state.show_memory {
-                    let mut close = false;
-                    let mut mem_action = None;
-                    egui::collapsing_header::CollapsingState::load_with_default_open(
-                        ctx,
-                        ui.make_persistent_id("dbg-mem"),
-                        true,
-                    )
-                    .show_header(ui, |ui| section_title(ui, "Memory (hex)", &mut close))
-                    .body(|ui| mem_action = memory_body(ui, state));
-                    if close {
-                        emit(MenuAction::ToggleMemory);
-                    }
-                    if let Some(a) = mem_action {
-                        emit(a);
-                    }
-                }
-            });
-        });
+/// Body of the SPC700 disassembly view.
+pub(crate) fn spc700_disasm_body(ui: &mut egui::Ui, snap: &DebugSnapshot) -> Option<PanelNav> {
+    let Some(lines) = snap.spc_disasm.as_ref() else {
+        ui.label("(no ROM loaded)");
+        return None;
+    };
+    disasm_body(ui, lines, snap.spc_disasm_lines, 4, 0xFFFF)
+}
+
+/// Body of the CPU (65c816) disassembly view.
+pub(crate) fn cpu_disasm_body(ui: &mut egui::Ui, snap: &DebugSnapshot) -> Option<PanelNav> {
+    let Some(lines) = snap.cpu_disasm.as_ref() else {
+        ui.label("(no ROM loaded)");
+        return None;
+    };
+    disasm_body(ui, lines, snap.cpu_disasm_lines, 6, 0xFF_FFFF)
 }
 
 #[allow(deprecated)]
@@ -537,6 +1267,9 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>,
                     }
                 });
                 ui.menu_button("Debug", |ui| {
+                    // Grouped by subsystem (CPU / SPC700 / PPU), separated by
+                    // a light rule, Mesen2-style.
+                    ui.label(egui::RichText::new("CPU").weak().small());
                     if ui
                         .selectable_label(state.show_cpu_state, "CPU state")
                         .clicked()
@@ -545,6 +1278,45 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>,
                         ui.close();
                     }
                     if ui
+                        .selectable_label(state.show_cpu_memory, "CPU memory")
+                        .clicked()
+                    {
+                        emit(MenuAction::ToggleCpuMemory);
+                        ui.close();
+                    }
+                    if ui
+                        .selectable_label(state.show_cpu_disasm, "CPU disassembly")
+                        .clicked()
+                    {
+                        emit(MenuAction::ToggleCpuDisasm);
+                        ui.close();
+                    }
+                    ui.separator();
+                    ui.label(egui::RichText::new("SPC700").weak().small());
+                    if ui
+                        .selectable_label(state.show_spc700, "SPC700 state")
+                        .clicked()
+                    {
+                        emit(MenuAction::ToggleSpc700);
+                        ui.close();
+                    }
+                    if ui
+                        .selectable_label(state.show_spc700_memory, "SPC700 memory")
+                        .clicked()
+                    {
+                        emit(MenuAction::ToggleSpc700Memory);
+                        ui.close();
+                    }
+                    if ui
+                        .selectable_label(state.show_spc700_disasm, "SPC700 disassembly")
+                        .clicked()
+                    {
+                        emit(MenuAction::ToggleSpc700Disasm);
+                        ui.close();
+                    }
+                    ui.separator();
+                    ui.label(egui::RichText::new("PPU").weak().small());
+                    if ui
                         .selectable_label(state.show_sprites, "Sprites (OAM)")
                         .clicked()
                     {
@@ -552,10 +1324,23 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>,
                         ui.close();
                     }
                     if ui
-                        .selectable_label(state.show_memory, "Memory (hex)")
+                        .selectable_label(state.show_palette, "Palette (CGRAM)")
                         .clicked()
                     {
-                        emit(MenuAction::ToggleMemory);
+                        emit(MenuAction::TogglePalette);
+                        ui.close();
+                    }
+                    if ui.selectable_label(state.show_tilemap, "Tilemap").clicked() {
+                        emit(MenuAction::ToggleTilemap);
+                        ui.close();
+                    }
+                    ui.separator();
+                    ui.label(egui::RichText::new("System").weak().small());
+                    if ui
+                        .selectable_label(state.show_registers, "Registers")
+                        .clicked()
+                    {
+                        emit(MenuAction::ToggleRegisters);
                         ui.close();
                     }
                 });

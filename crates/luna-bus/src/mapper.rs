@@ -20,6 +20,10 @@ pub enum MapperKind {
     Sa1,
     /// Super FX mapping (Star Fox, Yoshi's Island, Doom).
     SuperFx,
+    /// NEC DSP-1 coprocessor (Super Mario Kart, Pilotwings, …). The base
+    /// ROM layout is `LoROM` or `HiROM` depending on the board; the chip is
+    /// driven through a `Dsp1Mapper` shim in luna-core.
+    Dsp1,
     /// S-DD1 (Star Ocean, Street Fighter Alpha 2).
     Sdd1,
     /// SPC7110 (Far East of Eden Zero).
@@ -42,6 +46,7 @@ impl MapperKind {
             "exhirom" => Some(Self::ExHiRom),
             "sa1" => Some(Self::Sa1),
             "superfx" => Some(Self::SuperFx),
+            "dsp1" => Some(Self::Dsp1),
             "sdd1" => Some(Self::Sdd1),
             "spc7110" => Some(Self::Spc7110),
             _ => None,
@@ -73,6 +78,18 @@ pub trait Mapper {
 
     /// Size of the SRAM in bytes (0 if none).
     fn sram_size(&self) -> usize;
+
+    /// Re-power the cartridge coprocessor to its power-on state, as the
+    /// SNES reset line does on real hardware (ares `SuperFX::power()` /
+    /// `SA1::power()`). ROM and battery-backed SRAM persist; the
+    /// coprocessor's registers, internal RAM, caches and its own CPU
+    /// return to power-on. Default = no-op for plain `LoROM` / `HiROM`
+    /// carts, which have no coprocessor state to clear.
+    ///
+    /// Without this, `Snes::reset` re-runs the main-CPU reset vector but
+    /// leaves a coprocessor (Super FX / SA-1) mid-execution, so a reset
+    /// of a Super FX title (e.g. Doom) freezes instead of rebooting.
+    fn reset(&mut self) {}
 
     /// Step the cartridge coprocessor (SA-1 / Super FX / DSP-1 / …)
     /// forward by approximately `main_mclk` master cycles of main-CPU
@@ -108,6 +125,12 @@ pub trait Mapper {
     /// Used by luna-api to expose SA-1 PC / running state to debug
     /// integrations diagnosing main↔SA-1 mailbox deadlocks.
     fn sa1_snapshot(&self) -> Option<Sa1Snapshot> {
+        None
+    }
+
+    /// A read-only DSP-1 (uPD7725) state snapshot for the debugger, or
+    /// `None` for non-DSP mappers.
+    fn dsp1_snapshot(&self) -> Option<Dsp1Snapshot> {
         None
     }
 
@@ -228,4 +251,21 @@ pub struct Sa1Snapshot {
     pub p: u8,
     /// `true` while CCNT.5 is clear (chip released from reset).
     pub running: bool,
+}
+
+/// A read-only snapshot of the DSP-1 (NEC uPD7725) for the debugger.
+#[derive(Debug, Clone, Copy)]
+pub struct Dsp1Snapshot {
+    /// Program counter.
+    pub pc: u16,
+    /// Status register (`SR`).
+    pub sr: u16,
+    /// Accumulator A.
+    pub a: i16,
+    /// Accumulator B.
+    pub b: i16,
+    /// Data register (`DR`, CPU port).
+    pub dr: u16,
+    /// `RQM` — set when the chip is waiting on the master.
+    pub rqm: bool,
 }

@@ -226,6 +226,21 @@ fn run(
             // 2026-06-10: the CLI render path, which never held, shows
             // Williams→black→DOOM at full brightness — the core is correct.)
             let cur_frame = em.frame_count().unwrap_or(last_emu_frame);
+            // A frame-count regression means the core was reset (or a new
+            // ROM loaded): `reset` zeroes frame_count. The `emu_dead`
+            // latch lives in this thread, so `Emulator::reset` cannot
+            // clear it — without this, a core that panicked once stays
+            // frozen forever and a subsequent `Reset` never reboots the
+            // ROM (the reported Doom symptom). Clear the per-thread
+            // latches so the reset actually resumes stepping.
+            if last_emu_frame != u64::MAX && cur_frame < last_emu_frame {
+                eprintln!(
+                    "luna-emu: reset detected (frame {last_emu_frame} -> {cur_frame}); \
+                     emu_dead was {emu_dead}, resuming"
+                );
+                emu_dead = false;
+                blank_run = 0;
+            }
             if cur_frame != last_emu_frame {
                 last_emu_frame = cur_frame;
                 let publish = if em.frame_showed_content().unwrap_or(true) {
