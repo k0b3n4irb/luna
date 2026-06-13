@@ -1,20 +1,31 @@
 # Controller bindings
 
-## Player 1 keyboard layout
+luna emulates a **single controller (Player 1)** only. A second controller
+(Player 2), the SNES **Mouse**, and the **Super Scope** are **not yet
+supported**. (The CLI/MCP `set_joypad(port, mask)` API can inject bitmasks for
+either port for scripted/agent input, but the GUI only wires Player 1 from the
+keyboard.)
 
-Wired in `luna-gui/src/app.rs`:
+## Player 1 keyboard layout (defaults)
+
+Defaults are the Mesen2 arrow-key preset; the source of truth is
+`luna-gui/src/input.rs` (`KeyBindings::default`). Bindings are stored by
+physical `KeyCode` (layout-agnostic), so the key *positions* hold on
+AZERTY/QWERTZ. Remap them in the GUI's input-config dialog.
 
 | Keyboard         | SNES button | JOY1 bit |
 |------------------|-------------|---------:|
-| `Z`              | B           | 15       |
-| `A`              | Y           | 14       |
-| Right `Shift`    | Select      | 13       |
-| `Enter`          | Start       | 12       |
+| `A`              | B           | 15       |
+| `Z`              | Y           | 14       |
+| `E`              | Select      | 13       |
+| `D`              | Start       | 12       |
 | `↑` `↓` `←` `→`  | D-pad       | 11..8    |
-| `X`              | A           | 7        |
-| `S`              | X           | 6        |
+| `S`              | A           | 7        |
+| `X`              | X           | 6        |
 | `Q`              | L           | 5        |
 | `W`              | R           | 4        |
+
+Hotkey: `F12` saves a screenshot (Mesen2-style), also remappable.
 
 ## Auto-read + manual-mode behaviour
 
@@ -29,5 +40,5 @@ auto-read latches.
 ## Remap dialog
 
 The GUI exposes a key-remap dialog (mirror of Mesen2's default keymap).
-See `luna-gui/src/remap.rs` for the binding-storage shape and the
-serialisation format.
+See `luna-gui/src/input.rs` for the binding-storage shape and the
+serialisation format (`KeyBindings`), and `luna-gui/src/ui.rs` for the dialog.
