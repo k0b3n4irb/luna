@@ -83,22 +83,23 @@ impl Dsp1Mapper {
         }
     }
 
-    /// If `(bank, offset)` falls in the DSP DR/SR window, return
-    /// `Some(is_sr)` — the masked offset's bit 0 selects SR (odd) vs DR
-    /// (even) per ares `necdsp/memory.cpp`.
+    /// If `(bank, offset)` falls in the DSP window, return `Some(is_sr)`.
+    ///
+    /// The DR/SR select is the address bit ABOVE the masked window — ares'
+    /// board `mask` compacts the offset so `necdsp`'s `address.bit(0)` is
+    /// really that high bit. For the `HiROM` `1K` board (`$6000-$7FFF`, mask
+    /// `0xfff`) that's bit 12: `$6xxx` = DR (16-bit, low byte at `$x000`,
+    /// high at `$x001`), `$7xxx` = SR. For the `LoROM` `1B` board
+    /// (`$8000-$FFFF`, mask `0x3fff`) it's bit 14.
     const fn dsp_select(&self, bank: u8, offset: u16) -> Option<bool> {
-        let in_window = if self.hirom {
-            // HiROM 1K: banks $00-$1F / $80-$9F at $6000-$7FFF.
-            matches!(bank, 0x00..=0x1F | 0x80..=0x9F) && offset >= 0x6000 && offset <= 0x7FFF
-        } else {
-            // LoROM 1B: banks $20-$3F / $A0-$BF at $8000-$FFFF.
-            matches!(bank, 0x20..=0x3F | 0xA0..=0xBF) && offset >= 0x8000
-        };
-        if in_window {
-            Some(offset & 1 != 0)
-        } else {
-            None
+        if self.hirom {
+            if matches!(bank, 0x00..=0x1F | 0x80..=0x9F) && offset >= 0x6000 && offset <= 0x7FFF {
+                return Some(offset & 0x1000 != 0);
+            }
+        } else if matches!(bank, 0x20..=0x3F | 0xA0..=0xBF) && offset >= 0x8000 {
+            return Some(offset & 0x4000 != 0);
         }
+        None
     }
 }
 
