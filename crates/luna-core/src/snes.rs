@@ -19,7 +19,7 @@ use luna_cartridge::Cartridge;
 use luna_cpu_65c816::Cpu;
 use luna_ppu::Ppu;
 
-use crate::coproc::Sa1Chip;
+use crate::coproc::{Dsp1Mapper, Sa1Chip};
 use crate::dma::{Dma, DmaBus, DmaTraceEvent, DmaTraceLog};
 
 /// Top-level SNES machine.
@@ -353,6 +353,20 @@ impl Snes {
             // harmless for the games tested — their plot addresses never
             // reach the larger wrap boundary.)
             MapperKind::SuperFx => Box::new(SuperFxMapper::new(cart.rom, 0x2_0000)),
+            // DSP-1 (Super Mario Kart, Pilotwings) — a base ROM/SRAM map
+            // (HiROM or LoROM per the board) plus the NEC uPD7725 chip,
+            // fed the cartridge's `dsp1b.rom` firmware. Without firmware
+            // the chip stays inert (the game still runs).
+            MapperKind::Dsp1 => {
+                let hirom = cart.header.dsp_hirom;
+                let firmware = cart.coprocessor_firmware().map(<[u8]>::to_vec);
+                Box::new(Dsp1Mapper::new(
+                    cart.rom,
+                    sram_bytes,
+                    firmware.as_deref(),
+                    hirom,
+                ))
+            }
             other => return Err(UnsupportedMapper(other)),
         };
 
