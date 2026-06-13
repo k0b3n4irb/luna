@@ -813,6 +813,22 @@ pub(crate) fn registers_body(ui: &mut egui::Ui, snap: &DebugSnapshot) {
                 rv_row(ui, &format!("${r:02X}"), &format!("COEF{n}"), &b(dsp(r)));
             }
         });
+
+    // --- DSP-1 (uPD7725), only for DSP cartridges ---
+    if let Some(d) = s.dsp1.as_ref() {
+        rv_header(ui, "DSP-1  (uPD7725)");
+        egui::Grid::new("rv_dsp1")
+            .num_columns(3)
+            .spacing([12.0, 4.0])
+            .show(ui, |ui| {
+                rv_row(ui, "", "PC", &format!("${:04X}", d.pc));
+                rv_row(ui, "", "SR", &w(d.sr));
+                rv_row(ui, "", "DR", &w(d.dr));
+                rv_row(ui, "", "A", &w(d.a as u16));
+                rv_row(ui, "", "B", &w(d.b as u16));
+                rv_row(ui, "", "RQM", &b(u8::from(d.rqm)));
+            });
+    }
 }
 
 /// 5-bit colour channel → 8-bit, replicating the high bits (matches
