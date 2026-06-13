@@ -22,6 +22,9 @@ pub use luna_core::{
     MapperKind, MemEventKind, MemTraceEvent, MemTraceLog, Sa1LogEvent, Sa1SideEvent, Sa1TraceEvent,
     SuperFxTraceEvent,
 };
+/// Decoded BG tilemap image (Tilemap Viewer), re-exported so the GUI uses
+/// `luna_api::TilemapImage` rather than depending on `luna-ppu`.
+pub use luna_ppu::TilemapImage;
 /// Framebuffer dimensions (256×224), re-exported so front-ends size their
 /// texture/window through `luna-api` rather than depending on `luna-ppu`.
 pub use luna_ppu::{FRAME_H, FRAME_W};
@@ -79,6 +82,12 @@ pub struct RomInfo {
     pub checksum_complement: u16,
     /// Whether `checksum` and `checksum_complement` are bitwise complements.
     pub checksum_valid: bool,
+    /// When the cart needs an external coprocessor firmware that wasn't
+    /// found (e.g. a DSP-1 game with no `dsp1b.rom`), the required
+    /// filename — so a front-end can prompt for / install it. `None` when
+    /// no firmware is needed or it was resolved. The game still loads
+    /// (the coprocessor stays inert) so it can be inspected meanwhile.
+    pub missing_firmware: Option<String>,
 }
 
 /// Snapshot of the emulator's observable state. Every field maps to
@@ -97,6 +106,8 @@ pub struct EmulatorState {
     pub scheduler: SchedulerState,
     /// APU / SPC700 / DSP.
     pub apu: ApuState,
+    /// DMA / HDMA controller registers ($420B-$420C, $43xx).
+    pub dma: DmaState,
     /// Cumulative metrics.
     pub stats: Stats,
     /// SA-1 coprocessor CPU state, if the loaded cartridge hosts one.
@@ -104,6 +115,26 @@ pub struct EmulatorState {
     /// debugging — lets you see at a glance whether the SA-1 PC is
     /// stuck in a polling loop, running random ROM bytes, or halted.
     pub sa1: Option<Sa1State>,
+    /// DSP-1 (NEC uPD7725) state, if the loaded cartridge hosts one.
+    /// `None` for non-DSP carts.
+    pub dsp1: Option<Dsp1State>,
+}
+
+/// DSP-1 (NEC uPD7725) coprocessor snapshot.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct Dsp1State {
+    /// Program counter.
+    pub pc: u16,
+    /// Status register (`SR`).
+    pub sr: u16,
+    /// Accumulator A.
+    pub a: i16,
+    /// Accumulator B.
+    pub b: i16,
+    /// Data register (`DR`, the CPU port).
+    pub dr: u16,
+    /// `RQM` — set when the chip is awaiting the master.
+    pub rqm: bool,
 }
 
 /// SA-1 coprocessor CPU snapshot.
@@ -146,6 +177,41 @@ pub struct CpuState {
     pub stopped: bool,
     /// `true` after WAI, until an interrupt arrives.
     pub waiting: bool,
+}
+
+/// SPC700 (audio CPU) register snapshot — the APU-core analogue of
+/// [`CpuState`], for a debugger panel.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct Spc700State {
+    /// Accumulator.
+    pub a: u8,
+    /// X index register.
+    pub x: u8,
+    /// Y index register.
+    pub y: u8,
+    /// Stack pointer low byte (stack lives at `$0100 + sp`).
+    pub sp: u8,
+    /// Program counter.
+    pub pc: u16,
+    /// Program status word (N V P B H I Z C).
+    pub psw: u8,
+    /// `true` after `STOP` or an unimplemented opcode.
+    pub stopped: bool,
+    /// `true` after `SLEEP`, until an interrupt wakes the core.
+    pub sleeping: bool,
+}
+
+/// One disassembled instruction line, for a disassembly debug panel.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct DisasmLine {
+    /// Address of the instruction (24-bit for the CPU bus; ≤`0xFFFF` for ARAM).
+    pub addr: u32,
+    /// The raw instruction bytes (1..=3).
+    pub bytes: Vec<u8>,
+    /// Canonical mnemonic + operands, e.g. `"MOV A, #$12"`.
+    pub text: String,
+    /// `true` if this line is the live program counter.
+    pub is_pc: bool,
 }
 
 /// PPU register snapshot + memory occupancy stats.
@@ -216,6 +282,36 @@ pub struct PpuState {
     pub cgram: Vec<u16>,
     /// Full OAM dump — 544 bytes (512 low table + 32 high table).
     pub oam_full: Vec<u8>,
+    /// `$2106` MOSAIC.
+    pub mosaic: u8,
+    /// `$211A` M7SEL.
+    pub m7sel: u8,
+    /// `$211B` M7A — Mode-7 matrix A.
+    pub m7a: i16,
+    /// `$211C` M7B — Mode-7 matrix B.
+    pub m7b: i16,
+    /// `$211D` M7C — Mode-7 matrix C.
+    pub m7c: i16,
+    /// `$211E` M7D — Mode-7 matrix D.
+    pub m7d: i16,
+    /// `$211F` M7X — Mode-7 centre X.
+    pub m7x: i16,
+    /// `$2120` M7Y — Mode-7 centre Y.
+    pub m7y: i16,
+    /// `$210D` M7HOFS — Mode-7 horizontal scroll.
+    pub m7_hofs: i16,
+    /// `$210E` M7VOFS — Mode-7 vertical scroll.
+    pub m7_vofs: i16,
+    /// `$2134-$2136` MPYL/MPYM/MPYH 24-bit hardware product.
+    pub mpy: i32,
+    /// `$213E` STAT77 (PPU1 status).
+    pub stat77: u8,
+    /// `$213F` STAT78 (PPU2 status).
+    pub stat78: u8,
+    /// `$213C` OPHCT — latched horizontal counter.
+    pub ophct: u16,
+    /// `$213D` OPVCT — latched vertical counter.
+    pub opvct: u16,
 }
 
 /// Per-BG serialisable view.
@@ -244,6 +340,62 @@ pub struct CpuRegsState {
     pub nmi_flag: bool,
     /// Latched IRQ line.
     pub irq_flag: bool,
+    /// `$4201` WRIO — programmable I/O port output.
+    pub wrio: u8,
+    /// `$4202` WRMPYA — multiply operand A.
+    pub wrmpya: u8,
+    /// `$4203` WRMPYB — multiply operand B.
+    pub wrmpyb: u8,
+    /// `$4204/$4205` WRDIV — 16-bit dividend.
+    pub wrdiv: u16,
+    /// `$4206` WRDVDD — 8-bit divisor.
+    pub wrdvdd: u8,
+    /// `$4207/$4208` HTIME — horizontal IRQ target.
+    pub htime: u16,
+    /// `$4209/$420A` VTIME — vertical IRQ target.
+    pub vtime: u16,
+    /// `$4216/$4217` RDMPY — multiply / remainder result.
+    pub rdmpy: u16,
+    /// `$4214/$4215` RDDIV — divide quotient result.
+    pub rddiv: u16,
+    /// `$4218/$4219` latched joypad 1 (auto-read).
+    pub joy1: u16,
+    /// `$421A/$421B` latched joypad 2 (auto-read).
+    pub joy2: u16,
+    /// `$420D` MEMSEL — `FastROM` enable (bit 0).
+    pub memsel: u8,
+}
+
+/// One DMA/HDMA channel's registers (`$43x0-$43xA`).
+#[derive(Debug, Clone, Copy, Serialize, schemars::JsonSchema)]
+pub struct DmaChannelState {
+    /// `$43x0` `DMAPx` (raw byte).
+    pub params: u8,
+    /// `$43x1` `BBADx` — B-bus address (`$2100 + bbad`).
+    pub bbad: u8,
+    /// `$43x2/$43x3` `A1Tx` — A-bus address.
+    pub a_addr: u16,
+    /// `$43x4` `A1Bx` — A-bus bank.
+    pub a_bank: u8,
+    /// `$43x5/$43x6` `DASx` — byte count / HDMA indirect address.
+    pub das: u16,
+    /// `$43x7` `A2Bx` — HDMA indirect bank.
+    pub dasb: u8,
+    /// `$43x8/$43x9` `A2Ax` — HDMA table pointer.
+    pub a2a: u16,
+    /// `$43xA` `NTRLx` — HDMA line counter.
+    pub ntlr: u8,
+}
+
+/// DMA / HDMA controller registers.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct DmaState {
+    /// The 8 channels ($430x-$437x).
+    pub channels: [DmaChannelState; 8],
+    /// `$420B` MDMAEN — general-DMA enable mask.
+    pub mdmaen: u8,
+    /// `$420C` HDMAEN — HDMA enable mask.
+    pub hdmaen: u8,
 }
 
 /// Scanline scheduler snapshot.
@@ -405,8 +557,42 @@ impl Emulator {
     /// stepping. Returns the parsed cartridge metadata for callers
     /// that want to surface it (window title, MCP `load_rom` tool).
     pub fn load_rom(&mut self, path: &Path) -> Result<RomInfo, ApiError> {
-        let cart = Cartridge::load(path)?;
+        let mut cart = Cartridge::load(path)?;
+        // Beside-ROM + embedded firmware are handled by `Cartridge::load`;
+        // additionally search the luna firmware folder so a once-installed
+        // `dsp1b.rom` is found for any ROM, anywhere.
+        if cart.needs_coprocessor_firmware() {
+            if let (Some(name), Some(dir)) =
+                (cart.required_firmware_filename(), Self::firmware_dir())
+            {
+                if let Ok(bytes) = std::fs::read(dir.join(name)) {
+                    cart.set_coprocessor_firmware(bytes);
+                }
+            }
+        }
         self.load_cartridge(cart)
+    }
+
+    /// luna's coprocessor-firmware folder (`<config>/luna/firmware`), where
+    /// files like `dsp1b.rom` live. `None` if no config dir is available.
+    #[must_use]
+    pub fn firmware_dir() -> Option<std::path::PathBuf> {
+        dirs::config_dir().map(|d| d.join("luna").join("firmware"))
+    }
+
+    /// Install a coprocessor-firmware file into the firmware folder under
+    /// the canonical name for its kind (the firmware dir is created if
+    /// needed). Front-ends call this from a CLI flag or a "locate firmware"
+    /// prompt; afterwards `load_rom` finds it automatically. `target` picks
+    /// the destination filename (e.g. `"dsp1b.rom"`).
+    pub fn install_firmware(src: &Path, target: &str) -> Result<std::path::PathBuf, ApiError> {
+        let dir = Self::firmware_dir().ok_or_else(|| {
+            ApiError::Io(std::io::Error::other("no config directory for firmware"))
+        })?;
+        std::fs::create_dir_all(&dir)?;
+        let dest = dir.join(target);
+        std::fs::copy(src, &dest)?;
+        Ok(dest)
     }
 
     /// Lower-level entry point used by tests: load a ROM blob
@@ -441,6 +627,11 @@ impl Emulator {
             checksum: cart.header.checksum,
             checksum_complement: cart.header.checksum_complement,
             checksum_valid: cart.header.checksum_valid(),
+            missing_firmware: if cart.needs_coprocessor_firmware() {
+                cart.required_firmware_filename().map(str::to_string)
+            } else {
+                None
+            },
         };
         // Unsupported coprocessor carts surface as a typed
         // `UnsupportedMapper` error (no longer a panic). The
@@ -628,6 +819,21 @@ impl Emulator {
                 bgs,
                 cgram,
                 oam_full,
+                mosaic: s.ppu.mosaic,
+                m7sel: s.ppu.m7sel,
+                m7a: s.ppu.m7a,
+                m7b: s.ppu.m7b,
+                m7c: s.ppu.m7c,
+                m7d: s.ppu.m7d,
+                m7x: s.ppu.m7x,
+                m7y: s.ppu.m7y,
+                m7_hofs: s.ppu.m7_hofs,
+                m7_vofs: s.ppu.m7_vofs,
+                mpy: s.ppu.mpy_result,
+                stat77: s.ppu.stat77,
+                stat78: s.ppu.stat78,
+                ophct: s.ppu.ophct,
+                opvct: s.ppu.opvct,
             }
         });
         let cpu_regs = self
@@ -638,6 +844,38 @@ impl Emulator {
                 hvbjoy: s.cpu_regs.hvbjoy,
                 nmi_flag: s.cpu_regs.nmi_flag,
                 irq_flag: s.cpu_regs.irq_flag,
+                wrio: s.cpu_regs.wrio,
+                wrmpya: s.cpu_regs.wrmpya,
+                wrmpyb: s.cpu_regs.wrmpyb,
+                wrdiv: s.cpu_regs.wrdiv,
+                wrdvdd: s.cpu_regs.wrdvdd,
+                htime: s.cpu_regs.htime,
+                vtime: s.cpu_regs.vtime,
+                rdmpy: s.cpu_regs.rdmpy,
+                rddiv: s.cpu_regs.rddiv,
+                joy1: s.cpu_regs.joypad1_latched,
+                joy2: s.cpu_regs.joypad2_latched,
+                memsel: u8::from(s.fast_rom),
+            });
+        let dma = self
+            .snes
+            .as_ref()
+            .map_or_else(default_dma_state, |s| DmaState {
+                channels: std::array::from_fn(|i| {
+                    let c = &s.dma.channels[i];
+                    DmaChannelState {
+                        params: c.params.to_byte(),
+                        bbad: c.bbad,
+                        a_addr: c.a_addr,
+                        a_bank: c.a_bank,
+                        das: c.das,
+                        dasb: c.dasb,
+                        a2a: c.a2a,
+                        ntlr: c.ntlr,
+                    }
+                }),
+                mdmaen: s.dma.mdmaen,
+                hdmaen: s.dma.hdmaen,
             });
         let scheduler = self
             .snes
@@ -722,6 +960,18 @@ impl Emulator {
                 p: snap.p,
                 running: snap.running,
             });
+        let dsp1 = self
+            .snes
+            .as_ref()
+            .and_then(|s| s.mapper.dsp1_snapshot())
+            .map(|snap| Dsp1State {
+                pc: snap.pc,
+                sr: snap.sr,
+                a: snap.a,
+                b: snap.b,
+                dr: snap.dr,
+                rqm: snap.rqm,
+            });
         EmulatorState {
             rom: self.rom_info.clone(),
             cpu,
@@ -731,6 +981,8 @@ impl Emulator {
             apu,
             stats,
             sa1,
+            dma,
+            dsp1,
         }
     }
 
@@ -848,6 +1100,146 @@ impl Emulator {
             for px in snes.ppu.framebuffer() {
                 push_rgb(px);
             }
+        }
+        Ok(out)
+    }
+
+    /// Cheap 65C816 register snapshot for a debugger panel — reads the
+    /// main CPU directly, without building (and cloning) a full
+    /// [`Emulator::state`] every frame. Same data as
+    /// [`EmulatorState::cpu`].
+    pub fn cpu_state(&self) -> Result<CpuState, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let c = &snes.cpu;
+        Ok(CpuState {
+            a: c.a,
+            x: c.x,
+            y: c.y,
+            sp: c.sp,
+            pc: c.pc,
+            pb: c.pb,
+            db: c.db,
+            dp: c.dp,
+            p: c.p.bits(),
+            e: c.e,
+            stopped: c.stopped,
+            waiting: c.waiting,
+        })
+    }
+
+    /// Cheap SPC700 register snapshot for a debugger panel — reads the
+    /// audio CPU directly, without building a full [`Emulator::state`]
+    /// (which clones the whole DSP register file + BRR excerpts). The
+    /// APU-core analogue of reading [`EmulatorState::cpu`].
+    pub fn spc700_state(&self) -> Result<Spc700State, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let c = &snes.apu_real.cpu;
+        Ok(Spc700State {
+            a: c.a,
+            x: c.x,
+            y: c.y,
+            sp: c.sp,
+            pc: c.pc,
+            psw: c.psw.0,
+            stopped: c.stopped,
+            sleeping: c.sleeping,
+        })
+    }
+
+    /// Disassemble `count` SPC700 instructions starting at `start`.
+    /// Instruction bytes are read from raw ARAM (side-effect-free — never
+    /// touches the SPC I/O ports / timers), and the line at the live SPC
+    /// program counter is flagged `is_pc`. For a disassembly panel.
+    pub fn disassemble_spc(&self, start: u16, count: u16) -> Result<Vec<DisasmLine>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let aram = &snes.apu_real.aram;
+        let read = |a: u16| aram[usize::from(a)];
+        let pc = snes.apu_real.cpu.pc;
+        let mut addr = start;
+        let mut out = Vec::with_capacity(usize::from(count));
+        for _ in 0..count {
+            let insn = luna_cpu_spc700::disassemble(read, addr);
+            let bytes = (0..u16::from(insn.length))
+                .map(|i| read(addr.wrapping_add(i)))
+                .collect();
+            out.push(DisasmLine {
+                addr: u32::from(addr),
+                bytes,
+                text: insn.text,
+                is_pc: addr == pc,
+            });
+            addr = addr.wrapping_add(u16::from(insn.length));
+        }
+        Ok(out)
+    }
+
+    /// Disassemble `count` 65C816 instructions starting at the 24-bit address
+    /// `start`, with effective accumulator/index widths `m8`/`x8`. Bytes are
+    /// read side-effect-free through `peek_memory`; the line at the live
+    /// `PB:PC` is flagged `is_pc`. Tracks `REP`/`SEP` forward so immediate
+    /// widths stay correct across a width change inside the window. For a
+    /// CPU disassembly panel.
+    pub fn disassemble_cpu(
+        &mut self,
+        start: u32,
+        count: u16,
+        m8: bool,
+        x8: bool,
+    ) -> Result<Vec<DisasmLine>, ApiError> {
+        let pc_full = {
+            let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+            (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc)
+        };
+        let bank = (start >> 16) as u8;
+        let start_off = start as u16;
+        // One side-effect-free peek of the whole window (instructions are
+        // ≤4 bytes, so over-read a little to cover the last one).
+        let span = u16::try_from(usize::from(count) * 4 + 3).unwrap_or(u16::MAX);
+        let buf = self.peek_memory(bank, start_off, span)?;
+        let read = |o: u16| {
+            buf.get(usize::from(o.wrapping_sub(start_off)))
+                .copied()
+                .unwrap_or(0)
+        };
+
+        let (mut m8, mut x8) = (m8, x8);
+        let mut off = start_off;
+        let mut out = Vec::with_capacity(usize::from(count));
+        for _ in 0..count {
+            let insn = luna_cpu_65c816::disassemble(read, off, m8, x8);
+            let bytes = (0..u16::from(insn.length))
+                .map(|i| read(off.wrapping_add(i)))
+                .collect();
+            let addr_full = (u32::from(bank) << 16) | u32::from(off);
+            out.push(DisasmLine {
+                addr: addr_full,
+                bytes,
+                text: insn.text,
+                is_pc: addr_full == pc_full,
+            });
+            // Track REP/SEP so later lines use the right immediate widths.
+            match read(off) {
+                0xC2 => {
+                    let v = read(off.wrapping_add(1));
+                    if v & 0x20 != 0 {
+                        m8 = false;
+                    }
+                    if v & 0x10 != 0 {
+                        x8 = false;
+                    }
+                }
+                0xE2 => {
+                    let v = read(off.wrapping_add(1));
+                    if v & 0x20 != 0 {
+                        m8 = true;
+                    }
+                    if v & 0x10 != 0 {
+                        x8 = true;
+                    }
+                }
+                _ => {}
+            }
+            off = off.wrapping_add(u16::from(insn.length));
         }
         Ok(out)
     }
@@ -1134,6 +1526,23 @@ impl Emulator {
         }
         Ok(out)
     }
+
+    /// All 256 CGRAM entries as raw BGR555 words (index 0 = backdrop).
+    /// Cheap, read-only — the Palette Viewer's per-frame source, avoiding
+    /// the full `state()` VRAM occupancy scan.
+    pub fn peek_cgram(&self) -> Result<Vec<u16>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        Ok((0..256u16).map(|i| snes.ppu.cgram.color(i as u8)).collect())
+    }
+
+    /// Render BG `bg_idx` (0..3)'s full tilemap to an RGBA image for the
+    /// GUI Tilemap Viewer. Debug render — ignores scroll/priority/blank,
+    /// shows raw palette colours, but honours per-tile flip + bases. In
+    /// Mode 7 `bg_idx` is ignored and the 128×128 field is rendered.
+    pub fn render_tilemap_rgba(&self, bg_idx: usize) -> Result<TilemapImage, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        Ok(luna_ppu::render_bg_tilemap(&snes.ppu, bg_idx))
+    }
 }
 
 const fn default_cpu_state() -> CpuState {
@@ -1191,6 +1600,21 @@ const fn default_ppu_state() -> PpuState {
         }; 4],
         cgram: Vec::new(),
         oam_full: Vec::new(),
+        mosaic: 0,
+        m7sel: 0,
+        m7a: 0,
+        m7b: 0,
+        m7c: 0,
+        m7d: 0,
+        m7x: 0,
+        m7y: 0,
+        m7_hofs: 0,
+        m7_vofs: 0,
+        mpy: 0,
+        stat77: 0,
+        stat78: 0,
+        ophct: 0,
+        opvct: 0,
     }
 }
 
@@ -1200,6 +1624,35 @@ const fn default_cpu_regs_state() -> CpuRegsState {
         hvbjoy: 0,
         nmi_flag: false,
         irq_flag: false,
+        wrio: 0,
+        wrmpya: 0,
+        wrmpyb: 0,
+        wrdiv: 0,
+        wrdvdd: 0,
+        htime: 0,
+        vtime: 0,
+        rdmpy: 0,
+        rddiv: 0,
+        joy1: 0,
+        joy2: 0,
+        memsel: 0,
+    }
+}
+
+const fn default_dma_state() -> DmaState {
+    DmaState {
+        channels: [DmaChannelState {
+            params: 0,
+            bbad: 0,
+            a_addr: 0,
+            a_bank: 0,
+            das: 0,
+            dasb: 0,
+            a2a: 0,
+            ntlr: 0,
+        }; 8],
+        mdmaen: 0,
+        hdmaen: 0,
     }
 }
 

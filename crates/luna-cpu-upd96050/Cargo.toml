@@ -1,0 +1,13 @@
+[package]
+name = "luna-cpu-upd96050"
+description = "NEC uPD7725 / uPD96050 DSP core (DSP-1..4, ST010/11) for the SNES"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true

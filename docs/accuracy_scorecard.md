@@ -267,8 +267,9 @@ per-dot) and carries concrete geometry bugs.
 |---|---|---|---|:--:|
 | BG modes 0–4 | per-pixel priority engine, correct tables | `background.cpp:172` | `RenderTilemap` | B |
 | BG modes 5/6 (hi-res 512) | **absent** — falls back to Mode-1, 256-wide (`renderer.rs:1107`) | hires path | `IsDoubleWidth` | **D** |
-| Mode 7 affine | matrix+center OK; OOB flawed | `mode7.cpp:1-65` | `SnesPpu.cpp:1140` | C |
-| Mode 7 EXTBG (SETINI b6) | **ignored** | `mode7.cpp:45` | `_state.ExtBgEnabled` | **F** |
+| Mode 7 affine | matrix+center+screen-over; renders CT + SMK/Pilotwings (DSP-1) correctly | `mode7.cpp:1-65` | `SnesPpu.cpp:1140` | B |
+| Mode 7 EXTBG (SETINI b6) | implemented (`luna_bg_gaps.md` §4) | `mode7.cpp:45` | `_state.ExtBgEnabled` | B |
+| DSP-1 (uPD7725) coprocessor | implemented; SMK + Pilotwings Mode 7 correct (HiROM 1K + LoROM 1B boards); needs user `dsp1b.rom` | `coprocessor/necdsp` | `NecDsp.cpp` | B |
 | Sprite/OBJ rendering | decode+4bpp+priority; shadow_y hack | `object.cpp:57` | `SnesPpu.cpp:695` | C |
 | **Sprite Y-wrap (8-bit)** | not wrapped (`renderer.rs:391`) | `within<0,255>` + `&255` (`object.cpp:54`) | `(uint8_t)endY` wrap (`SnesPpuTypes.h:46`) | **D** |
 | **Sprite tile addressing** | flat `tile+(row*16+col)` (`renderer.rs:416`) | per-nibble `&15` (`object.cpp:130`) | `&0x0F` (`SnesPpu.cpp:737`) | **D** |

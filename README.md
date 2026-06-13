@@ -13,27 +13,14 @@
 
 ## Why Luna?
 
-Traditional SNES emulators treat AI as a second-class use case — something you
-bolt on afterwards via OCR over screenshots. Luna flips that priority: the
-**agent ↔ machine** dialogue is a central design goal.
-
-In practice, the full machine state (CPU registers, VRAM, OAM, palette,
-scroll, tilemap, sprites, memory) is exposed in a **structured, serializable**
-form, and a built-in **MCP** (Model Context Protocol) server lets an agent like
-Claude drive the machine through a catalogue of standardized JSON-RPC tools —
-without ever looking at a single pixel if it doesn't want to.
-
-Three use cases are first-class from the start:
-
-- 🎮 **Play** — the agent plays an existing game.
-- 🛠️ **Dev** — the agent develops a homebrew.
-- 🐛 **Debug** — the agent inspects a ROM hack (breakpoints, trace, memory).
-
-Hardware fidelity is not sacrificed for it: the CPU cores are validated
-against reference test suites, and every subsystem is implemented by reading
-the reference emulators (ares, Mesen2) before writing a single line — see
-[`docs/emulator_landscape.md`](docs/emulator_landscape.md) for the survey that
-motivated those reference choices.
+Most SNES emulators bolt AI on afterwards via OCR over screenshots. Luna makes
+the **agent ↔ machine** dialogue first-class: the full machine state (CPU/PPU
+registers, VRAM, OAM, palette, sprites, memory) is exposed as **structured,
+serializable** snapshots, and a built-in **MCP** server lets an agent drive the
+machine over JSON-RPC — to **play**, **dev** (homebrew), or **debug** (ROM
+hacks). Fidelity isn't sacrificed: CPU cores pass the SingleStepTests suites and
+every subsystem is ported from ares / Mesen2. Full vision in
+[`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Status
 
@@ -47,20 +34,25 @@ Project under **active development, pre-1.0** (`v0.0.1`). What runs today:
 | SPC700 CPU (cycle-accurate, SingleStepTests suite 100%) | `luna-cpu-spc700` | ✅ |
 | APU — SPC700 + S-DSP (cycle-accurate ares port) | `luna-apu` | ✅ |
 | PPU + renderer + compositor | `luna-ppu` | ✅ |
-| System glue, scheduler, DMA / HDMA, SA-1 coprocessor | `luna-core` | ✅ |
+| System glue, scheduler, DMA / HDMA | `luna-core` | ✅ |
+| Coprocessors: SA-1, Super FX (GSU), DSP-1 | `luna-core` / `luna-bus` | ✅ |
+| NEC uPD7725 / uPD96050 DSP core (DSP-1) | `luna-cpu-upd96050` | ✅ |
 | Introspection API (`EmulatorState` snapshots) | `luna-api` | ✅ |
 | MCP server (stdio) | `luna-mcp-server` | ✅ |
-| CLI binary (`run` / `state` / `mcp`) | `luna-cli` | ✅ |
-| GUI debugger (eframe, audio-as-clock pacing) | `luna-gui` | ✅ |
+| CLI binary (`run` / `state` / `frames` / `wram-trace` / `mcp`) | `luna-cli` | ✅ |
+| GUI debugger (winit + pixels + egui-wgpu, audio-as-clock pacing) | `luna-gui` | ✅ |
 
-Coprocessors beyond SA-1 (Super FX, DSP-1…), REST/WebSocket transports and a
-WASM target are on the [roadmap](ARCHITECTURE.md#14-roadmap--phasing), not yet
-shipped.
+Commercial titles play across the major chips — SMW, Super Mario RPG (SA-1),
+Star Fox / Doom (Super FX), Super Mario Kart / Pilotwings (DSP-1 Mode 7) — and
+the GUI ships Mesen2-style debugger panels. Remaining coprocessors (DSP-2/3/4,
+Cx4, S-DD1, SPC7110), REST/WebSocket transports and a WASM target are on the
+[roadmap](ARCHITECTURE.md#14-roadmap--phasing).
 
 ## Platform support
 
 Luna is currently **developed and tested on Linux only**. The stack
-(eframe/wgpu for the GUI, cpal for audio) is cross-platform in principle, but
+(winit + pixels + egui-wgpu for the GUI, cpal for audio) is cross-platform in
+principle, but
 macOS and Windows are **not tested or supported yet** — they may build and run,
 but no guarantees. Contributions to validate other platforms are welcome.
 
@@ -90,9 +82,20 @@ cargo run --release -p luna-gui -- "path/to/game.sfc"
 ./target/release/luna mcp
 ```
 
+## Controls & firmware
+
+Single **Player 1** keyboard controller, remappable in the GUI — arrows =
+D-pad; `A`/`Z`/`S`/`X` = B/Y/A/X; `Q`/`W` = L/R; `D`/`E` = Start/Select; `F12` =
+screenshot. **No Player 2, Mouse, or Super Scope yet.** Full table:
+[`docs/CONTROLLER_BINDINGS.md`](docs/CONTROLLER_BINDINGS.md).
+
+**DSP-1 games** (Super Mario Kart, Pilotwings) need a user-supplied `dsp1b.rom`
+firmware — luna prompts for it (GUI) or takes `--dsp1-rom` (CLI). Setup:
+[`docs/firmware.md`](docs/firmware.md).
+
 ## Architecture at a glance
 
-Luna is an 11-crate Cargo workspace, organized in layers that communicate only
+Luna is a 12-crate Cargo workspace, organized in layers that communicate only
 through Rust contracts (traits + serializable types) — no lower layer ever
 depends on a higher one.
 
@@ -111,26 +114,21 @@ depends on a higher one.
    luna-cli (headless)              luna-gui (egui/wgpu)
 ```
 
-This decoupling enables three **execution modes**, combinable on the same
-binary:
-
-- **Headless** — no window, driven 100% via MCP (AI in production, CI).
-- **Standalone** — native window, keyboard/gamepad (a human plays).
-- **Spectator** — the AI plays, the human watches the framebuffer and the
-  agent's activity in real time.
-
-The full design (vision, non-goals, layers, threading, determinism, roadmap)
-is documented in **[`ARCHITECTURE.md`](ARCHITECTURE.md)**.
+The same binary runs **headless** (driven via MCP — CI / production),
+**standalone** (a human plays), or **spectator** (the AI plays, a human
+watches). Full design — vision, layers, threading, determinism, roadmap — in
+[`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Documentation
 
 | Document | Contents |
 |---|---|
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Full system design, layers, roadmap |
-| [`RESEARCH.md`](RESEARCH.md) | Pre-Phase-0 research (fork vs from-scratch, WASM, scheduler) |
 | [`CLAUDE.md`](CLAUDE.md) | Repository conventions for contributors (and agents) |
-| [`docs/`](docs/) | PPU/APU/SA-1 reference specs, accuracy scorecard, gap lists |
-| [`docs/emulator_landscape.md`](docs/emulator_landscape.md) | Comparative survey of existing SNES emulators |
+| [`docs/CONTROLLER_BINDINGS.md`](docs/CONTROLLER_BINDINGS.md) | Keyboard → SNES button map |
+| [`docs/firmware.md`](docs/firmware.md) | Coprocessor firmware (DSP-1 `dsp1b.rom`) setup |
+| [`docs/`](docs/) | Reference specs, accuracy scorecard, per-subsystem gap lists |
+| [`docs/emulator_landscape.md`](docs/emulator_landscape.md) | Survey of existing SNES emulators |
 
 ## Development
 

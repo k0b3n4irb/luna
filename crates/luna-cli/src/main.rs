@@ -87,6 +87,11 @@ enum Command {
         /// superfx.
         #[arg(long = "force-mapper")]
         force_mapper: Option<String>,
+        /// Install a DSP coprocessor firmware (`dsp1b.rom`) into luna's
+        /// firmware folder, then load — needed for DSP-1 games (Super
+        /// Mario Kart, Pilotwings). Persists for future runs.
+        #[arg(long = "dsp1-rom")]
+        dsp1_rom: Option<PathBuf>,
         /// Dump all 64 KB of PPU VRAM (raw bytes) to this file after the
         /// run. For diagnosing the framebuffer DMA → VRAM → display path.
         #[arg(long = "dump-vram")]
@@ -316,6 +321,7 @@ fn main() -> ExitCode {
             rom,
             steps,
             force_mapper,
+            dsp1_rom,
             dump_vram,
             out,
             screenshot,
@@ -368,6 +374,7 @@ fn main() -> ExitCode {
             dma_trace.as_deref(),
             dma_trace_from,
             dma_trace_max,
+            dsp1_rom.as_deref(),
         ),
         Command::Frames {
             rom,
@@ -742,19 +749,38 @@ fn load_rom_into(
     em: &mut luna_api::Emulator,
     rom: &std::path::Path,
     force_mapper: Option<&str>,
+    dsp1_rom: Option<&std::path::Path>,
 ) -> Result<(), String> {
-    match force_mapper {
+    // `--dsp1-rom` installs the firmware into luna's firmware folder so it
+    // is found now and on every future run.
+    if let Some(fw) = dsp1_rom {
+        match luna_api::Emulator::install_firmware(fw, "dsp1b.rom") {
+            Ok(dest) => eprintln!("installed DSP firmware → {}", dest.display()),
+            Err(e) => eprintln!("warning: could not install {}: {e}", fw.display()),
+        }
+    }
+    let info = match force_mapper {
         Some(kind_str) => {
             let kind = luna_api::MapperKind::from_cli_str(kind_str)
                 .ok_or_else(|| format!("unknown --force-mapper '{kind_str}'"))?;
             let bytes =
                 std::fs::read(rom).map_err(|e| format!("reading {}: {e}", rom.display()))?;
             em.load_rom_bytes_forced(bytes, kind)
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| e.to_string())?
         }
-        None => {
-            em.load_rom(rom).map_err(|e| e.to_string())?;
-        }
+        None => em.load_rom(rom).map_err(|e| e.to_string())?,
+    };
+    if let Some(name) = &info.missing_firmware {
+        let dir = luna_api::Emulator::firmware_dir().map_or_else(
+            || "<config>/luna/firmware".to_string(),
+            |d| d.display().to_string(),
+        );
+        eprintln!(
+            "warning: '{}' needs coprocessor firmware '{name}' which was not found — \
+             the coprocessor stays inert (e.g. Mode 7 graphics will be wrong). \
+             Supply it with `--dsp1-rom <path>` or place '{name}' in {dir}.",
+            info.title.trim()
+        );
     }
     Ok(())
 }
@@ -774,7 +800,7 @@ fn run_frames(
 ) -> ExitCode {
     const FRAME_BUDGET: u64 = 200_000;
     let mut em = luna_api::Emulator::new();
-    if let Err(e) = load_rom_into(&mut em, rom, force_mapper) {
+    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, None) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }
@@ -860,7 +886,7 @@ fn run_wram_trace(
     use std::fmt::Write as _;
     const FRAME_BUDGET: u64 = 200_000;
     let mut em = luna_api::Emulator::new();
-    if let Err(e) = load_rom_into(&mut em, rom, force_mapper) {
+    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, None) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }
@@ -974,9 +1000,10 @@ fn run_state(
     dma_trace_path: Option<&std::path::Path>,
     dma_trace_from: u64,
     dma_trace_max: usize,
+    dsp1_rom: Option<&std::path::Path>,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
-    if let Err(e) = load_rom_into(&mut em, rom, force_mapper) {
+    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, dsp1_rom) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }

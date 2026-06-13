@@ -19,7 +19,7 @@ use luna_cartridge::Cartridge;
 use luna_cpu_65c816::Cpu;
 use luna_ppu::Ppu;
 
-use crate::coproc::Sa1Chip;
+use crate::coproc::{Dsp1Mapper, Sa1Chip};
 use crate::dma::{Dma, DmaBus, DmaTraceEvent, DmaTraceLog};
 
 /// Top-level SNES machine.
@@ -353,6 +353,20 @@ impl Snes {
             // harmless for the games tested — their plot addresses never
             // reach the larger wrap boundary.)
             MapperKind::SuperFx => Box::new(SuperFxMapper::new(cart.rom, 0x2_0000)),
+            // DSP-1 (Super Mario Kart, Pilotwings) — a base ROM/SRAM map
+            // (HiROM or LoROM per the board) plus the NEC uPD7725 chip,
+            // fed the cartridge's `dsp1b.rom` firmware. Without firmware
+            // the chip stays inert (the game still runs).
+            MapperKind::Dsp1 => {
+                let hirom = cart.header.dsp_hirom;
+                let firmware = cart.coprocessor_firmware().map(<[u8]>::to_vec);
+                Box::new(Dsp1Mapper::new(
+                    cart.rom,
+                    sram_bytes,
+                    firmware.as_deref(),
+                    hirom,
+                ))
+            }
             other => return Err(UnsupportedMapper(other)),
         };
 
@@ -531,6 +545,17 @@ impl Snes {
     /// Run the CPU reset sequence: read the reset vector at `$00:FFFC`
     /// via the bus and load `PC`.
     pub fn reset(&mut self) {
+        // 0. Cartridge coprocessor (Super FX / SA-1 / …): re-power it
+        //    first, BEFORE the main CPU re-reads its reset vector. The
+        //    reset line on real hardware resets the cart chip too, not
+        //    just the main CPU. Doing this first guarantees a mid-run GSU
+        //    isn't still owning the ROM bus when the CPU fetches the
+        //    vector. ROM and battery SRAM persist; the coproc registers,
+        //    internal RAM and its own CPU return to power-on. Leaving the
+        //    GSU mid-execution here froze Doom on `Reset` (it never
+        //    rebooted). No-op for plain LoROM / HiROM carts.
+        self.mapper.reset();
+
         // 1. CPU: re-read the reset vector through the bus. VRAM / WRAM /
         //    SRAM persist across a reset (real hardware doesn't clear them).
         let scanlines = self.region_scanlines();
