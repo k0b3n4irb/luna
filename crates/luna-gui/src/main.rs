@@ -131,6 +131,8 @@ struct LunaApp {
     pending_firmware_rom: Option<PathBuf>,
     /// `true` while the egui input-config modal is open.
     show_input_config: bool,
+    /// `true` while the egui hotkey-config modal is open.
+    show_hotkey_config: bool,
     /// When `Some(button)`, the next key press is captured as that
     /// SNES button's new binding and the field is cleared.
     pending_rebind: Option<crate::input::SnesButton>,
@@ -191,6 +193,7 @@ impl LunaApp {
             firmware_picker_rx: None,
             pending_firmware_rom: None,
             show_input_config: false,
+            show_hotkey_config: false,
             pending_rebind: None,
             pending_hotkey_rebind: None,
             screenshot_status: None,
@@ -638,6 +641,7 @@ impl LunaApp {
             paused: self.emu_shared.paused.load(Ordering::Acquire),
             rom_title: self.rom_title.clone(),
             show_input_config: self.show_input_config,
+            show_hotkey_config: self.show_hotkey_config,
             key_bindings: &self.key_bindings,
             show_cpu_state: self.debug_windows.is_open(DebugPanel::Cpu),
             show_cpu_memory: self.debug_windows.is_open(DebugPanel::CpuMemory),
@@ -844,6 +848,11 @@ impl LunaApp {
                 self.show_input_config = !self.show_input_config;
                 if !self.show_input_config {
                     self.pending_rebind = None;
+                }
+            }
+            MenuAction::ToggleHotkeyConfig => {
+                self.show_hotkey_config = !self.show_hotkey_config;
+                if !self.show_hotkey_config {
                     self.pending_hotkey_rebind = None;
                 }
             }
