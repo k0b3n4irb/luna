@@ -47,10 +47,19 @@ struct RomResult {
     frames_run: u64,
     nmis: u64,
     instrs: u64,
+    /// Peak absolute audio sample seen across the run (0 = silent).
+    audio_peak: i32,
     findings: Vec<String>,
     repro: String,
     screenshot: Option<String>,
 }
+
+/// A static/black screen with the CPU spinning over no more than this many
+/// distinct addresses is treated as a confirmed hang (vs. an alive
+/// render/forced-blank issue, which stays ⚠️ suspect).
+const HANG_LOOP_MAX: usize = 64;
+/// Instruction budget for the end-of-run liveness probe.
+const LIVENESS_PROBE_STEPS: u64 = 200_000;
 
 /// Default scripted input: pulse Start a few times to clear title/menu screens
 /// (a static title is NOT a bug — `coproc-testing.md`). `frame:mask`, Start=0x1000.
@@ -118,6 +127,7 @@ fn bench_one(path: &Path, frames: u64, input: &[(u64, u16)], screens_dir: &Path)
                 frames_run: 0,
                 nmis: 0,
                 instrs: 0,
+                audio_peak: 0,
                 findings: vec![format!("load failed: {e}")],
                 repro,
                 screenshot: None,
@@ -129,7 +139,9 @@ fn bench_one(path: &Path, frames: u64, input: &[(u64, u16)], screens_dir: &Path)
     let mut applied = 0usize;
     let mut crash: Option<String> = None;
     let mut nmis_at_warmup = 0u64;
-    let mut hashes: Vec<u64> = Vec::new();
+    let mut audio_peak = 0i32;
+    let mut fb_first: Option<u64> = None;
+    let mut fb_changed = false;
     let mut last_frame = 0u64;
     for f in 0..frames {
         while applied < input.len() && input[applied].0 <= f {
@@ -143,13 +155,25 @@ fn bench_one(path: &Path, frames: u64, input: &[(u64, u16)], screens_dir: &Path)
         if em.cpu_state().is_ok_and(|c| c.stopped) {
             break; // CPU halted (STP) — no point spinning
         }
+        // Audio activity: drain this frame's samples, track peak amplitude.
+        if let Ok(samples) = em.drain_audio(usize::MAX) {
+            for (l, r) in samples {
+                audio_peak = audio_peak.max(i32::from(l).abs()).max(i32::from(r).abs());
+            }
+        }
         let st = em.state();
         last_frame = st.scheduler.frame_count;
         if f == WARMUP_FRAME {
             nmis_at_warmup = st.scheduler.nmis_serviced;
         }
-        if f == WARMUP_FRAME || f == frames / 2 || f + 1 == frames {
-            hashes.push(framebuffer_hash(&em));
+        // Past warm-up, sample the framebuffer; flag static if it never changes.
+        if f >= WARMUP_FRAME && f % 8 == 0 {
+            let h = framebuffer_hash(&em);
+            match fb_first {
+                None => fb_first = Some(h),
+                Some(h0) if h != h0 => fb_changed = true,
+                Some(_) => {}
+            }
         }
     }
 
@@ -157,7 +181,7 @@ fn bench_one(path: &Path, frames: u64, input: &[(u64, u16)], screens_dir: &Path)
     let nmis = st.scheduler.nmis_serviced;
     let mut findings: Vec<String> = Vec::new();
 
-    // ❌ confirmed
+    // ❌ confirmed-bug signals.
     if let Some(msg) = &crash {
         findings.push(format!("emulator error during run: {msg}"));
     }
@@ -173,44 +197,55 @@ fn bench_one(path: &Path, frames: u64, input: &[(u64, u16)], screens_dir: &Path)
             op.opcode, op.pc
         ));
     }
-    let confirmed = !findings.is_empty();
+    let mut confirmed = !findings.is_empty();
 
-    // 🔑 firmware
+    let static_fb = fb_first.is_some() && !fb_changed;
+    let blank = !em.frame_showed_content().unwrap_or(true);
+    let nmi_starved = nmis <= nmis_at_warmup;
+
+    // Dead screen (static or forced-blank) + a CPU spinning over a tiny set of
+    // addresses = a confirmed hang. If the CPU is alive (many distinct PCs),
+    // the dead screen is a render/forced-blank issue → ⚠️ suspect, not a hang.
+    // The liveness probe (`loop_probe`) is the new API signal that lets us tell
+    // the two apart — NMI-starvation alone never could (Super FX/IRQ games are
+    // alive without NMI).
+    if !confirmed && (static_fb || blank) {
+        let distinct = em
+            .loop_probe(LIVENESS_PROBE_STEPS)
+            .map_or(usize::MAX, |p| p.distinct_pcs);
+        let where_ = if blank { "black" } else { "static" };
+        let nmi = if nmi_starved {
+            ", no NMIs after warm-up"
+        } else {
+            ""
+        };
+        if distinct <= HANG_LOOP_MAX {
+            findings.push(format!(
+                "CPU stuck in a {distinct}-address loop while the screen is {where_}{nmi} — hang"
+            ));
+            confirmed = true;
+        } else {
+            findings.push(format!(
+                "screen {where_} for the whole run but CPU alive ({distinct} distinct PCs{nmi}) — render/forced-blank issue"
+            ));
+        }
+    }
+
+    // 🔑 firmware (informational alongside whatever else was found).
     if let Some(fw) = &info.missing_firmware {
         findings.push(format!("missing coprocessor firmware '{fw}' (inert)"));
     }
-
-    // ⚠️ suspect (only if not already confirmed). A live game animates its
-    // framebuffer even without servicing NMI (Super FX rendering, IRQ-driven
-    // attract demos) — so NMI-starvation ALONE is not a freeze; we only flag
-    // it as corroborating evidence when the framebuffer is also static.
-    if !confirmed {
-        let static_fb = hashes.len() >= 2 && hashes.iter().all(|h| *h == hashes[0]);
-        let nmi_starved = nmis <= nmis_at_warmup;
-        let blank = !em.frame_showed_content().unwrap_or(true);
-        if static_fb {
-            let extra = if nmi_starved {
-                format!(" and no NMIs after warm-up (frame {WARMUP_FRAME}: {nmis_at_warmup})")
-            } else {
-                String::new()
-            };
-            findings.push(format!(
-                "framebuffer never changed across {frames} frames{extra} — possible freeze/hang"
-            ));
-        }
-        if blank {
-            findings.push("screen forced-blank / no visible content for the whole run".into());
-        }
-    }
+    // Audio peak is surfaced as its own report column (silence over a 10s
+    // window is common for intros), not a status-driving finding.
 
     let status = if confirmed {
         Status::Bug
     } else if info.missing_firmware.is_some() {
         Status::NeedsFirmware
-    } else if findings.is_empty() {
-        Status::Ok
-    } else {
+    } else if static_fb || blank {
         Status::Suspect
+    } else {
+        Status::Ok
     };
 
     let screenshot = em.render_frame_png(false).ok().and_then(|png| {
@@ -228,6 +263,7 @@ fn bench_one(path: &Path, frames: u64, input: &[(u64, u16)], screens_dir: &Path)
         frames_run: last_frame,
         nmis,
         instrs: st.stats.instructions_executed,
+        audio_peak,
         findings,
         repro,
         screenshot,
@@ -316,7 +352,7 @@ fn write_reports(out: &Path, bugs_dir: &Path, rom_dir: &Path, frames: u64, resul
         count(Status::Suspect),
         count(Status::NeedsFirmware),
     );
-    rep.push_str("| ROM | Status | Mapper | Frames | NMIs | Instrs | Notes |\n");
+    rep.push_str("| ROM | Status | Mapper | Frames | NMIs | Audio | Notes |\n");
     rep.push_str("|---|---|---|--:|--:|--:|---|\n");
     for s in [
         Status::Bug,
@@ -330,14 +366,18 @@ fn write_reports(out: &Path, bugs_dir: &Path, rom_dir: &Path, frames: u64, resul
                 .screenshot
                 .as_ref()
                 .map_or_else(|| r.name.clone(), |p| format!("[{}]({p})", r.name));
+            let audio = if r.audio_peak == 0 {
+                "silent".to_string()
+            } else {
+                r.audio_peak.to_string()
+            };
             let _ = writeln!(
                 rep,
-                "| {link} | {} | {} | {} | {} | {} | {note} |",
+                "| {link} | {} | {} | {} | {} | {audio} | {note} |",
                 r.status.icon(),
                 r.mapper,
                 r.frames_run,
                 r.nmis,
-                r.instrs,
             );
         }
     }
