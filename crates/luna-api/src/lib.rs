@@ -1445,6 +1445,14 @@ impl Emulator {
         }
         Ok(out)
     }
+
+    /// All 256 CGRAM entries as raw BGR555 words (index 0 = backdrop).
+    /// Cheap, read-only — the Palette Viewer's per-frame source, avoiding
+    /// the full `state()` VRAM occupancy scan.
+    pub fn peek_cgram(&self) -> Result<Vec<u16>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        Ok((0..256u16).map(|i| snes.ppu.cgram.color(i as u8)).collect())
+    }
 }
 
 const fn default_cpu_state() -> CpuState {

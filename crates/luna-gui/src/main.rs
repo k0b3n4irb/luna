@@ -570,6 +570,7 @@ impl LunaApp {
             show_spc700_disasm: self.debug_windows.is_open(DebugPanel::Spc700Disasm),
             show_sprites: self.debug_windows.is_open(DebugPanel::Sprites),
             show_registers: self.debug_windows.is_open(DebugPanel::Registers),
+            show_palette: self.debug_windows.is_open(DebugPanel::Palette),
             pending_rebind: self.pending_rebind,
             pending_hotkey_rebind: self.pending_hotkey_rebind,
             screenshot_status: self.screenshot_status.clone(),
@@ -619,6 +620,7 @@ impl LunaApp {
                         DebugPanel::Spc700 => snap.spc700 = em.spc700_state().ok(),
                         DebugPanel::Sprites => snap.sprites = em.decode_sprites().ok(),
                         DebugPanel::Registers => snap.registers = Some(em.state()),
+                        DebugPanel::Palette => snap.palette = em.peek_cgram().ok(),
                         DebugPanel::CpuMemory => {
                             let (bank, off) = ((cpu_addr >> 16) as u8, cpu_addr as u16);
                             snap.cpu_memory =
@@ -746,6 +748,9 @@ impl LunaApp {
             MenuAction::ToggleSprites => self.debug_windows.toggle(event_loop, DebugPanel::Sprites),
             MenuAction::ToggleRegisters => {
                 self.debug_windows.toggle(event_loop, DebugPanel::Registers);
+            }
+            MenuAction::TogglePalette => {
+                self.debug_windows.toggle(event_loop, DebugPanel::Palette);
             }
             MenuAction::ToggleInputConfig => {
                 self.show_input_config = !self.show_input_config;
