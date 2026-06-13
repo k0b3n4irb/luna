@@ -522,6 +522,16 @@ pub struct Stats {
     pub total_mclk: u64,
 }
 
+/// Result of [`Emulator::loop_probe`] — a CPU-liveness measurement.
+#[derive(Debug, Clone, Copy, Serialize, schemars::JsonSchema)]
+pub struct LoopProbe {
+    /// Distinct `PB:PC` addresses executed during the probe. A tiny count
+    /// over many instructions means the CPU is spinning in a tight loop.
+    pub distinct_pcs: usize,
+    /// Instructions actually executed (≤ `max_steps`; less if the CPU halted).
+    pub executed: u64,
+}
+
 /// The public emulator handle. Owns at most one cartridge + Snes
 /// machine at a time.
 pub struct Emulator {
@@ -734,6 +744,36 @@ impl Emulator {
                 Err(ApiError::Panic(panic_message(&payload)))
             }
         }
+    }
+
+    /// Probe CPU liveness from the current state: step up to `max_steps`
+    /// instructions (stopping early if the CPU halts), recording how many
+    /// **distinct** program addresses (`PB:PC`) were executed. A live game
+    /// touches hundreds–thousands of addresses; a hung game spins over a
+    /// handful — so a tiny `distinct_pcs` is the signal a frozen game is in
+    /// an infinite loop (vs. STP, which `cpu_state().stopped` already
+    /// reports). Mutates state (advances the CPU); a diagnostic, not part of
+    /// normal stepping. Panic-safe (a crashing ROM returns `Err`).
+    pub fn loop_probe(&mut self, max_steps: u64) -> Result<LoopProbe, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        let mut seen = std::collections::HashSet::new();
+        let mut executed = 0u64;
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            while executed < max_steps && !snes.cpu.stopped {
+                seen.insert((u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc));
+                snes.step();
+                executed += 1;
+            }
+        }));
+        std::panic::set_hook(prev_hook);
+        self.instructions_executed += executed;
+        result.map_err(|p| ApiError::Panic(panic_message(&p)))?;
+        Ok(LoopProbe {
+            distinct_pcs: seen.len(),
+            executed,
+        })
     }
 
     /// Take a JSON-serialisable snapshot of the entire observable
