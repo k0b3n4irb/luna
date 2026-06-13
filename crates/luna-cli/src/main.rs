@@ -8,6 +8,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+mod bench;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "luna",
@@ -296,6 +298,25 @@ enum Command {
         #[arg(long)]
         input: Option<String>,
     },
+    /// Run every ROM in a directory headless, detect anomalies (crashes,
+    /// freezes, dead APU, missing firmware), and write a compatibility
+    /// report + one markdown bug file per finding. Stresses the CLI/API
+    /// across the whole corpus. Reports stay local (under `--out`).
+    Bench {
+        /// Directory of ROMs to scan (`.sfc` / `.smc`).
+        #[arg(default_value = "tests/roms")]
+        dir: PathBuf,
+        /// Output directory for the report, screenshots, and bug files.
+        #[arg(long, default_value = "tests/roms/bench")]
+        out: PathBuf,
+        /// Frames to run per ROM.
+        #[arg(short = 'f', long, default_value_t = 600)]
+        frames: u64,
+        /// Override the default Start-pulse input (`frame:hex`, like
+        /// `state --input`) applied to clear title screens.
+        #[arg(long)]
+        input: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -412,6 +433,22 @@ fn main() -> ExitCode {
             force_mapper.as_deref(),
             input.as_deref(),
         ),
+        Command::Bench {
+            dir,
+            out,
+            frames,
+            input,
+        } => {
+            let checkpoints = match input.as_deref().map(parse_input_script) {
+                Some(Ok(c)) => Some(c),
+                Some(Err(e)) => {
+                    eprintln!("error: --input: {e}");
+                    return ExitCode::from(2);
+                }
+                None => None,
+            };
+            bench::run_bench(&dir, &out, frames, checkpoints)
+        }
     }
 }
 
