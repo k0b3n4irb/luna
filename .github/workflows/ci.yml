@@ -1,8 +1,12 @@
 name: CI
 
 on:
+  # CI runs continuously on `develop` (the integration branch) and on every
+  # pull request. `main` is NOT a push trigger: it only ever receives merges
+  # from a green PR, gated by branch protection (required status checks), so a
+  # post-merge re-run on main would be redundant.
   push:
-    branches: [main]
+    branches: [develop]
   pull_request:
 
 # Cancel older runs of the same ref when a new one starts.
