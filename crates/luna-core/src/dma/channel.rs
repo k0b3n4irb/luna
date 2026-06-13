@@ -203,8 +203,21 @@ impl DmaParams {
 /// One of the eight DMA channels.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DmaChannel {
-    /// `$43x0` — decoded parameters.
+    /// `$43x0` — decoded parameters (drive the transfer logic).
     pub params: DmaParams,
+    /// `$43x0` — the raw byte exactly as last written. On hardware the
+    /// register is a plain 8-bit R/W latch: reads return every bit
+    /// verbatim, including bit 5 (unused) and the independent
+    /// fixed/reverse increment bits, none of which survive a round-trip
+    /// through [`DmaParams`]. Games that park their direct page on the
+    /// `$43xx` block and use these registers as fast zero-page scratch
+    /// (e.g. Ms. Pac-Man's graphics decompressor stores its source
+    /// pointer's low byte in `$4340`) rely on lossless read-back; a
+    /// re-encode via [`DmaParams::to_byte`] silently corrupts a quarter
+    /// of all values (any with bit 5 set). ares `cpu/io.cpp` readIO
+    /// reconstructs the byte from independently-stored bits — same
+    /// observable result.
+    pub dmap: u8,
     /// `$43x1` — B-bus base offset (`$2100 + bbad`).
     pub bbad: u8,
     /// `$43x2/$43x3` — A-bus address (low / high). 16-bit; the bank
@@ -258,9 +271,9 @@ impl DmaChannel {
     /// Read a per-channel register at offset `0x0..=0xF` (i.e. the
     /// low nibble of `$43xN`).
     #[must_use]
-    pub fn read(&self, offset: u8) -> u8 {
+    pub const fn read(&self, offset: u8) -> u8 {
         match offset & 0x0F {
-            0x0 => self.params.to_byte(),
+            0x0 => self.dmap,
             0x1 => self.bbad,
             0x2 => self.a_addr as u8,
             0x3 => (self.a_addr >> 8) as u8,
@@ -279,7 +292,12 @@ impl DmaChannel {
     /// Write a per-channel register at offset `0x0..=0xF`.
     pub fn write(&mut self, offset: u8, value: u8) {
         match offset & 0x0F {
-            0x0 => self.params = DmaParams::from_byte(value),
+            0x0 => {
+                // Keep the raw latch for lossless read-back AND the
+                // decoded params that drive the transfer logic.
+                self.dmap = value;
+                self.params = DmaParams::from_byte(value);
+            }
             0x1 => self.bbad = value,
             0x2 => self.a_addr = (self.a_addr & 0xFF00) | u16::from(value),
             0x3 => self.a_addr = (self.a_addr & 0x00FF) | (u16::from(value) << 8),
@@ -904,14 +922,25 @@ mod tests {
             if matches!(off, 0xC..=0xE) {
                 continue;
             }
-            // Offset $0 (DMAPx) round-trips through enum decoding,
-            // so the read-back may differ in bit 5 (always 0). Mask
-            // it before comparing.
-            if off == 0 {
-                assert_eq!(ch.read(off) & !0x20, val & !0x20);
-            } else {
-                assert_eq!(ch.read(off), val);
-            }
+            // Every other offset — including $0 (DMAPx) — is a plain
+            // 8-bit latch and must round-trip every bit verbatim.
+            assert_eq!(ch.read(off), val, "offset ${off:X} must round-trip");
+        }
+    }
+
+    #[test]
+    fn dmap_reads_back_raw_byte_not_reencoded() {
+        // Regression: $43x0 is a full 8-bit R/W latch. Re-encoding the
+        // read through DmaParams::to_byte() drops bit 5 (and folds the
+        // independent fixed/reverse increment bits), corrupting a
+        // quarter of all values. Ms. Pac-Man parks DP on $4300 and
+        // stores its decompressor's source-pointer low byte in $4340
+        // (DMAP4); a lossy read-back desyncs the LZ stream so the
+        // end-marker is never seen → infinite boot loop.
+        let mut ch = DmaChannel::new();
+        for v in 0u8..=0xFF {
+            ch.write(0x0, v);
+            assert_eq!(ch.read(0x0), v, "DMAPx must read back ${v:02X} verbatim");
         }
     }
 }
