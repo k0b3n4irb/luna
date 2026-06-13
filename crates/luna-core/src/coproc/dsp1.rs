@@ -145,6 +145,17 @@ impl Mapper for Dsp1Mapper {
         self.cycle_acc = 0;
     }
 
+    fn dsp1_snapshot(&self) -> Option<luna_bus::Dsp1Snapshot> {
+        Some(luna_bus::Dsp1Snapshot {
+            pc: self.dsp.pc(),
+            sr: self.dsp.sr(),
+            a: self.dsp.a(),
+            b: self.dsp.b(),
+            dr: self.dsp.dr(),
+            rqm: self.dsp.rqm(),
+        })
+    }
+
     fn step_coproc(&mut self, main_mclk: u32) {
         if !self.has_firmware {
             return;

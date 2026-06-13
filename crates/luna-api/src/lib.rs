@@ -109,6 +109,26 @@ pub struct EmulatorState {
     /// debugging — lets you see at a glance whether the SA-1 PC is
     /// stuck in a polling loop, running random ROM bytes, or halted.
     pub sa1: Option<Sa1State>,
+    /// DSP-1 (NEC uPD7725) state, if the loaded cartridge hosts one.
+    /// `None` for non-DSP carts.
+    pub dsp1: Option<Dsp1State>,
+}
+
+/// DSP-1 (NEC uPD7725) coprocessor snapshot.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct Dsp1State {
+    /// Program counter.
+    pub pc: u16,
+    /// Status register (`SR`).
+    pub sr: u16,
+    /// Accumulator A.
+    pub a: i16,
+    /// Accumulator B.
+    pub b: i16,
+    /// Data register (`DR`, the CPU port).
+    pub dr: u16,
+    /// `RQM` — set when the chip is awaiting the master.
+    pub rqm: bool,
 }
 
 /// SA-1 coprocessor CPU snapshot.
@@ -895,6 +915,18 @@ impl Emulator {
                 p: snap.p,
                 running: snap.running,
             });
+        let dsp1 = self
+            .snes
+            .as_ref()
+            .and_then(|s| s.mapper.dsp1_snapshot())
+            .map(|snap| Dsp1State {
+                pc: snap.pc,
+                sr: snap.sr,
+                a: snap.a,
+                b: snap.b,
+                dr: snap.dr,
+                rqm: snap.rqm,
+            });
         EmulatorState {
             rom: self.rom_info.clone(),
             cpu,
@@ -905,6 +937,7 @@ impl Emulator {
             stats,
             sa1,
             dma,
+            dsp1,
         }
     }
 

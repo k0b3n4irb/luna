@@ -128,6 +128,12 @@ pub trait Mapper {
         None
     }
 
+    /// A read-only DSP-1 (uPD7725) state snapshot for the debugger, or
+    /// `None` for non-DSP mappers.
+    fn dsp1_snapshot(&self) -> Option<Dsp1Snapshot> {
+        None
+    }
+
     /// Enable SA-1-*side* execution logging: from now the coprocessor
     /// records its own accesses to the SA-1 MMIO window (`$2200-$23FF`)
     /// with its PC, for diagnosing why the SA-1 (re)asserts registers
@@ -245,4 +251,21 @@ pub struct Sa1Snapshot {
     pub p: u8,
     /// `true` while CCNT.5 is clear (chip released from reset).
     pub running: bool,
+}
+
+/// A read-only snapshot of the DSP-1 (NEC uPD7725) for the debugger.
+#[derive(Debug, Clone, Copy)]
+pub struct Dsp1Snapshot {
+    /// Program counter.
+    pub pc: u16,
+    /// Status register (`SR`).
+    pub sr: u16,
+    /// Accumulator A.
+    pub a: i16,
+    /// Accumulator B.
+    pub b: i16,
+    /// Data register (`DR`, CPU port).
+    pub dr: u16,
+    /// `RQM` — set when the chip is waiting on the master.
+    pub rqm: bool,
 }
