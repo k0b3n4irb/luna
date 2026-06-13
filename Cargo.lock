@@ -1918,6 +1918,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "luna-cpu-upd96050"
+version = "0.0.1"
+
+[[package]]
 name = "luna-gui"
 version = "0.0.1"
 dependencies = [
