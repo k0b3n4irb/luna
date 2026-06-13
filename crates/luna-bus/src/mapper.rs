@@ -20,6 +20,10 @@ pub enum MapperKind {
     Sa1,
     /// Super FX mapping (Star Fox, Yoshi's Island, Doom).
     SuperFx,
+    /// NEC DSP-1 coprocessor (Super Mario Kart, Pilotwings, …). The base
+    /// ROM layout is `LoROM` or `HiROM` depending on the board; the chip is
+    /// driven through a `Dsp1Mapper` shim in luna-core.
+    Dsp1,
     /// S-DD1 (Star Ocean, Street Fighter Alpha 2).
     Sdd1,
     /// SPC7110 (Far East of Eden Zero).
@@ -42,6 +46,7 @@ impl MapperKind {
             "exhirom" => Some(Self::ExHiRom),
             "sa1" => Some(Self::Sa1),
             "superfx" => Some(Self::SuperFx),
+            "dsp1" => Some(Self::Dsp1),
             "sdd1" => Some(Self::Sdd1),
             "spc7110" => Some(Self::Spc7110),
             _ => None,

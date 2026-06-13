@@ -1896,6 +1896,7 @@ dependencies = [
  "luna-bus",
  "luna-cartridge",
  "luna-cpu-65c816",
+ "luna-cpu-upd96050",
  "luna-ppu",
  "sha2",
 ]

@@ -118,6 +118,7 @@ luna-cartridge    = { path = "crates/luna-cartridge", version = "0.0.1" }
 luna-core         = { path = "crates/luna-core", version = "0.0.1" }
 luna-cpu-65c816   = { path = "crates/luna-cpu-65c816", version = "0.0.1" }
 luna-cpu-spc700   = { path = "crates/luna-cpu-spc700", version = "0.0.1" }
+luna-cpu-upd96050 = { path = "crates/luna-cpu-upd96050", version = "0.0.1" }
 luna-mcp-server   = { path = "crates/luna-mcp-server", version = "0.0.1" }
 luna-ppu          = { path = "crates/luna-ppu", version = "0.0.1" }
 

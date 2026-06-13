@@ -69,6 +69,10 @@ pub struct Header {
     pub title: String,
     /// Cartridge mapping mode.
     pub mapper_kind: MapperKind,
+    /// For a `Dsp1` cartridge, whether the base ROM layout is `HiROM`
+    /// (`true`, e.g. Super Mario Kart) or `LoROM` (`false`). Ignored for
+    /// non-DSP mappers.
+    pub dsp_hirom: bool,
     /// `true` if the `FastROM` bit is set in the mapping byte.
     pub fast_rom: bool,
     /// ROM size in kilobytes (advertised by the cartridge, may exceed the
@@ -108,16 +112,34 @@ pub struct Cartridge {
     pub rom: Vec<u8>,
     /// Decoded header.
     pub header: Header,
+    /// Coprocessor microcode (e.g. an 8 KB DSP-1 `dsp1b.rom`), if the cart
+    /// needs one and it was found embedded in the dump or supplied
+    /// externally. `None` for non-coprocessor carts or until resolved.
+    coprocessor_firmware: Option<Vec<u8>>,
 }
 
+/// Combined DSP-1 firmware size (program `0x1800` + data `0x800`).
+const DSP1_FIRMWARE_LEN: usize = 0x2000;
+
 impl Cartridge {
-    /// Load and parse a ROM file from disk.
+    /// Load and parse a ROM file from disk. For a DSP game with no firmware
+    /// embedded in the dump, auto-discovers `dsp1b.rom` next to the ROM file.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, CartError> {
-        Self::from_bytes(fs::read(path)?)
+        let path = path.as_ref();
+        let mut cart = Self::from_bytes(fs::read(path)?)?;
+        if cart.needs_coprocessor_firmware() {
+            if let Some(dir) = path.parent() {
+                if let Ok(bytes) = fs::read(dir.join("dsp1b.rom")) {
+                    cart.set_coprocessor_firmware(bytes);
+                }
+            }
+        }
+        Ok(cart)
     }
 
     /// Parse a ROM image from bytes already in memory. Strips a 512-byte
-    /// SMC copier header if present.
+    /// SMC copier header if present, and (DSP games) extracts firmware
+    /// appended to the dump.
     pub fn from_bytes(mut rom: Vec<u8>) -> Result<Self, CartError> {
         // SMC copier prepends 512 bytes if `(rom.len() % 1024) == 512`.
         if rom.len() % 1024 == 512 {
@@ -127,7 +149,21 @@ impl Cartridge {
             return Err(CartError::TooSmall(rom.len()));
         }
         let header = detect_and_parse(&rom).ok_or(CartError::LayoutUnknown)?;
-        Ok(Self { rom, header })
+        // Some DSP-1 dumps append the chip's 8 KB firmware (Mesen2
+        // `BaseCartridge.cpp`: ROM length is `32KB·n + 0x2000`). Strip it
+        // off the ROM and keep it as the coprocessor firmware.
+        let coprocessor_firmware = if matches!(header.mapper_kind, MapperKind::Dsp1)
+            && rom.len() & 0x7FFF == DSP1_FIRMWARE_LEN
+        {
+            Some(rom.split_off(rom.len() - DSP1_FIRMWARE_LEN))
+        } else {
+            None
+        };
+        Ok(Self {
+            rom,
+            header,
+            coprocessor_firmware,
+        })
     }
 
     /// Parse a ROM image but **force** the mapper layout and skip the
@@ -148,8 +184,11 @@ impl Cartridge {
         let off = match mapper {
             // LoROM-region layouts (header at $7FC0).
             MapperKind::LoRom | MapperKind::Sa1 | MapperKind::SuperFx => HEADER_OFFSET_LOROM,
-            // HiROM-region layouts (header at $FFC0).
-            MapperKind::HiRom | MapperKind::Sdd1 | MapperKind::Spc7110 => HEADER_OFFSET_HIROM,
+            // HiROM-region layouts (header at $FFC0). Forced DSP-1 assumes
+            // the HiROM board (Super Mario Kart); LoROM DSP-1 isn't forced.
+            MapperKind::HiRom | MapperKind::Sdd1 | MapperKind::Spc7110 | MapperKind::Dsp1 => {
+                HEADER_OFFSET_HIROM
+            }
             MapperKind::ExHiRom => HEADER_OFFSET_EXHIROM,
         };
         if off + 0x20 > rom.len() {
@@ -157,7 +196,31 @@ impl Cartridge {
         }
         let mut header = parse_at(&rom, off);
         header.mapper_kind = mapper;
-        Ok(Self { rom, header })
+        Ok(Self {
+            rom,
+            header,
+            coprocessor_firmware: None,
+        })
+    }
+
+    /// `true` when this cartridge needs an external coprocessor firmware
+    /// image that hasn't been supplied yet (a DSP game with no `dsp1b.rom`
+    /// embedded in the dump or loaded beside it).
+    #[must_use]
+    pub const fn needs_coprocessor_firmware(&self) -> bool {
+        matches!(self.header.mapper_kind, MapperKind::Dsp1) && self.coprocessor_firmware.is_none()
+    }
+
+    /// Supply the coprocessor firmware (e.g. an 8 KB `dsp1b.rom`). Used by
+    /// front-ends that resolve the file via a CLI flag / firmware folder.
+    pub fn set_coprocessor_firmware(&mut self, bytes: Vec<u8>) {
+        self.coprocessor_firmware = Some(bytes);
+    }
+
+    /// The loaded coprocessor firmware, if any.
+    #[must_use]
+    pub fn coprocessor_firmware(&self) -> Option<&[u8]> {
+        self.coprocessor_firmware.as_deref()
     }
 }
 
@@ -205,11 +268,20 @@ fn parse_at(rom: &[u8], off: usize) -> Header {
     // Super FX games (Star Fox = $13, Yoshi's Island = $15) carry a LoROM
     // map mode ($20), so the GSU is only visible via this byte — high
     // nibble 1 = GSU. (Empirically verified against both ROMs' headers.)
+    // Coprocessor overrides keyed on the chipset byte: low nibble >= 3 flags
+    // a coprocessor, high nibble selects which (1 = Super FX, 0 = NEC DSP).
     let is_superfx = (chipset & 0x0F) >= 0x03 && (chipset & 0xF0) == 0x10;
+    let is_dsp = (chipset & 0x0F) >= 0x03 && (chipset & 0xF0) == 0x00;
+    let base_kind = mapper_from_byte(map_byte).unwrap_or(MapperKind::LoRom);
+    // DSP-1 boards exist in both LoROM (DR/SR at $8000) and HiROM (DR/SR at
+    // $6000) flavours — the base layout follows the map byte.
+    let dsp_hirom = matches!(base_kind, MapperKind::HiRom | MapperKind::ExHiRom);
     let mapper_kind = if is_superfx {
         MapperKind::SuperFx
+    } else if is_dsp {
+        MapperKind::Dsp1
     } else {
-        mapper_from_byte(map_byte).unwrap_or(MapperKind::LoRom)
+        base_kind
     };
     let fast_rom = (map_byte & 0x10) != 0;
     // The size bytes are exponents (KB = 1 << byte). Garbage cartridges
@@ -229,6 +301,7 @@ fn parse_at(rom: &[u8], off: usize) -> Header {
     Header {
         title,
         mapper_kind,
+        dsp_hirom,
         fast_rom,
         rom_size_kb,
         sram_size_kb,
