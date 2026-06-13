@@ -93,9 +93,13 @@ impl SnesButton {
     }
 }
 
-/// One pair `(SnesButton, KeyCode)` flattened for JSON.
+/// One pair `(SnesButton, KeyCode)` flattened for JSON. `player` is
+/// `#[serde(default)]` = 0, so an older `input.json` (Player-1-only, no
+/// `player` field) still loads as Player 1 untouched.
 #[derive(Serialize, Deserialize)]
 struct Binding {
+    #[serde(default)]
+    player: usize,
     button: SnesButton,
     key: KeyCode,
 }
@@ -136,34 +140,59 @@ struct HotkeyBinding {
     key: KeyCode,
 }
 
-/// Player-1 keyboard binding map. Each entry pairs a SNES button to a
-/// winit `KeyCode` (physical key). Defaults to the Mesen2 "Arrow keys"
-/// preset.
+/// Number of controller ports luna drives from the keyboard: Player 1 and
+/// Player 2 (both fully handled by the emulator — `$4017` + auto-read JOY2).
+pub(crate) const NUM_PLAYERS: usize = 2;
+
+/// Player-1 default: Mesen2 "Arrow keys" preset for SNES (verified against
+/// `UI/Config/KeyPresets.cs::ApplyArrowLayout`).
+const P1_DEFAULT: [(SnesButton, KeyCode); 12] = [
+    (SnesButton::B, KeyCode::KeyA),
+    (SnesButton::Y, KeyCode::KeyZ),
+    (SnesButton::Select, KeyCode::KeyE),
+    (SnesButton::Start, KeyCode::KeyD),
+    (SnesButton::Up, KeyCode::ArrowUp),
+    (SnesButton::Down, KeyCode::ArrowDown),
+    (SnesButton::Left, KeyCode::ArrowLeft),
+    (SnesButton::Right, KeyCode::ArrowRight),
+    (SnesButton::A, KeyCode::KeyS),
+    (SnesButton::X, KeyCode::KeyX),
+    (SnesButton::L, KeyCode::KeyQ),
+    (SnesButton::R, KeyCode::KeyW),
+];
+
+/// Player-2 default. Mesen2 ships no P2 keyboard preset (it leaves the
+/// second pad unbound), so this is luna's own: the numeric-keypad d-pad
+/// plus the right-hand `IJKL`/`UO`/`HN` cluster — chosen to never collide
+/// with the Player-1 keys above so both pads work out of the box.
+const P2_DEFAULT: [(SnesButton, KeyCode); 12] = [
+    (SnesButton::B, KeyCode::KeyK),
+    (SnesButton::Y, KeyCode::KeyJ),
+    (SnesButton::Select, KeyCode::KeyH),
+    (SnesButton::Start, KeyCode::KeyN),
+    (SnesButton::Up, KeyCode::Numpad8),
+    (SnesButton::Down, KeyCode::Numpad2),
+    (SnesButton::Left, KeyCode::Numpad4),
+    (SnesButton::Right, KeyCode::Numpad6),
+    (SnesButton::A, KeyCode::KeyL),
+    (SnesButton::X, KeyCode::KeyI),
+    (SnesButton::L, KeyCode::KeyU),
+    (SnesButton::R, KeyCode::KeyO),
+];
+
+/// Keyboard binding map for both controller ports. `pads[0]` = Player 1,
+/// `pads[1]` = Player 2. Each entry pairs a SNES button to a winit
+/// `KeyCode` (physical key, layout-agnostic).
 #[derive(Clone)]
 pub(crate) struct KeyBindings {
-    bindings: [(SnesButton, KeyCode); 12],
+    pads: [[(SnesButton, KeyCode); 12]; NUM_PLAYERS],
     hotkeys: [(Hotkey, KeyCode); 1],
 }
 
 impl Default for KeyBindings {
     fn default() -> Self {
-        // Mesen2 "Arrow keys" preset for SNES (verified against
-        // `UI/Config/KeyPresets.cs::ApplyArrowLayout`).
         Self {
-            bindings: [
-                (SnesButton::B, KeyCode::KeyA),
-                (SnesButton::Y, KeyCode::KeyZ),
-                (SnesButton::Select, KeyCode::KeyE),
-                (SnesButton::Start, KeyCode::KeyD),
-                (SnesButton::Up, KeyCode::ArrowUp),
-                (SnesButton::Down, KeyCode::ArrowDown),
-                (SnesButton::Left, KeyCode::ArrowLeft),
-                (SnesButton::Right, KeyCode::ArrowRight),
-                (SnesButton::A, KeyCode::KeyS),
-                (SnesButton::X, KeyCode::KeyX),
-                (SnesButton::L, KeyCode::KeyQ),
-                (SnesButton::R, KeyCode::KeyW),
-            ],
+            pads: [P1_DEFAULT, P2_DEFAULT],
             hotkeys: [(Hotkey::Screenshot, Hotkey::Screenshot.default_key())],
         }
     }
@@ -171,29 +200,34 @@ impl Default for KeyBindings {
 
 impl KeyBindings {
     #[must_use]
-    pub(crate) fn get(&self, button: SnesButton) -> KeyCode {
-        self.bindings
-            .iter()
-            .find(|(b, _)| *b == button)
+    pub(crate) fn get(&self, player: usize, button: SnesButton) -> KeyCode {
+        self.pads
+            .get(player)
+            .and_then(|p| p.iter().find(|(b, _)| *b == button))
             .map_or(KeyCode::Space, |(_, k)| *k)
     }
 
-    /// Rebind `button` to `key`. Multiple SNES buttons sharing one
-    /// keyboard key is harmless on the SNES side.
-    pub(crate) fn set(&mut self, button: SnesButton, key: KeyCode) {
-        for slot in &mut self.bindings {
-            if slot.0 == button {
-                slot.1 = key;
-                return;
+    /// Rebind `player`'s `button` to `key`. Multiple SNES buttons sharing
+    /// one keyboard key is harmless on the SNES side.
+    pub(crate) fn set(&mut self, player: usize, button: SnesButton, key: KeyCode) {
+        if let Some(pad) = self.pads.get_mut(player) {
+            for slot in pad {
+                if slot.0 == button {
+                    slot.1 = key;
+                    return;
+                }
             }
         }
     }
 
-    /// Restore the 12 pad bindings to the factory defaults (Mesen2
-    /// "Arrow keys" preset), leaving hotkeys untouched. Like Mesen2's
-    /// "Reset to Default": applies in-memory; persist via [`Self::save`].
-    pub(crate) fn reset_bindings(&mut self) {
-        self.bindings = Self::default().bindings;
+    /// Restore one player's 12 pad bindings to the factory defaults
+    /// (P1 = Mesen2 "Arrow keys"; P2 = luna's numpad cluster), leaving the
+    /// other player + hotkeys untouched. Like Mesen2's "Reset to Default":
+    /// applies in-memory; persist via [`Self::save`].
+    pub(crate) fn reset_bindings(&mut self, player: usize) {
+        if let Some(pad) = self.pads.get_mut(player) {
+            *pad = Self::default().pads[player];
+        }
     }
 
     /// Key currently bound to `hotkey`.
@@ -240,11 +274,15 @@ impl KeyBindings {
             fs::create_dir_all(parent)?;
         }
         let entries: Vec<Binding> = self
-            .bindings
+            .pads
             .iter()
-            .map(|(b, k)| Binding {
-                button: *b,
-                key: *k,
+            .enumerate()
+            .flat_map(|(player, pad)| {
+                pad.iter().map(move |(b, k)| Binding {
+                    player,
+                    button: *b,
+                    key: *k,
+                })
             })
             .collect();
         let json = serde_json::to_string_pretty(&entries)
@@ -268,11 +306,15 @@ impl KeyBindings {
         Ok(path)
     }
 
-    /// Build the 16-bit `JOY1` mask from the current set of held keys.
+    /// Build the 16-bit JOY mask for `player` from the current set of held
+    /// keys. Player 0 → `set_joypad(0, …)`, Player 1 → `set_joypad(1, …)`.
     #[must_use]
-    pub(crate) fn mask_from_pressed(&self, pressed: &HashSet<KeyCode>) -> u16 {
+    pub(crate) fn mask_from_pressed(&self, player: usize, pressed: &HashSet<KeyCode>) -> u16 {
+        let Some(pad) = self.pads.get(player) else {
+            return 0;
+        };
         let mut m: u16 = 0;
-        for (button, key) in &self.bindings {
+        for (button, key) in pad {
             if pressed.contains(key) {
                 m |= button.mask();
             }
@@ -292,9 +334,11 @@ impl KeyBindings {
         };
         let mut out = Self::default();
         for entry in entries {
-            for slot in &mut out.bindings {
-                if slot.0 == entry.button {
-                    slot.1 = entry.key;
+            if let Some(pad) = out.pads.get_mut(entry.player) {
+                for slot in pad {
+                    if slot.0 == entry.button {
+                        slot.1 = entry.key;
+                    }
                 }
             }
         }
@@ -346,20 +390,68 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_matches_mesen2_arrow_preset() {
+    fn default_p1_matches_mesen2_arrow_preset() {
         let b = KeyBindings::default();
-        assert_eq!(b.get(SnesButton::B), KeyCode::KeyA);
-        assert_eq!(b.get(SnesButton::Y), KeyCode::KeyZ);
-        assert_eq!(b.get(SnesButton::A), KeyCode::KeyS);
-        assert_eq!(b.get(SnesButton::X), KeyCode::KeyX);
-        assert_eq!(b.get(SnesButton::L), KeyCode::KeyQ);
-        assert_eq!(b.get(SnesButton::R), KeyCode::KeyW);
-        assert_eq!(b.get(SnesButton::Select), KeyCode::KeyE);
-        assert_eq!(b.get(SnesButton::Start), KeyCode::KeyD);
-        assert_eq!(b.get(SnesButton::Up), KeyCode::ArrowUp);
-        assert_eq!(b.get(SnesButton::Down), KeyCode::ArrowDown);
-        assert_eq!(b.get(SnesButton::Left), KeyCode::ArrowLeft);
-        assert_eq!(b.get(SnesButton::Right), KeyCode::ArrowRight);
+        assert_eq!(b.get(0, SnesButton::B), KeyCode::KeyA);
+        assert_eq!(b.get(0, SnesButton::Y), KeyCode::KeyZ);
+        assert_eq!(b.get(0, SnesButton::A), KeyCode::KeyS);
+        assert_eq!(b.get(0, SnesButton::X), KeyCode::KeyX);
+        assert_eq!(b.get(0, SnesButton::L), KeyCode::KeyQ);
+        assert_eq!(b.get(0, SnesButton::R), KeyCode::KeyW);
+        assert_eq!(b.get(0, SnesButton::Select), KeyCode::KeyE);
+        assert_eq!(b.get(0, SnesButton::Start), KeyCode::KeyD);
+        assert_eq!(b.get(0, SnesButton::Up), KeyCode::ArrowUp);
+        assert_eq!(b.get(0, SnesButton::Down), KeyCode::ArrowDown);
+        assert_eq!(b.get(0, SnesButton::Left), KeyCode::ArrowLeft);
+        assert_eq!(b.get(0, SnesButton::Right), KeyCode::ArrowRight);
+    }
+
+    #[test]
+    fn default_p2_is_numpad_cluster_and_disjoint_from_p1() {
+        let b = KeyBindings::default();
+        assert_eq!(b.get(1, SnesButton::Up), KeyCode::Numpad8);
+        assert_eq!(b.get(1, SnesButton::Down), KeyCode::Numpad2);
+        assert_eq!(b.get(1, SnesButton::B), KeyCode::KeyK);
+        // P1 and P2 must not share any physical key, or one press would
+        // drive both pads.
+        for &btn in &SnesButton::ALL {
+            for &btn2 in &SnesButton::ALL {
+                assert_ne!(
+                    b.get(0, btn),
+                    b.get(1, btn2),
+                    "P1 {btn:?} and P2 {btn2:?} collide on one key"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mask_is_per_player() {
+        let b = KeyBindings::default();
+        let mut p1 = HashSet::new();
+        p1.insert(KeyCode::KeyS); // P1 A
+        assert_eq!(b.mask_from_pressed(0, &p1), SnesButton::A.mask());
+        assert_eq!(b.mask_from_pressed(1, &p1), 0, "P1's key drives no P2 bit");
+        let mut p2 = HashSet::new();
+        p2.insert(KeyCode::Numpad8); // P2 Up
+        assert_eq!(b.mask_from_pressed(1, &p2), SnesButton::Up.mask());
+        assert_eq!(b.mask_from_pressed(0, &p2), 0);
+    }
+
+    #[test]
+    fn bindings_round_trip_player_index_through_serde() {
+        // A Binding without a `player` field (legacy input.json) loads as 0.
+        let legacy: Binding = serde_json::from_str(r#"{"button":"B","key":"KeyA"}"#).unwrap();
+        assert_eq!(legacy.player, 0);
+        // A P2 binding serialises and parses back with its player index.
+        let b = Binding {
+            player: 1,
+            button: SnesButton::Up,
+            key: KeyCode::Numpad8,
+        };
+        let json = serde_json::to_string(&b).unwrap();
+        let back: Binding = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.player, 1);
     }
 
     #[test]
@@ -375,23 +467,27 @@ mod tests {
     }
 
     #[test]
-    fn reset_bindings_restores_defaults_and_leaves_hotkeys() {
+    fn reset_bindings_restores_defaults_per_player_and_leaves_hotkeys() {
         let mut b = KeyBindings::default();
-        b.set(SnesButton::B, KeyCode::KeyP);
+        b.set(0, SnesButton::B, KeyCode::KeyP);
+        b.set(1, SnesButton::B, KeyCode::KeyP);
         b.set_hotkey(Hotkey::Screenshot, KeyCode::F2);
-        b.reset_bindings();
-        assert_eq!(b.get(SnesButton::B), KeyCode::KeyA, "pad reset to default");
+        b.reset_bindings(0);
+        assert_eq!(b.get(0, SnesButton::B), KeyCode::KeyA, "P1 reset to default");
+        assert_eq!(b.get(1, SnesButton::B), KeyCode::KeyP, "P2 untouched");
         assert_eq!(
             b.get_hotkey(Hotkey::Screenshot),
             KeyCode::F2,
             "hotkeys untouched by a pad reset"
         );
+        b.reset_bindings(1);
+        assert_eq!(b.get(1, SnesButton::B), KeyCode::KeyK, "P2 reset to default");
     }
 
     #[test]
     fn reset_hotkeys_restores_defaults_and_leaves_pad() {
         let mut b = KeyBindings::default();
-        b.set(SnesButton::B, KeyCode::KeyP);
+        b.set(0, SnesButton::B, KeyCode::KeyP);
         b.set_hotkey(Hotkey::Screenshot, KeyCode::F2);
         b.reset_hotkeys();
         assert_eq!(
@@ -400,7 +496,7 @@ mod tests {
             "hotkeys reset to default"
         );
         assert_eq!(
-            b.get(SnesButton::B),
+            b.get(0, SnesButton::B),
             KeyCode::KeyP,
             "pad untouched by a hotkey reset"
         );

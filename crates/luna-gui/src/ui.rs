@@ -25,11 +25,13 @@ pub(crate) enum MenuAction {
     Reset,
     ToggleInputConfig,
     ToggleHotkeyConfig,
-    StartRebind(crate::input::SnesButton),
+    /// Arm a rebind for `(player, button)` — player 0 = P1, 1 = P2.
+    StartRebind(usize, crate::input::SnesButton),
     StartRebindHotkey(crate::input::Hotkey),
     TakeScreenshot,
     SaveBindings,
-    ResetBindings,
+    /// Reset one player's pad bindings to defaults.
+    ResetBindings(usize),
     ResetHotkeys,
     // Debug panels (api-first: data comes from `luna_api::Emulator`).
     ToggleCpuState,
@@ -109,9 +111,9 @@ pub(crate) struct UiState<'a> {
     pub show_registers: bool,
     pub show_palette: bool,
     pub show_tilemap: bool,
-    /// When `Some`, the input modal is waiting on the user to press a
-    /// key to rebind the named SNES button.
-    pub pending_rebind: Option<crate::input::SnesButton>,
+    /// When `Some((player, button))`, the input modal is waiting on the
+    /// user to press a key to rebind that player's SNES button.
+    pub pending_rebind: Option<(usize, crate::input::SnesButton)>,
     /// When `Some`, the input modal is waiting on a key to rebind the
     /// named hotkey (screenshot, …).
     pub pending_hotkey_rebind: Option<crate::input::Hotkey>,
@@ -269,7 +271,14 @@ pub(crate) fn install_dark_theme(ctx: &egui::Context) {
 }
 
 fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>, emit: &mut F) {
-    use crate::input::SnesButton;
+    use crate::input::{NUM_PLAYERS, SnesButton};
+    // Which player tab is showing. Kept in egui memory so the window owns it
+    // locally (no round-trip through app state for a pure view toggle).
+    let tab_id = egui::Id::new("luna-input-player-tab");
+    let mut player = ctx
+        .data_mut(|d| d.get_temp::<usize>(tab_id))
+        .unwrap_or(0)
+        .min(NUM_PLAYERS - 1);
     // `open` drives egui's title-bar ✕ (top-right close, like the Debug
     // windows); a click sets it false and we toggle the panel off below.
     let mut open = true;
@@ -281,13 +290,27 @@ fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<
         .max_height(520.0)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
-            ui.label(
-                egui::RichText::new(
-                    "Click a row's button to rebind it. Defaults match the Mesen2 \
-                     \"Arrow keys\" preset.",
-                )
-                .color(egui::Color32::from_rgb(160, 160, 180)),
-            );
+            // Player 1 / Player 2 tabs. Both ports are fully driven by the
+            // emulator ($4017 + auto-read JOY2).
+            ui.horizontal(|ui| {
+                for p in 0..NUM_PLAYERS {
+                    if ui
+                        .selectable_label(player == p, format!("Player {}", p + 1))
+                        .clicked()
+                    {
+                        player = p;
+                    }
+                }
+            });
+            ui.separator();
+            let hint = if player == 0 {
+                "Click a row's button to rebind it. Player 1 defaults to the \
+                 Mesen2 \"Arrow keys\" preset."
+            } else {
+                "Click a row's button to rebind it. Player 2 defaults to the \
+                 numeric-keypad d-pad + the IJKL/UO/HN cluster."
+            };
+            ui.label(egui::RichText::new(hint).color(egui::Color32::from_rgb(160, 160, 180)));
             ui.add_space(8.0);
             egui::ScrollArea::vertical()
                 .max_height(420.0)
@@ -299,8 +322,8 @@ fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<
                         .show(ui, |ui| {
                             for &button in &SnesButton::ALL {
                                 ui.label(egui::RichText::new(button.label()).strong());
-                                let key = state.key_bindings.get(button);
-                                let label = if state.pending_rebind == Some(button) {
+                                let key = state.key_bindings.get(player, button);
+                                let label = if state.pending_rebind == Some((player, button)) {
                                     "Press a key…".to_string()
                                 } else {
                                     format!("{key:?}")
@@ -310,7 +333,7 @@ fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<
                                     .on_hover_text("Click to rebind")
                                     .clicked()
                                 {
-                                    emit(MenuAction::StartRebind(button));
+                                    emit(MenuAction::StartRebind(player, button));
                                 }
                                 ui.allocate_space(egui::vec2(1.0, 1.0));
                                 ui.end_row();
@@ -326,13 +349,14 @@ fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<
                 ui.add_space(12.0);
                 if ui
                     .button("Reset to defaults")
-                    .on_hover_text("Restore the Mesen2 \"Arrow keys\" preset")
+                    .on_hover_text("Restore this player's default bindings")
                     .clicked()
                 {
-                    emit(MenuAction::ResetBindings);
+                    emit(MenuAction::ResetBindings(player));
                 }
             });
         });
+    ctx.data_mut(|d| d.insert_temp(tab_id, player));
     if !open {
         emit(MenuAction::ToggleInputConfig);
     }

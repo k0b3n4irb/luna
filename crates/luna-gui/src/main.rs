@@ -135,7 +135,7 @@ struct LunaApp {
     show_hotkey_config: bool,
     /// When `Some(button)`, the next key press is captured as that
     /// SNES button's new binding and the field is cleared.
-    pending_rebind: Option<crate::input::SnesButton>,
+    pending_rebind: Option<(usize, crate::input::SnesButton)>,
     /// When `Some(hotkey)`, the next key press is captured as that
     /// hotkey's new binding (screenshot, …) and the field is cleared.
     pending_hotkey_rebind: Option<Hotkey>,
@@ -354,10 +354,12 @@ impl LunaApp {
         if !self.rom_loaded {
             return;
         }
-        let mask = self.key_bindings.mask_from_pressed(&self.pressed_keys);
+        let p1 = self.key_bindings.mask_from_pressed(0, &self.pressed_keys);
+        let p2 = self.key_bindings.mask_from_pressed(1, &self.pressed_keys);
         if let Ok(mut guard) = self.emu.lock() {
             if let Some(em) = guard.as_mut() {
-                let _ = em.set_joypad(0, mask);
+                let _ = em.set_joypad(0, p1);
+                let _ = em.set_joypad(1, p2);
             }
         }
     }
@@ -540,10 +542,10 @@ impl ApplicationHandler for LunaApp {
                 // it to that button / hotkey. Esc cancels.
                 if pressed
                     && !repeat
-                    && let Some(button) = self.pending_rebind
+                    && let Some((player, button)) = self.pending_rebind
                 {
                     if code != KeyCode::Escape {
-                        self.key_bindings.set(button, code);
+                        self.key_bindings.set(player, button, code);
                     }
                     self.pending_rebind = None;
                     return;
@@ -856,8 +858,8 @@ impl LunaApp {
                     self.pending_hotkey_rebind = None;
                 }
             }
-            MenuAction::StartRebind(button) => {
-                self.pending_rebind = Some(button);
+            MenuAction::StartRebind(player, button) => {
+                self.pending_rebind = Some((player, button));
                 self.pending_hotkey_rebind = None;
             }
             MenuAction::StartRebindHotkey(hotkey) => {
@@ -870,8 +872,8 @@ impl LunaApp {
                     eprintln!("luna-gui: save bindings failed: {e}");
                 }
             }
-            MenuAction::ResetBindings => {
-                self.key_bindings.reset_bindings();
+            MenuAction::ResetBindings(player) => {
+                self.key_bindings.reset_bindings(player);
                 self.pending_rebind = None;
             }
             MenuAction::ResetHotkeys => {
