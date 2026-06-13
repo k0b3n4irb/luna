@@ -144,9 +144,10 @@ struct HotkeyBinding {
 /// Player 2 (both fully handled by the emulator — `$4017` + auto-read JOY2).
 pub(crate) const NUM_PLAYERS: usize = 2;
 
-/// Player-1 default: Mesen2 "Arrow keys" preset for SNES (verified against
-/// `UI/Config/KeyPresets.cs::ApplyArrowLayout`).
-const P1_DEFAULT: [(SnesButton, KeyCode); 12] = [
+/// "Arrow keys" preset (Mesen2 `UI/Config/KeyPresets.cs::ApplyArrowLayout`):
+/// d-pad on the arrow cluster, buttons on the left-hand QWERTY block. This is
+/// the Player-1 factory default.
+const P1_ARROWS: [(SnesButton, KeyCode); 12] = [
     (SnesButton::B, KeyCode::KeyA),
     (SnesButton::Y, KeyCode::KeyZ),
     (SnesButton::Select, KeyCode::KeyE),
@@ -160,6 +161,55 @@ const P1_DEFAULT: [(SnesButton, KeyCode); 12] = [
     (SnesButton::L, KeyCode::KeyQ),
     (SnesButton::R, KeyCode::KeyW),
 ];
+
+/// "WASD" preset: d-pad on `WASD`, buttons on the cluster around it
+/// (`Q`/`E` = Y/X, `R`/`T` = L/R, `F`/`G` = B/A, `C`/`V` = Select/Start).
+/// Disjoint from the Player-2 default so the two pads can coexist.
+const P1_WASD: [(SnesButton, KeyCode); 12] = [
+    (SnesButton::B, KeyCode::KeyF),
+    (SnesButton::Y, KeyCode::KeyQ),
+    (SnesButton::Select, KeyCode::KeyC),
+    (SnesButton::Start, KeyCode::KeyV),
+    (SnesButton::Up, KeyCode::KeyW),
+    (SnesButton::Down, KeyCode::KeyS),
+    (SnesButton::Left, KeyCode::KeyA),
+    (SnesButton::Right, KeyCode::KeyD),
+    (SnesButton::A, KeyCode::KeyG),
+    (SnesButton::X, KeyCode::KeyE),
+    (SnesButton::L, KeyCode::KeyR),
+    (SnesButton::R, KeyCode::KeyT),
+];
+
+/// A named keyboard layout a player can switch to with one click (Mesen2
+/// ships a similar preset dropdown). Distinct from "Reset to defaults",
+/// which restores the player's factory binding (P1 = Arrows, P2 = numpad).
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub(crate) enum KeyPreset {
+    Arrows,
+    Wasd,
+}
+
+impl KeyPreset {
+    pub(crate) const ALL: [Self; 2] = [Self::Arrows, Self::Wasd];
+
+    /// Display label for the preset buttons.
+    #[must_use]
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Arrows => "Arrows",
+            Self::Wasd => "WASD",
+        }
+    }
+
+    /// The 12-button layout this preset applies.
+    #[must_use]
+    pub(crate) const fn layout(self) -> [(SnesButton, KeyCode); 12] {
+        match self {
+            Self::Arrows => P1_ARROWS,
+            Self::Wasd => P1_WASD,
+        }
+    }
+}
 
 /// Player-2 default. Mesen2 ships no P2 keyboard preset (it leaves the
 /// second pad unbound), so this is luna's own: the numeric-keypad d-pad
@@ -192,7 +242,7 @@ pub(crate) struct KeyBindings {
 impl Default for KeyBindings {
     fn default() -> Self {
         Self {
-            pads: [P1_DEFAULT, P2_DEFAULT],
+            pads: [P1_ARROWS, P2_DEFAULT],
             hotkeys: [(Hotkey::Screenshot, Hotkey::Screenshot.default_key())],
         }
     }
@@ -227,6 +277,14 @@ impl KeyBindings {
     pub(crate) fn reset_bindings(&mut self, player: usize) {
         if let Some(pad) = self.pads.get_mut(player) {
             *pad = Self::default().pads[player];
+        }
+    }
+
+    /// Apply a named [`KeyPreset`] (Arrows / WASD) to `player`'s pad.
+    /// Applies in-memory; persist via [`Self::save`].
+    pub(crate) fn apply_preset(&mut self, player: usize, preset: KeyPreset) {
+        if let Some(pad) = self.pads.get_mut(player) {
+            *pad = preset.layout();
         }
     }
 
@@ -426,6 +484,24 @@ mod tests {
     }
 
     #[test]
+    fn wasd_preset_applies_and_stays_disjoint_from_p2_default() {
+        let mut b = KeyBindings::default();
+        b.apply_preset(0, KeyPreset::Wasd);
+        assert_eq!(b.get(0, SnesButton::Up), KeyCode::KeyW);
+        assert_eq!(b.get(0, SnesButton::Left), KeyCode::KeyA);
+        assert_eq!(b.get(0, SnesButton::B), KeyCode::KeyF);
+        // P1 on WASD must still not collide with the P2 default pad.
+        for &p1 in &SnesButton::ALL {
+            for &p2 in &SnesButton::ALL {
+                assert_ne!(b.get(0, p1), b.get(1, p2), "WASD P1 {p1:?} vs P2 {p2:?}");
+            }
+        }
+        // Switching back to the Arrows preset restores the arrow d-pad.
+        b.apply_preset(0, KeyPreset::Arrows);
+        assert_eq!(b.get(0, SnesButton::Up), KeyCode::ArrowUp);
+    }
+
+    #[test]
     fn mask_is_per_player() {
         let b = KeyBindings::default();
         let mut p1 = HashSet::new();
@@ -473,7 +549,11 @@ mod tests {
         b.set(1, SnesButton::B, KeyCode::KeyP);
         b.set_hotkey(Hotkey::Screenshot, KeyCode::F2);
         b.reset_bindings(0);
-        assert_eq!(b.get(0, SnesButton::B), KeyCode::KeyA, "P1 reset to default");
+        assert_eq!(
+            b.get(0, SnesButton::B),
+            KeyCode::KeyA,
+            "P1 reset to default"
+        );
         assert_eq!(b.get(1, SnesButton::B), KeyCode::KeyP, "P2 untouched");
         assert_eq!(
             b.get_hotkey(Hotkey::Screenshot),
@@ -481,7 +561,11 @@ mod tests {
             "hotkeys untouched by a pad reset"
         );
         b.reset_bindings(1);
-        assert_eq!(b.get(1, SnesButton::B), KeyCode::KeyK, "P2 reset to default");
+        assert_eq!(
+            b.get(1, SnesButton::B),
+            KeyCode::KeyK,
+            "P2 reset to default"
+        );
     }
 
     #[test]

@@ -32,6 +32,8 @@ pub(crate) enum MenuAction {
     SaveBindings,
     /// Reset one player's pad bindings to defaults.
     ResetBindings(usize),
+    /// Apply a named layout preset (Arrows / WASD) to a player's pad.
+    ApplyPreset(usize, crate::input::KeyPreset),
     ResetHotkeys,
     // Debug panels (api-first: data comes from `luna_api::Emulator`).
     ToggleCpuState,
@@ -311,6 +313,16 @@ fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<
                  numeric-keypad d-pad + the IJKL/UO/HN cluster."
             };
             ui.label(egui::RichText::new(hint).color(egui::Color32::from_rgb(160, 160, 180)));
+            ui.add_space(6.0);
+            // One-click layout presets for the active player.
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Preset:").weak().small());
+                for preset in crate::input::KeyPreset::ALL {
+                    if ui.button(preset.label()).clicked() {
+                        emit(MenuAction::ApplyPreset(player, preset));
+                    }
+                }
+            });
             ui.add_space(8.0);
             egui::ScrollArea::vertical()
                 .max_height(420.0)
@@ -366,7 +378,11 @@ fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<
 /// the controller-bindings window so emulator hotkeys (screenshot, …) live
 /// in their own dedicated dialog. Shares the same `KeyBindings` store, so
 /// "Save & close" persists pad + hotkey bindings together.
-fn draw_hotkey_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>, emit: &mut F) {
+fn draw_hotkey_config<F: FnMut(MenuAction)>(
+    ctx: &egui::Context,
+    state: &UiState<'_>,
+    emit: &mut F,
+) {
     use crate::input::Hotkey;
     // `open` drives egui's title-bar ✕ (top-right close, like the Debug
     // windows); a click sets it false and we toggle the panel off below.
