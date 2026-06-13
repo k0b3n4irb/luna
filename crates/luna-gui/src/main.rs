@@ -876,6 +876,10 @@ impl LunaApp {
                 self.key_bindings.reset_bindings(player);
                 self.pending_rebind = None;
             }
+            MenuAction::ApplyPreset(player, preset) => {
+                self.key_bindings.apply_preset(player, preset);
+                self.pending_rebind = None;
+            }
             MenuAction::ResetHotkeys => {
                 self.key_bindings.reset_hotkeys();
                 self.pending_hotkey_rebind = None;
