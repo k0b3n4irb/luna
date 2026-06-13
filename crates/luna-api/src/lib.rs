@@ -97,6 +97,8 @@ pub struct EmulatorState {
     pub scheduler: SchedulerState,
     /// APU / SPC700 / DSP.
     pub apu: ApuState,
+    /// DMA / HDMA controller registers ($420B-$420C, $43xx).
+    pub dma: DmaState,
     /// Cumulative metrics.
     pub stats: Stats,
     /// SA-1 coprocessor CPU state, if the loaded cartridge hosts one.
@@ -251,6 +253,36 @@ pub struct PpuState {
     pub cgram: Vec<u16>,
     /// Full OAM dump — 544 bytes (512 low table + 32 high table).
     pub oam_full: Vec<u8>,
+    /// `$2106` MOSAIC.
+    pub mosaic: u8,
+    /// `$211A` M7SEL.
+    pub m7sel: u8,
+    /// `$211B` M7A — Mode-7 matrix A.
+    pub m7a: i16,
+    /// `$211C` M7B — Mode-7 matrix B.
+    pub m7b: i16,
+    /// `$211D` M7C — Mode-7 matrix C.
+    pub m7c: i16,
+    /// `$211E` M7D — Mode-7 matrix D.
+    pub m7d: i16,
+    /// `$211F` M7X — Mode-7 centre X.
+    pub m7x: i16,
+    /// `$2120` M7Y — Mode-7 centre Y.
+    pub m7y: i16,
+    /// `$210D` M7HOFS — Mode-7 horizontal scroll.
+    pub m7_hofs: i16,
+    /// `$210E` M7VOFS — Mode-7 vertical scroll.
+    pub m7_vofs: i16,
+    /// `$2134-$2136` MPYL/MPYM/MPYH 24-bit hardware product.
+    pub mpy: i32,
+    /// `$213E` STAT77 (PPU1 status).
+    pub stat77: u8,
+    /// `$213F` STAT78 (PPU2 status).
+    pub stat78: u8,
+    /// `$213C` OPHCT — latched horizontal counter.
+    pub ophct: u16,
+    /// `$213D` OPVCT — latched vertical counter.
+    pub opvct: u16,
 }
 
 /// Per-BG serialisable view.
@@ -279,6 +311,62 @@ pub struct CpuRegsState {
     pub nmi_flag: bool,
     /// Latched IRQ line.
     pub irq_flag: bool,
+    /// `$4201` WRIO — programmable I/O port output.
+    pub wrio: u8,
+    /// `$4202` WRMPYA — multiply operand A.
+    pub wrmpya: u8,
+    /// `$4203` WRMPYB — multiply operand B.
+    pub wrmpyb: u8,
+    /// `$4204/$4205` WRDIV — 16-bit dividend.
+    pub wrdiv: u16,
+    /// `$4206` WRDVDD — 8-bit divisor.
+    pub wrdvdd: u8,
+    /// `$4207/$4208` HTIME — horizontal IRQ target.
+    pub htime: u16,
+    /// `$4209/$420A` VTIME — vertical IRQ target.
+    pub vtime: u16,
+    /// `$4216/$4217` RDMPY — multiply / remainder result.
+    pub rdmpy: u16,
+    /// `$4214/$4215` RDDIV — divide quotient result.
+    pub rddiv: u16,
+    /// `$4218/$4219` latched joypad 1 (auto-read).
+    pub joy1: u16,
+    /// `$421A/$421B` latched joypad 2 (auto-read).
+    pub joy2: u16,
+    /// `$420D` MEMSEL — `FastROM` enable (bit 0).
+    pub memsel: u8,
+}
+
+/// One DMA/HDMA channel's registers (`$43x0-$43xA`).
+#[derive(Debug, Clone, Copy, Serialize, schemars::JsonSchema)]
+pub struct DmaChannelState {
+    /// `$43x0` `DMAPx` (raw byte).
+    pub params: u8,
+    /// `$43x1` `BBADx` — B-bus address (`$2100 + bbad`).
+    pub bbad: u8,
+    /// `$43x2/$43x3` `A1Tx` — A-bus address.
+    pub a_addr: u16,
+    /// `$43x4` `A1Bx` — A-bus bank.
+    pub a_bank: u8,
+    /// `$43x5/$43x6` `DASx` — byte count / HDMA indirect address.
+    pub das: u16,
+    /// `$43x7` `A2Bx` — HDMA indirect bank.
+    pub dasb: u8,
+    /// `$43x8/$43x9` `A2Ax` — HDMA table pointer.
+    pub a2a: u16,
+    /// `$43xA` `NTRLx` — HDMA line counter.
+    pub ntlr: u8,
+}
+
+/// DMA / HDMA controller registers.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct DmaState {
+    /// The 8 channels ($430x-$437x).
+    pub channels: [DmaChannelState; 8],
+    /// `$420B` MDMAEN — general-DMA enable mask.
+    pub mdmaen: u8,
+    /// `$420C` HDMAEN — HDMA enable mask.
+    pub hdmaen: u8,
 }
 
 /// Scanline scheduler snapshot.
@@ -663,6 +751,21 @@ impl Emulator {
                 bgs,
                 cgram,
                 oam_full,
+                mosaic: s.ppu.mosaic,
+                m7sel: s.ppu.m7sel,
+                m7a: s.ppu.m7a,
+                m7b: s.ppu.m7b,
+                m7c: s.ppu.m7c,
+                m7d: s.ppu.m7d,
+                m7x: s.ppu.m7x,
+                m7y: s.ppu.m7y,
+                m7_hofs: s.ppu.m7_hofs,
+                m7_vofs: s.ppu.m7_vofs,
+                mpy: s.ppu.mpy_result,
+                stat77: s.ppu.stat77,
+                stat78: s.ppu.stat78,
+                ophct: s.ppu.ophct,
+                opvct: s.ppu.opvct,
             }
         });
         let cpu_regs = self
@@ -673,6 +776,38 @@ impl Emulator {
                 hvbjoy: s.cpu_regs.hvbjoy,
                 nmi_flag: s.cpu_regs.nmi_flag,
                 irq_flag: s.cpu_regs.irq_flag,
+                wrio: s.cpu_regs.wrio,
+                wrmpya: s.cpu_regs.wrmpya,
+                wrmpyb: s.cpu_regs.wrmpyb,
+                wrdiv: s.cpu_regs.wrdiv,
+                wrdvdd: s.cpu_regs.wrdvdd,
+                htime: s.cpu_regs.htime,
+                vtime: s.cpu_regs.vtime,
+                rdmpy: s.cpu_regs.rdmpy,
+                rddiv: s.cpu_regs.rddiv,
+                joy1: s.cpu_regs.joypad1_latched,
+                joy2: s.cpu_regs.joypad2_latched,
+                memsel: u8::from(s.fast_rom),
+            });
+        let dma = self
+            .snes
+            .as_ref()
+            .map_or_else(default_dma_state, |s| DmaState {
+                channels: std::array::from_fn(|i| {
+                    let c = &s.dma.channels[i];
+                    DmaChannelState {
+                        params: c.params.to_byte(),
+                        bbad: c.bbad,
+                        a_addr: c.a_addr,
+                        a_bank: c.a_bank,
+                        das: c.das,
+                        dasb: c.dasb,
+                        a2a: c.a2a,
+                        ntlr: c.ntlr,
+                    }
+                }),
+                mdmaen: s.dma.mdmaen,
+                hdmaen: s.dma.hdmaen,
             });
         let scheduler = self
             .snes
@@ -766,6 +901,7 @@ impl Emulator {
             apu,
             stats,
             sa1,
+            dma,
         }
     }
 
@@ -1366,6 +1502,21 @@ const fn default_ppu_state() -> PpuState {
         }; 4],
         cgram: Vec::new(),
         oam_full: Vec::new(),
+        mosaic: 0,
+        m7sel: 0,
+        m7a: 0,
+        m7b: 0,
+        m7c: 0,
+        m7d: 0,
+        m7x: 0,
+        m7y: 0,
+        m7_hofs: 0,
+        m7_vofs: 0,
+        mpy: 0,
+        stat77: 0,
+        stat78: 0,
+        ophct: 0,
+        opvct: 0,
     }
 }
 
@@ -1375,6 +1526,35 @@ const fn default_cpu_regs_state() -> CpuRegsState {
         hvbjoy: 0,
         nmi_flag: false,
         irq_flag: false,
+        wrio: 0,
+        wrmpya: 0,
+        wrmpyb: 0,
+        wrdiv: 0,
+        wrdvdd: 0,
+        htime: 0,
+        vtime: 0,
+        rdmpy: 0,
+        rddiv: 0,
+        joy1: 0,
+        joy2: 0,
+        memsel: 0,
+    }
+}
+
+const fn default_dma_state() -> DmaState {
+    DmaState {
+        channels: [DmaChannelState {
+            params: 0,
+            bbad: 0,
+            a_addr: 0,
+            a_bank: 0,
+            das: 0,
+            dasb: 0,
+            a2a: 0,
+            ntlr: 0,
+        }; 8],
+        mdmaen: 0,
+        hdmaen: 0,
     }
 }
 

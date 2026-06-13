@@ -39,6 +39,7 @@ pub(crate) enum DebugPanel {
     Spc700Memory,
     Spc700Disasm,
     Sprites,
+    Registers,
 }
 
 impl DebugPanel {
@@ -51,6 +52,7 @@ impl DebugPanel {
             Self::Spc700Memory => "SPC700 memory",
             Self::Spc700Disasm => "SPC700 disassembly",
             Self::Sprites => "Sprites (OAM)",
+            Self::Registers => "Registers",
         }
     }
 
@@ -63,6 +65,7 @@ impl DebugPanel {
             Self::Spc700Disasm => (420, 440),
             Self::CpuDisasm => (460, 440),
             Self::Sprites => (340, 460),
+            Self::Registers => (360, 520),
         }
     }
 }
@@ -433,6 +436,7 @@ impl DebugWindows {
                             DebugPanel::Cpu => ui::cpu_state_body(ui, snap),
                             DebugPanel::Spc700 => ui::spc700_body(ui, snap),
                             DebugPanel::Sprites => ui::sprites_body(ui, snap),
+                            DebugPanel::Registers => ui::registers_body(ui, snap),
                             DebugPanel::Spc700Disasm => nav = ui::spc700_disasm_body(ui, snap),
                             DebugPanel::CpuDisasm => nav = ui::cpu_disasm_body(ui, snap),
                             DebugPanel::CpuMemory => nav = ui::cpu_memory_body(ui, snap),
