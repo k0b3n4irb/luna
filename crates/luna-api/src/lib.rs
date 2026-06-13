@@ -22,6 +22,9 @@ pub use luna_core::{
     MapperKind, MemEventKind, MemTraceEvent, MemTraceLog, Sa1LogEvent, Sa1SideEvent, Sa1TraceEvent,
     SuperFxTraceEvent,
 };
+/// Decoded BG tilemap image (Tilemap Viewer), re-exported so the GUI uses
+/// `luna_api::TilemapImage` rather than depending on `luna-ppu`.
+pub use luna_ppu::TilemapImage;
 /// Framebuffer dimensions (256×224), re-exported so front-ends size their
 /// texture/window through `luna-api` rather than depending on `luna-ppu`.
 pub use luna_ppu::{FRAME_H, FRAME_W};
@@ -1452,6 +1455,15 @@ impl Emulator {
     pub fn peek_cgram(&self) -> Result<Vec<u16>, ApiError> {
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
         Ok((0..256u16).map(|i| snes.ppu.cgram.color(i as u8)).collect())
+    }
+
+    /// Render BG `bg_idx` (0..3)'s full tilemap to an RGBA image for the
+    /// GUI Tilemap Viewer. Debug render — ignores scroll/priority/blank,
+    /// shows raw palette colours, but honours per-tile flip + bases. In
+    /// Mode 7 `bg_idx` is ignored and the 128×128 field is rendered.
+    pub fn render_tilemap_rgba(&self, bg_idx: usize) -> Result<TilemapImage, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        Ok(luna_ppu::render_bg_tilemap(&snes.ppu, bg_idx))
     }
 }
 

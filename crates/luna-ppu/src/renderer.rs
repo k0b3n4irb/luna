@@ -1958,6 +1958,179 @@ fn decode_palette(ppu: &Ppu, cgram_index: u8, brightness: u8) -> [u8; 3] {
     apply_brightness(bgr555_to_rgb888(color), brightness)
 }
 
+/// A decoded BG tilemap rendered to a flat RGBA8 image, for the GUI
+/// Tilemap Viewer. This is a *debug* render: it lays the whole tilemap
+/// out as a tile grid ignoring scroll, priority, and forced-blank, and
+/// shows the raw palette colours (no master-brightness). Per-tile H/V
+/// flip and the palette/character bases ARE honoured so it matches what
+/// the scanline renderer would draw from the same VRAM.
+pub struct TilemapImage {
+    /// Image width in pixels (`cols * 8`).
+    pub width: u32,
+    /// Image height in pixels (`rows * 8`).
+    pub height: u32,
+    /// RGBA8 pixels, `width * height * 4` bytes, row-major.
+    pub rgba: Vec<u8>,
+    /// Tilemap width in tiles.
+    pub cols: u16,
+    /// Tilemap height in tiles.
+    pub rows: u16,
+    /// Bits-per-pixel of this layer (2/4/8; 8 for Mode 7).
+    pub bpp: u8,
+    /// True when this is the Mode-7 128×128 field.
+    pub is_mode7: bool,
+    /// On-screen viewport rectangle origin (pixels), from the layer's
+    /// scroll. May wrap past the right/bottom edge — the consumer tiles it.
+    pub view_x: u32,
+    /// Viewport origin Y (pixels).
+    pub view_y: u32,
+    /// Viewport width (pixels); `0` means "no viewport overlay" (Mode 7,
+    /// whose visible area is affine, and disabled layers).
+    pub view_w: u32,
+    /// Viewport height (pixels).
+    pub view_h: u32,
+}
+
+impl TilemapImage {
+    fn empty() -> Self {
+        Self {
+            width: 1,
+            height: 1,
+            rgba: vec![0, 0, 0, 255],
+            cols: 0,
+            rows: 0,
+            bpp: 0,
+            is_mode7: false,
+            view_x: 0,
+            view_y: 0,
+            view_w: 0,
+            view_h: 0,
+        }
+    }
+}
+
+/// Render BG `bg_idx`'s full tilemap as an RGBA image (debug view). In
+/// Mode 7 the `bg_idx` is ignored and the 128×128 8bpp field is rendered.
+/// A disabled layer (bpp 0 in the current mode) yields a 1×1 black image.
+///
+/// NOTE: 8×8 tiles only — 16×16 big-tile mode (BGMODE bits 4-7) is
+/// rendered as its top-left 8×8 quadrants for now.
+#[must_use]
+pub fn render_bg_tilemap(ppu: &Ppu, bg_idx: usize) -> TilemapImage {
+    if ppu.bgmode & 0x07 == 7 {
+        return render_mode7_tilemap(ppu);
+    }
+    let Some(g) = bg_geom(ppu, bg_idx) else {
+        return TilemapImage::empty();
+    };
+    let width = u32::from(g.cols) * 8;
+    let height = u32::from(g.rows) * 8;
+    let mut rgba = vec![0u8; (width * height * 4) as usize];
+    for tile_row in 0..g.rows {
+        for tile_col in 0..g.cols {
+            // Sub-screen (quadrant) addressing, mirroring `sample_bg_pixel`.
+            let sub_x = usize::from(tile_col >> 5);
+            let sub_y = usize::from(tile_row >> 5);
+            let sub_index = match g.tilemap_size {
+                1 => sub_x,
+                2 => sub_y,
+                3 => sub_y * 2 + sub_x,
+                _ => 0,
+            };
+            let tc = usize::from(tile_col & 0x1F);
+            let tr = usize::from(tile_row & 0x1F);
+            let entry_off = g.tilemap_base + sub_index * 0x0800 + (tr * 32 + tc) * 2;
+            let lo = ppu.vram.peek(entry_off as u16);
+            let hi = ppu.vram.peek(entry_off.wrapping_add(1) as u16);
+            let entry = u16::from(lo) | (u16::from(hi) << 8);
+            let tile_num = entry & 0x03FF;
+            let palette_off = ((entry >> 10) & 0x07) as u8;
+            let h_flip = entry & 0x4000 != 0;
+            let v_flip = entry & 0x8000 != 0;
+            let tile_base = g.char_base + usize::from(tile_num) * g.bytes_per_tile;
+            for py in 0..8u32 {
+                let row_in_tile = if v_flip { 7 - py as usize } else { py as usize };
+                let decoded = decode_tile_row(ppu, tile_base, row_in_tile, g.bpp);
+                for px in 0..8u32 {
+                    let col_in_tile = if h_flip { 7 - px as usize } else { px as usize };
+                    let idx = decoded[col_in_tile];
+                    let cgram_idx = match g.bpp {
+                        2 => g.mode0_palette_base + palette_off * 4 + idx,
+                        4 => palette_off.wrapping_mul(16).wrapping_add(idx),
+                        _ => idx,
+                    };
+                    let [r, gr, b] = bgr555_to_rgb888(ppu.cgram.color(cgram_idx));
+                    let x = u32::from(tile_col) * 8 + px;
+                    let y = u32::from(tile_row) * 8 + py;
+                    let o = ((y * width + x) * 4) as usize;
+                    rgba[o] = r;
+                    rgba[o + 1] = gr;
+                    rgba[o + 2] = b;
+                    rgba[o + 3] = 255;
+                }
+            }
+        }
+    }
+    let bg = bg_state(ppu, bg_idx);
+    TilemapImage {
+        width,
+        height,
+        rgba,
+        cols: g.cols,
+        rows: g.rows,
+        bpp: g.bpp,
+        is_mode7: false,
+        view_x: u32::from(bg.h_scroll) % width,
+        view_y: u32::from(bg.v_scroll) % height,
+        view_w: FRAME_W as u32,
+        view_h: FRAME_H as u32,
+    }
+}
+
+/// Render the Mode-7 128×128 tile field (1024×1024 px, 8bpp direct
+/// colour). VRAM layout: byte `2n` = tilemap entry `n`, byte `2n+1` =
+/// char data (ares `mode7.cpp`).
+fn render_mode7_tilemap(ppu: &Ppu) -> TilemapImage {
+    let width = 1024u32;
+    let height = 1024u32;
+    let mut rgba = vec![0u8; (width * height * 4) as usize];
+    for tile_y in 0..128u16 {
+        for tile_x in 0..128u16 {
+            let tile_id = ppu.vram.peek((tile_y << 7 | tile_x) * 2);
+            for py in 0..8u16 {
+                for px in 0..8u16 {
+                    let palette_address = (py << 3) | px;
+                    let addr = (u16::from(tile_id) << 7)
+                        .wrapping_add(palette_address * 2)
+                        .wrapping_add(1);
+                    let palette_idx = ppu.vram.peek(addr);
+                    let [r, g, b] = bgr555_to_rgb888(ppu.cgram.color(palette_idx));
+                    let x = u32::from(tile_x) * 8 + u32::from(px);
+                    let y = u32::from(tile_y) * 8 + u32::from(py);
+                    let o = ((y * width + x) * 4) as usize;
+                    rgba[o] = r;
+                    rgba[o + 1] = g;
+                    rgba[o + 2] = b;
+                    rgba[o + 3] = 255;
+                }
+            }
+        }
+    }
+    TilemapImage {
+        width,
+        height,
+        rgba,
+        cols: 128,
+        rows: 128,
+        bpp: 8,
+        is_mode7: true,
+        view_x: 0,
+        view_y: 0,
+        view_w: 0,
+        view_h: 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
