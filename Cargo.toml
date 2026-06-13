@@ -151,6 +151,7 @@ sha2                 = "0.10"
 winit                = { version = "0.30", features = ["serde"] }
 pixels               = "0.17"
 rfd                  = "0.15"
+dirs                 = "6"
 # egui-on-pixels overlay: native-quality menu bar + dropdowns
 # rendered via wgpu on the SAME device pixels uses. eframe was
 # the wrapper we removed; using egui + egui-wgpu + egui-winit

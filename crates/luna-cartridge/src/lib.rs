@@ -222,6 +222,17 @@ impl Cartridge {
     pub fn coprocessor_firmware(&self) -> Option<&[u8]> {
         self.coprocessor_firmware.as_deref()
     }
+
+    /// The external firmware file this cartridge needs (e.g. `dsp1b.rom`
+    /// for a DSP-1 game), or `None` if it needs none. Front-ends use this
+    /// to name the file in a prompt / error and to look it up by name.
+    #[must_use]
+    pub const fn required_firmware_filename(&self) -> Option<&'static str> {
+        match self.header.mapper_kind {
+            MapperKind::Dsp1 => Some("dsp1b.rom"),
+            _ => None,
+        }
+    }
 }
 
 // =============================================================================

@@ -82,6 +82,12 @@ pub struct RomInfo {
     pub checksum_complement: u16,
     /// Whether `checksum` and `checksum_complement` are bitwise complements.
     pub checksum_valid: bool,
+    /// When the cart needs an external coprocessor firmware that wasn't
+    /// found (e.g. a DSP-1 game with no `dsp1b.rom`), the required
+    /// filename — so a front-end can prompt for / install it. `None` when
+    /// no firmware is needed or it was resolved. The game still loads
+    /// (the coprocessor stays inert) so it can be inspected meanwhile.
+    pub missing_firmware: Option<String>,
 }
 
 /// Snapshot of the emulator's observable state. Every field maps to
@@ -551,8 +557,42 @@ impl Emulator {
     /// stepping. Returns the parsed cartridge metadata for callers
     /// that want to surface it (window title, MCP `load_rom` tool).
     pub fn load_rom(&mut self, path: &Path) -> Result<RomInfo, ApiError> {
-        let cart = Cartridge::load(path)?;
+        let mut cart = Cartridge::load(path)?;
+        // Beside-ROM + embedded firmware are handled by `Cartridge::load`;
+        // additionally search the luna firmware folder so a once-installed
+        // `dsp1b.rom` is found for any ROM, anywhere.
+        if cart.needs_coprocessor_firmware() {
+            if let (Some(name), Some(dir)) =
+                (cart.required_firmware_filename(), Self::firmware_dir())
+            {
+                if let Ok(bytes) = std::fs::read(dir.join(name)) {
+                    cart.set_coprocessor_firmware(bytes);
+                }
+            }
+        }
         self.load_cartridge(cart)
+    }
+
+    /// luna's coprocessor-firmware folder (`<config>/luna/firmware`), where
+    /// files like `dsp1b.rom` live. `None` if no config dir is available.
+    #[must_use]
+    pub fn firmware_dir() -> Option<std::path::PathBuf> {
+        dirs::config_dir().map(|d| d.join("luna").join("firmware"))
+    }
+
+    /// Install a coprocessor-firmware file into the firmware folder under
+    /// the canonical name for its kind (the firmware dir is created if
+    /// needed). Front-ends call this from a CLI flag or a "locate firmware"
+    /// prompt; afterwards `load_rom` finds it automatically. `target` picks
+    /// the destination filename (e.g. `"dsp1b.rom"`).
+    pub fn install_firmware(src: &Path, target: &str) -> Result<std::path::PathBuf, ApiError> {
+        let dir = Self::firmware_dir().ok_or_else(|| {
+            ApiError::Io(std::io::Error::other("no config directory for firmware"))
+        })?;
+        std::fs::create_dir_all(&dir)?;
+        let dest = dir.join(target);
+        std::fs::copy(src, &dest)?;
+        Ok(dest)
     }
 
     /// Lower-level entry point used by tests: load a ROM blob
@@ -587,6 +627,11 @@ impl Emulator {
             checksum: cart.header.checksum,
             checksum_complement: cart.header.checksum_complement,
             checksum_valid: cart.header.checksum_valid(),
+            missing_firmware: if cart.needs_coprocessor_firmware() {
+                cart.required_firmware_filename().map(str::to_string)
+            } else {
+                None
+            },
         };
         // Unsupported coprocessor carts surface as a typed
         // `UnsupportedMapper` error (no longer a panic). The
