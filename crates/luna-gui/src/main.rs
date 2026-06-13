@@ -141,6 +141,11 @@ struct LunaApp {
     pending_hotkey_rebind: Option<Hotkey>,
     /// Last screenshot filename, surfaced in the menu bar as feedback.
     screenshot_status: Option<String>,
+    /// Currently-selected save-state slot (1..=9). The save/load hotkeys
+    /// act on this slot; picking a slot from either menu sets it.
+    current_slot: u8,
+    /// Transient save/load-state feedback surfaced in the menu bar.
+    save_state_status: Option<String>,
 
     /// Debug panels (Debug menu) — each is its own native OS window,
     /// draggable anywhere on the desktop. Data is pulled through
@@ -197,6 +202,8 @@ impl LunaApp {
             pending_rebind: None,
             pending_hotkey_rebind: None,
             screenshot_status: None,
+            current_slot: 1,
+            save_state_status: None,
             debug_windows: DebugWindows::new(),
             cpu_mem_addr: 0x7E_0000,
             spc_mem_addr: 0x0000,
@@ -567,6 +574,8 @@ impl ApplicationHandler for LunaApp {
                 {
                     match hotkey {
                         Hotkey::Screenshot => self.take_screenshot(),
+                        Hotkey::SaveState => self.save_state_to_slot(self.current_slot),
+                        Hotkey::LoadState => self.load_state_from_slot(self.current_slot),
                     }
                     return;
                 }
@@ -620,6 +629,9 @@ impl LunaApp {
         let Some(window) = self.window.clone() else {
             return;
         };
+        // Compute the occupied-slot flags before borrowing `pixels` mutably
+        // (it scans `self`), so the borrow checker stays happy.
+        let occupied_slots = self.occupied_slots();
         // Disjoint borrows: pixels and ui live in separate fields so the
         // closure passed to render_with can capture `&mut ui` without
         // aliasing `self`.
@@ -658,6 +670,8 @@ impl LunaApp {
             pending_rebind: self.pending_rebind,
             pending_hotkey_rebind: self.pending_hotkey_rebind,
             screenshot_status: self.screenshot_status.clone(),
+            save_state_status: self.save_state_status.clone(),
+            occupied_slots,
         };
         let win_size = window.inner_size();
         let scale = window.scale_factor() as f32;
@@ -884,6 +898,8 @@ impl LunaApp {
                 self.key_bindings.reset_hotkeys();
                 self.pending_hotkey_rebind = None;
             }
+            MenuAction::SaveState(slot) => self.save_state_to_slot(slot),
+            MenuAction::LoadState(slot) => self.load_state_from_slot(slot),
         }
     }
 
@@ -918,6 +934,113 @@ impl LunaApp {
             Err(e) => eprintln!("luna-gui: screenshot save failed: {e}"),
         }
     }
+
+    /// Lowercase-kebab slug for the current ROM, used in slot filenames.
+    /// Returns `None` when no ROM is loaded.
+    fn rom_slug(&self) -> Option<String> {
+        let title = self.rom_title.as_deref()?;
+        // Drop the extension, then slugify the stem.
+        let stem = title.rsplit_once('.').map_or(title, |(s, _)| s);
+        let s = slug(stem);
+        if s.is_empty() { None } else { Some(s) }
+    }
+
+    /// Which slots (1..=9, returned indexed 0..9) have a state file on disk
+    /// for the current ROM. Cheap file-existence checks, recomputed per
+    /// frame for the menu's occupied marker.
+    fn occupied_slots(&self) -> [bool; 9] {
+        let mut out = [false; 9];
+        let Some(slug) = self.rom_slug() else {
+            return out;
+        };
+        let dir = states_dir();
+        for (i, flag) in out.iter_mut().enumerate() {
+            let slot = (i + 1) as u8;
+            *flag = dir.join(slot_filename(&slug, slot)).exists();
+        }
+        out
+    }
+
+    /// Save emulator state to `slot` (1..=9) and make it the current slot.
+    /// Goes through `luna_api::Emulator::save_state` (api-first); the GUI
+    /// only adds the file write. No-op with a status message if no ROM.
+    fn save_state_to_slot(&mut self, slot: u8) {
+        self.current_slot = slot;
+        let Some(slug) = self.rom_slug() else {
+            self.save_state_status = Some("No ROM loaded".to_string());
+            return;
+        };
+        // Lock the emu and snapshot through the API (api-first).
+        let encoded = self
+            .emu
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(luna_api::Emulator::save_state));
+        let bytes = match encoded {
+            Some(Ok(b)) => b,
+            Some(Err(e)) => {
+                eprintln!("luna-gui: save state failed: {e}");
+                self.save_state_status = Some(format!("Save failed: {e}"));
+                return;
+            }
+            None => {
+                self.save_state_status = Some("No ROM loaded".to_string());
+                return;
+            }
+        };
+        let dir = states_dir();
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            eprintln!("luna-gui: cannot create states dir: {e}");
+            self.save_state_status = Some(format!("Save failed: {e}"));
+            return;
+        }
+        let path = dir.join(slot_filename(&slug, slot));
+        match std::fs::write(&path, &bytes) {
+            Ok(()) => {
+                eprintln!("luna-gui: state saved → {}", path.display());
+                self.save_state_status = Some(format!("\u{1F4BE} Slot {slot} saved"));
+            }
+            Err(e) => {
+                eprintln!("luna-gui: state write failed: {e}");
+                self.save_state_status = Some(format!("Save failed: {e}"));
+            }
+        }
+    }
+
+    /// Load emulator state from `slot` (1..=9) and make it the current slot.
+    /// Goes through `luna_api::Emulator::load_state` (api-first); a
+    /// wrong-ROM / corrupt blob surfaces as a status message, never a crash.
+    fn load_state_from_slot(&mut self, slot: u8) {
+        self.current_slot = slot;
+        let Some(slug) = self.rom_slug() else {
+            self.save_state_status = Some("No ROM loaded".to_string());
+            return;
+        };
+        let path = states_dir().join(slot_filename(&slug, slot));
+        let Ok(bytes) = std::fs::read(&path) else {
+            self.save_state_status = Some(format!("Slot {slot} empty"));
+            return;
+        };
+        // Lock the emu and restore through the API (api-first).
+        let result = self
+            .emu
+            .lock()
+            .ok()
+            .and_then(|mut g| g.as_mut().map(|em| em.load_state(&bytes)));
+        match result {
+            Some(Ok(())) => {
+                eprintln!("luna-gui: state loaded ← {}", path.display());
+                self.save_state_status = Some(format!("\u{1F4C2} Slot {slot} loaded"));
+            }
+            Some(Err(e)) => {
+                eprintln!("luna-gui: load state failed: {e}");
+                self.save_state_status = Some(format!("Load failed: {e}"));
+            }
+            None => {
+                self.save_state_status = Some("No ROM loaded".to_string());
+            }
+        }
+    }
 }
 
 /// Directory screenshots are written to: `$HOME/.local/luna/screenshots`
@@ -934,6 +1057,47 @@ fn screenshot_dir() -> PathBuf {
                 .join("screenshots")
         },
     )
+}
+
+/// Directory save states are written to: `$HOME/.local/luna/states`, a
+/// sibling of [`screenshot_dir`]. Falls back to a cwd-relative `states/`
+/// if `$HOME` is unset.
+fn states_dir() -> PathBuf {
+    std::env::var_os("HOME").map_or_else(
+        || PathBuf::from("states"),
+        |home| {
+            PathBuf::from(home)
+                .join(".local")
+                .join("luna")
+                .join("states")
+        },
+    )
+}
+
+/// Filename for a ROM's save-state slot: `<rom-slug>.slot<N>.luna`.
+fn slot_filename(slug: &str, slot: u8) -> String {
+    format!("{slug}.slot{slot}.luna")
+}
+
+/// Lowercase-kebab slug of `name`: alphanumerics lowercased, every run of
+/// non-alphanumeric characters collapsed to a single `-`, and leading /
+/// trailing `-` trimmed. Used to derive a stable, filesystem-safe filename
+/// stem from a ROM title.
+fn slug(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut pending_dash = false;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if pending_dash && !out.is_empty() {
+                out.push('-');
+            }
+            pending_dash = false;
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            pending_dash = true;
+        }
+    }
+    out
 }
 
 /// Pick `<screenshot_dir>/<base>_NNN.png` with the lowest free 3-digit

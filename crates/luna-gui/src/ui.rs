@@ -35,6 +35,10 @@ pub(crate) enum MenuAction {
     /// Apply a named layout preset (Arrows / WASD) to a player's pad.
     ApplyPreset(usize, crate::input::KeyPreset),
     ResetHotkeys,
+    /// Save emulator state to numbered slot `1..=9` (also sets it current).
+    SaveState(u8),
+    /// Load emulator state from numbered slot `1..=9` (also sets it current).
+    LoadState(u8),
     // Debug panels (api-first: data comes from `luna_api::Emulator`).
     ToggleCpuState,
     ToggleCpuMemory,
@@ -121,6 +125,11 @@ pub(crate) struct UiState<'a> {
     pub pending_hotkey_rebind: Option<crate::input::Hotkey>,
     /// Last screenshot filename, shown briefly in the menu bar.
     pub screenshot_status: Option<String>,
+    /// Transient save/load-state feedback shown in the menu bar.
+    pub save_state_status: Option<String>,
+    /// Which save-state slots (1..=9, indexed 0..9) have a file on disk for
+    /// the current ROM. Drives the " ●" occupied marker in the slot menus.
+    pub occupied_slots: [bool; 9],
 }
 
 /// All the egui plumbing wired up against pixels' wgpu device.
@@ -437,7 +446,9 @@ fn draw_hotkey_config<F: FnMut(MenuAction)>(
                 ui.add_space(12.0);
                 if ui
                     .button("Reset to defaults")
-                    .on_hover_text("Restore the factory hotkeys (Screenshot = F12)")
+                    .on_hover_text(
+                        "Restore the factory hotkeys (Screenshot = F12, Save = F5, Load = F9)",
+                    )
                     .clicked()
                 {
                     emit(MenuAction::ResetHotkeys);
@@ -1351,6 +1362,49 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>,
                         emit(MenuAction::Reset);
                         ui.close();
                     }
+                    ui.separator();
+                    let save_key = state
+                        .key_bindings
+                        .get_hotkey(crate::input::Hotkey::SaveState);
+                    let load_key = state
+                        .key_bindings
+                        .get_hotkey(crate::input::Hotkey::LoadState);
+                    ui.menu_button(format!("Save state ({save_key:?})"), |ui| {
+                        for slot in 1u8..=9 {
+                            let occupied = state
+                                .occupied_slots
+                                .get(usize::from(slot - 1))
+                                .copied()
+                                .unwrap_or(false);
+                            let label = if occupied {
+                                format!("Slot {slot} \u{25cf}")
+                            } else {
+                                format!("Slot {slot}")
+                            };
+                            if ui.button(label).clicked() {
+                                emit(MenuAction::SaveState(slot));
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.menu_button(format!("Load state ({load_key:?})"), |ui| {
+                        for slot in 1u8..=9 {
+                            let occupied = state
+                                .occupied_slots
+                                .get(usize::from(slot - 1))
+                                .copied()
+                                .unwrap_or(false);
+                            let label = if occupied {
+                                format!("Slot {slot} \u{25cf}")
+                            } else {
+                                format!("Slot {slot}")
+                            };
+                            if ui.button(label).clicked() {
+                                emit(MenuAction::LoadState(slot));
+                                ui.close();
+                            }
+                        }
+                    });
                 });
                 ui.menu_button("Settings", |ui| {
                     // Grouped by area (Mesen2-style), so Audio/Video sections
@@ -1469,6 +1523,12 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>,
                     );
                 }
                 if let Some(status) = state.screenshot_status.as_deref() {
+                    ui.add_space(16.0);
+                    ui.label(
+                        egui::RichText::new(status).color(egui::Color32::from_rgb(120, 200, 120)),
+                    );
+                }
+                if let Some(status) = state.save_state_status.as_deref() {
                     ui.add_space(16.0);
                     ui.label(
                         egui::RichText::new(status).color(egui::Color32::from_rgb(120, 200, 120)),
