@@ -24,6 +24,7 @@ pub(crate) enum MenuAction {
     PauseToggle,
     Reset,
     ToggleInputConfig,
+    ToggleHotkeyConfig,
     StartRebind(crate::input::SnesButton),
     StartRebindHotkey(crate::input::Hotkey),
     TakeScreenshot,
@@ -93,6 +94,7 @@ pub(crate) struct UiState<'a> {
     pub paused: bool,
     pub rom_title: Option<String>,
     pub show_input_config: bool,
+    pub show_hotkey_config: bool,
     pub key_bindings: &'a crate::input::KeyBindings,
     /// Which debug panels are open + their snapshotted data.
     pub show_cpu_state: bool,
@@ -171,6 +173,9 @@ impl UiOverlay {
             draw_menu_bar(ui.ctx(), state, &mut emit);
             if state.show_input_config {
                 draw_input_config(ui.ctx(), state, &mut emit);
+            }
+            if state.show_hotkey_config {
+                draw_hotkey_config(ui.ctx(), state, &mut emit);
             }
             // Debug views live in their own native OS windows (see
             // `crate::debug_window`), not in this overlay — so they can be
@@ -262,7 +267,7 @@ pub(crate) fn install_dark_theme(ctx: &egui::Context) {
 }
 
 fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>, emit: &mut F) {
-    use crate::input::{Hotkey, SnesButton};
+    use crate::input::SnesButton;
     egui::Window::new("Controller bindings")
         .collapsible(false)
         .resizable(false)
@@ -278,10 +283,8 @@ fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<
                 .color(egui::Color32::from_rgb(160, 160, 180)),
             );
             ui.add_space(8.0);
-            // Scroll so the Hotkeys section below the 12 pad rows stays
-            // reachable on short windows.
             egui::ScrollArea::vertical()
-                .max_height(380.0)
+                .max_height(420.0)
                 .show(ui, |ui| {
                     egui::Grid::new("luna-bindings-grid")
                         .num_columns(3)
@@ -307,9 +310,41 @@ fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<
                                 ui.end_row();
                             }
                         });
-                    ui.add_space(10.0);
-                    ui.label(egui::RichText::new("Hotkeys").strong());
-                    ui.add_space(4.0);
+                });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Save & close").clicked() {
+                    emit(MenuAction::SaveBindings);
+                    emit(MenuAction::ToggleInputConfig);
+                }
+                if ui.button("Close").clicked() {
+                    emit(MenuAction::ToggleInputConfig);
+                }
+            });
+        });
+}
+
+/// The Hotkeys rebind window (Settings → Hotkeys → Hotkeys…). Split out of
+/// the controller-bindings window so emulator hotkeys (screenshot, …) live
+/// in their own dedicated dialog. Shares the same `KeyBindings` store, so
+/// "Save & close" persists pad + hotkey bindings together.
+fn draw_hotkey_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>, emit: &mut F) {
+    use crate::input::Hotkey;
+    egui::Window::new("Hotkeys")
+        .collapsible(false)
+        .resizable(false)
+        .default_width(360.0)
+        .max_height(520.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new("Click a row's button to rebind an emulator hotkey.")
+                    .color(egui::Color32::from_rgb(160, 160, 180)),
+            );
+            ui.add_space(8.0);
+            egui::ScrollArea::vertical()
+                .max_height(420.0)
+                .show(ui, |ui| {
                     egui::Grid::new("luna-hotkeys-grid")
                         .num_columns(3)
                         .spacing([16.0, 6.0])
@@ -339,10 +374,10 @@ fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<
             ui.horizontal(|ui| {
                 if ui.button("Save & close").clicked() {
                     emit(MenuAction::SaveBindings);
-                    emit(MenuAction::ToggleInputConfig);
+                    emit(MenuAction::ToggleHotkeyConfig);
                 }
                 if ui.button("Close").clicked() {
-                    emit(MenuAction::ToggleInputConfig);
+                    emit(MenuAction::ToggleHotkeyConfig);
                 }
             });
         });
@@ -1260,6 +1295,15 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>,
                         .clicked()
                     {
                         emit(MenuAction::ToggleInputConfig);
+                        ui.close();
+                    }
+                    ui.separator();
+                    ui.label(egui::RichText::new("Hotkeys").weak().small());
+                    if ui
+                        .selectable_label(state.show_hotkey_config, "Hotkeys…")
+                        .clicked()
+                    {
+                        emit(MenuAction::ToggleHotkeyConfig);
                         ui.close();
                     }
                 });
