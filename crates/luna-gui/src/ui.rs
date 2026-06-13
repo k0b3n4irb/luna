@@ -1112,6 +1112,7 @@ pub(crate) fn sprites_body(ui: &mut egui::Ui, snap: &DebugSnapshot) {
 /// with a `LayoutJob` so each row is one galley.
 fn mem_hex_grid(ui: &mut egui::Ui, start: u32, bytes: &[u8], addr_digits: usize) {
     use egui::text::{LayoutJob, TextFormat};
+    use std::fmt::Write as _;
 
     // Never wrap: a row's hex and ASCII must stay on one aligned line (the
     // window/scroll-area handles any overflow).
@@ -1132,6 +1133,11 @@ fn mem_hex_grid(ui: &mut egui::Ui, start: u32, bytes: &[u8], addr_digits: usize)
         ..Default::default()
     };
 
+    // One reusable scratch buffer for the per-byte hex / per-char ASCII
+    // cells — `LayoutJob::append` copies the &str, so clearing and reusing
+    // this avoids a heap allocation per cell (32 per row) on every repaint.
+    let mut cell = String::with_capacity(3);
+
     for (r, chunk) in bytes.chunks(16).enumerate() {
         let addr = start.wrapping_add((r as u32) * 16) & 0xFF_FFFF;
         let mut job = LayoutJob::default();
@@ -1141,7 +1147,9 @@ fn mem_hex_grid(ui: &mut egui::Ui, start: u32, bytes: &[u8], addr_digits: usize)
             if r == 0 && i == 0 {
                 f.background = cursor_bg;
             }
-            job.append(&format!("{b:02X}"), 0.0, f);
+            cell.clear();
+            let _ = write!(cell, "{b:02X}");
+            job.append(&cell, 0.0, f);
             job.append(" ", 0.0, fmt(c_zero));
         }
         for _ in chunk.len()..16 {
@@ -1154,7 +1162,9 @@ fn mem_hex_grid(ui: &mut egui::Ui, start: u32, bytes: &[u8], addr_digits: usize)
             } else {
                 ('.', c_dot)
             };
-            job.append(&ch.to_string(), 0.0, fmt(col));
+            cell.clear();
+            cell.push(ch);
+            job.append(&cell, 0.0, fmt(col));
         }
         ui.label(job);
     }
