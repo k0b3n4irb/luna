@@ -41,6 +41,7 @@ pub(crate) enum DebugPanel {
     Sprites,
     Registers,
     Palette,
+    Tilemap,
 }
 
 impl DebugPanel {
@@ -55,6 +56,7 @@ impl DebugPanel {
             Self::Sprites => "Sprites (OAM)",
             Self::Registers => "Registers",
             Self::Palette => "Palette (CGRAM)",
+            Self::Tilemap => "Tilemap",
         }
     }
 
@@ -69,6 +71,7 @@ impl DebugPanel {
             Self::Sprites => (340, 460),
             Self::Registers => (360, 520),
             Self::Palette => (380, 440),
+            Self::Tilemap => (540, 580),
         }
     }
 }
@@ -441,6 +444,7 @@ impl DebugWindows {
                             DebugPanel::Sprites => ui::sprites_body(ui, snap),
                             DebugPanel::Registers => ui::registers_body(ui, snap),
                             DebugPanel::Palette => ui::palette_body(ui, snap),
+                            DebugPanel::Tilemap => nav = ui::tilemap_body(ui, snap),
                             DebugPanel::Spc700Disasm => nav = ui::spc700_disasm_body(ui, snap),
                             DebugPanel::CpuDisasm => nav = ui::cpu_disasm_body(ui, snap),
                             DebugPanel::CpuMemory => nav = ui::cpu_memory_body(ui, snap),

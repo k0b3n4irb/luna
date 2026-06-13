@@ -150,6 +150,8 @@ struct LunaApp {
     /// CPU (65c816) disassembly: 24-bit start address + line count.
     cpu_disasm_addr: u32,
     cpu_disasm_lines: u16,
+    /// Tilemap Viewer: which BG layer (0..3) to render.
+    tilemap_bg: usize,
 }
 
 impl LunaApp {
@@ -193,6 +195,7 @@ impl LunaApp {
             spc_disasm_lines: 32,
             cpu_disasm_addr: 0x00_8000,
             cpu_disasm_lines: 32,
+            tilemap_bg: 0,
         };
         if let Some(path) = auto_rom {
             app.load_rom(&path);
@@ -571,6 +574,7 @@ impl LunaApp {
             show_sprites: self.debug_windows.is_open(DebugPanel::Sprites),
             show_registers: self.debug_windows.is_open(DebugPanel::Registers),
             show_palette: self.debug_windows.is_open(DebugPanel::Palette),
+            show_tilemap: self.debug_windows.is_open(DebugPanel::Tilemap),
             pending_rebind: self.pending_rebind,
             pending_hotkey_rebind: self.pending_hotkey_rebind,
             screenshot_status: self.screenshot_status.clone(),
@@ -621,6 +625,10 @@ impl LunaApp {
                         DebugPanel::Sprites => snap.sprites = em.decode_sprites().ok(),
                         DebugPanel::Registers => snap.registers = Some(em.state()),
                         DebugPanel::Palette => snap.palette = em.peek_cgram().ok(),
+                        DebugPanel::Tilemap => {
+                            snap.tilemap = em.render_tilemap_rgba(self.tilemap_bg).ok();
+                            snap.tilemap_bg = self.tilemap_bg;
+                        }
                         DebugPanel::CpuMemory => {
                             let (bank, off) = ((cpu_addr >> 16) as u8, cpu_addr as u16);
                             snap.cpu_memory =
@@ -713,6 +721,9 @@ impl LunaApp {
                     self.spc_disasm_lines = n;
                 }
             }
+            Some(PanelNav::TilemapSetBg(bg)) => {
+                self.tilemap_bg = bg.min(3);
+            }
             None => {}
         }
         if close {
@@ -751,6 +762,9 @@ impl LunaApp {
             }
             MenuAction::TogglePalette => {
                 self.debug_windows.toggle(event_loop, DebugPanel::Palette);
+            }
+            MenuAction::ToggleTilemap => {
+                self.debug_windows.toggle(event_loop, DebugPanel::Tilemap);
             }
             MenuAction::ToggleInputConfig => {
                 self.show_input_config = !self.show_input_config;
