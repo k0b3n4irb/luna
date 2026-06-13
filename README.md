@@ -47,20 +47,29 @@ Project under **active development, pre-1.0** (`v0.0.1`). What runs today:
 | SPC700 CPU (cycle-accurate, SingleStepTests suite 100%) | `luna-cpu-spc700` | ✅ |
 | APU — SPC700 + S-DSP (cycle-accurate ares port) | `luna-apu` | ✅ |
 | PPU + renderer + compositor | `luna-ppu` | ✅ |
-| System glue, scheduler, DMA / HDMA, SA-1 coprocessor | `luna-core` | ✅ |
+| System glue, scheduler, DMA / HDMA | `luna-core` | ✅ |
+| Coprocessors: SA-1, Super FX (GSU), DSP-1 | `luna-core` / `luna-bus` | ✅ |
+| NEC uPD7725 / uPD96050 DSP core (DSP-1) | `luna-cpu-upd96050` | ✅ |
 | Introspection API (`EmulatorState` snapshots) | `luna-api` | ✅ |
 | MCP server (stdio) | `luna-mcp-server` | ✅ |
-| CLI binary (`run` / `state` / `mcp`) | `luna-cli` | ✅ |
-| GUI debugger (eframe, audio-as-clock pacing) | `luna-gui` | ✅ |
+| CLI binary (`run` / `state` / `frames` / `wram-trace` / `mcp`) | `luna-cli` | ✅ |
+| GUI debugger (winit + pixels + egui-wgpu, audio-as-clock pacing) | `luna-gui` | ✅ |
 
-Coprocessors beyond SA-1 (Super FX, DSP-1…), REST/WebSocket transports and a
-WASM target are on the [roadmap](ARCHITECTURE.md#14-roadmap--phasing), not yet
-shipped.
+Commercial titles boot and play across the major chips — e.g. Super Mario
+World, Super Mario RPG (SA-1), Star Fox / Doom (Super FX), and **Super Mario
+Kart / Pilotwings (DSP-1 Mode 7)**. The GUI ships Mesen2-style debugger panels
+(CPU/SPC700 state, memory, disassembly, registers, palette, tilemap, sprites).
+
+DSP-1 games need the chip's `dsp1b.rom` firmware (copyrighted, user-supplied —
+see [Controls & firmware](#controls--firmware)). Remaining coprocessors
+(DSP-2/3/4, Cx4, S-DD1, SPC7110), REST/WebSocket transports and a WASM target
+are on the [roadmap](ARCHITECTURE.md#14-roadmap--phasing).
 
 ## Platform support
 
 Luna is currently **developed and tested on Linux only**. The stack
-(eframe/wgpu for the GUI, cpal for audio) is cross-platform in principle, but
+(winit + pixels + egui-wgpu for the GUI, cpal for audio) is cross-platform in
+principle, but
 macOS and Windows are **not tested or supported yet** — they may build and run,
 but no guarantees. Contributions to validate other platforms are welcome.
 
@@ -90,9 +99,48 @@ cargo run --release -p luna-gui -- "path/to/game.sfc"
 ./target/release/luna mcp
 ```
 
+## Controls & firmware
+
+### Controls
+
+luna currently emulates a **single controller (Player 1)**, driven from the
+keyboard in the GUI. The default layout mirrors Mesen2's arrow-key preset; the
+keys are remappable in the GUI's input-config dialog (physical / layout-agnostic
+key codes, so the positions hold on AZERTY/QWERTZ).
+
+| Keyboard | SNES button | | Keyboard | SNES button |
+|---|---|:-:|---|---|
+| `↑ ↓ ← →` | D-pad  | | `A` | B |
+| `D` | Start        | | `Z` | Y |
+| `E` | Select       | | `S` | A |
+| `Q` | L (shoulder) | | `X` | X |
+| `W` | R (shoulder) | | `F12` | Screenshot (hotkey) |
+
+**Not yet supported:** a second controller (Player 2), the SNES **Mouse**, and
+the **Super Scope**. Only Player 1 is wired up for now. (The CLI/MCP can still
+*inject* arbitrary joypad bitmasks for either port via `set_joypad` — that's for
+scripted/agent input, not human play.)
+
+### DSP-1 firmware (Super Mario Kart, Pilotwings, …)
+
+DSP-1 games need the chip's microcode, `dsp1b.rom` (~8 KB) — it lives inside
+the NEC chip on the real cartridge, isn't part of a normal ROM dump, and is
+copyrighted, so luna cannot bundle it (neither can ares/Mesen2). **You supply
+it once.** luna looks for it in this order:
+
+1. **embedded** in the ROM dump (some `.sfc` files append it);
+2. a **`dsp1b.rom` next to the game file**;
+3. luna's firmware folder: **`~/.config/luna/firmware/dsp1b.rom`**.
+
+If none is found, the GUI **prompts** you to locate it (and installs it to the
+firmware folder for next time); the CLI prints a clear message and accepts
+`--dsp1-rom <path>` to install it. Without firmware the game still runs, but the
+DSP stays inert (Mode 7 graphics are wrong). Games that need no coprocessor —
+or use SA-1 / Super FX — need no firmware.
+
 ## Architecture at a glance
 
-Luna is an 11-crate Cargo workspace, organized in layers that communicate only
+Luna is a 12-crate Cargo workspace, organized in layers that communicate only
 through Rust contracts (traits + serializable types) — no lower layer ever
 depends on a higher one.
 
