@@ -47,8 +47,12 @@ struct RomResult {
     frames_run: u64,
     nmis: u64,
     instrs: u64,
-    /// Peak absolute audio sample seen across the run (0 = silent).
+    /// Peak absolute audio sample seen across the run + audio tail.
     audio_peak: i32,
+    /// Whether the S-DSP ever keyed a voice with a non-zero envelope — the
+    /// sound driver was alive and trying to play, even if the captured PCM
+    /// peak stayed quiet. Distinguishes "engine never ran" from "just quiet".
+    audio_voice_seen: bool,
     findings: Vec<String>,
     repro: String,
     screenshot: Option<String>,
@@ -60,6 +64,17 @@ struct RomResult {
 const HANG_LOOP_MAX: usize = 64;
 /// Instruction budget for the end-of-run liveness probe.
 const LIVENESS_PROBE_STEPS: u64 = 200_000;
+
+/// Peak `|sample|` above which audio counts as genuinely playing (not just
+/// DC/dither). Below it the main window heard nothing audible.
+const AUDIO_FLOOR: i32 = 256;
+/// If the main window was silent, keep stepping up to this many extra frames
+/// purely to sample audio. Many titles (esp. Konami) open with a silent
+/// publisher logo / intro and only start the music well after frame 600, so a
+/// 10 s window false-flags them as "silent". This is the audio twin of the
+/// coproc-testing rule's "a black smoke screenshot ≠ a bug": a silent boot
+/// window ≠ dead audio. ~30 s at 60 Hz is enough to reach their first track.
+const AUDIO_TAIL_FRAMES: u64 = 1800;
 
 /// Default scripted input: pulse Start a few times to clear title/menu screens
 /// (a static title is NOT a bug — `coproc-testing.md`). `frame:mask`, Start=0x1000.
@@ -128,6 +143,7 @@ fn bench_one(path: &Path, frames: u64, input: &[(u64, u16)], screens_dir: &Path)
                 nmis: 0,
                 instrs: 0,
                 audio_peak: 0,
+                audio_voice_seen: false,
                 findings: vec![format!("load failed: {e}")],
                 repro,
                 screenshot: None,
@@ -140,6 +156,7 @@ fn bench_one(path: &Path, frames: u64, input: &[(u64, u16)], screens_dir: &Path)
     let mut crash: Option<String> = None;
     let mut nmis_at_warmup = 0u64;
     let mut audio_peak = 0i32;
+    let mut audio_voice_seen = false;
     let mut fb_first: Option<u64> = None;
     let mut fb_changed = false;
     let mut last_frame = 0u64;
@@ -162,6 +179,9 @@ fn bench_one(path: &Path, frames: u64, input: &[(u64, u16)], screens_dir: &Path)
             }
         }
         let st = em.state();
+        // The driver is alive and trying to play if any voice keyed on with a
+        // live envelope — true even when the captured PCM happens to be quiet.
+        audio_voice_seen |= st.apu.voice_envelope.iter().any(|&e| e > 0);
         last_frame = st.scheduler.frame_count;
         if f == WARMUP_FRAME {
             nmis_at_warmup = st.scheduler.nmis_serviced;
@@ -254,6 +274,30 @@ fn bench_one(path: &Path, frames: u64, input: &[(u64, u16)], screens_dir: &Path)
             .map(|()| format!("screenshots/{slug}.png"))
     });
 
+    // Audio tail: if the main window heard nothing, keep stepping (pulsing
+    // Start) purely to sample audio. A silent boot window is NOT dead audio —
+    // it's usually a silent intro before the first track. Skipped for confirmed
+    // bugs / halted CPUs (pointless) so it only costs time on otherwise-✅ ROMs.
+    if !confirmed && crash.is_none() && audio_peak < AUDIO_FLOOR {
+        for f in 0..AUDIO_TAIL_FRAMES {
+            // Pulse Start every ~150 frames to nudge past attract/menu gates.
+            let mask = if f % 150 < 4 { 0x1000 } else { 0x0000 };
+            let _ = em.set_joypad(0, mask);
+            if em.step_until_frame(PER_FRAME_BUDGET).is_err() {
+                break;
+            }
+            if let Ok(samples) = em.drain_audio(usize::MAX) {
+                for (l, r) in samples {
+                    audio_peak = audio_peak.max(i32::from(l).abs()).max(i32::from(r).abs());
+                }
+            }
+            audio_voice_seen |= em.state().apu.voice_envelope.iter().any(|&e| e > 0);
+            if audio_peak >= AUDIO_FLOOR {
+                break; // found the music — no need to run the full tail
+            }
+        }
+    }
+
     RomResult {
         name,
         slug,
@@ -264,6 +308,7 @@ fn bench_one(path: &Path, frames: u64, input: &[(u64, u16)], screens_dir: &Path)
         nmis,
         instrs: st.stats.instructions_executed,
         audio_peak,
+        audio_voice_seen,
         findings,
         repro,
         screenshot,
@@ -366,10 +411,15 @@ fn write_reports(out: &Path, bugs_dir: &Path, rom_dir: &Path, frames: u64, resul
                 .screenshot
                 .as_ref()
                 .map_or_else(|| r.name.clone(), |p| format!("[{}]({p})", r.name));
-            let audio = if r.audio_peak == 0 {
-                "silent".to_string()
-            } else {
+            // peak ≥ floor → real audio (show the number); below floor but a
+            // voice keyed on → engine alive, just quiet; otherwise no audio
+            // heard even after the tail.
+            let audio = if r.audio_peak >= AUDIO_FLOOR {
                 r.audio_peak.to_string()
+            } else if r.audio_voice_seen {
+                "quiet".to_string()
+            } else {
+                "silent".to_string()
             };
             let _ = writeln!(
                 rep,
@@ -382,18 +432,30 @@ fn write_reports(out: &Path, bugs_dir: &Path, rom_dir: &Path, frames: u64, resul
         }
     }
 
+    rep.push_str(
+        "\n*Audio column: a number is the peak `|sample|` once real audio was \
+         heard; **quiet** = the sound engine keyed voices on but stayed below \
+         the audible floor; **silent** = nothing heard even after the audio \
+         tail. A silent *boot* window is not dead audio (intros are often \
+         silent) — the tail keeps sampling ~30 s past the main window to reach \
+         the first track before reporting.*\n",
+    );
+
     rep.push_str("\n## API-coverage notes\n\n");
     rep.push_str(
-        "Signals the benchmark wanted but `luna-api` does not expose yet \
-         (each would turn a ⚠️ suspect into a confirmed verdict):\n\n\
-         - **CPU infinite-loop / liveness detector** — distinguish a real hang \
-           from a legitimate wait-for-input loop (today only STP is observable).\n\
-         - **Audio-activity metric** — whether the DSP is producing non-silent \
-           samples (to flag dead audio without ears).\n\
-         - **Per-frame `framebuffer_changed` flag** — cheaper + less false-prone \
-           than hashing RGBA each sample.\n\
-         - **Reached-gameplay heuristic** — e.g. input-responsiveness or sprite \
-           activity, to separate \"sitting at a menu\" from \"actually playing\".\n",
+        "Progress probing what `luna-api` lets the bench observe:\n\n\
+         - ✅ **CPU infinite-loop / liveness detector** — `Emulator::loop_probe` \
+           (distinct PB:PC count) separates a real hang from a wait-for-input \
+           loop. Promoted a ⚠️ suspect to a confirmed ❌ hang.\n\
+         - ✅ **Audio-activity metric** — peak PCM via `drain_audio` + a \
+           voice-keyed-on signal from `EmulatorState::apu`, sampled across the \
+           run and an audio tail. Caveat learned: a fixed boot window \
+           false-flags silent intros, so the tail is required for an honest call.\n\
+         - ⏳ **Per-frame `framebuffer_changed` flag** — cheaper + less \
+           false-prone than hashing RGBA each sample.\n\
+         - ⏳ **Reached-gameplay heuristic** — e.g. input-responsiveness or \
+           sprite activity, to separate \"sitting at a menu\" from \"actually \
+           playing\".\n",
     );
 
     if let Err(e) = std::fs::write(out.join("report.md"), &rep) {
