@@ -36,7 +36,7 @@ const SFR_IRQ: u16 = 1 << 15; // interrupt asserted to SNES
 
 /// The GSU register file (spec §1). Owned by [`SuperFxMapper`]; MMIO at
 /// `$3000-$303F` reads/writes it, and the engine phase will consume it.
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct Registers {
     /// R0–R15. R14 = ROM-load trigger, R15 = PC (spec §1.1).
     r: [u16; 16],
@@ -211,7 +211,7 @@ pub struct SuperFxSnapshot {
 /// One 8-pixel plot run awaiting writeback to Game Pak RAM (spec §4.1).
 /// `offset` = `(y << 5) + (x >> 3)` (the 8-pixel tile-row slot), `bitpend`
 /// = per-x written-bit mask, `data` = the colour index per x in the run.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct PixelCache {
     offset: u16,
     bitpend: u8,
@@ -1520,9 +1520,61 @@ impl SuperFxMapper {
     }
 }
 
+/// The MUTABLE save-state of a [`SuperFxMapper`] — everything reset by
+/// [`Mapper::reset`] plus the Game Pak work RAM, but NOT the ROM image or
+/// the size masks (those are reconstructed from the live cart).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SuperFxState {
+    ram: Vec<u8>,
+    regs: Registers,
+    #[serde(with = "serde_bytes")]
+    cache: [u8; 512],
+    cache_valid: [bool; 32],
+    pixelcache: [PixelCache; 2],
+    clock_deficit: i64,
+    cycles: u32,
+    cpu_mclk: u64,
+    gsu_running_prev: bool,
+    modified_r14: bool,
+    modified_r15: bool,
+}
+
 impl Mapper for SuperFxMapper {
     fn kind(&self) -> MapperKind {
         MapperKind::SuperFx
+    }
+
+    fn save_state(&self) -> Vec<u8> {
+        let st = SuperFxState {
+            ram: self.ram.clone(),
+            regs: self.regs.clone(),
+            cache: *self.cache,
+            cache_valid: self.cache_valid,
+            pixelcache: self.pixelcache,
+            clock_deficit: self.clock_deficit,
+            cycles: self.cycles,
+            cpu_mclk: self.cpu_mclk,
+            gsu_running_prev: self.gsu_running_prev,
+            modified_r14: self.modified_r14,
+            modified_r15: self.modified_r15,
+        };
+        bincode::serialize(&st).unwrap_or_default()
+    }
+
+    fn load_state(&mut self, data: &[u8]) {
+        if let Ok(st) = bincode::deserialize::<SuperFxState>(data) {
+            self.ram = st.ram;
+            self.regs = st.regs;
+            *self.cache = st.cache;
+            self.cache_valid = st.cache_valid;
+            self.pixelcache = st.pixelcache;
+            self.clock_deficit = st.clock_deficit;
+            self.cycles = st.cycles;
+            self.cpu_mclk = st.cpu_mclk;
+            self.gsu_running_prev = st.gsu_running_prev;
+            self.modified_r14 = st.modified_r14;
+            self.modified_r15 = st.modified_r15;
+        }
     }
 
     /// Re-power the GSU on a system reset (ares `SuperFX::power()` →

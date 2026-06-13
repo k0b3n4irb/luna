@@ -19,6 +19,7 @@ luna-ppu         = { workspace = true }
 
 serde      = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
+bincode    = { workspace = true }
 thiserror  = { workspace = true }
 image      = { workspace = true }
 schemars   = { workspace = true }

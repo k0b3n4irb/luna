@@ -34,7 +34,7 @@ pub struct DmaTraceLog {
 }
 
 /// The SNES DMA controller — 8 channels + a pair of global registers.
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Dma {
     /// The eight DMA channels (indexed 0-7).
     pub channels: [DmaChannel; 8],
@@ -48,6 +48,10 @@ pub struct Dma {
     /// Optional DMA→VRAM transfer-time trace. `None` = disabled. The
     /// bus moves this into the per-transfer [`DmaBus`] view so the
     /// view's `$2118/9` writes can record (source → VMADD → byte).
+    ///
+    /// Diagnostic only — not part of the save-state (`serde(skip)` →
+    /// defaults to `None` on restore).
+    #[serde(skip)]
     pub dma_trace: Option<DmaTraceLog>,
 }
 

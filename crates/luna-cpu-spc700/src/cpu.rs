@@ -2,9 +2,10 @@
 
 use crate::bus::SpcBus;
 use crate::flags::{Psw, bit};
+use serde::{Deserialize, Serialize};
 
 /// SPC700 CPU state.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Spc700 {
     /// Accumulator.
     pub a: u8,

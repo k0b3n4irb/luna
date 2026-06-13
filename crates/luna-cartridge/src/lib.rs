@@ -38,7 +38,7 @@ pub enum CartError {
 // =============================================================================
 
 /// Cartridge region / video standard derived from the country byte.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Region {
     /// NTSC (Japan / North America).
     Ntsc,

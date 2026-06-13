@@ -1,0 +1,2 @@
+- [Confirmed-clean watch-items](project_confirmed_clean_watchitems.md) — PPU OAM port table, SuperFX pow2 pad, DSP 0x7FFF mask etc. are correct-by-design; don't re-flag. Plus Mode5/6 & SA-1 bitmap watch-items.
+- [Clippy gate aborts mask downstream](feedback_clippy_gate_aborts_mask_downstream.md) — `-D warnings` stops at first crate's error; re-run per-crate or without -D for the full list. borrowed_box/use_self recur in save-state serde.

@@ -47,7 +47,7 @@ fn write_a_valid<B: DmaBus>(bus: &mut B, addr: Addr24, value: u8) {
 // =============================================================================
 
 /// Direction of the DMA transfer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Direction {
     /// A-bus → B-bus (CPU → PPU). The common case: uploading tiles,
     /// palettes, OAM, etc.
@@ -57,7 +57,7 @@ pub enum Direction {
 }
 
 /// A-bus address increment behaviour.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Increment {
     /// `+1` per byte (the canonical "uploading a linear buffer" case).
     Up,
@@ -73,7 +73,7 @@ pub enum Increment {
 ///
 /// Notation below: `b` = `BBADx`. So mode 1 writes alternating to
 /// `$2100 + b` and `$2100 + b + 1`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TransferMode {
     /// Mode 0 — 1 byte to `b`. (e.g. palette stream into `$2122`.)
     OneByteOneReg,
@@ -130,7 +130,7 @@ impl TransferMode {
 }
 
 /// Fully-decoded `$43x0 DMAPx` register.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct DmaParams {
     /// A→B (CPU → PPU) or B→A (PPU → CPU).
     pub direction: Direction,
@@ -201,7 +201,7 @@ impl DmaParams {
 // =============================================================================
 
 /// One of the eight DMA channels.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct DmaChannel {
     /// `$43x0` — decoded parameters (drive the transfer logic).
     pub params: DmaParams,

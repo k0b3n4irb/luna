@@ -2,6 +2,7 @@
 
 use crate::flags::{StatusFlags, bit};
 use luna_bus::{Addr24, Bus, make_addr};
+use serde::{Deserialize, Serialize};
 
 /// 65C816 CPU state.
 ///
@@ -9,7 +10,7 @@ use luna_bus::{Addr24, Bus, make_addr};
 /// width (`M = 1` for A, `X = 1` for index regs) only the low byte is
 /// observable from the program. The high byte (`B`) of A is preserved
 /// across width transitions.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cpu {
     /// Accumulator (16-bit; `M = 1` exposes only the low byte).
     pub a: u16,

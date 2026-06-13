@@ -155,7 +155,7 @@ pub mod register {
 }
 
 /// Per-layer state derived from `$2107-$2114`.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct BgState {
     /// VRAM word address of the tilemap base.
     pub tilemap_addr_words: u16,
@@ -181,6 +181,7 @@ pub const fn bg_state(ppu: &Ppu, idx: usize) -> BgState {
 /// P1.1 scope: the data-flow plumbing — VRAM, CGRAM, OAM and the
 /// minimum register subset to upload data to them. The rendering side
 /// (modes, scroll, sprites on screen) lands in P1.4+.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Ppu {
     /// 64 KB tile and tilemap memory.
     pub vram: Vram,
@@ -355,6 +356,11 @@ pub struct Ppu {
     /// Tests that hand-build a `Ppu` and call
     /// [`render_frame_with`](crate::render_frame_with) bypass this
     /// buffer entirely and get a freshly-computed `Vec`.
+    ///
+    /// Serialized in the save-state: it is the last fully-rendered frame,
+    /// part of observable state, so restoring rewinds the displayed image
+    /// to exactly the save point (front-ends hold the last non-blank frame
+    /// between renders, so this must round-trip).
     pub framebuffer: Vec<[u8; 3]>,
 
     /// How far the current scanline has been rendered into the
