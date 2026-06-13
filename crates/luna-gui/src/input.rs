@@ -189,6 +189,13 @@ impl KeyBindings {
         }
     }
 
+    /// Restore the 12 pad bindings to the factory defaults (Mesen2
+    /// "Arrow keys" preset), leaving hotkeys untouched. Like Mesen2's
+    /// "Reset to Default": applies in-memory; persist via [`Self::save`].
+    pub(crate) fn reset_bindings(&mut self) {
+        self.bindings = Self::default().bindings;
+    }
+
     /// Key currently bound to `hotkey`.
     #[must_use]
     pub(crate) fn get_hotkey(&self, hotkey: Hotkey) -> KeyCode {
@@ -206,6 +213,13 @@ impl KeyBindings {
                 return;
             }
         }
+    }
+
+    /// Restore emulator hotkeys to their factory defaults (Screenshot =
+    /// `F12`), leaving pad bindings untouched. Applies in-memory; persist
+    /// via [`Self::save`].
+    pub(crate) fn reset_hotkeys(&mut self) {
+        self.hotkeys = Self::default().hotkeys;
     }
 
     /// Reverse lookup: the hotkey bound to `key`, if any. Used by the
@@ -358,6 +372,38 @@ mod tests {
         assert_eq!(b.get_hotkey(Hotkey::Screenshot), KeyCode::F2);
         assert_eq!(b.hotkey_for(KeyCode::F2), Some(Hotkey::Screenshot));
         assert_eq!(b.hotkey_for(KeyCode::F12), None);
+    }
+
+    #[test]
+    fn reset_bindings_restores_defaults_and_leaves_hotkeys() {
+        let mut b = KeyBindings::default();
+        b.set(SnesButton::B, KeyCode::KeyP);
+        b.set_hotkey(Hotkey::Screenshot, KeyCode::F2);
+        b.reset_bindings();
+        assert_eq!(b.get(SnesButton::B), KeyCode::KeyA, "pad reset to default");
+        assert_eq!(
+            b.get_hotkey(Hotkey::Screenshot),
+            KeyCode::F2,
+            "hotkeys untouched by a pad reset"
+        );
+    }
+
+    #[test]
+    fn reset_hotkeys_restores_defaults_and_leaves_pad() {
+        let mut b = KeyBindings::default();
+        b.set(SnesButton::B, KeyCode::KeyP);
+        b.set_hotkey(Hotkey::Screenshot, KeyCode::F2);
+        b.reset_hotkeys();
+        assert_eq!(
+            b.get_hotkey(Hotkey::Screenshot),
+            KeyCode::F12,
+            "hotkeys reset to default"
+        );
+        assert_eq!(
+            b.get(SnesButton::B),
+            KeyCode::KeyP,
+            "pad untouched by a hotkey reset"
+        );
     }
 
     #[test]

@@ -870,6 +870,14 @@ impl LunaApp {
                     eprintln!("luna-gui: save bindings failed: {e}");
                 }
             }
+            MenuAction::ResetBindings => {
+                self.key_bindings.reset_bindings();
+                self.pending_rebind = None;
+            }
+            MenuAction::ResetHotkeys => {
+                self.key_bindings.reset_hotkeys();
+                self.pending_hotkey_rebind = None;
+            }
         }
     }
 

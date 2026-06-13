@@ -29,6 +29,8 @@ pub(crate) enum MenuAction {
     StartRebindHotkey(crate::input::Hotkey),
     TakeScreenshot,
     SaveBindings,
+    ResetBindings,
+    ResetHotkeys,
     // Debug panels (api-first: data comes from `luna_api::Emulator`).
     ToggleCpuState,
     ToggleCpuMemory,
@@ -268,7 +270,11 @@ pub(crate) fn install_dark_theme(ctx: &egui::Context) {
 
 fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>, emit: &mut F) {
     use crate::input::SnesButton;
+    // `open` drives egui's title-bar ✕ (top-right close, like the Debug
+    // windows); a click sets it false and we toggle the panel off below.
+    let mut open = true;
     egui::Window::new("Controller bindings")
+        .open(&mut open)
         .collapsible(false)
         .resizable(false)
         .default_width(360.0)
@@ -317,11 +323,19 @@ fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<
                     emit(MenuAction::SaveBindings);
                     emit(MenuAction::ToggleInputConfig);
                 }
-                if ui.button("Close").clicked() {
-                    emit(MenuAction::ToggleInputConfig);
+                ui.add_space(12.0);
+                if ui
+                    .button("Reset to defaults")
+                    .on_hover_text("Restore the Mesen2 \"Arrow keys\" preset")
+                    .clicked()
+                {
+                    emit(MenuAction::ResetBindings);
                 }
             });
         });
+    if !open {
+        emit(MenuAction::ToggleInputConfig);
+    }
 }
 
 /// The Hotkeys rebind window (Settings → Hotkeys → Hotkeys…). Split out of
@@ -330,7 +344,11 @@ fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<
 /// "Save & close" persists pad + hotkey bindings together.
 fn draw_hotkey_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>, emit: &mut F) {
     use crate::input::Hotkey;
+    // `open` drives egui's title-bar ✕ (top-right close, like the Debug
+    // windows); a click sets it false and we toggle the panel off below.
+    let mut open = true;
     egui::Window::new("Hotkeys")
+        .open(&mut open)
         .collapsible(false)
         .resizable(false)
         .default_width(360.0)
@@ -376,11 +394,19 @@ fn draw_hotkey_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState
                     emit(MenuAction::SaveBindings);
                     emit(MenuAction::ToggleHotkeyConfig);
                 }
-                if ui.button("Close").clicked() {
-                    emit(MenuAction::ToggleHotkeyConfig);
+                ui.add_space(12.0);
+                if ui
+                    .button("Reset to defaults")
+                    .on_hover_text("Restore the factory hotkeys (Screenshot = F12)")
+                    .clicked()
+                {
+                    emit(MenuAction::ResetHotkeys);
                 }
             });
         });
+    if !open {
+        emit(MenuAction::ToggleHotkeyConfig);
+    }
 }
 
 /// Restyle the current `ui`'s widget visuals so an interactive widget
