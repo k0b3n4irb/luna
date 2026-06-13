@@ -1317,6 +1317,24 @@ impl Emulator {
             .frame_visible_content)
     }
 
+    /// Cheap, exact hash of the current **displayed** framebuffer (the same
+    /// `256 × 224` RGB pixels [`Emulator::render_frame_rgba`] emits with
+    /// `force_display = false`). Comparing this across frames detects a
+    /// wholly static screen *exactly and every frame* — both cheaper than
+    /// re-rendering to RGBA and hashing (no conversion, no allocation) and
+    /// more reliable than sampling every Nth frame, which can stride over a
+    /// brief change. A hash that never moves across a run is a frozen
+    /// display (vs. [`Emulator::frame_showed_content`], which reports
+    /// forced-blank); the two together separate "rendering nothing" from
+    /// "rendering the same thing forever".
+    pub fn framebuffer_hash(&self) -> Result<u64, ApiError> {
+        use std::hash::{Hash, Hasher};
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        snes.ppu.framebuffer().hash(&mut h);
+        Ok(h.finish())
+    }
+
     /// Number of stereo samples currently waiting in the APU output
     /// queue — cheap, lets an audio-paced GUI drain exactly the host
     /// ring's free space and tell whether the ring (not the queue) was
@@ -1850,5 +1868,27 @@ mod tests {
         e.load_rom_bytes(demo_lorom()).unwrap();
         let png = e.render_frame_png(false).expect("png");
         assert!(png.starts_with(b"\x89PNG"), "header should be PNG magic");
+    }
+
+    #[test]
+    fn framebuffer_hash_is_deterministic_and_matches_rgba_pixels() {
+        let mut e = Emulator::new();
+        assert!(matches!(e.framebuffer_hash(), Err(ApiError::NoRom)));
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        e.step_until_frame(1_000_000).unwrap();
+        let h1 = e.framebuffer_hash().expect("hash");
+        // Pure function of state: identical when nothing changed.
+        assert_eq!(h1, e.framebuffer_hash().unwrap(), "hash must be stable");
+        // It hashes the same displayed pixels render_frame_rgba emits: an
+        // independent hash of the RGB channels of that buffer agrees.
+        let rgba = e.render_frame_rgba(false).unwrap();
+        let mut ref_h = std::collections::hash_map::DefaultHasher::new();
+        let rgb: Vec<[u8; 3]> = rgba.chunks_exact(4).map(|c| [c[0], c[1], c[2]]).collect();
+        std::hash::Hash::hash(&rgb[..], &mut ref_h);
+        assert_eq!(
+            h1,
+            std::hash::Hasher::finish(&ref_h),
+            "hashes the displayed RGB"
+        );
     }
 }

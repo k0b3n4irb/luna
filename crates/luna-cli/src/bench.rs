@@ -5,9 +5,7 @@
 //! `load_rom` catch unwinds and return errors, so a single crashing ROM
 //! becomes one ❌ row instead of aborting the whole run.
 
-use std::collections::hash_map::DefaultHasher;
 use std::fmt::Write as _;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -109,13 +107,6 @@ fn slug(name: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
-/// Hash the published framebuffer to detect a wholly static screen.
-fn framebuffer_hash(em: &Emulator) -> u64 {
-    let mut h = DefaultHasher::new();
-    em.render_frame_rgba(false).unwrap_or_default().hash(&mut h);
-    h.finish()
-}
-
 /// Run one ROM and classify it.
 fn bench_one(path: &Path, frames: u64, input: &[(u64, u16)], screens_dir: &Path) -> RomResult {
     let name = path
@@ -186,13 +177,17 @@ fn bench_one(path: &Path, frames: u64, input: &[(u64, u16)], screens_dir: &Path)
         if f == WARMUP_FRAME {
             nmis_at_warmup = st.scheduler.nmis_serviced;
         }
-        // Past warm-up, sample the framebuffer; flag static if it never changes.
-        if f >= WARMUP_FRAME && f % 8 == 0 {
-            let h = framebuffer_hash(&em);
-            match fb_first {
-                None => fb_first = Some(h),
-                Some(h0) if h != h0 => fb_changed = true,
-                Some(_) => {}
+        // Past warm-up, hash the framebuffer EVERY frame (exact, cheap — the
+        // API hashes the native RGB buffer, no RGBA re-render); flag static if
+        // it never changes. Per-frame beats sampling-every-Nth, which can
+        // stride right over a brief change and false-flag a live screen.
+        if f >= WARMUP_FRAME {
+            if let Ok(h) = em.framebuffer_hash() {
+                match fb_first {
+                    None => fb_first = Some(h),
+                    Some(h0) if h != h0 => fb_changed = true,
+                    Some(_) => {}
+                }
             }
         }
     }
