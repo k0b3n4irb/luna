@@ -125,6 +125,10 @@ struct LunaApp {
     /// WM flags the window as "not responding" within ~2 seconds and
     /// pops a "Force Quit / Wait" prompt. Polled each `about_to_wait`.
     rom_picker_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
+    /// Pending coprocessor-firmware file-dialog result (same async pattern
+    /// as `rom_picker_rx`), and the ROM to reload once the user supplies it.
+    firmware_picker_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
+    pending_firmware_rom: Option<PathBuf>,
     /// `true` while the egui input-config modal is open.
     show_input_config: bool,
     /// When `Some(button)`, the next key press is captured as that
@@ -184,6 +188,8 @@ impl LunaApp {
             ui: None,
             rom_title: None,
             rom_picker_rx: None,
+            firmware_picker_rx: None,
+            pending_firmware_rom: None,
             show_input_config: false,
             pending_rebind: None,
             pending_hotkey_rebind: None,
@@ -214,10 +220,13 @@ impl LunaApp {
         // unsupported coprocessor cart (it catches `from_cartridge`'s
         // panic), so one check covers both.
         let mut em = Emulator::new();
-        if let Err(e) = em.load_rom(path) {
-            eprintln!("luna-gui: cannot load ROM (bad file or unsupported coprocessor): {e}");
-            return;
-        }
+        let info = match em.load_rom(path) {
+            Ok(info) => info,
+            Err(e) => {
+                eprintln!("luna-gui: cannot load ROM (bad file or unsupported coprocessor): {e}");
+                return;
+            }
+        };
         if let Ok(mut guard) = self.emu.lock() {
             *guard = Some(em);
         }
@@ -247,6 +256,70 @@ impl LunaApp {
         if let Some(dir) = path.parent() {
             self.last_rom_dir = Some(dir.to_path_buf());
             let _ = save_last_rom_dir(dir);
+        }
+        // DSP / coprocessor cart missing its firmware: the game runs inert
+        // (e.g. flat Mode 7) until the user supplies it. Prompt them to
+        // locate it, Mesen2-style; once installed, reload so it takes effect.
+        if let Some(fw_name) = info.missing_firmware {
+            self.prompt_for_firmware(path.to_path_buf(), fw_name);
+        }
+    }
+
+    /// Pop a file dialog asking the user to locate a coprocessor firmware
+    /// file (e.g. `dsp1b.rom`). On pick it is installed into luna's firmware
+    /// folder and the ROM reloaded. Mirrors [`Self::open_rom_dialog`]'s
+    /// off-thread pattern so the event loop keeps redrawing.
+    fn prompt_for_firmware(&mut self, rom: PathBuf, fw_name: String) {
+        if self.firmware_picker_rx.is_some() {
+            return;
+        }
+        eprintln!(
+            "luna-gui: this cartridge needs coprocessor firmware '{fw_name}' — \
+             prompting for it (the coprocessor is inert until supplied)."
+        );
+        let (tx, rx) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("luna-firmware-picker".into())
+            .spawn(move || {
+                let dialog = rfd::FileDialog::new()
+                    .set_title(format!("Locate coprocessor firmware ({fw_name})"))
+                    .add_filter("Firmware ROM", &["rom", "bin"])
+                    .add_filter("All files", &["*"]);
+                let _ = tx.send(dialog.pick_file());
+            })
+            .expect("spawn luna-firmware-picker thread");
+        self.firmware_picker_rx = Some(rx);
+        self.pending_firmware_rom = Some(rom);
+    }
+
+    /// Pump the firmware file-dialog channel. Called every `about_to_wait`.
+    fn poll_firmware_picker(&mut self) {
+        let Some(rx) = self.firmware_picker_rx.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Some(fw)) => {
+                self.firmware_picker_rx = None;
+                match Emulator::install_firmware(&fw, "dsp1b.rom") {
+                    Ok(dest) => {
+                        eprintln!("luna-gui: installed firmware → {}", dest.display());
+                        if let Some(rom) = self.pending_firmware_rom.take() {
+                            self.load_rom(&rom); // reload — now the firmware is found
+                        }
+                    }
+                    Err(e) => eprintln!("luna-gui: could not install firmware: {e}"),
+                }
+            }
+            Ok(None) => {
+                // Cancelled — leave the game running inert.
+                self.firmware_picker_rx = None;
+                self.pending_firmware_rom = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.firmware_picker_rx = None;
+                self.pending_firmware_rom = None;
+            }
         }
     }
 
@@ -527,6 +600,7 @@ impl ApplicationHandler for LunaApp {
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         self.poll_rom_picker();
+        self.poll_firmware_picker();
         // Request a redraw every ~16 ms to keep the framebuffer current.
         if let Some(win) = self.window.as_ref() {
             win.request_redraw();
