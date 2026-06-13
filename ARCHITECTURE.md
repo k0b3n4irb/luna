@@ -1632,7 +1632,14 @@ To discuss: GPL-3.0 (more protective) or Apache-2.0 (more permissive).
 
 ## 14. Roadmap & phasing
 
-### Phase 0 — Pattern validation & skeleton (3 weeks)
+> **Status (2026-06).** Phases 0–4 are **done**: luna boots and plays commercial
+> titles across the 65C816 + SPC700/DSP + PPU and all three priority
+> coprocessors (SA-1, Super FX, DSP-1), and the introspection API + MCP server +
+> standalone GUI ship. Phase 5 (advanced debug / spectator) is **in progress**;
+> Phase 6 (1.0 polish) is ahead. The week estimates below are the original plan,
+> kept for reference.
+
+### Phase 0 — Pattern validation & skeleton (3 weeks) — ✅ done
 
 **Research & validation** (1 week — a prerequisite to any production code):
 
@@ -1662,7 +1669,7 @@ To discuss: GPL-3.0 (more protective) or Apache-2.0 (more permissive).
 - `luna-cli`: loads a ROM, runs 1 frame, dumps the CPU state.
 - Tests: first pass of a few Tom Harte tests.
 
-### Phase 1 — First render (4 weeks)
+### Phase 1 — First render (4 weeks) — ✅ done
 
 - `luna-ppu`: modes 0 and 1, scanline-based, basic sprites.
 - `luna-dma`: DMA (without HDMA).
@@ -1671,13 +1678,13 @@ To discuss: GPL-3.0 (more protective) or Apache-2.0 (more permissive).
 - 1000+ Tom Harte tests pass (target: 100% of the 65C816).
 - A test ROM (krom CPUMSC) displays "PASS".
 
-### Phase 2 — Audio + simple games (4 weeks)
+### Phase 2 — Audio + simple games (4 weeks) — ✅ done
 
 - `luna-apu`: SPC700 + basic DSP.
 - Working HDMA.
 - **Super Mario World** playable end-to-end (without major visual bugs).
 
-### Phase 3 — API, MCP, standalone GUI (4 weeks)
+### Phase 3 — API, MCP, standalone GUI (4 weeks) — ✅ done
 
 - `luna-api`: Control + Debug + Semantic.
 - `luna-mcp`: stdio server with ~15 base tools.
@@ -1686,22 +1693,26 @@ To discuss: GPL-3.0 (more protective) or Apache-2.0 (more permissive).
 - Implementation of the token-economy principles from the start:
   resources, detail levels, hash-then-fetch.
 
-### Phase 4 — Priority coprocessors (6 weeks)
+### Phase 4 — Priority coprocessors (6 weeks) — ✅ done
 
-- SA-1, Super FX, DSP-1.
-- **Star Fox**, **Super Mario RPG**, **Yoshi's Island** playable.
+- SA-1, Super FX (GSU), DSP-1 (uPD7725 core in `luna-cpu-upd96050`).
+- **Star Fox** / **Doom** (Super FX), **Super Mario RPG** / **Kirby** (SA-1),
+  **Super Mario Kart** / **Pilotwings** (DSP-1 Mode 7) playable.
+- DSP-1 needs a user-supplied `dsp1b.rom` firmware — see
+  [`docs/firmware.md`](docs/firmware.md).
 
-### Phase 5 — Advanced debug & spectator mode (5 weeks)
+### Phase 5 — Advanced debug & spectator mode (5 weeks) — 🚧 in progress
 
-- Conditional breakpoints, trace logging, time travel.
-- Enriched Semantic API (decoded palette, window state).
-- MCP resources (`luna://docs/...`).
-- `luna-gui` v1: **spectator mode** with overlays — agent activity
-  timeline, highlighting of queried sprites/regions, live token-budget
-  panel.
-- `luna-overlay`: reusable components (timeline, memory mini-map).
+- ✅ GUI debugger panels (Mesen2-style): CPU/SPC700 state, memory hex,
+  65C816/SPC700 disassembly, I/O registers (incl. DSP-1), palette, tilemap,
+  sprites.
+- ⏳ Conditional breakpoints, trace logging, time travel.
+- ⏳ Enriched Semantic API (decoded palette, window state); MCP resources
+  (`luna://docs/...`).
+- ⏳ `luna-gui` spectator overlays — agent-activity timeline, queried
+  sprite/region highlighting, live token-budget panel.
 
-### Phase 6 — Polish & 1.0 (4 weeks)
+### Phase 6 — Polish & 1.0 (4 weeks) — ⏳ planned
 
 - Golden visual tests over 20 games.
 - User documentation.

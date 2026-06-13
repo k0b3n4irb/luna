@@ -9,6 +9,8 @@
 //!
 //! See `ARCHITECTURE.md` §6.5.
 
+pub mod dsp1;
 pub mod sa1;
 
+pub use dsp1::Dsp1Mapper;
 pub use sa1::Sa1Chip;
