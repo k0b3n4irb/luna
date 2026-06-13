@@ -1709,20 +1709,6 @@ fn print_diag_state(em: &mut luna_api::Emulator) {
         flg >> 5 & 1,
         if edl == 0 { 1 } else { (edl as u16) * 512 }
     );
-    if let Some(op) = &st.apu.unimplemented_opcode {
-        // Dump 4 bytes around the offending PC so we can see the
-        // operand pattern and recognise the addressing mode.
-        let aram = em.peek_aram(op.pc, 4).unwrap_or_default();
-        println!(
-            "APU:  STOPPED on unimplemented opcode ${:02X} at SPC PC=${:04X}  (bytes: {:02X} {:02X} {:02X} {:02X})",
-            op.opcode,
-            op.pc,
-            aram.first().copied().unwrap_or(0),
-            aram.get(1).copied().unwrap_or(0),
-            aram.get(2).copied().unwrap_or(0),
-            aram.get(3).copied().unwrap_or(0),
-        );
-    }
     // OAM occupancy + first few sprite entries.
     let oam = &p.oam_full;
     println!(

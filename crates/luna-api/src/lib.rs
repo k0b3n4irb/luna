@@ -62,7 +62,9 @@ pub enum ApiError {
 
 /// Save-state format version. Bump on any breaking change to the
 /// serialized layout so [`Emulator::load_state`] rejects stale blobs.
-pub const SAVE_STATE_VERSION: u32 = 1;
+/// v2: dropped the always-`None` `Spc700::unimplemented_opcode` field
+/// (the SPC700 dispatch is exhaustive), changing the bincode layout.
+pub const SAVE_STATE_VERSION: u32 = 2;
 
 /// On-disk / on-wire save-state container produced by
 /// [`Emulator::save_state`]. `core` is the bincode-encoded `Snes` (the
@@ -436,12 +438,10 @@ pub struct SchedulerState {
 pub struct ApuState {
     /// SPC700 program counter.
     pub spc_pc: u16,
-    /// `true` if the SPC700 has stopped (STP or unimplemented op).
+    /// `true` if the SPC700 has stopped (`STP`).
     pub spc_stopped: bool,
     /// `true` once the SPC has left the IPL ROM area at `$FFC0`.
     pub past_iplrom: bool,
-    /// `Some((opcode, pc))` if the SPC stopped on an unimplemented op.
-    pub unimplemented_opcode: Option<UnimplementedOp>,
     /// `$2140-$2143` bytes the SPC has placed on the CPU side.
     pub to_cpu_ports: [u8; 4],
     /// `$F4-$F7` bytes the CPU has placed on the SPC side.
@@ -494,16 +494,6 @@ pub struct ApuState {
     /// Per-voice 14-bit pitch accumulator. Threshold 0x4000 = 1 BRR
     /// sample per output tick.
     pub voice_pitch_acc: [u16; 8],
-}
-
-/// Diagnostic info for an SPC700 opcode that the emulator hasn't
-/// implemented yet.
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub struct UnimplementedOp {
-    /// Offending opcode byte.
-    pub opcode: u8,
-    /// Address (in SPC700 memory) where the opcode lives.
-    pub pc: u16,
 }
 
 /// One decoded OAM sprite (size, flips, and high-table bits resolved),
@@ -968,11 +958,6 @@ impl Emulator {
                 spc_pc: s.apu_real.cpu.pc,
                 spc_stopped: s.apu_real.cpu.stopped,
                 past_iplrom: s.apu_real.past_iplrom,
-                unimplemented_opcode: s
-                    .apu_real
-                    .cpu
-                    .unimplemented_opcode
-                    .map(|(o, p)| UnimplementedOp { opcode: o, pc: p }),
                 to_cpu_ports: s.apu_real.to_cpu_ports,
                 to_spc_ports: s.apu_real.to_spc_ports,
                 mvol_l: s.apu_real.dsp.registers[0x0C] as i8,
@@ -1823,7 +1808,6 @@ fn default_apu_state() -> ApuState {
         spc_pc: 0,
         spc_stopped: false,
         past_iplrom: false,
-        unimplemented_opcode: None,
         to_cpu_ports: [0; 4],
         to_spc_ports: [0; 4],
         mvol_l: 0,

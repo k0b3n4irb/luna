@@ -206,12 +206,6 @@ fn bench_one(path: &Path, frames: u64, input: &[(u64, u16)], screens_dir: &Path)
     if st.apu.spc_stopped {
         findings.push("SPC700 stopped".into());
     }
-    if let Some(op) = &st.apu.unimplemented_opcode {
-        findings.push(format!(
-            "SPC700 unimplemented opcode ${:02X} @ ${:04X}",
-            op.opcode, op.pc
-        ));
-    }
     let mut confirmed = !findings.is_empty();
 
     let static_fb = fb_first.is_some() && !fb_changed;
