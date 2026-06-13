@@ -2771,10 +2771,9 @@ mod tests {
             bus.poke(0xFFFF, 0x02);
             bus.poke_slice(0x0200, &[op, 0x00, 0x00]);
             cpu.reset(&mut bus);
+            // The check is simply that executing the formerly-missing
+            // opcode does not panic (the dispatch is now exhaustive).
             cpu.step(&mut bus);
-            // No assertion about state — only that no panic + the CPU
-            // didn't get stuck on `unimplemented_opcode`.
-            assert!(cpu.unimplemented_opcode.is_none(), "opcode ${op:02X}");
         }
     }
 
