@@ -112,23 +112,32 @@ struct Binding {
 pub(crate) enum Hotkey {
     /// Save a PNG of the current frame (default `F12`, like Mesen2).
     Screenshot,
+    /// Save emulator state to the current slot (default `F5`, like Mesen2).
+    SaveState,
+    /// Load emulator state from the current slot (default `F9`, like Mesen2).
+    LoadState,
 }
 
 impl Hotkey {
-    pub(crate) const ALL: [Self; 1] = [Self::Screenshot];
+    pub(crate) const ALL: [Self; 3] = [Self::Screenshot, Self::SaveState, Self::LoadState];
 
     /// Display label for the rebind UI.
     #[must_use]
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Screenshot => "Screenshot",
+            Self::SaveState => "Save state",
+            Self::LoadState => "Load state",
         }
     }
 
-    /// Factory default key. Mesen2 binds screenshot to `F12`.
+    /// Factory default key. Mesen2 binds screenshot to `F12`, save/load
+    /// state to `F5`/`F9`.
     const fn default_key(self) -> KeyCode {
         match self {
             Self::Screenshot => KeyCode::F12,
+            Self::SaveState => KeyCode::F5,
+            Self::LoadState => KeyCode::F9,
         }
     }
 }
@@ -236,14 +245,18 @@ const P2_DEFAULT: [(SnesButton, KeyCode); 12] = [
 #[derive(Clone)]
 pub(crate) struct KeyBindings {
     pads: [[(SnesButton, KeyCode); 12]; NUM_PLAYERS],
-    hotkeys: [(Hotkey, KeyCode); 1],
+    hotkeys: [(Hotkey, KeyCode); 3],
 }
 
 impl Default for KeyBindings {
     fn default() -> Self {
         Self {
             pads: [P1_ARROWS, P2_DEFAULT],
-            hotkeys: [(Hotkey::Screenshot, Hotkey::Screenshot.default_key())],
+            hotkeys: [
+                (Hotkey::Screenshot, Hotkey::Screenshot.default_key()),
+                (Hotkey::SaveState, Hotkey::SaveState.default_key()),
+                (Hotkey::LoadState, Hotkey::LoadState.default_key()),
+            ],
         }
     }
 }
