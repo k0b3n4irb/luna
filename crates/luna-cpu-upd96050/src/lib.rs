@@ -17,7 +17,7 @@
 #![forbid(unsafe_code)]
 
 /// Which NEC DSP this core models — selects the `pc`/`rp`/`dp` widths.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Revision {
     /// uPD7725 — DSP-1/1A/1B (11-bit PC, 10-bit RP, 8-bit DP).
     Upd7725,
@@ -26,7 +26,7 @@ pub enum Revision {
 }
 
 /// One ALU flag set (per accumulator).
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 struct Flag {
     ov0: bool, // overflow 0
     ov1: bool, // overflow 1
@@ -38,7 +38,7 @@ struct Flag {
 
 /// Status register (`SR`). Mixes externally-visible handshake bits
 /// (`rqm`, `drs`, `drc`) with user flags; only some bits are writable.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 struct Status {
     p0: bool,    // output port 0
     p1: bool,    // output port 1
@@ -92,7 +92,7 @@ impl Status {
 
 /// A register masked to a fixed bit width (`pc`/`rp`/`dp` — ares's
 /// `VariadicNatural`).
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 struct Vn {
     value: u16,
     mask: u16,
@@ -122,7 +122,7 @@ impl Vn {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 struct Registers {
     stack: [u16; 16],
     pc: Vn,
@@ -141,6 +141,18 @@ struct Registers {
     trb: u16,
     dr: u16, // data register (CPU port)
     sr: Status,
+}
+
+/// MUTABLE save-state of a [`Upd96050`] — data RAM, registers and flags.
+/// The microcode ROMs are firmware (restored from the cart), so they are
+/// not part of this blob.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Upd96050State {
+    revision: Revision,
+    data_ram: Vec<u16>,
+    regs: Registers,
+    flags_a: Flag,
+    flags_b: Flag,
 }
 
 /// A NEC uPD7725 / uPD96050 DSP instance.
@@ -186,6 +198,35 @@ impl Upd96050 {
         };
         self.flags_a = Flag::default();
         self.flags_b = Flag::default();
+    }
+
+    /// Serialize the DSP's MUTABLE state (data RAM + registers + flags) —
+    /// NOT the program / data microcode ROMs, which are firmware restored
+    /// from the cartridge. Returns a bincode blob for the save-state layer.
+    #[must_use]
+    pub fn save_state(&self) -> Vec<u8> {
+        let st = Upd96050State {
+            revision: self.revision,
+            data_ram: self.data_ram.to_vec(),
+            regs: self.regs,
+            flags_a: self.flags_a,
+            flags_b: self.flags_b,
+        };
+        bincode::serialize(&st).unwrap_or_default()
+    }
+
+    /// Restore the mutable state produced by [`Self::save_state`], leaving
+    /// the microcode ROMs intact.
+    pub fn load_state(&mut self, data: &[u8]) {
+        if let Ok(st) = bincode::deserialize::<Upd96050State>(data) {
+            self.revision = st.revision;
+            for (slot, w) in self.data_ram.iter_mut().zip(st.data_ram) {
+                *slot = w;
+            }
+            self.regs = st.regs;
+            self.flags_a = st.flags_a;
+            self.flags_b = st.flags_b;
+        }
     }
 
     /// Fill the program ROM (24-bit words, masked).

@@ -9,5 +9,10 @@ authors.workspace = true
 repository.workspace = true
 readme.workspace = true
 
+[dependencies]
+# Save-state: serde derives on PPU + VRAM/CGRAM/OAM state.
+serde       = { workspace = true, features = ["std", "derive"] }
+serde_bytes = { workspace = true }
+
 [lints]
 workspace = true

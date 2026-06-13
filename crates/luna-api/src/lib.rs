@@ -48,12 +48,32 @@ pub enum ApiError {
     /// `step` / etc. panicked inside the core.
     #[error("emulator panicked: {0}")]
     Panic(String),
+    /// Save-state encode/decode failed, or a loaded state did not match
+    /// the running ROM / save-state format version.
+    #[error("save state: {0}")]
+    SaveState(String),
     /// PNG encoding failed during `render_frame`.
     #[error("image: {0}")]
     Image(#[from] image::ImageError),
     /// Generic I/O.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// Save-state format version. Bump on any breaking change to the
+/// serialized layout so [`Emulator::load_state`] rejects stale blobs.
+pub const SAVE_STATE_VERSION: u32 = 1;
+
+/// On-disk / on-wire save-state container produced by
+/// [`Emulator::save_state`]. `core` is the bincode-encoded `Snes` (the
+/// mapper trait object is skipped by serde); `mapper` is the live mapper's
+/// mutable-state blob from [`luna_core::Mapper::save_state`].
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SaveStateBundle {
+    version: u32,
+    rom_hash: u64,
+    core: Vec<u8>,
+    mapper: Vec<u8>,
 }
 
 /// Cartridge metadata returned by [`Emulator::load_rom`].
@@ -538,6 +558,10 @@ pub struct Emulator {
     snes: Option<Snes>,
     rom_info: Option<RomInfo>,
     instructions_executed: u64,
+    /// Stable hash of the loaded ROM bytes, captured at `load_rom` time.
+    /// A save state records this so [`Emulator::load_state`] can refuse a
+    /// state produced against a different ROM.
+    rom_hash: u64,
 }
 
 impl Default for Emulator {
@@ -554,6 +578,7 @@ impl Emulator {
             snes: None,
             rom_info: None,
             instructions_executed: 0,
+            rom_hash: 0,
         }
     }
 
@@ -625,6 +650,15 @@ impl Emulator {
     }
 
     fn load_cartridge(&mut self, cart: Cartridge) -> Result<RomInfo, ApiError> {
+        // Capture a stable hash of the ROM bytes before the cartridge is
+        // consumed by `try_from_cartridge`; the save-state layer uses it to
+        // refuse states produced against a different ROM.
+        let rom_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            cart.rom.hash(&mut h);
+            h.finish()
+        };
         let info = RomInfo {
             title: cart.header.title.clone(),
             mapper: format!("{:?}", cart.header.mapper_kind),
@@ -658,6 +692,7 @@ impl Emulator {
                 self.snes = Some(snes);
                 self.rom_info = Some(info.clone());
                 self.instructions_executed = 0;
+                self.rom_hash = rom_hash;
                 Ok(info)
             }
             Ok(Err(unsupported)) => Err(ApiError::UnsupportedMapper(unsupported)),
@@ -1335,6 +1370,66 @@ impl Emulator {
         Ok(h.finish())
     }
 
+    /// Serialize the full running-machine state into a portable blob.
+    ///
+    /// The blob captures the mutable `Snes` state (CPU / PPU / APU / DMA /
+    /// scheduler / WRAM) plus the cartridge mapper's mutable state (SRAM,
+    /// coprocessor RAM / registers / CPU). It deliberately does **not**
+    /// contain the ROM: a state is only ever loadable into an emulator
+    /// already running the same ROM (enforced by [`Emulator::load_state`]
+    /// via the recorded ROM hash). Errors with [`ApiError::NoRom`] if no
+    /// ROM is loaded, or [`ApiError::SaveState`] on an encode failure.
+    pub fn save_state(&self) -> Result<Vec<u8>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let core = bincode::serialize(snes)
+            .map_err(|e| ApiError::SaveState(format!("core encode: {e}")))?;
+        let mapper = snes.mapper.save_state();
+        let bundle = SaveStateBundle {
+            version: SAVE_STATE_VERSION,
+            rom_hash: self.rom_hash,
+            core,
+            mapper,
+        };
+        bincode::serialize(&bundle).map_err(|e| ApiError::SaveState(format!("bundle encode: {e}")))
+    }
+
+    /// Restore a blob produced by [`Emulator::save_state`] into the live
+    /// emulator. The ROM must already be loaded and identical to the one
+    /// the state was saved from (matched by hash) — this is a rewind of the
+    /// running machine, not a ROM swap.
+    ///
+    /// Errors with [`ApiError::NoRom`] when no ROM is loaded, or
+    /// [`ApiError::SaveState`] on a decode failure, a format-version
+    /// mismatch, or a ROM-hash mismatch.
+    pub fn load_state(&mut self, data: &[u8]) -> Result<(), ApiError> {
+        if self.snes.is_none() {
+            return Err(ApiError::NoRom);
+        }
+        let bundle: SaveStateBundle = bincode::deserialize(data)
+            .map_err(|e| ApiError::SaveState(format!("bundle decode: {e}")))?;
+        if bundle.version != SAVE_STATE_VERSION {
+            return Err(ApiError::SaveState(format!(
+                "format version mismatch: state is v{}, this build expects v{SAVE_STATE_VERSION}",
+                bundle.version
+            )));
+        }
+        if bundle.rom_hash != self.rom_hash {
+            return Err(ApiError::SaveState(
+                "ROM mismatch: this save state was produced against a different ROM".to_string(),
+            ));
+        }
+        let mut restored: Snes = bincode::deserialize(&bundle.core)
+            .map_err(|e| ApiError::SaveState(format!("core decode: {e}")))?;
+        // The deserialized `Snes` has a placeholder mapper (the trait object
+        // is `serde(skip)`). Move the LIVE mapper — which still owns the ROM
+        // — into it, then replay the mapper's saved mutable state onto it.
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        restored.mapper = std::mem::replace(&mut snes.mapper, luna_core::null_mapper());
+        restored.mapper.load_state(&bundle.mapper);
+        *snes = restored;
+        Ok(())
+    }
+
     /// Number of stereo samples currently waiting in the APU output
     /// queue — cheap, lets an audio-paced GUI drain exactly the host
     /// ring's free space and tell whether the ring (not the queue) was
@@ -1804,6 +1899,79 @@ mod tests {
     fn fresh_emulator_has_no_rom() {
         let e = Emulator::new();
         assert!(!e.has_rom());
+    }
+
+    #[test]
+    fn save_state_requires_a_rom() {
+        let e = Emulator::new();
+        assert!(matches!(e.save_state(), Err(ApiError::NoRom)));
+        let mut e2 = Emulator::new();
+        assert!(matches!(e2.load_state(&[]), Err(ApiError::NoRom)));
+    }
+
+    #[test]
+    fn load_state_rejects_a_wrong_rom() {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        e.step_until_frame(200_000).unwrap();
+        let saved = e.save_state().expect("save");
+
+        // Fresh emulator with the SAME ROM accepts it.
+        let mut ok = Emulator::new();
+        ok.load_rom_bytes(demo_lorom()).unwrap();
+        assert!(ok.load_state(&saved).is_ok());
+
+        // A garbage blob is refused, not panicked on.
+        assert!(matches!(
+            ok.load_state(&[1, 2, 3, 4]),
+            Err(ApiError::SaveState(_))
+        ));
+    }
+
+    #[test]
+    fn save_state_round_trip_rewinds_and_stays_deterministic() {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+
+        // Run a few frames, then snapshot.
+        for _ in 0..3 {
+            e.step_until_frame(1_000_000).unwrap();
+        }
+        let saved = e.save_state().expect("save");
+        let hash_at_save = e.framebuffer_hash().expect("hash");
+        let cpu_at_save = e.cpu_state().expect("cpu");
+
+        // Run further so the machine has visibly advanced past the save.
+        for _ in 0..3 {
+            e.step_until_frame(1_000_000).unwrap();
+        }
+        let hash_after_more = e.framebuffer_hash().expect("hash");
+        let cpu_after_more = e.cpu_state().expect("cpu");
+
+        // Loading the state rewinds to exactly the save point.
+        e.load_state(&saved).expect("load");
+        assert_eq!(
+            e.framebuffer_hash().expect("hash"),
+            hash_at_save,
+            "loading a state must restore the framebuffer hash captured at save time"
+        );
+        assert_eq!(
+            e.cpu_state().expect("cpu").pc,
+            cpu_at_save.pc,
+            "loading a state must restore the CPU PC captured at save time"
+        );
+
+        // Determinism: re-running the same number of frames from the restored
+        // point reproduces the post-save run bit-for-bit.
+        for _ in 0..3 {
+            e.step_until_frame(1_000_000).unwrap();
+        }
+        assert_eq!(
+            e.framebuffer_hash().expect("hash"),
+            hash_after_more,
+            "replaying from a restored state must reproduce the same frame"
+        );
+        assert_eq!(e.cpu_state().expect("cpu").pc, cpu_after_more.pc);
     }
 
     #[test]

@@ -27,7 +27,7 @@
 //! code, reads it back to confirm "command transferred").
 
 /// Phase of the APU stub's state machine. See module docs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Phase {
     /// Post-reset. `$2140`/`$2141` return the canonical IPL ROM ready
     /// values `$AA` / `$BB`. CPU writes are recorded in `from_cpu`
@@ -44,6 +44,7 @@ pub enum Phase {
 }
 
 /// The smart APU stub. See module-level docs.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ApuStub {
     /// What the CPU reads at each port.
     to_cpu: [u8; 4],

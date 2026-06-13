@@ -49,6 +49,40 @@ const fn aram_with_ipl(aram: &[u8; 0x10000], control: u8, addr: u16) -> u8 {
 /// `dsp.rs` for the 1-for-1 transliteration of `ares/sfc/dsp/*`.
 pub mod dsp;
 
+/// `serde` helper for a heap-boxed fixed byte array (`Box<[u8; N]>`),
+/// which `serde_bytes` does not cover directly. Used by the save-state
+/// machinery for the 64 KB ARAM.
+pub(crate) mod boxed_byte_array {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    /// Serialize `Box<[u8; N]>` as raw bytes (the `&Box` from serde's
+    /// `with` call site deref-coerces to this `&[u8; N]`).
+    pub(crate) fn serialize<S, const N: usize>(
+        data: &[u8; N],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(&data[..])
+    }
+
+    /// Deserialize a byte blob back into `Box<[u8; N]>` (length must match).
+    pub(crate) fn deserialize<'de, D, const N: usize>(
+        deserializer: D,
+    ) -> Result<Box<[u8; N]>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes = <serde_bytes::ByteBuf>::deserialize(deserializer)?;
+        let arr: [u8; N] = bytes
+            .into_vec()
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("byte array length mismatch"))?;
+        Ok(Box::new(arr))
+    }
+}
+
 /// Nominal master cycles per SPC instruction (~4 SPC cycles × the
 /// 20.97 master/SPC ratio). Since Phase 2 this is **no longer** the
 /// scheduler quantum — `Apu::step` charges each instruction its real
@@ -73,6 +107,7 @@ pub const AUDIO_QUEUE_CAPACITY: usize = 16384;
 
 /// All APU state owned by [`Apu`]: SPC700 core + 64 KB ARAM + the two
 /// 4-byte mailbox arrays.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Apu {
     /// The SPC700 CPU.
     pub cpu: Spc700,
@@ -85,6 +120,7 @@ pub struct Apu {
     /// in — it's a read overlay over `$FFC0..=$FFFF` on the SPC side,
     /// gated on `$F1` bit 7 (see [`aram_with_ipl`] / [`Apu::peek`]). The
     /// DSP reads this array directly, bypassing the overlay.
+    #[serde(with = "boxed_byte_array")]
     pub aram: Box<[u8; 0x10000]>,
     /// CPU → SPC mailbox (CPU writes `$2140-$2143`, SPC reads `$F4-$F7`).
     pub to_spc_ports: [u8; 4],
@@ -133,6 +169,10 @@ pub struct Apu {
     /// to consume. Sized to a few frames at 32 kHz so brief audio
     /// underruns don't cause sustained drift; the host drains it on
     /// every UI frame.
+    ///
+    /// Transient playback buffer — not part of the save-state. It
+    /// `serde(skip)`-defaults to an empty queue on restore.
+    #[serde(skip)]
     pub audio_queue: std::collections::VecDeque<(i16, i16)>,
     /// SPC cycles owed to the audio-sample tick (32-cycle base
     /// clock). Drives both ADSR rate progression and the per-voice

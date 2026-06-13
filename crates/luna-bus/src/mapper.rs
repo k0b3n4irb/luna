@@ -6,7 +6,7 @@ use crate::types::Addr24;
 ///
 /// Determines how the cartridge ROM and SRAM are mapped into the 24-bit
 /// CPU address space.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MapperKind {
     /// Mode 20 — 32 KB ROM pages at `$8000-$FFFF`, mirrored across many
     /// banks. Most common for small to medium games.
@@ -62,6 +62,20 @@ impl MapperKind {
 pub trait Mapper {
     /// Identify the mapping mode.
     fn kind(&self) -> MapperKind;
+
+    /// Serialize the mapper's MUTABLE runtime state (SRAM, coproc RAM /
+    /// regs / CPU, banking latches, etc.) — NOT the ROM. Default: no state.
+    ///
+    /// Used by the save-state machinery: the trait object cannot itself
+    /// derive `Deserialize`, so the live mapper is kept and only its
+    /// mutable state is round-tripped through this byte blob.
+    fn save_state(&self) -> Vec<u8> {
+        Vec::new()
+    }
+
+    /// Restore mutable state produced by [`Mapper::save_state`] into the
+    /// live mapper, leaving ROM intact. Default: no-op.
+    fn load_state(&mut self, _data: &[u8]) {}
 
     /// Returns `Some(byte)` if `addr` falls inside a region this mapper
     /// owns (ROM / SRAM / coprocessor MMIO), or `None` if it falls
@@ -166,6 +180,32 @@ pub trait Mapper {
     /// Drain the Super FX instruction trace (empty if disabled / not GSU).
     fn take_superfx_trace(&mut self) -> Vec<SuperFxTraceEvent> {
         Vec::new()
+    }
+}
+
+/// A do-nothing mapper that owns no ROM and claims no addresses. Exists
+/// purely as a placeholder so the save-state machinery can `mem::replace`
+/// the live `Box<dyn Mapper + Send>` out of a `Snes` (the trait object
+/// cannot derive `Deserialize`, so a freshly deserialized `Snes` defaults
+/// its mapper to this and the caller swaps the real one back in).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NullMapper;
+
+impl Mapper for NullMapper {
+    fn kind(&self) -> MapperKind {
+        MapperKind::LoRom
+    }
+    fn read(&mut self, _addr: Addr24) -> Option<u8> {
+        None
+    }
+    fn write(&mut self, _addr: Addr24, _value: u8) -> bool {
+        false
+    }
+    fn rom_size(&self) -> usize {
+        0
+    }
+    fn sram_size(&self) -> usize {
+        0
     }
 }
 

@@ -11,6 +11,9 @@ readme.workspace = true
 
 [dependencies]
 luna-cpu-spc700 = { workspace = true }
+# Save-state: serde derives on APU + DSP state.
+serde       = { workspace = true, features = ["std", "derive"] }
+serde_bytes = { workspace = true }
 
 [lints]
 workspace = true

@@ -1,5 +1,7 @@
 //! SPC700 program status word (PSW).
 
+use serde::{Deserialize, Serialize};
+
 /// PSW bit masks.
 pub mod bit {
     /// Negative.
@@ -21,7 +23,7 @@ pub mod bit {
 }
 
 /// Wrapper around the 8-bit PSW register with named bit accessors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Psw(pub u8);
 
 impl Psw {
