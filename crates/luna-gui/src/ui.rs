@@ -1251,8 +1251,14 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>,
                         ui.close();
                     }
                 });
-                ui.menu_button("Input", |ui| {
-                    if ui.button("Configure controller…").clicked() {
+                ui.menu_button("Settings", |ui| {
+                    // Grouped by area (Mesen2-style), so Audio/Video sections
+                    // slot in below later.
+                    ui.label(egui::RichText::new("Input").weak().small());
+                    if ui
+                        .selectable_label(state.show_input_config, "Controller…")
+                        .clicked()
+                    {
                         emit(MenuAction::ToggleInputConfig);
                         ui.close();
                     }
