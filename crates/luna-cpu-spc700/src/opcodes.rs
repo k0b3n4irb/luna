@@ -55,21 +55,49 @@ impl Spc700 {
             // ---------------------------------------------------------
             // No-op + sleep + stop
             // ---------------------------------------------------------
-            0x00 => { /* NOP */ }
+            0x00 => self.dummy_read_pc(bus), // NOP
             0xEF => self.sleeping = true,
             0xFF => self.stopped = true,
 
             // ---------------------------------------------------------
-            // Flag toggles
+            // Flag toggles. Each prefetches (dummy-reads) the next byte;
+            // EI/DI/NOTC additionally burn one idle cycle (RR. vs RR).
             // ---------------------------------------------------------
-            0x20 => self.psw.remove(bit::P),          // CLRP
-            0x40 => self.psw.insert(bit::P),          // SETP
-            0x60 => self.psw.remove(bit::C),          // CLRC
-            0x80 => self.psw.insert(bit::C),          // SETC
-            0xA0 => self.psw.insert(bit::I),          // EI
-            0xC0 => self.psw.remove(bit::I),          // DI
-            0xE0 => self.psw.remove(bit::V | bit::H), // CLRV
-            0xED => self.psw.0 ^= bit::C,             // NOTC
+            0x20 => {
+                self.psw.remove(bit::P); // CLRP
+                self.dummy_read_pc(bus);
+            }
+            0x40 => {
+                self.psw.insert(bit::P); // SETP
+                self.dummy_read_pc(bus);
+            }
+            0x60 => {
+                self.psw.remove(bit::C); // CLRC
+                self.dummy_read_pc(bus);
+            }
+            0x80 => {
+                self.psw.insert(bit::C); // SETC
+                self.dummy_read_pc(bus);
+            }
+            0xA0 => {
+                self.psw.insert(bit::I); // EI
+                self.dummy_read_pc(bus);
+                bus.idle();
+            }
+            0xC0 => {
+                self.psw.remove(bit::I); // DI
+                self.dummy_read_pc(bus);
+                bus.idle();
+            }
+            0xE0 => {
+                self.psw.remove(bit::V | bit::H); // CLRV
+                self.dummy_read_pc(bus);
+            }
+            0xED => {
+                self.psw.0 ^= bit::C; // NOTC
+                self.dummy_read_pc(bus);
+                bus.idle();
+            }
 
             // ---------------------------------------------------------
             // Immediate MOV
@@ -105,23 +133,28 @@ impl Spc700 {
                 self.set_nz(v);
             }
             0xF4 => {
-                // MOV A,dp+X
+                // MOV A,dp+X — DirectIndexedRead: fetch; idle; load(dp+X).
                 let dp = self.fetch_u8(bus);
+                bus.idle();
                 let addr = self.direct_addr(dp.wrapping_add(self.x));
                 let v = bus.read(addr);
                 self.a = v;
                 self.set_nz(v);
             }
             0xC4 => {
-                // MOV dp,A
+                // MOV dp,A — ares DirectWrite: fetch; load(addr); store(addr).
                 let dp = self.fetch_u8(bus);
                 let addr = self.direct_addr(dp);
+                bus.read(addr);
                 bus.write(addr, self.a);
             }
             0xD4 => {
-                // MOV dp+X,A
+                // MOV dp+X,A — ares DirectIndexedWrite: fetch; idle;
+                // load(dp+X); store(dp+X).
                 let dp = self.fetch_u8(bus);
+                bus.idle();
                 let addr = self.direct_addr(dp.wrapping_add(self.x));
+                bus.read(addr);
                 bus.write(addr, self.a);
             }
 
@@ -136,8 +169,9 @@ impl Spc700 {
                 self.set_nz(v);
             }
             0xC5 => {
-                // MOV !abs,A
+                // MOV !abs,A — ares AbsoluteWrite: fetch16; read(addr); write(addr).
                 let addr = self.fetch_u16(bus);
+                bus.read(addr);
                 bus.write(addr, self.a);
             }
             0xE9 => {
@@ -155,13 +189,15 @@ impl Spc700 {
                 self.set_nz(v);
             }
             0xC9 => {
-                // MOV !abs,X
+                // MOV !abs,X — ares AbsoluteWrite: fetch16; read(addr); write(addr).
                 let addr = self.fetch_u16(bus);
+                bus.read(addr);
                 bus.write(addr, self.x);
             }
             0xCC => {
-                // MOV !abs,Y
+                // MOV !abs,Y — ares AbsoluteWrite: fetch16; read(addr); write(addr).
                 let addr = self.fetch_u16(bus);
+                bus.read(addr);
                 bus.write(addr, self.y);
             }
 
@@ -171,10 +207,14 @@ impl Spc700 {
             0xBD => {
                 // MOV SP,X — SP = X (does NOT set flags on real HW).
                 self.sp = self.x;
+                self.dummy_read_pc(bus);
             }
             0xC6 => {
                 // MOV (X),A — store A at direct page byte addressed by X.
+                // ares IndirectXWrite: read(PC); load(X); store(X).
+                self.dummy_read_pc(bus);
                 let addr = self.direct_addr(self.x);
+                bus.read(addr);
                 bus.write(addr, self.a);
             }
             0x1D => {
@@ -182,12 +222,14 @@ impl Spc700 {
                 self.x = self.x.wrapping_sub(1);
                 let v = self.x;
                 self.set_nz(v);
+                self.dummy_read_pc(bus);
             }
             0xFC => {
                 // INC Y
                 self.y = self.y.wrapping_add(1);
                 let v = self.y;
                 self.set_nz(v);
+                self.dummy_read_pc(bus);
             }
             0xAB => {
                 // INC dp — read, increment, write back; update N/Z.
@@ -201,19 +243,23 @@ impl Spc700 {
                 // MOV dp,#imm — store imm into a direct page byte. The
                 // SPC syntax orders the operands `(imm, dp)` in object
                 // code (CPU eats imm first, then dp).
+                // ares DirectImmediateWrite: fetch imm; fetch addr; load; store.
                 let imm = self.fetch_u8(bus);
                 let dp = self.fetch_u8(bus);
                 let addr = self.direct_addr(dp);
+                bus.read(addr);
                 bus.write(addr, imm);
             }
             0x78 => {
                 // CMP dp,#imm — compare direct page byte with imm,
                 // set N/Z/C without writing back.
+                // ares DirectImmediateCompare: fetch imm; fetch addr; load; idle.
                 let imm = self.fetch_u8(bus);
                 let dp = self.fetch_u8(bus);
                 let addr = self.direct_addr(dp);
                 let mem = bus.read(addr);
                 self.cmp_u8(mem, imm);
+                bus.idle();
             }
             0xEB => {
                 // MOV Y,dp
@@ -232,24 +278,29 @@ impl Spc700 {
                 self.cmp_u8(y, mem);
             }
             0xCB => {
-                // MOV dp,Y
+                // MOV dp,Y — ares DirectWrite: fetch; load(addr); store(addr).
                 let dp = self.fetch_u8(bus);
                 let addr = self.direct_addr(dp);
+                bus.read(addr);
                 bus.write(addr, self.y);
             }
             0xD7 => {
-                // MOV [dp]+Y,A — indirect indexed Y store. Read 16-bit
-                // pointer at (dp), add Y, store A there.
+                // MOV [dp]+Y,A — ares IndirectIndexedWrite: fetch; load lo;
+                // load hi; idle; read(addr+Y); write(addr+Y).
                 let dp = self.fetch_u8(bus);
                 let plo = bus.read(self.direct_addr(dp));
                 let phi = bus.read(self.direct_addr(dp.wrapping_add(1)));
                 let ptr = u16::from(plo) | (u16::from(phi) << 8);
                 let target = ptr.wrapping_add(u16::from(self.y));
+                bus.idle();
+                bus.read(target);
                 bus.write(target, self.a);
             }
             0xF7 => {
-                // MOV A,[dp]+Y — indirect indexed Y load.
+                // MOV A,[dp]+Y — ares IndirectIndexedRead: fetch; idle;
+                // load lo; load hi; read(addr+Y).
                 let dp = self.fetch_u8(bus);
+                bus.idle();
                 let plo = bus.read(self.direct_addr(dp));
                 let phi = bus.read(self.direct_addr(dp.wrapping_add(1)));
                 let ptr = u16::from(plo) | (u16::from(phi) << 8);
@@ -259,18 +310,22 @@ impl Spc700 {
                 self.set_nz(v);
             }
             0xC7 => {
-                // MOV [dp+X],A — indirect-indexed-X store. Pointer at
-                // direct_addr(dp+X) / direct_addr(dp+X+1).
+                // MOV [dp+X],A — ares IndexedIndirectWrite: fetch; idle;
+                // load lo; load hi; read(addr); write(addr).
                 let dp = self.fetch_u8(bus);
+                bus.idle();
                 let dpx = dp.wrapping_add(self.x);
                 let plo = bus.read(self.direct_addr(dpx));
                 let phi = bus.read(self.direct_addr(dpx.wrapping_add(1)));
                 let target = u16::from(plo) | (u16::from(phi) << 8);
+                bus.read(target);
                 bus.write(target, self.a);
             }
             0xE7 => {
-                // MOV A,[dp+X] — indirect-indexed-X load.
+                // MOV A,[dp+X] — ares IndexedIndirectRead: fetch; idle;
+                // load lo; load hi; read(addr).
                 let dp = self.fetch_u8(bus);
+                bus.idle();
                 let dpx = dp.wrapping_add(self.x);
                 let plo = bus.read(self.direct_addr(dpx));
                 let phi = bus.read(self.direct_addr(dpx.wrapping_add(1)));
@@ -284,18 +339,21 @@ impl Spc700 {
                 self.a = self.y;
                 let v = self.a;
                 self.set_nz(v);
+                self.dummy_read_pc(bus);
             }
             0x5D => {
                 // MOV X,A
                 self.x = self.a;
                 let v = self.x;
                 self.set_nz(v);
+                self.dummy_read_pc(bus);
             }
             0xBA => {
-                // MOVW YA,dp — 16-bit load. Y ← (dp+1), A ← (dp).
-                // Sets N/Z based on the resulting 16-bit YA.
+                // MOVW YA,dp — ares DirectReadWord(LDW): fetch; load lo;
+                // idle; load hi.
                 let dp = self.fetch_u8(bus);
                 let lo = bus.read(self.direct_addr(dp));
+                bus.idle();
                 let hi = bus.read(self.direct_addr(dp.wrapping_add(1)));
                 self.a = lo;
                 self.y = hi;
@@ -304,15 +362,19 @@ impl Spc700 {
                 self.psw.set(bit::N, v16 & 0x8000 != 0);
             }
             0xDA => {
-                // MOVW dp,YA — 16-bit store. (dp) ← A, (dp+1) ← Y.
+                // MOVW dp,YA — ares DirectWriteWord: fetch; load(lo addr);
+                // store lo; store hi.
                 let dp = self.fetch_u8(bus);
-                bus.write(self.direct_addr(dp), self.a);
+                let lo_addr = self.direct_addr(dp);
+                bus.read(lo_addr);
+                bus.write(lo_addr, self.a);
                 bus.write(self.direct_addr(dp.wrapping_add(1)), self.y);
             }
             0x1F => {
-                // JMP [!abs+X] — indirect-indexed jump. Read 16-bit
-                // pointer at (abs + X), jump there.
+                // JMP [!abs+X] — indirect-indexed jump. ares: fetch16;
+                // idle; read ptr lo; read ptr hi.
                 let base = self.fetch_u16(bus);
+                bus.idle();
                 let ptr = base.wrapping_add(u16::from(self.x));
                 let lo = bus.read(ptr);
                 let hi = bus.read(ptr.wrapping_add(1));
@@ -323,9 +385,11 @@ impl Spc700 {
             // 16-bit word ops on YA / direct-page word
             // ---------------------------------------------------------
             0x7A => {
-                // ADDW YA,dp — YA += (dp+1):(dp). Sets N/V/H/Z/C.
+                // ADDW YA,dp — ares DirectReadWord(ADW): fetch; load lo;
+                // idle; load hi.
                 let dp = self.fetch_u8(bus);
                 let lo = bus.read(self.direct_addr(dp));
+                bus.idle();
                 let hi = bus.read(self.direct_addr(dp.wrapping_add(1)));
                 let mem = u16::from(lo) | (u16::from(hi) << 8);
                 let ya = u16::from(self.a) | (u16::from(self.y) << 8);
@@ -343,9 +407,11 @@ impl Spc700 {
                 self.psw.set(bit::H, h);
             }
             0x9A => {
-                // SUBW YA,dp — YA -= (dp+1):(dp). Sets N/V/H/Z/C.
+                // SUBW YA,dp — ares DirectReadWord(SBW): fetch; load lo;
+                // idle; load hi.
                 let dp = self.fetch_u8(bus);
                 let lo = bus.read(self.direct_addr(dp));
+                bus.idle();
                 let hi = bus.read(self.direct_addr(dp.wrapping_add(1)));
                 let mem = u16::from(lo) | (u16::from(hi) << 8);
                 let ya = u16::from(self.a) | (u16::from(self.y) << 8);
@@ -375,28 +441,30 @@ impl Spc700 {
                 self.psw.set(bit::C, ya >= mem);
             }
             0x3A => {
-                // INCW dp — (dp+1):(dp) += 1.
+                // INCW dp — ares DirectModifyWord(+1):
+                // fetch; load lo (+adjust); store lo; load hi; store hi.
                 let dp = self.fetch_u8(bus);
                 let lo_addr = self.direct_addr(dp);
                 let hi_addr = self.direct_addr(dp.wrapping_add(1));
-                let v = (u16::from(bus.read(lo_addr)) | (u16::from(bus.read(hi_addr)) << 8))
-                    .wrapping_add(1);
-                bus.write(lo_addr, v as u8);
-                bus.write(hi_addr, (v >> 8) as u8);
-                self.psw.set(bit::Z, v == 0);
-                self.psw.set(bit::N, v & 0x8000 != 0);
+                let mut data = u16::from(bus.read(lo_addr)).wrapping_add(1);
+                bus.write(lo_addr, data as u8);
+                data = data.wrapping_add(u16::from(bus.read(hi_addr)) << 8);
+                bus.write(hi_addr, (data >> 8) as u8);
+                self.psw.set(bit::Z, data == 0);
+                self.psw.set(bit::N, data & 0x8000 != 0);
             }
             0x1A => {
-                // DECW dp — (dp+1):(dp) -= 1.
+                // DECW dp — ares DirectModifyWord(-1):
+                // fetch; load lo (+adjust); store lo; load hi; store hi.
                 let dp = self.fetch_u8(bus);
                 let lo_addr = self.direct_addr(dp);
                 let hi_addr = self.direct_addr(dp.wrapping_add(1));
-                let v = (u16::from(bus.read(lo_addr)) | (u16::from(bus.read(hi_addr)) << 8))
-                    .wrapping_sub(1);
-                bus.write(lo_addr, v as u8);
-                bus.write(hi_addr, (v >> 8) as u8);
-                self.psw.set(bit::Z, v == 0);
-                self.psw.set(bit::N, v & 0x8000 != 0);
+                let mut data = u16::from(bus.read(lo_addr)).wrapping_sub(1);
+                bus.write(lo_addr, data as u8);
+                data = data.wrapping_add(u16::from(bus.read(hi_addr)) << 8);
+                bus.write(hi_addr, (data >> 8) as u8);
+                self.psw.set(bit::Z, data == 0);
+                self.psw.set(bit::N, data & 0x8000 != 0);
             }
 
             // ---------------------------------------------------------
@@ -415,8 +483,9 @@ impl Spc700 {
                 self.set_nz(v);
             }
             0x1B => {
-                // ASL dp+X
+                // ASL dp+X — DirectIndexedModify: fetch; idle; load; store.
                 let dp = self.fetch_u8(bus);
+                bus.idle();
                 let addr = self.direct_addr(dp.wrapping_add(self.x));
                 let v = bus.read(addr);
                 self.psw.set(bit::C, v & 0x80 != 0);
@@ -444,8 +513,9 @@ impl Spc700 {
                 self.set_nz(v);
             }
             0x5B => {
-                // LSR dp+X
+                // LSR dp+X — DirectIndexedModify: fetch; idle; load; store.
                 let dp = self.fetch_u8(bus);
+                bus.idle();
                 let addr = self.direct_addr(dp.wrapping_add(self.x));
                 let v = bus.read(addr);
                 self.psw.set(bit::C, v & 0x01 != 0);
@@ -474,8 +544,9 @@ impl Spc700 {
                 self.set_nz(v);
             }
             0x3B => {
-                // ROL dp+X
+                // ROL dp+X — DirectIndexedModify: fetch; idle; load; store.
                 let dp = self.fetch_u8(bus);
+                bus.idle();
                 let addr = self.direct_addr(dp.wrapping_add(self.x));
                 let v = bus.read(addr);
                 let c_in = u8::from(self.psw.contains(bit::C));
@@ -506,8 +577,9 @@ impl Spc700 {
                 self.set_nz(v);
             }
             0x7B => {
-                // ROR dp+X
+                // ROR dp+X — DirectIndexedModify: fetch; idle; load; store.
                 let dp = self.fetch_u8(bus);
+                bus.idle();
                 let addr = self.direct_addr(dp.wrapping_add(self.x));
                 let v = bus.read(addr);
                 let c_in = u8::from(self.psw.contains(bit::C));
@@ -535,8 +607,9 @@ impl Spc700 {
                 self.set_nz(v);
             }
             0x9B => {
-                // DEC dp+X
+                // DEC dp+X — DirectIndexedModify: fetch; idle; load; store.
                 let dp = self.fetch_u8(bus);
+                bus.idle();
                 let addr = self.direct_addr(dp.wrapping_add(self.x));
                 let v = bus.read(addr).wrapping_sub(1);
                 bus.write(addr, v);
@@ -550,8 +623,9 @@ impl Spc700 {
                 self.set_nz(v);
             }
             0xBB => {
-                // INC dp+X
+                // INC dp+X — DirectIndexedModify: fetch; idle; load; store.
                 let dp = self.fetch_u8(bus);
+                bus.idle();
                 let addr = self.direct_addr(dp.wrapping_add(self.x));
                 let v = bus.read(addr).wrapping_add(1);
                 bus.write(addr, v);
@@ -575,6 +649,7 @@ impl Spc700 {
                 self.a = a << 1;
                 let v = self.a;
                 self.set_nz(v);
+                self.dummy_read_pc(bus);
             }
             0x5C => {
                 // LSR A — shift A right, bit 0 → C.
@@ -583,6 +658,7 @@ impl Spc700 {
                 self.a = a >> 1;
                 let v = self.a;
                 self.set_nz(v);
+                self.dummy_read_pc(bus);
             }
             0x3C => {
                 // ROL A — rotate left through C.
@@ -592,6 +668,7 @@ impl Spc700 {
                 self.a = (a << 1) | c_in;
                 let v = self.a;
                 self.set_nz(v);
+                self.dummy_read_pc(bus);
             }
             0x7C => {
                 // ROR A — rotate right through C.
@@ -601,6 +678,7 @@ impl Spc700 {
                 self.a = (a >> 1) | (c_in << 7);
                 let v = self.a;
                 self.set_nz(v);
+                self.dummy_read_pc(bus);
             }
 
             // ---------------------------------------------------------
@@ -662,24 +740,27 @@ impl Spc700 {
                 self.cmp_u8(a, v);
             }
             0x75 => {
-                // CMP A,!abs+X
+                // CMP A,!abs+X — AbsoluteIndexedRead: fetch16; idle; read.
                 let base = self.fetch_u16(bus);
+                bus.idle();
                 let addr = base.wrapping_add(u16::from(self.x));
                 let v = bus.read(addr);
                 let a = self.a;
                 self.cmp_u8(a, v);
             }
             0x76 => {
-                // CMP A,!abs+Y
+                // CMP A,!abs+Y — AbsoluteIndexedRead: fetch16; idle; read.
                 let base = self.fetch_u16(bus);
+                bus.idle();
                 let addr = base.wrapping_add(u16::from(self.y));
                 let v = bus.read(addr);
                 let a = self.a;
                 self.cmp_u8(a, v);
             }
             0x74 => {
-                // CMP A,dp+X
+                // CMP A,dp+X — DirectIndexedRead: fetch; idle; load.
                 let dp = self.fetch_u8(bus);
+                bus.idle();
                 let addr = self.direct_addr(dp.wrapping_add(self.x));
                 let v = bus.read(addr);
                 let a = self.a;
@@ -687,21 +768,28 @@ impl Spc700 {
             }
             // Indexed-DP MOV of X / Y
             0xD8 => {
-                // MOV dp,X
+                // MOV dp,X — ares DirectWrite: fetch; load(addr); store(addr).
                 let dp = self.fetch_u8(bus);
                 let addr = self.direct_addr(dp);
+                bus.read(addr);
                 bus.write(addr, self.x);
             }
             0xD9 => {
-                // MOV dp+Y,X
+                // MOV dp+Y,X — ares DirectIndexedWrite: fetch; idle;
+                // load(dp+Y); store(dp+Y).
                 let dp = self.fetch_u8(bus);
+                bus.idle();
                 let addr = self.direct_addr(dp.wrapping_add(self.y));
+                bus.read(addr);
                 bus.write(addr, self.x);
             }
             0xDB => {
-                // MOV dp+X,Y
+                // MOV dp+X,Y — ares DirectIndexedWrite: fetch; idle;
+                // load(dp+X); store(dp+X).
                 let dp = self.fetch_u8(bus);
+                bus.idle();
                 let addr = self.direct_addr(dp.wrapping_add(self.x));
+                bus.read(addr);
                 bus.write(addr, self.y);
             }
             0xF8 => {
@@ -713,16 +801,18 @@ impl Spc700 {
                 self.set_nz(v);
             }
             0xF9 => {
-                // MOV X,dp+Y
+                // MOV X,dp+Y — DirectIndexedRead: fetch; idle; load(dp+Y).
                 let dp = self.fetch_u8(bus);
+                bus.idle();
                 let addr = self.direct_addr(dp.wrapping_add(self.y));
                 let v = bus.read(addr);
                 self.x = v;
                 self.set_nz(v);
             }
             0xFB => {
-                // MOV Y,dp+X
+                // MOV Y,dp+X — DirectIndexedRead: fetch; idle; load(dp+X).
                 let dp = self.fetch_u8(bus);
+                bus.idle();
                 let addr = self.direct_addr(dp.wrapping_add(self.x));
                 let v = bus.read(addr);
                 self.y = v;
@@ -756,9 +846,10 @@ impl Spc700 {
                 let a = self.a;
                 self.a = self.sbc_u8(a, v);
             }
-            // OR/AND/EOR/ADC/SBC A,dp+X
+            // OR/AND/EOR/ADC/SBC A,dp+X — DirectIndexedRead: fetch; idle; load.
             0x14 => {
                 let dp = self.fetch_u8(bus);
+                bus.idle();
                 let v = bus.read(self.direct_addr(dp.wrapping_add(self.x)));
                 self.a |= v;
                 let r = self.a;
@@ -766,6 +857,7 @@ impl Spc700 {
             }
             0x34 => {
                 let dp = self.fetch_u8(bus);
+                bus.idle();
                 let v = bus.read(self.direct_addr(dp.wrapping_add(self.x)));
                 self.a &= v;
                 let r = self.a;
@@ -773,6 +865,7 @@ impl Spc700 {
             }
             0x54 => {
                 let dp = self.fetch_u8(bus);
+                bus.idle();
                 let v = bus.read(self.direct_addr(dp.wrapping_add(self.x)));
                 self.a ^= v;
                 let r = self.a;
@@ -780,19 +873,22 @@ impl Spc700 {
             }
             0x94 => {
                 let dp = self.fetch_u8(bus);
+                bus.idle();
                 let v = bus.read(self.direct_addr(dp.wrapping_add(self.x)));
                 let a = self.a;
                 self.a = self.adc_u8(a, v);
             }
             0xB4 => {
                 let dp = self.fetch_u8(bus);
+                bus.idle();
                 let v = bus.read(self.direct_addr(dp.wrapping_add(self.x)));
                 let a = self.a;
                 self.a = self.sbc_u8(a, v);
             }
-            // OR/AND/EOR/ADC/SBC A,!abs+X
+            // OR/AND/EOR/ADC/SBC A,!abs+X — AbsoluteIndexedRead: fetch16; idle; read.
             0x15 => {
                 let base = self.fetch_u16(bus);
+                bus.idle();
                 let v = bus.read(base.wrapping_add(u16::from(self.x)));
                 self.a |= v;
                 let r = self.a;
@@ -800,6 +896,7 @@ impl Spc700 {
             }
             0x35 => {
                 let base = self.fetch_u16(bus);
+                bus.idle();
                 let v = bus.read(base.wrapping_add(u16::from(self.x)));
                 self.a &= v;
                 let r = self.a;
@@ -807,6 +904,7 @@ impl Spc700 {
             }
             0x55 => {
                 let base = self.fetch_u16(bus);
+                bus.idle();
                 let v = bus.read(base.wrapping_add(u16::from(self.x)));
                 self.a ^= v;
                 let r = self.a;
@@ -814,19 +912,22 @@ impl Spc700 {
             }
             0x95 => {
                 let base = self.fetch_u16(bus);
+                bus.idle();
                 let v = bus.read(base.wrapping_add(u16::from(self.x)));
                 let a = self.a;
                 self.a = self.adc_u8(a, v);
             }
             0xB5 => {
                 let base = self.fetch_u16(bus);
+                bus.idle();
                 let v = bus.read(base.wrapping_add(u16::from(self.x)));
                 let a = self.a;
                 self.a = self.sbc_u8(a, v);
             }
-            // OR/AND/EOR/ADC/SBC A,!abs+Y
+            // OR/AND/EOR/ADC/SBC A,!abs+Y — AbsoluteIndexedRead: fetch16; idle; read.
             0x16 => {
                 let base = self.fetch_u16(bus);
+                bus.idle();
                 let v = bus.read(base.wrapping_add(u16::from(self.y)));
                 self.a |= v;
                 let r = self.a;
@@ -834,6 +935,7 @@ impl Spc700 {
             }
             0x36 => {
                 let base = self.fetch_u16(bus);
+                bus.idle();
                 let v = bus.read(base.wrapping_add(u16::from(self.y)));
                 self.a &= v;
                 let r = self.a;
@@ -841,6 +943,7 @@ impl Spc700 {
             }
             0x56 => {
                 let base = self.fetch_u16(bus);
+                bus.idle();
                 let v = bus.read(base.wrapping_add(u16::from(self.y)));
                 self.a ^= v;
                 let r = self.a;
@@ -848,30 +951,36 @@ impl Spc700 {
             }
             0x96 => {
                 let base = self.fetch_u16(bus);
+                bus.idle();
                 let v = bus.read(base.wrapping_add(u16::from(self.y)));
                 let a = self.a;
                 self.a = self.adc_u8(a, v);
             }
             0xB6 => {
                 let base = self.fetch_u16(bus);
+                bus.idle();
                 let v = bus.read(base.wrapping_add(u16::from(self.y)));
                 let a = self.a;
                 self.a = self.sbc_u8(a, v);
             }
-            // OR/AND/EOR/ADC/SBC A,(X) — register-indirect
+            // OR/AND/EOR/ADC/SBC A,(X) — register-indirect.
+            // ares IndirectXRead: read(PC) dummy, then load(X).
             0x06 => {
+                self.dummy_read_pc(bus);
                 let v = bus.read(self.direct_addr(self.x));
                 self.a |= v;
                 let r = self.a;
                 self.set_nz(r);
             }
             0x26 => {
+                self.dummy_read_pc(bus);
                 let v = bus.read(self.direct_addr(self.x));
                 self.a &= v;
                 let r = self.a;
                 self.set_nz(r);
             }
             0x46 => {
+                self.dummy_read_pc(bus);
                 let v = bus.read(self.direct_addr(self.x));
                 self.a ^= v;
                 let r = self.a;
@@ -879,16 +988,19 @@ impl Spc700 {
             }
             0x66 => {
                 // CMP A,(X)
+                self.dummy_read_pc(bus);
                 let v = bus.read(self.direct_addr(self.x));
                 let a = self.a;
                 self.cmp_u8(a, v);
             }
             0x86 => {
+                self.dummy_read_pc(bus);
                 let v = bus.read(self.direct_addr(self.x));
                 let a = self.a;
                 self.a = self.adc_u8(a, v);
             }
             0xA6 => {
+                self.dummy_read_pc(bus);
                 let v = bus.read(self.direct_addr(self.x));
                 let a = self.a;
                 self.a = self.sbc_u8(a, v);
@@ -968,11 +1080,13 @@ impl Spc700 {
             // (dst), (src)" so the read happens at the *first* byte
             // and the write at the second.
             // ---------------------------------------------------------
+            // ALU (dp),(dp) — ares DirectDirectModify:
+            // fetch src; load(src); fetch tgt; load(tgt); store(tgt).
             0x09 => {
                 // OR (dp),(dp)
                 let src = self.fetch_u8(bus);
-                let dst = self.fetch_u8(bus);
                 let s = bus.read(self.direct_addr(src));
+                let dst = self.fetch_u8(bus);
                 let d_addr = self.direct_addr(dst);
                 let v = bus.read(d_addr) | s;
                 bus.write(d_addr, v);
@@ -981,8 +1095,8 @@ impl Spc700 {
             0x29 => {
                 // AND (dp),(dp)
                 let src = self.fetch_u8(bus);
-                let dst = self.fetch_u8(bus);
                 let s = bus.read(self.direct_addr(src));
+                let dst = self.fetch_u8(bus);
                 let d_addr = self.direct_addr(dst);
                 let v = bus.read(d_addr) & s;
                 bus.write(d_addr, v);
@@ -991,26 +1105,28 @@ impl Spc700 {
             0x49 => {
                 // EOR (dp),(dp)
                 let src = self.fetch_u8(bus);
-                let dst = self.fetch_u8(bus);
                 let s = bus.read(self.direct_addr(src));
+                let dst = self.fetch_u8(bus);
                 let d_addr = self.direct_addr(dst);
                 let v = bus.read(d_addr) ^ s;
                 bus.write(d_addr, v);
                 self.set_nz(v);
             }
             0x69 => {
-                // CMP (dp),(dp)
+                // CMP (dp),(dp) — ares DirectDirectCompare:
+                // fetch src; load(src); fetch tgt; load(tgt); idle.
                 let src = self.fetch_u8(bus);
-                let dst = self.fetch_u8(bus);
                 let s = bus.read(self.direct_addr(src));
+                let dst = self.fetch_u8(bus);
                 let d = bus.read(self.direct_addr(dst));
                 self.cmp_u8(d, s);
+                bus.idle();
             }
             0x89 => {
                 // ADC (dp),(dp)
                 let src = self.fetch_u8(bus);
-                let dst = self.fetch_u8(bus);
                 let s = bus.read(self.direct_addr(src));
+                let dst = self.fetch_u8(bus);
                 let d_addr = self.direct_addr(dst);
                 let d = bus.read(d_addr);
                 let v = self.adc_u8(d, s);
@@ -1019,8 +1135,8 @@ impl Spc700 {
             0xA9 => {
                 // SBC (dp),(dp)
                 let src = self.fetch_u8(bus);
-                let dst = self.fetch_u8(bus);
                 let s = bus.read(self.direct_addr(src));
+                let dst = self.fetch_u8(bus);
                 let d_addr = self.direct_addr(dst);
                 let d = bus.read(d_addr);
                 let v = self.sbc_u8(d, s);
@@ -1058,21 +1174,30 @@ impl Spc700 {
             // CBNE — compare A to dp, branch if not equal.
             // ---------------------------------------------------------
             0x2E => {
-                // CBNE dp,rel
+                // CBNE dp,rel — ares BranchNotDirect: fetch addr; load;
+                // idle; fetch disp; [idle; idle] when taken.
                 let dp = self.fetch_u8(bus);
                 let v = bus.read(self.direct_addr(dp));
+                bus.idle();
                 let rel = self.fetch_u8(bus) as i8;
                 if self.a != v {
+                    bus.idle();
+                    bus.idle();
                     self.pc = self.pc.wrapping_add_signed(i16::from(rel));
                     self.branch_taken = true;
                 }
             }
             0xDE => {
-                // CBNE dp+X,rel
+                // CBNE dp+X,rel — ares BranchNotDirectIndexed: fetch addr;
+                // idle; load(addr+X); idle; fetch disp; [idle; idle] taken.
                 let dp = self.fetch_u8(bus);
+                bus.idle();
                 let v = bus.read(self.direct_addr(dp.wrapping_add(self.x)));
+                bus.idle();
                 let rel = self.fetch_u8(bus) as i8;
                 if self.a != v {
+                    bus.idle();
+                    bus.idle();
                     self.pc = self.pc.wrapping_add_signed(i16::from(rel));
                     self.branch_taken = true;
                 }
@@ -1082,10 +1207,13 @@ impl Spc700 {
             // PCALL — page call to $FF00 + imm
             // ---------------------------------------------------------
             0x4F => {
+                // PCALL — ares CallPage: fetch; idle; push hi; push lo; idle.
                 let target_lo = self.fetch_u8(bus);
+                bus.idle();
                 let return_pc = self.pc;
                 self.push_u8(bus, (return_pc >> 8) as u8);
                 self.push_u8(bus, return_pc as u8);
+                bus.idle();
                 self.pc = 0xFF00 | u16::from(target_lo);
             }
 
@@ -1094,6 +1222,11 @@ impl Spc700 {
             // ---------------------------------------------------------
             0xCF => {
                 // MUL YA — 16-bit unsigned multiply: YA = Y * A.
+                // ares: read(PC) + 7 idle cycles.
+                self.dummy_read_pc(bus);
+                for _ in 0..7 {
+                    bus.idle();
+                }
                 let product = u16::from(self.y) * u16::from(self.a);
                 self.a = product as u8;
                 self.y = (product >> 8) as u8;
@@ -1110,6 +1243,11 @@ impl Spc700 {
                 // which also covers X == 0 with no division by zero (the
                 // branch divides by 256-X, never X). Mesen2's 9-bit loop
                 // agrees on every flag and value.
+                // ares: read(PC) + 10 idle cycles.
+                self.dummy_read_pc(bus);
+                for _ in 0..10 {
+                    bus.idle();
+                }
                 let ya = u16::from(self.a) | (u16::from(self.y) << 8);
                 let x = u16::from(self.x);
                 let y = u16::from(self.y);
@@ -1160,25 +1298,33 @@ impl Spc700 {
             // Format: opcode, dp, rel.
             // ---------------------------------------------------------
             0x03 | 0x23 | 0x43 | 0x63 | 0x83 | 0xA3 | 0xC3 | 0xE3 => {
-                // BBS dp.bit, rel
+                // BBS dp.bit, rel — ares BranchBit: fetch addr; load; idle;
+                // fetch disp; [idle; idle] when taken.
                 let bit = (opcode >> 5) & 0x07;
                 let dp = self.fetch_u8(bus);
                 let addr = self.direct_addr(dp);
                 let v = bus.read(addr);
+                bus.idle();
                 let rel = self.fetch_u8(bus) as i8;
                 if v & (1 << bit) != 0 {
+                    bus.idle();
+                    bus.idle();
                     self.pc = self.pc.wrapping_add_signed(i16::from(rel));
                     self.branch_taken = true;
                 }
             }
             0x13 | 0x33 | 0x53 | 0x73 | 0x93 | 0xB3 | 0xD3 | 0xF3 => {
-                // BBC dp.bit, rel
+                // BBC dp.bit, rel — ares BranchBit: fetch addr; load; idle;
+                // fetch disp; [idle; idle] when taken.
                 let bit = (opcode >> 5) & 0x07;
                 let dp = self.fetch_u8(bus);
                 let addr = self.direct_addr(dp);
                 let v = bus.read(addr);
+                bus.idle();
                 let rel = self.fetch_u8(bus) as i8;
                 if v & (1 << bit) == 0 {
+                    bus.idle();
+                    bus.idle();
                     self.pc = self.pc.wrapping_add_signed(i16::from(rel));
                     self.branch_taken = true;
                 }
@@ -1188,28 +1334,36 @@ impl Spc700 {
             // Indexed-absolute MOV (table store / load patterns)
             // ---------------------------------------------------------
             0xD5 => {
-                // MOV !abs+X,A
+                // MOV !abs+X,A — ares AbsoluteIndexedWrite: fetch16; idle;
+                // read(addr+X); write(addr+X).
                 let base = self.fetch_u16(bus);
+                bus.idle();
                 let addr = base.wrapping_add(u16::from(self.x));
+                bus.read(addr);
                 bus.write(addr, self.a);
             }
             0xD6 => {
-                // MOV !abs+Y,A
+                // MOV !abs+Y,A — ares AbsoluteIndexedWrite: fetch16; idle;
+                // read(addr+Y); write(addr+Y).
                 let base = self.fetch_u16(bus);
+                bus.idle();
                 let addr = base.wrapping_add(u16::from(self.y));
+                bus.read(addr);
                 bus.write(addr, self.a);
             }
             0xF5 => {
-                // MOV A,!abs+X
+                // MOV A,!abs+X — AbsoluteIndexedRead: fetch16; idle; read.
                 let base = self.fetch_u16(bus);
+                bus.idle();
                 let addr = base.wrapping_add(u16::from(self.x));
                 let v = bus.read(addr);
                 self.a = v;
                 self.set_nz(v);
             }
             0xF6 => {
-                // MOV A,!abs+Y
+                // MOV A,!abs+Y — AbsoluteIndexedRead: fetch16; idle; read.
                 let base = self.fetch_u16(bus);
+                bus.idle();
                 let addr = base.wrapping_add(u16::from(self.y));
                 let v = bus.read(addr);
                 self.a = v;
@@ -1220,49 +1374,64 @@ impl Spc700 {
                 self.x = self.x.wrapping_add(1);
                 let v = self.x;
                 self.set_nz(v);
+                self.dummy_read_pc(bus);
             }
             0xDC => {
                 // DEC Y
                 self.y = self.y.wrapping_sub(1);
                 let v = self.y;
                 self.set_nz(v);
+                self.dummy_read_pc(bus);
             }
             0xBC => {
                 // INC A
                 self.a = self.a.wrapping_add(1);
                 let v = self.a;
                 self.set_nz(v);
+                self.dummy_read_pc(bus);
             }
             0x9C => {
                 // DEC A
                 self.a = self.a.wrapping_sub(1);
                 let v = self.a;
                 self.set_nz(v);
+                self.dummy_read_pc(bus);
             }
             0x9F => {
-                // XCN A — exchange nibbles of A.
+                // XCN A — exchange nibbles of A. read(PC) + 3 idles (ares).
+                self.dummy_read_pc(bus);
+                bus.idle();
+                bus.idle();
+                bus.idle();
                 self.a = self.a.rotate_left(4);
                 let v = self.a;
                 self.set_nz(v);
             }
             0x6E => {
-                // DBNZ dp,rel — decrement direct-page byte, branch if
-                // result != 0. Very common in driver tight loops.
+                // DBNZ dp,rel — ares BranchNotDirectDecrement: fetch addr;
+                // load; store; fetch disp; [idle; idle] when taken.
                 let dp = self.fetch_u8(bus);
                 let addr = self.direct_addr(dp);
                 let v = bus.read(addr).wrapping_sub(1);
                 bus.write(addr, v);
                 let rel = self.fetch_u8(bus) as i8;
                 if v != 0 {
+                    bus.idle();
+                    bus.idle();
                     self.pc = self.pc.wrapping_add_signed(i16::from(rel));
                     self.branch_taken = true;
                 }
             }
             0xFE => {
-                // DBNZ Y,rel — decrement Y, branch if Y != 0.
+                // DBNZ Y,rel — ares BranchNotYDecrement: read(PC); idle;
+                // fetch disp; [idle; idle] when taken.
+                self.dummy_read_pc(bus);
+                bus.idle();
                 self.y = self.y.wrapping_sub(1);
                 let rel = self.fetch_u8(bus) as i8;
                 if self.y != 0 {
+                    bus.idle();
+                    bus.idle();
                     self.pc = self.pc.wrapping_add_signed(i16::from(rel));
                     self.branch_taken = true;
                 }
@@ -1273,20 +1442,28 @@ impl Spc700 {
             // ---------------------------------------------------------
             0xAF => {
                 // MOV (X)+,A — store A at direct page X, then X++.
+                // ares IndirectXIncrementWrite: read(PC); idle; store(X).
+                self.dummy_read_pc(bus);
+                bus.idle();
                 let addr = self.direct_addr(self.x);
                 bus.write(addr, self.a);
                 self.x = self.x.wrapping_add(1);
             }
             0xBF => {
                 // MOV A,(X)+ — A ← *(direct[X]), then X++.
+                // ares IndirectXIncrementRead: read(PC); load(X); idle.
+                self.dummy_read_pc(bus);
                 let addr = self.direct_addr(self.x);
                 let v = bus.read(addr);
+                bus.idle();
                 self.a = v;
                 self.x = self.x.wrapping_add(1);
                 self.set_nz(v);
             }
             0xE6 => {
                 // MOV A,(X) — A ← *(direct[X]).
+                // ares IndirectXRead: read(PC) dummy; load(X).
+                self.dummy_read_pc(bus);
                 let addr = self.direct_addr(self.x);
                 let v = bus.read(addr);
                 self.a = v;
@@ -1297,18 +1474,21 @@ impl Spc700 {
                 self.x = self.sp;
                 let v = self.x;
                 self.set_nz(v);
+                self.dummy_read_pc(bus);
             }
             0xFD => {
                 // MOV Y,A
                 self.y = self.a;
                 let v = self.y;
                 self.set_nz(v);
+                self.dummy_read_pc(bus);
             }
             0x7D => {
                 // MOV A,X
                 self.a = self.x;
                 let v = self.a;
                 self.set_nz(v);
+                self.dummy_read_pc(bus);
             }
 
             // ---------------------------------------------------------
@@ -1404,39 +1584,55 @@ impl Spc700 {
             // Stack: PUSH / POP
             // ---------------------------------------------------------
             0x2D => {
-                // PUSH A
+                // PUSH A — ares Push: read(PC); push; idle.
+                self.dummy_read_pc(bus);
                 let a = self.a;
                 self.push_u8(bus, a);
+                bus.idle();
             }
             0x4D => {
-                // PUSH X
+                // PUSH X — ares Push: read(PC); push; idle.
+                self.dummy_read_pc(bus);
                 let x = self.x;
                 self.push_u8(bus, x);
+                bus.idle();
             }
             0x6D => {
-                // PUSH Y
+                // PUSH Y — ares Push: read(PC); push; idle.
+                self.dummy_read_pc(bus);
                 let y = self.y;
                 self.push_u8(bus, y);
+                bus.idle();
             }
             0x0D => {
-                // PUSH PSW
+                // PUSH PSW — ares Push: read(PC); push; idle.
+                self.dummy_read_pc(bus);
                 let p = self.psw.0;
                 self.push_u8(bus, p);
+                bus.idle();
             }
             0xAE => {
-                // POP A
+                // POP A — ares Pull: read(PC); idle; pull.
+                self.dummy_read_pc(bus);
+                bus.idle();
                 self.a = self.pop_u8(bus);
             }
             0xCE => {
-                // POP X
+                // POP X — ares Pull: read(PC); idle; pull.
+                self.dummy_read_pc(bus);
+                bus.idle();
                 self.x = self.pop_u8(bus);
             }
             0xEE => {
-                // POP Y
+                // POP Y — ares Pull: read(PC); idle; pull.
+                self.dummy_read_pc(bus);
+                bus.idle();
                 self.y = self.pop_u8(bus);
             }
             0x8E => {
-                // POP PSW
+                // POP PSW — ares PullP: read(PC); idle; pull.
+                self.dummy_read_pc(bus);
+                bus.idle();
                 self.psw.0 = self.pop_u8(bus);
             }
 
@@ -1444,15 +1640,21 @@ impl Spc700 {
             // Calls / jumps
             // ---------------------------------------------------------
             0x3F => {
-                // CALL !abs — push PC (return addr) then jump.
+                // CALL !abs — ares CallAbsolute: fetch16; idle; push hi;
+                // push lo; idle; idle.
                 let target = self.fetch_u16(bus);
+                bus.idle();
                 let return_pc = self.pc;
                 self.push_u8(bus, (return_pc >> 8) as u8);
                 self.push_u8(bus, return_pc as u8);
+                bus.idle();
+                bus.idle();
                 self.pc = target;
             }
             0x6F => {
-                // RET — pop low / high return PC.
+                // RET — ares ReturnSubroutine: read(PC); idle; pull lo; pull hi.
+                self.dummy_read_pc(bus);
+                bus.idle();
                 let lo = self.pop_u8(bus);
                 let hi = self.pop_u8(bus);
                 self.pc = u16::from(lo) | (u16::from(hi) << 8);
@@ -1484,11 +1686,16 @@ impl Spc700 {
             // ---------------------------------------------------------
             0x01 | 0x11 | 0x21 | 0x31 | 0x41 | 0x51 | 0x61 | 0x71 | 0x81 | 0x91 | 0xA1 | 0xB1
             | 0xC1 | 0xD1 | 0xE1 | 0xF1 => {
+                // ares CallTable: read(PC); idle; push hi; push lo; idle;
+                // read vec lo; read vec hi.
                 let n = (opcode >> 4) & 0x0F;
                 let vec_addr = 0xFFDE_u16.wrapping_sub(u16::from(n) * 2);
+                self.dummy_read_pc(bus);
+                bus.idle();
                 let return_pc = self.pc;
                 self.push_u8(bus, (return_pc >> 8) as u8);
                 self.push_u8(bus, return_pc as u8);
+                bus.idle();
                 let lo = bus.read(vec_addr);
                 let hi = bus.read(vec_addr.wrapping_add(1));
                 self.pc = u16::from(lo) | (u16::from(hi) << 8);
@@ -1501,53 +1708,69 @@ impl Spc700 {
             // except for CMP which only updates flags. Each opcode is
             // a single byte (no operands).
             // ---------------------------------------------------------
+            // ALU (X),(Y) — ares IndirectXWriteIndirectY:
+            // read(PC); load(Y); load(X); store(X).
             0x19 => {
                 // OR (X),(Y)
-                let dx = self.direct_addr(self.x);
+                self.dummy_read_pc(bus);
                 let dy = self.direct_addr(self.y);
-                let v = bus.read(dx) | bus.read(dy);
+                let dx = self.direct_addr(self.x);
+                let rhs = bus.read(dy);
+                let lhs = bus.read(dx);
+                let v = lhs | rhs;
                 bus.write(dx, v);
                 self.set_nz(v);
             }
             0x39 => {
                 // AND (X),(Y)
-                let dx = self.direct_addr(self.x);
+                self.dummy_read_pc(bus);
                 let dy = self.direct_addr(self.y);
-                let v = bus.read(dx) & bus.read(dy);
+                let dx = self.direct_addr(self.x);
+                let rhs = bus.read(dy);
+                let lhs = bus.read(dx);
+                let v = lhs & rhs;
                 bus.write(dx, v);
                 self.set_nz(v);
             }
             0x59 => {
                 // EOR (X),(Y)
-                let dx = self.direct_addr(self.x);
+                self.dummy_read_pc(bus);
                 let dy = self.direct_addr(self.y);
-                let v = bus.read(dx) ^ bus.read(dy);
+                let dx = self.direct_addr(self.x);
+                let rhs = bus.read(dy);
+                let lhs = bus.read(dx);
+                let v = lhs ^ rhs;
                 bus.write(dx, v);
                 self.set_nz(v);
             }
             0x79 => {
-                // CMP (X),(Y)
-                let dx = self.direct_addr(self.x);
+                // CMP (X),(Y) — ares IndirectXCompareIndirectY:
+                // read(PC); load(Y); load(X); idle.
+                self.dummy_read_pc(bus);
                 let dy = self.direct_addr(self.y);
-                let lhs = bus.read(dx);
+                let dx = self.direct_addr(self.x);
                 let rhs = bus.read(dy);
+                let lhs = bus.read(dx);
                 self.cmp_u8(lhs, rhs);
+                bus.idle();
             }
             0x99 => {
                 // ADC (X),(Y)
-                let dx = self.direct_addr(self.x);
+                self.dummy_read_pc(bus);
                 let dy = self.direct_addr(self.y);
-                let lhs = bus.read(dx);
+                let dx = self.direct_addr(self.x);
                 let rhs = bus.read(dy);
+                let lhs = bus.read(dx);
                 let r = self.adc_u8(lhs, rhs);
                 bus.write(dx, r);
             }
             0xB9 => {
                 // SBC (X),(Y)
-                let dx = self.direct_addr(self.x);
+                self.dummy_read_pc(bus);
                 let dy = self.direct_addr(self.y);
-                let lhs = bus.read(dx);
+                let dx = self.direct_addr(self.x);
                 let rhs = bus.read(dy);
+                let lhs = bus.read(dx);
                 let r = self.sbc_u8(lhs, rhs);
                 bus.write(dx, r);
             }
@@ -1583,9 +1806,11 @@ impl Spc700 {
             // real SPC700. Needed by Chrono Trigger / Super Bomberman.
             // ---------------------------------------------------------
             0xFA => {
+                // MOV dp,dp — ares DirectDirectWrite: fetch src; load(src);
+                // fetch tgt; store(tgt).
                 let src = self.fetch_u8(bus);
-                let dst = self.fetch_u8(bus);
                 let v = bus.read(self.direct_addr(src));
+                let dst = self.fetch_u8(bus);
                 bus.write(self.direct_addr(dst), v);
             }
 
@@ -1595,16 +1820,18 @@ impl Spc700 {
             // 3 bits = bit index. See [`Self::fetch_mem_bit`].
             // ---------------------------------------------------------
             0x0A => {
-                // OR1 C, m.b
+                // OR1 C, m.b — ares mode 0: read then idle.
                 let (addr, b) = self.fetch_mem_bit(bus);
                 let bit_set = (bus.read(addr) >> b) & 1 != 0;
+                bus.idle();
                 let c = self.psw.contains(bit::C);
                 self.psw.set(bit::C, c | bit_set);
             }
             0x2A => {
-                // OR1 C, /m.b (inverted source bit)
+                // OR1 C, /m.b (inverted source bit) — ares mode 1: read then idle.
                 let (addr, b) = self.fetch_mem_bit(bus);
                 let bit_set = (bus.read(addr) >> b) & 1 != 0;
+                bus.idle();
                 let c = self.psw.contains(bit::C);
                 self.psw.set(bit::C, c || !bit_set);
             }
@@ -1623,9 +1850,10 @@ impl Spc700 {
                 self.psw.set(bit::C, c && !bit_set);
             }
             0x8A => {
-                // EOR1 C, m.b
+                // EOR1 C, m.b — ares mode 4: read then idle.
                 let (addr, b) = self.fetch_mem_bit(bus);
                 let bit_set = (bus.read(addr) >> b) & 1 != 0;
+                bus.idle();
                 let c = self.psw.contains(bit::C);
                 self.psw.set(bit::C, c ^ bit_set);
             }
@@ -1636,9 +1864,10 @@ impl Spc700 {
                 self.psw.set(bit::C, bit_set);
             }
             0xCA => {
-                // MOV1 m.b, C — store C into bit.
+                // MOV1 m.b, C — store C into bit. ares mode 6: read; idle; write.
                 let (addr, b) = self.fetch_mem_bit(bus);
                 let mem = bus.read(addr);
+                bus.idle();
                 let mask = 1u8 << b;
                 let v = if self.psw.contains(bit::C) {
                     mem | mask
@@ -1665,9 +1894,10 @@ impl Spc700 {
                 let addr = self.fetch_u16(bus);
                 let mem = bus.read(addr);
                 // N/Z come from the subtraction A - mem, but C is NOT
-                // updated by TSET1.
+                // updated by TSET1. ares re-reads addr before the write.
                 let diff = self.a.wrapping_sub(mem);
                 self.set_nz(diff);
+                bus.read(addr);
                 bus.write(addr, mem | self.a);
             }
             0x4E => {
@@ -1676,6 +1906,7 @@ impl Spc700 {
                 let mem = bus.read(addr);
                 let diff = self.a.wrapping_sub(mem);
                 self.set_nz(diff);
+                bus.read(addr);
                 bus.write(addr, mem & !self.a);
             }
 
@@ -1685,6 +1916,8 @@ impl Spc700 {
             // ---------------------------------------------------------
             0xDF => {
                 // DAA — decimal adjust accumulator after addition.
+                self.dummy_read_pc(bus);
+                bus.idle();
                 if self.psw.contains(bit::C) || self.a > 0x99 {
                     self.a = self.a.wrapping_add(0x60);
                     self.psw.insert(bit::C);
@@ -1697,6 +1930,8 @@ impl Spc700 {
             }
             0xBE => {
                 // DAS — decimal adjust accumulator after subtraction.
+                self.dummy_read_pc(bus);
+                bus.idle();
                 if !self.psw.contains(bit::C) || self.a > 0x99 {
                     self.a = self.a.wrapping_sub(0x60);
                     self.psw.remove(bit::C);
@@ -1714,20 +1949,26 @@ impl Spc700 {
             // through the vector at `$FFDE`. RETI pops PSW then PC.
             // ---------------------------------------------------------
             0x0F => {
-                // BRK
+                // BRK — ares Break: read(PC); push hi; push lo; push P;
+                // idle; read vec lo; read vec hi.
+                self.dummy_read_pc(bus);
                 let return_pc = self.pc;
                 self.push_u8(bus, (return_pc >> 8) as u8);
                 self.push_u8(bus, return_pc as u8);
                 let p = self.psw.0;
                 self.push_u8(bus, p);
-                self.psw.insert(bit::B);
-                self.psw.remove(bit::I);
+                bus.idle();
                 let lo = bus.read(0xFFDE);
                 let hi = bus.read(0xFFDF);
                 self.pc = u16::from(lo) | (u16::from(hi) << 8);
+                self.psw.insert(bit::B);
+                self.psw.remove(bit::I);
             }
             0x7F => {
-                // RETI
+                // RETI — ares ReturnInterrupt: read(PC); idle; pull P;
+                // pull lo; pull hi.
+                self.dummy_read_pc(bus);
+                bus.idle();
                 self.psw.0 = self.pop_u8(bus);
                 let lo = self.pop_u8(bus);
                 let hi = self.pop_u8(bus);
@@ -1739,6 +1980,9 @@ impl Spc700 {
     fn branch_if<B: SpcBus>(&mut self, bus: &mut B, condition: bool) {
         let offset = self.fetch_u8(bus) as i8;
         if condition {
+            // ares instructionBranch: two idle cycles when taken (RR..).
+            bus.idle();
+            bus.idle();
             self.pc = self.pc.wrapping_add_signed(i16::from(offset));
             self.branch_taken = true;
         }
@@ -1796,6 +2040,7 @@ impl Spc700 {
     /// direct page, and read the byte the pointer points to.
     fn read_indirect_x<B: SpcBus>(&mut self, bus: &mut B) -> u8 {
         let dp = self.fetch_u8(bus);
+        bus.idle();
         let dpx = dp.wrapping_add(self.x);
         let lo = bus.read(self.direct_addr(dpx));
         let hi = bus.read(self.direct_addr(dpx.wrapping_add(1)));
@@ -1820,6 +2065,7 @@ impl Spc700 {
     /// read the byte at `pointer + Y`.
     fn read_indirect_y<B: SpcBus>(&mut self, bus: &mut B) -> u8 {
         let dp = self.fetch_u8(bus);
+        bus.idle();
         let lo = bus.read(self.direct_addr(dp));
         let hi = bus.read(self.direct_addr(dp.wrapping_add(1)));
         let ptr = u16::from(lo) | (u16::from(hi) << 8);
