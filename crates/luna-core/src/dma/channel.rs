@@ -248,6 +248,14 @@ pub struct DmaChannel {
     /// HDMA: whether **this** scanline fires a transfer. Reload-on-
     /// entry always sets this; in between it's the repeat flag's value.
     pub hdma_do_transfer: bool,
+    /// HDMA: whether this channel has had its frame-start setup
+    /// (`hdma_start_frame`) run since the last frame-start init. Cleared
+    /// every frame in `hdma_init`. A channel whose HDMAEN bit is set
+    /// **mid-frame** (e.g. Yoshi's Island enables the text-band split at
+    /// scanline ~12) is set up lazily on its first active line so it
+    /// starts cleanly from its source address — matching ares' live
+    /// `hdmaActive()` gating rather than a V=0-only latch.
+    pub hdma_started: bool,
 }
 
 impl Default for DmaParams {
