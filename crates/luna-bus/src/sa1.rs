@@ -49,13 +49,20 @@ const IRAM_SIZE: usize = 0x800;
 const MMIO_SIZE: usize = 0x200;
 
 /// SA-1 cartridge mapper (Mode 23).
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Sa1Mapper {
+    /// Cartridge ROM image — NOT part of the save-state (restored from the
+    /// live cart). `serde(skip)` defaults it to an empty `Vec` on decode;
+    /// [`Sa1Mapper::load_state`] re-attaches the live ROM afterwards.
+    #[serde(skip)]
     rom: Vec<u8>,
     bwram: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     iram: [u8; IRAM_SIZE],
     /// Memory-backed I/O register file at `$2200-$23FF`. Specific
     /// registers (banking + multiplier) have first-class semantics
     /// below; everything else lands here as a generic write/read.
+    #[serde(with = "serde_bytes")]
     mmio: [u8; MMIO_SIZE],
     /// $2220 CXB super-bank selector for `$00-$1F` / `$80-$9F`.
     cxb: u8,
@@ -194,6 +201,7 @@ pub struct Sa1Mapper {
     /// Source pixel bytes accumulated for the current in-flight tile.
     /// Filled `bpp` bytes per row; on the last row the staged 8×bpp
     /// bytes are planarized and emitted to DDA.
+    #[serde(with = "serde_bytes")]
     cc2_buf: [u8; 64],
     /// Number of bytes staged into `cc2_buf` for the current tile.
     cc2_byte_idx: usize,
@@ -1053,6 +1061,19 @@ impl Mapper for Sa1Mapper {
 
     fn sram_size(&self) -> usize {
         self.bwram.len()
+    }
+
+    fn save_state(&self) -> Vec<u8> {
+        bincode::serialize(self).unwrap_or_default()
+    }
+
+    fn load_state(&mut self, data: &[u8]) {
+        if let Ok(mut tmp) = bincode::deserialize::<Self>(data) {
+            // Keep the live ROM (it is `serde(skip)`-defaulted to empty in
+            // `tmp`); swap in every other field by replacing `self` wholesale.
+            tmp.rom = std::mem::take(&mut self.rom);
+            *self = tmp;
+        }
     }
 }
 

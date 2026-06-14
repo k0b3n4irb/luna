@@ -8,6 +8,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+mod bench;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "luna",
@@ -101,6 +103,10 @@ enum Command {
         /// luna's CPU-prepared GSU inputs against a reference.
         #[arg(long = "dump-coproc-ram")]
         dump_coproc_ram: Option<PathBuf>,
+        /// Dump all 64 KB of APU audio RAM (ARAM) raw bytes to this file.
+        /// For diagnosing the SPC700 sound driver / CPU↔SPC handshake.
+        #[arg(long = "dump-aram")]
+        dump_aram: Option<PathBuf>,
         /// Where to write the JSON state. Use `-` for stdout.
         #[arg(long, default_value = "-")]
         out: PathBuf,
@@ -296,6 +302,25 @@ enum Command {
         #[arg(long)]
         input: Option<String>,
     },
+    /// Run every ROM in a directory headless, detect anomalies (crashes,
+    /// freezes, dead APU, missing firmware), and write a compatibility
+    /// report + one markdown bug file per finding. Stresses the CLI/API
+    /// across the whole corpus. Reports stay local (under `--out`).
+    Bench {
+        /// Directory of ROMs to scan (`.sfc` / `.smc`).
+        #[arg(default_value = "tests/roms")]
+        dir: PathBuf,
+        /// Output directory for the report, screenshots, and bug files.
+        #[arg(long, default_value = "tests/roms/bench")]
+        out: PathBuf,
+        /// Frames to run per ROM.
+        #[arg(short = 'f', long, default_value_t = 600)]
+        frames: u64,
+        /// Override the default Start-pulse input (`frame:hex`, like
+        /// `state --input`) applied to clear title screens.
+        #[arg(long)]
+        input: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -346,12 +371,14 @@ fn main() -> ExitCode {
             dma_trace_from,
             dma_trace_max,
             dump_coproc_ram,
+            dump_aram,
         } => run_state(
             &rom,
             steps,
             force_mapper.as_deref(),
             dump_vram.as_deref(),
             dump_coproc_ram.as_deref(),
+            dump_aram.as_deref(),
             &out,
             screenshot.as_deref(),
             audio_out.as_deref(),
@@ -412,6 +439,22 @@ fn main() -> ExitCode {
             force_mapper.as_deref(),
             input.as_deref(),
         ),
+        Command::Bench {
+            dir,
+            out,
+            frames,
+            input,
+        } => {
+            let checkpoints = match input.as_deref().map(parse_input_script) {
+                Some(Ok(c)) => Some(c),
+                Some(Err(e)) => {
+                    eprintln!("error: --input: {e}");
+                    return ExitCode::from(2);
+                }
+                None => None,
+            };
+            bench::run_bench(&dir, &out, frames, checkpoints)
+        }
     }
 }
 
@@ -978,6 +1021,7 @@ fn run_state(
     force_mapper: Option<&str>,
     dump_vram_path: Option<&std::path::Path>,
     dump_coproc_ram_path: Option<&std::path::Path>,
+    dump_aram_path: Option<&std::path::Path>,
     out: &std::path::Path,
     screenshot: Option<&std::path::Path>,
     audio_out: Option<&std::path::Path>,
@@ -1281,6 +1325,15 @@ fn run_state(
             },
             Ok(None) => eprintln!("note: cart has no coprocessor work RAM"),
             Err(e) => eprintln!("error: coproc_ram: {e}"),
+        }
+    }
+    if let Some(path) = dump_aram_path {
+        match em.aram_bytes() {
+            Ok(bytes) => match std::fs::write(path, &bytes) {
+                Ok(()) => eprintln!("ARAM ({} bytes) written to {}", bytes.len(), path.display()),
+                Err(e) => eprintln!("error: writing ARAM dump: {e}"),
+            },
+            Err(e) => eprintln!("error: aram_bytes: {e}"),
         }
     }
     if let Some(path) = cpu_trace_path {
@@ -1672,20 +1725,6 @@ fn print_diag_state(em: &mut luna_api::Emulator) {
         flg >> 5 & 1,
         if edl == 0 { 1 } else { (edl as u16) * 512 }
     );
-    if let Some(op) = &st.apu.unimplemented_opcode {
-        // Dump 4 bytes around the offending PC so we can see the
-        // operand pattern and recognise the addressing mode.
-        let aram = em.peek_aram(op.pc, 4).unwrap_or_default();
-        println!(
-            "APU:  STOPPED on unimplemented opcode ${:02X} at SPC PC=${:04X}  (bytes: {:02X} {:02X} {:02X} {:02X})",
-            op.opcode,
-            op.pc,
-            aram.first().copied().unwrap_or(0),
-            aram.get(1).copied().unwrap_or(0),
-            aram.get(2).copied().unwrap_or(0),
-            aram.get(3).copied().unwrap_or(0),
-        );
-    }
     // OAM occupancy + first few sprite entries.
     let oam = &p.oam_full;
     println!(

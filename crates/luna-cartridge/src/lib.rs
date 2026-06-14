@@ -38,7 +38,7 @@ pub enum CartError {
 // =============================================================================
 
 /// Cartridge region / video standard derived from the country byte.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Region {
     /// NTSC (Japan / North America).
     Ntsc,
@@ -80,6 +80,12 @@ pub struct Header {
     pub rom_size_kb: u32,
     /// SRAM size in kilobytes (0 = no SRAM).
     pub sram_size_kb: u32,
+    /// Expansion (coprocessor work) RAM size in kilobytes, from the
+    /// extended-header `$FFBD` byte (`1024 << n`). `0` if the byte is not a
+    /// valid `1..=7` exponent. This is the Super FX Game Pak work RAM size —
+    /// distinct from `sram_size_kb` (battery save RAM, `$FFD8`). See Mesen2
+    /// `BaseCartridge.cpp` (`ExpansionRamSize`).
+    pub expansion_ram_kb: u32,
     /// Region / video standard.
     pub region: Region,
     /// Maker code (old-style single byte).
@@ -308,6 +314,16 @@ fn parse_at(rom: &[u8], off: usize) -> Header {
     } else {
         1u32 << u32::from(sram_byte).min(7)
     };
+    // Expansion (coprocessor) RAM size: extended-header byte $FFBD, three
+    // bytes before the standard header (`off - 3`). Only a `1..=7` exponent
+    // is a valid size (`1024 << n`); anything else (incl. the 0xFF that
+    // non-extended-header carts like Star Fox carry there) reads as "absent".
+    let expansion_ram_kb = off
+        .checked_sub(3)
+        .and_then(|i| rom.get(i))
+        .copied()
+        .filter(|&b| (1..=7).contains(&b))
+        .map_or(0, |b| 1u32 << b);
 
     Header {
         title,
@@ -316,6 +332,7 @@ fn parse_at(rom: &[u8], off: usize) -> Header {
         fast_rom,
         rom_size_kb,
         sram_size_kb,
+        expansion_ram_kb,
         region: Region::from_country(rom[off + 0x19]),
         maker: rom[off + 0x1A],
         version: rom[off + 0x1B],
@@ -393,6 +410,28 @@ mod tests {
         assert_eq!(cart.header.sram_size_kb, 8); // 1 << 3
         assert_eq!(cart.header.region, Region::Ntsc);
         assert!(cart.header.checksum_valid());
+    }
+
+    #[test]
+    fn expansion_ram_byte_sizes_superfx_work_ram() {
+        // Extended-header $FFBD (off-3) = exponent n → 1024<<n KB. Yoshi's
+        // Island carries 5 (= 32 KB); Doom/Stunt Race carry 6 (= 64 KB).
+        let mut rom = synth_lorom("EXP RAM", 0);
+        rom[HEADER_OFFSET_LOROM - 3] = 5;
+        assert_eq!(
+            Cartridge::from_bytes(rom).unwrap().header.expansion_ram_kb,
+            32
+        );
+
+        // An out-of-range byte (e.g. the 0xFF a non-extended-header cart
+        // like Star Fox carries there) reads as "absent" → 0; the Super FX
+        // builder then defaults GSU work RAM to 64 KB.
+        let mut rom = synth_lorom("NO EXP", 0);
+        rom[HEADER_OFFSET_LOROM - 3] = 0xFF;
+        assert_eq!(
+            Cartridge::from_bytes(rom).unwrap().header.expansion_ram_kb,
+            0
+        );
     }
 
     #[test]
