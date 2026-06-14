@@ -452,12 +452,17 @@ impl DmaChannel {
                 transferred += 1;
             }
         }
-        // Decrement the 7-bit line count. The repeat bit (bit 7) is
-        // preserved so we can read it back next line for `do_transfer`.
-        let count = (self.ntlr & 0x7F).saturating_sub(1);
-        let repeat = self.ntlr & 0x80;
-        self.ntlr = repeat | count;
-        if count == 0 {
+        // Decrement the FULL 8-bit line counter (repeat bit included) and
+        // reload a new header when the low 7 bits reach 0 — the ares/Mesen2
+        // model (`Gsu`-adjacent `SnesDmaController`: `LineCounterAndRepeat--`
+        // then reload if `& 0x7F == 0`). This is why a header whose low 7
+        // bits are 0 (e.g. `$80`) is a **128-line** entry, not a 1-line one:
+        // the counter walks $80→$7F→…→$00 before the low 7 bits hit 0.
+        // Contra III's title HDMA opens with `$80` for the 128-line logo
+        // band; the old `(ntlr & 0x7F).saturating_sub(1)` treated it as a
+        // single line, so the logo vanished after one scanline.
+        self.ntlr = self.ntlr.wrapping_sub(1);
+        if self.ntlr & 0x7F == 0 {
             // Entry exhausted: read next header byte.
             let next = read_a_valid(bus, make_addr(self.a_bank, self.a2a));
             self.a2a = self.a2a.wrapping_add(1);
@@ -477,8 +482,9 @@ impl DmaChannel {
                 self.hdma_do_transfer = true;
             }
         } else {
-            // Continuation line. Transfer only if the repeat flag is set.
-            self.hdma_do_transfer = repeat != 0;
+            // Continuation line: transfer iff the (decremented) repeat bit
+            // is set — repeat entries hold bit 7 high until they reload.
+            self.hdma_do_transfer = self.ntlr & 0x80 != 0;
         }
         transferred
     }
@@ -848,6 +854,38 @@ mod tests {
         ch.hdma_step_line(&mut bus); // line 3 + reads terminator
         assert_eq!(bus.b[0x22], 0x33);
         assert!(!ch.hdma_active, "terminator at offset 4 ends channel");
+    }
+
+    #[test]
+    fn hdma_header_low7_zero_is_a_128_line_entry() {
+        // Regression (Contra III title logo): a header whose low 7 bits are
+        // 0 ($80) is a **128-line** non-repeat entry, not a 1-line one — the
+        // counter walks $80→$7F→…→$00 before the low 7 bits hit 0. Transfer
+        // on line 1, hold for 127, then reload the next header at line 128.
+        let mut bus = MockBus::new();
+        bus.poke_a(0x00_2000, &[0x80, 0xAB, 0x01, 0xCD, 0x00]);
+        let mut ch = hdma_channel(0x00, 0x2000, 0x22, 0x00);
+        ch.hdma_start_frame(&mut bus);
+
+        // Line 1: transfer $AB.
+        ch.hdma_step_line(&mut bus);
+        assert_eq!(bus.b[0x22], 0xAB);
+        // Lines 2..=127: hold — still inside the same 128-line entry.
+        for _ in 0..126 {
+            ch.hdma_step_line(&mut bus);
+            assert!(ch.hdma_active, "still inside the 128-line entry");
+            assert!(!ch.hdma_do_transfer, "non-repeat continuation holds");
+        }
+        // Line 128: low 7 bits reach 0 → reload the $01 entry (no transfer
+        // this line, but the fresh entry arms a transfer for the next).
+        ch.hdma_step_line(&mut bus);
+        assert!(ch.hdma_active);
+        assert!(ch.hdma_do_transfer, "fresh entry transfers next line");
+        assert_eq!(bus.b[0x22], 0xAB, "no transfer on the reload line");
+        // Line 129: transfer $CD, then reload terminator → done.
+        ch.hdma_step_line(&mut bus);
+        assert_eq!(bus.b[0x22], 0xCD);
+        assert!(!ch.hdma_active, "terminator ends the channel");
     }
 
     #[test]
