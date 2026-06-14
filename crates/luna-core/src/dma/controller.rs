@@ -133,8 +133,13 @@ impl Dma {
     pub fn hdma_init<B: DmaBus>(&mut self, bus: &mut B) -> u32 {
         let mut enabled = 0u32;
         for ch in 0..8 {
+            // Re-arm the lazy-start latch each frame; a channel enabled
+            // *mid-frame* (HDMAEN bit set after this init) is set up on its
+            // first active line in `hdma_run_line`.
+            self.channels[ch].hdma_started = false;
             if self.hdmaen & (1 << ch) != 0 {
                 self.channels[ch].hdma_start_frame(bus);
+                self.channels[ch].hdma_started = true;
                 enabled += 1;
             } else {
                 self.channels[ch].hdma_active = false;
@@ -161,6 +166,14 @@ impl Dma {
         let mut any_active = false;
         for ch in 0..8 {
             if self.hdmaen & (1 << ch) != 0 {
+                // Mid-frame enable (HDMAEN bit set after `hdma_init`, e.g.
+                // Yoshi's Island's text-band split at scanline ~12): set the
+                // channel up now so it begins from its source address — ares
+                // gates `hdmaRun` on the live `hdmaActive()`, not a V=0 latch.
+                if !self.channels[ch].hdma_started {
+                    self.channels[ch].hdma_start_frame(bus);
+                    self.channels[ch].hdma_started = true;
+                }
                 // A channel active at line start does work this line.
                 any_active |= self.channels[ch].hdma_active;
                 bytes += self.channels[ch].hdma_step_line(bus);
@@ -286,6 +299,35 @@ mod tests {
 
         // Channel terminated → no cost on subsequent lines.
         assert_eq!(dma.hdma_run_line(&mut bus), 0);
+    }
+
+    #[test]
+    fn hdma_enabled_mid_frame_starts_from_source() {
+        // Regression: a channel whose HDMAEN bit is set AFTER `hdma_init`
+        // (Yoshi's Island enables its text-band split at scanline ~12)
+        // must still run, lazily setting up from its source address on the
+        // first active line — not stay dormant until the next frame's init.
+        let mut bus = MockBus::new();
+        bus.a[0x00_2000] = 0x02; // line count
+        bus.a[0x00_2001] = 0xAB; // data byte
+        bus.a[0x00_2002] = 0x00; // terminator
+        let mut dma = Dma::new();
+        dma.channels[0].params = DmaParams::from_byte(0); // mode 0, direct
+        dma.channels[0].bbad = 0x22;
+        dma.channels[0].a_addr = 0x2000;
+        dma.channels[0].a_bank = 0x00;
+
+        // Frame init with HDMA disabled → channel does not set up.
+        dma.hdmaen = 0;
+        assert_eq!(dma.hdma_init(&mut bus), 0);
+        assert!(!dma.channels[0].hdma_active);
+
+        // Mid-frame: the game enables the channel. The next scanline must
+        // set it up from $00:2000 and transfer the data byte to $2122.
+        dma.hdmaen = 0b0000_0001;
+        assert_eq!(dma.hdma_run_line(&mut bus), HDMA_OVERHEAD_MCLK + 8);
+        assert_eq!(bus.b[0x22], 0xAB, "mid-frame-enabled channel transferred");
+        assert!(dma.channels[0].hdma_started);
     }
 
     #[test]
