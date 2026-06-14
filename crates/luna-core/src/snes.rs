@@ -400,14 +400,20 @@ impl Snes {
             // the whole chip lives in `SuperFxMapper`, driven by the
             // `step_coproc` hook. The Game Pak **work** RAM (the GSU's plot
             // target) is NOT the header SRAM byte — that byte is battery
-            // *save* RAM (Star Fox reports 0; the PeterLemon GSU test ROMs
-            // report 1 KB, far too small for a 256×192 framebuffer). The
-            // real work RAM is a board property (Star Fox 32 KB, Doom
-            // 128 KB); without a board table, allocate the 128 KB upper
-            // bound so every framebuffer mode fits. (Over-allocation is
-            // harmless for the games tested — their plot addresses never
-            // reach the larger wrap boundary.)
-            MapperKind::SuperFx => Box::new(SuperFxMapper::new(cart.rom, 0x2_0000)),
+            // *save* RAM. The work-RAM size comes from the extended-header
+            // expansion-RAM byte `$FFBD` (`1024 << n`); GSU carts that don't
+            // carry it default to 64 KB (Mesen2 `BaseCartridge.cpp`). YI is
+            // 32 KB, Doom / Stunt Race 64 KB, Star Fox 64 KB (default).
+            // Over-allocating wraps GSU RAM/RAMBR addressing wrong, so size
+            // it faithfully rather than to a 128 KB upper bound.
+            MapperKind::SuperFx => {
+                let ram = if cart.header.expansion_ram_kb > 0 {
+                    cart.header.expansion_ram_kb as usize * 1024
+                } else {
+                    0x1_0000
+                };
+                Box::new(SuperFxMapper::new(cart.rom, ram))
+            }
             // DSP-1 (Super Mario Kart, Pilotwings) — a base ROM/SRAM map
             // (HiROM or LoROM per the board) plus the NEC uPD7725 chip,
             // fed the cartridge's `dsp1b.rom` firmware. Without firmware
