@@ -103,6 +103,10 @@ enum Command {
         /// luna's CPU-prepared GSU inputs against a reference.
         #[arg(long = "dump-coproc-ram")]
         dump_coproc_ram: Option<PathBuf>,
+        /// Dump all 64 KB of APU audio RAM (ARAM) raw bytes to this file.
+        /// For diagnosing the SPC700 sound driver / CPU↔SPC handshake.
+        #[arg(long = "dump-aram")]
+        dump_aram: Option<PathBuf>,
         /// Where to write the JSON state. Use `-` for stdout.
         #[arg(long, default_value = "-")]
         out: PathBuf,
@@ -367,12 +371,14 @@ fn main() -> ExitCode {
             dma_trace_from,
             dma_trace_max,
             dump_coproc_ram,
+            dump_aram,
         } => run_state(
             &rom,
             steps,
             force_mapper.as_deref(),
             dump_vram.as_deref(),
             dump_coproc_ram.as_deref(),
+            dump_aram.as_deref(),
             &out,
             screenshot.as_deref(),
             audio_out.as_deref(),
@@ -1015,6 +1021,7 @@ fn run_state(
     force_mapper: Option<&str>,
     dump_vram_path: Option<&std::path::Path>,
     dump_coproc_ram_path: Option<&std::path::Path>,
+    dump_aram_path: Option<&std::path::Path>,
     out: &std::path::Path,
     screenshot: Option<&std::path::Path>,
     audio_out: Option<&std::path::Path>,
@@ -1318,6 +1325,15 @@ fn run_state(
             },
             Ok(None) => eprintln!("note: cart has no coprocessor work RAM"),
             Err(e) => eprintln!("error: coproc_ram: {e}"),
+        }
+    }
+    if let Some(path) = dump_aram_path {
+        match em.aram_bytes() {
+            Ok(bytes) => match std::fs::write(path, &bytes) {
+                Ok(()) => eprintln!("ARAM ({} bytes) written to {}", bytes.len(), path.display()),
+                Err(e) => eprintln!("error: writing ARAM dump: {e}"),
+            },
+            Err(e) => eprintln!("error: aram_bytes: {e}"),
         }
     }
     if let Some(path) = cpu_trace_path {

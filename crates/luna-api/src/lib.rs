@@ -1599,6 +1599,14 @@ impl Emulator {
             .collect())
     }
 
+    /// All 64 KB of APU audio RAM (ARAM), for diagnosing the SPC700 sound
+    /// driver — e.g. comparing the CPU↔SPC700 `$2140-$2143` handshake or
+    /// disassembling a stuck driver against a reference.
+    pub fn aram_bytes(&self) -> Result<Vec<u8>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        Ok(snes.apu_real.aram.to_vec())
+    }
+
     /// Enable per-instruction CPU tracing. Every subsequent
     /// [`Emulator::step`] / [`Emulator::step_until_frame`] tick
     /// captures a register-file snapshot until `max_events` events
