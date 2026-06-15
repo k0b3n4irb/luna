@@ -67,6 +67,24 @@ impl Spc700 {
         v
     }
 
+    /// Dummy read of the byte at PC **without** advancing — one bus
+    /// cycle whose value is discarded. The SPC700 prefetches the byte
+    /// after a 1-/short-operand opcode even when it isn't used; this is
+    /// the per-cycle activity hardware (and Mesen2's `DummyRead`) shows
+    /// for implied/register ops. Needed for cycle-faithful timer/DSP
+    /// clocking, not for state.
+    #[inline]
+    pub fn dummy_read_pc<B: SpcBus>(&mut self, bus: &mut B) {
+        let _ = bus.read(self.pc);
+    }
+
+    /// An internal idle cycle: no bus access, but the SPC still burns a
+    /// cycle (clocking DSP + timers in the timing-accurate consumer).
+    #[inline]
+    pub fn idle<B: SpcBus>(bus: &mut B) {
+        bus.idle();
+    }
+
     /// Read a little-endian 16-bit value at PC and advance by 2.
     #[inline]
     pub fn fetch_u16<B: SpcBus>(&mut self, bus: &mut B) -> u16 {
