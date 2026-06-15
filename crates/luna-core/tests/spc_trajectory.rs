@@ -53,6 +53,46 @@ fn boot() -> Snes {
     snes
 }
 
+/// Drift-trace step 1: report the SPC's total opcode-cycle count (and its
+/// T0/T1 + T2 timer phases) at the moment it first leaves the IPL ROM (the
+/// JMP into the uploaded driver). Compared against ares' `lunaClocks/2` at
+/// the same event, this tests whether the IPL-upload exit timing seeds the
+/// Tales derail's timer-phase offset (luna exits the upload ~1883 poll-spins
+/// early vs ares). `timer_subdivider` counts one per SPC opcode-cycle.
+#[test]
+#[ignore = "manual; needs the gitignored Tales ROM + release build"]
+fn spc_ipl_exit_timer_phase() {
+    if !std::path::Path::new(ROM).exists() {
+        eprintln!("[skip] Tales ROM absent at {ROM}");
+        return;
+    }
+    let mut snes = boot();
+    // The SPC boots inside the IPL ROM ($FFC0+); the first pc < $FFC0 after
+    // it has run IPL code is the JMP into the uploaded driver. Capture the
+    // pre-state there (consistent with an ares hook at the top of SMP::main
+    // before executing the instruction).
+    let mut seen_ipl = false;
+    for i in 0..5_000_000u64 {
+        let pc = snes.apu_real.cpu.pc;
+        if pc >= 0xFFC0 {
+            seen_ipl = true;
+        }
+        if seen_ipl && pc < 0xFFC0 {
+            let sub = snes.apu_real.timer_subdivider;
+            eprintln!(
+                "luna IPL-exit @ CPU instr {i}: spc_pc={:#06X} total_spc_cycles(timer_subdivider)={sub}  \
+                 T0/T1 phase = {} /128,  T2 phase = {} /16",
+                snes.apu_real.cpu.pc,
+                sub % 128,
+                sub % 16
+            );
+            return;
+        }
+        snes.step();
+    }
+    eprintln!("luna never left the IPL ROM in 5M instrs");
+}
+
 #[test]
 #[ignore = "manual SPC trajectory harness; needs the gitignored Tales ROM + release build"]
 fn spc_freerun_reproduces_derail() {
