@@ -42,12 +42,17 @@ use std::path::PathBuf;
 
 struct RamBus {
     mem: Vec<u8>,
+    /// Per-cycle bus activity recorded in execution order, mirroring the
+    /// Tom Harte `cycles` trace: `(addr, value, kind)` where `kind` is
+    /// `"read"` / `"write"` / `"wait"` and idle cycles carry `None`.
+    trace: Vec<(Option<u16>, Option<u8>, &'static str)>,
 }
 
 impl RamBus {
     fn new() -> Self {
         Self {
             mem: vec![0; 0x1_0000],
+            trace: Vec::new(),
         }
     }
 
@@ -62,11 +67,18 @@ impl RamBus {
 
 impl SpcBus for RamBus {
     fn read(&mut self, addr: u16) -> u8 {
-        self.mem[addr as usize]
+        let value = self.mem[addr as usize];
+        self.trace.push((Some(addr), Some(value), "read"));
+        value
     }
 
     fn write(&mut self, addr: u16, value: u8) {
+        self.trace.push((Some(addr), Some(value), "write"));
         self.mem[addr as usize] = value;
+    }
+
+    fn idle(&mut self) {
+        self.trace.push((None, None, "wait"));
     }
 }
 
@@ -95,12 +107,11 @@ struct TestCase {
     #[serde(rename = "final")]
     final_: State,
     /// Per-bus-cycle activity trace (`[addr, value, kind]` per entry,
-    /// including internal `wait` cycles). luna's SPC700 returns a single
-    /// per-opcode total rather than a per-cycle trace, so we don't check
-    /// it entry-for-entry — but the trace's **length** is the
-    /// instruction's exact cycle count (branch-taken penalty included),
-    /// which is precisely what `Spc700::step` returns. That equality is
-    /// the cycle backstop validated below.
+    /// including internal `wait` cycles). luna's SPC700 now emits each
+    /// cycle (`read`/`write`/`idle`) in hardware position, so this is
+    /// checked **entry-for-entry** (kind + addr + value) against the
+    /// `RamBus` trace by [`compare_trace`] — catching a missing idle, a
+    /// misplaced dummy read, or a wrong access order, not just the total.
     cycles: Vec<serde_json::Value>,
 }
 
@@ -142,40 +153,83 @@ enum CaseResult {
     Skip,
 }
 
-/// Outcome of the per-opcode cycle-count check for one executed case.
-#[derive(Debug, Clone, Copy)]
-struct CycleCheck {
-    /// What `Spc700::step` charged for the instruction.
-    got: u8,
-    /// The authoritative count: the length of the bus-cycle trace.
-    want: usize,
-}
+/// Outcome of the per-opcode cycle check for one executed case: the
+/// **entry-for-entry** comparison of luna's recorded bus-cycle trace
+/// (`read`/`write`/`idle` in order, addr + value) against the Tom Harte
+/// `cycles` trace. This is the faithful-grammar oracle — it catches a
+/// missing idle cycle, a misplaced dummy read, or a wrong access order,
+/// not just a wrong total. `Ok(())` = byte-exact; `Err` = first divergence.
+type CycleCheck = Result<(), String>;
 
 /// Run one case. Returns the state-comparison result plus — when the
 /// instruction actually executed (didn't panic / isn't unimplemented) —
 /// a `CycleCheck`. The cycle check is independent of the state result so
-/// a cycle-table bug surfaces even on an opcode whose state is correct.
+/// a cycle-grammar bug surfaces even on an opcode whose state is correct.
 fn run_case(case: &TestCase, opcode: u8) -> (Result<CaseResult, String>, Option<CycleCheck>) {
     let mut cpu = Spc700::new();
     let mut bus = Box::new(RamBus::new());
     apply_state(&mut cpu, &mut bus, &case.initial);
 
-    let Ok(got_cycles) = catch_unwind(AssertUnwindSafe(|| cpu.step(&mut *bus))) else {
+    if catch_unwind(AssertUnwindSafe(|| cpu.step(&mut *bus))).is_err() {
         return (Ok(CaseResult::Skip), None);
-    };
+    }
 
     // SLEEP (0xEF) / STOP (0xFF) halt the core: their Tom Harte trace is a
-    // fixed 7-entry halt window (1 fetch + repeating read/wait idles), not a
-    // completing instruction cost, so they have no meaningful single-total to
-    // match. Skip the cycle check for them (state is still validated).
-    let cyc = (opcode != 0xEF && opcode != 0xFF).then_some(CycleCheck {
-        got: got_cycles,
-        want: case.cycles.len(),
-    });
+    // fixed halt window (1 fetch + repeating read/wait idles), not a
+    // completing instruction, so there is no finite trace to match. Skip
+    // the cycle check for them (state is still validated).
+    let cyc = (opcode != 0xEF && opcode != 0xFF).then(|| compare_trace(&bus.trace, &case.cycles));
     match compare_state(&cpu, &bus, &case.final_) {
         Ok(()) => (Ok(CaseResult::Pass), cyc),
         Err(e) => (Err(e), cyc),
     }
+}
+
+/// Parse one Tom Harte cycle entry `[addr|null, value|null, "kind"]`.
+fn parse_ref_cycle(v: &serde_json::Value) -> Result<(Option<u16>, Option<u8>, &str), String> {
+    let arr = v.as_array().ok_or("cycle entry is not an array")?;
+    let addr = arr
+        .first()
+        .and_then(serde_json::Value::as_u64)
+        .map(|n| n as u16);
+    let value = arr
+        .get(1)
+        .and_then(serde_json::Value::as_u64)
+        .map(|n| n as u8);
+    let kind = arr
+        .get(2)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("?");
+    Ok((addr, value, kind))
+}
+
+/// Compare luna's recorded bus trace to the reference, entry-for-entry.
+fn compare_trace(
+    got: &[(Option<u16>, Option<u8>, &'static str)],
+    want: &[serde_json::Value],
+) -> CycleCheck {
+    if got.len() != want.len() {
+        return Err(format!(
+            "trace length {} != reference {} (got {:?})",
+            got.len(),
+            want.len(),
+            got.iter().map(|c| c.2).collect::<Vec<_>>()
+        ));
+    }
+    for (i, (g, w)) in got.iter().zip(want).enumerate() {
+        let (wa, wv, wk) = parse_ref_cycle(w)?;
+        // A `None` reference value on a read is a don't-care (open-bus /
+        // dummy read): the hardware reads the byte but its value is not
+        // constrained, so only addr + kind are checked there.
+        let value_ok = wv.is_none() || g.1 == wv;
+        if g.2 != wk || g.0 != wa || !value_ok {
+            return Err(format!(
+                "cycle {i}: got [{:?},{:?},{}] want [{:?},{:?},{}]",
+                g.0, g.1, g.2, wa, wv, wk
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn apply_state(cpu: &mut Spc700, bus: &mut RamBus, s: &State) {
@@ -291,15 +345,13 @@ fn tom_harte() {
                 }
             }
             if let Some(c) = cycle {
-                if usize::from(c.got) == c.want {
-                    op.cycle_passed += 1;
-                } else {
-                    op.cycle_failed += 1;
-                    if op.first_cycle_failure.is_none() {
-                        op.first_cycle_failure = Some(format!(
-                            "{}: step() charged {} cycles, trace has {}",
-                            case.name, c.got, c.want
-                        ));
+                match c {
+                    Ok(()) => op.cycle_passed += 1,
+                    Err(diff) => {
+                        op.cycle_failed += 1;
+                        if op.first_cycle_failure.is_none() {
+                            op.first_cycle_failure = Some(format!("{}: {diff}", case.name));
+                        }
                     }
                 }
             }
@@ -336,7 +388,7 @@ fn print_report(stats: &BTreeMap<String, OpStats>, unknown: usize) {
         (p + u64::from(o.cycle_passed), f + u64::from(o.cycle_failed))
     });
     eprintln!();
-    eprintln!("  Cycle-count backstop (step() total == bus-cycle trace length):");
+    eprintln!("  Cycle-trace check (entry-for-entry: read/write/idle, addr+value):");
     eprintln!("    Match:    {cyc_pass}");
     eprintln!("    Mismatch: {cyc_fail}");
     eprintln!();
