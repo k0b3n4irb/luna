@@ -94,6 +94,13 @@ enum Command {
         /// Mario Kart, Pilotwings). Persists for future runs.
         #[arg(long = "dsp1-rom")]
         dsp1_rom: Option<PathBuf>,
+        /// Load a save state (a `.luna` blob from the GUI's save-state
+        /// slots, `~/.local/luna/states/<rom-slug>.slot<N>.luna`) right
+        /// after the ROM loads, before the `-n` warm-up. Lets a headless
+        /// run resume from a GUI-captured scene (e.g. to inspect a bug the
+        /// CLI can't reach without input). The state must match this ROM.
+        #[arg(long = "load-state")]
+        load_state: Option<PathBuf>,
         /// Dump all 64 KB of PPU VRAM (raw bytes) to this file after the
         /// run. For diagnosing the framebuffer DMA → VRAM → display path.
         #[arg(long = "dump-vram")]
@@ -347,6 +354,7 @@ fn main() -> ExitCode {
             steps,
             force_mapper,
             dsp1_rom,
+            load_state,
             dump_vram,
             out,
             screenshot,
@@ -402,6 +410,7 @@ fn main() -> ExitCode {
             dma_trace_from,
             dma_trace_max,
             dsp1_rom.as_deref(),
+            load_state.as_deref(),
         ),
         Command::Frames {
             rom,
@@ -1045,11 +1054,30 @@ fn run_state(
     dma_trace_from: u64,
     dma_trace_max: usize,
     dsp1_rom: Option<&std::path::Path>,
+    load_state_path: Option<&std::path::Path>,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
     if let Err(e) = load_rom_into(&mut em, rom, force_mapper, dsp1_rom) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
+    }
+    // Optionally resume from a GUI-captured save state (api-first:
+    // `Emulator::load_state`). Done right after `load_rom` so the `-n`
+    // warm-up runs forward from the captured scene.
+    if let Some(sp) = load_state_path {
+        match std::fs::read(sp) {
+            Ok(bytes) => {
+                if let Err(e) = em.load_state(&bytes) {
+                    eprintln!("error: --load-state {}: {e}", sp.display());
+                    return ExitCode::from(1);
+                }
+                eprintln!("loaded save state from {}", sp.display());
+            }
+            Err(e) => {
+                eprintln!("error: --load-state {}: {e}", sp.display());
+                return ExitCode::from(1);
+            }
+        }
     }
     if apu_log_path.is_some() {
         if let Err(e) = em.enable_mailbox_log() {
