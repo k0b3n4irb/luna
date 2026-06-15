@@ -48,6 +48,16 @@ fn load_firmware(dsp: &mut Upd96050, fw: &[u8]) -> bool {
     true
 }
 
+/// MUTABLE save-state of a [`Dsp1Mapper`]: the base mapper's state (its
+/// own ROM-excluded blob), the uPD7725's mutable state (microcode ROMs
+/// excluded), and the cycle accumulator.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Dsp1State {
+    base: Vec<u8>,
+    dsp: Vec<u8>,
+    cycle_acc: u64,
+}
+
 /// A DSP-1 cartridge: a base ROM/SRAM mapper + the uPD7725 chip.
 pub struct Dsp1Mapper {
     base: Box<dyn Mapper + Send>,
@@ -137,6 +147,23 @@ impl Mapper for Dsp1Mapper {
 
     fn sram_size(&self) -> usize {
         self.base.sram_size()
+    }
+
+    fn save_state(&self) -> Vec<u8> {
+        let st = Dsp1State {
+            base: self.base.save_state(),
+            dsp: self.dsp.save_state(),
+            cycle_acc: self.cycle_acc,
+        };
+        bincode::serialize(&st).unwrap_or_default()
+    }
+
+    fn load_state(&mut self, data: &[u8]) {
+        if let Ok(st) = bincode::deserialize::<Dsp1State>(data) {
+            self.base.load_state(&st.base);
+            self.dsp.load_state(&st.dsp);
+            self.cycle_acc = st.cycle_acc;
+        }
     }
 
     fn reset(&mut self) {

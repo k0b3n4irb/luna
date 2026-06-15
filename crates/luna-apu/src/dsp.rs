@@ -57,7 +57,7 @@ const fn bit(v: u8, n: u8) -> bool {
 
 // -------------- enums + structs ----------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EnvelopeMode {
     Release = 0,
     Attack = 1,
@@ -74,7 +74,7 @@ impl EnvelopeMode {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Voice {
     pub index: u8, // voice channel register base: 0x00, 0x10, ..., 0x70
 
@@ -151,7 +151,7 @@ impl Default for Voice {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Clock {
     pub counter: u16, // n15: max 0x7FFF
     pub sample: bool,
@@ -166,7 +166,7 @@ impl Default for Clock {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct MainVol {
     pub reset: bool,
     pub mute: bool,
@@ -174,7 +174,7 @@ pub struct MainVol {
     pub output: [i32; 2], // i17 in ares
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Echo {
     pub feedback: i8,
     pub volume: [i8; 2],
@@ -215,7 +215,7 @@ impl Default for Echo {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Noise {
     pub frequency: u8, // n5
     pub lfsr: u16,     // n15
@@ -230,7 +230,7 @@ impl Default for Noise {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Brr {
     pub bank: u8,
     pub _bank: u8,
@@ -241,7 +241,7 @@ pub struct Brr {
     pub _byte: u8,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Latch {
     pub adsr0: u8,
     pub envx: u8,
@@ -296,7 +296,9 @@ pub fn gaussian_table() -> &'static [i16; 512] {
 
 // -------------- the DSP itself -------------------------------------------
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Dsp {
+    #[serde(with = "serde_bytes")]
     pub registers: [u8; 128],
     pub voices: [Voice; 8],
     pub clock: Clock,

@@ -31,7 +31,7 @@
 //! average SPC instructions — good enough until we wire timer-driven
 //! cycle accounting in.
 
-use luna_cpu_spc700::{IPL_ROM, IPL_ROM_BASE, Spc700, SpcBus};
+use luna_cpu_spc700::{IPL_ROM, IPL_ROM_BASE, SPC700_CYCLES, Spc700, SpcBus};
 
 /// Read one ARAM byte as the **SPC700** sees it: `$FFC0-$FFFF` returns
 /// the 64-byte IPL ROM while `$F1` bit 7 is set, otherwise the physical
@@ -49,6 +49,40 @@ const fn aram_with_ipl(aram: &[u8; 0x10000], control: u8, addr: u16) -> u8 {
 /// `dsp.rs` for the 1-for-1 transliteration of `ares/sfc/dsp/*`.
 pub mod dsp;
 
+/// `serde` helper for a heap-boxed fixed byte array (`Box<[u8; N]>`),
+/// which `serde_bytes` does not cover directly. Used by the save-state
+/// machinery for the 64 KB ARAM.
+pub(crate) mod boxed_byte_array {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    /// Serialize `Box<[u8; N]>` as raw bytes (the `&Box` from serde's
+    /// `with` call site deref-coerces to this `&[u8; N]`).
+    pub(crate) fn serialize<S, const N: usize>(
+        data: &[u8; N],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(&data[..])
+    }
+
+    /// Deserialize a byte blob back into `Box<[u8; N]>` (length must match).
+    pub(crate) fn deserialize<'de, D, const N: usize>(
+        deserializer: D,
+    ) -> Result<Box<[u8; N]>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes = <serde_bytes::ByteBuf>::deserialize(deserializer)?;
+        let arr: [u8; N] = bytes
+            .into_vec()
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("byte array length mismatch"))?;
+        Ok(Box::new(arr))
+    }
+}
+
 /// Nominal master cycles per SPC instruction (~4 SPC cycles × the
 /// 20.97 master/SPC ratio). Since Phase 2 this is **no longer** the
 /// scheduler quantum — `Apu::step` charges each instruction its real
@@ -59,10 +93,20 @@ pub const MASTER_CYCLES_PER_SPC_STEP: u32 = 84;
 /// NTSC SNES master clock (Hz) — the CPU/PPU timebase.
 pub const MASTER_CLOCK_HZ: u64 = 21_477_272;
 
-/// SPC700 / S-DSP clock (Hz): the 24.576 MHz APU crystal ÷ 24.
-pub const SPC_CLOCK_HZ: u64 = 1_024_000;
+/// SPC700 / S-DSP clock (Hz): the APU crystal ÷ 24. The crystal is
+/// nominally 24.576 MHz (→ 1.024 MHz) but real hardware measures
+/// ~24.607 MHz; ares (`apuFrequency = 32040·768`) and Mesen2 both use the
+/// measured value → `24_606_720` ÷ 24 = **`1_025_280` Hz** (and a `32_040` Hz
+/// DSP output). luna's textbook 1.024 MHz ran the SPC ~0.125 % slow, which
+/// shifts the CPU↔SPC clock alignment during the boot/upload handshake
+/// (differential vs ares: this value moves luna's IPL-upload-loop exit
+/// measurably closer to ares — necessary, though not alone sufficient,
+/// for the Tales of Phantasia OP).
+pub const SPC_CLOCK_HZ: u64 = 1_025_280;
 
-/// SPC cycles per audio sample (32 kHz output at 1.024 MHz).
+/// SPC cycles per audio sample: 32 SPC cycles → one DSP sample. At
+/// [`SPC_CLOCK_HZ`] this yields the `32_040` Hz output rate ares and Mesen2
+/// produce (the host audio backend resamples to the device rate).
 pub const SPC_CYCLES_PER_SAMPLE: u32 = 32;
 
 /// Maximum number of stereo samples buffered in `audio_queue`. The
@@ -73,6 +117,7 @@ pub const AUDIO_QUEUE_CAPACITY: usize = 16384;
 
 /// All APU state owned by [`Apu`]: SPC700 core + 64 KB ARAM + the two
 /// 4-byte mailbox arrays.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Apu {
     /// The SPC700 CPU.
     pub cpu: Spc700,
@@ -85,11 +130,23 @@ pub struct Apu {
     /// in — it's a read overlay over `$FFC0..=$FFFF` on the SPC side,
     /// gated on `$F1` bit 7 (see [`aram_with_ipl`] / [`Apu::peek`]). The
     /// DSP reads this array directly, bypassing the overlay.
+    #[serde(with = "boxed_byte_array")]
     pub aram: Box<[u8; 0x10000]>,
     /// CPU → SPC mailbox (CPU writes `$2140-$2143`, SPC reads `$F4-$F7`).
     pub to_spc_ports: [u8; 4],
     /// SPC → CPU mailbox (SPC writes `$F4-$F7`, CPU reads `$2140-$2143`).
     pub to_cpu_ports: [u8; 4],
+    /// SPIKE (timestamped-mailbox visibility): a CPU write to `$2140+port`
+    /// is held here until the SPC's cycle (`timer_subdivider`) catches up
+    /// to the CPU's write cycle, then committed to `to_spc_ports`. This
+    /// makes CPU→SPC visibility cycle-exact instead of quantized to luna's
+    /// whole-instruction APU stepping. `None` = no pending write.
+    #[serde(default)]
+    to_spc_pending: [Option<u8>; 4],
+    /// SPC cycle (`timer_subdivider` value) at which each pending write
+    /// becomes visible (= the CPU's write cycle).
+    #[serde(default)]
+    to_spc_visible_at: [u32; 4],
     /// Fractional master→SPC cycle accumulator: holds
     /// `Σ(master cycles) × SPC_CLOCK_HZ` modulo `MASTER_CLOCK_HZ`, so
     /// the long-run SPC rate is exactly `SPC_CLOCK_HZ / MASTER_CLOCK_HZ`
@@ -133,6 +190,10 @@ pub struct Apu {
     /// to consume. Sized to a few frames at 32 kHz so brief audio
     /// underruns don't cause sustained drift; the host drains it on
     /// every UI frame.
+    ///
+    /// Transient playback buffer — not part of the save-state. It
+    /// `serde(skip)`-defaults to an empty queue on restore.
+    #[serde(skip)]
     pub audio_queue: std::collections::VecDeque<(i16, i16)>,
     /// SPC cycles owed to the audio-sample tick (32-cycle base
     /// clock). Drives both ADSR rate progression and the per-voice
@@ -187,6 +248,8 @@ impl Apu {
             aram,
             to_spc_ports: [0; 4],
             to_cpu_ports: [0; 4],
+            to_spc_pending: [None; 4],
+            to_spc_visible_at: [0; 4],
             spc_cycle_num: 0,
             spc_cycle_debt: 0,
             control: 0x80, // bit 7: IPL ROM exposed
@@ -217,6 +280,12 @@ impl Apu {
             timer_output: &mut apu.timer_output,
             timer_internal: &mut apu.timer_internal,
             timer_enabled: &mut apu.timer_enabled,
+            timer_subdivider: &mut apu.timer_subdivider,
+            sample_tick_deficit: &mut apu.sample_tick_deficit,
+            audio_queue: &mut apu.audio_queue,
+            audio_left: &mut apu.audio_left,
+            audio_right: &mut apu.audio_right,
+            clocked: 0,
         };
         apu.cpu.reset(&mut bus);
         apu
@@ -313,10 +382,21 @@ impl Apu {
         aram_with_ipl(&self.aram, self.control, addr)
     }
 
-    /// Main CPU writes `value` to mailbox port (0..=3). The byte
-    /// becomes visible to the SPC700 the next time it reads `$F4 + port`.
-    pub const fn cpu_write_port(&mut self, port: usize, value: u8) {
-        self.to_spc_ports[port] = value;
+    /// Main CPU writes `value` to mailbox port (0..=3).
+    ///
+    /// SPIKE (timestamped-mailbox visibility): rather than make the byte
+    /// instantly visible, hold it until the SPC's cycle catches up to the
+    /// CPU's write cycle. `spc_cycle_debt` is how far the SPC currently
+    /// lags the CPU clock (≥ 0 under no-overshoot), so the CPU's write
+    /// cycle in SPC units is `timer_subdivider + spc_cycle_debt`. The SPC
+    /// then sees the write exactly when it reaches that cycle (see the
+    /// commit at the top of [`run_one_spc`](Self::run_one_spc)) — cycle-
+    /// exact CPU→SPC visibility instead of luna's whole-instruction
+    /// quantization (the Tales OP timer-phase derail).
+    pub fn cpu_write_port(&mut self, port: usize, value: u8) {
+        self.to_spc_pending[port] = Some(value);
+        let lag = self.spc_cycle_debt.max(0) as u32;
+        self.to_spc_visible_at[port] = self.timer_subdivider.wrapping_add(lag);
     }
 
     /// Drain up to `max` queued stereo samples into `out`, in oldest-
@@ -361,6 +441,49 @@ impl Apu {
                 budget = 0;
                 break;
             }
+            // No-overshoot catch-up: peek the next opcode's base cost and
+            // only run it if it fits the remaining budget, so the SPC stops
+            // at-or-before the CPU's master clock rather than overshooting
+            // whole instructions past it. luna's one-way CPU-driven model
+            // (the SPC catches up to the CPU, never vice versa) desyncs the
+            // mailbox handshake under overshoot — Tales of Phantasia's OP
+            // hangs with no sound. Stopping short keeps the SPC's view of
+            // the CPU mailbox writes correctly ordered. The leftover budget
+            // carries forward in `spc_cycle_debt`.
+            let next_op = aram_with_ipl(&self.aram, self.control, self.cpu.pc);
+            if i64::from(SPC700_CYCLES[next_op as usize]) > budget {
+                break;
+            }
+            budget -= i64::from(self.run_one_spc());
+        }
+        self.spc_cycle_debt = budget;
+    }
+
+    /// Run exactly one SPC700 instruction over the APU bus, clocking the
+    /// timers + S-DSP per cycle in position (the ares grammar), and
+    /// reconciling any SLEEP/STOP cycles the core charges without driving
+    /// the bus. Returns the instruction's cycle cost. Shared by [`step`]
+    /// and the trajectory harness [`trace_step_one`].
+    ///
+    /// [`step`]: Self::step
+    /// [`trace_step_one`]: Self::trace_step_one
+    fn run_one_spc(&mut self) -> u32 {
+        // SPIKE: commit any CPU mailbox writes whose visibility cycle the
+        // SPC has now reached (cycle-exact CPU→SPC visibility). Wrap-safe:
+        // `timer_subdivider` is u32 and wraps (~70 min); a write always
+        // commits within microseconds, so a wrapping-distance < 2^31 means
+        // "at or past the visibility cycle".
+        for p in 0..4 {
+            if self.to_spc_pending[p].is_some()
+                && self
+                    .timer_subdivider
+                    .wrapping_sub(self.to_spc_visible_at[p])
+                    < 0x8000_0000
+            {
+                self.to_spc_ports[p] = self.to_spc_pending[p].take().unwrap();
+            }
+        }
+        let (cycles, clocked) = {
             let mut bus = ApuBusView {
                 aram: &mut self.aram,
                 to_spc_ports: &mut self.to_spc_ports,
@@ -373,16 +496,44 @@ impl Apu {
                 timer_output: &mut self.timer_output,
                 timer_internal: &mut self.timer_internal,
                 timer_enabled: &mut self.timer_enabled,
+                timer_subdivider: &mut self.timer_subdivider,
+                sample_tick_deficit: &mut self.sample_tick_deficit,
+                audio_queue: &mut self.audio_queue,
+                audio_left: &mut self.audio_left,
+                audio_right: &mut self.audio_right,
+                clocked: 0,
             };
             let cycles = u32::from(self.cpu.step(&mut bus));
-            budget -= i64::from(cycles);
-            self.tick_timers(cycles);
-            self.tick_voices(cycles);
-            if self.cpu.pc < IPL_ROM_BASE {
-                self.past_iplrom = true;
-            }
+            (cycles, bus.clocked)
+        };
+        let unclocked = cycles.saturating_sub(clocked);
+        if unclocked > 0 {
+            self.tick_timers(unclocked);
+            self.tick_voices(unclocked);
         }
-        self.spc_cycle_debt = budget;
+        if self.cpu.pc < IPL_ROM_BASE {
+            self.past_iplrom = true;
+        }
+        cycles
+    }
+
+    /// Trajectory-harness hook (Tales OP derail differential): capture the
+    /// pre-instruction SPC register snapshot `(pc, a, x, y, sp, psw)`, then
+    /// free-run exactly one SPC700 instruction (full timer/DSP clocking, a
+    /// frozen mailbox), and return the snapshot. Not used in normal
+    /// stepping; see `crates/luna-core/tests/spc_trajectory.rs`.
+    #[doc(hidden)]
+    pub fn trace_step_one(&mut self) -> (u16, u8, u8, u8, u8, u8) {
+        let snap = (
+            self.cpu.pc,
+            self.cpu.a,
+            self.cpu.x,
+            self.cpu.y,
+            self.cpu.sp,
+            self.cpu.psw.0,
+        );
+        self.run_one_spc();
+        snap
     }
 }
 
@@ -402,10 +553,109 @@ struct ApuBusView<'a> {
     timer_output: &'a mut [u8; 3],
     timer_internal: &'a mut [u16; 3],
     timer_enabled: &'a mut [bool; 3],
+    /// SPC-cycle accumulator feeding the timer dividers (128 → T0/T1,
+    /// 16 → T2). Advanced one per bus cycle by [`Self::clock_cycle`].
+    timer_subdivider: &'a mut u32,
+    /// SPC cycles since the last DSP sample; one 32 kHz sample is
+    /// produced every [`SPC_CYCLES_PER_SAMPLE`].
+    sample_tick_deficit: &'a mut u32,
+    audio_queue: &'a mut std::collections::VecDeque<(i16, i16)>,
+    audio_left: &'a mut i16,
+    audio_right: &'a mut i16,
+    /// Count of bus cycles clocked during the current instruction, so
+    /// the caller can reconcile any cycles with no bus activity (the
+    /// SLEEP/STOP halt window emits fewer bus ops than its cycle cost).
+    clocked: u32,
+}
+
+/// Advance one SPC timer (0/1/2) by one base-clock tick: bump the
+/// internal counter, and on reaching the reload target (0 ⇒ 256) wrap-
+/// increment the 4-bit output and reset.
+fn tick_one_timer(
+    reload: [u8; 3],
+    output: &mut [u8; 3],
+    internal: &mut [u16; 3],
+    enabled: [bool; 3],
+    idx: usize,
+) {
+    if !enabled[idx] {
+        return;
+    }
+    internal[idx] = internal[idx].wrapping_add(1);
+    let target = if reload[idx] == 0 {
+        256
+    } else {
+        u16::from(reload[idx])
+    };
+    if internal[idx] >= target {
+        internal[idx] = 0;
+        output[idx] = (output[idx] + 1) & 0x0F;
+    }
+}
+
+impl ApuBusView<'_> {
+    /// Clock the timers **and** the S-DSP by exactly one SPC cycle, in
+    /// position — the faithful ares grammar (`wait()` → `stepTimers` +
+    /// `synchronize(dsp)`; Mesen2 `IncCycleCount` → `Timer.Run` +
+    /// `dsp->Exec`). Called at the start of every read / write / idle so
+    /// a `$FD-$FF` timer read or a `$F3` DSP write lands on the correct
+    /// cycle. This is the whole point of the per-cycle SPC700 port: the
+    /// number of these calls per opcode equals its true cycle count.
+    fn clock_cycle(&mut self) {
+        self.clocked = self.clocked.wrapping_add(1);
+
+        // --- timers ---
+        *self.timer_subdivider = self.timer_subdivider.wrapping_add(1);
+        let after = *self.timer_subdivider;
+        // $F0 TEST gate (ares timing.cpp:45-49): output propagation is
+        // suppressed when timersEnable (bit 3) is clear or timersDisable
+        // (bit 0) is set. The divider keeps running so phase resumes on
+        // re-enable.
+        if *self.test & 0x08 != 0 && *self.test & 0x01 == 0 {
+            if after % 16 == 0 {
+                tick_one_timer(
+                    *self.timer_reload,
+                    self.timer_output,
+                    self.timer_internal,
+                    *self.timer_enabled,
+                    2,
+                );
+            }
+            if after % 128 == 0 {
+                tick_one_timer(
+                    *self.timer_reload,
+                    self.timer_output,
+                    self.timer_internal,
+                    *self.timer_enabled,
+                    0,
+                );
+                tick_one_timer(
+                    *self.timer_reload,
+                    self.timer_output,
+                    self.timer_internal,
+                    *self.timer_enabled,
+                    1,
+                );
+            }
+        }
+
+        // --- S-DSP: one 32 kHz sample every 32 SPC cycles ---
+        *self.sample_tick_deficit += 1;
+        if *self.sample_tick_deficit >= SPC_CYCLES_PER_SAMPLE {
+            *self.sample_tick_deficit -= SPC_CYCLES_PER_SAMPLE;
+            let (l, r) = self.dsp.main(self.aram);
+            if self.audio_queue.len() < AUDIO_QUEUE_CAPACITY {
+                self.audio_queue.push_back((l, r));
+            }
+            *self.audio_left = l;
+            *self.audio_right = r;
+        }
+    }
 }
 
 impl SpcBus for ApuBusView<'_> {
     fn read(&mut self, addr: u16) -> u8 {
+        self.clock_cycle();
         match addr {
             // $F0 — testing register, write-only on real HW. Return 0.
             0x00F0 => 0,
@@ -449,6 +699,7 @@ impl SpcBus for ApuBusView<'_> {
     }
 
     fn write(&mut self, addr: u16, value: u8) {
+        self.clock_cycle();
         match addr {
             // $F0 — TEST register. Bit 0 = timersDisable, bit 3 =
             // timersEnable gate the timers (ares io.cpp:81-94); the
@@ -510,6 +761,10 @@ impl SpcBus for ApuBusView<'_> {
             // Everything else — ARAM.
             _ => self.aram[addr as usize] = value,
         }
+    }
+
+    fn idle(&mut self) {
+        self.clock_cycle();
     }
 }
 
@@ -588,6 +843,12 @@ mod tests {
             timer_output: &mut apu.timer_output,
             timer_internal: &mut apu.timer_internal,
             timer_enabled: &mut apu.timer_enabled,
+            timer_subdivider: &mut apu.timer_subdivider,
+            sample_tick_deficit: &mut apu.sample_tick_deficit,
+            audio_queue: &mut apu.audio_queue,
+            audio_left: &mut apu.audio_left,
+            audio_right: &mut apu.audio_right,
+            clocked: 0,
         };
         // Pick voice 0 envelope-X output register ($08).
         bus.write(0x00F2, 0x08);
@@ -619,6 +880,12 @@ mod tests {
             timer_output: &mut apu.timer_output,
             timer_internal: &mut apu.timer_internal,
             timer_enabled: &mut apu.timer_enabled,
+            timer_subdivider: &mut apu.timer_subdivider,
+            sample_tick_deficit: &mut apu.sample_tick_deficit,
+            audio_queue: &mut apu.audio_queue,
+            audio_left: &mut apu.audio_left,
+            audio_right: &mut apu.audio_right,
+            clocked: 0,
         };
         bus.write(0x00F2, 0x7C); // point the index at ENDX
         assert_eq!(bus.read(0x00F3), 0b0000_0101);
@@ -721,6 +988,12 @@ mod tests {
                 timer_output: &mut apu.timer_output,
                 timer_internal: &mut apu.timer_internal,
                 timer_enabled: &mut apu.timer_enabled,
+                timer_subdivider: &mut apu.timer_subdivider,
+                sample_tick_deficit: &mut apu.sample_tick_deficit,
+                audio_queue: &mut apu.audio_queue,
+                audio_left: &mut apu.audio_left,
+                audio_right: &mut apu.audio_right,
+                clocked: 0,
             };
             assert_eq!(bus.read(0x00FF), 3);
             assert_eq!(bus.read(0x00FF), 0, "second read should be cleared");
@@ -742,6 +1015,12 @@ mod tests {
             timer_output: &mut apu.timer_output,
             timer_internal: &mut apu.timer_internal,
             timer_enabled: &mut apu.timer_enabled,
+            timer_subdivider: &mut apu.timer_subdivider,
+            sample_tick_deficit: &mut apu.sample_tick_deficit,
+            audio_queue: &mut apu.audio_queue,
+            audio_left: &mut apu.audio_left,
+            audio_right: &mut apu.audio_right,
+            clocked: 0,
         };
         // Enable all 3 timers via $F1.
         bus.write(0x00F1, 0x07);
@@ -755,10 +1034,10 @@ mod tests {
         // ares io.cpp:113-123 — $F1 bit 4 clears CPU→SMP ports 0/1, bit
         // 5 clears 2/3 (the ports the SPC reads at $F4-$F7).
         let mut apu = Apu::new();
-        apu.cpu_write_port(0, 0x11);
-        apu.cpu_write_port(1, 0x22);
-        apu.cpu_write_port(2, 0x33);
-        apu.cpu_write_port(3, 0x44);
+        // Seed the *committed* input ports directly (this test exercises the
+        // $F1 bit-4/5 clear, not the timestamped-visibility deferral of
+        // `cpu_write_port` — pending writes commit only once the SPC runs).
+        apu.to_spc_ports = [0x11, 0x22, 0x33, 0x44];
         {
             let mut bus = ApuBusView {
                 aram: &mut apu.aram,
@@ -772,6 +1051,12 @@ mod tests {
                 timer_output: &mut apu.timer_output,
                 timer_internal: &mut apu.timer_internal,
                 timer_enabled: &mut apu.timer_enabled,
+                timer_subdivider: &mut apu.timer_subdivider,
+                sample_tick_deficit: &mut apu.sample_tick_deficit,
+                audio_queue: &mut apu.audio_queue,
+                audio_left: &mut apu.audio_left,
+                audio_right: &mut apu.audio_right,
+                clocked: 0,
             };
             bus.write(0x00F1, 0x10); // bit 4 → clear ports 0/1
         }
@@ -789,6 +1074,12 @@ mod tests {
                 timer_output: &mut apu.timer_output,
                 timer_internal: &mut apu.timer_internal,
                 timer_enabled: &mut apu.timer_enabled,
+                timer_subdivider: &mut apu.timer_subdivider,
+                sample_tick_deficit: &mut apu.sample_tick_deficit,
+                audio_queue: &mut apu.audio_queue,
+                audio_left: &mut apu.audio_left,
+                audio_right: &mut apu.audio_right,
+                clocked: 0,
             };
             bus.write(0x00F1, 0x20); // bit 5 → clear ports 2/3
         }
@@ -812,6 +1103,12 @@ mod tests {
             timer_output: &mut apu.timer_output,
             timer_internal: &mut apu.timer_internal,
             timer_enabled: &mut apu.timer_enabled,
+            timer_subdivider: &mut apu.timer_subdivider,
+            sample_tick_deficit: &mut apu.sample_tick_deficit,
+            audio_queue: &mut apu.audio_queue,
+            audio_left: &mut apu.audio_left,
+            audio_right: &mut apu.audio_right,
+            clocked: 0,
         };
         bus.write(0x00F8, 0x42);
         bus.write(0x00F9, 0x99);

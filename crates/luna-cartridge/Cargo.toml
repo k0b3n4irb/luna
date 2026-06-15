@@ -12,6 +12,8 @@ readme.workspace = true
 [dependencies]
 luna-bus  = { workspace = true }
 thiserror = { workspace = true }
+# Save-state: serde derive on the cartridge Region enum.
+serde     = { workspace = true, features = ["std", "derive"] }
 
 [lints]
 workspace = true

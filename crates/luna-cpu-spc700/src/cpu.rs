@@ -2,9 +2,10 @@
 
 use crate::bus::SpcBus;
 use crate::flags::{Psw, bit};
+use serde::{Deserialize, Serialize};
 
 /// SPC700 CPU state.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Spc700 {
     /// Accumulator.
     pub a: u8,
@@ -18,9 +19,8 @@ pub struct Spc700 {
     pub pc: u16,
     /// Program status word.
     pub psw: Psw,
-    /// `true` after `STOP` until reset. Also set when the dispatcher
-    /// hits an opcode we haven't implemented yet (with the offender
-    /// captured in [`Self::unimplemented_opcode`]).
+    /// `true` after `STOP` until reset. The opcode dispatcher is
+    /// exhaustive over all 256 opcodes, so this is the only stop cause.
     pub stopped: bool,
     /// `true` after `SLEEP` until an interrupt wakes us up.
     pub sleeping: bool,
@@ -28,11 +28,6 @@ pub struct Spc700 {
     /// BBC) when it takes the branch. `step` reads it to add the `+2`
     /// taken penalty, then clears it before the next instruction.
     pub branch_taken: bool,
-    /// If the CPU stopped because of an unimplemented opcode, this
-    /// holds `(opcode, pc_of_opcode)`. Lets the host emulator surface
-    /// "added opcode $XX at PC=$YYYY would unblock the next driver
-    /// instruction" diagnostics instead of a generic panic.
-    pub unimplemented_opcode: Option<(u8, u16)>,
 }
 
 impl Spc700 {
@@ -58,7 +53,6 @@ impl Spc700 {
         self.pc = u16::from(lo) | (u16::from(hi) << 8);
         self.stopped = false;
         self.sleeping = false;
-        self.unimplemented_opcode = None;
     }
 
     // -----------------------------------------------------------------
@@ -71,6 +65,24 @@ impl Spc700 {
         let v = bus.read(self.pc);
         self.pc = self.pc.wrapping_add(1);
         v
+    }
+
+    /// Dummy read of the byte at PC **without** advancing — one bus
+    /// cycle whose value is discarded. The SPC700 prefetches the byte
+    /// after a 1-/short-operand opcode even when it isn't used; this is
+    /// the per-cycle activity hardware (and Mesen2's `DummyRead`) shows
+    /// for implied/register ops. Needed for cycle-faithful timer/DSP
+    /// clocking, not for state.
+    #[inline]
+    pub fn dummy_read_pc<B: SpcBus>(&mut self, bus: &mut B) {
+        let _ = bus.read(self.pc);
+    }
+
+    /// An internal idle cycle: no bus access, but the SPC still burns a
+    /// cycle (clocking DSP + timers in the timing-accurate consumer).
+    #[inline]
+    pub fn idle<B: SpcBus>(bus: &mut B) {
+        bus.idle();
     }
 
     /// Read a little-endian 16-bit value at PC and advance by 2.

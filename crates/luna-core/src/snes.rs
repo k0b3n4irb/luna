@@ -22,7 +22,50 @@ use luna_ppu::Ppu;
 use crate::coproc::{Dsp1Mapper, Sa1Chip};
 use crate::dma::{Dma, DmaBus, DmaTraceEvent, DmaTraceLog};
 
+/// `serde` helper for a heap-boxed fixed byte array (`Box<[u8; N]>`),
+/// which `serde_bytes` does not cover directly. Used for the 128 KB WRAM.
+pub(crate) mod boxed_byte_array {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    /// Serialize `Box<[u8; N]>` as raw bytes (the `&Box` from serde's
+    /// `with` call site deref-coerces to this `&[u8; N]`).
+    pub(crate) fn serialize<S, const N: usize>(
+        data: &[u8; N],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(&data[..])
+    }
+
+    /// Deserialize a byte blob back into `Box<[u8; N]>` (length must match).
+    pub(crate) fn deserialize<'de, D, const N: usize>(
+        deserializer: D,
+    ) -> Result<Box<[u8; N]>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes = <serde_bytes::ByteBuf>::deserialize(deserializer)?;
+        let arr: [u8; N] = bytes
+            .into_vec()
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("byte array length mismatch"))?;
+        Ok(Box::new(arr))
+    }
+}
+
+/// Placeholder mapper used while a freshly-deserialized [`Snes`] has no
+/// real cartridge attached. The save-state layer swaps the live mapper
+/// back in immediately after `bincode::deserialize`. (`Box<dyn Mapper>`
+/// cannot derive `Deserialize`, so the `mapper` field is `serde(skip)` and
+/// defaults to this.)
+fn placeholder_mapper() -> Box<dyn Mapper + Send> {
+    Box::new(luna_bus::NullMapper)
+}
+
 /// Top-level SNES machine.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Snes {
     /// Main CPU (65C816).
     pub cpu: Cpu,
@@ -34,8 +77,16 @@ pub struct Snes {
     /// division, IRQ status, etc.).
     pub cpu_regs: CpuRegs,
     /// 128 KB Work RAM (banks `$7E-$7F` and the `LowRAM` mirror).
+    #[serde(with = "boxed_byte_array")]
     pub wram: Box<[u8; 0x20000]>,
     /// Cartridge mapper (`LoROM` in P0.6; other mappers in V1+).
+    ///
+    /// Not serialized — the trait object cannot derive `Deserialize`, and
+    /// the ROM must not be baked into the save-state. The save-state layer
+    /// keeps the live mapper and only round-trips its mutable state via
+    /// [`Mapper::save_state`] / [`Mapper::load_state`]. On decode this
+    /// defaults to a [`luna_bus::NullMapper`] placeholder.
+    #[serde(skip, default = "placeholder_mapper")]
     pub mapper: Box<dyn Mapper + Send>,
     /// `FastROM` `MEMSEL` bit — when set, ROM in banks `$80-$FF` at
     /// `$8000-$FFFF` is FAST (6 mclk) instead of SLOW (8 mclk).
@@ -106,24 +157,28 @@ pub struct Snes {
     /// `Some`, every CPU read/write of those four ports is appended as
     /// a [`MailboxEvent`] for later analysis (e.g. diagnosing the
     /// SMW music-driver handshake). Enable via [`Snes::enable_mailbox_log`].
+    #[serde(skip)]
     pub mailbox_log: Option<Vec<MailboxEvent>>,
 
     /// Optional SA-1 MMIO traffic log (`$2200-$23FF`). When `Some`, every
     /// CPU read/write of an SA-1 control/status register is appended as a
     /// [`Sa1LogEvent`] for diagnosing the CPU↔SA-1 handshake (e.g. the
     /// SMRPG intro deadlock). Enable via [`Snes::enable_sa1_log`].
+    #[serde(skip)]
     pub sa1_log: Option<Vec<Sa1LogEvent>>,
 
     /// Optional CPU instruction trace. When `Some`, every call to
     /// [`Snes::step`] appends a pre-instruction register snapshot
     /// until the log fills (capped at `max_events`). Enable via
     /// [`Snes::enable_cpu_trace`].
+    #[serde(skip)]
     pub cpu_trace_log: Option<CpuTraceLog>,
 
     /// Optional memory access trace. When `Some`, every CPU bus
     /// read/write is appended until the log fills. Filterable by
     /// bank to avoid drowning in ROM fetches. Enable via
     /// [`Snes::enable_mem_trace`].
+    #[serde(skip)]
     pub mem_trace_log: Option<MemTraceLog>,
 }
 
@@ -345,14 +400,20 @@ impl Snes {
             // the whole chip lives in `SuperFxMapper`, driven by the
             // `step_coproc` hook. The Game Pak **work** RAM (the GSU's plot
             // target) is NOT the header SRAM byte — that byte is battery
-            // *save* RAM (Star Fox reports 0; the PeterLemon GSU test ROMs
-            // report 1 KB, far too small for a 256×192 framebuffer). The
-            // real work RAM is a board property (Star Fox 32 KB, Doom
-            // 128 KB); without a board table, allocate the 128 KB upper
-            // bound so every framebuffer mode fits. (Over-allocation is
-            // harmless for the games tested — their plot addresses never
-            // reach the larger wrap boundary.)
-            MapperKind::SuperFx => Box::new(SuperFxMapper::new(cart.rom, 0x2_0000)),
+            // *save* RAM. The work-RAM size comes from the extended-header
+            // expansion-RAM byte `$FFBD` (`1024 << n`); GSU carts that don't
+            // carry it default to 64 KB (Mesen2 `BaseCartridge.cpp`). YI is
+            // 32 KB, Doom / Stunt Race 64 KB, Star Fox 64 KB (default).
+            // Over-allocating wraps GSU RAM/RAMBR addressing wrong, so size
+            // it faithfully rather than to a 128 KB upper bound.
+            MapperKind::SuperFx => {
+                let ram = if cart.header.expansion_ram_kb > 0 {
+                    cart.header.expansion_ram_kb as usize * 1024
+                } else {
+                    0x1_0000
+                };
+                Box::new(SuperFxMapper::new(cart.rom, ram))
+            }
             // DSP-1 (Super Mario Kart, Pilotwings) — a base ROM/SRAM map
             // (HiROM or LoROM per the board) plus the NEC uPD7725 chip,
             // fed the cartridge's `dsp1b.rom` firmware. Without firmware
@@ -1771,6 +1832,18 @@ impl SnesBus<'_> {
                 }
             }
             self.ppu.write(off, value);
+            if off == 0x00 {
+                // INIDISP just changed forced-blank: recompute `active_display`
+                // LIVE so a MID-SCANLINE forced-blank gates VRAM/OAM writes
+                // correctly. `active_display` is otherwise only refreshed per
+                // scanline (advance_scheduler), so without this a game that
+                // force-blanks mid-line then DMAs (Tales' attack-frame OBJ-tile
+                // upload at line ~209) has its writes wrongly dropped — luna's
+                // stale cache said active-display while forced-blank was set.
+                // ares checks `displayDisable` live at the write (ppu io.cpp).
+                self.ppu.active_display =
+                    self.ppu_line < self.vblank_start_line && (self.ppu.inidisp & 0x80) == 0;
+            }
             return;
         }
         if let Some(port) = Self::apu_port(addr) {

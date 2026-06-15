@@ -9,5 +9,10 @@ authors.workspace = true
 repository.workspace = true
 readme.workspace = true
 
+[dependencies]
+# Save-state: serde derives on the uPD7725/uPD96050 DSP state.
+serde   = { workspace = true, features = ["std", "derive"] }
+bincode = { workspace = true }
+
 [lints]
 workspace = true

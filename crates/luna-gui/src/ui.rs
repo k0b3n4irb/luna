@@ -24,10 +24,21 @@ pub(crate) enum MenuAction {
     PauseToggle,
     Reset,
     ToggleInputConfig,
-    StartRebind(crate::input::SnesButton),
+    ToggleHotkeyConfig,
+    /// Arm a rebind for `(player, button)` — player 0 = P1, 1 = P2.
+    StartRebind(usize, crate::input::SnesButton),
     StartRebindHotkey(crate::input::Hotkey),
     TakeScreenshot,
     SaveBindings,
+    /// Reset one player's pad bindings to defaults.
+    ResetBindings(usize),
+    /// Apply a named layout preset (Arrows / WASD) to a player's pad.
+    ApplyPreset(usize, crate::input::KeyPreset),
+    ResetHotkeys,
+    /// Save emulator state to numbered slot `1..=9` (also sets it current).
+    SaveState(u8),
+    /// Load emulator state from numbered slot `1..=9` (also sets it current).
+    LoadState(u8),
     // Debug panels (api-first: data comes from `luna_api::Emulator`).
     ToggleCpuState,
     ToggleCpuMemory,
@@ -93,6 +104,7 @@ pub(crate) struct UiState<'a> {
     pub paused: bool,
     pub rom_title: Option<String>,
     pub show_input_config: bool,
+    pub show_hotkey_config: bool,
     pub key_bindings: &'a crate::input::KeyBindings,
     /// Which debug panels are open + their snapshotted data.
     pub show_cpu_state: bool,
@@ -105,14 +117,19 @@ pub(crate) struct UiState<'a> {
     pub show_registers: bool,
     pub show_palette: bool,
     pub show_tilemap: bool,
-    /// When `Some`, the input modal is waiting on the user to press a
-    /// key to rebind the named SNES button.
-    pub pending_rebind: Option<crate::input::SnesButton>,
+    /// When `Some((player, button))`, the input modal is waiting on the
+    /// user to press a key to rebind that player's SNES button.
+    pub pending_rebind: Option<(usize, crate::input::SnesButton)>,
     /// When `Some`, the input modal is waiting on a key to rebind the
     /// named hotkey (screenshot, …).
     pub pending_hotkey_rebind: Option<crate::input::Hotkey>,
     /// Last screenshot filename, shown briefly in the menu bar.
     pub screenshot_status: Option<String>,
+    /// Transient save/load-state feedback shown in the menu bar.
+    pub save_state_status: Option<String>,
+    /// Which save-state slots (1..=9, indexed 0..9) have a file on disk for
+    /// the current ROM. Drives the " ●" occupied marker in the slot menus.
+    pub occupied_slots: [bool; 9],
 }
 
 /// All the egui plumbing wired up against pixels' wgpu device.
@@ -171,6 +188,9 @@ impl UiOverlay {
             draw_menu_bar(ui.ctx(), state, &mut emit);
             if state.show_input_config {
                 draw_input_config(ui.ctx(), state, &mut emit);
+            }
+            if state.show_hotkey_config {
+                draw_hotkey_config(ui.ctx(), state, &mut emit);
             }
             // Debug views live in their own native OS windows (see
             // `crate::debug_window`), not in this overlay — so they can be
@@ -262,26 +282,59 @@ pub(crate) fn install_dark_theme(ctx: &egui::Context) {
 }
 
 fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>, emit: &mut F) {
-    use crate::input::{Hotkey, SnesButton};
+    use crate::input::{NUM_PLAYERS, SnesButton};
+    // Which player tab is showing. Kept in egui memory so the window owns it
+    // locally (no round-trip through app state for a pure view toggle).
+    let tab_id = egui::Id::new("luna-input-player-tab");
+    let mut player = ctx
+        .data_mut(|d| d.get_temp::<usize>(tab_id))
+        .unwrap_or(0)
+        .min(NUM_PLAYERS - 1);
+    // `open` drives egui's title-bar ✕ (top-right close, like the Debug
+    // windows); a click sets it false and we toggle the panel off below.
+    let mut open = true;
     egui::Window::new("Controller bindings")
+        .open(&mut open)
         .collapsible(false)
         .resizable(false)
         .default_width(360.0)
         .max_height(520.0)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
-            ui.label(
-                egui::RichText::new(
-                    "Click a row's button to rebind it. Defaults match the Mesen2 \
-                     \"Arrow keys\" preset.",
-                )
-                .color(egui::Color32::from_rgb(160, 160, 180)),
-            );
+            // Player 1 / Player 2 tabs. Both ports are fully driven by the
+            // emulator ($4017 + auto-read JOY2).
+            ui.horizontal(|ui| {
+                for p in 0..NUM_PLAYERS {
+                    if ui
+                        .selectable_label(player == p, format!("Player {}", p + 1))
+                        .clicked()
+                    {
+                        player = p;
+                    }
+                }
+            });
+            ui.separator();
+            let hint = if player == 0 {
+                "Click a row's button to rebind it. Player 1 defaults to the \
+                 Mesen2 \"Arrow keys\" preset."
+            } else {
+                "Click a row's button to rebind it. Player 2 defaults to the \
+                 numeric-keypad d-pad + the IJKL/UO/HN cluster."
+            };
+            ui.label(egui::RichText::new(hint).color(egui::Color32::from_rgb(160, 160, 180)));
+            ui.add_space(6.0);
+            // One-click layout presets for the active player.
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Preset:").weak().small());
+                for preset in crate::input::KeyPreset::ALL {
+                    if ui.button(preset.label()).clicked() {
+                        emit(MenuAction::ApplyPreset(player, preset));
+                    }
+                }
+            });
             ui.add_space(8.0);
-            // Scroll so the Hotkeys section below the 12 pad rows stays
-            // reachable on short windows.
             egui::ScrollArea::vertical()
-                .max_height(380.0)
+                .max_height(420.0)
                 .show(ui, |ui| {
                     egui::Grid::new("luna-bindings-grid")
                         .num_columns(3)
@@ -290,8 +343,8 @@ fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<
                         .show(ui, |ui| {
                             for &button in &SnesButton::ALL {
                                 ui.label(egui::RichText::new(button.label()).strong());
-                                let key = state.key_bindings.get(button);
-                                let label = if state.pending_rebind == Some(button) {
+                                let key = state.key_bindings.get(player, button);
+                                let label = if state.pending_rebind == Some((player, button)) {
                                     "Press a key…".to_string()
                                 } else {
                                     format!("{key:?}")
@@ -301,15 +354,64 @@ fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<
                                     .on_hover_text("Click to rebind")
                                     .clicked()
                                 {
-                                    emit(MenuAction::StartRebind(button));
+                                    emit(MenuAction::StartRebind(player, button));
                                 }
                                 ui.allocate_space(egui::vec2(1.0, 1.0));
                                 ui.end_row();
                             }
                         });
-                    ui.add_space(10.0);
-                    ui.label(egui::RichText::new("Hotkeys").strong());
-                    ui.add_space(4.0);
+                });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Save & close").clicked() {
+                    emit(MenuAction::SaveBindings);
+                    emit(MenuAction::ToggleInputConfig);
+                }
+                ui.add_space(12.0);
+                if ui
+                    .button("Reset to defaults")
+                    .on_hover_text("Restore this player's default bindings")
+                    .clicked()
+                {
+                    emit(MenuAction::ResetBindings(player));
+                }
+            });
+        });
+    ctx.data_mut(|d| d.insert_temp(tab_id, player));
+    if !open {
+        emit(MenuAction::ToggleInputConfig);
+    }
+}
+
+/// The Hotkeys rebind window (Settings → Hotkeys → Hotkeys…). Split out of
+/// the controller-bindings window so emulator hotkeys (screenshot, …) live
+/// in their own dedicated dialog. Shares the same `KeyBindings` store, so
+/// "Save & close" persists pad + hotkey bindings together.
+fn draw_hotkey_config<F: FnMut(MenuAction)>(
+    ctx: &egui::Context,
+    state: &UiState<'_>,
+    emit: &mut F,
+) {
+    use crate::input::Hotkey;
+    // `open` drives egui's title-bar ✕ (top-right close, like the Debug
+    // windows); a click sets it false and we toggle the panel off below.
+    let mut open = true;
+    egui::Window::new("Hotkeys")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .default_width(360.0)
+        .max_height(520.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new("Click a row's button to rebind an emulator hotkey.")
+                    .color(egui::Color32::from_rgb(160, 160, 180)),
+            );
+            ui.add_space(8.0);
+            egui::ScrollArea::vertical()
+                .max_height(420.0)
+                .show(ui, |ui| {
                     egui::Grid::new("luna-hotkeys-grid")
                         .num_columns(3)
                         .spacing([16.0, 6.0])
@@ -339,13 +441,23 @@ fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<
             ui.horizontal(|ui| {
                 if ui.button("Save & close").clicked() {
                     emit(MenuAction::SaveBindings);
-                    emit(MenuAction::ToggleInputConfig);
+                    emit(MenuAction::ToggleHotkeyConfig);
                 }
-                if ui.button("Close").clicked() {
-                    emit(MenuAction::ToggleInputConfig);
+                ui.add_space(12.0);
+                if ui
+                    .button("Reset to defaults")
+                    .on_hover_text(
+                        "Restore the factory hotkeys (Screenshot = F12, Save = F5, Load = F9)",
+                    )
+                    .clicked()
+                {
+                    emit(MenuAction::ResetHotkeys);
                 }
             });
         });
+    if !open {
+        emit(MenuAction::ToggleHotkeyConfig);
+    }
 }
 
 /// Restyle the current `ui`'s widget visuals so an interactive widget
@@ -1000,6 +1112,7 @@ pub(crate) fn sprites_body(ui: &mut egui::Ui, snap: &DebugSnapshot) {
 /// with a `LayoutJob` so each row is one galley.
 fn mem_hex_grid(ui: &mut egui::Ui, start: u32, bytes: &[u8], addr_digits: usize) {
     use egui::text::{LayoutJob, TextFormat};
+    use std::fmt::Write as _;
 
     // Never wrap: a row's hex and ASCII must stay on one aligned line (the
     // window/scroll-area handles any overflow).
@@ -1020,6 +1133,11 @@ fn mem_hex_grid(ui: &mut egui::Ui, start: u32, bytes: &[u8], addr_digits: usize)
         ..Default::default()
     };
 
+    // One reusable scratch buffer for the per-byte hex / per-char ASCII
+    // cells — `LayoutJob::append` copies the &str, so clearing and reusing
+    // this avoids a heap allocation per cell (32 per row) on every repaint.
+    let mut cell = String::with_capacity(3);
+
     for (r, chunk) in bytes.chunks(16).enumerate() {
         let addr = start.wrapping_add((r as u32) * 16) & 0xFF_FFFF;
         let mut job = LayoutJob::default();
@@ -1029,7 +1147,9 @@ fn mem_hex_grid(ui: &mut egui::Ui, start: u32, bytes: &[u8], addr_digits: usize)
             if r == 0 && i == 0 {
                 f.background = cursor_bg;
             }
-            job.append(&format!("{b:02X}"), 0.0, f);
+            cell.clear();
+            let _ = write!(cell, "{b:02X}");
+            job.append(&cell, 0.0, f);
             job.append(" ", 0.0, fmt(c_zero));
         }
         for _ in chunk.len()..16 {
@@ -1042,7 +1162,9 @@ fn mem_hex_grid(ui: &mut egui::Ui, start: u32, bytes: &[u8], addr_digits: usize)
             } else {
                 ('.', c_dot)
             };
-            job.append(&ch.to_string(), 0.0, fmt(col));
+            cell.clear();
+            cell.push(ch);
+            job.append(&cell, 0.0, fmt(col));
         }
         ui.label(job);
     }
@@ -1250,10 +1372,68 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>,
                         emit(MenuAction::Reset);
                         ui.close();
                     }
+                    ui.separator();
+                    let save_key = state
+                        .key_bindings
+                        .get_hotkey(crate::input::Hotkey::SaveState);
+                    let load_key = state
+                        .key_bindings
+                        .get_hotkey(crate::input::Hotkey::LoadState);
+                    ui.menu_button(format!("Save state ({save_key:?})"), |ui| {
+                        for slot in 1u8..=9 {
+                            let occupied = state
+                                .occupied_slots
+                                .get(usize::from(slot - 1))
+                                .copied()
+                                .unwrap_or(false);
+                            let label = if occupied {
+                                format!("Slot {slot} \u{25cf}")
+                            } else {
+                                format!("Slot {slot}")
+                            };
+                            if ui.button(label).clicked() {
+                                emit(MenuAction::SaveState(slot));
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.menu_button(format!("Load state ({load_key:?})"), |ui| {
+                        for slot in 1u8..=9 {
+                            let occupied = state
+                                .occupied_slots
+                                .get(usize::from(slot - 1))
+                                .copied()
+                                .unwrap_or(false);
+                            let label = if occupied {
+                                format!("Slot {slot} \u{25cf}")
+                            } else {
+                                format!("Slot {slot}")
+                            };
+                            if ui.button(label).clicked() {
+                                emit(MenuAction::LoadState(slot));
+                                ui.close();
+                            }
+                        }
+                    });
                 });
-                ui.menu_button("Input", |ui| {
-                    if ui.button("Configure controller…").clicked() {
+                ui.menu_button("Settings", |ui| {
+                    // Grouped by area (Mesen2-style), so Audio/Video sections
+                    // slot in below later.
+                    ui.label(egui::RichText::new("Input").weak().small());
+                    if ui
+                        .selectable_label(state.show_input_config, "Controller…")
+                        .clicked()
+                    {
                         emit(MenuAction::ToggleInputConfig);
+                        ui.close();
+                    }
+                    ui.separator();
+                    ui.label(egui::RichText::new("Hotkeys").weak().small());
+                    if ui
+                        .selectable_label(state.show_hotkey_config, "Hotkeys…")
+                        .clicked()
+                    {
+                        emit(MenuAction::ToggleHotkeyConfig);
                         ui.close();
                     }
                 });
@@ -1353,6 +1533,12 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>,
                     );
                 }
                 if let Some(status) = state.screenshot_status.as_deref() {
+                    ui.add_space(16.0);
+                    ui.label(
+                        egui::RichText::new(status).color(egui::Color32::from_rgb(120, 200, 120)),
+                    );
+                }
+                if let Some(status) = state.save_state_status.as_deref() {
                     ui.add_space(16.0);
                     ui.label(
                         egui::RichText::new(status).color(egui::Color32::from_rgb(120, 200, 120)),

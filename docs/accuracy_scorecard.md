@@ -60,6 +60,21 @@ needed (the GSU engine is byte-exact and its task timing matches Mesen within 1%
 The differential method (luna CLI traces vs Mesen oracles) localised it; see the
 `project_doom_flicker_opvct_latch` memory.
 
+**UPDATE 2026-06-13 — save state landed (no grade change, but a new
+determinism check).** Full machine-state serialization across the entire `Snes`
+tree (CPU/PPU/APU+S-DSP/DMA/coproc/WRAM/mappers) plus `Emulator::save_state` /
+`load_state` (commits `c58b639` engine+API, `06070b8` GUI slots+hotkeys,
+`a3e0a16` cleanup + `SAVE_STATE_VERSION` bump). This touched **no emulation
+logic** — it is `#[derive(Serialize/Deserialize)]` + a `Mapper::save_state/
+load_state` pair (mutable state only; ROM never serialized, kept live and
+replayed). Accuracy relevance is *verification*, not behavior: the round-trip
+test `save_state_round_trip_rewinds_and_stays_deterministic` (luna-api) asserts
+that save → run-forward → load **rewinds the framebuffer hash + CPU PC exactly**
+and that replay from the restored state is **bit-deterministic** — a CI-gated
+self-consistency signal that the *complete observable state set is enumerated*
+(a missing-field bug surfaces as a round-trip divergence). Validated headlessly
+on the real SMW ROM and in-GUI (F5/F9). No subsystem grade moves.
+
 > The detailed §1+ tables below are the **May 2026 snapshot** — kept for the
 > per-area reasoning, but superseded by this banner where they disagree.
 
@@ -439,6 +454,7 @@ grounded in what `luna-cli` and the standalone crates can actually do today.
 | Register snapshot | `state --out` (`EmulatorState` JSON: full CPU/PPU regs) | state assertions |
 | CPU instruction trace | `state` trace CSV (PC,A,X,Y,SP,P,DB,DP,e) | differential trace diff |
 | Scripted input | `state --input "frame:hex,..."` | tests needing button presses |
+| Full-state round-trip | `Emulator::save_state` / `load_state` | state-completeness + determinism: save → advance → load must rewind exactly (a missing serialized field shows as a round-trip divergence) |
 
 **One small gap:** `--peek` dumps hex to *stderr*, not a machine-readable
 exit code. Tiers 3 needs a thin addition — a `--assert BANK:OFFSET=HEX`
