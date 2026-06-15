@@ -136,6 +136,17 @@ pub struct Apu {
     pub to_spc_ports: [u8; 4],
     /// SPC → CPU mailbox (SPC writes `$F4-$F7`, CPU reads `$2140-$2143`).
     pub to_cpu_ports: [u8; 4],
+    /// SPIKE (timestamped-mailbox visibility): a CPU write to `$2140+port`
+    /// is held here until the SPC's cycle (`timer_subdivider`) catches up
+    /// to the CPU's write cycle, then committed to `to_spc_ports`. This
+    /// makes CPU→SPC visibility cycle-exact instead of quantized to luna's
+    /// whole-instruction APU stepping. `None` = no pending write.
+    #[serde(default)]
+    to_spc_pending: [Option<u8>; 4],
+    /// SPC cycle (`timer_subdivider` value) at which each pending write
+    /// becomes visible (= the CPU's write cycle).
+    #[serde(default)]
+    to_spc_visible_at: [u32; 4],
     /// Fractional master→SPC cycle accumulator: holds
     /// `Σ(master cycles) × SPC_CLOCK_HZ` modulo `MASTER_CLOCK_HZ`, so
     /// the long-run SPC rate is exactly `SPC_CLOCK_HZ / MASTER_CLOCK_HZ`
@@ -237,6 +248,8 @@ impl Apu {
             aram,
             to_spc_ports: [0; 4],
             to_cpu_ports: [0; 4],
+            to_spc_pending: [None; 4],
+            to_spc_visible_at: [0; 4],
             spc_cycle_num: 0,
             spc_cycle_debt: 0,
             control: 0x80, // bit 7: IPL ROM exposed
@@ -369,10 +382,21 @@ impl Apu {
         aram_with_ipl(&self.aram, self.control, addr)
     }
 
-    /// Main CPU writes `value` to mailbox port (0..=3). The byte
-    /// becomes visible to the SPC700 the next time it reads `$F4 + port`.
-    pub const fn cpu_write_port(&mut self, port: usize, value: u8) {
-        self.to_spc_ports[port] = value;
+    /// Main CPU writes `value` to mailbox port (0..=3).
+    ///
+    /// SPIKE (timestamped-mailbox visibility): rather than make the byte
+    /// instantly visible, hold it until the SPC's cycle catches up to the
+    /// CPU's write cycle. `spc_cycle_debt` is how far the SPC currently
+    /// lags the CPU clock (≥ 0 under no-overshoot), so the CPU's write
+    /// cycle in SPC units is `timer_subdivider + spc_cycle_debt`. The SPC
+    /// then sees the write exactly when it reaches that cycle (see the
+    /// commit at the top of [`run_one_spc`](Self::run_one_spc)) — cycle-
+    /// exact CPU→SPC visibility instead of luna's whole-instruction
+    /// quantization (the Tales OP timer-phase derail).
+    pub fn cpu_write_port(&mut self, port: usize, value: u8) {
+        self.to_spc_pending[port] = Some(value);
+        let lag = self.spc_cycle_debt.max(0) as u32;
+        self.to_spc_visible_at[port] = self.timer_subdivider.wrapping_add(lag);
     }
 
     /// Drain up to `max` queued stereo samples into `out`, in oldest-
@@ -444,6 +468,21 @@ impl Apu {
     /// [`step`]: Self::step
     /// [`trace_step_one`]: Self::trace_step_one
     fn run_one_spc(&mut self) -> u32 {
+        // SPIKE: commit any CPU mailbox writes whose visibility cycle the
+        // SPC has now reached (cycle-exact CPU→SPC visibility). Wrap-safe:
+        // `timer_subdivider` is u32 and wraps (~70 min); a write always
+        // commits within microseconds, so a wrapping-distance < 2^31 means
+        // "at or past the visibility cycle".
+        for p in 0..4 {
+            if self.to_spc_pending[p].is_some()
+                && self
+                    .timer_subdivider
+                    .wrapping_sub(self.to_spc_visible_at[p])
+                    < 0x8000_0000
+            {
+                self.to_spc_ports[p] = self.to_spc_pending[p].take().unwrap();
+            }
+        }
         let (cycles, clocked) = {
             let mut bus = ApuBusView {
                 aram: &mut self.aram,
@@ -995,10 +1034,10 @@ mod tests {
         // ares io.cpp:113-123 — $F1 bit 4 clears CPU→SMP ports 0/1, bit
         // 5 clears 2/3 (the ports the SPC reads at $F4-$F7).
         let mut apu = Apu::new();
-        apu.cpu_write_port(0, 0x11);
-        apu.cpu_write_port(1, 0x22);
-        apu.cpu_write_port(2, 0x33);
-        apu.cpu_write_port(3, 0x44);
+        // Seed the *committed* input ports directly (this test exercises the
+        // $F1 bit-4/5 clear, not the timestamped-visibility deferral of
+        // `cpu_write_port` — pending writes commit only once the SPC runs).
+        apu.to_spc_ports = [0x11, 0x22, 0x33, 0x44];
         {
             let mut bus = ApuBusView {
                 aram: &mut apu.aram,
