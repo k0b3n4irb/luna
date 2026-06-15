@@ -2,6 +2,7 @@
 
 use crate::flags::{StatusFlags, bit};
 use luna_bus::{Addr24, Bus, make_addr};
+use serde::{Deserialize, Serialize};
 
 /// 65C816 CPU state.
 ///
@@ -9,7 +10,7 @@ use luna_bus::{Addr24, Bus, make_addr};
 /// width (`M = 1` for A, `X = 1` for index regs) only the low byte is
 /// observable from the program. The high byte (`B`) of A is preserved
 /// across width transitions.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cpu {
     /// Accumulator (16-bit; `M = 1` exposes only the low byte).
     pub a: u16,
@@ -106,12 +107,14 @@ impl Cpu {
         self.pending_nmi = true;
     }
 
-    /// Latch an IRQ for servicing at the next instruction boundary,
-    /// gated by the `I` mask flag. The system bus calls this when an
-    /// H- or V-counter match fires per NMITIMEN bits 5:4. IRQ is
-    /// level-triggered on real hardware but we model it as edge-
-    /// triggered here for simplicity — the bus clears it explicitly
-    /// when `$4211 TIMEUP` is read or the trigger condition lapses.
+    /// Latch the PPU H/V-counter IRQ (NMITIMEN bits 5:4) for servicing
+    /// at the next instruction boundary, gated by the `I` mask flag.
+    /// This `pending_irq` edge-latch covers the internal H/V timer
+    /// source; the bus clears it when `$4211 TIMEUP` is read or the
+    /// match condition lapses. The **coprocessor** `/IRQ` is modelled
+    /// separately as a level line — see [`Cpu::set_irq_line`] /
+    /// [`Cpu::irq_line`], which prevents a single coprocessor IRQ from
+    /// being serviced twice.
     pub const fn trigger_irq(&mut self) {
         self.pending_irq = true;
     }

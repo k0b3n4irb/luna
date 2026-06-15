@@ -1,5 +1,7 @@
 //! 65C816 status register (`P`) and the hidden `E` (emulation) flag.
 
+use serde::{Deserialize, Serialize};
+
 /// Status register bit positions.
 ///
 /// `M` and `X` only have meaning when `E = 0` (native mode). In emulation
@@ -25,7 +27,7 @@ pub mod bit {
 }
 
 /// Wrapper around the 8-bit `P` register, with named bit accessors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct StatusFlags(pub u8);
 
 impl StatusFlags {

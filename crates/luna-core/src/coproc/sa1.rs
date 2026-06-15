@@ -27,6 +27,17 @@ use luna_bus::{
 };
 use luna_cpu_65c816::Cpu;
 
+/// MUTABLE save-state of a [`Sa1Chip`]: the shared-memory mapper state
+/// (as its own bincode blob, ROM excluded) plus the SA-1's CPU and run
+/// accounting. Trace/log fields are not part of the state.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Sa1ChipState {
+    inner: Vec<u8>,
+    cpu: Cpu,
+    running: bool,
+    deficit: u32,
+}
+
 /// SA-1 chip — a `Sa1Mapper` (shared cart memory) wrapped with its
 /// own 65C816 core.
 pub struct Sa1Chip {
@@ -146,6 +157,25 @@ impl Mapper for Sa1Chip {
 
     fn sram_size(&self) -> usize {
         self.inner.sram_size()
+    }
+
+    fn save_state(&self) -> Vec<u8> {
+        let st = Sa1ChipState {
+            inner: self.inner.save_state(),
+            cpu: self.cpu.clone(),
+            running: self.running,
+            deficit: self.deficit,
+        };
+        bincode::serialize(&st).unwrap_or_default()
+    }
+
+    fn load_state(&mut self, data: &[u8]) {
+        if let Ok(st) = bincode::deserialize::<Sa1ChipState>(data) {
+            self.inner.load_state(&st.inner);
+            self.cpu = st.cpu;
+            self.running = st.running;
+            self.deficit = st.deficit;
+        }
     }
 
     fn step_coproc(&mut self, main_mclk: u32) {

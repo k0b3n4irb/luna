@@ -84,9 +84,11 @@ cargo run --release -p luna-gui -- "path/to/game.sfc"
 
 ## Controls & firmware
 
-Single **Player 1** keyboard controller, remappable in the GUI — arrows =
-D-pad; `A`/`Z`/`S`/`X` = B/Y/A/X; `Q`/`W` = L/R; `D`/`E` = Start/Select; `F12` =
-screenshot. **No Player 2, Mouse, or Super Scope yet.** Full table:
+Two keyboard controllers (**Player 1** + **Player 2**), remappable per-player
+in the GUI (Settings → Input). Player 1 defaults: arrows = D-pad;
+`A`/`Z`/`S`/`X` = B/Y/A/X; `Q`/`W` = L/R; `D`/`E` = Start/Select. Player 2
+defaults to the numeric-keypad d-pad + the `IJKL`/`UO`/`HN` cluster. `F12` =
+screenshot (Settings → Hotkeys). **No Mouse or Super Scope yet.** Full table:
 [`docs/CONTROLLER_BINDINGS.md`](docs/CONTROLLER_BINDINGS.md).
 
 **DSP-1 games** (Super Mario Kart, Pilotwings) need a user-supplied `dsp1b.rom`

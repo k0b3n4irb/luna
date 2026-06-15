@@ -20,6 +20,12 @@
 > arbitration** stall. Everything that framed the flicker as a scheduling
 > problem has been cut.
 
+> **See also (2026-06):** the SMW2 Yoshi's Island intro "barcode" text bug
+> was traced *away* from GSU timing — the GSU engine and its per-op cycle
+> model are faithful (verified against Mesen `Gsu::Run`/`Step`), and the
+> text glyphs are not GSU-rendered at all. Full log:
+> `docs/yoshis_island_text_barcode_investigation.md`.
+
 Governed by `.claude/rules/faithful-port-and-dichotomy.md`. Written
 reference-first from the actual ares source
 (`ares/ares/scheduler/{scheduler,thread}.{hpp,cpp}`,

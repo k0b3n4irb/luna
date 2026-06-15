@@ -16,8 +16,18 @@ pub mod snes;
 pub use apu_stub::{ApuStub, Phase as ApuPhase};
 pub use cpu_regs::CpuRegs;
 pub use dma::{DmaTraceEvent, DmaTraceLog};
-pub use luna_bus::{MapperKind, Sa1SideEvent, Sa1TraceEvent, SuperFxTraceEvent};
+pub use luna_bus::{
+    Mapper, MapperKind, NullMapper, Sa1SideEvent, Sa1TraceEvent, SuperFxTraceEvent,
+};
 pub use snes::{
     CpuTraceEvent, CpuTraceLog, MailboxEvent, MailboxEventKind, MemEventKind, MemTraceEvent,
     MemTraceLog, Sa1LogEvent, Snes, UnsupportedMapper,
 };
+
+/// A placeholder [`Mapper`] trait object that owns no ROM and claims no
+/// addresses. The save-state layer uses it to `mem::replace` the live
+/// mapper out of a [`Snes`] (the trait object cannot derive `Deserialize`).
+#[must_use]
+pub fn null_mapper() -> Box<dyn Mapper + Send> {
+    Box::new(NullMapper)
+}

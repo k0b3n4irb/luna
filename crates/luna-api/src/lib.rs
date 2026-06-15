@@ -48,12 +48,34 @@ pub enum ApiError {
     /// `step` / etc. panicked inside the core.
     #[error("emulator panicked: {0}")]
     Panic(String),
+    /// Save-state encode/decode failed, or a loaded state did not match
+    /// the running ROM / save-state format version.
+    #[error("save state: {0}")]
+    SaveState(String),
     /// PNG encoding failed during `render_frame`.
     #[error("image: {0}")]
     Image(#[from] image::ImageError),
     /// Generic I/O.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// Save-state format version. Bump on any breaking change to the
+/// serialized layout so [`Emulator::load_state`] rejects stale blobs.
+/// v2: dropped the always-`None` `Spc700::unimplemented_opcode` field
+/// (the SPC700 dispatch is exhaustive), changing the bincode layout.
+pub const SAVE_STATE_VERSION: u32 = 2;
+
+/// On-disk / on-wire save-state container produced by
+/// [`Emulator::save_state`]. `core` is the bincode-encoded `Snes` (the
+/// mapper trait object is skipped by serde); `mapper` is the live mapper's
+/// mutable-state blob from [`luna_core::Mapper::save_state`].
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SaveStateBundle {
+    version: u32,
+    rom_hash: u64,
+    core: Vec<u8>,
+    mapper: Vec<u8>,
 }
 
 /// Cartridge metadata returned by [`Emulator::load_rom`].
@@ -416,12 +438,10 @@ pub struct SchedulerState {
 pub struct ApuState {
     /// SPC700 program counter.
     pub spc_pc: u16,
-    /// `true` if the SPC700 has stopped (STP or unimplemented op).
+    /// `true` if the SPC700 has stopped (`STP`).
     pub spc_stopped: bool,
     /// `true` once the SPC has left the IPL ROM area at `$FFC0`.
     pub past_iplrom: bool,
-    /// `Some((opcode, pc))` if the SPC stopped on an unimplemented op.
-    pub unimplemented_opcode: Option<UnimplementedOp>,
     /// `$2140-$2143` bytes the SPC has placed on the CPU side.
     pub to_cpu_ports: [u8; 4],
     /// `$F4-$F7` bytes the CPU has placed on the SPC side.
@@ -476,16 +496,6 @@ pub struct ApuState {
     pub voice_pitch_acc: [u16; 8],
 }
 
-/// Diagnostic info for an SPC700 opcode that the emulator hasn't
-/// implemented yet.
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub struct UnimplementedOp {
-    /// Offending opcode byte.
-    pub opcode: u8,
-    /// Address (in SPC700 memory) where the opcode lives.
-    pub pc: u16,
-}
-
 /// One decoded OAM sprite (size, flips, and high-table bits resolved),
 /// mirroring `luna_ppu::SpriteEntry` so front-ends can list sprites
 /// without depending on `luna-ppu` directly.
@@ -522,12 +532,26 @@ pub struct Stats {
     pub total_mclk: u64,
 }
 
+/// Result of [`Emulator::loop_probe`] — a CPU-liveness measurement.
+#[derive(Debug, Clone, Copy, Serialize, schemars::JsonSchema)]
+pub struct LoopProbe {
+    /// Distinct `PB:PC` addresses executed during the probe. A tiny count
+    /// over many instructions means the CPU is spinning in a tight loop.
+    pub distinct_pcs: usize,
+    /// Instructions actually executed (≤ `max_steps`; less if the CPU halted).
+    pub executed: u64,
+}
+
 /// The public emulator handle. Owns at most one cartridge + Snes
 /// machine at a time.
 pub struct Emulator {
     snes: Option<Snes>,
     rom_info: Option<RomInfo>,
     instructions_executed: u64,
+    /// Stable hash of the loaded ROM bytes, captured at `load_rom` time.
+    /// A save state records this so [`Emulator::load_state`] can refuse a
+    /// state produced against a different ROM.
+    rom_hash: u64,
 }
 
 impl Default for Emulator {
@@ -544,6 +568,7 @@ impl Emulator {
             snes: None,
             rom_info: None,
             instructions_executed: 0,
+            rom_hash: 0,
         }
     }
 
@@ -615,6 +640,15 @@ impl Emulator {
     }
 
     fn load_cartridge(&mut self, cart: Cartridge) -> Result<RomInfo, ApiError> {
+        // Capture a stable hash of the ROM bytes before the cartridge is
+        // consumed by `try_from_cartridge`; the save-state layer uses it to
+        // refuse states produced against a different ROM.
+        let rom_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            cart.rom.hash(&mut h);
+            h.finish()
+        };
         let info = RomInfo {
             title: cart.header.title.clone(),
             mapper: format!("{:?}", cart.header.mapper_kind),
@@ -648,6 +682,7 @@ impl Emulator {
                 self.snes = Some(snes);
                 self.rom_info = Some(info.clone());
                 self.instructions_executed = 0;
+                self.rom_hash = rom_hash;
                 Ok(info)
             }
             Ok(Err(unsupported)) => Err(ApiError::UnsupportedMapper(unsupported)),
@@ -734,6 +769,36 @@ impl Emulator {
                 Err(ApiError::Panic(panic_message(&payload)))
             }
         }
+    }
+
+    /// Probe CPU liveness from the current state: step up to `max_steps`
+    /// instructions (stopping early if the CPU halts), recording how many
+    /// **distinct** program addresses (`PB:PC`) were executed. A live game
+    /// touches hundreds–thousands of addresses; a hung game spins over a
+    /// handful — so a tiny `distinct_pcs` is the signal a frozen game is in
+    /// an infinite loop (vs. STP, which `cpu_state().stopped` already
+    /// reports). Mutates state (advances the CPU); a diagnostic, not part of
+    /// normal stepping. Panic-safe (a crashing ROM returns `Err`).
+    pub fn loop_probe(&mut self, max_steps: u64) -> Result<LoopProbe, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        let mut seen = std::collections::HashSet::new();
+        let mut executed = 0u64;
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            while executed < max_steps && !snes.cpu.stopped {
+                seen.insert((u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc));
+                snes.step();
+                executed += 1;
+            }
+        }));
+        std::panic::set_hook(prev_hook);
+        self.instructions_executed += executed;
+        result.map_err(|p| ApiError::Panic(panic_message(&p)))?;
+        Ok(LoopProbe {
+            distinct_pcs: seen.len(),
+            executed,
+        })
     }
 
     /// Take a JSON-serialisable snapshot of the entire observable
@@ -893,11 +958,6 @@ impl Emulator {
                 spc_pc: s.apu_real.cpu.pc,
                 spc_stopped: s.apu_real.cpu.stopped,
                 past_iplrom: s.apu_real.past_iplrom,
-                unimplemented_opcode: s
-                    .apu_real
-                    .cpu
-                    .unimplemented_opcode
-                    .map(|(o, p)| UnimplementedOp { opcode: o, pc: p }),
                 to_cpu_ports: s.apu_real.to_cpu_ports,
                 to_spc_ports: s.apu_real.to_spc_ports,
                 mvol_l: s.apu_real.dsp.registers[0x0C] as i8,
@@ -1277,6 +1337,84 @@ impl Emulator {
             .frame_visible_content)
     }
 
+    /// Cheap, exact hash of the current **displayed** framebuffer (the same
+    /// `256 × 224` RGB pixels [`Emulator::render_frame_rgba`] emits with
+    /// `force_display = false`). Comparing this across frames detects a
+    /// wholly static screen *exactly and every frame* — both cheaper than
+    /// re-rendering to RGBA and hashing (no conversion, no allocation) and
+    /// more reliable than sampling every Nth frame, which can stride over a
+    /// brief change. A hash that never moves across a run is a frozen
+    /// display (vs. [`Emulator::frame_showed_content`], which reports
+    /// forced-blank); the two together separate "rendering nothing" from
+    /// "rendering the same thing forever".
+    pub fn framebuffer_hash(&self) -> Result<u64, ApiError> {
+        use std::hash::{Hash, Hasher};
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        snes.ppu.framebuffer().hash(&mut h);
+        Ok(h.finish())
+    }
+
+    /// Serialize the full running-machine state into a portable blob.
+    ///
+    /// The blob captures the mutable `Snes` state (CPU / PPU / APU / DMA /
+    /// scheduler / WRAM) plus the cartridge mapper's mutable state (SRAM,
+    /// coprocessor RAM / registers / CPU). It deliberately does **not**
+    /// contain the ROM: a state is only ever loadable into an emulator
+    /// already running the same ROM (enforced by [`Emulator::load_state`]
+    /// via the recorded ROM hash). Errors with [`ApiError::NoRom`] if no
+    /// ROM is loaded, or [`ApiError::SaveState`] on an encode failure.
+    pub fn save_state(&self) -> Result<Vec<u8>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let core = bincode::serialize(snes)
+            .map_err(|e| ApiError::SaveState(format!("core encode: {e}")))?;
+        let mapper = snes.mapper.save_state();
+        let bundle = SaveStateBundle {
+            version: SAVE_STATE_VERSION,
+            rom_hash: self.rom_hash,
+            core,
+            mapper,
+        };
+        bincode::serialize(&bundle).map_err(|e| ApiError::SaveState(format!("bundle encode: {e}")))
+    }
+
+    /// Restore a blob produced by [`Emulator::save_state`] into the live
+    /// emulator. The ROM must already be loaded and identical to the one
+    /// the state was saved from (matched by hash) — this is a rewind of the
+    /// running machine, not a ROM swap.
+    ///
+    /// Errors with [`ApiError::NoRom`] when no ROM is loaded, or
+    /// [`ApiError::SaveState`] on a decode failure, a format-version
+    /// mismatch, or a ROM-hash mismatch.
+    pub fn load_state(&mut self, data: &[u8]) -> Result<(), ApiError> {
+        if self.snes.is_none() {
+            return Err(ApiError::NoRom);
+        }
+        let bundle: SaveStateBundle = bincode::deserialize(data)
+            .map_err(|e| ApiError::SaveState(format!("bundle decode: {e}")))?;
+        if bundle.version != SAVE_STATE_VERSION {
+            return Err(ApiError::SaveState(format!(
+                "format version mismatch: state is v{}, this build expects v{SAVE_STATE_VERSION}",
+                bundle.version
+            )));
+        }
+        if bundle.rom_hash != self.rom_hash {
+            return Err(ApiError::SaveState(
+                "ROM mismatch: this save state was produced against a different ROM".to_string(),
+            ));
+        }
+        let mut restored: Snes = bincode::deserialize(&bundle.core)
+            .map_err(|e| ApiError::SaveState(format!("core decode: {e}")))?;
+        // The deserialized `Snes` has a placeholder mapper (the trait object
+        // is `serde(skip)`). Move the LIVE mapper — which still owns the ROM
+        // — into it, then replay the mapper's saved mutable state onto it.
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        restored.mapper = std::mem::replace(&mut snes.mapper, luna_core::null_mapper());
+        restored.mapper.load_state(&bundle.mapper);
+        *snes = restored;
+        Ok(())
+    }
+
     /// Number of stereo samples currently waiting in the APU output
     /// queue — cheap, lets an audio-paced GUI drain exactly the host
     /// ring's free space and tell whether the ring (not the queue) was
@@ -1459,6 +1597,14 @@ impl Emulator {
         Ok((0u32..0x1_0000)
             .map(|a| snes.ppu.vram.peek(a as u16))
             .collect())
+    }
+
+    /// All 64 KB of APU audio RAM (ARAM), for diagnosing the SPC700 sound
+    /// driver — e.g. comparing the CPU↔SPC700 `$2140-$2143` handshake or
+    /// disassembling a stuck driver against a reference.
+    pub fn aram_bytes(&self) -> Result<Vec<u8>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        Ok(snes.apu_real.aram.to_vec())
     }
 
     /// Enable per-instruction CPU tracing. Every subsequent
@@ -1670,7 +1816,6 @@ fn default_apu_state() -> ApuState {
         spc_pc: 0,
         spc_stopped: false,
         past_iplrom: false,
-        unimplemented_opcode: None,
         to_cpu_ports: [0; 4],
         to_spc_ports: [0; 4],
         mvol_l: 0,
@@ -1749,6 +1894,79 @@ mod tests {
     }
 
     #[test]
+    fn save_state_requires_a_rom() {
+        let e = Emulator::new();
+        assert!(matches!(e.save_state(), Err(ApiError::NoRom)));
+        let mut e2 = Emulator::new();
+        assert!(matches!(e2.load_state(&[]), Err(ApiError::NoRom)));
+    }
+
+    #[test]
+    fn load_state_rejects_a_wrong_rom() {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        e.step_until_frame(200_000).unwrap();
+        let saved = e.save_state().expect("save");
+
+        // Fresh emulator with the SAME ROM accepts it.
+        let mut ok = Emulator::new();
+        ok.load_rom_bytes(demo_lorom()).unwrap();
+        assert!(ok.load_state(&saved).is_ok());
+
+        // A garbage blob is refused, not panicked on.
+        assert!(matches!(
+            ok.load_state(&[1, 2, 3, 4]),
+            Err(ApiError::SaveState(_))
+        ));
+    }
+
+    #[test]
+    fn save_state_round_trip_rewinds_and_stays_deterministic() {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+
+        // Run a few frames, then snapshot.
+        for _ in 0..3 {
+            e.step_until_frame(1_000_000).unwrap();
+        }
+        let saved = e.save_state().expect("save");
+        let hash_at_save = e.framebuffer_hash().expect("hash");
+        let cpu_at_save = e.cpu_state().expect("cpu");
+
+        // Run further so the machine has visibly advanced past the save.
+        for _ in 0..3 {
+            e.step_until_frame(1_000_000).unwrap();
+        }
+        let hash_after_more = e.framebuffer_hash().expect("hash");
+        let cpu_after_more = e.cpu_state().expect("cpu");
+
+        // Loading the state rewinds to exactly the save point.
+        e.load_state(&saved).expect("load");
+        assert_eq!(
+            e.framebuffer_hash().expect("hash"),
+            hash_at_save,
+            "loading a state must restore the framebuffer hash captured at save time"
+        );
+        assert_eq!(
+            e.cpu_state().expect("cpu").pc,
+            cpu_at_save.pc,
+            "loading a state must restore the CPU PC captured at save time"
+        );
+
+        // Determinism: re-running the same number of frames from the restored
+        // point reproduces the post-save run bit-for-bit.
+        for _ in 0..3 {
+            e.step_until_frame(1_000_000).unwrap();
+        }
+        assert_eq!(
+            e.framebuffer_hash().expect("hash"),
+            hash_after_more,
+            "replaying from a restored state must reproduce the same frame"
+        );
+        assert_eq!(e.cpu_state().expect("cpu").pc, cpu_after_more.pc);
+    }
+
+    #[test]
     fn load_rom_bytes_populates_rom_info() {
         let mut e = Emulator::new();
         let info = e.load_rom_bytes(demo_lorom()).expect("load");
@@ -1810,5 +2028,27 @@ mod tests {
         e.load_rom_bytes(demo_lorom()).unwrap();
         let png = e.render_frame_png(false).expect("png");
         assert!(png.starts_with(b"\x89PNG"), "header should be PNG magic");
+    }
+
+    #[test]
+    fn framebuffer_hash_is_deterministic_and_matches_rgba_pixels() {
+        let mut e = Emulator::new();
+        assert!(matches!(e.framebuffer_hash(), Err(ApiError::NoRom)));
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        e.step_until_frame(1_000_000).unwrap();
+        let h1 = e.framebuffer_hash().expect("hash");
+        // Pure function of state: identical when nothing changed.
+        assert_eq!(h1, e.framebuffer_hash().unwrap(), "hash must be stable");
+        // It hashes the same displayed pixels render_frame_rgba emits: an
+        // independent hash of the RGB channels of that buffer agrees.
+        let rgba = e.render_frame_rgba(false).unwrap();
+        let mut ref_h = std::collections::hash_map::DefaultHasher::new();
+        let rgb: Vec<[u8; 3]> = rgba.chunks_exact(4).map(|c| [c[0], c[1], c[2]]).collect();
+        std::hash::Hash::hash(&rgb[..], &mut ref_h);
+        assert_eq!(
+            h1,
+            std::hash::Hasher::finish(&ref_h),
+            "hashes the displayed RGB"
+        );
     }
 }

@@ -3,6 +3,40 @@
 //! Each region exposes the auto-incrementing read/write semantics that
 //! games use to upload data via the PPU registers.
 
+/// `serde` helper for a heap-boxed fixed byte array (`Box<[u8; N]>`),
+/// which `serde_bytes` does not cover directly. Round-trips the contents
+/// as a compact byte blob for the save-state machinery.
+pub(crate) mod boxed_byte_array {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    /// Serialize `Box<[u8; N]>` as raw bytes (the `&Box` from serde's
+    /// `with` call site deref-coerces to this `&[u8; N]`).
+    pub(crate) fn serialize<S, const N: usize>(
+        data: &[u8; N],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(&data[..])
+    }
+
+    /// Deserialize a byte blob back into `Box<[u8; N]>` (length must match).
+    pub(crate) fn deserialize<'de, D, const N: usize>(
+        deserializer: D,
+    ) -> Result<std::boxed::Box<[u8; N]>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes = <serde_bytes::ByteBuf>::deserialize(deserializer)?;
+        let arr: [u8; N] = bytes
+            .into_vec()
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("byte array length mismatch"))?;
+        Ok(std::boxed::Box::new(arr))
+    }
+}
+
 // =============================================================================
 // VRAM — 64 KB tile/tilemap memory.
 // =============================================================================
@@ -14,7 +48,9 @@
 /// (VMDATAL/H). The `VMAIN` register at `$2115` controls increment
 /// behaviour: after low or high byte access, by how much, and in what
 /// word-mapping pattern.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Vram {
+    #[serde(with = "boxed_byte_array")]
     data: Box<[u8; 0x1_0000]>,
     /// 16-bit word address (the SNES exposes 32 768 words, so the high
     /// bit of this is ignored when computing the byte offset).
@@ -152,7 +188,7 @@ impl Vram {
 }
 
 /// Decoded `$2115 VMAIN` register.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct VmainSettings {
     /// `true` ⇒ address increments on high-byte access (`$2119`/`$213A`).
     /// `false` ⇒ increments on low-byte access (`$2118`/`$2139`).
@@ -207,7 +243,9 @@ impl VmainSettings {
 /// of bytes via `$2122` (CGDATA) — the first sets the low byte of the
 /// word, the second sets the high byte (the latter triggers the word
 /// advance).
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Cgram {
+    #[serde(with = "serde_bytes")]
     data: [u8; 0x200],
     /// Word address (0..=255).
     pub address: u8,
@@ -313,7 +351,9 @@ impl Cgram {
 /// address by one. In the low table, even-byte writes are latched and
 /// committed only when the odd-byte write arrives, so software
 /// updating a sprite never observes a torn state mid-frame.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Oam {
+    #[serde(with = "serde_bytes")]
     data: [u8; 0x220],
     /// 9-bit word address set via OAMADDL/H. Kept around so we can
     /// reset the byte counter to its canonical position on each

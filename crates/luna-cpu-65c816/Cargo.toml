@@ -11,6 +11,8 @@ readme.workspace = true
 
 [dependencies]
 luna-bus = { workspace = true }
+# Save-state: serde derives on Cpu + StatusFlags.
+serde    = { workspace = true, features = ["std", "derive"] }
 
 [dev-dependencies]
 luna-bus   = { workspace = true, features = ["test-utils"] }

@@ -47,7 +47,7 @@ fn write_a_valid<B: DmaBus>(bus: &mut B, addr: Addr24, value: u8) {
 // =============================================================================
 
 /// Direction of the DMA transfer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Direction {
     /// A-bus → B-bus (CPU → PPU). The common case: uploading tiles,
     /// palettes, OAM, etc.
@@ -57,7 +57,7 @@ pub enum Direction {
 }
 
 /// A-bus address increment behaviour.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Increment {
     /// `+1` per byte (the canonical "uploading a linear buffer" case).
     Up,
@@ -73,7 +73,7 @@ pub enum Increment {
 ///
 /// Notation below: `b` = `BBADx`. So mode 1 writes alternating to
 /// `$2100 + b` and `$2100 + b + 1`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TransferMode {
     /// Mode 0 — 1 byte to `b`. (e.g. palette stream into `$2122`.)
     OneByteOneReg,
@@ -130,7 +130,7 @@ impl TransferMode {
 }
 
 /// Fully-decoded `$43x0 DMAPx` register.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct DmaParams {
     /// A→B (CPU → PPU) or B→A (PPU → CPU).
     pub direction: Direction,
@@ -201,10 +201,23 @@ impl DmaParams {
 // =============================================================================
 
 /// One of the eight DMA channels.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct DmaChannel {
-    /// `$43x0` — decoded parameters.
+    /// `$43x0` — decoded parameters (drive the transfer logic).
     pub params: DmaParams,
+    /// `$43x0` — the raw byte exactly as last written. On hardware the
+    /// register is a plain 8-bit R/W latch: reads return every bit
+    /// verbatim, including bit 5 (unused) and the independent
+    /// fixed/reverse increment bits, none of which survive a round-trip
+    /// through [`DmaParams`]. Games that park their direct page on the
+    /// `$43xx` block and use these registers as fast zero-page scratch
+    /// (e.g. Ms. Pac-Man's graphics decompressor stores its source
+    /// pointer's low byte in `$4340`) rely on lossless read-back; a
+    /// re-encode via [`DmaParams::to_byte`] silently corrupts a quarter
+    /// of all values (any with bit 5 set). ares `cpu/io.cpp` readIO
+    /// reconstructs the byte from independently-stored bits — same
+    /// observable result.
+    pub dmap: u8,
     /// `$43x1` — B-bus base offset (`$2100 + bbad`).
     pub bbad: u8,
     /// `$43x2/$43x3` — A-bus address (low / high). 16-bit; the bank
@@ -235,6 +248,14 @@ pub struct DmaChannel {
     /// HDMA: whether **this** scanline fires a transfer. Reload-on-
     /// entry always sets this; in between it's the repeat flag's value.
     pub hdma_do_transfer: bool,
+    /// HDMA: whether this channel has had its frame-start setup
+    /// (`hdma_start_frame`) run since the last frame-start init. Cleared
+    /// every frame in `hdma_init`. A channel whose HDMAEN bit is set
+    /// **mid-frame** (e.g. Yoshi's Island enables the text-band split at
+    /// scanline ~12) is set up lazily on its first active line so it
+    /// starts cleanly from its source address — matching ares' live
+    /// `hdmaActive()` gating rather than a V=0-only latch.
+    pub hdma_started: bool,
 }
 
 impl Default for DmaParams {
@@ -258,9 +279,9 @@ impl DmaChannel {
     /// Read a per-channel register at offset `0x0..=0xF` (i.e. the
     /// low nibble of `$43xN`).
     #[must_use]
-    pub fn read(&self, offset: u8) -> u8 {
+    pub const fn read(&self, offset: u8) -> u8 {
         match offset & 0x0F {
-            0x0 => self.params.to_byte(),
+            0x0 => self.dmap,
             0x1 => self.bbad,
             0x2 => self.a_addr as u8,
             0x3 => (self.a_addr >> 8) as u8,
@@ -279,7 +300,12 @@ impl DmaChannel {
     /// Write a per-channel register at offset `0x0..=0xF`.
     pub fn write(&mut self, offset: u8, value: u8) {
         match offset & 0x0F {
-            0x0 => self.params = DmaParams::from_byte(value),
+            0x0 => {
+                // Keep the raw latch for lossless read-back AND the
+                // decoded params that drive the transfer logic.
+                self.dmap = value;
+                self.params = DmaParams::from_byte(value);
+            }
             0x1 => self.bbad = value,
             0x2 => self.a_addr = (self.a_addr & 0xFF00) | u16::from(value),
             0x3 => self.a_addr = (self.a_addr & 0x00FF) | (u16::from(value) << 8),
@@ -426,12 +452,17 @@ impl DmaChannel {
                 transferred += 1;
             }
         }
-        // Decrement the 7-bit line count. The repeat bit (bit 7) is
-        // preserved so we can read it back next line for `do_transfer`.
-        let count = (self.ntlr & 0x7F).saturating_sub(1);
-        let repeat = self.ntlr & 0x80;
-        self.ntlr = repeat | count;
-        if count == 0 {
+        // Decrement the FULL 8-bit line counter (repeat bit included) and
+        // reload a new header when the low 7 bits reach 0 — the ares/Mesen2
+        // model (`Gsu`-adjacent `SnesDmaController`: `LineCounterAndRepeat--`
+        // then reload if `& 0x7F == 0`). This is why a header whose low 7
+        // bits are 0 (e.g. `$80`) is a **128-line** entry, not a 1-line one:
+        // the counter walks $80→$7F→…→$00 before the low 7 bits hit 0.
+        // Contra III's title HDMA opens with `$80` for the 128-line logo
+        // band; the old `(ntlr & 0x7F).saturating_sub(1)` treated it as a
+        // single line, so the logo vanished after one scanline.
+        self.ntlr = self.ntlr.wrapping_sub(1);
+        if self.ntlr & 0x7F == 0 {
             // Entry exhausted: read next header byte.
             let next = read_a_valid(bus, make_addr(self.a_bank, self.a2a));
             self.a2a = self.a2a.wrapping_add(1);
@@ -451,8 +482,9 @@ impl DmaChannel {
                 self.hdma_do_transfer = true;
             }
         } else {
-            // Continuation line. Transfer only if the repeat flag is set.
-            self.hdma_do_transfer = repeat != 0;
+            // Continuation line: transfer iff the (decremented) repeat bit
+            // is set — repeat entries hold bit 7 high until they reload.
+            self.hdma_do_transfer = self.ntlr & 0x80 != 0;
         }
         transferred
     }
@@ -825,6 +857,38 @@ mod tests {
     }
 
     #[test]
+    fn hdma_header_low7_zero_is_a_128_line_entry() {
+        // Regression (Contra III title logo): a header whose low 7 bits are
+        // 0 ($80) is a **128-line** non-repeat entry, not a 1-line one — the
+        // counter walks $80→$7F→…→$00 before the low 7 bits hit 0. Transfer
+        // on line 1, hold for 127, then reload the next header at line 128.
+        let mut bus = MockBus::new();
+        bus.poke_a(0x00_2000, &[0x80, 0xAB, 0x01, 0xCD, 0x00]);
+        let mut ch = hdma_channel(0x00, 0x2000, 0x22, 0x00);
+        ch.hdma_start_frame(&mut bus);
+
+        // Line 1: transfer $AB.
+        ch.hdma_step_line(&mut bus);
+        assert_eq!(bus.b[0x22], 0xAB);
+        // Lines 2..=127: hold — still inside the same 128-line entry.
+        for _ in 0..126 {
+            ch.hdma_step_line(&mut bus);
+            assert!(ch.hdma_active, "still inside the 128-line entry");
+            assert!(!ch.hdma_do_transfer, "non-repeat continuation holds");
+        }
+        // Line 128: low 7 bits reach 0 → reload the $01 entry (no transfer
+        // this line, but the fresh entry arms a transfer for the next).
+        ch.hdma_step_line(&mut bus);
+        assert!(ch.hdma_active);
+        assert!(ch.hdma_do_transfer, "fresh entry transfers next line");
+        assert_eq!(bus.b[0x22], 0xAB, "no transfer on the reload line");
+        // Line 129: transfer $CD, then reload terminator → done.
+        ch.hdma_step_line(&mut bus);
+        assert_eq!(bus.b[0x22], 0xCD);
+        assert!(!ch.hdma_active, "terminator ends the channel");
+    }
+
+    #[test]
     fn hdma_indirect_reads_data_via_dasb_pointer() {
         // Table at $00:8000 (a valid A-bus address — $4000-41FF is
         // blocked by validA): `82 56 34 00` (repeat 2-line entry,
@@ -904,14 +968,25 @@ mod tests {
             if matches!(off, 0xC..=0xE) {
                 continue;
             }
-            // Offset $0 (DMAPx) round-trips through enum decoding,
-            // so the read-back may differ in bit 5 (always 0). Mask
-            // it before comparing.
-            if off == 0 {
-                assert_eq!(ch.read(off) & !0x20, val & !0x20);
-            } else {
-                assert_eq!(ch.read(off), val);
-            }
+            // Every other offset — including $0 (DMAPx) — is a plain
+            // 8-bit latch and must round-trip every bit verbatim.
+            assert_eq!(ch.read(off), val, "offset ${off:X} must round-trip");
+        }
+    }
+
+    #[test]
+    fn dmap_reads_back_raw_byte_not_reencoded() {
+        // Regression: $43x0 is a full 8-bit R/W latch. Re-encoding the
+        // read through DmaParams::to_byte() drops bit 5 (and folds the
+        // independent fixed/reverse increment bits), corrupting a
+        // quarter of all values. Ms. Pac-Man parks DP on $4300 and
+        // stores its decompressor's source-pointer low byte in $4340
+        // (DMAP4); a lossy read-back desyncs the LZ stream so the
+        // end-marker is never seen → infinite boot loop.
+        let mut ch = DmaChannel::new();
+        for v in 0u8..=0xFF {
+            ch.write(0x0, v);
+            assert_eq!(ch.read(0x0), v, "DMAPx must read back ${v:02X} verbatim");
         }
     }
 }

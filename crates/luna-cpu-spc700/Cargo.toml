@@ -14,6 +14,10 @@ default = []
 # Enables a flat 64 KB RamBus for downstream tests.
 test-utils = []
 
+[dependencies]
+# Save-state: serde derives on Spc700 + Psw.
+serde = { workspace = true, features = ["std", "derive"] }
+
 # Tom Harte JSON tests integration (see tests/tom_harte.rs).
 [dev-dependencies]
 serde      = { workspace = true, features = ["std"] }

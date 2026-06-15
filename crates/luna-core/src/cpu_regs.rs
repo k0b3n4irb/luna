@@ -12,7 +12,7 @@
 /// Reads from write-only registers return open-bus (we return the last
 /// value seen on the CPU bus, which the calling [`crate::Snes`]
 /// `SnesBus` tracks). Writes to read-only registers are silently dropped.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct CpuRegs {
     /// `$4200` — NMITIMEN: NMI enable (bit 7), V-IRQ (bit 5),
     /// H-IRQ (bit 4), joypad auto-read (bit 0).

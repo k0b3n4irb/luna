@@ -20,6 +20,10 @@ luna-cartridge  = { workspace = true }
 luna-cpu-65c816 = { workspace = true }
 luna-cpu-upd96050 = { workspace = true }
 luna-ppu        = { workspace = true }
+# Save-state: serde derives on the Snes tree + bincode encode (coproc mappers).
+serde       = { workspace = true, features = ["std", "derive"] }
+serde_bytes = { workspace = true }
+bincode     = { workspace = true }
 
 [dev-dependencies]
 # SNES test-ROM golden suite (tests/snes_test_roms.rs): hash the
