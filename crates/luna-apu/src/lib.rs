@@ -93,10 +93,20 @@ pub const MASTER_CYCLES_PER_SPC_STEP: u32 = 84;
 /// NTSC SNES master clock (Hz) — the CPU/PPU timebase.
 pub const MASTER_CLOCK_HZ: u64 = 21_477_272;
 
-/// SPC700 / S-DSP clock (Hz): the 24.576 MHz APU crystal ÷ 24.
-pub const SPC_CLOCK_HZ: u64 = 1_024_000;
+/// SPC700 / S-DSP clock (Hz): the APU crystal ÷ 24. The crystal is
+/// nominally 24.576 MHz (→ 1.024 MHz) but real hardware measures
+/// ~24.607 MHz; ares (`apuFrequency = 32040·768`) and Mesen2 both use the
+/// measured value → `24_606_720` ÷ 24 = **`1_025_280` Hz** (and a `32_040` Hz
+/// DSP output). luna's textbook 1.024 MHz ran the SPC ~0.125 % slow, which
+/// shifts the CPU↔SPC clock alignment during the boot/upload handshake
+/// (differential vs ares: this value moves luna's IPL-upload-loop exit
+/// measurably closer to ares — necessary, though not alone sufficient,
+/// for the Tales of Phantasia OP).
+pub const SPC_CLOCK_HZ: u64 = 1_025_280;
 
-/// SPC cycles per audio sample (32 kHz output at 1.024 MHz).
+/// SPC cycles per audio sample: 32 SPC cycles → one DSP sample. At
+/// [`SPC_CLOCK_HZ`] this yields the `32_040` Hz output rate ares and Mesen2
+/// produce (the host audio backend resamples to the device rate).
 pub const SPC_CYCLES_PER_SAMPLE: u32 = 32;
 
 /// Maximum number of stereo samples buffered in `audio_queue`. The
@@ -257,6 +267,12 @@ impl Apu {
             timer_output: &mut apu.timer_output,
             timer_internal: &mut apu.timer_internal,
             timer_enabled: &mut apu.timer_enabled,
+            timer_subdivider: &mut apu.timer_subdivider,
+            sample_tick_deficit: &mut apu.sample_tick_deficit,
+            audio_queue: &mut apu.audio_queue,
+            audio_left: &mut apu.audio_left,
+            audio_right: &mut apu.audio_right,
+            clocked: 0,
         };
         apu.cpu.reset(&mut bus);
         apu
@@ -401,23 +417,41 @@ impl Apu {
                 budget = 0;
                 break;
             }
-            let mut bus = ApuBusView {
-                aram: &mut self.aram,
-                to_spc_ports: &mut self.to_spc_ports,
-                to_cpu_ports: &mut self.to_cpu_ports,
-                control: &mut self.control,
-                test: &mut self.test,
-                dsp_index: &mut self.dsp_index,
-                dsp: &mut self.dsp,
-                timer_reload: &mut self.timer_reload,
-                timer_output: &mut self.timer_output,
-                timer_internal: &mut self.timer_internal,
-                timer_enabled: &mut self.timer_enabled,
+            let (cycles, clocked) = {
+                let mut bus = ApuBusView {
+                    aram: &mut self.aram,
+                    to_spc_ports: &mut self.to_spc_ports,
+                    to_cpu_ports: &mut self.to_cpu_ports,
+                    control: &mut self.control,
+                    test: &mut self.test,
+                    dsp_index: &mut self.dsp_index,
+                    dsp: &mut self.dsp,
+                    timer_reload: &mut self.timer_reload,
+                    timer_output: &mut self.timer_output,
+                    timer_internal: &mut self.timer_internal,
+                    timer_enabled: &mut self.timer_enabled,
+                    timer_subdivider: &mut self.timer_subdivider,
+                    sample_tick_deficit: &mut self.sample_tick_deficit,
+                    audio_queue: &mut self.audio_queue,
+                    audio_left: &mut self.audio_left,
+                    audio_right: &mut self.audio_right,
+                    clocked: 0,
+                };
+                // The bus clocked timers + DSP once per cycle, in
+                // position, AS the instruction ran (ares grammar). So no
+                // post-instruction batch is needed for executing ops.
+                let cycles = u32::from(self.cpu.step(&mut bus));
+                (cycles, bus.clocked)
             };
-            let cycles = u32::from(self.cpu.step(&mut bus));
             budget -= i64::from(cycles);
-            self.tick_timers(cycles);
-            self.tick_voices(cycles);
+            // Reconcile cycles with no bus activity: the SLEEP/STOP halt
+            // window costs cycles the core charges but doesn't drive over
+            // the bus. Timers/DSP must still advance through them.
+            let unclocked = cycles.saturating_sub(clocked);
+            if unclocked > 0 {
+                self.tick_timers(unclocked);
+                self.tick_voices(unclocked);
+            }
             if self.cpu.pc < IPL_ROM_BASE {
                 self.past_iplrom = true;
             }
@@ -442,10 +476,109 @@ struct ApuBusView<'a> {
     timer_output: &'a mut [u8; 3],
     timer_internal: &'a mut [u16; 3],
     timer_enabled: &'a mut [bool; 3],
+    /// SPC-cycle accumulator feeding the timer dividers (128 → T0/T1,
+    /// 16 → T2). Advanced one per bus cycle by [`Self::clock_cycle`].
+    timer_subdivider: &'a mut u32,
+    /// SPC cycles since the last DSP sample; one 32 kHz sample is
+    /// produced every [`SPC_CYCLES_PER_SAMPLE`].
+    sample_tick_deficit: &'a mut u32,
+    audio_queue: &'a mut std::collections::VecDeque<(i16, i16)>,
+    audio_left: &'a mut i16,
+    audio_right: &'a mut i16,
+    /// Count of bus cycles clocked during the current instruction, so
+    /// the caller can reconcile any cycles with no bus activity (the
+    /// SLEEP/STOP halt window emits fewer bus ops than its cycle cost).
+    clocked: u32,
+}
+
+/// Advance one SPC timer (0/1/2) by one base-clock tick: bump the
+/// internal counter, and on reaching the reload target (0 ⇒ 256) wrap-
+/// increment the 4-bit output and reset.
+fn tick_one_timer(
+    reload: [u8; 3],
+    output: &mut [u8; 3],
+    internal: &mut [u16; 3],
+    enabled: [bool; 3],
+    idx: usize,
+) {
+    if !enabled[idx] {
+        return;
+    }
+    internal[idx] = internal[idx].wrapping_add(1);
+    let target = if reload[idx] == 0 {
+        256
+    } else {
+        u16::from(reload[idx])
+    };
+    if internal[idx] >= target {
+        internal[idx] = 0;
+        output[idx] = (output[idx] + 1) & 0x0F;
+    }
+}
+
+impl ApuBusView<'_> {
+    /// Clock the timers **and** the S-DSP by exactly one SPC cycle, in
+    /// position — the faithful ares grammar (`wait()` → `stepTimers` +
+    /// `synchronize(dsp)`; Mesen2 `IncCycleCount` → `Timer.Run` +
+    /// `dsp->Exec`). Called at the start of every read / write / idle so
+    /// a `$FD-$FF` timer read or a `$F3` DSP write lands on the correct
+    /// cycle. This is the whole point of the per-cycle SPC700 port: the
+    /// number of these calls per opcode equals its true cycle count.
+    fn clock_cycle(&mut self) {
+        self.clocked = self.clocked.wrapping_add(1);
+
+        // --- timers ---
+        *self.timer_subdivider = self.timer_subdivider.wrapping_add(1);
+        let after = *self.timer_subdivider;
+        // $F0 TEST gate (ares timing.cpp:45-49): output propagation is
+        // suppressed when timersEnable (bit 3) is clear or timersDisable
+        // (bit 0) is set. The divider keeps running so phase resumes on
+        // re-enable.
+        if *self.test & 0x08 != 0 && *self.test & 0x01 == 0 {
+            if after % 16 == 0 {
+                tick_one_timer(
+                    *self.timer_reload,
+                    self.timer_output,
+                    self.timer_internal,
+                    *self.timer_enabled,
+                    2,
+                );
+            }
+            if after % 128 == 0 {
+                tick_one_timer(
+                    *self.timer_reload,
+                    self.timer_output,
+                    self.timer_internal,
+                    *self.timer_enabled,
+                    0,
+                );
+                tick_one_timer(
+                    *self.timer_reload,
+                    self.timer_output,
+                    self.timer_internal,
+                    *self.timer_enabled,
+                    1,
+                );
+            }
+        }
+
+        // --- S-DSP: one 32 kHz sample every 32 SPC cycles ---
+        *self.sample_tick_deficit += 1;
+        if *self.sample_tick_deficit >= SPC_CYCLES_PER_SAMPLE {
+            *self.sample_tick_deficit -= SPC_CYCLES_PER_SAMPLE;
+            let (l, r) = self.dsp.main(self.aram);
+            if self.audio_queue.len() < AUDIO_QUEUE_CAPACITY {
+                self.audio_queue.push_back((l, r));
+            }
+            *self.audio_left = l;
+            *self.audio_right = r;
+        }
+    }
 }
 
 impl SpcBus for ApuBusView<'_> {
     fn read(&mut self, addr: u16) -> u8 {
+        self.clock_cycle();
         match addr {
             // $F0 — testing register, write-only on real HW. Return 0.
             0x00F0 => 0,
@@ -489,6 +622,7 @@ impl SpcBus for ApuBusView<'_> {
     }
 
     fn write(&mut self, addr: u16, value: u8) {
+        self.clock_cycle();
         match addr {
             // $F0 — TEST register. Bit 0 = timersDisable, bit 3 =
             // timersEnable gate the timers (ares io.cpp:81-94); the
@@ -550,6 +684,10 @@ impl SpcBus for ApuBusView<'_> {
             // Everything else — ARAM.
             _ => self.aram[addr as usize] = value,
         }
+    }
+
+    fn idle(&mut self) {
+        self.clock_cycle();
     }
 }
 
@@ -628,6 +766,12 @@ mod tests {
             timer_output: &mut apu.timer_output,
             timer_internal: &mut apu.timer_internal,
             timer_enabled: &mut apu.timer_enabled,
+            timer_subdivider: &mut apu.timer_subdivider,
+            sample_tick_deficit: &mut apu.sample_tick_deficit,
+            audio_queue: &mut apu.audio_queue,
+            audio_left: &mut apu.audio_left,
+            audio_right: &mut apu.audio_right,
+            clocked: 0,
         };
         // Pick voice 0 envelope-X output register ($08).
         bus.write(0x00F2, 0x08);
@@ -659,6 +803,12 @@ mod tests {
             timer_output: &mut apu.timer_output,
             timer_internal: &mut apu.timer_internal,
             timer_enabled: &mut apu.timer_enabled,
+            timer_subdivider: &mut apu.timer_subdivider,
+            sample_tick_deficit: &mut apu.sample_tick_deficit,
+            audio_queue: &mut apu.audio_queue,
+            audio_left: &mut apu.audio_left,
+            audio_right: &mut apu.audio_right,
+            clocked: 0,
         };
         bus.write(0x00F2, 0x7C); // point the index at ENDX
         assert_eq!(bus.read(0x00F3), 0b0000_0101);
@@ -761,6 +911,12 @@ mod tests {
                 timer_output: &mut apu.timer_output,
                 timer_internal: &mut apu.timer_internal,
                 timer_enabled: &mut apu.timer_enabled,
+                timer_subdivider: &mut apu.timer_subdivider,
+                sample_tick_deficit: &mut apu.sample_tick_deficit,
+                audio_queue: &mut apu.audio_queue,
+                audio_left: &mut apu.audio_left,
+                audio_right: &mut apu.audio_right,
+                clocked: 0,
             };
             assert_eq!(bus.read(0x00FF), 3);
             assert_eq!(bus.read(0x00FF), 0, "second read should be cleared");
@@ -782,6 +938,12 @@ mod tests {
             timer_output: &mut apu.timer_output,
             timer_internal: &mut apu.timer_internal,
             timer_enabled: &mut apu.timer_enabled,
+            timer_subdivider: &mut apu.timer_subdivider,
+            sample_tick_deficit: &mut apu.sample_tick_deficit,
+            audio_queue: &mut apu.audio_queue,
+            audio_left: &mut apu.audio_left,
+            audio_right: &mut apu.audio_right,
+            clocked: 0,
         };
         // Enable all 3 timers via $F1.
         bus.write(0x00F1, 0x07);
@@ -812,6 +974,12 @@ mod tests {
                 timer_output: &mut apu.timer_output,
                 timer_internal: &mut apu.timer_internal,
                 timer_enabled: &mut apu.timer_enabled,
+                timer_subdivider: &mut apu.timer_subdivider,
+                sample_tick_deficit: &mut apu.sample_tick_deficit,
+                audio_queue: &mut apu.audio_queue,
+                audio_left: &mut apu.audio_left,
+                audio_right: &mut apu.audio_right,
+                clocked: 0,
             };
             bus.write(0x00F1, 0x10); // bit 4 → clear ports 0/1
         }
@@ -829,6 +997,12 @@ mod tests {
                 timer_output: &mut apu.timer_output,
                 timer_internal: &mut apu.timer_internal,
                 timer_enabled: &mut apu.timer_enabled,
+                timer_subdivider: &mut apu.timer_subdivider,
+                sample_tick_deficit: &mut apu.sample_tick_deficit,
+                audio_queue: &mut apu.audio_queue,
+                audio_left: &mut apu.audio_left,
+                audio_right: &mut apu.audio_right,
+                clocked: 0,
             };
             bus.write(0x00F1, 0x20); // bit 5 → clear ports 2/3
         }
@@ -852,6 +1026,12 @@ mod tests {
             timer_output: &mut apu.timer_output,
             timer_internal: &mut apu.timer_internal,
             timer_enabled: &mut apu.timer_enabled,
+            timer_subdivider: &mut apu.timer_subdivider,
+            sample_tick_deficit: &mut apu.sample_tick_deficit,
+            audio_queue: &mut apu.audio_queue,
+            audio_left: &mut apu.audio_left,
+            audio_right: &mut apu.audio_right,
+            clocked: 0,
         };
         bus.write(0x00F8, 0x42);
         bus.write(0x00F9, 0x99);
