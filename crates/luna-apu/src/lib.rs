@@ -93,10 +93,20 @@ pub const MASTER_CYCLES_PER_SPC_STEP: u32 = 84;
 /// NTSC SNES master clock (Hz) — the CPU/PPU timebase.
 pub const MASTER_CLOCK_HZ: u64 = 21_477_272;
 
-/// SPC700 / S-DSP clock (Hz): the 24.576 MHz APU crystal ÷ 24.
-pub const SPC_CLOCK_HZ: u64 = 1_024_000;
+/// SPC700 / S-DSP clock (Hz): the APU crystal ÷ 24. The crystal is
+/// nominally 24.576 MHz (→ 1.024 MHz) but real hardware measures
+/// ~24.607 MHz; ares (`apuFrequency = 32040·768`) and Mesen2 both use the
+/// measured value → `24_606_720` ÷ 24 = **`1_025_280` Hz** (and a `32_040` Hz
+/// DSP output). luna's textbook 1.024 MHz ran the SPC ~0.125 % slow, which
+/// shifts the CPU↔SPC clock alignment during the boot/upload handshake
+/// (differential vs ares: this value moves luna's IPL-upload-loop exit
+/// measurably closer to ares — necessary, though not alone sufficient,
+/// for the Tales of Phantasia OP).
+pub const SPC_CLOCK_HZ: u64 = 1_025_280;
 
-/// SPC cycles per audio sample (32 kHz output at 1.024 MHz).
+/// SPC cycles per audio sample: 32 SPC cycles → one DSP sample. At
+/// [`SPC_CLOCK_HZ`] this yields the `32_040` Hz output rate ares and Mesen2
+/// produce (the host audio backend resamples to the device rate).
 pub const SPC_CYCLES_PER_SAMPLE: u32 = 32;
 
 /// Maximum number of stereo samples buffered in `audio_queue`. The
