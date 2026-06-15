@@ -1832,6 +1832,18 @@ impl SnesBus<'_> {
                 }
             }
             self.ppu.write(off, value);
+            if off == 0x00 {
+                // INIDISP just changed forced-blank: recompute `active_display`
+                // LIVE so a MID-SCANLINE forced-blank gates VRAM/OAM writes
+                // correctly. `active_display` is otherwise only refreshed per
+                // scanline (advance_scheduler), so without this a game that
+                // force-blanks mid-line then DMAs (Tales' attack-frame OBJ-tile
+                // upload at line ~209) has its writes wrongly dropped — luna's
+                // stale cache said active-display while forced-blank was set.
+                // ares checks `displayDisable` live at the write (ppu io.cpp).
+                self.ppu.active_display =
+                    self.ppu_line < self.vblank_start_line && (self.ppu.inidisp & 0x80) == 0;
+            }
             return;
         }
         if let Some(port) = Self::apu_port(addr) {
