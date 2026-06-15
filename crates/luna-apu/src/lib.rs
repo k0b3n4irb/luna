@@ -430,46 +430,71 @@ impl Apu {
             if i64::from(SPC700_CYCLES[next_op as usize]) > budget {
                 break;
             }
-            let (cycles, clocked) = {
-                let mut bus = ApuBusView {
-                    aram: &mut self.aram,
-                    to_spc_ports: &mut self.to_spc_ports,
-                    to_cpu_ports: &mut self.to_cpu_ports,
-                    control: &mut self.control,
-                    test: &mut self.test,
-                    dsp_index: &mut self.dsp_index,
-                    dsp: &mut self.dsp,
-                    timer_reload: &mut self.timer_reload,
-                    timer_output: &mut self.timer_output,
-                    timer_internal: &mut self.timer_internal,
-                    timer_enabled: &mut self.timer_enabled,
-                    timer_subdivider: &mut self.timer_subdivider,
-                    sample_tick_deficit: &mut self.sample_tick_deficit,
-                    audio_queue: &mut self.audio_queue,
-                    audio_left: &mut self.audio_left,
-                    audio_right: &mut self.audio_right,
-                    clocked: 0,
-                };
-                // The bus clocked timers + DSP once per cycle, in
-                // position, AS the instruction ran (ares grammar). So no
-                // post-instruction batch is needed for executing ops.
-                let cycles = u32::from(self.cpu.step(&mut bus));
-                (cycles, bus.clocked)
-            };
-            budget -= i64::from(cycles);
-            // Reconcile cycles with no bus activity: the SLEEP/STOP halt
-            // window costs cycles the core charges but doesn't drive over
-            // the bus. Timers/DSP must still advance through them.
-            let unclocked = cycles.saturating_sub(clocked);
-            if unclocked > 0 {
-                self.tick_timers(unclocked);
-                self.tick_voices(unclocked);
-            }
-            if self.cpu.pc < IPL_ROM_BASE {
-                self.past_iplrom = true;
-            }
+            budget -= i64::from(self.run_one_spc());
         }
         self.spc_cycle_debt = budget;
+    }
+
+    /// Run exactly one SPC700 instruction over the APU bus, clocking the
+    /// timers + S-DSP per cycle in position (the ares grammar), and
+    /// reconciling any SLEEP/STOP cycles the core charges without driving
+    /// the bus. Returns the instruction's cycle cost. Shared by [`step`]
+    /// and the trajectory harness [`trace_step_one`].
+    ///
+    /// [`step`]: Self::step
+    /// [`trace_step_one`]: Self::trace_step_one
+    fn run_one_spc(&mut self) -> u32 {
+        let (cycles, clocked) = {
+            let mut bus = ApuBusView {
+                aram: &mut self.aram,
+                to_spc_ports: &mut self.to_spc_ports,
+                to_cpu_ports: &mut self.to_cpu_ports,
+                control: &mut self.control,
+                test: &mut self.test,
+                dsp_index: &mut self.dsp_index,
+                dsp: &mut self.dsp,
+                timer_reload: &mut self.timer_reload,
+                timer_output: &mut self.timer_output,
+                timer_internal: &mut self.timer_internal,
+                timer_enabled: &mut self.timer_enabled,
+                timer_subdivider: &mut self.timer_subdivider,
+                sample_tick_deficit: &mut self.sample_tick_deficit,
+                audio_queue: &mut self.audio_queue,
+                audio_left: &mut self.audio_left,
+                audio_right: &mut self.audio_right,
+                clocked: 0,
+            };
+            let cycles = u32::from(self.cpu.step(&mut bus));
+            (cycles, bus.clocked)
+        };
+        let unclocked = cycles.saturating_sub(clocked);
+        if unclocked > 0 {
+            self.tick_timers(unclocked);
+            self.tick_voices(unclocked);
+        }
+        if self.cpu.pc < IPL_ROM_BASE {
+            self.past_iplrom = true;
+        }
+        cycles
+    }
+
+    /// Trajectory-harness hook (Tales OP derail differential): capture the
+    /// pre-instruction SPC register snapshot `(pc, a, x, y, sp, psw)`, then
+    /// free-run exactly one SPC700 instruction (full timer/DSP clocking, a
+    /// frozen mailbox), and return the snapshot. Not used in normal
+    /// stepping; see `crates/luna-core/tests/spc_trajectory.rs`.
+    #[doc(hidden)]
+    pub fn trace_step_one(&mut self) -> (u16, u8, u8, u8, u8, u8) {
+        let snap = (
+            self.cpu.pc,
+            self.cpu.a,
+            self.cpu.x,
+            self.cpu.y,
+            self.cpu.sp,
+            self.cpu.psw.0,
+        );
+        self.run_one_spc();
+        snap
     }
 }
 

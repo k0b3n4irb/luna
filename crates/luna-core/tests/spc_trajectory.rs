@@ -25,6 +25,8 @@
 //!     spc_freerun_reproduces_derail -- --ignored --nocapture
 //! ```
 
+use std::fmt::Write as _;
+
 use luna_cartridge::Cartridge;
 use luna_core::Snes;
 
@@ -89,8 +91,10 @@ fn spc_freerun_reproduces_derail() {
         snes.apu_real.cpu.pc, snes.apu_real.cpu.sleeping, snes.apu_real.cpu.stopped
     );
 
-    // --- Phase B: re-run to just before the derail, freeze the mailbox,
-    //     free-run only the APU, and see whether it still derails. ---
+    // --- Phase B: re-run to just before the derail, dump the injection
+    //     state (SMP regs + raw ARAM) for ares, freeze the mailbox, and
+    //     free-run the APU one instruction at a time, logging the per-
+    //     instruction trajectory until the derail. ---
     let margin = 40_000u64;
     let start = d.saturating_sub(margin);
     let mut snes = boot();
@@ -101,15 +105,46 @@ fn spc_freerun_reproduces_derail() {
         !derailed(&snes),
         "margin too small — already derailed at the free-run start"
     );
+    let cpu = &snes.apu_real.cpu;
+    // Injection state for ares: registers (one `key=val` per line) + raw
+    // 64 KB ARAM. ares overwrites its SMP regs + apuram with these, then
+    // free-runs and traces, so the two trajectories share an origin.
+    let mb = snes.apu_real.to_spc_ports;
+    let regs = format!(
+        "pc={}\na={}\nx={}\ny={}\nsp={}\npsw={}\ncontrol={}\n\
+         cpu0={}\ncpu1={}\ncpu2={}\ncpu3={}\n",
+        cpu.pc,
+        cpu.a,
+        cpu.x,
+        cpu.y,
+        cpu.sp,
+        cpu.psw.0,
+        snes.apu_real.control,
+        mb[0],
+        mb[1],
+        mb[2],
+        mb[3]
+    );
+    std::fs::write("/tmp/luna_spc_inject.txt", regs).expect("write inject regs");
+    std::fs::write("/tmp/luna_spc_inject_aram.bin", &snes.apu_real.aram[..])
+        .expect("write inject aram");
+    eprintln!(
+        "[inject] dumped SMP state @ step {start}: pc={:#06X} a={:02X} x={:02X} y={:02X} sp={:02X}",
+        cpu.pc, cpu.a, cpu.x, cpu.y, cpu.sp
+    );
+
     let frozen = snes.apu_real.to_spc_ports;
+    let mut traj = String::new();
     let mut derailed_free = None;
-    for i in 0..2_000_000usize {
-        snes.apu_real.step(84); // ~4 SPC cycles ≈ 1-2 SPC instrs/call
+    for i in 0..200_000usize {
+        let (pc, a, x, y, sp, psw) = snes.apu_real.trace_step_one();
+        let _ = writeln!(traj, "{pc:04X} {a:02X} {x:02X} {y:02X} {sp:02X} {psw:02X}");
         if derailed(&snes) {
             derailed_free = Some(i);
             break;
         }
     }
+    std::fs::write("/tmp/luna_spc_traj.txt", &traj).expect("write trajectory");
     assert_eq!(
         frozen, snes.apu_real.to_spc_ports,
         "mailbox changed during free-run — the CPU must not have run"
@@ -117,15 +152,16 @@ fn spc_freerun_reproduces_derail() {
 
     match derailed_free {
         Some(i) => eprintln!(
-            "\n=== DERAIL REPRODUCED mailbox-free (free-run call {i}, spc_pc={:#06X}) ===\n\
-             ⇒ INTERNAL to the SPC (engine / timer / sequence playback), NOT mailbox-dependent.\n\
-             ⇒ a synchronized luna↔ares SMP trajectory diff is VALID (Phase 2).",
-            snes.apu_real.cpu.pc
+            "\n=== DERAIL REPRODUCED mailbox-free (free-run instr {i}, spc_pc={:#06X}) ===\n\
+             luna trajectory ({} instrs) -> /tmp/luna_spc_traj.txt\n\
+             injection state -> /tmp/luna_spc_inject.txt + /tmp/luna_spc_inject_aram.bin\n\
+             ⇒ inject these into ares, free-run + trace, diff to the first diverging op (Phase 2).",
+            snes.apu_real.cpu.pc,
+            traj.lines().count()
         ),
         None => eprintln!(
             "\n=== NO derail in the mailbox-frozen free-run (started {margin} steps before) ===\n\
-             ⇒ the derail needs live CPU mailbox input within the last {margin} steps.\n\
-             ⇒ Phase 2 must be a CPU-coupled SMP trace, not a free-run trajectory."
+             ⇒ the derail needs live CPU mailbox input within the last {margin} steps."
         ),
     }
 }
