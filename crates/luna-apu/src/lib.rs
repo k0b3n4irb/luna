@@ -31,7 +31,7 @@
 //! average SPC instructions — good enough until we wire timer-driven
 //! cycle accounting in.
 
-use luna_cpu_spc700::{IPL_ROM, IPL_ROM_BASE, Spc700, SpcBus};
+use luna_cpu_spc700::{IPL_ROM, IPL_ROM_BASE, SPC700_CYCLES, Spc700, SpcBus};
 
 /// Read one ARAM byte as the **SPC700** sees it: `$FFC0-$FFFF` returns
 /// the 64-byte IPL ROM while `$F1` bit 7 is set, otherwise the physical
@@ -415,6 +415,19 @@ impl Apu {
                 // SPC halted: drop the budget rather than let it pile up
                 // into a burst if it ever un-stops.
                 budget = 0;
+                break;
+            }
+            // No-overshoot catch-up: peek the next opcode's base cost and
+            // only run it if it fits the remaining budget, so the SPC stops
+            // at-or-before the CPU's master clock rather than overshooting
+            // whole instructions past it. luna's one-way CPU-driven model
+            // (the SPC catches up to the CPU, never vice versa) desyncs the
+            // mailbox handshake under overshoot — Tales of Phantasia's OP
+            // hangs with no sound. Stopping short keeps the SPC's view of
+            // the CPU mailbox writes correctly ordered. The leftover budget
+            // carries forward in `spc_cycle_debt`.
+            let next_op = aram_with_ipl(&self.aram, self.control, self.cpu.pc);
+            if i64::from(SPC700_CYCLES[next_op as usize]) > budget {
                 break;
             }
             let (cycles, clocked) = {
