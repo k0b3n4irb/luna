@@ -105,14 +105,33 @@ fn spc_freerun_reproduces_derail() {
         !derailed(&snes),
         "margin too small — already derailed at the free-run start"
     );
+    // Phase-vs-bug control (LUNA_SPC_RESET_TIMER): reset BOTH timer phases
+    // to an identical aligned state (subdivider + per-timer divider = 0) so
+    // luna's free-run and ares' injected run start from the SAME timer
+    // phase (ares zeros stage0/stage1/stage2 to match). RESULT (settled
+    // 2026-06-15): WITH the reset the trajectories agree for all 12k traced
+    // instrs ⇒ the SPC700 engine + timer MODEL are faithful; WITHOUT it the
+    // first divergence is a T1OUT poll (ares' T1 ticks one poll before
+    // luna's) ⇒ the Tales derail is an accumulated timer-PHASE drift, not a
+    // model bug. Output counters / targets / enables are always preserved.
+    if std::env::var("LUNA_SPC_RESET_TIMER").is_ok() {
+        snes.apu_real.timer_subdivider = 0;
+        snes.apu_real.timer_internal = [0; 3];
+    }
     let cpu = &snes.apu_real.cpu;
-    // Injection state for ares: registers (one `key=val` per line) + raw
-    // 64 KB ARAM. ares overwrites its SMP regs + apuram with these, then
-    // free-runs and traces, so the two trajectories share an origin.
+    // Injection state for ares: registers + raw 64 KB ARAM + frozen mailbox
+    // + timer config (now phase-aligned to zero). ares overwrites its SMP
+    // regs/apuram/timers with these so the two trajectories share an origin.
     let mb = snes.apu_real.to_spc_ports;
+    let tout = snes.apu_real.timer_output;
+    let tdiv = snes.apu_real.timer_reload;
+    let ten = snes.apu_real.timer_enabled;
     let regs = format!(
-        "pc={}\na={}\nx={}\ny={}\nsp={}\npsw={}\ncontrol={}\n\
-         cpu0={}\ncpu1={}\ncpu2={}\ncpu3={}\n",
+        "pc={}\na={}\nx={}\ny={}\nsp={}\npsw={}\ncontrol={}\ntest={}\n\
+         cpu0={}\ncpu1={}\ncpu2={}\ncpu3={}\n\
+         t0out={}\nt1out={}\nt2out={}\n\
+         t0div={}\nt1div={}\nt2div={}\n\
+         t0en={}\nt1en={}\nt2en={}\n",
         cpu.pc,
         cpu.a,
         cpu.x,
@@ -120,10 +139,20 @@ fn spc_freerun_reproduces_derail() {
         cpu.sp,
         cpu.psw.0,
         snes.apu_real.control,
+        snes.apu_real.test,
         mb[0],
         mb[1],
         mb[2],
-        mb[3]
+        mb[3],
+        tout[0],
+        tout[1],
+        tout[2],
+        tdiv[0],
+        tdiv[1],
+        tdiv[2],
+        u8::from(ten[0]),
+        u8::from(ten[1]),
+        u8::from(ten[2]),
     );
     std::fs::write("/tmp/luna_spc_inject.txt", regs).expect("write inject regs");
     std::fs::write("/tmp/luna_spc_inject_aram.bin", &snes.apu_real.aram[..])
