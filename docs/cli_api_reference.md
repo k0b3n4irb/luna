@@ -28,6 +28,7 @@ Commands:
   frames      Capture EXACTLY-consecutive PPU frames as PNGs (temporal artefacts).
   wram-trace  Per-frame vblank-aligned WRAM page hashes (cross-emulator differential).
   bench       Run a whole ROM directory headless and write a compatibility report.
+  spc-dump    Export the live APU state as a playable .spc sound file.
   mcp         Serve the luna MCP server on stdio.
 
 Global options:
@@ -154,6 +155,31 @@ local (gitignored under `--out`).
 | `-f, --frames <N>` | `600` | Frames to run per ROM. |
 | `--input <SCRIPT>` | Start-pulse | Override the default title-clearing input (§3). |
 
+### `luna spc-dump` — export a `.spc` sound file
+
+```
+luna spc-dump [OPTIONS] <ROM>
+```
+
+Runs the ROM until its music driver is playing, then writes the live APU
+state as a `.spc` file (`SNES-SPC700 Sound File Data v0.30`): SPC700
+registers + 64 KB ARAM + 128 DSP registers + IPL ROM, playable in any SPC
+player. Step far enough in — and pulse Start via `--input` — that the
+music has started before the snapshot.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `<ROM>` | — | Path to the ROM. |
+| `-n, --steps <N>` | `5000000` | CPU instructions before the snapshot. |
+| `-o, --out <PATH>` | `<rom-stem>.spc` | Output path for the `.spc`. |
+| `--force-mapper <M>` | auto | As in `state`. |
+| `--dsp1-rom <PATH>` | — | Install `dsp1b.rom` then load (DSP-1 games). |
+| `--input <SCRIPT>` | — | Joypad-1 script applied before the snapshot (§3). |
+
+```bash
+luna spc-dump "game.sfc" -n 8000000 -o /tmp/song.spc
+```
+
 ### `luna mcp` — MCP server over stdio
 
 ```
@@ -253,8 +279,9 @@ method returns `Result<_, ApiError>` unless noted. Grouped by purpose:
 - `render_tilemap_rgba(bg_idx)` → `TilemapImage`
 - `decode_sprites()` → `Vec<SpriteInfo>`
 
-**Save-states**
+**Save-states & export**
 - `save_state()` → bytes, `load_state(bytes)`
+- `export_spc()` → a 66 048-byte `.spc` sound file (SPC700 regs + ARAM + DSP regs + IPL ROM)
 
 **Audio**
 - `audio_queue_len()`, `drain_audio(max)` → `Vec<(i16, i16)>`
