@@ -116,10 +116,20 @@ pub(crate) enum Hotkey {
     SaveState,
     /// Load emulator state from the current slot (default `F9`, like Mesen2).
     LoadState,
+    /// Toggle pause / resume (default `F2`).
+    Pause,
+    /// Reset the console (default `F3`).
+    Reset,
 }
 
 impl Hotkey {
-    pub(crate) const ALL: [Self; 3] = [Self::Screenshot, Self::SaveState, Self::LoadState];
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Screenshot,
+        Self::SaveState,
+        Self::LoadState,
+        Self::Pause,
+        Self::Reset,
+    ];
 
     /// Display label for the rebind UI.
     #[must_use]
@@ -128,16 +138,20 @@ impl Hotkey {
             Self::Screenshot => "Screenshot",
             Self::SaveState => "Save state",
             Self::LoadState => "Load state",
+            Self::Pause => "Pause / Resume",
+            Self::Reset => "Reset",
         }
     }
 
     /// Factory default key. Mesen2 binds screenshot to `F12`, save/load
-    /// state to `F5`/`F9`.
+    /// state to `F5`/`F9`; luna adds pause on `F2` and reset on `F3`.
     const fn default_key(self) -> KeyCode {
         match self {
             Self::Screenshot => KeyCode::F12,
             Self::SaveState => KeyCode::F5,
             Self::LoadState => KeyCode::F9,
+            Self::Pause => KeyCode::F2,
+            Self::Reset => KeyCode::F3,
         }
     }
 }
@@ -245,7 +259,7 @@ const P2_DEFAULT: [(SnesButton, KeyCode); 12] = [
 #[derive(Clone)]
 pub(crate) struct KeyBindings {
     pads: [[(SnesButton, KeyCode); 12]; NUM_PLAYERS],
-    hotkeys: [(Hotkey, KeyCode); 3],
+    hotkeys: [(Hotkey, KeyCode); 5],
 }
 
 impl Default for KeyBindings {
@@ -256,6 +270,8 @@ impl Default for KeyBindings {
                 (Hotkey::Screenshot, Hotkey::Screenshot.default_key()),
                 (Hotkey::SaveState, Hotkey::SaveState.default_key()),
                 (Hotkey::LoadState, Hotkey::LoadState.default_key()),
+                (Hotkey::Pause, Hotkey::Pause.default_key()),
+                (Hotkey::Reset, Hotkey::Reset.default_key()),
             ],
         }
     }
@@ -549,10 +565,19 @@ mod tests {
         assert_eq!(b.get_hotkey(Hotkey::Screenshot), KeyCode::F12);
         assert_eq!(b.hotkey_for(KeyCode::F12), Some(Hotkey::Screenshot));
         // Remap and confirm both directions follow.
-        b.set_hotkey(Hotkey::Screenshot, KeyCode::F2);
-        assert_eq!(b.get_hotkey(Hotkey::Screenshot), KeyCode::F2);
-        assert_eq!(b.hotkey_for(KeyCode::F2), Some(Hotkey::Screenshot));
+        b.set_hotkey(Hotkey::Screenshot, KeyCode::F1);
+        assert_eq!(b.get_hotkey(Hotkey::Screenshot), KeyCode::F1);
+        assert_eq!(b.hotkey_for(KeyCode::F1), Some(Hotkey::Screenshot));
         assert_eq!(b.hotkey_for(KeyCode::F12), None);
+    }
+
+    #[test]
+    fn pause_and_reset_hotkeys_default_to_f2_f3_and_reverse_resolves() {
+        let b = KeyBindings::default();
+        assert_eq!(b.get_hotkey(Hotkey::Pause), KeyCode::F2);
+        assert_eq!(b.get_hotkey(Hotkey::Reset), KeyCode::F3);
+        assert_eq!(b.hotkey_for(KeyCode::F2), Some(Hotkey::Pause));
+        assert_eq!(b.hotkey_for(KeyCode::F3), Some(Hotkey::Reset));
     }
 
     #[test]
