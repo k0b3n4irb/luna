@@ -32,24 +32,22 @@ enum Command {
     /// Load a ROM, step the CPU N instructions, optionally dump a
     /// screenshot of the resulting PPU state.
     ///
-    /// Phase 1.7: no APU yet, so real ROMs that handshake with the
-    /// SPC700 will eventually hang. We still render whatever the PPU
-    /// produced via direct CPU writes / DMA. unimplemented opcodes
-    /// panic and are caught — partial state is still dumped.
+    /// Unimplemented opcodes panic and are caught — partial state is
+    /// still dumped.
     Run {
         /// Path to the .sfc / .smc ROM file.
         rom: PathBuf,
         /// Maximum number of CPU instructions to execute before dumping.
         #[arg(short = 'n', long, default_value_t = 64)]
         steps: u64,
-        /// If set, render a 256×224 PNG of the framebuffer (BG1 Mode 0
-        /// only at this point) and write it to the given path.
+        /// If set, render a 256×224 PNG of the composited framebuffer
+        /// and write it to the given path.
         #[arg(long)]
         screenshot: Option<PathBuf>,
         /// Bypass INIDISP forced-blank when rendering. Lets you see
         /// whatever the game has uploaded to VRAM/CGRAM even if its
-        /// init left the screen blanked (typical when waiting on the
-        /// SPC700 we don't fully emulate yet).
+        /// init left the screen blanked (e.g. a title still waiting on
+        /// a Start press).
         #[arg(long)]
         force_display: bool,
         /// If set (1..=4), render ONLY that BG layer. Default is the
@@ -72,11 +70,11 @@ enum Command {
     /// closes the stream.
     Mcp,
     /// Run the emulator through `luna-api` and emit a JSON state
-    /// snapshot — the same data the MCP `get_state` tool returns.
+    /// snapshot — the same data the MCP `state` tool returns.
     ///
-    /// This is the dogfood path: the API surface that the CLI, GUI
-    /// and (eventually) MCP server all share. Use it to test the
-    /// API directly without going through any transport.
+    /// This is the dogfood path: the API surface that the CLI, GUI and
+    /// MCP server all share. Use it to test the API directly without
+    /// going through any transport.
     State {
         /// Path to the .sfc / .smc ROM file.
         rom: PathBuf,
@@ -328,6 +326,69 @@ enum Command {
         #[arg(long)]
         input: Option<String>,
     },
+    /// Run a ROM until its music driver is playing, then export the APU
+    /// state as a `.spc` sound file (SNES-SPC700 Sound File Data v0.30):
+    /// SPC700 registers + 64 KB ARAM + DSP registers + IPL ROM, playable
+    /// in any SPC player. Step far enough in (and pulse Start via
+    /// `--input`) that the music has started before the snapshot.
+    SpcDump {
+        /// Path to the .sfc / .smc ROM file.
+        rom: PathBuf,
+        /// CPU instructions to execute before the snapshot.
+        #[arg(short = 'n', long, default_value_t = 5_000_000)]
+        steps: u64,
+        /// Output path for the `.spc`. Defaults to the ROM's name with a
+        /// `.spc` extension, in the current directory.
+        #[arg(short = 'o', long)]
+        out: Option<PathBuf>,
+        /// Force a cartridge mapper (lorom, hirom, exhirom, sa1, superfx).
+        #[arg(long = "force-mapper")]
+        force_mapper: Option<String>,
+        /// Install a DSP coprocessor firmware (`dsp1b.rom`) then load —
+        /// needed for DSP-1 games (Super Mario Kart, Pilotwings).
+        #[arg(long = "dsp1-rom")]
+        dsp1_rom: Option<PathBuf>,
+        /// Scripted joypad-1 input, same `frame:hex` format as
+        /// `state --input`, applied before the snapshot so playback can
+        /// start past a title screen.
+        #[arg(long)]
+        input: Option<String>,
+    },
+    /// Run a ROM to a scene, then dump every graphics asset currently
+    /// loaded as PNGs: the VRAM tile sheet, the four BG tilemaps, the
+    /// CGRAM palette, the OAM sprite sheet, and the composited screen —
+    /// plus raw `vram.bin` / `cgram.bin` and `oam.json`. This captures
+    /// the assets *loaded at this instant* (already decompressed by the
+    /// game); snapshot several scenes (via `--input` / different `-n`) to
+    /// cover a whole game. A static whole-ROM rip is NOT possible — SNES
+    /// graphics are game-specific-compressed with no standard layout.
+    AssetsDump {
+        /// Path to the .sfc / .smc ROM file.
+        rom: PathBuf,
+        /// CPU instructions to execute before the snapshot.
+        #[arg(short = 'n', long, default_value_t = 5_000_000)]
+        steps: u64,
+        /// Output directory (created if absent).
+        #[arg(long = "out", default_value = "/tmp/luna_assets")]
+        out: PathBuf,
+        /// VRAM tile-sheet bits-per-pixel (2/4/8). Default: auto from the
+        /// current BG1 mode.
+        #[arg(long)]
+        bpp: Option<u8>,
+        /// CGRAM sub-palette row for the VRAM tile sheet (2bpp/4bpp).
+        #[arg(long, default_value_t = 0)]
+        palette: u8,
+        /// Force a cartridge mapper (lorom, hirom, exhirom, sa1, superfx).
+        #[arg(long = "force-mapper")]
+        force_mapper: Option<String>,
+        /// Install a DSP coprocessor firmware (`dsp1b.rom`) then load.
+        #[arg(long = "dsp1-rom")]
+        dsp1_rom: Option<PathBuf>,
+        /// Scripted joypad-1 input, same `frame:hex` format as
+        /// `state --input`, applied before the snapshot.
+        #[arg(long)]
+        input: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -464,6 +525,40 @@ fn main() -> ExitCode {
             };
             bench::run_bench(&dir, &out, frames, checkpoints)
         }
+        Command::SpcDump {
+            rom,
+            steps,
+            out,
+            force_mapper,
+            dsp1_rom,
+            input,
+        } => run_spc_dump(
+            &rom,
+            steps,
+            out.as_deref(),
+            force_mapper.as_deref(),
+            dsp1_rom.as_deref(),
+            input.as_deref(),
+        ),
+        Command::AssetsDump {
+            rom,
+            steps,
+            out,
+            bpp,
+            palette,
+            force_mapper,
+            dsp1_rom,
+            input,
+        } => run_assets_dump(
+            &rom,
+            steps,
+            &out,
+            bpp,
+            palette,
+            force_mapper.as_deref(),
+            dsp1_rom.as_deref(),
+            input.as_deref(),
+        ),
     }
 }
 
@@ -917,6 +1012,193 @@ fn run_frames(
             break;
         }
     }
+    ExitCode::SUCCESS
+}
+
+/// `luna spc-dump` — run until the music driver is live, then write a
+/// `.spc` file (via `Emulator::export_spc`). Scripted input is applied
+/// during the warm-up, same semantics as `run_frames`.
+fn run_spc_dump(
+    rom: &std::path::Path,
+    steps: u64,
+    out: Option<&std::path::Path>,
+    force_mapper: Option<&str>,
+    dsp1_rom: Option<&std::path::Path>,
+    input_script: Option<&str>,
+) -> ExitCode {
+    const FRAME_BUDGET: u64 = 200_000;
+    let mut em = luna_api::Emulator::new();
+    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, dsp1_rom) {
+        eprintln!("error: {e}");
+        return ExitCode::from(1);
+    }
+    let checkpoints: Vec<(u64, u16)> = match input_script {
+        None => Vec::new(),
+        Some(script) => match parse_input_script(script) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("error: --input: {e}");
+                return ExitCode::from(1);
+            }
+        },
+    };
+    for (frame, mask) in &checkpoints {
+        while em.state().scheduler.frame_count < *frame {
+            if em.step_until_frame(FRAME_BUDGET).unwrap_or(0) == 0 {
+                break;
+            }
+        }
+        if let Err(e) = em.set_joypad(0, *mask) {
+            eprintln!("error: set_joypad: {e}");
+            return ExitCode::from(1);
+        }
+    }
+    if let Err(e) = em.step(steps) {
+        eprintln!("step warning (warm-up): {e}");
+    }
+    let spc = match em.export_spc() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: export_spc: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    // Default output path: the ROM's stem with a `.spc` extension, in CWD.
+    let default_out =
+        PathBuf::from(rom.file_stem().unwrap_or(rom.as_os_str())).with_extension("spc");
+    let out_path = out.unwrap_or(&default_out);
+    if let Err(e) = std::fs::write(out_path, &spc) {
+        eprintln!("error: writing {}: {e}", out_path.display());
+        return ExitCode::from(1);
+    }
+    println!(
+        "SPC written to {} ({} bytes) — SPC700 pc=${:04X}",
+        out_path.display(),
+        spc.len(),
+        em.spc700_state().map_or(0, |s| s.pc),
+    );
+    ExitCode::SUCCESS
+}
+
+/// `luna assets-dump` — run to a scene, then write every loaded graphics
+/// asset as PNGs (+ raw VRAM/CGRAM + OAM JSON). Warm-up + scripted-input
+/// handling mirrors `run_spc_dump`.
+#[allow(clippy::too_many_arguments)]
+fn run_assets_dump(
+    rom: &std::path::Path,
+    steps: u64,
+    out: &std::path::Path,
+    bpp: Option<u8>,
+    palette: u8,
+    force_mapper: Option<&str>,
+    dsp1_rom: Option<&std::path::Path>,
+    input_script: Option<&str>,
+) -> ExitCode {
+    const FRAME_BUDGET: u64 = 200_000;
+    let mut em = luna_api::Emulator::new();
+    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, dsp1_rom) {
+        eprintln!("error: {e}");
+        return ExitCode::from(1);
+    }
+    let checkpoints: Vec<(u64, u16)> = match input_script {
+        None => Vec::new(),
+        Some(script) => match parse_input_script(script) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("error: --input: {e}");
+                return ExitCode::from(1);
+            }
+        },
+    };
+    for (frame, mask) in &checkpoints {
+        while em.state().scheduler.frame_count < *frame {
+            if em.step_until_frame(FRAME_BUDGET).unwrap_or(0) == 0 {
+                break;
+            }
+        }
+        if let Err(e) = em.set_joypad(0, *mask) {
+            eprintln!("error: set_joypad: {e}");
+            return ExitCode::from(1);
+        }
+    }
+    if let Err(e) = em.step(steps) {
+        eprintln!("step warning (warm-up): {e}");
+    }
+    if let Err(e) = std::fs::create_dir_all(out) {
+        eprintln!("error: creating {}: {e}", out.display());
+        return ExitCode::from(1);
+    }
+
+    // VRAM tile-sheet bpp: explicit, else auto from the current BG1 mode
+    // (falling back to the common 4bpp).
+    let bgmode = em.state().ppu.bgmode;
+    let tile_bpp = bpp.unwrap_or_else(|| match em.bg_bpp(0) {
+        Ok(b) if b != 0 => b,
+        _ => 4,
+    });
+
+    // Helper: write a PNG (Result<Vec<u8>>) to `out/<name>`, logging.
+    let mut wrote = 0u32;
+    let mut put = |name: &str, png: Result<Vec<u8>, luna_api::ApiError>| match png {
+        Ok(bytes) => {
+            let path = out.join(name);
+            if let Err(e) = std::fs::write(&path, &bytes) {
+                eprintln!("error: writing {}: {e}", path.display());
+            } else {
+                println!("  {} ({} bytes)", path.display(), bytes.len());
+                wrote += 1;
+            }
+        }
+        Err(e) => eprintln!("skip {name}: {e}"),
+    };
+
+    println!(
+        "assets @ frame {} (BGMODE ${bgmode:02X}, tile sheet {tile_bpp}bpp):",
+        em.frame_count().unwrap_or(0)
+    );
+    put("screen.png", em.render_frame_png(true));
+    put(
+        "vram_tiles.png",
+        em.render_vram_tiles_png(tile_bpp, palette),
+    );
+    put("palette.png", em.render_palette_png(16));
+    put("sprites.png", em.render_sprite_sheet_png());
+    // Mode 7 has a single 128×128 field (BG index is ignored); otherwise
+    // dump each BG layer that is enabled in the current mode.
+    if bgmode & 0x07 == 7 {
+        put("bg1_tilemap_mode7.png", em.render_tilemap_png(0));
+    } else {
+        for bg in 0..4usize {
+            if em.bg_bpp(bg).unwrap_or(0) != 0 {
+                put(
+                    &format!("bg{}_tilemap.png", bg + 1),
+                    em.render_tilemap_png(bg),
+                );
+            }
+        }
+    }
+
+    // Raw dumps + OAM metadata for tools that want the bytes.
+    if let Ok(v) = em.vram_bytes() {
+        let _ = std::fs::write(out.join("vram.bin"), v);
+    }
+    if let Ok(cg) = em.peek_cgram() {
+        let mut bytes = Vec::with_capacity(cg.len() * 2);
+        for c in cg {
+            bytes.extend_from_slice(&c.to_le_bytes());
+        }
+        let _ = std::fs::write(out.join("cgram.bin"), bytes);
+    }
+    if let Ok(sprites) = em.decode_sprites()
+        && let Ok(json) = serde_json::to_string_pretty(&sprites)
+    {
+        let _ = std::fs::write(out.join("oam.json"), json);
+    }
+
+    println!(
+        "wrote {wrote} PNG(s) + raw VRAM/CGRAM + oam.json to {}",
+        out.display()
+    );
     ExitCode::SUCCESS
 }
 
