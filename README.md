@@ -82,6 +82,12 @@ cargo run --release -p luna-gui -- "path/to/game.sfc"
 ./target/release/luna mcp
 ```
 
+`luna <command> --help` documents every flag. For the full reference —
+all subcommands (`run` · `state` · `frames` · `wram-trace` · `bench` ·
+`mcp`), the `luna-api` Rust surface, the MCP tool catalogue, and the
+state-JSON shape — see
+[`docs/cli_api_reference.md`](docs/cli_api_reference.md).
+
 ## Controls & firmware
 
 Two keyboard controllers (**Player 1** + **Player 2**), remappable per-player
@@ -126,6 +132,7 @@ watches). Full design — vision, layers, threading, determinism, roadmap — in
 | Document | Contents |
 |---|---|
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Full system design, layers, roadmap |
+| [`docs/cli_api_reference.md`](docs/cli_api_reference.md) | CLI commands + options, `luna-api` surface, MCP tools |
 | [`CLAUDE.md`](CLAUDE.md) | Repository conventions for contributors (and agents) |
 | [`docs/CONTROLLER_BINDINGS.md`](docs/CONTROLLER_BINDINGS.md) | Keyboard → SNES button map |
 | [`docs/firmware.md`](docs/firmware.md) | Coprocessor firmware (DSP-1 `dsp1b.rom`) setup |
