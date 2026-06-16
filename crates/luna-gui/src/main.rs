@@ -576,6 +576,8 @@ impl ApplicationHandler for LunaApp {
                         Hotkey::Screenshot => self.take_screenshot(),
                         Hotkey::SaveState => self.save_state_to_slot(self.current_slot),
                         Hotkey::LoadState => self.load_state_from_slot(self.current_slot),
+                        Hotkey::Pause => self.toggle_pause(),
+                        Hotkey::Reset => self.reset(),
                     }
                     return;
                 }

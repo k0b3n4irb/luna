@@ -447,7 +447,7 @@ fn draw_hotkey_config<F: FnMut(MenuAction)>(
                 if ui
                     .button("Reset to defaults")
                     .on_hover_text(
-                        "Restore the factory hotkeys (Screenshot = F12, Save = F5, Load = F9)",
+                        "Restore the factory hotkeys (Screenshot = F12, Save = F5, Load = F9, Pause = F2, Reset = F3)",
                     )
                     .clicked()
                 {
@@ -1363,12 +1363,14 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>,
                     }
                 });
                 ui.menu_button("Emulation", |ui| {
-                    let label = if state.paused { "Resume" } else { "Pause" };
-                    if ui.button(label).clicked() {
+                    let pause_key = state.key_bindings.get_hotkey(crate::input::Hotkey::Pause);
+                    let reset_key = state.key_bindings.get_hotkey(crate::input::Hotkey::Reset);
+                    let verb = if state.paused { "Resume" } else { "Pause" };
+                    if ui.button(format!("{verb} ({pause_key:?})")).clicked() {
                         emit(MenuAction::PauseToggle);
                         ui.close();
                     }
-                    if ui.button("Reset").clicked() {
+                    if ui.button(format!("Reset ({reset_key:?})")).clicked() {
                         emit(MenuAction::Reset);
                         ui.close();
                     }
