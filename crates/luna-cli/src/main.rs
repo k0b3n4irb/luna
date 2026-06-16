@@ -32,24 +32,22 @@ enum Command {
     /// Load a ROM, step the CPU N instructions, optionally dump a
     /// screenshot of the resulting PPU state.
     ///
-    /// Phase 1.7: no APU yet, so real ROMs that handshake with the
-    /// SPC700 will eventually hang. We still render whatever the PPU
-    /// produced via direct CPU writes / DMA. unimplemented opcodes
-    /// panic and are caught — partial state is still dumped.
+    /// Unimplemented opcodes panic and are caught — partial state is
+    /// still dumped.
     Run {
         /// Path to the .sfc / .smc ROM file.
         rom: PathBuf,
         /// Maximum number of CPU instructions to execute before dumping.
         #[arg(short = 'n', long, default_value_t = 64)]
         steps: u64,
-        /// If set, render a 256×224 PNG of the framebuffer (BG1 Mode 0
-        /// only at this point) and write it to the given path.
+        /// If set, render a 256×224 PNG of the composited framebuffer
+        /// and write it to the given path.
         #[arg(long)]
         screenshot: Option<PathBuf>,
         /// Bypass INIDISP forced-blank when rendering. Lets you see
         /// whatever the game has uploaded to VRAM/CGRAM even if its
-        /// init left the screen blanked (typical when waiting on the
-        /// SPC700 we don't fully emulate yet).
+        /// init left the screen blanked (e.g. a title still waiting on
+        /// a Start press).
         #[arg(long)]
         force_display: bool,
         /// If set (1..=4), render ONLY that BG layer. Default is the
@@ -72,11 +70,11 @@ enum Command {
     /// closes the stream.
     Mcp,
     /// Run the emulator through `luna-api` and emit a JSON state
-    /// snapshot — the same data the MCP `get_state` tool returns.
+    /// snapshot — the same data the MCP `state` tool returns.
     ///
-    /// This is the dogfood path: the API surface that the CLI, GUI
-    /// and (eventually) MCP server all share. Use it to test the
-    /// API directly without going through any transport.
+    /// This is the dogfood path: the API surface that the CLI, GUI and
+    /// MCP server all share. Use it to test the API directly without
+    /// going through any transport.
     State {
         /// Path to the .sfc / .smc ROM file.
         rom: PathBuf,
