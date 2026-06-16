@@ -1607,6 +1607,57 @@ impl Emulator {
         Ok(snes.apu_real.aram.to_vec())
     }
 
+    /// Export the current APU state as a 66 048-byte `.spc` sound file
+    /// (`SNES-SPC700 Sound File Data v0.30`): the live SPC700 registers,
+    /// all 64 KB of ARAM, the 128 DSP registers, and the IPL ROM — the
+    /// exact snapshot any SPC player needs to resume playback. Capture it
+    /// once the game's music driver is running (step far enough in, and
+    /// inject Start to pass title screens). A minimal ID666 text tag is
+    /// filled from the cartridge title.
+    pub fn export_spc(&self) -> Result<Vec<u8>, ApiError> {
+        // Null-pad a UTF-8 string into a fixed-width ID666 text field.
+        fn put_text(dst: &mut [u8], s: &str) {
+            let n = s.len().min(dst.len());
+            dst[..n].copy_from_slice(&s.as_bytes()[..n]);
+        }
+
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let apu = &snes.apu_real;
+        let mut buf = vec![0u8; 0x1_0200];
+        // 0x00: 33-byte signature, then 0x1A 0x1A.
+        buf[0x00..0x21].copy_from_slice(b"SNES-SPC700 Sound File Data v0.30");
+        buf[0x21] = 0x1A;
+        buf[0x22] = 0x1A;
+        buf[0x23] = 0x1A; // ID666 tag present (text format)
+        buf[0x24] = 30; // minor version
+
+        // 0x25: SPC700 register file at the dump moment.
+        let c = &apu.cpu;
+        buf[0x25..0x27].copy_from_slice(&c.pc.to_le_bytes());
+        buf[0x27] = c.a;
+        buf[0x28] = c.x;
+        buf[0x29] = c.y;
+        buf[0x2A] = c.psw.0;
+        buf[0x2B] = c.sp;
+        // 0x2C..0x2E reserved (zero).
+
+        // 0x2E: ID666 text tag.
+        let title = self.rom_info.as_ref().map_or("", |r| r.title.trim_end());
+        put_text(&mut buf[0x2E..0x4E], title); // song title
+        put_text(&mut buf[0x4E..0x6E], title); // game title
+        put_text(&mut buf[0x6E..0x7E], "luna"); // dumper
+        put_text(&mut buf[0xA9..0xAC], "180"); // seconds before fade
+        put_text(&mut buf[0xAC..0xB1], "10000"); // fade length (ms)
+        // 0xD2 emulator used: 0 = unknown.
+
+        // 0x100: 64 KB ARAM. 0x10100: 128 DSP registers.
+        buf[0x100..0x1_0100].copy_from_slice(&apu.aram[..]);
+        buf[0x1_0100..0x1_0180].copy_from_slice(&apu.dsp.registers);
+        // 0x10180..0x101C0 unused. 0x101C0: 64-byte IPL ROM.
+        buf[0x1_01C0..0x1_0200].copy_from_slice(&luna_cpu_spc700::IPL_ROM);
+        Ok(buf)
+    }
+
     /// Enable per-instruction CPU tracing. Every subsequent
     /// [`Emulator::step`] / [`Emulator::step_until_frame`] tick
     /// captures a register-file snapshot until `max_events` events
@@ -1982,6 +2033,33 @@ mod tests {
         let n = e.step(50).expect("step");
         assert!(n > 0, "should execute at least one instruction");
         assert_eq!(e.state().stats.instructions_executed, n);
+    }
+
+    #[test]
+    fn export_spc_has_valid_header_and_embeds_aram_dsp_iplrom() {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        e.step(2000).expect("step");
+        let spc = e.export_spc().expect("export_spc");
+
+        // Exact v0.30 file size and signature.
+        assert_eq!(spc.len(), 0x1_0200);
+        assert_eq!(&spc[0x00..0x21], b"SNES-SPC700 Sound File Data v0.30");
+        assert_eq!(&spc[0x21..0x23], &[0x1A, 0x1A]);
+        assert_eq!(spc[0x23], 0x1A, "ID666 tag present");
+
+        // SPC700 register block matches the live state.
+        let s = e.spc700_state().expect("spc700");
+        assert_eq!(u16::from_le_bytes([spc[0x25], spc[0x26]]), s.pc);
+        assert_eq!(spc[0x27], s.a);
+        assert_eq!(spc[0x2B], s.sp);
+
+        // Game-title ID666 field carries the cartridge title.
+        assert!(spc[0x4E..0x6E].starts_with(b"LUNA API TEST DEMO"));
+
+        // Payload regions match the dedicated accessors / the IPL ROM.
+        assert_eq!(&spc[0x100..0x1_0100], e.aram_bytes().unwrap().as_slice());
+        assert_eq!(&spc[0x1_01C0..0x1_0200], &luna_cpu_spc700::IPL_ROM);
     }
 
     #[test]

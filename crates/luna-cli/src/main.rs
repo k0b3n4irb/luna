@@ -326,6 +326,34 @@ enum Command {
         #[arg(long)]
         input: Option<String>,
     },
+    /// Run a ROM until its music driver is playing, then export the APU
+    /// state as a `.spc` sound file (SNES-SPC700 Sound File Data v0.30):
+    /// SPC700 registers + 64 KB ARAM + DSP registers + IPL ROM, playable
+    /// in any SPC player. Step far enough in (and pulse Start via
+    /// `--input`) that the music has started before the snapshot.
+    SpcDump {
+        /// Path to the .sfc / .smc ROM file.
+        rom: PathBuf,
+        /// CPU instructions to execute before the snapshot.
+        #[arg(short = 'n', long, default_value_t = 5_000_000)]
+        steps: u64,
+        /// Output path for the `.spc`. Defaults to the ROM's name with a
+        /// `.spc` extension, in the current directory.
+        #[arg(short = 'o', long)]
+        out: Option<PathBuf>,
+        /// Force a cartridge mapper (lorom, hirom, exhirom, sa1, superfx).
+        #[arg(long = "force-mapper")]
+        force_mapper: Option<String>,
+        /// Install a DSP coprocessor firmware (`dsp1b.rom`) then load —
+        /// needed for DSP-1 games (Super Mario Kart, Pilotwings).
+        #[arg(long = "dsp1-rom")]
+        dsp1_rom: Option<PathBuf>,
+        /// Scripted joypad-1 input, same `frame:hex` format as
+        /// `state --input`, applied before the snapshot so playback can
+        /// start past a title screen.
+        #[arg(long)]
+        input: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -462,6 +490,21 @@ fn main() -> ExitCode {
             };
             bench::run_bench(&dir, &out, frames, checkpoints)
         }
+        Command::SpcDump {
+            rom,
+            steps,
+            out,
+            force_mapper,
+            dsp1_rom,
+            input,
+        } => run_spc_dump(
+            &rom,
+            steps,
+            out.as_deref(),
+            force_mapper.as_deref(),
+            dsp1_rom.as_deref(),
+            input.as_deref(),
+        ),
     }
 }
 
@@ -915,6 +958,71 @@ fn run_frames(
             break;
         }
     }
+    ExitCode::SUCCESS
+}
+
+/// `luna spc-dump` — run until the music driver is live, then write a
+/// `.spc` file (via `Emulator::export_spc`). Scripted input is applied
+/// during the warm-up, same semantics as `run_frames`.
+fn run_spc_dump(
+    rom: &std::path::Path,
+    steps: u64,
+    out: Option<&std::path::Path>,
+    force_mapper: Option<&str>,
+    dsp1_rom: Option<&std::path::Path>,
+    input_script: Option<&str>,
+) -> ExitCode {
+    const FRAME_BUDGET: u64 = 200_000;
+    let mut em = luna_api::Emulator::new();
+    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, dsp1_rom) {
+        eprintln!("error: {e}");
+        return ExitCode::from(1);
+    }
+    let checkpoints: Vec<(u64, u16)> = match input_script {
+        None => Vec::new(),
+        Some(script) => match parse_input_script(script) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("error: --input: {e}");
+                return ExitCode::from(1);
+            }
+        },
+    };
+    for (frame, mask) in &checkpoints {
+        while em.state().scheduler.frame_count < *frame {
+            if em.step_until_frame(FRAME_BUDGET).unwrap_or(0) == 0 {
+                break;
+            }
+        }
+        if let Err(e) = em.set_joypad(0, *mask) {
+            eprintln!("error: set_joypad: {e}");
+            return ExitCode::from(1);
+        }
+    }
+    if let Err(e) = em.step(steps) {
+        eprintln!("step warning (warm-up): {e}");
+    }
+    let spc = match em.export_spc() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: export_spc: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    // Default output path: the ROM's stem with a `.spc` extension, in CWD.
+    let default_out =
+        PathBuf::from(rom.file_stem().unwrap_or(rom.as_os_str())).with_extension("spc");
+    let out_path = out.unwrap_or(&default_out);
+    if let Err(e) = std::fs::write(out_path, &spc) {
+        eprintln!("error: writing {}: {e}", out_path.display());
+        return ExitCode::from(1);
+    }
+    println!(
+        "SPC written to {} ({} bytes) — SPC700 pc=${:04X}",
+        out_path.display(),
+        spc.len(),
+        em.spc700_state().map_or(0, |s| s.pc),
+    );
     ExitCode::SUCCESS
 }
 
