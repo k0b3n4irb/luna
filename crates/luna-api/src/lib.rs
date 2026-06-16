@@ -1740,6 +1740,58 @@ impl Emulator {
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
         Ok(luna_ppu::render_bg_tilemap(&snes.ppu, bg_idx))
     }
+
+    /// PNG-encode BG `bg_idx`'s tilemap (the [`render_tilemap_rgba`]
+    /// image). For `luna assets-dump` / a tilemap viewer's "export".
+    ///
+    /// [`render_tilemap_rgba`]: Self::render_tilemap_rgba
+    pub fn render_tilemap_png(&self, bg_idx: usize) -> Result<Vec<u8>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        tilemap_to_png(&luna_ppu::render_bg_tilemap(&snes.ppu, bg_idx))
+    }
+
+    /// PNG of the whole 64 KB of VRAM decoded as a 16-wide tile sheet at
+    /// `bpp` (2/4/8) using CGRAM sub-palette `palette_row`. An asset rip
+    /// of every tile currently loaded.
+    pub fn render_vram_tiles_png(&self, bpp: u8, palette_row: u8) -> Result<Vec<u8>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        tilemap_to_png(&luna_ppu::render_vram_tiles(&snes.ppu, bpp, palette_row))
+    }
+
+    /// PNG of the 256-colour CGRAM as a 16×16 swatch grid (`cell` px per
+    /// swatch).
+    pub fn render_palette_png(&self, cell: u32) -> Result<Vec<u8>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        tilemap_to_png(&luna_ppu::render_cgram_palette(&snes.ppu, cell))
+    }
+
+    /// PNG sprite sheet: all 128 OAM sprites decoded at native size with
+    /// their OBJ palettes, transparent where index 0. RGBA (with alpha).
+    pub fn render_sprite_sheet_png(&self) -> Result<Vec<u8>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        tilemap_to_png(&luna_ppu::render_obj_sheet(&snes.ppu))
+    }
+
+    /// The BG `bg_idx` bits-per-pixel for the current BGMODE (2/4/8; 0 if
+    /// the layer is disabled in this mode). Lets a consumer pick a
+    /// sensible default `bpp` for [`render_vram_tiles_png`].
+    ///
+    /// [`render_vram_tiles_png`]: Self::render_vram_tiles_png
+    pub fn bg_bpp(&self, bg_idx: usize) -> Result<u8, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        Ok(luna_ppu::bg_bpp(snes.ppu.bgmode, bg_idx))
+    }
+}
+
+/// PNG-encode a [`TilemapImage`]'s RGBA buffer (with alpha — sprite
+/// sheets carry transparency).
+fn tilemap_to_png(img: &TilemapImage) -> Result<Vec<u8>, ApiError> {
+    let buf = image::RgbaImage::from_raw(img.width, img.height, img.rgba.clone())
+        .expect("rgba length matches width*height*4");
+    let mut out = Vec::new();
+    image::DynamicImage::from(buf)
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)?;
+    Ok(out)
 }
 
 const fn default_cpu_state() -> CpuState {

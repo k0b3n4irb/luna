@@ -84,8 +84,8 @@ cargo run --release -p luna-gui -- "path/to/game.sfc"
 
 `luna <command> --help` documents every flag. For the full reference —
 all subcommands (`run` · `state` · `frames` · `wram-trace` · `bench` ·
-`spc-dump` · `mcp`), the `luna-api` Rust surface, the MCP tool catalogue,
-and the state-JSON shape — see
+`spc-dump` · `assets-dump` · `mcp`), the `luna-api` Rust surface, the MCP
+tool catalogue, and the state-JSON shape — see
 [`docs/cli_api_reference.md`](docs/cli_api_reference.md).
 
 ## Controls & firmware

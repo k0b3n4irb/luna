@@ -29,6 +29,7 @@ Commands:
   wram-trace  Per-frame vblank-aligned WRAM page hashes (cross-emulator differential).
   bench       Run a whole ROM directory headless and write a compatibility report.
   spc-dump    Export the live APU state as a playable .spc sound file.
+  assets-dump Dump the loaded graphics (VRAM tiles, tilemaps, palette, sprites) as PNGs.
   mcp         Serve the luna MCP server on stdio.
 
 Global options:
@@ -180,6 +181,40 @@ music has started before the snapshot.
 luna spc-dump "game.sfc" -n 8000000 -o /tmp/song.spc
 ```
 
+### `luna assets-dump` — export the loaded graphics as PNGs
+
+```
+luna assets-dump [OPTIONS] <ROM>
+```
+
+Runs the ROM to a scene, then writes every graphics asset **currently
+loaded** as PNGs: `screen.png`, `vram_tiles.png` (the whole 64 KB VRAM as
+a tile sheet), `bg1..4_tilemap.png` (only the layers enabled in the
+current mode; Mode 7 → one `bg1_tilemap_mode7.png`), `palette.png`, and
+`sprites.png` (the 128 OAM sprites at native size, transparent). Also
+raw `vram.bin` / `cgram.bin` and `oam.json` (sprite metadata).
+
+> **This captures only what is loaded at that instant** (already
+> decompressed by the game). Snapshot several scenes — different `-n`,
+> or `--input` to reach them — to cover a whole game. A static
+> whole-ROM rip is **not** possible: SNES graphics are
+> game-specific-compressed with no standard layout.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `<ROM>` | — | Path to the ROM. |
+| `-n, --steps <N>` | `5000000` | CPU instructions before the snapshot. |
+| `--out <DIR>` | `/tmp/luna_assets` | Output directory (created if absent). |
+| `--bpp <2\|4\|8>` | auto (BG1 mode) | Bit-depth for the VRAM tile sheet. |
+| `--palette <N>` | `0` | CGRAM sub-palette row for the tile sheet (2/4bpp). |
+| `--force-mapper <M>` | auto | As in `state`. |
+| `--dsp1-rom <PATH>` | — | Install `dsp1b.rom` then load (DSP-1 games). |
+| `--input <SCRIPT>` | — | Joypad-1 script applied before the snapshot (§3). |
+
+```bash
+luna assets-dump "game.sfc" -n 8000000 --out /tmp/assets
+```
+
 ### `luna mcp` — MCP server over stdio
 
 ```
@@ -276,8 +311,9 @@ method returns `Result<_, ApiError>` unless noted. Grouped by purpose:
 **Rendering**
 - `render_frame_png(force_display)`, `render_frame_rgba(force_display)`
 - `render_frame_bg_png(bg, force_display)`
-- `render_tilemap_rgba(bg_idx)` → `TilemapImage`
-- `decode_sprites()` → `Vec<SpriteInfo>`
+- `render_tilemap_rgba(bg_idx)` → `TilemapImage`, `render_tilemap_png(bg_idx)`
+- `render_vram_tiles_png(bpp, palette_row)`, `render_palette_png(cell)`, `render_sprite_sheet_png()`
+- `bg_bpp(bg_idx)` → 2/4/8 (0 if disabled), `decode_sprites()` → `Vec<SpriteInfo>`
 
 **Save-states & export**
 - `save_state()` → bytes, `load_state(bytes)`
