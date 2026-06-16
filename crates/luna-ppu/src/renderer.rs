@@ -2131,6 +2131,175 @@ fn render_mode7_tilemap(ppu: &Ppu) -> TilemapImage {
     }
 }
 
+/// Render the entire 64 KB of VRAM as a tile sheet (debug / asset rip).
+/// `bpp` ∈ {2,4,8} selects the decode (16/32/64 bytes per tile); tiles
+/// are laid out 16 wide. Each pixel uses CGRAM sub-palette `palette_row`
+/// (4 colours for 2bpp, 16 for 4bpp; ignored for 8bpp, which indexes the
+/// full 256-colour CGRAM). Every pixel is opaque — colour 0 is shown
+/// literally so the sheet is self-describing.
+#[must_use]
+pub fn render_vram_tiles(ppu: &Ppu, bpp: u8, palette_row: u8) -> TilemapImage {
+    let bytes_per_tile: usize = match bpp {
+        2 => 16,
+        8 => 64,
+        _ => 32,
+    };
+    let bpp = match bpp {
+        2 | 8 => bpp,
+        _ => 4,
+    };
+    let num_tiles = (0x1_0000 / bytes_per_tile) as u32;
+    let cols: u32 = 16;
+    let rows = num_tiles.div_ceil(cols);
+    let width = cols * 8;
+    let height = rows * 8;
+    let mut rgba = vec![0u8; (width * height * 4) as usize];
+    for t in 0..num_tiles {
+        let tile_base = t as usize * bytes_per_tile;
+        let tcol = t % cols;
+        let trow = t / cols;
+        for py in 0..8u32 {
+            let decoded = decode_tile_row(ppu, tile_base, py as usize, bpp);
+            for px in 0..8u32 {
+                let idx = decoded[px as usize];
+                let cgram_idx = match bpp {
+                    2 => palette_row.wrapping_mul(4).wrapping_add(idx),
+                    4 => palette_row.wrapping_mul(16).wrapping_add(idx),
+                    _ => idx,
+                };
+                let [r, g, b] = bgr555_to_rgb888(ppu.cgram.color(cgram_idx));
+                let x = tcol * 8 + px;
+                let y = trow * 8 + py;
+                let o = ((y * width + x) * 4) as usize;
+                rgba[o] = r;
+                rgba[o + 1] = g;
+                rgba[o + 2] = b;
+                rgba[o + 3] = 255;
+            }
+        }
+    }
+    TilemapImage {
+        width,
+        height,
+        rgba,
+        cols: cols as u16,
+        rows: rows as u16,
+        bpp,
+        is_mode7: false,
+        view_x: 0,
+        view_y: 0,
+        view_w: 0,
+        view_h: 0,
+    }
+}
+
+/// Render the 256-colour CGRAM as a 16×16 swatch grid, each swatch
+/// `cell` px square (clamped to ≥ 1). Index 0 is top-left.
+#[must_use]
+pub fn render_cgram_palette(ppu: &Ppu, cell: u32) -> TilemapImage {
+    let cell = cell.max(1);
+    let width = 16 * cell;
+    let height = 16 * cell;
+    let mut rgba = vec![0u8; (width * height * 4) as usize];
+    for ci in 0..256u32 {
+        let [r, g, b] = bgr555_to_rgb888(ppu.cgram.color(ci as u8));
+        let cx = (ci % 16) * cell;
+        let cy = (ci / 16) * cell;
+        for dy in 0..cell {
+            for dx in 0..cell {
+                let o = (((cy + dy) * width + (cx + dx)) * 4) as usize;
+                rgba[o] = r;
+                rgba[o + 1] = g;
+                rgba[o + 2] = b;
+                rgba[o + 3] = 255;
+            }
+        }
+    }
+    TilemapImage {
+        width,
+        height,
+        rgba,
+        cols: 16,
+        rows: 16,
+        bpp: 0,
+        is_mode7: false,
+        view_x: 0,
+        view_y: 0,
+        view_w: 0,
+        view_h: 0,
+    }
+}
+
+/// Render all 128 OAM sprites as a sheet: one 64×64 cell per sprite (16
+/// columns × 8 rows), each sprite decoded at its native size from the
+/// OBJ CHR area using its OBJ palette (`128 + palette*16`). Pixels with
+/// colour index 0 — and unused cell area — are transparent (alpha 0), so
+/// the PNG carries true sprite cut-outs. Flips are applied.
+#[must_use]
+pub fn render_obj_sheet(ppu: &Ppu) -> TilemapImage {
+    const CELL: u32 = 64;
+    const COLS: u32 = 16;
+    let rows = 128 / COLS;
+    let width = COLS * CELL;
+    let height = rows * CELL;
+    let mut rgba = vec![0u8; (width * height * 4) as usize];
+    for (i, s) in decode_all_sprites(ppu).iter().enumerate() {
+        let cx = (i as u32 % COLS) * CELL;
+        let cy = (i as u32 / COLS) * CELL;
+        let tiles_w = u32::from(s.w) / 8;
+        let tiles_h = u32::from(s.h) / 8;
+        for ty in 0..tiles_h {
+            let src_ty = if s.v_flip { tiles_h - 1 - ty } else { ty };
+            for tx in 0..tiles_w {
+                let src_tx = if s.h_flip { tiles_w - 1 - tx } else { tx };
+                // OBJ tiles wrap within the 16×16-tile (256-entry) page;
+                // bit 8 (the page select) is preserved.
+                let lo = (u32::from(s.tile) & 0xFF)
+                    .wrapping_add(src_tx)
+                    .wrapping_add(src_ty * 16)
+                    & 0xFF;
+                let tile_id = (s.tile & 0x100) | lo as u16;
+                let tile_base = sprite_tile_byte_offset(ppu.obsel, tile_id);
+                for py in 0..8u32 {
+                    let row_in_tile = if s.v_flip { 7 - py } else { py } as usize;
+                    let decoded = decode_tile_row(ppu, tile_base, row_in_tile, 4);
+                    for px in 0..8u32 {
+                        let col = if s.h_flip { 7 - px } else { px } as usize;
+                        let idx = decoded[col];
+                        if idx == 0 {
+                            continue; // transparent
+                        }
+                        let cgram_idx = 128u8
+                            .wrapping_add(s.palette.wrapping_mul(16))
+                            .wrapping_add(idx);
+                        let [r, g, b] = bgr555_to_rgb888(ppu.cgram.color(cgram_idx));
+                        let x = cx + tx * 8 + px;
+                        let y = cy + ty * 8 + py;
+                        let o = ((y * width + x) * 4) as usize;
+                        rgba[o] = r;
+                        rgba[o + 1] = g;
+                        rgba[o + 2] = b;
+                        rgba[o + 3] = 255;
+                    }
+                }
+            }
+        }
+    }
+    TilemapImage {
+        width,
+        height,
+        rgba,
+        cols: COLS as u16,
+        rows: rows as u16,
+        bpp: 4,
+        is_mode7: false,
+        view_x: 0,
+        view_y: 0,
+        view_w: 0,
+        view_h: 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3762,5 +3931,35 @@ mod tests {
         assert!(matches!(hi[0].kind, LayerKind::Bg));
         assert_eq!(hi[0].idx, 2);
         assert_eq!(hi[0].bg_prio, 1);
+    }
+
+    #[test]
+    fn asset_sheets_have_expected_dimensions() {
+        let ppu = Ppu::new();
+        // VRAM sheet: 16 tiles wide; 4bpp → 2048 tiles → 128 rows.
+        let v = render_vram_tiles(&ppu, 4, 0);
+        assert_eq!((v.width, v.height), (128, 1024));
+        assert_eq!(v.rgba.len(), (128 * 1024 * 4) as usize);
+        // 2bpp → 4096 tiles → 256 rows; 8bpp → 1024 tiles → 64 rows.
+        assert_eq!(render_vram_tiles(&ppu, 2, 0).height, 2048);
+        assert_eq!(render_vram_tiles(&ppu, 8, 0).height, 512);
+        // Palette: 16×16 swatches at 16 px.
+        let p = render_cgram_palette(&ppu, 16);
+        assert_eq!((p.width, p.height), (256, 256));
+        // Sprite sheet: 16 cols × 8 rows of 64×64 cells.
+        let s = render_obj_sheet(&ppu);
+        assert_eq!((s.width, s.height), (1024, 512));
+    }
+
+    #[test]
+    fn vram_tile_sheet_reflects_a_seeded_tile() {
+        let ppu = setup_demo_tile();
+        // The demo tile lives at VRAM byte $2000 → 2bpp tile index 512.
+        // In a 16-wide sheet that's (col 0, row 32) → pixel (0, 256).
+        // Its row-0 pixel 0 is palette index 1 (= red, $001F here).
+        let sheet = render_vram_tiles(&ppu, 2, 0);
+        let o = ((256 * sheet.width) * 4) as usize;
+        let red = bgr555_to_rgb888(ppu.cgram.color(1));
+        assert_eq!(&sheet.rgba[o..o + 3], &red);
     }
 }
