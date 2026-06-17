@@ -124,7 +124,7 @@ branch-taken penalty), not a flat 84.
 | **2. SPC700 cycle accuracy** ✅ done | Real per-opcode cycles + branch-taken penalty; drive the APU from the master clock (mclk→SPC-cycle ratio) instead of a flat rate. | **CT/Akao handshake**, SPC700 B→A−, Tom Harte SPC `cycles[]` | Med |
 | **3. 65c816 cycle accuracy** ✅ done | Have the CPU core call `io_cycle` at the correct *intra-instruction* points with correct per-cycle costs (read/write/idle ordering). The core already emits `io_cycle` per **bus** access (Phase 1 relies on it); what was missing was the **internal/idle** cycles — RMW dead cycles, branch-taken / page-cross penalties, etc. — plus the Tom Harte `cycles[]` backstop to drive them out (cf. the SPC700 Phase-2 method). Landed `2da74fc`. | Tom Harte 65c816 `cycles[]`, A−→A | High — touched every opcode/addressing path |
 | **4. Per-access IRQ/NMI/HDMA** | Poll interrupts + HDMA in `io_cycle`: dot-precise H/V-IRQ (HTIME respected), H≈278 HDMA-vs-DMA preemption, RDNMI as a true 4-cycle hold. | Raster-IRQ games, DMA/timing C+→B+ | Med |
-| **5. DMA/HDMA cycle-stepping** ⏳ inc 0+1 + 5b done | Segmented sync DMA (`f3bd002`); HDMA preempts a mid-frame DMA at scanline boundaries (`d2a17fc`, line-granular). Phase 5b: SA-1 now charges **real per-access cycles** (ares `coprocessor/sa1/memory.cpp`: IO/ROM/IRAM/open-bus = 1 step, BWRAM = 2 steps, idle = 1 step; `conflict()` contention deferred) via a signed mclk deficit, replacing the flat 6 mclk/insn lump. Open: inc 2 dot-276 sub-line `hdmaPosition`. | DMA/timing → A−; SA-1 contention | Med |
+| **5. DMA/HDMA cycle-stepping** ⏳ inc 0+1 ✅, 5b ✅ — only inc 2 open | Segmented sync DMA (`f3bd002`); HDMA preempts a mid-frame DMA at scanline boundaries (`d2a17fc`, line-granular). Phase 5b ✅ (`097ffe7`): SA-1 now charges **real per-access cycles** (ares `coprocessor/sa1/memory.cpp`: IO/ROM/IRAM/open-bus = 1 step, BWRAM = 2 steps, idle = 1 step; `conflict()` contention deferred to Increment B) via a signed mclk deficit, replacing the flat 6 mclk/insn lump. Open: inc 2 dot-276 sub-line `hdmaPosition`. | DMA/timing → A−; SA-1 contention | Med |
 
 > **Note (2026-06-11):** the marquee raster-IRQ bug — Doom's letterbox-border
 > flicker — turned out **not** to be a Phase 4/5 item. It was a PPU register-latch
@@ -216,7 +216,7 @@ idles per ares `wdc65816/memory.cpp`; the Tom Harte cycle backstop (count
 sampled via `LUNA_TOM_HARTE_SAMPLE=N`) drove it to 0 mismatches at 100%
 state. WAI/STP excluded as halt artifacts.
 
-**Phase 5b — SA-1 real per-access cycles.** Replaced the flat
+**Phase 5b — SA-1 real per-access cycles.** ✅ done (`097ffe7`). Replaced the flat
 `MCLK_PER_SA1_INSN = 6` lump in `Sa1Chip::step_coproc` with a signed
 mclk *deficit*: each main-CPU advance adds to it, each SA-1 instruction
 subtracts its real cost. The cost is accumulated per bus access in
@@ -229,4 +229,7 @@ steps, `idle()` = 1 step). The `conflict()` BWRAM/IRAM contention steps
 zero-cost path can't stall the loop, and left unserialized (a
 ≤1-instruction transient, reset to 0 on load). Validated: SMRPG intro +
 post-Start name-entry render cleanly, `nmis_serviced` ≈ 5588 at
-`-n 55000000` (well past the title-wait plateau).
+`-n 55000000` (well past the title-wait plateau); and the full
+`tools/validate-hdma-corpus.sh` sweep (Contra III / Tales / F-Zero /
+FF6 / Gradius III / SCV4 / Super Metroid / Yoshi's Island / Axelay)
+renders with no banding, missing layer, or garbled split.
