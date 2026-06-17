@@ -29,7 +29,7 @@ pillar subsystem; until every row below is ✅, treat it as an approximation.
 | 9 | **`hdmaSetup` sets `hdmaDoTransfer=true` for ALL channels** (even disabled) when any HDMA is enabled (`dma.cpp:143`) | luna sets disabled channels `do_transfer=false`, uses lazy-start instead | ⚠️ structural difference — open. Equivalent output on YI/Contra III/corpus, but unverified vs every mid-frame toggle pattern. |
 | 10 | **Indirect "last active channel" 1-byte quirk** (`dma.cpp:165`) — if `$43xA==0` on reload AND this is the last active HDMA channel, load only **1** byte for the indirect address (address ends one short, one fewer cycle) | luna always reads 2 bytes | ⚠️ **not implemented** — open. Rare (terminating indirect entry on the last channel); affects address + 1 read of timing. |
 | 11 | **Per-line table read for timing** — `hdmaReload` does `readA` of the header **every** active line (`dma.cpp:153`), even gap lines | luna reads the next header only when the counter reaches 0 | ⚠️ timing approximation — luna folds per-line HDMA cost into the canonical 18-mclk/line `HDMA_OVERHEAD_MCLK`. Cycle count, not visual. |
-| 12 | **HDMA vs MDMA arbitration / mid-DMA pause** (`hdmaTransfer`/`dmaRun` set `dmaEnable=false`) | 🔬 | unaudited |
+| 12 | **HDMA vs MDMA arbitration / mid-DMA pause** (`hdmaTransfer`/`dmaRun` set `dmaEnable=false`) | a long sync DMA is driven in scanline-bounded segments; HDMA fires at each crossed visible line via `sched_one_line` | 🔧 fixed (Phase 5 inc 1) — HDMA now preempts a mid-frame MDMA at scanline boundaries instead of being deferred to after the whole burst. Test `hdma_preempts_a_long_mid_frame_dma_at_scanline_boundaries`. Sub-line position (ares dot-276 `hdmaPosition=1104`) is still line-granular — see #8/#11. |
 | 13 | **`$420C` write mid-DMA, HDMA on the same line as MDMA, DMA during HDMA** edge interactions | 🔬 | unaudited |
 
 ## Fixed (regression-tested)
@@ -43,7 +43,9 @@ pillar subsystem; until every row below is ✅, treat it as an approximation.
    faithfully (the `if(hdmaCompleted && hdmaFinished()) return;` branch).
 2. ⚠️ #9 reconcile the mid-frame model with ares' `hdmaDoTransfer`-for-all
    semantics (or prove the lazy-start equivalent for all toggle patterns).
-3. 🔬 #11–13 cycle-accurate per-line HDMA timing + HDMA/MDMA arbitration.
+3. 🔬 #11/#13 cycle-accurate per-line HDMA timing + remaining edge
+   interactions (`$420C` write mid-DMA, etc.). (#12 mid-DMA pause: fixed,
+   Phase 5 inc 1.) The sub-line dot-276 `hdmaPosition` is Phase 5 inc 2.
 
 ## How to extend
 
