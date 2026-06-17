@@ -38,7 +38,7 @@
 //! battery-backed SRAM, wrapping at the cart-declared size.
 
 use crate::mapper::{Mapper, MapperKind};
-use crate::types::{Addr24, bank_of, offset_of};
+use crate::types::{Addr24, bank_of, offset_of, rom_mirror};
 
 /// `HiROM` / `ExHiROM` mapper.
 pub struct HiRomMapper {
@@ -100,11 +100,13 @@ impl HiRomMapper {
             _ => return None,
         };
         let off = rom_bank * 0x1_0000 + usize::from(offset);
-        if off < self.rom.len() {
-            Some(off)
-        } else {
-            None
+        if self.rom.is_empty() {
+            return None;
         }
+        // Mirror a smaller-than-mapped image (ares `Bus::mirror`): `% len`
+        // for power-of-two ROMs, trailing-chunk mirror for non-pow2 (e.g.
+        // a 6 MB ExHiROM cart).
+        Some(rom_mirror(off, self.rom.len()))
     }
 
     /// Translate (bank, offset) → SRAM byte offset, or `None`.
@@ -236,12 +238,14 @@ mod tests {
     }
 
     #[test]
-    fn read_past_rom_returns_none() {
-        let mut m = HiRomMapper::new(ramp_rom(0x1_0000), 0); // 1 bank only
-        // $C0:0000 in range
+    fn read_past_rom_end_mirrors() {
+        let mut m = HiRomMapper::new(ramp_rom(0x1_0000), 0); // 1 bank (64 KB)
+        // $C0:0000 in range → rom[0].
         assert_eq!(m.read(make_addr(0xC0, 0x0000)), Some(0));
-        // $C1:0000 past end
-        assert_eq!(m.read(make_addr(0xC1, 0x0000)), None);
+        // $C1:0000 → linear $10000; a 64 KB image mirrors every 64 KB, so
+        // this wraps to rom[0] rather than returning open bus.
+        assert_eq!(m.read(make_addr(0xC1, 0x0000)), Some(0));
+        assert_eq!(m.read(make_addr(0xC1, 0x0042)), Some(0x42));
     }
 
     #[test]
