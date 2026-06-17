@@ -11,7 +11,7 @@
 //! offsets `$0000-$7FFF`.
 
 use crate::mapper::{Mapper, MapperKind};
-use crate::types::{Addr24, bank_of, offset_of};
+use crate::types::{Addr24, bank_of, offset_of, rom_mirror};
 
 /// `LoROM` mapper.
 pub struct LoRomMapper {
@@ -43,15 +43,13 @@ impl LoRomMapper {
         // is the bus's concern).
         let normalized_bank = bank & 0x7F;
         let rom_offset = (usize::from(normalized_bank) * 0x8000) + (usize::from(offset) - 0x8000);
-        if rom_offset < self.rom.len() {
-            Some(rom_offset)
-        } else {
-            // Address falls past the end of a smaller-than-mapped ROM —
-            // real cartridges open-bus this; we return None so the bus
-            // can decide. Most emulators return $00 or the high byte of
-            // the address.
-            None
+        if self.rom.is_empty() {
+            return None;
         }
+        // A ROM smaller than the mapped LoROM space mirrors (hardware
+        // wraps the image), via ares' `Bus::mirror`. Power-of-two images
+        // reduce to `% len`; non-pow2 carts mirror the trailing chunk.
+        Some(rom_mirror(rom_offset, self.rom.len()))
     }
 
     /// Translate a (bank, offset) into an SRAM offset, if the address
@@ -171,12 +169,30 @@ mod tests {
     }
 
     #[test]
-    fn reads_past_rom_end_return_none() {
-        let mut m = LoRomMapper::new(ramp_rom(32 * 1024), 0); // only 1 page
-        // Bank $00, offset $8000 → in range
+    fn reads_past_rom_end_mirror_power_of_two() {
+        let mut m = LoRomMapper::new(ramp_rom(32 * 1024), 0); // one 32 KB page
+        // Bank $00, offset $8000 → rom[0] (in range).
         assert_eq!(m.read(make_addr(0x00, 0x8000)), Some(0));
-        // Bank $01, offset $8000 → past end
-        assert_eq!(m.read(make_addr(0x01, 0x8000)), None);
+        // Bank $01, offset $8000 → linear $8000; a 32 KB ROM mirrors
+        // every 32 KB, so this wraps to rom[0], NOT open bus.
+        assert_eq!(m.read(make_addr(0x01, 0x8000)), Some(0));
+        // Bank $01, offset $8001 → wraps to rom[1].
+        assert_eq!(m.read(make_addr(0x01, 0x8001)), Some(1));
+    }
+
+    #[test]
+    fn non_pow2_rom_mirrors_trailing_chunk() {
+        // 1.5 MB = 1 MB + 0.5 MB. Linear $180000 (bank $30, off $8000) is
+        // exactly at the end; ares `mirror` folds it to $100000 — i.e. the
+        // trailing 0.5 MB chunk repeats, not open bus. ramp_rom stores
+        // `i & 0xFF`, so rom[$100000] == 0x00.
+        let mut m = LoRomMapper::new(ramp_rom(0x18_0000), 0);
+        // In-range sanity: bank $20 off $8000 → linear $100000.
+        assert_eq!(m.read(make_addr(0x20, 0x8000)), Some(0x00));
+        // Past-end mirror: bank $30 off $8000 → linear $180000 → $100000.
+        assert_eq!(m.read(make_addr(0x30, 0x8000)), Some(0x00));
+        // …and bank $30 off $8005 → $180005 → $100005 → rom byte 0x05.
+        assert_eq!(m.read(make_addr(0x30, 0x8005)), Some(0x05));
     }
 
     #[test]

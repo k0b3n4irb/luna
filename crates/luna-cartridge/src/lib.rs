@@ -249,14 +249,20 @@ const HEADER_OFFSET_LOROM: usize = 0x7FC0;
 const HEADER_OFFSET_HIROM: usize = 0xFFC0;
 const HEADER_OFFSET_EXHIROM: usize = 0x40_FFC0;
 
-/// Try every plausible internal-header offset and return the first whose
-/// checksum complement matches.
+/// Detect the cartridge layout by examining each plausible internal-header
+/// offset.
 ///
-/// We only use the checksum complement test (`!ck == ckcomp`) as the
-/// signal — it's strict but reliable. Unlicensed dumps with bogus
-/// checksums will be rejected; that's an acceptable trade-off for
-/// avoiding false positives on all-zero or non-ROM input.
+/// The checksum-complement test (`!ck == ckcomp`) is kept as the strict
+/// **acceptance gate** — it reliably rejects all-zero / non-ROM input,
+/// which is luna's deliberate trade-off (forced-mapper loading handles
+/// unlicensed dumps with bogus checksums). Among the offsets that pass
+/// the gate, we no longer take the *first* one: we pick the
+/// highest-[`score_header`] candidate (ties → the earlier offset, i.e.
+/// `LoROM`), a port of ares' `SuperFamicom::scoreHeader`
+/// (mia/medium/super-famicom.cpp). This disambiguates the rare case where
+/// more than one offset's checksum coincidentally validates.
 fn detect_and_parse(rom: &[u8]) -> Option<Header> {
+    let mut best: Option<(i32, usize)> = None;
     for off in [
         HEADER_OFFSET_LOROM,
         HEADER_OFFSET_HIROM,
@@ -265,12 +271,65 @@ fn detect_and_parse(rom: &[u8]) -> Option<Header> {
         if off + 0x20 > rom.len() {
             continue;
         }
-        let h = parse_at(rom, off);
-        if h.checksum_valid() {
-            return Some(h);
+        if !parse_at(rom, off).checksum_valid() {
+            continue;
+        }
+        let score = score_header(rom, off);
+        if best.is_none_or(|(bs, _)| score > bs) {
+            best = Some((score, off));
         }
     }
-    None
+    best.map(|(_, off)| parse_at(rom, off))
+}
+
+/// Heuristic confidence that the internal header at `off` is the real one,
+/// a faithful port of ares' `SuperFamicom::scoreHeader`
+/// (mia/medium/super-famicom.cpp). ares' header base is `off - 0x10`, so
+/// its `address + 0x25` map-mode byte is luna's `off + 0x15`, etc. Scores
+/// the reset-vector validity, the plausibility of the first opcode the CPU
+/// would execute, the checksum complement, and the map-mode/offset match.
+fn score_header(rom: &[u8], off: usize) -> i32 {
+    // ares requires `address + 0x50` bytes (= luna `off + 0x40`): the
+    // header plus the native reset vector at `off + 0x3C`.
+    if off + 0x40 > rom.len() {
+        return 0;
+    }
+    let map_mode = rom[off + 0x15] & !0x10; // ignore the FastROM bit
+    let complement = u16::from_le_bytes([rom[off + 0x1C], rom[off + 0x1D]]);
+    let checksum = u16::from_le_bytes([rom[off + 0x1E], rom[off + 0x1F]]);
+    let reset_vector = u16::from_le_bytes([rom[off + 0x3C], rom[off + 0x3D]]);
+    if reset_vector < 0x8000 {
+        // $00:0000-7FFF is never ROM data — this offset can't be a header.
+        return 0;
+    }
+
+    // The first instruction the CPU would execute at the reset vector.
+    let ares_base = off.wrapping_sub(0x10);
+    let opcode_off = (ares_base & !0x7FFF) | (reset_vector as usize & 0x7FFF);
+    let opcode = rom.get(opcode_off).copied().unwrap_or(0);
+
+    let mut score: i32 = 0;
+    match opcode {
+        // most likely: sei / clc / sec / stz $nnnn / jmp / jml
+        0x78 | 0x18 | 0x38 | 0x9C | 0x4C | 0x5C => score += 8,
+        // plausible: rep/sep/lda/ldx/ldy/jsr/jsl
+        0xC2 | 0xE2 | 0xAD | 0xAE | 0xAC | 0xAF | 0xA9 | 0xA2 | 0xA0 | 0x20 | 0x22 => score += 4,
+        // implausible: rti/rts/rtl/cmp/cpx/cpy
+        0x40 | 0x60 | 0x6B | 0xCD | 0xEC | 0xCC => score -= 4,
+        // least likely: brk/cop/stp/wdm/sbc $nnnnnn,x
+        0x00 | 0x02 | 0xDB | 0x42 | 0xFF => score -= 8,
+        _ => {}
+    }
+    if checksum.wrapping_add(complement) == 0xFFFF {
+        score += 4;
+    }
+    if off == HEADER_OFFSET_LOROM && map_mode == 0x20 {
+        score += 2;
+    }
+    if off == HEADER_OFFSET_HIROM && map_mode == 0x21 {
+        score += 2;
+    }
+    score.max(0)
 }
 
 fn parse_at(rom: &[u8], off: usize) -> Header {
@@ -289,6 +348,12 @@ fn parse_at(rom: &[u8], off: usize) -> Header {
     // a coprocessor, high nibble selects which (1 = Super FX, 0 = NEC DSP).
     let is_superfx = (chipset & 0x0F) >= 0x03 && (chipset & 0xF0) == 0x10;
     let is_dsp = (chipset & 0x0F) >= 0x03 && (chipset & 0xF0) == 0x00;
+    // SA-1's canonical signal is the chipset/RomType byte ($FFD6): low
+    // nibble >= 3 (coprocessor present) + high nibble 3 (= SA-1) — e.g.
+    // SMRPG / Kirby Super Star carry $34/$35. The MapMode byte's low
+    // nibble 3 is a weaker secondary signal (kept via `mapper_from_byte`),
+    // but RomType is what hardware/ares key on.
+    let is_sa1 = (chipset & 0x0F) >= 0x03 && (chipset & 0xF0) == 0x30;
     let base_kind = mapper_from_byte(map_byte).unwrap_or(MapperKind::LoRom);
     // DSP-1 boards exist in both LoROM (DR/SR at $8000) and HiROM (DR/SR at
     // $6000) flavours — the base layout follows the map byte.
@@ -297,6 +362,8 @@ fn parse_at(rom: &[u8], off: usize) -> Header {
         MapperKind::SuperFx
     } else if is_dsp {
         MapperKind::Dsp1
+    } else if is_sa1 {
+        MapperKind::Sa1
     } else {
         base_kind
     };
@@ -410,6 +477,35 @@ mod tests {
         assert_eq!(cart.header.sram_size_kb, 8); // 1 << 3
         assert_eq!(cart.header.region, Region::Ntsc);
         assert!(cart.header.checksum_valid());
+    }
+
+    #[test]
+    fn sa1_detected_via_chipset_romtype_not_mapmode() {
+        let mut rom = synth_lorom("SA1 TEST", 0);
+        // Keep the plain LoROM map mode ($20) — i.e. NOT the $23 SA-1
+        // map-mode. SA-1 must be recognised purely from the RomType byte
+        // ($FFD6 high nibble 3); SMRPG/Kirby carry $34/$35.
+        rom[HEADER_OFFSET_LOROM + 0x15] = 0x20;
+        rom[HEADER_OFFSET_LOROM + 0x16] = 0x34;
+        assert_eq!(
+            parse_at(&rom, HEADER_OFFSET_LOROM).mapper_kind,
+            MapperKind::Sa1
+        );
+    }
+
+    #[test]
+    fn score_header_prefers_plausible_reset_opcode() {
+        // Identical headers; only the byte at the reset-vector target
+        // differs. A plausible first opcode (sei) must outscore an
+        // implausible one (brk).
+        let mut good = synth_lorom("SCORE", 0);
+        // Point the reset vector at $8100 → file offset $0100.
+        good[HEADER_OFFSET_LOROM + 0x3C] = 0x00;
+        good[HEADER_OFFSET_LOROM + 0x3D] = 0x81;
+        let mut bad = good.clone();
+        good[0x0100] = 0x78; // sei  → +8
+        bad[0x0100] = 0x00; // brk  → -8
+        assert!(score_header(&good, HEADER_OFFSET_LOROM) > score_header(&bad, HEADER_OFFSET_LOROM));
     }
 
     #[test]
