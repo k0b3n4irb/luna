@@ -53,6 +53,24 @@ pub struct Dma {
     /// defaults to `None` on restore).
     #[serde(skip)]
     pub dma_trace: Option<DmaTraceLog>,
+    /// In-progress sync-DMA cursor (Phase 5): the masked channel set and
+    /// the channel currently mid-transfer, so a burst can be driven in
+    /// scanline-bounded segments. `None` = no sync DMA in flight.
+    /// Transient run-state — never saved (a state is only taken at a
+    /// frame boundary, never mid-DMA).
+    #[serde(skip)]
+    pub mdma_cursor: Option<MdmaCursor>,
+}
+
+/// Resume state for a segmented sync DMA (Phase 5). The per-channel
+/// progress lives on each [`DmaChannel`]; this only tracks which channels
+/// were triggered and which one the driver is currently servicing.
+#[derive(Debug, Clone, Copy)]
+pub struct MdmaCursor {
+    /// The `$420B` channel mask for this burst.
+    pub mask: u8,
+    /// Next channel index (0..=8) to service; `8` = burst complete.
+    pub current_ch: u8,
 }
 
 impl Dma {
@@ -110,12 +128,51 @@ impl Dma {
     /// across all triggered channels (useful for cycle counting in
     /// later phases).
     pub fn run_mdma<B: DmaBus>(&mut self, bus: &mut B, mask: u8) -> u32 {
-        self.mdmaen = mask;
+        // One-shot wrapper: an unbounded budget runs the whole burst in a
+        // single call and clears the cursor (the legacy lump behaviour).
+        self.run_mdma_segment(bus, mask, u32::MAX)
+    }
+
+    /// Transfer at most `max_bytes` of the sync DMA triggered by `mask`,
+    /// resuming across calls (Phase 5). The first call on an idle
+    /// controller latches the cursor from `mask`; subsequent calls
+    /// continue the same burst (the passed `mask` is ignored while a
+    /// cursor is live). Channels run in ascending order; a channel is
+    /// serviced to completion before advancing. Returns the bytes
+    /// transferred *this* call; when the burst finishes,
+    /// [`Self::mdma_cursor`] is cleared back to `None`.
+    pub fn run_mdma_segment<B: DmaBus>(&mut self, bus: &mut B, mask: u8, max_bytes: u32) -> u32 {
+        if self.mdma_cursor.is_none() {
+            self.mdmaen = mask;
+            self.mdma_cursor = Some(MdmaCursor {
+                mask,
+                current_ch: 0,
+            });
+        }
+        let mut budget = max_bytes;
         let mut total = 0u32;
-        for ch in 0..8 {
-            if mask & (1 << ch) != 0 {
-                total += self.channels[ch].run(bus);
+        // Work the masked channels in order, within this call's budget.
+        loop {
+            let cur = self.mdma_cursor.expect("cursor set above");
+            if cur.current_ch >= 8 || budget == 0 {
+                break;
             }
+            let ch = cur.current_ch as usize;
+            if cur.mask & (1 << ch) != 0 {
+                let done = self.channels[ch].run_segment(bus, budget);
+                total += done;
+                budget -= done;
+                if self.channels[ch].seg_running {
+                    // Hit the budget mid-channel — resume this channel on
+                    // the next call (don't advance the cursor).
+                    break;
+                }
+            }
+            // Channel finished (or not masked): advance to the next.
+            self.mdma_cursor.as_mut().expect("cursor").current_ch += 1;
+        }
+        if self.mdma_cursor.is_some_and(|c| c.current_ch >= 8) {
+            self.mdma_cursor = None;
         }
         total
     }
@@ -267,6 +324,66 @@ mod tests {
         assert_eq!(n, 4, "only channel 0 transferred");
         assert_eq!(bus.b[0x22], 0x44, "last byte landed at $2122");
         assert_eq!(bus.b[0xFF], 0x00, "channel 1 did not run");
+    }
+
+    #[test]
+    fn run_mdma_segment_chunked_matches_one_shot() {
+        // Increment 0 invariant: splitting a sync DMA into arbitrary
+        // byte-bounded segments produces byte-identical B-bus output and
+        // identical channel end-state vs. running it in one shot.
+        // Two masked channels with odd sizes + different modes, so chunk
+        // boundaries fall mid-pattern and mid-channel.
+        fn configure(dma: &mut Dma, bus: &mut MockBus) {
+            for i in 0..256u32 {
+                bus.a[(0x7E_0000 + i) as usize] = i as u8;
+                bus.a[(0x7F_0000 + i) as usize] = 0x80u8.wrapping_add(i as u8);
+            }
+            // Ch0: mode 1 (2 regs, pattern [0,1]), BBAD $18, 70 bytes.
+            dma.channels[0].params = DmaParams::from_byte(0x01);
+            dma.channels[0].bbad = 0x18;
+            dma.channels[0].a_addr = 0x0000;
+            dma.channels[0].a_bank = 0x7E;
+            dma.channels[0].das = 70;
+            // Ch2: mode 0 (1 reg), BBAD $22, 37 bytes.
+            dma.channels[2].params = DmaParams::from_byte(0x00);
+            dma.channels[2].bbad = 0x22;
+            dma.channels[2].a_addr = 0x0000;
+            dma.channels[2].a_bank = 0x7F;
+            dma.channels[2].das = 37;
+        }
+        let mask = 0b0000_0101; // channels 0 and 2
+
+        // (a) one shot
+        let mut bus_ref = MockBus::new();
+        let mut dma_ref = Dma::new();
+        configure(&mut dma_ref, &mut bus_ref);
+        let n_ref = dma_ref.run_mdma(&mut bus_ref, mask);
+
+        // (b) segmented in cycling chunk sizes until the cursor clears
+        let mut bus_seg = MockBus::new();
+        let mut dma_seg = Dma::new();
+        configure(&mut dma_seg, &mut bus_seg);
+        let chunks = [1u32, 7, 8, 9, 170, 65535];
+        let mut n_seg = 0u32;
+        let mut i = 0;
+        while dma_seg.mdma_cursor.is_some() || n_seg == 0 {
+            n_seg += dma_seg.run_mdma_segment(&mut bus_seg, mask, chunks[i % chunks.len()]);
+            i += 1;
+            assert!(i < 1000, "segmented run did not terminate");
+        }
+
+        assert_eq!(n_ref, 70 + 37);
+        assert_eq!(n_seg, n_ref, "same total bytes");
+        assert_eq!(bus_seg.b, bus_ref.b, "byte-identical B-bus output");
+        assert!(
+            dma_seg.mdma_cursor.is_none(),
+            "cursor cleared at completion"
+        );
+        for ch in [0usize, 2] {
+            assert_eq!(dma_seg.channels[ch].a_addr, dma_ref.channels[ch].a_addr);
+            assert_eq!(dma_seg.channels[ch].das, dma_ref.channels[ch].das);
+            assert!(!dma_seg.channels[ch].seg_running);
+        }
     }
 
     #[test]
