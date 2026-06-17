@@ -153,6 +153,12 @@ pub struct Snes {
     /// 16-bit shift register for controller 2 manual-mode reads.
     pub joypad2_shift: u16,
 
+    /// CPU memory-data register (open-bus latch): the last byte driven on
+    /// the CPU data bus by a read or write. Reads of unmapped / write-only
+    /// addresses return this instead of a fixed `0xFF` (ares' default bus
+    /// reader `[](n24,n8 data){ return data; }` returns the MDR).
+    pub mdr: u8,
+
     /// Optional CPU↔APU mailbox traffic log (`$2140-$2143`). When
     /// `Some`, every CPU read/write of those four ports is appended as
     /// a [`MailboxEvent`] for later analysis (e.g. diagnosing the
@@ -463,6 +469,7 @@ impl Snes {
             nmis_serviced: 0,
             region,
             wm_addr: 0,
+            mdr: 0,
             joypad_strobe: false,
             joypad1_shift: 0,
             joypad2_shift: 0,
@@ -642,6 +649,7 @@ impl Snes {
                 joypad_strobe,
                 joypad1_shift,
                 joypad2_shift,
+                mdr,
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
@@ -675,6 +683,7 @@ impl Snes {
                 joypad_strobe,
                 joypad1_shift,
                 joypad2_shift,
+                mdr,
             };
             cpu.reset(&mut bus);
         }
@@ -750,6 +759,7 @@ impl Snes {
                 joypad_strobe,
                 joypad1_shift,
                 joypad2_shift,
+                mdr,
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
@@ -786,6 +796,7 @@ impl Snes {
                 joypad_strobe,
                 joypad1_shift,
                 joypad2_shift,
+                mdr,
             };
             // The scanline scheduler now advances per bus access inside
             // `bus.io_cycle` (per-scanline rendering: each line is drawn
@@ -883,6 +894,7 @@ impl Snes {
                 joypad_strobe,
                 joypad1_shift,
                 joypad2_shift,
+                mdr,
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
@@ -919,6 +931,7 @@ impl Snes {
                 joypad_strobe,
                 joypad1_shift,
                 joypad2_shift,
+                mdr,
             };
             bus.sched_advance(mcycles);
             rb_line = bus.ppu_line;
@@ -982,6 +995,7 @@ impl Snes {
             joypad_strobe,
             joypad1_shift,
             joypad2_shift,
+            mdr,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -1015,6 +1029,7 @@ impl Snes {
             joypad_strobe,
             joypad1_shift,
             joypad2_shift,
+            mdr,
         };
         (0..count)
             .map(|i| {
@@ -1085,6 +1100,9 @@ struct SnesBus<'a> {
     joypad_strobe: &'a mut bool,
     joypad1_shift: &'a mut u16,
     joypad2_shift: &'a mut u16,
+    /// CPU open-bus latch (memory-data register). Open-bus reads return
+    /// this; reads and writes update it. See [`Snes::mdr`].
+    mdr: &'a mut u8,
     mclk_total: &'a mut MCycles,
     /// Total scanlines per frame for the current cart's region —
     /// used by the H/V counter latch path (\$2137 / WRIO) to wrap
@@ -1555,10 +1573,17 @@ impl SnesBus<'_> {
 impl Bus for SnesBus<'_> {
     fn read(&mut self, addr: Addr24) -> u8 {
         let value = self.read_inner(addr);
+        // Latch the byte on the CPU data bus (ares' `r.mdr`): open-bus
+        // reads below return this. An open-bus read returns the prior
+        // MDR (read_inner hands back `*self.mdr`), so this is idempotent
+        // for those — it only changes on a real fetch.
+        *self.mdr = value;
         self.trace_mem_access(addr, MemEventKind::Read, value);
         value
     }
     fn write(&mut self, addr: Addr24, value: u8) {
+        // A write drives the data bus too, so it updates the MDR.
+        *self.mdr = value;
         self.trace_mem_access(addr, MemEventKind::Write, value);
         self.write_inner(addr, value);
     }
@@ -1673,7 +1698,7 @@ impl SnesBus<'_> {
                 *self.wm_addr = (*self.wm_addr + 1) & 0x1FFFF;
                 return v;
             }
-            return 0xFF;
+            return *self.mdr;
         }
         if let Some(offset) = Self::is_joypad_serial(addr) {
             // $4016/$4017 manual serial read.
@@ -1714,11 +1739,11 @@ impl SnesBus<'_> {
             return bit as u8;
         }
         if let Some(offset) = Self::dma_offset(addr) {
-            return self.dma.read_register(offset).unwrap_or(0xFF);
+            return self.dma.read_register(offset).unwrap_or(*self.mdr);
         }
         if Self::is_mdmaen(addr) || Self::is_hdmaen(addr) {
             // MDMAEN / HDMAEN are write-only; reads return open bus.
-            return 0xFF;
+            return *self.mdr;
         }
         if let Some(reg_off) = Self::cpu_reg_offset(addr) {
             // $4212 HVBJOY: bit 7 = vblank (latched in `cpu_regs.hvbjoy`),
@@ -1753,7 +1778,7 @@ impl SnesBus<'_> {
                 return v;
             }
             // Write-only registers fall through to open bus.
-            return 0xFF;
+            return *self.mdr;
         }
         if let Some(v) = self.mapper.read(addr) {
             if let Some(reg) = Self::sa1_reg(addr) {
@@ -1769,8 +1794,8 @@ impl SnesBus<'_> {
             }
             return v;
         }
-        // Open bus stub.
-        0xFF
+        // Unmapped → open bus: the last byte driven on the CPU bus (MDR).
+        *self.mdr
     }
 
     /// SA-1 MMIO register address (`$2200-$23FF`) if `addr` targets the
@@ -2126,6 +2151,7 @@ mod tests {
             joypad_strobe,
             joypad1_shift,
             joypad2_shift,
+            mdr,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -2159,12 +2185,88 @@ mod tests {
             joypad_strobe,
             joypad1_shift,
             joypad2_shift,
+            mdr,
         };
         bus.write(make_addr(0x00, 0x0100), 0xAA);
         // Read back from the mirror in $00:
         assert_eq!(bus.read(make_addr(0x00, 0x0100)), 0xAA);
         // And from $7E (full WRAM):
         assert_eq!(bus.read(make_addr(0x7E, 0x0100)), 0xAA);
+    }
+
+    #[test]
+    fn open_bus_read_returns_last_data_bus_value_not_ff() {
+        let cart = demo_lorom();
+        let mut snes = Snes::from_cartridge(cart);
+        let scanlines = snes.region_scanlines();
+        let ppu_line_snapshot = snes.ppu_line;
+        let vblank_start_snapshot = vblank_start_line(snes.region);
+        let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
+        let Snes {
+            ppu,
+            dma,
+            cpu_regs,
+            apu_real,
+            apu_stub_fallback,
+            apu_panicked,
+            wram,
+            mapper,
+            fast_rom,
+            nmi_pending,
+            irq_pending,
+            total_mclk,
+            wm_addr,
+            joypad_strobe,
+            joypad1_shift,
+            joypad2_shift,
+            mdr,
+            mailbox_log,
+            sa1_log,
+            mem_trace_log,
+            ..
+        } = &mut snes;
+        let mut bus = SnesBus {
+            wram,
+            mapper: mapper.as_mut(),
+            ppu,
+            dma,
+            cpu_regs,
+            apu_real,
+            apu_stub_fallback,
+            apu_panicked,
+            fast_rom: *fast_rom,
+            nmi: nmi_pending,
+            irq: irq_pending,
+            mclk_total: total_mclk,
+            scanlines_per_frame: scanlines,
+            ppu_line: ppu_line_snapshot,
+            mcycles_in_line: 0,
+            frame_count: 0,
+            nmis_serviced: 0,
+            sched_enabled: false,
+            vblank_start_line: vblank_start_snapshot,
+            cpu_pc_full: cpu_pc_snapshot,
+            mailbox_log,
+            sa1_log,
+            mem_trace_log,
+            wm_addr,
+            joypad_strobe,
+            joypad1_shift,
+            joypad2_shift,
+            mdr,
+        };
+        // A write drives 0x5A onto the data bus → latches the MDR.
+        bus.write(make_addr(0x00, 0x0100), 0x5A);
+        // $420B (MDMAEN) is write-only → an open-bus read returns the MDR
+        // (last bus byte), NOT a fixed 0xFF.
+        assert_eq!(bus.read(make_addr(0x00, 0x420B)), 0x5A);
+        // A mapped read updates the MDR too: stage 0x33 in WRAM, read it,
+        // then confirm the open-bus read now follows.
+        bus.write(make_addr(0x00, 0x0200), 0x33);
+        assert_eq!(bus.read(make_addr(0x00, 0x0200)), 0x33);
+        assert_eq!(bus.read(make_addr(0x00, 0x420B)), 0x33);
+        // An entirely unmapped address open-buses to the same MDR.
+        assert_eq!(bus.read(make_addr(0x00, 0x420C)), 0x33);
     }
 
     #[test]
@@ -2196,6 +2298,7 @@ mod tests {
             joypad_strobe,
             joypad1_shift,
             joypad2_shift,
+            mdr,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -2229,6 +2332,7 @@ mod tests {
             joypad_strobe,
             joypad1_shift,
             joypad2_shift,
+            mdr,
         };
         // WMADD = $00:1F00.
         bus.write(make_addr(0x00, 0x2181), 0x00);
@@ -2273,6 +2377,7 @@ mod tests {
             joypad_strobe,
             joypad1_shift,
             joypad2_shift,
+            mdr,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -2306,6 +2411,7 @@ mod tests {
             joypad_strobe,
             joypad1_shift,
             joypad2_shift,
+            mdr,
         };
         // Latch then de-strobe.
         bus.write(make_addr(0x00, 0x4016), 0x01);
@@ -2670,6 +2776,7 @@ mod tests {
             joypad_strobe,
             joypad1_shift,
             joypad2_shift,
+            mdr,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -2703,6 +2810,7 @@ mod tests {
             joypad_strobe,
             joypad1_shift,
             joypad2_shift,
+            mdr,
         };
         bus.write(make_addr(0x00, 0x2100), 0x0F);
         assert_eq!(
