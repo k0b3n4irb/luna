@@ -256,6 +256,21 @@ pub struct DmaChannel {
     /// starts cleanly from its source address — matching ares' live
     /// `hdmaActive()` gating rather than a V=0-only latch.
     pub hdma_started: bool,
+
+    // --- transient sync-DMA segment cursor (Phase 5) ---
+    // These hold a sync DMA's progress *between* [`Self::run_segment`]
+    // calls so a long burst can be split at scanline boundaries (letting
+    // HDMA preempt). They are run-state only — never part of a save-state
+    // (a state is only ever taken at a frame boundary, never mid-DMA).
+    /// Bytes still to transfer in the in-progress sync DMA (`0` = idle).
+    #[serde(skip)]
+    pub seg_remaining: u32,
+    /// Pattern position (`mode.pattern()` index) carried across segments.
+    #[serde(skip)]
+    pub seg_byte_idx: u8,
+    /// `true` while a sync DMA is mid-burst (resume vs. fresh start).
+    #[serde(skip)]
+    pub seg_running: bool,
 }
 
 impl Default for DmaParams {
@@ -321,35 +336,49 @@ impl DmaChannel {
         }
     }
 
-    /// Execute the channel's DMA against the given bus. Runs until
-    /// `das` reaches zero (a starting `das = 0` transfers 64 KB).
-    ///
-    /// Updates `a_addr` (with `params.a_increment`) and `das` as it
-    /// goes. The B-bus offset cycles through `params.mode.pattern()`.
-    ///
+    /// Execute the channel's DMA against the given bus, to completion.
+    /// Runs until `das` reaches zero (a starting `das = 0` transfers
+    /// 64 KB). Updates `a_addr` (with `params.a_increment`) and `das` as
+    /// it goes; the B-bus offset cycles through `params.mode.pattern()`.
     /// Returns the number of bytes transferred.
+    ///
+    /// Thin wrapper over [`Self::run_segment`] with an unbounded budget.
     pub fn run<B: DmaBus>(&mut self, bus: &mut B) -> u32 {
-        // Each byte transfer is ~8 master cycles on real hardware.
-        // We feed that to the bus's per-byte tick so coprocessors
-        // (SA-1, etc.) run interleaved with the DMA instead of waking
-        // up after a multi-kilocycle freeze — matches ares + Mesen2
-        // scheduling. See `DmaBus::tick` doc for citations.
+        self.run_segment(bus, u32::MAX)
+    }
+
+    /// Transfer at most `max_bytes` of this channel's sync DMA, resuming
+    /// across calls (Phase 5: the driver splits a burst at scanline
+    /// boundaries so HDMA can preempt). The first call on an idle channel
+    /// latches the byte count (`das`, or 64 KB if `das == 0`) and pattern
+    /// position; subsequent calls continue from where the last left off.
+    /// Returns the bytes transferred *this* call; check
+    /// [`Self::seg_running`] to see whether the burst is finished.
+    pub fn run_segment<B: DmaBus>(&mut self, bus: &mut B, max_bytes: u32) -> u32 {
+        // Each byte transfer is ~8 master cycles on real hardware. We
+        // feed that to the bus's per-byte tick so coprocessors (SA-1,
+        // etc.) run interleaved with the DMA instead of waking up after a
+        // multi-kilocycle freeze — matches ares + Mesen2. See
+        // `DmaBus::tick`. (The master clock for APU/PPU/HDMA is advanced
+        // by the SnesBus driver per segment, not here.)
         const MCLK_PER_DMA_BYTE: u32 = 8;
 
+        if !self.seg_running {
+            // 0x0000 means 64 KB (ares' `do { } while(--transferSize)`
+            // wraps a zero start to 65536 iterations).
+            self.seg_remaining = if self.das == 0 {
+                0x1_0000
+            } else {
+                u32::from(self.das)
+            };
+            self.seg_byte_idx = 0;
+            self.seg_running = true;
+        }
+
         let pattern = self.params.mode.pattern();
-        let mut byte_idx: usize = 0;
-        let mut transferred: u32 = 0;
-        // 0x0000 means 64 KB (transfer count is computed as
-        // `((das as u32 + 0xFFFF) % 0x10000) + 1` effectively); we
-        // model it by looping with a u32 counter that initialises
-        // from das or 65536 if das == 0.
-        let total = if self.das == 0 {
-            0x1_0000_u32
-        } else {
-            u32::from(self.das)
-        };
-        while transferred < total {
-            let b_offset = self.bbad.wrapping_add(pattern[byte_idx]);
+        let mut done = 0u32;
+        while done < max_bytes && self.seg_remaining > 0 {
+            let b_offset = self.bbad.wrapping_add(pattern[self.seg_byte_idx as usize]);
             let a_addr: Addr24 = make_addr(self.a_bank, self.a_addr);
             // A WRAM→WMDATA ($2180) transfer is invalid: the B-bus side
             // is suppressed (ares dma.cpp:94).
@@ -372,14 +401,18 @@ impl DmaChannel {
                 Increment::Down => self.a_addr.wrapping_sub(1),
                 Increment::Fixed => self.a_addr,
             };
-            byte_idx = (byte_idx + 1) % pattern.len();
-            transferred += 1;
+            self.seg_byte_idx = ((self.seg_byte_idx as usize + 1) % pattern.len()) as u8;
+            self.seg_remaining -= 1;
+            done += 1;
             // Cooperative coprocessor tick after each byte.
             bus.tick(MCLK_PER_DMA_BYTE);
         }
-        // Hardware leaves `das = 0` at the end of a sync DMA.
-        self.das = 0;
-        transferred
+        if self.seg_remaining == 0 {
+            // Hardware leaves `das = 0` at the end of a sync DMA.
+            self.das = 0;
+            self.seg_running = false;
+        }
+        done
     }
 
     // ---------------------------------------------------------------
