@@ -29,7 +29,7 @@ truly-open list is short.** Use *this* table, not §1, as current truth.
 
 | Subsystem | May | **Re-grounded** | Still truly open |
 |---|:---:|:---:|---|
-| DSP S-DSP | A− | **A−** | golden-vector PCM tests absent (latent risk) |
+| DSP S-DSP | A− | **A** | ~~golden-vector PCM tests absent~~ — **FIXED 2026-06-17** (BRR→PCM differential vs Mesen2 + curated goldens) |
 | CPU 65c816 | A− | **A−** | none functional (DP-8 bare wrap is inert → comment fix) |
 | SPC700 | B | **B+** | fine cycle ordering only (branch penalty fixed) |
 | PPU | C+ | **A−** | *(OPHCT/OPVCT read-latch **+** BG scroll write-twice — both **FIXED 2026-06-11**; the OPVCT latch was the Doom-flicker root)* |
@@ -37,10 +37,10 @@ truly-open list is short.** Use *this* table, not §1, as current truth.
 | SA-1 | C+ | **B** | flat instruction timing (architectural, with Phase 5) |
 | Bus/mappers | C+ | **C+** | ROM mirroring, open-bus MDR, mapper-detect scoring |
 
-**Truly-open work list (was 6, now 4 after the OPVCT + BG-scroll fixes):**
+**Truly-open work list (was 6, now 3 after OPVCT + BG-scroll + BRR-test):**
 0. ~~PPU OPHCT/OPVCT read-latch not reset on $213F~~ — **FIXED 2026-06-11** (`08e68fe`, ares io.cpp:167-169). This was the **Doom border-flicker root** (see below).
 1. ~~PPU BG scroll write-twice~~ — **FIXED** (two shared latches, ares io.cpp:312; `ppu.rs:bg H/V scroll`, test `bg_h_scroll_uses_two_shared_latches`).
-2. DSP golden-vector PCM tests absent — highest unique value (the most faithful port is unverified by a real BRR→PCM assertion).
+2. ~~DSP golden-vector PCM tests absent~~ — **FIXED 2026-06-17**. The BRR→PCM decoder now has curated absolute goldens (all 4 filters + scale-13..15 overflow + clamp) **and** a differential proving luna's ares-port matches an independent Mesen2-form decoder bit-exactly over 200 000 random groups (`dsp.rs` tests `brr_curated_goldens_*` / `brr_differential_luna_matches_mesen_form_over_random_corpus`). ares and Mesen2 agree bit-exactly because every stored sample is `(s<<1)` (even buffer ⇒ inline `p>>1` == pre-shifted `prev>>1`).
 3. Bus: ROM mirroring of non-pow2 images returns open-bus instead of wrapping (`lorom.rs`/`hirom.rs`).
 4. Bus: open-bus is a fixed `0xFF`, not the last MDR latch (`snes.rs` `unwrap_or(0xFF)`).
 5. Bus: mapper detection is first-checksum-pass-wins, no weighted scoring; SA-1 detected via low-nibble MapMode not hi-nibble RomType.

@@ -1096,4 +1096,160 @@ mod tests {
         assert_eq!(dsp.read(0x00), 0x40);
         assert_eq!(dsp.voices[0].volume[0], 0x40);
     }
+
+    // ------------------- BRR → PCM golden vectors -------------------
+    //
+    // luna's `brr_decode` is a faithful port of ares `dsp/brr.cpp`. These
+    // tests assert it is *correct*, not merely self-consistent:
+    //
+    //  * curated goldens — absolute expected samples computed by hand from
+    //    the documented hardware algorithm (all 4 filters + scale edge
+    //    cases), each with the arithmetic shown so a reviewer can re-check.
+    //  * a differential vs an INDEPENDENT decoder translated from Mesen2's
+    //    `DSP/DspVoice.cpp::DecodeBrrSample` (the reference-first second
+    //    source). ares and Mesen2 agree bit-exactly here: every stored
+    //    sample is `(s << 1)`, so the buffer is always even, and ares'
+    //    inline `p>>1` equals Mesen's pre-shifted `prev = p>>1` under
+    //    floor-division for every filter and the scale-13..15 path.
+
+    /// Drive luna's real `brr_decode` for one 4-sample group. `b0` is the
+    /// cached BRR byte, `b1` the next ARAM byte. Returns the updated
+    /// 12-entry ring buffer + buffer offset.
+    fn luna_brr_group(
+        header: u8,
+        b0: u8,
+        b1: u8,
+        buffer: [i16; 12],
+        buffer_offset: u8,
+    ) -> ([i16; 12], u8) {
+        let mut dsp = Dsp::new();
+        dsp.brr._header = header;
+        dsp.brr._byte = b0;
+        let mut aram: Box<[u8; 0x10000]> =
+            vec![0u8; 0x10000].into_boxed_slice().try_into().unwrap();
+        let addr: u16 = 0x0100;
+        let off: u8 = 0;
+        dsp.voices[0].brr_address = addr;
+        dsp.voices[0].brr_offset = off;
+        aram[(addr as usize) + (off as usize) + 1] = b1;
+        dsp.voices[0].buffer = buffer;
+        dsp.voices[0].buffer_offset = buffer_offset;
+        dsp.brr_decode(0, &aram);
+        (dsp.voices[0].buffer, dsp.voices[0].buffer_offset)
+    }
+
+    /// Independent BRR decoder, translated from Mesen2
+    /// (`DspVoice.cpp::DecodeBrrSample`) onto luna's ring-buffer layout.
+    /// Same 4 samples, different arithmetic source → a real cross-check.
+    fn mesen_brr_group(
+        header: u8,
+        b0: u8,
+        b1: u8,
+        buffer: [i16; 12],
+        buffer_offset: u8,
+    ) -> ([i16; 12], u8) {
+        let mut buf = buffer;
+        let mut bo = buffer_offset as usize;
+        let samples: [i32; 4] = [
+            i32::from(((u16::from(b0 & 0xF0) << 8) as i16) >> 12),
+            i32::from(((u16::from(b0 & 0x0F) << 12) as i16) >> 12),
+            i32::from(((u16::from(b1 & 0xF0) << 8) as i16) >> 12),
+            i32::from(((u16::from(b1 & 0x0F) << 12) as i16) >> 12),
+        ];
+        let shift = i32::from(header >> 4);
+        let filter = header & 0x0C;
+        for &n in &samples {
+            let mut s = (n << shift) >> 1;
+            if shift >= 0x0D {
+                s = if s < 0 { -0x800 } else { 0 };
+            }
+            let prev1 = i32::from(buf[(bo + 11) % 12]) >> 1;
+            let prev2 = i32::from(buf[(bo + 10) % 12]) >> 1;
+            match filter {
+                0x00 => {}
+                0x04 => s += prev1 + (-prev1 >> 4),
+                0x08 => s += (prev1 << 1) + ((-((prev1 << 1) + prev1)) >> 5) - prev2 + (prev2 >> 4),
+                0x0C => {
+                    s += (prev1 << 1) + ((-(prev1 + (prev1 << 2) + (prev1 << 3))) >> 6) - prev2
+                        + (((prev2 << 1) + prev2) >> 4);
+                }
+                _ => {}
+            }
+            buf[bo] = (sclamp16(s) * 2) as i16;
+            bo = (bo + 1) % 12;
+        }
+        (buf, bo as u8)
+    }
+
+    #[test]
+    fn brr_curated_goldens_filter0_scale_and_overflow() {
+        // Filter 0, scale 0: stored = ((n >> 1) << 1) for nibble n.
+        // b0=0x27,b1=0xF8 → nibbles [2, 7, -1, -8].
+        //   2→(1<<1)=2  7→(3<<1)=6  -1→(-1<<1)=-2  -8→(-4<<1)=-8
+        let (buf, _) = luna_brr_group(0x00, 0x27, 0xF8, [0; 12], 0);
+        assert_eq!(&buf[0..4], &[2, 6, -2, -8]);
+
+        // Filter 0, scale 15 (>12): negative nibble → -0x800, else 0.
+        // stored = (±0x800) << 1 → -0x1000 / 0. nibbles [2,7,-1,-8].
+        let (buf, _) = luna_brr_group(0xF0, 0x27, 0xF8, [0; 12], 0);
+        assert_eq!(&buf[0..4], &[0, 0, -0x1000, -0x1000]);
+    }
+
+    #[test]
+    fn brr_curated_goldens_filters_1_2_3_sample0() {
+        // History: buffer[bo-1]=p1=100, buffer[bo-2]=200 (→ p2 = 200>>1 =
+        // 100). bo=2. nibble0 = 0 (b0=b1=0). Assert the first written
+        // sample buf[2]. (Even buffer ⇒ ares/Mesen identical.)
+        let mut start = [0i16; 12];
+        start[1] = 100; // p1 (raw)
+        start[0] = 200; // p2 (raw); ares uses p2>>1 = 100
+
+        // Filter 1: s = 0 + (p1>>1) + ((-p1)>>5) = 50 + (-100>>5)=50-4=46.
+        let (buf, _) = luna_brr_group(0x04, 0x00, 0x00, start, 2);
+        assert_eq!(buf[2], 92); // (46 << 1)
+
+        // Filter 2: s = p1 - p2 + (p2>>4) + ((p1*-3)>>6)
+        //             = 100 - 100 + (100>>4=6) + (-300>>6=-5) = 1 → 2.
+        let (buf, _) = luna_brr_group(0x08, 0x00, 0x00, start, 2);
+        assert_eq!(buf[2], 2);
+
+        // Filter 3: s = p1 - p2 + ((p1*-13)>>7) + ((p2*3)>>4)
+        //             = 100 - 100 + (-1300>>7=-11) + (300>>4=18) = 7 → 14.
+        let (buf, _) = luna_brr_group(0x0C, 0x00, 0x00, start, 2);
+        assert_eq!(buf[2], 14);
+    }
+
+    #[test]
+    fn brr_differential_luna_matches_mesen_form_over_random_corpus() {
+        // Deterministic LCG (no rand dep; Math.random-free). Carry the
+        // ring buffer forward across groups so cross-group p1/p2 chaining
+        // is exercised, comparing luna's ares-port to the Mesen2-form
+        // oracle on every group.
+        let mut seed: u32 = 0x1357_9BDF;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            seed
+        };
+        let mut buf_luna = [0i16; 12];
+        let mut buf_ref = [0i16; 12];
+        let mut bo_luna = 0u8;
+        let mut bo_ref = 0u8;
+        for i in 0..200_000u32 {
+            let r = next();
+            let header = (r & 0xFF) as u8;
+            let b0 = ((r >> 8) & 0xFF) as u8;
+            let b1 = ((r >> 16) & 0xFF) as u8;
+            let (nb_luna, nbo_luna) = luna_brr_group(header, b0, b1, buf_luna, bo_luna);
+            let (nb_ref, nbo_ref) = mesen_brr_group(header, b0, b1, buf_ref, bo_ref);
+            assert_eq!(
+                nb_luna, nb_ref,
+                "BRR group {i} diverged: header={header:#04x} b0={b0:#04x} b1={b1:#04x}"
+            );
+            assert_eq!(nbo_luna, nbo_ref);
+            buf_luna = nb_luna;
+            buf_ref = nb_ref;
+            bo_luna = nbo_luna;
+            bo_ref = nbo_ref;
+        }
+    }
 }
