@@ -29,7 +29,7 @@ pillar subsystem; until every row below is ✅, treat it as an approximation.
 | 9 | **`hdmaSetup` sets `hdmaDoTransfer=true` for ALL channels** (even disabled) when any HDMA is enabled (`dma.cpp:143`) | luna sets disabled channels `do_transfer=false`, uses lazy-start instead | ⚠️ structural difference — open. Equivalent output on YI/Contra III/corpus, but unverified vs every mid-frame toggle pattern. |
 | 10 | **Indirect "last active channel" 1-byte quirk** (`dma.cpp:165`) — if `$43xA==0` on reload AND this is the last active HDMA channel, load only **1** byte for the indirect address (address ends one short, one fewer cycle) | luna always reads 2 bytes | ⚠️ **not implemented** — open. Rare (terminating indirect entry on the last channel); affects address + 1 read of timing. |
 | 11 | **Per-line table read for timing** — `hdmaReload` does `readA` of the header **every** active line (`dma.cpp:153`), even gap lines | luna reads the next header only when the counter reaches 0 | ⚠️ timing approximation — luna folds per-line HDMA cost into the canonical 18-mclk/line `HDMA_OVERHEAD_MCLK`. Cycle count, not visual. |
-| 12 | **HDMA vs MDMA arbitration / mid-DMA pause** (`hdmaTransfer`/`dmaRun` set `dmaEnable=false`) | a long sync DMA is driven in scanline-bounded segments; HDMA fires at each crossed visible line via `sched_one_line` | 🔧 fixed (Phase 5 inc 1) — HDMA now preempts a mid-frame MDMA at scanline boundaries instead of being deferred to after the whole burst. Test `hdma_preempts_a_long_mid_frame_dma_at_scanline_boundaries`. Sub-line position (ares dot-276 `hdmaPosition=1104`) is still line-granular — see #8/#11. |
+| 12 | **HDMA vs MDMA arbitration / mid-DMA pause** (`hdmaTransfer`/`dmaRun` set `dmaEnable=false`) | a long sync DMA is driven in scanline-bounded segments; HDMA fires at each crossed visible line via `sched_one_line` | 🔧 fixed (Phase 5 inc 1) — HDMA now preempts a mid-frame MDMA at scanline boundaries instead of being deferred to after the whole burst. Test `hdma_preempts_a_long_mid_frame_dma_at_scanline_boundaries`. Sub-line position (ares dot-276 `hdmaPosition=1104`) is still line-granular — **inc 2 deferred, see the note below**. |
 | 13 | **`$420C` write mid-DMA, HDMA on the same line as MDMA, DMA during HDMA** edge interactions | 🔬 | unaudited |
 
 ## Fixed (regression-tested)
@@ -45,7 +45,40 @@ pillar subsystem; until every row below is ✅, treat it as an approximation.
    semantics (or prove the lazy-start equivalent for all toggle patterns).
 3. 🔬 #11/#13 cycle-accurate per-line HDMA timing + remaining edge
    interactions (`$420C` write mid-DMA, etc.). (#12 mid-DMA pause: fixed,
-   Phase 5 inc 1.) The sub-line dot-276 `hdmaPosition` is Phase 5 inc 2.
+   Phase 5 inc 1.)
+
+## Phase 5 inc 2 (sub-line dot-276 `hdmaPosition`) — ⚠️ DEFERRED (2026-06-17)
+
+ares runs HDMA at `hcounter() >= 1104` (dot 276, `timing.cpp:76`) on each
+visible line: the line's visible pixels (dots 0..255) are drawn *before*
+that point, so a line's own HDMA transfer affects the **next** line, and a
+CPU register write in late H-Blank likewise defers to the next line.
+
+**This cannot be represented on luna's whole-line renderer without
+corrupting output.** luna renders each scanline as one unit, so it has no
+notion of "registers written after dot 276 only affect post-dot-276
+pixels." A faithful port was implemented and measured against the golden
+corpus; firing HDMA at dot 276 (transfer → next line) **regressed** the
+known-good test ROMs:
+
+- `HDMA/HiColor64…` — periodic **black horizontal lines** (per-block
+  palette upload lands one line late).
+- `HDMA/RedSpace…` — **black top scanline**, gradient shifted down one line
+  (line 0 renders before its HDMA).
+- `HDMA/Mode7HDMA`, `Mode7/Perspective` — **garbage band at the top edge**
+  (line-0 matrix renders before its HDMA).
+
+luna's existing model (HDMA applied at the scanline boundary, to the line
+it affects) is what actually matches the hardware test-ROM images — all 58
+goldens render correctly. So the boundary model is kept, and the *visual*
+result is hardware-correct; only the sub-line **timing** of the HDMA
+CPU-stall and of HDMA's preemption of an in-flight MDMA is line-granular
+rather than dot-precise (a cycle-count gap with no known game impact).
+
+**To actually land inc 2** luna would need a per-dot / sub-line renderer
+(render dots 0..275 of line L, run HDMA, render the rest), or a register
+write-log replayed per dot at scan-out. That is a PPU-architecture change,
+out of scope for the DMA pillar. Reopen here if a per-dot renderer lands.
 
 ## How to extend
 
