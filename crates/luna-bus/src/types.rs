@@ -48,6 +48,35 @@ pub const fn make_addr(bank: u8, offset: u16) -> Addr24 {
     ((bank as u32) << 16) | (offset as u32)
 }
 
+/// Fold a linear ROM address into a `size`-byte image, mirroring exactly
+/// as SNES hardware does. Faithful port of ares' `Bus::mirror`
+/// (`sfc/memory/inline.hpp`). For a power-of-two `size` this is just
+/// `address % size`; for a non-power-of-two cart (e.g. 1.5 MB) the region
+/// past the end mirrors the trailing largest-power-of-two chunk rather
+/// than returning open bus. `size == 0` yields 0 (caller treats an empty
+/// ROM as unmapped).
+#[must_use]
+pub const fn rom_mirror(mut address: usize, mut size: usize) -> usize {
+    if size == 0 {
+        return 0;
+    }
+    let mut base = 0usize;
+    // SNES ROM space is 24-bit (max 16 MB); start at the top bit.
+    let mut mask = 1usize << 23;
+    while address >= size {
+        while address & mask == 0 {
+            mask >>= 1;
+        }
+        address -= mask;
+        if size > mask {
+            size -= mask;
+            base += mask;
+        }
+        mask >>= 1;
+    }
+    base + address
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,6 +93,23 @@ mod tests {
         assert_eq!(make_addr(0x7E, 0x1234), 0x7E_1234);
         assert_eq!(make_addr(0, 0), 0);
         assert_eq!(make_addr(0xFF, 0xFFFF), 0x00FF_FFFF);
+    }
+
+    #[test]
+    fn rom_mirror_matches_ares_bus_mirror() {
+        // size 0 → 0 (empty image).
+        assert_eq!(rom_mirror(123, 0), 0);
+        // In-range addresses pass through untouched.
+        assert_eq!(rom_mirror(0, 0x10_0000), 0);
+        assert_eq!(rom_mirror(0xF_FFFF, 0x10_0000), 0xF_FFFF);
+        // Power-of-two ⇒ plain modulo.
+        assert_eq!(rom_mirror(0x10_0000, 0x10_0000), 0);
+        assert_eq!(rom_mirror(0x18_0005, 0x10_0000), 0x8_0005);
+        // Non-pow2 1.5 MB: the end mirrors the trailing 0.5 MB chunk.
+        assert_eq!(rom_mirror(0x18_0000, 0x18_0000), 0x10_0000);
+        assert_eq!(rom_mirror(0x1F_FFFF, 0x18_0000), 0x17_FFFF);
+        // Non-pow2 6 MB ExHiROM: end mirrors the trailing 2 MB.
+        assert_eq!(rom_mirror(0x60_0000, 0x60_0000), 0x40_0000);
     }
 
     #[test]
