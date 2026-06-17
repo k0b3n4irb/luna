@@ -35,7 +35,10 @@ struct Sa1ChipState {
     inner: Vec<u8>,
     cpu: Cpu,
     running: bool,
-    deficit: u32,
+    // `deficit` is intentionally not serialized — it is a transient
+    // ≤1-instruction sub-clock budget; resetting it to 0 on load costs at
+    // most one SA-1 instruction of drift and keeps the save-state format
+    // stable across the u32→i32 change.
 }
 
 /// SA-1 chip — a `Sa1Mapper` (shared cart memory) wrapped with its
@@ -51,11 +54,12 @@ pub struct Sa1Chip {
     /// Default after construction is `false`; the main CPU starts it
     /// by clearing CCNT.7.
     pub running: bool,
-    /// Sub-master-clock budget. SA-1 runs at roughly 6 mclk per
-    /// instruction-equivalent (10.74 MHz × ~1.7 cycles/instr ≈ 6
-    /// SNES master cycles). We accumulate and dispatch one
-    /// instruction per `MCLK_PER_SA1_INSN` units.
-    deficit: u32,
+    /// Signed sub-master-clock budget (mclk). Each main-CPU advance adds to
+    /// it; each SA-1 instruction subtracts its **real** cost (per-access +
+    /// idle SA-1 steps × 2 mclk/step). It goes slightly negative when an
+    /// instruction overshoots; the overshoot carries to the next call. Not
+    /// serialized — a ≤1-instruction transient, reset to 0 on load.
+    deficit: i32,
     /// Optional SA-1-side execution log: when `Some`, the SA-1's own
     /// accesses to its MMIO window (`$2200-$23FF`) are recorded with the
     /// SA-1 PC. Enabled via [`Mapper::enable_sa1_side_log`].
@@ -66,7 +70,14 @@ pub struct Sa1Chip {
     sa1_trace: Option<(Vec<Sa1TraceEvent>, usize)>,
 }
 
-const MCLK_PER_SA1_INSN: u32 = 6;
+/// One SA-1 step = 2 master clocks (SA-1 @ 10.74 MHz; ares
+/// `SA1::step()` = `Thread::step(2)`).
+const MCLK_PER_SA1_STEP: i32 = 2;
+
+/// Upper bound on the carried budget (mclk). Bounds the catch-up burst if
+/// a large `main_mclk` ever leaks in (the per-byte DMA tick keeps the
+/// normal cadence fine-grained). ~a handful of SA-1 instructions.
+const DEFICIT_CAP: i32 = 120;
 
 impl Sa1Chip {
     /// Build a new SA-1 chip wrapping the given mapper.
@@ -164,7 +175,6 @@ impl Mapper for Sa1Chip {
             inner: self.inner.save_state(),
             cpu: self.cpu.clone(),
             running: self.running,
-            deficit: self.deficit,
         };
         bincode::serialize(&st).unwrap_or_default()
     }
@@ -174,7 +184,7 @@ impl Mapper for Sa1Chip {
             self.inner.load_state(&st.inner);
             self.cpu = st.cpu;
             self.running = st.running;
-            self.deficit = st.deficit;
+            self.deficit = 0; // transient; re-accrues on the next step
         }
     }
 
@@ -186,9 +196,10 @@ impl Mapper for Sa1Chip {
         if !self.running {
             return;
         }
-        self.deficit = self.deficit.saturating_add(main_mclk);
-        while self.deficit >= MCLK_PER_SA1_INSN && !self.cpu.stopped {
-            self.deficit -= MCLK_PER_SA1_INSN;
+        // Add this advance to the budget, clamped so a stray large lump
+        // can't trigger a runaway catch-up burst.
+        self.deficit = (self.deficit.saturating_add(main_mclk as i32)).min(DEFICIT_CAP);
+        while self.deficit > 0 && !self.cpu.stopped {
             // Self-referential bus borrow: `cpu`, `inner` and
             // `sa1_side_log` are disjoint fields of `Sa1Chip`, so we can
             // lend `inner`/`sa1_side_log` to the bus view while `cpu`
@@ -217,12 +228,19 @@ impl Mapper for Sa1Chip {
                     });
                 }
             }
+            // Count this instruction's real SA-1 steps: `Sa1Bus` adds the
+            // per-access region cost (1, or 2 for BWRAM) on every read/write
+            // and 1 per internal/idle `io_cycle`. Charge `steps × 2` mclk.
+            let mut steps: u32 = 0;
             let mut bus = Sa1Bus {
                 mapper: &mut self.inner,
                 log: self.sa1_side_log.as_mut(),
                 sa1_pc,
+                steps: &mut steps,
             };
             self.cpu.step(&mut bus);
+            // Floor at 1 step so a zero-cost path can never stall the loop.
+            self.deficit -= steps.max(1) as i32 * MCLK_PER_SA1_STEP;
         }
     }
 
@@ -274,6 +292,10 @@ struct Sa1Bus<'a> {
     log: Option<&'a mut Vec<Sa1SideEvent>>,
     /// SA-1 PC at the start of the executing instruction, for the trace.
     sa1_pc: u32,
+    /// Per-instruction SA-1-step accumulator (Phase 5b): each access adds
+    /// its region cost, each internal `io_cycle` adds 1. `step_coproc`
+    /// reads it after the step to charge the real cycle count.
+    steps: &'a mut u32,
 }
 
 /// SA-1 MMIO register (`$2200-$23FF`) if `addr` hits the register window.
@@ -311,6 +333,10 @@ const fn sa1_iram_addr(addr: Addr24) -> Option<u16> {
 
 impl Bus for Sa1Bus<'_> {
     fn read(&mut self, addr: Addr24) -> u8 {
+        // Charge this access's SA-1 cycle cost (Phase 5b): ROM/IRAM/IO = 1
+        // step, BWRAM = 2. Covers opcode fetch + operand + data reads (the
+        // core fetches via `bus.read`), mirroring ares `memory.cpp`.
+        *self.steps += u32::from(self.mapper.sa1_region_steps(addr));
         let bank = (addr >> 16) as u8;
         let offset = (addr & 0xFFFF) as u16;
         // SA-1 vector fetches at bank 0 redirect through CRV/CNV/CIV.
@@ -332,6 +358,8 @@ impl Bus for Sa1Bus<'_> {
     }
 
     fn write(&mut self, addr: Addr24, value: u8) {
+        // Charge this access's SA-1 cycle cost (Phase 5b), as in `read`.
+        *self.steps += u32::from(self.mapper.sa1_region_steps(addr));
         // Log SA-1-side writes to MMIO ($2200-23FF) AND to I-RAM
         // ($3000-37FF / $0000-07FF mirror). The I-RAM writes are the
         // cross-CPU handshake flags (e.g. Kirby's $300A/$300E) that the
@@ -353,9 +381,11 @@ impl Bus for Sa1Bus<'_> {
     }
 
     fn io_cycle(&mut self, _mcycles: MCycles) {
-        // No scheduler hookup on the SA-1 side yet — internal cycles
-        // are accounted via the main-CPU's mclk budget in
-        // `Sa1Chip::step_coproc`.
+        // One internal/idle SA-1 step per call (Phase 5b). The 65c816 core
+        // emits exactly one `io_cycle` per ares `idle()` step (and per WAI
+        // poll), so we count calls — the passed `_mcycles` is the main-CPU
+        // mclk value, irrelevant to the SA-1's own clock.
+        *self.steps += 1;
     }
 
     fn nmi_pending(&self) -> bool {
@@ -432,8 +462,10 @@ mod tests {
         chip.write(make_addr(0x00, 0x2200), 0x80); // arm reset
         chip.write(make_addr(0x00, 0x2200), 0x00); // release
         assert_eq!(chip.cpu.pc, 0x3000);
-        // Run enough mclk for at least one instruction.
-        chip.step_coproc(MCLK_PER_SA1_INSN * 4);
+        // Run a couple of SA-1 instructions' worth of mclk — enough to
+        // advance through the I-RAM NOPs without overrunning into the
+        // unwritten bytes past $3003.
+        chip.step_coproc(8);
         assert!(chip.cpu.pc > 0x3000, "PC should have advanced past 0x3000");
     }
 
@@ -492,10 +524,12 @@ mod tests {
         // Main side asserts CCNT bit 7 (0→1 IRQ trigger). Keep bit 5
         // set so the SA-1 stays in reset for this isolated test.
         chip.write(make_addr(0x00, 0x2200), 0xA0);
+        let mut sa1_steps = 0u32;
         let bus = Sa1Bus {
             mapper: &mut chip.inner,
             log: None,
             sa1_pc: 0,
+            steps: &mut sa1_steps,
         };
         assert!(bus.irq_pending());
         assert!(!bus.nmi_pending());
@@ -537,10 +571,12 @@ mod tests {
         chip.write(make_addr(0x00, 0x2236), 0x00);
         chip.write(make_addr(0x00, 0x2237), 0x40);
         assert_eq!(chip.read(make_addr(0x40, 0)), Some(0x77));
+        let mut sa1_steps = 0u32;
         let bus = Sa1Bus {
             mapper: &mut chip.inner,
             log: None,
             sa1_pc: 0,
+            steps: &mut sa1_steps,
         };
         assert!(bus.irq_pending());
     }

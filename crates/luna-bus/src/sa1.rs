@@ -1107,6 +1107,25 @@ impl Sa1Mapper {
         None
     }
 
+    /// Base SA-1 access cost in **SA-1 steps** (1 step = 2 master cycles)
+    /// for `addr`, faithful to ares `coprocessor/sa1/memory.cpp`: IO = 1,
+    /// ROM = 1, IRAM = 1, BWRAM = 2 (+ `conflict()` contention steps, which
+    /// are Increment B). The region order mirrors [`Self::read_from_sa1`]
+    /// exactly so the cycle decode can never drift from the data path.
+    #[must_use]
+    pub fn sa1_region_steps(&self, addr: Addr24) -> u8 {
+        let bank = bank_of(addr);
+        let offset = offset_of(addr);
+        // BWRAM is the only 2-step region; MMIO/IRAM/ROM/open-bus are all
+        // 1 step. Honour the same priority as `read_from_sa1` (MMIO and
+        // IRAM win over BWRAM), so a BWRAM cost is charged only when the
+        // address actually resolves to BWRAM.
+        let is_bwram = Self::mmio_offset(addr).is_none()
+            && Self::iram_offset_sa1(bank, offset).is_none()
+            && self.bwram_offset(bank, offset).is_some();
+        if is_bwram { 2 } else { 1 }
+    }
+
     /// Side-aware write entry for the SA-1's own bus. Drives I-RAM /
     /// BW-RAM through the CIWP / CBWE protection masks instead of
     /// the S-CPU's SIWP / SBWE / BWPA. MMIO writes are routed
