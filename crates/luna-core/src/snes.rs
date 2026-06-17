@@ -1948,39 +1948,71 @@ impl SnesBus<'_> {
         }
         if Self::is_mdmaen(addr) {
             // Trigger sync DMA on every channel selected in `value`.
-            // We splat the SnesBus borrows: `dma` is mutated by
-            // run_mdma, and the other refs flow into DmaBusView. This
-            // is the borrow-split that lets the DMA call itself
-            // recursively without re-entering the Bus impl.
-            // Move the DMA→VRAM trace into the view for this burst (so its
-            // $2118/9 writes are captured), then restore it: we can't borrow
-            // `self.dma` for the trace AND for `run_mdma` simultaneously.
-            let mut trace = self.dma.dma_trace.take();
-            let bytes = {
-                let mut view = DmaBusView {
-                    wram: self.wram,
-                    mapper: self.mapper,
-                    ppu: self.ppu,
-                    wm_addr: self.wm_addr,
-                    dma_trace: trace.as_mut(),
-                    last_a_addr: 0,
+            // We splat the SnesBus borrows: `dma` is mutated by the DMA
+            // call, the other refs flow into DmaBusView. This borrow-split
+            // lets the DMA run without re-entering the Bus impl. The
+            // DMA→VRAM trace is moved into the view for the burst (so its
+            // $2118/9 writes are captured) and restored after.
+            //
+            // 8 mclk one-shot start overhead, then 8 mclk per byte
+            // (fullsnes §"SNES DMA Timing"). `advance_coproc = false`:
+            // coprocs already advanced per byte via `DmaBusView::tick`, so
+            // the master-clock charge here must not re-charge them.
+            if self.dma.hdmaen == 0 {
+                // Fast path — no HDMA armed, so nothing the DMA could
+                // cross matters: run the whole burst as one lump (the
+                // legacy behaviour, byte-identical). Covers virtually all
+                // forced-blank / vblank uploads.
+                let mut trace = self.dma.dma_trace.take();
+                let bytes = {
+                    let mut view = DmaBusView {
+                        wram: self.wram,
+                        mapper: self.mapper,
+                        ppu: self.ppu,
+                        wm_addr: self.wm_addr,
+                        dma_trace: trace.as_mut(),
+                        last_a_addr: 0,
+                    };
+                    self.dma.run_mdma(&mut view, value)
                 };
-                self.dma.run_mdma(&mut view, value)
-            };
+                self.dma.dma_trace = trace;
+                self.advance_time(u64::from(8 + bytes.saturating_mul(8)), false);
+                return;
+            }
+
+            // Segmented path (Phase 5) — HDMA is armed, so a long burst
+            // must yield to HDMA at scanline boundaries instead of landing
+            // all at once. Drive the DMA in segments bounded by the next
+            // line crossing; `advance_time` then runs that line's HDMA via
+            // `sched_one_line`. A DMA yields to HDMA at most once per line,
+            // so line-granular segmentation reproduces ares' per-byte
+            // `dmaEdge` ordering for this case.
+            self.advance_time(8, false); // one-shot start overhead
+            let mut trace = self.dma.dma_trace.take();
+            loop {
+                let room_mclk = MCYCLES_PER_SCANLINE.saturating_sub(self.mcycles_in_line);
+                // Bytes that fit before the next boundary (≥1 to progress).
+                // 8 mclk/byte, matching `DmaChannel::run_segment`.
+                let seg_bytes = (room_mclk / 8).max(1);
+                let done = {
+                    let mut view = DmaBusView {
+                        wram: self.wram,
+                        mapper: self.mapper,
+                        ppu: self.ppu,
+                        wm_addr: self.wm_addr,
+                        dma_trace: trace.as_mut(),
+                        last_a_addr: 0,
+                    };
+                    self.dma.run_mdma_segment(&mut view, value, seg_bytes)
+                };
+                // Charge this segment's master clock; crosses the line
+                // boundary and fires HDMA for any visible line crossed.
+                self.advance_time(u64::from(done) * 8, false);
+                if self.dma.mdma_cursor.is_none() {
+                    break; // burst complete
+                }
+            }
             self.dma.dma_trace = trace;
-            // DMA stalls the CPU during the transfer. Cost model
-            // (per fullsnes §"SNES DMA Timing"):
-            //   * 8 mclk one-shot overhead at the start of the burst
-            //   * 8 mclk per channel that runs (already implicit in
-            //     the per-byte cost since we lump the bus overhead
-            //     into each byte)
-            //   * 8 mclk per byte transferred
-            // We charge `8 + 8 × bytes` — close enough for game
-            // compatibility without modelling the per-channel
-            // header explicitly. `advance_coproc = false`: the SA-1 (and
-            // future coprocs) already advanced per byte during the burst
-            // via `DmaBusView::tick`, so this lump must not re-charge it.
-            self.advance_time(u64::from(8 + bytes.saturating_mul(8)), false);
             return;
         }
         if Self::is_hdmaen(addr) {
@@ -2487,6 +2519,132 @@ mod tests {
         assert_eq!(snes.ppu.cgram.color(1), 0x03E0, "color 1 = green");
         // DAS is zeroed by hardware on completion.
         assert_eq!(snes.dma.channels[0].das, 0);
+    }
+
+    #[test]
+    fn hdma_preempts_a_long_mid_frame_dma_at_scanline_boundaries() {
+        // Phase 5 increment 1: a long sync DMA triggered mid-visible-frame
+        // with HDMA armed must *yield* to HDMA at scanline boundaries, not
+        // land all at once. Discriminator: the DMA streams 0xCD to
+        // successive VRAM words (shared VMADD); the armed HDMA writes 0xAB
+        // to the same $2118 at the VMADD reached mid-burst — so an
+        // interleaved HDMA byte lands in the *middle* of the DMA's output
+        // range, which is impossible in any non-interleaved (lump) model.
+        use crate::dma::DmaParams;
+
+        let cart = demo_lorom();
+        let mut snes = Snes::from_cartridge(cart);
+        snes.reset();
+
+        // Forced blank so $2118 VRAM writes land (and stay un-gated across
+        // line crossings), VMADD = 0, mid-visible scanline.
+        snes.ppu.inidisp = 0x80;
+        snes.ppu.active_display = false;
+        snes.ppu.vram.set_address(0, 0);
+        snes.ppu_line = 50;
+        // DMA ch0: mode 0 (→ $2118), FIXED source so every byte reads the
+        // same 0xCD; 600 bytes (~3.5 scanlines of 8-mclk transfers).
+        snes.wram[0x4000] = 0xCD;
+        snes.dma.channels[0].params = DmaParams::from_byte(0x08); // AToB, Fixed, mode 0
+        snes.dma.channels[0].bbad = 0x18;
+        snes.dma.channels[0].a_addr = 0x4000;
+        snes.dma.channels[0].a_bank = 0x7E;
+        snes.dma.channels[0].das = 600;
+        // HDMA ch1: direct mode 0 (→ $2118), pre-armed in its active state,
+        // repeat header (0x86 = repeat + 6 lines) so it fires every crossed
+        // line, reading 0xAB from its table.
+        for i in 0..8 {
+            snes.wram[0x5000 + i] = 0xAB;
+        }
+        snes.dma.channels[1].params = DmaParams::from_byte(0x00); // AToB, +1, mode 0
+        snes.dma.channels[1].bbad = 0x18;
+        snes.dma.channels[1].a_bank = 0x7E;
+        snes.dma.channels[1].a2a = 0x5000;
+        snes.dma.channels[1].ntlr = 0x86;
+        snes.dma.channels[1].hdma_active = true;
+        snes.dma.channels[1].hdma_do_transfer = true;
+        snes.dma.channels[1].hdma_started = true; // skip lazy frame re-init
+        snes.dma.hdmaen = 0x02;
+
+        let scanlines = snes.region_scanlines();
+        let vblank_start_snapshot = vblank_start_line(snes.region);
+        let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
+        let Snes {
+            ppu,
+            dma,
+            cpu_regs,
+            apu_real,
+            apu_stub_fallback,
+            apu_panicked,
+            wram,
+            mapper,
+            fast_rom,
+            nmi_pending,
+            irq_pending,
+            total_mclk,
+            wm_addr,
+            joypad_strobe,
+            joypad1_shift,
+            joypad2_shift,
+            mdr,
+            mailbox_log,
+            sa1_log,
+            mem_trace_log,
+            ..
+        } = &mut snes;
+        let mut bus = SnesBus {
+            wram,
+            mapper: mapper.as_mut(),
+            ppu,
+            dma,
+            cpu_regs,
+            apu_real,
+            apu_stub_fallback,
+            apu_panicked,
+            fast_rom: *fast_rom,
+            nmi: nmi_pending,
+            irq: irq_pending,
+            mclk_total: total_mclk,
+            scanlines_per_frame: scanlines,
+            ppu_line: 50,
+            mcycles_in_line: 0,
+            frame_count: 0,
+            nmis_serviced: 0,
+            sched_enabled: true,
+            vblank_start_line: vblank_start_snapshot,
+            cpu_pc_full: cpu_pc_snapshot,
+            mailbox_log,
+            sa1_log,
+            mem_trace_log,
+            wm_addr,
+            joypad_strobe,
+            joypad1_shift,
+            joypad2_shift,
+            mdr,
+        };
+        // Trigger channel-0 sync DMA via the bus (→ the segmented path,
+        // since HDMAEN != 0).
+        bus.write(make_addr(0x00, 0x420B), 0x01);
+        // (the `&mut snes` borrow held by `bus` ends at its last use above)
+
+        // VRAM low byte of word w == $2118 write #w.
+        let lows: Vec<u8> = (0..600u16).map(|w| snes.ppu.vram.peek(w * 2)).collect();
+        let first_ab = lows.iter().position(|&b| b == 0xAB);
+        assert!(first_ab.is_some(), "HDMA must have written 0xAB into VRAM");
+        let idx = first_ab.unwrap();
+        assert!(
+            idx < 500,
+            "HDMA byte landed mid-DMA-range (interleaved), not at the tail: idx={idx}"
+        );
+        assert!(
+            lows[idx + 1..].contains(&0xCD),
+            "DMA must resume (0xCD) after the HDMA preemption"
+        );
+        let ab_count = lows.iter().fold(0usize, |n, &b| n + usize::from(b == 0xAB));
+        assert!(
+            ab_count >= 2,
+            "HDMA should fire on each crossed scanline (got {ab_count})"
+        );
     }
 
     #[test]
