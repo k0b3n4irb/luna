@@ -74,12 +74,35 @@ bug ("Chrono Trigger audio deadlock — Akao's timing-coupled CPU↔SPC
 handshake deadlocks under luna"). So this is an **APU/SPC700 cycle-timing**
 issue, not an SA-1 one.
 
-**Next step:** an APU/SPC700 handshake differential — compare luna's vs
-Mesen's `$2140-$2143` exchange (and SPC700 timing) through the Akao upload,
-find the first point the handshake state diverges, and trace it to the
-SPC700 cycle/timer model (cf. cycle-accuracy Phase 2 + the
-`project_pitchmod_spc700_crash` timer-read lead). The SA-1 path below is
-**superseded**.
+### APU/SPC700 handshake differential (done): SPC700 writes port 3 = 0, not 2
+
+Captured the full `$2140-$2143` exchange from boot in both emulators
+(luna mem-trace; Mesen Lua read/write callbacks) and compared the collapsed
+value sequences. **They match exactly for 25,359 collapsed accesses**, then
+diverge: Mesen reads `$2143 = 02` (its SPC700 wrote port 3) and proceeds;
+**luna keeps reading `$2143 = 00` forever** → the S-CPU spins → the freeze.
+
+So the SPC700 echo VALUES are correct through the whole Akao upload; the
+divergence is the post-upload handshake. luna's SPC700 is running (PC cycles
+`$0301`→`$0307`), `to_cpu_ports=[0,0,0,0]`. Disassembling luna's ARAM:
+
+```
+$0301  FA 59 F6   MOV $F6,$59    ; port2 ($2142) <- dp $59
+$0304  FA 69 F7   MOV $F7,$69    ; port3 ($2143) <- dp $69   <-- handshake byte
+$0307  6F         RET
+```
+
+luna executes this and writes `$F7 = [dp $69]`, but **`dp $69 = 0` in luna
+vs `02` in Mesen** — the Akao driver's internal state variable diverges. So
+the root is an **SPC700 execution/timing divergence inside the Akao driver**
+(the CT/Akao family; cf. `project_pitchmod_spc700_crash` SPC700-timer lead),
+NOT the SA-1 and NOT a wrong SPC700 port echo.
+
+**Next step:** an SPC700 *instruction-trace* differential (luna has none yet
+— add one, like the GSU `--superfx-trace`) to find the first SPC700 op where
+the Akao driver's state (esp. dp $69 and the timer-derived vars) diverges
+from Mesen, then translate the SPC700 timer/cycle model faithfully
+(cycle-accuracy Phase 2 territory). The SA-1 path below is **superseded**.
 
 ## ⚠️ CORRECTION (peek bug): the SA-1 is NOT the cause
 
