@@ -1056,6 +1056,14 @@ impl Snes {
             } else if matches!(bank, 0x7E..=0x7F) {
                 // Full WRAM ($7E-$7F).
                 self.wram[(usize::from(bank - 0x7E) << 16) | usize::from(off)]
+            } else if matches!(bank, 0x00..=0x3F | 0x80..=0xBF)
+                && (0x3000..=0x37FF).contains(&off)
+            {
+                // SA-1 I-RAM ($3000-$37FF) is side-effect-free — read it from
+                // the mapper. (Lumping it into the register band below made
+                // every I-RAM peek return 0, which silently broke SA-1 I-RAM
+                // inspection and cross-emulator I-RAM differentials.)
+                self.mapper.read(make_addr(bank, off)).unwrap_or(0xFF)
             } else if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && (0x2000..=0x5FFF).contains(&off)
             {
                 // PPU/APU/CPU/coproc register band — read side effects, so 0.
