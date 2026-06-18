@@ -189,6 +189,16 @@ enum Command {
         /// 200 000).
         #[arg(long = "superfx-trace-max", default_value_t = 200_000)]
         superfx_trace_max: usize,
+        /// Optional FULL SPC700 instruction trace: a per-opcode register
+        /// snapshot written as CSV (`seq,pc,a,x,y,sp,psw`). Diff this PC
+        /// stream against a Mesen2 SPC700 trace to localise audio-driver
+        /// (Akao CPU↔SPC handshake) divergences (e.g. SMRPG/CT).
+        #[arg(long = "spc-trace")]
+        spc_trace: Option<PathBuf>,
+        /// Cap the SPC700 instruction trace at this many events (default
+        /// 200 000).
+        #[arg(long = "spc-trace-max", default_value_t = 200_000)]
+        spc_trace_max: usize,
         /// Optional CPU instruction trace. When set, captures a
         /// per-instruction register snapshot (PC, A, X, Y, SP, P, DB,
         /// DP, e) into the given CSV file. Capture starts at instr
@@ -429,6 +439,8 @@ fn main() -> ExitCode {
             sa1_trace_max,
             superfx_trace,
             superfx_trace_max,
+            spc_trace,
+            spc_trace_max,
             cpu_trace,
             cpu_trace_from,
             cpu_trace_max,
@@ -460,6 +472,8 @@ fn main() -> ExitCode {
             sa1_trace_max,
             superfx_trace.as_deref(),
             superfx_trace_max,
+            spc_trace.as_deref(),
+            spc_trace_max,
             cpu_trace.as_deref(),
             cpu_trace_from,
             cpu_trace_max,
@@ -760,6 +774,22 @@ fn write_sa1_trace_csv(
             ev.db,
             ev.dp,
             u8::from(ev.e),
+        )
+    })
+}
+
+/// Write per-opcode SPC700 trace events as CSV. Columns:
+/// `seq, pc, a, x, y, sp, psw`. Diff the `pc` column against a Mesen2
+/// SPC700 trace to find the first divergence in the audio driver.
+fn write_spc_trace_csv(
+    path: &std::path::Path,
+    events: &[luna_api::Spc700TraceEvent],
+) -> std::io::Result<()> {
+    write_csv(path, "seq,pc,a,x,y,sp,psw", events, |f, i, ev| {
+        writeln!(
+            f,
+            "{},${:04X},${:02X},${:02X},${:02X},${:02X},${:02X}",
+            i, ev.pc, ev.a, ev.x, ev.y, ev.sp, ev.psw,
         )
     })
 }
@@ -1325,6 +1355,8 @@ fn run_state(
     sa1_trace_max: usize,
     superfx_trace_path: Option<&std::path::Path>,
     superfx_trace_max: usize,
+    spc_trace_path: Option<&std::path::Path>,
+    spc_trace_max: usize,
     cpu_trace_path: Option<&std::path::Path>,
     cpu_trace_from: u64,
     cpu_trace_max: usize,
@@ -1388,6 +1420,12 @@ fn run_state(
     if superfx_trace_path.is_some() {
         if let Err(e) = em.enable_superfx_trace(superfx_trace_max) {
             eprintln!("error: enable_superfx_trace: {e}");
+            return ExitCode::from(1);
+        }
+    }
+    if spc_trace_path.is_some() {
+        if let Err(e) = em.enable_spc_trace(spc_trace_max) {
+            eprintln!("error: enable_spc_trace: {e}");
             return ExitCode::from(1);
         }
     }
@@ -1612,6 +1650,19 @@ fn run_state(
                 Err(e) => eprintln!("error: writing Super FX trace: {e}"),
             },
             Err(e) => eprintln!("error: take_superfx_trace: {e}"),
+        }
+    }
+    if let Some(path) = spc_trace_path {
+        match em.take_spc_trace() {
+            Ok(events) => match write_spc_trace_csv(path, &events) {
+                Ok(()) => eprintln!(
+                    "SPC700 instruction trace written to {} ({} events)",
+                    path.display(),
+                    events.len()
+                ),
+                Err(e) => eprintln!("error: writing SPC700 trace: {e}"),
+            },
+            Err(e) => eprintln!("error: take_spc_trace: {e}"),
         }
     }
     if let Some(path) = dump_vram_path {

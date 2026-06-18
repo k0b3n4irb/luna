@@ -115,6 +115,26 @@ pub const SPC_CYCLES_PER_SAMPLE: u32 = 32;
 /// at 32 kHz, plenty of headroom for normal frame cadence.
 pub const AUDIO_QUEUE_CAPACITY: usize = 16384;
 
+/// One pre-opcode SPC700 register snapshot for the instruction trace
+/// (`--spc-trace`). Mirrors the SA-1 / Super FX trace events; diff the PC
+/// stream against a Mesen2 SPC700 trace to localise audio-driver
+/// divergences (e.g. the SMRPG/CT Akao CPU↔SPC handshake).
+#[derive(Clone, Copy, Debug)]
+pub struct Spc700TraceEvent {
+    /// 16-bit SPC700 PC before the opcode runs.
+    pub pc: u16,
+    /// Accumulator.
+    pub a: u8,
+    /// X index.
+    pub x: u8,
+    /// Y index.
+    pub y: u8,
+    /// Stack pointer.
+    pub sp: u8,
+    /// Processor status word (`PSW`).
+    pub psw: u8,
+}
+
 /// All APU state owned by [`Apu`]: SPC700 core + 64 KB ARAM + the two
 /// 4-byte mailbox arrays.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -219,6 +239,13 @@ pub struct Apu {
     /// derive both from the same counter rather than running them
     /// separately.
     pub timer_subdivider: u32,
+
+    /// Optional full SPC700 instruction trace: `(events, max_events)`. A
+    /// pre-opcode register snapshot per SPC700 instruction, capped at
+    /// `max_events` (ring buffer: drops the oldest half when full).
+    /// Transient — `serde(skip)` so it never enters a save-state.
+    #[serde(skip)]
+    spc_trace: Option<(Vec<Spc700TraceEvent>, usize)>,
 }
 
 impl Default for Apu {
@@ -265,6 +292,7 @@ impl Apu {
             timer_internal: [0; 3],
             timer_enabled: [false; 3],
             timer_subdivider: 0,
+            spc_trace: None,
         };
         // Reset the SPC700 — reads $FFFE/$FFFF for the PC vector,
         // which the IPL ROM populates as $FFC0.
@@ -467,6 +495,21 @@ impl Apu {
     ///
     /// [`step`]: Self::step
     /// [`trace_step_one`]: Self::trace_step_one
+    /// Enable the SPC700 instruction trace: a pre-opcode register snapshot
+    /// per SPC700 instruction, capped at `max_events` (ring buffer). Drain
+    /// with [`Self::take_spc_trace`].
+    pub fn enable_spc_trace(&mut self, max_events: usize) {
+        self.spc_trace = Some((Vec::new(), max_events));
+    }
+
+    /// Drain the captured SPC700 instruction trace (empty if disabled).
+    pub fn take_spc_trace(&mut self) -> Vec<Spc700TraceEvent> {
+        match self.spc_trace.as_mut() {
+            Some((events, _)) => std::mem::take(events),
+            None => Vec::new(),
+        }
+    }
+
     fn run_one_spc(&mut self) -> u32 {
         // SPIKE: commit any CPU mailbox writes whose visibility cycle the
         // SPC has now reached (cycle-exact CPU→SPC visibility). Wrap-safe:
@@ -481,6 +524,27 @@ impl Apu {
                     < 0x8000_0000
             {
                 self.to_spc_ports[p] = self.to_spc_pending[p].take().unwrap();
+            }
+        }
+        // SPC700 instruction trace (`--spc-trace`): pre-opcode register
+        // snapshot. Copy the registers out first so the trace borrow does
+        // not alias `self.cpu`.
+        if self.spc_trace.is_some() {
+            let ev = Spc700TraceEvent {
+                pc: self.cpu.pc,
+                a: self.cpu.a,
+                x: self.cpu.x,
+                y: self.cpu.y,
+                sp: self.cpu.sp,
+                psw: self.cpu.psw.0,
+            };
+            if let Some((events, max)) = self.spc_trace.as_mut() {
+                if *max > 0 {
+                    if events.len() >= *max {
+                        events.drain(0..*max / 2);
+                    }
+                    events.push(ev);
+                }
             }
         }
         let (cycles, clocked) = {

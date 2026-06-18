@@ -16,6 +16,7 @@ pub mod snes;
 pub use apu_stub::{ApuStub, Phase as ApuPhase};
 pub use cpu_regs::CpuRegs;
 pub use dma::{DmaTraceEvent, DmaTraceLog};
+pub use luna_apu::Spc700TraceEvent;
 pub use luna_bus::{
     Mapper, MapperKind, NullMapper, Sa1SideEvent, Sa1TraceEvent, SuperFxTraceEvent,
 };

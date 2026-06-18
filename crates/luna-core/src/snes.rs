@@ -562,6 +562,16 @@ impl Snes {
         self.mapper.take_superfx_trace()
     }
 
+    /// Enable a per-opcode SPC700 instruction trace on the real APU.
+    pub fn enable_spc_trace(&mut self, max_events: usize) {
+        self.apu_real.enable_spc_trace(max_events);
+    }
+
+    /// Drain the SPC700 instruction trace (empty if disabled).
+    pub fn take_spc_trace(&mut self) -> Vec<luna_apu::Spc700TraceEvent> {
+        self.apu_real.take_spc_trace()
+    }
+
     /// Enable CPU instruction tracing. From this point onward each
     /// call to [`Snes::step`] appends a pre-instruction register
     /// snapshot until the log fills (`max_events` events). Use
@@ -1056,8 +1066,7 @@ impl Snes {
             } else if matches!(bank, 0x7E..=0x7F) {
                 // Full WRAM ($7E-$7F).
                 self.wram[(usize::from(bank - 0x7E) << 16) | usize::from(off)]
-            } else if matches!(bank, 0x00..=0x3F | 0x80..=0xBF)
-                && (0x3000..=0x37FF).contains(&off)
+            } else if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && (0x3000..=0x37FF).contains(&off)
             {
                 // SA-1 I-RAM ($3000-$37FF) is side-effect-free — read it from
                 // the mapper. (Lumping it into the register band below made
