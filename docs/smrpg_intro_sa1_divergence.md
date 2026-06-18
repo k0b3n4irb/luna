@@ -52,6 +52,35 @@ Findings (offset 0, no input, USA ROM):
 - No clean 1-frame timing slip at the onset (neighbour frames don't align
   better), so it's a genuine data divergence, not a cadence offset.
 
+## REFRAMED (2026-06-18): not SA-1 — it's the Akao CPU↔SPC700 handshake
+
+After fixing the peek bug (below) and re-running with reliable tools, the
+register-read differential over the frame-23→24 step (luna vs Mesen2) shows:
+
+- `$2300` CFR (SA-1 status): both read `00` — **match**. SA-1 exonerated.
+- SA-1 I-RAM: byte-identical at frames 23 and 24. SA-1 exonerated.
+- The dominant differing input is **`$2140` (APU port 0)** — read ~12k times
+  in a tight spin at bank **`$C4`** (`$C4:0605/07DC/07AA` = the **Akao sound
+  driver**), with luna's vs Mesen's value distributions differing. The S-CPU
+  writes `$2140` an incrementing `$40..$7F` sequence — the Akao data-upload
+  handshake to the SPC700.
+
+The 19-byte frame-24 WRAM divergence (`$7E:0070=03`, `$7E:0072=06`,
+`$7E:1D00=24`, `$7E:1DA8=24`, `$7E:1FE9-F8`) is written by game code
+(`$C3:xxxx`) down a branch that runs in Mesen but **not** luna — gated,
+transitively, on the Akao handshake state. SMRPG uses Square's **Akao**
+driver — the exact family the cycle-accuracy plan names as the motivating
+bug ("Chrono Trigger audio deadlock — Akao's timing-coupled CPU↔SPC
+handshake deadlocks under luna"). So this is an **APU/SPC700 cycle-timing**
+issue, not an SA-1 one.
+
+**Next step:** an APU/SPC700 handshake differential — compare luna's vs
+Mesen's `$2140-$2143` exchange (and SPC700 timing) through the Akao upload,
+find the first point the handshake state diverges, and trace it to the
+SPC700 cycle/timer model (cf. cycle-accuracy Phase 2 + the
+`project_pitchmod_spc700_crash` timer-read lead). The SA-1 path below is
+**superseded**.
+
 ## ⚠️ CORRECTION (peek bug): the SA-1 is NOT the cause
 
 The SA-1 analysis below was **invalidated by a luna debug-tooling bug**:
