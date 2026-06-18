@@ -20,7 +20,7 @@ use luna_core::Snes;
 pub use luna_core::{
     CpuTraceEvent, CpuTraceLog, DmaTraceEvent, DmaTraceLog, MailboxEvent, MailboxEventKind,
     MapperKind, MemEventKind, MemTraceEvent, MemTraceLog, Sa1LogEvent, Sa1SideEvent, Sa1TraceEvent,
-    SuperFxTraceEvent,
+    Spc700TraceEvent, SuperFxTraceEvent,
 };
 /// Decoded BG tilemap image (Tilemap Viewer), re-exported so the GUI uses
 /// `luna_api::TilemapImage` rather than depending on `luna-ppu`.
@@ -1524,6 +1524,21 @@ impl Emulator {
     pub fn take_superfx_trace(&mut self) -> Result<Vec<SuperFxTraceEvent>, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         Ok(snes.take_superfx_trace())
+    }
+
+    /// Enable a per-opcode SPC700 instruction trace (PC + registers per
+    /// opcode), for diffing the SPC700 stream against a Mesen2 reference
+    /// (e.g. the SMRPG/CT Akao CPU↔SPC handshake divergence).
+    pub fn enable_spc_trace(&mut self, max_events: usize) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.enable_spc_trace(max_events);
+        Ok(())
+    }
+
+    /// Drain the SPC700 instruction trace (empty if disabled).
+    pub fn take_spc_trace(&mut self) -> Result<Vec<Spc700TraceEvent>, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        Ok(snes.take_spc_trace())
     }
 
     /// Diagnostic: the coprocessor's work RAM (Super FX Game Pak RAM) read
