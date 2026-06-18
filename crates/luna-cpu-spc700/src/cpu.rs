@@ -54,6 +54,17 @@ pub struct Spc700 {
     /// micro-steps (e.g. between the dummy-read and the write of a RMW).
     #[serde(default)]
     pub addr_lat: u16,
+    /// Second per-instruction operand scratch (e.g. the destination dp
+    /// of a `(dp),(dp)` op, or the high byte of a fetched word).
+    #[serde(default)]
+    pub oper2: u16,
+    /// Per-instruction latched pointer / data value, carried across
+    /// micro-steps (e.g. a resolved indirect pointer, a RMW data byte).
+    #[serde(default)]
+    pub ptr_lat: u16,
+    /// Per-instruction latched bit index (bit-on-memory ops).
+    #[serde(default)]
+    pub bit_lat: u8,
     /// `true` between the opcode fetch and the final micro-step of the
     /// instruction currently running under `step_cycle`.
     #[serde(default)]
