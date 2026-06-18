@@ -133,6 +133,14 @@ pub struct Spc700TraceEvent {
     pub sp: u8,
     /// Processor status word (`PSW`).
     pub psw: u8,
+    /// Running SPC-cycle counter (`timer_subdivider`) at this opcode — for the
+    /// SPC-cycle differential vs Mesen `spc.cycle`. Wraps at 2^32 (~70 min).
+    pub spc_cycle: u32,
+    /// T2 internal counter (`timer_internal[2]`, vs Mesen `spc.timer2.stage2`).
+    pub t2_int: u16,
+    /// T2 output (`timer_output[2]`, vs Mesen `spc.timer2.stage3`) — the value
+    /// `$FF`/`CBNE $FF` reads (and clears).
+    pub t2_out: u8,
 }
 
 /// All APU state owned by [`Apu`]: SPC700 core + 64 KB ARAM + the two
@@ -537,6 +545,9 @@ impl Apu {
                 y: self.cpu.y,
                 sp: self.cpu.sp,
                 psw: self.cpu.psw.0,
+                spc_cycle: self.timer_subdivider,
+                t2_int: self.timer_internal[2],
+                t2_out: self.timer_output[2],
             };
             if let Some((events, max)) = self.spc_trace.as_mut() {
                 if *max > 0 {
