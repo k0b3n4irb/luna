@@ -52,13 +52,48 @@ Findings (offset 0, no input, USA ROM):
 - No clean 1-frame timing slip at the onset (neighbour frames don't align
   better), so it's a genuine data divergence, not a cadence offset.
 
-## Next dichotomy step
+## ROOT CAUSE (found): luna's SA-1 deadlocks in its boot handshake
 
-Frame 23 WRAM is byte-identical in both, so the divergence is produced
-entirely within the frame-23→24 game step. The root is the **first
-differing input** read during that step — almost certainly an SA-1 result
-(register `$2300`/`$2306-9` or I-RAM `$30xx`) that luna returns differently,
-causing the S-CPU to branch differently (skip the `$7E:1D00` writer, seed
-the MVN with zeros). Pin it with an SA-1 register-read / instruction-trace
-differential vs Mesen2 in the narrow frame-23→24 window, then read the ares
-SA-1 reference at exactly that op and translate faithfully.
+Extended the differential to the **SA-1 I-RAM** (the WRAM trace only hashed
+WRAM): at frame 23 (WRAM byte-identical) the **I-RAM already diverges** —
+luna `00` where Mesen has `$30001=01`, `$30004/8/c=5c`, `$30008-f` =
+`5C 8F 80 C0` / `5C AB 80 C0`, `$307fe/f = a6 81`. So the **SA-1 is the
+root**, upstream of the WRAM divergence.
+
+luna's SA-1 instruction trace (`--sa1-trace`) to frame 23: **1.38M instrs
+but only 137 distinct PCs, 691,199 iterations each at `$C0:816F` and
+`$C0:8171`** — a tight spin:
+
+```
+$C0:816F  A5 00     LDA $00      ; read I-RAM[$0]  (S-CPU view $00:3000)
+$C0:8171  F0 FC     BEQ $816F    ; loop while zero
+```
+
+The SA-1 sits in its **boot handshake**, waiting for I-RAM[$0] to go
+non-zero, and **never escapes the boot region** (`$C0:80xx/81xx`) — it never
+writes `$3004/8/c` (zero occurrences across a 40M-instruction run), so the
+table the S-CPU later copies into WRAM stays zero → the frame-24 WRAM
+divergence, then the eventual frame-2137 forced-blank spin.
+
+**The decisive clue — SA-1 vectors:** the S-CPU programs CNV (NMI) = `$0008`
+and CIV (IRQ) = `$000C` (I-RAM). In Mesen those I-RAM slots hold JML
+trampolines (`$0008: JML $C0808F`, `$000C: JML $C080AB`); **in luna they are
+zero** — the SA-1 NMI/IRQ handlers are never installed. So an **SA-1
+interrupt that fires in Mesen (driving the boot / releasing the spin) is not
+being delivered in luna**, OR the handshake write that installs the handlers
++ rings the I-RAM[$0] doorbell never happens.
+
+This is consistent with the deadlock at frame 2137 (the SA-1 *does* run
+later in luna, but the early boot handshake left it mis-synchronised).
+
+### Next step
+
+Get Mesen's SA-1 instruction trace working (Lua exec callback,
+`cpuType=sa1`, `memType=sa1Memory`) to see **how Mesen's SA-1 exits the
+`$C0:816F` spin** — does PC jump to the IRQ vector target `$C080AB` (IRQ
+fired), the NMI target `$C0808F` (NMI fired), or fall through (I-RAM[$0]
+written by the S-CPU)? That selects the fix:
+- IRQ/NMI vector → luna's **SA-1 interrupt delivery** (timer / H-V / CCNT
+  source) is the bug; compare to ares `coprocessor/sa1`.
+- fall-through → the **S-CPU→SA-1 I-RAM[$0] doorbell** path (a bus-view /
+  CFR-SFR handshake issue, cf. the Kirby `$2180` DMA-view bug).
