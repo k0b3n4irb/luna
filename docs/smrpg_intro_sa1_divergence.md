@@ -173,6 +173,60 @@ interleaves the CPU and SMP every cycle** (`Thread::synchronize`). The
 batching/SPIKE granularity makes mailbox spins resolve at the wrong cycle,
 accumulating drift that flips the Akao T2 poll at instr 55,537.
 
+### Implementation attempt (measured): mailbox visibility is NOT the bug
+
+Set up an SPC-trace differential loop (`/tmp/spcdiff.py`: spin-collapse + align)
+with the baseline pinned at collapsed idx **55,537**. A/B test of the planned
+"Stage 1" (Mesen `+1` mailbox-visibility vs luna's current `+debt`/CPU-cycle
+stamp): the `+1` model made it **far worse** — first divergence moved to idx
+**24** (into the IPL). So luna's existing `+debt` stamp is already
+cycle-correct and **the CPU→SPC mailbox visibility model is not the bug.**
+(Reverted; no code shipped — a speculative tweak would violate the rule.)
+
+The **raw** (un-collapsed) SPC streams first diverge at line 2858 — the IPL
+upload's `FFCF/FFD2` mailbox-wait spin, where **luna exits after ~5 iters vs
+Mesen's 10+**. The SPC executes *identical* instructions up to that spin
+(lines 1–2857 match), so the SPC cumulative cycles up to there are equal; the
+spin is shorter only because **the CPU's `$2140` write arrives at a different
+SPC-relative cycle**. ⇒ the divergence is a **cumulative CPU↔SPC *phase*** drift
+at the IPL handshake — the CPU reaches its `$2140` write at a different
+master-cycle count (relative to the SPC) in luna vs Mesen.
+
+**Reframing:** the fix is NOT a mailbox/SPC-timer tweak (Stages 1–2 refuted);
+it is the **cumulative CPU↔SPC phase** — either a 65c816/DMA *boot* cycle-count
+divergence (a possibly-clean fix; localizable with a CPU-side cumulative-cycle
+differential vs Mesen) or the full cycle-exact cooperative interleave
+(Stage 3). Next measurement: compare luna's vs Mesen's CPU master-cycle count
+at the first `$2140` handshake writes to localize CPU-side vs interleaving.
+
+### CPU-cycle differential (measured): missing DRAM refresh — FIXED (but not the SMRPG cause)
+
+Built the CPU-cycle differential the reframing called for: a Mesen2 Lua
+(`/tmp/mesen_apu_phase.lua`) capturing `masterClock` at every boot `$2140-$2143`
+access vs luna's `--apu-log`. Result:
+
+- The handshake **deltas are byte-identical** (read→`$CC`-write = 268 mclk;
+  `$CC`-write→echo round-trip = 654 mclk, both emulators). So the 65c816
+  instruction timing and the CPU↔SPC handshake round-trip are already correct.
+- But a clean **40-mclk-per-scanline drift** appears (one step every ~1364
+  mclk). That is **DRAM refresh** — luna did not model it at all. ares
+  (`cpu/timing.cpp:21-29`) halts the CPU 5×(6+2)=40 mclk once per scanline at
+  hcounter `530+8`≈538; Mesen models it (`memoryManager.dramRefreshPosition`).
+  The missing refresh made luna's CPU run ~40 mclk/line fast, accumulating the
+  CPU↔SPC phase drift (the ~9650-mclk boot offset = ~190 boot-line refreshes).
+
+**Fixed** (this commit): `DRAM_REFRESH_POS`/`DRAM_REFRESH_CYCLES` in
+`snes.rs::sched_advance` — fires once per line (same half-open `[lo,hi)` idiom
+as `poll_hv_irq`), charged as a stall the CPU is re-advanced by so the APU/PPU
+run during the halt. Boot drift dropped **9650 → 2050** mclk; 3 timing-sensitive
+goldens regenerated (renders eyeballed correct). A residual ~2050-mclk constant
+offset remains (a reset/power-on timing difference, separate from refresh).
+
+**This is foundational** (every game's CPU↔PPU/APU phase) **but it is NOT the
+SMRPG freeze.** After the fix the SPC divergence is *still* at collapsed instr
+55,537 (the Akao Timer-2 poll). The freeze is the **separate** SPC timer-2
+*intra-instruction phase* bug below — the next task.
+
 **Faithful fix = port ares' cooperative cycle-interleaved CPU↔SPC scheduling**
 (the same class as the Super FX cooperative-scheduler port in
 `.claude/rules/faithful-port-and-dichotomy.md`). The faithful-port rule
