@@ -19,6 +19,7 @@ pub mod disasm;
 pub mod flags;
 pub mod iplrom;
 pub mod opcodes;
+pub mod step;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
