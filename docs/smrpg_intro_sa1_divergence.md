@@ -148,14 +148,40 @@ end** (`tick_timers(unclocked)`), whereas ares interleaves the timer every
 cycle (`smp/timing.cpp` `wait()`→`stepTimers`). Over a tight poll loop this
 phase can drift enough to flip the T2 read at the critical instant.
 
-**Next measurement (before any fix):** compare luna's vs Mesen's cumulative
-SPC cycle count / timer phase at the exact divergence instruction (55,537) —
-is it (a) a per-opcode cycle-count delta somewhere, (b) the bulk-idle-tick
-phase, or (c) CPU→SPC mailbox visibility timing (the SPIKE / master→SPC
-ratio)? Then port the SPC700 timer/cycle model faithfully vs ares. **This is
-a cycle-accuracy change to SPC700 audio timing — high audio-regression risk,
-must be ear-validated across games before commit.** The SA-1 path below is
-**superseded**.
+### Confirming differential (done): it's the CPU↔SPC scheduling grammar
+
+T2 output is a pure function of cumulative SPC cycles (luna ticks T2 on
+`subdiv % 16` boundaries identically via `clock_cycle` and `tick_timers`), so
+the divergence ⇒ **cumulative SPC cycle drift**. Checked every targeted
+candidate; all RULED OUT:
+
+- **SPC clock ratio matches ares exactly**: ares `apuFrequency = 32040×768 =
+  24_606_720`, SMP = `/12`, opcode-cycle rate = `/24 = 1_025_280` =
+  luna's `SPC_CLOCK_HZ`. So no systematic clock drift.
+- **Timer 2 functionally correct** (enabled, 16-cycle rate, ticks).
+- **Per-opcode SPC700 cycle counts Tom-Harte-validated.**
+- **`$2140` write ordering correct** (`write_inner` runs `io_cycle` →
+  `Apu::step` before `cpu_write_port`, so the SPC is advanced to the write's
+  cycle first).
+
+The raw IPL-upload trace shows the actual mechanism: at the `FFCF/FFD2`
+mailbox-wait spin **luna exits after ~5 iterations, Mesen after 10+** — luna's
+SPC sees the CPU's `$2140` write after too few cycles. luna runs the SPC in
+**batches** (per S-CPU bus access, with the SPIKE timestamped-mailbox
+*approximation* in `Apu::cpu_write_port`/`run_one_spc`); ares **cooperatively
+interleaves the CPU and SMP every cycle** (`Thread::synchronize`). The
+batching/SPIKE granularity makes mailbox spins resolve at the wrong cycle,
+accumulating drift that flips the Akao T2 poll at instr 55,537.
+
+**Faithful fix = port ares' cooperative cycle-interleaved CPU↔SPC scheduling**
+(the same class as the Super FX cooperative-scheduler port in
+`.claude/rules/faithful-port-and-dichotomy.md`). The faithful-port rule
+**forbids** the tempting shortcut here — a speculative SPIKE-lag/"magic
+timing" tweak — and the Super FX cautionary tale shows approximating the
+cooperative model wastes days. This is a staged, multi-session Phase-2
+architectural change with audio-regression risk across every game; it must be
+done by dichotomy with the `--spc-trace` differential as the oracle and
+ear-validated. NOT a quick patch. The SA-1 path below is **superseded**.
 
 ## ⚠️ CORRECTION (peek bug): the SA-1 is NOT the cause
 
