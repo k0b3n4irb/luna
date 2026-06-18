@@ -1222,6 +1222,12 @@ impl Cpu {
 
         let byte = bus.read(make_addr(src_bank, self.x));
         bus.write(make_addr(dest_bank, self.y), byte);
+        // Two internal cycles per byte (ares `instructionBlockMove8`: the
+        // `idle()` after the write and the final `L idle()`). Omitting these
+        // made MVN/MVP 5 cycles/byte instead of 7 — a 12-mclk/byte undercharge
+        // that accumulated during boot block-moves, drifting the CPU↔SPC phase
+        // and the SPC timer-2 poll (the SMRPG Akao intro freeze).
+        self.io(bus);
         if increment {
             self.x = self.x.wrapping_add(1);
             self.y = self.y.wrapping_add(1);
@@ -1233,6 +1239,7 @@ impl Cpu {
             self.x &= 0x00FF;
             self.y &= 0x00FF;
         }
+        self.io(bus);
 
         let count = self.a; // 16-bit count; full C even when M = 1.
         self.a = self.a.wrapping_sub(1);
