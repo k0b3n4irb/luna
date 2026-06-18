@@ -1,7 +1,8 @@
 # Cycle-Accuracy Milestone — APU↔CPU↔PPU Synchronization Plan
 
-**Status:** in progress — **Phases 1, 2, 3 landed; Phase 4 in progress;
-Phase 5 increments 0+1 + Phase 5b landed; Phase 5 inc 2 deferred** (mid-frame
+**Status:** in progress — **Phases 1, 2, 3 landed; Phase 4 core landed
+(delivery edge cases deferred); Phase 5 increments 0+1 + Phase 5b landed;
+Phase 5 inc 2 deferred** (mid-frame
 DMA↔HDMA preemption at scanline boundaries; `f3bd002` resumable segment API +
 `d2a17fc` segmented driver; SA-1 real per-access cycle accounting replacing
 the flat 6 mclk/insn budget). Phase 5 inc 2 (true dot-276 `hdmaPosition`
@@ -20,12 +21,18 @@ renderer. See `docs/hdma_ares_audit.md` (§"Phase 5 inc 2 … DEFERRED").
   regression but was not (HEAD A/B confirmed) — and which a later (2026-06)
   investigation showed was **never an SA-1 deadlock at all** (see §7
   "SA-1 game status").
-- Phase 4 (per-access IRQ/NMI/HDMA): **partially done.** Dot-precise H/V
-  IRQ `d4b0bb6` (fixes modes 01/11; unblocks DKC's H-IRQ raster) + HDMA
-  time cost (18 mclk/line + 8/byte, charged via the `sched_advance` stall
-  loop). Remaining: $4211 TIMEUP hold, the ares "last dot" guard, htime==0
-  delay. The DMA↔HDMA preemption part needs steppable DMA → moved to
-  Phase 5.
+- Phase 4 (per-access IRQ/NMI/HDMA): **core done; delivery edge cases
+  deferred.** Dot-precise H/V IRQ `d4b0bb6` (fixes modes 01/11; unblocks
+  DKC's H-IRQ raster) + HDMA time cost (18 mclk/line + 8/byte, charged via
+  the `sched_advance` stall loop). The DMA↔HDMA preemption part landed in
+  Phase 5. The remaining items are all **NMI/IRQ-*delivery-timing* edge
+  cases** ($4211 TIMEUP hold, ares "last dot of field" guard, htime 10-clock
+  detection delay, and the `nmitimenUpdate` late-NMI-enable) — **deferred**
+  (2026-06-18): they are high-regression-risk on luna's level-driven IRQ
+  model and CLI-unvalidatable (GUI-only). The late-NMI-enable in particular
+  needs luna's `nmi_flag` modeled as a faithful ares `nmiLine` (cleared at
+  VBlank end) FIRST — a naive port black-screened SMRPG's intro. See §7 and
+  the `project_nmitimen_late_enable_breaks_smrpg` finding.
 - Phase 5: see the table in §5.
 **Author:** synthesized from the ares + Mesen2 timing correlation
 (`docs/accuracy_scorecard.md` §"DMA / HDMA / timing") and the Chrono
@@ -127,7 +134,7 @@ branch-taken penalty), not a flat 84.
 | **1. io_cycle-driven catch-up** ✅ done | Move PPU/APU/coproc advancement out of the end-of-`step()` lump and into `io_cycle`, advancing per access. Collapses the three lump calls into one per-access sync. **Naturally fixes the DMA coproc double-charge.** | Mid-instruction PPU/APU/coproc accuracy; foundation for all later phases | Med — hottest path; perf-sensitive |
 | **2. SPC700 cycle accuracy** ✅ done | Real per-opcode cycles + branch-taken penalty; drive the APU from the master clock (mclk→SPC-cycle ratio) instead of a flat rate. | **CT/Akao handshake**, SPC700 B→A−, Tom Harte SPC `cycles[]` | Med |
 | **3. 65c816 cycle accuracy** ✅ done | Have the CPU core call `io_cycle` at the correct *intra-instruction* points with correct per-cycle costs (read/write/idle ordering). The core already emits `io_cycle` per **bus** access (Phase 1 relies on it); what was missing was the **internal/idle** cycles — RMW dead cycles, branch-taken / page-cross penalties, etc. — plus the Tom Harte `cycles[]` backstop to drive them out (cf. the SPC700 Phase-2 method). Landed `2da74fc`. | Tom Harte 65c816 `cycles[]`, A−→A | High — touched every opcode/addressing path |
-| **4. Per-access IRQ/NMI/HDMA** | Poll interrupts + HDMA in `io_cycle`: dot-precise H/V-IRQ (HTIME respected), H≈278 HDMA-vs-DMA preemption, RDNMI as a true 4-cycle hold. | Raster-IRQ games, DMA/timing C+→B+ | Med |
+| **4. Per-access IRQ/NMI/HDMA** ✅ core done, ⚠️ delivery edge cases deferred | Poll interrupts + HDMA in `io_cycle`: dot-precise H/V-IRQ (`d4b0bb6`, HTIME respected) ✅; HDMA-vs-DMA preemption landed in Phase 5 ✅. **Deferred** (high-risk on luna's level IRQ model, GUI-only validation): `$4211` TIMEUP hold, ares "last dot of field" guard, htime 10-clock detection delay, and the `nmitimenUpdate` late-NMI-enable — the last needs a faithful `nmiLine` (cleared at VBlank end) first; a naive port black-screened SMRPG (see §7). | Raster-IRQ games, DMA/timing C+→B+ | Med |
 | **5. DMA/HDMA cycle-stepping** ✅ inc 0+1, ✅ 5b, ⚠️ inc 2 deferred | Segmented sync DMA (`f3bd002`); HDMA preempts a mid-frame DMA at scanline boundaries (`d2a17fc`, line-granular). Phase 5b ✅ (`097ffe7`): SA-1 now charges **real per-access cycles** (ares `coprocessor/sa1/memory.cpp`: IO/ROM/IRAM/open-bus = 1 step, BWRAM = 2 steps, idle = 1 step; `conflict()` contention deferred to Increment B) via a signed mclk deficit, replacing the flat 6 mclk/insn lump. **inc 2 (dot-276 sub-line `hdmaPosition`) deferred** — faithful dot-276 corrupts rendering on luna's whole-line renderer (needs a per-dot renderer); the boundary model is hardware-correct. See `docs/hdma_ares_audit.md`. | DMA/timing → A−; SA-1 contention | Med |
 
 > **Note (2026-06-11):** the marquee raster-IRQ bug — Doom's letterbox-border
@@ -157,16 +164,40 @@ against the core's per-instruction cycle total (SPC700 lands this in
   master loop) but is the prerequisite for everything else.
 - **Scope.** This is a multi-PR, multi-session milestone — not one change.
 
-## 7. Next step — Phase 4 (per-access IRQ/NMI/HDMA)
+## 7. Phase 4 (per-access IRQ/NMI/HDMA) — core done, edge cases deferred
 
-Phases 1–3 are done (see the status header). The active work is Phase 4:
-poll interrupts + HDMA **inside `io_cycle`** instead of only at
-instruction boundaries — dot-precise H/V-IRQ (HTIME respected), H≈278
-HDMA-vs-DMA preemption, RDNMI as a true 4-cycle hold. Now that the master
-clock advances per cycle (Phases 1–3), interrupt *latching* is the last
-piece still pinned to instruction boundaries. Phase 4 is justified on its
-own merits — raster-IRQ effects and HDMA-vs-DMA timing (scorecard DMA
-section C+→B+) — **not** by any SA-1 game (see below).
+Phases 1–3 are done (see the status header). Phase 4's **core landed**: the
+H/V-IRQ is now polled dot-precisely inside `io_cycle` (`d4b0bb6`, HTIME
+respected) and the HDMA-vs-DMA preemption landed in Phase 5. Now that the
+master clock advances per cycle (Phases 1–3), interrupt *latching* is no
+longer pinned to instruction boundaries.
+
+### Deferred Phase-4 delivery edge cases (2026-06-18)
+
+The remaining items are NMI/IRQ **delivery-timing** refinements:
+`$4211` TIMEUP hold, the ares "last dot of field" guard
+(`vcounter(6) || hcounter(6)`), the htime/vtime 10-clock detection delay
+(`vcounter(10)`/`hcounter(10)`), and the `nmitimenUpdate` semantics
+(late-NMI-enable + IRQ-disable-clear). They are **deferred**: high
+regression risk on luna's deliberate *level-driven* IRQ model (the Doom
+level-IRQ fix), and not CLI-validatable — only the GUI exposes the failure.
+
+The **`nmitimenUpdate` late-NMI-enable** is the cautionary tale: a faithful
+port (enable NMITIMEN.7 mid-frame → fire NMI now) **black-screened SMRPG's
+intro**. `--mem-trace` pinned it: SMRPG runs its intro with NMI *off*,
+polling, then enables NMI once (`$81` at `$C3:B9D4`) with `nmi_flag`
+stale-set — because luna's `nmi_flag` is **not** a faithful ares `nmiLine`
+(ares clears `nmiLine` at VBlank *end*; luna clears `nmi_flag` only on a
+`$4210` read). ares wouldn't fire there; luna did → spurious NMI →
+corruption. An `in_vblank` gate didn't fix it (the write's scanline is
+non-deterministic CPU-vs-GUI). **Prerequisite for re-attempting any of
+these: model `nmi_flag` as a real `nmiLine` (cleared at VBlank end + hold
+window)** — a sensitive change to the `$4210`/RDNMI path. The IRQ-disable-
+clear half is faithful and safe but marginal (a no-op for SMRPG). Recorded
+in the `project_nmitimen_late_enable_breaks_smrpg` memory.
+
+Phase 4's remaining value (raster-IRQ effects, scorecard DMA C+→B+) is
+**not** gated on any SA-1 game (see below).
 
 ### SA-1 game status (investigated 2026-06-02) — NOT cycle-accuracy bugs
 
