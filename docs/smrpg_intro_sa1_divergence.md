@@ -126,12 +126,36 @@ timer. This derails the whole handshake → the freeze.
 
 **Root cause: luna's SPC700 timer-2 timing.** Same family as the documented
 CT audio deadlock and the `project_pitchmod_spc700_crash` SPC700-timer lead.
-Fix is in `crates/luna-apu/src/lib.rs` (`tick_timers`/`tick_one_timer` + the
-mclk→SPC-cycle ratio in `Apu::step`): determine why T2 doesn't tick at the
-right rate vs SPC700 instruction cycles (enable state, reload `$FC`, the
-16-cycle base clock, or the master→SPC cycle conversion), then port the
-SPC700 timer + cycle model faithfully vs ares `smp/timing.cpp`
-(cycle-accuracy Phase 2). The SA-1 path below is **superseded**.
+
+### Diving into the fix (measured): the timer is *functionally* correct
+
+Probed T2 at the `$FF` reads (env-gated `eprintln`, since removed). At the
+poll loop: **T2 is enabled, target=256 (reload `$FC`=0), `timer_internal`
+climbs at the correct rate (one tick per 16 SPC cycles), and it DOES tick**
+— early reads show `out=1`/`out=4`. So it is **not** "T2 broken / disabled /
+wrong rate". With target=256 the output is non-zero only briefly each ~4096
+cycles, so the failure is a **sub-instruction timing/phase difference**: the
+two emulators execute the same ~55,500 SPC instructions (collapsed), and at
+instruction 55,537 luna's T2 output happens to read 0 where Mesen's has just
+ticked → luna takes the `$0231` branch once → cascade to the freeze.
+
+This points squarely at SPC700 **cycle-timing phase**, consistent with
+`project_pitchmod_spc700_crash`: the per-opcode cycle COUNTS are
+Tom-Harte-validated, but the timer is advanced at the wrong intra-instruction
+phase. Suspect: luna's `Apu::run_one_spc` ticks the bus-access cycles
+in-place (`clock_cycle`) but the instruction's **idle cycles in bulk at the
+end** (`tick_timers(unclocked)`), whereas ares interleaves the timer every
+cycle (`smp/timing.cpp` `wait()`→`stepTimers`). Over a tight poll loop this
+phase can drift enough to flip the T2 read at the critical instant.
+
+**Next measurement (before any fix):** compare luna's vs Mesen's cumulative
+SPC cycle count / timer phase at the exact divergence instruction (55,537) —
+is it (a) a per-opcode cycle-count delta somewhere, (b) the bulk-idle-tick
+phase, or (c) CPU→SPC mailbox visibility timing (the SPIKE / master→SPC
+ratio)? Then port the SPC700 timer/cycle model faithfully vs ares. **This is
+a cycle-accuracy change to SPC700 audio timing — high audio-regression risk,
+must be ear-validated across games before commit.** The SA-1 path below is
+**superseded**.
 
 ## ⚠️ CORRECTION (peek bug): the SA-1 is NOT the cause
 
