@@ -785,13 +785,18 @@ fn write_spc_trace_csv(
     path: &std::path::Path,
     events: &[luna_api::Spc700TraceEvent],
 ) -> std::io::Result<()> {
-    write_csv(path, "seq,pc,a,x,y,sp,psw", events, |f, i, ev| {
-        writeln!(
-            f,
-            "{},${:04X},${:02X},${:02X},${:02X},${:02X},${:02X}",
-            i, ev.pc, ev.a, ev.x, ev.y, ev.sp, ev.psw,
-        )
-    })
+    write_csv(
+        path,
+        "seq,pc,a,x,y,sp,psw,spc_cycle,t2_int,t2_out",
+        events,
+        |f, i, ev| {
+            writeln!(
+                f,
+                "{},${:04X},${:02X},${:02X},${:02X},${:02X},${:02X},{},{},{}",
+                i, ev.pc, ev.a, ev.x, ev.y, ev.sp, ev.psw, ev.spc_cycle, ev.t2_int, ev.t2_out,
+            )
+        },
+    )
 }
 
 /// Write per-opcode Super FX (GSU) trace events as CSV. Columns:
