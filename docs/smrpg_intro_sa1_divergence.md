@@ -98,11 +98,40 @@ the root is an **SPC700 execution/timing divergence inside the Akao driver**
 (the CT/Akao family; cf. `project_pitchmod_spc700_crash` SPC700-timer lead),
 NOT the SA-1 and NOT a wrong SPC700 port echo.
 
-**Next step:** an SPC700 *instruction-trace* differential (luna has none yet
-— add one, like the GSU `--superfx-trace`) to find the first SPC700 op where
-the Akao driver's state (esp. dp $69 and the timer-derived vars) diverges
-from Mesen, then translate the SPC700 timer/cycle model faithfully
-(cycle-accuracy Phase 2 territory). The SA-1 path below is **superseded**.
+### SPC700 instruction-trace differential (done): timer 2 is the root
+
+Built `--spc-trace` (commit `d6eae1d`; per-opcode `seq,pc,a,x,y,sp,psw`,
+mirrors `--sa1-trace`) and a Mesen2 SPC700 PC trace (Lua exec callback,
+`cpuType=spc`, `memType=spcMemory` — note: `emu.getState()` inside a memory
+callback aborts it, so log PC-only). Both from IPL boot (`$FFC0`).
+
+Collapsing spin-loops (period ≤8) and diffing: the two SPC700 streams match
+for ~55,500 collapsed instructions, then **branch differently at SPC PC
+`$022E`**:
+
+```
+$0225 2E FD 1B  CBNE $FD,+   ; A vs timer0 output
+$0228 2E FE 4C  CBNE $FE,+   ; A vs timer1 output
+$022B 2E F4 0D  CBNE $F4,+   ; A vs CPU port0
+$022E 2E FF 6F  CBNE $FF,+$6F; A vs TIMER 2 output -> branch $02A0
+```
+
+A = `$00` at every `$022E` (9,279×). Mesen: `A != [$FF]` → branches to
+`$02A0` (proceeds, eventually sets dp $69 = 2 and signals port 3). luna:
+`A == [$FF]` → falls through to `$0231`→`$0301` (`MOV $F7,$69` with
+dp $69 = 0). So **luna's SPC700 timer-2 output (`$FF`) reads 0 where Mesen's
+has ticked non-zero.** luna's timer 2 (the fast 16-cycle / 64 kHz timer)
+isn't accumulating relative to the driver's polls — the Akao tempo/sync
+timer. This derails the whole handshake → the freeze.
+
+**Root cause: luna's SPC700 timer-2 timing.** Same family as the documented
+CT audio deadlock and the `project_pitchmod_spc700_crash` SPC700-timer lead.
+Fix is in `crates/luna-apu/src/lib.rs` (`tick_timers`/`tick_one_timer` + the
+mclk→SPC-cycle ratio in `Apu::step`): determine why T2 doesn't tick at the
+right rate vs SPC700 instruction cycles (enable state, reload `$FC`, the
+16-cycle base clock, or the master→SPC cycle conversion), then port the
+SPC700 timer + cycle model faithfully vs ares `smp/timing.cpp`
+(cycle-accuracy Phase 2). The SA-1 path below is **superseded**.
 
 ## ⚠️ CORRECTION (peek bug): the SA-1 is NOT the cause
 
