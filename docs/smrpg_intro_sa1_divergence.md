@@ -52,7 +52,33 @@ Findings (offset 0, no input, USA ROM):
 - No clean 1-frame timing slip at the onset (neighbour frames don't align
   better), so it's a genuine data divergence, not a cadence offset.
 
-## ROOT CAUSE (found): luna's SA-1 deadlocks in its boot handshake
+## ⚠️ CORRECTION (peek bug): the SA-1 is NOT the cause
+
+The SA-1 analysis below was **invalidated by a luna debug-tooling bug**:
+`Snes::dbg_peek_bytes` returned a hardcoded `0` for the whole `$2000-$5FFF`
+band, which includes the SA-1 **I-RAM (`$3000-$37FF`)**. So every I-RAM
+peek/dump read `0`, making luna's I-RAM look all-zero and "diverging" from
+Mesen when it was not. Fixed: route `$3000-$37FF` through the mapper in the
+peek (side-effect-free). With the fix:
+
+- luna's I-RAM at `$3008` = `5C 8F 80 C0  5C AB 80 C0` — the NMI/IRQ JML
+  trampolines ARE correctly installed (the S-CPU write *did* store;
+  `iram_writable_for` returned true, SIWP=`$FF`).
+- **luna's full SA-1 I-RAM is byte-identical to Mesen at frames 23 AND 24.**
+
+So the SA-1 boot spin at `$C0:816F` is **normal** early-boot behavior in both
+emulators, not a deadlock, and the SA-1 is exonerated for the frame-24
+divergence. The real divergence is **WRAM only** (the `wram_page_hashes`
+oracle reads `snes.wram` directly and was always reliable): frame 23
+byte-identical, frame 24 = 19 WRAM bytes, cause still open and NOT
+SA-1-I-RAM-related. Candidates for the differing input in the frame-23→24
+step: SA-1 arithmetic result regs (`$2306-9`), CFR (`$2300`), a PPU/CPU
+register, or sub-frame timing — to be pinned next with the now-reliable
+tools (the WRAM differential + correct I-RAM/register reads).
+
+---
+
+## (superseded) earlier SA-1 reading — kept for the record
 
 Extended the differential to the **SA-1 I-RAM** (the WRAM trace only hashed
 WRAM): at frame 23 (WRAM byte-identical) the **I-RAM already diverges** —
