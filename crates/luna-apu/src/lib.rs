@@ -31,7 +31,7 @@
 //! average SPC instructions — good enough until we wire timer-driven
 //! cycle accounting in.
 
-use luna_cpu_spc700::{IPL_ROM, IPL_ROM_BASE, SPC700_CYCLES, Spc700, SpcBus};
+use luna_cpu_spc700::{IPL_ROM, IPL_ROM_BASE, Spc700, SpcBus};
 
 /// Read one ARAM byte as the **SPC700** sees it: `$FFC0-$FFFF` returns
 /// the 64-byte IPL ROM while `$F1` bit 7 is set, otherwise the physical
@@ -104,6 +104,14 @@ pub const MASTER_CLOCK_HZ: u64 = 21_477_272;
 /// for the Tales of Phantasia OP).
 pub const SPC_CLOCK_HZ: u64 = 1_025_280;
 
+/// SPC clock in Mesen2's **2× domain** (`_state.Cycle` units): each SPC
+/// cycle is 2 of these, so the master→SPC target `master_clock × clockRatio`
+/// has half-SPC-cycle resolution. `clockRatio = spcSampleRate·64 /
+/// masterClock`, and `spcSampleRate·64 = 32_040 · 64 = 2_050_560 = 2 ×
+/// SPC_CLOCK_HZ` — the integer numerator luna uses for the zero-drift
+/// fractional accumulator (`cpu_target_2x`).
+pub const SPC_2X_HZ: u64 = 2 * SPC_CLOCK_HZ;
+
 /// SPC cycles per audio sample: 32 SPC cycles → one DSP sample. At
 /// [`SPC_CLOCK_HZ`] this yields the `32_040` Hz output rate ares and Mesen2
 /// produce (the host audio backend resamples to the device rate).
@@ -114,6 +122,34 @@ pub const SPC_CYCLES_PER_SAMPLE: u32 = 32;
 /// dropped to keep emulator-side memory bounded. ~16k samples = 512 ms
 /// at 32 kHz, plenty of headroom for normal frame cadence.
 pub const AUDIO_QUEUE_CAPACITY: usize = 16384;
+
+/// One pre-opcode SPC700 register snapshot for the instruction trace
+/// (`--spc-trace`). Mirrors the SA-1 / Super FX trace events; diff the PC
+/// stream against a Mesen2 SPC700 trace to localise audio-driver
+/// divergences (e.g. the SMRPG/CT Akao CPU↔SPC handshake).
+#[derive(Clone, Copy, Debug)]
+pub struct Spc700TraceEvent {
+    /// 16-bit SPC700 PC before the opcode runs.
+    pub pc: u16,
+    /// Accumulator.
+    pub a: u8,
+    /// X index.
+    pub x: u8,
+    /// Y index.
+    pub y: u8,
+    /// Stack pointer.
+    pub sp: u8,
+    /// Processor status word (`PSW`).
+    pub psw: u8,
+    /// Running SPC-cycle counter (`timer_subdivider`) at this opcode — for the
+    /// SPC-cycle differential vs Mesen `spc.cycle`. Wraps at 2^32 (~70 min).
+    pub spc_cycle: u32,
+    /// T2 internal counter (`timer_internal[2]`, vs Mesen `spc.timer2.stage2`).
+    pub t2_int: u16,
+    /// T2 output (`timer_output[2]`, vs Mesen `spc.timer2.stage3`) — the value
+    /// `$FF`/`CBNE $FF` reads (and clears).
+    pub t2_out: u8,
+}
 
 /// All APU state owned by [`Apu`]: SPC700 core + 64 KB ARAM + the two
 /// 4-byte mailbox arrays.
@@ -135,27 +171,37 @@ pub struct Apu {
     /// CPU → SPC mailbox (CPU writes `$2140-$2143`, SPC reads `$F4-$F7`).
     pub to_spc_ports: [u8; 4],
     /// SPC → CPU mailbox (SPC writes `$F4-$F7`, CPU reads `$2140-$2143`).
+    /// This is Mesen2's `OutputReg`; the CPU reads it as-of the SPC run to
+    /// `target-1` (see [`Self::run_to_target`]) — the echo half-cycle.
     pub to_cpu_ports: [u8; 4],
-    /// SPIKE (timestamped-mailbox visibility): a CPU write to `$2140+port`
-    /// is held here until the SPC's cycle (`timer_subdivider`) catches up
-    /// to the CPU's write cycle, then committed to `to_spc_ports`. This
-    /// makes CPU→SPC visibility cycle-exact instead of quantized to luna's
-    /// whole-instruction APU stepping. `None` = no pending write.
+    /// Shadow of the CPU→SPC mailbox (Mesen2 `NewCpuRegs`): the value the
+    /// CPU most recently wrote. Copied into [`Self::to_spc_ports`]
+    /// (`CpuRegs`, what the SPC actually reads) either immediately or one
+    /// SPC cycle later — the write-visibility delay (see
+    /// [`Self::cpu_write_port`] / [`Self::pending_cpu_reg_update`]).
     #[serde(default)]
-    to_spc_pending: [Option<u8>; 4],
-    /// SPC cycle (`timer_subdivider` value) at which each pending write
-    /// becomes visible (= the CPU's write cycle).
+    new_to_spc_ports: [u8; 4],
+    /// Mesen2 `_pendingCpuRegUpdate`: when a CPU mailbox write lands while
+    /// the SPC is more than 1 (2×) unit behind, the SPC sees the new value
+    /// only after one more SPC cycle. Applied in [`Self::run_one_cycle`]
+    /// (Mesen `ProcessCycle`). Lets e.g. Kishin Douji Zenki boot.
     #[serde(default)]
-    to_spc_visible_at: [u32; 4],
-    /// Fractional master→SPC cycle accumulator: holds
-    /// `Σ(master cycles) × SPC_CLOCK_HZ` modulo `MASTER_CLOCK_HZ`, so
-    /// the long-run SPC rate is exactly `SPC_CLOCK_HZ / MASTER_CLOCK_HZ`
-    /// with zero drift.
-    spc_cycle_num: u64,
-    /// Signed SPC-cycle budget carried between `step` calls. Negative
-    /// means the last instruction overran; the debt is repaid from the
-    /// next batch of converted cycles.
-    spc_cycle_debt: i64,
+    pending_cpu_reg_update: bool,
+    /// SPC executed position in the **2× SPC clock domain** (Mesen2
+    /// `_state.Cycle`): `SPC_2X_HZ` units, advanced `+2` per SPC cycle. The
+    /// driver runs the SPC up to `cpu_target_2x - 1` so it sits half a 1×
+    /// SPC cycle behind the CPU at every mailbox access.
+    #[serde(default)]
+    spc_pos_2x: u64,
+    /// CPU position in the same 2× domain (`master_clock × clockRatio`),
+    /// accumulated with zero drift. The SPC chases `cpu_target_2x - 1`.
+    #[serde(default)]
+    cpu_target_2x: u64,
+    /// Fractional remainder of [`Self::cpu_target_2x`] (`< MASTER_CLOCK_HZ`):
+    /// the sub-unit phase of `master_clock × clockRatio`, needed to decide a
+    /// mailbox write's immediate-vs-pending visibility exactly like Mesen.
+    #[serde(default)]
+    cpu_clock_frac: u64,
     /// `$F1` SPC control register — bit 7 (use IPL ROM) is the only
     /// bit we honour for now; the rest are stored verbatim for round-
     /// trip diagnostics.
@@ -219,6 +265,13 @@ pub struct Apu {
     /// derive both from the same counter rather than running them
     /// separately.
     pub timer_subdivider: u32,
+
+    /// Optional full SPC700 instruction trace: `(events, max_events)`. A
+    /// pre-opcode register snapshot per SPC700 instruction, capped at
+    /// `max_events` (ring buffer: drops the oldest half when full).
+    /// Transient — `serde(skip)` so it never enters a save-state.
+    #[serde(skip)]
+    spc_trace: Option<(Vec<Spc700TraceEvent>, usize)>,
 }
 
 impl Default for Apu {
@@ -248,10 +301,11 @@ impl Apu {
             aram,
             to_spc_ports: [0; 4],
             to_cpu_ports: [0; 4],
-            to_spc_pending: [None; 4],
-            to_spc_visible_at: [0; 4],
-            spc_cycle_num: 0,
-            spc_cycle_debt: 0,
+            new_to_spc_ports: [0; 4],
+            pending_cpu_reg_update: false,
+            spc_pos_2x: 0,
+            cpu_target_2x: 0,
+            cpu_clock_frac: 0,
             control: 0x80, // bit 7: IPL ROM exposed
             test: 0x0A,    // timersEnable + ramWritable (ares power-on)
             past_iplrom: false,
@@ -265,12 +319,14 @@ impl Apu {
             timer_internal: [0; 3],
             timer_enabled: [false; 3],
             timer_subdivider: 0,
+            spc_trace: None,
         };
         // Reset the SPC700 — reads $FFFE/$FFFF for the PC vector,
         // which the IPL ROM populates as $FFC0.
         let mut bus = ApuBusView {
             aram: &mut apu.aram,
             to_spc_ports: &mut apu.to_spc_ports,
+            new_to_spc_ports: &mut apu.new_to_spc_ports,
             to_cpu_ports: &mut apu.to_cpu_ports,
             control: &mut apu.control,
             test: &mut apu.test,
@@ -369,6 +425,12 @@ impl Apu {
 
     /// Read a byte from the CPU side of the mailbox (port 0..=3).
     /// This is what the main CPU sees at `$2140 + port`.
+    ///
+    /// Mesen2 `CpuReadRegister`: returns the SPC's `OutputReg` after the SPC
+    /// has been `Run` to `target-1` (done by [`Self::step`] before this call).
+    /// The half-cycle-behind position *is* the echo-visibility delay — the
+    /// CPU sees the SPC's `$F4-$F7` output as-of ½ a 1× SPC cycle ago — so no
+    /// snapshot is needed here.
     #[must_use]
     pub const fn cpu_read_port(&self, port: usize) -> u8 {
         self.to_cpu_ports[port]
@@ -382,21 +444,30 @@ impl Apu {
         aram_with_ipl(&self.aram, self.control, addr)
     }
 
-    /// Main CPU writes `value` to mailbox port (0..=3).
-    ///
-    /// SPIKE (timestamped-mailbox visibility): rather than make the byte
-    /// instantly visible, hold it until the SPC's cycle catches up to the
-    /// CPU's write cycle. `spc_cycle_debt` is how far the SPC currently
-    /// lags the CPU clock (≥ 0 under no-overshoot), so the CPU's write
-    /// cycle in SPC units is `timer_subdivider + spc_cycle_debt`. The SPC
-    /// then sees the write exactly when it reaches that cycle (see the
-    /// commit at the top of [`run_one_spc`](Self::run_one_spc)) — cycle-
-    /// exact CPU→SPC visibility instead of luna's whole-instruction
-    /// quantization (the Tales OP timer-phase derail).
-    pub fn cpu_write_port(&mut self, port: usize, value: u8) {
-        self.to_spc_pending[port] = Some(value);
-        let lag = self.spc_cycle_debt.max(0) as u32;
-        self.to_spc_visible_at[port] = self.timer_subdivider.wrapping_add(lag);
+    /// Main CPU writes `value` to mailbox port (0..=3). Mesen2
+    /// `CpuWriteRegister`: the SPC was already `Run` to `target-1` (by
+    /// [`Self::step`] before this call). Shadow the value into `NewCpuRegs`
+    /// ([`Self::new_to_spc_ports`]); make it visible to the SPC (`CpuRegs` =
+    /// [`Self::to_spc_ports`]) **immediately** when the CPU is within one 2×
+    /// unit of the SPC (`master_clock·ratio − Cycle ≤ 1`), otherwise **one
+    /// SPC cycle later** via [`Self::pending_cpu_reg_update`] — the
+    /// write-visibility delay Mesen needs for e.g. Kishin Douji Zenki.
+    pub const fn cpu_write_port(&mut self, port: usize, value: u8) {
+        if self.new_to_spc_ports[port] == value {
+            return;
+        }
+        self.new_to_spc_ports[port] = value;
+        // `master_clock·ratio − Cycle = (cpu_target_2x − spc_pos_2x) + frac`,
+        // where `frac = cpu_clock_frac / MASTER_CLOCK_HZ ∈ [0,1)`. After
+        // `run_to_target`, `cpu_target_2x − spc_pos_2x ∈ {0, 1}`. So the
+        // write is immediate unless the SPC stopped exactly one unit short
+        // *and* there is a non-zero fractional phase.
+        let behind = self.cpu_target_2x.saturating_sub(self.spc_pos_2x);
+        if behind == 0 || (behind == 1 && self.cpu_clock_frac == 0) {
+            self.to_spc_ports[port] = value;
+        } else {
+            self.pending_cpu_reg_update = true;
+        }
     }
 
     /// Drain up to `max` queued stereo samples into `out`, in oldest-
@@ -428,35 +499,36 @@ impl Apu {
     /// branch penalty) — until the budget is spent. Timers and the DSP
     /// voice clock advance by the same real per-instruction cycles.
     pub fn step(&mut self, mclk: u32) {
-        // Convert this batch of master cycles into whole SPC cycles,
-        // carrying the fractional remainder so the rate has no drift.
-        self.spc_cycle_num += u64::from(mclk) * SPC_CLOCK_HZ;
-        let gained = (self.spc_cycle_num / MASTER_CLOCK_HZ) as i64;
-        self.spc_cycle_num %= MASTER_CLOCK_HZ;
-        let mut budget = self.spc_cycle_debt + gained;
-        while budget > 0 {
+        // Advance the CPU's position in the 2× SPC clock domain (Mesen2
+        // `_state.Cycle` units = `master_clock × clockRatio`), carrying the
+        // fractional remainder so the long-run rate is exactly
+        // `SPC_2X_HZ / MASTER_CLOCK_HZ` with zero drift.
+        self.cpu_clock_frac += u64::from(mclk) * SPC_2X_HZ;
+        self.cpu_target_2x += self.cpu_clock_frac / MASTER_CLOCK_HZ;
+        self.cpu_clock_frac %= MASTER_CLOCK_HZ;
+        self.run_to_target();
+    }
+
+    /// Mesen2 `Spc::Run`: step the SPC cycle-by-cycle (one bus access each,
+    /// `+2` in the 2× domain) until it reaches `cpu_target_2x - 1` — i.e.
+    /// **half a 1× SPC cycle behind** the CPU. The `-1` is load-bearing: it
+    /// holds the SPC at `target-1` so a CPU mailbox access reads `OutputReg`
+    /// (and writes `CpuRegs`) as-of that half-short position — the faithful
+    /// echo / write visibility that the whole-cycle approximations couldn't
+    /// reproduce. Stops mid-instruction (the SPC core is resumable).
+    fn run_to_target(&mut self) {
+        // `-1` matches Mesen (`Spc.Instructions.cpp`): each step advances 2.
+        let target = self.cpu_target_2x.saturating_sub(1);
+        while self.spc_pos_2x < target {
             if self.cpu.stopped {
-                // SPC halted: drop the budget rather than let it pile up
-                // into a burst if it ever un-stops.
-                budget = 0;
+                // STOP/SLEEP: execution is frozen forever (no resume path);
+                // keep the counter synced so we don't busy-loop.
+                self.spc_pos_2x = self.cpu_target_2x;
                 break;
             }
-            // No-overshoot catch-up: peek the next opcode's base cost and
-            // only run it if it fits the remaining budget, so the SPC stops
-            // at-or-before the CPU's master clock rather than overshooting
-            // whole instructions past it. luna's one-way CPU-driven model
-            // (the SPC catches up to the CPU, never vice versa) desyncs the
-            // mailbox handshake under overshoot — Tales of Phantasia's OP
-            // hangs with no sound. Stopping short keeps the SPC's view of
-            // the CPU mailbox writes correctly ordered. The leftover budget
-            // carries forward in `spc_cycle_debt`.
-            let next_op = aram_with_ipl(&self.aram, self.control, self.cpu.pc);
-            if i64::from(SPC700_CYCLES[next_op as usize]) > budget {
-                break;
-            }
-            budget -= i64::from(self.run_one_spc());
+            self.run_one_cycle();
+            self.spc_pos_2x += 2;
         }
-        self.spc_cycle_debt = budget;
     }
 
     /// Run exactly one SPC700 instruction over the APU bus, clocking the
@@ -467,26 +539,55 @@ impl Apu {
     ///
     /// [`step`]: Self::step
     /// [`trace_step_one`]: Self::trace_step_one
+    /// Enable the SPC700 instruction trace: a pre-opcode register snapshot
+    /// per SPC700 instruction, capped at `max_events` (ring buffer). Drain
+    /// with [`Self::take_spc_trace`].
+    pub fn enable_spc_trace(&mut self, max_events: usize) {
+        self.spc_trace = Some((Vec::new(), max_events));
+    }
+
+    /// Drain the captured SPC700 instruction trace (empty if disabled).
+    pub fn take_spc_trace(&mut self) -> Vec<Spc700TraceEvent> {
+        match self.spc_trace.as_mut() {
+            Some((events, _)) => std::mem::take(events),
+            None => Vec::new(),
+        }
+    }
+
     fn run_one_spc(&mut self) -> u32 {
-        // SPIKE: commit any CPU mailbox writes whose visibility cycle the
-        // SPC has now reached (cycle-exact CPU→SPC visibility). Wrap-safe:
-        // `timer_subdivider` is u32 and wraps (~70 min); a write always
-        // commits within microseconds, so a wrapping-distance < 2^31 means
-        // "at or past the visibility cycle".
-        for p in 0..4 {
-            if self.to_spc_pending[p].is_some()
-                && self
-                    .timer_subdivider
-                    .wrapping_sub(self.to_spc_visible_at[p])
-                    < 0x8000_0000
-            {
-                self.to_spc_ports[p] = self.to_spc_pending[p].take().unwrap();
+        // Atomic whole-instruction path — used only by the trajectory harness
+        // (`trace_step_one`), which runs with a frozen mailbox, so there is no
+        // pending CPU→SPC write to reconcile here (the cycle-exact driver
+        // `run_one_cycle` owns `pending_cpu_reg_update`).
+        // SPC700 instruction trace (`--spc-trace`): pre-opcode register
+        // snapshot. Copy the registers out first so the trace borrow does
+        // not alias `self.cpu`.
+        if self.spc_trace.is_some() {
+            let ev = Spc700TraceEvent {
+                pc: self.cpu.pc,
+                a: self.cpu.a,
+                x: self.cpu.x,
+                y: self.cpu.y,
+                sp: self.cpu.sp,
+                psw: self.cpu.psw.0,
+                spc_cycle: self.timer_subdivider,
+                t2_int: self.timer_internal[2],
+                t2_out: self.timer_output[2],
+            };
+            if let Some((events, max)) = self.spc_trace.as_mut() {
+                if *max > 0 {
+                    if events.len() >= *max {
+                        events.drain(0..*max / 2);
+                    }
+                    events.push(ev);
+                }
             }
         }
         let (cycles, clocked) = {
             let mut bus = ApuBusView {
                 aram: &mut self.aram,
                 to_spc_ports: &mut self.to_spc_ports,
+                new_to_spc_ports: &mut self.new_to_spc_ports,
                 to_cpu_ports: &mut self.to_cpu_ports,
                 control: &mut self.control,
                 test: &mut self.test,
@@ -517,6 +618,64 @@ impl Apu {
         cycles
     }
 
+    /// Advance the SPC700 by exactly one cycle (one bus access = `+2` in the
+    /// 2× domain), clocking timers + DSP per cycle (Mesen2 `ProcessCycle`).
+    fn run_one_cycle(&mut self) {
+        if !self.cpu.in_instruction && self.spc_trace.is_some() {
+            let ev = Spc700TraceEvent {
+                pc: self.cpu.pc,
+                a: self.cpu.a,
+                x: self.cpu.x,
+                y: self.cpu.y,
+                sp: self.cpu.sp,
+                psw: self.cpu.psw.0,
+                spc_cycle: self.timer_subdivider,
+                t2_int: self.timer_internal[2],
+                t2_out: self.timer_output[2],
+            };
+            if let Some((events, max)) = self.spc_trace.as_mut() {
+                if *max > 0 {
+                    if events.len() >= *max {
+                        events.drain(0..*max / 2);
+                    }
+                    events.push(ev);
+                }
+            }
+        }
+        let mut bus = ApuBusView {
+            aram: &mut self.aram,
+            to_spc_ports: &mut self.to_spc_ports,
+            new_to_spc_ports: &mut self.new_to_spc_ports,
+            to_cpu_ports: &mut self.to_cpu_ports,
+            control: &mut self.control,
+            test: &mut self.test,
+            dsp_index: &mut self.dsp_index,
+            dsp: &mut self.dsp,
+            timer_reload: &mut self.timer_reload,
+            timer_output: &mut self.timer_output,
+            timer_internal: &mut self.timer_internal,
+            timer_enabled: &mut self.timer_enabled,
+            timer_subdivider: &mut self.timer_subdivider,
+            sample_tick_deficit: &mut self.sample_tick_deficit,
+            audio_queue: &mut self.audio_queue,
+            audio_left: &mut self.audio_left,
+            audio_right: &mut self.audio_right,
+            clocked: 0,
+        };
+        self.cpu.step_cycle(&mut bus);
+        // Mesen2 `ProcessCycle`: a CPU→SPC mailbox write that was deferred
+        // (the SPC was >1 unit behind when the CPU wrote it) becomes visible
+        // to the SPC one cycle after the write — apply it now, after this
+        // cycle's bus access.
+        if self.pending_cpu_reg_update {
+            self.to_spc_ports = self.new_to_spc_ports;
+            self.pending_cpu_reg_update = false;
+        }
+        if self.cpu.pc < IPL_ROM_BASE {
+            self.past_iplrom = true;
+        }
+    }
+
     /// Trajectory-harness hook (Tales OP derail differential): capture the
     /// pre-instruction SPC register snapshot `(pc, a, x, y, sp, psw)`, then
     /// free-run exactly one SPC700 instruction (full timer/DSP clocking, a
@@ -544,6 +703,9 @@ impl Apu {
 struct ApuBusView<'a> {
     aram: &'a mut [u8; 0x10000],
     to_spc_ports: &'a mut [u8; 4],
+    /// `NewCpuRegs` shadow — cleared alongside `to_spc_ports` on a `$F1`
+    /// bit-4/5 input-port clear so the pending copy-all can't resurrect it.
+    new_to_spc_ports: &'a mut [u8; 4],
     to_cpu_ports: &'a mut [u8; 4],
     control: &'a mut u8,
     test: &'a mut u8,
@@ -725,13 +887,20 @@ impl SpcBus for ApuBusView<'_> {
                 // Bits 4/5 clear the CPU→SMP input mailbox ports the SPC
                 // reads at $F4-$F7 (ares io.cpp:113-123): bit 4 → ports
                 // 0/1, bit 5 → ports 2/3.
+                // Clear the `NewCpuRegs` shadow too (Mesen Spc::Write
+                // $F1) so a deferred pending copy-all can't resurrect a
+                // cleared port.
                 if value & 0x10 != 0 {
                     self.to_spc_ports[0] = 0;
                     self.to_spc_ports[1] = 0;
+                    self.new_to_spc_ports[0] = 0;
+                    self.new_to_spc_ports[1] = 0;
                 }
                 if value & 0x20 != 0 {
                     self.to_spc_ports[2] = 0;
                     self.to_spc_ports[3] = 0;
+                    self.new_to_spc_ports[2] = 0;
+                    self.new_to_spc_ports[3] = 0;
                 }
                 *self.control = value;
             }
@@ -834,6 +1003,7 @@ mod tests {
         let mut bus = ApuBusView {
             aram: &mut apu.aram,
             to_spc_ports: &mut apu.to_spc_ports,
+            new_to_spc_ports: &mut apu.new_to_spc_ports,
             to_cpu_ports: &mut apu.to_cpu_ports,
             control: &mut apu.control,
             test: &mut apu.test,
@@ -871,6 +1041,7 @@ mod tests {
         let mut bus = ApuBusView {
             aram: &mut apu.aram,
             to_spc_ports: &mut apu.to_spc_ports,
+            new_to_spc_ports: &mut apu.new_to_spc_ports,
             to_cpu_ports: &mut apu.to_cpu_ports,
             control: &mut apu.control,
             test: &mut apu.test,
@@ -979,6 +1150,7 @@ mod tests {
             let mut bus = ApuBusView {
                 aram: &mut apu.aram,
                 to_spc_ports: &mut apu.to_spc_ports,
+                new_to_spc_ports: &mut apu.new_to_spc_ports,
                 to_cpu_ports: &mut apu.to_cpu_ports,
                 control: &mut apu.control,
                 test: &mut apu.test,
@@ -1006,6 +1178,7 @@ mod tests {
         let mut bus = ApuBusView {
             aram: &mut apu.aram,
             to_spc_ports: &mut apu.to_spc_ports,
+            new_to_spc_ports: &mut apu.new_to_spc_ports,
             to_cpu_ports: &mut apu.to_cpu_ports,
             control: &mut apu.control,
             test: &mut apu.test,
@@ -1042,6 +1215,7 @@ mod tests {
             let mut bus = ApuBusView {
                 aram: &mut apu.aram,
                 to_spc_ports: &mut apu.to_spc_ports,
+                new_to_spc_ports: &mut apu.new_to_spc_ports,
                 to_cpu_ports: &mut apu.to_cpu_ports,
                 control: &mut apu.control,
                 test: &mut apu.test,
@@ -1065,6 +1239,7 @@ mod tests {
             let mut bus = ApuBusView {
                 aram: &mut apu.aram,
                 to_spc_ports: &mut apu.to_spc_ports,
+                new_to_spc_ports: &mut apu.new_to_spc_ports,
                 to_cpu_ports: &mut apu.to_cpu_ports,
                 control: &mut apu.control,
                 test: &mut apu.test,
@@ -1094,6 +1269,7 @@ mod tests {
         let mut bus = ApuBusView {
             aram: &mut apu.aram,
             to_spc_ports: &mut apu.to_spc_ports,
+            new_to_spc_ports: &mut apu.new_to_spc_ports,
             to_cpu_ports: &mut apu.to_cpu_ports,
             control: &mut apu.control,
             test: &mut apu.test,

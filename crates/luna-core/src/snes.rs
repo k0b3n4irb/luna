@@ -316,6 +316,23 @@ pub struct MemTraceLog {
 /// Master cycles per PPU scanline on NTSC (1364 mclk = 4 dots × 341).
 pub const MCYCLES_PER_SCANLINE: u32 = 1364;
 
+/// Line-relative master-cycle position at which the once-per-scanline DRAM
+/// refresh halts the CPU. ares `cpu/timing.cpp:71` sets
+/// `dramRefreshPosition = 530 + 8 - dmaCounter()` in hcounter (master-clock)
+/// units; with the common `dmaCounter() == 0` this is 538. Cross-checked
+/// against Mesen2 (the refresh fired between line-positions 472 and 580 on the
+/// SMRPG boot, bracketing 538).
+const DRAM_REFRESH_POS: u32 = 538;
+
+/// Master cycles the CPU is halted for DRAM refresh each scanline. ares
+/// `cpu/timing.cpp:24-28` performs 5 refresh accesses of `step(6)+step(2)` =
+/// 8 mclk each → 40 mclk total. luna applies it as one lump stall (the CPU
+/// does no work; the APU/PPU/coproc keep running), shifting the CPU↔APU phase
+/// exactly as hardware does. Omitting this made luna's CPU run ~40 mclk/line
+/// fast vs ares/Mesen, accumulating CPU↔SPC drift (e.g. the SMRPG Akao
+/// timer-poll freeze).
+const DRAM_REFRESH_CYCLES: u32 = 40;
+
 /// Convert the running master-clock counter into the PPU's current
 /// (H, V) dot coordinate. 1364 master cycles per scanline; the
 /// scanline count depends on region (262 NTSC / 312 PAL). Each
@@ -560,6 +577,16 @@ impl Snes {
     /// Drain the Super FX instruction trace (empty if disabled / not GSU).
     pub fn take_superfx_trace(&mut self) -> Vec<luna_bus::SuperFxTraceEvent> {
         self.mapper.take_superfx_trace()
+    }
+
+    /// Enable a per-opcode SPC700 instruction trace on the real APU.
+    pub fn enable_spc_trace(&mut self, max_events: usize) {
+        self.apu_real.enable_spc_trace(max_events);
+    }
+
+    /// Drain the SPC700 instruction trace (empty if disabled).
+    pub fn take_spc_trace(&mut self) -> Vec<luna_apu::Spc700TraceEvent> {
+        self.apu_real.take_spc_trace()
     }
 
     /// Enable CPU instruction tracing. From this point onward each
@@ -1056,6 +1083,13 @@ impl Snes {
             } else if matches!(bank, 0x7E..=0x7F) {
                 // Full WRAM ($7E-$7F).
                 self.wram[(usize::from(bank - 0x7E) << 16) | usize::from(off)]
+            } else if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && (0x3000..=0x37FF).contains(&off)
+            {
+                // SA-1 I-RAM ($3000-$37FF) is side-effect-free — read it from
+                // the mapper. (Lumping it into the register band below made
+                // every I-RAM peek return 0, which silently broke SA-1 I-RAM
+                // inspection and cross-emulator I-RAM differentials.)
+                self.mapper.read(make_addr(bank, off)).unwrap_or(0xFF)
             } else if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && (0x2000..=0x5FFF).contains(&off)
             {
                 // PPU/APU/CPU/coproc register band — read side effects, so 0.
@@ -1399,21 +1433,33 @@ impl SnesBus<'_> {
     /// line crossings in this advance (Phase 4); the caller charges it.
     fn sched_advance(&mut self, mcycles: u32) -> u32 {
         let mut remaining = mcycles;
-        let mut hdma_stall = 0u32;
+        let mut stall = 0u32;
         while remaining > 0 {
             let room = MCYCLES_PER_SCANLINE - self.mcycles_in_line;
             let chunk = remaining.min(room);
+            let lo = self.mcycles_in_line;
+            let hi = lo + chunk;
             // Poll the IRQ over [lo, lo+chunk) on the CURRENT line before
             // any boundary crossing advances `ppu_line` (the V-counter).
-            self.poll_hv_irq(self.mcycles_in_line, self.mcycles_in_line + chunk);
+            self.poll_hv_irq(lo, hi);
+            // DRAM refresh: once per scanline the CPU is halted ~40 mclk
+            // (ares `cpu/timing.cpp`). Fire when this chunk crosses the
+            // refresh position — like `poll_hv_irq`'s htime, the half-open
+            // [lo, hi) covers each line position once, so this triggers
+            // exactly once per line with no persistent flag. Charged as a
+            // stall the caller re-advances every subsystem by, so the APU/PPU
+            // run during the halt (the CPU↔APU phase shift hardware produces).
+            if lo <= DRAM_REFRESH_POS && DRAM_REFRESH_POS < hi {
+                stall += DRAM_REFRESH_CYCLES;
+            }
             self.mcycles_in_line += chunk;
             remaining -= chunk;
             if self.mcycles_in_line >= MCYCLES_PER_SCANLINE {
                 self.mcycles_in_line -= MCYCLES_PER_SCANLINE;
-                hdma_stall += self.sched_one_line();
+                stall += self.sched_one_line();
             }
         }
-        hdma_stall
+        stall
     }
 
     /// Dot-precise H/V-counter IRQ poll over the half-open master-cycle
@@ -1610,12 +1656,13 @@ impl SnesBus<'_> {
     /// [`DmaBusView::tick`], so charging it again with the lumped DMA
     /// cost here would double-count it.
     fn advance_time(&mut self, mcycles: MCycles, advance_coproc: bool) {
-        // Phase 4: HDMA steals master cycles. `sched_advance` returns the
-        // HDMA cost of any line crossed; the CPU is halted for that long,
-        // so we re-advance everything (master clock, APU, PPU, coproc, IRQ
-        // poll) by the stall in a follow-up pass. The loop converges —
-        // each scanline's HDMA runs once and a stall rarely spans a full
-        // 1364-mclk line.
+        // HDMA + DRAM refresh steal master cycles. `sched_advance` returns
+        // the stall cost of anything crossed (per-line HDMA and the
+        // once-per-line DRAM refresh); the CPU is halted for that long, so we
+        // re-advance everything (master clock, APU, PPU, coproc, IRQ poll) by
+        // the stall in a follow-up pass. The loop converges — each scanline's
+        // HDMA + refresh run once and a stall rarely spans a full 1364-mclk
+        // line.
         let mut step = mcycles;
         loop {
             *self.mclk_total = self.mclk_total.saturating_add(step);
@@ -1636,18 +1683,18 @@ impl SnesBus<'_> {
             if !self.sched_enabled {
                 return;
             }
-            let hdma_stall = self.sched_advance(step as u32);
+            let stall = self.sched_advance(step as u32);
             if advance_coproc {
                 self.mapper.step_coproc(step as u32);
             }
-            // Charge the HDMA stall only on the CPU-instruction path. The
-            // DMA-lump path (`advance_coproc == false`) lets HDMA fire but
-            // accounts its own lumped time; proper DMA↔HDMA interleaving is
-            // Phase 5, so don't re-loop there.
-            if hdma_stall == 0 || !advance_coproc {
+            // Charge the HDMA + refresh stall only on the CPU-instruction
+            // path. The DMA-lump path (`advance_coproc == false`) lets them
+            // fire but accounts its own lumped time; proper DMA↔HDMA
+            // interleaving is Phase 5, so don't re-loop there.
+            if stall == 0 || !advance_coproc {
                 return;
             }
-            step = MCycles::from(hdma_stall);
+            step = MCycles::from(stall);
         }
     }
 
