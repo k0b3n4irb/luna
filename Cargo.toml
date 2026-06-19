@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.4"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MPL-2.0"
@@ -111,16 +111,16 @@ too_long_first_doc_paragraph = "allow"
 
 [workspace.dependencies]
 # Cœur d'émulation
-luna-api          = { path = "crates/luna-api", version = "0.0.4" }
-luna-apu          = { path = "crates/luna-apu", version = "0.0.4" }
-luna-bus          = { path = "crates/luna-bus", version = "0.0.4" }
-luna-cartridge    = { path = "crates/luna-cartridge", version = "0.0.4" }
-luna-core         = { path = "crates/luna-core", version = "0.0.4" }
-luna-cpu-65c816   = { path = "crates/luna-cpu-65c816", version = "0.0.4" }
-luna-cpu-spc700   = { path = "crates/luna-cpu-spc700", version = "0.0.4" }
-luna-cpu-upd96050 = { path = "crates/luna-cpu-upd96050", version = "0.0.4" }
-luna-mcp-server   = { path = "crates/luna-mcp-server", version = "0.0.4" }
-luna-ppu          = { path = "crates/luna-ppu", version = "0.0.4" }
+luna-api          = { path = "crates/luna-api", version = "0.1.0" }
+luna-apu          = { path = "crates/luna-apu", version = "0.1.0" }
+luna-bus          = { path = "crates/luna-bus", version = "0.1.0" }
+luna-cartridge    = { path = "crates/luna-cartridge", version = "0.1.0" }
+luna-core         = { path = "crates/luna-core", version = "0.1.0" }
+luna-cpu-65c816   = { path = "crates/luna-cpu-65c816", version = "0.1.0" }
+luna-cpu-spc700   = { path = "crates/luna-cpu-spc700", version = "0.1.0" }
+luna-cpu-upd96050 = { path = "crates/luna-cpu-upd96050", version = "0.1.0" }
+luna-mcp-server   = { path = "crates/luna-mcp-server", version = "0.1.0" }
+luna-ppu          = { path = "crates/luna-ppu", version = "0.1.0" }
 
 # Externals (versions pinned plus tard quand on les utilisera vraiment)
 serde       = { version = "1", default-features = false, features = ["derive"] }

@@ -1991,7 +1991,7 @@ impl Spc700 {
     /// Update N / Z / C for an 8-bit compare `lhs - rhs`. No value is
     /// stored back — only flags change. C is set when `lhs >= rhs`
     /// (unsigned), matching 65C816 / SPC700 semantics.
-    const fn cmp_u8(&mut self, lhs: u8, rhs: u8) {
+    pub(crate) const fn cmp_u8(&mut self, lhs: u8, rhs: u8) {
         let result = lhs.wrapping_sub(rhs);
         self.set_nz(result);
         self.psw.set(bit::C, lhs >= rhs);
@@ -2000,7 +2000,7 @@ impl Spc700 {
     /// 8-bit add-with-carry. Sets N/V/H/Z/C. The half-carry flag is
     /// set from bit 4 of `(a & 0x0F) + (b & 0x0F) + carry`. Overflow
     /// (V) is signed-overflow detection.
-    fn adc_u8(&mut self, a: u8, b: u8) -> u8 {
+    pub(crate) fn adc_u8(&mut self, a: u8, b: u8) -> u8 {
         let c_in = u16::from(self.psw.contains(bit::C));
         let sum = u16::from(a) + u16::from(b) + c_in;
         let result = sum as u8;
@@ -2017,21 +2017,21 @@ impl Spc700 {
 
     /// 8-bit subtract-with-borrow. The SPC700's SBC is "ADC of the
     /// one's complement" — borrow comes from `!carry`. Sets N/V/H/Z/C.
-    fn sbc_u8(&mut self, a: u8, b: u8) -> u8 {
+    pub(crate) fn sbc_u8(&mut self, a: u8, b: u8) -> u8 {
         // SBC A,b = ADC A,~b — same flag rules.
         self.adc_u8(a, !b)
     }
 
     /// Push a byte onto the stack at `$01xx` (sp = low byte) and
     /// decrement the stack pointer.
-    fn push_u8<B: SpcBus>(&mut self, bus: &mut B, value: u8) {
+    pub(crate) fn push_u8<B: SpcBus>(&mut self, bus: &mut B, value: u8) {
         bus.write(0x0100 | u16::from(self.sp), value);
         self.sp = self.sp.wrapping_sub(1);
     }
 
     /// Pre-increment the stack pointer, then read the byte it now
     /// points to.
-    fn pop_u8<B: SpcBus>(&mut self, bus: &mut B) -> u8 {
+    pub(crate) fn pop_u8<B: SpcBus>(&mut self, bus: &mut B) -> u8 {
         self.sp = self.sp.wrapping_add(1);
         bus.read(0x0100 | u16::from(self.sp))
     }

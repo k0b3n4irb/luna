@@ -28,6 +28,47 @@ pub struct Spc700 {
     /// BBC) when it takes the branch. `step` reads it to add the `+2`
     /// taken penalty, then clears it before the next instruction.
     pub branch_taken: bool,
+
+    // ------------------------------------------------------------------
+    // Cycle-stepped (mid-instruction-resumable) execution state.
+    //
+    // The atomic `step()` runs a whole instruction at once; `step_cycle()`
+    // (see `step.rs`) advances exactly one SPC cycle (one bus access),
+    // resuming at `op_step`, so the CPU↔SPC interleave can be made
+    // cycle-exact (ares cooperative thread / Mesen2 `_opCode`/`_opStep`).
+    // All `#[serde(default)]` so old save-states load.
+    // ------------------------------------------------------------------
+    /// Opcode currently executing under `step_cycle` (valid while
+    /// `in_instruction`).
+    #[serde(default)]
+    pub op: u8,
+    /// Micro-step index within the current opcode (0 = first post-fetch
+    /// cycle).
+    #[serde(default)]
+    pub op_step: u8,
+    /// Per-instruction operand scratch (fetched immediate / dp byte /
+    /// relative offset), carried across micro-steps.
+    #[serde(default)]
+    pub oper: u16,
+    /// Per-instruction latched effective address, carried across
+    /// micro-steps (e.g. between the dummy-read and the write of a RMW).
+    #[serde(default)]
+    pub addr_lat: u16,
+    /// Second per-instruction operand scratch (e.g. the destination dp
+    /// of a `(dp),(dp)` op, or the high byte of a fetched word).
+    #[serde(default)]
+    pub oper2: u16,
+    /// Per-instruction latched pointer / data value, carried across
+    /// micro-steps (e.g. a resolved indirect pointer, a RMW data byte).
+    #[serde(default)]
+    pub ptr_lat: u16,
+    /// Per-instruction latched bit index (bit-on-memory ops).
+    #[serde(default)]
+    pub bit_lat: u8,
+    /// `true` between the opcode fetch and the final micro-step of the
+    /// instruction currently running under `step_cycle`.
+    #[serde(default)]
+    pub in_instruction: bool,
 }
 
 impl Spc700 {
