@@ -72,9 +72,16 @@ pub struct Sa1Mapper {
     exb: u8,
     /// $2223 FXB super-bank selector for `$60-$7D`.
     fxb: u8,
-    /// $2224 BMAPS — BW-RAM 8 KB window select for the `$6000-$7FFF`
-    /// window in main-CPU `LoROM` space.
+    /// $2224 BMAPS (SBM) — BW-RAM 8 KB window select for the `$6000-$7FFF`
+    /// window as seen by the **main CPU**.
     bmaps: u8,
+    /// $2225 BMAP (CBM) — BW-RAM 8 KB window select for the `$6000-$7FFF`
+    /// window as seen by the **SA-1**. Bit 7 = bitmap source mode (the SA-1
+    /// sees BW-RAM as a 2/4 bpp bitmap there); bits 0-6 = bank in normal
+    /// mode. Previously dropped — the SA-1 then wrongly read the main CPU's
+    /// SBM bank, livelocking SMRPG's attract-demo cmd-$11 routine.
+    #[serde(default)]
+    cbm: u8,
     /// Multiplier / divider operands and result.
     /// `$2251/$2252 MA` — multiplicand (signed 16-bit, write-twice).
     ma: i16,
@@ -317,6 +324,7 @@ impl Sa1Mapper {
             exb: 0x02,
             fxb: 0x03,
             bmaps: 0x00,
+            cbm: 0x00,
             ma: 0,
             mb: 0,
             mcnt: 0,
@@ -516,7 +524,7 @@ impl Sa1Mapper {
             self.iram[o] = value;
             return;
         }
-        if let Some(o) = self.bwram_offset(bank, offset) {
+        if let Some(o) = self.bwram_offset(bank, offset, WriteSide::Main) {
             self.bwram[o] = value;
         }
     }
@@ -902,12 +910,20 @@ impl Sa1Mapper {
     ///     `BMAPS << 13` within BW-RAM.
     ///   * Linear 256 KB at `$40-$4F:$0000-$FFFF` for the SA-1's own
     ///     full-bandwidth view.
-    fn bwram_offset(&self, bank: u8, offset: u16) -> Option<usize> {
+    fn bwram_offset(&self, bank: u8, offset: u16, side: WriteSide) -> Option<usize> {
         if self.bwram.is_empty() {
             return None;
         }
         if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && (0x6000..=0x7FFF).contains(&offset) {
-            let window = usize::from(self.bmaps & 0x1F) * 0x2000;
+            // The `$6000-$7FFF` 8 KB window is bank-selected PER SIDE: the main
+            // CPU uses SBM ($2224), the SA-1 uses CBM ($2225). (CBM bit 7 =
+            // bitmap source mode — not yet modelled; SMRPG's attract uses
+            // normal banking, bit 7 clear.)
+            let bank_reg = match side {
+                WriteSide::Main => self.bmaps,
+                WriteSide::Sa1 => self.cbm,
+            };
+            let window = usize::from(bank_reg & 0x1F) * 0x2000;
             let off = window + usize::from(offset - 0x6000);
             return Some(off % self.bwram.len());
         }
@@ -1039,7 +1055,7 @@ impl Mapper for Sa1Mapper {
         if let Some(o) = Self::iram_offset(bank, offset) {
             return Some(self.iram[o]);
         }
-        if let Some(o) = self.bwram_offset(bank, offset) {
+        if let Some(o) = self.bwram_offset(bank, offset, WriteSide::Main) {
             return Some(self.bwram[o]);
         }
         if let Some(o) = self.rom_offset(bank, offset) {
@@ -1098,7 +1114,7 @@ impl Sa1Mapper {
         if let Some(o) = Self::iram_offset_sa1(bank, offset) {
             return Some(self.iram[o]);
         }
-        if let Some(o) = self.bwram_offset(bank, offset) {
+        if let Some(o) = self.bwram_offset(bank, offset, WriteSide::Sa1) {
             return Some(self.bwram[o]);
         }
         if let Some(o) = self.rom_offset(bank, offset) {
@@ -1122,7 +1138,7 @@ impl Sa1Mapper {
         // address actually resolves to BWRAM.
         let is_bwram = Self::mmio_offset(addr).is_none()
             && Self::iram_offset_sa1(bank, offset).is_none()
-            && self.bwram_offset(bank, offset).is_some();
+            && self.bwram_offset(bank, offset, WriteSide::Sa1).is_some();
         if is_bwram { 2 } else { 1 }
     }
 
@@ -1320,6 +1336,8 @@ impl Sa1Mapper {
                 0x2222 => self.exb = value,
                 0x2223 => self.fxb = value,
                 0x2224 => self.bmaps = value,
+                // $2225 BMAP (CBM) — the SA-1's BW-RAM $6000-$7FFF bank.
+                0x2225 => self.cbm = value,
                 0x2226 => self.sbwe = value,
                 0x2227 => self.cbwe = value,
                 0x2228 => self.bwpa = value,
@@ -1373,7 +1391,7 @@ impl Sa1Mapper {
             // through to WRAM, which isn't what protection means.
             return true;
         }
-        if let Some(o) = self.bwram_offset(bank, offset) {
+        if let Some(o) = self.bwram_offset(bank, offset, side) {
             if self.bwram_writable_for(o, side) {
                 self.bwram[o] = value;
             }
