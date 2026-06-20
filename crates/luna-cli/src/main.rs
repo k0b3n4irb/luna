@@ -60,6 +60,14 @@ enum Command {
         /// emulator be audio-verified without a GUI / sound card.
         #[arg(long)]
         audio_out: Option<PathBuf>,
+        /// If set, print a hash of the displayed frame (honouring
+        /// `--force-display`) to stdout as `fbhash=<16-hex>`. A stable,
+        /// cross-architecture visual-regression key — it hashes the same
+        /// pixels `--screenshot` writes, before PNG encoding (so it is immune
+        /// to the build-dependent PNG encoder). Ideal as an external test
+        /// harness's baseline key.
+        #[arg(long)]
+        print_fbhash: bool,
     },
     /// Serve the Luna MCP server on stdio.
     ///
@@ -411,6 +419,7 @@ fn main() -> ExitCode {
             force_display,
             bg,
             audio_out,
+            print_fbhash,
         } => run(
             &rom,
             steps,
@@ -418,6 +427,7 @@ fn main() -> ExitCode {
             force_display,
             bg,
             audio_out.as_deref(),
+            print_fbhash,
         ),
         Command::Mcp => serve_mcp(),
         Command::State {
@@ -1803,6 +1813,7 @@ fn run(
     force_display: bool,
     bg: Option<u8>,
     audio_out: Option<&std::path::Path>,
+    print_fbhash: bool,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
     let info = match em.load_rom(rom_path) {
@@ -1918,6 +1929,17 @@ fn run(
             ),
             Err(e) => {
                 eprintln!("\nerror: could not write audio WAV: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    // Stable, cross-arch visual-regression key (hashes the displayed RGBA,
+    // pre-PNG). Printed last so a harness can `grep '^fbhash='`.
+    if print_fbhash {
+        match em.frame_hash(force_display) {
+            Ok(h) => println!("fbhash={h:016x}"),
+            Err(e) => {
+                eprintln!("\nerror: could not hash frame: {e}");
                 return ExitCode::from(1);
             }
         }
