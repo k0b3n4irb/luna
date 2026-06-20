@@ -114,7 +114,11 @@ pub trait Mapper {
     /// CPU's max `FastROM` rate, so it consumes ~2 SA-1 instructions
     /// per main-CPU \`mclk\`). Implementations should be safely
     /// callable even when their coprocessor is reset / stopped.
-    fn step_coproc(&mut self, _main_mclk: u32) {}
+    ///
+    /// `scpu_mar` is the S-CPU's last bus-access address (ares `cpu.r.mar`),
+    /// used by the SA-1 to model shared-bus `conflict()` contention; coprocs
+    /// without bus contention ignore it.
+    fn step_coproc(&mut self, _main_mclk: u32, _scpu_mar: u32) {}
 
     /// `true` while the cartridge coprocessor is asserting an IRQ line
     /// onto the main CPU (SA-1 SCNT bit 7 latched + SIE bit 7 enabled,
