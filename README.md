@@ -56,7 +56,25 @@ principle, but
 macOS and Windows are **not tested or supported yet** — they may build and run,
 but no guarantees. Contributions to validate other platforms are welcome.
 
-## Quick start
+## Download (Linux binaries)
+
+Prebuilt binaries are attached to each [GitHub
+release](https://github.com/kobenairb/luna/releases) — no toolchain needed:
+
+```bash
+# x86_64 (or swap aarch64 for ARM64)
+curl -LO https://github.com/kobenairb/luna/releases/latest/download/luna-v0.2.0-linux-x86_64.tar.gz
+tar xzf luna-v0.2.0-linux-x86_64.tar.gz && cd luna-v0.2.0-linux-x86_64
+./luna-gui "path/to/game.sfc"   # graphical emulator
+./luna --help                   # headless CLI (run / state / mcp)
+```
+
+Each tarball ships both binaries (`luna`, `luna-gui`) plus a `.sha256`
+checksum. Runtime needs a desktop Linux with Vulkan/OpenGL + X11/Wayland and
+ALSA (standard on any modern distro); the headless `luna` CLI needs none of
+those. Windows / macOS binaries are planned.
+
+## Quick start (build from source)
 
 Prerequisites: the Rust toolchain pinned in [`rust-toolchain.toml`](rust-toolchain.toml)
 (2024 edition, Rust ≥ 1.85), on Linux.

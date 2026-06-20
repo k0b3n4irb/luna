@@ -34,7 +34,7 @@ truly-open list is short.** Use *this* table, not §1, as current truth.
 | SPC700 | B | **B+** | fine cycle ordering only (branch penalty fixed) |
 | PPU | C+ | **A−** | *(OPHCT/OPVCT read-latch **+** BG scroll write-twice — both **FIXED 2026-06-11**; the OPVCT latch was the Doom-flicker root)* |
 | DMA/HDMA | C+ | **B−** | DMA per-byte + line-granular HDMA preempt (Phase 5). dot-276 sub-line is **visually a no-op** (276 = HBlank → effect on line N+1, which luna's boundary model already does — see `hdma_ares_audit.md` "Resolution 2026-06-20"); residual is the HDMA stall **cycle-count** timing only (no known game impact). |
-| SA-1 | C+ | **B** | flat instruction timing (architectural, with Phase 5) |
+| SA-1 | C+ | **A−** | ~~flat instruction timing~~ — **FIXED**: per-access cycle cost (Phase 5b `097ffe7`) + `conflict()` BWRAM/IRAM/ROM contention steps (Increment B, 2026-06-20). The "−" is the batched (non-cothread) scheduler grain, not a value bug. |
 | Bus/mappers | C+ | **B** | ~~ROM mirroring, open-bus MDR, mapper-detect scoring~~ — all **FIXED 2026-06-17** |
 
 **Truly-open work list (was 6, now 1 after OPVCT + BG-scroll + BRR-test + bus trio):**
@@ -44,7 +44,7 @@ truly-open list is short.** Use *this* table, not §1, as current truth.
 3. ~~Bus: ROM mirroring of non-pow2 images returns open-bus instead of wrapping~~ — **FIXED 2026-06-17** (`types::rom_mirror`, ares `Bus::mirror`; used by `lorom.rs`/`hirom.rs`).
 4. ~~Bus: open-bus is a fixed `0xFF`, not the last MDR latch~~ — **FIXED 2026-06-17** (`Snes::mdr`; CPU-visible open-bus sites return it, reads/writes update it).
 5. ~~Bus: mapper detection is first-checksum-pass-wins; SA-1 via MapMode not RomType~~ — **FIXED 2026-06-17** (`score_header` port of ares `scoreHeader` disambiguates checksum-passers; SA-1 keyed on the chipset/RomType high-nibble).
-6. SA-1 flat instruction timing (`coproc/sa1.rs` `MCLK_PER_SA1_INSN=6`) — architectural, fold into the timing rework, not isolated.
+6. ~~SA-1 flat instruction timing (`coproc/sa1.rs` `MCLK_PER_SA1_INSN=6`)~~ — **FIXED**: Phase 5b (`097ffe7`) replaced the flat lump with a signed-deficit per-access cost (BWRAM=2 / else=1 step), and the `conflict()` shared-bus contention steps (ROM +1, BWRAM/IRAM +2 when the S-CPU holds the same resource; ares `coprocessor/sa1/{rom,bwram,iram}.cpp`) landed 2026-06-20. SA-1 → A−.
 
 Plus the 2 architectural residuals (Phase 5: DMA per-byte grid stepping, mid-line
 HDMA preemption) — genuine HDMA-accuracy items.
