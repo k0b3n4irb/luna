@@ -1355,6 +1355,21 @@ impl Emulator {
         Ok(h.finish())
     }
 
+    /// Hash of the **displayed** RGBA frame ([`Self::render_frame_rgba`] at the
+    /// given `force_display`) — a stable visual-regression key. Deterministic
+    /// and **cross-architecture** stable (fixed-seed `SipHash` over the
+    /// integer-rendered bytes — no float), so a baseline captured on `x86_64`
+    /// matches one on `aarch64`. Hashes exactly the pixels a `--screenshot` at
+    /// the same `force_display` would write, **before** PNG encoding — avoiding
+    /// the build-dependent encoder variability of hashing the encoded file.
+    pub fn frame_hash(&self, force_display: bool) -> Result<u64, ApiError> {
+        use std::hash::Hasher;
+        let rgba = self.render_frame_rgba(force_display)?;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        h.write(&rgba);
+        Ok(h.finish())
+    }
+
     /// Serialize the full running-machine state into a portable blob.
     ///
     /// The blob captures the mutable `Snes` state (CPU / PPU / APU / DMA /
@@ -2195,5 +2210,22 @@ mod tests {
             std::hash::Hasher::finish(&ref_h),
             "hashes the displayed RGB"
         );
+    }
+
+    #[test]
+    fn frame_hash_is_deterministic_and_matches_render_frame_rgba() {
+        let mut e = Emulator::new();
+        assert!(matches!(e.frame_hash(false), Err(ApiError::NoRom)));
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        e.step_until_frame(1_000_000).unwrap();
+        let h = e.frame_hash(false).expect("hash");
+        // Pure function of state — stable across calls (the property a
+        // cross-arch baseline relies on).
+        assert_eq!(h, e.frame_hash(false).unwrap(), "frame_hash must be stable");
+        // It is exactly a fixed-seed hash of the displayed RGBA bytes.
+        let rgba = e.render_frame_rgba(false).unwrap();
+        let mut ref_h = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hasher::write(&mut ref_h, &rgba);
+        assert_eq!(h, std::hash::Hasher::finish(&ref_h));
     }
 }
