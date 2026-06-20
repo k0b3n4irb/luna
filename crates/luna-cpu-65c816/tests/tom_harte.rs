@@ -25,7 +25,7 @@
 
 #![allow(clippy::cast_possible_truncation)]
 
-use luna_bus::testing::RamBus;
+use luna_bus::testing::{RamBus, TraceKind};
 use luna_cpu_65c816::{Cpu, StatusFlags};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -129,15 +129,22 @@ struct CycleCheck {
     want: usize,
 }
 
-fn run_case(case: &TestCase, opcode: u8) -> (Result<CaseResult, String>, Option<CycleCheck>) {
+type RunResult = (
+    Result<CaseResult, String>,
+    Option<CycleCheck>,
+    Option<Result<(), String>>,
+);
+
+fn run_case(case: &TestCase, opcode: u8) -> RunResult {
     let mut cpu = Cpu::new();
     let mut bus = RamBus::new();
     apply_state(&mut cpu, &mut bus, &case.initial);
     bus.reset_cycle_counter();
+    bus.enable_trace();
 
     // Catch the panic that unimplemented opcodes raise (P0.4b territory).
     if catch_unwind(AssertUnwindSafe(|| cpu.step(&mut bus))).is_err() {
-        return (Ok(CaseResult::Skip), None);
+        return (Ok(CaseResult::Skip), None, None);
     }
 
     // WAI (0xCB) / STP (0xDB) halt the CPU: their Tom Harte trace is a
@@ -148,10 +155,69 @@ fn run_case(case: &TestCase, opcode: u8) -> (Result<CaseResult, String>, Option<
         got: bus.io_cycle_calls(),
         want: case.cycles.len(),
     });
+    // Entry-for-entry per-cycle bus-trace check (the faithful cycle-grammar
+    // oracle): compares luna's recorded read/write/internal sequence to the
+    // Tom Harte `cycles[]` order/addr/value. Informational — a divergence on
+    // a hardware dummy-read cycle (luna emits an internal where the chip
+    // drives the bus) is the known instruction-atomic gap, surfaced as a
+    // precise work-list, not a hard failure.
+    let trace =
+        (opcode != 0xCB && opcode != 0xDB).then(|| compare_trace(&bus.take_trace(), &case.cycles));
     match compare_state(&cpu, &bus, &case.final_) {
-        Ok(()) => (Ok(CaseResult::Pass), cyc),
-        Err(e) => (Err(e), cyc),
+        Ok(()) => (Ok(CaseResult::Pass), cyc, trace),
+        Err(e) => (Err(e), cyc, trace),
     }
+}
+
+/// Classify one Tom Harte cycle entry `[addr, value, flags]` into
+/// (kind, addr, value). Flags: char 0 = `d` (VDA), char 1 = `p` (VPA),
+/// `w` anywhere = write. A write is a Write; a valid-address read is a
+/// Read; everything else (no VDA/VPA, value usually null) is Internal.
+fn classify(entry: &serde_json::Value) -> (TraceKind, Option<u32>, Option<u8>) {
+    let arr = entry.as_array().expect("cycle entry is array");
+    let addr = arr
+        .first()
+        .and_then(serde_json::Value::as_u64)
+        .map(|a| a as u32);
+    let value = arr
+        .get(1)
+        .and_then(serde_json::Value::as_u64)
+        .map(|v| v as u8);
+    let flags = arr.get(2).and_then(serde_json::Value::as_str).unwrap_or("");
+    let kind = if flags.contains('w') {
+        TraceKind::Write
+    } else if flags.starts_with('d') || flags.get(1..2) == Some("p") {
+        TraceKind::Read
+    } else {
+        TraceKind::Internal
+    };
+    (kind, addr, value)
+}
+
+/// Compare luna's recorded per-cycle bus trace to the Tom Harte `cycles[]`
+/// entry-for-entry: kind for every cycle, plus addr+value for reads/writes.
+fn compare_trace(
+    got: &[(TraceKind, Option<u32>, Option<u8>)],
+    want: &[serde_json::Value],
+) -> Result<(), String> {
+    if got.len() != want.len() {
+        return Err(format!("trace length {} != {}", got.len(), want.len()));
+    }
+    for (i, (entry, &(gk, ga, gv))) in want.iter().zip(got).enumerate() {
+        let (wk, wa, wv) = classify(entry);
+        if gk != wk {
+            return Err(format!("cycle {i}: kind {gk:?} != {wk:?}"));
+        }
+        if matches!(wk, TraceKind::Read | TraceKind::Write) {
+            if ga != wa {
+                return Err(format!("cycle {i} {wk:?}: addr {ga:06X?} != {wa:06X?}"));
+            }
+            if gv != wv {
+                return Err(format!("cycle {i} {wk:?}: value {gv:02X?} != {wv:02X?}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn apply_state(cpu: &mut Cpu, bus: &mut RamBus, s: &State) {
@@ -217,6 +283,13 @@ struct OpStats {
     cycle_passed: u32,
     cycle_failed: u32,
     first_cycle_failure: Option<String>,
+    /// Entry-for-entry per-cycle bus-trace oracle: cases whose recorded
+    /// read/write/internal sequence matched the Tom Harte `cycles[]`
+    /// order/addr/value, vs. those that diverged (the dummy-read /
+    /// instruction-atomic work-list).
+    trace_passed: u32,
+    trace_failed: u32,
+    first_trace_failure: Option<String>,
 }
 
 #[test]
@@ -290,7 +363,7 @@ fn tom_harte() {
 
         let op = stats.entry(stem.clone()).or_default();
         for case in cases.iter().take(sample) {
-            let (state, cycle) = run_case(case, opcode);
+            let (state, cycle, trace) = run_case(case, opcode);
             match state {
                 Ok(CaseResult::Pass) => op.passed += 1,
                 Ok(CaseResult::Skip) => op.skipped += 1,
@@ -311,6 +384,17 @@ fn tom_harte() {
                             "{}: emitted {} io_cycles, trace has {}",
                             case.name, c.got, c.want
                         ));
+                    }
+                }
+            }
+            if let Some(t) = trace {
+                match t {
+                    Ok(()) => op.trace_passed += 1,
+                    Err(reason) => {
+                        op.trace_failed += 1;
+                        if op.first_trace_failure.is_none() {
+                            op.first_trace_failure = Some(format!("{}: {reason}", case.name));
+                        }
                     }
                 }
             }
@@ -379,6 +463,32 @@ fn print_report(stats: &BTreeMap<String, OpStats>, unknown: usize) {
         for (name, s) in cyc_failing.iter().take(40) {
             eprint!("  {name:>12} : {} mismatch", s.cycle_failed);
             if let Some(ref f) = s.first_cycle_failure {
+                eprintln!("  ({f})");
+            } else {
+                eprintln!();
+            }
+        }
+        eprintln!();
+    }
+
+    let (tr_pass, tr_fail): (u64, u64) = stats.values().fold((0, 0), |(p, f), o| {
+        (p + u64::from(o.trace_passed), f + u64::from(o.trace_failed))
+    });
+    eprintln!("  Per-cycle bus-trace oracle (entry-for-entry kind+addr+value):");
+    eprintln!("    Match:    {tr_pass}");
+    eprintln!("    Diverge:  {tr_fail}   (dummy-read / instruction-atomic work-list)");
+    eprintln!();
+    let mut tr_failing: Vec<(&String, &OpStats)> =
+        stats.iter().filter(|(_, s)| s.trace_failed > 0).collect();
+    tr_failing.sort_by_key(|(_, s)| std::cmp::Reverse(s.trace_failed));
+    if !tr_failing.is_empty() {
+        eprintln!(
+            "Opcodes with per-cycle trace divergences ({} opcodes; showing up to 60):",
+            tr_failing.len()
+        );
+        for (name, s) in tr_failing.iter().take(60) {
+            eprint!("  {name:>12} : {} diverge", s.trace_failed);
+            if let Some(ref f) = s.first_trace_failure {
                 eprintln!("  ({f})");
             } else {
                 eprintln!();
