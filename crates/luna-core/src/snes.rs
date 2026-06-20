@@ -696,6 +696,7 @@ impl Snes {
                 irq: irq_pending,
                 mclk_total: total_mclk,
                 scanlines_per_frame: scanlines,
+                scpu_mar: 0,
                 ppu_line: ppu_line_snapshot,
                 mcycles_in_line: 0,
                 frame_count: 0,
@@ -809,6 +810,7 @@ impl Snes {
                 irq: irq_pending,
                 mclk_total: total_mclk,
                 scanlines_per_frame: scanlines,
+                scpu_mar: 0,
                 ppu_line: ppu_line_snapshot,
                 mcycles_in_line: *mcycles_in_line,
                 frame_count: *frame_count,
@@ -944,6 +946,7 @@ impl Snes {
                 irq: irq_pending,
                 mclk_total: total_mclk,
                 scanlines_per_frame: scanlines,
+                scpu_mar: 0,
                 ppu_line: ppu_line_snapshot,
                 mcycles_in_line: *mcycles_in_line,
                 frame_count: *frame_count,
@@ -1042,6 +1045,7 @@ impl Snes {
             irq: irq_pending,
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
+            scpu_mar: 0,
             ppu_line: ppu_line_snapshot,
             mcycles_in_line: 0,
             frame_count: 0,
@@ -1137,6 +1141,13 @@ struct SnesBus<'a> {
     /// CPU open-bus latch (memory-data register). Open-bus reads return
     /// this; reads and writes update it. See [`Snes::mdr`].
     mdr: &'a mut u8,
+    /// S-CPU's last bus-access address (ares `cpu.r.mar`). Set at the top of
+    /// every `read_inner`/`write_inner`, held across internal cycles, and
+    /// passed to `step_coproc` so the SA-1 can model shared-bus `conflict()`
+    /// contention. Resets to 0 per instruction (the opcode fetch — always an
+    /// instruction's first access — sets it before any coproc step runs;
+    /// addr 0 is WRAM, never a contention region, so the reset is inert).
+    scpu_mar: u32,
     mclk_total: &'a mut MCycles,
     /// Total scanlines per frame for the current cart's region —
     /// used by the H/V counter latch path (\$2137 / WRIO) to wrap
@@ -1391,7 +1402,12 @@ impl DmaBus for DmaBusView<'_> {
         // mclks and then catch up in one ~700-instruction burst —
         // ruining the synchronisation the demo's `$3001 SA1_SYNC`
         // handshake depends on.
-        self.mapper.step_coproc(mcycles);
+        //
+        // No S-CPU bus access drives this DMA-side tick (the CPU is halted
+        // for the transfer), so there is no shared-bus `conflict()` partner —
+        // pass `mar = 0` (the ares `dma.cpp` DMA-vs-coproc contention is a
+        // separate, finer refinement).
+        self.mapper.step_coproc(mcycles, 0);
     }
 }
 
@@ -1685,7 +1701,7 @@ impl SnesBus<'_> {
             }
             let stall = self.sched_advance(step as u32);
             if advance_coproc {
-                self.mapper.step_coproc(step as u32);
+                self.mapper.step_coproc(step as u32, self.scpu_mar);
             }
             // Charge the HDMA + refresh stall only on the CPU-instruction
             // path. The DMA-lump path (`advance_coproc == false`) lets them
@@ -1699,6 +1715,10 @@ impl SnesBus<'_> {
     }
 
     fn read_inner(&mut self, addr: Addr24) -> u8 {
+        // Hold this access as the S-CPU memory-address register (ares
+        // `cpu.r.mar`) so the per-access coproc step can model SA-1
+        // `conflict()` bus contention against it.
+        self.scpu_mar = addr;
         let speed = address_speed(addr, self.fast_rom);
         self.io_cycle(speed.mcycles());
 
@@ -1860,6 +1880,8 @@ impl SnesBus<'_> {
     }
 
     fn write_inner(&mut self, addr: Addr24, value: u8) {
+        // S-CPU memory-address register (ares `cpu.r.mar`) — see `read_inner`.
+        self.scpu_mar = addr;
         let speed = address_speed(addr, self.fast_rom);
         self.io_cycle(speed.mcycles());
 
@@ -2250,6 +2272,7 @@ mod tests {
             irq: irq_pending,
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
+            scpu_mar: 0,
             ppu_line: ppu_line_snapshot,
             mcycles_in_line: 0,
             frame_count: 0,
@@ -2318,6 +2341,7 @@ mod tests {
             irq: irq_pending,
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
+            scpu_mar: 0,
             ppu_line: ppu_line_snapshot,
             mcycles_in_line: 0,
             frame_count: 0,
@@ -2397,6 +2421,7 @@ mod tests {
             irq: irq_pending,
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
+            scpu_mar: 0,
             ppu_line: ppu_line_snapshot,
             mcycles_in_line: 0,
             frame_count: 0,
@@ -2476,6 +2501,7 @@ mod tests {
             irq: irq_pending,
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
+            scpu_mar: 0,
             ppu_line: ppu_line_snapshot,
             mcycles_in_line: 0,
             frame_count: 0,
@@ -2653,6 +2679,7 @@ mod tests {
             irq: irq_pending,
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
+            scpu_mar: 0,
             ppu_line: 50,
             mcycles_in_line: 0,
             frame_count: 0,
@@ -3001,6 +3028,7 @@ mod tests {
             irq: irq_pending,
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
+            scpu_mar: 0,
             ppu_line: ppu_line_snapshot,
             mcycles_in_line: 0,
             frame_count: 0,
