@@ -60,6 +60,12 @@ enum Command {
         /// emulator be audio-verified without a GUI / sound card.
         #[arg(long)]
         audio_out: Option<PathBuf>,
+        /// If set, capture the program's `$21FC` Nocash-TTY output (the SDK's
+        /// `SNES_NOCASH` / `SNES_ASSERT` debug channel) and write the raw byte
+        /// stream to this file. Lets a headless harness read the ROM's own
+        /// log / assertion output with no GUI debugger.
+        #[arg(long)]
+        nocash_out: Option<PathBuf>,
     },
     /// Serve the Luna MCP server on stdio.
     ///
@@ -411,6 +417,7 @@ fn main() -> ExitCode {
             force_display,
             bg,
             audio_out,
+            nocash_out,
         } => run(
             &rom,
             steps,
@@ -418,6 +425,7 @@ fn main() -> ExitCode {
             force_display,
             bg,
             audio_out.as_deref(),
+            nocash_out.as_deref(),
         ),
         Command::Mcp => serve_mcp(),
         Command::State {
@@ -1803,6 +1811,7 @@ fn run(
     force_display: bool,
     bg: Option<u8>,
     audio_out: Option<&std::path::Path>,
+    nocash_out: Option<&std::path::Path>,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
     let info = match em.load_rom(rom_path) {
@@ -1814,6 +1823,15 @@ fn run(
     };
 
     print_header(&info);
+
+    // Arm the Nocash ($21FC) capture before stepping so the program's
+    // `SNES_NOCASH`/`SNES_ASSERT` output is recorded during the run.
+    if nocash_out.is_some() {
+        if let Err(e) = em.enable_nocash_log() {
+            eprintln!("error: enable_nocash_log: {e}");
+            return ExitCode::from(1);
+        }
+    }
 
     // `load_rom` already runs the reset vector; report where it landed.
     {
@@ -1918,6 +1936,20 @@ fn run(
             ),
             Err(e) => {
                 eprintln!("\nerror: could not write audio WAV: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    if let Some(path) = nocash_out {
+        let bytes = em.take_nocash_log().unwrap_or_default();
+        match std::fs::write(path, &bytes) {
+            Ok(()) => println!(
+                "Nocash ($21FC) log written to {}  ({} bytes)",
+                path.display(),
+                bytes.len(),
+            ),
+            Err(e) => {
+                eprintln!("\nerror: could not write Nocash log: {e}");
                 return ExitCode::from(1);
             }
         }
