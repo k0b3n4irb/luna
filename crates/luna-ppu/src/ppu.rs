@@ -13,6 +13,10 @@ use crate::renderer::{
 // `render_scanline_into` is no longer used directly here — full-line
 // renders go through `flush_partial_scanline`.
 
+/// Per-line OBJ evaluation cache: `(scanline_y, (decoded_sprites, eval))`,
+/// decoded once per line and reused across that line's flush segments.
+type LineObjCache = (u16, Box<([SpriteEntry; 128], SpriteEval)>);
+
 /// PPU register offsets (relative to `$2100`).
 pub mod register {
     /// `$2100` — INIDISP: forced blank + master brightness.
@@ -371,6 +375,16 @@ pub struct Ppu {
     /// [`Ppu::scanline_reset`] at every scanline boundary.
     pub last_flushed_dot: u16,
 
+    /// Per-line OBJ evaluation cache `(y, (sprites, eval))`, decoded once
+    /// per scanline and reused across all of that line's flush segments
+    /// (PERF-3). Without it, every mid-line `$21xx` write that triggers a
+    /// partial flush re-decodes all 128 OAM entries. Caching once per line
+    /// also matches hardware (OBJ is evaluated once, during the prior
+    /// line's `HBlank`) rather than re-evaluating per segment. Transient —
+    /// cleared by [`Ppu::scanline_reset`]; not part of the save-state.
+    #[serde(skip)]
+    line_sprites: Option<LineObjCache>,
+
     /// `true` when the screen is currently being scanned out — i.e.
     /// not in forced blank (`INIDISP.7 == 0`) AND the current scanline
     /// is visible (`< vblank_start_line`). Updated by the bus layer
@@ -470,6 +484,7 @@ impl Ppu {
             inidisp_write_count: 0,
             framebuffer: vec![[0u8; 3]; FRAME_W * FRAME_H],
             last_flushed_dot: 0,
+            line_sprites: None,
             // Post-reset state is forced-blanked (INIDISP=$80), so
             // active_display starts false.
             active_display: false,
@@ -504,21 +519,35 @@ impl Ppu {
             self.obj_range_over = false;
             self.obj_time_over = false;
         }
-        // Decode + evaluate this line's sprites ONCE and share the result
-        // with the flush render (PERF-2). Previously a separate
-        // `sprite_line_overflow` redid the full 128-entry OAM decode just
-        // to read these two overflow flags. Blank lines contribute no
-        // flags (matching the old guard) and need no sprite decode.
+        // Evaluate this line's sprites ONCE (cached + reused by every
+        // segment, PERF-3) and OR in the overflow flags. Blank lines
+        // contribute no flags (matching the old guard) and need no decode.
         if self.inidisp & 0x80 == 0 {
-            let sprites = decode_all_sprites(self);
-            let eval = evaluate_sprite_line(self, &sprites, y);
-            self.obj_range_over |= eval.range_over;
-            self.obj_time_over |= eval.time_over;
-            self.flush_partial_scanline_inner(y, FRAME_W as u16, opts, Some((&sprites, &eval)));
-        } else {
-            self.flush_partial_scanline_inner(y, FRAME_W as u16, opts, None);
+            self.ensure_line_sprites(y);
+            let (range_over, time_over) = self
+                .line_sprites
+                .as_ref()
+                .map_or((false, false), |(_, b)| (b.1.range_over, b.1.time_over));
+            self.obj_range_over |= range_over;
+            self.obj_time_over |= time_over;
         }
+        self.flush_partial_scanline_inner(y, FRAME_W as u16, opts);
         self.scanline_reset();
+    }
+
+    /// Decode + evaluate this scanline's OBJ once and cache it on
+    /// `line_sprites`, keyed by `y`. Re-decodes only when the cached line
+    /// differs (or the cache was cleared at the last boundary). The
+    /// overflow flags live on the cached [`SpriteEval`]; this does NOT
+    /// touch `obj_range_over` / `obj_time_over` (the caller ORs those once
+    /// per line).
+    fn ensure_line_sprites(&mut self, y: u16) {
+        if self.line_sprites.as_ref().is_some_and(|(cy, _)| *cy == y) {
+            return;
+        }
+        let sprites = decode_all_sprites(self);
+        let eval = evaluate_sprite_line(self, &sprites, y);
+        self.line_sprites = Some((y, Box::new((sprites, eval))));
     }
 
     /// Render pixels `last_flushed_dot..end_x` of scanline `y` into the
@@ -530,20 +559,15 @@ impl Ppu {
     /// Out-of-range `y` (≥ `FRAME_H`) or `end_x <= last_flushed_dot`
     /// is a no-op.
     pub fn flush_partial_scanline(&mut self, y: u16, end_x: u16, opts: RenderOptions) {
-        self.flush_partial_scanline_inner(y, end_x, opts, None);
+        self.flush_partial_scanline_inner(y, end_x, opts);
     }
 
-    /// Core of [`flush_partial_scanline`]. `precomp` lets the scheduler
-    /// supply a once-per-scanline sprite decode + evaluation so the
-    /// (interlace-doubled) render reuses it instead of re-decoding all
-    /// 128 OAM entries per render (PERF-2). `None` decodes internally.
-    fn flush_partial_scanline_inner(
-        &mut self,
-        y: u16,
-        end_x: u16,
-        opts: RenderOptions,
-        precomp: Option<(&[SpriteEntry; 128], &SpriteEval)>,
-    ) {
+    /// Core of [`flush_partial_scanline`]. Reuses the once-per-line OBJ
+    /// decode + evaluation cached on [`Self::line_sprites`] (PERF-3) so the
+    /// (interlace-doubled) render never re-decodes all 128 OAM entries per
+    /// segment. The cache is `take`n into a local for the render so the
+    /// interlace path can still mutate `self.field`, then restored.
+    fn flush_partial_scanline_inner(&mut self, y: u16, end_x: u16, opts: RenderOptions) {
         let yi = usize::from(y);
         if yi >= FRAME_H {
             return;
@@ -553,6 +577,16 @@ impl Ppu {
         if start >= end {
             return;
         }
+        // Per-line OBJ eval, decoded once and reused (blank lines need
+        // none). `take` the cache so the borrow doesn't pin `self` during
+        // the interlace `self.field` mutations below; restored at the end.
+        let cached = if self.inidisp & 0x80 == 0 {
+            self.ensure_line_sprites(y);
+            self.line_sprites.take()
+        } else {
+            None
+        };
+        let precomp = cached.as_ref().map(|(_, b)| (&b.0, &b.1));
         // Stack scratch row → partial render → copy into framebuffer.
         let mut row = [[0u8; 3]; FRAME_W];
         let si = usize::from(start);
@@ -582,12 +616,16 @@ impl Ppu {
         let off = yi * FRAME_W;
         self.framebuffer[off + si..off + ei].copy_from_slice(&row[si..ei]);
         self.last_flushed_dot = end;
+        // Restore the per-line OBJ cache for the next segment of this line.
+        self.line_sprites = cached;
     }
 
-    /// Reset the partial-flush cursor to 0. Called by the scheduler at
-    /// every scanline boundary so the next line starts from dot 0.
-    pub const fn scanline_reset(&mut self) {
+    /// Reset the partial-flush cursor to 0 and drop the per-line OBJ cache.
+    /// Called by the scheduler at every scanline boundary so the next line
+    /// starts from dot 0 and re-evaluates its sprites.
+    pub fn scanline_reset(&mut self) {
         self.last_flushed_dot = 0;
+        self.line_sprites = None;
     }
 
     /// Borrow the current persistent framebuffer (256 × 224 BGR888
