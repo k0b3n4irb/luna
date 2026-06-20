@@ -1746,6 +1746,22 @@ impl Emulator {
         Ok(snes.take_nocash_log())
     }
 
+    /// Enable capture of `WDM` (`$42`) executions — the SDK breakpoint /
+    /// assert channel (`SNES_ASSERT` → `WDM $00`). Complements the `$21FC`
+    /// Nocash log: `$21FC` carries text, `WDM` carries the binary
+    /// "assertion fired here" signal `(pc_full, operand)`.
+    pub fn enable_wdm_log(&mut self) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.cpu.enable_wdm_log();
+        Ok(())
+    }
+
+    /// Drain the captured `WDM` events as `(pc_full, operand)` per hit.
+    pub fn take_wdm_log(&mut self) -> Result<Vec<(u32, u8)>, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        Ok(snes.cpu.take_wdm_log())
+    }
+
     /// Direct read of the SPC700's ARAM. Read-only, no bus side
     /// effects.
     pub fn peek_aram(&self, offset: u16, count: u16) -> Result<Vec<u8>, ApiError> {

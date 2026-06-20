@@ -66,6 +66,12 @@ enum Command {
         /// log / assertion output with no GUI debugger.
         #[arg(long)]
         nocash_out: Option<PathBuf>,
+        /// If set, write captured `WDM $xx` executions (the SDK breakpoint /
+        /// `SNES_ASSERT` channel — `WDM $00`) to this file, one
+        /// `PC=$xxxxxx operand=$xx` line per hit. A non-empty file means an
+        /// assertion or breakpoint fired during the run.
+        #[arg(long)]
+        wdm_out: Option<PathBuf>,
         /// If set, print a hash of the displayed frame (honouring
         /// `--force-display`) to stdout as `fbhash=<16-hex>`. A stable,
         /// cross-architecture visual-regression key — it hashes the same
@@ -426,6 +432,7 @@ fn main() -> ExitCode {
             bg,
             audio_out,
             nocash_out,
+            wdm_out,
             print_fbhash,
         } => run(
             &rom,
@@ -435,6 +442,7 @@ fn main() -> ExitCode {
             bg,
             audio_out.as_deref(),
             nocash_out.as_deref(),
+            wdm_out.as_deref(),
             print_fbhash,
         ),
         Command::Mcp => serve_mcp(),
@@ -1822,6 +1830,7 @@ fn run(
     bg: Option<u8>,
     audio_out: Option<&std::path::Path>,
     nocash_out: Option<&std::path::Path>,
+    wdm_out: Option<&std::path::Path>,
     print_fbhash: bool,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
@@ -1840,6 +1849,12 @@ fn run(
     if nocash_out.is_some() {
         if let Err(e) = em.enable_nocash_log() {
             eprintln!("error: enable_nocash_log: {e}");
+            return ExitCode::from(1);
+        }
+    }
+    if wdm_out.is_some() {
+        if let Err(e) = em.enable_wdm_log() {
+            eprintln!("error: enable_wdm_log: {e}");
             return ExitCode::from(1);
         }
     }
@@ -1961,6 +1976,25 @@ fn run(
             ),
             Err(e) => {
                 eprintln!("\nerror: could not write Nocash log: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    if let Some(path) = wdm_out {
+        use std::fmt::Write as _;
+        let hits = em.take_wdm_log().unwrap_or_default();
+        let mut body = String::new();
+        for (pc, op) in &hits {
+            let _ = writeln!(body, "PC=${pc:06X} operand=${op:02X}");
+        }
+        match std::fs::write(path, &body) {
+            Ok(()) => println!(
+                "WDM log written to {}  ({} hit(s))",
+                path.display(),
+                hits.len(),
+            ),
+            Err(e) => {
+                eprintln!("\nerror: could not write WDM log: {e}");
                 return ExitCode::from(1);
             }
         }
