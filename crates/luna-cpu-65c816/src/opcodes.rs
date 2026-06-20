@@ -1009,13 +1009,22 @@ impl Cpu {
     /// `JSL $long` — push the program bank, then push PC-1 (16-bit),
     /// then jump to the 24-bit target. RTL undoes the push order.
     fn jsl_long<B: Bus>(&mut self, bus: &mut B) {
-        let target = self.fetch_u24(bus);
-        let return_pc = self.pc.wrapping_sub(1);
+        // ares `instructionCallLong` bus order (instructions-pc.cpp): fetch
+        // target lo+hi, **push PBR**, idle, **then** fetch target bank, then
+        // push the return PC. The program-bank push is interleaved between
+        // the 2nd and 3rd operand fetches — not after all three (the
+        // Tom Harte cycles[] oracle flags a read-vs-write swap at cycle 3 if
+        // the whole target is fetched up front). State is identical either
+        // way; this matches ares' per-cycle grammar.
+        let lo = self.fetch_u8(bus);
+        let hi = self.fetch_u8(bus);
         self.push_u8_native(bus, self.pb);
-        self.io(bus); // ares CallLong internal cycle (between PBR push and PC push)
+        self.io(bus); // ares CallLong internal cycle (between PBR push and bank fetch)
+        let bank = self.fetch_u8(bus);
+        let return_pc = self.pc.wrapping_sub(1);
         self.push_u16_native(bus, return_pc);
-        self.pb = (target >> 16) as u8;
-        self.pc = target as u16;
+        self.pb = bank;
+        self.pc = u16::from(lo) | (u16::from(hi) << 8);
     }
 
     /// `JSR ($abs,X)` — like JMP (abs,X) but pushes the return address.
@@ -1023,16 +1032,23 @@ impl Cpu {
     /// **before** the operand is read for X-indirection (so PC points
     /// at the last byte of the JSR operand, not past it).
     fn jsr_abs_indexed_indirect<B: Bus>(&mut self, bus: &mut B) {
-        let base = self.fetch_u16(bus);
-        // Return address = current PC minus 1 (pointing at the high byte
-        // of the operand we just fetched).
-        let return_addr = self.pc.wrapping_sub(1);
+        // ares `instructionCallIndexedIndirect` bus order (instructions-pc.cpp):
+        // fetch operand lo, **push the return address**, then fetch operand hi,
+        // then idle and read the indexed pointer. The push is interleaved
+        // between the two operand fetches (the cycles[] oracle flags a
+        // read-vs-write swap at cycle 2 if both operand bytes are fetched up
+        // front). State-identical — PC after the lo fetch already points at the
+        // operand-high byte, which is the return address.
+        let lo = self.fetch_u8(bus);
+        let return_addr = self.pc;
         self.push_u16(bus, return_addr);
+        let hi = self.fetch_u8(bus);
         self.io(bus); // ares CallIndexedIndirect internal cycle
+        let base = u16::from(lo) | (u16::from(hi) << 8);
         let ptr_off = base.wrapping_add(self.x);
-        let lo = bus.read(make_addr(self.pb, ptr_off));
-        let hi = bus.read(make_addr(self.pb, ptr_off.wrapping_add(1)));
-        self.pc = u16::from(lo) | (u16::from(hi) << 8);
+        let p_lo = bus.read(make_addr(self.pb, ptr_off));
+        let p_hi = bus.read(make_addr(self.pb, ptr_off.wrapping_add(1)));
+        self.pc = u16::from(p_lo) | (u16::from(p_hi) << 8);
     }
 
     /// `RTS` — pull PC, increment by 1, stay in the same program bank.
@@ -1318,8 +1334,12 @@ impl Cpu {
             let v = self.read_word16(bus, addr);
             self.io(bus);
             let new = op(v);
-            bus.write(addr, new as u8);
+            // ares writes the HIGH byte first (instructions-modify.cpp
+            // `instruction*Modify16`: `writeBank(V+1, W.h)` before
+            // `writeBank(V+0, W.l)`). State-identical to low-first, but the
+            // per-cycle bus order is what the Tom Harte cycles[] oracle checks.
             bus.write(self.hi_addr(addr), (new >> 8) as u8);
+            bus.write(addr, new as u8);
             self.set_nz16(new);
         }
     }
@@ -2360,8 +2380,9 @@ impl Cpu {
             let v = self.read_word16(bus, addr);
             self.io(bus); // RMW dead cycle
             let new = op(self, v);
-            bus.write(addr, new as u8);
+            // ares writes the HIGH byte first (see `modify_memory`).
             bus.write(self.hi_addr(addr), (new >> 8) as u8);
+            bus.write(addr, new as u8);
         }
     }
 

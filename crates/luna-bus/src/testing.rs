@@ -18,6 +18,24 @@ pub struct RamBus {
     io_cycle_calls: u64,
     nmi: bool,
     irq: bool,
+    /// Optional per-cycle bus-activity trace (opt-in via [`RamBus::enable_trace`]),
+    /// one entry per cycle in execution order: `(kind, addr, value)` where
+    /// `kind` is [`TraceKind`]. Reads/writes carry `addr`+`value`; internal
+    /// (`io_cycle`) cycles carry `None`/`None`. Used by the Tom Harte
+    /// `cycles[]` entry-for-entry oracle.
+    trace: Vec<(TraceKind, Option<Addr24>, Option<u8>)>,
+    record_trace: bool,
+}
+
+/// Kind of one recorded [`RamBus`] bus cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceKind {
+    /// A memory read (`addr`, `value` valid).
+    Read,
+    /// A memory write (`addr`, `value` valid).
+    Write,
+    /// An internal / idle cycle (`io_cycle`; no bus access).
+    Internal,
 }
 
 impl Default for RamBus {
@@ -40,7 +58,21 @@ impl RamBus {
             io_cycle_calls: 0,
             nmi: false,
             irq: false,
+            trace: Vec::new(),
+            record_trace: false,
         }
+    }
+
+    /// Begin recording the per-cycle bus-activity trace (cleared first).
+    pub fn enable_trace(&mut self) {
+        self.record_trace = true;
+        self.trace.clear();
+    }
+
+    /// Take the recorded per-cycle trace, clearing it (recording continues).
+    #[must_use]
+    pub fn take_trace(&mut self) -> Vec<(TraceKind, Option<Addr24>, Option<u8>)> {
+        std::mem::take(&mut self.trace)
     }
 
     /// Total master cycles paid via [`Bus::io_cycle`] since the bus was
@@ -103,19 +135,34 @@ impl RamBus {
 impl Bus for RamBus {
     fn read(&mut self, addr: Addr24) -> u8 {
         // Default cost in tests: 8 mclk per access (SLOW). Tests that care
-        // about FAST / XSLOW should call `io_cycle` directly instead.
-        self.io_cycle(8);
-        self.mem[addr as usize & 0x00FF_FFFF]
+        // about FAST / XSLOW should call `io_cycle` directly instead. The
+        // cycle count is inlined (not via `io_cycle`) so the per-cycle trace
+        // records a `Read` here and reserves `Internal` for direct
+        // `io_cycle` calls only.
+        self.io_cycles_paid = self.io_cycles_paid.saturating_add(8);
+        self.io_cycle_calls = self.io_cycle_calls.saturating_add(1);
+        let value = self.mem[addr as usize & 0x00FF_FFFF];
+        if self.record_trace {
+            self.trace.push((TraceKind::Read, Some(addr), Some(value)));
+        }
+        value
     }
 
     fn write(&mut self, addr: Addr24, value: u8) {
-        self.io_cycle(8);
+        self.io_cycles_paid = self.io_cycles_paid.saturating_add(8);
+        self.io_cycle_calls = self.io_cycle_calls.saturating_add(1);
         self.mem[addr as usize & 0x00FF_FFFF] = value;
+        if self.record_trace {
+            self.trace.push((TraceKind::Write, Some(addr), Some(value)));
+        }
     }
 
     fn io_cycle(&mut self, mcycles: MCycles) {
         self.io_cycles_paid = self.io_cycles_paid.saturating_add(mcycles);
         self.io_cycle_calls = self.io_cycle_calls.saturating_add(1);
+        if self.record_trace {
+            self.trace.push((TraceKind::Internal, None, None));
+        }
     }
 
     fn nmi_pending(&self) -> bool {
