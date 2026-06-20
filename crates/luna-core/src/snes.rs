@@ -11,6 +11,7 @@ use luna_apu::Apu;
 use luna_bus::hirom::HiRomMapper;
 use luna_bus::lorom::LoRomMapper;
 use luna_bus::sa1::Sa1Mapper;
+use luna_bus::sdd1::Sdd1Mapper;
 use luna_bus::superfx::SuperFxMapper;
 use luna_bus::{
     Addr24, Bus, MCycles, Mapper, MapperKind, address_speed, bank_of, make_addr, offset_of,
@@ -459,6 +460,9 @@ impl Snes {
                     hirom,
                 ))
             }
+            // S-DD1 — graphics decompression chip (Star Ocean, SF Alpha 2);
+            // LoROM-based MMC, the whole chip in `Sdd1Mapper`.
+            MapperKind::Sdd1 => Box::new(Sdd1Mapper::new(cart.rom, sram_bytes)),
             other => return Err(UnsupportedMapper(other)),
         };
 

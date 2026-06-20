@@ -11,6 +11,13 @@
 //! interleave) → Output Logic (bitplane → byte). The decompressor reads its
 //! compressed input only through the [`Sdd1RomBus`] trait, so it is fully
 //! testable in isolation from the SNES bus.
+//!
+//! [`Sdd1Mapper`] is the whole chip: the MMC (ROM banking + `$4800-$4807`
+//! control registers) plus — wired in a later stage — the DMA-triggered
+//! decompression.
+
+use crate::mapper::{Mapper, MapperKind};
+use crate::types::{Addr24, bank_of, offset_of, rom_mirror};
 
 /// Raw (already MMC-bank-switched) ROM byte source for the decompressor — the
 /// chip's `mmcRead`. Kept abstract so the decompressor is unit-testable
@@ -350,9 +357,190 @@ impl Sdd1Decompressor {
     }
 }
 
+/// The S-DD1 cartridge mapper: the MMC (ROM banking + `$4800-$4807` control
+/// registers) and SRAM. Decompression (the DMA-triggered streaming through
+/// [`Sdd1Decompressor`]) is wired in a later stage; for now this serves the
+/// banked program ROM so an S-DD1 game boots and runs its (uncompressed) code.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct Sdd1Mapper {
+    rom: Vec<u8>,
+    sram: Vec<u8>,
+    /// `$4800` hard-enable mask (per-channel S-DD1 DMA eligibility).
+    r4800: u8,
+    /// `$4801` soft-enable mask (per-channel arm; chip clears it at stream end).
+    r4801: u8,
+    /// `$4804-$4807` MMC bank selects for `$C0-CF/$D0-DF/$E0-EF/$F0-FF`
+    /// (bit 7 of `$4805`/`$4807` also flag the `$20-3F`/`$A0-BF` ROM mirror).
+    r4804: u8,
+    r4805: u8,
+    r4806: u8,
+    r4807: u8,
+}
+
+impl Sdd1Mapper {
+    /// Build an S-DD1 mapper around `rom` with `sram_size` bytes of SRAM.
+    #[must_use]
+    pub fn new(rom: Vec<u8>, sram_size: usize) -> Self {
+        Self {
+            rom,
+            sram: vec![0; sram_size],
+            r4800: 0,
+            r4801: 0,
+            r4804: 0,
+            r4805: 0,
+            r4806: 0,
+            r4807: 0,
+        }
+    }
+
+    /// S-DD1 control-register read (`$4800-$480F`); `None` for the non-register
+    /// addresses in that window (games never read them → open bus).
+    const fn read_reg(&self, offset: u16) -> Option<u8> {
+        match offset & 0x000F {
+            0x00 => Some(self.r4800),
+            0x01 => Some(self.r4801),
+            0x04 => Some(self.r4804),
+            0x05 => Some(self.r4805),
+            0x06 => Some(self.r4806),
+            0x07 => Some(self.r4807),
+            _ => None,
+        }
+    }
+
+    /// MMC-decode a 24-bit address to a flat ROM offset — ares `mcuRead`'s
+    /// non-decompression path + `mmcRead`. `None` if the address is not ROM.
+    /// Two regions:
+    /// - `$00-3F/$80-BF : $8000-FFFF` — banked program ROM (`LoROM`-style), with
+    ///   the `$20-3F`/`$A0-BF` mirror controlled by `r4805`/`r4807` bit 7.
+    /// - bit 22 set (`$40-7F` / `$C0-FF`) — MMC-banked data ROM: address bits
+    ///   `[20:21]` pick `r4804-7`, whose low nibble forms ROM bits `[20:23]`.
+    fn rom_addr(&self, addr: Addr24) -> Option<u32> {
+        let a = addr & 0x00FF_FFFF;
+        if a & 0x0040_0000 == 0 {
+            if a & 0x0000_8000 == 0 {
+                return None; // low half of $00-3F/$80-BF is not ROM
+            }
+            let mut a = a;
+            if a & 0x0080_0000 == 0 && a & 0x0020_0000 != 0 && self.r4805 & 0x80 != 0 {
+                a &= !0x0020_0000; // $20-3F mirrors $00-1F
+            }
+            if a & 0x0080_0000 != 0 && a & 0x0020_0000 != 0 && self.r4807 & 0x80 != 0 {
+                a &= !0x0020_0000; // $A0-BF mirrors $80-9F
+            }
+            Some(((a & 0x003F_0000) >> 1) | (a & 0x0000_7FFF))
+        } else {
+            let sel = match (a >> 20) & 0x03 {
+                0 => self.r4804,
+                1 => self.r4805,
+                2 => self.r4806,
+                _ => self.r4807,
+            };
+            Some((u32::from(sel & 0x0F) << 20) | (a & 0x000F_FFFF))
+        }
+    }
+
+    /// SRAM offset (S-DD1 board: `$70-73:$0000-7FFF`, within luna's `LoROM`
+    /// `$70-7D/$F0-FD` convention; wraps modulo the actual SRAM size).
+    fn sram_offset(&self, bank: u8, offset: u16) -> Option<usize> {
+        if self.sram.is_empty() || !matches!(bank, 0x70..=0x7D | 0xF0..=0xFD) || offset >= 0x8000 {
+            return None;
+        }
+        let normalized_bank = (bank & 0x7F) - 0x70;
+        Some((usize::from(normalized_bank) * 0x8000 + usize::from(offset)) % self.sram.len())
+    }
+}
+
+impl Mapper for Sdd1Mapper {
+    fn kind(&self) -> MapperKind {
+        MapperKind::Sdd1
+    }
+
+    fn read(&mut self, addr: Addr24) -> Option<u8> {
+        let bank = bank_of(addr);
+        let offset = offset_of(addr);
+        if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && (0x4800..=0x480F).contains(&offset) {
+            if let Some(v) = self.read_reg(offset) {
+                return Some(v);
+            }
+        }
+        if let Some(o) = self.sram_offset(bank, offset) {
+            return Some(self.sram[o]);
+        }
+        if let Some(rom_addr) = self.rom_addr(addr) {
+            if self.rom.is_empty() {
+                return None;
+            }
+            return Some(self.rom[rom_mirror(rom_addr as usize, self.rom.len())]);
+        }
+        None
+    }
+
+    fn write(&mut self, addr: Addr24, value: u8) -> bool {
+        let bank = bank_of(addr);
+        let offset = offset_of(addr);
+        if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && (0x4800..=0x480F).contains(&offset) {
+            match offset & 0x000F {
+                0x00 => self.r4800 = value,
+                0x01 => self.r4801 = value,
+                0x04 => self.r4804 = value & 0x8F,
+                0x05 => self.r4805 = value & 0x8F,
+                0x06 => self.r4806 = value & 0x8F,
+                0x07 => self.r4807 = value & 0x8F,
+                _ => {}
+            }
+            return true;
+        }
+        if let Some(o) = self.sram_offset(bank, offset) {
+            self.sram[o] = value;
+            return true;
+        }
+        false
+    }
+
+    fn rom_size(&self) -> usize {
+        self.rom.len()
+    }
+
+    fn sram_size(&self) -> usize {
+        self.sram.len()
+    }
+
+    fn reset(&mut self) {
+        // Control registers clear on reset; battery SRAM persists.
+        self.r4800 = 0;
+        self.r4801 = 0;
+        self.r4804 = 0;
+        self.r4805 = 0;
+        self.r4806 = 0;
+        self.r4807 = 0;
+    }
+
+    fn save_state(&self) -> Vec<u8> {
+        bincode::serialize(&(
+            &self.sram, self.r4800, self.r4801, self.r4804, self.r4805, self.r4806, self.r4807,
+        ))
+        .unwrap_or_default()
+    }
+
+    fn load_state(&mut self, data: &[u8]) {
+        if let Ok((sram, r4800, r4801, r4804, r4805, r4806, r4807)) =
+            bincode::deserialize::<(Vec<u8>, u8, u8, u8, u8, u8, u8)>(data)
+        {
+            self.sram = sram;
+            self.r4800 = r4800;
+            self.r4801 = r4801;
+            self.r4804 = r4804;
+            self.r4805 = r4805;
+            self.r4806 = r4806;
+            self.r4807 = r4807;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::make_addr;
 
     /// A plain byte-slice ROM source for testing the decompressor in
     /// isolation (out-of-range reads return 0, like open ROM).
@@ -431,5 +619,76 @@ mod tests {
 
             assert_eq!(out_a, out_b, "mode {header:#04x} must be deterministic");
         }
+    }
+
+    // ---- Sdd1Mapper (MMC) ----
+
+    fn mapper_with_ramp_rom(len: usize) -> Sdd1Mapper {
+        // ROM[i] = i & 0xFF, so a read reveals its decoded ROM offset.
+        let rom: Vec<u8> = (0..len).map(|i| (i & 0xFF) as u8).collect();
+        Sdd1Mapper::new(rom, 0x2000)
+    }
+
+    #[test]
+    fn mapper_program_rom_is_lorom_banked() {
+        let mut m = mapper_with_ramp_rom(0x40_0000);
+        // $00:8000 → ROM 0; $00:8001 → 1; $01:8000 → 0x8000.
+        assert_eq!(m.read(make_addr(0x00, 0x8000)), Some(0x00));
+        assert_eq!(m.read(make_addr(0x00, 0x8001)), Some(0x01));
+        assert_eq!(
+            m.read(make_addr(0x01, 0x8000)),
+            Some((0x8000usize & 0xFF) as u8)
+        );
+        // Low half of $00-3F is not program ROM.
+        assert_eq!(m.read(make_addr(0x00, 0x4000)), None);
+        // $80-BF mirrors $00-3F (bit 23 ignored in the banked path).
+        assert_eq!(
+            m.read(make_addr(0x80, 0x8001)),
+            m.read(make_addr(0x00, 0x8001))
+        );
+    }
+
+    #[test]
+    fn mapper_mmc_banks_c0_via_4804_7() {
+        let mut m = mapper_with_ramp_rom(0x80_0000);
+        // r4804 selects the 1 MB bank for $C0-CF: bank 5 → ROM 0x50_0000.
+        m.write(make_addr(0x00, 0x4804), 0x05);
+        // $C0:1234 → (5 << 20) | 0x1234 = 0x50_1234.
+        let want = (0x50_1234usize & 0xFF) as u8;
+        assert_eq!(m.read(make_addr(0xC0, 0x1234)), Some(want));
+        // r4807 selects $F0-FF: bank 7 → ROM 0x70_0000.
+        m.write(make_addr(0x00, 0x4807), 0x07);
+        assert_eq!(
+            m.read(make_addr(0xF0, 0x0000)),
+            Some((0x70_0000usize & 0xFF) as u8)
+        );
+    }
+
+    #[test]
+    fn mapper_control_registers_round_trip_and_mask() {
+        let mut m = mapper_with_ramp_rom(0x1_0000);
+        m.write(make_addr(0x00, 0x4800), 0xAB);
+        m.write(make_addr(0x00, 0x4801), 0xCD);
+        m.write(make_addr(0x00, 0x4805), 0xFF); // bank reg masked & 0x8F
+        assert_eq!(m.read(make_addr(0x00, 0x4800)), Some(0xAB));
+        assert_eq!(m.read(make_addr(0x00, 0x4801)), Some(0xCD));
+        assert_eq!(m.read(make_addr(0x00, 0x4805)), Some(0x8F));
+        // Reset clears the control registers.
+        m.reset();
+        assert_eq!(m.read(make_addr(0x00, 0x4800)), Some(0x00));
+    }
+
+    #[test]
+    fn mapper_sram_round_trips_and_save_state() {
+        let mut m = mapper_with_ramp_rom(0x1_0000);
+        m.write(make_addr(0x70, 0x0010), 0x5A);
+        assert_eq!(m.read(make_addr(0x70, 0x0010)), Some(0x5A));
+        // Save/restore preserves SRAM + the control registers.
+        m.write(make_addr(0x00, 0x4806), 0x03);
+        let blob = m.save_state();
+        let mut m2 = mapper_with_ramp_rom(0x1_0000);
+        m2.load_state(&blob);
+        assert_eq!(m2.read(make_addr(0x70, 0x0010)), Some(0x5A));
+        assert_eq!(m2.read(make_addr(0x00, 0x4806)), Some(0x03));
     }
 }
