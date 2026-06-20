@@ -1656,7 +1656,7 @@ impl Mapper for SuperFxMapper {
     /// (roughly 1 master clock ≈ 1 GSU clock at the fast rate; the exact
     /// clsr ratio is the timing phase's job). The loop also exits the moment
     /// a STOP clears the GO flag.
-    fn step_coproc(&mut self, main_mclk: u32) {
+    fn step_coproc(&mut self, main_mclk: u32, _scpu_mar: u32) {
         // Advance the shared CPU timeline unconditionally — even while the GSU
         // is stopped — so the trace's `mclk` stamp reflects idle (CPU-only)
         // time between GO tasks, not just GSU-active time.
@@ -2433,7 +2433,7 @@ mod tests {
     fn engine_step_coproc_runs_until_stop() {
         let mut m = fx();
         load_and_go(&mut m, &[0xD0, 0x00]); // inc r0 ; stop
-        m.step_coproc(1000); // ample budget
+        m.step_coproc(1000, 0); // ample budget
         assert!(!m.snapshot().running, "GSU halted on STOP");
         assert_eq!(m.snapshot().r[0], 1, "INC r0 executed exactly once");
     }
