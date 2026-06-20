@@ -80,6 +80,37 @@ rather than dot-precise (a cycle-count gap with no known game impact).
 write-log replayed per dot at scan-out. That is a PPU-architecture change,
 out of scope for the DMA pillar. Reopen here if a per-dot renderer lands.
 
+### Resolution (2026-06-20): the boundary model IS the faithful one
+
+A dedicated investigation (per-dot renderer scoping) sharpened the
+conclusion above from "deferred because we can't" to "**not needed —
+luna is already correct**". The key fact: **dot 276 (hcounter 1104) is in
+HBlank**, past the 256 visible dots (`FRAME_W = 256`). So a line's own HDMA
+fires *after* every visible pixel of that line is drawn — its register
+effect can only land on the **next** line. luna's `sched_one_line`
+(`snes.rs`) already renders line N, increments to N+1, *then* runs
+`hdma_run_line`, which is the exact ares ordering. There is no visible
+sub-line split to represent: nothing visible happens at dot 276.
+
+The `ca3e28b` regression was therefore a *bug*, not a missing feature — it
+applied HDMA at dot 276 **within** line N's whole-line flush, retroactively
+repainting line N. The fix was never a per-dot renderer; it was to keep the
+boundary model and never repaint an already-scanned-out line.
+
+luna's renderer is in fact a Mesen2-style lazy sub-range renderer
+(`flush_partial_scanline_inner` commits `[last_flushed_dot, end_x)` before
+each mid-line `$21xx` write), so the pre-write dots of a line are already
+immutable once flushed. That invariant — the foundation of the
+boundary-model correctness — is now locked by the regression test
+`ppu::tests::partial_flush_isolates_pre_and_post_write_segments`
+(`crates/luna-ppu/src/ppu.rs`): a backdrop change at dot 100 affects only
+dots 100..256, never 0..100.
+
+The only residual is the **cycle-count** timing of the HDMA CPU-stall and of
+HDMA's preemption of an in-flight MDMA (line-granular vs dot-precise) — no
+visual impact, no known game impact. **inc 2 is closed: the visual model is
+hardware-correct; the sub-line cycle timing is an accepted residual.**
+
 ## How to extend
 
 Run `tools/validate-hdma-corpus.sh` after any DMA change and eyeball. When a
