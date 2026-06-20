@@ -1052,6 +1052,44 @@ mod tests {
     }
 
     #[test]
+    fn partial_flush_isolates_pre_and_post_write_segments() {
+        // Regression guard for the sub-range / boundary model: a PPU
+        // register changed mid-scanline must affect ONLY the dots flushed
+        // after the change — the earlier dots are already committed. This
+        // invariant is exactly why luna's boundary-model HDMA is
+        // hardware-correct: dot 276 is in HBlank, so a line's own HDMA (or
+        // a late-HBlank register write) lands on the NEXT line, never
+        // repainting the already-scanned-out visible dots. The reverted
+        // `ca3e28b` broke this; this test keeps it from coming back.
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F); // full brightness, not forced-blank
+        // All layers off (TM = 0 default) → every dot is the backdrop
+        // (CGRAM[0]). Backdrop = colour A; flush dots 0..100 of line 0.
+        p.write(register::CGADD, 0x00);
+        p.write(register::CGDATA, 0x1F); // A = $001F (full red)
+        p.write(register::CGDATA, 0x00);
+        p.flush_partial_scanline(0, 100, RenderOptions::default());
+        // Change the backdrop to colour B; flush the rest of the line.
+        p.write(register::CGADD, 0x00);
+        p.write(register::CGDATA, 0x00);
+        p.write(register::CGDATA, 0x7C); // B = $7C00 (full blue)
+        p.flush_partial_scanline(0, FRAME_W as u16, RenderOptions::default());
+
+        let fb = p.framebuffer();
+        let (a, b) = (fb[0], fb[200]);
+        assert_ne!(a, b, "the two segments must render different backdrops");
+        // Uniform within each segment, split exactly at dot 100.
+        assert!(
+            (0..100).all(|x| fb[x] == a),
+            "pre-write dots 0..100 keep colour A"
+        );
+        assert!(
+            (100..FRAME_W).all(|x| fb[x] == b),
+            "post-write dots 100..256 take colour B"
+        );
+    }
+
+    #[test]
     fn oam_low_table_via_registers() {
         let mut p = Ppu::new();
         p.write(register::OAMADDL, 0x00);

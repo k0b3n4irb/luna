@@ -33,7 +33,7 @@ truly-open list is short.** Use *this* table, not §1, as current truth.
 | CPU 65c816 | A− | **A−** | none functional (DP-8 bare wrap is inert → comment fix) |
 | SPC700 | B | **B+** | fine cycle ordering only (branch penalty fixed) |
 | PPU | C+ | **A−** | *(OPHCT/OPVCT read-latch **+** BG scroll write-twice — both **FIXED 2026-06-11**; the OPVCT latch was the Doom-flicker root)* |
-| DMA/HDMA | C+ | **B−** | mid-line HDMA preemption + atomic burst (Phase 5) |
+| DMA/HDMA | C+ | **B−** | DMA per-byte + line-granular HDMA preempt (Phase 5). dot-276 sub-line is **visually a no-op** (276 = HBlank → effect on line N+1, which luna's boundary model already does — see `hdma_ares_audit.md` "Resolution 2026-06-20"); residual is the HDMA stall **cycle-count** timing only (no known game impact). |
 | SA-1 | C+ | **B** | flat instruction timing (architectural, with Phase 5) |
 | Bus/mappers | C+ | **B** | ~~ROM mirroring, open-bus MDR, mapper-detect scoring~~ — all **FIXED 2026-06-17** |
 
