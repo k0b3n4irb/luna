@@ -1142,6 +1142,76 @@ impl Sa1Mapper {
         if is_bwram { 2 } else { 1 }
     }
 
+    /// Extra SA-1 bus-**contention** steps for an access at `sa1_addr` while
+    /// the S-CPU holds `scpu_mar` on the shared bus — ares' `conflict()`
+    /// model (`coprocessor/sa1/{rom,bwram,iram}.cpp` + the conditional
+    /// `step()`s in `memory.cpp` read/write). The SA-1's own access region
+    /// (ROM / BW-RAM / I-RAM, classified by ares' raw address masks, MMIO
+    /// and ROM winning over BW-RAM/I-RAM) selects which resource is in play;
+    /// the penalty fires only when the **S-CPU**'s last access address
+    /// (`scpu_mar`, ares `cpu.r.mar`) targets that same resource:
+    /// ROM `+1`, BW-RAM `+2`, I-RAM `+2`. MMIO / open-bus never contend.
+    ///
+    /// Charged on top of [`Self::sa1_region_steps`] (the base cost). This is
+    /// the "Increment B" the Phase-5b doc deferred.
+    ///
+    /// Two faithful approximations vs ares, both bounded: (1) luna evaluates
+    /// `scpu_mar` once per SA-1 batch (the deficit model runs ~1-2 SA-1
+    /// instructions per S-CPU access, so the S-CPU address is effectively
+    /// fixed across the batch); (2) the I-RAM exemption during S-CPU DRAM
+    /// refresh (`iram.conflict()` returns `cpu.refresh()==0`) is not modelled
+    /// — a ≤2-step over-charge confined to the ~40-mclk refresh window.
+    #[must_use]
+    pub fn sa1_conflict_steps(&self, sa1_addr: Addr24, scpu_mar: u32) -> u8 {
+        let a = sa1_addr & 0xFF_FFFF;
+        // MMIO ($2200-23ff): no shared-bus contention.
+        if a & 0x40_FE00 == 0x00_2200 {
+            return 0;
+        }
+        // SA-1 ROM region → conflict iff the S-CPU is also in ROM (+1).
+        if a & 0x40_8000 == 0x00_8000 || a & 0xC0_0000 == 0xC0_0000 {
+            return u8::from(Self::scpu_rom_conflict(scpu_mar));
+        }
+        // SA-1 BW-RAM region → conflict iff the S-CPU is also in BW-RAM (+2).
+        if a & 0x40_E000 == 0x00_6000 || a & 0xE0_0000 == 0x40_0000 || a & 0xF0_0000 == 0x60_0000 {
+            return if Self::scpu_bwram_conflict(scpu_mar) {
+                2
+            } else {
+                0
+            };
+        }
+        // SA-1 I-RAM region ($0000-07ff mirror or $3000-37ff) → conflict iff
+        // the S-CPU is also in I-RAM (+2).
+        if a & 0x40_F800 == 0x00_0000 || a & 0x40_F800 == 0x00_3000 {
+            return if Self::scpu_iram_conflict(scpu_mar) {
+                2
+            } else {
+                0
+            };
+        }
+        // Open-bus fall-through: 1 base step, no contention.
+        0
+    }
+
+    /// ares `SA1::ROM::conflict()` — S-CPU in `00-3f/80-bf:8000-ffff` or
+    /// `c0-ff:0000-ffff`.
+    const fn scpu_rom_conflict(mar: u32) -> bool {
+        mar & 0x40_8000 == 0x00_8000 || mar & 0xC0_0000 == 0xC0_0000
+    }
+
+    /// ares `SA1::BWRAM::conflict()` — S-CPU in `00-3f/80-bf:6000-7fff` or
+    /// `40-4f:0000-ffff` (note: narrower than the SA-1's own BW-RAM region).
+    const fn scpu_bwram_conflict(mar: u32) -> bool {
+        mar & 0x40_E000 == 0x00_6000 || mar & 0xF0_0000 == 0x40_0000
+    }
+
+    /// ares `SA1::IRAM::conflict()` — S-CPU in `00-3f/80-bf:3000-37ff` (the
+    /// `cpu.refresh()==0` exemption is approximated as always-active; see
+    /// [`Self::sa1_conflict_steps`]).
+    const fn scpu_iram_conflict(mar: u32) -> bool {
+        mar & 0x40_F800 == 0x00_3000
+    }
+
     /// Side-aware write entry for the SA-1's own bus. Drives I-RAM /
     /// BW-RAM through the CIWP / CBWE protection masks instead of
     /// the S-CPU's SIWP / SBWE / BWPA. MMIO writes are routed
@@ -2316,5 +2386,45 @@ mod tests {
         assert_eq!(m.sa1_vector_override(0, 0xFFEB), Some(0x56));
         assert_eq!(m.sa1_vector_override(0, 0xFFEE), Some(0xBC));
         assert_eq!(m.sa1_vector_override(0, 0xFFEF), Some(0x9A));
+    }
+
+    #[test]
+    fn sa1_conflict_steps_charge_only_on_same_shared_resource() {
+        // Address-only contention model (ares `conflict()`); mapper config
+        // is irrelevant. Use a mapper with BW-RAM so the regions resolve.
+        let m = Sa1Mapper::new(ramp_rom(0x20_0000), 0x10000);
+
+        // S-CPU addresses representative of each shared resource + WRAM.
+        let scpu_rom = make_addr(0x01, 0x9000); // 01:8000-ffff → ROM
+        let scpu_rom_hi = make_addr(0xC5, 0x0000); // c0-ff → ROM
+        let scpu_bwram = make_addr(0x40, 0x0000); // 40-4f:0000 → BW-RAM
+        let scpu_iram = make_addr(0x00, 0x3100); // 00:3000-37ff → I-RAM
+        let scpu_wram = make_addr(0x00, 0x0100); // low RAM → no resource
+
+        // SA-1 ROM access: +1 iff the S-CPU also holds ROM.
+        let sa1_rom = make_addr(0x00, 0x8000);
+        assert_eq!(m.sa1_conflict_steps(sa1_rom, scpu_rom), 1);
+        assert_eq!(m.sa1_conflict_steps(sa1_rom, scpu_rom_hi), 1);
+        assert_eq!(m.sa1_conflict_steps(sa1_rom, scpu_bwram), 0);
+        assert_eq!(m.sa1_conflict_steps(sa1_rom, scpu_wram), 0);
+
+        // SA-1 BW-RAM access: +2 iff the S-CPU also holds BW-RAM.
+        let sa1_bwram = make_addr(0x00, 0x6000);
+        assert_eq!(m.sa1_conflict_steps(sa1_bwram, scpu_bwram), 2);
+        assert_eq!(m.sa1_conflict_steps(sa1_bwram, scpu_rom), 0);
+        assert_eq!(m.sa1_conflict_steps(sa1_bwram, scpu_iram), 0);
+
+        // SA-1 I-RAM access: +2 iff the S-CPU also holds I-RAM (the
+        // $3000-37ff window only — the $0000-07ff mirror does not count,
+        // faithful to ares `iram.cpp`).
+        let sa1_iram = make_addr(0x00, 0x3000);
+        assert_eq!(m.sa1_conflict_steps(sa1_iram, scpu_iram), 2);
+        assert_eq!(m.sa1_conflict_steps(sa1_iram, scpu_wram), 0);
+        assert_eq!(m.sa1_conflict_steps(sa1_iram, scpu_rom), 0);
+
+        // MMIO ($2200-23ff) never contends, whatever the S-CPU holds.
+        let sa1_mmio = make_addr(0x00, 0x2200);
+        assert_eq!(m.sa1_conflict_steps(sa1_mmio, scpu_rom), 0);
+        assert_eq!(m.sa1_conflict_steps(sa1_mmio, scpu_iram), 0);
     }
 }
