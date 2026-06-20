@@ -1731,6 +1731,21 @@ impl Emulator {
         Ok(snes.take_mem_trace_log())
     }
 
+    /// Enable capture of `$21FC` Nocash-TTY writes (the SDK debug channel
+    /// behind `SNES_NOCASH` / `SNES_ASSERT`). A headless harness can then read
+    /// the program's own log / assertion output without a GUI debugger.
+    pub fn enable_nocash_log(&mut self) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.enable_nocash_log();
+        Ok(())
+    }
+
+    /// Drain the captured `$21FC` Nocash byte stream.
+    pub fn take_nocash_log(&mut self) -> Result<Vec<u8>, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        Ok(snes.take_nocash_log())
+    }
+
     /// Direct read of the SPC700's ARAM. Read-only, no bus side
     /// effects.
     pub fn peek_aram(&self, offset: u16, count: u16) -> Result<Vec<u8>, ApiError> {
