@@ -358,9 +358,8 @@ impl Sdd1Decompressor {
 }
 
 /// The S-DD1 cartridge mapper: the MMC (ROM banking + `$4800-$4807` control
-/// registers) and SRAM. Decompression (the DMA-triggered streaming through
-/// [`Sdd1Decompressor`]) is wired in a later stage; for now this serves the
-/// banked program ROM so an S-DD1 game boots and runs its (uncompressed) code.
+/// registers) and SRAM, plus the DMA-triggered graphics decompression
+/// (streaming through [`Sdd1Decompressor`]).
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Sdd1Mapper {
     rom: Vec<u8>,
@@ -375,6 +374,37 @@ pub struct Sdd1Mapper {
     r4805: u8,
     r4806: u8,
     r4807: u8,
+    /// The streaming decompressor (one active stream at a time).
+    decompressor: Sdd1Decompressor,
+    /// Per-channel DMA source address / remaining length, captured by
+    /// observing `$43x2-6` writes — so a decompressing DMA read is recognised
+    /// (`addr == dma_address[ch]`, fixed-mode) and bounded.
+    dma_address: [u32; 8],
+    dma_size: [u16; 8],
+    /// `true` once the current stream's decompressor is initialised; reset
+    /// when a stream's length reaches 0.
+    dma_ready: bool,
+}
+
+/// Borrowed ROM view implementing the decompressor's input read (`mmcRead` —
+/// the `$C0-FF` four-bank MMC decode). Holds `&rom` plus *copies* of the bank
+/// selects, so it can be created while the decompressor field is borrowed
+/// mutably (disjoint from `rom`).
+struct Sdd1RomView<'a> {
+    rom: &'a [u8],
+    banks: [u8; 4],
+}
+
+impl Sdd1RomBus for Sdd1RomView<'_> {
+    fn mmc_read(&self, addr: u32) -> u8 {
+        if self.rom.is_empty() {
+            return 0;
+        }
+        let a = addr & 0x00FF_FFFF;
+        let sel = self.banks[((a >> 20) & 0x03) as usize];
+        let rom_addr = (u32::from(sel & 0x0F) << 20) | (a & 0x000F_FFFF);
+        self.rom[rom_mirror(rom_addr as usize, self.rom.len())]
+    }
 }
 
 impl Sdd1Mapper {
@@ -390,6 +420,10 @@ impl Sdd1Mapper {
             r4805: 0,
             r4806: 0,
             r4807: 0,
+            decompressor: Sdd1Decompressor::new(),
+            dma_address: [0; 8],
+            dma_size: [0; 8],
+            dma_ready: false,
         }
     }
 
@@ -466,6 +500,38 @@ impl Mapper for Sdd1Mapper {
         if let Some(o) = self.sram_offset(bank, offset) {
             return Some(self.sram[o]);
         }
+        // DMA-triggered decompression: in the bit-22 region (`$40-7F`/`$C0-FF`),
+        // if an armed channel's fixed source address matches this read, stream
+        // a decompressed byte (ares `mcuRead`). A normal (non-armed) read falls
+        // through to plain MMC ROM below.
+        let a = addr & 0x00FF_FFFF;
+        if a & 0x0040_0000 != 0 {
+            let active = self.r4800 & self.r4801;
+            if active != 0 {
+                for ch in 0..8 {
+                    if active & (1 << ch) != 0 && a == self.dma_address[ch] {
+                        // Build the ROM view inline (borrows `&self.rom`, copies
+                        // the bank regs) so it is disjoint from the
+                        // `&mut self.decompressor` borrow below.
+                        let view = Sdd1RomView {
+                            rom: &self.rom,
+                            banks: [self.r4804, self.r4805, self.r4806, self.r4807],
+                        };
+                        if !self.dma_ready {
+                            self.decompressor.init(&view, a);
+                            self.dma_ready = true;
+                        }
+                        let data = self.decompressor.decompress_byte(&view);
+                        self.dma_size[ch] = self.dma_size[ch].wrapping_sub(1);
+                        if self.dma_size[ch] == 0 {
+                            self.dma_ready = false;
+                            self.r4801 &= !(1 << ch);
+                        }
+                        return Some(data);
+                    }
+                }
+            }
+        }
         if let Some(rom_addr) = self.rom_addr(addr) {
             if self.rom.is_empty() {
                 return None;
@@ -490,6 +556,30 @@ impl Mapper for Sdd1Mapper {
             }
             return true;
         }
+        // Observe the SNES DMA controller's `$43x2-6` writes to learn each
+        // channel's source address ($43x2-4) and length ($43x5-6) — needed to
+        // recognise + bound a decompressing DMA. We only observe; the real DMA
+        // controller (luna-core) owns these registers, so don't claim them.
+        if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && matches!(offset, 0x4300..=0x437F) {
+            let ch = usize::from((offset >> 4) & 0x07);
+            match offset & 0x000F {
+                0x02 => {
+                    self.dma_address[ch] = (self.dma_address[ch] & 0x00FF_FF00) | u32::from(value);
+                }
+                0x03 => {
+                    self.dma_address[ch] =
+                        (self.dma_address[ch] & 0x00FF_00FF) | (u32::from(value) << 8);
+                }
+                0x04 => {
+                    self.dma_address[ch] =
+                        (self.dma_address[ch] & 0x0000_FFFF) | (u32::from(value) << 16);
+                }
+                0x05 => self.dma_size[ch] = (self.dma_size[ch] & 0xFF00) | u16::from(value),
+                0x06 => self.dma_size[ch] = (self.dma_size[ch] & 0x00FF) | (u16::from(value) << 8),
+                _ => {}
+            }
+            return false;
+        }
         if let Some(o) = self.sram_offset(bank, offset) {
             self.sram[o] = value;
             return true;
@@ -506,25 +596,64 @@ impl Mapper for Sdd1Mapper {
     }
 
     fn reset(&mut self) {
-        // Control registers clear on reset; battery SRAM persists.
+        // Control registers + any in-flight decompression clear on reset;
+        // battery SRAM persists.
         self.r4800 = 0;
         self.r4801 = 0;
         self.r4804 = 0;
         self.r4805 = 0;
         self.r4806 = 0;
         self.r4807 = 0;
+        self.dma_address = [0; 8];
+        self.dma_size = [0; 8];
+        self.dma_ready = false;
+        self.decompressor = Sdd1Decompressor::new();
     }
 
     fn save_state(&self) -> Vec<u8> {
         bincode::serialize(&(
-            &self.sram, self.r4800, self.r4801, self.r4804, self.r4805, self.r4806, self.r4807,
+            &self.sram,
+            self.r4800,
+            self.r4801,
+            self.r4804,
+            self.r4805,
+            self.r4806,
+            self.r4807,
+            self.dma_address,
+            self.dma_size,
+            self.dma_ready,
+            &self.decompressor,
         ))
         .unwrap_or_default()
     }
 
     fn load_state(&mut self, data: &[u8]) {
-        if let Ok((sram, r4800, r4801, r4804, r4805, r4806, r4807)) =
-            bincode::deserialize::<(Vec<u8>, u8, u8, u8, u8, u8, u8)>(data)
+        type State = (
+            Vec<u8>,
+            u8,
+            u8,
+            u8,
+            u8,
+            u8,
+            u8,
+            [u32; 8],
+            [u16; 8],
+            bool,
+            Sdd1Decompressor,
+        );
+        if let Ok((
+            sram,
+            r4800,
+            r4801,
+            r4804,
+            r4805,
+            r4806,
+            r4807,
+            dma_addr,
+            dma_size,
+            ready,
+            dec,
+        )) = bincode::deserialize::<State>(data)
         {
             self.sram = sram;
             self.r4800 = r4800;
@@ -533,6 +662,10 @@ impl Mapper for Sdd1Mapper {
             self.r4805 = r4805;
             self.r4806 = r4806;
             self.r4807 = r4807;
+            self.dma_address = dma_addr;
+            self.dma_size = dma_size;
+            self.dma_ready = ready;
+            self.decompressor = dec;
         }
     }
 }
@@ -676,6 +809,48 @@ mod tests {
         // Reset clears the control registers.
         m.reset();
         assert_eq!(m.read(make_addr(0x00, 0x4800)), Some(0x00));
+    }
+
+    #[test]
+    fn mapper_dma_decompression_arms_streams_and_disarms() {
+        // 8 MB ramp ROM; put a compressed header + payload at a $C0 address.
+        let mut rom: Vec<u8> = (0..0x80_0000).map(|i| (i & 0xFF) as u8).collect();
+        // r4804 = 0 → $C0:xxxx decodes to ROM 0x00_xxxx. Header 0xC0 = 8 bpp.
+        rom[0x0000] = 0xC0;
+        let mut m = Sdd1Mapper::new(rom, 0x2000);
+
+        // Game protocol: set DMA channel-0 source ($C0:0000) + length (4),
+        // then arm S-DD1 on channel 0 (hard + soft enable).
+        m.write(make_addr(0x00, 0x4302), 0x00); // addr byte 0
+        m.write(make_addr(0x00, 0x4303), 0x00); // addr byte 1
+        m.write(make_addr(0x00, 0x4304), 0xC0); // addr byte 2 → $C0:0000
+        m.write(make_addr(0x00, 0x4305), 0x04); // length lo = 4
+        m.write(make_addr(0x00, 0x4306), 0x00); // length hi
+        m.write(make_addr(0x00, 0x4800), 0x01); // hard-enable ch0
+        m.write(make_addr(0x00, 0x4801), 0x01); // soft-enable ch0
+
+        // 4 armed reads at the fixed source → decompressed (not raw ROM=0xC0).
+        let out: Vec<u8> = (0..4)
+            .map(|_| m.read(make_addr(0xC0, 0x0000)).unwrap())
+            .collect();
+        // Stream exhausted → S-DD1 clears the soft-enable bit.
+        assert_eq!(
+            m.read(make_addr(0x00, 0x4801)),
+            Some(0x00),
+            "r4801 ch0 cleared"
+        );
+
+        // Deterministic: re-arm + re-read yields the same bytes.
+        m.write(make_addr(0x00, 0x4305), 0x04);
+        m.write(make_addr(0x00, 0x4801), 0x01);
+        let out2: Vec<u8> = (0..4)
+            .map(|_| m.read(make_addr(0xC0, 0x0000)).unwrap())
+            .collect();
+        assert_eq!(out, out2);
+
+        // A read NOT matching an armed DMA returns plain MMC ROM: after the
+        // second stream finished r4801 is clear, so $C0:0010 yields raw 0x10.
+        assert_eq!(m.read(make_addr(0xC0, 0x0010)), Some(0x10));
     }
 
     #[test]

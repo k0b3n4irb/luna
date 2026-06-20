@@ -2065,6 +2065,10 @@ impl SnesBus<'_> {
         }
         if let Some(offset) = Self::dma_offset(addr) {
             self.dma.write_register(offset, value);
+            // Let a DMA-observing coprocessor (S-DD1) capture the channel's
+            // source address / length so it can set up on-the-fly graphics
+            // decompression. Non-observing mappers ignore `$43xx` writes.
+            let _ = self.mapper.write(addr, value);
             return;
         }
         if Self::is_mdmaen(addr) {
