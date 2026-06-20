@@ -1883,7 +1883,7 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
 name = "luna-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "dirs",
@@ -1902,7 +1902,7 @@ dependencies = [
 
 [[package]]
 name = "luna-apu"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "luna-cpu-spc700",
  "serde",
@@ -1911,7 +1911,7 @@ dependencies = [
 
 [[package]]
 name = "luna-bus"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "serde",
@@ -1920,7 +1920,7 @@ dependencies = [
 
 [[package]]
 name = "luna-cartridge"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "luna-bus",
  "serde",
@@ -1929,7 +1929,7 @@ dependencies = [
 
 [[package]]
 name = "luna-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "luna-api",
@@ -1940,7 +1940,7 @@ dependencies = [
 
 [[package]]
 name = "luna-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "image",
@@ -1957,7 +1957,7 @@ dependencies = [
 
 [[package]]
 name = "luna-cpu-65c816"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "luna-bus",
  "serde",
@@ -1966,7 +1966,7 @@ dependencies = [
 
 [[package]]
 name = "luna-cpu-spc700"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1974,7 +1974,7 @@ dependencies = [
 
 [[package]]
 name = "luna-cpu-upd96050"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "serde",
@@ -1982,7 +1982,7 @@ dependencies = [
 
 [[package]]
 name = "luna-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cpal",
  "egui",
@@ -2002,7 +2002,7 @@ dependencies = [
 
 [[package]]
 name = "luna-mcp-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "luna-api",
@@ -2015,7 +2015,7 @@ dependencies = [
 
 [[package]]
 name = "luna-ppu"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_bytes",

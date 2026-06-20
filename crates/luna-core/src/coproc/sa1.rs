@@ -188,7 +188,7 @@ impl Mapper for Sa1Chip {
         }
     }
 
-    fn step_coproc(&mut self, main_mclk: u32) {
+    fn step_coproc(&mut self, main_mclk: u32, scpu_mar: u32) {
         // Timer ticks even while the SA-1 CPU is held in reset — that's
         // how games can sit in CCNT.7-asserted "wait" mode and still
         // generate timer IRQs.
@@ -237,6 +237,7 @@ impl Mapper for Sa1Chip {
                 log: self.sa1_side_log.as_mut(),
                 sa1_pc,
                 steps: &mut steps,
+                scpu_mar,
             };
             self.cpu.step(&mut bus);
             // Floor at 1 step so a zero-cost path can never stall the loop.
@@ -296,6 +297,10 @@ struct Sa1Bus<'a> {
     /// its region cost, each internal `io_cycle` adds 1. `step_coproc`
     /// reads it after the step to charge the real cycle count.
     steps: &'a mut u32,
+    /// S-CPU's last bus-access address (ares `cpu.r.mar`) for the duration
+    /// of this SA-1 batch, used to add `conflict()` contention steps when
+    /// both chips touch the same shared resource (Increment B).
+    scpu_mar: u32,
 }
 
 /// SA-1 MMIO register (`$2200-$23FF`) if `addr` hits the register window.
@@ -336,7 +341,10 @@ impl Bus for Sa1Bus<'_> {
         // Charge this access's SA-1 cycle cost (Phase 5b): ROM/IRAM/IO = 1
         // step, BWRAM = 2. Covers opcode fetch + operand + data reads (the
         // core fetches via `bus.read`), mirroring ares `memory.cpp`.
-        *self.steps += u32::from(self.mapper.sa1_region_steps(addr));
+        // Plus the shared-bus `conflict()` contention steps (Increment B)
+        // when the S-CPU holds the same resource.
+        *self.steps += u32::from(self.mapper.sa1_region_steps(addr))
+            + u32::from(self.mapper.sa1_conflict_steps(addr, self.scpu_mar));
         let bank = (addr >> 16) as u8;
         let offset = (addr & 0xFFFF) as u16;
         // SA-1 vector fetches at bank 0 redirect through CRV/CNV/CIV.
@@ -358,8 +366,10 @@ impl Bus for Sa1Bus<'_> {
     }
 
     fn write(&mut self, addr: Addr24, value: u8) {
-        // Charge this access's SA-1 cycle cost (Phase 5b), as in `read`.
-        *self.steps += u32::from(self.mapper.sa1_region_steps(addr));
+        // Charge this access's SA-1 cycle cost (Phase 5b) + `conflict()`
+        // contention (Increment B), as in `read`.
+        *self.steps += u32::from(self.mapper.sa1_region_steps(addr))
+            + u32::from(self.mapper.sa1_conflict_steps(addr, self.scpu_mar));
         // Log SA-1-side writes to MMIO ($2200-23FF) AND to I-RAM
         // ($3000-37FF / $0000-07FF mirror). The I-RAM writes are the
         // cross-CPU handshake flags (e.g. Kirby's $300A/$300E) that the
@@ -465,7 +475,7 @@ mod tests {
         // Run a couple of SA-1 instructions' worth of mclk — enough to
         // advance through the I-RAM NOPs without overrunning into the
         // unwritten bytes past $3003.
-        chip.step_coproc(8);
+        chip.step_coproc(8, 0);
         assert!(chip.cpu.pc > 0x3000, "PC should have advanced past 0x3000");
     }
 
@@ -473,7 +483,7 @@ mod tests {
     fn sa1_step_does_nothing_while_reset_held() {
         let mut chip = sa1_chip();
         let pc_before = chip.cpu.pc;
-        chip.step_coproc(1000);
+        chip.step_coproc(1000, 0);
         assert_eq!(chip.cpu.pc, pc_before);
     }
 
@@ -530,6 +540,7 @@ mod tests {
             log: None,
             sa1_pc: 0,
             steps: &mut sa1_steps,
+            scpu_mar: 0,
         };
         assert!(bus.irq_pending());
         assert!(!bus.nmi_pending());
@@ -548,7 +559,7 @@ mod tests {
         chip.write(make_addr(0x00, 0x2214), 0);
         assert!(!chip.running, "still in reset");
         // Step enough to cross 100.
-        chip.step_coproc(200);
+        chip.step_coproc(200, 0);
         assert!(chip.inner.sa1_irq_line(), "timer should fire during reset");
     }
 
@@ -577,6 +588,7 @@ mod tests {
             log: None,
             sa1_pc: 0,
             steps: &mut sa1_steps,
+            scpu_mar: 0,
         };
         assert!(bus.irq_pending());
     }

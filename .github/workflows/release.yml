@@ -1,0 +1,94 @@
+name: Release
+
+# Build and publish runnable binaries when a version tag is pushed.
+# Step 1: Linux x86_64 + aarch64 (native runners — the repo is public, so
+# GitHub's arm64 Linux runner is free). Windows / macOS come later: add a
+# matrix entry. The auto-generated source archives stay; these binaries are
+# attached alongside them.
+on:
+  push:
+    tags:
+      - "v*"
+
+# Needed by softprops/action-gh-release to create the release + upload assets.
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # actions/cache still ships a Node 20 entrypoint; opt into Node 24 (see ci.yml).
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Build both binaries (`luna` CLI + `luna-gui`) natively per architecture
+  # and package each into a tarball with LICENSE + README + a SHA256 sidecar.
+  # ---------------------------------------------------------------------
+  build:
+    name: build ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # Only build-time system dep for both binaries: ALSA headers (cpal →
+      # alsa-sys). winit/wgpu dlopen X11/Wayland/Vulkan at runtime; rfd uses
+      # the pure-Rust xdg-portal backend — no GTK build dep. (Matches the CI
+      # `check` job, which is green with just this.)
+      - name: Install ALSA headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.arch }}
+
+      - name: Build release binaries
+        run: cargo build --release --locked -p luna-cli -p luna-gui
+
+      - name: Package tarball + checksum
+        run: |
+          set -euo pipefail
+          VER="${GITHUB_REF_NAME#v}"
+          PKG="luna-v${VER}-linux-${{ matrix.arch }}"
+          mkdir -p "dist/${PKG}"
+          cp target/release/luna target/release/luna-gui "dist/${PKG}/"
+          cp LICENSE README.md "dist/${PKG}/"
+          tar czf "dist/${PKG}.tar.gz" -C dist "${PKG}"
+          ( cd dist && sha256sum "${PKG}.tar.gz" > "${PKG}.tar.gz.sha256" )
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: luna-${{ matrix.arch }}
+          path: dist/*.tar.gz*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
+  # Collect every arch's artifacts and publish them to the GitHub release
+  # for this tag (created if absent), next to the source archives.
+  # ---------------------------------------------------------------------
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

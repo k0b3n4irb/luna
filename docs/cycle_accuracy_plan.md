@@ -251,6 +251,28 @@ idles per ares `wdc65816/memory.cpp`; the Tom Harte cycle backstop (count
 sampled via `LUNA_TOM_HARTE_SAMPLE=N`) drove it to 0 mismatches at 100%
 state. WAI/STP excluded as halt artifacts.
 
+**Phase 3b — 65c816 entry-for-entry `cycles[]` bus-trace oracle.** The Phase-3
+backstop only checked the cycle *count*; this upgrade checks the per-cycle
+**bus grammar** (kind + addr + value, entry for entry) against the Tom Harte
+`cycles[]`. `RamBus` (`luna-bus/src/testing.rs`) gained an opt-in per-cycle
+trace (`enable_trace`/`take_trace`, `TraceKind::{Read,Write,Internal}`); the
+harness `classify`/`compare_trace` (`tests/tom_harte.rs`) diff luna's
+read/write/idle sequence to the reference. Result: **4,740,000 / 5,040,000
+entries match (94.05%)** at 0 state-fail / 0 count-mismatch. The oracle found
+and drove out **three real ares bus-order divergences** (all state-invariant,
+fixed in `opcodes.rs`): **JSL `$22`** and **JSR `($abs,X)` `$fc`** pushed the
+return address *after* fetching the whole operand instead of interleaving the
+push between operand fetches (ares `instructionCallLong` /
+`instructionCallIndexedIndirect`); and **all 16-bit RMW** (INC/DEC via
+`modify_memory`, ASL/LSR/ROL/ROR/TSB/TRB via `modify_memory_with`) wrote the
+**low byte first** instead of ares' **high-byte-first** write-back
+(`instructions-modify.cpp` `instruction*Modify16`). The residual 30 diverging
+opcodes are **ares-faithful abstractions, not luna bugs**: the 28 emulation-mode
+RMW (`*.e`) dummy-write-back that ares models as `idle()`, and **WDM `$42`**
+whose 2nd-byte `fetch()` (a read in ares) Tom Harte traces as internal. The
+oracle is informational (not gated) precisely because matching it for those 30
+would mean *diverging from ares* — the opposite of the faithful-port pillar.
+
 **Phase 5b — SA-1 real per-access cycles.** ✅ done (`097ffe7`). Replaced the flat
 `MCLK_PER_SA1_INSN = 6` lump in `Sa1Chip::step_coproc` with a signed
 mclk *deficit*: each main-CPU advance adds to it, each SA-1 instruction

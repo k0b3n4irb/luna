@@ -183,7 +183,7 @@ impl Mapper for Dsp1Mapper {
         })
     }
 
-    fn step_coproc(&mut self, main_mclk: u32) {
+    fn step_coproc(&mut self, main_mclk: u32, _scpu_mar: u32) {
         if !self.has_firmware {
             return;
         }

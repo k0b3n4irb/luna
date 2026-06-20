@@ -899,7 +899,7 @@ spc_test!(
     spc_pitchmod,
     "PitchMod/PitchMod.sfc",
     "2d0b4cf14f382dff76f4e77a016e98827c70e36c3fcc6b9016ac92ec75bc529e",
-    ignore = "SPC700 crash under correct cycles — Mesen2 ref check pending (project_pitchmod_spc700_crash)"
+    ignore = "PitchMod is a knife-edge timing ROM — Mesen2 ALSO halts its SPC700 on STOP ~1.8s in (frame 108), so luna is correct; golden was captured with pre-081e78d wrong cycles (project_pitchmod_spc700_crash)"
 );
 spc_test!(
     spc_play_brr,
