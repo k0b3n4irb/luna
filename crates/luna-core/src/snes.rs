@@ -298,6 +298,12 @@ pub struct MemTraceEvent {
     pub kind: MemEventKind,
     /// Byte transferred.
     pub value: u8,
+    /// PPU scanline at the access (instruction-start snapshot).
+    pub line: u16,
+    /// `true` if the PPU is in the vertical-blank window
+    /// (`line >= vblank_start`). Forced-blank periods are derivable from
+    /// the INIDISP (`$2100`) writes in the same trace.
+    pub blank: bool,
 }
 
 /// Direction of a CPU bus access.
@@ -320,6 +326,12 @@ pub struct MemTraceLog {
     /// equals `b`. Useful for focusing on WRAM (bank `$7E` or `$7F`)
     /// without drowning in ROM fetches.
     pub bank_filter: Option<u8>,
+    /// Optional offset-range filter `(lo, hi)` (inclusive) on the
+    /// low-16-bit address — `None` captures every offset. Catches an
+    /// MMIO window (e.g. `$2100-$21FF`) across all banks without the
+    /// bank filter's code-fetch flood. Composes with `bank_filter`
+    /// (both must match).
+    pub offset_filter: Option<(u16, u16)>,
 }
 
 /// Master cycles per PPU scanline on NTSC (1364 mclk = 4 dots × 341).
@@ -627,11 +639,17 @@ impl Snes {
     /// Enable memory access tracing. Every CPU bus read/write
     /// matching `bank_filter` (or every access when `None`) is
     /// appended to the log until it fills.
-    pub fn enable_mem_trace(&mut self, max_events: usize, bank_filter: Option<u8>) {
+    pub fn enable_mem_trace(
+        &mut self,
+        max_events: usize,
+        bank_filter: Option<u8>,
+        offset_filter: Option<(u16, u16)>,
+    ) {
         self.mem_trace_log = Some(MemTraceLog {
             events: Vec::new(),
             max_events,
             bank_filter,
+            offset_filter,
         });
     }
 
@@ -1375,6 +1393,11 @@ struct DmaBusView<'a> {
     /// the immediately-following `write_b` to record a VRAM byte's
     /// source (DMA reads then writes each byte in lockstep, A→B).
     last_a_addr: u32,
+    /// Frame / scanline / vblank snapshot at the start of this DMA burst,
+    /// stamped onto each `DmaTraceEvent` for per-VBlank bucketing.
+    trace_frame: u64,
+    trace_line: u16,
+    trace_blank: bool,
 }
 
 impl DmaBus for DmaBusView<'_> {
@@ -1428,6 +1451,9 @@ impl DmaBus for DmaBusView<'_> {
                         vram_word: self.ppu.vram.address,
                         b_offset,
                         value,
+                        frame: self.trace_frame,
+                        line: self.trace_line,
+                        blank: self.trace_blank,
                     });
                 }
             }
@@ -1485,12 +1511,19 @@ impl SnesBus<'_> {
                     return;
                 }
             }
+            if let Some((lo, hi)) = log.offset_filter {
+                if !(lo..=hi).contains(&offset_of(addr)) {
+                    return;
+                }
+            }
             log.events.push(MemTraceEvent {
                 mclk_total: *self.mclk_total,
                 pc_full: self.cpu_pc_full,
                 addr_full: addr,
                 kind,
                 value,
+                line: self.ppu_line,
+                blank: self.ppu_line >= self.vblank_start_line,
             });
         }
     }
@@ -1671,6 +1704,9 @@ impl SnesBus<'_> {
                 // HDMA is not traced (the Super FX framebuffer upload is MDMA).
                 dma_trace: None,
                 last_a_addr: 0,
+                trace_frame: self.frame_count,
+                trace_line: self.ppu_line,
+                trace_blank: self.ppu_line >= self.vblank_start_line,
             };
             hdma_stall += self.dma.hdma_init(&mut view);
         }
@@ -1685,6 +1721,9 @@ impl SnesBus<'_> {
                 // HDMA is not traced (the Super FX framebuffer upload is MDMA).
                 dma_trace: None,
                 last_a_addr: 0,
+                trace_frame: self.frame_count,
+                trace_line: self.ppu_line,
+                trace_blank: self.ppu_line >= self.vblank_start_line,
             };
             hdma_stall += self.dma.hdma_run_line(&mut view);
         }
@@ -2118,6 +2157,9 @@ impl SnesBus<'_> {
                         wm_addr: self.wm_addr,
                         dma_trace: trace.as_mut(),
                         last_a_addr: 0,
+                        trace_frame: self.frame_count,
+                        trace_line: self.ppu_line,
+                        trace_blank: self.ppu_line >= self.vblank_start_line,
                     };
                     self.dma.run_mdma(&mut view, value)
                 };
@@ -2148,6 +2190,9 @@ impl SnesBus<'_> {
                         wm_addr: self.wm_addr,
                         dma_trace: trace.as_mut(),
                         last_a_addr: 0,
+                        trace_frame: self.frame_count,
+                        trace_line: self.ppu_line,
+                        trace_blank: self.ppu_line >= self.vblank_start_line,
                     };
                     self.dma.run_mdma_segment(&mut view, value, seg_bytes)
                 };
