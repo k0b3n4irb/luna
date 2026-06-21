@@ -175,6 +175,14 @@ enum Command {
         /// `--assert` but over VRAM. Repeatable.
         #[arg(long = "assert-vram")]
         assert_vram: Vec<String>,
+        /// Load battery SRAM from a `.srm` file before running (the other
+        /// half of a power-cycle test — write it with `--srm-out` in run A,
+        /// read it back in run B).
+        #[arg(long = "srm-in")]
+        srm_in: Option<PathBuf>,
+        /// Write battery SRAM to a `.srm` file after the run.
+        #[arg(long = "srm-out")]
+        srm_out: Option<PathBuf>,
         /// Optional CPU↔APU mailbox traffic log. When set, every
         /// CPU read/write of `$2140-$2143` during the run is captured
         /// and written to the given path as CSV with columns:
@@ -475,6 +483,8 @@ fn main() -> ExitCode {
             assert,
             assert_aram,
             assert_vram,
+            srm_in,
+            srm_out,
             apu_log,
             sa1_log,
             sa1_side_log,
@@ -511,6 +521,8 @@ fn main() -> ExitCode {
             &assert,
             &assert_aram,
             &assert_vram,
+            srm_in.as_deref(),
+            srm_out.as_deref(),
             apu_log.as_deref(),
             sa1_log.as_deref(),
             sa1_side_log.as_deref(),
@@ -1453,6 +1465,8 @@ fn run_state(
     assert_specs: &[String],
     assert_aram_specs: &[String],
     assert_vram_specs: &[String],
+    srm_in: Option<&std::path::Path>,
+    srm_out: Option<&std::path::Path>,
     apu_log_path: Option<&std::path::Path>,
     sa1_log_path: Option<&std::path::Path>,
     sa1_side_log_path: Option<&std::path::Path>,
@@ -1479,6 +1493,27 @@ fn run_state(
     if let Err(e) = load_rom_into(&mut em, rom, force_mapper, dsp1_rom) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
+    }
+    // --srm-in: seed battery SRAM from a `.srm` file (the read half of a
+    // cross-run power-cycle test), before the warm-up runs.
+    if let Some(path) = srm_in {
+        match std::fs::read(path) {
+            Ok(data) => {
+                if let Err(e) = em.load_sram(&data) {
+                    eprintln!("error: --srm-in: {e}");
+                    return ExitCode::from(1);
+                }
+                eprintln!(
+                    "loaded {} bytes of SRAM from {}",
+                    data.len(),
+                    path.display()
+                );
+            }
+            Err(e) => {
+                eprintln!("error: --srm-in {}: {e}", path.display());
+                return ExitCode::from(1);
+            }
+        }
     }
     // Optionally resume from a GUI-captured save state (api-first:
     // `Emulator::load_state`). Done right after `load_rom` so the `-n`
@@ -1958,6 +1993,15 @@ fn run_state(
             audio_accum.len(),
             secs
         );
+    }
+    // --srm-out: persist battery SRAM to a `.srm` file (the write half of a
+    // cross-run power-cycle test).
+    if let Some(path) = srm_out {
+        let data = em.sram();
+        match std::fs::write(path, &data) {
+            Ok(()) => eprintln!("wrote {} bytes of SRAM to {}", data.len(), path.display()),
+            Err(e) => eprintln!("error: --srm-out {}: {e}", path.display()),
+        }
     }
     if assert_failed {
         ExitCode::from(1)

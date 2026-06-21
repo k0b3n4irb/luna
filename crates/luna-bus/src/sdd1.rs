@@ -595,6 +595,15 @@ impl Mapper for Sdd1Mapper {
         self.sram.len()
     }
 
+    fn sram(&self) -> &[u8] {
+        &self.sram
+    }
+
+    fn load_sram(&mut self, data: &[u8]) {
+        let n = data.len().min(self.sram.len());
+        self.sram[..n].copy_from_slice(&data[..n]);
+    }
+
     fn reset(&mut self) {
         // Control registers + any in-flight decompression clear on reset;
         // battery SRAM persists.
