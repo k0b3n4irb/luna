@@ -274,6 +274,12 @@ enum Command {
         /// WRAM main page). Omit to capture every access.
         #[arg(long = "mem-trace-bank")]
         mem_trace_bank: Option<String>,
+        /// Hex offset range `LO:HI` (inclusive) to filter the memory
+        /// trace on, e.g. `2100:21FF` to capture only PPU/CPU MMIO
+        /// across all banks without the bank filter's code-fetch flood.
+        /// Composes with `--mem-trace-bank` (both must match).
+        #[arg(long = "mem-trace-addr")]
+        mem_trace_addr: Option<String>,
         /// Optional DMA→VRAM transfer-time trace. Captures every byte an
         /// MDMA writes to `$2118/$2119` as CSV
         /// (`seq,src,vram_word,reg,value`) — `src` is the 24-bit A-bus
@@ -501,6 +507,7 @@ fn main() -> ExitCode {
             mem_trace_from,
             mem_trace_max,
             mem_trace_bank,
+            mem_trace_addr,
             dma_trace,
             dma_trace_from,
             dma_trace_max,
@@ -539,6 +546,7 @@ fn main() -> ExitCode {
             mem_trace_from,
             mem_trace_max,
             mem_trace_bank.as_deref(),
+            mem_trace_addr.as_deref(),
             dma_trace.as_deref(),
             dma_trace_from,
             dma_trace_max,
@@ -948,17 +956,25 @@ fn write_dma_trace_csv(
     path: &std::path::Path,
     events: &[luna_api::DmaTraceEvent],
 ) -> std::io::Result<()> {
-    write_csv(path, "seq,src,vram_word,reg,value", events, |f, i, ev| {
-        writeln!(
-            f,
-            "{},{},${:04X},${:02X},${:02X}",
-            i,
-            fmt_pc(ev.src_full),
-            ev.vram_word,
-            ev.b_offset,
-            ev.value,
-        )
-    })
+    write_csv(
+        path,
+        "seq,frame,line,blank,src,vram_word,reg,value",
+        events,
+        |f, i, ev| {
+            writeln!(
+                f,
+                "{},{},{},{},{},${:04X},${:02X},${:02X}",
+                i,
+                ev.frame,
+                ev.line,
+                u8::from(ev.blank),
+                fmt_pc(ev.src_full),
+                ev.vram_word,
+                ev.b_offset,
+                ev.value,
+            )
+        },
+    )
 }
 
 /// Write per-instruction CPU trace events as CSV. Columns:
@@ -999,7 +1015,7 @@ fn write_mem_trace_csv(
 ) -> std::io::Result<()> {
     write_csv(
         path,
-        "mclk_total,frame_ntsc,pc,addr,kind,value",
+        "mclk_total,frame_ntsc,pc,addr,kind,value,line,blank",
         events,
         |f, _, ev| {
             let kind = match ev.kind {
@@ -1008,13 +1024,15 @@ fn write_mem_trace_csv(
             };
             writeln!(
                 f,
-                "{},{},{},{},{},${:02X}",
+                "{},{},{},{},{},${:02X},{},{}",
                 ev.mclk_total,
                 ev.mclk_total / NTSC_MCLK_PER_FRAME,
                 fmt_pc(ev.pc_full),
                 fmt_pc(ev.addr_full),
                 kind,
-                ev.value
+                ev.value,
+                ev.line,
+                u8::from(ev.blank),
             )
         },
     )
@@ -1483,6 +1501,7 @@ fn run_state(
     mem_trace_from: u64,
     mem_trace_max: usize,
     mem_trace_bank: Option<&str>,
+    mem_trace_addr: Option<&str>,
     dma_trace_path: Option<&std::path::Path>,
     dma_trace_from: u64,
     dma_trace_max: usize,
@@ -1621,6 +1640,27 @@ fn run_state(
             }
         },
     };
+    let parsed_mem_addr: Option<(u16, u16)> = match mem_trace_addr {
+        None => None,
+        Some(spec) => {
+            let parse_hex16 = |h: &str| u16::from_str_radix(h.trim().trim_start_matches("0x"), 16);
+            let Some((lo, hi)) = spec.split_once(':') else {
+                eprintln!("error: --mem-trace-addr `{spec}`: expected `LO:HI` (e.g. 2100:21FF)");
+                return ExitCode::from(1);
+            };
+            match (parse_hex16(lo), parse_hex16(hi)) {
+                (Ok(lo), Ok(hi)) if lo <= hi => Some((lo, hi)),
+                (Ok(lo), Ok(hi)) => {
+                    eprintln!("error: --mem-trace-addr `{spec}`: LO ({lo:#06X}) > HI ({hi:#06X})");
+                    return ExitCode::from(1);
+                }
+                _ => {
+                    eprintln!("error: --mem-trace-addr `{spec}`: expected hex `LO:HI`");
+                    return ExitCode::from(1);
+                }
+            }
+        }
+    };
     if bridge_target != u64::MAX {
         let current = em.instructions_executed();
         if bridge_target > current {
@@ -1639,7 +1679,7 @@ fn run_state(
         }
     }
     if mem_trace_path.is_some() && em.instructions_executed() >= mem_trace_from {
-        if let Err(e) = em.enable_mem_trace(mem_trace_max, parsed_mem_bank) {
+        if let Err(e) = em.enable_mem_trace(mem_trace_max, parsed_mem_bank, parsed_mem_addr) {
             eprintln!("error: enable_mem_trace: {e}");
             return ExitCode::from(1);
         }
@@ -1659,7 +1699,7 @@ fn run_state(
                 let _ = em.enable_cpu_trace(cpu_trace_max);
             }
             if mem_trace_path.is_some() && em.instructions_executed() >= mem_trace_from {
-                let _ = em.enable_mem_trace(mem_trace_max, parsed_mem_bank);
+                let _ = em.enable_mem_trace(mem_trace_max, parsed_mem_bank, parsed_mem_addr);
             }
         }
     }
