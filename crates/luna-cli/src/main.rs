@@ -161,6 +161,20 @@ enum Command {
         /// 544 bytes of SMW shadow-OAM.
         #[arg(long = "peek")]
         peek: Vec<String>,
+        /// Assert memory equals expected bytes after warm-up. Format:
+        /// `BANK:OFFSET=HEX` (all hex). Prints `PASS`/`FAIL` per spec and
+        /// exits non-zero if any fails. Repeatable. Example:
+        /// `--assert 7E:0010=AB12`.
+        #[arg(long = "assert")]
+        assert: Vec<String>,
+        /// Assert APU-RAM equals expected bytes (`OFFSET=HEX`). Like
+        /// `--assert` but over ARAM. Repeatable.
+        #[arg(long = "assert-aram")]
+        assert_aram: Vec<String>,
+        /// Assert VRAM equals expected bytes (`OFFSET=HEX`). Like
+        /// `--assert` but over VRAM. Repeatable.
+        #[arg(long = "assert-vram")]
+        assert_vram: Vec<String>,
         /// Optional CPU↔APU mailbox traffic log. When set, every
         /// CPU read/write of `$2140-$2143` during the run is captured
         /// and written to the given path as CSV with columns:
@@ -458,6 +472,9 @@ fn main() -> ExitCode {
             audio_out,
             input,
             peek,
+            assert,
+            assert_aram,
+            assert_vram,
             apu_log,
             sa1_log,
             sa1_side_log,
@@ -491,6 +508,9 @@ fn main() -> ExitCode {
             audio_out.as_deref(),
             input.as_deref(),
             &peek,
+            &assert,
+            &assert_aram,
+            &assert_vram,
             apu_log.as_deref(),
             sa1_log.as_deref(),
             sa1_side_log.as_deref(),
@@ -669,6 +689,57 @@ fn parse_peek_spec(spec: &str) -> Result<(u8, u16, u16), String> {
     let count = u16::from_str_radix(parts[2].trim(), 16)
         .map_err(|e| format!("bad count `{}`: {e}", parts[2]))?;
     Ok((bank, offset, count))
+}
+
+/// Parse an even-length hex string (no `0x`) into bytes.
+fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, String> {
+    let s = s.trim();
+    if s.is_empty() || s.len() % 2 != 0 {
+        return Err(format!("expected an even-length hex value, got `{s}`"));
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&s[i..i + 2], 16)
+                .map_err(|e| format!("bad hex `{}`: {e}", &s[i..i + 2]))
+        })
+        .collect()
+}
+
+/// Parse a `BANK:OFFSET=HEXBYTES` assertion (all hex, no `0x`).
+fn parse_assert_spec(spec: &str) -> Result<(u8, u16, Vec<u8>), String> {
+    let (loc, val) = spec
+        .split_once('=')
+        .ok_or_else(|| format!("expected BANK:OFFSET=HEX, got `{spec}`"))?;
+    let (bank_s, off_s) = loc
+        .split_once(':')
+        .ok_or_else(|| format!("expected BANK:OFFSET=HEX, got `{spec}`"))?;
+    let bank =
+        u8::from_str_radix(bank_s.trim(), 16).map_err(|e| format!("bad bank `{bank_s}`: {e}"))?;
+    let offset =
+        u16::from_str_radix(off_s.trim(), 16).map_err(|e| format!("bad offset `{off_s}`: {e}"))?;
+    Ok((bank, offset, parse_hex_bytes(val)?))
+}
+
+/// Parse an `OFFSET=HEXBYTES` assertion (for ARAM / VRAM — no bank).
+fn parse_assert_spec_no_bank(spec: &str) -> Result<(u16, Vec<u8>), String> {
+    let (off_s, val) = spec
+        .split_once('=')
+        .ok_or_else(|| format!("expected OFFSET=HEX, got `{spec}`"))?;
+    let offset =
+        u16::from_str_radix(off_s.trim(), 16).map_err(|e| format!("bad offset `{off_s}`: {e}"))?;
+    Ok((offset, parse_hex_bytes(val)?))
+}
+
+/// Lower-case hex of a byte slice (for assert PASS/FAIL output).
+fn hex_str(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }
 
 /// Master clocks per NTSC frame: 262 scanlines × 1364 mclk = 357 368.
@@ -1379,6 +1450,9 @@ fn run_state(
     audio_out: Option<&std::path::Path>,
     input_script: Option<&str>,
     peek_specs: &[String],
+    assert_specs: &[String],
+    assert_aram_specs: &[String],
+    assert_vram_specs: &[String],
     apu_log_path: Option<&std::path::Path>,
     sa1_log_path: Option<&std::path::Path>,
     sa1_side_log_path: Option<&std::path::Path>,
@@ -1618,6 +1692,72 @@ fn run_state(
         }
     }
 
+    // --assert / --assert-aram / --assert-vram: native pass/fail (exit 0/1) so
+    // headless consumers don't have to parse the peek dump.
+    let mut assert_failed = false;
+    for spec in assert_specs {
+        match parse_assert_spec(spec) {
+            Ok((bank, offset, want)) => match em.peek_memory(bank, offset, want.len() as u16) {
+                Ok(got) if got == want => {
+                    println!("PASS ${bank:02X}:{offset:04X}={}", hex_str(&want));
+                }
+                Ok(got) => {
+                    println!(
+                        "FAIL ${bank:02X}:{offset:04X} expected {} got {}",
+                        hex_str(&want),
+                        hex_str(&got)
+                    );
+                    assert_failed = true;
+                }
+                Err(e) => {
+                    eprintln!("error: --assert `{spec}`: {e}");
+                    assert_failed = true;
+                }
+            },
+            Err(e) => {
+                eprintln!("error: --assert `{spec}`: {e}");
+                assert_failed = true;
+            }
+        }
+    }
+    for (specs, label, kind) in [
+        (assert_aram_specs, "aram", 0u8),
+        (assert_vram_specs, "vram", 1u8),
+    ] {
+        for spec in specs {
+            match parse_assert_spec_no_bank(spec) {
+                Ok((offset, want)) => {
+                    let res = if kind == 0 {
+                        em.peek_aram(offset, want.len() as u16)
+                    } else {
+                        em.peek_vram(offset, want.len() as u16)
+                    };
+                    match res {
+                        Ok(got) if got == want => {
+                            println!("PASS {label}:{offset:04X}={}", hex_str(&want));
+                        }
+                        Ok(got) => {
+                            println!(
+                                "FAIL {label}:{offset:04X} expected {} got {}",
+                                hex_str(&want),
+                                hex_str(&got)
+                            );
+                            assert_failed = true;
+                        }
+                        Err(e) => {
+                            eprintln!("error: --assert-{label} `{spec}`: {e}");
+                            assert_failed = true;
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error: --assert-{label} `{spec}`: {e}");
+                    assert_failed = true;
+                }
+            }
+        }
+    }
+
     if let Some(path) = apu_log_path {
         match em.take_mailbox_log() {
             Ok(events) => match write_mailbox_log_csv(path, &events) {
@@ -1819,7 +1959,11 @@ fn run_state(
             secs
         );
     }
-    ExitCode::SUCCESS
+    if assert_failed {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 fn run(
