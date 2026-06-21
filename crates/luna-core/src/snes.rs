@@ -1143,6 +1143,27 @@ impl Snes {
         }
         out
     }
+
+    /// Debug poke: write `data` to WRAM (`$7E-$7F` or the `$00-3F`/`$80-BF`
+    /// low-RAM mirror) directly, bypassing the bus. For injecting a test
+    /// state without a full save-state. Addresses outside WRAM are ignored
+    /// (poking ROM/registers is meaningless / unsafe). Returns bytes written.
+    pub fn dbg_poke_bytes(&mut self, bank: u8, offset: u16, data: &[u8]) -> usize {
+        let mut written = 0;
+        for (i, &b) in data.iter().enumerate() {
+            let off = offset.wrapping_add(i as u16);
+            let idx = if matches!(bank, 0x7E..=0x7F) {
+                (usize::from(bank - 0x7E) << 16) | usize::from(off)
+            } else if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && off < 0x2000 {
+                usize::from(off)
+            } else {
+                continue;
+            };
+            self.wram[idx] = b;
+            written += 1;
+        }
+        written
+    }
 }
 
 // =============================================================================
