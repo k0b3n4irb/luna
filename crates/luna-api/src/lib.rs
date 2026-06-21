@@ -1565,6 +1565,24 @@ impl Emulator {
         Ok(snes.mapper.coproc_ram().map(<[u8]>::to_vec))
     }
 
+    /// Battery-backed cartridge SRAM — the raw contents of a `.srm` file.
+    /// Empty if the cart has none. Unlike a save-state (in-run snapshot),
+    /// this is the cross-run-persistent battery data, for power-cycle tests.
+    pub fn sram(&self) -> Vec<u8> {
+        self.snes
+            .as_ref()
+            .map(|s| s.mapper.sram().to_vec())
+            .unwrap_or_default()
+    }
+
+    /// Load battery SRAM (e.g. read from a `.srm` file). Copies up to the
+    /// cartridge's SRAM size.
+    pub fn load_sram(&mut self, data: &[u8]) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.mapper.load_sram(data);
+        Ok(())
+    }
+
     /// Diagnostic: a full copy of the 128 KiB WRAM (`$7E0000`-`$7FFFFF`).
     /// For byte-level cross-emulator diffing once `wram_page_hashes` has
     /// localised the first diverging frame + page.

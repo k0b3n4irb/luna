@@ -93,6 +93,17 @@ pub trait Mapper {
     /// Size of the SRAM in bytes (0 if none).
     fn sram_size(&self) -> usize;
 
+    /// Raw battery-backed SRAM bytes — the contents of a `.srm` file.
+    /// Empty if the cartridge has none. Used for cross-run persistence
+    /// (a true power-cycle test), distinct from a full save-state.
+    fn sram(&self) -> &[u8] {
+        &[]
+    }
+
+    /// Load raw battery SRAM (e.g. from a `.srm` file). Copies up to the
+    /// smaller of the two lengths; no-op if the cartridge has no SRAM.
+    fn load_sram(&mut self, _data: &[u8]) {}
+
     /// Re-power the cartridge coprocessor to its power-on state, as the
     /// SNES reset line does on real hardware (ares `SuperFX::power()` /
     /// `SA1::power()`). ROM and battery-backed SRAM persist; the
