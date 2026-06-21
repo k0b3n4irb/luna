@@ -163,6 +163,15 @@ impl Mapper for HiRomMapper {
         self.sram.len()
     }
 
+    fn sram(&self) -> &[u8] {
+        &self.sram
+    }
+
+    fn load_sram(&mut self, data: &[u8]) {
+        let n = data.len().min(self.sram.len());
+        self.sram[..n].copy_from_slice(&data[..n]);
+    }
+
     fn save_state(&self) -> Vec<u8> {
         bincode::serialize(&self.sram).unwrap_or_default()
     }

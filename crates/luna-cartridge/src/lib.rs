@@ -354,6 +354,9 @@ fn parse_at(rom: &[u8], off: usize) -> Header {
     // nibble 3 is a weaker secondary signal (kept via `mapper_from_byte`),
     // but RomType is what hardware/ares key on.
     let is_sa1 = (chipset & 0x0F) >= 0x03 && (chipset & 0xF0) == 0x30;
+    // S-DD1 (graphics decompression — Star Ocean, Street Fighter Alpha 2):
+    // chipset high nibble 4. LoROM-based; the chip is a `Sdd1Mapper` shim.
+    let is_sdd1 = (chipset & 0x0F) >= 0x03 && (chipset & 0xF0) == 0x40;
     let base_kind = mapper_from_byte(map_byte).unwrap_or(MapperKind::LoRom);
     // DSP-1 boards exist in both LoROM (DR/SR at $8000) and HiROM (DR/SR at
     // $6000) flavours — the base layout follows the map byte.
@@ -364,6 +367,8 @@ fn parse_at(rom: &[u8], off: usize) -> Header {
         MapperKind::Dsp1
     } else if is_sa1 {
         MapperKind::Sa1
+    } else if is_sdd1 {
+        MapperKind::Sdd1
     } else {
         base_kind
     };

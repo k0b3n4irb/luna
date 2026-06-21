@@ -48,6 +48,9 @@ pub enum ApiError {
     /// `step` / etc. panicked inside the core.
     #[error("emulator panicked: {0}")]
     Panic(String),
+    /// A debug call got an invalid argument (e.g. an unknown register name).
+    #[error("{0}")]
+    BadArg(String),
     /// Save-state encode/decode failed, or a loaded state did not match
     /// the running ROM / save-state format version.
     #[error("save state: {0}")]
@@ -1355,6 +1358,21 @@ impl Emulator {
         Ok(h.finish())
     }
 
+    /// Hash of the **displayed** RGBA frame ([`Self::render_frame_rgba`] at the
+    /// given `force_display`) — a stable visual-regression key. Deterministic
+    /// and **cross-architecture** stable (fixed-seed `SipHash` over the
+    /// integer-rendered bytes — no float), so a baseline captured on `x86_64`
+    /// matches one on `aarch64`. Hashes exactly the pixels a `--screenshot` at
+    /// the same `force_display` would write, **before** PNG encoding — avoiding
+    /// the build-dependent encoder variability of hashing the encoded file.
+    pub fn frame_hash(&self, force_display: bool) -> Result<u64, ApiError> {
+        use std::hash::Hasher;
+        let rgba = self.render_frame_rgba(force_display)?;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        h.write(&rgba);
+        Ok(h.finish())
+    }
+
     /// Serialize the full running-machine state into a portable blob.
     ///
     /// The blob captures the mutable `Snes` state (CPU / PPU / APU / DMA /
@@ -1447,6 +1465,120 @@ impl Emulator {
     pub fn peek_memory(&mut self, bank: u8, offset: u16, count: u16) -> Result<Vec<u8>, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         Ok(snes.dbg_peek_bytes(bank, offset, usize::from(count)))
+    }
+
+    /// Debug poke (L8): write bytes into WRAM (`$7E-$7F` or the `$00-3F`/
+    /// `$80-BF` low-RAM mirror) directly — inject a test state without a full
+    /// save-state. Returns bytes written (non-WRAM addresses are skipped).
+    pub fn poke_memory(&mut self, bank: u8, offset: u16, data: &[u8]) -> Result<usize, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        Ok(snes.dbg_poke_bytes(bank, offset, data))
+    }
+
+    /// Memory search (L9): every 24-bit `$7E-$7F` WRAM address whose bytes
+    /// match `pattern`. Empty `pattern` → no hits.
+    pub fn search_memory(&self, pattern: &[u8]) -> Result<Vec<u32>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        if pattern.is_empty() {
+            return Ok(Vec::new());
+        }
+        let wram = &snes.wram[..];
+        let mut hits = Vec::new();
+        for i in 0..=wram.len().saturating_sub(pattern.len()) {
+            if &wram[i..i + pattern.len()] == pattern {
+                hits.push(0x7E_0000 + i as u32);
+            }
+        }
+        Ok(hits)
+    }
+
+    /// Controlled execution (L10): step until the CPU PC reaches `pc`
+    /// (`pb << 16 | pc`) or `max_steps` instructions elapse. Returns `true`
+    /// if `pc` was reached (checked BEFORE each step, so a current match
+    /// returns immediately).
+    pub fn run_until_pc(&mut self, pc: u32, max_steps: u64) -> Result<bool, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        for _ in 0..max_steps {
+            let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
+            if cur == pc {
+                return Ok(true);
+            }
+            snes.step();
+        }
+        let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
+        Ok(cur == pc)
+    }
+
+    /// Controlled execution (L10): set a CPU register by name — one of
+    /// `a/x/y/sp/dp/pc/pb/db/p` (case-insensitive). Unknown name → `BadArg`.
+    pub fn set_cpu_register(&mut self, reg: &str, val: u32) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        let c = &mut snes.cpu;
+        match reg.to_ascii_lowercase().as_str() {
+            "a" => c.a = val as u16,
+            "x" => c.x = val as u16,
+            "y" => c.y = val as u16,
+            "sp" | "s" => c.sp = val as u16,
+            "dp" | "d" => c.dp = val as u16,
+            "pc" => c.pc = val as u16,
+            "pb" | "k" => c.pb = val as u8,
+            "db" | "dbr" => c.db = val as u8,
+            "p" => c.p.0 = val as u8,
+            other => return Err(ApiError::BadArg(format!("unknown register `{other}`"))),
+        }
+        Ok(())
+    }
+
+    /// Breakpoint (L7): step until an instruction WRITES `addr_full`
+    /// (`bank << 16 | offset`), or `max_steps` elapse. Returns the
+    /// `(pc, value)` of the writing instruction, or `None` if not hit.
+    pub fn run_until_mem_write(
+        &mut self,
+        addr_full: u32,
+        max_steps: u64,
+    ) -> Result<Option<(u32, u8)>, ApiError> {
+        self.run_until_mem_access(addr_full, MemEventKind::Write, max_steps)
+    }
+
+    /// Breakpoint (L7): like [`Self::run_until_mem_write`] but for READS.
+    pub fn run_until_mem_read(
+        &mut self,
+        addr_full: u32,
+        max_steps: u64,
+    ) -> Result<Option<(u32, u8)>, ApiError> {
+        self.run_until_mem_access(addr_full, MemEventKind::Read, max_steps)
+    }
+
+    fn run_until_mem_access(
+        &mut self,
+        addr_full: u32,
+        want: MemEventKind,
+        max_steps: u64,
+    ) -> Result<Option<(u32, u8)>, ApiError> {
+        let bank = (addr_full >> 16) as u8;
+        {
+            let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+            // Capture this bank's accesses; drained every step so it never
+            // overflows. (Re-enabling resets the buffer.)
+            snes.enable_mem_trace(1 << 16, Some(bank));
+        }
+        for _ in 0..max_steps {
+            {
+                let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+                snes.step();
+            }
+            let events = {
+                let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+                snes.take_mem_trace_log()
+            };
+            if let Some(ev) = events
+                .into_iter()
+                .find(|ev| ev.addr_full == addr_full && ev.kind == want)
+            {
+                return Ok(Some((ev.pc_full, ev.value)));
+            }
+        }
+        Ok(None)
     }
 
     /// Enable APU mailbox (`$2140-$2143`) event logging. Every CPU
@@ -1548,6 +1680,24 @@ impl Emulator {
     pub fn coproc_ram(&self) -> Result<Option<Vec<u8>>, ApiError> {
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
         Ok(snes.mapper.coproc_ram().map(<[u8]>::to_vec))
+    }
+
+    /// Battery-backed cartridge SRAM — the raw contents of a `.srm` file.
+    /// Empty if the cart has none. Unlike a save-state (in-run snapshot),
+    /// this is the cross-run-persistent battery data, for power-cycle tests.
+    pub fn sram(&self) -> Vec<u8> {
+        self.snes
+            .as_ref()
+            .map(|s| s.mapper.sram().to_vec())
+            .unwrap_or_default()
+    }
+
+    /// Load battery SRAM (e.g. read from a `.srm` file). Copies up to the
+    /// cartridge's SRAM size.
+    pub fn load_sram(&mut self, data: &[u8]) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.mapper.load_sram(data);
+        Ok(())
     }
 
     /// Diagnostic: a full copy of the 128 KiB WRAM (`$7E0000`-`$7FFFFF`).
@@ -1714,6 +1864,37 @@ impl Emulator {
     pub fn take_mem_trace_log(&mut self) -> Result<Vec<MemTraceEvent>, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         Ok(snes.take_mem_trace_log())
+    }
+
+    /// Enable capture of `$21FC` Nocash-TTY writes (the SDK debug channel
+    /// behind `SNES_NOCASH` / `SNES_ASSERT`). A headless harness can then read
+    /// the program's own log / assertion output without a GUI debugger.
+    pub fn enable_nocash_log(&mut self) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.enable_nocash_log();
+        Ok(())
+    }
+
+    /// Drain the captured `$21FC` Nocash byte stream.
+    pub fn take_nocash_log(&mut self) -> Result<Vec<u8>, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        Ok(snes.take_nocash_log())
+    }
+
+    /// Enable capture of `WDM` (`$42`) executions — the SDK breakpoint /
+    /// assert channel (`SNES_ASSERT` → `WDM $00`). Complements the `$21FC`
+    /// Nocash log: `$21FC` carries text, `WDM` carries the binary
+    /// "assertion fired here" signal `(pc_full, operand)`.
+    pub fn enable_wdm_log(&mut self) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.cpu.enable_wdm_log();
+        Ok(())
+    }
+
+    /// Drain the captured `WDM` events as `(pc_full, operand)` per hit.
+    pub fn take_wdm_log(&mut self) -> Result<Vec<(u32, u8)>, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        Ok(snes.cpu.take_wdm_log())
     }
 
     /// Direct read of the SPC700's ARAM. Read-only, no bus side
@@ -2006,6 +2187,46 @@ mod tests {
     }
 
     #[test]
+    fn debug_poke_search_run_until_set_register() {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+
+        // L8 poke + L9 search round-trip through WRAM.
+        assert_eq!(
+            e.poke_memory(0x7E, 0x0100, &[0xDE, 0xAD, 0xBE, 0xEF])
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            e.peek_memory(0x7E, 0x0100, 4).unwrap(),
+            vec![0xDE, 0xAD, 0xBE, 0xEF]
+        );
+        // low-RAM mirror writes the same bytes ($00:0100 → $7E:0100).
+        assert_eq!(e.peek_memory(0x00, 0x0100, 2).unwrap(), vec![0xDE, 0xAD]);
+        assert!(
+            e.search_memory(&[0xDE, 0xAD, 0xBE, 0xEF])
+                .unwrap()
+                .contains(&0x7E_0100)
+        );
+        assert!(e.search_memory(&[]).unwrap().is_empty());
+
+        // L10 set_cpu_register + run_until_pc.
+        e.set_cpu_register("pb", 0x00).unwrap();
+        e.set_cpu_register("pc", 0x9000).unwrap();
+        e.set_cpu_register("a", 0x1234).unwrap();
+        assert!(e.set_cpu_register("bogus", 0).is_err());
+        // Already at $00:9000 → run_until returns immediately.
+        assert!(e.run_until_pc(0x00_9000, 10).unwrap());
+        // A PC we won't reach within 1 step from here is not hit.
+        assert!(!e.run_until_pc(0x12_3456, 1).unwrap());
+
+        // L7: a memory-write breakpoint on an address the boot code never
+        // touches returns None within the step budget (no panic, no hang).
+        assert_eq!(e.run_until_mem_write(0x7E_FFFE, 50).unwrap(), None);
+        assert_eq!(e.run_until_mem_read(0x7E_FFFE, 50).unwrap(), None);
+    }
+
+    #[test]
     fn fresh_emulator_has_no_rom() {
         let e = Emulator::new();
         assert!(!e.has_rom());
@@ -2195,5 +2416,22 @@ mod tests {
             std::hash::Hasher::finish(&ref_h),
             "hashes the displayed RGB"
         );
+    }
+
+    #[test]
+    fn frame_hash_is_deterministic_and_matches_render_frame_rgba() {
+        let mut e = Emulator::new();
+        assert!(matches!(e.frame_hash(false), Err(ApiError::NoRom)));
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        e.step_until_frame(1_000_000).unwrap();
+        let h = e.frame_hash(false).expect("hash");
+        // Pure function of state — stable across calls (the property a
+        // cross-arch baseline relies on).
+        assert_eq!(h, e.frame_hash(false).unwrap(), "frame_hash must be stable");
+        // It is exactly a fixed-seed hash of the displayed RGBA bytes.
+        let rgba = e.render_frame_rgba(false).unwrap();
+        let mut ref_h = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hasher::write(&mut ref_h, &rgba);
+        assert_eq!(h, std::hash::Hasher::finish(&ref_h));
     }
 }
