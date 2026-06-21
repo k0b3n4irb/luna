@@ -19,6 +19,11 @@
 //!   `[l0, r0, l1, r1, …]` array.
 //! - `peek_memory { bank, offset, count }` → read through the bus.
 //! - `peek_aram { offset, count }` → direct SPC700 ARAM read.
+//! - `peek_vram { offset, count }` → direct VRAM read.
+//! - `poke_memory { bank, offset, data }` → inject WRAM bytes.
+//! - `search_memory { pattern }` → find a byte pattern in WRAM.
+//! - `run_until_pc { pc, max_steps }` → step to a target PC.
+//! - `set_cpu_register { reg, val }` → set a CPU register.
 //!
 //! Transport is stdio by default ([`serve_stdio`]); a future commit
 //! will add HTTP-SSE for browser clients.
@@ -126,6 +131,51 @@ pub struct PeekAramParams {
     pub count: u16,
 }
 
+/// `peek_vram` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct PeekVramParams {
+    /// 16-bit word/byte offset within the 64 KB VRAM.
+    pub offset: u16,
+    /// Number of bytes to read.
+    pub count: u16,
+}
+
+/// `poke_memory` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct PokeMemoryParams {
+    /// 8-bit CPU bank (`$7E-$7F` or a `$00-3F`/`$80-BF` low-RAM mirror).
+    pub bank: u8,
+    /// 16-bit offset within that bank.
+    pub offset: u16,
+    /// Bytes to write (JSON array, e.g. `[222, 173]`).
+    pub data: Vec<u8>,
+}
+
+/// `search_memory` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SearchMemoryParams {
+    /// Byte pattern to find in `$7E-$7F` WRAM.
+    pub pattern: Vec<u8>,
+}
+
+/// `run_until_pc` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct RunUntilPcParams {
+    /// 24-bit target PC (`pb << 16 | pc`).
+    pub pc: u32,
+    /// Maximum instructions to step before giving up.
+    pub max_steps: u64,
+}
+
+/// `set_cpu_register` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SetRegisterParams {
+    /// Register name: `a/x/y/sp/dp/pc/pb/db/p` (case-insensitive).
+    pub reg: String,
+    /// Value (low byte/word used per the register's width).
+    pub val: u32,
+}
+
 // ---------------- Tool result types ----------------
 
 /// `load_rom` / `state` result wrappers.
@@ -173,11 +223,32 @@ pub struct DrainAudioResult {
     pub frames: usize,
 }
 
-/// `peek_memory` / `peek_aram` result wrapper.
+/// `peek_memory` / `peek_aram` / `peek_vram` result wrapper.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct MemoryResult {
     /// Bytes read.
     pub bytes: Vec<u8>,
+}
+
+/// `poke_memory` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct PokeResult {
+    /// Bytes actually written (non-WRAM addresses are skipped).
+    pub written: usize,
+}
+
+/// `search_memory` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SearchResult {
+    /// 24-bit `$7E-$7F` addresses of every match.
+    pub addresses: Vec<u32>,
+}
+
+/// `run_until_pc` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct RunUntilResult {
+    /// `true` if the target PC was reached within `max_steps`.
+    pub hit: bool,
 }
 
 // ---------------- Server impl ----------------
@@ -360,6 +431,87 @@ impl LunaServer {
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(MemoryResult { bytes }))
+    }
+
+    #[rmcp::tool(
+        description = "Read `count` bytes from the 64 KB VRAM at the given offset. \
+                                Read-only."
+    )]
+    async fn peek_vram(
+        &self,
+        Parameters(params): Parameters<PeekVramParams>,
+    ) -> Result<rmcp::Json<MemoryResult>, ErrorData> {
+        let bytes = {
+            let em = self.emulator.lock().await;
+            em.peek_vram(params.offset, params.count)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(MemoryResult { bytes }))
+    }
+
+    #[rmcp::tool(
+        description = "Write bytes directly into WRAM ($7E-$7F or the $00-3F/$80-BF \
+                                low-RAM mirror) — inject a test state without a save-state. \
+                                Returns bytes written (non-WRAM addresses are skipped)."
+    )]
+    async fn poke_memory(
+        &self,
+        Parameters(params): Parameters<PokeMemoryParams>,
+    ) -> Result<rmcp::Json<PokeResult>, ErrorData> {
+        let written = {
+            let mut em = self.emulator.lock().await;
+            em.poke_memory(params.bank, params.offset, &params.data)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(PokeResult { written }))
+    }
+
+    #[rmcp::tool(
+        description = "Find every $7E-$7F WRAM address whose bytes match `pattern`. \
+                                Returns the 24-bit addresses."
+    )]
+    async fn search_memory(
+        &self,
+        Parameters(params): Parameters<SearchMemoryParams>,
+    ) -> Result<rmcp::Json<SearchResult>, ErrorData> {
+        let addresses = {
+            let em = self.emulator.lock().await;
+            em.search_memory(&params.pattern)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(SearchResult { addresses }))
+    }
+
+    #[rmcp::tool(
+        description = "Step the CPU until PB:PC reaches `pc` (24-bit) or `max_steps` \
+                                instructions elapse. Returns whether the target was hit."
+    )]
+    async fn run_until_pc(
+        &self,
+        Parameters(params): Parameters<RunUntilPcParams>,
+    ) -> Result<rmcp::Json<RunUntilResult>, ErrorData> {
+        let hit = {
+            let mut em = self.emulator.lock().await;
+            em.run_until_pc(params.pc, params.max_steps)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(RunUntilResult { hit }))
+    }
+
+    #[rmcp::tool(
+        description = "Set a CPU register by name (a/x/y/sp/dp/pc/pb/db/p). For setting \
+                                up a test state before stepping."
+    )]
+    async fn set_cpu_register(
+        &self,
+        Parameters(params): Parameters<SetRegisterParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.set_cpu_register(&params.reg, params.val)
+                .map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
     }
 }
 
