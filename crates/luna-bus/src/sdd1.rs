@@ -416,10 +416,16 @@ impl Sdd1Mapper {
             sram: vec![0; sram_size],
             r4800: 0,
             r4801: 0,
+            // MMC bank selects power on to the IDENTITY mapping (ares
+            // `SDD1::power`): $C0-CF→megabit 0, $D0-DF→1, $E0-EF→2, $F0-FF→3.
+            // Games that only reconfigure the high banks ($4806/$4807) rely on
+            // this default for $C0-DF — all-zero made bank $D7 read megabit 0,
+            // so Star Ocean's logo palette (at $D7:EF60) came out cream not
+            // green.
             r4804: 0,
-            r4805: 0,
-            r4806: 0,
-            r4807: 0,
+            r4805: 1,
+            r4806: 2,
+            r4807: 3,
             decompressor: Sdd1Decompressor::new(),
             dma_address: [0; 8],
             dma_size: [0; 8],
@@ -473,10 +479,19 @@ impl Sdd1Mapper {
         }
     }
 
-    /// SRAM offset (S-DD1 board: `$70-73:$0000-7FFF`, within luna's `LoROM`
-    /// `$70-7D/$F0-FD` convention; wraps modulo the actual SRAM size).
+    /// SRAM offset (S-DD1 board: `$70-7D:$0000-7FFF`; wraps modulo the actual
+    /// SRAM size).
+    ///
+    /// IMPORTANT: only the `$70-7D` lower half is SRAM. Unlike a plain `LoROM`
+    /// cart, the S-DD1's `$C0-FF` (including the `$F0-FD` LoROM-mirror banks)
+    /// is the MMC-banked **ROM** region — never SRAM. Claiming `$F0-FD` as
+    /// SRAM made every `$F0-FD:0000-7FFF` read return zeroed save-RAM instead
+    /// of the MMC ROM, so Star Ocean's post-intro script engine (it walks a
+    /// linked list of script entries that live in `$FA:xxxx`) read null links
+    /// and dead-looped at `$C0:6C00`. The intro never hit it because it only
+    /// reads `$C0-EF`.
     fn sram_offset(&self, bank: u8, offset: u16) -> Option<usize> {
-        if self.sram.is_empty() || !matches!(bank, 0x70..=0x7D | 0xF0..=0xFD) || offset >= 0x8000 {
+        if self.sram.is_empty() || !matches!(bank, 0x70..=0x7D) || offset >= 0x8000 {
             return None;
         }
         let normalized_bank = (bank & 0x7F) - 0x70;
@@ -609,10 +624,11 @@ impl Mapper for Sdd1Mapper {
         // battery SRAM persists.
         self.r4800 = 0;
         self.r4801 = 0;
+        // Identity MMC mapping on reset (ares `SDD1::power`), not all-zero.
         self.r4804 = 0;
-        self.r4805 = 0;
-        self.r4806 = 0;
-        self.r4807 = 0;
+        self.r4805 = 1;
+        self.r4806 = 2;
+        self.r4807 = 3;
         self.dma_address = [0; 8];
         self.dma_size = [0; 8];
         self.dma_ready = false;
@@ -874,5 +890,47 @@ mod tests {
         m2.load_state(&blob);
         assert_eq!(m2.read(make_addr(0x70, 0x0010)), Some(0x5A));
         assert_eq!(m2.read(make_addr(0x00, 0x4806)), Some(0x03));
+    }
+
+    #[test]
+    fn high_banks_f0_fd_read_mmc_rom_not_sram() {
+        // Regression: the S-DD1's `$C0-FF` (including the `$F0-FD` LoROM-mirror
+        // banks) is the MMC-banked ROM region — never SRAM. A `$F0-FD:0000-7FFF`
+        // read must return MMC ROM, not zeroed save-RAM. Star Ocean's post-intro
+        // script engine walks a linked list of script entries in `$FA:xxxx`;
+        // mapping those banks to (zeroed) SRAM returned null links and dead-looped
+        // the script interpreter at `$C0:6C00`. The intro never hit it (it only
+        // reads `$C0-EF`).
+        let mut m = mapper_with_ramp_rom(0x60_0000); // 6 MiB, rom[i] = i & 0xFF
+        // `$4807` selects the 1 MiB block mapped at `$F0-FF`; pick block 5.
+        m.write(make_addr(0x00, 0x4807), 0x05);
+        // Poison the real SRAM ($70) with a sentinel the bogus path would echo.
+        m.write(make_addr(0x70, 0x0003), 0xAB);
+        // `$FA:0003` → block 5 → ROM offset 0x5A0003 → ramp byte 0x03, i.e. the
+        // MMC ROM — NOT the SRAM sentinel and NOT zero.
+        assert_eq!(m.read(make_addr(0xFA, 0x0003)), Some(0x03));
+        // Writes to the ROM region are ignored (no SRAM aliasing).
+        m.write(make_addr(0xFA, 0x0003), 0x99);
+        assert_eq!(m.read(make_addr(0xFA, 0x0003)), Some(0x03));
+        // The genuine SRAM at `$70` is untouched and still reachable.
+        assert_eq!(m.read(make_addr(0x70, 0x0003)), Some(0xAB));
+    }
+
+    #[test]
+    fn mmc_powers_on_to_identity_mapping() {
+        // ROM byte = its megabit index, so a read reveals which megabit the
+        // MMC mapped it to. ares `SDD1::power` defaults the bank selects to the
+        // IDENTITY (r4804=0, r4805=1, r4806=2, r4807=3) — NOT all-zero. Star
+        // Ocean only writes $4806/$4807 and relies on this default for the low
+        // banks; an all-zero default mapped $D7 (its logo palette at $D7:EF60)
+        // to megabit 0, turning the tri-Ace/VRSS logo cream instead of green.
+        let rom: Vec<u8> = (0..0x40_0000).map(|i| ((i >> 20) & 0xFF) as u8).collect();
+        let mut m = Sdd1Mapper::new(rom, 0x2000);
+        assert_eq!(m.read(make_addr(0x00, 0x4804)), Some(0));
+        assert_eq!(m.read(make_addr(0x00, 0x4805)), Some(1));
+        assert_eq!(m.read(make_addr(0x00, 0x4806)), Some(2));
+        assert_eq!(m.read(make_addr(0x00, 0x4807)), Some(3));
+        // A $D0-DF read maps to megabit 1 (identity), not megabit 0.
+        assert_eq!(m.read(make_addr(0xD7, 0x0000)), Some(1));
     }
 }
