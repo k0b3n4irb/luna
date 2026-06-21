@@ -1529,6 +1529,58 @@ impl Emulator {
         Ok(())
     }
 
+    /// Breakpoint (L7): step until an instruction WRITES `addr_full`
+    /// (`bank << 16 | offset`), or `max_steps` elapse. Returns the
+    /// `(pc, value)` of the writing instruction, or `None` if not hit.
+    pub fn run_until_mem_write(
+        &mut self,
+        addr_full: u32,
+        max_steps: u64,
+    ) -> Result<Option<(u32, u8)>, ApiError> {
+        self.run_until_mem_access(addr_full, MemEventKind::Write, max_steps)
+    }
+
+    /// Breakpoint (L7): like [`Self::run_until_mem_write`] but for READS.
+    pub fn run_until_mem_read(
+        &mut self,
+        addr_full: u32,
+        max_steps: u64,
+    ) -> Result<Option<(u32, u8)>, ApiError> {
+        self.run_until_mem_access(addr_full, MemEventKind::Read, max_steps)
+    }
+
+    fn run_until_mem_access(
+        &mut self,
+        addr_full: u32,
+        want: MemEventKind,
+        max_steps: u64,
+    ) -> Result<Option<(u32, u8)>, ApiError> {
+        let bank = (addr_full >> 16) as u8;
+        {
+            let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+            // Capture this bank's accesses; drained every step so it never
+            // overflows. (Re-enabling resets the buffer.)
+            snes.enable_mem_trace(1 << 16, Some(bank));
+        }
+        for _ in 0..max_steps {
+            {
+                let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+                snes.step();
+            }
+            let events = {
+                let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+                snes.take_mem_trace_log()
+            };
+            if let Some(ev) = events
+                .into_iter()
+                .find(|ev| ev.addr_full == addr_full && ev.kind == want)
+            {
+                return Ok(Some((ev.pc_full, ev.value)));
+            }
+        }
+        Ok(None)
+    }
+
     /// Enable APU mailbox (`$2140-$2143`) event logging. Every CPU
     /// read or write of those ports from this point onward is captured
     /// in an in-memory ring buffer that the caller can drain with
@@ -2167,6 +2219,11 @@ mod tests {
         assert!(e.run_until_pc(0x00_9000, 10).unwrap());
         // A PC we won't reach within 1 step from here is not hit.
         assert!(!e.run_until_pc(0x12_3456, 1).unwrap());
+
+        // L7: a memory-write breakpoint on an address the boot code never
+        // touches returns None within the step budget (no panic, no hang).
+        assert_eq!(e.run_until_mem_write(0x7E_FFFE, 50).unwrap(), None);
+        assert_eq!(e.run_until_mem_read(0x7E_FFFE, 50).unwrap(), None);
     }
 
     #[test]

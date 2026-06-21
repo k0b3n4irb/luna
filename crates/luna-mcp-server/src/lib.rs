@@ -176,6 +176,15 @@ pub struct SetRegisterParams {
     pub val: u32,
 }
 
+/// `run_until_mem_write` / `run_until_mem_read` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct MemBreakpointParams {
+    /// 24-bit bus address to watch (`bank << 16 | offset`).
+    pub addr: u32,
+    /// Maximum instructions to step before giving up.
+    pub max_steps: u64,
+}
+
 // ---------------- Tool result types ----------------
 
 /// `load_rom` / `state` result wrappers.
@@ -249,6 +258,17 @@ pub struct SearchResult {
 pub struct RunUntilResult {
     /// `true` if the target PC was reached within `max_steps`.
     pub hit: bool,
+}
+
+/// `run_until_mem_write` / `run_until_mem_read` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct MemBreakResult {
+    /// `true` if the watched access happened within `max_steps`.
+    pub hit: bool,
+    /// 24-bit PC of the instruction that did the access (0 if not hit).
+    pub pc: u32,
+    /// Byte transferred (0 if not hit).
+    pub value: u8,
 }
 
 // ---------------- Server impl ----------------
@@ -512,6 +532,61 @@ impl LunaServer {
                 .map_err(|e| api_err_to_mcp(&e))?;
         }
         Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Step until an instruction WRITES the 24-bit bus address `addr`, \
+                                or `max_steps` elapse. Returns the writing PC + value (a memory \
+                                write-breakpoint — e.g. catch what zeroes a pointer)."
+    )]
+    async fn run_until_mem_write(
+        &self,
+        Parameters(params): Parameters<MemBreakpointParams>,
+    ) -> Result<rmcp::Json<MemBreakResult>, ErrorData> {
+        let hit = {
+            let mut em = self.emulator.lock().await;
+            em.run_until_mem_write(params.addr, params.max_steps)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(match hit {
+            Some((pc, value)) => MemBreakResult {
+                hit: true,
+                pc,
+                value,
+            },
+            None => MemBreakResult {
+                hit: false,
+                pc: 0,
+                value: 0,
+            },
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Step until an instruction READS the 24-bit bus address `addr`, \
+                                or `max_steps` elapse. Returns the reading PC + value."
+    )]
+    async fn run_until_mem_read(
+        &self,
+        Parameters(params): Parameters<MemBreakpointParams>,
+    ) -> Result<rmcp::Json<MemBreakResult>, ErrorData> {
+        let hit = {
+            let mut em = self.emulator.lock().await;
+            em.run_until_mem_read(params.addr, params.max_steps)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(match hit {
+            Some((pc, value)) => MemBreakResult {
+                hit: true,
+                pc,
+                value,
+            },
+            None => MemBreakResult {
+                hit: false,
+                pc: 0,
+                value: 0,
+            },
+        }))
     }
 }
 
