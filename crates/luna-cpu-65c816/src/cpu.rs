@@ -66,6 +66,15 @@ pub struct Cpu {
     /// reset to `false` at the start of every instruction in
     /// [`Cpu::execute`].
     pub bank0_wrap: bool,
+    /// Optional capture of `WDM` (`$42`) executions — `(pc_full, operand)`
+    /// per hit. `WDM` is a reserved no-op on hardware but a debugger signal
+    /// in no$/Mesen (operand `$00` = breakpoint), used by SDKs as an
+    /// assert/breakpoint channel (opensnes' `SNES_ASSERT` → `consoleMesen
+    /// Breakpoint` emits `WDM $00`). `None` = not capturing (zero cost);
+    /// enable with [`Cpu::enable_wdm_log`]. Transient debug state — not
+    /// serialized.
+    #[serde(skip)]
+    pub wdm_log: Option<Vec<(u32, u8)>>,
 }
 
 impl Default for Cpu {
@@ -96,6 +105,24 @@ impl Cpu {
             pending_irq: false,
             irq_line: false,
             bank0_wrap: false,
+            wdm_log: None,
+        }
+    }
+
+    /// Start capturing `WDM` (`$42`) executions (operand + PC). Idempotent.
+    /// See [`Cpu::wdm_log`].
+    pub fn enable_wdm_log(&mut self) {
+        if self.wdm_log.is_none() {
+            self.wdm_log = Some(Vec::new());
+        }
+    }
+
+    /// Drain the captured `WDM` events (`(pc_full, operand)` per hit).
+    /// Empty if capture was never enabled.
+    pub fn take_wdm_log(&mut self) -> Vec<(u32, u8)> {
+        match self.wdm_log.as_mut() {
+            Some(log) => std::mem::take(log),
+            None => Vec::new(),
         }
     }
 

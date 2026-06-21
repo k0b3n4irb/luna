@@ -1187,7 +1187,13 @@ impl Cpu {
     // ===================================================================
 
     fn wdm<B: Bus>(&mut self, bus: &mut B) {
-        let _operand = self.fetch_u8(bus);
+        // PC currently points at the operand byte (the opcode was already
+        // fetched). Record that address so a captured hit is locatable.
+        let pc_full = (u32::from(self.pb) << 16) | u32::from(self.pc);
+        let operand = self.fetch_u8(bus);
+        if let Some(log) = self.wdm_log.as_mut() {
+            log.push((pc_full, operand));
+        }
     }
 
     // ===================================================================
@@ -3546,6 +3552,26 @@ mod tests {
         let (mut cpu, mut bus) = run(&[0x42, 0xAA]);
         cpu.step(&mut bus);
         assert_eq!(cpu.pc, 0x8002, "WDM advances PC by 2 like other 2-byte ops");
+    }
+
+    #[test]
+    fn wdm_log_captures_operand_and_pc_when_enabled() {
+        // Disabled by default: WDM stays a silent no-op.
+        let (mut cpu, mut bus) = run(&[0x42, 0x00]);
+        cpu.step(&mut bus);
+        assert!(cpu.take_wdm_log().is_empty(), "no capture unless enabled");
+
+        // Enabled: the operand ($00 = breakpoint/assert) + PC are recorded.
+        // The recorded PC points at the operand byte (opcode at $8000 →
+        // operand at $8001).
+        let (mut cpu, mut bus) = run(&[0x42, 0x00]);
+        cpu.enable_wdm_log();
+        let pc_before = (u32::from(cpu.pb) << 16) | u32::from(cpu.pc);
+        cpu.step(&mut bus);
+        let log = cpu.take_wdm_log();
+        assert_eq!(log, vec![(pc_before + 1, 0x00)], "(pc_of_operand, operand)");
+        // Drained.
+        assert!(cpu.take_wdm_log().is_empty());
     }
 
     #[test]

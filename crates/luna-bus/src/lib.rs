@@ -23,6 +23,7 @@ pub mod hirom;
 pub mod lorom;
 pub mod mapper;
 pub mod sa1;
+pub mod sdd1;
 pub mod speed;
 pub mod superfx;
 pub mod types;

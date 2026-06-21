@@ -11,6 +11,7 @@ use luna_apu::Apu;
 use luna_bus::hirom::HiRomMapper;
 use luna_bus::lorom::LoRomMapper;
 use luna_bus::sa1::Sa1Mapper;
+use luna_bus::sdd1::Sdd1Mapper;
 use luna_bus::superfx::SuperFxMapper;
 use luna_bus::{
     Addr24, Bus, MCycles, Mapper, MapperKind, address_speed, bank_of, make_addr, offset_of,
@@ -186,6 +187,14 @@ pub struct Snes {
     /// [`Snes::enable_mem_trace`].
     #[serde(skip)]
     pub mem_trace_log: Option<MemTraceLog>,
+
+    /// Optional capture of the SDK debug TTY: every byte the program writes
+    /// to `$21FC` (the no$/Mesen "Nocash" console port — opensnes'
+    /// `consoleNocashMessage` / `SNES_NOCASH`). When `Some`, each `$21FC`
+    /// write byte is appended (bounded), so a headless harness can read the
+    /// program's own log/assert output. Enable via [`Snes::enable_nocash_log`].
+    #[serde(skip)]
+    pub nocash_log: Option<Vec<u8>>,
 }
 
 /// One CPU↔APU mailbox transfer, captured at `$2140-$2143`. luna-core
@@ -451,6 +460,9 @@ impl Snes {
                     hirom,
                 ))
             }
+            // S-DD1 — graphics decompression chip (Star Ocean, SF Alpha 2);
+            // LoROM-based MMC, the whole chip in `Sdd1Mapper`.
+            MapperKind::Sdd1 => Box::new(Sdd1Mapper::new(cart.rom, sram_bytes)),
             other => return Err(UnsupportedMapper(other)),
         };
 
@@ -494,6 +506,7 @@ impl Snes {
             sa1_log: None,
             cpu_trace_log: None,
             mem_trace_log: None,
+            nocash_log: None,
         })
     }
 
@@ -630,6 +643,22 @@ impl Snes {
         }
     }
 
+    /// Enable capture of `$21FC` Nocash-TTY writes (the SDK's
+    /// `SNES_NOCASH`/`SNES_ASSERT` debug output).
+    pub fn enable_nocash_log(&mut self) {
+        if self.nocash_log.is_none() {
+            self.nocash_log = Some(Vec::new());
+        }
+    }
+
+    /// Drain the captured `$21FC` Nocash byte stream.
+    pub fn take_nocash_log(&mut self) -> Vec<u8> {
+        match self.nocash_log.as_mut() {
+            Some(buf) => std::mem::take(buf),
+            None => Vec::new(),
+        }
+    }
+
     /// Cached scanlines-per-frame for the current region — propagates
     /// into every [`SnesBus`] borrow.
     #[inline]
@@ -680,6 +709,7 @@ impl Snes {
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
+                nocash_log,
                 ..
             } = self;
             let mut bus = SnesBus {
@@ -707,6 +737,7 @@ impl Snes {
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
+                nocash_log,
                 wm_addr,
                 joypad_strobe,
                 joypad1_shift,
@@ -791,6 +822,7 @@ impl Snes {
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
+                nocash_log,
                 mcycles_in_line,
                 frame_count,
                 nmis_serviced,
@@ -821,6 +853,7 @@ impl Snes {
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
+                nocash_log,
                 wm_addr,
                 joypad_strobe,
                 joypad1_shift,
@@ -927,6 +960,7 @@ impl Snes {
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
+                nocash_log,
                 mcycles_in_line,
                 frame_count,
                 nmis_serviced,
@@ -957,6 +991,7 @@ impl Snes {
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
+                nocash_log,
                 wm_addr,
                 joypad_strobe,
                 joypad1_shift,
@@ -1029,6 +1064,7 @@ impl Snes {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            nocash_log,
             ..
         } = self;
         let mut bus = SnesBus {
@@ -1056,6 +1092,7 @@ impl Snes {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            nocash_log,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -1105,6 +1142,27 @@ impl Snes {
             out.push(v);
         }
         out
+    }
+
+    /// Debug poke: write `data` to WRAM (`$7E-$7F` or the `$00-3F`/`$80-BF`
+    /// low-RAM mirror) directly, bypassing the bus. For injecting a test
+    /// state without a full save-state. Addresses outside WRAM are ignored
+    /// (poking ROM/registers is meaningless / unsafe). Returns bytes written.
+    pub fn dbg_poke_bytes(&mut self, bank: u8, offset: u16, data: &[u8]) -> usize {
+        let mut written = 0;
+        for (i, &b) in data.iter().enumerate() {
+            let off = offset.wrapping_add(i as u16);
+            let idx = if matches!(bank, 0x7E..=0x7F) {
+                (usize::from(bank - 0x7E) << 16) | usize::from(off)
+            } else if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && off < 0x2000 {
+                usize::from(off)
+            } else {
+                continue;
+            };
+            self.wram[idx] = b;
+            written += 1;
+        }
+        written
     }
 }
 
@@ -1182,6 +1240,8 @@ struct SnesBus<'a> {
     sa1_log: &'a mut Option<Vec<Sa1LogEvent>>,
     /// Memory access trace. `None` = disabled. See [`Snes::enable_mem_trace`].
     mem_trace_log: &'a mut Option<MemTraceLog>,
+    /// `$21FC` Nocash-TTY capture (the SDK's `SNES_NOCASH`/`SNES_ASSERT`).
+    nocash_log: &'a mut Option<Vec<u8>>,
 }
 
 impl SnesBus<'_> {
@@ -1885,6 +1945,19 @@ impl SnesBus<'_> {
         let speed = address_speed(addr, self.fast_rom);
         self.io_cycle(speed.mcycles());
 
+        // Nocash debug TTY: capture `$21FC` writes (no$/Mesen console port —
+        // the SDK's `SNES_NOCASH`/`SNES_ASSERT`) when enabled, bounded so a
+        // runaway never grows unbounded. Otherwise `$21FC` is open-bus.
+        if let Some(buf) = self.nocash_log.as_mut() {
+            let bank = (addr >> 16) as u8;
+            if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && addr as u16 == 0x21FC {
+                if buf.len() < 1 << 20 {
+                    buf.push(value);
+                }
+                return;
+            }
+        }
+
         if let Some(o) = Self::wram_offset(addr) {
             self.wram[o] = value;
             return;
@@ -2013,6 +2086,10 @@ impl SnesBus<'_> {
         }
         if let Some(offset) = Self::dma_offset(addr) {
             self.dma.write_register(offset, value);
+            // Let a DMA-observing coprocessor (S-DD1) capture the channel's
+            // source address / length so it can set up on-the-fly graphics
+            // decompression. Non-observing mappers ignore `$43xx` writes.
+            let _ = self.mapper.write(addr, value);
             return;
         }
         if Self::is_mdmaen(addr) {
@@ -2256,6 +2333,7 @@ mod tests {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            nocash_log,
             ..
         } = &mut snes;
         let mut bus = SnesBus {
@@ -2283,6 +2361,7 @@ mod tests {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            nocash_log,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -2325,6 +2404,7 @@ mod tests {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            nocash_log,
             ..
         } = &mut snes;
         let mut bus = SnesBus {
@@ -2352,6 +2432,7 @@ mod tests {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            nocash_log,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -2405,6 +2486,7 @@ mod tests {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            nocash_log,
             ..
         } = &mut snes;
         let mut bus = SnesBus {
@@ -2432,6 +2514,7 @@ mod tests {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            nocash_log,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -2449,6 +2532,86 @@ mod tests {
         bus.write(make_addr(0x00, 0x2182), 0x1F);
         // Read it back.
         assert_eq!(bus.read(make_addr(0x00, 0x2180)), 0xAB);
+    }
+
+    #[test]
+    fn nocash_21fc_writes_are_captured_and_filtered() {
+        let cart = demo_lorom();
+        let mut snes = Snes::from_cartridge(cart);
+        snes.reset();
+        snes.enable_nocash_log();
+        let scanlines = snes.region_scanlines();
+        let ppu_line_snapshot = snes.ppu_line;
+        let vblank_start_snapshot = vblank_start_line(snes.region);
+        let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
+        {
+            let Snes {
+                cpu: _,
+                ppu,
+                dma,
+                cpu_regs,
+                apu_real,
+                apu_stub_fallback,
+                apu_panicked,
+                wram,
+                mapper,
+                fast_rom,
+                nmi_pending,
+                irq_pending,
+                total_mclk,
+                wm_addr,
+                joypad_strobe,
+                joypad1_shift,
+                joypad2_shift,
+                mdr,
+                mailbox_log,
+                sa1_log,
+                mem_trace_log,
+                nocash_log,
+                ..
+            } = &mut snes;
+            let mut bus = SnesBus {
+                wram,
+                mapper: mapper.as_mut(),
+                ppu,
+                dma,
+                cpu_regs,
+                apu_real,
+                apu_stub_fallback,
+                apu_panicked,
+                fast_rom: *fast_rom,
+                nmi: nmi_pending,
+                irq: irq_pending,
+                mclk_total: total_mclk,
+                scanlines_per_frame: scanlines,
+                scpu_mar: 0,
+                ppu_line: ppu_line_snapshot,
+                mcycles_in_line: 0,
+                frame_count: 0,
+                nmis_serviced: 0,
+                sched_enabled: false,
+                vblank_start_line: vblank_start_snapshot,
+                cpu_pc_full: cpu_pc_snapshot,
+                mailbox_log,
+                sa1_log,
+                mem_trace_log,
+                nocash_log,
+                wm_addr,
+                joypad_strobe,
+                joypad1_shift,
+                joypad2_shift,
+                mdr,
+            };
+            bus.write(make_addr(0x00, 0x21FC), b'H');
+            bus.write(make_addr(0x00, 0x21FC), b'i');
+            // A non-$21FC write is NOT captured.
+            bus.write(make_addr(0x00, 0x2100), 0x0F);
+            // The `$80-BF` mirror of $21FC IS captured.
+            bus.write(make_addr(0x80, 0x21FC), b'!');
+        }
+        assert_eq!(snes.take_nocash_log(), b"Hi!", "only $21FC bytes, in order");
+        // Drained: a second take is empty.
+        assert!(snes.take_nocash_log().is_empty());
     }
 
     #[test]
@@ -2485,6 +2648,7 @@ mod tests {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            nocash_log,
             ..
         } = &mut snes;
         let mut bus = SnesBus {
@@ -2512,6 +2676,7 @@ mod tests {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            nocash_log,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -2663,6 +2828,7 @@ mod tests {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            nocash_log,
             ..
         } = &mut snes;
         let mut bus = SnesBus {
@@ -2690,6 +2856,7 @@ mod tests {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            nocash_log,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
@@ -3012,6 +3179,7 @@ mod tests {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            nocash_log,
             ..
         } = &mut snes;
         let mut bus = SnesBus {
@@ -3039,6 +3207,7 @@ mod tests {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            nocash_log,
             wm_addr,
             joypad_strobe,
             joypad1_shift,
