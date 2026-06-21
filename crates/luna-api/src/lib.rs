@@ -1560,7 +1560,7 @@ impl Emulator {
             let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
             // Capture this bank's accesses; drained every step so it never
             // overflows. (Re-enabling resets the buffer.)
-            snes.enable_mem_trace(1 << 16, Some(bank));
+            snes.enable_mem_trace(1 << 16, Some(bank), None);
         }
         for _ in 0..max_steps {
             {
@@ -1854,9 +1854,10 @@ impl Emulator {
         &mut self,
         max_events: usize,
         bank_filter: Option<u8>,
+        offset_filter: Option<(u16, u16)>,
     ) -> Result<(), ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
-        snes.enable_mem_trace(max_events, bank_filter);
+        snes.enable_mem_trace(max_events, bank_filter, offset_filter);
         Ok(())
     }
 
@@ -2224,6 +2225,35 @@ mod tests {
         // touches returns None within the step budget (no panic, no hang).
         assert_eq!(e.run_until_mem_write(0x7E_FFFE, 50).unwrap(), None);
         assert_eq!(e.run_until_mem_read(0x7E_FFFE, 50).unwrap(), None);
+    }
+
+    #[test]
+    fn mem_trace_offset_filter_and_frame_blank_columns() {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        // L14: capture only the stack page ($0100-$01FF). The boot BRK loop
+        // pushes to the stack, so this catches real accesses while skipping
+        // the ROM code fetches.
+        e.enable_mem_trace(10_000, None, Some((0x0100, 0x01FF)))
+            .unwrap();
+        e.step(4_000).unwrap();
+        let evs = e.take_mem_trace_log().unwrap();
+        assert!(
+            !evs.is_empty(),
+            "offset filter should still capture stack accesses"
+        );
+        for ev in &evs {
+            // L14: every captured offset is inside the filter window.
+            let off = (ev.addr_full & 0xFFFF) as u16;
+            assert!(
+                (0x0100..=0x01FF).contains(&off),
+                "offset {off:#06X} escaped the filter"
+            );
+            // L13: the per-access line is a valid scanline and `blank` agrees
+            // with it (NTSC vblank starts at line 225).
+            assert!(ev.line < 262, "scanline {} out of range", ev.line);
+            assert_eq!(ev.blank, ev.line >= 225, "blank flag must track vblank");
+        }
     }
 
     #[test]

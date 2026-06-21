@@ -22,6 +22,14 @@ pub struct DmaTraceEvent {
     pub b_offset: u8,
     /// The transferred byte.
     pub value: u8,
+    /// Completed-frame counter at the start of the owning DMA burst — lets a
+    /// consumer bucket DMA→VRAM bytes by frame (the per-VBlank budget check).
+    pub frame: u64,
+    /// PPU scanline at the start of the owning burst.
+    pub line: u16,
+    /// `true` if the burst started in the vertical-blank window
+    /// (`line >= vblank_start`).
+    pub blank: bool,
 }
 
 /// Bounded ring for the DMA→VRAM transfer-time tracer.
