@@ -42,6 +42,11 @@ const FRAME_H: usize = luna_ppu::FRAME_H;
 
 /// Hard ceiling on instructions, in case a ROM never settles or loops.
 const STEP_CAP: u64 = 30_000_000;
+/// SPC700 ALU tests run every addressing mode before the pass/fail verdict
+/// lands in the mailbox (ADC/SBC ~35M instructions), so they get a higher
+/// ceiling than the framebuffer-settle tests (some of which intentionally
+/// cap-out mid-animation and must keep their 30M frame).
+const SPC700_STEP_CAP: u64 = 45_000_000;
 /// Sample the framebuffer hash every this many instructions.
 const SAMPLE_EVERY: u64 = 100_000;
 /// Consecutive identical samples that count as "settled".
@@ -343,6 +348,71 @@ cpu_test!(
     "TRN",
     "4499f14b4497b7522691a4ac5ac8f9d5731976f89be27167091fe25a19cc9b68"
 );
+
+/// Peter Lemon `CPUTest/SPC700/<NAME>` ALU hardware test — checked by its
+/// **memory-result protocol**, not a framebuffer hash (the result display
+/// cycles per addressing mode, so a hash settles on a non-deterministic
+/// transient). Per the ROM's `.asm`, on the first divergent opcode the SPC700
+/// writes `$81` to CPUIO0 (`$2140`) and HALTS in a fail loop; on success it
+/// runs every mode to completion. Objective pass = the SPC→CPU mailbox port 0
+/// is never `$81`. Complements the cycle-stepped 65c816/SPC700 differential.
+fn run_spc700_fail_port(rom: Vec<u8>) -> u8 {
+    let mut cart = Cartridge::from_bytes_forced(rom, MapperKind::LoRom).expect("forced LoROM load");
+    cart.header.region = luna_cartridge::Region::Pal;
+    let mut snes = Snes::from_cartridge(cart);
+    snes.reset();
+
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let mut executed = 0u64;
+    'run: while executed < SPC700_STEP_CAP {
+        for _ in 0..SAMPLE_EVERY {
+            if catch_unwind(AssertUnwindSafe(|| snes.step())).is_err() {
+                break 'run;
+            }
+            executed += 1;
+        }
+        // The fail path halts immediately with $81 in CPUIO0 — bail early.
+        if snes.apu_real.cpu_read_port(0) == 0x81 {
+            break;
+        }
+    }
+    std::panic::set_hook(prev_hook);
+    snes.apu_real.cpu_read_port(0)
+}
+
+macro_rules! spc700_test {
+    ($fn:ident, $name:literal) => {
+        #[test]
+        fn $fn() {
+            let rel = concat!("CPUTest/SPC700/", $name, "/SPC700", $name, ".sfc");
+            let Some(root) = corpus_root() else {
+                eprintln!("[skip] SNES test corpus not found (tools/fetch-snes-test-roms.sh)");
+                return;
+            };
+            let path = root.join(rel);
+            if !path.is_file() {
+                eprintln!("[skip] {rel}: not present under {}", root.display());
+                return;
+            }
+            let rom = std::fs::read(&path).expect("read rom");
+            let port0 = run_spc700_fail_port(rom);
+            assert_ne!(
+                port0, 0x81,
+                "SPC700 {} test FAILED on hardware-result protocol: CPUIO0/$2140 = $81 (fail halt)",
+                $name
+            );
+        }
+    };
+}
+
+spc700_test!(spc700_adc, "ADC");
+spc700_test!(spc700_and, "AND");
+spc700_test!(spc700_dec, "DEC");
+spc700_test!(spc700_eor, "EOR");
+spc700_test!(spc700_inc, "INC");
+spc700_test!(spc700_ora, "ORA");
+spc700_test!(spc700_sbc, "SBC");
 
 /// Declare a Peter Lemon `PPU/<path>` golden test. The PPU suite has an
 /// irregular directory layout, so the full relative path is given.
