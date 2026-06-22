@@ -192,6 +192,16 @@ enum Command {
         /// `--assert` but over VRAM. Repeatable.
         #[arg(long = "assert-vram")]
         assert_vram: Vec<String>,
+        /// Assert CGRAM (palette) equals expected bytes (`OFFSET=HEX`, byte
+        /// offset into the 512-byte CGRAM, low byte of each colour first).
+        /// Like `--assert` but over CGRAM. Repeatable.
+        #[arg(long = "assert-cgram")]
+        assert_cgram: Vec<String>,
+        /// Run until PPU frame N (then snapshot), instead of stopping at the
+        /// `-n` instruction count. Makes input→assert probes land on an exact
+        /// frame rather than a generous `-n`.
+        #[arg(long = "until-frame")]
+        until_frame: Option<u64>,
         /// Load battery SRAM from a `.srm` file before running (the other
         /// half of a power-cycle test — write it with `--srm-out` in run A,
         /// read it back in run B).
@@ -515,6 +525,8 @@ fn main() -> ExitCode {
             assert,
             assert_aram,
             assert_vram,
+            assert_cgram,
+            until_frame,
             srm_in,
             srm_out,
             apu_log,
@@ -558,6 +570,8 @@ fn main() -> ExitCode {
             &assert,
             &assert_aram,
             &assert_vram,
+            &assert_cgram,
+            until_frame,
             srm_in.as_deref(),
             srm_out.as_deref(),
             apu_log.as_deref(),
@@ -1552,6 +1566,8 @@ fn run_state(
     assert_specs: &[String],
     assert_aram_specs: &[String],
     assert_vram_specs: &[String],
+    assert_cgram_specs: &[String],
+    until_frame: Option<u64>,
     srm_in: Option<&std::path::Path>,
     srm_out: Option<&std::path::Path>,
     apu_log_path: Option<&std::path::Path>,
@@ -1866,7 +1882,21 @@ fn run_state(
     // ~99% of audio on any run longer than ~0.5 s of emulated time.
     // The accumulated Vec is written to disk after the run.
     let mut audio_accum: Vec<(i16, i16)> = Vec::new();
-    if audio_out.is_some() {
+    if let Some(target_frame) = until_frame {
+        // RFE-5: run to a specific PPU frame instead of the `-n` instruction
+        // count, draining audio along the way so `--audio-out` still works.
+        const FRAME_BUDGET: u64 = 200_000;
+        while em.state().scheduler.frame_count < target_frame {
+            if em.step_until_frame(FRAME_BUDGET).unwrap_or(0) == 0 {
+                break;
+            }
+            if audio_out.is_some() {
+                if let Ok(mut chunk) = em.drain_audio(usize::MAX) {
+                    audio_accum.append(&mut chunk);
+                }
+            }
+        }
+    } else if audio_out.is_some() {
         // Chunk = 100k instructions ≈ ~10 ms of emulated SPC time
         // (well under the 512 ms queue capacity even at peak DSP
         // output rate). Drain the full queue after each chunk.
@@ -1970,6 +2000,45 @@ fn run_state(
                     eprintln!("error: --assert-{label} `{spec}`: {e}");
                     assert_failed = true;
                 }
+            }
+        }
+    }
+    // CGRAM is 256 × 15-bit colours (512 bytes), low byte of each colour first.
+    for spec in assert_cgram_specs {
+        match parse_assert_spec_no_bank(spec) {
+            Ok((offset, want)) => match em.peek_cgram() {
+                Ok(colors) => {
+                    let bytes: Vec<u8> = colors
+                        .iter()
+                        .flat_map(|c| [*c as u8, (*c >> 8) as u8])
+                        .collect();
+                    let start = offset as usize;
+                    let end = start + want.len();
+                    if end > bytes.len() {
+                        eprintln!(
+                            "error: --assert-cgram `{spec}`: offset {offset:#X}+{} exceeds the 512-byte CGRAM",
+                            want.len()
+                        );
+                        assert_failed = true;
+                    } else if bytes[start..end] == want[..] {
+                        println!("PASS cgram:{offset:04X}={}", hex_str(&want));
+                    } else {
+                        println!(
+                            "FAIL cgram:{offset:04X} expected {} got {}",
+                            hex_str(&want),
+                            hex_str(&bytes[start..end])
+                        );
+                        assert_failed = true;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error: --assert-cgram `{spec}`: {e}");
+                    assert_failed = true;
+                }
+            },
+            Err(e) => {
+                eprintln!("error: --assert-cgram `{spec}`: {e}");
+                assert_failed = true;
             }
         }
     }
