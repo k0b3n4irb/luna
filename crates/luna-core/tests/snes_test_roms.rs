@@ -628,13 +628,13 @@ ppu_test!(
     ppu_hdma_hicolor64,
     "HDMA/HiColor64PerTileRow/HiColor64PerTileRow.sfc",
     "ab7a0324251a2b7c87ede33af6b707dc3e4aa08891dfecd42121ec5f5f36e06a",
-    ignore = "HiColor chart: needs intra-scanline CGRAM (mid-line H-IRQ DMA) (gap #7)"
+    ignore = "HiColor chart (gap #7): RE-DIAGNOSED 2026-06-22 — NOT intra-scanline. The CGRAM-reload MDMAs ($420B) all fire in HBlank (measured h≈298-304), so it is a PER-LINE palette change; the residual is a per-line CGRAM-vs-render ordering offset, not a mid-line flush gap. Render is plausible (819/1199 colours). Pinning the exact line offset needs an ares/Mesen CGRAM-per-line differential oracle, not a guess (a mid-line MDMA→CGRAM partial-flush was tried — a correct no-op here since the DMAs land in HBlank)."
 );
 ppu_test!(
     ppu_hdma_hicolor128,
     "HDMA/HiColor128PerTileRow/HiColor128PerTileRow.sfc",
     "54495c7af30fa3cda2734230351396254d5ea2b64095b444082087888b539bc5",
-    ignore = "HiColor chart: needs intra-scanline CGRAM (mid-line H-IRQ DMA) (gap #7)"
+    ignore = "HiColor chart (gap #7): RE-DIAGNOSED 2026-06-22 — NOT intra-scanline. The CGRAM-reload MDMAs ($420B) all fire in HBlank (measured h≈298-304), so it is a PER-LINE palette change; the residual is a per-line CGRAM-vs-render ordering offset, not a mid-line flush gap. Render is plausible (819/1199 colours). Pinning the exact line offset needs an ares/Mesen CGRAM-per-line differential oracle, not a guess (a mid-line MDMA→CGRAM partial-flush was tried — a correct no-op here since the DMAs land in HBlank)."
 );
 
 // INPUT/ControllerLatency: "any button → white screen, none → black". Held
