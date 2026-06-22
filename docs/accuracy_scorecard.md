@@ -86,7 +86,7 @@ on the real SMW ROM and in-GUI (F5/F9). No subsystem grade moves.
 |---|:---:|---|
 | **DSP — S-DSP audio** | **A−** | Faithful near-line-for-line ares port; BRR/gaussian/envelope/echo/noise all match. Only loss: dead legacy tables in `lib.rs` + **zero golden-vector tests**. |
 | **CPU — 65c816** | **A−** *(was B)* | **99.99996 % Tom Harte (2 fails / 5.08M)** after fixing the 16-bit BCD adjust, MVN/MVP per-byte interruptibility, and E-mode stack + (dp,X) pointer wrap. Functionally byte-faithful to ares; the "−" is the instruction-atomic core (no cycle-stepping; edge-latched IRQ). |
-| **SMP — SPC700** | **B** *(was B−)* | 256/256 opcodes + ALU/MUL/DAA/DAS byte-faithful; `DIV YA,X` now ares-faithful (fixed). Remaining gap: the never-applied branch-taken cycle penalty — a cycle-timing ceiling that skews timer/DSP rate, not a value bug. |
+| **SMP — SPC700** | **A−** *(was B)* | 256/256 opcodes + ALU/MUL/DAA/DAS byte-faithful; `DIV YA,X` ares-faithful. The cycle model is now complete: all 254 opcodes are cycle-stepped byte-/cycle-exact vs the atomic core (`differential_all_ported_opcodes`), the taken-branch +2 penalty is applied (`ef44271`), the CPU↔SPC interleave is cycle-exact at bus-access granularity (cooperative grammar, active), and the `$F0` wait-state dividers `{2,4,10,20}` + the 8/16→10/20 timer glitch are modelled (gap 6 closed). |
 | **PPU — graphics** | **C+** | Color-math/CGWSEL/OAM-modulo reference-accurate; real bugs in sprite Y-wrap, large-sprite tile addressing, BG scroll write-twice, Mode-7 screen-over; hi-res modes 5/6 + EXTBG absent. |
 | **DMA / HDMA / timing** | **C+** | Byte-movement & HDMA table walk accurate & well-tested; **timing is architecturally coarse** (atomic burst + lump cycle-charge) → no mid-line HDMA preemption, H-IRQ ignores HTIME, **coprocessor double-charge bug**. |
 | **SA-1 coprocessor** | **C+** | IRQ/mailbox/banking/multiplier reference-accurate (incl. correct CCNT bit-5 polarity); divergences in divider signedness, MAC-clear guard, **CC1 bpp/width fields swapped**, flat instruction timing. |
@@ -223,7 +223,7 @@ one cycle-timing divergence remains.
 | **DIV YA,X** ✅ *fixed* | ares-faithful: H/V from **pre-div** Y, `Y<(X<<1)` overflow branch, X==0 via 256-X (`opcodes.rs:1096`) | H/V pre-div Y + overflow branch (`instructions.cpp:358`) | bit-loop, same semantics (`Spc.Instr.cpp:1163`) | **A** |
 | MUL | NZ from Y (`opcodes.rs:1087`) | `instructions.cpp:505` | matches | A |
 | DAA/DAS | `opcodes.rs:1676` | `instructions.cpp:199` | matches | A |
-| **Cycle — taken branch** | never adds +2 (`cycles.rs:28`) | +2 idle on take (`instructions.cpp:85`) | +2 idle (`Spc.Instr.cpp:1625`) | C |
+| **Cycle — taken branch** ✅ *fixed* | +2 on take via `SPC700_BRANCH_TAKEN_PENALTY` (`ef44271`) | +2 idle on take (`instructions.cpp:85`) | +2 idle (`Spc.Instr.cpp:1625`) | **A** |
 | Cycle — per-opcode base | table, plausible | per-access | per-access | B |
 | Reset / IPL | vector + SP=$FF (`cpu.rs:46`) | `timing.cpp:9` | equiv | B |
 | Timers T0/T1/T2 | 128/128/16 divider (`apu/lib.rs:205`) | 2-stage divider (`timing.cpp:34`) | `SpcTimer.h` | B− |
