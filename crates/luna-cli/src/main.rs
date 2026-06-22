@@ -154,6 +154,17 @@ enum Command {
         /// Up/Down/Left/Right(11..8) A(7) X(6) L(5) R(4).
         #[arg(long)]
         input: Option<String>,
+        /// Controller port-1 device: `pad` (default) or `mouse`.
+        #[arg(long, default_value = "pad")]
+        port1: String,
+        /// Controller port-2 device: `pad` (default) or `mouse`.
+        #[arg(long, default_value = "pad")]
+        port2: String,
+        /// Scripted SNES Mouse motion, applied to whichever port is set to
+        /// `mouse`. `frame:dx,dy,buttons` entries separated by `;` (signed
+        /// dx/dy; buttons bit0=left, bit1=right). Example: `--mouse "60:5,-3,1"`.
+        #[arg(long)]
+        mouse: Option<String>,
         /// Optional memory peek(s) after snapshot.  Format:
         /// `BANK:OFFSET:COUNT` (all hex, no `0x` prefix).  Can be
         /// specified multiple times.  Output goes to stderr as a
@@ -485,6 +496,9 @@ fn main() -> ExitCode {
             screenshot,
             audio_out,
             input,
+            port1,
+            port2,
+            mouse,
             peek,
             assert,
             assert_aram,
@@ -524,6 +538,9 @@ fn main() -> ExitCode {
             screenshot.as_deref(),
             audio_out.as_deref(),
             input.as_deref(),
+            &port1,
+            &port2,
+            mouse.as_deref(),
             &peek,
             &assert,
             &assert_aram,
@@ -691,6 +708,37 @@ fn parse_input_script(script: &str) -> Result<Vec<(u64, u16)>, String> {
         let mask: u16 = u16::from_str_radix(mask_str, 16)
             .map_err(|e| format!("bad hex mask `{mask_str}`: {e}"))?;
         out.push((frame, mask));
+    }
+    out.sort_by_key(|(f, _)| *f);
+    Ok(out)
+}
+
+/// A scripted mouse checkpoint: `(frame, (dx, dy, buttons))`.
+type MouseCheckpoint = (u64, (i32, i32, u8));
+
+/// Parse a `--mouse` script: `;`-separated `frame:dx,dy,buttons` entries
+/// (signed `dx`/`dy`; `buttons` bit0 = left, bit1 = right). Returns the
+/// checkpoints sorted by frame.
+fn parse_mouse_script(script: &str) -> Result<Vec<MouseCheckpoint>, String> {
+    let mut out = Vec::new();
+    for entry in script.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        let (frame, rest) = entry
+            .split_once(':')
+            .ok_or_else(|| format!("`{entry}`: expected `frame:dx,dy,buttons`"))?;
+        let frame: u64 = frame
+            .trim()
+            .parse()
+            .map_err(|_| format!("`{entry}`: bad frame"))?;
+        let p: Vec<&str> = rest.split(',').map(str::trim).collect();
+        if p.len() != 3 {
+            return Err(format!("`{entry}`: expected `dx,dy,buttons` (3 values)"));
+        }
+        let dx: i32 = p[0].parse().map_err(|_| format!("`{entry}`: bad dx"))?;
+        let dy: i32 = p[1].parse().map_err(|_| format!("`{entry}`: bad dy"))?;
+        let buttons: u8 = p[2]
+            .parse()
+            .map_err(|_| format!("`{entry}`: bad buttons"))?;
+        out.push((frame, (dx, dy, buttons)));
     }
     out.sort_by_key(|(f, _)| *f);
     Ok(out)
@@ -1479,6 +1527,9 @@ fn run_state(
     screenshot: Option<&std::path::Path>,
     audio_out: Option<&std::path::Path>,
     input_script: Option<&str>,
+    port1: &str,
+    port2: &str,
+    mouse_script: Option<&str>,
     peek_specs: &[String],
     assert_specs: &[String],
     assert_aram_specs: &[String],
@@ -1513,6 +1564,35 @@ fn run_state(
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }
+    // Controller port device selection (RFE-3): a `mouse` answers the
+    // auto-read / serial path with the SNES Mouse protocol so the game's
+    // DETECT succeeds (the signature) and `inputGetMouse` reads its deltas.
+    for (port, dev) in [(0u8, port1), (1u8, port2)] {
+        match dev {
+            "pad" => {}
+            "mouse" => {
+                if let Err(e) = em.set_port_mouse(port, true) {
+                    eprintln!("error: --port{}: {e}", port + 1);
+                    return ExitCode::from(1);
+                }
+            }
+            other => {
+                eprintln!(
+                    "error: --port{} `{other}`: expected `pad` or `mouse`",
+                    port + 1
+                );
+                return ExitCode::from(1);
+            }
+        }
+    }
+    let mouse_checkpoints = match mouse_script.map(parse_mouse_script) {
+        Some(Ok(v)) => v,
+        Some(Err(e)) => {
+            eprintln!("error: --mouse: {e}");
+            return ExitCode::from(1);
+        }
+        None => Vec::new(),
+    };
     // --srm-in: seed battery SRAM from a `.srm` file (the read half of a
     // cross-run power-cycle test), before the warm-up runs.
     if let Some(path) = srm_in {
@@ -1602,18 +1682,37 @@ fn run_state(
             }
         },
     };
-    if !checkpoints.is_empty() {
+    if !checkpoints.is_empty() || !mouse_checkpoints.is_empty() {
         const PER_FRAME_BUDGET: u64 = 60_000;
-        for (frame, mask) in &checkpoints {
+        // Merge gamepad (`--input`) and mouse (`--mouse`) checkpoints into one
+        // frame-sorted event stream so both apply at the right moment.
+        enum Ev {
+            Pad(u16),
+            Mouse(i32, i32, u8),
+        }
+        let mut events: Vec<(u64, Ev)> = checkpoints
+            .iter()
+            .map(|&(f, m)| (f, Ev::Pad(m)))
+            .chain(
+                mouse_checkpoints
+                    .iter()
+                    .map(|&(f, (dx, dy, b))| (f, Ev::Mouse(dx, dy, b))),
+            )
+            .collect();
+        events.sort_by_key(|(f, _)| *f);
+        for (frame, ev) in &events {
             // Step until we reach `frame` (no-op if we already crossed it).
             while em.state().scheduler.frame_count < *frame {
-                let executed = em.step_until_frame(PER_FRAME_BUDGET).unwrap_or(0);
-                if executed == 0 {
+                if em.step_until_frame(PER_FRAME_BUDGET).unwrap_or(0) == 0 {
                     break;
                 }
             }
-            if let Err(e) = em.set_joypad(0, *mask) {
-                eprintln!("error: set_joypad: {e}");
+            let applied = match ev {
+                Ev::Pad(m) => em.set_joypad(0, *m),
+                Ev::Mouse(dx, dy, b) => em.set_mouse(*dx, *dy, *b),
+            };
+            if let Err(e) = applied {
+                eprintln!("error: applying scripted input: {e}");
                 return ExitCode::from(1);
             }
         }

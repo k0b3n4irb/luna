@@ -9,7 +9,7 @@
 
 /// Which device occupies a controller port. Port 1 is currently always a
 /// [`Pad`](Self::Pad); port 2 can be reassigned to a peripheral.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PortDevice {
     /// Standard SNES gamepad (the `cpu_regs` 16-bit path handles it).
     #[default]
@@ -27,7 +27,7 @@ pub enum PortDevice {
 /// `0×8, right, left, speed[1:0], 0,0,0,1 (signature), dy, cy[6:0], dx,
 /// cx[6:0]`. Strobing while latched cycles the sensitivity (slow/normal/fast),
 /// exactly as the hardware's sensitivity-change sequence.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Mouse {
     /// This-frame signed X motion (set by the front-end; +right / −left).
     pub dx: i32,
@@ -73,6 +73,21 @@ impl Mouse {
         };
         self.cx = ((cx as u32 * mul) / 2).min(127);
         self.cy = ((cy as u32 * mul) / 2).min(127);
+    }
+
+    /// The 16-bit word an **auto-joypad-read** (`$4218`) latches for a Mouse:
+    /// a fresh strobe then 16 clocked bits, MSB-first (bit 15 = first clocked
+    /// bit, like the pad's `B`), so the `0001` device signature lands in the
+    /// low nibble where the SDK's `mouseInit` detects it. The auto-read only
+    /// sees the first 16 of the 32 protocol bits (buttons + speed + signature).
+    pub fn auto_read_16(&mut self) -> u16 {
+        self.latch(true);
+        self.latch(false);
+        let mut v = 0u16;
+        for i in 0..16 {
+            v |= u16::from(self.data() & 1) << (15 - i);
+        }
+        v
     }
 
     /// Clock out one serial bit (LSB of the return value). Mirrors ares
