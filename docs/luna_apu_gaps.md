@@ -111,9 +111,12 @@ underlying RAM. Tests `ipl_rom_overlay_toggles_with_f1_bit7`,
 - **Mailbox** direction model (`to_spc`/`to_cpu`), `$F2` DSPADDR
   read-back, `$F3` index masking (`& 0x7F` mirror region).
 - **SPC700 core** — semantically audited against ares (ALU, DAA/DAS/
-  DIV/MUL exact; see `luna_spc700_gaps.md`). NOTE: it has *no* Tom Harte
-  test (unlike the 65c816) — only inline unit tests; that gap is tracked
-  in `luna_spc700_gaps.md`.
+  DIV/MUL exact; see `luna_spc700_gaps.md`), AND covered by a
+  SingleStepTests / Tom Harte harness (`crates/luna-cpu-spc700/tests/
+  tom_harte.rs`) plus the PeterLemon SPC700 ALU hardware tests, validated
+  by their `$2140` mailbox memory-result protocol
+  (`spc700_*` in `crates/luna-core/tests/snes_test_roms.rs`). (The earlier
+  "no Tom Harte test" note here was stale.)
 
 ## Suggested order
 
