@@ -147,7 +147,7 @@ real, just not the ordering issue first suspected.
 |---|---|---|---|
 | 3 | MDMA cost charged as flat `8 + bytes·8`; ares adds a per-channel `+8` (and aligns the burst start to a whole CPU cycle) | `dma.cpp:16-22,108-122` | `snes.rs:1444` lumps per-channel into per-byte |
 | 4 | Sync DMA is **atomic** (runs all bytes in one `run_mdma` call) so it never yields to HDMA mid-transfer; ares lets HDMA stop an active DMA at a scanline boundary (`dmaEnable = false`) | `dma.cpp:146,175` | OK in practice — sync DMA almost always runs in V-blank with no active HDMA |
-| 5 | Enabling an HDMA channel mid-frame via `$420C` doesn't set it up until the next frame's `hdma_init` | `dma.cpp:28-33` | `controller.rs:78` only sets up at frame start |
+| ~~5~~ | ~~Enabling an HDMA channel mid-frame via `$420C` doesn't set it up until the next frame~~ — **DONE** (PR #3): live `hdma_started` lazy-start + ares `hdmaActive()` gating (Yoshi's Island intro text) | `dma.cpp:28-33` | `controller.rs:204-237` ✅ + regression test |
 | 6 | Indirect-HDMA `hdmaCompleted && hdmaFinished()` early-out after reading the first pointer byte not modelled | `dma.cpp:165` | `channel.rs:337-343` reads both pointer bytes regardless |
 
 ---

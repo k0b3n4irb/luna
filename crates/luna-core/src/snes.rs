@@ -1,9 +1,9 @@
 //! Top-level [`Snes`] machine struct.
 //!
-//! Wires together a `Cpu65816`, 128 KB of WRAM, the cartridge mapper, and
-//! a placeholder MMIO stub. The PPU / APU / DMA are still TODOs; reads
-//! from their registers return `0xFF` (open-bus convention) and writes
-//! are silently dropped.
+//! Wires together the `Cpu65816` main CPU, 128 KB of WRAM, the cartridge
+//! mapper, the `Ppu`, the real APU (`apu_real`: SPC700 + S-DSP, with an
+//! [`ApuStub`] kept only as a panic-fallback), and the DMA / HDMA and
+//! coprocessor subsystems — all driven by the master-clock scheduler.
 
 use crate::apu_stub::ApuStub;
 use crate::cpu_regs::CpuRegs;
