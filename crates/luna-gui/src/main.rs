@@ -126,6 +126,15 @@ struct LunaApp {
     /// load, written back on `unload_emu` (ROM change + app exit both route
     /// through it), so in-game saves persist across runs.
     srm_path: Option<PathBuf>,
+    /// Selected device on controller ports 1 and 2 (Settings → Devices). Fed
+    /// to the core each frame; reflected in the menu radios.
+    port_device: [luna_api::PortDevice; 2],
+    /// Host cursor in SNES framebuffer pixels (`(-1, -1)` = off the screen),
+    /// and the previous frame's, so a Mouse gets per-frame deltas.
+    cursor_snes: (i32, i32),
+    prev_cursor_snes: (i32, i32),
+    /// Host pointer buttons: bit 0 = left, bit 1 = right.
+    pointer_buttons: u8,
     /// Last battery-SRAM bytes written to `srm_path`; the periodic flush
     /// skips the disk write when the SRAM is unchanged.
     last_srm_written: Vec<u8>,
@@ -206,6 +215,10 @@ impl LunaApp {
             ui: None,
             rom_title: None,
             srm_path: None,
+            port_device: [luna_api::PortDevice::Pad; 2],
+            cursor_snes: (-1, -1),
+            prev_cursor_snes: (-1, -1),
+            pointer_buttons: 0,
             last_srm_written: Vec::new(),
             last_srm_flush: std::time::Instant::now(),
             rom_picker_rx: None,
@@ -443,6 +456,40 @@ impl LunaApp {
         }
     }
 
+    /// Feed the host pointer to a Mouse / Super Scope on the selected ports:
+    /// a Mouse gets the per-frame motion delta, a Super Scope the absolute aim
+    /// (both with the host's left/right buttons). No-op for plain pads.
+    fn push_devices(&mut self) {
+        if !self.rom_loaded || self.port_device == [luna_api::PortDevice::Pad; 2] {
+            return;
+        }
+        let devices = self.port_device;
+        let (cx, cy) = self.cursor_snes;
+        let onscreen = cx >= 0 && cy >= 0 && self.prev_cursor_snes.0 >= 0;
+        let (dx, dy) = if onscreen {
+            (cx - self.prev_cursor_snes.0, cy - self.prev_cursor_snes.1)
+        } else {
+            (0, 0)
+        };
+        self.prev_cursor_snes = self.cursor_snes;
+        let buttons = self.pointer_buttons;
+        if let Ok(mut guard) = self.emu.lock() {
+            if let Some(em) = guard.as_mut() {
+                for dev in devices {
+                    match dev {
+                        luna_api::PortDevice::Mouse => {
+                            let _ = em.set_mouse(dx, dy, buttons);
+                        }
+                        luna_api::PortDevice::SuperScope => {
+                            let _ = em.set_superscope(cx, cy, buttons);
+                        }
+                        luna_api::PortDevice::Pad => {}
+                    }
+                }
+            }
+        }
+    }
+
     /// File → Open ROM… via rfd, run on a worker thread so the winit
     /// event loop keeps redrawing while the OS dialog is open. The
     /// chosen path (or `None` on cancel) comes back through an mpsc
@@ -615,6 +662,34 @@ impl ApplicationHandler for LunaApp {
                     }
                 }
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                // Map the host cursor to SNES framebuffer pixels (Err = the
+                // pointer is outside the game area → offscreen for a scope).
+                self.cursor_snes = self
+                    .pixels
+                    .as_ref()
+                    .and_then(|p| {
+                        p.window_pos_to_pixel((position.x as f32, position.y as f32))
+                            .ok()
+                    })
+                    .map_or((-1, -1), |(px, py)| (px as i32, py as i32));
+            }
+            WindowEvent::MouseInput {
+                state: btn_state,
+                button,
+                ..
+            } => {
+                let bit = match button {
+                    winit::event::MouseButton::Left => 0x01,
+                    winit::event::MouseButton::Right => 0x02,
+                    _ => 0,
+                };
+                if btn_state == winit::event::ElementState::Pressed {
+                    self.pointer_buttons |= bit;
+                } else {
+                    self.pointer_buttons &= !bit;
+                }
+            }
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
             }
@@ -702,6 +777,8 @@ impl ApplicationHandler for LunaApp {
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         self.poll_rom_picker();
         self.poll_firmware_picker();
+        // Feed the host pointer to a Mouse / Super Scope once per loop tick.
+        self.push_devices();
         // Periodic battery-SRAM auto-flush (dirty-write only) so an in-game
         // save survives an unclean exit (crash / kill), not just a clean
         // close. The byte-compare in `persist_sram` makes idle frames free.
@@ -748,6 +825,7 @@ impl LunaApp {
         let ui_state = UiState {
             paused: self.emu_shared.paused.load(Ordering::Acquire),
             rom_title: self.rom_title.clone(),
+            port_device: self.port_device,
             show_input_config: self.show_input_config,
             show_hotkey_config: self.show_hotkey_config,
             key_bindings: &self.key_bindings,
@@ -994,6 +1072,18 @@ impl LunaApp {
             }
             MenuAction::SaveState(slot) => self.save_state_to_slot(slot),
             MenuAction::LoadState(slot) => self.load_state_from_slot(slot),
+            MenuAction::SetPortDevice(port, dev) => self.set_port_device(port, dev),
+        }
+    }
+
+    /// Assign a device to a controller port (Settings → Devices), driving the
+    /// core through `luna_api::Emulator::set_port_device` (api-first).
+    fn set_port_device(&mut self, port: u8, dev: luna_api::PortDevice) {
+        self.port_device[port as usize] = dev;
+        if let Ok(mut guard) = self.emu.lock() {
+            if let Some(em) = guard.as_mut() {
+                let _ = em.set_port_device(port, dev);
+            }
         }
     }
 
