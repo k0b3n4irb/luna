@@ -89,7 +89,7 @@ underlying RAM. Tests `ipl_rom_overlay_toggles_with_f1_bit7`,
 | # | Issue | ares ref | luna |
 |---|---|---|---|
 | ~~5~~ | ~~`$F8/$F9` AUXIO read returns 0~~ — **DONE**: read returns the stored value (`auxio_f8_f9_read_back_written_value`) | `smp/io.cpp:49-53` | ✅ |
-| 6 | Wait-state cycle dividers `{2,4,10,20}` (and the 8/16→10/20 glitch) not modelled; fixed master:SPC ratio used instead | `smp/timing.cpp:9-20` | `lib.rs` step() converts at a fixed ratio + per-opcode cost |
+| ~~6~~ | ~~Wait-state cycle dividers `{2,4,10,20}` (and the 8/16→10/20 glitch) not modelled~~ — **DONE**: `clock_cycle` picks the per-access wait-state (`$F0` external bits 4-5 / internal bits 6-7; internal for idle/`$00Fx`/IPLROM) and advances `spc_pos_2x` by `cycleWaitStates {2,4,10,20}`, the timers by `{2,4,8,16}` (the 8/16→10/20 clock glitch the timers escape), and the DSP sample by the clock divider. ws=0 byte-identical (24 APU tests + SPC differential + 58 goldens); `wait_states_divide_the_spc_clock` proves ws=1≈½ / ws=3≈⅒. | `smp/timing.cpp:9-20` | ✅ |
 | ~~7~~ | ~~Dead legacy DSP scaffolding in `lib.rs`~~ — **DONE**: removed the duplicate gaussian table + unused `ADSR_RATE_PERIODS` / `COUNTER_OFFSET` / `COUNTER_RELOAD` / `VOICE_END_SPC_CYCLES` / `AdsrPhase`; refreshed the stale module docs | — | ✅ |
 
 ---
