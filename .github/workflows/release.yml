@@ -92,3 +92,7 @@ jobs:
           files: dist/*
           generate_release_notes: true
           fail_on_unmatched_files: true
+          # Pre-release semver tags (a hyphen: v1.0.0-rc1, -beta…) publish as
+          # a GitHub pre-release so they never become the "latest" stable
+          # release; clean tags (v1.0.0) publish as a full release.
+          prerelease: ${{ contains(github.ref_name, '-') }}
