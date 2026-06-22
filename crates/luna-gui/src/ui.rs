@@ -39,6 +39,8 @@ pub(crate) enum MenuAction {
     SaveState(u8),
     /// Load emulator state from numbered slot `1..=9` (also sets it current).
     LoadState(u8),
+    /// Set controller port `0`/`1` to a device (pad / mouse / super scope).
+    SetPortDevice(u8, luna_api::PortDevice),
     // Debug panels (api-first: data comes from `luna_api::Emulator`).
     ToggleCpuState,
     ToggleCpuMemory,
@@ -103,6 +105,8 @@ pub(crate) struct DebugSnapshot {
 pub(crate) struct UiState<'a> {
     pub paused: bool,
     pub rom_title: Option<String>,
+    /// Current device on controller ports 1 and 2 (drives the menu's radios).
+    pub port_device: [luna_api::PortDevice; 2],
     pub show_input_config: bool,
     pub show_hotkey_config: bool,
     pub key_bindings: &'a crate::input::KeyBindings,
@@ -1437,6 +1441,30 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>,
                     {
                         emit(MenuAction::ToggleHotkeyConfig);
                         ui.close();
+                    }
+                    ui.separator();
+                    ui.label(egui::RichText::new("Devices").weak().small());
+                    for port in 0u8..2 {
+                        let cur = match state.port_device[port as usize] {
+                            luna_api::PortDevice::Pad => "Gamepad",
+                            luna_api::PortDevice::Mouse => "Mouse",
+                            luna_api::PortDevice::SuperScope => "Super Scope",
+                        };
+                        ui.menu_button(format!("Port {}: {cur}", port + 1), |ui| {
+                            for (label, dev) in [
+                                ("Gamepad", luna_api::PortDevice::Pad),
+                                ("Mouse", luna_api::PortDevice::Mouse),
+                                ("Super Scope", luna_api::PortDevice::SuperScope),
+                            ] {
+                                if ui
+                                    .radio(state.port_device[port as usize] == dev, label)
+                                    .clicked()
+                                {
+                                    emit(MenuAction::SetPortDevice(port, dev));
+                                    ui.close();
+                                }
+                            }
+                        });
                     }
                 });
                 ui.menu_button("Tools", |ui| {
