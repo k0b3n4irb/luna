@@ -271,4 +271,33 @@ mod tests {
         let speed = (u8::from(bits[10] == 1) << 1) | u8::from(bits[11] == 1);
         assert_eq!(speed, 2, "two strobes → fast");
     }
+
+    #[test]
+    fn super_scope_aim_latches_to_hv_and_gates_trigger_offscreen() {
+        // Onscreen aim: latch target is (cx + 24, cy); a serial read leads with
+        // the trigger bit. (Drove the example ROM from CALIBRATE to READY.)
+        let mut s = SuperScope {
+            cx: 128,
+            cy: 112,
+            trigger: true,
+            ..Default::default()
+        };
+        assert!(!s.offscreen());
+        assert_eq!(s.latch_hv(), (152, 112), "OPHCT = cx+24, OPVCT = cy");
+        s.latch(true);
+        s.latch(false);
+        assert_eq!(s.data() & 1, 1, "trigger reads 1 when onscreen");
+
+        // Offscreen aim suppresses the trigger bit (ares `trigger & !offscreen`).
+        let mut off = SuperScope {
+            cx: 300,
+            cy: 112,
+            trigger: true,
+            ..Default::default()
+        };
+        assert!(off.offscreen());
+        off.latch(true);
+        off.latch(false);
+        assert_eq!(off.data() & 1, 0, "trigger suppressed when offscreen");
+    }
 }
