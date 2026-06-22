@@ -57,6 +57,8 @@ use crate::input::{Hotkey, KeyBindings};
 use crate::ui::{DebugSnapshot, MenuAction, PanelNav, UiOverlay, UiState};
 
 const WINDOW_TITLE: &str = "Luna — SNES Emulator";
+/// Interval between periodic battery-SRAM auto-flushes (dirty-write only).
+const SRAM_FLUSH_SECS: u64 = 30;
 const INITIAL_SCALE: u32 = 3;
 /// Logical height of the egui menu bar reserved at the top of the
 /// window. The pixels canvas sits below it.
@@ -120,6 +122,15 @@ struct LunaApp {
     ui: Option<UiOverlay>,
     /// Friendly ROM name surfaced in the menu bar after a load.
     rom_title: Option<String>,
+    /// Sidecar `.srm` path for the loaded ROM's battery SRAM. Restored on
+    /// load, written back on `unload_emu` (ROM change + app exit both route
+    /// through it), so in-game saves persist across runs.
+    srm_path: Option<PathBuf>,
+    /// Last battery-SRAM bytes written to `srm_path`; the periodic flush
+    /// skips the disk write when the SRAM is unchanged.
+    last_srm_written: Vec<u8>,
+    /// When the battery SRAM was last auto-flushed (periodic dirty-write).
+    last_srm_flush: std::time::Instant,
     /// Pending async file-dialog result. The dialog runs on a worker
     /// thread so the winit event loop keeps redrawing — otherwise the
     /// WM flags the window as "not responding" within ~2 seconds and
@@ -194,6 +205,9 @@ impl LunaApp {
             last_rom_dir: load_last_rom_dir(),
             ui: None,
             rom_title: None,
+            srm_path: None,
+            last_srm_written: Vec::new(),
+            last_srm_flush: std::time::Instant::now(),
             rom_picker_rx: None,
             firmware_picker_rx: None,
             pending_firmware_rom: None,
@@ -237,6 +251,27 @@ impl LunaApp {
                 return;
             }
         };
+        // Restore battery SRAM from the sidecar `<rom>.srm`, if present, so
+        // in-game saves survive across runs (written back in `unload_emu`).
+        let srm_path = path.with_extension("srm");
+        if srm_path.is_file() {
+            match std::fs::read(&srm_path) {
+                Ok(data) => {
+                    if let Err(e) = em.load_sram(&data) {
+                        eprintln!(
+                            "luna-gui: ignoring battery SRAM {}: {e}",
+                            srm_path.display()
+                        );
+                    }
+                }
+                Err(e) => eprintln!("luna-gui: could not read {}: {e}", srm_path.display()),
+            }
+        }
+        self.srm_path = Some(srm_path);
+        // Seed the periodic-flush baseline with the just-loaded SRAM so the
+        // first auto-flush only writes once the game actually modifies it.
+        self.last_srm_written = em.sram();
+        self.last_srm_flush = std::time::Instant::now();
         if let Ok(mut guard) = self.emu.lock() {
             *guard = Some(em);
         }
@@ -347,13 +382,50 @@ impl LunaApp {
             }
         }
         self.emu_shared.shutdown.store(false, Ordering::Release);
+        // Final battery-SRAM flush before tearing down. Both paths into
+        // `unload_emu` — a ROM change and the app close — force-flush here,
+        // so the latest in-game save is never lost.
+        self.persist_sram(true);
         if let Ok(mut guard) = self.emu.lock() {
             *guard = None;
         }
+        self.srm_path = None;
         // Black the screen with a fresh empty triple buffer (the old one's
         // producer was the emu thread we just joined).
         self.framebuffer_out = triple_buffer::triple_buffer(&vec![0u8; FRAME_W * FRAME_H * 4]).1;
         self.rom_loaded = false;
+    }
+
+    /// Write the loaded cart's battery SRAM to its `<rom>.srm` sidecar.
+    /// With `force`, always writes (final flush on unload); otherwise only
+    /// when the bytes changed since the last write — a cheap periodic
+    /// auto-save (every [`SRAM_FLUSH_SECS`]) so a save survives an unclean
+    /// exit (crash / kill), not just a clean close. Carts without battery
+    /// SRAM return empty bytes and write nothing.
+    fn persist_sram(&mut self, force: bool) {
+        let Some(srm) = self.srm_path.clone() else {
+            return;
+        };
+        let data = {
+            let Ok(guard) = self.emu.lock() else {
+                return;
+            };
+            let Some(em) = guard.as_ref() else {
+                return;
+            };
+            em.sram()
+        };
+        if data.is_empty() || (!force && data == self.last_srm_written) {
+            return;
+        }
+        if let Err(e) = std::fs::write(&srm, &data) {
+            eprintln!(
+                "luna-gui: could not save battery SRAM to {}: {e}",
+                srm.display()
+            );
+            return;
+        }
+        self.last_srm_written = data;
     }
 
     /// Push the current keyboard mask into the loaded Snes.
@@ -479,6 +551,19 @@ impl ApplicationHandler for LunaApp {
             }
         };
         let size = window.inner_size();
+        // Pacing diagnostic (vsync-lock work): the display refresh rate vs the
+        // emu's ~60.099 fps (NTSC) sets the frame-presentation cadence — a
+        // mismatch is the root of motion judder. Log it so we fix the right case.
+        match window
+            .current_monitor()
+            .and_then(|m| m.refresh_rate_millihertz())
+        {
+            Some(mhz) => eprintln!(
+                "luna-gui: display refresh = {:.3} Hz (emu target ≈ 60.099 NTSC / 50.007 PAL)",
+                f64::from(mhz) / 1000.0
+            ),
+            None => eprintln!("luna-gui: display refresh rate unknown (monitor query None)"),
+        }
         let surface = SurfaceTexture::new(size.width, size.height, window.clone());
         let pixels = match Pixels::new(CANVAS_W as u32, CANVAS_H as u32, surface) {
             Ok(p) => p,
@@ -617,6 +702,13 @@ impl ApplicationHandler for LunaApp {
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         self.poll_rom_picker();
         self.poll_firmware_picker();
+        // Periodic battery-SRAM auto-flush (dirty-write only) so an in-game
+        // save survives an unclean exit (crash / kill), not just a clean
+        // close. The byte-compare in `persist_sram` makes idle frames free.
+        if self.last_srm_flush.elapsed() >= std::time::Duration::from_secs(SRAM_FLUSH_SECS) {
+            self.persist_sram(false);
+            self.last_srm_flush = std::time::Instant::now();
+        }
         // Request a redraw every ~16 ms to keep the framebuffer current.
         if let Some(win) = self.window.as_ref() {
             win.request_redraw();

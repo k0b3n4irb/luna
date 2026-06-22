@@ -1700,6 +1700,16 @@ impl Emulator {
         Ok(())
     }
 
+    /// Nominal display frame rate of the loaded cart's region — NTSC
+    /// 60.0988 Hz / PAL 50.007 Hz. Front-ends pace presentation to this so
+    /// the emulator runs at real time (defaults to NTSC with no ROM).
+    pub fn frame_rate_hz(&self) -> f64 {
+        match self.snes.as_ref().map(|s| s.region) {
+            Some(luna_cartridge::Region::Pal) => 50.0070,
+            _ => 60.0988,
+        }
+    }
+
     /// Diagnostic: a full copy of the 128 KiB WRAM (`$7E0000`-`$7FFFFF`).
     /// For byte-level cross-emulator diffing once `wram_page_hashes` has
     /// localised the first diverging frame + page.

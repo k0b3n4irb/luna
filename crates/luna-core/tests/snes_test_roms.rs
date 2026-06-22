@@ -42,6 +42,11 @@ const FRAME_H: usize = luna_ppu::FRAME_H;
 
 /// Hard ceiling on instructions, in case a ROM never settles or loops.
 const STEP_CAP: u64 = 30_000_000;
+/// SPC700 ALU tests run every addressing mode before the pass/fail verdict
+/// lands in the mailbox (ADC/SBC ~35M instructions), so they get a higher
+/// ceiling than the framebuffer-settle tests (some of which intentionally
+/// cap-out mid-animation and must keep their 30M frame).
+const SPC700_STEP_CAP: u64 = 45_000_000;
 /// Sample the framebuffer hash every this many instructions.
 const SAMPLE_EVERY: u64 = 100_000;
 /// Consecutive identical samples that count as "settled".
@@ -173,6 +178,44 @@ fn dump_png(bytes: &[u8], path: &Path) {
     let img =
         image::RgbImage::from_raw(FRAME_W as u32, FRAME_H as u32, bytes.to_vec()).expect("dims");
     let _ = img.save(path);
+}
+
+/// Repo-local commercial ROM dir (`tests/roms/`, gitignored). Used by the
+/// representative hardware-coverage goldens. Absent ROMs skip — these are
+/// **developer-local** regression nets (the copyrighted ROMs are not in CI).
+fn games_root() -> Option<PathBuf> {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR")); // crates/luna-core
+    p.pop(); // crates
+    p.pop(); // <repo root>
+    p.push("tests");
+    p.push("roms");
+    p.is_dir().then_some(p)
+}
+
+/// Boot a commercial ROM (auto-detected mapper + native region) with no input
+/// and run a FIXED instruction count, returning the framebuffer. Fixed-count
+/// (not settle) because these scenes animate; luna is deterministic, so the
+/// hash is stable run-to-run and moves only when emulation behaviour changes —
+/// re-record (`LUNA_SNES_TEST_RECORD=1`) after an intended render/timing change.
+fn run_game_fixed(rom: Vec<u8>, instructions: u64) -> Vec<u8> {
+    let cart = Cartridge::from_bytes(rom).expect("auto-detect cartridge");
+    let mut snes = Snes::from_cartridge(cart);
+    snes.reset();
+
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let mut executed = 0u64;
+    while executed < instructions {
+        if snes.cpu.stopped {
+            break;
+        }
+        if catch_unwind(AssertUnwindSafe(|| snes.step())).is_err() {
+            break;
+        }
+        executed += 1;
+    }
+    std::panic::set_hook(prev_hook);
+    fb_bytes(&snes)
 }
 
 /// Boot `rel` (relative to the corpus root), settle, and compare the
@@ -343,6 +386,71 @@ cpu_test!(
     "TRN",
     "4499f14b4497b7522691a4ac5ac8f9d5731976f89be27167091fe25a19cc9b68"
 );
+
+/// Peter Lemon `CPUTest/SPC700/<NAME>` ALU hardware test — checked by its
+/// **memory-result protocol**, not a framebuffer hash (the result display
+/// cycles per addressing mode, so a hash settles on a non-deterministic
+/// transient). Per the ROM's `.asm`, on the first divergent opcode the SPC700
+/// writes `$81` to CPUIO0 (`$2140`) and HALTS in a fail loop; on success it
+/// runs every mode to completion. Objective pass = the SPC→CPU mailbox port 0
+/// is never `$81`. Complements the cycle-stepped 65c816/SPC700 differential.
+fn run_spc700_fail_port(rom: Vec<u8>) -> u8 {
+    let mut cart = Cartridge::from_bytes_forced(rom, MapperKind::LoRom).expect("forced LoROM load");
+    cart.header.region = luna_cartridge::Region::Pal;
+    let mut snes = Snes::from_cartridge(cart);
+    snes.reset();
+
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let mut executed = 0u64;
+    'run: while executed < SPC700_STEP_CAP {
+        for _ in 0..SAMPLE_EVERY {
+            if catch_unwind(AssertUnwindSafe(|| snes.step())).is_err() {
+                break 'run;
+            }
+            executed += 1;
+        }
+        // The fail path halts immediately with $81 in CPUIO0 — bail early.
+        if snes.apu_real.cpu_read_port(0) == 0x81 {
+            break;
+        }
+    }
+    std::panic::set_hook(prev_hook);
+    snes.apu_real.cpu_read_port(0)
+}
+
+macro_rules! spc700_test {
+    ($fn:ident, $name:literal) => {
+        #[test]
+        fn $fn() {
+            let rel = concat!("CPUTest/SPC700/", $name, "/SPC700", $name, ".sfc");
+            let Some(root) = corpus_root() else {
+                eprintln!("[skip] SNES test corpus not found (tools/fetch-snes-test-roms.sh)");
+                return;
+            };
+            let path = root.join(rel);
+            if !path.is_file() {
+                eprintln!("[skip] {rel}: not present under {}", root.display());
+                return;
+            }
+            let rom = std::fs::read(&path).expect("read rom");
+            let port0 = run_spc700_fail_port(rom);
+            assert_ne!(
+                port0, 0x81,
+                "SPC700 {} test FAILED on hardware-result protocol: CPUIO0/$2140 = $81 (fail halt)",
+                $name
+            );
+        }
+    };
+}
+
+spc700_test!(spc700_adc, "ADC");
+spc700_test!(spc700_and, "AND");
+spc700_test!(spc700_dec, "DEC");
+spc700_test!(spc700_eor, "EOR");
+spc700_test!(spc700_inc, "INC");
+spc700_test!(spc700_ora, "ORA");
+spc700_test!(spc700_sbc, "SBC");
 
 /// Declare a Peter Lemon `PPU/<path>` golden test. The PPU suite has an
 /// irregular directory layout, so the full relative path is given.
@@ -628,13 +736,13 @@ ppu_test!(
     ppu_hdma_hicolor64,
     "HDMA/HiColor64PerTileRow/HiColor64PerTileRow.sfc",
     "ab7a0324251a2b7c87ede33af6b707dc3e4aa08891dfecd42121ec5f5f36e06a",
-    ignore = "HiColor chart: needs intra-scanline CGRAM (mid-line H-IRQ DMA) (gap #7)"
+    ignore = "HiColor chart (gap #7): fully mapped vs the shipped hardware reference PNG, 2026-06-22 — HARD multi-factor timing bug, NOT yet cracked. Technique (.asm): an H-IRQ at HTIME=190 reads the V-counter ($213D) each line and DMAs 8 incremental colours into CGRAM in HBlank (h~306), CGADD reset every 8 lines, building a 64-colour palette per 8-line tile-row. Reference diff: 81% exact; wrong rows are the FIRST line of each tile-row (y=0,8,16,…, ~15 rows) PLUS a separate bottom smooth-gradient band (y~160-221, ~57 rows = the larger slice). RULED OUT by measurement: (a) OPVCT/IRQ — luna fires the H-IRQ at HTIME=190 and returns the correct scanline (108=$6C,…), so the handler loads the right group; the scorecard grade-D \"H-IRQ ignores HTIME\" is stale. (b) render-vs-HBlank-DMA ordering — a flush-before-DMA correctly commits the visible line pre-DMA and persists (line-end render then no-ops), yet the image is UNCHANGED, proving each line's own DMA loads colours for FUTURE lines (incremental), so ordering is irrelevant to the current line. (c) per-line palette swap — forcing band-1 instead of band-0 did not help. The real residual is the incremental-palette-group activation timing + the bottom-band technique; needs a focused session with the reference per-row diff as the live oracle."
 );
 ppu_test!(
     ppu_hdma_hicolor128,
     "HDMA/HiColor128PerTileRow/HiColor128PerTileRow.sfc",
     "54495c7af30fa3cda2734230351396254d5ea2b64095b444082087888b539bc5",
-    ignore = "HiColor chart: needs intra-scanline CGRAM (mid-line H-IRQ DMA) (gap #7)"
+    ignore = "HiColor chart (gap #7): fully mapped vs the shipped hardware reference PNG, 2026-06-22 — HARD multi-factor timing bug, NOT yet cracked. Technique (.asm): an H-IRQ at HTIME=190 reads the V-counter ($213D) each line and DMAs 8 incremental colours into CGRAM in HBlank (h~306), CGADD reset every 8 lines, building a 64-colour palette per 8-line tile-row. Reference diff: 81% exact; wrong rows are the FIRST line of each tile-row (y=0,8,16,…, ~15 rows) PLUS a separate bottom smooth-gradient band (y~160-221, ~57 rows = the larger slice). RULED OUT by measurement: (a) OPVCT/IRQ — luna fires the H-IRQ at HTIME=190 and returns the correct scanline (108=$6C,…), so the handler loads the right group; the scorecard grade-D \"H-IRQ ignores HTIME\" is stale. (b) render-vs-HBlank-DMA ordering — a flush-before-DMA correctly commits the visible line pre-DMA and persists (line-end render then no-ops), yet the image is UNCHANGED, proving each line's own DMA loads colours for FUTURE lines (incremental), so ordering is irrelevant to the current line. (c) per-line palette swap — forcing band-1 instead of band-0 did not help. The real residual is the incremental-palette-group activation timing + the bottom-band technique; needs a focused session with the reference per-row diff as the live oracle."
 );
 
 // INPUT/ControllerLatency: "any button → white screen, none → black". Held
@@ -952,4 +1060,144 @@ spc_test!(
     hold = PAD_A,
     ignore = "stale audio hash since the per-cycle SPC700/timer/DSP + 1.025280 MHz clock \
               change (PR #9) — audition WAV + regen pending, like its siblings"
+);
+
+/// Declare a representative commercial-title golden — one eyeball-validated
+/// scene per hardware feature (mapper / coprocessor / PPU effect). The ROM
+/// boots with NO input to a fixed instruction count and its framebuffer hash
+/// is asserted. These are an **integration** regression net (the mapper +
+/// coproc boot + the full-game render path), complementing the Peter Lemon
+/// **primitive** goldens. Copyrighted ROMs live in `tests/roms/` (gitignored),
+/// so these SKIP unless the developer has dumped them.
+macro_rules! game_test {
+    ($fn:ident, $file:literal, $instructions:literal, $hash:literal) => {
+        #[test]
+        fn $fn() {
+            let Some(root) = games_root() else {
+                eprintln!("[skip] commercial ROMs (tests/roms/) absent — gitignored, dump your own");
+                return;
+            };
+            let path = root.join($file);
+            if !path.is_file() {
+                eprintln!("[skip] {}: not present under {}", $file, root.display());
+                return;
+            }
+            let rom = std::fs::read(&path).expect("read rom");
+            let bytes = run_game_fixed(rom, $instructions);
+            let got = hex(&Sha256::digest(&bytes));
+            if std::env::var("LUNA_SNES_TEST_RECORD").is_ok() {
+                if let Ok(dir) = std::env::var("LUNA_SNES_TEST_PNG") {
+                    dump_png(&bytes, &Path::new(&dir).join(concat!(stringify!($fn), ".png")));
+                }
+                println!("RECORD {} => {}", $file, got);
+                return;
+            }
+            assert_eq!(
+                got, $hash,
+                "framebuffer hash mismatch for {} \
+                 (run LUNA_SNES_TEST_RECORD=1 to re-record after an intended render change)",
+                $file
+            );
+        }
+    };
+}
+
+// Mode 7
+game_test!(
+    game_fzero,
+    "F-Zero (USA).sfc",
+    30_000_000,
+    "db0aae0d7ecaf5805eb44c732a22541880066759814f021951f8af0af7733ece"
+);
+game_test!(
+    game_mariokart,
+    "Super Mario Kart (USA).sfc",
+    50_000_000,
+    "b7bc468dec89ba2f02f36190f0fc4c6945ec2cee1f6e68000452596e8e21456e"
+);
+// SA-1
+game_test!(
+    game_smrpg,
+    "Super Mario RPG - Legend of the Seven Stars (USA).sfc",
+    12_000_000,
+    "49f84ad54742960ad0e193a38134e6ceba2b59f9809c46976b5d4cf6546a3dba"
+);
+game_test!(
+    game_kirby_ss,
+    "Kirby Super Star (USA).sfc",
+    35_000_000,
+    "1c88c42a9f38ff52a69bb78f62c90f1070a8837112243157df5a1fc485539e62"
+);
+// Super FX (GSU)
+game_test!(
+    game_starfox,
+    "Star Fox (USA) (Rev 2).sfc",
+    25_000_000,
+    "e778238e51f28032bd71a400b54e8f2278b19b3cba6d70a38cffbc36cf83ac9a"
+);
+game_test!(
+    game_stuntfx,
+    "Stunt Race FX (USA) (Rev 1).sfc",
+    25_000_000,
+    "4127b08e545a26a3c86cbdf39206c5834788a28cb4da5e0083a2595a3ff46b7f"
+);
+// S-DD1
+game_test!(
+    game_starocean,
+    "Star Ocean (tr).sfc",
+    30_000_000,
+    "1ecd444af4ed8b7e16c3ea267b2250bf1eea656f3ca7b426ac44a4158e7997a1"
+);
+// DSP-1
+game_test!(
+    game_pilotwings,
+    "Pilotwings (USA).sfc",
+    20_000_000,
+    "74e38144b13287b0bada97de9669bca89f00f3870461caf9537ea728c3f50fa7"
+);
+// Color math / transparency
+game_test!(
+    game_som,
+    "Secret of Mana (USA).sfc",
+    30_000_000,
+    "5371ef9d2574babb1aeab176fd70cbfd351ae925ed30bf61504bd69cefa909dc"
+);
+game_test!(
+    game_zelda,
+    "Legend of Zelda, The - A Link to the Past (USA).sfc",
+    35_000_000,
+    "924f3a854ea1b49886a2e11491afb6815c207f4f5b14a0532025e1ff58c8b252"
+);
+// HiROM (+ Mode 7 pendulum)
+game_test!(
+    game_metroid,
+    "Super Metroid (Japan, USA) (En,Ja).sfc",
+    35_000_000,
+    "3fddcd5d6d10a972030bec93560c75c65f670b4f3a8d84a423d42f8d661f6845"
+);
+game_test!(
+    game_chrono,
+    "Chrono Trigger (USA).sfc",
+    20_000_000,
+    "6e00465ad69e86123b1a18e9d5a35d3850ced35bc2d8eecf2e4da63fce10d9a7"
+);
+// Large ROM
+game_test!(
+    game_tales,
+    "Tales of Phantasia (Japan).sfc",
+    40_000_000,
+    "e997ba7d2757a4ed15dc52da2c2ba1a47ecd4a5eeb49d9d71cc55a750ee81fcf"
+);
+// HDMA (raster split + gradient)
+game_test!(
+    game_contra3,
+    "Contra III - The Alien Wars (USA).sfc",
+    50_000_000,
+    "2d8f52bb162cc1e9e00897e8b1dc5f17a54e2088f77ea14adce508aa91627e02"
+);
+game_test!(
+    game_axelay,
+    "Axelay (USA).sfc",
+    55_000_000,
+    "6ff009b793b5be6706cccb1378829c47d04f5284ec014c73a9988e97ef1c2c7c"
 );

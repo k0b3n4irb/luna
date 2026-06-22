@@ -8,6 +8,7 @@
 //! See `ARCHITECTURE.md` §6 and §6.6 for the target architecture.
 
 pub mod apu_stub;
+pub mod controller;
 pub mod coproc;
 pub mod cpu_regs;
 pub mod dma;

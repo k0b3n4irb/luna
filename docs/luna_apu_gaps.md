@@ -26,23 +26,19 @@ weights the hand-written SMP glue, where the real findings are.
 
 ---
 
-## 🔴 1. ENDX (`$7C`) wrongly cleared on `$F3` read
+## ✅ 1. ENDX (`$7C`) wrongly cleared on `$F3` read — DONE
 
 ares `DSP::read` (`dsp/memory.cpp:1-3`) has **no side effects** — ENDX
 is cleared only by a *write* to `$7C` (`memory.cpp:34-37`) or by KON
-re-keying a voice (`voice.cpp:146`). luna (`lib.rs:477-482`) clears
-`registers[0x7C]` whenever the SPC reads `$F3` with the index at `$7C`:
+re-keying a voice (`voice.cpp:146`). luna used to clear `registers[0x7C]`
+whenever the SPC read `$F3` with the index at `$7C`, which lost the
+end-of-sample bits on a second read.
 
-```rust
-if idx == 0x7C { self.dsp.registers[0x7C] = 0; }
-```
-
-A driver that reads ENDX more than once (or in two code paths) loses
-the end-of-sample bits after the first read, so one-shot samples and
-sample-end synchronisation can be missed. **The headline fix** — and
-safe to remove, since `dsp.rs` already maintains ENDX correctly
-(write-clear at `dsp.rs:384-388`, KON-clear, per-sample `_end`
-reflection at `dsp.rs:769-776`).
+**Fixed**: the side-effecting clear is gone — DSP reads no longer mutate
+ENDX (`lib.rs` ~889 comment "ENDX (`$7C`) is cleared only by a write to
+`$7C` or by KON"), and `dsp.rs` maintains it (write-clear, KON-clear,
+per-sample `_end` reflection). Regression tests: "ENDX must survive
+repeated reads" and "write to `$7C` clears ENDX" (`lib.rs` ~1126/1130).
 
 ---
 
@@ -111,9 +107,12 @@ underlying RAM. Tests `ipl_rom_overlay_toggles_with_f1_bit7`,
 - **Mailbox** direction model (`to_spc`/`to_cpu`), `$F2` DSPADDR
   read-back, `$F3` index masking (`& 0x7F` mirror region).
 - **SPC700 core** — semantically audited against ares (ALU, DAA/DAS/
-  DIV/MUL exact; see `luna_spc700_gaps.md`). NOTE: it has *no* Tom Harte
-  test (unlike the 65c816) — only inline unit tests; that gap is tracked
-  in `luna_spc700_gaps.md`.
+  DIV/MUL exact; see `luna_spc700_gaps.md`), AND covered by a
+  SingleStepTests / Tom Harte harness (`crates/luna-cpu-spc700/tests/
+  tom_harte.rs`) plus the PeterLemon SPC700 ALU hardware tests, validated
+  by their `$2140` mailbox memory-result protocol
+  (`spc700_*` in `crates/luna-core/tests/snes_test_roms.rs`). (The earlier
+  "no Tom Harte test" note here was stale.)
 
 ## Suggested order
 
