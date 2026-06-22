@@ -119,6 +119,19 @@ screenshot (Settings → Hotkeys). **No Mouse or Super Scope yet.** Full table:
 firmware — luna prompts for it (GUI) or takes `--dsp1-rom` (CLI). Setup:
 [`docs/firmware.md`](docs/firmware.md).
 
+## Saving your progress
+
+luna persists saves two ways:
+
+- **Battery (cartridge) saves** — automatic. A game's in-cartridge save is
+  written to a `<rom>.srm` sidecar next to the ROM when you close luna or
+  switch ROMs, and restored the next time you load that ROM. It is the
+  standard `.srm` format, so it interchanges with other emulators.
+- **Save states** — a full machine snapshot in any of 9 slots. `F5` saves to
+  the current slot, `F9` loads it; pick a slot from **Emulation → Save state /
+  Load state**. (Other hotkeys: `F2` pause, `F3` reset, `F12` screenshot — all
+  remappable in **Settings → Hotkeys**.)
+
 ## Architecture at a glance
 
 Luna is a 12-crate Cargo workspace, organized in layers that communicate only
