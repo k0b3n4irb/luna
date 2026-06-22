@@ -135,6 +135,9 @@ fn run(
     let mut last_report = Instant::now();
     let mut batches_since_report = 0u64;
     let mut samples_since_report = 0u64;
+    let mut frames_since_report = 0u64;
+    // Wall-clock deadline for the next emulated frame (the frame-rate limiter).
+    let mut next_frame_at = Instant::now();
     let mut ring_full_count = 0u64;
 
     // Last emulated frame_count we copied into the shared RGBA buffer.
@@ -225,6 +228,10 @@ fn run(
             // consecutive blanks, then publish the black once. (Verified
             // 2026-06-10: the CLI render path, which never held, shows
             // Williams→black→DOOM at full brightness — the core is correct.)
+            // Frame-rate limiter signals (consumed outside the lock): whether a
+            // full PPU frame completed this batch, and the cart's real-time rate.
+            let mut frame_produced = false;
+            let mut frame_hz = 60.0988_f64;
             let cur_frame = em.frame_count().unwrap_or(last_emu_frame);
             // A frame-count regression means the core was reset (or a new
             // ROM loaded): `reset` zeroes frame_count. The `emu_dead`
@@ -243,6 +250,9 @@ fn run(
             }
             if cur_frame != last_emu_frame {
                 last_emu_frame = cur_frame;
+                frames_since_report += 1;
+                frame_produced = true;
+                frame_hz = em.frame_rate_hz();
                 let publish = if em.frame_showed_content().unwrap_or(true) {
                     blank_run = 0;
                     true
@@ -261,10 +271,10 @@ fn run(
                     }
                 }
             }
-            (done, pushed, full)
+            (done, pushed, full, frame_produced, frame_hz)
         };
 
-        let (done, pushed, ring_full) = outcome;
+        let (_done, pushed, ring_full, frame_produced, frame_hz) = outcome;
         batches_since_report += 1;
         samples_since_report += pushed;
         if ring_full {
@@ -273,16 +283,35 @@ fn run(
 
         if last_report.elapsed() >= Duration::from_secs(1) {
             eprintln!(
-                "luna-emu: {} batches/s, {} samples/s, ring_full×{} (last batch: {} steps)",
-                batches_since_report, samples_since_report, ring_full_count, done,
+                "luna-emu: {frames_since_report} fps, {batches_since_report} batches/s, \
+                 {samples_since_report} samples/s ({:.1}/frame), ring_full×{ring_full_count}",
+                samples_since_report as f64 / frames_since_report.max(1) as f64,
             );
             last_report = Instant::now();
             batches_since_report = 0;
             samples_since_report = 0;
+            frames_since_report = 0;
             ring_full_count = 0;
         }
 
-        if ring_full {
+        // Frame-rate limiter (video-as-clock): cap the emu at the cart's real
+        // rate so it cannot outrun the display. The old audio-as-clock loop let
+        // the emu free-run to ~62 fps whenever the ring had space, so on a
+        // ~60 Hz display ~2 frames/s were dropped → motion judder. Sleep (NOT
+        // park_timeout — the cpal unpark would cut it short) until the frame's
+        // wall-clock deadline; the audio ring + DRC absorb the small rate delta.
+        if frame_produced {
+            let period = Duration::from_secs_f64(1.0 / frame_hz);
+            let now = Instant::now();
+            if now < next_frame_at {
+                thread::sleep(next_frame_at - now);
+                next_frame_at += period;
+            } else {
+                // Behind schedule (slow frame / startup): resync to avoid a
+                // catch-up spiral that would run fast to "make up" time.
+                next_frame_at = now + period;
+            }
+        } else if ring_full {
             thread::park_timeout(Duration::from_millis(50));
         } else {
             thread::yield_now();
