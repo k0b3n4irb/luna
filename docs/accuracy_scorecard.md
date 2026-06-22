@@ -31,7 +31,7 @@ truly-open list is short.** Use *this* table, not §1, as current truth.
 |---|:---:|:---:|---|
 | DSP S-DSP | A− | **A** | ~~golden-vector PCM tests absent~~ — **FIXED 2026-06-17** (BRR→PCM differential vs Mesen2 + curated goldens) |
 | CPU 65c816 | A− | **A−** | none functional (DP-8 bare wrap is inert → comment fix) |
-| SPC700 | B | **B+** | fine cycle ordering only (branch penalty fixed) |
+| SPC700 | B | **A−** | cycle model complete (2026-06-22): all 254 opcodes cycle-stepped byte/cycle-exact vs the atomic core, taken-branch +2 applied, cooperative CPU↔SPC interleave active at bus-access granularity, `$F0` wait-state dividers modelled (gap 6 closed) |
 | PPU | C+ | **A−** | *(OPHCT/OPVCT read-latch **+** BG scroll write-twice — both **FIXED 2026-06-11**; the OPVCT latch was the Doom-flicker root)* |
 | DMA/HDMA | C+ | **B−** | DMA per-byte + line-granular HDMA preempt (Phase 5). dot-276 sub-line is **visually a no-op** (276 = HBlank → effect on line N+1, which luna's boundary model already does — see `hdma_ares_audit.md` "Resolution 2026-06-20"); residual is the HDMA stall **cycle-count** timing only (no known game impact). |
 | SA-1 | C+ | **A−** | ~~flat instruction timing~~ — **FIXED**: per-access cycle cost (Phase 5b `097ffe7`) + `conflict()` BWRAM/IRAM/ROM contention steps (Increment B, 2026-06-20). The "−" is the batched (non-cothread) scheduler grain, not a value bug. |
@@ -48,6 +48,30 @@ truly-open list is short.** Use *this* table, not §1, as current truth.
 
 Plus the 2 architectural residuals (Phase 5: DMA per-byte grid stepping, mid-line
 HDMA preemption) — genuine HDMA-accuracy items.
+
+**UPDATE 2026-06-22 — SPC700 cycle model finished (→ A−); Star Ocean fixed; §1
+PPU rows confirmed stale.**
+- **SPC700 → A−.** The cycle-stepped core is byte/cycle-exact for all 254 opcodes
+  vs the atomic core (`differential_all_ported_opcodes`); the taken-branch +2
+  penalty is applied (`ef44271`); the CPU↔SPC interleave is cycle-exact at
+  bus-access granularity (cooperative grammar, active — not the old chunked
+  model); and the **`$F0` wait-state dividers** `{2,4,10,20}` clock / `{2,4,8,16}`
+  timer (the 8/16→10/20 glitch) are now modelled per access — **last named APU
+  gap (`luna_apu_gaps.md` §6) closed**. ws=0 byte-identical (24 APU tests + the
+  differential + 58 goldens unchanged); `wait_states_divide_the_spc_clock` proves
+  ws=1≈½ / ws=3≈⅒.
+- **Star Ocean (S-DD1) plays past the intro** (`f4fc744`): MMC bank selects power
+  on to identity (green tri-Ace logo) and `$C0-FF` is MMC ROM not SRAM (`$F0-FD`
+  was returning zeroed save-RAM, dead-looping the post-intro script engine).
+- **Audit of the §1 May PPU rows (below):** every grade-D/C claim spot-checked is
+  **already fixed in current code** — sprite Y-wrap (`sprite_on_line` does
+  `& 0xFF`), large-sprite tile addressing (delegated to the indexed renderer's
+  tile-wrap), BG modes 5/6 hi-res (`render_bg_scanline_indexed_hires`, 512-wide),
+  BG scroll write-twice (shared `bgofsPPU1/2` latches), Mode-7 screen-over
+  (`M7SEL` 7:6). The re-grounded banner's **PPU A−** is correct; **§1 stays
+  superseded** (its line-numbers and grades predate this work — do not cite it).
+  The per-dot/mid-scanline path exists (gap G6 `flush_partial_scanline`); a "per-dot
+  renderer rewrite" is **not** an open item.
 
 **UPDATE 2026-06-11 — the Doom flicker is SOLVED, and it was NOT a scheduler/timing
 problem.** The earlier theory here (Doom loop "~3.3× slow", attack only with the
@@ -86,7 +110,7 @@ on the real SMW ROM and in-GUI (F5/F9). No subsystem grade moves.
 |---|:---:|---|
 | **DSP — S-DSP audio** | **A−** | Faithful near-line-for-line ares port; BRR/gaussian/envelope/echo/noise all match. Only loss: dead legacy tables in `lib.rs` + **zero golden-vector tests**. |
 | **CPU — 65c816** | **A−** *(was B)* | **99.99996 % Tom Harte (2 fails / 5.08M)** after fixing the 16-bit BCD adjust, MVN/MVP per-byte interruptibility, and E-mode stack + (dp,X) pointer wrap. Functionally byte-faithful to ares; the "−" is the instruction-atomic core (no cycle-stepping; edge-latched IRQ). |
-| **SMP — SPC700** | **B** *(was B−)* | 256/256 opcodes + ALU/MUL/DAA/DAS byte-faithful; `DIV YA,X` now ares-faithful (fixed). Remaining gap: the never-applied branch-taken cycle penalty — a cycle-timing ceiling that skews timer/DSP rate, not a value bug. |
+| **SMP — SPC700** | **A−** *(was B)* | 256/256 opcodes + ALU/MUL/DAA/DAS byte-faithful; `DIV YA,X` ares-faithful. The cycle model is now complete: all 254 opcodes are cycle-stepped byte-/cycle-exact vs the atomic core (`differential_all_ported_opcodes`), the taken-branch +2 penalty is applied (`ef44271`), the CPU↔SPC interleave is cycle-exact at bus-access granularity (cooperative grammar, active), and the `$F0` wait-state dividers `{2,4,10,20}` + the 8/16→10/20 timer glitch are modelled (gap 6 closed). |
 | **PPU — graphics** | **C+** | Color-math/CGWSEL/OAM-modulo reference-accurate; real bugs in sprite Y-wrap, large-sprite tile addressing, BG scroll write-twice, Mode-7 screen-over; hi-res modes 5/6 + EXTBG absent. |
 | **DMA / HDMA / timing** | **C+** | Byte-movement & HDMA table walk accurate & well-tested; **timing is architecturally coarse** (atomic burst + lump cycle-charge) → no mid-line HDMA preemption, H-IRQ ignores HTIME, **coprocessor double-charge bug**. |
 | **SA-1 coprocessor** | **C+** | IRQ/mailbox/banking/multiplier reference-accurate (incl. correct CCNT bit-5 polarity); divergences in divider signedness, MAC-clear guard, **CC1 bpp/width fields swapped**, flat instruction timing. |
@@ -223,7 +247,7 @@ one cycle-timing divergence remains.
 | **DIV YA,X** ✅ *fixed* | ares-faithful: H/V from **pre-div** Y, `Y<(X<<1)` overflow branch, X==0 via 256-X (`opcodes.rs:1096`) | H/V pre-div Y + overflow branch (`instructions.cpp:358`) | bit-loop, same semantics (`Spc.Instr.cpp:1163`) | **A** |
 | MUL | NZ from Y (`opcodes.rs:1087`) | `instructions.cpp:505` | matches | A |
 | DAA/DAS | `opcodes.rs:1676` | `instructions.cpp:199` | matches | A |
-| **Cycle — taken branch** | never adds +2 (`cycles.rs:28`) | +2 idle on take (`instructions.cpp:85`) | +2 idle (`Spc.Instr.cpp:1625`) | C |
+| **Cycle — taken branch** ✅ *fixed* | +2 on take via `SPC700_BRANCH_TAKEN_PENALTY` (`ef44271`) | +2 idle on take (`instructions.cpp:85`) | +2 idle (`Spc.Instr.cpp:1625`) | **A** |
 | Cycle — per-opcode base | table, plausible | per-access | per-access | B |
 | Reset / IPL | vector + SP=$FF (`cpu.rs:46`) | `timing.cpp:9` | equiv | B |
 | Timers T0/T1/T2 | 128/128/16 divider (`apu/lib.rs:205`) | 2-stage divider (`timing.cpp:34`) | `SpcTimer.h` | B− |
