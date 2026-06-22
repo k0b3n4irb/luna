@@ -77,7 +77,9 @@ enum Command {
         /// cross-architecture visual-regression key — it hashes the same
         /// pixels `--screenshot` writes, before PNG encoding (so it is immune
         /// to the build-dependent PNG encoder). Ideal as an external test
-        /// harness's baseline key.
+        /// harness's baseline key. See `docs/trace_determinism.md` for which
+        /// outputs (fbhash / trace counts / WRAM bytes) are cross-arch-stable
+        /// and how strongly each may be asserted.
         #[arg(long)]
         print_fbhash: bool,
     },
