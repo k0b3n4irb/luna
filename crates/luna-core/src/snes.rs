@@ -301,9 +301,11 @@ pub struct MemTraceEvent {
     /// PPU scanline at the access (instruction-start snapshot).
     pub line: u16,
     /// `true` if the PPU is in the vertical-blank window
-    /// (`line >= vblank_start`). Forced-blank periods are derivable from
-    /// the INIDISP (`$2100`) writes in the same trace.
+    /// (`line >= vblank_start`).
     pub blank: bool,
+    /// `true` if INIDISP (`$2100`) forced-blank (bit 7) was set at the access.
+    /// A VRAM write is safe iff `blank || force_blank`.
+    pub force_blank: bool,
 }
 
 /// Direction of a CPU bus access.
@@ -1454,6 +1456,7 @@ impl DmaBus for DmaBusView<'_> {
                         frame: self.trace_frame,
                         line: self.trace_line,
                         blank: self.trace_blank,
+                        force_blank: self.ppu.inidisp & 0x80 != 0,
                     });
                 }
             }
@@ -1524,6 +1527,7 @@ impl SnesBus<'_> {
                 value,
                 line: self.ppu_line,
                 blank: self.ppu_line >= self.vblank_start_line,
+                force_blank: self.ppu.inidisp & 0x80 != 0,
             });
         }
     }
