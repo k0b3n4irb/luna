@@ -1887,6 +1887,13 @@ impl SnesBus<'_> {
             // title-menu pattern) drained the buffer into all-1s
             // after the first sweep and saw a phantom "every button
             // pressed" state forever — instant menu auto-advance.
+            // A Mouse on this port answers the manual serial read with its own
+            // 32-bit stream (device signature + signed dx/dy) instead of the
+            // pad shift register. The $4016 strobe drives its latch (below).
+            let port = usize::from(offset != 0x4016);
+            if let Some(m) = self.cpu_regs.port_mouse(port) {
+                return m.data() & 1;
+            }
             let shift = if offset == 0x4016 {
                 &mut *self.joypad1_shift
             } else {
@@ -2118,6 +2125,8 @@ impl SnesBus<'_> {
                     *self.joypad2_shift = self.cpu_regs.joypad2;
                 }
                 *self.joypad_strobe = next_strobe;
+                // A Mouse on either port latches off the same $4016 strobe.
+                self.cpu_regs.latch_mouse(next_strobe);
             }
             // $4017 writes drive the expansion-port output pins —
             // ignored by an emulator that doesn't model the expansion.

@@ -7,6 +7,8 @@
 //!
 //! Reference: <https://problemkaputt.de/fullsnes.htm> §"S-CPU Registers".
 
+use crate::controller::{Mouse, PortDevice};
+
 /// CPU-side registers.
 ///
 /// Reads from write-only registers return open-bus (we return the last
@@ -67,6 +69,14 @@ pub struct CpuRegs {
     pub joypad1_latched: u16,
     /// `$421A/$421B` — latched player-2 state.
     pub joypad2_latched: u16,
+
+    /// Device on controller port 1 (the auto-read + `$4016` serial path).
+    pub port1: PortDevice,
+    /// Device on controller port 2 (the auto-read + `$4017` serial path).
+    pub port2: PortDevice,
+    /// SNES Mouse state — shared by whichever port is set to
+    /// [`PortDevice::Mouse`] (a host has at most one mouse).
+    pub mouse: Mouse,
 }
 
 impl CpuRegs {
@@ -74,6 +84,21 @@ impl CpuRegs {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The [`Mouse`] on `port` (0 = port 1 / `$4016`, 1 = port 2 / `$4017`)
+    /// if that port has one, for the bus's manual serial read; else `None`.
+    pub fn port_mouse(&mut self, port: usize) -> Option<&mut Mouse> {
+        let dev = if port == 0 { self.port1 } else { self.port2 };
+        (dev == PortDevice::Mouse).then_some(&mut self.mouse)
+    }
+
+    /// Drive the shared `$4016` strobe line into the mouse latch when either
+    /// port hosts a mouse.
+    pub fn latch_mouse(&mut self, strobe: bool) {
+        if self.port1 == PortDevice::Mouse || self.port2 == PortDevice::Mouse {
+            self.mouse.latch(strobe);
+        }
     }
 
     /// Read a register at the 16-bit CPU bank-0 offset (`$4200-$421F`).
@@ -158,12 +183,23 @@ impl CpuRegs {
     /// the case by clearing both opposing bits — keyboard players
     /// who hit conflicting keys see a "no-direction" outcome rather
     /// than a glitched latch.
-    pub const fn latch_joypad_auto_read(&mut self) {
+    pub fn latch_joypad_auto_read(&mut self) {
         if self.nmitimen & 0x01 == 0 {
             return;
         }
-        self.joypad1_latched = Self::clean_dpad(self.joypad1);
-        self.joypad2_latched = Self::clean_dpad(self.joypad2);
+        // A Mouse on a port feeds the auto-read its first 16 protocol bits
+        // (signature + buttons + speed) instead of the pad's button mask —
+        // that is how the SDK's `mouseInit` detects it.
+        self.joypad1_latched = if self.port1 == PortDevice::Mouse {
+            self.mouse.auto_read_16()
+        } else {
+            Self::clean_dpad(self.joypad1)
+        };
+        self.joypad2_latched = if self.port2 == PortDevice::Mouse {
+            self.mouse.auto_read_16()
+        } else {
+            Self::clean_dpad(self.joypad2)
+        };
         self.hvbjoy |= 0x01;
     }
 
