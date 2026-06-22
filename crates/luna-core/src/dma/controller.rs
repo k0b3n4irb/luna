@@ -30,6 +30,10 @@ pub struct DmaTraceEvent {
     /// `true` if the burst started in the vertical-blank window
     /// (`line >= vblank_start`).
     pub blank: bool,
+    /// `true` if INIDISP (`$2100`) forced-blank (bit 7) was set at the write.
+    /// A VRAM write is safe iff `blank || force_blank` (V-blank *or* forced
+    /// blank); otherwise it races active display and the PPU drops it.
+    pub force_blank: bool,
 }
 
 /// Bounded ring for the DMA→VRAM transfer-time tracer.

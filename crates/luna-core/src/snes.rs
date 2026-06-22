@@ -301,9 +301,11 @@ pub struct MemTraceEvent {
     /// PPU scanline at the access (instruction-start snapshot).
     pub line: u16,
     /// `true` if the PPU is in the vertical-blank window
-    /// (`line >= vblank_start`). Forced-blank periods are derivable from
-    /// the INIDISP (`$2100`) writes in the same trace.
+    /// (`line >= vblank_start`).
     pub blank: bool,
+    /// `true` if INIDISP (`$2100`) forced-blank (bit 7) was set at the access.
+    /// A VRAM write is safe iff `blank || force_blank`.
+    pub force_blank: bool,
 }
 
 /// Direction of a CPU bus access.
@@ -1454,6 +1456,7 @@ impl DmaBus for DmaBusView<'_> {
                         frame: self.trace_frame,
                         line: self.trace_line,
                         blank: self.trace_blank,
+                        force_blank: self.ppu.inidisp & 0x80 != 0,
                     });
                 }
             }
@@ -1524,6 +1527,7 @@ impl SnesBus<'_> {
                 value,
                 line: self.ppu_line,
                 blank: self.ppu_line >= self.vblank_start_line,
+                force_blank: self.ppu.inidisp & 0x80 != 0,
             });
         }
     }
@@ -1628,6 +1632,13 @@ impl SnesBus<'_> {
         let vblank_start = self.vblank_start_line;
         let scanlines = self.scanlines_per_frame;
         let mut hdma_stall = 0u32;
+
+        // Super Scope light-gun: when the CRT beam reaches the aimed scanline,
+        // the gun strobes IOBit, latching the PPU H/V counters (OPHCT/OPVCT)
+        // the game reads back for the beam position.
+        if let Some((h, v)) = self.cpu_regs.scope_latch_target(self.ppu_line) {
+            self.ppu.latch_counters(h, v);
+        }
 
         // Render the visible line that just finished, with its end-of-line
         // register state (HDMA for the next line fires after the increment).
@@ -1887,6 +1898,13 @@ impl SnesBus<'_> {
             // title-menu pattern) drained the buffer into all-1s
             // after the first sweep and saw a phantom "every button
             // pressed" state forever — instant menu auto-advance.
+            // A Mouse on this port answers the manual serial read with its own
+            // 32-bit stream (device signature + signed dx/dy) instead of the
+            // pad shift register. The $4016 strobe drives its latch (below).
+            let port = usize::from(offset != 0x4016);
+            if let Some(bit) = self.cpu_regs.port_serial_bit(port) {
+                return bit;
+            }
             let shift = if offset == 0x4016 {
                 &mut *self.joypad1_shift
             } else {
@@ -2118,6 +2136,8 @@ impl SnesBus<'_> {
                     *self.joypad2_shift = self.cpu_regs.joypad2;
                 }
                 *self.joypad_strobe = next_strobe;
+                // Every connected peripheral latches off the $4016 strobe.
+                self.cpu_regs.latch_devices(next_strobe);
             }
             // $4017 writes drive the expansion-port output pins —
             // ignored by an emulator that doesn't model the expansion.
