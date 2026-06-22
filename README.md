@@ -24,7 +24,7 @@ every subsystem is ported from ares / Mesen2. Full vision in
 
 ## Status
 
-Project under **active development, pre-1.0** (`v0.0.1`). What runs today:
+Project under **active development, pre-1.0** (`v0.3.3`). What runs today:
 
 | Subsystem | Crate | State |
 |---|---|---|

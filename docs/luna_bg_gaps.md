@@ -17,7 +17,7 @@ Authored 2026-05-30. Mode 7 affine + M7SEL already fixed (commit
 
 ---
 
-## 🔴 1. Mode 0 — missing per-BG palette offset (`id << 5`)
+## ✅ 1. Mode 0 — missing per-BG palette offset (`id << 5`) — DONE
 
 ares `background.cpp:111-113`:
 
@@ -28,15 +28,14 @@ tile.palette = paletteOffset + (tile.paletteGroup << paletteSize);
 ```
 
 In Mode 0 each BG occupies its **own 32-colour CGRAM region**:
-BG1→0, BG2→32, BG3→64, BG4→96. luna
-(`renderer.rs:1235-1238`) computes `palette_off * 4 + idx` for **all**
-BGs with no `id*32` term, so Mode 0 BG2/BG3/BG4 draw with BG1's
-palette region — wrong colours. Mode 0 is common in menus / status
-bars / early titles.
+BG1→0, BG2→32, BG3→64, BG4→96. luna used to compute the palette index
+for **all** BGs with no `id*32` term, so Mode 0 BG2/BG3/BG4 drew with
+BG1's palette region — wrong colours.
 
-**Fix:** add `(bg_idx as u8) << 5` to the 2bpp CGRAM index when
-`bgmode & 7 == 0`. Max index = 96 + 7*4 + 3 = 127, stays inside the
-BG half of CGRAM. **(Being fixed now.)**
+**Fixed**: the renderer now carries a `mode0_palette_base` (`(bg_idx)
+<< 5` when `bgmode & 0x07 == 0`, else 0) and applies it to the 2bpp
+CGRAM index (`renderer.rs` ~1209/1244). Max index 127, inside the BG
+half of CGRAM.
 
 ---
 

@@ -26,23 +26,19 @@ weights the hand-written SMP glue, where the real findings are.
 
 ---
 
-## 🔴 1. ENDX (`$7C`) wrongly cleared on `$F3` read
+## ✅ 1. ENDX (`$7C`) wrongly cleared on `$F3` read — DONE
 
 ares `DSP::read` (`dsp/memory.cpp:1-3`) has **no side effects** — ENDX
 is cleared only by a *write* to `$7C` (`memory.cpp:34-37`) or by KON
-re-keying a voice (`voice.cpp:146`). luna (`lib.rs:477-482`) clears
-`registers[0x7C]` whenever the SPC reads `$F3` with the index at `$7C`:
+re-keying a voice (`voice.cpp:146`). luna used to clear `registers[0x7C]`
+whenever the SPC read `$F3` with the index at `$7C`, which lost the
+end-of-sample bits on a second read.
 
-```rust
-if idx == 0x7C { self.dsp.registers[0x7C] = 0; }
-```
-
-A driver that reads ENDX more than once (or in two code paths) loses
-the end-of-sample bits after the first read, so one-shot samples and
-sample-end synchronisation can be missed. **The headline fix** — and
-safe to remove, since `dsp.rs` already maintains ENDX correctly
-(write-clear at `dsp.rs:384-388`, KON-clear, per-sample `_end`
-reflection at `dsp.rs:769-776`).
+**Fixed**: the side-effecting clear is gone — DSP reads no longer mutate
+ENDX (`lib.rs` ~889 comment "ENDX (`$7C`) is cleared only by a write to
+`$7C` or by KON"), and `dsp.rs` maintains it (write-clear, KON-clear,
+per-sample `_end` reflection). Regression tests: "ENDX must survive
+repeated reads" and "write to `$7C` clears ENDX" (`lib.rs` ~1126/1130).
 
 ---
 
