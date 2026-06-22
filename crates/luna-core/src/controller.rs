@@ -116,6 +116,92 @@ impl Mouse {
     }
 }
 
+/// Super Scope — faithful-enough port of ares `controller/super-scope`.
+///
+/// A light gun on port 2. Its **buttons** are read as an 8-bit serial stream
+/// (trigger, cursor, turbo, pause, 0, 0, offscreen, noise) — clocked like the
+/// pad, also captured by the auto-read so the SDK's `scopeIsConnected` detects
+/// it. Its **position** is not in that stream: when the CRT beam crosses the
+/// aimed `(cx, cy)`, the gun strobes the port-2 `IOBit` (`$4201.d7`) which
+/// latches the PPU H/V counters (OPHCT/OPVCT) the game reads for `scopeGetX/Y`.
+/// The bus drives that latch from a per-scanline hook (see `snes.rs`).
+///
+/// The scripted model sets `cx/cy` + the four buttons directly; the
+/// edge/turbo-toggle/trigger-lock state machine ares runs for a *held* real
+/// button is intentionally simplified (a script provides discrete per-frame
+/// states), which is enough for the detection + position acceptance.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct SuperScope {
+    /// Aimed beam X in screen pixels (0..255); off-range = offscreen.
+    pub cx: i32,
+    /// Aimed beam Y in screen lines (0..239); off-range = offscreen.
+    pub cy: i32,
+    /// Trigger (fire) button — set per frame.
+    pub trigger: bool,
+    /// Cursor button — set per frame.
+    pub cursor: bool,
+    /// Turbo switch — set per frame.
+    pub turbo: bool,
+    /// Pause button — set per frame.
+    pub pause: bool,
+
+    counter: u32,
+    latched: bool,
+}
+
+impl SuperScope {
+    /// True when the aim is outside the 256×240 active screen.
+    pub const fn offscreen(&self) -> bool {
+        self.cx < 0 || self.cy < 0 || self.cx >= 256 || self.cy >= 240
+    }
+
+    /// The H/V counter values to latch when the beam crosses the aim — ares
+    /// `target = cy*1364 + (cx+24)*4`, i.e. H ≈ `cx + 24`, V = `cy`.
+    pub fn latch_hv(&self) -> (u16, u16) {
+        (
+            (self.cx + 24).clamp(0, 339) as u16,
+            self.cy.clamp(0, 261) as u16,
+        )
+    }
+
+    /// Drive the shared `$4016` latch line; resets the serial counter.
+    pub const fn latch(&mut self, strobe: bool) {
+        if self.latched != strobe {
+            self.latched = strobe;
+            self.counter = 0;
+        }
+    }
+
+    /// Clock one serial button bit (ares `SuperScope::data`).
+    pub fn data(&mut self) -> u8 {
+        let off = self.offscreen();
+        let c = self.counter;
+        self.counter += 1;
+        match c {
+            0 => u8::from(self.trigger && !off),
+            1 => u8::from(self.cursor),
+            2 => u8::from(self.turbo),
+            3 => u8::from(self.pause),
+            4 | 5 => 0,
+            6 => u8::from(off),
+            7 => 0, // noise
+            _ => 1,
+        }
+    }
+
+    /// The 16-bit auto-joypad-read word (8 button bits MSB-first, then 1s) so
+    /// `scopeIsConnected` detects the gun on the port-2 auto-read.
+    pub fn auto_read_16(&mut self) -> u16 {
+        self.latch(true);
+        self.latch(false);
+        let mut v = 0u16;
+        for i in 0..16 {
+            v |= u16::from(self.data() & 1) << (15 - i);
+        }
+        v
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
