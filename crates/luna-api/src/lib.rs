@@ -17,6 +17,9 @@ use std::path::Path;
 
 use luna_cartridge::{CartError, Cartridge};
 use luna_core::Snes;
+/// Controller-port device kind (pad / mouse / super scope), re-exported so the
+/// GUI's port-device selector goes through `luna-api`, not `luna-core`.
+pub use luna_core::controller::PortDevice;
 pub use luna_core::{
     CpuTraceEvent, CpuTraceLog, DmaTraceEvent, DmaTraceLog, MailboxEvent, MailboxEventKind,
     MapperKind, MemEventKind, MemTraceEvent, MemTraceLog, Sa1LogEvent, Sa1SideEvent, Sa1TraceEvent,
@@ -712,6 +715,75 @@ impl Emulator {
     pub fn set_joypad(&mut self, port: u8, mask: u16) -> Result<(), ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         snes.cpu_regs.set_joypad(usize::from(port), mask);
+        Ok(())
+    }
+
+    /// Select the device on a controller port (`port` 0 = port 1, 1 = port 2):
+    /// `true` = SNES Mouse, `false` = standard pad. A Mouse feeds its 16-bit
+    /// signature to the auto-joypad-read (how `mouseInit` detects it) and its
+    /// full 32-bit stream to the matching manual `$4016`/`$4017` serial read.
+    pub fn set_port_mouse(&mut self, port: u8, on: bool) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        let dev = if on {
+            luna_core::controller::PortDevice::Mouse
+        } else {
+            luna_core::controller::PortDevice::Pad
+        };
+        if port == 0 {
+            snes.cpu_regs.port1 = dev;
+        } else {
+            snes.cpu_regs.port2 = dev;
+        }
+        Ok(())
+    }
+
+    /// Set the port-2 Mouse's this-frame signed motion (`+dx` right, `+dy`
+    /// down) and buttons (bit 0 = left, bit 1 = right). Effective once
+    /// [`Self::set_port2_mouse`] is enabled.
+    pub fn set_mouse(&mut self, dx: i32, dy: i32, buttons: u8) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.cpu_regs.mouse.dx = dx;
+        snes.cpu_regs.mouse.dy = dy;
+        snes.cpu_regs.mouse.buttons = buttons;
+        Ok(())
+    }
+
+    /// Set a controller port's device (0 = port 1, 1 = port 2) — pad, mouse,
+    /// or super scope. The GUI's per-port device selector drives this.
+    pub fn set_port_device(&mut self, port: u8, device: PortDevice) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        if port == 0 {
+            snes.cpu_regs.port1 = device;
+        } else {
+            snes.cpu_regs.port2 = device;
+        }
+        Ok(())
+    }
+
+    /// The device currently on a controller port, so the GUI can reflect the
+    /// active selection (defaults to pad with no ROM).
+    pub fn port_device(&self, port: u8) -> PortDevice {
+        self.snes.as_ref().map_or(PortDevice::Pad, |s| {
+            if port == 0 {
+                s.cpu_regs.port1
+            } else {
+                s.cpu_regs.port2
+            }
+        })
+    }
+
+    /// Set the Super Scope's aimed beam position (`x`/`y` in screen pixels) and
+    /// buttons (bit0 = trigger, bit1 = cursor, bit2 = turbo, bit3 = pause).
+    /// Effective when a port is set to [`PortDevice::SuperScope`].
+    pub fn set_superscope(&mut self, x: i32, y: i32, buttons: u8) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        let s = &mut snes.cpu_regs.super_scope;
+        s.cx = x;
+        s.cy = y;
+        s.trigger = buttons & 0x01 != 0;
+        s.cursor = buttons & 0x02 != 0;
+        s.turbo = buttons & 0x04 != 0;
+        s.pause = buttons & 0x08 != 0;
         Ok(())
     }
 

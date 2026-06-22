@@ -77,7 +77,9 @@ enum Command {
         /// cross-architecture visual-regression key — it hashes the same
         /// pixels `--screenshot` writes, before PNG encoding (so it is immune
         /// to the build-dependent PNG encoder). Ideal as an external test
-        /// harness's baseline key.
+        /// harness's baseline key. See `docs/trace_determinism.md` for which
+        /// outputs (fbhash / trace counts / WRAM bytes) are cross-arch-stable
+        /// and how strongly each may be asserted.
         #[arg(long)]
         print_fbhash: bool,
     },
@@ -154,6 +156,23 @@ enum Command {
         /// Up/Down/Left/Right(11..8) A(7) X(6) L(5) R(4).
         #[arg(long)]
         input: Option<String>,
+        /// Controller port-1 device: `pad` (default), `mouse`, or `superscope`.
+        #[arg(long, default_value = "pad")]
+        port1: String,
+        /// Controller port-2 device: `pad` (default), `mouse`, or `superscope`.
+        #[arg(long, default_value = "pad")]
+        port2: String,
+        /// Scripted SNES Mouse motion, applied to whichever port is set to
+        /// `mouse`. `frame:dx,dy,buttons` entries separated by `;` (signed
+        /// dx/dy; buttons bit0=left, bit1=right). Example: `--mouse "60:5,-3,1"`.
+        #[arg(long)]
+        mouse: Option<String>,
+        /// Scripted Super Scope aim, applied to whichever port is set to
+        /// `superscope`. `frame:x,y,buttons` entries separated by `;` (absolute
+        /// screen pixels; buttons bit0=trigger, bit1=cursor, bit2=turbo,
+        /// bit3=pause). Example: `--superscope "120:128,112,1"`.
+        #[arg(long)]
+        superscope: Option<String>,
         /// Optional memory peek(s) after snapshot.  Format:
         /// `BANK:OFFSET:COUNT` (all hex, no `0x` prefix).  Can be
         /// specified multiple times.  Output goes to stderr as a
@@ -175,6 +194,16 @@ enum Command {
         /// `--assert` but over VRAM. Repeatable.
         #[arg(long = "assert-vram")]
         assert_vram: Vec<String>,
+        /// Assert CGRAM (palette) equals expected bytes (`OFFSET=HEX`, byte
+        /// offset into the 512-byte CGRAM, low byte of each colour first).
+        /// Like `--assert` but over CGRAM. Repeatable.
+        #[arg(long = "assert-cgram")]
+        assert_cgram: Vec<String>,
+        /// Run until PPU frame N (then snapshot), instead of stopping at the
+        /// `-n` instruction count. Makes input→assert probes land on an exact
+        /// frame rather than a generous `-n`.
+        #[arg(long = "until-frame")]
+        until_frame: Option<u64>,
         /// Load battery SRAM from a `.srm` file before running (the other
         /// half of a power-cycle test — write it with `--srm-out` in run A,
         /// read it back in run B).
@@ -260,7 +289,10 @@ enum Command {
         #[arg(long = "cpu-trace-max", default_value_t = 100_000)]
         cpu_trace_max: usize,
         /// Optional memory access trace. When set, captures every
-        /// CPU bus read/write into a CSV at PATH. Default: all
+        /// CPU bus read/write into a CSV at PATH, columns
+        /// `mclk_total,frame_ntsc,pc,addr,kind,value,line,blank,force_blank`
+        /// (`blank` = V-blank, `force_blank` = INIDISP `$2100` bit 7 at the
+        /// access; a VRAM write is safe iff `blank||force_blank`). Default: all
         /// banks. Combine with `--mem-trace-bank 7E` to focus on
         /// WRAM and skip ROM fetches. Gated by `--mem-trace-from`
         /// and `--mem-trace-max` analogous to `--cpu-trace-*`.
@@ -282,10 +314,12 @@ enum Command {
         mem_trace_addr: Option<String>,
         /// Optional DMA→VRAM transfer-time trace. Captures every byte an
         /// MDMA writes to `$2118/$2119` as CSV
-        /// (`seq,src,vram_word,reg,value`) — `src` is the 24-bit A-bus
-        /// source, `vram_word` the VMADD word the byte lands at, `reg`
-        /// $18/$19. The byte is captured AS READ during the transfer, so a
-        /// coprocessor (Super FX) overwriting its source buffer afterwards
+        /// (`seq,frame,line,blank,force_blank,src,vram_word,reg,value`) —
+        /// `blank` = V-blank period, `force_blank` = INIDISP (`$2100`) bit 7
+        /// at the write (a write is safe iff `blank||force_blank`), `src` the
+        /// 24-bit A-bus source, `vram_word` the VMADD word the byte lands at,
+        /// `reg` $18/$19. The byte is captured AS READ during the transfer, so
+        /// a coprocessor (Super FX) overwriting its source buffer afterwards
         /// can't confound the source→VRAM comparison. Gated by
         /// `--dma-trace-from`/`--dma-trace-max`.
         #[arg(long = "dma-trace")]
@@ -485,10 +519,16 @@ fn main() -> ExitCode {
             screenshot,
             audio_out,
             input,
+            port1,
+            port2,
+            mouse,
+            superscope,
             peek,
             assert,
             assert_aram,
             assert_vram,
+            assert_cgram,
+            until_frame,
             srm_in,
             srm_out,
             apu_log,
@@ -524,10 +564,16 @@ fn main() -> ExitCode {
             screenshot.as_deref(),
             audio_out.as_deref(),
             input.as_deref(),
+            &port1,
+            &port2,
+            mouse.as_deref(),
+            superscope.as_deref(),
             &peek,
             &assert,
             &assert_aram,
             &assert_vram,
+            &assert_cgram,
+            until_frame,
             srm_in.as_deref(),
             srm_out.as_deref(),
             apu_log.as_deref(),
@@ -691,6 +737,37 @@ fn parse_input_script(script: &str) -> Result<Vec<(u64, u16)>, String> {
         let mask: u16 = u16::from_str_radix(mask_str, 16)
             .map_err(|e| format!("bad hex mask `{mask_str}`: {e}"))?;
         out.push((frame, mask));
+    }
+    out.sort_by_key(|(f, _)| *f);
+    Ok(out)
+}
+
+/// A scripted mouse checkpoint: `(frame, (dx, dy, buttons))`.
+type MouseCheckpoint = (u64, (i32, i32, u8));
+
+/// Parse a `--mouse` script: `;`-separated `frame:dx,dy,buttons` entries
+/// (signed `dx`/`dy`; `buttons` bit0 = left, bit1 = right). Returns the
+/// checkpoints sorted by frame.
+fn parse_mouse_script(script: &str) -> Result<Vec<MouseCheckpoint>, String> {
+    let mut out = Vec::new();
+    for entry in script.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        let (frame, rest) = entry
+            .split_once(':')
+            .ok_or_else(|| format!("`{entry}`: expected `frame:dx,dy,buttons`"))?;
+        let frame: u64 = frame
+            .trim()
+            .parse()
+            .map_err(|_| format!("`{entry}`: bad frame"))?;
+        let p: Vec<&str> = rest.split(',').map(str::trim).collect();
+        if p.len() != 3 {
+            return Err(format!("`{entry}`: expected `dx,dy,buttons` (3 values)"));
+        }
+        let dx: i32 = p[0].parse().map_err(|_| format!("`{entry}`: bad dx"))?;
+        let dy: i32 = p[1].parse().map_err(|_| format!("`{entry}`: bad dy"))?;
+        let buttons: u8 = p[2]
+            .parse()
+            .map_err(|_| format!("`{entry}`: bad buttons"))?;
+        out.push((frame, (dx, dy, buttons)));
     }
     out.sort_by_key(|(f, _)| *f);
     Ok(out)
@@ -949,25 +1026,28 @@ fn write_superfx_trace_csv(
 }
 
 /// Write DMA→VRAM transfer-time trace events as CSV. Columns:
-/// `seq,src,vram_word,reg,value` — `src` is the 24-bit A-bus source
-/// (`bank:offset`), `vram_word` the VMADD word the byte landed at, `reg`
-/// the B-bus port ($2118 low / $2119 high), `value` the transferred byte.
+/// `seq,frame,line,blank,force_blank,src,vram_word,reg,value` — `blank` is the
+/// V-blank flag, `force_blank` INIDISP (`$2100`) bit 7 at the write (safe iff
+/// `blank||force_blank`), `src` the 24-bit A-bus source (`bank:offset`),
+/// `vram_word` the VMADD word the byte landed at, `reg` the B-bus port ($2118
+/// low / $2119 high), `value` the transferred byte.
 fn write_dma_trace_csv(
     path: &std::path::Path,
     events: &[luna_api::DmaTraceEvent],
 ) -> std::io::Result<()> {
     write_csv(
         path,
-        "seq,frame,line,blank,src,vram_word,reg,value",
+        "seq,frame,line,blank,force_blank,src,vram_word,reg,value",
         events,
         |f, i, ev| {
             writeln!(
                 f,
-                "{},{},{},{},{},${:04X},${:02X},${:02X}",
+                "{},{},{},{},{},{},${:04X},${:02X},${:02X}",
                 i,
                 ev.frame,
                 ev.line,
                 u8::from(ev.blank),
+                u8::from(ev.force_blank),
                 fmt_pc(ev.src_full),
                 ev.vram_word,
                 ev.b_offset,
@@ -1015,7 +1095,7 @@ fn write_mem_trace_csv(
 ) -> std::io::Result<()> {
     write_csv(
         path,
-        "mclk_total,frame_ntsc,pc,addr,kind,value,line,blank",
+        "mclk_total,frame_ntsc,pc,addr,kind,value,line,blank,force_blank",
         events,
         |f, _, ev| {
             let kind = match ev.kind {
@@ -1024,7 +1104,7 @@ fn write_mem_trace_csv(
             };
             writeln!(
                 f,
-                "{},{},{},{},{},${:02X},{},{}",
+                "{},{},{},{},{},${:02X},{},{},{}",
                 ev.mclk_total,
                 ev.mclk_total / NTSC_MCLK_PER_FRAME,
                 fmt_pc(ev.pc_full),
@@ -1033,6 +1113,7 @@ fn write_mem_trace_csv(
                 ev.value,
                 ev.line,
                 u8::from(ev.blank),
+                u8::from(ev.force_blank),
             )
         },
     )
@@ -1479,10 +1560,16 @@ fn run_state(
     screenshot: Option<&std::path::Path>,
     audio_out: Option<&std::path::Path>,
     input_script: Option<&str>,
+    port1: &str,
+    port2: &str,
+    mouse_script: Option<&str>,
+    superscope_script: Option<&str>,
     peek_specs: &[String],
     assert_specs: &[String],
     assert_aram_specs: &[String],
     assert_vram_specs: &[String],
+    assert_cgram_specs: &[String],
+    until_frame: Option<u64>,
     srm_in: Option<&std::path::Path>,
     srm_out: Option<&std::path::Path>,
     apu_log_path: Option<&std::path::Path>,
@@ -1513,6 +1600,51 @@ fn run_state(
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }
+    // Controller port device selection (RFE-3): a `mouse` answers the
+    // auto-read / serial path with the SNES Mouse protocol so the game's
+    // DETECT succeeds (the signature) and `inputGetMouse` reads its deltas.
+    for (port, dev) in [(0u8, port1), (1u8, port2)] {
+        match dev {
+            "pad" => {}
+            "mouse" => {
+                if let Err(e) = em.set_port_mouse(port, true) {
+                    eprintln!("error: --port{}: {e}", port + 1);
+                    return ExitCode::from(1);
+                }
+            }
+            "superscope" => {
+                if let Err(e) = em.set_port_device(port, luna_api::PortDevice::SuperScope) {
+                    eprintln!("error: --port{}: {e}", port + 1);
+                    return ExitCode::from(1);
+                }
+            }
+            other => {
+                eprintln!(
+                    "error: --port{} `{other}`: expected `pad`, `mouse`, or `superscope`",
+                    port + 1
+                );
+                return ExitCode::from(1);
+            }
+        }
+    }
+    let mouse_checkpoints = match mouse_script.map(parse_mouse_script) {
+        Some(Ok(v)) => v,
+        Some(Err(e)) => {
+            eprintln!("error: --mouse: {e}");
+            return ExitCode::from(1);
+        }
+        None => Vec::new(),
+    };
+    // `--superscope` shares the `frame:a,b,c` triplet grammar with `--mouse`
+    // (here a,b = absolute aim x,y; c = the button mask).
+    let scope_checkpoints = match superscope_script.map(parse_mouse_script) {
+        Some(Ok(v)) => v,
+        Some(Err(e)) => {
+            eprintln!("error: --superscope: {e}");
+            return ExitCode::from(1);
+        }
+        None => Vec::new(),
+    };
     // --srm-in: seed battery SRAM from a `.srm` file (the read half of a
     // cross-run power-cycle test), before the warm-up runs.
     if let Some(path) = srm_in {
@@ -1602,18 +1734,45 @@ fn run_state(
             }
         },
     };
-    if !checkpoints.is_empty() {
+    if !checkpoints.is_empty() || !mouse_checkpoints.is_empty() || !scope_checkpoints.is_empty() {
         const PER_FRAME_BUDGET: u64 = 60_000;
-        for (frame, mask) in &checkpoints {
+        // Merge gamepad (`--input`), mouse (`--mouse`) and super-scope
+        // (`--superscope`) checkpoints into one frame-sorted event stream so
+        // they all apply at the right moment.
+        enum Ev {
+            Pad(u16),
+            Mouse(i32, i32, u8),
+            Scope(i32, i32, u8),
+        }
+        let mut events: Vec<(u64, Ev)> = checkpoints
+            .iter()
+            .map(|&(f, m)| (f, Ev::Pad(m)))
+            .chain(
+                mouse_checkpoints
+                    .iter()
+                    .map(|&(f, (dx, dy, b))| (f, Ev::Mouse(dx, dy, b))),
+            )
+            .chain(
+                scope_checkpoints
+                    .iter()
+                    .map(|&(f, (x, y, b))| (f, Ev::Scope(x, y, b))),
+            )
+            .collect();
+        events.sort_by_key(|(f, _)| *f);
+        for (frame, ev) in &events {
             // Step until we reach `frame` (no-op if we already crossed it).
             while em.state().scheduler.frame_count < *frame {
-                let executed = em.step_until_frame(PER_FRAME_BUDGET).unwrap_or(0);
-                if executed == 0 {
+                if em.step_until_frame(PER_FRAME_BUDGET).unwrap_or(0) == 0 {
                     break;
                 }
             }
-            if let Err(e) = em.set_joypad(0, *mask) {
-                eprintln!("error: set_joypad: {e}");
+            let applied = match ev {
+                Ev::Pad(m) => em.set_joypad(0, *m),
+                Ev::Mouse(dx, dy, b) => em.set_mouse(*dx, *dy, *b),
+                Ev::Scope(x, y, b) => em.set_superscope(*x, *y, *b),
+            };
+            if let Err(e) = applied {
+                eprintln!("error: applying scripted input: {e}");
                 return ExitCode::from(1);
             }
         }
@@ -1725,7 +1884,21 @@ fn run_state(
     // ~99% of audio on any run longer than ~0.5 s of emulated time.
     // The accumulated Vec is written to disk after the run.
     let mut audio_accum: Vec<(i16, i16)> = Vec::new();
-    if audio_out.is_some() {
+    if let Some(target_frame) = until_frame {
+        // RFE-5: run to a specific PPU frame instead of the `-n` instruction
+        // count, draining audio along the way so `--audio-out` still works.
+        const FRAME_BUDGET: u64 = 200_000;
+        while em.state().scheduler.frame_count < target_frame {
+            if em.step_until_frame(FRAME_BUDGET).unwrap_or(0) == 0 {
+                break;
+            }
+            if audio_out.is_some() {
+                if let Ok(mut chunk) = em.drain_audio(usize::MAX) {
+                    audio_accum.append(&mut chunk);
+                }
+            }
+        }
+    } else if audio_out.is_some() {
         // Chunk = 100k instructions ≈ ~10 ms of emulated SPC time
         // (well under the 512 ms queue capacity even at peak DSP
         // output rate). Drain the full queue after each chunk.
@@ -1829,6 +2002,45 @@ fn run_state(
                     eprintln!("error: --assert-{label} `{spec}`: {e}");
                     assert_failed = true;
                 }
+            }
+        }
+    }
+    // CGRAM is 256 × 15-bit colours (512 bytes), low byte of each colour first.
+    for spec in assert_cgram_specs {
+        match parse_assert_spec_no_bank(spec) {
+            Ok((offset, want)) => match em.peek_cgram() {
+                Ok(colors) => {
+                    let bytes: Vec<u8> = colors
+                        .iter()
+                        .flat_map(|c| [*c as u8, (*c >> 8) as u8])
+                        .collect();
+                    let start = offset as usize;
+                    let end = start + want.len();
+                    if end > bytes.len() {
+                        eprintln!(
+                            "error: --assert-cgram `{spec}`: offset {offset:#X}+{} exceeds the 512-byte CGRAM",
+                            want.len()
+                        );
+                        assert_failed = true;
+                    } else if bytes[start..end] == want[..] {
+                        println!("PASS cgram:{offset:04X}={}", hex_str(&want));
+                    } else {
+                        println!(
+                            "FAIL cgram:{offset:04X} expected {} got {}",
+                            hex_str(&want),
+                            hex_str(&bytes[start..end])
+                        );
+                        assert_failed = true;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error: --assert-cgram `{spec}`: {e}");
+                    assert_failed = true;
+                }
+            },
+            Err(e) => {
+                eprintln!("error: --assert-cgram `{spec}`: {e}");
+                assert_failed = true;
             }
         }
     }

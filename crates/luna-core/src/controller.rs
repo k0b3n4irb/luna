@@ -9,7 +9,7 @@
 
 /// Which device occupies a controller port. Port 1 is currently always a
 /// [`Pad`](Self::Pad); port 2 can be reassigned to a peripheral.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PortDevice {
     /// Standard SNES gamepad (the `cpu_regs` 16-bit path handles it).
     #[default]
@@ -27,7 +27,7 @@ pub enum PortDevice {
 /// `0×8, right, left, speed[1:0], 0,0,0,1 (signature), dy, cy[6:0], dx,
 /// cx[6:0]`. Strobing while latched cycles the sensitivity (slow/normal/fast),
 /// exactly as the hardware's sensitivity-change sequence.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Mouse {
     /// This-frame signed X motion (set by the front-end; +right / −left).
     pub dx: i32,
@@ -75,6 +75,21 @@ impl Mouse {
         self.cy = ((cy as u32 * mul) / 2).min(127);
     }
 
+    /// The 16-bit word an **auto-joypad-read** (`$4218`) latches for a Mouse:
+    /// a fresh strobe then 16 clocked bits, MSB-first (bit 15 = first clocked
+    /// bit, like the pad's `B`), so the `0001` device signature lands in the
+    /// low nibble where the SDK's `mouseInit` detects it. The auto-read only
+    /// sees the first 16 of the 32 protocol bits (buttons + speed + signature).
+    pub fn auto_read_16(&mut self) -> u16 {
+        self.latch(true);
+        self.latch(false);
+        let mut v = 0u16;
+        for i in 0..16 {
+            v |= u16::from(self.data() & 1) << (15 - i);
+        }
+        v
+    }
+
     /// Clock out one serial bit (LSB of the return value). Mirrors ares
     /// `Mouse::data`: while strobed it cycles the sensitivity and returns 0.
     pub fn data(&mut self) -> u8 {
@@ -98,6 +113,92 @@ impl Mouse {
             25..=31 => ((self.cx >> (31 - c)) & 1) as u8, // cx[6:0]
             _ => 1,
         }
+    }
+}
+
+/// Super Scope — faithful-enough port of ares `controller/super-scope`.
+///
+/// A light gun on port 2. Its **buttons** are read as an 8-bit serial stream
+/// (trigger, cursor, turbo, pause, 0, 0, offscreen, noise) — clocked like the
+/// pad, also captured by the auto-read so the SDK's `scopeIsConnected` detects
+/// it. Its **position** is not in that stream: when the CRT beam crosses the
+/// aimed `(cx, cy)`, the gun strobes the port-2 `IOBit` (`$4201.d7`) which
+/// latches the PPU H/V counters (OPHCT/OPVCT) the game reads for `scopeGetX/Y`.
+/// The bus drives that latch from a per-scanline hook (see `snes.rs`).
+///
+/// The scripted model sets `cx/cy` + the four buttons directly; the
+/// edge/turbo-toggle/trigger-lock state machine ares runs for a *held* real
+/// button is intentionally simplified (a script provides discrete per-frame
+/// states), which is enough for the detection + position acceptance.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct SuperScope {
+    /// Aimed beam X in screen pixels (0..255); off-range = offscreen.
+    pub cx: i32,
+    /// Aimed beam Y in screen lines (0..239); off-range = offscreen.
+    pub cy: i32,
+    /// Trigger (fire) button — set per frame.
+    pub trigger: bool,
+    /// Cursor button — set per frame.
+    pub cursor: bool,
+    /// Turbo switch — set per frame.
+    pub turbo: bool,
+    /// Pause button — set per frame.
+    pub pause: bool,
+
+    counter: u32,
+    latched: bool,
+}
+
+impl SuperScope {
+    /// True when the aim is outside the 256×240 active screen.
+    pub const fn offscreen(&self) -> bool {
+        self.cx < 0 || self.cy < 0 || self.cx >= 256 || self.cy >= 240
+    }
+
+    /// The H/V counter values to latch when the beam crosses the aim — ares
+    /// `target = cy*1364 + (cx+24)*4`, i.e. H ≈ `cx + 24`, V = `cy`.
+    pub fn latch_hv(&self) -> (u16, u16) {
+        (
+            (self.cx + 24).clamp(0, 339) as u16,
+            self.cy.clamp(0, 261) as u16,
+        )
+    }
+
+    /// Drive the shared `$4016` latch line; resets the serial counter.
+    pub const fn latch(&mut self, strobe: bool) {
+        if self.latched != strobe {
+            self.latched = strobe;
+            self.counter = 0;
+        }
+    }
+
+    /// Clock one serial button bit (ares `SuperScope::data`).
+    pub fn data(&mut self) -> u8 {
+        let off = self.offscreen();
+        let c = self.counter;
+        self.counter += 1;
+        match c {
+            0 => u8::from(self.trigger && !off),
+            1 => u8::from(self.cursor),
+            2 => u8::from(self.turbo),
+            3 => u8::from(self.pause),
+            4 | 5 => 0,
+            6 => u8::from(off),
+            7 => 0, // noise
+            _ => 1,
+        }
+    }
+
+    /// The 16-bit auto-joypad-read word (8 button bits MSB-first, then 1s) so
+    /// `scopeIsConnected` detects the gun on the port-2 auto-read.
+    pub fn auto_read_16(&mut self) -> u16 {
+        self.latch(true);
+        self.latch(false);
+        let mut v = 0u16;
+        for i in 0..16 {
+            v |= u16::from(self.data() & 1) << (15 - i);
+        }
+        v
     }
 }
 
@@ -169,5 +270,34 @@ mod tests {
         };
         let speed = (u8::from(bits[10] == 1) << 1) | u8::from(bits[11] == 1);
         assert_eq!(speed, 2, "two strobes → fast");
+    }
+
+    #[test]
+    fn super_scope_aim_latches_to_hv_and_gates_trigger_offscreen() {
+        // Onscreen aim: latch target is (cx + 24, cy); a serial read leads with
+        // the trigger bit. (Drove the example ROM from CALIBRATE to READY.)
+        let mut s = SuperScope {
+            cx: 128,
+            cy: 112,
+            trigger: true,
+            ..Default::default()
+        };
+        assert!(!s.offscreen());
+        assert_eq!(s.latch_hv(), (152, 112), "OPHCT = cx+24, OPVCT = cy");
+        s.latch(true);
+        s.latch(false);
+        assert_eq!(s.data() & 1, 1, "trigger reads 1 when onscreen");
+
+        // Offscreen aim suppresses the trigger bit (ares `trigger & !offscreen`).
+        let mut off = SuperScope {
+            cx: 300,
+            cy: 112,
+            trigger: true,
+            ..Default::default()
+        };
+        assert!(off.offscreen());
+        off.latch(true);
+        off.latch(false);
+        assert_eq!(off.data() & 1, 0, "trigger suppressed when offscreen");
     }
 }
