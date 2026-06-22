@@ -7,7 +7,7 @@ belongs in `docs/`.
 
 ## What luna is
 
-A cycle-accurate-ish SNES emulator written in Rust. 11-crate workspace:
+A cycle-accurate-ish SNES emulator written in Rust. 12-crate workspace:
 
 - `crates/luna-bus/` — foundation: `Bus` trait, `Addr24`, `MapperKind`
   enum, the per-mapper shims (LoROM / HiROM / ExHiROM / SA-1). Used by
@@ -15,6 +15,8 @@ A cycle-accurate-ish SNES emulator written in Rust. 11-crate workspace:
 - `crates/luna-cartridge/` — ROM header parser, mapper detection.
 - `crates/luna-cpu-65c816/`, `crates/luna-cpu-spc700/` — CPU cores.
   Standalone, no SNES-specific glue — usable from any consumer.
+- `crates/luna-cpu-upd96050/` — NEC uPD7725 / uPD96050 DSP core (drives
+  DSP-1, etc.); standalone like the other CPU cores.
 - `crates/luna-apu/` — SPC700 bridge + S-DSP (cycle-accurate ares port
   in `src/dsp.rs`, see commit `25c3691`).
 - `crates/luna-ppu/` — PPU + renderer + compositor.
@@ -28,8 +30,9 @@ A cycle-accurate-ish SNES emulator written in Rust. 11-crate workspace:
 - `crates/luna-mcp-server/` — MCP transport (the GUI does not use it;
   invoked from `luna mcp` in the CLI binary).
 - `crates/luna-cli/` — `luna run` / `luna state` / `luna mcp` binary.
-- `crates/luna-gui/` — eframe-based debugger UI. Owns the dedicated
-  emu thread (`src/emu_thread.rs`, audio-as-clock pacing) and the cpal
+- `crates/luna-gui/` — hand-rolled debugger UI (winit + pixels +
+  egui-wgpu; eframe was removed 2026-05-28). Owns the dedicated emu
+  thread (`src/emu_thread.rs`, audio-as-clock pacing) and the cpal
   output stream (`src/audio.rs`, with 6-point cubic Hermite resampler
   + 5 Hz DC blocker).
 
