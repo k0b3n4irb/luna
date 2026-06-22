@@ -715,6 +715,36 @@ impl Emulator {
         Ok(())
     }
 
+    /// Select the device on a controller port (`port` 0 = port 1, 1 = port 2):
+    /// `true` = SNES Mouse, `false` = standard pad. A Mouse feeds its 16-bit
+    /// signature to the auto-joypad-read (how `mouseInit` detects it) and its
+    /// full 32-bit stream to the matching manual `$4016`/`$4017` serial read.
+    pub fn set_port_mouse(&mut self, port: u8, on: bool) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        let dev = if on {
+            luna_core::controller::PortDevice::Mouse
+        } else {
+            luna_core::controller::PortDevice::Pad
+        };
+        if port == 0 {
+            snes.cpu_regs.port1 = dev;
+        } else {
+            snes.cpu_regs.port2 = dev;
+        }
+        Ok(())
+    }
+
+    /// Set the port-2 Mouse's this-frame signed motion (`+dx` right, `+dy`
+    /// down) and buttons (bit 0 = left, bit 1 = right). Effective once
+    /// [`Self::set_port2_mouse`] is enabled.
+    pub fn set_mouse(&mut self, dx: i32, dy: i32, buttons: u8) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.cpu_regs.mouse.dx = dx;
+        snes.cpu_regs.mouse.dy = dy;
+        snes.cpu_regs.mouse.buttons = buttons;
+        Ok(())
+    }
+
     /// Step the CPU `count` instructions (or stop early if the CPU
     /// halts or panics). Returns the number actually executed.
     pub fn step(&mut self, count: u64) -> Result<u64, ApiError> {
