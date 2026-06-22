@@ -1576,9 +1576,15 @@ fn run_state(
                     return ExitCode::from(1);
                 }
             }
+            "superscope" => {
+                if let Err(e) = em.set_port_device(port, luna_api::PortDevice::SuperScope) {
+                    eprintln!("error: --port{}: {e}", port + 1);
+                    return ExitCode::from(1);
+                }
+            }
             other => {
                 eprintln!(
-                    "error: --port{} `{other}`: expected `pad` or `mouse`",
+                    "error: --port{} `{other}`: expected `pad`, `mouse`, or `superscope`",
                     port + 1
                 );
                 return ExitCode::from(1);

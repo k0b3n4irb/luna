@@ -7,7 +7,7 @@
 //!
 //! Reference: <https://problemkaputt.de/fullsnes.htm> §"S-CPU Registers".
 
-use crate::controller::{Mouse, PortDevice};
+use crate::controller::{Mouse, PortDevice, SuperScope};
 
 /// CPU-side registers.
 ///
@@ -77,6 +77,8 @@ pub struct CpuRegs {
     /// SNES Mouse state — shared by whichever port is set to
     /// [`PortDevice::Mouse`] (a host has at most one mouse).
     pub mouse: Mouse,
+    /// Super Scope state — used when a port is [`PortDevice::SuperScope`].
+    pub super_scope: SuperScope,
 }
 
 impl CpuRegs {
@@ -86,18 +88,38 @@ impl CpuRegs {
         Self::default()
     }
 
-    /// The [`Mouse`] on `port` (0 = port 1 / `$4016`, 1 = port 2 / `$4017`)
-    /// if that port has one, for the bus's manual serial read; else `None`.
-    pub fn port_mouse(&mut self, port: usize) -> Option<&mut Mouse> {
-        let dev = if port == 0 { self.port1 } else { self.port2 };
-        (dev == PortDevice::Mouse).then_some(&mut self.mouse)
+    /// One serial bit for `port`'s peripheral (Mouse / Super Scope) on a
+    /// manual `$4016` (port 0) / `$4017` (port 1) read; `None` for a pad.
+    pub fn port_serial_bit(&mut self, port: usize) -> Option<u8> {
+        match if port == 0 { self.port1 } else { self.port2 } {
+            PortDevice::Mouse => Some(self.mouse.data() & 1),
+            PortDevice::SuperScope => Some(self.super_scope.data() & 1),
+            PortDevice::Pad => None,
+        }
     }
 
-    /// Drive the shared `$4016` strobe line into the mouse latch when either
-    /// port hosts a mouse.
-    pub fn latch_mouse(&mut self, strobe: bool) {
+    /// If a Super Scope is connected and aimed onscreen, and the beam has
+    /// reached its aimed scanline `line`, the `(h, v)` counter values its
+    /// light-gun latches into OPHCT/OPVCT (which the game reads for the beam
+    /// position). `None` otherwise — no scope, offscreen, or wrong scanline.
+    pub fn scope_latch_target(&self, line: u16) -> Option<(u16, u16)> {
+        let active = self.port1 == PortDevice::SuperScope || self.port2 == PortDevice::SuperScope;
+        if active && !self.super_scope.offscreen() && u32::from(line) == self.super_scope.cy as u32
+        {
+            Some(self.super_scope.latch_hv())
+        } else {
+            None
+        }
+    }
+
+    /// Drive the shared `$4016` strobe line into every connected peripheral's
+    /// serial latch.
+    pub fn latch_devices(&mut self, strobe: bool) {
         if self.port1 == PortDevice::Mouse || self.port2 == PortDevice::Mouse {
             self.mouse.latch(strobe);
+        }
+        if self.port1 == PortDevice::SuperScope || self.port2 == PortDevice::SuperScope {
+            self.super_scope.latch(strobe);
         }
     }
 
@@ -190,15 +212,15 @@ impl CpuRegs {
         // A Mouse on a port feeds the auto-read its first 16 protocol bits
         // (signature + buttons + speed) instead of the pad's button mask —
         // that is how the SDK's `mouseInit` detects it.
-        self.joypad1_latched = if self.port1 == PortDevice::Mouse {
-            self.mouse.auto_read_16()
-        } else {
-            Self::clean_dpad(self.joypad1)
+        self.joypad1_latched = match self.port1 {
+            PortDevice::Mouse => self.mouse.auto_read_16(),
+            PortDevice::SuperScope => self.super_scope.auto_read_16(),
+            PortDevice::Pad => Self::clean_dpad(self.joypad1),
         };
-        self.joypad2_latched = if self.port2 == PortDevice::Mouse {
-            self.mouse.auto_read_16()
-        } else {
-            Self::clean_dpad(self.joypad2)
+        self.joypad2_latched = match self.port2 {
+            PortDevice::Mouse => self.mouse.auto_read_16(),
+            PortDevice::SuperScope => self.super_scope.auto_read_16(),
+            PortDevice::Pad => Self::clean_dpad(self.joypad2),
         };
         self.hvbjoy |= 0x01;
     }
