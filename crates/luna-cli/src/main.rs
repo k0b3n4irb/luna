@@ -277,7 +277,10 @@ enum Command {
         #[arg(long = "cpu-trace-max", default_value_t = 100_000)]
         cpu_trace_max: usize,
         /// Optional memory access trace. When set, captures every
-        /// CPU bus read/write into a CSV at PATH. Default: all
+        /// CPU bus read/write into a CSV at PATH, columns
+        /// `mclk_total,frame_ntsc,pc,addr,kind,value,line,blank,force_blank`
+        /// (`blank` = V-blank, `force_blank` = INIDISP `$2100` bit 7 at the
+        /// access; a VRAM write is safe iff `blank||force_blank`). Default: all
         /// banks. Combine with `--mem-trace-bank 7E` to focus on
         /// WRAM and skip ROM fetches. Gated by `--mem-trace-from`
         /// and `--mem-trace-max` analogous to `--cpu-trace-*`.
@@ -299,10 +302,12 @@ enum Command {
         mem_trace_addr: Option<String>,
         /// Optional DMA→VRAM transfer-time trace. Captures every byte an
         /// MDMA writes to `$2118/$2119` as CSV
-        /// (`seq,src,vram_word,reg,value`) — `src` is the 24-bit A-bus
-        /// source, `vram_word` the VMADD word the byte lands at, `reg`
-        /// $18/$19. The byte is captured AS READ during the transfer, so a
-        /// coprocessor (Super FX) overwriting its source buffer afterwards
+        /// (`seq,frame,line,blank,force_blank,src,vram_word,reg,value`) —
+        /// `blank` = V-blank period, `force_blank` = INIDISP (`$2100`) bit 7
+        /// at the write (a write is safe iff `blank||force_blank`), `src` the
+        /// 24-bit A-bus source, `vram_word` the VMADD word the byte lands at,
+        /// `reg` $18/$19. The byte is captured AS READ during the transfer, so
+        /// a coprocessor (Super FX) overwriting its source buffer afterwards
         /// can't confound the source→VRAM comparison. Gated by
         /// `--dma-trace-from`/`--dma-trace-max`.
         #[arg(long = "dma-trace")]
@@ -1005,25 +1010,28 @@ fn write_superfx_trace_csv(
 }
 
 /// Write DMA→VRAM transfer-time trace events as CSV. Columns:
-/// `seq,src,vram_word,reg,value` — `src` is the 24-bit A-bus source
-/// (`bank:offset`), `vram_word` the VMADD word the byte landed at, `reg`
-/// the B-bus port ($2118 low / $2119 high), `value` the transferred byte.
+/// `seq,frame,line,blank,force_blank,src,vram_word,reg,value` — `blank` is the
+/// V-blank flag, `force_blank` INIDISP (`$2100`) bit 7 at the write (safe iff
+/// `blank||force_blank`), `src` the 24-bit A-bus source (`bank:offset`),
+/// `vram_word` the VMADD word the byte landed at, `reg` the B-bus port ($2118
+/// low / $2119 high), `value` the transferred byte.
 fn write_dma_trace_csv(
     path: &std::path::Path,
     events: &[luna_api::DmaTraceEvent],
 ) -> std::io::Result<()> {
     write_csv(
         path,
-        "seq,frame,line,blank,src,vram_word,reg,value",
+        "seq,frame,line,blank,force_blank,src,vram_word,reg,value",
         events,
         |f, i, ev| {
             writeln!(
                 f,
-                "{},{},{},{},{},${:04X},${:02X},${:02X}",
+                "{},{},{},{},{},{},${:04X},${:02X},${:02X}",
                 i,
                 ev.frame,
                 ev.line,
                 u8::from(ev.blank),
+                u8::from(ev.force_blank),
                 fmt_pc(ev.src_full),
                 ev.vram_word,
                 ev.b_offset,
@@ -1071,7 +1079,7 @@ fn write_mem_trace_csv(
 ) -> std::io::Result<()> {
     write_csv(
         path,
-        "mclk_total,frame_ntsc,pc,addr,kind,value,line,blank",
+        "mclk_total,frame_ntsc,pc,addr,kind,value,line,blank,force_blank",
         events,
         |f, _, ev| {
             let kind = match ev.kind {
@@ -1080,7 +1088,7 @@ fn write_mem_trace_csv(
             };
             writeln!(
                 f,
-                "{},{},{},{},{},${:02X},{},{}",
+                "{},{},{},{},{},${:02X},{},{},{}",
                 ev.mclk_total,
                 ev.mclk_total / NTSC_MCLK_PER_FRAME,
                 fmt_pc(ev.pc_full),
@@ -1089,6 +1097,7 @@ fn write_mem_trace_csv(
                 ev.value,
                 ev.line,
                 u8::from(ev.blank),
+                u8::from(ev.force_blank),
             )
         },
     )
