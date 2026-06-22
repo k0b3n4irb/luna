@@ -551,6 +551,19 @@ impl ApplicationHandler for LunaApp {
             }
         };
         let size = window.inner_size();
+        // Pacing diagnostic (vsync-lock work): the display refresh rate vs the
+        // emu's ~60.099 fps (NTSC) sets the frame-presentation cadence — a
+        // mismatch is the root of motion judder. Log it so we fix the right case.
+        match window
+            .current_monitor()
+            .and_then(|m| m.refresh_rate_millihertz())
+        {
+            Some(mhz) => eprintln!(
+                "luna-gui: display refresh = {:.3} Hz (emu target ≈ 60.099 NTSC / 50.007 PAL)",
+                f64::from(mhz) / 1000.0
+            ),
+            None => eprintln!("luna-gui: display refresh rate unknown (monitor query None)"),
+        }
         let surface = SurfaceTexture::new(size.width, size.height, window.clone());
         let pixels = match Pixels::new(CANVAS_W as u32, CANVAS_H as u32, surface) {
             Ok(p) => p,
