@@ -120,6 +120,10 @@ struct LunaApp {
     ui: Option<UiOverlay>,
     /// Friendly ROM name surfaced in the menu bar after a load.
     rom_title: Option<String>,
+    /// Sidecar `.srm` path for the loaded ROM's battery SRAM. Restored on
+    /// load, written back on `unload_emu` (ROM change + app exit both route
+    /// through it), so in-game saves persist across runs.
+    srm_path: Option<PathBuf>,
     /// Pending async file-dialog result. The dialog runs on a worker
     /// thread so the winit event loop keeps redrawing — otherwise the
     /// WM flags the window as "not responding" within ~2 seconds and
@@ -194,6 +198,7 @@ impl LunaApp {
             last_rom_dir: load_last_rom_dir(),
             ui: None,
             rom_title: None,
+            srm_path: None,
             rom_picker_rx: None,
             firmware_picker_rx: None,
             pending_firmware_rom: None,
@@ -237,6 +242,23 @@ impl LunaApp {
                 return;
             }
         };
+        // Restore battery SRAM from the sidecar `<rom>.srm`, if present, so
+        // in-game saves survive across runs (written back in `unload_emu`).
+        let srm_path = path.with_extension("srm");
+        if srm_path.is_file() {
+            match std::fs::read(&srm_path) {
+                Ok(data) => {
+                    if let Err(e) = em.load_sram(&data) {
+                        eprintln!(
+                            "luna-gui: ignoring battery SRAM {}: {e}",
+                            srm_path.display()
+                        );
+                    }
+                }
+                Err(e) => eprintln!("luna-gui: could not read {}: {e}", srm_path.display()),
+            }
+        }
+        self.srm_path = Some(srm_path);
         if let Ok(mut guard) = self.emu.lock() {
             *guard = Some(em);
         }
@@ -348,8 +370,24 @@ impl LunaApp {
         }
         self.emu_shared.shutdown.store(false, Ordering::Release);
         if let Ok(mut guard) = self.emu.lock() {
+            // Persist battery SRAM before tearing down. Both paths into
+            // `unload_emu` — a ROM change and the app close — flush here, so
+            // in-game saves are never lost. Only carts with battery SRAM
+            // return non-empty bytes, so non-battery games write nothing.
+            if let (Some(em), Some(srm)) = (guard.as_ref(), self.srm_path.as_ref()) {
+                let data = em.sram();
+                if !data.is_empty() {
+                    if let Err(e) = std::fs::write(srm, &data) {
+                        eprintln!(
+                            "luna-gui: could not save battery SRAM to {}: {e}",
+                            srm.display()
+                        );
+                    }
+                }
+            }
             *guard = None;
         }
+        self.srm_path = None;
         // Black the screen with a fresh empty triple buffer (the old one's
         // producer was the emu thread we just joined).
         self.framebuffer_out = triple_buffer::triple_buffer(&vec![0u8; FRAME_W * FRAME_H * 4]).1;
