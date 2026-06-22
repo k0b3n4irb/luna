@@ -154,10 +154,10 @@ enum Command {
         /// Up/Down/Left/Right(11..8) A(7) X(6) L(5) R(4).
         #[arg(long)]
         input: Option<String>,
-        /// Controller port-1 device: `pad` (default) or `mouse`.
+        /// Controller port-1 device: `pad` (default), `mouse`, or `superscope`.
         #[arg(long, default_value = "pad")]
         port1: String,
-        /// Controller port-2 device: `pad` (default) or `mouse`.
+        /// Controller port-2 device: `pad` (default), `mouse`, or `superscope`.
         #[arg(long, default_value = "pad")]
         port2: String,
         /// Scripted SNES Mouse motion, applied to whichever port is set to
@@ -165,6 +165,12 @@ enum Command {
         /// dx/dy; buttons bit0=left, bit1=right). Example: `--mouse "60:5,-3,1"`.
         #[arg(long)]
         mouse: Option<String>,
+        /// Scripted Super Scope aim, applied to whichever port is set to
+        /// `superscope`. `frame:x,y,buttons` entries separated by `;` (absolute
+        /// screen pixels; buttons bit0=trigger, bit1=cursor, bit2=turbo,
+        /// bit3=pause). Example: `--superscope "120:128,112,1"`.
+        #[arg(long)]
+        superscope: Option<String>,
         /// Optional memory peek(s) after snapshot.  Format:
         /// `BANK:OFFSET:COUNT` (all hex, no `0x` prefix).  Can be
         /// specified multiple times.  Output goes to stderr as a
@@ -499,6 +505,7 @@ fn main() -> ExitCode {
             port1,
             port2,
             mouse,
+            superscope,
             peek,
             assert,
             assert_aram,
@@ -541,6 +548,7 @@ fn main() -> ExitCode {
             &port1,
             &port2,
             mouse.as_deref(),
+            superscope.as_deref(),
             &peek,
             &assert,
             &assert_aram,
@@ -1530,6 +1538,7 @@ fn run_state(
     port1: &str,
     port2: &str,
     mouse_script: Option<&str>,
+    superscope_script: Option<&str>,
     peek_specs: &[String],
     assert_specs: &[String],
     assert_aram_specs: &[String],
@@ -1595,6 +1604,16 @@ fn run_state(
         Some(Ok(v)) => v,
         Some(Err(e)) => {
             eprintln!("error: --mouse: {e}");
+            return ExitCode::from(1);
+        }
+        None => Vec::new(),
+    };
+    // `--superscope` shares the `frame:a,b,c` triplet grammar with `--mouse`
+    // (here a,b = absolute aim x,y; c = the button mask).
+    let scope_checkpoints = match superscope_script.map(parse_mouse_script) {
+        Some(Ok(v)) => v,
+        Some(Err(e)) => {
+            eprintln!("error: --superscope: {e}");
             return ExitCode::from(1);
         }
         None => Vec::new(),
@@ -1688,13 +1707,15 @@ fn run_state(
             }
         },
     };
-    if !checkpoints.is_empty() || !mouse_checkpoints.is_empty() {
+    if !checkpoints.is_empty() || !mouse_checkpoints.is_empty() || !scope_checkpoints.is_empty() {
         const PER_FRAME_BUDGET: u64 = 60_000;
-        // Merge gamepad (`--input`) and mouse (`--mouse`) checkpoints into one
-        // frame-sorted event stream so both apply at the right moment.
+        // Merge gamepad (`--input`), mouse (`--mouse`) and super-scope
+        // (`--superscope`) checkpoints into one frame-sorted event stream so
+        // they all apply at the right moment.
         enum Ev {
             Pad(u16),
             Mouse(i32, i32, u8),
+            Scope(i32, i32, u8),
         }
         let mut events: Vec<(u64, Ev)> = checkpoints
             .iter()
@@ -1703,6 +1724,11 @@ fn run_state(
                 mouse_checkpoints
                     .iter()
                     .map(|&(f, (dx, dy, b))| (f, Ev::Mouse(dx, dy, b))),
+            )
+            .chain(
+                scope_checkpoints
+                    .iter()
+                    .map(|&(f, (x, y, b))| (f, Ev::Scope(x, y, b))),
             )
             .collect();
         events.sort_by_key(|(f, _)| *f);
@@ -1716,6 +1742,7 @@ fn run_state(
             let applied = match ev {
                 Ev::Pad(m) => em.set_joypad(0, *m),
                 Ev::Mouse(dx, dy, b) => em.set_mouse(*dx, *dy, *b),
+                Ev::Scope(x, y, b) => em.set_superscope(*x, *y, *b),
             };
             if let Err(e) = applied {
                 eprintln!("error: applying scripted input: {e}");
