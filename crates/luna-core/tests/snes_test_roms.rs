@@ -180,6 +180,44 @@ fn dump_png(bytes: &[u8], path: &Path) {
     let _ = img.save(path);
 }
 
+/// Repo-local commercial ROM dir (`tests/roms/`, gitignored). Used by the
+/// representative hardware-coverage goldens. Absent ROMs skip — these are
+/// **developer-local** regression nets (the copyrighted ROMs are not in CI).
+fn games_root() -> Option<PathBuf> {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR")); // crates/luna-core
+    p.pop(); // crates
+    p.pop(); // <repo root>
+    p.push("tests");
+    p.push("roms");
+    p.is_dir().then_some(p)
+}
+
+/// Boot a commercial ROM (auto-detected mapper + native region) with no input
+/// and run a FIXED instruction count, returning the framebuffer. Fixed-count
+/// (not settle) because these scenes animate; luna is deterministic, so the
+/// hash is stable run-to-run and moves only when emulation behaviour changes —
+/// re-record (`LUNA_SNES_TEST_RECORD=1`) after an intended render/timing change.
+fn run_game_fixed(rom: Vec<u8>, instructions: u64) -> Vec<u8> {
+    let cart = Cartridge::from_bytes(rom).expect("auto-detect cartridge");
+    let mut snes = Snes::from_cartridge(cart);
+    snes.reset();
+
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let mut executed = 0u64;
+    while executed < instructions {
+        if snes.cpu.stopped {
+            break;
+        }
+        if catch_unwind(AssertUnwindSafe(|| snes.step())).is_err() {
+            break;
+        }
+        executed += 1;
+    }
+    std::panic::set_hook(prev_hook);
+    fb_bytes(&snes)
+}
+
 /// Boot `rel` (relative to the corpus root), settle, and compare the
 /// framebuffer SHA-256 to `expected`. Skips gracefully if the corpus or
 /// the specific ROM is absent.
@@ -1022,4 +1060,144 @@ spc_test!(
     hold = PAD_A,
     ignore = "stale audio hash since the per-cycle SPC700/timer/DSP + 1.025280 MHz clock \
               change (PR #9) — audition WAV + regen pending, like its siblings"
+);
+
+/// Declare a representative commercial-title golden — one eyeball-validated
+/// scene per hardware feature (mapper / coprocessor / PPU effect). The ROM
+/// boots with NO input to a fixed instruction count and its framebuffer hash
+/// is asserted. These are an **integration** regression net (the mapper +
+/// coproc boot + the full-game render path), complementing the Peter Lemon
+/// **primitive** goldens. Copyrighted ROMs live in `tests/roms/` (gitignored),
+/// so these SKIP unless the developer has dumped them.
+macro_rules! game_test {
+    ($fn:ident, $file:literal, $instructions:literal, $hash:literal) => {
+        #[test]
+        fn $fn() {
+            let Some(root) = games_root() else {
+                eprintln!("[skip] commercial ROMs (tests/roms/) absent — gitignored, dump your own");
+                return;
+            };
+            let path = root.join($file);
+            if !path.is_file() {
+                eprintln!("[skip] {}: not present under {}", $file, root.display());
+                return;
+            }
+            let rom = std::fs::read(&path).expect("read rom");
+            let bytes = run_game_fixed(rom, $instructions);
+            let got = hex(&Sha256::digest(&bytes));
+            if std::env::var("LUNA_SNES_TEST_RECORD").is_ok() {
+                if let Ok(dir) = std::env::var("LUNA_SNES_TEST_PNG") {
+                    dump_png(&bytes, &Path::new(&dir).join(concat!(stringify!($fn), ".png")));
+                }
+                println!("RECORD {} => {}", $file, got);
+                return;
+            }
+            assert_eq!(
+                got, $hash,
+                "framebuffer hash mismatch for {} \
+                 (run LUNA_SNES_TEST_RECORD=1 to re-record after an intended render change)",
+                $file
+            );
+        }
+    };
+}
+
+// Mode 7
+game_test!(
+    game_fzero,
+    "F-Zero (USA).sfc",
+    30_000_000,
+    "db0aae0d7ecaf5805eb44c732a22541880066759814f021951f8af0af7733ece"
+);
+game_test!(
+    game_mariokart,
+    "Super Mario Kart (USA).sfc",
+    50_000_000,
+    "b7bc468dec89ba2f02f36190f0fc4c6945ec2cee1f6e68000452596e8e21456e"
+);
+// SA-1
+game_test!(
+    game_smrpg,
+    "Super Mario RPG - Legend of the Seven Stars (USA).sfc",
+    12_000_000,
+    "49f84ad54742960ad0e193a38134e6ceba2b59f9809c46976b5d4cf6546a3dba"
+);
+game_test!(
+    game_kirby_ss,
+    "Kirby Super Star (USA).sfc",
+    35_000_000,
+    "1c88c42a9f38ff52a69bb78f62c90f1070a8837112243157df5a1fc485539e62"
+);
+// Super FX (GSU)
+game_test!(
+    game_starfox,
+    "Star Fox (USA) (Rev 2).sfc",
+    25_000_000,
+    "e778238e51f28032bd71a400b54e8f2278b19b3cba6d70a38cffbc36cf83ac9a"
+);
+game_test!(
+    game_stuntfx,
+    "Stunt Race FX (USA) (Rev 1).sfc",
+    25_000_000,
+    "4127b08e545a26a3c86cbdf39206c5834788a28cb4da5e0083a2595a3ff46b7f"
+);
+// S-DD1
+game_test!(
+    game_starocean,
+    "Star Ocean (tr).sfc",
+    30_000_000,
+    "1ecd444af4ed8b7e16c3ea267b2250bf1eea656f3ca7b426ac44a4158e7997a1"
+);
+// DSP-1
+game_test!(
+    game_pilotwings,
+    "Pilotwings (USA).sfc",
+    20_000_000,
+    "74e38144b13287b0bada97de9669bca89f00f3870461caf9537ea728c3f50fa7"
+);
+// Color math / transparency
+game_test!(
+    game_som,
+    "Secret of Mana (USA).sfc",
+    30_000_000,
+    "5371ef9d2574babb1aeab176fd70cbfd351ae925ed30bf61504bd69cefa909dc"
+);
+game_test!(
+    game_zelda,
+    "Legend of Zelda, The - A Link to the Past (USA).sfc",
+    35_000_000,
+    "924f3a854ea1b49886a2e11491afb6815c207f4f5b14a0532025e1ff58c8b252"
+);
+// HiROM (+ Mode 7 pendulum)
+game_test!(
+    game_metroid,
+    "Super Metroid (Japan, USA) (En,Ja).sfc",
+    35_000_000,
+    "3fddcd5d6d10a972030bec93560c75c65f670b4f3a8d84a423d42f8d661f6845"
+);
+game_test!(
+    game_chrono,
+    "Chrono Trigger (USA).sfc",
+    20_000_000,
+    "6e00465ad69e86123b1a18e9d5a35d3850ced35bc2d8eecf2e4da63fce10d9a7"
+);
+// Large ROM
+game_test!(
+    game_tales,
+    "Tales of Phantasia (Japan).sfc",
+    40_000_000,
+    "e997ba7d2757a4ed15dc52da2c2ba1a47ecd4a5eeb49d9d71cc55a750ee81fcf"
+);
+// HDMA (raster split + gradient)
+game_test!(
+    game_contra3,
+    "Contra III - The Alien Wars (USA).sfc",
+    50_000_000,
+    "2d8f52bb162cc1e9e00897e8b1dc5f17a54e2088f77ea14adce508aa91627e02"
+);
+game_test!(
+    game_axelay,
+    "Axelay (USA).sfc",
+    55_000_000,
+    "6ff009b793b5be6706cccb1378829c47d04f5284ec014c73a9988e97ef1c2c7c"
 );
