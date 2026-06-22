@@ -31,7 +31,7 @@ truly-open list is short.** Use *this* table, not §1, as current truth.
 |---|:---:|:---:|---|
 | DSP S-DSP | A− | **A** | ~~golden-vector PCM tests absent~~ — **FIXED 2026-06-17** (BRR→PCM differential vs Mesen2 + curated goldens) |
 | CPU 65c816 | A− | **A−** | none functional (DP-8 bare wrap is inert → comment fix) |
-| SPC700 | B | **B+** | fine cycle ordering only (branch penalty fixed) |
+| SPC700 | B | **A−** | cycle model complete (2026-06-22): all 254 opcodes cycle-stepped byte/cycle-exact vs the atomic core, taken-branch +2 applied, cooperative CPU↔SPC interleave active at bus-access granularity, `$F0` wait-state dividers modelled (gap 6 closed) |
 | PPU | C+ | **A−** | *(OPHCT/OPVCT read-latch **+** BG scroll write-twice — both **FIXED 2026-06-11**; the OPVCT latch was the Doom-flicker root)* |
 | DMA/HDMA | C+ | **B−** | DMA per-byte + line-granular HDMA preempt (Phase 5). dot-276 sub-line is **visually a no-op** (276 = HBlank → effect on line N+1, which luna's boundary model already does — see `hdma_ares_audit.md` "Resolution 2026-06-20"); residual is the HDMA stall **cycle-count** timing only (no known game impact). |
 | SA-1 | C+ | **A−** | ~~flat instruction timing~~ — **FIXED**: per-access cycle cost (Phase 5b `097ffe7`) + `conflict()` BWRAM/IRAM/ROM contention steps (Increment B, 2026-06-20). The "−" is the batched (non-cothread) scheduler grain, not a value bug. |
@@ -48,6 +48,30 @@ truly-open list is short.** Use *this* table, not §1, as current truth.
 
 Plus the 2 architectural residuals (Phase 5: DMA per-byte grid stepping, mid-line
 HDMA preemption) — genuine HDMA-accuracy items.
+
+**UPDATE 2026-06-22 — SPC700 cycle model finished (→ A−); Star Ocean fixed; §1
+PPU rows confirmed stale.**
+- **SPC700 → A−.** The cycle-stepped core is byte/cycle-exact for all 254 opcodes
+  vs the atomic core (`differential_all_ported_opcodes`); the taken-branch +2
+  penalty is applied (`ef44271`); the CPU↔SPC interleave is cycle-exact at
+  bus-access granularity (cooperative grammar, active — not the old chunked
+  model); and the **`$F0` wait-state dividers** `{2,4,10,20}` clock / `{2,4,8,16}`
+  timer (the 8/16→10/20 glitch) are now modelled per access — **last named APU
+  gap (`luna_apu_gaps.md` §6) closed**. ws=0 byte-identical (24 APU tests + the
+  differential + 58 goldens unchanged); `wait_states_divide_the_spc_clock` proves
+  ws=1≈½ / ws=3≈⅒.
+- **Star Ocean (S-DD1) plays past the intro** (`f4fc744`): MMC bank selects power
+  on to identity (green tri-Ace logo) and `$C0-FF` is MMC ROM not SRAM (`$F0-FD`
+  was returning zeroed save-RAM, dead-looping the post-intro script engine).
+- **Audit of the §1 May PPU rows (below):** every grade-D/C claim spot-checked is
+  **already fixed in current code** — sprite Y-wrap (`sprite_on_line` does
+  `& 0xFF`), large-sprite tile addressing (delegated to the indexed renderer's
+  tile-wrap), BG modes 5/6 hi-res (`render_bg_scanline_indexed_hires`, 512-wide),
+  BG scroll write-twice (shared `bgofsPPU1/2` latches), Mode-7 screen-over
+  (`M7SEL` 7:6). The re-grounded banner's **PPU A−** is correct; **§1 stays
+  superseded** (its line-numbers and grades predate this work — do not cite it).
+  The per-dot/mid-scanline path exists (gap G6 `flush_partial_scanline`); a "per-dot
+  renderer rewrite" is **not** an open item.
 
 **UPDATE 2026-06-11 — the Doom flicker is SOLVED, and it was NOT a scheduler/timing
 problem.** The earlier theory here (Doom loop "~3.3× slow", attack only with the
