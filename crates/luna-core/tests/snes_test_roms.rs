@@ -968,13 +968,11 @@ macro_rules! spc_test {
             test_audio(concat!("SPC700/", $path), $hash, $mask);
         }
     };
-    // Ignored audio golden: the SPC700/S-DSP PCM hash is timing-fragile and
-    // these baselines went stale when the Phase-2/3 SPC700 cycle accuracy
-    // (Tom-Harte-validated) shifted the waveform. Audio correctness can't be
-    // self-verified (the `audible-fixes-test-first` rule), so they're parked
-    // until the WAV is auditioned + the hash regenerated. PitchMod is a
-    // separate case — a real SPC700 crash under the correct cycles (see the
-    // `project_pitchmod_spc700_crash` memory + tools/pitchmod-ref-check.lua).
+    // Ignored audio golden. Now used only by PitchMod — a real SPC700 STOP
+    // halt under the correct cycles that Mesen2 reproduces too (see the
+    // `project_pitchmod_spc700_crash` memory + tools/pitchmod-ref-check.lua), so
+    // its golden is intentionally parked. (The Phase-2/3 stale-waveform goldens
+    // that used to live here were auditioned + re-baselined 2026-06-23.)
     ($fn:ident, $path:literal, $hash:literal, ignore = $reason:literal) => {
         #[test]
         #[ignore = $reason]
@@ -994,14 +992,14 @@ macro_rules! spc_test {
 }
 
 // Golden hashes of luna's 32 kHz PCM output (first 3 s, loaded as PAL).
-// 8 play (incl. the multi-block-upload music ROMs fixed by the IPL-ROM
-// byte correction); PlayTwoSong is a separate, still-open gap.
+// All 8 auditioned (recognisable, clean) and re-baselined 2026-06-23 after the
+// Phase-2/3 SPC700 cycle-accuracy waveform shift; the multi-block-upload music
+// ROMs play thanks to the IPL-ROM byte fix. PitchMod stays ignored (a real,
+// ares-matching STOP halt — see its reason).
 spc_test!(
     spc_italo,
     "ItaloTest/ItaloTest.sfc",
-    "ba5f3d21b6cfda0876b0e627b8c5da7e3164b91e418fcaf2f7c8180736a5d370",
-    ignore =
-        "stale audio hash since Phase 2/3 SPC700 cycle accuracy — audition WAV + regen pending"
+    "df026edb17535c591ac398713d8f510e923f8a6ffdb92995b65863a3302954db"
 );
 spc_test!(
     spc_pitchmod,
@@ -1012,54 +1010,40 @@ spc_test!(
 spc_test!(
     spc_play_brr,
     "PlayBRRSample/PlayBRRSample.sfc",
-    "9bab340ac08c21cc15e27c39bdba674acecc1e2a3b2842a0e47a51afe10b46b1",
-    ignore =
-        "stale audio hash since Phase 2/3 SPC700 cycle accuracy — audition WAV + regen pending"
+    "8e23b0d9c060b0339f13173f7863aade272d02cf8df97d7f1684699d85e11ad2"
 );
 spc_test!(
     spc_play_noise,
     "PlayNoise/PlayNoise.sfc",
-    "a0fcb98352b9a4fe551759a0c90d9e363c400832a656544a27d052f6e35fce86",
-    ignore =
-        "stale audio hash since Phase 2/3 SPC700 cycle accuracy — audition WAV + regen pending"
+    "fb285cf0055c90ae485656269536ec103e0407d36b705e63e1c60cb370e5cb63"
 );
 spc_test!(
     spc_twinkle,
     "Twinkle/Twinkle.sfc",
-    "861ae2ca24f09adb728575fe5dcd708525e05fe97c9224db81c615321c0488fa",
-    ignore =
-        "stale audio hash since Phase 2/3 SPC700 cycle accuracy — audition WAV + regen pending"
+    "d145d0f0ea9f41927b33e5ed3bc71758556f1f63bdc101c3810cd38ea6daf9c4"
 );
 // Multi-block uploads — silent until the IPL-ROM `$FFEE` byte fix.
 spc_test!(
     spc_axel_f,
     "Axel-F/Axel-F.sfc",
-    "48834e4b31eb9140a14530f34fdf02574aafa2a03753801ccb7a50bd212d63ec",
-    ignore =
-        "stale audio hash since Phase 2/3 SPC700 cycle accuracy — audition WAV + regen pending"
+    "3d24ae64cef24c53d4863c7a07205953f885905cdfcef8a97f1c5885cd5daf3d"
 );
 spc_test!(
     spc_ffvii_prelude,
     "FFVIIPrelude/FFVIIPrelude.sfc",
-    "a9b4ef857dbd5805e51e3abfdabfbe359acc7a45facc82950aa37e09166c5450",
-    ignore =
-        "stale audio hash since Phase 2/3 SPC700 cycle accuracy — audition WAV + regen pending"
+    "8acf5de6f2ad8e736bda6271a7a772596b1a8857ff6619768362acd9a4c513d6"
 );
 spc_test!(
     spc_speech,
     "SpeechSynth/SpeechSynth.sfc",
-    "da65e946b7e159e65604e237df3eaf251db7353740fe4888f89725dd47045b20",
-    ignore =
-        "stale audio hash since Phase 2/3 SPC700 cycle accuracy — audition WAV + regen pending"
+    "724b0a292a5da09cc2c0fd4c9637e2dd679e15ec4e72de6e06cc4caba409d459"
 );
 // Plays only on a button press — hold A (song 1) until the driver boots.
 spc_test!(
     spc_play_two_song,
     "PlayTwoSong/PlayTwoSong.sfc",
-    "a99fd88d43ff1b4d4d070c33b92ef69b3cabc0caaaa63041806201d39cc8dd35",
-    hold = PAD_A,
-    ignore = "stale audio hash since the per-cycle SPC700/timer/DSP + 1.025280 MHz clock \
-              change (PR #9) — audition WAV + regen pending, like its siblings"
+    "9e10ae2a4286501af7f423db4f59eeec67c5b9189249399da0bce61bdbb4d339",
+    hold = PAD_A
 );
 
 /// Declare a representative commercial-title golden — one eyeball-validated
