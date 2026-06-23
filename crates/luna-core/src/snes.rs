@@ -1739,6 +1739,15 @@ impl SnesBus<'_> {
             // Frame wrap.
             self.ppu_line = 0;
             self.cpu_regs.hvbjoy &= !0x80;
+            // P1 — faithful `nmiLine`: ares clears it when `nmiValid` falls
+            // (vcounter < vdisp), i.e. at VBlank end, NOT only on a $4210 read
+            // (irq.cpp `nmiLine = nmiValid`). Without this the flag stays
+            // stale-true into the next frame — the latent bug a faithful
+            // late-NMI-enable (P2) would turn into a spurious NMI (the SMRPG
+            // black-screen tripwire). The actual NMI is still fired at VBlank
+            // entry via `*self.nmi`; this only fixes what `$4210` reads outside
+            // VBlank (now 0, matching hardware).
+            self.cpu_regs.nmi_flag = false;
             self.frame_count = self.frame_count.saturating_add(1);
             // Snapshot whether the frame that just completed showed any
             // visible content, paired with the frame counter bump so a

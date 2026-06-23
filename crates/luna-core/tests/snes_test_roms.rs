@@ -603,10 +603,15 @@ ppu_test!(
 );
 // MosaicMode3 ramps the BG mosaic size while R is held — hold R so the
 // captured frame exercises the $2106 mosaic (verified pixelated).
+// Re-baselined 2026-06-23 (P1 faithful nmiLine): clearing $4210 at VBlank end
+// shifts this timing-sensitive ramp demo by ~1 frame, so the fixed -n lands a
+// little further along. Old (c3048a2e) and new (df5e17e0) frames both eyeball-
+// confirmed clean 8×8 mosaics of the same lake/island scene (the new one is
+// slightly more detailed) — a benign frame-shift, not a render regression.
 ppu_test!(
     ppu_mosaic_mode3,
     "Mosaic/Mode3/MosaicMode3.sfc",
-    "c3048a2eff2084b019b0dee48c2de599aa24e4d071facc000b33497e5ba6478a",
+    "df5e17e0e8fe0a6b3ebf2411ee98d2e5be250004b0546419c3ef1a775c11686f",
     hold = PAD_R
 );
 // Mode 5 hi-res + INTERLACE (SETINI bit 0): the Moogle figure. Interlace
