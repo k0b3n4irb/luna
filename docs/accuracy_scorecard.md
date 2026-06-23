@@ -34,7 +34,7 @@ truly-open list is short.** Use *this* table, not §1, as current truth.
 | SPC700 | B | **A−** | cycle model complete (2026-06-22): all 254 opcodes cycle-stepped byte/cycle-exact vs the atomic core, taken-branch +2 applied, cooperative CPU↔SPC interleave active at bus-access granularity, `$F0` wait-state dividers modelled (gap 6 closed) |
 | PPU | C+ | **A−** | *(OPHCT/OPVCT read-latch **+** BG scroll write-twice — both **FIXED 2026-06-11**; the OPVCT latch was the Doom-flicker root)* |
 | DMA/HDMA | C+ | **B−** | DMA per-byte + line-granular HDMA preempt (Phase 5). dot-276 sub-line is **visually a no-op** (276 = HBlank → effect on line N+1, which luna's boundary model already does — see `hdma_ares_audit.md` "Resolution 2026-06-20"); residual is the HDMA stall **cycle-count** timing only (no known game impact). |
-| SA-1 | C+ | **A−** | ~~flat instruction timing~~ — **FIXED**: per-access cycle cost (Phase 5b `097ffe7`) + `conflict()` BWRAM/IRAM/ROM contention steps (Increment B, 2026-06-20). The "−" is the batched (non-cothread) scheduler grain, not a value bug. |
+| SA-1 | C+ | **A−** | ~~flat instruction timing~~ — **FIXED**: per-access cycle cost (Phase 5b `097ffe7`) + `conflict()` BWRAM/IRAM/ROM contention steps (Increment B, 2026-06-20). ~~HV-mode timer unimplemented~~ — **FIXED 2026-06-23** (faithful ares `SA1::step` port, both modes, unit-tested). The remaining "−" is purely the batched (non-cothread) scheduler grain, not a value or feature bug. |
 | Bus/mappers | C+ | **B** | ~~ROM mirroring, open-bus MDR, mapper-detect scoring~~ — all **FIXED 2026-06-17** |
 
 **Truly-open work list (was 6, now 1 after OPVCT + BG-scroll + BRR-test + bus trio):**
