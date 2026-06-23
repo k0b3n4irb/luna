@@ -2291,6 +2291,22 @@ impl SnesBus<'_> {
                     self.ppu.latch_counters(h, v);
                 }
             }
+            // P2 — late NMI enable: raising NMITIMEN.7 (0→1) while the NMI line
+            // is still asserted ($4210 flag set, i.e. mid-VBlank, un-read) fires
+            // the NMI now (ares irq.cpp `nmitimenUpdate`: `if nmiEnable.raise(7)
+            // && nmiLine → nmiTransition`). Checked BEFORE the CpuRegs::write so
+            // we see the previous NMITIMEN.7. P1's VBlank-end clear of `nmi_flag`
+            // is what makes this safe: the line is no longer stale-true outside
+            // VBlank, so this can't fire the spurious NMI that black-screened
+            // SMRPG when the naive port was attempted.
+            if reg_off == 0x4200
+                && self.cpu_regs.nmitimen & 0x80 == 0
+                && value & 0x80 != 0
+                && self.cpu_regs.nmi_flag
+            {
+                *self.nmi = true;
+                self.trace_irq_signal(MemEventKind::NmiSignal, value);
+            }
             if self.cpu_regs.write(reg_off, value) {
                 return;
             }
@@ -2415,6 +2431,49 @@ mod tests {
         // STP — CPU halts
         snes.step();
         assert!(snes.cpu.stopped);
+    }
+
+    /// ROM that does `LDA #$80; STA $4200; STP` — raise NMITIMEN.7 then halt.
+    fn nmitimen_enable_rom() -> Cartridge {
+        let mut rom = demo_lorom().rom;
+        rom[0x0000] = 0xA9; // LDA #$80
+        rom[0x0001] = 0x80;
+        rom[0x0002] = 0x8D; // STA $4200 (absolute, DB=0 → $00:4200)
+        rom[0x0003] = 0x00;
+        rom[0x0004] = 0x42;
+        rom[0x0005] = 0xDB; // STP
+        Cartridge::from_bytes(rom).unwrap()
+    }
+
+    #[test]
+    fn late_nmi_enable_fires_when_line_asserted() {
+        // P2: raising NMITIMEN.7 (0→1) while the NMI line is asserted (the
+        // $4210 flag is set, i.e. mid-VBlank, un-read) fires the NMI now.
+        let mut snes = Snes::from_cartridge(nmitimen_enable_rom());
+        snes.reset();
+        snes.cpu_regs.nmi_flag = true; // NMI line asserted (in VBlank)
+        snes.cpu_regs.nmitimen = 0x00; // NMI not yet enabled
+        snes.nmi_pending = false;
+        snes.step(); // LDA #$80
+        snes.step(); // STA $4200 — the 0→1 raise
+        assert!(snes.cpu.pending_nmi, "late NMITIMEN.7 enable fires the NMI");
+    }
+
+    #[test]
+    fn late_nmi_enable_does_not_fire_when_line_clear() {
+        // The P1 guarantee: outside VBlank the line is clear (not stale-true),
+        // so the same write must NOT fire a spurious NMI (the SMRPG tripwire).
+        let mut snes = Snes::from_cartridge(nmitimen_enable_rom());
+        snes.reset();
+        snes.cpu_regs.nmi_flag = false; // line NOT asserted (outside VBlank)
+        snes.cpu_regs.nmitimen = 0x00;
+        snes.nmi_pending = false;
+        snes.step(); // LDA #$80
+        snes.step(); // STA $4200
+        assert!(
+            !snes.cpu.pending_nmi,
+            "no spurious NMI when the line is clear"
+        );
     }
 
     #[test]
