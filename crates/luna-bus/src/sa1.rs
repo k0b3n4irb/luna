@@ -150,23 +150,27 @@ pub struct Sa1Mapper {
     snv_lo: u8,
     snv_hi: u8,
 
-    // ---- Phase-3 timer ($2210-$2215) ----
+    // ---- SA-1 timer ($2210-$2215) — faithful ares port ----
     /// `$2210 TMC` — timer control. bit 7 = mode (0 = HV timer, 1 =
-    /// linear timer), bit 1 = V enable, bit 0 = H enable. In linear
-    /// mode an 18-bit counter wraps every 2^18 SA-1 clocks; the
-    /// `HCNT:VCNT.lo[1:0]` compare raises a timer IRQ.
+    /// linear timer), bit 1 = V enable, bit 0 = H enable.
     tmc: u8,
-    /// `$2212/$2213 HCNT` — H compare (write) / counter low (read).
+    /// `$2212/$2213 HCNT` — H compare (write, in dots).
     hcnt_lo: u8,
     hcnt_hi: u8,
-    /// `$2214/$2215 VCNT` — V compare (write) / counter high (read).
+    /// `$2214/$2215 VCNT` — V compare (write, in dots).
     vcnt_lo: u8,
     vcnt_hi: u8,
-    /// Free-running 18-bit linear-mode counter. Wraps modulo 2^18.
-    linear_counter: u32,
-    /// True between a compare-match and the next reset / clear, so we
-    /// only raise one IRQ edge per match.
-    timer_match_armed: bool,
+    /// Internal H/V timer counters, in CLOCKS (4 clocks = 1 dot), per ares
+    /// `SA1::status`. HV mode wraps H at 1364 and V at `scanlines`; linear
+    /// mode is an 11-bit H + 9-bit V free-runner. Read back as dots at
+    /// `$2302-$2305` (HCR/VCR).
+    hcounter: u16,
+    vcounter: u16,
+    /// Active scanline count (262 NTSC / 312 PAL) for the HV-mode V wrap.
+    scanlines: u16,
+    /// Leftover odd master clock between `tick_timer` calls so the timer
+    /// advances in ares' exact 2-clock steps regardless of batch size.
+    timer_rem: u32,
 
     // ---- Phase-3 DMA ($2230-$2239) ----
     /// `$2230 DCNT` — DMA control byte (bit 7 = enable, bit 6 =
@@ -354,8 +358,10 @@ impl Sa1Mapper {
             hcnt_hi: 0,
             vcnt_lo: 0,
             vcnt_hi: 0,
-            linear_counter: 0,
-            timer_match_armed: true,
+            hcounter: 0,
+            vcounter: 0,
+            scanlines: 262,
+            timer_rem: 0,
             dcnt: 0,
             dma_en: false,
             dma_cden: false,
@@ -651,44 +657,58 @@ impl Sa1Mapper {
         self.cc1_irq_to_main = true;
     }
 
-    /// Compose the 18-bit linear-mode compare value from HCNT lo/hi
-    /// + VCNT lo's low 2 bits (per Anomie's SA-1 doc).
-    fn linear_compare(&self) -> u32 {
-        u32::from(self.hcnt_lo)
-            | (u32::from(self.hcnt_hi) << 8)
-            | (u32::from(self.vcnt_lo & 0x03) << 16)
+    /// HCNT/VCNT compare values (9-bit, in dots) from their lo/hi pairs.
+    fn timer_compare(&self) -> (u16, u16) {
+        let hcnt = ((u16::from(self.hcnt_hi) << 8) | u16::from(self.hcnt_lo)) & 0x01FF;
+        let vcnt = ((u16::from(self.vcnt_hi) << 8) | u16::from(self.vcnt_lo)) & 0x01FF;
+        (hcnt, vcnt)
     }
 
-    /// Advance the SA-1 timer by `ticks` SA-1-clock cycles.
-    ///
-    /// In linear mode (TMC bit 7 = 1), the 18-bit counter increments
-    /// and a compare match against `linear_compare()` raises the
-    /// timer IRQ latch (gated by CIE.5 in the IRQ-line query).
-    ///
-    /// HV-mode timing isn't wired yet — the SA-1 has no direct view of
-    /// the PPU's dot counter here, so the H/V counter readbacks just
-    /// return the latched compare values until that hookup lands.
+    /// Advance the SA-1 timer by `ticks` master clocks, in ares' exact
+    /// 2-clock steps (`SA1::step`). Both HV and linear modes keep their own
+    /// H/V counters; only the advance differs, the IRQ compare is the same
+    /// `hen | ven<<1` switch in either mode. `timer_rem` carries any odd
+    /// clock between calls so the cadence is independent of batch size.
     pub fn tick_timer(&mut self, ticks: u32) {
-        if (self.tmc & 0x80) == 0 || (self.tmc & 0x03) == 0 {
-            // HV mode or both H/V disabled → no IRQ progress here.
-            self.linear_counter = self.linear_counter.wrapping_add(ticks) & 0x3FFFF;
-            return;
+        self.timer_rem += ticks;
+        while self.timer_rem >= 2 {
+            self.timer_rem -= 2;
+            self.timer_step2();
         }
-        let compare = self.linear_compare();
-        let before = self.linear_counter;
-        let after = (self.linear_counter.wrapping_add(ticks)) & 0x3FFFF;
-        // Detect a forward crossing through `compare` modulo 2^18.
-        let crossed = if before <= after {
-            before < compare && compare <= after
+    }
+
+    /// One ares timer step (+2 master clocks): advance the counters per the
+    /// selected mode, then test the H/V compare for the timer IRQ.
+    fn timer_step2(&mut self) {
+        if self.tmc & 0x80 == 0 {
+            // HV timer — H wraps each scanline (1364 clocks), V each frame.
+            self.hcounter += 2;
+            if self.hcounter >= 1364 {
+                self.hcounter = 0;
+                self.vcounter += 1;
+                if self.vcounter >= self.scanlines {
+                    self.vcounter = 0;
+                }
+            }
         } else {
-            // Wraparound — crossed if compare in (before, 2^18) or [0, after].
-            before < compare || compare <= after
-        };
-        if crossed && self.timer_match_armed {
-            self.timer_irq_to_sa1 = true;
-            self.timer_match_armed = false;
+            // Linear timer — an 11-bit H feeding a 9-bit V.
+            self.hcounter += 2;
+            self.vcounter = self.vcounter.wrapping_add(self.hcounter >> 11);
+            self.hcounter &= 0x07FF;
+            self.vcounter &= 0x01FF;
         }
-        self.linear_counter = after;
+        // Timer IRQ compare. Mode = hen | ven<<1 = TMC[1:0]. The flag stays
+        // set (level) until the SA-1 clears it via $220B; the bare `==` fires
+        // once per H period (line) / V period (frame), like ares.
+        let (hcnt, vcnt) = self.timer_compare();
+        match self.tmc & 0x03 {
+            1 if self.hcounter == hcnt << 2 => self.timer_irq_to_sa1 = true,
+            2 if self.vcounter == vcnt && self.hcounter == 0 => self.timer_irq_to_sa1 = true,
+            3 if self.vcounter == vcnt && self.hcounter == hcnt << 2 => {
+                self.timer_irq_to_sa1 = true;
+            }
+            _ => {}
+        }
     }
 
     /// `true` while the SA-1 is asserting an IRQ line onto the main
@@ -1027,14 +1047,12 @@ impl Mapper for Sa1Mapper {
             return Some(match mr_addr {
                 0x2300 => self.read_sfr(),
                 0x2301 => self.read_cfr(),
-                // HCR / VCR — the SA-1's free-running H/V counters.
-                // In linear mode we expose the 18-bit `linear_counter`
-                // split into lo (HCR), hi (VCR), and the top 2 bits in
-                // the next register.
-                0x2302 => self.linear_counter as u8,
-                0x2303 => (self.linear_counter >> 8) as u8,
-                0x2304 => (self.linear_counter >> 16) as u8 & 0x03,
-                0x2305 => 0,
+                // HCR / VCR — the live H/V timer counters, read back in DOTS
+                // (4 clocks = 1 dot), 9 bits each. H = hcounter >> 2.
+                0x2302 => (self.hcounter >> 2) as u8,
+                0x2303 => ((self.hcounter >> 2) >> 8) as u8 & 0x01,
+                0x2304 => self.vcounter as u8,
+                0x2305 => (self.vcounter >> 8) as u8 & 0x01,
                 0x2306 => self.mr as u8,
                 0x2307 => (self.mr >> 8) as u8,
                 0x2308 => (self.mr >> 16) as u8,
@@ -1319,13 +1337,12 @@ impl Sa1Mapper {
                 0x220F => self.siv_hi = value,
 
                 // -------- SA-1 timer --------
-                0x2210 => {
-                    self.tmc = value;
-                    self.timer_match_armed = true;
-                }
+                0x2210 => self.tmc = value,
                 0x2211 => {
-                    self.linear_counter = 0;
-                    self.timer_match_armed = true;
+                    // CTR — restart the timer (ares io.cpp $2211).
+                    self.hcounter = 0;
+                    self.vcounter = 0;
+                    self.timer_rem = 0;
                 }
                 0x2212 => self.hcnt_lo = value,
                 0x2213 => self.hcnt_hi = value,
@@ -1784,60 +1801,70 @@ mod tests {
     // ------------- Phase-3 timer tests -------------
 
     #[test]
-    fn timer_linear_mode_fires_irq_on_compare_match() {
+    fn timer_linear_mode_fires_irq_on_h_match() {
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
-        // Enable SA-1-side timer IRQ (CIE bit 6 per ares + Mesen2).
-        m.write(make_addr(0x00, 0x220A), 0x40);
-        // Set TMC linear mode + H enable.
-        m.write(make_addr(0x00, 0x2210), 0x81);
-        // Compare = 100.
-        m.write(make_addr(0x00, 0x2212), 100);
+        m.write(make_addr(0x00, 0x220A), 0x40); // CIE.6 = timer IRQ enable
+        m.write(make_addr(0x00, 0x2210), 0x81); // linear mode + H enable
+        m.write(make_addr(0x00, 0x2212), 100); // HCNT = 100 dots → 400 clocks
         m.write(make_addr(0x00, 0x2213), 0);
-        m.write(make_addr(0x00, 0x2214), 0);
-        // Tick 50 ticks — not enough, no IRQ.
-        m.tick_timer(50);
+        m.tick_timer(398); // hcounter = 398, not yet the compare
         assert!(!m.sa1_irq_line());
-        // Tick another 60 — crosses 100, fires.
-        m.tick_timer(60);
-        assert!(m.sa1_irq_line(), "timer should have fired at 100");
+        m.tick_timer(2); // hcounter reaches 400 == HCNT<<2
+        assert!(m.sa1_irq_line(), "fires when hcounter == HCNT<<2");
     }
 
     #[test]
     fn timer_reset_via_ctr_clears_the_counter() {
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
         m.write(make_addr(0x00, 0x2210), 0x81);
-        m.tick_timer(123);
-        assert_eq!(m.read(make_addr(0x00, 0x2302)), Some(123));
-        m.write(make_addr(0x00, 0x2211), 0x00); // CTR
+        m.tick_timer(400); // 400 clocks
+        // HCR ($2302) reads back in DOTS: 400 >> 2 = 100.
+        assert_eq!(m.read(make_addr(0x00, 0x2302)), Some(100));
+        m.write(make_addr(0x00, 0x2211), 0x00); // CTR restart
         assert_eq!(m.read(make_addr(0x00, 0x2302)), Some(0));
     }
 
     #[test]
-    fn timer_hv_mode_does_not_fire_irq() {
+    fn timer_hv_mode_fires_irq_on_h_match() {
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
-        m.write(make_addr(0x00, 0x220A), 0x40); // CIE bit 6 = timer
-        // TMC = $01 (H enable, HV mode) — no linear progress + no IRQ.
-        m.write(make_addr(0x00, 0x2210), 0x01);
-        m.tick_timer(10_000);
+        m.write(make_addr(0x00, 0x220A), 0x40); // CIE.6 = timer IRQ enable
+        m.write(make_addr(0x00, 0x2210), 0x01); // HV mode + H enable
+        m.write(make_addr(0x00, 0x2212), 100); // HCNT = 100 dots → 400 clocks
+        m.tick_timer(398);
         assert!(!m.sa1_irq_line());
+        m.tick_timer(2); // hcounter == 400
+        assert!(m.sa1_irq_line(), "HV-mode H match fires the timer IRQ");
     }
 
     #[test]
-    fn timer_compare_match_re_arms_after_clear() {
+    fn timer_hv_mode_fires_on_v_match() {
+        // The raster-timing use case: fire at the start of a target scanline.
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
-        m.write(make_addr(0x00, 0x220A), 0x40); // CIE bit 6 = timer
-        m.write(make_addr(0x00, 0x2210), 0x81);
-        m.write(make_addr(0x00, 0x2212), 50);
-        m.tick_timer(60);
-        assert!(m.sa1_irq_line());
-        // Clear via CIC bit 6.
-        m.write(make_addr(0x00, 0x220B), 0x40);
+        m.write(make_addr(0x00, 0x220A), 0x40); // CIE.6 = timer IRQ enable
+        m.write(make_addr(0x00, 0x2210), 0x02); // HV mode + V enable
+        m.write(make_addr(0x00, 0x2214), 2); // VCNT = scanline 2
+        // V increments once per 1364-clock line; reach the start of line 2.
+        m.tick_timer(2 * 1364 - 2);
         assert!(!m.sa1_irq_line());
-        // CTR write to re-arm.
-        m.write(make_addr(0x00, 0x2211), 0x00);
-        // Need another full pass to re-trigger.
-        m.tick_timer(60);
-        assert!(m.sa1_irq_line(), "re-armed timer fires on next match");
+        m.tick_timer(2); // vcounter == 2 with hcounter == 0
+        assert!(m.sa1_irq_line(), "HV-mode V match fires at the line start");
+    }
+
+    #[test]
+    fn timer_irq_refires_each_period_after_clear() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
+        m.write(make_addr(0x00, 0x220A), 0x40); // CIE.6 = timer IRQ enable
+        m.write(make_addr(0x00, 0x2210), 0x81); // linear mode + H enable
+        m.write(make_addr(0x00, 0x2212), 50); // HCNT = 50 → 200 clocks
+        m.tick_timer(200);
+        assert!(m.sa1_irq_line());
+        m.write(make_addr(0x00, 0x220B), 0x40); // CIC.6 clears the flag
+        assert!(!m.sa1_irq_line());
+        // The flag is level, not one-shot: it re-fires one full H period
+        // later (linear H wraps at 0x800 = 2048 clocks) when hcounter hits
+        // the compare again — no re-arm write needed.
+        m.tick_timer(2048);
+        assert!(m.sa1_irq_line(), "fires again on the next period");
     }
 
     // ------------- Phase-3 normal DMA tests -------------
