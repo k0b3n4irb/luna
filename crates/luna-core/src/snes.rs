@@ -315,6 +315,12 @@ pub enum MemEventKind {
     Read,
     /// CPU write.
     Write,
+    /// Synthetic delivery-timing marker: the NMI line was raised (V-blank
+    /// entry with NMITIMEN.7 set). `value` = NMITIMEN, `addr_full` = `$4210`.
+    NmiSignal,
+    /// Synthetic delivery-timing marker: the H/V-timer IRQ line was raised.
+    /// `value` = NMITIMEN, `addr_full` = `$4211`.
+    IrqSignal,
 }
 
 /// Bounded ring for the memory access tracer.
@@ -1531,6 +1537,39 @@ impl SnesBus<'_> {
             });
         }
     }
+
+    /// Emit a synthetic NMI/IRQ delivery-timing marker into the memory trace
+    /// (P0 of the cycle-accuracy roadmap). Unlike a bus access it bypasses the
+    /// bank/offset filters — it is a *when did the line get raised* event, the
+    /// thing the deferred Phase-4 NMI/IRQ work needs to diff against ares/Mesen.
+    #[inline]
+    fn trace_irq_signal(&mut self, kind: MemEventKind, value: u8) {
+        let pc = self.cpu_pc_full;
+        let mclk = *self.mclk_total;
+        let line = self.ppu_line;
+        let blank = line >= self.vblank_start_line;
+        let force_blank = self.ppu.inidisp & 0x80 != 0;
+        if let Some(log) = self.mem_trace_log.as_mut() {
+            if log.events.len() >= log.max_events {
+                return;
+            }
+            let addr_full = if matches!(kind, MemEventKind::NmiSignal) {
+                0x00_4210
+            } else {
+                0x00_4211
+            };
+            log.events.push(MemTraceEvent {
+                mclk_total: mclk,
+                pc_full: pc,
+                addr_full,
+                kind,
+                value,
+                line,
+                blank,
+                force_blank,
+            });
+        }
+    }
 }
 
 impl SnesBus<'_> {
@@ -1618,6 +1657,7 @@ impl SnesBus<'_> {
             // `*self.irq` edge was (it coalesced/dropped ~64% of Doom's chained
             // H+V writes). No edge latch is set here any more.
             self.cpu_regs.irq_flag = true;
+            self.trace_irq_signal(MemEventKind::IrqSignal, self.cpu_regs.nmitimen);
         }
     }
 
@@ -1663,6 +1703,7 @@ impl SnesBus<'_> {
             if self.cpu_regs.nmitimen & 0x80 != 0 {
                 *self.nmi = true;
                 self.nmis_serviced = self.nmis_serviced.saturating_add(1);
+                self.trace_irq_signal(MemEventKind::NmiSignal, self.cpu_regs.nmitimen);
             }
             // OAM address auto-reset (ares `object.cpp:31-32`), unless
             // forced-blank.
