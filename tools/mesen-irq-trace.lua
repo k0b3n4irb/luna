@@ -46,4 +46,15 @@ emu.addMemoryCallback(onRead,   emu.callbackType.read,  0x4210, 0x4211, M, C)
 emu.addMemoryCallback(onVector, emu.callbackType.read,  0xFFEA, 0xFFEF, M, C)
 emu.addMemoryCallback(onVector, emu.callbackType.read,  0xFFFA, 0xFFFF, M, C)
 
-emu.addEventCallback(function() out:flush() end, emu.eventType.endFrame)
+-- Stop after STOP_FRAME frames so --testRunner exits cleanly (override with
+-- the env var). ~600 frames ≈ 10 s — plenty of NMI/IRQ events to diff.
+local STOP_FRAME = tonumber(os.getenv("IRQ_STOP_FRAME") or "600")
+local frame = 0
+emu.addEventCallback(function()
+  out:flush()
+  frame = frame + 1
+  if frame >= STOP_FRAME then
+    out:close()
+    emu.stop(0)
+  end
+end, emu.eventType.endFrame)

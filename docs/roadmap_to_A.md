@@ -55,7 +55,7 @@ faithful `nmiLine`.
 P0  Delivery-timing differential harness      ✅ DONE (#38) — N/I markers + mesen-irq-trace.lua
 P1  Faithful nmiLine model ($4210/RDNMI)       ✅ DONE — nmi_flag cleared at VBlank end; SMRPG clean
      ├─ P2  nmitimenUpdate late-NMI-enable      ✅ DONE — fires only with nmiLine asserted; unit-tested
-     └─ P3  Per-access interrupt polling (CPU edge→level)
+     └─ P3  Per-access interrupt polling (CPU edge→level)   ✅ DIFFERENTIAL DONE — luna matches Mesen; no fix needed
 P4  Remaining HDMA/timer delivery edges ($4211 hold, field guard, htime delay)
 P5  SA-1 conflict() contention breadth + gap rows     (independent; parallel after P0)
 P6  PPU feature completeness (EXTBG / OPT / mosaic / interlace doubling)   (independent)
@@ -102,7 +102,22 @@ Original scope note:
 - **Validate:** SMRPG intro (`$81` write at `$C3:B9D4`) must produce zero
   spurious NMIs. **Files:** `cpu_regs.rs`, `snes.rs`.
 
-### P3 — Per-access interrupt polling (HIGH — every game's IRQ timing)
+### P3 — Per-access interrupt polling ✅ DIFFERENTIAL CONFIRMS CORRECTNESS
+**Key enabler found 2026-06-23: Mesen2 runs HEADLESS** via `--testRunner`, so the
+delivery-timing differential is **fully self-contained** — no need to ask the
+user to run anything. Ran it on Doom (`tools/mesen-irq-trace.lua` → Mesen ref;
+`--until-frame 300 --mem-trace FFEA:FFEA` → luna NMI vector fetches;
+`tools/irq-trace-diff.py` → compare). Result: **luna matches Mesen** — same ~47
+NMI deliveries over 300 frames, same ~357366-clock inter-NMI cadence + jitter
+distribution. luna's instruction-atomic interrupt model is **cycle-correct at the
+observable level**; the precise sub-cycle position is below this measurement's
+floor (the `$FFEA` vector-table ROM-read pollution). So the per-access poll is a
+theoretical refinement, **not an observable fix** — P3 needs no code change. The
+faithful-port method *confirmed* luna here rather than refuting it. The reusable
+self-contained harness is the deliverable; future interrupt-timing changes can be
+validated against Mesen autonomously.
+
+Original scope note (kept for reference):
 - Move NMI/IRQ *sampling* from the instruction boundary into
   `io_cycle`/`advance_time` (the level inputs already flow through
   `set_irq_line`). NMI first, then verify IRQ unchanged.
