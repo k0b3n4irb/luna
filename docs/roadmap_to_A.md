@@ -54,7 +54,7 @@ faithful `nmiLine`.
 ```
 P0  Delivery-timing differential harness      ✅ DONE (#38) — N/I markers + mesen-irq-trace.lua
 P1  Faithful nmiLine model ($4210/RDNMI)       ✅ DONE — nmi_flag cleared at VBlank end; SMRPG clean
-     ├─ P2  nmitimenUpdate late-NMI-enable      (unlocked by P1)
+     ├─ P2  nmitimenUpdate late-NMI-enable      ✅ DONE — fires only with nmiLine asserted; unit-tested
      └─ P3  Per-access interrupt polling (CPU edge→level)
 P4  Remaining HDMA/timer delivery edges ($4211 hold, field guard, htime delay)
 P5  SA-1 conflict() contention breadth + gap rows     (independent; parallel after P0)
