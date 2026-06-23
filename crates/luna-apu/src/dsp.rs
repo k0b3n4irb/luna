@@ -1252,4 +1252,54 @@ mod tests {
             bo_ref = nbo_ref;
         }
     }
+
+    /// Set up voice 0 as a looping BRR sample at max volume, key it on, and
+    /// return its first 64 stereo samples from the real `main()` loop. Drives
+    /// the full per-sample path: BRR decode + gaussian pitch interpolation +
+    /// envelope + per-voice and master volume.
+    fn full_voice_brr_output() -> Vec<(i16, i16)> {
+        let mut dsp = Dsp::new();
+        let mut aram: Box<[u8; 0x10000]> =
+            vec![0u8; 0x10000].into_boxed_slice().try_into().unwrap();
+        // Source directory @ $0200: srcn 0 → start $0300, loop $0300.
+        aram[0x0200..0x0204].copy_from_slice(&[0x00, 0x03, 0x00, 0x03]);
+        // One BRR block @ $0300: shift 0xB, filter 0, loop+end set (0xB3),
+        // a non-trivial waveform in the 8 data bytes.
+        aram[0x0300] = 0xB3;
+        aram[0x0301..0x0309].copy_from_slice(&[0x12, 0x34, 0x56, 0x78, 0x87, 0x65, 0x43, 0x21]);
+        dsp.write(0x6C, 0x20); // FLG: clear reset+mute, echo off
+        dsp.write(0x5D, 0x02); // DIR: source directory page → $0200
+        dsp.write(0x0C, 0x7F); // MVOL_L
+        dsp.write(0x1C, 0x7F); // MVOL_R
+        dsp.write(0x00, 0x7F); // V0VOL_L
+        dsp.write(0x01, 0x7F); // V0VOL_R
+        dsp.write(0x02, 0x00); // V0PITCH_L
+        dsp.write(0x03, 0x10); // V0PITCH_H → 0x1000 ≈ rate 1.0
+        dsp.write(0x04, 0x00); // V0SRCN = 0
+        dsp.write(0x05, 0x00); // ADSR1.7=0 → GAIN mode
+        dsp.write(0x07, 0x7F); // GAIN: direct, max
+        dsp.write(0x4C, 0x01); // KON voice 0
+        (0..64).map(|_| dsp.main(&mut aram)).collect()
+    }
+
+    /// Full-voice PCM regression golden. The BRR decoder is correctness-tested
+    /// above (curated goldens + Mesen differential); this locks the *integration*
+    /// — BRR + gaussian pitch interpolation + envelope + per-voice/master volume
+    /// through the real `main()` loop — so a regression in any of those stages is
+    /// caught at the DSP unit level (not only via the end-to-end ROM goldens).
+    /// Baseline captured 2026-06-23.
+    #[test]
+    fn full_voice_brr_pcm_golden() {
+        let out = full_voice_brr_output();
+        // Sustains audio after the ~8-sample key-on ramp (guards a silent setup).
+        let nonzero = out.iter().filter(|(l, r)| *l != 0 || *r != 0).count();
+        assert!(
+            nonzero >= 40,
+            "voice should sustain audio; nonzero={nonzero}"
+        );
+        // Pinned samples (L == R since L/R volumes are equal).
+        assert_eq!(out[10], (8006, 8006));
+        assert_eq!(out[30], (-10591, -10591));
+        assert_eq!(out[63], (-10533, -10533));
+    }
 }
