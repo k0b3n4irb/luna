@@ -52,8 +52,8 @@ faithful `nmiLine`.
 ## Phased plan
 
 ```
-P0  Delivery-timing differential harness      (KEYSTONE; no behavior change; de-risks all of P1–P4)
-P1  Faithful nmiLine model ($4210/RDNMI)       (PREREQUISITE — the SMRPG black-screen gate)
+P0  Delivery-timing differential harness      ✅ DONE (#38) — N/I markers + mesen-irq-trace.lua
+P1  Faithful nmiLine model ($4210/RDNMI)       ✅ DONE — nmi_flag cleared at VBlank end; SMRPG clean
      ├─ P2  nmitimenUpdate late-NMI-enable      (unlocked by P1)
      └─ P3  Per-access interrupt polling (CPU edge→level)
 P4  Remaining HDMA/timer delivery edges ($4211 hold, field guard, htime delay)
@@ -79,7 +79,15 @@ are independent and parallelizable once P0 exists.
 - **Files:** `tools/mesen-wram-hash.lua` (template), `crates/luna-cli/src/main.rs`,
   `crates/luna-core/src/snes.rs`, `crates/luna-core/tests/`.
 
-### P1 — Faithful `nmiLine` (HIGH risk, the tripwire)
+### P1 — Faithful `nmiLine` ✅ DONE (HIGH risk, the tripwire — landed clean)
+Implemented the core: `nmi_flag` (= ares `nmiLine`) is now cleared at VBlank end
+(the frame wrap), not only on a `$4210` read, matching ares irq.cpp
+`nmiLine = nmiValid`. Validated: goldens 88/0, SMRPG intro renders (no black
+screen), SMRPG name-entry reaches gameplay (nmis 5699, 89%), and the P0 trace
+confirms `$4210` now reads bit7=1 in VBlank / 0 outside (was stale-true). This
+unblocks P2 (late-NMI-enable) without the spurious-NMI tripwire.
+
+Original scope note:
 - Replace `cpu_regs.nmi_flag` (cleared only on `$4210` read) with an ares
   `nmiLine`: set at VBlank entry, **cleared at VBlank end**, with the RDNMI hold
   window. Stage as a shadow field asserted-equal first, then flip the clear
