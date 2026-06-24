@@ -76,13 +76,13 @@ the chip clears r4801.bit(n) and re-arms `dmaReady` when size hits 0.
 ### luna integration note (this is where luna differs from the canonical hardware structure)
 
 In luna, `$4300-437F` writes go to the **DMA controller**, not the mapper, and
-`mapper.read()` serves both CPU reads and DMA A-bus reads (via
-`DmaBusView::read_a`). So to port the reference faithfully, luna must **forward
-`$43xx` writes to the S-DD1 mapper** (in addition to the DMA controller) so it
-can capture `dma[n].address/size`. `$4800-480F` already reaches
-`mapper.read/write` (CPU fall-through). Then the `mcuRead` logic ports verbatim:
-`mapper.read(addr)` matches `addr == dma[n].address` with `r4800 & r4801`
-armed → decompress.
+the mapper's read path serves both CPU reads and DMA A-bus reads. So to port
+the reference faithfully, luna must **forward `$43xx` writes to the S-DD1
+mapper** (in addition to the DMA controller) so it can capture each channel's
+DMA address and size. `$4800-480F` already reaches the mapper (CPU
+fall-through). Then the armed-DMA read logic ports verbatim: a mapper read at
+`addr` that matches a channel's DMA address, with `r4800 & r4801` armed,
+triggers decompression.
 
 Detection: chipset byte `$FFD6` — `(chipset & 0x0F) >= 0x03 && (chipset & 0xF0)
 == 0x40` (S-DD1 = coprocessor high-nibble **4**; cf. SuperFX=1, DSP=0, SA-1=3).

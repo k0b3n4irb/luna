@@ -35,20 +35,17 @@ The hardware uses per-opcode cycle costs, charged per-instruction in the dispatc
 
 The full table must be wired from a canonical source.
 
-**luna status: DONE.** The per-opcode table is
-`luna-cpu-spc700/src/cycles.rs` `SPC700_CYCLES[256]` (real 2..12 costs,
-not flat). `Spc700::step` (`opcodes.rs:44`) charges
-`SPC700_CYCLES[opcode]`, and `Apu::step` (`luna-apu/src/lib.rs:377-380`)
-feeds the returned per-instruction cost straight into `tick_timers` /
-`tick_voices` — so timer tempo and DSP sample rate track real cycle
-counts. The old "flat 4 cycles" approximation is gone.
+**luna status: DONE.** A per-opcode table holds the real 2..12 costs
+(not flat). The SPC700 dispatcher charges the per-opcode cost for each
+instruction, and the APU feeds the returned per-instruction cost straight
+into the timer and voice ticking — so timer tempo and DSP sample rate
+track real cycle counts. The old "flat 4 cycles" approximation is gone.
 
-**Branch-taken `+2` penalty: also DONE.** `cycles.rs`
-`SPC700_BRANCH_TAKEN_PENALTY = 2` is added in `opcodes.rs:46-47` when
-`self.branch_taken` is set (BRA / Bcc / CBNE / DBNZ / BBS / BBC set it
-at the branch sites). The base table lists the *not-taken* cost; the
-taken idle is added on top. This was the last open SPC700 cycle gap in
-the scorecard and it is now closed (test `branch_taken_penalty_is_applied`).
+**Branch-taken `+2` penalty: also DONE.** A branch-taken penalty of 2
+cycles is added when a branch is taken (BRA / Bcc / CBNE / DBNZ / BBS /
+BBC set the branch-taken flag at the branch sites). The base table lists
+the *not-taken* cost; the taken idle is added on top. This was the last
+open SPC700 cycle gap and it is now closed.
 
 ## 3. SPC700 ↔ DSP timing
 
@@ -81,15 +78,13 @@ if gaussianOffset >= 0x8000:  // BRR-advance bit
 
 The **BRR advance threshold is 0x8000** (= bit 15). The low 12 bits form the gaussian interpolation phase (256-entry table indexed by `(gaussianOffset >> 4) & 0xFF` essentially).
 
-**luna status: CORRECT.** The live DSP (`luna-apu/src/dsp.rs`) follows
-the hardware-reference formulation, where `gaussian_offset` is masked to
-`0x3FFF` and the BRR-advance test is `>= 0x4000`. `voice4` (`dsp.rs:732`)
-decodes the next BRR group when `gaussian_offset >= 0x4000`, then advances
-`(gaussian_offset & 0x3FFF) + latch.pitch` (`dsp.rs:744-750`). This is
-one equivalent form of the `>= 0x8000`/`-= 0x4000` formulation above (both
-are equivalent: the BRR-advance bit is carried at 0x4000 over a
-0x3FFF-masked accumulator). The old `0x1000`-threshold bug lived in
-now-deleted legacy DSP code in `lib.rs`; it is not the live path.
+**luna status: CORRECT.** The live DSP follows the hardware-reference
+formulation, where `gaussian_offset` is masked to `0x3FFF` and the
+BRR-advance test is `>= 0x4000`. The voice pipeline decodes the next BRR
+group when `gaussian_offset >= 0x4000`, then advances
+`(gaussian_offset & 0x3FFF) + pitch`. This is one equivalent form of the
+`>= 0x8000`/`-= 0x4000` formulation above (both are equivalent: the
+BRR-advance bit is carried at 0x4000 over a 0x3FFF-masked accumulator).
 
 ### KON 5-sample delay
 
@@ -118,10 +113,7 @@ if range <= 12:
     raw = (nibble << range) >> 1     // ← THE HALF-SHIFT
 else:
     raw = (nibble >> 3) << 11         // sign-preserve + drop magnitude
-                                       // luna: `s32_s &= !0x7FF` on the
-                                       // sign-extended sample (dsp.rs:581) —
-                                       // hardware-accurate (keeps sign, drops
-                                       // low 11 bits). Correct.
+                                       // (keeps sign, drops the low 11 bits)
 
 p1 = buffer[offset-1] >> 1   // ← FIVE !! the previous samples are read HALVED
 p2 = buffer[offset-2] >> 1
@@ -137,18 +129,12 @@ s = (i16)(s << 1)          // ← FINAL SHIFT-LEFT with i16 wrap (not saturate!)
 buffer[offset] = s          // store as doubled, will be halved on next read
 ```
 
-**luna status: CORRECT.** `Dsp::brr_decode` (`luna-apu/src/dsp.rs:557`)
-implements all three:
-1. The post-decode half-shift: `s32_s <<= scale; s32_s >>= 1` (`dsp.rs:578-579`),
-   with the `scale > 12` clamp path `s32_s &= !0x7FF` (`dsp.rs:581`).
-2. The history half-shift on `p2` (`dsp.rs:593`, `>> 1`) and the
-   filter-internal `p1 >> 1` (e.g. filter 1, `dsp.rs:598`) — matching
-   the hardware BRR decoder.
-3. The final wrap-truncate: `let stored = (s32_s << 1) as i16` after
-   `sclamp16` (`dsp.rs:616-617`).
-
-The old missing-half-shift bug lived in legacy DSP code in `lib.rs` that
-has since been deleted; it is not the live path.
+**luna status: CORRECT.** The BRR decoder implements all three:
+1. The post-decode half-shift: `s <<= scale; s >>= 1`, with the
+   `scale > 12` clamp path `s &= !0x7FF`.
+2. The history half-shift on `p2` (`>> 1`) and the filter-internal
+   `p1 >> 1` (e.g. filter 1) — matching the hardware BRR decoder.
+3. The final wrap-truncate: `(s << 1) as i16` after the 15-bit clamp.
 
 The buffer holds **12 samples** (4 per BRR row × 3 most recent rows) so the 4-tap gaussian can read across 2 row boundaries.
 
@@ -187,20 +173,13 @@ When active, the envelope steps according to its current phase:
 - **Release**: env -= 8 (fast-release / forced-release path)
 - **Direct gain**: per the 4 gain modes (lin+, lin-, exp+, exp-)
 
-**luna status: CORRECT.** The live envelope is `Dsp::envelope_run` /
-`envelope_finish` (`luna-apu/src/dsp.rs:476-553`), a faithful hardware port:
-- Global counter via `counter_poll` (`dsp.rs:444`) using the
-  `COUNTER_RATE` / `COUNTER_OFFSET` tables (`dsp.rs:255,260`) — the
-  `(counter + OFFSET[rate]) % RATE[rate] == 0` test, exactly the
-  mechanism in §6 above. The `voice_age % period` hack is gone.
-- Attack uses `2*Ar+1` (`(bits(adsr0,0,3))*2 + 1`, `dsp.rs:504`), and
-  Decay uses `2*Dr+16` (`dsp.rs:497`).
-- All four phases + the four GAIN modes (`dsp.rs:508-529`) are
-  implemented with the rate-gated step.
-
-The old `voice_age % period` / hardcoded-`-8`-Release model lived in
-legacy DSP code in `lib.rs` (`AdsrPhase` / `ADSR_RATE_PERIODS`) that has
-since been **deleted**; it was never the live path.
+**luna status: CORRECT.** The live envelope is a faithful hardware port:
+- Global counter polling uses the counter-rate / counter-offset tables —
+  the `(counter + OFFSET[rate]) % RATE[rate] == 0` test, exactly the
+  mechanism in §6 above.
+- Attack uses `2*Ar+1`, and Decay uses `2*Dr+16`.
+- All four phases + the four GAIN modes are implemented with the
+  rate-gated step.
 
 ## 7. Gaussian interpolation
 
@@ -217,12 +196,9 @@ s = saturating_add(s, (TABLE[frac] * sample_0) >> 11)
 s = clamp15(s) & ~1                     // bit-0 clear
 ```
 
-luna implements this in the live DSP as `Dsp::gaussian_interpolate`
-(`luna-apu/src/dsp.rs:455`) — the 3-tap `>>11` accumulate, the
-`i32::from(output as i16)` partial-sum wrap (`dsp.rs:469`), and the
-final `sclamp16(output) & !1` (`dsp.rs:471`). **Correct**, matching the
-hardware gaussian interpolation. ✓ (The old `lib.rs` gaussian/counter
-duplicate tables were dead-but-identical and have since been deleted.)
+luna implements this in the live DSP — the 3-tap `>>11` accumulate, the
+`(output as i16)` partial-sum wrap, and the final `clamp16(output) & !1`.
+**Correct**, matching the hardware gaussian interpolation. ✓
 
 ## 8. Echo (8-tap FIR + delay line)
 
@@ -253,14 +229,12 @@ echo_in_r = read 16-bit signed from APURAM[ESA*256 + echo_offset*4 + 2..3]
 // Output: voice_sum_l + (fir_l * EVOLL) >> 7  →  apply MVOLL  →  clamp/output
 ```
 
-**luna status: CORRECT.** The live echo path is in `dsp.rs` (a faithful
-hardware port): `echo_read` stores history halved (`s >> 1`,
-`dsp.rs:810`), `calculate_fir` does the `>> 6` per-tap (`dsp.rs:795`),
-and `echo25` (`dsp.rs:849`) implements the staged clamp protocol — taps
-0..5 accumulate freely, tap 6 truncates via `i32::from(.. as i16)`, tap
-7 clamps with `sclamp16` and clears bit 0 (`& !1`). Feedback write is
-gated by `echo._readonly` (`echo_write`, `dsp.rs:814`). The old
-partial `process_echo` in `lib.rs` is gone.
+**luna status: CORRECT.** The live echo path is a faithful hardware
+port: history is stored halved (`s >> 1`), the FIR does the `>> 6`
+per-tap, and the staged clamp protocol is implemented — taps 0..5
+accumulate freely, tap 6 truncates via an `i16` cast, tap 7 clamps to
+16 bits and clears bit 0 (`& !1`). The feedback write is gated by the
+echo read-only flag.
 
 ## 9. KON / KOFF / ENDX (double-buffered)
 
@@ -269,18 +243,16 @@ partial `process_echo` in `lib.rs` is gone.
 - `$7C ENDX` — read-only mirror of "voice hit end-of-BRR-block-with-end-bit-set". Double-buffered: written at cycle 29-30, becomes visible the NEXT sample. Music drivers poll ENDX to know when a voice has completed.
 
 **luna status: CORRECT.** The live DSP implements the full 5-step KON
-delay and the ENDX timing in `dsp.rs`:
+delay and the ENDX timing:
 - On a KON edge at the sample boundary, `keyon_delay = 5` and the mode
-  enters Attack (`voice3c`, `dsp.rs:719-722`). During the countdown the
-  envelope is forced to 0, `gaussian_offset` is held at `0x4000` for the
-  interpolated-silence samples and 0 on the load sample, and real
-  playback (BRR start-address load from the directory) begins at delay 5
-  → 0 (`dsp.rs:679-696`).
-- ENDX is the per-voice `_end` bit OR'd into `registers[0x7C]` in
-  `voice7` (`dsp.rs:768-776`), with the cycle-29/30 staging emulated by
-  the pipeline split (`voice5` sets `_end` from `_looped`, clears it when
-  `keyon_delay == 5`, `dsp.rs:755-762`). This is the hardware ENDX
-  double-buffer behaviour, not a synchronous shortcut.
+  enters Attack. During the countdown the envelope is forced to 0,
+  `gaussian_offset` is held at `0x4000` for the interpolated-silence
+  samples and 0 on the load sample, and real playback (BRR start-address
+  load from the directory) begins at delay 5 → 0.
+- ENDX is the per-voice end bit OR'd into the `$7C` register, with the
+  cycle-29/30 staging emulated by the pipeline split (the end bit is set
+  from the looped flag and cleared when `keyon_delay == 5`). This is the
+  hardware ENDX double-buffer behaviour, not a synchronous shortcut.
 
 ## 10. Reset state
 

@@ -45,13 +45,10 @@ AI plays, a human watches), or **headless** (driven over MCP, for CI and agents)
 
 ## 📖 Documentation
 
-Everything — installing, the controls, saves, the CLI / API / MCP surface, and
-how each subsystem works — lives in the guide. This README is just the porch.
+Install, controls, the CLI / API / MCP surface, and how every subsystem works —
+it's all in the guide:
 
-### **→ [k0b3n4irb.github.io/luna](https://k0b3n4irb.github.io/luna/)**
-
-The generated Rust **[API reference](https://k0b3n4irb.github.io/luna/api/)**
-covers all twelve crates.
+### 📖 **[k0b3n4irb.github.io/luna](https://k0b3n4irb.github.io/luna/)**  ·  📚 **[API reference](https://k0b3n4irb.github.io/luna/api/)**
 
 ## 🙏 Acknowledgements
 

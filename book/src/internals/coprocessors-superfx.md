@@ -4,11 +4,10 @@ Diff target for the luna Rust port. This is the faithful-port reference for
 luna's GSU: every claim describes hardware-accurate behaviour, verified against
 the hardware reference.
 
-The GSU core (`struct GSU`) is the abstract CPU; the SoC wrapper
-(`struct SuperFX : GSU, Thread`) supplies the virtuals
-(`step/read/write/plot/rpix/pipe/...`). luna should mirror this split: a pure GSU
-instruction engine + a SuperFX glue layer that owns the memory map, timing, MMIO,
-and SNES handshake.
+The GSU core is the abstract CPU; a SoC wrapper supplies the system glue
+(stepping, memory reads/writes, the pixel-plot path, the operand pipeline).
+luna mirrors this split: a pure GSU instruction engine plus a SuperFX glue
+layer that owns the memory map, timing, MMIO, and SNES handshake.
 
 ---
 
@@ -375,7 +374,7 @@ Implement by condition, ignore the mnemonic dispute.
 
 ## 3. Memory map & bus
 
-### 3.1 GSU-side view (`SuperFX::read/write`)
+### 3.1 GSU-side view
 
 The GSU's data bus decodes the 24-bit address:
 
@@ -564,8 +563,7 @@ cost is `clsr ? fast : slow`. The two base values are **F=5 / S=6** for memory c
    `romdr = read((rombr<<16)+r14)`.
 2. Service pending RAM write: `ramcl -= min(clocks,ramcl)`; when 0, `write(0x700000 +
    (rambr<<16) + ramar, ramdr)`.
-3. `Thread::step(clocks); Thread::synchronize(cpu)` — advance the coprocessor clock and
-   re-sync to the SNES.
+3. Advance the coprocessor clock by `clocks` and re-synchronise to the SNES.
 
 (Equivalently: accumulate the cycle count, decrement RomDelay/RamDelay, fire the buffered
 ROM read / RAM write on reaching 0.)
@@ -604,8 +602,8 @@ explicit `step()`:
 
 ### 6.5 Lockstep with the SNES CPU
 
-The SuperFX is a `Thread`; every `step()` ends with `Thread::synchronize(cpu)`, and the
-GSU's `main()` loop runs one instruction per dispatch, idling `step(6)` per call when
+The SuperFX runs as a cooperative thread; every `step()` ends by re-synchronising to the
+SNES CPU, and the GSU's main loop runs one instruction per dispatch, idling `step(6)` per call when
 `sfr.g==0`. Any SNES MMIO access calls `cpu.synchronize(*this)` first to align clocks
 before touching state. A catch-up driver is equivalent: execute until
 `CycleCount >= masterClock*clockMultiplier`, then a final Step to align. luna's existing

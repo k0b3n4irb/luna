@@ -1,61 +1,42 @@
-# SA-1 status
+# SA-1
 
-Snapshot: 2026-05-27. SA-1 ROMs now run end-to-end in luna — the
-chip-side 65C816 instance, shared IRAM, B-bus mapping, DMA catch-up
-during main-CPU bursts, and the PPU read path all agree with the
-hardware reference.
+The SA-1 is the most powerful of the SNES cartridge coprocessors: a
+second 65C816 — the same CPU as the console's main processor, but
+clocked roughly three times faster — placed on the cartridge alongside
+fast on-chip RAM and a set of hardware accelerators. Games such as
+Super Mario RPG, Kirby Super Star, and Kirby's Dream Land 3 use it to
+offload work the main CPU could not do in time: bulk decompression,
+sprite and character-data transforms, arithmetic (multiply / divide /
+cumulative-sum), and bitmap/character-conversion helpers.
 
-## Reference reproducer
+## What the chip provides
 
-opensnes ships an SA-1 starfield demo that the chip computes 128 dot
-positions per frame for via a sine-table loop. luna now renders the
-full murmuration (~128 white dots on a deep-blue field), matching
-the expected hardware output:
+- **A second 65C816 core** running from the same cartridge ROM, able to
+  execute its own program in parallel with the main CPU.
+- **Internal work RAM (IRAM)** shared between the two processors, plus a
+  banked view of the cartridge's battery-backed RAM (BW-RAM), with
+  per-side banking so each processor can address a different bank.
+- **A DMA unit** for moving and reformatting data, including a
+  character-conversion mode that repacks linear bitmap data into the
+  SNES planar tile format.
+- **Arithmetic accelerators** (signed/unsigned multiply, divide, and a
+  running cumulative-sum register) the main CPU reads back through MMIO.
+- **Memory-protection registers** that arbitrate which processor owns
+  which region, so the two cores do not corrupt each other's working
+  set.
 
-```bash
-./target/release/luna state -n 100000000 \
-    --screenshot /tmp/sa1_starfield.png \
-    /home/k0b3n4irb/workspace/opensnes/examples/memory/sa1_starfield/sa1_starfield.sfc
-```
+## How luna implements it
 
-## What was fixed
+luna models the SA-1 as a chip-side 65C816 instance driven by a
+cooperative scheduler alongside the main CPU: the two cores advance in
+lockstep at bus-access granularity, so neither runs ahead of the other.
+The shared IRAM, the per-side BW-RAM banking, the B-bus register window
+(`$2200-$23FF`), the arithmetic units, and the DMA path — including the
+character-conversion mode — are all present. During long main-CPU DMA
+bursts the SA-1 is stepped per byte transferred, so it never sees a
+frozen timeline while the bus is held.
 
-Two independent bugs were uncovered by the starfield reproducer:
-
-1. **OAM peek mask was bit-AND not modulo** (commit `4632488`).
-   `Oam::peek/poke/read` used `data[addr & 0x21F]` where `0x21F` is
-   the ring SIZE (544 = 0x220 in exclusive, 0x21F inclusive), not a
-   wrap mask. Since 0x21F bit-patterns to `bits 0..4 + bit 9`, any
-   `addr` in `32..0x1FF` lost its bit-5+ entropy and aliased back
-   into the first 32 bytes. Visible effect: sprites 8..15 rendered
-   with sprite 0..7's bytes, sprites 16..23 with sprite 0..7's, etc.
-   — a clean 32-byte sprite wrap.
-2. **DMA bursts didn't catch the coprocessor up between bytes**
-   (commit `2b8ab8e`). `DmaChannel::run` held the bus for the full
-   transfer (up to ~262k mclks) without stepping the SA-1. Now
-   `DmaBus::tick(8)` runs per byte transferred, matching the hardware's
-   per-byte coprocessor synchronization.
-
-Bug #1 was the visible cause of the starfield collapse. Bug #2 is
-architecturally correct independent of #1 — without it the SA-1
-sees a frozen timeline during long DMAs.
-
-## Deliberate deviations from the hardware reference
-
-- **CIWP/SIWP reset defaults** (`luna-bus/src/sa1.rs:355-373`). The
-  hardware reference resets both protections to `0x00` (block-all);
-  luna ships `0xFF` (allow-all). Attempted to switch to the reference
-  defaults on 2026-05-27 and the opensnes sa1_starfield demo went black
-  in luna-gui — its `sa1_boot.asm` writes `CIWP = $FF` but never touches
-  `SIWP`, so it depends on the open default. The 0xFF deviation is
-  the practical choice until we hit a real cart that probes the
-  reset state.
-
-## Related notes
-
-- The cooperative scheduler, CIWP/SIWP reset behaviour, the SA-1 `Run()`
-  cadence, and the per-byte DMA interleave are all modelled on the
-  hardware reference.
-- The `.claude/rules/reference-first.md` rule lists the running tally
-  of bit-layout / mask bugs that secondary docs missed but the canonical
-  hardware behaviour caught.
+The implementation follows the hardware reference for register layout,
+the memory-protection semantics, and the run cadence. You can observe
+the SA-1's MMIO traffic live with `luna state --sa1-log <path>`, which
+records every access in the `$2200-$23FF` window.
