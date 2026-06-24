@@ -1,0 +1,64 @@
+name: docs
+
+# Builds the mdBook guide + the rustdoc API reference and publishes the
+# combined site to the gh-pages branch (guide at /, API under /api).
+
+on:
+  push:
+    branches: [develop, main]
+    paths:
+      - "book/**"
+      - "crates/**/*.rs"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: docs-pages
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: "0.4.40"
+
+      - name: Build the guide
+        run: mdbook build book
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: System deps (libasound for the workspace)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - name: Build the rustdoc API reference
+        run: cargo doc --workspace --no-deps
+
+      - name: Assemble the site (guide at /, API under /api)
+        run: |
+          mkdir -p public
+          cp -r book/book/* public/
+          mkdir -p public/api
+          cp -r target/doc/* public/api/
+          # /api lands on the public-contract crate.
+          printf '<!doctype html><meta http-equiv="refresh" content="0; url=luna_api/index.html">' > public/api/index.html
+          touch public/.nojekyll
+
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
+          publish_branch: gh-pages
+          force_orphan: true
