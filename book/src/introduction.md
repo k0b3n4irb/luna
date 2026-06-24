@@ -11,10 +11,10 @@ registers, VRAM, OAM, palette, sprites, memory — is exposed as structured,
 serializable snapshots, and a built-in **MCP server** lets an agent drive the
 console over JSON-RPC to *play*, *build homebrew*, or *debug ROM hacks*.
 
-And it does not trade away fidelity to get there. Both CPU cores pass the
-SingleStepTests suites 100%, and every subsystem is a **faithful port of
-[ares](https://ares-emu.net/) and [Mesen2](https://github.com/SourMesen/Mesen2)** —
-verified, where it matters, by a headless differential against those references.
+And it does not trade away fidelity to get there. Both CPU cores pass their
+exhaustive per-instruction test suites 100%, and every subsystem is a **faithful
+reconstruction of the real hardware** — verified, where it matters, by a headless
+differential against a reference emulator.
 
 ## How this guide is organised
 
@@ -27,9 +27,9 @@ verified, where it matters, by a headless differential against those references.
   coprocessors). Start here if you want to *understand or hack on* Luna.
 
 - **[The Faithful-Port Method](method/faithful-port.md)** — the heart of the
-  project: why Luna is translated from ares/Mesen2 rather than invented, the
-  self-contained differential harness that proves it, the accuracy scorecard,
-  and the road to grade "A" everywhere.
+  project: why Luna is translated from the hardware references rather than
+  invented, the self-contained differential harness that proves it, the accuracy
+  scorecard, and the road to grade "A" everywhere.
 
 - **[API reference (rustdoc) ↗](api/index.html)** — the generated Rust API docs
   for all twelve crates.
@@ -39,7 +39,7 @@ verified, where it matters, by a headless differential against those references.
 | | |
 |---|---|
 | **Language** | Rust (2024 edition) |
-| **Cores** | 65C816 + SPC700 (SingleStepTests 100%), S-DSP audio |
+| **Cores** | 65C816 + SPC700 (per-instruction suites 100%), S-DSP audio |
 | **Coprocessors** | SA-1, Super FX (GSU), DSP-1, S-DD1 |
 | **Front-ends** | GUI debugger (winit + wgpu), headless CLI, MCP server |
 | **Platform** | Linux (macOS / Windows may build, unsupported) |

@@ -14,13 +14,15 @@ the per-mapper shims that translate a SNES address into a physical location:
 | **SA-1** | the SA-1 coprocessor board |
 
 Mapper detection scores the ROM header (reset-vector validity, opcode
-plausibility, checksum, map-mode/offset agreement) the way ares does, and the
-highest-scoring layout wins. Unmapped or write-only reads return the **open-bus**
-value (the last byte the data bus carried), latched in the MDR.
+plausibility, checksum, map-mode/offset agreement) the way the hardware
+reference does, and the highest-scoring layout wins. Unmapped or write-only
+reads return the **open-bus** value (the last byte the data bus carried),
+latched in the MDR.
 
-Access timing follows ares' `CPU::wait`: `$2000–$3FFF` and `$4200–$5FFF` are
-fast (6 master cycles), `$4000–$41FF` (the joypad ports) is extra-slow (12),
-and FastROM (`$80–$FF` at `$8000–$FFFF`) drops from 8 to 6 when enabled.
+Access timing follows the hardware's bus-wait behaviour: `$2000–$3FFF` and
+`$4200–$5FFF` are fast (6 master cycles), `$4000–$41FF` (the joypad ports) is
+extra-slow (12), and FastROM (`$80–$FF` at `$8000–$FFFF`) drops from 8 to 6 when
+enabled.
 
 ## DMA & HDMA
 
@@ -32,6 +34,6 @@ status bars.
 
 HDMA is a [pillar subsystem](../method/faithful-port.md): it is shared by every
 game and has been the source of repeated game-specific rendering bugs, so it is
-held to a living, line-by-line audit against ares' `dma.cpp` — covering the
-edge cases (count-0 line headers, mid-frame enable, indirect addressing, the
+held to a living, line-by-line audit against the hardware reference — covering
+the edge cases (count-0 line headers, mid-frame enable, indirect addressing, the
 transfer-mode patterns) that the golden test suite alone does not reach.

@@ -7,23 +7,23 @@ faithfully, without big-bang rewrites.
 ## The headline finding — re-scope before building
 
 The two scary "architectural rewrites" everyone assumes this needs are
-**mostly already done** in luna. Building either as a literal ares port would
-re-do finished work and risk regressions against a faithful baseline. Per the
-repo's own code + ground-truth docs:
+**mostly already done** in luna. Building either as a literal hardware-reference
+port would re-do finished work and risk regressions against a faithful baseline.
+Per the repo's own code + ground-truth docs:
 
-1. **Cooperative cothread scheduler — the *grammar* is already ported (no libco).**
+1. **Cooperative cothread scheduler — the *grammar* is already ported (no cothreads).**
    `cycle_accuracy_plan.md` §4 deliberately chose a **CPU-driven** model with
    `io_cycle`/`advance_time` as the per-access synchronization point (Phases 1–5
    landed). The CPU↔SPC interleave is **cycle-exact at bus-access granularity**
-   (`Apu::run_to_target`, a Mesen2 `Spc::Run` port — resumable, one access at a
-   time). `cooperative_scheduler_reference.md` concludes a global libco rewrite
-   is "unnecessary and Rust-hostile." **→ Do NOT port libco.**
+   (`Apu::run_to_target` — resumable, one access at a time).
+   `cooperative_scheduler_reference.md` concludes a global cothread rewrite
+   is "unnecessary and Rust-hostile." **→ Do NOT port a cothread scheduler.**
 
 2. **Per-dot PPU renderer — already a lazy sub-range renderer; dot-276 is resolved.**
    luna renders lazily per dot-range (`ppu.rs` `flush_partial_scanline`,
    `last_flushed_dot`): a mid-line `$2100-$2133` write commits `[last_flushed,
    dot)` with the *old* register state first, so the visible region already gets
-   dot-precise mid-line latching. `hdma_ares_audit.md` (2026-06-20) **closes**
+   dot-precise mid-line latching. `hdma_audit.md` (2026-06-20) **closes**
    dot-276 HDMA: dot 276 is in HBlank past the 256 visible dots, so a line's
    HDMA only affects the *next* line — which `sched_one_line` already does. All
    58 goldens render correctly. **→ Do NOT rewrite the renderer.**
@@ -38,7 +38,7 @@ gap first and they become tractable.
 
 | Subsystem | Grade | The "−" (precise) | Class |
 |---|:--:|---|:--:|
-| 65c816 | A− | Interrupt taken at instruction *boundary*, not the per-access poll point; 2/5.08M Tom Harte `cycles[]` edge fails | delivery-timing |
+| 65c816 | A− | Interrupt taken at instruction *boundary*, not the per-access poll point; 2/5.08M per-instruction `cycles[]` edge fails | delivery-timing |
 | SPC700 | A− | Cycle model complete; "−" is residual *confidence* (breadth), not a known defect | validation |
 | PPU | A− | Feature edges (EXTBG / offset-per-tile / mosaic / interlace vertical-doubling) + hi-res sub-subpixel color-math (documented approximation) | feature |
 | SA-1 | A− | `conflict()` contention landed 2026-06-20; "−" is corpus-validation breadth + small `luna_sa1_gaps.md` rows | feature + validation |
@@ -52,10 +52,10 @@ faithful `nmiLine`.
 ## Phased plan
 
 ```
-P0  Delivery-timing differential harness      ✅ DONE (#38) — N/I markers + mesen-irq-trace.lua
+P0  Delivery-timing differential harness      ✅ DONE (#38) — N/I markers + reference IRQ trace
 P1  Faithful nmiLine model ($4210/RDNMI)       ✅ DONE — nmi_flag cleared at VBlank end; SMRPG clean
      ├─ P2  nmitimenUpdate late-NMI-enable      ✅ DONE — fires only with nmiLine asserted; unit-tested
-     └─ P3  Per-access interrupt polling (CPU edge→level)   ✅ DIFFERENTIAL DONE — luna matches Mesen; no fix needed
+     └─ P3  Per-access interrupt polling (CPU edge→level)   ✅ DIFFERENTIAL DONE — luna matches the reference; no fix needed
 P4  Remaining HDMA/timer delivery edges ($4211 hold, field guard, htime delay)
 P5  SA-1 conflict() contention breadth + gap rows     (independent; parallel after P0)
 P6  PPU feature completeness (EXTBG / OPT / mosaic / interlace doubling)   (independent)
@@ -69,32 +69,32 @@ delivery-timing item (P2/P3/P4) is rooted there. P5/P6 and the Tier-0/1 fixes
 are independent and parallelizable once P0 exists.
 
 ### P0 — Delivery-timing differential harness (FIRST step)
-- **What:** a Mesen `--testRunner` Lua trace of per-frame `$4210`/`$4211` read
-  values + timing, NMI/IRQ vector-fetch dot positions, HVBJOY transitions; a
+- **What:** a reference-emulator headless Lua trace of per-frame `$4210`/`$4211`
+  read values + timing, NMI/IRQ vector-fetch dot positions, HVBJOY transitions; a
   matching luna CLI trace (extend `MemTraceLog`/`CpuTraceLog` with an
   interrupt-delivery event, reuse `--mem-trace` `$4200-$421F` filtering); a diff
   test modeled on `tests/spc_trajectory.rs`.
 - **Risk:** none — read-only, zero emulation change. Converts the four
   "GUI-only" deferrals into bisectable diffs. **Highest leverage in the plan.**
-- **Files:** `tools/mesen-wram-hash.lua` (template), `crates/luna-cli/src/main.rs`,
+- **Files:** the reference-trace Lua template, `crates/luna-cli/src/main.rs`,
   `crates/luna-core/src/snes.rs`, `crates/luna-core/tests/`.
 
 ### P1 — Faithful `nmiLine` ✅ DONE (HIGH risk, the tripwire — landed clean)
-Implemented the core: `nmi_flag` (= ares `nmiLine`) is now cleared at VBlank end
-(the frame wrap), not only on a `$4210` read, matching ares irq.cpp
+Implemented the core: `nmi_flag` (= the hardware `nmiLine`) is now cleared at
+VBlank end (the frame wrap), not only on a `$4210` read, matching the hardware's
 `nmiLine = nmiValid`. Validated: goldens 88/0, SMRPG intro renders (no black
 screen), SMRPG name-entry reaches gameplay (nmis 5699, 89%), and the P0 trace
 confirms `$4210` now reads bit7=1 in VBlank / 0 outside (was stale-true). This
 unblocks P2 (late-NMI-enable) without the spurious-NMI tripwire.
 
 Original scope note:
-- Replace `cpu_regs.nmi_flag` (cleared only on `$4210` read) with an ares
+- Replace `cpu_regs.nmi_flag` (cleared only on `$4210` read) with a hardware
   `nmiLine`: set at VBlank entry, **cleared at VBlank end**, with the RDNMI hold
   window. Stage as a shadow field asserted-equal first, then flip the clear
   point behind the SMRPG-intro NMI-count assertion, then remove the old field.
-- **Validate:** P0 diff vs Mesen over SMRPG intro + SMW; SMRPG name-entry smoke;
-  58 goldens unchanged. **Files:** `cpu_regs.rs`, `snes.rs` (`sched_one_line`,
-  `$4210` path).
+- **Validate:** P0 diff against the reference over SMRPG intro + SMW; SMRPG
+  name-entry smoke; 58 goldens unchanged. **Files:** `cpu_regs.rs`, `snes.rs`
+  (`sched_one_line`, `$4210` path).
 
 ### P2 — `nmitimenUpdate` late-NMI-enable (MEDIUM, was HIGH pre-P1)
 - Enabling `NMITIMEN.7` mid-VBlank with the faithful `nmiLine` asserted fires
@@ -103,11 +103,11 @@ Original scope note:
   spurious NMIs. **Files:** `cpu_regs.rs`, `snes.rs`.
 
 ### P3 — Per-access interrupt polling ✅ DIFFERENTIAL CONFIRMS CORRECTNESS
-**Key enabler found 2026-06-23: Mesen2 runs HEADLESS** via `--testRunner`, so the
+**Key enabler found 2026-06-23: the reference emulator runs HEADLESS**, so the
 delivery-timing differential is **fully self-contained** — no need to ask the
-user to run anything. Ran it on Doom (`tools/mesen-irq-trace.lua` → Mesen ref;
-`--until-frame 300 --mem-trace FFEA:FFEA` → luna NMI vector fetches;
-`tools/irq-trace-diff.py` → compare). Result: **luna matches Mesen** — same ~47
+user to run anything. Ran it on Doom (the reference IRQ-trace script → reference
+trace; `--until-frame 300 --mem-trace FFEA:FFEA` → luna NMI vector fetches; a
+trace-diff script → compare). Result: **luna matches the reference** — same ~47
 NMI deliveries over 300 frames, same ~357366-clock inter-NMI cadence + jitter
 distribution. luna's instruction-atomic interrupt model is **cycle-correct at the
 observable level**; the precise sub-cycle position is below this measurement's
@@ -115,20 +115,20 @@ floor (the `$FFEA` vector-table ROM-read pollution). So the per-access poll is a
 theoretical refinement, **not an observable fix** — P3 needs no code change. The
 faithful-port method *confirmed* luna here rather than refuting it. The reusable
 self-contained harness is the deliverable; future interrupt-timing changes can be
-validated against Mesen autonomously.
+validated against the reference autonomously.
 
 Original scope note (kept for reference):
 - Move NMI/IRQ *sampling* from the instruction boundary into
   `io_cycle`/`advance_time` (the level inputs already flow through
   `set_irq_line`). NMI first, then verify IRQ unchanged.
-- **Validate:** Tom Harte `cycles[]` oracle (the 2/5.08M fails are candidates to
-  close); Doom letterbox raster (the level-IRQ fix must NOT regress).
-  **Files:** `snes.rs` (`step`, `advance_time`, `poll_hv_irq`),
-  `cpu-65c816/src/opcodes.rs`, `cpu-65c816/tests/tom_harte.rs`.
+- **Validate:** the per-instruction `cycles[]` oracle (the 2/5.08M fails are
+  candidates to close); Doom letterbox raster (the level-IRQ fix must NOT
+  regress). **Files:** `snes.rs` (`step`, `advance_time`, `poll_hv_irq`),
+  `cpu-65c816/src/opcodes.rs`, `cpu-65c816/tests/cpu_tests.rs`.
 
 ### P4 — HDMA/timer delivery edges (MEDIUM, 3 independent edits)
-- `$4211` TIMEUP hold; ares "last dot of field" guard; htime/vtime 10-clock
-  detection delay — all in `poll_hv_irq`. Land + validate each separately.
+- `$4211` TIMEUP hold; the hardware "last dot of field" guard; htime/vtime
+  10-clock detection delay — all in `poll_hv_irq`. Land + validate each separately.
 
 ### P5 — SA-1 contention breadth (LOW-MED, parallel)
 - Validate `conflict()` BWRAM/IRAM/ROM contention across the SA-1 corpus + close
@@ -140,10 +140,10 @@ Original scope note (kept for reference):
 
 ### Tier-0/1 quick wins (no architecture, parallelizable)
 - **Bus speed table** (`$2000-3FFF/$4200-5FFF`→6 mclk, `$4000-41FF`→12) — ~1 h.
-- **DMA indirect-HDMA last-channel 1-byte quirk** (ares `dma.cpp`) — ~2 h.
+- **DMA indirect-HDMA last-channel 1-byte quirk** (the hardware DMA behaviour) — ~2 h.
 
 ## Explicitly NOT recommended
-- **Literal libco cothread port** — re-does the grammar luna already speaks
+- **Literal cooperative-cothread port** — re-does the grammar luna already speaks
   (`run_to_target`/`advance_time`); blast-radius = the whole core; payoff =
   behavioral parity with today. The Super FX cautionary tale in reverse.
 - **Literal per-dot renderer** — nothing visible to split at dot 276; risks the
