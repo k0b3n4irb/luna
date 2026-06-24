@@ -33,4 +33,3 @@
 ---
 
 [The SNES emulator landscape](appendix/landscape.md)
-[API reference (rustdoc) ↗](https://kobenairb.github.io/luna/api/)
