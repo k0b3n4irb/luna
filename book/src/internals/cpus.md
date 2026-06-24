@@ -34,8 +34,7 @@ suite for the `spc700`** (256K cases), with per-opcode cycle counts (2–12 cycl
 not a flat model) modelled on the hardware reference.
 
 The CPU↔CPU interleave is cycle-exact: the SPC700 advances one bus access at a
-time (`Apu::run_to_target`), so the two processors never run ahead of each
-other — the prerequisite for games that synchronise tightly through the APU I/O
-ports.
+time, so the two processors never run ahead of each other — the prerequisite
+for games that synchronise tightly through the APU I/O ports.
 
 > For the audio side this CPU drives — the S-DSP — see [The APU](apu.md).
