@@ -8,8 +8,8 @@ description = "Guide and reference for Luna, a cycle-accurate, AI-native SNES em
 [output.html]
 default-theme = "navy"
 preferred-dark-theme = "navy"
-git-repository-url = "https://github.com/kobenairb/luna"
-edit-url-template = "https://github.com/kobenairb/luna/edit/develop/book/{path}"
+git-repository-url = "https://github.com/k0b3n4irb/luna"
+edit-url-template = "https://github.com/k0b3n4irb/luna/edit/develop/book/{path}"
 additional-css = ["theme/luna.css"]
 
 [output.html.fold]

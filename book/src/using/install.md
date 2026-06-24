@@ -2,11 +2,11 @@
 
 ## Prebuilt binaries (recommended)
 
-Every [GitHub release](https://github.com/kobenairb/luna/releases/latest) ships
+Every [GitHub release](https://github.com/k0b3n4irb/luna/releases/latest) ships
 Linux binaries for **x86_64** and **aarch64** — no toolchain needed:
 
 ```bash
-curl -LO https://github.com/kobenairb/luna/releases/latest/download/luna-v1.2.0-linux-x86_64.tar.gz
+curl -LO https://github.com/k0b3n4irb/luna/releases/latest/download/luna-v1.2.0-linux-x86_64.tar.gz
 tar xzf luna-v1.2.0-linux-x86_64.tar.gz && cd luna-v1.2.0-linux-x86_64
 
 ./luna-gui "path/to/game.sfc"   # play in the graphical debugger
@@ -28,11 +28,11 @@ guarantees.
 ## Build from source
 
 You need the Rust toolchain pinned in
-[`rust-toolchain.toml`](https://github.com/kobenairb/luna/blob/main/rust-toolchain.toml)
+[`rust-toolchain.toml`](https://github.com/k0b3n4irb/luna/blob/main/rust-toolchain.toml)
 (2024 edition), plus `libasound2-dev` on Linux:
 
 ```bash
-git clone https://github.com/kobenairb/luna && cd luna
+git clone https://github.com/k0b3n4irb/luna && cd luna
 cargo run --release -p luna-gui -- "path/to/game.sfc"
 ```
 
