@@ -1,17 +1,13 @@
-# S-DD1 coprocessor — synthesised ares + Mesen2 reference
+# S-DD1 coprocessor — faithful-port reference
 
 **Purpose:** the faithful-port spec for luna's S-DD1 (graphics decompression
-chip — Star Ocean, Street Fighter Alpha 2). Built per `.claude/rules/
-reference-first.md` from **both** references read in full:
+chip — Star Ocean, Street Fighter Alpha 2), written against the hardware
+reference behaviour.
 
-- **ares** `ares/sfc/coprocessor/sdd1/{sdd1.cpp,sdd1.hpp,decompressor.cpp,decompressor.hpp}`
-- **Mesen2** `Core/SNES/Coprocessors/SDD1/{Sdd1.cpp,Sdd1Mmc.cpp,Sdd1Decomp.cpp,…}`
-
-> **Key finding:** ares and Mesen2 are **byte-identical** on the two critical
-> tables (`run_count` 256 entries, `evolution_table` 33 states) and structurally
-> identical on the whole pipeline (IM→GCD→8×BG→PEM→CM→OL). There is **no
-> divergence** to arbitrate — both implement the canonical "Andreas Naive"
-> reference. luna copies the tables verbatim.
+> **Key finding:** the two critical tables (`run_count` 256 entries,
+> `evolution_table` 33 states) and the whole pipeline (IM→GCD→8×BG→PEM→CM→OL)
+> match the canonical hardware reference exactly — there is **no
+> divergence** to arbitrate. luna copies the tables verbatim.
 
 The S-DD1 is two independent subsystems: (1) an **MMC** (memory mapper, banks the
 up-to-8 MB ROM into the bus), and (2) a **streaming decompressor** that runs
@@ -35,7 +31,7 @@ S-DD1 control registers (`$4800-$480F`, banks `$00-3F`/`$80-BF`; address masked 
 
 `$4802-3` / `$4808-F` read through to ROM.
 
-**ROM decode (ares `mcuRead`/`mmcRead`):**
+**ROM decode (the hardware reference's `mcuRead`/`mmcRead` path):**
 
 - **`$00-3F,$80-BF : $8000-FFFF`** (banked LoROM-style region):
   ```
@@ -50,8 +46,8 @@ S-DD1 control registers (`$4800-$480F`, banks `$00-3F`/`$80-BF`; address masked 
 
 ## 2. DMA-triggered decompression (the integration crux)
 
-The chip decompresses **on the fly while a DMA reads from it**. ares `mcuRead`
-`$C0-FF` path:
+The chip decompresses **on the fly while a DMA reads from it**. The reference
+`mcuRead` `$C0-FF` path:
 
 ```
 if (r4800 & r4801) {                       // some channel armed
@@ -68,23 +64,25 @@ return mmcRead(addr);                        // not decompressing → normal ROM
 ```
 
 The chip captures the per-channel DMA **address** (`$43x2-4`) and **size**
-(`$43x5-6`) by intercepting writes to `$00-3F,$80-BF:$4300-437F` (ares `dmaWrite`,
-which then forwards to the CPU's real DMA). **S-DD1 always uses fixed-address DMA**,
+(`$43x5-6`) by intercepting writes to `$00-3F,$80-BF:$4300-437F` (the reference
+`dmaWrite` path, which then forwards to the CPU's real DMA). **S-DD1 always uses
+fixed-address DMA**,
 so `addr == dma[n].address` holds for every byte of the transfer.
 
 Protocol the game uses: write `$43xx` (addr+size, fixed mode) → write r4800+r4801
 to arm the channel → write `$420B` (MDMAEN) → the DMA streams decompressed bytes;
 the chip clears r4801.bit(n) and re-arms `dmaReady` when size hits 0.
 
-### luna integration note (this is where luna differs from the refs' structure)
+### luna integration note (this is where luna differs from the canonical hardware structure)
 
 In luna, `$4300-437F` writes go to the **DMA controller**, not the mapper, and
 `mapper.read()` serves both CPU reads and DMA A-bus reads (via
-`DmaBusView::read_a`). So to port ares faithfully, luna must **forward `$43xx`
-writes to the S-DD1 mapper** (in addition to the DMA controller) so it can capture
-`dma[n].address/size`. `$4800-480F` already reaches `mapper.read/write` (CPU
-fall-through). Then the `mcuRead` logic ports verbatim: `mapper.read(addr)` matches
-`addr == dma[n].address` with `r4800 & r4801` armed → decompress.
+`DmaBusView::read_a`). So to port the reference faithfully, luna must **forward
+`$43xx` writes to the S-DD1 mapper** (in addition to the DMA controller) so it
+can capture `dma[n].address/size`. `$4800-480F` already reaches
+`mapper.read/write` (CPU fall-through). Then the `mcuRead` logic ports verbatim:
+`mapper.read(addr)` matches `addr == dma[n].address` with `r4800 & r4801`
+armed → decompress.
 
 Detection: chipset byte `$FFD6` — `(chipset & 0x0F) >= 0x03 && (chipset & 0xF0)
 == 0x40` (S-DD1 = coprocessor high-nibble **4**; cf. SuperFX=1, DSP=0, SA-1=3).
