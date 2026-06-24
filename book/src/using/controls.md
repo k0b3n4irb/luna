@@ -9,8 +9,7 @@ scripted/agent input; the GUI wires both ports from the keyboard.)
 
 Bindings are stored by physical `KeyCode` (layout-agnostic), so the key
 *positions* hold on AZERTY/QWERTZ. Remap them per-player in the GUI under
-**Settings → Input** (a Player 1 / Player 2 tab). The source of truth is
-`luna-gui/src/input.rs` (`KeyBindings::default`). That dialog also has a
+**Settings → Input** (a Player 1 / Player 2 tab). That dialog also has a
 **Preset** row that applies a whole layout to the active player in one click
 (see *Presets* below); "Reset to defaults" is separate and always restores the
 player's factory binding (P1 = Arrows, P2 = numpad).
@@ -85,6 +84,5 @@ auto-read latches.
 
 ## Remap dialog
 
-The GUI exposes a key-remap dialog.
-See `luna-gui/src/input.rs` for the binding-storage shape and the
-serialisation format (`KeyBindings`), and `luna-gui/src/ui.rs` for the dialog.
+The GUI exposes a key-remap dialog under **Settings → Input**, where each
+binding is stored by physical key position and persisted across sessions.

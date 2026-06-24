@@ -11,9 +11,8 @@ shares, and the MCP tool catalogue.
 > disagrees with `--help` / rustdoc, those win.
 
 luna is **API-first**: the CLI, the MCP server, and the GUI are all thin
-consumers of the one `luna_api::Emulator` contract (see
-`.claude/rules/api-first.md`). What `luna state` measures is exactly what
-the GUI shows — coherence by construction.
+consumers of the one `luna_api::Emulator` contract. What `luna state`
+measures is exactly what the GUI shows — coherence by construction.
 
 ---
 
@@ -151,8 +150,8 @@ local (gitignored under `--out`).
 
 | Option | Default | Purpose |
 |---|---|---|
-| `[DIR]` | `tests/roms` | Directory of ROMs to scan. |
-| `--out <DIR>` | `tests/roms/bench` | Output dir for `report.md`, `bugs/*`, `screenshots/*`. |
+| `[DIR]` | the bundled ROM dir | Directory of ROMs to scan. |
+| `--out <DIR>` | a `bench` subdir | Output dir for `report.md`, `bugs/*`, `screenshots/*`. |
 | `-f, --frames <N>` | `600` | Frames to run per ROM. |
 | `--input <SCRIPT>` | Start-pulse | Override the default title-clearing input (§3). |
 
@@ -242,7 +241,7 @@ stream. No options — configure the client to launch `luna mcp`.
 | `dma` | DMA/HDMA channel state. |
 | `stats` | Counters: `nmis_serviced`, frame count, instruction count, NMI rate, … |
 
-(See `crates/luna-api/src/lib.rs` for the full nested field set.)
+(See the `luna-api` rustdoc for the full nested field set.)
 
 ---
 
@@ -262,7 +261,7 @@ Left(9) Right(8) A(7) X(6) L(5) R(4)`. So Start = `$1000`, A = `$80`.
 
 > Most commercial titles sit at a title/demo screen waiting for Start —
 > a black/forced-blank screenshot with no input is **not** a bug. Pulse
-> Start to get past it (see `.claude/rules/coproc-testing.md`).
+> Start to get past it.
 
 ---
 
@@ -343,6 +342,6 @@ method returns `Result<_, ApiError>` unless noted. Grouped by purpose:
 
 ## 6. Controls & firmware
 
-- **GUI keyboard bindings + hotkeys:** `docs/CONTROLLER_BINDINGS.md`.
-- **Coprocessor firmware (DSP-1, …):** `docs/firmware.md`; install via
+- **GUI keyboard bindings + hotkeys:** see the Controls chapter.
+- **Coprocessor firmware (DSP-1, …):** install via
   `luna state --dsp1-rom <path>` or `Emulator::install_firmware`.

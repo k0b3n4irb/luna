@@ -8,7 +8,7 @@ same-arch-only vs visual-anchor-only. It answers OpenSNES follow-up RFE-4.
 
 luna's entire **headless** path — every CPU core (65C816, SPC700, uPD96050,
 GSU), the PPU, S-DSP, DMA/HDMA, and the coprocessors — is **integer-only**.
-There is no floating point, no `Date::now`, no RNG, and no hash-map iteration on
+There is no floating point, no wall-clock time source, no RNG, and no hash-map iteration on
 the emulation path. So for a fixed `(ROM, mapper, input script, start state)`
 the execution is **bit-identical every run**. (The only floating point in the
 project is the *GUI's* audio resampler and frame pacing — neither touches the

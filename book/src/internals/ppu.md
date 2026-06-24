@@ -183,10 +183,9 @@ When set, BG1 in modes 3/4/7 reinterprets its palette byte as a packed BGR tripl
 - Optional `paletteGroup = -----bgr` (low 3 bits from tilemap's palette field).
 - The hardware combines these to produce a 15-bit color.
 
-luna implements this: `direct_color_to_bgr5(palette_index, group)`
-(renderer.rs:924) decodes the 8-bit `BBGGGRRR` palette byte AND folds in
-the 3-bit tilemap palette group (R←g0, G←g1, B←g2), so the paletteGroup
-low bits are NOT dropped.
+luna implements this: it decodes the 8-bit `BBGGGRRR` palette byte AND
+folds in the 3-bit tilemap palette group (R←g0, G←g1, B←g2), so the
+paletteGroup low bits are NOT dropped.
 
 ---
 
@@ -227,24 +226,22 @@ if(address.bit(9)) {
 setFirstSprite();                       // refresh OAM-priority rotation
 ```
 
-luna's `memory.rs:425-454` (`Oam::write_gated`) implements the even-byte
-latch correctly. luna does not maintain a *cached* firstSprite refreshed
-on every `$2104` write the way the hardware reference's `setFirstSprite()` does; instead it
-derives it on demand each scanline from the priority-rotation flag and
-`$2103` word address — `Oam::first_sprite()` (memory.rs:407) returns
-`(word_address >> 2) & 0x7F` when priority rotation is on, else 0. Same
-observable result; the firstSprite index is just recomputed lazily rather
-than stamped per write.
+luna implements the even-byte latch correctly. luna does not maintain a
+*cached* firstSprite refreshed on every `$2104` write the way the hardware
+reference's `setFirstSprite()` does; instead it derives it on demand each
+scanline from the priority-rotation flag and the `$2103` word address,
+returning `(word_address >> 2) & 0x7F` when priority rotation is on, else
+0. Same observable result; the firstSprite index is just recomputed lazily
+rather than stamped per write.
 
 ### 6.4 Sprite double-buffering
 
 The hardware double-buffers the per-line tile cache: `active ^= 1` at start of each scanline, the run consumes `tile[!active]` (filled the previous scanline), and the fetch fills `tile[active]` for the next scanline — i.e. sprites for line N are evaluated at the end of line N-1.
 
 luna decodes the sprite set **once per scanline** and shares it across the
-whole line: `render_current_scanline` (ppu.rs:493) evaluates sprites once
-and threads the decode into `render_scanline_partial_into_from` via the
-`precomp` argument (renderer.rs:460, ppu.rs:511), so per-pixel composition
-does not re-walk OAM. What luna does NOT do is the cross-scanline
+whole line: it evaluates sprites once and threads the decode into the
+per-pixel compositor, so per-pixel composition does not re-walk OAM. What
+luna does NOT do is the cross-scanline
 double-buffer (fetch line N's tiles while running line N-1); it evaluates
 the current line's sprites against live OAM at the start of that line. The
 practical effect is the same for static OAM; only a game that rewrites OAM
@@ -309,14 +306,13 @@ latch.vcounter = 0;
 ```
 
 A handler that does not re-sync via $213F can desync the toggle and read
-the high byte (0 for lines < 256) when it expected the low byte. This is
-the **Doom-flicker root cause**: Doom's raster IRQ read V≈0, mis-dispatched
-to its no-ack branch, and re-fired the H/V IRQ ~200×/frame.
+the high byte (0 for lines < 256) when it expected the low byte. This was
+the root cause of a Doom raster-IRQ flicker: Doom's raster IRQ read V≈0,
+mis-dispatched to its no-ack branch, and re-fired the H/V IRQ ~200×/frame.
 
-luna implements this: reading STAT78 clears `ophct_hi_pending` /
-`opvct_hi_pending` (ppu.rs:635-636) — the same read also clears the shared
-BG-scroll write-twice latch and the external-latch-hit status bit
-(ppu.rs:623-625).
+luna implements this: reading STAT78 clears the OPHCT/OPVCT high-byte
+pending flags — the same read also clears the shared BG-scroll write-twice
+latch and the external-latch-hit status bit.
 
 ### 8b.2 BG scroll ($210D-$2114) write-twice — TWO shared latches
 
@@ -333,10 +329,9 @@ The regular-BG scroll registers are write-twice into a pair of shared
 - **V-scroll write ($210E/$2110/$2112/$2114):** uses the FULL previous-write
   latch (`bgofs_ppu1`, no PPU2 cross) and updates ONLY `bgofs_ppu1`.
 
-luna implements both: `write_bg_h_scroll` (ppu.rs:678-691, dual-latch
-cross) and `write_bg_v_scroll` (ppu.rs:695-699, PPU1-only). The Mode-7
-M7HOFS/M7VOFS write-twice uses a *separate* `m7_latch` (ppu.rs:707-726),
-not these BG-scroll latches.
+luna implements both: the H-scroll write (dual-latch cross) and the
+V-scroll write (PPU1-only). The Mode-7 M7HOFS/M7VOFS write-twice uses a
+*separate* `m7_latch`, not these BG-scroll latches.
 
 ---
 
@@ -345,18 +340,16 @@ not these BG-scroll latches.
 The hardware treats PPU register writes as **instantaneous, mid-scanline**. The pixel up to the write x position uses the OLD state; the rest of the scanline uses the NEW state — equivalently, the in-progress line is rendered up to the write x before the register write that affects rendering is applied.
 
 luna renders **per scanline**, not in one end-of-frame pass: the scheduler
-calls `Ppu::render_current_scanline` (ppu.rs:493) at the end of every
-visible line, committing it to the persistent framebuffer. So a register
-write on line N is already seen by lines N+1.. — mid-frame tilemap/palette
-changes for status-bar split, parallax, and HDMA-driven effects render
-correctly at scanline granularity.
+renders each visible line at its end, committing it to the persistent
+framebuffer. So a register write on line N is already seen by lines N+1.. —
+mid-frame tilemap/palette changes for status-bar split, parallax, and
+HDMA-driven effects render correctly at scanline granularity.
 
 luna additionally models **mid-scanline** writes: a rendering-affecting
-register write flushes the in-progress line up to the current dot via
-`Ppu::flush_partial_scanline` (ppu.rs:526) so pixels left of the write
-keep the OLD state and pixels right of it use the NEW state — matching
-the hardware's render-before-write model. The remaining gap is purely
-sub-dot ordering, not whole-frame staleness.
+register write flushes the in-progress line up to the current dot so pixels
+left of the write keep the OLD state and pixels right of it use the NEW
+state — matching the hardware's render-before-write model. The remaining
+gap is purely sub-dot ordering, not whole-frame staleness.
 
 ---
 
@@ -364,19 +357,17 @@ sub-dot ordering, not whole-frame staleness.
 
 The hardware enforces:
 - VRAM read/write during active display (forced-blank OFF, vcounter < vdisp) returns 0 / discards the write.
-- CGRAM write during active display lands at `latch.cgramAddress` (the address-mux updated by `DAC::paletteColor()` per pixel), not the address the game programmed.
+- CGRAM write during active display lands at `latch.cgramAddress` (the address-mux updated by the DAC per pixel), not the address the game programmed.
 - OAM read/write during active display routes through `latch.oamAddress` (updated by the OBJ evaluator).
 
-luna implements the VRAM and OAM gates: it tracks `Ppu::active_display`
+luna implements the VRAM and OAM gates: it tracks an `active_display` flag
 (true when not forced-blank AND on a visible scanline) and routes the data
-ports through gated writers — VRAM via `Vram::write_lo_gated` /
-`write_hi_gated` (ppu.rs:825-826) and OAM via `Oam::write_gated`
-(ppu.rs:764). When `active_display` is true the byte is dropped but the
-address counter (and OAM even/odd latch) still advance, matching the
-hardware reference.
+ports through gated writers for VRAM and OAM. When `active_display` is true
+the byte is dropped but the address counter (and OAM even/odd latch) still
+advance, matching the hardware reference.
 
-CGRAM is **deliberately ungated** (`Cgram::write`, memory.rs:261): on real
-hardware an active-display CGRAM write still commits, just at the
+CGRAM is **deliberately ungated**: on real hardware an active-display CGRAM
+write still commits, just at the
 DAC's `latch.cgramAddress` rather than the programmed address. luna commits
 at the programmed address — it does not yet model the per-pixel
 address-mux, so the *value* lands but at the wrong slot only in the rare
@@ -392,11 +383,10 @@ Mode 7 (BGMODE=7): BG1 is a 1024×1024 affine-transformed 8bpp tilemap. M7A/M7B/
 EXTBG (SETINI bit 6): BG2 reuses the Mode-7 framebuffer with priority bits
 from the high tile-byte — used by F-Zero, Pilotwings.
 
-luna implements EXTBG: when `BGMODE == 7 && (setini & 0x40) != 0`
-(renderer.rs:497) it exposes the affine plane as BG2, deriving the colour
-from the low 7 bits of the 8bpp pixel and the priority from bit 7
-(renderer.rs:536-538), and composites it via `MODE7_EXTBG_TABLE`
-(renderer.rs:1165). Mode 7 is no longer BG1-only.
+luna implements EXTBG: when `BGMODE == 7 && (setini & 0x40) != 0` it
+exposes the affine plane as BG2, deriving the colour from the low 7 bits of
+the 8bpp pixel and the priority from bit 7, and composites it with BG2's
+priority slots. Mode 7 is no longer BG1-only.
 
 ---
 

@@ -257,64 +257,50 @@ Cargo workspace with ~15 crates. Each crate is annotated **cross-target**
 --target wasm32-unknown-unknown` on the cross-target crates.
 
 ```
-luna/
-├── Cargo.toml                       # workspace root
-├── ARCHITECTURE.md                  # this document
-├── README.md                        # project introduction (front door)
-├── RESEARCH.md                      # pre-Phase-0 research synthesis
-├── docs/emulator_landscape.md       # comparative survey of SNES emulators
-│
-├── crates/
-│   │── # ──────────── EMULATION CORE (cross-target, !Send, no_std-ready) ────
-│   ├── luna-bus/                    # ✅ memory map, cartridge mappers
-│   ├── luna-cpu-65c816/             # ✅ main CPU, cycle-accurate
-│   ├── luna-cpu-spc700/             # ✅ audio CPU
-│   ├── luna-ppu/                    # ✅ Picture Processing Unit
-│   ├── luna-apu/                    # ✅ SPC700 + audio DSP (orchestrates spc700)
-│   ├── luna-dma/                    # ✅ DMA + HDMA
-│   ├── luna-coproc/                 # ✅ SA-1, Super FX, DSP-1/2/3/4, etc.
-│   ├── luna-cartridge/              # ✅ ROM parsing, header detection, SRAM
-│   ├── luna-core/                   # ✅ assembles the components, scheduler
-│   │
-│   │── # ──────────── CROSS-TARGET ABSTRACTIONS ─────────────────────
-│   ├── luna-async/                  # ✅ runtime facade (spawn/sleep/channels)
-│   ├── luna-api/                    # ✅ ★ stable public contract (layer 3)
-│   │
-│   │── # ──────────── TRANSPORTS (mix cross-target / native-only) ────
-│   ├── luna-mcp-core/               # ✅ Tool/Resource types, schemas
-│   ├── luna-mcp-server/             # ❌ rmcp + tokio mainline (native-only)
-│   ├── luna-mcp-client/             # ✅ cross-target WebSocket transport
-│   ├── luna-rest/                   # ❌ axum + OpenAPI (V1.1, native-only)
-│   ├── luna-ws/                     # ❌ tokio-tungstenite (V1.1, native-only)
-│   ├── luna-wasm/                   # ⚠️ WASM-only, JS bindings (V2)
-│   ├── luna-ffi/                    # ❌ cdylib C/Python (V2, native-only)
-│   ├── luna-libretro/               # ❌ libretro core (V2, native-only)
-│   │
-│   │── # ──────────── BINARIES & GUI ───────────────────────────────
-│   ├── luna-cli/                    # ❌ `luna` binary, dispatches the modes
-│   ├── luna-gui/                    # ⚠️ egui/wgpu (native + WASM via eframe)
-│   └── luna-overlay/                # ⚠️ spectator overlays (native + WASM)
-│
-├── tests/
-│   ├── roms/                        # homebrew hardware-test ROMs
-│   ├── cpu-tests/                   # JSON per-instruction test suite for the 65C816
-│   └── golden/                      # reference frames for visual tests
-│
-└── tools/
-    └── disasm/                      # standalone 65C816 disassembler
+# ──────────── EMULATION CORE (cross-target, !Send, no_std-ready) ────
+luna-bus          # ✅ memory map, cartridge mappers
+luna-cpu-65c816   # ✅ main CPU, cycle-accurate
+luna-cpu-spc700   # ✅ audio CPU
+luna-ppu          # ✅ Picture Processing Unit
+luna-apu          # ✅ SPC700 + audio DSP (orchestrates spc700)
+luna-dma          # ✅ DMA + HDMA
+luna-coproc       # ✅ SA-1, Super FX, DSP-1/2/3/4, etc.
+luna-cartridge    # ✅ ROM parsing, header detection, SRAM
+luna-core         # ✅ assembles the components, scheduler
+
+# ──────────── CROSS-TARGET ABSTRACTIONS ─────────────────────
+luna-async        # ✅ runtime facade (spawn/sleep/channels)
+luna-api          # ✅ ★ stable public contract (layer 3)
+
+# ──────────── TRANSPORTS (mix cross-target / native-only) ────
+luna-mcp-core     # ✅ Tool/Resource types, schemas
+luna-mcp-server   # ❌ rmcp + tokio mainline (native-only)
+luna-mcp-client   # ✅ cross-target WebSocket transport
+luna-rest         # ❌ axum + OpenAPI (V1.1, native-only)
+luna-ws           # ❌ tokio-tungstenite (V1.1, native-only)
+luna-wasm         # ⚠️ WASM-only, JS bindings (V2)
+luna-ffi          # ❌ cdylib C/Python (V2, native-only)
+luna-libretro     # ❌ libretro core (V2, native-only)
+
+# ──────────── BINARIES & GUI ───────────────────────────────
+luna-cli          # ❌ `luna` binary, dispatches the modes
+luna-gui          # ⚠️ egui/wgpu (native + WASM via eframe)
+luna-overlay      # ⚠️ spectator overlays (native + WASM)
 ```
 
 Legend: ✅ cross-target / ⚠️ cross-target with cfg-gated features /
-❌ native-only.
+❌ native-only. Alongside the crates the workspace also carries the
+homebrew hardware-test ROMs, the JSON per-instruction 65C816 test suite,
+and the golden reference frames used by the visual tests.
 
-**Key dependency choices** (revised after research, see RESEARCH.md)
+**Key dependency choices**
 
 | Domain              | Crate(s)                                       | Rationale                                                   |
 |---------------------|------------------------------------------------|-------------------------------------------------------------|
 | Native async runtime| `tokio` (rt-multi-thread, sync, macros)        | De facto standard                                           |
 | Web async runtime   | `wasm-bindgen-futures` + `gloo-timers`         | Single-thread, microtask queue                              |
 | **Async facade**    | **`luna-async`** (in-house crate)              | **Avoids `#[cfg(target_arch)]` everywhere — mandatory**     |
-| Channels (cross)    | `futures::channel::mpsc` / `async-channel`     | `crossbeam-channel` **panics** under WASM (see RESEARCH.md) |
+| Channels (cross)    | `futures::channel::mpsc` / `async-channel`     | `crossbeam-channel` **panics** under WASM |
 | Serialization       | `serde` + `serde_json`                         | Essential for MCP                                           |
 | MCP server          | `rmcp` (official Anthropic) — native only      | No `wasm32-unknown-unknown` support                         |
 | Schemas             | `schemars` + `ts-rs` (build-time) + `utoipa`   | JSON Schema / TS / OpenAPI generation                       |
@@ -348,7 +334,7 @@ to `wasm32-unknown-unknown`. However:
 implementations:
 
 ```rust
-// crates/luna-async/src/lib.rs
+// the luna-async facade
 #[cfg(not(target_arch = "wasm32"))]
 mod imp {
     pub use tokio::task::spawn;
@@ -443,8 +429,8 @@ specific to the cartridge type:
 - `SDD1Mapper`
 - `SPC7110Mapper`
 
-Detection is done via `luna-cartridge::detect_mapper(&rom_bytes)` which
-parses the SNES internal header (offset 0x7FC0 or 0xFFC0).
+Detection is done by `luna-cartridge`, which parses the SNES internal
+header (offset 0x7FC0 or 0xFFC0) to choose the mapper.
 
 ### Memory map summary
 
@@ -511,20 +497,15 @@ The SNES PPU is *complex*: 8 graphics modes (including the famous Mode 7),
 4 tile planes, 128 sprites, OAM, CGRAM palette, masking windows, mosaic,
 color math…
 
-**Breakdown into sub-modules**
+**Breakdown into responsibilities**
 
-```
-luna-ppu/
-├── src/
-│   ├── lib.rs           # struct Ppu, tick()
-│   ├── modes/           # rendering of modes 0–7
-│   │   ├── mode0.rs ... mode7.rs
-│   ├── sprites.rs       # OAM, sprite renderer
-│   ├── window.rs        # window masking, color math
-│   ├── vram.rs          # VRAM 64 KB
-│   ├── cgram.rs         # palette 512 bytes
-│   └── registers.rs     # $2100-$213F
-```
+- the top-level `Ppu` state + per-tick stepping
+- rendering of modes 0–7
+- OAM + the sprite renderer
+- window masking + color math
+- VRAM (64 KB)
+- CGRAM palette (512 bytes)
+- the `$2100-$213F` register file
 
 **Rendering**: scanline-based in V1 (simpler and 99% sufficient),
 upgradable to dot-based for the demos that change registers in the middle
@@ -619,7 +600,7 @@ loop {
 **Full Rust sketch**
 
 ```rust
-// crates/luna-core/src/scheduler.rs
+// the luna-core scheduler
 
 pub type MCycles = u64;
 pub const NTSC_MASTER_HZ: u64 = 21_477_272;
@@ -1259,8 +1240,6 @@ non-WASM features). Consequence for Luna Studio Web:
 - Future alternative: wait for `wasm32-wasip2` + the Component Model
   (maturity mid-2026 per paiml/rust-mcp-sdk).
 
-See RESEARCH.md for the details of the WASM audit.
-
 ### 9.3 Unlocked product use cases
 
 Beyond the AI agent, here is the ecosystem of tools the API makes possible.
@@ -1550,7 +1529,7 @@ RAM (negligible up to several minutes).
 
 ### Integration tests
 
-- **Open-source homebrew hardware-test ROMs** in `tests/roms/`:
+- **Open-source homebrew hardware-test ROMs**:
   - CPU / PPU / DMA / HDMA / ADC result-screen ROMs
   - APU audio-test ROMs
   - advanced-PPU test ROMs
@@ -1560,7 +1539,7 @@ RAM (negligible up to several minutes).
 ### Visual tests (golden)
 
 - For each reference game (~20 games), a frame at a precise point (after a
-  deterministic input sequence) is stored as a PNG in `tests/golden/`.
+  deterministic input sequence) is stored as a golden PNG.
 - In CI, we replay the sequence and compare pixel-by-pixel (zero tolerance
   in cycle-accurate mode).
 
@@ -1627,11 +1606,11 @@ To discuss: GPL-3.0 (more protective) or Apache-2.0 (more permissive).
 **Research & validation** (1 week — a prerequisite to any production code):
 
 - Studying the master-clock catch-up scheduling model:
-  - the `Snes::tick` direct model
+  - the direct CPU-tick model
   - the rational APU catch-up
-  - the per-region `access_master_cycles` computation
+  - the per-region access-cost computation
   - DMA/HDMA timing
-  - the `start_cycle`/`end_cycle` cycle-stepping pattern
+  - the start-cycle/end-cycle cycle-stepping pattern
   - the workspace-organization model
 - Validate the per-instruction `65816` test-suite format end-to-end against
   the CPU core.
@@ -1654,7 +1633,7 @@ To discuss: GPL-3.0 (more protective) or Apache-2.0 (more permissive).
 
 - `luna-ppu`: modes 0 and 1, scanline-based, basic sprites.
 - `luna-dma`: DMA (without HDMA).
-- `luna-core::Snes::step()` complete (see §6.6) — CPU + DMA + PPU catch-up
+- `luna-core` scheduler step complete (see §6.6) — CPU + DMA + PPU catch-up
   via `bus.io_cycle()`.
 - 1000+ per-instruction tests pass (target: 100% of the 65C816).
 - A CPU result-screen test ROM displays "PASS".
@@ -1679,8 +1658,7 @@ To discuss: GPL-3.0 (more protective) or Apache-2.0 (more permissive).
 - SA-1, Super FX (GSU), DSP-1 (uPD7725 core in `luna-cpu-upd96050`).
 - **Star Fox** / **Doom** (Super FX), **Super Mario RPG** / **Kirby** (SA-1),
   **Super Mario Kart** / **Pilotwings** (DSP-1 Mode 7) playable.
-- DSP-1 needs a user-supplied `dsp1b.rom` firmware — see
-  [`docs/firmware.md`](docs/firmware.md).
+- DSP-1 needs a user-supplied `dsp1b.rom` firmware.
 
 ### Phase 5 — Advanced debug & spectator mode (5 weeks) — 🚧 in progress
 
