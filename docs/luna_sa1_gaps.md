@@ -77,28 +77,34 @@ accumulator produces visibly wrong geometry.
 
 ---
 
-## 🟠 5. Timer HV mode (`$2210` hvselb=0) unimplemented
+## ✅ 5. Timer HV mode (`$2210` hvselb=0) — IMPLEMENTED 2026-06-23
 
 ares `sa1.cpp:63-94` runs the SA-1 timer in two modes selected by TMC
-(`$2210`) bit 7 (`hvselb`):
+(`$2210`) bit 7 (`hvselb`). **Both are now a faithful port** of ares'
+`SA1::step`, sharing one `hcounter`/`vcounter` model:
 
-- **Linear** (hvselb=1): an 18-bit counter; IRQ on a compare match.
-  luna implements this (`tick_timer`, `sa1.rs:638`).
 - **HV** (hvselb=0): `hcounter += 2` per 2 clocks, wraps at 1364;
   `vcounter++` wraps at `scanlines`; IRQ when `hcounter == hcnt<<2`
-  (hen) and/or `vcounter == vcnt` (ven). luna **does not implement
-  this** — `tick_timer` early-returns with no IRQ when TMC.7 == 0
-  (the in-code comment admits it: "HV-mode timing isn't wired yet").
+  (hen) and/or `vcounter == vcnt` (ven).
+- **Linear** (hvselb=1): an 11-bit H feeding a 9-bit V free-runner; same
+  compare switch. (This replaced luna's earlier non-faithful 18-bit
+  single-counter model.)
 
-The HV timer needs the SA-1 to see the PPU dot/scanline position, which
-isn't plumbed to the chip yet (related to cycle-accuracy Phase 4). The
-HCR/VCR read-backs (`$2306`-region) are also stubbed for HV mode.
+**Key correction:** the timer is SELF-CONTAINED — it keeps its own H/V
+counters, it does NOT read the PPU beam. The old "needs the PPU dot
+view / wait for Phase 4" note was wrong; HV mode just wraps at
+1364/`scanlines` to mimic beam timing. HCR/VCR (`$2302-$2305`) now read
+back the live counters in dots. Unit-tested (`sa1.rs` `timer_*`: H match
+linear + HV, V match HV, CTR restart, level-flag re-fire).
 
-**Audited 2026-06-01 during the SMRPG deadlock hunt — NOT the cause
-there:** SMRPG writes TMC exactly once (`= $00`, timer off) and never
-touches `$2211-$2215`, so its hang is unrelated. But other SA-1 titles
-that use HV-mode raster timing would mis-fire. Wiring it requires the
-PPU H/V dot view (do it with Phase 4).
+The IRQ-vs-PPU-scanline *alignment* is as accurate as luna's SA-1
+stepping cadence (master-clock-driven; exact dot precision is the
+general SA-1 cycle-accuracy refinement, Phase 4/5) — but the timer fires
+correctly and games using HV-mode raster timing are no longer dead.
+
+**No regression risk for SMRPG:** it writes TMC once (`= $00`, timer
+off) and never touches `$2211-$2215`; smoke is byte-identical to the
+pre-change baseline.
 
 ---
 

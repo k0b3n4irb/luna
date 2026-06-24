@@ -315,6 +315,12 @@ pub enum MemEventKind {
     Read,
     /// CPU write.
     Write,
+    /// Synthetic delivery-timing marker: the NMI line was raised (V-blank
+    /// entry with NMITIMEN.7 set). `value` = NMITIMEN, `addr_full` = `$4210`.
+    NmiSignal,
+    /// Synthetic delivery-timing marker: the H/V-timer IRQ line was raised.
+    /// `value` = NMITIMEN, `addr_full` = `$4211`.
+    IrqSignal,
 }
 
 /// Bounded ring for the memory access tracer.
@@ -1531,6 +1537,39 @@ impl SnesBus<'_> {
             });
         }
     }
+
+    /// Emit a synthetic NMI/IRQ delivery-timing marker into the memory trace
+    /// (P0 of the cycle-accuracy roadmap). Unlike a bus access it bypasses the
+    /// bank/offset filters — it is a *when did the line get raised* event, the
+    /// thing the deferred Phase-4 NMI/IRQ work needs to diff against ares/Mesen.
+    #[inline]
+    fn trace_irq_signal(&mut self, kind: MemEventKind, value: u8) {
+        let pc = self.cpu_pc_full;
+        let mclk = *self.mclk_total;
+        let line = self.ppu_line;
+        let blank = line >= self.vblank_start_line;
+        let force_blank = self.ppu.inidisp & 0x80 != 0;
+        if let Some(log) = self.mem_trace_log.as_mut() {
+            if log.events.len() >= log.max_events {
+                return;
+            }
+            let addr_full = if matches!(kind, MemEventKind::NmiSignal) {
+                0x00_4210
+            } else {
+                0x00_4211
+            };
+            log.events.push(MemTraceEvent {
+                mclk_total: mclk,
+                pc_full: pc,
+                addr_full,
+                kind,
+                value,
+                line,
+                blank,
+                force_blank,
+            });
+        }
+    }
 }
 
 impl SnesBus<'_> {
@@ -1618,6 +1657,7 @@ impl SnesBus<'_> {
             // `*self.irq` edge was (it coalesced/dropped ~64% of Doom's chained
             // H+V writes). No edge latch is set here any more.
             self.cpu_regs.irq_flag = true;
+            self.trace_irq_signal(MemEventKind::IrqSignal, self.cpu_regs.nmitimen);
         }
     }
 
@@ -1663,6 +1703,7 @@ impl SnesBus<'_> {
             if self.cpu_regs.nmitimen & 0x80 != 0 {
                 *self.nmi = true;
                 self.nmis_serviced = self.nmis_serviced.saturating_add(1);
+                self.trace_irq_signal(MemEventKind::NmiSignal, self.cpu_regs.nmitimen);
             }
             // OAM address auto-reset (ares `object.cpp:31-32`), unless
             // forced-blank.
@@ -1698,6 +1739,15 @@ impl SnesBus<'_> {
             // Frame wrap.
             self.ppu_line = 0;
             self.cpu_regs.hvbjoy &= !0x80;
+            // P1 — faithful `nmiLine`: ares clears it when `nmiValid` falls
+            // (vcounter < vdisp), i.e. at VBlank end, NOT only on a $4210 read
+            // (irq.cpp `nmiLine = nmiValid`). Without this the flag stays
+            // stale-true into the next frame — the latent bug a faithful
+            // late-NMI-enable (P2) would turn into a spurious NMI (the SMRPG
+            // black-screen tripwire). The actual NMI is still fired at VBlank
+            // entry via `*self.nmi`; this only fixes what `$4210` reads outside
+            // VBlank (now 0, matching hardware).
+            self.cpu_regs.nmi_flag = false;
             self.frame_count = self.frame_count.saturating_add(1);
             // Snapshot whether the frame that just completed showed any
             // visible content, paired with the frame counter bump so a
@@ -2241,6 +2291,22 @@ impl SnesBus<'_> {
                     self.ppu.latch_counters(h, v);
                 }
             }
+            // P2 — late NMI enable: raising NMITIMEN.7 (0→1) while the NMI line
+            // is still asserted ($4210 flag set, i.e. mid-VBlank, un-read) fires
+            // the NMI now (ares irq.cpp `nmitimenUpdate`: `if nmiEnable.raise(7)
+            // && nmiLine → nmiTransition`). Checked BEFORE the CpuRegs::write so
+            // we see the previous NMITIMEN.7. P1's VBlank-end clear of `nmi_flag`
+            // is what makes this safe: the line is no longer stale-true outside
+            // VBlank, so this can't fire the spurious NMI that black-screened
+            // SMRPG when the naive port was attempted.
+            if reg_off == 0x4200
+                && self.cpu_regs.nmitimen & 0x80 == 0
+                && value & 0x80 != 0
+                && self.cpu_regs.nmi_flag
+            {
+                *self.nmi = true;
+                self.trace_irq_signal(MemEventKind::NmiSignal, value);
+            }
             if self.cpu_regs.write(reg_off, value) {
                 return;
             }
@@ -2365,6 +2431,49 @@ mod tests {
         // STP — CPU halts
         snes.step();
         assert!(snes.cpu.stopped);
+    }
+
+    /// ROM that does `LDA #$80; STA $4200; STP` — raise NMITIMEN.7 then halt.
+    fn nmitimen_enable_rom() -> Cartridge {
+        let mut rom = demo_lorom().rom;
+        rom[0x0000] = 0xA9; // LDA #$80
+        rom[0x0001] = 0x80;
+        rom[0x0002] = 0x8D; // STA $4200 (absolute, DB=0 → $00:4200)
+        rom[0x0003] = 0x00;
+        rom[0x0004] = 0x42;
+        rom[0x0005] = 0xDB; // STP
+        Cartridge::from_bytes(rom).unwrap()
+    }
+
+    #[test]
+    fn late_nmi_enable_fires_when_line_asserted() {
+        // P2: raising NMITIMEN.7 (0→1) while the NMI line is asserted (the
+        // $4210 flag is set, i.e. mid-VBlank, un-read) fires the NMI now.
+        let mut snes = Snes::from_cartridge(nmitimen_enable_rom());
+        snes.reset();
+        snes.cpu_regs.nmi_flag = true; // NMI line asserted (in VBlank)
+        snes.cpu_regs.nmitimen = 0x00; // NMI not yet enabled
+        snes.nmi_pending = false;
+        snes.step(); // LDA #$80
+        snes.step(); // STA $4200 — the 0→1 raise
+        assert!(snes.cpu.pending_nmi, "late NMITIMEN.7 enable fires the NMI");
+    }
+
+    #[test]
+    fn late_nmi_enable_does_not_fire_when_line_clear() {
+        // The P1 guarantee: outside VBlank the line is clear (not stale-true),
+        // so the same write must NOT fire a spurious NMI (the SMRPG tripwire).
+        let mut snes = Snes::from_cartridge(nmitimen_enable_rom());
+        snes.reset();
+        snes.cpu_regs.nmi_flag = false; // line NOT asserted (outside VBlank)
+        snes.cpu_regs.nmitimen = 0x00;
+        snes.nmi_pending = false;
+        snes.step(); // LDA #$80
+        snes.step(); // STA $4200
+        assert!(
+            !snes.cpu.pending_nmi,
+            "no spurious NMI when the line is clear"
+        );
     }
 
     #[test]
