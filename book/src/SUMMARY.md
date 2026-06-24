@@ -32,4 +32,4 @@
 
 ---
 
-[The SNES emulator landscape](appendix/landscape.md)
+[Acknowledgements](acknowledgements.md)

@@ -4,35 +4,34 @@ luna is validated against two large external test sets. Neither is
 vendored into this repo — both are fetched on demand and the tests are
 opt-in / skip-if-absent, so a plain `cargo test` works without them.
 
-## 1. Tom Harte / SingleStepTests — CPU instruction semantics
+## 1. Per-instruction CPU semantics suite
 
 Exhaustive single-instruction state-transition tests (≈10k cases per
 opcode) for both CPU cores.
 
-| Core | Source | Harness | Fetch |
-|---|---|---|---|
-| 65C816 | [SingleStepTests/65816](https://github.com/SingleStepTests/65816) (= [TomHarte/ProcessorTests](https://github.com/TomHarte/ProcessorTests) `/65816`) | `crates/luna-cpu-65c816/tests/tom_harte.rs` | `tools/fetch-tom-harte.sh` → `tests/tom-harte/v1` |
-| SPC700 | [SingleStepTests/spc700](https://github.com/SingleStepTests/spc700) (= ProcessorTests `/spc700`) | `crates/luna-cpu-spc700/tests/tom_harte.rs` | `tools/fetch-tom-harte-spc700.sh` → `tests/tom-harte-spc700/v1` |
+| Core | Harness | Fetch |
+|---|---|---|
+| 65C816 | `crates/luna-cpu-65c816/tests/cpu_tests.rs` | `tools/fetch-cpu-tests.sh` → `tests/cpu-tests/v1` |
+| SPC700 | `crates/luna-cpu-spc700/tests/cpu_tests.rs` | `tools/fetch-cpu-tests-spc700.sh` → `tests/cpu-tests-spc700/v1` |
 
 Both are `#[ignore]`d (large dataset, ~8 min for the 65C816). Run:
 
 ```bash
-tools/fetch-tom-harte.sh
-tools/fetch-tom-harte-spc700.sh
-LUNA_TOM_HARTE_REQUIRE=1 cargo test -p luna-cpu-65c816 --test tom_harte -- --ignored
-LUNA_TOM_HARTE_REQUIRE=1 cargo test -p luna-cpu-spc700 --test tom_harte -- --ignored
+tools/fetch-cpu-tests.sh
+tools/fetch-cpu-tests-spc700.sh
+LUNA_CPU_TESTS_REQUIRE=1 cargo test -p luna-cpu-65c816 --test cpu_tests -- --ignored
+LUNA_CPU_TESTS_REQUIRE=1 cargo test -p luna-cpu-spc700 --test cpu_tests -- --ignored
 ```
 
-`LUNA_TOM_HARTE_REQUIRE=1` turns any mismatch into a hard failure
+`LUNA_CPU_TESTS_REQUIRE=1` turns any mismatch into a hard failure
 (otherwise the test just prints a report). Current state: **both pass
 100%** (65C816 5,080,000/5,080,000; SPC700 256,000/256,000). CI gates
-them in the `tom-harte` job. The datasets are gitignored.
+them in the `cpu-tests` job. The datasets are gitignored.
 
-## 2. Peter Lemon SNES — full-system golden display tests
+## 2. Homebrew full-system golden display tests
 
 End-to-end hardware-test ROMs that exercise the whole emulator (CPU +
-PPU + bus). Following the [`twvd/siena`](https://github.com/twvd/siena)
-convention, the ROM corpus is **not vendored** and is checked out **at
+PPU + bus). The ROM corpus is **not vendored** and is checked out **at
 the same directory level** as this repo (a sibling), then referenced
 from there:
 
@@ -42,9 +41,9 @@ from there:
 └── luna_tests/    ← the sibling corpus  (../luna_tests)
 ```
 
-Source: [PeterLemon/SNES](https://github.com/PeterLemon/SNES) — sparse
-clone of only the test-relevant subdirs (`CPUTest`, `PPU`; not the
-multi-GB whole repo). Harness: `crates/luna-core/tests/snes_test_roms.rs`.
+Source: an open-source homebrew hardware-test ROM corpus — sparse clone of
+only the test-relevant subdirs (`CPUTest`, `PPU`; not the multi-GB whole
+repo). Harness: `crates/luna-core/tests/snes_test_roms.rs`.
 Each test boots a ROM with a forced LoROM mapper
 (`Cartridge::from_bytes_forced` — these homebrew ROMs have no valid
 header checksum), runs it until the 256×224 framebuffer settles (or a
@@ -91,21 +90,21 @@ committed as golden tests.
 
 ### Loaded as PAL
 
-The harness forces **`Region::Pal`** (`run_to_stable`), matching the
-`twvd/siena` convention. Peter Lemon's suite is PAL-timed: some tests
+The harness forces **`Region::Pal`** (`run_to_stable`). This homebrew
+suite is PAL-timed: some tests
 (BRA, JMP, PSR, RET) do a single `WaitNMI` then write the entire result
 table in one burst that only fits inside PAL's longer V-blank (~72 lines
 vs NTSC's 37). Run as NTSC, luna *correctly* drops the writes that
-overflow into active display (`active_display` gating, ares-accurate) and
+overflow into active display (`active_display` gating, hardware-accurate) and
 those screens stay blank. The other 19 re-sync to V-blank per row (e.g.
 ADC issues 33 `WaitNMI`s) and render on any region. luna's NTSC timing is
 correct — these ROMs simply target PAL, so the suite loads them as PAL to
-reproduce the reference output.
+reproduce the expected output.
 
 ### Golden hashes are luna's own output
 
-Unlike the Tom Harte vectors (hardware truth), these hashes are captured
-from **luna's renderer**, so they are **regression baselines**, not an
+Unlike the per-instruction CPU vectors (hardware truth), these hashes are
+captured from **luna's renderer**, so they are **regression baselines**, not an
 independent correctness oracle. Each ROM ships a reference `CPU<NAME>.png`
 (real-hardware output) — eyeball luna's render against it when blessing a
 baseline (verified: e.g. BRA shows the full BCC…BRL PASS table). Regenerate

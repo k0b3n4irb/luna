@@ -92,7 +92,7 @@ screenshots), Luna makes the agent ↔ machine dialogue a central design goal.
 | Metric                                 | Target                             |
 |----------------------------------------|------------------------------------|
 | SNES compatibility (test suite)        | ≥ 99% of commercial ROMs           |
-| bsnes/ares tests passed                | ≥ 95%                              |
+| Hardware-accuracy tests passed         | ≥ 95%                              |
 | Performance (release, modern x86-64)   | 60 fps cycle-accurate at < 30% CPU |
 | MCP tool round-trip latency            | < 5 ms (local stdio)               |
 | Cold start → ROM loaded                | < 200 ms                           |
@@ -104,8 +104,8 @@ screenshots), Luna makes the agent ↔ machine dialogue a central design goal.
 
 ## 2. Non-goals
 
-- **Speed at the expense of accuracy**: Luna is not Snes9x; we
-  systematically favor fidelity.
+- **Speed at the expense of accuracy**: we systematically favor fidelity
+  over raw throughput.
 - **Online multiplayer netplay**: out of scope for V1.
 - **Emulation of other consoles**: SNES only. (A future factorization is
   possible but it is not a goal.)
@@ -296,8 +296,8 @@ luna/
 │   └── luna-overlay/                # ⚠️ spectator overlays (native + WASM)
 │
 ├── tests/
-│   ├── roms/                        # test ROMs (krom, blargg, peter_lemon)
-│   ├── tom-harte/                   # JSON ProcessorTests suite for the 65C816
+│   ├── roms/                        # homebrew hardware-test ROMs
+│   ├── cpu-tests/                   # JSON per-instruction test suite for the 65C816
 │   └── golden/                      # reference frames for visual tests
 │
 └── tools/
@@ -321,16 +321,16 @@ Legend: ✅ cross-target / ⚠️ cross-target with cfg-gated features /
 | Rendering (gui)     | `wgpu` + `egui` / `eframe`                     | Cross-platform native + WASM via WebGPU/WebGL               |
 | Native audio        | `cpal`                                         | Cross-platform low-latency                                  |
 | Web audio           | `cpal` (wasm-bindgen backend, output only)     | Web Audio API bridge; ~50-100ms latency                     |
-| 65C816 testing      | `tom-harte/ProcessorTests` (JSON)              | Suite used by jgenesis, dr.beer, etc.                       |
+| 65C816 testing      | per-instruction state-vector suite (JSON)      | Exhaustive opcode-level conformance vectors                 |
 | Visual tests        | `image` + `pixelmatch`                         | Golden-frame comparison                                     |
 | Tracing             | `tracing` + `tracing-subscriber`               | Structured logs                                             |
 | CLI args            | `clap` (derive)                                | Standard                                                    |
 | Coroutines          | **none** (`genawaiter` rejected)               | Static-dispatch pattern preferred, see §6.6                 |
 
-**Decision on the internal architecture**: unlike ares which uses libco,
-and unlike some Rust emulators that attempt `#[coroutine]` (nightly, broken
-save-states), Luna uses the **CPU-driven master-clock catch-up** pattern
-validated by jgenesis and tetanes. See §6.6 for the details.
+**Decision on the internal architecture**: unlike designs that use
+cooperative cothreads, and unlike some Rust emulators that attempt
+`#[coroutine]` (nightly, broken save-states), Luna uses the
+**CPU-driven master-clock catch-up** pattern. See §6.6 for the details.
 
 ### 4.1 Cross-target async strategy
 
@@ -428,8 +428,7 @@ accurate" SNES emulator from a truly cycle-accurate one. Without it, the
 PPU is only caught up between CPU instructions — which misses HDMA
 effects, the exact timing of H/V IRQs, and the Mario Kart bugs. With it,
 every CPU memory access triggers a PPU catch-up to the exact cycle, which
-guarantees accuracy while staying zero-alloc in the hot loop. Pattern
-validated by jgenesis and tetanes.
+guarantees accuracy while staying zero-alloc in the hot loop.
 
 ### Cartridge mappers
 
@@ -585,22 +584,20 @@ a PPU (clocked by dots/scanlines), an APU at an independent frequency
 (3.072 MHz SPC700), DMAs that steal cycles from the CPU, and potentially a
 coprocessor — all while staying deterministic and performant.
 
-**Decision**: we adopt the **CPU-driven master-clock catch-up** pattern
-validated by [jgenesis](https://github.com/jsgroth/jgenesis) and
-[tetanes](https://github.com/lukexor/tetanes), considered the Rust state of
-the art in cycle-accurate emulation.
+**Decision**: we adopt the **CPU-driven master-clock catch-up** pattern,
+considered the Rust state of the art in cycle-accurate emulation.
 
 **Rejected patterns and why**
 
 | Pattern | Verdict | Reason |
 |---|---|---|
-| Event-queue `BinaryHeap` (moa style) | ❌ | At 21M cycles/s, the heap + `Box<dyn>` overhead eats 50% of the cycle budget |
-| Coroutines `#[coroutine]` (Lochnes) | ❌ | Nightly only, save-states impossible (non-serializable closures), marginal perf |
+| Event-queue `BinaryHeap` | ❌ | At 21M cycles/s, the heap + `Box<dyn>` overhead eats 50% of the cycle budget |
+| Coroutines `#[coroutine]` | ❌ | Nightly only, save-states impossible (non-serializable closures), marginal perf |
 | `genawaiter` (stable, but...) | ❌ | LLVM struggles to inline it; broken save-states |
-| Naive instruction-step (rboy GB) | ❌ | No mid-instruction accuracy, breaks Mario Kart |
-| Lazy + `next_event` (gameroy GB) | ⚠️ | To be used **in addition** to optimize WAI/STP |
-| **CPU master-clock catch-up + `io_cycle()` (jgenesis)** | ✅ | **Our choice** |
-| Pure per-cycle state-machine (DaveTCode NES) | ⚠️ | Excellent for the isolated CPU, to be used in `luna-cpu-65c816` |
+| Naive instruction-step | ❌ | No mid-instruction accuracy, breaks Mario Kart |
+| Lazy + `next_event` | ⚠️ | To be used **in addition** to optimize WAI/STP |
+| **CPU master-clock catch-up + `io_cycle()`** | ✅ | **Our choice** |
+| Pure per-cycle state-machine | ⚠️ | Excellent for the isolated CPU, to be used in `luna-cpu-65c816` |
 
 **Adopted pattern — overview**
 
@@ -719,20 +716,6 @@ impl Apu {
    self.wram, …`). No `Rc<RefCell>` in the hot loop.
 
 **Residual risks & mitigations**: see §15.
-
-**Reference files to study in Phase 0** (read-only, GPL-3.0 incompatible
-with copying):
-
-- [`jgenesis/backend/snes-core/src/api.rs`](https://github.com/jsgroth/jgenesis/blob/master/backend/snes-core/src/api.rs#L284)
-  — `Snes::tick` line 284 (direct model)
-- [`jgenesis/backend/snes-core/src/apu.rs`](https://github.com/jsgroth/jgenesis/blob/master/backend/snes-core/src/apu.rs#L274)
-  — rational catch-up line 274
-- [`jgenesis/backend/snes-core/src/memory/dma.rs`](https://github.com/jsgroth/jgenesis/blob/master/backend/snes-core/src/memory/dma.rs)
-  — DMA/HDMA timing
-- [`jgenesis/backend/snes-core/src/bus.rs`](https://github.com/jsgroth/jgenesis/blob/master/backend/snes-core/src/bus.rs)
-  — `access_master_cycles` computation per memory region
-- [`tetanes-core/src/cpu.rs`](https://github.com/lukexor/tetanes/blob/main/tetanes-core/src/cpu.rs#L280)
-  — `start_cycle`/`end_cycle` pattern (NES but transposable)
 
 ---
 
@@ -1360,8 +1343,8 @@ VRAM, the instruction fetch, the pixel-by-pixel effect.
 #### G — Modern speedrunning & TAS
 
 Deterministic `replay` mode + frame-stepping + save states + scripting → a
-Tool-Assisted Speedrun platform. A serious competitor to BizHawk for the
-SNES, with the added modern Rust ecosystem and scriptable API.
+Tool-Assisted Speedrun platform for the SNES, with a modern Rust ecosystem
+and a scriptable API.
 
 #### H — Automated tournament refereeing
 
@@ -1567,10 +1550,10 @@ RAM (negligible up to several minutes).
 
 ### Integration tests
 
-- **Open-source test ROMs** in `tests/roms/`:
-  - **krom** suite (CPU, PPU, DMA, HDMA, ADC, etc.)
-  - **blargg** suite (APU)
-  - **peter_lemon** suite (advanced PPU)
+- **Open-source homebrew hardware-test ROMs** in `tests/roms/`:
+  - CPU / PPU / DMA / HDMA / ADC result-screen ROMs
+  - APU audio-test ROMs
+  - advanced-PPU test ROMs
 - Each ROM displays "PASS" or "FAIL" via text/screen. We capture frame N
   and look for the expected pattern.
 
@@ -1643,17 +1626,15 @@ To discuss: GPL-3.0 (more protective) or Apache-2.0 (more permissive).
 
 **Research & validation** (1 week — a prerequisite to any production code):
 
-- Reading the reference code (read-only, GPL-3.0, no copying):
-  - `jgenesis/backend/snes-core/src/api.rs` (`Snes::tick` model)
-  - `jgenesis/backend/snes-core/src/apu.rs` (rational catch-up)
-  - `jgenesis/backend/snes-core/src/bus.rs` (`access_master_cycles`)
-  - `jgenesis/backend/snes-core/src/memory/dma.rs` (DMA/HDMA timing)
-  - `tetanes-core/src/cpu.rs` (`start_cycle`/`end_cycle` pattern)
-  - `jgenesis/ARCHITECTURE.md` (workspace organization model)
-- Verify the license of `emu-rs/snes-apu` (MIT/Apache expected) — if
-  compatible, plan its integration in Phase 2 to save ~1 month.
-- Clone and run [Tom Harte 65816 ProcessorTests](https://github.com/SingleStepTests/65816)
-  to validate the test-suite format.
+- Studying the master-clock catch-up scheduling model:
+  - the `Snes::tick` direct model
+  - the rational APU catch-up
+  - the per-region `access_master_cycles` computation
+  - DMA/HDMA timing
+  - the `start_cycle`/`end_cycle` cycle-stepping pattern
+  - the workspace-organization model
+- Validate the per-instruction `65816` test-suite format end-to-end against
+  the CPU core.
 
 **Code skeleton** (2 weeks):
 
@@ -1667,7 +1648,7 @@ To discuss: GPL-3.0 (more protective) or Apache-2.0 (more permissive).
 - `luna-cpu-65c816`: complete instruction decoder (without fine timing
   yet). Jump-table `[fn(&mut Cpu, &mut Bus); 256]`.
 - `luna-cli`: loads a ROM, runs 1 frame, dumps the CPU state.
-- Tests: first pass of a few Tom Harte tests.
+- Tests: first pass of a few per-instruction CPU tests.
 
 ### Phase 1 — First render (4 weeks) — ✅ done
 
@@ -1675,8 +1656,8 @@ To discuss: GPL-3.0 (more protective) or Apache-2.0 (more permissive).
 - `luna-dma`: DMA (without HDMA).
 - `luna-core::Snes::step()` complete (see §6.6) — CPU + DMA + PPU catch-up
   via `bus.io_cycle()`.
-- 1000+ Tom Harte tests pass (target: 100% of the 65C816).
-- A test ROM (krom CPUMSC) displays "PASS".
+- 1000+ per-instruction tests pass (target: 100% of the 65C816).
+- A CPU result-screen test ROM displays "PASS".
 
 ### Phase 2 — Audio + simple games (4 weeks) — ✅ done
 
@@ -1703,7 +1684,7 @@ To discuss: GPL-3.0 (more protective) or Apache-2.0 (more permissive).
 
 ### Phase 5 — Advanced debug & spectator mode (5 weeks) — 🚧 in progress
 
-- ✅ GUI debugger panels (Mesen2-style): CPU/SPC700 state, memory hex,
+- ✅ GUI debugger panels: CPU/SPC700 state, memory hex,
   65C816/SPC700 disassembly, I/O registers (incl. DSP-1), palette, tilemap,
   sprites.
 - ⏳ Conditional breakpoints, trace logging, time travel.
@@ -1748,26 +1729,26 @@ Optional phases depending on traction & community feedback:
 
 | Risk                                            | Mitigation                                                                          |
 |-------------------------------------------------|-------------------------------------------------------------------------------------|
-| Cycle-accurate performance too slow             | jgenesis static-dispatch zero-alloc pattern (§6.6), criterion profiling, SIMD PPU   |
-| CPU↔APU sync hard to stabilize                  | Rational u64 arithmetic (no float, §6.6), blargg APU tests                          |
+| Cycle-accurate performance too slow             | Static-dispatch zero-alloc pattern (§6.6), criterion profiling, SIMD PPU            |
+| CPU↔APU sync hard to stabilize                  | Rational u64 arithmetic (no float, §6.6), APU audio-test ROMs                       |
 | MCP schemas that change (evolving spec)         | Pin to a stable version, abstract behind `luna-mcp-core`                            |
-| Under-documented coprocessors (Super FX)        | Rely on fullsnes.htm + jgenesis code (reading, not GPL copying)                     |
+| Under-documented coprocessors (Super FX)        | Cross-reference the hardware behaviour against multiple sources                     |
 | **Token cost explosion in AI usage**            | `economy/balanced/generous` profiles, hash-then-fetch, MCP resources, budget tracker (§8.5) |
 | Spectator GUI slowing down the core             | Separate GUI thread, framebuffer shared via `arc-swap` or triple-buffer            |
 | **Hostile borrow checker** (CPU + bus + PPU mut simultaneously) | `SnesBus<'a>` pattern created on every step, separate borrows. No `Rc<RefCell>` in the hot loop |
 | **`tokio::time` panics under WASM**             | `luna-async` facade mandatory from V1 (§4.1) — ban direct `tokio::*` in the core    |
 | **`crossbeam-channel` panics under WASM**       | Use `futures::channel::mpsc` everywhere, never crossbeam in the core               |
 | **`rmcp` does not run under WASM**              | V2 Luna Studio Web = WebSocket client to a remote native Luna (see §9.2)            |
-| **Missed mid-instruction effects** (Mario Kart, F-Zero) | `bus.io_cycle()` pattern on every CPU access (§5, §6.6). Test against Tom Harte ProcessorTests |
-| **NMI/IRQ timing 1-cycle off**                  | Latch the IRQ/NMI state at instruction start, serve it before the next fetch (see jgenesis api.rs:323) |
+| **Missed mid-instruction effects** (Mario Kart, F-Zero) | `bus.io_cycle()` pattern on every CPU access (§5, §6.6). Test against the per-instruction CPU suite |
+| **NMI/IRQ timing 1-cycle off**                  | Latch the IRQ/NMI state at instruction start, serve it before the next fetch |
 
 ### Open questions (to be settled in Phase 0)
 
 1. **Final license**: MPL-2.0 (proposed) vs Apache-2.0 (more permissive).
    Validation after reviewing the desired commercial constraints.
-2. **`emu-rs/snes-apu` integration**: verify the license in Phase 0. If
-   MIT/Apache, plan the integration in Phase 2 (saves ~1 month).
-   Otherwise, APU from scratch.
+2. **Third-party APU crate integration**: survey existing permissively
+   licensed SPC700/DSP crates in Phase 0. If a suitable one exists, plan
+   the integration in Phase 2 (saves ~1 month). Otherwise, APU from scratch.
 3. **libretro core compatibility**: deferred to Phase 10. To confirm that
    the libretro constraints (sync API, threading) are compatible with our
    `!Send` core.

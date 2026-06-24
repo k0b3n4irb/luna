@@ -1,191 +1,78 @@
-# Luna
+<div align="center">
 
-> A **cycle-accurate** SNES emulator written in Rust, designed so that an AI
-> agent can **play**, **develop** and **debug** Super Nintendo games
-> autonomously — through a rich introspection API and a built-in MCP server.
+# 🌙 Luna
 
-[![Rust edition](https://img.shields.io/badge/Rust-2024-orange)](rust-toolchain.toml)
+### A cycle-accurate SNES emulator, written in Rust — built so an AI agent can play, develop and debug Super Nintendo games on its own.
+
+[![Release](https://img.shields.io/github/v/release/k0b3n4irb/luna?color=brightgreen)](https://github.com/k0b3n4irb/luna/releases/latest)
+[![Docs](https://img.shields.io/badge/docs-k0b3n4irb.github.io%2Fluna-8a7cff)](https://k0b3n4irb.github.io/luna/)
 [![License](https://img.shields.io/badge/license-MPL--2.0-blue)](LICENSE)
-[![Status](https://img.shields.io/badge/status-pre--1.0-yellow)](#status)
-[![Platform](https://img.shields.io/badge/platform-Linux-informational)](#platform-support)
+[![Rust](https://img.shields.io/badge/Rust-2024-orange)](rust-toolchain.toml)
+
+<!-- TODO: drop a GUI screenshot / gameplay GIF here — it makes the porch.
+     Capture the debugger on a game and commit it to docs/assets/. -->
+
+**[📖 Documentation](https://k0b3n4irb.github.io/luna/) · [⬇️ Download](https://github.com/k0b3n4irb/luna/releases/latest) · [📚 API reference](https://k0b3n4irb.github.io/luna/api/)**
+
+</div>
 
 ---
 
-## Why Luna?
+Most emulators bolt AI on afterwards, by reading screenshots. **Luna makes the
+agent ↔ machine dialogue first-class.** The whole machine state — CPU and PPU
+registers, VRAM, OAM, palette, sprites, memory — is exposed as structured,
+serializable snapshots, and a built-in **MCP server** lets an agent drive the
+console over JSON-RPC to *play*, *build homebrew*, or *debug ROM hacks*.
 
-Most SNES emulators bolt AI on afterwards via OCR over screenshots. Luna makes
-the **agent ↔ machine** dialogue first-class: the full machine state (CPU/PPU
-registers, VRAM, OAM, palette, sprites, memory) is exposed as **structured,
-serializable** snapshots, and a built-in **MCP** server lets an agent drive the
-machine over JSON-RPC — to **play**, **dev** (homebrew), or **debug** (ROM
-hacks). Fidelity isn't sacrificed: CPU cores pass the SingleStepTests suites and
-every subsystem is ported from ares / Mesen2. Full vision in
-[`ARCHITECTURE.md`](ARCHITECTURE.md).
+And it does not trade away fidelity to get there. Luna is **cycle-accurate**:
+both CPU cores pass their exhaustive per-instruction test suites 100%, the audio
+and video paths are reconstructed down to per-access timing, and that accuracy
+is held in place by a self-contained differential harness — so what the headless
+CLI measures is exactly what you see on screen.
 
-## Status
+One binary runs three ways: **standalone** (a human plays), **spectator** (the
+AI plays, a human watches), or **headless** (driven over MCP, for CI and agents).
 
-Project under **active development, pre-1.0** (`v0.3.3`). What runs today:
+## ✨ Features
 
-| Subsystem | Crate | State |
-|---|---|---|
-| Bus & memory map (LoROM / HiROM / ExHiROM / SA-1) | `luna-bus` | ✅ |
-| ROM parsing & mapper detection | `luna-cartridge` | ✅ |
-| 65C816 CPU (cycle-accurate, SingleStepTests suite 100%) | `luna-cpu-65c816` | ✅ |
-| SPC700 CPU (cycle-accurate, SingleStepTests suite 100%) | `luna-cpu-spc700` | ✅ |
-| APU — SPC700 + S-DSP (cycle-accurate ares port) | `luna-apu` | ✅ |
-| PPU + renderer + compositor | `luna-ppu` | ✅ |
-| System glue, scheduler, DMA / HDMA | `luna-core` | ✅ |
-| Coprocessors: SA-1, Super FX (GSU), DSP-1 | `luna-core` / `luna-bus` | ✅ |
-| NEC uPD7725 / uPD96050 DSP core (DSP-1) | `luna-cpu-upd96050` | ✅ |
-| Introspection API (`EmulatorState` snapshots) | `luna-api` | ✅ |
-| MCP server (stdio) | `luna-mcp-server` | ✅ |
-| CLI binary (`run` / `state` / `frames` / `wram-trace` / `mcp`) | `luna-cli` | ✅ |
-| GUI debugger (winit + pixels + egui-wgpu, audio-as-clock pacing) | `luna-gui` | ✅ |
+- **Cycle-accurate cores** — 65C816 + SPC700 (per-instruction suites 100%), S-DSP audio.
+- **The big coprocessors** — SA-1, Super FX (GSU), DSP-1, S-DD1.
+- **AI-native** — a stable introspection API + an MCP server; an agent reads
+  state and drives input through one contract the CLI, GUI and MCP all share.
+- **A real debugger GUI** — memory, disassembly and live panels over winit + wgpu,
+  two remappable controllers, plus SNES Mouse & Super Scope.
+- **Never lose progress** — automatic `.srm` battery saves + 9 save-state slots.
 
-Commercial titles play across the major chips — SMW, Super Mario RPG (SA-1),
-Star Fox / Doom (Super FX), Super Mario Kart / Pilotwings (DSP-1 Mode 7) — and
-the GUI ships Mesen2-style debugger panels. Remaining coprocessors (DSP-2/3/4,
-Cx4, S-DD1, SPC7110), REST/WebSocket transports and a WASM target are on the
-[roadmap](ARCHITECTURE.md#14-roadmap--phasing).
+## 📖 Documentation
 
-## Platform support
+Everything — installing, the controls, saves, the CLI / API / MCP surface, and
+how each subsystem works — lives in the guide. This README is just the porch.
 
-Luna is currently **developed and tested on Linux only**. The stack
-(winit + pixels + egui-wgpu for the GUI, cpal for audio) is cross-platform in
-principle, but
-macOS and Windows are **not tested or supported yet** — they may build and run,
-but no guarantees. Contributions to validate other platforms are welcome.
+### **→ [k0b3n4irb.github.io/luna](https://k0b3n4irb.github.io/luna/)**
 
-## Download (Linux binaries)
+The generated Rust **[API reference](https://k0b3n4irb.github.io/luna/api/)**
+covers all twelve crates.
 
-Prebuilt binaries are attached to each [GitHub
-release](https://github.com/kobenairb/luna/releases) — no toolchain needed:
+## 🙏 Acknowledgements
 
-```bash
-# x86_64 (or swap aarch64 for ARM64)
-curl -LO https://github.com/kobenairb/luna/releases/latest/download/luna-v0.2.0-linux-x86_64.tar.gz
-tar xzf luna-v0.2.0-linux-x86_64.tar.gz && cd luna-v0.2.0-linux-x86_64
-./luna-gui "path/to/game.sfc"   # graphical emulator
-./luna --help                   # headless CLI (run / state / mcp)
-```
+Luna stands on the shoulders of the people and projects that made accurate SNES
+emulation a shared, documented science. It would not exist without them:
 
-Each tarball ships both binaries (`luna`, `luna-gui`) plus a `.sha256`
-checksum. Runtime needs a desktop Linux with Vulkan/OpenGL + X11/Wayland and
-ALSA (standard on any modern distro); the headless `luna` CLI needs none of
-those. Windows / macOS binaries are planned.
+- **[ares](https://ares-emu.net/)** — the gold standard for SNES hardware
+  accuracy, and Luna's primary reference for getting each subsystem right.
+- **[Mesen2](https://github.com/SourMesen/Mesen2)** — an independent second
+  source and an invaluable debugging companion; its headless test runner makes
+  Luna's differential validation possible.
+- **[Tom Harte's processor tests](https://github.com/SingleStepTests)** — the
+  exhaustive per-instruction test suites that pin down the 65C816 and SPC700 to
+  the cycle.
+- **The homebrew hardware-test ROM authors** — whose golden test ROMs exercise
+  corners of the hardware no commercial game reaches.
+- **The wider SNES emulation and reverse-engineering community** — decades of
+  documentation, disassembly and patient measurement of real silicon.
 
-## Quick start (build from source)
+Thank you. 🙇
 
-Prerequisites: the Rust toolchain pinned in [`rust-toolchain.toml`](rust-toolchain.toml)
-(2024 edition, Rust ≥ 1.85), on Linux.
+## 📄 License
 
-```bash
-# Full build (debug + release)
-cargo build --release --workspace
-
-# Launch the graphical debugger on a ROM
-cargo run --release -p luna-gui -- "path/to/game.sfc"
-```
-
-### The `luna` binary (CLI)
-
-```bash
-# Run N instructions and dump a screenshot (headless, no GUI)
-./target/release/luna run "game.sfc" -n 2000000 --screenshot /tmp/frame.png
-
-# Emit a JSON snapshot of the machine state (the same data the MCP get_state tool returns)
-./target/release/luna state "game.sfc" -n 30000 --out -
-
-# Serve the MCP server over stdio (for Claude Desktop / Claude Code / custom clients)
-./target/release/luna mcp
-```
-
-`luna <command> --help` documents every flag. For the full reference —
-all subcommands (`run` · `state` · `frames` · `wram-trace` · `bench` ·
-`spc-dump` · `assets-dump` · `mcp`), the `luna-api` Rust surface, the MCP
-tool catalogue, and the state-JSON shape — see
-[`docs/cli_api_reference.md`](docs/cli_api_reference.md).
-
-## Controls & firmware
-
-Two keyboard controllers (**Player 1** + **Player 2**), remappable per-player
-in the GUI (Settings → Input). Player 1 defaults: arrows = D-pad;
-`A`/`Z`/`S`/`X` = B/Y/A/X; `Q`/`W` = L/R; `D`/`E` = Start/Select. Player 2
-defaults to the numeric-keypad d-pad + the `IJKL`/`UO`/`HN` cluster. `F12` =
-screenshot (Settings → Hotkeys). **No Mouse or Super Scope yet.** Full table:
-[`docs/CONTROLLER_BINDINGS.md`](docs/CONTROLLER_BINDINGS.md).
-
-**DSP-1 games** (Super Mario Kart, Pilotwings) need a user-supplied `dsp1b.rom`
-firmware — luna prompts for it (GUI) or takes `--dsp1-rom` (CLI). Setup:
-[`docs/firmware.md`](docs/firmware.md).
-
-## Saving your progress
-
-luna persists saves two ways:
-
-- **Battery (cartridge) saves** — automatic. A game's in-cartridge save is
-  written to a `<rom>.srm` sidecar next to the ROM when you close luna or
-  switch ROMs, and restored the next time you load that ROM. It is the
-  standard `.srm` format, so it interchanges with other emulators.
-- **Save states** — a full machine snapshot in any of 9 slots. `F5` saves to
-  the current slot, `F9` loads it; pick a slot from **Emulation → Save state /
-  Load state**. (Other hotkeys: `F2` pause, `F3` reset, `F12` screenshot — all
-  remappable in **Settings → Hotkeys**.)
-
-## Architecture at a glance
-
-Luna is a 12-crate Cargo workspace, organized in layers that communicate only
-through Rust contracts (traits + serializable types) — no lower layer ever
-depends on a higher one.
-
-```
-┌──────────────────────────────────────────────────────────┐
-│  MCP server (luna-mcp-server)  — JSON-RPC over stdio       │
-├──────────────────────────────────────────────────────────┤
-│  Introspection API (luna-api)  — stable public contract    │
-├──────────────────────────────────────────────────────────┤
-│  Emulation core (luna-core)                                │
-│   65C816 · PPU · SPC700/DSP · DMA · SA-1 · scheduler       │
-├──────────────────────────────────────────────────────────┤
-│  Bus & mappers (luna-bus)                                  │
-└──────────────────────────────────────────────────────────┘
-        ▲                                  ▲
-   luna-cli (headless)              luna-gui (egui/wgpu)
-```
-
-The same binary runs **headless** (driven via MCP — CI / production),
-**standalone** (a human plays), or **spectator** (the AI plays, a human
-watches). Full design — vision, layers, threading, determinism, roadmap — in
-[`ARCHITECTURE.md`](ARCHITECTURE.md).
-
-## Documentation
-
-| Document | Contents |
-|---|---|
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Full system design, layers, roadmap |
-| [`docs/cli_api_reference.md`](docs/cli_api_reference.md) | CLI commands + options, `luna-api` surface, MCP tools |
-| [`CLAUDE.md`](CLAUDE.md) | Repository conventions for contributors (and agents) |
-| [`docs/CONTROLLER_BINDINGS.md`](docs/CONTROLLER_BINDINGS.md) | Keyboard → SNES button map |
-| [`docs/firmware.md`](docs/firmware.md) | Coprocessor firmware (DSP-1 `dsp1b.rom`) setup |
-| [`docs/`](docs/) | Reference specs, accuracy scorecard, per-subsystem gap lists |
-| [`docs/emulator_landscape.md`](docs/emulator_landscape.md) | Survey of existing SNES emulators |
-
-## Development
-
-The canonical sequence before any commit (rebuild + tests + lint):
-
-```bash
-cargo build --workspace --all-targets \
-  && cargo build --release --workspace --all-targets \
-  && cargo test --workspace --lib \
-  && cargo fmt --all --check \
-  && cargo clippy --workspace --all-targets --all-features -- -D warnings
-```
-
-Detailed conventions (reference-first, coprocessor test discipline,
-audio/video validation workflow) live in [`CLAUDE.md`](CLAUDE.md) and
-`.claude/rules/`.
-
-## License
-
-Distributed under the **Mozilla Public License 2.0** — see [`LICENSE`](LICENSE).
+[Mozilla Public License 2.0](LICENSE).

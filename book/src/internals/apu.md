@@ -1,11 +1,7 @@
 # SNES APU (SPC700 + S-DSP) — reference spec
 
-**Sources cross-checked**:
-- ares: `ares/sfc/smp/*.cpp`, `ares/sfc/dsp/*.cpp`, `ares/component/processor/spc700/*.cpp`
-- Mesen2: `Core/SNES/Spc*.cpp`, `Core/SNES/Dsp.cpp`, `Core/SNES/DspVoice.cpp`
-- Raw notes: `/tmp/ares_apu_notes.md` (1691 lines), `/tmp/mesen2_apu_notes.md` (1002 lines)
-
-Per CLAUDE.md, every claim below has agreement from both refs unless flagged "DIVERGENCE" or "ARES-ONLY"/"MESEN2-ONLY".
+luna's faithful-port reference for the SNES audio subsystem (SPC700 CPU +
+S-DSP), describing the hardware-accurate behaviour each component models.
 
 ---
 
@@ -22,7 +18,7 @@ The SPC700 has 256 opcodes with cycle costs ranging **2..8 cycles**. They are **
 - T0/T1/T2 timers (= song tempo) increment based on elapsed SPC cycles.
 - The DSP sample tick fires every 32 SPC cycles → pitch sounds wrong if cycle accounting is off.
 
-Both refs use per-opcode cycle tables. Canonical reference: ares' `spc700.cpp` `instruction()` dispatcher, Mesen2's `Spc.Instructions.cpp:114-172` `IncCycleCount` per-instruction.
+The hardware uses per-opcode cycle costs, charged per-instruction in the dispatcher.
 
 **Examples** (selected):
 | Opcode | Mnemonic | Cycles |
@@ -56,12 +52,13 @@ the scorecard and it is now closed (test `branch_taken_penalty_is_applied`).
 
 ## 3. SPC700 ↔ DSP timing
 
-ares' `SMP::main()` calls `synchronize(dsp)` after every opcode. Mesen2's `Spc::Exec()` runs one opcode then `Dsp::Step(elapsed)`. The DSP catches up by running its 32-cycle pipeline however many times the elapsed SPC cycles cover.
+After every opcode the DSP is synchronized: it catches up by running its
+32-cycle pipeline however many times the elapsed SPC cycles cover.
 
 DSP pipeline organization:
 - 32 DSP cycles per output sample.
-- Voice stages `voice1..voice5` (ares) or `Voice::Step1..Step9` (Mesen2) are **interleaved across the 32 cycles**.
-- Voice 0's pipeline runs at cycles {0, 1, 2, 21, 24, 29, 30, ...} — it literally spans into the next sample (`/tmp/ares_apu_notes.md:681-707`).
+- The voice pipeline stages are **interleaved across the 32 cycles**.
+- Voice 0's pipeline runs at cycles {0, 1, 2, 21, 24, 29, 30, ...} — it literally spans into the next sample.
 - Voice 7's pipeline runs at staggered cycles in the same window.
 
 **Consequence**: a per-sample loop that processes voices serially (`for v in 0..8 { ... }`) gets the wrong inter-voice timing for:
@@ -71,7 +68,7 @@ DSP pipeline organization:
 
 ## 4. DSP pitch counter — the canonical interpolation pipeline
 
-Each voice has a **16-bit pitch accumulator** (`gaussianOffset` in ares, `interpolationPos` in Mesen2).
+Each voice has a **16-bit pitch accumulator** (the `gaussianOffset` / interpolation-position register).
 
 ### Per DSP sample:
 ```
@@ -82,20 +79,19 @@ if gaussianOffset >= 0x8000:  // BRR-advance bit
     gaussianOffset -= 0x4000   // or &= 0x3FFF + carry bit handling
 ```
 
-Both refs agree the **BRR advance threshold is 0x8000** (= bit 15). The low 12 bits form the gaussian interpolation phase (256-entry table indexed by `(gaussianOffset >> 4) & 0xFF` essentially).
+The **BRR advance threshold is 0x8000** (= bit 15). The low 12 bits form the gaussian interpolation phase (256-entry table indexed by `(gaussianOffset >> 4) & 0xFF` essentially).
 
 **luna status: CORRECT.** The live DSP (`luna-apu/src/dsp.rs`) follows
-ares' formulation, where `gaussian_offset` is masked to `0x3FFF` and the
-BRR-advance test is `>= 0x4000`. `voice4` (`dsp.rs:732`) decodes the next
-BRR group when `gaussian_offset >= 0x4000`, then advances
+the hardware-reference formulation, where `gaussian_offset` is masked to
+`0x3FFF` and the BRR-advance test is `>= 0x4000`. `voice4` (`dsp.rs:732`)
+decodes the next BRR group when `gaussian_offset >= 0x4000`, then advances
 `(gaussian_offset & 0x3FFF) + latch.pitch` (`dsp.rs:744-750`). This is
-the ares variant of the `>= 0x8000`/`-= 0x4000` formulation above (both
-are equivalent: ares carries the BRR-advance bit at 0x4000 over a
+one equivalent form of the `>= 0x8000`/`-= 0x4000` formulation above (both
+are equivalent: the BRR-advance bit is carried at 0x4000 over a
 0x3FFF-masked accumulator). The old `0x1000`-threshold bug lived in
 now-deleted legacy DSP code in `lib.rs`; it is not the live path.
 
 ### KON 5-sample delay
-ares (`dsp_voice.cpp:55-75`), Mesen2 (`DspVoice.cpp:245-261`):
 
 On a KON edge for voice V:
 - `keyOnDelay = 5` (countdown)
@@ -115,17 +111,17 @@ Header byte:
 - bit 1 = **loop**
 - bit 0 = **end**
 
-### Decode formula (both refs)
+### Decode formula
 ```
 nibble = signed_4bit(extract from data byte)
 if range <= 12:
     raw = (nibble << range) >> 1     // ← THE HALF-SHIFT
 else:
-    raw = (nibble >> 3) << 11         // ARES-style sign-preserve+drop magnitude
+    raw = (nibble >> 3) << 11         // sign-preserve + drop magnitude
                                        // luna: `s32_s &= !0x7FF` on the
                                        // sign-extended sample (dsp.rs:581) —
-                                       // matches ares (keeps sign, drops low
-                                       // 11 bits). Correct.
+                                       // hardware-accurate (keeps sign, drops
+                                       // low 11 bits). Correct.
 
 p1 = buffer[offset-1] >> 1   // ← FIVE !! the previous samples are read HALVED
 p2 = buffer[offset-2] >> 1
@@ -147,19 +143,19 @@ implements all three:
    with the `scale > 12` clamp path `s32_s &= !0x7FF` (`dsp.rs:581`).
 2. The history half-shift on `p2` (`dsp.rs:593`, `>> 1`) and the
    filter-internal `p1 >> 1` (e.g. filter 1, `dsp.rs:598`) — matching
-   ares `brr.cpp`.
+   the hardware BRR decoder.
 3. The final wrap-truncate: `let stored = (s32_s << 1) as i16` after
    `sclamp16` (`dsp.rs:616-617`).
 
 The old missing-half-shift bug lived in legacy DSP code in `lib.rs` that
 has since been deleted; it is not the live path.
 
-The buffer holds **12 samples** in ares (4 per BRR row × 3 most recent rows) so the 4-tap gaussian can read across 2 row boundaries.
+The buffer holds **12 samples** (4 per BRR row × 3 most recent rows) so the 4-tap gaussian can read across 2 row boundaries.
 
 ## 6. ADSR envelope
 
 ### Rate table (32 entries)
-Both refs agree on this exact table:
+The exact rate table:
 ```
 const RATE_TABLE: [u16; 32] = [
     0, 2048, 1536, 1280, 1024, 768, 640, 512,
@@ -168,7 +164,6 @@ const RATE_TABLE: [u16; 32] = [
      10,    8,    6,    5,    4,   3,   2,   1
 ];
 ```
-(`Dsp.cpp:59-73` Mesen2; equivalent in ares `dsp/envelope.cpp`)
 
 ### Counter offsets table (32 entries)
 ```
@@ -193,7 +188,7 @@ When active, the envelope steps according to its current phase:
 - **Direct gain**: per the 4 gain modes (lin+, lin-, exp+, exp-)
 
 **luna status: CORRECT.** The live envelope is `Dsp::envelope_run` /
-`envelope_finish` (`luna-apu/src/dsp.rs:476-553`), a faithful ares port:
+`envelope_finish` (`luna-apu/src/dsp.rs:476-553`), a faithful hardware port:
 - Global counter via `counter_poll` (`dsp.rs:444`) using the
   `COUNTER_RATE` / `COUNTER_OFFSET` tables (`dsp.rs:255,260`) — the
   `(counter + OFFSET[rate]) % RATE[rate] == 0` test, exactly the
@@ -209,7 +204,7 @@ since been **deleted**; it was never the live path.
 
 ## 7. Gaussian interpolation
 
-Both refs use the canonical 256-entry × 4-section table (1024 entries total) built from `sin(pi*k*1.28/1024) * ((cos(pi*k*2/1023)-1)*0.5 + (cos(pi*k*4/1023)-1)*0.08 + 1) / k`, normalised so each 4-tap group sums to 2048.
+The canonical 256-entry × 4-section table (1024 entries total) is built from `sin(pi*k*1.28/1024) * ((cos(pi*k*2/1023)-1)*0.5 + (cos(pi*k*4/1023)-1)*0.08 + 1) / k`, normalised so each 4-tap group sums to 2048.
 
 Per sample:
 ```
@@ -225,9 +220,9 @@ s = clamp15(s) & ~1                     // bit-0 clear
 luna implements this in the live DSP as `Dsp::gaussian_interpolate`
 (`luna-apu/src/dsp.rs:455`) — the 3-tap `>>11` accumulate, the
 `i32::from(output as i16)` partial-sum wrap (`dsp.rs:469`), and the
-final `sclamp16(output) & !1` (`dsp.rs:471`). **Correct**, matching ares
-`gaussian.cpp`. ✓ (The old `lib.rs` gaussian/counter duplicate tables
-were dead-but-identical and have since been deleted.)
+final `sclamp16(output) & !1` (`dsp.rs:471`). **Correct**, matching the
+hardware gaussian interpolation. ✓ (The old `lib.rs` gaussian/counter
+duplicate tables were dead-but-identical and have since been deleted.)
 
 ## 8. Echo (8-tap FIR + delay line)
 
@@ -248,7 +243,7 @@ echo_in_r = read 16-bit signed from APURAM[ESA*256 + echo_offset*4 + 2..3]
 // Push into 8-stage history (history stored HALVED: history[i] = echo_in >> 1)
 // 8-tap FIR with the standard coefficient set, accumulator >> 6 per tap
 
-// 3-stage clamp protocol (Mesen2 Dsp.cpp:144-147, 160, 185-197):
+// 3-stage clamp protocol:
 //   taps 0..5 — accumulate freely
 //   tap 6 — truncate via int16 cast (allowed to wrap)
 //   tap 7 — clamp16
@@ -258,8 +253,8 @@ echo_in_r = read 16-bit signed from APURAM[ESA*256 + echo_offset*4 + 2..3]
 // Output: voice_sum_l + (fir_l * EVOLL) >> 7  →  apply MVOLL  →  clamp/output
 ```
 
-**luna status: CORRECT.** The live echo path is in `dsp.rs` (ares
-`echo.cpp` port): `echo_read` stores history halved (`s >> 1`,
+**luna status: CORRECT.** The live echo path is in `dsp.rs` (a faithful
+hardware port): `echo_read` stores history halved (`s >> 1`,
 `dsp.rs:810`), `calculate_fir` does the `>> 6` per-tap (`dsp.rs:795`),
 and `echo25` (`dsp.rs:849`) implements the staged clamp protocol — taps
 0..5 accumulate freely, tap 6 truncates via `i32::from(.. as i16)`, tap
@@ -284,8 +279,8 @@ delay and the ENDX timing in `dsp.rs`:
 - ENDX is the per-voice `_end` bit OR'd into `registers[0x7C]` in
   `voice7` (`dsp.rs:768-776`), with the cycle-29/30 staging emulated by
   the pipeline split (`voice5` sets `_end` from `_looped`, clears it when
-  `keyon_delay == 5`, `dsp.rs:755-762`). This is the ares `misc.cpp` /
-  `voice.cpp` ENDX double-buffer behaviour, not a synchronous shortcut.
+  `keyon_delay == 5`, `dsp.rs:755-762`). This is the hardware ENDX
+  double-buffer behaviour, not a synchronous shortcut.
 
 ## 10. Reset state
 

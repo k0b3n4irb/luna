@@ -1,8 +1,8 @@
 # Coprocessors
 
 Many SNES cartridges carried an extra chip on the board to do work the base
-console could not. Luna implements the major ones, each as a faithful port of
-its ares/Mesen2 reference:
+console could not. Luna implements the major ones, each as a faithful,
+hardware-accurate port:
 
 | Chip | What it does | Example games |
 |---|---|---|
