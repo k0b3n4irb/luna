@@ -1,116 +1,64 @@
-# External test corpora
+# Testing & validation
 
-luna is validated against two large external test sets. Neither is
-vendored into this repo — both are fetched on demand and the tests are
-opt-in / skip-if-absent, so a plain `cargo test` works without them.
+Luna's accuracy is held in place by **two complementary tiers** of automated
+tests, plus the differential harness from the [previous chapter](differential.md).
+The exact commands and file locations live with the code (see the repository's
+`tests/` directories and contributing notes); this chapter describes *what* is
+validated and *why* it is trustworthy.
 
-## 1. Per-instruction CPU semantics suite
+## Tier 1 — per-instruction CPU suites (hardware truth)
 
-Exhaustive single-instruction state-transition tests (≈10k cases per
-opcode) for both CPU cores.
+Both CPU cores are checked against **exhaustive single-instruction
+state-transition vectors** — roughly ten thousand cases per opcode, covering
+every addressing mode and flag combination. Each case sets the processor to a
+known state, runs one instruction, and asserts the resulting registers, flags
+and memory.
 
-| Core | Harness | Fetch |
+These vectors are an **independent correctness oracle**: they encode real
+hardware behaviour, not Luna's. Current state — **both cores pass 100%**:
+
+| Core | Cases | Result |
 |---|---|---|
-| 65C816 | `crates/luna-cpu-65c816/tests/cpu_tests.rs` | `tools/fetch-cpu-tests.sh` → `tests/cpu-tests/v1` |
-| SPC700 | `crates/luna-cpu-spc700/tests/cpu_tests.rs` | `tools/fetch-cpu-tests-spc700.sh` → `tests/cpu-tests-spc700/v1` |
+| 65C816 | 5,080,000 | ✅ all pass |
+| SPC700 | 256,000 | ✅ all pass |
 
-Both are `#[ignore]`d (large dataset, ~8 min for the 65C816). Run:
+The datasets are large, so they are fetched on demand and gated in their own CI
+job rather than run on every `cargo test`.
 
-```bash
-tools/fetch-cpu-tests.sh
-tools/fetch-cpu-tests-spc700.sh
-LUNA_CPU_TESTS_REQUIRE=1 cargo test -p luna-cpu-65c816 --test cpu_tests -- --ignored
-LUNA_CPU_TESTS_REQUIRE=1 cargo test -p luna-cpu-spc700 --test cpu_tests -- --ignored
-```
+## Tier 2 — full-system golden ROM tests (regression baselines)
 
-`LUNA_CPU_TESTS_REQUIRE=1` turns any mismatch into a hard failure
-(otherwise the test just prints a report). Current state: **both pass
-100%** (65C816 5,080,000/5,080,000; SPC700 256,000/256,000). CI gates
-them in the `cpu-tests` job. The datasets are gitignored.
+End-to-end homebrew hardware-test ROMs exercise the *whole* machine — CPU, PPU
+and bus together. Each test boots a ROM, runs it until the framebuffer settles
+(or to a fixed, deterministic instruction count for animated scenes), and
+asserts a hash of the result:
 
-## 2. Homebrew full-system golden display tests
+- **Display ROMs** hash the 256×224 framebuffer — opcode result screens (every
+  group renders its all-PASS table), background modes, hi-colour blending,
+  windows, Mode 7, and mosaic.
+- **Audio ROMs** play music or sound effects rather than draw, so they hash the
+  APU's 32 kHz PCM output instead of the framebuffer.
 
-End-to-end hardware-test ROMs that exercise the whole emulator (CPU +
-PPU + bus). The ROM corpus is **not vendored** and is checked out **at
-the same directory level** as this repo (a sibling), then referenced
-from there:
+Unlike the Tier-1 vectors, these hashes are captured from **Luna's own output**,
+so they are **regression baselines**, not an independent oracle. Each ROM ships
+a reference image from real hardware; a Luna render is eyeballed against it
+before a baseline is blessed, and re-blessed after any intended render change.
 
-```
-<parent>/
-├── luna/          ← this repo
-└── luna_tests/    ← the sibling corpus  (../luna_tests)
-```
+The ROM corpus is **not vendored** — it is fetched on demand and the tests
+skip cleanly if it is absent, so a plain build never depends on it.
 
-Source: an open-source homebrew hardware-test ROM corpus — sparse clone of
-only the test-relevant subdirs (`CPUTest`, `PPU`; not the multi-GB whole
-repo). Harness: `crates/luna-core/tests/snes_test_roms.rs`.
-Each test boots a ROM with a forced LoROM mapper
-(`Cartridge::from_bytes_forced` — these homebrew ROMs have no valid
-header checksum), runs it until the 256×224 framebuffer settles (or a
-fixed instruction cap for continuously-animated scenes — deterministic
-by instruction count), and asserts a SHA-256 of the framebuffer against a
-committed golden hash.
+### A nuance worth knowing: PAL timing
 
-Coverage:
+The display suite is loaded as **PAL**. Several ROMs do a single wait-for-vblank
+and then write their entire result table in one burst that only fits inside
+PAL's longer vblank (~72 lines vs NTSC's 37). Run as NTSC, Luna *correctly*
+drops the writes that overflow into active display — which is hardware-accurate,
+but leaves those particular screens blank. Loading the suite as PAL reproduces
+the output the ROMs were authored for; Luna's NTSC timing is itself correct.
 
-- **`CPUTest/CPU/*`** (23): every opcode-group result screen (ADC … TRN),
-  each an all-PASS table.
-- **`PPU/*`** (16): BG maps (2BPP BG1-4, 4BPP), hi-colour blend
-  (`HiColor*`), windows (`WindowHDMA`, `WindowMultiHDMA`), Mode 7
-  (`RotZoom`, `Perspective`, `Rings`), `GreenSpace`, and `Mosaic`
-  (Mode 3 / Mode 5). Each luna render was eyeballed against the bundled
-  reference `*.png` before blessing. `MosaicMode3` holds **R** so the
-  demo ramps the `$2106` mosaic size (luna's mosaic is verified working
-  — the captured frame is pixelated). `MosaicMode5` exercises **Mode 5
-  hi-res**; it surfaced (and now passes after) the hi-res 16-px-tile-width
-  fix (bg-gap #14) — luna renders the single 512px figure matching the
-  reference.
-- **`SPC700/*`** (9): audio ROMs — these play music / sounds rather than
-  draw a screen, so they assert a SHA-256 of the APU's **32 kHz PCM
-  output** (first 3 s) instead of the framebuffer (`test_audio` /
-  `spc_test!`). All 9 play (auditioned by ear before blessing).
-  `PlayTwoSong` only plays on a button press, so its test holds **A**
-  (song 1) until the driver boots, then releases (`hold = PAD_A`) — the
-  harness injects controller input via `Snes::set_joypad`.
-  `LUNA_SNES_TEST_PNG=<dir>` in record mode dumps a `.wav` to audition.
-  NB: these surfaced the IPL-ROM multi-block bug (the `$FFEE` byte) — see
-  `luna_spc700_gaps.md`.
+## Why two tiers
 
-```bash
-tools/fetch-snes-test-roms.sh                  # sparse-clone → ../luna_tests
-cargo test -p luna-core --test snes_test_roms
-```
-
-Or point `LUNA_SNES_TEST_DIR` at a corpus root. If the corpus is absent
-the tests skip with a notice and pass. CI runs them in the
-`snes-test-roms` job.
-
-All 23 CPUTest ROMs render the correct all-PASS result screen and are
-committed as golden tests.
-
-### Loaded as PAL
-
-The harness forces **`Region::Pal`** (`run_to_stable`). This homebrew
-suite is PAL-timed: some tests
-(BRA, JMP, PSR, RET) do a single `WaitNMI` then write the entire result
-table in one burst that only fits inside PAL's longer V-blank (~72 lines
-vs NTSC's 37). Run as NTSC, luna *correctly* drops the writes that
-overflow into active display (`active_display` gating, hardware-accurate) and
-those screens stay blank. The other 19 re-sync to V-blank per row (e.g.
-ADC issues 33 `WaitNMI`s) and render on any region. luna's NTSC timing is
-correct — these ROMs simply target PAL, so the suite loads them as PAL to
-reproduce the expected output.
-
-### Golden hashes are luna's own output
-
-Unlike the per-instruction CPU vectors (hardware truth), these hashes are
-captured from **luna's renderer**, so they are **regression baselines**, not an
-independent correctness oracle. Each ROM ships a reference `CPU<NAME>.png`
-(real-hardware output) — eyeball luna's render against it when blessing a
-baseline (verified: e.g. BRA shows the full BCC…BRL PASS table). Regenerate
-after an intended render change:
-
-```bash
-LUNA_SNES_TEST_RECORD=1 LUNA_SNES_TEST_PNG=/tmp/snes \
-  cargo test -p luna-core --test snes_test_roms -- --nocapture
-```
+The per-instruction suites prove each opcode is right in isolation but say
+nothing about how the subsystems interact. The golden ROMs prove the *system*
+renders correctly but, being Luna's own output, can only catch *regressions*.
+Together — plus the differential harness for timing — they cover correctness
+from the single instruction up to the whole frame.
