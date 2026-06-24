@@ -558,8 +558,8 @@ mod tests {
         chip.write(make_addr(0x00, 0x2213), 0);
         chip.write(make_addr(0x00, 0x2214), 0);
         assert!(!chip.running, "still in reset");
-        // Step enough to cross 100.
-        chip.step_coproc(200, 0);
+        // Step enough to reach the compare (HCNT 100 dots = 400 clocks).
+        chip.step_coproc(400, 0);
         assert!(chip.inner.sa1_irq_line(), "timer should fire during reset");
     }
 

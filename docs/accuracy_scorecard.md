@@ -29,12 +29,12 @@ truly-open list is short.** Use *this* table, not §1, as current truth.
 
 | Subsystem | May | **Re-grounded** | Still truly open |
 |---|:---:|:---:|---|
-| DSP S-DSP | A− | **A** | ~~golden-vector PCM tests absent~~ — **FIXED 2026-06-17** (BRR→PCM differential vs Mesen2 + curated goldens) |
+| DSP S-DSP | A− | **A** | ~~golden-vector PCM tests absent~~ — **FIXED** (BRR→PCM differential vs Mesen2 + curated goldens 2026-06-17; full-voice integration golden + re-baselined end-to-end PCM 2026-06-23) |
 | CPU 65c816 | A− | **A−** | none functional (DP-8 bare wrap is inert → comment fix) |
 | SPC700 | B | **A−** | cycle model complete (2026-06-22): all 254 opcodes cycle-stepped byte/cycle-exact vs the atomic core, taken-branch +2 applied, cooperative CPU↔SPC interleave active at bus-access granularity, `$F0` wait-state dividers modelled (gap 6 closed) |
 | PPU | C+ | **A−** | *(OPHCT/OPVCT read-latch **+** BG scroll write-twice — both **FIXED 2026-06-11**; the OPVCT latch was the Doom-flicker root)* |
 | DMA/HDMA | C+ | **B−** | DMA per-byte + line-granular HDMA preempt (Phase 5). dot-276 sub-line is **visually a no-op** (276 = HBlank → effect on line N+1, which luna's boundary model already does — see `hdma_ares_audit.md` "Resolution 2026-06-20"); residual is the HDMA stall **cycle-count** timing only (no known game impact). |
-| SA-1 | C+ | **A−** | ~~flat instruction timing~~ — **FIXED**: per-access cycle cost (Phase 5b `097ffe7`) + `conflict()` BWRAM/IRAM/ROM contention steps (Increment B, 2026-06-20). The "−" is the batched (non-cothread) scheduler grain, not a value bug. |
+| SA-1 | C+ | **A−** | ~~flat instruction timing~~ — **FIXED**: per-access cycle cost (Phase 5b `097ffe7`) + `conflict()` BWRAM/IRAM/ROM contention steps (Increment B, 2026-06-20). ~~HV-mode timer unimplemented~~ — **FIXED 2026-06-23** (faithful ares `SA1::step` port, both modes, unit-tested). The remaining "−" is purely the batched (non-cothread) scheduler grain, not a value or feature bug. |
 | Bus/mappers | C+ | **B** | ~~ROM mirroring, open-bus MDR, mapper-detect scoring~~ — all **FIXED 2026-06-17** |
 
 **Truly-open work list (was 6, now 1 after OPVCT + BG-scroll + BRR-test + bus trio):**
@@ -108,7 +108,7 @@ on the real SMW ROM and in-GUI (F5/F9). No subsystem grade moves.
 
 | Subsystem | Grade | One-line correlation summary |
 |---|:---:|---|
-| **DSP — S-DSP audio** | **A−** | Faithful near-line-for-line ares port; BRR/gaussian/envelope/echo/noise all match. Only loss: dead legacy tables in `lib.rs` + **zero golden-vector tests**. |
+| **DSP — S-DSP audio** | **A** | Faithful near-line-for-line ares port; BRR/gaussian/envelope/echo/noise all match. Golden-vector coverage now complete: curated BRR goldens + a Mesen2 differential + a full-voice integration golden (`dsp.rs`) + the re-baselined end-to-end PCM ROM goldens. |
 | **CPU — 65c816** | **A−** *(was B)* | **99.99996 % Tom Harte (2 fails / 5.08M)** after fixing the 16-bit BCD adjust, MVN/MVP per-byte interruptibility, and E-mode stack + (dp,X) pointer wrap. Functionally byte-faithful to ares; the "−" is the instruction-atomic core (no cycle-stepping; edge-latched IRQ). |
 | **SMP — SPC700** | **A−** *(was B)* | 256/256 opcodes + ALU/MUL/DAA/DAS byte-faithful; `DIV YA,X` ares-faithful. The cycle model is now complete: all 254 opcodes are cycle-stepped byte-/cycle-exact vs the atomic core (`differential_all_ported_opcodes`), the taken-branch +2 penalty is applied (`ef44271`), the CPU↔SPC interleave is cycle-exact at bus-access granularity (cooperative grammar, active), and the `$F0` wait-state dividers `{2,4,10,20}` + the 8/16→10/20 timer glitch are modelled (gap 6 closed). |
 | **PPU — graphics** | **C+** | Color-math/CGWSEL/OAM-modulo reference-accurate; real bugs in sprite Y-wrap, large-sprite tile addressing, BG scroll write-twice, Mode-7 screen-over; hi-res modes 5/6 + EXTBG absent. |

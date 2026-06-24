@@ -1101,6 +1101,9 @@ fn write_mem_trace_csv(
             let kind = match ev.kind {
                 luna_api::MemEventKind::Read => "R",
                 luna_api::MemEventKind::Write => "W",
+                // Synthetic delivery-timing markers (P0 harness).
+                luna_api::MemEventKind::NmiSignal => "N",
+                luna_api::MemEventKind::IrqSignal => "I",
             };
             writeln!(
                 f,
