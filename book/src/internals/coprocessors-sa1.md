@@ -15,7 +15,7 @@ the reference output from Mesen2:
 ```bash
 ./target/release/luna state -n 100000000 \
     --screenshot /tmp/sa1_starfield.png \
-    /home/kobenairb/workspace/opensnes/examples/memory/sa1_starfield/sa1_starfield.sfc
+    /home/k0b3n4irb/workspace/opensnes/examples/memory/sa1_starfield/sa1_starfield.sfc
 ```
 
 ## What was fixed

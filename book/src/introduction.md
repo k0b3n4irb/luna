@@ -43,7 +43,7 @@ verified, where it matters, by a headless differential against those references.
 | **Coprocessors** | SA-1, Super FX (GSU), DSP-1, S-DD1 |
 | **Front-ends** | GUI debugger (winit + wgpu), headless CLI, MCP server |
 | **Platform** | Linux (macOS / Windows may build, unsupported) |
-| **License** | [MPL-2.0](https://github.com/kobenairb/luna/blob/main/LICENSE) |
+| **License** | [MPL-2.0](https://github.com/k0b3n4irb/luna/blob/main/LICENSE) |
 
 > Luna is one binary that runs three ways: **standalone** (a human plays),
 > **spectator** (the AI plays, a human watches), or **headless** (driven over
