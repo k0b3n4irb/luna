@@ -1415,6 +1415,14 @@ struct DmaBusView<'a> {
     trace_frame: u64,
     trace_line: u16,
     trace_blank: bool,
+    /// PPU dot (H position) at the start of this DMA burst, stamped onto
+    /// each `DmaTraceEvent` so the Event Viewer can plot `(dot, line)`.
+    trace_dot: u16,
+    /// DMA channel (0-7) currently driving the transfer — set by the
+    /// controller via [`DmaBus::set_active_channel`] before each channel's
+    /// segment, so captured B-bus writes carry their source channel
+    /// (Mesen2 `dma->GetActiveChannel()`).
+    dma_channel: u8,
 }
 
 impl DmaBus for DmaBusView<'_> {
@@ -1458,18 +1466,24 @@ impl DmaBus for DmaBusView<'_> {
 
     fn write_b(&mut self, b_offset: u8, value: u8) {
         if b_offset <= 0x3F {
-            // DMA→VRAM trace: capture (source → VMADD → byte) BEFORE the
+            // DMA B-bus trace: capture (source → VMADD → byte) BEFORE the
             // write, since the $2119 (high) write auto-increments VMADD.
-            // Only VRAM data ports ($2118/$2119) are of interest.
+            // Captures EVERY PPU B-bus write ($2100-$213F), not just the
+            // VRAM ports — the Event Viewer categorises OAM ($2104),
+            // CGRAM ($2122), etc. DMA writes too. `vram_word` is only
+            // meaningful for the $2118/$2119 ports; VRAM-only consumers
+            // (the CLI `--dma-trace` CSV) filter on `b_offset`.
             if let Some(log) = self.dma_trace.as_mut() {
-                if matches!(b_offset, 0x18 | 0x19) && log.events.len() < log.max_events {
+                if log.events.len() < log.max_events {
                     log.events.push(DmaTraceEvent {
                         src_full: self.last_a_addr,
                         vram_word: self.ppu.vram.address,
                         b_offset,
                         value,
+                        channel: self.dma_channel,
                         frame: self.trace_frame,
                         line: self.trace_line,
+                        dot: self.trace_dot,
                         blank: self.trace_blank,
                         force_blank: self.ppu.inidisp & 0x80 != 0,
                     });
@@ -1512,6 +1526,10 @@ impl DmaBus for DmaBusView<'_> {
         // pass `mar = 0` (the ares `dma.cpp` DMA-vs-coproc contention is a
         // separate, finer refinement).
         self.mapper.step_coproc(mcycles, 0);
+    }
+
+    fn set_active_channel(&mut self, channel: u8) {
+        self.dma_channel = channel;
     }
 }
 
@@ -1779,6 +1797,8 @@ impl SnesBus<'_> {
                 trace_frame: self.frame_count,
                 trace_line: self.ppu_line,
                 trace_blank: self.ppu_line >= self.vblank_start_line,
+                trace_dot: current_hv(*self.mclk_total, self.scanlines_per_frame).0,
+                dma_channel: 0,
             };
             hdma_stall += self.dma.hdma_init(&mut view);
         }
@@ -1796,6 +1816,8 @@ impl SnesBus<'_> {
                 trace_frame: self.frame_count,
                 trace_line: self.ppu_line,
                 trace_blank: self.ppu_line >= self.vblank_start_line,
+                trace_dot: current_hv(*self.mclk_total, self.scanlines_per_frame).0,
+                dma_channel: 0,
             };
             hdma_stall += self.dma.hdma_run_line(&mut view);
         }
@@ -2241,6 +2263,8 @@ impl SnesBus<'_> {
                         trace_frame: self.frame_count,
                         trace_line: self.ppu_line,
                         trace_blank: self.ppu_line >= self.vblank_start_line,
+                        trace_dot: current_hv(*self.mclk_total, self.scanlines_per_frame).0,
+                        dma_channel: 0,
                     };
                     self.dma.run_mdma(&mut view, value)
                 };
@@ -2274,6 +2298,8 @@ impl SnesBus<'_> {
                         trace_frame: self.frame_count,
                         trace_line: self.ppu_line,
                         trace_blank: self.ppu_line >= self.vblank_start_line,
+                        trace_dot: current_hv(*self.mclk_total, self.scanlines_per_frame).0,
+                        dma_channel: 0,
                     };
                     self.dma.run_mdma_segment(&mut view, value, seg_bytes)
                 };

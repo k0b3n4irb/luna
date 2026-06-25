@@ -18,15 +18,23 @@ pub struct DmaTraceEvent {
     pub src_full: u32,
     /// PPU VRAM word address (`$2116/7` VMADD) the byte targets.
     pub vram_word: u16,
-    /// B-bus register: `0x18` (`$2118`, low byte) or `0x19` (`$2119`, high).
+    /// B-bus register offset: the byte targets `$2100 + b_offset` (e.g.
+    /// `0x18`/`0x19` = `$2118`/`$2119` VRAM; `0x04` = `$2104` OAM).
     pub b_offset: u8,
     /// The transferred byte.
     pub value: u8,
+    /// DMA channel (0-7) that performed this transfer — Mesen2's
+    /// `DebugEventInfo::DmaChannel` (read from `dma->GetActiveChannel()`),
+    /// driving the Event Viewer's per-channel filter.
+    pub channel: u8,
     /// Completed-frame counter at the start of the owning DMA burst — lets a
     /// consumer bucket DMA→VRAM bytes by frame (the per-VBlank budget check).
     pub frame: u64,
     /// PPU scanline at the start of the owning burst.
     pub line: u16,
+    /// PPU dot — the H position at the transfer, derived from the master
+    /// clock (the Event Viewer plots events at `(dot, line)`).
+    pub dot: u16,
     /// `true` if the burst started in the vertical-blank window
     /// (`line >= vblank_start`).
     pub blank: bool,
@@ -171,6 +179,9 @@ impl Dma {
             }
             let ch = cur.current_ch as usize;
             if cur.mask & (1 << ch) != 0 {
+                // Tag the bus view with the active channel so its B-bus
+                // writes carry the channel (Mesen2 `dma->GetActiveChannel()`).
+                bus.set_active_channel(ch as u8);
                 let done = self.channels[ch].run_segment(bus, budget);
                 total += done;
                 budget -= done;

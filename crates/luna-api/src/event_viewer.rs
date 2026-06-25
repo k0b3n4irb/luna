@@ -7,7 +7,7 @@
 //! - default colors: `UI/Config/Debugger/SnesEventViewerConfig.cs`
 //! - register names: `UI/Debugger/Labels/DefaultLabelHelper.cs` `SetSnesDefaultLabels`
 
-use luna_core::{MemEventKind, MemTraceEvent};
+use luna_core::{DmaTraceEvent, MemEventKind, MemTraceEvent};
 
 /// Number of Event Viewer categories (the `visible[]` mask width).
 pub const CATEGORY_COUNT: usize = 18;
@@ -187,12 +187,11 @@ pub struct EventViewerConfig {
     pub visible: [bool; CATEGORY_COUNT],
     /// Show the previous frame's trailing events on the overlay.
     pub show_previous_frame: bool,
-    /// Per-DMA-channel visibility.
-    ///
-    /// TODO fidelity: not yet enforced. luna's mem-trace does not tag the DMA
-    /// channel of a register write (Mesen2 reads `dma->GetActiveChannel()`), so
-    /// this filter is exposed for the UI but currently inert — DMA-sourced
-    /// register writes categorise as ordinary writes.
+    /// Per-DMA-channel visibility — a DMA-sourced event whose channel's flag
+    /// is `false` is excluded (Mesen2 `GetEventConfig` `:106-109`, the
+    /// `ShowDmaChannels[DmaChannel & 7]` gate). luna tags each DMA B-bus
+    /// write with its channel (the controller's `dma->GetActiveChannel()`
+    /// equivalent), so this filter is enforced in [`decode_dma_event`].
     pub show_dma_channels: [bool; 8],
 }
 
@@ -220,10 +219,17 @@ pub struct EventViewerEvent {
     pub addr: u16,
     /// Byte transferred.
     pub value: u8,
+    /// Originating program counter — the 24-bit CPU PC for a CPU access
+    /// (`MemTraceEvent::pc_full`), or the DMA source address for a DMA write
+    /// (`DmaTraceEvent::src_full`, Mesen2 shows the DMA source here).
+    pub pc: u32,
     /// Resolved category.
     pub category: EventCategory,
     /// True if this event belongs to the previous frame (drawn trailing).
     pub is_prev_frame: bool,
+    /// `Some(channel)` if this access was performed by DMA (the channel that
+    /// drove it, 0-7); `None` for a CPU access (Mesen2 `DmaChannel == -1`).
+    pub dma_channel: Option<u8>,
 }
 
 /// Decode one raw event into a snapshot row, honouring the config visibility
@@ -243,8 +249,47 @@ pub fn decode_event(
         cycle: ev.dot.saturating_mul(4),
         addr: (ev.addr_full & 0xFFFF) as u16,
         value: ev.value,
+        pc: ev.pc_full & 0xFF_FFFF,
         category,
         is_prev_frame,
+        dma_channel: None,
+    })
+}
+
+/// Decode one DMA B-bus write into a snapshot row, honouring both the
+/// category-visibility mask and the per-channel DMA filter.
+///
+/// A DMA B-bus write to `b_offset` targets register `$2100 + b_offset` and is
+/// always a write (`is_write = true`, Mesen2's `DmaWrite`). Returns `None` if
+/// the access has no category, its category is hidden, or its channel is
+/// hidden by `show_dma_channels` (Mesen2 `GetEventConfig` `:106-109`).
+#[must_use]
+pub fn decode_dma_event(
+    ev: &DmaTraceEvent,
+    cfg: &EventViewerConfig,
+    is_prev_frame: bool,
+) -> Option<EventViewerEvent> {
+    // DMA-channel filter first — verbatim Mesen2 `GetEventConfig:106-109`:
+    // a DMA op on a hidden channel is excluded entirely.
+    if !cfg.show_dma_channels[(ev.channel & 7) as usize] {
+        return None;
+    }
+    let addr = 0x2100u16 + u16::from(ev.b_offset);
+    let category = categorise(addr, true)?;
+    if !cfg.visible[category.index()] {
+        return None;
+    }
+    Some(EventViewerEvent {
+        scanline: ev.line,
+        cycle: ev.dot.saturating_mul(4),
+        addr,
+        value: ev.value,
+        // Mesen2 shows the DMA source address in the "PC" column for a
+        // DMA-originated event (there is no instruction PC).
+        pc: ev.src_full & 0xFF_FFFF,
+        category,
+        is_prev_frame,
+        dma_channel: Some(ev.channel & 7),
     })
 }
 
@@ -435,5 +480,61 @@ mod tests {
         assert_eq!(EventCategory::PpuCgramWrite.index(), 0);
         assert_eq!(EventCategory::MarkedBreakpoint.index(), 17);
         assert_eq!(CATEGORY_COUNT, 18);
+    }
+
+    /// Build a synthetic DMA B-bus write to `$2100 + b_offset` on `channel`.
+    fn dma_ev(b_offset: u8, channel: u8) -> DmaTraceEvent {
+        DmaTraceEvent {
+            src_full: 0x7E_0000,
+            vram_word: 0,
+            b_offset,
+            value: 0xAB,
+            channel,
+            frame: 0,
+            line: 42,
+            dot: 100,
+            blank: false,
+            force_blank: false,
+        }
+    }
+
+    #[test]
+    fn dma_event_categorises_by_target_register_and_carries_channel() {
+        let cfg = EventViewerConfig::default();
+        // $2104 (OAMDATA) on channel 5 → OAM-write category, channel tagged.
+        let e = decode_dma_event(&dma_ev(0x04, 5), &cfg, false).expect("visible");
+        assert_eq!(e.addr, 0x2104);
+        assert_eq!(e.category, EventCategory::PpuOamWrite);
+        assert_eq!(e.dma_channel, Some(5));
+        assert_eq!(e.scanline, 42);
+        assert_eq!(e.cycle, 400, "dot 100 * 4 = H-clock 400");
+
+        // $2118 (VMDATAL) on channel 0 → VRAM-write category.
+        let v = decode_dma_event(&dma_ev(0x18, 0), &cfg, false).expect("visible");
+        assert_eq!(v.addr, 0x2118);
+        assert_eq!(v.category, EventCategory::PpuVramWrite);
+        assert_eq!(v.dma_channel, Some(0));
+    }
+
+    #[test]
+    fn show_dma_channels_filter_excludes_hidden_channel() {
+        let mut cfg = EventViewerConfig::default();
+        // Hide channel 3; a DMA event on channel 3 is excluded entirely
+        // (Mesen2 GetEventConfig:106-109), even though its category is visible.
+        cfg.show_dma_channels[3] = false;
+        assert!(decode_dma_event(&dma_ev(0x18, 3), &cfg, false).is_none());
+        // A different channel for the same register is still shown.
+        assert!(decode_dma_event(&dma_ev(0x18, 2), &cfg, false).is_some());
+    }
+
+    #[test]
+    fn hidden_category_excludes_dma_event() {
+        let mut cfg = EventViewerConfig::default();
+        // Hide the VRAM-write category; a VRAM DMA write is excluded even
+        // though its channel is visible.
+        cfg.visible[EventCategory::PpuVramWrite.index()] = false;
+        assert!(decode_dma_event(&dma_ev(0x18, 0), &cfg, false).is_none());
+        // An OAM DMA write (different, still-visible category) survives.
+        assert!(decode_dma_event(&dma_ev(0x04, 0), &cfg, false).is_some());
     }
 }

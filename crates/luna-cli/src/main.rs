@@ -1035,10 +1035,18 @@ fn write_dma_trace_csv(
     path: &std::path::Path,
     events: &[luna_api::DmaTraceEvent],
 ) -> std::io::Result<()> {
+    // This tracer is VRAM-focused (the double-buffer / per-VBlank budget
+    // check): the broad B-bus capture now also records OAM/CGRAM/etc. DMA
+    // writes for the Event Viewer, so filter to the VRAM data ports here.
+    let vram: Vec<luna_api::DmaTraceEvent> = events
+        .iter()
+        .copied()
+        .filter(|ev| matches!(ev.b_offset, 0x18 | 0x19))
+        .collect();
     write_csv(
         path,
         "seq,frame,line,blank,force_blank,src,vram_word,reg,value",
-        events,
+        &vram,
         |f, i, ev| {
             writeln!(
                 f,
