@@ -300,6 +300,10 @@ pub struct MemTraceEvent {
     pub value: u8,
     /// PPU scanline at the access (instruction-start snapshot).
     pub line: u16,
+    /// PPU dot — the H position (0..340) at the access, derived from the
+    /// master clock. Pairs with `line` to place the event on a frame grid
+    /// (the Event Viewer plots events at `(dot, line)`).
+    pub dot: u16,
     /// `true` if the PPU is in the vertical-blank window
     /// (`line >= vblank_start`).
     pub blank: bool,
@@ -1532,6 +1536,7 @@ impl SnesBus<'_> {
                 kind,
                 value,
                 line: self.ppu_line,
+                dot: current_hv(*self.mclk_total, self.scanlines_per_frame).0,
                 blank: self.ppu_line >= self.vblank_start_line,
                 force_blank: self.ppu.inidisp & 0x80 != 0,
             });
@@ -1565,6 +1570,7 @@ impl SnesBus<'_> {
                 kind,
                 value,
                 line,
+                dot: current_hv(mclk, self.scanlines_per_frame).0,
                 blank,
                 force_blank,
             });

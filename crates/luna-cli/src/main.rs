@@ -1095,7 +1095,7 @@ fn write_mem_trace_csv(
 ) -> std::io::Result<()> {
     write_csv(
         path,
-        "mclk_total,frame_ntsc,pc,addr,kind,value,line,blank,force_blank",
+        "mclk_total,frame_ntsc,pc,addr,kind,value,line,dot,blank,force_blank",
         events,
         |f, _, ev| {
             let kind = match ev.kind {
@@ -1107,7 +1107,7 @@ fn write_mem_trace_csv(
             };
             writeln!(
                 f,
-                "{},{},{},{},{},${:02X},{},{},{}",
+                "{},{},{},{},{},${:02X},{},{},{},{}",
                 ev.mclk_total,
                 ev.mclk_total / NTSC_MCLK_PER_FRAME,
                 fmt_pc(ev.pc_full),
@@ -1115,6 +1115,7 @@ fn write_mem_trace_csv(
                 kind,
                 ev.value,
                 ev.line,
+                ev.dot,
                 u8::from(ev.blank),
                 u8::from(ev.force_blank),
             )
