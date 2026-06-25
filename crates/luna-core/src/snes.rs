@@ -673,6 +673,11 @@ impl Snes {
         }
     }
 
+    /// Stop the memory access tracer and release its buffer.
+    pub fn disable_mem_trace(&mut self) {
+        self.mem_trace_log = None;
+    }
+
     /// Enable capture of `$21FC` Nocash-TTY writes (the SDK's
     /// `SNES_NOCASH`/`SNES_ASSERT` debug output).
     pub fn enable_nocash_log(&mut self) {
