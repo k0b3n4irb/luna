@@ -43,13 +43,6 @@ AI plays, a human watches), or **headless** (driven over MCP, for CI and agents)
   two remappable controllers, plus SNES Mouse & Super Scope.
 - **Never lose progress** — automatic `.srm` battery saves + 9 save-state slots.
 
-## 📖 Documentation
-
-Install, controls, the CLI / API / MCP surface, and how every subsystem works —
-it's all in the guide:
-
-### 📖 **[k0b3n4irb.github.io/luna](https://k0b3n4irb.github.io/luna/)**  ·  📚 **[API reference](https://k0b3n4irb.github.io/luna/api/)**
-
 ## 🙏 Acknowledgements
 
 Luna stands on the shoulders of the people and projects that made accurate SNES
