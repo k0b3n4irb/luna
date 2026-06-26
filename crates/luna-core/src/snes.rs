@@ -1791,7 +1791,10 @@ impl SnesBus<'_> {
                 mapper: &mut *self.mapper,
                 ppu: &mut *self.ppu,
                 wm_addr: &mut *self.wm_addr,
-                // HDMA is not traced (the Super FX framebuffer upload is MDMA).
+                // hdma_init only reads table headers/pointers (A-bus); it makes
+                // no B-bus register writes, so there is nothing to trace here.
+                // The per-scanline transfers below are what the Event Viewer
+                // captures.
                 dma_trace: None,
                 last_a_addr: 0,
                 trace_frame: self.frame_count,
@@ -1805,13 +1808,18 @@ impl SnesBus<'_> {
 
         // HDMA on every visible scanline (end-of-HBlank ordering).
         if self.ppu_line < vblank_start {
+            // Trace HDMA register writes for the Event Viewer, exactly like
+            // MDMA: hdma_run_line stamps each channel via set_active_channel
+            // (HdmaChannelFlag | ch, Mesen2 SnesDmaController.cpp:264), and the
+            // shared DmaBusView::write_b records the DmaTraceEvent. The trace
+            // log is moved into the view for the line and returned after.
+            let mut trace = self.dma.dma_trace.take();
             let mut view = DmaBusView {
                 wram: &mut *self.wram,
                 mapper: &mut *self.mapper,
                 ppu: &mut *self.ppu,
                 wm_addr: &mut *self.wm_addr,
-                // HDMA is not traced (the Super FX framebuffer upload is MDMA).
-                dma_trace: None,
+                dma_trace: trace.as_mut(),
                 last_a_addr: 0,
                 trace_frame: self.frame_count,
                 trace_line: self.ppu_line,
@@ -1820,6 +1828,7 @@ impl SnesBus<'_> {
                 dma_channel: 0,
             };
             hdma_stall += self.dma.hdma_run_line(&mut view);
+            self.dma.dma_trace = trace;
         }
         hdma_stall
     }
