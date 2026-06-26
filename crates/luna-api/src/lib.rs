@@ -32,6 +32,14 @@ pub use luna_ppu::TilemapImage;
 /// texture/window through `luna-api` rather than depending on `luna-ppu`.
 pub use luna_ppu::{FRAME_H, FRAME_W};
 use serde::Serialize;
+
+/// Faithful Mesen2 SNES Event Viewer data layer (categories, colors, register
+/// names, config). The GUI Event Viewer panel consumes this via the accessors
+/// on [`Emulator`].
+pub mod event_viewer;
+pub use event_viewer::{
+    CATEGORY_COUNT, EventCategory, EventViewerConfig, EventViewerEvent, categorise, register_name,
+};
 use thiserror::Error;
 
 /// Errors surfaced from [`Emulator`] methods.
@@ -558,6 +566,57 @@ pub struct Emulator {
     /// A save state records this so [`Emulator::load_state`] can refuse a
     /// state produced against a different ROM.
     rom_hash: u64,
+    /// Event Viewer category/DMA visibility config.
+    event_config: event_viewer::EventViewerConfig,
+    /// The just-completed frame's captured events (Mesen2 `_debugEvents`),
+    /// CPU IO + DMA merged and sorted by `(scanline, cycle)`.
+    last_frame_events: Vec<CapturedEvent>,
+    /// The frame before that (Mesen2 `_prevDebugEvents`) — drawn trailing when
+    /// `show_previous_frame` is on.
+    prev_frame_events: Vec<CapturedEvent>,
+}
+
+/// One raw captured Event Viewer event before category/filter decode — either
+/// a CPU bus access (mem-trace) or a DMA B-bus write (dma-trace). Kept as the
+/// raw source so [`Emulator::event_snapshot`] can re-decode under the live
+/// config (visibility / DMA-channel toggles) without re-running the frame.
+#[derive(Clone, Copy)]
+enum CapturedEvent {
+    /// A CPU bus access or NMI/IRQ marker.
+    Cpu(MemTraceEvent),
+    /// A DMA B-bus write, carrying its source channel.
+    Dma(DmaTraceEvent),
+}
+
+impl CapturedEvent {
+    /// Sort key `(scanline, cycle)` — Mesen2 orders the event list/overlay by
+    /// PPU position. Cycle is the exact H-clock (Mesen2 `GetHClock`).
+    const fn sort_key(&self) -> (u16, u16) {
+        match self {
+            Self::Cpu(e) => (e.line, e.hclock),
+            Self::Dma(e) => (e.line, e.hclock),
+        }
+    }
+
+    /// The position key Mesen2's `FilterEvents` compares against the cursor:
+    /// `(scanline << 16) + cycle`.
+    fn position_key(&self) -> u32 {
+        let (line, cycle) = self.sort_key();
+        (u32::from(line) << 16) | u32::from(cycle)
+    }
+
+    /// Decode under `cfg`, flagging prev-frame membership. `None` when the
+    /// access has no category or is hidden by a category / DMA-channel filter.
+    fn decode(
+        &self,
+        cfg: &event_viewer::EventViewerConfig,
+        is_prev_frame: bool,
+    ) -> Option<EventViewerEvent> {
+        match self {
+            Self::Cpu(e) => event_viewer::decode_event(e, cfg, is_prev_frame),
+            Self::Dma(e) => event_viewer::decode_dma_event(e, cfg, is_prev_frame),
+        }
+    }
 }
 
 impl Default for Emulator {
@@ -575,6 +634,13 @@ impl Emulator {
             rom_info: None,
             instructions_executed: 0,
             rom_hash: 0,
+            event_config: event_viewer::EventViewerConfig {
+                visible: [true; event_viewer::CATEGORY_COUNT],
+                show_previous_frame: true,
+                show_dma_channels: [true; 8],
+            },
+            last_frame_events: Vec::new(),
+            prev_frame_events: Vec::new(),
         }
     }
 
@@ -1947,6 +2013,103 @@ impl Emulator {
     pub fn take_mem_trace_log(&mut self) -> Result<Vec<MemTraceEvent>, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         Ok(snes.take_mem_trace_log())
+    }
+
+    // --- Event Viewer (faithful Mesen2 port; see `event_viewer` module) ---
+
+    /// Turn Event Viewer capture on or off. When on, the emulator records the
+    /// register IO range (`$2100-$437F`) plus NMI/IRQ markers; the GUI panel
+    /// drains them per frame via [`Emulator::swap_frame_events`].
+    pub fn enable_event_capture(&mut self, on: bool) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        if on {
+            snes.enable_mem_trace(16_384, None, Some((0x2100, 0x437F)));
+            // Also capture DMA B-bus writes (OAM/VRAM/CGRAM DMA) — the CPU
+            // mem-trace never sees them (the CPU is halted during a burst),
+            // so without this the overlay is sparse vs Mesen2.
+            snes.dma.enable_dma_trace(16_384);
+        } else {
+            snes.disable_mem_trace();
+            snes.dma.dma_trace = None;
+            self.last_frame_events.clear();
+            self.prev_frame_events.clear();
+        }
+        Ok(())
+    }
+
+    /// Roll the events captured since the last call into the completed-frame
+    /// buffers (Mesen2's `ClearFrameEvents`: `_prevDebugEvents = _debugEvents`).
+    /// The emu loop calls this once per emulated frame. A frame with no captured
+    /// events keeps the previous set (avoids flicker on quiet frames).
+    pub fn swap_frame_events(&mut self) {
+        let Some(snes) = self.snes.as_mut() else {
+            return;
+        };
+        // Drain BOTH traces: CPU IO accesses (mem-trace) and DMA B-bus
+        // writes (dma-trace). The CPU is halted during a DMA burst, so DMA
+        // register writes never appear in the mem-trace — merging the two is
+        // what makes the overlay dense (OAM/VRAM DMA show up).
+        let cpu = snes.take_mem_trace_log();
+        let dma = snes.dma.take_dma_trace();
+        if cpu.is_empty() && dma.is_empty() {
+            // Quiet frame: keep the previous set (avoids overlay flicker).
+            return;
+        }
+        let mut merged: Vec<CapturedEvent> = Vec::with_capacity(cpu.len() + dma.len());
+        merged.extend(cpu.into_iter().map(CapturedEvent::Cpu));
+        merged.extend(dma.into_iter().map(CapturedEvent::Dma));
+        // Order by PPU position so the list/overlay are sequential.
+        merged.sort_by_key(CapturedEvent::sort_key);
+        std::mem::swap(&mut self.prev_frame_events, &mut self.last_frame_events);
+        self.last_frame_events = merged;
+    }
+
+    /// The current Event Viewer snapshot: the just-finished frame's visible
+    /// events, plus (when `show_previous_frame` is on) the previous frame's,
+    /// each decoded + filtered by the category visibility mask.
+    #[must_use]
+    pub fn event_snapshot(&self) -> Vec<EventViewerEvent> {
+        let mut out = Vec::with_capacity(self.last_frame_events.len());
+        for ev in &self.last_frame_events {
+            if let Some(e) = ev.decode(&self.event_config, false) {
+                out.push(e);
+            }
+        }
+        if self.event_config.show_previous_frame {
+            // Mesen2 `BaseEventManager::FilterEvents` (`:9-22`): include a
+            // previous-frame event only when its `(scanline<<16)+cycle` is
+            // GREATER than the cursor, so the prev frame fills in the part of
+            // the frame the current one has not reached yet (no duplication).
+            // luna polls at the frame boundary (no pause), so the live cursor
+            // is the last current-frame event's position — i.e. prev-frame
+            // events later than that fill the tail of the frame.
+            let cursor = self
+                .last_frame_events
+                .iter()
+                .map(CapturedEvent::position_key)
+                .max()
+                .unwrap_or(0);
+            for ev in &self.prev_frame_events {
+                if ev.position_key() <= cursor {
+                    continue;
+                }
+                if let Some(e) = ev.decode(&self.event_config, true) {
+                    out.push(e);
+                }
+            }
+        }
+        out
+    }
+
+    /// Read the Event Viewer config (category/DMA visibility, previous-frame).
+    #[must_use]
+    pub const fn event_config(&self) -> &EventViewerConfig {
+        &self.event_config
+    }
+
+    /// Mutate the Event Viewer config (the GUI toggles category/DMA visibility).
+    pub const fn event_config_mut(&mut self) -> &mut EventViewerConfig {
+        &mut self.event_config
     }
 
     /// Enable capture of `$21FC` Nocash-TTY writes (the SDK debug channel

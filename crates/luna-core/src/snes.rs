@@ -300,6 +300,10 @@ pub struct MemTraceEvent {
     pub value: u8,
     /// PPU scanline at the access (instruction-start snapshot).
     pub line: u16,
+    /// Exact horizontal master-clock (0..1363) at the access — Mesen2's
+    /// `GetHClock`. Pairs with `line` to place the event on a frame grid
+    /// (the Event Viewer plots events at `(hclock, line)`, column `hclock/2`).
+    pub hclock: u16,
     /// `true` if the PPU is in the vertical-blank window
     /// (`line >= vblank_start`).
     pub blank: bool,
@@ -374,6 +378,17 @@ fn current_hv(mclk_total: u64, scanlines: u16) -> (u16, u16) {
     let v = (in_frame / u64::from(MCYCLES_PER_SCANLINE)) as u16;
     let h = ((in_frame % u64::from(MCYCLES_PER_SCANLINE)) / 4) as u16;
     (h, v)
+}
+
+/// The exact horizontal master-clock position within the current scanline
+/// (0..1363) — Mesen2's `MemoryManager::GetHClock`, used verbatim as the
+/// Event Viewer's `Cycle`. Unlike [`current_hv`]'s H (which divides by 4 to a
+/// PPU dot for IRQ/HTIME comparison), this keeps full master-cycle precision
+/// so the overlay can place an event at the exact column (`x = hclock / 2`).
+#[inline]
+fn current_hclock(mclk_total: u64, scanlines: u16) -> u16 {
+    let per_frame = u64::from(MCYCLES_PER_SCANLINE) * u64::from(scanlines);
+    (mclk_total % per_frame % u64::from(MCYCLES_PER_SCANLINE)) as u16
 }
 
 /// Region-aware scanline parameters.
@@ -667,6 +682,11 @@ impl Snes {
             Some(log) => std::mem::take(&mut log.events),
             None => Vec::new(),
         }
+    }
+
+    /// Stop the memory access tracer and release its buffer.
+    pub fn disable_mem_trace(&mut self) {
+        self.mem_trace_log = None;
     }
 
     /// Enable capture of `$21FC` Nocash-TTY writes (the SDK's
@@ -1406,6 +1426,15 @@ struct DmaBusView<'a> {
     trace_frame: u64,
     trace_line: u16,
     trace_blank: bool,
+    /// Exact horizontal master-clock (0..1363) at this DMA burst/line,
+    /// stamped onto each `DmaTraceEvent` so the Event Viewer can plot
+    /// `(hclock, line)` at full column precision (Mesen2 `GetHClock`).
+    trace_hclock: u16,
+    /// DMA channel (0-7) currently driving the transfer — set by the
+    /// controller via [`DmaBus::set_active_channel`] before each channel's
+    /// segment, so captured B-bus writes carry their source channel
+    /// (Mesen2 `dma->GetActiveChannel()`).
+    dma_channel: u8,
 }
 
 impl DmaBus for DmaBusView<'_> {
@@ -1449,18 +1478,24 @@ impl DmaBus for DmaBusView<'_> {
 
     fn write_b(&mut self, b_offset: u8, value: u8) {
         if b_offset <= 0x3F {
-            // DMA→VRAM trace: capture (source → VMADD → byte) BEFORE the
+            // DMA B-bus trace: capture (source → VMADD → byte) BEFORE the
             // write, since the $2119 (high) write auto-increments VMADD.
-            // Only VRAM data ports ($2118/$2119) are of interest.
+            // Captures EVERY PPU B-bus write ($2100-$213F), not just the
+            // VRAM ports — the Event Viewer categorises OAM ($2104),
+            // CGRAM ($2122), etc. DMA writes too. `vram_word` is only
+            // meaningful for the $2118/$2119 ports; VRAM-only consumers
+            // (the CLI `--dma-trace` CSV) filter on `b_offset`.
             if let Some(log) = self.dma_trace.as_mut() {
-                if matches!(b_offset, 0x18 | 0x19) && log.events.len() < log.max_events {
+                if log.events.len() < log.max_events {
                     log.events.push(DmaTraceEvent {
                         src_full: self.last_a_addr,
                         vram_word: self.ppu.vram.address,
                         b_offset,
                         value,
+                        channel: self.dma_channel,
                         frame: self.trace_frame,
                         line: self.trace_line,
+                        hclock: self.trace_hclock,
                         blank: self.trace_blank,
                         force_blank: self.ppu.inidisp & 0x80 != 0,
                     });
@@ -1504,6 +1539,10 @@ impl DmaBus for DmaBusView<'_> {
         // separate, finer refinement).
         self.mapper.step_coproc(mcycles, 0);
     }
+
+    fn set_active_channel(&mut self, channel: u8) {
+        self.dma_channel = channel;
+    }
 }
 
 impl SnesBus<'_> {
@@ -1532,6 +1571,7 @@ impl SnesBus<'_> {
                 kind,
                 value,
                 line: self.ppu_line,
+                hclock: current_hclock(*self.mclk_total, self.scanlines_per_frame),
                 blank: self.ppu_line >= self.vblank_start_line,
                 force_blank: self.ppu.inidisp & 0x80 != 0,
             });
@@ -1565,6 +1605,7 @@ impl SnesBus<'_> {
                 kind,
                 value,
                 line,
+                hclock: current_hclock(mclk, self.scanlines_per_frame),
                 blank,
                 force_blank,
             });
@@ -1762,31 +1803,44 @@ impl SnesBus<'_> {
                 mapper: &mut *self.mapper,
                 ppu: &mut *self.ppu,
                 wm_addr: &mut *self.wm_addr,
-                // HDMA is not traced (the Super FX framebuffer upload is MDMA).
+                // hdma_init only reads table headers/pointers (A-bus); it makes
+                // no B-bus register writes, so there is nothing to trace here.
+                // The per-scanline transfers below are what the Event Viewer
+                // captures.
                 dma_trace: None,
                 last_a_addr: 0,
                 trace_frame: self.frame_count,
                 trace_line: self.ppu_line,
                 trace_blank: self.ppu_line >= self.vblank_start_line,
+                trace_hclock: current_hclock(*self.mclk_total, self.scanlines_per_frame),
+                dma_channel: 0,
             };
             hdma_stall += self.dma.hdma_init(&mut view);
         }
 
         // HDMA on every visible scanline (end-of-HBlank ordering).
         if self.ppu_line < vblank_start {
+            // Trace HDMA register writes for the Event Viewer, exactly like
+            // MDMA: hdma_run_line stamps each channel via set_active_channel
+            // (HdmaChannelFlag | ch, Mesen2 SnesDmaController.cpp:264), and the
+            // shared DmaBusView::write_b records the DmaTraceEvent. The trace
+            // log is moved into the view for the line and returned after.
+            let mut trace = self.dma.dma_trace.take();
             let mut view = DmaBusView {
                 wram: &mut *self.wram,
                 mapper: &mut *self.mapper,
                 ppu: &mut *self.ppu,
                 wm_addr: &mut *self.wm_addr,
-                // HDMA is not traced (the Super FX framebuffer upload is MDMA).
-                dma_trace: None,
+                dma_trace: trace.as_mut(),
                 last_a_addr: 0,
                 trace_frame: self.frame_count,
                 trace_line: self.ppu_line,
                 trace_blank: self.ppu_line >= self.vblank_start_line,
+                trace_hclock: current_hclock(*self.mclk_total, self.scanlines_per_frame),
+                dma_channel: 0,
             };
             hdma_stall += self.dma.hdma_run_line(&mut view);
+            self.dma.dma_trace = trace;
         }
         hdma_stall
     }
@@ -2230,6 +2284,8 @@ impl SnesBus<'_> {
                         trace_frame: self.frame_count,
                         trace_line: self.ppu_line,
                         trace_blank: self.ppu_line >= self.vblank_start_line,
+                        trace_hclock: current_hclock(*self.mclk_total, self.scanlines_per_frame),
+                        dma_channel: 0,
                     };
                     self.dma.run_mdma(&mut view, value)
                 };
@@ -2263,6 +2319,8 @@ impl SnesBus<'_> {
                         trace_frame: self.frame_count,
                         trace_line: self.ppu_line,
                         trace_blank: self.ppu_line >= self.vblank_start_line,
+                        trace_hclock: current_hclock(*self.mclk_total, self.scanlines_per_frame),
+                        dma_channel: 0,
                     };
                     self.dma.run_mdma_segment(&mut view, value, seg_bytes)
                 };
