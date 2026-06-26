@@ -32,9 +32,9 @@ pub struct DmaTraceEvent {
     pub frame: u64,
     /// PPU scanline at the start of the owning burst.
     pub line: u16,
-    /// PPU dot — the H position at the transfer, derived from the master
-    /// clock (the Event Viewer plots events at `(dot, line)`).
-    pub dot: u16,
+    /// Exact horizontal master-clock (0..1363) at the transfer — Mesen2's
+    /// `GetHClock` (the Event Viewer plots events at `(hclock, line)`).
+    pub hclock: u16,
     /// `true` if the burst started in the vertical-blank window
     /// (`line >= vblank_start`).
     pub blank: bool,

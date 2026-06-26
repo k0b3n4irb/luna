@@ -1103,7 +1103,7 @@ fn write_mem_trace_csv(
 ) -> std::io::Result<()> {
     write_csv(
         path,
-        "mclk_total,frame_ntsc,pc,addr,kind,value,line,dot,blank,force_blank",
+        "mclk_total,frame_ntsc,pc,addr,kind,value,line,hclock,blank,force_blank",
         events,
         |f, _, ev| {
             let kind = match ev.kind {
@@ -1123,7 +1123,7 @@ fn write_mem_trace_csv(
                 kind,
                 ev.value,
                 ev.line,
-                ev.dot,
+                ev.hclock,
                 u8::from(ev.blank),
                 u8::from(ev.force_blank),
             )

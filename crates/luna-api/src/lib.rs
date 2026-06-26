@@ -590,11 +590,11 @@ enum CapturedEvent {
 
 impl CapturedEvent {
     /// Sort key `(scanline, cycle)` — Mesen2 orders the event list/overlay by
-    /// PPU position. Cycle is the H-clock (`dot * 4`).
+    /// PPU position. Cycle is the exact H-clock (Mesen2 `GetHClock`).
     const fn sort_key(&self) -> (u16, u16) {
         match self {
-            Self::Cpu(e) => (e.line, e.dot.saturating_mul(4)),
-            Self::Dma(e) => (e.line, e.dot.saturating_mul(4)),
+            Self::Cpu(e) => (e.line, e.hclock),
+            Self::Dma(e) => (e.line, e.hclock),
         }
     }
 

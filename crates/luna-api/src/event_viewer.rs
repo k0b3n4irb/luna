@@ -210,10 +210,9 @@ impl Default for EventViewerConfig {
 pub struct EventViewerEvent {
     /// PPU scanline at the access.
     pub scanline: u16,
-    /// H-clock (0..1363), Mesen2's `Cycle`.
-    ///
-    /// TODO fidelity: derived as `dot * 4`. Mesen2 uses the exact `GetHClock()`;
-    /// luna's trace stores the dot (H/4), so sub-dot H-clock precision is lost.
+    /// Exact H-clock (0..1363) — Mesen2's `Cycle` (`GetHClock`). luna's trace
+    /// stamps the full horizontal master-clock, so the overlay places the
+    /// event at the exact column (`x = cycle / 2`).
     pub cycle: u16,
     /// 16-bit register address.
     pub addr: u16,
@@ -246,7 +245,7 @@ pub fn decode_event(
     }
     Some(EventViewerEvent {
         scanline: ev.line,
-        cycle: ev.dot.saturating_mul(4),
+        cycle: ev.hclock,
         addr: (ev.addr_full & 0xFFFF) as u16,
         value: ev.value,
         pc: ev.pc_full & 0xFF_FFFF,
@@ -281,7 +280,7 @@ pub fn decode_dma_event(
     }
     Some(EventViewerEvent {
         scanline: ev.line,
-        cycle: ev.dot.saturating_mul(4),
+        cycle: ev.hclock,
         addr,
         value: ev.value,
         // Mesen2 shows the DMA source address in the "PC" column for a
@@ -492,7 +491,7 @@ mod tests {
             channel,
             frame: 0,
             line: 42,
-            dot: 100,
+            hclock: 400,
             blank: false,
             force_blank: false,
         }
@@ -507,7 +506,7 @@ mod tests {
         assert_eq!(e.category, EventCategory::PpuOamWrite);
         assert_eq!(e.dma_channel, Some(5));
         assert_eq!(e.scanline, 42);
-        assert_eq!(e.cycle, 400, "dot 100 * 4 = H-clock 400");
+        assert_eq!(e.cycle, 400, "exact H-clock carried straight through");
 
         // $2118 (VMDATAL) on channel 0 → VRAM-write category.
         let v = decode_dma_event(&dma_ev(0x18, 0), &cfg, false).expect("visible");

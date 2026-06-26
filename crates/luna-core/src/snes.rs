@@ -300,10 +300,10 @@ pub struct MemTraceEvent {
     pub value: u8,
     /// PPU scanline at the access (instruction-start snapshot).
     pub line: u16,
-    /// PPU dot — the H position (0..340) at the access, derived from the
-    /// master clock. Pairs with `line` to place the event on a frame grid
-    /// (the Event Viewer plots events at `(dot, line)`).
-    pub dot: u16,
+    /// Exact horizontal master-clock (0..1363) at the access — Mesen2's
+    /// `GetHClock`. Pairs with `line` to place the event on a frame grid
+    /// (the Event Viewer plots events at `(hclock, line)`, column `hclock/2`).
+    pub hclock: u16,
     /// `true` if the PPU is in the vertical-blank window
     /// (`line >= vblank_start`).
     pub blank: bool,
@@ -378,6 +378,17 @@ fn current_hv(mclk_total: u64, scanlines: u16) -> (u16, u16) {
     let v = (in_frame / u64::from(MCYCLES_PER_SCANLINE)) as u16;
     let h = ((in_frame % u64::from(MCYCLES_PER_SCANLINE)) / 4) as u16;
     (h, v)
+}
+
+/// The exact horizontal master-clock position within the current scanline
+/// (0..1363) — Mesen2's `MemoryManager::GetHClock`, used verbatim as the
+/// Event Viewer's `Cycle`. Unlike [`current_hv`]'s H (which divides by 4 to a
+/// PPU dot for IRQ/HTIME comparison), this keeps full master-cycle precision
+/// so the overlay can place an event at the exact column (`x = hclock / 2`).
+#[inline]
+fn current_hclock(mclk_total: u64, scanlines: u16) -> u16 {
+    let per_frame = u64::from(MCYCLES_PER_SCANLINE) * u64::from(scanlines);
+    (mclk_total % per_frame % u64::from(MCYCLES_PER_SCANLINE)) as u16
 }
 
 /// Region-aware scanline parameters.
@@ -1415,9 +1426,10 @@ struct DmaBusView<'a> {
     trace_frame: u64,
     trace_line: u16,
     trace_blank: bool,
-    /// PPU dot (H position) at the start of this DMA burst, stamped onto
-    /// each `DmaTraceEvent` so the Event Viewer can plot `(dot, line)`.
-    trace_dot: u16,
+    /// Exact horizontal master-clock (0..1363) at this DMA burst/line,
+    /// stamped onto each `DmaTraceEvent` so the Event Viewer can plot
+    /// `(hclock, line)` at full column precision (Mesen2 `GetHClock`).
+    trace_hclock: u16,
     /// DMA channel (0-7) currently driving the transfer — set by the
     /// controller via [`DmaBus::set_active_channel`] before each channel's
     /// segment, so captured B-bus writes carry their source channel
@@ -1483,7 +1495,7 @@ impl DmaBus for DmaBusView<'_> {
                         channel: self.dma_channel,
                         frame: self.trace_frame,
                         line: self.trace_line,
-                        dot: self.trace_dot,
+                        hclock: self.trace_hclock,
                         blank: self.trace_blank,
                         force_blank: self.ppu.inidisp & 0x80 != 0,
                     });
@@ -1559,7 +1571,7 @@ impl SnesBus<'_> {
                 kind,
                 value,
                 line: self.ppu_line,
-                dot: current_hv(*self.mclk_total, self.scanlines_per_frame).0,
+                hclock: current_hclock(*self.mclk_total, self.scanlines_per_frame),
                 blank: self.ppu_line >= self.vblank_start_line,
                 force_blank: self.ppu.inidisp & 0x80 != 0,
             });
@@ -1593,7 +1605,7 @@ impl SnesBus<'_> {
                 kind,
                 value,
                 line,
-                dot: current_hv(mclk, self.scanlines_per_frame).0,
+                hclock: current_hclock(mclk, self.scanlines_per_frame),
                 blank,
                 force_blank,
             });
@@ -1800,7 +1812,7 @@ impl SnesBus<'_> {
                 trace_frame: self.frame_count,
                 trace_line: self.ppu_line,
                 trace_blank: self.ppu_line >= self.vblank_start_line,
-                trace_dot: current_hv(*self.mclk_total, self.scanlines_per_frame).0,
+                trace_hclock: current_hclock(*self.mclk_total, self.scanlines_per_frame),
                 dma_channel: 0,
             };
             hdma_stall += self.dma.hdma_init(&mut view);
@@ -1824,7 +1836,7 @@ impl SnesBus<'_> {
                 trace_frame: self.frame_count,
                 trace_line: self.ppu_line,
                 trace_blank: self.ppu_line >= self.vblank_start_line,
-                trace_dot: current_hv(*self.mclk_total, self.scanlines_per_frame).0,
+                trace_hclock: current_hclock(*self.mclk_total, self.scanlines_per_frame),
                 dma_channel: 0,
             };
             hdma_stall += self.dma.hdma_run_line(&mut view);
@@ -2272,7 +2284,7 @@ impl SnesBus<'_> {
                         trace_frame: self.frame_count,
                         trace_line: self.ppu_line,
                         trace_blank: self.ppu_line >= self.vblank_start_line,
-                        trace_dot: current_hv(*self.mclk_total, self.scanlines_per_frame).0,
+                        trace_hclock: current_hclock(*self.mclk_total, self.scanlines_per_frame),
                         dma_channel: 0,
                     };
                     self.dma.run_mdma(&mut view, value)
@@ -2307,7 +2319,7 @@ impl SnesBus<'_> {
                         trace_frame: self.frame_count,
                         trace_line: self.ppu_line,
                         trace_blank: self.ppu_line >= self.vblank_start_line,
-                        trace_dot: current_hv(*self.mclk_total, self.scanlines_per_frame).0,
+                        trace_hclock: current_hclock(*self.mclk_total, self.scanlines_per_frame),
                         dma_channel: 0,
                     };
                     self.dma.run_mdma_segment(&mut view, value, seg_bytes)
