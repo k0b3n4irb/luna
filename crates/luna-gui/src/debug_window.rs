@@ -42,11 +42,13 @@ pub(crate) enum DebugPanel {
     Registers,
     Palette,
     Tilemap,
+    EventViewer,
 }
 
 impl DebugPanel {
     const fn title(self) -> &'static str {
         match self {
+            Self::EventViewer => "Event Viewer",
             Self::Cpu => "CPU — 65c816",
             Self::CpuMemory => "CPU memory",
             Self::CpuDisasm => "CPU disassembly",
@@ -63,6 +65,7 @@ impl DebugPanel {
     /// Default window size (logical px) — sized to each panel's content.
     const fn default_size(self) -> (u32, u32) {
         match self {
+            Self::EventViewer => (980, 720),
             Self::Cpu => (250, 340),
             Self::Spc700 => (250, 320),
             Self::CpuMemory | Self::Spc700Memory => (660, 420),
@@ -438,20 +441,29 @@ impl DebugWindows {
                                 .max_rect(content)
                                 .layout(egui::Layout::top_down(egui::Align::Min)),
                         );
-                        egui::ScrollArea::both().show(&mut body, |ui| match panel {
-                            DebugPanel::Cpu => ui::cpu_state_body(ui, snap),
-                            DebugPanel::Spc700 => ui::spc700_body(ui, snap),
-                            DebugPanel::Sprites => ui::sprites_body(ui, snap),
-                            DebugPanel::Registers => ui::registers_body(ui, snap),
-                            DebugPanel::Palette => ui::palette_body(ui, snap),
-                            DebugPanel::Tilemap => nav = ui::tilemap_body(ui, snap),
-                            DebugPanel::Spc700Disasm => nav = ui::spc700_disasm_body(ui, snap),
-                            DebugPanel::CpuDisasm => nav = ui::cpu_disasm_body(ui, snap),
-                            DebugPanel::CpuMemory => nav = ui::cpu_memory_body(ui, snap),
-                            DebugPanel::Spc700Memory => {
-                                nav = ui::spc700_memory_body(ui, snap);
-                            }
-                        });
+                        // The Event Viewer drives its own internal panels
+                        // (`SidePanel`/`TopBottomPanel` via `show_inside`), which
+                        // need the full body rect and manage their own scrolling —
+                        // so it is NOT wrapped in the outer scroll area.
+                        if panel == DebugPanel::EventViewer {
+                            nav = ui::event_viewer_body(&mut body, snap);
+                        } else {
+                            egui::ScrollArea::both().show(&mut body, |ui| match panel {
+                                DebugPanel::Cpu => ui::cpu_state_body(ui, snap),
+                                DebugPanel::Spc700 => ui::spc700_body(ui, snap),
+                                DebugPanel::Sprites => ui::sprites_body(ui, snap),
+                                DebugPanel::Registers => ui::registers_body(ui, snap),
+                                DebugPanel::Palette => ui::palette_body(ui, snap),
+                                DebugPanel::Tilemap => nav = ui::tilemap_body(ui, snap),
+                                DebugPanel::EventViewer => {}
+                                DebugPanel::Spc700Disasm => nav = ui::spc700_disasm_body(ui, snap),
+                                DebugPanel::CpuDisasm => nav = ui::cpu_disasm_body(ui, snap),
+                                DebugPanel::CpuMemory => nav = ui::cpu_memory_body(ui, snap),
+                                DebugPanel::Spc700Memory => {
+                                    nav = ui::spc700_memory_body(ui, snap);
+                                }
+                            });
+                        }
 
                         // Blue resize grip (bottom-right), ness-style.
                         let g = 16.0;
