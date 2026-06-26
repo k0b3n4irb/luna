@@ -1035,10 +1035,18 @@ fn write_dma_trace_csv(
     path: &std::path::Path,
     events: &[luna_api::DmaTraceEvent],
 ) -> std::io::Result<()> {
+    // This tracer is VRAM-focused (the double-buffer / per-VBlank budget
+    // check): the broad B-bus capture now also records OAM/CGRAM/etc. DMA
+    // writes for the Event Viewer, so filter to the VRAM data ports here.
+    let vram: Vec<luna_api::DmaTraceEvent> = events
+        .iter()
+        .copied()
+        .filter(|ev| matches!(ev.b_offset, 0x18 | 0x19))
+        .collect();
     write_csv(
         path,
         "seq,frame,line,blank,force_blank,src,vram_word,reg,value",
-        events,
+        &vram,
         |f, i, ev| {
             writeln!(
                 f,
@@ -1095,7 +1103,7 @@ fn write_mem_trace_csv(
 ) -> std::io::Result<()> {
     write_csv(
         path,
-        "mclk_total,frame_ntsc,pc,addr,kind,value,line,blank,force_blank",
+        "mclk_total,frame_ntsc,pc,addr,kind,value,line,hclock,blank,force_blank",
         events,
         |f, _, ev| {
             let kind = match ev.kind {
@@ -1107,7 +1115,7 @@ fn write_mem_trace_csv(
             };
             writeln!(
                 f,
-                "{},{},{},{},{},${:02X},{},{},{}",
+                "{},{},{},{},{},${:02X},{},{},{},{}",
                 ev.mclk_total,
                 ev.mclk_total / NTSC_MCLK_PER_FRAME,
                 fmt_pc(ev.pc_full),
@@ -1115,6 +1123,7 @@ fn write_mem_trace_csv(
                 kind,
                 ev.value,
                 ev.line,
+                ev.hclock,
                 u8::from(ev.blank),
                 u8::from(ev.force_blank),
             )

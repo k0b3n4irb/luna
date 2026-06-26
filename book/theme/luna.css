@@ -1,0 +1,29 @@
+/* Luna guide — small accent touches on top of the navy theme. */
+:root {
+    --luna-accent: #8a7cff;
+}
+
+.menu-title {
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+
+/* Tables: a touch more breathing room + a clear header. */
+.content table thead th {
+    border-bottom: 2px solid var(--luna-accent);
+}
+.content table td,
+.content table th {
+    padding: 0.4rem 0.75rem;
+}
+
+/* Blockquotes as soft callouts. */
+.content blockquote {
+    border-inline-start: 3px solid var(--luna-accent);
+    background: rgba(138, 124, 255, 0.06);
+}
+
+/* Inline code a little calmer. */
+.content code {
+    border-radius: 4px;
+}
