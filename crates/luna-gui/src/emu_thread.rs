@@ -250,6 +250,9 @@ fn run(
             }
             if cur_frame != last_emu_frame {
                 last_emu_frame = cur_frame;
+                // Roll the just-finished frame's captured events into the
+                // double-buffer (Mesen2 `ClearFrameEvents`) for the Event Viewer.
+                em.swap_frame_events();
                 frames_since_report += 1;
                 frame_produced = true;
                 frame_hz = em.frame_rate_hz();

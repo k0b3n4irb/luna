@@ -18,15 +18,23 @@ pub struct DmaTraceEvent {
     pub src_full: u32,
     /// PPU VRAM word address (`$2116/7` VMADD) the byte targets.
     pub vram_word: u16,
-    /// B-bus register: `0x18` (`$2118`, low byte) or `0x19` (`$2119`, high).
+    /// B-bus register offset: the byte targets `$2100 + b_offset` (e.g.
+    /// `0x18`/`0x19` = `$2118`/`$2119` VRAM; `0x04` = `$2104` OAM).
     pub b_offset: u8,
     /// The transferred byte.
     pub value: u8,
+    /// DMA channel (0-7) that performed this transfer — Mesen2's
+    /// `DebugEventInfo::DmaChannel` (read from `dma->GetActiveChannel()`),
+    /// driving the Event Viewer's per-channel filter.
+    pub channel: u8,
     /// Completed-frame counter at the start of the owning DMA burst — lets a
     /// consumer bucket DMA→VRAM bytes by frame (the per-VBlank budget check).
     pub frame: u64,
     /// PPU scanline at the start of the owning burst.
     pub line: u16,
+    /// Exact horizontal master-clock (0..1363) at the transfer — Mesen2's
+    /// `GetHClock` (the Event Viewer plots events at `(hclock, line)`).
+    pub hclock: u16,
     /// `true` if the burst started in the vertical-blank window
     /// (`line >= vblank_start`).
     pub blank: bool,
@@ -171,6 +179,9 @@ impl Dma {
             }
             let ch = cur.current_ch as usize;
             if cur.mask & (1 << ch) != 0 {
+                // Tag the bus view with the active channel so its B-bus
+                // writes carry the channel (Mesen2 `dma->GetActiveChannel()`).
+                bus.set_active_channel(ch as u8);
                 let done = self.channels[ch].run_segment(bus, budget);
                 total += done;
                 budget -= done;
@@ -243,6 +254,12 @@ impl Dma {
                     self.channels[ch].hdma_start_frame(bus);
                     self.channels[ch].hdma_started = true;
                 }
+                // Tag B-bus writes this channel makes with its channel id so
+                // the Event Viewer can plot them — faithful to Mesen2's
+                // `_activeChannel = HdmaChannelFlag | i` (SnesDmaController.cpp
+                // :264). The HDMA flag (bit 6) marks the event as HDMA-sourced;
+                // consumers mask `& 7` for the channel number.
+                bus.set_active_channel(HDMA_CHANNEL_FLAG | ch as u8);
                 // A channel active at line start does work this line.
                 any_active |= self.channels[ch].hdma_active;
                 bytes += self.channels[ch].hdma_step_line(bus);
@@ -261,6 +278,12 @@ impl Dma {
 /// folding ares' `step(8)` + DMA-clock alignment + reload reads.
 const HDMA_OVERHEAD_MCLK: u32 = 18;
 
+/// Marks an active-channel tag as HDMA-sourced (Mesen2's
+/// `SnesDmaController::HdmaChannelFlag`, `SnesDmaController.h:12`). OR'd onto
+/// the channel index for the Event Viewer; consumers take `& 7` for the
+/// channel number.
+const HDMA_CHANNEL_FLAG: u8 = 0x40;
+
 #[cfg(test)]
 mod tests {
     use super::super::bus::DmaBus;
@@ -270,6 +293,12 @@ mod tests {
     struct MockBus {
         a: Vec<u8>,
         b: Vec<u8>,
+        /// Active channel tag last set via `set_active_channel` (mirrors the
+        /// real `DmaBusView::dma_channel`); recorded against each `write_b`.
+        active: u8,
+        /// `(active_channel, b_offset, value)` for every B-bus write, so a
+        /// test can assert the channel tag carried by each transfer.
+        tagged_writes: Vec<(u8, u8, u8)>,
     }
 
     impl MockBus {
@@ -277,6 +306,8 @@ mod tests {
             Self {
                 a: vec![0; 0x100_0000],
                 b: vec![0; 0x100],
+                active: 0,
+                tagged_writes: Vec::new(),
             }
         }
     }
@@ -293,6 +324,10 @@ mod tests {
         }
         fn write_b(&mut self, b_offset: u8, value: u8) {
             self.b[b_offset as usize] = value;
+            self.tagged_writes.push((self.active, b_offset, value));
+        }
+        fn set_active_channel(&mut self, channel: u8) {
+            self.active = channel;
         }
     }
 
@@ -457,6 +492,41 @@ mod tests {
         assert_eq!(dma.hdma_run_line(&mut bus), HDMA_OVERHEAD_MCLK + 8);
         assert_eq!(bus.b[0x22], 0xAB, "mid-frame-enabled channel transferred");
         assert!(dma.channels[0].hdma_started);
+    }
+
+    #[test]
+    fn hdma_transfer_tags_writes_with_the_hdma_channel_flag() {
+        // Regression: HDMA per-scanline register writes must be tagged with
+        // their channel so the Event Viewer can plot them — faithful to
+        // Mesen2's `_activeChannel = HdmaChannelFlag | i`. The tag is
+        // `0x40 | ch`; consumers mask `& 7` for the channel number. (Without
+        // this, raster/gradient HDMA effects were invisible in the overlay.)
+        let mut bus = MockBus::new();
+        // Channel 3, mode 0, one transferred line of 0x5A → $2122.
+        bus.a[0x00_2000] = 0x01; // 1-line, non-repeat
+        bus.a[0x00_2001] = 0x5A; // data byte
+        bus.a[0x00_2002] = 0x00; // terminator
+        let mut dma = Dma::new();
+        dma.channels[3].params = DmaParams::from_byte(0); // mode 0, direct
+        dma.channels[3].bbad = 0x22;
+        dma.channels[3].a_addr = 0x2000;
+        dma.channels[3].a_bank = 0x00;
+        dma.hdmaen = 0b0000_1000; // channel 3
+
+        dma.hdma_init(&mut bus); // header reads only — no B-bus writes
+        assert!(
+            bus.tagged_writes.is_empty(),
+            "hdma_init must not write B-bus registers"
+        );
+
+        dma.hdma_run_line(&mut bus);
+        assert_eq!(
+            bus.tagged_writes,
+            vec![(HDMA_CHANNEL_FLAG | 3, 0x22, 0x5A)],
+            "the transfer is tagged with HdmaChannelFlag | channel 3"
+        );
+        // Consumer view: the channel number is the low 3 bits.
+        assert_eq!(bus.tagged_writes[0].0 & 7, 3);
     }
 
     #[test]

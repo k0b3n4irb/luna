@@ -34,4 +34,11 @@ pub trait DmaBus {
     /// Default `no-op` for the test mock buses; production buses
     /// override to forward to the coprocessor's `step_coproc`.
     fn tick(&mut self, _mcycles: u32) {}
+
+    /// Set the DMA channel (0-7) currently driving the bus. The controller
+    /// calls this before each channel's transfer so the bus view can tag
+    /// captured B-bus writes with their source channel — mirrors Mesen2's
+    /// `dma->GetActiveChannel()` (`SnesEventManager.cpp:40-42`). Default
+    /// no-op for the test mock buses.
+    fn set_active_channel(&mut self, _channel: u8) {}
 }
