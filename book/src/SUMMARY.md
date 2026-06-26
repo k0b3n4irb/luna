@@ -6,6 +6,7 @@
 
 - [Install & first run](using/install.md)
 - [Controls](using/controls.md)
+- [Debugging tools](using/debugging.md)
 - [Saves & save states](using/saves.md)
 - [CLI, API & MCP](using/cli-api-mcp.md)
 
