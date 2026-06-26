@@ -3,9 +3,11 @@
 luna emulates **two controllers (Player 1 + Player 2)** from the keyboard,
 both fully driven by the emulator (`$4016`/`$4017` manual reads + the
 auto-read latch `$4218/$4219` for JOY1 and `$421A/$421B` for JOY2). The SNES
-**Mouse** and the **Super Scope** are **not yet supported**. (The CLI/MCP
-`set_joypad(port, mask)` API injects bitmasks for either port for
-scripted/agent input; the GUI wires both ports from the keyboard.)
+**Mouse** and the **Super Scope** are also supported: select a per-port device
+in the GUI under **Settings → Devices** (the host pointer drives them), or from
+the CLI with `--port1`/`--port2` plus scripted `--mouse`/`--superscope` input.
+(The CLI/MCP `set_joypad(port, mask)` API injects pad bitmasks for either port
+for scripted/agent input; the GUI wires both pad ports from the keyboard.)
 
 Bindings are stored by physical `KeyCode` (layout-agnostic), so the key
 *positions* hold on AZERTY/QWERTZ. Remap them per-player in the GUI under

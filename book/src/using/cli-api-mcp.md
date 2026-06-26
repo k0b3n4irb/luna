@@ -263,6 +263,26 @@ Left(9) Right(8) A(7) X(6) L(5) R(4)`. So Start = `$1000`, A = `$80`.
 > a black/forced-blank screenshot with no input is **not** a bug. Pulse
 > Start to get past it.
 
+### Pointer devices (Mouse / Super Scope)
+
+A port can hold a **Mouse** or **Super Scope** instead of a pad. Select the
+device with `--port1`/`--port2` (`pad` · `mouse` · `superscope`), then script
+its motion:
+
+```
+# Super Scope on port 2, fire at screen pixel (128, 112) on frame 120
+--port2 superscope --superscope "120:128,112,1"
+
+# Mouse on port 1: move +5/-3 and press the left button on frame 60
+--port1 mouse --mouse "60:5,-3,1"
+```
+
+`--mouse` takes signed `dx,dy` motion (`buttons` bit0 = left, bit1 = right);
+`--superscope` takes absolute screen `x,y` pixels (`buttons` bit0 = trigger,
+bit1 = cursor, bit2 = turbo, bit3 = pause). In the GUI these map to the host
+mouse cursor automatically once a port is set to the device under
+**Settings → Devices**.
+
 ---
 
 ## 4. MCP tool catalogue (`luna mcp`)

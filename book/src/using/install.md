@@ -6,8 +6,8 @@ Every [GitHub release](https://github.com/k0b3n4irb/luna/releases/latest) ships
 Linux binaries for **x86_64** and **aarch64** — no toolchain needed:
 
 ```bash
-curl -LO https://github.com/k0b3n4irb/luna/releases/latest/download/luna-v1.2.0-linux-x86_64.tar.gz
-tar xzf luna-v1.2.0-linux-x86_64.tar.gz && cd luna-v1.2.0-linux-x86_64
+curl -LO https://github.com/k0b3n4irb/luna/releases/latest/download/luna-v1.3.0-linux-x86_64.tar.gz
+tar xzf luna-v1.3.0-linux-x86_64.tar.gz && cd luna-v1.3.0-linux-x86_64
 
 ./luna-gui "path/to/game.sfc"   # play in the graphical debugger
 ./luna --help                   # headless CLI: run · state · mcp …
