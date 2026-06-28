@@ -1,10 +1,12 @@
 name: Release
 
 # Build and publish runnable binaries when a version tag is pushed.
-# Step 1: Linux x86_64 + aarch64 (native runners — the repo is public, so
-# GitHub's arm64 Linux runner is free). Windows / macOS come later: add a
-# matrix entry. The auto-generated source archives stay; these binaries are
-# attached alongside them.
+# Native build per target — no cross-compilation:
+#   - Linux  x86_64  (ubuntu-latest)        tar.gz
+#   - Linux  aarch64 (ubuntu-24.04-arm)     tar.gz   (free arm64 runner: public repo)
+#   - Windows x86_64 (windows-latest)       zip      (Explorer-native extraction)
+#   - macOS  aarch64 (macos-14, Apple Si.)  tar.gz
+# The auto-generated source archives stay; these binaries attach alongside them.
 on:
   push:
     tags:
@@ -22,72 +24,108 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------
-  # Build both binaries (`luna` CLI + `luna-gui`) natively per architecture
-  # and package each into a tarball with LICENSE + README + a SHA256 sidecar.
+  # Build both binaries (`luna` CLI + `luna-gui`) natively per platform
+  # and package each with LICENSE + README + a SHA256 sidecar.
   # ---------------------------------------------------------------------
   build:
-    name: build ${{ matrix.arch }}
+    name: build ${{ matrix.os }} ${{ matrix.arch }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: ubuntu-latest
+            os: linux
             arch: x86_64
+            format: tar.gz
           - runner: ubuntu-24.04-arm
+            os: linux
             arch: aarch64
+            format: tar.gz
+          - runner: windows-latest
+            os: windows
+            arch: x86_64
+            format: zip
+          - runner: macos-14
+            os: macos
+            arch: aarch64
+            format: tar.gz
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
 
-      # Only build-time system dep for both binaries: ALSA headers (cpal →
-      # alsa-sys). winit/wgpu dlopen X11/Wayland/Vulkan at runtime; rfd uses
-      # the pure-Rust xdg-portal backend — no GTK build dep. (Matches the CI
-      # `check` job, which is green with just this.)
+      # Linux's only build-time system dep for both binaries: ALSA headers
+      # (cpal → alsa-sys). winit/wgpu dlopen X11/Wayland/Vulkan at runtime; rfd
+      # uses the pure-Rust xdg-portal backend — no GTK build dep. Windows (WASAPI)
+      # and macOS (CoreAudio) need no extra system package; cpal links the OS
+      # audio framework directly.
       - name: Install ALSA headers
+        if: matrix.os == 'linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.arch }}
+          key: release-${{ matrix.os }}-${{ matrix.arch }}
 
       - name: Build release binaries
         run: cargo build --release --locked -p luna-cli -p luna-gui
 
-      - name: Package tarball + checksum
+      # One bash step for every platform — Git Bash is on PATH on the Windows
+      # runner, so tar/7z/sha256sum all resolve. macOS lacks `sha256sum`, so we
+      # fall back to `shasum -a 256` (identical `<hash>  <file>` output, and
+      # `shasum -c` verifies a `sha256sum`-style file).
+      - name: Package archive + checksum
+        shell: bash
         run: |
           set -euo pipefail
           VER="${GITHUB_REF_NAME#v}"
-          PKG="luna-v${VER}-linux-${{ matrix.arch }}"
+          PKG="luna-v${VER}-${{ matrix.os }}-${{ matrix.arch }}"
           mkdir -p "dist/${PKG}"
-          cp target/release/luna target/release/luna-gui "dist/${PKG}/"
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            cp target/release/luna.exe target/release/luna-gui.exe "dist/${PKG}/"
+          else
+            cp target/release/luna target/release/luna-gui "dist/${PKG}/"
+          fi
           cp LICENSE README.md "dist/${PKG}/"
-          tar czf "dist/${PKG}.tar.gz" -C dist "${PKG}"
-          ( cd dist && sha256sum "${PKG}.tar.gz" > "${PKG}.tar.gz.sha256" )
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            SHA() { sha256sum "$@"; }
+          else
+            SHA() { shasum -a 256 "$@"; }
+          fi
+
+          if [ "${{ matrix.format }}" = "zip" ]; then
+            ( cd dist && 7z a -tzip "${PKG}.zip" "${PKG}" >/dev/null )
+          else
+            tar czf "dist/${PKG}.tar.gz" -C dist "${PKG}"
+          fi
+          ( cd dist && SHA "${PKG}.${{ matrix.format }}" > "${PKG}.${{ matrix.format }}.sha256" )
           ls -l dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
-          name: luna-${{ matrix.arch }}
-          path: dist/*.tar.gz*
+          name: luna-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            dist/*.tar.gz*
+            dist/*.zip*
           if-no-files-found: error
 
   # ---------------------------------------------------------------------
-  # Collect every arch's artifacts and publish them to the GitHub release
-  # for this tag (created if absent), next to the source archives.
+  # Collect every platform's artifacts and publish them to the GitHub
+  # release for this tag (created if absent), next to the source archives.
   # ---------------------------------------------------------------------
   release:
     name: publish release
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
 
       - name: Publish
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           generate_release_notes: true
