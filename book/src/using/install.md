@@ -3,27 +3,43 @@
 ## Prebuilt binaries (recommended)
 
 Every [GitHub release](https://github.com/k0b3n4irb/luna/releases/latest) ships
-Linux binaries for **x86_64** and **aarch64** — no toolchain needed:
+prebuilt binaries — no toolchain needed:
+
+| Platform | Asset |
+|---|---|
+| Linux x86_64 | `luna-v1.4.0-linux-x86_64.tar.gz` |
+| Linux aarch64 | `luna-v1.4.0-linux-aarch64.tar.gz` |
+| Windows x86_64 | `luna-v1.4.0-windows-x86_64.zip` |
+| macOS Apple Silicon (arm64) | `luna-v1.4.0-macos-aarch64.tar.gz` |
 
 ```bash
-curl -LO https://github.com/k0b3n4irb/luna/releases/latest/download/luna-v1.3.0-linux-x86_64.tar.gz
-tar xzf luna-v1.3.0-linux-x86_64.tar.gz && cd luna-v1.3.0-linux-x86_64
+# Linux / macOS (swap the asset name for your platform)
+curl -LO https://github.com/k0b3n4irb/luna/releases/latest/download/luna-v1.4.0-linux-x86_64.tar.gz
+tar xzf luna-v1.4.0-linux-x86_64.tar.gz && cd luna-v1.4.0-linux-x86_64
 
 ./luna-gui "path/to/game.sfc"   # play in the graphical debugger
 ./luna --help                   # headless CLI: run · state · mcp …
 ```
 
-Each tarball contains both binaries (`luna`, `luna-gui`) and a `.sha256`
-checksum. For ARM64, swap `x86_64` → `aarch64`.
+On Windows, download the `.zip`, extract it (Explorer opens it natively), and
+run `luna-gui.exe` or `luna.exe`. Each archive contains both binaries and a
+`.sha256` checksum.
 
 ### Runtime requirements
 
-- **`luna-gui`** needs a desktop Linux session: Vulkan or OpenGL, X11 or
-  Wayland, and ALSA — all standard on any modern distro.
+- **`luna-gui`** needs a desktop session with a GPU backend:
+  - Linux — Vulkan or OpenGL, X11 or Wayland, and ALSA (all standard on any
+    modern distro).
+  - Windows — Direct3D 12 / Vulkan (any recent GPU driver).
+  - macOS — Metal (built in).
 - **`luna`** (the headless CLI) needs none of those; it runs anywhere.
 
-macOS and Windows are not yet built or supported — they may compile, but no
-guarantees.
+> **macOS Gatekeeper:** the binaries are unsigned, so the first launch is
+> blocked. Clear the quarantine flag once with
+> `xattr -dr com.apple.quarantine luna-v1.4.0-macos-aarch64`, or right-click →
+> *Open* in Finder and confirm.
+>
+> Intel Macs and 32-bit/ARM Windows are not built — build from source below.
 
 ## Build from source
 
