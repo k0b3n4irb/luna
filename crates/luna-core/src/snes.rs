@@ -3033,7 +3033,6 @@ mod tests {
         snes.dma.channels[1].ntlr = 0x86;
         snes.dma.channels[1].hdma_active = true;
         snes.dma.channels[1].hdma_do_transfer = true;
-        snes.dma.channels[1].hdma_started = true; // skip lazy frame re-init
         snes.dma.hdmaen = 0x02;
 
         let scanlines = snes.region_scanlines();
