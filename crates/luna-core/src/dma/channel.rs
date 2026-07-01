@@ -455,9 +455,13 @@ impl DmaChannel {
     /// byte and either reloads from a new entry, or terminates the
     /// channel for the rest of the frame.
     ///
+    /// `last_active` is true when this is the last still-active HDMA
+    /// channel (ares `hdmaFinished()`: no higher-indexed channel is
+    /// active). It only matters for the indirect-reload quirk below.
+    ///
     /// Returns the number of bytes transferred on this line (0 if
     /// the channel is done or this line was a non-repeat gap).
-    pub fn hdma_step_line<B: DmaBus>(&mut self, bus: &mut B) -> u32 {
+    pub fn hdma_step_line<B: DmaBus>(&mut self, bus: &mut B, last_active: bool) -> u32 {
         if !self.hdma_active {
             return 0;
         }
@@ -496,23 +500,34 @@ impl DmaChannel {
         // single line, so the logo vanished after one scanline.
         self.ntlr = self.ntlr.wrapping_sub(1);
         if self.ntlr & 0x7F == 0 {
-            // Entry exhausted: read next header byte.
+            // Entry exhausted: read next header byte (ares `hdmaReload`,
+            // dma.cpp:152-171). A 0 header terminates the channel; a
+            // non-zero one arms a fresh entry that transfers next line.
             let next = read_a_valid(bus, make_addr(self.a_bank, self.a2a));
             self.a2a = self.a2a.wrapping_add(1);
             self.ntlr = next;
-            if next == 0 {
-                self.hdma_active = false;
-                self.hdma_do_transfer = false;
-            } else {
-                if self.params.hdma_indirect {
-                    let lo = read_a_valid(bus, make_addr(self.a_bank, self.a2a));
+            let completed = next == 0;
+            self.hdma_active = !completed;
+            self.hdma_do_transfer = !completed;
+            if self.params.hdma_indirect {
+                // ares reads the indirect data pointer on EVERY reload,
+                // including a terminating (0) header (dma.cpp:162-169). The
+                // first byte lands in the high half (`data << 8`); the second
+                // shifts it down and takes the high half. But if this reload
+                // both terminates the channel AND it is the last active HDMA
+                // channel (`hdmaCompleted && hdmaFinished()`), ares reads only
+                // that FIRST byte — the address ends one short and one A-bus
+                // cycle is saved (the row #10 last-active-channel quirk). For
+                // a live entry (or a non-last terminator) the normal 2-byte
+                // load runs, giving `das = lo | hi << 8` exactly as before.
+                let first = read_a_valid(bus, make_addr(self.a_bank, self.a2a));
+                self.a2a = self.a2a.wrapping_add(1);
+                self.das = u16::from(first) << 8;
+                if !(completed && last_active) {
+                    let second = read_a_valid(bus, make_addr(self.a_bank, self.a2a));
                     self.a2a = self.a2a.wrapping_add(1);
-                    let hi = read_a_valid(bus, make_addr(self.a_bank, self.a2a));
-                    self.a2a = self.a2a.wrapping_add(1);
-                    self.das = u16::from(lo) | (u16::from(hi) << 8);
+                    self.das = (u16::from(second) << 8) | (self.das >> 8);
                 }
-                // A fresh entry always transfers on its first line.
-                self.hdma_do_transfer = true;
             }
         } else {
             // Continuation line: transfer iff the (decremented) repeat bit
@@ -858,14 +873,14 @@ mod tests {
         assert_eq!(ch.ntlr, 0x02, "header byte cached as-is");
 
         // Line 1: transfer $11, count → 1, continuation gap (no repeat).
-        let n = ch.hdma_step_line(&mut bus);
+        let n = ch.hdma_step_line(&mut bus, true);
         assert_eq!(n, 1, "mode 0 transfers 1 byte/line");
         assert_eq!(bus.b[0x22], 0x11);
         assert!(ch.hdma_active);
         assert!(!ch.hdma_do_transfer, "non-repeat continuation skips");
 
         // Line 2: no transfer; count drops to 0 → reads terminator → done.
-        let n = ch.hdma_step_line(&mut bus);
+        let n = ch.hdma_step_line(&mut bus, true);
         assert_eq!(n, 0);
         assert!(!ch.hdma_active);
     }
@@ -880,11 +895,11 @@ mod tests {
 
         // 3 lines, each transferring one byte; count goes 3→2→1→0
         // then terminator fetch.
-        ch.hdma_step_line(&mut bus); // line 1
+        ch.hdma_step_line(&mut bus, true); // line 1
         assert_eq!(bus.b[0x22], 0x11);
-        ch.hdma_step_line(&mut bus); // line 2
+        ch.hdma_step_line(&mut bus, true); // line 2
         assert_eq!(bus.b[0x22], 0x22);
-        ch.hdma_step_line(&mut bus); // line 3 + reads terminator
+        ch.hdma_step_line(&mut bus, true); // line 3 + reads terminator
         assert_eq!(bus.b[0x22], 0x33);
         assert!(!ch.hdma_active, "terminator at offset 4 ends channel");
     }
@@ -901,22 +916,22 @@ mod tests {
         ch.hdma_start_frame(&mut bus);
 
         // Line 1: transfer $AB.
-        ch.hdma_step_line(&mut bus);
+        ch.hdma_step_line(&mut bus, true);
         assert_eq!(bus.b[0x22], 0xAB);
         // Lines 2..=127: hold — still inside the same 128-line entry.
         for _ in 0..126 {
-            ch.hdma_step_line(&mut bus);
+            ch.hdma_step_line(&mut bus, true);
             assert!(ch.hdma_active, "still inside the 128-line entry");
             assert!(!ch.hdma_do_transfer, "non-repeat continuation holds");
         }
         // Line 128: low 7 bits reach 0 → reload the $01 entry (no transfer
         // this line, but the fresh entry arms a transfer for the next).
-        ch.hdma_step_line(&mut bus);
+        ch.hdma_step_line(&mut bus, true);
         assert!(ch.hdma_active);
         assert!(ch.hdma_do_transfer, "fresh entry transfers next line");
         assert_eq!(bus.b[0x22], 0xAB, "no transfer on the reload line");
         // Line 129: transfer $CD, then reload terminator → done.
-        ch.hdma_step_line(&mut bus);
+        ch.hdma_step_line(&mut bus, true);
         assert_eq!(bus.b[0x22], 0xCD);
         assert!(!ch.hdma_active, "terminator ends the channel");
     }
@@ -937,12 +952,71 @@ mod tests {
         assert_eq!(ch.das, 0x3456, "indirect pointer loaded from table");
         assert!(ch.hdma_active);
 
-        ch.hdma_step_line(&mut bus); // line 1: reads $7E:3456 = $AA
+        ch.hdma_step_line(&mut bus, true); // line 1: reads $7E:3456 = $AA
         assert_eq!(bus.b[0x22], 0xAA);
         assert_eq!(ch.das, 0x3457, "data pointer advanced past the byte");
-        ch.hdma_step_line(&mut bus); // line 2: reads $7E:3457 = $BB, then term.
+        ch.hdma_step_line(&mut bus, true); // line 2: reads $7E:3457 = $BB, then term.
         assert_eq!(bus.b[0x22], 0xBB);
         assert!(!ch.hdma_active);
+    }
+
+    /// Regression — HDMA audit row #10, ares dma.cpp:162-169. When an
+    /// indirect reload BOTH terminates the channel (0 header) AND this is the
+    /// last active HDMA channel (`hdmaCompleted && hdmaFinished()`), ares reads
+    /// only the FIRST indirect-pointer byte (`indirectAddress = data << 8`) and
+    /// returns — one fewer A-bus read than the normal 2-byte load.
+    #[test]
+    fn hdma_indirect_terminator_on_last_channel_reads_one_byte() {
+        // Table $00:8000 — indirect (mode 0 + $40): a 1-line entry pointing at
+        // $3456, then a 0 terminator header whose (never-transferred) pointer
+        // bytes sit at offsets 4/5. Data $7E:3456 = $AB.
+        let mut bus = MockBus::new();
+        bus.poke_a(0x00_8000, &[0x01, 0x56, 0x34, 0x00, 0xEE, 0xFF]);
+        bus.poke_a(0x7E_3456, &[0xAB]);
+        let mut ch = hdma_channel(0x00, 0x8000, 0x22, 0x40);
+        ch.dasb = 0x7E;
+        ch.hdma_start_frame(&mut bus); // a2a=$8003, das=$3456
+        assert_eq!(ch.das, 0x3456);
+
+        // Line 1: transfer $AB, hit the 0 header. As the last active channel,
+        // exactly ONE indirect byte ($EE @ $8004) is read — $FF @ $8005 is not.
+        ch.hdma_step_line(&mut bus, true);
+        assert_eq!(bus.b[0x22], 0xAB, "the live entry still transfers");
+        assert!(!ch.hdma_active, "0 header terminates the channel");
+        assert_eq!(ch.a2a, 0x8005, "header + 1 indirect byte consumed");
+        assert_eq!(ch.das, 0xEE00, "ares: indirectAddress = firstByte << 8");
+        assert!(
+            bus.log.iter().any(|l| l.starts_with("RA $008004")),
+            "first indirect byte is read"
+        );
+        assert!(
+            !bus.log.iter().any(|l| l.starts_with("RA $008005")),
+            "second indirect byte is NOT read on the last active channel"
+        );
+    }
+
+    /// Complement to the row #10 quirk — when the terminating indirect entry is
+    /// NOT the last active channel (a higher-indexed channel is still running),
+    /// ares reads BOTH pointer bytes as usual (`indirectAddress = data << 8 |
+    /// indirectAddress >> 8`).
+    #[test]
+    fn hdma_indirect_terminator_with_later_channel_reads_two_bytes() {
+        let mut bus = MockBus::new();
+        bus.poke_a(0x00_8000, &[0x01, 0x56, 0x34, 0x00, 0xEE, 0xFF]);
+        bus.poke_a(0x7E_3456, &[0xAB]);
+        let mut ch = hdma_channel(0x00, 0x8000, 0x22, 0x40);
+        ch.dasb = 0x7E;
+        ch.hdma_start_frame(&mut bus);
+
+        // last_active = false → both pointer bytes ($EE, $FF) are read.
+        ch.hdma_step_line(&mut bus, false);
+        assert!(!ch.hdma_active);
+        assert_eq!(ch.a2a, 0x8006, "header + 2 indirect bytes consumed");
+        assert_eq!(ch.das, 0xFFEE, "ares: data << 8 | indirectAddress >> 8");
+        assert!(
+            bus.log.iter().any(|l| l.starts_with("RA $008005")),
+            "second indirect byte IS read when a later channel is active"
+        );
     }
 
     #[test]
@@ -955,7 +1029,7 @@ mod tests {
         ch.hdma_start_frame(&mut bus);
         assert!(!ch.hdma_active);
         // Stepping is a no-op.
-        assert_eq!(ch.hdma_step_line(&mut bus), 0);
+        assert_eq!(ch.hdma_step_line(&mut bus, true), 0);
     }
 
     #[test]
@@ -967,12 +1041,12 @@ mod tests {
         let mut ch = hdma_channel(0x00, 0x6000, 0x22, 0x00);
         ch.hdma_start_frame(&mut bus);
 
-        ch.hdma_step_line(&mut bus); // line 1: write $AA, fetch entry 2
+        ch.hdma_step_line(&mut bus, true); // line 1: write $AA, fetch entry 2
         assert_eq!(bus.b[0x22], 0xAA);
         assert!(ch.hdma_active);
         assert_eq!(ch.ntlr & 0x7F, 0x01, "second entry has 1 line");
 
-        ch.hdma_step_line(&mut bus); // line 2: write $BB, fetch terminator
+        ch.hdma_step_line(&mut bus, true); // line 2: write $BB, fetch terminator
         assert_eq!(bus.b[0x22], 0xBB);
         assert!(!ch.hdma_active);
     }
@@ -985,7 +1059,7 @@ mod tests {
         bus.poke_a(0x00_7000, &[0x01, 0x11, 0x22, 0x00]);
         let mut ch = hdma_channel(0x00, 0x7000, 0x18, 0x01); // mode 1
         ch.hdma_start_frame(&mut bus);
-        let n = ch.hdma_step_line(&mut bus);
+        let n = ch.hdma_step_line(&mut bus, true);
         assert_eq!(n, 2);
         assert_eq!(bus.b[0x18], 0x11);
         assert_eq!(bus.b[0x19], 0x22);

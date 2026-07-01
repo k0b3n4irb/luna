@@ -262,7 +262,14 @@ impl Dma {
                 bus.set_active_channel(HDMA_CHANNEL_FLAG | ch as u8);
                 // A channel active at line start does work this line.
                 any_active |= self.channels[ch].hdma_active;
-                bytes += self.channels[ch].hdma_step_line(bus);
+                // ares `hdmaFinished()`: this is the last active HDMA channel
+                // iff no higher-indexed enabled channel is still active. Snapshot
+                // it before the step (later channels haven't advanced this line —
+                // matching ares' transfer-all-then-advance-all ordering). Drives
+                // the indirect-terminator 1-byte reload quirk (`hdma_step_line`).
+                let last_active = !((ch + 1..8)
+                    .any(|j| self.hdmaen & (1 << j) != 0 && self.channels[j].hdma_active));
+                bytes += self.channels[ch].hdma_step_line(bus, last_active);
             }
         }
         if any_active {
@@ -527,6 +534,65 @@ mod tests {
         );
         // Consumer view: the channel number is the low 3 bits.
         assert_eq!(bus.tagged_writes[0].0 & 7, 3);
+    }
+
+    #[test]
+    fn hdma_indirect_terminator_1byte_quirk_tracks_the_last_active_channel() {
+        // Row #10 integration: the "last active channel" that drives the
+        // 1-byte indirect-terminator quirk (ares `hdmaFinished()`) is computed
+        // across channels. Two indirect channels: ch0 terminates on line 1
+        // while ch1 (higher index) is still active → ch0 is NOT last, reads 2
+        // pointer bytes. ch1 terminates on line 2 as the sole survivor → it IS
+        // last, reads only 1.
+        let mut bus = MockBus::new();
+        // ch0 table $00:1000 — 1-line entry → $3456, then 0 terminator whose
+        // pointer bytes ($EE,$FF) sit at offsets 4/5.
+        for (i, b) in [0x01u8, 0x56, 0x34, 0x00, 0xEE, 0xFF].iter().enumerate() {
+            bus.a[0x00_1000 + i] = *b;
+        }
+        bus.a[0x7E_3456] = 0xAB;
+        // ch1 table $00:2000 — 2-line entry → $5678, then 0 terminator ($AA,$BB).
+        for (i, b) in [0x02u8, 0x78, 0x56, 0x00, 0xAA, 0xBB].iter().enumerate() {
+            bus.a[0x00_2000 + i] = *b;
+        }
+        bus.a[0x7E_5678] = 0xCD;
+        bus.a[0x7E_5679] = 0xEF;
+
+        let mut dma = Dma::new();
+        for (ch, addr) in [(0usize, 0x1000u16), (1, 0x2000)] {
+            dma.channels[ch].params = DmaParams::from_byte(0x40); // indirect, mode 0
+            dma.channels[ch].bbad = 0x22;
+            dma.channels[ch].a_addr = addr;
+            dma.channels[ch].a_bank = 0x00;
+            dma.channels[ch].dasb = 0x7E;
+        }
+        dma.hdmaen = 0b0000_0011;
+        dma.hdma_init(&mut bus);
+
+        // Line 1: ch0 terminates but ch1 is still active → NOT last → 2 bytes.
+        dma.hdma_run_line(&mut bus);
+        assert!(!dma.channels[0].hdma_active);
+        assert_eq!(
+            dma.channels[0].a2a, 0x1006,
+            "ch0 read header + 2 indirect bytes (a later channel is active)"
+        );
+        assert_eq!(dma.channels[0].das, 0xFFEE, "full 2-byte indirect pointer");
+        assert!(
+            dma.channels[1].hdma_active,
+            "ch1 still inside its 2-line entry"
+        );
+
+        // Line 2: ch1 terminates as the sole remaining channel → last → 1 byte.
+        dma.hdma_run_line(&mut bus);
+        assert!(!dma.channels[1].hdma_active);
+        assert_eq!(
+            dma.channels[1].a2a, 0x2005,
+            "ch1 read header + 1 indirect byte (last active channel quirk)"
+        );
+        assert_eq!(
+            dma.channels[1].das, 0xAA00,
+            "ares: firstByte << 8, one short"
+        );
     }
 
     #[test]
