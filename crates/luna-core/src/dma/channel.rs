@@ -241,21 +241,17 @@ pub struct DmaChannel {
     /// `$43xB` / `$43xF` — unused mirror byte exposed in real hardware
     /// (some games rely on the open-bus value).
     pub unused: u8,
-    /// HDMA: whether the channel can still fire this frame. Set true
-    /// by [`Self::hdma_start_frame`] iff the table didn't start with a
-    /// terminator byte; cleared when the table runs out.
+    /// HDMA: whether the channel can still fire this frame — luna's name for
+    /// ares/Mesen2's `!HdmaFinished`. `hdma_init` resets it true for ALL
+    /// channels every frame; `hdma_start_frame` clears it when the table
+    /// starts with a terminator, and the per-line reload clears it when the
+    /// table runs out.
     pub hdma_active: bool,
-    /// HDMA: whether **this** scanline fires a transfer. Reload-on-
-    /// entry always sets this; in between it's the repeat flag's value.
+    /// HDMA: whether **this** scanline fires a transfer (ares/Mesen2
+    /// `DoTransfer`). `hdma_init` sets it true for ALL channels when any HDMA
+    /// is enabled; reload-on-entry re-sets it; in between it is the repeat
+    /// flag's value.
     pub hdma_do_transfer: bool,
-    /// HDMA: whether this channel has had its frame-start setup
-    /// (`hdma_start_frame`) run since the last frame-start init. Cleared
-    /// every frame in `hdma_init`. A channel whose HDMAEN bit is set
-    /// **mid-frame** (e.g. Yoshi's Island enables the text-band split at
-    /// scanline ~12) is set up lazily on its first active line so it
-    /// starts cleanly from its source address — matching ares' live
-    /// `hdmaActive()` gating rather than a V=0-only latch.
-    pub hdma_started: bool,
 
     // --- transient sync-DMA segment cursor (Phase 5) ---
     // These hold a sync DMA's progress *between* [`Self::run_segment`]

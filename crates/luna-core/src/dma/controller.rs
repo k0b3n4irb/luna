@@ -211,26 +211,33 @@ impl Dma {
     /// `hdmaSetup`: `step(8)` overhead + one header read per enabled
     /// channel; folded here into the canonical `18 + 8·channels` figure.
     pub fn hdma_init<B: DmaBus>(&mut self, bus: &mut B) -> u32 {
+        // ares `hdmaReset` + Mesen2 `InitHdmaChannels`: every frame, reset the
+        // per-channel run flags for ALL 8 channels — enabled or not. Mesen
+        // notes NOT resetting `DoTransfer` glitches Aladdin / Super Ghouls'n
+        // Ghosts. `hdma_active` is luna's `!HdmaFinished`.
+        for ch in 0..8 {
+            self.channels[ch].hdma_active = true;
+            self.channels[ch].hdma_do_transfer = false;
+        }
+        if self.hdmaen == 0 {
+            return 0;
+        }
         let mut enabled = 0u32;
         for ch in 0..8 {
-            // Re-arm the lazy-start latch each frame; a channel enabled
-            // *mid-frame* (HDMAEN bit set after this init) is set up on its
-            // first active line in `hdma_run_line`.
-            self.channels[ch].hdma_started = false;
+            // "Set DoTransfer to true for ALL channels if any HDMA channel is
+            // enabled" (Mesen2 SnesDmaController.cpp:131, ares dma.cpp:143).
+            // This is what lets a channel enabled MID-frame transfer from its
+            // (stale) running table pointer — the references do NOT re-copy
+            // the source address on a mid-frame enable.
+            self.channels[ch].hdma_do_transfer = true;
             if self.hdmaen & (1 << ch) != 0 {
+                // Enabled at V=0: copy source→pointer and read the first entry
+                // (may terminate the channel if the header is 0).
                 self.channels[ch].hdma_start_frame(bus);
-                self.channels[ch].hdma_started = true;
                 enabled += 1;
-            } else {
-                self.channels[ch].hdma_active = false;
-                self.channels[ch].hdma_do_transfer = false;
             }
         }
-        if enabled > 0 {
-            HDMA_OVERHEAD_MCLK + 8 * enabled
-        } else {
-            0
-        }
+        HDMA_OVERHEAD_MCLK + 8 * enabled
     }
 
     /// Per-scanline HDMA step. Called once per visible scanline
@@ -246,14 +253,11 @@ impl Dma {
         let mut any_active = false;
         for ch in 0..8 {
             if self.hdmaen & (1 << ch) != 0 {
-                // Mid-frame enable (HDMAEN bit set after `hdma_init`, e.g.
-                // Yoshi's Island's text-band split at scanline ~12): set the
-                // channel up now so it begins from its source address — ares
-                // gates `hdmaRun` on the live `hdmaActive()`, not a V=0 latch.
-                if !self.channels[ch].hdma_started {
-                    self.channels[ch].hdma_start_frame(bus);
-                    self.channels[ch].hdma_started = true;
-                }
+                // Live HDMAEN gate (ares `hdmaActive()` / Mesen2 per-line
+                // `HdmaChannels & (1<<i)`): a channel enabled mid-frame runs
+                // from here using the `do_transfer`/pointer state left by
+                // `hdma_init` — the references keep that (stale) state; they do
+                // NOT re-copy the source on a mid-frame enable.
                 // Tag B-bus writes this channel makes with its channel id so
                 // the Event Viewer can plot them — faithful to Mesen2's
                 // `_activeChannel = HdmaChannelFlag | i` (SnesDmaController.cpp
@@ -473,32 +477,79 @@ mod tests {
     }
 
     #[test]
-    fn hdma_enabled_mid_frame_starts_from_source() {
-        // Regression: a channel whose HDMAEN bit is set AFTER `hdma_init`
-        // (Yoshi's Island enables its text-band split at scanline ~12)
-        // must still run, lazily setting up from its source address on the
-        // first active line — not stay dormant until the next frame's init.
+    fn hdma_mid_frame_enable_uses_stale_pointer_not_source() {
+        // Faithful port (ares hdmaSetup / Mesen2 InitHdmaChannels, audit #9): a
+        // channel enabled MID-frame does NOT re-copy its source address. When
+        // any HDMA is enabled at V=0, hdma_init arms `DoTransfer=true` for ALL
+        // channels, so a later-enabled channel runs from its (stale) running
+        // table pointer. luna previously lazily re-init'd from source — an
+        // invention absent from BOTH references (Yoshi's Island still renders
+        // correctly under the faithful model; validated by screenshot).
         let mut bus = MockBus::new();
-        bus.a[0x00_2000] = 0x02; // line count
-        bus.a[0x00_2001] = 0xAB; // data byte
-        bus.a[0x00_2002] = 0x00; // terminator
-        let mut dma = Dma::new();
-        dma.channels[0].params = DmaParams::from_byte(0); // mode 0, direct
-        dma.channels[0].bbad = 0x22;
-        dma.channels[0].a_addr = 0x2000;
-        dma.channels[0].a_bank = 0x00;
+        // ch7 is enabled at V=0 → makes hdma_init run its full loop.
+        bus.a[0x00_1000] = 0x01; // 1-line entry
+        bus.a[0x00_1001] = 0x11;
+        bus.a[0x00_1002] = 0x00; // terminator
+        // ch0's STALE pointer points at $00:3000 ($DD); its SOURCE is a
+        // different place ($00:2000 = $AA) that must NOT be read mid-frame.
+        bus.a[0x00_3000] = 0xDD;
+        bus.a[0x00_2000] = 0xAA;
 
-        // Frame init with HDMA disabled → channel does not set up.
+        let mut dma = Dma::new();
+        dma.channels[7].params = DmaParams::from_byte(0);
+        dma.channels[7].bbad = 0x30;
+        dma.channels[7].a_addr = 0x1000;
+        dma.channels[0].params = DmaParams::from_byte(0);
+        dma.channels[0].bbad = 0x22;
+        dma.channels[0].a_addr = 0x2000; // source — must stay untouched
+        dma.channels[0].a2a = 0x3000; // stale running pointer
+        dma.channels[0].ntlr = 0x02; // stale line counter (non-repeat gap next)
+
+        dma.hdmaen = 0x80; // only ch7 at V=0
+        dma.hdma_init(&mut bus);
+        assert!(
+            dma.channels[0].hdma_do_transfer,
+            "init armed DoTransfer for ALL channels"
+        );
+        assert_eq!(
+            dma.channels[0].a2a, 0x3000,
+            "source NOT copied into pointer"
+        );
+
+        // Mid-frame enable of ch0 → transfers from the stale pointer ($DD).
+        dma.hdmaen = 0x81;
+        dma.hdma_run_line(&mut bus);
+        assert_eq!(
+            bus.b[0x22], 0xDD,
+            "ch0 ran from its stale pointer, not source"
+        );
+    }
+
+    #[test]
+    fn hdma_cold_mid_frame_enable_skips_transfer_first_line() {
+        // Faithful: if NO channel is enabled at V=0, hdma_init resets
+        // DoTransfer=false for all and early-returns (Mesen2 InitHdmaChannels
+        // line 111 + the `!HdmaChannels` return). A channel enabled mid-frame
+        // then has DoTransfer=false → NO transfer on its first active line; it
+        // only advances the (stale) counter.
+        let mut bus = MockBus::new();
+        bus.a[0x00_3000] = 0xDD;
+        let mut dma = Dma::new();
+        dma.channels[0].params = DmaParams::from_byte(0);
+        dma.channels[0].bbad = 0x22;
+        dma.channels[0].a2a = 0x3000;
+        dma.channels[0].ntlr = 0x02;
+
         dma.hdmaen = 0;
         assert_eq!(dma.hdma_init(&mut bus), 0);
-        assert!(!dma.channels[0].hdma_active);
+        assert!(
+            !dma.channels[0].hdma_do_transfer,
+            "cold init leaves DoTransfer false"
+        );
 
-        // Mid-frame: the game enables the channel. The next scanline must
-        // set it up from $00:2000 and transfer the data byte to $2122.
-        dma.hdmaen = 0b0000_0001;
-        assert_eq!(dma.hdma_run_line(&mut bus), HDMA_OVERHEAD_MCLK + 8);
-        assert_eq!(bus.b[0x22], 0xAB, "mid-frame-enabled channel transferred");
-        assert!(dma.channels[0].hdma_started);
+        dma.hdmaen = 0x01;
+        dma.hdma_run_line(&mut bus);
+        assert_eq!(bus.b[0x22], 0x00, "no transfer on the first line");
     }
 
     #[test]
