@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CATEGORY_COUNT"],"enum":["EventCategory"],"fn":["categorise","decode_dma_event","decode_event","event_category","register_name"],"struct":["EventViewerConfig","EventViewerEvent"]};

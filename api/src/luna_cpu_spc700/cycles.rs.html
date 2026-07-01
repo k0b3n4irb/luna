@@ -1,0 +1,180 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/luna-cpu-spc700/src/cycles.rs`."><title>cycles.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-b7b9f40b.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="luna_cpu_spc700" data-themes="" data-resource-suffix="" data-rustdoc-version="1.95.0 (59807616e 2026-04-14)" data-channel="1.95.0" data-search-js="search-63369b7b.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">luna_cpu_spc700/</div>cycles.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! SPC700 per-opcode cycle counts (canonical Sony / Anomie / ares
+<a href=#2 id=2 data-nosnippet>2</a>//! reference).
+<a href=#3 id=3 data-nosnippet>3</a>//!
+<a href=#4 id=4 data-nosnippet>4</a>//! Each entry is the total bus-cycle cost of the opcode INCLUDING the
+<a href=#5 id=5 data-nosnippet>5</a>//! initial opcode fetch. Branches list the not-taken cost; the
+<a href=#6 id=6 data-nosnippet>6</a>//! dispatcher should add the per-instruction "taken" penalty
+<a href=#7 id=7 data-nosnippet>7</a>//! separately if it cares (BRA family = +2 when taken, BBC/BBS = +2,
+<a href=#8 id=8 data-nosnippet>8</a>//! CBNE = +2, DBNZ = +2).
+<a href=#9 id=9 data-nosnippet>9</a>//!
+<a href=#10 id=10 data-nosnippet>10</a>//! Cross-checked against ares' `processor/spc700/instructions.cpp`
+<a href=#11 id=11 data-nosnippet>11</a>//! addressing-mode helpers (per the spec in
+<a href=#12 id=12 data-nosnippet>12</a>//! `docs/apu_dsp_reference.md` §2): each `fetch()` / `read()` /
+<a href=#13 id=13 data-nosnippet>13</a>//! `write()` / `idle()` / `push()` / `pull()` / `load()` / `store()`
+<a href=#14 id=14 data-nosnippet>14</a>//! call inside ares costs exactly one bus cycle, and the table here
+<a href=#15 id=15 data-nosnippet>15</a>//! is the sum for each opcode.
+<a href=#16 id=16 data-nosnippet>16</a>//!
+<a href=#17 id=17 data-nosnippet>17</a>//! Replaces the previous "flat 4 cycles per opcode" approximation
+<a href=#18 id=18 data-nosnippet>18</a>//! that desynchronised music tempo (T0/T1/T2 timers) AND playback
+<a href=#19 id=19 data-nosnippet>19</a>//! pitch (DSP sample tick) by the same factor of ~10-50% (gap A1 in
+<a href=#20 id=20 data-nosnippet>20</a>//! `docs/luna_apu_gaps.md`).
+<a href=#21 id=21 data-nosnippet>21</a>
+<a href=#22 id=22 data-nosnippet>22</a>/// Per-opcode cycle counts for the SPC700, in opcode order
+<a href=#23 id=23 data-nosnippet>23</a>/// (`SPC700_CYCLES[opcode] = cycles`).
+<a href=#24 id=24 data-nosnippet>24</a>///
+<a href=#25 id=25 data-nosnippet>25</a>/// Values follow the canonical SPC700 cycle reference (see
+<a href=#26 id=26 data-nosnippet>26</a>/// `docs/apu_dsp_reference.md` §2). Branches list the **not-taken**
+<a href=#27 id=27 data-nosnippet>27</a>/// cost; `Spc700::step` adds the +2 taken-branch penalty
+<a href=#28 id=28 data-nosnippet>28</a>/// ([`SPC700_BRANCH_TAKEN_PENALTY`]) when a branch / `CBNE` / `DBNZ`
+<a href=#29 id=29 data-nosnippet>29</a>/// is taken.
+<a href=#30 id=30 data-nosnippet>30</a></span><span class="attr">#[rustfmt::skip]
+<a href=#31 id=31 data-nosnippet>31</a></span><span class="kw">pub const </span>SPC700_CYCLES: [u8; <span class="number">256</span>] = [
+<a href=#32 id=32 data-nosnippet>32</a>    <span class="comment">// 0x00-0x0F
+<a href=#33 id=33 data-nosnippet>33</a>    //  00:NOP 01:TCALL0 02:SET1 03:BBS0 04:OR_d 05:OR_!a 06:OR_(X) 07:OR_[d+X]
+<a href=#34 id=34 data-nosnippet>34</a>    //  08:OR_#i 09:OR_dd,ds 0A:OR1 0B:ASL_d 0C:ASL_!a 0D:PUSH_P 0E:TSET1 0F:BRK
+<a href=#35 id=35 data-nosnippet>35</a>        </span><span class="number">2</span>, <span class="number">8</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">3</span>, <span class="number">4</span>, <span class="number">3</span>, <span class="number">6</span>, <span class="number">2</span>, <span class="number">6</span>, <span class="number">5</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">4</span>, <span class="number">6</span>, <span class="number">8</span>,
+<a href=#36 id=36 data-nosnippet>36</a>    <span class="comment">// 0x10-0x1F
+<a href=#37 id=37 data-nosnippet>37</a>    //  10:BPL 11:TCALL1 12:CLR1 13:BBC0 14:OR_d+X 15:OR_!a+X 16:OR_!a+Y 17:OR_[d]+Y
+<a href=#38 id=38 data-nosnippet>38</a>    //  18:OR_d,#i 19:OR_(X)(Y) 1A:DECW_d 1B:ASL_d+X 1C:ASL_A 1D:DEC_X 1E:CMP_X_!a 1F:JMP_[!a+X]
+<a href=#39 id=39 data-nosnippet>39</a>        </span><span class="number">2</span>, <span class="number">8</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">5</span>, <span class="number">6</span>, <span class="number">5</span>, <span class="number">5</span>, <span class="number">6</span>, <span class="number">5</span>, <span class="number">2</span>, <span class="number">2</span>, <span class="number">4</span>, <span class="number">6</span>,
+<a href=#40 id=40 data-nosnippet>40</a>    <span class="comment">// 0x20-0x2F
+<a href=#41 id=41 data-nosnippet>41</a>    //  20:CLRP 21:TCALL2 22:SET1 23:BBS1 24:AND_d 25:AND_!a 26:AND_(X) 27:AND_[d+X]
+<a href=#42 id=42 data-nosnippet>42</a>    //  28:AND_#i 29:AND_dd,ds 2A:OR1_/m 2B:ROL_d 2C:ROL_!a 2D:PUSH_A 2E:CBNE_d 2F:BRA
+<a href=#43 id=43 data-nosnippet>43</a>        </span><span class="number">2</span>, <span class="number">8</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">3</span>, <span class="number">4</span>, <span class="number">3</span>, <span class="number">6</span>, <span class="number">2</span>, <span class="number">6</span>, <span class="number">5</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">2</span>,
+<a href=#44 id=44 data-nosnippet>44</a>    <span class="comment">// 0x30-0x3F
+<a href=#45 id=45 data-nosnippet>45</a>    //  30:BMI 31:TCALL3 32:CLR1 33:BBC1 34:AND_d+X 35:AND_!a+X 36:AND_!a+Y 37:AND_[d]+Y
+<a href=#46 id=46 data-nosnippet>46</a>    //  38:AND_d,#i 39:AND_(X)(Y) 3A:INCW_d 3B:ROL_d+X 3C:ROL_A 3D:INC_X 3E:CMP_X_d 3F:CALL_!a
+<a href=#47 id=47 data-nosnippet>47</a>        </span><span class="number">2</span>, <span class="number">8</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">5</span>, <span class="number">6</span>, <span class="number">5</span>, <span class="number">5</span>, <span class="number">6</span>, <span class="number">5</span>, <span class="number">2</span>, <span class="number">2</span>, <span class="number">3</span>, <span class="number">8</span>,
+<a href=#48 id=48 data-nosnippet>48</a>    <span class="comment">// 0x40-0x4F
+<a href=#49 id=49 data-nosnippet>49</a>    //  40:SETP 41:TCALL4 42:SET1 43:BBS2 44:EOR_d 45:EOR_!a 46:EOR_(X) 47:EOR_[d+X]
+<a href=#50 id=50 data-nosnippet>50</a>    //  48:EOR_#i 49:EOR_dd,ds 4A:AND1 4B:LSR_d 4C:LSR_!a 4D:PUSH_X 4E:TCLR1 4F:PCALL_#u
+<a href=#51 id=51 data-nosnippet>51</a>        </span><span class="number">2</span>, <span class="number">8</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">3</span>, <span class="number">4</span>, <span class="number">3</span>, <span class="number">6</span>, <span class="number">2</span>, <span class="number">6</span>, <span class="number">4</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">4</span>, <span class="number">6</span>, <span class="number">6</span>,
+<a href=#52 id=52 data-nosnippet>52</a>    <span class="comment">// 0x50-0x5F
+<a href=#53 id=53 data-nosnippet>53</a>    //  50:BVC 51:TCALL5 52:CLR1 53:BBC2 54:EOR_d+X 55:EOR_!a+X 56:EOR_!a+Y 57:EOR_[d]+Y
+<a href=#54 id=54 data-nosnippet>54</a>    //  58:EOR_d,#i 59:EOR_(X)(Y) 5A:CMPW_d 5B:LSR_d+X 5C:LSR_A 5D:MOV_X,A 5E:CMP_Y_!a 5F:JMP_!a
+<a href=#55 id=55 data-nosnippet>55</a>        </span><span class="number">2</span>, <span class="number">8</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">5</span>, <span class="number">6</span>, <span class="number">5</span>, <span class="number">5</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">2</span>, <span class="number">2</span>, <span class="number">4</span>, <span class="number">3</span>,
+<a href=#56 id=56 data-nosnippet>56</a>    <span class="comment">// 0x60-0x6F
+<a href=#57 id=57 data-nosnippet>57</a>    //  60:CLRC 61:TCALL6 62:SET1 63:BBS3 64:CMP_d 65:CMP_!a 66:CMP_(X) 67:CMP_[d+X]
+<a href=#58 id=58 data-nosnippet>58</a>    //  68:CMP_#i 69:CMP_dd,ds 6A:AND1_/m 6B:ROR_d 6C:ROR_!a 6D:PUSH_Y 6E:DBNZ_d 6F:RET
+<a href=#59 id=59 data-nosnippet>59</a>        </span><span class="number">2</span>, <span class="number">8</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">3</span>, <span class="number">4</span>, <span class="number">3</span>, <span class="number">6</span>, <span class="number">2</span>, <span class="number">6</span>, <span class="number">4</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">5</span>,
+<a href=#60 id=60 data-nosnippet>60</a>    <span class="comment">// 0x70-0x7F
+<a href=#61 id=61 data-nosnippet>61</a>    //  70:BVS 71:TCALL7 72:CLR1 73:BBC3 74:CMP_d+X 75:CMP_!a+X 76:CMP_!a+Y 77:CMP_[d]+Y
+<a href=#62 id=62 data-nosnippet>62</a>    //  78:CMP_d,#i 79:CMP_(X)(Y) 7A:ADDW_d 7B:ROR_d+X 7C:ROR_A 7D:MOV_A,X 7E:CMP_Y_d 7F:RETI
+<a href=#63 id=63 data-nosnippet>63</a>        </span><span class="number">2</span>, <span class="number">8</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">5</span>, <span class="number">6</span>, <span class="number">5</span>, <span class="number">5</span>, <span class="number">5</span>, <span class="number">5</span>, <span class="number">2</span>, <span class="number">2</span>, <span class="number">3</span>, <span class="number">6</span>,
+<a href=#64 id=64 data-nosnippet>64</a>    <span class="comment">// 0x80-0x8F
+<a href=#65 id=65 data-nosnippet>65</a>    //  80:SETC 81:TCALL8 82:SET1 83:BBS4 84:ADC_d 85:ADC_!a 86:ADC_(X) 87:ADC_[d+X]
+<a href=#66 id=66 data-nosnippet>66</a>    //  88:ADC_#i 89:ADC_dd,ds 8A:EOR1 8B:DEC_d 8C:DEC_!a 8D:MOV_Y,#i 8E:POP_P 8F:MOV_d,#i
+<a href=#67 id=67 data-nosnippet>67</a>        </span><span class="number">2</span>, <span class="number">8</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">3</span>, <span class="number">4</span>, <span class="number">3</span>, <span class="number">6</span>, <span class="number">2</span>, <span class="number">6</span>, <span class="number">5</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">2</span>, <span class="number">4</span>, <span class="number">5</span>,
+<a href=#68 id=68 data-nosnippet>68</a>    <span class="comment">// 0x90-0x9F
+<a href=#69 id=69 data-nosnippet>69</a>    //  90:BCC 91:TCALL9 92:CLR1 93:BBC4 94:ADC_d+X 95:ADC_!a+X 96:ADC_!a+Y 97:ADC_[d]+Y
+<a href=#70 id=70 data-nosnippet>70</a>    //  98:ADC_d,#i 99:ADC_(X)(Y) 9A:SUBW_d 9B:DEC_d+X 9C:DEC_A 9D:MOV_X,SP 9E:DIV 9F:XCN
+<a href=#71 id=71 data-nosnippet>71</a>        </span><span class="number">2</span>, <span class="number">8</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">5</span>, <span class="number">6</span>, <span class="number">5</span>, <span class="number">5</span>, <span class="number">5</span>, <span class="number">5</span>, <span class="number">2</span>, <span class="number">2</span>,<span class="number">12</span>, <span class="number">5</span>,
+<a href=#72 id=72 data-nosnippet>72</a>    <span class="comment">// 0xA0-0xAF
+<a href=#73 id=73 data-nosnippet>73</a>    //  A0:EI A1:TCALL10 A2:SET1 A3:BBS5 A4:SBC_d A5:SBC_!a A6:SBC_(X) A7:SBC_[d+X]
+<a href=#74 id=74 data-nosnippet>74</a>    //  A8:SBC_#i A9:SBC_dd,ds AA:LDC_C,m AB:INC_d AC:INC_!a AD:CMP_Y,#i AE:POP_A AF:MOV_(X)+,A
+<a href=#75 id=75 data-nosnippet>75</a>        </span><span class="number">3</span>, <span class="number">8</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">3</span>, <span class="number">4</span>, <span class="number">3</span>, <span class="number">6</span>, <span class="number">2</span>, <span class="number">6</span>, <span class="number">4</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">2</span>, <span class="number">4</span>, <span class="number">4</span>,
+<a href=#76 id=76 data-nosnippet>76</a>    <span class="comment">// 0xB0-0xBF
+<a href=#77 id=77 data-nosnippet>77</a>    //  B0:BCS B1:TCALL11 B2:CLR1 B3:BBC5 B4:SBC_d+X B5:SBC_!a+X B6:SBC_!a+Y B7:SBC_[d]+Y
+<a href=#78 id=78 data-nosnippet>78</a>    //  B8:SBC_d,#i B9:SBC_(X)(Y) BA:MOVW_YA,d BB:INC_d+X BC:INC_A BD:MOV_SP,X BE:DAS BF:MOV_A,(X)+
+<a href=#79 id=79 data-nosnippet>79</a>        </span><span class="number">2</span>, <span class="number">8</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">5</span>, <span class="number">6</span>, <span class="number">5</span>, <span class="number">5</span>, <span class="number">5</span>, <span class="number">5</span>, <span class="number">2</span>, <span class="number">2</span>, <span class="number">3</span>, <span class="number">4</span>,
+<a href=#80 id=80 data-nosnippet>80</a>    <span class="comment">// 0xC0-0xCF
+<a href=#81 id=81 data-nosnippet>81</a>    //  C0:DI C1:TCALL12 C2:SET1 C3:BBS6 C4:MOV_d,A C5:MOV_!a,A C6:MOV_(X),A C7:MOV_[d+X],A
+<a href=#82 id=82 data-nosnippet>82</a>    //  C8:CMP_X,#i C9:MOV_!a,X CA:STC_m,C CB:MOV_d,Y CC:MOV_!a,Y CD:MOV_X,#i CE:POP_X CF:MUL
+<a href=#83 id=83 data-nosnippet>83</a>        </span><span class="number">3</span>, <span class="number">8</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">4</span>, <span class="number">7</span>, <span class="number">2</span>, <span class="number">5</span>, <span class="number">6</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">2</span>, <span class="number">4</span>, <span class="number">9</span>,
+<a href=#84 id=84 data-nosnippet>84</a>    <span class="comment">// 0xD0-0xDF
+<a href=#85 id=85 data-nosnippet>85</a>    //  D0:BNE D1:TCALL13 D2:CLR1 D3:BBC6 D4:MOV_d+X,A D5:MOV_!a+X,A D6:MOV_!a+Y,A D7:MOV_[d]+Y,A
+<a href=#86 id=86 data-nosnippet>86</a>    //  D8:MOV_d,X D9:MOV_d+Y,X DA:MOVW_d,YA DB:MOV_d+X,Y DC:DEC_Y DD:MOV_A,Y DE:CBNE_d+X DF:DAA
+<a href=#87 id=87 data-nosnippet>87</a>        </span><span class="number">2</span>, <span class="number">8</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">5</span>, <span class="number">6</span>, <span class="number">6</span>, <span class="number">7</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">5</span>, <span class="number">5</span>, <span class="number">2</span>, <span class="number">2</span>, <span class="number">6</span>, <span class="number">3</span>,
+<a href=#88 id=88 data-nosnippet>88</a>    <span class="comment">// 0xE0-0xEF
+<a href=#89 id=89 data-nosnippet>89</a>    //  E0:CLRV E1:TCALL14 E2:SET1 E3:BBS7 E4:MOV_A,d E5:MOV_A,!a E6:MOV_A,(X) E7:MOV_A,[d+X]
+<a href=#90 id=90 data-nosnippet>90</a>    //  E8:MOV_A,#i E9:MOV_X,!a EA:NOT1 EB:MOV_Y,d EC:MOV_Y,!a ED:NOTC EE:POP_Y EF:SLEEP
+<a href=#91 id=91 data-nosnippet>91</a>        </span><span class="number">2</span>, <span class="number">8</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">3</span>, <span class="number">4</span>, <span class="number">3</span>, <span class="number">6</span>, <span class="number">2</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">3</span>, <span class="number">4</span>, <span class="number">3</span>, <span class="number">4</span>, <span class="number">2</span>,
+<a href=#92 id=92 data-nosnippet>92</a>    <span class="comment">// 0xF0-0xFF
+<a href=#93 id=93 data-nosnippet>93</a>    //  F0:BEQ F1:TCALL15 F2:CLR1 F3:BBC7 F4:MOV_A,d+X F5:MOV_A,!a+X F6:MOV_A,!a+Y F7:MOV_A,[d]+Y
+<a href=#94 id=94 data-nosnippet>94</a>    //  F8:MOV_X,d F9:MOV_X,d+Y FA:MOV_dd,ds FB:MOV_Y,d+X FC:INC_Y FD:MOV_Y,A FE:DBNZ_Y FF:STOP
+<a href=#95 id=95 data-nosnippet>95</a>        </span><span class="number">2</span>, <span class="number">8</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">5</span>, <span class="number">6</span>, <span class="number">3</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">4</span>, <span class="number">2</span>, <span class="number">2</span>, <span class="number">4</span>, <span class="number">2</span>,
+<a href=#96 id=96 data-nosnippet>96</a>];
+<a href=#97 id=97 data-nosnippet>97</a>
+<a href=#98 id=98 data-nosnippet>98</a><span class="doccomment">/// Extra SPC cycles a branch-family opcode costs when the branch is
+<a href=#99 id=99 data-nosnippet>99</a>/// **taken** — two pipeline idles on real hardware (ares
+<a href=#100 id=100 data-nosnippet>100</a>/// `instructionBranch`: two `idle()` calls past the condition). Added
+<a href=#101 id=101 data-nosnippet>101</a>/// by [`crate::Spc700::step`] on top of the not-taken base in
+<a href=#102 id=102 data-nosnippet>102</a>/// [`SPC700_CYCLES`] for BRA / Bcc / CBNE / DBNZ / BBS / BBC.
+<a href=#103 id=103 data-nosnippet>103</a></span><span class="kw">pub const </span>SPC700_BRANCH_TAKEN_PENALTY: u8 = <span class="number">2</span>;
+<a href=#104 id=104 data-nosnippet>104</a>
+<a href=#105 id=105 data-nosnippet>105</a><span class="doccomment">/// Quick sanity check: every entry must be in [2, 12]. Used by the
+<a href=#106 id=106 data-nosnippet>106</a>/// build-time test below.
+<a href=#107 id=107 data-nosnippet>107</a></span><span class="attr">#[cfg(test)]
+<a href=#108 id=108 data-nosnippet>108</a></span><span class="kw">const _</span>: () = {
+<a href=#109 id=109 data-nosnippet>109</a>    <span class="kw">let </span><span class="kw-2">mut </span>i = <span class="number">0</span>;
+<a href=#110 id=110 data-nosnippet>110</a>    <span class="kw">while </span>i &lt; <span class="number">256 </span>{
+<a href=#111 id=111 data-nosnippet>111</a>        <span class="kw">let </span>c = SPC700_CYCLES[i];
+<a href=#112 id=112 data-nosnippet>112</a>        <span class="macro">assert!</span>(c &gt;= <span class="number">2 </span>&amp;&amp; c &lt;= <span class="number">12</span>, <span class="string">"cycle table entry out of range"</span>);
+<a href=#113 id=113 data-nosnippet>113</a>        i += <span class="number">1</span>;
+<a href=#114 id=114 data-nosnippet>114</a>    }
+<a href=#115 id=115 data-nosnippet>115</a>};
+<a href=#116 id=116 data-nosnippet>116</a>
+<a href=#117 id=117 data-nosnippet>117</a><span class="attr">#[cfg(test)]
+<a href=#118 id=118 data-nosnippet>118</a></span><span class="kw">mod </span>tests {
+<a href=#119 id=119 data-nosnippet>119</a>    <span class="kw">use </span>super::<span class="kw-2">*</span>;
+<a href=#120 id=120 data-nosnippet>120</a>
+<a href=#121 id=121 data-nosnippet>121</a>    <span class="attr">#[test]
+<a href=#122 id=122 data-nosnippet>122</a>    </span><span class="kw">fn </span>well_known_opcodes_have_canonical_cycle_counts() {
+<a href=#123 id=123 data-nosnippet>123</a>        <span class="comment">// Spot-check against the agent's ares research notes.
+<a href=#124 id=124 data-nosnippet>124</a>        </span><span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0x00</span>], <span class="number">2</span>, <span class="string">"NOP"</span>);
+<a href=#125 id=125 data-nosnippet>125</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0x01</span>], <span class="number">8</span>, <span class="string">"TCALL 0"</span>);
+<a href=#126 id=126 data-nosnippet>126</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0x08</span>], <span class="number">2</span>, <span class="string">"OR A,#i (immediate)"</span>);
+<a href=#127 id=127 data-nosnippet>127</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0x05</span>], <span class="number">4</span>, <span class="string">"OR A,!a (absolute)"</span>);
+<a href=#128 id=128 data-nosnippet>128</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0x04</span>], <span class="number">3</span>, <span class="string">"OR A,d (direct page)"</span>);
+<a href=#129 id=129 data-nosnippet>129</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0x3F</span>], <span class="number">8</span>, <span class="string">"CALL !a"</span>);
+<a href=#130 id=130 data-nosnippet>130</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0x6F</span>], <span class="number">5</span>, <span class="string">"RET"</span>);
+<a href=#131 id=131 data-nosnippet>131</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0x7F</span>], <span class="number">6</span>, <span class="string">"RETI"</span>);
+<a href=#132 id=132 data-nosnippet>132</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0x0F</span>], <span class="number">8</span>, <span class="string">"BRK"</span>);
+<a href=#133 id=133 data-nosnippet>133</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0x10</span>], <span class="number">2</span>, <span class="string">"BPL not-taken"</span>);
+<a href=#134 id=134 data-nosnippet>134</a>        <span class="macro">assert_eq!</span>(
+<a href=#135 id=135 data-nosnippet>135</a>            SPC700_CYCLES[<span class="number">0x2F</span>], <span class="number">2</span>,
+<a href=#136 id=136 data-nosnippet>136</a>            <span class="string">"BRA not-taken base; step() adds +2 taken = 4"
+<a href=#137 id=137 data-nosnippet>137</a>        </span>);
+<a href=#138 id=138 data-nosnippet>138</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0xCF</span>], <span class="number">9</span>, <span class="string">"MUL YA"</span>);
+<a href=#139 id=139 data-nosnippet>139</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0x9E</span>], <span class="number">12</span>, <span class="string">"DIV YA,X"</span>);
+<a href=#140 id=140 data-nosnippet>140</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0xDF</span>], <span class="number">3</span>, <span class="string">"DAA"</span>);
+<a href=#141 id=141 data-nosnippet>141</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0xBE</span>], <span class="number">3</span>, <span class="string">"DAS"</span>);
+<a href=#142 id=142 data-nosnippet>142</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0x9F</span>], <span class="number">5</span>, <span class="string">"XCN"</span>);
+<a href=#143 id=143 data-nosnippet>143</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0xED</span>], <span class="number">3</span>, <span class="string">"NOTC"</span>);
+<a href=#144 id=144 data-nosnippet>144</a>        <span class="comment">// SLEEP/STOP halt the core; luna charges the fetch+execute (2) and
+<a href=#145 id=145 data-nosnippet>145</a>        // then returns 2 per step while halted. The Tom Harte trace length
+<a href=#146 id=146 data-nosnippet>146</a>        // (7) is a fixed halt-window artifact, not a completing instruction
+<a href=#147 id=147 data-nosnippet>147</a>        // cost, so the cycle backstop excludes these two opcodes.
+<a href=#148 id=148 data-nosnippet>148</a>        </span><span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0xEF</span>], <span class="number">2</span>, <span class="string">"SLEEP"</span>);
+<a href=#149 id=149 data-nosnippet>149</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0xFF</span>], <span class="number">2</span>, <span class="string">"STOP"</span>);
+<a href=#150 id=150 data-nosnippet>150</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0x8F</span>], <span class="number">5</span>, <span class="string">"MOV d,#i (direct-immediate write)"</span>);
+<a href=#151 id=151 data-nosnippet>151</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0xFA</span>], <span class="number">5</span>, <span class="string">"MOV dd,ds"</span>);
+<a href=#152 id=152 data-nosnippet>152</a>
+<a href=#153 id=153 data-nosnippet>153</a>        <span class="comment">// The carry/bit group + MOV A,(X)+ — corrected after the Tom Harte
+<a href=#154 id=154 data-nosnippet>154</a>        // cycle backstop caught luna charging each one cycle too many
+<a href=#155 id=155 data-nosnippet>155</a>        // (tests/tom_harte.rs validates step() == bus-cycle trace length).
+<a href=#156 id=156 data-nosnippet>156</a>        </span><span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0x0A</span>], <span class="number">5</span>, <span class="string">"OR1 C,m.b"</span>);
+<a href=#157 id=157 data-nosnippet>157</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0x2A</span>], <span class="number">5</span>, <span class="string">"OR1 C,/m.b"</span>);
+<a href=#158 id=158 data-nosnippet>158</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0x4A</span>], <span class="number">4</span>, <span class="string">"AND1 C,m.b"</span>);
+<a href=#159 id=159 data-nosnippet>159</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0x6A</span>], <span class="number">4</span>, <span class="string">"AND1 C,/m.b"</span>);
+<a href=#160 id=160 data-nosnippet>160</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0x8A</span>], <span class="number">5</span>, <span class="string">"EOR1 C,m.b"</span>);
+<a href=#161 id=161 data-nosnippet>161</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0xAA</span>], <span class="number">4</span>, <span class="string">"MOV1 C,m.b"</span>);
+<a href=#162 id=162 data-nosnippet>162</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0xCA</span>], <span class="number">6</span>, <span class="string">"MOV1 m.b,C"</span>);
+<a href=#163 id=163 data-nosnippet>163</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0xEA</span>], <span class="number">5</span>, <span class="string">"NOT1 m.b"</span>);
+<a href=#164 id=164 data-nosnippet>164</a>        <span class="macro">assert_eq!</span>(SPC700_CYCLES[<span class="number">0xBF</span>], <span class="number">4</span>, <span class="string">"MOV A,(X)+"</span>);
+<a href=#165 id=165 data-nosnippet>165</a>    }
+<a href=#166 id=166 data-nosnippet>166</a>
+<a href=#167 id=167 data-nosnippet>167</a>    <span class="attr">#[test]
+<a href=#168 id=168 data-nosnippet>168</a>    </span><span class="kw">fn </span>cycle_table_average_is_in_realistic_range() {
+<a href=#169 id=169 data-nosnippet>169</a>        <span class="comment">// Sanity: the avg cycle count across all 256 opcodes should
+<a href=#170 id=170 data-nosnippet>170</a>        // land between 3.5 and 5.5 — anything outside indicates I
+<a href=#171 id=171 data-nosnippet>171</a>        // mistyped a row.
+<a href=#172 id=172 data-nosnippet>172</a>        </span><span class="kw">let </span>sum: u32 = SPC700_CYCLES.iter().map(|<span class="kw-2">&amp;</span>c| c <span class="kw">as </span>u32).sum();
+<a href=#173 id=173 data-nosnippet>173</a>        <span class="kw">let </span>avg = sum <span class="kw">as </span>f64 / <span class="number">256.0</span>;
+<a href=#174 id=174 data-nosnippet>174</a>        <span class="macro">assert!</span>(
+<a href=#175 id=175 data-nosnippet>175</a>            (<span class="number">3.5</span>..=<span class="number">5.5</span>).contains(<span class="kw-2">&amp;</span>avg),
+<a href=#176 id=176 data-nosnippet>176</a>            <span class="string">"avg cycles per opcode out of plausible range: {avg}"
+<a href=#177 id=177 data-nosnippet>177</a>        </span>);
+<a href=#178 id=178 data-nosnippet>178</a>    }
+<a href=#179 id=179 data-nosnippet>179</a>}
+</code></pre></div></section></main></body></html>

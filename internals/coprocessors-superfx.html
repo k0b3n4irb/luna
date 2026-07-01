@@ -1,0 +1,809 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Super FX (GSU) - Luna — SNES Emulator Guide</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Guide and reference for Luna, a cycle-accurate, AI-native SNES emulator written in Rust.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/luna.css">
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "navy";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="../introduction.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">Using Luna</li><li class="chapter-item expanded "><a href="../using/install.html"><strong aria-hidden="true">1.</strong> Install & first run</a></li><li class="chapter-item expanded "><a href="../using/controls.html"><strong aria-hidden="true">2.</strong> Controls</a></li><li class="chapter-item expanded "><a href="../using/debugging.html"><strong aria-hidden="true">3.</strong> Debugging tools</a></li><li class="chapter-item expanded "><a href="../using/saves.html"><strong aria-hidden="true">4.</strong> Saves & save states</a></li><li class="chapter-item expanded "><a href="../using/cli-api-mcp.html"><strong aria-hidden="true">5.</strong> CLI, API & MCP</a></li><li class="chapter-item expanded affix "><li class="part-title">How Luna Works</li><li class="chapter-item expanded "><a href="../internals/architecture.html"><strong aria-hidden="true">6.</strong> Architecture overview</a></li><li class="chapter-item expanded "><a href="../internals/ppu.html"><strong aria-hidden="true">7.</strong> The PPU — graphics</a></li><li class="chapter-item expanded "><a href="../internals/apu.html"><strong aria-hidden="true">8.</strong> The APU — audio</a></li><li class="chapter-item expanded "><a href="../internals/cpus.html"><strong aria-hidden="true">9.</strong> The CPUs — 65C816 & SPC700</a></li><li class="chapter-item expanded "><a href="../internals/memory-dma-bus.html"><strong aria-hidden="true">10.</strong> Memory, DMA & the bus</a></li><li class="chapter-item expanded "><a href="../internals/coprocessors.html"><strong aria-hidden="true">11.</strong> Coprocessors</a><a class="toggle"><div>❱</div></a></li><li><ol class="section"><li class="chapter-item "><a href="../internals/coprocessors-sa1.html"><strong aria-hidden="true">11.1.</strong> SA-1</a></li><li class="chapter-item expanded "><a href="../internals/coprocessors-superfx.html" class="active"><strong aria-hidden="true">11.2.</strong> Super FX (GSU)</a></li><li class="chapter-item "><a href="../internals/coprocessors-sdd1.html"><strong aria-hidden="true">11.3.</strong> S-DD1</a></li></ol></li><li class="chapter-item expanded "><li class="part-title">The Faithful-Port Method</li><li class="chapter-item expanded "><a href="../method/faithful-port.html"><strong aria-hidden="true">12.</strong> Why "faithful port"</a></li><li class="chapter-item expanded "><a href="../method/differential.html"><strong aria-hidden="true">13.</strong> The differential harness</a></li><li class="chapter-item expanded "><a href="../method/accuracy.html"><strong aria-hidden="true">14.</strong> Accuracy scorecard</a></li><li class="chapter-item expanded "><a href="../method/testing.html"><strong aria-hidden="true">15.</strong> Testing & determinism</a><a class="toggle"><div>❱</div></a></li><li><ol class="section"><li class="chapter-item "><a href="../method/determinism.html"><strong aria-hidden="true">15.1.</strong> Determinism guarantees</a></li></ol></li><li class="chapter-item expanded "><a href="../method/road-to-a.html"><strong aria-hidden="true">16.</strong> The road to "A"</a></li><li class="chapter-item expanded affix "><li class="spacer"></li><li class="chapter-item expanded affix "><a href="../acknowledgements.html">Acknowledgements</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Luna — SNES Emulator Guide</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/k0b3n4irb/luna" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/k0b3n4irb/luna/edit/develop/book/src/internals/coprocessors-superfx.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="superfx--gsu-graphics-support-unit--implementation-reference-spec"><a class="header" href="#superfx--gsu-graphics-support-unit--implementation-reference-spec">SuperFX / GSU (Graphics Support Unit) — Implementation Reference Spec</a></h1>
+<p>Diff target for the luna Rust port. This is the faithful-port reference for
+luna's GSU: every claim describes hardware-accurate behaviour, verified against
+the hardware reference.</p>
+<p>The GSU core is the abstract CPU; a SoC wrapper supplies the system glue
+(stepping, memory reads/writes, the pixel-plot path, the operand pipeline).
+luna mirrors this split: a pure GSU instruction engine plus a SuperFX glue
+layer that owns the memory map, timing, MMIO, and SNES handshake.</p>
+<hr />
+<h2 id="1-register-model"><a class="header" href="#1-register-model">1. Register model</a></h2>
+<h3 id="11-general-purpose-registers-r0r15"><a class="header" href="#11-general-purpose-registers-r0r15">1.1 General-purpose registers R0–R15</a></h3>
+<p>16 × 16-bit registers (<code>Register r[16]</code>). Each <code>Register</code> tracks a <code>modified</code>
+flag set on every write; the wrapper uses it to detect writes to R14 and R15.</p>
+<p>Special-purpose roles:</p>
+<div class="table-wrapper"><table><thead><tr><th>Reg</th><th>Role</th></tr></thead><tbody>
+<tr><td>R0</td><td>default source &amp; dest after <code>reset()</code> (<code>sreg=dreg=0</code>)</td></tr>
+<tr><td>R1</td><td>PLOT/RPIX X coordinate</td></tr>
+<tr><td>R2</td><td>PLOT/RPIX Y coordinate</td></tr>
+<tr><td>R3</td><td>(general)</td></tr>
+<tr><td>R4</td><td>LMULT low-16 result destination</td></tr>
+<tr><td>R6</td><td>FMULT/LMULT implicit multiplicand</td></tr>
+<tr><td>R7</td><td>MERGE high source (<code>r7 &amp; 0xff00</code>)</td></tr>
+<tr><td>R8</td><td>MERGE low source (<code>r8 &gt;&gt; 8</code>)</td></tr>
+<tr><td>R11</td><td>LINK destination (return address)</td></tr>
+<tr><td>R12</td><td>LOOP counter (decremented)</td></tr>
+<tr><td>R13</td><td>LOOP branch target</td></tr>
+<tr><td>R14</td><td><strong>ROM-load trigger</strong>: writing R14 starts a ROM buffer fetch</td></tr>
+<tr><td>R15</td><td><strong>Program counter</strong></td></tr>
+</tbody></table>
+</div>
+<p><strong>R14 ROM-load trigger.</strong> After any instruction, if <code>regs.r[14].modified</code> the
+wrapper calls <code>updateROMBuffer()</code>. Also on a direct MMIO write to R14 from the
+SNES. <code>updateROMBuffer()</code> sets <code>sfr.r=1</code> and arms <code>romcl</code>. The fetch at
+<code>(rombr&lt;&lt;16)+r14</code> lands <code>romcl</code> cycles later. Equivalently, on a write to
+register 14 the status flag <code>RomReadPending</code> is set and <code>RomDelay = ClockSelect ? 5 : 6</code>.</p>
+<p><strong>R15 PC autoincrement.</strong> After executing an instruction, if R15 was <em>not</em> written
+by it, R15 is incremented. Branch / JMP / LOOP write R15 explicitly to suppress
+the increment.</p>
+<h3 id="12-sfr--status-flag-register-16-bit-mmio-30303031"><a class="header" href="#12-sfr--status-flag-register-16-bit-mmio-30303031">1.2 SFR — Status Flag Register (16-bit, MMIO $3030/$3031)</a></h3>
+<p>Bit layout:</p>
+<div class="table-wrapper"><table><thead><tr><th>Bit</th><th>Name</th><th>Meaning</th></tr></thead><tbody>
+<tr><td>0</td><td>—</td><td>(always 0)</td></tr>
+<tr><td>1</td><td>z</td><td>zero flag</td></tr>
+<tr><td>2</td><td>cy</td><td>carry flag</td></tr>
+<tr><td>3</td><td>s</td><td>sign flag</td></tr>
+<tr><td>4</td><td>ov</td><td>overflow flag</td></tr>
+<tr><td>5</td><td>g</td><td><strong>go</strong> flag (GSU running)</td></tr>
+<tr><td>6</td><td>r</td><td>ROM-read pending (R14 fetch in flight)</td></tr>
+<tr><td>7</td><td>—</td><td>(always 0)</td></tr>
+<tr><td>8</td><td>alt1</td><td>ALT1 prefix mode active</td></tr>
+<tr><td>9</td><td>alt2</td><td>ALT2 prefix mode active</td></tr>
+<tr><td>10</td><td>il</td><td>immediate-lower latch</td></tr>
+<tr><td>11</td><td>ih</td><td>immediate-upper latch</td></tr>
+<tr><td>12</td><td>b</td><td>"with" (B) prefix flag</td></tr>
+<tr><td>13–14</td><td>—</td><td>(always 0)</td></tr>
+<tr><td>15</td><td>irq</td><td>interrupt asserted to SNES</td></tr>
+</tbody></table>
+</div>
+<p>Composite <code>alt</code> = bits 8:9 — the 2-bit ALT mode selector {alt0,alt1,alt2,alt3}.</p>
+<p><strong>Read mask:</strong> SFR reads back as <code>data &amp; 0x9f7e</code> — i.e. bits {1,2,3,4,5,6,
+8,9,10,11,12, 15} are visible; bits 0,7,13,14 read 0. Built explicitly: low byte =
+z&lt;&lt;1|cy&lt;&lt;2|s&lt;&lt;3|ov&lt;&lt;4|g&lt;&lt;5|r&lt;&lt;6; high byte = alt1&lt;&lt;0|alt2&lt;&lt;1|il&lt;&lt;2|ih&lt;&lt;3|b&lt;&lt;4|irq&lt;&lt;7.
+The low byte omits bit 0 and bit 7 (0x7e low / 0x9f high).</p>
+<h3 id="13-pbr--rombr--rambr--cbr--scbr"><a class="header" href="#13-pbr--rombr--rambr--cbr--scbr">1.3 PBR / ROMBR / RAMBR / CBR / SCBR</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Reg</th><th>Width</th><th>Role</th><th>Reset</th></tr></thead><tbody>
+<tr><td>pbr</td><td>n8</td><td>Program Bank Register — bank for PC fetches; ≤$5F = ROM, ≥$60 = RAM</td><td>0x00</td></tr>
+<tr><td>rombr</td><td>n8</td><td>ROM data Bank Register — bank for R14 ROM buffer fetch / GETx</td><td>0x00</td></tr>
+<tr><td>rambr</td><td>bool</td><td>RAM data Bank Register — 1-bit RAM bank for LD/ST buffer ops</td><td>0</td></tr>
+<tr><td>cbr</td><td>n16</td><td>Cache Base Register — base PC of the 512-byte instruction cache window; only bits 15:4 meaningful (<code>&amp;0xfff0</code>)</td><td>0x0000</td></tr>
+<tr><td>scbr</td><td>n8</td><td>Screen Base Register — Game Pak RAM tile-map base, used as <code>scbr&lt;&lt;10</code></td><td>0x00</td></tr>
+<tr><td>colr</td><td>n8</td><td>Color Register (PLOT color)</td><td>0x00</td></tr>
+</tbody></table>
+</div>
+<p><code>pbr</code> writable range is masked to 7 bits on MMIO write (<code>data &amp; 0x7f</code>) and on
+LJMP (<code>r[n] &amp; 0x7f</code>). <code>rombr</code> masked 7-bit. <code>rambr</code> masked 1-bit.</p>
+<h3 id="14-scmr--screen-mode-register-303a--scrambled-bit-layout"><a class="header" href="#14-scmr--screen-mode-register-303a--scrambled-bit-layout">1.4 SCMR — Screen Mode Register ($303A) — <strong>scrambled bit layout</strong></a></h3>
+<p>Fields:</p>
+<ul>
+<li><code>ht</code> (height select, <strong>2 bits split across two non-adjacent SCMR bits</strong>)</li>
+<li><code>ron</code> (1 = GSU has ROM access; SNES locked out)</li>
+<li><code>ran</code> (1 = GSU has RAM access; SNES locked out)</li>
+<li><code>md</code>  (color depth mode, 2 bits)</li>
+</ul>
+<p>The wire byte ↔ field mapping is deliberately scrambled. <strong>Write</strong> <code>scmr = data</code>:</p>
+<pre><code>ht  = ((data &amp; 0x20) ? 1 : 0) &lt;&lt; 1   // ht bit1 &lt;- byte bit5
+ht |= ((data &amp; 0x04) ? 1 : 0) &lt;&lt; 0   // ht bit0 &lt;- byte bit2
+ron = data &amp; 0x10                    // byte bit4
+ran = data &amp; 0x08                    // byte bit3
+md  = data &amp; 0x03                    // byte bits1:0
+</code></pre>
+<p><strong>Read</strong> reverses it:</p>
+<pre><code>byte = ((ht&gt;&gt;1)&lt;&lt;5) | (ron&lt;&lt;4) | (ran&lt;&lt;3) | ((ht&amp;1)&lt;&lt;2) | md
+</code></pre>
+<p>Byte bit map: <code>bit5=ht_hi, bit4=ron, bit3=ran, bit2=ht_lo, bits1:0=md</code>.</p>
+<p><code>md</code> → bpp mapping: md∈{0,1,2,3} → bpp∈{2,4,4,8}. Computed as
+<code>bpp = 2 &lt;&lt; (md - (md&gt;&gt;1))</code>. md==3 (8bpp) is the "OBJ-capable" /
+transparency-special mode.</p>
+<h3 id="15-por--plot-option-register-set-by-cmode-4e-alt1"><a class="header" href="#15-por--plot-option-register-set-by-cmode-4e-alt1">1.5 POR — Plot Option Register (set by CMODE, $4E alt1)</a></h3>
+<p>Fields, set from source register low byte:</p>
+<div class="table-wrapper"><table><thead><tr><th>Bit</th><th>Field</th><th>Meaning</th></tr></thead><tbody>
+<tr><td>0</td><td>transparent</td><td>1 = plot even transparent (color 0) pixels</td></tr>
+<tr><td>1</td><td>dither</td><td>1 = dither color by (x^y)&amp;1 (non-8bpp only)</td></tr>
+<tr><td>2</td><td>highnibble</td><td>color() returns `(colr&amp;0xf0)</td></tr>
+<tr><td>3</td><td>freezehigh</td><td>color() returns `(colr&amp;0xf0)</td></tr>
+<tr><td>4</td><td>obj</td><td>OBJ mode — forces tile-index calc to ht==3 layout</td></tr>
+</tbody></table>
+</div>
+<h3 id="16-cfgr--config-register-3037"><a class="header" href="#16-cfgr--config-register-3037">1.6 CFGR — Config Register ($3037)</a></h3>
+<p>Fields:</p>
+<ul>
+<li><code>irq</code> (bit 7): 1 = <strong>mask</strong> GSU IRQ (STOP will not raise IRQ)</li>
+<li><code>ms0</code> (bit 5): 1 = high-speed multiply (MULT/FMULT timing)</li>
+</ul>
+<p><code>cfgr = data</code> → <code>irq=data&amp;0x80; ms0=data&amp;0x20</code>.</p>
+<h3 id="17-other-single-bit--misc-registers"><a class="header" href="#17-other-single-bit--misc-registers">1.7 Other single-bit / misc registers</a></h3>
+<ul>
+<li><code>bramr</code> (bool) — Backup-RAM write enable ($3033, <code>data&amp;0x01</code>); when 0, SNES
+writes to BRAM are dropped.</li>
+<li><code>vcr</code> (n8) — Version Code Register, read-only at $303B, reset 0x04.</li>
+<li><code>clsr</code> (bool) — Clock Select Register ($3039, <code>data&amp;0x01</code>): 0 = 10.7 MHz,
+1 = 21.4 MHz. Affects every cycle cost (<code>clsr ? fast : slow</code>).</li>
+<li><code>pipeline</code> (n8) — the prefetched opcode (the 1-stage pipe). Reset to 0x01 (NOP)
+on power.</li>
+<li><code>ramaddr</code> (n16) — last RAM address used by LD/ST (for SBK).</li>
+</ul>
+<h3 id="18-reset--power-state"><a class="header" href="#18-reset--power-state">1.8 Reset / power state</a></h3>
+<p>All R[]=0, sfr=0, pbr=rombr=0, rambr=0, cbr=0, scbr=0, scmr=0, colr=0, por=0,
+bramr=0, <strong>vcr=0x04</strong>, cfgr=0, clsr=0, pipeline=0x01 (NOP), ramaddr=0.
+<code>reset()</code> also zeroes sfr.b/alt1/alt2 and sreg=dreg=0.
+Wrapper power: cache.buffer all 0, all 32 valid flags false, pixelcache[0/1].offset=~0,
+bitpend=0, romcl=romdr=ramcl=ramar=ramdr=0.</p>
+<h3 id="19-mmio-address-map-3000303f-cache-310032ff"><a class="header" href="#19-mmio-address-map-3000303f-cache-310032ff">1.9 MMIO address map ($3000–$303F, cache $3100–$32FF)</a></h3>
+<p>SNES sees these at <code>$00-$3F:$3000-$34FF</code> (see §3).
+Internally <code>address = 0x3000 | addr.bit(0,9)</code> — mirrors every 0x400.</p>
+<div class="table-wrapper"><table><thead><tr><th>Addr</th><th>R/W</th><th>Function</th></tr></thead><tbody>
+<tr><td>$3000–$301F</td><td>R/W</td><td>R0–R15, little-endian byte pairs: reg = <code>addr&gt;&gt;1 &amp; 15</code>, byte = <code>addr&amp;1</code></td></tr>
+<tr><td>$301F (W high byte of R15)</td><td>W</td><td><strong>also sets sfr.g=1 (GO)</strong> — writing R15 high byte launches the GSU</td></tr>
+<tr><td>$3030</td><td>R</td><td>SFR low byte</td></tr>
+<tr><td>$3030</td><td>W</td><td>SFR low byte; if g 1→0, cbr=0 + flushCache</td></tr>
+<tr><td>$3031</td><td>R</td><td>SFR high byte; <strong>side effect: clears sfr.irq and deasserts CPU IRQ</strong></td></tr>
+<tr><td>$3031</td><td>W</td><td>SFR high byte</td></tr>
+<tr><td>$3033</td><td>W</td><td>BRAMR (<code>data&amp;0x01</code>)</td></tr>
+<tr><td>$3034</td><td>R</td><td>PBR</td></tr>
+<tr><td>$3034</td><td>W</td><td>PBR (<code>data&amp;0x7f</code>) + flushCache</td></tr>
+<tr><td>$3036</td><td>R</td><td>ROMBR</td></tr>
+<tr><td>$3037</td><td>W</td><td>CFGR</td></tr>
+<tr><td>$3038</td><td>W</td><td>SCBR</td></tr>
+<tr><td>$3039</td><td>W</td><td>CLSR (<code>data&amp;0x01</code>)</td></tr>
+<tr><td>$303A</td><td>W</td><td>SCMR (scrambled, §1.4)</td></tr>
+<tr><td>$303B</td><td>R</td><td>VCR (0x04)</td></tr>
+<tr><td>$303C</td><td>R</td><td>RAMBR</td></tr>
+<tr><td>$303E</td><td>R</td><td>CBR low byte</td></tr>
+<tr><td>$303F</td><td>R</td><td>CBR high byte</td></tr>
+<tr><td>$3100–$32FF</td><td>R/W</td><td>instruction cache RAM (512B), indexed <code>(addr-0x3100+cbr)&amp;511</code></td></tr>
+<tr><td>(other)</td><td>R</td><td>0x00</td></tr>
+</tbody></table>
+</div>
+<p>Every MMIO access first synchronizes the coprocessor up to the SNES clock before
+the access.</p>
+<p><strong>MMIO access-gating edge case:</strong> on real hardware most MMIO is blocked while the
+GSU is running — reads return 0 for all but $3030/$3031/$303B when the GSU is
+running; writes allow only $3030/$303A while running ("During GSU operation, only
+SFR, SCMR, and VCR may be accessed"). luna does not require this lockout for
+correctness of the games tested; it is documented as a hardware nicety. Serve all
+addresses unconditionally.</p>
+<hr />
+<h2 id="2-instruction-set"><a class="header" href="#2-instruction-set">2. Instruction set</a></h2>
+<h3 id="21-the-alt-prefix-mechanism-critical"><a class="header" href="#21-the-alt-prefix-mechanism-critical">2.1 The ALT prefix mechanism (CRITICAL)</a></h3>
+<p>The same opcode byte decodes to a different instruction depending on <code>sfr.alt1</code> /
+<code>sfr.alt2</code>. The 2-bit value <code>alt2&lt;&lt;1 | alt1</code> selects one of four "modes":</p>
+<div class="table-wrapper"><table><thead><tr><th>alt2 alt1</th><th>mode</th><th>set by</th></tr></thead><tbody>
+<tr><td>0 0</td><td>ALT0 (default)</td><td>—</td></tr>
+<tr><td>0 1</td><td>ALT1</td><td><code>$3D ALT1</code></td></tr>
+<tr><td>1 0</td><td>ALT2</td><td><code>$3E ALT2</code></td></tr>
+<tr><td>1 1</td><td>ALT3</td><td><code>$3F ALT3</code></td></tr>
+</tbody></table>
+</div>
+<ul>
+<li><code>$3D ALT1</code>: <code>sfr.b=0; sfr.alt1=1</code></li>
+<li><code>$3E ALT2</code>: <code>sfr.b=0; sfr.alt2=1</code></li>
+<li><code>$3F ALT3</code>: <code>sfr.b=0; sfr.alt1=1; sfr.alt2=1</code></li>
+</ul>
+<p>ALT1/2/3 are themselves prefix instructions: they do <strong>not</strong> call <code>reset()</code>, so the
+alt bits survive into the <em>next</em> instruction. Every <em>non-prefix</em> instruction ends
+with <code>regs.reset()</code> which clears b, alt1, alt2 and resets sreg/dreg to 0.
+Thus alt flags are consumed by exactly one following op.</p>
+<p>The prefix ops TO/FROM/WITH set sreg/dreg and the <code>b</code> ("with") flag (§2.2) and also
+<strong>do not</strong> call reset() in their prefix role.</p>
+<h3 id="22-register-select-prefixes-to--from--with-and-the-b-flag"><a class="header" href="#22-register-select-prefixes-to--from--with-and-the-b-flag">2.2 Register-select prefixes: TO / FROM / WITH and the B flag</a></h3>
+<p>These build the source/dest operand selection for the <em>next</em> ALU/move op:</p>
+<ul>
+<li><code>$B0–$BF FROM rN</code> (ALT0, b=0): <code>sreg = n</code> (set source).</li>
+<li><code>$10–$1F TO rN</code> (ALT0, b=0): <code>dreg = n</code> (set dest).</li>
+<li><code>$20–$2F WITH rN</code>: <code>sreg = n; dreg = n; sfr.b = 1</code>.</li>
+</ul>
+<p>The <code>b</code> ("with") flag changes TO/FROM into the <em>move</em> variants:</p>
+<ul>
+<li><code>$10–$1F MOVE rN</code> (b=1): <code>r[n] = sr()</code> then reset().</li>
+<li><code>$B0–$BF MOVES rN</code> (b=1): <code>dr() = r[n]</code>, sets ov/s/z, then reset().</li>
+</ul>
+<p>So: a bare <code>FROM rA</code> / <code>TO rB</code> only <em>latches</em> sreg/dreg and the next op uses them
+(this is how <code>ADD rN</code> reads <code>sr()</code> as src and writes <code>dr()</code> as dest). A <code>WITH rA</code>
+sets both and the <code>b</code> flag, making the immediately following <code>TO</code>/<code>FROM</code> act as
+register-to-register MOVE/MOVES. After any non-prefix op, reset() restores sreg=dreg=0
+(so the implicit operand defaults back to R0).</p>
+<p><code>sr()</code> = <code>r[sreg]</code>, <code>dr()</code> = <code>r[dreg]</code>.</p>
+<h3 id="23-the-pipeline--operand-fetch"><a class="header" href="#23-the-pipeline--operand-fetch">2.3 The pipeline / operand fetch</a></h3>
+<p><code>pipe()</code> returns the prefetched byte <code>regs.pipeline</code> and prefetches the next opcode
+from <code>++r15</code>. <code>peekpipe()</code> returns pipeline but prefetches from the <em>current</em> r15
+without incrementing the returned value's basis; the main loop uses <code>peekpipe()</code> to
+get the opcode. Operand bytes (branch displacement, immediates, RAM short/long
+addresses) are read via <code>pipe()</code>. Equivalently: an opcode read followed by an
+operand read that increments R15 then refills the program read buffer.</p>
+<h3 id="24-opcode-table"><a class="header" href="#24-opcode-table">2.4 Opcode table</a></h3>
+<p>Notation: <code>sr</code> = <code>r[sreg]</code>, <code>dr</code> = <code>r[dreg]</code>, <code>n</code> = low nibble of opcode (register
+index) or immediate as noted. "reset" = clears alt/b + sreg/dreg unless it's a
+prefix op. Flag column lists flags written. Cycle cost is the <em>extra</em> cost beyond
+the base fetch/decode; base instruction execution is implicitly the pipeline step
+(see §6) — only ops that call <code>step()</code> themselves add the listed extra cycles.
+<code>F</code> = fast-clock cycles (clsr=1), <code>S</code> = slow (clsr=0); where a single number is
+shown the op adds no explicit step().</p>
+<div class="table-wrapper"><table><thead><tr><th>Opcode</th><th>ALT0 (default)</th><th>ALT1</th><th>ALT2</th><th>ALT3</th><th>Effect / notes</th></tr></thead><tbody>
+<tr><td>$00</td><td>stop</td><td>stop</td><td>stop</td><td>stop</td><td>if <code>!cfgr.irq</code>: sfr.irq=1, raise CPU IRQ. sfr.g=0; pipeline=NOP; reset()</td></tr>
+<tr><td>$01</td><td>nop</td><td>nop</td><td>nop</td><td>nop</td><td>reset() only</td></tr>
+<tr><td>$02</td><td>cache</td><td>cache</td><td>cache</td><td>cache</td><td>if cbr≠(r15&amp;0xfff0): cbr=r15&amp;0xfff0, flushCache</td></tr>
+<tr><td>$03</td><td>lsr</td><td>lsr</td><td>lsr</td><td>lsr</td><td>cy=sr&amp;1; dr=sr&gt;&gt;1; s,z</td></tr>
+<tr><td>$04</td><td>rol</td><td>rol</td><td>rol</td><td>rol</td><td>dr=(sr&lt;&lt;1)</td></tr>
+<tr><td>$05</td><td>bra e</td><td>(same all modes)</td><td></td><td></td><td>unconditional; disp=<code>(i8)pipe()</code>; if take r15+=disp</td></tr>
+<tr><td>$06</td><td>b** (see note)</td><td></td><td></td><td></td><td>cond branch — <code>(s^ov)==0</code></td></tr>
+<tr><td>$07</td><td>b**</td><td></td><td></td><td></td><td>cond branch — <code>(s^ov)==1</code></td></tr>
+<tr><td>$08</td><td>bne</td><td></td><td></td><td></td><td><code>z==0</code></td></tr>
+<tr><td>$09</td><td>beq</td><td></td><td></td><td></td><td><code>z==1</code></td></tr>
+<tr><td>$0A</td><td>bpl</td><td></td><td></td><td></td><td><code>s==0</code></td></tr>
+<tr><td>$0B</td><td>bmi</td><td></td><td></td><td></td><td><code>s==1</code></td></tr>
+<tr><td>$0C</td><td>bcc</td><td></td><td></td><td></td><td><code>cy==0</code></td></tr>
+<tr><td>$0D</td><td>bcs</td><td></td><td></td><td></td><td><code>cy==1</code></td></tr>
+<tr><td>$0E</td><td>bvc</td><td></td><td></td><td></td><td><code>ov==0</code></td></tr>
+<tr><td>$0F</td><td>bvs</td><td></td><td></td><td></td><td><code>ov==1</code></td></tr>
+<tr><td>$10–$1F</td><td>to rN / move rN(b=1)</td><td>(same)</td><td></td><td></td><td>b=0: dreg=N; b=1: r[N]=sr, reset</td></tr>
+<tr><td>$20–$2F</td><td>with rN</td><td>(same)</td><td></td><td></td><td>sreg=dreg=N; sfr.b=1 (prefix, no reset)</td></tr>
+<tr><td>$30–$3B</td><td>stw (rN)</td><td>stb (rN)</td><td>stw</td><td>stb</td><td>ramaddr=r[N]; writeRAMBuffer(addr, sr); if !alt1 also (addr^1, sr&gt;&gt;8)</td></tr>
+<tr><td>$3C</td><td>loop</td><td>loop</td><td>loop</td><td>loop</td><td>r12--; s,z from r12; if !z r15=r13</td></tr>
+<tr><td>$3D</td><td>alt1</td><td>—</td><td>—</td><td>—</td><td>b=0; alt1=1 (prefix)</td></tr>
+<tr><td>$3E</td><td>alt2</td><td>—</td><td>—</td><td>—</td><td>b=0; alt2=1 (prefix)</td></tr>
+<tr><td>$3F</td><td>alt3</td><td>—</td><td>—</td><td>—</td><td>b=0; alt1=alt2=1 (prefix)</td></tr>
+<tr><td>$40–$4B</td><td>ldw (rN)</td><td>ldb (rN)</td><td>ldw</td><td>ldb</td><td>ramaddr=r[N]; dr=readRAMBuffer(addr); if !alt1 dr</td></tr>
+<tr><td>$4C</td><td>plot</td><td>rpix</td><td>plot</td><td>rpix</td><td>see §4. RPIX adds bpp×(F5/S6) step</td></tr>
+<tr><td>$4D</td><td>swap</td><td>swap</td><td>swap</td><td>swap</td><td>dr=(sr&gt;&gt;8)</td></tr>
+<tr><td>$4E</td><td>color</td><td>cmode</td><td>color</td><td>cmode</td><td>alt0: colr=color(sr); alt1: por=sr (CMODE)</td></tr>
+<tr><td>$4F</td><td>not</td><td>not</td><td>not</td><td>not</td><td>dr=~sr; s,z</td></tr>
+<tr><td>$50–$5F</td><td>add rN</td><td>adc rN</td><td>add #N</td><td>adc #N</td><td>r=sr+op(+cy if alt1); ov,s,cy,z; dr=r</td></tr>
+<tr><td>$60–$6F</td><td>sub rN</td><td>sbc rN</td><td>sub #N</td><td>cmp rN</td><td>r=sr-op(-!cy if sbc); ov,s,cy,z; dr=r (CMP: no write)</td></tr>
+<tr><td>$70</td><td>merge</td><td>merge</td><td>merge</td><td>merge</td><td>dr=(r7&amp;0xff00)</td></tr>
+<tr><td>$71–$7F</td><td>and rN</td><td>bic rN</td><td>and #N</td><td>bic #N</td><td>dr=sr &amp; (alt1?~op:op); s,z</td></tr>
+<tr><td>$80–$8F</td><td>mult rN</td><td>umult rN</td><td>mult #N</td><td>umult #N</td><td>signed/unsigned 8×8→16; s,z; if !ms0 add F1/S2 step</td></tr>
+<tr><td>$90</td><td>sbk</td><td>sbk</td><td>sbk</td><td>sbk</td><td>writeRAMBuffer(ramaddr,sr); (ramaddr^1, sr&gt;&gt;8)</td></tr>
+<tr><td>$91–$94</td><td>link #N</td><td>(same)</td><td></td><td></td><td>r11=r15+N (N=1..4 = low nibble)</td></tr>
+<tr><td>$95</td><td>sex</td><td>sex</td><td>sex</td><td>sex</td><td>dr=(i8)sr (sign-extend low byte); s,z</td></tr>
+<tr><td>$96</td><td>asr</td><td>div2</td><td>asr</td><td>div2</td><td>cy=sr&amp;1; dr=(i16)sr&gt;&gt;1 (+rounding if div2); s,z</td></tr>
+<tr><td>$97</td><td>ror</td><td>ror</td><td>ror</td><td>ror</td><td>dr=(cy&lt;&lt;15)</td></tr>
+<tr><td>$98–$9D</td><td>jmp rN</td><td>ljmp rN</td><td>jmp</td><td>ljmp</td><td>alt0: r15=r[N]; alt1: pbr=r[N]&amp;0x7f, r15=sr, cbr=r15&amp;0xfff0, flushCache</td></tr>
+<tr><td>$9E</td><td>lob</td><td>lob</td><td>lob</td><td>lob</td><td>dr=sr&amp;0xff; s(bit7),z</td></tr>
+<tr><td>$9F</td><td>fmult</td><td>lmult</td><td>fmult</td><td>lmult</td><td>(i16)sr*(i16)r6; dr=res&gt;&gt;16; cy=res&amp;0x8000; if lmult r4=res; s,z; step (ms0?3:7)×(clsr?1:2)</td></tr>
+<tr><td>$A0–$AF</td><td>ibt rN,#pp</td><td>lms rN,(yy)</td><td>sms (yy),rN</td><td>(=alt1 lms)</td><td>alt1: short-addr load; alt2: short-addr store; else r[N]=(i8)pipe()</td></tr>
+<tr><td>$B0–$BF</td><td>from rN / moves(b=1)</td><td>(same)</td><td></td><td></td><td>b=0: sreg=N; b=1: dr=r[N], ov/s/z, reset</td></tr>
+<tr><td>$C0</td><td>hib</td><td>hib</td><td>hib</td><td>hib</td><td>dr=sr&gt;&gt;8; s(bit7),z</td></tr>
+<tr><td>$C1–$CF</td><td>or rN</td><td>xor rN</td><td>or #N</td><td>xor #N</td><td>dr=sr</td></tr>
+<tr><td>$D0–$DE</td><td>inc rN</td><td>(same)</td><td></td><td></td><td>r[N]++; s,z</td></tr>
+<tr><td>$DF</td><td>getc</td><td>(getc)</td><td>ramb</td><td>romb</td><td>alt0: colr=color(readROMBuffer); alt2&amp;!alt1: syncRAM, rambr=sr&amp;1; alt3: syncROM, rombr=sr&amp;0x7f</td></tr>
+<tr><td>$E0–$EE</td><td>dec rN</td><td>(same)</td><td></td><td></td><td>r[N]--; s,z</td></tr>
+<tr><td>$EF</td><td>getb</td><td>getbh</td><td>getbl</td><td>getbs</td><td>ROM buffer byte → dr per alt2:alt1 (see below)</td></tr>
+<tr><td>$F0–$FF</td><td>iwt rN,#xx</td><td>lm rN,(xx)</td><td>sm (xx),rN</td><td>(=alt1 lm)</td><td>alt1: long-addr load; alt2: long-addr store; else r[N]=word immediate</td></tr>
+</tbody></table>
+</div>
+<p><strong>Branch-name $06/$07 caution.</strong> The dispatch maps <code>$06 → Branch((s^ov)==0)</code> and
+<code>$07 → Branch((s^ov)==1)</code>. Mnemonic labels for these two opcodes vary between
+secondary references (one labels $06="blt"/$07="bge", another swaps them), but
+<strong>the branch <em>conditions</em> are identical</strong> — for luna only the <em>condition per
+opcode byte</em> matters: <code>$06 → take when (s^ov)==0</code>, <code>$07 → take when (s^ov)==1</code>.
+Implement by condition, ignore the mnemonic dispute.</p>
+<p><strong>GETB ($EF) sub-decode</strong> (<code>alt2&lt;&lt;1|alt1</code>):</p>
+<ul>
+<li>0 getb : <code>dr = romBuffer</code></li>
+<li>1 getbh: <code>dr = romBuffer&lt;&lt;8 | (n8)sr</code></li>
+<li>2 getbl: <code>dr = (sr&amp;0xff00) | romBuffer</code></li>
+<li>3 getbs: <code>dr = (i8)romBuffer</code></li>
+</ul>
+<h3 id="25-alu-flag-details-exact"><a class="header" href="#25-alu-flag-details-exact">2.5 ALU flag details (exact)</a></h3>
+<ul>
+<li><strong>ADD/ADC</strong>: operand <code>n = (alt2 ? immediate-nibble : r[n])</code>;
+carry-in = <code>alt1 ? cy : 0</code>. <code>r = sr + n + carryin</code>.
+<code>ov = ~(sr^n) &amp; (n^r) &amp; 0x8000</code>; <code>s = r&amp;0x8000</code>; <code>cy = r&gt;=0x10000</code>; <code>z = (u16)r==0</code>.</li>
+<li><strong>SUB/SBC/CMP</strong>: operand selection <code>n = (!alt2 || alt1) ? r[n] : immediate</code> — i.e. immediate only for SUB#N (alt2 &amp;&amp; !alt1). Borrow term:
+<code>(!alt2 &amp;&amp; alt1) ? !cy : 0</code> (SBC). <code>r = sr - n - borrow</code>.
+<code>ov = (sr^n) &amp; (sr^r) &amp; 0x8000</code>; <code>s = r&amp;0x8000</code>; <code>cy = r&gt;=0</code>; <code>z=(u16)r==0</code>.
+Write dr <strong>unless</strong> CMP (alt3 = alt2&amp;&amp;alt1): <code>if(!alt2 || !alt1) dr=r</code>.
+(The SBC borrow <code>result -= Carry ? 0 : 1</code> == <code>!cy</code>.)</li>
+<li><strong>AND/BIC</strong>: <code>n = alt2 ? imm : r[n]</code>; <code>dr = sr &amp; (alt1 ? ~n : n)</code>.</li>
+<li><strong>OR/XOR</strong>: <code>n = alt2 ? imm : r[n]</code>; <code>dr = alt1 ? sr^n : sr|n</code>.</li>
+<li><strong>MERGE</strong>: <code>dr=(r7&amp;0xff00)|(r8&gt;&gt;8)</code>; flags use packed masks:
+<code>ov=dr&amp;0xc0c0; s=dr&amp;0x8080; cy=dr&amp;0xe0e0; z=dr&amp;0xf0f0</code> (note: z is <em>set</em> when any
+of those bits set — these are unusual "any-bit" flags, not standard z/s).</li>
+<li><strong>ASR/DIV2</strong>: <code>cy=sr&amp;1</code>; <code>dr = (i16)sr&gt;&gt;1 + (alt1 ? ((sr+1)&gt;&gt;16) : 0)</code>. The <code>(sr+1)&gt;&gt;16</code> rounding term is the DIV2 correction.</li>
+<li><strong>MULT/UMULT</strong>: <code>n = alt2 ? imm : r[n]</code>;
+<code>dr = alt1 ? (u16)((u8)sr*(u8)n) : (u16)((i8)sr*(i8)n)</code> (8×8→16, low byte operands).
+Timing: if <code>!ms0</code> add <code>step(clsr?1:2)</code>.</li>
+<li><strong>FMULT/LMULT</strong>: <code>result = (i16)sr * (i16)r6</code> (16×16→32);
+<code>dr = result&gt;&gt;16</code>; <code>cy = result&amp;0x8000</code>; if LMULT <code>r4 = result</code> (low 16).
+Timing: <code>step((ms0?3:7) * (clsr?1:2))</code>.</li>
+</ul>
+<h3 id="26-ld--st-and-ram-buffer-ops"><a class="header" href="#26-ld--st-and-ram-buffer-ops">2.6 LD / ST and RAM-buffer ops</a></h3>
+<ul>
+<li><strong>STW/STB ($30, store)</strong>: <code>ramaddr=r[N]; writeRAMBuffer(ramaddr, sr)</code>; STW also
+<code>writeRAMBuffer(ramaddr^1, sr&gt;&gt;8)</code>. writeRAMBuffer arms a delayed write (see §6).</li>
+<li><strong>LDW/LDB ($40, load)</strong>: <code>ramaddr=r[N]; dr=readRAMBuffer(ramaddr)</code>; LDW also
+<code>dr |= readRAMBuffer(ramaddr^1)&lt;&lt;8</code>.</li>
+<li><strong>SBK ($90)</strong>: re-store word to last <code>ramaddr</code>.</li>
+<li><strong>IBT/LMS/SMS ($A0)</strong>: alt1 LMS load word from <code>(pipe()&lt;&lt;1)</code>; alt2 SMS store word to
+<code>(pipe()&lt;&lt;1)</code>; default IBT <code>r[N]=(i8)pipe()</code>.</li>
+<li><strong>IWT/LM/SM ($F0)</strong>: alt1 LM load word from 16-bit immediate addr (two pipe bytes);
+alt2 SM store; default IWT load 16-bit immediate into r[N].</li>
+</ul>
+<h3 id="27-getc--ramb--romb-df-and-getb-ef"><a class="header" href="#27-getc--ramb--romb-df-and-getb-ef">2.7 GETC / RAMB / ROMB ($DF) and GETB ($EF)</a></h3>
+<ul>
+<li>GETC (alt0): <code>colr = color(readROMBuffer())</code>.</li>
+<li>RAMB (alt2,!alt1): syncRAMBuffer; <code>rambr = sr &amp; 1</code>.</li>
+<li>ROMB (alt3): syncROMBuffer; <code>rombr = sr &amp; 0x7f</code>.</li>
+<li>GETB family — see §2.4.</li>
+</ul>
+<hr />
+<h2 id="3-memory-map--bus"><a class="header" href="#3-memory-map--bus">3. Memory map &amp; bus</a></h2>
+<h3 id="31-gsu-side-view"><a class="header" href="#31-gsu-side-view">3.1 GSU-side view</a></h3>
+<p>The GSU's data bus decodes the 24-bit address:</p>
+<div class="table-wrapper"><table><thead><tr><th>GSU address</th><th>Target</th><th>Gating</th></tr></thead><tbody>
+<tr><td><code>$00–$3F:$0000–$FFFF</code></td><td>ROM, mapped `((addr&amp;0x3f0000)&gt;&gt;1)</td><td>(addr&amp;0x7fff)<code>then</code>&amp;romMask`</td></tr>
+<tr><td><code>$40–$5F:$0000–$FFFF</code></td><td>ROM, linear <code>addr &amp; romMask</code></td><td>stalls while <code>!scmr.ron</code></td></tr>
+<tr><td><code>$70–$71:$0000–$FFFF</code></td><td>Game Pak RAM, <code>addr &amp; ramMask</code></td><td>stalls while <code>!scmr.ran</code> (read &amp; write)</td></tr>
+<tr><td>(other)</td><td>open bus → returns passed <code>data</code></td><td>—</td></tr>
+</tbody></table>
+</div>
+<p>ROM/RAM-access stall: while the relevant access bit (ron/ran) is <em>not</em> granted to the
+GSU, the read/write loops <code>step(6); synchronize(cpu); break if scheduler.synchronizing()</code>
+— i.e. the GSU burns cycles waiting for the SNES to grant access via SCMR. luna can
+model this as: if access not granted, stall the GSU (yield to SNES) until SCMR flips
+the bit.</p>
+<p>The first-bank ROM remap <code>((addr&amp;0x3f0000)&gt;&gt;1)|(addr&amp;0x7fff)</code> packs the upper-half
+$8000–$FFFF of each LoROM bank into a contiguous ROM image; the <code>$40–$5F</code> window is the
+flat/linear view of the same ROM. <code>romMask = romSizeRound(rom.size())-1</code> (rounded up to
+a power of two to fix the non-power-of-two SuperFX voxel demo).
+<code>ramMask = ram.size()-1</code>, <code>bramMask = bram.size()-1</code>.</p>
+<p>GSU-side mappings: <code>$00–$3F:$8000–$FFFF</code> ROM, <code>$00–$3F:$0000–$7FFF</code> ROM <strong>mirror</strong>,
+<code>$40–$5F:$0000–$FFFF</code> ROM, <code>$70–$71:$0000–$FFFF</code> GSU RAM. (The $0000–$7FFF mirror is the
+LoROM low-half mirror folded into the remap formula.)</p>
+<h3 id="32-snes-cpu-side-view-the-superfx-mapper"><a class="header" href="#32-snes-cpu-side-view-the-superfx-mapper">3.2 SNES-CPU-side view (the SuperFX mapper)</a></h3>
+<p>Three memory shims are wired into the SNES bus; the SNES board glue places them. The
+CPU-side address ranges:</p>
+<div class="table-wrapper"><table><thead><tr><th>SNES address</th><th>Target</th></tr></thead><tbody>
+<tr><td><code>$00–$3F:$3000–$3FFF</code> and <code>$80–$BF:$3000–$3FFF</code></td><td>GSU MMIO</td></tr>
+<tr><td><code>$00–$3F:$8000–$FFFF</code>, <code>$80–$BF:$8000–$FFFF</code></td><td>ROM</td></tr>
+<tr><td><code>$40–$5F:$0000–$FFFF</code>, <code>$C0–$DF:$0000–$FFFF</code></td><td>ROM</td></tr>
+<tr><td><code>$00–$3E:$6000–$7FFF</code> (+$80 mirror)</td><td>Game Pak RAM</td></tr>
+<tr><td><code>$70–$71:$0000–$FFFF</code>, <code>$F0–$F1:$0000–$FFFF</code></td><td>Game Pak RAM</td></tr>
+</tbody></table>
+</div>
+<p>The internal MMIO mirror is <code>$3000 | addr.bit(0,9)</code> → the live window is <code>$3000–$33FF</code>
+mirrored up to <code>$34FF</code> (mask <code>addr &amp; 0x33FF</code>). luna should treat $3000–$34FF in
+$00–$3F:/$80–$BF as the MMIO region.</p>
+<h3 id="33-bus-conflict-behaviour-while-the-gsu-runs"><a class="header" href="#33-bus-conflict-behaviour-while-the-gsu-runs">3.3 Bus-conflict behaviour while the GSU runs</a></h3>
+<p>When the GSU is running (<code>sfr.g</code>) <strong>and</strong> holds ROM access (<code>scmr.ron</code>), SNES reads of
+the ROM return a <strong>fixed vector</strong>, not ROM data:</p>
+<pre><code>vector[16] = {00,01,00,01,04,01,00,01,00,01,08,01,00,01,0c,01}; return vector[addr&amp;15];
+</code></pre>
+<p>This is the canonical "GSU busy" reset/IRQ vector pattern the SNES sees so it doesn't
+execute garbage. Equivalently: odd addresses → 0x01, even addresses →
+{0,0,0x04,0,0,0,0x08,0,0x0C} per <code>addr&amp;0x0E</code>, gated on running &amp;&amp; ROM access.</p>
+<p>When the GSU runs <strong>and</strong> holds RAM access (<code>scmr.ran</code>), SNES reads of Game Pak RAM
+return <strong>open bus</strong> (the passed <code>data</code>). SNES writes still go through (the write lands).</p>
+<p>BRAM (backup RAM) writes from the SNES are gated by <code>bramr</code>.</p>
+<hr />
+<h2 id="4-pixel-plot-pipeline"><a class="header" href="#4-pixel-plot-pipeline">4. Pixel-plot pipeline</a></h2>
+<h3 id="41-pixelcache-structure"><a class="header" href="#41-pixelcache-structure">4.1 PixelCache structure</a></h3>
+<p>Two caches (<code>pixelcache[2]</code>):</p>
+<pre><code>struct PixelCache { n16 offset; n8 bitpend; n8 data[8]; }
+</code></pre>
+<p><code>offset</code> = tile-row position <code>(y&lt;&lt;5)+(x&gt;&gt;3)</code> (8-pixel run), <code>bitpend</code> = per-x written-bit
+mask (8 bits), <code>data[8]</code> = color index per x in the run. pixelcache[0] = primary (current
+8-pixel run), pixelcache[1] = secondary (one-deep writeback queue). (An equivalent form
+stores X(&amp;0xF8)/Y instead of a packed offset, but the geometry is identical.)</p>
+<h3 id="42-color--colrgetc-color-resolution"><a class="header" href="#42-color--colrgetc-color-resolution">4.2 color() — COLR/GETC color resolution</a></h3>
+<pre><code>if(por.highnibble)  return (colr &amp; 0xf0) | (source &gt;&gt; 4);
+if(por.freezehigh)  return (colr &amp; 0xf0) | (source &amp; 0x0f);
+return source;
+</code></pre>
+<p>Used by COLOR ($4E alt0) and GETC ($DF alt0).</p>
+<h3 id="43-plot"><a class="header" href="#43-plot">4.3 plot()</a></h3>
+<ol>
+<li>
+<p><strong>Transparency test</strong> (skip plot if transparent &amp; <code>!por.transparent</code>):</p>
+<ul>
+<li>md==3 (8bpp): if <code>por.freezehigh</code> test <code>(colr&amp;0x0f)==0</code>, else test <code>colr==0</code>.</li>
+<li>else: test <code>(colr&amp;0x0f)==0</code>.</li>
+</ul>
+<p><strong>Edge case worth noting:</strong> the verified reference only special-cases md==3,
+testing the low <em>nibble</em> in all non-8bpp modes (so 2bpp tests bits 3:0, not 1:0).
+A bpp-exact reading would test exactly <code>bpp</code> low bits, which differs for 2bpp
+(md==0). <strong>Follow the verified low-nibble behaviour</strong> — flag as a candidate to
+revisit if a 2bpp-plot test ROM disagrees.</p>
+</li>
+<li>
+<p><strong>Dither</strong>: if <code>por.dither &amp;&amp; md!=3</code>: if <code>(x^y)&amp;1</code> use high nibble
+(<code>color&gt;&gt;=4</code>), then <code>color &amp;= 0x0f</code>.</p>
+</li>
+<li>
+<p><strong>Cache slot</strong>: <code>offset=(y&lt;&lt;5)+(x&gt;&gt;3)</code>; if it differs from
+pixelcache[0].offset → flush pixelcache[1] to RAM, move [0]→[1], clear [0]
+(bitpend=0, offset=new).</p>
+</li>
+<li>
+<p><strong>Write pixel</strong>: <code>x=(x&amp;7)^7</code> (bit-reverse within the run);
+<code>data[x]=color; bitpend |= 1&lt;&lt;x</code>; if bitpend==0xff (run full) flush [1], move [0]→[1],
+clear [0].</p>
+</li>
+</ol>
+<h3 id="44-flushpixelcache--writeback-to-game-pak-ram"><a class="header" href="#44-flushpixelcache--writeback-to-game-pak-ram">4.4 flushPixelCache() — writeback to Game Pak RAM</a></h3>
+<p>Converts the run's <code>data[8]</code> planar color indices into bitplane bytes and writes them to
+the tile at <code>0x700000 + cn*(bpp&lt;&lt;3) + (scbr&lt;&lt;10) + (y&amp;7)*2</code>. Character number <code>cn</code> from the
+tile-index formula (§4.6). For each of <code>bpp</code> planes <code>n</code>:</p>
+<ul>
+<li><code>byte = ((n&gt;&gt;1)&lt;&lt;4) + (n&amp;1)</code> → byte offsets {0,1,16,17,32,33,48,49}.</li>
+<li>Build <code>data</code> by gathering bit n of each <code>cache.data[x]</code> into bit x.</li>
+<li>If <code>bitpend != 0xff</code> (partial run): read-modify-write — <code>step(clsr?5:6)</code>,
+<code>data &amp;= bitpend</code>, <code>data |= read(addr+byte) &amp; ~bitpend</code>.</li>
+<li><code>step(clsr?5:6); write(addr+byte, data)</code>.</li>
+<li>Clear bitpend.</li>
+</ul>
+<p>(The reference waits for RAM access before each plane write, folded into the RAM stall in
+write().)</p>
+<h3 id="45-rpix--pixel-readback"><a class="header" href="#45-rpix--pixel-readback">4.5 rpix() — pixel readback</a></h3>
+<p>Flush both caches first (secondary then primary), then read the <code>bpp</code>
+bitplane bytes at the same tile address and reassemble the color index of pixel (x,y):</p>
+<ul>
+<li><code>x=(x&amp;7)^7</code>; for each plane n: <code>byte=((n&gt;&gt;1)&lt;&lt;4)+(n&amp;1)</code>; <code>step(clsr?5:6)</code>;
+<code>data |= ((read(addr+byte)&gt;&gt;x)&amp;1)&lt;&lt;n</code>.
+RPIX sets s,z from the result and writes dr. (Whether the step happens before or after
+the read is cosmetic — same cycle total.)</li>
+</ul>
+<h3 id="46-tile-index-character-number-formula"><a class="header" href="#46-tile-index-character-number-formula">4.6 Tile-index (character number) formula</a></h3>
+<p>Selector: <code>por.obj ? 3 : scmr.ht</code>:</p>
+<pre><code>ht 0: cn = ((x&amp;0xf8)&lt;&lt;1) + ((y&amp;0xf8)&gt;&gt;3)
+ht 1: cn = ((x&amp;0xf8)&lt;&lt;1) + ((x&amp;0xf8)&gt;&gt;1) + ((y&amp;0xf8)&gt;&gt;3)
+ht 2: cn = ((x&amp;0xf8)&lt;&lt;1) + ((x&amp;0xf8)&lt;&lt;0) + ((y&amp;0xf8)&gt;&gt;3)
+ht 3: cn = ((y&amp;0x80)&lt;&lt;2) + ((x&amp;0x80)&lt;&lt;1) + ((y&amp;0x78)&lt;&lt;1) + ((x&amp;0x78)&gt;&gt;3)   // OBJ/160-px
+</code></pre>
+<p>Tile byte address: <code>0x700000 + cn*(bpp&lt;&lt;3) + (scbr&lt;&lt;10) + (y&amp;7)*2</code>.
+(<code>ScreenBase</code>==scbr.)</p>
+<p><code>bpp = 2 &lt;&lt; (md - (md&gt;&gt;1))</code> → md{0,1,2,3}→bpp{2,4,4,8}; <code>(bpp&lt;&lt;3)</code> = bytes
+per tile (16/32/32/64). Bitplane interleave {0,1,16,17,32,33,48,49} is standard SNES
+planar layout (planes 0/1 adjacent, planes 2/3 at +16, etc.).</p>
+<hr />
+<h2 id="5-cache-ram-512-byte-instruction-cache"><a class="header" href="#5-cache-ram-512-byte-instruction-cache">5. Cache RAM (512-byte instruction cache)</a></h2>
+<p>Structure: <code>cache.buffer[512]</code>, <code>cache.valid[32]</code>. 32 lines × 16 bytes. <code>cbr</code> is the
+cache base PC (bits 15:4).</p>
+<p><strong>Fetch path</strong> <code>readOpcode(address)</code>:</p>
+<ol>
+<li><code>offset = address - cbr</code>.</li>
+<li>If <code>offset &lt; 512</code> (in-cache window):
+<ul>
+<li>line = <code>offset&gt;&gt;4</code>. If <code>!valid[line]</code>: fill the 16-byte line — <code>dp = offset &amp; 0xfff0</code>,
+<code>sp = (pbr&lt;&lt;16) + ((cbr+dp)&amp;0xfff0)</code>; loop 16: <code>step(clsr?5:6); buffer[dp++]=read(sp++)</code>;
+then <code>valid[line]=true</code>.</li>
+<li>else (hit): <code>step(clsr?1:2)</code>.</li>
+<li>return <code>buffer[offset]</code>.</li>
+</ul>
+</li>
+<li>Else (outside cache window): if <code>pbr&lt;=0x5f</code> syncROMBuffer else syncRAMBuffer; then
+<code>step(clsr?5:6); return read((pbr&lt;&lt;16)|address)</code>.</li>
+</ol>
+<p>(A bulk implementation fills the line then does a single <code>Step(clsr?5*16:6*16)</code> — one
+step of 16× the per-byte cost — for the same total. Cache-hit cost <code>Step(clsr?1:2)</code>.)</p>
+<p><strong>Cache addressing for MMIO ($3100–$32FF):</strong> <code>(address + cbr) &amp; 511</code>.
+Writing the 16th byte of a line (<code>(address&amp;15)==15</code>) marks that line valid —
+this is how the SNES can preload the cache.</p>
+<p><strong>Invalidation / flush</strong> <code>flushCache()</code> = set all 32 valid flags false.
+Triggered by:</p>
+<ul>
+<li>CACHE op when cbr changes.</li>
+<li>LJMP.</li>
+<li>MMIO write to PBR $3034.</li>
+<li>g 1→0 transition on $3030 write (also zeroes cbr).</li>
+</ul>
+<hr />
+<h2 id="6-timing-model"><a class="header" href="#6-timing-model">6. Timing model</a></h2>
+<h3 id="61-clock-select--step-granularity"><a class="header" href="#61-clock-select--step-granularity">6.1 Clock select &amp; step granularity</a></h3>
+<p><code>clsr</code> selects fast (21.4 MHz, clsr=1) vs slow (10.7 MHz, clsr=0). Throughout, the per-event
+cost is <code>clsr ? fast : slow</code>. The two base values are <strong>F=5 / S=6</strong> for memory cycles and
+<strong>F=1 / S=2</strong> for cache-hit fetch cycles. <code>step(clocks)</code>:</p>
+<ol>
+<li>Service pending ROM buffer: <code>romcl -= min(clocks,romcl)</code>; when it hits 0, <code>sfr.r=0</code>,
+<code>romdr = read((rombr&lt;&lt;16)+r14)</code>.</li>
+<li>Service pending RAM write: <code>ramcl -= min(clocks,ramcl)</code>; when 0, <code>write(0x700000 + (rambr&lt;&lt;16) + ramar, ramdr)</code>.</li>
+<li>Advance the coprocessor clock by <code>clocks</code> and re-synchronise to the SNES.</li>
+</ol>
+<p>(Equivalently: accumulate the cycle count, decrement RomDelay/RamDelay, fire the buffered
+ROM read / RAM write on reaching 0.)</p>
+<h3 id="62-rom-buffer-r14-triggered"><a class="header" href="#62-rom-buffer-r14-triggered">6.2 ROM buffer (R14-triggered)</a></h3>
+<ul>
+<li><code>updateROMBuffer()</code>: <code>sfr.r=1; romcl = clsr?5:6</code>. Armed when R14 is written.</li>
+<li><code>syncROMBuffer()</code>: if <code>romcl</code> pending, <code>step(romcl)</code> to force completion.</li>
+<li><code>readROMBuffer()</code>: syncROMBuffer then return <code>romdr</code>.
+Used by GETB/GETC/ROMB.</li>
+</ul>
+<h3 id="63-ram-buffer-delayed-write"><a class="header" href="#63-ram-buffer-delayed-write">6.3 RAM buffer (delayed write)</a></h3>
+<ul>
+<li><code>writeRAMBuffer(addr,data)</code>: syncRAMBuffer first (drain prior pending write), then
+<code>ramcl = clsr?5:6; ramar=addr; ramdr=data</code>. The actual store lands
+<code>ramcl</code> cycles later in step().</li>
+<li><code>readRAMBuffer(addr)</code>: syncRAMBuffer then <code>read(0x700000 + (rambr&lt;&lt;16) + addr)</code>.
+<strong>Reads are not buffered</strong> — only writes are delayed.</li>
+<li><code>syncRAMBuffer()</code>: <code>if(ramcl) step(ramcl)</code>.</li>
+</ul>
+<h3 id="64-per-instruction-explicit-cycle-costs-step-calls-inside-ops"><a class="header" href="#64-per-instruction-explicit-cycle-costs-step-calls-inside-ops">6.4 Per-instruction explicit cycle costs (step() calls inside ops)</a></h3>
+<p>Most ops cost only their fetch (cache hit F1/S2, or fill/non-cache F5/S6). Ops that add
+explicit <code>step()</code>:</p>
+<div class="table-wrapper"><table><thead><tr><th>Op</th><th>extra step</th></tr></thead><tbody>
+<tr><td>MULT/UMULT</td><td>if <code>!ms0</code>: <code>clsr?1:2</code></td></tr>
+<tr><td>FMULT/LMULT</td><td><code>(ms0?3:7) * (clsr?1:2)</code></td></tr>
+<tr><td>RPIX</td><td>per plane (bpp): <code>clsr?5:6</code></td></tr>
+<tr><td>PLOT cache flush</td><td>per plane, +RMW when partial: each <code>clsr?5:6</code></td></tr>
+<tr><td>cache line fill</td><td>16 × <code>clsr?5:6</code></td></tr>
+<tr><td>non-cache fetch</td><td><code>clsr?5:6</code></td></tr>
+<tr><td>cache hit fetch</td><td><code>clsr?1:2</code></td></tr>
+<tr><td>ROM/RAM access stall</td><td><code>6</code> per spin while access denied</td></tr>
+</tbody></table>
+</div>
+<h3 id="65-lockstep-with-the-snes-cpu"><a class="header" href="#65-lockstep-with-the-snes-cpu">6.5 Lockstep with the SNES CPU</a></h3>
+<p>The SuperFX runs as a cooperative thread; every <code>step()</code> ends by re-synchronising to the
+SNES CPU, and the GSU's main loop runs one instruction per dispatch, idling <code>step(6)</code> per call when
+<code>sfr.g==0</code>. Any SNES MMIO access calls <code>cpu.synchronize(*this)</code> first to align clocks
+before touching state. A catch-up driver is equivalent: execute until
+<code>CycleCount &gt;= masterClock*clockMultiplier</code>, then a final Step to align. luna's existing
+coproc scheduler should drive the GSU like SA-1 — run N GSU cycles per SNES master-clock
+budget, with a synchronize on every MMIO touch.</p>
+<p>The GSU thread base clock is fixed; the clsr fast/slow ratio is expressed through the
+per-event step counts, not by changing the base frequency. (Any clock-multiplier knob is
+an overclock UI feature, not hardware — ignore for accuracy.)</p>
+<hr />
+<h2 id="7-control-flow--handshake"><a class="header" href="#7-control-flow--handshake">7. Control flow / handshake</a></h2>
+<h3 id="71-start-go"><a class="header" href="#71-start-go">7.1 Start (GO)</a></h3>
+<p>The SNES launches the GSU by writing R15 (the PC) via MMIO, <strong>high byte last</strong>: writing
+$301F (R15 high byte) sets <code>sfr.g=1</code> as a side effect. So the canonical launch is: set up
+registers, write R15 low ($301E) then R15 high ($301F) → GO. Alternatively the SNES can
+set sfr.g via the $3030 SFR write, but the documented trigger is the R15-high write. (A
+write to register 14 separately arms the ROM buffer.)</p>
+<p>On launch the GSU begins fetching from <code>(pbr&lt;&lt;16)|r15</code> through the cache.
+<code>pipeline</code> starts as 0x01 (NOP) so the first executed instruction is a NOP —
+gives the pipeline one slot to prime.</p>
+<h3 id="72-stop--halt"><a class="header" href="#72-stop--halt">7.2 Stop / HALT</a></h3>
+<ul>
+<li>STOP op ($00): <code>if(!cfgr.irq){ sfr.irq=1; stop(); }</code> then <code>sfr.g=0; pipeline=NOP; reset()</code>.
+<code>stop()</code> → <code>cpu.irq(1)</code> raises the SNES IRQ.</li>
+<li>The SNES can also clear g by writing $3030 with bit5=0; the g 1→0 transition resets
+<code>cbr=0</code> and flushes the cache.</li>
+</ul>
+<p>While <code>sfr.g==0</code>, <code>main()</code> just idles <code>step(6)</code> and does not fetch/execute.</p>
+<h3 id="73-irq-generation--acknowledge"><a class="header" href="#73-irq-generation--acknowledge">7.3 IRQ generation &amp; acknowledge</a></h3>
+<ul>
+<li>STOP raises IRQ unless masked by <code>cfgr.irq</code> (the "IRQ disable" bit): only when
+<code>cfgr.irq==0</code> does STOP set <code>sfr.irq=1</code> and call <code>stop()</code>→<code>cpu.irq(1)</code>. (Note the
+inverted sense: <code>cfgr.irq==1</code> <em>masks</em> the interrupt.)</li>
+<li>The SNES acknowledges by <strong>reading SFR high byte $3031</strong>, which clears <code>sfr.irq</code> and
+deasserts the line: <code>regs.sfr.irq=0; cpu.irq(0)</code>.</li>
+</ul>
+<h3 id="74-reset-state"><a class="header" href="#74-reset-state">7.4 Reset state</a></h3>
+<p>See §1.8. Key: vcr=0x04, pipeline=0x01 (NOP), sfr.g=0 (halted), all banks 0, cache invalid,
+pixelcache offsets ~0.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../internals/coprocessors-sa1.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../internals/coprocessors-sdd1.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../internals/coprocessors-sa1.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../internals/coprocessors-sdd1.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

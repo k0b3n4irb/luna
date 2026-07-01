@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["AUDIO_QUEUE_CAPACITY","MASTER_CLOCK_HZ","MASTER_CYCLES_PER_SPC_STEP","SPC_2X_HZ","SPC_CLOCK_HZ","SPC_CYCLES_PER_SAMPLE"],"mod":["dsp"],"struct":["Apu","Spc700TraceEvent"]};

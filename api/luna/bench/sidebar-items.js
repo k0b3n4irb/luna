@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["AUDIO_FLOOR","AUDIO_TAIL_FRAMES","HANG_LOOP_MAX","LIVENESS_PROBE_STEPS","PER_FRAME_BUDGET","WARMUP_FRAME"],"enum":["Status"],"fn":["bench_one","default_input","run_bench","slug","write_reports"],"struct":["RomResult"]};

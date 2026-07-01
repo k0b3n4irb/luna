@@ -1,0 +1,1822 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Architecture overview - Luna — SNES Emulator Guide</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Guide and reference for Luna, a cycle-accurate, AI-native SNES emulator written in Rust.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/luna.css">
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "navy";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="../introduction.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">Using Luna</li><li class="chapter-item expanded "><a href="../using/install.html"><strong aria-hidden="true">1.</strong> Install & first run</a></li><li class="chapter-item expanded "><a href="../using/controls.html"><strong aria-hidden="true">2.</strong> Controls</a></li><li class="chapter-item expanded "><a href="../using/debugging.html"><strong aria-hidden="true">3.</strong> Debugging tools</a></li><li class="chapter-item expanded "><a href="../using/saves.html"><strong aria-hidden="true">4.</strong> Saves & save states</a></li><li class="chapter-item expanded "><a href="../using/cli-api-mcp.html"><strong aria-hidden="true">5.</strong> CLI, API & MCP</a></li><li class="chapter-item expanded affix "><li class="part-title">How Luna Works</li><li class="chapter-item expanded "><a href="../internals/architecture.html" class="active"><strong aria-hidden="true">6.</strong> Architecture overview</a></li><li class="chapter-item expanded "><a href="../internals/ppu.html"><strong aria-hidden="true">7.</strong> The PPU — graphics</a></li><li class="chapter-item expanded "><a href="../internals/apu.html"><strong aria-hidden="true">8.</strong> The APU — audio</a></li><li class="chapter-item expanded "><a href="../internals/cpus.html"><strong aria-hidden="true">9.</strong> The CPUs — 65C816 & SPC700</a></li><li class="chapter-item expanded "><a href="../internals/memory-dma-bus.html"><strong aria-hidden="true">10.</strong> Memory, DMA & the bus</a></li><li class="chapter-item expanded "><a href="../internals/coprocessors.html"><strong aria-hidden="true">11.</strong> Coprocessors</a><a class="toggle"><div>❱</div></a></li><li><ol class="section"><li class="chapter-item "><a href="../internals/coprocessors-sa1.html"><strong aria-hidden="true">11.1.</strong> SA-1</a></li><li class="chapter-item "><a href="../internals/coprocessors-superfx.html"><strong aria-hidden="true">11.2.</strong> Super FX (GSU)</a></li><li class="chapter-item "><a href="../internals/coprocessors-sdd1.html"><strong aria-hidden="true">11.3.</strong> S-DD1</a></li></ol></li><li class="chapter-item expanded "><li class="part-title">The Faithful-Port Method</li><li class="chapter-item expanded "><a href="../method/faithful-port.html"><strong aria-hidden="true">12.</strong> Why "faithful port"</a></li><li class="chapter-item expanded "><a href="../method/differential.html"><strong aria-hidden="true">13.</strong> The differential harness</a></li><li class="chapter-item expanded "><a href="../method/accuracy.html"><strong aria-hidden="true">14.</strong> Accuracy scorecard</a></li><li class="chapter-item expanded "><a href="../method/testing.html"><strong aria-hidden="true">15.</strong> Testing & determinism</a><a class="toggle"><div>❱</div></a></li><li><ol class="section"><li class="chapter-item "><a href="../method/determinism.html"><strong aria-hidden="true">15.1.</strong> Determinism guarantees</a></li></ol></li><li class="chapter-item expanded "><a href="../method/road-to-a.html"><strong aria-hidden="true">16.</strong> The road to "A"</a></li><li class="chapter-item expanded affix "><li class="spacer"></li><li class="chapter-item expanded affix "><a href="../acknowledgements.html">Acknowledgements</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Luna — SNES Emulator Guide</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/k0b3n4irb/luna" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/k0b3n4irb/luna/edit/develop/book/src/internals/architecture.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="luna--architecture"><a class="header" href="#luna--architecture">Luna — Architecture</a></h1>
+<blockquote>
+<p>A SNES emulator in Rust with an introspection API and a built-in MCP
+server, designed so that an AI agent can <strong>play</strong>, <strong>develop</strong> and
+<strong>debug</strong> Super Nintendo games autonomously.</p>
+</blockquote>
+<hr />
+<h2 id="table-of-contents"><a class="header" href="#table-of-contents">Table of contents</a></h2>
+<ul>
+<li><a href="#1-vision--goals">1. Vision &amp; goals</a></li>
+<li><a href="#2-non-goals">2. Non-goals</a></li>
+<li><a href="#3-overview">3. Overview</a>
+<ul>
+<li><a href="#31-layered-architecture">3.1 Layered architecture</a></li>
+<li><a href="#32-execution-modes">3.2 Execution modes</a></li>
+</ul>
+</li>
+<li><a href="#4-rust-workspace-organization">4. Rust workspace organization</a>
+<ul>
+<li><a href="#41-cross-target-async-strategy">4.1 Cross-target async strategy</a></li>
+</ul>
+</li>
+<li><a href="#5-layer-1--bus--memory">5. Layer 1 — Bus &amp; memory</a></li>
+<li><a href="#6-layer-2--emulation-core">6. Layer 2 — Emulation core</a>
+<ul>
+<li><a href="#61-65c816-cpu">6.1 65C816 CPU</a></li>
+<li><a href="#62-ppu">6.2 PPU</a></li>
+<li><a href="#63-apu--spc700">6.3 APU / SPC700</a></li>
+<li><a href="#64-dma--hdma">6.4 DMA &amp; HDMA</a></li>
+<li><a href="#65-coprocessors">6.5 Coprocessors</a></li>
+<li><a href="#66-scheduler--cycle-accurate-sync">6.6 Scheduler &amp; cycle-accurate sync</a></li>
+</ul>
+</li>
+<li><a href="#7-layer-3--control--introspection-api">7. Layer 3 — Control &amp; introspection API</a>
+<ul>
+<li><a href="#71-control-plane">7.1 Control plane</a></li>
+<li><a href="#72-debug-api">7.2 Debug API</a></li>
+<li><a href="#73-semantic-api-for-the-ai">7.3 Semantic API (for the AI)</a></li>
+<li><a href="#74-events--subscriptions">7.4 Events &amp; subscriptions</a></li>
+</ul>
+</li>
+<li><a href="#8-layer-4--mcp-server">8. Layer 4 — MCP server</a>
+<ul>
+<li><a href="#81-transport--runtime">8.1 Transport &amp; runtime</a></li>
+<li><a href="#82-tool-catalogue">8.2 Tool catalogue</a></li>
+<li><a href="#83-resource-catalogue">8.3 Resource catalogue</a></li>
+<li><a href="#84-notifications--streaming">8.4 Notifications &amp; streaming</a></li>
+<li><a href="#85-token-economy--mcp-costs">8.5 Token economy &amp; MCP costs</a></li>
+</ul>
+</li>
+<li><a href="#9-api-first--ecosystem-of-use-cases">9. API-first &amp; ecosystem of use cases</a>
+<ul>
+<li><a href="#91-the-api-is-the-product-not-mcp">9.1 The API is the product, not MCP</a></li>
+<li><a href="#92-transport-catalogue">9.2 Transport catalogue</a></li>
+<li><a href="#93-unlocked-product-use-cases">9.3 Unlocked product use cases</a></li>
+<li><a href="#94-architectural-implications">9.4 Architectural implications</a></li>
+<li><a href="#95-luna-api-as-a-stable-public-contract">9.5 <code>luna-api</code> as a stable public contract</a></li>
+</ul>
+</li>
+<li><a href="#10-threading-model">10. Threading model</a>
+<ul>
+<li><a href="#101-native-target-linux--macos--windows">10.1 Native target</a></li>
+<li><a href="#102-wasm-target-luna-studio-web--v2">10.2 WASM target (Luna Studio Web — V2)</a></li>
+<li><a href="#103-strict-discipline">10.3 Strict discipline</a></li>
+</ul>
+</li>
+<li><a href="#11-determinism--reproducibility">11. Determinism &amp; reproducibility</a></li>
+<li><a href="#12-testing-strategy">12. Testing strategy</a></li>
+<li><a href="#13-build-distribution-license">13. Build, distribution, license</a></li>
+<li><a href="#14-roadmap--phasing">14. Roadmap &amp; phasing</a></li>
+<li><a href="#15-risks--open-questions">15. Risks &amp; open questions</a></li>
+<li><a href="#16-glossary">16. Glossary</a></li>
+</ul>
+<hr />
+<h2 id="1-vision--goals"><a class="header" href="#1-vision--goals">1. Vision &amp; goals</a></h2>
+<p><strong>Luna</strong> is a SNES emulator in Rust that exposes the console as a
+<strong>first-class programmable environment</strong> for AI agents. Where traditional
+emulators treat AI as a secondary use case (to be bolted on via OCR over
+screenshots), Luna makes the agent ↔ machine dialogue a central design goal.</p>
+<p><strong>Goals</strong></p>
+<ol>
+<li><strong>High hardware fidelity</strong>: cycle-accurate emulation of the 65C816 CPU,
+the PPU, the SPC700 and the main coprocessors (SA-1, Super FX, DSP-1
+as a priority).</li>
+<li><strong>Rich introspection API</strong>: expose the full machine state (registers,
+VRAM, OAM, palette, scroll, tilemap, sprites) in a structured form.</li>
+<li><strong>Built-in MCP server</strong>: an AI agent (Claude, Cursor, etc.) can drive
+the emulator through a catalogue of standardized JSON-RPC <em>tools</em>.</li>
+<li><strong>Three assumed usage modes</strong>:
+<ul>
+<li>🎮 <strong>Play mode</strong> — the agent plays an existing game.</li>
+<li>🛠️ <strong>Dev mode</strong> — the agent develops a homebrew (hot-reload, profiler).</li>
+<li>🐛 <strong>Debug mode</strong> — the agent debugs a ROM hack (breakpoints, trace,
+time-travel).</li>
+</ul>
+</li>
+<li><strong>Triple execution mode</strong>: <em>headless</em> (for AI in production / CI),
+<em>standalone</em> (for a human who plays), <em>spectator</em> (the AI plays, the
+human observes with visual feedback and activity overlays).</li>
+<li><strong>MCP token economy</strong>: intentional design so that a multi-hour AI
+session fits within a reasonable budget (see §8.5).</li>
+<li><strong>Strict determinism</strong> in <code>replay</code> mode: the same input + same seed
+produces the same sequence of frames bit for bit.</li>
+<li><strong>API-first</strong>: MCP is just one of the transports. Layer 3
+(<code>luna-api</code>) is designed from the start as a stable public contract
+that can be exposed via REST, WebSocket, WASM, FFI… to unlock an
+ecosystem of third-party tools (homebrew web IDE, desktop dev studio
+client, VSCode extensions, etc. — see §9).</li>
+</ol>
+<p><strong>Measurable success criteria</strong></p>
+<div class="table-wrapper"><table><thead><tr><th>Metric</th><th>Target</th></tr></thead><tbody>
+<tr><td>SNES compatibility (test suite)</td><td>≥ 99% of commercial ROMs</td></tr>
+<tr><td>Hardware-accuracy tests passed</td><td>≥ 95%</td></tr>
+<tr><td>Performance (release, modern x86-64)</td><td>60 fps cycle-accurate at &lt; 30% CPU</td></tr>
+<tr><td>MCP tool round-trip latency</td><td>&lt; 5 ms (local stdio)</td></tr>
+<tr><td>Cold start → ROM loaded</td><td>&lt; 200 ms</td></tr>
+<tr><td>Binary size (release, stripped)</td><td>&lt; 15 MB</td></tr>
+<tr><td>Token budget / hour (balanced profile, active gameplay)</td><td>&lt; 10M tokens</td></tr>
+<tr><td>Spectator GUI latency (event → render)</td><td>&lt; 16 ms (1 frame)</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="2-non-goals"><a class="header" href="#2-non-goals">2. Non-goals</a></h2>
+<ul>
+<li><strong>Speed at the expense of accuracy</strong>: we systematically favor fidelity
+over raw throughput.</li>
+<li><strong>Online multiplayer netplay</strong>: out of scope for V1.</li>
+<li><strong>Emulation of other consoles</strong>: SNES only. (A future factorization is
+possible but it is not a goal.)</li>
+<li><strong>Immersive, complex GUI</strong>: <code>luna-gui</code> is deliberately minimal and
+functional (framebuffer + debug overlays). We do not compete with
+RetroArch on shaders, post-processing, or multimedia frontends.</li>
+<li><strong>Compatibility with low-level hacks</strong> (overclocking, MSU-1,
+widescreen patches): possible in V2.</li>
+</ul>
+<hr />
+<h2 id="3-overview"><a class="header" href="#3-overview">3. Overview</a></h2>
+<h3 id="31-layered-architecture"><a class="header" href="#31-layered-architecture">3.1 Layered architecture</a></h3>
+<pre><code>┌─────────────────────────────────────────────────────────────────────┐
+│                  Layer 4 — MCP server (luna-mcp)                   │
+│         JSON-RPC 2.0 over stdio / SSE / Streamable HTTP             │
+│                            (tokio async)                            │
+├─────────────────────────────────────────────────────────────────────┤
+│        Layer 3 — Control &amp; Introspection API (luna-api)            │
+│   ┌───────────────┬────────────────┬─────────────┬──────────────┐   │
+│   │ Control plane │   Debug API    │ Semantic API│   Events     │   │
+│   │ (lifecycle)   │ (breakpoints,  │ (sprites,   │  (vblank,    │   │
+│   │               │  registers,    │  tilemap,   │   irq, bp    │   │
+│   │               │  trace, mem)   │  scroll…)   │   hits, …)   │   │
+│   └───────────────┴────────────────┴─────────────┴──────────────┘   │
+├─────────────────────────────────────────────────────────────────────┤
+│             Layer 2 — Emulation core (luna-core)                   │
+│  ┌────────┬────────┬────────────┬─────┬───────────┬───────────────┐ │
+│  │ 65C816 │  PPU   │ SPC700/DSP │ DMA │ Coproc.   │   Scheduler   │ │
+│  │        │        │            │     │ (SA-1, FX)│ (coroutines)  │ │
+│  └────────┴────────┴────────────┴─────┴───────────┴───────────────┘ │
+├─────────────────────────────────────────────────────────────────────┤
+│            Layer 1 — Bus &amp; memory map (luna-bus)                   │
+│        Mappers (LoROM, HiROM, ExHiROM, SA-1, SDD-1, …)              │
+└─────────────────────────────────────────────────────────────────────┘
+                            ▲
+                            │
+                   ┌────────┴────────┐
+                   │   luna-cli      │   luna-gui (egui/wgpu)
+                   │ (headless run)  │   standalone &amp; spectator
+                   └─────────────────┘
+</code></pre>
+<p>The layers communicate only through Rust contracts (traits + serializable
+types). No direct dependency from a lower layer to a higher one.</p>
+<h3 id="32-execution-modes"><a class="header" href="#32-execution-modes">3.2 Execution modes</a></h3>
+<p>Luna is designed to run under <strong>four</strong> combinable modes, which are not
+separate binaries but configurations of the same <code>luna</code> binary. This stems
+from the principle that <strong>the emulation core, the introspection API and the
+GUI are fully decoupled</strong>: each "consumer" of the core can be turned on or
+off independently.</p>
+<h4 id="mode-1--headless-ai-production-ci"><a class="header" href="#mode-1--headless-ai-production-ci">Mode 1 — Headless (AI production, CI)</a></h4>
+<pre><code class="language-bash">$ luna mcp --rom game.sfc
+</code></pre>
+<ul>
+<li>No window, no graphics dependency (on Linux, no need for X or Wayland).</li>
+<li>MCP stdio server on standard output.</li>
+<li>Inputs only via the <code>emu_send_input</code> MCP tool.</li>
+<li>Outputs only via MCP tools/resources.</li>
+<li><strong>Use</strong>: integration into Claude Code/Cursor, cloud deployment, batch AI
+benchmarks, CI test suite.</li>
+</ul>
+<h4 id="mode-2--standalone-human-plays"><a class="header" href="#mode-2--standalone-human-plays">Mode 2 — Standalone (human plays)</a></h4>
+<pre><code class="language-bash">$ luna run game.sfc
+</code></pre>
+<ul>
+<li>Native window, framebuffer at 60 fps, audio.</li>
+<li>Keyboard/gamepad inputs.</li>
+<li>No MCP server started.</li>
+<li>Menu: save states, reset, load ROM, video options (integer filter, 4:3
+ratio, etc.).</li>
+<li><strong>Use</strong>: classic retrogaming, manual verification of a behavior, human
+debugging.</li>
+</ul>
+<h4 id="mode-3--spectator-the-ai-plays-the-human-observes"><a class="header" href="#mode-3--spectator-the-ai-plays-the-human-observes">Mode 3 — Spectator (the AI plays, the human observes)</a></h4>
+<pre><code class="language-bash">$ luna mcp --rom game.sfc --spectate
+</code></pre>
+<ul>
+<li>The MCP server is active (the AI is in control).</li>
+<li><strong>A GUI window is open in parallel</strong>, subscribed to the same event bus
+as the agent.</li>
+<li>The human sees in real time:
+<ul>
+<li>the framebuffer (what the agent sees)</li>
+<li><strong>an "Agent activity" panel</strong>: a timeline of recent tool calls
+(<code>emu_send_input(B, 30 frames)</code>, <code>sem_get_sprites()</code>, …)</li>
+<li><strong>visual overlays</strong>: highlighting of the sprites/memory regions the
+agent queried in the last N seconds</li>
+<li>event notifications (<code>BreakpointHit</code>, <code>RomLoaded</code>)</li>
+</ul>
+</li>
+<li>The human can at any time:
+<ul>
+<li><strong>pause</strong> (the agent sees its next request queued)</li>
+<li><strong>inspect</strong> the state (registers, memory) side by side with the agent</li>
+<li><strong>take over</strong> (toggle "human override") to replay a difficult section</li>
+</ul>
+</li>
+<li><strong>Use</strong>: <strong>debugging the agent itself</strong> (why did it choose that input?),
+public demos, educational observation.</li>
+</ul>
+<h4 id="mode-4--coop-human--ai-simultaneously-v2"><a class="header" href="#mode-4--coop-human--ai-simultaneously-v2">Mode 4 — Coop (human + AI simultaneously, V2)</a></h4>
+<pre><code class="language-bash">$ luna mcp --rom game.sfc --spectate --coop
+</code></pre>
+<ul>
+<li>Human inputs + MCP inputs merged.</li>
+<li>Use case: human drives P1, AI drives P2 in a coop game (Joe &amp; Mac,
+Sunset Riders…), or the AI suggests and the human validates.</li>
+<li>Out of scope for V1, but the architecture allows it natively (the input
+subsystem already aggregates multiple sources).</li>
+</ul>
+<h4 id="decoupling-architecture"><a class="header" href="#decoupling-architecture">Decoupling architecture</a></h4>
+<pre><code>                      Emulation core
+                  ┌─────────────────────┐
+                  │     Event bus       │ (tokio broadcast)
+                  └─────────┬───────────┘
+                            │
+            ┌───────────────┼───────────────┐
+            │               │               │
+            ▼               ▼               ▼
+       ┌─────────┐    ┌─────────┐    ┌──────────┐
+       │   MCP   │    │   GUI   │    │  Replay  │
+       │ server  │    │ (egui)  │    │ recorder │
+       └─────────┘    └─────────┘    └──────────┘
+       (optional)    (optional)     (optional)
+</code></pre>
+<p>Each consumer is <strong>opt-in</strong>. The <code>--spectate</code> mode simply turns on GUI +
+MCP simultaneously. The GUI <strong>never</strong> goes through MCP: it talks to the
+core via the internal bus (latency &lt; 1 ms, zero token cost).</p>
+<hr />
+<h2 id="4-rust-workspace-organization"><a class="header" href="#4-rust-workspace-organization">4. Rust workspace organization</a></h2>
+<p>Cargo workspace with ~15 crates. Each crate is annotated <strong>cross-target</strong>
+(compiles natively and to <code>wasm32-unknown-unknown</code>) or <strong>native-only</strong>
+(forbidden under WASM). This discipline is verified in CI: <code>cargo check --target wasm32-unknown-unknown</code> on the cross-target crates.</p>
+<pre><code># ──────────── EMULATION CORE (cross-target, !Send, no_std-ready) ────
+luna-bus          # ✅ memory map, cartridge mappers
+luna-cpu-65c816   # ✅ main CPU, cycle-accurate
+luna-cpu-spc700   # ✅ audio CPU
+luna-ppu          # ✅ Picture Processing Unit
+luna-apu          # ✅ SPC700 + audio DSP (orchestrates spc700)
+luna-dma          # ✅ DMA + HDMA
+luna-coproc       # ✅ SA-1, Super FX, DSP-1/2/3/4, etc.
+luna-cartridge    # ✅ ROM parsing, header detection, SRAM
+luna-core         # ✅ assembles the components, scheduler
+
+# ──────────── CROSS-TARGET ABSTRACTIONS ─────────────────────
+luna-async        # ✅ runtime facade (spawn/sleep/channels)
+luna-api          # ✅ ★ stable public contract (layer 3)
+
+# ──────────── TRANSPORTS (mix cross-target / native-only) ────
+luna-mcp-core     # ✅ Tool/Resource types, schemas
+luna-mcp-server   # ❌ rmcp + tokio mainline (native-only)
+luna-mcp-client   # ✅ cross-target WebSocket transport
+luna-rest         # ❌ axum + OpenAPI (V1.1, native-only)
+luna-ws           # ❌ tokio-tungstenite (V1.1, native-only)
+luna-wasm         # ⚠️ WASM-only, JS bindings (V2)
+luna-ffi          # ❌ cdylib C/Python (V2, native-only)
+luna-libretro     # ❌ libretro core (V2, native-only)
+
+# ──────────── BINARIES &amp; GUI ───────────────────────────────
+luna-cli          # ❌ `luna` binary, dispatches the modes
+luna-gui          # ⚠️ egui/wgpu (native + WASM via eframe)
+luna-overlay      # ⚠️ spectator overlays (native + WASM)
+</code></pre>
+<p>Legend: ✅ cross-target / ⚠️ cross-target with cfg-gated features /
+❌ native-only. Alongside the crates the workspace also carries the
+homebrew hardware-test ROMs, the JSON per-instruction 65C816 test suite,
+and the golden reference frames used by the visual tests.</p>
+<p><strong>Key dependency choices</strong></p>
+<div class="table-wrapper"><table><thead><tr><th>Domain</th><th>Crate(s)</th><th>Rationale</th></tr></thead><tbody>
+<tr><td>Native async runtime</td><td><code>tokio</code> (rt-multi-thread, sync, macros)</td><td>De facto standard</td></tr>
+<tr><td>Web async runtime</td><td><code>wasm-bindgen-futures</code> + <code>gloo-timers</code></td><td>Single-thread, microtask queue</td></tr>
+<tr><td><strong>Async facade</strong></td><td><strong><code>luna-async</code></strong> (in-house crate)</td><td><strong>Avoids <code>#[cfg(target_arch)]</code> everywhere — mandatory</strong></td></tr>
+<tr><td>Channels (cross)</td><td><code>futures::channel::mpsc</code> / <code>async-channel</code></td><td><code>crossbeam-channel</code> <strong>panics</strong> under WASM</td></tr>
+<tr><td>Serialization</td><td><code>serde</code> + <code>serde_json</code></td><td>Essential for MCP</td></tr>
+<tr><td>MCP server</td><td><code>rmcp</code> (official Anthropic) — native only</td><td>No <code>wasm32-unknown-unknown</code> support</td></tr>
+<tr><td>Schemas</td><td><code>schemars</code> + <code>ts-rs</code> (build-time) + <code>utoipa</code></td><td>JSON Schema / TS / OpenAPI generation</td></tr>
+<tr><td>Rendering (gui)</td><td><code>wgpu</code> + <code>egui</code> / <code>eframe</code></td><td>Cross-platform native + WASM via WebGPU/WebGL</td></tr>
+<tr><td>Native audio</td><td><code>cpal</code></td><td>Cross-platform low-latency</td></tr>
+<tr><td>Web audio</td><td><code>cpal</code> (wasm-bindgen backend, output only)</td><td>Web Audio API bridge; ~50-100ms latency</td></tr>
+<tr><td>65C816 testing</td><td>per-instruction state-vector suite (JSON)</td><td>Exhaustive opcode-level conformance vectors</td></tr>
+<tr><td>Visual tests</td><td><code>image</code> + <code>pixelmatch</code></td><td>Golden-frame comparison</td></tr>
+<tr><td>Tracing</td><td><code>tracing</code> + <code>tracing-subscriber</code></td><td>Structured logs</td></tr>
+<tr><td>CLI args</td><td><code>clap</code> (derive)</td><td>Standard</td></tr>
+<tr><td>Coroutines</td><td><strong>none</strong> (<code>genawaiter</code> rejected)</td><td>Static-dispatch pattern preferred, see §6.6</td></tr>
+</tbody></table>
+</div>
+<p><strong>Decision on the internal architecture</strong>: unlike designs that use
+cooperative cothreads, and unlike some Rust emulators that attempt
+<code>#[coroutine]</code> (nightly, broken save-states), Luna uses the
+<strong>CPU-driven master-clock catch-up</strong> pattern. See §6.6 for the details.</p>
+<h3 id="41-cross-target-async-strategy"><a class="header" href="#41-cross-target-async-strategy">4.1 Cross-target async strategy</a></h3>
+<p>The core (<code>luna-core</code>, <code>luna-api</code>, <code>luna-mcp-core</code>) must be able to compile
+to <code>wasm32-unknown-unknown</code>. However:</p>
+<ul>
+<li>mainline <code>tokio</code> only partially supports WASM
+(<code>tokio::time</code> <em>panics</em> at runtime).</li>
+<li><code>crossbeam-channel</code> does <strong>not</strong> work under WASM (parking primitive
+absent, panic "unreachable").</li>
+<li><code>std::thread::spawn</code> is unavailable under single-thread WASM.</li>
+</ul>
+<p><strong>Adopted solution</strong>: a <code>luna-async</code> crate that exposes a minimal API
+(<code>spawn</code>, <code>sleep</code>, <code>yield_now</code>, <code>mpsc</code>, <code>oneshot</code>) with two conditional
+implementations:</p>
+<pre><code class="language-rust">// the luna-async facade
+#[cfg(not(target_arch = "wasm32"))]
+mod imp {
+    pub use tokio::task::spawn;
+    pub use tokio::time::sleep;
+}
+
+#[cfg(target_arch = "wasm32")]
+mod imp {
+    use std::future::Future;
+    pub fn spawn&lt;F: Future&lt;Output = ()&gt; + 'static&gt;(f: F) {
+        wasm_bindgen_futures::spawn_local(f);
+    }
+    pub async fn sleep(d: std::time::Duration) {
+        gloo_timers::future::TimeoutFuture::new(d.as_millis() as u32).await;
+    }
+}
+
+pub use imp::{spawn, sleep};
+
+// Cross-target channels — `futures::channel` works everywhere
+pub use futures::channel::{mpsc, oneshot};</code></pre>
+<p><strong><code>!Send</code> discipline throughout the core</strong>: single-thread, WASM-compatible.
+Native parallelism goes through explicit workers (dedicated threads) in the
+native <code>luna-mcp-server</code>, never in <code>luna-core</code>.</p>
+<p><strong>Consequence for the 60 Hz loop</strong>: see §10 (dedicated thread on native,
+<code>requestAnimationFrame</code> under WASM, abstracted by a <code>Frontend</code> trait).</p>
+<hr />
+<h2 id="5-layer-1--bus--memory"><a class="header" href="#5-layer-1--bus--memory">5. Layer 1 — Bus &amp; memory</a></h2>
+<p>The <strong>bus</strong> is the central object that routes reads/writes to the right
+components according to the 65C816's 24-bit address (<code>$bb:aaaa</code>).</p>
+<h3 id="bus-trait-the-view-exposed-to-the-cpu"><a class="header" href="#bus-trait-the-view-exposed-to-the-cpu"><code>Bus</code> trait (the view exposed to the CPU)</a></h3>
+<pre><code class="language-rust">pub type MCycles = u64;
+
+pub trait Bus {
+    /// Reads a byte. TRIGGERS `io_cycle()` internally with the access
+    /// cost (SLOW=8 / FAST=6 / XSLOW=12 mclk depending on the region).
+    fn read(&amp;mut self, addr: u32) -&gt; u8;
+
+    /// Writes a byte. May have side effects (MMIO registers).
+    /// Also triggers `io_cycle()` with the access cost.
+    fn write(&amp;mut self, addr: u32, value: u8);
+
+    /// **KEY PRIMITIVE FOR MID-INSTRUCTION ACCURACY.**
+    /// Called by the CPU on every bus access (read, write, or internal
+    /// cycle without an access). The bus uses it to immediately catch
+    /// the PPU up, process HDMA, and test NMI/IRQ.
+    ///
+    /// This is what makes Mario Kart, F-Zero, and all games with
+    /// HDMA/mid-frame effects correct.
+    fn io_cycle(&amp;mut self, mcycles: MCycles);
+
+    /// Probes the interrupt lines after accumulation via io_cycle.
+    fn nmi_pending(&amp;self) -&gt; bool;
+    fn irq_pending(&amp;self) -&gt; bool;
+}
+
+/// Trait for components stored behind the bus (PPU, DMA, etc.)
+pub trait BusDevice {
+    fn read(&amp;mut self, addr: u32) -&gt; u8;
+    fn write(&amp;mut self, addr: u32, value: u8);
+    fn snapshot(&amp;self) -&gt; Vec&lt;u8&gt;;
+    fn restore(&amp;mut self, data: &amp;[u8]) -&gt; Result&lt;(), SnapshotError&gt;;
+}</code></pre>
+<p><strong>Why <code>io_cycle()</code>?</strong> It is the primitive that separates a "moderately
+accurate" SNES emulator from a truly cycle-accurate one. Without it, the
+PPU is only caught up between CPU instructions — which misses HDMA
+effects, the exact timing of H/V IRQs, and the Mario Kart bugs. With it,
+every CPU memory access triggers a PPU catch-up to the exact cycle, which
+guarantees accuracy while staying zero-alloc in the hot loop.</p>
+<h3 id="cartridge-mappers"><a class="header" href="#cartridge-mappers">Cartridge mappers</a></h3>
+<p>A <code>Mapper</code> trait that implements <code>BusDevice</code> and exposes the topology
+specific to the cartridge type:</p>
+<ul>
+<li><code>LoRom</code> (mode 20)</li>
+<li><code>HiRom</code> (mode 21)</li>
+<li><code>ExHiRom</code> (mode 25)</li>
+<li><code>Sa1Mapper</code></li>
+<li><code>SuperFxMapper</code></li>
+<li><code>SDD1Mapper</code></li>
+<li><code>SPC7110Mapper</code></li>
+</ul>
+<p>Detection is done by <code>luna-cartridge</code>, which parses the SNES internal
+header (offset 0x7FC0 or 0xFFC0) to choose the mapper.</p>
+<h3 id="memory-map-summary"><a class="header" href="#memory-map-summary">Memory map summary</a></h3>
+<pre><code>$00–$3F:$0000–$1FFF  → WRAM mirror (LowRAM)
+$00–$3F:$2100–$213F  → PPU registers
+$00–$3F:$2140–$2143  → APU communication ports
+$00–$3F:$4200–$421F  → CPU registers (NMI, IRQ, DMA)
+$00–$3F:$4300–$437F  → DMA channels
+$00–$3F:$8000–$FFFF  → ROM (via mapper)
+$7E–$7F:$0000–$FFFF  → WRAM (128 KB)
+$F0–$FF:...          → SRAM (via mapper)
+</code></pre>
+<hr />
+<h2 id="6-layer-2--emulation-core"><a class="header" href="#6-layer-2--emulation-core">6. Layer 2 — Emulation core</a></h2>
+<h3 id="61-65c816-cpu"><a class="header" href="#61-65c816-cpu">6.1 65C816 CPU</a></h3>
+<p>Cycle-accurate implementation of the Western Design Center 65C816 (the
+16-bit 6502 variant used in the SNES).</p>
+<p><strong>65C816 quirks to handle correctly</strong></p>
+<ul>
+<li>Independent 8/16-bit modes for A and X/Y (via the M and X flags of the
+status register).</li>
+<li>Separate 64 KB banks for program (PB) and data (DB).</li>
+<li>Emulation mode (E) that makes it behave like a 6502.</li>
+<li>All the exotic addressing modes (direct page, stack relative, long
+indexed…).</li>
+</ul>
+<p><strong>Core of the implementation</strong></p>
+<pre><code class="language-rust">pub struct Cpu65C816 {
+    // Registers
+    a: u16, x: u16, y: u16,
+    pc: u16, pb: u8, db: u8,
+    sp: u16, dp: u16,
+    p: StatusFlags,        // N V M X D I Z C + E
+    
+    // Cycle-accurate stepping state
+    pending_cycles: u8,
+    current_instr: Option&lt;Instruction&gt;,
+    micro_op_index: u8,
+}
+
+impl Cpu65C816 {
+    /// Advances by one master cycle. May be in the middle of an instruction.
+    pub fn tick(&amp;mut self, bus: &amp;mut Bus) -&gt; CycleResult;
+}</code></pre>
+<p>Each instruction is broken down into cycle-dated <strong>micro-ops</strong>, which
+allows:</p>
+<ul>
+<li>cycle-precise breakpoints</li>
+<li>an interrupt (IRQ/NMI) handled at the exact hardware timing</li>
+<li>a "step" debugger that can step by instruction or by cycle</li>
+</ul>
+<h3 id="62-ppu"><a class="header" href="#62-ppu">6.2 PPU</a></h3>
+<p>The SNES PPU is <em>complex</em>: 8 graphics modes (including the famous Mode 7),
+4 tile planes, 128 sprites, OAM, CGRAM palette, masking windows, mosaic,
+color math…</p>
+<p><strong>Breakdown into responsibilities</strong></p>
+<ul>
+<li>the top-level <code>Ppu</code> state + per-tick stepping</li>
+<li>rendering of modes 0–7</li>
+<li>OAM + the sprite renderer</li>
+<li>window masking + color math</li>
+<li>VRAM (64 KB)</li>
+<li>CGRAM palette (512 bytes)</li>
+<li>the <code>$2100-$213F</code> register file</li>
+</ul>
+<p><strong>Rendering</strong>: scanline-based in V1 (simpler and 99% sufficient),
+upgradable to dot-based for the demos that change registers in the middle
+of a scanline.</p>
+<p><strong>Exposed framebuffer</strong>: <code>[u8; 256 * 224 * 4]</code> (RGBA8) accessible
+read-only via layer 3.</p>
+<h3 id="63-apu--spc700"><a class="header" href="#63-apu--spc700">6.3 APU / SPC700</a></h3>
+<p>The SNES APU is a near-independent subsystem: an SPC700 CPU (an 8-bit
+variant derived from the 6502) with its own 64 KB RAM and an audio DSP. It
+communicates with the main CPU via 4 "mailbox" registers.</p>
+<p><strong>Critical architectural implication</strong>: the SPC700 runs at 1.024 MHz while
+the 65C816 runs at ~3.58 MHz, and the two must stay synchronized. That is
+the scheduler's job (§6.6).</p>
+<pre><code class="language-rust">pub struct Apu {
+    spc700: Spc700,
+    dsp: AudioDsp,
+    ram: [u8; 65536],
+    ports: [u8; 4],      // $2140–$2143 on the CPU side
+}</code></pre>
+<h3 id="64-dma--hdma"><a class="header" href="#64-dma--hdma">6.4 DMA &amp; HDMA</a></h3>
+<p>8 DMA channels (memory ↔ MMIO burst transfers) + their HDMA equivalents
+(transfers synchronized to PPU rendering, scanline by scanline).</p>
+<p>This is crucial: nearly all SNES visual effects (parallax, dynamic mode 7,
+color math over windows) rely on HDMA. Incorrect emulation breaks Final
+Fantasy VI, Chrono Trigger, etc.</p>
+<h3 id="65-coprocessors"><a class="header" href="#65-coprocessors">6.5 Coprocessors</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Chip</th><th>Iconic games</th><th>Priority</th></tr></thead><tbody>
+<tr><td>SA-1</td><td>Super Mario RPG, Kirby Super Star</td><td>V1</td></tr>
+<tr><td>Super FX</td><td>Star Fox, Yoshi's Island, Doom</td><td>V1</td></tr>
+<tr><td>DSP-1</td><td>Super Mario Kart, Pilotwings</td><td>V1</td></tr>
+<tr><td>DSP-2/3/4</td><td>Dungeon Master, SD Gundam GX</td><td>V2</td></tr>
+<tr><td>Cx4</td><td>Mega Man X2, X3</td><td>V2</td></tr>
+<tr><td>SPC7110</td><td>Far East of Eden Zero</td><td>V3</td></tr>
+<tr><td>S-DD1</td><td>Star Ocean, Street Fighter Alpha 2</td><td>V2</td></tr>
+<tr><td>OBC1, ST010+</td><td>A few niche titles</td><td>V3</td></tr>
+</tbody></table>
+</div>
+<p>Each coprocessor is a crate-feature of <code>luna-coproc</code>, which allows building
+a minimal build when targeting a specific game.</p>
+<h3 id="66-scheduler--cycle-accurate-sync"><a class="header" href="#66-scheduler--cycle-accurate-sync">6.6 Scheduler &amp; cycle-accurate sync</a></h3>
+<p><strong>The problem</strong>: advance, in the right order, a main CPU (21.477 MHz NTSC),
+a PPU (clocked by dots/scanlines), an APU at an independent frequency
+(3.072 MHz SPC700), DMAs that steal cycles from the CPU, and potentially a
+coprocessor — all while staying deterministic and performant.</p>
+<p><strong>Decision</strong>: we adopt the <strong>CPU-driven master-clock catch-up</strong> pattern,
+considered the Rust state of the art in cycle-accurate emulation.</p>
+<p><strong>Rejected patterns and why</strong></p>
+<div class="table-wrapper"><table><thead><tr><th>Pattern</th><th>Verdict</th><th>Reason</th></tr></thead><tbody>
+<tr><td>Event-queue <code>BinaryHeap</code></td><td>❌</td><td>At 21M cycles/s, the heap + <code>Box&lt;dyn&gt;</code> overhead eats 50% of the cycle budget</td></tr>
+<tr><td>Coroutines <code>#[coroutine]</code></td><td>❌</td><td>Nightly only, save-states impossible (non-serializable closures), marginal perf</td></tr>
+<tr><td><code>genawaiter</code> (stable, but...)</td><td>❌</td><td>LLVM struggles to inline it; broken save-states</td></tr>
+<tr><td>Naive instruction-step</td><td>❌</td><td>No mid-instruction accuracy, breaks Mario Kart</td></tr>
+<tr><td>Lazy + <code>next_event</code></td><td>⚠️</td><td>To be used <strong>in addition</strong> to optimize WAI/STP</td></tr>
+<tr><td><strong>CPU master-clock catch-up + <code>io_cycle()</code></strong></td><td>✅</td><td><strong>Our choice</strong></td></tr>
+<tr><td>Pure per-cycle state-machine</td><td>⚠️</td><td>Excellent for the isolated CPU, to be used in <code>luna-cpu-65c816</code></td></tr>
+</tbody></table>
+</div>
+<p><strong>Adopted pattern — overview</strong></p>
+<pre><code>loop {
+  delta_mclk = if memory_refresh_pending { 40 }                  // DRAM refresh
+              else if dma.active() { dma.tick(bus) }             // DMA steals the cycles
+              else { cpu.step(bus) }                             // 1 CPU instruction
+                       ↑ during this step, the CPU calls
+                         bus.io_cycle(n) on every access,
+                         which catches PPU/HDMA up mid-instruction
+  apu.tick(delta_mclk)                                           // rational catch-up
+  ppu.catch_up_to(total_mclk + delta_mclk)                       // internal-cycle residue
+  total_mclk += delta_mclk
+  if ppu.frame_complete() { return }
+}
+</code></pre>
+<p><strong>Full Rust sketch</strong></p>
+<pre><code class="language-rust">// the luna-core scheduler
+
+pub type MCycles = u64;
+pub const NTSC_MASTER_HZ: u64 = 21_477_272;
+pub const APU_MASTER_HZ:  u64 = 24_576_000;
+
+pub struct Snes {
+    pub cpu: Cpu65816,
+    pub ppu: Ppu,
+    pub apu: Apu,             // SPC700 + DSP, independent frequency
+    pub dma: DmaUnit,
+    pub cart: Cartridge,
+    pub wram: Box&lt;[u8; 0x20000]&gt;,
+    pub total_mclk: MCycles,
+    pub frame_mclk: MCycles,
+    pub memory_refresh_pending: bool,
+}
+
+impl Snes {
+    /// One iteration = either 1 CPU instruction, or 1 DMA cycle, or
+    /// 1 DRAM refresh. Zero-alloc in the hot loop.
+    #[inline]
+    pub fn step(&amp;mut self) -&gt; TickEffect {
+        let delta = if self.memory_refresh_pending {
+            self.memory_refresh_pending = false;
+            MEMORY_REFRESH_CYCLES                                    // ~40 mclk
+        } else if self.dma.active() {
+            // DMA steals cycles from the CPU. Unit = 8 mclk (1 byte transfer)
+            self.dma.tick(&amp;mut self.snes_bus())
+        } else {
+            // CPU executes ONE instruction. During `step`, bus.io_cycle()
+            // immediately catches up PPU + HDMA + IRQ check.
+            let mut bus = self.snes_bus();
+            self.cpu.step(&amp;mut bus);
+            bus.access_master_cycles_total
+        };
+
+        // APU at a different frequency: catch-up using RATIONAL u64
+        // arithmetic (no float, no drift).
+        let apu_eff = self.apu.tick(delta);
+
+        // PPU residue (internal CPU cycles with no bus access → not caught
+        // up by io_cycle). Usually 0-2 mclk.
+        let ppu_eff = self.ppu.catch_up_to(self.total_mclk + delta);
+
+        self.total_mclk += delta;
+        self.frame_mclk += delta;
+
+        TickEffect {
+            frame_complete: ppu_eff.frame_complete,
+            audio_samples: apu_eff.audio_samples,
+        }
+    }
+
+    pub fn run_to_frame(&amp;mut self, audio_out: &amp;mut Vec&lt;(f32, f32)&gt;) {
+        loop {
+            let e = self.step();
+            audio_out.extend(e.audio_samples);
+            if e.frame_complete { return; }
+        }
+    }
+}
+
+// APU catch-up using rational arithmetic — NO FLOAT
+impl Apu {
+    pub fn tick(&amp;mut self, main_mcycles: MCycles) -&gt; TickEffect {
+        // master CPU = 21.477272 MHz, master APU = 24.576 MHz
+        self.numerator += main_mcycles * APU_MASTER_HZ;
+        while self.numerator &gt;= NTSC_MASTER_HZ {
+            self.numerator -= NTSC_MASTER_HZ;
+            self.spc700.step(&amp;mut self.bus);
+            self.timer0.tick(); self.timer1.tick(); self.timer2.tick();
+            if self.sample_divider.tick() { self.emit_sample(); }
+        }
+        TickEffect::default()
+    }
+}</code></pre>
+<p><strong>Why this works</strong> (to keep in mind while implementing):</p>
+<ol>
+<li><strong>Zero-alloc in the hot loop</strong> — no <code>Box&lt;dyn&gt;</code>, no <code>BinaryHeap</code>, no
+<code>Vec::push</code> per cycle. Static dispatch everywhere.</li>
+<li><strong>Free mid-instruction accuracy</strong> — <code>bus.io_cycle()</code> catches up the PPU
+on every access, so scanline-precise HDMA, exact H/V IRQs, and the
+Mario Kart bugs are correctly reproduced.</li>
+<li><strong>No APU/CPU drift</strong> — rational u64 arithmetic (no float). Verifiable:
+after 1h of emulation, <code>apu.cycle_count() ≈ apu_freq * elapsed</code>.</li>
+<li><strong>Trivial save states</strong> — all fields are concrete <code>serde::Serialize</code>
+structs (impossible with coroutines/closures).</li>
+<li><strong>Run-ahead / netplay possible</strong> — <code>step()</code> is pure, the entire state
+can be cloned and replayed.</li>
+<li><strong>Borrow-checker compatible</strong> — <code>SnesBus&lt;'a&gt;</code> pattern created on every
+step that borrows the fields separately (<code>&amp;mut self.ppu, &amp;mut self.wram, …</code>). No <code>Rc&lt;RefCell&gt;</code> in the hot loop.</li>
+</ol>
+<p><strong>Residual risks &amp; mitigations</strong>: see §15.</p>
+<hr />
+<h2 id="7-layer-3--control--introspection-api"><a class="header" href="#7-layer-3--control--introspection-api">7. Layer 3 — Control &amp; introspection API</a></h2>
+<p>This is the layer that defines <strong>what you can do with the machine</strong> without
+yet talking about MCP. It is exposed by the <code>luna-api</code> crate as async Rust
+traits, independent of the protocol.</p>
+<h3 id="71-control-plane"><a class="header" href="#71-control-plane">7.1 Control plane</a></h3>
+<pre><code class="language-rust">#[async_trait]
+pub trait EmulatorControl {
+    async fn load_rom(&amp;self, path: &amp;Path) -&gt; Result&lt;RomInfo&gt;;
+    async fn load_rom_bytes(&amp;self, bytes: Vec&lt;u8&gt;) -&gt; Result&lt;RomInfo&gt;;
+    async fn reset(&amp;self) -&gt; Result&lt;()&gt;;
+    async fn pause(&amp;self) -&gt; Result&lt;()&gt;;
+    async fn resume(&amp;self) -&gt; Result&lt;()&gt;;
+    async fn step_instructions(&amp;self, count: u32) -&gt; Result&lt;StepResult&gt;;
+    async fn step_cycles(&amp;self, count: u64) -&gt; Result&lt;StepResult&gt;;
+    async fn step_frames(&amp;self, count: u32) -&gt; Result&lt;StepResult&gt;;
+
+    async fn save_state(&amp;self) -&gt; Result&lt;SaveStateId&gt;;
+    async fn load_state(&amp;self, id: SaveStateId) -&gt; Result&lt;()&gt;;
+    async fn list_states(&amp;self) -&gt; Result&lt;Vec&lt;SaveStateInfo&gt;&gt;;
+
+    async fn screenshot(&amp;self) -&gt; Result&lt;Screenshot&gt;;  // PNG bytes
+    async fn send_input(&amp;self, port: u8, buttons: Buttons, frames: u32) -&gt; Result&lt;()&gt;;
+}</code></pre>
+<h3 id="72-debug-api"><a class="header" href="#72-debug-api">7.2 Debug API</a></h3>
+<pre><code class="language-rust">#[async_trait]
+pub trait EmulatorDebug {
+    // Registers
+    async fn cpu_registers(&amp;self) -&gt; CpuRegisters;
+    async fn apu_registers(&amp;self) -&gt; ApuRegisters;
+    async fn ppu_registers(&amp;self) -&gt; PpuRegisters;
+
+    // Memory
+    async fn read_memory(&amp;self, space: MemSpace, addr: u32, len: u32) -&gt; Vec&lt;u8&gt;;
+    async fn write_memory(&amp;self, space: MemSpace, addr: u32, data: Vec&lt;u8&gt;) -&gt; Result&lt;()&gt;;
+
+    // Breakpoints
+    async fn add_breakpoint(&amp;self, bp: Breakpoint) -&gt; Result&lt;BpId&gt;;
+    async fn remove_breakpoint(&amp;self, id: BpId) -&gt; Result&lt;()&gt;;
+    async fn list_breakpoints(&amp;self) -&gt; Vec&lt;BreakpointInfo&gt;;
+
+    // Disassembly
+    async fn disassemble(&amp;self, addr: u24, count: u32) -&gt; Vec&lt;DisasmLine&gt;;
+
+    // Trace
+    async fn start_trace(&amp;self, filter: TraceFilter) -&gt; Result&lt;TraceId&gt;;
+    async fn stop_trace(&amp;self, id: TraceId) -&gt; Result&lt;TraceLog&gt;;
+}
+
+pub enum MemSpace { Wram, Vram, Oam, Cgram, Sram, ApuRam, Rom }
+
+pub enum Breakpoint {
+    Exec   { addr: u24, condition: Option&lt;Expr&gt; },
+    Read   { addr: u24, len: u32 },
+    Write  { addr: u24, len: u32, value_match: Option&lt;u8&gt; },
+    Vblank,
+    Hblank { scanline: u16 },
+    DmaStart { channel: u8 },
+}</code></pre>
+<h3 id="73-semantic-api-for-the-ai"><a class="header" href="#73-semantic-api-for-the-ai">7.3 Semantic API (for the AI)</a></h3>
+<p><strong>This is where Luna differentiates itself from every other emulator.</strong> We
+expose the <em>semantics</em> of the current frame, not just its pixels, so that
+an agent can "understand" the scene without a vision pipeline.</p>
+<pre><code class="language-rust">#[async_trait]
+pub trait EmulatorSemantic {
+    /// All OAM sprites with their decoded state.
+    async fn sprites(&amp;self) -&gt; Vec&lt;Sprite&gt;;
+
+    /// The 4 backgrounds, their mode, their scroll registers.
+    async fn backgrounds(&amp;self) -&gt; [Background; 4];
+
+    /// The currently visible tilemap region for a given BG.
+    async fn visible_tilemap(&amp;self, bg: u8) -&gt; Tilemap;
+
+    /// CGRAM palette decoded into RGB colors.
+    async fn palette(&amp;self) -&gt; [Color; 256];
+
+    /// Active graphics mode ($2105).
+    async fn graphics_mode(&amp;self) -&gt; GraphicsMode;
+
+    /// Window and color-math state.
+    async fn window_state(&amp;self) -&gt; WindowState;
+}
+
+pub struct Sprite {
+    pub index: u8,
+    pub x: i16, pub y: i16,
+    pub size: SpriteSize,
+    pub tile_index: u16,
+    pub palette: u8,
+    pub priority: u8,
+    pub flip_h: bool, pub flip_v: bool,
+    pub on_screen: bool,
+}</code></pre>
+<p><strong>Bonus</strong>: an optional system of <strong>per-game annotations</strong> (<code>game_maps/</code>),
+which maps known RAM addresses to semantic names:</p>
+<pre><code class="language-toml"># game_maps/super_mario_world.toml
+[memory.ram]
+"player_x"     = { addr = 0x7E0094, type = "u16le" }
+"player_y"     = { addr = 0x7E0096, type = "u16le" }
+"player_state" = { addr = 0x7E0071, type = "u8" }
+"score"        = { addr = 0x7E0F34, type = "u24le" }
+"coins"        = { addr = 0x7E0DBF, type = "u8" }
+"lives"        = { addr = 0x7E0DBE, type = "u8" }
+</code></pre>
+<p>The agent can then call <code>read_named("player_x")</code> instead of memorizing hex
+addresses.</p>
+<h3 id="74-events--subscriptions"><a class="header" href="#74-events--subscriptions">7.4 Events &amp; subscriptions</a></h3>
+<p>Many use cases require the agent to react to an event rather than poll. We
+expose an async event channel:</p>
+<pre><code class="language-rust">#[async_trait]
+pub trait EmulatorEvents {
+    async fn subscribe(&amp;self, filter: EventFilter) -&gt; EventStream;
+}
+
+pub enum EmulatorEvent {
+    FrameComplete { frame_number: u64 },
+    VBlankStart,
+    BreakpointHit { id: BpId, pc: u24 },
+    MemoryWatchTriggered { addr: u24, old: u8, new: u8 },
+    DmaTransferComplete { channel: u8 },
+    Crash { reason: CrashReason },
+    RomLoaded { info: RomInfo },
+}</code></pre>
+<p>On the MCP side, these events are published as JSON-RPC <strong>notifications</strong>
+(unsolicited server→client messages).</p>
+<hr />
+<h2 id="8-layer-4--mcp-server"><a class="header" href="#8-layer-4--mcp-server">8. Layer 4 — MCP server</a></h2>
+<h3 id="81-transport--runtime"><a class="header" href="#81-transport--runtime">8.1 Transport &amp; runtime</a></h3>
+<p><strong>Supported transports</strong> (in this priority order):</p>
+<ol>
+<li><strong>stdio</strong> — for local integration with Claude Code, Cursor, etc.</li>
+<li><strong>Streamable HTTP</strong> — for web / cloud integration.</li>
+<li><strong>SSE</strong> — historical fallback.</li>
+</ol>
+<p>The <code>luna</code> binary launches the MCP server in stdio mode by default:</p>
+<pre><code class="language-bash">$ luna mcp                            # stdio mode (default)
+$ luna mcp --http --port 7878         # HTTP mode
+$ luna mcp --rom path/to/game.sfc     # load the ROM at startup
+</code></pre>
+<p>The multi-thread tokio runtime handles concurrency: a dedicated thread for
+the emulation core (clocked at 60 fps), N threads for the MCP handlers that
+talk to the core via crossbeam channels.</p>
+<h3 id="82-tool-catalogue"><a class="header" href="#82-tool-catalogue">8.2 Tool catalogue</a></h3>
+<p>Each MCP tool is a thin JSON ↔ <code>luna-api</code> call mapping layer. JSON schemas
+generated from the Rust structs via <code>schemars</code>.</p>
+<p><strong>"Control" tools</strong></p>
+<div class="table-wrapper"><table><thead><tr><th>Tool</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>emu_load_rom</code></td><td>Loads a ROM from a path</td></tr>
+<tr><td><code>emu_reset</code></td><td>Resets the console</td></tr>
+<tr><td><code>emu_pause</code> / <code>emu_resume</code></td><td>Pause/resume</td></tr>
+<tr><td><code>emu_step</code></td><td>Advances by N instructions / cycles / frames</td></tr>
+<tr><td><code>emu_send_input</code></td><td>Sends a button sequence</td></tr>
+<tr><td><code>emu_screenshot</code></td><td>PNG of the current framebuffer</td></tr>
+<tr><td><code>emu_save_state</code></td><td>Creates a save state, returns an ID</td></tr>
+<tr><td><code>emu_load_state</code></td><td>Restores a save state</td></tr>
+</tbody></table>
+</div>
+<p><strong>"Debug" tools</strong></p>
+<div class="table-wrapper"><table><thead><tr><th>Tool</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>dbg_read_memory</code></td><td>Reads N bytes in a memory space</td></tr>
+<tr><td><code>dbg_write_memory</code></td><td>Writes N bytes</td></tr>
+<tr><td><code>dbg_get_registers</code></td><td>All CPU/PPU/APU registers</td></tr>
+<tr><td><code>dbg_add_breakpoint</code></td><td>Sets a typed breakpoint</td></tr>
+<tr><td><code>dbg_remove_breakpoint</code></td><td>Removes a breakpoint</td></tr>
+<tr><td><code>dbg_list_breakpoints</code></td><td>Lists the active breakpoints</td></tr>
+<tr><td><code>dbg_disassemble</code></td><td>Disassembles N instructions at an address</td></tr>
+<tr><td><code>dbg_trace_start</code></td><td>Starts a filtered trace log</td></tr>
+<tr><td><code>dbg_trace_stop</code></td><td>Stops and returns the trace</td></tr>
+</tbody></table>
+</div>
+<p><strong>"Semantic" tools</strong> (Luna's differentiating advantage)</p>
+<div class="table-wrapper"><table><thead><tr><th>Tool</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>sem_get_sprites</code></td><td>Structured list of the 128 active sprites</td></tr>
+<tr><td><code>sem_get_backgrounds</code></td><td>The 4 BGs with mode + scroll</td></tr>
+<tr><td><code>sem_get_tilemap</code></td><td>Visible tilemap for a BG</td></tr>
+<tr><td><code>sem_get_palette</code></td><td>Decoded CGRAM palette</td></tr>
+<tr><td><code>sem_read_named</code></td><td>Reads an address via the game's named mapping</td></tr>
+<tr><td><code>sem_load_game_map</code></td><td>Loads an annotation file</td></tr>
+</tbody></table>
+</div>
+<h3 id="83-resource-catalogue"><a class="header" href="#83-resource-catalogue">8.3 Resource catalogue</a></h3>
+<p>MCP <strong>resources</strong> expose content the agent can "read" (different from
+tools, which are actions).</p>
+<div class="table-wrapper"><table><thead><tr><th>URI</th><th>Content</th></tr></thead><tbody>
+<tr><td><code>luna://state/cpu</code></td><td>JSON CPU registers</td></tr>
+<tr><td><code>luna://state/ppu</code></td><td>JSON PPU registers</td></tr>
+<tr><td><code>luna://state/framebuffer.png</code></td><td>Current frame as PNG</td></tr>
+<tr><td><code>luna://state/sprites</code></td><td>JSON OAM sprites</td></tr>
+<tr><td><code>luna://memory/wram?addr=…&amp;len=…</code></td><td>Memory dump</td></tr>
+<tr><td><code>luna://disasm?addr=…&amp;count=…</code></td><td>Text disassembly</td></tr>
+<tr><td><code>luna://docs/65c816-opcodes</code></td><td>Built-in 65C816 opcode reference</td></tr>
+<tr><td><code>luna://docs/ppu-registers</code></td><td>PPU register reference</td></tr>
+</tbody></table>
+</div>
+<p>These built-in docs let the agent consult the spec without a network,
+which dramatically speeds up debug iterations.</p>
+<h3 id="84-notifications--streaming"><a class="header" href="#84-notifications--streaming">8.4 Notifications &amp; streaming</a></h3>
+<p>The server emits JSON-RPC notifications for subscribed events. The MCP
+client receives them as a push:</p>
+<pre><code class="language-json">{
+  "jsonrpc": "2.0",
+  "method": "luna/event",
+  "params": {
+    "type": "BreakpointHit",
+    "id": "bp_4",
+    "pc": "0x808012",
+    "cycle": 1234567
+  }
+}
+</code></pre>
+<p>On the agent side, this enables the pattern:</p>
+<pre><code>1. add_breakpoint(exec, 0x808012)
+2. resume()
+3. (passive wait for the "BreakpointHit" notification)
+4. get_registers() / read_memory() / disassemble()
+5. step / continue
+</code></pre>
+<h3 id="85-token-economy--mcp-costs"><a class="header" href="#85-token-economy--mcp-costs">8.5 Token economy &amp; MCP costs</a></h3>
+<h4 id="851-the-problem"><a class="header" href="#851-the-problem">8.5.1 The problem</a></h4>
+<p>An agent driving an emulator can saturate a token quota very quickly if the
+API is designed naively. A few orders of magnitude to set the scene (basis:
+~4 characters per token, base64 encoding adds ~33% of volume):</p>
+<div class="table-wrapper"><table><thead><tr><th>Raw SNES data</th><th>Size</th><th>Tokens (naive)</th></tr></thead><tbody>
+<tr><td>RGBA framebuffer 256×224</td><td>224 KB</td><td>~76,000</td></tr>
+<tr><td>PNG framebuffer (limited colors)</td><td>5–20 KB</td><td>~1,700–6,800</td></tr>
+<tr><td>Full VRAM dump</td><td>64 KB</td><td>~22,000</td></tr>
+<tr><td>Full WRAM dump</td><td>128 KB</td><td>~44,000</td></tr>
+<tr><td>Full OAM (128 sprites, raw)</td><td>544 B</td><td>~180</td></tr>
+<tr><td>1 second of unfiltered CPU trace</td><td>~1 MB</td><td>~340,000</td></tr>
+</tbody></table>
+</div>
+<p>For comparison, a typical Claude Sonnet call has a <em>context window</em> on the
+order of 200k tokens. <strong>A raw screenshot would already consume ~38% of that
+budget</strong>; a raw trace log, more than the entire budget. Without discipline,
+an agent playing for 5 minutes can consume several million tokens.</p>
+<h4 id="852-seven-design-principles"><a class="header" href="#852-seven-design-principles">8.5.2 Seven design principles</a></h4>
+<ol>
+<li><strong>Semantics before pixels</strong>: by default, return decoded structures
+(sprites, scroll, named RAM), not bytes.</li>
+<li><strong>Filter server-side</strong>: <code>visible_only</code>, <code>region</code>, <code>since_frame</code>,
+<code>kind</code> — it is not the agent's job to throw away what it did not ask
+for.</li>
+<li><strong>Hash + diff</strong>: before a large payload, expose a hash of the state;
+the agent only fetches if it changed.</li>
+<li><strong>Resources rather than inline</strong>: large blobs (PNG, memory dumps) are
+exposed as <strong>MCP resources</strong> (URI), not inline in the response — the
+agent only pays the cost if it explicitly chooses to read the resource.</li>
+<li><strong>Explicit detail levels</strong>: every potentially costly tool exposes a
+<code>detail: "thumbnail" | "low" | "medium" | "full"</code> parameter, with <code>low</code>
+as the default.</li>
+<li><strong>Hard caps</strong>: each tool has an internal <code>max_bytes</code> and truncates with
+a structured warning rather than returning 100 KB without notice.</li>
+<li><strong>Announced budget</strong>: every response includes an
+<code>estimated_output_tokens</code> field (computed server-side) that lets the
+agent and the human track consumption in real time.</li>
+</ol>
+<h4 id="853-concrete-strategies-per-tool"><a class="header" href="#853-concrete-strategies-per-tool">8.5.3 Concrete strategies per tool</a></h4>
+<div class="table-wrapper"><table><thead><tr><th>Tool</th><th>Naive</th><th>With the Luna strategy</th><th>Savings</th></tr></thead><tbody>
+<tr><td><code>emu_screenshot</code></td><td>Inline base64 PNG (~5k)</td><td>Resource URI (~50 tokens); PNG available via <code>luna://state/framebuffer.png</code> if needed</td><td>~99%</td></tr>
+<tr><td><code>sem_get_sprites</code></td><td>128 sprites all fields (~3k)</td><td><code>{visible_only: true, fields: ["x","y","tile"]}</code> → ~500</td><td>~85%</td></tr>
+<tr><td><code>dbg_read_memory</code></td><td>1 KB of bytes (~340)</td><td>Hash if unchanged (~30); bytes if changed</td><td>~90% in steady state</td></tr>
+<tr><td><code>dbg_trace_start</code></td><td>Raw (~340k/s)</td><td>Filter <code>{pc_range, ops}</code> + <code>max_lines</code> limit</td><td>~99%</td></tr>
+<tr><td><code>sem_get_tilemap</code></td><td>Full tilemap 32×32×4 (~5k)</td><td>Auto-crop to the visible region (~1k)</td><td>~80%</td></tr>
+<tr><td><code>dbg_get_registers</code></td><td>All registers in detail (~600)</td><td>Categories: <code>cpu</code>, <code>ppu_minimal</code>, <code>apu</code> (~150 each)</td><td>~75%</td></tr>
+</tbody></table>
+</div>
+<h4 id="854-mechanisms-implemented-in-the-api"><a class="header" href="#854-mechanisms-implemented-in-the-api">8.5.4 Mechanisms implemented in the API</a></h4>
+<p><strong>a) Standardized detail levels</strong></p>
+<pre><code class="language-rust">#[derive(Deserialize)]
+pub struct ScreenshotParams {
+    /// "thumbnail" (32×28, ~150 tokens),
+    /// "low" (128×112, ~1.5k tokens),
+    /// "full" (256×224, via resource URI only)
+    #[serde(default = "default_low")]
+    detail: DetailLevel,
+    /// If true, return just a hash if the frame has not changed
+    /// since the last call
+    #[serde(default)]
+    if_changed_since: Option&lt;FrameHash&gt;,
+}</code></pre>
+<p><strong>b) Hash-then-fetch pattern</strong></p>
+<pre><code class="language-rust">#[derive(Serialize)]
+pub struct MemoryReadResponse {
+    pub addr: u32,
+    pub len: u32,
+    pub hash: u64,             // always returned
+    pub data: Option&lt;Vec&lt;u8&gt;&gt;, // None if hash == previous_hash (savings)
+    pub estimated_output_tokens: u32,
+}</code></pre>
+<p>The agent can therefore say: "read 1KB at 0x7E0000, but just the hash if
+nothing changed". On a polling loop, this cuts the cost by a factor of
+10–100x.</p>
+<p><strong>c) Resources for large payloads</strong></p>
+<p>Rather than inlining a PNG in a tool response, Luna exposes:</p>
+<pre><code>luna://state/framebuffer.png        → full PNG
+luna://state/vram.bin               → 64 KB VRAM
+luna://state/sprites.json           → detailed JSON of all sprites
+luna://state/disasm?addr=…&amp;count=…  → text disassembly
+</code></pre>
+<p>The <code>emu_screenshot</code> tool returns, by default, <strong>only</strong> the resource URI +
+a thumbnail. The agent decides whether to "open" the resource. MCP clients
+like Claude Code can even preview without loading into context.</p>
+<p><strong>d) Standardized filters</strong></p>
+<p>All "list" tools support uniform filters:</p>
+<pre><code class="language-jsonc">{
+  "visible_only": true,        // on-screen sprites/tiles only
+  "region": { "x": 0, "y": 0, "w": 128, "h": 128 },
+  "since_frame": 1234,          // delta since a frame
+  "fields": ["x", "y", "tile"], // projection (major savings)
+  "limit": 50
+}
+</code></pre>
+<p><strong>e) Subscriptions rather than polling</strong></p>
+<p>Polling is expensive (1 tool call/frame × 60 frames/s). We encourage the
+agent to use MCP notifications for frequent events:</p>
+<pre><code>✘ Bad (polling):
+  while True: screenshot(); analyze(); sleep(...)
+  → 60 tools/s × 1k tokens = 60k tokens/s
+
+✓ Good (event-driven):
+  subscribe("FrameComplete", every=30)
+  → 2 notifications/s × 200 tokens = 400 tokens/s
+</code></pre>
+<p><strong>f) Transparent budget tracking</strong></p>
+<p>Each response contains:</p>
+<pre><code class="language-json">{
+  "data": "...",
+  "_meta": {
+    "estimated_output_tokens": 142,
+    "session_tokens_used": 28430,
+    "session_tokens_budget": 200000
+  }
+}
+</code></pre>
+<p>The agent (and the spectator GUI) can display consumption in real time.
+When the budget is approached, we can either alert or degrade gracefully
+(automatically force <code>detail: thumbnail</code>).</p>
+<h4 id="855-configurable-cost-modes"><a class="header" href="#855-configurable-cost-modes">8.5.5 Configurable cost modes</a></h4>
+<p>At MCP server startup, the user picks a profile:</p>
+<pre><code class="language-bash">$ luna mcp --rom game.sfc --cost-profile economy
+$ luna mcp --rom game.sfc --cost-profile balanced     # default
+$ luna mcp --rom game.sfc --cost-profile generous
+</code></pre>
+<div class="table-wrapper"><table><thead><tr><th>Profile</th><th>Screenshot default</th><th>Memory default</th><th>Trace default</th></tr></thead><tbody>
+<tr><td><code>economy</code></td><td>thumbnail</td><td>hash-only</td><td>refused without filter</td></tr>
+<tr><td><code>balanced</code></td><td>low</td><td>hash-then-data</td><td>1k lines max</td></tr>
+<tr><td><code>generous</code></td><td>medium</td><td>full data</td><td>10k lines max</td></tr>
+</tbody></table>
+</div>
+<p>The <code>economy</code> profile is designed so that a multi-hour session fits within
+a reasonable budget (typically &lt; 5M tokens / hour of active gameplay).</p>
+<h4 id="856-session-budget-estimate"><a class="header" href="#856-session-budget-estimate">8.5.6 Session budget estimate</a></h4>
+<p>On a typical "agent learning to play Super Mario World" use case with the
+<code>balanced</code> profile and an event-driven loop:</p>
+<div class="table-wrapper"><table><thead><tr><th>Action</th><th>Frequency</th><th>Tokens/call</th><th>Total/min</th></tr></thead><tbody>
+<tr><td>FrameComplete subscription</td><td>2/s (filtered)</td><td>200</td><td>24,000</td></tr>
+<tr><td>sem_get_sprites (visible)</td><td>2/s</td><td>500</td><td>60,000</td></tr>
+<tr><td>sem_read_named (player_x/y/lives)</td><td>2/s</td><td>80</td><td>9,600</td></tr>
+<tr><td>emu_send_input</td><td>~5/s</td><td>50</td><td>15,000</td></tr>
+<tr><td>emu_screenshot (low) occasional</td><td>0.1/s</td><td>1,500</td><td>9,000</td></tr>
+<tr><td><strong>Total</strong></td><td></td><td></td><td><strong>~120k/min</strong></td></tr>
+</tbody></table>
+</div>
+<p>→ <strong>~7M tokens/hour</strong> of an active agent on this profile. That is
+sustainable on an Anthropic "pro" API plan, and far below the ~80M
+tokens/hour a naive design based on full PNGs + RAM dumps would consume.</p>
+<hr />
+<h2 id="9-api-first--ecosystem-of-use-cases"><a class="header" href="#9-api-first--ecosystem-of-use-cases">9. API-first &amp; ecosystem of use cases</a></h2>
+<p>The AI agent via MCP is only one possible client among many. Exposing Luna
+as a stable API opens up a whole range of tools the SNES community has
+never had: a web IDE for homebrew, a desktop development client, CI for ROM
+hacks, a TAS platform, a VSCode extension, etc. This section spells out that
+openness and its implications.</p>
+<h3 id="91-the-api-is-the-product-not-mcp"><a class="header" href="#91-the-api-is-the-product-not-mcp">9.1 The API is the product, not MCP</a></h3>
+<p>Looking at the layered architecture (§3.1), one notices that layers 1 to 3
+<strong>never</strong> depend on layer 4. The MCP server is only an <strong>adapter</strong> that
+translates JSON-RPC ↔ <code>luna-api</code> Rust calls.</p>
+<pre><code>   Naive view                         Luna view
+   ──────────                         ─────────
+   ┌─────────────┐                    ┌─────────────┐
+   │  Emulator   │                    │ Stable API  │ ← the public product
+   └──────┬──────┘                    ├─────────────┤
+          │                           │  Emulator   │ ← the implementation
+   ┌──────▼──────┐                    └─────────────┘
+   │   MCP API   │ ← the product
+   └─────────────┘            ┌─MCP─┬─REST─┬─WS─┬─WASM─┬─FFI─┐
+                              └─────┴──────┴────┴──────┴─────┘
+                                     ↑ interchangeable adapters
+</code></pre>
+<p>This is the <strong>Ports &amp; Adapters</strong> pattern (hexagonal architecture), adapted
+to a product where the core (the emulation) must outlive the evolution of
+access protocols. Concretely:</p>
+<ul>
+<li>The <code>luna-api</code> crate imports <strong>nothing MCP-specific</strong>.</li>
+<li>The public types are serializable with <code>serde</code> but format-agnostic
+(JSON, MessagePack, bincode, protobuf possible).</li>
+<li>Every new transport is a <code>luna-transport-X</code> crate that depends only on
+<code>luna-api</code>, never the other way around.</li>
+</ul>
+<h3 id="92-transport-catalogue"><a class="header" href="#92-transport-catalogue">9.2 Transport catalogue</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Transport</th><th>Typical use case</th><th>Status</th></tr></thead><tbody>
+<tr><td><strong>MCP stdio</strong></td><td>Local AI agent (Claude Code, Cursor)</td><td>V1</td></tr>
+<tr><td><strong>MCP HTTP/SSE</strong></td><td>Remote AI agent, multi-client</td><td>V1</td></tr>
+<tr><td><strong>REST / HTTP</strong></td><td>Web frontends, enterprise integrations</td><td>V1.1</td></tr>
+<tr><td><strong>WebSocket</strong></td><td>Real-time web (Luna Studio Web)</td><td>V1.1</td></tr>
+<tr><td><strong>gRPC</strong></td><td>High-perf clients, microservices</td><td>V2</td></tr>
+<tr><td><strong>WASM / JS bindings</strong></td><td>Emulator in the browser</td><td>V2</td></tr>
+<tr><td><strong>FFI / cdylib</strong></td><td>C / Python / Lua / … integrations</td><td>V2</td></tr>
+<tr><td><strong>libretro core</strong></td><td>RetroArch integration</td><td>V2</td></tr>
+</tbody></table>
+</div>
+<p><strong>Principle</strong>: <em>one source schema, several generated adapters</em>. From the
+<code>luna-api</code> types annotated with <code>schemars::JsonSchema</code>, we automatically
+derive:</p>
+<ul>
+<li>JSON Schema for the MCP tools.</li>
+<li>OpenAPI 3 for REST (via <code>utoipa</code>).</li>
+<li><code>.proto</code> files for gRPC.</li>
+<li>TypeScript types for web clients (via <code>ts-rs</code>).</li>
+<li>Python bindings (via <code>pyo3</code>).</li>
+</ul>
+<p>A single source of truth, several surfaces. The risk of desynchronization
+between client and server is eliminated at compile time.</p>
+<p><strong>⚠️ Important WASM constraint</strong>: <code>rmcp</code> (the official Rust MCP SDK) does
+not support <code>wasm32-unknown-unknown</code> (it depends on mainline <code>tokio</code> with
+non-WASM features). Consequence for Luna Studio Web:</p>
+<ul>
+<li>
+<p>The WASM binary <strong>does not embed an MCP server</strong>.</p>
+</li>
+<li>
+<p>The remote AI agent connects to a <strong>native</strong> Luna (which hosts the
+official MCP server), via WebSocket relayed by the web client.</p>
+</li>
+<li>
+<p>Target architecture for the web V2:</p>
+<pre><code>AI agent ──MCP stdio──► native Luna ──WebSocket──► Luna Studio Web (WASM)
+                                                        │
+                                                        ▼
+                                                 Shared view of the same
+                                                 emulation state
+</code></pre>
+</li>
+<li>
+<p>Future alternative: wait for <code>wasm32-wasip2</code> + the Component Model
+(maturity mid-2026 per paiml/rust-mcp-sdk).</p>
+</li>
+</ul>
+<h3 id="93-unlocked-product-use-cases"><a class="header" href="#93-unlocked-product-use-cases">9.3 Unlocked product use cases</a></h3>
+<p>Beyond the AI agent, here is the ecosystem of tools the API makes possible.
+Listed by impact potential for the SNES community.</p>
+<h4 id="a--luna-studio-web-homebrew-ide-in-the-browser"><a class="header" href="#a--luna-studio-web-homebrew-ide-in-the-browser">A — Luna Studio Web (homebrew IDE in the browser)</a></h4>
+<p><strong>High priority</strong> post-V1. An integrated environment in the browser to
+develop your own SNES game:</p>
+<ul>
+<li>Code editor (Monaco/CodeMirror) with 65C816 syntax highlighting.</li>
+<li>Built-in assembler (<code>wla-dx</code>, <code>ca65</code>) compiled to WASM.</li>
+<li><strong>Luna emulator in WASM</strong> on the same page, local execution.</li>
+<li><strong>Hot-reload</strong>: <code>Ctrl+R</code> re-assembles and relaunches the current ROM.</li>
+<li>Visual debug tools: VRAM viewer, palette editor, sprite editor, tilemap
+painter.</li>
+<li>Git versioning via libgit2 (in-browser) or a server backend.</li>
+<li>Project sharing via URL (sandboxed).</li>
+</ul>
+<p>The entire IDE is a SPA that talks to Luna WASM via JS bindings — no
+network latency in the dev/test loop. <strong>This is by far the most impactful
+use case for the SNES homebrew community</strong>, which today has no equivalent
+to Godot/Unity for its needs.</p>
+<h4 id="b--luna-studio-desktop-heavy-dev-studio-client"><a class="header" href="#b--luna-studio-desktop-heavy-dev-studio-client">B — Luna Studio Desktop (heavy dev-studio client)</a></h4>
+<p>For devs who want native performance and system integration:</p>
+<ul>
+<li>Cycle-accurate with no JS/WASM overhead.</li>
+<li>Native filesystem, native Git, pluggable build pipelines.</li>
+<li>Plugin system (Aseprite, Tiled, Pyxel importers…).</li>
+<li>More powerful debugger (multi-window memory inspector, rich conditional
+watchpoints).</li>
+</ul>
+<p>Built with <code>egui</code> + direct calls to <code>luna-api</code> (no JSON transport, just
+Rust ↔ Rust). It is the SNES equivalent of "Visual Studio Code + integrated
+emulator extension".</p>
+<h4 id="c--ci-integration-tests-for-rom-hacks-and-homebrew"><a class="header" href="#c--ci-integration-tests-for-rom-hacks-and-homebrew">C — CI integration tests for ROM hacks and homebrew</a></h4>
+<p>A <code>luna-test</code> crate that lets you write tests for your own game:</p>
+<pre><code class="language-rust">#[luna_test]
+fn level_1_can_be_completed() {
+    let mut emu = Luna::new().load("game.sfc");
+    emu.advance_to_title_screen();
+    emu.send_inputs(&amp;["Start", "Start"]);
+    emu.run_until_event(Event::LevelComplete, max_frames: 18_000)?;
+    assert_eq!(emu.read_named("score"), 12_500);
+    assert_eq!(emu.read_named("lives"), 3);
+}</code></pre>
+<p>Homebrew devs have no serious CI today. Luna brings a standard: commit →
+GitHub Actions → tests played on a cycle-accurate emulator → result in
+≤ 30s.</p>
+<h4 id="d--lightweight-cloud-streaming"><a class="header" href="#d--lightweight-cloud-streaming">D — Lightweight cloud streaming</a></h4>
+<p>WebSocket + compressed framebuffer (PNG diff or simple H.264) → stream a
+Luna session from a server to a thin web client. Not a Stadia competitor,
+but useful for: "open this ROM in a tab without installing anything"
+(demos, sharing, interactive archives).</p>
+<h4 id="e--vscode-extension"><a class="header" href="#e--vscode-extension">E — VSCode extension</a></h4>
+<p>A plugin that detects SNES homebrew projects and:</p>
+<ul>
+<li>Launches Luna as a subprocess (local REST transport).</li>
+<li>Displays the framebuffer in a webview panel.</li>
+<li>Wires the VSCode debugger to the breakpoint/register API.</li>
+<li>Allows edit → assemble → test without leaving the editor.</li>
+</ul>
+<h4 id="f--educational-platform"><a class="header" href="#f--educational-platform">F — Educational platform</a></h4>
+<p>16-bit machine architecture courses, Luna as an interactive, real-time
+sandbox: students simultaneously see the state of the CPU registers, the
+VRAM, the instruction fetch, the pixel-by-pixel effect.</p>
+<h4 id="g--modern-speedrunning--tas"><a class="header" href="#g--modern-speedrunning--tas">G — Modern speedrunning &amp; TAS</a></h4>
+<p>Deterministic <code>replay</code> mode + frame-stepping + save states + scripting → a
+Tool-Assisted Speedrun platform for the SNES, with a modern Rust ecosystem
+and a scriptable API.</p>
+<h4 id="h--automated-tournament-refereeing"><a class="header" href="#h--automated-tournament-refereeing">H — Automated tournament refereeing</a></h4>
+<p>Multiple Luna instances in parallel (one container per match) +
+cryptographically signed replays → SNES tournaments with integrity proofs.
+Eliminates client-side cheating.</p>
+<h4 id="i--embedded--hardware"><a class="header" href="#i--embedded--hardware">I — Embedded / hardware</a></h4>
+<p>Once <code>luna-core</code> is stable in <code>no_std</code> (V2 goal), a port becomes possible
+on a Raspberry Pi-type SBC in "smart retro console" mode: emulator + local
+MCP server that answers a voice assistant's requests ("Claude, save my
+state before the boss").</p>
+<h3 id="94-architectural-implications"><a class="header" href="#94-architectural-implications">9.4 Architectural implications</a></h3>
+<p>For this ecosystem to stay coherent and maintainable:</p>
+<ol>
+<li>
+<p><strong>Zero application logic in the transports</strong>: the <code>luna-mcp</code>,
+<code>luna-rest</code>, <code>luna-wasm</code> crates do <em>only</em> marshalling. All business
+logic stays in <code>luna-api</code>.</p>
+</li>
+<li>
+<p><strong>Single source schema</strong>: all <code>luna-api</code> public types are annotated
+<code>JsonSchema</code>. The OpenAPI docs, TS types, and <code>.proto</code> files are all
+<strong>generated</strong>, not hand-written.</p>
+</li>
+<li>
+<p><strong>Conditional compilation</strong>: each transport is a toggleable Cargo
+feature. "Minimal headless" build = MCP only. "Luna Studio Desktop"
+build = everything enabled.</p>
+</li>
+<li>
+<p><strong>Authentication &amp; authorization</strong>: critical as soon as we leave local
+stdio. V1.1 design:</p>
+<ul>
+<li>API token (<code>Authorization: Bearer …</code>).</li>
+<li>Granular capabilities (<code>read_state</code>, <code>write_memory</code>, <code>load_rom</code>).</li>
+<li>Rate limiting + per-session quotas.</li>
+</ul>
+</li>
+<li>
+<p><strong>Multi-tenancy</strong>: V1 = one binary, one emulation. V1.1+ considers a
+<strong>session manager mode</strong> for the cloud (N isolated sessions per server
+instance, each with its own emulation core in a thread).</p>
+</li>
+<li>
+<p><strong>API versioning</strong>: version pin in requests, clean deprecation (≥ 1
+minor of transition), announced breaking changes.</p>
+</li>
+<li>
+<p><strong>Observability</strong>: structured tracing (<code>tracing</code> crate), optional
+Prometheus metrics for server deployments. Essential in multi-tenancy.</p>
+</li>
+</ol>
+<h3 id="95-luna-api-as-a-stable-public-contract"><a class="header" href="#95-luna-api-as-a-stable-public-contract">9.5 <code>luna-api</code> as a stable public contract</a></h3>
+<p>Direct consequence: <code>luna-api</code> becomes the <strong>flagship crate</strong> of the
+ecosystem, the one that must have the strongest stability. We apply a
+discipline to it that is stricter than the other crates:</p>
+<ul>
+<li><strong>Strict SemVer</strong>: no breaking change without a major bump.</li>
+<li><strong>Deprecation policy</strong>: ≥ 1 minor with <code>#[deprecated]</code> before removal.</li>
+<li><strong>Public API tests</strong>: <code>cargo-public-api</code> in CI, detects any undocumented
+change.</li>
+<li><strong>Exhaustive documentation</strong>: every trait/struct documented, examples in
+<code>///</code> doctests run as tests.</li>
+<li><strong>Strategic re-exports</strong>: <code>luna::api::prelude::*</code> gathers the types
+clients need, isolating internal details.</li>
+<li><strong>Maintained changelog</strong> in the Keep a Changelog format, with an "API
+changes" section separate from the rest.</li>
+</ul>
+<p>It is the only crate whose API stability is guaranteed at the "release
+product 1.0" level. The others (<code>luna-cpu</code>, <code>luna-ppu</code>, …) can evolve more
+freely between versions as long as <code>luna-api</code> stays stable.</p>
+<hr />
+<h2 id="10-threading-model"><a class="header" href="#10-threading-model">10. Threading model</a></h2>
+<p>The model differs depending on the target (native vs WASM). The shared code
+goes through the <code>luna-async</code> facade (§4.1) to stay cross-target.</p>
+<h3 id="101-native-target-linux--macos--windows"><a class="header" href="#101-native-target-linux--macos--windows">10.1 Native target (Linux / macOS / Windows)</a></h3>
+<pre><code>┌────────────────────────────────────────────────────────────────┐
+│            "emulation" thread (dedicated, 60 Hz)              │
+│  - CPU master-clock catch-up scheduler (§6.6)                 │
+│  - bus.io_cycle() catches PPU/HDMA up mid-instruction         │
+│  - Checks breakpoints                                         │
+│  - Reads Commands between frames                              │
+│  - Publishes Events on the bus                                │
+└───────┬────────────────────────────────────────────┬───────────┘
+        │ futures::channel::mpsc&lt;Command&gt; (input)    │ broadcast&lt;Event&gt;
+        ▲                                            ▼
+┌───────┴──────────────┐                  ┌──────────────────────┐
+│  Tokio runtime       │                  │  Event bus           │
+│  (main thread)       │                  │  (tokio broadcast)   │
+│  - luna-mcp-server   │◄─── Event ──────►│  fan-out broadcast   │
+│  - async handlers    │                  └──────┬───────────────┘
+│  - parse JSON-RPC    │                         │
+└──────────────────────┘                         │
+                                                 ▼
+                                ┌────────────────────────────────┐
+                                │     "GUI" thread (optional)    │
+                                │  - winit/egui/wgpu             │
+                                │  - 60 fps framebuffer render   │
+                                │  - spectator overlays          │
+                                │  - keyboard/gamepad inputs →   │
+                                │    Command to the core         │
+                                └────────────────────────────────┘
+</code></pre>
+<h3 id="102-wasm-target-luna-studio-web--v2"><a class="header" href="#102-wasm-target-luna-studio-web--v2">10.2 WASM target (Luna Studio Web — V2)</a></h3>
+<pre><code>┌────────────────────────────────────────────────────────────────┐
+│              Single-thread tasks (Web Worker or main)         │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ Emulation clocked by requestAnimationFrame()             │   │
+│  │  - CPU master-clock catch-up scheduler (§6.6)            │   │
+│  │  - bus.io_cycle() catches PPU/HDMA up mid-instruction    │   │
+│  └────────────────┬────────────────────────────────────────┘   │
+│                   │ Rc&lt;RefCell&lt;EmuState&gt;&gt;                       │
+│                   ▼                                             │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ Microtask queue: luna-mcp-client + GUI eframe           │   │
+│  │  - WebSocket to a remote native Luna (NO embedded MCP   │   │
+│  │    server — rmcp incompatible with WASM)                │   │
+│  │  - egui/wgpu via eframe (WebGPU or WebGL2)              │   │
+│  └─────────────────────────────────────────────────────────┘   │
+└────────────────────────────────────────────────────────────────┘
+</code></pre>
+<h3 id="103-strict-discipline"><a class="header" href="#103-strict-discipline">10.3 Strict discipline</a></h3>
+<ul>
+<li>The core accesses <em>no</em> async or GUI resource directly. All interaction
+with the outside world goes through the channels (<code>Command</code> in,
+<code>Event</code> broadcast out).</li>
+<li><strong>No <code>crossbeam-channel</code> in the core</strong> — it panics under WASM. Use
+<code>futures::channel::mpsc</code> everywhere (cross-target compatible).</li>
+<li><strong><code>!Send</code> everywhere</strong> in <code>luna-core</code> and <code>luna-mcp-core</code> — single-thread
+for WASM compat. Native parallelism goes through explicit threads in the
+native <code>luna-mcp-server</code> only.</li>
+<li><strong>No <code>borrow_mut()</code> across an <code>await</code></strong> on the WASM side — risk of a
+<code>RefCell already borrowed</code> panic.</li>
+</ul>
+<p>Structural advantages:</p>
+<ul>
+<li>The core stays testable without tokio, winit, or WebSocket.</li>
+<li>MCP latency does not affect emulation timing.</li>
+<li>The core can be frozen (paused) without disturbing the MCP server or the
+GUI.</li>
+<li><strong>GUI and MCP are symmetric</strong>: both are consumers of the same bus, which
+makes the <code>spectate</code> mode trivial (= enable both).</li>
+<li>The human can take over in spectator mode by sending <code>Command::Input</code>
+from the GUI exactly as the MCP agent would — the command's origin is
+traced for the "Agent activity" panel.</li>
+</ul>
+<hr />
+<h2 id="11-determinism--reproducibility"><a class="header" href="#11-determinism--reproducibility">11. Determinism &amp; reproducibility</a></h2>
+<p><strong>Default guarantees</strong></p>
+<ul>
+<li>Same ROM + same input sequence + same initial RNG seed → exactly the same
+sequence of frames.</li>
+<li>Save states encode the <em>complete</em> machine state (RAM, VRAM, OAM, CGRAM,
+APU RAM, registers, scheduler queue, cycle counter).</li>
+</ul>
+<p><strong>Replay</strong></p>
+<p><code>.lreplay</code> file format (TOML + binary):</p>
+<pre><code class="language-toml">[meta]
+rom_sha256 = "abc123..."
+luna_version = "0.3.1"
+created_at = "2026-05-23T11:00:00Z"
+
+[inputs]
+# (frame, port, buttons)
+1     = [0, "Start"]
+60    = [0, "B"]
+120   = [0, "B|Right"]
+# ...
+</code></pre>
+<p>A replay can be played back with:</p>
+<pre><code class="language-bash">$ luna replay session.lreplay --verify
+</code></pre>
+<p>The <code>--verify</code> flag re-computes the hash of the framebuffers and compares it
+to a reference manifest — useful in CI.</p>
+<p><strong>Time travel</strong>: a circular buffer of N save states taken every second
+(configurable) lets the agent do <code>rewind(seconds: 5)</code>. Cost: ~200 KB × N in
+RAM (negligible up to several minutes).</p>
+<hr />
+<h2 id="12-testing-strategy"><a class="header" href="#12-testing-strategy">12. Testing strategy</a></h2>
+<h3 id="unit-tests"><a class="header" href="#unit-tests">Unit tests</a></h3>
+<ul>
+<li>One crate = one test module.</li>
+<li>Each 65C816 opcode tested on known cases (flags, E-mode edge cases, BCD,
+etc.).</li>
+<li>Each PPU register tested on read/write behaviors.</li>
+</ul>
+<h3 id="integration-tests"><a class="header" href="#integration-tests">Integration tests</a></h3>
+<ul>
+<li><strong>Open-source homebrew hardware-test ROMs</strong>:
+<ul>
+<li>CPU / PPU / DMA / HDMA / ADC result-screen ROMs</li>
+<li>APU audio-test ROMs</li>
+<li>advanced-PPU test ROMs</li>
+</ul>
+</li>
+<li>Each ROM displays "PASS" or "FAIL" via text/screen. We capture frame N
+and look for the expected pattern.</li>
+</ul>
+<h3 id="visual-tests-golden"><a class="header" href="#visual-tests-golden">Visual tests (golden)</a></h3>
+<ul>
+<li>For each reference game (~20 games), a frame at a precise point (after a
+deterministic input sequence) is stored as a golden PNG.</li>
+<li>In CI, we replay the sequence and compare pixel-by-pixel (zero tolerance
+in cycle-accurate mode).</li>
+</ul>
+<h3 id="performance-tests"><a class="header" href="#performance-tests">Performance tests</a></h3>
+<ul>
+<li><code>cargo bench</code> (criterion) on the hot paths: CPU step, PPU scanline, APU
+sample generation.</li>
+<li>A perf regression is flagged if &gt; 5% over two consecutive commits.</li>
+</ul>
+<h3 id="mcp-tests"><a class="header" href="#mcp-tests">MCP tests</a></h3>
+<ul>
+<li>A mock MCP client that replays scripted scenarios and checks the
+responses (schemas + expected values).</li>
+</ul>
+<hr />
+<h2 id="13-build-distribution-license"><a class="header" href="#13-build-distribution-license">13. Build, distribution, license</a></h2>
+<p><strong>Build</strong></p>
+<pre><code class="language-bash"># development
+cargo build
+
+# optimized release
+cargo build --release
+
+# minimal build (no GUI, no niche coprocessors)
+cargo build --release --no-default-features --features "core,mcp,sa1,superfx,dsp1"
+</code></pre>
+<p><strong>Distribution</strong></p>
+<ul>
+<li><strong>Binaries</strong>: Linux x86-64/aarch64, macOS Intel/ARM, Windows x86-64.</li>
+<li><strong>Crates.io</strong>: all the <code>luna-*</code> crates published independently.</li>
+<li><strong>GitHub Releases</strong>: tagged + signed checksums.</li>
+<li><strong>Docker</strong>: image <code>ghcr.io/&lt;org&gt;/luna:latest</code> for CI integration.</li>
+</ul>
+<p><strong>License</strong></p>
+<p>Recommendation: <strong>MPL-2.0</strong> (Mozilla Public License 2.0). Rationale:</p>
+<ul>
+<li>More permissive than the GPL (compatible with commercial use).</li>
+<li>File-level copyleft: modifications to Luna's code must be shared, but
+integration into a larger project (e.g. a proprietary dev tool) remains
+possible.</li>
+<li>Compatible with potential adoption by the libretro / Anthropic community.</li>
+</ul>
+<p>To discuss: GPL-3.0 (more protective) or Apache-2.0 (more permissive).</p>
+<hr />
+<h2 id="14-roadmap--phasing"><a class="header" href="#14-roadmap--phasing">14. Roadmap &amp; phasing</a></h2>
+<blockquote>
+<p><strong>Status (2026-06).</strong> Phases 0–4 are <strong>done</strong>: luna boots and plays commercial
+titles across the 65C816 + SPC700/DSP + PPU and all three priority
+coprocessors (SA-1, Super FX, DSP-1), and the introspection API + MCP server +
+standalone GUI ship. Phase 5 (advanced debug / spectator) is <strong>in progress</strong>;
+Phase 6 (1.0 polish) is ahead. The week estimates below are the original plan,
+kept for reference.</p>
+</blockquote>
+<h3 id="phase-0--pattern-validation--skeleton-3-weeks---done"><a class="header" href="#phase-0--pattern-validation--skeleton-3-weeks---done">Phase 0 — Pattern validation &amp; skeleton (3 weeks) — ✅ done</a></h3>
+<p><strong>Research &amp; validation</strong> (1 week — a prerequisite to any production code):</p>
+<ul>
+<li>Studying the master-clock catch-up scheduling model:
+<ul>
+<li>the direct CPU-tick model</li>
+<li>the rational APU catch-up</li>
+<li>the per-region access-cost computation</li>
+<li>DMA/HDMA timing</li>
+<li>the start-cycle/end-cycle cycle-stepping pattern</li>
+<li>the workspace-organization model</li>
+</ul>
+</li>
+<li>Validate the per-instruction <code>65816</code> test-suite format end-to-end against
+the CPU core.</li>
+</ul>
+<p><strong>Code skeleton</strong> (2 weeks):</p>
+<ul>
+<li>Cargo workspace with the ~15 crates (see §4), all compiling empty.</li>
+<li>GitHub Actions CI: <code>cargo check</code> + <code>cargo check --target wasm32-unknown-unknown</code> (fails if a cross-target crate breaks).</li>
+<li><code>luna-async</code>: runtime facade (spawn/sleep/channels) with native (tokio) +
+web (wasm-bindgen-futures) implementations.</li>
+<li><code>luna-bus</code>: basic memory map + LoROM mapper + <code>Bus</code> trait with
+<code>io_cycle()</code>.</li>
+<li><code>luna-cpu-65c816</code>: complete instruction decoder (without fine timing
+yet). Jump-table <code>[fn(&amp;mut Cpu, &amp;mut Bus); 256]</code>.</li>
+<li><code>luna-cli</code>: loads a ROM, runs 1 frame, dumps the CPU state.</li>
+<li>Tests: first pass of a few per-instruction CPU tests.</li>
+</ul>
+<h3 id="phase-1--first-render-4-weeks---done"><a class="header" href="#phase-1--first-render-4-weeks---done">Phase 1 — First render (4 weeks) — ✅ done</a></h3>
+<ul>
+<li><code>luna-ppu</code>: modes 0 and 1, scanline-based, basic sprites.</li>
+<li><code>luna-dma</code>: DMA (without HDMA).</li>
+<li><code>luna-core</code> scheduler step complete (see §6.6) — CPU + DMA + PPU catch-up
+via <code>bus.io_cycle()</code>.</li>
+<li>1000+ per-instruction tests pass (target: 100% of the 65C816).</li>
+<li>A CPU result-screen test ROM displays "PASS".</li>
+</ul>
+<h3 id="phase-2--audio--simple-games-4-weeks---done"><a class="header" href="#phase-2--audio--simple-games-4-weeks---done">Phase 2 — Audio + simple games (4 weeks) — ✅ done</a></h3>
+<ul>
+<li><code>luna-apu</code>: SPC700 + basic DSP.</li>
+<li>Working HDMA.</li>
+<li><strong>Super Mario World</strong> playable end-to-end (without major visual bugs).</li>
+</ul>
+<h3 id="phase-3--api-mcp-standalone-gui-4-weeks---done"><a class="header" href="#phase-3--api-mcp-standalone-gui-4-weeks---done">Phase 3 — API, MCP, standalone GUI (4 weeks) — ✅ done</a></h3>
+<ul>
+<li><code>luna-api</code>: Control + Debug + Semantic.</li>
+<li><code>luna-mcp</code>: stdio server with ~15 base tools.</li>
+<li><code>luna-gui</code> v0: <strong>standalone</strong> mode (human plays with keyboard/gamepad).</li>
+<li>Demo: Claude Code loads a ROM, takes a screenshot, reads the RAM.</li>
+<li>Implementation of the token-economy principles from the start:
+resources, detail levels, hash-then-fetch.</li>
+</ul>
+<h3 id="phase-4--priority-coprocessors-6-weeks---done"><a class="header" href="#phase-4--priority-coprocessors-6-weeks---done">Phase 4 — Priority coprocessors (6 weeks) — ✅ done</a></h3>
+<ul>
+<li>SA-1, Super FX (GSU), DSP-1 (uPD7725 core in <code>luna-cpu-upd96050</code>).</li>
+<li><strong>Star Fox</strong> / <strong>Doom</strong> (Super FX), <strong>Super Mario RPG</strong> / <strong>Kirby</strong> (SA-1),
+<strong>Super Mario Kart</strong> / <strong>Pilotwings</strong> (DSP-1 Mode 7) playable.</li>
+<li>DSP-1 needs a user-supplied <code>dsp1b.rom</code> firmware.</li>
+</ul>
+<h3 id="phase-5--advanced-debug--spectator-mode-5-weeks---in-progress"><a class="header" href="#phase-5--advanced-debug--spectator-mode-5-weeks---in-progress">Phase 5 — Advanced debug &amp; spectator mode (5 weeks) — 🚧 in progress</a></h3>
+<ul>
+<li>✅ GUI debugger panels: CPU/SPC700 state, memory hex,
+65C816/SPC700 disassembly, I/O registers (incl. DSP-1), palette, tilemap,
+sprites.</li>
+<li>⏳ Conditional breakpoints, trace logging, time travel.</li>
+<li>⏳ Enriched Semantic API (decoded palette, window state); MCP resources
+(<code>luna://docs/...</code>).</li>
+<li>⏳ <code>luna-gui</code> spectator overlays — agent-activity timeline, queried
+sprite/region highlighting, live token-budget panel.</li>
+</ul>
+<h3 id="phase-6--polish--10-4-weeks---planned"><a class="header" href="#phase-6--polish--10-4-weeks---planned">Phase 6 — Polish &amp; 1.0 (4 weeks) — ⏳ planned</a></h3>
+<ul>
+<li>Golden visual tests over 20 games.</li>
+<li>User documentation.</li>
+<li>Stabilization of <code>luna-api</code> (frozen SemVer, <code>cargo-public-api</code> in CI).</li>
+<li>Public AI demos:
+<ol>
+<li>Claude plays Super Mario World autonomously.</li>
+<li>Claude debugs a crash on a ROM hack.</li>
+<li>Claude develops a "hello world" homebrew by assembling + testing in
+the loop.</li>
+</ol>
+</li>
+</ul>
+<p><strong>Estimated total</strong>: ~6 months for V1.0.</p>
+<h3 id="post-10--opening-up-the-ecosystem"><a class="header" href="#post-10--opening-up-the-ecosystem">Post-1.0 — Opening up the ecosystem</a></h3>
+<p>Optional phases depending on traction &amp; community feedback:</p>
+<ul>
+<li><strong>Phase 7 — Additional transports</strong> (~4 wk): <code>luna-rest</code>, <code>luna-ws</code>,
+OpenAPI + TS type generation. Unlocks third-party web frontends.</li>
+<li><strong>Phase 8 — Luna Studio Web</strong> (~8 wk): <code>luna-wasm</code> + homebrew IDE SPA.
+The "killer app" goal for the SNES community.</li>
+<li><strong>Phase 9 — Luna Studio Desktop</strong> (~6 wk): evolution of <code>luna-gui</code> into a
+full IDE with integrated assembler, plugin system.</li>
+<li><strong>Phase 10 — Bindings &amp; integrations</strong> (~6 wk): Python/C FFI, VSCode
+extension, libretro core.</li>
+<li><strong>Phase 11 — Cloud &amp; multi-tenancy</strong> (~6 wk): auth, session manager,
+observability, Kubernetes deployment.</li>
+</ul>
+<hr />
+<h2 id="15-risks--open-questions"><a class="header" href="#15-risks--open-questions">15. Risks &amp; open questions</a></h2>
+<h3 id="technical-risks"><a class="header" href="#technical-risks">Technical risks</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Risk</th><th>Mitigation</th></tr></thead><tbody>
+<tr><td>Cycle-accurate performance too slow</td><td>Static-dispatch zero-alloc pattern (§6.6), criterion profiling, SIMD PPU</td></tr>
+<tr><td>CPU↔APU sync hard to stabilize</td><td>Rational u64 arithmetic (no float, §6.6), APU audio-test ROMs</td></tr>
+<tr><td>MCP schemas that change (evolving spec)</td><td>Pin to a stable version, abstract behind <code>luna-mcp-core</code></td></tr>
+<tr><td>Under-documented coprocessors (Super FX)</td><td>Cross-reference the hardware behaviour against multiple sources</td></tr>
+<tr><td><strong>Token cost explosion in AI usage</strong></td><td><code>economy/balanced/generous</code> profiles, hash-then-fetch, MCP resources, budget tracker (§8.5)</td></tr>
+<tr><td>Spectator GUI slowing down the core</td><td>Separate GUI thread, framebuffer shared via <code>arc-swap</code> or triple-buffer</td></tr>
+<tr><td><strong>Hostile borrow checker</strong> (CPU + bus + PPU mut simultaneously)</td><td><code>SnesBus&lt;'a&gt;</code> pattern created on every step, separate borrows. No <code>Rc&lt;RefCell&gt;</code> in the hot loop</td></tr>
+<tr><td><strong><code>tokio::time</code> panics under WASM</strong></td><td><code>luna-async</code> facade mandatory from V1 (§4.1) — ban direct <code>tokio::*</code> in the core</td></tr>
+<tr><td><strong><code>crossbeam-channel</code> panics under WASM</strong></td><td>Use <code>futures::channel::mpsc</code> everywhere, never crossbeam in the core</td></tr>
+<tr><td><strong><code>rmcp</code> does not run under WASM</strong></td><td>V2 Luna Studio Web = WebSocket client to a remote native Luna (see §9.2)</td></tr>
+<tr><td><strong>Missed mid-instruction effects</strong> (Mario Kart, F-Zero)</td><td><code>bus.io_cycle()</code> pattern on every CPU access (§5, §6.6). Test against the per-instruction CPU suite</td></tr>
+<tr><td><strong>NMI/IRQ timing 1-cycle off</strong></td><td>Latch the IRQ/NMI state at instruction start, serve it before the next fetch</td></tr>
+</tbody></table>
+</div>
+<h3 id="open-questions-to-be-settled-in-phase-0"><a class="header" href="#open-questions-to-be-settled-in-phase-0">Open questions (to be settled in Phase 0)</a></h3>
+<ol>
+<li><strong>Final license</strong>: MPL-2.0 (proposed) vs Apache-2.0 (more permissive).
+Validation after reviewing the desired commercial constraints.</li>
+<li><strong>Third-party APU crate integration</strong>: survey existing permissively
+licensed SPC700/DSP crates in Phase 0. If a suitable one exists, plan
+the integration in Phase 2 (saves ~1 month). Otherwise, APU from scratch.</li>
+<li><strong>libretro core compatibility</strong>: deferred to Phase 10. To confirm that
+the libretro constraints (sync API, threading) are compatible with our
+<code>!Send</code> core.</li>
+<li><strong>WASM target from V1?</strong>: recommended — the <code>luna-async</code> facade must be
+in place from the start to avoid costly backtracking. WASM compilation
+can stay "compile + basic tests" in V1, without a full GUI.</li>
+<li><strong>Game-map format</strong>: TOML, JSON, or a custom format? How to share in the
+community (GitHub registry, marketplace)?</li>
+<li><strong><code>luna-api</code> stabilization strategy</strong>: at what point do we freeze the
+public API? Target: Phase 6.</li>
+<li><strong>Multi-tenancy in V1.1 or V2</strong>: a single emulation core per binary
+(simple) or several parallel sessions (unlocks "cloud sandbox")?</li>
+<li><strong><code>!Send</code> everywhere vs cfg-gate</strong>: does the simplicity of <code>!Send</code>
+everywhere outweigh the lost native parallelism? Research recommendation:
+<code>!Send</code> everywhere (see eframe, the majority of cross-target Rust
+emulators).</li>
+</ol>
+<h3 id="product-questions"><a class="header" href="#product-questions">Product questions</a></h3>
+<ul>
+<li><strong>Dual license model</strong> (open source + commercial) if companies want to
+integrate Luna?</li>
+<li><strong>Marketplace of community-annotated game maps</strong>?</li>
+<li><strong>Public benchmarks</strong>: a suite of challenges ("beat Super Mario World
+level 1") to compare LLM performance?</li>
+</ul>
+<hr />
+<h2 id="16-glossary"><a class="header" href="#16-glossary">16. Glossary</a></h2>
+<ul>
+<li><strong>65C816</strong>: the SNES's 16-bit CPU, derived from the 6502.</li>
+<li><strong>APU</strong> (Audio Processing Unit): the SNES's sound subsystem, made up of
+the SPC700 and the DSP.</li>
+<li><strong>CGRAM</strong>: 512 bytes of palette memory (256 colors × 16 bits).</li>
+<li><strong>Coprocessor</strong>: an additional chip in a SNES cartridge (SA-1, Super FX,
+DSP-1, etc.).</li>
+<li><strong>Cycle-accurate</strong>: emulation where every clock cycle is simulated, not
+just the final results of an instruction.</li>
+<li><strong>DMA</strong> (Direct Memory Access): fast memory transfer without the CPU.</li>
+<li><strong>DSP</strong>: Digital Signal Processor (here, either the APU audio DSP or a
+DSP-N coprocessor).</li>
+<li><strong>HDMA</strong>: DMA synchronized to PPU scanlines.</li>
+<li><strong>HLE</strong> (High-Level Emulation): simplified emulation of behaviors (vs
+cycle-accurate).</li>
+<li><strong>MCP</strong> (Model Context Protocol): a standardized protocol for an LLM to
+communicate with external tools.</li>
+<li><strong>MMIO</strong> (Memory-Mapped I/O): registers exposed as memory addresses.</li>
+<li><strong>OAM</strong> (Object Attribute Memory): the memory that describes the SNES's
+128 sprites (512 bytes + 32 bytes of table 2).</li>
+<li><strong>PPU</strong> (Picture Processing Unit): the SNES's video subsystem.</li>
+<li><strong>Scanline</strong>: a horizontal line of pixels rendered by the PPU.</li>
+<li><strong>SPC700</strong>: the 8-bit CPU dedicated to audio in the SNES.</li>
+<li><strong>Tilemap</strong>: a grid of tiles that composes a background.</li>
+<li><strong>VRAM</strong>: 64 KB of video memory (tiles, tilemaps).</li>
+<li><strong>WRAM</strong> (Work RAM): the main CPU's 128 KB of work RAM.</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../using/cli-api-mcp.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../internals/ppu.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../using/cli-api-mcp.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../internals/ppu.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

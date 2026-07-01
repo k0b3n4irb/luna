@@ -1,0 +1,416 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>S-DD1 - Luna — SNES Emulator Guide</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Guide and reference for Luna, a cycle-accurate, AI-native SNES emulator written in Rust.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/luna.css">
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "navy";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="../introduction.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">Using Luna</li><li class="chapter-item expanded "><a href="../using/install.html"><strong aria-hidden="true">1.</strong> Install & first run</a></li><li class="chapter-item expanded "><a href="../using/controls.html"><strong aria-hidden="true">2.</strong> Controls</a></li><li class="chapter-item expanded "><a href="../using/debugging.html"><strong aria-hidden="true">3.</strong> Debugging tools</a></li><li class="chapter-item expanded "><a href="../using/saves.html"><strong aria-hidden="true">4.</strong> Saves & save states</a></li><li class="chapter-item expanded "><a href="../using/cli-api-mcp.html"><strong aria-hidden="true">5.</strong> CLI, API & MCP</a></li><li class="chapter-item expanded affix "><li class="part-title">How Luna Works</li><li class="chapter-item expanded "><a href="../internals/architecture.html"><strong aria-hidden="true">6.</strong> Architecture overview</a></li><li class="chapter-item expanded "><a href="../internals/ppu.html"><strong aria-hidden="true">7.</strong> The PPU — graphics</a></li><li class="chapter-item expanded "><a href="../internals/apu.html"><strong aria-hidden="true">8.</strong> The APU — audio</a></li><li class="chapter-item expanded "><a href="../internals/cpus.html"><strong aria-hidden="true">9.</strong> The CPUs — 65C816 & SPC700</a></li><li class="chapter-item expanded "><a href="../internals/memory-dma-bus.html"><strong aria-hidden="true">10.</strong> Memory, DMA & the bus</a></li><li class="chapter-item expanded "><a href="../internals/coprocessors.html"><strong aria-hidden="true">11.</strong> Coprocessors</a><a class="toggle"><div>❱</div></a></li><li><ol class="section"><li class="chapter-item "><a href="../internals/coprocessors-sa1.html"><strong aria-hidden="true">11.1.</strong> SA-1</a></li><li class="chapter-item "><a href="../internals/coprocessors-superfx.html"><strong aria-hidden="true">11.2.</strong> Super FX (GSU)</a></li><li class="chapter-item expanded "><a href="../internals/coprocessors-sdd1.html" class="active"><strong aria-hidden="true">11.3.</strong> S-DD1</a></li></ol></li><li class="chapter-item expanded "><li class="part-title">The Faithful-Port Method</li><li class="chapter-item expanded "><a href="../method/faithful-port.html"><strong aria-hidden="true">12.</strong> Why "faithful port"</a></li><li class="chapter-item expanded "><a href="../method/differential.html"><strong aria-hidden="true">13.</strong> The differential harness</a></li><li class="chapter-item expanded "><a href="../method/accuracy.html"><strong aria-hidden="true">14.</strong> Accuracy scorecard</a></li><li class="chapter-item expanded "><a href="../method/testing.html"><strong aria-hidden="true">15.</strong> Testing & determinism</a><a class="toggle"><div>❱</div></a></li><li><ol class="section"><li class="chapter-item "><a href="../method/determinism.html"><strong aria-hidden="true">15.1.</strong> Determinism guarantees</a></li></ol></li><li class="chapter-item expanded "><a href="../method/road-to-a.html"><strong aria-hidden="true">16.</strong> The road to "A"</a></li><li class="chapter-item expanded affix "><li class="spacer"></li><li class="chapter-item expanded affix "><a href="../acknowledgements.html">Acknowledgements</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Luna — SNES Emulator Guide</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/k0b3n4irb/luna" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/k0b3n4irb/luna/edit/develop/book/src/internals/coprocessors-sdd1.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="s-dd1-coprocessor--faithful-port-reference"><a class="header" href="#s-dd1-coprocessor--faithful-port-reference">S-DD1 coprocessor — faithful-port reference</a></h1>
+<p><strong>Purpose:</strong> the faithful-port spec for luna's S-DD1 (graphics decompression
+chip — Star Ocean, Street Fighter Alpha 2), written against the hardware
+reference behaviour.</p>
+<blockquote>
+<p><strong>Key finding:</strong> the two critical tables (<code>run_count</code> 256 entries,
+<code>evolution_table</code> 33 states) and the whole pipeline (IM→GCD→8×BG→PEM→CM→OL)
+match the canonical hardware reference exactly — there is <strong>no
+divergence</strong> to arbitrate. luna copies the tables verbatim.</p>
+</blockquote>
+<p>The S-DD1 is two independent subsystems: (1) an <strong>MMC</strong> (memory mapper, banks the
+up-to-8 MB ROM into the bus), and (2) a <strong>streaming decompressor</strong> that runs
+<strong>during a DMA</strong> reading from the chip.</p>
+<hr />
+<h2 id="1-registers--memory-map"><a class="header" href="#1-registers--memory-map">1. Registers + memory map</a></h2>
+<p>S-DD1 control registers (<code>$4800-$480F</code>, banks <code>$00-3F</code>/<code>$80-BF</code>; address masked to
+<code>$4800 | addr &amp; 0x0F</code>):</p>
+<div class="table-wrapper"><table><thead><tr><th>Reg</th><th>Name</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>$4800</code></td><td>r4800 — <strong>hard enable</strong></td><td>bit-per-channel: channel n is S-DD1-decompressible</td></tr>
+<tr><td><code>$4801</code></td><td>r4801 — <strong>soft enable</strong></td><td>bit-per-channel arm; <strong>cleared by the chip</strong> when a stream ends</td></tr>
+<tr><td><code>$4804</code></td><td>r4804 — MMC bank A</td><td>write masked <code>&amp; 0x8F</code>; low 4 bits = 1 MB ROM bank for <code>$C0-CF</code></td></tr>
+<tr><td><code>$4805</code></td><td>r4805 — MMC bank B</td><td><code>&amp; 0x8F</code>; bank for <code>$D0-DF</code>; <strong>bit 7</strong> = <code>$20-3F</code> mirror flag</td></tr>
+<tr><td><code>$4806</code></td><td>r4806 — MMC bank C</td><td><code>&amp; 0x8F</code>; bank for <code>$E0-EF</code></td></tr>
+<tr><td><code>$4807</code></td><td>r4807 — MMC bank D</td><td><code>&amp; 0x8F</code>; bank for <code>$F0-FF</code>; <strong>bit 7</strong> = <code>$A0-BF</code> mirror flag</td></tr>
+</tbody></table>
+</div>
+<p><code>$4802-3</code> / <code>$4808-F</code> read through to ROM.</p>
+<p><strong>ROM decode (the hardware reference's <code>mcuRead</code>/<code>mmcRead</code> path):</strong></p>
+<ul>
+<li><strong><code>$00-3F,$80-BF : $8000-FFFF</code></strong> (banked LoROM-style region):
+<pre><code>if (!addr.bit23 &amp;&amp; addr.bit21 &amp;&amp; r4805.bit7) addr.bit21 = 0   // $20-3F mirror
+if ( addr.bit23 &amp;&amp; addr.bit21 &amp;&amp; r4807.bit7) addr.bit21 = 0   // $A0-BF mirror
+rom_addr = (addr.bits[16:21] &lt;&lt; 15) | addr.bits[0:14]
+</code></pre>
+</li>
+<li><strong><code>$C0-FF : $0000-FFFF</code></strong> (MMC-banked region; <code>mmcRead</code>): <code>addr.bits[20:21]</code>
+selects r4804/5/6/7; <code>rom_addr = (reg &amp; 0x0F) &lt;&lt; 20 | addr.bits[0:19]</code>.</li>
+</ul>
+<hr />
+<h2 id="2-dma-triggered-decompression-the-integration-crux"><a class="header" href="#2-dma-triggered-decompression-the-integration-crux">2. DMA-triggered decompression (the integration crux)</a></h2>
+<p>The chip decompresses <strong>on the fly while a DMA reads from it</strong>. The reference
+<code>mcuRead</code> <code>$C0-FF</code> path:</p>
+<pre><code>if (r4800 &amp; r4801) {                       // some channel armed
+  for n in 0..8 {
+    if r4800.bit(n) &amp;&amp; r4801.bit(n) &amp;&amp; addr == dma[n].address {
+      if !dmaReady { decompressor.init(addr); dmaReady = true; }   // first read
+      data = decompressor.read();           // one decompressed byte
+      if (--dma[n].size == 0) { dmaReady = false; r4801.bit(n) = 0; }  // stream end
+      return data;
+    }
+  }
+}
+return mmcRead(addr);                        // not decompressing → normal ROM
+</code></pre>
+<p>The chip captures the per-channel DMA <strong>address</strong> (<code>$43x2-4</code>) and <strong>size</strong>
+(<code>$43x5-6</code>) by intercepting writes to <code>$00-3F,$80-BF:$4300-437F</code> (the reference
+<code>dmaWrite</code> path, which then forwards to the CPU's real DMA). <strong>S-DD1 always uses
+fixed-address DMA</strong>,
+so <code>addr == dma[n].address</code> holds for every byte of the transfer.</p>
+<p>Protocol the game uses: write <code>$43xx</code> (addr+size, fixed mode) → write r4800+r4801
+to arm the channel → write <code>$420B</code> (MDMAEN) → the DMA streams decompressed bytes;
+the chip clears r4801.bit(n) and re-arms <code>dmaReady</code> when size hits 0.</p>
+<h3 id="luna-integration-note-this-is-where-luna-differs-from-the-canonical-hardware-structure"><a class="header" href="#luna-integration-note-this-is-where-luna-differs-from-the-canonical-hardware-structure">luna integration note (this is where luna differs from the canonical hardware structure)</a></h3>
+<p>In luna, <code>$4300-437F</code> writes go to the <strong>DMA controller</strong>, not the mapper, and
+the mapper's read path serves both CPU reads and DMA A-bus reads. So to port
+the reference faithfully, luna must <strong>forward <code>$43xx</code> writes to the S-DD1
+mapper</strong> (in addition to the DMA controller) so it can capture each channel's
+DMA address and size. <code>$4800-480F</code> already reaches the mapper (CPU
+fall-through). Then the armed-DMA read logic ports verbatim: a mapper read at
+<code>addr</code> that matches a channel's DMA address, with <code>r4800 &amp; r4801</code> armed,
+triggers decompression.</p>
+<p>Detection: chipset byte <code>$FFD6</code> — <code>(chipset &amp; 0x0F) &gt;= 0x03 &amp;&amp; (chipset &amp; 0xF0) == 0x40</code> (S-DD1 = coprocessor high-nibble <strong>4</strong>; cf. SuperFX=1, DSP=0, SA-1=3).
+S-DD1 carts are LoROM-based; header at <code>$7FC0</code>.</p>
+<hr />
+<h2 id="3-the-decompressor-im--gcd--8bg--pem--cm--ol"><a class="header" href="#3-the-decompressor-im--gcd--8bg--pem--cm--ol">3. The decompressor (IM → GCD → 8×BG → PEM → CM → OL)</a></h2>
+<p>Six submodules. <code>init(offset)</code> resets all; <code>read()</code> returns one output byte
+(delegates to OL). The header byte at <code>offset</code> configures CM + OL (bits 7:6 =
+bitplane mode, 5:4 = context-bits mode).</p>
+<h3 id="31-input-manager-im--bit-reader"><a class="header" href="#31-input-manager-im--bit-reader">3.1 Input Manager (IM) — bit reader</a></h3>
+<p>State: <code>offset</code> (ROM byte pos), <code>bitCount</code> (<strong>init = 4</strong>, skips the header's low
+4 bits). <code>getCodeWord(codeLen)</code>:</p>
+<pre><code>cw = mmcRead(offset) &lt;&lt; bitCount;  bitCount++
+if (cw &amp; 0x80) { cw |= mmcRead(offset+1) &gt;&gt; (9 - bitCount); bitCount += codeLen }
+if (bitCount &amp; 0x08) { offset++; bitCount &amp;= 0x07 }
+return cw
+</code></pre>
+<h3 id="32-golomb-code-decoder-gcd--run_count256-verbatim--both-refs-identical"><a class="header" href="#32-golomb-code-decoder-gcd--run_count256-verbatim--both-refs-identical">3.2 Golomb-Code Decoder (GCD) — <code>run_count[256]</code> (VERBATIM — both refs identical)</a></h3>
+<pre><code>0x00,0x00,0x01,0x00,0x03,0x01,0x02,0x00, 0x07,0x03,0x05,0x01,0x06,0x02,0x04,0x00,
+0x0f,0x07,0x0b,0x03,0x0d,0x05,0x09,0x01, 0x0e,0x06,0x0a,0x02,0x0c,0x04,0x08,0x00,
+0x1f,0x0f,0x17,0x07,0x1b,0x0b,0x13,0x03, 0x1d,0x0d,0x15,0x05,0x19,0x09,0x11,0x01,
+0x1e,0x0e,0x16,0x06,0x1a,0x0a,0x12,0x02, 0x1c,0x0c,0x14,0x04,0x18,0x08,0x10,0x00,
+0x3f,0x1f,0x2f,0x0f,0x37,0x17,0x27,0x07, 0x3b,0x1b,0x2b,0x0b,0x33,0x13,0x23,0x03,
+0x3d,0x1d,0x2d,0x0d,0x35,0x15,0x25,0x05, 0x39,0x19,0x29,0x09,0x31,0x11,0x21,0x01,
+0x3e,0x1e,0x2e,0x0e,0x36,0x16,0x26,0x06, 0x3a,0x1a,0x2a,0x0a,0x32,0x12,0x22,0x02,
+0x3c,0x1c,0x2c,0x0c,0x34,0x14,0x24,0x04, 0x38,0x18,0x28,0x08,0x30,0x10,0x20,0x00,
+0x7f,0x3f,0x5f,0x1f,0x6f,0x2f,0x4f,0x0f, 0x77,0x37,0x57,0x17,0x67,0x27,0x47,0x07,
+0x7b,0x3b,0x5b,0x1b,0x6b,0x2b,0x4b,0x0b, 0x73,0x33,0x53,0x13,0x63,0x23,0x43,0x03,
+0x7d,0x3d,0x5d,0x1d,0x6d,0x2d,0x4d,0x0d, 0x75,0x35,0x55,0x15,0x65,0x25,0x45,0x05,
+0x79,0x39,0x59,0x19,0x69,0x29,0x49,0x09, 0x71,0x31,0x51,0x11,0x61,0x21,0x41,0x01,
+0x7e,0x3e,0x5e,0x1e,0x6e,0x2e,0x4e,0x0e, 0x76,0x36,0x56,0x16,0x66,0x26,0x46,0x06,
+0x7a,0x3a,0x5a,0x1a,0x6a,0x2a,0x4a,0x0a, 0x72,0x32,0x52,0x12,0x62,0x22,0x42,0x02,
+0x7c,0x3c,0x5c,0x1c,0x6c,0x2c,0x4c,0x0c, 0x74,0x34,0x54,0x14,0x64,0x24,0x44,0x04,
+0x78,0x38,0x58,0x18,0x68,0x28,0x48,0x08, 0x70,0x30,0x50,0x10,0x60,0x20,0x40,0x00,
+</code></pre>
+<p><code>getRunCount(codeNum) -&gt; (mpsCount, lpsIndex)</code>:</p>
+<pre><code>cw = IM.getCodeWord(codeNum)
+if (cw &amp; 0x80) { lpsIndex = 1; mpsCount = run_count[cw &gt;&gt; (codeNum ^ 7)] }
+else           { mpsCount = 1 &lt;&lt; codeNum }   // lpsIndex stays 0
+</code></pre>
+<h3 id="33-bits-generator-bg--8-instances-bg0bg7-each-codenum--07"><a class="header" href="#33-bits-generator-bg--8-instances-bg0bg7-each-codenum--07">3.3 Bits Generator (BG) — 8 instances <code>bg0..bg7</code>, each <code>codeNum = 0..7</code></a></h3>
+<p>State: <code>mpsCount</code>, <code>lpsIndex</code> (init 0,0). <code>getBit() -&gt; (bit, endOfRun)</code>:</p>
+<pre><code>if (!mpsCount &amp;&amp; !lpsIndex) GCD.getRunCount(codeNum, &amp;mpsCount, &amp;lpsIndex)
+if (mpsCount) { bit = 0; mpsCount-- } else { bit = 1; lpsIndex = 0 }
+endOfRun = !(mpsCount || lpsIndex)
+</code></pre>
+<h3 id="34-probability-estimation-module-pem--evolution_table33-codenum-nextmps-nextlps-verbatim"><a class="header" href="#34-probability-estimation-module-pem--evolution_table33-codenum-nextmps-nextlps-verbatim">3.4 Probability Estimation Module (PEM) — <code>evolution_table[33]</code> {codeNum, nextMPS, nextLPS} (VERBATIM)</a></h3>
+<pre><code>{0,25,25},{0,2,1},{0,3,1},{0,4,2},{0,5,3},{1,6,4},{1,7,5},{1,8,6},{1,9,7},
+{2,10,8},{2,11,9},{2,12,10},{2,13,11},{3,14,12},{3,15,13},{3,16,14},{3,17,15},
+{4,18,16},{4,19,17},{5,20,18},{5,21,19},{6,22,20},{6,23,21},{7,24,22},{7,24,23},
+{0,26,1},{1,27,2},{2,28,4},{3,29,8},{4,30,12},{5,31,16},{6,32,18},{7,24,22},
+</code></pre>
+<p><code>contextInfo[32]</code> = {status, mps} (init 0,0). <code>getBit(context)</code>:</p>
+<pre><code>s = evolution_table[contextInfo[ctx].status]
+bit = bg[s.codeNum].getBit(&amp;endOfRun)
+if (endOfRun) {
+  if (bit) { if (!(status &amp; 0xFE)) contextInfo[ctx].mps ^= 1;  status = s.nextLPS }
+  else     { status = s.nextMPS }
+}
+return bit ^ contextInfo[ctx].mps
+</code></pre>
+<h3 id="35-context-model-cm--bitplane-interleave--context-bits"><a class="header" href="#35-context-model-cm--bitplane-interleave--context-bits">3.5 Context Model (CM) — bitplane interleave + context bits</a></h3>
+<p>State from header: <code>bitplanesInfo = firstByte &amp; 0xC0</code>, <code>contextBitsInfo = firstByte &amp; 0x30</code>; <code>bitNumber</code>, <code>currentBitplane</code>, <code>prevBitplaneBits[8]</code> (u16).
+Init <code>currentBitplane</code>: mode 0x00→1, 0x40→7, 0x80→3 (0xC0 set per bit).
+<code>getBit()</code>:</p>
+<pre><code>switch bitplanesInfo {
+  0x00: currentBitplane ^= 1
+  0x40: currentBitplane ^= 1; if (!(bitNumber &amp; 0x7F)) currentBitplane = (currentBitplane+2)&amp;7
+  0x80: currentBitplane ^= 1; if (!(bitNumber &amp; 0x7F)) currentBitplane ^= 2
+  0xC0: currentBitplane = bitNumber &amp; 7
+}
+ctxBits = &amp;prevBitplaneBits[currentBitplane]
+ctx = (currentBitplane &amp; 1) &lt;&lt; 4
+switch contextBitsInfo {
+  0x00: ctx |= ((*ctxBits &amp; 0x01C0) &gt;&gt; 5) | (*ctxBits &amp; 1)
+  0x10: ctx |= ((*ctxBits &amp; 0x0180) &gt;&gt; 5) | (*ctxBits &amp; 1)
+  0x20: ctx |= ((*ctxBits &amp; 0x00C0) &gt;&gt; 5) | (*ctxBits &amp; 1)
+  0x30: ctx |= ((*ctxBits &amp; 0x0180) &gt;&gt; 5) | (*ctxBits &amp; 3)
+}
+bit = PEM.getBit(ctx);  *ctxBits = (*ctxBits &lt;&lt; 1) | bit;  bitNumber++;  return bit
+</code></pre>
+<h3 id="36-output-logic-ol--bitplanes--bytes"><a class="header" href="#36-output-logic-ol--bitplanes--bytes">3.6 Output Logic (OL) — bitplanes → bytes</a></h3>
+<p>State: <code>bitplanesInfo</code> (= firstByte &amp; 0xC0), regs <code>r0,r1,r2</code> (init r0=1).
+<code>decompress() -&gt; byte</code>:</p>
+<pre><code>0x00 | 0x40 | 0x80:   // 2 planes → 2 bytes, returned across two calls
+  if (r0 == 0) { r0 = ~r0; return r2 }              // even call: buffered high byte
+  for (r0=0x80, r1=0, r2=0; r0; r0&gt;&gt;=1) {           // odd call: read 16 bits
+    if (CM.getBit()) r1 |= r0
+    if (CM.getBit()) r2 |= r0
+  }
+  return r1
+0xC0:                 // 8bpp: 1 plane → 1 byte
+  for (r0=0x01, r1=0; r0; r0&lt;&lt;=1) { if (CM.getBit()) r1 |= r0 }
+  return r1
+</code></pre>
+<p>Mode summary (header bits 7:6): <code>0x00/0x40/0x80</code> = 2-plane (2/4 bpp gfx), <code>0xC0</code> =
+1-plane (8 bpp). Bits 5:4 = which previous bits form the context window.</p>
+<hr />
+<h2 id="4-luna-porting-plan-stages"><a class="header" href="#4-luna-porting-plan-stages">4. luna porting plan (stages)</a></h2>
+<ol>
+<li><strong>Pure <code>Sdd1Decompressor</code></strong> (luna-bus, new file): IM/GCD/BG/PEM/CM/OL + the two
+verbatim tables, reading input via a <code>&amp;[u8] + offset</code> (or a closure). Unit-test
+the building blocks + table integrity in isolation — <strong>zero SNES coupling</strong>.</li>
+<li><strong><code>Sdd1Mapper</code> MMC</strong> (luna-bus): the <code>$4800-4807</code> regs + the banked-ROM read
+paths (<code>$00-3F/$80-BF:8000-FFFF</code> + <code>$C0-FF</code>), detection (<code>0x40</code>) + factory.
+No decompression yet — game boots + runs uncompressed code.</li>
+<li><strong>Wire decompression</strong>: forward <code>$43xx</code> writes to the mapper (capture addr/size),
+the <code>mcuRead</code> armed-DMA path in <code>mapper.read</code>. End-to-end: Star Ocean / SF Alpha
+2 graphics (user GUI eyeball — <code>audible-fixes</code>/visible-rendering rule).</li>
+<li><strong>Save-state + edge cases</strong> (serialize decompressor + MMC state).</li>
+</ol>
+<p>Validation: the two tables get an integrity test; each submodule a behavioural
+test; end-to-end is the real game in the GUI (no public S-DD1 golden corpus).</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../internals/coprocessors-superfx.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../method/faithful-port.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../internals/coprocessors-superfx.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../method/faithful-port.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

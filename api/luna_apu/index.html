@@ -1,0 +1,50 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="SNES APU — orchestrates the `luna-cpu-spc700` core, 64 KB of ARAM, the IPL ROM mapped over the top page, and the four mailbox ports facing the main CPU."><title>luna_apu - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-b7b9f40b.css"><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="luna_apu" data-themes="" data-resource-suffix="" data-rustdoc-version="1.95.0 (59807616e 2026-04-14)" data-channel="1.95.0" data-search-js="search-63369b7b.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-170eb4bf.js" ><script src="../static.files/storage-41dd4d93.js"></script><script defer src="../crates.js"></script><script defer src="../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../static.files/favicon-044be391.svg"></head><body class="rustdoc mod crate"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Crate luna_apu</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../luna_apu/index.html">luna_<wbr>apu</a><span class="version">1.4.0</span></h2></div><div class="sidebar-elems"><ul class="block"><li><a id="all-types" href="all.html">All Items</a></li></ul><section id="rustdoc-toc"><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#mailbox-direction-model" title="Mailbox direction model">Mailbox direction model</a></li><li><a href="#clock-ratio" title="Clock ratio">Clock ratio</a></li></ul><h3><a href="#modules">Crate Items</a></h3><ul class="block"><li><a href="#modules" title="Modules">Modules</a></li><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li></ul></section><div id="rustdoc-modnav"></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1>Crate <span>luna_<wbr>apu</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../src/luna_apu/lib.rs.html#1-1408">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>SNES APU — orchestrates the <code>luna-cpu-spc700</code> core, 64 KB of ARAM,
+the IPL ROM mapped over the top page, and the four mailbox ports
+facing the main CPU.</p>
+<p>The audio DSP (sample generation, voice mixing) is the
+cycle-accurate ares port in <a href="dsp/index.html" title="mod luna_apu::dsp"><code>dsp</code></a>; <code>$F2</code>/<code>$F3</code> route through it.</p>
+<h2 id="mailbox-direction-model"><a class="doc-anchor" href="#mailbox-direction-model">§</a>Mailbox direction model</h2>
+<p>The four SNES mailbox ports are actually <strong>two</strong> registers per
+port (one per direction):</p>
+<div class="example-wrap"><pre class="language-text"><code>                    ┌─────────────────────────────┐
+  CPU side          │       inside the APU         │       SPC700
+─────────────       │                             │     ───────────
+  $2140-$2143 ──W──▶│ to_spc_ports[0..3] (RAM)    │◀──R─ $00F4-$00F7
+                    │                             │
+  $2140-$2143 ◀──R──│ to_cpu_ports[0..3] (RAM)    │──W──▶ $00F4-$00F7
+                    └─────────────────────────────┘</code></pre></div>
+<p>A read at the same port from either side returns what <strong>the other
+side last wrote</strong>, not your own writes. This matches real hardware
+and is what the IPL ROM relies on for the boot handshake.</p>
+<h2 id="clock-ratio"><a class="doc-anchor" href="#clock-ratio">§</a>Clock ratio</h2>
+<p>SNES master = 21.477 MHz, SPC = 1.024 MHz, ratio ≈ 21. We run one
+SPC instruction per 84 master cycles, which assumes ~4-cycle
+average SPC instructions — good enough until we wire timer-driven
+cycle accounting in.</p>
+</div></details><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="dsp/index.html" title="mod luna_apu::dsp">dsp</a></dt><dd>Cycle-accurate ares port of the S-DSP — the live audio path. See
+<code>dsp.rs</code> for the 1-for-1 transliteration of <code>ares/sfc/dsp/*</code>.
+Cycle-accurate port of ares’ S-DSP (Sony CXD1222Q-1).</dd></dl><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.Apu.html" title="struct luna_apu::Apu">Apu</a></dt><dd>All APU state owned by <a href="struct.Apu.html" title="struct luna_apu::Apu"><code>Apu</code></a>: SPC700 core + 64 KB ARAM + the two
+4-byte mailbox arrays.</dd><dt><a class="struct" href="struct.Spc700TraceEvent.html" title="struct luna_apu::Spc700TraceEvent">Spc700<wbr>Trace<wbr>Event</a></dt><dd>One pre-opcode SPC700 register snapshot for the instruction trace
+(<code>--spc-trace</code>). Mirrors the SA-1 / Super FX trace events; diff the PC
+stream against a Mesen2 SPC700 trace to localise audio-driver
+divergences (e.g. the SMRPG/CT Akao CPU↔SPC handshake).</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.AUDIO_QUEUE_CAPACITY.html" title="constant luna_apu::AUDIO_QUEUE_CAPACITY">AUDIO_<wbr>QUEUE_<wbr>CAPACITY</a></dt><dd>Maximum number of stereo samples buffered in <code>audio_queue</code>. The
+host audio backend drains it each frame; bursts beyond this cap are
+dropped to keep emulator-side memory bounded. ~16k samples = 512 ms
+at 32 kHz, plenty of headroom for normal frame cadence.</dd><dt><a class="constant" href="constant.MASTER_CLOCK_HZ.html" title="constant luna_apu::MASTER_CLOCK_HZ">MASTER_<wbr>CLOCK_<wbr>HZ</a></dt><dd>NTSC SNES master clock (Hz) — the CPU/PPU timebase.</dd><dt><a class="constant" href="constant.MASTER_CYCLES_PER_SPC_STEP.html" title="constant luna_apu::MASTER_CYCLES_PER_SPC_STEP">MASTER_<wbr>CYCLES_<wbr>PER_<wbr>SPC_<wbr>STEP</a></dt><dd>Nominal master cycles per SPC instruction (~4 SPC cycles × the
+20.97 master/SPC ratio). Since Phase 2 this is <strong>no longer</strong> the
+scheduler quantum — <code>Apu::step</code> charges each instruction its real
+per-opcode cost — but it is kept as a convenience multiplier for
+tests that want “≈N instructions of headroom”.</dd><dt><a class="constant" href="constant.SPC_2X_HZ.html" title="constant luna_apu::SPC_2X_HZ">SPC_<wbr>2X_<wbr>HZ</a></dt><dd>SPC clock in Mesen2’s <strong>2× domain</strong> (<code>_state.Cycle</code> units): each SPC
+cycle is 2 of these, so the master→SPC target <code>master_clock × clockRatio</code>
+has half-SPC-cycle resolution. <code>clockRatio = spcSampleRate·64 / masterClock</code>, and <code>spcSampleRate·64 = 32_040 · 64 = 2_050_560 = 2 × SPC_CLOCK_HZ</code> — the integer numerator luna uses for the zero-drift
+fractional accumulator (<code>cpu_target_2x</code>).</dd><dt><a class="constant" href="constant.SPC_CLOCK_HZ.html" title="constant luna_apu::SPC_CLOCK_HZ">SPC_<wbr>CLOCK_<wbr>HZ</a></dt><dd>SPC700 / S-DSP clock (Hz): the APU crystal ÷ 24. The crystal is
+nominally 24.576 MHz (→ 1.024 MHz) but real hardware measures
+~24.607 MHz; ares (<code>apuFrequency = 32040·768</code>) and Mesen2 both use the
+measured value → <code>24_606_720</code> ÷ 24 = <strong><code>1_025_280</code> Hz</strong> (and a <code>32_040</code> Hz
+DSP output). luna’s textbook 1.024 MHz ran the SPC ~0.125 % slow, which
+shifts the CPU↔SPC clock alignment during the boot/upload handshake
+(differential vs ares: this value moves luna’s IPL-upload-loop exit
+measurably closer to ares — necessary, though not alone sufficient,
+for the Tales of Phantasia OP).</dd><dt><a class="constant" href="constant.SPC_CYCLES_PER_SAMPLE.html" title="constant luna_apu::SPC_CYCLES_PER_SAMPLE">SPC_<wbr>CYCLES_<wbr>PER_<wbr>SAMPLE</a></dt><dd>SPC cycles per audio sample: 32 SPC cycles → one DSP sample. At
+<a href="constant.SPC_CLOCK_HZ.html" title="constant luna_apu::SPC_CLOCK_HZ"><code>SPC_CLOCK_HZ</code></a> this yields the <code>32_040</code> Hz output rate ares and Mesen2
+produce (the host audio backend resamples to the device rate).</dd></dl></section></div></main></body></html>

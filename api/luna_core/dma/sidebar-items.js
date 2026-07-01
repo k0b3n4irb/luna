@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Direction","Increment","TransferMode"],"struct":["Dma","DmaChannel","DmaParams","DmaTraceEvent","DmaTraceLog"],"trait":["DmaBus"]};

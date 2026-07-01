@@ -1,0 +1,557 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>The PPU — graphics - Luna — SNES Emulator Guide</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Guide and reference for Luna, a cycle-accurate, AI-native SNES emulator written in Rust.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/luna.css">
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "navy";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="../introduction.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">Using Luna</li><li class="chapter-item expanded "><a href="../using/install.html"><strong aria-hidden="true">1.</strong> Install & first run</a></li><li class="chapter-item expanded "><a href="../using/controls.html"><strong aria-hidden="true">2.</strong> Controls</a></li><li class="chapter-item expanded "><a href="../using/debugging.html"><strong aria-hidden="true">3.</strong> Debugging tools</a></li><li class="chapter-item expanded "><a href="../using/saves.html"><strong aria-hidden="true">4.</strong> Saves & save states</a></li><li class="chapter-item expanded "><a href="../using/cli-api-mcp.html"><strong aria-hidden="true">5.</strong> CLI, API & MCP</a></li><li class="chapter-item expanded affix "><li class="part-title">How Luna Works</li><li class="chapter-item expanded "><a href="../internals/architecture.html"><strong aria-hidden="true">6.</strong> Architecture overview</a></li><li class="chapter-item expanded "><a href="../internals/ppu.html" class="active"><strong aria-hidden="true">7.</strong> The PPU — graphics</a></li><li class="chapter-item expanded "><a href="../internals/apu.html"><strong aria-hidden="true">8.</strong> The APU — audio</a></li><li class="chapter-item expanded "><a href="../internals/cpus.html"><strong aria-hidden="true">9.</strong> The CPUs — 65C816 & SPC700</a></li><li class="chapter-item expanded "><a href="../internals/memory-dma-bus.html"><strong aria-hidden="true">10.</strong> Memory, DMA & the bus</a></li><li class="chapter-item expanded "><a href="../internals/coprocessors.html"><strong aria-hidden="true">11.</strong> Coprocessors</a><a class="toggle"><div>❱</div></a></li><li><ol class="section"><li class="chapter-item "><a href="../internals/coprocessors-sa1.html"><strong aria-hidden="true">11.1.</strong> SA-1</a></li><li class="chapter-item "><a href="../internals/coprocessors-superfx.html"><strong aria-hidden="true">11.2.</strong> Super FX (GSU)</a></li><li class="chapter-item "><a href="../internals/coprocessors-sdd1.html"><strong aria-hidden="true">11.3.</strong> S-DD1</a></li></ol></li><li class="chapter-item expanded "><li class="part-title">The Faithful-Port Method</li><li class="chapter-item expanded "><a href="../method/faithful-port.html"><strong aria-hidden="true">12.</strong> Why "faithful port"</a></li><li class="chapter-item expanded "><a href="../method/differential.html"><strong aria-hidden="true">13.</strong> The differential harness</a></li><li class="chapter-item expanded "><a href="../method/accuracy.html"><strong aria-hidden="true">14.</strong> Accuracy scorecard</a></li><li class="chapter-item expanded "><a href="../method/testing.html"><strong aria-hidden="true">15.</strong> Testing & determinism</a><a class="toggle"><div>❱</div></a></li><li><ol class="section"><li class="chapter-item "><a href="../method/determinism.html"><strong aria-hidden="true">15.1.</strong> Determinism guarantees</a></li></ol></li><li class="chapter-item expanded "><a href="../method/road-to-a.html"><strong aria-hidden="true">16.</strong> The road to "A"</a></li><li class="chapter-item expanded affix "><li class="spacer"></li><li class="chapter-item expanded affix "><a href="../acknowledgements.html">Acknowledgements</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Luna — SNES Emulator Guide</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/k0b3n4irb/luna" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/k0b3n4irb/luna/edit/develop/book/src/internals/ppu.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="snes-ppu-compositor--dmaoam-pipeline--reference-spec"><a class="header" href="#snes-ppu-compositor--dmaoam-pipeline--reference-spec">SNES PPU compositor + DMA/OAM pipeline — reference spec</a></h1>
+<p>luna's faithful-port reference for the PPU compositor and the DMA/OAM pipeline.
+Every rule below describes hardware-accurate behaviour.</p>
+<hr />
+<h2 id="1-pixel-mixer-overview"><a class="header" href="#1-pixel-mixer-overview">1. Pixel mixer overview</a></h2>
+<p>Per dot, the hardware produces a final pixel by:</p>
+<ol>
+<li>Selecting a <strong>main-screen winner</strong> (BG1..4 / OBJ / backdrop) via priority comparison.</li>
+<li>Selecting a <strong>sub-screen winner</strong> the same way using TS instead of TM.</li>
+<li>Applying the <strong>window pipeline</strong> to zero out windowed layers and to compute the per-region "above.colorEnable" / "below.colorEnable" flags from CGWSEL bits 7:6 and 5:4.</li>
+<li>Applying <strong>force-main-black</strong> to the main pixel when above.colorEnable is false.</li>
+<li>Applying <strong>color math</strong> (add/sub, optional halve) when below.colorEnable is true AND the winning above layer's CGADSUB enable bit is set AND (for OBJ) the palette index is ≥ 192.</li>
+<li>Applying display brightness ($2100 bits 0-3).</li>
+</ol>
+<p>Hi-res (mode 5/6) and pseudo-hi-res (SETINI bit 3) double the horizontal resolution to 512 pixels by separately emitting the sub-pixel and main-pixel on alternating dot positions. The non-hi-res case discards the sub-pixel and emits the main-pixel twice.</p>
+<hr />
+<h2 id="2-the-abovebelow-mixer"><a class="header" href="#2-the-abovebelow-mixer">2. The above/below mixer</a></h2>
+<p>The hardware treats above and below symmetrically — same priority resolution, same per-layer enable (TM vs TS), same per-pixel winner stamping. The main–vs-sub asymmetry is <em>only</em> in:</p>
+<ul>
+<li>TM ($212C) gates above, TS ($212D) gates below.</li>
+<li>The DAC consumes them differently at the end: main is the displayed pixel; sub is one of two possible math operands.</li>
+</ul>
+<h3 id="21-main-screen-winner"><a class="header" href="#21-main-screen-winner">2.1 Main-screen winner</a></h3>
+<p>Per the hardware reference:</p>
+<p>For each layer in priority order, if the layer wrote a non-transparent pixel at this x, stamp:</p>
+<ul>
+<li><code>math.above.color</code> = the layer's pixel color (CGRAM-indexed, except BG1 direct-color in modes 3/4/7).</li>
+<li><code>math.below.colorEnable</code> = CGADSUB bit for that layer kind (BG1=bit0, BG2=bit1, BG3=bit2, BG4=bit3, OBJ=bit4 — and for OBJ, ALSO require palette ≥ 192 i.e. CGRAM index ≥ 192).</li>
+</ul>
+<p>If no layer drew, the winner is the backdrop:</p>
+<ul>
+<li><code>math.above.color</code> = CGRAM[0].</li>
+<li><code>math.below.colorEnable</code> = CGADSUB bit 5 (back colorEnable).</li>
+</ul>
+<p>Priority resolution uses a scalar comparator. The hardware flattens the layer×sub-priority space into one scalar so OBJ priority and BG priority are interleaved (e.g. OBJ priorities <code>{2,3,6,9}</code> for BG mode 1, BG3-priority).</p>
+<h3 id="22-sub-screen-winner"><a class="header" href="#22-sub-screen-winner">2.2 Sub-screen winner</a></h3>
+<p>Same algorithm, gated by TS instead of TM. The hardware renders a real sub-screen.</p>
+<p>If no sub-layer drew, the sub backdrop is CGRAM[0] (same as main backdrop) — there is <strong>no separate sub-backdrop register</strong>.</p>
+<p>"Sub had a real winner" is tracked by a per-x sub-priority flag (<code>&gt; 0</code>), equivalently a <code>math.transparent</code> boolean (see §4.3).</p>
+<h3 id="23-final-pixel-selection"><a class="header" href="#23-final-pixel-selection">2.3 Final pixel selection</a></h3>
+<pre><code>// pseudo-code for the final pixel selection
+
+if (!window.above.colorEnable[x])  math.above.color = 0;   // force-main-black
+if (!window.below.colorEnable[x])  math.below.colorEnable = false; // window-disables-math
+
+if (!math.below.colorEnable) {
+    // no math this dot
+    return math.above.colorEnable ? math.above.color : 0;
+}
+
+// math enabled
+operand_b = blendMode ? math.below.color : fixedColor;     // CGWSEL bit 1 selector
+if (blendMode &amp;&amp; math.transparent) {                       // sub had no real winner
+    operand_b = fixedColor;
+    colorHalve = false;                                    // disable halve
+}
+out = add_or_sub(math.above.color, operand_b, subtract, halve);
+return out;
+</code></pre>
+<p>Order of operations is exact: the force-main-black happens before the AllowColorMath/<code>math.below.colorEnable</code> gate, so even pixels where math is disabled can be blanked by the force-black rule.</p>
+<hr />
+<h2 id="3-window-pipeline"><a class="header" href="#3-window-pipeline">3. Window pipeline</a></h2>
+<h3 id="31-per-window-evaluation"><a class="header" href="#31-per-window-evaluation">3.1 Per-window evaluation</a></h3>
+<p>For each x, evaluate Window1 (<code>x ∈ [WH0..WH1]</code>) and Window2 (<code>x ∈ [WH2..WH3]</code>). Hardware semantic: when <code>left &gt; right</code> the window is empty, never matches.</p>
+<h3 id="32-per-layer-combiner"><a class="header" href="#32-per-layer-combiner">3.2 Per-layer combiner</a></h3>
+<p>Each of the 6 entities (BG1, BG2, BG3, BG4, OBJ, math) has 4 bits in its <code>*SEL</code> nibble:</p>
+<ul>
+<li>bit 0: W1 invert (true → use <code>!w1_in</code>).</li>
+<li>bit 1: W1 enable.</li>
+<li>bit 2: W2 invert (true → use <code>!w2_in</code>).</li>
+<li>bit 3: W2 enable.</li>
+</ul>
+<p>The per-layer window test:</p>
+<pre><code>if(!oneEnable) return two &amp;&amp; twoEnable;
+if(!twoEnable) return one;
+if(mask == 0) return (one | two);   // OR
+if(mask == 1) return (one &amp; two);   // AND
+return (one ^ two) == 3 - mask;     // mask=2 XOR (== 1), mask=3 XNOR (== 0)
+</code></pre>
+<p>The combiner output for a layer is then masked against TMW/TSW to gate per-layer rendering on each screen.</p>
+<h3 id="33-color-math-window"><a class="header" href="#33-color-math-window">3.3 Color-math window</a></h3>
+<p>The math window is a dedicated entry in the same array (it is layer index 5 of the window state). Its enable/invert bits live in <strong><code>$2125</code> WOBJSEL high nibble</strong> (math is the "logically 6th" layer alongside OBJ).</p>
+<p>The hardware computes the math-window <code>value</code> per dot, then expands it to two enable flags via the <code>array[] = {true, value, !value, false}</code> lookup:</p>
+<div class="table-wrapper"><table><thead><tr><th style="text-align: center">CGWSEL[7:6] aboveMask</th><th style="text-align: center">output.above.colorEnable</th><th style="text-align: left">meaning</th></tr></thead><tbody>
+<tr><td style="text-align: center">0</td><td style="text-align: center">true</td><td style="text-align: left">main never forced black</td></tr>
+<tr><td style="text-align: center">1</td><td style="text-align: center">value</td><td style="text-align: left">main visible inside window, FORCED BLACK outside</td></tr>
+<tr><td style="text-align: center">2</td><td style="text-align: center">!value</td><td style="text-align: left">main visible outside window, FORCED BLACK inside</td></tr>
+<tr><td style="text-align: center">3</td><td style="text-align: center">false</td><td style="text-align: left">main always forced black</td></tr>
+</tbody></table>
+</div><div class="table-wrapper"><table><thead><tr><th style="text-align: center">CGWSEL[5:4] belowMask</th><th style="text-align: center">output.below.colorEnable</th><th style="text-align: left">meaning</th></tr></thead><tbody>
+<tr><td style="text-align: center">0</td><td style="text-align: center">true</td><td style="text-align: left">math enabled everywhere</td></tr>
+<tr><td style="text-align: center">1</td><td style="text-align: center">value</td><td style="text-align: left">math enabled inside window only</td></tr>
+<tr><td style="text-align: center">2</td><td style="text-align: center">!value</td><td style="text-align: left">math enabled outside window only</td></tr>
+<tr><td style="text-align: center">3</td><td style="text-align: center">false</td><td style="text-align: left">math disabled everywhere</td></tr>
+</tbody></table>
+</div>
+<p>The four mode values can be named:</p>
+<ul>
+<li><code>Never = 0</code>, <code>OutsideWindow = 1</code>, <code>InsideWindow = 2</code>, <code>Always = 3</code>.</li>
+</ul>
+<p>For force-black (clip mode, bits 7:6):</p>
+<ul>
+<li><code>OutsideWindow</code> (1) means "force black OUTSIDE the window" → main visible inside.</li>
+<li><code>InsideWindow</code> (2) means "force black INSIDE the window" → main visible outside.</li>
+</ul>
+<p>For math-region (prevent mode, bits 5:4):</p>
+<ul>
+<li><code>OutsideWindow</code> (1) means "math DISABLED outside the window" → math fires inside only.</li>
+<li><code>InsideWindow</code> (2) means "math DISABLED inside the window" → math fires outside only.</li>
+</ul>
+<p>The named-region view (where the rule is active) and the <code>array[]</code> flag-value view (the flag value at that x) decode to identical per-x behaviour.</p>
+<hr />
+<h2 id="4-color-math-semantics"><a class="header" href="#4-color-math-semantics">4. Color math semantics</a></h2>
+<h3 id="41-cgadsub-2131"><a class="header" href="#41-cgadsub-2131">4.1 CGADSUB ($2131)</a></h3>
+<p>Bit layout:</p>
+<ul>
+<li>bit 0..3: BG1..BG4 colorEnable.</li>
+<li>bit 4: OBJ colorEnable (gated by palette ≥ 192 at pixel-pick time).</li>
+<li>bit 5: backdrop colorEnable.</li>
+<li>bit 6: colorHalve.</li>
+<li>bit 7: subtract (0=add, 1=sub).</li>
+</ul>
+<h3 id="42-blend-semantics"><a class="header" href="#42-blend-semantics">4.2 Blend semantics</a></h3>
+<p>Add:</p>
+<pre><code>sum = x + y;
+carry = (sum - ((x ^ y) &amp; 0x0421)) &amp; 0x8420;
+result = (sum - carry) | (carry - (carry &gt;&gt; 5));
+</code></pre>
+<p>The <code>0x0421</code> / <code>0x8420</code> magic isolates inter-channel carries for the BGR555 packed representation. With halve: <code>(x + y - ((x^y) &amp; 0x0421)) &gt;&gt; 1</code>.</p>
+<p>Sub: <code>diff = x - y + 0x8420; borrow = (diff - ((x^y) &amp; 0x8420)) &amp; 0x8420; ...</code> — same channel-isolation trick going the other way.</p>
+<p>An equivalent per-channel formulation (operating after unpacking) produces identical results on valid inputs.</p>
+<h3 id="43-the-mathtransparent-fallback"><a class="header" href="#43-the-mathtransparent-fallback">4.3 The <code>math.transparent</code> fallback</a></h3>
+<p>The hardware applies this rule: when sub-as-math-operand (<code>blendMode</code>) is on but the sub-screen had <strong>no real winner</strong> at this x (only the sub backdrop), the math operand falls back to the fixed color and the halve is disabled for this dot:</p>
+<pre><code>if(blendMode &amp;&amp; sub_had_no_real_winner) {
+  operand_b   = fixedColor;         // operand becomes fixedColor
+  colorHalve  = false;              // halve disabled this dot
+}
+</code></pre>
+<p>where "no real winner" means the per-x sub-priority is 0 (the sub backdrop was the only sub thing).</p>
+<p>luna MUST implement this fallback or any dialog-box-style math against an empty sub region will halve a non-zero pixel and look wrong.</p>
+<hr />
+<h2 id="5-direct-color-cgwsel-bit-0"><a class="header" href="#5-direct-color-cgwsel-bit-0">5. Direct color (CGWSEL bit 0)</a></h2>
+<p>When set, BG1 in modes 3/4/7 reinterprets its palette byte as a packed BGR triplet rather than indexing CGRAM:</p>
+<ul>
+<li><code>palette = bbgggrr</code> (low 8 bits from tilemap).</li>
+<li>Optional <code>paletteGroup = -----bgr</code> (low 3 bits from tilemap's palette field).</li>
+<li>The hardware combines these to produce a 15-bit color.</li>
+</ul>
+<p>luna implements this: it decodes the 8-bit <code>BBGGGRRR</code> palette byte AND
+folds in the 3-bit tilemap palette group (R←g0, G←g1, B←g2), so the
+paletteGroup low bits are NOT dropped.</p>
+<hr />
+<h2 id="6-obj-rendering"><a class="header" href="#6-obj-rendering">6. OBJ rendering</a></h2>
+<h3 id="61-per-scanline-evaluation"><a class="header" href="#61-per-scanline-evaluation">6.1 Per-scanline evaluation</a></h3>
+<p>The hardware walks OAM once per scanline checking sprite Y vs current line and OBSEL size. Up to 32 sprites per line, 34 tiles per line. Sprite overflow flags ($213E bits 6/7) set when caps are exceeded.</p>
+<p>Evaluation starts from sprite N where N is the OAM-priority rotation index (refreshed by OAM <code>$2104</code> writes).</p>
+<h3 id="62-oam-address-reset-at-vblank"><a class="header" href="#62-oam-address-reset-at-vblank">6.2 OAM address reset at VBlank</a></h3>
+<p><code>InternalOamAddress = OamRamAddress &lt;&lt; 1</code> at vcounter == vdisp, <strong>only when force-blank is OFF</strong>:</p>
+<pre><code>if(scanline == vdisp &amp;&amp; !forcedBlank) {
+    InternalOamAddress = OamRamAddress &lt;&lt; 1;
+}
+</code></pre>
+<p>Additionally: a write to <strong>$2100</strong> that exits force-blank while at the vblank line triggers the same reset.</p>
+<p>This is critical for SMW: the game expects every NMI to start OAM-streaming at index 0. If the reset is missing, the OAM DMA lands at whatever the last-written <code>$2102/$2103</code> address was — which for many games is fine because they explicitly write <code>$2103=0</code> before the DMA, but games that rely on the auto-reset will end up with garbled or empty OAM.</p>
+<h3 id="63-oam-2104-write"><a class="header" href="#63-oam-2104-write">6.3 OAM <code>$2104</code> write</a></h3>
+<p>Even-address writes are LATCHED until the odd-address write commits both atomically:</p>
+<pre><code>n1 latchBit = oamAddress.bit(0);
+n10 address = oamAddress++;
+if(latchBit == 0) latch.oam = data;
+if(address.bit(9)) {
+  writeOAM(address, data);              // high table = direct byte
+} else if(latchBit == 1) {
+  writeOAM((address &amp; ~1) + 0, latch.oam);
+  writeOAM((address &amp; ~1) + 1, data);
+}
+setFirstSprite();                       // refresh OAM-priority rotation
+</code></pre>
+<p>luna implements the even-byte latch correctly. luna does not maintain a
+<em>cached</em> firstSprite refreshed on every <code>$2104</code> write the way the hardware
+reference's <code>setFirstSprite()</code> does; instead it derives it on demand each
+scanline from the priority-rotation flag and the <code>$2103</code> word address,
+returning <code>(word_address &gt;&gt; 2) &amp; 0x7F</code> when priority rotation is on, else
+0. Same observable result; the firstSprite index is just recomputed lazily
+rather than stamped per write.</p>
+<h3 id="64-sprite-double-buffering"><a class="header" href="#64-sprite-double-buffering">6.4 Sprite double-buffering</a></h3>
+<p>The hardware double-buffers the per-line tile cache: <code>active ^= 1</code> at start of each scanline, the run consumes <code>tile[!active]</code> (filled the previous scanline), and the fetch fills <code>tile[active]</code> for the next scanline — i.e. sprites for line N are evaluated at the end of line N-1.</p>
+<p>luna decodes the sprite set <strong>once per scanline</strong> and shares it across the
+whole line: it evaluates sprites once and threads the decode into the
+per-pixel compositor, so per-pixel composition does not re-walk OAM. What
+luna does NOT do is the cross-scanline
+double-buffer (fetch line N's tiles while running line N-1); it evaluates
+the current line's sprites against live OAM at the start of that line. The
+practical effect is the same for static OAM; only a game that rewrites OAM
+mid-scanline expecting the previous line's fetched tiles to already be
+latched would differ — and no commercial title in the corpus relies on it.</p>
+<hr />
+<h2 id="7-dma--hdma-timing"><a class="header" href="#7-dma--hdma-timing">7. DMA / HDMA timing</a></h2>
+<h3 id="71-general-dma-420b"><a class="header" href="#71-general-dma-420b">7.1 General DMA ($420B)</a></h3>
+<p>Write to <code>$420B</code> with a 1-bit set per active channel:</p>
+<ul>
+<li>The CPU stalls for the transfer duration.</li>
+<li>Transfers happen one channel at a time, in channel-number order.</li>
+<li>8 cycles per byte transferred + overhead.</li>
+</ul>
+<h3 id="72-hdma-enable--service-420c"><a class="header" href="#72-hdma-enable--service-420c">7.2 HDMA enable / service ($420C)</a></h3>
+<p><code>$420C</code> enables HDMA channels for the <em>next</em> HDMA setup at the start of the next frame.</p>
+<p>HDMA setup runs at H=6 of scanline 0 (visible frame start), resetting per-channel state. HDMA transfer runs on every visible scanline at H=278 (just before HBlank), performing one transfer per enabled channel based on the channel's repeat counter.</p>
+<p>The hardware dispatches HDMA event-driven.</p>
+<h3 id="73-auto-joypad-read-4200-bit-0"><a class="header" href="#73-auto-joypad-read-4200-bit-0">7.3 Auto-joypad-read ($4200 bit 0)</a></h3>
+<p>Fires at scanline <code>vdisp + 2.5</code> (NTSC line 227.5) when bit 0 of <code>$4200</code> is set. Reads <code>$4016/$4017</code> 16 times, writes the resulting bit-shifted-in values to <code>$4218..$421F</code>.</p>
+<p>While the auto-read is in progress, <code>$4212</code> bit 0 reads 1 ("auto-joypad-read busy").</p>
+<h3 id="74-hvbjoy-4212"><a class="header" href="#74-hvbjoy-4212">7.4 HVBJOY ($4212)</a></h3>
+<ul>
+<li>bit 0: auto-joypad-read busy.</li>
+<li>bit 6: HBlank — TRUE during HBlank (hcounter ≥ 274) of <em>every</em> line including non-visible.</li>
+<li>bit 7: VBlank — TRUE from scanline vdisp until line 261/311 (NTSC/PAL).</li>
+</ul>
+<hr />
+<h2 id="8-nmi--vblank"><a class="header" href="#8-nmi--vblank">8. NMI / VBlank</a></h2>
+<ul>
+<li>NMI fires at the start of vblank (scanline 225 NTSC non-overscan) when <code>$4200.7</code> is set.</li>
+<li><code>$4210</code> (RDNMI) read returns the NMI flag in bit 7 and clears it (open-bus bits 0-6).</li>
+<li>IRQ is gated by <code>$4200.5</code> (V-IRQ) or <code>$4200.4</code> (H-IRQ).</li>
+</ul>
+<hr />
+<h2 id="8b-readwrite-latches-and-write-twice-quirks"><a class="header" href="#8b-readwrite-latches-and-write-twice-quirks">8b. Read/write latches and write-twice quirks</a></h2>
+<h3 id="8b1-stat78-213f-read-resets-the-ophctopvct-byte-flip-flop"><a class="header" href="#8b1-stat78-213f-read-resets-the-ophctopvct-byte-flip-flop">8b.1 STAT78 ($213F) read resets the OPHCT/OPVCT byte flip-flop</a></h3>
+<p>OPHCT ($213C) and OPVCT ($213D) are 9-bit latched counters read one byte
+at a time via a shared low/high <strong>byte flip-flop</strong>: the first read returns
+the low byte and arms the flip-flop, the second returns bit 0 of the high
+byte and disarms it.</p>
+<p>Reading <strong>STAT78 ($213F)</strong> resets that flip-flop as a side effect, so the
+<em>next</em> OPHCT/OPVCT read is guaranteed to return the LOW byte:</p>
+<pre><code>latch.hcounter = 0;
+latch.vcounter = 0;
+</code></pre>
+<p>A handler that does not re-sync via $213F can desync the toggle and read
+the high byte (0 for lines &lt; 256) when it expected the low byte. This was
+the root cause of a Doom raster-IRQ flicker: Doom's raster IRQ read V≈0,
+mis-dispatched to its no-ack branch, and re-fired the H/V IRQ ~200×/frame.</p>
+<p>luna implements this: reading STAT78 clears the OPHCT/OPVCT high-byte
+pending flags — the same read also clears the shared BG-scroll write-twice
+latch and the external-latch-hit status bit.</p>
+<h3 id="8b2-bg-scroll-210d-2114-write-twice--two-shared-latches"><a class="header" href="#8b2-bg-scroll-210d-2114-write-twice--two-shared-latches">8b.2 BG scroll ($210D-$2114) write-twice — TWO shared latches</a></h3>
+<p>The regular-BG scroll registers are write-twice into a pair of shared
+8-bit latches <code>bgofs_ppu1</code> / <code>bgofs_ppu2</code>:</p>
+<ul>
+<li><strong>H-scroll write ($210D/$210F/$2111/$2113):</strong> the composed 10-bit offset
+takes bits 3-9 from PPU1's <em>previous</em> byte (<code>bgofs_ppu1 &amp; ~7</code>), bits 0-2
+from PPU2's <em>byte-before-that</em> (<code>bgofs_ppu2 &amp; 7</code>), and bits 8-9 from the
+newly written high byte. <strong>Both</strong> latches then take the new byte. The
+cross-latch on the low 3 bits is the real hardware quirk — it only
+manifests when scroll registers interleave; a single latch mis-scrolls
+the sub-tile H offset.</li>
+<li><strong>V-scroll write ($210E/$2110/$2112/$2114):</strong> uses the FULL previous-write
+latch (<code>bgofs_ppu1</code>, no PPU2 cross) and updates ONLY <code>bgofs_ppu1</code>.</li>
+</ul>
+<p>luna implements both: the H-scroll write (dual-latch cross) and the
+V-scroll write (PPU1-only). The Mode-7 M7HOFS/M7VOFS write-twice uses a
+<em>separate</em> <code>m7_latch</code>, not these BG-scroll latches.</p>
+<hr />
+<h2 id="9-mid-frame-register-write-latching"><a class="header" href="#9-mid-frame-register-write-latching">9. Mid-frame register write latching</a></h2>
+<p>The hardware treats PPU register writes as <strong>instantaneous, mid-scanline</strong>. The pixel up to the write x position uses the OLD state; the rest of the scanline uses the NEW state — equivalently, the in-progress line is rendered up to the write x before the register write that affects rendering is applied.</p>
+<p>luna renders <strong>per scanline</strong>, not in one end-of-frame pass: the scheduler
+renders each visible line at its end, committing it to the persistent
+framebuffer. So a register write on line N is already seen by lines N+1.. —
+mid-frame tilemap/palette changes for status-bar split, parallax, and
+HDMA-driven effects render correctly at scanline granularity.</p>
+<p>luna additionally models <strong>mid-scanline</strong> writes: a rendering-affecting
+register write flushes the in-progress line up to the current dot so pixels
+left of the write keep the OLD state and pixels right of it use the NEW
+state — matching the hardware's render-before-write model. The remaining
+gap is purely sub-dot ordering, not whole-frame staleness.</p>
+<hr />
+<h2 id="10-force-display--vram--cgram--oam-access-gating"><a class="header" href="#10-force-display--vram--cgram--oam-access-gating">10. Force-display / VRAM / CGRAM / OAM access gating</a></h2>
+<p>The hardware enforces:</p>
+<ul>
+<li>VRAM read/write during active display (forced-blank OFF, vcounter &lt; vdisp) returns 0 / discards the write.</li>
+<li>CGRAM write during active display lands at <code>latch.cgramAddress</code> (the address-mux updated by the DAC per pixel), not the address the game programmed.</li>
+<li>OAM read/write during active display routes through <code>latch.oamAddress</code> (updated by the OBJ evaluator).</li>
+</ul>
+<p>luna implements the VRAM and OAM gates: it tracks an <code>active_display</code> flag
+(true when not forced-blank AND on a visible scanline) and routes the data
+ports through gated writers for VRAM and OAM. When <code>active_display</code> is true
+the byte is dropped but the address counter (and OAM even/odd latch) still
+advance, matching the hardware reference.</p>
+<p>CGRAM is <strong>deliberately ungated</strong>: on real hardware an active-display CGRAM
+write still commits, just at the
+DAC's <code>latch.cgramAddress</code> rather than the programmed address. luna commits
+at the programmed address — it does not yet model the per-pixel
+address-mux, so the <em>value</em> lands but at the wrong slot only in the rare
+case a game writes CGRAM mid-active-line. This is the one remaining
+sub-quirk; the blanket "implements none of these gates" was stale.</p>
+<hr />
+<h2 id="11-mode-7-and-extbg"><a class="header" href="#11-mode-7-and-extbg">11. Mode-7 and EXTBG</a></h2>
+<p>Mode 7 (BGMODE=7): BG1 is a 1024×1024 affine-transformed 8bpp tilemap. M7A/M7B/M7C/M7D matrix (signed 8.8), M7X/M7Y center (signed 13-bit).</p>
+<p>EXTBG (SETINI bit 6): BG2 reuses the Mode-7 framebuffer with priority bits
+from the high tile-byte — used by F-Zero, Pilotwings.</p>
+<p>luna implements EXTBG: when <code>BGMODE == 7 &amp;&amp; (setini &amp; 0x40) != 0</code> it
+exposes the affine plane as BG2, deriving the colour from the low 7 bits of
+the 8bpp pixel and the priority from bit 7, and composites it with BG2's
+priority slots. Mode 7 is no longer BG1-only.</p>
+<hr />
+<h2 id="appendix-cgwsel--cgadsub--setini-bit-level-cross-check"><a class="header" href="#appendix-cgwsel--cgadsub--setini-bit-level-cross-check">Appendix: CGWSEL / CGADSUB / SETINI bit-level cross-check</a></h2>
+<div class="table-wrapper"><table><thead><tr><th style="text-align: left">Reg.bits</th><th style="text-align: left">Meaning</th></tr></thead><tbody>
+<tr><td style="text-align: left">$2130.0</td><td style="text-align: left">direct color</td></tr>
+<tr><td style="text-align: left">$2130.1</td><td style="text-align: left">sub-as-math-operand</td></tr>
+<tr><td style="text-align: left">$2130.5:4</td><td style="text-align: left">math-region (4 values: <code>Never</code>/<code>OutsideWindow</code>/<code>InsideWindow</code>/<code>Always</code>)</td></tr>
+<tr><td style="text-align: left">$2130.7:6</td><td style="text-align: left">force-main-black region (4 values, same enum)</td></tr>
+<tr><td style="text-align: left">$2131.0..3</td><td style="text-align: left">BG1..BG4 colorEnable</td></tr>
+<tr><td style="text-align: left">$2131.4</td><td style="text-align: left">OBJ colorEnable (+ pal≥192)</td></tr>
+<tr><td style="text-align: left">$2131.5</td><td style="text-align: left">back colorEnable</td></tr>
+<tr><td style="text-align: left">$2131.6</td><td style="text-align: left">colorHalve</td></tr>
+<tr><td style="text-align: left">$2131.7</td><td style="text-align: left">subtract</td></tr>
+<tr><td style="text-align: left">$2132</td><td style="text-align: left">fixed color (R/G/B select bits 7/6/5, value low 5)</td></tr>
+<tr><td style="text-align: left">$2133.6</td><td style="text-align: left">EXTBG</td></tr>
+<tr><td style="text-align: left">$2133.5</td><td style="text-align: left">hi-res</td></tr>
+<tr><td style="text-align: left">$4200.0</td><td style="text-align: left">auto-joypad-read enable</td></tr>
+<tr><td style="text-align: left">$4200.7</td><td style="text-align: left">NMI enable</td></tr>
+<tr><td style="text-align: left">$4212.0</td><td style="text-align: left">auto-joypad busy</td></tr>
+<tr><td style="text-align: left">$4212.6</td><td style="text-align: left">live HBlank</td></tr>
+<tr><td style="text-align: left">$4212.7</td><td style="text-align: left">VBlank</td></tr>
+</tbody></table>
+</div>
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../internals/architecture.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../internals/apu.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../internals/architecture.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../internals/apu.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

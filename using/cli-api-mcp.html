@@ -1,0 +1,544 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>CLI, API &amp; MCP - Luna — SNES Emulator Guide</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Guide and reference for Luna, a cycle-accurate, AI-native SNES emulator written in Rust.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/luna.css">
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "navy";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="../introduction.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">Using Luna</li><li class="chapter-item expanded "><a href="../using/install.html"><strong aria-hidden="true">1.</strong> Install & first run</a></li><li class="chapter-item expanded "><a href="../using/controls.html"><strong aria-hidden="true">2.</strong> Controls</a></li><li class="chapter-item expanded "><a href="../using/debugging.html"><strong aria-hidden="true">3.</strong> Debugging tools</a></li><li class="chapter-item expanded "><a href="../using/saves.html"><strong aria-hidden="true">4.</strong> Saves & save states</a></li><li class="chapter-item expanded "><a href="../using/cli-api-mcp.html" class="active"><strong aria-hidden="true">5.</strong> CLI, API & MCP</a></li><li class="chapter-item expanded affix "><li class="part-title">How Luna Works</li><li class="chapter-item expanded "><a href="../internals/architecture.html"><strong aria-hidden="true">6.</strong> Architecture overview</a></li><li class="chapter-item expanded "><a href="../internals/ppu.html"><strong aria-hidden="true">7.</strong> The PPU — graphics</a></li><li class="chapter-item expanded "><a href="../internals/apu.html"><strong aria-hidden="true">8.</strong> The APU — audio</a></li><li class="chapter-item expanded "><a href="../internals/cpus.html"><strong aria-hidden="true">9.</strong> The CPUs — 65C816 & SPC700</a></li><li class="chapter-item expanded "><a href="../internals/memory-dma-bus.html"><strong aria-hidden="true">10.</strong> Memory, DMA & the bus</a></li><li class="chapter-item expanded "><a href="../internals/coprocessors.html"><strong aria-hidden="true">11.</strong> Coprocessors</a><a class="toggle"><div>❱</div></a></li><li><ol class="section"><li class="chapter-item "><a href="../internals/coprocessors-sa1.html"><strong aria-hidden="true">11.1.</strong> SA-1</a></li><li class="chapter-item "><a href="../internals/coprocessors-superfx.html"><strong aria-hidden="true">11.2.</strong> Super FX (GSU)</a></li><li class="chapter-item "><a href="../internals/coprocessors-sdd1.html"><strong aria-hidden="true">11.3.</strong> S-DD1</a></li></ol></li><li class="chapter-item expanded "><li class="part-title">The Faithful-Port Method</li><li class="chapter-item expanded "><a href="../method/faithful-port.html"><strong aria-hidden="true">12.</strong> Why "faithful port"</a></li><li class="chapter-item expanded "><a href="../method/differential.html"><strong aria-hidden="true">13.</strong> The differential harness</a></li><li class="chapter-item expanded "><a href="../method/accuracy.html"><strong aria-hidden="true">14.</strong> Accuracy scorecard</a></li><li class="chapter-item expanded "><a href="../method/testing.html"><strong aria-hidden="true">15.</strong> Testing & determinism</a><a class="toggle"><div>❱</div></a></li><li><ol class="section"><li class="chapter-item "><a href="../method/determinism.html"><strong aria-hidden="true">15.1.</strong> Determinism guarantees</a></li></ol></li><li class="chapter-item expanded "><a href="../method/road-to-a.html"><strong aria-hidden="true">16.</strong> The road to "A"</a></li><li class="chapter-item expanded affix "><li class="spacer"></li><li class="chapter-item expanded affix "><a href="../acknowledgements.html">Acknowledgements</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Luna — SNES Emulator Guide</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/k0b3n4irb/luna" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/k0b3n4irb/luna/edit/develop/book/src/using/cli-api-mcp.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="luna-cli--api-reference"><a class="header" href="#luna-cli--api-reference">luna CLI / API reference</a></h1>
+<p>The complete, human-readable reference for driving luna headless: the
+<code>luna</code> command-line binary, the <code>luna-api</code> Rust surface every front-end
+shares, and the MCP tool catalogue.</p>
+<blockquote>
+<p><strong>Source of truth.</strong> The CLI is self-documenting via <code>clap</code>: run
+<code>luna &lt;command&gt; --help</code> for the canonical, always-current flag list.
+The Rust API is documented inline — <code>cargo doc -p luna-api --open</code>
+browses every method. This file is the curated overview; if it ever
+disagrees with <code>--help</code> / rustdoc, those win.</p>
+</blockquote>
+<p>luna is <strong>API-first</strong>: the CLI, the MCP server, and the GUI are all thin
+consumers of the one <code>luna_api::Emulator</code> contract. What <code>luna state</code>
+measures is exactly what the GUI shows — coherence by construction.</p>
+<hr />
+<h2 id="1-the-luna-cli"><a class="header" href="#1-the-luna-cli">1. The <code>luna</code> CLI</a></h2>
+<pre><code>luna &lt;COMMAND&gt;
+
+Commands:
+  run         Load a ROM, step N instructions, optionally dump a screenshot.
+  state       Run through luna-api and emit a JSON state snapshot (+ dumps/traces).
+  frames      Capture EXACTLY-consecutive PPU frames as PNGs (temporal artefacts).
+  wram-trace  Per-frame vblank-aligned WRAM page hashes (cross-emulator differential).
+  bench       Run a whole ROM directory headless and write a compatibility report.
+  spc-dump    Export the live APU state as a playable .spc sound file.
+  assets-dump Dump the loaded graphics (VRAM tiles, tilemaps, palette, sprites) as PNGs.
+  mcp         Serve the luna MCP server on stdio.
+
+Global options:
+  -h, --help     Print help
+  -V, --version  Print version
+</code></pre>
+<p>Build it with <code>cargo build --release -p luna-cli</code>; the binary is
+<code>./target/release/luna</code>.</p>
+<h3 id="luna-run--quick-render--audio-dump"><a class="header" href="#luna-run--quick-render--audio-dump"><code>luna run</code> — quick render / audio dump</a></h3>
+<pre><code>luna run [OPTIONS] &lt;ROM&gt;
+</code></pre>
+<div class="table-wrapper"><table><thead><tr><th>Option</th><th>Default</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>&lt;ROM&gt;</code></td><td>—</td><td>Path to the <code>.sfc</code> / <code>.smc</code> ROM.</td></tr>
+<tr><td><code>-n, --steps &lt;N&gt;</code></td><td><code>64</code></td><td>CPU instructions to execute before dumping.</td></tr>
+<tr><td><code>--screenshot &lt;PATH&gt;</code></td><td>—</td><td>Render a 256×224 PNG of the framebuffer to <code>PATH</code>.</td></tr>
+<tr><td><code>--force-display</code></td><td>off</td><td>Bypass INIDISP forced-blank so you see whatever is in VRAM/CGRAM.</td></tr>
+<tr><td><code>--bg &lt;1..=4&gt;</code></td><td>composited</td><td>Render ONLY that BG layer instead of the composited frame.</td></tr>
+<tr><td><code>--audio-out &lt;PATH&gt;</code></td><td>—</td><td>Capture the APU's 32 kHz stereo output to a WAV.</td></tr>
+</tbody></table>
+</div>
+<pre><code class="language-bash">luna run -n 12000000 --screenshot /tmp/title.png "game.sfc"
+</code></pre>
+<h3 id="luna-state--json-snapshot--diagnostics-the-workhorse"><a class="header" href="#luna-state--json-snapshot--diagnostics-the-workhorse"><code>luna state</code> — JSON snapshot + diagnostics (the workhorse)</a></h3>
+<pre><code>luna state [OPTIONS] &lt;ROM&gt;
+</code></pre>
+<p>Emits the same <code>EmulatorState</code> JSON the MCP <code>state</code> tool returns (§2),
+and is the hub for every headless diagnostic.</p>
+<div class="table-wrapper"><table><thead><tr><th>Option</th><th>Default</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>&lt;ROM&gt;</code></td><td>—</td><td>Path to the ROM.</td></tr>
+<tr><td><code>-n, --steps &lt;N&gt;</code></td><td><code>1000</code></td><td>CPU instructions before snapshotting.</td></tr>
+<tr><td><code>--out &lt;PATH&gt;</code></td><td><code>-</code></td><td>Where to write the JSON (<code>-</code> = stdout).</td></tr>
+<tr><td><code>--force-mapper &lt;M&gt;</code></td><td>auto</td><td>Force a mapper for headerless ROMs: <code>lorom</code>, <code>hirom</code>, <code>exhirom</code>, <code>sa1</code>, <code>superfx</code>.</td></tr>
+<tr><td><code>--dsp1-rom &lt;PATH&gt;</code></td><td>—</td><td>Install <code>dsp1b.rom</code> firmware then load (Mario Kart, Pilotwings). Persists.</td></tr>
+<tr><td><code>--load-state &lt;PATH&gt;</code></td><td>—</td><td>Load a <code>.luna</code> save-state right after ROM load, before warm-up (resume a GUI-captured scene).</td></tr>
+<tr><td><code>--input &lt;SCRIPT&gt;</code></td><td>—</td><td>Scripted joypad-1 input (§3).</td></tr>
+<tr><td><code>--screenshot &lt;PATH&gt;</code></td><td>—</td><td>Also write a PNG.</td></tr>
+<tr><td><code>--audio-out &lt;PATH&gt;</code></td><td>—</td><td>Also write a 32 kHz stereo WAV.</td></tr>
+<tr><td><code>--peek &lt;B:O:C&gt;</code></td><td>—</td><td>Hex-dump <code>COUNT</code> bytes at <code>BANK:OFFSET</code> to stderr (repeatable).</td></tr>
+<tr><td><code>--dump-vram &lt;PATH&gt;</code></td><td>—</td><td>Dump all 64 KB PPU VRAM (raw).</td></tr>
+<tr><td><code>--dump-aram &lt;PATH&gt;</code></td><td>—</td><td>Dump all 64 KB APU ARAM (raw).</td></tr>
+<tr><td><code>--dump-coproc-ram &lt;PATH&gt;</code></td><td>—</td><td>Dump coprocessor work RAM (Super FX Game Pak RAM), ungated.</td></tr>
+<tr><td><code>--apu-log &lt;PATH&gt;</code></td><td>—</td><td>CSV of every <code>$2140-$2143</code> CPU↔APU mailbox access.</td></tr>
+<tr><td><code>--sa1-log &lt;PATH&gt;</code></td><td>—</td><td>CSV of every <code>$2200-$23FF</code> SA-1 MMIO access.</td></tr>
+</tbody></table>
+</div>
+<pre><code class="language-bash"># JSON snapshot to stdout, plus a peek at SMW shadow-OAM
+luna state -n 1000000 --peek 7E:0200:220 "game.sfc"
+
+# Reach the name-entry screen by pulsing Start, then screenshot
+luna state -n 55000000 \
+  --input "1600:0x1000,1610:0,2000:0x1000,2010:0" \
+  --screenshot /tmp/name.png "game.sfc"
+</code></pre>
+<h3 id="luna-frames--consecutive-frame-capture-temporal-artefacts"><a class="header" href="#luna-frames--consecutive-frame-capture-temporal-artefacts"><code>luna frames</code> — consecutive-frame capture (temporal artefacts)</a></h3>
+<pre><code>luna frames [OPTIONS] &lt;ROM&gt;
+</code></pre>
+<p>Captures a run of consecutive PPU frames as PNGs through the same render
+path the GUI uses — for flicker / page-flip-desync bugs a single
+screenshot can't show. Each PNG is tagged with its frame number and the
+forced-blank flag.</p>
+<div class="table-wrapper"><table><thead><tr><th>Option</th><th>Default</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>-n, --steps &lt;N&gt;</code></td><td><code>1000</code></td><td>Warm-up instructions before capture begins.</td></tr>
+<tr><td><code>-c, --count &lt;N&gt;</code></td><td><code>8</code></td><td>Number of consecutive frames to capture.</td></tr>
+<tr><td><code>--out-dir &lt;DIR&gt;</code></td><td><code>/tmp/luna_frames</code></td><td>Output directory (created if absent).</td></tr>
+<tr><td><code>--force-mapper &lt;M&gt;</code></td><td>auto</td><td>As in <code>state</code>.</td></tr>
+<tr><td><code>--input &lt;SCRIPT&gt;</code></td><td>—</td><td>Joypad-1 script applied during warm-up (§3).</td></tr>
+</tbody></table>
+</div>
+<h3 id="luna-wram-trace--cross-emulator-state-differential"><a class="header" href="#luna-wram-trace--cross-emulator-state-differential"><code>luna wram-trace</code> — cross-emulator state differential</a></h3>
+<pre><code>luna wram-trace [OPTIONS] &lt;ROM&gt;
+</code></pre>
+<p>Emits per-frame (vblank-aligned) FNV-1a hashes of each WRAM page. With no
+input, WRAM-at-vblank-N is the <strong>same game-frame</strong> in luna and a
+reference emulator, so the first differing frame pins the first real
+state divergence (THE method's confound-free oracle). Line format:
+<code>&lt;ppu_frame&gt; &lt;h0&gt; &lt;h1&gt; … &lt;hN&gt;</code>.</p>
+<div class="table-wrapper"><table><thead><tr><th>Option</th><th>Default</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>-n, --steps &lt;N&gt;</code></td><td><code>0</code></td><td>Warm-up instructions before frame 0.</td></tr>
+<tr><td><code>-c, --count &lt;N&gt;</code></td><td><code>300</code></td><td>Consecutive frames to hash.</td></tr>
+<tr><td><code>--page-size &lt;BYTES&gt;</code></td><td><code>4096</code></td><td>Page size (power of two dividing <code>0x20000</code>).</td></tr>
+<tr><td><code>--out &lt;PATH&gt;</code></td><td><code>/tmp/luna_wram_hashes.txt</code></td><td>Hash-table output.</td></tr>
+<tr><td><code>--dump-frame &lt;N&gt;</code></td><td>—</td><td>Also dump the full 128 KiB WRAM as raw <code>.bin</code> at frame <code>N</code>.</td></tr>
+<tr><td><code>--dump-out &lt;PATH&gt;</code></td><td><code>/tmp/luna_wram_frame.bin</code></td><td>Where the <code>--dump-frame</code> snapshot goes.</td></tr>
+<tr><td><code>--force-mapper &lt;M&gt;</code></td><td>auto</td><td>As in <code>state</code>.</td></tr>
+<tr><td><code>--input &lt;SCRIPT&gt;</code></td><td>—</td><td>Joypad-1 script (§3).</td></tr>
+</tbody></table>
+</div>
+<h3 id="luna-bench--whole-corpus-compatibility-report"><a class="header" href="#luna-bench--whole-corpus-compatibility-report"><code>luna bench</code> — whole-corpus compatibility report</a></h3>
+<pre><code>luna bench [OPTIONS] [DIR]
+</code></pre>
+<p>Runs every <code>.sfc</code>/<code>.smc</code> in <code>DIR</code> headless, detects anomalies (crashes,
+freezes, dead APU, missing firmware) panic-safely, and writes a
+compatibility report + one markdown bug file per finding. Reports stay
+local (gitignored under <code>--out</code>).</p>
+<div class="table-wrapper"><table><thead><tr><th>Option</th><th>Default</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>[DIR]</code></td><td>the bundled ROM dir</td><td>Directory of ROMs to scan.</td></tr>
+<tr><td><code>--out &lt;DIR&gt;</code></td><td>a <code>bench</code> subdir</td><td>Output dir for <code>report.md</code>, <code>bugs/*</code>, <code>screenshots/*</code>.</td></tr>
+<tr><td><code>-f, --frames &lt;N&gt;</code></td><td><code>600</code></td><td>Frames to run per ROM.</td></tr>
+<tr><td><code>--input &lt;SCRIPT&gt;</code></td><td>Start-pulse</td><td>Override the default title-clearing input (§3).</td></tr>
+</tbody></table>
+</div>
+<h3 id="luna-spc-dump--export-a-spc-sound-file"><a class="header" href="#luna-spc-dump--export-a-spc-sound-file"><code>luna spc-dump</code> — export a <code>.spc</code> sound file</a></h3>
+<pre><code>luna spc-dump [OPTIONS] &lt;ROM&gt;
+</code></pre>
+<p>Runs the ROM until its music driver is playing, then writes the live APU
+state as a <code>.spc</code> file (<code>SNES-SPC700 Sound File Data v0.30</code>): SPC700
+registers + 64 KB ARAM + 128 DSP registers + IPL ROM, playable in any SPC
+player. Step far enough in — and pulse Start via <code>--input</code> — that the
+music has started before the snapshot.</p>
+<div class="table-wrapper"><table><thead><tr><th>Option</th><th>Default</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>&lt;ROM&gt;</code></td><td>—</td><td>Path to the ROM.</td></tr>
+<tr><td><code>-n, --steps &lt;N&gt;</code></td><td><code>5000000</code></td><td>CPU instructions before the snapshot.</td></tr>
+<tr><td><code>-o, --out &lt;PATH&gt;</code></td><td><code>&lt;rom-stem&gt;.spc</code></td><td>Output path for the <code>.spc</code>.</td></tr>
+<tr><td><code>--force-mapper &lt;M&gt;</code></td><td>auto</td><td>As in <code>state</code>.</td></tr>
+<tr><td><code>--dsp1-rom &lt;PATH&gt;</code></td><td>—</td><td>Install <code>dsp1b.rom</code> then load (DSP-1 games).</td></tr>
+<tr><td><code>--input &lt;SCRIPT&gt;</code></td><td>—</td><td>Joypad-1 script applied before the snapshot (§3).</td></tr>
+</tbody></table>
+</div>
+<pre><code class="language-bash">luna spc-dump "game.sfc" -n 8000000 -o /tmp/song.spc
+</code></pre>
+<h3 id="luna-assets-dump--export-the-loaded-graphics-as-pngs"><a class="header" href="#luna-assets-dump--export-the-loaded-graphics-as-pngs"><code>luna assets-dump</code> — export the loaded graphics as PNGs</a></h3>
+<pre><code>luna assets-dump [OPTIONS] &lt;ROM&gt;
+</code></pre>
+<p>Runs the ROM to a scene, then writes every graphics asset <strong>currently
+loaded</strong> as PNGs: <code>screen.png</code>, <code>vram_tiles.png</code> (the whole 64 KB VRAM as
+a tile sheet), <code>bg1..4_tilemap.png</code> (only the layers enabled in the
+current mode; Mode 7 → one <code>bg1_tilemap_mode7.png</code>), <code>palette.png</code>, and
+<code>sprites.png</code> (the 128 OAM sprites at native size, transparent). Also
+raw <code>vram.bin</code> / <code>cgram.bin</code> and <code>oam.json</code> (sprite metadata).</p>
+<blockquote>
+<p><strong>This captures only what is loaded at that instant</strong> (already
+decompressed by the game). Snapshot several scenes — different <code>-n</code>,
+or <code>--input</code> to reach them — to cover a whole game. A static
+whole-ROM rip is <strong>not</strong> possible: SNES graphics are
+game-specific-compressed with no standard layout.</p>
+</blockquote>
+<div class="table-wrapper"><table><thead><tr><th>Option</th><th>Default</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>&lt;ROM&gt;</code></td><td>—</td><td>Path to the ROM.</td></tr>
+<tr><td><code>-n, --steps &lt;N&gt;</code></td><td><code>5000000</code></td><td>CPU instructions before the snapshot.</td></tr>
+<tr><td><code>--out &lt;DIR&gt;</code></td><td><code>/tmp/luna_assets</code></td><td>Output directory (created if absent).</td></tr>
+<tr><td><code>--bpp &lt;2|4|8&gt;</code></td><td>auto (BG1 mode)</td><td>Bit-depth for the VRAM tile sheet.</td></tr>
+<tr><td><code>--palette &lt;N&gt;</code></td><td><code>0</code></td><td>CGRAM sub-palette row for the tile sheet (2/4bpp).</td></tr>
+<tr><td><code>--force-mapper &lt;M&gt;</code></td><td>auto</td><td>As in <code>state</code>.</td></tr>
+<tr><td><code>--dsp1-rom &lt;PATH&gt;</code></td><td>—</td><td>Install <code>dsp1b.rom</code> then load (DSP-1 games).</td></tr>
+<tr><td><code>--input &lt;SCRIPT&gt;</code></td><td>—</td><td>Joypad-1 script applied before the snapshot (§3).</td></tr>
+</tbody></table>
+</div>
+<pre><code class="language-bash">luna assets-dump "game.sfc" -n 8000000 --out /tmp/assets
+</code></pre>
+<h3 id="luna-mcp--mcp-server-over-stdio"><a class="header" href="#luna-mcp--mcp-server-over-stdio"><code>luna mcp</code> — MCP server over stdio</a></h3>
+<pre><code>luna mcp
+</code></pre>
+<p>Serves the tool catalogue in §4 to any connected MCP client (Claude
+Desktop, Claude Code, custom). Stays alive until the client closes the
+stream. No options — configure the client to launch <code>luna mcp</code>.</p>
+<hr />
+<h2 id="2-the-state-json-emulatorstate"><a class="header" href="#2-the-state-json-emulatorstate">2. The state JSON (<code>EmulatorState</code>)</a></h2>
+<p><code>luna state</code> / the MCP <code>state</code> tool serialise this top-level shape:</p>
+<div class="table-wrapper"><table><thead><tr><th>Field</th><th>Contents</th></tr></thead><tbody>
+<tr><td><code>rom</code></td><td><code>RomInfo</code>: <code>title</code>, <code>mapper</code>, <code>rom_bytes</code>, <code>header_rom_size_kb</code>, <code>sram_kb</code>, <code>region</code>, <code>fast_rom</code>, <code>version</code>, <code>checksum{,_complement,_valid}</code>, <code>missing_firmware</code>.</td></tr>
+<tr><td><code>cpu</code></td><td>65c816 registers <code>a/x/y/sp/pc/pb/db/dp/p</code> + flags.</td></tr>
+<tr><td><code>cpu_regs</code></td><td>Decoded MMIO/CPU register block.</td></tr>
+<tr><td><code>ppu</code></td><td>PPU registers + VRAM/CGRAM/OAM occupancy.</td></tr>
+<tr><td><code>scheduler</code></td><td>Master-clock / line / frame scheduler state.</td></tr>
+<tr><td><code>apu</code></td><td>SPC700 + S-DSP state (<code>spc_stopped</code>, etc.).</td></tr>
+<tr><td><code>dma</code></td><td>DMA/HDMA channel state.</td></tr>
+<tr><td><code>stats</code></td><td>Counters: <code>nmis_serviced</code>, frame count, instruction count, NMI rate, …</td></tr>
+</tbody></table>
+</div>
+<p>(See the <code>luna-api</code> rustdoc for the full nested field set.)</p>
+<hr />
+<h2 id="3-scripted-joypad-input---input"><a class="header" href="#3-scripted-joypad-input---input">3. Scripted joypad input (<code>--input</code>)</a></h2>
+<p>Shared by <code>state</code>, <code>frames</code>, <code>wram-trace</code>, <code>bench</code>. Format:
+comma-separated <code>frame:hex</code> checkpoints — frame number in decimal, mask
+in hex (optional <code>0x</code>). The mask is latched at the <strong>start</strong> of the named
+PPU frame and held until the next checkpoint overrides it.</p>
+<pre><code>--input "100:0x1000,110:0"   # hold Start for frames 100..=109, then release
+</code></pre>
+<p><strong>JOY1 bit layout:</strong> <code>B(15) Y(14) Select(13) Start(12) Up(11) Down(10) Left(9) Right(8) A(7) X(6) L(5) R(4)</code>. So Start = <code>$1000</code>, A = <code>$80</code>.</p>
+<blockquote>
+<p>Most commercial titles sit at a title/demo screen waiting for Start —
+a black/forced-blank screenshot with no input is <strong>not</strong> a bug. Pulse
+Start to get past it.</p>
+</blockquote>
+<h3 id="pointer-devices-mouse--super-scope"><a class="header" href="#pointer-devices-mouse--super-scope">Pointer devices (Mouse / Super Scope)</a></h3>
+<p>A port can hold a <strong>Mouse</strong> or <strong>Super Scope</strong> instead of a pad. Select the
+device with <code>--port1</code>/<code>--port2</code> (<code>pad</code> · <code>mouse</code> · <code>superscope</code>), then script
+its motion:</p>
+<pre><code># Super Scope on port 2, fire at screen pixel (128, 112) on frame 120
+--port2 superscope --superscope "120:128,112,1"
+
+# Mouse on port 1: move +5/-3 and press the left button on frame 60
+--port1 mouse --mouse "60:5,-3,1"
+</code></pre>
+<p><code>--mouse</code> takes signed <code>dx,dy</code> motion (<code>buttons</code> bit0 = left, bit1 = right);
+<code>--superscope</code> takes absolute screen <code>x,y</code> pixels (<code>buttons</code> bit0 = trigger,
+bit1 = cursor, bit2 = turbo, bit3 = pause). In the GUI these map to the host
+mouse cursor automatically once a port is set to the device under
+<strong>Settings → Devices</strong>.</p>
+<hr />
+<h2 id="4-mcp-tool-catalogue-luna-mcp"><a class="header" href="#4-mcp-tool-catalogue-luna-mcp">4. MCP tool catalogue (<code>luna mcp</code>)</a></h2>
+<p>Each tool is a thin wrapper over the matching <code>luna_api::Emulator</code>
+method, so the MCP transport adds reach, not capability.</p>
+<div class="table-wrapper"><table><thead><tr><th>Tool</th><th>Maps to</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>load_rom</code></td><td><code>load_rom</code></td><td>Load a <code>.sfc</code>/<code>.smc</code> from a host path.</td></tr>
+<tr><td><code>reset</code></td><td><code>reset</code></td><td>Reset to power-on state.</td></tr>
+<tr><td><code>set_joypad</code></td><td><code>set_joypad</code></td><td>Set the button bitmask for <code>port</code> (0 = P1, 1 = P2).</td></tr>
+<tr><td><code>step</code></td><td><code>step</code></td><td>Step <code>count</code> instructions (stops early if the CPU halts).</td></tr>
+<tr><td><code>step_until_frame</code></td><td><code>step_until_frame</code></td><td>Run until one PPU frame completes (bounded).</td></tr>
+<tr><td><code>state</code></td><td><code>state</code></td><td>Full observable-state JSON snapshot (§2).</td></tr>
+<tr><td><code>screenshot</code></td><td><code>render_frame_png</code></td><td>Render the 256×224 composited framebuffer to PNG.</td></tr>
+<tr><td><code>drain_audio</code></td><td><code>drain_audio</code></td><td>Drain up to <code>max</code> stereo samples from the APU.</td></tr>
+<tr><td><code>peek_memory</code></td><td><code>peek_memory</code></td><td>Read <code>count</code> bytes from the CPU bus at <code>bank:offset</code>.</td></tr>
+<tr><td><code>peek_aram</code></td><td><code>peek_aram</code></td><td>Read <code>count</code> bytes from the SPC700's 64 KB ARAM.</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="5-the-luna-api-rust-surface-emulator"><a class="header" href="#5-the-luna-api-rust-surface-emulator">5. The <code>luna-api</code> Rust surface (<code>Emulator</code>)</a></h2>
+<p>Add <code>luna-api</code> as a dependency and drive the emulator directly. Every
+method returns <code>Result&lt;_, ApiError&gt;</code> unless noted. Grouped by purpose:</p>
+<p><strong>Lifecycle / loading</strong></p>
+<ul>
+<li><code>load_rom(path)</code> → <code>RomInfo</code>, <code>load_rom_bytes(bytes)</code>,
+<code>load_rom_bytes_forced(bytes, mapper)</code></li>
+<li><code>reset()</code></li>
+<li><code>firmware_dir()</code>, <code>install_firmware(src, target)</code> — DSP-1 etc.</li>
+</ul>
+<p><strong>Driving</strong></p>
+<ul>
+<li><code>step(count)</code> → instructions executed</li>
+<li><code>step_until_frame(max_steps)</code>, <code>loop_probe(max_steps)</code> → <code>LoopProbe</code></li>
+<li><code>set_joypad(port, mask)</code></li>
+</ul>
+<p><strong>Observation</strong></p>
+<ul>
+<li><code>state()</code> → <code>EmulatorState</code> (the whole snapshot)</li>
+<li><code>cpu_state()</code>, <code>spc700_state()</code></li>
+<li><code>frame_count()</code>, <code>forced_blank()</code>, <code>frame_showed_content()</code>,
+<code>framebuffer_hash()</code></li>
+</ul>
+<p><strong>Rendering</strong></p>
+<ul>
+<li><code>render_frame_png(force_display)</code>, <code>render_frame_rgba(force_display)</code></li>
+<li><code>render_frame_bg_png(bg, force_display)</code></li>
+<li><code>render_tilemap_rgba(bg_idx)</code> → <code>TilemapImage</code>, <code>render_tilemap_png(bg_idx)</code></li>
+<li><code>render_vram_tiles_png(bpp, palette_row)</code>, <code>render_palette_png(cell)</code>, <code>render_sprite_sheet_png()</code></li>
+<li><code>bg_bpp(bg_idx)</code> → 2/4/8 (0 if disabled), <code>decode_sprites()</code> → <code>Vec&lt;SpriteInfo&gt;</code></li>
+</ul>
+<p><strong>Save-states &amp; export</strong></p>
+<ul>
+<li><code>save_state()</code> → bytes, <code>load_state(bytes)</code></li>
+<li><code>export_spc()</code> → a 66 048-byte <code>.spc</code> sound file (SPC700 regs + ARAM + DSP regs + IPL ROM)</li>
+</ul>
+<p><strong>Audio</strong></p>
+<ul>
+<li><code>audio_queue_len()</code>, <code>drain_audio(max)</code> → <code>Vec&lt;(i16, i16)&gt;</code></li>
+</ul>
+<p><strong>Memory / register peeking</strong></p>
+<ul>
+<li><code>peek_memory(bank, offset, count)</code>, <code>peek_aram(offset, count)</code>,
+<code>peek_vram(offset, count)</code>, <code>peek_cgram()</code>, <code>peek_pc_bytes(count)</code></li>
+<li><code>vram_bytes()</code>, <code>aram_bytes()</code>, <code>wram_snapshot()</code>,
+<code>wram_page_hashes(page_size)</code>, <code>coproc_ram()</code></li>
+</ul>
+<p><strong>Disassembly</strong></p>
+<ul>
+<li><code>disassemble_cpu(start, …)</code> (M/X-aware), <code>disassemble_spc(start, count)</code></li>
+</ul>
+<p><strong>Tracing / diagnostics</strong> (enable, run, then take the buffered log)</p>
+<ul>
+<li>mailbox: <code>enable_mailbox_log</code> / <code>take_mailbox_log</code></li>
+<li>SA-1: <code>enable_sa1_log</code> / <code>take_sa1_log</code>, <code>…_side_log</code>, <code>…_trace</code></li>
+<li>Super FX: <code>enable_superfx_trace</code> / <code>take_superfx_trace</code></li>
+<li>DMA: <code>enable_dma_trace</code> / <code>take_dma_trace</code></li>
+<li>CPU: <code>enable_cpu_trace</code> / <code>take_cpu_trace_log</code></li>
+<li>memory: <code>enable_mem_trace</code> / <code>take_mem_trace_log</code></li>
+</ul>
+<hr />
+<h2 id="6-controls--firmware"><a class="header" href="#6-controls--firmware">6. Controls &amp; firmware</a></h2>
+<ul>
+<li><strong>GUI keyboard bindings + hotkeys:</strong> see the Controls chapter.</li>
+<li><strong>Coprocessor firmware (DSP-1, …):</strong> install via
+<code>luna state --dsp1-rom &lt;path&gt;</code> or <code>Emulator::install_firmware</code>.</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../using/saves.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../internals/architecture.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../using/saves.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../internals/architecture.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

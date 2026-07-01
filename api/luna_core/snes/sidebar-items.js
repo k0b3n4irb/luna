@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MCYCLES_PER_SCANLINE","NTSC_SCANLINES_PER_FRAME","NTSC_VBLANK_START_LINE","PAL_SCANLINES_PER_FRAME","PAL_VBLANK_START_LINE"],"enum":["MailboxEventKind","MemEventKind"],"fn":["scanlines_per_frame","vblank_start_line"],"struct":["CpuTraceEvent","CpuTraceLog","MailboxEvent","MemTraceEvent","MemTraceLog","Sa1LogEvent","Snes","UnsupportedMapper"]};

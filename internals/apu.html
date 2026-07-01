@@ -1,0 +1,485 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>The APU — audio - Luna — SNES Emulator Guide</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="Guide and reference for Luna, a cycle-accurate, AI-native SNES emulator written in Rust.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/luna.css">
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "navy";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="../introduction.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">Using Luna</li><li class="chapter-item expanded "><a href="../using/install.html"><strong aria-hidden="true">1.</strong> Install & first run</a></li><li class="chapter-item expanded "><a href="../using/controls.html"><strong aria-hidden="true">2.</strong> Controls</a></li><li class="chapter-item expanded "><a href="../using/debugging.html"><strong aria-hidden="true">3.</strong> Debugging tools</a></li><li class="chapter-item expanded "><a href="../using/saves.html"><strong aria-hidden="true">4.</strong> Saves & save states</a></li><li class="chapter-item expanded "><a href="../using/cli-api-mcp.html"><strong aria-hidden="true">5.</strong> CLI, API & MCP</a></li><li class="chapter-item expanded affix "><li class="part-title">How Luna Works</li><li class="chapter-item expanded "><a href="../internals/architecture.html"><strong aria-hidden="true">6.</strong> Architecture overview</a></li><li class="chapter-item expanded "><a href="../internals/ppu.html"><strong aria-hidden="true">7.</strong> The PPU — graphics</a></li><li class="chapter-item expanded "><a href="../internals/apu.html" class="active"><strong aria-hidden="true">8.</strong> The APU — audio</a></li><li class="chapter-item expanded "><a href="../internals/cpus.html"><strong aria-hidden="true">9.</strong> The CPUs — 65C816 & SPC700</a></li><li class="chapter-item expanded "><a href="../internals/memory-dma-bus.html"><strong aria-hidden="true">10.</strong> Memory, DMA & the bus</a></li><li class="chapter-item expanded "><a href="../internals/coprocessors.html"><strong aria-hidden="true">11.</strong> Coprocessors</a><a class="toggle"><div>❱</div></a></li><li><ol class="section"><li class="chapter-item "><a href="../internals/coprocessors-sa1.html"><strong aria-hidden="true">11.1.</strong> SA-1</a></li><li class="chapter-item "><a href="../internals/coprocessors-superfx.html"><strong aria-hidden="true">11.2.</strong> Super FX (GSU)</a></li><li class="chapter-item "><a href="../internals/coprocessors-sdd1.html"><strong aria-hidden="true">11.3.</strong> S-DD1</a></li></ol></li><li class="chapter-item expanded "><li class="part-title">The Faithful-Port Method</li><li class="chapter-item expanded "><a href="../method/faithful-port.html"><strong aria-hidden="true">12.</strong> Why "faithful port"</a></li><li class="chapter-item expanded "><a href="../method/differential.html"><strong aria-hidden="true">13.</strong> The differential harness</a></li><li class="chapter-item expanded "><a href="../method/accuracy.html"><strong aria-hidden="true">14.</strong> Accuracy scorecard</a></li><li class="chapter-item expanded "><a href="../method/testing.html"><strong aria-hidden="true">15.</strong> Testing & determinism</a><a class="toggle"><div>❱</div></a></li><li><ol class="section"><li class="chapter-item "><a href="../method/determinism.html"><strong aria-hidden="true">15.1.</strong> Determinism guarantees</a></li></ol></li><li class="chapter-item expanded "><a href="../method/road-to-a.html"><strong aria-hidden="true">16.</strong> The road to "A"</a></li><li class="chapter-item expanded affix "><li class="spacer"></li><li class="chapter-item expanded affix "><a href="../acknowledgements.html">Acknowledgements</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Luna — SNES Emulator Guide</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/k0b3n4irb/luna" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/k0b3n4irb/luna/edit/develop/book/src/internals/apu.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="snes-apu-spc700--s-dsp--reference-spec"><a class="header" href="#snes-apu-spc700--s-dsp--reference-spec">SNES APU (SPC700 + S-DSP) — reference spec</a></h1>
+<p>luna's faithful-port reference for the SNES audio subsystem (SPC700 CPU +
+S-DSP), describing the hardware-accurate behaviour each component models.</p>
+<hr />
+<h2 id="1-clocks"><a class="header" href="#1-clocks">1. Clocks</a></h2>
+<ul>
+<li><strong>SNES master clock</strong>: 21.477 272 MHz NTSC (21.281 370 MHz PAL).</li>
+<li><strong>SPC700 clock</strong>: 1.024 MHz = master / ~21. Each SPC cycle = ~21 master cycles.</li>
+<li><strong>DSP sample rate</strong>: SPC_clock / 32 = <strong>32 000 Hz</strong> (one output sample emitted every 32 SPC cycles).</li>
+<li>The DSP runs a <strong>32-cycle macro pipeline</strong> that emits one stereo sample.</li>
+</ul>
+<h2 id="2-spc700-opcode-cycle-counts--not-flat"><a class="header" href="#2-spc700-opcode-cycle-counts--not-flat">2. SPC700 opcode cycle counts — NOT FLAT</a></h2>
+<p>The SPC700 has 256 opcodes with cycle costs ranging <strong>2..8 cycles</strong>. They are <strong>NOT</strong> uniform. Music drivers depend on accurate cycle counts because:</p>
+<ul>
+<li>T0/T1/T2 timers (= song tempo) increment based on elapsed SPC cycles.</li>
+<li>The DSP sample tick fires every 32 SPC cycles → pitch sounds wrong if cycle accounting is off.</li>
+</ul>
+<p>The hardware uses per-opcode cycle costs, charged per-instruction in the dispatcher.</p>
+<p><strong>Examples</strong> (selected):</p>
+<div class="table-wrapper"><table><thead><tr><th>Opcode</th><th>Mnemonic</th><th>Cycles</th></tr></thead><tbody>
+<tr><td><code>$00</code></td><td>NOP</td><td>2</td></tr>
+<tr><td><code>$8F</code></td><td>MOV dp, #imm</td><td>5</td></tr>
+<tr><td><code>$3F</code></td><td>CALL !abs</td><td>8</td></tr>
+<tr><td><code>$6F</code></td><td>RET</td><td>5</td></tr>
+<tr><td><code>$01..F1</code></td><td>TCALL n</td><td>8</td></tr>
+<tr><td><code>$03..F3</code></td><td>BBS/BBC</td><td>5 (+2 if branch taken)</td></tr>
+<tr><td><code>$CF</code></td><td>MUL YA</td><td>9</td></tr>
+<tr><td><code>$9E</code></td><td>DIV YA, X</td><td>12</td></tr>
+<tr><td><code>$DF</code></td><td>DAA</td><td>3</td></tr>
+</tbody></table>
+</div>
+<p>The full table must be wired from a canonical source.</p>
+<p><strong>luna status: DONE.</strong> A per-opcode table holds the real 2..12 costs
+(not flat). The SPC700 dispatcher charges the per-opcode cost for each
+instruction, and the APU feeds the returned per-instruction cost straight
+into the timer and voice ticking — so timer tempo and DSP sample rate
+track real cycle counts. The old "flat 4 cycles" approximation is gone.</p>
+<p><strong>Branch-taken <code>+2</code> penalty: also DONE.</strong> A branch-taken penalty of 2
+cycles is added when a branch is taken (BRA / Bcc / CBNE / DBNZ / BBS /
+BBC set the branch-taken flag at the branch sites). The base table lists
+the <em>not-taken</em> cost; the taken idle is added on top. This was the last
+open SPC700 cycle gap and it is now closed.</p>
+<h2 id="3-spc700--dsp-timing"><a class="header" href="#3-spc700--dsp-timing">3. SPC700 ↔ DSP timing</a></h2>
+<p>After every opcode the DSP is synchronized: it catches up by running its
+32-cycle pipeline however many times the elapsed SPC cycles cover.</p>
+<p>DSP pipeline organization:</p>
+<ul>
+<li>32 DSP cycles per output sample.</li>
+<li>The voice pipeline stages are <strong>interleaved across the 32 cycles</strong>.</li>
+<li>Voice 0's pipeline runs at cycles {0, 1, 2, 21, 24, 29, 30, ...} — it literally spans into the next sample.</li>
+<li>Voice 7's pipeline runs at staggered cycles in the same window.</li>
+</ul>
+<p><strong>Consequence</strong>: a per-sample loop that processes voices serially (<code>for v in 0..8 { ... }</code>) gets the wrong inter-voice timing for:</p>
+<ul>
+<li><strong>PMON</strong> (pitch modulation): voice N reads voice N-1's <code>latch.output</code> from a specific prior cycle.</li>
+<li><strong>ENDX</strong>: the bit-clear-then-bit-set sequence happens at cycles 29-30.</li>
+<li><strong>KON latch</strong>: the 63-clock KON delay reads <code>dsp_regs[0x4C] KON</code> and clears via the <code>_keylatch</code> mechanism.</li>
+</ul>
+<h2 id="4-dsp-pitch-counter--the-canonical-interpolation-pipeline"><a class="header" href="#4-dsp-pitch-counter--the-canonical-interpolation-pipeline">4. DSP pitch counter — the canonical interpolation pipeline</a></h2>
+<p>Each voice has a <strong>16-bit pitch accumulator</strong> (the <code>gaussianOffset</code> / interpolation-position register).</p>
+<h3 id="per-dsp-sample"><a class="header" href="#per-dsp-sample">Per DSP sample:</a></h3>
+<pre><code>gaussianOffset += pitch       // pitch = 14-bit register, 0..0x3FFF
+if gaussianOffset &gt;= 0x8000:  // BRR-advance bit
+    decode next BRR sample
+    push into circular buffer
+    gaussianOffset -= 0x4000   // or &amp;= 0x3FFF + carry bit handling
+</code></pre>
+<p>The <strong>BRR advance threshold is 0x8000</strong> (= bit 15). The low 12 bits form the gaussian interpolation phase (256-entry table indexed by <code>(gaussianOffset &gt;&gt; 4) &amp; 0xFF</code> essentially).</p>
+<p><strong>luna status: CORRECT.</strong> The live DSP follows the hardware-reference
+formulation, where <code>gaussian_offset</code> is masked to <code>0x3FFF</code> and the
+BRR-advance test is <code>&gt;= 0x4000</code>. The voice pipeline decodes the next BRR
+group when <code>gaussian_offset &gt;= 0x4000</code>, then advances
+<code>(gaussian_offset &amp; 0x3FFF) + pitch</code>. This is one equivalent form of the
+<code>&gt;= 0x8000</code>/<code>-= 0x4000</code> formulation above (both are equivalent: the
+BRR-advance bit is carried at 0x4000 over a 0x3FFF-masked accumulator).</p>
+<h3 id="kon-5-sample-delay"><a class="header" href="#kon-5-sample-delay">KON 5-sample delay</a></h3>
+<p>On a KON edge for voice V:</p>
+<ul>
+<li><code>keyOnDelay = 5</code> (countdown)</li>
+<li>For the next 4 samples: force <code>interpolationPos = 0x4000</code> (or <code>gaussianOffset = 0</code>), force <code>pitch = 0</code> in the BRR-advance step → no BRR decode happens, voice plays interpolated silence</li>
+<li>At <code>keyOnDelay == 0</code>: load BRR start address from directory, begin real playback</li>
+<li>Envelope: stays at 0 during the delay, enters Attack at sample 5</li>
+</ul>
+<p>Without this, voices "click" at note onset and the BRR address gets read with stale state → wrong sample played first.</p>
+<h2 id="5-brr-sample-decoder"><a class="header" href="#5-brr-sample-decoder">5. BRR sample decoder</a></h2>
+<p>BRR (Bit Rate Reduction) block layout: <strong>9 bytes</strong> per block = 1 header + 8 data bytes (16 × 4-bit nibbles).</p>
+<p>Header byte:</p>
+<ul>
+<li>bits 7:4 = <strong>range</strong> (shift amount 0..12; values 13-15 are clamped specially)</li>
+<li>bits 3:2 = <strong>filter</strong> (0..3)</li>
+<li>bit 1 = <strong>loop</strong></li>
+<li>bit 0 = <strong>end</strong></li>
+</ul>
+<h3 id="decode-formula"><a class="header" href="#decode-formula">Decode formula</a></h3>
+<pre><code>nibble = signed_4bit(extract from data byte)
+if range &lt;= 12:
+    raw = (nibble &lt;&lt; range) &gt;&gt; 1     // ← THE HALF-SHIFT
+else:
+    raw = (nibble &gt;&gt; 3) &lt;&lt; 11         // sign-preserve + drop magnitude
+                                       // (keeps sign, drops the low 11 bits)
+
+p1 = buffer[offset-1] &gt;&gt; 1   // ← FIVE !! the previous samples are read HALVED
+p2 = buffer[offset-2] &gt;&gt; 1
+
+match filter:
+  0: s = raw
+  1: s = raw + p1 + ((-p1) &gt;&gt; 4)
+  2: s = raw + p1 * 2 + ((-p1 * 3) &gt;&gt; 5) - p2 + (p2 &gt;&gt; 4)
+  3: s = raw + p1 * 2 + ((-p1 * 13) &gt;&gt; 6) - p2 + ((p2 * 3) &gt;&gt; 4)
+
+s = clamp15(s)             // 15-bit clamp (NOT 16-bit)
+s = (i16)(s &lt;&lt; 1)          // ← FINAL SHIFT-LEFT with i16 wrap (not saturate!)
+buffer[offset] = s          // store as doubled, will be halved on next read
+</code></pre>
+<p><strong>luna status: CORRECT.</strong> The BRR decoder implements all three:</p>
+<ol>
+<li>The post-decode half-shift: <code>s &lt;&lt;= scale; s &gt;&gt;= 1</code>, with the
+<code>scale &gt; 12</code> clamp path <code>s &amp;= !0x7FF</code>.</li>
+<li>The history half-shift on <code>p2</code> (<code>&gt;&gt; 1</code>) and the filter-internal
+<code>p1 &gt;&gt; 1</code> (e.g. filter 1) — matching the hardware BRR decoder.</li>
+<li>The final wrap-truncate: <code>(s &lt;&lt; 1) as i16</code> after the 15-bit clamp.</li>
+</ol>
+<p>The buffer holds <strong>12 samples</strong> (4 per BRR row × 3 most recent rows) so the 4-tap gaussian can read across 2 row boundaries.</p>
+<h2 id="6-adsr-envelope"><a class="header" href="#6-adsr-envelope">6. ADSR envelope</a></h2>
+<h3 id="rate-table-32-entries"><a class="header" href="#rate-table-32-entries">Rate table (32 entries)</a></h3>
+<p>The exact rate table:</p>
+<pre><code>const RATE_TABLE: [u16; 32] = [
+    0, 2048, 1536, 1280, 1024, 768, 640, 512,
+    384,  320,  256,  192,  160, 128,  96,  80,
+     64,   48,   40,   32,   24,  20,  16,  12,
+     10,    8,    6,    5,    4,   3,   2,   1
+];
+</code></pre>
+<h3 id="counter-offsets-table-32-entries"><a class="header" href="#counter-offsets-table-32-entries">Counter offsets table (32 entries)</a></h3>
+<pre><code>const OFFSET_TABLE: [u16; 32] = [
+    1, 0, 1040, 536, 0, 1040, 536, 0,
+    1040, 536, 0, 1040, 536, 0, 1040, 536,
+    0, 1040, 536, 0, 1040, 536, 0, 1040,
+    536, 0, 1040, 536, 0, 1040, 0, 0
+];
+</code></pre>
+<h3 id="counter-mechanism"><a class="header" href="#counter-mechanism">Counter mechanism</a></h3>
+<p>The DSP runs a global counter that <strong>wraps at 0x77FF</strong> (= 30719). Each DSP sample increments it by 1. An envelope rate is "active" when:</p>
+<pre><code>(global_counter + OFFSET_TABLE[rate]) % RATE_TABLE[rate] == 0
+</code></pre>
+<p>When active, the envelope steps according to its current phase:</p>
+<ul>
+<li><strong>Attack</strong>: env += (Ar == 31) ? 1024 : 32</li>
+<li><strong>Decay</strong>: env -= ((env - 1) &gt;&gt; 8) + 1</li>
+<li><strong>Sustain</strong>: same as Decay</li>
+<li><strong>Release</strong>: env -= 8 (fast-release / forced-release path)</li>
+<li><strong>Direct gain</strong>: per the 4 gain modes (lin+, lin-, exp+, exp-)</li>
+</ul>
+<p><strong>luna status: CORRECT.</strong> The live envelope is a faithful hardware port:</p>
+<ul>
+<li>Global counter polling uses the counter-rate / counter-offset tables —
+the <code>(counter + OFFSET[rate]) % RATE[rate] == 0</code> test, exactly the
+mechanism in §6 above.</li>
+<li>Attack uses <code>2*Ar+1</code>, and Decay uses <code>2*Dr+16</code>.</li>
+<li>All four phases + the four GAIN modes are implemented with the
+rate-gated step.</li>
+</ul>
+<h2 id="7-gaussian-interpolation"><a class="header" href="#7-gaussian-interpolation">7. Gaussian interpolation</a></h2>
+<p>The canonical 256-entry × 4-section table (1024 entries total) is built from <code>sin(pi*k*1.28/1024) * ((cos(pi*k*2/1023)-1)*0.5 + (cos(pi*k*4/1023)-1)*0.08 + 1) / k</code>, normalised so each 4-tap group sums to 2048.</p>
+<p>Per sample:</p>
+<pre><code>frac = (gaussianOffset &gt;&gt; 4) &amp; 0xFF   // 0..255
+s = (TABLE[0x0FF - frac] * sample_3) &gt;&gt; 11
+s += (TABLE[0x1FF - frac] * sample_2) &gt;&gt; 11
+s += (TABLE[0x100 + frac] * sample_1) &gt;&gt; 11
+s = (i16)s                              // ← partial-sum wrap quirk
+s = saturating_add(s, (TABLE[frac] * sample_0) &gt;&gt; 11)
+s = clamp15(s) &amp; ~1                     // bit-0 clear
+</code></pre>
+<p>luna implements this in the live DSP — the 3-tap <code>&gt;&gt;11</code> accumulate, the
+<code>(output as i16)</code> partial-sum wrap, and the final <code>clamp16(output) &amp; !1</code>.
+<strong>Correct</strong>, matching the hardware gaussian interpolation. ✓</p>
+<h2 id="8-echo-8-tap-fir--delay-line"><a class="header" href="#8-echo-8-tap-fir--delay-line">8. Echo (8-tap FIR + delay line)</a></h2>
+<p>DSP registers:</p>
+<ul>
+<li><code>$2D EON</code> — per-voice echo-input enable</li>
+<li><code>$4D EFB</code> — echo feedback (signed 8-bit)</li>
+<li><code>$5D</code> — used by both DIR (sample directory page) AND <code>EDL</code> (echo delay length: low nibble × 2048 bytes)</li>
+<li><code>$6D ESA</code> — echo start address page</li>
+<li><code>$7D EDL</code> — echo delay length (low 4 bits)</li>
+<li><code>$0C MVOLL</code>, <code>$1C MVOLR</code>, <code>$2C EVOLL</code>, <code>$3C EVOLR</code> — main and echo volumes</li>
+<li><code>$0F..$7F FIR coefficients</code> (8 of them, signed 8-bit)</li>
+</ul>
+<p>Per sample:</p>
+<pre><code>echo_in_l = read 16-bit signed from APURAM[ESA*256 + echo_offset*4 + 0..1]
+echo_in_r = read 16-bit signed from APURAM[ESA*256 + echo_offset*4 + 2..3]
+
+// Push into 8-stage history (history stored HALVED: history[i] = echo_in &gt;&gt; 1)
+// 8-tap FIR with the standard coefficient set, accumulator &gt;&gt; 6 per tap
+
+// 3-stage clamp protocol:
+//   taps 0..5 — accumulate freely
+//   tap 6 — truncate via int16 cast (allowed to wrap)
+//   tap 7 — clamp16
+// final: result &amp; ~0x01 (bit-0 clear)
+
+// Feedback: write (fir_l + echo_in_l*EFB/128) back to APURAM (gated by !FLG.ECEN)
+// Output: voice_sum_l + (fir_l * EVOLL) &gt;&gt; 7  →  apply MVOLL  →  clamp/output
+</code></pre>
+<p><strong>luna status: CORRECT.</strong> The live echo path is a faithful hardware
+port: history is stored halved (<code>s &gt;&gt; 1</code>), the FIR does the <code>&gt;&gt; 6</code>
+per-tap, and the staged clamp protocol is implemented — taps 0..5
+accumulate freely, tap 6 truncates via an <code>i16</code> cast, tap 7 clamps to
+16 bits and clears bit 0 (<code>&amp; !1</code>). The feedback write is gated by the
+echo read-only flag.</p>
+<h2 id="9-kon--koff--endx-double-buffered"><a class="header" href="#9-kon--koff--endx-double-buffered">9. KON / KOFF / ENDX (double-buffered)</a></h2>
+<ul>
+<li><code>$4C KON</code> — write 1-bit per voice to key ON. Latched at the end of the 32-cycle macro pipeline.</li>
+<li><code>$5C KOFF</code> — same for key OFF.</li>
+<li><code>$7C ENDX</code> — read-only mirror of "voice hit end-of-BRR-block-with-end-bit-set". Double-buffered: written at cycle 29-30, becomes visible the NEXT sample. Music drivers poll ENDX to know when a voice has completed.</li>
+</ul>
+<p><strong>luna status: CORRECT.</strong> The live DSP implements the full 5-step KON
+delay and the ENDX timing:</p>
+<ul>
+<li>On a KON edge at the sample boundary, <code>keyon_delay = 5</code> and the mode
+enters Attack. During the countdown the envelope is forced to 0,
+<code>gaussian_offset</code> is held at <code>0x4000</code> for the interpolated-silence
+samples and 0 on the load sample, and real playback (BRR start-address
+load from the directory) begins at delay 5 → 0.</li>
+<li>ENDX is the per-voice end bit OR'd into the <code>$7C</code> register, with the
+cycle-29/30 staging emulated by the pipeline split (the end bit is set
+from the looped flag and cleared when <code>keyon_delay == 5</code>). This is the
+hardware ENDX double-buffer behaviour, not a synchronous shortcut.</li>
+</ul>
+<h2 id="10-reset-state"><a class="header" href="#10-reset-state">10. Reset state</a></h2>
+<p>DSP register reset:</p>
+<ul>
+<li><code>$6C FLG = 0xE0</code> (RESET + MUTE + ECEN flags all set)</li>
+<li>All other registers undefined per real hardware but most emulators zero them</li>
+<li>KON = 0, KOF = 0, ENDX = 0</li>
+</ul>
+<p>SPC700 reset:</p>
+<ul>
+<li>PC loaded from <code>$FFFE-$FFFF</code> (in IPL ROM at boot, then in RAM after)</li>
+<li>A = X = Y = 0</li>
+<li>SP = 0xEF (or whatever IPL boot left it at)</li>
+<li>PSW = 0x02 (Z flag set)</li>
+</ul>
+<h2 id="11-initialization-sequence"><a class="header" href="#11-initialization-sequence">11. Initialization sequence</a></h2>
+<p>The IPL ROM at <code>$FFC0-$FFFF</code> is the SPC700's boot code. On reset:</p>
+<ol>
+<li>SPC700 starts executing at <code>$FFC0</code>.</li>
+<li>Writes <code>$AA</code> to <code>$F4</code> (port 0) and <code>$BB</code> to <code>$F5</code> (port 1) — signals to main CPU "I'm ready, send me code".</li>
+<li>Polls <code>$F4</code> for a non-zero value (the main CPU's protocol command).</li>
+<li>When the protocol is satisfied, the SPC jumps to wherever the main CPU's upload says.</li>
+</ol>
+<p>This handshake is <strong>always</strong> the first ~700 cycles after reset. luna's APU reaches this state cleanly (confirmed by mailbox tracer earlier: <code>$AA/$BB/$CC</code> ack at mclk 60656/60720/61824).</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../internals/ppu.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../internals/cpus.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../internals/ppu.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../internals/cpus.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

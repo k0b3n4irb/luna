@@ -1,0 +1,27 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The canonical 64-byte SNES SPC700 IPL ROM."><title>luna_cpu_spc700::iplrom - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-b7b9f40b.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="luna_cpu_spc700" data-themes="" data-resource-suffix="" data-rustdoc-version="1.95.0 (59807616e 2026-04-14)" data-channel="1.95.0" data-search-js="search-63369b7b.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module iplrom</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../luna_cpu_spc700/index.html">luna_<wbr>cpu_<wbr>spc700</a><span class="version">1.4.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module iplrom</a></h2><h3><a href="#constants">Module Items</a></h3><ul class="block"><li><a href="#constants" title="Constants">Constants</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate luna_<wbr>cpu_<wbr>spc700</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">luna_cpu_spc700</a></div><h1>Module <span>iplrom</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/luna_cpu_spc700/iplrom.rs.html#1-107">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The canonical 64-byte SNES SPC700 IPL ROM.</p>
+<p>This is a literal byte-for-byte copy of the SPC700 boot ROM that
+sits at <code>$FFC0..=$FFFF</code> of every real SPC700’s address space. It
+is part of the SNES hardware — the same bytes appear on every
+console ever made. Cross-checked against fullsnes (Nocash) and
+ares’ <code>sfc/smp/iplrom.cpp</code>.</p>
+<p>On reset the SPC700 reads its reset vector from <code>$FFFE/$FFFF</code>
+(which the IPL ROM populates as <code>$FFC0</code>) and starts executing the
+IPL ROM, which:</p>
+<ol>
+<li>Initialises the stack pointer.</li>
+<li>Clears direct page RAM (<code>$0000..=$00EF</code>).</li>
+<li>Writes <code>$AA</code> to mailbox 0 (<code>$F4</code>) and <code>$BB</code> to mailbox 1 (<code>$F5</code>).</li>
+<li>Spins until the main CPU writes <code>$CC</code> to mailbox 0 — the
+handshake “kick”.</li>
+<li>Enters a byte-transfer loop driven by counters on <code>$F4</code>/<code>$F5</code>
+and the target address on <code>$F6</code>/<code>$F7</code>.</li>
+<li>Finishes by <code>JMP [$0000+X]</code> into whatever code was uploaded.</li>
+</ol>
+<p>The ROM is read-only on real hardware (the SPC700 has a bit in
+its control register <code>$F1</code> to expose it or hide it), but we only
+model the “exposed” path for now — it’s how every commercial
+SNES game boots.</p>
+<p>See also: <a href="https://problemkaputt.de/fullsnes.htm#snesapu">https://problemkaputt.de/fullsnes.htm#snesapu</a>.</p>
+</div></details><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.IPL_ROM.html" title="constant luna_cpu_spc700::iplrom::IPL_ROM">IPL_ROM</a></dt><dd>The 64 bytes of the SPC700 boot ROM, mapped at <code>$FFC0..=$FFFF</code>.
+Same on every SNES — these are documented hardware bytes, not
+reverse-engineered firmware.</dd><dt><a class="constant" href="constant.IPL_ROM_BASE.html" title="constant luna_cpu_spc700::iplrom::IPL_ROM_BASE">IPL_<wbr>ROM_<wbr>BASE</a></dt><dd>Where the IPL ROM lives in the SPC700’s address space.</dd></dl></section></div></main></body></html>

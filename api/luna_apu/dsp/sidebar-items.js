@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["COUNTER_OFFSET","COUNTER_RATE","COUNTER_RELOAD"],"enum":["EnvelopeMode"],"fn":["gaussian_table"],"struct":["Brr","Clock","Dsp","Echo","Latch","MainVol","Noise","Voice"]};

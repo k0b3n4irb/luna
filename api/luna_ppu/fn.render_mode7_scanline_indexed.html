@@ -1,0 +1,30 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Render one Mode-7 scanline into an `IndexedScanline`."><title>render_mode7_scanline_indexed in luna_ppu - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-b7b9f40b.css"><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="luna_ppu" data-themes="" data-resource-suffix="" data-rustdoc-version="1.95.0 (59807616e 2026-04-14)" data-channel="1.95.0" data-search-js="search-63369b7b.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-170eb4bf.js" ><script src="../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">render_mode7_scanline_indexed</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../luna_ppu/index.html">luna_<wbr>ppu</a><span class="version">1.4.0</span></h2></div><div class="sidebar-elems"><div id="rustdoc-modnav"></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="index.html">luna_ppu</a></div><h1>Function <span class="fn">render_<wbr>mode7_<wbr>scanline_<wbr>indexed</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../src/luna_ppu/renderer.rs.html#792-888">Source</a> </span></div><pre class="rust item-decl"><code>pub fn render_mode7_scanline_indexed(
+    ppu: &amp;<a class="struct" href="struct.Ppu.html" title="struct luna_ppu::Ppu">Ppu</a>,
+    y: <a class="primitive" href="https://doc.rust-lang.org/1.95.0/std/primitive.u16.html">u16</a>,
+    opts: <a class="struct" href="struct.RenderOptions.html" title="struct luna_ppu::RenderOptions">RenderOptions</a>,
+) -&gt; <a class="type" href="type.IndexedScanline.html" title="type luna_ppu::IndexedScanline">IndexedScanline</a></code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Render one Mode-7 scanline into an <a href="type.IndexedScanline.html" title="type luna_ppu::IndexedScanline"><code>IndexedScanline</code></a>.</p>
+<p>Mode 7 has just one BG layer (BG1) which is the entire VRAM
+interpreted as a 128×128-tile field with 8×8 8bpp tiles. This is a
+direct port of ares <code>mode7.cpp</code>. The per-scanline affine origin is:</p>
+<div class="example-wrap"><pre class="language-text"><code>  origin_x = M7A·clip(M7HOFS - M7X) + M7B·clip(M7VOFS - M7Y)
+             + M7B·y + (M7X &lt;&lt; 8)
+  origin_y = M7C·clip(M7HOFS - M7X) + M7D·clip(M7VOFS - M7Y)
+             + M7D·y + (M7Y &lt;&lt; 8)
+  pixel_x  = (origin_x + M7A·x) &gt;&gt; 8
+  pixel_y  = (origin_y + M7C·x) &gt;&gt; 8</code></pre></div>
+<p>where matrix values are signed 8.8 fixed point, <code>clip()</code> keeps the
+10-bit magnitude + bit-13 sign of the scroll/centre difference, and
+each partial product drops its low 6 bits (<code>&amp; !63</code>) to match the
+hardware multiplier. The integer part is a VRAM byte address into
+the tilemap (low byte) and pixel data (high byte) of the interleaved
+64 KB tilemap / tileset.</p>
+<p><code>M7SEL</code> bits 1:0 control the wrap / transparent behaviour outside
+the 128×128 field:</p>
+<ul>
+<li><code>00</code> / <code>01</code> — coordinates wrap (the 7-bit tile mask repeats)</li>
+<li><code>10</code> — return transparent (force palette 0)</li>
+<li><code>11</code> — use tile 0 outside the field</li>
+</ul>
+<p>Horizontal and vertical flips (<code>M7SEL</code> bits 6, 7) negate the
+screen-space coordinate before the matrix multiply.</p>
+</div></details></section></div></main></body></html>
