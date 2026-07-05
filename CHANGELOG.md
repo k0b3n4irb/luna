@@ -6,21 +6,35 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-07-05
+
+The HDMA pillar closure + the 2026-07-05 project-review remediation.
+
 ### Fixed
 - HDMA mid-frame enable is now a faithful port: a channel enabled after
   frame start runs from its stale table pointer (ares/Mesen2 semantics), not
   a re-read of the source address — closes audit row #9 (#58).
 - HDMA indirect "last active channel" 1-byte reload quirk — closes audit
-  row #10 (#57). The HDMA/DMA pillar audit is now ✅ on every
-  visual/behavioral row.
+  row #10 (#57). **The HDMA/DMA pillar audit is now faithful on every
+  visual/behavioral row**; the scorecard row moves B− → A−.
 
-### CI / docs
+### Changed
+- `luna-cli` internals split into focused modules with the crate's first
+  unit tests — 19 tests pin every flag-parser (`--input`, `--mouse`,
+  `--peek`, `--assert*`, `--mem-trace-*`). No behavior change (proven:
+  `--help` and framebuffer hashes byte-identical) (#62).
+
+### CI / docs / project
 - CI clippy now runs `--all-features`, matching the local gate; Tom Harte
-  CPU suites run weekly on a cron (#59).
+  CPU suites run weekly on a cron; new weekly headless-throughput perf
+  guard (#59, #64).
 - README homebrew demo grid (Mode 7 / HDMA wave / windows / gradient) — no
   commercial-game imagery (#60); repo description + topics set.
-- Living accuracy scorecard (single current-truth table; the May/June
-  review archived), this CHANGELOG, and CONTRIBUTING.md.
+- Living accuracy scorecard: one current-truth table, Super FX / DSP-1 /
+  S-DD1 graded for the first time, May/June review archived; accuracy
+  fixes must now update their row in the same PR (#61).
+- This CHANGELOG and CONTRIBUTING.md (#61); `.mailmap`; internal
+  version-pin cleanup (#64).
 
 ## [1.4.0] — 2026-06-28
 
