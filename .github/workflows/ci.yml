@@ -107,6 +107,9 @@ jobs:
 
   # ---------------------------------------------------------------------
   # Lints (cargo clippy with -D warnings on top of workspace lints).
+  # `--all-features` matches the local pre-commit gate
+  # (.claude/rules/rust-lint-discipline.md) so feature-gated code paths
+  # (test-utils, debug-only counters) are linted in CI too.
   # ---------------------------------------------------------------------
   clippy:
     name: clippy
@@ -120,7 +123,7 @@ jobs:
           toolchain: stable
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   # ---------------------------------------------------------------------
   # NOTE: the Tom Harte SingleStepTests (both CPU cores) used to run here on

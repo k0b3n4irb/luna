@@ -16,6 +16,11 @@ name: Tom Harte CPU suites
 
 on:
   workflow_dispatch:
+  # Weekly safety net: scheduled runs execute on the DEFAULT branch (main),
+  # i.e. the released code — deliberate. The manual dispatch above remains
+  # the way to gate a CPU-core branch before merging.
+  schedule:
+    - cron: "0 6 * * 1" # Monday 06:00 UTC
 
 env:
   CARGO_TERM_COLOR: always
