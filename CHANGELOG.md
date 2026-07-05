@@ -6,6 +6,11 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-07-05
+
+Interactive-debugger parity (epic #63, P1–P3) — the MCP surface now covers
+the OpenSNES snesdbg workflows end-to-end.
+
 ### Added
 - **WLA-DX `.sym` symbol support** (#67): `<rom>.sym` auto-detected next
   to the ROM (CLI `--sym` overrides); `disassemble_cpu` lines and the MCP
