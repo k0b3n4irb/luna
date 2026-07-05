@@ -211,26 +211,33 @@ impl Dma {
     /// `hdmaSetup`: `step(8)` overhead + one header read per enabled
     /// channel; folded here into the canonical `18 + 8·channels` figure.
     pub fn hdma_init<B: DmaBus>(&mut self, bus: &mut B) -> u32 {
+        // ares `hdmaReset` + Mesen2 `InitHdmaChannels`: every frame, reset the
+        // per-channel run flags for ALL 8 channels — enabled or not. Mesen
+        // notes NOT resetting `DoTransfer` glitches Aladdin / Super Ghouls'n
+        // Ghosts. `hdma_active` is luna's `!HdmaFinished`.
+        for ch in 0..8 {
+            self.channels[ch].hdma_active = true;
+            self.channels[ch].hdma_do_transfer = false;
+        }
+        if self.hdmaen == 0 {
+            return 0;
+        }
         let mut enabled = 0u32;
         for ch in 0..8 {
-            // Re-arm the lazy-start latch each frame; a channel enabled
-            // *mid-frame* (HDMAEN bit set after this init) is set up on its
-            // first active line in `hdma_run_line`.
-            self.channels[ch].hdma_started = false;
+            // "Set DoTransfer to true for ALL channels if any HDMA channel is
+            // enabled" (Mesen2 SnesDmaController.cpp:131, ares dma.cpp:143).
+            // This is what lets a channel enabled MID-frame transfer from its
+            // (stale) running table pointer — the references do NOT re-copy
+            // the source address on a mid-frame enable.
+            self.channels[ch].hdma_do_transfer = true;
             if self.hdmaen & (1 << ch) != 0 {
+                // Enabled at V=0: copy source→pointer and read the first entry
+                // (may terminate the channel if the header is 0).
                 self.channels[ch].hdma_start_frame(bus);
-                self.channels[ch].hdma_started = true;
                 enabled += 1;
-            } else {
-                self.channels[ch].hdma_active = false;
-                self.channels[ch].hdma_do_transfer = false;
             }
         }
-        if enabled > 0 {
-            HDMA_OVERHEAD_MCLK + 8 * enabled
-        } else {
-            0
-        }
+        HDMA_OVERHEAD_MCLK + 8 * enabled
     }
 
     /// Per-scanline HDMA step. Called once per visible scanline
@@ -246,14 +253,11 @@ impl Dma {
         let mut any_active = false;
         for ch in 0..8 {
             if self.hdmaen & (1 << ch) != 0 {
-                // Mid-frame enable (HDMAEN bit set after `hdma_init`, e.g.
-                // Yoshi's Island's text-band split at scanline ~12): set the
-                // channel up now so it begins from its source address — ares
-                // gates `hdmaRun` on the live `hdmaActive()`, not a V=0 latch.
-                if !self.channels[ch].hdma_started {
-                    self.channels[ch].hdma_start_frame(bus);
-                    self.channels[ch].hdma_started = true;
-                }
+                // Live HDMAEN gate (ares `hdmaActive()` / Mesen2 per-line
+                // `HdmaChannels & (1<<i)`): a channel enabled mid-frame runs
+                // from here using the `do_transfer`/pointer state left by
+                // `hdma_init` — the references keep that (stale) state; they do
+                // NOT re-copy the source on a mid-frame enable.
                 // Tag B-bus writes this channel makes with its channel id so
                 // the Event Viewer can plot them — faithful to Mesen2's
                 // `_activeChannel = HdmaChannelFlag | i` (SnesDmaController.cpp
@@ -262,7 +266,14 @@ impl Dma {
                 bus.set_active_channel(HDMA_CHANNEL_FLAG | ch as u8);
                 // A channel active at line start does work this line.
                 any_active |= self.channels[ch].hdma_active;
-                bytes += self.channels[ch].hdma_step_line(bus);
+                // ares `hdmaFinished()`: this is the last active HDMA channel
+                // iff no higher-indexed enabled channel is still active. Snapshot
+                // it before the step (later channels haven't advanced this line —
+                // matching ares' transfer-all-then-advance-all ordering). Drives
+                // the indirect-terminator 1-byte reload quirk (`hdma_step_line`).
+                let last_active = !((ch + 1..8)
+                    .any(|j| self.hdmaen & (1 << j) != 0 && self.channels[j].hdma_active));
+                bytes += self.channels[ch].hdma_step_line(bus, last_active);
             }
         }
         if any_active {
@@ -466,32 +477,79 @@ mod tests {
     }
 
     #[test]
-    fn hdma_enabled_mid_frame_starts_from_source() {
-        // Regression: a channel whose HDMAEN bit is set AFTER `hdma_init`
-        // (Yoshi's Island enables its text-band split at scanline ~12)
-        // must still run, lazily setting up from its source address on the
-        // first active line — not stay dormant until the next frame's init.
+    fn hdma_mid_frame_enable_uses_stale_pointer_not_source() {
+        // Faithful port (ares hdmaSetup / Mesen2 InitHdmaChannels, audit #9): a
+        // channel enabled MID-frame does NOT re-copy its source address. When
+        // any HDMA is enabled at V=0, hdma_init arms `DoTransfer=true` for ALL
+        // channels, so a later-enabled channel runs from its (stale) running
+        // table pointer. luna previously lazily re-init'd from source — an
+        // invention absent from BOTH references (Yoshi's Island still renders
+        // correctly under the faithful model; validated by screenshot).
         let mut bus = MockBus::new();
-        bus.a[0x00_2000] = 0x02; // line count
-        bus.a[0x00_2001] = 0xAB; // data byte
-        bus.a[0x00_2002] = 0x00; // terminator
-        let mut dma = Dma::new();
-        dma.channels[0].params = DmaParams::from_byte(0); // mode 0, direct
-        dma.channels[0].bbad = 0x22;
-        dma.channels[0].a_addr = 0x2000;
-        dma.channels[0].a_bank = 0x00;
+        // ch7 is enabled at V=0 → makes hdma_init run its full loop.
+        bus.a[0x00_1000] = 0x01; // 1-line entry
+        bus.a[0x00_1001] = 0x11;
+        bus.a[0x00_1002] = 0x00; // terminator
+        // ch0's STALE pointer points at $00:3000 ($DD); its SOURCE is a
+        // different place ($00:2000 = $AA) that must NOT be read mid-frame.
+        bus.a[0x00_3000] = 0xDD;
+        bus.a[0x00_2000] = 0xAA;
 
-        // Frame init with HDMA disabled → channel does not set up.
+        let mut dma = Dma::new();
+        dma.channels[7].params = DmaParams::from_byte(0);
+        dma.channels[7].bbad = 0x30;
+        dma.channels[7].a_addr = 0x1000;
+        dma.channels[0].params = DmaParams::from_byte(0);
+        dma.channels[0].bbad = 0x22;
+        dma.channels[0].a_addr = 0x2000; // source — must stay untouched
+        dma.channels[0].a2a = 0x3000; // stale running pointer
+        dma.channels[0].ntlr = 0x02; // stale line counter (non-repeat gap next)
+
+        dma.hdmaen = 0x80; // only ch7 at V=0
+        dma.hdma_init(&mut bus);
+        assert!(
+            dma.channels[0].hdma_do_transfer,
+            "init armed DoTransfer for ALL channels"
+        );
+        assert_eq!(
+            dma.channels[0].a2a, 0x3000,
+            "source NOT copied into pointer"
+        );
+
+        // Mid-frame enable of ch0 → transfers from the stale pointer ($DD).
+        dma.hdmaen = 0x81;
+        dma.hdma_run_line(&mut bus);
+        assert_eq!(
+            bus.b[0x22], 0xDD,
+            "ch0 ran from its stale pointer, not source"
+        );
+    }
+
+    #[test]
+    fn hdma_cold_mid_frame_enable_skips_transfer_first_line() {
+        // Faithful: if NO channel is enabled at V=0, hdma_init resets
+        // DoTransfer=false for all and early-returns (Mesen2 InitHdmaChannels
+        // line 111 + the `!HdmaChannels` return). A channel enabled mid-frame
+        // then has DoTransfer=false → NO transfer on its first active line; it
+        // only advances the (stale) counter.
+        let mut bus = MockBus::new();
+        bus.a[0x00_3000] = 0xDD;
+        let mut dma = Dma::new();
+        dma.channels[0].params = DmaParams::from_byte(0);
+        dma.channels[0].bbad = 0x22;
+        dma.channels[0].a2a = 0x3000;
+        dma.channels[0].ntlr = 0x02;
+
         dma.hdmaen = 0;
         assert_eq!(dma.hdma_init(&mut bus), 0);
-        assert!(!dma.channels[0].hdma_active);
+        assert!(
+            !dma.channels[0].hdma_do_transfer,
+            "cold init leaves DoTransfer false"
+        );
 
-        // Mid-frame: the game enables the channel. The next scanline must
-        // set it up from $00:2000 and transfer the data byte to $2122.
-        dma.hdmaen = 0b0000_0001;
-        assert_eq!(dma.hdma_run_line(&mut bus), HDMA_OVERHEAD_MCLK + 8);
-        assert_eq!(bus.b[0x22], 0xAB, "mid-frame-enabled channel transferred");
-        assert!(dma.channels[0].hdma_started);
+        dma.hdmaen = 0x01;
+        dma.hdma_run_line(&mut bus);
+        assert_eq!(bus.b[0x22], 0x00, "no transfer on the first line");
     }
 
     #[test]
@@ -527,6 +585,65 @@ mod tests {
         );
         // Consumer view: the channel number is the low 3 bits.
         assert_eq!(bus.tagged_writes[0].0 & 7, 3);
+    }
+
+    #[test]
+    fn hdma_indirect_terminator_1byte_quirk_tracks_the_last_active_channel() {
+        // Row #10 integration: the "last active channel" that drives the
+        // 1-byte indirect-terminator quirk (ares `hdmaFinished()`) is computed
+        // across channels. Two indirect channels: ch0 terminates on line 1
+        // while ch1 (higher index) is still active → ch0 is NOT last, reads 2
+        // pointer bytes. ch1 terminates on line 2 as the sole survivor → it IS
+        // last, reads only 1.
+        let mut bus = MockBus::new();
+        // ch0 table $00:1000 — 1-line entry → $3456, then 0 terminator whose
+        // pointer bytes ($EE,$FF) sit at offsets 4/5.
+        for (i, b) in [0x01u8, 0x56, 0x34, 0x00, 0xEE, 0xFF].iter().enumerate() {
+            bus.a[0x00_1000 + i] = *b;
+        }
+        bus.a[0x7E_3456] = 0xAB;
+        // ch1 table $00:2000 — 2-line entry → $5678, then 0 terminator ($AA,$BB).
+        for (i, b) in [0x02u8, 0x78, 0x56, 0x00, 0xAA, 0xBB].iter().enumerate() {
+            bus.a[0x00_2000 + i] = *b;
+        }
+        bus.a[0x7E_5678] = 0xCD;
+        bus.a[0x7E_5679] = 0xEF;
+
+        let mut dma = Dma::new();
+        for (ch, addr) in [(0usize, 0x1000u16), (1, 0x2000)] {
+            dma.channels[ch].params = DmaParams::from_byte(0x40); // indirect, mode 0
+            dma.channels[ch].bbad = 0x22;
+            dma.channels[ch].a_addr = addr;
+            dma.channels[ch].a_bank = 0x00;
+            dma.channels[ch].dasb = 0x7E;
+        }
+        dma.hdmaen = 0b0000_0011;
+        dma.hdma_init(&mut bus);
+
+        // Line 1: ch0 terminates but ch1 is still active → NOT last → 2 bytes.
+        dma.hdma_run_line(&mut bus);
+        assert!(!dma.channels[0].hdma_active);
+        assert_eq!(
+            dma.channels[0].a2a, 0x1006,
+            "ch0 read header + 2 indirect bytes (a later channel is active)"
+        );
+        assert_eq!(dma.channels[0].das, 0xFFEE, "full 2-byte indirect pointer");
+        assert!(
+            dma.channels[1].hdma_active,
+            "ch1 still inside its 2-line entry"
+        );
+
+        // Line 2: ch1 terminates as the sole remaining channel → last → 1 byte.
+        dma.hdma_run_line(&mut bus);
+        assert!(!dma.channels[1].hdma_active);
+        assert_eq!(
+            dma.channels[1].a2a, 0x2005,
+            "ch1 read header + 1 indirect byte (last active channel quirk)"
+        );
+        assert_eq!(
+            dma.channels[1].das, 0xAA00,
+            "ares: firstByte << 8, one short"
+        );
     }
 
     #[test]

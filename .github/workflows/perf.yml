@@ -1,0 +1,79 @@
+name: Perf guard
+
+# Weekly wall-clock speed check on the released code. Catches only
+# CATASTROPHIC regressions (an accidental O(n²), a debug-build escape, a
+# runaway sync loop): the gate is a generous 2× real-time floor, far below
+# the ~7× a developer machine reaches, so runner variance can't flake it.
+# Scheduled runs execute on the default branch (main); use the manual
+# dispatch to check a branch. `luna bench` is a liveness/compat harness,
+# not a speed one — hence this dedicated timing job.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 7 * * 1" # Monday 07:00 UTC (1h after Tom Harte)
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  perf:
+    name: perf (headless throughput)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install ALSA headers (cpal → alsa-sys)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: perf
+      - name: Cache SNES test-ROM corpus
+        id: rom-cache
+        uses: actions/cache@v4
+        with:
+          path: ../luna_tests
+          key: snes-test-roms-${{ hashFiles('tools/fetch-snes-test-roms.sh') }}
+      - name: Fetch corpus (on cache miss)
+        if: steps.rom-cache.outputs.cache-hit != 'true'
+        run: tools/fetch-snes-test-roms.sh
+
+      - name: Build release CLI
+        run: cargo build --release --locked -p luna-cli
+
+      # Run two corpus scenes for a fixed instruction budget, derive the
+      # emulated-frame throughput from the JSON state, and gate at 2×
+      # real-time (>= 120 emulated fps). Results land in the job summary.
+      - name: Measure throughput
+        run: |
+          set -euo pipefail
+          MIN_FPS=120
+          fail=0
+          {
+            echo "## Headless throughput (gate: ≥ ${MIN_FPS} emulated fps = 2× real-time)"
+            echo ""
+            echo "| ROM | frames | wall (s) | emulated fps | ratio vs 60.1 |"
+            echo "|---|---:|---:|---:|---:|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for rom in \
+            "../luna_tests/PPU/Mode7/Perspective/Perspective.sfc" \
+            "../luna_tests/PPU/HDMA/WaveHDMA/WaveHDMA.sfc"; do
+            name=$(basename "$rom" .sfc)
+            start=$(date +%s.%N)
+            ./target/release/luna state -n 30000000 --force-mapper lorom \
+              --out /tmp/perf_state.json "$rom" > /dev/null
+            end=$(date +%s.%N)
+            wall=$(python3 -c "print(f'{($end - $start):.2f}')")
+            frames=$(python3 -c "import json;print(json.load(open('/tmp/perf_state.json'))['scheduler']['frame_count'])")
+            fps=$(python3 -c "print(f'{$frames / $wall:.0f}')")
+            ratio=$(python3 -c "print(f'{$frames / $wall / 60.1:.1f}x')")
+            echo "| $name | $frames | $wall | $fps | $ratio |" >> "$GITHUB_STEP_SUMMARY"
+            echo "$name: $frames frames in ${wall}s -> $fps fps ($ratio)"
+            if [ "$(python3 -c "print(1 if $fps < $MIN_FPS else 0)")" = "1" ]; then
+              echo "::error::$name below the ${MIN_FPS} fps floor ($fps fps)"
+              fail=1
+            fi
+          done
+          exit $fail
