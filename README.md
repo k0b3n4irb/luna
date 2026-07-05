@@ -9,8 +9,20 @@
 [![License](https://img.shields.io/badge/license-MPL--2.0-blue)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-2024-orange)](rust-toolchain.toml)
 
-<!-- TODO: drop a GUI screenshot / gameplay GIF here — it makes the porch.
-     Capture the debugger on a game and commit it to docs/assets/. -->
+<table>
+  <tr>
+    <td><img src="docs/assets/demo-mode7-perspective.png" alt="Mode 7 perspective plane — affine texture-mapped ground" width="256"/></td>
+    <td><img src="docs/assets/demo-hdma-wave.png" alt="Per-scanline HDMA horizontal-scroll wave distortion" width="256"/></td>
+  </tr>
+  <tr>
+    <td><img src="docs/assets/demo-window-rings.png" alt="Circular PPU windows driven by HDMA" width="256"/></td>
+    <td><img src="docs/assets/demo-hdma-gradient.png" alt="HDMA per-scanline CGRAM colour gradient" width="256"/></td>
+  </tr>
+</table>
+
+*Rendered by Luna's headless CLI (`luna state --screenshot`) from the open-source
+[PeterLemon SNES test corpus](https://github.com/PeterLemon/SNES) — Mode 7 perspective,
+HDMA wave, windowing and gradient effects.*
 
 **[📖 Documentation](https://k0b3n4irb.github.io/luna/) · [⬇️ Download](https://github.com/k0b3n4irb/luna/releases/latest) · [📚 API reference](https://k0b3n4irb.github.io/luna/api/)**
 
