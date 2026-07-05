@@ -6,6 +6,12 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Added
+- CLI `--assert` / `--peek` accept WLA-DX label names (`--assert
+  r_done=EFBE`, `--peek monster_x:2`) resolved through the loaded `.sym`
+  table — parity with the MCP `symbol:` args; the numeric forms are
+  unchanged (#77). Frees the last downstream `.sym` parser.
+
 ## [1.6.0] — 2026-07-05
 
 Interactive-debugger parity (epic #63, P1–P3) — the MCP surface now covers

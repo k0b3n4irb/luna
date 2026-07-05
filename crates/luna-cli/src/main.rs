@@ -197,16 +197,19 @@ enum Command {
         #[arg(long)]
         superscope: Option<String>,
         /// Optional memory peek(s) after snapshot.  Format:
-        /// `BANK:OFFSET:COUNT` (all hex, no `0x` prefix).  Can be
-        /// specified multiple times.  Output goes to stderr as a
-        /// labelled hex dump.  Example: `--peek 7E:0200:220` reads
-        /// 544 bytes of SMW shadow-OAM.
+        /// `BANK:OFFSET:COUNT` (all hex, no `0x` prefix), or a WLA-DX
+        /// label `NAME[:COUNT]` resolved through the loaded `.sym`
+        /// table (auto-detected `<rom>.sym` or `--sym`; count defaults
+        /// to 1).  Can be specified multiple times.  Output goes to
+        /// stderr as a labelled hex dump.  Examples:
+        /// `--peek 7E:0200:220`, `--peek monster_x:2`.
         #[arg(long = "peek")]
         peek: Vec<String>,
         /// Assert memory equals expected bytes after warm-up. Format:
-        /// `BANK:OFFSET=HEX` (all hex). Prints `PASS`/`FAIL` per spec and
-        /// exits non-zero if any fails. Repeatable. Example:
-        /// `--assert 7E:0010=AB12`.
+        /// `BANK:OFFSET=HEX` (all hex), or a WLA-DX label `NAME=HEX`
+        /// resolved through the loaded `.sym` table. Prints `PASS`/`FAIL`
+        /// per spec and exits non-zero if any fails. Repeatable.
+        /// Examples: `--assert 7E:0010=AB12`, `--assert r_done=EFBE`.
         #[arg(long = "assert")]
         assert: Vec<String>,
         /// Assert APU-RAM equals expected bytes (`OFFSET=HEX`). Like

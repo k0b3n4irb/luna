@@ -122,6 +122,43 @@ pub(crate) fn parse_assert_spec_no_bank(spec: &str) -> Result<(u16, Vec<u8>), St
     Ok((offset, parse_hex_bytes(val)?))
 }
 
+/// Parse a symbolic assert `NAME=HEXBYTES` (issue #77 — the WLA-DX
+/// label form). Returns the raw name; resolution against the loaded
+/// `.sym` table happens at the use site. The numeric `BANK:OFFSET=HEX`
+/// form is tried FIRST by the caller, so this only sees specs whose
+/// left side is not a bank:offset pair.
+pub(crate) fn parse_assert_spec_sym(spec: &str) -> Result<(String, Vec<u8>), String> {
+    let (name, val) = spec
+        .split_once('=')
+        .ok_or_else(|| format!("expected NAME=HEX, got `{spec}`"))?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(format!("empty symbol name in `{spec}`"));
+    }
+    Ok((name.to_string(), parse_hex_bytes(val)?))
+}
+
+/// Parse a symbolic peek `NAME[:COUNT]` (issue #77): a WLA-DX label,
+/// optionally followed by a hex byte count (default 1). Splits on the
+/// LAST `:` and only treats the tail as a count when it parses as hex —
+/// so a label that itself contains `:` still resolves whole.
+pub(crate) fn parse_peek_spec_sym(spec: &str) -> Result<(String, u16), String> {
+    let spec = spec.trim();
+    if let Some((name, count_s)) = spec.rsplit_once(':') {
+        if let Ok(count) = u16::from_str_radix(count_s.trim(), 16) {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(format!("empty symbol name in `{spec}`"));
+            }
+            return Ok((name.to_string(), count));
+        }
+    }
+    if spec.is_empty() {
+        return Err("empty --peek spec".into());
+    }
+    Ok((spec.to_string(), 1))
+}
+
 /// Parse a hex byte with optional `0x` prefix (the `--mem-trace-bank`
 /// form). Extracted from the former inline match in `run_state` so it is
 /// unit-testable; the error text feeds the same `eprintln!` as before.
@@ -303,6 +340,54 @@ mod tests {
             parse_assert_spec_no_bank("2140")
                 .unwrap_err()
                 .contains("OFFSET=HEX")
+        );
+    }
+
+    // --- symbolic forms (issue #77) ------------------------------------------
+
+    #[test]
+    fn assert_spec_sym_parses_name_and_bytes() {
+        assert_eq!(
+            parse_assert_spec_sym("r_done=EFBE").unwrap(),
+            ("r_done".into(), vec![0xEF, 0xBE])
+        );
+        assert!(
+            parse_assert_spec_sym("r_done")
+                .unwrap_err()
+                .contains("NAME=HEX")
+        );
+        assert!(
+            parse_assert_spec_sym("=00")
+                .unwrap_err()
+                .contains("empty symbol")
+        );
+        assert!(
+            parse_assert_spec_sym("x=zz")
+                .unwrap_err()
+                .contains("bad hex")
+        );
+    }
+
+    #[test]
+    fn peek_spec_sym_parses_name_and_optional_count() {
+        assert_eq!(
+            parse_peek_spec_sym("monster_x").unwrap(),
+            ("monster_x".into(), 1)
+        );
+        assert_eq!(
+            parse_peek_spec_sym("monster_x:10").unwrap(),
+            ("monster_x".into(), 0x10)
+        );
+        // A non-hex tail is part of the name, not a count.
+        assert_eq!(
+            parse_peek_spec_sym("ns:label").unwrap(),
+            ("ns:label".into(), 1)
+        );
+        assert!(parse_peek_spec_sym("").is_err());
+        assert!(
+            parse_peek_spec_sym(":10")
+                .unwrap_err()
+                .contains("empty symbol")
         );
     }
 
