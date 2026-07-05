@@ -7,6 +7,14 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- **First-class breakpoint/watchpoint registry** (#66): exec breakpoints
+  and read/write memory watchpoints halt at full emulation speed via the
+  existing trace hook points (zero overhead when unused). New API
+  (`bp_add_exec/mem`, `bp_remove/clear/list`, `run_until_break` →
+  `RunOutcome`) and MCP tools (`bp_add`, `bp_remove`, `bp_clear_all`,
+  `bp_list`, `run_until_break`). Exec bps halt before their instruction
+  (resume-friendly); watchpoints report the exact accessing PC, address
+  and value (epic #63, phase P2).
 - **15 new MCP tools** (#65): CPU/SPC700 disassembly with live-PC/M/X
   defaults, save/load state over the wire, CGRAM peek, the four debug
   renders (tilemap / VRAM tiles / palette / sprite sheet) as base64 PNGs,
