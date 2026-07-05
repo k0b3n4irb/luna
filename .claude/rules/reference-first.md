@@ -32,6 +32,11 @@ fully** before touching luna code.
    `fullsnes.htm` paraphrases alone. The bit layouts and timing
    quirks differ between secondary docs and what real hardware
    does; ares + Mesen2 are the empirical truth.
+7. **Update the scorecard in the same PR.** Any accuracy fix flips or
+   annotates its subsystem row in `docs/accuracy_scorecard.md` (and the
+   relevant audit/gap doc) — the scorecard is a living document and must
+   never lag the code. (The HDMA pillar rule already mandates this for
+   `docs/hdma_ares_audit.md`; this generalises it to every subsystem.)
 
 ## Why this matters
 
