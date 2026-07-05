@@ -7,6 +7,13 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- **WLA-DX `.sym` symbol support** (#67): `<rom>.sym` auto-detected next
+  to the ROM (CLI `--sym` overrides); `disassemble_cpu` lines and the MCP
+  cpu/mem traces annotate with the nearest label (`name+0xNN`); the
+  address-taking MCP tools accept a `symbol` name; new
+  `load_symbols` / `resolve_symbol` API + MCP surface — the two symbol
+  parsers duplicated in the OpenSNES tooling become deletable
+  (epic #63, phase P3).
 - **First-class breakpoint/watchpoint registry** (#66): exec breakpoints
   and read/write memory watchpoints halt at full emulation speed via the
   existing trace hook points (zero overhead when unused). New API
