@@ -132,6 +132,11 @@ enum Command {
         /// Mario Kart, Pilotwings). Persists for future runs.
         #[arg(long = "dsp1-rom")]
         dsp1_rom: Option<PathBuf>,
+        /// Load a WLA-DX `.sym` symbol file (overrides the automatic
+        /// `<rom>.sym` detection). Symbol names then annotate the CPU
+        /// disassembly and resolve in the debug tooling.
+        #[arg(long = "sym")]
+        sym: Option<PathBuf>,
         /// Load a save state (a `.luna` blob from the GUI's save-state
         /// slots, `~/.local/luna/states/<rom-slug>.slot<N>.luna`) right
         /// after the ROM loads, before the `-n` warm-up. Lets a headless
@@ -531,6 +536,7 @@ fn main() -> ExitCode {
             steps,
             force_mapper,
             dsp1_rom,
+            sym,
             load_state,
             dump_vram,
             out,
@@ -615,6 +621,7 @@ fn main() -> ExitCode {
             dma_trace_from,
             dma_trace_max,
             dsp1_rom.as_deref(),
+            sym.as_deref(),
             load_state.as_deref(),
         ),
         Command::Frames {
