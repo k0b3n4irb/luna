@@ -13,9 +13,10 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 `--all-features` is what catches lints in conditional code paths
-(test-utils, debug-only counters, etc.). The standard gate omits it
-because it's not what CI runs by default; this rule says: **run it
-locally before committing anyway**.
+(test-utils, debug-only counters, etc.). Since 2026-07 the CI clippy
+job runs this exact form too (`ci.yml`), so the local and CI gates are
+identical — run it locally before committing and CI will never
+surprise you.
 
 When a clippy finding shows up:
 
@@ -63,9 +64,8 @@ cargo build --workspace --all-targets \
 ```
 
 This is now THE canonical sequence. The `--all-features` clippy step
-supersedes the one in `rebuild-discipline.md`; that older line stays
-in place for CI compatibility, but locally the `--all-features` form
-is what we run.
+supersedes the plain form in `rebuild-discipline.md`, and since 2026-07
+it is also what CI runs — one gate everywhere.
 
 If any step fails, fix it — don't `--no-verify` past it. The hooks /
 lint gates exist because every previous time we skipped them, we

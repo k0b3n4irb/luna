@@ -42,7 +42,7 @@ CI runs the following — they must pass clean before commit:
 
 ```
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 Together with the rebuild + tests, this is the canonical pre-commit
@@ -53,5 +53,5 @@ cargo build --workspace --all-targets \
   && cargo build --release --workspace --all-targets \
   && cargo test --workspace --lib \
   && cargo fmt --all --check \
-  && cargo clippy --workspace --all-targets -- -D warnings
+  && cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
