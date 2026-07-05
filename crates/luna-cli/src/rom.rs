@@ -40,5 +40,16 @@ pub(crate) fn load_rom_into(
             info.title.trim()
         );
     }
+    // WLA-DX symbol auto-detection (issue #67): a `<rom>.sym` next to the
+    // ROM (the wlalink convention) is loaded automatically so disassembly
+    // and symbol resolution work with zero flags. Explicit `--sym` on the
+    // subcommands overrides this afterwards.
+    let sym = rom.with_extension("sym");
+    if sym.is_file() {
+        match em.load_symbols(&sym) {
+            Ok(n) => eprintln!("loaded {n} symbols from {}", sym.display()),
+            Err(e) => eprintln!("warning: could not parse {}: {e}", sym.display()),
+        }
+    }
     Ok(())
 }

@@ -8,6 +8,7 @@
 //! See `ARCHITECTURE.md` §6 and §6.6 for the target architecture.
 
 pub mod apu_stub;
+pub mod breakpoints;
 pub mod controller;
 pub mod coproc;
 pub mod cpu_regs;
@@ -15,6 +16,7 @@ pub mod dma;
 pub mod snes;
 
 pub use apu_stub::{ApuStub, Phase as ApuPhase};
+pub use breakpoints::{BreakHit, BreakKind, BreakpointInfo, BreakpointSet};
 pub use cpu_regs::CpuRegs;
 pub use dma::{DmaTraceEvent, DmaTraceLog};
 pub use luna_apu::Spc700TraceEvent;

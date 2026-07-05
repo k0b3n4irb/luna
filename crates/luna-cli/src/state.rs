@@ -62,12 +62,24 @@ pub(crate) fn run_state(
     dma_trace_from: u64,
     dma_trace_max: usize,
     dsp1_rom: Option<&std::path::Path>,
+    sym: Option<&std::path::Path>,
     load_state_path: Option<&std::path::Path>,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
     if let Err(e) = load_rom_into(&mut em, rom, force_mapper, dsp1_rom) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
+    }
+    // Explicit `--sym` overrides the `<rom>.sym` auto-detection done by
+    // `load_rom_into` (issue #67).
+    if let Some(sym_path) = sym {
+        match em.load_symbols(sym_path) {
+            Ok(n) => eprintln!("loaded {n} symbols from {}", sym_path.display()),
+            Err(e) => {
+                eprintln!("error: --sym {}: {e}", sym_path.display());
+                return ExitCode::from(1);
+            }
+        }
     }
     // Controller port device selection (RFE-3): a `mouse` answers the
     // auto-read / serial path with the SNES Mouse protocol so the game's
