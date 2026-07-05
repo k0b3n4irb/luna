@@ -292,6 +292,43 @@ pub struct EnableMemTraceParams {
     pub hi: Option<u16>,
 }
 
+/// `bp_add` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct BpAddParams {
+    /// `"exec"` for a PC breakpoint, `"mem"` for a memory watchpoint.
+    pub kind: String,
+    /// Exec: the 24-bit `PB:PC`. Mem: the 24-bit range start.
+    pub addr: u32,
+    /// Mem only: inclusive range end (defaults to `addr` — a single
+    /// address watch).
+    #[serde(default)]
+    pub hi: Option<u32>,
+    /// Mem only: fire on reads (default false).
+    #[serde(default)]
+    pub on_read: bool,
+    /// Mem only: fire on writes (default true).
+    #[serde(default = "default_true")]
+    pub on_write: bool,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+/// `bp_remove` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct BpRemoveParams {
+    /// The id returned by `bp_add`.
+    pub id: u32,
+}
+
+/// `run_until_break` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct RunUntilBreakParams {
+    /// Maximum instructions to execute before giving up.
+    pub max_steps: u64,
+}
+
 /// `set_mouse` parameters.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct SetMouseParams {
@@ -496,6 +533,63 @@ pub struct MemTraceLine {
 pub struct MemTraceResult {
     /// Recorded accesses, oldest first. Draining resets the ring.
     pub events: Vec<MemTraceLine>,
+}
+
+/// `bp_add` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BpAddResult {
+    /// Registry id of the new breakpoint (stable until removed).
+    pub id: u32,
+}
+
+/// `bp_remove` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BpRemoveResult {
+    /// `true` if the id existed and was removed.
+    pub removed: bool,
+}
+
+/// One registered breakpoint (`bp_list`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BpEntry {
+    /// Registry id.
+    pub id: u32,
+    /// `"exec"` or `"mem"`.
+    pub kind: String,
+    /// Exec: the PC. Mem: range start.
+    pub lo: u32,
+    /// Exec: same as `lo`. Mem: inclusive range end.
+    pub hi: u32,
+    /// Mem: fires on reads.
+    pub on_read: bool,
+    /// Mem: fires on writes.
+    pub on_write: bool,
+}
+
+/// `bp_list` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BpListResult {
+    /// Every registered breakpoint, ordered by id.
+    pub breakpoints: Vec<BpEntry>,
+}
+
+/// `run_until_break` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct RunUntilBreakResult {
+    /// Instructions actually executed this call.
+    pub steps: u64,
+    /// `true` if a breakpoint fired (fields below are then meaningful).
+    pub hit: bool,
+    /// Id of the breakpoint that fired.
+    pub bp_id: Option<u32>,
+    /// `"exec"`, `"read"` or `"write"`.
+    pub kind: Option<String>,
+    /// Exec: the about-to-execute PC. Mem: the accessing instruction's PC.
+    pub pc: Option<u32>,
+    /// Mem hits: the accessed 24-bit bus address.
+    pub addr: Option<u32>,
+    /// Mem hits: the byte transferred.
+    pub value: Option<u8>,
 }
 
 // ---------------- Server impl ----------------
@@ -1084,6 +1178,132 @@ impl LunaServer {
         }))
     }
 
+    // ------------- Breakpoint registry (issue #66) -------------
+
+    #[rmcp::tool(
+        description = "Register a breakpoint. kind='exec': halt BEFORE the instruction \
+                                at 24-bit PB:PC `addr` executes. kind='mem': watchpoint over the \
+                                inclusive bus range `addr`..=`hi` (default single address), firing \
+                                on reads (`on_read`) and/or writes (`on_write`, default true); \
+                                halts AFTER the accessing instruction with its PC/addr/value. \
+                                Returns the registry id. Run with `run_until_break`."
+    )]
+    async fn bp_add(
+        &self,
+        Parameters(params): Parameters<BpAddParams>,
+    ) -> Result<rmcp::Json<BpAddResult>, ErrorData> {
+        let id = {
+            let mut em = self.emulator.lock().await;
+            match params.kind.as_str() {
+                "exec" => em
+                    .bp_add_exec(params.addr)
+                    .map_err(|e| api_err_to_mcp(&e))?,
+                "mem" => em
+                    .bp_add_mem(
+                        params.addr,
+                        params.hi.unwrap_or(params.addr),
+                        params.on_read,
+                        params.on_write,
+                    )
+                    .map_err(|e| api_err_to_mcp(&e))?,
+                other => {
+                    return Err(ErrorData::invalid_params(
+                        format!("kind must be 'exec' or 'mem', got `{other}`"),
+                        None,
+                    ));
+                }
+            }
+        };
+        Ok(rmcp::Json(BpAddResult { id }))
+    }
+
+    #[rmcp::tool(description = "Remove a breakpoint by the id `bp_add` returned.")]
+    async fn bp_remove(
+        &self,
+        Parameters(params): Parameters<BpRemoveParams>,
+    ) -> Result<rmcp::Json<BpRemoveResult>, ErrorData> {
+        let removed = {
+            let mut em = self.emulator.lock().await;
+            em.bp_remove(params.id).map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(BpRemoveResult { removed }))
+    }
+
+    #[rmcp::tool(description = "Remove every registered breakpoint and watchpoint.")]
+    async fn bp_clear_all(&self) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.bp_clear().map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(description = "List every registered breakpoint/watchpoint, ordered by id.")]
+    async fn bp_list(&self) -> Result<rmcp::Json<BpListResult>, ErrorData> {
+        let list = {
+            let em = self.emulator.lock().await;
+            em.bp_list().map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(BpListResult {
+            breakpoints: list
+                .into_iter()
+                .map(|b| BpEntry {
+                    id: b.id,
+                    kind: if b.exec { "exec".into() } else { "mem".into() },
+                    lo: b.lo,
+                    hi: b.hi,
+                    on_read: b.on_read,
+                    on_write: b.on_write,
+                })
+                .collect(),
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Run at full emulation speed until a registered breakpoint fires \
+                                or `max_steps` instructions elapse. Exec breakpoints halt before \
+                                their instruction (resume-friendly: the first instruction of the \
+                                run is exempt); watchpoints halt after the accessing instruction \
+                                and report its PC, the address and the byte."
+    )]
+    async fn run_until_break(
+        &self,
+        Parameters(params): Parameters<RunUntilBreakParams>,
+    ) -> Result<rmcp::Json<RunUntilBreakResult>, ErrorData> {
+        let out = {
+            let mut em = self.emulator.lock().await;
+            em.run_until_break(params.max_steps)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(match out.hit {
+            Some(hit) => RunUntilBreakResult {
+                steps: out.steps,
+                hit: true,
+                bp_id: Some(hit.id),
+                kind: Some(
+                    match hit.kind {
+                        luna_api::BreakKind::Exec => "exec",
+                        luna_api::BreakKind::Read => "read",
+                        luna_api::BreakKind::Write => "write",
+                    }
+                    .into(),
+                ),
+                pc: Some(hit.pc),
+                addr: hit.addr,
+                value: hit.value,
+            },
+            None => RunUntilBreakResult {
+                steps: out.steps,
+                hit: false,
+                bp_id: None,
+                kind: None,
+                pc: None,
+                addr: None,
+                value: None,
+            },
+        }))
+    }
+
     #[rmcp::tool(
         description = "Feed SNES Mouse input for the next joypad auto-read: accumulated \
                                 `dx`/`dy` displacement plus the button bitmask (bit 0 = left, \
@@ -1375,6 +1595,116 @@ mod tests {
         }))
         .await
         .unwrap();
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// P2 breakpoint surface (issue #66): add/list/run/remove/clear over
+    /// MCP, on an injected WRAM loop.
+    #[tokio::test]
+    async fn server_p2_breakpoints_round_trip() {
+        let s = LunaServer::new();
+        let path = PathBuf::from("/tmp/luna_mcp_p2_demo.smc");
+        std::fs::write(&path, demo_lorom()).unwrap();
+        s.load_rom(Parameters(LoadRomParams {
+            path: path.to_string_lossy().into(),
+        }))
+        .await
+        .unwrap();
+        // Inject `LDA #$42; STA $0200; JMP $0100` at $00:0100 and aim PC.
+        s.poke_memory(Parameters(PokeMemoryParams {
+            bank: 0x7E,
+            offset: 0x0100,
+            data: vec![0xA9, 0x42, 0x8D, 0x00, 0x02, 0x4C, 0x00, 0x01],
+        }))
+        .await
+        .unwrap();
+        for (reg, val) in [("pb", 0x00u32), ("pc", 0x0100), ("db", 0x00)] {
+            s.set_cpu_register(Parameters(SetRegisterParams {
+                reg: reg.into(),
+                val,
+            }))
+            .await
+            .unwrap();
+        }
+
+        // Watchpoint on the STA target (defaults: single address, write).
+        let wp = s
+            .bp_add(Parameters(BpAddParams {
+                kind: "mem".into(),
+                addr: 0x00_0200,
+                hi: None,
+                on_read: false,
+                on_write: true,
+            }))
+            .await
+            .unwrap()
+            .0
+            .id;
+        // Exec bp on the JMP.
+        let xp = s
+            .bp_add(Parameters(BpAddParams {
+                kind: "exec".into(),
+                addr: 0x00_0105,
+                hi: None,
+                on_read: false,
+                on_write: true,
+            }))
+            .await
+            .unwrap()
+            .0
+            .id;
+        assert!(
+            s.bp_add(Parameters(BpAddParams {
+                kind: "bogus".into(),
+                addr: 0,
+                hi: None,
+                on_read: false,
+                on_write: true,
+            }))
+            .await
+            .is_err()
+        );
+        assert_eq!(s.bp_list().await.unwrap().0.breakpoints.len(), 2);
+
+        // The watchpoint (STA at $0102) fires first.
+        let out = s
+            .run_until_break(Parameters(RunUntilBreakParams { max_steps: 100 }))
+            .await
+            .unwrap()
+            .0;
+        assert!(out.hit);
+        assert_eq!(out.bp_id, Some(wp));
+        assert_eq!(out.kind.as_deref(), Some("write"));
+        assert_eq!((out.addr, out.value), (Some(0x00_0200), Some(0x42)));
+        assert_eq!(out.pc, Some(0x00_0102));
+
+        // Remove it; the exec bp fires next (before the JMP executes).
+        assert!(
+            s.bp_remove(Parameters(BpRemoveParams { id: wp }))
+                .await
+                .unwrap()
+                .0
+                .removed
+        );
+        let out = s
+            .run_until_break(Parameters(RunUntilBreakParams { max_steps: 100 }))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(out.bp_id, Some(xp));
+        assert_eq!(out.kind.as_deref(), Some("exec"));
+        assert_eq!(out.pc, Some(0x00_0105));
+
+        // Clear all: the run completes its budget.
+        s.bp_clear_all().await.unwrap();
+        let out = s
+            .run_until_break(Parameters(RunUntilBreakParams { max_steps: 10 }))
+            .await
+            .unwrap()
+            .0;
+        assert!(!out.hit);
+        assert_eq!(out.steps, 10);
 
         let _ = std::fs::remove_file(&path);
     }

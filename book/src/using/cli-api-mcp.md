@@ -322,6 +322,9 @@ method, so the MCP transport adds reach, not capability.
 | `render_sprite_sheet` | `render_sprite_sheet_png` | All 128 OAM sprites as a transparent PNG sheet. |
 | `enable_cpu_trace` / `take_cpu_trace` | `enable_cpu_trace` / `take_cpu_trace_log` | Per-instruction CPU trace ring (PC + registers). |
 | `enable_mem_trace` / `take_mem_trace` | `enable_mem_trace` / `take_mem_trace_log` | Per-bus-access trace with bank/offset-range filters. |
+| `bp_add` | `bp_add_exec` / `bp_add_mem` | Register an exec breakpoint or a read/write watchpoint range. |
+| `bp_remove` / `bp_clear_all` / `bp_list` | `bp_remove` / `bp_clear` / `bp_list` | Manage the breakpoint registry. |
+| `run_until_break` | `run_until_break` | Run at full speed until a breakpoint fires (or a step budget). |
 
 ---
 

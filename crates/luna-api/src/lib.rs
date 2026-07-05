@@ -21,9 +21,9 @@ use luna_core::Snes;
 /// GUI's port-device selector goes through `luna-api`, not `luna-core`.
 pub use luna_core::controller::PortDevice;
 pub use luna_core::{
-    CpuTraceEvent, CpuTraceLog, DmaTraceEvent, DmaTraceLog, MailboxEvent, MailboxEventKind,
-    MapperKind, MemEventKind, MemTraceEvent, MemTraceLog, Sa1LogEvent, Sa1SideEvent, Sa1TraceEvent,
-    Spc700TraceEvent, SuperFxTraceEvent,
+    BreakHit, BreakKind, BreakpointInfo, CpuTraceEvent, CpuTraceLog, DmaTraceEvent, DmaTraceLog,
+    MailboxEvent, MailboxEventKind, MapperKind, MemEventKind, MemTraceEvent, MemTraceLog,
+    Sa1LogEvent, Sa1SideEvent, Sa1TraceEvent, Spc700TraceEvent, SuperFxTraceEvent,
 };
 /// Decoded BG tilemap image (Tilemap Viewer), re-exported so the GUI uses
 /// `luna_api::TilemapImage` rather than depending on `luna-ppu`.
@@ -239,6 +239,16 @@ pub struct Spc700State {
     pub stopped: bool,
     /// `true` after `SLEEP`, until an interrupt wakes the core.
     pub sleeping: bool,
+}
+
+/// Outcome of [`Emulator::run_until_break`]: either the step budget ran
+/// out (`hit == None`) or a breakpoint/watchpoint fired.
+#[derive(Debug, Clone, Serialize)]
+pub struct RunOutcome {
+    /// Instructions actually executed this call.
+    pub steps: u64,
+    /// The breakpoint hit that stopped the run, if any.
+    pub hit: Option<BreakHit>,
 }
 
 /// One disassembled instruction line, for a disassembly debug panel.
@@ -1651,6 +1661,108 @@ impl Emulator {
         Ok(cur == pc)
     }
 
+    // -----------------------------------------------------------------
+    // Breakpoint / watchpoint registry (issue #66, epic #63)
+    // -----------------------------------------------------------------
+
+    /// Get (installing on first use) the breakpoint registry.
+    fn bp_registry(&mut self) -> Result<&mut luna_core::BreakpointSet, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        Ok(snes
+            .breakpoints
+            .get_or_insert_with(|| Box::new(luna_core::BreakpointSet::new())))
+    }
+
+    /// Register an exec breakpoint at a 24-bit `PB:PC`. Returns its id.
+    pub fn bp_add_exec(&mut self, pc: u32) -> Result<u32, ApiError> {
+        Ok(self.bp_registry()?.add_exec(pc))
+    }
+
+    /// Register a memory watchpoint over the inclusive 24-bit bus range
+    /// `lo..=hi`, firing on reads and/or writes. Returns its id.
+    pub fn bp_add_mem(
+        &mut self,
+        lo: u32,
+        hi: u32,
+        on_read: bool,
+        on_write: bool,
+    ) -> Result<u32, ApiError> {
+        if lo > hi {
+            return Err(ApiError::BadArg(format!(
+                "watch range lo ({lo:#08X}) > hi ({hi:#08X})"
+            )));
+        }
+        if !on_read && !on_write {
+            return Err(ApiError::BadArg(
+                "watchpoint must fire on reads, writes, or both".into(),
+            ));
+        }
+        Ok(self.bp_registry()?.add_mem(lo, hi, on_read, on_write))
+    }
+
+    /// Remove a breakpoint by id. Returns `true` if it existed.
+    pub fn bp_remove(&mut self, id: u32) -> Result<bool, ApiError> {
+        Ok(self.bp_registry()?.remove(id))
+    }
+
+    /// Remove every breakpoint.
+    pub fn bp_clear(&mut self) -> Result<(), ApiError> {
+        self.bp_registry()?.clear();
+        Ok(())
+    }
+
+    /// Snapshot the registered breakpoints.
+    pub fn bp_list(&self) -> Result<Vec<BreakpointInfo>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        Ok(snes
+            .breakpoints
+            .as_ref()
+            .map(|b| b.list())
+            .unwrap_or_default())
+    }
+
+    /// Run at full emulation speed until a registered breakpoint fires or
+    /// `max_steps` instructions elapse.
+    ///
+    /// Semantics:
+    /// - **exec breakpoints** halt BEFORE the instruction at the target PC
+    ///   executes. Resume-friendly: the check is skipped for the very first
+    ///   instruction of the run, so calling again after a hit moves past it.
+    /// - **memory watchpoints** halt AFTER the accessing instruction
+    ///   completes (instruction-atomic, like luna's interrupt model); the
+    ///   hit reports the exact accessing PC, address and value.
+    ///
+    /// A stale unconsumed watchpoint hit from a previous plain `step()` run
+    /// is discarded at entry.
+    pub fn run_until_break(&mut self, max_steps: u64) -> Result<RunOutcome, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        if let Some(bp) = snes.breakpoints.as_mut() {
+            bp.take_pending(); // discard stale
+        }
+        for i in 0..max_steps {
+            let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
+            if i > 0 {
+                if let Some(hit) = snes.breakpoints.as_ref().and_then(|b| b.check_exec(cur)) {
+                    return Ok(RunOutcome {
+                        steps: i,
+                        hit: Some(hit),
+                    });
+                }
+            }
+            snes.step();
+            if let Some(hit) = snes.breakpoints.as_mut().and_then(|b| b.take_pending()) {
+                return Ok(RunOutcome {
+                    steps: i + 1,
+                    hit: Some(hit),
+                });
+            }
+        }
+        Ok(RunOutcome {
+            steps: max_steps,
+            hit: None,
+        })
+    }
+
     /// Controlled execution (L10): set a CPU register by name — one of
     /// `a/x/y/sp/dp/pc/pb/db/p` (case-insensitive). Unknown name → `BadArg`.
     pub fn set_cpu_register(&mut self, reg: &str, val: u32) -> Result<(), ApiError> {
@@ -2474,6 +2586,75 @@ mod tests {
         // touches returns None within the step budget (no panic, no hang).
         assert_eq!(e.run_until_mem_write(0x7E_FFFE, 50).unwrap(), None);
         assert_eq!(e.run_until_mem_read(0x7E_FFFE, 50).unwrap(), None);
+    }
+
+    /// Breakpoint registry (issue #66): exec breakpoints halt-at-speed
+    /// with resume semantics, watchpoints report the exact accessing
+    /// instruction, and the registry lifecycle works end-to-end.
+    #[test]
+    fn breakpoint_registry_halts_at_speed() {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+
+        // Inject a tiny loop at $00:0100 (WRAM mirror):
+        //   0100: A9 42     LDA #$42
+        //   0102: 8D 00 02  STA $0200
+        //   0105: 4C 00 01  JMP $0100
+        e.poke_memory(
+            0x7E,
+            0x0100,
+            &[0xA9, 0x42, 0x8D, 0x00, 0x02, 0x4C, 0x00, 0x01],
+        )
+        .unwrap();
+        e.set_cpu_register("pb", 0x00).unwrap();
+        e.set_cpu_register("pc", 0x0100).unwrap();
+        e.set_cpu_register("db", 0x00).unwrap();
+
+        // No registry installed: the run completes its budget, hit = None.
+        let out = e.run_until_break(6).unwrap();
+        assert_eq!((out.steps, out.hit.is_none()), (6, true));
+
+        // --- exec breakpoint: halts BEFORE the instruction at the target.
+        e.set_cpu_register("pc", 0x0100).unwrap();
+        let bp_jmp = e.bp_add_exec(0x00_0105).unwrap();
+        let out = e.run_until_break(100).unwrap();
+        let hit = out.hit.expect("exec bp hit");
+        assert_eq!(hit.kind, BreakKind::Exec);
+        assert_eq!((hit.id, hit.pc), (bp_jmp, 0x00_0105));
+        assert_eq!(out.steps, 2, "LDA + STA executed, JMP not yet");
+        assert_eq!(e.cpu_state().unwrap().pc, 0x0105);
+
+        // Resume semantics: calling again moves PAST the breakpoint and
+        // comes back around the loop to hit it again.
+        let out = e.run_until_break(100).unwrap();
+        assert_eq!(out.hit.unwrap().pc, 0x00_0105);
+        assert_eq!(out.steps, 3, "JMP + LDA + STA this time");
+
+        // --- memory watchpoint: exact accessing instruction reported.
+        assert!(e.bp_remove(bp_jmp).unwrap());
+        let bp_w = e.bp_add_mem(0x00_0200, 0x00_0200, false, true).unwrap();
+        e.set_cpu_register("pc", 0x0100).unwrap();
+        let out = e.run_until_break(100).unwrap();
+        let hit = out.hit.expect("watchpoint hit");
+        assert_eq!(hit.kind, BreakKind::Write);
+        assert_eq!(hit.id, bp_w);
+        assert_eq!(hit.addr, Some(0x00_0200));
+        assert_eq!(hit.value, Some(0x42));
+        assert_eq!(hit.pc, 0x00_0102, "the STA instruction did the write");
+        assert_eq!(out.steps, 2, "halts after the accessing instruction");
+
+        // --- registry lifecycle + argument validation.
+        assert_eq!(e.bp_list().unwrap().len(), 1);
+        assert!(e.bp_add_mem(0x10, 0x00, true, true).is_err(), "lo > hi");
+        assert!(
+            e.bp_add_mem(0x00, 0x10, false, false).is_err(),
+            "neither read nor write"
+        );
+        e.bp_clear().unwrap();
+        assert!(e.bp_list().unwrap().is_empty());
+        // Cleared registry: the loop runs to its budget again.
+        let out = e.run_until_break(10).unwrap();
+        assert!(out.hit.is_none());
     }
 
     #[test]
