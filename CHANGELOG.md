@@ -6,6 +6,14 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Added
+- **15 new MCP tools** (#65): CPU/SPC700 disassembly with live-PC/M/X
+  defaults, save/load state over the wire, CGRAM peek, the four debug
+  renders (tilemap / VRAM tiles / palette / sprite sheet) as base64 PNGs,
+  CPU + memory trace enable/drain with filters, and Mouse / Super Scope
+  input — the MCP surface now covers the interactive-debugger workflows
+  (epic #63, phase P1).
+
 ## [1.5.0] — 2026-07-05
 
 The HDMA pillar closure + the 2026-07-05 project-review remediation.
