@@ -43,6 +43,7 @@ pub(crate) enum DebugPanel {
     Palette,
     Tilemap,
     EventViewer,
+    Breakpoints,
 }
 
 impl DebugPanel {
@@ -59,6 +60,7 @@ impl DebugPanel {
             Self::Registers => "Registers",
             Self::Palette => "Palette (CGRAM)",
             Self::Tilemap => "Tilemap",
+            Self::Breakpoints => "Breakpoints",
         }
     }
 
@@ -75,6 +77,7 @@ impl DebugPanel {
             Self::Registers => (360, 520),
             Self::Palette => (380, 440),
             Self::Tilemap => (540, 580),
+            Self::Breakpoints => (420, 360),
         }
     }
 }
@@ -458,6 +461,9 @@ impl DebugWindows {
                                 DebugPanel::EventViewer => {}
                                 DebugPanel::Spc700Disasm => nav = ui::spc700_disasm_body(ui, snap),
                                 DebugPanel::CpuDisasm => nav = ui::cpu_disasm_body(ui, snap),
+                                DebugPanel::Breakpoints => {
+                                    nav = ui::breakpoints_body(ui, snap);
+                                }
                                 DebugPanel::CpuMemory => nav = ui::cpu_memory_body(ui, snap),
                                 DebugPanel::Spc700Memory => {
                                     nav = ui::spc700_memory_body(ui, snap);

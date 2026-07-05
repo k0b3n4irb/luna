@@ -6,6 +6,17 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Added
+- **GUI breakpoints & stepping** (#68 — epic #63 P4, completing the
+  interactive-debugger parity): click a CPU-disassembly row to toggle an
+  exec breakpoint (red gutter dot); a Breakpoints panel lists/removes them
+  and adds memory watchpoints; on a hit the emulation auto-pauses with a
+  halt banner, the disassembly jumps to the PC, and the Event Viewer's
+  *Breakpoint* category shows the hit at its exact position. `F10` steps
+  one instruction, `F11` one frame. The no-debugger hot path is unchanged;
+  `run_until_break` now counts instructions and catches core panics like
+  `step`.
+
 ## [1.6.0] — 2026-07-05
 
 Interactive-debugger parity (epic #63, P1–P3) — the MCP surface now covers
