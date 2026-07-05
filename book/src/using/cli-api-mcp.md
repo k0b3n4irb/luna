@@ -73,6 +73,7 @@ and is the hub for every headless diagnostic.
 | `-n, --steps <N>` | `1000` | CPU instructions before snapshotting. |
 | `--out <PATH>` | `-` | Where to write the JSON (`-` = stdout). |
 | `--force-mapper <M>` | auto | Force a mapper for headerless ROMs: `lorom`, `hirom`, `exhirom`, `sa1`, `superfx`. |
+| `--sym <PATH>` | auto-detect `<rom>.sym` | Load a WLA-DX symbol file (annotated disasm, named addresses). |
 | `--dsp1-rom <PATH>` | — | Install `dsp1b.rom` firmware then load (Mario Kart, Pilotwings). Persists. |
 | `--load-state <PATH>` | — | Load a `.luna` save-state right after ROM load, before warm-up (resume a GUI-captured scene). |
 | `--input <SCRIPT>` | — | Scripted joypad-1 input (§3). |
@@ -325,6 +326,13 @@ method, so the MCP transport adds reach, not capability.
 | `bp_add` | `bp_add_exec` / `bp_add_mem` | Register an exec breakpoint or a read/write watchpoint range. |
 | `bp_remove` / `bp_clear_all` / `bp_list` | `bp_remove` / `bp_clear` / `bp_list` | Manage the breakpoint registry. |
 | `run_until_break` | `run_until_break` | Run at full speed until a breakpoint fires (or a step budget). |
+| `load_symbols` | `load_symbols` | Load a WLA-DX `.sym`; disasm + traces become annotated. |
+| `resolve_symbol` | `resolve_symbol` | Label name → 24-bit address. |
+
+With a symbol table loaded, the address-taking tools (`peek_memory`,
+`poke_memory`, `run_until_pc`, `run_until_mem_*`, `bp_add`) also accept a
+`symbol` name in place of the numeric address — e.g.
+`peek_memory {symbol: "monster_x", count: 2}`.
 
 ---
 
