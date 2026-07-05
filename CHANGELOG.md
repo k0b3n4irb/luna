@@ -16,6 +16,10 @@ All notable user-facing changes to luna. Releases are cut from `main`
   one instruction, `F11` one frame. The no-debugger hot path is unchanged;
   `run_until_break` now counts instructions and catches core panics like
   `step`.
+- CLI `--assert` / `--peek` accept WLA-DX label names (`--assert
+  r_done=EFBE`, `--peek monster_x:2`) resolved through the loaded `.sym`
+  table — parity with the MCP `symbol:` args; the numeric forms are
+  unchanged (#77). Frees the last downstream `.sym` parser.
 
 ## [1.6.0] — 2026-07-05
 
