@@ -1,0 +1,5 @@
+# Canonicalise the maintainer's git identities (placeholder emails from
+# early machines) so `git shortlog`/`git log --author` see one person.
+k0b3n4irb <kobenairb@gmail.com> K0b3 <K0b3@nowhere.zz>
+k0b3n4irb <kobenairb@gmail.com> k0b3n4irb <k0b3n4irb@nowhere.zz>
+k0b3n4irb <kobenairb@gmail.com> k0b3n4irb <k0b3n4irb@gmail.com>
