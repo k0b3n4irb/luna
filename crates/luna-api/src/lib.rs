@@ -78,6 +78,10 @@ pub enum ApiError {
 /// serialized layout so [`Emulator::load_state`] rejects stale blobs.
 /// v2: dropped the always-`None` `Spc700::unimplemented_opcode` field
 /// (the SPC700 dispatch is exhaustive), changing the bincode layout.
+///
+/// NOTE (2026-07): the container is encoded with bincode 1.x (EOL branch).
+/// Evaluate migrating to bincode 2 at the NEXT version bump — a bump
+/// already invalidates old blobs, so that is the free moment to switch.
 pub const SAVE_STATE_VERSION: u32 = 2;
 
 /// On-disk / on-wire save-state container produced by
