@@ -6,6 +6,34 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-07-05
+
+Interactive-debugger parity (epic #63, P1–P3) — the MCP surface now covers
+the OpenSNES snesdbg workflows end-to-end.
+
+### Added
+- **WLA-DX `.sym` symbol support** (#67): `<rom>.sym` auto-detected next
+  to the ROM (CLI `--sym` overrides); `disassemble_cpu` lines and the MCP
+  cpu/mem traces annotate with the nearest label (`name+0xNN`); the
+  address-taking MCP tools accept a `symbol` name; new
+  `load_symbols` / `resolve_symbol` API + MCP surface — the two symbol
+  parsers duplicated in the OpenSNES tooling become deletable
+  (epic #63, phase P3).
+- **First-class breakpoint/watchpoint registry** (#66): exec breakpoints
+  and read/write memory watchpoints halt at full emulation speed via the
+  existing trace hook points (zero overhead when unused). New API
+  (`bp_add_exec/mem`, `bp_remove/clear/list`, `run_until_break` →
+  `RunOutcome`) and MCP tools (`bp_add`, `bp_remove`, `bp_clear_all`,
+  `bp_list`, `run_until_break`). Exec bps halt before their instruction
+  (resume-friendly); watchpoints report the exact accessing PC, address
+  and value (epic #63, phase P2).
+- **15 new MCP tools** (#65): CPU/SPC700 disassembly with live-PC/M/X
+  defaults, save/load state over the wire, CGRAM peek, the four debug
+  renders (tilemap / VRAM tiles / palette / sprite sheet) as base64 PNGs,
+  CPU + memory trace enable/drain with filters, and Mouse / Super Scope
+  input — the MCP surface now covers the interactive-debugger workflows
+  (epic #63, phase P1).
+
 ## [1.5.0] — 2026-07-05
 
 The HDMA pillar closure + the 2026-07-05 project-review remediation.

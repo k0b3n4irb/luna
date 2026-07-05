@@ -73,6 +73,7 @@ and is the hub for every headless diagnostic.
 | `-n, --steps <N>` | `1000` | CPU instructions before snapshotting. |
 | `--out <PATH>` | `-` | Where to write the JSON (`-` = stdout). |
 | `--force-mapper <M>` | auto | Force a mapper for headerless ROMs: `lorom`, `hirom`, `exhirom`, `sa1`, `superfx`. |
+| `--sym <PATH>` | auto-detect `<rom>.sym` | Load a WLA-DX symbol file (annotated disasm, named addresses). |
 | `--dsp1-rom <PATH>` | — | Install `dsp1b.rom` firmware then load (Mario Kart, Pilotwings). Persists. |
 | `--load-state <PATH>` | — | Load a `.luna` save-state right after ROM load, before warm-up (resume a GUI-captured scene). |
 | `--input <SCRIPT>` | — | Scripted joypad-1 input (§3). |
@@ -295,13 +296,43 @@ method, so the MCP transport adds reach, not capability.
 | `load_rom` | `load_rom` | Load a `.sfc`/`.smc` from a host path. |
 | `reset` | `reset` | Reset to power-on state. |
 | `set_joypad` | `set_joypad` | Set the button bitmask for `port` (0 = P1, 1 = P2). |
+| `set_mouse` | `set_mouse` | Feed SNES Mouse `dx`/`dy`/buttons for the next auto-read. |
+| `set_superscope` | `set_superscope` | Feed Super Scope aim (`x`, `y`) + buttons. |
 | `step` | `step` | Step `count` instructions (stops early if the CPU halts). |
 | `step_until_frame` | `step_until_frame` | Run until one PPU frame completes (bounded). |
+| `run_until_pc` | `run_until_pc` | Step until PB:PC hits a 24-bit target (bounded). |
+| `run_until_mem_write` | `run_until_mem_write` | Step until an address is written; returns PC + value. |
+| `run_until_mem_read` | `run_until_mem_read` | Step until an address is read; returns PC + value. |
 | `state` | `state` | Full observable-state JSON snapshot (§2). |
 | `screenshot` | `render_frame_png` | Render the 256×224 composited framebuffer to PNG. |
 | `drain_audio` | `drain_audio` | Drain up to `max` stereo samples from the APU. |
 | `peek_memory` | `peek_memory` | Read `count` bytes from the CPU bus at `bank:offset`. |
 | `peek_aram` | `peek_aram` | Read `count` bytes from the SPC700's 64 KB ARAM. |
+| `peek_vram` | `peek_vram` | Read `count` bytes from the 64 KB VRAM. |
+| `peek_cgram` | `peek_cgram` | All 256 CGRAM palette entries as BGR555 words. |
+| `poke_memory` | `poke_memory` | Write bytes into WRAM (state injection). |
+| `search_memory` | `search_memory` | Find a byte pattern in `$7E-$7F` WRAM. |
+| `set_cpu_register` | `set_cpu_register` | Set a CPU register by name. |
+| `disasm_cpu` | `disassemble_cpu` | 65C816 disassembly (defaults: live PC + live M/X widths). |
+| `disasm_spc` | `disassemble_spc` | SPC700 disassembly (default: live SPC PC). |
+| `save_state` | `save_state` | Full-machine save-state blob, base64 (versioned, ROM-hash-guarded). |
+| `load_state` | `load_state` | Restore a `save_state` blob. |
+| `render_tilemap` | `render_tilemap_png` | Full tilemap of BG 1..=4 as PNG. |
+| `render_vram_tiles` | `render_vram_tiles_png` | VRAM tile set decoded at 2/4/8 bpp as PNG. |
+| `render_palette` | `render_palette_png` | CGRAM as a 16×16 swatch-grid PNG. |
+| `render_sprite_sheet` | `render_sprite_sheet_png` | All 128 OAM sprites as a transparent PNG sheet. |
+| `enable_cpu_trace` / `take_cpu_trace` | `enable_cpu_trace` / `take_cpu_trace_log` | Per-instruction CPU trace ring (PC + registers). |
+| `enable_mem_trace` / `take_mem_trace` | `enable_mem_trace` / `take_mem_trace_log` | Per-bus-access trace with bank/offset-range filters. |
+| `bp_add` | `bp_add_exec` / `bp_add_mem` | Register an exec breakpoint or a read/write watchpoint range. |
+| `bp_remove` / `bp_clear_all` / `bp_list` | `bp_remove` / `bp_clear` / `bp_list` | Manage the breakpoint registry. |
+| `run_until_break` | `run_until_break` | Run at full speed until a breakpoint fires (or a step budget). |
+| `load_symbols` | `load_symbols` | Load a WLA-DX `.sym`; disasm + traces become annotated. |
+| `resolve_symbol` | `resolve_symbol` | Label name → 24-bit address. |
+
+With a symbol table loaded, the address-taking tools (`peek_memory`,
+`poke_memory`, `run_until_pc`, `run_until_mem_*`, `bp_add`) also accept a
+`symbol` name in place of the numeric address — e.g.
+`peek_memory {symbol: "monster_x", count: 2}`.
 
 ---
 

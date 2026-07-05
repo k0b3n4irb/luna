@@ -25,6 +25,26 @@
 //! - `run_until_pc { pc, max_steps }` → step to a target PC.
 //! - `set_cpu_register { reg, val }` → set a CPU register.
 //!
+//! Interactive-debugger surface (issue #65 / epic #63 — feeds the
+//! `OpenSNES` snesdbg-retirement workflows):
+//!
+//! - `disasm_cpu { addr?, lines?, m8?, x8? }` → 65C816 disassembly
+//!   (defaults: live PC + live M/X widths).
+//! - `disasm_spc { addr?, lines? }` → SPC700 disassembly (default:
+//!   live SPC PC).
+//! - `save_state` / `load_state { state_base64 }` → full-machine
+//!   save-state round-trip (versioned, ROM-hash-guarded).
+//! - `peek_cgram` → all 256 CGRAM BGR555 words.
+//! - `render_tilemap { bg }` / `render_vram_tiles { bpp?, palette_row? }`
+//!   / `render_palette { cell? }` / `render_sprite_sheet` → debug PNGs,
+//!   base64-encoded.
+//! - `enable_cpu_trace { max_events }` / `take_cpu_trace` → per-
+//!   instruction CPU trace ring.
+//! - `enable_mem_trace { max_events, bank?, lo?, hi? }` /
+//!   `take_mem_trace` → per-bus-access memory trace with filters.
+//! - `set_mouse { dx, dy, buttons }` / `set_superscope { x, y, buttons }`
+//!   → pointer-device input.
+//!
 //! Transport is stdio by default ([`serve_stdio`]); a future commit
 //! will add HTTP-SSE for browser clients.
 
@@ -114,10 +134,16 @@ pub struct DrainAudioParams {
 /// `peek_memory` parameters.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct PeekMemoryParams {
-    /// 8-bit CPU bank (`$00..$FF`).
+    /// 8-bit CPU bank (`$00..$FF`). Ignored when `symbol` is given.
+    #[serde(default)]
     pub bank: u8,
-    /// 16-bit offset within that bank.
+    /// 16-bit offset within that bank. Ignored when `symbol` is given.
+    #[serde(default)]
     pub offset: u16,
+    /// Read at a loaded WLA-DX symbol instead of `bank:offset`
+    /// (requires `load_symbols`).
+    #[serde(default)]
+    pub symbol: Option<String>,
     /// Number of bytes to read.
     pub count: u16,
 }
@@ -144,9 +170,15 @@ pub struct PeekVramParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct PokeMemoryParams {
     /// 8-bit CPU bank (`$7E-$7F` or a `$00-3F`/`$80-BF` low-RAM mirror).
+    /// Ignored when `symbol` is given.
+    #[serde(default)]
     pub bank: u8,
-    /// 16-bit offset within that bank.
+    /// 16-bit offset within that bank. Ignored when `symbol` is given.
+    #[serde(default)]
     pub offset: u16,
+    /// Write at a loaded WLA-DX symbol instead of `bank:offset`.
+    #[serde(default)]
+    pub symbol: Option<String>,
     /// Bytes to write (JSON array, e.g. `[222, 173]`).
     pub data: Vec<u8>,
 }
@@ -161,8 +193,12 @@ pub struct SearchMemoryParams {
 /// `run_until_pc` parameters.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct RunUntilPcParams {
-    /// 24-bit target PC (`pb << 16 | pc`).
+    /// 24-bit target PC (`pb << 16 | pc`). Ignored when `symbol` is given.
+    #[serde(default)]
     pub pc: u32,
+    /// Run to a loaded WLA-DX symbol instead of `pc`.
+    #[serde(default)]
+    pub symbol: Option<String>,
     /// Maximum instructions to step before giving up.
     pub max_steps: u64,
 }
@@ -179,10 +215,181 @@ pub struct SetRegisterParams {
 /// `run_until_mem_write` / `run_until_mem_read` parameters.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct MemBreakpointParams {
-    /// 24-bit bus address to watch (`bank << 16 | offset`).
+    /// 24-bit bus address to watch (`bank << 16 | offset`). Ignored when
+    /// `symbol` is given.
+    #[serde(default)]
     pub addr: u32,
+    /// Watch a loaded WLA-DX symbol instead of `addr`.
+    #[serde(default)]
+    pub symbol: Option<String>,
     /// Maximum instructions to step before giving up.
     pub max_steps: u64,
+}
+
+/// `disasm_cpu` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema, Default)]
+pub struct DisasmCpuParams {
+    /// 24-bit start address (`pb << 16 | pc`). Defaults to the live PC.
+    #[serde(default)]
+    pub addr: Option<u32>,
+    /// Number of instructions to decode. Defaults to 16.
+    #[serde(default)]
+    pub lines: Option<u16>,
+    /// Force 8-bit accumulator immediates. Defaults to the live M flag
+    /// (true in emulation mode).
+    #[serde(default)]
+    pub m8: Option<bool>,
+    /// Force 8-bit index immediates. Defaults to the live X flag
+    /// (true in emulation mode).
+    #[serde(default)]
+    pub x8: Option<bool>,
+}
+
+/// `disasm_spc` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema, Default)]
+pub struct DisasmSpcParams {
+    /// 16-bit ARAM start address. Defaults to the live SPC700 PC.
+    #[serde(default)]
+    pub addr: Option<u16>,
+    /// Number of instructions to decode. Defaults to 16.
+    #[serde(default)]
+    pub lines: Option<u16>,
+}
+
+/// `load_state` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct LoadStateParams {
+    /// A base64-encoded save-state blob previously returned by
+    /// `save_state`. Rejected if the version or ROM hash mismatch.
+    pub state_base64: String,
+}
+
+/// `render_tilemap` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct RenderTilemapParams {
+    /// Background layer, 1..=4 (matches the GUI/CLI convention).
+    pub bg: u8,
+}
+
+/// `render_vram_tiles` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema, Default)]
+pub struct RenderVramTilesParams {
+    /// Tile bit depth: 2, 4 or 8. Defaults to 4.
+    #[serde(default)]
+    pub bpp: Option<u8>,
+    /// CGRAM palette row used to colour the tiles. Defaults to 0.
+    #[serde(default)]
+    pub palette_row: Option<u8>,
+}
+
+/// `render_palette` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema, Default)]
+pub struct RenderPaletteParams {
+    /// Pixel size of each of the 16×16 swatches. Defaults to 16.
+    #[serde(default)]
+    pub cell: Option<u32>,
+}
+
+/// `enable_cpu_trace` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct EnableCpuTraceParams {
+    /// Hard cap on recorded events (memory guard for long runs).
+    pub max_events: usize,
+}
+
+/// `enable_mem_trace` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct EnableMemTraceParams {
+    /// Hard cap on recorded events.
+    pub max_events: usize,
+    /// Only record accesses whose bank matches (e.g. `0x7E`).
+    #[serde(default)]
+    pub bank: Option<u8>,
+    /// With `hi`, only record offsets in `lo..=hi` (e.g. `0x2100`).
+    #[serde(default)]
+    pub lo: Option<u16>,
+    /// Upper bound of the offset filter (inclusive).
+    #[serde(default)]
+    pub hi: Option<u16>,
+}
+
+/// `bp_add` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct BpAddParams {
+    /// `"exec"` for a PC breakpoint, `"mem"` for a memory watchpoint.
+    pub kind: String,
+    /// Exec: the 24-bit `PB:PC`. Mem: the 24-bit range start. Ignored
+    /// when `symbol` is given.
+    #[serde(default)]
+    pub addr: u32,
+    /// Break at a loaded WLA-DX symbol instead of `addr`.
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// Mem only: inclusive range end (defaults to `addr` — a single
+    /// address watch).
+    #[serde(default)]
+    pub hi: Option<u32>,
+    /// Mem only: fire on reads (default false).
+    #[serde(default)]
+    pub on_read: bool,
+    /// Mem only: fire on writes (default true).
+    #[serde(default = "default_true")]
+    pub on_write: bool,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+/// `bp_remove` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct BpRemoveParams {
+    /// The id returned by `bp_add`.
+    pub id: u32,
+}
+
+/// `run_until_break` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct RunUntilBreakParams {
+    /// Maximum instructions to execute before giving up.
+    pub max_steps: u64,
+}
+
+/// `load_symbols` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct LoadSymbolsParams {
+    /// Path to a WLA-DX `.sym` file on the host filesystem.
+    pub path: String,
+}
+
+/// `resolve_symbol` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct ResolveSymbolParams {
+    /// Label name exactly as it appears in the `.sym` file.
+    pub name: String,
+}
+
+/// `set_mouse` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SetMouseParams {
+    /// Accumulated X displacement since the last auto-read.
+    pub dx: i32,
+    /// Accumulated Y displacement since the last auto-read.
+    pub dy: i32,
+    /// Button bitmask: bit 0 = left, bit 1 = right.
+    pub buttons: u8,
+}
+
+/// `set_superscope` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SetSuperscopeParams {
+    /// Aim X in screen space (0..=255; off-screen values allowed).
+    pub x: i32,
+    /// Aim Y in screen space (0..=224).
+    pub y: i32,
+    /// Button bitmask: bit 0 fire, bit 1 cursor, bit 2 pause,
+    /// bit 3 turbo.
+    pub buttons: u8,
 }
 
 // ---------------- Tool result types ----------------
@@ -269,6 +476,192 @@ pub struct MemBreakResult {
     pub pc: u32,
     /// Byte transferred (0 if not hit).
     pub value: u8,
+}
+
+/// `disasm_cpu` / `disasm_spc` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DisasmResult {
+    /// Decoded instruction lines, in address order. `is_pc` marks the
+    /// live program counter's line.
+    pub lines: Vec<luna_api::DisasmLine>,
+}
+
+/// `save_state` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SaveStateResult {
+    /// The serialized machine state, base64-encoded. Feed back to
+    /// `load_state` to restore.
+    pub state_base64: String,
+    /// Decoded blob size in bytes.
+    pub bytes: usize,
+}
+
+/// `peek_cgram` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CgramResult {
+    /// All 256 CGRAM entries as raw BGR555 words (index 0 = backdrop).
+    pub colors: Vec<u16>,
+}
+
+/// Result for the debug-render tools (`render_tilemap`,
+/// `render_vram_tiles`, `render_palette`, `render_sprite_sheet`).
+/// Dimensions vary per render — decode the PNG header if needed.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct PngResult {
+    /// PNG bytes, base64-encoded.
+    pub png_base64: String,
+}
+
+/// One CPU-trace event (`take_cpu_trace`) — a flattened, transport-
+/// friendly copy of `luna_api::CpuTraceEvent`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CpuTraceLine {
+    /// Master cycles since reset at instruction start.
+    pub mclk: u64,
+    /// 24-bit PC of the about-to-execute instruction.
+    pub pc: u32,
+    /// Accumulator (16-bit).
+    pub a: u16,
+    /// X index register.
+    pub x: u16,
+    /// Y index register.
+    pub y: u16,
+    /// Stack pointer.
+    pub sp: u16,
+    /// Processor status flags.
+    pub p: u8,
+    /// Data bank.
+    pub db: u8,
+    /// Direct page register.
+    pub dp: u16,
+    /// Emulation-mode flag.
+    pub e: bool,
+    /// Nearest symbol for `pc` when a `.sym` table is loaded.
+    pub symbol: Option<String>,
+}
+
+/// `take_cpu_trace` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CpuTraceResult {
+    /// Recorded instructions, oldest first. Draining resets the ring.
+    pub events: Vec<CpuTraceLine>,
+}
+
+/// One memory-trace event (`take_mem_trace`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct MemTraceLine {
+    /// Master cycles since reset at the access.
+    pub mclk: u64,
+    /// 24-bit PC of the instruction performing the access.
+    pub pc: u32,
+    /// 24-bit bus address accessed.
+    pub addr: u32,
+    /// `"read"` or `"write"`.
+    pub kind: String,
+    /// Byte transferred.
+    pub value: u8,
+    /// PPU scanline at the access.
+    pub line: u16,
+    /// Exact horizontal master-clock (0..1363) at the access.
+    pub hclock: u16,
+    /// `true` if the access happened inside vertical blank.
+    pub blank: bool,
+    /// `true` if INIDISP forced-blank was set at the access.
+    pub force_blank: bool,
+    /// Nearest symbol for `addr` when a `.sym` table is loaded.
+    pub symbol: Option<String>,
+}
+
+/// `take_mem_trace` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct MemTraceResult {
+    /// Recorded accesses, oldest first. Draining resets the ring.
+    pub events: Vec<MemTraceLine>,
+}
+
+/// `bp_add` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BpAddResult {
+    /// Registry id of the new breakpoint (stable until removed).
+    pub id: u32,
+}
+
+/// `bp_remove` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BpRemoveResult {
+    /// `true` if the id existed and was removed.
+    pub removed: bool,
+}
+
+/// One registered breakpoint (`bp_list`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BpEntry {
+    /// Registry id.
+    pub id: u32,
+    /// `"exec"` or `"mem"`.
+    pub kind: String,
+    /// Exec: the PC. Mem: range start.
+    pub lo: u32,
+    /// Exec: same as `lo`. Mem: inclusive range end.
+    pub hi: u32,
+    /// Mem: fires on reads.
+    pub on_read: bool,
+    /// Mem: fires on writes.
+    pub on_write: bool,
+}
+
+/// `bp_list` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BpListResult {
+    /// Every registered breakpoint, ordered by id.
+    pub breakpoints: Vec<BpEntry>,
+}
+
+/// `run_until_break` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct RunUntilBreakResult {
+    /// Instructions actually executed this call.
+    pub steps: u64,
+    /// `true` if a breakpoint fired (fields below are then meaningful).
+    pub hit: bool,
+    /// Id of the breakpoint that fired.
+    pub bp_id: Option<u32>,
+    /// `"exec"`, `"read"` or `"write"`.
+    pub kind: Option<String>,
+    /// Exec: the about-to-execute PC. Mem: the accessing instruction's PC.
+    pub pc: Option<u32>,
+    /// Mem hits: the accessed 24-bit bus address.
+    pub addr: Option<u32>,
+    /// Mem hits: the byte transferred.
+    pub value: Option<u8>,
+}
+
+/// `load_symbols` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct LoadSymbolsResult {
+    /// Number of labels parsed from the file.
+    pub count: usize,
+}
+
+/// `resolve_symbol` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ResolveSymbolResult {
+    /// 24-bit `bank << 16 | offset` address, or null if unknown.
+    pub addr: Option<u32>,
+}
+
+/// Resolve an optional symbol name against the emulator's loaded table,
+/// falling back to the numeric address. Unknown symbol → invalid-params.
+fn resolve_addr(em: &Emulator, symbol: Option<&str>, numeric: u32) -> Result<u32, ErrorData> {
+    match symbol {
+        None => Ok(numeric),
+        Some(name) => em.resolve_symbol(name).ok_or_else(|| {
+            ErrorData::invalid_params(
+                format!("unknown symbol `{name}` (is the right .sym loaded?)"),
+                None,
+            )
+        }),
+    }
 }
 
 // ---------------- Server impl ----------------
@@ -431,7 +824,12 @@ impl LunaServer {
     ) -> Result<rmcp::Json<MemoryResult>, ErrorData> {
         let bytes = {
             let mut em = self.emulator.lock().await;
-            em.peek_memory(params.bank, params.offset, params.count)
+            let addr = resolve_addr(
+                &em,
+                params.symbol.as_deref(),
+                (u32::from(params.bank) << 16) | u32::from(params.offset),
+            )?;
+            em.peek_memory((addr >> 16) as u8, addr as u16, params.count)
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(MemoryResult { bytes }))
@@ -480,7 +878,12 @@ impl LunaServer {
     ) -> Result<rmcp::Json<PokeResult>, ErrorData> {
         let written = {
             let mut em = self.emulator.lock().await;
-            em.poke_memory(params.bank, params.offset, &params.data)
+            let addr = resolve_addr(
+                &em,
+                params.symbol.as_deref(),
+                (u32::from(params.bank) << 16) | u32::from(params.offset),
+            )?;
+            em.poke_memory((addr >> 16) as u8, addr as u16, &params.data)
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(PokeResult { written }))
@@ -512,7 +915,8 @@ impl LunaServer {
     ) -> Result<rmcp::Json<RunUntilResult>, ErrorData> {
         let hit = {
             let mut em = self.emulator.lock().await;
-            em.run_until_pc(params.pc, params.max_steps)
+            let pc = resolve_addr(&em, params.symbol.as_deref(), params.pc)?;
+            em.run_until_pc(pc, params.max_steps)
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(RunUntilResult { hit }))
@@ -545,7 +949,8 @@ impl LunaServer {
     ) -> Result<rmcp::Json<MemBreakResult>, ErrorData> {
         let hit = {
             let mut em = self.emulator.lock().await;
-            em.run_until_mem_write(params.addr, params.max_steps)
+            let addr = resolve_addr(&em, params.symbol.as_deref(), params.addr)?;
+            em.run_until_mem_write(addr, params.max_steps)
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(match hit {
@@ -572,7 +977,8 @@ impl LunaServer {
     ) -> Result<rmcp::Json<MemBreakResult>, ErrorData> {
         let hit = {
             let mut em = self.emulator.lock().await;
-            em.run_until_mem_read(params.addr, params.max_steps)
+            let addr = resolve_addr(&em, params.symbol.as_deref(), params.addr)?;
+            em.run_until_mem_read(addr, params.max_steps)
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(match hit {
@@ -587,6 +993,473 @@ impl LunaServer {
                 value: 0,
             },
         }))
+    }
+
+    // ------------- Interactive-debugger surface (issue #65) -------------
+
+    #[rmcp::tool(
+        description = "Disassemble 65C816 instructions. Defaults: start at the live \
+                                PB:PC with immediate-operand widths from the live M/X flags; \
+                                override `addr` (24-bit), `lines` (default 16), `m8`/`x8` to \
+                                inspect elsewhere. `is_pc` marks the live-PC line."
+    )]
+    async fn disasm_cpu(
+        &self,
+        Parameters(params): Parameters<DisasmCpuParams>,
+    ) -> Result<rmcp::Json<DisasmResult>, ErrorData> {
+        let lines = {
+            let mut em = self.emulator.lock().await;
+            let cpu = em.cpu_state().map_err(|e| api_err_to_mcp(&e))?;
+            let addr = params
+                .addr
+                .unwrap_or_else(|| (u32::from(cpu.pb) << 16) | u32::from(cpu.pc));
+            let m8 = params.m8.unwrap_or(cpu.e || cpu.p & 0x20 != 0);
+            let x8 = params.x8.unwrap_or(cpu.e || cpu.p & 0x10 != 0);
+            em.disassemble_cpu(addr, params.lines.unwrap_or(16), m8, x8)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(DisasmResult { lines }))
+    }
+
+    #[rmcp::tool(
+        description = "Disassemble SPC700 instructions from ARAM. Defaults: start at \
+                                the live SPC PC; override `addr` (16-bit) and `lines` \
+                                (default 16). `is_pc` marks the live-PC line."
+    )]
+    async fn disasm_spc(
+        &self,
+        Parameters(params): Parameters<DisasmSpcParams>,
+    ) -> Result<rmcp::Json<DisasmResult>, ErrorData> {
+        let lines = {
+            let em = self.emulator.lock().await;
+            let addr = match params.addr {
+                Some(a) => a,
+                None => em.spc700_state().map_err(|e| api_err_to_mcp(&e))?.pc,
+            };
+            em.disassemble_spc(addr, params.lines.unwrap_or(16))
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(DisasmResult { lines }))
+    }
+
+    #[rmcp::tool(
+        description = "Serialize the full machine state (CPU/PPU/APU/DMA/coproc/WRAM + \
+                                mapper) to a versioned, ROM-hash-guarded blob, returned \
+                                base64-encoded. Restore later with `load_state`."
+    )]
+    async fn save_state(&self) -> Result<rmcp::Json<SaveStateResult>, ErrorData> {
+        let blob = {
+            let em = self.emulator.lock().await;
+            em.save_state().map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(SaveStateResult {
+            bytes: blob.len(),
+            state_base64: base64::engine::general_purpose::STANDARD.encode(&blob),
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Restore a save-state blob produced by `save_state` (base64). \
+                                Rejected if the format version or the loaded ROM's hash \
+                                mismatch — a state only loads against its own ROM."
+    )]
+    async fn load_state(
+        &self,
+        Parameters(params): Parameters<LoadStateParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        let blob = base64::engine::general_purpose::STANDARD
+            .decode(&params.state_base64)
+            .map_err(|e| ErrorData::invalid_params(format!("bad base64: {e}"), None))?;
+        {
+            let mut em = self.emulator.lock().await;
+            em.load_state(&blob).map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Read all 256 CGRAM palette entries as raw BGR555 words \
+                                (index 0 = backdrop). Read-only."
+    )]
+    async fn peek_cgram(&self) -> Result<rmcp::Json<CgramResult>, ErrorData> {
+        let colors = {
+            let em = self.emulator.lock().await;
+            em.peek_cgram().map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(CgramResult { colors }))
+    }
+
+    #[rmcp::tool(
+        description = "Render background layer `bg` (1..=4)'s full tilemap as a PNG \
+                                (base64) — the whole scrollable field, not just the viewport. \
+                                Mode 7 renders the 128×128 field on BG1."
+    )]
+    async fn render_tilemap(
+        &self,
+        Parameters(params): Parameters<RenderTilemapParams>,
+    ) -> Result<rmcp::Json<PngResult>, ErrorData> {
+        let png = {
+            let em = self.emulator.lock().await;
+            let idx = usize::from(params.bg.saturating_sub(1).min(3));
+            em.render_tilemap_png(idx).map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(PngResult {
+            png_base64: base64::engine::general_purpose::STANDARD.encode(&png),
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Render the VRAM tile set as a PNG (base64) decoded at `bpp` \
+                                (2/4/8, default 4) using CGRAM `palette_row` (default 0)."
+    )]
+    async fn render_vram_tiles(
+        &self,
+        Parameters(params): Parameters<RenderVramTilesParams>,
+    ) -> Result<rmcp::Json<PngResult>, ErrorData> {
+        let png = {
+            let em = self.emulator.lock().await;
+            em.render_vram_tiles_png(params.bpp.unwrap_or(4), params.palette_row.unwrap_or(0))
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(PngResult {
+            png_base64: base64::engine::general_purpose::STANDARD.encode(&png),
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Render the 256-colour CGRAM palette as a 16×16 swatch-grid PNG \
+                                (base64); `cell` = pixels per swatch (default 16)."
+    )]
+    async fn render_palette(
+        &self,
+        Parameters(params): Parameters<RenderPaletteParams>,
+    ) -> Result<rmcp::Json<PngResult>, ErrorData> {
+        let png = {
+            let em = self.emulator.lock().await;
+            em.render_palette_png(params.cell.unwrap_or(16))
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(PngResult {
+            png_base64: base64::engine::general_purpose::STANDARD.encode(&png),
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Render all 128 OAM sprites at native size with their OBJ \
+                                palettes as a transparent-background PNG sprite sheet (base64)."
+    )]
+    async fn render_sprite_sheet(&self) -> Result<rmcp::Json<PngResult>, ErrorData> {
+        let png = {
+            let em = self.emulator.lock().await;
+            em.render_sprite_sheet_png()
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(PngResult {
+            png_base64: base64::engine::general_purpose::STANDARD.encode(&png),
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Start recording a per-instruction CPU trace (PC + registers), \
+                                capped at `max_events`. Drain with `take_cpu_trace`."
+    )]
+    async fn enable_cpu_trace(
+        &self,
+        Parameters(params): Parameters<EnableCpuTraceParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_cpu_trace(params.max_events)
+                .map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the recorded CPU trace (oldest first) and reset the ring. \
+                                Enable first with `enable_cpu_trace`, then `step`."
+    )]
+    async fn take_cpu_trace(&self) -> Result<rmcp::Json<CpuTraceResult>, ErrorData> {
+        let (events, syms) = {
+            let mut em = self.emulator.lock().await;
+            let events = em.take_cpu_trace_log().map_err(|e| api_err_to_mcp(&e))?;
+            (events, em.symbols_cloned())
+        };
+        let lines = events
+            .into_iter()
+            .map(|ev| CpuTraceLine {
+                mclk: ev.mclk_total,
+                pc: ev.pc_full,
+                a: ev.a,
+                x: ev.x,
+                y: ev.y,
+                sp: ev.sp,
+                p: ev.p,
+                db: ev.db,
+                dp: ev.dp,
+                e: ev.e,
+                symbol: syms.as_ref().and_then(|t| t.nearest(ev.pc_full)),
+            })
+            .collect();
+        Ok(rmcp::Json(CpuTraceResult { events: lines }))
+    }
+
+    #[rmcp::tool(
+        description = "Start recording every CPU bus access (PC, address, r/w, value, \
+                                scanline/H-clock), capped at `max_events`. Optional filters: \
+                                `bank` (e.g. 0x7E) and/or an inclusive offset range `lo`..=`hi` \
+                                (e.g. 0x2100..0x21FF). Drain with `take_mem_trace`."
+    )]
+    async fn enable_mem_trace(
+        &self,
+        Parameters(params): Parameters<EnableMemTraceParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        let offset_filter = match (params.lo, params.hi) {
+            (Some(lo), Some(hi)) if lo <= hi => Some((lo, hi)),
+            (None, None) => None,
+            _ => {
+                return Err(ErrorData::invalid_params(
+                    "offset filter needs both `lo` and `hi` with lo <= hi",
+                    None,
+                ));
+            }
+        };
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_mem_trace(params.max_events, params.bank, offset_filter)
+                .map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the recorded memory-access trace (oldest first) and reset \
+                                the ring. Enable first with `enable_mem_trace`, then `step`."
+    )]
+    async fn take_mem_trace(&self) -> Result<rmcp::Json<MemTraceResult>, ErrorData> {
+        let (events, syms) = {
+            let mut em = self.emulator.lock().await;
+            let events = em.take_mem_trace_log().map_err(|e| api_err_to_mcp(&e))?;
+            (events, em.symbols_cloned())
+        };
+        let lines = events
+            .into_iter()
+            .map(|ev| MemTraceLine {
+                mclk: ev.mclk_total,
+                pc: ev.pc_full,
+                addr: ev.addr_full,
+                kind: match ev.kind {
+                    luna_api::MemEventKind::Read => "read".into(),
+                    luna_api::MemEventKind::Write => "write".into(),
+                    luna_api::MemEventKind::NmiSignal => "nmi".into(),
+                    luna_api::MemEventKind::IrqSignal => "irq".into(),
+                },
+                value: ev.value,
+                line: ev.line,
+                hclock: ev.hclock,
+                blank: ev.blank,
+                force_blank: ev.force_blank,
+                symbol: syms.as_ref().and_then(|t| t.nearest(ev.addr_full)),
+            })
+            .collect();
+        Ok(rmcp::Json(MemTraceResult { events: lines }))
+    }
+
+    // ------------- WLA-DX symbols (issue #67) -------------
+
+    #[rmcp::tool(
+        description = "Load a WLA-DX `.sym` symbol file (the wlalink output every \
+                                WLA-DX-built ROM ships). Once loaded: `disasm_cpu` lines carry \
+                                the nearest label, cpu/mem traces are annotated, and the \
+                                address-taking tools (`peek_memory`, `poke_memory`, \
+                                `run_until_pc`, `run_until_mem_*`, `bp_add`) accept a `symbol` \
+                                name instead of a numeric address."
+    )]
+    async fn load_symbols(
+        &self,
+        Parameters(params): Parameters<LoadSymbolsParams>,
+    ) -> Result<rmcp::Json<LoadSymbolsResult>, ErrorData> {
+        let count = {
+            let mut em = self.emulator.lock().await;
+            em.load_symbols(std::path::Path::new(&params.path))
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(LoadSymbolsResult { count }))
+    }
+
+    #[rmcp::tool(
+        description = "Resolve a loaded WLA-DX label to its 24-bit `bank:offset` \
+                                address (null if unknown)."
+    )]
+    async fn resolve_symbol(
+        &self,
+        Parameters(params): Parameters<ResolveSymbolParams>,
+    ) -> Result<rmcp::Json<ResolveSymbolResult>, ErrorData> {
+        let addr = {
+            let em = self.emulator.lock().await;
+            em.resolve_symbol(&params.name)
+        };
+        Ok(rmcp::Json(ResolveSymbolResult { addr }))
+    }
+
+    // ------------- Breakpoint registry (issue #66) -------------
+
+    #[rmcp::tool(
+        description = "Register a breakpoint. kind='exec': halt BEFORE the instruction \
+                                at 24-bit PB:PC `addr` executes. kind='mem': watchpoint over the \
+                                inclusive bus range `addr`..=`hi` (default single address), firing \
+                                on reads (`on_read`) and/or writes (`on_write`, default true); \
+                                halts AFTER the accessing instruction with its PC/addr/value. \
+                                Returns the registry id. Run with `run_until_break`."
+    )]
+    async fn bp_add(
+        &self,
+        Parameters(params): Parameters<BpAddParams>,
+    ) -> Result<rmcp::Json<BpAddResult>, ErrorData> {
+        let id = {
+            let mut em = self.emulator.lock().await;
+            let addr = resolve_addr(&em, params.symbol.as_deref(), params.addr)?;
+            match params.kind.as_str() {
+                "exec" => em.bp_add_exec(addr).map_err(|e| api_err_to_mcp(&e))?,
+                "mem" => em
+                    .bp_add_mem(
+                        addr,
+                        params.hi.unwrap_or(addr),
+                        params.on_read,
+                        params.on_write,
+                    )
+                    .map_err(|e| api_err_to_mcp(&e))?,
+                other => {
+                    return Err(ErrorData::invalid_params(
+                        format!("kind must be 'exec' or 'mem', got `{other}`"),
+                        None,
+                    ));
+                }
+            }
+        };
+        Ok(rmcp::Json(BpAddResult { id }))
+    }
+
+    #[rmcp::tool(description = "Remove a breakpoint by the id `bp_add` returned.")]
+    async fn bp_remove(
+        &self,
+        Parameters(params): Parameters<BpRemoveParams>,
+    ) -> Result<rmcp::Json<BpRemoveResult>, ErrorData> {
+        let removed = {
+            let mut em = self.emulator.lock().await;
+            em.bp_remove(params.id).map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(BpRemoveResult { removed }))
+    }
+
+    #[rmcp::tool(description = "Remove every registered breakpoint and watchpoint.")]
+    async fn bp_clear_all(&self) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.bp_clear().map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(description = "List every registered breakpoint/watchpoint, ordered by id.")]
+    async fn bp_list(&self) -> Result<rmcp::Json<BpListResult>, ErrorData> {
+        let list = {
+            let em = self.emulator.lock().await;
+            em.bp_list().map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(BpListResult {
+            breakpoints: list
+                .into_iter()
+                .map(|b| BpEntry {
+                    id: b.id,
+                    kind: if b.exec { "exec".into() } else { "mem".into() },
+                    lo: b.lo,
+                    hi: b.hi,
+                    on_read: b.on_read,
+                    on_write: b.on_write,
+                })
+                .collect(),
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Run at full emulation speed until a registered breakpoint fires \
+                                or `max_steps` instructions elapse. Exec breakpoints halt before \
+                                their instruction (resume-friendly: the first instruction of the \
+                                run is exempt); watchpoints halt after the accessing instruction \
+                                and report its PC, the address and the byte."
+    )]
+    async fn run_until_break(
+        &self,
+        Parameters(params): Parameters<RunUntilBreakParams>,
+    ) -> Result<rmcp::Json<RunUntilBreakResult>, ErrorData> {
+        let out = {
+            let mut em = self.emulator.lock().await;
+            em.run_until_break(params.max_steps)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(match out.hit {
+            Some(hit) => RunUntilBreakResult {
+                steps: out.steps,
+                hit: true,
+                bp_id: Some(hit.id),
+                kind: Some(
+                    match hit.kind {
+                        luna_api::BreakKind::Exec => "exec",
+                        luna_api::BreakKind::Read => "read",
+                        luna_api::BreakKind::Write => "write",
+                    }
+                    .into(),
+                ),
+                pc: Some(hit.pc),
+                addr: hit.addr,
+                value: hit.value,
+            },
+            None => RunUntilBreakResult {
+                steps: out.steps,
+                hit: false,
+                bp_id: None,
+                kind: None,
+                pc: None,
+                addr: None,
+                value: None,
+            },
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Feed SNES Mouse input for the next joypad auto-read: accumulated \
+                                `dx`/`dy` displacement plus the button bitmask (bit 0 = left, \
+                                bit 1 = right). Select the mouse first via the GUI or the CLI \
+                                `--port1 mouse`."
+    )]
+    async fn set_mouse(
+        &self,
+        Parameters(params): Parameters<SetMouseParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.set_mouse(params.dx, params.dy, params.buttons)
+                .map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Feed Super Scope input: screen-space aim (`x`, `y`) and the \
+                                button bitmask (bit 0 fire, bit 1 cursor, bit 2 pause, bit 3 \
+                                turbo). Select the scope first (GUI or CLI `--port2 superscope`)."
+    )]
+    async fn set_superscope(
+        &self,
+        Parameters(params): Parameters<SetSuperscopeParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.set_superscope(params.x, params.y, params.buttons)
+                .map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
     }
 }
 
@@ -710,6 +1583,361 @@ mod tests {
             .unwrap();
         assert!(bytes.starts_with(b"\x89PNG"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// P1 surface round-trip (issue #65): disasm at the live PC, a
+    /// save→mutate→load state cycle, CGRAM + every debug render, both
+    /// trace rings, and the pointer-device setters.
+    #[tokio::test]
+    async fn server_p1_debugger_surface_round_trip() {
+        let s = LunaServer::new();
+        let path = PathBuf::from("/tmp/luna_mcp_p1_demo.smc");
+        std::fs::write(&path, demo_lorom()).unwrap();
+        s.load_rom(Parameters(LoadRomParams {
+            path: path.to_string_lossy().into(),
+        }))
+        .await
+        .unwrap();
+        s.step(Parameters(StepParams { count: 50 })).await.unwrap();
+
+        // disasm_cpu with all defaults → decodes at the live PC.
+        let d = s
+            .disasm_cpu(Parameters(DisasmCpuParams::default()))
+            .await
+            .unwrap();
+        assert_eq!(d.0.lines.len(), 16);
+        assert!(d.0.lines[0].is_pc, "first default line is the live PC");
+        // disasm_spc with defaults.
+        let d = s
+            .disasm_spc(Parameters(DisasmSpcParams::default()))
+            .await
+            .unwrap();
+        assert_eq!(d.0.lines.len(), 16);
+
+        // save → run further → load → the saved position is restored.
+        let saved = s.save_state().await.unwrap();
+        assert!(saved.0.bytes > 0);
+        let pc_at_save = {
+            let mut em = s.emulator.lock().await;
+            em.state().cpu.pc
+        };
+        s.step(Parameters(StepParams { count: 200 })).await.unwrap();
+        s.load_state(Parameters(LoadStateParams {
+            state_base64: saved.0.state_base64,
+        }))
+        .await
+        .unwrap();
+        let pc_after_load = {
+            let mut em = s.emulator.lock().await;
+            em.state().cpu.pc
+        };
+        assert_eq!(pc_at_save, pc_after_load, "load_state restores the PC");
+        // Corrupt base64 → invalid-params error, not a panic.
+        assert!(
+            s.load_state(Parameters(LoadStateParams {
+                state_base64: "not-base64!".into(),
+            }))
+            .await
+            .is_err()
+        );
+
+        // CGRAM + the four debug renders all return valid payloads.
+        let cg = s.peek_cgram().await.unwrap();
+        assert_eq!(cg.0.colors.len(), 256);
+        for png_b64 in [
+            s.render_tilemap(Parameters(RenderTilemapParams { bg: 1 }))
+                .await
+                .unwrap()
+                .0
+                .png_base64,
+            s.render_vram_tiles(Parameters(RenderVramTilesParams::default()))
+                .await
+                .unwrap()
+                .0
+                .png_base64,
+            s.render_palette(Parameters(RenderPaletteParams::default()))
+                .await
+                .unwrap()
+                .0
+                .png_base64,
+            s.render_sprite_sheet().await.unwrap().0.png_base64,
+        ] {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&png_b64)
+                .unwrap();
+            assert!(bytes.starts_with(b"\x89PNG"));
+        }
+
+        // Trace rings: enable → step → drain (non-empty), drain again (empty).
+        s.enable_cpu_trace(Parameters(EnableCpuTraceParams { max_events: 1000 }))
+            .await
+            .unwrap();
+        s.enable_mem_trace(Parameters(EnableMemTraceParams {
+            max_events: 1000,
+            bank: None,
+            lo: None,
+            hi: None,
+        }))
+        .await
+        .unwrap();
+        s.step(Parameters(StepParams { count: 20 })).await.unwrap();
+        let ct = s.take_cpu_trace().await.unwrap();
+        assert!(!ct.0.events.is_empty(), "cpu trace recorded");
+        let mt = s.take_mem_trace().await.unwrap();
+        assert!(!mt.0.events.is_empty(), "mem trace recorded");
+        assert!(
+            mt.0.events
+                .iter()
+                .all(|e| matches!(e.kind.as_str(), "read" | "write" | "nmi" | "irq"))
+        );
+        assert!(s.take_cpu_trace().await.unwrap().0.events.is_empty());
+        // Bad offset filter (lo without hi) → invalid-params.
+        assert!(
+            s.enable_mem_trace(Parameters(EnableMemTraceParams {
+                max_events: 10,
+                bank: None,
+                lo: Some(0x2100),
+                hi: None,
+            }))
+            .await
+            .is_err()
+        );
+
+        // Pointer devices accept input without error.
+        s.set_mouse(Parameters(SetMouseParams {
+            dx: -3,
+            dy: 4,
+            buttons: 1,
+        }))
+        .await
+        .unwrap();
+        s.set_superscope(Parameters(SetSuperscopeParams {
+            x: 128,
+            y: 112,
+            buttons: 1,
+        }))
+        .await
+        .unwrap();
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// P2 breakpoint surface (issue #66): add/list/run/remove/clear over
+    /// MCP, on an injected WRAM loop.
+    #[tokio::test]
+    async fn server_p2_breakpoints_round_trip() {
+        let s = LunaServer::new();
+        let path = PathBuf::from("/tmp/luna_mcp_p2_demo.smc");
+        std::fs::write(&path, demo_lorom()).unwrap();
+        s.load_rom(Parameters(LoadRomParams {
+            path: path.to_string_lossy().into(),
+        }))
+        .await
+        .unwrap();
+        // Inject `LDA #$42; STA $0200; JMP $0100` at $00:0100 and aim PC.
+        s.poke_memory(Parameters(PokeMemoryParams {
+            bank: 0x7E,
+            offset: 0x0100,
+            symbol: None,
+            data: vec![0xA9, 0x42, 0x8D, 0x00, 0x02, 0x4C, 0x00, 0x01],
+        }))
+        .await
+        .unwrap();
+        for (reg, val) in [("pb", 0x00u32), ("pc", 0x0100), ("db", 0x00)] {
+            s.set_cpu_register(Parameters(SetRegisterParams {
+                reg: reg.into(),
+                val,
+            }))
+            .await
+            .unwrap();
+        }
+
+        // Watchpoint on the STA target (defaults: single address, write).
+        let wp = s
+            .bp_add(Parameters(BpAddParams {
+                kind: "mem".into(),
+                addr: 0x00_0200,
+                symbol: None,
+                hi: None,
+                on_read: false,
+                on_write: true,
+            }))
+            .await
+            .unwrap()
+            .0
+            .id;
+        // Exec bp on the JMP.
+        let xp = s
+            .bp_add(Parameters(BpAddParams {
+                kind: "exec".into(),
+                addr: 0x00_0105,
+                symbol: None,
+                hi: None,
+                on_read: false,
+                on_write: true,
+            }))
+            .await
+            .unwrap()
+            .0
+            .id;
+        assert!(
+            s.bp_add(Parameters(BpAddParams {
+                kind: "bogus".into(),
+                addr: 0,
+                symbol: None,
+                hi: None,
+                on_read: false,
+                on_write: true,
+            }))
+            .await
+            .is_err()
+        );
+        assert_eq!(s.bp_list().await.unwrap().0.breakpoints.len(), 2);
+
+        // The watchpoint (STA at $0102) fires first.
+        let out = s
+            .run_until_break(Parameters(RunUntilBreakParams { max_steps: 100 }))
+            .await
+            .unwrap()
+            .0;
+        assert!(out.hit);
+        assert_eq!(out.bp_id, Some(wp));
+        assert_eq!(out.kind.as_deref(), Some("write"));
+        assert_eq!((out.addr, out.value), (Some(0x00_0200), Some(0x42)));
+        assert_eq!(out.pc, Some(0x00_0102));
+
+        // Remove it; the exec bp fires next (before the JMP executes).
+        assert!(
+            s.bp_remove(Parameters(BpRemoveParams { id: wp }))
+                .await
+                .unwrap()
+                .0
+                .removed
+        );
+        let out = s
+            .run_until_break(Parameters(RunUntilBreakParams { max_steps: 100 }))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(out.bp_id, Some(xp));
+        assert_eq!(out.kind.as_deref(), Some("exec"));
+        assert_eq!(out.pc, Some(0x00_0105));
+
+        // Clear all: the run completes its budget.
+        s.bp_clear_all().await.unwrap();
+        let out = s
+            .run_until_break(Parameters(RunUntilBreakParams { max_steps: 10 }))
+            .await
+            .unwrap()
+            .0;
+        assert!(!out.hit);
+        assert_eq!(out.steps, 10);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// P3 symbol surface (issue #67): load a .sym over MCP, resolve,
+    /// then drive `peek`/`poke`/`bp_add` by name and see annotated disasm.
+    #[tokio::test]
+    async fn server_p3_symbols_round_trip() {
+        let s = LunaServer::new();
+        let rom_path = PathBuf::from("/tmp/luna_mcp_p3_demo.smc");
+        std::fs::write(&rom_path, demo_lorom()).unwrap();
+        s.load_rom(Parameters(LoadRomParams {
+            path: rom_path.to_string_lossy().into(),
+        }))
+        .await
+        .unwrap();
+
+        let sym_path = PathBuf::from("/tmp/luna_mcp_p3_demo.sym");
+        std::fs::write(&sym_path, "[labels]\n00:0100 main\n7e:0200 monster_x\n").unwrap();
+        let n = s
+            .load_symbols(Parameters(LoadSymbolsParams {
+                path: sym_path.to_string_lossy().into(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(n.0.count, 2);
+
+        // resolve_symbol: known and unknown.
+        let r = s
+            .resolve_symbol(Parameters(ResolveSymbolParams {
+                name: "monster_x".into(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(r.0.addr, Some(0x7E_0200));
+        let r = s
+            .resolve_symbol(Parameters(ResolveSymbolParams {
+                name: "nope".into(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(r.0.addr, None);
+
+        // poke by symbol, peek back by symbol.
+        s.poke_memory(Parameters(PokeMemoryParams {
+            bank: 0,
+            offset: 0,
+            symbol: Some("monster_x".into()),
+            data: vec![0xAB, 0xCD],
+        }))
+        .await
+        .unwrap();
+        let bytes = s
+            .peek_memory(Parameters(PeekMemoryParams {
+                bank: 0,
+                offset: 0,
+                symbol: Some("monster_x".into()),
+                count: 2,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(bytes.0.bytes, vec![0xAB, 0xCD]);
+        // Unknown symbol → invalid-params, not a silent bank-0 read.
+        assert!(
+            s.peek_memory(Parameters(PeekMemoryParams {
+                bank: 0,
+                offset: 0,
+                symbol: Some("nope".into()),
+                count: 1,
+            }))
+            .await
+            .is_err()
+        );
+
+        // bp_add by symbol registers at the resolved address.
+        let id = s
+            .bp_add(Parameters(BpAddParams {
+                kind: "mem".into(),
+                addr: 0,
+                symbol: Some("monster_x".into()),
+                hi: None,
+                on_read: false,
+                on_write: true,
+            }))
+            .await
+            .unwrap()
+            .0
+            .id;
+        let list = s.bp_list().await.unwrap().0.breakpoints;
+        assert_eq!(list[0].id, id);
+        assert_eq!(list[0].lo, 0x7E_0200);
+
+        // Annotated disassembly at a labeled address.
+        let d = s
+            .disasm_cpu(Parameters(DisasmCpuParams {
+                addr: Some(0x00_0100),
+                lines: Some(1),
+                m8: Some(true),
+                x8: Some(true),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(d.0.lines[0].symbol.as_deref(), Some("main"));
+
+        let _ = std::fs::remove_file(&rom_path);
+        let _ = std::fs::remove_file(&sym_path);
     }
 
     fn demo_lorom() -> Vec<u8> {

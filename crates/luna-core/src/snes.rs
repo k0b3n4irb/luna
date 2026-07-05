@@ -188,6 +188,15 @@ pub struct Snes {
     #[serde(skip)]
     pub mem_trace_log: Option<MemTraceLog>,
 
+    /// Optional breakpoint/watchpoint registry (issue #66). When `Some`,
+    /// `SnesBus::trace_mem_access` matches every CPU bus access against
+    /// the registered watchpoints and parks the first hit for the driving
+    /// run loop; exec breakpoints are checked by the driver against the
+    /// live `PB:PC` before each instruction. Debug infrastructure — never
+    /// part of a save-state.
+    #[serde(skip)]
+    pub breakpoints: Option<Box<crate::breakpoints::BreakpointSet>>,
+
     /// Optional capture of the SDK debug TTY: every byte the program writes
     /// to `$21FC` (the no$/Mesen "Nocash" console port — opensnes'
     /// `consoleNocashMessage` / `SNES_NOCASH`). When `Some`, each `$21FC`
@@ -541,6 +550,7 @@ impl Snes {
             sa1_log: None,
             cpu_trace_log: None,
             mem_trace_log: None,
+            breakpoints: None,
             nocash_log: None,
         })
     }
@@ -755,6 +765,7 @@ impl Snes {
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
+                breakpoints,
                 nocash_log,
                 ..
             } = self;
@@ -783,6 +794,7 @@ impl Snes {
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
+                breakpoints,
                 nocash_log,
                 wm_addr,
                 joypad_strobe,
@@ -868,6 +880,7 @@ impl Snes {
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
+                breakpoints,
                 nocash_log,
                 mcycles_in_line,
                 frame_count,
@@ -899,6 +912,7 @@ impl Snes {
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
+                breakpoints,
                 nocash_log,
                 wm_addr,
                 joypad_strobe,
@@ -1006,6 +1020,7 @@ impl Snes {
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
+                breakpoints,
                 nocash_log,
                 mcycles_in_line,
                 frame_count,
@@ -1037,6 +1052,7 @@ impl Snes {
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
+                breakpoints,
                 nocash_log,
                 wm_addr,
                 joypad_strobe,
@@ -1110,6 +1126,7 @@ impl Snes {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            breakpoints,
             nocash_log,
             ..
         } = self;
@@ -1138,6 +1155,7 @@ impl Snes {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            breakpoints,
             nocash_log,
             wm_addr,
             joypad_strobe,
@@ -1286,6 +1304,9 @@ struct SnesBus<'a> {
     sa1_log: &'a mut Option<Vec<Sa1LogEvent>>,
     /// Memory access trace. `None` = disabled. See [`Snes::enable_mem_trace`].
     mem_trace_log: &'a mut Option<MemTraceLog>,
+    /// Breakpoint/watchpoint registry (issue #66) — watch hits are parked
+    /// on the registry's `pending_hit` for the driving loop.
+    breakpoints: &'a mut Option<Box<crate::breakpoints::BreakpointSet>>,
     /// `$21FC` Nocash-TTY capture (the SDK's `SNES_NOCASH`/`SNES_ASSERT`).
     nocash_log: &'a mut Option<Vec<u8>>,
 }
@@ -1550,6 +1571,13 @@ impl SnesBus<'_> {
     /// the bank filter. Cheap when disabled.
     #[inline]
     fn trace_mem_access(&mut self, addr: Addr24, kind: MemEventKind, value: u8) {
+        // Watchpoints (issue #66) FIRST — the trace-log branch below has
+        // early returns (cap / filters) that must never mask a hit. One
+        // `Option` check when no registry is installed — the same cost
+        // class as the trace hook itself.
+        if let Some(bp) = self.breakpoints.as_mut() {
+            bp.check_mem(addr, kind, value, self.cpu_pc_full);
+        }
         if let Some(log) = self.mem_trace_log.as_mut() {
             if log.events.len() >= log.max_events {
                 return;
@@ -2565,6 +2593,7 @@ mod tests {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            breakpoints,
             nocash_log,
             ..
         } = &mut snes;
@@ -2593,6 +2622,7 @@ mod tests {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            breakpoints,
             nocash_log,
             wm_addr,
             joypad_strobe,
@@ -2636,6 +2666,7 @@ mod tests {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            breakpoints,
             nocash_log,
             ..
         } = &mut snes;
@@ -2664,6 +2695,7 @@ mod tests {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            breakpoints,
             nocash_log,
             wm_addr,
             joypad_strobe,
@@ -2718,6 +2750,7 @@ mod tests {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            breakpoints,
             nocash_log,
             ..
         } = &mut snes;
@@ -2746,6 +2779,7 @@ mod tests {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            breakpoints,
             nocash_log,
             wm_addr,
             joypad_strobe,
@@ -2799,6 +2833,7 @@ mod tests {
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
+                breakpoints,
                 nocash_log,
                 ..
             } = &mut snes;
@@ -2827,6 +2862,7 @@ mod tests {
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
+                breakpoints,
                 nocash_log,
                 wm_addr,
                 joypad_strobe,
@@ -2880,6 +2916,7 @@ mod tests {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            breakpoints,
             nocash_log,
             ..
         } = &mut snes;
@@ -2908,6 +2945,7 @@ mod tests {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            breakpoints,
             nocash_log,
             wm_addr,
             joypad_strobe,
@@ -3059,6 +3097,7 @@ mod tests {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            breakpoints,
             nocash_log,
             ..
         } = &mut snes;
@@ -3087,6 +3126,7 @@ mod tests {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            breakpoints,
             nocash_log,
             wm_addr,
             joypad_strobe,
@@ -3410,6 +3450,7 @@ mod tests {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            breakpoints,
             nocash_log,
             ..
         } = &mut snes;
@@ -3438,6 +3479,7 @@ mod tests {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            breakpoints,
             nocash_log,
             wm_addr,
             joypad_strobe,
