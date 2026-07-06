@@ -11,7 +11,7 @@
 
 <table>
   <tr>
-    <td><img src="docs/assets/demo-mode7-perspective.png" alt="Mode 7 perspective plane — affine texture-mapped ground" width="256"/></td>
+    <td><img src="docs/assets/demo-mode7-hdma.png" alt="Mode 7 perspective ground driven by per-scanline HDMA" width="256"/></td>
     <td><img src="docs/assets/demo-hdma-wave.png" alt="Per-scanline HDMA horizontal-scroll wave distortion" width="256"/></td>
   </tr>
   <tr>

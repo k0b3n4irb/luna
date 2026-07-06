@@ -23,11 +23,11 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use luna_api::Emulator;
+use luna_api::{BreakHit, Emulator};
 use ringbuf::HeapProd;
 use ringbuf::traits::{Observer, Producer};
 
@@ -49,6 +49,23 @@ pub(crate) struct EmuShared {
     /// callback calls `.unpark()` on this after consuming samples,
     /// waking the emu thread if it parked on a full producer ring.
     pub thread_handle: Mutex<Option<thread::Thread>>,
+    /// `true` while ≥1 breakpoint is registered (issue #68). Synced by
+    /// the UI after every registry mutation. Gates the run loop between
+    /// the plain `step(BATCH)` hot path (unchanged pacing) and the
+    /// break-aware `run_until_break(BATCH)` path — with no debugger in
+    /// play the hot path is byte-identical to before.
+    pub has_breakpoints: AtomicBool,
+    /// Single-step request: number of instructions to execute while
+    /// paused. The UI stores a count and `unpark_emu()`s; the emu
+    /// thread's paused branch consumes it, steps, and republishes a
+    /// framebuffer (the triple-buffer input lives on this thread).
+    pub step_request: AtomicU32,
+    /// Step-one-frame request while paused (same protocol as
+    /// [`Self::step_request`]).
+    pub step_frame_request: AtomicBool,
+    /// The breakpoint hit that auto-paused the emu thread, for the UI
+    /// to display (halt banner + disasm jump). Taken by the UI.
+    pub last_break: Mutex<Option<BreakHit>>,
 }
 
 impl EmuShared {
@@ -57,6 +74,10 @@ impl EmuShared {
             shutdown: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             thread_handle: Mutex::new(None),
+            has_breakpoints: AtomicBool::new(false),
+            step_request: AtomicU32::new(0),
+            step_frame_request: AtomicBool::new(false),
+            last_break: Mutex::new(None),
         }
     }
 
@@ -158,6 +179,45 @@ fn run(
             break;
         }
         if shared.paused.load(Ordering::Acquire) {
+            // Debugger stepping (issue #68): while paused, the UI can queue
+            // "step N instructions" / "step one frame" requests. They are
+            // serviced HERE (not on the UI thread) because the framebuffer
+            // triple-buffer input is owned by this thread — stepping and
+            // republishing stay on the same path as normal running.
+            let step_n = shared.step_request.swap(0, Ordering::AcqRel);
+            let step_frame = shared.step_frame_request.swap(false, Ordering::AcqRel);
+            if (step_n > 0 || step_frame) && !emu_dead {
+                if let Ok(mut guard) = emu.lock() {
+                    if let Some(em) = guard.as_mut() {
+                        let res = if step_frame {
+                            em.step_until_frame(1_000_000).map(|_| ())
+                        } else {
+                            em.step(u64::from(step_n)).map(|_| ())
+                        };
+                        if let Err(e) = res {
+                            let st = em.state();
+                            eprintln!(
+                                "luna-emu: EMULATOR PANIC during step at PB:PC=${:02X}:{:04X} — {e}",
+                                st.cpu.pb, st.cpu.pc
+                            );
+                            emu_dead = true;
+                        }
+                        // Keep the Event Viewer's frame double-buffer coherent
+                        // if the step crossed a frame boundary.
+                        let cur = em.frame_count().unwrap_or(last_emu_frame);
+                        if cur != last_emu_frame {
+                            last_emu_frame = cur;
+                            em.swap_frame_events();
+                        }
+                        // Republish so the user SEES the effect of the step
+                        // (paused = inspecting; show the current PPU state).
+                        if let Ok(rgba) = em.render_frame_rgba(false) {
+                            framebuffer_in.write(rgba);
+                        }
+                    }
+                }
+                continue; // more requests may already be queued
+            }
             thread::park_timeout(Duration::from_millis(50));
             continue;
         }
@@ -177,20 +237,40 @@ fn run(
             // stop stepping (to avoid re-panicking) but keep the thread
             // alive so the UI stays responsive. The PB:PC is read back
             // from the API state snapshot for the freeze-debug log.
-            let done: u64 = if emu_dead {
-                0
-            } else {
-                match em.step(BATCH as u64) {
-                    Ok(n) => n,
-                    Err(e) => {
-                        let st = em.state();
-                        eprintln!(
-                            "luna-emu: EMULATOR PANIC at PB:PC=${:02X}:{:04X} — {}",
-                            st.cpu.pb, st.cpu.pc, e
-                        );
-                        emu_dead = true;
-                        0
+            //
+            // With ≥1 breakpoint registered (issue #68) the batch goes
+            // through `run_until_break` instead (same panic-catch +
+            // instruction-accounting service level); on a hit we stash it
+            // for the UI, auto-pause, and publish the halt frame. With no
+            // debugger in play the hot path is unchanged.
+            let step_res: Result<u64, luna_api::ApiError> = if emu_dead {
+                Ok(0)
+            } else if shared.has_breakpoints.load(Ordering::Acquire) {
+                em.run_until_break(BATCH as u64).map(|out| {
+                    if let Some(hit) = out.hit {
+                        if let Ok(mut g) = shared.last_break.lock() {
+                            *g = Some(hit);
+                        }
+                        shared.paused.store(true, Ordering::Release);
+                        if let Ok(rgba) = em.render_frame_rgba(false) {
+                            framebuffer_in.write(rgba);
+                        }
                     }
+                    out.steps
+                })
+            } else {
+                em.step(BATCH as u64)
+            };
+            let done: u64 = match step_res {
+                Ok(n) => n,
+                Err(e) => {
+                    let st = em.state();
+                    eprintln!(
+                        "luna-emu: EMULATOR PANIC at PB:PC=${:02X}:{:04X} — {}",
+                        st.cpu.pb, st.cpu.pc, e
+                    );
+                    emu_dead = true;
+                    0
                 }
             };
 

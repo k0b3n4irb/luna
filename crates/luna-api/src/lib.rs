@@ -608,6 +608,9 @@ enum CapturedEvent {
     Cpu(MemTraceEvent),
     /// A DMA B-bus write, carrying its source channel.
     Dma(DmaTraceEvent),
+    /// A breakpoint hit (issue #68) — Mesen2's `MarkedBreakpoint` overlay
+    /// category. Injected by `run_until_break` at the halt position.
+    Break { pc: u32, line: u16, hclock: u16 },
 }
 
 impl CapturedEvent {
@@ -617,6 +620,7 @@ impl CapturedEvent {
         match self {
             Self::Cpu(e) => (e.line, e.hclock),
             Self::Dma(e) => (e.line, e.hclock),
+            Self::Break { line, hclock, .. } => (*line, *hclock),
         }
     }
 
@@ -637,6 +641,22 @@ impl CapturedEvent {
         match self {
             Self::Cpu(e) => event_viewer::decode_event(e, cfg, is_prev_frame),
             Self::Dma(e) => event_viewer::decode_dma_event(e, cfg, is_prev_frame),
+            Self::Break { pc, line, hclock } => {
+                let category = event_viewer::EventCategory::MarkedBreakpoint;
+                if !cfg.visible[category.index()] {
+                    return None;
+                }
+                Some(EventViewerEvent {
+                    scanline: *line,
+                    cycle: *hclock,
+                    addr: (*pc & 0xFFFF) as u16,
+                    value: 0,
+                    pc: *pc,
+                    category,
+                    is_prev_frame,
+                    dma_channel: None,
+                })
+            }
         }
     }
 }
@@ -1797,33 +1817,81 @@ impl Emulator {
     ///
     /// A stale unconsumed watchpoint hit from a previous plain `step()` run
     /// is discarded at entry.
+    ///
+    /// Service level matches [`Self::step`]: executed instructions count
+    /// into the cumulative stats, a `STOP`ped CPU ends the run early, and a
+    /// core panic is caught and surfaced as [`ApiError::Panic`] (so a GUI
+    /// driving loop keeps its emu-dead latch semantics).
     pub fn run_until_break(&mut self, max_steps: u64) -> Result<RunOutcome, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         if let Some(bp) = snes.breakpoints.as_mut() {
             bp.take_pending(); // discard stale
         }
-        for i in 0..max_steps {
-            let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
-            if i > 0 {
-                if let Some(hit) = snes.breakpoints.as_ref().and_then(|b| b.check_exec(cur)) {
-                    return Ok(RunOutcome {
-                        steps: i,
+        let mut executed = 0u64;
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for i in 0..max_steps {
+                if snes.cpu.stopped {
+                    break;
+                }
+                let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
+                if i > 0 {
+                    if let Some(hit) = snes.breakpoints.as_ref().and_then(|b| b.check_exec(cur)) {
+                        return RunOutcome {
+                            steps: i,
+                            hit: Some(hit),
+                        };
+                    }
+                }
+                snes.step();
+                executed = i + 1;
+                if let Some(hit) = snes.breakpoints.as_mut().and_then(|b| b.take_pending()) {
+                    return RunOutcome {
+                        steps: i + 1,
                         hit: Some(hit),
-                    });
+                    };
                 }
             }
-            snes.step();
-            if let Some(hit) = snes.breakpoints.as_mut().and_then(|b| b.take_pending()) {
-                return Ok(RunOutcome {
-                    steps: i + 1,
-                    hit: Some(hit),
-                });
+            RunOutcome {
+                steps: executed,
+                hit: None,
+            }
+        }));
+        std::panic::set_hook(prev_hook);
+        match result {
+            Ok(out) => {
+                self.instructions_executed += out.steps;
+                if let Some(hit) = out.hit {
+                    // Surface the hit on the Event Viewer overlay (Mesen2's
+                    // MarkedBreakpoint category, issue #68). Injected straight
+                    // into the completed-frame buffer so it is visible while
+                    // paused at the halt (the in-progress frame won't roll
+                    // until resume). Sorted insert keeps the list ordered.
+                    let (line, hclock) = self.snes.as_ref().map_or((0, 0), |s| {
+                        (
+                            s.ppu_line,
+                            (s.mcycles_in_line).min(u32::from(u16::MAX)) as u16,
+                        )
+                    });
+                    let ev = CapturedEvent::Break {
+                        pc: hit.pc,
+                        line,
+                        hclock,
+                    };
+                    let key = ev.sort_key();
+                    let idx = self
+                        .last_frame_events
+                        .partition_point(|e| e.sort_key() <= key);
+                    self.last_frame_events.insert(idx, ev);
+                }
+                Ok(out)
+            }
+            Err(payload) => {
+                self.instructions_executed += executed;
+                Err(ApiError::Panic(panic_message(&payload)))
             }
         }
-        Ok(RunOutcome {
-            steps: max_steps,
-            hit: None,
-        })
     }
 
     /// Controlled execution (L10): set a CPU register by name — one of
@@ -2718,9 +2786,13 @@ mod tests {
         e.set_cpu_register("pc", 0x0100).unwrap();
         e.set_cpu_register("db", 0x00).unwrap();
 
-        // No registry installed: the run completes its budget, hit = None.
+        // No registry installed: the run completes its budget, hit = None,
+        // and the instructions count into the cumulative stats (same
+        // service level as `step` — the GUI loop depends on this).
+        let before = e.instructions_executed();
         let out = e.run_until_break(6).unwrap();
         assert_eq!((out.steps, out.hit.is_none()), (6, true));
+        assert_eq!(e.instructions_executed(), before + 6);
 
         // --- exec breakpoint: halts BEFORE the instruction at the target.
         e.set_cpu_register("pc", 0x0100).unwrap();
@@ -2763,6 +2835,19 @@ mod tests {
         // Cleared registry: the loop runs to its budget again.
         let out = e.run_until_break(10).unwrap();
         assert!(out.hit.is_none());
+
+        // A hit surfaces on the Event Viewer as a MarkedBreakpoint event
+        // (issue #68) — visible immediately while paused at the halt.
+        e.set_cpu_register("pc", 0x0100).unwrap();
+        e.bp_add_exec(0x00_0105).unwrap();
+        let out = e.run_until_break(100).unwrap();
+        assert!(out.hit.is_some());
+        assert!(
+            e.event_snapshot().iter().any(|ev| ev.category
+                == event_viewer::EventCategory::MarkedBreakpoint
+                && ev.pc == 0x00_0105),
+            "the hit is injected into the Event Viewer buffer"
+        );
     }
 
     #[test]

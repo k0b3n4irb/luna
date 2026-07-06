@@ -120,15 +120,23 @@ pub(crate) enum Hotkey {
     Pause,
     /// Reset the console (default `F3`).
     Reset,
+    /// Debugger: execute one CPU instruction while paused (default
+    /// `F10`, the Mesen2 step key). Pauses first if running.
+    StepInstruction,
+    /// Debugger: run to the next frame boundary while paused (default
+    /// `F11`). Pauses first if running.
+    StepFrame,
 }
 
 impl Hotkey {
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::Screenshot,
         Self::SaveState,
         Self::LoadState,
         Self::Pause,
         Self::Reset,
+        Self::StepInstruction,
+        Self::StepFrame,
     ];
 
     /// Display label for the rebind UI.
@@ -140,6 +148,8 @@ impl Hotkey {
             Self::LoadState => "Load state",
             Self::Pause => "Pause / Resume",
             Self::Reset => "Reset",
+            Self::StepInstruction => "Step instruction",
+            Self::StepFrame => "Step frame",
         }
     }
 
@@ -152,6 +162,8 @@ impl Hotkey {
             Self::LoadState => KeyCode::F9,
             Self::Pause => KeyCode::F2,
             Self::Reset => KeyCode::F3,
+            Self::StepInstruction => KeyCode::F10,
+            Self::StepFrame => KeyCode::F11,
         }
     }
 }
@@ -259,20 +271,16 @@ const P2_DEFAULT: [(SnesButton, KeyCode); 12] = [
 #[derive(Clone)]
 pub(crate) struct KeyBindings {
     pads: [[(SnesButton, KeyCode); 12]; NUM_PLAYERS],
-    hotkeys: [(Hotkey, KeyCode); 5],
+    hotkeys: [(Hotkey, KeyCode); Hotkey::ALL.len()],
 }
 
 impl Default for KeyBindings {
     fn default() -> Self {
         Self {
             pads: [P1_ARROWS, P2_DEFAULT],
-            hotkeys: [
-                (Hotkey::Screenshot, Hotkey::Screenshot.default_key()),
-                (Hotkey::SaveState, Hotkey::SaveState.default_key()),
-                (Hotkey::LoadState, Hotkey::LoadState.default_key()),
-                (Hotkey::Pause, Hotkey::Pause.default_key()),
-                (Hotkey::Reset, Hotkey::Reset.default_key()),
-            ],
+            // Derived from `Hotkey::ALL` so a new hotkey can never be
+            // forgotten here (the array length tracks the enum).
+            hotkeys: Hotkey::ALL.map(|h| (h, h.default_key())),
         }
     }
 }
@@ -475,6 +483,16 @@ fn hotkeys_path() -> std::io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debugger_step_hotkeys_default_to_f10_f11() {
+        let b = KeyBindings::default();
+        assert_eq!(b.hotkey_for(KeyCode::F10), Some(Hotkey::StepInstruction));
+        assert_eq!(b.hotkey_for(KeyCode::F11), Some(Hotkey::StepFrame));
+        // Every hotkey stays reachable through the ALL table (rebind UI).
+        assert!(Hotkey::ALL.contains(&Hotkey::StepInstruction));
+        assert!(Hotkey::ALL.contains(&Hotkey::StepFrame));
+    }
 
     #[test]
     fn default_p1_matches_mesen2_arrow_preset() {
