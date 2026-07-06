@@ -11,8 +11,8 @@ use crate::csv::{
 use crate::fmt::hex_str;
 use crate::output::{print_hex_dump, write_wav};
 use crate::parsers::{
-    parse_addr_range, parse_assert_spec, parse_assert_spec_no_bank, parse_hex_u8,
-    parse_input_script, parse_mouse_script, parse_peek_spec,
+    parse_addr_range, parse_assert_spec, parse_assert_spec_no_bank, parse_assert_spec_sym,
+    parse_hex_u8, parse_input_script, parse_mouse_script, parse_peek_spec, parse_peek_spec_sym,
 };
 use crate::rom::load_rom_into;
 
@@ -398,7 +398,21 @@ pub(crate) fn run_state(
     }
 
     for spec in peek_specs {
-        match parse_peek_spec(spec) {
+        // Numeric `BANK:OFFSET:COUNT` first; else a WLA-DX label
+        // `NAME[:COUNT]` resolved through the loaded .sym table (#77).
+        let target = match parse_peek_spec(spec) {
+            Ok(t) => Ok(t),
+            Err(num_err) => match parse_peek_spec_sym(spec) {
+                Ok((name, count)) => match em.resolve_symbol(&name) {
+                    Some(addr) => Ok(((addr >> 16) as u8, addr as u16, count)),
+                    None => Err(format!(
+                        "unknown symbol `{name}` (and not BANK:OFFSET:COUNT: {num_err})"
+                    )),
+                },
+                Err(_) => Err(num_err),
+            },
+        };
+        match target {
             Ok((bank, offset, count)) => match em.peek_memory(bank, offset, count) {
                 Ok(bytes) => {
                     eprintln!("peek ${:02X}:{:04X} +{:04X}:", bank, offset, bytes.len());
@@ -414,7 +428,22 @@ pub(crate) fn run_state(
     // headless consumers don't have to parse the peek dump.
     let mut assert_failed = false;
     for spec in assert_specs {
-        match parse_assert_spec(spec) {
+        // Numeric `BANK:OFFSET=HEX` first; else a WLA-DX label `NAME=HEX`
+        // resolved through the loaded .sym table (#77) — this is what lets
+        // OpenSNES's probe harness drop its own .sym parser.
+        let target = match parse_assert_spec(spec) {
+            Ok(t) => Ok(t),
+            Err(num_err) => match parse_assert_spec_sym(spec) {
+                Ok((name, want)) => match em.resolve_symbol(&name) {
+                    Some(addr) => Ok(((addr >> 16) as u8, addr as u16, want)),
+                    None => Err(format!(
+                        "unknown symbol `{name}` (and not BANK:OFFSET=HEX: {num_err})"
+                    )),
+                },
+                Err(_) => Err(num_err),
+            },
+        };
+        match target {
             Ok((bank, offset, want)) => match em.peek_memory(bank, offset, want.len() as u16) {
                 Ok(got) if got == want => {
                     println!("PASS ${bank:02X}:{offset:04X}={}", hex_str(&want));
