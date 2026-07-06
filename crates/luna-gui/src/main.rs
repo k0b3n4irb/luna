@@ -166,6 +166,9 @@ struct LunaApp {
     current_slot: u8,
     /// Transient save/load-state feedback surfaced in the menu bar.
     save_state_status: Option<String>,
+    /// Debugger halt banner (issue #68): set when a breakpoint auto-paused
+    /// the emu thread, cleared on resume/reset.
+    break_status: Option<String>,
 
     /// Debug panels (Debug menu) — each is its own native OS window,
     /// draggable anywhere on the desktop. Data is pulled through
@@ -231,6 +234,7 @@ impl LunaApp {
             screenshot_status: None,
             current_slot: 1,
             save_state_status: None,
+            break_status: None,
             debug_windows: DebugWindows::new(),
             cpu_mem_addr: 0x7E_0000,
             spc_mem_addr: 0x0000,
@@ -541,13 +545,62 @@ impl LunaApp {
         }
     }
 
-    fn toggle_pause(&self) {
+    fn toggle_pause(&mut self) {
         let was = self.emu_shared.paused.load(Ordering::Acquire);
         self.emu_shared.paused.store(!was, Ordering::Release);
+        if was {
+            // Resuming clears the debugger halt banner.
+            self.break_status = None;
+        }
         self.emu_shared.unpark_emu();
     }
 
-    fn reset(&self) {
+    /// Consume a breakpoint hit stashed by the emu thread (issue #68):
+    /// surface the halt banner, jump the CPU disassembly to the halt PC,
+    /// and open the panel so the highlighted line is visible.
+    fn poll_break_hit(&mut self, event_loop: &ActiveEventLoop) {
+        let hit = self
+            .emu_shared
+            .last_break
+            .lock()
+            .ok()
+            .and_then(|mut g| g.take());
+        let Some(hit) = hit else { return };
+        // Resolve the halt site to a symbol when a .sym table is loaded.
+        let sym = self.emu.lock().ok().and_then(|mut g| {
+            g.as_mut()
+                .and_then(|em| em.symbol_for_addr(hit.pc))
+                .map(|s| format!(" ({s})"))
+        });
+        let sym = sym.unwrap_or_default();
+        self.break_status = Some(match hit.kind {
+            luna_api::BreakKind::Exec => {
+                format!("\u{23f8} Break: exec ${:06X}{sym} — bp #{}", hit.pc, hit.id)
+            }
+            luna_api::BreakKind::Read | luna_api::BreakKind::Write => {
+                let what = if hit.kind == luna_api::BreakKind::Read {
+                    "read"
+                } else {
+                    "write"
+                };
+                format!(
+                    "\u{23f8} Break: {what} ${:06X}={:02X} at ${:06X}{sym} — bp #{}",
+                    hit.addr.unwrap_or(0),
+                    hit.value.unwrap_or(0),
+                    hit.pc,
+                    hit.id
+                )
+            }
+        });
+        // Jump the disassembly to the halt PC and make sure it is visible.
+        self.cpu_disasm_addr = hit.pc;
+        if !self.debug_windows.is_open(DebugPanel::CpuDisasm) {
+            self.debug_windows.toggle(event_loop, DebugPanel::CpuDisasm);
+        }
+    }
+
+    fn reset(&mut self) {
+        self.break_status = None;
         if let Ok(mut guard) = self.emu.lock() {
             if let Some(em) = guard.as_mut() {
                 let _ = em.reset();
@@ -555,6 +608,67 @@ impl LunaApp {
         }
         self.emu_shared.paused.store(false, Ordering::Release);
         self.emu_shared.unpark_emu();
+    }
+
+    // ------------- Debugger controls (issue #68) -------------
+
+    /// Debugger single-step: pause (if running) and queue one instruction.
+    /// The emu thread services the request in its paused branch and
+    /// republishes the framebuffer (it owns the triple-buffer input).
+    fn step_instruction(&self) {
+        self.emu_shared.paused.store(true, Ordering::Release);
+        self.emu_shared.step_request.fetch_add(1, Ordering::AcqRel);
+        self.emu_shared.unpark_emu();
+    }
+
+    /// Debugger step-frame: pause (if running) and queue a run to the
+    /// next frame boundary.
+    fn step_frame(&self) {
+        self.emu_shared.paused.store(true, Ordering::Release);
+        self.emu_shared
+            .step_frame_request
+            .store(true, Ordering::Release);
+        self.emu_shared.unpark_emu();
+    }
+
+    /// Re-derive the emu thread's `has_breakpoints` gate from the live
+    /// registry. Call after every breakpoint mutation.
+    fn sync_has_breakpoints(&self) {
+        let any = if let Ok(mut guard) = self.emu.lock() {
+            guard
+                .as_mut()
+                .is_some_and(|em| em.bp_list().is_ok_and(|l| !l.is_empty()))
+        } else {
+            false
+        };
+        self.emu_shared
+            .has_breakpoints
+            .store(any, Ordering::Release);
+    }
+
+    /// Toggle an exec breakpoint at `addr` (24-bit PB:PC) — the disasm
+    /// row-click handler. Removes an existing exec bp at that address,
+    /// else adds one; then re-syncs the emu thread's gate.
+    fn toggle_breakpoint_at(&self, addr: u32) {
+        if let Ok(mut guard) = self.emu.lock() {
+            if let Some(em) = guard.as_mut() {
+                let existing = em
+                    .bp_list()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|b| b.exec && b.lo == addr)
+                    .map(|b| b.id);
+                match existing {
+                    Some(id) => {
+                        let _ = em.bp_remove(id);
+                    }
+                    None => {
+                        let _ = em.bp_add_exec(addr);
+                    }
+                }
+            }
+        }
+        self.sync_has_breakpoints();
     }
 }
 
@@ -738,6 +852,8 @@ impl ApplicationHandler for LunaApp {
                         Hotkey::LoadState => self.load_state_from_slot(self.current_slot),
                         Hotkey::Pause => self.toggle_pause(),
                         Hotkey::Reset => self.reset(),
+                        Hotkey::StepInstruction => self.step_instruction(),
+                        Hotkey::StepFrame => self.step_frame(),
                     }
                     return;
                 }
@@ -774,9 +890,10 @@ impl ApplicationHandler for LunaApp {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.poll_rom_picker();
         self.poll_firmware_picker();
+        self.poll_break_hit(event_loop);
         // Feed the host pointer to a Mouse / Super Scope once per loop tick.
         self.push_devices();
         // Periodic battery-SRAM auto-flush (dirty-write only) so an in-game
@@ -824,6 +941,7 @@ impl LunaApp {
         let pending: Mutex<Vec<MenuAction>> = Mutex::new(Vec::new());
         let ui_state = UiState {
             paused: self.emu_shared.paused.load(Ordering::Acquire),
+            break_status: self.break_status.clone(),
             rom_title: self.rom_title.clone(),
             port_device: self.port_device,
             show_input_config: self.show_input_config,
@@ -932,6 +1050,24 @@ impl LunaApp {
                                 )
                                 .ok();
                             snap.cpu_disasm_lines = self.cpu_disasm_lines;
+                            // Exec-breakpoint gutter markers (issue #68).
+                            snap.cpu_bp_addrs = em
+                                .bp_list()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .filter(|b| b.exec)
+                                .map(|b| b.lo)
+                                .collect();
+                        }
+                        DebugPanel::Breakpoints => {
+                            snap.breakpoints = em.bp_list().ok().map(|list| {
+                                list.into_iter()
+                                    .map(|b| {
+                                        let sym = em.symbol_for_addr(b.lo);
+                                        (b, sym)
+                                    })
+                                    .collect()
+                            });
                         }
                     }
                     snap
@@ -949,6 +1085,41 @@ impl LunaApp {
         let snap = self.build_panel_snapshot(panel);
         let (nav, close) = self.debug_windows.render(id, &snap);
         match nav {
+            Some(PanelNav::DisasmToggleBreakpoint(addr)) => {
+                self.toggle_breakpoint_at(addr);
+            }
+            Some(PanelNav::BpRemove(id)) => {
+                if let Ok(mut guard) = self.emu.lock() {
+                    if let Some(em) = guard.as_mut() {
+                        let _ = em.bp_remove(id);
+                    }
+                }
+                self.sync_has_breakpoints();
+            }
+            Some(PanelNav::BpClearAll) => {
+                if let Ok(mut guard) = self.emu.lock() {
+                    if let Some(em) = guard.as_mut() {
+                        let _ = em.bp_clear();
+                    }
+                }
+                self.sync_has_breakpoints();
+            }
+            Some(PanelNav::BpAddExec(addr)) => {
+                if let Ok(mut guard) = self.emu.lock() {
+                    if let Some(em) = guard.as_mut() {
+                        let _ = em.bp_add_exec(addr);
+                    }
+                }
+                self.sync_has_breakpoints();
+            }
+            Some(PanelNav::BpAddMem(lo, hi, on_r, on_w)) => {
+                if let Ok(mut guard) = self.emu.lock() {
+                    if let Some(em) = guard.as_mut() {
+                        let _ = em.bp_add_mem(lo, hi, on_r, on_w);
+                    }
+                }
+                self.sync_has_breakpoints();
+            }
             Some(PanelNav::MemAddr(d)) => match panel {
                 DebugPanel::CpuMemory => {
                     self.cpu_mem_addr =
@@ -1049,6 +1220,12 @@ impl LunaApp {
             MenuAction::ToggleCpuDisasm => {
                 self.debug_windows.toggle(event_loop, DebugPanel::CpuDisasm);
             }
+            MenuAction::ToggleBreakpoints => {
+                self.debug_windows
+                    .toggle(event_loop, DebugPanel::Breakpoints);
+            }
+            MenuAction::StepInstruction => self.step_instruction(),
+            MenuAction::StepFrame => self.step_frame(),
             MenuAction::ToggleSpc700 => self.debug_windows.toggle(event_loop, DebugPanel::Spc700),
             MenuAction::ToggleSpc700Memory => {
                 self.debug_windows

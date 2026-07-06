@@ -17,6 +17,30 @@ in real time as the game runs.
 The disassemblers are M/X-aware for the 65C816 (operand widths follow the
 current register sizes); the memory viewers show the live CPU bus and ARAM.
 
+## Breakpoints & stepping
+
+Luna's GUI debugger halts the emulation at full speed on breakpoints and
+steps it instruction by instruction — the same registry the MCP tools use.
+
+- **Set a breakpoint**: open *Debug → CPU disassembly*, click any row — a
+  red dot marks it. Click again to remove. The *Debug → Breakpoints* panel
+  lists every breakpoint (with its symbol when a `.sym` table is loaded),
+  removes them individually (✕) or all at once, and adds **memory
+  watchpoints** over an address range, firing on reads and/or writes.
+- **Run to the hit**: resume (`F2`). When a breakpoint fires the emulation
+  auto-pauses, an orange **⏸ Break** banner appears in the menu bar with
+  the hit's PC (and address/value for a watchpoint), the CPU disassembly
+  jumps to the halt PC with the line highlighted, and the Event Viewer
+  shows the hit as a *Breakpoint* dot at the exact scanline/H-clock.
+- **Step**: `F10` executes one instruction, `F11` runs to the next frame
+  boundary (both also in the *Emulation* menu, and both pause first if the
+  game is running). The framebuffer and all debug panels follow each step.
+
+Exec breakpoints halt *before* their instruction executes and are
+resume-friendly: resuming from a hit moves past it. Watchpoints halt right
+*after* the accessing instruction, reporting its exact PC, the address and
+the byte. With no breakpoints set, the emulation hot path is unchanged.
+
 ## The Event Viewer
 
 The Event Viewer answers one question the other panels can't: **where in the
