@@ -6,6 +6,12 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-07-06
+
+The GUI interactive debugger — breakpoints, watchpoints, and stepping
+(epic #63 P4, closing the interactive-debugger epic on the luna side) —
+plus CLI symbol-name assertions.
+
 ### Added
 - **GUI breakpoints & stepping** (#68 — epic #63 P4, completing the
   interactive-debugger parity): click a CPU-disassembly row to toggle an
