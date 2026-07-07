@@ -58,6 +58,9 @@ pub(crate) enum MenuAction {
     StepInstruction,
     /// Debugger: run to the next frame boundary (pauses first if running).
     StepFrame,
+    /// Toggle joypad input recording (issue #83): start capturing, or stop
+    /// and export the `frame:mask` script.
+    ToggleInputRecording,
 }
 
 /// A navigation request a debug panel's toolbar emits this frame, applied
@@ -184,6 +187,11 @@ pub(crate) struct UiState<'a> {
     pub screenshot_status: Option<String>,
     /// Transient save/load-state feedback shown in the menu bar.
     pub save_state_status: Option<String>,
+    /// `true` while joypad input is being recorded (issue #83) — drives the
+    /// menu toggle label and the red "● REC" indicator.
+    pub recording_input: bool,
+    /// Transient input-recording feedback (saved-script path) in the menu bar.
+    pub input_record_status: Option<String>,
     /// Which save-state slots (1..=9, indexed 0..9) have a file on disk for
     /// the current ROM. Drives the " ●" occupied marker in the slot menus.
     pub occupied_slots: [bool; 9],
@@ -1863,6 +1871,18 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>,
                         ui.close();
                     }
                     ui.separator();
+                    // Input recording (issue #83): capture joypad play, export
+                    // it as a replayable `frame:mask` --input script.
+                    let rec_label = if state.recording_input {
+                        "\u{23FA} Stop recording (export --input script)"
+                    } else {
+                        "\u{23FA} Record input"
+                    };
+                    if ui.button(rec_label).clicked() {
+                        emit(MenuAction::ToggleInputRecording);
+                        ui.close();
+                    }
+                    ui.separator();
                     let save_key = state
                         .key_bindings
                         .get_hotkey(crate::input::Hotkey::SaveState);
@@ -2068,6 +2088,19 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>,
                     ui.colored_label(egui::Color32::from_rgb(240, 140, 60), msg);
                 }
                 if let Some(status) = state.save_state_status.as_deref() {
+                    ui.add_space(16.0);
+                    ui.label(
+                        egui::RichText::new(status).color(egui::Color32::from_rgb(120, 200, 120)),
+                    );
+                }
+                if state.recording_input {
+                    ui.add_space(16.0);
+                    ui.label(
+                        egui::RichText::new("\u{23FA} REC")
+                            .color(egui::Color32::from_rgb(230, 70, 70))
+                            .strong(),
+                    );
+                } else if let Some(status) = state.input_record_status.as_deref() {
                     ui.add_space(16.0);
                     ui.label(
                         egui::RichText::new(status).color(egui::Color32::from_rgb(120, 200, 120)),

@@ -1,36 +1,62 @@
-//! Pure string→value parsers for the CLI's flag mini-languages
+//! String→value parsers for the CLI's flag mini-languages
 //! (`--input`, `--mouse`, `--peek`, `--assert*`, `--mem-trace-*`).
 //!
-//! Everything here is a free function with no I/O, so the whole module
-//! is unit-testable — these parsers are the front door of the
+//! The parsing bodies are pure free functions with no I/O, so they are
+//! unit-testable — these parsers are the front door of the
 //! differential-debugging toolkit and a silent mis-parse corrupts a
-//! debugging session, so they get pinned by tests.
+//! debugging session, so they get pinned by tests. The one exception is
+//! [`parse_input_script`], which resolves a leading `@` as a file path
+//! (so an exported recording replays directly with `--input @file`); the
+//! pure body it delegates to is [`parse_input_script_body`].
 
-/// Parse a `--input` script: comma-separated `frame:hex` entries.
-/// Returns the checkpoints sorted by ascending frame. The frame
-/// number is decimal; the hex mask accepts an optional `0x` prefix
-/// and is read as a 16-bit value.
+/// Parse a `--input` script into `(frame, mask)` checkpoints sorted by
+/// ascending frame.
+///
+/// The script is comma- **and** newline-separated `frame:hex` entries; a
+/// `#` starts a comment to end-of-line. The frame is decimal; the hex mask
+/// accepts an optional `0x` prefix and is a 16-bit value. If the whole
+/// argument starts with `@`, the rest is a **file path** whose contents are
+/// parsed instead — so a recording exported by the GUI (a commented,
+/// multi-line file) replays directly via `--input @recording.input`.
 pub(crate) fn parse_input_script(script: &str) -> Result<Vec<(u64, u16)>, String> {
+    let script = script.trim();
+    if let Some(path) = script.strip_prefix('@') {
+        let path = path.trim();
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| format!("reading input file `{path}`: {e}"))?;
+        parse_input_script_body(&contents)
+    } else {
+        parse_input_script_body(script)
+    }
+}
+
+/// Pure `frame:hex` body parser (no I/O): comma/newline-separated entries,
+/// `#` line comments, sorted by frame. See [`parse_input_script`].
+pub(crate) fn parse_input_script_body(script: &str) -> Result<Vec<(u64, u16)>, String> {
     let mut out: Vec<(u64, u16)> = Vec::new();
-    for entry in script.split(',') {
-        let entry = entry.trim();
-        if entry.is_empty() {
-            continue;
+    for line in script.lines() {
+        // Drop a `#` comment (whole-line or trailing) before splitting.
+        let line = line.split('#').next().unwrap_or("");
+        for entry in line.split(',') {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            let (frame_str, mask_str) = entry
+                .split_once(':')
+                .ok_or_else(|| format!("missing ':' in entry `{entry}`"))?;
+            let frame: u64 = frame_str
+                .trim()
+                .parse()
+                .map_err(|e| format!("bad frame `{frame_str}`: {e}"))?;
+            let mask_str = mask_str
+                .trim()
+                .trim_start_matches("0x")
+                .trim_start_matches("0X");
+            let mask: u16 = u16::from_str_radix(mask_str, 16)
+                .map_err(|e| format!("bad hex mask `{mask_str}`: {e}"))?;
+            out.push((frame, mask));
         }
-        let (frame_str, mask_str) = entry
-            .split_once(':')
-            .ok_or_else(|| format!("missing ':' in entry `{entry}`"))?;
-        let frame: u64 = frame_str
-            .trim()
-            .parse()
-            .map_err(|e| format!("bad frame `{frame_str}`: {e}"))?;
-        let mask_str = mask_str
-            .trim()
-            .trim_start_matches("0x")
-            .trim_start_matches("0X");
-        let mask: u16 = u16::from_str_radix(mask_str, 16)
-            .map_err(|e| format!("bad hex mask `{mask_str}`: {e}"))?;
-        out.push((frame, mask));
     }
     out.sort_by_key(|(f, _)| *f);
     Ok(out)
@@ -230,6 +256,45 @@ mod tests {
     #[test]
     fn input_script_empty_string_is_empty_ok() {
         assert_eq!(parse_input_script("").unwrap(), vec![]);
+    }
+
+    #[test]
+    fn input_script_handles_comments_and_newlines() {
+        // Exactly the shape the GUI recording export writes (issue #83):
+        // a `#` header, the P1 line, and a fully-commented P2 section.
+        let file = "\
+# luna input recording — player 1
+# replay: luna state --input @file rom.sfc
+1600:0x1000,1610:0x0000
+# player 2 (not replayable via --input):
+# 8000:0x8000
+";
+        let v = parse_input_script(file).unwrap();
+        assert_eq!(v, vec![(1600, 0x1000), (1610, 0)], "P2 comment ignored");
+    }
+
+    #[test]
+    fn input_script_strips_trailing_comment() {
+        let v = parse_input_script("5:0x80  # press A").unwrap();
+        assert_eq!(v, vec![(5, 0x80)]);
+    }
+
+    #[test]
+    fn input_script_reads_from_at_file() {
+        // `@path` loads and parses the file — the `--input @recording` path.
+        let dir = std::env::temp_dir();
+        let path = dir.join("luna_test_input_at_file.input");
+        std::fs::write(&path, "# hdr\n3:0x1000\n7:0\n").unwrap();
+        let arg = format!("@{}", path.display());
+        let v = parse_input_script(&arg).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(v, vec![(3, 0x1000), (7, 0)]);
+    }
+
+    #[test]
+    fn input_script_at_missing_file_errors() {
+        let err = parse_input_script("@/no/such/luna_input_file.input").unwrap_err();
+        assert!(err.contains("reading input file"), "got: {err}");
     }
 
     // --- parse_mouse_script -------------------------------------------------
