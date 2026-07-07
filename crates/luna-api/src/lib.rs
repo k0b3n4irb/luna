@@ -253,6 +253,36 @@ pub struct RunOutcome {
     pub hit: Option<BreakHit>,
 }
 
+/// One recorded joypad transition captured during play (issue #83).
+///
+/// A capture logs only *changes* to the per-port button mask, keyed by the
+/// `frame_count` at which the change was applied — the same `frame:mask`
+/// checkpoint semantics the `--input` / `set_joypad` replay path consumes
+/// (a mask holds until the next entry), so a capture round-trips through
+/// [`input_capture_to_script`] straight back into a deterministic replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct InputCaptureEntry {
+    /// `frame_count` at which this mask took effect.
+    pub frame: u64,
+    /// Controller port: `0` = player 1, `1` = player 2.
+    pub port: u8,
+    /// JOY1L/JOY1H button bitmask now in effect (see [`Emulator::set_joypad`]).
+    pub mask: u16,
+}
+
+/// Render a capture (from [`Emulator::take_input_capture`]) as a `--input`
+/// script string for one port: comma-separated `frame:0xMASK` checkpoints,
+/// ready to feed back to `luna state --input` or the MCP replay path.
+#[must_use]
+pub fn input_capture_to_script(entries: &[InputCaptureEntry], port: u8) -> String {
+    entries
+        .iter()
+        .filter(|e| e.port == port)
+        .map(|e| format!("{}:0x{:04X}", e.frame, e.mask))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// One disassembled instruction line, for a disassembly debug panel.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct DisasmLine {
@@ -575,6 +605,26 @@ pub struct LoopProbe {
     pub executed: u64,
 }
 
+/// In-progress joypad capture buffer (issue #83). Records only mask
+/// *changes* per port; `last_mask` de-dups so a held button costs one
+/// entry, not one-per-frame.
+struct InputCapture {
+    entries: Vec<InputCaptureEntry>,
+    last_mask: [u16; 2],
+}
+
+impl InputCapture {
+    fn note(&mut self, frame: u64, port: u8, mask: u16) {
+        let Some(slot) = self.last_mask.get_mut(usize::from(port)) else {
+            return; // only ports 0/1 exist
+        };
+        if *slot != mask {
+            *slot = mask;
+            self.entries.push(InputCaptureEntry { frame, port, mask });
+        }
+    }
+}
+
 /// The public emulator handle. Owns at most one cartridge + Snes
 /// machine at a time.
 pub struct Emulator {
@@ -596,6 +646,10 @@ pub struct Emulator {
     /// The frame before that (Mesen2 `_prevDebugEvents`) — drawn trailing when
     /// `show_previous_frame` is on.
     prev_frame_events: Vec<CapturedEvent>,
+    /// Active joypad-input capture, if recording (issue #83). `None` when
+    /// not recording; fed by [`Emulator::set_joypad`], drained by
+    /// [`Emulator::take_input_capture`].
+    input_capture: Option<InputCapture>,
 }
 
 /// One raw captured Event Viewer event before category/filter decode — either
@@ -684,6 +738,7 @@ impl Emulator {
             },
             last_frame_events: Vec::new(),
             prev_frame_events: Vec::new(),
+            input_capture: None,
         }
     }
 
@@ -811,6 +866,9 @@ impl Emulator {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         snes.reset();
         self.instructions_executed = 0;
+        // A reset rewinds frame_count to 0; a capture spanning it would have
+        // incoherent frames, so drop it (issue #83).
+        self.input_capture = None;
         Ok(())
     }
 
@@ -824,7 +882,51 @@ impl Emulator {
     pub fn set_joypad(&mut self, port: u8, mask: u16) -> Result<(), ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         snes.cpu_regs.set_joypad(usize::from(port), mask);
+        let frame = snes.frame_count;
+        // Feed an in-progress capture (issue #83): records only the change,
+        // keyed by the frame it lands on — the checkpoint the replay reads.
+        if let Some(cap) = self.input_capture.as_mut() {
+            cap.note(frame, port, mask);
+        }
         Ok(())
+    }
+
+    /// Start recording joypad input (issue #83): every subsequent
+    /// [`Self::set_joypad`] change is logged as a `frame:mask` checkpoint.
+    /// The masks currently in effect become the capture's baseline, so a
+    /// button already held when recording starts is captured too. Replaces
+    /// any capture already in progress.
+    pub fn start_input_capture(&mut self) {
+        let (frame, m0, m1) = self.snes.as_ref().map_or((0, 0, 0), |s| {
+            (s.frame_count, s.cpu_regs.joypad1, s.cpu_regs.joypad2)
+        });
+        // Baseline last_mask = the default idle state, so an idle start adds
+        // no entries but a held-at-start button (mask != 0) does.
+        let mut cap = InputCapture {
+            entries: Vec::new(),
+            last_mask: [0, 0],
+        };
+        cap.note(frame, 0, m0);
+        cap.note(frame, 1, m1);
+        self.input_capture = Some(cap);
+    }
+
+    /// Whether a joypad-input capture is currently recording (issue #83).
+    #[must_use]
+    pub const fn is_capturing_input(&self) -> bool {
+        self.input_capture.is_some()
+    }
+
+    /// Stop recording and return the captured joypad checkpoints, sorted by
+    /// frame (issue #83). Render them as an `--input` script with
+    /// [`input_capture_to_script`]. Returns an empty vec if not recording.
+    pub fn take_input_capture(&mut self) -> Vec<InputCaptureEntry> {
+        let mut entries = self
+            .input_capture
+            .take()
+            .map_or_else(Vec::new, |c| c.entries);
+        entries.sort_by_key(|e| e.frame);
+        entries
     }
 
     /// Select the device on a controller port (`port` 0 = port 1, 1 = port 2):
@@ -3086,5 +3188,86 @@ mod tests {
         let mut ref_h = std::collections::hash_map::DefaultHasher::new();
         std::hash::Hasher::write(&mut ref_h, &rgba);
         assert_eq!(h, std::hash::Hasher::finish(&ref_h));
+    }
+
+    #[test]
+    fn input_capture_records_only_changes_keyed_by_frame() {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        e.step_until_frame(1_000_000).unwrap();
+        let f0 = e.frame_count().unwrap();
+
+        e.start_input_capture();
+        assert!(e.is_capturing_input());
+
+        // Idle baseline (mask 0) at f0 adds nothing; press Start (bit 12)…
+        e.set_joypad(0, 0x1000).unwrap();
+        // …the same mask again is de-duped (a held button = one entry).
+        e.set_joypad(0, 0x1000).unwrap();
+
+        e.step_until_frame(1_000_000).unwrap();
+        let f1 = e.frame_count().unwrap();
+        e.set_joypad(0, 0).unwrap(); // release P1
+        e.set_joypad(1, 0x8000).unwrap(); // P2 presses B
+
+        let entries = e.take_input_capture();
+        assert!(!e.is_capturing_input(), "take stops the capture");
+        assert_eq!(
+            entries,
+            vec![
+                InputCaptureEntry {
+                    frame: f0,
+                    port: 0,
+                    mask: 0x1000
+                },
+                InputCaptureEntry {
+                    frame: f1,
+                    port: 0,
+                    mask: 0
+                },
+                InputCaptureEntry {
+                    frame: f1,
+                    port: 1,
+                    mask: 0x8000
+                },
+            ]
+        );
+        // Per-port scripts round-trip into the `--input` replay format.
+        assert_eq!(
+            input_capture_to_script(&entries, 0),
+            format!("{f0}:0x1000,{f1}:0x0000")
+        );
+        assert_eq!(input_capture_to_script(&entries, 1), format!("{f1}:0x8000"));
+    }
+
+    #[test]
+    fn input_capture_baseline_captures_held_button_at_start() {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        e.step_until_frame(1_000_000).unwrap();
+        let f0 = e.frame_count().unwrap();
+        // Hold A *before* recording — the baseline must still capture it.
+        e.set_joypad(0, 0x0080).unwrap();
+        e.start_input_capture();
+        assert_eq!(
+            e.take_input_capture(),
+            vec![InputCaptureEntry {
+                frame: f0,
+                port: 0,
+                mask: 0x0080
+            }]
+        );
+    }
+
+    #[test]
+    fn reset_clears_in_progress_input_capture() {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        e.start_input_capture();
+        e.set_joypad(0, 0x1000).unwrap();
+        assert!(e.is_capturing_input());
+        e.reset().unwrap();
+        assert!(!e.is_capturing_input(), "reset drops the capture");
+        assert!(e.take_input_capture().is_empty());
     }
 }

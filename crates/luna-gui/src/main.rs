@@ -166,6 +166,11 @@ struct LunaApp {
     current_slot: u8,
     /// Transient save/load-state feedback surfaced in the menu bar.
     save_state_status: Option<String>,
+    /// `true` while recording joypad input (issue #83). Mirrors the API's
+    /// capture state; the source of truth for the menu toggle + REC badge.
+    recording_input: bool,
+    /// Transient input-recording feedback (saved-script path) in the menu bar.
+    input_record_status: Option<String>,
     /// Debugger halt banner (issue #68): set when a breakpoint auto-paused
     /// the emu thread, cleared on resume/reset.
     break_status: Option<String>,
@@ -234,6 +239,8 @@ impl LunaApp {
             screenshot_status: None,
             current_slot: 1,
             save_state_status: None,
+            recording_input: false,
+            input_record_status: None,
             break_status: None,
             debug_windows: DebugWindows::new(),
             cpu_mem_addr: 0x7E_0000,
@@ -601,6 +608,9 @@ impl LunaApp {
 
     fn reset(&mut self) {
         self.break_status = None;
+        // A reset rewinds frame_count, so the API drops any in-progress
+        // capture (issue #83) — keep the GUI's mirror in sync.
+        self.recording_input = false;
         if let Ok(mut guard) = self.emu.lock() {
             if let Some(em) = guard.as_mut() {
                 let _ = em.reset();
@@ -962,6 +972,8 @@ impl LunaApp {
             pending_hotkey_rebind: self.pending_hotkey_rebind,
             screenshot_status: self.screenshot_status.clone(),
             save_state_status: self.save_state_status.clone(),
+            recording_input: self.recording_input,
+            input_record_status: self.input_record_status.clone(),
             occupied_slots,
         };
         let win_size = window.inner_size();
@@ -1298,6 +1310,82 @@ impl LunaApp {
             MenuAction::SaveState(slot) => self.save_state_to_slot(slot),
             MenuAction::LoadState(slot) => self.load_state_from_slot(slot),
             MenuAction::SetPortDevice(port, dev) => self.set_port_device(port, dev),
+            MenuAction::ToggleInputRecording => self.toggle_input_recording(),
+        }
+    }
+
+    /// Start recording joypad input, or stop and export it as a `frame:mask`
+    /// `--input` script (issue #83). Driven entirely through `luna-api`'s
+    /// capture surface (api-first). The exported script replays deterministically
+    /// via `luna state --input` / `set_joypad` + `step_until_frame`.
+    fn toggle_input_recording(&mut self) {
+        if !self.rom_loaded {
+            return;
+        }
+        let Ok(mut guard) = self.emu.lock() else {
+            return;
+        };
+        let Some(em) = guard.as_mut() else {
+            return;
+        };
+        if self.recording_input {
+            let entries = em.take_input_capture();
+            drop(guard);
+            self.recording_input = false;
+            let script_p1 = luna_api::input_capture_to_script(&entries, 0);
+            let script_p2 = luna_api::input_capture_to_script(&entries, 1);
+            let base = self.rom_title.as_deref().unwrap_or("luna");
+            let base = base.rsplit_once('.').map_or(base, |(stem, _)| stem);
+            let path = next_recording_path(base);
+            let fname = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("rec.input");
+            let rom = self.rom_title.as_deref().unwrap_or("<rom>.sfc");
+            // The active lines are Player 1 only — `--input` is single-port, and
+            // the parser skips `#` comments, so the file replays directly with
+            // `luna state --input @<file>`. Frames are absolute from power-on, so
+            // replay reproduces a recording made from boot (pair a save state for
+            // a mid-game capture). Player 2, if any, is written commented-out
+            // (not replayable via `--input`; use the API/MCP `set_joypad`).
+            let mut body = format!(
+                "# luna input recording (issue #83) — player 1 frame:mask checkpoints.\n\
+                 # Frames are absolute from power-on.\n\
+                 # Replay a from-boot recording:\n\
+                 #   luna state -n <instr> --input @{fname} \"{rom}\"\n\
+                 # Replay a mid-game recording (pair it with a save state taken\n\
+                 # at record-start, F5 in the GUI):\n\
+                 #   luna state --load-state <state.luna> --input @{fname} \"{rom}\"\n\
+                 {script_p1}\n"
+            );
+            if !script_p2.is_empty() {
+                body.push_str("# player 2 (NOT replayable via --input; use API/MCP set_joypad):\n");
+                body.push_str("# ");
+                body.push_str(&script_p2);
+                body.push('\n');
+            }
+            match std::fs::write(&path, body) {
+                Ok(()) => {
+                    eprintln!(
+                        "luna-gui: input recording saved ({} P1 + {} P2 changes) → {}",
+                        entries.iter().filter(|e| e.port == 0).count(),
+                        entries.iter().filter(|e| e.port == 1).count(),
+                        path.display(),
+                    );
+                    let shown = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+                    self.input_record_status = Some(format!("\u{23FA} saved {shown}"));
+                }
+                Err(e) => {
+                    eprintln!("luna-gui: input recording save failed: {e}");
+                    self.input_record_status = Some("\u{23FA} save failed".to_string());
+                }
+            }
+        } else {
+            em.start_input_capture();
+            drop(guard);
+            self.recording_input = true;
+            self.input_record_status = None;
+            eprintln!("luna-gui: input recording started");
         }
     }
 
@@ -1466,6 +1554,32 @@ fn screenshot_dir() -> PathBuf {
                 .join("screenshots")
         },
     )
+}
+
+/// Directory for exported input recordings (issue #83): `~/.local/luna/recordings`.
+fn recordings_dir() -> PathBuf {
+    std::env::var_os("HOME").map_or_else(
+        || PathBuf::from("recordings"),
+        |home| {
+            PathBuf::from(home)
+                .join(".local")
+                .join("luna")
+                .join("recordings")
+        },
+    )
+}
+
+/// Next free `<base>_NNN.input` path under [`recordings_dir`].
+fn next_recording_path(base: &str) -> PathBuf {
+    let dir = recordings_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    for counter in 0..1000 {
+        let candidate = dir.join(format!("{base}_{counter:03}.input"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    dir.join(format!("{base}_overflow.input"))
 }
 
 /// Directory save states are written to: `$HOME/.local/luna/states`, a
