@@ -6,6 +6,22 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Added
+- **Input recording** (#83): capture what you actually play and export it
+  as the existing `frame:mask` `--input` script — the record half to match
+  luna's replay half. In the GUI, *Emulation → ● Record input* toggles
+  capture (with a red **⏺ REC** badge) and writes a replayable `.input`
+  file to `~/.local/luna/recordings/` on stop. New `luna-api` surface
+  (`start_input_capture` / `take_input_capture` / `is_capturing_input`,
+  `input_capture_to_script`) records only per-port mask *changes*, so files
+  stay tiny; also exposed as the MCP `start_input_capture` /
+  `take_input_capture` tools. Only Player 1 changes are recorded (Player 2
+  is captured but written commented-out, since `--input` is single-port).
+- `--input` now also accepts `@<file>` to read a script from a file, and
+  the script grammar allows `#` comments and newlines — so an exported
+  recording replays directly with `luna state --input @recording.input`
+  (pair a save state via `--load-state` for a mid-game capture).
+
 ## [1.7.0] — 2026-07-06
 
 The GUI interactive debugger — breakpoints, watchpoints, and stepping

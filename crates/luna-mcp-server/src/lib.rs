@@ -52,7 +52,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use base64::Engine;
-use luna_api::{ApiError, Emulator, EmulatorState, RomInfo};
+use luna_api::{
+    ApiError, Emulator, EmulatorState, InputCaptureEntry, RomInfo, input_capture_to_script,
+};
 use rmcp::{
     ErrorData, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -615,6 +617,18 @@ pub struct BpEntry {
 pub struct BpListResult {
     /// Every registered breakpoint, ordered by id.
     pub breakpoints: Vec<BpEntry>,
+}
+
+/// `take_input_capture` result (issue #83).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct InputCaptureResult {
+    /// Every recorded joypad change (`frame`, `port`, `mask`), sorted by frame.
+    pub entries: Vec<InputCaptureEntry>,
+    /// Player-1 changes as a `--input` script (`frame:0xMASK,…`), ready to
+    /// replay via `set_joypad` + `step_until_frame` or `luna state --input`.
+    pub script_p1: String,
+    /// Player-2 changes rendered the same way (empty if P2 was untouched).
+    pub script_p2: String,
 }
 
 /// `run_until_break` result.
@@ -1359,6 +1373,39 @@ impl LunaServer {
             em.bp_clear().map_err(|e| api_err_to_mcp(&e))?;
         }
         Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Start recording player joypad input (issue #83). Every subsequent \
+                                set_joypad change is logged as a frame:mask checkpoint; masks \
+                                already held become the baseline. Stop and retrieve with \
+                                take_input_capture. Replaces any capture already running."
+    )]
+    async fn start_input_capture(&self) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.start_input_capture();
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Stop the joypad input capture and return the recorded frame:mask \
+                                checkpoints — per-port entries plus ready-to-replay P1/P2 --input \
+                                scripts. Empty if no capture was running."
+    )]
+    async fn take_input_capture(&self) -> Result<rmcp::Json<InputCaptureResult>, ErrorData> {
+        let entries = {
+            let mut em = self.emulator.lock().await;
+            em.take_input_capture()
+        };
+        let script_p1 = input_capture_to_script(&entries, 0);
+        let script_p2 = input_capture_to_script(&entries, 1);
+        Ok(rmcp::Json(InputCaptureResult {
+            entries,
+            script_p1,
+            script_p2,
+        }))
     }
 
     #[rmcp::tool(description = "List every registered breakpoint/watchpoint, ordered by id.")]
