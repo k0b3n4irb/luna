@@ -6,6 +6,12 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-07-07
+
+Input recording — the record half of luna's input replay, requested and
+validated by Cooper (the OpenSNES IDE) for one-click bug repros and
+gameplay regression tests.
+
 ### Added
 - **Input recording** (#83): capture what you actually play and export it
   as the existing `frame:mask` `--input` script — the record half to match
