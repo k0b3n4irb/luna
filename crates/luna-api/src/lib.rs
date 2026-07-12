@@ -2548,6 +2548,15 @@ impl Emulator {
         Ok((0..256u16).map(|i| snes.ppu.cgram.color(i as u8)).collect())
     }
 
+    /// All 544 OAM bytes (512-byte low table + 32-byte high table) as raw
+    /// bytes (issue #89). Cheap, read-only — the same bytes `state().ppu.
+    /// oam_full` exposes, without the rest of the `state()` snapshot. The
+    /// per-frame source for a sprite/OAM viewer.
+    pub fn peek_oam(&self) -> Result<Vec<u8>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        Ok((0..0x220u16).map(|i| snes.ppu.oam.peek(i)).collect())
+    }
+
     /// Render BG `bg_idx` (0..3)'s full tilemap to an RGBA image for the
     /// GUI Tilemap Viewer. Debug render — ignores scroll/priority/blank,
     /// shows raw palette colours, but honours per-tile flip + bases. In
@@ -3314,5 +3323,16 @@ mod tests {
         // The forced-loaded core actually runs.
         e.step_until_frame(1_000_000).unwrap();
         assert!(e.frame_count().unwrap() >= 1);
+    }
+
+    #[test]
+    fn peek_oam_matches_state_oam_full() {
+        let mut e = Emulator::new();
+        assert!(matches!(e.peek_oam(), Err(ApiError::NoRom)));
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        e.step_until_frame(1_000_000).unwrap();
+        let oam = e.peek_oam().unwrap();
+        assert_eq!(oam.len(), 0x220, "544 OAM bytes");
+        assert_eq!(oam, e.state().ppu.oam_full, "peek_oam == state oam_full");
     }
 }

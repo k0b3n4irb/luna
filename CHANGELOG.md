@@ -7,6 +7,14 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- **MCP `peek_oam`** (#89): read all 544 OAM bytes (512-byte low table +
+  32-byte high table) directly, instead of pulling the whole `state()`
+  snapshot for a sprite/OAM viewer. New `Emulator::peek_oam()` API + MCP tool,
+  mirroring `peek_cgram`.
+- **MCP `capabilities`** (#90): reports the luna release `version` and the
+  live tool catalogue, so a client can feature-detect. (The handshake's
+  `serverInfo.version` reports the rmcp library version, not luna's — this
+  tool gives the real one.)
 - **luna-gui: force the cartridge mapper** (#88). A ROM whose internal
   checksum is blank/invalid (much of the PeterLemon homebrew test corpus)
   used to load as a black screen, because layout auto-detection refuses to
