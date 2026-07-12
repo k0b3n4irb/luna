@@ -6,6 +6,17 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Added
+- **Interruptible run + `pause`** (#92): the MCP surface gains a `run` tool
+  (no mandatory step budget — runs until a breakpoint, a `STOP`, or a
+  `pause`) and a `pause` tool that stops an in-flight run. `pause` raises a
+  shared flag *without* taking the emulator lock, so it lands while `run`
+  holds it (rmcp dispatches each request on its own task); the run then
+  returns with `interrupted: true`. Backed by
+  `Emulator::run_until_break_interruptible(max_steps, &AtomicBool)` and a new
+  `RunOutcome::interrupted`. Removes the old "every continue must be a bounded
+  `run_until_break`" constraint for MCP debugger clients.
+
 ### Fixed
 - **Memory watchpoints now fold address mirrors** (#91). A watchpoint on a
   WRAM or MMIO address used to fire only on the exact 24-bit bank, so a game

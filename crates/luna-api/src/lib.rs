@@ -251,6 +251,10 @@ pub struct RunOutcome {
     pub steps: u64,
     /// The breakpoint hit that stopped the run, if any.
     pub hit: Option<BreakHit>,
+    /// `true` if an external interrupt (a `pause`) ended the run before a
+    /// breakpoint or the step budget (issue #92). Distinguishes a paused run
+    /// (`hit == None && interrupted`) from a budget-exhausted one.
+    pub interrupted: bool,
 }
 
 /// One recorded joypad transition captured during play (issue #83).
@@ -1953,6 +1957,23 @@ impl Emulator {
     /// core panic is caught and surfaced as [`ApiError::Panic`] (so a GUI
     /// driving loop keeps its emu-dead latch semantics).
     pub fn run_until_break(&mut self, max_steps: u64) -> Result<RunOutcome, ApiError> {
+        self.run_until_break_interruptible(max_steps, &std::sync::atomic::AtomicBool::new(false))
+    }
+
+    /// Like [`Self::run_until_break`], but an external `interrupt` flag ends the
+    /// run early (issue #92): a front-end holds the flag *outside* the emulator
+    /// lock and raises it (a `pause`) to stop an in-progress run without racing
+    /// for the lock. Pass a large `max_steps` for an effectively unbounded run
+    /// that only a breakpoint, a `STOP`, or `interrupt` stops. The returned
+    /// [`RunOutcome`] has `interrupted == true` when the flag ended it.
+    pub fn run_until_break_interruptible(
+        &mut self,
+        max_steps: u64,
+        interrupt: &std::sync::atomic::AtomicBool,
+    ) -> Result<RunOutcome, ApiError> {
+        use std::sync::atomic::Ordering;
+        // Clear any stale raise so this run isn't stopped by a previous pause.
+        interrupt.store(false, Ordering::Relaxed);
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         if let Some(bp) = snes.breakpoints.as_mut() {
             bp.take_pending(); // discard stale
@@ -1965,12 +1986,23 @@ impl Emulator {
                 if snes.cpu.stopped {
                     break;
                 }
+                // Check the pause flag periodically (every 4096 instructions) —
+                // cheap enough to be invisible on the run, responsive enough
+                // that a pause returns within microseconds.
+                if i & 0xFFF == 0 && interrupt.load(Ordering::Relaxed) {
+                    return RunOutcome {
+                        steps: i,
+                        hit: None,
+                        interrupted: true,
+                    };
+                }
                 let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
                 if i > 0 {
                     if let Some(hit) = snes.breakpoints.as_ref().and_then(|b| b.check_exec(cur)) {
                         return RunOutcome {
                             steps: i,
                             hit: Some(hit),
+                            interrupted: false,
                         };
                     }
                 }
@@ -1980,12 +2012,14 @@ impl Emulator {
                     return RunOutcome {
                         steps: i + 1,
                         hit: Some(hit),
+                        interrupted: false,
                     };
                 }
             }
             RunOutcome {
                 steps: executed,
                 hit: None,
+                interrupted: false,
             }
         }));
         std::panic::set_hook(prev_hook);
@@ -3326,6 +3360,30 @@ mod tests {
         // The forced-loaded core actually runs.
         e.step_until_frame(1_000_000).unwrap();
         assert!(e.frame_count().unwrap() >= 1);
+    }
+
+    #[test]
+    fn run_until_break_interruptible_stops_on_pause_flag() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        let flag = AtomicBool::new(false);
+        // The run holds `e` on this thread; a scoped thread raises the pause
+        // flag mid-run (the real front-end model: pause off the emulator lock).
+        let out = std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                flag.store(true, Ordering::Relaxed);
+            });
+            e.run_until_break_interruptible(1_000_000_000, &flag)
+                .unwrap()
+        });
+        assert!(out.interrupted, "the pause flag ended the run");
+        assert!(out.hit.is_none(), "paused, not a breakpoint hit");
+        assert!(
+            out.steps > 0 && out.steps < 1_000_000_000,
+            "stopped mid-run"
+        );
     }
 
     #[test]
