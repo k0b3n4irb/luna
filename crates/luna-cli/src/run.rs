@@ -3,7 +3,9 @@
 use std::process::ExitCode;
 
 use crate::output::{print_cpu_state, print_diag_state, print_header, save_screenshot, write_wav};
+use crate::rom::load_rom_into;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     rom_path: &std::path::Path,
     steps: u64,
@@ -14,17 +16,19 @@ pub(crate) fn run(
     nocash_out: Option<&std::path::Path>,
     wdm_out: Option<&std::path::Path>,
     print_fbhash: bool,
+    force_mapper: Option<&str>,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
-    let info = match em.load_rom(rom_path) {
-        Ok(i) => i,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::from(1);
-        }
-    };
+    // Shared loader (issue #95): honours `--force-mapper` so a bad-checksum
+    // reference ROM (PeterLemon corpus) can reach `--print-fbhash` too.
+    if let Err(e) = load_rom_into(&mut em, rom_path, force_mapper, None) {
+        eprintln!("error: {e}");
+        return ExitCode::from(1);
+    }
 
-    print_header(&info);
+    if let Some(info) = em.rom_info() {
+        print_header(info);
+    }
 
     // Arm the Nocash ($21FC) capture before stepping so the program's
     // `SNES_NOCASH`/`SNES_ASSERT` output is recorded during the run.
