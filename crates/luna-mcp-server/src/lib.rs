@@ -505,6 +505,23 @@ pub struct CgramResult {
     pub colors: Vec<u16>,
 }
 
+/// `peek_oam` result (issue #89).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct OamResult {
+    /// All 544 OAM bytes: the 512-byte low table + the 32-byte high table.
+    pub bytes: Vec<u8>,
+}
+
+/// `capabilities` result (issue #90).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CapabilitiesResult {
+    /// luna release version, e.g. `"1.8.0"`.
+    pub version: String,
+    /// Every registered tool name — the live catalogue, a stable contract for
+    /// client feature-detection (no need to guess from a stale `--help`).
+    pub tools: Vec<String>,
+}
+
 /// Result for the debug-render tools (`render_tilemap`,
 /// `render_vram_tiles`, `render_palette`, `render_sprite_sheet`).
 /// Dimensions vary per render — decode the PNG header if needed.
@@ -1101,6 +1118,38 @@ impl LunaServer {
             em.peek_cgram().map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(CgramResult { colors }))
+    }
+
+    #[rmcp::tool(
+        description = "Read all 544 OAM bytes (512-byte low table + 32-byte high table) \
+                                as raw bytes — sprite attributes for an OAM/sprite viewer. \
+                                Read-only."
+    )]
+    async fn peek_oam(&self) -> Result<rmcp::Json<OamResult>, ErrorData> {
+        let bytes = {
+            let em = self.emulator.lock().await;
+            em.peek_oam().map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(OamResult { bytes }))
+    }
+
+    #[rmcp::tool(
+        description = "Report this luna MCP server's version and the live tool catalogue, \
+                                so a client can feature-detect instead of guessing from a stale \
+                                --help. `version` is the luna release; `tools` is every \
+                                registered tool name."
+    )]
+    async fn capabilities(&self) -> rmcp::Json<CapabilitiesResult> {
+        let tools = self
+            .tool_router
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        rmcp::Json(CapabilitiesResult {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            tools,
+        })
     }
 
     #[rmcp::tool(
