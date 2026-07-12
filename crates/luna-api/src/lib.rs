@@ -752,6 +752,14 @@ impl Emulator {
         self.snes.is_some()
     }
 
+    /// The loaded cartridge's parsed metadata, or `None` before any load.
+    /// Lets a caller that loaded through a helper (e.g. the CLI's shared
+    /// `load_rom_into`) recover the [`RomInfo`] for a header print-out.
+    #[must_use]
+    pub const fn rom_info(&self) -> Option<&RomInfo> {
+        self.rom_info.as_ref()
+    }
+
     /// Load a ROM file. On success, the emulator is ready for
     /// stepping. Returns the parsed cartridge metadata for callers
     /// that want to surface it (window title, MCP `load_rom` tool).

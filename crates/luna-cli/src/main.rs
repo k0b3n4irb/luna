@@ -100,6 +100,12 @@ enum Command {
         /// and how strongly each may be asserted.
         #[arg(long)]
         print_fbhash: bool,
+        /// Force a cartridge mapper, bypassing header auto-detection — same as
+        /// `state`/`frames` (issue #95). Needed for checksum-invalid homebrew /
+        /// reference ROMs (e.g. the `PeterLemon` corpus) so they can reach
+        /// `--print-fbhash`. One of: lorom, hirom, exhirom, sa1, superfx.
+        #[arg(long = "force-mapper")]
+        force_mapper: Option<String>,
     },
     /// Serve the Luna MCP server on stdio.
     ///
@@ -144,6 +150,16 @@ enum Command {
         /// CLI can't reach without input). The state must match this ROM.
         #[arg(long = "load-state")]
         load_state: Option<PathBuf>,
+        /// Write captured `WDM $xx` executions (the SDK breakpoint /
+        /// `SNES_ASSERT` channel) to this file — parity with `luna run`
+        /// (issue #85), so an input-driven test keeps the WDM oracle.
+        #[arg(long = "wdm-out")]
+        wdm_out: Option<PathBuf>,
+        /// Print `fbhash=<16-hex>` — the cross-arch-stable displayed-frame key
+        /// (same as `luna run --print-fbhash`, issue #85) — so an input-driven
+        /// `state` run can also emit a visual baseline.
+        #[arg(long)]
+        print_fbhash: bool,
         /// Dump all 64 KB of PPU VRAM (raw bytes) to this file after the
         /// run. For diagnosing the framebuffer DMA → VRAM → display path.
         #[arg(long = "dump-vram")]
@@ -522,6 +538,7 @@ fn main() -> ExitCode {
             nocash_out,
             wdm_out,
             print_fbhash,
+            force_mapper,
         } => run(
             &rom,
             steps,
@@ -532,6 +549,7 @@ fn main() -> ExitCode {
             nocash_out.as_deref(),
             wdm_out.as_deref(),
             print_fbhash,
+            force_mapper.as_deref(),
         ),
         Command::Mcp => serve_mcp(),
         Command::State {
@@ -580,6 +598,8 @@ fn main() -> ExitCode {
             dma_trace_max,
             dump_coproc_ram,
             dump_aram,
+            wdm_out,
+            print_fbhash,
         } => run_state(
             &rom,
             steps,
@@ -626,6 +646,8 @@ fn main() -> ExitCode {
             dsp1_rom.as_deref(),
             sym.as_deref(),
             load_state.as_deref(),
+            wdm_out.as_deref(),
+            print_fbhash,
         ),
         Command::Frames {
             rom,

@@ -7,6 +7,12 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- **CLI flag parity** (#95, #85): `luna run` now accepts `--force-mapper`
+  (like `state`/`frames`), so a checksum-invalid reference ROM can reach
+  `--print-fbhash`; and `luna state` now accepts `--print-fbhash` and
+  `--wdm-out`, so an input-driven (`--input`) test can also emit the
+  cross-arch visual baseline and keep the WDM/`SNES_ASSERT` oracle. `run` and
+  `state` produce the same `fbhash` for the same displayed frame.
 - **luna-gui: reload the ROM in place** (#93). *File ▸ Reload ROM* reboots the
   current ROM from disk, and *File ▸ Auto-reload on file change* watches the
   loaded ROM file and reboots when it changes — the watch-mode loop for an
