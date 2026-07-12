@@ -171,6 +171,16 @@ struct LunaApp {
     recording_input: bool,
     /// Transient input-recording feedback (saved-script path) in the menu bar.
     input_record_status: Option<String>,
+    /// Force a cartridge mapper on the next load instead of auto-detecting it
+    /// (issue #88). `None` = auto-detect (default); `Some(kind)` routes through
+    /// `Emulator::load_rom_forced` so checksum-invalid homebrew/test ROMs load.
+    forced_mapper: Option<luna_api::MapperKind>,
+    /// A ROM whose auto-detection just failed, awaiting a mapper choice
+    /// (issue #88). Drives the inline "couldn't detect — load as…?" prompt;
+    /// picking a mapper reloads this path immediately (no re-Open).
+    pending_force_path: Option<PathBuf>,
+    /// Transient load feedback (e.g. an auto-detect failure hint) in the menu bar.
+    load_notice: Option<String>,
     /// Debugger halt banner (issue #68): set when a breakpoint auto-paused
     /// the emu thread, cleared on resume/reset.
     break_status: Option<String>,
@@ -241,6 +251,9 @@ impl LunaApp {
             save_state_status: None,
             recording_input: false,
             input_record_status: None,
+            forced_mapper: None,
+            pending_force_path: None,
+            load_notice: None,
             break_status: None,
             debug_windows: DebugWindows::new(),
             cpu_mem_addr: 0x7E_0000,
@@ -268,10 +281,33 @@ impl LunaApp {
         // unsupported coprocessor cart (it catches `from_cartridge`'s
         // panic), so one check covers both.
         let mut em = Emulator::new();
-        let info = match em.load_rom(path) {
-            Ok(info) => info,
+        // Auto-detect by default; force the mapper when the user picked one
+        // (issue #88) — lets checksum-invalid homebrew/test ROMs load.
+        let result = match self.forced_mapper {
+            Some(mapper) => em.load_rom_forced(path, mapper),
+            None => em.load_rom(path),
+        };
+        let info = match result {
+            Ok(info) => {
+                self.load_notice = None;
+                self.pending_force_path = None;
+                info
+            }
             Err(e) => {
                 eprintln!("luna-gui: cannot load ROM (bad file or unsupported coprocessor): {e}");
+                if self.forced_mapper.is_none() {
+                    // Auto-detection failed — recoverable. Remember the path so
+                    // the inline "load as…?" prompt can retry it in one click
+                    // (issue #88), and drop a menu-bar hint too.
+                    self.pending_force_path = Some(path.to_path_buf());
+                    self.load_notice =
+                        Some("\u{26A0} couldn't detect mapper — pick one to load".to_string());
+                } else {
+                    // A forced load failed (wrong mapper / bad file): don't loop
+                    // the prompt, just report it.
+                    self.pending_force_path = None;
+                    self.load_notice = Some("\u{26A0} ROM load failed (forced mapper)".to_string());
+                }
                 return;
             }
         };
@@ -974,6 +1010,14 @@ impl LunaApp {
             save_state_status: self.save_state_status.clone(),
             recording_input: self.recording_input,
             input_record_status: self.input_record_status.clone(),
+            forced_mapper: self.forced_mapper,
+            load_notice: self.load_notice.clone(),
+            force_prompt_file: self.pending_force_path.as_deref().map(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("this ROM")
+                    .to_string()
+            }),
             occupied_slots,
         };
         let win_size = window.inner_size();
@@ -1311,6 +1355,20 @@ impl LunaApp {
             MenuAction::LoadState(slot) => self.load_state_from_slot(slot),
             MenuAction::SetPortDevice(port, dev) => self.set_port_device(port, dev),
             MenuAction::ToggleInputRecording => self.toggle_input_recording(),
+            MenuAction::SetForcedMapper(mapper) => {
+                self.forced_mapper = mapper;
+                self.load_notice = None;
+                // Auto-retry (issue #88): if a load is waiting on a mapper
+                // choice and we now have one, reload it immediately — no
+                // re-Open. Auto-detect (`None`) can't rescue it, so skip.
+                if let (Some(_), Some(path)) = (mapper, self.pending_force_path.take()) {
+                    self.load_rom(&path);
+                }
+            }
+            MenuAction::DismissForcePrompt => {
+                self.pending_force_path = None;
+                self.load_notice = None;
+            }
         }
     }
 

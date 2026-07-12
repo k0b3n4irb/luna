@@ -61,6 +61,12 @@ pub(crate) enum MenuAction {
     /// Toggle joypad input recording (issue #83): start capturing, or stop
     /// and export the `frame:mask` script.
     ToggleInputRecording,
+    /// Force a cartridge mapper on the next ROM load (issue #88); `None` =
+    /// auto-detect. When a load is awaiting a mapper choice, this also retries
+    /// it immediately.
+    SetForcedMapper(Option<luna_api::MapperKind>),
+    /// Dismiss the "couldn't detect the mapper" prompt without loading (issue #88).
+    DismissForcePrompt,
 }
 
 /// A navigation request a debug panel's toolbar emits this frame, applied
@@ -192,6 +198,14 @@ pub(crate) struct UiState<'a> {
     pub recording_input: bool,
     /// Transient input-recording feedback (saved-script path) in the menu bar.
     pub input_record_status: Option<String>,
+    /// Forced cartridge mapper for the next load, or `None` = auto-detect
+    /// (issue #88); drives the File ▸ Force mapper submenu's checkmarks.
+    pub forced_mapper: Option<luna_api::MapperKind>,
+    /// Transient load feedback (auto-detect failure hint) in the menu bar.
+    pub load_notice: Option<String>,
+    /// When `Some(filename)`, a ROM failed auto-detection and the inline
+    /// "load as…?" mapper prompt is shown for it (issue #88).
+    pub force_prompt_file: Option<String>,
     /// Which save-state slots (1..=9, indexed 0..9) have a file on disk for
     /// the current ROM. Drives the " ●" occupied marker in the slot menus.
     pub occupied_slots: [bool; 9],
@@ -256,6 +270,9 @@ impl UiOverlay {
             }
             if state.show_hotkey_config {
                 draw_hotkey_config(ui.ctx(), state, &mut emit);
+            }
+            if let Some(file) = state.force_prompt_file.as_deref() {
+                draw_force_mapper_prompt(ui.ctx(), file, &mut emit);
             }
             // Debug views live in their own native OS windows (see
             // `crate::debug_window`), not in this overlay — so they can be
@@ -1824,6 +1841,40 @@ pub(crate) fn breakpoints_body(ui: &mut egui::Ui, snap: &DebugSnapshot) -> Optio
     nav
 }
 
+/// Inline "couldn't detect the mapper — load as…?" prompt (issue #88), shown
+/// centered when a ROM fails auto-detection. Each button forces that mapper and
+/// retries the pending load in one click; Cancel dismisses it.
+fn draw_force_mapper_prompt<F: FnMut(MenuAction)>(ctx: &egui::Context, file: &str, emit: &mut F) {
+    use luna_api::MapperKind;
+    egui::Window::new("Couldn't detect the cartridge mapper")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.label(format!(
+                "\u{201C}{file}\u{201D} has no valid internal checksum, so luna can't \
+                 tell LoROM from HiROM. Load it as:"
+            ));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                for (label, kind) in [
+                    ("LoROM", MapperKind::LoRom),
+                    ("HiROM", MapperKind::HiRom),
+                    ("ExHiROM", MapperKind::ExHiRom),
+                    ("SA-1", MapperKind::Sa1),
+                ] {
+                    if ui.button(label).clicked() {
+                        emit(MenuAction::SetForcedMapper(Some(kind)));
+                    }
+                }
+                ui.separator();
+                if ui.button("Cancel").clicked() {
+                    emit(MenuAction::DismissForcePrompt);
+                }
+            });
+        });
+}
+
 #[allow(deprecated)]
 fn draw_menu_bar<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>, emit: &mut F) {
     egui::TopBottomPanel::top("luna-menu")
@@ -1835,6 +1886,26 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>,
                         emit(MenuAction::OpenRom);
                         ui.close();
                     }
+                    // Force the cartridge mapper on the next load (issue #88) —
+                    // lets checksum-invalid homebrew/test ROMs that fail
+                    // auto-detection load. Auto is the default.
+                    ui.menu_button("Force mapper", |ui| {
+                        use luna_api::MapperKind;
+                        let options: [(&str, Option<MapperKind>); 5] = [
+                            ("Auto-detect", None),
+                            ("LoROM", Some(MapperKind::LoRom)),
+                            ("HiROM", Some(MapperKind::HiRom)),
+                            ("ExHiROM", Some(MapperKind::ExHiRom)),
+                            ("SA-1", Some(MapperKind::Sa1)),
+                        ];
+                        for (label, kind) in options {
+                            let selected = state.forced_mapper == kind;
+                            if ui.radio(selected, label).clicked() {
+                                emit(MenuAction::SetForcedMapper(kind));
+                                ui.close();
+                            }
+                        }
+                    });
                     ui.separator();
                     if ui.button("Quit").clicked() {
                         emit(MenuAction::Quit);
@@ -2105,6 +2176,19 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>,
                     ui.label(
                         egui::RichText::new(status).color(egui::Color32::from_rgb(120, 200, 120)),
                     );
+                }
+                // Forced-mapper indicator + load-failure hint (issue #88).
+                if let Some(kind) = state.forced_mapper {
+                    ui.add_space(16.0);
+                    ui.label(
+                        egui::RichText::new(format!("mapper: {kind:?}"))
+                            .color(egui::Color32::from_rgb(150, 150, 170))
+                            .italics(),
+                    );
+                }
+                if let Some(notice) = state.load_notice.as_deref() {
+                    ui.add_space(16.0);
+                    ui.colored_label(egui::Color32::from_rgb(240, 140, 60), notice);
                 }
             });
         });
