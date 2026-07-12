@@ -7,6 +7,12 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- **luna-gui: reload the ROM in place** (#93). *File ▸ Reload ROM* reboots the
+  current ROM from disk, and *File ▸ Auto-reload on file change* watches the
+  loaded ROM file and reboots when it changes — the watch-mode loop for an
+  external SDK build (rebuild the `.sfc`, the running game restarts, no
+  reopen). Off by default; the mtime poll is throttled and debounced one cycle
+  so a mid-rebuild write isn't read half-written.
 - **Interruptible run + `pause`** (#92): the MCP surface gains a `run` tool
   (no mandatory step budget — runs until a breakpoint, a `STOP`, or a
   `pause`) and a `pause` tool that stops an in-flight run. `pause` raises a
