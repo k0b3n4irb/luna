@@ -64,6 +64,8 @@ pub(crate) fn run_state(
     dsp1_rom: Option<&std::path::Path>,
     sym: Option<&std::path::Path>,
     load_state_path: Option<&std::path::Path>,
+    wdm_out: Option<&std::path::Path>,
+    print_fbhash: bool,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
     if let Err(e) = load_rom_into(&mut em, rom, force_mapper, dsp1_rom) {
@@ -198,6 +200,14 @@ pub(crate) fn run_state(
     if spc_trace_path.is_some() {
         if let Err(e) = em.enable_spc_trace(spc_trace_max) {
             eprintln!("error: enable_spc_trace: {e}");
+            return ExitCode::from(1);
+        }
+    }
+    // Arm the WDM ($42) capture before stepping so the ROM's SNES_ASSERT /
+    // breakpoint channel is recorded (issue #85 — parity with `luna run`).
+    if wdm_out.is_some() {
+        if let Err(e) = em.enable_wdm_log() {
+            eprintln!("error: enable_wdm_log: {e}");
             return ExitCode::from(1);
         }
     }
@@ -752,6 +762,37 @@ pub(crate) fn run_state(
         match std::fs::write(path, &data) {
             Ok(()) => eprintln!("wrote {} bytes of SRAM to {}", data.len(), path.display()),
             Err(e) => eprintln!("error: --srm-out {}: {e}", path.display()),
+        }
+    }
+    // WDM ($42) capture → file, and the cross-arch fbhash key (issue #85 —
+    // parity with `luna run`, so an input-driven test can also emit a visual
+    // baseline). Printed last so a harness can `grep '^fbhash='`.
+    if let Some(path) = wdm_out {
+        use std::fmt::Write as _;
+        let hits = em.take_wdm_log().unwrap_or_default();
+        let mut body = String::new();
+        for (pc, op) in &hits {
+            let _ = writeln!(body, "PC=${pc:06X} operand=${op:02X}");
+        }
+        match std::fs::write(path, &body) {
+            Ok(()) => eprintln!(
+                "WDM log written to {} ({} hit(s))",
+                path.display(),
+                hits.len()
+            ),
+            Err(e) => {
+                eprintln!("error: could not write WDM log: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    if print_fbhash {
+        match em.frame_hash(false) {
+            Ok(h) => println!("fbhash={h:016x}"),
+            Err(e) => {
+                eprintln!("error: could not hash frame: {e}");
+                return ExitCode::from(1);
+            }
         }
     }
     if assert_failed {
