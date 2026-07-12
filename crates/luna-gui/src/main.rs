@@ -126,6 +126,17 @@ struct LunaApp {
     /// load, written back on `unload_emu` (ROM change + app exit both route
     /// through it), so in-game saves persist across runs.
     srm_path: Option<PathBuf>,
+    /// Path of the currently-loaded ROM, kept so it can be reloaded in place
+    /// (issue #93 — File ▸ Reload ROM, and watch-mode auto-reload).
+    rom_path: Option<PathBuf>,
+    /// Auto-reload the ROM when its file changes on disk (issue #93) — the
+    /// watch-mode loop: an external rebuild rewrites the `.sfc`, luna-gui
+    /// reboots it. Off by default.
+    auto_reload: bool,
+    /// Throttle + debounce state for the auto-reload mtime poll.
+    last_reload_check: std::time::Instant,
+    loaded_rom_mtime: Option<std::time::SystemTime>,
+    pending_reload_mtime: Option<std::time::SystemTime>,
     /// Selected device on controller ports 1 and 2 (Settings → Devices). Fed
     /// to the core each frame; reflected in the menu radios.
     port_device: [luna_api::PortDevice; 2],
@@ -171,6 +182,16 @@ struct LunaApp {
     recording_input: bool,
     /// Transient input-recording feedback (saved-script path) in the menu bar.
     input_record_status: Option<String>,
+    /// Force a cartridge mapper on the next load instead of auto-detecting it
+    /// (issue #88). `None` = auto-detect (default); `Some(kind)` routes through
+    /// `Emulator::load_rom_forced` so checksum-invalid homebrew/test ROMs load.
+    forced_mapper: Option<luna_api::MapperKind>,
+    /// A ROM whose auto-detection just failed, awaiting a mapper choice
+    /// (issue #88). Drives the inline "couldn't detect — load as…?" prompt;
+    /// picking a mapper reloads this path immediately (no re-Open).
+    pending_force_path: Option<PathBuf>,
+    /// Transient load feedback (e.g. an auto-detect failure hint) in the menu bar.
+    load_notice: Option<String>,
     /// Debugger halt banner (issue #68): set when a breakpoint auto-paused
     /// the emu thread, cleared on resume/reset.
     break_status: Option<String>,
@@ -223,6 +244,11 @@ impl LunaApp {
             ui: None,
             rom_title: None,
             srm_path: None,
+            rom_path: None,
+            auto_reload: false,
+            last_reload_check: std::time::Instant::now(),
+            loaded_rom_mtime: None,
+            pending_reload_mtime: None,
             port_device: [luna_api::PortDevice::Pad; 2],
             cursor_snes: (-1, -1),
             prev_cursor_snes: (-1, -1),
@@ -241,6 +267,9 @@ impl LunaApp {
             save_state_status: None,
             recording_input: false,
             input_record_status: None,
+            forced_mapper: None,
+            pending_force_path: None,
+            load_notice: None,
             break_status: None,
             debug_windows: DebugWindows::new(),
             cpu_mem_addr: 0x7E_0000,
@@ -268,10 +297,33 @@ impl LunaApp {
         // unsupported coprocessor cart (it catches `from_cartridge`'s
         // panic), so one check covers both.
         let mut em = Emulator::new();
-        let info = match em.load_rom(path) {
-            Ok(info) => info,
+        // Auto-detect by default; force the mapper when the user picked one
+        // (issue #88) — lets checksum-invalid homebrew/test ROMs load.
+        let result = match self.forced_mapper {
+            Some(mapper) => em.load_rom_forced(path, mapper),
+            None => em.load_rom(path),
+        };
+        let info = match result {
+            Ok(info) => {
+                self.load_notice = None;
+                self.pending_force_path = None;
+                info
+            }
             Err(e) => {
                 eprintln!("luna-gui: cannot load ROM (bad file or unsupported coprocessor): {e}");
+                if self.forced_mapper.is_none() {
+                    // Auto-detection failed — recoverable. Remember the path so
+                    // the inline "load as…?" prompt can retry it in one click
+                    // (issue #88), and drop a menu-bar hint too.
+                    self.pending_force_path = Some(path.to_path_buf());
+                    self.load_notice =
+                        Some("\u{26A0} couldn't detect mapper — pick one to load".to_string());
+                } else {
+                    // A forced load failed (wrong mapper / bad file): don't loop
+                    // the prompt, just report it.
+                    self.pending_force_path = None;
+                    self.load_notice = Some("\u{26A0} ROM load failed (forced mapper)".to_string());
+                }
                 return;
             }
         };
@@ -292,6 +344,12 @@ impl LunaApp {
             }
         }
         self.srm_path = Some(srm_path);
+        // Remember the ROM path + its mtime so it can be reloaded in place
+        // (issue #93); reset the debounce so the just-loaded build isn't
+        // immediately re-triggered.
+        self.rom_path = Some(path.to_path_buf());
+        self.loaded_rom_mtime = rom_mtime(path);
+        self.pending_reload_mtime = None;
         // Seed the periodic-flush baseline with the just-loaded SRAM so the
         // first auto-flush only writes once the game actually modifies it.
         self.last_srm_written = em.sram();
@@ -606,6 +664,44 @@ impl LunaApp {
         }
     }
 
+    /// Reload the current ROM from disk in place (issue #93) — a fresh boot of
+    /// whatever is on disk now. Used by File ▸ Reload ROM and watch-mode auto
+    /// reload.
+    fn reload_rom(&mut self) {
+        if let Some(path) = self.rom_path.clone() {
+            eprintln!("luna-gui: reloading {}", path.display());
+            self.load_rom(&path);
+        }
+    }
+
+    /// Watch-mode auto-reload (issue #93): when the loaded ROM file changes on
+    /// disk, reboot it. Throttled to a few Hz and debounced by one poll cycle
+    /// so a mid-rebuild write isn't read half-written.
+    fn poll_auto_reload(&mut self) {
+        if !self.auto_reload || !self.rom_loaded {
+            return;
+        }
+        if self.last_reload_check.elapsed() < std::time::Duration::from_millis(300) {
+            return;
+        }
+        self.last_reload_check = std::time::Instant::now();
+        let Some(path) = self.rom_path.clone() else {
+            return;
+        };
+        let Some(cur) = rom_mtime(&path) else {
+            return;
+        };
+        if Some(cur) == self.loaded_rom_mtime {
+            self.pending_reload_mtime = None; // unchanged since load
+        } else if self.pending_reload_mtime == Some(cur) {
+            // Stable for one cycle → the write has settled; reboot.
+            self.pending_reload_mtime = None;
+            self.reload_rom();
+        } else {
+            self.pending_reload_mtime = Some(cur); // first sighting; wait
+        }
+    }
+
     fn reset(&mut self) {
         self.break_status = None;
         // A reset rewinds frame_count, so the API drops any in-progress
@@ -906,6 +1002,8 @@ impl ApplicationHandler for LunaApp {
         self.poll_break_hit(event_loop);
         // Feed the host pointer to a Mouse / Super Scope once per loop tick.
         self.push_devices();
+        // Watch-mode auto-reload: reboot the ROM if its file changed (#93).
+        self.poll_auto_reload();
         // Periodic battery-SRAM auto-flush (dirty-write only) so an in-game
         // save survives an unclean exit (crash / kill), not just a clean
         // close. The byte-compare in `persist_sram` makes idle frames free.
@@ -974,6 +1072,15 @@ impl LunaApp {
             save_state_status: self.save_state_status.clone(),
             recording_input: self.recording_input,
             input_record_status: self.input_record_status.clone(),
+            forced_mapper: self.forced_mapper,
+            load_notice: self.load_notice.clone(),
+            force_prompt_file: self.pending_force_path.as_deref().map(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("this ROM")
+                    .to_string()
+            }),
+            auto_reload: self.auto_reload,
             occupied_slots,
         };
         let win_size = window.inner_size();
@@ -1311,6 +1418,27 @@ impl LunaApp {
             MenuAction::LoadState(slot) => self.load_state_from_slot(slot),
             MenuAction::SetPortDevice(port, dev) => self.set_port_device(port, dev),
             MenuAction::ToggleInputRecording => self.toggle_input_recording(),
+            MenuAction::SetForcedMapper(mapper) => {
+                self.forced_mapper = mapper;
+                self.load_notice = None;
+                // Auto-retry (issue #88): if a load is waiting on a mapper
+                // choice and we now have one, reload it immediately — no
+                // re-Open. Auto-detect (`None`) can't rescue it, so skip.
+                if let (Some(_), Some(path)) = (mapper, self.pending_force_path.take()) {
+                    self.load_rom(&path);
+                }
+            }
+            MenuAction::DismissForcePrompt => {
+                self.pending_force_path = None;
+                self.load_notice = None;
+            }
+            MenuAction::ReloadRom => self.reload_rom(),
+            MenuAction::ToggleAutoReload => {
+                self.auto_reload = !self.auto_reload;
+                // Re-arm the debounce so toggling on doesn't fire on a stale mtime.
+                self.pending_reload_mtime = None;
+                self.last_reload_check = std::time::Instant::now();
+            }
         }
     }
 
@@ -1557,6 +1685,11 @@ fn screenshot_dir() -> PathBuf {
 }
 
 /// Directory for exported input recordings (issue #83): `~/.local/luna/recordings`.
+/// The loaded ROM file's modification time, for watch-mode auto-reload (#93).
+fn rom_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
 fn recordings_dir() -> PathBuf {
     std::env::var_os("HOME").map_or_else(
         || PathBuf::from("recordings"),
