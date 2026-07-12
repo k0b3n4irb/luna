@@ -35,6 +35,7 @@
 //! - `save_state` / `load_state { state_base64 }` → full-machine
 //!   save-state round-trip (versioned, ROM-hash-guarded).
 //! - `peek_cgram` → all 256 CGRAM BGR555 words.
+//! - `peek_oam` → raw 544-byte OAM (low + high table).
 //! - `render_tilemap { bg }` / `render_vram_tiles { bpp?, palette_row? }`
 //!   / `render_palette { cell? }` / `render_sprite_sheet` → debug PNGs,
 //!   base64-encoded.
@@ -503,6 +504,14 @@ pub struct SaveStateResult {
 pub struct CgramResult {
     /// All 256 CGRAM entries as raw BGR555 words (index 0 = backdrop).
     pub colors: Vec<u16>,
+}
+
+/// `peek_oam` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct OamResult {
+    /// Raw OAM: 512-byte low table followed by the 32-byte high table
+    /// (544 bytes total).
+    pub bytes: Vec<u8>,
 }
 
 /// Result for the debug-render tools (`render_tilemap`,
@@ -1103,6 +1112,16 @@ impl LunaServer {
         Ok(rmcp::Json(CgramResult { colors }))
     }
 
+    #[rmcp::tool(description = "Read raw OAM: 512-byte low table + 32-byte high table \
+                                (544 bytes total). Read-only.")]
+    async fn peek_oam(&self) -> Result<rmcp::Json<OamResult>, ErrorData> {
+        let bytes = {
+            let em = self.emulator.lock().await;
+            em.peek_oam().map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(OamResult { bytes }))
+    }
+
     #[rmcp::tool(
         description = "Render background layer `bg` (1..=4)'s full tilemap as a PNG \
                                 (base64) — the whole scrollable field, not just the viewport. \
@@ -1688,9 +1707,11 @@ mod tests {
             .is_err()
         );
 
-        // CGRAM + the four debug renders all return valid payloads.
+        // CGRAM + OAM + the four debug renders all return valid payloads.
         let cg = s.peek_cgram().await.unwrap();
         assert_eq!(cg.0.colors.len(), 256);
+        let oam = s.peek_oam().await.unwrap();
+        assert_eq!(oam.0.bytes.len(), 0x220);
         for png_b64 in [
             s.render_tilemap(Parameters(RenderTilemapParams { bg: 1 }))
                 .await

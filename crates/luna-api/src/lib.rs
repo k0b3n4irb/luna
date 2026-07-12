@@ -2523,6 +2523,14 @@ impl Emulator {
         Ok((0..256u16).map(|i| snes.ppu.cgram.color(i as u8)).collect())
     }
 
+    /// Raw OAM as 544 bytes (512-byte low table + 32-byte high table).
+    /// Cheap, read-only, side-effect-free — mirrors [`Self::peek_cgram`]
+    /// for the PPU/OAM viewer, avoiding the full `state()` snapshot.
+    pub fn peek_oam(&self) -> Result<Vec<u8>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        Ok((0..0x220u16).map(|i| snes.ppu.oam.peek(i)).collect())
+    }
+
     /// Render BG `bg_idx` (0..3)'s full tilemap to an RGBA image for the
     /// GUI Tilemap Viewer. Debug render — ignores scroll/priority/blank,
     /// shows raw palette colours, but honours per-tile flip + bases. In
@@ -3141,6 +3149,22 @@ mod tests {
         // $00, $80.
         let bytes = e.peek_memory(0x00, 0xFFFC, 2).unwrap();
         assert_eq!(bytes, vec![0x00, 0x80]);
+    }
+
+    #[test]
+    fn peek_oam_matches_state_oam_full() {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        let oam = e.peek_oam().unwrap();
+        assert_eq!(oam.len(), 0x220);
+        assert_eq!(oam, e.state().ppu.oam_full);
+    }
+
+    #[test]
+    fn peek_oam_without_rom_returns_no_rom_error() {
+        let e = Emulator::new();
+        let err = e.peek_oam().unwrap_err();
+        assert!(matches!(err, ApiError::NoRom));
     }
 
     #[test]
