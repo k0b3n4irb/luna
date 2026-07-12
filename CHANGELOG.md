@@ -6,46 +6,14 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
-### Added
-- **CLI flag parity** (#95, #85): `luna run` now accepts `--force-mapper`
-  (like `state`/`frames`), so a checksum-invalid reference ROM can reach
-  `--print-fbhash`; and `luna state` now accepts `--print-fbhash` and
-  `--wdm-out`, so an input-driven (`--input`) test can also emit the
-  cross-arch visual baseline and keep the WDM/`SNES_ASSERT` oracle. `run` and
-  `state` produce the same `fbhash` for the same displayed frame.
-- **luna-gui: reload the ROM in place** (#93). *File ▸ Reload ROM* reboots the
-  current ROM from disk, and *File ▸ Auto-reload on file change* watches the
-  loaded ROM file and reboots when it changes — the watch-mode loop for an
-  external SDK build (rebuild the `.sfc`, the running game restarts, no
-  reopen). Off by default; the mtime poll is throttled and debounced one cycle
-  so a mid-rebuild write isn't read half-written.
-- **Interruptible run + `pause`** (#92): the MCP surface gains a `run` tool
-  (no mandatory step budget — runs until a breakpoint, a `STOP`, or a
-  `pause`) and a `pause` tool that stops an in-flight run. `pause` raises a
-  shared flag *without* taking the emulator lock, so it lands while `run`
-  holds it (rmcp dispatches each request on its own task); the run then
-  returns with `interrupted: true`. Backed by
-  `Emulator::run_until_break_interruptible(max_steps, &AtomicBool)` and a new
-  `RunOutcome::interrupted`. Removes the old "every continue must be a bounded
-  `run_until_break`" constraint for MCP debugger clients.
+## [1.9.0] — 2026-07-12
 
-### Fixed
-- **Memory watchpoints now fold address mirrors** (#91). A watchpoint on a
-  WRAM or MMIO address used to fire only on the exact 24-bit bank, so a game
-  touching the same byte through a mirror (`$00:0500` vs `$7E:0500`, or
-  `$00:2100` vs FastROM `$80:2100`) slipped past silently. Watches set through
-  the API/MCP now match every mirror of the WRAM low 8 KB and the MMIO windows
-  by default; bank-exact matching is still available at the registry level.
+Debugger + toolchain polish from a joint review with Cooper (the OpenSNES
+IDE): a leaner MCP debug surface (raw OAM, capabilities, interruptible run +
+pause, mirror-folded watchpoints), a friendlier GUI (force-mapper, in-place
+reload), and CLI flag parity for the PeterLemon reference-port workflow.
 
 ### Added
-- **MCP `peek_oam`** (#89): read all 544 OAM bytes (512-byte low table +
-  32-byte high table) directly, instead of pulling the whole `state()`
-  snapshot for a sprite/OAM viewer. New `Emulator::peek_oam()` API + MCP tool,
-  mirroring `peek_cgram`.
-- **MCP `capabilities`** (#90): reports the luna release `version` and the
-  live tool catalogue, so a client can feature-detect. (The handshake's
-  `serverInfo.version` reports the rmcp library version, not luna's — this
-  tool gives the real one.)
 - **luna-gui: force the cartridge mapper** (#88). A ROM whose internal
   checksum is blank/invalid (much of the PeterLemon homebrew test corpus)
   used to load as a black screen, because layout auto-detection refuses to
@@ -56,6 +24,42 @@ All notable user-facing changes to luna. Releases are cut from `main`
   sticky default for opening a whole test corpus. Auto-detect stays the
   default. New API `Emulator::load_rom_forced(path, mapper)` (the path-based
   sibling of `load_rom_bytes_forced`) backs it.
+- **MCP `peek_oam`** (#89): read all 544 OAM bytes (512-byte low table +
+  32-byte high table) directly, instead of pulling the whole `state()`
+  snapshot for a sprite/OAM viewer. New `Emulator::peek_oam()` API + MCP tool,
+  mirroring `peek_cgram`.
+- **MCP `capabilities`** (#90): reports the luna release `version` and the
+  live tool catalogue, so a client can feature-detect. (The handshake's
+  `serverInfo.version` reports the rmcp library version, not luna's — this
+  tool gives the real one.)
+- **Interruptible run + `pause`** (#92): the MCP surface gains a `run` tool
+  (no mandatory step budget — runs until a breakpoint, a `STOP`, or a
+  `pause`) and a `pause` tool that stops an in-flight run. `pause` raises a
+  shared flag *without* taking the emulator lock, so it lands while `run`
+  holds it (rmcp dispatches each request on its own task); the run then
+  returns with `interrupted: true`. Backed by
+  `Emulator::run_until_break_interruptible(max_steps, &AtomicBool)` and a new
+  `RunOutcome::interrupted`.
+- **luna-gui: reload the ROM in place** (#93). *File ▸ Reload ROM* reboots the
+  current ROM from disk, and *File ▸ Auto-reload on file change* watches the
+  loaded ROM file and reboots when it changes — the watch-mode loop for an
+  external SDK build (rebuild the `.sfc`, the running game restarts, no
+  reopen). Off by default; the mtime poll is throttled and debounced one cycle
+  so a mid-rebuild write isn't read half-written.
+- **CLI flag parity** (#95, #85): `luna run` now accepts `--force-mapper`
+  (like `state`/`frames`), so a checksum-invalid reference ROM can reach
+  `--print-fbhash`; and `luna state` now accepts `--print-fbhash` and
+  `--wdm-out`, so an input-driven (`--input`) test can also emit the
+  cross-arch visual baseline and keep the WDM/`SNES_ASSERT` oracle. `run` and
+  `state` produce the same `fbhash` for the same displayed frame.
+
+### Fixed
+- **Memory watchpoints now fold address mirrors** (#91). A watchpoint on a
+  WRAM or MMIO address used to fire only on the exact 24-bit bank, so a game
+  touching the same byte through a mirror (`$00:0500` vs `$7E:0500`, or
+  `$00:2100` vs FastROM `$80:2100`) slipped past silently. Watches set through
+  the API/MCP now match every mirror of the WRAM low 8 KB and the MMIO windows
+  by default; bank-exact matching is still available at the registry level.
 
 ## [1.8.0] — 2026-07-07
 
