@@ -67,6 +67,10 @@ pub(crate) enum MenuAction {
     SetForcedMapper(Option<luna_api::MapperKind>),
     /// Dismiss the "couldn't detect the mapper" prompt without loading (issue #88).
     DismissForcePrompt,
+    /// Reload the current ROM from disk in place (issue #93).
+    ReloadRom,
+    /// Toggle watch-mode auto-reload on ROM-file change (issue #93).
+    ToggleAutoReload,
 }
 
 /// A navigation request a debug panel's toolbar emits this frame, applied
@@ -206,6 +210,8 @@ pub(crate) struct UiState<'a> {
     /// When `Some(filename)`, a ROM failed auto-detection and the inline
     /// "load as…?" mapper prompt is shown for it (issue #88).
     pub force_prompt_file: Option<String>,
+    /// Watch-mode auto-reload state (issue #93) — drives the File menu toggle.
+    pub auto_reload: bool,
     /// Which save-state slots (1..=9, indexed 0..9) have a file on disk for
     /// the current ROM. Drives the " ●" occupied marker in the slot menus.
     pub occupied_slots: [bool; 9],
@@ -1906,6 +1912,20 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>,
                             }
                         }
                     });
+                    ui.separator();
+                    // Reload the ROM in place + watch-mode auto-reload (issue #93).
+                    if ui.button("Reload ROM").clicked() {
+                        emit(MenuAction::ReloadRom);
+                        ui.close();
+                    }
+                    let mut auto_reload = state.auto_reload;
+                    if ui
+                        .checkbox(&mut auto_reload, "Auto-reload on file change")
+                        .clicked()
+                    {
+                        emit(MenuAction::ToggleAutoReload);
+                        ui.close();
+                    }
                     ui.separator();
                     if ui.button("Quit").clicked() {
                         emit(MenuAction::Quit);
