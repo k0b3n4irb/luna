@@ -64,6 +64,35 @@ pub struct BreakHit {
     pub value: Option<u8>,
 }
 
+/// Fold an address to a canonical form so a watchpoint matches accesses that
+/// reach the same physical location through an address mirror (issue #91):
+///
+/// - the **WRAM low 8 KB** — `$00-$3F:0000-1FFF` and `$80-$BF:0000-1FFF` all
+///   alias `$7E:0000-1FFF` — folds to `$7E:off`;
+/// - the **MMIO windows** — `$2100-$21FF`, `$4016-$4017`, `$4200-$43FF` appear
+///   in every system bank (`$00-$3F`/`$80-$BF`) — fold to bank `$00`.
+///
+/// Everything else (WRAM high `$7E:2000-` / `$7F`, cartridge space) passes
+/// through unchanged.
+const fn fold_mirror(addr: u32) -> u32 {
+    let bank = (addr >> 16) & 0xFF;
+    let off = addr & 0xFFFF;
+    let system = bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF);
+    if system {
+        if off < 0x2000 {
+            return 0x7E_0000 | off; // WRAM low → canonical $7E
+        }
+        if (off >= 0x2100 && off <= 0x21FF)
+            || (off >= 0x4200 && off <= 0x43FF)
+            || off == 0x4016
+            || off == 0x4017
+        {
+            return off; // MMIO → canonical bank $00
+        }
+    }
+    addr
+}
+
 /// A registered memory watchpoint (inclusive 24-bit address range).
 #[derive(Debug, Clone, Copy)]
 struct MemWatch {
@@ -72,6 +101,12 @@ struct MemWatch {
     hi: u32,
     on_read: bool,
     on_write: bool,
+    /// Also match accesses that reach this range through an address mirror
+    /// (issue #91). `clo`/`chi` are the folded endpoints, valid as a range
+    /// only when both fold into the same region (`clo <= chi`).
+    mirror: bool,
+    clo: u32,
+    chi: u32,
 }
 
 /// The registry. Installed on [`crate::Snes`] as an `Option<Box<_>>` so
@@ -107,16 +142,31 @@ impl BreakpointSet {
     }
 
     /// Register a memory watchpoint over the inclusive 24-bit bus range
-    /// `lo..=hi`, firing on reads and/or writes. Returns its id.
-    pub fn add_mem(&mut self, lo: u32, hi: u32, on_read: bool, on_write: bool) -> u32 {
+    /// `lo..=hi`, firing on reads and/or writes. Returns its id. With
+    /// `mirror`, also matches accesses that reach the range through a WRAM /
+    /// MMIO address mirror (issue #91) — e.g. a watch on `$7E:0500` fires on
+    /// `$00:0500`, and a watch on `$00:2100` fires on `$80:2100`.
+    pub fn add_mem(
+        &mut self,
+        lo: u32,
+        hi: u32,
+        on_read: bool,
+        on_write: bool,
+        mirror: bool,
+    ) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
+        let lo = lo & 0x00FF_FFFF;
+        let hi = hi & 0x00FF_FFFF;
         self.mem.push(MemWatch {
             id,
-            lo: lo & 0x00FF_FFFF,
-            hi: hi & 0x00FF_FFFF,
+            lo,
+            hi,
             on_read,
             on_write,
+            mirror,
+            clo: fold_mirror(lo),
+            chi: fold_mirror(hi),
         });
         id
     }
@@ -198,11 +248,13 @@ impl BreakpointSet {
             // Interrupt-delivery markers are trace annotations, not accesses.
             MemEventKind::NmiSignal | MemEventKind::IrqSignal => return,
         };
-        if let Some(w) = self
-            .mem
-            .iter()
-            .find(|w| (w.lo..=w.hi).contains(&addr) && if is_read { w.on_read } else { w.on_write })
-        {
+        let faddr = fold_mirror(addr);
+        if let Some(w) = self.mem.iter().find(|w| {
+            let kind_ok = if is_read { w.on_read } else { w.on_write };
+            kind_ok
+                && ((w.lo..=w.hi).contains(&addr)
+                    || (w.mirror && w.clo <= w.chi && (w.clo..=w.chi).contains(&faddr)))
+        }) {
             self.pending_hit = Some(BreakHit {
                 id: w.id,
                 kind: break_kind,
@@ -236,7 +288,7 @@ mod tests {
     #[test]
     fn mem_watchpoint_matches_range_and_kind() {
         let mut bp = BreakpointSet::new();
-        let id = bp.add_mem(0x7E_1000, 0x7E_10FF, false, true); // write-only
+        let id = bp.add_mem(0x7E_1000, 0x7E_10FF, false, true, false); // write-only
         // Read inside the range: no hit (write-only watch).
         bp.check_mem(0x7E_1080, MemEventKind::Read, 0xAA, 0x00_8000);
         assert!(bp.pending_hit.is_none());
@@ -256,7 +308,7 @@ mod tests {
     #[test]
     fn first_hit_of_an_instruction_wins() {
         let mut bp = BreakpointSet::new();
-        bp.add_mem(0x7E_0000, 0x7E_FFFF, true, true);
+        bp.add_mem(0x7E_0000, 0x7E_FFFF, true, true, false);
         bp.check_mem(0x7E_0001, MemEventKind::Write, 1, 0);
         bp.check_mem(0x7E_0002, MemEventKind::Write, 2, 0);
         assert_eq!(bp.take_pending().unwrap().addr, Some(0x7E_0001));
@@ -265,7 +317,7 @@ mod tests {
     #[test]
     fn interrupt_markers_never_trip_watchpoints() {
         let mut bp = BreakpointSet::new();
-        bp.add_mem(0x00_0000, 0xFF_FFFF, true, true);
+        bp.add_mem(0x00_0000, 0xFF_FFFF, true, true, false);
         bp.check_mem(0x00_FFEA, MemEventKind::NmiSignal, 0, 0);
         bp.check_mem(0x00_FFEE, MemEventKind::IrqSignal, 0, 0);
         assert!(bp.pending_hit.is_none());
@@ -275,7 +327,7 @@ mod tests {
     fn remove_clear_list_lifecycle() {
         let mut bp = BreakpointSet::new();
         let a = bp.add_exec(0x00_8000);
-        let b = bp.add_mem(0x7E_0000, 0x7E_00FF, true, false);
+        let b = bp.add_mem(0x7E_0000, 0x7E_00FF, true, false, false);
         assert_eq!(bp.list().len(), 2);
         assert!(bp.remove(a));
         assert!(!bp.remove(a), "double-remove is false");
@@ -285,5 +337,52 @@ mod tests {
         assert!(c > b, "ids are never reused");
         bp.clear();
         assert!(bp.is_empty());
+    }
+
+    #[test]
+    fn mirror_watch_folds_wram_low_page() {
+        // Watch a WRAM-low variable via $7E; a mirror access through $00/$80
+        // must fire, but $7F (different WRAM half) and WRAM-high must not.
+        let mut bp = BreakpointSet::new();
+        bp.add_mem(0x7E_0500, 0x7E_0500, false, true, true);
+        bp.check_mem(0x00_0500, MemEventKind::Write, 0x11, 0x00_8000);
+        assert_eq!(
+            bp.take_pending().unwrap().addr,
+            Some(0x00_0500),
+            "$00 mirror"
+        );
+        bp.check_mem(0x80_0500, MemEventKind::Write, 0x22, 0x00_8000);
+        assert_eq!(
+            bp.take_pending().unwrap().addr,
+            Some(0x80_0500),
+            "$80 mirror"
+        );
+        // $7F:0500 is a different physical byte (WRAM high half) — no hit.
+        bp.check_mem(0x7F_0500, MemEventKind::Write, 0x33, 0x00_8000);
+        assert!(bp.pending_hit.is_none(), "$7F is not a mirror of $7E-low");
+    }
+
+    #[test]
+    fn mirror_watch_folds_mmio_across_banks() {
+        // Watch $00:2100 (INIDISP); a FastROM access via $80:2100 must fire.
+        let mut bp = BreakpointSet::new();
+        bp.add_mem(0x00_2100, 0x00_2100, false, true, true);
+        bp.check_mem(0x80_2100, MemEventKind::Write, 0x8F, 0x80_8000);
+        assert_eq!(bp.take_pending().unwrap().addr, Some(0x80_2100));
+    }
+
+    #[test]
+    fn mirror_off_stays_bank_exact() {
+        // Without mirroring, a $7E watch does NOT fire on the $00 mirror.
+        let mut bp = BreakpointSet::new();
+        bp.add_mem(0x7E_0500, 0x7E_0500, false, true, false);
+        bp.check_mem(0x00_0500, MemEventKind::Write, 0x11, 0x00_8000);
+        assert!(bp.pending_hit.is_none(), "bank-exact: no mirror match");
+        bp.check_mem(0x7E_0500, MemEventKind::Write, 0x11, 0x00_8000);
+        assert_eq!(
+            bp.take_pending().unwrap().addr,
+            Some(0x7E_0500),
+            "exact still hits"
+        );
     }
 }

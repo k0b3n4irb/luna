@@ -1907,7 +1907,10 @@ impl Emulator {
                 "watchpoint must fire on reads, writes, or both".into(),
             ));
         }
-        Ok(self.bp_registry()?.add_mem(lo, hi, on_read, on_write))
+        // Mirror-folded by default (issue #91): a watch on a WRAM/MMIO address
+        // also fires on accesses through its bank mirrors, so the caller need
+        // not know the exact executing bank (LoROM $00:2100 vs FastROM $80:2100).
+        Ok(self.bp_registry()?.add_mem(lo, hi, on_read, on_write, true))
     }
 
     /// Remove a breakpoint by id. Returns `true` if it existed.
