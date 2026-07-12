@@ -6,6 +6,18 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Added
+- **luna-gui: force the cartridge mapper** (#88). A ROM whose internal
+  checksum is blank/invalid (much of the PeterLemon homebrew test corpus)
+  used to load as a black screen, because layout auto-detection refuses to
+  guess LoROM vs HiROM without a valid checksum and the GUI had no override.
+  Now, on a detection failure an inline **"couldn't detect the mapper — load
+  as LoROM / HiROM / ExHiROM / SA-1?"** prompt appears and loads the ROM in
+  one click (no re-open); a **File ▸ Force mapper** submenu also pre-sets a
+  sticky default for opening a whole test corpus. Auto-detect stays the
+  default. New API `Emulator::load_rom_forced(path, mapper)` (the path-based
+  sibling of `load_rom_bytes_forced`) backs it.
+
 ## [1.8.0] — 2026-07-07
 
 Input recording — the record half of luna's input replay, requested and

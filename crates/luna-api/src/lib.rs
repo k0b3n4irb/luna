@@ -809,6 +809,31 @@ impl Emulator {
         self.load_cartridge(cart)
     }
 
+    /// Load a ROM **file** with a forced mapper, bypassing header
+    /// auto-detection. The path-based sibling of [`Self::load_rom_bytes_forced`]
+    /// — reads the file, strips a copier header, searches the firmware folder
+    /// like [`Self::load_rom`], then applies `mapper`. Lets a front-end open a
+    /// checksum-invalid homebrew/test ROM (`PeterLemon` corpus) that
+    /// auto-detection would reject (issue #88).
+    pub fn load_rom_forced(
+        &mut self,
+        path: &Path,
+        mapper: MapperKind,
+    ) -> Result<RomInfo, ApiError> {
+        let bytes = std::fs::read(path)?;
+        let mut cart = Cartridge::from_bytes_forced(bytes, mapper)?;
+        if cart.needs_coprocessor_firmware() {
+            if let (Some(name), Some(dir)) =
+                (cart.required_firmware_filename(), Self::firmware_dir())
+            {
+                if let Ok(fw) = std::fs::read(dir.join(name)) {
+                    cart.set_coprocessor_firmware(fw);
+                }
+            }
+        }
+        self.load_cartridge(cart)
+    }
+
     fn load_cartridge(&mut self, cart: Cartridge) -> Result<RomInfo, ApiError> {
         // Capture a stable hash of the ROM bytes before the cartridge is
         // consumed by `try_from_cartridge`; the save-state layer uses it to
@@ -3269,5 +3294,25 @@ mod tests {
         e.reset().unwrap();
         assert!(!e.is_capturing_input(), "reset drops the capture");
         assert!(e.take_input_capture().is_empty());
+    }
+
+    #[test]
+    fn load_rom_forced_from_path_bypasses_autodetect() {
+        // Write a ROM to disk and load it with a forced mapper (issue #88) —
+        // the path the GUI's Force-mapper menu uses. Proves read + forced
+        // parse + core build end-to-end.
+        let dir = std::env::temp_dir();
+        let path = dir.join("luna_test_forced_load.sfc");
+        std::fs::write(&path, demo_lorom()).unwrap();
+        let mut e = Emulator::new();
+        let info = e
+            .load_rom_forced(&path, MapperKind::LoRom)
+            .expect("forced LoROM load");
+        let _ = std::fs::remove_file(&path);
+        assert!(e.has_rom());
+        assert_eq!(info.mapper, "LoRom");
+        // The forced-loaded core actually runs.
+        e.step_until_frame(1_000_000).unwrap();
+        assert!(e.frame_count().unwrap() >= 1);
     }
 }
