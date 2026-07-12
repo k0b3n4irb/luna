@@ -103,11 +103,15 @@ enum Command {
     },
     /// Serve the Luna MCP server on stdio.
     ///
-    /// Once started, Luna exposes a tool catalogue (`load_rom`, reset,
-    /// step, state, screenshot, `drain_audio`, `peek_memory`, `peek_aram`)
-    /// to any connected MCP client (Claude Desktop, Claude Code,
-    /// custom clients). The process stays alive until the client
-    /// closes the stream.
+    /// Once started, Luna exposes a growing tool catalogue (`load_rom`,
+    /// reset, step, state, screenshot, `drain_audio`, `peek_memory`,
+    /// `peek_aram`, and more) to any connected MCP client (Claude
+    /// Desktop, Claude Code, custom clients). The process stays alive
+    /// until the client closes the stream.
+    ///
+    /// This list is illustrative, not authoritative — it lags the
+    /// registry as tools are added. Call the `capabilities` MCP tool
+    /// (or `tools/list`) once connected for the exact, current set.
     Mcp,
     /// Run the emulator through `luna-api` and emit a JSON state
     /// snapshot — the same data the MCP `state` tool returns.

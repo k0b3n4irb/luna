@@ -4,6 +4,8 @@
 //! Designed so Claude (or any MCP-aware client) can drive the
 //! emulator end-to-end:
 //!
+//! - `capabilities` → this server's version + exact registered tool
+//!   names, for client feature-detection (works without a loaded ROM).
 //! - `load_rom { path }` → loads a cartridge, returns its metadata.
 //! - `reset` → power-on reset.
 //! - `step { count }` → advance the CPU N instructions.
@@ -498,6 +500,19 @@ pub struct SaveStateResult {
     pub bytes: usize,
 }
 
+/// `capabilities` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CapabilitiesResult {
+    /// This server's own crate version (`luna-mcp-server`'s Cargo
+    /// version, not `rmcp`'s — the MCP handshake's `serverInfo.version`
+    /// actually reports the framework's version, not ours, which is
+    /// why this exists).
+    pub version: String,
+    /// Names of every MCP tool currently registered, straight from the
+    /// tool router — always exact, never stale like `luna mcp --help`.
+    pub tools: Vec<String>,
+}
+
 /// `peek_cgram` result.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CgramResult {
@@ -689,6 +704,24 @@ impl LunaServer {
             emulator: Arc::new(Mutex::new(Emulator::new())),
             tool_router: Self::tool_router(),
         }
+    }
+
+    #[rmcp::tool(
+        description = "Return this server's version and the exact list of currently \
+                                registered MCP tool names, for client feature-detection. \
+                                Read-only, works before any ROM is loaded."
+    )]
+    async fn capabilities(&self) -> Result<rmcp::Json<CapabilitiesResult>, ErrorData> {
+        let tools = self
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        Ok(rmcp::Json(CapabilitiesResult {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            tools,
+        }))
     }
 
     #[rmcp::tool(
@@ -1565,6 +1598,19 @@ mod tests {
         let result = s.state().await;
         // No ROM loaded → the embedded RomInfo is None.
         assert!(result.0.state.rom.is_none());
+    }
+
+    /// `capabilities` is a pure introspection tool — it must work with
+    /// no ROM loaded, report this crate's own version (not `rmcp`'s),
+    /// and list itself among the registered tools.
+    #[tokio::test]
+    async fn server_capabilities_works_without_rom() {
+        let s = LunaServer::new();
+        let result = s.capabilities().await.unwrap();
+        assert_eq!(result.0.version, env!("CARGO_PKG_VERSION"));
+        assert!(result.0.tools.contains(&"capabilities".to_string()));
+        assert!(result.0.tools.contains(&"load_rom".to_string()));
+        assert!(result.0.tools.len() > 20);
     }
 
     /// `step` without a ROM returns a `NoRom` `ApiError` mapped to an
