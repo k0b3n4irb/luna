@@ -6,6 +6,14 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Fixed
+- **Memory watchpoints now fold address mirrors** (#91). A watchpoint on a
+  WRAM or MMIO address used to fire only on the exact 24-bit bank, so a game
+  touching the same byte through a mirror (`$00:0500` vs `$7E:0500`, or
+  `$00:2100` vs FastROM `$80:2100`) slipped past silently. Watches set through
+  the API/MCP now match every mirror of the WRAM low 8 KB and the MMIO windows
+  by default; bank-exact matching is still available at the registry level.
+
 ### Added
 - **MCP `peek_oam`** (#89): read all 544 OAM bytes (512-byte low table +
   32-byte high table) directly, instead of pulling the whole `state()`
