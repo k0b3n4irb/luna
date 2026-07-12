@@ -251,6 +251,10 @@ pub struct RunOutcome {
     pub steps: u64,
     /// The breakpoint hit that stopped the run, if any.
     pub hit: Option<BreakHit>,
+    /// `true` if an external interrupt (a `pause`) ended the run before a
+    /// breakpoint or the step budget (issue #92). Distinguishes a paused run
+    /// (`hit == None && interrupted`) from a budget-exhausted one.
+    pub interrupted: bool,
 }
 
 /// One recorded joypad transition captured during play (issue #83).
@@ -748,6 +752,14 @@ impl Emulator {
         self.snes.is_some()
     }
 
+    /// The loaded cartridge's parsed metadata, or `None` before any load.
+    /// Lets a caller that loaded through a helper (e.g. the CLI's shared
+    /// `load_rom_into`) recover the [`RomInfo`] for a header print-out.
+    #[must_use]
+    pub const fn rom_info(&self) -> Option<&RomInfo> {
+        self.rom_info.as_ref()
+    }
+
     /// Load a ROM file. On success, the emulator is ready for
     /// stepping. Returns the parsed cartridge metadata for callers
     /// that want to surface it (window title, MCP `load_rom` tool).
@@ -806,6 +818,31 @@ impl Emulator {
         mapper: luna_core::MapperKind,
     ) -> Result<RomInfo, ApiError> {
         let cart = Cartridge::from_bytes_forced(bytes, mapper)?;
+        self.load_cartridge(cart)
+    }
+
+    /// Load a ROM **file** with a forced mapper, bypassing header
+    /// auto-detection. The path-based sibling of [`Self::load_rom_bytes_forced`]
+    /// — reads the file, strips a copier header, searches the firmware folder
+    /// like [`Self::load_rom`], then applies `mapper`. Lets a front-end open a
+    /// checksum-invalid homebrew/test ROM (`PeterLemon` corpus) that
+    /// auto-detection would reject (issue #88).
+    pub fn load_rom_forced(
+        &mut self,
+        path: &Path,
+        mapper: MapperKind,
+    ) -> Result<RomInfo, ApiError> {
+        let bytes = std::fs::read(path)?;
+        let mut cart = Cartridge::from_bytes_forced(bytes, mapper)?;
+        if cart.needs_coprocessor_firmware() {
+            if let (Some(name), Some(dir)) =
+                (cart.required_firmware_filename(), Self::firmware_dir())
+            {
+                if let Ok(fw) = std::fs::read(dir.join(name)) {
+                    cart.set_coprocessor_firmware(fw);
+                }
+            }
+        }
         self.load_cartridge(cart)
     }
 
@@ -1882,7 +1919,10 @@ impl Emulator {
                 "watchpoint must fire on reads, writes, or both".into(),
             ));
         }
-        Ok(self.bp_registry()?.add_mem(lo, hi, on_read, on_write))
+        // Mirror-folded by default (issue #91): a watch on a WRAM/MMIO address
+        // also fires on accesses through its bank mirrors, so the caller need
+        // not know the exact executing bank (LoROM $00:2100 vs FastROM $80:2100).
+        Ok(self.bp_registry()?.add_mem(lo, hi, on_read, on_write, true))
     }
 
     /// Remove a breakpoint by id. Returns `true` if it existed.
@@ -1925,6 +1965,23 @@ impl Emulator {
     /// core panic is caught and surfaced as [`ApiError::Panic`] (so a GUI
     /// driving loop keeps its emu-dead latch semantics).
     pub fn run_until_break(&mut self, max_steps: u64) -> Result<RunOutcome, ApiError> {
+        self.run_until_break_interruptible(max_steps, &std::sync::atomic::AtomicBool::new(false))
+    }
+
+    /// Like [`Self::run_until_break`], but an external `interrupt` flag ends the
+    /// run early (issue #92): a front-end holds the flag *outside* the emulator
+    /// lock and raises it (a `pause`) to stop an in-progress run without racing
+    /// for the lock. Pass a large `max_steps` for an effectively unbounded run
+    /// that only a breakpoint, a `STOP`, or `interrupt` stops. The returned
+    /// [`RunOutcome`] has `interrupted == true` when the flag ended it.
+    pub fn run_until_break_interruptible(
+        &mut self,
+        max_steps: u64,
+        interrupt: &std::sync::atomic::AtomicBool,
+    ) -> Result<RunOutcome, ApiError> {
+        use std::sync::atomic::Ordering;
+        // Clear any stale raise so this run isn't stopped by a previous pause.
+        interrupt.store(false, Ordering::Relaxed);
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         if let Some(bp) = snes.breakpoints.as_mut() {
             bp.take_pending(); // discard stale
@@ -1937,12 +1994,23 @@ impl Emulator {
                 if snes.cpu.stopped {
                     break;
                 }
+                // Check the pause flag periodically (every 4096 instructions) —
+                // cheap enough to be invisible on the run, responsive enough
+                // that a pause returns within microseconds.
+                if i & 0xFFF == 0 && interrupt.load(Ordering::Relaxed) {
+                    return RunOutcome {
+                        steps: i,
+                        hit: None,
+                        interrupted: true,
+                    };
+                }
                 let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
                 if i > 0 {
                     if let Some(hit) = snes.breakpoints.as_ref().and_then(|b| b.check_exec(cur)) {
                         return RunOutcome {
                             steps: i,
                             hit: Some(hit),
+                            interrupted: false,
                         };
                     }
                 }
@@ -1952,12 +2020,14 @@ impl Emulator {
                     return RunOutcome {
                         steps: i + 1,
                         hit: Some(hit),
+                        interrupted: false,
                     };
                 }
             }
             RunOutcome {
                 steps: executed,
                 hit: None,
+                interrupted: false,
             }
         }));
         std::panic::set_hook(prev_hook);
@@ -2521,6 +2591,15 @@ impl Emulator {
     pub fn peek_cgram(&self) -> Result<Vec<u16>, ApiError> {
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
         Ok((0..256u16).map(|i| snes.ppu.cgram.color(i as u8)).collect())
+    }
+
+    /// All 544 OAM bytes (512-byte low table + 32-byte high table) as raw
+    /// bytes (issue #89). Cheap, read-only — the same bytes `state().ppu.
+    /// oam_full` exposes, without the rest of the `state()` snapshot. The
+    /// per-frame source for a sprite/OAM viewer.
+    pub fn peek_oam(&self) -> Result<Vec<u8>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        Ok((0..0x220u16).map(|i| snes.ppu.oam.peek(i)).collect())
     }
 
     /// Render BG `bg_idx` (0..3)'s full tilemap to an RGBA image for the
@@ -3269,5 +3348,60 @@ mod tests {
         e.reset().unwrap();
         assert!(!e.is_capturing_input(), "reset drops the capture");
         assert!(e.take_input_capture().is_empty());
+    }
+
+    #[test]
+    fn load_rom_forced_from_path_bypasses_autodetect() {
+        // Write a ROM to disk and load it with a forced mapper (issue #88) —
+        // the path the GUI's Force-mapper menu uses. Proves read + forced
+        // parse + core build end-to-end.
+        let dir = std::env::temp_dir();
+        let path = dir.join("luna_test_forced_load.sfc");
+        std::fs::write(&path, demo_lorom()).unwrap();
+        let mut e = Emulator::new();
+        let info = e
+            .load_rom_forced(&path, MapperKind::LoRom)
+            .expect("forced LoROM load");
+        let _ = std::fs::remove_file(&path);
+        assert!(e.has_rom());
+        assert_eq!(info.mapper, "LoRom");
+        // The forced-loaded core actually runs.
+        e.step_until_frame(1_000_000).unwrap();
+        assert!(e.frame_count().unwrap() >= 1);
+    }
+
+    #[test]
+    fn run_until_break_interruptible_stops_on_pause_flag() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        let flag = AtomicBool::new(false);
+        // The run holds `e` on this thread; a scoped thread raises the pause
+        // flag mid-run (the real front-end model: pause off the emulator lock).
+        let out = std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                flag.store(true, Ordering::Relaxed);
+            });
+            e.run_until_break_interruptible(1_000_000_000, &flag)
+                .unwrap()
+        });
+        assert!(out.interrupted, "the pause flag ended the run");
+        assert!(out.hit.is_none(), "paused, not a breakpoint hit");
+        assert!(
+            out.steps > 0 && out.steps < 1_000_000_000,
+            "stopped mid-run"
+        );
+    }
+
+    #[test]
+    fn peek_oam_matches_state_oam_full() {
+        let mut e = Emulator::new();
+        assert!(matches!(e.peek_oam(), Err(ApiError::NoRom)));
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        e.step_until_frame(1_000_000).unwrap();
+        let oam = e.peek_oam().unwrap();
+        assert_eq!(oam.len(), 0x220, "544 OAM bytes");
+        assert_eq!(oam, e.state().ppu.oam_full, "peek_oam == state oam_full");
     }
 }

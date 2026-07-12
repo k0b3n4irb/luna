@@ -50,6 +50,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use base64::Engine;
 use luna_api::{
@@ -74,6 +75,11 @@ use tokio::sync::Mutex;
 #[derive(Clone)]
 pub struct LunaServer {
     emulator: Arc<Mutex<Emulator>>,
+    /// Pause flag for an in-progress `run` (issue #92). Held *outside* the
+    /// emulator mutex so the `pause` tool can raise it without waiting for the
+    /// running tool to release the lock (rmcp dispatches each request on its
+    /// own task, so `pause` runs concurrently with `run`).
+    interrupt: Arc<AtomicBool>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -357,6 +363,14 @@ pub struct RunUntilBreakParams {
     pub max_steps: u64,
 }
 
+/// `run` parameters (issue #92).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct RunParams {
+    /// Optional safety cap on instructions; omit for an effectively unbounded
+    /// run that only a breakpoint, a `STOP`, or a `pause` stops.
+    pub max_steps: Option<u64>,
+}
+
 /// `load_symbols` parameters.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct LoadSymbolsParams {
@@ -505,6 +519,23 @@ pub struct CgramResult {
     pub colors: Vec<u16>,
 }
 
+/// `peek_oam` result (issue #89).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct OamResult {
+    /// All 544 OAM bytes: the 512-byte low table + the 32-byte high table.
+    pub bytes: Vec<u8>,
+}
+
+/// `capabilities` result (issue #90).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CapabilitiesResult {
+    /// luna release version, e.g. `"1.8.0"`.
+    pub version: String,
+    /// Every registered tool name — the live catalogue, a stable contract for
+    /// client feature-detection (no need to guess from a stale `--help`).
+    pub tools: Vec<String>,
+}
+
 /// Result for the debug-render tools (`render_tilemap`,
 /// `render_vram_tiles`, `render_palette`, `render_sprite_sheet`).
 /// Dimensions vary per render — decode the PNG header if needed.
@@ -648,6 +679,9 @@ pub struct RunUntilBreakResult {
     pub addr: Option<u32>,
     /// Mem hits: the byte transferred.
     pub value: Option<u8>,
+    /// `true` if a `pause` ended the run before a breakpoint or the step
+    /// budget (issue #92): `hit == false && interrupted == true`.
+    pub interrupted: bool,
 }
 
 /// `load_symbols` result.
@@ -687,6 +721,7 @@ impl LunaServer {
     pub fn new() -> Self {
         Self {
             emulator: Arc::new(Mutex::new(Emulator::new())),
+            interrupt: Arc::new(AtomicBool::new(false)),
             tool_router: Self::tool_router(),
         }
     }
@@ -1104,6 +1139,38 @@ impl LunaServer {
     }
 
     #[rmcp::tool(
+        description = "Read all 544 OAM bytes (512-byte low table + 32-byte high table) \
+                                as raw bytes — sprite attributes for an OAM/sprite viewer. \
+                                Read-only."
+    )]
+    async fn peek_oam(&self) -> Result<rmcp::Json<OamResult>, ErrorData> {
+        let bytes = {
+            let em = self.emulator.lock().await;
+            em.peek_oam().map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(OamResult { bytes }))
+    }
+
+    #[rmcp::tool(
+        description = "Report this luna MCP server's version and the live tool catalogue, \
+                                so a client can feature-detect instead of guessing from a stale \
+                                --help. `version` is the luna release; `tools` is every \
+                                registered tool name."
+    )]
+    async fn capabilities(&self) -> rmcp::Json<CapabilitiesResult> {
+        let tools = self
+            .tool_router
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        rmcp::Json(CapabilitiesResult {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            tools,
+        })
+    }
+
+    #[rmcp::tool(
         description = "Render background layer `bg` (1..=4)'s full tilemap as a PNG \
                                 (base64) — the whole scrollable field, not just the viewport. \
                                 Mode 7 renders the 128×128 field on BG1."
@@ -1445,33 +1512,41 @@ impl LunaServer {
             em.run_until_break(params.max_steps)
                 .map_err(|e| api_err_to_mcp(&e))?
         };
-        Ok(rmcp::Json(match out.hit {
-            Some(hit) => RunUntilBreakResult {
-                steps: out.steps,
-                hit: true,
-                bp_id: Some(hit.id),
-                kind: Some(
-                    match hit.kind {
-                        luna_api::BreakKind::Exec => "exec",
-                        luna_api::BreakKind::Read => "read",
-                        luna_api::BreakKind::Write => "write",
-                    }
-                    .into(),
-                ),
-                pc: Some(hit.pc),
-                addr: hit.addr,
-                value: hit.value,
-            },
-            None => RunUntilBreakResult {
-                steps: out.steps,
-                hit: false,
-                bp_id: None,
-                kind: None,
-                pc: None,
-                addr: None,
-                value: None,
-            },
-        }))
+        Ok(rmcp::Json(outcome_to_result(&out)))
+    }
+
+    #[rmcp::tool(
+        description = "Run at full emulation speed until a breakpoint fires, the CPU \
+                                STOPs, or a `pause` is issued (issue #92) — an interruptible run \
+                                with no mandatory step budget. `max_steps` is an optional safety \
+                                cap (default effectively unbounded). Returns the same fields as \
+                                run_until_break plus `interrupted` (true when a pause ended it). \
+                                Because rmcp handles each request on its own task, a `pause` \
+                                call lands while this run is in flight."
+    )]
+    async fn run(
+        &self,
+        Parameters(params): Parameters<RunParams>,
+    ) -> Result<rmcp::Json<RunUntilBreakResult>, ErrorData> {
+        let max_steps = params.max_steps.unwrap_or(u64::MAX);
+        let out = {
+            let mut em = self.emulator.lock().await;
+            em.run_until_break_interruptible(max_steps, &self.interrupt)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(outcome_to_result(&out)))
+    }
+
+    #[rmcp::tool(
+        description = "Ask an in-progress `run` to stop as soon as possible (issue #92). \
+                                Raises a shared pause flag without taking the emulator lock, so \
+                                it returns immediately even while `run` holds the emulator; the \
+                                run then returns with `interrupted: true`. A no-op if nothing is \
+                                running."
+    )]
+    async fn pause(&self) -> rmcp::Json<EmptyOk> {
+        self.interrupt.store(true, Ordering::Relaxed);
+        rmcp::Json(EmptyOk { ok: true })
     }
 
     #[rmcp::tool(
@@ -1530,6 +1605,40 @@ impl ServerHandler for LunaServer {}
 /// Map [`luna_api::ApiError`] onto an MCP `internal_error` payload.
 fn api_err_to_mcp(e: &ApiError) -> ErrorData {
     ErrorData::internal_error(e.to_string(), None)
+}
+
+/// Flatten a [`luna_api::RunOutcome`] into the wire result shared by
+/// `run_until_break` and `run` (issue #92).
+fn outcome_to_result(out: &luna_api::RunOutcome) -> RunUntilBreakResult {
+    match &out.hit {
+        Some(hit) => RunUntilBreakResult {
+            steps: out.steps,
+            hit: true,
+            bp_id: Some(hit.id),
+            kind: Some(
+                match hit.kind {
+                    luna_api::BreakKind::Exec => "exec",
+                    luna_api::BreakKind::Read => "read",
+                    luna_api::BreakKind::Write => "write",
+                }
+                .into(),
+            ),
+            pc: Some(hit.pc),
+            addr: hit.addr,
+            value: hit.value,
+            interrupted: out.interrupted,
+        },
+        None => RunUntilBreakResult {
+            steps: out.steps,
+            hit: false,
+            bp_id: None,
+            kind: None,
+            pc: None,
+            addr: None,
+            value: None,
+            interrupted: out.interrupted,
+        },
+    }
 }
 
 /// Run the Luna MCP server on stdio until the client disconnects.
