@@ -52,7 +52,12 @@ on one screen"):
 3. SA-1 / Super FX scheduler grain — batched stepping vs ares' cothreads;
    engine outputs are exact, only stall placement differs.
 4. P4 interrupt micro-timing (TIMEUP hold window, last-dot guard, htime=0
-   delay) — the Mesen differential proved the observable NMI/IRQ cadence
-   already matches.
+   delay). The Mesen differential shows the NMI/IRQ *cadence* matches, but
+   that is not the same as the *registers* being right at every H-clock: the
+   RDNMI (`$4210`) visibility window was observably wrong until 2026-07-13
+   (#107 — a `BIT $4210 / BPL` poll loop passed twice per VBlank, so the whole
+   PeterLemon corpus animated ~4/3x too fast). `$4211` TIMEUP has the same
+   shape of hold window and is **not** yet measured against a reference —
+   treat it as the next candidate, not as verified.
 5. DSP-1 differential oracle — the one grade capped by *missing evidence*
    rather than a known divergence.
