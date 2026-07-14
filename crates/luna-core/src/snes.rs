@@ -375,6 +375,31 @@ const DRAM_REFRESH_POS: u32 = 538;
 /// timer-poll freeze).
 const DRAM_REFRESH_CYCLES: u32 = 40;
 
+/// H-clock from which the S-CPU presents the raised NMI line to a `$4210`
+/// (RDNMI) read, on the `VBlank` scanline.
+///
+/// Before it, a read sees the flag **clear** and — the part that matters —
+/// **cannot clear it**. Both references agree on the no-clear half: ares
+/// holds the line for four clocks after raising it (`cpu/irq.cpp:14`,
+/// "hold /NMI for four cycles", checked by `rdnmi()` at `irq.cpp:52-58`), and
+/// Mesen2 only lets a read clear the flag "starting on cycle 6"
+/// (`InternalRegisters.cpp:234-241`). That no-clear window is what keeps an
+/// NMI handler that ACKs `$4210` from starving a mainline `BPL $4210` poll of
+/// the same flag (Mesen2 names Terranigma; Chrono Trigger uses the same
+/// Square / Quintet idiom and hangs in luna without it).
+///
+/// They *disagree* on what a read inside the window returns: ares raises the
+/// line at the H=2 poll (`vcounter(2) >= vdisp`) and hands it back set, while
+/// Mesen2 hands back zero — its `InternalRegisters.h:116` comment, written
+/// against the S-CPU schematics, asks "why does the CPU behave like it was
+/// set on H=6 instead of H=2?". Measured against a Mesen2 headless trace of
+/// krom's `WaveHDMA`, a `$4210` read at H=4 of the `VBlank` scanline does
+/// return zero, so we follow Mesen2 here. Handing the flag back set inside
+/// the window instead makes a `BIT $4210 / BPL` poll loop pass **twice** in
+/// one `VBlank` — it sees the flag, cannot clear it, and passes again on the
+/// next iteration (issue #107).
+const RDNMI_VISIBLE_HCLOCK: u16 = 6;
+
 /// Convert the running master-clock counter into the PPU's current
 /// (H, V) dot coordinate. 1364 master cycles per scanline; the
 /// scanline count depends on region (262 NTSC / 312 PAL). Each
@@ -1962,6 +1987,13 @@ impl SnesBus<'_> {
         // `conflict()` bus contention against it.
         self.scpu_mar = addr;
         let speed = address_speed(addr, self.fast_rom);
+        // NOTE: luna charges the whole access here and samples the bus at its
+        // END. ares and Mesen2 both sample four master clocks EARLIER —
+        // `step(clockCount - 4); bus.read(); step(4)` (ares
+        // `cpu/memory.cpp:12-14`). Porting that shifts every MMIO read by 4
+        // mclk, which moves the smoke goldens and the audio durations, so it
+        // is tracked as its own change rather than smuggled in with the RDNMI
+        // fix (issue #107 only needed `RDNMI_VISIBLE_HCLOCK`).
         self.io_cycle(speed.mcycles());
 
         if let Some(o) = Self::wram_offset(addr) {
@@ -2081,14 +2113,15 @@ impl SnesBus<'_> {
                 return (self.cpu_regs.hvbjoy & !0x40) | hblank_bit;
             }
             if reg_off == 0x4210 {
-                // RDNMI 4-cycle hold window. Mesen2 keeps the flag
-                // set when HClock < 6 on the NMI scanline, so a
-                // mainline `BPL $4210` after the NMI handler ACKed
-                // the same flag still sees the bit. luna's H is in
-                // dots (4 mclk each), so < 6 mclks ≈ < 2 dots.
-                let (h, _) = current_hv(*self.mclk_total, self.scanlines_per_frame);
-                let in_hold = self.ppu_line == self.vblank_start_line && h < 2;
-                return self.cpu_regs.read_rdnmi(in_hold);
+                // RDNMI — see `RDNMI_VISIBLE_HCLOCK`. The window is in master
+                // clocks, not dots: luna used to round it up to a whole dot
+                // (< 2 dots = < 8 mclk) *and* hand the flag back set inside
+                // it, which made a `BIT $4210 / BPL` poll loop pass twice in
+                // one VBlank (issue #107).
+                let hclock = current_hclock(*self.mclk_total, self.scanlines_per_frame);
+                let visible =
+                    self.ppu_line != self.vblank_start_line || hclock >= RDNMI_VISIBLE_HCLOCK;
+                return self.cpu_regs.read_rdnmi(visible);
             }
             if let Some(v) = self.cpu_regs.read(reg_off) {
                 return v;
@@ -3237,6 +3270,113 @@ mod tests {
         assert_eq!(snes.ppu_line, NTSC_VBLANK_START_LINE);
         assert!(snes.cpu_regs.nmi_flag);
         assert_eq!(snes.nmis_serviced, 0);
+    }
+
+    /// Read `$4210` through the CPU bus, sampled at `hclock` of the `VBlank`
+    /// scanline with the NMI flag already raised. Returns the byte the CPU
+    /// sees and whether the flag survived the read.
+    fn rdnmi_read_at(hclock: u64) -> (u8, bool) {
+        let mut snes = Snes::from_cartridge(demo_lorom());
+        snes.reset();
+        snes.cpu_regs.nmi_flag = true;
+        let vblank = vblank_start_line(snes.region);
+        // luna samples the bus at the END of an access, so start the read one
+        // full access-cost before the H-clock we want it to land on.
+        let cost = address_speed(make_addr(0x00, 0x4210), false).mcycles();
+        let line_start = u64::from(vblank) * u64::from(MCYCLES_PER_SCANLINE);
+        snes.total_mclk = line_start + hclock - cost;
+        snes.ppu_line = vblank;
+
+        let scanlines = snes.region_scanlines();
+        let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
+        let Snes {
+            ppu,
+            dma,
+            cpu_regs,
+            apu_real,
+            apu_stub_fallback,
+            apu_panicked,
+            wram,
+            mapper,
+            fast_rom,
+            nmi_pending,
+            irq_pending,
+            total_mclk,
+            wm_addr,
+            joypad_strobe,
+            joypad1_shift,
+            joypad2_shift,
+            mdr,
+            mailbox_log,
+            sa1_log,
+            mem_trace_log,
+            breakpoints,
+            nocash_log,
+            ..
+        } = &mut snes;
+        let mut bus = SnesBus {
+            wram,
+            mapper: mapper.as_mut(),
+            ppu,
+            dma,
+            cpu_regs,
+            apu_real,
+            apu_stub_fallback,
+            apu_panicked,
+            fast_rom: *fast_rom,
+            nmi: nmi_pending,
+            irq: irq_pending,
+            mclk_total: total_mclk,
+            scanlines_per_frame: scanlines,
+            scpu_mar: 0,
+            ppu_line: vblank,
+            mcycles_in_line: 0,
+            frame_count: 0,
+            nmis_serviced: 0,
+            sched_enabled: false,
+            vblank_start_line: vblank,
+            cpu_pc_full: cpu_pc_snapshot,
+            mailbox_log,
+            sa1_log,
+            mem_trace_log,
+            breakpoints,
+            nocash_log,
+            wm_addr,
+            joypad_strobe,
+            joypad1_shift,
+            joypad2_shift,
+            mdr,
+        };
+        let v = bus.read(make_addr(0x00, 0x4210));
+        let still_set = bus.cpu_regs.nmi_flag;
+        (v, still_set)
+    }
+
+    /// Issue #107: a `BIT $4210 / BPL` poll loop must pass exactly ONCE per
+    /// `VBlank`. It passed twice whenever its read landed in the first clocks of
+    /// the `VBlank` scanline, because luna handed the flag back *set* there and
+    /// — being inside the no-clear window — could not clear it, so the very
+    /// next poll passed again. Before `RDNMI_VISIBLE_HCLOCK` the S-CPU has not
+    /// presented the line yet: the read sees it clear (and still cannot clear
+    /// it, which is what protects Chrono Trigger / Terranigma).
+    #[test]
+    fn rdnmi_is_invisible_and_unclearable_before_hclock_6() {
+        for h in [0, 2, 4] {
+            let (v, still_set) = rdnmi_read_at(h);
+            assert_eq!(v & 0x80, 0x00, "H={h}: flag must read clear");
+            assert!(still_set, "H={h}: read must NOT clear the flag");
+        }
+    }
+
+    /// From H=6 the line is presented: the read sees it and clears it, so the
+    /// next poll blocks until the next frame — one pass per `VBlank`.
+    #[test]
+    fn rdnmi_is_visible_and_clears_from_hclock_6() {
+        for h in [6, 8, 40, 600] {
+            let (v, still_set) = rdnmi_read_at(h);
+            assert_eq!(v & 0x80, 0x80, "H={h}: flag must read set");
+            assert!(!still_set, "H={h}: read must clear the flag");
+        }
     }
 
     // ---- Phase 4: dot-precise H/V-counter IRQ (poll_hv_irq) ----
