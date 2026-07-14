@@ -22,6 +22,7 @@ pub(crate) fn run_state(
     rom: &std::path::Path,
     steps: u64,
     force_mapper: Option<&str>,
+    force_region: Option<&str>,
     dump_vram_path: Option<&std::path::Path>,
     dump_coproc_ram_path: Option<&std::path::Path>,
     dump_aram_path: Option<&std::path::Path>,
@@ -68,7 +69,7 @@ pub(crate) fn run_state(
     print_fbhash: bool,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
-    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, dsp1_rom) {
+    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, dsp1_rom) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }

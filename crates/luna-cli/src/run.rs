@@ -17,11 +17,12 @@ pub(crate) fn run(
     wdm_out: Option<&std::path::Path>,
     print_fbhash: bool,
     force_mapper: Option<&str>,
+    force_region: Option<&str>,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
     // Shared loader (issue #95): honours `--force-mapper` so a bad-checksum
     // reference ROM (PeterLemon corpus) can reach `--print-fbhash` too.
-    if let Err(e) = load_rom_into(&mut em, rom_path, force_mapper, None) {
+    if let Err(e) = load_rom_into(&mut em, rom_path, force_mapper, force_region, None) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }

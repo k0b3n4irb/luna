@@ -6,6 +6,16 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Added
+- **CLI: `--force-region <ntsc|pal>`** on every ROM-loading subcommand (`run`,
+  `state`, `frames`, `wram-trace`, the dump commands), backed by
+  `Emulator::set_forced_region` in `luna-api`. Overrides the cartridge header's
+  country byte, changing the scanline count (262/312) and frame rate. Exists
+  because the golden harness runs the homebrew corpus as PAL to match krom's
+  reference captures, and a timing investigation (#109) must be able to
+  reproduce that exact configuration — with `--mem-trace`, `--cpu-trace` and
+  the Mesen2 differential attached — from the command line.
+
 ### Fixed
 - **CPU: `$4210` (RDNMI) was readable too early, so `WaitNMI` poll loops ran
   the game twice per frame** (#107). The classic no-NMI idiom — `WaitNMI: BIT
