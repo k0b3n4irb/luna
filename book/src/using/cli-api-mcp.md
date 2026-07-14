@@ -111,6 +111,15 @@ luna state -n 55000000 --input @repro.input \
   --print-fbhash --wdm-out /tmp/asserts.txt "game.sfc"
 ```
 
+Reproduce the golden harness's configuration exactly — it runs the homebrew
+corpus as **PAL** to match krom's reference captures, which a blank test-ROM
+header can't say:
+
+```bash
+luna state -n 5000000 --force-mapper lorom --force-region pal \
+  --screenshot /tmp/bra.png "CPUTest/CPU/BRA/CPUBRA.sfc"
+```
+
 ### `luna frames` — consecutive-frame capture (temporal artefacts)
 
 ```

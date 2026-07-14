@@ -15,6 +15,7 @@
 
 use std::path::Path;
 
+pub use luna_cartridge::Region;
 use luna_cartridge::{CartError, Cartridge};
 use luna_core::Snes;
 /// Controller-port device kind (pad / mouse / super scope), re-exported so the
@@ -654,6 +655,9 @@ pub struct Emulator {
     /// not recording; fed by [`Emulator::set_joypad`], drained by
     /// [`Emulator::take_input_capture`].
     input_capture: Option<InputCapture>,
+    /// Video-standard override applied to every subsequent ROM load — see
+    /// [`Emulator::set_forced_region`]. `None` = honour the cartridge header.
+    forced_region: Option<Region>,
 }
 
 /// One raw captured Event Viewer event before category/filter decode — either
@@ -743,6 +747,7 @@ impl Emulator {
             last_frame_events: Vec::new(),
             prev_frame_events: Vec::new(),
             input_capture: None,
+            forced_region: None,
         }
     }
 
@@ -846,7 +851,32 @@ impl Emulator {
         self.load_cartridge(cart)
     }
 
-    fn load_cartridge(&mut self, cart: Cartridge) -> Result<RomInfo, ApiError> {
+    /// Force the video standard (NTSC / PAL) for every subsequent ROM load,
+    /// overriding the cartridge header's country byte. `None` restores header
+    /// auto-detection.
+    ///
+    /// The region decides the scanline count (262 NTSC / 312 PAL) and the
+    /// frame rate, so it changes every timing-derived observable — which is
+    /// the point: the golden harness runs the `PeterLemon` corpus as PAL to
+    /// match krom's reference captures, and a differential investigation must
+    /// be able to reproduce that exact configuration from the CLI (issue
+    /// #109). Sticky across loads (like a front-end setting), NOT cleared by
+    /// [`Emulator::reset`]; takes effect on the next load, not retroactively.
+    pub const fn set_forced_region(&mut self, region: Option<Region>) {
+        self.forced_region = region;
+    }
+
+    /// The active video-standard override, if any — see
+    /// [`Emulator::set_forced_region`].
+    #[must_use]
+    pub const fn forced_region(&self) -> Option<Region> {
+        self.forced_region
+    }
+
+    fn load_cartridge(&mut self, mut cart: Cartridge) -> Result<RomInfo, ApiError> {
+        if let Some(region) = self.forced_region {
+            cart.header.region = region;
+        }
         // Capture a stable hash of the ROM bytes before the cartridge is
         // consumed by `try_from_cartridge`; the save-state layer uses it to
         // refuse states produced against a different ROM.

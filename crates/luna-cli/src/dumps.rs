@@ -14,12 +14,13 @@ pub(crate) fn run_spc_dump(
     steps: u64,
     out: Option<&std::path::Path>,
     force_mapper: Option<&str>,
+    force_region: Option<&str>,
     dsp1_rom: Option<&std::path::Path>,
     input_script: Option<&str>,
 ) -> ExitCode {
     const FRAME_BUDGET: u64 = 200_000;
     let mut em = luna_api::Emulator::new();
-    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, dsp1_rom) {
+    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, dsp1_rom) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }
@@ -82,12 +83,13 @@ pub(crate) fn run_assets_dump(
     bpp: Option<u8>,
     palette: u8,
     force_mapper: Option<&str>,
+    force_region: Option<&str>,
     dsp1_rom: Option<&std::path::Path>,
     input_script: Option<&str>,
 ) -> ExitCode {
     const FRAME_BUDGET: u64 = 200_000;
     let mut em = luna_api::Emulator::new();
-    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, dsp1_rom) {
+    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, dsp1_rom) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }
