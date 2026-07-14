@@ -41,7 +41,22 @@ const FRAME_W: usize = luna_ppu::FRAME_W;
 const FRAME_H: usize = luna_ppu::FRAME_H;
 
 /// Hard ceiling on instructions, in case a ROM never settles or loops.
-const STEP_CAP: u64 = 30_000_000;
+/// Frame budget for the settle-runner. Like the commercial-game runner (see
+/// [`run_game_to_frame`]) the capture point is anchored to a FRAME, never to an
+/// instruction count: a demo animates per frame, so frame N is the same picture
+/// however cycle-exact the CPU's timing is, while a fixed instruction count
+/// slides backwards through the ROM the moment that timing gets *more*
+/// accurate. Most of these ROMs settle to a static screen long before this and
+/// never reach it — for them it is only a ceiling.
+const FRAME_CAP: u64 = 2300;
+
+/// Hang guard for the settle-runner — never the thing that stops a healthy run.
+/// It has to be generous: a ROM that busy-waits on `VBlank` (all five `CPUTest`
+/// ROMs do) spends *more* instructions per frame as the emulation gets more
+/// cycle-accurate, and the old 30M cap silently truncated them mid-run, leaving
+/// goldens of half-drawn "BCC PASS / BCS PASS / BNE…" screens — throwing away
+/// the very assertion those tests exist to make.
+const STEP_CAP: u64 = 200_000_000;
 
 /// Safety net for the frame-anchored commercial-game runs — a ROM that hangs
 /// must not spin forever. It is deliberately generous: the *budget* is the
@@ -122,7 +137,7 @@ fn run_to_stable(rom: Vec<u8>, hold: u16) -> Vec<u8> {
     let mut last = String::new();
     let mut stable = 0u32;
     let mut executed = 0u64;
-    'run: while executed < STEP_CAP {
+    'run: while executed < STEP_CAP && snes.frame_count < FRAME_CAP {
         for _ in 0..SAMPLE_EVERY {
             if snes.cpu.stopped {
                 break;
@@ -545,7 +560,7 @@ ppu_test!(
 ppu_test!(
     ppu_bg_8bpp_32x32,
     "BGMAP/8x8/8BPP/32x32/8x8BGMap8BPP32x32.sfc",
-    "c9f38bf6de592abfe11d37ac5e06125ca9e12013902f3c81f6069b44e499d19b"
+    "481136e9410fb54f9753338ae287879711228486b397c2a0285cca3556073d79"
 );
 ppu_test!(
     ppu_bg_8bpp_32x64,
@@ -636,7 +651,7 @@ ppu_test!(
 ppu_test!(
     ppu_mosaic_mode3,
     "Mosaic/Mode3/MosaicMode3.sfc",
-    "c3048a2eff2084b019b0dee48c2de599aa24e4d071facc000b33497e5ba6478a",
+    "0a5bffd4b5604dc7d28a1dd30e1332fe94a1b061cec14c5d449b05048f89fa84",
     hold = PAD_R
 );
 // Mode 5 hi-res + INTERLACE (SETINI bit 0): the Moogle figure. Interlace
@@ -702,6 +717,12 @@ ppu_test!(
 // must), and a Mode-7 perspective floor with per-line matrix HDMA. They
 // validate the HDMA engine: table walk, indirect addressing, per-line
 // fixed-colour ($2132), and Mode-7 matrix writes ($211B-$2120).
+// Re-baselined 2026-07-14 with the frame-anchored settle runner (`FRAME_CAP`):
+// these three never settle, so they used to be captured wherever a fixed
+// instruction count happened to land. They are now captured at frame 2300 —
+// same demos, correct animation phase, eyeball-confirmed (the water wave, the
+// lake mosaic, the 8BPP cathedral).
+//
 // Re-baselined 2026-07-13 (issue #107, RDNMI visibility window): these three
 // demos idle on the corpus' `WaitNMI` macro (`BIT $4210 / BPL`), which used to
 // pass TWICE per VBlank whenever its read landed in the first clocks of the
@@ -716,7 +737,7 @@ ppu_test!(
 ppu_test!(
     ppu_hdma_wave,
     "HDMA/WaveHDMA/WaveHDMA.sfc",
-    "e11347b9e4fb567f49f8d13fe2397188844f09e642d2c0623c9e0b976da3cd09"
+    "827649198604a62fbac24becba9244171c3b4a693d6b02b570df7d8920f574bc"
 );
 ppu_test!(
     ppu_hdma_redspace,
