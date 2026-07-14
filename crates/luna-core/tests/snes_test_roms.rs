@@ -70,9 +70,26 @@ const GAME_STEP_CAP: u64 = 200_000_000;
 /// cap-out mid-animation and must keep their 30M frame).
 const SPC700_STEP_CAP: u64 = 45_000_000;
 /// Sample the framebuffer hash every this many instructions.
-const SAMPLE_EVERY: u64 = 100_000;
+const SAMPLE_FRAMES: u64 = 8;
+
+/// Instruction batch between mailbox polls in the SPC700 runner. That one reads
+/// a `$2140` mailbox, not the framebuffer, and its ROMs signal completion
+/// explicitly — so it has no settle heuristic to get wrong and stays in
+/// instructions.
+const SPC_POLL_EVERY: u64 = 100_000;
 /// Consecutive identical samples that count as "settled".
 const STABLE_SAMPLES: u32 = 8;
+
+// NOTE on both of the above: the settle criterion is measured in FRAMES, not
+// instructions, and that is not cosmetic. It used to sample every 100k
+// instructions and call the ROM settled after 8 unchanged samples. But a ROM
+// that busy-waits on VBlank executes MORE instructions per frame as the
+// emulation gets more cycle-accurate — so 100k instructions buys fewer and
+// fewer frames, the stability window shrinks in real time, and a ROM that is
+// merely PAUSED between two printed lines looks finished. That is exactly how
+// the five `CPUTest` goldens ended up as half-drawn "BCC PASS / BCS PASS /
+// BNE…" screens. In frames the window is what it says it is, whatever the CPU
+// timing does.
 
 /// Corpus root: `$LUNA_SNES_TEST_DIR`, else the sibling `../luna_tests`.
 fn corpus_root() -> Option<PathBuf> {
@@ -138,7 +155,8 @@ fn run_to_stable(rom: Vec<u8>, hold: u16) -> Vec<u8> {
     let mut stable = 0u32;
     let mut executed = 0u64;
     'run: while executed < STEP_CAP && snes.frame_count < FRAME_CAP {
-        for _ in 0..SAMPLE_EVERY {
+        let sample_at = snes.frame_count + SAMPLE_FRAMES;
+        while snes.frame_count < sample_at && executed < STEP_CAP {
             if snes.cpu.stopped {
                 break;
             }
@@ -440,7 +458,7 @@ fn run_spc700_fail_port(rom: Vec<u8>) -> u8 {
     std::panic::set_hook(Box::new(|_| {}));
     let mut executed = 0u64;
     'run: while executed < SPC700_STEP_CAP {
-        for _ in 0..SAMPLE_EVERY {
+        for _ in 0..SPC_POLL_EVERY {
             if catch_unwind(AssertUnwindSafe(|| snes.step())).is_err() {
                 break 'run;
             }
@@ -560,7 +578,7 @@ ppu_test!(
 ppu_test!(
     ppu_bg_8bpp_32x32,
     "BGMAP/8x8/8BPP/32x32/8x8BGMap8BPP32x32.sfc",
-    "481136e9410fb54f9753338ae287879711228486b397c2a0285cca3556073d79"
+    "bdcb17fa44e03ec6700a31eebe7f6ed1b93b6c15f7cbc0fa984e0a6534c95685"
 );
 ppu_test!(
     ppu_bg_8bpp_32x64,
@@ -737,7 +755,7 @@ ppu_test!(
 ppu_test!(
     ppu_hdma_wave,
     "HDMA/WaveHDMA/WaveHDMA.sfc",
-    "827649198604a62fbac24becba9244171c3b4a693d6b02b570df7d8920f574bc"
+    "501773380511613eb7a0579135b9f5c0b43e70d8fd654619da5d56324e60c345"
 );
 ppu_test!(
     ppu_hdma_redspace,
