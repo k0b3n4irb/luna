@@ -520,10 +520,11 @@ ppu_test!(
 // produce the *same* framebuffer (hence the identical hash, not a typo).
 // TileFlip's flip pattern is pixel-identical (same colour histogram) at a
 // 15-px vertical framing offset vs the PAL capture.
+// Re-baselined 2026-07-13 — see the WaitNMI note on `ppu_hdma_wave` (#107).
 ppu_test!(
     ppu_bg_8bpp_32x32,
     "BGMAP/8x8/8BPP/32x32/8x8BGMap8BPP32x32.sfc",
-    "f2017bdcdeb5938291288e2d5d453b33ed3095f759dc99bbf909257bb17e8bdf"
+    "c9f38bf6de592abfe11d37ac5e06125ca9e12013902f3c81f6069b44e499d19b"
 );
 ppu_test!(
     ppu_bg_8bpp_32x64,
@@ -608,10 +609,13 @@ ppu_test!(
 // little further along. Old (c3048a2e) and new (df5e17e0) frames both eyeball-
 // confirmed clean 8×8 mosaics of the same lake/island scene (the new one is
 // slightly more detailed) — a benign frame-shift, not a render regression.
+// Re-baselined 2026-07-13 (#107) — see the WaitNMI note on `ppu_hdma_wave`.
+// The correct 1x loop rate puts this back on c3048a2e, the very frame this
+// test baselined against before the 2026-06-23 nmiLine shift above.
 ppu_test!(
     ppu_mosaic_mode3,
     "Mosaic/Mode3/MosaicMode3.sfc",
-    "df5e17e0e8fe0a6b3ebf2411ee98d2e5be250004b0546419c3ef1a775c11686f",
+    "c3048a2eff2084b019b0dee48c2de599aa24e4d071facc000b33497e5ba6478a",
     hold = PAD_R
 );
 // Mode 5 hi-res + INTERLACE (SETINI bit 0): the Moogle figure. Interlace
@@ -677,10 +681,21 @@ ppu_test!(
 // must), and a Mode-7 perspective floor with per-line matrix HDMA. They
 // validate the HDMA engine: table walk, indirect addressing, per-line
 // fixed-colour ($2132), and Mode-7 matrix writes ($211B-$2120).
+// Re-baselined 2026-07-13 (issue #107, RDNMI visibility window): these three
+// demos idle on the corpus' `WaitNMI` macro (`BIT $4210 / BPL`), which used to
+// pass TWICE per VBlank whenever its read landed in the first clocks of the
+// VBlank scanline — luna handed the flag back set there but could not clear it.
+// They therefore animated ~4/3x too fast. At the same fixed instruction budget
+// the correct 1x rate lands on a different animation phase; all three were
+// eyeball-confirmed clean (wave: same water, other phase; mosaic: same lake
+// scene, a coarser step of its ramp — and back to the c3048a2e frame this test
+// baselined against before the 2026-06-23 nmiLine shift; 8BPP: same tilemap, a
+// different scroll offset). Verified against a Mesen2 headless trace: one pass
+// per frame, HDMA table pointer +3/frame.
 ppu_test!(
     ppu_hdma_wave,
     "HDMA/WaveHDMA/WaveHDMA.sfc",
-    "c61b781ec9bb1fa7cdf5d49f8353adbb8074d9b88f9093cf3ed04af9e141f971"
+    "e11347b9e4fb567f49f8d13fe2397188844f09e642d2c0623c9e0b976da3cd09"
 );
 ppu_test!(
     ppu_hdma_redspace,

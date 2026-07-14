@@ -6,6 +6,26 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Fixed
+- **CPU: `$4210` (RDNMI) was readable too early, so `WaitNMI` poll loops ran
+  the game twice per frame** (#107). The classic no-NMI idiom — `WaitNMI: BIT
+  $4210 / BPL WaitNMI` — passed **twice** in one VBlank whenever its read
+  landed in the first clocks of the VBlank scanline: luna handed the flag back
+  *set* there but, being inside the window where the S-CPU forbids clearing it,
+  could not clear it, so the very next poll passed again. Every demo in the
+  PeterLemon corpus idles on that macro, so they all animated ~4/3x too fast
+  (krom's `WaveHDMA` advanced its HDMA table +4 bytes/frame instead of +3),
+  which made luna useless as a behavioural reference for porting them.
+  luna now follows Mesen2 (`InternalRegisters.h:116`, written against the S-CPU
+  schematics — "why does the CPU behave like it was set on H=6 instead of
+  H=2?"): before H-clock 6 of the VBlank scanline a `$4210` read sees the flag
+  **clear** and still cannot clear it, which keeps the protection that an NMI
+  handler acknowledging `$4210` must not starve a mainline poll of the same
+  flag (Terranigma, Chrono Trigger). Verified against a Mesen2 headless trace
+  of `WaveHDMA`: exactly one pass per frame, HDMA table pointer +3/frame.
+  Three PeterLemon goldens were re-baselined (same clean picture, correct
+  animation phase); no commercial-title golden moved.
+
 ## [1.9.0] — 2026-07-12
 
 Debugger + toolchain polish from a joint review with Cooper (the OpenSNES

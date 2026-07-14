@@ -169,24 +169,18 @@ impl CpuRegs {
         Some(v)
     }
 
-    /// `$4210` RDNMI read with the hardware 4-cycle hold window honoured.
+    /// `$4210` RDNMI read.
     ///
-    /// Per Mesen2 (`InternalRegisters.cpp:229-241`) and ares
-    /// (`cpu_irq.cpp::rdnmi`): reading `$4210` clears the NMI flag on
-    /// every cycle EXCEPT the first ~6 master cycles of the NMI
-    /// scanline. During that brief window the hardware forces the flag
-    /// to stay set, so a CPU mainline that polls `BPL $4210` is not
-    /// starved by its own NMI handler `ACKing` the same flag a few cycles
-    /// earlier. Mesen2's comment explicitly names Terranigma; Chrono
-    /// Trigger uses the same Square/Quintet idiom and hangs in luna
-    /// without the hold window.
-    ///
-    /// `in_hold` should be `true` only when the bus knows the current
-    /// scanline is the NMI scanline AND the H-clock is < 6 master
-    /// cycles (= < 2 dots at luna's H resolution).
-    pub const fn read_rdnmi(&mut self, in_hold: bool) -> u8 {
-        let v = if self.nmi_flag { 0x80 } else { 0x00 } | 0x02; // CPU rev 2
-        if !in_hold {
+    /// `visible` is false only for a read the S-CPU has not yet presented the
+    /// raised NMI line to — the first few H-clocks of the NMI scanline. Such
+    /// a read reads the flag **clear** and, crucially, does not clear it: that
+    /// is what keeps an NMI handler that acknowledges `$4210` from starving a
+    /// mainline `BPL $4210` poll of it. The bus derives it from the H-clock
+    /// — see `RDNMI_VISIBLE_HCLOCK` in `snes.rs` for the window and for where
+    /// ares and Mesen2 disagree on it.
+    pub const fn read_rdnmi(&mut self, visible: bool) -> u8 {
+        let v = if self.nmi_flag && visible { 0x80 } else { 0x00 } | 0x02; // CPU rev 2
+        if visible {
             self.nmi_flag = false;
         }
         v
