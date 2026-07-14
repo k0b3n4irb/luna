@@ -70,7 +70,7 @@ const GAME_STEP_CAP: u64 = 200_000_000;
 /// cap-out mid-animation and must keep their 30M frame).
 const SPC700_STEP_CAP: u64 = 45_000_000;
 /// Sample the framebuffer hash every this many instructions.
-const SAMPLE_FRAMES: u64 = 8;
+const SAMPLE_FRAMES: u64 = 30;
 
 /// Instruction batch between mailbox polls in the SPC700 runner. That one reads
 /// a `$2140` mailbox, not the framebuffer, and its ROMs signal completion
@@ -80,6 +80,16 @@ const SPC_POLL_EVERY: u64 = 100_000;
 /// Consecutive identical samples that count as "settled".
 const STABLE_SAMPLES: u32 = 8;
 
+// The settle window is therefore SAMPLE_FRAMES * STABLE_SAMPLES = 240 frames,
+// i.e. four seconds of unchanged picture. It has to be wide, because "the
+// screen has not changed" is a weak signal: a ROM that is merely PAUSED between
+// two printed lines looks exactly like one that has finished. The `CPUTest`
+// ROMs wait for VBlank, do a VRAM DMA, then compute — and once the DMA is
+// charged its real cost (the DRAM refresh halts it, as on hardware) that work
+// no longer fits in one VBlank, so they lose a frame per line and their pauses
+// stretch well past a second. A narrow window mistakes that for completion and
+// freezes a half-drawn "BCC PASS / BCS PASS / BNE…" screen as the golden.
+//
 // NOTE on both of the above: the settle criterion is measured in FRAMES, not
 // instructions, and that is not cosmetic. It used to sample every 100k
 // instructions and call the ROM settled after 8 unchanged samples. But a ROM
@@ -578,7 +588,7 @@ ppu_test!(
 ppu_test!(
     ppu_bg_8bpp_32x32,
     "BGMAP/8x8/8BPP/32x32/8x8BGMap8BPP32x32.sfc",
-    "bdcb17fa44e03ec6700a31eebe7f6ed1b93b6c15f7cbc0fa984e0a6534c95685"
+    "041d5bf2f4b98b1f4c9ba957b3578637c1f89cc24e4ee4a45764bf8b887c150d"
 );
 ppu_test!(
     ppu_bg_8bpp_32x64,
@@ -649,7 +659,7 @@ ppu_test!(
 ppu_test!(
     ppu_mode7_starwars,
     "Mode7/StarWars/StarWars.sfc",
-    "ed496efc8c84512041910419eaee12fc4d941067a942fd1ad403cead1c5bef05"
+    "07efc96c41f7e32df785ccb830d0599c44ac2167abd36678542142ac8007d5c7"
 );
 ppu_test!(
     ppu_greenspace,
@@ -669,7 +679,7 @@ ppu_test!(
 ppu_test!(
     ppu_mosaic_mode3,
     "Mosaic/Mode3/MosaicMode3.sfc",
-    "0a5bffd4b5604dc7d28a1dd30e1332fe94a1b061cec14c5d449b05048f89fa84",
+    "53b2b1e07a34619efe4dfbea0ad694145e7e4d9046eea815061ae7d7b9d5d46f",
     hold = PAD_R
 );
 // Mode 5 hi-res + INTERLACE (SETINI bit 0): the Moogle figure. Interlace
@@ -755,7 +765,7 @@ ppu_test!(
 ppu_test!(
     ppu_hdma_wave,
     "HDMA/WaveHDMA/WaveHDMA.sfc",
-    "501773380511613eb7a0579135b9f5c0b43e70d8fd654619da5d56324e60c345"
+    "c5e6f162159c0a9b0afc7b4007f08c9b966ca1dc7d4a534040cf3737fc4330cd"
 );
 ppu_test!(
     ppu_hdma_redspace,
