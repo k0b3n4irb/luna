@@ -16,13 +16,17 @@ All notable user-facing changes to luna. Releases are cut from `main`
   PeterLemon corpus idles on that macro, so they all animated ~4/3x too fast
   (krom's `WaveHDMA` advanced its HDMA table +4 bytes/frame instead of +3),
   which made luna useless as a behavioural reference for porting them.
-  luna now follows Mesen2 (`InternalRegisters.h:116`, written against the S-CPU
-  schematics — "why does the CPU behave like it was set on H=6 instead of
-  H=2?"): before H-clock 6 of the VBlank scanline a `$4210` read sees the flag
-  **clear** and still cannot clear it, which keeps the protection that an NMI
-  handler acknowledging `$4210` must not starve a mainline poll of the same
-  flag (Terranigma, Chrono Trigger). Verified against a Mesen2 headless trace
-  of `WaveHDMA`: exactly one pass per frame, HDMA table pointer +3/frame.
+  luna now masks the flag below H-clock 6 of the VBlank scanline: a `$4210`
+  read there sees it **clear** and still cannot clear it, which keeps the
+  protection that an NMI handler acknowledging `$4210` must not starve a
+  mainline poll of the same flag (Terranigma, Chrono Trigger). Verified
+  against a Mesen2 headless trace of `WaveHDMA`: exactly one pass per frame,
+  HDMA table pointer +3/frame. Note this masking is a **deliberate deviation**
+  from ares and Mesen2, which both hand the flag back *set* in that window: the
+  outcome actually hinges on where the poll loop lands relative to the
+  scanline, and luna's lands inside the window where hardware's does not. The
+  faithful rule needs cycle-exact CPU-vs-scanline timing first (#109); the
+  masking is conservative — it can only make a poll retry, never double-fire.
   Three PeterLemon goldens were re-baselined (same clean picture, correct
   animation phase); no commercial-title golden moved.
 

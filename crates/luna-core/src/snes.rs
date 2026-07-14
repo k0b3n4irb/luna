@@ -388,16 +388,33 @@ const DRAM_REFRESH_CYCLES: u32 = 40;
 /// the same flag (Mesen2 names Terranigma; Chrono Trigger uses the same
 /// Square / Quintet idiom and hangs in luna without it).
 ///
-/// They *disagree* on what a read inside the window returns: ares raises the
-/// line at the H=2 poll (`vcounter(2) >= vdisp`) and hands it back set, while
-/// Mesen2 hands back zero — its `InternalRegisters.h:116` comment, written
-/// against the S-CPU schematics, asks "why does the CPU behave like it was
-/// set on H=6 instead of H=2?". Measured against a Mesen2 headless trace of
-/// krom's `WaveHDMA`, a `$4210` read at H=4 of the `VBlank` scanline does
-/// return zero, so we follow Mesen2 here. Handing the flag back set inside
-/// the window instead makes a `BIT $4210 / BPL` poll loop pass **twice** in
-/// one `VBlank` — it sees the flag, cannot clear it, and passes again on the
-/// next iteration (issue #107).
+/// **This is a deviation from both references, and a deliberate one.** They
+/// agree with each other: the line is raised at the H=2 poll and a read in
+/// `[2, 6)` hands it back **set** (ares `irq.cpp:13-14,52-58`; Mesen2 sets
+/// `_nmiFlag` in the `hClock == 2` branch of `ProcessIrqCounters` and only
+/// guards the *clear*). luna returns zero there instead.
+///
+/// The reason is that whether a `BIT $4210 / BPL` poll loop passes once or
+/// twice per `VBlank` hinges entirely on *where the poll lands* relative to
+/// the scanline — a 4-clock window. Hardware's and Mesen2's poll lands clear
+/// of it (sampled H-clocks `{0, 16, 34, 46, 52}`); luna's locks onto H=4,
+/// **inside** it, so the faithful rule makes luna double-pass where hardware
+/// does not (measured: 21 of 139 frames of krom's `WaveHDMA`). That phase
+/// error is the real bug — it needs cycle-exact CPU-vs-scanline timing, which
+/// luna does not have yet (issue #109; the scorecard's open item 4).
+///
+/// Masking the flag below H=6 makes the observable correct *independently of
+/// the phase*, and it is conservative in the only direction that matters: it
+/// can make a poll miss one iteration and retry 52 clocks later, never
+/// double-fire. It preserves the half both references agree on and that games
+/// depend on — a read here **cannot clear the flag**, which is what stops an
+/// NMI handler acknowledging `$4210` from starving a mainline poll of it
+/// (Mesen2 names Terranigma; Chrono Trigger uses the same Square / Quintet
+/// idiom and hangs in luna without it).
+///
+/// Retire this the moment luna's CPU-vs-scanline phase is cycle-exact: the
+/// faithful `RAISE=2` / `HOLD=6` pair is implemented and unit-tested on
+/// `wip/cycle-phase-109`.
 const RDNMI_VISIBLE_HCLOCK: u16 = 6;
 
 /// Convert the running master-clock counter into the PPU's current
