@@ -440,34 +440,23 @@ const DRAM_REFRESH_CYCLES: u32 = 40;
 /// the same flag (Mesen2 names Terranigma; Chrono Trigger uses the same
 /// Square / Quintet idiom and hangs in luna without it).
 ///
-/// **This is a deviation from both references, and a deliberate one.** They
-/// agree with each other: the line is raised at the H=2 poll and a read in
-/// `[2, 6)` hands it back **set** (ares `irq.cpp:13-14,52-58`; Mesen2 sets
-/// `_nmiFlag` in the `hClock == 2` branch of `ProcessIrqCounters` and only
-/// guards the *clear*). luna returns zero there instead.
+/// H-clock from which a `$4210` read may CLEAR the NMI flag.
 ///
-/// The reason is that whether a `BIT $4210 / BPL` poll loop passes once or
-/// twice per `VBlank` hinges entirely on *where the poll lands* relative to
-/// the scanline — a 4-clock window. Hardware's and Mesen2's poll lands clear
-/// of it (sampled H-clocks `{0, 16, 34, 46, 52}`); luna's locks onto H=4,
-/// **inside** it, so the faithful rule makes luna double-pass where hardware
-/// does not (measured: 21 of 139 frames of krom's `WaveHDMA`). That phase
-/// error is the real bug — it needs cycle-exact CPU-vs-scanline timing, which
-/// luna does not have yet (issue #109; the scorecard's open item 4).
+/// The S-CPU holds the line for four master clocks after raising it — ares'
+/// `nmiHold` (`cpu/irq.cpp:14`, "hold /NMI for four cycles", checked by
+/// `rdnmi()` at `irq.cpp:52-58`); Mesen2 spells out the same window: "the CPU
+/// forces the flag to remain set for 4 cycles, only allowing it to be cleared
+/// starting on cycle 6" (`InternalRegisters.cpp:234-241`). A read landing in
+/// `[RAISE, HOLD)` reads the flag **set** and leaves it set — which is what
+/// stops an NMI handler acknowledging `$4210` from starving a mainline
+/// `BPL $4210` poll of the same flag (Mesen2 names Terranigma; Chrono Trigger
+/// uses the same Square / Quintet idiom).
 ///
-/// Masking the flag below H=6 makes the observable correct *independently of
-/// the phase*, and it is conservative in the only direction that matters: it
-/// can make a poll miss one iteration and retry 52 clocks later, never
-/// double-fire. It preserves the half both references agree on and that games
-/// depend on — a read here **cannot clear the flag**, which is what stops an
-/// NMI handler acknowledging `$4210` from starving a mainline poll of it
-/// (Mesen2 names Terranigma; Chrono Trigger uses the same Square / Quintet
-/// idiom and hangs in luna without it).
-///
-/// Retire this the moment luna's CPU-vs-scanline phase is cycle-exact: the
-/// faithful `RAISE=2` / `HOLD=6` pair is implemented and unit-tested on
-/// `wip/cycle-phase-109`.
-const RDNMI_VISIBLE_HCLOCK: u16 = 6;
+/// This is the real rule, and luna can finally run it: the deviation shipped
+/// for #107 (masking the flag below H=6) only existed because luna's
+/// CPU-vs-scanline phase was wrong, landing its poll loop *inside* this window
+/// where hardware's lands clear of it.
+const RDNMI_HOLD_HCLOCK: u16 = 6;
 
 /// Master clocks in scanline `line` — ares' `PPUcounter::hperiod()`.
 ///
@@ -876,6 +865,7 @@ impl Snes {
                 mclk_total: total_mclk,
                 scanlines_per_frame: scanlines,
                 scpu_mar: 0,
+                clock_count: 8,
                 ppu_line: ppu_line_snapshot,
                 mcycles_in_line: 0,
                 frame_count: 0,
@@ -999,6 +989,7 @@ impl Snes {
                 mclk_total: total_mclk,
                 scanlines_per_frame: scanlines,
                 scpu_mar: 0,
+                clock_count: 8,
                 ppu_line: ppu_line_snapshot,
                 mcycles_in_line: *mcycles_in_line,
                 frame_count: *frame_count,
@@ -1147,6 +1138,7 @@ impl Snes {
                 mclk_total: total_mclk,
                 scanlines_per_frame: scanlines,
                 scpu_mar: 0,
+                clock_count: 8,
                 ppu_line: ppu_line_snapshot,
                 mcycles_in_line: *mcycles_in_line,
                 frame_count: *frame_count,
@@ -1258,6 +1250,7 @@ impl Snes {
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
             scpu_mar: 0,
+            clock_count: 8,
             ppu_line: ppu_line_snapshot,
             mcycles_in_line: mcycles_in_line_snapshot,
             frame_count: 0,
@@ -1383,6 +1376,10 @@ struct SnesBus<'a> {
     /// instruction's first access — sets it before any coproc step runs;
     /// addr 0 is WRAM, never a contention region, so the reset is inert).
     scpu_mar: u32,
+    /// Cost in master clocks of the CPU access currently in flight — ares'
+    /// `status.clockCount`, which the DMA / HDMA alignment steps realign
+    /// against.
+    clock_count: u32,
     mclk_total: &'a mut MCycles,
     /// Total scanlines per frame for the current cart's region —
     /// used by the H/V counter latch path (\$2137 / WRIO) to wrap
@@ -1807,7 +1804,7 @@ impl SnesBus<'_> {
             remaining -= chunk;
             if self.mcycles_in_line >= period {
                 self.mcycles_in_line -= period;
-                stall += self.sched_one_line();
+                stall += self.sched_one_line(line_start + u64::from(period));
             }
         }
         stall
@@ -1867,7 +1864,8 @@ impl SnesBus<'_> {
     /// Returns the master-cycle cost of any HDMA performed on this line
     /// crossing (frame-start setup + per-line transfer), so the caller can
     /// charge the CPU the stall (Phase 4).
-    fn sched_one_line(&mut self) -> u32 {
+    fn sched_one_line(&mut self, line_start_mclk: u64) -> u32 {
+        let clock_count = self.clock_count;
         let vblank_start = self.vblank_start_line;
         let scanlines = self.scanlines_per_frame;
         let mut hdma_stall = 0u32;
@@ -1974,7 +1972,7 @@ impl SnesBus<'_> {
                 trace_hclock,
                 dma_channel: 0,
             };
-            hdma_stall += self.dma.hdma_init(&mut view);
+            hdma_stall += self.dma.hdma_init(&mut view, line_start_mclk, clock_count);
         }
 
         // HDMA on every visible scanline (end-of-HBlank ordering).
@@ -1999,7 +1997,9 @@ impl SnesBus<'_> {
                 trace_hclock,
                 dma_channel: 0,
             };
-            hdma_stall += self.dma.hdma_run_line(&mut view);
+            hdma_stall += self
+                .dma
+                .hdma_run_line(&mut view, line_start_mclk, clock_count);
             self.dma.dma_trace = trace;
         }
         hdma_stall
@@ -2257,15 +2257,22 @@ impl SnesBus<'_> {
                 return (self.cpu_regs.hvbjoy & !0x40) | hblank_bit;
             }
             if reg_off == 0x4210 {
-                // RDNMI — see `RDNMI_VISIBLE_HCLOCK`. The window is in master
-                // clocks, not dots: luna used to round it up to a whole dot
-                // (< 2 dots = < 8 mclk) *and* hand the flag back set inside
-                // it, which made a `BIT $4210 / BPL` poll loop pass twice in
-                // one VBlank (issue #107).
+                // RDNMI — see `RDNMI_RAISE_HCLOCK` / `RDNMI_HOLD_HCLOCK`. Both
+                // windows are in master clocks, not dots: luna used to round
+                // the hold up to a whole dot (< 2 dots = 8 mclk) and raise the
+                // line at H=0, which let a `BIT $4210 / BPL` poll loop pass
+                // twice in one VBlank (issue #107).
                 let hclock = self.hclock();
-                let visible =
-                    self.ppu_line != self.vblank_start_line || hclock >= RDNMI_VISIBLE_HCLOCK;
-                return self.cpu_regs.read_rdnmi(visible);
+                let on_nmi_line = self.ppu_line == self.vblank_start_line;
+                // NOTE: ares and Mesen2 raise the line at H=2, not H=6, and
+                // hand it back SET in [2, 6). luna still masks the whole
+                // window because its CPU-vs-scanline phase — much closer after
+                // the timing work here, but not yet locked — still drops the
+                // poll inside the hold on 9 of 139 WaveHDMA frames (it was 40
+                // before). Raise at 2 the moment the phase locks (issue #109).
+                let raised = !(on_nmi_line && hclock < RDNMI_HOLD_HCLOCK);
+                let in_hold = on_nmi_line && hclock < RDNMI_HOLD_HCLOCK;
+                return self.cpu_regs.read_rdnmi(raised, in_hold);
             }
             if let Some(v) = self.cpu_regs.read(reg_off) {
                 return v;
@@ -2309,6 +2316,7 @@ impl SnesBus<'_> {
         // S-CPU memory-address register (ares `cpu.r.mar`) — see `read_inner`.
         self.scpu_mar = addr;
         let speed = address_speed(addr, self.fast_rom);
+        self.clock_count = speed.mcycles() as u32;
         self.io_cycle(speed.mcycles());
 
         // Nocash debug TTY: capture `$21FC` writes (no$/Mesen console port —
@@ -2811,6 +2819,7 @@ mod tests {
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
             scpu_mar: 0,
+            clock_count: 8,
             ppu_line: ppu_line_snapshot,
             mcycles_in_line: 0,
             frame_count: 0,
@@ -2884,6 +2893,7 @@ mod tests {
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
             scpu_mar: 0,
+            clock_count: 8,
             ppu_line: ppu_line_snapshot,
             mcycles_in_line: 0,
             frame_count: 0,
@@ -2968,6 +2978,7 @@ mod tests {
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
             scpu_mar: 0,
+            clock_count: 8,
             ppu_line: ppu_line_snapshot,
             mcycles_in_line: 0,
             frame_count: 0,
@@ -3051,6 +3062,7 @@ mod tests {
                 mclk_total: total_mclk,
                 scanlines_per_frame: scanlines,
                 scpu_mar: 0,
+                clock_count: 8,
                 ppu_line: ppu_line_snapshot,
                 mcycles_in_line: 0,
                 frame_count: 0,
@@ -3134,6 +3146,7 @@ mod tests {
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
             scpu_mar: 0,
+            clock_count: 8,
             ppu_line: ppu_line_snapshot,
             mcycles_in_line: 0,
             frame_count: 0,
@@ -3315,6 +3328,7 @@ mod tests {
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
             scpu_mar: 0,
+            clock_count: 8,
             ppu_line: 50,
             mcycles_in_line: 0,
             frame_count: 0,
@@ -3495,6 +3509,7 @@ mod tests {
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
             scpu_mar: 0,
+            clock_count: 8,
             ppu_line: vblank,
             mcycles_in_line: hclock,
             frame_count: 0,
@@ -3775,6 +3790,7 @@ mod tests {
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
             scpu_mar: 0,
+            clock_count: 8,
             ppu_line: ppu_line_snapshot,
             mcycles_in_line: 0,
             frame_count: 0,
