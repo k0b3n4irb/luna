@@ -36,8 +36,17 @@ struct Case {
     id: &'static str,
     /// Filename inside `tests/roms/`.
     rom_filename: &'static str,
-    /// How many main-CPU instructions to run before sampling state.
-    insns: u64,
+    /// How many frames to run before sampling state.
+    ///
+    /// Anchored to FRAMES, not to an instruction count. A SNES game advances
+    /// its logic once per frame, so its state at frame N is the same however
+    /// cycle-exact the emulator's timing is — whereas a fixed instruction
+    /// count slides backwards through the game the moment the CPU spends more
+    /// master clocks per instruction, i.e. the moment it gets *more* accurate.
+    /// The audio-duration check below made that painfully literal: it asserted
+    /// emulated seconds for a fixed instruction budget, so it flagged every
+    /// timing improvement as a regression.
+    frames: u64,
     /// Plain-English description for failure messages.
     note: &'static str,
 }
@@ -46,20 +55,22 @@ const CASES: &[Case] = &[
     Case {
         id: "smw",
         rom_filename: "Super Mario World (U) [!].smc",
-        insns: 10_000_000,
-        note: "title screen, ~10 s of audio (no echo on this driver)",
+        frames: 736,
+        note: "title screen, ~12 s of audio (no echo on this driver)",
     },
     Case {
         id: "dkc",
         rom_filename: "Donkey Kong Country (U) (V1.2) [!].smc",
-        insns: 80_000_000,
-        note: "past Rareware logo, ~36 s of audio with echo + voices 4-6",
+        frames: 3253,
+        note: "past Rareware logo, ~54 s of audio with echo + voices 4-6",
     },
     Case {
         id: "bomberman",
         rom_filename: "Super Bomberman (USA).sfc",
-        insns: 60_000_000,
-        note: "title screen, ~63 s of audio",
+        // 4738 landed on a forced-blank frame between attract scenes — a black
+        // golden proves nothing. 4336 is the title screen proper.
+        frames: 4336,
+        note: "title screen, ~72 s of audio",
     },
 ];
 
@@ -236,7 +247,7 @@ fn write_audio_golden(case: &Case, stats: &AudioStats, duration_s: f64) {
         .unwrap_or(serde_json::Value::Array(vec![]));
     let golden = serde_json::json!({
         "rom": case.rom_filename,
-        "insns": case.insns,
+        "frames": case.frames,
         "note": case.note,
         "duration_s": (duration_s * 1000.0).round() / 1000.0,
         "stats": {
@@ -275,7 +286,7 @@ fn smoke() {
             skipped += 1;
             continue;
         }
-        eprintln!("RUN  {} ({}M insns)", case.id, case.insns / 1_000_000);
+        eprintln!("RUN  {} ({} frames)", case.id, case.frames);
 
         let mut emu = Emulator::new();
         if let Err(e) = emu.load_rom(&rom_path) {
@@ -287,15 +298,17 @@ fn smoke() {
         // the audio. Chunk the step + drain incrementally, same trick
         // luna-cli uses when emitting `--audio-out`.
         let mut audio: Vec<(i16, i16)> = Vec::new();
-        let mut left = case.insns;
         let mut step_err: Option<String> = None;
-        while left > 0 {
-            let take = left.min(AUDIO_CHUNK);
+        // Safety net only — a hung ROM must not spin forever. The budget is
+        // `case.frames`; this must never be what stops a healthy run.
+        let mut guard = 400_000_000u64;
+        while emu.frame_count().unwrap_or(u64::MAX) < case.frames && guard > 0 {
+            let take = AUDIO_CHUNK.min(guard);
             if let Err(e) = emu.step(take) {
                 step_err = Some(format!("{}: step failed: {e}", case.id));
                 break;
             }
-            left -= take;
+            guard -= take;
             if let Ok(mut chunk) = emu.drain_audio(usize::MAX) {
                 audio.append(&mut chunk);
             }
