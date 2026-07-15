@@ -100,12 +100,25 @@ enum Command {
         /// and how strongly each may be asserted.
         #[arg(long)]
         print_fbhash: bool,
+        /// Emit the native 512×448 frame (issue #115): hi-res modes 5/6 and
+        /// pseudo-512 keep their two horizontal subpixels per dot, interlace
+        /// keeps both fields as separate lines — instead of the default
+        /// 256×224 averaged view. Applies to `--screenshot` and
+        /// `--print-fbhash`.
+        #[arg(long = "native-res")]
+        native_res: bool,
         /// Force a cartridge mapper, bypassing header auto-detection — same as
         /// `state`/`frames` (issue #95). Needed for checksum-invalid homebrew /
         /// reference ROMs (e.g. the `PeterLemon` corpus) so they can reach
         /// `--print-fbhash`. One of: lorom, hirom, exhirom, sa1, superfx.
         #[arg(long = "force-mapper")]
         force_mapper: Option<String>,
+        /// Force the video standard (ntsc, pal), overriding the cartridge
+        /// header's country byte. Changes the scanline count (262/312) and
+        /// frame rate — required to reproduce the golden harness, which runs
+        /// the `PeterLemon` corpus as PAL to match krom's reference captures.
+        #[arg(long = "force-region")]
+        force_region: Option<String>,
     },
     /// Serve the Luna MCP server on stdio.
     ///
@@ -133,6 +146,12 @@ enum Command {
         /// superfx.
         #[arg(long = "force-mapper")]
         force_mapper: Option<String>,
+        /// Force the video standard (ntsc, pal), overriding the cartridge
+        /// header's country byte. Changes the scanline count (262/312) and
+        /// frame rate — required to reproduce the golden harness, which runs
+        /// the `PeterLemon` corpus as PAL to match krom's reference captures.
+        #[arg(long = "force-region")]
+        force_region: Option<String>,
         /// Install a DSP coprocessor firmware (`dsp1b.rom`) into luna's
         /// firmware folder, then load — needed for DSP-1 games (Super
         /// Mario Kart, Pilotwings). Persists for future runs.
@@ -160,6 +179,13 @@ enum Command {
         /// `state` run can also emit a visual baseline.
         #[arg(long)]
         print_fbhash: bool,
+        /// Emit the native 512×448 frame (issue #115): hi-res modes 5/6 and
+        /// pseudo-512 keep their two horizontal subpixels per dot, interlace
+        /// keeps both fields as separate lines — instead of the default
+        /// 256×224 averaged view. Applies to `--screenshot` and
+        /// `--print-fbhash`.
+        #[arg(long = "native-res")]
+        native_res: bool,
         /// Dump all 64 KB of PPU VRAM (raw bytes) to this file after the
         /// run. For diagnosing the framebuffer DMA → VRAM → display path.
         #[arg(long = "dump-vram")]
@@ -397,6 +423,12 @@ enum Command {
         /// (lorom, hirom, exhirom, sa1, superfx).
         #[arg(long = "force-mapper")]
         force_mapper: Option<String>,
+        /// Force the video standard (ntsc, pal), overriding the cartridge
+        /// header's country byte. Changes the scanline count (262/312) and
+        /// frame rate — required to reproduce the golden harness, which runs
+        /// the `PeterLemon` corpus as PAL to match krom's reference captures.
+        #[arg(long = "force-region")]
+        force_region: Option<String>,
         /// Scripted joypad-1 input, same `frame:hex` format as
         /// `state --input`, applied during the warm-up so the capture
         /// can land in gameplay rather than at a title screen.
@@ -437,6 +469,12 @@ enum Command {
         /// Force a cartridge mapper (lorom, hirom, exhirom, sa1, superfx).
         #[arg(long = "force-mapper")]
         force_mapper: Option<String>,
+        /// Force the video standard (ntsc, pal), overriding the cartridge
+        /// header's country byte. Changes the scanline count (262/312) and
+        /// frame rate — required to reproduce the golden harness, which runs
+        /// the `PeterLemon` corpus as PAL to match krom's reference captures.
+        #[arg(long = "force-region")]
+        force_region: Option<String>,
         /// Scripted joypad-1 input, same `frame:hex` format as `state --input`.
         #[arg(long)]
         input: Option<String>,
@@ -478,6 +516,12 @@ enum Command {
         /// Force a cartridge mapper (lorom, hirom, exhirom, sa1, superfx).
         #[arg(long = "force-mapper")]
         force_mapper: Option<String>,
+        /// Force the video standard (ntsc, pal), overriding the cartridge
+        /// header's country byte. Changes the scanline count (262/312) and
+        /// frame rate — required to reproduce the golden harness, which runs
+        /// the `PeterLemon` corpus as PAL to match krom's reference captures.
+        #[arg(long = "force-region")]
+        force_region: Option<String>,
         /// Install a DSP coprocessor firmware (`dsp1b.rom`) then load —
         /// needed for DSP-1 games (Super Mario Kart, Pilotwings).
         #[arg(long = "dsp1-rom")]
@@ -515,6 +559,12 @@ enum Command {
         /// Force a cartridge mapper (lorom, hirom, exhirom, sa1, superfx).
         #[arg(long = "force-mapper")]
         force_mapper: Option<String>,
+        /// Force the video standard (ntsc, pal), overriding the cartridge
+        /// header's country byte. Changes the scanline count (262/312) and
+        /// frame rate — required to reproduce the golden harness, which runs
+        /// the `PeterLemon` corpus as PAL to match krom's reference captures.
+        #[arg(long = "force-region")]
+        force_region: Option<String>,
         /// Install a DSP coprocessor firmware (`dsp1b.rom`) then load.
         #[arg(long = "dsp1-rom")]
         dsp1_rom: Option<PathBuf>,
@@ -538,7 +588,9 @@ fn main() -> ExitCode {
             nocash_out,
             wdm_out,
             print_fbhash,
+            native_res,
             force_mapper,
+            force_region,
         } => run(
             &rom,
             steps,
@@ -549,13 +601,16 @@ fn main() -> ExitCode {
             nocash_out.as_deref(),
             wdm_out.as_deref(),
             print_fbhash,
+            native_res,
             force_mapper.as_deref(),
+            force_region.as_deref(),
         ),
         Command::Mcp => serve_mcp(),
         Command::State {
             rom,
             steps,
             force_mapper,
+            force_region,
             dsp1_rom,
             sym,
             load_state,
@@ -600,10 +655,12 @@ fn main() -> ExitCode {
             dump_aram,
             wdm_out,
             print_fbhash,
+            native_res,
         } => run_state(
             &rom,
             steps,
             force_mapper.as_deref(),
+            force_region.as_deref(),
             dump_vram.as_deref(),
             dump_coproc_ram.as_deref(),
             dump_aram.as_deref(),
@@ -648,6 +705,7 @@ fn main() -> ExitCode {
             load_state.as_deref(),
             wdm_out.as_deref(),
             print_fbhash,
+            native_res,
         ),
         Command::Frames {
             rom,
@@ -655,6 +713,7 @@ fn main() -> ExitCode {
             count,
             out_dir,
             force_mapper,
+            force_region,
             input,
         } => run_frames(
             &rom,
@@ -662,6 +721,7 @@ fn main() -> ExitCode {
             count,
             &out_dir,
             force_mapper.as_deref(),
+            force_region.as_deref(),
             input.as_deref(),
         ),
         Command::WramTrace {
@@ -673,6 +733,7 @@ fn main() -> ExitCode {
             dump_frame,
             dump_out,
             force_mapper,
+            force_region,
             input,
         } => run_wram_trace(
             &rom,
@@ -683,6 +744,7 @@ fn main() -> ExitCode {
             dump_frame,
             &dump_out,
             force_mapper.as_deref(),
+            force_region.as_deref(),
             input.as_deref(),
         ),
         Command::Bench {
@@ -706,6 +768,7 @@ fn main() -> ExitCode {
             steps,
             out,
             force_mapper,
+            force_region,
             dsp1_rom,
             input,
         } => run_spc_dump(
@@ -713,6 +776,7 @@ fn main() -> ExitCode {
             steps,
             out.as_deref(),
             force_mapper.as_deref(),
+            force_region.as_deref(),
             dsp1_rom.as_deref(),
             input.as_deref(),
         ),
@@ -723,6 +787,7 @@ fn main() -> ExitCode {
             bpp,
             palette,
             force_mapper,
+            force_region,
             dsp1_rom,
             input,
         } => run_assets_dump(
@@ -732,6 +797,7 @@ fn main() -> ExitCode {
             bpp,
             palette,
             force_mapper.as_deref(),
+            force_region.as_deref(),
             dsp1_rom.as_deref(),
             input.as_deref(),
         ),

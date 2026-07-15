@@ -53,9 +53,19 @@ luna run [OPTIONS] <ROM>
 | `--force-display` | off | Bypass INIDISP forced-blank so you see whatever is in VRAM/CGRAM. |
 | `--bg <1..=4>` | composited | Render ONLY that BG layer instead of the composited frame. |
 | `--audio-out <PATH>` | — | Capture the APU's 32 kHz stereo output to a WAV. |
+| `--force-mapper <M>` | auto | Force a mapper (`lorom`/`hirom`/`exhirom`/`sa1`/`superfx`) for a headerless / checksum-invalid ROM. |
+| `--force-region <R>` | header | Force the video standard (`ntsc`/`pal`) — changes the scanline count (262/312) and frame rate. |
+| `--native-res` | off | Emit the native **512×448** frame for `--screenshot`/`--print-fbhash`: hi-res modes 5/6 & pseudo-512 keep both horizontal subpixels, interlace keeps both fields as lines. |
+| `--wdm-out <PATH>` | — | Write captured `WDM $xx` executions (the `SNES_ASSERT` channel) — a non-empty file means an assertion fired. |
+| `--print-fbhash` | off | Print `fbhash=<16-hex>`, a cross-arch-stable key for the displayed frame. |
 
 ```bash
 luna run -n 12000000 --screenshot /tmp/title.png "game.sfc"
+
+# Visual baseline for a reference ROM with a bad header (e.g. a PeterLemon
+# test ROM): force the mapper so it renders, and print the hash key.
+luna run -n 3000000 --force-mapper lorom --print-fbhash "WaveHDMA.sfc"
+# → fbhash=7429bf441a1c7d6c   (record this as the test's expected value)
 ```
 
 ### `luna state` — JSON snapshot + diagnostics (the workhorse)
@@ -73,6 +83,8 @@ and is the hub for every headless diagnostic.
 | `-n, --steps <N>` | `1000` | CPU instructions before snapshotting. |
 | `--out <PATH>` | `-` | Where to write the JSON (`-` = stdout). |
 | `--force-mapper <M>` | auto | Force a mapper for headerless ROMs: `lorom`, `hirom`, `exhirom`, `sa1`, `superfx`. |
+| `--force-region <R>` | header | Force the video standard: `ntsc` or `pal`. |
+| `--native-res` | off | As in `run` — native 512×448 output for `--screenshot` and `--print-fbhash`. |
 | `--sym <PATH>` | auto-detect `<rom>.sym` | Load a WLA-DX symbol file (annotated disasm, named addresses). |
 | `--dsp1-rom <PATH>` | — | Install `dsp1b.rom` firmware then load (Mario Kart, Pilotwings). Persists. |
 | `--load-state <PATH>` | — | Load a `.luna` save-state right after ROM load, before warm-up (resume a GUI-captured scene). |
@@ -85,6 +97,8 @@ and is the hub for every headless diagnostic.
 | `--dump-coproc-ram <PATH>` | — | Dump coprocessor work RAM (Super FX Game Pak RAM), ungated. |
 | `--apu-log <PATH>` | — | CSV of every `$2140-$2143` CPU↔APU mailbox access. |
 | `--sa1-log <PATH>` | — | CSV of every `$2200-$23FF` SA-1 MMIO access. |
+| `--print-fbhash` | off | Print `fbhash=<16-hex>` for the displayed frame — the same key as `run`, so an `--input`-driven test can carry a visual baseline. |
+| `--wdm-out <PATH>` | — | Write captured `WDM $xx` (`SNES_ASSERT`) executions — keeps the assertion oracle on an `--input` test. |
 
 ```bash
 # JSON snapshot to stdout, plus a peek at SMW shadow-OAM
@@ -94,6 +108,30 @@ luna state -n 1000000 --peek 7E:0200:220 "game.sfc"
 luna state -n 55000000 \
   --input "1600:0x1000,1610:0,2000:0x1000,2010:0" \
   --screenshot /tmp/name.png "game.sfc"
+
+# A self-contained gameplay regression test: drive input, then emit BOTH a
+# visual baseline (fbhash) and the assertion oracle (WDM) in one run.
+luna state -n 55000000 --input @repro.input \
+  --print-fbhash --wdm-out /tmp/asserts.txt "game.sfc"
+```
+
+Reproduce the golden harness's configuration exactly — it runs the homebrew
+corpus as **PAL** to match krom's reference captures, which a blank test-ROM
+header can't say:
+
+```bash
+luna state -n 5000000 --force-mapper lorom --force-region pal \
+  --screenshot /tmp/bra.png "CPUTest/CPU/BRA/CPUBRA.sfc"
+```
+
+Exact-resolution regression for the hi-res / interlace demos (issue #115): the
+PPU really computes 512 horizontal subpixels and two interlace fields, then
+averages them into the displayed 256×224 — `--native-res` keeps them:
+
+```bash
+luna state -n 8000000 --force-mapper lorom --force-region pal --native-res \
+  --screenshot /tmp/font.png --print-fbhash \
+  "PPU/Interlace/InterlaceFont/InterlaceFont.sfc"   # → a 512×448 PNG
 ```
 
 ### `luna frames` — consecutive-frame capture (temporal artefacts)
@@ -239,10 +277,22 @@ stream. No options — configure the client to launch `luna mcp`.
 | `ppu` | PPU registers + VRAM/CGRAM/OAM occupancy. |
 | `scheduler` | Master-clock / line / frame scheduler state. |
 | `apu` | SPC700 + S-DSP state (`spc_stopped`, etc.). |
-| `dma` | DMA/HDMA channel state. |
+| `dma` | Per-channel DMA/HDMA registers (see below). |
 | `stats` | Counters: `nmis_serviced`, frame count, instruction count, NMI rate, … |
 
 (See the `luna-api` rustdoc for the full nested field set.)
+
+The `dma` block is the headless surface for the `$43xx` DMA/HDMA registers —
+which read `0` through `--peek` because they are **write-only on hardware**.
+Each of `dma.channels[0..8]` gives `params` (DMAP), `bbad` (BBAD, target
+`$2100+bbad`), `a_addr` (A1T, table start), `a_bank`, `das`, `a2a` (HDMA
+indirect / table pointer) and `ntlr` (HDMA line counter):
+
+```bash
+# Watch an HDMA table pointer advance per frame (e.g. a scanline wave effect)
+luna state -n 3000000 --force-mapper lorom --out - "WaveHDMA.sfc" \
+  | jq '.dma.channels[0] | {bbad, a_addr, ntlr}'
+```
 
 ---
 
@@ -255,6 +305,15 @@ PPU frame and held until the next checkpoint overrides it.
 
 ```
 --input "100:0x1000,110:0"   # hold Start for frames 100..=109, then release
+```
+
+`--input` also accepts **`@<file>`** to read the script from a file, and the
+grammar allows `#` comments and newlines — so a recording exported from
+`luna-gui` (*Emulation ▸ ● Record input*) or the MCP `take_input_capture`
+tool replays straight back:
+
+```bash
+luna state -n 60000000 --input @gameplay.input "game.sfc"
 ```
 
 **JOY1 bit layout:** `B(15) Y(14) Select(13) Start(12) Up(11) Down(10)
@@ -326,6 +385,10 @@ method, so the MCP transport adds reach, not capability.
 | `bp_add` | `bp_add_exec` / `bp_add_mem` | Register an exec breakpoint or a read/write watchpoint range. |
 | `bp_remove` / `bp_clear_all` / `bp_list` | `bp_remove` / `bp_clear` / `bp_list` | Manage the breakpoint registry. |
 | `run_until_break` | `run_until_break` | Run at full speed until a breakpoint fires (or a step budget). |
+| `run` / `pause` | `run_until_break_interruptible` | Unbounded interruptible run: `run` goes until a breakpoint / `STOP` / `pause`; `pause` stops it (returns `interrupted: true`). No mandatory step budget. |
+| `peek_oam` | `peek_oam` | All 544 OAM bytes (512 low table + 32 high table). |
+| `capabilities` | — | luna `version` + the live tool catalogue, for client feature-detection (the handshake `serverInfo.version` is rmcp's, not luna's). |
+| `start_input_capture` / `take_input_capture` | `start_input_capture` / `take_input_capture` | Record joypad changes and export a `frame:mask` script (replay with `--input @file`). |
 | `load_symbols` | `load_symbols` | Load a WLA-DX `.sym`; disasm + traces become annotated. |
 | `resolve_symbol` | `resolve_symbol` | Label name → 24-bit address. |
 

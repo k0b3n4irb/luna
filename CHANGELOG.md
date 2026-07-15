@@ -6,6 +6,101 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-07-15
+
+The accuracy release. The CPU↔scanline phase work (#107 → #109) lands end to
+end: on krom's `CPUBRA`, luna and Mesen2 now execute a **cycle-identical
+instruction stream over 841 386 instructions** — and the `$4210` deviation
+that opened the chain is retired for the faithful hardware rule. Around it:
+`--force-region`, native 512×448 output for the OpenSNES interlace port, and
+a golden-test net re-anchored on frames so it survives accuracy work instead
+of penalising it.
+
+### Fixed
+- **CPU↔scanline phase locked — ares' two remaining timing terms** (#109,
+  closing the chain opened by #107):
+  - **read sample point**: the bus is now sampled four master clocks before
+    the access ends (`step(cost−4); read; step(4)`, ares `cpu/memory.cpp`,
+    Mesen2 `SnesMemoryManager::Read`) instead of at the end — every H-clock-
+    dependent register read (`$4210`, `$4212`, `$2137`) observes the bus where
+    hardware does, and traces/watchpoints timestamp at that point;
+  - **deferred `dmaEdge`**: a `$420B` write only *arms* the transfer (ares
+    `dmaPending`); the burst executes at the next bus access and is charged to
+    the next instruction, where Mesen2's per-instruction trace places it. The
+    DMA/HDMA realignment step now also uses the true in-flight access cost.
+  Result: on `CPUBRA`, luna and Mesen2 are **cycle-identical over 841 386
+  instructions — not a single per-instruction delta differs**. The phase is
+  locked, so the faithful RDNMI rule (raise at H=2, readable-set hold in
+  [2,6)) replaces #107's conservative masking: `WaveHDMA` polls exactly once
+  on 139/139 frames while keeping the Terranigma / Chrono Trigger protection,
+  and its HDMA table advances +3/frame on 446/449. Save-state version bumped
+  (a pending-DMA field is serialized). Nine goldens re-baselined (eyeballed;
+  the two moved PCM goldens have identical loudness/attack stats — LSB-level
+  differences only).
+- **CPU↔scanline phase: five faithful timing fixes** (#109), each read out of
+  ares and verified by a per-instruction master-clock differential against
+  Mesen2 — on krom's `CPUBRA` the two emulators now execute an **identical PC
+  stream over 841 386 instructions with a total drift of −8 master clocks**:
+  - the CPU's **reset sequence** (132 clocks + vector fetch, ares' `//H=186`)
+    was never charged, so luna's entire CPU-vs-scanline phase ran 186 clocks
+    early;
+  - the once-per-scanline **DRAM refresh was not charged during DMA** — a
+    64 KiB VRAM clear finished 15 840 clocks early;
+  - the **refresh position** was pinned at 538 instead of ares'
+    `530 + 8 − dmaCounter()` (531..538, aligned to the DMA clock), and fired
+    one chunk late;
+  - `STZ $420B` (no channels) paid an 8-clock DMA overhead hardware doesn't,
+    and a real burst was missing ares' alignment + per-channel steps;
+  - the **HDMA per-line cost** (scorecard/audit item #11) is now ares' model —
+    8 clocks per A-bus read including the every-line table read, replacing the
+    flat `18 + 8×bytes` — closing ~1 000 clocks of phase error per frame on
+    HDMA-heavy scenes.
+  The NTSC **short scanline** (line 240 of odd fields = 1360 clocks) is now
+  representable: (H, V) derive from incremental counters instead of dividing
+  the master clock. Audio validated by ear in the GUI; 18 goldens
+  re-baselined (one-frame shifts, each eyeballed); the full HDMA commercial
+  corpus swept clean.
+- **Golden harness: the `CPUTest` family now runs as NTSC.** The old PAL
+  forcing was calibrated against luna's too-fast boot: with cycle-exact
+  timing (and per Mesen2, pixel-for-pixel), the ROMs' single-burst result
+  table genuinely overruns PAL's VBlank and truncates mid-row. In NTSC both
+  emulators render the full all-PASS table — and all 23 goldens pass with
+  their existing hashes, now timing-invariant.
+
+### Added
+- **CLI: `--force-region <ntsc|pal>`** on every ROM-loading subcommand (`run`,
+  `state`, `frames`, `wram-trace`, the dump commands), backed by
+  `Emulator::set_forced_region` in `luna-api`. Overrides the cartridge header's
+  country byte, changing the scanline count (262/312) and frame rate. Exists
+  because the golden harness runs the homebrew corpus as PAL to match krom's
+  reference captures, and a timing investigation (#109) must be able to
+  reproduce that exact configuration — with `--mem-trace`, `--cpu-trace` and
+  the Mesen2 differential attached — from the command line.
+
+### Fixed
+- **CPU: `$4210` (RDNMI) was readable too early, so `WaitNMI` poll loops ran
+  the game twice per frame** (#107). The classic no-NMI idiom — `WaitNMI: BIT
+  $4210 / BPL WaitNMI` — passed **twice** in one VBlank whenever its read
+  landed in the first clocks of the VBlank scanline: luna handed the flag back
+  *set* there but, being inside the window where the S-CPU forbids clearing it,
+  could not clear it, so the very next poll passed again. Every demo in the
+  PeterLemon corpus idles on that macro, so they all animated ~4/3x too fast
+  (krom's `WaveHDMA` advanced its HDMA table +4 bytes/frame instead of +3),
+  which made luna useless as a behavioural reference for porting them.
+  luna now masks the flag below H-clock 6 of the VBlank scanline: a `$4210`
+  read there sees it **clear** and still cannot clear it, which keeps the
+  protection that an NMI handler acknowledging `$4210` must not starve a
+  mainline poll of the same flag (Terranigma, Chrono Trigger). Verified
+  against a Mesen2 headless trace of `WaveHDMA`: exactly one pass per frame,
+  HDMA table pointer +3/frame. Note this masking is a **deliberate deviation**
+  from ares and Mesen2, which both hand the flag back *set* in that window: the
+  outcome actually hinges on where the poll loop lands relative to the
+  scanline, and luna's lands inside the window where hardware's does not. The
+  faithful rule needs cycle-exact CPU-vs-scanline timing first (#109); the
+  masking is conservative — it can only make a poll retry, never double-fire.
+  Three PeterLemon goldens were re-baselined (same clean picture, correct
+  animation phase); no commercial-title golden moved.
+
 ## [1.9.0] — 2026-07-12
 
 Debugger + toolchain polish from a joint review with Cooper (the OpenSNES

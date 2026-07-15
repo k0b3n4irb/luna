@@ -41,16 +41,65 @@ const FRAME_W: usize = luna_ppu::FRAME_W;
 const FRAME_H: usize = luna_ppu::FRAME_H;
 
 /// Hard ceiling on instructions, in case a ROM never settles or loops.
-const STEP_CAP: u64 = 30_000_000;
+/// Frame budget for the settle-runner. Like the commercial-game runner (see
+/// [`run_game_to_frame`]) the capture point is anchored to a FRAME, never to an
+/// instruction count: a demo animates per frame, so frame N is the same picture
+/// however cycle-exact the CPU's timing is, while a fixed instruction count
+/// slides backwards through the ROM the moment that timing gets *more*
+/// accurate. Most of these ROMs settle to a static screen long before this and
+/// never reach it — for them it is only a ceiling.
+const FRAME_CAP: u64 = 2300;
+
+/// Hang guard for the settle-runner — never the thing that stops a healthy run.
+/// It has to be generous: a ROM that busy-waits on `VBlank` (all five `CPUTest`
+/// ROMs do) spends *more* instructions per frame as the emulation gets more
+/// cycle-accurate, and the old 30M cap silently truncated them mid-run, leaving
+/// goldens of half-drawn "BCC PASS / BCS PASS / BNE…" screens — throwing away
+/// the very assertion those tests exist to make.
+const STEP_CAP: u64 = 200_000_000;
+
+/// Safety net for the frame-anchored commercial-game runs — a ROM that hangs
+/// must not spin forever. It is deliberately generous: the *budget* is the
+/// frame target (see [`run_game_to_frame`]), and this must never be what stops
+/// a healthy run, or we are back to an instruction-indexed capture that slides
+/// whenever the CPU's cycle timing improves.
+const GAME_STEP_CAP: u64 = 200_000_000;
 /// SPC700 ALU tests run every addressing mode before the pass/fail verdict
 /// lands in the mailbox (ADC/SBC ~35M instructions), so they get a higher
 /// ceiling than the framebuffer-settle tests (some of which intentionally
 /// cap-out mid-animation and must keep their 30M frame).
 const SPC700_STEP_CAP: u64 = 45_000_000;
 /// Sample the framebuffer hash every this many instructions.
-const SAMPLE_EVERY: u64 = 100_000;
+const SAMPLE_FRAMES: u64 = 30;
+
+/// Instruction batch between mailbox polls in the SPC700 runner. That one reads
+/// a `$2140` mailbox, not the framebuffer, and its ROMs signal completion
+/// explicitly — so it has no settle heuristic to get wrong and stays in
+/// instructions.
+const SPC_POLL_EVERY: u64 = 100_000;
 /// Consecutive identical samples that count as "settled".
 const STABLE_SAMPLES: u32 = 8;
+
+// The settle window is therefore SAMPLE_FRAMES * STABLE_SAMPLES = 240 frames,
+// i.e. four seconds of unchanged picture. It has to be wide, because "the
+// screen has not changed" is a weak signal: a ROM that is merely PAUSED between
+// two printed lines looks exactly like one that has finished. The `CPUTest`
+// ROMs wait for VBlank, do a VRAM DMA, then compute — and once the DMA is
+// charged its real cost (the DRAM refresh halts it, as on hardware) that work
+// no longer fits in one VBlank, so they lose a frame per line and their pauses
+// stretch well past a second. A narrow window mistakes that for completion and
+// freezes a half-drawn "BCC PASS / BCS PASS / BNE…" screen as the golden.
+//
+// NOTE on both of the above: the settle criterion is measured in FRAMES, not
+// instructions, and that is not cosmetic. It used to sample every 100k
+// instructions and call the ROM settled after 8 unchanged samples. But a ROM
+// that busy-waits on VBlank executes MORE instructions per frame as the
+// emulation gets more cycle-accurate — so 100k instructions buys fewer and
+// fewer frames, the stability window shrinks in real time, and a ROM that is
+// merely PAUSED between two printed lines looks finished. That is exactly how
+// the five `CPUTest` goldens ended up as half-drawn "BCC PASS / BCS PASS /
+// BNE…" screens. In frames the window is what it says it is, whatever the CPU
+// timing does.
 
 /// Corpus root: `$LUNA_SNES_TEST_DIR`, else the sibling `../luna_tests`.
 fn corpus_root() -> Option<PathBuf> {
@@ -85,16 +134,23 @@ fn fb_bytes(snes: &Snes) -> Vec<u8> {
 /// Boot a forced-LoROM ROM and run until the framebuffer settles (or the
 /// step cap / a `STP` / a CPU panic). Returns the framebuffer bytes.
 ///
-/// The ROM is loaded as **PAL**, matching the `twvd/siena` convention.
-/// Peter Lemon's suite is PAL-timed: several tests do a single `WaitNMI`
-/// then write the whole result table in one burst that only fits inside
-/// PAL's longer V-blank (~72 lines vs NTSC's 37). Run as NTSC, luna
-/// correctly drops the writes that overflow into active display and the
-/// screen stays blank — so PAL is required to reproduce the reference
-/// output.
-fn run_to_stable(rom: Vec<u8>, hold: u16) -> Vec<u8> {
+/// `region` picks the video standard, and it is a per-family decision:
+///
+/// - The PPU demos run as **PAL**, matching the `twvd/siena` convention and
+///   krom's reference captures.
+/// - The `CPUTest` family runs as **NTSC**. It used to be PAL too, on the
+///   theory that its result table only fits inside PAL's longer V-blank —
+///   but that was calibrated against luna's old, too-fast boot (the DRAM
+///   refresh was not charged during DMA). With cycle-exact timing the truth
+///   is the opposite, and **Mesen2 agrees on both counts**: in PAL the write
+///   burst overruns V-blank and the table is truncated mid-row (Mesen2's PAL
+///   screen is pixel-identical to luna's, last VRAM write within 2 master
+///   clocks), while in NTSC both emulators render the full all-PASS table.
+///   A truncated table has no assertion value; NTSC keeps it, and the final
+///   screen being static makes the golden timing-invariant.
+fn run_to_stable(rom: Vec<u8>, hold: u16, region: luna_cartridge::Region) -> Vec<u8> {
     let mut cart = Cartridge::from_bytes_forced(rom, MapperKind::LoRom).expect("forced LoROM load");
-    cart.header.region = luna_cartridge::Region::Pal;
+    cart.header.region = region;
     let mut snes = Snes::from_cartridge(cart);
     snes.reset();
 
@@ -115,8 +171,9 @@ fn run_to_stable(rom: Vec<u8>, hold: u16) -> Vec<u8> {
     let mut last = String::new();
     let mut stable = 0u32;
     let mut executed = 0u64;
-    'run: while executed < STEP_CAP {
-        for _ in 0..SAMPLE_EVERY {
+    'run: while executed < STEP_CAP && snes.frame_count < FRAME_CAP {
+        let sample_at = snes.frame_count + SAMPLE_FRAMES;
+        while snes.frame_count < sample_at && executed < STEP_CAP {
             if snes.cpu.stopped {
                 break;
             }
@@ -192,12 +249,23 @@ fn games_root() -> Option<PathBuf> {
     p.is_dir().then_some(p)
 }
 
-/// Boot a commercial ROM (auto-detected mapper + native region) with no input
-/// and run a FIXED instruction count, returning the framebuffer. Fixed-count
-/// (not settle) because these scenes animate; luna is deterministic, so the
-/// hash is stable run-to-run and moves only when emulation behaviour changes —
-/// re-record (`LUNA_SNES_TEST_RECORD=1`) after an intended render/timing change.
-fn run_game_fixed(rom: Vec<u8>, instructions: u64) -> Vec<u8> {
+/// Boot a commercial ROM (auto-detected mapper + native region) with no input,
+/// run to **frame `frames`**, and return the framebuffer. These scenes animate
+/// and never settle, so the capture point has to be pinned to something.
+///
+/// It is pinned to a FRAME, not to an instruction count, and that distinction
+/// is the whole point. A SNES game advances its logic once per frame (its NMI
+/// handler), so its state at frame N is the same no matter how cycle-exact the
+/// emulator's timing is. An instruction count is not: make the CPU spend more
+/// master clocks per instruction — i.e. make it *more* accurate — and a
+/// fixed-instruction capture slides backwards through the game. That made the
+/// golden suite penalise every accuracy improvement, and it silently truncated
+/// the `CPUTest` ROMs mid-run (they wait on `VBlank`, so a longer frame costs
+/// them busy-wait instructions rather than progress). Frame-anchored, the
+/// captures survive timing work; only a real behaviour change moves them.
+///
+/// `GAME_STEP_CAP` is a safety net for a ROM that hangs, nothing more.
+fn run_game_to_frame(rom: Vec<u8>, frames: u64) -> Vec<u8> {
     let cart = Cartridge::from_bytes(rom).expect("auto-detect cartridge");
     let mut snes = Snes::from_cartridge(cart);
     snes.reset();
@@ -205,7 +273,7 @@ fn run_game_fixed(rom: Vec<u8>, instructions: u64) -> Vec<u8> {
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let mut executed = 0u64;
-    while executed < instructions {
+    while snes.frame_count < frames && executed < GAME_STEP_CAP {
         if snes.cpu.stopped {
             break;
         }
@@ -215,13 +283,16 @@ fn run_game_fixed(rom: Vec<u8>, instructions: u64) -> Vec<u8> {
         executed += 1;
     }
     std::panic::set_hook(prev_hook);
+    // Stopping the instant the counter ticks over leaves the framebuffer
+    // holding the frame that just completed — a whole, coherent picture,
+    // where a mid-frame stop caught a mix of two.
     fb_bytes(&snes)
 }
 
 /// Boot `rel` (relative to the corpus root), settle, and compare the
 /// framebuffer SHA-256 to `expected`. Skips gracefully if the corpus or
 /// the specific ROM is absent.
-fn test_display(rel: &str, expected: &str, hold: u16) {
+fn test_display(rel: &str, expected: &str, hold: u16, region: luna_cartridge::Region) {
     let Some(root) = corpus_root() else {
         eprintln!(
             "[skip] SNES test corpus not found — checkout ../luna_tests \
@@ -236,7 +307,7 @@ fn test_display(rel: &str, expected: &str, hold: u16) {
     }
 
     let rom = std::fs::read(&path).expect("read rom");
-    let bytes = run_to_stable(rom, hold);
+    let bytes = run_to_stable(rom, hold, region);
     let got = hex(&Sha256::digest(&bytes));
 
     if std::env::var("LUNA_SNES_TEST_RECORD").is_ok() {
@@ -264,13 +335,61 @@ macro_rules! cpu_test {
                 concat!("CPUTest/CPU/", $name, "/CPU", $name, ".sfc"),
                 $hash,
                 0,
+                luna_cartridge::Region::Ntsc,
             );
         }
     };
 }
 
-// Golden hashes captured from luna's renderer (loaded as PAL — see
-// `run_to_stable`). All 23 render the correct all-PASS result screen.
+/// Issue #115: the native 512×448 capture, end to end. Boots `InterlaceFont`
+/// (mode 5 hi-res + SETINI interlace — the exact class the feature exists
+/// for), runs it to its settled font grid with capture on, and pins the
+/// SHA-256 of the native buffer. krom ships a real-hardware 512×448 PNG of
+/// this screen; luna's native frame measures 95.9 % pixel-exact against it
+/// (the rest is a uniform few-LSB colorimetric offset from the capture
+/// chain), so this hash is a true exact-resolution baseline.
+#[test]
+fn ppu_interlace_font_native_512x448() {
+    let Some(root) = corpus_root() else {
+        eprintln!("[skip] SNES test corpus not found");
+        return;
+    };
+    let path = root.join("PPU/Interlace/InterlaceFont/InterlaceFont.sfc");
+    let Ok(rom) = std::fs::read(&path) else {
+        eprintln!("[skip] {} absent", path.display());
+        return;
+    };
+    let mut cart = Cartridge::from_bytes_forced(rom, MapperKind::LoRom).expect("forced LoROM load");
+    cart.header.region = luna_cartridge::Region::Pal;
+    let mut snes = Snes::from_cartridge(cart);
+    snes.reset();
+    snes.ppu.set_native_capture(true);
+    while snes.frame_count < 120 {
+        snes.step();
+    }
+    assert_eq!(
+        snes.ppu.native_framebuffer.len(),
+        512 * 448,
+        "native buffer must be 512x448"
+    );
+    let mut bytes = Vec::with_capacity(512 * 448 * 3);
+    for px in &snes.ppu.native_framebuffer {
+        bytes.extend_from_slice(px);
+    }
+    let got = hex(&Sha256::digest(&bytes));
+    if std::env::var("LUNA_SNES_TEST_RECORD").is_ok() {
+        println!("RECORD native InterlaceFont => {got}");
+        return;
+    }
+    assert_eq!(
+        got, "8e67fed7238a7186a069b2a9de6be0adc076b44665a36095b646d559578ae286",
+        "native 512x448 InterlaceFont hash moved — re-record after an intended render change"
+    );
+}
+
+// Golden hashes captured from luna's renderer (loaded as NTSC — see
+// `run_to_stable` for why the CPUTest family is NTSC where the PPU demos are
+// PAL). All 23 render the correct all-PASS result screen.
 cpu_test!(
     cpu_adc,
     "ADC",
@@ -404,7 +523,7 @@ fn run_spc700_fail_port(rom: Vec<u8>) -> u8 {
     std::panic::set_hook(Box::new(|_| {}));
     let mut executed = 0u64;
     'run: while executed < SPC700_STEP_CAP {
-        for _ in 0..SAMPLE_EVERY {
+        for _ in 0..SPC_POLL_EVERY {
             if catch_unwind(AssertUnwindSafe(|| snes.step())).is_err() {
                 break 'run;
             }
@@ -458,7 +577,12 @@ macro_rules! ppu_test {
     ($fn:ident, $path:literal, $hash:literal) => {
         #[test]
         fn $fn() {
-            test_display(concat!("PPU/", $path), $hash, 0);
+            test_display(
+                concat!("PPU/", $path),
+                $hash,
+                0,
+                luna_cartridge::Region::Pal,
+            );
         }
     };
     // `hold = <mask>` holds a controller-1 button for the whole run — for
@@ -467,7 +591,12 @@ macro_rules! ppu_test {
     ($fn:ident, $path:literal, $hash:literal, hold = $mask:expr) => {
         #[test]
         fn $fn() {
-            test_display(concat!("PPU/", $path), $hash, $mask);
+            test_display(
+                concat!("PPU/", $path),
+                $hash,
+                $mask,
+                luna_cartridge::Region::Pal,
+            );
         }
     };
     // A scene luna renders wrong (tracked PPU gap). `#[ignore]`d, with the
@@ -477,7 +606,12 @@ macro_rules! ppu_test {
         #[test]
         #[ignore = $reason]
         fn $fn() {
-            test_display(concat!("PPU/", $path), $hash, 0);
+            test_display(
+                concat!("PPU/", $path),
+                $hash,
+                0,
+                luna_cartridge::Region::Pal,
+            );
         }
     };
 }
@@ -520,10 +654,11 @@ ppu_test!(
 // produce the *same* framebuffer (hence the identical hash, not a typo).
 // TileFlip's flip pattern is pixel-identical (same colour histogram) at a
 // 15-px vertical framing offset vs the PAL capture.
+// Re-baselined 2026-07-13 — see the WaitNMI note on `ppu_hdma_wave` (#107).
 ppu_test!(
     ppu_bg_8bpp_32x32,
     "BGMAP/8x8/8BPP/32x32/8x8BGMap8BPP32x32.sfc",
-    "f2017bdcdeb5938291288e2d5d453b33ed3095f759dc99bbf909257bb17e8bdf"
+    "3d7f59d39a304c08355b9e09352c2eda05b180ab3145297ad53751df3c883d78"
 );
 ppu_test!(
     ppu_bg_8bpp_32x64,
@@ -594,7 +729,7 @@ ppu_test!(
 ppu_test!(
     ppu_mode7_starwars,
     "Mode7/StarWars/StarWars.sfc",
-    "ed496efc8c84512041910419eaee12fc4d941067a942fd1ad403cead1c5bef05"
+    "35104f05519cf58bbf9c24e906d586767fe95d1899d806c2109003c6067e9a36"
 );
 ppu_test!(
     ppu_greenspace,
@@ -608,10 +743,13 @@ ppu_test!(
 // little further along. Old (c3048a2e) and new (df5e17e0) frames both eyeball-
 // confirmed clean 8×8 mosaics of the same lake/island scene (the new one is
 // slightly more detailed) — a benign frame-shift, not a render regression.
+// Re-baselined 2026-07-13 (#107) — see the WaitNMI note on `ppu_hdma_wave`.
+// The correct 1x loop rate puts this back on c3048a2e, the very frame this
+// test baselined against before the 2026-06-23 nmiLine shift above.
 ppu_test!(
     ppu_mosaic_mode3,
     "Mosaic/Mode3/MosaicMode3.sfc",
-    "df5e17e0e8fe0a6b3ebf2411ee98d2e5be250004b0546419c3ef1a775c11686f",
+    "3e8a872b79dcd20c88e8de81c743e361f4d6c3c3b12f0ce17e266c3eb89eba80",
     hold = PAD_R
 );
 // Mode 5 hi-res + INTERLACE (SETINI bit 0): the Moogle figure. Interlace
@@ -677,10 +815,27 @@ ppu_test!(
 // must), and a Mode-7 perspective floor with per-line matrix HDMA. They
 // validate the HDMA engine: table walk, indirect addressing, per-line
 // fixed-colour ($2132), and Mode-7 matrix writes ($211B-$2120).
+// Re-baselined 2026-07-14 with the frame-anchored settle runner (`FRAME_CAP`):
+// these three never settle, so they used to be captured wherever a fixed
+// instruction count happened to land. They are now captured at frame 2300 —
+// same demos, correct animation phase, eyeball-confirmed (the water wave, the
+// lake mosaic, the 8BPP cathedral).
+//
+// Re-baselined 2026-07-13 (issue #107, RDNMI visibility window): these three
+// demos idle on the corpus' `WaitNMI` macro (`BIT $4210 / BPL`), which used to
+// pass TWICE per VBlank whenever its read landed in the first clocks of the
+// VBlank scanline — luna handed the flag back set there but could not clear it.
+// They therefore animated ~4/3x too fast. At the same fixed instruction budget
+// the correct 1x rate lands on a different animation phase; all three were
+// eyeball-confirmed clean (wave: same water, other phase; mosaic: same lake
+// scene, a coarser step of its ramp — and back to the c3048a2e frame this test
+// baselined against before the 2026-06-23 nmiLine shift; 8BPP: same tilemap, a
+// different scroll offset). Verified against a Mesen2 headless trace: one pass
+// per frame, HDMA table pointer +3/frame.
 ppu_test!(
     ppu_hdma_wave,
     "HDMA/WaveHDMA/WaveHDMA.sfc",
-    "c61b781ec9bb1fa7cdf5d49f8353adbb8074d9b88f9093cf3ed04af9e141f971"
+    "723a1d7345ae138a9c738d86d5525e2dd045aa71fe1266f413457e6131b8684c"
 );
 ppu_test!(
     ppu_hdma_redspace,
@@ -760,6 +915,7 @@ fn input_controller_latency() {
         "INPUT/ControllerLatency/ControllerLatency.sfc",
         "5fcaea3e9a96bd542b161537c280f82dc131be0498b738564f53cd256a1c601d",
         PAD_A,
+        luna_cartridge::Region::Pal,
     );
 }
 
@@ -1004,7 +1160,7 @@ macro_rules! spc_test {
 spc_test!(
     spc_italo,
     "ItaloTest/ItaloTest.sfc",
-    "df026edb17535c591ac398713d8f510e923f8a6ffdb92995b65863a3302954db"
+    "9f3cc4abf78e16acd6d69a3147e303887ec653ababa827e49a92d233932673b0"
 );
 spc_test!(
     spc_pitchmod,
@@ -1015,39 +1171,39 @@ spc_test!(
 spc_test!(
     spc_play_brr,
     "PlayBRRSample/PlayBRRSample.sfc",
-    "8e23b0d9c060b0339f13173f7863aade272d02cf8df97d7f1684699d85e11ad2"
+    "a47bc23f14447de6111a7c128b349833099964d2224f09000200a3cfd4ee02ee"
 );
 spc_test!(
     spc_play_noise,
     "PlayNoise/PlayNoise.sfc",
-    "fb285cf0055c90ae485656269536ec103e0407d36b705e63e1c60cb370e5cb63"
+    "124decc81ceb450910e076396f3e77ea10d9f101e1a08d351ee73b9ff7ad51b2"
 );
 spc_test!(
     spc_twinkle,
     "Twinkle/Twinkle.sfc",
-    "d145d0f0ea9f41927b33e5ed3bc71758556f1f63bdc101c3810cd38ea6daf9c4"
+    "77183a84670e3e32f77b7b33b6816104a8be8a8e2ccd35d537e9f3930312283b"
 );
 // Multi-block uploads — silent until the IPL-ROM `$FFEE` byte fix.
 spc_test!(
     spc_axel_f,
     "Axel-F/Axel-F.sfc",
-    "3d24ae64cef24c53d4863c7a07205953f885905cdfcef8a97f1c5885cd5daf3d"
+    "26c62a40fafa3dbe24664f9defc0eef0572122c35d0779918b9b87d67acddb28"
 );
 spc_test!(
     spc_ffvii_prelude,
     "FFVIIPrelude/FFVIIPrelude.sfc",
-    "8acf5de6f2ad8e736bda6271a7a772596b1a8857ff6619768362acd9a4c513d6"
+    "2d16c154dc5a24e9a135a725810685370b918b39a6a8a3665cc18d5f40d095c7"
 );
 spc_test!(
     spc_speech,
     "SpeechSynth/SpeechSynth.sfc",
-    "724b0a292a5da09cc2c0fd4c9637e2dd679e15ec4e72de6e06cc4caba409d459"
+    "e455e6e5d6423a76899f4fe68b0d3c90e1d770c566e2c684a79afd42e2adfe2d"
 );
 // Plays only on a button press — hold A (song 1) until the driver boots.
 spc_test!(
     spc_play_two_song,
     "PlayTwoSong/PlayTwoSong.sfc",
-    "9e10ae2a4286501af7f423db4f59eeec67c5b9189249399da0bce61bdbb4d339",
+    "619879848ba540f89c2c103510b9f8e956a96988791186bdd1b762c37926eb91",
     hold = PAD_A
 );
 
@@ -1058,8 +1214,16 @@ spc_test!(
 /// coproc boot + the full-game render path), complementing the Peter Lemon
 /// **primitive** goldens. Copyrighted ROMs live in `tests/roms/` (gitignored),
 /// so these SKIP unless the developer has dumped them.
+// Re-baselined 2026-07-14 with the frame-anchored runner (see
+// `run_game_to_frame`): the capture now stops on a frame boundary instead of
+// wherever a fixed instruction count happened to land mid-frame, so five of
+// these hold a whole picture where they used to hold a mix of two. Same scenes,
+// eyeball-confirmed (F-Zero mid-race, SMRPG's Peach-in-the-garden intro, Kirby
+// in play, Star Fox's 3D intro, Tales' forest). `game_starfox` had been red on
+// develop for a while — its golden predated a render change and is refreshed
+// here too.
 macro_rules! game_test {
-    ($fn:ident, $file:literal, $instructions:literal, $hash:literal) => {
+    ($fn:ident, $file:literal, $frames:literal, $hash:literal) => {
         #[test]
         fn $fn() {
             let Some(root) = games_root() else {
@@ -1072,7 +1236,7 @@ macro_rules! game_test {
                 return;
             }
             let rom = std::fs::read(&path).expect("read rom");
-            let bytes = run_game_fixed(rom, $instructions);
+            let bytes = run_game_to_frame(rom, $frames);
             let got = hex(&Sha256::digest(&bytes));
             if std::env::var("LUNA_SNES_TEST_RECORD").is_ok() {
                 if let Ok(dir) = std::env::var("LUNA_SNES_TEST_PNG") {
@@ -1095,98 +1259,98 @@ macro_rules! game_test {
 game_test!(
     game_fzero,
     "F-Zero (USA).sfc",
-    30_000_000,
-    "db0aae0d7ecaf5805eb44c732a22541880066759814f021951f8af0af7733ece"
+    2226,
+    "8a23e9a76fdd8b5ebe49474e13970c97ab4e393d88e1db56cc943facac2b2009"
 );
 game_test!(
     game_mariokart,
     "Super Mario Kart (USA).sfc",
-    50_000_000,
+    3587,
     "b7bc468dec89ba2f02f36190f0fc4c6945ec2cee1f6e68000452596e8e21456e"
 );
 // SA-1
 game_test!(
     game_smrpg,
     "Super Mario RPG - Legend of the Seven Stars (USA).sfc",
-    12_000_000,
-    "49f84ad54742960ad0e193a38134e6ceba2b59f9809c46976b5d4cf6546a3dba"
+    905,
+    "44f50ec4c1bc032c9db2eeeb6b0368591fea79750402d794afad67bd213cf7d3"
 );
 game_test!(
     game_kirby_ss,
     "Kirby Super Star (USA).sfc",
-    35_000_000,
-    "1c88c42a9f38ff52a69bb78f62c90f1070a8837112243157df5a1fc485539e62"
+    3054,
+    "7c7f46baa486d520465816c92b4c78c1f7ae8cf3f7b82815f8e329939c68e1e6"
 );
 // Super FX (GSU)
 game_test!(
     game_starfox,
     "Star Fox (USA) (Rev 2).sfc",
-    25_000_000,
-    "e778238e51f28032bd71a400b54e8f2278b19b3cba6d70a38cffbc36cf83ac9a"
+    1939,
+    "041565e9141d7565e9fb858b778cee333c8c52a5414f1022598493d32f46b4a6"
 );
 game_test!(
     game_stuntfx,
     "Stunt Race FX (USA) (Rev 1).sfc",
-    25_000_000,
-    "4127b08e545a26a3c86cbdf39206c5834788a28cb4da5e0083a2595a3ff46b7f"
+    2299,
+    "1c2d2e25fc4ff44d95083b217aaf3481f36beb5e6d2978cf5fc78a684b7974ec"
 );
 // S-DD1
 game_test!(
     game_starocean,
     "Star Ocean (tr).sfc",
-    30_000_000,
-    "1ecd444af4ed8b7e16c3ea267b2250bf1eea656f3ca7b426ac44a4158e7997a1"
+    1875,
+    "58e6d199d993f2a32f044ed4a485e9f283094cbe039d06a78940fda35982c798"
 );
 // DSP-1
 game_test!(
     game_pilotwings,
     "Pilotwings (USA).sfc",
-    20_000_000,
+    1395,
     "74e38144b13287b0bada97de9669bca89f00f3870461caf9537ea728c3f50fa7"
 );
 // Color math / transparency
 game_test!(
     game_som,
     "Secret of Mana (USA).sfc",
-    30_000_000,
-    "5371ef9d2574babb1aeab176fd70cbfd351ae925ed30bf61504bd69cefa909dc"
+    2307,
+    "e49f43e9484af9edbfbb21adf360d8a61886b44d23556674d609715319e2b47c"
 );
 game_test!(
     game_zelda,
     "Legend of Zelda, The - A Link to the Past (USA).sfc",
-    35_000_000,
-    "924f3a854ea1b49886a2e11491afb6815c207f4f5b14a0532025e1ff58c8b252"
+    2631,
+    "940a5f9e93bbb92ac49a0b1770e6538e084c2330388a533657d16e76a79d1a88"
 );
 // HiROM (+ Mode 7 pendulum)
 game_test!(
     game_metroid,
     "Super Metroid (Japan, USA) (En,Ja).sfc",
-    35_000_000,
+    2303,
     "3fddcd5d6d10a972030bec93560c75c65f670b4f3a8d84a423d42f8d661f6845"
 );
 game_test!(
     game_chrono,
     "Chrono Trigger (USA).sfc",
-    20_000_000,
+    1870,
     "6e00465ad69e86123b1a18e9d5a35d3850ced35bc2d8eecf2e4da63fce10d9a7"
 );
 // Large ROM
 game_test!(
     game_tales,
     "Tales of Phantasia (Japan).sfc",
-    40_000_000,
-    "e997ba7d2757a4ed15dc52da2c2ba1a47ecd4a5eeb49d9d71cc55a750ee81fcf"
+    2574,
+    "00b885f072760a8ac33a75a9a2ce49b37c085e6eedaed756fc9c0257deea9c48"
 );
 // HDMA (raster split + gradient)
 game_test!(
     game_contra3,
     "Contra III - The Alien Wars (USA).sfc",
-    50_000_000,
+    4573,
     "2d8f52bb162cc1e9e00897e8b1dc5f17a54e2088f77ea14adce508aa91627e02"
 );
 game_test!(
     game_axelay,
     "Axelay (USA).sfc",
-    55_000_000,
+    4801,
     "6ff009b793b5be6706cccb1378829c47d04f5284ec014c73a9988e97ef1c2c7c"
 );

@@ -62,6 +62,11 @@ pub struct Dma {
     /// only). The fast path is to call [`Dma::run_mdma`] directly with
     /// the value being written.
     pub mdmaen: u8,
+    /// Channel mask of a `$420B` write whose burst has not run yet. ares
+    /// `status.dmaPending`: the write only arms; the transfer executes at the
+    /// next `dmaEdge()` — the start of the following bus access — and is
+    /// charged to that instruction (issue #109).
+    pub pending_mdma: u8,
     /// `$420C HDMAEN` — HDMA enable mask. Stored but not yet acted upon
     /// (HDMA is in a later phase).
     pub hdmaen: u8,
@@ -210,7 +215,12 @@ impl Dma {
     /// can be charged the stall (Phase 4). Per ares `cpu/dma.cpp`
     /// `hdmaSetup`: `step(8)` overhead + one header read per enabled
     /// channel; folded here into the canonical `18 + 8·channels` figure.
-    pub fn hdma_init<B: DmaBus>(&mut self, bus: &mut B) -> u32 {
+    pub fn hdma_init<B: DmaBus>(
+        &mut self,
+        bus: &mut B,
+        mclk_at_fire: u64,
+        clock_count: u32,
+    ) -> u32 {
         // ares `hdmaReset` + Mesen2 `InitHdmaChannels`: every frame, reset the
         // per-channel run flags for ALL 8 channels — enabled or not. Mesen
         // notes NOT resetting `DoTransfer` glitches Aladdin / Super Ghouls'n
@@ -222,7 +232,7 @@ impl Dma {
         if self.hdmaen == 0 {
             return 0;
         }
-        let mut enabled = 0u32;
+        let mut reads = 0u32;
         for ch in 0..8 {
             // "Set DoTransfer to true for ALL channels if any HDMA channel is
             // enabled" (Mesen2 SnesDmaController.cpp:131, ares dma.cpp:143).
@@ -233,11 +243,10 @@ impl Dma {
             if self.hdmaen & (1 << ch) != 0 {
                 // Enabled at V=0: copy source→pointer and read the first entry
                 // (may terminate the channel if the header is 0).
-                self.channels[ch].hdma_start_frame(bus);
-                enabled += 1;
+                reads += self.channels[ch].hdma_start_frame(bus);
             }
         }
-        HDMA_OVERHEAD_MCLK + 8 * enabled
+        hdma_cost(mclk_at_fire, clock_count, reads)
     }
 
     /// Per-scanline HDMA step. Called once per visible scanline
@@ -248,8 +257,13 @@ impl Dma {
     /// channel was active, else 0 (ares `cpu/dma.cpp` `hdmaRun`: `step(8)`
     /// overhead + 8 mclk per transferred byte, folded into the canonical
     /// 18-mclk per-scanline overhead).
-    pub fn hdma_run_line<B: DmaBus>(&mut self, bus: &mut B) -> u32 {
-        let mut bytes = 0u32;
+    pub fn hdma_run_line<B: DmaBus>(
+        &mut self,
+        bus: &mut B,
+        mclk_at_fire: u64,
+        clock_count: u32,
+    ) -> u32 {
+        let mut reads = 0u32;
         let mut any_active = false;
         for ch in 0..8 {
             if self.hdmaen & (1 << ch) != 0 {
@@ -273,21 +287,46 @@ impl Dma {
                 // the indirect-terminator 1-byte reload quirk (`hdma_step_line`).
                 let last_active = !((ch + 1..8)
                     .any(|j| self.hdmaen & (1 << j) != 0 && self.channels[j].hdma_active));
-                bytes += self.channels[ch].hdma_step_line(bus, last_active);
+                reads += self.channels[ch].hdma_step_line(bus, last_active);
             }
         }
         if any_active {
-            HDMA_OVERHEAD_MCLK + 8 * bytes
+            hdma_cost(mclk_at_fire, clock_count, reads)
         } else {
             0
         }
     }
 }
 
-/// Fixed per-scanline HDMA overhead in master cycles when ≥1 channel is
-/// active — the canonical hardware figure (anomie / bsnes / higan),
-/// folding ares' `step(8)` + DMA-clock alignment + reload reads.
-const HDMA_OVERHEAD_MCLK: u32 = 18;
+/// Master clocks an HDMA setup / per-line run costs — ares' model.
+///
+/// `cpu/timing.cpp:110-119` wraps it in the same two alignment steps a DMA
+/// gets, and `cpu/dma.cpp:28-42` adds a fixed `step(8)`:
+///
+/// ```text
+/// step(counter.dma = 8 - dmaCounter());          // align to the DMA clock
+/// counter.dma += 8; step(8);                     // hdmaSetup() / hdmaRun()
+///   per channel: 8 mclk per A-bus READ (readA = step(4) + read + step(4));
+///                a B-bus write costs nothing (writeB does not step)
+/// step(clockCount - counter.dma % clockCount);   // realign to the CPU clock
+/// ```
+///
+/// `reads` is that A-bus read count — transfers **plus** the header read every
+/// active channel does every line. luna used to charge a flat
+/// `18 + 8 * transferred_bytes`, which both missed the per-line header read
+/// and ignored the alignment steps: for a one-channel, mode-2 table (krom's
+/// `WaveHDMA`) that is 34 mclk a line where hardware spends ~39. Multiplied by
+/// 224 lines it is over a thousand master clocks of CPU-vs-scanline phase
+/// error per frame — enough to make a free-running poll loop's landing point
+/// drift when hardware's stays put.
+#[inline]
+const fn hdma_cost(mclk_at_fire: u64, clock_count: u32, reads: u32) -> u32 {
+    let align = 8 - (mclk_at_fire & 7) as u32; // 1..=8
+    let counter_dma = align + 8 + 8 * reads;
+    // ares steps a FULL `clockCount` when the modulo lands on zero.
+    let realign = clock_count - counter_dma % clock_count;
+    counter_dma + realign
+}
 
 /// Marks an active-channel tag as HDMA-sourced (Mesen2's
 /// `SnesDmaController::HdmaChannelFlag`, `SnesDmaController.h:12`). OR'd onto
@@ -461,19 +500,24 @@ mod tests {
         dma.channels[0].a_bank = 0x00;
         dma.hdmaen = 0b0000_0001; // channel 0 HDMA enabled
 
-        // Frame setup: 18 overhead + 8 per enabled channel (1).
-        assert_eq!(dma.hdma_init(&mut bus), HDMA_OVERHEAD_MCLK + 8);
+        // Cost is 8 mclk per A-bus READ plus ares' fixed step(8) and the two
+        // DMA-clock alignment steps — see `hdma_cost`. Pin the master clock at
+        // 0 and the in-flight access at 6 mclk so the alignment is stable.
+        let cost = |reads| hdma_cost(0, 6, reads);
 
-        // Line 1 transfers 1 byte → 18 + 8.
-        assert_eq!(dma.hdma_run_line(&mut bus), HDMA_OVERHEAD_MCLK + 8);
+        // Frame setup: one header read.
+        assert_eq!(dma.hdma_init(&mut bus, 0, 6), cost(1));
+
+        // Line 1: one transferred byte + the per-line header read.
+        assert_eq!(dma.hdma_run_line(&mut bus, 0, 6), cost(2));
         assert_eq!(bus.b[0x22], 0x11);
 
-        // Line 2 is an active gap (still active at line start, 0 bytes,
-        // reads the terminator) → overhead only.
-        assert_eq!(dma.hdma_run_line(&mut bus), HDMA_OVERHEAD_MCLK);
+        // Line 2 is an active gap: no transfer, but ares still reads the table
+        // byte every line — so it is NOT free.
+        assert_eq!(dma.hdma_run_line(&mut bus, 0, 6), cost(1));
 
         // Channel terminated → no cost on subsequent lines.
-        assert_eq!(dma.hdma_run_line(&mut bus), 0);
+        assert_eq!(dma.hdma_run_line(&mut bus, 0, 6), 0);
     }
 
     #[test]
@@ -506,7 +550,7 @@ mod tests {
         dma.channels[0].ntlr = 0x02; // stale line counter (non-repeat gap next)
 
         dma.hdmaen = 0x80; // only ch7 at V=0
-        dma.hdma_init(&mut bus);
+        dma.hdma_init(&mut bus, 0, 6);
         assert!(
             dma.channels[0].hdma_do_transfer,
             "init armed DoTransfer for ALL channels"
@@ -518,7 +562,7 @@ mod tests {
 
         // Mid-frame enable of ch0 → transfers from the stale pointer ($DD).
         dma.hdmaen = 0x81;
-        dma.hdma_run_line(&mut bus);
+        dma.hdma_run_line(&mut bus, 0, 6);
         assert_eq!(
             bus.b[0x22], 0xDD,
             "ch0 ran from its stale pointer, not source"
@@ -541,14 +585,14 @@ mod tests {
         dma.channels[0].ntlr = 0x02;
 
         dma.hdmaen = 0;
-        assert_eq!(dma.hdma_init(&mut bus), 0);
+        assert_eq!(dma.hdma_init(&mut bus, 0, 6), 0);
         assert!(
             !dma.channels[0].hdma_do_transfer,
             "cold init leaves DoTransfer false"
         );
 
         dma.hdmaen = 0x01;
-        dma.hdma_run_line(&mut bus);
+        dma.hdma_run_line(&mut bus, 0, 6);
         assert_eq!(bus.b[0x22], 0x00, "no transfer on the first line");
     }
 
@@ -571,13 +615,13 @@ mod tests {
         dma.channels[3].a_bank = 0x00;
         dma.hdmaen = 0b0000_1000; // channel 3
 
-        dma.hdma_init(&mut bus); // header reads only — no B-bus writes
+        dma.hdma_init(&mut bus, 0, 6); // header reads only — no B-bus writes
         assert!(
             bus.tagged_writes.is_empty(),
             "hdma_init must not write B-bus registers"
         );
 
-        dma.hdma_run_line(&mut bus);
+        dma.hdma_run_line(&mut bus, 0, 6);
         assert_eq!(
             bus.tagged_writes,
             vec![(HDMA_CHANNEL_FLAG | 3, 0x22, 0x5A)],
@@ -618,10 +662,10 @@ mod tests {
             dma.channels[ch].dasb = 0x7E;
         }
         dma.hdmaen = 0b0000_0011;
-        dma.hdma_init(&mut bus);
+        dma.hdma_init(&mut bus, 0, 6);
 
         // Line 1: ch0 terminates but ch1 is still active → NOT last → 2 bytes.
-        dma.hdma_run_line(&mut bus);
+        dma.hdma_run_line(&mut bus, 0, 6);
         assert!(!dma.channels[0].hdma_active);
         assert_eq!(
             dma.channels[0].a2a, 0x1006,
@@ -634,7 +678,7 @@ mod tests {
         );
 
         // Line 2: ch1 terminates as the sole remaining channel → last → 1 byte.
-        dma.hdma_run_line(&mut bus);
+        dma.hdma_run_line(&mut bus, 0, 6);
         assert!(!dma.channels[1].hdma_active);
         assert_eq!(
             dma.channels[1].a2a, 0x2005,
@@ -650,8 +694,8 @@ mod tests {
     fn hdma_with_no_enabled_channels_costs_nothing() {
         let mut bus = MockBus::new();
         let mut dma = Dma::new(); // hdmaen == 0
-        assert_eq!(dma.hdma_init(&mut bus), 0);
-        assert_eq!(dma.hdma_run_line(&mut bus), 0);
+        assert_eq!(dma.hdma_init(&mut bus, 0, 6), 0);
+        assert_eq!(dma.hdma_run_line(&mut bus, 0, 6), 0);
     }
 
     #[test]

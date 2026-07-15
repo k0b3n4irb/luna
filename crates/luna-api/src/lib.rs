@@ -15,6 +15,7 @@
 
 use std::path::Path;
 
+pub use luna_cartridge::Region;
 use luna_cartridge::{CartError, Cartridge};
 use luna_core::Snes;
 /// Controller-port device kind (pad / mouse / super scope), re-exported so the
@@ -84,7 +85,7 @@ pub enum ApiError {
 /// NOTE (2026-07): the container is encoded with bincode 1.x (EOL branch).
 /// Evaluate migrating to bincode 2 at the NEXT version bump — a bump
 /// already invalidates old blobs, so that is the free moment to switch.
-pub const SAVE_STATE_VERSION: u32 = 2;
+pub const SAVE_STATE_VERSION: u32 = 3;
 
 /// On-disk / on-wire save-state container produced by
 /// [`Emulator::save_state`]. `core` is the bincode-encoded `Snes` (the
@@ -654,6 +655,9 @@ pub struct Emulator {
     /// not recording; fed by [`Emulator::set_joypad`], drained by
     /// [`Emulator::take_input_capture`].
     input_capture: Option<InputCapture>,
+    /// Video-standard override applied to every subsequent ROM load — see
+    /// [`Emulator::set_forced_region`]. `None` = honour the cartridge header.
+    forced_region: Option<Region>,
 }
 
 /// One raw captured Event Viewer event before category/filter decode — either
@@ -743,6 +747,7 @@ impl Emulator {
             last_frame_events: Vec::new(),
             prev_frame_events: Vec::new(),
             input_capture: None,
+            forced_region: None,
         }
     }
 
@@ -846,7 +851,32 @@ impl Emulator {
         self.load_cartridge(cart)
     }
 
-    fn load_cartridge(&mut self, cart: Cartridge) -> Result<RomInfo, ApiError> {
+    /// Force the video standard (NTSC / PAL) for every subsequent ROM load,
+    /// overriding the cartridge header's country byte. `None` restores header
+    /// auto-detection.
+    ///
+    /// The region decides the scanline count (262 NTSC / 312 PAL) and the
+    /// frame rate, so it changes every timing-derived observable — which is
+    /// the point: the golden harness runs the `PeterLemon` corpus as PAL to
+    /// match krom's reference captures, and a differential investigation must
+    /// be able to reproduce that exact configuration from the CLI (issue
+    /// #109). Sticky across loads (like a front-end setting), NOT cleared by
+    /// [`Emulator::reset`]; takes effect on the next load, not retroactively.
+    pub const fn set_forced_region(&mut self, region: Option<Region>) {
+        self.forced_region = region;
+    }
+
+    /// The active video-standard override, if any — see
+    /// [`Emulator::set_forced_region`].
+    #[must_use]
+    pub const fn forced_region(&self) -> Option<Region> {
+        self.forced_region
+    }
+
+    fn load_cartridge(&mut self, mut cart: Cartridge) -> Result<RomInfo, ApiError> {
+        if let Some(region) = self.forced_region {
+            cart.header.region = region;
+        }
         // Capture a stable hash of the ROM bytes before the cartridge is
         // consumed by `try_from_cartridge`; the save-state layer uses it to
         // refuse states produced against a different ROM.
@@ -1694,6 +1724,63 @@ impl Emulator {
         let rgba = self.render_frame_rgba(force_display)?;
         let mut h = std::collections::hash_map::DefaultHasher::new();
         h.write(&rgba);
+        Ok(h.finish())
+    }
+
+    /// Enable / disable the **native 512×448 capture** (issue #115).
+    ///
+    /// The PPU genuinely computes 512 horizontal samples in the hi-res modes
+    /// (5/6 and pseudo-512) and two interlace fields per line — then collapses
+    /// both by averaging into the 256×224 framebuffer every front-end shows.
+    /// With capture on, the un-collapsed pixels are also kept, per scanline
+    /// (so mid-frame register changes and HDMA effects are honoured exactly
+    /// like the displayed frame): the sub/main subpixel pair side by side
+    /// (lores dots duplicated), the two fields on rows `2y` / `2y+1`
+    /// (duplicated when not interlaced). Off by default — it costs render
+    /// time. Enable it, run at least one full frame, then read
+    /// [`Self::render_frame_png_native`] / [`Self::frame_hash_native`].
+    pub fn set_native_capture(&mut self, on: bool) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.ppu.set_native_capture(on);
+        Ok(())
+    }
+
+    /// The native 512×448 frame as PNG bytes — see
+    /// [`Self::set_native_capture`]. Errors if capture is not enabled.
+    pub fn render_frame_png_native(&self) -> Result<Vec<u8>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        if snes.ppu.native_framebuffer.is_empty() {
+            return Err(ApiError::Io(std::io::Error::other(
+                "native capture is not enabled (set_native_capture / --native-res)",
+            )));
+        }
+        let (w, h) = (FRAME_W * 2, FRAME_H * 2);
+        let mut buf = Vec::with_capacity(w * h * 3);
+        for px in &snes.ppu.native_framebuffer {
+            buf.extend_from_slice(px);
+        }
+        let img = image::RgbImage::from_raw(w as u32, h as u32, buf)
+            .ok_or_else(|| ApiError::Io(std::io::Error::other("native frame size mismatch")))?;
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .map_err(|e| ApiError::Io(std::io::Error::other(e.to_string())))?;
+        Ok(png)
+    }
+
+    /// Hash of the native 512×448 frame — the exact-resolution regression key
+    /// issue #115 asks for. Same construction as [`Self::frame_hash`]
+    /// (fixed-seed hasher over raw pixel bytes, cross-architecture stable).
+    /// Errors if capture is not enabled.
+    pub fn frame_hash_native(&self) -> Result<u64, ApiError> {
+        use std::hash::{Hash, Hasher};
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        if snes.ppu.native_framebuffer.is_empty() {
+            return Err(ApiError::Io(std::io::Error::other(
+                "native capture is not enabled (set_native_capture / --native-res)",
+            )));
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        snes.ppu.native_framebuffer.hash(&mut h);
         Ok(h.finish())
     }
 
