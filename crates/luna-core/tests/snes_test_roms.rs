@@ -658,7 +658,7 @@ ppu_test!(
 ppu_test!(
     ppu_bg_8bpp_32x32,
     "BGMAP/8x8/8BPP/32x32/8x8BGMap8BPP32x32.sfc",
-    "041d5bf2f4b98b1f4c9ba957b3578637c1f89cc24e4ee4a45764bf8b887c150d"
+    "3d7f59d39a304c08355b9e09352c2eda05b180ab3145297ad53751df3c883d78"
 );
 ppu_test!(
     ppu_bg_8bpp_32x64,
@@ -729,7 +729,7 @@ ppu_test!(
 ppu_test!(
     ppu_mode7_starwars,
     "Mode7/StarWars/StarWars.sfc",
-    "9c2332097a05a03fd29d89e0559ac49dc01fa6b2682e5da9f3027196af3747a0"
+    "35104f05519cf58bbf9c24e906d586767fe95d1899d806c2109003c6067e9a36"
 );
 ppu_test!(
     ppu_greenspace,
@@ -749,7 +749,7 @@ ppu_test!(
 ppu_test!(
     ppu_mosaic_mode3,
     "Mosaic/Mode3/MosaicMode3.sfc",
-    "53b2b1e07a34619efe4dfbea0ad694145e7e4d9046eea815061ae7d7b9d5d46f",
+    "3e8a872b79dcd20c88e8de81c743e361f4d6c3c3b12f0ce17e266c3eb89eba80",
     hold = PAD_R
 );
 // Mode 5 hi-res + INTERLACE (SETINI bit 0): the Moogle figure. Interlace
@@ -835,7 +835,7 @@ ppu_test!(
 ppu_test!(
     ppu_hdma_wave,
     "HDMA/WaveHDMA/WaveHDMA.sfc",
-    "6f60cb7d5dde75283c4fb5470d1ab0186c46fe30deb93a6daf81cdc3878eb5a1"
+    "723a1d7345ae138a9c738d86d5525e2dd045aa71fe1266f413457e6131b8684c"
 );
 ppu_test!(
     ppu_hdma_redspace,
@@ -1160,7 +1160,7 @@ macro_rules! spc_test {
 spc_test!(
     spc_italo,
     "ItaloTest/ItaloTest.sfc",
-    "d1b9b5d62d3f8f58076ee4a1024b2bdc5aba6b37b3b83b3aecbba5cfb9139a75"
+    "9f3cc4abf78e16acd6d69a3147e303887ec653ababa827e49a92d233932673b0"
 );
 spc_test!(
     spc_pitchmod,
@@ -1181,7 +1181,7 @@ spc_test!(
 spc_test!(
     spc_twinkle,
     "Twinkle/Twinkle.sfc",
-    "286c57f5133e9d35a036ec6363298c048f65ad26c70dfca18d0b852dc59880af"
+    "77183a84670e3e32f77b7b33b6816104a8be8a8e2ccd35d537e9f3930312283b"
 );
 // Multi-block uploads — silent until the IPL-ROM `$FFEE` byte fix.
 spc_test!(
@@ -1273,20 +1273,20 @@ game_test!(
     game_smrpg,
     "Super Mario RPG - Legend of the Seven Stars (USA).sfc",
     905,
-    "4be7165dcc9614897291bcd0aa11076d5c2e9759659dc80d6ae2f19d64afb198"
+    "44f50ec4c1bc032c9db2eeeb6b0368591fea79750402d794afad67bd213cf7d3"
 );
 game_test!(
     game_kirby_ss,
     "Kirby Super Star (USA).sfc",
     3054,
-    "51872f586c41cb800c4bb60848b3d64527a7753518c17c52e61daca2ecb0226d"
+    "7c7f46baa486d520465816c92b4c78c1f7ae8cf3f7b82815f8e329939c68e1e6"
 );
 // Super FX (GSU)
 game_test!(
     game_starfox,
     "Star Fox (USA) (Rev 2).sfc",
     1939,
-    "2c67970bcea7d2d71c3ca4cbd2ace82863cc7f63d44d312215db4564a403e152"
+    "041565e9141d7565e9fb858b778cee333c8c52a5414f1022598493d32f46b4a6"
 );
 game_test!(
     game_stuntfx,

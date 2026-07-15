@@ -85,7 +85,7 @@ pub enum ApiError {
 /// NOTE (2026-07): the container is encoded with bincode 1.x (EOL branch).
 /// Evaluate migrating to bincode 2 at the NEXT version bump — a bump
 /// already invalidates old blobs, so that is the free moment to switch.
-pub const SAVE_STATE_VERSION: u32 = 2;
+pub const SAVE_STATE_VERSION: u32 = 3;
 
 /// On-disk / on-wire save-state container produced by
 /// [`Emulator::save_state`]. `core` is the bincode-encoded `Snes` (the
