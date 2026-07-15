@@ -178,9 +178,9 @@ impl CpuRegs {
     /// mainline `BPL $4210` poll of it. The bus derives it from the H-clock
     /// — see `RDNMI_VISIBLE_HCLOCK` in `snes.rs` for the window and for where
     /// ares and Mesen2 disagree on it.
-    pub const fn read_rdnmi(&mut self, visible: bool) -> u8 {
-        let v = if self.nmi_flag && visible { 0x80 } else { 0x00 } | 0x02; // CPU rev 2
-        if visible {
+    pub const fn read_rdnmi(&mut self, raised: bool, in_hold: bool) -> u8 {
+        let v = if self.nmi_flag && raised { 0x80 } else { 0x00 } | 0x02; // CPU rev 2
+        if !in_hold {
             self.nmi_flag = false;
         }
         v

@@ -134,16 +134,23 @@ fn fb_bytes(snes: &Snes) -> Vec<u8> {
 /// Boot a forced-LoROM ROM and run until the framebuffer settles (or the
 /// step cap / a `STP` / a CPU panic). Returns the framebuffer bytes.
 ///
-/// The ROM is loaded as **PAL**, matching the `twvd/siena` convention.
-/// Peter Lemon's suite is PAL-timed: several tests do a single `WaitNMI`
-/// then write the whole result table in one burst that only fits inside
-/// PAL's longer V-blank (~72 lines vs NTSC's 37). Run as NTSC, luna
-/// correctly drops the writes that overflow into active display and the
-/// screen stays blank — so PAL is required to reproduce the reference
-/// output.
-fn run_to_stable(rom: Vec<u8>, hold: u16) -> Vec<u8> {
+/// `region` picks the video standard, and it is a per-family decision:
+///
+/// - The PPU demos run as **PAL**, matching the `twvd/siena` convention and
+///   krom's reference captures.
+/// - The `CPUTest` family runs as **NTSC**. It used to be PAL too, on the
+///   theory that its result table only fits inside PAL's longer V-blank —
+///   but that was calibrated against luna's old, too-fast boot (the DRAM
+///   refresh was not charged during DMA). With cycle-exact timing the truth
+///   is the opposite, and **Mesen2 agrees on both counts**: in PAL the write
+///   burst overruns V-blank and the table is truncated mid-row (Mesen2's PAL
+///   screen is pixel-identical to luna's, last VRAM write within 2 master
+///   clocks), while in NTSC both emulators render the full all-PASS table.
+///   A truncated table has no assertion value; NTSC keeps it, and the final
+///   screen being static makes the golden timing-invariant.
+fn run_to_stable(rom: Vec<u8>, hold: u16, region: luna_cartridge::Region) -> Vec<u8> {
     let mut cart = Cartridge::from_bytes_forced(rom, MapperKind::LoRom).expect("forced LoROM load");
-    cart.header.region = luna_cartridge::Region::Pal;
+    cart.header.region = region;
     let mut snes = Snes::from_cartridge(cart);
     snes.reset();
 
@@ -285,7 +292,7 @@ fn run_game_to_frame(rom: Vec<u8>, frames: u64) -> Vec<u8> {
 /// Boot `rel` (relative to the corpus root), settle, and compare the
 /// framebuffer SHA-256 to `expected`. Skips gracefully if the corpus or
 /// the specific ROM is absent.
-fn test_display(rel: &str, expected: &str, hold: u16) {
+fn test_display(rel: &str, expected: &str, hold: u16, region: luna_cartridge::Region) {
     let Some(root) = corpus_root() else {
         eprintln!(
             "[skip] SNES test corpus not found — checkout ../luna_tests \
@@ -300,7 +307,7 @@ fn test_display(rel: &str, expected: &str, hold: u16) {
     }
 
     let rom = std::fs::read(&path).expect("read rom");
-    let bytes = run_to_stable(rom, hold);
+    let bytes = run_to_stable(rom, hold, region);
     let got = hex(&Sha256::digest(&bytes));
 
     if std::env::var("LUNA_SNES_TEST_RECORD").is_ok() {
@@ -328,13 +335,15 @@ macro_rules! cpu_test {
                 concat!("CPUTest/CPU/", $name, "/CPU", $name, ".sfc"),
                 $hash,
                 0,
+                luna_cartridge::Region::Ntsc,
             );
         }
     };
 }
 
-// Golden hashes captured from luna's renderer (loaded as PAL — see
-// `run_to_stable`). All 23 render the correct all-PASS result screen.
+// Golden hashes captured from luna's renderer (loaded as NTSC — see
+// `run_to_stable` for why the CPUTest family is NTSC where the PPU demos are
+// PAL). All 23 render the correct all-PASS result screen.
 cpu_test!(
     cpu_adc,
     "ADC",
@@ -522,7 +531,12 @@ macro_rules! ppu_test {
     ($fn:ident, $path:literal, $hash:literal) => {
         #[test]
         fn $fn() {
-            test_display(concat!("PPU/", $path), $hash, 0);
+            test_display(
+                concat!("PPU/", $path),
+                $hash,
+                0,
+                luna_cartridge::Region::Pal,
+            );
         }
     };
     // `hold = <mask>` holds a controller-1 button for the whole run — for
@@ -531,7 +545,12 @@ macro_rules! ppu_test {
     ($fn:ident, $path:literal, $hash:literal, hold = $mask:expr) => {
         #[test]
         fn $fn() {
-            test_display(concat!("PPU/", $path), $hash, $mask);
+            test_display(
+                concat!("PPU/", $path),
+                $hash,
+                $mask,
+                luna_cartridge::Region::Pal,
+            );
         }
     };
     // A scene luna renders wrong (tracked PPU gap). `#[ignore]`d, with the
@@ -541,7 +560,12 @@ macro_rules! ppu_test {
         #[test]
         #[ignore = $reason]
         fn $fn() {
-            test_display(concat!("PPU/", $path), $hash, 0);
+            test_display(
+                concat!("PPU/", $path),
+                $hash,
+                0,
+                luna_cartridge::Region::Pal,
+            );
         }
     };
 }
@@ -659,7 +683,7 @@ ppu_test!(
 ppu_test!(
     ppu_mode7_starwars,
     "Mode7/StarWars/StarWars.sfc",
-    "07efc96c41f7e32df785ccb830d0599c44ac2167abd36678542142ac8007d5c7"
+    "9c2332097a05a03fd29d89e0559ac49dc01fa6b2682e5da9f3027196af3747a0"
 );
 ppu_test!(
     ppu_greenspace,
@@ -765,7 +789,7 @@ ppu_test!(
 ppu_test!(
     ppu_hdma_wave,
     "HDMA/WaveHDMA/WaveHDMA.sfc",
-    "c5e6f162159c0a9b0afc7b4007f08c9b966ca1dc7d4a534040cf3737fc4330cd"
+    "6f60cb7d5dde75283c4fb5470d1ab0186c46fe30deb93a6daf81cdc3878eb5a1"
 );
 ppu_test!(
     ppu_hdma_redspace,
@@ -845,6 +869,7 @@ fn input_controller_latency() {
         "INPUT/ControllerLatency/ControllerLatency.sfc",
         "5fcaea3e9a96bd542b161537c280f82dc131be0498b738564f53cd256a1c601d",
         PAD_A,
+        luna_cartridge::Region::Pal,
     );
 }
 
@@ -1089,7 +1114,7 @@ macro_rules! spc_test {
 spc_test!(
     spc_italo,
     "ItaloTest/ItaloTest.sfc",
-    "df026edb17535c591ac398713d8f510e923f8a6ffdb92995b65863a3302954db"
+    "d1b9b5d62d3f8f58076ee4a1024b2bdc5aba6b37b3b83b3aecbba5cfb9139a75"
 );
 spc_test!(
     spc_pitchmod,
@@ -1100,39 +1125,39 @@ spc_test!(
 spc_test!(
     spc_play_brr,
     "PlayBRRSample/PlayBRRSample.sfc",
-    "8e23b0d9c060b0339f13173f7863aade272d02cf8df97d7f1684699d85e11ad2"
+    "a47bc23f14447de6111a7c128b349833099964d2224f09000200a3cfd4ee02ee"
 );
 spc_test!(
     spc_play_noise,
     "PlayNoise/PlayNoise.sfc",
-    "fb285cf0055c90ae485656269536ec103e0407d36b705e63e1c60cb370e5cb63"
+    "124decc81ceb450910e076396f3e77ea10d9f101e1a08d351ee73b9ff7ad51b2"
 );
 spc_test!(
     spc_twinkle,
     "Twinkle/Twinkle.sfc",
-    "d145d0f0ea9f41927b33e5ed3bc71758556f1f63bdc101c3810cd38ea6daf9c4"
+    "286c57f5133e9d35a036ec6363298c048f65ad26c70dfca18d0b852dc59880af"
 );
 // Multi-block uploads — silent until the IPL-ROM `$FFEE` byte fix.
 spc_test!(
     spc_axel_f,
     "Axel-F/Axel-F.sfc",
-    "3d24ae64cef24c53d4863c7a07205953f885905cdfcef8a97f1c5885cd5daf3d"
+    "26c62a40fafa3dbe24664f9defc0eef0572122c35d0779918b9b87d67acddb28"
 );
 spc_test!(
     spc_ffvii_prelude,
     "FFVIIPrelude/FFVIIPrelude.sfc",
-    "8acf5de6f2ad8e736bda6271a7a772596b1a8857ff6619768362acd9a4c513d6"
+    "2d16c154dc5a24e9a135a725810685370b918b39a6a8a3665cc18d5f40d095c7"
 );
 spc_test!(
     spc_speech,
     "SpeechSynth/SpeechSynth.sfc",
-    "724b0a292a5da09cc2c0fd4c9637e2dd679e15ec4e72de6e06cc4caba409d459"
+    "e455e6e5d6423a76899f4fe68b0d3c90e1d770c566e2c684a79afd42e2adfe2d"
 );
 // Plays only on a button press — hold A (song 1) until the driver boots.
 spc_test!(
     spc_play_two_song,
     "PlayTwoSong/PlayTwoSong.sfc",
-    "9e10ae2a4286501af7f423db4f59eeec67c5b9189249399da0bce61bdbb4d339",
+    "619879848ba540f89c2c103510b9f8e956a96988791186bdd1b762c37926eb91",
     hold = PAD_A
 );
 
@@ -1202,33 +1227,33 @@ game_test!(
     game_smrpg,
     "Super Mario RPG - Legend of the Seven Stars (USA).sfc",
     905,
-    "c387092a54343be5cd3d10c41fc99ac61a3f52db6c7b2730f3f5f435fbd17f04"
+    "4be7165dcc9614897291bcd0aa11076d5c2e9759659dc80d6ae2f19d64afb198"
 );
 game_test!(
     game_kirby_ss,
     "Kirby Super Star (USA).sfc",
     3054,
-    "7da9412a2e7755758687e23fc5b57d5ac80c226187ca498d597e8aba7d283516"
+    "51872f586c41cb800c4bb60848b3d64527a7753518c17c52e61daca2ecb0226d"
 );
 // Super FX (GSU)
 game_test!(
     game_starfox,
     "Star Fox (USA) (Rev 2).sfc",
     1939,
-    "3fddc142b5636e46960cb59aec6848cba43f5ea66154648f014e64f0d64ae093"
+    "2c67970bcea7d2d71c3ca4cbd2ace82863cc7f63d44d312215db4564a403e152"
 );
 game_test!(
     game_stuntfx,
     "Stunt Race FX (USA) (Rev 1).sfc",
     2299,
-    "4127b08e545a26a3c86cbdf39206c5834788a28cb4da5e0083a2595a3ff46b7f"
+    "1c2d2e25fc4ff44d95083b217aaf3481f36beb5e6d2978cf5fc78a684b7974ec"
 );
 // S-DD1
 game_test!(
     game_starocean,
     "Star Ocean (tr).sfc",
     1875,
-    "1ecd444af4ed8b7e16c3ea267b2250bf1eea656f3ca7b426ac44a4158e7997a1"
+    "58e6d199d993f2a32f044ed4a485e9f283094cbe039d06a78940fda35982c798"
 );
 // DSP-1
 game_test!(
@@ -1242,13 +1267,13 @@ game_test!(
     game_som,
     "Secret of Mana (USA).sfc",
     2307,
-    "5371ef9d2574babb1aeab176fd70cbfd351ae925ed30bf61504bd69cefa909dc"
+    "e49f43e9484af9edbfbb21adf360d8a61886b44d23556674d609715319e2b47c"
 );
 game_test!(
     game_zelda,
     "Legend of Zelda, The - A Link to the Past (USA).sfc",
     2631,
-    "924f3a854ea1b49886a2e11491afb6815c207f4f5b14a0532025e1ff58c8b252"
+    "940a5f9e93bbb92ac49a0b1770e6538e084c2330388a533657d16e76a79d1a88"
 );
 // HiROM (+ Mode 7 pendulum)
 game_test!(
@@ -1268,7 +1293,7 @@ game_test!(
     game_tales,
     "Tales of Phantasia (Japan).sfc",
     2574,
-    "bf40a2ee6d3c7b254e41ef6fdee1cc929b0985a7401b778d1a26ac65f5a5a6bf"
+    "00b885f072760a8ac33a75a9a2ce49b37c085e6eedaed756fc9c0257deea9c48"
 );
 // HDMA (raster split + gradient)
 game_test!(

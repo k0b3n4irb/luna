@@ -1,5 +1,5 @@
 {
-  "duration_s": 12.264,
+  "duration_s": 12.333,
   "frames": 736,
   "note": "title screen, ~12 s of audio (no echo on this driver)",
   "rom": "Super Mario World (U) [!].smc",
@@ -46,10 +46,10 @@
     }
   ],
   "stats": {
-    "mean_abs": 601.03,
-    "non_zero": 0.5709,
-    "peak_neg": -17295,
-    "peak_pos": 15830,
-    "rms": 1228.65
+    "mean_abs": 600.23,
+    "non_zero": 0.5716,
+    "peak_neg": -17363,
+    "peak_pos": 15782,
+    "rms": 1227.7
   }
 }

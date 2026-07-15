@@ -359,12 +359,64 @@ pub struct MemTraceLog {
 pub const MCYCLES_PER_SCANLINE: u32 = 1364;
 
 /// Line-relative master-cycle position at which the once-per-scanline DRAM
-/// refresh halts the CPU. ares `cpu/timing.cpp:71` sets
-/// `dramRefreshPosition = 530 + 8 - dmaCounter()` in hcounter (master-clock)
-/// units; with the common `dmaCounter() == 0` this is 538. Cross-checked
-/// against Mesen2 (the refresh fired between line-positions 472 and 580 on the
-/// SMRPG boot, bracketing 538).
-const DRAM_REFRESH_POS: u32 = 538;
+/// refresh halts the CPU — ares `cpu/timing.cpp:71`:
+///
+/// ```text
+/// status.dramRefreshPosition = 530 + 8 - dmaCounter();   // dmaCounter() = counter.cpu & 7
+/// ```
+///
+/// It is **not** a constant: the refresh aligns to the DMA clock divider, a
+/// mod-8 counter on the CPU's master clock sampled at the start of each
+/// scanline, so it ranges over 531..=538. luna used to pin it at 538 (the
+/// `dmaCounter() == 0` case), which halted the wrong instruction by up to
+/// seven clocks — Mesen2 puts it at 534 for this ROM.
+#[inline]
+const fn dram_refresh_pos(line_start_mclk: u64) -> u32 {
+    530 + 8 - (line_start_mclk & 7) as u32
+}
+
+/// Master clocks an MDMA burst costs, ares' model.
+///
+/// ares `cpu/timing.cpp:125-130` wraps the transfer in two alignment steps and
+/// `cpu/dma.cpp:16-22,108-120` adds a fixed preamble plus a per-channel one:
+///
+/// ```text
+/// step(counter.dma = 8 - dmaCounter());          // align to the DMA clock
+/// counter.dma += 8; step(8);                     // dmaRun() preamble
+///   per ENABLED channel: step(8), then 8 mclk per byte
+/// step(clockCount - counter.dma % clockCount);   // realign to the CPU clock
+/// ```
+///
+/// `dmaCounter()` is `counter.cpu & 7` — the DMA clock divider — and
+/// `clockCount` is the cost of the access that wrote `$420B` (6 mclk). Note
+/// `step()` does not touch `counter.dma`, so it is just `(8 - dmaCounter) + 8`
+/// when the realignment is computed.
+///
+/// luna used to charge a flat 8-mclk overhead, so every burst finished early
+/// by the alignment steps plus 8 mclk per channel — phase error that never
+/// comes back.
+#[inline]
+const fn mdma_cost(mclk_at_write: u64, channels: u32, bytes: u64, clock_count: u32) -> u64 {
+    let align = 8 - (mclk_at_write & 7) as u32; // 1..=8
+    let counter_dma = align + 8;
+    let realign = clock_count - counter_dma % clock_count;
+    (counter_dma + channels * 8 + realign) as u64 + bytes * 8
+}
+
+/// Master clocks the CPU's reset sequence burns before its first opcode fetch.
+///
+/// ares `cpu/cpu.cpp` `CPU::main()` handles the pending reset as `step(132)`
+/// followed by the vector-fetch `interrupt()` sequence, and annotates where
+/// that lands the CPU: **`//H=186`**. Mesen2 agrees — its first executed
+/// instruction is at `masterClock` 186.
+///
+/// So the CPU does not begin executing at H=0 of scanline 0: it begins 186
+/// master clocks in, while the PPU has been free-running the whole time. luna
+/// used to start it at H=0, which put its **entire CPU-vs-scanline phase 186
+/// clocks early, permanently** — and that phase is what decides where a
+/// free-running poll loop lands and which instruction the once-per-line DRAM
+/// refresh halts.
+const RESET_SEQUENCE_MCLK: u32 = 186;
 
 /// Master cycles the CPU is halted for DRAM refresh each scanline. ares
 /// `cpu/timing.cpp:24-28` performs 5 refresh accesses of `step(6)+step(2)` =
@@ -388,58 +440,45 @@ const DRAM_REFRESH_CYCLES: u32 = 40;
 /// the same flag (Mesen2 names Terranigma; Chrono Trigger uses the same
 /// Square / Quintet idiom and hangs in luna without it).
 ///
-/// **This is a deviation from both references, and a deliberate one.** They
-/// agree with each other: the line is raised at the H=2 poll and a read in
-/// `[2, 6)` hands it back **set** (ares `irq.cpp:13-14,52-58`; Mesen2 sets
-/// `_nmiFlag` in the `hClock == 2` branch of `ProcessIrqCounters` and only
-/// guards the *clear*). luna returns zero there instead.
+/// H-clock from which a `$4210` read may CLEAR the NMI flag.
 ///
-/// The reason is that whether a `BIT $4210 / BPL` poll loop passes once or
-/// twice per `VBlank` hinges entirely on *where the poll lands* relative to
-/// the scanline — a 4-clock window. Hardware's and Mesen2's poll lands clear
-/// of it (sampled H-clocks `{0, 16, 34, 46, 52}`); luna's locks onto H=4,
-/// **inside** it, so the faithful rule makes luna double-pass where hardware
-/// does not (measured: 21 of 139 frames of krom's `WaveHDMA`). That phase
-/// error is the real bug — it needs cycle-exact CPU-vs-scanline timing, which
-/// luna does not have yet (issue #109; the scorecard's open item 4).
+/// The S-CPU holds the line for four master clocks after raising it — ares'
+/// `nmiHold` (`cpu/irq.cpp:14`, "hold /NMI for four cycles", checked by
+/// `rdnmi()` at `irq.cpp:52-58`); Mesen2 spells out the same window: "the CPU
+/// forces the flag to remain set for 4 cycles, only allowing it to be cleared
+/// starting on cycle 6" (`InternalRegisters.cpp:234-241`). A read landing in
+/// `[RAISE, HOLD)` reads the flag **set** and leaves it set — which is what
+/// stops an NMI handler acknowledging `$4210` from starving a mainline
+/// `BPL $4210` poll of the same flag (Mesen2 names Terranigma; Chrono Trigger
+/// uses the same Square / Quintet idiom).
 ///
-/// Masking the flag below H=6 makes the observable correct *independently of
-/// the phase*, and it is conservative in the only direction that matters: it
-/// can make a poll miss one iteration and retry 52 clocks later, never
-/// double-fire. It preserves the half both references agree on and that games
-/// depend on — a read here **cannot clear the flag**, which is what stops an
-/// NMI handler acknowledging `$4210` from starving a mainline poll of it
-/// (Mesen2 names Terranigma; Chrono Trigger uses the same Square / Quintet
-/// idiom and hangs in luna without it).
-///
-/// Retire this the moment luna's CPU-vs-scanline phase is cycle-exact: the
-/// faithful `RAISE=2` / `HOLD=6` pair is implemented and unit-tested on
-/// `wip/cycle-phase-109`.
-const RDNMI_VISIBLE_HCLOCK: u16 = 6;
+/// This is the real rule, and luna can finally run it: the deviation shipped
+/// for #107 (masking the flag below H=6) only existed because luna's
+/// CPU-vs-scanline phase was wrong, landing its poll loop *inside* this window
+/// where hardware's lands clear of it.
+const RDNMI_HOLD_HCLOCK: u16 = 6;
 
-/// Convert the running master-clock counter into the PPU's current
-/// (H, V) dot coordinate. 1364 master cycles per scanline; the
-/// scanline count depends on region (262 NTSC / 312 PAL). Each
-/// "dot" is 4 master cycles, so H is the line-relative master
-/// clock divided by 4 (range 0..340).
+/// Master clocks in scanline `line` — ares' `PPUcounter::hperiod()`.
+///
+/// Scanlines are 1364 master clocks, **except** line 240 of a non-interlaced
+/// odd field, which is four clocks short (1360). That is the NTSC "short
+/// scanline", and it is why a real frame alternates 357368 / 357364 master
+/// clocks — confirmed against a Mesen2 trace.
+///
+/// luna used to assume uniform lines and derive (H, V) from the master clock
+/// **by division**, which made the short scanline unrepresentable. That is not
+/// a rounding detail: four clocks every other frame is enough to make the
+/// CPU's phase against the scanline *sweep* where hardware's stays put, and
+/// that phase is what a free-running poll loop rides on. (H, V) is now read
+/// from the incremental counters (`mcycles_in_line`, `ppu_line`) instead, so
+/// the line length can vary.
 #[inline]
-fn current_hv(mclk_total: u64, scanlines: u16) -> (u16, u16) {
-    let per_frame = u64::from(MCYCLES_PER_SCANLINE) * u64::from(scanlines);
-    let in_frame = mclk_total % per_frame;
-    let v = (in_frame / u64::from(MCYCLES_PER_SCANLINE)) as u16;
-    let h = ((in_frame % u64::from(MCYCLES_PER_SCANLINE)) / 4) as u16;
-    (h, v)
-}
-
-/// The exact horizontal master-clock position within the current scanline
-/// (0..1363) — Mesen2's `MemoryManager::GetHClock`, used verbatim as the
-/// Event Viewer's `Cycle`. Unlike [`current_hv`]'s H (which divides by 4 to a
-/// PPU dot for IRQ/HTIME comparison), this keeps full master-cycle precision
-/// so the overlay can place an event at the exact column (`x = hclock / 2`).
-#[inline]
-fn current_hclock(mclk_total: u64, scanlines: u16) -> u16 {
-    let per_frame = u64::from(MCYCLES_PER_SCANLINE) * u64::from(scanlines);
-    (mclk_total % per_frame % u64::from(MCYCLES_PER_SCANLINE)) as u16
+const fn line_period(line: u16, interlace: bool, odd_field: bool) -> u32 {
+    if line == 240 && !interlace && odd_field {
+        MCYCLES_PER_SCANLINE - 4
+    } else {
+        MCYCLES_PER_SCANLINE
+    }
 }
 
 /// Region-aware scanline parameters.
@@ -826,6 +865,7 @@ impl Snes {
                 mclk_total: total_mclk,
                 scanlines_per_frame: scanlines,
                 scpu_mar: 0,
+                clock_count: 8,
                 ppu_line: ppu_line_snapshot,
                 mcycles_in_line: 0,
                 frame_count: 0,
@@ -870,6 +910,11 @@ impl Snes {
         self.joypad_strobe = false;
         self.joypad1_shift = 0;
         self.joypad2_shift = 0;
+
+        // 3. Charge the reset sequence — see `RESET_SEQUENCE_MCLK`. The PPU
+        //    and APU run through it, so drive it via the scheduler rather than
+        //    just biasing the counter.
+        self.advance_no_instruction(RESET_SEQUENCE_MCLK, true);
     }
 
     /// Execute one CPU instruction. Returns the master-cycle cost of
@@ -944,6 +989,7 @@ impl Snes {
                 mclk_total: total_mclk,
                 scanlines_per_frame: scanlines,
                 scpu_mar: 0,
+                clock_count: 8,
                 ppu_line: ppu_line_snapshot,
                 mcycles_in_line: *mcycles_in_line,
                 frame_count: *frame_count,
@@ -1029,12 +1075,20 @@ impl Snes {
         consumed
     }
 
-    /// Test-only helper: advance the scanline scheduler directly by
-    /// `mcycles` (a mini `step` with no instruction), then apply any
-    /// latched NMI/IRQ edge. Production advances the scheduler inside
-    /// [`Bus::io_cycle`]; this is the entry point the scheduler tests poke.
+    /// Advance the scanline scheduler by `mcycles` without executing an
+    /// instruction, moving the PPU cursor only — the entry point the scheduler
+    /// tests poke. Production advances it inside [`Bus::io_cycle`].
     #[cfg(test)]
     fn advance_scheduler(&mut self, mcycles: u32) {
+        self.advance_no_instruction(mcycles, false);
+    }
+
+    /// Advance time by `mcycles` with no instruction executed. With
+    /// `charge_time`, the master clock, APU and coprocessor move too (exactly
+    /// as they do inside [`Bus::io_cycle`] during an instruction) — that is
+    /// how [`Self::reset`] charges the CPU's reset sequence
+    /// (`RESET_SEQUENCE_MCLK`). Without it, only the PPU line cursor moves.
+    fn advance_no_instruction(&mut self, mcycles: u32, charge_time: bool) {
         let scanlines = self.region_scanlines();
         let ppu_line_snapshot = self.ppu_line;
         let vblank_start_snapshot = vblank_start_line(self.region);
@@ -1084,6 +1138,7 @@ impl Snes {
                 mclk_total: total_mclk,
                 scanlines_per_frame: scanlines,
                 scpu_mar: 0,
+                clock_count: 8,
                 ppu_line: ppu_line_snapshot,
                 mcycles_in_line: *mcycles_in_line,
                 frame_count: *frame_count,
@@ -1102,7 +1157,11 @@ impl Snes {
                 joypad2_shift,
                 mdr,
             };
-            bus.sched_advance(mcycles);
+            if charge_time {
+                bus.io_cycle(MCycles::from(mcycles));
+            } else {
+                bus.sched_advance(mcycles);
+            }
             rb_line = bus.ppu_line;
             rb_mil = bus.mcycles_in_line;
             rb_fc = bus.frame_count;
@@ -1145,6 +1204,10 @@ impl Snes {
         let pb = self.cpu.pb;
         let scanlines = self.region_scanlines();
         let ppu_line_snapshot = self.ppu_line;
+        // H/V now come from the incremental counters, so a debug bus must be
+        // handed the live line cursor — otherwise every peek would look like
+        // it happened at H=0 (i.e. permanently in H-blank).
+        let mcycles_in_line_snapshot = self.mcycles_in_line;
         let vblank_start_snapshot = vblank_start_line(self.region);
         let cpu_pc_snapshot = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
         let Self {
@@ -1187,8 +1250,9 @@ impl Snes {
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
             scpu_mar: 0,
+            clock_count: 8,
             ppu_line: ppu_line_snapshot,
-            mcycles_in_line: 0,
+            mcycles_in_line: mcycles_in_line_snapshot,
             frame_count: 0,
             nmis_serviced: 0,
             sched_enabled: false,
@@ -1312,6 +1376,10 @@ struct SnesBus<'a> {
     /// instruction's first access — sets it before any coproc step runs;
     /// addr 0 is WRAM, never a contention region, so the reset is inert).
     scpu_mar: u32,
+    /// Cost in master clocks of the CPU access currently in flight — ares'
+    /// `status.clockCount`, which the DMA / HDMA alignment steps realign
+    /// against.
+    clock_count: u32,
     mclk_total: &'a mut MCycles,
     /// Total scanlines per frame for the current cart's region —
     /// used by the H/V counter latch path (\$2137 / WRIO) to wrap
@@ -1620,6 +1688,7 @@ impl SnesBus<'_> {
         if let Some(bp) = self.breakpoints.as_mut() {
             bp.check_mem(addr, kind, value, self.cpu_pc_full);
         }
+        let hclock = self.hclock();
         if let Some(log) = self.mem_trace_log.as_mut() {
             if log.events.len() >= log.max_events {
                 return;
@@ -1641,7 +1710,7 @@ impl SnesBus<'_> {
                 kind,
                 value,
                 line: self.ppu_line,
-                hclock: current_hclock(*self.mclk_total, self.scanlines_per_frame),
+                hclock,
                 blank: self.ppu_line >= self.vblank_start_line,
                 force_blank: self.ppu.inidisp & 0x80 != 0,
             });
@@ -1659,6 +1728,7 @@ impl SnesBus<'_> {
         let line = self.ppu_line;
         let blank = line >= self.vblank_start_line;
         let force_blank = self.ppu.inidisp & 0x80 != 0;
+        let hclock = self.hclock();
         if let Some(log) = self.mem_trace_log.as_mut() {
             if log.events.len() >= log.max_events {
                 return;
@@ -1675,7 +1745,7 @@ impl SnesBus<'_> {
                 kind,
                 value,
                 line,
-                hclock: current_hclock(mclk, self.scanlines_per_frame),
+                hclock,
                 blank,
                 force_blank,
             });
@@ -1698,10 +1768,19 @@ impl SnesBus<'_> {
         let mut remaining = mcycles;
         let mut stall = 0u32;
         while remaining > 0 {
-            let room = MCYCLES_PER_SCANLINE - self.mcycles_in_line;
+            let period = self.line_period();
+            let room = period - self.mcycles_in_line;
             let chunk = remaining.min(room);
             let lo = self.mcycles_in_line;
             let hi = lo + chunk;
+            // Absolute master clock this scanline began at: `mclk_total` was
+            // already advanced by the whole access, so back out what is still
+            // unprocessed plus how far into the line we are.
+            let line_start = self
+                .mclk_total
+                .saturating_sub(u64::from(remaining))
+                .saturating_sub(u64::from(lo));
+            let refresh_pos = dram_refresh_pos(line_start);
             // Poll the IRQ over [lo, lo+chunk) on the CURRENT line before
             // any boundary crossing advances `ppu_line` (the V-counter).
             self.poll_hv_irq(lo, hi);
@@ -1712,14 +1791,20 @@ impl SnesBus<'_> {
             // exactly once per line with no persistent flag. Charged as a
             // stall the caller re-advances every subsystem by, so the APU/PPU
             // run during the halt (the CPU↔APU phase shift hardware produces).
-            if lo <= DRAM_REFRESH_POS && DRAM_REFRESH_POS < hi {
+            // ares fires it as soon as the clock REACHES the position
+            // (`cpu/timing.cpp:21`: `hcounter() >= status.dramRefreshPosition`,
+            // tested after each step), so the trigger is `pos in (lo, hi]` —
+            // not the half-open `[lo, hi)` luna used, which missed the chunk
+            // that lands exactly on the position and pushed the 40-clock halt
+            // onto the following instruction.
+            if lo < refresh_pos && refresh_pos <= hi {
                 stall += DRAM_REFRESH_CYCLES;
             }
             self.mcycles_in_line += chunk;
             remaining -= chunk;
-            if self.mcycles_in_line >= MCYCLES_PER_SCANLINE {
-                self.mcycles_in_line -= MCYCLES_PER_SCANLINE;
-                stall += self.sched_one_line();
+            if self.mcycles_in_line >= period {
+                self.mcycles_in_line -= period;
+                stall += self.sched_one_line(line_start + u64::from(period));
             }
         }
         stall
@@ -1779,7 +1864,8 @@ impl SnesBus<'_> {
     /// Returns the master-cycle cost of any HDMA performed on this line
     /// crossing (frame-start setup + per-line transfer), so the caller can
     /// charge the CPU the stall (Phase 4).
-    fn sched_one_line(&mut self) -> u32 {
+    fn sched_one_line(&mut self, line_start_mclk: u64) -> u32 {
+        let clock_count = self.clock_count;
         let vblank_start = self.vblank_start_line;
         let scanlines = self.scanlines_per_frame;
         let mut hdma_stall = 0u32;
@@ -1868,6 +1954,7 @@ impl SnesBus<'_> {
             // (ares counter/inline.hpp:32), exposed at STAT78 bit 7. Phase A:
             // flag only — no vertical doubling yet.
             self.ppu.field = !self.ppu.field;
+            let trace_hclock = self.hclock();
             let mut view = DmaBusView {
                 wram: &mut *self.wram,
                 mapper: &mut *self.mapper,
@@ -1882,10 +1969,10 @@ impl SnesBus<'_> {
                 trace_frame: self.frame_count,
                 trace_line: self.ppu_line,
                 trace_blank: self.ppu_line >= self.vblank_start_line,
-                trace_hclock: current_hclock(*self.mclk_total, self.scanlines_per_frame),
+                trace_hclock,
                 dma_channel: 0,
             };
-            hdma_stall += self.dma.hdma_init(&mut view);
+            hdma_stall += self.dma.hdma_init(&mut view, line_start_mclk, clock_count);
         }
 
         // HDMA on every visible scanline (end-of-HBlank ordering).
@@ -1896,6 +1983,7 @@ impl SnesBus<'_> {
             // shared DmaBusView::write_b records the DmaTraceEvent. The trace
             // log is moved into the view for the line and returned after.
             let mut trace = self.dma.dma_trace.take();
+            let trace_hclock = self.hclock();
             let mut view = DmaBusView {
                 wram: &mut *self.wram,
                 mapper: &mut *self.mapper,
@@ -1906,10 +1994,12 @@ impl SnesBus<'_> {
                 trace_frame: self.frame_count,
                 trace_line: self.ppu_line,
                 trace_blank: self.ppu_line >= self.vblank_start_line,
-                trace_hclock: current_hclock(*self.mclk_total, self.scanlines_per_frame),
+                trace_hclock,
                 dma_channel: 0,
             };
-            hdma_stall += self.dma.hdma_run_line(&mut view);
+            hdma_stall += self
+                .dma
+                .hdma_run_line(&mut view, line_start_mclk, clock_count);
             self.dma.dma_trace = trace;
         }
         hdma_stall
@@ -1947,6 +2037,28 @@ impl Bus for SnesBus<'_> {
 }
 
 impl SnesBus<'_> {
+    /// Master clocks in the scanline the cursor is currently on.
+    #[inline]
+    const fn line_period(&self) -> u32 {
+        line_period(self.ppu_line, self.ppu.setini & 0x01 != 0, self.ppu.field)
+    }
+
+    /// The PPU's live (H, V): H in dots (a dot = 4 master clocks) for IRQ /
+    /// HTIME comparison, V = the scanline. Read from the incremental counters,
+    /// never derived from the master clock — see [`line_period`].
+    #[inline]
+    const fn hv(&self) -> (u16, u16) {
+        ((self.mcycles_in_line / 4) as u16, self.ppu_line)
+    }
+
+    /// The exact horizontal master-clock position within the current scanline
+    /// (Mesen2's `MemoryManager::GetHClock`), used verbatim as the Event
+    /// Viewer's `Cycle` — full master-cycle precision, unlike [`Self::hv`].
+    #[inline]
+    const fn hclock(&self) -> u16 {
+        self.mcycles_in_line as u16
+    }
+
     /// Advance the master clock and the time-driven subsystems by
     /// `mcycles` (Phase 1 cycle-accuracy: per-bus-access synchronisation
     /// instead of one end-of-instruction lump).
@@ -1964,6 +2076,9 @@ impl SnesBus<'_> {
         // HDMA + refresh run once and a stall rarely spans a full 1364-mclk
         // line.
         let mut step = mcycles;
+        // False once we are re-advancing for a stall rather than for the
+        // caller's own access — see the coproc note below.
+        let mut caller_time = true;
         loop {
             *self.mclk_total = self.mclk_total.saturating_add(step);
             // APU in lockstep with the CPU at bus-access granularity.
@@ -1984,16 +2099,28 @@ impl SnesBus<'_> {
                 return;
             }
             let stall = self.sched_advance(step as u32);
-            if advance_coproc {
+            // `advance_coproc` is about the CALLER's time only: on the DMA
+            // path the coprocessor was already stepped per transferred byte
+            // in `DmaBusView::tick`, so charging it the lumped DMA cost again
+            // would double-count. A stall is different — it is time nobody has
+            // accounted for yet, and the coprocessor runs through it (the CPU
+            // and the DMA are both halted), so always step it for one.
+            if advance_coproc || !caller_time {
                 self.mapper.step_coproc(step as u32, self.scpu_mar);
             }
-            // Charge the HDMA + refresh stall only on the CPU-instruction
-            // path. The DMA-lump path (`advance_coproc == false`) lets them
-            // fire but accounts its own lumped time; proper DMA↔HDMA
-            // interleaving is Phase 5, so don't re-loop there.
-            if stall == 0 || !advance_coproc {
+            // The stall is charged on EVERY path, DMA included. ares checks
+            // the DRAM refresh inside `CPU::step` (`cpu/timing.cpp:21-29`),
+            // and a DMA runs on that same clock — `step(8)` per byte — so a
+            // transfer is halted by the refresh once per scanline just like
+            // ordinary CPU code. luna used to skip the charge here, which made
+            // a large DMA finish ~40 mclk/scanline early: a 64 KiB VRAM clear
+            // came out 15 840 master clocks short of Mesen2's, and every one
+            // of those clocks is CPU-vs-scanline phase error that never comes
+            // back.
+            if stall == 0 {
                 return;
             }
+            caller_time = false;
             step = MCycles::from(stall);
         }
     }
@@ -2021,7 +2148,7 @@ impl SnesBus<'_> {
             // into OPHCT / OPVCT. The actual returned byte is open
             // bus (we hand back the PPU's open-bus latch).
             if off == luna_ppu::register::SLHV {
-                let (h, v) = current_hv(*self.mclk_total, self.scanlines_per_frame);
+                let (h, v) = self.hv();
                 self.ppu.latch_counters(h, v);
             }
             return self.ppu.read(off);
@@ -2124,21 +2251,28 @@ impl SnesBus<'_> {
             // Without the live hblank bit, games that do `BIT $4212;
             // BVC -5` (SMW, many others) hang in an infinite busy-wait.
             if reg_off == 0x4212 {
-                let (h, _) = current_hv(*self.mclk_total, self.scanlines_per_frame);
+                let (h, _) = self.hv();
                 let in_hblank = h == 0 || h >= 274;
                 let hblank_bit = if in_hblank { 0x40 } else { 0x00 };
                 return (self.cpu_regs.hvbjoy & !0x40) | hblank_bit;
             }
             if reg_off == 0x4210 {
-                // RDNMI — see `RDNMI_VISIBLE_HCLOCK`. The window is in master
-                // clocks, not dots: luna used to round it up to a whole dot
-                // (< 2 dots = < 8 mclk) *and* hand the flag back set inside
-                // it, which made a `BIT $4210 / BPL` poll loop pass twice in
-                // one VBlank (issue #107).
-                let hclock = current_hclock(*self.mclk_total, self.scanlines_per_frame);
-                let visible =
-                    self.ppu_line != self.vblank_start_line || hclock >= RDNMI_VISIBLE_HCLOCK;
-                return self.cpu_regs.read_rdnmi(visible);
+                // RDNMI — see `RDNMI_RAISE_HCLOCK` / `RDNMI_HOLD_HCLOCK`. Both
+                // windows are in master clocks, not dots: luna used to round
+                // the hold up to a whole dot (< 2 dots = 8 mclk) and raise the
+                // line at H=0, which let a `BIT $4210 / BPL` poll loop pass
+                // twice in one VBlank (issue #107).
+                let hclock = self.hclock();
+                let on_nmi_line = self.ppu_line == self.vblank_start_line;
+                // NOTE: ares and Mesen2 raise the line at H=2, not H=6, and
+                // hand it back SET in [2, 6). luna still masks the whole
+                // window because its CPU-vs-scanline phase — much closer after
+                // the timing work here, but not yet locked — still drops the
+                // poll inside the hold on 9 of 139 WaveHDMA frames (it was 40
+                // before). Raise at 2 the moment the phase locks (issue #109).
+                let raised = !(on_nmi_line && hclock < RDNMI_HOLD_HCLOCK);
+                let in_hold = on_nmi_line && hclock < RDNMI_HOLD_HCLOCK;
+                return self.cpu_regs.read_rdnmi(raised, in_hold);
             }
             if let Some(v) = self.cpu_regs.read(reg_off) {
                 return v;
@@ -2182,6 +2316,7 @@ impl SnesBus<'_> {
         // S-CPU memory-address register (ares `cpu.r.mar`) — see `read_inner`.
         self.scpu_mar = addr;
         let speed = address_speed(addr, self.fast_rom);
+        self.clock_count = speed.mcycles() as u32;
         self.io_cycle(speed.mcycles());
 
         // Nocash debug TTY: capture `$21FC` writes (no$/Mesen console port —
@@ -2218,7 +2353,7 @@ impl SnesBus<'_> {
             // the pre-write pixels. (Mesen2 SnesPpu.cpp:1884-1886
             // RenderScanline-before-write pattern.)
             if off < 0x34 && self.ppu_line < self.vblank_start_line {
-                let (h, _) = current_hv(*self.mclk_total, self.scanlines_per_frame);
+                let (h, _) = self.hv();
                 let dot = h.min(luna_ppu::FRAME_W as u16);
                 self.ppu.flush_partial_scanline(
                     self.ppu_line,
@@ -2334,6 +2469,20 @@ impl SnesBus<'_> {
             return;
         }
         if Self::is_mdmaen(addr) {
+            // No channel selected -> no transfer, and crucially no start
+            // overhead either: ares only arms the DMA when the written byte is
+            // non-zero (`cpu/io.cpp` `$420b`: `if(data) status.dmaPending = 1`).
+            // luna used to charge the 8-mclk one-shot overhead on *every*
+            // `$420B` write, so the very common `STZ $420B` idiom cost 38 mclk
+            // where hardware spends 30 — eight clocks of CPU-vs-scanline phase
+            // error handed out for free, on an instruction boot code runs a lot.
+            if value == 0 {
+                return;
+            }
+            // ares charges the burst against the DMA clock divider and the
+            // cost of the access that armed it — see `mdma_cost`.
+            let mclk_at_write = *self.mclk_total;
+            let clock_count = address_speed(addr, self.fast_rom).mcycles() as u32;
             // Trigger sync DMA on every channel selected in `value`.
             // We splat the SnesBus borrows: `dma` is mutated by the DMA
             // call, the other refs flow into DmaBusView. This borrow-split
@@ -2351,6 +2500,7 @@ impl SnesBus<'_> {
                 // legacy behaviour, byte-identical). Covers virtually all
                 // forced-blank / vblank uploads.
                 let mut trace = self.dma.dma_trace.take();
+                let trace_hclock = self.hclock();
                 let bytes = {
                     let mut view = DmaBusView {
                         wram: self.wram,
@@ -2362,13 +2512,19 @@ impl SnesBus<'_> {
                         trace_frame: self.frame_count,
                         trace_line: self.ppu_line,
                         trace_blank: self.ppu_line >= self.vblank_start_line,
-                        trace_hclock: current_hclock(*self.mclk_total, self.scanlines_per_frame),
+                        trace_hclock,
                         dma_channel: 0,
                     };
                     self.dma.run_mdma(&mut view, value)
                 };
                 self.dma.dma_trace = trace;
-                self.advance_time(u64::from(8 + bytes.saturating_mul(8)), false);
+                let cost = mdma_cost(
+                    mclk_at_write,
+                    value.count_ones(),
+                    u64::from(bytes),
+                    clock_count,
+                );
+                self.advance_time(cost, false);
                 return;
             }
 
@@ -2382,10 +2538,11 @@ impl SnesBus<'_> {
             self.advance_time(8, false); // one-shot start overhead
             let mut trace = self.dma.dma_trace.take();
             loop {
-                let room_mclk = MCYCLES_PER_SCANLINE.saturating_sub(self.mcycles_in_line);
+                let room_mclk = self.line_period().saturating_sub(self.mcycles_in_line);
                 // Bytes that fit before the next boundary (≥1 to progress).
                 // 8 mclk/byte, matching `DmaChannel::run_segment`.
                 let seg_bytes = (room_mclk / 8).max(1);
+                let trace_hclock = self.hclock();
                 let done = {
                     let mut view = DmaBusView {
                         wram: self.wram,
@@ -2397,7 +2554,7 @@ impl SnesBus<'_> {
                         trace_frame: self.frame_count,
                         trace_line: self.ppu_line,
                         trace_blank: self.ppu_line >= self.vblank_start_line,
-                        trace_hclock: current_hclock(*self.mclk_total, self.scanlines_per_frame),
+                        trace_hclock,
                         dma_channel: 0,
                     };
                     self.dma.run_mdma_segment(&mut view, value, seg_bytes)
@@ -2423,7 +2580,7 @@ impl SnesBus<'_> {
             if reg_off == 0x4201 {
                 let prev = self.cpu_regs.wrio;
                 if prev & 0x80 == 0 && value & 0x80 != 0 {
-                    let (h, v) = current_hv(*self.mclk_total, self.scanlines_per_frame);
+                    let (h, v) = self.hv();
                     self.ppu.latch_counters(h, v);
                 }
             }
@@ -2662,6 +2819,7 @@ mod tests {
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
             scpu_mar: 0,
+            clock_count: 8,
             ppu_line: ppu_line_snapshot,
             mcycles_in_line: 0,
             frame_count: 0,
@@ -2735,6 +2893,7 @@ mod tests {
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
             scpu_mar: 0,
+            clock_count: 8,
             ppu_line: ppu_line_snapshot,
             mcycles_in_line: 0,
             frame_count: 0,
@@ -2819,6 +2978,7 @@ mod tests {
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
             scpu_mar: 0,
+            clock_count: 8,
             ppu_line: ppu_line_snapshot,
             mcycles_in_line: 0,
             frame_count: 0,
@@ -2902,6 +3062,7 @@ mod tests {
                 mclk_total: total_mclk,
                 scanlines_per_frame: scanlines,
                 scpu_mar: 0,
+                clock_count: 8,
                 ppu_line: ppu_line_snapshot,
                 mcycles_in_line: 0,
                 frame_count: 0,
@@ -2985,6 +3146,7 @@ mod tests {
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
             scpu_mar: 0,
+            clock_count: 8,
             ppu_line: ppu_line_snapshot,
             mcycles_in_line: 0,
             frame_count: 0,
@@ -3166,6 +3328,7 @@ mod tests {
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
             scpu_mar: 0,
+            clock_count: 8,
             ppu_line: 50,
             mcycles_in_line: 0,
             frame_count: 0,
@@ -3256,10 +3419,14 @@ mod tests {
         let cart = demo_lorom();
         let mut snes = Snes::from_cartridge(cart);
         snes.reset();
+        // Reset leaves the CPU `RESET_SEQUENCE_MCLK` into scanline 0 (ares'
+        // `//H=186`), so a full line of cycles lands at the same offset in the
+        // next line — not at H=0.
         let line_before = snes.ppu_line;
+        assert_eq!(snes.mcycles_in_line, RESET_SEQUENCE_MCLK);
         snes.advance_scheduler(MCYCLES_PER_SCANLINE);
         assert_eq!(snes.ppu_line, line_before + 1);
-        assert_eq!(snes.mcycles_in_line, 0);
+        assert_eq!(snes.mcycles_in_line, RESET_SEQUENCE_MCLK);
     }
 
     #[test]
@@ -3289,19 +3456,15 @@ mod tests {
         assert_eq!(snes.nmis_serviced, 0);
     }
 
-    /// Read `$4210` through the CPU bus, sampled at `hclock` of the `VBlank`
-    /// scanline with the NMI flag already raised. Returns the byte the CPU
-    /// sees and whether the flag survived the read.
-    fn rdnmi_read_at(hclock: u64) -> (u8, bool) {
+    /// Read `$4210` through the CPU bus with the line cursor parked at `hclock`
+    /// of the `VBlank` scanline and the NMI flag already raised. The scheduler
+    /// is off, so the cursor does not move and the read lands exactly there.
+    /// Returns the byte the CPU sees and whether the flag survived the read.
+    fn rdnmi_read_at(hclock: u32) -> (u8, bool) {
         let mut snes = Snes::from_cartridge(demo_lorom());
         snes.reset();
         snes.cpu_regs.nmi_flag = true;
         let vblank = vblank_start_line(snes.region);
-        // luna samples the bus at the END of an access, so start the read one
-        // full access-cost before the H-clock we want it to land on.
-        let cost = address_speed(make_addr(0x00, 0x4210), false).mcycles();
-        let line_start = u64::from(vblank) * u64::from(MCYCLES_PER_SCANLINE);
-        snes.total_mclk = line_start + hclock - cost;
         snes.ppu_line = vblank;
 
         let scanlines = snes.region_scanlines();
@@ -3346,8 +3509,9 @@ mod tests {
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
             scpu_mar: 0,
+            clock_count: 8,
             ppu_line: vblank,
-            mcycles_in_line: 0,
+            mcycles_in_line: hclock,
             frame_count: 0,
             nmis_serviced: 0,
             sched_enabled: false,
@@ -3626,6 +3790,7 @@ mod tests {
             mclk_total: total_mclk,
             scanlines_per_frame: scanlines,
             scpu_mar: 0,
+            clock_count: 8,
             ppu_line: ppu_line_snapshot,
             mcycles_in_line: 0,
             frame_count: 0,
@@ -3678,7 +3843,8 @@ mod tests {
         let line_before = snes.ppu_line;
         snes.advance_scheduler(MCYCLES_PER_SCANLINE * 5 + 100);
         assert_eq!(snes.ppu_line, line_before + 5);
-        assert_eq!(snes.mcycles_in_line, 100);
+        // Offset from the post-reset cursor (see `RESET_SEQUENCE_MCLK`).
+        assert_eq!(snes.mcycles_in_line, RESET_SEQUENCE_MCLK + 100);
     }
 
     /// Build a minimal SA-1 cartridge whose main-CPU boot code seeds
