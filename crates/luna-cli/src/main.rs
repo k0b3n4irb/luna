@@ -100,6 +100,13 @@ enum Command {
         /// and how strongly each may be asserted.
         #[arg(long)]
         print_fbhash: bool,
+        /// Emit the native 512×448 frame (issue #115): hi-res modes 5/6 and
+        /// pseudo-512 keep their two horizontal subpixels per dot, interlace
+        /// keeps both fields as separate lines — instead of the default
+        /// 256×224 averaged view. Applies to `--screenshot` and
+        /// `--print-fbhash`.
+        #[arg(long = "native-res")]
+        native_res: bool,
         /// Force a cartridge mapper, bypassing header auto-detection — same as
         /// `state`/`frames` (issue #95). Needed for checksum-invalid homebrew /
         /// reference ROMs (e.g. the `PeterLemon` corpus) so they can reach
@@ -172,6 +179,13 @@ enum Command {
         /// `state` run can also emit a visual baseline.
         #[arg(long)]
         print_fbhash: bool,
+        /// Emit the native 512×448 frame (issue #115): hi-res modes 5/6 and
+        /// pseudo-512 keep their two horizontal subpixels per dot, interlace
+        /// keeps both fields as separate lines — instead of the default
+        /// 256×224 averaged view. Applies to `--screenshot` and
+        /// `--print-fbhash`.
+        #[arg(long = "native-res")]
+        native_res: bool,
         /// Dump all 64 KB of PPU VRAM (raw bytes) to this file after the
         /// run. For diagnosing the framebuffer DMA → VRAM → display path.
         #[arg(long = "dump-vram")]
@@ -574,6 +588,7 @@ fn main() -> ExitCode {
             nocash_out,
             wdm_out,
             print_fbhash,
+            native_res,
             force_mapper,
             force_region,
         } => run(
@@ -586,6 +601,7 @@ fn main() -> ExitCode {
             nocash_out.as_deref(),
             wdm_out.as_deref(),
             print_fbhash,
+            native_res,
             force_mapper.as_deref(),
             force_region.as_deref(),
         ),
@@ -639,6 +655,7 @@ fn main() -> ExitCode {
             dump_aram,
             wdm_out,
             print_fbhash,
+            native_res,
         } => run_state(
             &rom,
             steps,
@@ -688,6 +705,7 @@ fn main() -> ExitCode {
             load_state.as_deref(),
             wdm_out.as_deref(),
             print_fbhash,
+            native_res,
         ),
         Command::Frames {
             rom,

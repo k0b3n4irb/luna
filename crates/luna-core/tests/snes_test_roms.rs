@@ -341,6 +341,52 @@ macro_rules! cpu_test {
     };
 }
 
+/// Issue #115: the native 512×448 capture, end to end. Boots `InterlaceFont`
+/// (mode 5 hi-res + SETINI interlace — the exact class the feature exists
+/// for), runs it to its settled font grid with capture on, and pins the
+/// SHA-256 of the native buffer. krom ships a real-hardware 512×448 PNG of
+/// this screen; luna's native frame measures 95.9 % pixel-exact against it
+/// (the rest is a uniform few-LSB colorimetric offset from the capture
+/// chain), so this hash is a true exact-resolution baseline.
+#[test]
+fn ppu_interlace_font_native_512x448() {
+    let Some(root) = corpus_root() else {
+        eprintln!("[skip] SNES test corpus not found");
+        return;
+    };
+    let path = root.join("PPU/Interlace/InterlaceFont/InterlaceFont.sfc");
+    let Ok(rom) = std::fs::read(&path) else {
+        eprintln!("[skip] {} absent", path.display());
+        return;
+    };
+    let mut cart = Cartridge::from_bytes_forced(rom, MapperKind::LoRom).expect("forced LoROM load");
+    cart.header.region = luna_cartridge::Region::Pal;
+    let mut snes = Snes::from_cartridge(cart);
+    snes.reset();
+    snes.ppu.set_native_capture(true);
+    while snes.frame_count < 120 {
+        snes.step();
+    }
+    assert_eq!(
+        snes.ppu.native_framebuffer.len(),
+        512 * 448,
+        "native buffer must be 512x448"
+    );
+    let mut bytes = Vec::with_capacity(512 * 448 * 3);
+    for px in &snes.ppu.native_framebuffer {
+        bytes.extend_from_slice(px);
+    }
+    let got = hex(&Sha256::digest(&bytes));
+    if std::env::var("LUNA_SNES_TEST_RECORD").is_ok() {
+        println!("RECORD native InterlaceFont => {got}");
+        return;
+    }
+    assert_eq!(
+        got, "8e67fed7238a7186a069b2a9de6be0adc076b44665a36095b646d559578ae286",
+        "native 512x448 InterlaceFont hash moved — re-record after an intended render change"
+    );
+}
+
 // Golden hashes captured from luna's renderer (loaded as NTSC — see
 // `run_to_stable` for why the CPUTest family is NTSC where the PPU demos are
 // PAL). All 23 render the correct all-PASS result screen.

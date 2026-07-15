@@ -449,7 +449,7 @@ pub fn render_scanline_partial_into(
     opts: RenderOptions,
     out: &mut [[u8; 3]],
 ) {
-    render_scanline_partial_into_from(ppu, y, start_x, end_x, opts, out, None);
+    render_scanline_partial_into_from(ppu, y, start_x, end_x, opts, out, None, None);
 }
 
 /// Core of [`render_scanline_partial_into`]. `precomp` optionally
@@ -457,6 +457,7 @@ pub fn render_scanline_partial_into(
 /// decodes sprites once per scanline and shares them across the
 /// overflow-flag read and (in interlace) both field renders (PERF-2).
 /// `None` decodes sprites internally, as the full-frame paths do.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_scanline_partial_into_from(
     ppu: &Ppu,
     y: u16,
@@ -465,6 +466,12 @@ pub(crate) fn render_scanline_partial_into_from(
     opts: RenderOptions,
     out: &mut [[u8; 3]],
     precomp: Option<(&[SpriteEntry; 128], &SpriteEval)>,
+    // Native 512-wide row (issue #115): when `Some`, each dot's un-collapsed
+    // subpixel pair is written at `2x` / `2x+1` — the exact operands of the
+    // hi-res average (sub-screen winner left, main-screen result right; lores
+    // dots duplicate the main pixel). `average(native pair) == out[x]` holds
+    // by construction.
+    mut native: Option<&mut [[u8; 3]; FRAME_W * 2]>,
 ) {
     debug_assert_eq!(
         out.len(),
@@ -481,6 +488,11 @@ pub(crate) fn render_scanline_partial_into_from(
     if ppu.inidisp & 0x80 != 0 && !opts.bypass_forced_blank {
         for px in &mut out[start..end] {
             *px = [0, 0, 0];
+        }
+        if let Some(native) = native {
+            for px in &mut native[start * 2..end * 2] {
+                *px = [0, 0, 0];
+            }
         }
         return;
     }
@@ -677,6 +689,35 @@ pub(crate) fn render_scanline_partial_into_from(
             scale_5_to_8(final_bgr5.2),
         ];
         *out_pixel = apply_brightness(rgb888, brightness);
+
+        // Native capture (issue #115): emit the pair the average collapsed —
+        // the dot's left subpixel is the sub-screen winner, the right the
+        // main-screen result (ares dac.cpp:39-40 emits below then above).
+        // Lores dots carry the same pixel twice, so the row is uniformly
+        // 512 wide whatever mode each scanline is in.
+        if let Some(native) = native.as_deref_mut() {
+            let (left, right) = if blend_hires {
+                (sub.bgr5, main_bgr5)
+            } else {
+                (main_bgr5, main_bgr5)
+            };
+            native[x * 2] = apply_brightness(
+                [
+                    scale_5_to_8(left.0),
+                    scale_5_to_8(left.1),
+                    scale_5_to_8(left.2),
+                ],
+                brightness,
+            );
+            native[x * 2 + 1] = apply_brightness(
+                [
+                    scale_5_to_8(right.0),
+                    scale_5_to_8(right.1),
+                    scale_5_to_8(right.2),
+                ],
+                brightness,
+            );
+        }
     }
 }
 
