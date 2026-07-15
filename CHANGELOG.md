@@ -6,6 +6,37 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Fixed
+- **CPU↔scanline phase: five faithful timing fixes** (#109), each read out of
+  ares and verified by a per-instruction master-clock differential against
+  Mesen2 — on krom's `CPUBRA` the two emulators now execute an **identical PC
+  stream over 841 386 instructions with a total drift of −8 master clocks**:
+  - the CPU's **reset sequence** (132 clocks + vector fetch, ares' `//H=186`)
+    was never charged, so luna's entire CPU-vs-scanline phase ran 186 clocks
+    early;
+  - the once-per-scanline **DRAM refresh was not charged during DMA** — a
+    64 KiB VRAM clear finished 15 840 clocks early;
+  - the **refresh position** was pinned at 538 instead of ares'
+    `530 + 8 − dmaCounter()` (531..538, aligned to the DMA clock), and fired
+    one chunk late;
+  - `STZ $420B` (no channels) paid an 8-clock DMA overhead hardware doesn't,
+    and a real burst was missing ares' alignment + per-channel steps;
+  - the **HDMA per-line cost** (scorecard/audit item #11) is now ares' model —
+    8 clocks per A-bus read including the every-line table read, replacing the
+    flat `18 + 8×bytes` — closing ~1 000 clocks of phase error per frame on
+    HDMA-heavy scenes.
+  The NTSC **short scanline** (line 240 of odd fields = 1360 clocks) is now
+  representable: (H, V) derive from incremental counters instead of dividing
+  the master clock. Audio validated by ear in the GUI; 18 goldens
+  re-baselined (one-frame shifts, each eyeballed); the full HDMA commercial
+  corpus swept clean.
+- **Golden harness: the `CPUTest` family now runs as NTSC.** The old PAL
+  forcing was calibrated against luna's too-fast boot: with cycle-exact
+  timing (and per Mesen2, pixel-for-pixel), the ROMs' single-burst result
+  table genuinely overruns PAL's VBlank and truncates mid-row. In NTSC both
+  emulators render the full all-PASS table — and all 23 goldens pass with
+  their existing hashes, now timing-invariant.
+
 ### Added
 - **CLI: `--force-region <ntsc|pal>`** on every ROM-loading subcommand (`run`,
   `state`, `frames`, `wram-trace`, the dump commands), backed by

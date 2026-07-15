@@ -336,7 +336,7 @@ impl DmaChannel {
     /// Runs until `das` reaches zero (a starting `das = 0` transfers
     /// 64 KB). Updates `a_addr` (with `params.a_increment`) and `das` as
     /// it goes; the B-bus offset cycles through `params.mode.pattern()`.
-    /// Returns the number of bytes transferred.
+    /// Returns the number of A-bus reads it made (ares charges 8 mclk each).
     ///
     /// Thin wrapper over [`Self::run_segment`] with an unbounded budget.
     pub fn run<B: DmaBus>(&mut self, bus: &mut B) -> u32 {
@@ -423,7 +423,8 @@ impl DmaChannel {
     /// Sets `hdma_active = true` and `hdma_do_transfer = true` if the
     /// channel has at least one entry; sets them false (channel
     /// disabled for the frame) if the table starts with a 0 byte.
-    pub fn hdma_start_frame<B: DmaBus>(&mut self, bus: &mut B) {
+    pub fn hdma_start_frame<B: DmaBus>(&mut self, bus: &mut B) -> u32 {
+        let mut reads = 1;
         self.a2a = self.a_addr;
         let header = read_a_valid(bus, make_addr(self.a_bank, self.a2a));
         self.a2a = self.a2a.wrapping_add(1);
@@ -431,7 +432,7 @@ impl DmaChannel {
         if header == 0 {
             self.hdma_active = false;
             self.hdma_do_transfer = false;
-            return;
+            return reads;
         }
         if self.params.hdma_indirect {
             let lo = read_a_valid(bus, make_addr(self.a_bank, self.a2a));
@@ -439,9 +440,11 @@ impl DmaChannel {
             let hi = read_a_valid(bus, make_addr(self.a_bank, self.a2a));
             self.a2a = self.a2a.wrapping_add(1);
             self.das = u16::from(lo) | (u16::from(hi) << 8);
+            reads += 2;
         }
         self.hdma_active = true;
         self.hdma_do_transfer = true;
+        reads
     }
 
     /// One HDMA scanline step. If `hdma_do_transfer` is set, transfers
@@ -455,13 +458,16 @@ impl DmaChannel {
     /// channel (ares `hdmaFinished()`: no higher-indexed channel is
     /// active). It only matters for the indirect-reload quirk below.
     ///
-    /// Returns the number of bytes transferred on this line (0 if
-    /// the channel is done or this line was a non-repeat gap).
+    /// Returns the number of **A-bus reads** the channel made this line —
+    /// transfers plus the reload read(s). ares charges 8 master clocks for
+    /// each (`Channel::readA` = `step(4)` + bus read + `step(4)`) and nothing
+    /// for a B-bus write (`writeB` does not step), so this count *is* the
+    /// channel's per-line cost divided by 8.
     pub fn hdma_step_line<B: DmaBus>(&mut self, bus: &mut B, last_active: bool) -> u32 {
         if !self.hdma_active {
             return 0;
         }
-        let mut transferred: u32 = 0;
+        let mut reads: u32 = 0;
         if self.hdma_do_transfer {
             // Emit one full mode "unit". Pattern length = unit size.
             let pattern = self.params.mode.pattern();
@@ -482,7 +488,7 @@ impl DmaChannel {
                 if !(b_offset == 0x80 && is_wram_a(src)) {
                     bus.write_b(b_offset, value);
                 }
-                transferred += 1;
+                reads += 1;
             }
         }
         // Decrement the FULL 8-bit line counter (repeat bit included) and
@@ -495,11 +501,19 @@ impl DmaChannel {
         // band; the old `(ntlr & 0x7F).saturating_sub(1)` treated it as a
         // single line, so the logo vanished after one scanline.
         self.ntlr = self.ntlr.wrapping_sub(1);
+        // ares `hdmaReload` (dma.cpp:152-171) reads the byte at the table
+        // pointer on EVERY line — unconditionally, 8 master clocks — and only
+        // *consumes* it (advancing the pointer) when the low 7 bits of the
+        // line counter have reached 0. luna used to read only on a reload, so
+        // an active channel was 8 mclk/line cheaper than hardware. Over a
+        // 224-line frame that is ~1800 master clocks of CPU-vs-scanline phase
+        // error, every frame.
+        let next = read_a_valid(bus, make_addr(self.a_bank, self.a2a));
+        reads += 1;
         if self.ntlr & 0x7F == 0 {
-            // Entry exhausted: read next header byte (ares `hdmaReload`,
-            // dma.cpp:152-171). A 0 header terminates the channel; a
-            // non-zero one arms a fresh entry that transfers next line.
-            let next = read_a_valid(bus, make_addr(self.a_bank, self.a2a));
+            // Entry exhausted: consume the header. A 0 header terminates the
+            // channel; a non-zero one arms a fresh entry that transfers next
+            // line.
             self.a2a = self.a2a.wrapping_add(1);
             self.ntlr = next;
             let completed = next == 0;
@@ -517,10 +531,12 @@ impl DmaChannel {
                 // a live entry (or a non-last terminator) the normal 2-byte
                 // load runs, giving `das = lo | hi << 8` exactly as before.
                 let first = read_a_valid(bus, make_addr(self.a_bank, self.a2a));
+                reads += 1;
                 self.a2a = self.a2a.wrapping_add(1);
                 self.das = u16::from(first) << 8;
                 if !(completed && last_active) {
                     let second = read_a_valid(bus, make_addr(self.a_bank, self.a2a));
+                    reads += 1;
                     self.a2a = self.a2a.wrapping_add(1);
                     self.das = (u16::from(second) << 8) | (self.das >> 8);
                 }
@@ -530,7 +546,7 @@ impl DmaChannel {
             // is set — repeat entries hold bit 7 high until they reload.
             self.hdma_do_transfer = self.ntlr & 0x80 != 0;
         }
-        transferred
+        reads
     }
 }
 
@@ -869,15 +885,18 @@ mod tests {
         assert_eq!(ch.ntlr, 0x02, "header byte cached as-is");
 
         // Line 1: transfer $11, count → 1, continuation gap (no repeat).
+        // The return is A-BUS READS, not bytes: 1 transfer + the table byte
+        // ares re-reads every line (`hdmaReload`).
         let n = ch.hdma_step_line(&mut bus, true);
-        assert_eq!(n, 1, "mode 0 transfers 1 byte/line");
+        assert_eq!(n, 2, "mode 0: 1 transferred byte + the per-line table read");
         assert_eq!(bus.b[0x22], 0x11);
         assert!(ch.hdma_active);
         assert!(!ch.hdma_do_transfer, "non-repeat continuation skips");
 
-        // Line 2: no transfer; count drops to 0 → reads terminator → done.
+        // Line 2: no transfer; count drops to 0 → consumes the terminator.
+        // Still one A-bus read — an active channel is never free.
         let n = ch.hdma_step_line(&mut bus, true);
-        assert_eq!(n, 0);
+        assert_eq!(n, 1);
         assert!(!ch.hdma_active);
     }
 
@@ -1056,7 +1075,7 @@ mod tests {
         let mut ch = hdma_channel(0x00, 0x7000, 0x18, 0x01); // mode 1
         ch.hdma_start_frame(&mut bus);
         let n = ch.hdma_step_line(&mut bus, true);
-        assert_eq!(n, 2);
+        assert_eq!(n, 3, "2 transferred bytes + the per-line table read");
         assert_eq!(bus.b[0x18], 0x11);
         assert_eq!(bus.b[0x19], 0x22);
     }

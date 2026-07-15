@@ -1,5 +1,5 @@
 {
-  "duration_s": 54.203,
+  "duration_s": 54.213,
   "frames": 3253,
   "note": "past Rareware logo, ~54 s of audio with echo + voices 4-6",
   "rom": "Donkey Kong Country (U) (V1.2) [!].smc",
@@ -46,10 +46,10 @@
     }
   ],
   "stats": {
-    "mean_abs": 1450.55,
-    "non_zero": 0.8766,
+    "mean_abs": 1450.33,
+    "non_zero": 0.8763,
     "peak_neg": -16385,
-    "peak_pos": 17863,
-    "rms": 2419.36
+    "peak_pos": 17865,
+    "rms": 2420.13
   }
 }
