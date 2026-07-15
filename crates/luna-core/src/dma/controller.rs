@@ -62,6 +62,11 @@ pub struct Dma {
     /// only). The fast path is to call [`Dma::run_mdma`] directly with
     /// the value being written.
     pub mdmaen: u8,
+    /// Channel mask of a `$420B` write whose burst has not run yet. ares
+    /// `status.dmaPending`: the write only arms; the transfer executes at the
+    /// next `dmaEdge()` — the start of the following bus access — and is
+    /// charged to that instruction (issue #109).
+    pub pending_mdma: u8,
     /// `$420C HDMAEN` — HDMA enable mask. Stored but not yet acted upon
     /// (HDMA is in a later phase).
     pub hdmaen: u8,

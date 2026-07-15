@@ -46,10 +46,10 @@
     }
   ],
   "stats": {
-    "mean_abs": 1449.36,
+    "mean_abs": 1449.05,
     "non_zero": 0.7793,
-    "peak_neg": -24576,
-    "peak_pos": 23268,
-    "rms": 2414.82
+    "peak_neg": -22338,
+    "peak_pos": 23333,
+    "rms": 2414.58
   }
 }
