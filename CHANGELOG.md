@@ -7,6 +7,26 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Fixed
+- **CPU↔scanline phase locked — ares' two remaining timing terms** (#109,
+  closing the chain opened by #107):
+  - **read sample point**: the bus is now sampled four master clocks before
+    the access ends (`step(cost−4); read; step(4)`, ares `cpu/memory.cpp`,
+    Mesen2 `SnesMemoryManager::Read`) instead of at the end — every H-clock-
+    dependent register read (`$4210`, `$4212`, `$2137`) observes the bus where
+    hardware does, and traces/watchpoints timestamp at that point;
+  - **deferred `dmaEdge`**: a `$420B` write only *arms* the transfer (ares
+    `dmaPending`); the burst executes at the next bus access and is charged to
+    the next instruction, where Mesen2's per-instruction trace places it. The
+    DMA/HDMA realignment step now also uses the true in-flight access cost.
+  Result: on `CPUBRA`, luna and Mesen2 are **cycle-identical over 841 386
+  instructions — not a single per-instruction delta differs**. The phase is
+  locked, so the faithful RDNMI rule (raise at H=2, readable-set hold in
+  [2,6)) replaces #107's conservative masking: `WaveHDMA` polls exactly once
+  on 139/139 frames while keeping the Terranigma / Chrono Trigger protection,
+  and its HDMA table advances +3/frame on 446/449. Save-state version bumped
+  (a pending-DMA field is serialized). Nine goldens re-baselined (eyeballed;
+  the two moved PCM goldens have identical loudness/attack stats — LSB-level
+  differences only).
 - **CPU↔scanline phase: five faithful timing fixes** (#109), each read out of
   ares and verified by a per-instruction master-clock differential against
   Mesen2 — on krom's `CPUBRA` the two emulators now execute an **identical PC

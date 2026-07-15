@@ -427,19 +427,37 @@ const RESET_SEQUENCE_MCLK: u32 = 186;
 /// timer-poll freeze).
 const DRAM_REFRESH_CYCLES: u32 = 40;
 
-/// H-clock from which the S-CPU presents the raised NMI line to a `$4210`
-/// (RDNMI) read, on the `VBlank` scanline.
+/// Master clocks of a CPU read that elapse *after* the bus is sampled.
 ///
-/// Before it, a read sees the flag **clear** and — the part that matters —
-/// **cannot clear it**. Both references agree on the no-clear half: ares
-/// holds the line for four clocks after raising it (`cpu/irq.cpp:14`,
-/// "hold /NMI for four cycles", checked by `rdnmi()` at `irq.cpp:52-58`), and
-/// Mesen2 only lets a read clear the flag "starting on cycle 6"
-/// (`InternalRegisters.cpp:234-241`). That no-clear window is what keeps an
-/// NMI handler that ACKs `$4210` from starving a mainline `BPL $4210` poll of
-/// the same flag (Mesen2 names Terranigma; Chrono Trigger uses the same
-/// Square / Quintet idiom and hangs in luna without it).
+/// ares splits a read (`cpu/memory.cpp:8-19`): it steps all but the last four
+/// master clocks of the access, samples the bus, then steps the remaining
+/// four:
 ///
+/// ```text
+/// step(clockCount - 4);  data = bus.read(address, r.mdr);  step(4);
+/// ```
+///
+/// Mesen2 does the same (`SnesMemoryManager::Read`: `_execRead()` = the
+/// `speed - 4` step, then `handler->Read`, then `IncMasterClock4`). luna used
+/// to charge the whole access up front and sample at its END, so every read
+/// observed the bus four clocks late — visible on any register whose value
+/// depends on the H-clock at the moment of the read (`$4210` RDNMI, `$4212`
+/// HVBJOY's live H-blank bit, `$2137` SLHV and the OPHCT/OPVCT latches).
+/// Issue #109. Writes need no split: ares steps the full `clockCount`
+/// *before* `bus.write` (`memory.cpp:21-28`), which luna already does.
+const READ_SAMPLE_TAIL: MCycles = 4;
+
+/// H-clock at which the S-CPU raises the NMI line on the `VBlank` scanline.
+///
+/// ares polls the line every four clocks and tests `vcounter(2) >= vdisp`
+/// (`cpu/irq.cpp:13`) — the V-counter as it was two clocks ago, its model of
+/// the "hardware communication delay between opcode and interrupt units"; the
+/// first poll that sees the new scanline is the one at H=2. Mesen2 raises it
+/// in the same place (`ProcessIrqCounters`' `hClock == 2` branch). A `$4210`
+/// read sampled before this reads the flag clear (and, being inside the hold,
+/// cannot clear it either).
+const RDNMI_RAISE_HCLOCK: u16 = 2;
+
 /// H-clock from which a `$4210` read may CLEAR the NMI flag.
 ///
 /// The S-CPU holds the line for four master clocks after raising it — ares'
@@ -452,10 +470,12 @@ const DRAM_REFRESH_CYCLES: u32 = 40;
 /// `BPL $4210` poll of the same flag (Mesen2 names Terranigma; Chrono Trigger
 /// uses the same Square / Quintet idiom).
 ///
-/// This is the real rule, and luna can finally run it: the deviation shipped
-/// for #107 (masking the flag below H=6) only existed because luna's
-/// CPU-vs-scanline phase was wrong, landing its poll loop *inside* this window
-/// where hardware's lands clear of it.
+/// This is the faithful ares/Mesen2 pair, live since the CPU↔scanline phase
+/// locked (issue #109). The `$4210` masking shipped for #107 — the flag held
+/// invisible below H=6 — existed only because luna's phase was wrong, landing
+/// its poll loop *inside* this window where hardware's lands clear of it:
+/// measured on `WaveHDMA`, the faithful rule now gives exactly one poll pass
+/// on 139/139 frames, sampling at H-clocks {16..46}, never inside the hold.
 const RDNMI_HOLD_HCLOCK: u16 = 6;
 
 /// Master clocks in scanline `line` — ares' `PPUcounter::hperiod()`.
@@ -910,6 +930,7 @@ impl Snes {
         self.joypad_strobe = false;
         self.joypad1_shift = 0;
         self.joypad2_shift = 0;
+        self.dma.pending_mdma = 0;
 
         // 3. Charge the reset sequence — see `RESET_SEQUENCE_MCLK`. The PPU
         //    and APU run through it, so drive it via the scheduler rather than
@@ -2013,8 +2034,10 @@ impl Bus for SnesBus<'_> {
         // reads below return this. An open-bus read returns the prior
         // MDR (read_inner hands back `*self.mdr`), so this is idempotent
         // for those — it only changes on a real fetch.
+        //
+        // The trace/watchpoint hook is not here: `read_inner` fires it at
+        // the bus-sampling point, four clocks before the access ends.
         *self.mdr = value;
-        self.trace_mem_access(addr, MemEventKind::Read, value);
         value
     }
     fn write(&mut self, addr: Addr24, value: u8) {
@@ -2125,21 +2148,134 @@ impl SnesBus<'_> {
         }
     }
 
+    /// ares' `dmaEdge()` (`cpu/timing.cpp:100-133`), the deferred half: a DMA
+    /// armed by a `$420B` write runs at the start of the next bus access,
+    /// after `clock_count` is known (the realignment step is computed against
+    /// it) and before the access's own clocks are charged.
+    fn dma_edge(&mut self) {
+        let value = self.dma.pending_mdma;
+        if value == 0 {
+            return;
+        }
+        self.dma.pending_mdma = 0;
+        // ares charges the burst against the DMA clock divider at the edge
+        // and the cost of the access whose edge runs it — see `mdma_cost`.
+        let mclk_at_edge = *self.mclk_total;
+        let clock_count = self.clock_count;
+        // Trigger sync DMA on every channel selected in `value`.
+        // We splat the SnesBus borrows: `dma` is mutated by the DMA
+        // call, the other refs flow into DmaBusView. This borrow-split
+        // lets the DMA run without re-entering the Bus impl. The
+        // DMA→VRAM trace is moved into the view for the burst (so its
+        // $2118/9 writes are captured) and restored after.
+        //
+        // `advance_coproc = false`: coprocs already advanced per byte via
+        // `DmaBusView::tick`, so the master-clock charge here must not
+        // re-charge them.
+        if self.dma.hdmaen == 0 {
+            // Fast path — no HDMA armed, so nothing the DMA could
+            // cross matters: run the whole burst as one lump (the
+            // legacy behaviour, byte-identical). Covers virtually all
+            // forced-blank / vblank uploads.
+            let mut trace = self.dma.dma_trace.take();
+            let trace_hclock = self.hclock();
+            let bytes = {
+                let mut view = DmaBusView {
+                    wram: self.wram,
+                    mapper: self.mapper,
+                    ppu: self.ppu,
+                    wm_addr: self.wm_addr,
+                    dma_trace: trace.as_mut(),
+                    last_a_addr: 0,
+                    trace_frame: self.frame_count,
+                    trace_line: self.ppu_line,
+                    trace_blank: self.ppu_line >= self.vblank_start_line,
+                    trace_hclock,
+                    dma_channel: 0,
+                };
+                self.dma.run_mdma(&mut view, value)
+            };
+            self.dma.dma_trace = trace;
+            let cost = mdma_cost(
+                mclk_at_edge,
+                value.count_ones(),
+                u64::from(bytes),
+                clock_count,
+            );
+            self.advance_time(cost, false);
+            return;
+        }
+
+        // Segmented path (Phase 5) — HDMA is armed, so a long burst
+        // must yield to HDMA at scanline boundaries instead of landing
+        // all at once. Drive the DMA in segments bounded by the next
+        // line crossing; `advance_time` then runs that line's HDMA via
+        // `sched_one_line`. A DMA yields to HDMA at most once per line,
+        // so line-granular segmentation reproduces ares' per-byte
+        // `dmaEdge` ordering for this case.
+        self.advance_time(8, false); // one-shot start overhead
+        let mut trace = self.dma.dma_trace.take();
+        loop {
+            let room_mclk = self.line_period().saturating_sub(self.mcycles_in_line);
+            // Bytes that fit before the next boundary (≥1 to progress).
+            // 8 mclk/byte, matching `DmaChannel::run_segment`.
+            let seg_bytes = (room_mclk / 8).max(1);
+            let trace_hclock = self.hclock();
+            let done = {
+                let mut view = DmaBusView {
+                    wram: self.wram,
+                    mapper: self.mapper,
+                    ppu: self.ppu,
+                    wm_addr: self.wm_addr,
+                    dma_trace: trace.as_mut(),
+                    last_a_addr: 0,
+                    trace_frame: self.frame_count,
+                    trace_line: self.ppu_line,
+                    trace_blank: self.ppu_line >= self.vblank_start_line,
+                    trace_hclock,
+                    dma_channel: 0,
+                };
+                self.dma.run_mdma_segment(&mut view, value, seg_bytes)
+            };
+            // Charge this segment's master clock; crosses the line
+            // boundary and fires HDMA for any visible line crossed.
+            self.advance_time(u64::from(done) * 8, false);
+            if self.dma.mdma_cursor.is_none() {
+                break; // burst complete
+            }
+        }
+        self.dma.dma_trace = trace;
+    }
+
+    /// A CPU read, in ares' shape (`cpu/memory.cpp:8-19`): the DMA edge runs
+    /// first, then all but the last four clocks are charged, the bus is
+    /// sampled, and the tail is charged — see `READ_SAMPLE_TAIL`.
     fn read_inner(&mut self, addr: Addr24) -> u8 {
         // Hold this access as the S-CPU memory-address register (ares
         // `cpu.r.mar`) so the per-access coproc step can model SA-1
         // `conflict()` bus contention against it.
         self.scpu_mar = addr;
         let speed = address_speed(addr, self.fast_rom);
-        // NOTE: luna charges the whole access here and samples the bus at its
-        // END. ares and Mesen2 both sample four master clocks EARLIER —
-        // `step(clockCount - 4); bus.read(); step(4)` (ares
-        // `cpu/memory.cpp:12-14`). Porting that shifts every MMIO read by 4
-        // mclk, which moves the smoke goldens and the audio durations, so it
-        // is tracked as its own change rather than smuggled in with the RDNMI
-        // fix (issue #107 only needed `RDNMI_VISIBLE_HCLOCK`).
-        self.io_cycle(speed.mcycles());
+        // ares `status.clockCount` — the cost of the access in flight, which
+        // the DMA/HDMA realignment steps are computed against.
+        self.clock_count = speed.mcycles() as u32;
+        // ares runs `dmaEdge()` before the access's clocks: a DMA armed by
+        // the previous instruction's `$420B` write executes HERE, charged to
+        // this instruction — see `dma_edge`.
+        self.dma_edge();
+        // Every bus speed is >= 6 mclk, so the pre-sample step is >= 2.
+        self.io_cycle(speed.mcycles() - READ_SAMPLE_TAIL);
+        let data = self.read_sampled(addr);
+        // Timestamp the trace / fire watchpoints at the sampling point — that
+        // is where the byte was latched.
+        self.trace_mem_access(addr, MemEventKind::Read, data);
+        self.io_cycle(READ_SAMPLE_TAIL);
+        data
+    }
 
+    /// Decode + perform the read itself, at the point in the access
+    /// [`Self::read_inner`] has positioned the clock on. Charges no time.
+    fn read_sampled(&mut self, addr: Addr24) -> u8 {
         if let Some(o) = Self::wram_offset(addr) {
             return self.wram[o];
         }
@@ -2264,13 +2400,7 @@ impl SnesBus<'_> {
                 // twice in one VBlank (issue #107).
                 let hclock = self.hclock();
                 let on_nmi_line = self.ppu_line == self.vblank_start_line;
-                // NOTE: ares and Mesen2 raise the line at H=2, not H=6, and
-                // hand it back SET in [2, 6). luna still masks the whole
-                // window because its CPU-vs-scanline phase — much closer after
-                // the timing work here, but not yet locked — still drops the
-                // poll inside the hold on 9 of 139 WaveHDMA frames (it was 40
-                // before). Raise at 2 the moment the phase locks (issue #109).
-                let raised = !(on_nmi_line && hclock < RDNMI_HOLD_HCLOCK);
+                let raised = !(on_nmi_line && hclock < RDNMI_RAISE_HCLOCK);
                 let in_hold = on_nmi_line && hclock < RDNMI_HOLD_HCLOCK;
                 return self.cpu_regs.read_rdnmi(raised, in_hold);
             }
@@ -2317,6 +2447,8 @@ impl SnesBus<'_> {
         self.scpu_mar = addr;
         let speed = address_speed(addr, self.fast_rom);
         self.clock_count = speed.mcycles() as u32;
+        // ares `CPU::write` runs `dmaEdge()` before stepping (`memory.cpp:24`).
+        self.dma_edge();
         self.io_cycle(speed.mcycles());
 
         // Nocash debug TTY: capture `$21FC` writes (no$/Mesen console port —
@@ -2469,104 +2601,16 @@ impl SnesBus<'_> {
             return;
         }
         if Self::is_mdmaen(addr) {
-            // No channel selected -> no transfer, and crucially no start
-            // overhead either: ares only arms the DMA when the written byte is
-            // non-zero (`cpu/io.cpp` `$420b`: `if(data) status.dmaPending = 1`).
-            // luna used to charge the 8-mclk one-shot overhead on *every*
-            // `$420B` write, so the very common `STZ $420B` idiom cost 38 mclk
-            // where hardware spends 30 — eight clocks of CPU-vs-scanline phase
-            // error handed out for free, on an instruction boot code runs a lot.
-            if value == 0 {
-                return;
+            // `$420B` only ARMS the transfer — ares `cpu/io.cpp`:
+            // `if(data) status.dmaPending = 1;`. The burst itself runs at the
+            // next `dmaEdge()`, i.e. at the start of the NEXT bus access, and
+            // is charged to that instruction — which is where Mesen2's
+            // per-instruction trace places it too. luna used to run it inline
+            // here, charging it to the arming instruction: one instruction of
+            // permanent CPU-vs-scanline phase error per DMA (issue #109).
+            if value != 0 {
+                self.dma.pending_mdma = value;
             }
-            // ares charges the burst against the DMA clock divider and the
-            // cost of the access that armed it — see `mdma_cost`.
-            let mclk_at_write = *self.mclk_total;
-            let clock_count = address_speed(addr, self.fast_rom).mcycles() as u32;
-            // Trigger sync DMA on every channel selected in `value`.
-            // We splat the SnesBus borrows: `dma` is mutated by the DMA
-            // call, the other refs flow into DmaBusView. This borrow-split
-            // lets the DMA run without re-entering the Bus impl. The
-            // DMA→VRAM trace is moved into the view for the burst (so its
-            // $2118/9 writes are captured) and restored after.
-            //
-            // 8 mclk one-shot start overhead, then 8 mclk per byte
-            // (fullsnes §"SNES DMA Timing"). `advance_coproc = false`:
-            // coprocs already advanced per byte via `DmaBusView::tick`, so
-            // the master-clock charge here must not re-charge them.
-            if self.dma.hdmaen == 0 {
-                // Fast path — no HDMA armed, so nothing the DMA could
-                // cross matters: run the whole burst as one lump (the
-                // legacy behaviour, byte-identical). Covers virtually all
-                // forced-blank / vblank uploads.
-                let mut trace = self.dma.dma_trace.take();
-                let trace_hclock = self.hclock();
-                let bytes = {
-                    let mut view = DmaBusView {
-                        wram: self.wram,
-                        mapper: self.mapper,
-                        ppu: self.ppu,
-                        wm_addr: self.wm_addr,
-                        dma_trace: trace.as_mut(),
-                        last_a_addr: 0,
-                        trace_frame: self.frame_count,
-                        trace_line: self.ppu_line,
-                        trace_blank: self.ppu_line >= self.vblank_start_line,
-                        trace_hclock,
-                        dma_channel: 0,
-                    };
-                    self.dma.run_mdma(&mut view, value)
-                };
-                self.dma.dma_trace = trace;
-                let cost = mdma_cost(
-                    mclk_at_write,
-                    value.count_ones(),
-                    u64::from(bytes),
-                    clock_count,
-                );
-                self.advance_time(cost, false);
-                return;
-            }
-
-            // Segmented path (Phase 5) — HDMA is armed, so a long burst
-            // must yield to HDMA at scanline boundaries instead of landing
-            // all at once. Drive the DMA in segments bounded by the next
-            // line crossing; `advance_time` then runs that line's HDMA via
-            // `sched_one_line`. A DMA yields to HDMA at most once per line,
-            // so line-granular segmentation reproduces ares' per-byte
-            // `dmaEdge` ordering for this case.
-            self.advance_time(8, false); // one-shot start overhead
-            let mut trace = self.dma.dma_trace.take();
-            loop {
-                let room_mclk = self.line_period().saturating_sub(self.mcycles_in_line);
-                // Bytes that fit before the next boundary (≥1 to progress).
-                // 8 mclk/byte, matching `DmaChannel::run_segment`.
-                let seg_bytes = (room_mclk / 8).max(1);
-                let trace_hclock = self.hclock();
-                let done = {
-                    let mut view = DmaBusView {
-                        wram: self.wram,
-                        mapper: self.mapper,
-                        ppu: self.ppu,
-                        wm_addr: self.wm_addr,
-                        dma_trace: trace.as_mut(),
-                        last_a_addr: 0,
-                        trace_frame: self.frame_count,
-                        trace_line: self.ppu_line,
-                        trace_blank: self.ppu_line >= self.vblank_start_line,
-                        trace_hclock,
-                        dma_channel: 0,
-                    };
-                    self.dma.run_mdma_segment(&mut view, value, seg_bytes)
-                };
-                // Charge this segment's master clock; crosses the line
-                // boundary and fires HDMA for any visible line crossed.
-                self.advance_time(u64::from(done) * 8, false);
-                if self.dma.mdma_cursor.is_none() {
-                    break; // burst complete
-                }
-            }
-            self.dma.dma_trace = trace;
             return;
         }
         if Self::is_hdmaen(addr) {
@@ -3350,6 +3394,9 @@ mod tests {
         // Trigger channel-0 sync DMA via the bus (→ the segmented path,
         // since HDMAEN != 0).
         bus.write(make_addr(0x00, 0x420B), 0x01);
+        // `$420B` only arms the burst (ares `dmaPending`); it executes at the
+        // next bus access's `dmaEdge()`. Fire that edge.
+        let _ = bus.read(make_addr(0x00, 0x8000));
         // (the `&mut snes` borrow held by `bus` ends at its last use above)
 
         // VRAM low byte of word w == $2118 write #w.
@@ -3533,19 +3580,25 @@ mod tests {
         (v, still_set)
     }
 
-    /// Issue #107: a `BIT $4210 / BPL` poll loop must pass exactly ONCE per
-    /// `VBlank`. It passed twice whenever its read landed in the first clocks of
-    /// the `VBlank` scanline, because luna handed the flag back *set* there and
-    /// — being inside the no-clear window — could not clear it, so the very
-    /// next poll passed again. Before `RDNMI_VISIBLE_HCLOCK` the S-CPU has not
-    /// presented the line yet: the read sees it clear (and still cannot clear
-    /// it, which is what protects Chrono Trigger / Terranigma).
+    /// Before the raise (H < 2) a `$4210` read sees the flag clear and — being
+    /// inside the hold — cannot clear it.
     #[test]
-    fn rdnmi_is_invisible_and_unclearable_before_hclock_6() {
-        for h in [0, 2, 4] {
+    fn rdnmi_reads_clear_before_the_raise() {
+        let (v, still_set) = rdnmi_read_at(0);
+        assert_eq!(v & 0x80, 0x00, "H=0: line not raised yet");
+        assert!(still_set, "H=0: read must not clear the flag");
+    }
+
+    /// Inside the hold (`H` in `[2, 6)`) the read returns the flag **set**
+    /// but leaves it set — ares `nmiHold`, the Terranigma / Chrono Trigger
+    /// protection. This is the faithful rule, live since the phase locked
+    /// (#109); #107's masking (clear below H=6) is retired.
+    #[test]
+    fn rdnmi_reads_set_but_does_not_clear_inside_the_hold() {
+        for h in [2, 4] {
             let (v, still_set) = rdnmi_read_at(h);
-            assert_eq!(v & 0x80, 0x00, "H={h}: flag must read clear");
-            assert!(still_set, "H={h}: read must NOT clear the flag");
+            assert_eq!(v & 0x80, 0x80, "H={h}: flag must read set");
+            assert!(still_set, "H={h}: hold must survive the read");
         }
     }
 

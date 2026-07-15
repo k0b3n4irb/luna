@@ -63,13 +63,15 @@ on one screen"):
    **2026-07-15 update:** the CPU↔scanline phase work (#109) landed five
    faithful timing fixes — reset preamble (`//H=186`), DRAM refresh charged
    during DMA, DMA-clock-aligned refresh position, ares' MDMAEN/HDMA cost
-   models, NTSC short scanline — verified by a per-instruction cycle
-   differential vs Mesen2 (CPUBRA: PC stream identical over 841 386
-   instructions, total drift −8 mclk; even the PAL VBlank-overrun truncation
-   matches Mesen2 pixel-for-pixel, last VRAM write within 2 mclk). Residual:
-   the poll phase is close but not *locked* (faithful RDNMI raise-at-H=2
-   would still double-pass 9/139 WaveHDMA frames, so the conservative $4210
-   masking stays); next structural term is ares' deferred `dmaEdge` and the
-   4-mclk read sample point.
+   models, NTSC short scanline — then closed with ares' remaining two terms:
+   the read **sample point** (`step(cost−4); read; step(4)`) and the
+   **deferred `dmaEdge`** (a `$420B`-armed burst runs at the next access,
+   charged to the next instruction). Verified by the per-instruction cycle
+   differential vs Mesen2: on CPUBRA the two emulators are **cycle-identical
+   over 841 386 instructions — zero per-instruction deltas differ**. The
+   CPU↔scanline phase is **locked**: the faithful RDNMI pair (raise H=2,
+   hold [2,6)) is live and `WaveHDMA` polls exactly once on 139/139 frames
+   (#107's conservative masking is retired). `$4211` TIMEUP's hold window
+   remains the un-measured sibling.
 5. DSP-1 differential oracle — the one grade capped by *missing evidence*
    rather than a known divergence.
