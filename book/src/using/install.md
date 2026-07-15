@@ -7,15 +7,15 @@ prebuilt binaries — no toolchain needed:
 
 | Platform | Asset |
 |---|---|
-| Linux x86_64 | `luna-v1.9.0-linux-x86_64.tar.gz` |
-| Linux aarch64 | `luna-v1.9.0-linux-aarch64.tar.gz` |
-| Windows x86_64 | `luna-v1.9.0-windows-x86_64.zip` |
-| macOS Apple Silicon (arm64) | `luna-v1.9.0-macos-aarch64.tar.gz` |
+| Linux x86_64 | `luna-v1.10.0-linux-x86_64.tar.gz` |
+| Linux aarch64 | `luna-v1.10.0-linux-aarch64.tar.gz` |
+| Windows x86_64 | `luna-v1.10.0-windows-x86_64.zip` |
+| macOS Apple Silicon (arm64) | `luna-v1.10.0-macos-aarch64.tar.gz` |
 
 ```bash
 # Linux / macOS (swap the asset name for your platform)
-curl -LO https://github.com/k0b3n4irb/luna/releases/latest/download/luna-v1.9.0-linux-x86_64.tar.gz
-tar xzf luna-v1.9.0-linux-x86_64.tar.gz && cd luna-v1.9.0-linux-x86_64
+curl -LO https://github.com/k0b3n4irb/luna/releases/latest/download/luna-v1.10.0-linux-x86_64.tar.gz
+tar xzf luna-v1.10.0-linux-x86_64.tar.gz && cd luna-v1.10.0-linux-x86_64
 
 ./luna-gui "path/to/game.sfc"   # play in the graphical debugger
 ./luna --help                   # headless CLI: run · state · mcp …
@@ -36,7 +36,7 @@ run `luna-gui.exe` or `luna.exe`. Each archive contains both binaries and a
 
 > **macOS Gatekeeper:** the binaries are unsigned, so the first launch is
 > blocked. Clear the quarantine flag once with
-> `xattr -dr com.apple.quarantine luna-v1.9.0-macos-aarch64`, or right-click →
+> `xattr -dr com.apple.quarantine luna-v1.10.0-macos-aarch64`, or right-click →
 > *Open* in Finder and confirm.
 >
 > Intel Macs and 32-bit/ARM Windows are not built — build from source below.
