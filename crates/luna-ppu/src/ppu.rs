@@ -366,6 +366,19 @@ pub struct Ppu {
     /// to exactly the save point (front-ends hold the last non-blank frame
     /// between renders, so this must round-trip).
     pub framebuffer: Vec<[u8; 3]>,
+    /// Native-resolution capture toggle (issue #115). Off by default — the
+    /// dual-write in the compositor and the per-field rows cost time, so only
+    /// a consumer that asked for native output pays for it.
+    #[serde(skip)]
+    pub native_capture: bool,
+    /// The native 512×448 frame, maintained per scanline when
+    /// [`Self::native_capture`] is on: hi-res dots keep their sub/main
+    /// subpixel pair side by side (lores dots are duplicated), and the two
+    /// interlace fields land on rows `2y` / `2y+1` (duplicated when not
+    /// interlaced). Empty when capture is off. Not console state — a debug
+    /// capture, regenerable — so save states skip it.
+    #[serde(skip)]
+    pub native_framebuffer: Vec<[u8; 3]>,
 
     /// How far the current scanline has been rendered into the
     /// framebuffer. Phase 2 of gap G6: a `$21xx` write that lands
@@ -483,6 +496,8 @@ impl Ppu {
             open_bus: 0,
             inidisp_write_count: 0,
             framebuffer: vec![[0u8; 3]; FRAME_W * FRAME_H],
+            native_capture: false,
+            native_framebuffer: Vec::new(),
             last_flushed_dot: 0,
             line_sprites: None,
             // Post-reset state is forced-blanked (INIDISP=$80), so
@@ -591,6 +606,12 @@ impl Ppu {
         let mut row = [[0u8; 3]; FRAME_W];
         let si = usize::from(start);
         let ei = usize::from(end);
+        // Native capture (issue #115): the un-collapsed pixels, written by
+        // the compositor alongside the 256-wide row. One 512-wide row per
+        // field; committed to `native_framebuffer` rows 2y / 2y+1 below.
+        let capture = self.native_capture;
+        let mut native_even = [[0u8; 3]; FRAME_W * 2];
+        let mut native_odd = [[0u8; 3]; FRAME_W * 2];
         if self.setini & 0x01 != 0 {
             // Interlace (Phase C): the 448-line image is collapsed to 224 by
             // averaging the two fields (logical lines y*2 and y*2+1) — the
@@ -601,9 +622,27 @@ impl Ppu {
             let saved_field = self.field;
             let mut row_odd = [[0u8; 3]; FRAME_W];
             self.field = false;
-            render_scanline_partial_into_from(self, y, start, end, opts, &mut row, precomp);
+            render_scanline_partial_into_from(
+                self,
+                y,
+                start,
+                end,
+                opts,
+                &mut row,
+                precomp,
+                capture.then_some(&mut native_even),
+            );
             self.field = true;
-            render_scanline_partial_into_from(self, y, start, end, opts, &mut row_odd, precomp);
+            render_scanline_partial_into_from(
+                self,
+                y,
+                start,
+                end,
+                opts,
+                &mut row_odd,
+                precomp,
+                capture.then_some(&mut native_odd),
+            );
             self.field = saved_field;
             for x in si..ei {
                 for c in 0..3 {
@@ -611,10 +650,31 @@ impl Ppu {
                 }
             }
         } else {
-            render_scanline_partial_into_from(self, y, start, end, opts, &mut row, precomp);
+            render_scanline_partial_into_from(
+                self,
+                y,
+                start,
+                end,
+                opts,
+                &mut row,
+                precomp,
+                capture.then_some(&mut native_even),
+            );
+            // Not interlaced: both native rows carry the same field.
+            native_odd = native_even;
         }
         let off = yi * FRAME_W;
         self.framebuffer[off + si..off + ei].copy_from_slice(&row[si..ei]);
+        if capture {
+            let w = FRAME_W * 2;
+            let (nsi, nei) = (si * 2, ei * 2);
+            let even_off = (yi * 2) * w;
+            let odd_off = (yi * 2 + 1) * w;
+            self.native_framebuffer[even_off + nsi..even_off + nei]
+                .copy_from_slice(&native_even[nsi..nei]);
+            self.native_framebuffer[odd_off + nsi..odd_off + nei]
+                .copy_from_slice(&native_odd[nsi..nei]);
+        }
         self.last_flushed_dot = end;
         // Restore the per-line OBJ cache for the next segment of this line.
         self.line_sprites = cached;
@@ -626,6 +686,19 @@ impl Ppu {
     pub fn scanline_reset(&mut self) {
         self.last_flushed_dot = 0;
         self.line_sprites = None;
+    }
+
+    /// Enable / disable the native 512×448 capture (issue #115). Enabling
+    /// allocates (and zeroes) the buffer; content accumulates from the next
+    /// rendered scanline on, so callers should let a full frame elapse before
+    /// reading [`Self::native_framebuffer`].
+    pub fn set_native_capture(&mut self, on: bool) {
+        self.native_capture = on;
+        if on {
+            self.native_framebuffer = vec![[0u8; 3]; FRAME_W * 2 * FRAME_H * 2];
+        } else {
+            self.native_framebuffer = Vec::new();
+        }
     }
 
     /// Borrow the current persistent framebuffer (256 × 224 BGR888
@@ -1243,6 +1316,50 @@ mod tests {
             [0, 0, 0],
             "last line should be backdrop"
         );
+    }
+
+    #[test]
+    fn native_capture_duplicates_lores_and_matches_the_displayed_row() {
+        // Issue #115: with capture on, a lores scanline lands in the native
+        // buffer with each dot duplicated horizontally and the (identical)
+        // field pair on rows 2y and 2y+1 — so the native frame is uniformly
+        // 512×448 whatever mode each line is in.
+        let mut p = ppu_with_solid_bg1_tile();
+        p.set_native_capture(true);
+        p.render_current_scanline(0, RenderOptions::default());
+        let w = crate::FRAME_W * 2;
+        assert_eq!(p.native_framebuffer.len(), w * crate::FRAME_H * 2);
+        for x in 0..crate::FRAME_W {
+            let displayed = p.framebuffer()[x];
+            assert_eq!(p.native_framebuffer[x * 2], displayed, "left subpixel");
+            assert_eq!(p.native_framebuffer[x * 2 + 1], displayed, "right subpixel");
+            assert_eq!(p.native_framebuffer[w + x * 2], displayed, "odd field row");
+        }
+        // Off again: the buffer is released.
+        p.set_native_capture(false);
+        assert!(p.native_framebuffer.is_empty());
+    }
+
+    #[test]
+    fn native_capture_keeps_the_pseudo_hires_pair_unaveraged() {
+        // Pseudo-512 (SETINI bit 3): the displayed pixel is the average of
+        // the sub and main winners; the native row must keep the pair. With
+        // BG1 (red) on main only and the backdrop (black) as the sub winner,
+        // the displayed pixel is half-red while the native pair is
+        // [black, red] — the exact operands the average collapsed.
+        let mut p = ppu_with_solid_bg1_tile();
+        p.write(register::SETINI, 0x08);
+        p.set_native_capture(true);
+        p.render_current_scanline(0, RenderOptions::default());
+        let displayed = p.framebuffer()[0];
+        let left = p.native_framebuffer[0];
+        let right = p.native_framebuffer[1];
+        assert_eq!(left, [0, 0, 0], "left subpixel = sub winner (backdrop)");
+        assert!(
+            right[0] > displayed[0],
+            "right subpixel = unhalved main red"
+        );
+        assert_ne!(left, right, "the pair must survive unaveraged");
     }
 
     #[test]

@@ -1727,6 +1727,63 @@ impl Emulator {
         Ok(h.finish())
     }
 
+    /// Enable / disable the **native 512×448 capture** (issue #115).
+    ///
+    /// The PPU genuinely computes 512 horizontal samples in the hi-res modes
+    /// (5/6 and pseudo-512) and two interlace fields per line — then collapses
+    /// both by averaging into the 256×224 framebuffer every front-end shows.
+    /// With capture on, the un-collapsed pixels are also kept, per scanline
+    /// (so mid-frame register changes and HDMA effects are honoured exactly
+    /// like the displayed frame): the sub/main subpixel pair side by side
+    /// (lores dots duplicated), the two fields on rows `2y` / `2y+1`
+    /// (duplicated when not interlaced). Off by default — it costs render
+    /// time. Enable it, run at least one full frame, then read
+    /// [`Self::render_frame_png_native`] / [`Self::frame_hash_native`].
+    pub fn set_native_capture(&mut self, on: bool) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.ppu.set_native_capture(on);
+        Ok(())
+    }
+
+    /// The native 512×448 frame as PNG bytes — see
+    /// [`Self::set_native_capture`]. Errors if capture is not enabled.
+    pub fn render_frame_png_native(&self) -> Result<Vec<u8>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        if snes.ppu.native_framebuffer.is_empty() {
+            return Err(ApiError::Io(std::io::Error::other(
+                "native capture is not enabled (set_native_capture / --native-res)",
+            )));
+        }
+        let (w, h) = (FRAME_W * 2, FRAME_H * 2);
+        let mut buf = Vec::with_capacity(w * h * 3);
+        for px in &snes.ppu.native_framebuffer {
+            buf.extend_from_slice(px);
+        }
+        let img = image::RgbImage::from_raw(w as u32, h as u32, buf)
+            .ok_or_else(|| ApiError::Io(std::io::Error::other("native frame size mismatch")))?;
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .map_err(|e| ApiError::Io(std::io::Error::other(e.to_string())))?;
+        Ok(png)
+    }
+
+    /// Hash of the native 512×448 frame — the exact-resolution regression key
+    /// issue #115 asks for. Same construction as [`Self::frame_hash`]
+    /// (fixed-seed hasher over raw pixel bytes, cross-architecture stable).
+    /// Errors if capture is not enabled.
+    pub fn frame_hash_native(&self) -> Result<u64, ApiError> {
+        use std::hash::{Hash, Hasher};
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        if snes.ppu.native_framebuffer.is_empty() {
+            return Err(ApiError::Io(std::io::Error::other(
+                "native capture is not enabled (set_native_capture / --native-res)",
+            )));
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        snes.ppu.native_framebuffer.hash(&mut h);
+        Ok(h.finish())
+    }
+
     /// Serialize the full running-machine state into a portable blob.
     ///
     /// The blob captures the mutable `Snes` state (CPU / PPU / APU / DMA /

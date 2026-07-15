@@ -16,6 +16,7 @@ pub(crate) fn run(
     nocash_out: Option<&std::path::Path>,
     wdm_out: Option<&std::path::Path>,
     print_fbhash: bool,
+    native_res: bool,
     force_mapper: Option<&str>,
     force_region: Option<&str>,
 ) -> ExitCode {
@@ -25,6 +26,9 @@ pub(crate) fn run(
     if let Err(e) = load_rom_into(&mut em, rom_path, force_mapper, force_region, None) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
+    }
+    if native_res {
+        em.set_native_capture(true).expect("rom just loaded");
     }
 
     if let Some(info) = em.rom_info() {
@@ -189,7 +193,12 @@ pub(crate) fn run(
     // Stable, cross-arch visual-regression key (hashes the displayed RGBA,
     // pre-PNG). Printed last so a harness can `grep '^fbhash='`.
     if print_fbhash {
-        match em.frame_hash(force_display) {
+        let hash = if native_res {
+            em.frame_hash_native()
+        } else {
+            em.frame_hash(force_display)
+        };
+        match hash {
             Ok(h) => println!("fbhash={h:016x}"),
             Err(e) => {
                 eprintln!("\nerror: could not hash frame: {e}");
