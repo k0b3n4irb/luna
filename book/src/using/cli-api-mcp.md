@@ -54,6 +54,8 @@ luna run [OPTIONS] <ROM>
 | `--bg <1..=4>` | composited | Render ONLY that BG layer instead of the composited frame. |
 | `--audio-out <PATH>` | — | Capture the APU's 32 kHz stereo output to a WAV. |
 | `--force-mapper <M>` | auto | Force a mapper (`lorom`/`hirom`/`exhirom`/`sa1`/`superfx`) for a headerless / checksum-invalid ROM. |
+| `--force-region <R>` | header | Force the video standard (`ntsc`/`pal`) — changes the scanline count (262/312) and frame rate. |
+| `--native-res` | off | Emit the native **512×448** frame for `--screenshot`/`--print-fbhash`: hi-res modes 5/6 & pseudo-512 keep both horizontal subpixels, interlace keeps both fields as lines. |
 | `--wdm-out <PATH>` | — | Write captured `WDM $xx` executions (the `SNES_ASSERT` channel) — a non-empty file means an assertion fired. |
 | `--print-fbhash` | off | Print `fbhash=<16-hex>`, a cross-arch-stable key for the displayed frame. |
 
@@ -81,6 +83,8 @@ and is the hub for every headless diagnostic.
 | `-n, --steps <N>` | `1000` | CPU instructions before snapshotting. |
 | `--out <PATH>` | `-` | Where to write the JSON (`-` = stdout). |
 | `--force-mapper <M>` | auto | Force a mapper for headerless ROMs: `lorom`, `hirom`, `exhirom`, `sa1`, `superfx`. |
+| `--force-region <R>` | header | Force the video standard: `ntsc` or `pal`. |
+| `--native-res` | off | As in `run` — native 512×448 output for `--screenshot` and `--print-fbhash`. |
 | `--sym <PATH>` | auto-detect `<rom>.sym` | Load a WLA-DX symbol file (annotated disasm, named addresses). |
 | `--dsp1-rom <PATH>` | — | Install `dsp1b.rom` firmware then load (Mario Kart, Pilotwings). Persists. |
 | `--load-state <PATH>` | — | Load a `.luna` save-state right after ROM load, before warm-up (resume a GUI-captured scene). |
@@ -118,6 +122,16 @@ header can't say:
 ```bash
 luna state -n 5000000 --force-mapper lorom --force-region pal \
   --screenshot /tmp/bra.png "CPUTest/CPU/BRA/CPUBRA.sfc"
+```
+
+Exact-resolution regression for the hi-res / interlace demos (issue #115): the
+PPU really computes 512 horizontal subpixels and two interlace fields, then
+averages them into the displayed 256×224 — `--native-res` keeps them:
+
+```bash
+luna state -n 8000000 --force-mapper lorom --force-region pal --native-res \
+  --screenshot /tmp/font.png --print-fbhash \
+  "PPU/Interlace/InterlaceFont/InterlaceFont.sfc"   # → a 512×448 PNG
 ```
 
 ### `luna frames` — consecutive-frame capture (temporal artefacts)
