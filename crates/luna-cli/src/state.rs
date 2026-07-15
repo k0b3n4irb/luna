@@ -22,6 +22,7 @@ pub(crate) fn run_state(
     rom: &std::path::Path,
     steps: u64,
     force_mapper: Option<&str>,
+    force_region: Option<&str>,
     dump_vram_path: Option<&std::path::Path>,
     dump_coproc_ram_path: Option<&std::path::Path>,
     dump_aram_path: Option<&std::path::Path>,
@@ -66,11 +67,17 @@ pub(crate) fn run_state(
     load_state_path: Option<&std::path::Path>,
     wdm_out: Option<&std::path::Path>,
     print_fbhash: bool,
+    native_res: bool,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
-    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, dsp1_rom) {
+    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, dsp1_rom) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
+    }
+    if native_res {
+        // Issue #115: keep the un-collapsed 512×448 pixels alongside the
+        // displayed frame; --screenshot / --print-fbhash emit them below.
+        em.set_native_capture(true).expect("rom just loaded");
     }
     // Explicit `--sym` overrides the `<rom>.sym` auto-detection done by
     // `load_rom_into` (issue #67).
@@ -722,7 +729,12 @@ pub(crate) fn run_state(
     }
 
     if let Some(p) = screenshot {
-        match em.render_frame_png(false) {
+        let png_result = if native_res {
+            em.render_frame_png_native()
+        } else {
+            em.render_frame_png(false)
+        };
+        match png_result {
             Ok(png) => {
                 if let Err(e) = std::fs::write(p, &png) {
                     eprintln!("error: writing screenshot: {e}");
@@ -787,7 +799,12 @@ pub(crate) fn run_state(
         }
     }
     if print_fbhash {
-        match em.frame_hash(false) {
+        let hash = if native_res {
+            em.frame_hash_native()
+        } else {
+            em.frame_hash(false)
+        };
+        match hash {
             Ok(h) => println!("fbhash={h:016x}"),
             Err(e) => {
                 eprintln!("error: could not hash frame: {e}");

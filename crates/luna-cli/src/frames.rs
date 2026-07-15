@@ -16,11 +16,12 @@ pub(crate) fn run_frames(
     count: u64,
     out_dir: &std::path::Path,
     force_mapper: Option<&str>,
+    force_region: Option<&str>,
     input_script: Option<&str>,
 ) -> ExitCode {
     const FRAME_BUDGET: u64 = 200_000;
     let mut em = luna_api::Emulator::new();
-    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, None) {
+    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, None) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }

@@ -1,7 +1,7 @@
 {
-  "duration_s": 11.874,
-  "insns": 10000000,
-  "note": "title screen, ~10 s of audio (no echo on this driver)",
+  "duration_s": 12.334,
+  "frames": 736,
+  "note": "title screen, ~12 s of audio (no echo on this driver)",
   "rom": "Super Mario World (U) [!].smc",
   "spectrum_peaks": [
     {
@@ -46,10 +46,10 @@
     }
   ],
   "stats": {
-    "mean_abs": 592.73,
-    "non_zero": 0.5642,
-    "peak_neg": -15724,
-    "peak_pos": 17258,
-    "rms": 1216.23
+    "mean_abs": 600.31,
+    "non_zero": 0.5716,
+    "peak_neg": -17363,
+    "peak_pos": 15782,
+    "rms": 1227.78
   }
 }

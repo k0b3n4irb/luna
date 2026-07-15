@@ -41,6 +41,33 @@ resume-friendly: resuming from a hit moves past it. Watchpoints halt right
 *after* the accessing instruction, reporting its exact PC, the address and
 the byte. With no breakpoints set, the emulation hot path is unchanged.
 
+Memory watchpoints are **mirror-folded**: a watch on a WRAM or MMIO address
+also fires when the game reaches the same byte through an address mirror — so
+`$7E:0500` catches an access via `$00:0500`, and `$00:2100` catches a FastROM
+access via `$80:2100`. You don't need to know the executing bank.
+
+Driving this from a script (MCP), a run needs no step budget: `run` executes
+until a breakpoint, a `STOP`, or a `pause` from another call, then returns
+`interrupted: true` — so a debugger client can "continue" and "pause" without
+polling.
+
+## GUI conveniences
+
+A few workflow helpers in the **File** and **Emulation** menus:
+
+- **Force mapper** (*File ▸ Force mapper*): load a ROM whose internal checksum
+  is blank/invalid (much of the homebrew test corpus) — auto-detection refuses
+  to guess LoROM vs HiROM without a valid checksum, so on a failed load an
+  inline *"couldn't detect the mapper — load as…?"* prompt loads it in one
+  click, and the submenu pre-sets a sticky default for a whole test corpus.
+- **Record input** (*Emulation ▸ ● Record input*): capture what you play as a
+  replayable `frame:mask` script. A red **⏺ REC** badge shows while recording;
+  stopping writes a `.input` file to `~/.local/luna/recordings/` that replays
+  with `luna state --input @<file>`.
+- **Reload ROM** (*File ▸ Reload ROM*) + **Auto-reload on file change**: reboot
+  the current ROM from disk in place — turn on auto-reload and an external SDK
+  build (a rewritten `.sfc`) restarts the running game with no reopen.
+
 ## The Event Viewer
 
 The Event Viewer answers one question the other panels can't: **where in the

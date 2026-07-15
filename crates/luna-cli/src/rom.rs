@@ -1,14 +1,27 @@
 //! ROM loading shared by every headless subcommand.
 
-/// Load `rom` into `em`, honouring an optional `--force-mapper` override.
-/// Centralises the force-mapper parse + file read shared by the `state`
-/// and `frames` subcommands. Returns a human-facing error string.
+/// Load `rom` into `em`, honouring the optional `--force-mapper` and
+/// `--force-region` overrides. Centralises the override parsing + file read
+/// shared by every ROM-loading subcommand. Returns a human-facing error
+/// string.
 pub(crate) fn load_rom_into(
     em: &mut luna_api::Emulator,
     rom: &std::path::Path,
     force_mapper: Option<&str>,
+    force_region: Option<&str>,
     dsp1_rom: Option<&std::path::Path>,
 ) -> Result<(), String> {
+    match force_region {
+        Some(r) => {
+            let region = match r.to_ascii_lowercase().as_str() {
+                "ntsc" => luna_api::Region::Ntsc,
+                "pal" => luna_api::Region::Pal,
+                _ => return Err(format!("unknown --force-region '{r}' (ntsc, pal)")),
+            };
+            em.set_forced_region(Some(region));
+        }
+        None => em.set_forced_region(None),
+    }
     // `--dsp1-rom` installs the firmware into luna's firmware folder so it
     // is found now and on every future run.
     if let Some(fw) = dsp1_rom {

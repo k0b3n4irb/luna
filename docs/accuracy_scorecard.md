@@ -47,12 +47,31 @@ on one screen"):
 
 1. PPU gap #7 — HiColor sub-scanline CGRAM timing (needs a per-dot CGRAM
    model; tripwire goldens in place).
-2. HDMA per-line cycle-count (#11/#13 in the audit) — luna folds the per-line
-   cost into `HDMA_OVERHEAD_MCLK`.
+2. ~~HDMA per-line cycle-count (#11 in the audit)~~ — **closed 2026-07-15**:
+   faithful per-A-bus-read cost model (`hdma_cost`), `HDMA_OVERHEAD_MCLK`
+   retired. #13's edge *interactions* (`$420C` mid-DMA) stay open.
 3. SA-1 / Super FX scheduler grain — batched stepping vs ares' cothreads;
    engine outputs are exact, only stall placement differs.
 4. P4 interrupt micro-timing (TIMEUP hold window, last-dot guard, htime=0
-   delay) — the Mesen differential proved the observable NMI/IRQ cadence
-   already matches.
+   delay). The Mesen differential shows the NMI/IRQ *cadence* matches, but
+   that is not the same as the *registers* being right at every H-clock: the
+   RDNMI (`$4210`) visibility window was observably wrong until 2026-07-13
+   (#107 — a `BIT $4210 / BPL` poll loop passed twice per VBlank, so the whole
+   PeterLemon corpus animated ~4/3x too fast). `$4211` TIMEUP has the same
+   shape of hold window and is **not** yet measured against a reference —
+   treat it as the next candidate, not as verified.
+   **2026-07-15 update:** the CPU↔scanline phase work (#109) landed five
+   faithful timing fixes — reset preamble (`//H=186`), DRAM refresh charged
+   during DMA, DMA-clock-aligned refresh position, ares' MDMAEN/HDMA cost
+   models, NTSC short scanline — then closed with ares' remaining two terms:
+   the read **sample point** (`step(cost−4); read; step(4)`) and the
+   **deferred `dmaEdge`** (a `$420B`-armed burst runs at the next access,
+   charged to the next instruction). Verified by the per-instruction cycle
+   differential vs Mesen2: on CPUBRA the two emulators are **cycle-identical
+   over 841 386 instructions — zero per-instruction deltas differ**. The
+   CPU↔scanline phase is **locked**: the faithful RDNMI pair (raise H=2,
+   hold [2,6)) is live and `WaveHDMA` polls exactly once on 139/139 frames
+   (#107's conservative masking is retired). `$4211` TIMEUP's hold window
+   remains the un-measured sibling.
 5. DSP-1 differential oracle — the one grade capped by *missing evidence*
    rather than a known divergence.
