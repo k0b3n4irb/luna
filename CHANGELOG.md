@@ -6,6 +6,16 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-07-15
+
+The accuracy release. The CPU↔scanline phase work (#107 → #109) lands end to
+end: on krom's `CPUBRA`, luna and Mesen2 now execute a **cycle-identical
+instruction stream over 841 386 instructions** — and the `$4210` deviation
+that opened the chain is retired for the faithful hardware rule. Around it:
+`--force-region`, native 512×448 output for the OpenSNES interlace port, and
+a golden-test net re-anchored on frames so it survives accuracy work instead
+of penalising it.
+
 ### Fixed
 - **CPU↔scanline phase locked — ares' two remaining timing terms** (#109,
   closing the chain opened by #107):
