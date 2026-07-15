@@ -47,8 +47,9 @@ on one screen"):
 
 1. PPU gap #7 — HiColor sub-scanline CGRAM timing (needs a per-dot CGRAM
    model; tripwire goldens in place).
-2. HDMA per-line cycle-count (#11/#13 in the audit) — luna folds the per-line
-   cost into `HDMA_OVERHEAD_MCLK`.
+2. ~~HDMA per-line cycle-count (#11 in the audit)~~ — **closed 2026-07-15**:
+   faithful per-A-bus-read cost model (`hdma_cost`), `HDMA_OVERHEAD_MCLK`
+   retired. #13's edge *interactions* (`$420C` mid-DMA) stay open.
 3. SA-1 / Super FX scheduler grain — batched stepping vs ares' cothreads;
    engine outputs are exact, only stall placement differs.
 4. P4 interrupt micro-timing (TIMEUP hold window, last-dot guard, htime=0
@@ -59,5 +60,16 @@ on one screen"):
    PeterLemon corpus animated ~4/3x too fast). `$4211` TIMEUP has the same
    shape of hold window and is **not** yet measured against a reference —
    treat it as the next candidate, not as verified.
+   **2026-07-15 update:** the CPU↔scanline phase work (#109) landed five
+   faithful timing fixes — reset preamble (`//H=186`), DRAM refresh charged
+   during DMA, DMA-clock-aligned refresh position, ares' MDMAEN/HDMA cost
+   models, NTSC short scanline — verified by a per-instruction cycle
+   differential vs Mesen2 (CPUBRA: PC stream identical over 841 386
+   instructions, total drift −8 mclk; even the PAL VBlank-overrun truncation
+   matches Mesen2 pixel-for-pixel, last VRAM write within 2 mclk). Residual:
+   the poll phase is close but not *locked* (faithful RDNMI raise-at-H=2
+   would still double-pass 9/139 WaveHDMA frames, so the conservative $4210
+   masking stays); next structural term is ares' deferred `dmaEdge` and the
+   4-mclk read sample point.
 5. DSP-1 differential oracle — the one grade capped by *missing evidence*
    rather than a known divergence.
