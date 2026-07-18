@@ -6,7 +6,20 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
-## [1.10.0] — 2026-07-15
+### Fixed
+- **GUI: the game no longer hides under the menu bar / bottom letterbox**.
+  The frame was centered in the *whole* window by the `pixels` scaling
+  renderer, which knows nothing about the 28-px egui menu bar — so the top
+  of the picture sat under the menu and a matching black bar appeared at the
+  bottom (visible on every ROM next to Mesen2). The game is now drawn by
+  egui itself: the emulator texture is registered with the egui renderer and
+  painted aspect-correct in the area *below* the menu bar, so letterboxing
+  is symmetric and resize-safe. Two follow-on fixes landed with it: the
+  frame texture is created as `Rgba8Unorm` (non-sRGB) because egui-wgpu's
+  `register_native_texture` contract expects gamma-space samples — the
+  sRGB default double-converted and darkened every color — and the
+  mouse→SNES-pixel mapping (Mouse / Super Scope) now derives from the
+  actual on-screen game rect instead of the old `pixels` surface transform.
 
 The accuracy release. The CPU↔scanline phase work (#107 → #109) lands end to
 end: on krom's `CPUBRA`, luna and Mesen2 now execute a **cycle-identical
