@@ -222,6 +222,14 @@ pub(crate) struct UiOverlay {
     ctx: egui::Context,
     winit_state: egui_winit::State,
     renderer: egui_wgpu::Renderer,
+    /// The SNES framebuffer texture (pixels' 256×224 upload target),
+    /// registered with egui so the game frame is laid out by egui itself —
+    /// aspect-fit in the space **under** the menu bar. `None` until the first
+    /// frame registers it.
+    game_tex: Option<egui::TextureId>,
+    /// Where the game image landed this frame, in logical points — the
+    /// mouse→SNES-pixel mapping (Super Scope / SNES Mouse) reads it.
+    last_game_rect: Option<egui::Rect>,
 }
 
 impl UiOverlay {
@@ -241,7 +249,29 @@ impl UiOverlay {
             ctx,
             winit_state,
             renderer,
+            game_tex: None,
+            last_game_rect: None,
         }
+    }
+
+    /// Register pixels' 256×224 frame texture with the egui renderer (once).
+    /// Nearest filtering keeps the upscale crisp, matching what pixels'
+    /// own scaling renderer did.
+    pub(crate) fn ensure_game_texture(&mut self, device: &wgpu::Device, texture: &wgpu::Texture) {
+        if self.game_tex.is_none() {
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.game_tex = Some(self.renderer.register_native_texture(
+                device,
+                &view,
+                wgpu::FilterMode::Nearest,
+            ));
+        }
+    }
+
+    /// The game image's on-screen rectangle (logical points) from the last
+    /// rendered frame — `None` before the first frame.
+    pub(crate) const fn game_rect(&self) -> Option<egui::Rect> {
+        self.last_game_rect
     }
 
     /// Forward a winit event to egui. Returns `true` if egui wants the
@@ -269,8 +299,43 @@ impl UiOverlay {
         F: FnMut(MenuAction),
     {
         let raw_input = self.winit_state.take_egui_input(window);
+        let game_tex = self.game_tex;
+        let game_rect: std::cell::Cell<Option<egui::Rect>> = std::cell::Cell::new(None);
         let full_output = self.ctx.run_ui(raw_input, |ui| {
-            draw_menu_bar(ui.ctx(), state, &mut emit);
+            let menu_bottom = draw_menu_bar(ui.ctx(), state, &mut emit);
+            // The game frame, laid out by egui: aspect-fit (8:7) in the space
+            // BELOW the menu strip. This replaces pixels' built-in scaling
+            // renderer, which centred the image in the WHOLE window — with
+            // the menu strip added to the window height, that centring put
+            // ~half the strip's height as a black bar at the bottom and slid
+            // the top of the image under the menu (the "black bar at the
+            // bottom" bug). The area is computed EXPLICITLY from the strip's
+            // real bottom edge — `ctx.content_rect()` is the whole window
+            // (it subtracts OS notches, NOT egui panels; painting it black
+            // was the "menu bar disappeared" regression). At the default
+            // window size the fit is exact; a resized window letterboxes
+            // symmetrically within the game area.
+            if let Some(tex) = game_tex {
+                let screen = ui.ctx().content_rect();
+                let avail =
+                    egui::Rect::from_min_max(egui::pos2(screen.min.x, menu_bottom), screen.max);
+                let painter = ui.painter();
+                painter.rect_filled(avail, 0.0, egui::Color32::BLACK);
+                let scale = (avail.width() / crate::CANVAS_W as f32)
+                    .min(avail.height() / crate::CANVAS_H as f32);
+                let size = egui::vec2(
+                    crate::CANVAS_W as f32 * scale,
+                    crate::CANVAS_H as f32 * scale,
+                );
+                let rect = egui::Rect::from_center_size(avail.center(), size);
+                painter.image(
+                    tex,
+                    rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+                game_rect.set(Some(rect));
+            }
             if state.show_input_config {
                 draw_input_config(ui.ctx(), state, &mut emit);
             }
@@ -284,6 +349,7 @@ impl UiOverlay {
             // `crate::debug_window`), not in this overlay — so they can be
             // dragged anywhere on the desktop, outside the game window.
         });
+        self.last_game_rect = game_rect.get();
         self.winit_state
             .handle_platform_output(window, full_output.platform_output);
         let paint_jobs = self
@@ -310,7 +376,10 @@ impl UiOverlay {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
+                        // This pass paints the whole window now (menu + game
+                        // image + black letterbox), so it clears — pixels'
+                        // scaling pass, which used to clear, no longer runs.
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -1882,8 +1951,14 @@ fn draw_force_mapper_prompt<F: FnMut(MenuAction)>(ctx: &egui::Context, file: &st
 }
 
 #[allow(deprecated)]
-fn draw_menu_bar<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>, emit: &mut F) {
-    egui::TopBottomPanel::top("luna-menu")
+/// Draws the top menu strip. Returns the strip's bottom edge in logical
+/// points — the game-frame layout anchors just below it.
+fn draw_menu_bar<F: FnMut(MenuAction)>(
+    ctx: &egui::Context,
+    state: &UiState<'_>,
+    emit: &mut F,
+) -> f32 {
+    let response = egui::TopBottomPanel::top("luna-menu")
         .exact_height(28.0)
         .show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
@@ -2212,4 +2287,5 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>,
                 }
             });
         });
+    response.response.rect.bottom()
 }
