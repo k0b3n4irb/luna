@@ -43,7 +43,7 @@ use std::sync::mpsc;
 use std::thread::JoinHandle;
 
 use luna_api::{Emulator, FRAME_H, FRAME_W};
-use pixels::{Pixels, SurfaceTexture};
+use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
@@ -832,7 +832,15 @@ impl ApplicationHandler for LunaApp {
             None => eprintln!("luna-gui: display refresh rate unknown (monitor query None)"),
         }
         let surface = SurfaceTexture::new(size.width, size.height, window.clone());
-        let pixels = match Pixels::new(CANVAS_W as u32, CANVAS_H as u32, surface) {
+        // The frame texture is NON-sRGB (`Rgba8Unorm`), per egui-wgpu's
+        // `register_native_texture` contract: egui's shader treats the
+        // sampled value as gamma. pixels' default (`Rgba8UnormSrgb`) made
+        // the sampler hand egui linearised values, which the shader then
+        // darkened a second time — hello_world's blue turned near-black.
+        let pixels = match PixelsBuilder::new(CANVAS_W as u32, CANVAS_H as u32, surface)
+            .texture_format(pixels::wgpu::TextureFormat::Rgba8Unorm)
+            .build()
+        {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("luna-gui: pixels init failed: {e}");
@@ -883,16 +891,28 @@ impl ApplicationHandler for LunaApp {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                // Map the host cursor to SNES framebuffer pixels (Err = the
+                // Map the host cursor to SNES framebuffer pixels (None = the
                 // pointer is outside the game area → offscreen for a scope).
+                // The game image is laid out by egui now, so the mapping uses
+                // its rectangle (logical points), not pixels' scaling matrix.
+                let sf = self.window.as_ref().map_or(1.0, |w| w.scale_factor()) as f32;
                 self.cursor_snes = self
-                    .pixels
+                    .ui
                     .as_ref()
-                    .and_then(|p| {
-                        p.window_pos_to_pixel((position.x as f32, position.y as f32))
-                            .ok()
+                    .and_then(ui::UiOverlay::game_rect)
+                    .and_then(|rect| {
+                        let lx = position.x as f32 / sf;
+                        let ly = position.y as f32 / sf;
+                        if !rect.contains(egui::pos2(lx, ly)) {
+                            return None;
+                        }
+                        let px = ((lx - rect.min.x) / rect.width() * CANVAS_W as f32)
+                            .clamp(0.0, CANVAS_W as f32 - 1.0);
+                        let py = ((ly - rect.min.y) / rect.height() * CANVAS_H as f32)
+                            .clamp(0.0, CANVAS_H as f32 - 1.0);
+                        Some((px as i32, py as i32))
                     })
-                    .map_or((-1, -1), |(px, py)| (px as i32, py as i32));
+                    .unwrap_or((-1, -1));
             }
             WindowEvent::MouseInput {
                 state: btn_state,
@@ -1086,8 +1106,12 @@ impl LunaApp {
         let win_size = window.inner_size();
         let scale = window.scale_factor() as f32;
         let result = pixels.render_with(|encoder, target_view, ctx| {
-            ctx.scaling_renderer.render(encoder, target_view);
             if let Some(ui) = ui {
+                // egui lays out the game frame itself (aspect-fit under the
+                // menu bar) — see `UiOverlay`. pixels' scaling renderer is
+                // NOT used: it centred the image in the whole window, leaving
+                // a black bar at the bottom equal to ~half the menu strip.
+                ui.ensure_game_texture(&ctx.device, &ctx.texture);
                 let mut sink = pending.lock().unwrap();
                 ui.render(
                     &window,
@@ -1100,6 +1124,10 @@ impl LunaApp {
                     &ui_state,
                     |action| sink.push(action),
                 );
+            } else {
+                // No overlay (should not happen in practice): fall back to
+                // pixels' own centred blit so the frame is still visible.
+                ctx.scaling_renderer.render(encoder, target_view);
             }
             Ok(())
         });
