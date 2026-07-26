@@ -59,6 +59,15 @@ use crate::ui::{DebugSnapshot, MenuAction, PanelNav, UiOverlay, UiState};
 const WINDOW_TITLE: &str = "Luna — SNES Emulator";
 /// Interval between periodic battery-SRAM auto-flushes (dirty-write only).
 const SRAM_FLUSH_SECS: u64 = 30;
+
+/// Menu-bar notice shown while emulation runs without a host audio
+/// stream. Compared verbatim in `ensure_audio` so a successful
+/// reconnection clears exactly this notice and no other.
+const AUDIO_NOTICE: &str = "\u{26A0} no audio device — running silent";
+
+/// How often `ensure_audio` re-probes for an output device when the
+/// stream is absent or dead. Cheap (one cpal host query) and silent.
+const AUDIO_RETRY_SECS: u64 = 3;
 const INITIAL_SCALE: u32 = 3;
 /// Logical height of the egui menu bar reserved at the top of the
 /// window. The pixels canvas sits below it.
@@ -79,7 +88,7 @@ struct LunaApp {
     /// Handle to the spawned emu thread (one per loaded ROM). The
     /// thread returns the audio producer + primed gate on exit so the
     /// next ROM's spawn can reuse the same cpal stream.
-    emu_join: Option<JoinHandle<emu_thread::AudioReclaim>>,
+    emu_join: Option<JoinHandle<Option<emu_thread::AudioReclaim>>>,
     /// State shared between UI, emu thread, and the cpal callback —
     /// shutdown / pause flags + the unpark handle that the cpal
     /// callback uses to wake the emu thread.
@@ -92,13 +101,16 @@ struct LunaApp {
     /// clocks (ness `triple_buffer`).
     framebuffer_out: triple_buffer::Output<Vec<u8>>,
 
-    /// Audio backend kept alive for the program's lifetime. cpal owns
+    /// Audio backend kept alive while its stream is healthy. cpal owns
     /// the ring's consumer end internally; we hand the producer to the
-    /// emu thread and reclaim it on join for the next ROM swap.
-    #[allow(dead_code)]
+    /// emu thread and reclaim it on join for the next ROM swap. `None`
+    /// when no output device could be opened — `ensure_audio` keeps
+    /// retrying and hot-swaps a rebuilt stream into the running thread.
     audio: Option<crate::audio::AudioBackend>,
     audio_producer: Option<ringbuf::HeapProd<(i16, i16)>>,
     audio_primed: Option<Arc<AtomicBool>>,
+    /// Throttle for `ensure_audio`'s device re-probe.
+    last_audio_check: std::time::Instant,
 
     /// Set of keys currently held down — recomputed each
     /// `KeyboardInput` event, sampled before every joypad push.
@@ -236,6 +248,7 @@ impl LunaApp {
             audio,
             audio_producer,
             audio_primed,
+            last_audio_check: std::time::Instant::now(),
             pressed_keys: HashSet::new(),
             modifiers: ModifiersState::empty(),
             key_bindings: KeyBindings::load_or_default(),
@@ -357,19 +370,26 @@ impl LunaApp {
         if let Ok(mut guard) = self.emu.lock() {
             *guard = Some(em);
         }
-        if let (Some(producer), Some(primed)) =
-            (self.audio_producer.take(), self.audio_primed.take())
-        {
-            let (fb_in, fb_out) = triple_buffer::triple_buffer(&vec![0u8; FRAME_W * FRAME_H * 4]);
-            self.framebuffer_out = fb_out;
-            self.emu_join = Some(crate::emu_thread::spawn(
-                self.emu.clone(),
-                self.emu_shared.clone(),
-                producer,
-                primed,
-                fb_in,
-            ));
+        // Spawn the emu thread UNCONDITIONALLY. Audio is an optional
+        // passenger: with no output device the thread runs silent, paced
+        // by its video-as-clock frame limiter (the old audio-gated spawn
+        // left the ROM "loaded" but never stepped — a permanent black
+        // screen with no message).
+        let audio_pair = match (self.audio_producer.take(), self.audio_primed.take()) {
+            (Some(producer), Some(primed)) => Some((producer, primed)),
+            _ => None,
+        };
+        if audio_pair.is_none() {
+            self.load_notice = Some(AUDIO_NOTICE.to_string());
         }
+        let (fb_in, fb_out) = triple_buffer::triple_buffer(&vec![0u8; FRAME_W * FRAME_H * 4]);
+        self.framebuffer_out = fb_out;
+        self.emu_join = Some(crate::emu_thread::spawn(
+            self.emu.clone(),
+            self.emu_shared.clone(),
+            audio_pair,
+            fb_in,
+        ));
         self.rom_loaded = true;
         let name = path
             .file_name()
@@ -450,6 +470,58 @@ impl LunaApp {
         }
     }
 
+    /// Keep the audio output alive across the app's lifetime: if the
+    /// stream died (device unplugged, audio server restarted) or never
+    /// existed (no device at startup), retry `AudioBackend::try_start`
+    /// every [`AUDIO_RETRY_SECS`]. A fresh stream is handed to a running
+    /// emu thread hot via [`EmuShared::audio_swap`] — the game keeps
+    /// running throughout; only the sound goes away and comes back.
+    fn ensure_audio(&mut self) {
+        if self.last_audio_check.elapsed() < std::time::Duration::from_secs(AUDIO_RETRY_SECS) {
+            return;
+        }
+        self.last_audio_check = std::time::Instant::now();
+        let dead = self
+            .audio
+            .as_ref()
+            .is_some_and(crate::audio::AudioBackend::is_dead);
+        if self.audio.is_some() && !dead {
+            return;
+        }
+        if dead {
+            eprintln!("luna-gui audio: stream died (device lost?) — rebuilding");
+            // Drop the dead stream first: its callback holds the old
+            // ring's consumer; the emu thread's old producer becomes a
+            // write-to-nowhere until the swap below replaces it.
+            self.audio = None;
+            self.audio_producer = None;
+            self.audio_primed = None;
+        }
+        let Some(artifacts) = crate::audio::AudioBackend::try_start(self.emu_shared.clone()) else {
+            return;
+        };
+        self.audio = Some(artifacts.backend);
+        if self.emu_join.is_some() {
+            // Emu thread running (possibly silent): hot-swap the fresh
+            // producer + primed gate in.
+            if let Ok(mut g) = self.emu_shared.audio_swap.lock() {
+                *g = Some((artifacts.producer, artifacts.primed));
+            }
+            self.emu_shared
+                .audio_swap_pending
+                .store(true, Ordering::Release);
+            self.emu_shared.unpark_emu();
+        } else {
+            // No ROM yet — stash for the next `load_rom` spawn.
+            self.audio_producer = Some(artifacts.producer);
+            self.audio_primed = Some(artifacts.primed);
+        }
+        if self.load_notice.as_deref() == Some(AUDIO_NOTICE) {
+            self.load_notice = None;
+        }
+        eprintln!("luna-gui audio: stream (re)started");
+    }
+
     fn unload_emu(&mut self) {
         self.emu_shared.shutdown.store(true, Ordering::Release);
         self.emu_shared.unpark_emu();
@@ -458,9 +530,25 @@ impl LunaApp {
             // as the thread left it: the cpal callback can continue
             // draining stale samples from the ring; the next emu
             // thread starts pushing into the freed slots immediately.
-            if let Ok((producer, primed)) = join.join() {
-                self.audio_producer = Some(producer);
-                self.audio_primed = Some(primed);
+            match join.join() {
+                Ok(Some((producer, primed))) => {
+                    self.audio_producer = Some(producer);
+                    self.audio_primed = Some(primed);
+                }
+                // The thread ran silent (no audio device) — nothing to
+                // reclaim; `ensure_audio` keeps retrying in the background.
+                Ok(None) => {}
+                Err(e) => {
+                    // The emu thread itself panicked (core panics are
+                    // caught by the API — this is a GUI-side bug). The
+                    // producer died with it; drop the whole backend so
+                    // `ensure_audio` rebuilds a fresh stream + ring
+                    // instead of leaving every future load silent.
+                    eprintln!("luna-gui: emu thread panicked: {e:?} — rebuilding audio backend");
+                    self.audio = None;
+                    self.audio_producer = None;
+                    self.audio_primed = None;
+                }
             }
         }
         self.emu_shared.shutdown.store(false, Ordering::Release);
@@ -933,6 +1021,16 @@ impl ApplicationHandler for LunaApp {
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
             }
+            WindowEvent::Focused(false) => {
+                // Alt-Tab (or any focus loss) while a key is held: winit
+                // will never deliver the matching Released to this
+                // window, so the SNES button would stay pressed forever.
+                // Release everything on the way out.
+                self.pressed_keys.clear();
+                self.pointer_buttons = 0;
+                self.modifiers = ModifiersState::empty();
+                self.push_joypad();
+            }
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
@@ -967,6 +1065,13 @@ impl ApplicationHandler for LunaApp {
                     self.pending_hotkey_rebind = None;
                     return;
                 }
+                // egui claimed the keyboard (typing in a modal text
+                // field): neither hotkeys nor the joypad may fire. The
+                // rebind captures above deliberately run first — they
+                // are armed FROM those modals.
+                if consumed_by_ui {
+                    return;
+                }
                 // Emulator hotkeys (remappable; default Screenshot = F12).
                 if pressed
                     && !repeat
@@ -981,9 +1086,6 @@ impl ApplicationHandler for LunaApp {
                         Hotkey::StepInstruction => self.step_instruction(),
                         Hotkey::StepFrame => self.step_frame(),
                     }
-                    return;
-                }
-                if consumed_by_ui {
                     return;
                 }
                 if pressed && !repeat && self.modifiers.control_key() {
@@ -1019,6 +1121,9 @@ impl ApplicationHandler for LunaApp {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.poll_rom_picker();
         self.poll_firmware_picker();
+        // Rebuild the audio stream if it died or a device appeared
+        // (throttled to one probe every few seconds).
+        self.ensure_audio();
         self.poll_break_hit(event_loop);
         // Feed the host pointer to a Mouse / Super Scope once per loop tick.
         self.push_devices();
@@ -1112,7 +1217,11 @@ impl LunaApp {
                 // NOT used: it centred the image in the whole window, leaving
                 // a black bar at the bottom equal to ~half the menu strip.
                 ui.ensure_game_texture(&ctx.device, &ctx.texture);
-                let mut sink = pending.lock().unwrap();
+                // The Mutex is frame-local; recover from a (theoretical)
+                // poison rather than aborting the render path.
+                let mut sink = pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 ui.render(
                     &window,
                     &ctx.device,
