@@ -23,7 +23,7 @@ game impact.
 | DMA / HDMA | **A−** | **Pillar audit closed 2026-07-01**: every visual/behavioral row faithful (mid-frame enable = stale pointer, indirect last-active 1-byte quirk, count-0 header, MDMA preemption). Per-line cycle cost (#11) closed 2026-07-15 (faithful per-A-bus-read model, #117); residual = #13 edge interactions only (`$420C` mid-DMA, HDMA on the same line as MDMA) | [`hdma_ares_audit.md`](hdma_ares_audit.md), [`luna_dma_gaps.md`](luna_dma_gaps.md) | **2026-07-15** |
 | SA-1 | **A−** | `conflict()` bus contention, faithful HV timer, per-access cycle cost; residual = batched (non-cothread) scheduler grain, not a value/feature bug | [`luna_sa1_gaps.md`](luna_sa1_gaps.md), [`sa1_status.md`](archive/sa1_status.md) | 2026-06-23 |
 | Super FX (GSU) | **A−** | Engine proven byte-exact vs Mesen (single-step + trajectory differential harnesses); level-IRQ semantics fixed; Star Fox / Doom / Yoshi's Island / Stunt Race FX reach gameplay. Residual = batched scheduling grain (same class as SA-1) | [`superfx_reference.md`](superfx_reference.md), `luna-bus/src/superfx.rs` harnesses | 2026-06-20 |
-| DSP-1 (uPD7725) | **B+** | Core implemented (`luna-cpu-upd96050`); Super Mario Kart Mode 7 and Pilotwings correct. No per-op differential vs a reference core yet — grade capped until one exists | `luna-cpu-upd96050/src/lib.rs`, [`firmware.md`](firmware.md) | 2026-06-19 |
+| DSP-1 (uPD7725) | **A−** | Port-level differential vs Mesen2: the complete DR command/result byte stream is **byte-identical over 380 783 events** (SMK title + demo race, 60 s no-input; SR polling excluded as timing-sensitive). Validates the uPD7725 core + firmware decode + mapper glue end-to-end. Residual = no per-op internal-state oracle (Mesen2 Lua doesn't expose NecDsp registers) | `tests/dsp1_port_differential.rs`, `tools/mesen-dsp1-port-trace.lua`, [`firmware.md`](firmware.md) | **2026-07-26** |
 | S-DD1 | **A−** | Decompressor proven byte-exact (staged differential); MMC banking faithful; Star Ocean and Street Fighter Alpha 2 play | [`sdd1_reference.md`](sdd1_reference.md) | 2026-06-22 |
 | Bus / mappers | **B+** | ROM mirroring, open-bus MDR latch, `score_header` mapper detection, memory-speed table — all faithful and tested. Unaudited corners: exotic boards outside the supported set | `luna-bus/src/speed.rs`, `luna-cartridge` | 2026-06-17 |
 
@@ -73,5 +73,8 @@ on one screen"):
    hold [2,6)) is live and `WaveHDMA` polls exactly once on 139/139 frames
    (#107's conservative masking is retired). `$4211` TIMEUP's hold window
    remains the un-measured sibling.
-5. DSP-1 differential oracle — the one grade capped by *missing evidence*
-   rather than a known divergence.
+5. ~~DSP-1 differential oracle~~ — **closed 2026-07-26**: port-level DR
+   stream differential vs Mesen2, byte-identical over 380 783 events
+   (`tests/dsp1_port_differential.rs`; Mesen2's Lua does not expose the
+   NecDsp registers, so the DR protocol stream — the chip's complete
+   observable behaviour — is the oracle). Grade flipped B+ → A−.
