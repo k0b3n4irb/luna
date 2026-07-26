@@ -468,7 +468,7 @@ cpu_test!(
 cpu_test!(
     cpu_phl,
     "PHL",
-    "2c6f100bb12ba58ef3e5e6b7c159744a2d9a927ab77bb530fce2cb7503375b8f"
+    "4202868f9e91273e7949ae3d1d0b72e0bb6838017083703416187e1e8945eba5"
 );
 cpu_test!(
     cpu_psr,
