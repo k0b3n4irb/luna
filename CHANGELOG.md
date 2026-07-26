@@ -16,6 +16,17 @@ All notable user-facing changes to luna. Releases are cut from `main`
   title + demo race (60 s, no input). DSP-1 grade: B+ → A−.
 
 ### Fixed
+- **`$4211` TIMEUP is now the faithful ares model** — the last three
+  deferred interrupt micro-timing terms are ported (ares `irq.cpp`):
+  the H/V-IRQ assert point sits 10 clocks after the counters match
+  (the detect→assert pipeline, including its wrap into the next line
+  for `htime` near the line end), IRQs cannot trigger across a field
+  boundary, a `$4211` read landing within 4 clocks of the raise sees
+  the flag without acknowledging it (the RDNMI-hold mirror), and
+  disabling both IRQ sources in NMITIMEN drops a held flag at once.
+  Also found by measurement vs Mesen2: `$4210`/`$4211`/`$4212` now
+  pass the CPU open-bus (MDR) bits through their undriven bit
+  positions (bits 4-6 / 0-6 / 1-5) instead of returning zeros.
 - **PPU open bus is now the real two-chip MDR model** (ares
   `ppu1.mdr`/`ppu2.mdr`, Mesen2 agrees). Reads of the PPU1 write-only
   family (`$2104-06/08-0A/14-16/18-1A/24-26/28-2A`) return PPU1's

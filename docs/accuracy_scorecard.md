@@ -71,8 +71,19 @@ on one screen"):
    over 841 386 instructions — zero per-instruction deltas differ**. The
    CPU↔scanline phase is **locked**: the faithful RDNMI pair (raise H=2,
    hold [2,6)) is live and `WaveHDMA` polls exactly once on 139/139 frames
-   (#107's conservative masking is retired). `$4211` TIMEUP's hold window
-   remains the un-measured sibling.
+   (#107's conservative masking is retired).
+   **2026-07-26 update — the three deferred TIMEUP siblings are ported**
+   (ares irq.cpp): the 10-clock detect→assert counter-sampling delay
+   (vcounter(10)/hcounter(10), incl. its next-line wrap), the
+   "no IRQ on the last dot of a field" guard, the 4-clock `$4211` hold
+   window (mirror of the RDNMI hold), the irqLine drop on NMITIMEN
+   IRQ-disable, and the $4210/$4211/$4212 CPU-open-bus passthrough bits
+   (found by measurement: Mesen returns MDR low bits, luna returned
+   zeros). Unit-tested per edge case; 89/89 goldens (CPUPHL re-anchored,
+   verified against the hardware reference PNG); Doom NMI/TIMEUP cadence
+   unchanged vs Mesen; Tales of Phantasia (pure V-IRQ) plays clean.
+   Residual: the hold is positional per-raise, not a live 4-clock poll
+   grid — below the bus-access observable floor.
 5. ~~DSP-1 differential oracle~~ — **closed 2026-07-26**: port-level DR
    stream differential vs Mesen2, byte-identical over 380 783 events
    (`tests/dsp1_port_differential.rs`; Mesen2's Lua does not expose the
