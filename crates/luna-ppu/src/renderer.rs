@@ -457,7 +457,6 @@ pub fn render_scanline_partial_into(
 /// decodes sprites once per scanline and shares them across the
 /// overflow-flag read and (in interlace) both field renders (PERF-2).
 /// `None` decodes sprites internally, as the full-frame paths do.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_scanline_partial_into_from(
     ppu: &Ppu,
     y: u16,

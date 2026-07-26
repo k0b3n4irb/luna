@@ -5,7 +5,6 @@ use std::process::ExitCode;
 use crate::output::{print_cpu_state, print_diag_state, print_header, save_screenshot, write_wav};
 use crate::rom::load_rom_into;
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     rom_path: &std::path::Path,
     steps: u64,

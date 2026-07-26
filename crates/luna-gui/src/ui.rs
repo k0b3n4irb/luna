@@ -283,7 +283,6 @@ impl UiOverlay {
 
     /// Build the frame's egui content + render it to `target_view`
     /// over the same wgpu command encoder that pixels used.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn render<F>(
         &mut self,
         window: &Window,
