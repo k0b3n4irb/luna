@@ -98,10 +98,10 @@ impl EmuShared {
     /// emu thread's effective production rate equals the cpal drain
     /// rate.
     pub(crate) fn unpark_emu(&self) {
-        if let Ok(g) = self.thread_handle.lock() {
-            if let Some(t) = g.as_ref() {
-                t.unpark();
-            }
+        if let Ok(g) = self.thread_handle.lock()
+            && let Some(t) = g.as_ref()
+        {
+            t.unpark();
         }
     }
 }
@@ -211,33 +211,33 @@ fn run(
             let step_n = shared.step_request.swap(0, Ordering::AcqRel);
             let step_frame = shared.step_frame_request.swap(false, Ordering::AcqRel);
             if (step_n > 0 || step_frame) && !emu_dead {
-                if let Ok(mut guard) = emu.lock() {
-                    if let Some(em) = guard.as_mut() {
-                        let res = if step_frame {
-                            em.step_until_frame(1_000_000).map(|_| ())
-                        } else {
-                            em.step(u64::from(step_n)).map(|_| ())
-                        };
-                        if let Err(e) = res {
-                            let st = em.state();
-                            eprintln!(
-                                "luna-emu: EMULATOR PANIC during step at PB:PC=${:02X}:{:04X} — {e}",
-                                st.cpu.pb, st.cpu.pc
-                            );
-                            emu_dead = true;
-                        }
-                        // Keep the Event Viewer's frame double-buffer coherent
-                        // if the step crossed a frame boundary.
-                        let cur = em.frame_count().unwrap_or(last_emu_frame);
-                        if cur != last_emu_frame {
-                            last_emu_frame = cur;
-                            em.swap_frame_events();
-                        }
-                        // Republish so the user SEES the effect of the step
-                        // (paused = inspecting; show the current PPU state).
-                        if let Ok(rgba) = em.render_frame_rgba(false) {
-                            framebuffer_in.write(rgba);
-                        }
+                if let Ok(mut guard) = emu.lock()
+                    && let Some(em) = guard.as_mut()
+                {
+                    let res = if step_frame {
+                        em.step_until_frame(1_000_000).map(|_| ())
+                    } else {
+                        em.step(u64::from(step_n)).map(|_| ())
+                    };
+                    if let Err(e) = res {
+                        let st = em.state();
+                        eprintln!(
+                            "luna-emu: EMULATOR PANIC during step at PB:PC=${:02X}:{:04X} — {e}",
+                            st.cpu.pb, st.cpu.pc
+                        );
+                        emu_dead = true;
+                    }
+                    // Keep the Event Viewer's frame double-buffer coherent
+                    // if the step crossed a frame boundary.
+                    let cur = em.frame_count().unwrap_or(last_emu_frame);
+                    if cur != last_emu_frame {
+                        last_emu_frame = cur;
+                        em.swap_frame_events();
+                    }
+                    // Republish so the user SEES the effect of the step
+                    // (paused = inspecting; show the current PPU state).
+                    if let Ok(rgba) = em.render_frame_rgba(false) {
+                        framebuffer_in.write(rgba);
                     }
                 }
                 continue; // more requests may already be queued
@@ -379,13 +379,11 @@ fn run(
                     // threshold (a genuine transition); hold otherwise.
                     blank_run == BLANK_HOLD_FRAMES
                 };
-                if publish {
-                    if let Ok(rgba) = em.render_frame_rgba(false) {
-                        // Lock-free publish into the triple buffer (moves
-                        // `rgba`, no copy; the UI reads the latest contention-
-                        // free).
-                        framebuffer_in.write(rgba);
-                    }
+                if publish && let Ok(rgba) = em.render_frame_rgba(false) {
+                    // Lock-free publish into the triple buffer (moves
+                    // `rgba`, no copy; the UI reads the latest contention-
+                    // free).
+                    framebuffer_in.write(rgba);
                 }
             }
             (done, pushed, full, frame_produced, frame_hz)

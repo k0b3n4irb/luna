@@ -605,11 +605,11 @@ impl LunaApp {
         }
         let p1 = self.key_bindings.mask_from_pressed(0, &self.pressed_keys);
         let p2 = self.key_bindings.mask_from_pressed(1, &self.pressed_keys);
-        if let Ok(mut guard) = self.emu.lock() {
-            if let Some(em) = guard.as_mut() {
-                let _ = em.set_joypad(0, p1);
-                let _ = em.set_joypad(1, p2);
-            }
+        if let Ok(mut guard) = self.emu.lock()
+            && let Some(em) = guard.as_mut()
+        {
+            let _ = em.set_joypad(0, p1);
+            let _ = em.set_joypad(1, p2);
         }
     }
 
@@ -630,18 +630,18 @@ impl LunaApp {
         };
         self.prev_cursor_snes = self.cursor_snes;
         let buttons = self.pointer_buttons;
-        if let Ok(mut guard) = self.emu.lock() {
-            if let Some(em) = guard.as_mut() {
-                for dev in devices {
-                    match dev {
-                        luna_api::PortDevice::Mouse => {
-                            let _ = em.set_mouse(dx, dy, buttons);
-                        }
-                        luna_api::PortDevice::SuperScope => {
-                            let _ = em.set_superscope(cx, cy, buttons);
-                        }
-                        luna_api::PortDevice::Pad => {}
+        if let Ok(mut guard) = self.emu.lock()
+            && let Some(em) = guard.as_mut()
+        {
+            for dev in devices {
+                match dev {
+                    luna_api::PortDevice::Mouse => {
+                        let _ = em.set_mouse(dx, dy, buttons);
                     }
+                    luna_api::PortDevice::SuperScope => {
+                        let _ = em.set_superscope(cx, cy, buttons);
+                    }
+                    luna_api::PortDevice::Pad => {}
                 }
             }
         }
@@ -795,10 +795,10 @@ impl LunaApp {
         // A reset rewinds frame_count, so the API drops any in-progress
         // capture (issue #83) — keep the GUI's mirror in sync.
         self.recording_input = false;
-        if let Ok(mut guard) = self.emu.lock() {
-            if let Some(em) = guard.as_mut() {
-                let _ = em.reset();
-            }
+        if let Ok(mut guard) = self.emu.lock()
+            && let Some(em) = guard.as_mut()
+        {
+            let _ = em.reset();
         }
         self.emu_shared.paused.store(false, Ordering::Release);
         self.emu_shared.unpark_emu();
@@ -844,21 +844,21 @@ impl LunaApp {
     /// row-click handler. Removes an existing exec bp at that address,
     /// else adds one; then re-syncs the emu thread's gate.
     fn toggle_breakpoint_at(&self, addr: u32) {
-        if let Ok(mut guard) = self.emu.lock() {
-            if let Some(em) = guard.as_mut() {
-                let existing = em
-                    .bp_list()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .find(|b| b.exec && b.lo == addr)
-                    .map(|b| b.id);
-                match existing {
-                    Some(id) => {
-                        let _ = em.bp_remove(id);
-                    }
-                    None => {
-                        let _ = em.bp_add_exec(addr);
-                    }
+        if let Ok(mut guard) = self.emu.lock()
+            && let Some(em) = guard.as_mut()
+        {
+            let existing = em
+                .bp_list()
+                .unwrap_or_default()
+                .into_iter()
+                .find(|b| b.exec && b.lo == addr)
+                .map(|b| b.id);
+            match existing {
+                Some(id) => {
+                    let _ = em.bp_remove(id);
+                }
+                None => {
+                    let _ = em.bp_add_exec(addr);
                 }
             }
         }
@@ -1345,34 +1345,34 @@ impl LunaApp {
                 self.toggle_breakpoint_at(addr);
             }
             Some(PanelNav::BpRemove(id)) => {
-                if let Ok(mut guard) = self.emu.lock() {
-                    if let Some(em) = guard.as_mut() {
-                        let _ = em.bp_remove(id);
-                    }
+                if let Ok(mut guard) = self.emu.lock()
+                    && let Some(em) = guard.as_mut()
+                {
+                    let _ = em.bp_remove(id);
                 }
                 self.sync_has_breakpoints();
             }
             Some(PanelNav::BpClearAll) => {
-                if let Ok(mut guard) = self.emu.lock() {
-                    if let Some(em) = guard.as_mut() {
-                        let _ = em.bp_clear();
-                    }
+                if let Ok(mut guard) = self.emu.lock()
+                    && let Some(em) = guard.as_mut()
+                {
+                    let _ = em.bp_clear();
                 }
                 self.sync_has_breakpoints();
             }
             Some(PanelNav::BpAddExec(addr)) => {
-                if let Ok(mut guard) = self.emu.lock() {
-                    if let Some(em) = guard.as_mut() {
-                        let _ = em.bp_add_exec(addr);
-                    }
+                if let Ok(mut guard) = self.emu.lock()
+                    && let Some(em) = guard.as_mut()
+                {
+                    let _ = em.bp_add_exec(addr);
                 }
                 self.sync_has_breakpoints();
             }
             Some(PanelNav::BpAddMem(lo, hi, on_r, on_w)) => {
-                if let Ok(mut guard) = self.emu.lock() {
-                    if let Some(em) = guard.as_mut() {
-                        let _ = em.bp_add_mem(lo, hi, on_r, on_w);
-                    }
+                if let Ok(mut guard) = self.emu.lock()
+                    && let Some(em) = guard.as_mut()
+                {
+                    let _ = em.bp_add_mem(lo, hi, on_r, on_w);
                 }
                 self.sync_has_breakpoints();
             }
@@ -1428,27 +1428,27 @@ impl LunaApp {
             }
             Some(PanelNav::EventViewer(act)) => {
                 use crate::ui::EventViewerAction;
-                if let Ok(mut g) = self.emu.lock() {
-                    if let Some(em) = g.as_mut() {
-                        let cfg = em.event_config_mut();
-                        match act {
-                            EventViewerAction::Category(i, on) => {
-                                if let Some(v) = cfg.visible.get_mut(i) {
-                                    *v = on;
-                                }
+                if let Ok(mut g) = self.emu.lock()
+                    && let Some(em) = g.as_mut()
+                {
+                    let cfg = em.event_config_mut();
+                    match act {
+                        EventViewerAction::Category(i, on) => {
+                            if let Some(v) = cfg.visible.get_mut(i) {
+                                *v = on;
                             }
-                            EventViewerAction::DmaChannel(ch, on) => {
-                                if let Some(v) = cfg.show_dma_channels.get_mut(ch) {
-                                    *v = on;
-                                }
+                        }
+                        EventViewerAction::DmaChannel(ch, on) => {
+                            if let Some(v) = cfg.show_dma_channels.get_mut(ch) {
+                                *v = on;
                             }
-                            EventViewerAction::PreviousFrame(on) => {
-                                cfg.show_previous_frame = on;
-                            }
-                            EventViewerAction::All(on) => {
-                                cfg.visible = [on; luna_api::CATEGORY_COUNT];
-                                cfg.show_dma_channels = [on; 8];
-                            }
+                        }
+                        EventViewerAction::PreviousFrame(on) => {
+                            cfg.show_previous_frame = on;
+                        }
+                        EventViewerAction::All(on) => {
+                            cfg.visible = [on; luna_api::CATEGORY_COUNT];
+                            cfg.show_dma_channels = [on; 8];
                         }
                     }
                 }
@@ -1507,10 +1507,10 @@ impl LunaApp {
                 // Capture only runs while the panel is open (it adds per-access
                 // tracing overhead).
                 let on = self.debug_windows.is_open(DebugPanel::EventViewer);
-                if let Ok(mut g) = self.emu.lock() {
-                    if let Some(em) = g.as_mut() {
-                        let _ = em.enable_event_capture(on);
-                    }
+                if let Ok(mut g) = self.emu.lock()
+                    && let Some(em) = g.as_mut()
+                {
+                    let _ = em.enable_event_capture(on);
                 }
             }
             MenuAction::ToggleInputConfig => {
@@ -1658,10 +1658,10 @@ impl LunaApp {
     /// core through `luna_api::Emulator::set_port_device` (api-first).
     fn set_port_device(&mut self, port: u8, dev: luna_api::PortDevice) {
         self.port_device[port as usize] = dev;
-        if let Ok(mut guard) = self.emu.lock() {
-            if let Some(em) = guard.as_mut() {
-                let _ = em.set_port_device(port, dev);
-            }
+        if let Ok(mut guard) = self.emu.lock()
+            && let Some(em) = guard.as_mut()
+        {
+            let _ = em.set_port_device(port, dev);
         }
     }
 

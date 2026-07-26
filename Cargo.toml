@@ -18,7 +18,11 @@ members = [
 [workspace.package]
 version = "1.10.1"
 edition = "2024"
-rust-version = "1.85"
+# Kept equal to the pinned toolchain (rust-toolchain.toml) — the only
+# rustc this workspace is actually built and tested with. The previous
+# claim (1.85) was never compiled and was already false (transitive
+# deps require >= 1.87).
+rust-version = "1.95"
 license = "MPL-2.0"
 authors = ["Luna contributors"]
 repository = "https://github.com/k0b3n4irb/luna"
