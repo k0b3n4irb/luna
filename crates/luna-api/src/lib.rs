@@ -773,14 +773,12 @@ impl Emulator {
         // Beside-ROM + embedded firmware are handled by `Cartridge::load`;
         // additionally search the luna firmware folder so a once-installed
         // `dsp1b.rom` is found for any ROM, anywhere.
-        if cart.needs_coprocessor_firmware() {
-            if let (Some(name), Some(dir)) =
+        if cart.needs_coprocessor_firmware()
+            && let (Some(name), Some(dir)) =
                 (cart.required_firmware_filename(), Self::firmware_dir())
-            {
-                if let Ok(bytes) = std::fs::read(dir.join(name)) {
-                    cart.set_coprocessor_firmware(bytes);
-                }
-            }
+            && let Ok(bytes) = std::fs::read(dir.join(name))
+        {
+            cart.set_coprocessor_firmware(bytes);
         }
         self.load_cartridge(cart)
     }
@@ -839,14 +837,12 @@ impl Emulator {
     ) -> Result<RomInfo, ApiError> {
         let bytes = std::fs::read(path)?;
         let mut cart = Cartridge::from_bytes_forced(bytes, mapper)?;
-        if cart.needs_coprocessor_firmware() {
-            if let (Some(name), Some(dir)) =
+        if cart.needs_coprocessor_firmware()
+            && let (Some(name), Some(dir)) =
                 (cart.required_firmware_filename(), Self::firmware_dir())
-            {
-                if let Ok(fw) = std::fs::read(dir.join(name)) {
-                    cart.set_coprocessor_firmware(fw);
-                }
-            }
+            && let Ok(fw) = std::fs::read(dir.join(name))
+        {
+            cart.set_coprocessor_firmware(fw);
         }
         self.load_cartridge(cart)
     }
@@ -2092,14 +2088,14 @@ impl Emulator {
                     };
                 }
                 let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
-                if i > 0 {
-                    if let Some(hit) = snes.breakpoints.as_ref().and_then(|b| b.check_exec(cur)) {
-                        return RunOutcome {
-                            steps: i,
-                            hit: Some(hit),
-                            interrupted: false,
-                        };
-                    }
+                if i > 0
+                    && let Some(hit) = snes.breakpoints.as_ref().and_then(|b| b.check_exec(cur))
+                {
+                    return RunOutcome {
+                        steps: i,
+                        hit: Some(hit),
+                        interrupted: false,
+                    };
                 }
                 snes.step();
                 executed = i + 1;
