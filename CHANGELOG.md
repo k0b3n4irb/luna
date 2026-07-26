@@ -6,6 +6,19 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Fixed
+- **PPU open bus is now the real two-chip MDR model** (ares
+  `ppu1.mdr`/`ppu2.mdr`, Mesen2 agrees). Reads of the PPU1 write-only
+  family (`$2104-06/08-0A/14-16/18-1A/24-26/28-2A`) return PPU1's
+  data-bus latch; every other write-only `$21xx` register and SLHV
+  return the **CPU** MDR (previously a single PPU-side latch answered
+  for everything, updated even by writes); CGDATAREAD, OPHCT/OPVCT and
+  STAT77/STAT78 now perform their partial updates, leaving the
+  documented stale bits (CGRAM high-read bit 7, counter high-read bits
+  1-7, STAT77 bit 4, STAT78 bit 5). Games that read write-only `$21xx`
+  registers and depend on 65c816 open-bus behaviour now see the right
+  byte. Save-state format bumped to v4 (PPU field layout changed).
+
 ## [1.10.1] — 2026-07-18
 
 Hotfix for a GUI display regression: the game frame sat under the menu bar,

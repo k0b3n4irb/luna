@@ -3415,9 +3415,9 @@ mod tests {
         p.write(register::M7B, 0x01); // M7B = 0x0100
         assert_eq!(p.mpy_result, 128, "got {:#X}", p.mpy_result);
         // MPYL/MPYM/MPYH read back the same.
-        assert_eq!(p.read(register::MPYL), 0x80);
-        assert_eq!(p.read(register::MPYM), 0x00);
-        assert_eq!(p.read(register::MPYH), 0x00);
+        assert_eq!(p.read(register::MPYL, 0), 0x80);
+        assert_eq!(p.read(register::MPYM, 0), 0x00);
+        assert_eq!(p.read(register::MPYH, 0), 0x00);
     }
 
     #[test]

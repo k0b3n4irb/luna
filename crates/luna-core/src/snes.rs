@@ -1562,6 +1562,10 @@ struct DmaBusView<'a> {
     wram: &'a mut [u8; 0x20000],
     mapper: &'a mut dyn Mapper,
     ppu: &'a mut Ppu,
+    /// CPU data-bus latch (`Snes::mdr`) — a DMA read of a write-only
+    /// PPU register returns it, same as a CPU read (ares passes
+    /// `r.mdr` as the `data` param of every bus read).
+    mdr: &'a mut u8,
     /// Shared 17-bit WRAM-port address (`$2181-$2183` WMADD), so a DMA to
     /// `$2180` (WMDATA) writes WRAM and auto-increments — the same state
     /// the CPU port uses.
@@ -1617,7 +1621,7 @@ impl DmaBus for DmaBusView<'_> {
         // as the CPU port (`read_inner` $2180). APU $40-$43 is still open
         // bus on the DMA path.
         if b_offset <= 0x3F {
-            self.ppu.read(b_offset)
+            self.ppu.read(b_offset, *self.mdr)
         } else if b_offset == 0x80 {
             let a = (*self.wm_addr & 0x1FFFF) as usize;
             let v = self.wram[a];
@@ -1981,6 +1985,7 @@ impl SnesBus<'_> {
                 mapper: &mut *self.mapper,
                 ppu: &mut *self.ppu,
                 wm_addr: &mut *self.wm_addr,
+                mdr: &mut *self.mdr,
                 // hdma_init only reads table headers/pointers (A-bus); it makes
                 // no B-bus register writes, so there is nothing to trace here.
                 // The per-scanline transfers below are what the Event Viewer
@@ -2010,6 +2015,7 @@ impl SnesBus<'_> {
                 mapper: &mut *self.mapper,
                 ppu: &mut *self.ppu,
                 wm_addr: &mut *self.wm_addr,
+                mdr: &mut *self.mdr,
                 dma_trace: trace.as_mut(),
                 last_a_addr: 0,
                 trace_frame: self.frame_count,
@@ -2185,6 +2191,7 @@ impl SnesBus<'_> {
                     mapper: self.mapper,
                     ppu: self.ppu,
                     wm_addr: self.wm_addr,
+                    mdr: self.mdr,
                     dma_trace: trace.as_mut(),
                     last_a_addr: 0,
                     trace_frame: self.frame_count,
@@ -2227,6 +2234,7 @@ impl SnesBus<'_> {
                     mapper: self.mapper,
                     ppu: self.ppu,
                     wm_addr: self.wm_addr,
+                    mdr: self.mdr,
                     dma_trace: trace.as_mut(),
                     last_a_addr: 0,
                     trace_frame: self.frame_count,
@@ -2281,13 +2289,15 @@ impl SnesBus<'_> {
         }
         if let Some(off) = Self::ppu_offset(addr) {
             // $2137 SLHV — reading also latches the H/V counters
-            // into OPHCT / OPVCT. The actual returned byte is open
-            // bus (we hand back the PPU's open-bus latch).
+            // into OPHCT / OPVCT. The returned byte is the CPU's own
+            // MDR (ares readIO `return data;`), which `Ppu::read`
+            // reproduces for every register that is write-only on both
+            // PPU chips.
             if off == luna_ppu::register::SLHV {
                 let (h, v) = self.hv();
                 self.ppu.latch_counters(h, v);
             }
-            return self.ppu.read(off);
+            return self.ppu.read(off, *self.mdr);
         }
         if let Some(port) = Self::apu_port(addr) {
             // Mailbox reads: prefer the real SPC (now timer-driven,
