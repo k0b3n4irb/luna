@@ -1,5 +1,18 @@
 # Luna — Architecture
 
+> **Historical design document (May 2026).** This is Luna's founding
+> architecture/vision paper, kept for the rationale and the layer model —
+> it is **not** a description of the current tree. Where they differ, the
+> code wins. Known drift: the real workspace is **12 crates** (see
+> `CLAUDE.md` or `ls crates/`) — `luna-async`, `luna-mcp-core`,
+> `luna-mcp-client`, `luna-rest`, `luna-ws`, `luna-wasm`, `luna-ffi`,
+> `luna-libretro` and `luna-overlay` were never built, and `luna-dma` /
+> `luna-coproc` were merged into `luna-core` (`5cf2220`); the GUI is
+> hand-rolled winit + pixels + egui-wgpu (eframe was removed 2026-05-28);
+> the real API is synchronous (no async traits); the real CLI flags and
+> MCP tool catalogue are in the guide
+> (`book/src/using/cli-api-mcp.md`), not §3.2/§8.2.
+
 > A SNES emulator in Rust with an introspection API and a built-in MCP
 > server, designed so that an AI agent can **play**, **develop** and
 > **debug** Super Nintendo games autonomously.

@@ -42,7 +42,7 @@ differential against a reference emulator.
 | **Cores** | 65C816 + SPC700 (per-instruction suites 100%), S-DSP audio |
 | **Coprocessors** | SA-1, Super FX (GSU), DSP-1, S-DD1 |
 | **Front-ends** | GUI debugger (winit + wgpu), headless CLI, MCP server |
-| **Platform** | Linux (macOS / Windows may build, unsupported) |
+| **Platform** | Linux (tested) · Windows x86_64 + macOS arm64 (release binaries provided, unsigned) |
 | **License** | [MPL-2.0](https://github.com/k0b3n4irb/luna/blob/main/LICENSE) |
 
 > Luna is one binary that runs three ways: **standalone** (a human plays),

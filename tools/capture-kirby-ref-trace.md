@@ -4,7 +4,7 @@ Why: luna's S-CPU boots Kirby, does `JMP $000E`, but WRAM `$00:000E` is
 `$00` (never populated) → executes `BRK` → jumps to the game's crash-trap
 vector (`$00:FFE6 = $5FFF`) → runs away → corrupts the stack → black
 screen. The crash mechanism is fully understood (see the
-`project_smrpg_sa1_deadlock` memory and `docs/sa1_status.md`); the open
+`project_smrpg_sa1_deadlock` memory and `docs/archive/sa1_status.md`); the open
 question is **what populates WRAM `$0000-$001F` on real hardware, and
 where luna's boot diverges and skips it.**
 
