@@ -6,6 +6,15 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Added
+- **DSP-1 differential oracle** — the scorecard's last "grade capped by
+  missing evidence" item is closed. New harness
+  (`tests/dsp1_port_differential.rs` + `tools/mesen-dsp1-port-trace.lua`)
+  compares the DSP-1's complete observable behaviour — the DR-port
+  command/result byte stream — against a Mesen2 reference capture:
+  **byte-identical over 380 783 events** across Super Mario Kart's
+  title + demo race (60 s, no input). DSP-1 grade: B+ → A−.
+
 ### Fixed
 - **PPU open bus is now the real two-chip MDR model** (ares
   `ppu1.mdr`/`ppu2.mdr`, Mesen2 agrees). Reads of the PPU1 write-only
