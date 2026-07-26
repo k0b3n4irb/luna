@@ -903,7 +903,7 @@ ppu_test!(
     ppu_hdma_hicolor128,
     "HDMA/HiColor128PerTileRow/HiColor128PerTileRow.sfc",
     "24f07ecd1ef6839b042d15fce801340720b9dc1d8b7678b315678fa3da2214f5",
-    ignore = "HiColor128 residual (gap #7b): 91.0% pixel-exact vs the hardware reference after the line-origin + HDMA-phase fixes (was 83.7%). Remaining diff = four ALTERNATING 8-line bands at the bottom (y 168-175, 184-191, 200-207, 216-223) plus isolated rows 95/111 — the 128-colour variant runs a SECOND 8-colour DMA per line whose landing point luna's burst-start flush doesn't yet split correctly. Needs per-byte clock advance inside the CGRAM DMA burst. HiColor64 (one DMA/line) is pixel-exact."
+    ignore = "HiColor128 residual (gap #7b): 91.0% vs the hardware reference after the line-origin + HDMA-phase fixes (was 83.7%). MEASURED 2026-07-26 (timeline differential, values byte-identical to Mesen2): (1) the bad rows are FULL-WIDTH (x 0..255) alternating 8-line bands (y 168-175, 184-191, 200-207, 216-223) + rows 95/111 — a palette-GROUP phase issue in the bottom technique, NOT a mid-row split; (2) the 32-byte CGRAM DMA starts at h=924 (dot ~231, mid-visible) on hardware but luna runs the burst at h=1088, because the IRQ handler reaches its $420B write ~200 clocks late (Mesen h=874 vs luna h=1074, constant every line) — an interrupt-ENTRY latency skew on the CPU side (ares tests interrupts at the second-to-last cycle of each opcode; luna at the instruction boundary), which is the lead to chase FIRST. Per-byte clock advance inside the burst only matters after that skew is fixed."
 );
 
 // INPUT/ControllerLatency: "any button → white screen, none → black". Held
