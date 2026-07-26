@@ -66,6 +66,15 @@ pub(crate) struct EmuShared {
     /// The breakpoint hit that auto-paused the emu thread, for the UI
     /// to display (halt banner + disasm jump). Taken by the UI.
     pub last_break: Mutex<Option<BreakHit>>,
+    /// Hot audio hand-off: when the UI rebuilds the cpal stream (device
+    /// reconnected, or one appearing after a silent start), it parks the
+    /// fresh producer + primed gate here and raises
+    /// [`Self::audio_swap_pending`]; the running emu thread adopts them
+    /// at the top of its next loop iteration — no ROM reload needed.
+    pub audio_swap: Mutex<Option<AudioReclaim>>,
+    /// Cheap flag checked every batch so the hot path never touches
+    /// [`Self::audio_swap`]'s mutex unless a swap is actually queued.
+    pub audio_swap_pending: AtomicBool,
 }
 
 impl EmuShared {
@@ -78,6 +87,8 @@ impl EmuShared {
             step_request: AtomicU32::new(0),
             step_frame_request: AtomicBool::new(false),
             last_break: Mutex::new(None),
+            audio_swap: Mutex::new(None),
+            audio_swap_pending: AtomicBool::new(false),
         }
     }
 
@@ -112,16 +123,20 @@ impl EmuShared {
 /// keeps showing the previous good frame. Most games toggle bit 7
 /// every `VBlank` to upload tiles/OAM safely, so without this the
 /// screen would flash black once per second.
+/// `audio` is `None` when no output device could be opened — emulation
+/// still runs (paced by the video-as-clock frame limiter alone) and the
+/// APU output is discarded; a stream rebuilt later is adopted hot via
+/// [`EmuShared::audio_swap`]. The `Snes` must never be held hostage by
+/// the host's audio stack.
 pub(crate) fn spawn(
     emu: Arc<Mutex<Option<Emulator>>>,
     shared: Arc<EmuShared>,
-    producer: HeapProd<(i16, i16)>,
-    primed: Arc<AtomicBool>,
+    audio: Option<AudioReclaim>,
     framebuffer_in: triple_buffer::Input<Vec<u8>>,
-) -> JoinHandle<AudioReclaim> {
+) -> JoinHandle<Option<AudioReclaim>> {
     thread::Builder::new()
         .name("luna-emu".into())
-        .spawn(move || run(emu, shared, producer, primed, framebuffer_in))
+        .spawn(move || run(emu, shared, audio, framebuffer_in))
         .expect("failed to spawn luna-emu thread")
 }
 
@@ -134,10 +149,9 @@ pub(crate) fn spawn(
 fn run(
     emu: Arc<Mutex<Option<Emulator>>>,
     shared: Arc<EmuShared>,
-    mut producer: HeapProd<(i16, i16)>,
-    primed: Arc<AtomicBool>,
+    mut audio: Option<AudioReclaim>,
     mut framebuffer_in: triple_buffer::Input<Vec<u8>>,
-) -> AudioReclaim {
+) -> Option<AudioReclaim> {
     const BATCH: usize = 1024;
     // Hold the last content frame across up to this many consecutive
     // full-frame forced-blank frames (absorbs the transient per-frame blanks
@@ -177,6 +191,16 @@ fn run(
     loop {
         if shared.shutdown.load(Ordering::Acquire) {
             break;
+        }
+        // Adopt a rebuilt cpal stream's producer + primed gate (device
+        // reconnected, or one appearing after a silent start).
+        if shared.audio_swap_pending.swap(false, Ordering::AcqRel) {
+            if let Ok(mut g) = shared.audio_swap.lock() {
+                if let Some(pair) = g.take() {
+                    eprintln!("luna-emu: adopting a rebuilt audio stream");
+                    audio = Some(pair);
+                }
+            }
         }
         if shared.paused.load(Ordering::Acquire) {
             // Debugger stepping (issue #68): while paused, the UI can queue
@@ -279,20 +303,30 @@ fn run(
             // the API queue still holds more afterwards, the ring (not
             // the queue) was the limiter → `full` → we park until cpal
             // consumes and unparks us.
-            let free = producer.vacant_len();
-            let samples = em.drain_audio(free).unwrap_or_default();
-            let pushed = samples.len() as u64;
-            for s in samples {
-                let _ = producer.try_push(s);
-            }
-            let full = em.audio_queue_len().unwrap_or(0) > 0;
-            // Open the cpal callback's silence gate the moment we have
-            // pushed any sample at all. Without this, the callback
-            // returns zeros forever, the SPSC ring stays full of the
-            // initial burst, and the emu thread parks indefinitely.
-            if pushed > 0 && !primed.load(Ordering::Relaxed) {
-                primed.store(true, Ordering::Release);
-            }
+            //
+            // With no audio stream (`audio == None`) the APU output is
+            // drained and discarded so the queue stays flat; pacing then
+            // falls entirely to the video-as-clock frame limiter below.
+            let (pushed, full) = if let Some((producer, primed)) = audio.as_mut() {
+                let free = producer.vacant_len();
+                let samples = em.drain_audio(free).unwrap_or_default();
+                let pushed = samples.len() as u64;
+                for s in samples {
+                    let _ = producer.try_push(s);
+                }
+                let full = em.audio_queue_len().unwrap_or(0) > 0;
+                // Open the cpal callback's silence gate the moment we have
+                // pushed any sample at all. Without this, the callback
+                // returns zeros forever, the SPSC ring stays full of the
+                // initial burst, and the emu thread parks indefinitely.
+                if pushed > 0 && !primed.load(Ordering::Relaxed) {
+                    primed.store(true, Ordering::Release);
+                }
+                (pushed, full)
+            } else {
+                let _ = em.drain_audio(usize::MAX);
+                (0, false)
+            };
 
             // Framebuffer publication via the SAME API render path the
             // CLI/MCP use (`render_frame_rgba`) — so the GUI and CLI cannot
@@ -405,10 +439,9 @@ fn run(
     if let Ok(mut g) = shared.thread_handle.lock() {
         *g = None;
     }
-    // Hand back the audio-side ownership so the next ROM's emu thread
-    // can re-spawn with the same producer + primed gate. cpal's
-    // consumer is permanently held by the audio callback (registered
-    // once at app start), so we can't recreate the ring; the producer
-    // must round-trip across ROM swaps.
-    (producer, primed)
+    // Hand back the audio-side ownership (if any) so the next ROM's emu
+    // thread can re-spawn with the same producer + primed gate. cpal's
+    // consumer is held by the audio callback of the live stream, so the
+    // producer must round-trip across ROM swaps.
+    audio
 }
