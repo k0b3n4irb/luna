@@ -944,21 +944,21 @@ impl Snes {
         let before = self.total_mclk;
         // Capture the pre-instruction snapshot for the CPU tracer
         // before the destructure below moves `cpu` out of `self`.
-        if let Some(log) = self.cpu_trace_log.as_mut() {
-            if log.events.len() < log.max_events {
-                log.events.push(CpuTraceEvent {
-                    mclk_total: before,
-                    pc_full: (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc),
-                    a: self.cpu.a,
-                    x: self.cpu.x,
-                    y: self.cpu.y,
-                    sp: self.cpu.sp,
-                    p: self.cpu.p.bits(),
-                    db: self.cpu.db,
-                    dp: self.cpu.dp,
-                    e: self.cpu.e,
-                });
-            }
+        if let Some(log) = self.cpu_trace_log.as_mut()
+            && log.events.len() < log.max_events
+        {
+            log.events.push(CpuTraceEvent {
+                mclk_total: before,
+                pc_full: (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc),
+                a: self.cpu.a,
+                x: self.cpu.x,
+                y: self.cpu.y,
+                sp: self.cpu.sp,
+                p: self.cpu.p.bits(),
+                db: self.cpu.db,
+                dp: self.cpu.dp,
+                e: self.cpu.e,
+            });
         }
         let scanlines = self.region_scanlines();
         let ppu_line_snapshot = self.ppu_line;
@@ -1641,21 +1641,21 @@ impl DmaBus for DmaBusView<'_> {
             // CGRAM ($2122), etc. DMA writes too. `vram_word` is only
             // meaningful for the $2118/$2119 ports; VRAM-only consumers
             // (the CLI `--dma-trace` CSV) filter on `b_offset`.
-            if let Some(log) = self.dma_trace.as_mut() {
-                if log.events.len() < log.max_events {
-                    log.events.push(DmaTraceEvent {
-                        src_full: self.last_a_addr,
-                        vram_word: self.ppu.vram.address,
-                        b_offset,
-                        value,
-                        channel: self.dma_channel,
-                        frame: self.trace_frame,
-                        line: self.trace_line,
-                        hclock: self.trace_hclock,
-                        blank: self.trace_blank,
-                        force_blank: self.ppu.inidisp & 0x80 != 0,
-                    });
-                }
+            if let Some(log) = self.dma_trace.as_mut()
+                && log.events.len() < log.max_events
+            {
+                log.events.push(DmaTraceEvent {
+                    src_full: self.last_a_addr,
+                    vram_word: self.ppu.vram.address,
+                    b_offset,
+                    value,
+                    channel: self.dma_channel,
+                    frame: self.trace_frame,
+                    line: self.trace_line,
+                    hclock: self.trace_hclock,
+                    blank: self.trace_blank,
+                    force_blank: self.ppu.inidisp & 0x80 != 0,
+                });
             }
             // CGDATA ($2122) is never dropped during active display (handled
             // at the source in Ppu::write — ares io.cpp:55-60); VRAM/OAM still
@@ -1718,15 +1718,15 @@ impl SnesBus<'_> {
             if log.events.len() >= log.max_events {
                 return;
             }
-            if let Some(filter) = log.bank_filter {
-                if bank_of(addr) != filter {
-                    return;
-                }
+            if let Some(filter) = log.bank_filter
+                && bank_of(addr) != filter
+            {
+                return;
             }
-            if let Some((lo, hi)) = log.offset_filter {
-                if !(lo..=hi).contains(&offset_of(addr)) {
-                    return;
-                }
+            if let Some((lo, hi)) = log.offset_filter
+                && !(lo..=hi).contains(&offset_of(addr))
+            {
+                return;
             }
             log.events.push(MemTraceEvent {
                 mclk_total: *self.mclk_total,
@@ -2421,16 +2421,16 @@ impl SnesBus<'_> {
             return *self.mdr;
         }
         if let Some(v) = self.mapper.read(addr) {
-            if let Some(reg) = Self::sa1_reg(addr) {
-                if let Some(log) = self.sa1_log.as_mut() {
-                    log.push(Sa1LogEvent {
-                        mclk_total: *self.mclk_total,
-                        pc_full: self.cpu_pc_full,
-                        kind: MailboxEventKind::Read,
-                        reg,
-                        value: v,
-                    });
-                }
+            if let Some(reg) = Self::sa1_reg(addr)
+                && let Some(log) = self.sa1_log.as_mut()
+            {
+                log.push(Sa1LogEvent {
+                    mclk_total: *self.mclk_total,
+                    pc_full: self.cpu_pc_full,
+                    kind: MailboxEventKind::Read,
+                    reg,
+                    value: v,
+                });
             }
             return v;
         }
@@ -2664,16 +2664,16 @@ impl SnesBus<'_> {
             }
             return;
         }
-        if let Some(reg) = Self::sa1_reg(addr) {
-            if let Some(log) = self.sa1_log.as_mut() {
-                log.push(Sa1LogEvent {
-                    mclk_total: *self.mclk_total,
-                    pc_full: self.cpu_pc_full,
-                    kind: MailboxEventKind::Write,
-                    reg,
-                    value,
-                });
-            }
+        if let Some(reg) = Self::sa1_reg(addr)
+            && let Some(log) = self.sa1_log.as_mut()
+        {
+            log.push(Sa1LogEvent {
+                mclk_total: *self.mclk_total,
+                pc_full: self.cpu_pc_full,
+                kind: MailboxEventKind::Write,
+                reg,
+                value,
+            });
         }
         // Mapper claims SRAM writes; anything not yet routed drops.
         let _ = self.mapper.write(addr, value);

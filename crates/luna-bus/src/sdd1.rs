@@ -507,10 +507,11 @@ impl Mapper for Sdd1Mapper {
     fn read(&mut self, addr: Addr24) -> Option<u8> {
         let bank = bank_of(addr);
         let offset = offset_of(addr);
-        if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && (0x4800..=0x480F).contains(&offset) {
-            if let Some(v) = self.read_reg(offset) {
-                return Some(v);
-            }
+        if matches!(bank, 0x00..=0x3F | 0x80..=0xBF)
+            && (0x4800..=0x480F).contains(&offset)
+            && let Some(v) = self.read_reg(offset)
+        {
+            return Some(v);
         }
         if let Some(o) = self.sram_offset(bank, offset) {
             return Some(self.sram[o]);
