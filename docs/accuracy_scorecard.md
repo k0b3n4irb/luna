@@ -19,7 +19,7 @@ game impact.
 | CPU 65c816 | **A−** | Tom Harte 5.08M cases 100% + per-entry `cycles[]` bus-order oracle (94% entry-exact; the residual ~30 opcodes are ares-faithful — don't chase) | [`luna_65c816_gaps.md`](luna_65c816_gaps.md), `tests/tom_harte.rs` | 2026-06-20 |
 | SPC700 | **A−** | All 254 opcodes cycle-stepped, byte/cycle-exact vs the atomic core; cooperative CPU↔SPC interleave at bus-access grain; `$F0` wait-state dividers modelled | [`luna_spc700_gaps.md`](luna_spc700_gaps.md), Tom Harte SPC700 100% | 2026-06-22 |
 | S-DSP (audio) | **A** | Cycle-accurate ares port; BRR→PCM proven bit-exact vs an independent Mesen2-form decoder over 200k random groups; 10 PCM goldens CI-gated | [`luna_apu_gaps.md`](luna_apu_gaps.md), `luna-apu/src/dsp.rs` tests | 2026-06-23 |
-| PPU | **A−** | Full feature set faithful (EXTBG, offset-per-tile, mosaic, interlace, hi-res 5/6, Mode 7, windows, color math). `$21xx` open bus = faithful two-chip MDR model incl. stale-bit partial updates (2026-07-26; residual: STAT78 bit-6 PIO gate). Open: gap #7 HiColor sub-scanline CGRAM timing (81% pixel-exact, `#[ignore]` tripwires keep it visible) | [`luna_bg_gaps.md`](luna_bg_gaps.md), [`luna_obj_gaps.md`](luna_obj_gaps.md), [`ppu_compositor_reference.md`](ppu_compositor_reference.md) | **2026-07-26** |
+| PPU | **A** | Full feature set faithful (EXTBG, offset-per-tile, mosaic, interlace, hi-res 5/6, Mode 7, windows, color math) **on the hardware line origin** (picture = PPU lines 1..=224, row r scanned during line r+1 — gap #7 root cause, found via the HiColor chart): **16 corpus tests pixel-exact vs hardware reference PNGs** (WindowHDMA, Mode7HDMA, Perspective, Rings, HiColor64/3840/575Myst, BGMap family, …). `$21xx` open bus = two-chip MDR (2026-07-26). Residuals: HiColor128 second-per-line-DMA split (91%, gap #7b tripwire), STAT78 bit-6 PIO gate | [`luna_bg_gaps.md`](luna_bg_gaps.md), [`luna_obj_gaps.md`](luna_obj_gaps.md), [`ppu_compositor_reference.md`](ppu_compositor_reference.md) | **2026-07-26** |
 | DMA / HDMA | **A−** | **Pillar audit closed 2026-07-01**: every visual/behavioral row faithful (mid-frame enable = stale pointer, indirect last-active 1-byte quirk, count-0 header, MDMA preemption). Per-line cycle cost (#11) closed 2026-07-15 (faithful per-A-bus-read model, #117); residual = #13 edge interactions only (`$420C` mid-DMA, HDMA on the same line as MDMA) | [`hdma_ares_audit.md`](hdma_ares_audit.md), [`luna_dma_gaps.md`](luna_dma_gaps.md) | **2026-07-15** |
 | SA-1 | **A−** | `conflict()` bus contention, faithful HV timer, per-access cycle cost; residual = batched (non-cothread) scheduler grain, not a value/feature bug | [`luna_sa1_gaps.md`](luna_sa1_gaps.md), [`sa1_status.md`](archive/sa1_status.md) | 2026-06-23 |
 | Super FX (GSU) | **A−** | Engine proven byte-exact vs Mesen (single-step + trajectory differential harnesses); level-IRQ semantics fixed; Star Fox / Doom / Yoshi's Island / Stunt Race FX reach gameplay. Residual = batched scheduling grain (same class as SA-1) | [`superfx_reference.md`](superfx_reference.md), `luna-bus/src/superfx.rs` harnesses | 2026-06-20 |
@@ -45,8 +45,15 @@ on one screen"):
 
 ## Open items (all below the observable floor)
 
-1. PPU gap #7 — HiColor sub-scanline CGRAM timing (needs a per-dot CGRAM
-   model; tripwire goldens in place).
+1. ~~PPU gap #7 — HiColor sub-scanline CGRAM timing~~ — **cracked
+   2026-07-26**: never a CGRAM-timing bug (the luna↔Mesen2 write timeline
+   was byte-identical); it was the framebuffer LINE ORIGIN (hardware
+   displays lines 1..=224 → row r is scanned during line r+1). Fixed with
+   the hardware origin + the DMA-path partial flush + the HDMA end-of-line
+   application point; HiColor64 and 15 other corpus refs are now
+   pixel-exact. Residual **#7b**: HiColor128's SECOND per-line CGRAM DMA
+   needs per-byte clock advance inside the burst (91% exact, tripwire in
+   place).
 2. ~~HDMA per-line cycle-count (#11 in the audit)~~ — **closed 2026-07-15**:
    faithful per-A-bus-read cost model (`hdma_cost`), `HDMA_OVERHEAD_MCLK`
    retired. #13's edge *interactions* (`$420C` mid-DMA) stay open.
