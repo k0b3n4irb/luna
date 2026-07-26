@@ -21,7 +21,7 @@ pub mod iplrom;
 pub mod opcodes;
 pub mod step;
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 pub mod testing;
 
 pub use bus::SpcBus;

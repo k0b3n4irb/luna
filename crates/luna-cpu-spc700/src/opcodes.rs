@@ -49,7 +49,6 @@ impl Spc700 {
         cycles
     }
 
-    #[allow(clippy::too_many_lines)]
     fn execute<B: SpcBus>(&mut self, opcode: u8, bus: &mut B) {
         match opcode {
             // ---------------------------------------------------------

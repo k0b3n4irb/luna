@@ -75,7 +75,6 @@ pub(crate) fn run_spc_dump(
 /// `luna assets-dump` — run to a scene, then write every loaded graphics
 /// asset as PNGs (+ raw VRAM/CGRAM + OAM JSON). Warm-up + scripted-input
 /// handling mirrors `run_spc_dump`.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_assets_dump(
     rom: &std::path::Path,
     steps: u64,

@@ -17,7 +17,6 @@ use crate::parsers::{
 use crate::rom::load_rom_into;
 
 /// `luna state` — exercise the public `luna-api` surface end-to-end.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_state(
     rom: &std::path::Path,
     steps: u64,

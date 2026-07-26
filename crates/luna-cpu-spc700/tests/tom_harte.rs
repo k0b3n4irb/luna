@@ -36,9 +36,8 @@ use std::path::PathBuf;
 // Flat 64 KB test bus
 // =============================================================================
 //
-// The crate's `testing::RamBus` lives behind the `test-utils` feature, which an
-// integration test can't enable for itself. A local bus keeps this harness
-// self-contained.
+// The crate's `testing::RamBus` is `#[cfg(test)]`-only (unit tests), which an
+// integration test can't see. A local bus keeps this harness self-contained.
 
 struct RamBus {
     mem: Vec<u8>,

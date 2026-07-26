@@ -9,7 +9,6 @@ use crate::rom::load_rom_into;
 /// `luna wram-trace` — emit per-frame (vblank-aligned) WRAM page hashes
 /// for a confound-free cross-emulator differential (see the subcommand
 /// doc). One line per frame: `<ppu_frame> <h0> <h1> ...`.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_wram_trace(
     rom: &std::path::Path,
     steps: u64,
