@@ -194,13 +194,12 @@ fn run(
         }
         // Adopt a rebuilt cpal stream's producer + primed gate (device
         // reconnected, or one appearing after a silent start).
-        if shared.audio_swap_pending.swap(false, Ordering::AcqRel) {
-            if let Ok(mut g) = shared.audio_swap.lock() {
-                if let Some(pair) = g.take() {
-                    eprintln!("luna-emu: adopting a rebuilt audio stream");
-                    audio = Some(pair);
-                }
-            }
+        if shared.audio_swap_pending.swap(false, Ordering::AcqRel)
+            && let Ok(mut g) = shared.audio_swap.lock()
+            && let Some(pair) = g.take()
+        {
+            eprintln!("luna-emu: adopting a rebuilt audio stream");
+            audio = Some(pair);
         }
         if shared.paused.load(Ordering::Acquire) {
             // Debugger stepping (issue #68): while paused, the UI can queue
