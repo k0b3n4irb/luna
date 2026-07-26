@@ -38,10 +38,10 @@ pub(crate) fn run_wram_trace(
             }
         },
     };
-    if steps > 0 {
-        if let Err(e) = em.step(steps) {
-            eprintln!("step warning (warm-up): {e}");
-        }
+    if steps > 0
+        && let Err(e) = em.step(steps)
+    {
+        eprintln!("step warning (warm-up): {e}");
     }
     // Input checkpoints are applied DURING the capture loop, keyed by the
     // current PPU frame — so a scripted joypad pulse can span the frames

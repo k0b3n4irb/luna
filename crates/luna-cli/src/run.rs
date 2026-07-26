@@ -36,17 +36,17 @@ pub(crate) fn run(
 
     // Arm the Nocash ($21FC) capture before stepping so the program's
     // `SNES_NOCASH`/`SNES_ASSERT` output is recorded during the run.
-    if nocash_out.is_some() {
-        if let Err(e) = em.enable_nocash_log() {
-            eprintln!("error: enable_nocash_log: {e}");
-            return ExitCode::from(1);
-        }
+    if nocash_out.is_some()
+        && let Err(e) = em.enable_nocash_log()
+    {
+        eprintln!("error: enable_nocash_log: {e}");
+        return ExitCode::from(1);
     }
-    if wdm_out.is_some() {
-        if let Err(e) = em.enable_wdm_log() {
-            eprintln!("error: enable_wdm_log: {e}");
-            return ExitCode::from(1);
-        }
+    if wdm_out.is_some()
+        && let Err(e) = em.enable_wdm_log()
+    {
+        eprintln!("error: enable_wdm_log: {e}");
+        return ExitCode::from(1);
     }
 
     // `load_rom` already runs the reset vector; report where it landed.

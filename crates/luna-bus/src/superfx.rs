@@ -813,12 +813,11 @@ impl SuperFxMapper {
         // Mark the next executed op as a fresh task start.
         if !self.sfr_get(SFR_G) {
             self.gsu_running_prev = false;
-            if let Some(idx) = traced_idx {
-                if let Some((events, _)) = self.trace.as_mut() {
-                    if let Some(e) = events.get_mut(idx) {
-                        e.stop = true;
-                    }
-                }
+            if let Some(idx) = traced_idx
+                && let Some((events, _)) = self.trace.as_mut()
+                && let Some(e) = events.get_mut(idx)
+            {
+                e.stop = true;
             }
         }
     }

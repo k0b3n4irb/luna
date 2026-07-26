@@ -1,0 +1,25 @@
+name: Feature request
+description: A new capability (GUI feature, CLI flag, MCP tool, supported chip…)
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What do you need, and why?
+      description: >-
+        The use case first — what you're trying to do. If it's a new
+        coprocessor/board, name a game that needs it.
+    validations:
+      required: true
+  - type: textarea
+    id: shape
+    attributes:
+      label: How should it look?
+      description: >-
+        GUI control, CLI flag, MCP tool, API method…? Luna is API-first:
+        anything a front-end shows must exist on `luna_api::Emulator`
+        first, so a sketch of the API surface helps.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Workarounds you've tried

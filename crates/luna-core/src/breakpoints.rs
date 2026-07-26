@@ -188,7 +188,7 @@ impl BreakpointSet {
 
     /// `true` when nothing is registered.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.exec.is_empty() && self.mem.is_empty()
     }
 
