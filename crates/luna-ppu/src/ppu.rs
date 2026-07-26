@@ -340,10 +340,16 @@ pub struct Ppu {
     bgofs_ppu1: u8,
     bgofs_ppu2: u8,
 
-    // ---------- Open-bus tracking ----------
-    /// Last value seen on the PPU data bus — returned for reads of
-    /// write-only registers.
-    pub open_bus: u8,
+    // ---------- PPU open-bus (MDR) tracking ----------
+    /// PPU1's internal data-bus latch (ares `ppu1.mdr`). Updated by
+    /// every read the PPU1 chip serves (OAM/VRAM data, MPY, STAT77);
+    /// returned verbatim for the PPU1 write-only family
+    /// `$2104-06/$2108-0A/$2114-16/$2118-1A/$2124-26/$2128-2A`.
+    pub ppu1_mdr: u8,
+    /// PPU2's internal data-bus latch (ares `ppu2.mdr`). Updated —
+    /// sometimes only partially, leaving stale bits — by CGDATAREAD,
+    /// OPHCT/OPVCT and STAT78 reads.
+    pub ppu2_mdr: u8,
 
     // ---------- Diagnostic counters (debug-only, not on hot path) ----------
     /// How many times `$2100` (INIDISP) has been written since reset.
@@ -493,7 +499,8 @@ impl Ppu {
             field: false,
             bgofs_ppu1: 0,
             bgofs_ppu2: 0,
-            open_bus: 0,
+            ppu1_mdr: 0,
+            ppu2_mdr: 0,
             inidisp_write_count: 0,
             framebuffer: vec![[0u8; 3]; FRAME_W * FRAME_H],
             native_capture: false,
@@ -709,34 +716,82 @@ impl Ppu {
     }
 
     /// Read a PPU register. `offset` is the byte offset from `$2100`
-    /// (`0x00..=0x3F`).
+    /// (`0x00..=0x3F`); `cpu_mdr` is the CPU's current data-bus latch
+    /// (ares passes it as `data` into `PPU::readIO`).
     ///
-    /// Write-only registers return the open-bus value; we model open
-    /// bus minimally by returning the last byte seen on the PPU bus.
-    pub fn read(&mut self, offset: u8) -> u8 {
-        let value = match offset {
-            register::OAMDATAREAD => self.oam.read(),
-            register::VMDATALREAD => self.vram.read_lo(),
-            register::VMDATAHREAD => self.vram.read_hi(),
-            register::CGDATAREAD => self.cgram.read(),
+    /// Open bus is faithful to ares `ppu/io.cpp readIO` (Mesen2
+    /// `SnesPpu::Read` agrees): the two PPU chips each keep their own
+    /// MDR latch. The PPU1 write-only family returns `ppu1.mdr`; every
+    /// OTHER write-only register (INIDISP, BGMODE, scrolls, SETINI, …)
+    /// and SLHV return the **CPU** MDR — they don't sit on either PPU
+    /// chip's data bus. CGDATAREAD / OPHCT / OPVCT / STAT77 / STAT78
+    /// update their chip's MDR only partially, leaving stale bits.
+    pub fn read(&mut self, offset: u8, cpu_mdr: u8) -> u8 {
+        match offset {
+            // PPU1 write-only family (ares io.cpp:68-75): reads return
+            // PPU1's data-bus latch unchanged.
+            0x04..=0x06 | 0x08..=0x0A | 0x14..=0x16 | 0x18..=0x1A | 0x24..=0x26 | 0x28..=0x2A => {
+                self.ppu1_mdr
+            }
+            register::OAMDATAREAD => {
+                self.ppu1_mdr = self.oam.read();
+                self.ppu1_mdr
+            }
+            register::VMDATALREAD => {
+                self.ppu1_mdr = self.vram.read_lo();
+                self.ppu1_mdr
+            }
+            register::VMDATAHREAD => {
+                self.ppu1_mdr = self.vram.read_hi();
+                self.ppu1_mdr
+            }
+            register::CGDATAREAD => {
+                // Second (high) byte only drives bits 0-6 of PPU2's
+                // MDR — bit 7 is stale (ares io.cpp:129-135).
+                let high = self.cgram.read_high_pending();
+                let v = self.cgram.read();
+                self.ppu2_mdr = if high {
+                    (self.ppu2_mdr & 0x80) | (v & 0x7F)
+                } else {
+                    v
+                };
+                self.ppu2_mdr
+            }
             // Mode-7 hardware-multiplier result (also driven by
             // M7A / M7B writes outside Mode 7 — used as a fast
             // multiplier).
-            register::MPYL => self.mpy_result as u8,
-            register::MPYM => (self.mpy_result >> 8) as u8,
-            register::MPYH => (self.mpy_result >> 16) as u8,
+            register::MPYL => {
+                self.ppu1_mdr = self.mpy_result as u8;
+                self.ppu1_mdr
+            }
+            register::MPYM => {
+                self.ppu1_mdr = (self.mpy_result >> 8) as u8;
+                self.ppu1_mdr
+            }
+            register::MPYH => {
+                self.ppu1_mdr = (self.mpy_result >> 16) as u8;
+                self.ppu1_mdr
+            }
             register::STAT77 => {
-                self.stat77
-                    | (u8::from(self.obj_time_over) << 7)
+                // Bits 0-3 = PPU1 version, bit 4 = stale PPU1 MDR,
+                // bit 5 = 0, bits 6/7 = range/time over (ares
+                // io.cpp:158-164).
+                self.ppu1_mdr = (self.stat77 & 0x0F)
+                    | (self.ppu1_mdr & 0x10)
                     | (u8::from(self.obj_range_over) << 6)
+                    | (u8::from(self.obj_time_over) << 7);
+                self.ppu1_mdr
             }
             register::STAT78 => {
                 // Reading $213F is documented to clear the shared
                 // BG-scroll write-twice latch AND the "latch hit"
-                // status bit as side effects.
-                let v = self.stat78
-                    | (u8::from(self.field) << 7)
-                    | if self.external_latch_hit { 0x40 } else { 0 };
+                // status bit as side effects. Bits 0-4 (PPU2 version +
+                // PAL) come from `stat78`, bit 5 is stale PPU2 MDR,
+                // bit 6 = latch hit, bit 7 = field (ares io.cpp:167-180).
+                self.ppu2_mdr = (self.stat78 & 0x1F)
+                    | (self.ppu2_mdr & 0x20)
+                    | if self.external_latch_hit { 0x40 } else { 0 }
+                    | (u8::from(self.field) << 7);
                 self.bgofs_ppu1 = 0;
                 self.bgofs_ppu2 = 0;
                 self.external_latch_hit = false;
@@ -751,35 +806,39 @@ impl Ppu {
                 // flickering the letterbox border.
                 self.ophct_hi_pending = false;
                 self.opvct_hi_pending = false;
-                v
+                self.ppu2_mdr
             }
             register::OPHCT => {
-                // Read low byte first, then high byte (only bit 0
-                // of the high byte is meaningful — H is 9-bit).
+                // Read low byte first, then high byte. The high read
+                // drives only bit 0 of PPU2's MDR (H is 9-bit) — bits
+                // 1-7 are stale (ares io.cpp:139-145).
                 if self.ophct_hi_pending {
                     self.ophct_hi_pending = false;
-                    ((self.ophct >> 8) & 0x01) as u8
+                    self.ppu2_mdr = (self.ppu2_mdr & 0xFE) | ((self.ophct >> 8) & 0x01) as u8;
                 } else {
                     self.ophct_hi_pending = true;
-                    self.ophct as u8
+                    self.ppu2_mdr = self.ophct as u8;
                 }
+                self.ppu2_mdr
             }
             register::OPVCT => {
                 if self.opvct_hi_pending {
                     self.opvct_hi_pending = false;
-                    ((self.opvct >> 8) & 0x01) as u8
+                    self.ppu2_mdr = (self.ppu2_mdr & 0xFE) | ((self.opvct >> 8) & 0x01) as u8;
                 } else {
                     self.opvct_hi_pending = true;
-                    self.opvct as u8
+                    self.ppu2_mdr = self.opvct as u8;
                 }
+                self.ppu2_mdr
             }
-            // Everything else: open bus. The renderer's status registers
-            // ($2134-$213F apart from those above) will be implemented
-            // alongside the renderer.
-            _ => self.open_bus,
-        };
-        self.open_bus = value;
-        value
+            // Every other register — INIDISP, BGMODE, the scroll /
+            // VRAM-address / window / color-math / SETINI families, and
+            // SLHV ($2137, whose latch side effect the caller performs) —
+            // is write-only on BOTH PPU chips: the read drives neither
+            // PPU MDR and returns the CPU's own data-bus latch
+            // (ares io.cpp: `return data;`).
+            _ => cpu_mdr,
+        }
     }
 
     /// Decode `$2107-$210A BGxSC` (tilemap address + size bits).
@@ -868,8 +927,11 @@ impl Ppu {
     }
 
     /// Write a PPU register. `offset` is the byte offset from `$2100`.
+    ///
+    /// Writes do NOT touch `ppu1_mdr`/`ppu2_mdr` — those latch only on
+    /// reads served by the respective PPU chip (ares `writeIO` never
+    /// updates them; the CPU-side MDR is maintained by the bus).
     pub fn write(&mut self, offset: u8, value: u8) {
-        self.open_bus = value;
         match offset {
             register::INIDISP => {
                 self.inidisp = value;
@@ -998,13 +1060,13 @@ mod stat_tests {
     #[test]
     fn stat77_returns_chip_id_1() {
         let mut p = Ppu::new();
-        assert_eq!(p.read(register::STAT77) & 0x0F, 0x01);
+        assert_eq!(p.read(register::STAT77, 0) & 0x0F, 0x01);
     }
 
     #[test]
     fn stat78_returns_chip_rev_2_and_ntsc_by_default() {
         let mut p = Ppu::new();
-        let v = p.read(register::STAT78);
+        let v = p.read(register::STAT78, 0);
         assert_eq!(v & 0x0F, 0x02, "chip rev = 2");
         assert_eq!(v & 0x10, 0x00, "region bit clear = NTSC");
     }
@@ -1013,12 +1075,16 @@ mod stat_tests {
     fn stat78_bit7_reflects_interlace_field() {
         let mut p = Ppu::new();
         assert_eq!(
-            p.read(register::STAT78) & 0x80,
+            p.read(register::STAT78, 0) & 0x80,
             0x00,
             "field 0 → bit 7 clear"
         );
         p.field = true;
-        assert_eq!(p.read(register::STAT78) & 0x80, 0x80, "field 1 → bit 7 set");
+        assert_eq!(
+            p.read(register::STAT78, 0) & 0x80,
+            0x80,
+            "field 1 → bit 7 set"
+        );
     }
 
     #[test]
@@ -1029,7 +1095,7 @@ mod stat_tests {
         // Reading STAT78 should reset the latch — verified
         // indirectly by checking the next BG scroll write doesn't
         // see the stale 0x42 in the high byte.
-        let _ = p.read(register::STAT78);
+        let _ = p.read(register::STAT78, 0);
         // Write a single BG2HOFS value; if the latch was cleared,
         // BG2 H scroll's high byte sees 0.
         p.write(register::BG2HOFS, 0x10);
@@ -1069,26 +1135,29 @@ mod stat_tests {
     fn ophct_opvct_use_write_twice_read_protocol() {
         let mut p = Ppu::new();
         p.latch_counters(0x123, 0x0AB);
-        // First read = low byte; second = bit 0 of high byte.
-        assert_eq!(p.read(register::OPHCT), 0x23);
-        assert_eq!(p.read(register::OPHCT), 0x01); // high bit 0 of 0x123
+        // First read = low byte; the second (high) read drives only
+        // bit 0 of PPU2's MDR — bits 1-7 are STALE from the low read
+        // (ares io.cpp: `ppu2.mdr.bit(0) = hcounter.bit(8)`).
+        assert_eq!(p.read(register::OPHCT, 0), 0x23);
+        assert_eq!(p.read(register::OPHCT, 0), (0x23 & 0xFE) | 0x01); // = 0x23
         // Third read cycles back to low again.
-        assert_eq!(p.read(register::OPHCT), 0x23);
-        // OPVCT independent.
-        assert_eq!(p.read(register::OPVCT), 0xAB);
-        assert_eq!(p.read(register::OPVCT), 0x00); // 0x0AB high bit 0
+        assert_eq!(p.read(register::OPHCT, 0), 0x23);
+        // OPVCT independent; V = 0x0AB → high bit 0, stale bits 1-7
+        // from the 0xAB low read.
+        assert_eq!(p.read(register::OPVCT, 0), 0xAB);
+        assert_eq!(p.read(register::OPVCT, 0), 0xAB & 0xFE); // = 0xAA
     }
 
     #[test]
     fn latch_counters_sets_latch_hit_bit_visible_via_stat78() {
         let mut p = Ppu::new();
         // Before any latch the hit bit is clear.
-        assert_eq!(p.read(register::STAT78) & 0x40, 0);
+        assert_eq!(p.read(register::STAT78, 0) & 0x40, 0);
         p.latch_counters(100, 50);
-        let v = p.read(register::STAT78);
+        let v = p.read(register::STAT78, 0);
         assert_eq!(v & 0x40, 0x40, "latch hit should be set");
         // Reading STAT78 clears the bit.
-        assert_eq!(p.read(register::STAT78) & 0x40, 0);
+        assert_eq!(p.read(register::STAT78, 0) & 0x40, 0);
     }
 }
 
@@ -1187,13 +1256,63 @@ mod tests {
     }
 
     #[test]
-    fn read_write_only_register_returns_open_bus() {
+    fn read_write_only_register_returns_cpu_mdr_not_ppu_latch() {
         let mut p = Ppu::new();
-        // $2100 (INIDISP) is write-only. We write a known value and
-        // then read another write-only address — it should return that
-        // open-bus value.
+        // $2100 (INIDISP) is write-only on BOTH PPU chips: a read
+        // returns the CPU's data-bus latch (ares `return data;`), and
+        // PPU writes must not disturb that — only the bus does.
         p.write(register::BGMODE, 0xAB);
-        assert_eq!(p.read(register::INIDISP), 0xAB);
+        assert_eq!(p.read(register::INIDISP, 0x5A), 0x5A);
+        // SLHV ($2137) likewise returns the CPU MDR.
+        assert_eq!(p.read(register::SLHV, 0xC3), 0xC3);
+    }
+
+    #[test]
+    fn ppu1_family_returns_ppu1_mdr_from_last_ppu1_read() {
+        let mut p = Ppu::new();
+        // Seed PPU1's MDR through a real PPU1 read (VRAM prefetch).
+        p.vram.poke(0x0000, 0x42);
+        p.write(register::VMAIN, 0x00);
+        p.write(register::VMADDL, 0x00);
+        p.write(register::VMADDH, 0x00);
+        assert_eq!(p.read(register::VMDATALREAD, 0), 0x42);
+        // $2104 (OAMDATA, write-only) sits on PPU1: it returns PPU1's
+        // MDR — NOT the CPU MDR — and leaves it unchanged.
+        assert_eq!(p.read(register::OAMDATA, 0x99), 0x42);
+        assert_eq!(p.read(0x18, 0x99), 0x42); // $2118 VMDATAL, same family
+    }
+
+    #[test]
+    fn stat77_bit4_and_stat78_bit5_are_stale_mdr_bits() {
+        let mut p = Ppu::new();
+        // Seed PPU1's MDR with a bit-4-set value via a VRAM read.
+        p.vram.poke(0x0000, 0x10);
+        p.write(register::VMAIN, 0x00);
+        p.write(register::VMADDL, 0x00);
+        p.write(register::VMADDH, 0x00);
+        let _ = p.read(register::VMDATALREAD, 0);
+        // STAT77 keeps PPU1 MDR bit 4, forces bit 5 to 0.
+        let s77 = p.read(register::STAT77, 0);
+        assert_eq!(s77 & 0x10, 0x10, "bit 4 stale from PPU1 MDR");
+        assert_eq!(s77 & 0x20, 0, "bit 5 always 0");
+        // Seed PPU2's MDR with bit 5 set via an OPVCT low read.
+        p.latch_counters(0, 0x20);
+        let _ = p.read(register::OPVCT, 0); // low byte = 0x20
+        let s78 = p.read(register::STAT78, 0);
+        assert_eq!(s78 & 0x20, 0x20, "bit 5 stale from PPU2 MDR");
+    }
+
+    #[test]
+    fn cgram_high_byte_read_keeps_stale_ppu2_mdr_bit7() {
+        let mut p = Ppu::new();
+        // Word 0 = low 0x80 (bit 7 set), high 0x7F.
+        p.cgram.poke(0, 0x80);
+        p.cgram.poke(1, 0x7F);
+        p.write(register::CGADD, 0x00);
+        // Low read drives all 8 PPU2-MDR bits (0x80 → bit 7 set).
+        assert_eq!(p.read(register::CGDATAREAD, 0), 0x80);
+        // High read drives only bits 0-6; bit 7 stays stale (set).
+        assert_eq!(p.read(register::CGDATAREAD, 0), 0x80 | 0x7F);
     }
 
     #[test]
@@ -1207,8 +1326,8 @@ mod tests {
         p.write(register::VMADDL, 0x00);
         p.write(register::VMADDH, 0x00); // triggers prefetch
         // First reads return the pre-fetched bytes.
-        assert_eq!(p.read(register::VMDATALREAD), 0x42);
-        assert_eq!(p.read(register::VMDATAHREAD), 0x84);
+        assert_eq!(p.read(register::VMDATALREAD, 0), 0x42);
+        assert_eq!(p.read(register::VMDATAHREAD, 0), 0x84);
     }
 
     /// Stand up a PPU rendering a solid-red BG1 tile across the
