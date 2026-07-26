@@ -8,10 +8,11 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 readme.workspace = true
+publish.workspace = true
 
 [features]
 default = []
-# Enables testing utilities (RamBus, EventLog) for downstream crates' tests.
+# Enables testing utilities (RamBus, TraceKind) for downstream crates' tests.
 test-utils = []
 
 [dependencies]
