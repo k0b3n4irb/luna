@@ -95,13 +95,13 @@ impl SymbolTable {
 
     /// Number of labels in the table.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.by_name.len()
     }
 
     /// `true` when no labels were parsed.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.by_name.is_empty()
     }
 
