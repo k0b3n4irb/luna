@@ -1,6 +1,17 @@
-# SMRPG intro deadlock — cross-emulator WRAM differential (OPEN)
+# SMRPG intro deadlock — cross-emulator WRAM differential (RESOLVED)
 
-**Status: OPEN.** A real, pre-existing luna bug (not caused by any recent
+**Status: RESOLVED** (commit `2e51c78`, 2026-06-19 — "fix(sa1): wire \$2225
+CBM so the SA-1 uses its own BW-RAM bank"). Root cause: `$2225` (the SA-1
+side's BW-RAM bank register) had no handler, so the SA-1 read the S-CPU's
+`$2224` SBM bank instead — command `$11` graphics work got wrong data and
+the handshake result the S-CPU polled for never arrived. The fix wires
+`$2225` with per-side BW-RAM banking (`$2224` main / `$2225` SA-1). The
+attract demo now runs; the investigation below is kept as a worked example
+of the WRAM-differential method.
+
+---
+
+**Original report:** a real, pre-existing luna bug (not caused by any recent
 change). Super Mario RPG's no-input intro plays the early scenes, then —
 after the "Mario leaves the house / jumps" scene — the screen goes
 **forced-blank (black) with audio still playing** and never recovers.

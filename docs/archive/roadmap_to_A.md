@@ -1,5 +1,14 @@
 # Roadmap to "A everywhere" — the cycle-accuracy frontier
 
+> **ARCHIVED (2026-07-26).** Historical plan, frozen at v1.2.0. Its grades
+> and open items are superseded by
+> [`../accuracy_scorecard.md`](../accuracy_scorecard.md) (kept current
+> per-PR): DMA/HDMA is now A− (audit closed 2026-07-01), Bus is B+, the
+> P4 RDNMI/\$4210 half landed via #107/#109/#118, and the "quick wins"
+> below (bus speed table `47032bd`, indirect-HDMA 1-byte quirk `23d3318`)
+> shipped. The two "do NOT rewrite" conclusions (§1 libco, §2 renderer)
+> remain valid.
+
 Status: **plan** (2026-06-23). Goal: flip the remaining **A−** subsystems
 (65c816, SPC700, PPU, SA-1) and the **B−/B** ones (DMA/HDMA, Bus) up to **A**,
 faithfully, without big-bang rewrites.
