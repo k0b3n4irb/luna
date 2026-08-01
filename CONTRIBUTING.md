@@ -88,6 +88,13 @@ assert, and how to replay a crash reproducer.
   (`release.yml` builds and attaches the 4-platform binaries +
   checksums); then reconcile `develop` with `main`. Update the pinned
   asset names in `book/src/using/install.md` as part of the bump PR.
+- **Before tagging, run the full suite locally *with* `tests/roms/`
+  populated** — `cargo test --workspace --all-targets`. The commercial
+  smoke and game goldens SKIP on CI (copyrighted ROMs are never
+  committed), so a stale golden passes CI silently and only a local run
+  catches it. That is exactly how the v1.12.0 prep caught three
+  `tests/golden/smoke/` PNGs left un-anchored by the line-origin
+  change.
 
 ## License
 

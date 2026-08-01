@@ -6,6 +6,14 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+## [1.12.0] — 2026-08-01
+
+Player comfort and debugging reach. The GUI gains the three things
+anyone actually reaches for (fullscreen, gamepads, volume); the
+audio-driver blind spot two downstream reports pointed at is now
+instrumented; and the untrusted-input surface, the MCP wire contract
+and the H/V-counter latch each gained the evidence they were missing.
+
 ### Changed
 - **rmcp 0.8 → 3.1** (MCP 2026-07-28 support). Taken with evidence, not
   on a green compile: the new protocol contract tests exercise the
