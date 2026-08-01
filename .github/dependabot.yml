@@ -10,10 +10,17 @@ updates:
       time: "06:00"
     open-pull-requests-limit: 5
     groups:
+      # The GUI stack MUST move as a set: egui, egui-wgpu and egui-winit
+      # share an `epaint` version, and all three must agree with the wgpu
+      # major that `pixels` re-exports. A lone egui-wgpu 0.35 bump against
+      # egui 0.34 breaks the type bridge (PR #140, closed 2026-08-01:
+      # "expected `epaint::image::ImageDelta`, found `ImageDelta`").
+      gui-stack:
+        patterns: ["egui", "egui-*", "pixels", "wgpu", "winit"]
+      # Everything else: routine minor/patch in one PR.
       cargo-minor-patch:
         update-types: ["minor", "patch"]
-    # Major bumps of the GUI stack (wgpu/egui/winit move in lockstep and
-    # break APIs) are surfaced individually so they can be planned.
+        exclude-patterns: ["egui", "egui-*", "pixels", "wgpu", "winit"]
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
