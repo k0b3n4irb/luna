@@ -214,6 +214,45 @@ pub(crate) fn parse_addr_range(spec: &str) -> Result<(u16, u16), String> {
 // is pinned here.
 // =============================================================================
 
+/// Step `em` until PPU frame `frame` is reached, spending **at most**
+/// `budget` instructions. Returns the instructions consumed.
+///
+/// This bound is what makes a scripted `--input` checkpoint honour
+/// `-n` (issue #126): the pre-roll used to step to each checkpoint's
+/// frame unconditionally and only THEN spend the requested budget, so
+/// `-n 100000 --input "900:0x8000"` ran to frame 910 instead of frame
+/// 12 — a run 75x longer than asked, in which a press scheduled far
+/// beyond the requested window still reached the ROM. A checkpoint the
+/// run never reaches must simply not fire.
+///
+/// Stops early when the emulator makes no progress (halted core), so a
+/// dead ROM cannot spin here.
+pub(crate) fn step_to_frame_bounded(em: &mut luna_api::Emulator, frame: u64, budget: u64) -> u64 {
+    let start = em.instructions_executed();
+    while em.state().scheduler.frame_count < frame {
+        let spent = em.instructions_executed().saturating_sub(start);
+        let left = budget.saturating_sub(spent);
+        if left == 0 {
+            break;
+        }
+        // Never overshoot the budget: cap the per-frame step by what is
+        // left, so the last partial frame stops exactly on the limit.
+        if em
+            .step_until_frame(left.min(FRAME_STEP_BUDGET))
+            .unwrap_or(0)
+            == 0
+        {
+            break;
+        }
+    }
+    em.instructions_executed().saturating_sub(start)
+}
+
+/// Per-call instruction cap while chasing a checkpoint frame. Large
+/// enough for any real frame (a slow one is ~40k instructions), small
+/// enough that the budget check above stays responsive.
+const FRAME_STEP_BUDGET: u64 = 200_000;
+
 #[cfg(test)]
 mod tests {
     use super::*;

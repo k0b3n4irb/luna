@@ -26,3 +26,8 @@ tokio      = { workspace = true, features = ["macros", "rt-multi-thread", "io-st
 
 [lints]
 workspace = true
+
+# `state --out -` emits JSON that the CLI-level regression tests parse
+# (tests/input_script_budget.rs).
+[dev-dependencies]
+serde_json = { workspace = true, features = ["std"] }
