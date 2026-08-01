@@ -170,7 +170,7 @@ dirs                 = "6"
 # so the wgpu::Device handle pixels exposes is the same type egui-wgpu
 # expects (mixing two wgpu majors silently breaks the type bridge).
 egui                 = "0.34"
-egui-wgpu            = "0.34"
+egui-wgpu            = "0.35"
 egui-winit           = { version = "0.34", default-features = false, features = ["links", "wayland", "x11"] }
 
 # Audio output — cpal cross-platform stream + ringbuf SPSC.
