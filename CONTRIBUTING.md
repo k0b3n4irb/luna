@@ -10,7 +10,8 @@ but apply to every contribution, human or otherwise.
 
 - Rust toolchain: pinned by [`rust-toolchain.toml`](rust-toolchain.toml)
   (edition 2024) — `rustup` picks it up automatically.
-- Linux build dependency: `libasound2-dev` (cpal → ALSA). Windows (WASAPI)
+- Linux build dependencies: `libasound2-dev` (cpal → ALSA) and `libudev-dev`
+  (gilrs → gamepad hotplug). Windows (WASAPI)
   and macOS (CoreAudio) need nothing extra.
 
 ```bash

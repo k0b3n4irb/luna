@@ -41,6 +41,12 @@ pub(crate) enum MenuAction {
     LoadState(u8),
     /// Set controller port `0`/`1` to a device (pad / mouse / super scope).
     SetPortDevice(u8, luna_api::PortDevice),
+    /// Toggle borderless fullscreen (also on the F11 hotkey).
+    ToggleFullscreen,
+    /// Master volume slider (0..=100), applied live in the cpal callback.
+    SetVolume(u8),
+    /// Mute toggle (keeps the slider position).
+    ToggleMute,
     // Debug panels (api-first: data comes from `luna_api::Emulator`).
     ToggleCpuState,
     ToggleCpuMemory,
@@ -172,6 +178,10 @@ pub(crate) struct UiState<'a> {
     pub rom_title: Option<String>,
     /// Current device on controller ports 1 and 2 (drives the menu's radios).
     pub port_device: [luna_api::PortDevice; 2],
+    /// Master volume slider position (0..=100).
+    pub volume_percent: u8,
+    /// Mute state (menu checkbox).
+    pub muted: bool,
     pub show_input_config: bool,
     pub show_hotkey_config: bool,
     pub key_bindings: &'a crate::input::KeyBindings,
@@ -2014,6 +2024,13 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(
                         emit(MenuAction::PauseToggle);
                         ui.close();
                     }
+                    let fs_key = state
+                        .key_bindings
+                        .get_hotkey(crate::input::Hotkey::Fullscreen);
+                    if ui.button(format!("Fullscreen ({fs_key:?})")).clicked() {
+                        emit(MenuAction::ToggleFullscreen);
+                        ui.close();
+                    }
                     let step_key = state
                         .key_bindings
                         .get_hotkey(crate::input::Hotkey::StepInstruction);
@@ -2092,8 +2109,19 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(
                     });
                 });
                 ui.menu_button("Settings", |ui| {
-                    // Grouped by area (Mesen2-style), so Audio/Video sections
-                    // slot in below later.
+                    // Grouped by area (Mesen2-style).
+                    ui.label(egui::RichText::new("Audio").weak().small());
+                    let mut vol = i32::from(state.volume_percent);
+                    if ui
+                        .add(egui::Slider::new(&mut vol, 0..=100).text("Volume"))
+                        .changed()
+                    {
+                        emit(MenuAction::SetVolume(vol.clamp(0, 100) as u8));
+                    }
+                    if ui.selectable_label(state.muted, "Mute").clicked() {
+                        emit(MenuAction::ToggleMute);
+                    }
+                    ui.separator();
                     ui.label(egui::RichText::new("Input").weak().small());
                     if ui
                         .selectable_label(state.show_input_config, "Controller…")

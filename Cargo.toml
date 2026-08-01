@@ -177,6 +177,10 @@ egui-winit           = { version = "0.34", default-features = false, features = 
 cpal                 = "0.16"
 ringbuf              = { version = "0.4", default-features = false, features = ["std"] }
 
+# Host gamepads (luna-gui): cross-platform pad input, SDL-style mappings.
+gilrs                = "0.11"
+
+
 # MCP — Anthropic Rust SDK for Model Context Protocol.
 rmcp                 = { version = "0.8", features = ["server", "macros", "schemars", "transport-io"] }
 schemars             = "1.0"

@@ -45,7 +45,7 @@ run `luna-gui.exe` or `luna.exe`. Each archive contains both binaries and a
 
 You need the Rust toolchain pinned in
 [`rust-toolchain.toml`](https://github.com/k0b3n4irb/luna/blob/main/rust-toolchain.toml)
-(2024 edition), plus `libasound2-dev` on Linux:
+(2024 edition), plus `libasound2-dev` and `libudev-dev` on Linux:
 
 ```bash
 git clone https://github.com/k0b3n4irb/luna && cd luna
