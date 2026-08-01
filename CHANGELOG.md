@@ -6,6 +6,20 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Changed
+- **rmcp 0.8 → 3.1** (MCP 2026-07-28 support). Taken with evidence, not
+  on a green compile: the new protocol contract tests exercise the
+  catalogue, an argument/result round trip, the JSON-RPC error path,
+  unknown-tool rejection and a full `load_rom` → `screenshot` → `state`
+  agent loop — all pass unchanged against 3.1, so luna's observable MCP
+  behaviour is preserved. The client-side `CallToolRequestParams` is now
+  non-exhaustive and built through `::new(..).with_arguments(..)` (test
+  code only; the server's tool definitions are untouched thanks to the
+  macros). Bonus: this retires the `RUSTSEC-2026-0189` ignore in
+  `deny.toml` — the DNS-rebinding advisory against rmcp 0.8's HTTP
+  transport is fixed upstream, so the exception is gone rather than
+  merely justified.
+
 ### Added
 - **MCP protocol contract tests** — the audit's "only front-end without
   a contract test" is closed. `luna-mcp-server/tests/protocol.rs` runs
