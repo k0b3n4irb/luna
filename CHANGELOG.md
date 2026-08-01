@@ -21,6 +21,23 @@ All notable user-facing changes to luna. Releases are cut from `main`
   merely justified.
 
 ### Added
+- **DSP / APU visibility for audio-driver debugging**
+  ([#122](https://github.com/k0b3n4irb/luna/issues/122), asked for by
+  OpenSNES while debugging its SPC700 arc through WAV captures alone):
+  1. `state` JSON gains **`apu.dsp`** — the eight voices as objects
+     (`keyed_on`, VOL L/R, pitch, SRCN, ADSR1/2, GAIN, ENVX, OUTX, live
+     envelope + phase, BRR address, pitch accumulator) plus master
+     state (MVOL/EVOL, EFB, KON/KOFF, FLG, ENDX, PMON/NON/EON, DIR,
+     ESA, EDL), instead of eight parallel arrays. The flat `voice_*`
+     arrays stay for existing consumers.
+  2. **`--peek APU:OFFSET:COUNT`** reads ARAM instead of the CPU bus —
+     verify an uploaded driver image or the `$F0-$FF` register page.
+  3. **`--dsp-trace <PATH>`** (+ `--dsp-trace-max`) captures every DSP
+     register write with an SPC-cycle timestamp as CSV
+     `spc_cycles,reg,name,value`, `name` decoded (`V0_ADSR1`, `KON`,
+     `FLG`, …) — the sequencing oracle for "did my KON/KOFF pulses
+     reach the chip in the order I intended?", which is invisible in a
+     WAV.
 - **Fuzzing for the ROM-parsing surface** (`fuzz/`, cargo-fuzz): three
   targets covering `Cartridge::from_bytes` (auto-detect, header scoring,
   SMC/firmware stripping), the checksum-skipping `from_bytes_forced`
