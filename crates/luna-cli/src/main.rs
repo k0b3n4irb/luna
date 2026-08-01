@@ -288,6 +288,17 @@ enum Command {
         /// music-driver "wait for ack" deadlock).
         #[arg(long = "apu-log")]
         apu_log: Option<PathBuf>,
+        /// Optional DSP register-write trace (issue #122). Captures every
+        /// write to a `$00-$7F` DSP register with an SPC-cycle timestamp
+        /// and writes CSV columns `spc_cycles,reg,name,value` — `name`
+        /// decodes the register (`V0_ADSR1`, `KON`, `FLG`, …). Answers
+        /// "did my KON/KOFF sequence reach the chip in the order I
+        /// intended?", which a WAV capture cannot show.
+        #[arg(long = "dsp-trace")]
+        dsp_trace: Option<PathBuf>,
+        /// Cap on captured DSP register writes (see `--dsp-trace`).
+        #[arg(long = "dsp-trace-max", default_value_t = 100_000)]
+        dsp_trace_max: usize,
         /// Optional SA-1 MMIO traffic log. When set, every CPU read/write
         /// of an SA-1 register `$2200-$23FF` during the run is captured and
         /// written to the given path as CSV with columns:
@@ -632,6 +643,8 @@ fn main() -> ExitCode {
             srm_in,
             srm_out,
             apu_log,
+            dsp_trace,
+            dsp_trace_max,
             sa1_log,
             sa1_side_log,
             sa1_trace,
@@ -681,6 +694,8 @@ fn main() -> ExitCode {
             srm_in.as_deref(),
             srm_out.as_deref(),
             apu_log.as_deref(),
+            dsp_trace.as_deref(),
+            dsp_trace_max,
             sa1_log.as_deref(),
             sa1_side_log.as_deref(),
             sa1_trace.as_deref(),

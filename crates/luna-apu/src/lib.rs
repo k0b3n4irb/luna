@@ -414,6 +414,12 @@ impl Apu {
     /// — which is when the ADSR phase machine actually moves and
     /// the per-voice position counter increments.
     fn tick_voices(&mut self, spc_cycles: u32) {
+        // Timestamp source for the optional DSP write trace (#122):
+        // advanced with the same cycles that drive the sample pipeline,
+        // so a traced write is placed relative to audio output.
+        if self.dsp.write_log.is_some() {
+            self.dsp.trace_cycles = self.dsp.trace_cycles.wrapping_add(u64::from(spc_cycles));
+        }
         self.sample_tick_deficit = self.sample_tick_deficit.saturating_add(spc_cycles);
         while self.sample_tick_deficit >= SPC_CYCLES_PER_SAMPLE {
             self.sample_tick_deficit -= SPC_CYCLES_PER_SAMPLE;

@@ -253,8 +253,49 @@ pub(crate) fn step_to_frame_bounded(em: &mut luna_api::Emulator, frame: u64, bud
 /// enough that the budget check above stays responsive.
 const FRAME_STEP_BUDGET: u64 = 200_000;
 
+/// An `APU:OFFSET:COUNT` peek target (issue #122): `OFFSET`/`COUNT` are
+/// hex, and the read goes to **ARAM** (the SPC700's 64 KB address
+/// space) rather than the CPU bus — so `APU:0200:16` dumps the uploaded
+/// driver image and `APU:00F0:10` the `$F0-$FF` register page.
+///
+/// Returns `None` when the spec is not APU-prefixed, so the caller can
+/// fall through to the CPU-bus and symbol forms.
+pub(crate) fn parse_apu_peek_spec(spec: &str) -> Option<Result<(u16, u16), String>> {
+    let rest = spec
+        .trim()
+        .strip_prefix("APU:")
+        .or_else(|| spec.trim().strip_prefix("apu:"))?;
+    let Some((off_s, count_s)) = rest.split_once(':') else {
+        return Some(Err(format!(
+            "expected APU:OFFSET:COUNT (hex), got `{spec}`"
+        )));
+    };
+    let offset = match u16::from_str_radix(off_s.trim(), 16) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(format!("bad ARAM offset `{off_s}`: {e}"))),
+    };
+    let count = match u16::from_str_radix(count_s.trim(), 16) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(format!("bad count `{count_s}`: {e}"))),
+    };
+    Some(Ok((offset, count)))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn apu_peek_spec_parses_and_is_opt_in() {
+        use super::parse_apu_peek_spec;
+        assert_eq!(parse_apu_peek_spec("APU:0200:16"), Some(Ok((0x0200, 0x16))));
+        assert_eq!(parse_apu_peek_spec("apu:00F0:10"), Some(Ok((0x00F0, 0x10))));
+        // Not APU-prefixed → None, so the CPU-bus / symbol forms still win.
+        assert!(parse_apu_peek_spec("7E:0200:20").is_none());
+        assert!(parse_apu_peek_spec("current_song:1").is_none());
+        // Malformed APU spec reports rather than silently falling through.
+        assert!(matches!(parse_apu_peek_spec("APU:0200"), Some(Err(_))));
+        assert!(matches!(parse_apu_peek_spec("APU:zz:10"), Some(Err(_))));
+    }
+
     use super::*;
 
     // --- parse_input_script -------------------------------------------------
