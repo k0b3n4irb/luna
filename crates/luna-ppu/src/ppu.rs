@@ -317,6 +317,13 @@ pub struct Ppu {
     /// "Latch hit" bit: set when the H/V counters were latched
     /// since the last STAT78 read. Exposed at STAT78 bit 6.
     pub external_latch_hit: bool,
+    /// Mirror of the WRIO (`$4201`) bit-7 latch line, kept current by
+    /// the bus on every `$4201` write. While the line is held LOW,
+    /// STAT78 bit 6 reads 1 and the read does NOT clear the latch flag
+    /// (ares io.cpp `$213f`: `if(!cpu.pio().bit(7)) ppu2.mdr.bit(6)=1;
+    /// else { bit6 = latch.counters; latch.counters = 0; }`). Powers up
+    /// high (the PIO out-pins reset to `$FF`).
+    pub pio_bit7: bool,
     /// Interlace field parity, exposed at STAT78 ($213F) bit 7. Toggles
     /// every frame at the V-counter wrap (ares `counter/inline.hpp:32`
     /// `time.field ^= 1`) — unconditionally, even in progressive mode.
@@ -496,6 +503,7 @@ impl Ppu {
             ophct_hi_pending: false,
             opvct_hi_pending: false,
             external_latch_hit: false,
+            pio_bit7: true,
             field: false,
             bgofs_ppu1: 0,
             bgofs_ppu2: 0,
@@ -799,13 +807,24 @@ impl Ppu {
                 // status bit as side effects. Bits 0-4 (PPU2 version +
                 // PAL) come from `stat78`, bit 5 is stale PPU2 MDR,
                 // bit 6 = latch hit, bit 7 = field (ares io.cpp:167-180).
+                // Bit 6: while the WRIO latch line is held LOW the
+                // counters latch continuously — the bit reads 1 and the
+                // read does NOT clear the flag; with the line high it
+                // reads (and clears) the latch-hit flag (ares io.cpp
+                // $213f, Mesen2 SnesPpu::Read agree).
+                let latch_bit = if self.pio_bit7 {
+                    let hit = self.external_latch_hit;
+                    self.external_latch_hit = false;
+                    if hit { 0x40 } else { 0 }
+                } else {
+                    0x40
+                };
                 self.ppu2_mdr = (self.stat78 & 0x1F)
                     | (self.ppu2_mdr & 0x20)
-                    | if self.external_latch_hit { 0x40 } else { 0 }
+                    | latch_bit
                     | (u8::from(self.field) << 7);
                 self.bgofs_ppu1 = 0;
                 self.bgofs_ppu2 = 0;
-                self.external_latch_hit = false;
                 // Reading $213F also resets the OPHCT/OPVCT byte-read
                 // flip-flop (ares `io.cpp` $213f: `latch.hcounter = 0;
                 // latch.vcounter = 0;`), so the next OPHCT/OPVCT read
@@ -914,8 +933,10 @@ impl Ppu {
 
     /// Latch the current PPU H/V counters into OPHCT/OPVCT. Called
     /// by the `SnesBus` on:
-    ///   * a WRIO (\$4201) write whose bit 7 transitions from 0 to 1
-    ///   * a read of SLHV (\$2137) — also returns open bus
+    ///   * a WRIO (\$4201) write whose bit 7 FALLS (1 → 0) — the
+    ///     hardware latch edge (ares cpu/io.cpp:143)
+    ///   * a read of SLHV (\$2137) while WRIO bit 7 is high — also
+    ///     returns open bus
     ///
     /// Both paths feed the SAME pair of latched values; the read
     /// protocol on OPHCT/OPVCT is separately tracked (low-then-high).
@@ -1169,6 +1190,25 @@ mod stat_tests {
         assert_eq!(v & 0x40, 0x40, "latch hit should be set");
         // Reading STAT78 clears the bit.
         assert_eq!(p.read(register::STAT78, 0) & 0x40, 0);
+    }
+
+    #[test]
+    fn stat78_bit6_forced_high_and_uncleared_while_pio_low() {
+        // ares io.cpp $213f: with WRIO bit 7 held LOW the counters latch
+        // continuously — bit 6 reads 1 and the read does NOT clear the
+        // latch-hit flag; releasing the line restores read-and-clear.
+        let mut p = Ppu::new();
+        p.pio_bit7 = false;
+        assert_eq!(p.read(register::STAT78, 0) & 0x40, 0x40, "held low → 1");
+        p.latch_counters(10, 20);
+        assert_eq!(p.read(register::STAT78, 0) & 0x40, 0x40);
+        assert!(
+            p.external_latch_hit,
+            "read while low must not clear the latch flag"
+        );
+        p.pio_bit7 = true;
+        assert_eq!(p.read(register::STAT78, 0) & 0x40, 0x40, "flag survives");
+        assert_eq!(p.read(register::STAT78, 0) & 0x40, 0, "then clears");
     }
 }
 

@@ -6,6 +6,100 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+## [1.12.0] — 2026-08-01
+
+Player comfort and debugging reach. The GUI gains the three things
+anyone actually reaches for (fullscreen, gamepads, volume); the
+audio-driver blind spot two downstream reports pointed at is now
+instrumented; and the untrusted-input surface, the MCP wire contract
+and the H/V-counter latch each gained the evidence they were missing.
+
+### Changed
+- **rmcp 0.8 → 3.1** (MCP 2026-07-28 support). Taken with evidence, not
+  on a green compile: the new protocol contract tests exercise the
+  catalogue, an argument/result round trip, the JSON-RPC error path,
+  unknown-tool rejection and a full `load_rom` → `screenshot` → `state`
+  agent loop — all pass unchanged against 3.1, so luna's observable MCP
+  behaviour is preserved. The client-side `CallToolRequestParams` is now
+  non-exhaustive and built through `::new(..).with_arguments(..)` (test
+  code only; the server's tool definitions are untouched thanks to the
+  macros). Bonus: this retires the `RUSTSEC-2026-0189` ignore in
+  `deny.toml` — the DNS-rebinding advisory against rmcp 0.8's HTTP
+  transport is fixed upstream, so the exception is gone rather than
+  merely justified.
+
+### Added
+- **DSP / APU visibility for audio-driver debugging**
+  ([#122](https://github.com/k0b3n4irb/luna/issues/122), asked for by
+  OpenSNES while debugging its SPC700 arc through WAV captures alone):
+  1. `state` JSON gains **`apu.dsp`** — the eight voices as objects
+     (`keyed_on`, VOL L/R, pitch, SRCN, ADSR1/2, GAIN, ENVX, OUTX, live
+     envelope + phase, BRR address, pitch accumulator) plus master
+     state (MVOL/EVOL, EFB, KON/KOFF, FLG, ENDX, PMON/NON/EON, DIR,
+     ESA, EDL), instead of eight parallel arrays. The flat `voice_*`
+     arrays stay for existing consumers.
+  2. **`--peek APU:OFFSET:COUNT`** reads ARAM instead of the CPU bus —
+     verify an uploaded driver image or the `$F0-$FF` register page.
+  3. **`--dsp-trace <PATH>`** (+ `--dsp-trace-max`) captures every DSP
+     register write with an SPC-cycle timestamp as CSV
+     `spc_cycles,reg,name,value`, `name` decoded (`V0_ADSR1`, `KON`,
+     `FLG`, …) — the sequencing oracle for "did my KON/KOFF pulses
+     reach the chip in the order I intended?", which is invisible in a
+     WAV.
+- **Fuzzing for the ROM-parsing surface** (`fuzz/`, cargo-fuzz): three
+  targets covering `Cartridge::from_bytes` (auto-detect, header scoring,
+  SMC/firmware stripping), the checksum-skipping `from_bytes_forced`
+  path across all 8 mapper kinds, and the full parse → `Snes` →
+  `reset` → step chain where an accepted-but-malformed cart reaches the
+  mapper shims. First campaign: **~67 million executions, zero crashes**
+  — the parser's clamps and mirrored indexing hold under adversarial
+  input. Weekly in CI (+ on any PR touching `luna-cartridge` or
+  `fuzz/`), with crash reproducers uploaded as artifacts and a minimized
+  seed corpus committed so a fresh clone starts from real coverage.
+- **MCP protocol contract tests** — the audit's "only front-end without
+  a contract test" is closed. `luna-mcp-server/tests/protocol.rs` runs
+  the real server against a real rmcp client over an in-memory
+  `tokio::io::duplex` pair (no process, no ports, deterministic) and
+  locks the wire behaviour: the discovered tool catalogue (plus every
+  tool having a description and an input schema), an argument/result
+  round trip, errors surfacing as JSON-RPC errors carrying luna's
+  message, unknown-tool rejection, and a full `load_rom` → `screenshot`
+  → `state` agent loop on a synthetic ROM. This is the evidence the
+  pending rmcp 3.0 (MCP 2026-07-28) bump was waiting on.
+
+### Fixed
+- **`--input` checkpoints no longer overrun the `-n` budget**
+  ([#126](https://github.com/k0b3n4irb/luna/issues/126), reported
+  downstream by OpenSNES). Chasing a checkpoint's frame stepped the
+  emulator *unbounded* and only then spent `-n`, so
+  `luna state -n 100000 --input "900:0x8000"` ran to frame **910**
+  instead of frame 12 — a run 75x longer than requested, in which a
+  press scheduled far beyond the requested window still reached the
+  ROM (the reported "first checkpoint latched at boot"). Checkpoint
+  chasing now spends from the same budget as the run: `-n` is the total
+  length with or without `--input`, and a checkpoint the run never
+  reaches simply never fires. Fixed identically in `state`, `spc-dump`
+  and `assets-dump` (`wram-trace` and `bench` already applied
+  checkpoints inside their frame loops). CLI-level regression tests
+  included.
+
+- **The H/V-counter latch subsystem is now faithful end-to-end** (ares
+  `cpu/io.cpp` + Mesen2 agree on all four): the WRIO (`$4201`) latch
+  fires on the **falling** edge of bit 7 (luna had the polarity
+  inverted), WRIO powers up high (`$FF`), SLHV (`$2137`) only latches
+  while the line is high, and STAT78 bit 6 reads forced-1 without
+  clearing the latch flag while the line is held low — closing the last
+  named residual of the scorecard's PPU row.
+
+### Added
+- **GUI comfort trio** — the three most-visible player features:
+  **fullscreen** (`F11` remappable hotkey + Emulation menu, borderless),
+  **gamepad support** (up to two pads via gilrs, SDL-style mappings,
+  fixed Mesen2-like layout, first pad = Player 1, merged with the
+  keyboard), and a **volume slider + mute** (Settings → Audio, applied
+  live in the audio callback, persisted to `~/.config/luna/audio.json`).
+  The *Step frame* debugger hotkey moved from `F11` to `F6`.
+
 ## [1.11.0] — 2026-08-01
 
 The audit release: an eight-PR sweep out of a full-project review — one

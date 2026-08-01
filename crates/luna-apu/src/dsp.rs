@@ -296,6 +296,27 @@ pub fn gaussian_table() -> &'static [i16; 512] {
 
 // -------------- the DSP itself -------------------------------------------
 
+/// One DSP register write, captured by the optional trace (issue
+/// #122): the sequencing oracle a driver author needs when a voice
+/// dies after a KOFF/KON pulse and the WAV alone cannot say whether
+/// the writes reached the chip in the intended order.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct DspWriteEvent {
+    /// SPC700 cycles since reset at the moment of the write.
+    pub spc_cycles: u64,
+    /// Register index (`$00-$7F`).
+    pub reg: u8,
+    /// Byte written.
+    pub value: u8,
+}
+
+/// Bounded ring for [`DspWriteEvent`]s.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct DspWriteLog {
+    pub events: Vec<DspWriteEvent>,
+    pub max_events: usize,
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Dsp {
     #[serde(with = "serde_bytes")]
@@ -310,6 +331,13 @@ pub struct Dsp {
     /// Per-`main()` accumulator: the last produced stereo sample
     /// (echo27 calls `sample()` once per macro-pipeline run).
     pub last_sample: (i16, i16),
+    /// Optional register-write trace (`--dsp-trace`). `None` = off, and
+    /// the write path pays a single `Option` check.
+    #[serde(skip)]
+    pub write_log: Option<DspWriteLog>,
+    /// Timestamp source for the trace, ticked by the APU bridge.
+    #[serde(skip)]
+    pub trace_cycles: u64,
 }
 
 impl Default for Dsp {
@@ -343,6 +371,8 @@ impl Dsp {
             brr: Brr::default(),
             latch: Latch::default(),
             last_sample: (0, 0),
+            write_log: None,
+            trace_cycles: 0,
         };
         // Trigger gaussian table init so the first sample isn't slow.
         let _ = gaussian_table();
@@ -359,6 +389,15 @@ impl Dsp {
 
     pub fn write(&mut self, address: u8, data: u8) {
         let addr = address & 0x7F;
+        if let Some(log) = self.write_log.as_mut()
+            && log.events.len() < log.max_events
+        {
+            log.events.push(DspWriteEvent {
+                spc_cycles: self.trace_cycles,
+                reg: addr,
+                value: data,
+            });
+        }
         self.registers[addr as usize] = data;
 
         match addr {

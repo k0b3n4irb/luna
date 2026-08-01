@@ -18,7 +18,6 @@ pub(crate) fn run_spc_dump(
     dsp1_rom: Option<&std::path::Path>,
     input_script: Option<&str>,
 ) -> ExitCode {
-    const FRAME_BUDGET: u64 = 200_000;
     let mut em = luna_api::Emulator::new();
     if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, dsp1_rom) {
         eprintln!("error: {e}");
@@ -34,18 +33,30 @@ pub(crate) fn run_spc_dump(
             }
         },
     };
+    // Checkpoint chasing spends from the SAME `-n` budget as the run
+    // (issue #126) — see `parsers::step_to_frame_bounded`.
+    let start_instructions = em.instructions_executed();
     for (frame, mask) in &checkpoints {
-        while em.state().scheduler.frame_count < *frame {
-            if em.step_until_frame(FRAME_BUDGET).unwrap_or(0) == 0 {
-                break;
-            }
+        let spent = em
+            .instructions_executed()
+            .saturating_sub(start_instructions);
+        let Some(left) = steps.checked_sub(spent).filter(|l| *l > 0) else {
+            break;
+        };
+        crate::parsers::step_to_frame_bounded(&mut em, *frame, left);
+        if em.state().scheduler.frame_count < *frame {
+            break;
         }
         if let Err(e) = em.set_joypad(0, *mask) {
             eprintln!("error: set_joypad: {e}");
             return ExitCode::from(1);
         }
     }
-    if let Err(e) = em.step(steps) {
+    let remaining = steps.saturating_sub(
+        em.instructions_executed()
+            .saturating_sub(start_instructions),
+    );
+    if let Err(e) = em.step(remaining) {
         eprintln!("step warning (warm-up): {e}");
     }
     let spc = match em.export_spc() {
@@ -86,7 +97,6 @@ pub(crate) fn run_assets_dump(
     dsp1_rom: Option<&std::path::Path>,
     input_script: Option<&str>,
 ) -> ExitCode {
-    const FRAME_BUDGET: u64 = 200_000;
     let mut em = luna_api::Emulator::new();
     if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, dsp1_rom) {
         eprintln!("error: {e}");
@@ -102,18 +112,30 @@ pub(crate) fn run_assets_dump(
             }
         },
     };
+    // Checkpoint chasing spends from the SAME `-n` budget as the run
+    // (issue #126) — see `parsers::step_to_frame_bounded`.
+    let start_instructions = em.instructions_executed();
     for (frame, mask) in &checkpoints {
-        while em.state().scheduler.frame_count < *frame {
-            if em.step_until_frame(FRAME_BUDGET).unwrap_or(0) == 0 {
-                break;
-            }
+        let spent = em
+            .instructions_executed()
+            .saturating_sub(start_instructions);
+        let Some(left) = steps.checked_sub(spent).filter(|l| *l > 0) else {
+            break;
+        };
+        crate::parsers::step_to_frame_bounded(&mut em, *frame, left);
+        if em.state().scheduler.frame_count < *frame {
+            break;
         }
         if let Err(e) = em.set_joypad(0, *mask) {
             eprintln!("error: set_joypad: {e}");
             return ExitCode::from(1);
         }
     }
-    if let Err(e) = em.step(steps) {
+    let remaining = steps.saturating_sub(
+        em.instructions_executed()
+            .saturating_sub(start_instructions),
+    );
+    if let Err(e) = em.step(remaining) {
         eprintln!("step warning (warm-up): {e}");
     }
     if let Err(e) = std::fs::create_dir_all(out) {

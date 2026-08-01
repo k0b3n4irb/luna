@@ -30,6 +30,7 @@ egui-winit = { workspace = true }
 # Blocks on the wgpu adapter/device futures when opening a debug window.
 pollster   = "0.4"
 cpal       = { workspace = true }
+gilrs      = { workspace = true }
 ringbuf    = { workspace = true }
 triple_buffer = "8"
 serde      = { workspace = true }

@@ -12,10 +12,6 @@ yanked = "deny"
 # Each ignore is a considered decision — re-evaluate when Dependabot
 # offers the relevant major bump.
 ignore = [
-    # rmcp 0.8: DNS-rebinding in the Streamable *HTTP* server transport.
-    # luna serves MCP over stdio only (`luna mcp`); the vulnerable
-    # transport is never constructed. Fixed upstream in a later major.
-    "RUSTSEC-2026-0189",
     # quick-xml 0.39 DoS vectors (quadratic dup-attribute check,
     # unbounded NS allocation). Transitive via the rfd/zbus desktop
     # portal stack — parses local portal replies, not remote input.

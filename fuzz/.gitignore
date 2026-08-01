@@ -1,0 +1,5 @@
+# cargo-fuzz build output.
+target/
+# Crash reproducers are per-run, and a committed one would fail CI
+# forever; keep them local (CI uploads them as artifacts instead).
+artifacts/

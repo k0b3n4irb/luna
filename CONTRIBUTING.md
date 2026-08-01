@@ -10,7 +10,8 @@ but apply to every contribution, human or otherwise.
 
 - Rust toolchain: pinned by [`rust-toolchain.toml`](rust-toolchain.toml)
   (edition 2024) — `rustup` picks it up automatically.
-- Linux build dependency: `libasound2-dev` (cpal → ALSA). Windows (WASAPI)
+- Linux build dependencies: `libasound2-dev` (cpal → ALSA) and `libudev-dev`
+  (gilrs → gamepad hotplug). Windows (WASAPI)
   and macOS (CoreAudio) need nothing extra.
 
 ```bash
@@ -54,7 +55,10 @@ cargo build --workspace --all-targets \
   `feat(cli): ...`, `docs: ...`. No `Co-authored-by`/tool-attribution
   trailers.
 - **Branches/PRs**: branch from `develop`, PR back to `develop`
-  (squash-merged). `main` only receives release merges.
+  (squash-merged). `main` only receives release merges — including
+  **Dependabot's**: it is configured with `target-branch: develop`, so
+  check the base before merging a bot PR. A bump landing on `main`
+  directly makes the next release PR conflict on `Cargo.lock`.
 - **Accuracy work**: read the matching reference implementation (ares +
   Mesen2) *first* — see
   [`.claude/rules/reference-first.md`](.claude/rules/reference-first.md) —
@@ -62,6 +66,20 @@ cargo build --workspace --all-targets \
   in the same PR.
 - **Anything a human can see or hear** (rendering, audio, GUI behaviour)
   gets validated in the GUI before merge, not just by unit tests.
+
+## Fuzzing
+
+The ROM parser is the one surface that takes untrusted input, so it is
+fuzzed (`fuzz/`, three targets, weekly in CI). Before changing
+`luna-cartridge` or the mapper shims, a quick local run is cheap:
+
+```bash
+cargo install cargo-fuzz
+cargo +nightly fuzz run cartridge_parse -- -max_total_time=120
+```
+
+See [`fuzz/README.md`](fuzz/README.md) for the targets, the contract they
+assert, and how to replay a crash reproducer.
 
 ## Versioning & releases
 
@@ -73,6 +91,13 @@ cargo build --workspace --all-targets \
   (`release.yml` builds and attaches the 4-platform binaries +
   checksums); then reconcile `develop` with `main`. Update the pinned
   asset names in `book/src/using/install.md` as part of the bump PR.
+- **Before tagging, run the full suite locally *with* `tests/roms/`
+  populated** — `cargo test --workspace --all-targets`. The commercial
+  smoke and game goldens SKIP on CI (copyrighted ROMs are never
+  committed), so a stale golden passes CI silently and only a local run
+  catches it. That is exactly how the v1.12.0 prep caught three
+  `tests/golden/smoke/` PNGs left un-anchored by the line-origin
+  change.
 
 ## License
 

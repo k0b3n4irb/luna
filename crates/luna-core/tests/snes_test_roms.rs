@@ -202,6 +202,10 @@ fn run_to_stable(rom: Vec<u8>, hold: u16, region: luna_cartridge::Region) -> Vec
     }
 
     std::panic::set_hook(prev_hook);
+    eprintln!(
+        "[settle] frame={} executed={} stable={}",
+        snes.frame_count, executed, stable
+    );
     if std::env::var("LUNA_SNES_TEST_PPUDIAG").is_ok() {
         let bg1 = snes.ppu.bg[0];
         let bg2 = snes.ppu.bg[1];

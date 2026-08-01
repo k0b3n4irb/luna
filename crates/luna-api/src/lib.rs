@@ -15,6 +15,10 @@
 
 use std::path::Path;
 
+/// DSP register-write trace event (issue #122), re-exported so the CLI
+/// and MCP consume it through `luna-api` rather than depending on
+/// `luna-apu` (`.claude/rules/api-first.md`).
+pub use luna_apu::dsp::DspWriteEvent;
 pub use luna_cartridge::Region;
 use luna_cartridge::{CartError, Cartridge};
 use luna_core::Snes;
@@ -503,6 +507,81 @@ pub struct SchedulerState {
     pub nmis_serviced: u64,
 }
 
+/// One DSP voice, as a debugger wants to read it: the register file
+/// values that drive it **plus** the live decode state, in one object
+/// instead of eight parallel arrays (issue #122).
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct DspVoiceState {
+    /// Voice index 0-7 (register block `$x0-$x9`).
+    pub index: u8,
+    /// Currently producing output (envelope non-zero or not released).
+    pub keyed_on: bool,
+    /// `$x0` VOL(L) — signed left volume.
+    pub vol_l: i8,
+    /// `$x1` VOL(R) — signed right volume.
+    pub vol_r: i8,
+    /// `$x2`/`$x3` P — 14-bit pitch (`0x1000` = 1:1 playback).
+    pub pitch: u16,
+    /// `$x4` SRCN — sample-directory index this voice plays.
+    pub srcn: u8,
+    /// `$x5` ADSR1 (`ADSR enable` + attack/decay rates).
+    pub adsr1: u8,
+    /// `$x6` ADSR2 (sustain level + release rate).
+    pub adsr2: u8,
+    /// `$x7` GAIN (used when ADSR is disabled).
+    pub gain: u8,
+    /// `$x8` ENVX — the envelope value as the *register* reports it.
+    pub envx: u8,
+    /// `$x9` OUTX — the voice's most recent output sample, register-side.
+    pub outx: i8,
+    /// Live 11-bit envelope the DSP is applying right now — independent
+    /// of `ENVX`, which the driver may not have re-read.
+    pub envelope: u16,
+    /// Live ADSR phase (`Attack` / `Decay` / `Sustain` / `Release`).
+    pub envelope_phase: String,
+    /// Current BRR block address in ARAM (advances 9 bytes per block).
+    pub brr_addr: u16,
+    /// 14-bit pitch accumulator; `0x4000` = one BRR sample per tick.
+    pub pitch_acc: u16,
+}
+
+/// DSP global state + the eight voices, structured (issue #122).
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct DspState {
+    /// The eight voices, index order.
+    pub voices: Vec<DspVoiceState>,
+    /// `$0C` MVOL(L) — master volume left.
+    pub mvol_l: i8,
+    /// `$1C` MVOL(R) — master volume right.
+    pub mvol_r: i8,
+    /// `$2C` EVOL(L) — echo volume left.
+    pub evol_l: i8,
+    /// `$3C` EVOL(R) — echo volume right.
+    pub evol_r: i8,
+    /// `$0D` EFB — echo feedback.
+    pub efb: i8,
+    /// `$4C` KON — most recent key-on write.
+    pub kon: u8,
+    /// `$5C` KOFF — most recent key-off write.
+    pub koff: u8,
+    /// `$6C` FLG — reset / mute / echo-write-disable + noise clock.
+    pub flg: u8,
+    /// `$7C` ENDX — per-voice "sample ended" flags.
+    pub endx: u8,
+    /// `$2D` PMON — per-voice pitch modulation enable.
+    pub pmon: u8,
+    /// `$3D` NON — per-voice noise enable.
+    pub non: u8,
+    /// `$4D` EON — per-voice echo enable.
+    pub eon: u8,
+    /// `$5D` DIR — sample-directory page (`DIR << 8` in ARAM).
+    pub dir: u8,
+    /// `$6D` ESA — echo-buffer start page in ARAM.
+    pub esa: u8,
+    /// `$7D` EDL — echo delay (buffer length).
+    pub edl: u8,
+}
+
 /// APU / SPC700 / DSP snapshot.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ApuState {
@@ -564,6 +643,10 @@ pub struct ApuState {
     /// Per-voice 14-bit pitch accumulator. Threshold 0x4000 = 1 BRR
     /// sample per output tick.
     pub voice_pitch_acc: [u16; 8],
+    /// Structured DSP view — the register file and the live decode
+    /// state per voice, in one object (issue #122). The flat
+    /// `voice_*` arrays above are kept for existing consumers.
+    pub dsp: DspState,
 }
 
 /// One decoded OAM sprite (size, flips, and high-table bits resolved),
@@ -1356,6 +1439,54 @@ impl Emulator {
                     .map(|v| s.apu_real.dsp.voices[v].buffer.to_vec())
                     .collect(),
                 voice_pitch_acc: std::array::from_fn(|i| s.apu_real.dsp.voices[i].gaussian_offset),
+                dsp: {
+                    let r = &s.apu_real.dsp.registers;
+                    // Per-voice register block is $x0-$x9 with x = voice.
+                    let vreg = |v: usize, lo: usize| r[(v << 4) | lo];
+                    DspState {
+                        voices: (0..8)
+                            .map(|i| {
+                                let live = &s.apu_real.dsp.voices[i];
+                                DspVoiceState {
+                                    index: i as u8,
+                                    keyed_on: live.envelope_mode
+                                        != luna_apu::dsp::EnvelopeMode::Release
+                                        || live.envelope != 0,
+                                    vol_l: vreg(i, 0x0) as i8,
+                                    vol_r: vreg(i, 0x1) as i8,
+                                    pitch: (u16::from(vreg(i, 0x2))
+                                        | (u16::from(vreg(i, 0x3)) << 8))
+                                        & 0x3FFF,
+                                    srcn: vreg(i, 0x4),
+                                    adsr1: vreg(i, 0x5),
+                                    adsr2: vreg(i, 0x6),
+                                    gain: vreg(i, 0x7),
+                                    envx: vreg(i, 0x8),
+                                    outx: vreg(i, 0x9) as i8,
+                                    envelope: live.envelope,
+                                    envelope_phase: format!("{:?}", live.envelope_mode),
+                                    brr_addr: live.brr_address,
+                                    pitch_acc: live.gaussian_offset,
+                                }
+                            })
+                            .collect(),
+                        mvol_l: r[0x0C] as i8,
+                        mvol_r: r[0x1C] as i8,
+                        evol_l: r[0x2C] as i8,
+                        evol_r: r[0x3C] as i8,
+                        efb: r[0x0D] as i8,
+                        kon: r[0x4C],
+                        koff: r[0x5C],
+                        flg: r[0x6C],
+                        endx: r[0x7C],
+                        pmon: r[0x2D],
+                        non: r[0x3D],
+                        eon: r[0x4D],
+                        dir: r[0x5D],
+                        esa: r[0x6D],
+                        edl: r[0x7D],
+                    }
+                },
             });
         let stats = Stats {
             instructions_executed: self.instructions_executed,
@@ -2401,6 +2532,29 @@ impl Emulator {
         Ok(())
     }
 
+    /// Enable the DSP register-write trace (issue #122): every write to
+    /// a `$00-$7F` DSP register is captured with an SPC-cycle timestamp,
+    /// up to `max_events`. Answers "did my KON/KOFF sequence reach the
+    /// chip in the order I intended?" — invisible in a WAV capture.
+    pub fn enable_dsp_trace(&mut self, max_events: usize) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.apu_real.dsp.write_log = Some(luna_apu::dsp::DspWriteLog {
+            events: Vec::new(),
+            max_events,
+        });
+        snes.apu_real.dsp.trace_cycles = 0;
+        Ok(())
+    }
+
+    /// Drain the DSP register-write trace (empty if disabled).
+    pub fn take_dsp_trace(&mut self) -> Result<Vec<DspWriteEvent>, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        Ok(match snes.apu_real.dsp.write_log.as_mut() {
+            Some(log) => std::mem::take(&mut log.events),
+            None => Vec::new(),
+        })
+    }
+
     /// Drain the DMA→VRAM trace (empty if disabled).
     pub fn take_dma_trace(&mut self) -> Result<Vec<DmaTraceEvent>, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
@@ -2892,6 +3046,42 @@ fn default_apu_state() -> ApuState {
         voice_brr_dump: vec![vec![0; 36]; 8],
         voice_brr_history: vec![vec![0; 4]; 8],
         voice_pitch_acc: [0; 8],
+        dsp: DspState {
+            voices: (0..8)
+                .map(|i| DspVoiceState {
+                    index: i,
+                    keyed_on: false,
+                    vol_l: 0,
+                    vol_r: 0,
+                    pitch: 0,
+                    srcn: 0,
+                    adsr1: 0,
+                    adsr2: 0,
+                    gain: 0,
+                    envx: 0,
+                    outx: 0,
+                    envelope: 0,
+                    envelope_phase: "Off".to_string(),
+                    brr_addr: 0,
+                    pitch_acc: 0,
+                })
+                .collect(),
+            mvol_l: 0,
+            mvol_r: 0,
+            evol_l: 0,
+            evol_r: 0,
+            efb: 0,
+            kon: 0,
+            koff: 0,
+            flg: 0,
+            endx: 0,
+            pmon: 0,
+            non: 0,
+            eon: 0,
+            dir: 0,
+            esa: 0,
+            edl: 0,
+        },
     }
 }
 

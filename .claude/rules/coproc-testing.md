@@ -53,10 +53,17 @@ A working build:
 - **#1** shows the intro cinematic (Peach in the garden — bird, treehouse,
   bushes), rendered cleanly.
 - **#2** reaches the **"Your name?"** name-entry screen, and crucially
-  `nmis_serviced` keeps climbing past the title (≥ ~5000 at `-n
-  55000000`, NMI service rate ≥ 80%). Without the `--input` the run
-  **freezes at `nmis_serviced` ≈ 1598** — that plateau is the title
+  `nmis_serviced` keeps climbing past the title (**≈ 3335 at frame ≈ 3988**
+  for `-n 55000000`, NMI service rate ≥ 80%). Without the `--input` the
+  run **freezes at `nmis_serviced` ≈ 1598** — that plateau is the title
   wait, not a deadlock.
+
+  > The counts above were re-measured 2026-08-01, after `--input`
+  > checkpoints started spending from the `-n` budget instead of
+  > pre-rolling on top of it (issue #126). The command reaches the same
+  > screen; it just runs the 55M instructions actually requested rather
+  > than 55M **plus** an unbounded chase to frame 2500, so the absolute
+  > counters are lower than the pre-fix figures (≥ 5000).
 
 For PPU compositor / color-math changes the equivalent SMW Yoshi's
 House intro repro is also useful — see `/smoke-test` for the
