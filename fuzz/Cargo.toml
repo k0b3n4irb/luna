@@ -1,0 +1,44 @@
+[package]
+name = "luna-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# Not a workspace member: cargo-fuzz builds it with its own nightly
+# toolchain + sanitizer flags, which must not leak into the stable
+# workspace build.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+luna-cartridge = { path = "../crates/luna-cartridge" }
+luna-bus = { path = "../crates/luna-bus" }
+luna-core = { path = "../crates/luna-core" }
+
+[[bin]]
+name = "cartridge_parse"
+path = "fuzz_targets/cartridge_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cartridge_forced"
+path = "fuzz_targets/cartridge_forced.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cartridge_to_system"
+path = "fuzz_targets/cartridge_to_system.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

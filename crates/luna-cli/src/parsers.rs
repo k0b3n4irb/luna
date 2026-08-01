@@ -214,8 +214,88 @@ pub(crate) fn parse_addr_range(spec: &str) -> Result<(u16, u16), String> {
 // is pinned here.
 // =============================================================================
 
+/// Step `em` until PPU frame `frame` is reached, spending **at most**
+/// `budget` instructions. Returns the instructions consumed.
+///
+/// This bound is what makes a scripted `--input` checkpoint honour
+/// `-n` (issue #126): the pre-roll used to step to each checkpoint's
+/// frame unconditionally and only THEN spend the requested budget, so
+/// `-n 100000 --input "900:0x8000"` ran to frame 910 instead of frame
+/// 12 — a run 75x longer than asked, in which a press scheduled far
+/// beyond the requested window still reached the ROM. A checkpoint the
+/// run never reaches must simply not fire.
+///
+/// Stops early when the emulator makes no progress (halted core), so a
+/// dead ROM cannot spin here.
+pub(crate) fn step_to_frame_bounded(em: &mut luna_api::Emulator, frame: u64, budget: u64) -> u64 {
+    let start = em.instructions_executed();
+    while em.state().scheduler.frame_count < frame {
+        let spent = em.instructions_executed().saturating_sub(start);
+        let left = budget.saturating_sub(spent);
+        if left == 0 {
+            break;
+        }
+        // Never overshoot the budget: cap the per-frame step by what is
+        // left, so the last partial frame stops exactly on the limit.
+        if em
+            .step_until_frame(left.min(FRAME_STEP_BUDGET))
+            .unwrap_or(0)
+            == 0
+        {
+            break;
+        }
+    }
+    em.instructions_executed().saturating_sub(start)
+}
+
+/// Per-call instruction cap while chasing a checkpoint frame. Large
+/// enough for any real frame (a slow one is ~40k instructions), small
+/// enough that the budget check above stays responsive.
+const FRAME_STEP_BUDGET: u64 = 200_000;
+
+/// An `APU:OFFSET:COUNT` peek target (issue #122): `OFFSET`/`COUNT` are
+/// hex, and the read goes to **ARAM** (the SPC700's 64 KB address
+/// space) rather than the CPU bus — so `APU:0200:16` dumps the uploaded
+/// driver image and `APU:00F0:10` the `$F0-$FF` register page.
+///
+/// Returns `None` when the spec is not APU-prefixed, so the caller can
+/// fall through to the CPU-bus and symbol forms.
+pub(crate) fn parse_apu_peek_spec(spec: &str) -> Option<Result<(u16, u16), String>> {
+    let rest = spec
+        .trim()
+        .strip_prefix("APU:")
+        .or_else(|| spec.trim().strip_prefix("apu:"))?;
+    let Some((off_s, count_s)) = rest.split_once(':') else {
+        return Some(Err(format!(
+            "expected APU:OFFSET:COUNT (hex), got `{spec}`"
+        )));
+    };
+    let offset = match u16::from_str_radix(off_s.trim(), 16) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(format!("bad ARAM offset `{off_s}`: {e}"))),
+    };
+    let count = match u16::from_str_radix(count_s.trim(), 16) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(format!("bad count `{count_s}`: {e}"))),
+    };
+    Some(Ok((offset, count)))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn apu_peek_spec_parses_and_is_opt_in() {
+        use super::parse_apu_peek_spec;
+        assert_eq!(parse_apu_peek_spec("APU:0200:16"), Some(Ok((0x0200, 0x16))));
+        assert_eq!(parse_apu_peek_spec("apu:00F0:10"), Some(Ok((0x00F0, 0x10))));
+        // Not APU-prefixed → None, so the CPU-bus / symbol forms still win.
+        assert!(parse_apu_peek_spec("7E:0200:20").is_none());
+        assert!(parse_apu_peek_spec("current_song:1").is_none());
+        // Malformed APU spec reports rather than silently falling through.
+        assert!(matches!(parse_apu_peek_spec("APU:0200"), Some(Err(_))));
+        assert!(matches!(parse_apu_peek_spec("APU:zz:10"), Some(Err(_))));
+    }
+
     use super::*;
 
     // --- parse_input_script -------------------------------------------------
