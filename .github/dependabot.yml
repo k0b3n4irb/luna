@@ -4,6 +4,13 @@ version: 2
 updates:
   - package-ecosystem: cargo
     directory: "/"
+    # Day-to-day integration happens on `develop`; `main` only ever
+    # receives release merges. Without this, Dependabot targets the
+    # DEFAULT branch (main) and its bumps land there directly — which
+    # is exactly what happened on 2026-08-01: four dependency PRs went
+    # to main, develop never saw them, and the next develop→main
+    # release PR came up CONFLICTING on Cargo.lock.
+    target-branch: develop
     schedule:
       interval: weekly
       day: monday
@@ -23,6 +30,7 @@ updates:
         exclude-patterns: ["egui", "egui-*", "pixels", "wgpu", "winit"]
   - package-ecosystem: github-actions
     directory: "/"
+    target-branch: develop
     schedule:
       interval: weekly
       day: monday

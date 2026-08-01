@@ -21,7 +21,7 @@ env:
   RUSTFLAGS: "-D warnings"
   # Reduce noise from incremental compilation when caches are warm.
   CARGO_INCREMENTAL: "0"
-  # actions/cache@v4 still ships a Node.js 20 entrypoint (deprecated; forced
+  # actions/cache@v6 still ships a Node.js 20 entrypoint (deprecated; forced
   # to Node 24 by the runner from 2026-06-16). Opt into Node 24 now to clear
   # the deprecation warning. See github.blog/changelog/2025-09-19.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -34,7 +34,7 @@ jobs:
     name: check (native)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install ALSA headers (cpal → alsa-sys)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
       - uses: dtolnay/rust-toolchain@master
@@ -50,7 +50,7 @@ jobs:
     name: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install ALSA headers (cpal → alsa-sys)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
       - uses: dtolnay/rust-toolchain@master
@@ -72,7 +72,7 @@ jobs:
     name: check (wasm32)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
@@ -98,7 +98,7 @@ jobs:
     name: fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
@@ -115,7 +115,7 @@ jobs:
     name: clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install ALSA headers (cpal → alsa-sys)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
       - uses: dtolnay/rust-toolchain@master
@@ -145,7 +145,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
@@ -154,7 +154,7 @@ jobs:
           key: snes-test-roms
       - name: Cache SNES test-ROM corpus
         id: rom-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ../luna_tests
           key: snes-test-roms-${{ hashFiles('tools/fetch-snes-test-roms.sh') }}
