@@ -124,17 +124,23 @@ pub(crate) enum Hotkey {
     /// `F10`, the Mesen2 step key). Pauses first if running.
     StepInstruction,
     /// Debugger: run to the next frame boundary while paused (default
-    /// `F11`). Pauses first if running.
+    /// `F6`; was `F11` before fullscreen claimed the universal key).
     StepFrame,
+    /// Toggle borderless fullscreen (default `F11`, the universal
+    /// convention). Listed BEFORE the step hotkeys in [`Self::ALL`] so a
+    /// legacy saved config that still maps `F11` to `StepFrame` resolves
+    /// `F11` to fullscreen (first match wins in `hotkey_for`).
+    Fullscreen,
 }
 
 impl Hotkey {
-    pub(crate) const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::Screenshot,
         Self::SaveState,
         Self::LoadState,
         Self::Pause,
         Self::Reset,
+        Self::Fullscreen,
         Self::StepInstruction,
         Self::StepFrame,
     ];
@@ -150,6 +156,7 @@ impl Hotkey {
             Self::Reset => "Reset",
             Self::StepInstruction => "Step instruction",
             Self::StepFrame => "Step frame",
+            Self::Fullscreen => "Toggle fullscreen",
         }
     }
 
@@ -163,7 +170,8 @@ impl Hotkey {
             Self::Pause => KeyCode::F2,
             Self::Reset => KeyCode::F3,
             Self::StepInstruction => KeyCode::F10,
-            Self::StepFrame => KeyCode::F11,
+            Self::StepFrame => KeyCode::F6,
+            Self::Fullscreen => KeyCode::F11,
         }
     }
 }
@@ -456,7 +464,7 @@ impl KeyBindings {
 }
 
 /// `~/.config/luna/<file>` on Linux / equivalent on macOS & Windows.
-fn config_file(file: &str) -> std::io::Result<PathBuf> {
+pub(crate) fn config_file(file: &str) -> std::io::Result<PathBuf> {
     let base = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         PathBuf::from(xdg)
     } else if let Ok(home) = std::env::var("HOME") {
@@ -488,7 +496,8 @@ mod tests {
     fn debugger_step_hotkeys_default_to_f10_f11() {
         let b = KeyBindings::default();
         assert_eq!(b.hotkey_for(KeyCode::F10), Some(Hotkey::StepInstruction));
-        assert_eq!(b.hotkey_for(KeyCode::F11), Some(Hotkey::StepFrame));
+        assert_eq!(b.hotkey_for(KeyCode::F6), Some(Hotkey::StepFrame));
+        assert_eq!(b.hotkey_for(KeyCode::F11), Some(Hotkey::Fullscreen));
         // Every hotkey stays reachable through the ALL table (rebind UI).
         assert!(Hotkey::ALL.contains(&Hotkey::StepInstruction));
         assert!(Hotkey::ALL.contains(&Hotkey::StepFrame));
