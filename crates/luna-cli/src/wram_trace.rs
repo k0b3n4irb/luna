@@ -9,7 +9,6 @@ use crate::rom::load_rom_into;
 /// `luna wram-trace` — emit per-frame (vblank-aligned) WRAM page hashes
 /// for a confound-free cross-emulator differential (see the subcommand
 /// doc). One line per frame: `<ppu_frame> <h0> <h1> ...`.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_wram_trace(
     rom: &std::path::Path,
     steps: u64,
@@ -39,10 +38,10 @@ pub(crate) fn run_wram_trace(
             }
         },
     };
-    if steps > 0 {
-        if let Err(e) = em.step(steps) {
-            eprintln!("step warning (warm-up): {e}");
-        }
+    if steps > 0
+        && let Err(e) = em.step(steps)
+    {
+        eprintln!("step warning (warm-up): {e}");
     }
     // Input checkpoints are applied DURING the capture loop, keyed by the
     // current PPU frame — so a scripted joypad pulse can span the frames

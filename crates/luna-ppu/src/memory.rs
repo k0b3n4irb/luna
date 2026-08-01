@@ -309,6 +309,14 @@ impl Cgram {
         }
     }
 
+    /// Whether the next [`Self::read`] will return the HIGH byte of the
+    /// current word (the PPU read path needs this to apply the partial
+    /// PPU2-MDR update — the high read only drives bits 0-6).
+    #[must_use]
+    pub const fn read_high_pending(&self) -> bool {
+        self.high_pending
+    }
+
     /// `$213B` read — returns the byte at the current word address,
     /// alternating low/high and advancing on the high read.
     pub fn read(&mut self) -> u8 {

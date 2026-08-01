@@ -181,13 +181,13 @@ fn bench_one(path: &Path, frames: u64, input: &[(u64, u16)], screens_dir: &Path)
         // API hashes the native RGB buffer, no RGBA re-render); flag static if
         // it never changes. Per-frame beats sampling-every-Nth, which can
         // stride right over a brief change and false-flag a live screen.
-        if f >= WARMUP_FRAME {
-            if let Ok(h) = em.framebuffer_hash() {
-                match fb_first {
-                    None => fb_first = Some(h),
-                    Some(h0) if h != h0 => fb_changed = true,
-                    Some(_) => {}
-                }
+        if f >= WARMUP_FRAME
+            && let Ok(h) = em.framebuffer_hash()
+        {
+            match fb_first {
+                None => fb_first = Some(h),
+                Some(h0) if h != h0 => fb_changed = true,
+                Some(_) => {}
             }
         }
     }

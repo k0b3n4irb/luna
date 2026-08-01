@@ -412,9 +412,15 @@ fn render_frame_bg1_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
 #[must_use]
 pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
     let mut buf = vec![[0u8; 3]; FRAME_W * FRAME_H];
-    for y in 0..FRAME_H as u16 {
-        let off = y as usize * FRAME_W;
-        render_scanline_into(ppu, y, opts, &mut buf[off..off + FRAME_W]);
+    // Hardware line origin: framebuffer row r carries the content the
+    // PPU computes for line V = r+1 (the displayed picture is PPU lines
+    // 1..=224; line 0 is the pre-render line). Mirrors the scheduler
+    // path (`Ppu::flush_partial_scanline_inner` writes line V to row
+    // V-1) so the static full-frame render and the per-line render
+    // cannot disagree.
+    for v in 1..=FRAME_H as u16 {
+        let off = (v as usize - 1) * FRAME_W;
+        render_scanline_into(ppu, v, opts, &mut buf[off..off + FRAME_W]);
     }
     buf
 }
@@ -457,7 +463,6 @@ pub fn render_scanline_partial_into(
 /// decodes sprites once per scanline and shares them across the
 /// overflow-flag read and (in interlace) both field renders (PERF-2).
 /// `None` decodes sprites internally, as the full-frame paths do.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_scanline_partial_into_from(
     ppu: &Ppu,
     y: u16,
@@ -1864,9 +1869,10 @@ fn render_sprites_scanline_indexed_from(
 #[must_use]
 pub fn render_frame_bg_with(ppu: &Ppu, bg_idx: usize, opts: RenderOptions) -> Vec<[u8; 3]> {
     let mut buf = vec![[0u8; 3]; FRAME_W * FRAME_H];
-    for y in 0..FRAME_H {
-        let line = render_bg_scanline_with(ppu, bg_idx, y as u16, opts);
-        let off = y * FRAME_W;
+    // Same hardware line origin as `render_frame_with`: row r = line r+1.
+    for v in 1..=FRAME_H {
+        let line = render_bg_scanline_with(ppu, bg_idx, v as u16, opts);
+        let off = (v - 1) * FRAME_W;
         buf[off..off + FRAME_W].copy_from_slice(&line);
     }
     buf
@@ -2373,7 +2379,14 @@ mod tests {
         //   bit1: 0 1 1 0 1 1 0 1  → hi = 0b0110_1101 = 0x6D
         p.vram.poke(0x2000, 0xB6);
         p.vram.poke(0x2001, 0x6D);
-        // Rest of the tile (rows 1-7) stays zero → transparent.
+        // Duplicate the pattern into tile row 1: with the hardware line
+        // origin (picture = PPU lines 1..=224, fb row 0 = line 1), the
+        // top displayed row samples BG row 1 at scroll 0 — tile row 0 is
+        // the never-displayed pre-render line, exactly why real games
+        // set BGVOFS = -1.
+        p.vram.poke(0x2002, 0xB6);
+        p.vram.poke(0x2003, 0x6D);
+        // Rest of the tile (rows 2-7) stays zero → transparent.
 
         // Tilemap entry at byte $0000-$0001: tile 0, palette offset 0.
         p.vram.poke(0x0000, 0x00);
@@ -2512,10 +2525,11 @@ mod tests {
 
     #[test]
     fn transparent_pixels_show_the_backdrop_color() {
-        // Row 1 of tile 0 is all zero → all pixels transparent →
-        // backdrop ($7C1F = magenta = R=31 B=31).
+        // Row 2 of tile 0 is all zero → all pixels transparent →
+        // backdrop ($7C1F = magenta = R=31 B=31). (Rows 0 AND 1 carry
+        // the demo pattern since the hardware-line-origin change.)
         let p = setup_demo_tile();
-        let line = render_bg1_scanline(&p, 1);
+        let line = render_bg1_scanline(&p, 2);
         // Magenta in RGB: R=255, G=0, B=255.
         for px in &line[..256] {
             assert_eq!(*px, [0xFF, 0, 0xFF]);
@@ -3416,9 +3430,9 @@ mod tests {
         p.write(register::M7B, 0x01); // M7B = 0x0100
         assert_eq!(p.mpy_result, 128, "got {:#X}", p.mpy_result);
         // MPYL/MPYM/MPYH read back the same.
-        assert_eq!(p.read(register::MPYL), 0x80);
-        assert_eq!(p.read(register::MPYM), 0x00);
-        assert_eq!(p.read(register::MPYH), 0x00);
+        assert_eq!(p.read(register::MPYL, 0), 0x80);
+        assert_eq!(p.read(register::MPYM, 0), 0x00);
+        assert_eq!(p.read(register::MPYH, 0), 0x00);
     }
 
     #[test]

@@ -24,7 +24,7 @@ Applies to:
   or `crates/luna-gui/src/audio.rs`.
 - Anything touching `crates/luna-ppu/src/renderer.rs`,
   `crates/luna-ppu/src/ppu.rs` rendering paths, or
-  `crates/luna-gui/src/app.rs` framebuffer plumbing.
+  `crates/luna-gui/src/main.rs` framebuffer plumbing.
 - GUI keybinding / control-response changes.
 - Any change you'd describe as "should look / sound different now".
 

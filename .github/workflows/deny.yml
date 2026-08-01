@@ -1,0 +1,27 @@
+name: deny
+
+# Supply-chain gate: RustSec advisories, license allow-list, registry
+# sources. Runs when the dependency graph changes and weekly (so new
+# advisories against an unchanged lockfile still surface).
+on:
+  push:
+    branches: [develop]
+    paths: ["Cargo.lock", "**/Cargo.toml", "deny.toml", ".github/workflows/deny.yml"]
+  pull_request:
+    paths: ["Cargo.lock", "**/Cargo.toml", "deny.toml", ".github/workflows/deny.yml"]
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC, alongside tom-harte/perf
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          rust-version: stable

@@ -1,0 +1,66 @@
+# cargo-deny configuration — supply-chain gate (advisories, licenses,
+# duplicate-crate awareness, registry sources). Run locally with
+# `cargo deny check`; CI runs it via .github/workflows/deny.yml.
+
+[graph]
+all-features = true
+
+[advisories]
+# Fail on any advisory (vulnerability, unmaintained, unsound, notice).
+version = 2
+yanked = "deny"
+# Each ignore is a considered decision — re-evaluate when Dependabot
+# offers the relevant major bump.
+ignore = [
+    # rmcp 0.8: DNS-rebinding in the Streamable *HTTP* server transport.
+    # luna serves MCP over stdio only (`luna mcp`); the vulnerable
+    # transport is never constructed. Fixed upstream in a later major.
+    "RUSTSEC-2026-0189",
+    # quick-xml 0.39 DoS vectors (quadratic dup-attribute check,
+    # unbounded NS allocation). Transitive via the rfd/zbus desktop
+    # portal stack — parses local portal replies, not remote input.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    # bincode 1.x is unmaintained. Direct dep (save-state format);
+    # migrating to bincode 2 changes the on-disk format — planned
+    # separately, not a drive-by bump.
+    "RUSTSEC-2025-0141",
+    # Unmaintained, transitive, no safe upgrade path published:
+    "RUSTSEC-2024-0436", # paste (via egui/wgpu stack)
+    "RUSTSEC-2026-0192", # ttf-parser (via winit -> sctk-adwaita)
+]
+
+[licenses]
+version = 2
+# The workspace itself is MPL-2.0; dependencies must stay within this
+# permissive set (reciprocal-for-file MPL is compatible with all of it).
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "BSL-1.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Duplicate crate versions are normal in a GUI dep tree (wgpu/egui pull
+# overlapping stacks); warn so the list stays visible without blocking.
+multiple-versions = "warn"
+wildcards = "deny"
+# The luna-* path dependencies carry no version (private workspace,
+# publish = false) — that's the one wildcard shape we accept.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

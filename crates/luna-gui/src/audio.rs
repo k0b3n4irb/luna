@@ -57,6 +57,10 @@ pub(crate) struct AudioBackend {
     /// Held just to keep the stream alive — dropping the `Stream`
     /// stops the callback.
     _stream: Stream,
+    /// Set by the cpal error callback when the stream dies (device
+    /// unplugged, audio server restarted). Polled by the UI's
+    /// `ensure_audio` to rebuild the stream.
+    dead: Arc<AtomicBool>,
 }
 
 /// What [`AudioBackend::try_start`] returns — the backend itself, the
@@ -71,6 +75,12 @@ pub(crate) struct AudioStreamArtifacts {
 }
 
 impl AudioBackend {
+    /// Whether the cpal stream has reported a fatal error since it
+    /// started (the callback will never fire again).
+    pub(crate) fn is_dead(&self) -> bool {
+        self.dead.load(Ordering::Relaxed)
+    }
+
     /// Try to start an audio stream on the default output device.
     /// Returns `None` (with a logged reason) if any setup step
     /// fails — emulation continues silently in that case.
@@ -124,6 +134,16 @@ impl AudioBackend {
         let (producer, mut consumer) = rb.split();
         let primed = Arc::new(AtomicBool::new(false));
         let primed_cb = primed.clone();
+        // Death flag: flipped by the error callback so the UI can
+        // notice a lost device and rebuild the stream.
+        let dead = Arc::new(AtomicBool::new(false));
+        let on_error = {
+            let dead = dead.clone();
+            move |err| {
+                eprintln!("luna-gui audio error: {err} — marking stream dead");
+                dead.store(true, Ordering::Release);
+            }
+        };
 
         let device_rate = config.sample_rate.0;
         let mut resampler = Resampler::new(TARGET_SAMPLE_RATE, device_rate);
@@ -154,7 +174,7 @@ impl AudioBackend {
                         // push more (it parks on a full ring).
                         emu_inner.unpark_emu();
                     },
-                    |err| eprintln!("luna-gui audio error: {err}"),
+                    on_error,
                     None,
                 )
             }
@@ -173,7 +193,7 @@ impl AudioBackend {
                         );
                         emu_inner.unpark_emu();
                     },
-                    |err| eprintln!("luna-gui audio error: {err}"),
+                    on_error,
                     None,
                 )
             }
@@ -192,7 +212,7 @@ impl AudioBackend {
                         );
                         emu_inner.unpark_emu();
                     },
-                    |err| eprintln!("luna-gui audio error: {err}"),
+                    on_error,
                     None,
                 )
             }
@@ -217,7 +237,10 @@ impl AudioBackend {
             chosen_format, config.sample_rate.0
         );
         Some(AudioStreamArtifacts {
-            backend: Self { _stream: stream },
+            backend: Self {
+                _stream: stream,
+                dead,
+            },
             producer,
             primed,
         })

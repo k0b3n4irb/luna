@@ -5,7 +5,6 @@ use std::process::ExitCode;
 use crate::output::{print_cpu_state, print_diag_state, print_header, save_screenshot, write_wav};
 use crate::rom::load_rom_into;
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     rom_path: &std::path::Path,
     steps: u64,
@@ -37,17 +36,17 @@ pub(crate) fn run(
 
     // Arm the Nocash ($21FC) capture before stepping so the program's
     // `SNES_NOCASH`/`SNES_ASSERT` output is recorded during the run.
-    if nocash_out.is_some() {
-        if let Err(e) = em.enable_nocash_log() {
-            eprintln!("error: enable_nocash_log: {e}");
-            return ExitCode::from(1);
-        }
+    if nocash_out.is_some()
+        && let Err(e) = em.enable_nocash_log()
+    {
+        eprintln!("error: enable_nocash_log: {e}");
+        return ExitCode::from(1);
     }
-    if wdm_out.is_some() {
-        if let Err(e) = em.enable_wdm_log() {
-            eprintln!("error: enable_wdm_log: {e}");
-            return ExitCode::from(1);
-        }
+    if wdm_out.is_some()
+        && let Err(e) = em.enable_wdm_log()
+    {
+        eprintln!("error: enable_wdm_log: {e}");
+        return ExitCode::from(1);
     }
 
     // `load_rom` already runs the reset vector; report where it landed.

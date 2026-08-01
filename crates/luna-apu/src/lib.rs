@@ -600,13 +600,13 @@ impl Apu {
                 t2_int: self.timer_internal[2],
                 t2_out: self.timer_output[2],
             };
-            if let Some((events, max)) = self.spc_trace.as_mut() {
-                if *max > 0 {
-                    if events.len() >= *max {
-                        events.drain(0..*max / 2);
-                    }
-                    events.push(ev);
+            if let Some((events, max)) = self.spc_trace.as_mut()
+                && *max > 0
+            {
+                if events.len() >= *max {
+                    events.drain(0..*max / 2);
                 }
+                events.push(ev);
             }
         }
         let (cycles, clocked) = {
@@ -660,13 +660,13 @@ impl Apu {
                 t2_int: self.timer_internal[2],
                 t2_out: self.timer_output[2],
             };
-            if let Some((events, max)) = self.spc_trace.as_mut() {
-                if *max > 0 {
-                    if events.len() >= *max {
-                        events.drain(0..*max / 2);
-                    }
-                    events.push(ev);
+            if let Some((events, max)) = self.spc_trace.as_mut()
+                && *max > 0
+            {
+                if events.len() >= *max {
+                    events.drain(0..*max / 2);
                 }
+                events.push(ev);
             }
         }
         let mut bus = ApuBusView {

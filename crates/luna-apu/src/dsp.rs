@@ -449,7 +449,7 @@ impl Dsp {
         }
         let r = COUNTER_RATE[rate as usize] as u32;
         let off = COUNTER_OFFSET[rate as usize] as u32;
-        (self.clock.counter as u32 + off) % r == 0
+        (self.clock.counter as u32 + off).is_multiple_of(r)
     }
 
     // ---------------- gaussian.cpp ---------------

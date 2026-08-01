@@ -1,11 +1,11 @@
-//! SNES emulator core.
+//! SNES emulator core — the system glue.
 //!
-//! Phase 0.6 scope: just enough to wire a `Cpu65816` against a cartridge
-//! and step it. WRAM (128 KB) is exposed. PPU / APU / DMA registers are
-//! still stubbed (reads return 0xFF / open-bus; writes are dropped) and
-//! will land in Phase 1+.
-//!
-//! See `ARCHITECTURE.md` §6 and §6.6 for the target architecture.
+//! Owns the top-level [`Snes`] struct, the CPU-driven master-clock
+//! scheduler (per-access `io_cycle` synchronization of PPU / APU /
+//! coprocessors, DRAM refresh, HV IRQs), and the DMA + coprocessor
+//! subsystems (`dma`, `coproc`). Consumed exclusively through
+//! `luna-api` — front-ends (CLI / GUI / MCP) never depend on this
+//! crate directly (see `.claude/rules/api-first.md`).
 
 pub mod apu_stub;
 pub mod breakpoints;

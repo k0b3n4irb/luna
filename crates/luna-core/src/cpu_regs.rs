@@ -43,8 +43,16 @@ pub struct CpuRegs {
     /// read. Bits 0-3 = CPU version (we return 2, the most common rev).
     pub nmi_flag: bool,
     /// `$4211` read side — bit 7 = "IRQ flag" (set when the IRQ
-    /// condition fires). Cleared on read.
+    /// condition fires). Cleared on read — unless the read lands inside
+    /// the 4-clock hold window after the raise (see
+    /// [`Self::read_timeup`]).
     pub irq_flag: bool,
+    /// Absolute master clock of the last H/V-IRQ raise. ares holds
+    /// `/IRQ` for four clocks (`irq.cpp:30` `irqHold`, cleared by the
+    /// next `irqPoll` 4 clocks later): a `$4211` read sampling inside
+    /// `[raise, raise+4)` sees the flag SET but does **not** acknowledge
+    /// it — the mirror of the RDNMI hold.
+    pub irq_raise_mclk: u64,
     /// `$4212` read side — HVBJOY: bit 7 = V-blank, bit 6 = H-blank,
     /// bit 0 = joypad auto-read busy.
     pub hvbjoy: u8,
@@ -144,12 +152,9 @@ impl CpuRegs {
                 self.nmi_flag = false;
                 v
             }
-            0x4211 => {
-                // TIMEUP: bit 7 = irq flag (cleared by this read).
-                let v = if self.irq_flag { 0x80 } else { 0x00 };
-                self.irq_flag = false;
-                v
-            }
+            // 0x4211 TIMEUP is handled by the bus (`snes.rs read_inner`):
+            // the hold window needs the master clock and the low bits are
+            // CPU open bus — see `read_timeup`.
             0x4212 => self.hvbjoy,
             0x4214 => self.rddiv as u8,
             0x4215 => (self.rddiv >> 8) as u8,
@@ -182,6 +187,21 @@ impl CpuRegs {
         let v = if self.nmi_flag && raised { 0x80 } else { 0x00 } | 0x02; // CPU rev 2
         if !in_hold {
             self.nmi_flag = false;
+        }
+        v
+    }
+
+    /// `$4211` TIMEUP read — the exact mirror of [`Self::read_rdnmi`]
+    /// (ares `irq.cpp:60-66` `timeup()`): returns the held IRQ line in
+    /// bit 7 and acknowledges it, **unless** the read samples inside the
+    /// 4-clock hold window after the raise (`in_hold`, computed by the
+    /// bus from [`Self::irq_raise_mclk`]) — then the flag survives so
+    /// the pending IRQ still fires. Bits 0-6 are CPU open bus, `OR`ed in
+    /// by the bus.
+    pub const fn read_timeup(&mut self, in_hold: bool) -> u8 {
+        let v = if self.irq_flag { 0x80 } else { 0x00 };
+        if !in_hold {
+            self.irq_flag = false;
         }
         v
     }
@@ -258,7 +278,19 @@ impl CpuRegs {
     /// Write a register at the 16-bit CPU bank-0 offset.
     pub fn write(&mut self, offset: u16, value: u8) -> bool {
         match offset {
-            0x4200 => self.nmitimen = value,
+            0x4200 => {
+                self.nmitimen = value;
+                // ares `nmitimenUpdate` (irq.cpp:40-43): disabling BOTH
+                // H/V IRQ sources drops the held line at once — a stale
+                // TIMEUP flag must not linger past the disable. (The
+                // NMI-side late-enable retrigger is deliberately NOT
+                // ported: luna's nmi_flag is not a faithful nmiLine and
+                // the retrigger fires spuriously — see the
+                // NMITIMEN/SMRPG note in the project memory.)
+                if value & 0x30 == 0 {
+                    self.irq_flag = false;
+                }
+            }
             0x4201 => self.wrio = value,
             0x4202 => self.wrmpya = value,
             0x4203 => {
@@ -407,10 +439,34 @@ mod tests {
     fn timeup_returns_irq_flag_and_clears_it() {
         let mut r = CpuRegs::new();
         r.irq_flag = true;
-        let v = r.read(0x4211).unwrap();
+        let v = r.read_timeup(false);
         assert!(v & 0x80 != 0);
-        let v = r.read(0x4211).unwrap();
+        let v = r.read_timeup(false);
         assert_eq!(v, 0);
+    }
+
+    #[test]
+    fn timeup_read_inside_the_hold_window_does_not_acknowledge() {
+        // ares irq.cpp:60-66: `timeup()` clears the line only when
+        // `!irqHold` — a read within 4 clocks of the raise sees the flag
+        // but leaves it set, so the pending IRQ still fires.
+        let mut r = CpuRegs::new();
+        r.irq_flag = true;
+        assert_eq!(r.read_timeup(true) & 0x80, 0x80);
+        assert!(r.irq_flag, "hold read must not acknowledge");
+        assert_eq!(r.read_timeup(false) & 0x80, 0x80);
+        assert!(!r.irq_flag, "post-hold read acknowledges");
+    }
+
+    #[test]
+    fn disabling_both_irq_sources_drops_a_held_timeup_flag() {
+        // ares nmitimenUpdate: `if(!io.irqEnable) status.irqLine = 0`.
+        let mut r = CpuRegs::new();
+        r.irq_flag = true;
+        r.write(0x4200, 0x10); // H-IRQ still enabled — flag survives
+        assert!(r.irq_flag);
+        r.write(0x4200, 0x00); // both sources off — flag drops
+        assert!(!r.irq_flag);
     }
 
     // ---------------------------------------------------------------

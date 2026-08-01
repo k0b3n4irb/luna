@@ -1,0 +1,26 @@
+# Weekly dependency freshness + security updates.
+# Grouped so routine bumps arrive as one PR per ecosystem, not twenty.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-patch:
+        update-types: ["minor", "patch"]
+    # Major bumps of the GUI stack (wgpu/egui/winit move in lockstep and
+    # break APIs) are surfaced individually so they can be planned.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 3
+    groups:
+      actions:
+        patterns: ["*"]

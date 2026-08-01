@@ -382,7 +382,7 @@ fn ppu_interlace_font_native_512x448() {
         return;
     }
     assert_eq!(
-        got, "8e67fed7238a7186a069b2a9de6be0adc076b44665a36095b646d559578ae286",
+        got, "e0d00e0a5af0003a8dc6323d1a04880fdbd96f86ce8314e4118f50e9093db681",
         "native 512x448 InterlaceFont hash moved — re-record after an intended render change"
     );
 }
@@ -393,117 +393,117 @@ fn ppu_interlace_font_native_512x448() {
 cpu_test!(
     cpu_adc,
     "ADC",
-    "9f2c04820b712abb2cf94b49bfafcb0f5384c08a4bdc2665f10fb11b87bd4df5"
+    "b3adb5fba9c957ae762713dff0eeee8a83cb43d02e1c3649d63737a6915debda"
 );
 cpu_test!(
     cpu_and,
     "AND",
-    "ab1f1a4806e8af4be436f72a8d07b1157095d0213534d90033e2fca82141c4ef"
+    "2243f54469fb08c7238b5b0a6ceeb22f8cf79d220fdc16e505c540ebbb147460"
 );
 cpu_test!(
     cpu_asl,
     "ASL",
-    "9b43257dd732fb231ea022d84a3b429de3dfdf613c437d22824c1fef4ef5a676"
+    "475a18346e09be4c30bdfa28c3b30a877c85037c69e66bdebc1856ceae4c1ed9"
 );
 cpu_test!(
     cpu_bit,
     "BIT",
-    "7161f1fbf43d0c8ab1dd9224edc8b31ce83f28e5154659ab46d157c00597b6dc"
+    "f2e5cb5b2fe13083aa1c6c1ec8f8905bdf9ac1c4f26be470ed5753fe55c65174"
 );
 cpu_test!(
     cpu_bra,
     "BRA",
-    "ba0ac0fea8985bac44c9baa8c1e614b27468fff4eca516c117e5cbdac48e6dad"
+    "9c2a6d06fb317ec256f5f5f59b437e3717eb66282d7ba6d3c47d78b6c9d85211"
 );
 cpu_test!(
     cpu_cmp,
     "CMP",
-    "b58c651cf366ed54cb423e1eb903e4515c000ec23e8d7b1771550a4a944ddf6f"
+    "9375f7a8b4e38c5629feb87b2055bca84f67cf514da1526b5797fcb90f50a9a7"
 );
 cpu_test!(
     cpu_dec,
     "DEC",
-    "756d778724ee196dbf935ac4d1f272121db62d27bf55d43235f58716bf1bfbeb"
+    "3249f51754297d45a47da17b1b29c2f5fafe6ecde62e0e194b78e1ac20439914"
 );
 cpu_test!(
     cpu_eor,
     "EOR",
-    "01e8bbe4a0d5c74c5c014b13ed7115827e1134d96384b7be39dc0802baf50287"
+    "f8c17f1ff716af939869167e249a4c27002d4d36c1774ff0241fccbcd6361a9d"
 );
 cpu_test!(
     cpu_inc,
     "INC",
-    "906da4f07091fdbafee79e020d30c6a7aa494112e307d64565017fdb6d0eab94"
+    "6e5bbea05a36f019c93687bc830ea2c6ee5e88e03e63e9ac059fc95c5ee08c4d"
 );
 cpu_test!(
     cpu_jmp,
     "JMP",
-    "73367eaedb8f70ad0e73ad4a2b72e756a223ae14047ce7754b24827d09d8f0bd"
+    "776340215a96509489bc17b394fa0f3971dc73790f1c126961a5704e4b80e68d"
 );
 cpu_test!(
     cpu_ldr,
     "LDR",
-    "b40f60b260056515688b136b1b07fdbdf3fcfb2806d3aab71130db7dc35a6b44"
+    "3c8bbf8285672ca6d5f95fded62377d0da4b0fabe418b6464e0ce25049a39955"
 );
 cpu_test!(
     cpu_lsr,
     "LSR",
-    "42d2016c4d22554a93b154e1fb4c7c0ecd166a5e9b9c3b9e60a65183b30ad52f"
+    "9db3f1b7a8b20a505e164db67ce08ce357ff79420cd7b1c3ca63bf6040cc7529"
 );
 cpu_test!(
     cpu_mov,
     "MOV",
-    "f9adc3998195578846723f7521b6441742c3d2784d0ae9ab6bdeed257e1ea931"
+    "e4ac2da27999979f098956f8ffbf72ff65691d24ce78370cf88c4b3c3352f4ab"
 );
 cpu_test!(
     cpu_msc,
     "MSC",
-    "6932e0ac7568ceb73083ae9fe3eec334a4c515ba99daf43399d3a56a023d8d3b"
+    "5a64e3067d54d0351ff8c84194e5530a306fd7e2b3cbcf3c75aec329b5343485"
 );
 cpu_test!(
     cpu_ora,
     "ORA",
-    "e81c479ebec11bf59cde7d0e4c56ef0c84d266d9526e5d3f7e2e67f6dd33327b"
+    "5fac6b67e578658a961b6318f3d15e2420c736b3a58f99250302062d03b3fa0c"
 );
 cpu_test!(
     cpu_phl,
     "PHL",
-    "2c6f100bb12ba58ef3e5e6b7c159744a2d9a927ab77bb530fce2cb7503375b8f"
+    "fb03b6271b4a927e075d2b6aa2a7084cebfe84449500f5ac8eaae2df1d64946d"
 );
 cpu_test!(
     cpu_psr,
     "PSR",
-    "c4e0406dad42e1fa92392e3d659168e71dd172d18687fb81cb64ed97ad021621"
+    "faf91c2c0c1d620eb8468324f87b809273f176fd0f4dc98e22b4f110dce0e8c6"
 );
 cpu_test!(
     cpu_ret,
     "RET",
-    "977cf3f643d39ac7e2ca53a960fa2803b06be5cb837a7e482d8cc36415565622"
+    "75f9ef7fbd98dc1843d6748186cad3d0f3259685eb5e520bc6965bf7108ff8f6"
 );
 cpu_test!(
     cpu_rol,
     "ROL",
-    "6d19686e6886c3c2f3904c432f25d4531d95dfb6e2da6b460cdfc48cdfbb2990"
+    "ceb99cb521187cbb4b9c634d728fb0fd6d85bf853a2e166e65702fa827164129"
 );
 cpu_test!(
     cpu_ror,
     "ROR",
-    "25126b9e496b228daf3efda965f1d1b42beb6c58301d503912cca7300d874500"
+    "3ea40b0d84bec054c167412bbde562de78088c5ff574e3de061c4b1b16a84000"
 );
 cpu_test!(
     cpu_sbc,
     "SBC",
-    "d95ac3554a56038cbe10f89ad95ffedfa65a513fbe4804f219259e8fc5ad73e1"
+    "329baf59349fc52b4ce148281884b5bfdf630ff15b75f1caf0311deb635f2d4a"
 );
 cpu_test!(
     cpu_str,
     "STR",
-    "edf27896517d3865fb893431e3ff40e9098a3952f1f0d87e5a97c84b0638317b"
+    "4968af4f04d840ed40aa4c7aee44808f4782e050ec7fe5255e9974fcacbe00da"
 );
 cpu_test!(
     cpu_trn,
     "TRN",
-    "4499f14b4497b7522691a4ac5ac8f9d5731976f89be27167091fe25a19cc9b68"
+    "1aa58b7e0202d88c4fb40298b160ffd080f5acb323c058f1cd687658b2f09716"
 );
 
 /// Peter Lemon `CPUTest/SPC700/<NAME>` ALU hardware test — checked by its
@@ -621,27 +621,27 @@ macro_rules! ppu_test {
 ppu_test!(
     ppu_bg1_2bpp,
     "BGMAP/8x8/2BPP/8x8BG1Map2BPP32x328PAL/8x8BG1Map2BPP32x328PAL.sfc",
-    "d0c931e79fb78ae46471674155dabbbcaedddb8f082ccc54c4e02a1a8617fe57"
+    "2f5a6b5b2430be80963b02345f9d7939b9dba12b7367fe2fa04231843cb792fc"
 );
 ppu_test!(
     ppu_bg2_2bpp,
     "BGMAP/8x8/2BPP/8x8BG2Map2BPP32x328PAL/8x8BG2Map2BPP32x328PAL.sfc",
-    "347f7663c3cfdc347a323c64c7c4e80ad3873b8b211aefa12919e245a99b2ff8"
+    "b1c8ed442d709dc26ce49d4ee0aab8146459b90765804cd3c332ffc85286f6e4"
 );
 ppu_test!(
     ppu_bg3_2bpp,
     "BGMAP/8x8/2BPP/8x8BG3Map2BPP32x328PAL/8x8BG3Map2BPP32x328PAL.sfc",
-    "347f7663c3cfdc347a323c64c7c4e80ad3873b8b211aefa12919e245a99b2ff8"
+    "b1c8ed442d709dc26ce49d4ee0aab8146459b90765804cd3c332ffc85286f6e4"
 );
 ppu_test!(
     ppu_bg4_2bpp,
     "BGMAP/8x8/2BPP/8x8BG4Map2BPP32x328PAL/8x8BG4Map2BPP32x328PAL.sfc",
-    "347f7663c3cfdc347a323c64c7c4e80ad3873b8b211aefa12919e245a99b2ff8"
+    "b1c8ed442d709dc26ce49d4ee0aab8146459b90765804cd3c332ffc85286f6e4"
 );
 ppu_test!(
     ppu_bg_4bpp,
     "BGMAP/8x8/4BPP/8x8BGMap4BPP32x328PAL/8x8BGMap4BPP32x328PAL.sfc",
-    "156220da11d227e5a5f0447b36d4923a3b1b04bfd435584fa13b50a6153462e5"
+    "e5deb17973db08bd6fca4262925dfec1e3016629500e9f1e1ea2f3895699bdc4"
 );
 // 8bpp (256-colour) BG maps across all four tilemap sizes + tile flip —
 // exercises the 64-wide/64-tall quadrant offsets (+0x800/0x1000/0x1800)
@@ -658,67 +658,67 @@ ppu_test!(
 ppu_test!(
     ppu_bg_8bpp_32x32,
     "BGMAP/8x8/8BPP/32x32/8x8BGMap8BPP32x32.sfc",
-    "3d7f59d39a304c08355b9e09352c2eda05b180ab3145297ad53751df3c883d78"
+    "b5467e295995c8ad193b81cefb17fa191ab14b6a66b471f3c09ab53ac9ca21fc"
 );
 ppu_test!(
     ppu_bg_8bpp_32x64,
     "BGMAP/8x8/8BPP/32x64/8x8BGMap8BPP32x64.sfc",
-    "fd2abf80a33c3145d5b3ce0aff45168f7e55790012ce09ca6de1e4af5d86b51e"
+    "4bbb0bdb9f88d5e2d08d76f2dd73419102436d6b07a5d7d46097aa28c0486d48"
 );
 ppu_test!(
     ppu_bg_8bpp_64x32,
     "BGMAP/8x8/8BPP/64x32/8x8BGMap8BPP64x32.sfc",
-    "fd2abf80a33c3145d5b3ce0aff45168f7e55790012ce09ca6de1e4af5d86b51e"
+    "4bbb0bdb9f88d5e2d08d76f2dd73419102436d6b07a5d7d46097aa28c0486d48"
 );
 ppu_test!(
     ppu_bg_8bpp_64x64,
     "BGMAP/8x8/8BPP/64x64/8x8BGMap8BPP64x64.sfc",
-    "fd2abf80a33c3145d5b3ce0aff45168f7e55790012ce09ca6de1e4af5d86b51e"
+    "4bbb0bdb9f88d5e2d08d76f2dd73419102436d6b07a5d7d46097aa28c0486d48"
 );
 ppu_test!(
     ppu_bg_8bpp_tileflip,
     "BGMAP/8x8/8BPP/TileFlip/8x8BGMapTileFlip.sfc",
-    "04202031bf187476cd32c2e7e6851b128372986b126fbe499c851cbf41b73929"
+    "b4bcc1f52aaef003a8080deafc89a6db90eafa92748eb048b83a5bbf908cc8cd"
 );
 ppu_test!(
     ppu_rings,
     "Rings/Rings.sfc",
-    "a8353b5531c6173b46636544e5a6838a97b38b2d2f03bcb11c887054bf3ec15e"
+    "ad85874fc9cca1779ea17619bdf34cdaa141e158f8237f49848147715915b82f"
 );
 ppu_test!(
     ppu_hicolor_dlair,
     "Blend/HiColor/HiColor1241DLair/HiColor1241DLair.sfc",
-    "32c758e0238f8de9717cff1351f083545c4423a90a5aad4bc8ebeea493ff2555"
+    "d8652d4c5692d49e533d25602d071f337c0f8361910c6a2806e3811c26106999"
 );
 ppu_test!(
     ppu_hicolor_3840,
     "Blend/HiColor/HiColor3840/HiColor3840.sfc",
-    "bc2c00d8d889753a1f22548191fd87ba6dad6f9b63ce861358bedb34393a5bb2"
+    "7e955d6dd9fe2a5c87a71b3a27c3f9733f828c317d8f7c72b662a054af0342a7"
 );
 ppu_test!(
     ppu_hicolor_myst,
     "Blend/HiColor/HiColor575Myst/HiColor575Myst.sfc",
-    "0125ae2f592c0cb4a00a31b156b95085b7e6a6026bb8c86cc4e55d13e449acf3"
+    "992bdd7a70664c196df6b50bd9d1bf224369d97ba07138c6a70855b8f350b228"
 );
 ppu_test!(
     ppu_window_hdma,
     "Window/WindowHDMA/WindowHDMA.sfc",
-    "2bae131ba2086640751142164246aadaf54c147dfd732839b8f0a7c91f7b2521"
+    "43fa9c46d4d27cfd63c94fd668be369514fb1aa87e4062494ffcaa588986ad2e"
 );
 ppu_test!(
     ppu_window_multi,
     "Window/WindowMultiHDMA/WindowMultiHDMA.sfc",
-    "885273a42c4f466571ff0db04f180b6cc08f988022c52a596d50aa6c700dfc18"
+    "d960958706735e07da9cdc504c9a9f6b868770e893d6e3a7b504838f88238876"
 );
 ppu_test!(
     ppu_mode7_rotzoom,
     "Mode7/RotZoom/RotZoom.sfc",
-    "6f8deb68ff3ad378cbcab75310272e2b152862ad01d286a7c0780b7df693001b"
+    "76b76eeb6a096a180e2acaabb6c8b16d228cd983b396af2dc2e20f8f93ceb04e"
 );
 ppu_test!(
     ppu_mode7_persp,
     "Mode7/Perspective/Perspective.sfc",
-    "10ce69859a5828d80d0b8af768a233694414c76743aa5cffdc962d52eb9dab0d"
+    "d87d90b83e244ac20d248ee6376936e5d15ed0573e909ddcaf2744932347c1e3"
 );
 // Animated Mode-7 Star Wars intro. luna's run settles on the static
 // "A long time ago in a galaxy far, far away...." opening-text hold (blue
@@ -729,7 +729,7 @@ ppu_test!(
 ppu_test!(
     ppu_mode7_starwars,
     "Mode7/StarWars/StarWars.sfc",
-    "35104f05519cf58bbf9c24e906d586767fe95d1899d806c2109003c6067e9a36"
+    "be60a30fcda54db1f495b121b558cf0987621f1648fd377bb5237b1cbf5631c0"
 );
 ppu_test!(
     ppu_greenspace,
@@ -749,7 +749,7 @@ ppu_test!(
 ppu_test!(
     ppu_mosaic_mode3,
     "Mosaic/Mode3/MosaicMode3.sfc",
-    "3e8a872b79dcd20c88e8de81c743e361f4d6c3c3b12f0ce17e266c3eb89eba80",
+    "9424df0b5273fd06c961a6c57ff64b81949f0f39fff5d947917761f6bab93b8b",
     hold = PAD_R
 );
 // Mode 5 hi-res + INTERLACE (SETINI bit 0): the Moogle figure. Interlace
@@ -760,7 +760,7 @@ ppu_test!(
 ppu_test!(
     ppu_mosaic_mode5,
     "Mosaic/Mode5/MosaicMode5.sfc",
-    "2a64e595a9c7d6f37326ac2c305b7c5895e999be27abb5a813f68cecb30e0aac"
+    "fdec5062bbc5532825b7a34011970cbed12ddc70ca6106096f668bd54e0cc14d"
 );
 
 // -----------------------------------------------------------------------
@@ -772,12 +772,12 @@ ppu_test!(
 ppu_test!(
     ppu_interlace_font,
     "Interlace/InterlaceFont/InterlaceFont.sfc",
-    "c94d7ae1117f59cb5ba247039297047debef9b0a0744d2a12f58800c3a19fe39"
+    "a22e716dda80673a147256ab326e57148f2a2de98081adf570cd1bbf68137da4"
 );
 ppu_test!(
     ppu_interlace_scroll,
     "Interlace/InterlaceScroll/InterlaceScroll.sfc",
-    "6b9454710ae9131852cdb4a818272b73fa7bd3bb98814f032fa7e17bc1cc952d"
+    "42715721ffa92227169211e8cd0fabdbab3a994d555dfb8b7976f1b421012d8f"
 );
 // The only wired Interlace ROM with a sprite (the hero). Phase D made its
 // sprite render half-height (interlace), matching the reference — pre-Phase-D
@@ -785,22 +785,22 @@ ppu_test!(
 ppu_test!(
     ppu_interlace_rpg,
     "Interlace/InterlaceRPG/InterlaceRPG.sfc",
-    "139abe05a6f67e5057e472e031eab7ef6cff80e2acf66507cbb29a2d051b1e63"
+    "e56b22a580bec9f8e3a665b712d0092ffaa25418ee117beaad77e982b88917ce"
 );
 ppu_test!(
     ppu_interlace_moogle,
     "Interlace/InterlaceMoogle/InterlaceMoogle.sfc",
-    "2a64e595a9c7d6f37326ac2c305b7c5895e999be27abb5a813f68cecb30e0aac"
+    "fdec5062bbc5532825b7a34011970cbed12ddc70ca6106096f668bd54e0cc14d"
 );
 ppu_test!(
     ppu_interlace_myst_hdma,
     "Interlace/InterlaceMystHDMA/InterlaceMystHDMA.sfc",
-    "2ade4b5840e988bdd181d11dc8083bee84762e0e2edef9c49c792695b4549aa1"
+    "2dc7bea4e849e7959243246d6ebe5cd73e990efe6d2ff9de393d8870d2f7139a"
 );
 ppu_test!(
     ppu_interlace_simpsons_hdma,
     "Interlace/InterlaceSimpsonsHDMA/InterlaceSimpsonsHDMA.sfc",
-    "d3d1c97d1c2ab7749da08d01a75c6619e9f1ef0c4acf175b7dc79ae4361bb35a"
+    "ada7fa4f77366ca6118d6a8ab3e21326375ea7105aeffb3166679fe352ae1cbd"
 );
 
 // -----------------------------------------------------------------------
@@ -835,7 +835,7 @@ ppu_test!(
 ppu_test!(
     ppu_hdma_wave,
     "HDMA/WaveHDMA/WaveHDMA.sfc",
-    "723a1d7345ae138a9c738d86d5525e2dd045aa71fe1266f413457e6131b8684c"
+    "a69f3e647f821b823a16a30b23069ee987cba858a99f9dff61c0fb6d87c532f5"
 );
 ppu_test!(
     ppu_hdma_redspace,
@@ -855,7 +855,7 @@ ppu_test!(
 ppu_test!(
     ppu_hdma_mode7,
     "HDMA/Mode7HDMA/Mode7HDMA.sfc",
-    "736a61ba11eeb963d4c78129669c7a3dee511d3a482646cf60eb7c17e7061d89"
+    "0178471f15cdac7ad2c10ef5b532c2a6d3ef2d6c6d2646e95f76381c86f9d383"
 );
 // The HiColor demos stream CGRAM mid-frame to exceed 256 colours. Despite
 // the corpus folder name, the palette is NOT pushed by HDMA — it's an
@@ -875,34 +875,35 @@ ppu_test!(
 ppu_test!(
     ppu_hdma_hicolor64_pseudohires,
     "HDMA/HiColor64PerTileRowPseudoHiRes/HiColor64PerTileRowPseudoHiRes.sfc",
-    "610fbfa6a0566c809708ff380d1a2f972b10b1d343d82310646fd1c91297072c"
+    "91ab0f56a02343f9936b9e37222b6802bbab475b229d8ca70e6dbd379d4c6dd1"
 );
 // The two non-pseudo-hires variants display an RGB colour *chart* (sharp
 // gradient bands; reference image ships as `HiColor*PerTileRow.png`).
-// Validated HiColor64 against that reference: 81.2% pixel-exact, 88.2%
-// within tol 24, MAE 7/255 — and the diff is confined to the *tile-row
-// boundary* scanlines (rows 0,8,16,24,…, 15 of 224). The H-IRQ fires
-// mid-line, so on hardware each 8-line boundary scanline is split (old
-// palette above the IRQ dot, new below). luna renders each scanline
-// atomically from one CGRAM snapshot (and only partial-flushes on the CPU
-// write path, not the DMA path), so it draws the boundary line with the
-// pre-swap palette — only that 1 line per tile-row is wrong, the other 7
-// are pixel-exact. No cheap fix: neither pure-old nor pure-new palette
-// matches the mid-line mix; an exact fix needs sub-scanline CGRAM tracking
-// tied to the CPU H-position during the DMA — deep change, ~no commercial
-// payoff. Kept `#[ignore]`d (gap #7). Confirmed not a render-order lag:
-// deferring the render by one line neither fixed it nor survived the suite.
+//
+// GAP #7 — CRACKED 2026-07-26. The 19-percent diff was never a CGRAM-timing
+// bug: the full luna-vs-Mesen2 write timeline (values, lines, order) was
+// byte-identical (1 benign vblank CGADD skew in 3598 events). The real cause
+// was the FRAMEBUFFER LINE ORIGIN: hardware displays PPU lines 1..=224 (fb
+// row r is scanned during line r+1; line 0 is the pre-render line), while
+// luna mapped line L to row L — invisible on static screens, one full row
+// off the moment the palette changes every line. Fixed by the hardware line
+// origin (`flush_partial_scanline_inner` writes line V to row V-1), the
+// DMA-path partial flush (a B-bus CGRAM write mid-line commits the
+// in-progress row with the pre-write palette, like the CPU path), and the
+// HDMA end-of-line application point. HiColor64 is now PIXEL-EXACT against
+// the hardware reference PNG (0/57344), along with 15 other corpus refs
+// (WindowHDMA, Mode7HDMA, Perspective, Rings, HiColor3840, HiColor575Myst,
+// the BGMap family, ...).
 ppu_test!(
     ppu_hdma_hicolor64,
     "HDMA/HiColor64PerTileRow/HiColor64PerTileRow.sfc",
-    "ab7a0324251a2b7c87ede33af6b707dc3e4aa08891dfecd42121ec5f5f36e06a",
-    ignore = "HiColor chart (gap #7): fully mapped vs the shipped hardware reference PNG, 2026-06-22 — HARD multi-factor timing bug, NOT yet cracked. Technique (.asm): an H-IRQ at HTIME=190 reads the V-counter ($213D) each line and DMAs 8 incremental colours into CGRAM in HBlank (h~306), CGADD reset every 8 lines, building a 64-colour palette per 8-line tile-row. Reference diff: 81% exact; wrong rows are the FIRST line of each tile-row (y=0,8,16,…, ~15 rows) PLUS a separate bottom smooth-gradient band (y~160-221, ~57 rows = the larger slice). RULED OUT by measurement: (a) OPVCT/IRQ — luna fires the H-IRQ at HTIME=190 and returns the correct scanline (108=$6C,…), so the handler loads the right group; the scorecard grade-D \"H-IRQ ignores HTIME\" is stale. (b) render-vs-HBlank-DMA ordering — a flush-before-DMA correctly commits the visible line pre-DMA and persists (line-end render then no-ops), yet the image is UNCHANGED, proving each line's own DMA loads colours for FUTURE lines (incremental), so ordering is irrelevant to the current line. (c) per-line palette swap — forcing band-1 instead of band-0 did not help. The real residual is the incremental-palette-group activation timing + the bottom-band technique; needs a focused session with the reference per-row diff as the live oracle."
+    "5b3439273c97532f00b1c233d3423b05d4ef04b6a6fa79153f7254512ed086dd"
 );
 ppu_test!(
     ppu_hdma_hicolor128,
     "HDMA/HiColor128PerTileRow/HiColor128PerTileRow.sfc",
-    "54495c7af30fa3cda2734230351396254d5ea2b64095b444082087888b539bc5",
-    ignore = "HiColor chart (gap #7): fully mapped vs the shipped hardware reference PNG, 2026-06-22 — HARD multi-factor timing bug, NOT yet cracked. Technique (.asm): an H-IRQ at HTIME=190 reads the V-counter ($213D) each line and DMAs 8 incremental colours into CGRAM in HBlank (h~306), CGADD reset every 8 lines, building a 64-colour palette per 8-line tile-row. Reference diff: 81% exact; wrong rows are the FIRST line of each tile-row (y=0,8,16,…, ~15 rows) PLUS a separate bottom smooth-gradient band (y~160-221, ~57 rows = the larger slice). RULED OUT by measurement: (a) OPVCT/IRQ — luna fires the H-IRQ at HTIME=190 and returns the correct scanline (108=$6C,…), so the handler loads the right group; the scorecard grade-D \"H-IRQ ignores HTIME\" is stale. (b) render-vs-HBlank-DMA ordering — a flush-before-DMA correctly commits the visible line pre-DMA and persists (line-end render then no-ops), yet the image is UNCHANGED, proving each line's own DMA loads colours for FUTURE lines (incremental), so ordering is irrelevant to the current line. (c) per-line palette swap — forcing band-1 instead of band-0 did not help. The real residual is the incremental-palette-group activation timing + the bottom-band technique; needs a focused session with the reference per-row diff as the live oracle."
+    "24f07ecd1ef6839b042d15fce801340720b9dc1d8b7678b315678fa3da2214f5",
+    ignore = "HiColor128 residual (gap #7b): 91.0% vs the hardware reference after the line-origin + HDMA-phase fixes (was 83.7%). MEASURED 2026-07-26, second pass with the NMI-vector clock calibration (the FIRST pass's ~200-clock IRQ-entry-skew lead was an ARTIFACT of comparing uncalibrated master-clock line phases across emulators — deltas-not-absolutes; after calibrating on the $FFEA fetch position, luna's IRQ raise, vector fetch, handler length AND $420B/CGRAM-burst positions are all cycle-aligned with Mesen2, and the burst is post-visible on hardware too). The REAL residual signature: in the bottom half, every SECOND 8-line tile-row band (y 168-175, 184-191, 200-207, 216-223) renders exactly ONE LINE EARLY (band content matches the reference at local shift -1 within 256 px), plus rows 95/111 — an alternating per-tile-row palette-group parity, likely in how the every-16-lines CGADD reset interacts with which batch each band's first row samples. CGRAM write timeline itself is byte-identical to Mesen2."
 );
 
 // INPUT/ControllerLatency: "any button → white screen, none → black". Held
@@ -1260,97 +1261,97 @@ game_test!(
     game_fzero,
     "F-Zero (USA).sfc",
     2226,
-    "8a23e9a76fdd8b5ebe49474e13970c97ab4e393d88e1db56cc943facac2b2009"
+    "e75992a5e9d55fb30cb8349a1796ab1f860196f896265f255fafaaf09f94b669"
 );
 game_test!(
     game_mariokart,
     "Super Mario Kart (USA).sfc",
     3587,
-    "b7bc468dec89ba2f02f36190f0fc4c6945ec2cee1f6e68000452596e8e21456e"
+    "aa62f60e42226041fef35dd20bb9642e9deec009b936129811f4eaba1d76f038"
 );
 // SA-1
 game_test!(
     game_smrpg,
     "Super Mario RPG - Legend of the Seven Stars (USA).sfc",
     905,
-    "44f50ec4c1bc032c9db2eeeb6b0368591fea79750402d794afad67bd213cf7d3"
+    "65d4908b5d63fe0fc8afb8f69b5dae6643f52377e73ec5d2d726b44dd942e8ac"
 );
 game_test!(
     game_kirby_ss,
     "Kirby Super Star (USA).sfc",
     3054,
-    "7c7f46baa486d520465816c92b4c78c1f7ae8cf3f7b82815f8e329939c68e1e6"
+    "a4184f024deaa411b30f65621bff893505e6b1b6782dff3c843019b3e8f3ee1a"
 );
 // Super FX (GSU)
 game_test!(
     game_starfox,
     "Star Fox (USA) (Rev 2).sfc",
     1939,
-    "041565e9141d7565e9fb858b778cee333c8c52a5414f1022598493d32f46b4a6"
+    "f2898571d973c0c265b27f21ac3d186f8b78cbcf05b688127bfaa9bd4413e1e3"
 );
 game_test!(
     game_stuntfx,
     "Stunt Race FX (USA) (Rev 1).sfc",
     2299,
-    "1c2d2e25fc4ff44d95083b217aaf3481f36beb5e6d2978cf5fc78a684b7974ec"
+    "4ccf73b8c336054676bb48c8dc668c81fddc4123fb2630bf15538e35d79d2008"
 );
 // S-DD1
 game_test!(
     game_starocean,
     "Star Ocean (tr).sfc",
     1875,
-    "58e6d199d993f2a32f044ed4a485e9f283094cbe039d06a78940fda35982c798"
+    "fa9e3f45b35f8331d9f3aa5a0064a2eaf1ab3d27a6b2b91ccd32784eca976f17"
 );
 // DSP-1
 game_test!(
     game_pilotwings,
     "Pilotwings (USA).sfc",
     1395,
-    "74e38144b13287b0bada97de9669bca89f00f3870461caf9537ea728c3f50fa7"
+    "6a05fbbe26b4692619b7f66838be6bdefbd7f28acd6e899b14b4fd3c7f56d80f"
 );
 // Color math / transparency
 game_test!(
     game_som,
     "Secret of Mana (USA).sfc",
     2307,
-    "e49f43e9484af9edbfbb21adf360d8a61886b44d23556674d609715319e2b47c"
+    "ba2f10628fb5751a835495e33f7243075958410275c112cc993ab41db278b338"
 );
 game_test!(
     game_zelda,
     "Legend of Zelda, The - A Link to the Past (USA).sfc",
     2631,
-    "940a5f9e93bbb92ac49a0b1770e6538e084c2330388a533657d16e76a79d1a88"
+    "59233337f7cb7152ce1dc6e78b4e40aa53701439b5485198fd45a50edcc4d154"
 );
 // HiROM (+ Mode 7 pendulum)
 game_test!(
     game_metroid,
     "Super Metroid (Japan, USA) (En,Ja).sfc",
     2303,
-    "3fddcd5d6d10a972030bec93560c75c65f670b4f3a8d84a423d42f8d661f6845"
+    "c0a2ecaadc4020e95d74b41c40275214ac0cda55fea07955bb2e407ae1ea2e0a"
 );
 game_test!(
     game_chrono,
     "Chrono Trigger (USA).sfc",
     1870,
-    "6e00465ad69e86123b1a18e9d5a35d3850ced35bc2d8eecf2e4da63fce10d9a7"
+    "18aabf052b1ed53c3a8d6a73614f073059b48797ad3a551fabd75a21ec0d72d9"
 );
 // Large ROM
 game_test!(
     game_tales,
     "Tales of Phantasia (Japan).sfc",
     2574,
-    "00b885f072760a8ac33a75a9a2ce49b37c085e6eedaed756fc9c0257deea9c48"
+    "959e2bff422f3c6fb6b89521290009adf5779c34c9783f62d70931e908132573"
 );
 // HDMA (raster split + gradient)
 game_test!(
     game_contra3,
     "Contra III - The Alien Wars (USA).sfc",
     4573,
-    "2d8f52bb162cc1e9e00897e8b1dc5f17a54e2088f77ea14adce508aa91627e02"
+    "a428991c2a453b533db6f00c732f958cc56ae5ba9932d3a7dc8112fee18db22b"
 );
 game_test!(
     game_axelay,
     "Axelay (USA).sfc",
     4801,
-    "6ff009b793b5be6706cccb1378829c47d04f5284ec014c73a9988e97ef1c2c7c"
+    "2425cfc89488d6ca003b3a9af5a79edb316c0b0828d0af66e92c6b6f270cc734"
 );

@@ -63,6 +63,17 @@ cargo build --workspace --all-targets \
 - **Anything a human can see or hear** (rendering, audio, GUI behaviour)
   gets validated in the GUI before merge, not just by unit tests.
 
+## Versioning & releases
+
+- **Application SemVer**: `minor` = new features / accuracy improvements,
+  `patch` = hotfix on a released binary (e.g. v1.10.1). There is no API
+  stability promise — the crates are not published (`publish = false`).
+- **Release flow**: bump `version` + finalize `CHANGELOG.md` in a PR to
+  `develop`; merge `develop` → `main`; tag `vX.Y.Z` on `main`
+  (`release.yml` builds and attaches the 4-platform binaries +
+  checksums); then reconcile `develop` with `main`. Update the pinned
+  asset names in `book/src/using/install.md` as part of the bump PR.
+
 ## License
 
 MPL-2.0. By contributing you agree your work is released under the same

@@ -1,0 +1,49 @@
+name: Bug report
+description: Something is wrong (crash, freeze, wrong rendering/audio, GUI issue)
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Luna version
+      description: Release tag (e.g. v1.10.1) or commit hash, and OS.
+      placeholder: v1.10.1 · Fedora 44 aarch64
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game / ROM
+      description: >-
+        Title + region (e.g. "Super Mario RPG (USA)"). Never attach a
+        copyrighted ROM; a homebrew/test-ROM reproducer is even better.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: >-
+        Steps in the GUI, or ideally a headless CLI command — accuracy
+        bugs that reproduce with `luna state -n <steps> --screenshot
+        out.png <rom>` (plus `--input "1600:0x1000,1610:0"` to press
+        Start) are the fastest to fix.
+      placeholder: |
+        ./target/release/luna state -n 12000000 --screenshot /tmp/bug.png "game.sfc"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+      description: >-
+        What should happen (screenshot from real hardware / ares / Mesen2
+        if you have one) vs what Luna shows. Side-by-side screenshots are
+        the ideal evidence.
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Frame number where it appears, save state, logs, `RUST_BACKTRACE=1` output…

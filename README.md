@@ -4,6 +4,7 @@
 
 ### A cycle-accurate SNES emulator, written in Rust — built so an AI agent can play, develop and debug Super Nintendo games on its own.
 
+[![CI](https://github.com/k0b3n4irb/luna/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/k0b3n4irb/luna/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/k0b3n4irb/luna?color=brightgreen)](https://github.com/k0b3n4irb/luna/releases/latest)
 [![Docs](https://img.shields.io/badge/docs-k0b3n4irb.github.io%2Fluna-8a7cff)](https://k0b3n4irb.github.io/luna/)
 [![License](https://img.shields.io/badge/license-MPL--2.0-blue)](LICENSE)

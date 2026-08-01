@@ -2,7 +2,7 @@
 
 Reference-first audit of luna's SA-1 against ares
 (`ares/sfc/coprocessor/sa1/io.cpp`, `memory.cpp`, `dma.cpp`). Companion
-to the BG / OBJ / APU / DMA gap docs; complements `sa1_status.md` (the
+to the BG / OBJ / APU / DMA gap docs; complements `archive/sa1_status.md` (the
 fix-snapshot + the deliberate CIWP/SIWP `0xFF` deviation).
 
 Scope: the register I/O + math unit + DMA/MMC in
@@ -113,8 +113,8 @@ pre-change baseline.
 | # | Issue | ares ref | luna |
 |---|---|---|---|
 | 2 | `$2202` (SIC) models a bit-6 "S-CPU NMI clear" that hardware doesn't have (SIC only has chdma=bit5, cpu=bit7) | `io.cpp:155-163` | `sa1.rs:1097-1099` |
-| 3 | CIWP/SIWP reset default is `0xFF` (allow-all) not `0x00` — a **deliberate** deviation (an opensnes demo depends on it); see `sa1_status.md` | `io.cpp` reset | intentional |
-| 4 | CCNT reset edge sets `CIWP = 0` (`io.cpp:113`) | `io.cpp:103-114` | **deferred** — verified absent, but it lives in the deliberately-deviated I-RAM protection model (CIWP/SIWP default `0xFF`, `sa1_status.md`). Adding it broke an SA-1 I-RAM test (synthetic handler doesn't pre-arm CIWP) and is the GUI-blackout-prone area the status doc warns about. Revisit with the protection model holistically + GUI validation. |
+| 3 | CIWP/SIWP reset default is `0xFF` (allow-all) not `0x00` — a **deliberate** deviation (an opensnes demo depends on it); see `archive/sa1_status.md` | `io.cpp` reset | intentional |
+| 4 | CCNT reset edge sets `CIWP = 0` (`io.cpp:113`) | `io.cpp:103-114` | **deferred** — verified absent, but it lives in the deliberately-deviated I-RAM protection model (CIWP/SIWP default `0xFF`, `archive/sa1_status.md`). Adding it broke an SA-1 I-RAM test (synthetic handler doesn't pre-arm CIWP) and is the GUI-blackout-prone area the status doc warns about. Revisit with the protection model holistically + GUI validation. |
 
 ---
 

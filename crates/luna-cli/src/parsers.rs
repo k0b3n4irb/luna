@@ -111,7 +111,7 @@ pub(crate) fn parse_peek_spec(spec: &str) -> Result<(u8, u16, u16), String> {
 /// Parse an even-length hex string (no `0x`) into bytes.
 pub(crate) fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, String> {
     let s = s.trim();
-    if s.is_empty() || s.len() % 2 != 0 {
+    if s.is_empty() || !s.len().is_multiple_of(2) {
         return Err(format!("expected an even-length hex value, got `{s}`"));
     }
     (0..s.len())
@@ -170,14 +170,14 @@ pub(crate) fn parse_assert_spec_sym(spec: &str) -> Result<(String, Vec<u8>), Str
 /// so a label that itself contains `:` still resolves whole.
 pub(crate) fn parse_peek_spec_sym(spec: &str) -> Result<(String, u16), String> {
     let spec = spec.trim();
-    if let Some((name, count_s)) = spec.rsplit_once(':') {
-        if let Ok(count) = u16::from_str_radix(count_s.trim(), 16) {
-            let name = name.trim();
-            if name.is_empty() {
-                return Err(format!("empty symbol name in `{spec}`"));
-            }
-            return Ok((name.to_string(), count));
+    if let Some((name, count_s)) = spec.rsplit_once(':')
+        && let Ok(count) = u16::from_str_radix(count_s.trim(), 16)
+    {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(format!("empty symbol name in `{spec}`"));
         }
+        return Ok((name.to_string(), count));
     }
     if spec.is_empty() {
         return Err("empty --peek spec".into());

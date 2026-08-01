@@ -6,13 +6,13 @@
 // minimization here.
 #![allow(clippy::needless_pass_by_ref_mut)]
 
-//! Opcode dispatch and a representative subset of instruction handlers.
+//! Opcode dispatch and the full 65c816 instruction-handler set.
 //!
-//! P0.4a covers loads / stores (LDA/STA in multiple modes), jumps and
-//! conditional branches, mode-control opcodes (XCE / SEP / REP) and the
-//! flag-toggle family. The remaining ~225 opcodes are stubbed with a
-//! clear panic message so the dispatch table is complete and Tom Harte
-//! tests can be wired up in P0.4b without further plumbing changes.
+//! All 256 opcodes are implemented (no stubs, no panics) and validated
+//! against the Tom Harte `SingleStepTests` suite — 100% pass, including
+//! the per-entry `cycles[]` bus-order oracle (see `tests/tom_harte.rs`).
+//! Handlers are grouped by family (loads/stores, ALU, RMW, branches,
+//! stack, mode control) with separator banners.
 
 use crate::addressing::{
     Access, absolute, absolute_indexed_x, absolute_indexed_y, absolute_long,
@@ -150,7 +150,6 @@ impl Cpu {
     }
 
     /// Dispatch on a fetched opcode. Inlined into the match by LLVM.
-    #[allow(clippy::too_many_lines)]
     fn execute<B: Bus>(&mut self, opcode: u8, bus: &mut B) {
         // Default 16-bit accesses to bank-carrying (ares readBank/read);
         // the direct-page / stack-relative addressing helpers flip this on
