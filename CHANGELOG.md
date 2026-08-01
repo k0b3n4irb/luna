@@ -43,6 +43,21 @@ All notable user-facing changes to luna. Releases are cut from `main`
   pending rmcp 3.0 (MCP 2026-07-28) bump was waiting on.
 
 ### Fixed
+- **`--input` checkpoints no longer overrun the `-n` budget**
+  ([#126](https://github.com/k0b3n4irb/luna/issues/126), reported
+  downstream by OpenSNES). Chasing a checkpoint's frame stepped the
+  emulator *unbounded* and only then spent `-n`, so
+  `luna state -n 100000 --input "900:0x8000"` ran to frame **910**
+  instead of frame 12 — a run 75x longer than requested, in which a
+  press scheduled far beyond the requested window still reached the
+  ROM (the reported "first checkpoint latched at boot"). Checkpoint
+  chasing now spends from the same budget as the run: `-n` is the total
+  length with or without `--input`, and a checkpoint the run never
+  reaches simply never fires. Fixed identically in `state`, `spc-dump`
+  and `assets-dump` (`wram-trace` and `bench` already applied
+  checkpoints inside their frame loops). CLI-level regression tests
+  included.
+
 - **The H/V-counter latch subsystem is now faithful end-to-end** (ares
   `cpu/io.cpp` + Mesen2 agree on all four): the WRIO (`$4201`) latch
   fires on the **falling** edge of bit 7 (luna had the polarity
