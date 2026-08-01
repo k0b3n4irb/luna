@@ -35,7 +35,7 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
   CARGO_INCREMENTAL: "0"
-  # actions/cache@v4 still ships a Node.js 20 entrypoint (deprecated). Opt
+  # actions/cache@v6 still ships a Node.js 20 entrypoint (deprecated). Opt
   # into Node 24 now to clear the runner warning (github.blog 2025-09-19).
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
@@ -54,7 +54,7 @@ jobs:
           key: tom-harte
       - name: Cache 65C816 Tom Harte dataset
         id: snes-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: tests/tom-harte/v1
           key: tom-harte-65816-${{ hashFiles('tools/fetch-tom-harte.sh') }}
@@ -63,7 +63,7 @@ jobs:
         run: tools/fetch-tom-harte.sh
       - name: Cache SPC700 Tom Harte dataset
         id: spc-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: tests/tom-harte-spc700/v1
           key: tom-harte-spc700-${{ hashFiles('tools/fetch-tom-harte-spc700.sh') }}
