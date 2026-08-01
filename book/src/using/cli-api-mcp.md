@@ -96,6 +96,8 @@ and is the hub for every headless diagnostic.
 | `--dump-aram <PATH>` | — | Dump all 64 KB APU ARAM (raw). |
 | `--dump-coproc-ram <PATH>` | — | Dump coprocessor work RAM (Super FX Game Pak RAM), ungated. |
 | `--apu-log <PATH>` | — | CSV of every `$2140-$2143` CPU↔APU mailbox access. |
+| `--dsp-trace <PATH>` | — | CSV of every DSP register write: `spc_cycles,reg,name,value`, with `name` decoded (`V0_ADSR1`, `KON`, `FLG`, …). |
+| `--dsp-trace-max <N>` | `100000` | Cap on captured DSP writes. |
 | `--sa1-log <PATH>` | — | CSV of every `$2200-$23FF` SA-1 MMIO access. |
 | `--print-fbhash` | off | Print `fbhash=<16-hex>` for the displayed frame — the same key as `run`, so an `--input`-driven test can carry a visual baseline. |
 | `--wdm-out <PATH>` | — | Write captured `WDM $xx` (`SNES_ASSERT`) executions — keeps the assertion oracle on an `--input` test. |
@@ -132,6 +134,30 @@ averages them into the displayed 256×224 — `--native-res` keeps them:
 luna state -n 8000000 --force-mapper lorom --force-region pal --native-res \
   --screenshot /tmp/font.png --print-fbhash \
   "PPU/Interlace/InterlaceFont/InterlaceFont.sfc"   # → a 512×448 PNG
+```
+
+#### Audio-side visibility
+
+Three views for driver debugging, when a WAV capture alone cannot say
+what the SPC actually did:
+
+```bash
+# 1. Structured DSP state: per-voice registers + live decode state.
+luna state game.sfc -n 3000000 --out - \
+  | jq '.apu.dsp | {mvol_l, kon, dir, voices: [.voices[] | select(.keyed_on)
+        | {index, srcn, pitch, envx, outx, envelope_phase}]}'
+
+# 2. Peek ARAM directly — verify an uploaded driver image or the
+#    $F0-$FF register page (hex offset:count, like a CPU-bus peek).
+luna state game.sfc -n 3000000 --peek APU:0200:40 --peek APU:00F0:10
+
+# 3. DSP register-write trace — the sequencing oracle: did the
+#    KON/KOFF pulses reach the chip in the intended order?
+luna state game.sfc -n 2000000 --dsp-trace dsp.csv
+# spc_cycles,reg,name,value
+# 0,$6C,FLG,$20
+# 0,$5C,KOFF,$FF     <- driver mutes every voice before setup
+# 0,$5D,DIR,$0A      <- sample directory at $0A00
 ```
 
 ### `luna frames` — consecutive-frame capture (temporal artefacts)

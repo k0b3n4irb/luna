@@ -4,9 +4,9 @@
 use std::process::ExitCode;
 
 use crate::csv::{
-    write_cpu_trace_csv, write_dma_trace_csv, write_mailbox_log_csv, write_mem_trace_csv,
-    write_sa1_log_csv, write_sa1_side_log_csv, write_sa1_trace_csv, write_spc_trace_csv,
-    write_superfx_trace_csv,
+    write_cpu_trace_csv, write_dma_trace_csv, write_dsp_trace_csv, write_mailbox_log_csv,
+    write_mem_trace_csv, write_sa1_log_csv, write_sa1_side_log_csv, write_sa1_trace_csv,
+    write_spc_trace_csv, write_superfx_trace_csv,
 };
 use crate::fmt::hex_str;
 use crate::output::{print_hex_dump, write_wav};
@@ -42,6 +42,8 @@ pub(crate) fn run_state(
     srm_in: Option<&std::path::Path>,
     srm_out: Option<&std::path::Path>,
     apu_log_path: Option<&std::path::Path>,
+    dsp_trace_path: Option<&std::path::Path>,
+    dsp_trace_max: usize,
     sa1_log_path: Option<&std::path::Path>,
     sa1_side_log_path: Option<&std::path::Path>,
     sa1_trace_path: Option<&std::path::Path>,
@@ -177,6 +179,12 @@ pub(crate) fn run_state(
         && let Err(e) = em.enable_mailbox_log()
     {
         eprintln!("error: enable_mailbox_log: {e}");
+        return ExitCode::from(1);
+    }
+    if dsp_trace_path.is_some()
+        && let Err(e) = em.enable_dsp_trace(dsp_trace_max)
+    {
+        eprintln!("error: enable_dsp_trace: {e}");
         return ExitCode::from(1);
     }
     if sa1_log_path.is_some()
@@ -429,6 +437,21 @@ pub(crate) fn run_state(
     }
 
     for spec in peek_specs {
+        // `APU:OFFSET:COUNT` reads ARAM instead of the CPU bus (#122):
+        // checked first because the prefix is unambiguous.
+        if let Some(apu) = crate::parsers::parse_apu_peek_spec(spec) {
+            match apu {
+                Ok((offset, count)) => match em.peek_aram(offset, count) {
+                    Ok(bytes) => {
+                        eprintln!("peek APU:{:04X} +{:04X}:", offset, bytes.len());
+                        print_hex_dump(0, offset, &bytes);
+                    }
+                    Err(e) => eprintln!("error: peek_aram `{spec}`: {e}"),
+                },
+                Err(e) => eprintln!("error: --peek `{spec}`: {e}"),
+            }
+            continue;
+        }
         // Numeric `BANK:OFFSET:COUNT` first; else a WLA-DX label
         // `NAME[:COUNT]` resolved through the loaded .sym table (#77).
         let target = match parse_peek_spec(spec) {
@@ -575,6 +598,19 @@ pub(crate) fn run_state(
         }
     }
 
+    if let Some(path) = dsp_trace_path {
+        match em.take_dsp_trace() {
+            Ok(events) => match write_dsp_trace_csv(path, &events) {
+                Ok(()) => eprintln!(
+                    "DSP write trace written to {} ({} events)",
+                    path.display(),
+                    events.len()
+                ),
+                Err(e) => eprintln!("error: writing DSP trace: {e}"),
+            },
+            Err(e) => eprintln!("error: take_dsp_trace: {e}"),
+        }
+    }
     if let Some(path) = apu_log_path {
         match em.take_mailbox_log() {
             Ok(events) => match write_mailbox_log_csv(path, &events) {
