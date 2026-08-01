@@ -149,7 +149,7 @@ clap                 = { version = "4", features = ["derive"] }
 image                = { version = "0.25", default-features = false, features = ["png"] }
 
 # SHA-256 of framebuffers for the SNES test-ROM golden suite.
-sha2                 = "0.10"
+sha2                 = "0.11"
 
 # GUI (luna-gui — desktop application)
 # Minimal pixel-rendering stack for the SNES framebuffer: winit owns
@@ -160,7 +160,7 @@ sha2                 = "0.10"
 # perceived rendering bug ambiguous between core and GUI.
 winit                = { version = "0.30", features = ["serde"] }
 pixels               = "0.17"
-rfd                  = "0.15"
+rfd                  = "0.17"
 dirs                 = "6"
 # egui-on-pixels overlay: native-quality menu bar + dropdowns
 # rendered via wgpu on the SAME device pixels uses. eframe was
