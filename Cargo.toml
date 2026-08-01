@@ -149,7 +149,7 @@ clap                 = { version = "4", features = ["derive"] }
 image                = { version = "0.25", default-features = false, features = ["png"] }
 
 # SHA-256 of framebuffers for the SNES test-ROM golden suite.
-sha2                 = "0.10"
+sha2                 = "0.11"
 
 # GUI (luna-gui — desktop application)
 # Minimal pixel-rendering stack for the SNES framebuffer: winit owns
