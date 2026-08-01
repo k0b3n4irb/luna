@@ -590,7 +590,18 @@ impl Ppu {
     /// segment. The cache is `take`n into a local for the render so the
     /// interlace path can still mutate `self.field`, then restored.
     fn flush_partial_scanline_inner(&mut self, y: u16, end_x: u16, opts: RenderOptions) {
-        let yi = usize::from(y);
+        // Hardware line origin (gap #7, proven by the HiColor charts vs
+        // the hardware references + a Mesen2 capture): the displayed
+        // picture is PPU lines 1..=224, and the content the PPU computes
+        // for line V is scanned out as framebuffer row V-1 (ares renders
+        // line V into output row V-1; Mesen2's first visible scanline is
+        // 1). `y` is the PPU line V — all content math below stays keyed
+        // by it; only the framebuffer row shifts. Line 0 is the
+        // pre-render line: nothing is displayed.
+        if y == 0 {
+            return;
+        }
+        let yi = usize::from(y) - 1;
         if yi >= FRAME_H {
             return;
         }
@@ -1210,12 +1221,12 @@ mod tests {
         p.write(register::CGADD, 0x00);
         p.write(register::CGDATA, 0x1F); // A = $001F (full red)
         p.write(register::CGDATA, 0x00);
-        p.flush_partial_scanline(0, 100, RenderOptions::default());
+        p.flush_partial_scanline(1, 100, RenderOptions::default());
         // Change the backdrop to colour B; flush the rest of the line.
         p.write(register::CGADD, 0x00);
         p.write(register::CGDATA, 0x00);
         p.write(register::CGDATA, 0x7C); // B = $7C00 (full blue)
-        p.flush_partial_scanline(0, FRAME_W as u16, RenderOptions::default());
+        p.flush_partial_scanline(1, FRAME_W as u16, RenderOptions::default());
 
         let fb = p.framebuffer();
         let (a, b) = (fb[0], fb[200]);
@@ -1374,7 +1385,8 @@ mod tests {
         p.render_current_scanline(10, RenderOptions::default());
         assert_eq!(p.last_flushed_dot, 0, "scanline_reset clears cursor");
         // Left half (dot 0): no blue. Right half (dot 200): blue.
-        let row_start = 10 * crate::FRAME_W;
+        // (Line 10 is displayed as framebuffer row 9 — hardware line origin.)
+        let row_start = 9 * crate::FRAME_W;
         assert_eq!(
             p.framebuffer()[row_start][2],
             0,
@@ -1410,25 +1422,26 @@ mod tests {
         // red on the top, backdrop black on the bottom — proving that
         // a TM change between scanlines is honoured.
         let mut p = ppu_with_solid_bg1_tile();
-        for y in 0..100u16 {
+        // Lines 1..=100 land on rows 0..=99 (hardware line origin).
+        for y in 0..=100u16 {
             p.render_current_scanline(y, RenderOptions::default());
         }
         p.write(register::TM, 0x00); // BG1 off
-        for y in 100..crate::FRAME_H as u16 {
+        for y in 101..=crate::FRAME_H as u16 {
             p.render_current_scanline(y, RenderOptions::default());
         }
         // Top half: BG1 red (non-black).
-        assert_ne!(p.framebuffer()[0], [0, 0, 0], "line 0 should show BG1");
+        assert_ne!(p.framebuffer()[0], [0, 0, 0], "row 0 should show BG1");
         assert_ne!(
             p.framebuffer()[99 * crate::FRAME_W],
             [0, 0, 0],
-            "line 99 should still show BG1"
+            "row 99 (line 100) should still show BG1"
         );
         // Bottom half: backdrop black.
         assert_eq!(
             p.framebuffer()[100 * crate::FRAME_W],
             [0, 0, 0],
-            "line 100 should be backdrop after TM=0"
+            "row 100 (line 101) should be backdrop after TM=0"
         );
         assert_eq!(
             p.framebuffer()[(crate::FRAME_H - 1) * crate::FRAME_W],
@@ -1445,7 +1458,7 @@ mod tests {
         // 512×448 whatever mode each line is in.
         let mut p = ppu_with_solid_bg1_tile();
         p.set_native_capture(true);
-        p.render_current_scanline(0, RenderOptions::default());
+        p.render_current_scanline(1, RenderOptions::default());
         let w = crate::FRAME_W * 2;
         assert_eq!(p.native_framebuffer.len(), w * crate::FRAME_H * 2);
         for x in 0..crate::FRAME_W {
@@ -1469,7 +1482,7 @@ mod tests {
         let mut p = ppu_with_solid_bg1_tile();
         p.write(register::SETINI, 0x08);
         p.set_native_capture(true);
-        p.render_current_scanline(0, RenderOptions::default());
+        p.render_current_scanline(1, RenderOptions::default());
         let displayed = p.framebuffer()[0];
         let left = p.native_framebuffer[0];
         let right = p.native_framebuffer[1];
@@ -1520,21 +1533,21 @@ mod tests {
         let mut p = ppu_with_solid_bg1_tile();
         p.render_current_scanline(50, RenderOptions::default());
         assert_ne!(
-            p.framebuffer()[50 * crate::FRAME_W],
+            p.framebuffer()[49 * crate::FRAME_W],
             [0, 0, 0],
-            "line 50 rendered with display on should be visible"
+            "line 50 (row 49) rendered with display on should be visible"
         );
         p.write(register::INIDISP, 0x80); // force-blank on
         p.render_current_scanline(51, RenderOptions::default());
         assert_eq!(
-            p.framebuffer()[51 * crate::FRAME_W],
+            p.framebuffer()[50 * crate::FRAME_W],
             [0, 0, 0],
-            "line 51 rendered during force-blank must be black"
+            "line 51 (row 50) rendered during force-blank must be black"
         );
         // Line 50 must still be visible (the force-blank only affects
         // lines rendered after it landed).
         assert_ne!(
-            p.framebuffer()[50 * crate::FRAME_W],
+            p.framebuffer()[49 * crate::FRAME_W],
             [0, 0, 0],
             "line 50 must persist across the force-blank toggle"
         );
@@ -1550,7 +1563,7 @@ mod tests {
 
         // Forced-blank scanline render still produces all-zero output,
         // and the framebuffer remains all-zero.
-        p.render_current_scanline(0, RenderOptions::default());
+        p.render_current_scanline(1, RenderOptions::default());
         assert!(
             p.framebuffer()[..crate::FRAME_W]
                 .iter()
@@ -1564,12 +1577,13 @@ mod tests {
         p.cgram.poke(0, 0xFF); // CGRAM[0] = $00FF → BGR555 R = 31
         p.cgram.poke(1, 0x7F);
         p.render_current_scanline(42, RenderOptions::default());
-        // Line 42 now holds the backdrop colour; lines 0..41 are still
-        // black (forced-blank render written above) / never touched.
-        let off = 42 * crate::FRAME_W;
+        // Line 42 lands on row 41 (hardware line origin); earlier rows are
+        // still black (forced-blank render written above) / never touched.
+        let off = 41 * crate::FRAME_W;
         let pixel = p.framebuffer()[off];
         assert_ne!(pixel, [0, 0, 0], "scanline 42 should now be non-zero");
-        // Out-of-range y is a no-op (doesn't panic).
-        p.render_current_scanline(crate::FRAME_H as u16, RenderOptions::default());
+        // Out-of-range line is a no-op (doesn't panic) — line FRAME_H+1
+        // would target row FRAME_H, one past the last framebuffer row.
+        p.render_current_scanline(crate::FRAME_H as u16 + 1, RenderOptions::default());
     }
 }
