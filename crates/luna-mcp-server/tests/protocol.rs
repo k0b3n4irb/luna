@@ -15,7 +15,7 @@
 
 use luna_mcp_server::LunaServer;
 use rmcp::ServiceExt;
-use rmcp::model::CallToolRequestParam;
+use rmcp::model::CallToolRequestParams;
 use rmcp::service::ServiceError;
 
 /// Spawn `LunaServer` on one end of an in-memory duplex and return a
@@ -79,10 +79,7 @@ async fn tools_list_exposes_the_documented_catalogue() {
 async fn capabilities_round_trips_over_the_wire() {
     let client = connect().await;
     let result = client
-        .call_tool(CallToolRequestParam {
-            name: "capabilities".into(),
-            arguments: None,
-        })
+        .call_tool(CallToolRequestParams::new("capabilities"))
         .await
         .expect("capabilities call");
 
@@ -102,15 +99,14 @@ async fn tool_error_surfaces_to_the_peer_as_jsonrpc_error() {
     let client = connect().await;
     // `step` with no ROM loaded → ApiError::NoRom, mapped to ErrorData.
     let err = client
-        .call_tool(CallToolRequestParam {
-            name: "step".into(),
-            arguments: Some(
+        .call_tool(
+            CallToolRequestParams::new("step").with_arguments(
                 serde_json::json!({ "count": 1 })
                     .as_object()
                     .expect("object")
                     .clone(),
             ),
-        })
+        )
         .await
         .expect_err("stepping without a ROM must fail");
 
@@ -131,10 +127,7 @@ async fn tool_error_surfaces_to_the_peer_as_jsonrpc_error() {
 async fn unknown_tool_is_rejected() {
     let client = connect().await;
     let err = client
-        .call_tool(CallToolRequestParam {
-            name: "definitely_not_a_luna_tool".into(),
-            arguments: None,
-        })
+        .call_tool(CallToolRequestParams::new("definitely_not_a_luna_tool"))
         .await
         .expect_err("unknown tool must be rejected");
     assert!(
@@ -175,25 +168,21 @@ async fn load_step_and_screenshot_round_trip() {
 
     let client = connect().await;
     let load = client
-        .call_tool(CallToolRequestParam {
-            name: "load_rom".into(),
-            arguments: Some(
+        .call_tool(
+            CallToolRequestParams::new("load_rom").with_arguments(
                 serde_json::json!({ "path": path.to_string_lossy() })
                     .as_object()
                     .expect("object")
                     .clone(),
             ),
-        })
+        )
         .await
         .expect("load_rom call");
     assert_ne!(load.is_error, Some(true), "synthetic ROM must load");
 
     // A screenshot must come back as a base64 payload of a real PNG.
     let shot = client
-        .call_tool(CallToolRequestParam {
-            name: "screenshot".into(),
-            arguments: None,
-        })
+        .call_tool(CallToolRequestParams::new("screenshot"))
         .await
         .expect("screenshot call");
     assert_ne!(shot.is_error, Some(true));
@@ -206,10 +195,7 @@ async fn load_step_and_screenshot_round_trip() {
 
     // `state` must round-trip the loaded ROM back to the peer.
     let state = client
-        .call_tool(CallToolRequestParam {
-            name: "state".into(),
-            arguments: None,
-        })
+        .call_tool(CallToolRequestParams::new("state"))
         .await
         .expect("state call");
     assert_ne!(state.is_error, Some(true));
