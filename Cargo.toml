@@ -178,7 +178,7 @@ cpal                 = "0.16"
 ringbuf              = { version = "0.4", default-features = false, features = ["std"] }
 
 # MCP — Anthropic Rust SDK for Model Context Protocol.
-rmcp                 = { version = "0.8", features = ["server", "macros", "schemars", "transport-io"] }
+rmcp                 = { version = "3.0", features = ["server", "macros", "schemars", "transport-io"] }
 schemars             = "1.0"
 base64               = "0.22"
 
