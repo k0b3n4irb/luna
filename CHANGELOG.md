@@ -6,6 +6,14 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+## [1.11.0] — 2026-08-01
+
+The audit release: an eight-PR sweep out of a full-project review — one
+foundational rendering discovery (the hardware framebuffer line origin,
+dormant under every frame since the project began), three accuracy
+chantiers, a GUI-robustness batch, and the supply-chain/ops layer. The
+accuracy scorecard now has no row below A−, with the PPU at **A**.
+
 ### Fixed
 - **The framebuffer line origin is now the hardware's** — the root cause
   of PPU gap #7, found by pinning luna's HiColor chart against the
@@ -26,17 +34,6 @@ All notable user-facing changes to luna. Releases are cut from `main`
   HiColor64 tripwire is un-ignored as an active golden, and the whole
   golden suite re-anchored (verified against references + the commercial
   HDMA corpus: F-Zero, SCV4, Yoshi's Island, FF6, SMRPG, RPM Racing).
-
-### Added
-- **DSP-1 differential oracle** — the scorecard's last "grade capped by
-  missing evidence" item is closed. New harness
-  (`tests/dsp1_port_differential.rs` + `tools/mesen-dsp1-port-trace.lua`)
-  compares the DSP-1's complete observable behaviour — the DR-port
-  command/result byte stream — against a Mesen2 reference capture:
-  **byte-identical over 380 783 events** across Super Mario Kart's
-  title + demo race (60 s, no input). DSP-1 grade: B+ → A−.
-
-### Fixed
 - **`$4211` TIMEUP is now the faithful ares model** — the last three
   deferred interrupt micro-timing terms are ported (ares `irq.cpp`):
   the H/V-IRQ assert point sits 10 clocks after the counters match
@@ -47,8 +44,7 @@ All notable user-facing changes to luna. Releases are cut from `main`
   disabling both IRQ sources in NMITIMEN drops a held flag at once.
   Also found by measurement vs Mesen2: `$4210`/`$4211`/`$4212` now
   pass the CPU open-bus (MDR) bits through their undriven bit
-  positions (bits 4-6 / 0-6 / 1-5) instead of returning zeros.
-- **PPU open bus is now the real two-chip MDR model** (ares
+  positions (bits 4-6 / 0-6 / 1-5) instead of returning zeros.- **PPU open bus is now the real two-chip MDR model** (ares
   `ppu1.mdr`/`ppu2.mdr`, Mesen2 agrees). Reads of the PPU1 write-only
   family (`$2104-06/08-0A/14-16/18-1A/24-26/28-2A`) return PPU1's
   data-bus latch; every other write-only `$21xx` register and SLHV
@@ -59,6 +55,37 @@ All notable user-facing changes to luna. Releases are cut from `main`
   1-7, STAT77 bit 4, STAT78 bit 5). Games that read write-only `$21xx`
   registers and depend on 65c816 open-bus behaviour now see the right
   byte. Save-state format bumped to v4 (PPU field layout changed).
+
+- **GUI: emulation no longer depends on the audio stack** (#130). With
+  no output device the ROM used to look loaded but nothing ever stepped
+  the core (permanent black screen); the emu thread now always spawns
+  (video-as-clock pacing, "running silent" menu notice), a dead cpal
+  stream is rebuilt automatically every ~3 s and hot-swapped into the
+  running thread (sound drops and comes back on its own when the device
+  returns), a panicked emu thread no longer disables audio for every
+  later ROM, keys no longer stay pressed after Alt-Tab, and hotkeys no
+  longer fire while typing in a modal.
+
+### Added
+- **DSP-1 differential oracle** — the scorecard's last "grade capped by
+  missing evidence" item is closed. New harness
+  (`tests/dsp1_port_differential.rs` + `tools/mesen-dsp1-port-trace.lua`)
+  compares the DSP-1's complete observable behaviour — the DR-port
+  command/result byte stream — against a Mesen2 reference capture:
+  **byte-identical over 380 783 events** across Super Mario Kart's
+  title + demo race (60 s, no input). DSP-1 grade: B+ → A−.
+- **Supply-chain & repo hardening** (#127-#129): cargo-deny (advisories
+  / licenses / sources) in CI + weekly, Dependabot, SECURITY.md, issue
+  and PR templates, a CI badge, and the Tom Harte suites now gate every
+  PR that touches a CPU core. The declared MSRV is now the tested
+  toolchain (1.95 — the old 1.85 claim never compiled), stale founding
+  docs are bannered as historical, and closed investigations are
+  archived.
+
+### Changed
+- **Save states**: format v4 (the PPU layout changed with the two-chip
+  MDR model and the line-origin work). Older `.luna` states are
+  rejected with a clear error — re-create them from the current build.
 
 ## [1.10.1] — 2026-07-18
 
