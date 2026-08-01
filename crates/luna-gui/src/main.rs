@@ -111,6 +111,19 @@ struct LunaApp {
     audio_primed: Option<Arc<AtomicBool>>,
     /// Throttle for `ensure_audio`'s device re-probe.
     last_audio_check: std::time::Instant,
+    /// Master volume as `f32` bits (0.0..=1.0), shared with the cpal
+    /// callback (applied post-resampler). Mute stores 0.0 here while
+    /// `volume_percent` keeps the slider position.
+    volume: Arc<std::sync::atomic::AtomicU32>,
+    /// Volume slider position (0..=100), persisted to audio.json.
+    volume_percent: u8,
+    /// Mute toggle, persisted to audio.json.
+    muted: bool,
+    /// Host gamepads (gilrs). `None` when the backend failed to init.
+    gilrs: Option<gilrs::Gilrs>,
+    /// Live SNES button mask per player derived from gamepads 1 and 2,
+    /// OR-merged with the keyboard mask in `push_joypad`.
+    pad_masks: [u16; 2],
 
     /// Set of keys currently held down — recomputed each
     /// `KeyboardInput` event, sampled before every joypad push.
@@ -229,8 +242,15 @@ struct LunaApp {
 impl LunaApp {
     fn new(auto_rom: Option<PathBuf>) -> Self {
         let emu_shared = Arc::new(EmuShared::new());
+        let (volume_percent, muted) = load_audio_config();
+        let gain = if muted {
+            0.0
+        } else {
+            f32::from(volume_percent) / 100.0
+        };
+        let volume = Arc::new(std::sync::atomic::AtomicU32::new(gain.to_bits()));
         let (audio, audio_producer, audio_primed) =
-            match crate::audio::AudioBackend::try_start(emu_shared.clone()) {
+            match crate::audio::AudioBackend::try_start(emu_shared.clone(), volume.clone()) {
                 Some(AudioStreamArtifacts {
                     backend,
                     producer,
@@ -249,6 +269,13 @@ impl LunaApp {
             audio_producer,
             audio_primed,
             last_audio_check: std::time::Instant::now(),
+            volume,
+            volume_percent,
+            muted,
+            gilrs: gilrs::Gilrs::new()
+                .map_err(|e| eprintln!("luna-gui: gamepad backend unavailable: {e}"))
+                .ok(),
+            pad_masks: [0; 2],
             pressed_keys: HashSet::new(),
             modifiers: ModifiersState::empty(),
             key_bindings: KeyBindings::load_or_default(),
@@ -497,7 +524,9 @@ impl LunaApp {
             self.audio_producer = None;
             self.audio_primed = None;
         }
-        let Some(artifacts) = crate::audio::AudioBackend::try_start(self.emu_shared.clone()) else {
+        let Some(artifacts) =
+            crate::audio::AudioBackend::try_start(self.emu_shared.clone(), self.volume.clone())
+        else {
             return;
         };
         self.audio = Some(artifacts.backend);
@@ -520,6 +549,56 @@ impl LunaApp {
             self.load_notice = None;
         }
         eprintln!("luna-gui audio: stream (re)started");
+    }
+
+    /// Toggle borderless fullscreen on the game window (F11 / View menu).
+    fn toggle_fullscreen(&self) {
+        if let Some(win) = self.window.as_ref() {
+            if win.fullscreen().is_some() {
+                win.set_fullscreen(None);
+            } else {
+                win.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+            }
+        }
+    }
+
+    /// Store the effective gain (0 when muted) for the cpal callback and
+    /// persist the audio settings.
+    fn apply_volume(&self) {
+        let gain = if self.muted {
+            0.0
+        } else {
+            f32::from(self.volume_percent) / 100.0
+        };
+        self.volume
+            .store(gain.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        if let Err(e) = save_audio_config(self.volume_percent, self.muted) {
+            eprintln!("luna-gui: could not persist audio settings: {e}");
+        }
+    }
+
+    /// Pump gilrs and refresh the per-player SNES masks. gilrs indexes
+    /// gamepads by connection order: the first pad drives player 1, the
+    /// second player 2. Pushes the joypad state only when a mask changed
+    /// (the keyboard path pushes on its own key events).
+    fn poll_gamepads(&mut self) {
+        let Some(g) = self.gilrs.as_mut() else { return };
+        let mut saw_event = false;
+        while let Some(ev) = g.next_event() {
+            let _ = ev;
+            saw_event = true;
+        }
+        if !saw_event {
+            return;
+        }
+        let mut masks = [0u16; 2];
+        for (slot, (_, pad)) in g.gamepads().take(2).enumerate() {
+            masks[slot] = snes_mask_from_gamepad(&pad);
+        }
+        if masks != self.pad_masks {
+            self.pad_masks = masks;
+            self.push_joypad();
+        }
     }
 
     fn unload_emu(&mut self) {
@@ -603,8 +682,8 @@ impl LunaApp {
         if !self.rom_loaded {
             return;
         }
-        let p1 = self.key_bindings.mask_from_pressed(0, &self.pressed_keys);
-        let p2 = self.key_bindings.mask_from_pressed(1, &self.pressed_keys);
+        let p1 = self.key_bindings.mask_from_pressed(0, &self.pressed_keys) | self.pad_masks[0];
+        let p2 = self.key_bindings.mask_from_pressed(1, &self.pressed_keys) | self.pad_masks[1];
         if let Ok(mut guard) = self.emu.lock()
             && let Some(em) = guard.as_mut()
         {
@@ -1085,6 +1164,7 @@ impl ApplicationHandler for LunaApp {
                         Hotkey::Reset => self.reset(),
                         Hotkey::StepInstruction => self.step_instruction(),
                         Hotkey::StepFrame => self.step_frame(),
+                        Hotkey::Fullscreen => self.toggle_fullscreen(),
                     }
                     return;
                 }
@@ -1124,6 +1204,7 @@ impl ApplicationHandler for LunaApp {
         // Rebuild the audio stream if it died or a device appeared
         // (throttled to one probe every few seconds).
         self.ensure_audio();
+        self.poll_gamepads();
         self.poll_break_hit(event_loop);
         // Feed the host pointer to a Mouse / Super Scope once per loop tick.
         self.push_devices();
@@ -1177,6 +1258,8 @@ impl LunaApp {
             break_status: self.break_status.clone(),
             rom_title: self.rom_title.clone(),
             port_device: self.port_device,
+            volume_percent: self.volume_percent,
+            muted: self.muted,
             show_input_config: self.show_input_config,
             show_hotkey_config: self.show_hotkey_config,
             key_bindings: &self.key_bindings,
@@ -1554,6 +1637,17 @@ impl LunaApp {
             MenuAction::SaveState(slot) => self.save_state_to_slot(slot),
             MenuAction::LoadState(slot) => self.load_state_from_slot(slot),
             MenuAction::SetPortDevice(port, dev) => self.set_port_device(port, dev),
+            MenuAction::ToggleFullscreen => self.toggle_fullscreen(),
+            MenuAction::SetVolume(v) => {
+                self.volume_percent = v;
+                // Dragging the slider un-mutes (matching every mixer UI).
+                self.muted = false;
+                self.apply_volume();
+            }
+            MenuAction::ToggleMute => {
+                self.muted = !self.muted;
+                self.apply_volume();
+            }
             MenuAction::ToggleInputRecording => self.toggle_input_recording(),
             MenuAction::SetForcedMapper(mapper) => {
                 self.forced_mapper = mapper;
@@ -1823,6 +1917,81 @@ fn screenshot_dir() -> PathBuf {
 
 /// Directory for exported input recordings (issue #83): `~/.local/luna/recordings`.
 /// The loaded ROM file's modification time, for watch-mode auto-reload (#93).
+/// SNES button mask from a gilrs gamepad snapshot. Fixed, Mesen2-like
+/// layout: South=B, East=A, West=Y, North=X, shoulders=L/R,
+/// Select/Start, d-pad (buttons or left stick past a 0.5 deadzone).
+fn snes_mask_from_gamepad(pad: &gilrs::Gamepad) -> u16 {
+    use crate::input::SnesButton as S;
+    use gilrs::{Axis, Button};
+    let mut m = 0u16;
+    let mut on = |b: Button, s: S| {
+        if pad.is_pressed(b) {
+            m |= s.mask();
+        }
+    };
+    on(Button::South, S::B);
+    on(Button::East, S::A);
+    on(Button::West, S::Y);
+    on(Button::North, S::X);
+    on(Button::LeftTrigger, S::L);
+    on(Button::RightTrigger, S::R);
+    on(Button::Select, S::Select);
+    on(Button::Start, S::Start);
+    on(Button::DPadUp, S::Up);
+    on(Button::DPadDown, S::Down);
+    on(Button::DPadLeft, S::Left);
+    on(Button::DPadRight, S::Right);
+    // Left stick doubles as the d-pad (0.5 deadzone).
+    let ax = pad.value(Axis::LeftStickX);
+    let ay = pad.value(Axis::LeftStickY);
+    if ax <= -0.5 {
+        m |= S::Left.mask();
+    } else if ax >= 0.5 {
+        m |= S::Right.mask();
+    }
+    if ay >= 0.5 {
+        m |= S::Up.mask();
+    } else if ay <= -0.5 {
+        m |= S::Down.mask();
+    }
+    m
+}
+
+/// Load `(volume_percent, muted)` from `~/.config/luna/audio.json`;
+/// defaults to (100, false).
+fn load_audio_config() -> (u8, bool) {
+    let Ok(path) = crate::input::config_file("audio.json") else {
+        return (100, false);
+    };
+    let Ok(json) = std::fs::read_to_string(path) else {
+        return (100, false);
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) else {
+        return (100, false);
+    };
+    let vol = v
+        .get("volume")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(100);
+    let muted = v
+        .get("muted")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    (vol.min(100) as u8, muted)
+}
+
+/// Persist the audio settings next to the input config.
+fn save_audio_config(volume: u8, muted: bool) -> std::io::Result<()> {
+    let path = crate::input::config_file("audio.json")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(
+        path,
+        format!("{{\n  \"volume\": {volume},\n  \"muted\": {muted}\n}}\n"),
+    )
+}
+
 fn rom_mtime(path: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
