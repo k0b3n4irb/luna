@@ -150,9 +150,12 @@ so they aren't lost:
   (`$2104-06/08-0A/14-16/18-1A/24-26/28-2A`) returns `ppu1_mdr`, every other
   write-only register + SLHV returns the **CPU** MDR, and CGDATAREAD /
   OPHCT / OPVCT / STAT77 / STAT78 perform their partial (stale-bit) updates.
-  Unit tests cover each stale-bit case. Remaining sliver: STAT78 bit 6
-  should read as forced-1 while `$4201` bit 7 is held low (ares io.cpp
-  `!cpu.pio()` branch) — needs the PIO line plumbed into the PPU read.
+  Unit tests cover each stale-bit case. STAT78 bit-6 PIO gate **CLOSED 2026-08-01**: `Ppu::pio_bit7` mirrors the
+  WRIO line; held low ⇒ bit 6 reads 1 without clearing the latch flag.
+  Same pass fixed the WRIO latch POLARITY (fires on the 1→0 falling edge,
+  was inverted), the WRIO reset value ($FF — pins power up high) and the
+  SLHV gate (latches only while the line is high). ares cpu/io.cpp:143 +
+  Mesen2 InternalRegisters.cpp:338 agree on all four.
 - **General mid-scanline register latching** — per-scanline render + a partial
   mid-scanline flush exist (`flush_partial_scanline`), but not every register is
   latched at its exact dot.
