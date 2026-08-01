@@ -33,7 +33,7 @@
 //! stopband ripple of a naïve linear interpolator.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Sample, SampleFormat, Stream, StreamConfig};
@@ -87,6 +87,7 @@ impl AudioBackend {
     #[must_use]
     pub(crate) fn try_start(
         emu_shared: Arc<crate::emu_thread::EmuShared>,
+        volume: Arc<AtomicU32>,
     ) -> Option<AudioStreamArtifacts> {
         let host = cpal::default_host();
         let Some(device) = host.default_output_device() else {
@@ -159,6 +160,7 @@ impl AudioBackend {
             SampleFormat::F32 => {
                 let primed_inner = primed_cb;
                 let emu_inner = emu_shared;
+                let vol = volume;
                 device.build_output_stream(
                     &config,
                     move |data: &mut [f32], _| {
@@ -168,6 +170,7 @@ impl AudioBackend {
                             &mut resampler,
                             &mut dc_blocker,
                             &primed_inner,
+                            f32::from_bits(vol.load(Ordering::Relaxed)),
                         );
                         // Audio-as-clock: each callback drained samples
                         // from the ring → tell the emu thread it can
@@ -181,6 +184,7 @@ impl AudioBackend {
             SampleFormat::I16 => {
                 let primed_inner = primed_cb;
                 let emu_inner = emu_shared;
+                let vol = volume;
                 device.build_output_stream(
                     &config,
                     move |data: &mut [i16], _| {
@@ -190,6 +194,7 @@ impl AudioBackend {
                             &mut resampler,
                             &mut dc_blocker,
                             &primed_inner,
+                            f32::from_bits(vol.load(Ordering::Relaxed)),
                         );
                         emu_inner.unpark_emu();
                     },
@@ -200,6 +205,7 @@ impl AudioBackend {
             SampleFormat::U8 => {
                 let primed_inner = primed_cb;
                 let emu_inner = emu_shared;
+                let vol = volume;
                 device.build_output_stream(
                     &config,
                     move |data: &mut [u8], _| {
@@ -209,6 +215,7 @@ impl AudioBackend {
                             &mut resampler,
                             &mut dc_blocker,
                             &primed_inner,
+                            f32::from_bits(vol.load(Ordering::Relaxed)),
                         );
                         emu_inner.unpark_emu();
                     },
@@ -253,6 +260,7 @@ fn fill_buffer_f32(
     resampler: &mut Resampler,
     dc_blocker: &mut DcBlocker,
     primed: &AtomicBool,
+    gain: f32,
 ) {
     if !primed.load(Ordering::Relaxed) {
         for s in data.iter_mut() {
@@ -264,8 +272,8 @@ fn fill_buffer_f32(
     let mut idx = 0;
     while idx + 1 < data.len() {
         let (l, r) = resampler.pull(|| pop_input(consumer).map(|s| dc_blocker.process(s)));
-        data[idx] = l;
-        data[idx + 1] = r;
+        data[idx] = l * gain;
+        data[idx + 1] = r * gain;
         idx += 2;
     }
 }
@@ -292,6 +300,7 @@ fn fill_buffer_i16(
     resampler: &mut Resampler,
     dc_blocker: &mut DcBlocker,
     primed: &AtomicBool,
+    gain: f32,
 ) {
     if !primed.load(Ordering::Relaxed) {
         for s in data.iter_mut() {
@@ -306,8 +315,8 @@ fn fill_buffer_i16(
         // The resampler works in normalised f32 [-1, 1]; round back
         // to i16. Clamp because the cubic Hermite interp can
         // mathematically overshoot by an LSB on extreme transients.
-        data[idx] = (l * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
-        data[idx + 1] = (r * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
+        data[idx] = (l * gain * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
+        data[idx + 1] = (r * gain * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
         idx += 2;
     }
 }
@@ -322,6 +331,7 @@ fn fill_buffer_u8(
     resampler: &mut Resampler,
     dc_blocker: &mut DcBlocker,
     primed: &AtomicBool,
+    gain: f32,
 ) {
     if !primed.load(Ordering::Relaxed) {
         for s in data.iter_mut() {
@@ -333,8 +343,8 @@ fn fill_buffer_u8(
     let mut idx = 0;
     while idx + 1 < data.len() {
         let (l, r) = resampler.pull(|| pop_input(consumer).map(|s| dc_blocker.process(s)));
-        data[idx] = l.mul_add(128.0, 128.0).round().clamp(0.0, 255.0) as u8;
-        data[idx + 1] = r.mul_add(128.0, 128.0).round().clamp(0.0, 255.0) as u8;
+        data[idx] = (l * gain).mul_add(128.0, 128.0).round().clamp(0.0, 255.0) as u8;
+        data[idx + 1] = (r * gain).mul_add(128.0, 128.0).round().clamp(0.0, 255.0) as u8;
         idx += 2;
     }
 }

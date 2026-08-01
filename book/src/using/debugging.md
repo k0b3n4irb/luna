@@ -32,7 +32,7 @@ steps it instruction by instruction — the same registry the MCP tools use.
   the hit's PC (and address/value for a watchpoint), the CPU disassembly
   jumps to the halt PC with the line highlighted, and the Event Viewer
   shows the hit as a *Breakpoint* dot at the exact scanline/H-clock.
-- **Step**: `F10` executes one instruction, `F11` runs to the next frame
+- **Step**: `F10` executes one instruction, `F6` runs to the next frame
   boundary (both also in the *Emulation* menu, and both pause first if the
   game is running). The framebuffer and all debug panels follow each step.
 

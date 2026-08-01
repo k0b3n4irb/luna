@@ -6,6 +6,15 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Added
+- **GUI comfort trio** — the three most-visible player features:
+  **fullscreen** (`F11` remappable hotkey + Emulation menu, borderless),
+  **gamepad support** (up to two pads via gilrs, SDL-style mappings,
+  fixed Mesen2-like layout, first pad = Player 1, merged with the
+  keyboard), and a **volume slider + mute** (Settings → Audio, applied
+  live in the audio callback, persisted to `~/.config/luna/audio.json`).
+  The *Step frame* debugger hotkey moved from `F11` to `F6`.
+
 ## [1.11.0] — 2026-08-01
 
 The audit release: an eight-PR sweep out of a full-project review — one
