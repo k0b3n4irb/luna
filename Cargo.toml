@@ -160,7 +160,7 @@ sha2                 = "0.10"
 # perceived rendering bug ambiguous between core and GUI.
 winit                = { version = "0.30", features = ["serde"] }
 pixels               = "0.17"
-rfd                  = "0.15"
+rfd                  = "0.17"
 dirs                 = "6"
 # egui-on-pixels overlay: native-quality menu bar + dropdowns
 # rendered via wgpu on the SAME device pixels uses. eframe was
