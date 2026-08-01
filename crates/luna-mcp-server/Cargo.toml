@@ -24,5 +24,14 @@ serde_json = { workspace = true, features = ["std"] } # used by the rmcp::tool m
 # enable the bits we actually need here.
 tokio      = { workspace = true, features = ["macros", "rt-multi-thread", "io-std", "sync"] }
 
+# Protocol contract tests (tests/protocol.rs) drive the server with a REAL
+# rmcp client over an in-memory duplex: `client` gives us that peer (the
+# binary only ever serves, so it stays out of the production build), and
+# `io-util` provides tokio::io::duplex.
+[dev-dependencies]
+rmcp       = { workspace = true, features = ["client"] }
+tokio      = { workspace = true, features = ["macros", "rt-multi-thread", "io-util", "sync"] }
+serde_json = { workspace = true, features = ["std"] }
+
 [lints]
 workspace = true

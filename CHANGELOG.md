@@ -6,6 +6,18 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Added
+- **MCP protocol contract tests** — the audit's "only front-end without
+  a contract test" is closed. `luna-mcp-server/tests/protocol.rs` runs
+  the real server against a real rmcp client over an in-memory
+  `tokio::io::duplex` pair (no process, no ports, deterministic) and
+  locks the wire behaviour: the discovered tool catalogue (plus every
+  tool having a description and an input schema), an argument/result
+  round trip, errors surfacing as JSON-RPC errors carrying luna's
+  message, unknown-tool rejection, and a full `load_rom` → `screenshot`
+  → `state` agent loop on a synthetic ROM. This is the evidence the
+  pending rmcp 3.0 (MCP 2026-07-28) bump was waiting on.
+
 ### Fixed
 - **The H/V-counter latch subsystem is now faithful end-to-end** (ares
   `cpu/io.cpp` + Mesen2 agree on all four): the WRIO (`$4201`) latch
