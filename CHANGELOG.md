@@ -6,6 +6,27 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Fixed
+- **The framebuffer line origin is now the hardware's** — the root cause
+  of PPU gap #7, found by pinning luna's HiColor chart against the
+  hardware reference and a Mesen2 capture (luna's frame was pixel-perfect
+  but one scanline late; the luna↔Mesen2 CGRAM write timeline was
+  byte-identical, 3597/3598 events). Hardware displays PPU lines 1..=224:
+  framebuffer row r is scanned during line r+1, and line 0 is the
+  pre-render line (why real games set BGVOFS = -1). Three coordinated
+  changes: `Ppu` renders line V into row V-1; a DMA B-bus write landing
+  mid-line now partial-flushes the in-progress row with the pre-write
+  state (the CPU-path flush, mirrored on the DMA path); and each line's
+  HDMA transfer fires at the END of its line (ares `hcounter() >= 1104` —
+  after the visible pixels of the row being scanned), lifting the
+  2026-06-17 dot-276 deferral. Result: **16 PeterLemon corpus tests are
+  now pixel-exact against their hardware reference PNGs** (WindowHDMA
+  30938→0, Mode7HDMA, Perspective, Rings, HiColor64/3840/575Myst, the
+  BGMap family, …; 36/42 improved, 3 within animation-phase noise), the
+  HiColor64 tripwire is un-ignored as an active golden, and the whole
+  golden suite re-anchored (verified against references + the commercial
+  HDMA corpus: F-Zero, SCV4, Yoshi's Island, FF6, SMRPG, RPM Racing).
+
 ### Added
 - **DSP-1 differential oracle** — the scorecard's last "grade capped by
   missing evidence" item is closed. New harness

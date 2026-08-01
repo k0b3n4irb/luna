@@ -1654,6 +1654,26 @@ impl DmaBus for DmaBusView<'_> {
 
     fn write_b(&mut self, b_offset: u8, value: u8) {
         if b_offset <= 0x3F {
+            // Mirror of the CPU path's intra-line partial flush (gap G6,
+            // `write_inner` $21xx): a DMA byte hitting a render-affecting
+            // register mid-line must commit the in-progress dots with the
+            // OLD state BEFORE the write lands. The HiColor class (gap #7)
+            // is the canonical victim: an H-IRQ handler DMAs new palette
+            // entries into CGRAM during HBlank, and the just-scanned
+            // line's pixels used the PRE-DMA palette — without this flush
+            // the line-end render saw the post-DMA colours (one DMA batch
+            // too new; wrong on every line whose pixels use entries its
+            // own HBlank DMA rewrites). `trace_line`/`trace_hclock` are
+            // the burst-start stamps — byte-level clock advance within a
+            // burst is below the whole-line renderer's floor.
+            if b_offset < 0x34 && !self.trace_blank {
+                let dot = (self.trace_hclock / 4).min(luna_ppu::FRAME_W as u16);
+                self.ppu.flush_partial_scanline(
+                    self.trace_line,
+                    dot,
+                    luna_ppu::RenderOptions::default(),
+                );
+            }
             // DMA B-bus trace: capture (source → VMADD → byte) BEFORE the
             // write, since the $2119 (high) write auto-increments VMADD.
             // Captures EVERY PPU B-bus write ($2100-$213F), not just the
@@ -1965,8 +1985,16 @@ impl SnesBus<'_> {
             self.ppu.latch_counters(h, v);
         }
 
-        // Render the visible line that just finished, with its end-of-line
-        // register state (HDMA for the next line fires after the increment).
+        // Render the framebuffer row the beam just finished scanning.
+        // Hardware line origin (gap #7, proven by the HiColor chart —
+        // Mesen2's frame == the corpus reference, luna's was one line
+        // late): the displayed picture is PPU lines 1..=224, and fb row
+        // `r` is drawn DURING PPU line `r+1`. So the crossing at the end
+        // of line L commits row L-1 — with line L's end-of-line register
+        // state, one line fresher than the old `row L at end of L`
+        // mapping. Static content is unchanged (the renderer is keyed by
+        // the row index); per-line dynamic state (HiColor CGRAM DMAs,
+        // HDMA gradients) lands on the hardware row.
         if self.ppu_line < vblank_start {
             self.ppu
                 .render_current_scanline(self.ppu_line, luna_ppu::RenderOptions::default());
@@ -1978,6 +2006,43 @@ impl SnesBus<'_> {
             if self.ppu.inidisp & 0x80 == 0 {
                 self.ppu.frame_visible_content_accum = true;
             }
+        }
+
+        // Line `ppu_line`'s HDMA transfer — fired at the END of the line
+        // (hardware runs it at dot ~278 of line V, i.e. AFTER the visible
+        // pixels of framebuffer row V-1, which the render above just
+        // committed). Firing it at the start of the line (the previous
+        // model) made every HDMA-driven row one table entry too new once
+        // the hardware line origin landed (RedSpace9BitHDMA's starfield
+        // was the tripwire: 4x worse vs the hardware reference). Same
+        // per-line table cursor — only the application point moved one
+        // crossing later, between the same two rendered rows.
+        if self.ppu_line < vblank_start {
+            // Trace HDMA register writes for the Event Viewer, exactly like
+            // MDMA: hdma_run_line stamps each channel via set_active_channel
+            // (HdmaChannelFlag | ch, Mesen2 SnesDmaController.cpp:264), and the
+            // shared DmaBusView::write_b records the DmaTraceEvent. The trace
+            // log is moved into the view for the line and returned after.
+            let mut trace = self.dma.dma_trace.take();
+            let trace_hclock = self.hclock();
+            let mut view = DmaBusView {
+                wram: &mut *self.wram,
+                mapper: &mut *self.mapper,
+                ppu: &mut *self.ppu,
+                wm_addr: &mut *self.wm_addr,
+                mdr: &mut *self.mdr,
+                dma_trace: trace.as_mut(),
+                last_a_addr: 0,
+                trace_frame: self.frame_count,
+                trace_line: self.ppu_line,
+                trace_blank: self.ppu_line >= self.vblank_start_line,
+                trace_hclock,
+                dma_channel: 0,
+            };
+            hdma_stall += self
+                .dma
+                .hdma_run_line(&mut view, line_start_mclk, clock_count);
+            self.dma.dma_trace = trace;
         }
 
         self.ppu_line += 1;
@@ -2064,34 +2129,6 @@ impl SnesBus<'_> {
             hdma_stall += self.dma.hdma_init(&mut view, line_start_mclk, clock_count);
         }
 
-        // HDMA on every visible scanline (end-of-HBlank ordering).
-        if self.ppu_line < vblank_start {
-            // Trace HDMA register writes for the Event Viewer, exactly like
-            // MDMA: hdma_run_line stamps each channel via set_active_channel
-            // (HdmaChannelFlag | ch, Mesen2 SnesDmaController.cpp:264), and the
-            // shared DmaBusView::write_b records the DmaTraceEvent. The trace
-            // log is moved into the view for the line and returned after.
-            let mut trace = self.dma.dma_trace.take();
-            let trace_hclock = self.hclock();
-            let mut view = DmaBusView {
-                wram: &mut *self.wram,
-                mapper: &mut *self.mapper,
-                ppu: &mut *self.ppu,
-                wm_addr: &mut *self.wm_addr,
-                mdr: &mut *self.mdr,
-                dma_trace: trace.as_mut(),
-                last_a_addr: 0,
-                trace_frame: self.frame_count,
-                trace_line: self.ppu_line,
-                trace_blank: self.ppu_line >= self.vblank_start_line,
-                trace_hclock,
-                dma_channel: 0,
-            };
-            hdma_stall += self
-                .dma
-                .hdma_run_line(&mut view, line_start_mclk, clock_count);
-            self.dma.dma_trace = trace;
-        }
         hdma_stall
     }
 }
