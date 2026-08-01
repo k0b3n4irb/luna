@@ -1,0 +1,67 @@
+name: fuzz
+
+# Weekly fuzzing of the untrusted-input surface (ROM parsing → system
+# construction). Short per-target budgets: this is a regression net that
+# re-explores from the committed corpus, not a discovery campaign — for
+# that, run `cargo +nightly fuzz run <target>` locally for hours.
+#
+# A crash fails the job AND uploads the reproducer artifact, so the input
+# can be replayed with `cargo fuzz run <target> artifacts/<target>/<file>`.
+on:
+  schedule:
+    - cron: "0 7 * * 1" # Mondays 07:00 UTC, after tom-harte
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "Minutes per target"
+        required: false
+        default: "5"
+  pull_request:
+    paths:
+      - "crates/luna-cartridge/**"
+      - "fuzz/**"
+      - ".github/workflows/fuzz.yml"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [cartridge_parse, cartridge_forced, cartridge_to_system]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
+      # cargo-fuzz needs nightly for -Z sanitizer support.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "fuzz -> target"
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Fuzz ${{ matrix.target }}
+        # The repo pins stable in rust-toolchain.toml, which would win
+        # over the installed nightly for cargo-fuzz's inner `cargo build`
+        # (`-Zsanitizer` is nightly-only) — force it for this step.
+        env:
+          RUSTUP_TOOLCHAIN: nightly
+        run: |
+          MINUTES="${{ github.event.inputs.minutes || '5' }}"
+          cargo fuzz run "${{ matrix.target }}" -- \
+            -max_total_time=$((MINUTES * 60)) -rss_limit_mb=4096
+      - name: Upload crash reproducer
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
