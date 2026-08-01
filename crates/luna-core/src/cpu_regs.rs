@@ -90,10 +90,15 @@ pub struct CpuRegs {
 }
 
 impl CpuRegs {
-    /// Build a powered-on register file (all zero).
+    /// Build a powered-on register file. All zero except WRIO ($4201),
+    /// whose out-pins power up HIGH (ares `io.pio = 0xff`) — required
+    /// for the falling-edge counter latch to be armed from reset.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            wrio: 0xFF,
+            ..Self::default()
+        }
     }
 
     /// One serial bit for `port`'s peripheral (Mouse / Super Scope) on a

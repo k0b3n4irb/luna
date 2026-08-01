@@ -4,9 +4,9 @@
 use std::process::ExitCode;
 
 use crate::csv::{
-    write_cpu_trace_csv, write_dma_trace_csv, write_mailbox_log_csv, write_mem_trace_csv,
-    write_sa1_log_csv, write_sa1_side_log_csv, write_sa1_trace_csv, write_spc_trace_csv,
-    write_superfx_trace_csv,
+    write_cpu_trace_csv, write_dma_trace_csv, write_dsp_trace_csv, write_mailbox_log_csv,
+    write_mem_trace_csv, write_sa1_log_csv, write_sa1_side_log_csv, write_sa1_trace_csv,
+    write_spc_trace_csv, write_superfx_trace_csv,
 };
 use crate::fmt::hex_str;
 use crate::output::{print_hex_dump, write_wav};
@@ -42,6 +42,8 @@ pub(crate) fn run_state(
     srm_in: Option<&std::path::Path>,
     srm_out: Option<&std::path::Path>,
     apu_log_path: Option<&std::path::Path>,
+    dsp_trace_path: Option<&std::path::Path>,
+    dsp_trace_max: usize,
     sa1_log_path: Option<&std::path::Path>,
     sa1_side_log_path: Option<&std::path::Path>,
     sa1_trace_path: Option<&std::path::Path>,
@@ -179,6 +181,12 @@ pub(crate) fn run_state(
         eprintln!("error: enable_mailbox_log: {e}");
         return ExitCode::from(1);
     }
+    if dsp_trace_path.is_some()
+        && let Err(e) = em.enable_dsp_trace(dsp_trace_max)
+    {
+        eprintln!("error: enable_dsp_trace: {e}");
+        return ExitCode::from(1);
+    }
     if sa1_log_path.is_some()
         && let Err(e) = em.enable_sa1_log()
     {
@@ -231,8 +239,8 @@ pub(crate) fn run_state(
             }
         },
     };
+    let start_instructions = em.instructions_executed();
     if !checkpoints.is_empty() || !mouse_checkpoints.is_empty() || !scope_checkpoints.is_empty() {
-        const PER_FRAME_BUDGET: u64 = 60_000;
         // Merge gamepad (`--input`), mouse (`--mouse`) and super-scope
         // (`--superscope`) checkpoints into one frame-sorted event stream so
         // they all apply at the right moment.
@@ -256,12 +264,20 @@ pub(crate) fn run_state(
             )
             .collect();
         events.sort_by_key(|(f, _)| *f);
+        // Chasing checkpoint frames spends from the SAME `-n` budget as
+        // the run itself (issue #126): a checkpoint scheduled beyond the
+        // requested window must never fire, and the total run must be
+        // `-n` instructions — not `-n` on top of an unbounded pre-roll.
         for (frame, ev) in &events {
-            // Step until we reach `frame` (no-op if we already crossed it).
-            while em.state().scheduler.frame_count < *frame {
-                if em.step_until_frame(PER_FRAME_BUDGET).unwrap_or(0) == 0 {
-                    break;
-                }
+            let spent = em
+                .instructions_executed()
+                .saturating_sub(start_instructions);
+            let Some(left) = steps.checked_sub(spent).filter(|l| *l > 0) else {
+                break; // budget exhausted — later checkpoints never happen
+            };
+            crate::parsers::step_to_frame_bounded(&mut em, *frame, left);
+            if em.state().scheduler.frame_count < *frame {
+                break; // ran out before reaching this checkpoint's frame
             }
             let applied = match ev {
                 Ev::Pad(m) => em.set_joypad(0, *m),
@@ -278,7 +294,12 @@ pub(crate) fn run_state(
     // targets, enable whichever crossed; bridge to the later one if
     // it's still ahead, enable that. Each trace caps itself at its
     // own --*-trace-max events regardless of remaining steps.
-    let mut remaining = steps;
+    // Whatever the checkpoint pre-roll consumed comes OUT of `-n`, so
+    // `-n` is the total run length with or without `--input`.
+    let mut remaining = steps.saturating_sub(
+        em.instructions_executed()
+            .saturating_sub(start_instructions),
+    );
     let mut bridge_target = u64::MAX;
     if cpu_trace_path.is_some() {
         bridge_target = bridge_target.min(cpu_trace_from);
@@ -416,6 +437,21 @@ pub(crate) fn run_state(
     }
 
     for spec in peek_specs {
+        // `APU:OFFSET:COUNT` reads ARAM instead of the CPU bus (#122):
+        // checked first because the prefix is unambiguous.
+        if let Some(apu) = crate::parsers::parse_apu_peek_spec(spec) {
+            match apu {
+                Ok((offset, count)) => match em.peek_aram(offset, count) {
+                    Ok(bytes) => {
+                        eprintln!("peek APU:{:04X} +{:04X}:", offset, bytes.len());
+                        print_hex_dump(0, offset, &bytes);
+                    }
+                    Err(e) => eprintln!("error: peek_aram `{spec}`: {e}"),
+                },
+                Err(e) => eprintln!("error: --peek `{spec}`: {e}"),
+            }
+            continue;
+        }
         // Numeric `BANK:OFFSET:COUNT` first; else a WLA-DX label
         // `NAME[:COUNT]` resolved through the loaded .sym table (#77).
         let target = match parse_peek_spec(spec) {
@@ -562,6 +598,19 @@ pub(crate) fn run_state(
         }
     }
 
+    if let Some(path) = dsp_trace_path {
+        match em.take_dsp_trace() {
+            Ok(events) => match write_dsp_trace_csv(path, &events) {
+                Ok(()) => eprintln!(
+                    "DSP write trace written to {} ({} events)",
+                    path.display(),
+                    events.len()
+                ),
+                Err(e) => eprintln!("error: writing DSP trace: {e}"),
+            },
+            Err(e) => eprintln!("error: take_dsp_trace: {e}"),
+        }
+    }
     if let Some(path) = apu_log_path {
         match em.take_mailbox_log() {
             Ok(events) => match write_mailbox_log_csv(path, &events) {

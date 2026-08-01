@@ -89,3 +89,30 @@ auto-read latches.
 
 The GUI exposes a key-remap dialog under **Settings → Input**, where each
 binding is stored by physical key position and persisted across sessions.
+
+## Gamepads
+
+Plug in up to two host gamepads (SDL-style mappings via `gilrs`): the
+first connected pad drives Player 1, the second Player 2, merged with
+the keyboard (both work at once). Fixed, Mesen2-like layout:
+
+| Gamepad             | SNES        |
+|---------------------|-------------|
+| South (A/Cross)     | B           |
+| East (B/Circle)     | A           |
+| West (X/Square)     | Y           |
+| North (Y/Triangle)  | X           |
+| L1 / R1             | L / R       |
+| Select / Start      | Select / Start |
+| D-pad or left stick | D-pad       |
+
+## Display & audio
+
+- **Fullscreen**: `F11` (remappable hotkey) or *Emulation → Fullscreen*
+  — borderless, toggle to return.
+- **Volume**: *Settings → Audio* — a 0-100 slider plus *Mute*, applied
+  live in the audio callback and persisted to
+  `~/.config/luna/audio.json`.
+- The *Step frame* debugger hotkey moved from `F11` to `F6` (fullscreen
+  claimed the universal key); saved hotkey configs keep working and can
+  be rebound under *Settings → Hotkeys*.
