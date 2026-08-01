@@ -6,6 +6,15 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Fixed
+- **The H/V-counter latch subsystem is now faithful end-to-end** (ares
+  `cpu/io.cpp` + Mesen2 agree on all four): the WRIO (`$4201`) latch
+  fires on the **falling** edge of bit 7 (luna had the polarity
+  inverted), WRIO powers up high (`$FF`), SLHV (`$2137`) only latches
+  while the line is high, and STAT78 bit 6 reads forced-1 without
+  clearing the latch flag while the line is held low — closing the last
+  named residual of the scorecard's PPU row.
+
 ### Added
 - **GUI comfort trio** — the three most-visible player features:
   **fullscreen** (`F11` remappable hotkey + Emulation menu, borderless),
