@@ -21,6 +21,16 @@ All notable user-facing changes to luna. Releases are cut from `main`
   merely justified.
 
 ### Added
+- **Fuzzing for the ROM-parsing surface** (`fuzz/`, cargo-fuzz): three
+  targets covering `Cartridge::from_bytes` (auto-detect, header scoring,
+  SMC/firmware stripping), the checksum-skipping `from_bytes_forced`
+  path across all 8 mapper kinds, and the full parse → `Snes` →
+  `reset` → step chain where an accepted-but-malformed cart reaches the
+  mapper shims. First campaign: **~67 million executions, zero crashes**
+  — the parser's clamps and mirrored indexing hold under adversarial
+  input. Weekly in CI (+ on any PR touching `luna-cartridge` or
+  `fuzz/`), with crash reproducers uploaded as artifacts and a minimized
+  seed corpus committed so a fresh clone starts from real coverage.
 - **MCP protocol contract tests** — the audit's "only front-end without
   a contract test" is closed. `luna-mcp-server/tests/protocol.rs` runs
   the real server against a real rmcp client over an in-memory

@@ -64,6 +64,20 @@ cargo build --workspace --all-targets \
 - **Anything a human can see or hear** (rendering, audio, GUI behaviour)
   gets validated in the GUI before merge, not just by unit tests.
 
+## Fuzzing
+
+The ROM parser is the one surface that takes untrusted input, so it is
+fuzzed (`fuzz/`, three targets, weekly in CI). Before changing
+`luna-cartridge` or the mapper shims, a quick local run is cheap:
+
+```bash
+cargo install cargo-fuzz
+cargo +nightly fuzz run cartridge_parse -- -max_total_time=120
+```
+
+See [`fuzz/README.md`](fuzz/README.md) for the targets, the contract they
+assert, and how to replay a crash reproducer.
+
 ## Versioning & releases
 
 - **Application SemVer**: `minor` = new features / accuracy improvements,
