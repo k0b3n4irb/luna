@@ -59,7 +59,29 @@ known game impact:
    effect; unify `hdma_start_frame`/`hdma_step_line` onto one `hdmaReload` port
    if ever closing the last micro-divergence.
 
-## Phase 5 inc 2 (sub-line dot-276 `hdmaPosition`) — ⚠️ DEFERRED (2026-06-17)
+## Phase 5 inc 2 (sub-line dot-276 `hdmaPosition`) — ✅ LANDED (2026-07-26)
+
+> **2026-07-26 resolution — the 2026-06-17 deferral is lifted.** The June
+> attempt regressed the goldens because luna's **framebuffer line origin
+> was off by one**, not because the whole-line renderer can't express the
+> position: hardware displays PPU lines 1..=224 (fb row r is scanned
+> during line r+1; line 0 is the pre-render line), while luna mapped line
+> L to row L. Once the hardware origin landed (`flush_partial_scanline_inner`
+> writes line V to row V-1) the faithful application point became a
+> one-crossing move: `hdma_run_line` for line V now fires at the END of
+> line V (after the row-V-1 render commits), matching ares' `hcounter()
+> >= 1104` "after the visible pixels, before the next row" semantics at
+> whole-line granularity. Every June symptom below was the OLD origin's
+> artifact and is now gone — HiColor64, RedSpace9Bit, Mode7HDMA,
+> Perspective, WindowHDMA, Rings and 10 more corpus tests are
+> **pixel-exact vs their hardware reference PNGs** (36/42 improved).
+> A DMA B-bus write that lands mid-line also partial-flushes the
+> in-progress row with the pre-write state (the CPU-path G6 flush,
+> mirrored in `DmaBusView::write_b`). Residual: per-BYTE clock advance
+> within one burst (HiColor128's second per-line DMA, gap #7b).
+
+### The original 2026-06-17 deferral (historical — root cause was the line origin)
+
 
 ares runs HDMA at `hcounter() >= 1104` (dot 276, `timing.cpp:76`) on each
 visible line: the line's visible pixels (dots 0..255) are drawn *before*

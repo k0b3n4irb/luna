@@ -151,7 +151,7 @@ impl Mapper for Sa1Chip {
                 // NOTE: ares io.cpp:113 also clears CIWP=0 here. luna does
                 // NOT — it deliberately deviates on the I-RAM write-
                 // protection model (CIWP/SIWP default 0xFF; see
-                // docs/sa1_status.md). Clearing CIWP here breaks SA-1 code
+                // docs/archive/sa1_status.md). Clearing CIWP here breaks SA-1 code
                 // that doesn't pre-arm it (and is the fragile, GUI-blackout-
                 // prone area flagged in that doc). Deferred until the
                 // protection model is revisited holistically. (#4)
@@ -210,23 +210,23 @@ impl Mapper for Sa1Chip {
             // buffer — keeps the most recent `max` events (drops the oldest
             // half when full, amortised O(1)), so a long run captures the
             // SA-1's *current* loop (the hang) rather than early boot.
-            if let Some((events, max)) = self.sa1_trace.as_mut() {
-                if *max > 0 {
-                    if events.len() >= *max {
-                        events.drain(0..*max / 2);
-                    }
-                    events.push(Sa1TraceEvent {
-                        pc_full: sa1_pc,
-                        a: self.cpu.a,
-                        x: self.cpu.x,
-                        y: self.cpu.y,
-                        sp: self.cpu.sp,
-                        p: self.cpu.p.bits(),
-                        db: self.cpu.db,
-                        dp: self.cpu.dp,
-                        e: self.cpu.e,
-                    });
+            if let Some((events, max)) = self.sa1_trace.as_mut()
+                && *max > 0
+            {
+                if events.len() >= *max {
+                    events.drain(0..*max / 2);
                 }
+                events.push(Sa1TraceEvent {
+                    pc_full: sa1_pc,
+                    a: self.cpu.a,
+                    x: self.cpu.x,
+                    y: self.cpu.y,
+                    sp: self.cpu.sp,
+                    p: self.cpu.p.bits(),
+                    db: self.cpu.db,
+                    dp: self.cpu.dp,
+                    e: self.cpu.e,
+                });
             }
             // Count this instruction's real SA-1 steps: `Sa1Bus` adds the
             // per-access region cost (1, or 2 for BWRAM) on every read/write
@@ -375,15 +375,15 @@ impl Bus for Sa1Bus<'_> {
         // cross-CPU handshake flags (e.g. Kirby's $300A/$300E) that the
         // MMIO-only log could never show — only writes are traced (reads
         // would flood the log when the SA-1 spins polling a flag).
-        if let Some(log) = self.log.as_deref_mut() {
-            if let Some(reg) = sa1_reg(addr).or_else(|| sa1_iram_addr(addr)) {
-                log.push(Sa1SideEvent {
-                    sa1_pc: self.sa1_pc,
-                    write: true,
-                    reg,
-                    value,
-                });
-            }
+        if let Some(log) = self.log.as_deref_mut()
+            && let Some(reg) = sa1_reg(addr).or_else(|| sa1_iram_addr(addr))
+        {
+            log.push(Sa1SideEvent {
+                sa1_pc: self.sa1_pc,
+                write: true,
+                reg,
+                value,
+            });
         }
         // Route through the SA-1-side entry so I-RAM / BW-RAM
         // protection consults CIWP / CBWE instead of SIWP / SBWE.

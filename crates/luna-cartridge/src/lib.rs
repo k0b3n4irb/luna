@@ -133,12 +133,11 @@ impl Cartridge {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, CartError> {
         let path = path.as_ref();
         let mut cart = Self::from_bytes(fs::read(path)?)?;
-        if cart.needs_coprocessor_firmware() {
-            if let Some(dir) = path.parent() {
-                if let Ok(bytes) = fs::read(dir.join("dsp1b.rom")) {
-                    cart.set_coprocessor_firmware(bytes);
-                }
-            }
+        if cart.needs_coprocessor_firmware()
+            && let Some(dir) = path.parent()
+            && let Ok(bytes) = fs::read(dir.join("dsp1b.rom"))
+        {
+            cart.set_coprocessor_firmware(bytes);
         }
         Ok(cart)
     }

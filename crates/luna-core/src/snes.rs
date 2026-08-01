@@ -160,6 +160,15 @@ pub struct Snes {
     /// reader `[](n24,n8 data){ return data; }` returns the MDR).
     pub mdr: u8,
 
+    /// H/V-IRQ assert point that slipped past the end of its scanline
+    /// (ares samples the counters 10 clocks in the past — `vcounter(10)`
+    /// / `hcounter(10)`, irq.cpp:26-28 — so an `htime` near the line end
+    /// asserts in the first clocks of the NEXT line). Latched by
+    /// [`Self::poll_hv_irq`] and consumed on the following line; never
+    /// latched across a field boundary (the ares `vcounter(6) ||
+    /// hcounter(6)` "no IRQ on the last dot of a field" guard).
+    irq_wrap_trig: Option<u32>,
+
     /// Optional CPU↔APU mailbox traffic log (`$2140-$2143`). When
     /// `Some`, every CPU read/write of those four ports is appended as
     /// a [`MailboxEvent`] for later analysis (e.g. diagnosing the
@@ -644,6 +653,7 @@ impl Snes {
             region,
             wm_addr: 0,
             mdr: 0,
+            irq_wrap_trig: None,
             joypad_strobe: false,
             joypad1_shift: 0,
             joypad2_shift: 0,
@@ -863,6 +873,7 @@ impl Snes {
                 joypad1_shift,
                 joypad2_shift,
                 mdr,
+                irq_wrap_trig,
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
@@ -903,6 +914,7 @@ impl Snes {
                 joypad1_shift,
                 joypad2_shift,
                 mdr,
+                irq_wrap_trig,
             };
             cpu.reset(&mut bus);
         }
@@ -944,21 +956,21 @@ impl Snes {
         let before = self.total_mclk;
         // Capture the pre-instruction snapshot for the CPU tracer
         // before the destructure below moves `cpu` out of `self`.
-        if let Some(log) = self.cpu_trace_log.as_mut() {
-            if log.events.len() < log.max_events {
-                log.events.push(CpuTraceEvent {
-                    mclk_total: before,
-                    pc_full: (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc),
-                    a: self.cpu.a,
-                    x: self.cpu.x,
-                    y: self.cpu.y,
-                    sp: self.cpu.sp,
-                    p: self.cpu.p.bits(),
-                    db: self.cpu.db,
-                    dp: self.cpu.dp,
-                    e: self.cpu.e,
-                });
-            }
+        if let Some(log) = self.cpu_trace_log.as_mut()
+            && log.events.len() < log.max_events
+        {
+            log.events.push(CpuTraceEvent {
+                mclk_total: before,
+                pc_full: (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc),
+                a: self.cpu.a,
+                x: self.cpu.x,
+                y: self.cpu.y,
+                sp: self.cpu.sp,
+                p: self.cpu.p.bits(),
+                db: self.cpu.db,
+                dp: self.cpu.dp,
+                e: self.cpu.e,
+            });
         }
         let scanlines = self.region_scanlines();
         let ppu_line_snapshot = self.ppu_line;
@@ -985,6 +997,7 @@ impl Snes {
                 joypad1_shift,
                 joypad2_shift,
                 mdr,
+                irq_wrap_trig,
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
@@ -1028,6 +1041,7 @@ impl Snes {
                 joypad1_shift,
                 joypad2_shift,
                 mdr,
+                irq_wrap_trig,
             };
             // The scanline scheduler now advances per bus access inside
             // `bus.io_cycle` (per-scanline rendering: each line is drawn
@@ -1134,6 +1148,7 @@ impl Snes {
                 joypad1_shift,
                 joypad2_shift,
                 mdr,
+                irq_wrap_trig,
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
@@ -1177,6 +1192,7 @@ impl Snes {
                 joypad1_shift,
                 joypad2_shift,
                 mdr,
+                irq_wrap_trig,
             };
             if charge_time {
                 bus.io_cycle(MCycles::from(mcycles));
@@ -1249,6 +1265,7 @@ impl Snes {
             joypad1_shift,
             joypad2_shift,
             mdr,
+            irq_wrap_trig,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -1289,6 +1306,7 @@ impl Snes {
             joypad1_shift,
             joypad2_shift,
             mdr,
+            irq_wrap_trig,
         };
         (0..count)
             .map(|i| {
@@ -1390,6 +1408,8 @@ struct SnesBus<'a> {
     /// CPU open-bus latch (memory-data register). Open-bus reads return
     /// this; reads and writes update it. See [`Snes::mdr`].
     mdr: &'a mut u8,
+    /// Cross-line H/V-IRQ assert point (see `Snes::irq_wrap_trig`).
+    irq_wrap_trig: &'a mut Option<u32>,
     /// S-CPU's last bus-access address (ares `cpu.r.mar`). Set at the top of
     /// every `read_inner`/`write_inner`, held across internal cycles, and
     /// passed to `step_coproc` so the SA-1 can model shared-bus `conflict()`
@@ -1562,6 +1582,10 @@ struct DmaBusView<'a> {
     wram: &'a mut [u8; 0x20000],
     mapper: &'a mut dyn Mapper,
     ppu: &'a mut Ppu,
+    /// CPU data-bus latch (`Snes::mdr`) — a DMA read of a write-only
+    /// PPU register returns it, same as a CPU read (ares passes
+    /// `r.mdr` as the `data` param of every bus read).
+    mdr: &'a mut u8,
     /// Shared 17-bit WRAM-port address (`$2181-$2183` WMADD), so a DMA to
     /// `$2180` (WMDATA) writes WRAM and auto-increments — the same state
     /// the CPU port uses.
@@ -1617,7 +1641,7 @@ impl DmaBus for DmaBusView<'_> {
         // as the CPU port (`read_inner` $2180). APU $40-$43 is still open
         // bus on the DMA path.
         if b_offset <= 0x3F {
-            self.ppu.read(b_offset)
+            self.ppu.read(b_offset, *self.mdr)
         } else if b_offset == 0x80 {
             let a = (*self.wm_addr & 0x1FFFF) as usize;
             let v = self.wram[a];
@@ -1630,6 +1654,26 @@ impl DmaBus for DmaBusView<'_> {
 
     fn write_b(&mut self, b_offset: u8, value: u8) {
         if b_offset <= 0x3F {
+            // Mirror of the CPU path's intra-line partial flush (gap G6,
+            // `write_inner` $21xx): a DMA byte hitting a render-affecting
+            // register mid-line must commit the in-progress dots with the
+            // OLD state BEFORE the write lands. The HiColor class (gap #7)
+            // is the canonical victim: an H-IRQ handler DMAs new palette
+            // entries into CGRAM during HBlank, and the just-scanned
+            // line's pixels used the PRE-DMA palette — without this flush
+            // the line-end render saw the post-DMA colours (one DMA batch
+            // too new; wrong on every line whose pixels use entries its
+            // own HBlank DMA rewrites). `trace_line`/`trace_hclock` are
+            // the burst-start stamps — byte-level clock advance within a
+            // burst is below the whole-line renderer's floor.
+            if b_offset < 0x34 && !self.trace_blank {
+                let dot = (self.trace_hclock / 4).min(luna_ppu::FRAME_W as u16);
+                self.ppu.flush_partial_scanline(
+                    self.trace_line,
+                    dot,
+                    luna_ppu::RenderOptions::default(),
+                );
+            }
             // DMA B-bus trace: capture (source → VMADD → byte) BEFORE the
             // write, since the $2119 (high) write auto-increments VMADD.
             // Captures EVERY PPU B-bus write ($2100-$213F), not just the
@@ -1637,21 +1681,21 @@ impl DmaBus for DmaBusView<'_> {
             // CGRAM ($2122), etc. DMA writes too. `vram_word` is only
             // meaningful for the $2118/$2119 ports; VRAM-only consumers
             // (the CLI `--dma-trace` CSV) filter on `b_offset`.
-            if let Some(log) = self.dma_trace.as_mut() {
-                if log.events.len() < log.max_events {
-                    log.events.push(DmaTraceEvent {
-                        src_full: self.last_a_addr,
-                        vram_word: self.ppu.vram.address,
-                        b_offset,
-                        value,
-                        channel: self.dma_channel,
-                        frame: self.trace_frame,
-                        line: self.trace_line,
-                        hclock: self.trace_hclock,
-                        blank: self.trace_blank,
-                        force_blank: self.ppu.inidisp & 0x80 != 0,
-                    });
-                }
+            if let Some(log) = self.dma_trace.as_mut()
+                && log.events.len() < log.max_events
+            {
+                log.events.push(DmaTraceEvent {
+                    src_full: self.last_a_addr,
+                    vram_word: self.ppu.vram.address,
+                    b_offset,
+                    value,
+                    channel: self.dma_channel,
+                    frame: self.trace_frame,
+                    line: self.trace_line,
+                    hclock: self.trace_hclock,
+                    blank: self.trace_blank,
+                    force_blank: self.ppu.inidisp & 0x80 != 0,
+                });
             }
             // CGDATA ($2122) is never dropped during active display (handled
             // at the source in Ppu::write — ares io.cpp:55-60); VRAM/OAM still
@@ -1714,15 +1758,15 @@ impl SnesBus<'_> {
             if log.events.len() >= log.max_events {
                 return;
             }
-            if let Some(filter) = log.bank_filter {
-                if bank_of(addr) != filter {
-                    return;
-                }
+            if let Some(filter) = log.bank_filter
+                && bank_of(addr) != filter
+            {
+                return;
             }
-            if let Some((lo, hi)) = log.offset_filter {
-                if !(lo..=hi).contains(&offset_of(addr)) {
-                    return;
-                }
+            if let Some((lo, hi)) = log.offset_filter
+                && !(lo..=hi).contains(&offset_of(addr))
+            {
+                return;
             }
             log.events.push(MemTraceEvent {
                 mclk_total: *self.mclk_total,
@@ -1804,7 +1848,7 @@ impl SnesBus<'_> {
             let refresh_pos = dram_refresh_pos(line_start);
             // Poll the IRQ over [lo, lo+chunk) on the CURRENT line before
             // any boundary crossing advances `ppu_line` (the V-counter).
-            self.poll_hv_irq(lo, hi);
+            self.poll_hv_irq(lo, hi, line_start);
             // DRAM refresh: once per scanline the CPU is halted ~40 mclk
             // (ares `cpu/timing.cpp`). Fire when this chunk crosses the
             // refresh position — like `poll_hv_irq`'s htime, the half-open
@@ -1844,10 +1888,23 @@ impl SnesBus<'_> {
     /// never double-fires. NMITIMEN bit 4 = H-IRQ enable, bit 5 = V-IRQ
     /// enable; HTIME/VTIME are 9-bit (dots / lines).
     ///
-    /// Deferred (gaps, not regressions): the ares "no trigger on the last
-    /// dot of the field" guard, the htime==0 / detect→assert delay, and
-    /// the $4211 TIMEUP hold window (mirror of the RDNMI hold).
-    fn poll_hv_irq(&mut self, mclk_lo: u32, mclk_hi: u32) {
+    /// The three ares terms formerly deferred here are now ported: the
+    /// 10-clock detect→assert counter-sampling delay (with its next-line
+    /// wrap), the "no IRQ on the last dot of a field" guard, and — at the
+    /// `$4211` read site — the 4-clock TIMEUP hold window (mirror of the
+    /// RDNMI hold; see [`CpuRegs::read_timeup`]).
+    fn poll_hv_irq(&mut self, mclk_lo: u32, mclk_hi: u32, line_start: u64) {
+        // A trigger that slipped past the previous line's end asserts in
+        // this line's first clocks (against the PREVIOUS line's V match —
+        // ares' `vcounter(10)` still reads it there).
+        if let Some(w) = *self.irq_wrap_trig
+            && mclk_lo <= w
+            && w < mclk_hi
+        {
+            *self.irq_wrap_trig = None;
+            self.raise_hv_irq(line_start + u64::from(w));
+            return;
+        }
         let hirq = self.cpu_regs.nmitimen & 0x10 != 0;
         let virq = self.cpu_regs.nmitimen & 0x20 != 0;
         if !hirq && !virq {
@@ -1858,24 +1915,54 @@ impl SnesBus<'_> {
         if virq && self.ppu_line != self.cpu_regs.vtime {
             return;
         }
-        let fire = if hirq {
-            // H-IRQ: fire when this chunk crosses the `htime` dot.
-            let trig = u32::from(self.cpu_regs.htime) * 4;
-            mclk_lo <= trig && trig < mclk_hi
+        // ares samples the counters 10 clocks in the past (`vcounter(10)
+        // == vtime && hcounter(10) == htime`, irq.cpp:26-28) — the
+        // opcode↔interrupt-unit communication delay — so the assert point
+        // is 10 clocks AFTER the counters actually match. V-only IRQs
+        // assert 10 clocks into the matching line.
+        let match_clk = if hirq {
+            u32::from(self.cpu_regs.htime) * 4
         } else {
-            // V-only: H is irrelevant; fire at the matching line's start.
-            mclk_lo == 0
+            0
         };
-        if fire {
-            // Raise the held level only (ares `status.irqLine`, Mesen `_irqFlag`).
-            // `irq_flag` stays set until the program reads $4211; the CPU samples
-            // it as a *level* via `set_irq_line` at each instruction boundary, so
-            // the IRQ is never lost to `I`-masking the way the old one-shot
-            // `*self.irq` edge was (it coalesced/dropped ~64% of Doom's chained
-            // H+V writes). No edge latch is set here any more.
-            self.cpu_regs.irq_flag = true;
-            self.trace_irq_signal(MemEventKind::IrqSignal, self.cpu_regs.nmitimen);
+        let period = self.line_period();
+        if match_clk >= period {
+            // The htime dot does not exist on this line — the counters can
+            // never match (ares' `hcounter(10) == htime` is simply never
+            // true). Distinct from the wrap below, which is only the
+            // 10-clock ASSERT delay spilling past the line end.
+            return;
         }
+        let trig = match_clk + 10;
+        if trig >= period {
+            // The assert point lands on the NEXT line. Latch it once (at
+            // the chunk that reaches the line end) — unless this is the
+            // field's last line: ares' `(vcounter(6) || hcounter(6))`
+            // guard (irq.cpp:29) forbids a trigger on the last dot of a
+            // field, which is exactly this wrap.
+            if mclk_hi >= period
+                && u32::from(self.ppu_line) + 1 < u32::from(self.scanlines_per_frame)
+            {
+                *self.irq_wrap_trig = Some(trig - period);
+            }
+            return;
+        }
+        if mclk_lo <= trig && trig < mclk_hi {
+            self.raise_hv_irq(line_start + u64::from(trig));
+        }
+    }
+
+    /// Raise the held H/V-IRQ level (ares `status.irqLine`, Mesen
+    /// `_irqFlag`) and stamp the raise clock for the `$4211` hold window.
+    /// `irq_flag` stays set until the program reads `$4211`; the CPU
+    /// samples it as a *level* via `set_irq_line` at each instruction
+    /// boundary, so the IRQ is never lost to `I`-masking the way the old
+    /// one-shot edge was (it coalesced/dropped ~64% of Doom's chained
+    /// H+V writes).
+    fn raise_hv_irq(&mut self, raise_mclk: u64) {
+        self.cpu_regs.irq_flag = true;
+        self.cpu_regs.irq_raise_mclk = raise_mclk;
+        self.trace_irq_signal(MemEventKind::IrqSignal, self.cpu_regs.nmitimen);
     }
 
     /// Cross one scanline boundary, applying the per-line PPU events.
@@ -1898,8 +1985,16 @@ impl SnesBus<'_> {
             self.ppu.latch_counters(h, v);
         }
 
-        // Render the visible line that just finished, with its end-of-line
-        // register state (HDMA for the next line fires after the increment).
+        // Render the framebuffer row the beam just finished scanning.
+        // Hardware line origin (gap #7, proven by the HiColor chart —
+        // Mesen2's frame == the corpus reference, luna's was one line
+        // late): the displayed picture is PPU lines 1..=224, and fb row
+        // `r` is drawn DURING PPU line `r+1`. So the crossing at the end
+        // of line L commits row L-1 — with line L's end-of-line register
+        // state, one line fresher than the old `row L at end of L`
+        // mapping. Static content is unchanged (the renderer is keyed by
+        // the row index); per-line dynamic state (HiColor CGRAM DMAs,
+        // HDMA gradients) lands on the hardware row.
         if self.ppu_line < vblank_start {
             self.ppu
                 .render_current_scanline(self.ppu_line, luna_ppu::RenderOptions::default());
@@ -1911,6 +2006,43 @@ impl SnesBus<'_> {
             if self.ppu.inidisp & 0x80 == 0 {
                 self.ppu.frame_visible_content_accum = true;
             }
+        }
+
+        // Line `ppu_line`'s HDMA transfer — fired at the END of the line
+        // (hardware runs it at dot ~278 of line V, i.e. AFTER the visible
+        // pixels of framebuffer row V-1, which the render above just
+        // committed). Firing it at the start of the line (the previous
+        // model) made every HDMA-driven row one table entry too new once
+        // the hardware line origin landed (RedSpace9BitHDMA's starfield
+        // was the tripwire: 4x worse vs the hardware reference). Same
+        // per-line table cursor — only the application point moved one
+        // crossing later, between the same two rendered rows.
+        if self.ppu_line < vblank_start {
+            // Trace HDMA register writes for the Event Viewer, exactly like
+            // MDMA: hdma_run_line stamps each channel via set_active_channel
+            // (HdmaChannelFlag | ch, Mesen2 SnesDmaController.cpp:264), and the
+            // shared DmaBusView::write_b records the DmaTraceEvent. The trace
+            // log is moved into the view for the line and returned after.
+            let mut trace = self.dma.dma_trace.take();
+            let trace_hclock = self.hclock();
+            let mut view = DmaBusView {
+                wram: &mut *self.wram,
+                mapper: &mut *self.mapper,
+                ppu: &mut *self.ppu,
+                wm_addr: &mut *self.wm_addr,
+                mdr: &mut *self.mdr,
+                dma_trace: trace.as_mut(),
+                last_a_addr: 0,
+                trace_frame: self.frame_count,
+                trace_line: self.ppu_line,
+                trace_blank: self.ppu_line >= self.vblank_start_line,
+                trace_hclock,
+                dma_channel: 0,
+            };
+            hdma_stall += self
+                .dma
+                .hdma_run_line(&mut view, line_start_mclk, clock_count);
+            self.dma.dma_trace = trace;
         }
 
         self.ppu_line += 1;
@@ -1981,6 +2113,7 @@ impl SnesBus<'_> {
                 mapper: &mut *self.mapper,
                 ppu: &mut *self.ppu,
                 wm_addr: &mut *self.wm_addr,
+                mdr: &mut *self.mdr,
                 // hdma_init only reads table headers/pointers (A-bus); it makes
                 // no B-bus register writes, so there is nothing to trace here.
                 // The per-scanline transfers below are what the Event Viewer
@@ -1996,33 +2129,6 @@ impl SnesBus<'_> {
             hdma_stall += self.dma.hdma_init(&mut view, line_start_mclk, clock_count);
         }
 
-        // HDMA on every visible scanline (end-of-HBlank ordering).
-        if self.ppu_line < vblank_start {
-            // Trace HDMA register writes for the Event Viewer, exactly like
-            // MDMA: hdma_run_line stamps each channel via set_active_channel
-            // (HdmaChannelFlag | ch, Mesen2 SnesDmaController.cpp:264), and the
-            // shared DmaBusView::write_b records the DmaTraceEvent. The trace
-            // log is moved into the view for the line and returned after.
-            let mut trace = self.dma.dma_trace.take();
-            let trace_hclock = self.hclock();
-            let mut view = DmaBusView {
-                wram: &mut *self.wram,
-                mapper: &mut *self.mapper,
-                ppu: &mut *self.ppu,
-                wm_addr: &mut *self.wm_addr,
-                dma_trace: trace.as_mut(),
-                last_a_addr: 0,
-                trace_frame: self.frame_count,
-                trace_line: self.ppu_line,
-                trace_blank: self.ppu_line >= self.vblank_start_line,
-                trace_hclock,
-                dma_channel: 0,
-            };
-            hdma_stall += self
-                .dma
-                .hdma_run_line(&mut view, line_start_mclk, clock_count);
-            self.dma.dma_trace = trace;
-        }
         hdma_stall
     }
 }
@@ -2185,6 +2291,7 @@ impl SnesBus<'_> {
                     mapper: self.mapper,
                     ppu: self.ppu,
                     wm_addr: self.wm_addr,
+                    mdr: self.mdr,
                     dma_trace: trace.as_mut(),
                     last_a_addr: 0,
                     trace_frame: self.frame_count,
@@ -2227,6 +2334,7 @@ impl SnesBus<'_> {
                     mapper: self.mapper,
                     ppu: self.ppu,
                     wm_addr: self.wm_addr,
+                    mdr: self.mdr,
                     dma_trace: trace.as_mut(),
                     last_a_addr: 0,
                     trace_frame: self.frame_count,
@@ -2281,13 +2389,15 @@ impl SnesBus<'_> {
         }
         if let Some(off) = Self::ppu_offset(addr) {
             // $2137 SLHV — reading also latches the H/V counters
-            // into OPHCT / OPVCT. The actual returned byte is open
-            // bus (we hand back the PPU's open-bus latch).
+            // into OPHCT / OPVCT. The returned byte is the CPU's own
+            // MDR (ares readIO `return data;`), which `Ppu::read`
+            // reproduces for every register that is write-only on both
+            // PPU chips.
             if off == luna_ppu::register::SLHV {
                 let (h, v) = self.hv();
                 self.ppu.latch_counters(h, v);
             }
-            return self.ppu.read(off);
+            return self.ppu.read(off, *self.mdr);
         }
         if let Some(port) = Self::apu_port(addr) {
             // Mailbox reads: prefer the real SPC (now timer-driven,
@@ -2390,7 +2500,9 @@ impl SnesBus<'_> {
                 let (h, _) = self.hv();
                 let in_hblank = h == 0 || h >= 274;
                 let hblank_bit = if in_hblank { 0x40 } else { 0x00 };
-                return (self.cpu_regs.hvbjoy & !0x40) | hblank_bit;
+                // Bits 1-5 are CPU open bus (ares io.cpp:33-37 only
+                // drives bits 0, 6, 7 of the incoming MDR).
+                return (self.cpu_regs.hvbjoy & 0x81) | hblank_bit | (*self.mdr & 0x3E);
             }
             if reg_off == 0x4210 {
                 // RDNMI — see `RDNMI_RAISE_HCLOCK` / `RDNMI_HOLD_HCLOCK`. Both
@@ -2402,7 +2514,18 @@ impl SnesBus<'_> {
                 let on_nmi_line = self.ppu_line == self.vblank_start_line;
                 let raised = !(on_nmi_line && hclock < RDNMI_RAISE_HCLOCK);
                 let in_hold = on_nmi_line && hclock < RDNMI_HOLD_HCLOCK;
-                return self.cpu_regs.read_rdnmi(raised, in_hold);
+                // Bits 4-6 are CPU open bus (ares io.cpp:24-27 drives
+                // only the version nibble and bit 7 of the MDR).
+                return self.cpu_regs.read_rdnmi(raised, in_hold) | (*self.mdr & 0x70);
+            }
+            if reg_off == 0x4211 {
+                // TIMEUP: bit 7 = held IRQ line, acknowledged by the read
+                // UNLESS the bus sample lands inside the 4-clock hold
+                // window after the raise (ares irq.cpp:60-66 `timeup()`
+                // under `irqHold` — the mirror of the RDNMI hold). Bits
+                // 0-6 are CPU open bus (ares io.cpp:29-31).
+                let in_hold = *self.mclk_total < self.cpu_regs.irq_raise_mclk + 4;
+                return self.cpu_regs.read_timeup(in_hold) | (*self.mdr & 0x7F);
             }
             if let Some(v) = self.cpu_regs.read(reg_off) {
                 return v;
@@ -2411,16 +2534,16 @@ impl SnesBus<'_> {
             return *self.mdr;
         }
         if let Some(v) = self.mapper.read(addr) {
-            if let Some(reg) = Self::sa1_reg(addr) {
-                if let Some(log) = self.sa1_log.as_mut() {
-                    log.push(Sa1LogEvent {
-                        mclk_total: *self.mclk_total,
-                        pc_full: self.cpu_pc_full,
-                        kind: MailboxEventKind::Read,
-                        reg,
-                        value: v,
-                    });
-                }
+            if let Some(reg) = Self::sa1_reg(addr)
+                && let Some(log) = self.sa1_log.as_mut()
+            {
+                log.push(Sa1LogEvent {
+                    mclk_total: *self.mclk_total,
+                    pc_full: self.cpu_pc_full,
+                    kind: MailboxEventKind::Read,
+                    reg,
+                    value: v,
+                });
             }
             return v;
         }
@@ -2654,16 +2777,16 @@ impl SnesBus<'_> {
             }
             return;
         }
-        if let Some(reg) = Self::sa1_reg(addr) {
-            if let Some(log) = self.sa1_log.as_mut() {
-                log.push(Sa1LogEvent {
-                    mclk_total: *self.mclk_total,
-                    pc_full: self.cpu_pc_full,
-                    kind: MailboxEventKind::Write,
-                    reg,
-                    value,
-                });
-            }
+        if let Some(reg) = Self::sa1_reg(addr)
+            && let Some(log) = self.sa1_log.as_mut()
+        {
+            log.push(Sa1LogEvent {
+                mclk_total: *self.mclk_total,
+                pc_full: self.cpu_pc_full,
+                kind: MailboxEventKind::Write,
+                reg,
+                value,
+            });
         }
         // Mapper claims SRAM writes; anything not yet routed drops.
         let _ = self.mapper.write(addr, value);
@@ -2841,6 +2964,7 @@ mod tests {
             joypad1_shift,
             joypad2_shift,
             mdr,
+            irq_wrap_trig,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -2881,6 +3005,7 @@ mod tests {
             joypad1_shift,
             joypad2_shift,
             mdr,
+            irq_wrap_trig,
         };
         bus.write(make_addr(0x00, 0x0100), 0xAA);
         // Read back from the mirror in $00:
@@ -2915,6 +3040,7 @@ mod tests {
             joypad1_shift,
             joypad2_shift,
             mdr,
+            irq_wrap_trig,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -2955,6 +3081,7 @@ mod tests {
             joypad1_shift,
             joypad2_shift,
             mdr,
+            irq_wrap_trig,
         };
         // A write drives 0x5A onto the data bus → latches the MDR.
         bus.write(make_addr(0x00, 0x0100), 0x5A);
@@ -3000,6 +3127,7 @@ mod tests {
             joypad1_shift,
             joypad2_shift,
             mdr,
+            irq_wrap_trig,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -3040,6 +3168,7 @@ mod tests {
             joypad1_shift,
             joypad2_shift,
             mdr,
+            irq_wrap_trig,
         };
         // WMADD = $00:1F00.
         bus.write(make_addr(0x00, 0x2181), 0x00);
@@ -3084,6 +3213,7 @@ mod tests {
                 joypad1_shift,
                 joypad2_shift,
                 mdr,
+                irq_wrap_trig,
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
@@ -3124,6 +3254,7 @@ mod tests {
                 joypad1_shift,
                 joypad2_shift,
                 mdr,
+                irq_wrap_trig,
             };
             bus.write(make_addr(0x00, 0x21FC), b'H');
             bus.write(make_addr(0x00, 0x21FC), b'i');
@@ -3168,6 +3299,7 @@ mod tests {
             joypad1_shift,
             joypad2_shift,
             mdr,
+            irq_wrap_trig,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -3208,6 +3340,7 @@ mod tests {
             joypad1_shift,
             joypad2_shift,
             mdr,
+            irq_wrap_trig,
         };
         // Latch then de-strobe.
         bus.write(make_addr(0x00, 0x4016), 0x01);
@@ -3350,6 +3483,7 @@ mod tests {
             joypad1_shift,
             joypad2_shift,
             mdr,
+            irq_wrap_trig,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -3390,6 +3524,7 @@ mod tests {
             joypad1_shift,
             joypad2_shift,
             mdr,
+            irq_wrap_trig,
         };
         // Trigger channel-0 sync DMA via the bus (→ the segmented path,
         // since HDMAEN != 0).
@@ -3534,6 +3669,7 @@ mod tests {
             joypad1_shift,
             joypad2_shift,
             mdr,
+            irq_wrap_trig,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -3574,6 +3710,7 @@ mod tests {
             joypad1_shift,
             joypad2_shift,
             mdr,
+            irq_wrap_trig,
         };
         let v = bus.read(make_addr(0x00, 0x4210));
         let still_set = bus.cpu_regs.nmi_flag;
@@ -3644,11 +3781,13 @@ mod tests {
         // (Old code fired every scanline boundary — wrong dot.)
         let mut snes = irq_snes();
         snes.cpu_regs.nmitimen = 0x10; // H-IRQ only
-        snes.cpu_regs.htime = 100; // dot 100 → mclk 400
+        snes.cpu_regs.htime = 100; // dot 100 → mclk 400, assert at 410
         snes.ppu_line = 10;
-        snes.advance_scheduler(399); // up to mclk 399, dot-100 not crossed
+        // ares samples the counters 10 clocks in the past (vcounter(10)/
+        // hcounter(10), irq.cpp:26-28), so the assert point is htime*4+10.
+        snes.advance_scheduler(409); // up to mclk 409 — not asserted yet
         assert!(!snes.cpu_regs.irq_flag, "not yet at htime dot");
-        snes.advance_scheduler(2); // crosses mclk 400
+        snes.advance_scheduler(2); // crosses mclk 410
         assert!(snes.cpu_regs.irq_flag, "fires at htime dot 100");
         // Next scanline fires again (H-IRQ is per-line).
         snes.cpu_regs.irq_flag = false;
@@ -3670,7 +3809,9 @@ mod tests {
         assert!(!snes.cpu_regs.irq_flag, "no fire on line 49");
         // Crossing into line 50 fires at its start.
         assert_eq!(snes.ppu_line, 50);
-        snes.advance_scheduler(8); // first dots of line 50
+        // The 10-clock counter-sampling delay puts the assert point 10
+        // clocks into the matching line.
+        snes.advance_scheduler(12); // first dots of line 50, past +10
         assert!(snes.cpu_regs.irq_flag, "V-IRQ fires at line 50 start");
     }
 
@@ -3680,7 +3821,7 @@ mod tests {
         // (it only fired when htime == 0). Must fire at (h=htime, v=vtime).
         let mut snes = irq_snes();
         snes.cpu_regs.nmitimen = 0x30; // H+V IRQ
-        snes.cpu_regs.htime = 80; // dot 80 → mclk 320
+        snes.cpu_regs.htime = 80; // dot 80 → mclk 320, assert at 330
         snes.cpu_regs.vtime = 60;
         // Wrong line: V gate blocks it entirely.
         snes.ppu_line = 59;
@@ -3688,9 +3829,9 @@ mod tests {
         assert!(!snes.cpu_regs.irq_flag, "no fire on line 59");
         // Right line, before the htime dot: still no fire.
         assert_eq!(snes.ppu_line, 60);
-        snes.advance_scheduler(319);
+        snes.advance_scheduler(329);
         assert!(!snes.cpu_regs.irq_flag, "not yet at htime on line 60");
-        // Cross the htime dot on line 60 → fire.
+        // Cross the htime assert point (320 + the 10-clock delay) → fire.
         snes.advance_scheduler(2);
         assert!(
             snes.cpu_regs.irq_flag,
@@ -3712,6 +3853,85 @@ mod tests {
             !snes.cpu_regs.irq_flag,
             "htime past the line never matches → no IRQ"
         );
+        // …and the next line must not fire either (this is NOT the
+        // 10-clock-delay wrap — the dot itself is unreachable).
+        snes.advance_scheduler(MCYCLES_PER_SCANLINE);
+        assert!(!snes.cpu_regs.irq_flag, "no phantom wrap fire");
+    }
+
+    #[test]
+    fn hv_irq_assert_delay_wraps_into_the_next_line() {
+        // htime near the line end: the dot matches on this line, but the
+        // 10-clock detect→assert delay pushes the assert point past the
+        // line boundary — ares' vcounter(10)/hcounter(10) still read the
+        // matching line there, so the IRQ fires in the FIRST clocks of
+        // the next line.
+        let mut snes = irq_snes();
+        snes.cpu_regs.nmitimen = 0x30; // H+V
+        snes.cpu_regs.htime = 339; // dot 339 → mclk 1356; assert at 1366 ≥ 1364
+        snes.cpu_regs.vtime = 60;
+        snes.ppu_line = 60;
+        snes.advance_scheduler(MCYCLES_PER_SCANLINE);
+        assert!(
+            !snes.cpu_regs.irq_flag,
+            "assert point is past this line's end"
+        );
+        assert_eq!(snes.ppu_line, 61);
+        snes.advance_scheduler(4); // crosses the wrapped point (1366-1364=2)
+        assert!(
+            snes.cpu_regs.irq_flag,
+            "wrapped assert fires on the next line's first clocks"
+        );
+    }
+
+    #[test]
+    fn hv_irq_no_trigger_across_the_field_boundary() {
+        // ares irq.cpp:29: `(vcounter(6) || hcounter(6))` — IRQs cannot
+        // trigger on the last dot of a field. A wrap from the field's
+        // LAST line into line 0 is exactly that case and must be
+        // suppressed.
+        let mut snes = irq_snes();
+        let last_line = snes.region_scanlines() - 1;
+        snes.cpu_regs.nmitimen = 0x30;
+        snes.cpu_regs.htime = 339;
+        snes.cpu_regs.vtime = last_line;
+        snes.ppu_line = last_line;
+        snes.advance_scheduler(MCYCLES_PER_SCANLINE);
+        snes.advance_scheduler(16);
+        assert!(
+            !snes.cpu_regs.irq_flag,
+            "no IRQ may trigger across the field boundary"
+        );
+    }
+
+    #[test]
+    fn timeup_hold_window_survives_a_simultaneous_read() {
+        // The raise clock is stamped by poll_hv_irq; a $4211 read whose
+        // bus sample lands within 4 master clocks of it must see the
+        // flag WITHOUT acknowledging it (ares timeup() under irqHold).
+        let mut snes = irq_snes();
+        snes.cpu_regs.nmitimen = 0x10;
+        snes.cpu_regs.htime = 100; // assert at line-relative 410
+        snes.ppu_line = 10;
+        snes.advance_scheduler(412);
+        assert!(snes.cpu_regs.irq_flag);
+        // The raise is stamped at the line-relative assert point (410 =
+        // htime*4 + the 10-clock delay), whatever the absolute base.
+        assert_eq!(
+            snes.cpu_regs.irq_raise_mclk % u64::from(MCYCLES_PER_SCANLINE),
+            410
+        );
+        // Reads go through the bus (`read_inner`: in_hold = mclk_total <
+        // raise + 4); exercise the window arithmetic on both sides.
+        let raise = snes.cpu_regs.irq_raise_mclk;
+        let in_hold = (raise + 2) < raise + 4;
+        assert!(in_hold, "sample 2 clocks after the raise is held");
+        assert_eq!(snes.cpu_regs.read_timeup(in_hold) & 0x80, 0x80);
+        assert!(snes.cpu_regs.irq_flag, "held read must not acknowledge");
+        let in_hold = (raise + 6) < raise + 4;
+        assert!(!in_hold);
+        assert_eq!(snes.cpu_regs.read_timeup(in_hold) & 0x80, 0x80);
+        assert!(!snes.cpu_regs.irq_flag, "post-hold read acknowledges");
     }
 
     #[test]
@@ -3821,6 +4041,7 @@ mod tests {
             joypad1_shift,
             joypad2_shift,
             mdr,
+            irq_wrap_trig,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -3861,6 +4082,7 @@ mod tests {
             joypad1_shift,
             joypad2_shift,
             mdr,
+            irq_wrap_trig,
         };
         bus.write(make_addr(0x00, 0x2100), 0x0F);
         assert_eq!(

@@ -17,7 +17,6 @@ use crate::parsers::{
 use crate::rom::load_rom_into;
 
 /// `luna state` — exercise the public `luna-api` surface end-to-end.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_state(
     rom: &std::path::Path,
     steps: u64,
@@ -174,49 +173,49 @@ pub(crate) fn run_state(
             }
         }
     }
-    if apu_log_path.is_some() {
-        if let Err(e) = em.enable_mailbox_log() {
-            eprintln!("error: enable_mailbox_log: {e}");
-            return ExitCode::from(1);
-        }
+    if apu_log_path.is_some()
+        && let Err(e) = em.enable_mailbox_log()
+    {
+        eprintln!("error: enable_mailbox_log: {e}");
+        return ExitCode::from(1);
     }
-    if sa1_log_path.is_some() {
-        if let Err(e) = em.enable_sa1_log() {
-            eprintln!("error: enable_sa1_log: {e}");
-            return ExitCode::from(1);
-        }
+    if sa1_log_path.is_some()
+        && let Err(e) = em.enable_sa1_log()
+    {
+        eprintln!("error: enable_sa1_log: {e}");
+        return ExitCode::from(1);
     }
-    if sa1_side_log_path.is_some() {
-        if let Err(e) = em.enable_sa1_side_log() {
-            eprintln!("error: enable_sa1_side_log: {e}");
-            return ExitCode::from(1);
-        }
+    if sa1_side_log_path.is_some()
+        && let Err(e) = em.enable_sa1_side_log()
+    {
+        eprintln!("error: enable_sa1_side_log: {e}");
+        return ExitCode::from(1);
     }
-    if sa1_trace_path.is_some() {
-        if let Err(e) = em.enable_sa1_trace(sa1_trace_max) {
-            eprintln!("error: enable_sa1_trace: {e}");
-            return ExitCode::from(1);
-        }
+    if sa1_trace_path.is_some()
+        && let Err(e) = em.enable_sa1_trace(sa1_trace_max)
+    {
+        eprintln!("error: enable_sa1_trace: {e}");
+        return ExitCode::from(1);
     }
-    if superfx_trace_path.is_some() {
-        if let Err(e) = em.enable_superfx_trace(superfx_trace_max) {
-            eprintln!("error: enable_superfx_trace: {e}");
-            return ExitCode::from(1);
-        }
+    if superfx_trace_path.is_some()
+        && let Err(e) = em.enable_superfx_trace(superfx_trace_max)
+    {
+        eprintln!("error: enable_superfx_trace: {e}");
+        return ExitCode::from(1);
     }
-    if spc_trace_path.is_some() {
-        if let Err(e) = em.enable_spc_trace(spc_trace_max) {
-            eprintln!("error: enable_spc_trace: {e}");
-            return ExitCode::from(1);
-        }
+    if spc_trace_path.is_some()
+        && let Err(e) = em.enable_spc_trace(spc_trace_max)
+    {
+        eprintln!("error: enable_spc_trace: {e}");
+        return ExitCode::from(1);
     }
     // Arm the WDM ($42) capture before stepping so the ROM's SNES_ASSERT /
     // breakpoint channel is recorded (issue #85 — parity with `luna run`).
-    if wdm_out.is_some() {
-        if let Err(e) = em.enable_wdm_log() {
-            eprintln!("error: enable_wdm_log: {e}");
-            return ExitCode::from(1);
-        }
+    if wdm_out.is_some()
+        && let Err(e) = em.enable_wdm_log()
+    {
+        eprintln!("error: enable_wdm_log: {e}");
+        return ExitCode::from(1);
     }
     // Parse `frame:hex` checkpoints into a sorted vector. We apply
     // them by stepping `step_until_frame` between checkpoints — a
@@ -318,17 +317,19 @@ pub(crate) fn run_state(
         }
     }
     // Enable whichever traces are at or past their target now.
-    if cpu_trace_path.is_some() && em.instructions_executed() >= cpu_trace_from {
-        if let Err(e) = em.enable_cpu_trace(cpu_trace_max) {
-            eprintln!("error: enable_cpu_trace: {e}");
-            return ExitCode::from(1);
-        }
+    if cpu_trace_path.is_some()
+        && em.instructions_executed() >= cpu_trace_from
+        && let Err(e) = em.enable_cpu_trace(cpu_trace_max)
+    {
+        eprintln!("error: enable_cpu_trace: {e}");
+        return ExitCode::from(1);
     }
-    if mem_trace_path.is_some() && em.instructions_executed() >= mem_trace_from {
-        if let Err(e) = em.enable_mem_trace(mem_trace_max, parsed_mem_bank, parsed_mem_addr) {
-            eprintln!("error: enable_mem_trace: {e}");
-            return ExitCode::from(1);
-        }
+    if mem_trace_path.is_some()
+        && em.instructions_executed() >= mem_trace_from
+        && let Err(e) = em.enable_mem_trace(mem_trace_max, parsed_mem_bank, parsed_mem_addr)
+    {
+        eprintln!("error: enable_mem_trace: {e}");
+        return ExitCode::from(1);
     }
     // If the two targets differ, bridge to the second one and enable.
     if cpu_trace_path.is_some() && mem_trace_path.is_some() && cpu_trace_from != mem_trace_from {
@@ -379,10 +380,10 @@ pub(crate) fn run_state(
             if em.step_until_frame(FRAME_BUDGET).unwrap_or(0) == 0 {
                 break;
             }
-            if audio_out.is_some() {
-                if let Ok(mut chunk) = em.drain_audio(usize::MAX) {
-                    audio_accum.append(&mut chunk);
-                }
+            if audio_out.is_some()
+                && let Ok(mut chunk) = em.drain_audio(usize::MAX)
+            {
+                audio_accum.append(&mut chunk);
             }
         }
     } else if audio_out.is_some() {

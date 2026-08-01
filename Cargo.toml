@@ -16,13 +16,20 @@ members = [
 ]
 
 [workspace.package]
-version = "1.10.1"
+version = "1.11.0"
 edition = "2024"
-rust-version = "1.85"
+# Kept equal to the pinned toolchain (rust-toolchain.toml) — the only
+# rustc this workspace is actually built and tested with. The previous
+# claim (1.85) was never compiled and was already false (transitive
+# deps require >= 1.87).
+rust-version = "1.95"
 license = "MPL-2.0"
 authors = ["Luna contributors"]
-repository = "https://github.com/kobenairb/luna"
+repository = "https://github.com/k0b3n4irb/luna"
 readme = "README.md"
+# Not published to crates.io (workspace-internal paths, MPL-2.0 app).
+# Flip per-crate if/when the standalone CPU cores are released.
+publish = false
 
 [workspace.lints.rust]
 unsafe_code = "deny"
@@ -131,8 +138,6 @@ bincode     = "1.3"
 # serde's stock impls do not cover) — used by save-state on RAM/cache arrays.
 serde_bytes = "0.11"
 thiserror   = "2"
-tracing     = "0.1"
-futures     = { version = "0.3", default-features = false, features = ["alloc"] }
 
 # Async runtime — needed by luna-cli (tokio main) and luna-mcp-server.
 tokio       = { version = "1", default-features = false }

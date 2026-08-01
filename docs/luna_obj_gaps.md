@@ -144,8 +144,15 @@ so they aren't lost:
 - **OBJ cross-scanline sprite fetch-ahead** — ares evaluates line N+1's sprites
   during line N; luna decodes once per scanline with no fetch-ahead. Cosmetic
   at most (affects only exact mid-OAM-write timing).
-- **PPU register read open-bus** — reads of write-only / unmapped `$21xx` return
-  a fixed value, not the PPU MDR open-bus latch (`ppu.rs` read fallthrough).
+- ~~**PPU register read open-bus**~~ — **FIXED 2026-07-26**: `Ppu::read` now
+  models the two per-chip MDR latches faithfully (ares `ppu1.mdr`/`ppu2.mdr`,
+  io.cpp readIO; Mesen2 `SnesPpu::Read` agrees): the PPU1 write-only family
+  (`$2104-06/08-0A/14-16/18-1A/24-26/28-2A`) returns `ppu1_mdr`, every other
+  write-only register + SLHV returns the **CPU** MDR, and CGDATAREAD /
+  OPHCT / OPVCT / STAT77 / STAT78 perform their partial (stale-bit) updates.
+  Unit tests cover each stale-bit case. Remaining sliver: STAT78 bit 6
+  should read as forced-1 while `$4201` bit 7 is held low (ares io.cpp
+  `!cpu.pio()` branch) — needs the PIO line plumbed into the PPU read.
 - **General mid-scanline register latching** — per-scanline render + a partial
   mid-scanline flush exist (`flush_partial_scanline`), but not every register is
   latched at its exact dot.

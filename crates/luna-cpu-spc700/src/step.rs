@@ -92,7 +92,6 @@ impl Spc700 {
     /// Each arm performs exactly one bus access per `op_step` so the
     /// access sequence matches the atomic handler in `opcodes.rs`
     /// byte-for-byte. Ported group by group (plan Stage 2).
-    #[allow(clippy::too_many_lines)]
     fn execute_cycle<B: SpcBus>(&mut self, bus: &mut B) -> bool {
         match self.op {
             // =============================================================
