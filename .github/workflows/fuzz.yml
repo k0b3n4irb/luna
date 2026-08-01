@@ -49,6 +49,11 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
       - name: Fuzz ${{ matrix.target }}
+        # The repo pins stable in rust-toolchain.toml, which would win
+        # over the installed nightly for cargo-fuzz's inner `cargo build`
+        # (`-Zsanitizer` is nightly-only) — force it for this step.
+        env:
+          RUSTUP_TOOLCHAIN: nightly
         run: |
           MINUTES="${{ github.event.inputs.minutes || '5' }}"
           cargo fuzz run "${{ matrix.target }}" -- \
