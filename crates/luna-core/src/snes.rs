@@ -2388,12 +2388,14 @@ impl SnesBus<'_> {
             return self.wram[o];
         }
         if let Some(off) = Self::ppu_offset(addr) {
-            // $2137 SLHV — reading also latches the H/V counters
-            // into OPHCT / OPVCT. The returned byte is the CPU's own
+            // $2137 SLHV — reading latches the H/V counters into
+            // OPHCT / OPVCT, but ONLY while the WRIO latch line is high
+            // (ares ppu/io.cpp $2137 `if(cpu.pio().bit(7))`; Mesen2
+            // SnesPpu.cpp agrees). The returned byte is the CPU's own
             // MDR (ares readIO `return data;`), which `Ppu::read`
             // reproduces for every register that is write-only on both
             // PPU chips.
-            if off == luna_ppu::register::SLHV {
+            if off == luna_ppu::register::SLHV && self.cpu_regs.wrio & 0x80 != 0 {
                 let (h, v) = self.hv();
                 self.ppu.latch_counters(h, v);
             }
@@ -2741,15 +2743,20 @@ impl SnesBus<'_> {
             return;
         }
         if let Some(reg_off) = Self::cpu_reg_offset(addr) {
-            // WRIO ($4201) bit 7 0→1 transition latches the PPU H/V
-            // counters. Check BEFORE handing off to CpuRegs::write so
-            // we can see the previous value.
+            // WRIO ($4201): the PPU H/V counters latch on the FALLING
+            // edge of bit 7 (ares cpu/io.cpp:143 `io.pio.bit(7) &&
+            // !data.bit(7)`; Mesen2 InternalRegisters.cpp:338 agrees) —
+            // luna had the polarity inverted (0→1) until 2026-08-01.
+            // Checked BEFORE CpuRegs::write so we see the previous value.
+            // The PPU also mirrors the line level for the STAT78 bit-6
+            // gate (held low ⇒ bit 6 reads 1, latch flag not cleared).
             if reg_off == 0x4201 {
                 let prev = self.cpu_regs.wrio;
-                if prev & 0x80 == 0 && value & 0x80 != 0 {
+                if prev & 0x80 != 0 && value & 0x80 == 0 {
                     let (h, v) = self.hv();
                     self.ppu.latch_counters(h, v);
                 }
+                self.ppu.pio_bit7 = value & 0x80 != 0;
             }
             // P2 — late NMI enable: raising NMITIMEN.7 (0→1) while the NMI line
             // is still asserted ($4210 flag set, i.e. mid-VBlank, un-read) fires
@@ -3012,6 +3019,100 @@ mod tests {
         assert_eq!(bus.read(make_addr(0x00, 0x0100)), 0xAA);
         // And from $7E (full WRAM):
         assert_eq!(bus.read(make_addr(0x7E, 0x0100)), 0xAA);
+    }
+
+    #[test]
+    fn wrio_latch_fires_on_falling_edge_and_slhv_gates_on_pio_high() {
+        // ares cpu/io.cpp:143: the H/V counter latch fires when WRIO
+        // bit 7 FALLS (1→0); the pins power up HIGH ($FF). A rising
+        // edge must NOT latch, and SLHV ($2137) only latches while the
+        // line is high.
+        let cart = demo_lorom();
+        let mut snes = Snes::from_cartridge(cart);
+        let scanlines = snes.region_scanlines();
+        let ppu_line_snapshot = snes.ppu_line;
+        let vblank_start_snapshot = vblank_start_line(snes.region);
+        let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
+        assert_eq!(snes.cpu_regs.wrio, 0xFF, "WRIO powers up high");
+        let Snes {
+            ppu,
+            dma,
+            cpu_regs,
+            apu_real,
+            apu_stub_fallback,
+            apu_panicked,
+            wram,
+            mapper,
+            fast_rom,
+            nmi_pending,
+            irq_pending,
+            total_mclk,
+            wm_addr,
+            joypad_strobe,
+            joypad1_shift,
+            joypad2_shift,
+            mdr,
+            irq_wrap_trig,
+            mailbox_log,
+            sa1_log,
+            mem_trace_log,
+            breakpoints,
+            nocash_log,
+            ..
+        } = &mut snes;
+        let mut bus = SnesBus {
+            wram,
+            mapper: mapper.as_mut(),
+            ppu,
+            dma,
+            cpu_regs,
+            apu_real,
+            apu_stub_fallback,
+            apu_panicked,
+            fast_rom: *fast_rom,
+            nmi: nmi_pending,
+            irq: irq_pending,
+            mclk_total: total_mclk,
+            scanlines_per_frame: scanlines,
+            scpu_mar: 0,
+            clock_count: 8,
+            ppu_line: ppu_line_snapshot,
+            mcycles_in_line: 0,
+            frame_count: 0,
+            nmis_serviced: 0,
+            sched_enabled: false,
+            vblank_start_line: vblank_start_snapshot,
+            cpu_pc_full: cpu_pc_snapshot,
+            mailbox_log,
+            sa1_log,
+            mem_trace_log,
+            breakpoints,
+            nocash_log,
+            wm_addr,
+            joypad_strobe,
+            joypad1_shift,
+            joypad2_shift,
+            mdr,
+            irq_wrap_trig,
+        };
+        // Falling edge (FF → 00): latch fires, PIO mirror goes low.
+        bus.write(make_addr(0x00, 0x4201), 0x00);
+        assert!(bus.ppu.external_latch_hit, "1→0 must latch");
+        assert!(!bus.ppu.pio_bit7);
+        // While low, STAT78 bit 6 reads 1 and does not clear the flag.
+        assert_eq!(bus.read(make_addr(0x00, 0x213F)) & 0x40, 0x40);
+        assert!(bus.ppu.external_latch_hit);
+        // While low, SLHV must NOT latch.
+        bus.ppu.external_latch_hit = false;
+        let _ = bus.read(make_addr(0x00, 0x2137));
+        assert!(!bus.ppu.external_latch_hit, "SLHV gated while PIO low");
+        // Rising edge (00 → 80): NO latch, mirror goes high again.
+        bus.write(make_addr(0x00, 0x4201), 0x80);
+        assert!(!bus.ppu.external_latch_hit, "0→1 must not latch");
+        assert!(bus.ppu.pio_bit7);
+        // SLHV latches again with the line high.
+        let _ = bus.read(make_addr(0x00, 0x2137));
+        assert!(bus.ppu.external_latch_hit, "SLHV latches while PIO high");
     }
 
     #[test]
