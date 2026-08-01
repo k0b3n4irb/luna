@@ -51,7 +51,7 @@ jobs:
             format: tar.gz
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # Linux's only build-time system dep for both binaries: ALSA headers
       # (cpal → alsa-sys). winit/wgpu dlopen X11/Wayland/Vulkan at runtime; rfd
