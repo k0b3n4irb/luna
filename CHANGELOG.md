@@ -29,6 +29,18 @@ All notable user-facing changes to luna. Releases are cut from `main`
   handshake legible (Super Mario Kart: four `R` sites hit 21 462 times
   each, i.e. a four-word result handed back one word per site, with the
   `S` polls clustered on the first of them).
+  - `--dsp1-trace-commands`: the same capture grouped into **command
+    transactions** — one row per command byte with the input words it
+    consumed and the output words it produced, against the `OpenSNES`
+    command table. Transaction boundaries come from the protocol (an
+    8-bit `DRC` write opens a command), **never** from the table, so a
+    stale word count surfaces as `status=mismatch` on that one row
+    instead of silently mis-grouping the rest of the capture — a word
+    count is documentation, and documentation must not be able to make
+    the emulator look broken. Each row carries a `confidence`
+    (`verified` / `documented` / `provisional`) so a disagreement can be
+    weighed rather than taken as a verdict; open-ended operations
+    (Raster, ROM dump) report their observed length and assert nothing.
   Note the neighbouring flag names: `--dsp-trace` is the **audio**
   S-DSP, `--dsp1-trace` the **cart coprocessor**.
 
