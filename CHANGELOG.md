@@ -24,6 +24,11 @@ All notable user-facing changes to luna. Releases are cut from `main`
     firmware idles in a two-instruction RQM wait loop, so a full trace
     spends its entire budget on idle spin before the interesting command
     lands (observed on Super Mario Kart: 200 000 events, all idle).
+  On a port row `pc` is the **microcode** PC at the moment the CPU
+  touched the port, not a CPU address — grouping by it is what makes a
+  handshake legible (Super Mario Kart: four `R` sites hit 21 462 times
+  each, i.e. a four-word result handed back one word per site, with the
+  `S` polls clustered on the first of them).
   Note the neighbouring flag names: `--dsp-trace` is the **audio**
   S-DSP, `--dsp1-trace` the **cart coprocessor**.
 

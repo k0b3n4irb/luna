@@ -163,7 +163,9 @@ struct Upd96050State {
 pub struct TraceEvent {
     /// What happened.
     pub kind: TraceKind,
-    /// Program counter of the executed instruction (`Exec` only).
+    /// Microcode program counter. On `Exec` this is the instruction that
+    /// ran; on a port event it is where the microcode was sitting when the
+    /// CPU touched the port -- which spin-wait a handshake stalled in.
     pub pc: u16,
     /// The 24-bit microcode word (`Exec` only).
     pub opcode: u32,
@@ -314,7 +316,7 @@ impl Upd96050 {
     pub fn read_sr(&mut self) -> u8 {
         let v = (self.regs.sr.to_u16() >> 8) as u8;
         if self.trace.is_some() {
-            self.trace_push(TraceKind::SrRead, 0, 0, v);
+            self.trace_push(TraceKind::SrRead, self.regs.pc.get(), 0, v);
         }
         v
     }
@@ -326,7 +328,7 @@ impl Upd96050 {
     pub fn read_dr(&mut self) -> u8 {
         let v = self.read_dr_inner();
         if self.trace.is_some() {
-            self.trace_push(TraceKind::DrRead, 0, 0, v);
+            self.trace_push(TraceKind::DrRead, self.regs.pc.get(), 0, v);
         }
         v
     }
@@ -353,7 +355,7 @@ impl Upd96050 {
     pub fn write_dr(&mut self, data: u8) {
         self.write_dr_inner(data);
         if self.trace.is_some() {
-            self.trace_push(TraceKind::DrWrite, 0, 0, data);
+            self.trace_push(TraceKind::DrWrite, self.regs.pc.get(), 0, data);
         }
     }
 

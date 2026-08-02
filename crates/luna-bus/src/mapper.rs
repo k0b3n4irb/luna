@@ -335,7 +335,9 @@ pub struct Sa1Snapshot {
 pub struct Dsp1TraceEvent {
     /// `E` = executed instruction, `W`/`R` = DR write/read, `S` = SR poll.
     pub kind: Dsp1TraceKind,
-    /// Program counter of the executed instruction (`Exec` only).
+    /// Microcode program counter. On `Exec` this is the instruction that
+    /// ran; on a port event it is where the microcode was sitting when the
+    /// CPU touched the port -- which spin-wait a handshake stalled in.
     pub pc: u16,
     /// 24-bit microcode word (`Exec` only).
     pub opcode: u32,
