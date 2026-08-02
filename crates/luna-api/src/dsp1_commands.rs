@@ -129,23 +129,41 @@ const OPERATIONS: &[Operation] = &[
         Confidence::Documented,
     ),
     op("Gyrate", &[0x14, 0x34], 6, 3, Confidence::Provisional),
-    // Parameter's output count was flagged provisional ("~4") by OpenSNES.
-    // luna observes a stable 7-in/4-out over 112 consecutive Super Mario
-    // Kart transactions, so it is carried here as 4 — still Provisional
-    // until their module confirms it from the other side.
+    // Out-count was OpenSNES's least certain row ("~4"). luna measured a
+    // stable 7-in/4-out over 112 consecutive Super Mario Kart transactions
+    // and they promoted it on that evidence, so it is Verified here.
+    // (Their remaining uncertainty is what the four scalars *mean* —
+    // a semantics question this decoder does not touch.)
     op(
         "Parameter",
         &[0x02, 0x12, 0x22, 0x32],
         7,
         4,
-        Confidence::Provisional,
+        Confidence::Verified,
     ),
     op("RamTest", &[0x0F, 0x07], 1, 2, Confidence::Provisional),
     op("RomVersion", &[0x2F, 0x27], 1, 2, Confidence::Provisional),
+    // Sync / Reset: flushes any pending command state and returns the chip
+    // to command-wait (snes9x HLE dispatch, `case 0x80` under `default:`).
+    // Super Mario Kart hammers it 128x at boot to reach a known listening
+    // state before its first real command.
+    //
+    // It shares snes9x's `default:` arm, so an unrecognised byte behaves
+    // identically (0/0). Only $80 is *named* — any other byte stays
+    // `Unknown`, because same behaviour is not same meaning, and a byte we
+    // cannot name is exactly the thing worth surfacing.
+    op("Sync", &[0x80], 0, 0, Confidence::Documented),
     // Open-ended: Raster emits a per-scanline matrix stream until the
     // master stops it, and ROM dump streams the whole 2048-word ROM.
-    // OpenSNES gave no word counts for either, so neither is claimed —
-    // the observed counts are reported and nothing is asserted.
+    // Neither output length is claimed.
+    //
+    // Raster's *input* is left unasserted too. luna measures 5 setup words
+    // on Super Mario Kart and OpenSNES took that into their table, but
+    // flagged it pending confirmation that it is general rather than
+    // SMK-specific. Asserting an unconfirmed 5 would make any title with a
+    // different setup length read as `mismatch` — i.e. our documentation
+    // making the emulator look wrong, the one failure mode this module
+    // exists to prevent. It stays reported, not required, until confirmed.
     unbounded("Raster", &[0x0A, 0x1A, 0x2A, 0x3A]),
     unbounded("RomDump", &[0x1F, 0x17, 0x37, 0x3F]),
 ];
@@ -397,13 +415,37 @@ mod tests {
         }
     }
 
+    /// `$80` is Sync/Reset. It shares snes9x's `default:` arm, so an
+    /// unrecognised byte behaves the same (0 in / 0 out) — but identical
+    /// behaviour is not identical meaning, and only `$80` gets a name.
     #[test]
-    fn an_unknown_command_is_observed_not_guessed() {
-        // $80: Super Mario Kart writes it 128x at boot with no payload.
-        let tx = decode(&[cmd(0x80)], false);
-        assert_eq!(tx[0].name, "?");
-        assert_eq!(tx[0].status, TxStatus::Unknown);
+    fn sync_is_named_but_a_look_alike_unknown_byte_is_not() {
+        let sync = decode(&[cmd(0x80)], false);
+        assert_eq!(sync[0].name, "Sync");
+        assert_eq!(sync[0].status, TxStatus::Ok);
+        assert_eq!(sync[0].expected_in, Some(0));
+
+        // Same observable shape, no name, nothing asserted.
+        let unknown = decode(&[cmd(0x55)], false);
+        assert_eq!(unknown[0].name, "?");
+        assert_eq!(unknown[0].status, TxStatus::Unknown);
+        assert_eq!(unknown[0].expected_in, None);
+    }
+
+    /// Raster's setup length is measured, not required: `OpenSNES` flagged
+    /// the 5 words luna saw on Super Mario Kart as unconfirmed-general, so
+    /// a title using a different setup must NOT read as a mismatch.
+    #[test]
+    fn raster_setup_length_is_reported_not_asserted() {
+        let mut s: Vec<Dsp1TraceEvent> = vec![cmd(0x0A)];
+        for i in 0..3u16 {
+            s.extend(word(Dsp1TraceKind::DrWrite, i));
+        }
+        s.extend(word(Dsp1TraceKind::DrRead, 0xBEEF));
+        let tx = decode(&s, false);
+        assert_eq!(tx[0].in_words.len(), 3);
         assert_eq!(tx[0].expected_in, None);
+        assert_eq!(tx[0].status, TxStatus::Unbounded);
     }
 
     #[test]
