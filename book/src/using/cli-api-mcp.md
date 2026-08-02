@@ -96,6 +96,9 @@ and is the hub for every headless diagnostic.
 | `--dump-aram <PATH>` | — | Dump all 64 KB APU ARAM (raw). |
 | `--dump-coproc-ram <PATH>` | — | Dump coprocessor work RAM (Super FX Game Pak RAM), ungated. |
 | `--apu-log <PATH>` | — | CSV of every `$2140-$2143` CPU↔APU mailbox access. |
+| `--dsp1-trace <PATH>` | — | DSP-1 (µPD77C25) trace: microcode execution **and** CPU-side DR/SR traffic in one stream — `seq,kind,pc,opcode,value,a,b,dr,sr,rqm` (`kind` = E/W/R/S). |
+| `--dsp1-trace-ports` | off | Restrict the above to the DR/SR transactions (the stock firmware idles in an RQM loop, so a full trace is mostly idle spin). |
+| `--dsp1-trace-max <N>` | `200000` | Cap on captured DSP-1 events. |
 | `--dsp-trace <PATH>` | — | CSV of every DSP register write: `spc_cycles,reg,name,value`, with `name` decoded (`V0_ADSR1`, `KON`, `FLG`, …). |
 | `--dsp-trace-max <N>` | `100000` | Cap on captured DSP writes. |
 | `--sa1-log <PATH>` | — | CSV of every `$2200-$23FF` SA-1 MMIO access. |
@@ -134,6 +137,31 @@ averages them into the displayed 256×224 — `--native-res` keeps them:
 luna state -n 8000000 --force-mapper lorom --force-region pal --native-res \
   --screenshot /tmp/font.png --print-fbhash \
   "PPU/Interlace/InterlaceFont/InterlaceFont.sfc"   # → a 512×448 PNG
+```
+
+#### Coprocessor liveness and the DSP-1 handshake
+
+`--superfx-trace` and `--sa1-trace` let a harness prove those chips ran;
+`--dsp1-trace` closes the gap for the DSP-1 (µPD77C25). Note the two
+distinct flags: `--dsp-trace` is the **audio** S-DSP, `--dsp1-trace` the
+**cart coprocessor**.
+
+```bash
+# Liveness without any trace: state JSON carries the instruction count.
+luna state "Super Mario Kart (USA).sfc" -n 5000000 --out - \
+  | jq '.dsp1.instructions_executed'    # assert >= 1
+# -> 41780039
+
+# The command handshake. --dsp1-trace-ports is what makes it readable:
+# the stock firmware idles in a two-instruction RQM wait loop, so a full
+# trace spends its whole budget on idle spin before your command lands.
+luna state "Super Mario Kart (USA).sfc" -n 5000000 \
+  --dsp1-trace dsp1.csv --dsp1-trace-ports
+# seq,kind,pc,opcode,value,a,b,dr,sr,rqm
+# 0,W,$0000,$000000,$80,$0000,$00C0,$0080,$0400,0   <- command byte in
+# 1,R,$0000,$000000,$3C,$0080,$00C0,$3C00,$8400,1   <- result byte out
+
+# Drop --dsp1-trace-ports to see the microcode between the transactions.
 ```
 
 #### Audio-side visibility
