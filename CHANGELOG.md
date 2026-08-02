@@ -6,6 +6,27 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Added
+- **`--dsp1-trace` for DSP-1 (µPD77C25) visibility**
+  ([#158](https://github.com/k0b3n4irb/luna/issues/158)) — parity with
+  `--superfx-trace` / `--sa1-trace`, so a headless harness can prove the
+  DSP-1 executed the same way it already can for the other two
+  coprocessors. Three parts:
+  - `dsp1.instructions_executed` in the `state` JSON: the
+    coproc-liveness counter, readable **without** enabling any trace.
+  - `--dsp1-trace` (+ `--dsp1-trace-max`): microcode execution **and**
+    the CPU-side DR/SR port traffic in ONE interleaved stream
+    (`seq,kind,pc,opcode,value,a,b,dr,sr,rqm`, `kind` = E/W/R/S) —
+    because the question a driver author asks is "did my command byte
+    land before or after the chip cleared RQM?", which two separate logs
+    cannot answer.
+  - `--dsp1-trace-ports`: restrict to the DR/SR transactions. The stock
+    firmware idles in a two-instruction RQM wait loop, so a full trace
+    spends its entire budget on idle spin before the interesting command
+    lands (observed on Super Mario Kart: 200 000 events, all idle).
+  Note the neighbouring flag names: `--dsp-trace` is the **audio**
+  S-DSP, `--dsp1-trace` the **cart coprocessor**.
+
 ## [1.12.0] — 2026-08-01
 
 Player comfort and debugging reach. The GUI gains the three things

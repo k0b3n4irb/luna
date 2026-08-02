@@ -21,7 +21,8 @@ pub use cpu_regs::CpuRegs;
 pub use dma::{DmaTraceEvent, DmaTraceLog};
 pub use luna_apu::Spc700TraceEvent;
 pub use luna_bus::{
-    Mapper, MapperKind, NullMapper, Sa1SideEvent, Sa1TraceEvent, SuperFxTraceEvent,
+    Dsp1TraceEvent, Dsp1TraceKind, Mapper, MapperKind, NullMapper, Sa1SideEvent, Sa1TraceEvent,
+    SuperFxTraceEvent,
 };
 pub use snes::{
     CpuTraceEvent, CpuTraceLog, MailboxEvent, MailboxEventKind, MemEventKind, MemTraceEvent,

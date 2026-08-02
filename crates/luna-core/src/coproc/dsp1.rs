@@ -172,6 +172,38 @@ impl Mapper for Dsp1Mapper {
         self.cycle_acc = 0;
     }
 
+    fn enable_dsp1_trace(&mut self, max_events: usize, ports_only: bool) {
+        self.dsp.enable_trace(max_events, ports_only);
+    }
+
+    fn take_dsp1_trace(&mut self) -> Vec<luna_bus::Dsp1TraceEvent> {
+        use luna_cpu_upd96050::TraceKind as K;
+        self.dsp
+            .take_trace()
+            .into_iter()
+            .map(|e| luna_bus::Dsp1TraceEvent {
+                kind: match e.kind {
+                    K::Exec => luna_bus::Dsp1TraceKind::Exec,
+                    K::DrWrite => luna_bus::Dsp1TraceKind::DrWrite,
+                    K::DrRead => luna_bus::Dsp1TraceKind::DrRead,
+                    K::SrRead => luna_bus::Dsp1TraceKind::SrRead,
+                },
+                pc: e.pc,
+                opcode: e.opcode,
+                value: e.value,
+                a: e.a,
+                b: e.b,
+                dr: e.dr,
+                sr: e.sr,
+                rqm: e.rqm,
+            })
+            .collect()
+    }
+
+    fn dsp1_instructions(&self) -> Option<u64> {
+        Some(self.dsp.instructions_executed)
+    }
+
     fn dsp1_snapshot(&self) -> Option<luna_bus::Dsp1Snapshot> {
         Some(luna_bus::Dsp1Snapshot {
             pc: self.dsp.pc(),
@@ -312,6 +344,30 @@ mod tests {
         assert_eq!(restored.cycle_acc, 12_345);
         // A corrupt blob is ignored rather than panicking.
         restored.load_state(&[0xFF; 4]);
+    }
+
+    #[test]
+    fn the_trace_and_liveness_counter_are_wired_through_the_shim() {
+        // Issue #158: the trait hooks must reach the chip, and the
+        // counter must be readable without enabling a trace.
+        let mut m = Dsp1Mapper::new(rom(), 0, Some(&firmware()), true);
+        assert_eq!(m.dsp1_instructions(), Some(0));
+        m.enable_dsp1_trace(16, true);
+        // A DR write through the bus window must land in the trace.
+        assert!(m.write(make_addr(0x00, 0x6000), 0x5A));
+        let events = m.take_dsp1_trace();
+        assert_eq!(events.len(), 1, "the port write is traced");
+        assert_eq!(events[0].value, 0x5A);
+        assert!(m.take_dsp1_trace().is_empty(), "draining empties it");
+    }
+
+    #[test]
+    fn a_non_dsp1_mapper_reports_no_liveness_counter() {
+        // The default trait impls must stay inert for other carts, so a
+        // harness can tell "no DSP-1" from "DSP-1 that never ran".
+        use luna_bus::lorom::LoRomMapper;
+        let plain = LoRomMapper::new(rom(), 0);
+        assert_eq!(plain.dsp1_instructions(), None);
     }
 
     #[test]
