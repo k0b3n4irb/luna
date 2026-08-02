@@ -158,11 +158,32 @@ luna state "Super Mario Kart (USA).sfc" -n 5000000 --out - \
 luna state "Super Mario Kart (USA).sfc" -n 5000000 \
   --dsp1-trace dsp1.csv --dsp1-trace-ports
 # seq,kind,pc,opcode,value,a,b,dr,sr,rqm
-# 0,W,$0000,$000000,$80,$0000,$00C0,$0080,$0400,0   <- command byte in
-# 1,R,$0000,$000000,$3C,$0080,$00C0,$3C00,$8400,1   <- result byte out
+# 0,W,$0004,$000000,$80,$0000,$00C0,$0080,$0400,0   <- command byte in
+# 143,S,$0185,$000000,$00,$7FFF,$0000,$3400,$0000,0 <- poll: RQM clear, busy
+# 195,R,$034D,$000000,$00,$003E,$0000,$0000,$9000,1 <- result byte out
 
 # Drop --dsp1-trace-ports to see the microcode between the transactions.
 ```
+
+On a port row `pc` is *not* a CPU address: it is where the DSP-1 microcode
+was sitting when the CPU touched the port. That is the column that turns a
+handshake into something readable — group by it and the firmware's structure
+falls out. On the run above:
+
+```console
+$ awk -F, 'NR>1 {print $2, $3}' dsp1.csv | sort | uniq -c | sort -rn | head -5
+  21462 R $038F
+  21462 R $038D
+  21462 R $038A
+  21462 R $0387
+  19224 S $0387
+```
+
+Four read sites hit an identical number of times is the firmware handing back
+a four-word result, one word per site — and the `S` rows at `$0387` are the
+CPU polling the same site until `RQM` comes up. An off-by-one in a command's
+result length shows up here as a fifth site, or as one count that does not
+match the others.
 
 #### Audio-side visibility
 
