@@ -6,6 +6,17 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Removed
+- **Dependabot** (`.github/dependabot.yml`) — the bot was never
+  authorised by the maintainer. It arrived bundled inside the
+  supply-chain lot (#129) rather than as a decision of its own, and a
+  third-party app opening pull requests against this repository is
+  exactly the kind of change that needs to be asked for, not inferred.
+  Dependency updates are now manual; `cargo deny` (CI + weekly) remains
+  the gate that *surfaces* advisories, and acting on one is a maintainer
+  call. Dependabot alerts and automated security fixes were already off
+  at the repository level and stay off.
+
 ### Added
 - **`--dsp1-trace` for DSP-1 (µPD77C25) visibility**
   ([#158](https://github.com/k0b3n4irb/luna/issues/158)) — parity with
