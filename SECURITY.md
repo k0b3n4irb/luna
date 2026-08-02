@@ -30,4 +30,7 @@ public issue for an exploitable bug before a fix has shipped.
 - `Cargo.lock` is committed; release binaries are built with `--locked`.
 - `cargo deny` (advisories + licenses + sources) runs in CI on every
   change to the dependency graph and weekly (`deny.yml`).
-- Dependencies are updated via Dependabot (weekly, grouped).
+- Dependency updates are **manual and deliberate**: no bot opens pull
+  requests against this repository. `cargo deny` is the gate that
+  surfaces a vulnerable or unlicensed dependency; acting on it is a
+  maintainer decision, not an automated one.
