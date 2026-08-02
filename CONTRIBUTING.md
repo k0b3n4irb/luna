@@ -55,10 +55,8 @@ cargo build --workspace --all-targets \
   `feat(cli): ...`, `docs: ...`. No `Co-authored-by`/tool-attribution
   trailers.
 - **Branches/PRs**: branch from `develop`, PR back to `develop`
-  (squash-merged). `main` only receives release merges — including
-  **Dependabot's**: it is configured with `target-branch: develop`, so
-  check the base before merging a bot PR. A bump landing on `main`
-  directly makes the next release PR conflict on `Cargo.lock`.
+  (squash-merged). `main` only receives release merges. A change landing
+  on `main` directly makes the next release PR conflict on `Cargo.lock`.
 - **Accuracy work**: read the matching reference implementation (ares +
   Mesen2) *first* — see
   [`.claude/rules/reference-first.md`](.claude/rules/reference-first.md) —
