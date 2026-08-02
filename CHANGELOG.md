@@ -41,6 +41,13 @@ All notable user-facing changes to luna. Releases are cut from `main`
     (`verified` / `documented` / `provisional`) so a disagreement can be
     weighed rather than taken as a verdict; open-ended operations
     (Raster, ROM dump) report their observed length and assert nothing.
+    Two rows were settled by measuring rather than by reading a doc:
+    `$02` Parameter is 7-in/4-out (stable over 112 consecutive Super
+    Mario Kart transactions, promoted upstream on that evidence), and
+    `$80` is Sync/Reset — 0/0, hammered 128x at boot to force the chip
+    into command-wait. Only `$80` is named: an unrecognised byte
+    behaves identically in the reference HLE dispatch, but identical
+    behaviour is not identical meaning, so it stays `unknown`.
   Note the neighbouring flag names: `--dsp-trace` is the **audio**
   S-DSP, `--dsp1-trace` the **cart coprocessor**.
 
