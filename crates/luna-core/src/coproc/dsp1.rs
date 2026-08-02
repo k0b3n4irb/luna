@@ -198,3 +198,128 @@ impl Mapper for Dsp1Mapper {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Dsp1Mapper, FIRMWARE_BYTES};
+    use luna_bus::mapper::{Mapper, MapperKind};
+    use luna_bus::types::make_addr;
+
+    /// A 64 KB LoROM-shaped image; contents don't matter for the shim,
+    /// only that base reads return *something* distinguishable.
+    fn rom() -> Vec<u8> {
+        vec![0xA5; 0x1_0000]
+    }
+
+    /// Firmware of the right size. The words are nonsense — these tests
+    /// exercise the SHIM (address decode, port routing, plumbing), not
+    /// the uPD7725 core, which has its own byte-exact DR differential
+    /// against Mesen2 (`tests/dsp1_port_differential.rs`).
+    fn firmware() -> Vec<u8> {
+        vec![0u8; FIRMWARE_BYTES]
+    }
+
+    #[test]
+    fn hirom_board_decodes_dr_at_6xxx_and_sr_at_7xxx() {
+        // HiROM 1K board: window $00-1F:6000-7FFF, and the DR/SR select
+        // is bit 12 — NOT bit 0. Getting that wrong is a real historical
+        // hazard (the select sits ABOVE ares' compacted board mask), and
+        // it silently routes every command byte to the status port.
+        let m = Dsp1Mapper::new(rom(), 0, Some(&firmware()), true);
+        assert_eq!(m.dsp_select(0x00, 0x6000), Some(false), "$6000 = DR");
+        assert_eq!(m.dsp_select(0x00, 0x6FFF), Some(false), "$6FFF = DR");
+        assert_eq!(m.dsp_select(0x00, 0x7000), Some(true), "$7000 = SR");
+        assert_eq!(m.dsp_select(0x1F, 0x7FFF), Some(true), "$7FFF = SR");
+        // Mirror banks $80-$9F decode identically.
+        assert_eq!(m.dsp_select(0x80, 0x6000), Some(false));
+        assert_eq!(m.dsp_select(0x9F, 0x7000), Some(true));
+        // Outside the window: not the DSP.
+        assert_eq!(m.dsp_select(0x00, 0x5FFF), None, "below the window");
+        assert_eq!(m.dsp_select(0x00, 0x8000), None, "above the window");
+        assert_eq!(m.dsp_select(0x20, 0x6000), None, "wrong bank");
+    }
+
+    #[test]
+    fn lorom_board_decodes_dr_and_sr_on_bit_14() {
+        // LoROM 1B board: window $20-3F:8000-FFFF, select on bit 14.
+        let m = Dsp1Mapper::new(rom(), 0, Some(&firmware()), false);
+        assert_eq!(m.dsp_select(0x20, 0x8000), Some(false), "$8000 = DR");
+        assert_eq!(m.dsp_select(0x20, 0xBFFF), Some(false), "$BFFF = DR");
+        assert_eq!(m.dsp_select(0x20, 0xC000), Some(true), "$C000 = SR");
+        assert_eq!(m.dsp_select(0x3F, 0xFFFF), Some(true));
+        assert_eq!(m.dsp_select(0xA0, 0x8000), Some(false), "mirror bank");
+        assert_eq!(m.dsp_select(0x20, 0x7FFF), None, "below the window");
+        assert_eq!(m.dsp_select(0x00, 0x8000), None, "wrong bank");
+    }
+
+    #[test]
+    fn the_two_boards_do_not_share_a_window() {
+        // A HiROM-board address must not decode on a LoROM board and
+        // vice versa — the shim picks one layout at construction.
+        let hi = Dsp1Mapper::new(rom(), 0, Some(&firmware()), true);
+        let lo = Dsp1Mapper::new(rom(), 0, Some(&firmware()), false);
+        assert!(hi.dsp_select(0x20, 0x8000).is_none());
+        assert!(lo.dsp_select(0x00, 0x6000).is_none());
+    }
+
+    #[test]
+    fn reads_outside_the_window_fall_through_to_the_base_mapper() {
+        // The shim must not swallow ordinary cart reads.
+        let mut m = Dsp1Mapper::new(rom(), 0, Some(&firmware()), true);
+        assert_eq!(
+            m.read(make_addr(0x00, 0x8000)),
+            Some(0xA5),
+            "ROM read must reach the base mapper"
+        );
+        assert_eq!(m.kind(), MapperKind::Dsp1);
+        assert_eq!(m.rom_size(), 0x1_0000);
+    }
+
+    #[test]
+    fn sr_reads_report_rqm_and_sr_writes_are_dropped() {
+        // SR is read-only to the CPU (uPD7725: the status write is a
+        // no-op). A shim that routed it to write_dr would corrupt the
+        // command stream, so pin the routing.
+        let mut m = Dsp1Mapper::new(rom(), 0, Some(&firmware()), true);
+        let sr_addr = make_addr(0x00, 0x7000);
+        let before = m.read(sr_addr);
+        assert!(m.write(sr_addr, 0x5A), "SR window must be claimed");
+        assert_eq!(m.read(sr_addr), before, "writing SR changes nothing");
+    }
+
+    #[test]
+    fn undersized_firmware_leaves_the_chip_inert_but_the_cart_playable() {
+        // A truncated/absent dsp1b.rom must not panic and must not stop
+        // the base cart from working — the documented behaviour is "the
+        // game runs, the DSP returns nothing".
+        let mut m = Dsp1Mapper::new(rom(), 0, Some(&[0u8; 16]), true);
+        assert!(!m.has_firmware);
+        m.step_coproc(1_000_000, 0); // must be a no-op, not a hang
+        assert_eq!(m.read(make_addr(0x00, 0x8000)), Some(0xA5));
+        // Same with no firmware at all.
+        let m2 = Dsp1Mapper::new(rom(), 0, None, true);
+        assert!(!m2.has_firmware);
+    }
+
+    #[test]
+    fn save_state_round_trips_through_the_shim() {
+        let mut m = Dsp1Mapper::new(rom(), 0, Some(&firmware()), true);
+        m.cycle_acc = 12_345;
+        let blob = m.save_state();
+        assert!(!blob.is_empty(), "shim must serialise base + chip + acc");
+        let mut restored = Dsp1Mapper::new(rom(), 0, Some(&firmware()), true);
+        restored.load_state(&blob);
+        assert_eq!(restored.cycle_acc, 12_345);
+        // A corrupt blob is ignored rather than panicking.
+        restored.load_state(&[0xFF; 4]);
+    }
+
+    #[test]
+    fn reset_clears_the_cycle_accumulator() {
+        let mut m = Dsp1Mapper::new(rom(), 0, Some(&firmware()), true);
+        m.cycle_acc = 999;
+        m.reset();
+        assert_eq!(m.cycle_acc, 0);
+        assert!(m.dsp1_snapshot().is_some(), "introspection stays wired");
+    }
+}
