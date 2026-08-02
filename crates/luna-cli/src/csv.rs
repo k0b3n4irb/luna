@@ -389,3 +389,47 @@ pub(crate) fn write_dsp1_trace_csv(
         },
     )
 }
+
+/// Write the DSP-1 port trace grouped into command transactions
+/// (issue #158, the `OpenSNES` command table).
+///
+/// `in`/`out` hold the payload words, `|`-separated, so one row is a whole
+/// transaction. `status` is the only column to read as a verdict, and it
+/// reports rather than corrects: a row whose observed word counts disagree
+/// with the table comes out `mismatch` with both figures side by side,
+/// because a stale table entry must never masquerade as an emulator bug.
+pub(crate) fn write_dsp1_commands_csv(
+    path: &std::path::Path,
+    txs: &[luna_api::dsp1_commands::Transaction],
+) -> std::io::Result<()> {
+    write_csv(
+        path,
+        "seq,cmd,name,pc,in_words,out_words,expected_in,expected_out,confidence,status,in,out",
+        txs,
+        |f, _, tx| {
+            let words = |w: &[u16]| {
+                w.iter()
+                    .map(|x| format!("${x:04X}"))
+                    .collect::<Vec<_>>()
+                    .join("|")
+            };
+            let expected = |n: Option<u8>| n.map_or_else(|| "-".to_string(), |v| v.to_string());
+            writeln!(
+                f,
+                "{},${:02X},{},${:04X},{},{},{},{},{},{},{},{}",
+                tx.seq,
+                tx.command,
+                tx.name,
+                tx.pc,
+                tx.in_words.len(),
+                tx.out_words.len(),
+                expected(tx.expected_in),
+                expected(tx.expected_out),
+                tx.confidence.as_str(),
+                tx.status.as_str(),
+                words(&tx.in_words),
+                words(&tx.out_words),
+            )
+        },
+    )
+}

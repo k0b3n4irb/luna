@@ -42,6 +42,7 @@ use serde::Serialize;
 /// Faithful Mesen2 SNES Event Viewer data layer (categories, colors, register
 /// names, config). The GUI Event Viewer panel consumes this via the accessors
 /// on [`Emulator`].
+pub mod dsp1_commands;
 pub mod event_viewer;
 pub mod symbols;
 pub use event_viewer::{
