@@ -347,3 +347,45 @@ fn dsp_reg_name(reg: u8) -> String {
         _ => format!("${reg:02X}"),
     }
 }
+
+/// Write the DSP-1 (`µPD77C25`) trace as CSV: `seq,kind,pc,opcode,value,
+/// a,b,dr,sr,rqm`.
+///
+/// Microcode execution and CPU-side port traffic share one stream on
+/// purpose (issue #158): the question a driver author asks is "did my
+/// command byte land before or after the chip cleared RQM?", and two
+/// separate logs cannot answer it. `kind` is `E` (exec), `W` (DR write),
+/// `R` (DR read) or `S` (SR poll); `pc`/`opcode` are meaningful for `E`,
+/// `value` for the port events.
+pub(crate) fn write_dsp1_trace_csv(
+    path: &std::path::Path,
+    events: &[luna_api::Dsp1TraceEvent],
+) -> std::io::Result<()> {
+    write_csv(
+        path,
+        "seq,kind,pc,opcode,value,a,b,dr,sr,rqm",
+        events,
+        |f, i, ev| {
+            let kind = match ev.kind {
+                luna_api::Dsp1TraceKind::Exec => "E",
+                luna_api::Dsp1TraceKind::DrWrite => "W",
+                luna_api::Dsp1TraceKind::DrRead => "R",
+                luna_api::Dsp1TraceKind::SrRead => "S",
+            };
+            writeln!(
+                f,
+                "{},{},${:04X},${:06X},${:02X},${:04X},${:04X},${:04X},${:04X},{}",
+                i,
+                kind,
+                ev.pc,
+                ev.opcode,
+                ev.value,
+                ev.a as u16,
+                ev.b as u16,
+                ev.dr,
+                ev.sr,
+                u8::from(ev.rqm),
+            )
+        },
+    )
+}
