@@ -1,14 +1,20 @@
 [package]
 name = "luna-cpu-spc700"
-description = "SPC700 CPU implementation for the SNES audio coprocessor"
+description = "Cycle-accurate SPC700 CPU core (SNES audio coprocessor) — standalone, no SNES glue, 100% on the Tom Harte SingleStepTests suite"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-readme.workspace = true
-publish.workspace = true
+# Own README: someone landing on crates.io wants the CORE's story, not
+# the emulator's.
+readme = "README.md"
+keywords = ["snes", "spc700", "emulator", "cpu", "retro"]
+categories = ["emulators", "no-std::no-alloc"]
+# Published: this core has no internal dependencies and is usable from
+# any consumer (see the workspace-level `publish = false` default).
+publish = true
 
 [dependencies]
 # Save-state: serde derives on Spc700 + Psw.

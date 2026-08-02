@@ -99,6 +99,30 @@ assert, and how to replay a crash reproducer.
   `tests/golden/smoke/` PNGs left un-anchored by the line-origin
   change.
 
+## Publishing to crates.io
+
+The workspace defaults to `publish = false`; a crate opts in explicitly.
+**Only crates with no internal dependencies are published**, so a
+consumer of a core never drags the emulator in:
+
+| Crate | Status |
+|---|---|
+| `luna-cpu-spc700` | published — no internal deps |
+| `luna-cpu-upd96050` | published — no internal deps |
+| `luna-cpu-65c816` | **held**: depends on `luna-bus`, which today also carries ~6 000 lines of Super FX / SA-1 / S-DD1 chip logic. Publishing it would export that shape to the ecosystem, and crates.io versions are forever. Unblocked by splitting the coprocessors out of `luna-bus` (see `ARCHITECTURE.md`). |
+| everything else | internal (`luna-core` is also taken on crates.io by an unrelated crate) |
+
+Release order for a published crate:
+
+```bash
+cargo publish --dry-run -p <crate>   # packages + verifies in isolation
+cargo publish -p <crate>             # irreversible: a version is never reusable
+```
+
+Publish **after** the git tag, from `main`, so the published source
+matches a released commit. A published crate keeps its own `README.md`
+(crates.io shows it, and a core's story is not the emulator's).
+
 ## License
 
 MPL-2.0. By contributing you agree your work is released under the same

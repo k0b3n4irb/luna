@@ -1,14 +1,16 @@
 [package]
 name = "luna-cpu-upd96050"
-description = "NEC uPD7725 / uPD96050 DSP core (DSP-1..4, ST010/11) for the SNES"
+description = "NEC uPD7725 / uPD96050 DSP core (SNES DSP-1/2/3/4, ST010) — standalone, validated byte-exact against a reference emulator"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-readme.workspace = true
-publish.workspace = true
+readme = "README.md"
+keywords = ["snes", "dsp", "emulator", "upd7725", "retro"]
+categories = ["emulators"]
+publish = true
 
 [dependencies]
 # Save-state: serde derives on the uPD7725/uPD96050 DSP state.
