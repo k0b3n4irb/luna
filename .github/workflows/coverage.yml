@@ -1,0 +1,72 @@
+name: coverage
+
+# Line/region coverage per crate, published to the job summary. Not a
+# gate: no threshold blocks a PR — the point is VISIBILITY, so an
+# untested area is a deliberate choice rather than an unnoticed one.
+#
+# Runs weekly and on demand — not per-PR: it would add minutes to every
+# diff to report a number nobody acts on in that moment.
+on:
+  schedule:
+    - cron: "0 8 * * 1" # Mondays 08:00 UTC, after tom-harte/perf/fuzz
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      # `--lib` on purpose, NOT --all-targets. Measured 2026-08-02:
+      # instrumented, the golden ROM suite (pure emulation throughput,
+      # ~50 s in release) had not finished after 68 MINUTES — coverage
+      # instrumentation and a cycle-accurate emulator running ~90 test
+      # ROMs do not mix. Those suites earn their keep as pixel-exactness
+      # oracles, not as coverage contributors, so the number below is
+      # explicitly "unit-test coverage".
+      - name: Measure
+        run: |
+          cargo llvm-cov --workspace --lib \
+            --summary-only --json --output-path coverage.json
+          cargo llvm-cov --workspace --lib --summary-only \
+            > coverage.txt 2>&1 || true
+      - name: Publish to the job summary
+        run: |
+          {
+            echo "## Unit-test coverage (lines)"
+            echo
+            echo "Per file, worst first. No threshold gates this job — it"
+            echo "exists so an untested area is a choice, not a surprise."
+            echo
+            echo "Scope: \`--lib\` only. The golden ROM, Tom Harte and"
+            echo "differential suites are excluded — instrumented, they run"
+            echo "for hours, and their value is pixel/byte-exactness rather"
+            echo "than reaching lines. Read a low number here as \"few unit"
+            echo "tests\", not as \"unverified\"."
+            echo
+            echo '```'
+            grep -E '^(luna|Filename|TOTAL)' coverage.txt \
+              | awk 'NR==1 {next} {printf "%-44s %8s\n", $1, $10}' \
+              | sort -k2 -n
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the raw report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            coverage.json
+            coverage.txt
