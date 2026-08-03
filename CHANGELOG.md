@@ -4,7 +4,15 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.13.0] — 2026-08-03
+
+DSP-1 visibility, end to end. The cart coprocessor was the last one with
+no trace surface: Super FX and SA-1 could both be proven to have
+executed, the DSP-1 could not, so a divergence there had no
+confound-free oracle to bisect against. It now has one, and it goes
+further than a raw instruction dump — the byte stream can be read back
+as command transactions, checked against the OpenSNES command table
+without ever letting that table decide what it is looking at.
 
 ### Removed
 - **Dependabot** (`.github/dependabot.yml`) — the bot was never

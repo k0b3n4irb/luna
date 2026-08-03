@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.12.0"
+version = "1.13.0"
 edition = "2024"
 # Kept equal to the pinned toolchain (rust-toolchain.toml) — the only
 # rustc this workspace is actually built and tested with. The previous
