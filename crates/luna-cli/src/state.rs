@@ -4,9 +4,9 @@
 use std::process::ExitCode;
 
 use crate::csv::{
-    write_cpu_trace_csv, write_dma_trace_csv, write_dsp_trace_csv, write_mailbox_log_csv,
-    write_mem_trace_csv, write_sa1_log_csv, write_sa1_side_log_csv, write_sa1_trace_csv,
-    write_spc_trace_csv, write_superfx_trace_csv,
+    write_cpu_trace_csv, write_dma_trace_csv, write_dsp_trace_csv, write_dsp1_commands_csv,
+    write_dsp1_trace_csv, write_mailbox_log_csv, write_mem_trace_csv, write_sa1_log_csv,
+    write_sa1_side_log_csv, write_sa1_trace_csv, write_spc_trace_csv, write_superfx_trace_csv,
 };
 use crate::fmt::hex_str;
 use crate::output::{print_hex_dump, write_wav};
@@ -50,6 +50,10 @@ pub(crate) fn run_state(
     sa1_trace_max: usize,
     superfx_trace_path: Option<&std::path::Path>,
     superfx_trace_max: usize,
+    dsp1_trace_path: Option<&std::path::Path>,
+    dsp1_trace_max: usize,
+    dsp1_trace_ports: bool,
+    dsp1_commands_path: Option<&std::path::Path>,
     spc_trace_path: Option<&std::path::Path>,
     spc_trace_max: usize,
     cpu_trace_path: Option<&std::path::Path>,
@@ -203,6 +207,17 @@ pub(crate) fn run_state(
         && let Err(e) = em.enable_sa1_trace(sa1_trace_max)
     {
         eprintln!("error: enable_sa1_trace: {e}");
+        return ExitCode::from(1);
+    }
+    // --dsp1-trace-commands needs the same capture, and only ever reads
+    // the port events, so it implies --dsp1-trace-ports.
+    if (dsp1_trace_path.is_some() || dsp1_commands_path.is_some())
+        && let Err(e) = em.enable_dsp1_trace(
+            dsp1_trace_max,
+            dsp1_trace_ports || dsp1_commands_path.is_some(),
+        )
+    {
+        eprintln!("error: enable_dsp1_trace: {e}");
         return ExitCode::from(1);
     }
     if superfx_trace_path.is_some()
@@ -661,6 +676,49 @@ pub(crate) fn run_state(
                 Err(e) => eprintln!("error: writing SA-1 trace: {e}"),
             },
             Err(e) => eprintln!("error: take_sa1_trace: {e}"),
+        }
+    }
+    if dsp1_trace_path.is_some() || dsp1_commands_path.is_some() {
+        match em.take_dsp1_trace() {
+            Ok(events) => {
+                if let Some(path) = dsp1_trace_path {
+                    match write_dsp1_trace_csv(path, &events) {
+                        Ok(()) => eprintln!(
+                            "DSP-1 trace written to {} ({} events)",
+                            path.display(),
+                            events.len()
+                        ),
+                        Err(e) => eprintln!("error: writing DSP-1 trace: {e}"),
+                    }
+                }
+                if let Some(path) = dsp1_commands_path {
+                    // Hitting the cap leaves the final transaction cut off
+                    // mid-stream; say so rather than report a short count
+                    // as a disagreement with the table.
+                    let truncated = events.len() >= dsp1_trace_max;
+                    let txs = luna_api::dsp1_commands::decode(&events, truncated);
+                    let mismatches = txs
+                        .iter()
+                        .filter(|t| t.status == luna_api::dsp1_commands::TxStatus::Mismatch)
+                        .count();
+                    match write_dsp1_commands_csv(path, &txs) {
+                        Ok(()) => {
+                            eprintln!(
+                                "DSP-1 commands written to {} ({} transactions{})",
+                                path.display(),
+                                txs.len(),
+                                if mismatches > 0 {
+                                    format!(", {mismatches} disagreeing with the table")
+                                } else {
+                                    String::new()
+                                }
+                            );
+                        }
+                        Err(e) => eprintln!("error: writing DSP-1 commands: {e}"),
+                    }
+                }
+            }
+            Err(e) => eprintln!("error: take_dsp1_trace: {e}"),
         }
     }
     if let Some(path) = superfx_trace_path {
