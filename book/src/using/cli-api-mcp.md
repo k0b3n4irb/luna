@@ -96,6 +96,9 @@ and is the hub for every headless diagnostic.
 | `--dump-aram <PATH>` | — | Dump all 64 KB APU ARAM (raw). |
 | `--dump-coproc-ram <PATH>` | — | Dump coprocessor work RAM (Super FX Game Pak RAM), ungated. |
 | `--apu-log <PATH>` | — | CSV of every `$2140-$2143` CPU↔APU mailbox access. |
+| `--dsp1-trace <PATH>` | — | DSP-1 (µPD77C25) trace: microcode execution **and** CPU-side DR/SR traffic in one stream — `seq,kind,pc,opcode,value,a,b,dr,sr,rqm` (`kind` = E/W/R/S). |
+| `--dsp1-trace-ports` | off | Restrict the above to the DR/SR transactions (the stock firmware idles in an RQM loop, so a full trace is mostly idle spin). |
+| `--dsp1-trace-max <N>` | `200000` | Cap on captured DSP-1 events. |
 | `--dsp-trace <PATH>` | — | CSV of every DSP register write: `spc_cycles,reg,name,value`, with `name` decoded (`V0_ADSR1`, `KON`, `FLG`, …). |
 | `--dsp-trace-max <N>` | `100000` | Cap on captured DSP writes. |
 | `--sa1-log <PATH>` | — | CSV of every `$2200-$23FF` SA-1 MMIO access. |
@@ -135,6 +138,83 @@ luna state -n 8000000 --force-mapper lorom --force-region pal --native-res \
   --screenshot /tmp/font.png --print-fbhash \
   "PPU/Interlace/InterlaceFont/InterlaceFont.sfc"   # → a 512×448 PNG
 ```
+
+#### Coprocessor liveness and the DSP-1 handshake
+
+`--superfx-trace` and `--sa1-trace` let a harness prove those chips ran;
+`--dsp1-trace` closes the gap for the DSP-1 (µPD77C25). Note the two
+distinct flags: `--dsp-trace` is the **audio** S-DSP, `--dsp1-trace` the
+**cart coprocessor**.
+
+```bash
+# Liveness without any trace: state JSON carries the instruction count.
+luna state "Super Mario Kart (USA).sfc" -n 5000000 --out - \
+  | jq '.dsp1.instructions_executed'    # assert >= 1
+# -> 41780039
+
+# The command handshake. --dsp1-trace-ports is what makes it readable:
+# the stock firmware idles in a two-instruction RQM wait loop, so a full
+# trace spends its whole budget on idle spin before your command lands.
+luna state "Super Mario Kart (USA).sfc" -n 5000000 \
+  --dsp1-trace dsp1.csv --dsp1-trace-ports
+# seq,kind,pc,opcode,value,a,b,dr,sr,rqm
+# 0,W,$0004,$000000,$80,$0000,$00C0,$0080,$0400,0   <- command byte in
+# 143,S,$0185,$000000,$00,$7FFF,$0000,$3400,$0000,0 <- poll: RQM clear, busy
+# 195,R,$034D,$000000,$00,$003E,$0000,$0000,$9000,1 <- result byte out
+
+# Drop --dsp1-trace-ports to see the microcode between the transactions.
+```
+
+On a port row `pc` is *not* a CPU address: it is where the DSP-1 microcode
+was sitting when the CPU touched the port. That is the column that turns a
+handshake into something readable — group by it and the firmware's structure
+falls out. On the run above:
+
+```console
+$ awk -F, 'NR>1 {print $2, $3}' dsp1.csv | sort | uniq -c | sort -rn | head -5
+  21462 R $038F
+  21462 R $038D
+  21462 R $038A
+  21462 R $0387
+  19224 S $0387
+```
+
+Four read sites hit an identical number of times is the firmware handing back
+a four-word result, one word per site — and the `S` rows at `$0387` are the
+CPU polling the same site until `RQM` comes up. An off-by-one in a command's
+result length shows up here as a fifth site, or as one count that does not
+match the others.
+
+##### Command transactions
+
+`--dsp1-trace-commands` groups that byte stream into one row per command —
+the command byte, the input words it consumed, the output words it produced:
+
+```bash
+luna state "Super Mario Kart (USA).sfc" -n 5000000 \
+  --dsp1-trace-commands dsp1_cmds.csv
+# seq,cmd,name,pc,in_words,out_words,expected_in,expected_out,confidence,status,in,out
+# 128,$02,Parameter,$0004,7,4,7,4,provisional,ok,$0880|$27A0|…,$0000|$FFB2|…
+# 203,$0A,Raster,$0004,5,384,-,-,unbounded,unbounded,$FFB6|$8000|…,$05FF|…
+```
+
+Boundaries come from the **protocol** — an 8-bit (`DRC`) write opens a
+command, and every word until the next one belongs to it — never from the
+word-count table. The table only supplies the `expected_*` columns, so a
+stale entry surfaces as `status=mismatch` on that single row, with both
+counts side by side, while every other transaction stays correctly grouped.
+That is deliberate: a word count is documentation, and documentation must
+never be able to make an emulator look broken.
+
+Read the two verdict columns together:
+
+| Column | Meaning |
+|---|---|
+| `confidence` | `verified` (checked on hardware-grade traces) → `documented` → `provisional`. How much the `expected_*` figures are worth. |
+| `status` | `ok`, `mismatch`, `unbounded` (open-ended output — observed length reported, nothing asserted), `truncated` (capture hit its cap mid-transaction), `unknown` (command not in the table). |
+
+A `mismatch` on a `provisional` row is far more likely a stale table entry
+than an emulator defect. A `mismatch` on a `verified` row is worth chasing.
 
 #### Audio-side visibility
 

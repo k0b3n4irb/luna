@@ -748,6 +748,22 @@ impl Snes {
         self.mapper.take_superfx_trace()
     }
 
+    /// Enable a DSP-1 (`µPD77C25`) microcode + port trace (issue #158).
+    pub fn enable_dsp1_trace(&mut self, max_events: usize, ports_only: bool) {
+        self.mapper.enable_dsp1_trace(max_events, ports_only);
+    }
+
+    /// Drain the DSP-1 trace (empty if disabled / not a DSP-1 cart).
+    pub fn take_dsp1_trace(&mut self) -> Vec<luna_bus::Dsp1TraceEvent> {
+        self.mapper.take_dsp1_trace()
+    }
+
+    /// DSP-1 instructions executed since power-on — the coproc-liveness
+    /// counter, available without enabling a trace.
+    pub fn dsp1_instructions(&self) -> Option<u64> {
+        self.mapper.dsp1_instructions()
+    }
+
     /// Enable a per-opcode SPC700 instruction trace on the real APU.
     pub fn enable_spc_trace(&mut self, max_events: usize) {
         self.apu_real.enable_spc_trace(max_events);

@@ -4,7 +4,71 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.13.0] — 2026-08-03
+
+DSP-1 visibility, end to end. The cart coprocessor was the last one with
+no trace surface: Super FX and SA-1 could both be proven to have
+executed, the DSP-1 could not, so a divergence there had no
+confound-free oracle to bisect against. It now has one, and it goes
+further than a raw instruction dump — the byte stream can be read back
+as command transactions, checked against the OpenSNES command table
+without ever letting that table decide what it is looking at.
+
+### Removed
+- **Dependabot** (`.github/dependabot.yml`) — the bot was never
+  authorised by the maintainer. It arrived bundled inside the
+  supply-chain lot (#129) rather than as a decision of its own, and a
+  third-party app opening pull requests against this repository is
+  exactly the kind of change that needs to be asked for, not inferred.
+  Dependency updates are now manual; `cargo deny` (CI + weekly) remains
+  the gate that *surfaces* advisories, and acting on one is a maintainer
+  call. Dependabot alerts and automated security fixes were already off
+  at the repository level and stay off.
+
+### Added
+- **`--dsp1-trace` for DSP-1 (µPD77C25) visibility**
+  ([#158](https://github.com/k0b3n4irb/luna/issues/158)) — parity with
+  `--superfx-trace` / `--sa1-trace`, so a headless harness can prove the
+  DSP-1 executed the same way it already can for the other two
+  coprocessors. Three parts:
+  - `dsp1.instructions_executed` in the `state` JSON: the
+    coproc-liveness counter, readable **without** enabling any trace.
+  - `--dsp1-trace` (+ `--dsp1-trace-max`): microcode execution **and**
+    the CPU-side DR/SR port traffic in ONE interleaved stream
+    (`seq,kind,pc,opcode,value,a,b,dr,sr,rqm`, `kind` = E/W/R/S) —
+    because the question a driver author asks is "did my command byte
+    land before or after the chip cleared RQM?", which two separate logs
+    cannot answer.
+  - `--dsp1-trace-ports`: restrict to the DR/SR transactions. The stock
+    firmware idles in a two-instruction RQM wait loop, so a full trace
+    spends its entire budget on idle spin before the interesting command
+    lands (observed on Super Mario Kart: 200 000 events, all idle).
+  On a port row `pc` is the **microcode** PC at the moment the CPU
+  touched the port, not a CPU address — grouping by it is what makes a
+  handshake legible (Super Mario Kart: four `R` sites hit 21 462 times
+  each, i.e. a four-word result handed back one word per site, with the
+  `S` polls clustered on the first of them).
+  - `--dsp1-trace-commands`: the same capture grouped into **command
+    transactions** — one row per command byte with the input words it
+    consumed and the output words it produced, against the `OpenSNES`
+    command table. Transaction boundaries come from the protocol (an
+    8-bit `DRC` write opens a command), **never** from the table, so a
+    stale word count surfaces as `status=mismatch` on that one row
+    instead of silently mis-grouping the rest of the capture — a word
+    count is documentation, and documentation must not be able to make
+    the emulator look broken. Each row carries a `confidence`
+    (`verified` / `documented` / `provisional`) so a disagreement can be
+    weighed rather than taken as a verdict; open-ended operations
+    (Raster, ROM dump) report their observed length and assert nothing.
+    Two rows were settled by measuring rather than by reading a doc:
+    `$02` Parameter is 7-in/4-out (stable over 112 consecutive Super
+    Mario Kart transactions, promoted upstream on that evidence), and
+    `$80` is Sync/Reset — 0/0, hammered 128x at boot to force the chip
+    into command-wait. Only `$80` is named: an unrecognised byte
+    behaves identically in the reference HLE dispatch, but identical
+    behaviour is not identical meaning, so it stays `unknown`.
+  Note the neighbouring flag names: `--dsp-trace` is the **audio**
+  S-DSP, `--dsp1-trace` the **cart coprocessor**.
 
 ## [1.12.0] — 2026-08-01
 

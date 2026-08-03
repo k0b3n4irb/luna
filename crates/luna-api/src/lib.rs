@@ -27,8 +27,9 @@ use luna_core::Snes;
 pub use luna_core::controller::PortDevice;
 pub use luna_core::{
     BreakHit, BreakKind, BreakpointInfo, CpuTraceEvent, CpuTraceLog, DmaTraceEvent, DmaTraceLog,
-    MailboxEvent, MailboxEventKind, MapperKind, MemEventKind, MemTraceEvent, MemTraceLog,
-    Sa1LogEvent, Sa1SideEvent, Sa1TraceEvent, Spc700TraceEvent, SuperFxTraceEvent,
+    Dsp1TraceEvent, Dsp1TraceKind, MailboxEvent, MailboxEventKind, MapperKind, MemEventKind,
+    MemTraceEvent, MemTraceLog, Sa1LogEvent, Sa1SideEvent, Sa1TraceEvent, Spc700TraceEvent,
+    SuperFxTraceEvent,
 };
 /// Decoded BG tilemap image (Tilemap Viewer), re-exported so the GUI uses
 /// `luna_api::TilemapImage` rather than depending on `luna-ppu`.
@@ -41,6 +42,7 @@ use serde::Serialize;
 /// Faithful Mesen2 SNES Event Viewer data layer (categories, colors, register
 /// names, config). The GUI Event Viewer panel consumes this via the accessors
 /// on [`Emulator`].
+pub mod dsp1_commands;
 pub mod event_viewer;
 pub mod symbols;
 pub use event_viewer::{
@@ -184,6 +186,11 @@ pub struct Dsp1State {
     pub dr: u16,
     /// `RQM` — set when the chip is awaiting the master.
     pub rqm: bool,
+    /// Microcode instructions executed since power-on. A harness asserts
+    /// `>= 1` on this to prove the DSP-1 actually ran — the same
+    /// coproc-liveness check the Super FX / SA-1 traces already allow
+    /// (issue #158).
+    pub instructions_executed: u64,
 }
 
 /// SA-1 coprocessor CPU snapshot.
@@ -1502,6 +1509,11 @@ impl Emulator {
                 p: snap.p,
                 running: snap.running,
             });
+        let dsp1_instructions = self
+            .snes
+            .as_ref()
+            .and_then(|s| s.mapper.dsp1_instructions())
+            .unwrap_or(0);
         let dsp1 = self
             .snes
             .as_ref()
@@ -1513,6 +1525,7 @@ impl Emulator {
                 b: snap.b,
                 dr: snap.dr,
                 rqm: snap.rqm,
+                instructions_executed: dsp1_instructions,
             });
         EmulatorState {
             rom: self.rom_info.clone(),
@@ -2429,6 +2442,36 @@ impl Emulator {
     pub fn take_superfx_trace(&mut self) -> Result<Vec<SuperFxTraceEvent>, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         Ok(snes.take_superfx_trace())
+    }
+
+    /// Enable the DSP-1 (`µPD77C25`) trace (issue #158): microcode
+    /// execution AND the CPU-side DR/SR port traffic in one interleaved
+    /// stream, so the command handshake is diagnosable ("did the byte
+    /// land before or after RQM cleared?"). Parity with the Super FX and
+    /// SA-1 traces.
+    pub fn enable_dsp1_trace(
+        &mut self,
+        max_events: usize,
+        ports_only: bool,
+    ) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.enable_dsp1_trace(max_events, ports_only);
+        Ok(())
+    }
+
+    /// Drain the DSP-1 trace (empty if disabled / not a DSP-1 cart).
+    pub fn take_dsp1_trace(&mut self) -> Result<Vec<Dsp1TraceEvent>, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        Ok(snes.take_dsp1_trace())
+    }
+
+    /// DSP-1 microcode instructions executed since power-on — the
+    /// coproc-liveness counter a harness asserts `>= 1` on, without
+    /// enabling a trace. `None` when the cart has no DSP-1. Also exposed
+    /// as `dsp1.instructions_executed` in [`Emulator::state`].
+    pub fn dsp1_instructions(&self) -> Result<Option<u64>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        Ok(snes.dsp1_instructions())
     }
 
     /// Enable a per-opcode SPC700 instruction trace (PC + registers per

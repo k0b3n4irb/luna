@@ -339,6 +339,38 @@ enum Command {
         /// 200 000).
         #[arg(long = "superfx-trace-max", default_value_t = 200_000)]
         superfx_trace_max: usize,
+        /// Optional DSP-1 (`µPD77C25`) trace: microcode execution AND the
+        /// CPU-side DR/SR port traffic in ONE interleaved stream, as CSV
+        /// (`seq,kind,pc,opcode,value,a,b,dr,sr,rqm`). `kind` is E/W/R/S
+        /// (exec, DR write, DR read, SR poll) — so the command handshake
+        /// is readable directly: did the byte land before or after RQM
+        /// cleared? Parity with `--superfx-trace` / `--sa1-trace`.
+        #[arg(long = "dsp1-trace")]
+        dsp1_trace: Option<PathBuf>,
+        /// Cap the DSP-1 trace at this many events (default 200 000).
+        #[arg(long = "dsp1-trace-max", default_value_t = 200_000)]
+        dsp1_trace_max: usize,
+        /// Restrict `--dsp1-trace` to the CPU-side DR/SR transactions,
+        /// dropping microcode execution. The stock firmware idles in an
+        /// RQM wait loop, so a full trace is almost entirely idle spin
+        /// and the cap is exhausted before the interesting command
+        /// lands — use this to read the command handshake itself.
+        #[arg(long = "dsp1-trace-ports")]
+        dsp1_trace_ports: bool,
+        /// Group the DSP-1 port trace into command transactions, as CSV
+        /// (`seq,cmd,name,pc,in_words,out_words,expected_in,expected_out,
+        /// confidence,status,in,out`). One row per command: the byte, the
+        /// input words it consumed, the output words it produced.
+        ///
+        /// Transaction boundaries come from the protocol (an 8-bit `DRC`
+        /// write opens a command), never from the word-count table — so a
+        /// stale table entry surfaces as `status=mismatch` on that one row
+        /// instead of silently mis-grouping the rest. `confidence` says how
+        /// far the expected counts can be trusted; open-ended operations
+        /// (Raster, ROM dump) report their observed length and assert
+        /// nothing. Implies `--dsp1-trace-ports`.
+        #[arg(long = "dsp1-trace-commands")]
+        dsp1_trace_commands: Option<PathBuf>,
         /// Optional FULL SPC700 instruction trace: a per-opcode register
         /// snapshot written as CSV (`seq,pc,a,x,y,sp,psw`). Diff this PC
         /// stream against a Mesen2 SPC700 trace to localise audio-driver
@@ -651,6 +683,10 @@ fn main() -> ExitCode {
             sa1_trace_max,
             superfx_trace,
             superfx_trace_max,
+            dsp1_trace,
+            dsp1_trace_max,
+            dsp1_trace_ports,
+            dsp1_trace_commands,
             spc_trace,
             spc_trace_max,
             cpu_trace,
@@ -702,6 +738,10 @@ fn main() -> ExitCode {
             sa1_trace_max,
             superfx_trace.as_deref(),
             superfx_trace_max,
+            dsp1_trace.as_deref(),
+            dsp1_trace_max,
+            dsp1_trace_ports,
+            dsp1_trace_commands.as_deref(),
             spc_trace.as_deref(),
             spc_trace_max,
             cpu_trace.as_deref(),
