@@ -155,8 +155,72 @@ struct Upd96050State {
     flags_b: Flag,
 }
 
+/// One traced `µPD77C25` event (luna issue #158). Instruction execution
+/// and the CPU-side DR/SR port traffic share ONE stream on purpose: the
+/// question a driver author asks is "did my command byte land before or
+/// after the chip cleared RQM?", and two separate logs cannot answer it.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct TraceEvent {
+    /// What happened.
+    pub kind: TraceKind,
+    /// Microcode program counter. On `Exec` this is the instruction that
+    /// ran; on a port event it is where the microcode was sitting when the
+    /// CPU touched the port -- which spin-wait a handshake stalled in.
+    pub pc: u16,
+    /// The 24-bit microcode word (`Exec` only).
+    pub opcode: u32,
+    /// Byte crossing the CPU port (`DrWrite` / `DrRead` / `SrRead`).
+    pub value: u8,
+    /// Accumulator A after the event.
+    pub a: i16,
+    /// Accumulator B after the event.
+    pub b: i16,
+    /// Data register after the event.
+    pub dr: u16,
+    /// Status register after the event.
+    pub sr: u16,
+    /// `RQM` after the event — the handshake bit the master polls.
+    pub rqm: bool,
+}
+
+/// Event discriminator for [`TraceEvent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TraceKind {
+    /// One microcode instruction executed.
+    Exec,
+    /// The master wrote a byte to `DR`.
+    DrWrite,
+    /// The master read a byte from `DR`.
+    DrRead,
+    /// The master polled `SR`.
+    SrRead,
+}
+
+/// Bounded ring for [`TraceEvent`]s.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct TraceLog {
+    /// Captured events, oldest first.
+    pub events: Vec<TraceEvent>,
+    /// Hard cap; captures stop (rather than wrap) once reached.
+    pub max_events: usize,
+    /// Capture only the CPU-side DR/SR traffic, dropping microcode
+    /// execution. The stock firmware idles in a two-instruction RQM
+    /// wait loop, so a full trace is ~all idle spin and the cap is
+    /// exhausted long before the interesting command lands — this mode
+    /// is what makes the transaction view usable (issue #158).
+    pub ports_only: bool,
+}
+
 /// A NEC uPD7725 / uPD96050 DSP instance.
 pub struct Upd96050 {
+    /// Optional instruction + port trace (`--dsp1-trace`). `None` = off.
+    /// Not part of the save state (a trace is a debugging session, not
+    /// machine state).
+    pub trace: Option<TraceLog>,
+    /// Instructions executed since power-on. Lets a harness assert the
+    /// chip actually ran (the coproc-liveness pattern) without enabling
+    /// a trace at all.
+    pub instructions_executed: u64,
     revision: Revision,
     program_rom: Box<[u32; 16384]>, // 24-bit words
     data_rom: Box<[u16; 2048]>,
@@ -179,6 +243,8 @@ impl Upd96050 {
             regs: Registers::default(),
             flags_a: Flag::default(),
             flags_b: Flag::default(),
+            trace: None,
+            instructions_executed: 0,
         };
         core.power();
         core
@@ -247,15 +313,28 @@ impl Upd96050 {
 
     /// Read `$SR` — the high byte of the 16-bit status register.
     #[must_use]
-    pub const fn read_sr(&self) -> u8 {
-        (self.regs.sr.to_u16() >> 8) as u8
+    pub fn read_sr(&mut self) -> u8 {
+        let v = (self.regs.sr.to_u16() >> 8) as u8;
+        if self.trace.is_some() {
+            self.trace_push(TraceKind::SrRead, self.regs.pc.get(), 0, v);
+        }
+        v
     }
 
     /// Write `$SR` — a no-op on hardware (status is read-only to the CPU).
     pub const fn write_sr(&mut self, _data: u8) {}
 
     /// Read `$DR` (the CPU↔DSP data port), advancing the 8/16-bit handshake.
-    pub const fn read_dr(&mut self) -> u8 {
+    pub fn read_dr(&mut self) -> u8 {
+        let v = self.read_dr_inner();
+        if self.trace.is_some() {
+            self.trace_push(TraceKind::DrRead, self.regs.pc.get(), 0, v);
+        }
+        v
+    }
+
+    /// The DR read itself, without tracing.
+    const fn read_dr_inner(&mut self) -> u8 {
         if self.regs.sr.drc {
             // 8-bit
             self.regs.sr.rqm = false;
@@ -274,6 +353,14 @@ impl Upd96050 {
 
     /// Write `$DR`, advancing the 8/16-bit handshake.
     pub fn write_dr(&mut self, data: u8) {
+        self.write_dr_inner(data);
+        if self.trace.is_some() {
+            self.trace_push(TraceKind::DrWrite, self.regs.pc.get(), 0, data);
+        }
+    }
+
+    /// The DR write itself, without tracing.
+    fn write_dr_inner(&mut self, data: u8) {
         if self.regs.sr.drc {
             // 8-bit
             self.regs.sr.rqm = false;
@@ -355,11 +442,56 @@ impl Upd96050 {
 
     // ── Execution (ares processor/upd96050/instructions.cpp) ──
 
+    /// Append a trace event when the trace is enabled and has room.
+    fn trace_push(&mut self, kind: TraceKind, pc: u16, opcode: u32, value: u8) {
+        let (a, b, dr, sr, rqm) = (
+            self.regs.a,
+            self.regs.b,
+            self.regs.dr,
+            self.regs.sr.to_u16(),
+            self.regs.sr.rqm,
+        );
+        if let Some(log) = self.trace.as_mut()
+            && log.events.len() < log.max_events
+            && !(log.ports_only && kind == TraceKind::Exec)
+        {
+            log.events.push(TraceEvent {
+                kind,
+                pc,
+                opcode,
+                value,
+                a,
+                b,
+                dr,
+                sr,
+                rqm,
+            });
+        }
+    }
+
+    /// Enable the instruction + port trace, capped at `max_events`.
+    pub fn enable_trace(&mut self, max_events: usize, ports_only: bool) {
+        self.trace = Some(TraceLog {
+            events: Vec::new(),
+            max_events,
+            ports_only,
+        });
+    }
+
+    /// Drain the trace (empty when disabled).
+    pub fn take_trace(&mut self) -> Vec<TraceEvent> {
+        match self.trace.as_mut() {
+            Some(log) => std::mem::take(&mut log.events),
+            None => Vec::new(),
+        }
+    }
+
     /// Execute one instruction (fetch at `pc`, then the unconditional
     /// `K*L` multiply that updates `M`/`N`).
     pub fn exec(&mut self) {
         let pc = self.regs.pc.post_inc();
         let opcode = self.program_rom[pc as usize];
+        self.instructions_executed = self.instructions_executed.wrapping_add(1);
         match opcode >> 22 {
             0 => self.exec_op(opcode),
             1 => self.exec_rt(opcode),
@@ -369,6 +501,9 @@ impl Upd96050 {
         let result = i32::from(self.regs.k) * i32::from(self.regs.l);
         self.regs.m = (result >> 15) as i16; // sign + top 15 bits
         self.regs.n = (result << 1) as i16; // low 15 bits + 0
+        if self.trace.is_some() {
+            self.trace_push(TraceKind::Exec, pc, opcode, 0);
+        }
     }
 
     fn exec_op(&mut self, opcode: u32) {
@@ -702,5 +837,75 @@ mod tests {
         d.exec(); // A = 5
         d.exec(); // A = 5 + 3 = 8
         assert_eq!(d.a(), 8);
+    }
+}
+
+#[cfg(test)]
+mod trace_tests {
+    use super::{Revision, TraceKind, Upd96050};
+
+    #[test]
+    fn instruction_counter_runs_without_a_trace_enabled() {
+        // The liveness counter is the cheap path: a harness asserts
+        // `>= 1` on it without paying for a trace (issue #158).
+        let mut dsp = Upd96050::new(Revision::Upd7725);
+        assert_eq!(dsp.instructions_executed, 0);
+        dsp.exec();
+        dsp.exec();
+        assert_eq!(dsp.instructions_executed, 2);
+        assert!(dsp.trace.is_none(), "no trace was enabled");
+    }
+
+    #[test]
+    fn trace_interleaves_execution_and_port_traffic() {
+        // The whole point of one stream: the command byte's position
+        // relative to the microcode is what makes the handshake
+        // diagnosable.
+        let mut dsp = Upd96050::new(Revision::Upd7725);
+        dsp.enable_trace(64, false);
+        dsp.exec();
+        dsp.write_dr(0xAB);
+        dsp.exec();
+        let _ = dsp.read_sr();
+        let events = dsp.take_trace();
+        let kinds: Vec<_> = events.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TraceKind::Exec,
+                TraceKind::DrWrite,
+                TraceKind::Exec,
+                TraceKind::SrRead
+            ]
+        );
+        assert_eq!(events[1].value, 0xAB, "the written byte is captured");
+        assert!(dsp.take_trace().is_empty(), "draining empties the ring");
+    }
+
+    #[test]
+    fn ports_only_drops_execution_so_the_cap_reaches_the_command() {
+        // Stock firmware idles in an RQM wait loop; without this mode a
+        // 200k-event cap is spent entirely on idle spin before the
+        // interesting write lands (observed on Super Mario Kart).
+        let mut dsp = Upd96050::new(Revision::Upd7725);
+        dsp.enable_trace(64, true);
+        for _ in 0..100 {
+            dsp.exec();
+        }
+        dsp.write_dr(0x42);
+        let events = dsp.take_trace();
+        assert_eq!(events.len(), 1, "only the port event survives");
+        assert_eq!(events[0].kind, TraceKind::DrWrite);
+        assert_eq!(events[0].value, 0x42);
+    }
+
+    #[test]
+    fn the_ring_is_bounded() {
+        let mut dsp = Upd96050::new(Revision::Upd7725);
+        dsp.enable_trace(3, false);
+        for _ in 0..50 {
+            dsp.exec();
+        }
+        assert_eq!(dsp.take_trace().len(), 3, "capped at max_events");
     }
 }

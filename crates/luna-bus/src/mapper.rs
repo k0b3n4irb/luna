@@ -196,6 +196,24 @@ pub trait Mapper {
     fn take_superfx_trace(&mut self) -> Vec<SuperFxTraceEvent> {
         Vec::new()
     }
+
+    /// Enable a DSP-1 (`µPD77C25`) trace: microcode execution **and** the
+    /// CPU-side DR/SR port traffic in ONE interleaved stream, so the
+    /// command handshake is diagnosable ("did the byte land before or
+    /// after RQM cleared?"). No-op for non-DSP-1 mappers. Issue #158.
+    fn enable_dsp1_trace(&mut self, _max_events: usize, _ports_only: bool) {}
+
+    /// Drain the DSP-1 trace (empty if disabled / not a DSP-1 cart).
+    fn take_dsp1_trace(&mut self) -> Vec<Dsp1TraceEvent> {
+        Vec::new()
+    }
+
+    /// DSP-1 instructions executed since power-on — the coproc-liveness
+    /// counter, available without enabling a trace. `None` when the cart
+    /// has no DSP-1.
+    fn dsp1_instructions(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// A do-nothing mapper that owns no ROM and claims no addresses. Exists
@@ -306,6 +324,48 @@ pub struct Sa1Snapshot {
     pub p: u8,
     /// `true` while CCNT.5 is clear (chip released from reset).
     pub running: bool,
+}
+
+/// One traced DSP-1 (`µPD77C25`) event — microcode execution or CPU-side
+/// port traffic, in one stream (issue #158). Defined here rather than
+/// re-exported from the chip crate because `luna-bus` is below it in the
+/// dependency graph, matching how `Sa1TraceEvent` / `SuperFxTraceEvent`
+/// are declared.
+#[derive(Debug, Clone, Copy)]
+pub struct Dsp1TraceEvent {
+    /// `E` = executed instruction, `W`/`R` = DR write/read, `S` = SR poll.
+    pub kind: Dsp1TraceKind,
+    /// Microcode program counter. On `Exec` this is the instruction that
+    /// ran; on a port event it is where the microcode was sitting when the
+    /// CPU touched the port -- which spin-wait a handshake stalled in.
+    pub pc: u16,
+    /// 24-bit microcode word (`Exec` only).
+    pub opcode: u32,
+    /// Byte crossing the CPU port (port events only).
+    pub value: u8,
+    /// Accumulator A after the event.
+    pub a: i16,
+    /// Accumulator B after the event.
+    pub b: i16,
+    /// Data register after the event.
+    pub dr: u16,
+    /// Status register after the event.
+    pub sr: u16,
+    /// `RQM` after the event — the handshake bit the master polls.
+    pub rqm: bool,
+}
+
+/// Event discriminator for [`Dsp1TraceEvent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dsp1TraceKind {
+    /// One microcode instruction executed.
+    Exec,
+    /// The master wrote a byte to `DR`.
+    DrWrite,
+    /// The master read a byte from `DR`.
+    DrRead,
+    /// The master polled `SR`.
+    SrRead,
 }
 
 /// A read-only snapshot of the DSP-1 (NEC uPD7725) for the debugger.
