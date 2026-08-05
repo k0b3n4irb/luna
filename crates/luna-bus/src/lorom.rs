@@ -118,11 +118,13 @@ impl Mapper for LoRomMapper {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        bincode::serialize(&self.sram).unwrap_or_default()
+        bincode::serde::encode_to_vec(&self.sram, bincode::config::standard()).unwrap_or_default()
     }
 
     fn load_state(&mut self, data: &[u8]) {
-        if let Ok(sram) = bincode::deserialize::<Vec<u8>>(data) {
+        if let Ok((sram, _)) =
+            bincode::serde::decode_from_slice::<Vec<u8>, _>(data, bincode::config::standard())
+        {
             self.sram = sram;
         }
     }
