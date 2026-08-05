@@ -89,11 +89,12 @@ pub enum ApiError {
 /// (the SPC700 dispatch is exhaustive), changing the bincode layout.
 /// v4: `Ppu::open_bus` split into `ppu1_mdr` + `ppu2_mdr` (faithful
 /// per-chip open-bus latches, ares `ppu1.mdr`/`ppu2.mdr`).
-///
-/// NOTE (2026-07): the container is encoded with bincode 1.x (EOL branch).
-/// Evaluate migrating to bincode 2 at the NEXT version bump — a bump
-/// already invalidates old blobs, so that is the free moment to switch.
-pub const SAVE_STATE_VERSION: u32 = 4;
+/// v5 (2026-08, #167): `rom_hash` switched from `std` `DefaultHasher`
+/// (unspecified across toolchains — states silently broke across builds)
+/// to explicit FNV-1a-64 over the raw ROM bytes, and the container plus
+/// every mapper/coproc blob moved from bincode 1.x (EOL) to bincode 2
+/// (`standard` config). Both breaks share this single bump.
+pub const SAVE_STATE_VERSION: u32 = 5;
 
 /// On-disk / on-wire save-state container produced by
 /// [`Emulator::save_state`]. `core` is the bincode-encoded `Snes` (the
@@ -105,6 +106,19 @@ struct SaveStateBundle {
     rom_hash: u64,
     core: Vec<u8>,
     mapper: Vec<u8>,
+}
+
+/// FNV-1a 64-bit over raw bytes — the crate's stable hash for anything
+/// persisted or compared across builds (ROM identity, WRAM page hashes).
+/// Explicit by design: `std`'s `DefaultHasher` is unspecified across
+/// toolchains, so it must never leak into persisted formats.
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 /// Cartridge metadata returned by [`Emulator::load_rom`].
@@ -967,13 +981,10 @@ impl Emulator {
         }
         // Capture a stable hash of the ROM bytes before the cartridge is
         // consumed by `try_from_cartridge`; the save-state layer uses it to
-        // refuse states produced against a different ROM.
-        let rom_hash = {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            cart.rom.hash(&mut h);
-            h.finish()
-        };
+        // refuse states produced against a different ROM. FNV-1a, not the
+        // std DefaultHasher: the algorithm must not drift across toolchains
+        // or a state written by one build is unreadable by the next.
+        let rom_hash = fnv1a_64(&cart.rom);
         let info = RomInfo {
             title: cart.header.title.clone(),
             mapper: format!("{:?}", cart.header.mapper_kind),
@@ -1938,7 +1949,7 @@ impl Emulator {
     /// ROM is loaded, or [`ApiError::SaveState`] on an encode failure.
     pub fn save_state(&self) -> Result<Vec<u8>, ApiError> {
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
-        let core = bincode::serialize(snes)
+        let core = bincode::serde::encode_to_vec(snes, bincode::config::standard())
             .map_err(|e| ApiError::SaveState(format!("core encode: {e}")))?;
         let mapper = snes.mapper.save_state();
         let bundle = SaveStateBundle {
@@ -1947,7 +1958,8 @@ impl Emulator {
             core,
             mapper,
         };
-        bincode::serialize(&bundle).map_err(|e| ApiError::SaveState(format!("bundle encode: {e}")))
+        bincode::serde::encode_to_vec(&bundle, bincode::config::standard())
+            .map_err(|e| ApiError::SaveState(format!("bundle encode: {e}")))
     }
 
     /// Restore a blob produced by [`Emulator::save_state`] into the live
@@ -1962,8 +1974,9 @@ impl Emulator {
         if self.snes.is_none() {
             return Err(ApiError::NoRom);
         }
-        let bundle: SaveStateBundle = bincode::deserialize(data)
-            .map_err(|e| ApiError::SaveState(format!("bundle decode: {e}")))?;
+        let (bundle, _): (SaveStateBundle, usize) =
+            bincode::serde::decode_from_slice(data, bincode::config::standard())
+                .map_err(|e| ApiError::SaveState(format!("bundle decode: {e}")))?;
         if bundle.version != SAVE_STATE_VERSION {
             return Err(ApiError::SaveState(format!(
                 "format version mismatch: state is v{}, this build expects v{SAVE_STATE_VERSION}",
@@ -1975,8 +1988,9 @@ impl Emulator {
                 "ROM mismatch: this save state was produced against a different ROM".to_string(),
             ));
         }
-        let mut restored: Snes = bincode::deserialize(&bundle.core)
-            .map_err(|e| ApiError::SaveState(format!("core decode: {e}")))?;
+        let (mut restored, _): (Snes, usize) =
+            bincode::serde::decode_from_slice(&bundle.core, bincode::config::standard())
+                .map_err(|e| ApiError::SaveState(format!("core decode: {e}")))?;
         // The deserialized `Snes` has a placeholder mapper (the trait object
         // is `serde(skip)`). Move the LIVE mapper — which still owns the ROM
         // — into it, then replay the mapper's saved mutable state onto it.
@@ -2567,19 +2581,7 @@ impl Emulator {
                 "page_size must be a power of two dividing 0x20000, got {page_size:#x}"
             )));
         }
-        Ok(snes
-            .wram
-            .chunks_exact(ps)
-            .map(|page| {
-                // FNV-1a 64-bit
-                let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-                for &b in page {
-                    h ^= u64::from(b);
-                    h = h.wrapping_mul(0x0000_0100_0000_01b3);
-                }
-                h
-            })
-            .collect())
+        Ok(snes.wram.chunks_exact(ps).map(fnv1a_64).collect())
     }
 
     /// Enable the DMA→VRAM transfer-time trace: every byte an MDMA writes
@@ -3213,6 +3215,45 @@ mod tests {
                 other => panic!("expected BadArg for {bad:#x}, got {other:?}"),
             }
         }
+    }
+
+    /// Save-state v5 (#167): the stable FNV-1a rom hash matches the
+    /// published test vectors (i.e. the algorithm can never drift with the
+    /// toolchain), a v5 blob round-trips, and stale or foreign blobs are
+    /// rejected with a clean error.
+    #[test]
+    fn save_state_v5_stable_hash_roundtrip_and_rejections() {
+        // FNV-1a 64 reference vectors — if these move, every persisted
+        // rom_hash breaks, so they are pinned here.
+        assert_eq!(fnv1a_64(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a_64(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(fnv1a_64(b"foobar"), 0x8594_4171_f739_67e8);
+
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+
+        // v5 round-trip.
+        let blob = e.save_state().unwrap();
+        e.load_state(&blob).unwrap();
+
+        // A stale-version bundle is rejected by the version gate.
+        let stale = SaveStateBundle {
+            version: SAVE_STATE_VERSION - 1,
+            rom_hash: 0,
+            core: Vec::new(),
+            mapper: Vec::new(),
+        };
+        let bytes = bincode::serde::encode_to_vec(&stale, bincode::config::standard()).unwrap();
+        match e.load_state(&bytes) {
+            Err(ApiError::SaveState(msg)) => assert!(msg.contains("version")),
+            other => panic!("expected SaveState version error, got {other:?}"),
+        }
+
+        // Garbage (e.g. an old bincode-1 blob) errors cleanly, never panics.
+        assert!(matches!(
+            e.load_state(&[0xFF; 16]),
+            Err(ApiError::SaveState(_))
+        ));
     }
 
     #[test]

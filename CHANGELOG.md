@@ -4,6 +4,33 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Changed
+- **BREAKING — save-state format v5** (#167): the ROM-identity hash binding
+  a state to its ROM is now an explicit FNV-1a-64 over the raw ROM bytes
+  (previously `std`'s `DefaultHasher`, unspecified across toolchains — a
+  Rust upgrade could silently orphan every saved state), and the container
+  plus all mapper/coprocessor blobs moved from bincode 1.x (EOL) to
+  bincode 2. Both breaks share the one version bump: v4 and older `.luna`
+  blobs are rejected with a clean version error — re-save from a live run.
+  States are now portable across luna builds and toolchains
+  (`docs/trace_determinism.md` gained a save-state section).
+
+### Fixed
+- `wram_page_hashes` no longer panics the transport on an invalid
+  `page_size` — it returns a typed `BadArg` error (#167, #182).
+- `run_until_pc` catches core panics like every other run path — a
+  crashing ROM surfaces as an error instead of aborting the CLI/MCP/GUI
+  (#167, #183).
+- `run_until_mem_read`/`run_until_mem_write` no longer clobber a
+  caller-enabled memory trace: they ride the breakpoint registry (and are
+  panic-safe by construction) instead of hijacking the mem-trace buffer
+  (#167, #184).
+- "Native capture is not enabled" is a typed usage error (`BadArg`), not
+  a fake I/O error; fixed the stale `set_port2_mouse` rustdoc link
+  (#167, #185).
+
 ## [1.13.0] — 2026-08-03
 
 DSP-1 visibility, end to end. The cart coprocessor was the last one with

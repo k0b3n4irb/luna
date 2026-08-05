@@ -1557,11 +1557,13 @@ impl Mapper for SuperFxMapper {
             modified_r14: self.modified_r14,
             modified_r15: self.modified_r15,
         };
-        bincode::serialize(&st).unwrap_or_default()
+        bincode::serde::encode_to_vec(&st, bincode::config::standard()).unwrap_or_default()
     }
 
     fn load_state(&mut self, data: &[u8]) {
-        if let Ok(st) = bincode::deserialize::<SuperFxState>(data) {
+        if let Ok((st, _)) =
+            bincode::serde::decode_from_slice::<SuperFxState, _>(data, bincode::config::standard())
+        {
             self.ram = st.ram;
             self.regs = st.regs;
             *self.cache = st.cache;
