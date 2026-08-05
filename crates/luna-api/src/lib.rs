@@ -1105,7 +1105,8 @@ impl Emulator {
 
     /// Set the port-2 Mouse's this-frame signed motion (`+dx` right, `+dy`
     /// down) and buttons (bit 0 = left, bit 1 = right). Effective once
-    /// [`Self::set_port2_mouse`] is enabled.
+    /// the Mouse is selected via [`Self::set_port_device`] (or
+    /// [`Self::set_port_mouse`]).
     pub fn set_mouse(&mut self, dx: i32, dy: i32, buttons: u8) -> Result<(), ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         snes.cpu_regs.mouse.dx = dx;
@@ -1892,9 +1893,9 @@ impl Emulator {
     pub fn render_frame_png_native(&self) -> Result<Vec<u8>, ApiError> {
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
         if snes.ppu.native_framebuffer.is_empty() {
-            return Err(ApiError::Io(std::io::Error::other(
-                "native capture is not enabled (set_native_capture / --native-res)",
-            )));
+            return Err(ApiError::BadArg(
+                "native capture is not enabled (set_native_capture / --native-res)".into(),
+            ));
         }
         let (w, h) = (FRAME_W * 2, FRAME_H * 2);
         let mut buf = Vec::with_capacity(w * h * 3);
@@ -1917,9 +1918,9 @@ impl Emulator {
         use std::hash::{Hash, Hasher};
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
         if snes.ppu.native_framebuffer.is_empty() {
-            return Err(ApiError::Io(std::io::Error::other(
-                "native capture is not enabled (set_native_capture / --native-res)",
-            )));
+            return Err(ApiError::BadArg(
+                "native capture is not enabled (set_native_capture / --native-res)".into(),
+            ));
         }
         let mut h = std::collections::hash_map::DefaultHasher::new();
         snes.ppu.native_framebuffer.hash(&mut h);
