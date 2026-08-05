@@ -2545,10 +2545,11 @@ impl Emulator {
     pub fn wram_page_hashes(&self, page_size: usize) -> Result<Vec<u64>, ApiError> {
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
         let ps = if page_size == 0 { 0x1000 } else { page_size };
-        assert!(
-            ps.is_power_of_two() && 0x2_0000 % ps == 0,
-            "page_size must be a power of two dividing 0x20000"
-        );
+        if !ps.is_power_of_two() || 0x2_0000 % ps != 0 {
+            return Err(ApiError::BadArg(format!(
+                "page_size must be a power of two dividing 0x20000, got {page_size:#x}"
+            )));
+        }
         Ok(snes
             .wram
             .chunks_exact(ps)
@@ -3176,6 +3177,25 @@ mod tests {
         rom[0x7FDE] = checksum as u8;
         rom[0x7FDF] = (checksum >> 8) as u8;
         rom
+    }
+
+    #[test]
+    fn wram_page_hashes_bad_page_size_is_err_not_panic() {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+
+        // Valid: default (0 → 4 KiB) and an explicit power of two.
+        assert_eq!(e.wram_page_hashes(0).unwrap().len(), 32);
+        assert_eq!(e.wram_page_hashes(0x8000).unwrap().len(), 4);
+
+        // Invalid sizes must come back as BadArg — a bad argument from an
+        // MCP client must never panic the transport.
+        for bad in [3usize, 0x1001, 0x4_0000] {
+            match e.wram_page_hashes(bad) {
+                Err(ApiError::BadArg(_)) => {}
+                other => panic!("expected BadArg for {bad:#x}, got {other:?}"),
+            }
+        }
     }
 
     #[test]
