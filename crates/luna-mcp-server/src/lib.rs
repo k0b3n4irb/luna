@@ -829,11 +829,14 @@ impl LunaServer {
             em.render_frame_png(params.force_display)
                 .map_err(|e| api_err_to_mcp(&e))?
         };
+        // Report whatever the API actually rendered (hardcoding 256×224
+        // would lie the day a native-res / per-BG render lands here).
+        let (width, height) = png_dimensions(&png);
         let png_base64 = base64::engine::general_purpose::STANDARD.encode(&png);
         Ok(rmcp::Json(ScreenshotResult {
             png_base64,
-            width: 256,
-            height: 224,
+            width,
+            height,
         }))
     }
 
@@ -1607,6 +1610,18 @@ fn api_err_to_mcp(e: &ApiError) -> ErrorData {
     ErrorData::internal_error(e.to_string(), None)
 }
 
+/// Width/height straight from the PNG IHDR (fixed offsets 16..24,
+/// big-endian — IHDR is required to be the first chunk), so the reported
+/// dimensions are those of whatever the API actually rendered. `(0, 0)`
+/// on a malformed buffer.
+fn png_dimensions(png: &[u8]) -> (u32, u32) {
+    let field = |o: usize| {
+        png.get(o..o + 4)
+            .map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    (field(16), field(20))
+}
+
 /// Flatten a [`luna_api::RunOutcome`] into the wire result shared by
 /// `run_until_break` and `run` (issue #92).
 fn outcome_to_result(out: &luna_api::RunOutcome) -> RunUntilBreakResult {
@@ -1686,6 +1701,19 @@ mod tests {
             panic!("expected error for stepping without a ROM");
         };
         assert!(err.message.contains("no ROM"));
+    }
+
+    /// `png_dimensions` reads the IHDR fields; a malformed buffer yields
+    /// `(0, 0)` instead of panicking. (The screenshot round-trip test
+    /// below covers the real-PNG path: it asserts 256×224 on an actual
+    /// render.)
+    #[test]
+    fn png_dimensions_reads_the_ihdr() {
+        let mut buf = vec![0u8; 24];
+        buf[16..20].copy_from_slice(&512u32.to_be_bytes());
+        buf[20..24].copy_from_slice(&448u32.to_be_bytes());
+        assert_eq!(png_dimensions(&buf), (512, 448));
+        assert_eq!(png_dimensions(&[]), (0, 0));
     }
 
     /// Loading a non-existent ROM bubbles the I/O error up through
