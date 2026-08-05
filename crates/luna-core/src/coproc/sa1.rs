@@ -176,11 +176,13 @@ impl Mapper for Sa1Chip {
             cpu: self.cpu.clone(),
             running: self.running,
         };
-        bincode::serialize(&st).unwrap_or_default()
+        bincode::serde::encode_to_vec(&st, bincode::config::standard()).unwrap_or_default()
     }
 
     fn load_state(&mut self, data: &[u8]) {
-        if let Ok(st) = bincode::deserialize::<Sa1ChipState>(data) {
+        if let Ok((st, _)) =
+            bincode::serde::decode_from_slice::<Sa1ChipState, _>(data, bincode::config::standard())
+        {
             self.inner.load_state(&st.inner);
             self.cpu = st.cpu;
             self.running = st.running;

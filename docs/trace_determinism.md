@@ -45,3 +45,13 @@ therefore stable by the same mechanism.
 If you ever observe a cross-arch mismatch in a count or row that the fbhash
 agrees on, that is a luna bug — please report it; the anchor argument says it
 should not happen.
+
+## Save states (`.luna` blobs)
+
+Since format **v5** (#167) a save state is **portable across luna builds and
+toolchains**: the ROM-identity hash that binds a state to its ROM is an
+explicit FNV-1a-64 over the raw ROM bytes (previously `std`'s `DefaultHasher`,
+whose algorithm Rust does not specify across releases — states silently broke
+on a toolchain bump), and the container is bincode 2 `standard`. A state is
+still rejected on a format-version or ROM mismatch, with a clean error. v4 and
+older blobs are not readable by v5 builds — re-save from a live run.
