@@ -2048,18 +2048,27 @@ impl Emulator {
     /// Controlled execution (L10): step until the CPU PC reaches `pc`
     /// (`pb << 16 | pc`) or `max_steps` instructions elapse. Returns `true`
     /// if `pc` was reached (checked BEFORE each step, so a current match
-    /// returns immediately).
+    /// returns immediately). Panic-safe (a crashing ROM returns `Err`).
     pub fn run_until_pc(&mut self, pc: u32, max_steps: u64) -> Result<bool, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
-        for _ in 0..max_steps {
-            let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
-            if cur == pc {
-                return Ok(true);
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for _ in 0..max_steps {
+                let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
+                if cur == pc {
+                    return true;
+                }
+                snes.step();
             }
-            snes.step();
+            let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
+            cur == pc
+        }));
+        std::panic::set_hook(prev_hook);
+        match result {
+            Ok(hit) => Ok(hit),
+            Err(payload) => Err(ApiError::Panic(panic_message(&payload))),
         }
-        let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
-        Ok(cur == pc)
     }
 
     // -----------------------------------------------------------------
