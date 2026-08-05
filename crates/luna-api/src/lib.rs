@@ -2341,30 +2341,37 @@ impl Emulator {
         want: MemEventKind,
         max_steps: u64,
     ) -> Result<Option<(u32, u8)>, ApiError> {
-        let bank = (addr_full >> 16) as u8;
-        {
-            let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
-            // Capture this bank's accesses; drained every step so it never
-            // overflows. (Re-enabling resets the buffer.)
-            snes.enable_mem_trace(1 << 16, Some(bank), None);
-        }
-        for _ in 0..max_steps {
-            {
-                let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
-                snes.step();
+        // A temporary watchpoint on exactly this address, consumed through the
+        // same guarded loop as `run_until_break` — unlike the previous
+        // mem-trace-based implementation, a mem trace the caller enabled
+        // survives this call untouched, and a core panic surfaces as `Err`.
+        // Mirror folding stays OFF to keep this legacy path's exact-address
+        // semantics; other registered breakpoints are skipped over, as before.
+        let on_read = matches!(want, MemEventKind::Read);
+        let id = self
+            .bp_registry()?
+            .add_mem(addr_full, addr_full, on_read, !on_read, false);
+        let mut remaining = max_steps;
+        let outcome = loop {
+            match self.run_until_break(remaining) {
+                Ok(out) => {
+                    remaining = remaining.saturating_sub(out.steps);
+                    match out.hit {
+                        Some(hit) if hit.id == id => {
+                            break Ok(Some((hit.pc, hit.value.unwrap_or(0))));
+                        }
+                        // A hit always costs >= 1 step, so skipping foreign
+                        // breakpoints cannot loop forever.
+                        Some(_) if remaining > 0 => {}
+                        _ => break Ok(None),
+                    }
+                }
+                Err(e) => break Err(e),
             }
-            let events = {
-                let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
-                snes.take_mem_trace_log()
-            };
-            if let Some(ev) = events
-                .into_iter()
-                .find(|ev| ev.addr_full == addr_full && ev.kind == want)
-            {
-                return Ok(Some((ev.pc_full, ev.value)));
-            }
-        }
-        Ok(None)
+        };
+        // Always drop the temporary watchpoint, including on the Err path.
+        let _ = self.bp_remove(id);
+        outcome
     }
 
     /// Enable APU mailbox (`$2140-$2143`) event logging. Every CPU
@@ -3216,6 +3223,51 @@ mod tests {
         // touches returns None within the step budget (no panic, no hang).
         assert_eq!(e.run_until_mem_write(0x7E_FFFE, 50).unwrap(), None);
         assert_eq!(e.run_until_mem_read(0x7E_FFFE, 50).unwrap(), None);
+    }
+
+    /// The legacy L7 run-until paths ride the breakpoint registry now: the
+    /// hit is reported exactly as before, a mem trace the caller enabled
+    /// survives the call (the old implementation silently replaced it), and
+    /// the temporary watchpoint never leaks into the registry.
+    #[test]
+    fn run_until_mem_write_hits_and_preserves_the_mem_trace() {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+
+        // Same injected loop as the breakpoint test:
+        //   0100: A9 42     LDA #$42
+        //   0102: 8D 00 02  STA $0200
+        //   0105: 4C 00 01  JMP $0100
+        e.poke_memory(
+            0x7E,
+            0x0100,
+            &[0xA9, 0x42, 0x8D, 0x00, 0x02, 0x4C, 0x00, 0x01],
+        )
+        .unwrap();
+        e.set_cpu_register("pb", 0x00).unwrap();
+        e.set_cpu_register("pc", 0x0100).unwrap();
+        e.set_cpu_register("db", 0x00).unwrap();
+
+        // A mem trace the caller enabled before the run...
+        e.enable_mem_trace(10_000, None, Some((0x0100, 0x02FF)))
+            .unwrap();
+
+        // The write is found and reported with the accessing PC + value.
+        let hit = e.run_until_mem_write(0x00_0200, 100).unwrap();
+        assert_eq!(hit, Some((0x00_0102, 0x42)));
+
+        // ...is still live and captured the run's accesses.
+        let events = e.take_mem_trace_log().unwrap();
+        assert!(
+            events.iter().any(|ev| ev.addr_full == 0x00_0200),
+            "caller's mem trace was clobbered by run_until_mem_write"
+        );
+
+        // The temporary watchpoint did not leak into the registry.
+        assert!(e.bp_list().unwrap().is_empty());
+
+        // Unhit address: still None within budget.
+        assert_eq!(e.run_until_mem_write(0x7E_FFFE, 50).unwrap(), None);
     }
 
     /// WLA-DX symbols (issue #67): parse, resolve, annotate the
