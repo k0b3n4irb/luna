@@ -37,7 +37,7 @@ pub(crate) fn run_frames(
             Ok(v) => v,
             Err(e) => {
                 eprintln!("error: --input: {e}");
-                return ExitCode::from(1);
+                return ExitCode::from(2);
             }
         },
     };

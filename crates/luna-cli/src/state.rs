@@ -126,7 +126,7 @@ pub(crate) fn run_state(
         Some(Ok(v)) => v,
         Some(Err(e)) => {
             eprintln!("error: --mouse: {e}");
-            return ExitCode::from(1);
+            return ExitCode::from(2);
         }
         None => Vec::new(),
     };
@@ -136,7 +136,7 @@ pub(crate) fn run_state(
         Some(Ok(v)) => v,
         Some(Err(e)) => {
             eprintln!("error: --superscope: {e}");
-            return ExitCode::from(1);
+            return ExitCode::from(2);
         }
         None => Vec::new(),
     };
@@ -250,7 +250,7 @@ pub(crate) fn run_state(
             Ok(v) => v,
             Err(e) => {
                 eprintln!("error: --input: {e}");
-                return ExitCode::from(1);
+                return ExitCode::from(2);
             }
         },
     };
