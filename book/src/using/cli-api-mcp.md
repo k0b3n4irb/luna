@@ -39,6 +39,17 @@ Global options:
 Build it with `cargo build --release -p luna-cli`; the binary is
 `./target/release/luna`.
 
+#### Exit codes (the CI contract)
+
+| Code | Meaning |
+|---|---|
+| `0` | Run completed; every `--assert*` spec passed. (A ROM hitting an unimplemented core path still exits 0 — emulation gaps are reported, not treated as CLI failures.) |
+| `1` | Runtime failure (ROM load, I/O, trace enable) **or** at least one `--assert*` spec failed (each failing spec prints a `FAIL …` line on stdout). |
+| `2` | Usage error — a malformed `--input` / `--mouse` / `--superscope` script (any subcommand). Fix the invocation, not the ROM. |
+
+A test harness should treat `1` as "the ROM regressed" and `2` as "the
+harness itself is broken".
+
 ### `luna run` — quick render / audio dump
 
 ```
