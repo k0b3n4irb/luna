@@ -15,7 +15,7 @@ pub const CATEGORY_COUNT: usize = 18;
 /// One Event Viewer category — mirrors Mesen2's `SnesEventViewerConfig`
 /// categories. The variant order is the canonical index (0..18) used by
 /// [`EventViewerConfig::visible`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub enum EventCategory {
     /// PPU CGRAM register write (`$2121-$2122`).
     PpuCgramWrite,
@@ -181,7 +181,7 @@ pub fn event_category(ev: &MemTraceEvent) -> Option<EventCategory> {
 
 /// Event Viewer configuration — mirrors Mesen2's `SnesEventViewerConfig`
 /// (all categories visible, previous-frame on, all DMA channels on by default).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
 pub struct EventViewerConfig {
     /// Per-category visibility, indexed by [`EventCategory::index`].
     pub visible: [bool; CATEGORY_COUNT],
@@ -206,7 +206,7 @@ impl Default for EventViewerConfig {
 }
 
 /// One decoded Event Viewer event — the snapshot unit the overlay/list consume.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, schemars::JsonSchema)]
 pub struct EventViewerEvent {
     /// PPU scanline at the access.
     pub scanline: u16,
