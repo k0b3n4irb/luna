@@ -510,6 +510,11 @@ method, so the MCP transport adds reach, not capability.
 | `start_input_capture` / `take_input_capture` | `start_input_capture` / `take_input_capture` | Record joypad changes and export a `frame:mask` script (replay with `--input @file`). |
 | `load_symbols` | `load_symbols` | Load a WLA-DX `.sym`; disasm + traces become annotated. |
 | `resolve_symbol` | `resolve_symbol` | Label name → 24-bit address. |
+| `frame_hash` | `frame_hash` / `frame_hash_native` | 64-bit pixel hash of the current frame as 16 hex chars — the CLI's `fbhash=` value. `native: true` hashes the 512×448 capture (enable it first; native and non-native values are not comparable). |
+| `set_native_capture` | `set_native_capture` | Toggle native 512×448 capture for `screenshot`/`frame_hash` `native` modes. |
+| `wram_page_hashes` | `wram_page_hashes` | Stable FNV-1a-64 per WRAM page (default 4 KiB → 32 hashes). Diff two calls to localise a WRAM change. |
+| `wram_snapshot` | `wram_snapshot` | Full-WRAM FNV-1a-64 hash (+ the raw 128 KiB base64 with `include_data`). |
+| `loop_probe` | `loop_probe` | Hang diagnostic: run `max_steps` and count distinct PCs (a handful ⇒ tight spin loop). |
 | `enable_nocash_log` / `take_nocash_log` | `enable_nocash_log` / `take_nocash_log` | The `$21FC` Nocash TTY (`SNES_NOCASH` text): drain returns `{text, base64}`. |
 | `enable_wdm_log` / `take_wdm_log` | `enable_wdm_log` / `take_wdm_log` | The `WDM` assert channel (`SNES_ASSERT` → `WDM $00`): drain returns `[{pc, operand, symbol}]`. |
 
