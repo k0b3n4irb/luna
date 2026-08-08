@@ -7,6 +7,15 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- Symbols v2 (#179, closing the ARAM half of #171): the symbol table
+  carries two address spaces (24-bit CPU bus + SPC700 ARAM) — load a
+  wla-spc700 driver's `.sym` with `space: "aram"` (API:
+  `load_symbols_spc(_str)`) without clobbering the game's CPU symbols;
+  `disasm_spc` is now annotated and, with `peek_aram`, accepts ARAM
+  `symbol` names. WLA-DX `[definitions]` constants resolve by name (and
+  never annotate addresses). Name resolution is a binary search and
+  parse dedup is sort-based — the old linear/quadratic scans are gone,
+  so large `.sym` files stay fast.
 - `luna state`: `--peek` results are mirrored into the `--out` JSON as a
   `peeks` array (`{spec, space, addr, bytes_hex, error?}`) so harnesses
   read peeks from the same machine-readable channel as the state instead

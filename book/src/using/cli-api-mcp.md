@@ -564,9 +564,17 @@ With a symbol table loaded, the address-taking tools (`peek_memory`,
 `enable_mem_trace`) also accept a `symbol` name in place of the numeric
 address — e.g. `peek_memory {symbol: "monster_x", count: 2}`, or a
 symbol-bounded watch range `bp_add {kind: "mem", symbol: "buf_start",
-hi_symbol: "buf_end"}`. The ARAM-space tools (`disasm_spc`, `peek_aram`)
-stay numeric until the symbol table grows an SPC address space
-(issue #179).
+hi_symbol: "buf_end"}`.
+
+Since symbols v2 (#179) the table carries **two address spaces**: the
+24-bit CPU bus and the SPC700's 16-bit ARAM. `load_symbols` /
+`load_symbols_str` take `space: "aram"` for a wla-spc700 driver's `.sym`
+(loading one space never clobbers the other), `resolve_symbol` /
+`symbol_for_addr` take the same `space` argument, and the ARAM tools
+(`disasm_spc`, `peek_aram`) accept `symbol` names resolved in the ARAM
+space — `disasm_spc` output is annotated from it. WLA-DX
+`[definitions]` constants also resolve by name (they never annotate
+addresses — a constant is not a location).
 
 #### Reading the SDK assert/log channels over MCP
 

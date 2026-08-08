@@ -288,7 +288,11 @@ pub struct PeekMemoryParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct PeekAramParams {
     /// 16-bit offset within the SPC700's 64 KB ARAM.
+    #[serde(default)]
     pub offset: u16,
+    /// Read at a loaded ARAM-space symbol instead of `offset`.
+    #[serde(default)]
+    pub symbol: Option<String>,
     /// Number of bytes to read — up to `0x10000` for the whole ARAM in
     /// one call (the address space wraps; larger counts are clamped).
     pub count: u32,
@@ -392,6 +396,10 @@ pub struct DisasmSpcParams {
     /// 16-bit ARAM start address. Defaults to the live SPC700 PC.
     #[serde(default)]
     pub addr: Option<u16>,
+    /// Disassemble starting at a loaded ARAM-space symbol instead of
+    /// `addr` (load one with `load_symbols {space: "aram"}`).
+    #[serde(default)]
+    pub symbol: Option<String>,
     /// Number of instructions to decode. Defaults to 16.
     #[serde(default)]
     pub lines: Option<u16>,
@@ -518,6 +526,11 @@ pub struct RunParams {
 pub struct LoadSymbolsParams {
     /// Path to a WLA-DX `.sym` file on the host filesystem.
     pub path: String,
+    /// Which symbol space to load into: `cpu` (default — the 24-bit bus)
+    /// or `aram` (a wla-spc700 driver's symbols, 16-bit ARAM). Loading
+    /// one space keeps the other's symbols.
+    #[serde(default)]
+    pub space: Option<String>,
 }
 
 /// `resolve_symbol` parameters.
@@ -525,6 +538,9 @@ pub struct LoadSymbolsParams {
 pub struct ResolveSymbolParams {
     /// Label name exactly as it appears in the `.sym` file.
     pub name: String,
+    /// `cpu` (default) or `aram` — which symbol space to resolve in.
+    #[serde(default)]
+    pub space: Option<String>,
 }
 
 /// `set_mouse` parameters.
@@ -1154,16 +1170,24 @@ pub struct ResolveSymbolResult {
 /// `load_symbols_str` parameters.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct LoadSymbolsStrParams {
-    /// WLA-DX `.sym` text (`[labels]` / `[symbols]` / `[exports]`
-    /// sections). Replaces any previously loaded table wholesale.
+    /// WLA-DX `.sym` text (`[labels]` / `[symbols]` / `[exports]` +
+    /// `[definitions]` sections). Replaces the loaded table's entries of
+    /// the chosen space, keeping the other space.
     pub text: String,
+    /// `cpu` (default) or `aram` — see `load_symbols`.
+    #[serde(default)]
+    pub space: Option<String>,
 }
 
 /// `symbol_for_addr` parameters.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct SymbolForAddrParams {
-    /// 24-bit `bank << 16 | offset` address to symbolise.
+    /// 24-bit `bank << 16 | offset` address (or a 16-bit ARAM offset
+    /// with `space: "aram"`) to symbolise.
     pub addr: u32,
+    /// `cpu` (default) or `aram` — which symbol space to look in.
+    #[serde(default)]
+    pub space: Option<String>,
 }
 
 /// `symbol_for_addr` result.
@@ -1506,7 +1530,16 @@ impl LunaServer {
     ) -> Result<rmcp::Json<MemoryResult>, ErrorData> {
         let bytes = {
             let em = self.emulator.lock().await;
-            em.peek_aram(params.offset, params.count)
+            let offset = match &params.symbol {
+                Some(name) => em.resolve_symbol_spc(name).ok_or_else(|| {
+                    ErrorData::invalid_params(
+                        format!("unknown ARAM symbol `{name}` (load with load_symbols {{space: \"aram\"}})"),
+                        None,
+                    )
+                })?,
+                None => params.offset,
+            };
+            em.peek_aram(offset, params.count)
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(MemoryResult { bytes }))
@@ -1696,9 +1729,15 @@ impl LunaServer {
     ) -> Result<rmcp::Json<DisasmResult>, ErrorData> {
         let lines = {
             let em = self.emulator.lock().await;
-            let addr = match params.addr {
-                Some(a) => a,
-                None => em.spc700_state().map_err(|e| api_err_to_mcp(&e))?.pc,
+            let addr = match (&params.symbol, params.addr) {
+                (Some(name), _) => em.resolve_symbol_spc(name).ok_or_else(|| {
+                    ErrorData::invalid_params(
+                        format!("unknown ARAM symbol `{name}` (load with load_symbols {{space: \"aram\"}})"),
+                        None,
+                    )
+                })?,
+                (None, Some(a)) => a,
+                (None, None) => em.spc700_state().map_err(|e| api_err_to_mcp(&e))?.pc,
             };
             em.disassemble_spc(addr, params.lines.unwrap_or(16))
                 .map_err(|e| api_err_to_mcp(&e))?
@@ -1991,10 +2030,16 @@ impl LunaServer {
         &self,
         Parameters(params): Parameters<LoadSymbolsParams>,
     ) -> Result<rmcp::Json<LoadSymbolsResult>, ErrorData> {
+        let space = parse_space(params.space.as_deref())?;
         let count = {
             let mut em = self.emulator.lock().await;
-            em.load_symbols(std::path::Path::new(&params.path))
-                .map_err(|e| api_err_to_mcp(&e))?
+            match space {
+                luna_api::SymbolSpace::Cpu => em.load_symbols(std::path::Path::new(&params.path)),
+                luna_api::SymbolSpace::Aram => {
+                    em.load_symbols_spc(std::path::Path::new(&params.path))
+                }
+            }
+            .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(LoadSymbolsResult { count }))
     }
@@ -2007,9 +2052,13 @@ impl LunaServer {
         &self,
         Parameters(params): Parameters<ResolveSymbolParams>,
     ) -> Result<rmcp::Json<ResolveSymbolResult>, ErrorData> {
+        let space = parse_space(params.space.as_deref())?;
         let addr = {
             let em = self.emulator.lock().await;
-            em.resolve_symbol(&params.name)
+            match space {
+                luna_api::SymbolSpace::Cpu => em.resolve_symbol(&params.name),
+                luna_api::SymbolSpace::Aram => em.resolve_symbol_spc(&params.name).map(u32::from),
+            }
         };
         Ok(rmcp::Json(ResolveSymbolResult { addr }))
     }
@@ -2023,9 +2072,13 @@ impl LunaServer {
         &self,
         Parameters(params): Parameters<LoadSymbolsStrParams>,
     ) -> Result<rmcp::Json<LoadSymbolsResult>, ErrorData> {
+        let space = parse_space(params.space.as_deref())?;
         let count = {
             let mut em = self.emulator.lock().await;
-            em.load_symbols_str(&params.text)
+            match space {
+                luna_api::SymbolSpace::Cpu => em.load_symbols_str(&params.text),
+                luna_api::SymbolSpace::Aram => em.load_symbols_spc_str(&params.text),
+            }
         };
         Ok(rmcp::Json(LoadSymbolsResult { count }))
     }
@@ -2050,12 +2103,21 @@ impl LunaServer {
     async fn symbol_for_addr(
         &self,
         Parameters(params): Parameters<SymbolForAddrParams>,
-    ) -> rmcp::Json<SymbolForAddrResult> {
+    ) -> Result<rmcp::Json<SymbolForAddrResult>, ErrorData> {
+        let space = parse_space(params.space.as_deref())?;
         let symbol = {
             let em = self.emulator.lock().await;
-            em.symbol_for_addr(params.addr)
+            match space {
+                luna_api::SymbolSpace::Cpu => em.symbol_for_addr(params.addr),
+                luna_api::SymbolSpace::Aram => {
+                    let addr = u16::try_from(params.addr).map_err(|_| {
+                        ErrorData::invalid_params("aram addr must fit in 16 bits", None)
+                    })?;
+                    em.symbol_for_aram_addr(addr)
+                }
+            }
         };
-        rmcp::Json(SymbolForAddrResult { symbol })
+        Ok(rmcp::Json(SymbolForAddrResult { symbol }))
     }
 
     // ------------- Persistence + media parity (issue #173) -------------
@@ -2966,6 +3028,19 @@ fn b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
+/// Parse an optional symbol-`space` tool param: `cpu` (default) or
+/// `aram`/`spc`.
+fn parse_space(s: Option<&str>) -> Result<luna_api::SymbolSpace, ErrorData> {
+    match s.map(str::to_ascii_lowercase).as_deref() {
+        None | Some("cpu") => Ok(luna_api::SymbolSpace::Cpu),
+        Some("aram" | "spc") => Ok(luna_api::SymbolSpace::Aram),
+        Some(other) => Err(ErrorData::invalid_params(
+            format!("unknown space `{other}` (cpu, aram)"),
+            None,
+        )),
+    }
+}
+
 /// Parse an optional `force_mapper` tool param into a [`luna_api::MapperKind`],
 /// sharing the CLI's `--force-mapper` vocabulary.
 fn parse_force_mapper(s: Option<&str>) -> Result<Option<luna_api::MapperKind>, ErrorData> {
@@ -3432,6 +3507,7 @@ mod tests {
         let n = s
             .load_symbols(Parameters(LoadSymbolsParams {
                 path: sym_path.to_string_lossy().into(),
+                space: None,
             }))
             .await
             .unwrap();
@@ -3441,6 +3517,7 @@ mod tests {
         let r = s
             .resolve_symbol(Parameters(ResolveSymbolParams {
                 name: "monster_x".into(),
+                space: None,
             }))
             .await
             .unwrap();
@@ -3448,6 +3525,7 @@ mod tests {
         let r = s
             .resolve_symbol(Parameters(ResolveSymbolParams {
                 name: "nope".into(),
+                space: None,
             }))
             .await
             .unwrap();
@@ -3568,6 +3646,7 @@ mod tests {
         std::fs::write(&sym_path, "[labels]\n00:8000 main\n").unwrap();
         s.load_symbols(Parameters(LoadSymbolsParams {
             path: sym_path.to_string_lossy().into(),
+            space: None,
         }))
         .await
         .unwrap();
@@ -3907,16 +3986,23 @@ mod tests {
         let n = s
             .load_symbols_str(Parameters(LoadSymbolsStrParams {
                 text: "[labels]\n00:8000 main\n7e:0200 monster_x\n7e:020f monster_end\n".into(),
+                space: None,
             }))
             .await
             .unwrap();
         assert_eq!(n.0.count, 3);
 
         // symbol_for_addr: exact, offset form, and no-label-in-bank.
-        let sym = |addr| s.symbol_for_addr(Parameters(SymbolForAddrParams { addr }));
-        assert_eq!(sym(0x7E_0200).await.0.symbol.as_deref(), Some("monster_x"));
-        assert_eq!(sym(0x00_8005).await.0.symbol.as_deref(), Some("main+0x05"));
-        assert!(sym(0x7F_0000).await.0.symbol.is_none());
+        let sym = |addr| s.symbol_for_addr(Parameters(SymbolForAddrParams { addr, space: None }));
+        assert_eq!(
+            sym(0x7E_0200).await.unwrap().0.symbol.as_deref(),
+            Some("monster_x")
+        );
+        assert_eq!(
+            sym(0x00_8005).await.unwrap().0.symbol.as_deref(),
+            Some("main+0x05")
+        );
+        assert!(sym(0x7F_0000).await.unwrap().0.symbol.is_none());
 
         // disasm_cpu accepts a symbol start.
         let d = s
@@ -3979,6 +4065,7 @@ mod tests {
         assert!(
             s.resolve_symbol(Parameters(ResolveSymbolParams {
                 name: "main".into(),
+                space: None,
             }))
             .await
             .unwrap()
@@ -3986,7 +4073,7 @@ mod tests {
             .addr
             .is_none()
         );
-        assert!(sym(0x7E_0200).await.0.symbol.is_none());
+        assert!(sym(0x7E_0200).await.unwrap().0.symbol.is_none());
     }
 
     #[tokio::test]
@@ -4091,6 +4178,7 @@ mod tests {
         let aram = s
             .peek_aram(Parameters(PeekAramParams {
                 offset: 0,
+                symbol: None,
                 count: 0x1_0000,
             }))
             .await
@@ -4132,6 +4220,132 @@ mod tests {
         assert!(instructions.contains("load_rom"));
         assert!(instructions.contains("take_wdm_log"));
         assert!(info.capabilities.tools.is_some());
+    }
+
+    #[tokio::test]
+    async fn server_symbol_spaces_round_trip() {
+        let s = LunaServer::new();
+        let rom_path = PathBuf::from("/tmp/luna_mcp_symspaces_demo.smc");
+        std::fs::write(&rom_path, demo_lorom()).unwrap();
+        s.load_rom(Parameters(rom_params(&rom_path.to_string_lossy())))
+            .await
+            .unwrap();
+
+        // CPU symbols + a [definitions] constant.
+        let n = s
+            .load_symbols_str(Parameters(LoadSymbolsStrParams {
+                text: "[labels]\n00:8000 main\n[definitions]\n00000042 MAGIC\n".into(),
+                space: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(n.0.count, 2);
+        // Constants resolve in the CPU space (v2, #179).
+        let r = s
+            .resolve_symbol(Parameters(ResolveSymbolParams {
+                name: "MAGIC".into(),
+                space: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(r.0.addr, Some(0x42));
+
+        // ARAM symbols load into their own space, keeping the CPU table.
+        let n = s
+            .load_symbols_str(Parameters(LoadSymbolsStrParams {
+                text: "[labels]\n00:0500 driver_loop\n".into(),
+                space: Some("aram".into()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(n.0.count, 1);
+        let r = s
+            .resolve_symbol(Parameters(ResolveSymbolParams {
+                name: "driver_loop".into(),
+                space: Some("aram".into()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(r.0.addr, Some(0x0500));
+        // Cross-space resolution stays separate in both directions.
+        assert!(
+            s.resolve_symbol(Parameters(ResolveSymbolParams {
+                name: "driver_loop".into(),
+                space: None,
+            }))
+            .await
+            .unwrap()
+            .0
+            .addr
+            .is_none()
+        );
+        let r = s
+            .resolve_symbol(Parameters(ResolveSymbolParams {
+                name: "main".into(),
+                space: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(r.0.addr, Some(0x00_8000));
+
+        // symbol_for_addr in the aram space, incl. the 16-bit guard.
+        let sfa = s
+            .symbol_for_addr(Parameters(SymbolForAddrParams {
+                addr: 0x0502,
+                space: Some("aram".into()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(sfa.0.symbol.as_deref(), Some("driver_loop+0x02"));
+        assert!(
+            s.symbol_for_addr(Parameters(SymbolForAddrParams {
+                addr: 0x1_0000,
+                space: Some("aram".into()),
+            }))
+            .await
+            .is_err()
+        );
+
+        // disasm_spc + peek_aram accept ARAM symbols; the disassembly is
+        // annotated from the ARAM space.
+        let d = s
+            .disasm_spc(Parameters(DisasmSpcParams {
+                addr: None,
+                symbol: Some("driver_loop".into()),
+                lines: Some(1),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(d.0.lines[0].addr, 0x0500);
+        assert_eq!(d.0.lines[0].symbol.as_deref(), Some("driver_loop"));
+        let bytes = s
+            .peek_aram(Parameters(PeekAramParams {
+                offset: 0,
+                symbol: Some("driver_loop".into()),
+                count: 2,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(bytes.0.bytes.len(), 2);
+        assert!(
+            s.peek_aram(Parameters(PeekAramParams {
+                offset: 0,
+                symbol: Some("main".into()), // CPU label ≠ ARAM symbol
+                count: 2,
+            }))
+            .await
+            .is_err()
+        );
+
+        // Bad space vocabulary.
+        assert!(
+            s.resolve_symbol(Parameters(ResolveSymbolParams {
+                name: "main".into(),
+                space: Some("vram".into()),
+            }))
+            .await
+            .is_err()
+        );
     }
 
     /// `load_rom` params with no mapper/region override — the common case.

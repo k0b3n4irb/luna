@@ -48,7 +48,7 @@ pub mod symbols;
 pub use event_viewer::{
     CATEGORY_COUNT, EventCategory, EventViewerConfig, EventViewerEvent, categorise, register_name,
 };
-pub use symbols::SymbolTable;
+pub use symbols::{SymbolKind, SymbolSpace, SymbolTable};
 use thiserror::Error;
 
 /// Errors surfaced from [`Emulator`] methods.
@@ -1734,9 +1734,9 @@ impl Emulator {
                 bytes,
                 text: insn.text,
                 is_pc: addr == pc,
-                // ARAM addresses live outside the CPU bus's bank space the
-                // .sym labels describe.
-                symbol: None,
+                // Annotated from the ARAM symbol space (issue #179) — CPU
+                // .sym labels never claim ARAM addresses.
+                symbol: self.symbols.as_ref().and_then(|t| t.nearest_spc(addr)),
             });
             addr = addr.wrapping_add(u16::from(insn.length));
         }
@@ -2098,8 +2098,48 @@ impl Emulator {
     pub fn load_symbols(&mut self, path: &std::path::Path) -> Result<usize, ApiError> {
         let table = SymbolTable::load(path)?;
         let n = table.len();
-        self.symbols = Some(table);
+        self.install_symbols(symbols::SymbolSpace::Cpu, table);
         Ok(n)
+    }
+
+    /// Replace one space of the loaded table, keeping the other — so a
+    /// CPU `.sym` load never clobbers loaded SPC symbols and vice versa
+    /// (issue #179).
+    fn install_symbols(&mut self, space: symbols::SymbolSpace, table: SymbolTable) {
+        match &mut self.symbols {
+            Some(existing) => existing.replace_space(space, table),
+            None => self.symbols = Some(table),
+        }
+    }
+
+    /// Load a wla-spc700 `.sym` into the ARAM symbol space (issue #179):
+    /// `disassemble_spc` becomes annotated and the SPC-side tools accept
+    /// symbol names. Keeps the CPU-space table intact.
+    pub fn load_symbols_spc(&mut self, path: &std::path::Path) -> Result<usize, ApiError> {
+        let table = SymbolTable::load_spc(path)?;
+        let n = table.len();
+        self.install_symbols(symbols::SymbolSpace::Aram, table);
+        Ok(n)
+    }
+
+    /// [`Self::load_symbols_spc`] from text instead of a file.
+    pub fn load_symbols_spc_str(&mut self, text: &str) -> usize {
+        let table = SymbolTable::parse_spc(text);
+        let n = table.len();
+        self.install_symbols(symbols::SymbolSpace::Aram, table);
+        n
+    }
+
+    /// Resolve an ARAM-space label to its 16-bit offset.
+    #[must_use]
+    pub fn resolve_symbol_spc(&self, name: &str) -> Option<u16> {
+        self.symbols.as_ref()?.resolve_spc(name)
+    }
+
+    /// Nearest ARAM label at or below `addr` (`name` or `name+0xNN`).
+    #[must_use]
+    pub fn symbol_for_aram_addr(&self, addr: u16) -> Option<String> {
+        self.symbols.as_ref()?.nearest_spc(addr)
     }
 
     /// Parse a `.sym` table from a string (the file-less form used by
@@ -2107,7 +2147,7 @@ impl Emulator {
     pub fn load_symbols_str(&mut self, text: &str) -> usize {
         let table = SymbolTable::parse(text);
         let n = table.len();
-        self.symbols = Some(table);
+        self.install_symbols(symbols::SymbolSpace::Cpu, table);
         n
     }
 
