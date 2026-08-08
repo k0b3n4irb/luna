@@ -1231,8 +1231,16 @@ impl LunaServer {
     /// Build a new server backed by a freshly-constructed `Emulator`.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_emulator(Emulator::new())
+    }
+
+    /// Build a server around an existing (typically preloaded) `Emulator` —
+    /// the `luna mcp --rom <path>` path, so a session starts with the ROM
+    /// and symbols already in place instead of hunting for a host path.
+    #[must_use]
+    pub fn with_emulator(emulator: Emulator) -> Self {
         Self {
-            emulator: Arc::new(Mutex::new(Emulator::new())),
+            emulator: Arc::new(Mutex::new(emulator)),
             interrupt: Arc::new(AtomicBool::new(false)),
             dsp1_trace_max: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             tool_router: Self::tool_router(),
@@ -2912,7 +2920,40 @@ pub struct EmptyOk {
 }
 
 #[rmcp::tool_handler]
-impl ServerHandler for LunaServer {}
+impl ServerHandler for LunaServer {
+    // rmcp's ServerInfo/Implementation are #[non_exhaustive], so the
+    // struct-expression form clippy suggests cannot compile — mutate a
+    // Default instead.
+    #[allow(clippy::field_reassign_with_default)]
+    fn get_info(&self) -> rmcp::model::ServerInfo {
+        let mut info = rmcp::model::ServerInfo::default();
+        let mut implementation = rmcp::model::Implementation::default();
+        implementation.name = "luna".into();
+        implementation.version = env!("CARGO_PKG_VERSION").into();
+        info.server_info = implementation;
+        info.capabilities = rmcp::model::ServerCapabilities::builder()
+            .enable_tools()
+            .build();
+        info.instructions = Some(
+            "luna — a SNES emulator with a full debugging surface. Typical \
+                 session: `load_rom` (or start the server as `luna mcp --rom <path>` \
+                 and skip it), then `step` / `step_until_frame` / `run` to advance, \
+                 `state` / `screenshot` / `frame_hash` to observe, and `peek_memory` / \
+                 `peek_vram` / `peek_aram` to inspect memory. Debugging SDK-built \
+                 homebrew: `enable_wdm_log` + `enable_nocash_log` before running, then \
+                 `take_wdm_log` (assertion hits) and `take_nocash_log` (the ROM's \
+                 printf channel) — an empty WDM drain is the green light. Deeper \
+                 diagnosis: `enable_cpu_trace` / `enable_mem_trace` and the \
+                 coprocessor pairs (dma/dsp/mailbox/sa1/superfx/dsp1/spc), each \
+                 drained by its `take_*`. Load symbols (`load_symbols` / \
+                 `load_symbols_str`) and every address-taking tool also accepts a \
+                 `symbol` name while disassembly and traces become annotated. \
+                 `capabilities` lists the live tool catalogue."
+                .into(),
+        );
+        info
+    }
+}
 
 /// Map [`luna_api::ApiError`] onto an MCP `internal_error` payload.
 fn api_err_to_mcp(e: &ApiError) -> ErrorData {
@@ -3008,8 +3049,18 @@ fn outcome_to_result(out: &luna_api::RunOutcome) -> RunUntilBreakResult {
 /// for `claude_desktop_config.json`-style spawns. Blocks until the
 /// MCP client closes the stream or sends a shutdown.
 pub async fn serve_stdio() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    serve_stdio_with(Emulator::new()).await
+}
+
+/// Like [`serve_stdio`], but serving an existing (typically preloaded)
+/// `Emulator` — the `luna mcp --rom <path>` entry point.
+pub async fn serve_stdio_with(
+    emulator: Emulator,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (stdin, stdout) = stdio();
-    let server = LunaServer::new().serve((stdin, stdout)).await?;
+    let server = LunaServer::with_emulator(emulator)
+        .serve((stdin, stdout))
+        .await?;
     server.waiting().await?;
     Ok(())
 }
@@ -4053,6 +4104,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(vram.0.bytes.len(), 0x1_0000);
+    }
+
+    #[tokio::test]
+    async fn server_with_preloaded_emulator_answers_without_load_rom() {
+        // The `luna mcp --rom` path: the emulator arrives already loaded.
+        let rom_path = PathBuf::from("/tmp/luna_mcp_preload_demo.smc");
+        std::fs::write(&rom_path, demo_lorom()).unwrap();
+        let mut em = Emulator::new();
+        em.load_rom(&rom_path).unwrap();
+        let s = LunaServer::with_emulator(em);
+
+        // First contact: state + step work with no prior load_rom call.
+        let st = s.state().await;
+        assert!(st.0.state.rom.is_some());
+        let stepped = s.step(Parameters(StepParams { count: 10 })).await.unwrap();
+        assert_eq!(stepped.0.executed, 10);
+    }
+
+    #[test]
+    fn get_info_reports_luna_identity_and_instructions() {
+        let s = LunaServer::new();
+        let info = s.get_info();
+        assert_eq!(info.server_info.name, "luna");
+        assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
+        let instructions = info.instructions.expect("server instructions present");
+        assert!(instructions.contains("load_rom"));
+        assert!(instructions.contains("take_wdm_log"));
+        assert!(info.capabilities.tools.is_some());
     }
 
     /// `load_rom` params with no mapper/region override — the common case.

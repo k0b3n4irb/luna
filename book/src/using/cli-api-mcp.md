@@ -373,12 +373,30 @@ luna assets-dump "game.sfc" -n 8000000 --out /tmp/assets
 ### `luna mcp` — MCP server over stdio
 
 ```
-luna mcp
+luna mcp [--rom <PATH> [--sym <PATH>] [--force-mapper <KIND>] [--force-region <ntsc|pal>]]
 ```
 
 Serves the tool catalogue in §4 to any connected MCP client (Claude
 Desktop, Claude Code, custom). Stays alive until the client closes the
-stream. No options — configure the client to launch `luna mcp`.
+stream.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `--rom <PATH>` | none | Preload a ROM so the session starts ready — the client's first `state`/`step` works with no `load_rom` call (and no host-path hunting). A `<rom>.sym` beside it auto-loads, wlalink-style. |
+| `--sym <PATH>` | beside-ROM auto-detect | Explicit WLA-DX `.sym` (overrides the auto-detection). |
+| `--force-mapper <KIND>` | header auto-detect | Same vocabulary as `luna state` — for headerless/checksum-invalid homebrew. |
+| `--force-region <ntsc\|pal>` | header country byte | Force the video standard for the preloaded ROM. |
+
+```bash
+# A Claude Code MCP entry that opens the work-in-progress ROM directly:
+luna mcp --rom game.sfc --force-mapper lorom
+# → the client's first `state` already reports rom.title, no load_rom step
+```
+
+The handshake now identifies the server as `luna` with luna's real
+version (previously it reported the rmcp library's), and carries server
+instructions describing the load → run → observe → trace workflow — an
+MCP client sees how to drive the emulator before listing a single tool.
 
 ---
 
@@ -509,7 +527,7 @@ method, so the MCP transport adds reach, not capability.
 | `run_until_break` | `run_until_break` | Run at full speed until a breakpoint fires (or a step budget). |
 | `run` / `pause` | `run_until_break_interruptible` | Unbounded interruptible run: `run` goes until a breakpoint / `STOP` / `pause`; `pause` stops it (returns `interrupted: true`). No mandatory step budget. |
 | `peek_oam` | `peek_oam` | All 544 OAM bytes (512 low table + 32 high table). |
-| `capabilities` | — | luna `version` + the live tool catalogue, for client feature-detection (the handshake `serverInfo.version` is rmcp's, not luna's). |
+| `capabilities` | — | luna `version` + the live tool catalogue, for client feature-detection (the handshake `serverInfo` also reports luna's identity since #174). |
 | `start_input_capture` / `take_input_capture` | `start_input_capture` / `take_input_capture` | Record joypad changes and export a `frame:mask` script (replay with `--input @file`). |
 | `load_symbols` | `load_symbols` | Load a WLA-DX `.sym`; disasm + traces become annotated. |
 | `load_symbols_str` | `load_symbols_str` | Load `.sym` text directly (no host file — e.g. an in-memory build's output). Replaces the table. |

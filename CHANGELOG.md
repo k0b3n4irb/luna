@@ -7,6 +7,12 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- `luna mcp` preload flags (#174) — `--rom` (with beside-ROM `.sym`
+  auto-detection), `--sym`, `--force-mapper`, `--force-region`: the
+  session starts with the ROM loaded, so an MCP client's first `state`
+  works without a `load_rom` round-trip. The MCP handshake now
+  identifies the server as `luna` with luna's real version (previously
+  rmcp's) and carries workflow instructions.
 - MCP: persistence + media parity (#173) — `sram_get` / `sram_set`
   (base64 `.srm`, the `--srm-out` / `--srm-in` pair), `export_spc`
   (standard `.spc` v0.30 snapshot), `decode_sprites` (structured OAM
