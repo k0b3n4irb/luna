@@ -7,6 +7,11 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- Narrowing memory-search sessions (#177) — `search_begin(width)` /
+  `search_refine(op, value?)` / `search_results(limit)` on
+  `luna_api::Emulator` and as MCP tools: the classic "find my variable"
+  loop (`eq`/`ne`/`lt`/`gt` against a value, `changed`/`unchanged`
+  against the previous snapshot).
 - Breakpoints v2 (#176) — `bp_set_enabled` (disable without losing id /
   name / hit count), per-breakpoint hit counts (mem watches count at
   most one hit per instruction, matching the first-hit rule), an
@@ -87,6 +92,8 @@ All notable user-facing changes to luna. Releases are cut from `main`
   (`docs/trace_determinism.md` gained a save-state section).
 
 ### Fixed
+- `search_memory` hits in the WRAM high half are reported as `$7F:xxxx`
+  — previously they leaked as impossible `$7E:1xxxx` addresses (#177).
 - `wram_page_hashes` no longer panics the transport on an invalid
   `page_size` — it returns a typed `BadArg` error (#167, #182).
 - `run_until_pc` catches core panics like every other run path — a
