@@ -482,11 +482,14 @@ method, so the MCP transport adds reach, not capability.
 | `run_until_mem_write` | `run_until_mem_write` | Step until an address is written; returns PC + value. |
 | `run_until_mem_read` | `run_until_mem_read` | Step until an address is read; returns PC + value. |
 | `state` | `state` | Full observable-state JSON snapshot (§2). |
-| `screenshot` | `render_frame_png` | Render the 256×224 composited framebuffer to PNG. |
+| `screenshot` | `render_frame_png` / `render_frame_png_native` / `render_frame_bg_png` | Render the composited 256×224 frame to PNG; `native: true` captures 512×448 (enable `set_native_capture` first), `bg: 1..=4` renders one layer in isolation. |
+| `sram_get` / `sram_set` | `sram` / `load_sram` | Battery-RAM image as base64 — the MCP form of `--srm-out` / `--srm-in`. |
+| `export_spc` | `export_spc` | Standard `.spc` (v0.30) music snapshot, base64 — playable in any SPC player. |
+| `decode_sprites` | `decode_sprites` | All 128 OAM entries as a structured list — the queryable `render_sprite_sheet`. |
 | `drain_audio` | `drain_audio` | Drain up to `max` stereo samples from the APU. |
 | `peek_memory` | `peek_memory` | Read `count` bytes from the CPU bus at `bank:offset`. |
-| `peek_aram` | `peek_aram` | Read `count` bytes from the SPC700's 64 KB ARAM. |
-| `peek_vram` | `peek_vram` | Read `count` bytes from the 64 KB VRAM. |
+| `peek_aram` | `peek_aram` | Read `count` bytes from the SPC700's 64 KB ARAM (`count` up to `0x10000` — a full dump needs no paging). |
+| `peek_vram` | `peek_vram` | Read `count` bytes from the 64 KB VRAM (same one-call full-dump range). |
 | `peek_cgram` | `peek_cgram` | All 256 CGRAM palette entries as BGR555 words. |
 | `poke_memory` | `poke_memory` | Write bytes into WRAM (state injection). |
 | `search_memory` | `search_memory` | Find a byte pattern in `$7E-$7F` WRAM. |

@@ -7,6 +7,13 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- MCP: persistence + media parity (#173) — `sram_get` / `sram_set`
+  (base64 `.srm`, the `--srm-out` / `--srm-in` pair), `export_spc`
+  (standard `.spc` v0.30 snapshot), `decode_sprites` (structured OAM
+  list), and `screenshot` gained `native` (512×448) and `bg` (single
+  layer 1..=4) modes. `Emulator::peek_vram` / `peek_aram` `count` is
+  now `u32` (capped at `0x10000`) so a full 64 KB dump is one call —
+  the CLI `--peek APU:0:10000` form works too.
 - MCP: symbol parity (#171, CPU-space half) — new `load_symbols_str`
   (load `.sym` text with no host file), `clear_symbols`, and
   `symbol_for_addr` (reverse lookup) tools; `disasm_cpu` and
