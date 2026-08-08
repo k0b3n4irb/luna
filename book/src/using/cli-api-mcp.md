@@ -102,7 +102,7 @@ and is the hub for every headless diagnostic.
 | `--input <SCRIPT>` | — | Scripted joypad-1 input (§3). |
 | `--screenshot <PATH>` | — | Also write a PNG. |
 | `--audio-out <PATH>` | — | Also write a 32 kHz stereo WAV. |
-| `--peek <B:O:C>` | — | Hex-dump `COUNT` bytes at `BANK:OFFSET` to stderr (repeatable). |
+| `--peek <B:O:C>` | — | Hex-dump `COUNT` bytes at `BANK:OFFSET` to stderr (repeatable). Each result is also mirrored into the `--out` JSON `peeks` array (see §2) — the machine-readable channel a harness should parse. |
 | `--dump-vram <PATH>` | — | Dump all 64 KB PPU VRAM (raw). |
 | `--dump-aram <PATH>` | — | Dump all 64 KB APU ARAM (raw). |
 | `--dump-coproc-ram <PATH>` | — | Dump coprocessor work RAM (Super FX Game Pak RAM), ungated. |
@@ -414,6 +414,14 @@ MCP client sees how to drive the emulator before listing a single tool.
 | `apu` | SPC700 + S-DSP state (`spc_stopped`, etc.). |
 | `dma` | Per-channel DMA/HDMA registers (see below). |
 | `stats` | Counters: `nmis_serviced`, frame count, instruction count, NMI rate, … |
+| `peeks` | One entry per `--peek`, in order: `{spec, space: "cpu"\|"aram", addr, bytes_hex, error?}`. Always present (empty without `--peek`); a failed peek keeps its slot with an `error` string instead of vanishing. |
+
+```bash
+# The harness-friendly peek channel: read bytes from the JSON, not stderr.
+luna state -n 1000000 --peek 7E:0200:04 --out - game.sfc \
+  | jq -r '.peeks[0].bytes_hex'
+# → e.g. 00f04512
+```
 
 (See the `luna-api` rustdoc for the full nested field set.)
 

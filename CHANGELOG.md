@@ -7,6 +7,12 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- `luna state`: `--peek` results are mirrored into the `--out` JSON as a
+  `peeks` array (`{spec, space, addr, bytes_hex, error?}`) so harnesses
+  read peeks from the same machine-readable channel as the state instead
+  of regex-parsing the stderr hexdump (#175). Existing top-level JSON
+  keys are unchanged; failed peeks keep their slot with an `error`
+  string. The stderr hexdump stays for humans.
 - `luna mcp` preload flags (#174) — `--rom` (with beside-ROM `.sym`
   auto-detection), `--sym`, `--force-mapper`, `--force-region`: the
   session starts with the ROM loaded, so an MCP client's first `state`
