@@ -248,6 +248,16 @@ pub struct ScreenshotParams {
     /// even when a game keeps the screen blanked. Defaults to false.
     #[serde(default)]
     pub force_display: bool,
+    /// Capture at native 512×448 (hi-res / interlace detail). Requires
+    /// `set_native_capture {enabled: true}` before the frame renders.
+    /// Mutually exclusive with `bg`.
+    #[serde(default)]
+    pub native: bool,
+    /// Render a single background layer (1..=4, the GUI/CLI convention)
+    /// instead of the composited frame — isolates which layer holds a
+    /// glitch. Mutually exclusive with `native`.
+    #[serde(default)]
+    pub bg: Option<u8>,
 }
 
 /// `drain_audio` parameters.
@@ -279,8 +289,9 @@ pub struct PeekMemoryParams {
 pub struct PeekAramParams {
     /// 16-bit offset within the SPC700's 64 KB ARAM.
     pub offset: u16,
-    /// Number of bytes to read.
-    pub count: u16,
+    /// Number of bytes to read — up to `0x10000` for the whole ARAM in
+    /// one call (the address space wraps; larger counts are clamped).
+    pub count: u32,
 }
 
 /// `peek_vram` parameters.
@@ -288,8 +299,9 @@ pub struct PeekAramParams {
 pub struct PeekVramParams {
     /// 16-bit word/byte offset within the 64 KB VRAM.
     pub offset: u16,
-    /// Number of bytes to read.
-    pub count: u16,
+    /// Number of bytes to read — up to `0x10000` for the whole VRAM in
+    /// one call (the address space wraps; larger counts are clamped).
+    pub count: u32,
 }
 
 /// `poke_memory` parameters.
@@ -1163,6 +1175,41 @@ pub struct SymbolForAddrResult {
     pub symbol: Option<String>,
 }
 
+/// `sram_set` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SramSetParams {
+    /// The battery-RAM image, base64-encoded (a `.srm` file's bytes).
+    pub sram_base64: String,
+}
+
+/// `sram_get` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SramGetResult {
+    /// The battery-backed SRAM image, base64-encoded. Empty when the
+    /// cart has no SRAM.
+    pub sram_base64: String,
+    /// SRAM size in bytes.
+    pub bytes: usize,
+}
+
+/// `export_spc` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ExportSpcResult {
+    /// A standard `.spc` (v0.30) music snapshot, base64-encoded —
+    /// playable in any SPC player.
+    pub spc_base64: String,
+    /// Blob size in bytes (always 0x10200).
+    pub bytes: usize,
+}
+
+/// `decode_sprites` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DecodeSpritesResult {
+    /// All 128 OAM entries decoded (position, size, tile, palette,
+    /// priority, flips, visibility).
+    pub sprites: Vec<luna_api::SpriteInfo>,
+}
+
 /// Resolve an optional symbol name against the emulator's loaded table,
 /// falling back to the numeric address. Unknown symbol → invalid-params.
 fn resolve_addr(em: &Emulator, symbol: Option<&str>, numeric: u32) -> Result<u32, ErrorData> {
@@ -1351,21 +1398,40 @@ impl LunaServer {
     }
 
     #[rmcp::tool(
-        description = "Render the current PPU framebuffer (256×224, composited \
-                                BG3-over-BG1-over-BG2 + sprites) as a PNG and return it \
-                                base64-encoded."
+        description = "Render the current PPU framebuffer as a base64 PNG. Default: the \
+                                256×224 composited frame. `native: true`: the 512×448 capture \
+                                (enable `set_native_capture` first). `bg: 1..=4`: one \
+                                background layer in isolation."
     )]
     async fn screenshot(
         &self,
         Parameters(params): Parameters<ScreenshotParams>,
     ) -> Result<rmcp::Json<ScreenshotResult>, ErrorData> {
+        if params.native && params.bg.is_some() {
+            return Err(ErrorData::invalid_params(
+                "`native` and `bg` are mutually exclusive",
+                None,
+            ));
+        }
         let png = {
             let em = self.emulator.lock().await;
-            em.render_frame_png(params.force_display)
-                .map_err(|e| api_err_to_mcp(&e))?
+            match params.bg {
+                Some(bg @ 1..=4) => {
+                    em.render_frame_bg_png(usize::from(bg - 1), params.force_display)
+                }
+                Some(bg) => {
+                    return Err(ErrorData::invalid_params(
+                        format!("bg must be 1..=4, got {bg}"),
+                        None,
+                    ));
+                }
+                None if params.native => em.render_frame_png_native(),
+                None => em.render_frame_png(params.force_display),
+            }
+            .map_err(|e| api_err_to_mcp(&e))?
         };
         // Report whatever the API actually rendered (hardcoding 256×224
-        // would lie the day a native-res / per-BG render lands here).
+        // would lie about the native / per-BG renders).
         let (width, height) = png_dimensions(&png);
         let png_base64 = b64(&png);
         Ok(rmcp::Json(ScreenshotResult {
@@ -1982,6 +2048,70 @@ impl LunaServer {
             em.symbol_for_addr(params.addr)
         };
         rmcp::Json(SymbolForAddrResult { symbol })
+    }
+
+    // ------------- Persistence + media parity (issue #173) -------------
+
+    #[rmcp::tool(
+        description = "Read the battery-backed SRAM image, base64-encoded (what the CLI \
+                                writes with --srm-out). Empty when the cart has no SRAM."
+    )]
+    async fn sram_get(&self) -> rmcp::Json<SramGetResult> {
+        let sram = {
+            let em = self.emulator.lock().await;
+            em.sram()
+        };
+        rmcp::Json(SramGetResult {
+            bytes: sram.len(),
+            sram_base64: b64(&sram),
+        })
+    }
+
+    #[rmcp::tool(
+        description = "Load a battery-RAM image (base64 of a .srm file) into the cart — \
+                                the CLI's --srm-in. Load it before the game reads its save."
+    )]
+    async fn sram_set(
+        &self,
+        Parameters(params): Parameters<SramSetParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(params.sram_base64.as_bytes())
+            .map_err(|e| ErrorData::invalid_params(format!("bad base64: {e}"), None))?;
+        {
+            let mut em = self.emulator.lock().await;
+            em.load_sram(&data).map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Export the current APU state as a standard .spc music snapshot \
+                                (v0.30, base64) — playable in any SPC player. Capture while \
+                                the tune of interest is playing."
+    )]
+    async fn export_spc(&self) -> Result<rmcp::Json<ExportSpcResult>, ErrorData> {
+        let blob = {
+            let em = self.emulator.lock().await;
+            em.export_spc().map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(ExportSpcResult {
+            bytes: blob.len(),
+            spc_base64: b64(&blob),
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Decode all 128 OAM sprite entries into a structured list \
+                                (position, size, tile, palette, priority, flips, visibility) — \
+                                the queryable version of `render_sprite_sheet`."
+    )]
+    async fn decode_sprites(&self) -> Result<rmcp::Json<DecodeSpritesResult>, ErrorData> {
+        let sprites = {
+            let em = self.emulator.lock().await;
+            em.decode_sprites().map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(DecodeSpritesResult { sprites }))
     }
 
     // ------------- Breakpoint registry (issue #66) -------------
@@ -3806,6 +3936,123 @@ mod tests {
             .is_none()
         );
         assert!(sym(0x7E_0200).await.0.symbol.is_none());
+    }
+
+    #[tokio::test]
+    async fn server_persistence_and_media_round_trip() {
+        let s = LunaServer::new();
+
+        // Give the demo cart 8 KB of SRAM (header $7FD8 = size code 3).
+        let mut rom = demo_lorom();
+        rom[0x7FD8] = 0x03;
+        // Header checksum changed → re-fix it.
+        let mut sum = 0u32;
+        for (i, b) in rom.iter().enumerate() {
+            if !(0x7FDC..=0x7FDF).contains(&i) {
+                sum += u32::from(*b);
+            }
+        }
+        let checksum = (sum & 0xFFFF) as u16;
+        let complement = !checksum;
+        rom[0x7FDC] = complement as u8;
+        rom[0x7FDD] = (complement >> 8) as u8;
+        rom[0x7FDE] = checksum as u8;
+        rom[0x7FDF] = (checksum >> 8) as u8;
+        let rom_path = PathBuf::from("/tmp/luna_mcp_media_demo.smc");
+        std::fs::write(&rom_path, rom).unwrap();
+        s.load_rom(Parameters(rom_params(&rom_path.to_string_lossy())))
+            .await
+            .unwrap();
+
+        // sram_set → sram_get round trip.
+        let image = vec![0xA5u8; 0x2000];
+        s.sram_set(Parameters(SramSetParams {
+            sram_base64: b64(&image),
+        }))
+        .await
+        .unwrap();
+        let got = s.sram_get().await;
+        assert_eq!(got.0.bytes, 0x2000);
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(got.0.sram_base64)
+            .unwrap();
+        assert_eq!(decoded, image);
+        assert!(
+            s.sram_set(Parameters(SramSetParams {
+                sram_base64: "!!!".into(),
+            }))
+            .await
+            .is_err()
+        );
+
+        // export_spc: a v0.30 blob with the right magic + size.
+        let spc = s.export_spc().await.unwrap();
+        assert_eq!(spc.0.bytes, 0x10200);
+        let blob = base64::engine::general_purpose::STANDARD
+            .decode(spc.0.spc_base64)
+            .unwrap();
+        assert!(blob.starts_with(b"SNES-SPC700 Sound File Data"));
+
+        // decode_sprites: all 128 OAM entries.
+        let sprites = s.decode_sprites().await.unwrap();
+        assert_eq!(sprites.0.sprites.len(), 128);
+
+        // screenshot: bg render works and reports 256×224; conflicts and
+        // bad indices are invalid_params; native still gated.
+        let shot = s
+            .screenshot(Parameters(ScreenshotParams {
+                force_display: true,
+                native: false,
+                bg: Some(1),
+            }))
+            .await
+            .unwrap();
+        assert_eq!((shot.0.width, shot.0.height), (256, 224));
+        assert!(
+            s.screenshot(Parameters(ScreenshotParams {
+                force_display: false,
+                native: true,
+                bg: Some(1),
+            }))
+            .await
+            .is_err()
+        );
+        assert!(
+            s.screenshot(Parameters(ScreenshotParams {
+                force_display: false,
+                native: false,
+                bg: Some(5),
+            }))
+            .await
+            .is_err()
+        );
+        assert!(
+            s.screenshot(Parameters(ScreenshotParams {
+                force_display: false,
+                native: true,
+                bg: None,
+            }))
+            .await
+            .is_err()
+        );
+
+        // peek_aram / peek_vram: the u32 lift makes one-call full dumps work.
+        let aram = s
+            .peek_aram(Parameters(PeekAramParams {
+                offset: 0,
+                count: 0x1_0000,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(aram.0.bytes.len(), 0x1_0000);
+        let vram = s
+            .peek_vram(Parameters(PeekVramParams {
+                offset: 0,
+                count: 0x1_0000,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(vram.0.bytes.len(), 0x1_0000);
     }
 
     /// `load_rom` params with no mapper/region override — the common case.

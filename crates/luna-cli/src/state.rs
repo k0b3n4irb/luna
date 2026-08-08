@@ -544,9 +544,9 @@ pub(crate) fn run_state(
             match parse_assert_spec_no_bank(spec) {
                 Ok((offset, want)) => {
                     let res = if kind == 0 {
-                        em.peek_aram(offset, want.len() as u16)
+                        em.peek_aram(offset, want.len() as u32)
                     } else {
-                        em.peek_vram(offset, want.len() as u16)
+                        em.peek_vram(offset, want.len() as u32)
                     };
                     match res {
                         Ok(got) if got == want => {
