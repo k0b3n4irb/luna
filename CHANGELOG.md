@@ -7,6 +7,12 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- MCP: the CI determinism oracles are now reachable over MCP (#170) —
+  `frame_hash {force_display, native}` (the CLI `fbhash=` value, 16 hex
+  chars), `set_native_capture`, `wram_page_hashes {page_size}`,
+  `wram_snapshot {include_data}` (stable FNV-1a-64 + optional base64
+  image), and `loop_probe {max_steps}`. Hashes travel as hex strings
+  because JSON numbers can't carry a full u64.
 - MCP: headerless / checksum-invalid homebrew is now loadable over pure MCP
   (#169) — `load_rom` gained optional `force_mapper` / `force_region`
   params (the CLI `--force-mapper` / `--force-region` vocabulary), a new

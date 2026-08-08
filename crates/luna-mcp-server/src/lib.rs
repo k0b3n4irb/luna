@@ -129,6 +129,55 @@ pub struct SetPortDeviceParams {
     pub device: String,
 }
 
+/// `frame_hash` parameters.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct FrameHashParams {
+    /// Render as if the display were on even during forced blank (the
+    /// screenshot `force_display` policy). Ignored when `native` is set.
+    #[serde(default)]
+    pub force_display: bool,
+    /// Hash the native 512×448 capture instead of the composited 256×224
+    /// frame. Requires `set_native_capture {enabled: true}` before the
+    /// frame renders. Native and non-native hashes use different
+    /// constructions — never compare one against the other.
+    #[serde(default)]
+    pub native: bool,
+}
+
+/// `set_native_capture` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SetNativeCaptureParams {
+    /// `true` to start capturing at native 512×448 resolution (hi-res /
+    /// interlace modes render meaningfully; everything else is doubled).
+    pub enabled: bool,
+}
+
+/// `wram_page_hashes` parameters.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct WramPageHashesParams {
+    /// Page size in bytes — a power of two dividing 128 KiB (0x20000).
+    /// Omit (or 0) for the default 4 KiB pages (32 hashes).
+    #[serde(default)]
+    pub page_size: usize,
+}
+
+/// `wram_snapshot` parameters.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct WramSnapshotParams {
+    /// Also return the full 128 KiB WRAM image base64-encoded. Off by
+    /// default — the hash alone answers "did anything change?".
+    #[serde(default)]
+    pub include_data: bool,
+}
+
+/// `loop_probe` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct LoopProbeParams {
+    /// Instructions to execute while collecting distinct PCs. Mutates
+    /// state (the CPU advances).
+    pub max_steps: u64,
+}
+
 /// `step` parameters.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct StepParams {
@@ -674,6 +723,48 @@ pub struct WdmEvent {
 pub struct WdmLogResult {
     /// Recorded WDM hits, oldest first. Draining resets the buffer.
     pub events: Vec<WdmEvent>,
+}
+
+/// `frame_hash` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FrameHashResult {
+    /// The 64-bit frame hash as 16 lowercase hex chars — the exact value
+    /// the CLI prints as `fbhash=` (hex string because a JSON number
+    /// cannot carry a full u64).
+    pub hash: String,
+}
+
+/// `wram_page_hashes` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct WramPageHashesResult {
+    /// The effective page size in bytes.
+    pub page_size: usize,
+    /// One stable FNV-1a-64 hash per page (16 hex chars each), page 0
+    /// first ($7E:0000). Diff two calls to localise a WRAM change.
+    pub hashes: Vec<String>,
+}
+
+/// `wram_snapshot` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct WramSnapshotResult {
+    /// Stable FNV-1a-64 over all 128 KiB (16 hex chars) — equal hashes ⇒
+    /// identical WRAM.
+    pub hash: String,
+    /// Snapshot size in bytes (always 0x20000).
+    pub bytes: usize,
+    /// The raw WRAM image, base64-encoded — only when `include_data` was
+    /// requested.
+    pub wram_base64: Option<String>,
+}
+
+/// `loop_probe` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct LoopProbeResult {
+    /// Distinct 24-bit PCs seen. A healthy game touches hundreds+; a
+    /// handful means the CPU is spinning in a tight (likely hung) loop.
+    pub distinct_pcs: usize,
+    /// Instructions actually executed (may stop early on STP).
+    pub executed: u64,
 }
 
 /// `bp_add` result.
@@ -1788,6 +1879,129 @@ impl LunaServer {
             .collect();
         Ok(rmcp::Json(WdmLogResult { events }))
     }
+
+    // ------------- Determinism oracles (issue #170) -------------
+
+    #[rmcp::tool(
+        description = "64-bit hash of the current frame's pixels (pre-PNG, so it is \
+                                stable across builds) — the CLI's `fbhash=` value, as 16 hex \
+                                chars. `force_display` renders through forced blank; `native` \
+                                hashes the 512×448 capture instead (enable it first with \
+                                `set_native_capture`; native and non-native values are not \
+                                comparable)."
+    )]
+    async fn frame_hash(
+        &self,
+        Parameters(params): Parameters<FrameHashParams>,
+    ) -> Result<rmcp::Json<FrameHashResult>, ErrorData> {
+        let hash = {
+            let em = self.emulator.lock().await;
+            if params.native {
+                em.frame_hash_native()
+            } else {
+                em.frame_hash(params.force_display)
+            }
+            .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(FrameHashResult {
+            hash: format!("{hash:016x}"),
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Enable / disable native 512×448 frame capture (hi-res and \
+                                interlace detail). Enable it, run at least one frame, then \
+                                `screenshot` / `frame_hash` with `native: true`."
+    )]
+    async fn set_native_capture(
+        &self,
+        Parameters(params): Parameters<SetNativeCaptureParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.set_native_capture(params.enabled)
+                .map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Stable FNV-1a-64 hash per WRAM page (default 4 KiB pages → 32 \
+                                hashes, 16 hex chars each). Diff two calls to localise which \
+                                page a WRAM change landed in, then `peek_memory` to bisect — \
+                                the CLI `luna wram-trace` workflow over MCP."
+    )]
+    async fn wram_page_hashes(
+        &self,
+        Parameters(params): Parameters<WramPageHashesParams>,
+    ) -> Result<rmcp::Json<WramPageHashesResult>, ErrorData> {
+        let hashes = {
+            let em = self.emulator.lock().await;
+            em.wram_page_hashes(params.page_size)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        let effective = if params.page_size == 0 {
+            0x1000
+        } else {
+            params.page_size
+        };
+        Ok(rmcp::Json(WramPageHashesResult {
+            page_size: effective,
+            hashes: hashes.iter().map(|h| format!("{h:016x}")).collect(),
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Snapshot all 128 KiB of WRAM: a stable FNV-1a-64 hash always, \
+                                plus the raw image base64-encoded when `include_data` is set. \
+                                Equal hashes ⇒ byte-identical WRAM (the determinism oracle for \
+                                CI and A/B bisection)."
+    )]
+    async fn wram_snapshot(
+        &self,
+        Parameters(params): Parameters<WramSnapshotParams>,
+    ) -> Result<rmcp::Json<WramSnapshotResult>, ErrorData> {
+        let (hash, data) = {
+            let em = self.emulator.lock().await;
+            // One full-width "page" = one stable hash over the whole 128 KiB.
+            let hash = em
+                .wram_page_hashes(0x20000)
+                .map_err(|e| api_err_to_mcp(&e))?[0];
+            let data = if params.include_data {
+                Some(em.wram_snapshot().map_err(|e| api_err_to_mcp(&e))?)
+            } else {
+                None
+            };
+            (hash, data)
+        };
+        Ok(rmcp::Json(WramSnapshotResult {
+            hash: format!("{hash:016x}"),
+            bytes: 0x20000,
+            wram_base64: data.as_deref().map(b64),
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Hang diagnostic: execute up to `max_steps` instructions and count \
+                                the distinct PCs visited. A healthy game loop touches hundreds+ \
+                                of addresses; a handful means the CPU is spinning in a tight \
+                                wait/hang loop (STP is reported separately by `state`). Mutates \
+                                state — the CPU really advances."
+    )]
+    async fn loop_probe(
+        &self,
+        Parameters(params): Parameters<LoopProbeParams>,
+    ) -> Result<rmcp::Json<LoopProbeResult>, ErrorData> {
+        let probe = {
+            let mut em = self.emulator.lock().await;
+            em.loop_probe(params.max_steps)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(LoopProbeResult {
+            distinct_pcs: probe.distinct_pcs,
+            executed: probe.executed,
+        }))
+    }
 }
 
 impl Default for LunaServer {
@@ -2519,6 +2733,115 @@ mod tests {
             .await
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn server_determinism_oracles_round_trip() {
+        let s = LunaServer::new();
+
+        // Everything errors cleanly without a ROM.
+        assert!(
+            s.frame_hash(Parameters(FrameHashParams::default()))
+                .await
+                .is_err()
+        );
+        assert!(
+            s.wram_page_hashes(Parameters(WramPageHashesParams::default()))
+                .await
+                .is_err()
+        );
+        assert!(
+            s.loop_probe(Parameters(LoopProbeParams { max_steps: 10 }))
+                .await
+                .is_err()
+        );
+
+        let rom_path = PathBuf::from("/tmp/luna_mcp_oracles_demo.smc");
+        std::fs::write(&rom_path, demo_lorom()).unwrap();
+        s.load_rom(Parameters(rom_params(&rom_path.to_string_lossy())))
+            .await
+            .unwrap();
+
+        // frame_hash: 16 hex chars, deterministic while nothing steps.
+        let h1 = s
+            .frame_hash(Parameters(FrameHashParams::default()))
+            .await
+            .unwrap();
+        assert_eq!(h1.0.hash.len(), 16);
+        assert!(h1.0.hash.chars().all(|c| c.is_ascii_hexdigit()));
+        let h2 = s
+            .frame_hash(Parameters(FrameHashParams::default()))
+            .await
+            .unwrap();
+        assert_eq!(h1.0.hash, h2.0.hash);
+
+        // native gate: BadArg until set_native_capture flips it on.
+        assert!(
+            s.frame_hash(Parameters(FrameHashParams {
+                force_display: false,
+                native: true,
+            }))
+            .await
+            .is_err()
+        );
+        s.set_native_capture(Parameters(SetNativeCaptureParams { enabled: true }))
+            .await
+            .unwrap();
+        s.step_until_frame(Parameters(StepUntilFrameParams {
+            max_steps: 1_000_000,
+        }))
+        .await
+        .unwrap();
+        let hn = s
+            .frame_hash(Parameters(FrameHashParams {
+                force_display: false,
+                native: true,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(hn.0.hash.len(), 16);
+
+        // wram_page_hashes: default page size → 32 pages; bad size errors.
+        let pages = s
+            .wram_page_hashes(Parameters(WramPageHashesParams::default()))
+            .await
+            .unwrap();
+        assert_eq!(pages.0.page_size, 0x1000);
+        assert_eq!(pages.0.hashes.len(), 32);
+        assert!(
+            s.wram_page_hashes(Parameters(WramPageHashesParams { page_size: 3 }))
+                .await
+                .is_err()
+        );
+
+        // wram_snapshot: hash equals the one full-width page hash, data
+        // round-trips at 128 KiB only when asked for.
+        let snap = s
+            .wram_snapshot(Parameters(WramSnapshotParams::default()))
+            .await
+            .unwrap();
+        assert!(snap.0.wram_base64.is_none());
+        let full = s
+            .wram_page_hashes(Parameters(WramPageHashesParams { page_size: 0x20000 }))
+            .await
+            .unwrap();
+        assert_eq!(snap.0.hash, full.0.hashes[0]);
+        let snap = s
+            .wram_snapshot(Parameters(WramSnapshotParams { include_data: true }))
+            .await
+            .unwrap();
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(snap.0.wram_base64.unwrap())
+            .unwrap();
+        assert_eq!(data.len(), 0x20000);
+
+        // loop_probe advances the CPU and reports a plausible shape.
+        let probe = s
+            .loop_probe(Parameters(LoopProbeParams { max_steps: 500 }))
+            .await
+            .unwrap();
+        assert!(probe.0.executed <= 500);
+        assert!(probe.0.distinct_pcs >= 1);
     }
 
     /// `load_rom` params with no mapper/region override — the common case.
