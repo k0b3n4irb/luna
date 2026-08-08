@@ -508,11 +508,33 @@ method, so the MCP transport adds reach, not capability.
 | `start_input_capture` / `take_input_capture` | `start_input_capture` / `take_input_capture` | Record joypad changes and export a `frame:mask` script (replay with `--input @file`). |
 | `load_symbols` | `load_symbols` | Load a WLA-DX `.sym`; disasm + traces become annotated. |
 | `resolve_symbol` | `resolve_symbol` | Label name → 24-bit address. |
+| `enable_nocash_log` / `take_nocash_log` | `enable_nocash_log` / `take_nocash_log` | The `$21FC` Nocash TTY (`SNES_NOCASH` text): drain returns `{text, base64}`. |
+| `enable_wdm_log` / `take_wdm_log` | `enable_wdm_log` / `take_wdm_log` | The `WDM` assert channel (`SNES_ASSERT` → `WDM $00`): drain returns `[{pc, operand, symbol}]`. |
 
 With a symbol table loaded, the address-taking tools (`peek_memory`,
 `poke_memory`, `run_until_pc`, `run_until_mem_*`, `bp_add`) also accept a
 `symbol` name in place of the numeric address — e.g.
 `peek_memory {symbol: "monster_x", count: 2}`.
+
+#### Reading the SDK assert/log channels over MCP
+
+An agent debugging an SDK-built ROM watches the two debug channels the
+same way the CLI's `--nocash-out` / `--wdm-out` flags do — enable, run,
+drain:
+
+```text
+enable_nocash_log {}   # $21FC TTY — SNES_NOCASH("...") text output
+enable_wdm_log {}      # WDM $42 — SNES_ASSERT "fired here" events
+run {}                 # or step / step_until_frame / run_until_break
+pause {}
+take_nocash_log {}     # → {text: "hello\n", base64: "aGVsbG8K"}
+take_wdm_log {}        # → {events: [{pc: 32779, operand: 0, symbol: "assert_fail+0x02"}]}
+```
+
+An empty `take_wdm_log` after a run is the "no assertions fired" green
+light a CI-style probe wants; the Nocash text is the ROM's own printf
+channel. Draining resets each channel, so successive takes return only
+new output.
 
 ---
 

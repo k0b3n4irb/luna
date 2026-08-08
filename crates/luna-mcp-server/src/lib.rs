@@ -44,6 +44,9 @@
 //!   `take_mem_trace` → per-bus-access memory trace with filters.
 //! - `set_mouse { dx, dy, buttons }` / `set_superscope { x, y, buttons }`
 //!   → pointer-device input.
+//! - `enable_nocash_log` / `take_nocash_log` and `enable_wdm_log` /
+//!   `take_wdm_log` → the SDK assert/log channels ($21FC Nocash TTY
+//!   text + WDM assert hits).
 //!
 //! Transport is stdio by default ([`serve_stdio`]); a future commit
 //! will add HTTP-SSE for browser clients.
@@ -612,6 +615,34 @@ pub struct MemTraceResult {
     pub events: Vec<MemTraceLine>,
 }
 
+/// `take_nocash_log` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct NocashLogResult {
+    /// The drained byte stream decoded as lossy UTF-8 (the usual case —
+    /// `SNES_NOCASH` emits text).
+    pub text: String,
+    /// The exact drained bytes, base64-encoded (lossless).
+    pub base64: String,
+}
+
+/// One WDM assert/breakpoint event (`take_wdm_log`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct WdmEvent {
+    /// 24-bit PC of the `WDM` opcode.
+    pub pc: u32,
+    /// The WDM operand byte (`SNES_ASSERT` fires `WDM $00`).
+    pub operand: u8,
+    /// Nearest symbol for `pc` when a `.sym` table is loaded.
+    pub symbol: Option<String>,
+}
+
+/// `take_wdm_log` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct WdmLogResult {
+    /// Recorded WDM hits, oldest first. Draining resets the buffer.
+    pub events: Vec<WdmEvent>,
+}
+
 /// `bp_add` result.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct BpAddResult {
@@ -832,7 +863,7 @@ impl LunaServer {
         // Report whatever the API actually rendered (hardcoding 256×224
         // would lie the day a native-res / per-BG render lands here).
         let (width, height) = png_dimensions(&png);
-        let png_base64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        let png_base64 = b64(&png);
         Ok(rmcp::Json(ScreenshotResult {
             png_base64,
             width,
@@ -1106,7 +1137,7 @@ impl LunaServer {
         };
         Ok(rmcp::Json(SaveStateResult {
             bytes: blob.len(),
-            state_base64: base64::engine::general_purpose::STANDARD.encode(&blob),
+            state_base64: b64(&blob),
         }))
     }
 
@@ -1188,7 +1219,7 @@ impl LunaServer {
             em.render_tilemap_png(idx).map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(PngResult {
-            png_base64: base64::engine::general_purpose::STANDARD.encode(&png),
+            png_base64: b64(&png),
         }))
     }
 
@@ -1206,7 +1237,7 @@ impl LunaServer {
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(PngResult {
-            png_base64: base64::engine::general_purpose::STANDARD.encode(&png),
+            png_base64: b64(&png),
         }))
     }
 
@@ -1224,7 +1255,7 @@ impl LunaServer {
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(PngResult {
-            png_base64: base64::engine::general_purpose::STANDARD.encode(&png),
+            png_base64: b64(&png),
         }))
     }
 
@@ -1239,7 +1270,7 @@ impl LunaServer {
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(PngResult {
-            png_base64: base64::engine::general_purpose::STANDARD.encode(&png),
+            png_base64: b64(&png),
         }))
     }
 
@@ -1586,6 +1617,72 @@ impl LunaServer {
         }
         Ok(rmcp::Json(EmptyOk { ok: true }))
     }
+
+    // ------------- SDK assert/log channels (issue #168) -------------
+
+    #[rmcp::tool(
+        description = "Start capturing the $21FC Nocash TTY — the SDK debug text \
+                                channel behind SNES_NOCASH / SNES_ASSERT. Drain with \
+                                `take_nocash_log`."
+    )]
+    async fn enable_nocash_log(&self) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_nocash_log().map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the captured $21FC Nocash byte stream: the text as lossy \
+                                UTF-8 plus the exact bytes base64-encoded. Enable first with \
+                                `enable_nocash_log`, then run/step."
+    )]
+    async fn take_nocash_log(&self) -> Result<rmcp::Json<NocashLogResult>, ErrorData> {
+        let bytes = {
+            let mut em = self.emulator.lock().await;
+            em.take_nocash_log().map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(NocashLogResult {
+            text: String::from_utf8_lossy(&bytes).into_owned(),
+            base64: b64(&bytes),
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Start capturing WDM ($42) executions — the SDK assert/breakpoint \
+                                channel (SNES_ASSERT fires WDM $00). Complements the $21FC \
+                                Nocash text log with a binary \"assertion fired here\" signal. \
+                                Drain with `take_wdm_log`."
+    )]
+    async fn enable_wdm_log(&self) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_wdm_log().map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the captured WDM events as `{pc, operand, symbol}` per hit, \
+                                oldest first. Enable first with `enable_wdm_log`, then run/step."
+    )]
+    async fn take_wdm_log(&self) -> Result<rmcp::Json<WdmLogResult>, ErrorData> {
+        let (events, syms) = {
+            let mut em = self.emulator.lock().await;
+            let events = em.take_wdm_log().map_err(|e| api_err_to_mcp(&e))?;
+            (events, em.symbols_cloned())
+        };
+        let events = events
+            .into_iter()
+            .map(|(pc, operand)| WdmEvent {
+                pc,
+                operand,
+                symbol: syms.as_ref().and_then(|t| t.nearest(pc)),
+            })
+            .collect();
+        Ok(rmcp::Json(WdmLogResult { events }))
+    }
 }
 
 impl Default for LunaServer {
@@ -1608,6 +1705,12 @@ impl ServerHandler for LunaServer {}
 /// Map [`luna_api::ApiError`] onto an MCP `internal_error` payload.
 fn api_err_to_mcp(e: &ApiError) -> ErrorData {
     ErrorData::internal_error(e.to_string(), None)
+}
+
+/// Base64-encode bytes with the standard alphabet — the one wire encoding
+/// shared by every binary payload this server returns.
+fn b64(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 /// Width/height straight from the PNG IHDR (fixed offsets 16..24,
@@ -2122,6 +2225,79 @@ mod tests {
 
         let _ = std::fs::remove_file(&rom_path);
         let _ = std::fs::remove_file(&sym_path);
+    }
+
+    #[tokio::test]
+    async fn server_nocash_and_wdm_logs_round_trip() {
+        let s = LunaServer::new();
+
+        // Without a ROM both enables surface an error.
+        assert!(s.enable_nocash_log().await.is_err());
+        assert!(s.enable_wdm_log().await.is_err());
+
+        // Patch a program into the demo ROM at $00:8000: emit "HI" on the
+        // $21FC Nocash TTY, fire the SNES_ASSERT-style `WDM #$00`, then spin.
+        let mut rom = demo_lorom();
+        let prog: &[u8] = &[
+            0xA9, 0x48, // LDA #'H'
+            0x8D, 0xFC, 0x21, // STA $21FC
+            0xA9, 0x49, // LDA #'I'
+            0x8D, 0xFC, 0x21, // STA $21FC
+            0x42, 0x00, // WDM #$00
+            0x80, 0xFE, // BRA *
+        ];
+        rom[..prog.len()].copy_from_slice(prog);
+        // Re-fix the header checksum the patch just invalidated.
+        let mut sum = 0u32;
+        for (i, b) in rom.iter().enumerate() {
+            if !(0x7FDC..=0x7FDF).contains(&i) {
+                sum += u32::from(*b);
+            }
+        }
+        let checksum = (sum & 0xFFFF) as u16;
+        let complement = !checksum;
+        rom[0x7FDC] = complement as u8;
+        rom[0x7FDD] = (complement >> 8) as u8;
+        rom[0x7FDE] = checksum as u8;
+        rom[0x7FDF] = (checksum >> 8) as u8;
+
+        let rom_path = PathBuf::from("/tmp/luna_mcp_nocash_wdm_demo.smc");
+        std::fs::write(&rom_path, rom).unwrap();
+        s.load_rom(Parameters(LoadRomParams {
+            path: rom_path.to_string_lossy().into(),
+        }))
+        .await
+        .unwrap();
+
+        s.enable_nocash_log().await.unwrap();
+        s.enable_wdm_log().await.unwrap();
+
+        // A label so take_wdm_log symbolises the recorded PC.
+        let sym_path = PathBuf::from("/tmp/luna_mcp_nocash_wdm_demo.sym");
+        std::fs::write(&sym_path, "[labels]\n00:8000 main\n").unwrap();
+        s.load_symbols(Parameters(LoadSymbolsParams {
+            path: sym_path.to_string_lossy().into(),
+        }))
+        .await
+        .unwrap();
+
+        s.step(Parameters(StepParams { count: 32 })).await.unwrap();
+
+        let nocash = s.take_nocash_log().await.unwrap();
+        assert_eq!(nocash.0.text, "HI");
+        assert_eq!(nocash.0.base64, "SEk=");
+
+        let wdm = s.take_wdm_log().await.unwrap();
+        assert_eq!(wdm.0.events.len(), 1);
+        let ev = &wdm.0.events[0];
+        assert_eq!(ev.operand, 0x00);
+        // The core records the operand byte's address (opcode at $00:800A).
+        assert_eq!(ev.pc, 0x00_800B);
+        assert_eq!(ev.symbol.as_deref(), Some("main+0x0B"));
+
+        // Draining resets both channels.
+        assert!(s.take_nocash_log().await.unwrap().0.text.is_empty());
+        assert!(s.take_wdm_log().await.unwrap().0.events.is_empty());
     }
 
     fn demo_lorom() -> Vec<u8> {
