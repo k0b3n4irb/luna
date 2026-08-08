@@ -94,6 +94,39 @@ pub struct LoadRomParams {
     /// Absolute path to a `.sfc` / `.smc` ROM file on the local
     /// filesystem.
     pub path: String,
+    /// Force the mapper instead of header auto-detection — needed for
+    /// headerless / checksum-invalid homebrew. One of `lorom`, `hirom`,
+    /// `exhirom`, `sa1`, `superfx`, `dsp1`, `sdd1`, `spc7110`.
+    #[serde(default)]
+    pub force_mapper: Option<String>,
+    /// Force the video standard (`ntsc` or `pal`), overriding the header's
+    /// country byte. Omitting it restores auto-detection.
+    #[serde(default)]
+    pub force_region: Option<String>,
+}
+
+/// `load_rom_bytes` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct LoadRomBytesParams {
+    /// The raw `.sfc` / `.smc` image, base64-encoded (standard alphabet).
+    pub rom_base64: String,
+    /// Force the mapper instead of header auto-detection (same values as
+    /// `load_rom`).
+    #[serde(default)]
+    pub force_mapper: Option<String>,
+    /// Force the video standard (`ntsc` or `pal`). Omitting it restores
+    /// auto-detection.
+    #[serde(default)]
+    pub force_region: Option<String>,
+}
+
+/// `set_port_device` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SetPortDeviceParams {
+    /// Controller port: `0` = P1, `1` = P2.
+    pub port: u8,
+    /// Device to plug in: `joypad`, `mouse`, or `superscope`.
+    pub device: String,
 }
 
 /// `step` parameters.
@@ -759,18 +792,87 @@ impl LunaServer {
 
     #[rmcp::tool(
         description = "Load a SNES ROM (.sfc / .smc) from a path on the host filesystem. \
-                                Returns parsed cartridge metadata."
+                                Returns parsed cartridge metadata. Optional `force_mapper` \
+                                (lorom/hirom/exhirom/sa1/superfx/dsp1/sdd1/spc7110) bypasses \
+                                header auto-detection for headerless or checksum-invalid \
+                                homebrew; optional `force_region` (ntsc/pal) overrides the \
+                                header's country byte — omit either to auto-detect."
     )]
     async fn load_rom(
         &self,
         Parameters(params): Parameters<LoadRomParams>,
     ) -> Result<rmcp::Json<LoadRomResult>, ErrorData> {
+        let mapper = parse_force_mapper(params.force_mapper.as_deref())?;
+        let region = parse_force_region(params.force_region.as_deref())?;
         let info = {
             let mut em = self.emulator.lock().await;
-            em.load_rom(&PathBuf::from(params.path))
-                .map_err(|e| api_err_to_mcp(&e))?
+            em.set_forced_region(region);
+            let path = PathBuf::from(params.path);
+            match mapper {
+                Some(kind) => em.load_rom_forced(&path, kind),
+                None => em.load_rom(&path),
+            }
+            .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(LoadRomResult { rom: info }))
+    }
+
+    #[rmcp::tool(
+        description = "Load a SNES ROM from base64-encoded bytes (no host file needed — \
+                                e.g. a freshly assembled homebrew image). Same optional \
+                                `force_mapper` / `force_region` as `load_rom`. Caveat: unlike \
+                                the path-based `load_rom`, this does NOT search the firmware \
+                                folder, so a cart needing coprocessor firmware (e.g. DSP-1) \
+                                loads with the coprocessor inert — check `missing_firmware` \
+                                in the result and prefer `load_rom` for those."
+    )]
+    async fn load_rom_bytes(
+        &self,
+        Parameters(params): Parameters<LoadRomBytesParams>,
+    ) -> Result<rmcp::Json<LoadRomResult>, ErrorData> {
+        let mapper = parse_force_mapper(params.force_mapper.as_deref())?;
+        let region = parse_force_region(params.force_region.as_deref())?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(params.rom_base64.as_bytes())
+            .map_err(|e| ErrorData::invalid_params(format!("bad base64: {e}"), None))?;
+        let info = {
+            let mut em = self.emulator.lock().await;
+            em.set_forced_region(region);
+            match mapper {
+                Some(kind) => em.load_rom_bytes_forced(bytes, kind),
+                None => em.load_rom_bytes(bytes),
+            }
+            .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(LoadRomResult { rom: info }))
+    }
+
+    #[rmcp::tool(
+        description = "Plug a device into a controller port (0 = P1, 1 = P2): `joypad`, \
+                                `mouse`, or `superscope`. Feed it afterwards with `set_joypad`, \
+                                `set_mouse`, or `set_superscope`."
+    )]
+    async fn set_port_device(
+        &self,
+        Parameters(params): Parameters<SetPortDeviceParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        let device = match params.device.to_ascii_lowercase().as_str() {
+            "joypad" | "pad" => luna_api::PortDevice::Pad,
+            "mouse" => luna_api::PortDevice::Mouse,
+            "superscope" => luna_api::PortDevice::SuperScope,
+            other => {
+                return Err(ErrorData::invalid_params(
+                    format!("unknown device `{other}` (joypad, mouse, superscope)"),
+                    None,
+                ));
+            }
+        };
+        {
+            let mut em = self.emulator.lock().await;
+            em.set_port_device(params.port, device)
+                .map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
     }
 
     #[rmcp::tool(description = "Reset the loaded emulator to its power-on state. \
@@ -1586,8 +1688,9 @@ impl LunaServer {
     #[rmcp::tool(
         description = "Feed SNES Mouse input for the next joypad auto-read: accumulated \
                                 `dx`/`dy` displacement plus the button bitmask (bit 0 = left, \
-                                bit 1 = right). Select the mouse first via the GUI or the CLI \
-                                `--port1 mouse`."
+                                bit 1 = right). Plug the mouse in first with \
+                                `set_port_device {port: 0, device: \"mouse\"}` (CLI \
+                                equivalent: `--port1 mouse`)."
     )]
     async fn set_mouse(
         &self,
@@ -1604,7 +1707,9 @@ impl LunaServer {
     #[rmcp::tool(
         description = "Feed Super Scope input: screen-space aim (`x`, `y`) and the \
                                 button bitmask (bit 0 fire, bit 1 cursor, bit 2 pause, bit 3 \
-                                turbo). Select the scope first (GUI or CLI `--port2 superscope`)."
+                                turbo). Plug the scope in first with \
+                                `set_port_device {port: 1, device: \"superscope\"}` (CLI \
+                                equivalent: `--port2 superscope`)."
     )]
     async fn set_superscope(
         &self,
@@ -1711,6 +1816,37 @@ fn api_err_to_mcp(e: &ApiError) -> ErrorData {
 /// shared by every binary payload this server returns.
 fn b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// Parse an optional `force_mapper` tool param into a [`luna_api::MapperKind`],
+/// sharing the CLI's `--force-mapper` vocabulary.
+fn parse_force_mapper(s: Option<&str>) -> Result<Option<luna_api::MapperKind>, ErrorData> {
+    s.map(|k| {
+        luna_api::MapperKind::from_cli_str(k).ok_or_else(|| {
+            ErrorData::invalid_params(
+                format!(
+                    "unknown force_mapper `{k}` (lorom, hirom, exhirom, sa1, superfx, dsp1, \
+                     sdd1, spc7110)"
+                ),
+                None,
+            )
+        })
+    })
+    .transpose()
+}
+
+/// Parse an optional `force_region` tool param, sharing the CLI's
+/// `--force-region` vocabulary.
+fn parse_force_region(s: Option<&str>) -> Result<Option<luna_api::Region>, ErrorData> {
+    s.map(|r| match r.to_ascii_lowercase().as_str() {
+        "ntsc" => Ok(luna_api::Region::Ntsc),
+        "pal" => Ok(luna_api::Region::Pal),
+        _ => Err(ErrorData::invalid_params(
+            format!("unknown force_region `{r}` (ntsc, pal)"),
+            None,
+        )),
+    })
+    .transpose()
 }
 
 /// Width/height straight from the PNG IHDR (fixed offsets 16..24,
@@ -1825,9 +1961,9 @@ mod tests {
     async fn server_load_rom_missing_file_returns_error() {
         let s = LunaServer::new();
         let result = s
-            .load_rom(Parameters(LoadRomParams {
-                path: "/tmp/luna-this-file-does-not-exist.smc".into(),
-            }))
+            .load_rom(Parameters(rom_params(
+                "/tmp/luna-this-file-does-not-exist.smc",
+            )))
             .await;
         let Err(err) = result else {
             panic!("expected error for missing ROM");
@@ -1848,9 +1984,7 @@ mod tests {
         let path = PathBuf::from("/tmp/luna_mcp_demo.smc");
         std::fs::write(&path, demo_lorom()).unwrap();
         let info = s
-            .load_rom(Parameters(LoadRomParams {
-                path: path.to_string_lossy().into(),
-            }))
+            .load_rom(Parameters(rom_params(&path.to_string_lossy())))
             .await
             .unwrap();
         assert_eq!(info.0.rom.mapper, "LoRom");
@@ -1880,11 +2014,9 @@ mod tests {
         let s = LunaServer::new();
         let path = PathBuf::from("/tmp/luna_mcp_p1_demo.smc");
         std::fs::write(&path, demo_lorom()).unwrap();
-        s.load_rom(Parameters(LoadRomParams {
-            path: path.to_string_lossy().into(),
-        }))
-        .await
-        .unwrap();
+        s.load_rom(Parameters(rom_params(&path.to_string_lossy())))
+            .await
+            .unwrap();
         s.step(Parameters(StepParams { count: 50 })).await.unwrap();
 
         // disasm_cpu with all defaults → decodes at the live PC.
@@ -2016,11 +2148,9 @@ mod tests {
         let s = LunaServer::new();
         let path = PathBuf::from("/tmp/luna_mcp_p2_demo.smc");
         std::fs::write(&path, demo_lorom()).unwrap();
-        s.load_rom(Parameters(LoadRomParams {
-            path: path.to_string_lossy().into(),
-        }))
-        .await
-        .unwrap();
+        s.load_rom(Parameters(rom_params(&path.to_string_lossy())))
+            .await
+            .unwrap();
         // Inject `LDA #$42; STA $0200; JMP $0100` at $00:0100 and aim PC.
         s.poke_memory(Parameters(PokeMemoryParams {
             bank: 0x7E,
@@ -2130,11 +2260,9 @@ mod tests {
         let s = LunaServer::new();
         let rom_path = PathBuf::from("/tmp/luna_mcp_p3_demo.smc");
         std::fs::write(&rom_path, demo_lorom()).unwrap();
-        s.load_rom(Parameters(LoadRomParams {
-            path: rom_path.to_string_lossy().into(),
-        }))
-        .await
-        .unwrap();
+        s.load_rom(Parameters(rom_params(&rom_path.to_string_lossy())))
+            .await
+            .unwrap();
 
         let sym_path = PathBuf::from("/tmp/luna_mcp_p3_demo.sym");
         std::fs::write(&sym_path, "[labels]\n00:0100 main\n7e:0200 monster_x\n").unwrap();
@@ -2263,11 +2391,9 @@ mod tests {
 
         let rom_path = PathBuf::from("/tmp/luna_mcp_nocash_wdm_demo.smc");
         std::fs::write(&rom_path, rom).unwrap();
-        s.load_rom(Parameters(LoadRomParams {
-            path: rom_path.to_string_lossy().into(),
-        }))
-        .await
-        .unwrap();
+        s.load_rom(Parameters(rom_params(&rom_path.to_string_lossy())))
+            .await
+            .unwrap();
 
         s.enable_nocash_log().await.unwrap();
         s.enable_wdm_log().await.unwrap();
@@ -2298,6 +2424,110 @@ mod tests {
         // Draining resets both channels.
         assert!(s.take_nocash_log().await.unwrap().0.text.is_empty());
         assert!(s.take_wdm_log().await.unwrap().0.events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn server_forced_loading_and_port_device_round_trip() {
+        let s = LunaServer::new();
+        let rom_path = PathBuf::from("/tmp/luna_mcp_forced_demo.smc");
+        std::fs::write(&rom_path, demo_lorom()).unwrap();
+
+        // Auto-detection sees the LoROM header...
+        let info = s
+            .load_rom(Parameters(rom_params(&rom_path.to_string_lossy())))
+            .await
+            .unwrap();
+        assert_eq!(info.0.rom.mapper, "LoRom");
+
+        // A checksum-corrupted image is rejected by auto-detection...
+        let mut broken = demo_lorom();
+        broken[0x7FDC] ^= 0xFF;
+        let broken_path = PathBuf::from("/tmp/luna_mcp_forced_demo_broken.smc");
+        std::fs::write(&broken_path, &broken).unwrap();
+        assert!(
+            s.load_rom(Parameters(rom_params(&broken_path.to_string_lossy())))
+                .await
+                .is_err()
+        );
+
+        // ...but force_mapper loads it anyway (the point of the flag).
+        let info = s
+            .load_rom(Parameters(LoadRomParams {
+                path: broken_path.to_string_lossy().into(),
+                force_mapper: Some("lorom".into()),
+                force_region: Some("pal".into()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(info.0.rom.mapper, "LoRom");
+        assert!(!info.0.rom.checksum_valid);
+
+        // Bad vocabulary is an invalid_params error, not a load attempt.
+        assert!(
+            s.load_rom(Parameters(LoadRomParams {
+                path: rom_path.to_string_lossy().into(),
+                force_mapper: Some("wat".into()),
+                force_region: None,
+            }))
+            .await
+            .is_err()
+        );
+        assert!(
+            s.load_rom(Parameters(LoadRomParams {
+                path: rom_path.to_string_lossy().into(),
+                force_mapper: None,
+                force_region: Some("secam".into()),
+            }))
+            .await
+            .is_err()
+        );
+
+        // load_rom_bytes: same image over base64, no host file involved.
+        let info = s
+            .load_rom_bytes(Parameters(LoadRomBytesParams {
+                rom_base64: b64(&demo_lorom()),
+                force_mapper: None,
+                force_region: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(info.0.rom.title.trim(), "LUNA MCP DEMO");
+        assert!(
+            s.load_rom_bytes(Parameters(LoadRomBytesParams {
+                rom_base64: "not-base64!!".into(),
+                force_mapper: None,
+                force_region: None,
+            }))
+            .await
+            .is_err()
+        );
+
+        // set_port_device: plug a mouse into P1, feed it, unplug back to pad.
+        for device in ["mouse", "joypad"] {
+            s.set_port_device(Parameters(SetPortDeviceParams {
+                port: 0,
+                device: device.into(),
+            }))
+            .await
+            .unwrap();
+        }
+        assert!(
+            s.set_port_device(Parameters(SetPortDeviceParams {
+                port: 0,
+                device: "lightgun".into(),
+            }))
+            .await
+            .is_err()
+        );
+    }
+
+    /// `load_rom` params with no mapper/region override — the common case.
+    fn rom_params(path: &str) -> LoadRomParams {
+        LoadRomParams {
+            path: path.into(),
+            force_mapper: None,
+            force_region: None,
+        }
     }
 
     fn demo_lorom() -> Vec<u8> {
