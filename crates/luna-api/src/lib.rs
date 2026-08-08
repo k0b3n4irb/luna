@@ -733,6 +733,15 @@ pub enum SearchOp {
     Unchanged,
 }
 
+/// One per-frame memory freeze (issue #178).
+#[derive(Debug, Clone, Copy, Serialize, schemars::JsonSchema)]
+pub struct FreezeEntry {
+    /// Canonical 24-bit WRAM address (`$7E`/`$7F`).
+    pub addr: u32,
+    /// The byte pinned there at every frame boundary.
+    pub value: u8,
+}
+
 /// One [`Emulator::search_results`] row.
 #[derive(Debug, Clone, Copy, Serialize, schemars::JsonSchema)]
 pub struct SearchHit {
@@ -800,6 +809,11 @@ pub struct Emulator {
     /// Live narrowing memory-search session (issue #177); `None` until
     /// [`Emulator::search_begin`] runs.
     search_session: Option<SearchSession>,
+    /// Per-frame memory freezes (issue #178): `(canonical $7E/$7F WRAM
+    /// address, value)`, re-applied whenever the frame counter advances
+    /// in ANY run path — so a freeze behaves identically under the CLI,
+    /// MCP and the GUI (the API-first coherence rule).
+    freezes: Vec<(u32, u8)>,
     /// Event Viewer category/DMA visibility config.
     event_config: event_viewer::EventViewerConfig,
     /// The just-completed frame's captured events (Mesen2 `_debugEvents`),
@@ -897,6 +911,7 @@ impl Emulator {
             rom_hash: 0,
             symbols: None,
             search_session: None,
+            freezes: Vec::new(),
             event_config: event_viewer::EventViewerConfig {
                 visible: [true; event_viewer::CATEGORY_COUNT],
                 show_previous_frame: true,
@@ -1220,7 +1235,9 @@ impl Emulator {
     /// Step the CPU `count` instructions (or stop early if the CPU
     /// halts or panics). Returns the number actually executed.
     pub fn step(&mut self, count: u64) -> Result<u64, ApiError> {
+        let freezes = self.freezes.clone();
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        let mut last_frame = snes.frame_count;
         let mut executed = 0u64;
         let prev_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
@@ -1231,6 +1248,7 @@ impl Emulator {
                 }
                 snes.step();
                 executed += 1;
+                Self::apply_freezes_on_frame_edge(snes, &freezes, &mut last_frame);
             }
             executed
         }));
@@ -1251,8 +1269,10 @@ impl Emulator {
     /// `frame_count` advances). Returns the number of instructions
     /// executed. Bounded by `max_steps` as a safety belt.
     pub fn step_until_frame(&mut self, max_steps: u64) -> Result<u64, ApiError> {
+        let freezes = self.freezes.clone();
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         let start_frame = snes.frame_count;
+        let mut last_frame = start_frame;
         let mut executed = 0u64;
         let prev_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
@@ -1260,6 +1280,7 @@ impl Emulator {
             while executed < max_steps && !snes.cpu.stopped && snes.frame_count == start_frame {
                 snes.step();
                 executed += 1;
+                Self::apply_freezes_on_frame_edge(snes, &freezes, &mut last_frame);
             }
             executed
         }));
@@ -1285,7 +1306,9 @@ impl Emulator {
     /// reports). Mutates state (advances the CPU); a diagnostic, not part of
     /// normal stepping. Panic-safe (a crashing ROM returns `Err`).
     pub fn loop_probe(&mut self, max_steps: u64) -> Result<LoopProbe, ApiError> {
+        let freezes = self.freezes.clone();
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        let mut last_frame = snes.frame_count;
         let mut seen = std::collections::HashSet::new();
         let mut executed = 0u64;
         let prev_hook = std::panic::take_hook();
@@ -1295,6 +1318,7 @@ impl Emulator {
                 seen.insert((u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc));
                 snes.step();
                 executed += 1;
+                Self::apply_freezes_on_frame_edge(snes, &freezes, &mut last_frame);
             }
         }));
         std::panic::set_hook(prev_hook);
@@ -2095,6 +2119,112 @@ impl Emulator {
         Ok(snes.dbg_poke_bytes(bank, offset, data))
     }
 
+    /// Direct write into PPU VRAM at byte address `offset` (wraps at
+    /// 64 KB). Bypasses the bus like [`Self::poke_memory`] — state
+    /// injection, no cycles, no MMIO side effects (issue #178).
+    pub fn poke_vram(&mut self, offset: u16, data: &[u8]) -> Result<usize, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        for (i, &b) in data.iter().enumerate() {
+            snes.ppu.vram.poke(offset.wrapping_add(i as u16), b);
+        }
+        Ok(data.len())
+    }
+
+    /// Direct write into CGRAM at byte address `offset` (wraps at 512
+    /// bytes; each palette entry is a little-endian BGR555 word).
+    pub fn poke_cgram(&mut self, offset: u16, data: &[u8]) -> Result<usize, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        for (i, &b) in data.iter().enumerate() {
+            snes.ppu.cgram.poke(offset.wrapping_add(i as u16), b);
+        }
+        Ok(data.len())
+    }
+
+    /// Direct write into OAM at byte address `offset` (wraps at the
+    /// 544-byte table: 512 low + 32 high).
+    pub fn poke_oam(&mut self, offset: u16, data: &[u8]) -> Result<usize, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        for (i, &b) in data.iter().enumerate() {
+            snes.ppu.oam.poke(offset.wrapping_add(i as u16), b);
+        }
+        Ok(data.len())
+    }
+
+    /// Direct write into the SPC700's ARAM at `offset` (wraps at 64 KB).
+    pub fn poke_aram(&mut self, offset: u16, data: &[u8]) -> Result<usize, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        for (i, &b) in data.iter().enumerate() {
+            snes.apu_real.aram[usize::from(offset.wrapping_add(i as u16))] = b;
+        }
+        Ok(data.len())
+    }
+
+    /// Canonicalise a freezable WRAM address: `$7E`/`$7F` pass through,
+    /// the `$00-3F`/`$80-BF` low-8KB mirrors fold to `$7E`, anything
+    /// else is a `BadArg`.
+    fn freeze_canonical_addr(addr: u32) -> Result<u32, ApiError> {
+        let bank = (addr >> 16) & 0xFF;
+        let off = addr & 0xFFFF;
+        match bank {
+            0x7E | 0x7F => Ok(addr & 0x00FF_FFFF),
+            b if (b <= 0x3F || (0x80..=0xBF).contains(&b)) && off < 0x2000 => Ok(0x7E_0000 | off),
+            _ => Err(ApiError::BadArg(format!(
+                "freeze address {addr:#08X} is not WRAM ($7E/$7F or a low-RAM mirror)"
+            ))),
+        }
+    }
+
+    /// Canonical WRAM address → flat `0..0x20000` offset.
+    const fn wram_addr_to_offset(addr: u32) -> usize {
+        (((addr >> 16) as usize & 1) << 16) | (addr as usize & 0xFFFF)
+    }
+
+    /// Pin `value` at a WRAM address, re-applied at every frame boundary
+    /// in every run path (cheat-style, issue #178) — and applied once
+    /// immediately. Adding an address twice replaces its value.
+    pub fn freeze_add(&mut self, addr: u32, value: u8) -> Result<(), ApiError> {
+        let addr = Self::freeze_canonical_addr(addr)?;
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        match self.freezes.iter_mut().find(|(a, _)| *a == addr) {
+            Some(entry) => entry.1 = value,
+            None => self.freezes.push((addr, value)),
+        }
+        snes.wram[Self::wram_addr_to_offset(addr)] = value;
+        Ok(())
+    }
+
+    /// Remove a freeze by address. Returns `true` if one existed.
+    pub fn freeze_remove(&mut self, addr: u32) -> Result<bool, ApiError> {
+        let addr = Self::freeze_canonical_addr(addr)?;
+        let before = self.freezes.len();
+        self.freezes.retain(|(a, _)| *a != addr);
+        Ok(self.freezes.len() != before)
+    }
+
+    /// The active freeze list.
+    #[must_use]
+    pub fn freeze_list(&self) -> Vec<FreezeEntry> {
+        self.freezes
+            .iter()
+            .map(|&(addr, value)| FreezeEntry { addr, value })
+            .collect()
+    }
+
+    /// Re-apply the freeze list when the frame counter advanced — called
+    /// from EVERY run path (`step`, `step_until_frame`, `loop_probe`,
+    /// `run_until_break_interruptible`) so a freeze behaves identically
+    /// under the CLI, MCP and the GUI. The check is one `u64` compare
+    /// per executed instruction: effectively free.
+    fn apply_freezes_on_frame_edge(snes: &mut Snes, freezes: &[(u32, u8)], last_frame: &mut u64) {
+        if freezes.is_empty() || snes.frame_count == *last_frame {
+            return;
+        }
+        *last_frame = snes.frame_count;
+        for &(addr, value) in freezes {
+            snes.wram[Self::wram_addr_to_offset(addr)] = value;
+        }
+    }
+
     /// Memory search (L9): every 24-bit `$7E-$7F` WRAM address whose bytes
     /// match `pattern`. Empty `pattern` → no hits.
     pub fn search_memory(&self, pattern: &[u8]) -> Result<Vec<u32>, ApiError> {
@@ -2440,7 +2570,9 @@ impl Emulator {
         use std::sync::atomic::Ordering;
         // Clear any stale raise so this run isn't stopped by a previous pause.
         interrupt.store(false, Ordering::Relaxed);
+        let freezes = self.freezes.clone();
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        let mut last_frame = snes.frame_count;
         if let Some(bp) = snes.breakpoints.as_mut() {
             bp.take_pending(); // discard stale
         }
@@ -2474,6 +2606,7 @@ impl Emulator {
                 }
                 snes.step();
                 executed = i + 1;
+                Self::apply_freezes_on_frame_edge(snes, &freezes, &mut last_frame);
                 if let Some(hit) = snes.breakpoints.as_mut().and_then(|b| b.take_pending()) {
                     return RunOutcome {
                         steps: i + 1,
@@ -3463,6 +3596,63 @@ mod tests {
             e.load_state(&[0xFF; 16]),
             Err(ApiError::SaveState(_))
         ));
+    }
+
+    #[test]
+    fn pokes_reach_all_memory_spaces() {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+
+        e.poke_vram(0x1000, &[0xAB, 0xCD]).unwrap();
+        assert_eq!(e.peek_vram(0x1000, 2).unwrap(), vec![0xAB, 0xCD]);
+
+        e.poke_cgram(0x0002, &[0x1F, 0x00]).unwrap(); // entry 1 = red
+        assert_eq!(e.peek_cgram().unwrap()[1], 0x001F);
+
+        e.poke_oam(0x0004, &[0x77]).unwrap();
+        assert_eq!(e.peek_oam().unwrap()[4], 0x77);
+
+        e.poke_aram(0x4000, &[0x99]).unwrap();
+        assert_eq!(e.peek_aram(0x4000, 1).unwrap(), vec![0x99]);
+    }
+
+    #[test]
+    fn freezes_reapply_on_every_run_path() {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+
+        // Non-WRAM addresses are rejected; low-mirror folds to $7E.
+        assert!(e.freeze_add(0x00_8000, 1).is_err());
+        e.freeze_add(0x00_0180, 0x11).unwrap();
+        assert_eq!(e.freeze_list()[0].addr, 0x7E_0180);
+
+        // freeze_add applies immediately.
+        e.freeze_add(0x7E_0300, 0x55).unwrap();
+        assert_eq!(e.peek_memory(0x7E, 0x0300, 1).unwrap(), vec![0x55]);
+
+        // Simulate the game clobbering it, then cross a frame boundary
+        // through the INTERRUPTIBLE run loop — the GUI's drive path
+        // (the API-first coherence requirement of issue #178).
+        e.poke_memory(0x7E, 0x0300, &[0x00]).unwrap();
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        e.run_until_break_interruptible(50_000, &stop).unwrap();
+        assert_eq!(
+            e.peek_memory(0x7E, 0x0300, 1).unwrap(),
+            vec![0x55],
+            "freeze re-applied at the frame edge inside run_until_break_interruptible"
+        );
+
+        // Same through plain step().
+        e.poke_memory(0x7E, 0x0300, &[0x00]).unwrap();
+        e.step(50_000).unwrap();
+        assert_eq!(e.peek_memory(0x7E, 0x0300, 1).unwrap(), vec![0x55]);
+
+        // Remove: the value stops being pinned.
+        assert!(e.freeze_remove(0x7E_0300).unwrap());
+        assert!(!e.freeze_remove(0x7E_0300).unwrap());
+        e.poke_memory(0x7E, 0x0300, &[0x00]).unwrap();
+        e.step(50_000).unwrap();
+        assert_eq!(e.peek_memory(0x7E, 0x0300, 1).unwrap(), vec![0x00]);
     }
 
     #[test]

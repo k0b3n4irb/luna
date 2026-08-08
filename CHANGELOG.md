@@ -7,6 +7,13 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- Pokes beyond WRAM + per-frame freezes (#178) — `poke_vram` /
+  `poke_cgram` / `poke_oam` / `poke_aram` on `luna_api::Emulator` and
+  as MCP tools (previously `poke_memory` silently skipped everything
+  but WRAM), plus `freeze_add` / `freeze_remove` / `freeze_list`:
+  cheat-style WRAM pinning re-applied at every frame boundary in every
+  run path — including the GUI's interruptible run loop, so the three
+  front-ends can never disagree about a frozen value.
 - Narrowing memory-search sessions (#177) — `search_begin(width)` /
   `search_refine(op, value?)` / `search_results(limit)` on
   `luna_api::Emulator` and as MCP tools: the classic "find my variable"

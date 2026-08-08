@@ -1184,6 +1184,55 @@ pub struct SearchResultsResult {
     pub hits: Vec<luna_api::SearchHit>,
 }
 
+/// Shared parameters for the offset+data poke tools
+/// (`poke_vram` / `poke_cgram` / `poke_oam` / `poke_aram`).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct PokeOffsetParams {
+    /// Byte offset within the target memory (wraps at its size).
+    pub offset: u16,
+    /// Bytes to write (JSON array).
+    pub data: Vec<u8>,
+}
+
+/// `freeze_add` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct FreezeAddParams {
+    /// 24-bit WRAM address (`$7E`/`$7F`, or a low-RAM mirror which
+    /// folds to `$7E`). Ignored when `symbol` is given.
+    #[serde(default)]
+    pub addr: u32,
+    /// Freeze at a loaded WLA-DX symbol instead of `addr`.
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// The byte pinned there at every frame boundary.
+    pub value: u8,
+}
+
+/// `freeze_remove` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct FreezeRemoveParams {
+    /// The frozen address. Ignored when `symbol` is given.
+    #[serde(default)]
+    pub addr: u32,
+    /// Resolve a loaded WLA-DX symbol instead of `addr`.
+    #[serde(default)]
+    pub symbol: Option<String>,
+}
+
+/// `freeze_remove` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FreezeRemoveResult {
+    /// `true` if a freeze existed at that address.
+    pub removed: bool,
+}
+
+/// `freeze_list` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FreezeListResult {
+    /// The active freezes (canonical `$7E`/`$7F` addresses).
+    pub freezes: Vec<luna_api::FreezeEntry>,
+}
+
 /// `bp_list` result.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct BpListResult {
@@ -2316,6 +2365,114 @@ impl LunaServer {
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(BpSetEnabledResult { found }))
+    }
+
+    // ------------- Pokes beyond WRAM + freezes (issue #178) -------------
+
+    #[rmcp::tool(
+        description = "Write bytes directly into PPU VRAM at a byte offset (wraps at \
+                                64 KB). State injection — bypasses the bus, no MMIO side \
+                                effects."
+    )]
+    async fn poke_vram(
+        &self,
+        Parameters(params): Parameters<PokeOffsetParams>,
+    ) -> Result<rmcp::Json<PokeResult>, ErrorData> {
+        let written = {
+            let mut em = self.emulator.lock().await;
+            em.poke_vram(params.offset, &params.data)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(PokeResult { written }))
+    }
+
+    #[rmcp::tool(
+        description = "Write bytes directly into CGRAM at a byte offset (wraps at 512 \
+                                bytes; palette entries are little-endian BGR555 words)."
+    )]
+    async fn poke_cgram(
+        &self,
+        Parameters(params): Parameters<PokeOffsetParams>,
+    ) -> Result<rmcp::Json<PokeResult>, ErrorData> {
+        let written = {
+            let mut em = self.emulator.lock().await;
+            em.poke_cgram(params.offset, &params.data)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(PokeResult { written }))
+    }
+
+    #[rmcp::tool(
+        description = "Write bytes directly into OAM at a byte offset (wraps at the \
+                                544-byte table)."
+    )]
+    async fn poke_oam(
+        &self,
+        Parameters(params): Parameters<PokeOffsetParams>,
+    ) -> Result<rmcp::Json<PokeResult>, ErrorData> {
+        let written = {
+            let mut em = self.emulator.lock().await;
+            em.poke_oam(params.offset, &params.data)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(PokeResult { written }))
+    }
+
+    #[rmcp::tool(
+        description = "Write bytes directly into the SPC700's ARAM at an offset (wraps \
+                                at 64 KB)."
+    )]
+    async fn poke_aram(
+        &self,
+        Parameters(params): Parameters<PokeOffsetParams>,
+    ) -> Result<rmcp::Json<PokeResult>, ErrorData> {
+        let written = {
+            let mut em = self.emulator.lock().await;
+            em.poke_aram(params.offset, &params.data)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(PokeResult { written }))
+    }
+
+    #[rmcp::tool(
+        description = "Pin a byte at a WRAM address, re-applied at every frame boundary \
+                                in every run path (cheat-style pinning for testing) — and \
+                                applied once immediately. Re-adding an address replaces its \
+                                value."
+    )]
+    async fn freeze_add(
+        &self,
+        Parameters(params): Parameters<FreezeAddParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            let addr = resolve_addr(&em, params.symbol.as_deref(), params.addr)?;
+            em.freeze_add(addr, params.value)
+                .map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(description = "Remove a per-frame freeze by address (or symbol).")]
+    async fn freeze_remove(
+        &self,
+        Parameters(params): Parameters<FreezeRemoveParams>,
+    ) -> Result<rmcp::Json<FreezeRemoveResult>, ErrorData> {
+        let removed = {
+            let mut em = self.emulator.lock().await;
+            let addr = resolve_addr(&em, params.symbol.as_deref(), params.addr)?;
+            em.freeze_remove(addr).map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(FreezeRemoveResult { removed }))
+    }
+
+    #[rmcp::tool(description = "List the active per-frame freezes.")]
+    async fn freeze_list(&self) -> rmcp::Json<FreezeListResult> {
+        let freezes = {
+            let em = self.emulator.lock().await;
+            em.freeze_list()
+        };
+        rmcp::Json(FreezeListResult { freezes })
     }
 
     // ------------- Narrowing memory search (issue #177) -------------
