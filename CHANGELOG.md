@@ -7,6 +7,15 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- `luna test` (#181) — the manifest-driven homebrew test runner: one
+  TOML per test (`rom`, optional `sym`/`input`/`screenshot`, a
+  `frames`/`steps` bound, and asserts on `wdm_empty`,
+  `nocash_contains`, `fbhash` and symbol values), run in-process
+  through `luna-api` with the CI exit-code contract (0 pass / 1 fail /
+  2 usage). `--update` regenerates `fbhash` goldens preserving manifest
+  comments; `--only` filters; `--report json` emits a machine-readable
+  summary. New book chapter "Developing homebrew with luna" with a
+  copyable GitHub Actions recipe.
 - Tracked 65C816 call stack (#180) — opt-in `enable_call_stack` +
   `call_stack()` on `luna_api::Emulator` (JSR/JSL/RTS/RTL, BRK/COP and
   NMI entries; bounded at 256 frames; RTS-without-JSR tolerant),

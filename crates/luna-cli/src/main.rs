@@ -18,6 +18,7 @@ mod parsers;
 mod rom;
 mod run;
 mod state;
+mod test_cmd;
 mod wram_trace;
 
 use dumps::{run_assets_dump, run_spc_dump};
@@ -119,6 +120,26 @@ enum Command {
         /// the `PeterLemon` corpus as PAL to match krom's reference captures.
         #[arg(long = "force-region")]
         force_region: Option<String>,
+    },
+    /// Run manifest-driven homebrew tests (issue #181): one TOML per
+    /// test (rom, input, run bound, asserts), executed in-process
+    /// through `luna-api`. Exit 0 = all pass, 1 = assert failures,
+    /// 2 = manifest/usage errors — the CI contract.
+    Test {
+        /// Manifest files, or directories scanned recursively for
+        /// `*.toml`. Defaults to `./tests`.
+        paths: Vec<std::path::PathBuf>,
+        /// Rewrite each manifest's `asserts.fbhash` with the measured
+        /// value (regenerate goldens after an intended render change).
+        /// Formatting and comments are preserved.
+        #[arg(long)]
+        update: bool,
+        /// Only run manifests whose path contains this substring.
+        #[arg(long)]
+        only: Option<String>,
+        /// Also print a machine-readable JSON report to stdout.
+        #[arg(long = "report", value_parser = ["json"])]
+        report: Option<String>,
     },
     /// Serve the Luna MCP server on stdio.
     ///
@@ -669,6 +690,17 @@ fn main() -> ExitCode {
             native_res,
             force_mapper.as_deref(),
             force_region.as_deref(),
+        ),
+        Command::Test {
+            paths,
+            update,
+            only,
+            report,
+        } => test_cmd::run_tests(
+            &paths,
+            update,
+            only.as_deref(),
+            report.as_deref() == Some("json"),
         ),
         Command::Mcp {
             rom,
