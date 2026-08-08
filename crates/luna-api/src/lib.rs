@@ -2865,24 +2865,28 @@ impl Emulator {
     }
 
     /// Direct read of the SPC700's ARAM. Read-only, no bus side
-    /// effects.
-    pub fn peek_aram(&self, offset: u16, count: u16) -> Result<Vec<u8>, ApiError> {
+    /// effects. `count` up to `0x10000` reads the whole 64 KB in one
+    /// call (larger values are clamped — the address space wraps).
+    pub fn peek_aram(&self, offset: u16, count: u32) -> Result<Vec<u8>, ApiError> {
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
-        let mut out = Vec::with_capacity(usize::from(count));
+        let count = count.min(0x1_0000);
+        let mut out = Vec::with_capacity(count as usize);
         for i in 0..count {
-            out.push(snes.apu_real.aram[offset.wrapping_add(i) as usize]);
+            out.push(snes.apu_real.aram[offset.wrapping_add(i as u16) as usize]);
         }
         Ok(out)
     }
 
     /// Direct read of PPU VRAM. `offset` is a *byte* address (0..0xFFFF
-    /// — VRAM is 64 KB), `count` how many consecutive bytes to read.
-    /// Read-only, no bus side effects.
-    pub fn peek_vram(&self, offset: u16, count: u16) -> Result<Vec<u8>, ApiError> {
+    /// — VRAM is 64 KB), `count` how many consecutive bytes to read —
+    /// up to `0x10000` for the whole VRAM in one call (larger values are
+    /// clamped; the address space wraps). Read-only, no bus side effects.
+    pub fn peek_vram(&self, offset: u16, count: u32) -> Result<Vec<u8>, ApiError> {
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
-        let mut out = Vec::with_capacity(usize::from(count));
+        let count = count.min(0x1_0000);
+        let mut out = Vec::with_capacity(count as usize);
         for i in 0..count {
-            out.push(snes.ppu.vram.peek(offset.wrapping_add(i)));
+            out.push(snes.ppu.vram.peek(offset.wrapping_add(i as u16)));
         }
         Ok(out)
     }
