@@ -7,6 +7,12 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- MCP: full trace parity with the CLI (#172) — mechanical `enable_*` /
+  `take_*` tool pairs for the dma, dsp (S-DSP writes), mailbox
+  (`$2140-43`), `sa1_log`, `sa1_side_log`, `sa1_trace`, superfx, dsp1,
+  and spc700 traces. PC-carrying events are symbolised like the CPU/mem
+  traces; `take_dsp1_trace {decode_commands}` additionally returns the
+  decoded DSP-1 command transactions (the `--dsp1-trace-commands` view).
 - MCP: the CI determinism oracles are now reachable over MCP (#170) —
   `frame_hash {force_display, native}` (the CLI `fbhash=` value, 16 hex
   chars), `set_native_capture`, `wram_page_hashes {page_size}`,
