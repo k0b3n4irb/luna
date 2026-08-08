@@ -4,7 +4,15 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.14.0] — 2026-08-08
+
+The OpenSNES DX release: everything the SDK team asked for in issues
+#168–#181, in one coherent drop. Full CLI↔MCP parity (an agent over MCP
+now sees every trace, oracle and channel the CLI does), a much richer
+debugging API (symbols v2 with an SPC address space, breakpoints v2,
+narrowing search sessions, pokes for every memory space, per-frame
+freezes, a tracked call stack), and `luna test` — the manifest-driven
+test runner that finally gives homebrew a real CI story.
 
 ### Added
 - `luna test` (#181) — the manifest-driven homebrew test runner: one
