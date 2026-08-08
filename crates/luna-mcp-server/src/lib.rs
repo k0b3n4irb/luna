@@ -83,6 +83,10 @@ pub struct LunaServer {
     /// running tool to release the lock (rmcp dispatches each request on its
     /// own task, so `pause` runs concurrently with `run`).
     interrupt: Arc<AtomicBool>,
+    /// The `max_events` passed to the last `enable_dsp1_trace` — needed by
+    /// `take_dsp1_trace {decode_commands}` to tell a capped (truncated)
+    /// drain from a complete one before decoding transactions.
+    dsp1_trace_max: Arc<std::sync::atomic::AtomicUsize>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -176,6 +180,35 @@ pub struct LoopProbeParams {
     /// Instructions to execute while collecting distinct PCs. Mutates
     /// state (the CPU advances).
     pub max_steps: u64,
+}
+
+/// Shared parameters for the capped `enable_*_trace` tools
+/// (dma / dsp / `sa1_trace` / superfx / spc).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct EnableRingTraceParams {
+    /// Hard cap on recorded events; recording stops when the ring is full.
+    pub max_events: usize,
+}
+
+/// `enable_dsp1_trace` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct EnableDsp1TraceParams {
+    /// Hard cap on recorded events.
+    pub max_events: usize,
+    /// Record only the CPU-side DR/SR port traffic, skipping microcode
+    /// `exec` events — the handshake view without the firehose.
+    #[serde(default)]
+    pub ports_only: bool,
+}
+
+/// `take_dsp1_trace` parameters.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct TakeDsp1TraceParams {
+    /// Also decode the drained port traffic into DSP-1 command
+    /// transactions (command byte, word counts, status vs. the known
+    /// command table).
+    #[serde(default)]
+    pub decode_commands: bool,
 }
 
 /// `step` parameters.
@@ -767,6 +800,247 @@ pub struct LoopProbeResult {
     pub executed: u64,
 }
 
+/// One DMA→VRAM transfer byte (`take_dma_trace`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DmaTraceLine {
+    /// 24-bit A-bus source address of this byte.
+    pub src: u32,
+    /// PPU VRAM word address (`$2116/7`) the byte targets.
+    pub vram_word: u16,
+    /// B-bus register offset (byte targets `$2100 + b_offset`).
+    pub b_offset: u8,
+    /// The transferred byte.
+    pub value: u8,
+    /// DMA channel (0-7).
+    pub channel: u8,
+    /// Completed-frame counter at the start of the owning burst.
+    pub frame: u64,
+    /// PPU scanline at the start of the owning burst.
+    pub line: u16,
+    /// Horizontal master-clock (0..1363) at the transfer.
+    pub hclock: u16,
+    /// Burst started inside vertical blank.
+    pub blank: bool,
+    /// INIDISP forced-blank was set at the write. A VRAM write is safe
+    /// iff `blank || force_blank`.
+    pub force_blank: bool,
+}
+
+/// `take_dma_trace` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DmaTraceResult {
+    /// Recorded transfers, oldest first. Draining resets the ring.
+    pub events: Vec<DmaTraceLine>,
+}
+
+/// One S-DSP register write (`take_dsp_trace`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DspTraceLine {
+    /// SPC700 cycles since reset at the write.
+    pub spc_cycles: u64,
+    /// DSP register index (`$00-$7F`).
+    pub reg: u8,
+    /// Byte written.
+    pub value: u8,
+}
+
+/// `take_dsp_trace` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DspTraceResult {
+    /// Recorded writes, oldest first. Draining resets the ring.
+    pub events: Vec<DspTraceLine>,
+}
+
+/// One CPU↔APU mailbox access (`take_mailbox_log`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct MailboxLine {
+    /// Master cycles since reset at the access.
+    pub mclk: u64,
+    /// 24-bit CPU PC of the accessing instruction.
+    pub pc: u32,
+    /// `"read"` (CPU ← APU) or `"write"` (CPU → APU).
+    pub kind: String,
+    /// Mailbox port `0..=3` (`$2140 + port`).
+    pub port: u8,
+    /// Byte transferred.
+    pub value: u8,
+    /// Nearest symbol for `pc` when a `.sym` table is loaded.
+    pub symbol: Option<String>,
+}
+
+/// `take_mailbox_log` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct MailboxLogResult {
+    /// Recorded accesses, oldest first. Draining resets the log.
+    pub events: Vec<MailboxLine>,
+}
+
+/// One main-CPU access to an SA-1 MMIO register (`take_sa1_log`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct Sa1LogLine {
+    /// Master cycles since reset at the access.
+    pub mclk: u64,
+    /// 24-bit CPU PC of the accessing instruction.
+    pub pc: u32,
+    /// `"read"` or `"write"`.
+    pub kind: String,
+    /// Register address in `$2200..=$23FF`.
+    pub reg: u16,
+    /// Byte transferred.
+    pub value: u8,
+    /// Nearest symbol for `pc` when a `.sym` table is loaded.
+    pub symbol: Option<String>,
+}
+
+/// `take_sa1_log` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct Sa1LogResult {
+    /// Recorded accesses, oldest first. Draining resets the log.
+    pub events: Vec<Sa1LogLine>,
+}
+
+/// One SA-1-side MMIO access (`take_sa1_side_log`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct Sa1SideLine {
+    /// 24-bit SA-1 PC at the start of the accessing instruction.
+    pub sa1_pc: u32,
+    /// `true` = write, `false` = read.
+    pub write: bool,
+    /// Register address in `$2200..=$23FF`.
+    pub reg: u16,
+    /// Byte transferred.
+    pub value: u8,
+}
+
+/// `take_sa1_side_log` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct Sa1SideLogResult {
+    /// Recorded accesses, oldest first. Draining resets the log.
+    pub events: Vec<Sa1SideLine>,
+}
+
+/// One SA-1 pre-instruction register snapshot (`take_sa1_trace`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct Sa1TraceLine {
+    /// 24-bit SA-1 PC before the opcode runs.
+    pub pc: u32,
+    /// Accumulator.
+    pub a: u16,
+    /// X index.
+    pub x: u16,
+    /// Y index.
+    pub y: u16,
+    /// Stack pointer.
+    pub sp: u16,
+    /// Processor status.
+    pub p: u8,
+    /// Data bank.
+    pub db: u8,
+    /// Direct page.
+    pub dp: u16,
+    /// Emulation-mode flag.
+    pub e: bool,
+}
+
+/// `take_sa1_trace` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct Sa1TraceResult {
+    /// Recorded instructions, oldest first. Draining resets the ring.
+    pub events: Vec<Sa1TraceLine>,
+}
+
+/// One Super FX (GSU) opcode event (`take_superfx_trace`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SuperFxTraceLine {
+    /// GSU PC (`pbr << 16 | r15`) at the fetch.
+    pub pc: u32,
+    /// Opcode byte executed.
+    pub opcode: u8,
+    /// Raw 16-bit status flag register.
+    pub sfr: u16,
+    /// General-purpose registers R0–R15 (R15 = PC).
+    pub r: Vec<u16>,
+    /// GSU clock position on the shared master-clock axis.
+    pub mclk: u64,
+    /// First instruction of a GO task.
+    pub go_start: bool,
+    /// This instruction cleared SFR.G (STOP).
+    pub stop: bool,
+}
+
+/// `take_superfx_trace` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SuperFxTraceResult {
+    /// Recorded opcodes, oldest first. Draining resets the ring.
+    pub events: Vec<SuperFxTraceLine>,
+}
+
+/// One DSP-1 trace event (`take_dsp1_trace`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct Dsp1TraceLine {
+    /// `"exec"` (microcode instruction), `"dr_write"` / `"dr_read"` (CPU
+    /// port traffic), or `"sr_read"` (status poll).
+    pub kind: String,
+    /// Microcode PC (on port events: where the microcode was sitting).
+    pub pc: u16,
+    /// 24-bit microcode word (`exec` only).
+    pub opcode: u32,
+    /// Byte crossing the CPU port (port events only).
+    pub value: u8,
+    /// Accumulator A after the event.
+    pub a: i16,
+    /// Accumulator B after the event.
+    pub b: i16,
+    /// Data register after the event.
+    pub dr: u16,
+    /// Status register after the event.
+    pub sr: u16,
+    /// RQM handshake bit after the event.
+    pub rqm: bool,
+}
+
+/// `take_dsp1_trace` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct Dsp1TraceResult {
+    /// Recorded events, oldest first. Draining resets the ring.
+    pub events: Vec<Dsp1TraceLine>,
+    /// Decoded command transactions — only when `decode_commands` was set.
+    pub commands: Option<Vec<luna_api::dsp1_commands::Transaction>>,
+    /// The drain hit the ring cap, so the final transaction may be cut
+    /// off mid-stream (decoding accounts for this).
+    pub truncated: bool,
+}
+
+/// One SPC700 pre-instruction register snapshot (`take_spc_trace`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SpcTraceLine {
+    /// 16-bit SPC700 PC before the opcode runs.
+    pub pc: u16,
+    /// Accumulator.
+    pub a: u8,
+    /// X index.
+    pub x: u8,
+    /// Y index.
+    pub y: u8,
+    /// Stack pointer.
+    pub sp: u8,
+    /// Processor status word (PSW).
+    pub psw: u8,
+    /// Running SPC-cycle counter at this opcode (wraps at 2^32).
+    pub spc_cycle: u32,
+    /// Timer 2 internal counter.
+    pub t2_int: u16,
+    /// Timer 2 output (the value `$FF` reads clear).
+    pub t2_out: u8,
+}
+
+/// `take_spc_trace` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SpcTraceResult {
+    /// Recorded instructions, oldest first. Draining resets the ring.
+    pub events: Vec<SpcTraceLine>,
+}
+
 /// `bp_add` result.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct BpAddResult {
@@ -877,6 +1151,7 @@ impl LunaServer {
         Self {
             emulator: Arc::new(Mutex::new(Emulator::new())),
             interrupt: Arc::new(AtomicBool::new(false)),
+            dsp1_trace_max: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             tool_router: Self::tool_router(),
         }
     }
@@ -2002,6 +2277,396 @@ impl LunaServer {
             executed: probe.executed,
         }))
     }
+
+    // ------------- Coprocessor / driver trace parity (issue #172) -------------
+
+    #[rmcp::tool(
+        description = "Start recording DMA→VRAM transfer bytes (source, VRAM word, \
+                                channel, scanline/H-clock, blank flags), capped at \
+                                `max_events`. Drain with `take_dma_trace`."
+    )]
+    async fn enable_dma_trace(
+        &self,
+        Parameters(params): Parameters<EnableRingTraceParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_dma_trace(params.max_events)
+                .map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the DMA→VRAM trace (oldest first) and reset the ring. A \
+                                write is display-safe iff `blank || force_blank`."
+    )]
+    async fn take_dma_trace(&self) -> Result<rmcp::Json<DmaTraceResult>, ErrorData> {
+        let events = {
+            let mut em = self.emulator.lock().await;
+            em.take_dma_trace().map_err(|e| api_err_to_mcp(&e))?
+        };
+        let events = events
+            .into_iter()
+            .map(|ev| DmaTraceLine {
+                src: ev.src_full,
+                vram_word: ev.vram_word,
+                b_offset: ev.b_offset,
+                value: ev.value,
+                channel: ev.channel,
+                frame: ev.frame,
+                line: ev.line,
+                hclock: ev.hclock,
+                blank: ev.blank,
+                force_blank: ev.force_blank,
+            })
+            .collect();
+        Ok(rmcp::Json(DmaTraceResult { events }))
+    }
+
+    #[rmcp::tool(
+        description = "Start recording S-DSP register writes ($F2/$F3 from the SPC700 \
+                                side), capped at `max_events`. Drain with `take_dsp_trace` — \
+                                proves whether/what the sound driver programs the DSP."
+    )]
+    async fn enable_dsp_trace(
+        &self,
+        Parameters(params): Parameters<EnableRingTraceParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_dsp_trace(params.max_events)
+                .map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the S-DSP register-write trace (oldest first) and reset \
+                                the ring."
+    )]
+    async fn take_dsp_trace(&self) -> Result<rmcp::Json<DspTraceResult>, ErrorData> {
+        let events = {
+            let mut em = self.emulator.lock().await;
+            em.take_dsp_trace().map_err(|e| api_err_to_mcp(&e))?
+        };
+        let events = events
+            .into_iter()
+            .map(|ev| DspTraceLine {
+                spc_cycles: ev.spc_cycles,
+                reg: ev.reg,
+                value: ev.value,
+            })
+            .collect();
+        Ok(rmcp::Json(DspTraceResult { events }))
+    }
+
+    #[rmcp::tool(
+        description = "Start recording CPU↔APU mailbox traffic ($2140-$2143, both \
+                                directions, with the accessing PC). Unbounded until drained — \
+                                enable, run the window of interest, then `take_mailbox_log`."
+    )]
+    async fn enable_mailbox_log(&self) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_mailbox_log().map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the CPU↔APU mailbox log (oldest first) and reset it — the \
+                                CPU↔SPC handshake stream (e.g. sound-driver upload stalls)."
+    )]
+    async fn take_mailbox_log(&self) -> Result<rmcp::Json<MailboxLogResult>, ErrorData> {
+        let (events, syms) = {
+            let mut em = self.emulator.lock().await;
+            let events = em.take_mailbox_log().map_err(|e| api_err_to_mcp(&e))?;
+            (events, em.symbols_cloned())
+        };
+        let events = events
+            .into_iter()
+            .map(|ev| MailboxLine {
+                mclk: ev.mclk_total,
+                pc: ev.pc_full,
+                kind: match ev.kind {
+                    luna_api::MailboxEventKind::Read => "read".into(),
+                    luna_api::MailboxEventKind::Write => "write".into(),
+                },
+                port: ev.port,
+                value: ev.value,
+                symbol: syms.as_ref().and_then(|t| t.nearest(ev.pc_full)),
+            })
+            .collect();
+        Ok(rmcp::Json(MailboxLogResult { events }))
+    }
+
+    #[rmcp::tool(
+        description = "Start recording main-CPU accesses to the SA-1 MMIO range \
+                                ($2200-$23FF) with the accessing PC. Unbounded until drained."
+    )]
+    async fn enable_sa1_log(&self) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_sa1_log().map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the main-CPU→SA-1 MMIO log (oldest first) and reset it — \
+                                one half of a CPU↔SA-1 handshake diagnosis (pair with \
+                                `take_sa1_side_log`)."
+    )]
+    async fn take_sa1_log(&self) -> Result<rmcp::Json<Sa1LogResult>, ErrorData> {
+        let (events, syms) = {
+            let mut em = self.emulator.lock().await;
+            let events = em.take_sa1_log().map_err(|e| api_err_to_mcp(&e))?;
+            (events, em.symbols_cloned())
+        };
+        let events = events
+            .into_iter()
+            .map(|ev| Sa1LogLine {
+                mclk: ev.mclk_total,
+                pc: ev.pc_full,
+                kind: match ev.kind {
+                    luna_api::MailboxEventKind::Read => "read".into(),
+                    luna_api::MailboxEventKind::Write => "write".into(),
+                },
+                reg: ev.reg,
+                value: ev.value,
+                symbol: syms.as_ref().and_then(|t| t.nearest(ev.pc_full)),
+            })
+            .collect();
+        Ok(rmcp::Json(Sa1LogResult { events }))
+    }
+
+    #[rmcp::tool(
+        description = "Start recording SA-1-side accesses to its own MMIO registers \
+                                (which SA-1 code touches $2200-$23FF). Unbounded until drained."
+    )]
+    async fn enable_sa1_side_log(&self) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_sa1_side_log().map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the SA-1-side MMIO log (oldest first) and reset it — the \
+                                other half of a CPU↔SA-1 handshake diagnosis."
+    )]
+    async fn take_sa1_side_log(&self) -> Result<rmcp::Json<Sa1SideLogResult>, ErrorData> {
+        let events = {
+            let mut em = self.emulator.lock().await;
+            em.take_sa1_side_log().map_err(|e| api_err_to_mcp(&e))?
+        };
+        let events = events
+            .into_iter()
+            .map(|ev| Sa1SideLine {
+                sa1_pc: ev.sa1_pc,
+                write: ev.write,
+                reg: ev.reg,
+                value: ev.value,
+            })
+            .collect();
+        Ok(rmcp::Json(Sa1SideLogResult { events }))
+    }
+
+    #[rmcp::tool(
+        description = "Start recording a per-instruction SA-1 CPU trace (PC + register \
+                                file), capped at `max_events`. Drain with `take_sa1_trace`."
+    )]
+    async fn enable_sa1_trace(
+        &self,
+        Parameters(params): Parameters<EnableRingTraceParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_sa1_trace(params.max_events)
+                .map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the SA-1 instruction trace (oldest first) and reset the \
+                                ring. Empty when the cart has no SA-1."
+    )]
+    async fn take_sa1_trace(&self) -> Result<rmcp::Json<Sa1TraceResult>, ErrorData> {
+        let events = {
+            let mut em = self.emulator.lock().await;
+            em.take_sa1_trace().map_err(|e| api_err_to_mcp(&e))?
+        };
+        let events = events
+            .into_iter()
+            .map(|ev| Sa1TraceLine {
+                pc: ev.pc_full,
+                a: ev.a,
+                x: ev.x,
+                y: ev.y,
+                sp: ev.sp,
+                p: ev.p,
+                db: ev.db,
+                dp: ev.dp,
+                e: ev.e,
+            })
+            .collect();
+        Ok(rmcp::Json(Sa1TraceResult { events }))
+    }
+
+    #[rmcp::tool(
+        description = "Start recording a per-opcode Super FX (GSU) trace (PC, opcode, \
+                                SFR, R0-R15, mclk, GO/STOP edges), capped at `max_events`. \
+                                Drain with `take_superfx_trace`."
+    )]
+    async fn enable_superfx_trace(
+        &self,
+        Parameters(params): Parameters<EnableRingTraceParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_superfx_trace(params.max_events)
+                .map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the Super FX opcode trace (oldest first) and reset the \
+                                ring. Empty when the cart has no GSU."
+    )]
+    async fn take_superfx_trace(&self) -> Result<rmcp::Json<SuperFxTraceResult>, ErrorData> {
+        let events = {
+            let mut em = self.emulator.lock().await;
+            em.take_superfx_trace().map_err(|e| api_err_to_mcp(&e))?
+        };
+        let events = events
+            .into_iter()
+            .map(|ev| SuperFxTraceLine {
+                pc: ev.pc_full,
+                opcode: ev.opcode,
+                sfr: ev.sfr,
+                r: ev.r.to_vec(),
+                mclk: ev.mclk,
+                go_start: ev.go_start,
+                stop: ev.stop,
+            })
+            .collect();
+        Ok(rmcp::Json(SuperFxTraceResult { events }))
+    }
+
+    #[rmcp::tool(
+        description = "Start recording the DSP-1 (µPD77C25) trace: microcode execution \
+                                and CPU-side DR/SR port traffic in one stream, capped at \
+                                `max_events`. `ports_only` keeps just the handshake traffic. \
+                                Drain with `take_dsp1_trace`."
+    )]
+    async fn enable_dsp1_trace(
+        &self,
+        Parameters(params): Parameters<EnableDsp1TraceParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_dsp1_trace(params.max_events, params.ports_only)
+                .map_err(|e| api_err_to_mcp(&e))?;
+        }
+        self.dsp1_trace_max
+            .store(params.max_events, Ordering::Relaxed);
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the DSP-1 trace (oldest first) and reset the ring; empty \
+                                when the cart has no DSP-1. With `decode_commands`, also \
+                                returns the port traffic decoded into command transactions \
+                                (command byte, word counts, match status vs. the known table)."
+    )]
+    async fn take_dsp1_trace(
+        &self,
+        Parameters(params): Parameters<TakeDsp1TraceParams>,
+    ) -> Result<rmcp::Json<Dsp1TraceResult>, ErrorData> {
+        let events = {
+            let mut em = self.emulator.lock().await;
+            em.take_dsp1_trace().map_err(|e| api_err_to_mcp(&e))?
+        };
+        // Hitting the cap leaves the final transaction cut off mid-stream;
+        // decoding must know that rather than report a short count as a
+        // table mismatch (same rule as the CLI --dsp1-trace-commands path).
+        let max = self.dsp1_trace_max.load(Ordering::Relaxed);
+        let truncated = max > 0 && events.len() >= max;
+        let commands = params
+            .decode_commands
+            .then(|| luna_api::dsp1_commands::decode(&events, truncated));
+        let events = events
+            .into_iter()
+            .map(|ev| Dsp1TraceLine {
+                kind: match ev.kind {
+                    luna_api::Dsp1TraceKind::Exec => "exec".into(),
+                    luna_api::Dsp1TraceKind::DrWrite => "dr_write".into(),
+                    luna_api::Dsp1TraceKind::DrRead => "dr_read".into(),
+                    luna_api::Dsp1TraceKind::SrRead => "sr_read".into(),
+                },
+                pc: ev.pc,
+                opcode: ev.opcode,
+                value: ev.value,
+                a: ev.a,
+                b: ev.b,
+                dr: ev.dr,
+                sr: ev.sr,
+                rqm: ev.rqm,
+            })
+            .collect();
+        Ok(rmcp::Json(Dsp1TraceResult {
+            events,
+            commands,
+            truncated,
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Start recording a per-instruction SPC700 trace (PC, registers, \
+                                SPC cycle, timer-2 state), capped at `max_events`. Drain with \
+                                `take_spc_trace`."
+    )]
+    async fn enable_spc_trace(
+        &self,
+        Parameters(params): Parameters<EnableRingTraceParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_spc_trace(params.max_events)
+                .map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the SPC700 instruction trace (oldest first) and reset the \
+                                ring."
+    )]
+    async fn take_spc_trace(&self) -> Result<rmcp::Json<SpcTraceResult>, ErrorData> {
+        let events = {
+            let mut em = self.emulator.lock().await;
+            em.take_spc_trace().map_err(|e| api_err_to_mcp(&e))?
+        };
+        let events = events
+            .into_iter()
+            .map(|ev| SpcTraceLine {
+                pc: ev.pc,
+                a: ev.a,
+                x: ev.x,
+                y: ev.y,
+                sp: ev.sp,
+                psw: ev.psw,
+                spc_cycle: ev.spc_cycle,
+                t2_int: ev.t2_int,
+                t2_out: ev.t2_out,
+            })
+            .collect();
+        Ok(rmcp::Json(SpcTraceResult { events }))
+    }
 }
 
 impl Default for LunaServer {
@@ -2842,6 +3507,105 @@ mod tests {
             .unwrap();
         assert!(probe.0.executed <= 500);
         assert!(probe.0.distinct_pcs >= 1);
+    }
+
+    #[tokio::test]
+    async fn server_trace_parity_round_trip() {
+        let s = LunaServer::new();
+
+        // Every enable errors cleanly without a ROM.
+        assert!(s.enable_mailbox_log().await.is_err());
+        assert!(
+            s.enable_dma_trace(Parameters(EnableRingTraceParams { max_events: 16 }))
+                .await
+                .is_err()
+        );
+
+        // A program that pokes the APU mailbox so the log has real traffic.
+        let mut rom = demo_lorom();
+        let prog: &[u8] = &[
+            0xA9, 0xCC, // LDA #$CC
+            0x8D, 0x40, 0x21, // STA $2140
+            0xAD, 0x40, 0x21, // LDA $2140
+            0x80, 0xFE, // BRA *
+        ];
+        rom[..prog.len()].copy_from_slice(prog);
+        let rom_path = PathBuf::from("/tmp/luna_mcp_traces_demo.smc");
+        std::fs::write(&rom_path, rom).unwrap();
+        s.load_rom(Parameters(LoadRomParams {
+            path: rom_path.to_string_lossy().into(),
+            force_mapper: Some("lorom".into()),
+            force_region: None,
+        }))
+        .await
+        .unwrap();
+
+        // Enable all nine, run a while, drain all nine.
+        s.enable_mailbox_log().await.unwrap();
+        s.enable_sa1_log().await.unwrap();
+        s.enable_sa1_side_log().await.unwrap();
+        for max in [64usize] {
+            s.enable_dma_trace(Parameters(EnableRingTraceParams { max_events: max }))
+                .await
+                .unwrap();
+            s.enable_dsp_trace(Parameters(EnableRingTraceParams { max_events: max }))
+                .await
+                .unwrap();
+            s.enable_sa1_trace(Parameters(EnableRingTraceParams { max_events: max }))
+                .await
+                .unwrap();
+            s.enable_superfx_trace(Parameters(EnableRingTraceParams { max_events: max }))
+                .await
+                .unwrap();
+            s.enable_spc_trace(Parameters(EnableRingTraceParams { max_events: max }))
+                .await
+                .unwrap();
+        }
+        s.enable_dsp1_trace(Parameters(EnableDsp1TraceParams {
+            max_events: 64,
+            ports_only: false,
+        }))
+        .await
+        .unwrap();
+
+        s.step(Parameters(StepParams { count: 2000 }))
+            .await
+            .unwrap();
+
+        // The mailbox saw our $2140 write + read, tagged with the writing PC.
+        let mail = s.take_mailbox_log().await.unwrap();
+        assert!(!mail.0.events.is_empty());
+        let w = mail.0.events.iter().find(|e| e.kind == "write").unwrap();
+        assert_eq!(w.port, 0);
+        assert_eq!(w.value, 0xCC);
+        assert_eq!(w.pc >> 16, 0x00);
+
+        // The SPC700 IPL boot ROM executed instructions.
+        let spc = s.take_spc_trace().await.unwrap();
+        assert!(!spc.0.events.is_empty());
+
+        // Coprocessor traces drain empty on a plain LoROM cart, not error.
+        assert!(s.take_sa1_log().await.unwrap().0.events.is_empty());
+        assert!(s.take_sa1_side_log().await.unwrap().0.events.is_empty());
+        assert!(s.take_sa1_trace().await.unwrap().0.events.is_empty());
+        assert!(s.take_superfx_trace().await.unwrap().0.events.is_empty());
+        let dsp1 = s
+            .take_dsp1_trace(Parameters(TakeDsp1TraceParams {
+                decode_commands: true,
+            }))
+            .await
+            .unwrap();
+        assert!(dsp1.0.events.is_empty());
+        assert!(dsp1.0.commands.is_some_and(|c| c.is_empty()));
+        assert!(!dsp1.0.truncated);
+
+        // DMA + DSP traces drain Ok (the demo program does no DMA; the IPL
+        // may or may not touch DSP registers — shape only).
+        s.take_dma_trace().await.unwrap();
+        s.take_dsp_trace().await.unwrap();
+
+        // Draining reset the mailbox log.
+        assert!(s.take_mailbox_log().await.unwrap().0.events.is_empty());
     }
 
     /// `load_rom` params with no mapper/region override — the common case.
