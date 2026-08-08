@@ -1144,6 +1144,46 @@ pub struct BpSetEnabledResult {
     pub found: bool,
 }
 
+/// `search_begin` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SearchBeginParams {
+    /// Candidate width: `u8` or `u16` (little-endian, any offset).
+    pub width: String,
+}
+
+/// `search_refine` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SearchRefineParams {
+    /// `eq` / `ne` / `lt` / `gt` (against `value`) or `changed` /
+    /// `unchanged` (against the previous snapshot).
+    pub op: String,
+    /// Comparison value — required for `eq`/`ne`/`lt`/`gt`.
+    #[serde(default)]
+    pub value: Option<u16>,
+}
+
+/// `search_begin` / `search_refine` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SearchCountResult {
+    /// Surviving candidate count.
+    pub remaining: usize,
+}
+
+/// `search_results` parameters.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct SearchResultsParams {
+    /// Maximum rows to return (default 64).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// `search_results` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SearchResultsResult {
+    /// Surviving candidates with their current values.
+    pub hits: Vec<luna_api::SearchHit>,
+}
+
 /// `bp_list` result.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct BpListResult {
@@ -2276,6 +2316,83 @@ impl LunaServer {
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(BpSetEnabledResult { found }))
+    }
+
+    // ------------- Narrowing memory search (issue #177) -------------
+
+    #[rmcp::tool(
+        description = "Start a narrowing WRAM search (\"find my variable\"): snapshot \
+                                all 128 KiB and mark every offset a candidate at `width` \
+                                (`u8` or `u16`). Then alternate gameplay with `search_refine` \
+                                until few candidates remain. Replaces any previous session."
+    )]
+    async fn search_begin(
+        &self,
+        Parameters(params): Parameters<SearchBeginParams>,
+    ) -> Result<rmcp::Json<SearchCountResult>, ErrorData> {
+        let width = match params.width.to_ascii_lowercase().as_str() {
+            "u8" | "8" => luna_api::SearchWidth::U8,
+            "u16" | "16" => luna_api::SearchWidth::U16,
+            other => {
+                return Err(ErrorData::invalid_params(
+                    format!("unknown width `{other}` (u8, u16)"),
+                    None,
+                ));
+            }
+        };
+        let remaining = {
+            let mut em = self.emulator.lock().await;
+            em.search_begin(width).map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(SearchCountResult { remaining }))
+    }
+
+    #[rmcp::tool(
+        description = "Narrow the live search: keep candidates whose current value is \
+                                `eq`/`ne`/`lt`/`gt` `value`, or `changed`/`unchanged` vs the \
+                                previous snapshot (which then advances). Returns the surviving \
+                                count."
+    )]
+    async fn search_refine(
+        &self,
+        Parameters(params): Parameters<SearchRefineParams>,
+    ) -> Result<rmcp::Json<SearchCountResult>, ErrorData> {
+        let op = match params.op.to_ascii_lowercase().as_str() {
+            "eq" => luna_api::SearchOp::Eq,
+            "ne" => luna_api::SearchOp::Ne,
+            "lt" => luna_api::SearchOp::Lt,
+            "gt" => luna_api::SearchOp::Gt,
+            "changed" => luna_api::SearchOp::Changed,
+            "unchanged" => luna_api::SearchOp::Unchanged,
+            other => {
+                return Err(ErrorData::invalid_params(
+                    format!("unknown op `{other}` (eq, ne, lt, gt, changed, unchanged)"),
+                    None,
+                ));
+            }
+        };
+        let remaining = {
+            let mut em = self.emulator.lock().await;
+            em.search_refine(op, params.value)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(SearchCountResult { remaining }))
+    }
+
+    #[rmcp::tool(
+        description = "The live search's surviving candidates (up to `limit`, default \
+                                64) with their current values, as canonical $7E/$7F addresses."
+    )]
+    async fn search_results(
+        &self,
+        Parameters(params): Parameters<SearchResultsParams>,
+    ) -> Result<rmcp::Json<SearchResultsResult>, ErrorData> {
+        let hits = {
+            let em = self.emulator.lock().await;
+            em.search_results(params.limit.unwrap_or(64))
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(SearchResultsResult { hits }))
     }
 
     #[rmcp::tool(description = "Remove a breakpoint by the id `bp_add` returned.")]
@@ -4491,6 +4608,78 @@ mod tests {
             .unwrap()
             .0
             .found
+        );
+    }
+
+    #[tokio::test]
+    async fn server_search_session_round_trip() {
+        let s = LunaServer::new();
+        let rom_path = PathBuf::from("/tmp/luna_mcp_search_demo.smc");
+        std::fs::write(&rom_path, demo_lorom()).unwrap();
+        s.load_rom(Parameters(rom_params(&rom_path.to_string_lossy())))
+            .await
+            .unwrap();
+
+        // Plant the variable, begin, and narrow to it.
+        s.poke_memory(Parameters(PokeMemoryParams {
+            bank: 0x7E,
+            offset: 0x0300,
+            symbol: None,
+            data: vec![100, 0],
+        }))
+        .await
+        .unwrap();
+        let n = s
+            .search_begin(Parameters(SearchBeginParams {
+                width: "u16".into(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(n.0.remaining, 0x1FFFF);
+        s.search_refine(Parameters(SearchRefineParams {
+            op: "eq".into(),
+            value: Some(100),
+        }))
+        .await
+        .unwrap();
+        s.poke_memory(Parameters(PokeMemoryParams {
+            bank: 0x7E,
+            offset: 0x0300,
+            symbol: None,
+            data: vec![73, 0],
+        }))
+        .await
+        .unwrap();
+        let n = s
+            .search_refine(Parameters(SearchRefineParams {
+                op: "eq".into(),
+                value: Some(73),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(n.0.remaining, 1);
+        let hits = s
+            .search_results(Parameters(SearchResultsParams::default()))
+            .await
+            .unwrap();
+        assert_eq!(hits.0.hits[0].addr, 0x7E_0300);
+        assert_eq!(hits.0.hits[0].value, 73);
+
+        // Vocabulary errors.
+        assert!(
+            s.search_begin(Parameters(SearchBeginParams {
+                width: "u32".into(),
+            }))
+            .await
+            .is_err()
+        );
+        assert!(
+            s.search_refine(Parameters(SearchRefineParams {
+                op: "between".into(),
+                value: None,
+            }))
+            .await
+            .is_err()
         );
     }
 

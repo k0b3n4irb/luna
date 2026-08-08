@@ -706,6 +706,54 @@ pub struct Stats {
     pub total_mclk: u64,
 }
 
+/// Value width for a narrowing memory-search session (issue #177).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchWidth {
+    /// One byte per candidate.
+    U8,
+    /// Little-endian 16-bit value per candidate (any offset, not just
+    /// aligned — game variables live anywhere).
+    U16,
+}
+
+/// Comparison for [`Emulator::search_refine`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchOp {
+    /// Current value == the given value.
+    Eq,
+    /// Current value != the given value.
+    Ne,
+    /// Current value < the given value.
+    Lt,
+    /// Current value > the given value.
+    Gt,
+    /// Current value differs from the previous snapshot.
+    Changed,
+    /// Current value equals the previous snapshot.
+    Unchanged,
+}
+
+/// One [`Emulator::search_results`] row.
+#[derive(Debug, Clone, Copy, Serialize, schemars::JsonSchema)]
+pub struct SearchHit {
+    /// Canonical 24-bit WRAM address (`$7E`/`$7F`).
+    pub addr: u32,
+    /// The candidate's current value (u8 widened for byte searches).
+    pub value: u16,
+}
+
+/// Live state of a narrowing search: the previous WRAM snapshot plus the
+/// surviving candidate offsets.
+#[derive(Debug)]
+struct SearchSession {
+    width: SearchWidth,
+    /// WRAM as of the last `begin`/`refine` — the "previous value" side
+    /// of `Changed`/`Unchanged`.
+    prev: Vec<u8>,
+    /// Surviving flat WRAM offsets (`0..0x20000`).
+    candidates: Vec<u32>,
+}
+
 /// Result of [`Emulator::loop_probe`] — a CPU-liveness measurement.
 #[derive(Debug, Clone, Copy, Serialize, schemars::JsonSchema)]
 pub struct LoopProbe {
@@ -749,6 +797,9 @@ pub struct Emulator {
     /// Loaded WLA-DX symbol table (issue #67); `None` until
     /// [`Emulator::load_symbols`] runs.
     symbols: Option<SymbolTable>,
+    /// Live narrowing memory-search session (issue #177); `None` until
+    /// [`Emulator::search_begin`] runs.
+    search_session: Option<SearchSession>,
     /// Event Viewer category/DMA visibility config.
     event_config: event_viewer::EventViewerConfig,
     /// The just-completed frame's captured events (Mesen2 `_debugEvents`),
@@ -845,6 +896,7 @@ impl Emulator {
             instructions_executed: 0,
             rom_hash: 0,
             symbols: None,
+            search_session: None,
             event_config: event_viewer::EventViewerConfig {
                 visible: [true; event_viewer::CATEGORY_COUNT],
                 show_previous_frame: true,
@@ -2054,10 +2106,108 @@ impl Emulator {
         let mut hits = Vec::new();
         for i in 0..=wram.len().saturating_sub(pattern.len()) {
             if &wram[i..i + pattern.len()] == pattern {
-                hits.push(0x7E_0000 + i as u32);
+                hits.push(Self::wram_offset_to_addr(i));
             }
         }
         Ok(hits)
+    }
+
+    /// A flat WRAM offset (`0..0x20000`) as its canonical 24-bit bus
+    /// address: `$7E:0000-FFFF` then `$7F:0000-FFFF`. (The old
+    /// `0x7E_0000 + i` form leaked `$7F` hits as impossible `$7E:1xxxx`
+    /// addresses — issue #177's opening bug.)
+    const fn wram_offset_to_addr(i: usize) -> u32 {
+        if i < 0x1_0000 {
+            0x7E_0000 + i as u32
+        } else {
+            0x7F_0000 + (i as u32 - 0x1_0000)
+        }
+    }
+
+    /// Read one search-width value at flat WRAM offset `off`.
+    fn search_read(wram: &[u8], width: SearchWidth, off: u32) -> u16 {
+        let off = off as usize;
+        match width {
+            SearchWidth::U8 => u16::from(wram[off]),
+            SearchWidth::U16 => u16::from_le_bytes([wram[off], wram[off + 1]]),
+        }
+    }
+
+    /// Start a narrowing memory-search session over all of WRAM ("find
+    /// my variable", issue #177): snapshot the current 128 KiB and mark
+    /// every offset a candidate. Returns the candidate count. Replaces
+    /// any previous session.
+    pub fn search_begin(&mut self, width: SearchWidth) -> Result<usize, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let prev = snes.wram.to_vec();
+        let last = prev.len()
+            - match width {
+                SearchWidth::U8 => 0,
+                SearchWidth::U16 => 1,
+            };
+        let candidates: Vec<u32> = (0..last as u32).collect();
+        let n = candidates.len();
+        self.search_session = Some(SearchSession {
+            width,
+            prev,
+            candidates,
+        });
+        Ok(n)
+    }
+
+    /// Narrow the live session: keep candidates whose **current** value
+    /// satisfies `op` — against `value` (`Eq`/`Ne`/`Lt`/`Gt`, required)
+    /// or against the previous snapshot (`Changed`/`Unchanged`). The
+    /// snapshot then advances to the current WRAM. Returns the surviving
+    /// candidate count. Typical loop: begin → play → `Changed` → play →
+    /// `Unchanged`/`Eq value` → … until a handful remain.
+    pub fn search_refine(&mut self, op: SearchOp, value: Option<u16>) -> Result<usize, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let session = self.search_session.as_mut().ok_or_else(|| {
+            ApiError::BadArg("no search session — call search_begin first".into())
+        })?;
+        let needs_value = matches!(
+            op,
+            SearchOp::Eq | SearchOp::Ne | SearchOp::Lt | SearchOp::Gt
+        );
+        if needs_value && value.is_none() {
+            return Err(ApiError::BadArg(format!("op {op:?} needs a value")));
+        }
+        let wram = &snes.wram[..];
+        let width = session.width;
+        let prev = std::mem::take(&mut session.prev);
+        session.candidates.retain(|&off| {
+            let cur = Self::search_read(wram, width, off);
+            match op {
+                SearchOp::Eq => cur == value.unwrap_or_default(),
+                SearchOp::Ne => cur != value.unwrap_or_default(),
+                SearchOp::Lt => cur < value.unwrap_or_default(),
+                SearchOp::Gt => cur > value.unwrap_or_default(),
+                SearchOp::Changed => cur != Self::search_read(&prev, width, off),
+                SearchOp::Unchanged => cur == Self::search_read(&prev, width, off),
+            }
+        });
+        session.prev = wram.to_vec();
+        Ok(session.candidates.len())
+    }
+
+    /// The live session's surviving candidates (up to `limit`) with
+    /// their current values, as canonical `$7E`/`$7F` addresses.
+    pub fn search_results(&self, limit: usize) -> Result<Vec<SearchHit>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let session = self.search_session.as_ref().ok_or_else(|| {
+            ApiError::BadArg("no search session — call search_begin first".into())
+        })?;
+        let wram = &snes.wram[..];
+        Ok(session
+            .candidates
+            .iter()
+            .take(limit)
+            .map(|&off| SearchHit {
+                addr: Self::wram_offset_to_addr(off as usize),
+                value: Self::search_read(wram, session.width, off),
+            })
+            .collect())
     }
 
     /// Controlled execution (L10): step until the CPU PC reaches `pc`
@@ -3313,6 +3463,49 @@ mod tests {
             e.load_state(&[0xFF; 16]),
             Err(ApiError::SaveState(_))
         ));
+    }
+
+    #[test]
+    fn search_memory_reports_7f_hits_in_bank_7f() {
+        // Issue #177's opening bug: hits in the WRAM high half surfaced
+        // as impossible `$7E:1xxxx` addresses.
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        e.poke_memory(0x7F, 0x0123, &[0xCA, 0xFE]).unwrap();
+        let hits = e.search_memory(&[0xCA, 0xFE]).unwrap();
+        assert_eq!(hits, vec![0x7F_0123]);
+    }
+
+    #[test]
+    fn narrowing_search_session_converges() {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+
+        // No session yet → refine/results are usage errors.
+        assert!(e.search_refine(SearchOp::Changed, None).is_err());
+        assert!(e.search_results(10).is_err());
+
+        // Plant a "player HP" u16 variable and begin.
+        e.poke_memory(0x7E, 0x0300, &[0x64, 0x00]).unwrap(); // 100
+        let n = e.search_begin(SearchWidth::U16).unwrap();
+        assert_eq!(n, 0x1FFFF);
+
+        // Round 1: value == 100 — the variable (plus coincidences) survive.
+        let n = e.search_refine(SearchOp::Eq, Some(100)).unwrap();
+        assert!(n >= 1);
+
+        // "Take damage": 100 → 73, everything else untouched.
+        e.poke_memory(0x7E, 0x0300, &[0x49, 0x00]).unwrap();
+        let n = e.search_refine(SearchOp::Changed, None).unwrap();
+        assert!(n >= 1);
+        let n = e.search_refine(SearchOp::Eq, Some(73)).unwrap();
+        assert_eq!(n, 1, "converged to exactly the planted variable");
+        let hits = e.search_results(10).unwrap();
+        assert_eq!(hits[0].addr, 0x7E_0300);
+        assert_eq!(hits[0].value, 73);
+
+        // Ops that need a value reject its absence.
+        assert!(e.search_refine(SearchOp::Lt, None).is_err());
     }
 
     #[test]
