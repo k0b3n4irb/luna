@@ -6,6 +6,13 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Added
+- MCP: the two SDK assert/log channels are now reachable over MCP (#168) —
+  `enable_nocash_log` / `take_nocash_log` (the `$21FC` Nocash TTY, drained
+  as `{text, base64}`) and `enable_wdm_log` / `take_wdm_log` (the `WDM`
+  assert channel, drained as `[{pc, operand, symbol}]`). Parity with the
+  CLI's `--nocash-out` / `--wdm-out`.
+
 ### Changed
 - **BREAKING — save-state format v5** (#167): the ROM-identity hash binding
   a state to its ROM is now an explicit FNV-1a-64 over the raw ROM bytes
