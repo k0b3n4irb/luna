@@ -155,11 +155,13 @@ impl Mapper for Dsp1Mapper {
             dsp: self.dsp.save_state(),
             cycle_acc: self.cycle_acc,
         };
-        bincode::serialize(&st).unwrap_or_default()
+        bincode::serde::encode_to_vec(&st, bincode::config::standard()).unwrap_or_default()
     }
 
     fn load_state(&mut self, data: &[u8]) {
-        if let Ok(st) = bincode::deserialize::<Dsp1State>(data) {
+        if let Ok((st, _)) =
+            bincode::serde::decode_from_slice::<Dsp1State, _>(data, bincode::config::standard())
+        {
             self.base.load_state(&st.base);
             self.dsp.load_state(&st.dsp);
             self.cycle_acc = st.cycle_acc;

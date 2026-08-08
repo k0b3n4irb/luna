@@ -26,7 +26,7 @@
 use crate::{Dsp1TraceEvent, Dsp1TraceKind};
 
 /// How much the word counts for a command can be trusted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub enum Confidence {
     /// Verified against luna by the `OpenSNES` team with `dsp1b.rom`.
     Verified,
@@ -41,7 +41,7 @@ pub enum Confidence {
 }
 
 /// Outcome of matching one transaction against the table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub enum TxStatus {
     /// Observed word counts match the table.
     Ok,
@@ -56,7 +56,7 @@ pub enum TxStatus {
 }
 
 /// One decoded DSP-1 command.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
 pub struct Transaction {
     /// Index of the command byte within the raw event stream.
     pub seq: usize,
