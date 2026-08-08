@@ -1233,6 +1233,22 @@ pub struct FreezeListResult {
     pub freezes: Vec<luna_api::FreezeEntry>,
 }
 
+/// `enable_call_stack` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct EnableCallStackParams {
+    /// `true` starts tracking (empty stack — earlier calls are
+    /// unknowable); `false` stops and drops it.
+    pub enabled: bool,
+}
+
+/// `call_stack` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CallStackResult {
+    /// Tracked frames, oldest first (last = innermost). Empty when
+    /// tracking is off.
+    pub frames: Vec<luna_api::CallFrame>,
+}
+
 /// `bp_list` result.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct BpListResult {
@@ -2473,6 +2489,37 @@ impl LunaServer {
             em.freeze_list()
         };
         rmcp::Json(FreezeListResult { freezes })
+    }
+
+    // ------------- Call-stack tracking (issue #180) -------------
+
+    #[rmcp::tool(
+        description = "Enable / disable JSR/JSL/RTS/RTL + interrupt tracking of the \
+                                65C816 call stack. Off by default (tracking costs one opcode \
+                                peek per instruction); enable, run, then read `call_stack`."
+    )]
+    async fn enable_call_stack(
+        &self,
+        Parameters(params): Parameters<EnableCallStackParams>,
+    ) -> rmcp::Json<EmptyOk> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_call_stack(params.enabled);
+        }
+        rmcp::Json(EmptyOk { ok: true })
+    }
+
+    #[rmcp::tool(
+        description = "The tracked 65C816 call stack: `[{pc, from, kind, symbol}]`, \
+                                oldest first (last = innermost). `kind` is jsr/jsl/interrupt. \
+                                Empty unless `enable_call_stack` is on."
+    )]
+    async fn call_stack(&self) -> rmcp::Json<CallStackResult> {
+        let frames = {
+            let em = self.emulator.lock().await;
+            em.call_stack()
+        };
+        rmcp::Json(CallStackResult { frames })
     }
 
     // ------------- Narrowing memory search (issue #177) -------------
@@ -4838,6 +4885,45 @@ mod tests {
             .await
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn server_call_stack_round_trip() {
+        let s = LunaServer::new();
+        let mut rom = demo_lorom();
+        // $8000: JSR $8010 ; spin. $8010: JSL $008020 ; RTS. $8020: spin.
+        let prog: &[(usize, &[u8])] = &[
+            (0x0000, &[0x20, 0x10, 0x80, 0x80, 0xFE]),
+            (0x0010, &[0x22, 0x20, 0x80, 0x00, 0x60]),
+            (0x0020, &[0x80, 0xFE]),
+        ];
+        for &(off, bytes) in prog {
+            rom[off..off + bytes.len()].copy_from_slice(bytes);
+        }
+        let rom_path = PathBuf::from("/tmp/luna_mcp_callstack_demo.smc");
+        std::fs::write(&rom_path, rom).unwrap();
+        s.load_rom(Parameters(LoadRomParams {
+            path: rom_path.to_string_lossy().into(),
+            force_mapper: Some("lorom".into()),
+            force_region: None,
+        }))
+        .await
+        .unwrap();
+
+        // Off: empty.
+        assert!(s.call_stack().await.0.frames.is_empty());
+
+        s.enable_call_stack(Parameters(EnableCallStackParams { enabled: true }))
+            .await;
+        s.step(Parameters(StepParams { count: 2 })).await.unwrap();
+        let frames = s.call_stack().await.0.frames;
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].pc, 0x00_8010);
+        assert_eq!(frames[1].pc, 0x00_8020);
+
+        s.enable_call_stack(Parameters(EnableCallStackParams { enabled: false }))
+            .await;
+        assert!(s.call_stack().await.0.frames.is_empty());
     }
 
     /// `load_rom` params with no mapper/region override — the common case.

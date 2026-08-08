@@ -196,6 +196,11 @@ enum Command {
         /// `state` run can also emit a visual baseline.
         #[arg(long)]
         print_fbhash: bool,
+        /// Track the 65C816 call stack (JSR/JSL/RTS/RTL + interrupts,
+        /// issue #180) during the run; the `--out` JSON gains a
+        /// `call_stack` array of `{pc, from, kind, symbol}` frames.
+        #[arg(long = "call-stack")]
+        call_stack: bool,
         /// Emit the native 512×448 frame (issue #115): hi-res modes 5/6 and
         /// pseudo-512 keep their two horizontal subpixels per dot, interlace
         /// keeps both fields as separate lines — instead of the default
@@ -731,6 +736,7 @@ fn main() -> ExitCode {
             dump_aram,
             wdm_out,
             print_fbhash,
+            call_stack,
             native_res,
         } => run_state(
             &rom,
@@ -787,6 +793,7 @@ fn main() -> ExitCode {
             load_state.as_deref(),
             wdm_out.as_deref(),
             print_fbhash,
+            call_stack,
             native_res,
         ),
         Command::Frames {

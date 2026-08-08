@@ -183,6 +183,11 @@ pub struct EmulatorState {
     /// DSP-1 (NEC uPD7725) state, if the loaded cartridge hosts one.
     /// `None` for non-DSP carts.
     pub dsp1: Option<Dsp1State>,
+    /// The tracked 65C816 call stack (issue #180) — present only while
+    /// [`Emulator::enable_call_stack`] tracking is on, so existing
+    /// state-JSON consumers see no new key by default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_stack: Option<Vec<CallFrame>>,
 }
 
 /// DSP-1 (NEC uPD7725) coprocessor snapshot.
@@ -733,6 +738,33 @@ pub enum SearchOp {
     Unchanged,
 }
 
+/// What pushed a [`CallFrame`] (issue #180).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CallKind {
+    /// `JSR` (absolute or `(a,x)`).
+    Jsr,
+    /// `JSL` (long).
+    Jsl,
+    /// An interrupt entry: NMI dispatch, `BRK` or `COP`.
+    Interrupt,
+}
+
+/// One entry of the tracked 65C816 call stack (issue #180), oldest
+/// first — the last element is the innermost call.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct CallFrame {
+    /// 24-bit entry PC of the called routine / interrupt handler.
+    pub pc: u32,
+    /// 24-bit address of the calling `JSR`/`JSL` instruction (for an
+    /// NMI: the instruction the interrupt cut in front of).
+    pub from: u32,
+    /// What pushed this frame.
+    pub kind: CallKind,
+    /// Nearest symbol for `pc` when a `.sym` table is loaded.
+    pub symbol: Option<String>,
+}
+
 /// One per-frame memory freeze (issue #178).
 #[derive(Debug, Clone, Copy, Serialize, schemars::JsonSchema)]
 pub struct FreezeEntry {
@@ -814,6 +846,11 @@ pub struct Emulator {
     /// in ANY run path — so a freeze behaves identically under the CLI,
     /// MCP and the GUI (the API-first coherence rule).
     freezes: Vec<(u32, u8)>,
+    /// Tracked 65C816 call stack (issue #180); `None` = tracking off
+    /// (the default — tracking costs one opcode peek per instruction).
+    /// Maintained API-side by the run loops: the CPU core stays
+    /// untouched (user decision, 2026-08-08).
+    call_stack: Option<Vec<CallFrame>>,
     /// Event Viewer category/DMA visibility config.
     event_config: event_viewer::EventViewerConfig,
     /// The just-completed frame's captured events (Mesen2 `_debugEvents`),
@@ -912,6 +949,7 @@ impl Emulator {
             symbols: None,
             search_session: None,
             freezes: Vec::new(),
+            call_stack: None,
             event_config: event_viewer::EventViewerConfig {
                 visible: [true; event_viewer::CATEGORY_COUNT],
                 show_previous_frame: true,
@@ -1236,6 +1274,7 @@ impl Emulator {
     /// halts or panics). Returns the number actually executed.
     pub fn step(&mut self, count: u64) -> Result<u64, ApiError> {
         let freezes = self.freezes.clone();
+        let mut cstack = self.call_stack.take();
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         let mut last_frame = snes.frame_count;
         let mut executed = 0u64;
@@ -1246,13 +1285,18 @@ impl Emulator {
                 if snes.cpu.stopped {
                     break;
                 }
+                let pre = cstack.as_ref().map(|_| Self::call_track_pre(snes));
                 snes.step();
                 executed += 1;
+                if let (Some(stack), Some(pre)) = (cstack.as_mut(), pre) {
+                    Self::call_track_post(snes, stack, pre);
+                }
                 Self::apply_freezes_on_frame_edge(snes, &freezes, &mut last_frame);
             }
             executed
         }));
         std::panic::set_hook(prev_hook);
+        self.call_stack = cstack;
         match result {
             Ok(n) => {
                 self.instructions_executed += n;
@@ -1270,6 +1314,7 @@ impl Emulator {
     /// executed. Bounded by `max_steps` as a safety belt.
     pub fn step_until_frame(&mut self, max_steps: u64) -> Result<u64, ApiError> {
         let freezes = self.freezes.clone();
+        let mut cstack = self.call_stack.take();
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         let start_frame = snes.frame_count;
         let mut last_frame = start_frame;
@@ -1278,13 +1323,18 @@ impl Emulator {
         std::panic::set_hook(Box::new(|_| {}));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             while executed < max_steps && !snes.cpu.stopped && snes.frame_count == start_frame {
+                let pre = cstack.as_ref().map(|_| Self::call_track_pre(snes));
                 snes.step();
                 executed += 1;
+                if let (Some(stack), Some(pre)) = (cstack.as_mut(), pre) {
+                    Self::call_track_post(snes, stack, pre);
+                }
                 Self::apply_freezes_on_frame_edge(snes, &freezes, &mut last_frame);
             }
             executed
         }));
         std::panic::set_hook(prev_hook);
+        self.call_stack = cstack;
         match result {
             Ok(n) => {
                 self.instructions_executed += n;
@@ -1307,6 +1357,7 @@ impl Emulator {
     /// normal stepping. Panic-safe (a crashing ROM returns `Err`).
     pub fn loop_probe(&mut self, max_steps: u64) -> Result<LoopProbe, ApiError> {
         let freezes = self.freezes.clone();
+        let mut cstack = self.call_stack.take();
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         let mut last_frame = snes.frame_count;
         let mut seen = std::collections::HashSet::new();
@@ -1316,12 +1367,17 @@ impl Emulator {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             while executed < max_steps && !snes.cpu.stopped {
                 seen.insert((u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc));
+                let pre = cstack.as_ref().map(|_| Self::call_track_pre(snes));
                 snes.step();
                 executed += 1;
+                if let (Some(stack), Some(pre)) = (cstack.as_mut(), pre) {
+                    Self::call_track_post(snes, stack, pre);
+                }
                 Self::apply_freezes_on_frame_edge(snes, &freezes, &mut last_frame);
             }
         }));
         std::panic::set_hook(prev_hook);
+        self.call_stack = cstack;
         self.instructions_executed += executed;
         result.map_err(|p| ApiError::Panic(panic_message(&p)))?;
         Ok(LoopProbe {
@@ -1626,6 +1682,7 @@ impl Emulator {
             sa1,
             dma,
             dsp1,
+            call_stack: self.call_stack.as_ref().map(|_| self.call_stack()),
         }
     }
 
@@ -2210,6 +2267,95 @@ impl Emulator {
             .collect()
     }
 
+    /// Enable / disable call-stack tracking (issue #180). Off by default
+    /// — tracking costs one opcode peek per executed instruction.
+    /// Enabling starts an empty stack (calls made before enabling are
+    /// unknowable); enabling while already on is a no-op; disabling
+    /// drops the stack.
+    pub fn enable_call_stack(&mut self, on: bool) {
+        match (on, self.call_stack.is_some()) {
+            (true, false) => self.call_stack = Some(Vec::new()),
+            (false, _) => self.call_stack = None,
+            (true, true) => {}
+        }
+    }
+
+    /// The tracked call stack, oldest frame first (empty when tracking
+    /// is off), symbol-annotated from the loaded `.sym` table. Cheap —
+    /// deliberately NOT part of the expensive [`Self::state`] scan
+    /// (though `state()` embeds it when tracking is on).
+    #[must_use]
+    pub fn call_stack(&self) -> Vec<CallFrame> {
+        let Some(stack) = &self.call_stack else {
+            return Vec::new();
+        };
+        stack
+            .iter()
+            .map(|f| CallFrame {
+                symbol: self.symbols.as_ref().and_then(|t| t.nearest(f.pc)),
+                ..f.clone()
+            })
+            .collect()
+    }
+
+    /// Pre-step capture for call-stack tracking: the opcode about to
+    /// execute, the live PC, and the NMI-service count (to detect an
+    /// NMI dispatched inside the step).
+    fn call_track_pre(snes: &mut Snes) -> (u8, u32, u64) {
+        let pb = snes.cpu.pb;
+        let pc = snes.cpu.pc;
+        let op = snes.dbg_peek_bytes(pb, pc, 1)[0];
+        (
+            op,
+            (u32::from(pb) << 16) | u32::from(pc),
+            snes.nmis_serviced,
+        )
+    }
+
+    /// Post-step: interpret the pre-captured opcode as a push (JSR $20 /
+    /// JSR (a,x) $FC / JSL $22 / BRK $00 / COP $02), a pop (RTS $60 /
+    /// RTL $6B / RTI $40), or neither; an NMI dispatched inside the step
+    /// (service-count delta) pushes an interrupt frame. Bounded at 256
+    /// frames (oldest dropped) and tolerant of RTS-without-JSR. Known
+    /// approximation: a call and an interrupt in the same step record
+    /// the interrupt handler as both entries.
+    fn call_track_post(snes: &Snes, stack: &mut Vec<CallFrame>, pre: (u8, u32, u64)) {
+        const CAP: usize = 256;
+        let (op, from, nmis_before) = pre;
+        let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
+        let mut push = |kind: CallKind| {
+            if stack.len() >= CAP {
+                stack.remove(0);
+            }
+            stack.push(CallFrame {
+                pc: cur,
+                from,
+                kind,
+                symbol: None,
+            });
+        };
+        match op {
+            0x20 | 0xFC => push(CallKind::Jsr),
+            0x22 => push(CallKind::Jsl),
+            0x00 | 0x02 => push(CallKind::Interrupt),
+            0x60 | 0x6B | 0x40 => {
+                stack.pop();
+            }
+            _ => {}
+        }
+        if snes.nmis_serviced != nmis_before {
+            if stack.len() >= CAP {
+                stack.remove(0);
+            }
+            stack.push(CallFrame {
+                pc: cur,
+                from,
+                kind: CallKind::Interrupt,
+                symbol: None,
+            });
+        }
+    }
+
     /// Re-apply the freeze list when the frame counter advanced — called
     /// from EVERY run path (`step`, `step_until_frame`, `loop_probe`,
     /// `run_until_break_interruptible`) so a freeze behaves identically
@@ -2571,6 +2717,7 @@ impl Emulator {
         // Clear any stale raise so this run isn't stopped by a previous pause.
         interrupt.store(false, Ordering::Relaxed);
         let freezes = self.freezes.clone();
+        let mut cstack = self.call_stack.take();
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         let mut last_frame = snes.frame_count;
         if let Some(bp) = snes.breakpoints.as_mut() {
@@ -2604,8 +2751,12 @@ impl Emulator {
                         interrupted: false,
                     };
                 }
+                let pre = cstack.as_ref().map(|_| Self::call_track_pre(snes));
                 snes.step();
                 executed = i + 1;
+                if let (Some(stack), Some(pre)) = (cstack.as_mut(), pre) {
+                    Self::call_track_post(snes, stack, pre);
+                }
                 Self::apply_freezes_on_frame_edge(snes, &freezes, &mut last_frame);
                 if let Some(hit) = snes.breakpoints.as_mut().and_then(|b| b.take_pending()) {
                     return RunOutcome {
@@ -3596,6 +3747,51 @@ mod tests {
             e.load_state(&[0xFF; 16]),
             Err(ApiError::SaveState(_))
         ));
+    }
+
+    #[test]
+    fn call_stack_tracks_nested_calls_and_returns() {
+        let mut rom = demo_lorom();
+        // $8000: JSR $8010 ; then spin. $8010: JSL $008020 ; RTS.
+        // $8020: RTL.
+        let prog: &[(usize, &[u8])] = &[
+            (0x0000, &[0x20, 0x10, 0x80, 0x80, 0xFE]),
+            (0x0010, &[0x22, 0x20, 0x80, 0x00, 0x60]),
+            (0x0020, &[0x6B]),
+        ];
+        for &(off, bytes) in prog {
+            rom[off..off + bytes.len()].copy_from_slice(bytes);
+        }
+        let mut e = Emulator::new();
+        e.load_rom_bytes_forced(rom, luna_core::MapperKind::LoRom)
+            .unwrap();
+        e.load_symbols_str("[labels]\n00:8010 sub1\n00:8020 sub2\n");
+
+        // Off by default: empty and free.
+        e.step(1).unwrap();
+        assert!(e.call_stack().is_empty());
+
+        // Reset to the entry point and track from the top.
+        e.reset().unwrap();
+        e.enable_call_stack(true);
+        e.step(2).unwrap(); // JSR, then JSL
+        let stack = e.call_stack();
+        assert_eq!(stack.len(), 2);
+        assert_eq!((stack[0].from, stack[0].pc), (0x00_8000, 0x00_8010));
+        assert_eq!(stack[0].kind, CallKind::Jsr);
+        assert_eq!(stack[0].symbol.as_deref(), Some("sub1"));
+        assert_eq!((stack[1].from, stack[1].pc), (0x00_8010, 0x00_8020));
+        assert_eq!(stack[1].kind, CallKind::Jsl);
+        assert_eq!(stack[1].symbol.as_deref(), Some("sub2"));
+
+        // RTL then RTS unwind to empty.
+        e.step(2).unwrap();
+        assert!(e.call_stack().is_empty());
+
+        // state() embeds it only while tracking.
+        assert!(e.state().call_stack.is_some());
+        e.enable_call_stack(false);
+        assert!(e.state().call_stack.is_none());
     }
 
     #[test]

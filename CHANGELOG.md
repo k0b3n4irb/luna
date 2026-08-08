@@ -7,6 +7,13 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- Tracked 65C816 call stack (#180) — opt-in `enable_call_stack` +
+  `call_stack()` on `luna_api::Emulator` (JSR/JSL/RTS/RTL, BRK/COP and
+  NMI entries; bounded at 256 frames; RTS-without-JSR tolerant),
+  symbol-annotated, exposed as MCP tools, embedded in the state JSON
+  while tracking (`call_stack`), and on the CLI as `luna state
+  --call-stack`. Maintained API-side by the run loops — the CPU core
+  is untouched.
 - Pokes beyond WRAM + per-frame freezes (#178) — `poke_vram` /
   `poke_cgram` / `poke_oam` / `poke_aram` on `luna_api::Emulator` and
   as MCP tools (previously `poke_memory` silently skipped everything

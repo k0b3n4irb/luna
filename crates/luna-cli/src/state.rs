@@ -121,12 +121,18 @@ pub(crate) fn run_state(
     load_state_path: Option<&std::path::Path>,
     wdm_out: Option<&std::path::Path>,
     print_fbhash: bool,
+    call_stack: bool,
     native_res: bool,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
     if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, dsp1_rom) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
+    }
+    if call_stack {
+        // Issue #180: track JSR/JSL/RTS/RTL + interrupts for the whole
+        // run; the --out JSON then carries state.call_stack.
+        em.enable_call_stack(true);
     }
     if native_res {
         // Issue #115: keep the un-collapsed 512×448 pixels alongside the
