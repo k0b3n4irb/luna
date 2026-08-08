@@ -7,6 +7,14 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- MCP: headerless / checksum-invalid homebrew is now loadable over pure MCP
+  (#169) — `load_rom` gained optional `force_mapper` / `force_region`
+  params (the CLI `--force-mapper` / `--force-region` vocabulary), a new
+  `load_rom_bytes` tool loads a base64 image with no host file (note: no
+  firmware-folder lookup — check `missing_firmware`), and a new
+  `set_port_device` tool plugs `joypad` / `mouse` / `superscope` into a
+  port without touching the GUI or CLI (the `set_mouse` /
+  `set_superscope` descriptions now point at it).
 - MCP: the two SDK assert/log channels are now reachable over MCP (#168) —
   `enable_nocash_log` / `take_nocash_log` (the `$21FC` Nocash TTY, drained
   as `{text, base64}`) and `enable_wdm_log` / `take_wdm_log` (the `WDM`
