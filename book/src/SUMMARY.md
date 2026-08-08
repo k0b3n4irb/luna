@@ -9,6 +9,7 @@
 - [Debugging tools](using/debugging.md)
 - [Saves & save states](using/saves.md)
 - [CLI, API & MCP](using/cli-api-mcp.md)
+- [Developing homebrew with luna](using/homebrew-ci.md)
 
 # How Luna Works
 

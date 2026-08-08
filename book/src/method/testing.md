@@ -62,3 +62,11 @@ nothing about how the subsystems interact. The golden ROMs prove the *system*
 renders correctly but, being Luna's own output, can only catch *regressions*.
 Together — plus the differential harness for timing — they cover correctness
 from the single instruction up to the whole frame.
+
+## Tier 3 — user-facing: `luna test` (homebrew CI)
+
+The first two tiers test *luna*; `luna test` lets homebrew developers test
+*their game* with the same machinery — TOML manifests asserting on symbols,
+the SDK assert/log channels and displayed-frame hashes, run in-process
+through `luna-api` with a CI exit-code contract. See
+[Developing homebrew with luna](../using/homebrew-ci.md).
