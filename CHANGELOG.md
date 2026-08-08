@@ -7,6 +7,13 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- MCP: symbol parity (#171, CPU-space half) — new `load_symbols_str`
+  (load `.sym` text with no host file), `clear_symbols`, and
+  `symbol_for_addr` (reverse lookup) tools; `disasm_cpu` and
+  `enable_mem_trace` now accept a `symbol` argument, and `bp_add` gained
+  `hi_symbol` for symbol-bounded watch ranges. The ARAM-space tools
+  (`disasm_spc`, `peek_aram`) stay numeric until symbols v2 adds an SPC
+  address space (#179).
 - MCP: full trace parity with the CLI (#172) — mechanical `enable_*` /
   `take_*` tool pairs for the dma, dsp (S-DSP writes), mailbox
   (`$2140-43`), `sa1_log`, `sa1_side_log`, `sa1_trace`, superfx, dsp1,
