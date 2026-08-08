@@ -358,6 +358,9 @@ pub struct DisasmCpuParams {
     /// 24-bit start address (`pb << 16 | pc`). Defaults to the live PC.
     #[serde(default)]
     pub addr: Option<u32>,
+    /// Disassemble starting at a loaded WLA-DX symbol instead of `addr`.
+    #[serde(default)]
+    pub symbol: Option<String>,
     /// Number of instructions to decode. Defaults to 16.
     #[serde(default)]
     pub lines: Option<u16>,
@@ -437,6 +440,11 @@ pub struct EnableMemTraceParams {
     /// Upper bound of the offset filter (inclusive).
     #[serde(default)]
     pub hi: Option<u16>,
+    /// Filter to exactly one loaded WLA-DX symbol's address ("trace my
+    /// variable"): sets `bank` and a one-address `lo..=hi` range from the
+    /// symbol. Mutually exclusive with `bank`/`lo`/`hi`.
+    #[serde(default)]
+    pub symbol: Option<String>,
 }
 
 /// `bp_add` parameters.
@@ -455,6 +463,10 @@ pub struct BpAddParams {
     /// address watch).
     #[serde(default)]
     pub hi: Option<u32>,
+    /// Mem only: range end at a loaded WLA-DX symbol instead of `hi`
+    /// (watch `symbol..=hi_symbol`, e.g. a buffer's start/end labels).
+    #[serde(default)]
+    pub hi_symbol: Option<String>,
     /// Mem only: fire on reads (default false).
     #[serde(default)]
     pub on_read: bool,
@@ -1127,6 +1139,30 @@ pub struct ResolveSymbolResult {
     pub addr: Option<u32>,
 }
 
+/// `load_symbols_str` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct LoadSymbolsStrParams {
+    /// WLA-DX `.sym` text (`[labels]` / `[symbols]` / `[exports]`
+    /// sections). Replaces any previously loaded table wholesale.
+    pub text: String,
+}
+
+/// `symbol_for_addr` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SymbolForAddrParams {
+    /// 24-bit `bank << 16 | offset` address to symbolise.
+    pub addr: u32,
+}
+
+/// `symbol_for_addr` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SymbolForAddrResult {
+    /// Nearest preceding label in the same bank (`name` or
+    /// `name+0xOFF`), or null when no table is loaded / no label
+    /// precedes the address in its bank.
+    pub symbol: Option<String>,
+}
+
 /// Resolve an optional symbol name against the emulator's loaded table,
 /// falling back to the numeric address. Unknown symbol → invalid-params.
 fn resolve_addr(em: &Emulator, symbol: Option<&str>, numeric: u32) -> Result<u32, ErrorData> {
@@ -1561,9 +1597,12 @@ impl LunaServer {
         let lines = {
             let mut em = self.emulator.lock().await;
             let cpu = em.cpu_state().map_err(|e| api_err_to_mcp(&e))?;
-            let addr = params
-                .addr
-                .unwrap_or_else(|| (u32::from(cpu.pb) << 16) | u32::from(cpu.pc));
+            let addr = match &params.symbol {
+                Some(_) => resolve_addr(&em, params.symbol.as_deref(), 0)?,
+                None => params
+                    .addr
+                    .unwrap_or_else(|| (u32::from(cpu.pb) << 16) | u32::from(cpu.pc)),
+            };
             let m8 = params.m8.unwrap_or(cpu.e || cpu.p & 0x20 != 0);
             let x8 = params.x8.unwrap_or(cpu.e || cpu.p & 0x10 != 0);
             em.disassemble_cpu(addr, params.lines.unwrap_or(16), m8, x8)
@@ -1797,6 +1836,14 @@ impl LunaServer {
         &self,
         Parameters(params): Parameters<EnableMemTraceParams>,
     ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        if params.symbol.is_some()
+            && (params.bank.is_some() || params.lo.is_some() || params.hi.is_some())
+        {
+            return Err(ErrorData::invalid_params(
+                "`symbol` is mutually exclusive with `bank`/`lo`/`hi`",
+                None,
+            ));
+        }
         let offset_filter = match (params.lo, params.hi) {
             (Some(lo), Some(hi)) if lo <= hi => Some((lo, hi)),
             (None, None) => None,
@@ -1809,7 +1856,15 @@ impl LunaServer {
         };
         {
             let mut em = self.emulator.lock().await;
-            em.enable_mem_trace(params.max_events, params.bank, offset_filter)
+            let (bank, offset_filter) = match &params.symbol {
+                Some(_) => {
+                    let addr = resolve_addr(&em, params.symbol.as_deref(), 0)?;
+                    let off = (addr & 0xFFFF) as u16;
+                    (Some((addr >> 16) as u8), Some((off, off)))
+                }
+                None => (params.bank, offset_filter),
+            };
+            em.enable_mem_trace(params.max_events, bank, offset_filter)
                 .map_err(|e| api_err_to_mcp(&e))?;
         }
         Ok(rmcp::Json(EmptyOk { ok: true }))
@@ -1885,6 +1940,50 @@ impl LunaServer {
         Ok(rmcp::Json(ResolveSymbolResult { addr }))
     }
 
+    #[rmcp::tool(
+        description = "Load WLA-DX `.sym` text directly (no host file needed — e.g. the \
+                                symbol output of an in-memory build). Replaces any loaded \
+                                table; returns the parsed label count."
+    )]
+    async fn load_symbols_str(
+        &self,
+        Parameters(params): Parameters<LoadSymbolsStrParams>,
+    ) -> Result<rmcp::Json<LoadSymbolsResult>, ErrorData> {
+        let count = {
+            let mut em = self.emulator.lock().await;
+            em.load_symbols_str(&params.text)
+        };
+        Ok(rmcp::Json(LoadSymbolsResult { count }))
+    }
+
+    #[rmcp::tool(
+        description = "Drop the loaded symbol table — disassembly and traces stop being \
+                                annotated and symbol arguments stop resolving."
+    )]
+    async fn clear_symbols(&self) -> rmcp::Json<EmptyOk> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.clear_symbols();
+        }
+        rmcp::Json(EmptyOk { ok: true })
+    }
+
+    #[rmcp::tool(
+        description = "Reverse symbol lookup: 24-bit address → nearest preceding label \
+                                in the same bank (`name` or `name+0xOFF`), null if none. The \
+                                inverse of `resolve_symbol`."
+    )]
+    async fn symbol_for_addr(
+        &self,
+        Parameters(params): Parameters<SymbolForAddrParams>,
+    ) -> rmcp::Json<SymbolForAddrResult> {
+        let symbol = {
+            let em = self.emulator.lock().await;
+            em.symbol_for_addr(params.addr)
+        };
+        rmcp::Json(SymbolForAddrResult { symbol })
+    }
+
     // ------------- Breakpoint registry (issue #66) -------------
 
     #[rmcp::tool(
@@ -1902,15 +2001,14 @@ impl LunaServer {
         let id = {
             let mut em = self.emulator.lock().await;
             let addr = resolve_addr(&em, params.symbol.as_deref(), params.addr)?;
+            let hi = match &params.hi_symbol {
+                Some(_) => resolve_addr(&em, params.hi_symbol.as_deref(), 0)?,
+                None => params.hi.unwrap_or(addr),
+            };
             match params.kind.as_str() {
                 "exec" => em.bp_add_exec(addr).map_err(|e| api_err_to_mcp(&e))?,
                 "mem" => em
-                    .bp_add_mem(
-                        addr,
-                        params.hi.unwrap_or(addr),
-                        params.on_read,
-                        params.on_write,
-                    )
+                    .bp_add_mem(addr, hi, params.on_read, params.on_write)
                     .map_err(|e| api_err_to_mcp(&e))?,
                 other => {
                     return Err(ErrorData::invalid_params(
@@ -2975,6 +3073,7 @@ mod tests {
             bank: None,
             lo: None,
             hi: None,
+            symbol: None,
         }))
         .await
         .unwrap();
@@ -2996,6 +3095,7 @@ mod tests {
                 bank: None,
                 lo: Some(0x2100),
                 hi: None,
+                symbol: None,
             }))
             .await
             .is_err()
@@ -3055,6 +3155,7 @@ mod tests {
                 addr: 0x00_0200,
                 symbol: None,
                 hi: None,
+                hi_symbol: None,
                 on_read: false,
                 on_write: true,
             }))
@@ -3069,6 +3170,7 @@ mod tests {
                 addr: 0x00_0105,
                 symbol: None,
                 hi: None,
+                hi_symbol: None,
                 on_read: false,
                 on_write: true,
             }))
@@ -3082,6 +3184,7 @@ mod tests {
                 addr: 0,
                 symbol: None,
                 hi: None,
+                hi_symbol: None,
                 on_read: false,
                 on_write: true,
             }))
@@ -3207,6 +3310,7 @@ mod tests {
                 addr: 0,
                 symbol: Some("monster_x".into()),
                 hi: None,
+                hi_symbol: None,
                 on_read: false,
                 on_write: true,
             }))
@@ -3222,6 +3326,7 @@ mod tests {
         let d = s
             .disasm_cpu(Parameters(DisasmCpuParams {
                 addr: Some(0x00_0100),
+                symbol: None,
                 lines: Some(1),
                 m8: Some(true),
                 x8: Some(true),
@@ -3606,6 +3711,101 @@ mod tests {
 
         // Draining reset the mailbox log.
         assert!(s.take_mailbox_log().await.unwrap().0.events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn server_symbol_tools_round_trip() {
+        let s = LunaServer::new();
+        let rom_path = PathBuf::from("/tmp/luna_mcp_symtools_demo.smc");
+        std::fs::write(&rom_path, demo_lorom()).unwrap();
+        s.load_rom(Parameters(rom_params(&rom_path.to_string_lossy())))
+            .await
+            .unwrap();
+
+        // load_symbols_str: no host file involved.
+        let n = s
+            .load_symbols_str(Parameters(LoadSymbolsStrParams {
+                text: "[labels]\n00:8000 main\n7e:0200 monster_x\n7e:020f monster_end\n".into(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(n.0.count, 3);
+
+        // symbol_for_addr: exact, offset form, and no-label-in-bank.
+        let sym = |addr| s.symbol_for_addr(Parameters(SymbolForAddrParams { addr }));
+        assert_eq!(sym(0x7E_0200).await.0.symbol.as_deref(), Some("monster_x"));
+        assert_eq!(sym(0x00_8005).await.0.symbol.as_deref(), Some("main+0x05"));
+        assert!(sym(0x7F_0000).await.0.symbol.is_none());
+
+        // disasm_cpu accepts a symbol start.
+        let d = s
+            .disasm_cpu(Parameters(DisasmCpuParams {
+                addr: None,
+                symbol: Some("main".into()),
+                lines: Some(1),
+                m8: Some(true),
+                x8: Some(true),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(d.0.lines[0].addr, 0x00_8000);
+
+        // enable_mem_trace: symbol conflicts with manual filters...
+        assert!(
+            s.enable_mem_trace(Parameters(EnableMemTraceParams {
+                max_events: 10,
+                bank: Some(0x7E),
+                lo: None,
+                hi: None,
+                symbol: Some("monster_x".into()),
+            }))
+            .await
+            .is_err()
+        );
+        // ...and works alone.
+        s.enable_mem_trace(Parameters(EnableMemTraceParams {
+            max_events: 10,
+            bank: None,
+            lo: None,
+            hi: None,
+            symbol: Some("monster_x".into()),
+        }))
+        .await
+        .unwrap();
+
+        // bp_add: watch a symbol..=hi_symbol range.
+        let id = s
+            .bp_add(Parameters(BpAddParams {
+                kind: "mem".into(),
+                addr: 0,
+                symbol: Some("monster_x".into()),
+                hi: None,
+                hi_symbol: Some("monster_end".into()),
+                on_read: false,
+                on_write: true,
+            }))
+            .await
+            .unwrap()
+            .0
+            .id;
+        let list = s.bp_list().await.unwrap().0.breakpoints;
+        let bp = list.iter().find(|b| b.id == id).unwrap();
+        assert_eq!(bp.lo, 0x7E_0200);
+        assert_eq!(bp.hi, 0x7E_020F);
+
+        // clear_symbols: resolution and annotation stop.
+        s.clear_symbols().await;
+        assert!(
+            s.resolve_symbol(Parameters(ResolveSymbolParams {
+                name: "main".into(),
+            }))
+            .await
+            .unwrap()
+            .0
+            .addr
+            .is_none()
+        );
+        assert!(sym(0x7E_0200).await.0.symbol.is_none());
     }
 
     /// `load_rom` params with no mapper/region override — the common case.

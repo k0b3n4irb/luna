@@ -509,7 +509,10 @@ method, so the MCP transport adds reach, not capability.
 | `capabilities` | — | luna `version` + the live tool catalogue, for client feature-detection (the handshake `serverInfo.version` is rmcp's, not luna's). |
 | `start_input_capture` / `take_input_capture` | `start_input_capture` / `take_input_capture` | Record joypad changes and export a `frame:mask` script (replay with `--input @file`). |
 | `load_symbols` | `load_symbols` | Load a WLA-DX `.sym`; disasm + traces become annotated. |
+| `load_symbols_str` | `load_symbols_str` | Load `.sym` text directly (no host file — e.g. an in-memory build's output). Replaces the table. |
+| `clear_symbols` | `clear_symbols` | Drop the loaded table. |
 | `resolve_symbol` | `resolve_symbol` | Label name → 24-bit address. |
+| `symbol_for_addr` | `symbol_for_addr` | 24-bit address → nearest preceding label in its bank (the inverse). |
 | `enable_dma_trace` / `take_dma_trace` | `enable_dma_trace` / `take_dma_trace` | DMA→VRAM transfer bytes with scanline/H-clock + blank flags (the CLI `--dma-trace`). |
 | `enable_dsp_trace` / `take_dsp_trace` | `enable_dsp_trace` / `take_dsp_trace` | S-DSP register writes from the SPC700 side (the CLI `--dsp-trace`). |
 | `enable_mailbox_log` / `take_mailbox_log` | `enable_mailbox_log` / `take_mailbox_log` | CPU↔APU `$2140-43` traffic with the accessing PC, symbolised (the CLI `--apu-log`). |
@@ -528,9 +531,13 @@ method, so the MCP transport adds reach, not capability.
 | `enable_wdm_log` / `take_wdm_log` | `enable_wdm_log` / `take_wdm_log` | The `WDM` assert channel (`SNES_ASSERT` → `WDM $00`): drain returns `[{pc, operand, symbol}]`. |
 
 With a symbol table loaded, the address-taking tools (`peek_memory`,
-`poke_memory`, `run_until_pc`, `run_until_mem_*`, `bp_add`) also accept a
-`symbol` name in place of the numeric address — e.g.
-`peek_memory {symbol: "monster_x", count: 2}`.
+`poke_memory`, `run_until_pc`, `run_until_mem_*`, `bp_add`, `disasm_cpu`,
+`enable_mem_trace`) also accept a `symbol` name in place of the numeric
+address — e.g. `peek_memory {symbol: "monster_x", count: 2}`, or a
+symbol-bounded watch range `bp_add {kind: "mem", symbol: "buf_start",
+hi_symbol: "buf_end"}`. The ARAM-space tools (`disasm_spc`, `peek_aram`)
+stay numeric until the symbol table grows an SPC address space
+(issue #179).
 
 #### Reading the SDK assert/log channels over MCP
 
