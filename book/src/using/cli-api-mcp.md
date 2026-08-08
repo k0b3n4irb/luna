@@ -469,7 +469,9 @@ method, so the MCP transport adds reach, not capability.
 
 | Tool | Maps to | Purpose |
 |---|---|---|
-| `load_rom` | `load_rom` | Load a `.sfc`/`.smc` from a host path. |
+| `load_rom` | `load_rom` / `load_rom_forced` | Load a `.sfc`/`.smc` from a host path. Optional `force_mapper` (`lorom`, `hirom`, `exhirom`, `sa1`, `superfx`, `dsp1`, `sdd1`, `spc7110`) and `force_region` (`ntsc`, `pal`) bypass header auto-detection — same vocabulary as the CLI `--force-mapper` / `--force-region`. |
+| `load_rom_bytes` | `load_rom_bytes` / `load_rom_bytes_forced` | Load a ROM from base64 bytes (e.g. a freshly assembled image, no host file). Same force params. Unlike `load_rom` it does **not** search the firmware folder — check `missing_firmware` in the result. |
+| `set_port_device` | `set_port_device` | Plug `joypad` / `mouse` / `superscope` into port 0 or 1, then feed it with the matching `set_*` tool. |
 | `reset` | `reset` | Reset to power-on state. |
 | `set_joypad` | `set_joypad` | Set the button bitmask for `port` (0 = P1, 1 = P2). |
 | `set_mouse` | `set_mouse` | Feed SNES Mouse `dx`/`dy`/buttons for the next auto-read. |
@@ -535,6 +537,22 @@ An empty `take_wdm_log` after a run is the "no assertions fired" green
 light a CI-style probe wants; the Nocash text is the ROM's own printf
 channel. Draining resets each channel, so successive takes return only
 new output.
+
+#### Loading homebrew straight from the assembler
+
+A build loop that never touches the filesystem, including a
+checksum-invalid work-in-progress image and a pointer device:
+
+```text
+load_rom_bytes {rom_base64: "<the .sfc bytes>", force_mapper: "lorom"}
+set_port_device {port: 0, device: "mouse"}
+set_mouse {dx: 5, dy: 0, buttons: 1}
+step_until_frame {}
+```
+
+`force_mapper` / `force_region` accept exactly the CLI's
+`--force-mapper` / `--force-region` values, so a recipe translates
+between the two transports verbatim.
 
 ---
 
