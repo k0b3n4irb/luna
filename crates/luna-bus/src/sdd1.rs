@@ -637,19 +637,22 @@ impl Mapper for Sdd1Mapper {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        bincode::serialize(&(
-            &self.sram,
-            self.r4800,
-            self.r4801,
-            self.r4804,
-            self.r4805,
-            self.r4806,
-            self.r4807,
-            self.dma_address,
-            self.dma_size,
-            self.dma_ready,
-            &self.decompressor,
-        ))
+        bincode::serde::encode_to_vec(
+            (
+                &self.sram,
+                self.r4800,
+                self.r4801,
+                self.r4804,
+                self.r4805,
+                self.r4806,
+                self.r4807,
+                self.dma_address,
+                self.dma_size,
+                self.dma_ready,
+                &self.decompressor,
+            ),
+            bincode::config::standard(),
+        )
         .unwrap_or_default()
     }
 
@@ -668,18 +671,9 @@ impl Mapper for Sdd1Mapper {
             Sdd1Decompressor,
         );
         if let Ok((
-            sram,
-            r4800,
-            r4801,
-            r4804,
-            r4805,
-            r4806,
-            r4807,
-            dma_addr,
-            dma_size,
-            ready,
-            dec,
-        )) = bincode::deserialize::<State>(data)
+            (sram, r4800, r4801, r4804, r4805, r4806, r4807, dma_addr, dma_size, ready, dec),
+            _,
+        )) = bincode::serde::decode_from_slice::<State, _>(data, bincode::config::standard())
         {
             self.sram = sram;
             self.r4800 = r4800;

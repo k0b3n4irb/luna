@@ -29,6 +29,7 @@ Commands:
   bench       Run a whole ROM directory headless and write a compatibility report.
   spc-dump    Export the live APU state as a playable .spc sound file.
   assets-dump Dump the loaded graphics (VRAM tiles, tilemaps, palette, sprites) as PNGs.
+  test        Run manifest-driven homebrew tests (see "Developing homebrew with luna").
   mcp         Serve the luna MCP server on stdio.
 
 Global options:
@@ -38,6 +39,17 @@ Global options:
 
 Build it with `cargo build --release -p luna-cli`; the binary is
 `./target/release/luna`.
+
+#### Exit codes (the CI contract)
+
+| Code | Meaning |
+|---|---|
+| `0` | Run completed; every `--assert*` spec passed. (A ROM hitting an unimplemented core path still exits 0 — emulation gaps are reported, not treated as CLI failures.) |
+| `1` | Runtime failure (ROM load, I/O, trace enable) **or** at least one `--assert*` spec failed (each failing spec prints a `FAIL …` line on stdout). |
+| `2` | Usage error — a malformed `--input` / `--mouse` / `--superscope` script (any subcommand). Fix the invocation, not the ROM. |
+
+A test harness should treat `1` as "the ROM regressed" and `2` as "the
+harness itself is broken".
 
 ### `luna run` — quick render / audio dump
 
@@ -91,7 +103,7 @@ and is the hub for every headless diagnostic.
 | `--input <SCRIPT>` | — | Scripted joypad-1 input (§3). |
 | `--screenshot <PATH>` | — | Also write a PNG. |
 | `--audio-out <PATH>` | — | Also write a 32 kHz stereo WAV. |
-| `--peek <B:O:C>` | — | Hex-dump `COUNT` bytes at `BANK:OFFSET` to stderr (repeatable). |
+| `--peek <B:O:C>` | — | Hex-dump `COUNT` bytes at `BANK:OFFSET` to stderr (repeatable). Each result is also mirrored into the `--out` JSON `peeks` array (see §2) — the machine-readable channel a harness should parse. |
 | `--dump-vram <PATH>` | — | Dump all 64 KB PPU VRAM (raw). |
 | `--dump-aram <PATH>` | — | Dump all 64 KB APU ARAM (raw). |
 | `--dump-coproc-ram <PATH>` | — | Dump coprocessor work RAM (Super FX Game Pak RAM), ungated. |
@@ -362,12 +374,30 @@ luna assets-dump "game.sfc" -n 8000000 --out /tmp/assets
 ### `luna mcp` — MCP server over stdio
 
 ```
-luna mcp
+luna mcp [--rom <PATH> [--sym <PATH>] [--force-mapper <KIND>] [--force-region <ntsc|pal>]]
 ```
 
 Serves the tool catalogue in §4 to any connected MCP client (Claude
 Desktop, Claude Code, custom). Stays alive until the client closes the
-stream. No options — configure the client to launch `luna mcp`.
+stream.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `--rom <PATH>` | none | Preload a ROM so the session starts ready — the client's first `state`/`step` works with no `load_rom` call (and no host-path hunting). A `<rom>.sym` beside it auto-loads, wlalink-style. |
+| `--sym <PATH>` | beside-ROM auto-detect | Explicit WLA-DX `.sym` (overrides the auto-detection). |
+| `--force-mapper <KIND>` | header auto-detect | Same vocabulary as `luna state` — for headerless/checksum-invalid homebrew. |
+| `--force-region <ntsc\|pal>` | header country byte | Force the video standard for the preloaded ROM. |
+
+```bash
+# A Claude Code MCP entry that opens the work-in-progress ROM directly:
+luna mcp --rom game.sfc --force-mapper lorom
+# → the client's first `state` already reports rom.title, no load_rom step
+```
+
+The handshake now identifies the server as `luna` with luna's real
+version (previously it reported the rmcp library's), and carries server
+instructions describing the load → run → observe → trace workflow — an
+MCP client sees how to drive the emulator before listing a single tool.
 
 ---
 
@@ -385,6 +415,14 @@ stream. No options — configure the client to launch `luna mcp`.
 | `apu` | SPC700 + S-DSP state (`spc_stopped`, etc.). |
 | `dma` | Per-channel DMA/HDMA registers (see below). |
 | `stats` | Counters: `nmis_serviced`, frame count, instruction count, NMI rate, … |
+| `peeks` | One entry per `--peek`, in order: `{spec, space: "cpu"\|"aram", addr, bytes_hex, error?}`. Always present (empty without `--peek`); a failed peek keeps its slot with an `error` string instead of vanishing. |
+
+```bash
+# The harness-friendly peek channel: read bytes from the JSON, not stderr.
+luna state -n 1000000 --peek 7E:0200:04 --out - game.sfc \
+  | jq -r '.peeks[0].bytes_hex'
+# → e.g. 00f04512
+```
 
 (See the `luna-api` rustdoc for the full nested field set.)
 
@@ -458,7 +496,9 @@ method, so the MCP transport adds reach, not capability.
 
 | Tool | Maps to | Purpose |
 |---|---|---|
-| `load_rom` | `load_rom` | Load a `.sfc`/`.smc` from a host path. |
+| `load_rom` | `load_rom` / `load_rom_forced` | Load a `.sfc`/`.smc` from a host path. Optional `force_mapper` (`lorom`, `hirom`, `exhirom`, `sa1`, `superfx`, `dsp1`, `sdd1`, `spc7110`) and `force_region` (`ntsc`, `pal`) bypass header auto-detection — same vocabulary as the CLI `--force-mapper` / `--force-region`. |
+| `load_rom_bytes` | `load_rom_bytes` / `load_rom_bytes_forced` | Load a ROM from base64 bytes (e.g. a freshly assembled image, no host file). Same force params. Unlike `load_rom` it does **not** search the firmware folder — check `missing_firmware` in the result. |
+| `set_port_device` | `set_port_device` | Plug `joypad` / `mouse` / `superscope` into port 0 or 1, then feed it with the matching `set_*` tool. |
 | `reset` | `reset` | Reset to power-on state. |
 | `set_joypad` | `set_joypad` | Set the button bitmask for `port` (0 = P1, 1 = P2). |
 | `set_mouse` | `set_mouse` | Feed SNES Mouse `dx`/`dy`/buttons for the next auto-read. |
@@ -469,14 +509,21 @@ method, so the MCP transport adds reach, not capability.
 | `run_until_mem_write` | `run_until_mem_write` | Step until an address is written; returns PC + value. |
 | `run_until_mem_read` | `run_until_mem_read` | Step until an address is read; returns PC + value. |
 | `state` | `state` | Full observable-state JSON snapshot (§2). |
-| `screenshot` | `render_frame_png` | Render the 256×224 composited framebuffer to PNG. |
+| `screenshot` | `render_frame_png` / `render_frame_png_native` / `render_frame_bg_png` | Render the composited 256×224 frame to PNG; `native: true` captures 512×448 (enable `set_native_capture` first), `bg: 1..=4` renders one layer in isolation. |
+| `sram_get` / `sram_set` | `sram` / `load_sram` | Battery-RAM image as base64 — the MCP form of `--srm-out` / `--srm-in`. |
+| `export_spc` | `export_spc` | Standard `.spc` (v0.30) music snapshot, base64 — playable in any SPC player. |
+| `decode_sprites` | `decode_sprites` | All 128 OAM entries as a structured list — the queryable `render_sprite_sheet`. |
 | `drain_audio` | `drain_audio` | Drain up to `max` stereo samples from the APU. |
 | `peek_memory` | `peek_memory` | Read `count` bytes from the CPU bus at `bank:offset`. |
-| `peek_aram` | `peek_aram` | Read `count` bytes from the SPC700's 64 KB ARAM. |
-| `peek_vram` | `peek_vram` | Read `count` bytes from the 64 KB VRAM. |
+| `peek_aram` | `peek_aram` | Read `count` bytes from the SPC700's 64 KB ARAM (`count` up to `0x10000` — a full dump needs no paging). |
+| `peek_vram` | `peek_vram` | Read `count` bytes from the 64 KB VRAM (same one-call full-dump range). |
 | `peek_cgram` | `peek_cgram` | All 256 CGRAM palette entries as BGR555 words. |
 | `poke_memory` | `poke_memory` | Write bytes into WRAM (state injection). |
-| `search_memory` | `search_memory` | Find a byte pattern in `$7E-$7F` WRAM. |
+| `poke_vram` / `poke_cgram` / `poke_oam` / `poke_aram` | same names | Direct writes into the other memory spaces (bus-bypassing state injection; each wraps at its size). |
+| `freeze_add` / `freeze_remove` / `freeze_list` | same names | Cheat-style per-frame pinning: the byte is re-applied at every frame boundary in **every** run path (CLI, MCP and GUI behave identically), and once immediately on add. WRAM only. |
+| `enable_call_stack` / `call_stack` | `enable_call_stack` / `call_stack` | Opt-in JSR/JSL/RTS/RTL + interrupt tracking → `[{pc, from, kind, symbol}]`, oldest first. The CLI form is `luna state --call-stack` (the `--out` JSON gains a `call_stack` array). |
+| `search_memory` | `search_memory` | Find a byte pattern in `$7E-$7F` WRAM (hits report canonical `$7E`/`$7F` addresses). |
+| `search_begin` / `search_refine` / `search_results` | `search_begin` / `search_refine` / `search_results` | The classic narrowing "find my variable" loop: begin (`u8`/`u16`), then alternate gameplay with refines (`eq`/`ne`/`lt`/`gt` a value, or `changed`/`unchanged` vs the last snapshot) until few candidates remain. |
 | `set_cpu_register` | `set_cpu_register` | Set a CPU register by name. |
 | `disasm_cpu` | `disassemble_cpu` | 65C816 disassembly (defaults: live PC + live M/X widths). |
 | `disasm_spc` | `disassemble_spc` | SPC700 disassembly (default: live SPC PC). |
@@ -488,20 +535,88 @@ method, so the MCP transport adds reach, not capability.
 | `render_sprite_sheet` | `render_sprite_sheet_png` | All 128 OAM sprites as a transparent PNG sheet. |
 | `enable_cpu_trace` / `take_cpu_trace` | `enable_cpu_trace` / `take_cpu_trace_log` | Per-instruction CPU trace ring (PC + registers). |
 | `enable_mem_trace` / `take_mem_trace` | `enable_mem_trace` / `take_mem_trace_log` | Per-bus-access trace with bank/offset-range filters. |
-| `bp_add` | `bp_add_exec` / `bp_add_mem` | Register an exec breakpoint or a read/write watchpoint range. |
-| `bp_remove` / `bp_clear_all` / `bp_list` | `bp_remove` / `bp_clear` / `bp_list` | Manage the breakpoint registry. |
+| `bp_add` | `bp_add_exec` / `bp_add_mem` | Register an exec breakpoint or a read/write watchpoint range. `mirror: false` makes a mem watch bank-exact (default follows WRAM/MMIO mirrors); `name` (defaulting to the `symbol` used) labels it in `bp_list`. |
+| `bp_set_enabled` | `bp_set_enabled` | Disable/re-enable without removing — id, name and hit count survive. |
+| `bp_remove` / `bp_clear_all` / `bp_list` | `bp_remove` / `bp_clear` / `bp_list` | Manage the registry. `bp_list` rows now carry `enabled`, `hit_count` (mem: at most one per instruction), `mirror` and `name`. |
 | `run_until_break` | `run_until_break` | Run at full speed until a breakpoint fires (or a step budget). |
 | `run` / `pause` | `run_until_break_interruptible` | Unbounded interruptible run: `run` goes until a breakpoint / `STOP` / `pause`; `pause` stops it (returns `interrupted: true`). No mandatory step budget. |
 | `peek_oam` | `peek_oam` | All 544 OAM bytes (512 low table + 32 high table). |
-| `capabilities` | — | luna `version` + the live tool catalogue, for client feature-detection (the handshake `serverInfo.version` is rmcp's, not luna's). |
+| `capabilities` | — | luna `version` + the live tool catalogue, for client feature-detection (the handshake `serverInfo` also reports luna's identity since #174). |
 | `start_input_capture` / `take_input_capture` | `start_input_capture` / `take_input_capture` | Record joypad changes and export a `frame:mask` script (replay with `--input @file`). |
 | `load_symbols` | `load_symbols` | Load a WLA-DX `.sym`; disasm + traces become annotated. |
+| `load_symbols_str` | `load_symbols_str` | Load `.sym` text directly (no host file — e.g. an in-memory build's output). Replaces the table. |
+| `clear_symbols` | `clear_symbols` | Drop the loaded table. |
 | `resolve_symbol` | `resolve_symbol` | Label name → 24-bit address. |
+| `symbol_for_addr` | `symbol_for_addr` | 24-bit address → nearest preceding label in its bank (the inverse). |
+| `enable_dma_trace` / `take_dma_trace` | `enable_dma_trace` / `take_dma_trace` | DMA→VRAM transfer bytes with scanline/H-clock + blank flags (the CLI `--dma-trace`). |
+| `enable_dsp_trace` / `take_dsp_trace` | `enable_dsp_trace` / `take_dsp_trace` | S-DSP register writes from the SPC700 side (the CLI `--dsp-trace`). |
+| `enable_mailbox_log` / `take_mailbox_log` | `enable_mailbox_log` / `take_mailbox_log` | CPU↔APU `$2140-43` traffic with the accessing PC, symbolised (the CLI `--apu-log`). |
+| `enable_sa1_log` / `take_sa1_log` | `enable_sa1_log` / `take_sa1_log` | Main-CPU accesses to SA-1 MMIO, symbolised (the CLI `--sa1-log`). |
+| `enable_sa1_side_log` / `take_sa1_side_log` | `enable_sa1_side_log` / `take_sa1_side_log` | SA-1-side MMIO accesses (the CLI `--sa1-side-log`). |
+| `enable_sa1_trace` / `take_sa1_trace` | `enable_sa1_trace` / `take_sa1_trace` | Per-instruction SA-1 register trace (the CLI `--sa1-trace`). |
+| `enable_superfx_trace` / `take_superfx_trace` | `enable_superfx_trace` / `take_superfx_trace` | Per-opcode GSU trace incl. GO/STOP edges (the CLI `--superfx-trace`). |
+| `enable_dsp1_trace` / `take_dsp1_trace` | `enable_dsp1_trace` / `take_dsp1_trace` | DSP-1 microcode + DR/SR port stream; `take` optionally decodes command transactions (the CLI `--dsp1-trace` / `--dsp1-trace-commands`). |
+| `enable_spc_trace` / `take_spc_trace` | `enable_spc_trace` / `take_spc_trace` | Per-instruction SPC700 trace with timer-2 state (the CLI `--spc-trace`). |
+| `frame_hash` | `frame_hash` / `frame_hash_native` | 64-bit pixel hash of the current frame as 16 hex chars — the CLI's `fbhash=` value. `native: true` hashes the 512×448 capture (enable it first; native and non-native values are not comparable). |
+| `set_native_capture` | `set_native_capture` | Toggle native 512×448 capture for `screenshot`/`frame_hash` `native` modes. |
+| `wram_page_hashes` | `wram_page_hashes` | Stable FNV-1a-64 per WRAM page (default 4 KiB → 32 hashes). Diff two calls to localise a WRAM change. |
+| `wram_snapshot` | `wram_snapshot` | Full-WRAM FNV-1a-64 hash (+ the raw 128 KiB base64 with `include_data`). |
+| `loop_probe` | `loop_probe` | Hang diagnostic: run `max_steps` and count distinct PCs (a handful ⇒ tight spin loop). |
+| `enable_nocash_log` / `take_nocash_log` | `enable_nocash_log` / `take_nocash_log` | The `$21FC` Nocash TTY (`SNES_NOCASH` text): drain returns `{text, base64}`. |
+| `enable_wdm_log` / `take_wdm_log` | `enable_wdm_log` / `take_wdm_log` | The `WDM` assert channel (`SNES_ASSERT` → `WDM $00`): drain returns `[{pc, operand, symbol}]`. |
 
 With a symbol table loaded, the address-taking tools (`peek_memory`,
-`poke_memory`, `run_until_pc`, `run_until_mem_*`, `bp_add`) also accept a
-`symbol` name in place of the numeric address — e.g.
-`peek_memory {symbol: "monster_x", count: 2}`.
+`poke_memory`, `run_until_pc`, `run_until_mem_*`, `bp_add`, `disasm_cpu`,
+`enable_mem_trace`) also accept a `symbol` name in place of the numeric
+address — e.g. `peek_memory {symbol: "monster_x", count: 2}`, or a
+symbol-bounded watch range `bp_add {kind: "mem", symbol: "buf_start",
+hi_symbol: "buf_end"}`.
+
+Since symbols v2 (#179) the table carries **two address spaces**: the
+24-bit CPU bus and the SPC700's 16-bit ARAM. `load_symbols` /
+`load_symbols_str` take `space: "aram"` for a wla-spc700 driver's `.sym`
+(loading one space never clobbers the other), `resolve_symbol` /
+`symbol_for_addr` take the same `space` argument, and the ARAM tools
+(`disasm_spc`, `peek_aram`) accept `symbol` names resolved in the ARAM
+space — `disasm_spc` output is annotated from it. WLA-DX
+`[definitions]` constants also resolve by name (they never annotate
+addresses — a constant is not a location).
+
+#### Reading the SDK assert/log channels over MCP
+
+An agent debugging an SDK-built ROM watches the two debug channels the
+same way the CLI's `--nocash-out` / `--wdm-out` flags do — enable, run,
+drain:
+
+```text
+enable_nocash_log {}   # $21FC TTY — SNES_NOCASH("...") text output
+enable_wdm_log {}      # WDM $42 — SNES_ASSERT "fired here" events
+run {}                 # or step / step_until_frame / run_until_break
+pause {}
+take_nocash_log {}     # → {text: "hello\n", base64: "aGVsbG8K"}
+take_wdm_log {}        # → {events: [{pc: 32779, operand: 0, symbol: "assert_fail+0x02"}]}
+```
+
+An empty `take_wdm_log` after a run is the "no assertions fired" green
+light a CI-style probe wants; the Nocash text is the ROM's own printf
+channel. Draining resets each channel, so successive takes return only
+new output.
+
+#### Loading homebrew straight from the assembler
+
+A build loop that never touches the filesystem, including a
+checksum-invalid work-in-progress image and a pointer device:
+
+```text
+load_rom_bytes {rom_base64: "<the .sfc bytes>", force_mapper: "lorom"}
+set_port_device {port: 0, device: "mouse"}
+set_mouse {dx: 5, dy: 0, buttons: 1}
+step_until_frame {}
+```
+
+`force_mapper` / `force_region` accept exactly the CLI's
+`--force-mapper` / `--force-region` values, so a recipe translates
+between the two transports verbatim.
 
 ---
 

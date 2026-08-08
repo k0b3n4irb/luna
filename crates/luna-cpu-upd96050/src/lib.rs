@@ -278,13 +278,15 @@ impl Upd96050 {
             flags_a: self.flags_a,
             flags_b: self.flags_b,
         };
-        bincode::serialize(&st).unwrap_or_default()
+        bincode::serde::encode_to_vec(&st, bincode::config::standard()).unwrap_or_default()
     }
 
     /// Restore the mutable state produced by [`Self::save_state`], leaving
     /// the microcode ROMs intact.
     pub fn load_state(&mut self, data: &[u8]) {
-        if let Ok(st) = bincode::deserialize::<Upd96050State>(data) {
+        if let Ok((st, _)) =
+            bincode::serde::decode_from_slice::<Upd96050State, _>(data, bincode::config::standard())
+        {
             self.revision = st.revision;
             for (slot, w) in self.data_ram.iter_mut().zip(st.data_ram) {
                 *slot = w;

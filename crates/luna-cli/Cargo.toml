@@ -21,7 +21,10 @@ luna-api        = { workspace = true }
 luna-mcp-server = { workspace = true }
 
 clap       = { workspace = true }
+serde      = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }
+toml       = { workspace = true }
+toml_edit  = { workspace = true }
 tokio      = { workspace = true, features = ["macros", "rt-multi-thread", "io-std"] }
 
 [lints]

@@ -18,6 +18,7 @@ mod parsers;
 mod rom;
 mod run;
 mod state;
+mod test_cmd;
 mod wram_trace;
 
 use dumps::{run_assets_dump, run_spc_dump};
@@ -120,14 +121,51 @@ enum Command {
         #[arg(long = "force-region")]
         force_region: Option<String>,
     },
+    /// Run manifest-driven homebrew tests (issue #181): one TOML per
+    /// test (rom, input, run bound, asserts), executed in-process
+    /// through `luna-api`. Exit 0 = all pass, 1 = assert failures,
+    /// 2 = manifest/usage errors — the CI contract.
+    Test {
+        /// Manifest files, or directories scanned recursively for
+        /// `*.toml`. Defaults to `./tests`.
+        paths: Vec<std::path::PathBuf>,
+        /// Rewrite each manifest's `asserts.fbhash` with the measured
+        /// value (regenerate goldens after an intended render change).
+        /// Formatting and comments are preserved.
+        #[arg(long)]
+        update: bool,
+        /// Only run manifests whose path contains this substring.
+        #[arg(long)]
+        only: Option<String>,
+        /// Also print a machine-readable JSON report to stdout.
+        #[arg(long = "report", value_parser = ["json"])]
+        report: Option<String>,
+    },
     /// Serve the Luna MCP server on stdio.
     ///
-    /// Once started, Luna exposes a tool catalogue (`load_rom`, reset,
-    /// step, state, screenshot, `drain_audio`, `peek_memory`, `peek_aram`)
-    /// to any connected MCP client (Claude Desktop, Claude Code,
-    /// custom clients). The process stays alive until the client
-    /// closes the stream.
-    Mcp,
+    /// Once started, Luna exposes its full tool catalogue (load / run /
+    /// observe / trace — see the book's MCP section, or the
+    /// `capabilities` tool at runtime) to any connected MCP client
+    /// (Claude Desktop, Claude Code, custom clients). The process stays
+    /// alive until the client closes the stream. With `--rom`, the
+    /// session starts with the ROM (and symbols) already loaded.
+    Mcp {
+        /// Preload a ROM so the client can skip `load_rom` (a `<rom>.sym`
+        /// beside it is auto-loaded, wlalink-style).
+        #[arg(long)]
+        rom: Option<std::path::PathBuf>,
+        /// Explicit WLA-DX `.sym` to load after the ROM (overrides the
+        /// beside-ROM auto-detection).
+        #[arg(long, requires = "rom")]
+        sym: Option<std::path::PathBuf>,
+        /// Force the mapper for `--rom` (lorom, hirom, exhirom, sa1,
+        /// superfx, dsp1, sdd1, spc7110) instead of header auto-detection.
+        #[arg(long = "force-mapper", requires = "rom")]
+        force_mapper: Option<String>,
+        /// Force the video standard for `--rom` (ntsc, pal).
+        #[arg(long = "force-region", requires = "rom")]
+        force_region: Option<String>,
+    },
     /// Run the emulator through `luna-api` and emit a JSON state
     /// snapshot — the same data the MCP `state` tool returns.
     ///
@@ -179,6 +217,11 @@ enum Command {
         /// `state` run can also emit a visual baseline.
         #[arg(long)]
         print_fbhash: bool,
+        /// Track the 65C816 call stack (JSR/JSL/RTS/RTL + interrupts,
+        /// issue #180) during the run; the `--out` JSON gains a
+        /// `call_stack` array of `{pc, from, kind, symbol}` frames.
+        #[arg(long = "call-stack")]
+        call_stack: bool,
         /// Emit the native 512×448 frame (issue #115): hi-res modes 5/6 and
         /// pseudo-512 keep their two horizontal subpixels per dot, interlace
         /// keeps both fields as separate lines — instead of the default
@@ -648,7 +691,28 @@ fn main() -> ExitCode {
             force_mapper.as_deref(),
             force_region.as_deref(),
         ),
-        Command::Mcp => serve_mcp(),
+        Command::Test {
+            paths,
+            update,
+            only,
+            report,
+        } => test_cmd::run_tests(
+            &paths,
+            update,
+            only.as_deref(),
+            report.as_deref() == Some("json"),
+        ),
+        Command::Mcp {
+            rom,
+            sym,
+            force_mapper,
+            force_region,
+        } => serve_mcp(
+            rom.as_deref(),
+            sym.as_deref(),
+            force_mapper.as_deref(),
+            force_region.as_deref(),
+        ),
         Command::State {
             rom,
             steps,
@@ -704,6 +768,7 @@ fn main() -> ExitCode {
             dump_aram,
             wdm_out,
             print_fbhash,
+            call_stack,
             native_res,
         } => run_state(
             &rom,
@@ -760,6 +825,7 @@ fn main() -> ExitCode {
             load_state.as_deref(),
             wdm_out.as_deref(),
             print_fbhash,
+            call_stack,
             native_res,
         ),
         Command::Frames {
@@ -861,7 +927,31 @@ fn main() -> ExitCode {
 
 /// `luna mcp` — serve the Luna MCP server on stdio until the client
 /// disconnects.
-fn serve_mcp() -> ExitCode {
+fn serve_mcp(
+    rom: Option<&std::path::Path>,
+    sym: Option<&std::path::Path>,
+    force_mapper: Option<&str>,
+    force_region: Option<&str>,
+) -> ExitCode {
+    // Preload before the transport comes up, so the client's first
+    // `state` already sees the ROM (issue #174). Failures are startup
+    // errors — an MCP client can't fix a bad --rom path interactively.
+    let mut em = luna_api::Emulator::new();
+    if let Some(rom) = rom {
+        if let Err(e) = crate::rom::load_rom_into(&mut em, rom, force_mapper, force_region, None) {
+            eprintln!("error: {e}");
+            return ExitCode::from(1);
+        }
+        if let Some(sym) = sym {
+            match em.load_symbols(sym) {
+                Ok(n) => eprintln!("loaded {n} symbols from {}", sym.display()),
+                Err(e) => {
+                    eprintln!("error: reading {}: {e}", sym.display());
+                    return ExitCode::from(1);
+                }
+            }
+        }
+    }
     // Build a fresh tokio runtime here rather than `#[tokio::main]` so
     // the rest of the CLI (which doesn't need async) stays sync.
     let rt = match tokio::runtime::Builder::new_multi_thread()
@@ -874,7 +964,7 @@ fn serve_mcp() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    match rt.block_on(luna_mcp_server::serve_stdio()) {
+    match rt.block_on(luna_mcp_server::serve_stdio_with(em)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: MCP server: {e}");

@@ -16,6 +16,55 @@ use crate::parsers::{
 };
 use crate::rom::load_rom_into;
 
+/// One `--peek` result mirrored into the `--out` JSON (issue #175), so a
+/// harness reads peeks from the same machine-readable channel as the
+/// state instead of regex-parsing the stderr hexdump.
+#[derive(serde::Serialize)]
+struct PeekOut {
+    /// The `--peek` spec verbatim.
+    spec: String,
+    /// `"cpu"` (24-bit bus) or `"aram"` (16-bit SPC700 offset).
+    space: &'static str,
+    /// Resolved start address (`bank << 16 | offset` for cpu).
+    addr: u32,
+    /// The bytes read, lowercase hex, two chars per byte.
+    bytes_hex: String,
+    /// Present when the peek failed (bad spec / unknown symbol / error).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl PeekOut {
+    fn ok(spec: &str, space: &'static str, addr: u32, bytes: &[u8]) -> Self {
+        Self {
+            spec: spec.to_string(),
+            space,
+            addr,
+            bytes_hex: hex_str(bytes),
+            error: None,
+        }
+    }
+
+    fn err(spec: &str, space: &'static str, error: String) -> Self {
+        Self {
+            spec: spec.to_string(),
+            space,
+            addr: 0,
+            bytes_hex: String::new(),
+            error: Some(error),
+        }
+    }
+}
+
+/// The `--out` payload: the [`luna_api::EmulatorState`] fields at the top
+/// level (unchanged for existing consumers) plus the `peeks` array.
+#[derive(serde::Serialize)]
+struct StateOut<'a> {
+    #[serde(flatten)]
+    state: &'a luna_api::EmulatorState,
+    peeks: &'a [PeekOut],
+}
+
 /// `luna state` — exercise the public `luna-api` surface end-to-end.
 pub(crate) fn run_state(
     rom: &std::path::Path,
@@ -72,12 +121,18 @@ pub(crate) fn run_state(
     load_state_path: Option<&std::path::Path>,
     wdm_out: Option<&std::path::Path>,
     print_fbhash: bool,
+    call_stack: bool,
     native_res: bool,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
     if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, dsp1_rom) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
+    }
+    if call_stack {
+        // Issue #180: track JSR/JSL/RTS/RTL + interrupts for the whole
+        // run; the --out JSON then carries state.call_stack.
+        em.enable_call_stack(true);
     }
     if native_res {
         // Issue #115: keep the un-collapsed 512×448 pixels alongside the
@@ -126,7 +181,7 @@ pub(crate) fn run_state(
         Some(Ok(v)) => v,
         Some(Err(e)) => {
             eprintln!("error: --mouse: {e}");
-            return ExitCode::from(1);
+            return ExitCode::from(2);
         }
         None => Vec::new(),
     };
@@ -136,7 +191,7 @@ pub(crate) fn run_state(
         Some(Ok(v)) => v,
         Some(Err(e)) => {
             eprintln!("error: --superscope: {e}");
-            return ExitCode::from(1);
+            return ExitCode::from(2);
         }
         None => Vec::new(),
     };
@@ -250,7 +305,7 @@ pub(crate) fn run_state(
             Ok(v) => v,
             Err(e) => {
                 eprintln!("error: --input: {e}");
-                return ExitCode::from(1);
+                return ExitCode::from(2);
             }
         },
     };
@@ -451,6 +506,9 @@ pub(crate) fn run_state(
         }
     }
 
+    // Each --peek result also lands, machine-readable, in the --out JSON
+    // (issue #175) — the stderr hexdump stays for humans.
+    let mut peek_outs: Vec<PeekOut> = Vec::new();
     for spec in peek_specs {
         // `APU:OFFSET:COUNT` reads ARAM instead of the CPU bus (#122):
         // checked first because the prefix is unambiguous.
@@ -460,10 +518,17 @@ pub(crate) fn run_state(
                     Ok(bytes) => {
                         eprintln!("peek APU:{:04X} +{:04X}:", offset, bytes.len());
                         print_hex_dump(0, offset, &bytes);
+                        peek_outs.push(PeekOut::ok(spec, "aram", u32::from(offset), &bytes));
                     }
-                    Err(e) => eprintln!("error: peek_aram `{spec}`: {e}"),
+                    Err(e) => {
+                        eprintln!("error: peek_aram `{spec}`: {e}");
+                        peek_outs.push(PeekOut::err(spec, "aram", e.to_string()));
+                    }
                 },
-                Err(e) => eprintln!("error: --peek `{spec}`: {e}"),
+                Err(e) => {
+                    eprintln!("error: --peek `{spec}`: {e}");
+                    peek_outs.push(PeekOut::err(spec, "aram", e));
+                }
             }
             continue;
         }
@@ -486,10 +551,18 @@ pub(crate) fn run_state(
                 Ok(bytes) => {
                     eprintln!("peek ${:02X}:{:04X} +{:04X}:", bank, offset, bytes.len());
                     print_hex_dump(bank, offset, &bytes);
+                    let addr = (u32::from(bank) << 16) | u32::from(offset);
+                    peek_outs.push(PeekOut::ok(spec, "cpu", addr, &bytes));
                 }
-                Err(e) => eprintln!("error: peek_memory `{spec}`: {e}"),
+                Err(e) => {
+                    eprintln!("error: peek_memory `{spec}`: {e}");
+                    peek_outs.push(PeekOut::err(spec, "cpu", e.to_string()));
+                }
             },
-            Err(e) => eprintln!("error: --peek `{spec}`: {e}"),
+            Err(e) => {
+                eprintln!("error: --peek `{spec}`: {e}");
+                peek_outs.push(PeekOut::err(spec, "cpu", e));
+            }
         }
     }
 
@@ -544,9 +617,9 @@ pub(crate) fn run_state(
             match parse_assert_spec_no_bank(spec) {
                 Ok((offset, want)) => {
                     let res = if kind == 0 {
-                        em.peek_aram(offset, want.len() as u16)
+                        em.peek_aram(offset, want.len() as u32)
                     } else {
-                        em.peek_vram(offset, want.len() as u16)
+                        em.peek_vram(offset, want.len() as u32)
                     };
                     match res {
                         Ok(got) if got == want => {
@@ -820,7 +893,10 @@ pub(crate) fn run_state(
     }
 
     let state = em.state();
-    let json = match serde_json::to_string_pretty(&state) {
+    let json = match serde_json::to_string_pretty(&StateOut {
+        state: &state,
+        peeks: &peek_outs,
+    }) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: serialising state: {e}");

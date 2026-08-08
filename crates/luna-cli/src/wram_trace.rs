@@ -34,7 +34,7 @@ pub(crate) fn run_wram_trace(
             Ok(v) => v,
             Err(e) => {
                 eprintln!("error: --input: {e}");
-                return ExitCode::from(1);
+                return ExitCode::from(2);
             }
         },
     };

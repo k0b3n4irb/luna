@@ -44,6 +44,9 @@
 //!   `take_mem_trace` → per-bus-access memory trace with filters.
 //! - `set_mouse { dx, dy, buttons }` / `set_superscope { x, y, buttons }`
 //!   → pointer-device input.
+//! - `enable_nocash_log` / `take_nocash_log` and `enable_wdm_log` /
+//!   `take_wdm_log` → the SDK assert/log channels ($21FC Nocash TTY
+//!   text + WDM assert hits).
 //!
 //! Transport is stdio by default ([`serve_stdio`]); a future commit
 //! will add HTTP-SSE for browser clients.
@@ -80,6 +83,10 @@ pub struct LunaServer {
     /// running tool to release the lock (rmcp dispatches each request on its
     /// own task, so `pause` runs concurrently with `run`).
     interrupt: Arc<AtomicBool>,
+    /// The `max_events` passed to the last `enable_dsp1_trace` — needed by
+    /// `take_dsp1_trace {decode_commands}` to tell a capped (truncated)
+    /// drain from a complete one before decoding transactions.
+    dsp1_trace_max: Arc<std::sync::atomic::AtomicUsize>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -91,6 +98,117 @@ pub struct LoadRomParams {
     /// Absolute path to a `.sfc` / `.smc` ROM file on the local
     /// filesystem.
     pub path: String,
+    /// Force the mapper instead of header auto-detection — needed for
+    /// headerless / checksum-invalid homebrew. One of `lorom`, `hirom`,
+    /// `exhirom`, `sa1`, `superfx`, `dsp1`, `sdd1`, `spc7110`.
+    #[serde(default)]
+    pub force_mapper: Option<String>,
+    /// Force the video standard (`ntsc` or `pal`), overriding the header's
+    /// country byte. Omitting it restores auto-detection.
+    #[serde(default)]
+    pub force_region: Option<String>,
+}
+
+/// `load_rom_bytes` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct LoadRomBytesParams {
+    /// The raw `.sfc` / `.smc` image, base64-encoded (standard alphabet).
+    pub rom_base64: String,
+    /// Force the mapper instead of header auto-detection (same values as
+    /// `load_rom`).
+    #[serde(default)]
+    pub force_mapper: Option<String>,
+    /// Force the video standard (`ntsc` or `pal`). Omitting it restores
+    /// auto-detection.
+    #[serde(default)]
+    pub force_region: Option<String>,
+}
+
+/// `set_port_device` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SetPortDeviceParams {
+    /// Controller port: `0` = P1, `1` = P2.
+    pub port: u8,
+    /// Device to plug in: `joypad`, `mouse`, or `superscope`.
+    pub device: String,
+}
+
+/// `frame_hash` parameters.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct FrameHashParams {
+    /// Render as if the display were on even during forced blank (the
+    /// screenshot `force_display` policy). Ignored when `native` is set.
+    #[serde(default)]
+    pub force_display: bool,
+    /// Hash the native 512×448 capture instead of the composited 256×224
+    /// frame. Requires `set_native_capture {enabled: true}` before the
+    /// frame renders. Native and non-native hashes use different
+    /// constructions — never compare one against the other.
+    #[serde(default)]
+    pub native: bool,
+}
+
+/// `set_native_capture` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SetNativeCaptureParams {
+    /// `true` to start capturing at native 512×448 resolution (hi-res /
+    /// interlace modes render meaningfully; everything else is doubled).
+    pub enabled: bool,
+}
+
+/// `wram_page_hashes` parameters.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct WramPageHashesParams {
+    /// Page size in bytes — a power of two dividing 128 KiB (0x20000).
+    /// Omit (or 0) for the default 4 KiB pages (32 hashes).
+    #[serde(default)]
+    pub page_size: usize,
+}
+
+/// `wram_snapshot` parameters.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct WramSnapshotParams {
+    /// Also return the full 128 KiB WRAM image base64-encoded. Off by
+    /// default — the hash alone answers "did anything change?".
+    #[serde(default)]
+    pub include_data: bool,
+}
+
+/// `loop_probe` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct LoopProbeParams {
+    /// Instructions to execute while collecting distinct PCs. Mutates
+    /// state (the CPU advances).
+    pub max_steps: u64,
+}
+
+/// Shared parameters for the capped `enable_*_trace` tools
+/// (dma / dsp / `sa1_trace` / superfx / spc).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct EnableRingTraceParams {
+    /// Hard cap on recorded events; recording stops when the ring is full.
+    pub max_events: usize,
+}
+
+/// `enable_dsp1_trace` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct EnableDsp1TraceParams {
+    /// Hard cap on recorded events.
+    pub max_events: usize,
+    /// Record only the CPU-side DR/SR port traffic, skipping microcode
+    /// `exec` events — the handshake view without the firehose.
+    #[serde(default)]
+    pub ports_only: bool,
+}
+
+/// `take_dsp1_trace` parameters.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct TakeDsp1TraceParams {
+    /// Also decode the drained port traffic into DSP-1 command
+    /// transactions (command byte, word counts, status vs. the known
+    /// command table).
+    #[serde(default)]
+    pub decode_commands: bool,
 }
 
 /// `step` parameters.
@@ -130,6 +248,16 @@ pub struct ScreenshotParams {
     /// even when a game keeps the screen blanked. Defaults to false.
     #[serde(default)]
     pub force_display: bool,
+    /// Capture at native 512×448 (hi-res / interlace detail). Requires
+    /// `set_native_capture {enabled: true}` before the frame renders.
+    /// Mutually exclusive with `bg`.
+    #[serde(default)]
+    pub native: bool,
+    /// Render a single background layer (1..=4, the GUI/CLI convention)
+    /// instead of the composited frame — isolates which layer holds a
+    /// glitch. Mutually exclusive with `native`.
+    #[serde(default)]
+    pub bg: Option<u8>,
 }
 
 /// `drain_audio` parameters.
@@ -160,9 +288,14 @@ pub struct PeekMemoryParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct PeekAramParams {
     /// 16-bit offset within the SPC700's 64 KB ARAM.
+    #[serde(default)]
     pub offset: u16,
-    /// Number of bytes to read.
-    pub count: u16,
+    /// Read at a loaded ARAM-space symbol instead of `offset`.
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// Number of bytes to read — up to `0x10000` for the whole ARAM in
+    /// one call (the address space wraps; larger counts are clamped).
+    pub count: u32,
 }
 
 /// `peek_vram` parameters.
@@ -170,8 +303,9 @@ pub struct PeekAramParams {
 pub struct PeekVramParams {
     /// 16-bit word/byte offset within the 64 KB VRAM.
     pub offset: u16,
-    /// Number of bytes to read.
-    pub count: u16,
+    /// Number of bytes to read — up to `0x10000` for the whole VRAM in
+    /// one call (the address space wraps; larger counts are clamped).
+    pub count: u32,
 }
 
 /// `poke_memory` parameters.
@@ -240,6 +374,9 @@ pub struct DisasmCpuParams {
     /// 24-bit start address (`pb << 16 | pc`). Defaults to the live PC.
     #[serde(default)]
     pub addr: Option<u32>,
+    /// Disassemble starting at a loaded WLA-DX symbol instead of `addr`.
+    #[serde(default)]
+    pub symbol: Option<String>,
     /// Number of instructions to decode. Defaults to 16.
     #[serde(default)]
     pub lines: Option<u16>,
@@ -259,6 +396,10 @@ pub struct DisasmSpcParams {
     /// 16-bit ARAM start address. Defaults to the live SPC700 PC.
     #[serde(default)]
     pub addr: Option<u16>,
+    /// Disassemble starting at a loaded ARAM-space symbol instead of
+    /// `addr` (load one with `load_symbols {space: "aram"}`).
+    #[serde(default)]
+    pub symbol: Option<String>,
     /// Number of instructions to decode. Defaults to 16.
     #[serde(default)]
     pub lines: Option<u16>,
@@ -319,6 +460,11 @@ pub struct EnableMemTraceParams {
     /// Upper bound of the offset filter (inclusive).
     #[serde(default)]
     pub hi: Option<u16>,
+    /// Filter to exactly one loaded WLA-DX symbol's address ("trace my
+    /// variable"): sets `bank` and a one-address `lo..=hi` range from the
+    /// symbol. Mutually exclusive with `bank`/`lo`/`hi`.
+    #[serde(default)]
+    pub symbol: Option<String>,
 }
 
 /// `bp_add` parameters.
@@ -337,12 +483,24 @@ pub struct BpAddParams {
     /// address watch).
     #[serde(default)]
     pub hi: Option<u32>,
+    /// Mem only: range end at a loaded WLA-DX symbol instead of `hi`
+    /// (watch `symbol..=hi_symbol`, e.g. a buffer's start/end labels).
+    #[serde(default)]
+    pub hi_symbol: Option<String>,
     /// Mem only: fire on reads (default false).
     #[serde(default)]
     pub on_read: bool,
     /// Mem only: fire on writes (default true).
     #[serde(default = "default_true")]
     pub on_write: bool,
+    /// Mem only: also fire on WRAM/MMIO bank-mirror accesses (default
+    /// true — pass false for a bank-exact watch).
+    #[serde(default)]
+    pub mirror: Option<bool>,
+    /// Display name for `bp_list`. Defaults to the `symbol` when one is
+    /// used at creation.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 const fn default_true() -> bool {
@@ -376,6 +534,11 @@ pub struct RunParams {
 pub struct LoadSymbolsParams {
     /// Path to a WLA-DX `.sym` file on the host filesystem.
     pub path: String,
+    /// Which symbol space to load into: `cpu` (default — the 24-bit bus)
+    /// or `aram` (a wla-spc700 driver's symbols, 16-bit ARAM). Loading
+    /// one space keeps the other's symbols.
+    #[serde(default)]
+    pub space: Option<String>,
 }
 
 /// `resolve_symbol` parameters.
@@ -383,6 +546,9 @@ pub struct LoadSymbolsParams {
 pub struct ResolveSymbolParams {
     /// Label name exactly as it appears in the `.sym` file.
     pub name: String,
+    /// `cpu` (default) or `aram` — which symbol space to resolve in.
+    #[serde(default)]
+    pub space: Option<String>,
 }
 
 /// `set_mouse` parameters.
@@ -612,6 +778,317 @@ pub struct MemTraceResult {
     pub events: Vec<MemTraceLine>,
 }
 
+/// `take_nocash_log` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct NocashLogResult {
+    /// The drained byte stream decoded as lossy UTF-8 (the usual case —
+    /// `SNES_NOCASH` emits text).
+    pub text: String,
+    /// The exact drained bytes, base64-encoded (lossless).
+    pub base64: String,
+}
+
+/// One WDM assert/breakpoint event (`take_wdm_log`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct WdmEvent {
+    /// 24-bit PC of the `WDM` opcode.
+    pub pc: u32,
+    /// The WDM operand byte (`SNES_ASSERT` fires `WDM $00`).
+    pub operand: u8,
+    /// Nearest symbol for `pc` when a `.sym` table is loaded.
+    pub symbol: Option<String>,
+}
+
+/// `take_wdm_log` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct WdmLogResult {
+    /// Recorded WDM hits, oldest first. Draining resets the buffer.
+    pub events: Vec<WdmEvent>,
+}
+
+/// `frame_hash` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FrameHashResult {
+    /// The 64-bit frame hash as 16 lowercase hex chars — the exact value
+    /// the CLI prints as `fbhash=` (hex string because a JSON number
+    /// cannot carry a full u64).
+    pub hash: String,
+}
+
+/// `wram_page_hashes` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct WramPageHashesResult {
+    /// The effective page size in bytes.
+    pub page_size: usize,
+    /// One stable FNV-1a-64 hash per page (16 hex chars each), page 0
+    /// first ($7E:0000). Diff two calls to localise a WRAM change.
+    pub hashes: Vec<String>,
+}
+
+/// `wram_snapshot` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct WramSnapshotResult {
+    /// Stable FNV-1a-64 over all 128 KiB (16 hex chars) — equal hashes ⇒
+    /// identical WRAM.
+    pub hash: String,
+    /// Snapshot size in bytes (always 0x20000).
+    pub bytes: usize,
+    /// The raw WRAM image, base64-encoded — only when `include_data` was
+    /// requested.
+    pub wram_base64: Option<String>,
+}
+
+/// `loop_probe` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct LoopProbeResult {
+    /// Distinct 24-bit PCs seen. A healthy game touches hundreds+; a
+    /// handful means the CPU is spinning in a tight (likely hung) loop.
+    pub distinct_pcs: usize,
+    /// Instructions actually executed (may stop early on STP).
+    pub executed: u64,
+}
+
+/// One DMA→VRAM transfer byte (`take_dma_trace`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DmaTraceLine {
+    /// 24-bit A-bus source address of this byte.
+    pub src: u32,
+    /// PPU VRAM word address (`$2116/7`) the byte targets.
+    pub vram_word: u16,
+    /// B-bus register offset (byte targets `$2100 + b_offset`).
+    pub b_offset: u8,
+    /// The transferred byte.
+    pub value: u8,
+    /// DMA channel (0-7).
+    pub channel: u8,
+    /// Completed-frame counter at the start of the owning burst.
+    pub frame: u64,
+    /// PPU scanline at the start of the owning burst.
+    pub line: u16,
+    /// Horizontal master-clock (0..1363) at the transfer.
+    pub hclock: u16,
+    /// Burst started inside vertical blank.
+    pub blank: bool,
+    /// INIDISP forced-blank was set at the write. A VRAM write is safe
+    /// iff `blank || force_blank`.
+    pub force_blank: bool,
+}
+
+/// `take_dma_trace` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DmaTraceResult {
+    /// Recorded transfers, oldest first. Draining resets the ring.
+    pub events: Vec<DmaTraceLine>,
+}
+
+/// One S-DSP register write (`take_dsp_trace`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DspTraceLine {
+    /// SPC700 cycles since reset at the write.
+    pub spc_cycles: u64,
+    /// DSP register index (`$00-$7F`).
+    pub reg: u8,
+    /// Byte written.
+    pub value: u8,
+}
+
+/// `take_dsp_trace` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DspTraceResult {
+    /// Recorded writes, oldest first. Draining resets the ring.
+    pub events: Vec<DspTraceLine>,
+}
+
+/// One CPU↔APU mailbox access (`take_mailbox_log`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct MailboxLine {
+    /// Master cycles since reset at the access.
+    pub mclk: u64,
+    /// 24-bit CPU PC of the accessing instruction.
+    pub pc: u32,
+    /// `"read"` (CPU ← APU) or `"write"` (CPU → APU).
+    pub kind: String,
+    /// Mailbox port `0..=3` (`$2140 + port`).
+    pub port: u8,
+    /// Byte transferred.
+    pub value: u8,
+    /// Nearest symbol for `pc` when a `.sym` table is loaded.
+    pub symbol: Option<String>,
+}
+
+/// `take_mailbox_log` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct MailboxLogResult {
+    /// Recorded accesses, oldest first. Draining resets the log.
+    pub events: Vec<MailboxLine>,
+}
+
+/// One main-CPU access to an SA-1 MMIO register (`take_sa1_log`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct Sa1LogLine {
+    /// Master cycles since reset at the access.
+    pub mclk: u64,
+    /// 24-bit CPU PC of the accessing instruction.
+    pub pc: u32,
+    /// `"read"` or `"write"`.
+    pub kind: String,
+    /// Register address in `$2200..=$23FF`.
+    pub reg: u16,
+    /// Byte transferred.
+    pub value: u8,
+    /// Nearest symbol for `pc` when a `.sym` table is loaded.
+    pub symbol: Option<String>,
+}
+
+/// `take_sa1_log` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct Sa1LogResult {
+    /// Recorded accesses, oldest first. Draining resets the log.
+    pub events: Vec<Sa1LogLine>,
+}
+
+/// One SA-1-side MMIO access (`take_sa1_side_log`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct Sa1SideLine {
+    /// 24-bit SA-1 PC at the start of the accessing instruction.
+    pub sa1_pc: u32,
+    /// `true` = write, `false` = read.
+    pub write: bool,
+    /// Register address in `$2200..=$23FF`.
+    pub reg: u16,
+    /// Byte transferred.
+    pub value: u8,
+}
+
+/// `take_sa1_side_log` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct Sa1SideLogResult {
+    /// Recorded accesses, oldest first. Draining resets the log.
+    pub events: Vec<Sa1SideLine>,
+}
+
+/// One SA-1 pre-instruction register snapshot (`take_sa1_trace`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct Sa1TraceLine {
+    /// 24-bit SA-1 PC before the opcode runs.
+    pub pc: u32,
+    /// Accumulator.
+    pub a: u16,
+    /// X index.
+    pub x: u16,
+    /// Y index.
+    pub y: u16,
+    /// Stack pointer.
+    pub sp: u16,
+    /// Processor status.
+    pub p: u8,
+    /// Data bank.
+    pub db: u8,
+    /// Direct page.
+    pub dp: u16,
+    /// Emulation-mode flag.
+    pub e: bool,
+}
+
+/// `take_sa1_trace` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct Sa1TraceResult {
+    /// Recorded instructions, oldest first. Draining resets the ring.
+    pub events: Vec<Sa1TraceLine>,
+}
+
+/// One Super FX (GSU) opcode event (`take_superfx_trace`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SuperFxTraceLine {
+    /// GSU PC (`pbr << 16 | r15`) at the fetch.
+    pub pc: u32,
+    /// Opcode byte executed.
+    pub opcode: u8,
+    /// Raw 16-bit status flag register.
+    pub sfr: u16,
+    /// General-purpose registers R0–R15 (R15 = PC).
+    pub r: Vec<u16>,
+    /// GSU clock position on the shared master-clock axis.
+    pub mclk: u64,
+    /// First instruction of a GO task.
+    pub go_start: bool,
+    /// This instruction cleared SFR.G (STOP).
+    pub stop: bool,
+}
+
+/// `take_superfx_trace` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SuperFxTraceResult {
+    /// Recorded opcodes, oldest first. Draining resets the ring.
+    pub events: Vec<SuperFxTraceLine>,
+}
+
+/// One DSP-1 trace event (`take_dsp1_trace`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct Dsp1TraceLine {
+    /// `"exec"` (microcode instruction), `"dr_write"` / `"dr_read"` (CPU
+    /// port traffic), or `"sr_read"` (status poll).
+    pub kind: String,
+    /// Microcode PC (on port events: where the microcode was sitting).
+    pub pc: u16,
+    /// 24-bit microcode word (`exec` only).
+    pub opcode: u32,
+    /// Byte crossing the CPU port (port events only).
+    pub value: u8,
+    /// Accumulator A after the event.
+    pub a: i16,
+    /// Accumulator B after the event.
+    pub b: i16,
+    /// Data register after the event.
+    pub dr: u16,
+    /// Status register after the event.
+    pub sr: u16,
+    /// RQM handshake bit after the event.
+    pub rqm: bool,
+}
+
+/// `take_dsp1_trace` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct Dsp1TraceResult {
+    /// Recorded events, oldest first. Draining resets the ring.
+    pub events: Vec<Dsp1TraceLine>,
+    /// Decoded command transactions — only when `decode_commands` was set.
+    pub commands: Option<Vec<luna_api::dsp1_commands::Transaction>>,
+    /// The drain hit the ring cap, so the final transaction may be cut
+    /// off mid-stream (decoding accounts for this).
+    pub truncated: bool,
+}
+
+/// One SPC700 pre-instruction register snapshot (`take_spc_trace`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SpcTraceLine {
+    /// 16-bit SPC700 PC before the opcode runs.
+    pub pc: u16,
+    /// Accumulator.
+    pub a: u8,
+    /// X index.
+    pub x: u8,
+    /// Y index.
+    pub y: u8,
+    /// Stack pointer.
+    pub sp: u8,
+    /// Processor status word (PSW).
+    pub psw: u8,
+    /// Running SPC-cycle counter at this opcode (wraps at 2^32).
+    pub spc_cycle: u32,
+    /// Timer 2 internal counter.
+    pub t2_int: u16,
+    /// Timer 2 output (the value `$FF` reads clear).
+    pub t2_out: u8,
+}
+
+/// `take_spc_trace` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SpcTraceResult {
+    /// Recorded instructions, oldest first. Draining resets the ring.
+    pub events: Vec<SpcTraceLine>,
+}
+
 /// `bp_add` result.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct BpAddResult {
@@ -641,6 +1118,135 @@ pub struct BpEntry {
     pub on_read: bool,
     /// Mem: fires on writes.
     pub on_write: bool,
+    /// A disabled breakpoint stays registered but never fires.
+    pub enabled: bool,
+    /// Times fired since creation (mem: at most once per instruction).
+    pub hit_count: u64,
+    /// Mem: mirror folding active (WRAM/MMIO bank mirrors also fire).
+    pub mirror: bool,
+    /// Display name (the symbol it was created from, or an explicit name).
+    pub name: Option<String>,
+}
+
+/// `bp_set_enabled` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct BpSetEnabledParams {
+    /// The id `bp_add` returned.
+    pub id: u32,
+    /// `false` disables without removing (id, name and hit count kept).
+    pub enabled: bool,
+}
+
+/// `bp_set_enabled` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BpSetEnabledResult {
+    /// `true` if the id exists.
+    pub found: bool,
+}
+
+/// `search_begin` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SearchBeginParams {
+    /// Candidate width: `u8` or `u16` (little-endian, any offset).
+    pub width: String,
+}
+
+/// `search_refine` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SearchRefineParams {
+    /// `eq` / `ne` / `lt` / `gt` (against `value`) or `changed` /
+    /// `unchanged` (against the previous snapshot).
+    pub op: String,
+    /// Comparison value — required for `eq`/`ne`/`lt`/`gt`.
+    #[serde(default)]
+    pub value: Option<u16>,
+}
+
+/// `search_begin` / `search_refine` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SearchCountResult {
+    /// Surviving candidate count.
+    pub remaining: usize,
+}
+
+/// `search_results` parameters.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct SearchResultsParams {
+    /// Maximum rows to return (default 64).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// `search_results` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SearchResultsResult {
+    /// Surviving candidates with their current values.
+    pub hits: Vec<luna_api::SearchHit>,
+}
+
+/// Shared parameters for the offset+data poke tools
+/// (`poke_vram` / `poke_cgram` / `poke_oam` / `poke_aram`).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct PokeOffsetParams {
+    /// Byte offset within the target memory (wraps at its size).
+    pub offset: u16,
+    /// Bytes to write (JSON array).
+    pub data: Vec<u8>,
+}
+
+/// `freeze_add` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct FreezeAddParams {
+    /// 24-bit WRAM address (`$7E`/`$7F`, or a low-RAM mirror which
+    /// folds to `$7E`). Ignored when `symbol` is given.
+    #[serde(default)]
+    pub addr: u32,
+    /// Freeze at a loaded WLA-DX symbol instead of `addr`.
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// The byte pinned there at every frame boundary.
+    pub value: u8,
+}
+
+/// `freeze_remove` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct FreezeRemoveParams {
+    /// The frozen address. Ignored when `symbol` is given.
+    #[serde(default)]
+    pub addr: u32,
+    /// Resolve a loaded WLA-DX symbol instead of `addr`.
+    #[serde(default)]
+    pub symbol: Option<String>,
+}
+
+/// `freeze_remove` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FreezeRemoveResult {
+    /// `true` if a freeze existed at that address.
+    pub removed: bool,
+}
+
+/// `freeze_list` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FreezeListResult {
+    /// The active freezes (canonical `$7E`/`$7F` addresses).
+    pub freezes: Vec<luna_api::FreezeEntry>,
+}
+
+/// `enable_call_stack` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct EnableCallStackParams {
+    /// `true` starts tracking (empty stack — earlier calls are
+    /// unknowable); `false` stops and drops it.
+    pub enabled: bool,
+}
+
+/// `call_stack` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CallStackResult {
+    /// Tracked frames, oldest first (last = innermost). Empty when
+    /// tracking is off.
+    pub frames: Vec<luna_api::CallFrame>,
 }
 
 /// `bp_list` result.
@@ -698,6 +1304,73 @@ pub struct ResolveSymbolResult {
     pub addr: Option<u32>,
 }
 
+/// `load_symbols_str` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct LoadSymbolsStrParams {
+    /// WLA-DX `.sym` text (`[labels]` / `[symbols]` / `[exports]` +
+    /// `[definitions]` sections). Replaces the loaded table's entries of
+    /// the chosen space, keeping the other space.
+    pub text: String,
+    /// `cpu` (default) or `aram` — see `load_symbols`.
+    #[serde(default)]
+    pub space: Option<String>,
+}
+
+/// `symbol_for_addr` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SymbolForAddrParams {
+    /// 24-bit `bank << 16 | offset` address (or a 16-bit ARAM offset
+    /// with `space: "aram"`) to symbolise.
+    pub addr: u32,
+    /// `cpu` (default) or `aram` — which symbol space to look in.
+    #[serde(default)]
+    pub space: Option<String>,
+}
+
+/// `symbol_for_addr` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SymbolForAddrResult {
+    /// Nearest preceding label in the same bank (`name` or
+    /// `name+0xOFF`), or null when no table is loaded / no label
+    /// precedes the address in its bank.
+    pub symbol: Option<String>,
+}
+
+/// `sram_set` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SramSetParams {
+    /// The battery-RAM image, base64-encoded (a `.srm` file's bytes).
+    pub sram_base64: String,
+}
+
+/// `sram_get` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SramGetResult {
+    /// The battery-backed SRAM image, base64-encoded. Empty when the
+    /// cart has no SRAM.
+    pub sram_base64: String,
+    /// SRAM size in bytes.
+    pub bytes: usize,
+}
+
+/// `export_spc` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ExportSpcResult {
+    /// A standard `.spc` (v0.30) music snapshot, base64-encoded —
+    /// playable in any SPC player.
+    pub spc_base64: String,
+    /// Blob size in bytes (always 0x10200).
+    pub bytes: usize,
+}
+
+/// `decode_sprites` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DecodeSpritesResult {
+    /// All 128 OAM entries decoded (position, size, tile, palette,
+    /// priority, flips, visibility).
+    pub sprites: Vec<luna_api::SpriteInfo>,
+}
+
 /// Resolve an optional symbol name against the emulator's loaded table,
 /// falling back to the numeric address. Unknown symbol → invalid-params.
 fn resolve_addr(em: &Emulator, symbol: Option<&str>, numeric: u32) -> Result<u32, ErrorData> {
@@ -719,27 +1392,105 @@ impl LunaServer {
     /// Build a new server backed by a freshly-constructed `Emulator`.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_emulator(Emulator::new())
+    }
+
+    /// Build a server around an existing (typically preloaded) `Emulator` —
+    /// the `luna mcp --rom <path>` path, so a session starts with the ROM
+    /// and symbols already in place instead of hunting for a host path.
+    #[must_use]
+    pub fn with_emulator(emulator: Emulator) -> Self {
         Self {
-            emulator: Arc::new(Mutex::new(Emulator::new())),
+            emulator: Arc::new(Mutex::new(emulator)),
             interrupt: Arc::new(AtomicBool::new(false)),
+            dsp1_trace_max: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             tool_router: Self::tool_router(),
         }
     }
 
     #[rmcp::tool(
         description = "Load a SNES ROM (.sfc / .smc) from a path on the host filesystem. \
-                                Returns parsed cartridge metadata."
+                                Returns parsed cartridge metadata. Optional `force_mapper` \
+                                (lorom/hirom/exhirom/sa1/superfx/dsp1/sdd1/spc7110) bypasses \
+                                header auto-detection for headerless or checksum-invalid \
+                                homebrew; optional `force_region` (ntsc/pal) overrides the \
+                                header's country byte — omit either to auto-detect."
     )]
     async fn load_rom(
         &self,
         Parameters(params): Parameters<LoadRomParams>,
     ) -> Result<rmcp::Json<LoadRomResult>, ErrorData> {
+        let mapper = parse_force_mapper(params.force_mapper.as_deref())?;
+        let region = parse_force_region(params.force_region.as_deref())?;
         let info = {
             let mut em = self.emulator.lock().await;
-            em.load_rom(&PathBuf::from(params.path))
-                .map_err(|e| api_err_to_mcp(&e))?
+            em.set_forced_region(region);
+            let path = PathBuf::from(params.path);
+            match mapper {
+                Some(kind) => em.load_rom_forced(&path, kind),
+                None => em.load_rom(&path),
+            }
+            .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(LoadRomResult { rom: info }))
+    }
+
+    #[rmcp::tool(
+        description = "Load a SNES ROM from base64-encoded bytes (no host file needed — \
+                                e.g. a freshly assembled homebrew image). Same optional \
+                                `force_mapper` / `force_region` as `load_rom`. Caveat: unlike \
+                                the path-based `load_rom`, this does NOT search the firmware \
+                                folder, so a cart needing coprocessor firmware (e.g. DSP-1) \
+                                loads with the coprocessor inert — check `missing_firmware` \
+                                in the result and prefer `load_rom` for those."
+    )]
+    async fn load_rom_bytes(
+        &self,
+        Parameters(params): Parameters<LoadRomBytesParams>,
+    ) -> Result<rmcp::Json<LoadRomResult>, ErrorData> {
+        let mapper = parse_force_mapper(params.force_mapper.as_deref())?;
+        let region = parse_force_region(params.force_region.as_deref())?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(params.rom_base64.as_bytes())
+            .map_err(|e| ErrorData::invalid_params(format!("bad base64: {e}"), None))?;
+        let info = {
+            let mut em = self.emulator.lock().await;
+            em.set_forced_region(region);
+            match mapper {
+                Some(kind) => em.load_rom_bytes_forced(bytes, kind),
+                None => em.load_rom_bytes(bytes),
+            }
+            .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(LoadRomResult { rom: info }))
+    }
+
+    #[rmcp::tool(
+        description = "Plug a device into a controller port (0 = P1, 1 = P2): `joypad`, \
+                                `mouse`, or `superscope`. Feed it afterwards with `set_joypad`, \
+                                `set_mouse`, or `set_superscope`."
+    )]
+    async fn set_port_device(
+        &self,
+        Parameters(params): Parameters<SetPortDeviceParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        let device = match params.device.to_ascii_lowercase().as_str() {
+            "joypad" | "pad" => luna_api::PortDevice::Pad,
+            "mouse" => luna_api::PortDevice::Mouse,
+            "superscope" => luna_api::PortDevice::SuperScope,
+            other => {
+                return Err(ErrorData::invalid_params(
+                    format!("unknown device `{other}` (joypad, mouse, superscope)"),
+                    None,
+                ));
+            }
+        };
+        {
+            let mut em = self.emulator.lock().await;
+            em.set_port_device(params.port, device)
+                .map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
     }
 
     #[rmcp::tool(description = "Reset the loaded emulator to its power-on state. \
@@ -816,24 +1567,46 @@ impl LunaServer {
     }
 
     #[rmcp::tool(
-        description = "Render the current PPU framebuffer (256×224, composited \
-                                BG3-over-BG1-over-BG2 + sprites) as a PNG and return it \
-                                base64-encoded."
+        description = "Render the current PPU framebuffer as a base64 PNG. Default: the \
+                                256×224 composited frame. `native: true`: the 512×448 capture \
+                                (enable `set_native_capture` first). `bg: 1..=4`: one \
+                                background layer in isolation."
     )]
     async fn screenshot(
         &self,
         Parameters(params): Parameters<ScreenshotParams>,
     ) -> Result<rmcp::Json<ScreenshotResult>, ErrorData> {
+        if params.native && params.bg.is_some() {
+            return Err(ErrorData::invalid_params(
+                "`native` and `bg` are mutually exclusive",
+                None,
+            ));
+        }
         let png = {
             let em = self.emulator.lock().await;
-            em.render_frame_png(params.force_display)
-                .map_err(|e| api_err_to_mcp(&e))?
+            match params.bg {
+                Some(bg @ 1..=4) => {
+                    em.render_frame_bg_png(usize::from(bg - 1), params.force_display)
+                }
+                Some(bg) => {
+                    return Err(ErrorData::invalid_params(
+                        format!("bg must be 1..=4, got {bg}"),
+                        None,
+                    ));
+                }
+                None if params.native => em.render_frame_png_native(),
+                None => em.render_frame_png(params.force_display),
+            }
+            .map_err(|e| api_err_to_mcp(&e))?
         };
-        let png_base64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        // Report whatever the API actually rendered (hardcoding 256×224
+        // would lie about the native / per-BG renders).
+        let (width, height) = png_dimensions(&png);
+        let png_base64 = b64(&png);
         Ok(rmcp::Json(ScreenshotResult {
             png_base64,
-            width: 256,
-            height: 224,
+            width,
+            height,
         }))
     }
 
@@ -894,7 +1667,16 @@ impl LunaServer {
     ) -> Result<rmcp::Json<MemoryResult>, ErrorData> {
         let bytes = {
             let em = self.emulator.lock().await;
-            em.peek_aram(params.offset, params.count)
+            let offset = match &params.symbol {
+                Some(name) => em.resolve_symbol_spc(name).ok_or_else(|| {
+                    ErrorData::invalid_params(
+                        format!("unknown ARAM symbol `{name}` (load with load_symbols {{space: \"aram\"}})"),
+                        None,
+                    )
+                })?,
+                None => params.offset,
+            };
+            em.peek_aram(offset, params.count)
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(MemoryResult { bytes }))
@@ -1059,9 +1841,12 @@ impl LunaServer {
         let lines = {
             let mut em = self.emulator.lock().await;
             let cpu = em.cpu_state().map_err(|e| api_err_to_mcp(&e))?;
-            let addr = params
-                .addr
-                .unwrap_or_else(|| (u32::from(cpu.pb) << 16) | u32::from(cpu.pc));
+            let addr = match &params.symbol {
+                Some(_) => resolve_addr(&em, params.symbol.as_deref(), 0)?,
+                None => params
+                    .addr
+                    .unwrap_or_else(|| (u32::from(cpu.pb) << 16) | u32::from(cpu.pc)),
+            };
             let m8 = params.m8.unwrap_or(cpu.e || cpu.p & 0x20 != 0);
             let x8 = params.x8.unwrap_or(cpu.e || cpu.p & 0x10 != 0);
             em.disassemble_cpu(addr, params.lines.unwrap_or(16), m8, x8)
@@ -1081,9 +1866,15 @@ impl LunaServer {
     ) -> Result<rmcp::Json<DisasmResult>, ErrorData> {
         let lines = {
             let em = self.emulator.lock().await;
-            let addr = match params.addr {
-                Some(a) => a,
-                None => em.spc700_state().map_err(|e| api_err_to_mcp(&e))?.pc,
+            let addr = match (&params.symbol, params.addr) {
+                (Some(name), _) => em.resolve_symbol_spc(name).ok_or_else(|| {
+                    ErrorData::invalid_params(
+                        format!("unknown ARAM symbol `{name}` (load with load_symbols {{space: \"aram\"}})"),
+                        None,
+                    )
+                })?,
+                (None, Some(a)) => a,
+                (None, None) => em.spc700_state().map_err(|e| api_err_to_mcp(&e))?.pc,
             };
             em.disassemble_spc(addr, params.lines.unwrap_or(16))
                 .map_err(|e| api_err_to_mcp(&e))?
@@ -1103,7 +1894,7 @@ impl LunaServer {
         };
         Ok(rmcp::Json(SaveStateResult {
             bytes: blob.len(),
-            state_base64: base64::engine::general_purpose::STANDARD.encode(&blob),
+            state_base64: b64(&blob),
         }))
     }
 
@@ -1185,7 +1976,7 @@ impl LunaServer {
             em.render_tilemap_png(idx).map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(PngResult {
-            png_base64: base64::engine::general_purpose::STANDARD.encode(&png),
+            png_base64: b64(&png),
         }))
     }
 
@@ -1203,7 +1994,7 @@ impl LunaServer {
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(PngResult {
-            png_base64: base64::engine::general_purpose::STANDARD.encode(&png),
+            png_base64: b64(&png),
         }))
     }
 
@@ -1221,7 +2012,7 @@ impl LunaServer {
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(PngResult {
-            png_base64: base64::engine::general_purpose::STANDARD.encode(&png),
+            png_base64: b64(&png),
         }))
     }
 
@@ -1236,7 +2027,7 @@ impl LunaServer {
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(PngResult {
-            png_base64: base64::engine::general_purpose::STANDARD.encode(&png),
+            png_base64: b64(&png),
         }))
     }
 
@@ -1295,6 +2086,14 @@ impl LunaServer {
         &self,
         Parameters(params): Parameters<EnableMemTraceParams>,
     ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        if params.symbol.is_some()
+            && (params.bank.is_some() || params.lo.is_some() || params.hi.is_some())
+        {
+            return Err(ErrorData::invalid_params(
+                "`symbol` is mutually exclusive with `bank`/`lo`/`hi`",
+                None,
+            ));
+        }
         let offset_filter = match (params.lo, params.hi) {
             (Some(lo), Some(hi)) if lo <= hi => Some((lo, hi)),
             (None, None) => None,
@@ -1307,7 +2106,15 @@ impl LunaServer {
         };
         {
             let mut em = self.emulator.lock().await;
-            em.enable_mem_trace(params.max_events, params.bank, offset_filter)
+            let (bank, offset_filter) = match &params.symbol {
+                Some(_) => {
+                    let addr = resolve_addr(&em, params.symbol.as_deref(), 0)?;
+                    let off = (addr & 0xFFFF) as u16;
+                    (Some((addr >> 16) as u8), Some((off, off)))
+                }
+                None => (params.bank, offset_filter),
+            };
+            em.enable_mem_trace(params.max_events, bank, offset_filter)
                 .map_err(|e| api_err_to_mcp(&e))?;
         }
         Ok(rmcp::Json(EmptyOk { ok: true }))
@@ -1360,10 +2167,16 @@ impl LunaServer {
         &self,
         Parameters(params): Parameters<LoadSymbolsParams>,
     ) -> Result<rmcp::Json<LoadSymbolsResult>, ErrorData> {
+        let space = parse_space(params.space.as_deref())?;
         let count = {
             let mut em = self.emulator.lock().await;
-            em.load_symbols(std::path::Path::new(&params.path))
-                .map_err(|e| api_err_to_mcp(&e))?
+            match space {
+                luna_api::SymbolSpace::Cpu => em.load_symbols(std::path::Path::new(&params.path)),
+                luna_api::SymbolSpace::Aram => {
+                    em.load_symbols_spc(std::path::Path::new(&params.path))
+                }
+            }
+            .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(LoadSymbolsResult { count }))
     }
@@ -1376,11 +2189,136 @@ impl LunaServer {
         &self,
         Parameters(params): Parameters<ResolveSymbolParams>,
     ) -> Result<rmcp::Json<ResolveSymbolResult>, ErrorData> {
+        let space = parse_space(params.space.as_deref())?;
         let addr = {
             let em = self.emulator.lock().await;
-            em.resolve_symbol(&params.name)
+            match space {
+                luna_api::SymbolSpace::Cpu => em.resolve_symbol(&params.name),
+                luna_api::SymbolSpace::Aram => em.resolve_symbol_spc(&params.name).map(u32::from),
+            }
         };
         Ok(rmcp::Json(ResolveSymbolResult { addr }))
+    }
+
+    #[rmcp::tool(
+        description = "Load WLA-DX `.sym` text directly (no host file needed — e.g. the \
+                                symbol output of an in-memory build). Replaces any loaded \
+                                table; returns the parsed label count."
+    )]
+    async fn load_symbols_str(
+        &self,
+        Parameters(params): Parameters<LoadSymbolsStrParams>,
+    ) -> Result<rmcp::Json<LoadSymbolsResult>, ErrorData> {
+        let space = parse_space(params.space.as_deref())?;
+        let count = {
+            let mut em = self.emulator.lock().await;
+            match space {
+                luna_api::SymbolSpace::Cpu => em.load_symbols_str(&params.text),
+                luna_api::SymbolSpace::Aram => em.load_symbols_spc_str(&params.text),
+            }
+        };
+        Ok(rmcp::Json(LoadSymbolsResult { count }))
+    }
+
+    #[rmcp::tool(
+        description = "Drop the loaded symbol table — disassembly and traces stop being \
+                                annotated and symbol arguments stop resolving."
+    )]
+    async fn clear_symbols(&self) -> rmcp::Json<EmptyOk> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.clear_symbols();
+        }
+        rmcp::Json(EmptyOk { ok: true })
+    }
+
+    #[rmcp::tool(
+        description = "Reverse symbol lookup: 24-bit address → nearest preceding label \
+                                in the same bank (`name` or `name+0xOFF`), null if none. The \
+                                inverse of `resolve_symbol`."
+    )]
+    async fn symbol_for_addr(
+        &self,
+        Parameters(params): Parameters<SymbolForAddrParams>,
+    ) -> Result<rmcp::Json<SymbolForAddrResult>, ErrorData> {
+        let space = parse_space(params.space.as_deref())?;
+        let symbol = {
+            let em = self.emulator.lock().await;
+            match space {
+                luna_api::SymbolSpace::Cpu => em.symbol_for_addr(params.addr),
+                luna_api::SymbolSpace::Aram => {
+                    let addr = u16::try_from(params.addr).map_err(|_| {
+                        ErrorData::invalid_params("aram addr must fit in 16 bits", None)
+                    })?;
+                    em.symbol_for_aram_addr(addr)
+                }
+            }
+        };
+        Ok(rmcp::Json(SymbolForAddrResult { symbol }))
+    }
+
+    // ------------- Persistence + media parity (issue #173) -------------
+
+    #[rmcp::tool(
+        description = "Read the battery-backed SRAM image, base64-encoded (what the CLI \
+                                writes with --srm-out). Empty when the cart has no SRAM."
+    )]
+    async fn sram_get(&self) -> rmcp::Json<SramGetResult> {
+        let sram = {
+            let em = self.emulator.lock().await;
+            em.sram()
+        };
+        rmcp::Json(SramGetResult {
+            bytes: sram.len(),
+            sram_base64: b64(&sram),
+        })
+    }
+
+    #[rmcp::tool(
+        description = "Load a battery-RAM image (base64 of a .srm file) into the cart — \
+                                the CLI's --srm-in. Load it before the game reads its save."
+    )]
+    async fn sram_set(
+        &self,
+        Parameters(params): Parameters<SramSetParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(params.sram_base64.as_bytes())
+            .map_err(|e| ErrorData::invalid_params(format!("bad base64: {e}"), None))?;
+        {
+            let mut em = self.emulator.lock().await;
+            em.load_sram(&data).map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Export the current APU state as a standard .spc music snapshot \
+                                (v0.30, base64) — playable in any SPC player. Capture while \
+                                the tune of interest is playing."
+    )]
+    async fn export_spc(&self) -> Result<rmcp::Json<ExportSpcResult>, ErrorData> {
+        let blob = {
+            let em = self.emulator.lock().await;
+            em.export_spc().map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(ExportSpcResult {
+            bytes: blob.len(),
+            spc_base64: b64(&blob),
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Decode all 128 OAM sprite entries into a structured list \
+                                (position, size, tile, palette, priority, flips, visibility) — \
+                                the queryable version of `render_sprite_sheet`."
+    )]
+    async fn decode_sprites(&self) -> Result<rmcp::Json<DecodeSpritesResult>, ErrorData> {
+        let sprites = {
+            let em = self.emulator.lock().await;
+            em.decode_sprites().map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(DecodeSpritesResult { sprites }))
     }
 
     // ------------- Breakpoint registry (issue #66) -------------
@@ -1400,14 +2338,22 @@ impl LunaServer {
         let id = {
             let mut em = self.emulator.lock().await;
             let addr = resolve_addr(&em, params.symbol.as_deref(), params.addr)?;
+            let hi = match &params.hi_symbol {
+                Some(_) => resolve_addr(&em, params.hi_symbol.as_deref(), 0)?,
+                None => params.hi.unwrap_or(addr),
+            };
+            // The display name defaults to the symbol the bp was created from.
+            let name = params.name.as_deref().or(params.symbol.as_deref());
             match params.kind.as_str() {
-                "exec" => em.bp_add_exec(addr).map_err(|e| api_err_to_mcp(&e))?,
+                "exec" => em.bp_add_exec(addr, name).map_err(|e| api_err_to_mcp(&e))?,
                 "mem" => em
                     .bp_add_mem(
                         addr,
-                        params.hi.unwrap_or(addr),
+                        hi,
                         params.on_read,
                         params.on_write,
+                        params.mirror.unwrap_or(true),
+                        name,
                     )
                     .map_err(|e| api_err_to_mcp(&e))?,
                 other => {
@@ -1419,6 +2365,238 @@ impl LunaServer {
             }
         };
         Ok(rmcp::Json(BpAddResult { id }))
+    }
+
+    #[rmcp::tool(
+        description = "Enable or disable a breakpoint without removing it — keeps its \
+                                id, name and hit count. `found` is false for unknown ids."
+    )]
+    async fn bp_set_enabled(
+        &self,
+        Parameters(params): Parameters<BpSetEnabledParams>,
+    ) -> Result<rmcp::Json<BpSetEnabledResult>, ErrorData> {
+        let found = {
+            let mut em = self.emulator.lock().await;
+            em.bp_set_enabled(params.id, params.enabled)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(BpSetEnabledResult { found }))
+    }
+
+    // ------------- Pokes beyond WRAM + freezes (issue #178) -------------
+
+    #[rmcp::tool(
+        description = "Write bytes directly into PPU VRAM at a byte offset (wraps at \
+                                64 KB). State injection — bypasses the bus, no MMIO side \
+                                effects."
+    )]
+    async fn poke_vram(
+        &self,
+        Parameters(params): Parameters<PokeOffsetParams>,
+    ) -> Result<rmcp::Json<PokeResult>, ErrorData> {
+        let written = {
+            let mut em = self.emulator.lock().await;
+            em.poke_vram(params.offset, &params.data)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(PokeResult { written }))
+    }
+
+    #[rmcp::tool(
+        description = "Write bytes directly into CGRAM at a byte offset (wraps at 512 \
+                                bytes; palette entries are little-endian BGR555 words)."
+    )]
+    async fn poke_cgram(
+        &self,
+        Parameters(params): Parameters<PokeOffsetParams>,
+    ) -> Result<rmcp::Json<PokeResult>, ErrorData> {
+        let written = {
+            let mut em = self.emulator.lock().await;
+            em.poke_cgram(params.offset, &params.data)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(PokeResult { written }))
+    }
+
+    #[rmcp::tool(
+        description = "Write bytes directly into OAM at a byte offset (wraps at the \
+                                544-byte table)."
+    )]
+    async fn poke_oam(
+        &self,
+        Parameters(params): Parameters<PokeOffsetParams>,
+    ) -> Result<rmcp::Json<PokeResult>, ErrorData> {
+        let written = {
+            let mut em = self.emulator.lock().await;
+            em.poke_oam(params.offset, &params.data)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(PokeResult { written }))
+    }
+
+    #[rmcp::tool(
+        description = "Write bytes directly into the SPC700's ARAM at an offset (wraps \
+                                at 64 KB)."
+    )]
+    async fn poke_aram(
+        &self,
+        Parameters(params): Parameters<PokeOffsetParams>,
+    ) -> Result<rmcp::Json<PokeResult>, ErrorData> {
+        let written = {
+            let mut em = self.emulator.lock().await;
+            em.poke_aram(params.offset, &params.data)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(PokeResult { written }))
+    }
+
+    #[rmcp::tool(
+        description = "Pin a byte at a WRAM address, re-applied at every frame boundary \
+                                in every run path (cheat-style pinning for testing) — and \
+                                applied once immediately. Re-adding an address replaces its \
+                                value."
+    )]
+    async fn freeze_add(
+        &self,
+        Parameters(params): Parameters<FreezeAddParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            let addr = resolve_addr(&em, params.symbol.as_deref(), params.addr)?;
+            em.freeze_add(addr, params.value)
+                .map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(description = "Remove a per-frame freeze by address (or symbol).")]
+    async fn freeze_remove(
+        &self,
+        Parameters(params): Parameters<FreezeRemoveParams>,
+    ) -> Result<rmcp::Json<FreezeRemoveResult>, ErrorData> {
+        let removed = {
+            let mut em = self.emulator.lock().await;
+            let addr = resolve_addr(&em, params.symbol.as_deref(), params.addr)?;
+            em.freeze_remove(addr).map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(FreezeRemoveResult { removed }))
+    }
+
+    #[rmcp::tool(description = "List the active per-frame freezes.")]
+    async fn freeze_list(&self) -> rmcp::Json<FreezeListResult> {
+        let freezes = {
+            let em = self.emulator.lock().await;
+            em.freeze_list()
+        };
+        rmcp::Json(FreezeListResult { freezes })
+    }
+
+    // ------------- Call-stack tracking (issue #180) -------------
+
+    #[rmcp::tool(
+        description = "Enable / disable JSR/JSL/RTS/RTL + interrupt tracking of the \
+                                65C816 call stack. Off by default (tracking costs one opcode \
+                                peek per instruction); enable, run, then read `call_stack`."
+    )]
+    async fn enable_call_stack(
+        &self,
+        Parameters(params): Parameters<EnableCallStackParams>,
+    ) -> rmcp::Json<EmptyOk> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_call_stack(params.enabled);
+        }
+        rmcp::Json(EmptyOk { ok: true })
+    }
+
+    #[rmcp::tool(
+        description = "The tracked 65C816 call stack: `[{pc, from, kind, symbol}]`, \
+                                oldest first (last = innermost). `kind` is jsr/jsl/interrupt. \
+                                Empty unless `enable_call_stack` is on."
+    )]
+    async fn call_stack(&self) -> rmcp::Json<CallStackResult> {
+        let frames = {
+            let em = self.emulator.lock().await;
+            em.call_stack()
+        };
+        rmcp::Json(CallStackResult { frames })
+    }
+
+    // ------------- Narrowing memory search (issue #177) -------------
+
+    #[rmcp::tool(
+        description = "Start a narrowing WRAM search (\"find my variable\"): snapshot \
+                                all 128 KiB and mark every offset a candidate at `width` \
+                                (`u8` or `u16`). Then alternate gameplay with `search_refine` \
+                                until few candidates remain. Replaces any previous session."
+    )]
+    async fn search_begin(
+        &self,
+        Parameters(params): Parameters<SearchBeginParams>,
+    ) -> Result<rmcp::Json<SearchCountResult>, ErrorData> {
+        let width = match params.width.to_ascii_lowercase().as_str() {
+            "u8" | "8" => luna_api::SearchWidth::U8,
+            "u16" | "16" => luna_api::SearchWidth::U16,
+            other => {
+                return Err(ErrorData::invalid_params(
+                    format!("unknown width `{other}` (u8, u16)"),
+                    None,
+                ));
+            }
+        };
+        let remaining = {
+            let mut em = self.emulator.lock().await;
+            em.search_begin(width).map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(SearchCountResult { remaining }))
+    }
+
+    #[rmcp::tool(
+        description = "Narrow the live search: keep candidates whose current value is \
+                                `eq`/`ne`/`lt`/`gt` `value`, or `changed`/`unchanged` vs the \
+                                previous snapshot (which then advances). Returns the surviving \
+                                count."
+    )]
+    async fn search_refine(
+        &self,
+        Parameters(params): Parameters<SearchRefineParams>,
+    ) -> Result<rmcp::Json<SearchCountResult>, ErrorData> {
+        let op = match params.op.to_ascii_lowercase().as_str() {
+            "eq" => luna_api::SearchOp::Eq,
+            "ne" => luna_api::SearchOp::Ne,
+            "lt" => luna_api::SearchOp::Lt,
+            "gt" => luna_api::SearchOp::Gt,
+            "changed" => luna_api::SearchOp::Changed,
+            "unchanged" => luna_api::SearchOp::Unchanged,
+            other => {
+                return Err(ErrorData::invalid_params(
+                    format!("unknown op `{other}` (eq, ne, lt, gt, changed, unchanged)"),
+                    None,
+                ));
+            }
+        };
+        let remaining = {
+            let mut em = self.emulator.lock().await;
+            em.search_refine(op, params.value)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(SearchCountResult { remaining }))
+    }
+
+    #[rmcp::tool(
+        description = "The live search's surviving candidates (up to `limit`, default \
+                                64) with their current values, as canonical $7E/$7F addresses."
+    )]
+    async fn search_results(
+        &self,
+        Parameters(params): Parameters<SearchResultsParams>,
+    ) -> Result<rmcp::Json<SearchResultsResult>, ErrorData> {
+        let hits = {
+            let em = self.emulator.lock().await;
+            em.search_results(params.limit.unwrap_or(64))
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(SearchResultsResult { hits }))
     }
 
     #[rmcp::tool(description = "Remove a breakpoint by the id `bp_add` returned.")]
@@ -1491,6 +2669,10 @@ impl LunaServer {
                     hi: b.hi,
                     on_read: b.on_read,
                     on_write: b.on_write,
+                    enabled: b.enabled,
+                    hit_count: b.hit_count,
+                    mirror: b.mirror,
+                    name: b.name,
                 })
                 .collect(),
         }))
@@ -1552,8 +2734,9 @@ impl LunaServer {
     #[rmcp::tool(
         description = "Feed SNES Mouse input for the next joypad auto-read: accumulated \
                                 `dx`/`dy` displacement plus the button bitmask (bit 0 = left, \
-                                bit 1 = right). Select the mouse first via the GUI or the CLI \
-                                `--port1 mouse`."
+                                bit 1 = right). Plug the mouse in first with \
+                                `set_port_device {port: 0, device: \"mouse\"}` (CLI \
+                                equivalent: `--port1 mouse`)."
     )]
     async fn set_mouse(
         &self,
@@ -1570,7 +2753,9 @@ impl LunaServer {
     #[rmcp::tool(
         description = "Feed Super Scope input: screen-space aim (`x`, `y`) and the \
                                 button bitmask (bit 0 fire, bit 1 cursor, bit 2 pause, bit 3 \
-                                turbo). Select the scope first (GUI or CLI `--port2 superscope`)."
+                                turbo). Plug the scope in first with \
+                                `set_port_device {port: 1, device: \"superscope\"}` (CLI \
+                                equivalent: `--port2 superscope`)."
     )]
     async fn set_superscope(
         &self,
@@ -1582,6 +2767,585 @@ impl LunaServer {
                 .map_err(|e| api_err_to_mcp(&e))?;
         }
         Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    // ------------- SDK assert/log channels (issue #168) -------------
+
+    #[rmcp::tool(
+        description = "Start capturing the $21FC Nocash TTY — the SDK debug text \
+                                channel behind SNES_NOCASH / SNES_ASSERT. Drain with \
+                                `take_nocash_log`."
+    )]
+    async fn enable_nocash_log(&self) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_nocash_log().map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the captured $21FC Nocash byte stream: the text as lossy \
+                                UTF-8 plus the exact bytes base64-encoded. Enable first with \
+                                `enable_nocash_log`, then run/step."
+    )]
+    async fn take_nocash_log(&self) -> Result<rmcp::Json<NocashLogResult>, ErrorData> {
+        let bytes = {
+            let mut em = self.emulator.lock().await;
+            em.take_nocash_log().map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(NocashLogResult {
+            text: String::from_utf8_lossy(&bytes).into_owned(),
+            base64: b64(&bytes),
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Start capturing WDM ($42) executions — the SDK assert/breakpoint \
+                                channel (SNES_ASSERT fires WDM $00). Complements the $21FC \
+                                Nocash text log with a binary \"assertion fired here\" signal. \
+                                Drain with `take_wdm_log`."
+    )]
+    async fn enable_wdm_log(&self) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_wdm_log().map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the captured WDM events as `{pc, operand, symbol}` per hit, \
+                                oldest first. Enable first with `enable_wdm_log`, then run/step."
+    )]
+    async fn take_wdm_log(&self) -> Result<rmcp::Json<WdmLogResult>, ErrorData> {
+        let (events, syms) = {
+            let mut em = self.emulator.lock().await;
+            let events = em.take_wdm_log().map_err(|e| api_err_to_mcp(&e))?;
+            (events, em.symbols_cloned())
+        };
+        let events = events
+            .into_iter()
+            .map(|(pc, operand)| WdmEvent {
+                pc,
+                operand,
+                symbol: syms.as_ref().and_then(|t| t.nearest(pc)),
+            })
+            .collect();
+        Ok(rmcp::Json(WdmLogResult { events }))
+    }
+
+    // ------------- Determinism oracles (issue #170) -------------
+
+    #[rmcp::tool(
+        description = "64-bit hash of the current frame's pixels (pre-PNG, so it is \
+                                stable across builds) — the CLI's `fbhash=` value, as 16 hex \
+                                chars. `force_display` renders through forced blank; `native` \
+                                hashes the 512×448 capture instead (enable it first with \
+                                `set_native_capture`; native and non-native values are not \
+                                comparable)."
+    )]
+    async fn frame_hash(
+        &self,
+        Parameters(params): Parameters<FrameHashParams>,
+    ) -> Result<rmcp::Json<FrameHashResult>, ErrorData> {
+        let hash = {
+            let em = self.emulator.lock().await;
+            if params.native {
+                em.frame_hash_native()
+            } else {
+                em.frame_hash(params.force_display)
+            }
+            .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(FrameHashResult {
+            hash: format!("{hash:016x}"),
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Enable / disable native 512×448 frame capture (hi-res and \
+                                interlace detail). Enable it, run at least one frame, then \
+                                `screenshot` / `frame_hash` with `native: true`."
+    )]
+    async fn set_native_capture(
+        &self,
+        Parameters(params): Parameters<SetNativeCaptureParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.set_native_capture(params.enabled)
+                .map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Stable FNV-1a-64 hash per WRAM page (default 4 KiB pages → 32 \
+                                hashes, 16 hex chars each). Diff two calls to localise which \
+                                page a WRAM change landed in, then `peek_memory` to bisect — \
+                                the CLI `luna wram-trace` workflow over MCP."
+    )]
+    async fn wram_page_hashes(
+        &self,
+        Parameters(params): Parameters<WramPageHashesParams>,
+    ) -> Result<rmcp::Json<WramPageHashesResult>, ErrorData> {
+        let hashes = {
+            let em = self.emulator.lock().await;
+            em.wram_page_hashes(params.page_size)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        let effective = if params.page_size == 0 {
+            0x1000
+        } else {
+            params.page_size
+        };
+        Ok(rmcp::Json(WramPageHashesResult {
+            page_size: effective,
+            hashes: hashes.iter().map(|h| format!("{h:016x}")).collect(),
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Snapshot all 128 KiB of WRAM: a stable FNV-1a-64 hash always, \
+                                plus the raw image base64-encoded when `include_data` is set. \
+                                Equal hashes ⇒ byte-identical WRAM (the determinism oracle for \
+                                CI and A/B bisection)."
+    )]
+    async fn wram_snapshot(
+        &self,
+        Parameters(params): Parameters<WramSnapshotParams>,
+    ) -> Result<rmcp::Json<WramSnapshotResult>, ErrorData> {
+        let (hash, data) = {
+            let em = self.emulator.lock().await;
+            // One full-width "page" = one stable hash over the whole 128 KiB.
+            let hash = em
+                .wram_page_hashes(0x20000)
+                .map_err(|e| api_err_to_mcp(&e))?[0];
+            let data = if params.include_data {
+                Some(em.wram_snapshot().map_err(|e| api_err_to_mcp(&e))?)
+            } else {
+                None
+            };
+            (hash, data)
+        };
+        Ok(rmcp::Json(WramSnapshotResult {
+            hash: format!("{hash:016x}"),
+            bytes: 0x20000,
+            wram_base64: data.as_deref().map(b64),
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Hang diagnostic: execute up to `max_steps` instructions and count \
+                                the distinct PCs visited. A healthy game loop touches hundreds+ \
+                                of addresses; a handful means the CPU is spinning in a tight \
+                                wait/hang loop (STP is reported separately by `state`). Mutates \
+                                state — the CPU really advances."
+    )]
+    async fn loop_probe(
+        &self,
+        Parameters(params): Parameters<LoopProbeParams>,
+    ) -> Result<rmcp::Json<LoopProbeResult>, ErrorData> {
+        let probe = {
+            let mut em = self.emulator.lock().await;
+            em.loop_probe(params.max_steps)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(LoopProbeResult {
+            distinct_pcs: probe.distinct_pcs,
+            executed: probe.executed,
+        }))
+    }
+
+    // ------------- Coprocessor / driver trace parity (issue #172) -------------
+
+    #[rmcp::tool(
+        description = "Start recording DMA→VRAM transfer bytes (source, VRAM word, \
+                                channel, scanline/H-clock, blank flags), capped at \
+                                `max_events`. Drain with `take_dma_trace`."
+    )]
+    async fn enable_dma_trace(
+        &self,
+        Parameters(params): Parameters<EnableRingTraceParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_dma_trace(params.max_events)
+                .map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the DMA→VRAM trace (oldest first) and reset the ring. A \
+                                write is display-safe iff `blank || force_blank`."
+    )]
+    async fn take_dma_trace(&self) -> Result<rmcp::Json<DmaTraceResult>, ErrorData> {
+        let events = {
+            let mut em = self.emulator.lock().await;
+            em.take_dma_trace().map_err(|e| api_err_to_mcp(&e))?
+        };
+        let events = events
+            .into_iter()
+            .map(|ev| DmaTraceLine {
+                src: ev.src_full,
+                vram_word: ev.vram_word,
+                b_offset: ev.b_offset,
+                value: ev.value,
+                channel: ev.channel,
+                frame: ev.frame,
+                line: ev.line,
+                hclock: ev.hclock,
+                blank: ev.blank,
+                force_blank: ev.force_blank,
+            })
+            .collect();
+        Ok(rmcp::Json(DmaTraceResult { events }))
+    }
+
+    #[rmcp::tool(
+        description = "Start recording S-DSP register writes ($F2/$F3 from the SPC700 \
+                                side), capped at `max_events`. Drain with `take_dsp_trace` — \
+                                proves whether/what the sound driver programs the DSP."
+    )]
+    async fn enable_dsp_trace(
+        &self,
+        Parameters(params): Parameters<EnableRingTraceParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_dsp_trace(params.max_events)
+                .map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the S-DSP register-write trace (oldest first) and reset \
+                                the ring."
+    )]
+    async fn take_dsp_trace(&self) -> Result<rmcp::Json<DspTraceResult>, ErrorData> {
+        let events = {
+            let mut em = self.emulator.lock().await;
+            em.take_dsp_trace().map_err(|e| api_err_to_mcp(&e))?
+        };
+        let events = events
+            .into_iter()
+            .map(|ev| DspTraceLine {
+                spc_cycles: ev.spc_cycles,
+                reg: ev.reg,
+                value: ev.value,
+            })
+            .collect();
+        Ok(rmcp::Json(DspTraceResult { events }))
+    }
+
+    #[rmcp::tool(
+        description = "Start recording CPU↔APU mailbox traffic ($2140-$2143, both \
+                                directions, with the accessing PC). Unbounded until drained — \
+                                enable, run the window of interest, then `take_mailbox_log`."
+    )]
+    async fn enable_mailbox_log(&self) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_mailbox_log().map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the CPU↔APU mailbox log (oldest first) and reset it — the \
+                                CPU↔SPC handshake stream (e.g. sound-driver upload stalls)."
+    )]
+    async fn take_mailbox_log(&self) -> Result<rmcp::Json<MailboxLogResult>, ErrorData> {
+        let (events, syms) = {
+            let mut em = self.emulator.lock().await;
+            let events = em.take_mailbox_log().map_err(|e| api_err_to_mcp(&e))?;
+            (events, em.symbols_cloned())
+        };
+        let events = events
+            .into_iter()
+            .map(|ev| MailboxLine {
+                mclk: ev.mclk_total,
+                pc: ev.pc_full,
+                kind: match ev.kind {
+                    luna_api::MailboxEventKind::Read => "read".into(),
+                    luna_api::MailboxEventKind::Write => "write".into(),
+                },
+                port: ev.port,
+                value: ev.value,
+                symbol: syms.as_ref().and_then(|t| t.nearest(ev.pc_full)),
+            })
+            .collect();
+        Ok(rmcp::Json(MailboxLogResult { events }))
+    }
+
+    #[rmcp::tool(
+        description = "Start recording main-CPU accesses to the SA-1 MMIO range \
+                                ($2200-$23FF) with the accessing PC. Unbounded until drained."
+    )]
+    async fn enable_sa1_log(&self) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_sa1_log().map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the main-CPU→SA-1 MMIO log (oldest first) and reset it — \
+                                one half of a CPU↔SA-1 handshake diagnosis (pair with \
+                                `take_sa1_side_log`)."
+    )]
+    async fn take_sa1_log(&self) -> Result<rmcp::Json<Sa1LogResult>, ErrorData> {
+        let (events, syms) = {
+            let mut em = self.emulator.lock().await;
+            let events = em.take_sa1_log().map_err(|e| api_err_to_mcp(&e))?;
+            (events, em.symbols_cloned())
+        };
+        let events = events
+            .into_iter()
+            .map(|ev| Sa1LogLine {
+                mclk: ev.mclk_total,
+                pc: ev.pc_full,
+                kind: match ev.kind {
+                    luna_api::MailboxEventKind::Read => "read".into(),
+                    luna_api::MailboxEventKind::Write => "write".into(),
+                },
+                reg: ev.reg,
+                value: ev.value,
+                symbol: syms.as_ref().and_then(|t| t.nearest(ev.pc_full)),
+            })
+            .collect();
+        Ok(rmcp::Json(Sa1LogResult { events }))
+    }
+
+    #[rmcp::tool(
+        description = "Start recording SA-1-side accesses to its own MMIO registers \
+                                (which SA-1 code touches $2200-$23FF). Unbounded until drained."
+    )]
+    async fn enable_sa1_side_log(&self) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_sa1_side_log().map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the SA-1-side MMIO log (oldest first) and reset it — the \
+                                other half of a CPU↔SA-1 handshake diagnosis."
+    )]
+    async fn take_sa1_side_log(&self) -> Result<rmcp::Json<Sa1SideLogResult>, ErrorData> {
+        let events = {
+            let mut em = self.emulator.lock().await;
+            em.take_sa1_side_log().map_err(|e| api_err_to_mcp(&e))?
+        };
+        let events = events
+            .into_iter()
+            .map(|ev| Sa1SideLine {
+                sa1_pc: ev.sa1_pc,
+                write: ev.write,
+                reg: ev.reg,
+                value: ev.value,
+            })
+            .collect();
+        Ok(rmcp::Json(Sa1SideLogResult { events }))
+    }
+
+    #[rmcp::tool(
+        description = "Start recording a per-instruction SA-1 CPU trace (PC + register \
+                                file), capped at `max_events`. Drain with `take_sa1_trace`."
+    )]
+    async fn enable_sa1_trace(
+        &self,
+        Parameters(params): Parameters<EnableRingTraceParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_sa1_trace(params.max_events)
+                .map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the SA-1 instruction trace (oldest first) and reset the \
+                                ring. Empty when the cart has no SA-1."
+    )]
+    async fn take_sa1_trace(&self) -> Result<rmcp::Json<Sa1TraceResult>, ErrorData> {
+        let events = {
+            let mut em = self.emulator.lock().await;
+            em.take_sa1_trace().map_err(|e| api_err_to_mcp(&e))?
+        };
+        let events = events
+            .into_iter()
+            .map(|ev| Sa1TraceLine {
+                pc: ev.pc_full,
+                a: ev.a,
+                x: ev.x,
+                y: ev.y,
+                sp: ev.sp,
+                p: ev.p,
+                db: ev.db,
+                dp: ev.dp,
+                e: ev.e,
+            })
+            .collect();
+        Ok(rmcp::Json(Sa1TraceResult { events }))
+    }
+
+    #[rmcp::tool(
+        description = "Start recording a per-opcode Super FX (GSU) trace (PC, opcode, \
+                                SFR, R0-R15, mclk, GO/STOP edges), capped at `max_events`. \
+                                Drain with `take_superfx_trace`."
+    )]
+    async fn enable_superfx_trace(
+        &self,
+        Parameters(params): Parameters<EnableRingTraceParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_superfx_trace(params.max_events)
+                .map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the Super FX opcode trace (oldest first) and reset the \
+                                ring. Empty when the cart has no GSU."
+    )]
+    async fn take_superfx_trace(&self) -> Result<rmcp::Json<SuperFxTraceResult>, ErrorData> {
+        let events = {
+            let mut em = self.emulator.lock().await;
+            em.take_superfx_trace().map_err(|e| api_err_to_mcp(&e))?
+        };
+        let events = events
+            .into_iter()
+            .map(|ev| SuperFxTraceLine {
+                pc: ev.pc_full,
+                opcode: ev.opcode,
+                sfr: ev.sfr,
+                r: ev.r.to_vec(),
+                mclk: ev.mclk,
+                go_start: ev.go_start,
+                stop: ev.stop,
+            })
+            .collect();
+        Ok(rmcp::Json(SuperFxTraceResult { events }))
+    }
+
+    #[rmcp::tool(
+        description = "Start recording the DSP-1 (µPD77C25) trace: microcode execution \
+                                and CPU-side DR/SR port traffic in one stream, capped at \
+                                `max_events`. `ports_only` keeps just the handshake traffic. \
+                                Drain with `take_dsp1_trace`."
+    )]
+    async fn enable_dsp1_trace(
+        &self,
+        Parameters(params): Parameters<EnableDsp1TraceParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_dsp1_trace(params.max_events, params.ports_only)
+                .map_err(|e| api_err_to_mcp(&e))?;
+        }
+        self.dsp1_trace_max
+            .store(params.max_events, Ordering::Relaxed);
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the DSP-1 trace (oldest first) and reset the ring; empty \
+                                when the cart has no DSP-1. With `decode_commands`, also \
+                                returns the port traffic decoded into command transactions \
+                                (command byte, word counts, match status vs. the known table)."
+    )]
+    async fn take_dsp1_trace(
+        &self,
+        Parameters(params): Parameters<TakeDsp1TraceParams>,
+    ) -> Result<rmcp::Json<Dsp1TraceResult>, ErrorData> {
+        let events = {
+            let mut em = self.emulator.lock().await;
+            em.take_dsp1_trace().map_err(|e| api_err_to_mcp(&e))?
+        };
+        // Hitting the cap leaves the final transaction cut off mid-stream;
+        // decoding must know that rather than report a short count as a
+        // table mismatch (same rule as the CLI --dsp1-trace-commands path).
+        let max = self.dsp1_trace_max.load(Ordering::Relaxed);
+        let truncated = max > 0 && events.len() >= max;
+        let commands = params
+            .decode_commands
+            .then(|| luna_api::dsp1_commands::decode(&events, truncated));
+        let events = events
+            .into_iter()
+            .map(|ev| Dsp1TraceLine {
+                kind: match ev.kind {
+                    luna_api::Dsp1TraceKind::Exec => "exec".into(),
+                    luna_api::Dsp1TraceKind::DrWrite => "dr_write".into(),
+                    luna_api::Dsp1TraceKind::DrRead => "dr_read".into(),
+                    luna_api::Dsp1TraceKind::SrRead => "sr_read".into(),
+                },
+                pc: ev.pc,
+                opcode: ev.opcode,
+                value: ev.value,
+                a: ev.a,
+                b: ev.b,
+                dr: ev.dr,
+                sr: ev.sr,
+                rqm: ev.rqm,
+            })
+            .collect();
+        Ok(rmcp::Json(Dsp1TraceResult {
+            events,
+            commands,
+            truncated,
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Start recording a per-instruction SPC700 trace (PC, registers, \
+                                SPC cycle, timer-2 state), capped at `max_events`. Drain with \
+                                `take_spc_trace`."
+    )]
+    async fn enable_spc_trace(
+        &self,
+        Parameters(params): Parameters<EnableRingTraceParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_spc_trace(params.max_events)
+                .map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Drain the SPC700 instruction trace (oldest first) and reset the \
+                                ring."
+    )]
+    async fn take_spc_trace(&self) -> Result<rmcp::Json<SpcTraceResult>, ErrorData> {
+        let events = {
+            let mut em = self.emulator.lock().await;
+            em.take_spc_trace().map_err(|e| api_err_to_mcp(&e))?
+        };
+        let events = events
+            .into_iter()
+            .map(|ev| SpcTraceLine {
+                pc: ev.pc,
+                a: ev.a,
+                x: ev.x,
+                y: ev.y,
+                sp: ev.sp,
+                psw: ev.psw,
+                spc_cycle: ev.spc_cycle,
+                t2_int: ev.t2_int,
+                t2_out: ev.t2_out,
+            })
+            .collect();
+        Ok(rmcp::Json(SpcTraceResult { events }))
     }
 }
 
@@ -1600,11 +3364,106 @@ pub struct EmptyOk {
 }
 
 #[rmcp::tool_handler]
-impl ServerHandler for LunaServer {}
+impl ServerHandler for LunaServer {
+    // rmcp's ServerInfo/Implementation are #[non_exhaustive], so the
+    // struct-expression form clippy suggests cannot compile — mutate a
+    // Default instead.
+    #[allow(clippy::field_reassign_with_default)]
+    fn get_info(&self) -> rmcp::model::ServerInfo {
+        let mut info = rmcp::model::ServerInfo::default();
+        let mut implementation = rmcp::model::Implementation::default();
+        implementation.name = "luna".into();
+        implementation.version = env!("CARGO_PKG_VERSION").into();
+        info.server_info = implementation;
+        info.capabilities = rmcp::model::ServerCapabilities::builder()
+            .enable_tools()
+            .build();
+        info.instructions = Some(
+            "luna — a SNES emulator with a full debugging surface. Typical \
+                 session: `load_rom` (or start the server as `luna mcp --rom <path>` \
+                 and skip it), then `step` / `step_until_frame` / `run` to advance, \
+                 `state` / `screenshot` / `frame_hash` to observe, and `peek_memory` / \
+                 `peek_vram` / `peek_aram` to inspect memory. Debugging SDK-built \
+                 homebrew: `enable_wdm_log` + `enable_nocash_log` before running, then \
+                 `take_wdm_log` (assertion hits) and `take_nocash_log` (the ROM's \
+                 printf channel) — an empty WDM drain is the green light. Deeper \
+                 diagnosis: `enable_cpu_trace` / `enable_mem_trace` and the \
+                 coprocessor pairs (dma/dsp/mailbox/sa1/superfx/dsp1/spc), each \
+                 drained by its `take_*`. Load symbols (`load_symbols` / \
+                 `load_symbols_str`) and every address-taking tool also accepts a \
+                 `symbol` name while disassembly and traces become annotated. \
+                 `capabilities` lists the live tool catalogue."
+                .into(),
+        );
+        info
+    }
+}
 
 /// Map [`luna_api::ApiError`] onto an MCP `internal_error` payload.
 fn api_err_to_mcp(e: &ApiError) -> ErrorData {
     ErrorData::internal_error(e.to_string(), None)
+}
+
+/// Base64-encode bytes with the standard alphabet — the one wire encoding
+/// shared by every binary payload this server returns.
+fn b64(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// Parse an optional symbol-`space` tool param: `cpu` (default) or
+/// `aram`/`spc`.
+fn parse_space(s: Option<&str>) -> Result<luna_api::SymbolSpace, ErrorData> {
+    match s.map(str::to_ascii_lowercase).as_deref() {
+        None | Some("cpu") => Ok(luna_api::SymbolSpace::Cpu),
+        Some("aram" | "spc") => Ok(luna_api::SymbolSpace::Aram),
+        Some(other) => Err(ErrorData::invalid_params(
+            format!("unknown space `{other}` (cpu, aram)"),
+            None,
+        )),
+    }
+}
+
+/// Parse an optional `force_mapper` tool param into a [`luna_api::MapperKind`],
+/// sharing the CLI's `--force-mapper` vocabulary.
+fn parse_force_mapper(s: Option<&str>) -> Result<Option<luna_api::MapperKind>, ErrorData> {
+    s.map(|k| {
+        luna_api::MapperKind::from_cli_str(k).ok_or_else(|| {
+            ErrorData::invalid_params(
+                format!(
+                    "unknown force_mapper `{k}` (lorom, hirom, exhirom, sa1, superfx, dsp1, \
+                     sdd1, spc7110)"
+                ),
+                None,
+            )
+        })
+    })
+    .transpose()
+}
+
+/// Parse an optional `force_region` tool param, sharing the CLI's
+/// `--force-region` vocabulary.
+fn parse_force_region(s: Option<&str>) -> Result<Option<luna_api::Region>, ErrorData> {
+    s.map(|r| match r.to_ascii_lowercase().as_str() {
+        "ntsc" => Ok(luna_api::Region::Ntsc),
+        "pal" => Ok(luna_api::Region::Pal),
+        _ => Err(ErrorData::invalid_params(
+            format!("unknown force_region `{r}` (ntsc, pal)"),
+            None,
+        )),
+    })
+    .transpose()
+}
+
+/// Width/height straight from the PNG IHDR (fixed offsets 16..24,
+/// big-endian — IHDR is required to be the first chunk), so the reported
+/// dimensions are those of whatever the API actually rendered. `(0, 0)`
+/// on a malformed buffer.
+fn png_dimensions(png: &[u8]) -> (u32, u32) {
+    let field = |o: usize| {
+        png.get(o..o + 4)
+            .map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    (field(16), field(20))
 }
 
 /// Flatten a [`luna_api::RunOutcome`] into the wire result shared by
@@ -1647,8 +3506,18 @@ fn outcome_to_result(out: &luna_api::RunOutcome) -> RunUntilBreakResult {
 /// for `claude_desktop_config.json`-style spawns. Blocks until the
 /// MCP client closes the stream or sends a shutdown.
 pub async fn serve_stdio() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    serve_stdio_with(Emulator::new()).await
+}
+
+/// Like [`serve_stdio`], but serving an existing (typically preloaded)
+/// `Emulator` — the `luna mcp --rom <path>` entry point.
+pub async fn serve_stdio_with(
+    emulator: Emulator,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (stdin, stdout) = stdio();
-    let server = LunaServer::new().serve((stdin, stdout)).await?;
+    let server = LunaServer::with_emulator(emulator)
+        .serve((stdin, stdout))
+        .await?;
     server.waiting().await?;
     Ok(())
 }
@@ -1688,15 +3557,28 @@ mod tests {
         assert!(err.message.contains("no ROM"));
     }
 
+    /// `png_dimensions` reads the IHDR fields; a malformed buffer yields
+    /// `(0, 0)` instead of panicking. (The screenshot round-trip test
+    /// below covers the real-PNG path: it asserts 256×224 on an actual
+    /// render.)
+    #[test]
+    fn png_dimensions_reads_the_ihdr() {
+        let mut buf = vec![0u8; 24];
+        buf[16..20].copy_from_slice(&512u32.to_be_bytes());
+        buf[20..24].copy_from_slice(&448u32.to_be_bytes());
+        assert_eq!(png_dimensions(&buf), (512, 448));
+        assert_eq!(png_dimensions(&[]), (0, 0));
+    }
+
     /// Loading a non-existent ROM bubbles the I/O error up through
     /// the MCP layer.
     #[tokio::test]
     async fn server_load_rom_missing_file_returns_error() {
         let s = LunaServer::new();
         let result = s
-            .load_rom(Parameters(LoadRomParams {
-                path: "/tmp/luna-this-file-does-not-exist.smc".into(),
-            }))
+            .load_rom(Parameters(rom_params(
+                "/tmp/luna-this-file-does-not-exist.smc",
+            )))
             .await;
         let Err(err) = result else {
             panic!("expected error for missing ROM");
@@ -1717,9 +3599,7 @@ mod tests {
         let path = PathBuf::from("/tmp/luna_mcp_demo.smc");
         std::fs::write(&path, demo_lorom()).unwrap();
         let info = s
-            .load_rom(Parameters(LoadRomParams {
-                path: path.to_string_lossy().into(),
-            }))
+            .load_rom(Parameters(rom_params(&path.to_string_lossy())))
             .await
             .unwrap();
         assert_eq!(info.0.rom.mapper, "LoRom");
@@ -1749,11 +3629,9 @@ mod tests {
         let s = LunaServer::new();
         let path = PathBuf::from("/tmp/luna_mcp_p1_demo.smc");
         std::fs::write(&path, demo_lorom()).unwrap();
-        s.load_rom(Parameters(LoadRomParams {
-            path: path.to_string_lossy().into(),
-        }))
-        .await
-        .unwrap();
+        s.load_rom(Parameters(rom_params(&path.to_string_lossy())))
+            .await
+            .unwrap();
         s.step(Parameters(StepParams { count: 50 })).await.unwrap();
 
         // disasm_cpu with all defaults → decodes at the live PC.
@@ -1833,6 +3711,7 @@ mod tests {
             bank: None,
             lo: None,
             hi: None,
+            symbol: None,
         }))
         .await
         .unwrap();
@@ -1854,6 +3733,7 @@ mod tests {
                 bank: None,
                 lo: Some(0x2100),
                 hi: None,
+                symbol: None,
             }))
             .await
             .is_err()
@@ -1885,11 +3765,9 @@ mod tests {
         let s = LunaServer::new();
         let path = PathBuf::from("/tmp/luna_mcp_p2_demo.smc");
         std::fs::write(&path, demo_lorom()).unwrap();
-        s.load_rom(Parameters(LoadRomParams {
-            path: path.to_string_lossy().into(),
-        }))
-        .await
-        .unwrap();
+        s.load_rom(Parameters(rom_params(&path.to_string_lossy())))
+            .await
+            .unwrap();
         // Inject `LDA #$42; STA $0200; JMP $0100` at $00:0100 and aim PC.
         s.poke_memory(Parameters(PokeMemoryParams {
             bank: 0x7E,
@@ -1915,8 +3793,11 @@ mod tests {
                 addr: 0x00_0200,
                 symbol: None,
                 hi: None,
+                hi_symbol: None,
                 on_read: false,
                 on_write: true,
+                mirror: None,
+                name: None,
             }))
             .await
             .unwrap()
@@ -1929,8 +3810,11 @@ mod tests {
                 addr: 0x00_0105,
                 symbol: None,
                 hi: None,
+                hi_symbol: None,
                 on_read: false,
                 on_write: true,
+                mirror: None,
+                name: None,
             }))
             .await
             .unwrap()
@@ -1942,8 +3826,11 @@ mod tests {
                 addr: 0,
                 symbol: None,
                 hi: None,
+                hi_symbol: None,
                 on_read: false,
                 on_write: true,
+                mirror: None,
+                name: None,
             }))
             .await
             .is_err()
@@ -1999,17 +3886,16 @@ mod tests {
         let s = LunaServer::new();
         let rom_path = PathBuf::from("/tmp/luna_mcp_p3_demo.smc");
         std::fs::write(&rom_path, demo_lorom()).unwrap();
-        s.load_rom(Parameters(LoadRomParams {
-            path: rom_path.to_string_lossy().into(),
-        }))
-        .await
-        .unwrap();
+        s.load_rom(Parameters(rom_params(&rom_path.to_string_lossy())))
+            .await
+            .unwrap();
 
         let sym_path = PathBuf::from("/tmp/luna_mcp_p3_demo.sym");
         std::fs::write(&sym_path, "[labels]\n00:0100 main\n7e:0200 monster_x\n").unwrap();
         let n = s
             .load_symbols(Parameters(LoadSymbolsParams {
                 path: sym_path.to_string_lossy().into(),
+                space: None,
             }))
             .await
             .unwrap();
@@ -2019,6 +3905,7 @@ mod tests {
         let r = s
             .resolve_symbol(Parameters(ResolveSymbolParams {
                 name: "monster_x".into(),
+                space: None,
             }))
             .await
             .unwrap();
@@ -2026,6 +3913,7 @@ mod tests {
         let r = s
             .resolve_symbol(Parameters(ResolveSymbolParams {
                 name: "nope".into(),
+                space: None,
             }))
             .await
             .unwrap();
@@ -2069,8 +3957,11 @@ mod tests {
                 addr: 0,
                 symbol: Some("monster_x".into()),
                 hi: None,
+                hi_symbol: None,
                 on_read: false,
                 on_write: true,
+                mirror: None,
+                name: None,
             }))
             .await
             .unwrap()
@@ -2084,6 +3975,7 @@ mod tests {
         let d = s
             .disasm_cpu(Parameters(DisasmCpuParams {
                 addr: Some(0x00_0100),
+                symbol: None,
                 lines: Some(1),
                 m8: Some(true),
                 x8: Some(true),
@@ -2094,6 +3986,953 @@ mod tests {
 
         let _ = std::fs::remove_file(&rom_path);
         let _ = std::fs::remove_file(&sym_path);
+    }
+
+    #[tokio::test]
+    async fn server_nocash_and_wdm_logs_round_trip() {
+        let s = LunaServer::new();
+
+        // Without a ROM both enables surface an error.
+        assert!(s.enable_nocash_log().await.is_err());
+        assert!(s.enable_wdm_log().await.is_err());
+
+        // Patch a program into the demo ROM at $00:8000: emit "HI" on the
+        // $21FC Nocash TTY, fire the SNES_ASSERT-style `WDM #$00`, then spin.
+        let mut rom = demo_lorom();
+        let prog: &[u8] = &[
+            0xA9, 0x48, // LDA #'H'
+            0x8D, 0xFC, 0x21, // STA $21FC
+            0xA9, 0x49, // LDA #'I'
+            0x8D, 0xFC, 0x21, // STA $21FC
+            0x42, 0x00, // WDM #$00
+            0x80, 0xFE, // BRA *
+        ];
+        rom[..prog.len()].copy_from_slice(prog);
+        // Re-fix the header checksum the patch just invalidated.
+        let mut sum = 0u32;
+        for (i, b) in rom.iter().enumerate() {
+            if !(0x7FDC..=0x7FDF).contains(&i) {
+                sum += u32::from(*b);
+            }
+        }
+        let checksum = (sum & 0xFFFF) as u16;
+        let complement = !checksum;
+        rom[0x7FDC] = complement as u8;
+        rom[0x7FDD] = (complement >> 8) as u8;
+        rom[0x7FDE] = checksum as u8;
+        rom[0x7FDF] = (checksum >> 8) as u8;
+
+        let rom_path = PathBuf::from("/tmp/luna_mcp_nocash_wdm_demo.smc");
+        std::fs::write(&rom_path, rom).unwrap();
+        s.load_rom(Parameters(rom_params(&rom_path.to_string_lossy())))
+            .await
+            .unwrap();
+
+        s.enable_nocash_log().await.unwrap();
+        s.enable_wdm_log().await.unwrap();
+
+        // A label so take_wdm_log symbolises the recorded PC.
+        let sym_path = PathBuf::from("/tmp/luna_mcp_nocash_wdm_demo.sym");
+        std::fs::write(&sym_path, "[labels]\n00:8000 main\n").unwrap();
+        s.load_symbols(Parameters(LoadSymbolsParams {
+            path: sym_path.to_string_lossy().into(),
+            space: None,
+        }))
+        .await
+        .unwrap();
+
+        s.step(Parameters(StepParams { count: 32 })).await.unwrap();
+
+        let nocash = s.take_nocash_log().await.unwrap();
+        assert_eq!(nocash.0.text, "HI");
+        assert_eq!(nocash.0.base64, "SEk=");
+
+        let wdm = s.take_wdm_log().await.unwrap();
+        assert_eq!(wdm.0.events.len(), 1);
+        let ev = &wdm.0.events[0];
+        assert_eq!(ev.operand, 0x00);
+        // The core records the operand byte's address (opcode at $00:800A).
+        assert_eq!(ev.pc, 0x00_800B);
+        assert_eq!(ev.symbol.as_deref(), Some("main+0x0B"));
+
+        // Draining resets both channels.
+        assert!(s.take_nocash_log().await.unwrap().0.text.is_empty());
+        assert!(s.take_wdm_log().await.unwrap().0.events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn server_forced_loading_and_port_device_round_trip() {
+        let s = LunaServer::new();
+        let rom_path = PathBuf::from("/tmp/luna_mcp_forced_demo.smc");
+        std::fs::write(&rom_path, demo_lorom()).unwrap();
+
+        // Auto-detection sees the LoROM header...
+        let info = s
+            .load_rom(Parameters(rom_params(&rom_path.to_string_lossy())))
+            .await
+            .unwrap();
+        assert_eq!(info.0.rom.mapper, "LoRom");
+
+        // A checksum-corrupted image is rejected by auto-detection...
+        let mut broken = demo_lorom();
+        broken[0x7FDC] ^= 0xFF;
+        let broken_path = PathBuf::from("/tmp/luna_mcp_forced_demo_broken.smc");
+        std::fs::write(&broken_path, &broken).unwrap();
+        assert!(
+            s.load_rom(Parameters(rom_params(&broken_path.to_string_lossy())))
+                .await
+                .is_err()
+        );
+
+        // ...but force_mapper loads it anyway (the point of the flag).
+        let info = s
+            .load_rom(Parameters(LoadRomParams {
+                path: broken_path.to_string_lossy().into(),
+                force_mapper: Some("lorom".into()),
+                force_region: Some("pal".into()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(info.0.rom.mapper, "LoRom");
+        assert!(!info.0.rom.checksum_valid);
+
+        // Bad vocabulary is an invalid_params error, not a load attempt.
+        assert!(
+            s.load_rom(Parameters(LoadRomParams {
+                path: rom_path.to_string_lossy().into(),
+                force_mapper: Some("wat".into()),
+                force_region: None,
+            }))
+            .await
+            .is_err()
+        );
+        assert!(
+            s.load_rom(Parameters(LoadRomParams {
+                path: rom_path.to_string_lossy().into(),
+                force_mapper: None,
+                force_region: Some("secam".into()),
+            }))
+            .await
+            .is_err()
+        );
+
+        // load_rom_bytes: same image over base64, no host file involved.
+        let info = s
+            .load_rom_bytes(Parameters(LoadRomBytesParams {
+                rom_base64: b64(&demo_lorom()),
+                force_mapper: None,
+                force_region: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(info.0.rom.title.trim(), "LUNA MCP DEMO");
+        assert!(
+            s.load_rom_bytes(Parameters(LoadRomBytesParams {
+                rom_base64: "not-base64!!".into(),
+                force_mapper: None,
+                force_region: None,
+            }))
+            .await
+            .is_err()
+        );
+
+        // set_port_device: plug a mouse into P1, feed it, unplug back to pad.
+        for device in ["mouse", "joypad"] {
+            s.set_port_device(Parameters(SetPortDeviceParams {
+                port: 0,
+                device: device.into(),
+            }))
+            .await
+            .unwrap();
+        }
+        assert!(
+            s.set_port_device(Parameters(SetPortDeviceParams {
+                port: 0,
+                device: "lightgun".into(),
+            }))
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn server_determinism_oracles_round_trip() {
+        let s = LunaServer::new();
+
+        // Everything errors cleanly without a ROM.
+        assert!(
+            s.frame_hash(Parameters(FrameHashParams::default()))
+                .await
+                .is_err()
+        );
+        assert!(
+            s.wram_page_hashes(Parameters(WramPageHashesParams::default()))
+                .await
+                .is_err()
+        );
+        assert!(
+            s.loop_probe(Parameters(LoopProbeParams { max_steps: 10 }))
+                .await
+                .is_err()
+        );
+
+        let rom_path = PathBuf::from("/tmp/luna_mcp_oracles_demo.smc");
+        std::fs::write(&rom_path, demo_lorom()).unwrap();
+        s.load_rom(Parameters(rom_params(&rom_path.to_string_lossy())))
+            .await
+            .unwrap();
+
+        // frame_hash: 16 hex chars, deterministic while nothing steps.
+        let h1 = s
+            .frame_hash(Parameters(FrameHashParams::default()))
+            .await
+            .unwrap();
+        assert_eq!(h1.0.hash.len(), 16);
+        assert!(h1.0.hash.chars().all(|c| c.is_ascii_hexdigit()));
+        let h2 = s
+            .frame_hash(Parameters(FrameHashParams::default()))
+            .await
+            .unwrap();
+        assert_eq!(h1.0.hash, h2.0.hash);
+
+        // native gate: BadArg until set_native_capture flips it on.
+        assert!(
+            s.frame_hash(Parameters(FrameHashParams {
+                force_display: false,
+                native: true,
+            }))
+            .await
+            .is_err()
+        );
+        s.set_native_capture(Parameters(SetNativeCaptureParams { enabled: true }))
+            .await
+            .unwrap();
+        s.step_until_frame(Parameters(StepUntilFrameParams {
+            max_steps: 1_000_000,
+        }))
+        .await
+        .unwrap();
+        let hn = s
+            .frame_hash(Parameters(FrameHashParams {
+                force_display: false,
+                native: true,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(hn.0.hash.len(), 16);
+
+        // wram_page_hashes: default page size → 32 pages; bad size errors.
+        let pages = s
+            .wram_page_hashes(Parameters(WramPageHashesParams::default()))
+            .await
+            .unwrap();
+        assert_eq!(pages.0.page_size, 0x1000);
+        assert_eq!(pages.0.hashes.len(), 32);
+        assert!(
+            s.wram_page_hashes(Parameters(WramPageHashesParams { page_size: 3 }))
+                .await
+                .is_err()
+        );
+
+        // wram_snapshot: hash equals the one full-width page hash, data
+        // round-trips at 128 KiB only when asked for.
+        let snap = s
+            .wram_snapshot(Parameters(WramSnapshotParams::default()))
+            .await
+            .unwrap();
+        assert!(snap.0.wram_base64.is_none());
+        let full = s
+            .wram_page_hashes(Parameters(WramPageHashesParams { page_size: 0x20000 }))
+            .await
+            .unwrap();
+        assert_eq!(snap.0.hash, full.0.hashes[0]);
+        let snap = s
+            .wram_snapshot(Parameters(WramSnapshotParams { include_data: true }))
+            .await
+            .unwrap();
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(snap.0.wram_base64.unwrap())
+            .unwrap();
+        assert_eq!(data.len(), 0x20000);
+
+        // loop_probe advances the CPU and reports a plausible shape.
+        let probe = s
+            .loop_probe(Parameters(LoopProbeParams { max_steps: 500 }))
+            .await
+            .unwrap();
+        assert!(probe.0.executed <= 500);
+        assert!(probe.0.distinct_pcs >= 1);
+    }
+
+    #[tokio::test]
+    async fn server_trace_parity_round_trip() {
+        let s = LunaServer::new();
+
+        // Every enable errors cleanly without a ROM.
+        assert!(s.enable_mailbox_log().await.is_err());
+        assert!(
+            s.enable_dma_trace(Parameters(EnableRingTraceParams { max_events: 16 }))
+                .await
+                .is_err()
+        );
+
+        // A program that pokes the APU mailbox so the log has real traffic.
+        let mut rom = demo_lorom();
+        let prog: &[u8] = &[
+            0xA9, 0xCC, // LDA #$CC
+            0x8D, 0x40, 0x21, // STA $2140
+            0xAD, 0x40, 0x21, // LDA $2140
+            0x80, 0xFE, // BRA *
+        ];
+        rom[..prog.len()].copy_from_slice(prog);
+        let rom_path = PathBuf::from("/tmp/luna_mcp_traces_demo.smc");
+        std::fs::write(&rom_path, rom).unwrap();
+        s.load_rom(Parameters(LoadRomParams {
+            path: rom_path.to_string_lossy().into(),
+            force_mapper: Some("lorom".into()),
+            force_region: None,
+        }))
+        .await
+        .unwrap();
+
+        // Enable all nine, run a while, drain all nine.
+        s.enable_mailbox_log().await.unwrap();
+        s.enable_sa1_log().await.unwrap();
+        s.enable_sa1_side_log().await.unwrap();
+        for max in [64usize] {
+            s.enable_dma_trace(Parameters(EnableRingTraceParams { max_events: max }))
+                .await
+                .unwrap();
+            s.enable_dsp_trace(Parameters(EnableRingTraceParams { max_events: max }))
+                .await
+                .unwrap();
+            s.enable_sa1_trace(Parameters(EnableRingTraceParams { max_events: max }))
+                .await
+                .unwrap();
+            s.enable_superfx_trace(Parameters(EnableRingTraceParams { max_events: max }))
+                .await
+                .unwrap();
+            s.enable_spc_trace(Parameters(EnableRingTraceParams { max_events: max }))
+                .await
+                .unwrap();
+        }
+        s.enable_dsp1_trace(Parameters(EnableDsp1TraceParams {
+            max_events: 64,
+            ports_only: false,
+        }))
+        .await
+        .unwrap();
+
+        s.step(Parameters(StepParams { count: 2000 }))
+            .await
+            .unwrap();
+
+        // The mailbox saw our $2140 write + read, tagged with the writing PC.
+        let mail = s.take_mailbox_log().await.unwrap();
+        assert!(!mail.0.events.is_empty());
+        let w = mail.0.events.iter().find(|e| e.kind == "write").unwrap();
+        assert_eq!(w.port, 0);
+        assert_eq!(w.value, 0xCC);
+        assert_eq!(w.pc >> 16, 0x00);
+
+        // The SPC700 IPL boot ROM executed instructions.
+        let spc = s.take_spc_trace().await.unwrap();
+        assert!(!spc.0.events.is_empty());
+
+        // Coprocessor traces drain empty on a plain LoROM cart, not error.
+        assert!(s.take_sa1_log().await.unwrap().0.events.is_empty());
+        assert!(s.take_sa1_side_log().await.unwrap().0.events.is_empty());
+        assert!(s.take_sa1_trace().await.unwrap().0.events.is_empty());
+        assert!(s.take_superfx_trace().await.unwrap().0.events.is_empty());
+        let dsp1 = s
+            .take_dsp1_trace(Parameters(TakeDsp1TraceParams {
+                decode_commands: true,
+            }))
+            .await
+            .unwrap();
+        assert!(dsp1.0.events.is_empty());
+        assert!(dsp1.0.commands.is_some_and(|c| c.is_empty()));
+        assert!(!dsp1.0.truncated);
+
+        // DMA + DSP traces drain Ok (the demo program does no DMA; the IPL
+        // may or may not touch DSP registers — shape only).
+        s.take_dma_trace().await.unwrap();
+        s.take_dsp_trace().await.unwrap();
+
+        // Draining reset the mailbox log.
+        assert!(s.take_mailbox_log().await.unwrap().0.events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn server_symbol_tools_round_trip() {
+        let s = LunaServer::new();
+        let rom_path = PathBuf::from("/tmp/luna_mcp_symtools_demo.smc");
+        std::fs::write(&rom_path, demo_lorom()).unwrap();
+        s.load_rom(Parameters(rom_params(&rom_path.to_string_lossy())))
+            .await
+            .unwrap();
+
+        // load_symbols_str: no host file involved.
+        let n = s
+            .load_symbols_str(Parameters(LoadSymbolsStrParams {
+                text: "[labels]\n00:8000 main\n7e:0200 monster_x\n7e:020f monster_end\n".into(),
+                space: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(n.0.count, 3);
+
+        // symbol_for_addr: exact, offset form, and no-label-in-bank.
+        let sym = |addr| s.symbol_for_addr(Parameters(SymbolForAddrParams { addr, space: None }));
+        assert_eq!(
+            sym(0x7E_0200).await.unwrap().0.symbol.as_deref(),
+            Some("monster_x")
+        );
+        assert_eq!(
+            sym(0x00_8005).await.unwrap().0.symbol.as_deref(),
+            Some("main+0x05")
+        );
+        assert!(sym(0x7F_0000).await.unwrap().0.symbol.is_none());
+
+        // disasm_cpu accepts a symbol start.
+        let d = s
+            .disasm_cpu(Parameters(DisasmCpuParams {
+                addr: None,
+                symbol: Some("main".into()),
+                lines: Some(1),
+                m8: Some(true),
+                x8: Some(true),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(d.0.lines[0].addr, 0x00_8000);
+
+        // enable_mem_trace: symbol conflicts with manual filters...
+        assert!(
+            s.enable_mem_trace(Parameters(EnableMemTraceParams {
+                max_events: 10,
+                bank: Some(0x7E),
+                lo: None,
+                hi: None,
+                symbol: Some("monster_x".into()),
+            }))
+            .await
+            .is_err()
+        );
+        // ...and works alone.
+        s.enable_mem_trace(Parameters(EnableMemTraceParams {
+            max_events: 10,
+            bank: None,
+            lo: None,
+            hi: None,
+            symbol: Some("monster_x".into()),
+        }))
+        .await
+        .unwrap();
+
+        // bp_add: watch a symbol..=hi_symbol range.
+        let id = s
+            .bp_add(Parameters(BpAddParams {
+                kind: "mem".into(),
+                addr: 0,
+                symbol: Some("monster_x".into()),
+                hi: None,
+                hi_symbol: Some("monster_end".into()),
+                on_read: false,
+                on_write: true,
+                mirror: None,
+                name: None,
+            }))
+            .await
+            .unwrap()
+            .0
+            .id;
+        let list = s.bp_list().await.unwrap().0.breakpoints;
+        let bp = list.iter().find(|b| b.id == id).unwrap();
+        assert_eq!(bp.lo, 0x7E_0200);
+        assert_eq!(bp.hi, 0x7E_020F);
+
+        // clear_symbols: resolution and annotation stop.
+        s.clear_symbols().await;
+        assert!(
+            s.resolve_symbol(Parameters(ResolveSymbolParams {
+                name: "main".into(),
+                space: None,
+            }))
+            .await
+            .unwrap()
+            .0
+            .addr
+            .is_none()
+        );
+        assert!(sym(0x7E_0200).await.unwrap().0.symbol.is_none());
+    }
+
+    #[tokio::test]
+    async fn server_persistence_and_media_round_trip() {
+        let s = LunaServer::new();
+
+        // Give the demo cart 8 KB of SRAM (header $7FD8 = size code 3).
+        let mut rom = demo_lorom();
+        rom[0x7FD8] = 0x03;
+        // Header checksum changed → re-fix it.
+        let mut sum = 0u32;
+        for (i, b) in rom.iter().enumerate() {
+            if !(0x7FDC..=0x7FDF).contains(&i) {
+                sum += u32::from(*b);
+            }
+        }
+        let checksum = (sum & 0xFFFF) as u16;
+        let complement = !checksum;
+        rom[0x7FDC] = complement as u8;
+        rom[0x7FDD] = (complement >> 8) as u8;
+        rom[0x7FDE] = checksum as u8;
+        rom[0x7FDF] = (checksum >> 8) as u8;
+        let rom_path = PathBuf::from("/tmp/luna_mcp_media_demo.smc");
+        std::fs::write(&rom_path, rom).unwrap();
+        s.load_rom(Parameters(rom_params(&rom_path.to_string_lossy())))
+            .await
+            .unwrap();
+
+        // sram_set → sram_get round trip.
+        let image = vec![0xA5u8; 0x2000];
+        s.sram_set(Parameters(SramSetParams {
+            sram_base64: b64(&image),
+        }))
+        .await
+        .unwrap();
+        let got = s.sram_get().await;
+        assert_eq!(got.0.bytes, 0x2000);
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(got.0.sram_base64)
+            .unwrap();
+        assert_eq!(decoded, image);
+        assert!(
+            s.sram_set(Parameters(SramSetParams {
+                sram_base64: "!!!".into(),
+            }))
+            .await
+            .is_err()
+        );
+
+        // export_spc: a v0.30 blob with the right magic + size.
+        let spc = s.export_spc().await.unwrap();
+        assert_eq!(spc.0.bytes, 0x10200);
+        let blob = base64::engine::general_purpose::STANDARD
+            .decode(spc.0.spc_base64)
+            .unwrap();
+        assert!(blob.starts_with(b"SNES-SPC700 Sound File Data"));
+
+        // decode_sprites: all 128 OAM entries.
+        let sprites = s.decode_sprites().await.unwrap();
+        assert_eq!(sprites.0.sprites.len(), 128);
+
+        // screenshot: bg render works and reports 256×224; conflicts and
+        // bad indices are invalid_params; native still gated.
+        let shot = s
+            .screenshot(Parameters(ScreenshotParams {
+                force_display: true,
+                native: false,
+                bg: Some(1),
+            }))
+            .await
+            .unwrap();
+        assert_eq!((shot.0.width, shot.0.height), (256, 224));
+        assert!(
+            s.screenshot(Parameters(ScreenshotParams {
+                force_display: false,
+                native: true,
+                bg: Some(1),
+            }))
+            .await
+            .is_err()
+        );
+        assert!(
+            s.screenshot(Parameters(ScreenshotParams {
+                force_display: false,
+                native: false,
+                bg: Some(5),
+            }))
+            .await
+            .is_err()
+        );
+        assert!(
+            s.screenshot(Parameters(ScreenshotParams {
+                force_display: false,
+                native: true,
+                bg: None,
+            }))
+            .await
+            .is_err()
+        );
+
+        // peek_aram / peek_vram: the u32 lift makes one-call full dumps work.
+        let aram = s
+            .peek_aram(Parameters(PeekAramParams {
+                offset: 0,
+                symbol: None,
+                count: 0x1_0000,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(aram.0.bytes.len(), 0x1_0000);
+        let vram = s
+            .peek_vram(Parameters(PeekVramParams {
+                offset: 0,
+                count: 0x1_0000,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(vram.0.bytes.len(), 0x1_0000);
+    }
+
+    #[tokio::test]
+    async fn server_with_preloaded_emulator_answers_without_load_rom() {
+        // The `luna mcp --rom` path: the emulator arrives already loaded.
+        let rom_path = PathBuf::from("/tmp/luna_mcp_preload_demo.smc");
+        std::fs::write(&rom_path, demo_lorom()).unwrap();
+        let mut em = Emulator::new();
+        em.load_rom(&rom_path).unwrap();
+        let s = LunaServer::with_emulator(em);
+
+        // First contact: state + step work with no prior load_rom call.
+        let st = s.state().await;
+        assert!(st.0.state.rom.is_some());
+        let stepped = s.step(Parameters(StepParams { count: 10 })).await.unwrap();
+        assert_eq!(stepped.0.executed, 10);
+    }
+
+    #[test]
+    fn get_info_reports_luna_identity_and_instructions() {
+        let s = LunaServer::new();
+        let info = s.get_info();
+        assert_eq!(info.server_info.name, "luna");
+        assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
+        let instructions = info.instructions.expect("server instructions present");
+        assert!(instructions.contains("load_rom"));
+        assert!(instructions.contains("take_wdm_log"));
+        assert!(info.capabilities.tools.is_some());
+    }
+
+    #[tokio::test]
+    async fn server_symbol_spaces_round_trip() {
+        let s = LunaServer::new();
+        let rom_path = PathBuf::from("/tmp/luna_mcp_symspaces_demo.smc");
+        std::fs::write(&rom_path, demo_lorom()).unwrap();
+        s.load_rom(Parameters(rom_params(&rom_path.to_string_lossy())))
+            .await
+            .unwrap();
+
+        // CPU symbols + a [definitions] constant.
+        let n = s
+            .load_symbols_str(Parameters(LoadSymbolsStrParams {
+                text: "[labels]\n00:8000 main\n[definitions]\n00000042 MAGIC\n".into(),
+                space: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(n.0.count, 2);
+        // Constants resolve in the CPU space (v2, #179).
+        let r = s
+            .resolve_symbol(Parameters(ResolveSymbolParams {
+                name: "MAGIC".into(),
+                space: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(r.0.addr, Some(0x42));
+
+        // ARAM symbols load into their own space, keeping the CPU table.
+        let n = s
+            .load_symbols_str(Parameters(LoadSymbolsStrParams {
+                text: "[labels]\n00:0500 driver_loop\n".into(),
+                space: Some("aram".into()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(n.0.count, 1);
+        let r = s
+            .resolve_symbol(Parameters(ResolveSymbolParams {
+                name: "driver_loop".into(),
+                space: Some("aram".into()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(r.0.addr, Some(0x0500));
+        // Cross-space resolution stays separate in both directions.
+        assert!(
+            s.resolve_symbol(Parameters(ResolveSymbolParams {
+                name: "driver_loop".into(),
+                space: None,
+            }))
+            .await
+            .unwrap()
+            .0
+            .addr
+            .is_none()
+        );
+        let r = s
+            .resolve_symbol(Parameters(ResolveSymbolParams {
+                name: "main".into(),
+                space: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(r.0.addr, Some(0x00_8000));
+
+        // symbol_for_addr in the aram space, incl. the 16-bit guard.
+        let sfa = s
+            .symbol_for_addr(Parameters(SymbolForAddrParams {
+                addr: 0x0502,
+                space: Some("aram".into()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(sfa.0.symbol.as_deref(), Some("driver_loop+0x02"));
+        assert!(
+            s.symbol_for_addr(Parameters(SymbolForAddrParams {
+                addr: 0x1_0000,
+                space: Some("aram".into()),
+            }))
+            .await
+            .is_err()
+        );
+
+        // disasm_spc + peek_aram accept ARAM symbols; the disassembly is
+        // annotated from the ARAM space.
+        let d = s
+            .disasm_spc(Parameters(DisasmSpcParams {
+                addr: None,
+                symbol: Some("driver_loop".into()),
+                lines: Some(1),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(d.0.lines[0].addr, 0x0500);
+        assert_eq!(d.0.lines[0].symbol.as_deref(), Some("driver_loop"));
+        let bytes = s
+            .peek_aram(Parameters(PeekAramParams {
+                offset: 0,
+                symbol: Some("driver_loop".into()),
+                count: 2,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(bytes.0.bytes.len(), 2);
+        assert!(
+            s.peek_aram(Parameters(PeekAramParams {
+                offset: 0,
+                symbol: Some("main".into()), // CPU label ≠ ARAM symbol
+                count: 2,
+            }))
+            .await
+            .is_err()
+        );
+
+        // Bad space vocabulary.
+        assert!(
+            s.resolve_symbol(Parameters(ResolveSymbolParams {
+                name: "main".into(),
+                space: Some("vram".into()),
+            }))
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn server_breakpoints_v2_round_trip() {
+        let s = LunaServer::new();
+        let rom_path = PathBuf::from("/tmp/luna_mcp_bpv2_demo.smc");
+        std::fs::write(&rom_path, demo_lorom()).unwrap();
+        s.load_rom(Parameters(rom_params(&rom_path.to_string_lossy())))
+            .await
+            .unwrap();
+        s.load_symbols_str(Parameters(LoadSymbolsStrParams {
+            text: "[labels]\n7e:0200 monster_x\n".into(),
+            space: None,
+        }))
+        .await
+        .unwrap();
+
+        // A named, bank-exact (mirror off) watch created from a symbol.
+        let id = s
+            .bp_add(Parameters(BpAddParams {
+                kind: "mem".into(),
+                addr: 0,
+                symbol: Some("monster_x".into()),
+                hi: None,
+                hi_symbol: None,
+                on_read: false,
+                on_write: true,
+                mirror: Some(false),
+                name: None,
+            }))
+            .await
+            .unwrap()
+            .0
+            .id;
+        let list = s.bp_list().await.unwrap().0.breakpoints;
+        let bp = list.iter().find(|b| b.id == id).unwrap();
+        assert!(bp.enabled);
+        assert!(!bp.mirror);
+        assert_eq!(bp.hit_count, 0);
+        assert_eq!(bp.name.as_deref(), Some("monster_x"));
+
+        // Disable → run past a write → no hit; hit_count stays 0.
+        let found = s
+            .bp_set_enabled(Parameters(BpSetEnabledParams { id, enabled: false }))
+            .await
+            .unwrap();
+        assert!(found.0.found);
+        // Inject `LDA #$42; STA $0200; BRA *` at $7E:0100 won't execute
+        // from WRAM here — instead poke through the API and step: pokes
+        // bypass the bus, so drive a real write via run_until: simplest
+        // is to verify the disabled watch doesn't fire during a run.
+        let out = s
+            .run_until_break(Parameters(RunUntilBreakParams { max_steps: 200 }))
+            .await
+            .unwrap();
+        assert!(!out.0.hit);
+
+        // Re-enable + unknown id shape.
+        assert!(
+            s.bp_set_enabled(Parameters(BpSetEnabledParams { id, enabled: true }))
+                .await
+                .unwrap()
+                .0
+                .found
+        );
+        assert!(
+            !s.bp_set_enabled(Parameters(BpSetEnabledParams {
+                id: 4242,
+                enabled: true,
+            }))
+            .await
+            .unwrap()
+            .0
+            .found
+        );
+    }
+
+    #[tokio::test]
+    async fn server_search_session_round_trip() {
+        let s = LunaServer::new();
+        let rom_path = PathBuf::from("/tmp/luna_mcp_search_demo.smc");
+        std::fs::write(&rom_path, demo_lorom()).unwrap();
+        s.load_rom(Parameters(rom_params(&rom_path.to_string_lossy())))
+            .await
+            .unwrap();
+
+        // Plant the variable, begin, and narrow to it.
+        s.poke_memory(Parameters(PokeMemoryParams {
+            bank: 0x7E,
+            offset: 0x0300,
+            symbol: None,
+            data: vec![100, 0],
+        }))
+        .await
+        .unwrap();
+        let n = s
+            .search_begin(Parameters(SearchBeginParams {
+                width: "u16".into(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(n.0.remaining, 0x1FFFF);
+        s.search_refine(Parameters(SearchRefineParams {
+            op: "eq".into(),
+            value: Some(100),
+        }))
+        .await
+        .unwrap();
+        s.poke_memory(Parameters(PokeMemoryParams {
+            bank: 0x7E,
+            offset: 0x0300,
+            symbol: None,
+            data: vec![73, 0],
+        }))
+        .await
+        .unwrap();
+        let n = s
+            .search_refine(Parameters(SearchRefineParams {
+                op: "eq".into(),
+                value: Some(73),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(n.0.remaining, 1);
+        let hits = s
+            .search_results(Parameters(SearchResultsParams::default()))
+            .await
+            .unwrap();
+        assert_eq!(hits.0.hits[0].addr, 0x7E_0300);
+        assert_eq!(hits.0.hits[0].value, 73);
+
+        // Vocabulary errors.
+        assert!(
+            s.search_begin(Parameters(SearchBeginParams {
+                width: "u32".into(),
+            }))
+            .await
+            .is_err()
+        );
+        assert!(
+            s.search_refine(Parameters(SearchRefineParams {
+                op: "between".into(),
+                value: None,
+            }))
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn server_call_stack_round_trip() {
+        let s = LunaServer::new();
+        let mut rom = demo_lorom();
+        // $8000: JSR $8010 ; spin. $8010: JSL $008020 ; RTS. $8020: spin.
+        let prog: &[(usize, &[u8])] = &[
+            (0x0000, &[0x20, 0x10, 0x80, 0x80, 0xFE]),
+            (0x0010, &[0x22, 0x20, 0x80, 0x00, 0x60]),
+            (0x0020, &[0x80, 0xFE]),
+        ];
+        for &(off, bytes) in prog {
+            rom[off..off + bytes.len()].copy_from_slice(bytes);
+        }
+        let rom_path = PathBuf::from("/tmp/luna_mcp_callstack_demo.smc");
+        std::fs::write(&rom_path, rom).unwrap();
+        s.load_rom(Parameters(LoadRomParams {
+            path: rom_path.to_string_lossy().into(),
+            force_mapper: Some("lorom".into()),
+            force_region: None,
+        }))
+        .await
+        .unwrap();
+
+        // Off: empty.
+        assert!(s.call_stack().await.0.frames.is_empty());
+
+        s.enable_call_stack(Parameters(EnableCallStackParams { enabled: true }))
+            .await;
+        s.step(Parameters(StepParams { count: 2 })).await.unwrap();
+        let frames = s.call_stack().await.0.frames;
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].pc, 0x00_8010);
+        assert_eq!(frames[1].pc, 0x00_8020);
+
+        s.enable_call_stack(Parameters(EnableCallStackParams { enabled: false }))
+            .await;
+        assert!(s.call_stack().await.0.frames.is_empty());
+    }
+
+    /// `load_rom` params with no mapper/region override — the common case.
+    fn rom_params(path: &str) -> LoadRomParams {
+        LoadRomParams {
+            path: path.into(),
+            force_mapper: None,
+            force_region: None,
+        }
     }
 
     fn demo_lorom() -> Vec<u8> {

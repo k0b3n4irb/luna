@@ -937,7 +937,7 @@ impl LunaApp {
                     let _ = em.bp_remove(id);
                 }
                 None => {
-                    let _ = em.bp_add_exec(addr);
+                    let _ = em.bp_add_exec(addr, None);
                 }
             }
         }
@@ -1447,7 +1447,7 @@ impl LunaApp {
                 if let Ok(mut guard) = self.emu.lock()
                     && let Some(em) = guard.as_mut()
                 {
-                    let _ = em.bp_add_exec(addr);
+                    let _ = em.bp_add_exec(addr, None);
                 }
                 self.sync_has_breakpoints();
             }
@@ -1455,7 +1455,7 @@ impl LunaApp {
                 if let Ok(mut guard) = self.emu.lock()
                     && let Some(em) = guard.as_mut()
                 {
-                    let _ = em.bp_add_mem(lo, hi, on_r, on_w);
+                    let _ = em.bp_add_mem(lo, hi, on_r, on_w, true, None);
                 }
                 self.sync_has_breakpoints();
             }

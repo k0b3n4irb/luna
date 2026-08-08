@@ -1098,11 +1098,13 @@ impl Mapper for Sa1Mapper {
     }
 
     fn save_state(&self) -> Vec<u8> {
-        bincode::serialize(self).unwrap_or_default()
+        bincode::serde::encode_to_vec(self, bincode::config::standard()).unwrap_or_default()
     }
 
     fn load_state(&mut self, data: &[u8]) {
-        if let Ok(mut tmp) = bincode::deserialize::<Self>(data) {
+        if let Ok((mut tmp, _)) =
+            bincode::serde::decode_from_slice::<Self, _>(data, bincode::config::standard())
+        {
             // Keep the live ROM (it is `serde(skip)`-defaulted to empty in
             // `tmp`); swap in every other field by replacing `self` wholesale.
             tmp.rom = std::mem::take(&mut self.rom);

@@ -4,6 +4,140 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.14.0] — 2026-08-08
+
+The OpenSNES DX release: everything the SDK team asked for in issues
+#168–#181, in one coherent drop. Full CLI↔MCP parity (an agent over MCP
+now sees every trace, oracle and channel the CLI does), a much richer
+debugging API (symbols v2 with an SPC address space, breakpoints v2,
+narrowing search sessions, pokes for every memory space, per-frame
+freezes, a tracked call stack), and `luna test` — the manifest-driven
+test runner that finally gives homebrew a real CI story.
+
+### Added
+- `luna test` (#181) — the manifest-driven homebrew test runner: one
+  TOML per test (`rom`, optional `sym`/`input`/`screenshot`, a
+  `frames`/`steps` bound, and asserts on `wdm_empty`,
+  `nocash_contains`, `fbhash` and symbol values), run in-process
+  through `luna-api` with the CI exit-code contract (0 pass / 1 fail /
+  2 usage). `--update` regenerates `fbhash` goldens preserving manifest
+  comments; `--only` filters; `--report json` emits a machine-readable
+  summary. New book chapter "Developing homebrew with luna" with a
+  copyable GitHub Actions recipe.
+- Tracked 65C816 call stack (#180) — opt-in `enable_call_stack` +
+  `call_stack()` on `luna_api::Emulator` (JSR/JSL/RTS/RTL, BRK/COP and
+  NMI entries; bounded at 256 frames; RTS-without-JSR tolerant),
+  symbol-annotated, exposed as MCP tools, embedded in the state JSON
+  while tracking (`call_stack`), and on the CLI as `luna state
+  --call-stack`. Maintained API-side by the run loops — the CPU core
+  is untouched.
+- Pokes beyond WRAM + per-frame freezes (#178) — `poke_vram` /
+  `poke_cgram` / `poke_oam` / `poke_aram` on `luna_api::Emulator` and
+  as MCP tools (previously `poke_memory` silently skipped everything
+  but WRAM), plus `freeze_add` / `freeze_remove` / `freeze_list`:
+  cheat-style WRAM pinning re-applied at every frame boundary in every
+  run path — including the GUI's interruptible run loop, so the three
+  front-ends can never disagree about a frozen value.
+- Narrowing memory-search sessions (#177) — `search_begin(width)` /
+  `search_refine(op, value?)` / `search_results(limit)` on
+  `luna_api::Emulator` and as MCP tools: the classic "find my variable"
+  loop (`eq`/`ne`/`lt`/`gt` against a value, `changed`/`unchanged`
+  against the previous snapshot).
+- Breakpoints v2 (#176) — `bp_set_enabled` (disable without losing id /
+  name / hit count), per-breakpoint hit counts (mem watches count at
+  most one hit per instruction, matching the first-hit rule), an
+  exposed `mirror` flag on watch creation (previously hardcoded on),
+  and display names defaulting to the creating symbol. `bp_list`
+  reports it all. API note: `Emulator::bp_add_exec` / `bp_add_mem`
+  signatures grew `name` (and `mirror`) parameters.
+- Symbols v2 (#179, closing the ARAM half of #171): the symbol table
+  carries two address spaces (24-bit CPU bus + SPC700 ARAM) — load a
+  wla-spc700 driver's `.sym` with `space: "aram"` (API:
+  `load_symbols_spc(_str)`) without clobbering the game's CPU symbols;
+  `disasm_spc` is now annotated and, with `peek_aram`, accepts ARAM
+  `symbol` names. WLA-DX `[definitions]` constants resolve by name (and
+  never annotate addresses). Name resolution is a binary search and
+  parse dedup is sort-based — the old linear/quadratic scans are gone,
+  so large `.sym` files stay fast.
+- `luna state`: `--peek` results are mirrored into the `--out` JSON as a
+  `peeks` array (`{spec, space, addr, bytes_hex, error?}`) so harnesses
+  read peeks from the same machine-readable channel as the state instead
+  of regex-parsing the stderr hexdump (#175). Existing top-level JSON
+  keys are unchanged; failed peeks keep their slot with an `error`
+  string. The stderr hexdump stays for humans.
+- `luna mcp` preload flags (#174) — `--rom` (with beside-ROM `.sym`
+  auto-detection), `--sym`, `--force-mapper`, `--force-region`: the
+  session starts with the ROM loaded, so an MCP client's first `state`
+  works without a `load_rom` round-trip. The MCP handshake now
+  identifies the server as `luna` with luna's real version (previously
+  rmcp's) and carries workflow instructions.
+- MCP: persistence + media parity (#173) — `sram_get` / `sram_set`
+  (base64 `.srm`, the `--srm-out` / `--srm-in` pair), `export_spc`
+  (standard `.spc` v0.30 snapshot), `decode_sprites` (structured OAM
+  list), and `screenshot` gained `native` (512×448) and `bg` (single
+  layer 1..=4) modes. `Emulator::peek_vram` / `peek_aram` `count` is
+  now `u32` (capped at `0x10000`) so a full 64 KB dump is one call —
+  the CLI `--peek APU:0:10000` form works too.
+- MCP: symbol parity (#171, CPU-space half) — new `load_symbols_str`
+  (load `.sym` text with no host file), `clear_symbols`, and
+  `symbol_for_addr` (reverse lookup) tools; `disasm_cpu` and
+  `enable_mem_trace` now accept a `symbol` argument, and `bp_add` gained
+  `hi_symbol` for symbol-bounded watch ranges. The ARAM-space tools
+  (`disasm_spc`, `peek_aram`) stay numeric until symbols v2 adds an SPC
+  address space (#179).
+- MCP: full trace parity with the CLI (#172) — mechanical `enable_*` /
+  `take_*` tool pairs for the dma, dsp (S-DSP writes), mailbox
+  (`$2140-43`), `sa1_log`, `sa1_side_log`, `sa1_trace`, superfx, dsp1,
+  and spc700 traces. PC-carrying events are symbolised like the CPU/mem
+  traces; `take_dsp1_trace {decode_commands}` additionally returns the
+  decoded DSP-1 command transactions (the `--dsp1-trace-commands` view).
+- MCP: the CI determinism oracles are now reachable over MCP (#170) —
+  `frame_hash {force_display, native}` (the CLI `fbhash=` value, 16 hex
+  chars), `set_native_capture`, `wram_page_hashes {page_size}`,
+  `wram_snapshot {include_data}` (stable FNV-1a-64 + optional base64
+  image), and `loop_probe {max_steps}`. Hashes travel as hex strings
+  because JSON numbers can't carry a full u64.
+- MCP: headerless / checksum-invalid homebrew is now loadable over pure MCP
+  (#169) — `load_rom` gained optional `force_mapper` / `force_region`
+  params (the CLI `--force-mapper` / `--force-region` vocabulary), a new
+  `load_rom_bytes` tool loads a base64 image with no host file (note: no
+  firmware-folder lookup — check `missing_firmware`), and a new
+  `set_port_device` tool plugs `joypad` / `mouse` / `superscope` into a
+  port without touching the GUI or CLI (the `set_mouse` /
+  `set_superscope` descriptions now point at it).
+- MCP: the two SDK assert/log channels are now reachable over MCP (#168) —
+  `enable_nocash_log` / `take_nocash_log` (the `$21FC` Nocash TTY, drained
+  as `{text, base64}`) and `enable_wdm_log` / `take_wdm_log` (the `WDM`
+  assert channel, drained as `[{pc, operand, symbol}]`). Parity with the
+  CLI's `--nocash-out` / `--wdm-out`.
+
+### Changed
+- **BREAKING — save-state format v5** (#167): the ROM-identity hash binding
+  a state to its ROM is now an explicit FNV-1a-64 over the raw ROM bytes
+  (previously `std`'s `DefaultHasher`, unspecified across toolchains — a
+  Rust upgrade could silently orphan every saved state), and the container
+  plus all mapper/coprocessor blobs moved from bincode 1.x (EOL) to
+  bincode 2. Both breaks share the one version bump: v4 and older `.luna`
+  blobs are rejected with a clean version error — re-save from a live run.
+  States are now portable across luna builds and toolchains
+  (`docs/trace_determinism.md` gained a save-state section).
+
+### Fixed
+- `search_memory` hits in the WRAM high half are reported as `$7F:xxxx`
+  — previously they leaked as impossible `$7E:1xxxx` addresses (#177).
+- `wram_page_hashes` no longer panics the transport on an invalid
+  `page_size` — it returns a typed `BadArg` error (#167, #182).
+- `run_until_pc` catches core panics like every other run path — a
+  crashing ROM surfaces as an error instead of aborting the CLI/MCP/GUI
+  (#167, #183).
+- `run_until_mem_read`/`run_until_mem_write` no longer clobber a
+  caller-enabled memory trace: they ride the breakpoint registry (and are
+  panic-safe by construction) instead of hijacking the mem-trace buffer
+  (#167, #184).
+- "Native capture is not enabled" is a typed usage error (`BadArg`), not
+  a fake I/O error; fixed the stale `set_port2_mouse` rustdoc link
+  (#167, #185).
+
 ## [1.13.0] — 2026-08-03
 
 DSP-1 visibility, end to end. The cart coprocessor was the last one with

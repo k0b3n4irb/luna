@@ -260,7 +260,7 @@ const FRAME_STEP_BUDGET: u64 = 200_000;
 ///
 /// Returns `None` when the spec is not APU-prefixed, so the caller can
 /// fall through to the CPU-bus and symbol forms.
-pub(crate) fn parse_apu_peek_spec(spec: &str) -> Option<Result<(u16, u16), String>> {
+pub(crate) fn parse_apu_peek_spec(spec: &str) -> Option<Result<(u16, u32), String>> {
     let rest = spec
         .trim()
         .strip_prefix("APU:")
@@ -274,7 +274,7 @@ pub(crate) fn parse_apu_peek_spec(spec: &str) -> Option<Result<(u16, u16), Strin
         Ok(v) => v,
         Err(e) => return Some(Err(format!("bad ARAM offset `{off_s}`: {e}"))),
     };
-    let count = match u16::from_str_radix(count_s.trim(), 16) {
+    let count = match u32::from_str_radix(count_s.trim(), 16) {
         Ok(v) => v,
         Err(e) => return Some(Err(format!("bad count `{count_s}`: {e}"))),
     };

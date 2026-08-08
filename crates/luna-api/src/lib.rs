@@ -48,7 +48,7 @@ pub mod symbols;
 pub use event_viewer::{
     CATEGORY_COUNT, EventCategory, EventViewerConfig, EventViewerEvent, categorise, register_name,
 };
-pub use symbols::SymbolTable;
+pub use symbols::{SymbolKind, SymbolSpace, SymbolTable};
 use thiserror::Error;
 
 /// Errors surfaced from [`Emulator`] methods.
@@ -89,11 +89,12 @@ pub enum ApiError {
 /// (the SPC700 dispatch is exhaustive), changing the bincode layout.
 /// v4: `Ppu::open_bus` split into `ppu1_mdr` + `ppu2_mdr` (faithful
 /// per-chip open-bus latches, ares `ppu1.mdr`/`ppu2.mdr`).
-///
-/// NOTE (2026-07): the container is encoded with bincode 1.x (EOL branch).
-/// Evaluate migrating to bincode 2 at the NEXT version bump — a bump
-/// already invalidates old blobs, so that is the free moment to switch.
-pub const SAVE_STATE_VERSION: u32 = 4;
+/// v5 (2026-08, #167): `rom_hash` switched from `std` `DefaultHasher`
+/// (unspecified across toolchains — states silently broke across builds)
+/// to explicit FNV-1a-64 over the raw ROM bytes, and the container plus
+/// every mapper/coproc blob moved from bincode 1.x (EOL) to bincode 2
+/// (`standard` config). Both breaks share this single bump.
+pub const SAVE_STATE_VERSION: u32 = 5;
 
 /// On-disk / on-wire save-state container produced by
 /// [`Emulator::save_state`]. `core` is the bincode-encoded `Snes` (the
@@ -105,6 +106,19 @@ struct SaveStateBundle {
     rom_hash: u64,
     core: Vec<u8>,
     mapper: Vec<u8>,
+}
+
+/// FNV-1a 64-bit over raw bytes — the crate's stable hash for anything
+/// persisted or compared across builds (ROM identity, WRAM page hashes).
+/// Explicit by design: `std`'s `DefaultHasher` is unspecified across
+/// toolchains, so it must never leak into persisted formats.
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 /// Cartridge metadata returned by [`Emulator::load_rom`].
@@ -169,6 +183,11 @@ pub struct EmulatorState {
     /// DSP-1 (NEC uPD7725) state, if the loaded cartridge hosts one.
     /// `None` for non-DSP carts.
     pub dsp1: Option<Dsp1State>,
+    /// The tracked 65C816 call stack (issue #180) — present only while
+    /// [`Emulator::enable_call_stack`] tracking is on, so existing
+    /// state-JSON consumers see no new key by default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_stack: Option<Vec<CallFrame>>,
 }
 
 /// DSP-1 (NEC uPD7725) coprocessor snapshot.
@@ -692,6 +711,90 @@ pub struct Stats {
     pub total_mclk: u64,
 }
 
+/// Value width for a narrowing memory-search session (issue #177).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchWidth {
+    /// One byte per candidate.
+    U8,
+    /// Little-endian 16-bit value per candidate (any offset, not just
+    /// aligned — game variables live anywhere).
+    U16,
+}
+
+/// Comparison for [`Emulator::search_refine`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchOp {
+    /// Current value == the given value.
+    Eq,
+    /// Current value != the given value.
+    Ne,
+    /// Current value < the given value.
+    Lt,
+    /// Current value > the given value.
+    Gt,
+    /// Current value differs from the previous snapshot.
+    Changed,
+    /// Current value equals the previous snapshot.
+    Unchanged,
+}
+
+/// What pushed a [`CallFrame`] (issue #180).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CallKind {
+    /// `JSR` (absolute or `(a,x)`).
+    Jsr,
+    /// `JSL` (long).
+    Jsl,
+    /// An interrupt entry: NMI dispatch, `BRK` or `COP`.
+    Interrupt,
+}
+
+/// One entry of the tracked 65C816 call stack (issue #180), oldest
+/// first — the last element is the innermost call.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct CallFrame {
+    /// 24-bit entry PC of the called routine / interrupt handler.
+    pub pc: u32,
+    /// 24-bit address of the calling `JSR`/`JSL` instruction (for an
+    /// NMI: the instruction the interrupt cut in front of).
+    pub from: u32,
+    /// What pushed this frame.
+    pub kind: CallKind,
+    /// Nearest symbol for `pc` when a `.sym` table is loaded.
+    pub symbol: Option<String>,
+}
+
+/// One per-frame memory freeze (issue #178).
+#[derive(Debug, Clone, Copy, Serialize, schemars::JsonSchema)]
+pub struct FreezeEntry {
+    /// Canonical 24-bit WRAM address (`$7E`/`$7F`).
+    pub addr: u32,
+    /// The byte pinned there at every frame boundary.
+    pub value: u8,
+}
+
+/// One [`Emulator::search_results`] row.
+#[derive(Debug, Clone, Copy, Serialize, schemars::JsonSchema)]
+pub struct SearchHit {
+    /// Canonical 24-bit WRAM address (`$7E`/`$7F`).
+    pub addr: u32,
+    /// The candidate's current value (u8 widened for byte searches).
+    pub value: u16,
+}
+
+/// Live state of a narrowing search: the previous WRAM snapshot plus the
+/// surviving candidate offsets.
+#[derive(Debug)]
+struct SearchSession {
+    width: SearchWidth,
+    /// WRAM as of the last `begin`/`refine` — the "previous value" side
+    /// of `Changed`/`Unchanged`.
+    prev: Vec<u8>,
+    /// Surviving flat WRAM offsets (`0..0x20000`).
+    candidates: Vec<u32>,
+}
+
 /// Result of [`Emulator::loop_probe`] — a CPU-liveness measurement.
 #[derive(Debug, Clone, Copy, Serialize, schemars::JsonSchema)]
 pub struct LoopProbe {
@@ -735,6 +838,19 @@ pub struct Emulator {
     /// Loaded WLA-DX symbol table (issue #67); `None` until
     /// [`Emulator::load_symbols`] runs.
     symbols: Option<SymbolTable>,
+    /// Live narrowing memory-search session (issue #177); `None` until
+    /// [`Emulator::search_begin`] runs.
+    search_session: Option<SearchSession>,
+    /// Per-frame memory freezes (issue #178): `(canonical $7E/$7F WRAM
+    /// address, value)`, re-applied whenever the frame counter advances
+    /// in ANY run path — so a freeze behaves identically under the CLI,
+    /// MCP and the GUI (the API-first coherence rule).
+    freezes: Vec<(u32, u8)>,
+    /// Tracked 65C816 call stack (issue #180); `None` = tracking off
+    /// (the default — tracking costs one opcode peek per instruction).
+    /// Maintained API-side by the run loops: the CPU core stays
+    /// untouched (user decision, 2026-08-08).
+    call_stack: Option<Vec<CallFrame>>,
     /// Event Viewer category/DMA visibility config.
     event_config: event_viewer::EventViewerConfig,
     /// The just-completed frame's captured events (Mesen2 `_debugEvents`),
@@ -831,6 +947,9 @@ impl Emulator {
             instructions_executed: 0,
             rom_hash: 0,
             symbols: None,
+            search_session: None,
+            freezes: Vec::new(),
+            call_stack: None,
             event_config: event_viewer::EventViewerConfig {
                 visible: [true; event_viewer::CATEGORY_COUNT],
                 show_previous_frame: true,
@@ -967,13 +1086,10 @@ impl Emulator {
         }
         // Capture a stable hash of the ROM bytes before the cartridge is
         // consumed by `try_from_cartridge`; the save-state layer uses it to
-        // refuse states produced against a different ROM.
-        let rom_hash = {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            cart.rom.hash(&mut h);
-            h.finish()
-        };
+        // refuse states produced against a different ROM. FNV-1a, not the
+        // std DefaultHasher: the algorithm must not drift across toolchains
+        // or a state written by one build is unreadable by the next.
+        let rom_hash = fnv1a_64(&cart.rom);
         let info = RomInfo {
             title: cart.header.title.clone(),
             mapper: format!("{:?}", cart.header.mapper_kind),
@@ -1105,7 +1221,8 @@ impl Emulator {
 
     /// Set the port-2 Mouse's this-frame signed motion (`+dx` right, `+dy`
     /// down) and buttons (bit 0 = left, bit 1 = right). Effective once
-    /// [`Self::set_port2_mouse`] is enabled.
+    /// the Mouse is selected via [`Self::set_port_device`] (or
+    /// [`Self::set_port_mouse`]).
     pub fn set_mouse(&mut self, dx: i32, dy: i32, buttons: u8) -> Result<(), ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         snes.cpu_regs.mouse.dx = dx;
@@ -1156,7 +1273,10 @@ impl Emulator {
     /// Step the CPU `count` instructions (or stop early if the CPU
     /// halts or panics). Returns the number actually executed.
     pub fn step(&mut self, count: u64) -> Result<u64, ApiError> {
+        let freezes = self.freezes.clone();
+        let mut cstack = self.call_stack.take();
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        let mut last_frame = snes.frame_count;
         let mut executed = 0u64;
         let prev_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
@@ -1165,12 +1285,18 @@ impl Emulator {
                 if snes.cpu.stopped {
                     break;
                 }
+                let pre = cstack.as_ref().map(|_| Self::call_track_pre(snes));
                 snes.step();
                 executed += 1;
+                if let (Some(stack), Some(pre)) = (cstack.as_mut(), pre) {
+                    Self::call_track_post(snes, stack, pre);
+                }
+                Self::apply_freezes_on_frame_edge(snes, &freezes, &mut last_frame);
             }
             executed
         }));
         std::panic::set_hook(prev_hook);
+        self.call_stack = cstack;
         match result {
             Ok(n) => {
                 self.instructions_executed += n;
@@ -1187,19 +1313,28 @@ impl Emulator {
     /// `frame_count` advances). Returns the number of instructions
     /// executed. Bounded by `max_steps` as a safety belt.
     pub fn step_until_frame(&mut self, max_steps: u64) -> Result<u64, ApiError> {
+        let freezes = self.freezes.clone();
+        let mut cstack = self.call_stack.take();
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         let start_frame = snes.frame_count;
+        let mut last_frame = start_frame;
         let mut executed = 0u64;
         let prev_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             while executed < max_steps && !snes.cpu.stopped && snes.frame_count == start_frame {
+                let pre = cstack.as_ref().map(|_| Self::call_track_pre(snes));
                 snes.step();
                 executed += 1;
+                if let (Some(stack), Some(pre)) = (cstack.as_mut(), pre) {
+                    Self::call_track_post(snes, stack, pre);
+                }
+                Self::apply_freezes_on_frame_edge(snes, &freezes, &mut last_frame);
             }
             executed
         }));
         std::panic::set_hook(prev_hook);
+        self.call_stack = cstack;
         match result {
             Ok(n) => {
                 self.instructions_executed += n;
@@ -1221,7 +1356,10 @@ impl Emulator {
     /// reports). Mutates state (advances the CPU); a diagnostic, not part of
     /// normal stepping. Panic-safe (a crashing ROM returns `Err`).
     pub fn loop_probe(&mut self, max_steps: u64) -> Result<LoopProbe, ApiError> {
+        let freezes = self.freezes.clone();
+        let mut cstack = self.call_stack.take();
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        let mut last_frame = snes.frame_count;
         let mut seen = std::collections::HashSet::new();
         let mut executed = 0u64;
         let prev_hook = std::panic::take_hook();
@@ -1229,11 +1367,17 @@ impl Emulator {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             while executed < max_steps && !snes.cpu.stopped {
                 seen.insert((u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc));
+                let pre = cstack.as_ref().map(|_| Self::call_track_pre(snes));
                 snes.step();
                 executed += 1;
+                if let (Some(stack), Some(pre)) = (cstack.as_mut(), pre) {
+                    Self::call_track_post(snes, stack, pre);
+                }
+                Self::apply_freezes_on_frame_edge(snes, &freezes, &mut last_frame);
             }
         }));
         std::panic::set_hook(prev_hook);
+        self.call_stack = cstack;
         self.instructions_executed += executed;
         result.map_err(|p| ApiError::Panic(panic_message(&p)))?;
         Ok(LoopProbe {
@@ -1538,6 +1682,7 @@ impl Emulator {
             sa1,
             dma,
             dsp1,
+            call_stack: self.call_stack.as_ref().map(|_| self.call_stack()),
         }
     }
 
@@ -1722,9 +1867,9 @@ impl Emulator {
                 bytes,
                 text: insn.text,
                 is_pc: addr == pc,
-                // ARAM addresses live outside the CPU bus's bank space the
-                // .sym labels describe.
-                symbol: None,
+                // Annotated from the ARAM symbol space (issue #179) — CPU
+                // .sym labels never claim ARAM addresses.
+                symbol: self.symbols.as_ref().and_then(|t| t.nearest_spc(addr)),
             });
             addr = addr.wrapping_add(u16::from(insn.length));
         }
@@ -1892,9 +2037,9 @@ impl Emulator {
     pub fn render_frame_png_native(&self) -> Result<Vec<u8>, ApiError> {
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
         if snes.ppu.native_framebuffer.is_empty() {
-            return Err(ApiError::Io(std::io::Error::other(
-                "native capture is not enabled (set_native_capture / --native-res)",
-            )));
+            return Err(ApiError::BadArg(
+                "native capture is not enabled (set_native_capture / --native-res)".into(),
+            ));
         }
         let (w, h) = (FRAME_W * 2, FRAME_H * 2);
         let mut buf = Vec::with_capacity(w * h * 3);
@@ -1917,9 +2062,9 @@ impl Emulator {
         use std::hash::{Hash, Hasher};
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
         if snes.ppu.native_framebuffer.is_empty() {
-            return Err(ApiError::Io(std::io::Error::other(
-                "native capture is not enabled (set_native_capture / --native-res)",
-            )));
+            return Err(ApiError::BadArg(
+                "native capture is not enabled (set_native_capture / --native-res)".into(),
+            ));
         }
         let mut h = std::collections::hash_map::DefaultHasher::new();
         snes.ppu.native_framebuffer.hash(&mut h);
@@ -1937,7 +2082,7 @@ impl Emulator {
     /// ROM is loaded, or [`ApiError::SaveState`] on an encode failure.
     pub fn save_state(&self) -> Result<Vec<u8>, ApiError> {
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
-        let core = bincode::serialize(snes)
+        let core = bincode::serde::encode_to_vec(snes, bincode::config::standard())
             .map_err(|e| ApiError::SaveState(format!("core encode: {e}")))?;
         let mapper = snes.mapper.save_state();
         let bundle = SaveStateBundle {
@@ -1946,7 +2091,8 @@ impl Emulator {
             core,
             mapper,
         };
-        bincode::serialize(&bundle).map_err(|e| ApiError::SaveState(format!("bundle encode: {e}")))
+        bincode::serde::encode_to_vec(&bundle, bincode::config::standard())
+            .map_err(|e| ApiError::SaveState(format!("bundle encode: {e}")))
     }
 
     /// Restore a blob produced by [`Emulator::save_state`] into the live
@@ -1961,8 +2107,9 @@ impl Emulator {
         if self.snes.is_none() {
             return Err(ApiError::NoRom);
         }
-        let bundle: SaveStateBundle = bincode::deserialize(data)
-            .map_err(|e| ApiError::SaveState(format!("bundle decode: {e}")))?;
+        let (bundle, _): (SaveStateBundle, usize) =
+            bincode::serde::decode_from_slice(data, bincode::config::standard())
+                .map_err(|e| ApiError::SaveState(format!("bundle decode: {e}")))?;
         if bundle.version != SAVE_STATE_VERSION {
             return Err(ApiError::SaveState(format!(
                 "format version mismatch: state is v{}, this build expects v{SAVE_STATE_VERSION}",
@@ -1974,8 +2121,9 @@ impl Emulator {
                 "ROM mismatch: this save state was produced against a different ROM".to_string(),
             ));
         }
-        let mut restored: Snes = bincode::deserialize(&bundle.core)
-            .map_err(|e| ApiError::SaveState(format!("core decode: {e}")))?;
+        let (mut restored, _): (Snes, usize) =
+            bincode::serde::decode_from_slice(&bundle.core, bincode::config::standard())
+                .map_err(|e| ApiError::SaveState(format!("core decode: {e}")))?;
         // The deserialized `Snes` has a placeholder mapper (the trait object
         // is `serde(skip)`). Move the LIVE mapper — which still owns the ROM
         // — into it, then replay the mapper's saved mutable state onto it.
@@ -2028,6 +2176,201 @@ impl Emulator {
         Ok(snes.dbg_poke_bytes(bank, offset, data))
     }
 
+    /// Direct write into PPU VRAM at byte address `offset` (wraps at
+    /// 64 KB). Bypasses the bus like [`Self::poke_memory`] — state
+    /// injection, no cycles, no MMIO side effects (issue #178).
+    pub fn poke_vram(&mut self, offset: u16, data: &[u8]) -> Result<usize, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        for (i, &b) in data.iter().enumerate() {
+            snes.ppu.vram.poke(offset.wrapping_add(i as u16), b);
+        }
+        Ok(data.len())
+    }
+
+    /// Direct write into CGRAM at byte address `offset` (wraps at 512
+    /// bytes; each palette entry is a little-endian BGR555 word).
+    pub fn poke_cgram(&mut self, offset: u16, data: &[u8]) -> Result<usize, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        for (i, &b) in data.iter().enumerate() {
+            snes.ppu.cgram.poke(offset.wrapping_add(i as u16), b);
+        }
+        Ok(data.len())
+    }
+
+    /// Direct write into OAM at byte address `offset` (wraps at the
+    /// 544-byte table: 512 low + 32 high).
+    pub fn poke_oam(&mut self, offset: u16, data: &[u8]) -> Result<usize, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        for (i, &b) in data.iter().enumerate() {
+            snes.ppu.oam.poke(offset.wrapping_add(i as u16), b);
+        }
+        Ok(data.len())
+    }
+
+    /// Direct write into the SPC700's ARAM at `offset` (wraps at 64 KB).
+    pub fn poke_aram(&mut self, offset: u16, data: &[u8]) -> Result<usize, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        for (i, &b) in data.iter().enumerate() {
+            snes.apu_real.aram[usize::from(offset.wrapping_add(i as u16))] = b;
+        }
+        Ok(data.len())
+    }
+
+    /// Canonicalise a freezable WRAM address: `$7E`/`$7F` pass through,
+    /// the `$00-3F`/`$80-BF` low-8KB mirrors fold to `$7E`, anything
+    /// else is a `BadArg`.
+    fn freeze_canonical_addr(addr: u32) -> Result<u32, ApiError> {
+        let bank = (addr >> 16) & 0xFF;
+        let off = addr & 0xFFFF;
+        match bank {
+            0x7E | 0x7F => Ok(addr & 0x00FF_FFFF),
+            b if (b <= 0x3F || (0x80..=0xBF).contains(&b)) && off < 0x2000 => Ok(0x7E_0000 | off),
+            _ => Err(ApiError::BadArg(format!(
+                "freeze address {addr:#08X} is not WRAM ($7E/$7F or a low-RAM mirror)"
+            ))),
+        }
+    }
+
+    /// Canonical WRAM address → flat `0..0x20000` offset.
+    const fn wram_addr_to_offset(addr: u32) -> usize {
+        (((addr >> 16) as usize & 1) << 16) | (addr as usize & 0xFFFF)
+    }
+
+    /// Pin `value` at a WRAM address, re-applied at every frame boundary
+    /// in every run path (cheat-style, issue #178) — and applied once
+    /// immediately. Adding an address twice replaces its value.
+    pub fn freeze_add(&mut self, addr: u32, value: u8) -> Result<(), ApiError> {
+        let addr = Self::freeze_canonical_addr(addr)?;
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        match self.freezes.iter_mut().find(|(a, _)| *a == addr) {
+            Some(entry) => entry.1 = value,
+            None => self.freezes.push((addr, value)),
+        }
+        snes.wram[Self::wram_addr_to_offset(addr)] = value;
+        Ok(())
+    }
+
+    /// Remove a freeze by address. Returns `true` if one existed.
+    pub fn freeze_remove(&mut self, addr: u32) -> Result<bool, ApiError> {
+        let addr = Self::freeze_canonical_addr(addr)?;
+        let before = self.freezes.len();
+        self.freezes.retain(|(a, _)| *a != addr);
+        Ok(self.freezes.len() != before)
+    }
+
+    /// The active freeze list.
+    #[must_use]
+    pub fn freeze_list(&self) -> Vec<FreezeEntry> {
+        self.freezes
+            .iter()
+            .map(|&(addr, value)| FreezeEntry { addr, value })
+            .collect()
+    }
+
+    /// Enable / disable call-stack tracking (issue #180). Off by default
+    /// — tracking costs one opcode peek per executed instruction.
+    /// Enabling starts an empty stack (calls made before enabling are
+    /// unknowable); enabling while already on is a no-op; disabling
+    /// drops the stack.
+    pub fn enable_call_stack(&mut self, on: bool) {
+        match (on, self.call_stack.is_some()) {
+            (true, false) => self.call_stack = Some(Vec::new()),
+            (false, _) => self.call_stack = None,
+            (true, true) => {}
+        }
+    }
+
+    /// The tracked call stack, oldest frame first (empty when tracking
+    /// is off), symbol-annotated from the loaded `.sym` table. Cheap —
+    /// deliberately NOT part of the expensive [`Self::state`] scan
+    /// (though `state()` embeds it when tracking is on).
+    #[must_use]
+    pub fn call_stack(&self) -> Vec<CallFrame> {
+        let Some(stack) = &self.call_stack else {
+            return Vec::new();
+        };
+        stack
+            .iter()
+            .map(|f| CallFrame {
+                symbol: self.symbols.as_ref().and_then(|t| t.nearest(f.pc)),
+                ..f.clone()
+            })
+            .collect()
+    }
+
+    /// Pre-step capture for call-stack tracking: the opcode about to
+    /// execute, the live PC, and the NMI-service count (to detect an
+    /// NMI dispatched inside the step).
+    fn call_track_pre(snes: &mut Snes) -> (u8, u32, u64) {
+        let pb = snes.cpu.pb;
+        let pc = snes.cpu.pc;
+        let op = snes.dbg_peek_bytes(pb, pc, 1)[0];
+        (
+            op,
+            (u32::from(pb) << 16) | u32::from(pc),
+            snes.nmis_serviced,
+        )
+    }
+
+    /// Post-step: interpret the pre-captured opcode as a push (JSR $20 /
+    /// JSR (a,x) $FC / JSL $22 / BRK $00 / COP $02), a pop (RTS $60 /
+    /// RTL $6B / RTI $40), or neither; an NMI dispatched inside the step
+    /// (service-count delta) pushes an interrupt frame. Bounded at 256
+    /// frames (oldest dropped) and tolerant of RTS-without-JSR. Known
+    /// approximation: a call and an interrupt in the same step record
+    /// the interrupt handler as both entries.
+    fn call_track_post(snes: &Snes, stack: &mut Vec<CallFrame>, pre: (u8, u32, u64)) {
+        const CAP: usize = 256;
+        let (op, from, nmis_before) = pre;
+        let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
+        let mut push = |kind: CallKind| {
+            if stack.len() >= CAP {
+                stack.remove(0);
+            }
+            stack.push(CallFrame {
+                pc: cur,
+                from,
+                kind,
+                symbol: None,
+            });
+        };
+        match op {
+            0x20 | 0xFC => push(CallKind::Jsr),
+            0x22 => push(CallKind::Jsl),
+            0x00 | 0x02 => push(CallKind::Interrupt),
+            0x60 | 0x6B | 0x40 => {
+                stack.pop();
+            }
+            _ => {}
+        }
+        if snes.nmis_serviced != nmis_before {
+            if stack.len() >= CAP {
+                stack.remove(0);
+            }
+            stack.push(CallFrame {
+                pc: cur,
+                from,
+                kind: CallKind::Interrupt,
+                symbol: None,
+            });
+        }
+    }
+
+    /// Re-apply the freeze list when the frame counter advanced — called
+    /// from EVERY run path (`step`, `step_until_frame`, `loop_probe`,
+    /// `run_until_break_interruptible`) so a freeze behaves identically
+    /// under the CLI, MCP and the GUI. The check is one `u64` compare
+    /// per executed instruction: effectively free.
+    fn apply_freezes_on_frame_edge(snes: &mut Snes, freezes: &[(u32, u8)], last_frame: &mut u64) {
+        if freezes.is_empty() || snes.frame_count == *last_frame {
+            return;
+        }
+        *last_frame = snes.frame_count;
+        for &(addr, value) in freezes {
+            snes.wram[Self::wram_addr_to_offset(addr)] = value;
+        }
+    }
+
     /// Memory search (L9): every 24-bit `$7E-$7F` WRAM address whose bytes
     /// match `pattern`. Empty `pattern` → no hits.
     pub fn search_memory(&self, pattern: &[u8]) -> Result<Vec<u32>, ApiError> {
@@ -2039,27 +2382,134 @@ impl Emulator {
         let mut hits = Vec::new();
         for i in 0..=wram.len().saturating_sub(pattern.len()) {
             if &wram[i..i + pattern.len()] == pattern {
-                hits.push(0x7E_0000 + i as u32);
+                hits.push(Self::wram_offset_to_addr(i));
             }
         }
         Ok(hits)
     }
 
+    /// A flat WRAM offset (`0..0x20000`) as its canonical 24-bit bus
+    /// address: `$7E:0000-FFFF` then `$7F:0000-FFFF`. (The old
+    /// `0x7E_0000 + i` form leaked `$7F` hits as impossible `$7E:1xxxx`
+    /// addresses — issue #177's opening bug.)
+    const fn wram_offset_to_addr(i: usize) -> u32 {
+        if i < 0x1_0000 {
+            0x7E_0000 + i as u32
+        } else {
+            0x7F_0000 + (i as u32 - 0x1_0000)
+        }
+    }
+
+    /// Read one search-width value at flat WRAM offset `off`.
+    fn search_read(wram: &[u8], width: SearchWidth, off: u32) -> u16 {
+        let off = off as usize;
+        match width {
+            SearchWidth::U8 => u16::from(wram[off]),
+            SearchWidth::U16 => u16::from_le_bytes([wram[off], wram[off + 1]]),
+        }
+    }
+
+    /// Start a narrowing memory-search session over all of WRAM ("find
+    /// my variable", issue #177): snapshot the current 128 KiB and mark
+    /// every offset a candidate. Returns the candidate count. Replaces
+    /// any previous session.
+    pub fn search_begin(&mut self, width: SearchWidth) -> Result<usize, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let prev = snes.wram.to_vec();
+        let last = prev.len()
+            - match width {
+                SearchWidth::U8 => 0,
+                SearchWidth::U16 => 1,
+            };
+        let candidates: Vec<u32> = (0..last as u32).collect();
+        let n = candidates.len();
+        self.search_session = Some(SearchSession {
+            width,
+            prev,
+            candidates,
+        });
+        Ok(n)
+    }
+
+    /// Narrow the live session: keep candidates whose **current** value
+    /// satisfies `op` — against `value` (`Eq`/`Ne`/`Lt`/`Gt`, required)
+    /// or against the previous snapshot (`Changed`/`Unchanged`). The
+    /// snapshot then advances to the current WRAM. Returns the surviving
+    /// candidate count. Typical loop: begin → play → `Changed` → play →
+    /// `Unchanged`/`Eq value` → … until a handful remain.
+    pub fn search_refine(&mut self, op: SearchOp, value: Option<u16>) -> Result<usize, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let session = self.search_session.as_mut().ok_or_else(|| {
+            ApiError::BadArg("no search session — call search_begin first".into())
+        })?;
+        let needs_value = matches!(
+            op,
+            SearchOp::Eq | SearchOp::Ne | SearchOp::Lt | SearchOp::Gt
+        );
+        if needs_value && value.is_none() {
+            return Err(ApiError::BadArg(format!("op {op:?} needs a value")));
+        }
+        let wram = &snes.wram[..];
+        let width = session.width;
+        let prev = std::mem::take(&mut session.prev);
+        session.candidates.retain(|&off| {
+            let cur = Self::search_read(wram, width, off);
+            match op {
+                SearchOp::Eq => cur == value.unwrap_or_default(),
+                SearchOp::Ne => cur != value.unwrap_or_default(),
+                SearchOp::Lt => cur < value.unwrap_or_default(),
+                SearchOp::Gt => cur > value.unwrap_or_default(),
+                SearchOp::Changed => cur != Self::search_read(&prev, width, off),
+                SearchOp::Unchanged => cur == Self::search_read(&prev, width, off),
+            }
+        });
+        session.prev = wram.to_vec();
+        Ok(session.candidates.len())
+    }
+
+    /// The live session's surviving candidates (up to `limit`) with
+    /// their current values, as canonical `$7E`/`$7F` addresses.
+    pub fn search_results(&self, limit: usize) -> Result<Vec<SearchHit>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let session = self.search_session.as_ref().ok_or_else(|| {
+            ApiError::BadArg("no search session — call search_begin first".into())
+        })?;
+        let wram = &snes.wram[..];
+        Ok(session
+            .candidates
+            .iter()
+            .take(limit)
+            .map(|&off| SearchHit {
+                addr: Self::wram_offset_to_addr(off as usize),
+                value: Self::search_read(wram, session.width, off),
+            })
+            .collect())
+    }
+
     /// Controlled execution (L10): step until the CPU PC reaches `pc`
     /// (`pb << 16 | pc`) or `max_steps` instructions elapse. Returns `true`
     /// if `pc` was reached (checked BEFORE each step, so a current match
-    /// returns immediately).
+    /// returns immediately). Panic-safe (a crashing ROM returns `Err`).
     pub fn run_until_pc(&mut self, pc: u32, max_steps: u64) -> Result<bool, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
-        for _ in 0..max_steps {
-            let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
-            if cur == pc {
-                return Ok(true);
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for _ in 0..max_steps {
+                let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
+                if cur == pc {
+                    return true;
+                }
+                snes.step();
             }
-            snes.step();
+            let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
+            cur == pc
+        }));
+        std::panic::set_hook(prev_hook);
+        match result {
+            Ok(hit) => Ok(hit),
+            Err(payload) => Err(ApiError::Panic(panic_message(&payload))),
         }
-        let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
-        Ok(cur == pc)
     }
 
     // -----------------------------------------------------------------
@@ -2074,8 +2524,48 @@ impl Emulator {
     pub fn load_symbols(&mut self, path: &std::path::Path) -> Result<usize, ApiError> {
         let table = SymbolTable::load(path)?;
         let n = table.len();
-        self.symbols = Some(table);
+        self.install_symbols(symbols::SymbolSpace::Cpu, table);
         Ok(n)
+    }
+
+    /// Replace one space of the loaded table, keeping the other — so a
+    /// CPU `.sym` load never clobbers loaded SPC symbols and vice versa
+    /// (issue #179).
+    fn install_symbols(&mut self, space: symbols::SymbolSpace, table: SymbolTable) {
+        match &mut self.symbols {
+            Some(existing) => existing.replace_space(space, table),
+            None => self.symbols = Some(table),
+        }
+    }
+
+    /// Load a wla-spc700 `.sym` into the ARAM symbol space (issue #179):
+    /// `disassemble_spc` becomes annotated and the SPC-side tools accept
+    /// symbol names. Keeps the CPU-space table intact.
+    pub fn load_symbols_spc(&mut self, path: &std::path::Path) -> Result<usize, ApiError> {
+        let table = SymbolTable::load_spc(path)?;
+        let n = table.len();
+        self.install_symbols(symbols::SymbolSpace::Aram, table);
+        Ok(n)
+    }
+
+    /// [`Self::load_symbols_spc`] from text instead of a file.
+    pub fn load_symbols_spc_str(&mut self, text: &str) -> usize {
+        let table = SymbolTable::parse_spc(text);
+        let n = table.len();
+        self.install_symbols(symbols::SymbolSpace::Aram, table);
+        n
+    }
+
+    /// Resolve an ARAM-space label to its 16-bit offset.
+    #[must_use]
+    pub fn resolve_symbol_spc(&self, name: &str) -> Option<u16> {
+        self.symbols.as_ref()?.resolve_spc(name)
+    }
+
+    /// Nearest ARAM label at or below `addr` (`name` or `name+0xNN`).
+    #[must_use]
+    pub fn symbol_for_aram_addr(&self, addr: u16) -> Option<String> {
+        self.symbols.as_ref()?.nearest_spc(addr)
     }
 
     /// Parse a `.sym` table from a string (the file-less form used by
@@ -2083,7 +2573,7 @@ impl Emulator {
     pub fn load_symbols_str(&mut self, text: &str) -> usize {
         let table = SymbolTable::parse(text);
         let n = table.len();
-        self.symbols = Some(table);
+        self.install_symbols(symbols::SymbolSpace::Cpu, table);
         n
     }
 
@@ -2124,19 +2614,28 @@ impl Emulator {
             .get_or_insert_with(|| Box::new(luna_core::BreakpointSet::new())))
     }
 
-    /// Register an exec breakpoint at a 24-bit `PB:PC`. Returns its id.
-    pub fn bp_add_exec(&mut self, pc: u32) -> Result<u32, ApiError> {
-        Ok(self.bp_registry()?.add_exec(pc))
+    /// Register an exec breakpoint at a 24-bit `PB:PC`, optionally named
+    /// (e.g. after the symbol it was created from). Returns its id.
+    pub fn bp_add_exec(&mut self, pc: u32, name: Option<&str>) -> Result<u32, ApiError> {
+        let name = name.map(str::to_string);
+        Ok(self.bp_registry()?.add_exec(pc, name))
     }
 
     /// Register a memory watchpoint over the inclusive 24-bit bus range
     /// `lo..=hi`, firing on reads and/or writes. Returns its id.
+    ///
+    /// `mirror` (issue #91, exposed in #176 — previously always on): the
+    /// watch also fires on accesses that reach the range through a WRAM /
+    /// MMIO bank mirror (`$00:2100` vs the FastROM-bank `$80:2100`). Pass
+    /// `false` for a bank-exact watch.
     pub fn bp_add_mem(
         &mut self,
         lo: u32,
         hi: u32,
         on_read: bool,
         on_write: bool,
+        mirror: bool,
+        name: Option<&str>,
     ) -> Result<u32, ApiError> {
         if lo > hi {
             return Err(ApiError::BadArg(format!(
@@ -2148,10 +2647,16 @@ impl Emulator {
                 "watchpoint must fire on reads, writes, or both".into(),
             ));
         }
-        // Mirror-folded by default (issue #91): a watch on a WRAM/MMIO address
-        // also fires on accesses through its bank mirrors, so the caller need
-        // not know the exact executing bank (LoROM $00:2100 vs FastROM $80:2100).
-        Ok(self.bp_registry()?.add_mem(lo, hi, on_read, on_write, true))
+        let name = name.map(str::to_string);
+        Ok(self
+            .bp_registry()?
+            .add_mem(lo, hi, on_read, on_write, mirror, name))
+    }
+
+    /// Enable / disable a breakpoint without removing it (issue #176) —
+    /// keeps its id, name and hit count. Returns `true` if the id exists.
+    pub fn bp_set_enabled(&mut self, id: u32, enabled: bool) -> Result<bool, ApiError> {
+        Ok(self.bp_registry()?.set_enabled(id, enabled))
     }
 
     /// Remove a breakpoint by id. Returns `true` if it existed.
@@ -2211,7 +2716,10 @@ impl Emulator {
         use std::sync::atomic::Ordering;
         // Clear any stale raise so this run isn't stopped by a previous pause.
         interrupt.store(false, Ordering::Relaxed);
+        let freezes = self.freezes.clone();
+        let mut cstack = self.call_stack.take();
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        let mut last_frame = snes.frame_count;
         if let Some(bp) = snes.breakpoints.as_mut() {
             bp.take_pending(); // discard stale
         }
@@ -2243,8 +2751,13 @@ impl Emulator {
                         interrupted: false,
                     };
                 }
+                let pre = cstack.as_ref().map(|_| Self::call_track_pre(snes));
                 snes.step();
                 executed = i + 1;
+                if let (Some(stack), Some(pre)) = (cstack.as_mut(), pre) {
+                    Self::call_track_post(snes, stack, pre);
+                }
+                Self::apply_freezes_on_frame_edge(snes, &freezes, &mut last_frame);
                 if let Some(hit) = snes.breakpoints.as_mut().and_then(|b| b.take_pending()) {
                     return RunOutcome {
                         steps: i + 1,
@@ -2341,30 +2854,37 @@ impl Emulator {
         want: MemEventKind,
         max_steps: u64,
     ) -> Result<Option<(u32, u8)>, ApiError> {
-        let bank = (addr_full >> 16) as u8;
-        {
-            let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
-            // Capture this bank's accesses; drained every step so it never
-            // overflows. (Re-enabling resets the buffer.)
-            snes.enable_mem_trace(1 << 16, Some(bank), None);
-        }
-        for _ in 0..max_steps {
-            {
-                let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
-                snes.step();
+        // A temporary watchpoint on exactly this address, consumed through the
+        // same guarded loop as `run_until_break` — unlike the previous
+        // mem-trace-based implementation, a mem trace the caller enabled
+        // survives this call untouched, and a core panic surfaces as `Err`.
+        // Mirror folding stays OFF to keep this legacy path's exact-address
+        // semantics; other registered breakpoints are skipped over, as before.
+        let on_read = matches!(want, MemEventKind::Read);
+        let id = self
+            .bp_registry()?
+            .add_mem(addr_full, addr_full, on_read, !on_read, false, None);
+        let mut remaining = max_steps;
+        let outcome = loop {
+            match self.run_until_break(remaining) {
+                Ok(out) => {
+                    remaining = remaining.saturating_sub(out.steps);
+                    match out.hit {
+                        Some(hit) if hit.id == id => {
+                            break Ok(Some((hit.pc, hit.value.unwrap_or(0))));
+                        }
+                        // A hit always costs >= 1 step, so skipping foreign
+                        // breakpoints cannot loop forever.
+                        Some(_) if remaining > 0 => {}
+                        _ => break Ok(None),
+                    }
+                }
+                Err(e) => break Err(e),
             }
-            let events = {
-                let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
-                snes.take_mem_trace_log()
-            };
-            if let Some(ev) = events
-                .into_iter()
-                .find(|ev| ev.addr_full == addr_full && ev.kind == want)
-            {
-                return Ok(Some((ev.pc_full, ev.value)));
-            }
-        }
-        Ok(None)
+        };
+        // Always drop the temporary watchpoint, including on the Err path.
+        let _ = self.bp_remove(id);
+        outcome
     }
 
     /// Enable APU mailbox (`$2140-$2143`) event logging. Every CPU
@@ -2545,23 +3065,12 @@ impl Emulator {
     pub fn wram_page_hashes(&self, page_size: usize) -> Result<Vec<u64>, ApiError> {
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
         let ps = if page_size == 0 { 0x1000 } else { page_size };
-        assert!(
-            ps.is_power_of_two() && 0x2_0000 % ps == 0,
-            "page_size must be a power of two dividing 0x20000"
-        );
-        Ok(snes
-            .wram
-            .chunks_exact(ps)
-            .map(|page| {
-                // FNV-1a 64-bit
-                let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-                for &b in page {
-                    h ^= u64::from(b);
-                    h = h.wrapping_mul(0x0000_0100_0000_01b3);
-                }
-                h
-            })
-            .collect())
+        if !ps.is_power_of_two() || 0x2_0000 % ps != 0 {
+            return Err(ApiError::BadArg(format!(
+                "page_size must be a power of two dividing 0x20000, got {page_size:#x}"
+            )));
+        }
+        Ok(snes.wram.chunks_exact(ps).map(fnv1a_64).collect())
     }
 
     /// Enable the DMA→VRAM transfer-time trace: every byte an MDMA writes
@@ -2845,24 +3354,28 @@ impl Emulator {
     }
 
     /// Direct read of the SPC700's ARAM. Read-only, no bus side
-    /// effects.
-    pub fn peek_aram(&self, offset: u16, count: u16) -> Result<Vec<u8>, ApiError> {
+    /// effects. `count` up to `0x10000` reads the whole 64 KB in one
+    /// call (larger values are clamped — the address space wraps).
+    pub fn peek_aram(&self, offset: u16, count: u32) -> Result<Vec<u8>, ApiError> {
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
-        let mut out = Vec::with_capacity(usize::from(count));
+        let count = count.min(0x1_0000);
+        let mut out = Vec::with_capacity(count as usize);
         for i in 0..count {
-            out.push(snes.apu_real.aram[offset.wrapping_add(i) as usize]);
+            out.push(snes.apu_real.aram[offset.wrapping_add(i as u16) as usize]);
         }
         Ok(out)
     }
 
     /// Direct read of PPU VRAM. `offset` is a *byte* address (0..0xFFFF
-    /// — VRAM is 64 KB), `count` how many consecutive bytes to read.
-    /// Read-only, no bus side effects.
-    pub fn peek_vram(&self, offset: u16, count: u16) -> Result<Vec<u8>, ApiError> {
+    /// — VRAM is 64 KB), `count` how many consecutive bytes to read —
+    /// up to `0x10000` for the whole VRAM in one call (larger values are
+    /// clamped; the address space wraps). Read-only, no bus side effects.
+    pub fn peek_vram(&self, offset: u16, count: u32) -> Result<Vec<u8>, ApiError> {
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
-        let mut out = Vec::with_capacity(usize::from(count));
+        let count = count.min(0x1_0000);
+        let mut out = Vec::with_capacity(count as usize);
         for i in 0..count {
-            out.push(snes.ppu.vram.peek(offset.wrapping_add(i)));
+            out.push(snes.ppu.vram.peek(offset.wrapping_add(i as u16)));
         }
         Ok(out)
     }
@@ -3179,6 +3692,209 @@ mod tests {
     }
 
     #[test]
+    fn wram_page_hashes_bad_page_size_is_err_not_panic() {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+
+        // Valid: default (0 → 4 KiB) and an explicit power of two.
+        assert_eq!(e.wram_page_hashes(0).unwrap().len(), 32);
+        assert_eq!(e.wram_page_hashes(0x8000).unwrap().len(), 4);
+
+        // Invalid sizes must come back as BadArg — a bad argument from an
+        // MCP client must never panic the transport.
+        for bad in [3usize, 0x1001, 0x4_0000] {
+            match e.wram_page_hashes(bad) {
+                Err(ApiError::BadArg(_)) => {}
+                other => panic!("expected BadArg for {bad:#x}, got {other:?}"),
+            }
+        }
+    }
+
+    /// Save-state v5 (#167): the stable FNV-1a rom hash matches the
+    /// published test vectors (i.e. the algorithm can never drift with the
+    /// toolchain), a v5 blob round-trips, and stale or foreign blobs are
+    /// rejected with a clean error.
+    #[test]
+    fn save_state_v5_stable_hash_roundtrip_and_rejections() {
+        // FNV-1a 64 reference vectors — if these move, every persisted
+        // rom_hash breaks, so they are pinned here.
+        assert_eq!(fnv1a_64(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a_64(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(fnv1a_64(b"foobar"), 0x8594_4171_f739_67e8);
+
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+
+        // v5 round-trip.
+        let blob = e.save_state().unwrap();
+        e.load_state(&blob).unwrap();
+
+        // A stale-version bundle is rejected by the version gate.
+        let stale = SaveStateBundle {
+            version: SAVE_STATE_VERSION - 1,
+            rom_hash: 0,
+            core: Vec::new(),
+            mapper: Vec::new(),
+        };
+        let bytes = bincode::serde::encode_to_vec(&stale, bincode::config::standard()).unwrap();
+        match e.load_state(&bytes) {
+            Err(ApiError::SaveState(msg)) => assert!(msg.contains("version")),
+            other => panic!("expected SaveState version error, got {other:?}"),
+        }
+
+        // Garbage (e.g. an old bincode-1 blob) errors cleanly, never panics.
+        assert!(matches!(
+            e.load_state(&[0xFF; 16]),
+            Err(ApiError::SaveState(_))
+        ));
+    }
+
+    #[test]
+    fn call_stack_tracks_nested_calls_and_returns() {
+        let mut rom = demo_lorom();
+        // $8000: JSR $8010 ; then spin. $8010: JSL $008020 ; RTS.
+        // $8020: RTL.
+        let prog: &[(usize, &[u8])] = &[
+            (0x0000, &[0x20, 0x10, 0x80, 0x80, 0xFE]),
+            (0x0010, &[0x22, 0x20, 0x80, 0x00, 0x60]),
+            (0x0020, &[0x6B]),
+        ];
+        for &(off, bytes) in prog {
+            rom[off..off + bytes.len()].copy_from_slice(bytes);
+        }
+        let mut e = Emulator::new();
+        e.load_rom_bytes_forced(rom, luna_core::MapperKind::LoRom)
+            .unwrap();
+        e.load_symbols_str("[labels]\n00:8010 sub1\n00:8020 sub2\n");
+
+        // Off by default: empty and free.
+        e.step(1).unwrap();
+        assert!(e.call_stack().is_empty());
+
+        // Reset to the entry point and track from the top.
+        e.reset().unwrap();
+        e.enable_call_stack(true);
+        e.step(2).unwrap(); // JSR, then JSL
+        let stack = e.call_stack();
+        assert_eq!(stack.len(), 2);
+        assert_eq!((stack[0].from, stack[0].pc), (0x00_8000, 0x00_8010));
+        assert_eq!(stack[0].kind, CallKind::Jsr);
+        assert_eq!(stack[0].symbol.as_deref(), Some("sub1"));
+        assert_eq!((stack[1].from, stack[1].pc), (0x00_8010, 0x00_8020));
+        assert_eq!(stack[1].kind, CallKind::Jsl);
+        assert_eq!(stack[1].symbol.as_deref(), Some("sub2"));
+
+        // RTL then RTS unwind to empty.
+        e.step(2).unwrap();
+        assert!(e.call_stack().is_empty());
+
+        // state() embeds it only while tracking.
+        assert!(e.state().call_stack.is_some());
+        e.enable_call_stack(false);
+        assert!(e.state().call_stack.is_none());
+    }
+
+    #[test]
+    fn pokes_reach_all_memory_spaces() {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+
+        e.poke_vram(0x1000, &[0xAB, 0xCD]).unwrap();
+        assert_eq!(e.peek_vram(0x1000, 2).unwrap(), vec![0xAB, 0xCD]);
+
+        e.poke_cgram(0x0002, &[0x1F, 0x00]).unwrap(); // entry 1 = red
+        assert_eq!(e.peek_cgram().unwrap()[1], 0x001F);
+
+        e.poke_oam(0x0004, &[0x77]).unwrap();
+        assert_eq!(e.peek_oam().unwrap()[4], 0x77);
+
+        e.poke_aram(0x4000, &[0x99]).unwrap();
+        assert_eq!(e.peek_aram(0x4000, 1).unwrap(), vec![0x99]);
+    }
+
+    #[test]
+    fn freezes_reapply_on_every_run_path() {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+
+        // Non-WRAM addresses are rejected; low-mirror folds to $7E.
+        assert!(e.freeze_add(0x00_8000, 1).is_err());
+        e.freeze_add(0x00_0180, 0x11).unwrap();
+        assert_eq!(e.freeze_list()[0].addr, 0x7E_0180);
+
+        // freeze_add applies immediately.
+        e.freeze_add(0x7E_0300, 0x55).unwrap();
+        assert_eq!(e.peek_memory(0x7E, 0x0300, 1).unwrap(), vec![0x55]);
+
+        // Simulate the game clobbering it, then cross a frame boundary
+        // through the INTERRUPTIBLE run loop — the GUI's drive path
+        // (the API-first coherence requirement of issue #178).
+        e.poke_memory(0x7E, 0x0300, &[0x00]).unwrap();
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        e.run_until_break_interruptible(50_000, &stop).unwrap();
+        assert_eq!(
+            e.peek_memory(0x7E, 0x0300, 1).unwrap(),
+            vec![0x55],
+            "freeze re-applied at the frame edge inside run_until_break_interruptible"
+        );
+
+        // Same through plain step().
+        e.poke_memory(0x7E, 0x0300, &[0x00]).unwrap();
+        e.step(50_000).unwrap();
+        assert_eq!(e.peek_memory(0x7E, 0x0300, 1).unwrap(), vec![0x55]);
+
+        // Remove: the value stops being pinned.
+        assert!(e.freeze_remove(0x7E_0300).unwrap());
+        assert!(!e.freeze_remove(0x7E_0300).unwrap());
+        e.poke_memory(0x7E, 0x0300, &[0x00]).unwrap();
+        e.step(50_000).unwrap();
+        assert_eq!(e.peek_memory(0x7E, 0x0300, 1).unwrap(), vec![0x00]);
+    }
+
+    #[test]
+    fn search_memory_reports_7f_hits_in_bank_7f() {
+        // Issue #177's opening bug: hits in the WRAM high half surfaced
+        // as impossible `$7E:1xxxx` addresses.
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        e.poke_memory(0x7F, 0x0123, &[0xCA, 0xFE]).unwrap();
+        let hits = e.search_memory(&[0xCA, 0xFE]).unwrap();
+        assert_eq!(hits, vec![0x7F_0123]);
+    }
+
+    #[test]
+    fn narrowing_search_session_converges() {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+
+        // No session yet → refine/results are usage errors.
+        assert!(e.search_refine(SearchOp::Changed, None).is_err());
+        assert!(e.search_results(10).is_err());
+
+        // Plant a "player HP" u16 variable and begin.
+        e.poke_memory(0x7E, 0x0300, &[0x64, 0x00]).unwrap(); // 100
+        let n = e.search_begin(SearchWidth::U16).unwrap();
+        assert_eq!(n, 0x1FFFF);
+
+        // Round 1: value == 100 — the variable (plus coincidences) survive.
+        let n = e.search_refine(SearchOp::Eq, Some(100)).unwrap();
+        assert!(n >= 1);
+
+        // "Take damage": 100 → 73, everything else untouched.
+        e.poke_memory(0x7E, 0x0300, &[0x49, 0x00]).unwrap();
+        let n = e.search_refine(SearchOp::Changed, None).unwrap();
+        assert!(n >= 1);
+        let n = e.search_refine(SearchOp::Eq, Some(73)).unwrap();
+        assert_eq!(n, 1, "converged to exactly the planted variable");
+        let hits = e.search_results(10).unwrap();
+        assert_eq!(hits[0].addr, 0x7E_0300);
+        assert_eq!(hits[0].value, 73);
+
+        // Ops that need a value reject its absence.
+        assert!(e.search_refine(SearchOp::Lt, None).is_err());
+    }
+
+    #[test]
     fn debug_poke_search_run_until_set_register() {
         let mut e = Emulator::new();
         e.load_rom_bytes(demo_lorom()).unwrap();
@@ -3218,6 +3934,51 @@ mod tests {
         assert_eq!(e.run_until_mem_read(0x7E_FFFE, 50).unwrap(), None);
     }
 
+    /// The legacy L7 run-until paths ride the breakpoint registry now: the
+    /// hit is reported exactly as before, a mem trace the caller enabled
+    /// survives the call (the old implementation silently replaced it), and
+    /// the temporary watchpoint never leaks into the registry.
+    #[test]
+    fn run_until_mem_write_hits_and_preserves_the_mem_trace() {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+
+        // Same injected loop as the breakpoint test:
+        //   0100: A9 42     LDA #$42
+        //   0102: 8D 00 02  STA $0200
+        //   0105: 4C 00 01  JMP $0100
+        e.poke_memory(
+            0x7E,
+            0x0100,
+            &[0xA9, 0x42, 0x8D, 0x00, 0x02, 0x4C, 0x00, 0x01],
+        )
+        .unwrap();
+        e.set_cpu_register("pb", 0x00).unwrap();
+        e.set_cpu_register("pc", 0x0100).unwrap();
+        e.set_cpu_register("db", 0x00).unwrap();
+
+        // A mem trace the caller enabled before the run...
+        e.enable_mem_trace(10_000, None, Some((0x0100, 0x02FF)))
+            .unwrap();
+
+        // The write is found and reported with the accessing PC + value.
+        let hit = e.run_until_mem_write(0x00_0200, 100).unwrap();
+        assert_eq!(hit, Some((0x00_0102, 0x42)));
+
+        // ...is still live and captured the run's accesses.
+        let events = e.take_mem_trace_log().unwrap();
+        assert!(
+            events.iter().any(|ev| ev.addr_full == 0x00_0200),
+            "caller's mem trace was clobbered by run_until_mem_write"
+        );
+
+        // The temporary watchpoint did not leak into the registry.
+        assert!(e.bp_list().unwrap().is_empty());
+
+        // Unhit address: still None within budget.
+        assert_eq!(e.run_until_mem_write(0x7E_FFFE, 50).unwrap(), None);
+    }
+
     /// WLA-DX symbols (issue #67): parse, resolve, annotate the
     /// disassembly, and drive the address-taking APIs by name.
     #[test]
@@ -3253,7 +4014,8 @@ mod tests {
 
         // A watchpoint at a named WRAM address reports the write.
         let wp_addr = e.resolve_symbol("monster_x").unwrap();
-        e.bp_add_mem(wp_addr, wp_addr, false, true).unwrap();
+        e.bp_add_mem(wp_addr, wp_addr, false, true, true, None)
+            .unwrap();
         let out = e.run_until_break(20).unwrap();
         assert_eq!(out.hit.unwrap().addr, Some(0x00_0200));
 
@@ -3295,7 +4057,7 @@ mod tests {
 
         // --- exec breakpoint: halts BEFORE the instruction at the target.
         e.set_cpu_register("pc", 0x0100).unwrap();
-        let bp_jmp = e.bp_add_exec(0x00_0105).unwrap();
+        let bp_jmp = e.bp_add_exec(0x00_0105, None).unwrap();
         let out = e.run_until_break(100).unwrap();
         let hit = out.hit.expect("exec bp hit");
         assert_eq!(hit.kind, BreakKind::Exec);
@@ -3311,7 +4073,9 @@ mod tests {
 
         // --- memory watchpoint: exact accessing instruction reported.
         assert!(e.bp_remove(bp_jmp).unwrap());
-        let bp_w = e.bp_add_mem(0x00_0200, 0x00_0200, false, true).unwrap();
+        let bp_w = e
+            .bp_add_mem(0x00_0200, 0x00_0200, false, true, true, None)
+            .unwrap();
         e.set_cpu_register("pc", 0x0100).unwrap();
         let out = e.run_until_break(100).unwrap();
         let hit = out.hit.expect("watchpoint hit");
@@ -3324,9 +4088,12 @@ mod tests {
 
         // --- registry lifecycle + argument validation.
         assert_eq!(e.bp_list().unwrap().len(), 1);
-        assert!(e.bp_add_mem(0x10, 0x00, true, true).is_err(), "lo > hi");
         assert!(
-            e.bp_add_mem(0x00, 0x10, false, false).is_err(),
+            e.bp_add_mem(0x10, 0x00, true, true, true, None).is_err(),
+            "lo > hi"
+        );
+        assert!(
+            e.bp_add_mem(0x00, 0x10, false, false, true, None).is_err(),
             "neither read nor write"
         );
         e.bp_clear().unwrap();
@@ -3338,7 +4105,7 @@ mod tests {
         // A hit surfaces on the Event Viewer as a MarkedBreakpoint event
         // (issue #68) — visible immediately while paused at the halt.
         e.set_cpu_register("pc", 0x0100).unwrap();
-        e.bp_add_exec(0x00_0105).unwrap();
+        e.bp_add_exec(0x00_0105, None).unwrap();
         let out = e.run_until_break(100).unwrap();
         assert!(out.hit.is_some());
         assert!(
