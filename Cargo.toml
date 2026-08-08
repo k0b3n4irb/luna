@@ -137,6 +137,10 @@ bincode     = { version = "2.0", features = ["serde"] }
 # Efficient (de)serialisation of byte arrays (`[u8; N]` for N > 32, which
 # serde's stock impls do not cover) — used by save-state on RAM/cache arrays.
 serde_bytes = "0.11"
+# `luna test` manifests (issue #181): serde parse + format-preserving
+# rewrite for `--update` (goldens regenerate without clobbering comments).
+toml        = "0.8"
+toml_edit   = "0.22"
 thiserror   = "2"
 
 # Async runtime — needed by luna-cli (tokio main) and luna-mcp-server.
