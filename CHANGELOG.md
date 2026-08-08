@@ -7,6 +7,13 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- Breakpoints v2 (#176) — `bp_set_enabled` (disable without losing id /
+  name / hit count), per-breakpoint hit counts (mem watches count at
+  most one hit per instruction, matching the first-hit rule), an
+  exposed `mirror` flag on watch creation (previously hardcoded on),
+  and display names defaulting to the creating symbol. `bp_list`
+  reports it all. API note: `Emulator::bp_add_exec` / `bp_add_mem`
+  signatures grew `name` (and `mirror`) parameters.
 - Symbols v2 (#179, closing the ARAM half of #171): the symbol table
   carries two address spaces (24-bit CPU bus + SPC700 ARAM) — load a
   wla-spc700 driver's `.sym` with `space: "aram"` (API:

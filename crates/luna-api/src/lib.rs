@@ -2188,19 +2188,28 @@ impl Emulator {
             .get_or_insert_with(|| Box::new(luna_core::BreakpointSet::new())))
     }
 
-    /// Register an exec breakpoint at a 24-bit `PB:PC`. Returns its id.
-    pub fn bp_add_exec(&mut self, pc: u32) -> Result<u32, ApiError> {
-        Ok(self.bp_registry()?.add_exec(pc))
+    /// Register an exec breakpoint at a 24-bit `PB:PC`, optionally named
+    /// (e.g. after the symbol it was created from). Returns its id.
+    pub fn bp_add_exec(&mut self, pc: u32, name: Option<&str>) -> Result<u32, ApiError> {
+        let name = name.map(str::to_string);
+        Ok(self.bp_registry()?.add_exec(pc, name))
     }
 
     /// Register a memory watchpoint over the inclusive 24-bit bus range
     /// `lo..=hi`, firing on reads and/or writes. Returns its id.
+    ///
+    /// `mirror` (issue #91, exposed in #176 — previously always on): the
+    /// watch also fires on accesses that reach the range through a WRAM /
+    /// MMIO bank mirror (`$00:2100` vs the FastROM-bank `$80:2100`). Pass
+    /// `false` for a bank-exact watch.
     pub fn bp_add_mem(
         &mut self,
         lo: u32,
         hi: u32,
         on_read: bool,
         on_write: bool,
+        mirror: bool,
+        name: Option<&str>,
     ) -> Result<u32, ApiError> {
         if lo > hi {
             return Err(ApiError::BadArg(format!(
@@ -2212,10 +2221,16 @@ impl Emulator {
                 "watchpoint must fire on reads, writes, or both".into(),
             ));
         }
-        // Mirror-folded by default (issue #91): a watch on a WRAM/MMIO address
-        // also fires on accesses through its bank mirrors, so the caller need
-        // not know the exact executing bank (LoROM $00:2100 vs FastROM $80:2100).
-        Ok(self.bp_registry()?.add_mem(lo, hi, on_read, on_write, true))
+        let name = name.map(str::to_string);
+        Ok(self
+            .bp_registry()?
+            .add_mem(lo, hi, on_read, on_write, mirror, name))
+    }
+
+    /// Enable / disable a breakpoint without removing it (issue #176) —
+    /// keeps its id, name and hit count. Returns `true` if the id exists.
+    pub fn bp_set_enabled(&mut self, id: u32, enabled: bool) -> Result<bool, ApiError> {
+        Ok(self.bp_registry()?.set_enabled(id, enabled))
     }
 
     /// Remove a breakpoint by id. Returns `true` if it existed.
@@ -2414,7 +2429,7 @@ impl Emulator {
         let on_read = matches!(want, MemEventKind::Read);
         let id = self
             .bp_registry()?
-            .add_mem(addr_full, addr_full, on_read, !on_read, false);
+            .add_mem(addr_full, addr_full, on_read, !on_read, false, None);
         let mut remaining = max_steps;
         let outcome = loop {
             match self.run_until_break(remaining) {
@@ -3420,7 +3435,8 @@ mod tests {
 
         // A watchpoint at a named WRAM address reports the write.
         let wp_addr = e.resolve_symbol("monster_x").unwrap();
-        e.bp_add_mem(wp_addr, wp_addr, false, true).unwrap();
+        e.bp_add_mem(wp_addr, wp_addr, false, true, true, None)
+            .unwrap();
         let out = e.run_until_break(20).unwrap();
         assert_eq!(out.hit.unwrap().addr, Some(0x00_0200));
 
@@ -3462,7 +3478,7 @@ mod tests {
 
         // --- exec breakpoint: halts BEFORE the instruction at the target.
         e.set_cpu_register("pc", 0x0100).unwrap();
-        let bp_jmp = e.bp_add_exec(0x00_0105).unwrap();
+        let bp_jmp = e.bp_add_exec(0x00_0105, None).unwrap();
         let out = e.run_until_break(100).unwrap();
         let hit = out.hit.expect("exec bp hit");
         assert_eq!(hit.kind, BreakKind::Exec);
@@ -3478,7 +3494,9 @@ mod tests {
 
         // --- memory watchpoint: exact accessing instruction reported.
         assert!(e.bp_remove(bp_jmp).unwrap());
-        let bp_w = e.bp_add_mem(0x00_0200, 0x00_0200, false, true).unwrap();
+        let bp_w = e
+            .bp_add_mem(0x00_0200, 0x00_0200, false, true, true, None)
+            .unwrap();
         e.set_cpu_register("pc", 0x0100).unwrap();
         let out = e.run_until_break(100).unwrap();
         let hit = out.hit.expect("watchpoint hit");
@@ -3491,9 +3509,12 @@ mod tests {
 
         // --- registry lifecycle + argument validation.
         assert_eq!(e.bp_list().unwrap().len(), 1);
-        assert!(e.bp_add_mem(0x10, 0x00, true, true).is_err(), "lo > hi");
         assert!(
-            e.bp_add_mem(0x00, 0x10, false, false).is_err(),
+            e.bp_add_mem(0x10, 0x00, true, true, true, None).is_err(),
+            "lo > hi"
+        );
+        assert!(
+            e.bp_add_mem(0x00, 0x10, false, false, true, None).is_err(),
             "neither read nor write"
         );
         e.bp_clear().unwrap();
@@ -3505,7 +3526,7 @@ mod tests {
         // A hit surfaces on the Event Viewer as a MarkedBreakpoint event
         // (issue #68) — visible immediately while paused at the halt.
         e.set_cpu_register("pc", 0x0100).unwrap();
-        e.bp_add_exec(0x00_0105).unwrap();
+        e.bp_add_exec(0x00_0105, None).unwrap();
         let out = e.run_until_break(100).unwrap();
         assert!(out.hit.is_some());
         assert!(
