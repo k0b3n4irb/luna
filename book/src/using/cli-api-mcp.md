@@ -518,7 +518,8 @@ method, so the MCP transport adds reach, not capability.
 | `peek_vram` | `peek_vram` | Read `count` bytes from the 64 KB VRAM (same one-call full-dump range). |
 | `peek_cgram` | `peek_cgram` | All 256 CGRAM palette entries as BGR555 words. |
 | `poke_memory` | `poke_memory` | Write bytes into WRAM (state injection). |
-| `search_memory` | `search_memory` | Find a byte pattern in `$7E-$7F` WRAM. |
+| `search_memory` | `search_memory` | Find a byte pattern in `$7E-$7F` WRAM (hits report canonical `$7E`/`$7F` addresses). |
+| `search_begin` / `search_refine` / `search_results` | `search_begin` / `search_refine` / `search_results` | The classic narrowing "find my variable" loop: begin (`u8`/`u16`), then alternate gameplay with refines (`eq`/`ne`/`lt`/`gt` a value, or `changed`/`unchanged` vs the last snapshot) until few candidates remain. |
 | `set_cpu_register` | `set_cpu_register` | Set a CPU register by name. |
 | `disasm_cpu` | `disassemble_cpu` | 65C816 disassembly (defaults: live PC + live M/X widths). |
 | `disasm_spc` | `disassemble_spc` | SPC700 disassembly (default: live SPC PC). |
