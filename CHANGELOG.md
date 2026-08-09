@@ -4,6 +4,17 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+- `luna test`: `audio_rms_min` no longer reads a silent ring for a ROM
+  that is audibly playing (#211). The APU sample ring holds 512 ms and
+  drops **new** samples when full, so the runner's single end-of-run
+  drain only ever saw the boot silence; it now drains during the run
+  (frame-at-a-time under a `frames` bound, chunked under `steps`) and
+  computes the RMS over the whole pooled stream — the same audio
+  `luna run --audio-out` captures.
+
 ## [1.15.0] — 2026-08-09
 
 `luna test` asserts v2 — the direct answer to OpenSNES's v1.14.0

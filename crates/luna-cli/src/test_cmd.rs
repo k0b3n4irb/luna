@@ -445,26 +445,64 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
     let mut delta_prev: BTreeMap<String, i64> = BTreeMap::new();
     snapshot_deltas(&mut em, &m.checkpoint, 0, &mut delta_prev);
 
+    // audio_rms_min needs the WHOLE sample stream: the APU ring holds
+    // 512 ms and drops NEW samples when full, so a single end-of-run
+    // drain only ever sees the boot silence (issue #211). Drain after
+    // every stepping leg instead and pool the stream.
+    let want_audio = m.asserts.audio_rms_min.is_some();
+    let mut audio_acc: Vec<(i16, i16)> = Vec::new();
+    // Advance to `frame`, draining the audio ring often enough that it
+    // can never overflow between drains (one frame ≈ 533 samples vs the
+    // 16384-sample ring): frame-at-a-time when pooling, one bounded call
+    // otherwise (zero overhead for manifests without the assert).
+    let advance = |em: &mut luna_api::Emulator,
+                   frame: u64,
+                   spent: &mut u64,
+                   audio_acc: &mut Vec<(i16, i16)>|
+     -> Result<(), String> {
+        if !want_audio {
+            *spent += step_to_frame_bounded(em, frame, total_budget.saturating_sub(*spent));
+            return Ok(());
+        }
+        loop {
+            let cur = em.state().scheduler.frame_count;
+            audio_acc.extend(em.drain_audio(usize::MAX).map_err(|e| e.to_string())?);
+            if cur >= frame || total_budget.saturating_sub(*spent) == 0 {
+                return Ok(());
+            }
+            let stepped = step_to_frame_bounded(em, cur + 1, total_budget.saturating_sub(*spent));
+            *spent += stepped;
+            if stepped == 0 {
+                return Ok(());
+            }
+        }
+    };
     let drive_to = |em: &mut luna_api::Emulator,
                     target_frame: u64,
                     spent: &mut u64,
-                    input_iter: &mut std::iter::Peekable<std::slice::Iter<(u64, u16)>>|
+                    input_iter: &mut std::iter::Peekable<std::slice::Iter<(u64, u16)>>,
+                    audio_acc: &mut Vec<(i16, i16)>|
      -> Result<(), String> {
         while let Some(&&(frame, mask)) = input_iter.peek() {
             if frame > target_frame {
                 break;
             }
-            *spent += step_to_frame_bounded(em, frame, total_budget.saturating_sub(*spent));
+            advance(em, frame, spent, audio_acc)?;
             em.set_joypad(0, mask).map_err(|e| e.to_string())?;
             input_iter.next();
         }
-        *spent += step_to_frame_bounded(em, target_frame, total_budget.saturating_sub(*spent));
-        Ok(())
+        advance(em, target_frame, spent, audio_acc)
     };
 
     // Checkpoints in order, then the final bound.
     for (i, cp) in m.checkpoint.iter().enumerate() {
-        drive_to(&mut em, cp.at_frame, &mut spent, &mut input_iter)?;
+        drive_to(
+            &mut em,
+            cp.at_frame,
+            &mut spent,
+            &mut input_iter,
+            &mut audio_acc,
+        )?;
         let label = format!("checkpoint@{}", cp.at_frame);
         for (key, assert) in &cp.values {
             match check_value(&mut em, key, assert) {
@@ -499,16 +537,31 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
     }
     match bound {
         Some(Bound::Frames(_)) | None => {
-            drive_to(&mut em, final_frame, &mut spent, &mut input_iter)?;
+            drive_to(
+                &mut em,
+                final_frame,
+                &mut spent,
+                &mut input_iter,
+                &mut audio_acc,
+            )?;
         }
         Some(Bound::Steps(s)) => {
             // No checkpoints (validated above): input entries then the rest.
             for &(frame, mask) in &input_entries {
-                spent += step_to_frame_bounded(&mut em, frame, total_budget.saturating_sub(spent));
+                advance(&mut em, frame, &mut spent, &mut audio_acc)?;
                 em.set_joypad(0, mask).map_err(|e| e.to_string())?;
             }
-            em.step(s.saturating_sub(spent))
-                .map_err(|e| e.to_string())?;
+            // Chunked so the 512 ms audio ring can never overflow
+            // between drains (issue #211).
+            let mut left = s.saturating_sub(spent);
+            while left > 0 {
+                let chunk = left.min(100_000);
+                em.step(chunk).map_err(|e| e.to_string())?;
+                left -= chunk;
+                if want_audio {
+                    audio_acc.extend(em.drain_audio(usize::MAX).map_err(|e| e.to_string())?);
+                }
+            }
         }
     }
 
@@ -544,12 +597,14 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
         }
     }
     if let Some(min) = m.asserts.audio_rms_min {
-        let samples = em.drain_audio(usize::MAX).map_err(|e| e.to_string())?;
-        let rms = audio_rms(&samples);
+        // The stream pooled across the whole run (issue #211) plus
+        // whatever the ring still holds.
+        audio_acc.extend(em.drain_audio(usize::MAX).map_err(|e| e.to_string())?);
+        let rms = audio_rms(&audio_acc);
         if rms < min {
             failures.push(format!(
                 "audio_rms_min: RMS {rms:.1} < {min} over {} samples",
-                samples.len()
+                audio_acc.len()
             ));
         }
     }

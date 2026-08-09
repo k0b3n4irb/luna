@@ -76,9 +76,10 @@ What each assert means:
   the most recent audio, so this asserts on the state at the end of
   the run.
 - **`[asserts.blocks]`** — arbitrary-length byte-range equality in any
-  space. A bare hex string reads the CPU bus (symbol or `BANK:OFFSET`
-  keys); a table selects `space = "wram"|"vram"|"cgram"|"oam"|"aram"`
-  with a hex offset key. Failures report the first mismatching offset.
+  space. A bare hex string reads the CPU bus, and so does
+  `space = "wram"` — both use **symbol or `BANK:OFFSET` keys** (a bare
+  hex offset is only valid for `vram`/`cgram`/`oam`/`aram`, whose keys
+  are 16-bit offsets). Failures report the first mismatching offset.
 
   ```toml
   [asserts.blocks]

@@ -302,6 +302,64 @@ at_frame = 2
 }
 
 #[test]
+fn audio_rms_pools_the_whole_stream_not_just_the_ring() {
+    // Issue #211: the APU ring holds 512 ms (16384 samples) and drops
+    // NEW samples when full, so a single end-of-run drain only ever saw
+    // the boot window. The runner now drains during the run — over a
+    // ~2 s bound the pooled count must exceed the ring capacity.
+    let dir = fresh_dir("audio_pool");
+    synthetic_rom(&dir.join("game.sfc"), &[]);
+    std::fs::write(
+        dir.join("audio.toml"),
+        r#"
+rom = "game.sfc"
+force_mapper = "lorom"
+frames = 120
+
+[asserts]
+audio_rms_min = 99999.0     # unreachable — we want the FAIL line's count
+"#,
+    )
+    .unwrap();
+    let out = run(&["audio.toml"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1));
+    let count: u64 = stdout
+        .split("over ")
+        .nth(1)
+        .and_then(|s| s.split(' ').next())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| panic!("no sample count in: {stdout}"));
+    assert!(
+        count > 16384,
+        "pooled {count} samples — still capped at the ring size"
+    );
+
+    // Same manifest under `steps` exercises the chunked path.
+    std::fs::write(
+        dir.join("audio_steps.toml"),
+        r#"
+rom = "game.sfc"
+force_mapper = "lorom"
+steps = 2000000
+
+[asserts]
+audio_rms_min = 99999.0
+"#,
+    )
+    .unwrap();
+    let out = run(&["audio_steps.toml"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let count: u64 = stdout
+        .split("over ")
+        .nth(1)
+        .and_then(|s| s.split(' ').next())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| panic!("no sample count in: {stdout}"));
+    assert!(count > 16384, "steps path pooled only {count} samples");
+}
+
+#[test]
 fn update_regenerates_the_fbhash_golden() {
     let dir = fresh_dir("update");
     synthetic_rom(&dir.join("game.sfc"), &[]);
