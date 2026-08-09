@@ -7,6 +7,16 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- `luna test`: the final manifest capabilities (#212) — per-leg
+  `mouse`/`superscope` scripts (the `--mouse`/`--superscope` grammars,
+  ports 1/2), `[asserts.dsp]` on the S-DSP register file (names or hex
+  indices; new `Emulator::dsp_registers()`), `[asserts.footprint]`
+  non-zero-byte floors per space, `[asserts.dma]` discipline ceilings
+  (`unsafe_writes`, `max_vblank_bytes` — classified from the DMA
+  trace), `srm_in`/`srm_out` for battery power-cycle tests, and a
+  `firmware = "dsp1b.rom"` gate that SKIPs (never fails) when the blob
+  is absent — with `SKIP` lines, a skipped count, and JSON `skipped`
+  fields.
 - `luna test`: `[asserts.blocks]` entries accept an explicit `offset`
   field, turning the TOML key into a free label — two spaces at the
   same offset (e.g. VRAM[0] and CGRAM[0] after a double DMA) can now
