@@ -140,9 +140,16 @@ with checkpoints alone, the last one ends the run). The final
   N non-zero bytes in `wram`/`vram`/`cgram`/`oam`/`aram` — proof an
   upload happened without pinning exact bytes.
 - **`[asserts.dma]`** — DMA-discipline ceilings from the trace luna
-  records: `unsafe_writes = 0` (max DMA→VRAM bytes written outside
-  VBlank/forced-blank — the writes real hardware drops) and
-  `max_vblank_bytes = 4096` (max bytes in any single frame's burst).
+  records: `unsafe_writes = 0` (max DMA→VRAM bytes written during
+  active display — the writes real hardware drops) and
+  `max_vblank_bytes = 4096` (max screen-on VRAM bytes in any single
+  frame's burst window). Both count only the VRAM data ports
+  (`$2118`/`$2119`) — OAM/CGRAM/scroll-register (H)DMA writes never
+  race the VRAM deadline and are ignored — and forced-blank bytes are
+  excluded from `max_vblank_bytes`: under forced blank there is no
+  VBlank deadline, which is exactly why big boot uploads use it. A
+  failing `unsafe_writes` names the first offending write (frame,
+  line, channel, VRAM word, source address).
 - **Battery SRAM round-trip** — `srm_out = "save.srm"` writes SRAM
   after the run; a later manifest (sorted order!) reloads it with
   `srm_in` and asserts the value persisted:
