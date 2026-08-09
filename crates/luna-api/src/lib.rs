@@ -3133,6 +3133,16 @@ impl Emulator {
     /// Export the current APU state as a 66 048-byte `.spc` sound file
     /// (`SNES-SPC700 Sound File Data v0.30`): the live SPC700 registers,
     /// all 64 KB of ARAM, the 128 DSP registers, and the IPL ROM — the
+    /// The S-DSP's raw 128-byte register file (issue #212) — the same
+    /// bytes [`Self::export_spc`] embeds in the `.spc` blob, without
+    /// building it. Read-only, no side effects. Index by register
+    /// address (`$0C` = MVOLL, `$6C` = FLG, `$7D` = EDL, `$x0-$x7` =
+    /// per-voice, …).
+    pub fn dsp_registers(&self) -> Result<[u8; 128], ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        Ok(snes.apu_real.dsp.registers)
+    }
+
     /// exact snapshot any SPC player needs to resume playback. Capture it
     /// once the game's music driver is running (step far enough in, and
     /// inject Start to pass title screens). A minimal ID666 text tag is
