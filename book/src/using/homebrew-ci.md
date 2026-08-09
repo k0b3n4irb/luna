@@ -26,7 +26,7 @@ luna test [PATHS...] [--update] [--only SUBSTR] [--report json]
 rom = "../build/game.sfc"      # relative to this manifest
 sym = "../build/game.sym"      # optional (a beside-ROM .sym auto-loads)
 force_mapper = "lorom"         # optional — headerless/WIP images
-frames = 600                   # run bound: `frames` or `steps` (exactly one)
+frames = 600                   # run bound: `frames` or `steps` (or checkpoints)
 input = "300:0x1000,310:0"     # optional joypad script, or "@inputs/boot.txt"
 screenshot = "artifacts/boot.png"  # optional artifact, written after the run
 
@@ -34,10 +34,17 @@ screenshot = "artifacts/boot.png"  # optional artifact, written after the run
 wdm_empty = true               # SNES_ASSERT never fired (WDM channel silent)
 nocash_contains = "BOOT OK"    # the $21FC TTY printed this
 fbhash = "7429bf441a1c7d6c"    # displayed-frame hash — see below
+audio_rms_min = 100.0          # the music is audibly playing
 
 [asserts.values]               # loaded symbol (or "BANK:OFFSET") = expected
-r_game_state = 0x02            # ≤ 0xFF checks one byte…
-r_score = 0x2EE0               # …larger values check a little-endian u16
+r_game_state = 0x02            # bare int = eq; ≤ 0xFF checks one byte…
+r_score = { ge = 0x1000 }      # …and tables give ge/gt/le/lt/ne thresholds
+
+[asserts.blocks]               # byte-range equality, any memory space
+"0000" = { space = "vram", hex = "7cc6cede..." }
+
+[asserts.trace]                # coprocessor liveness
+superfx = { min = 1 }
 ```
 
 What each assert means:
@@ -51,8 +58,67 @@ What each assert means:
   the golden suite's SHA-256). After an **intended** render change, run
   `luna test --update` to regenerate every manifest's `fbhash` in
   place; formatting and comments are preserved.
-- **`[asserts.values]`** — read WRAM through the loaded symbol table
-  (or a literal `"7E:0100"` hex pair) and compare.
+- **`[asserts.values]`** — read memory through the loaded symbol table
+  (or a literal `"7E:0100"` hex pair) and compare. A bare integer means
+  `eq`; a table gives comparators — any of `eq`/`ne`/`ge`/`gt`/`le`/`lt`
+  plus an optional `width = 1|2` (default: 1 byte if every bound fits,
+  else a little-endian u16):
+
+  ```toml
+  [asserts.values]
+  r_lives = 3                      # exact
+  r_score = { ge = 0x1000 }        # threshold
+  r_timer = { gt = 0, le = 0x63, width = 1 }
+  ```
+
+- **`audio_rms_min`** — RMS over the drained sample ring must reach
+  this floor: the "music is actually playing" oracle. The ring holds
+  the most recent audio, so this asserts on the state at the end of
+  the run.
+- **`[asserts.blocks]`** — arbitrary-length byte-range equality in any
+  space. A bare hex string reads the CPU bus (symbol or `BANK:OFFSET`
+  keys); a table selects `space = "wram"|"vram"|"cgram"|"oam"|"aram"`
+  with a hex offset key. Failures report the first mismatching offset.
+
+  ```toml
+  [asserts.blocks]
+  font_tiles = "7cc6ce...00"                    # symbol, CPU bus
+  "0000" = { space = "vram", hex = "7cc6ce" }   # uploaded tiles
+  ```
+
+- **`[asserts.trace]`** — the named trace recorded at least `min`
+  events: `dma`, `dsp` (S-DSP writes), `mailbox`, `sa1`, `superfx`,
+  `dsp1`, `spc`. `superfx = { min = 1 }` is the "the GSU actually ran"
+  liveness check.
+
+## Checkpoints — before/after assertions
+
+`[[checkpoint]]` tables measure *along* the run, in order: each leg
+runs to its `at_frame` (applying that leg's `input` entries), then
+evaluates its `values` and `delta` asserts. `delta` compares against
+the previous checkpoint (the run start for the first one):
+
+```toml
+# "pressing RIGHT moves the player right"
+rom = "../build/game.sfc"
+force_mapper = "lorom"
+
+[[checkpoint]]                 # settle: establish the baseline
+at_frame = 60
+
+[[checkpoint]]                 # press RIGHT for 3 frames
+at_frame = 90
+input = "62:0x0100,65:0"
+[checkpoint.delta]
+xloc = "increased"             # increased | decreased | changed | unchanged
+yloc = "unchanged"
+r_mode = { dir = "unchanged", width = 1 }
+```
+
+`at_frame` values must increase; `steps` cannot be combined with
+checkpoints (use `frames`, which may extend past the last checkpoint —
+with checkpoints alone, the last one ends the run). The final
+`[asserts]` block still evaluates at the very end.
 
 Input scripts use exactly the `--input` grammar (`frame:mask`, `#`
 comments, `@file`), so a recording exported from the GUI or captured

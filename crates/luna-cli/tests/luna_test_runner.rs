@@ -154,6 +154,154 @@ fn only_filters_manifests() {
 }
 
 #[test]
+fn thresholds_blocks_traces_and_audio_asserts() {
+    let dir = fresh_dir("asserts_v2");
+    // $8000: INC $10 ; BRA -4 — a WRAM counter that climbs forever.
+    synthetic_rom(&dir.join("game.sfc"), &[0xE6, 0x10, 0x80, 0xFC]);
+    std::fs::write(
+        dir.join("v2.toml"),
+        r#"
+rom = "game.sfc"
+force_mapper = "lorom"
+frames = 3
+
+[asserts]
+audio_rms_min = 0.0            # trivially satisfiable floor (IPL is silent)
+
+[asserts.values]
+"7E:0010" = { ge = 1, width = 1 }     # the counter climbed
+"7E:0011" = { le = 0 }                # neighbour untouched
+"7E:0012" = { ne = 5, lt = 6 }        # multi-op comparator
+
+[asserts.blocks]
+"00:8000" = "e610 80fc"               # the program bytes, via the CPU bus
+"0100" = { space = "vram", hex = "00000000" }   # VRAM powers up zeroed
+
+[asserts.trace]
+spc = { min = 1 }                     # the SPC700 IPL executed
+"#,
+    )
+    .unwrap();
+    let out = run(&["v2.toml"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The failing directions: threshold violated, block mismatch,
+    // impossible trace count, unreachable RMS.
+    std::fs::write(
+        dir.join("v2_fail.toml"),
+        r#"
+rom = "game.sfc"
+force_mapper = "lorom"
+frames = 3
+
+[asserts]
+audio_rms_min = 1.0
+
+[asserts.values]
+"7E:0010" = { le = 0, width = 1 }
+
+[asserts.blocks]
+"00:8000" = "ffffffff"
+
+[asserts.trace]
+superfx = { min = 1 }
+"#,
+    )
+    .unwrap();
+    let out = run(&["v2_fail.toml"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "stdout: {stdout}");
+    for needle in [
+        "values.7E:0010",
+        "blocks.00:8000",
+        "trace.superfx: 0 event(s)",
+        "audio_rms_min",
+    ] {
+        assert!(stdout.contains(needle), "missing `{needle}` in: {stdout}");
+    }
+
+    // Vocabulary errors are usage errors (exit 2).
+    std::fs::write(
+        dir.join("v2_bad.toml"),
+        "rom = \"game.sfc\"\nforce_mapper = \"lorom\"\nframes = 1\n[asserts.trace]\nwarp = { min = 1 }\n",
+    )
+    .unwrap();
+    let out = run(&["v2_bad.toml"], &dir);
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn checkpoints_track_deltas_between_legs() {
+    let dir = fresh_dir("checkpoints");
+    // The same climbing counter: increases between any two checkpoints.
+    synthetic_rom(&dir.join("game.sfc"), &[0xE6, 0x10, 0x80, 0xFC]);
+    std::fs::write(
+        dir.join("delta.toml"),
+        r#"
+rom = "game.sfc"
+force_mapper = "lorom"
+
+[[checkpoint]]
+at_frame = 2
+[checkpoint.values]
+"7E:0010" = { ge = 1, width = 1 }
+[checkpoint.delta]
+"7E:0010" = { dir = "increased", width = 1 }
+"7E:0020" = "unchanged"
+
+[[checkpoint]]
+at_frame = 4
+[checkpoint.delta]
+"7E:0010" = { dir = "increased", width = 1 }
+"7E:0020" = "unchanged"
+"#,
+    )
+    .unwrap();
+    let out = run(&["delta.toml"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The wrong direction fails, naming the checkpoint.
+    std::fs::write(
+        dir.join("delta_fail.toml"),
+        r#"
+rom = "game.sfc"
+force_mapper = "lorom"
+
+[[checkpoint]]
+at_frame = 2
+[checkpoint.delta]
+"7E:0010" = { dir = "decreased", width = 1 }
+"#,
+    )
+    .unwrap();
+    let out = run(&["delta_fail.toml"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stdout.contains("checkpoint@2 delta.7E:0010"),
+        "stdout: {stdout}"
+    );
+
+    // Non-increasing checkpoints and steps+checkpoints are usage errors.
+    std::fs::write(
+        dir.join("delta_bad.toml"),
+        "rom = \"game.sfc\"\nforce_mapper = \"lorom\"\nsteps = 100\n[[checkpoint]]\nat_frame = 2\n",
+    )
+    .unwrap();
+    assert_eq!(run(&["delta_bad.toml"], &dir).status.code(), Some(2));
+}
+
+#[test]
 fn update_regenerates_the_fbhash_golden() {
     let dir = fresh_dir("update");
     synthetic_rom(&dir.join("game.sfc"), &[]);
