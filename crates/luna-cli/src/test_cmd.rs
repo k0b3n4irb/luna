@@ -167,6 +167,10 @@ struct Asserts {
     /// trace luna already records.
     #[serde(default)]
     dma: Option<DmaAssert>,
+    /// Decoded-sprite asserts (issue #218): visible count + per-sprite
+    /// fields over the `assets-dump` OAM decode.
+    #[serde(default)]
+    oam: Option<OamAssert>,
 }
 
 /// A `[asserts.footprint]` entry.
@@ -177,15 +181,53 @@ struct FootprintAssert {
     nonzero_min: u64,
 }
 
-/// The `[asserts.dma]` ceilings — both are maxima.
+/// The `[asserts.dma]` ceilings — both are maxima, both count only the
+/// VRAM data ports (`$2118`/`$2119`), exactly like the `--dma-trace`
+/// CSV the probes bucket (issue #217): the trace also records OAM /
+/// CGRAM / scroll-register DMA-and-HDMA writes, which are not VRAM
+/// bytes and never race the VRAM deadline.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DmaAssert {
-    /// Max DMA→VRAM bytes written outside VBlank/forced-blank
-    /// (`0` = every VRAM write was display-safe).
+    /// Max DMA→VRAM bytes written during active display — outside both
+    /// `VBlank` and forced blank (`0` = every VRAM write was
+    /// display-safe).
     unsafe_writes: Option<u64>,
-    /// Max DMA→VRAM bytes in any single frame's burst window.
+    /// Max DMA→VRAM bytes in any single frame's burst window,
+    /// **excluding forced-blank bytes**: the ~4 KB budget exists
+    /// because of the `VBlank` deadline with the screen on, and forced
+    /// blank has no deadline (that is exactly why big boot uploads use
+    /// it) — issue #217.
     max_vblank_bytes: Option<u64>,
+}
+
+/// The `[asserts.oam]` decoded-sprite asserts (issue #218) — a thin
+/// wrapper over `Emulator::decode_sprites()` (the same decode the
+/// sprite viewer and MCP `decode_sprites` expose), so sprite structure
+/// is assertable without a brittle raw-OAM golden.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OamAssert {
+    /// Count of on-screen sprites — the standard predicate
+    /// `0 <= y < 224` and `-32 < x < 256` — with the
+    /// `[asserts.values]` comparator grammar (`visible = 1` or
+    /// `visible = { ge = 1 }`).
+    #[serde(default)]
+    visible: Option<ValueAssert>,
+    /// Per-sprite field asserts by hardware OAM index (`0`-`127`):
+    /// `x`, `y`, `tile`, `palette`, `priority`, `w`, `h` (comparator
+    /// grammar) and `hflip`/`vflip` (booleans, or 0/1).
+    #[serde(default)]
+    sprites: BTreeMap<String, BTreeMap<String, OamFieldAssert>>,
+}
+
+/// One sprite-field assert: a bare boolean for the flip flags, else
+/// the `[asserts.values]` comparator grammar.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum OamFieldAssert {
+    Flag(bool),
+    Val(ValueAssert),
 }
 
 /// One scripted peripheral event (issue #212).
@@ -850,33 +892,105 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
                 "dma: trace hit its {DMA_TRACE_CAP}-event cap — counts would under-report; shorten the run"
             ));
         }
-        // A VRAM write is display-safe iff it happened in VBlank OR
-        // under forced blank (the DmaTraceEvent classification the
-        // Event Viewer already uses).
-        let unsafe_writes = events
-            .iter()
+        // Only the VRAM data ports count (issue #217) — the trace also
+        // records OAM/CGRAM/register (H)DMA writes, which the probes'
+        // CSV bucketing never saw and which don't race the VRAM
+        // deadline. A VRAM write is display-safe iff it happened in
+        // VBlank OR under forced blank (the DmaTraceEvent
+        // classification the Event Viewer already uses).
+        let vram_events = || events.iter().filter(|e| matches!(e.b_offset, 0x18 | 0x19));
+        let unsafe_events: Vec<_> = vram_events()
             .filter(|e| !(e.blank || e.force_blank))
-            .count() as u64;
+            .collect();
+        let unsafe_writes = unsafe_events.len() as u64;
         if let Some(max) = dma.unsafe_writes
             && unsafe_writes > max
         {
+            // Name the first offender so a disagreement with an external
+            // bucketing is diagnosable at a glance (issue #217).
+            let first = unsafe_events[0];
             failures.push(format!(
-                "dma.unsafe_writes: {unsafe_writes} VRAM byte(s) written outside \
-                 VBlank/forced-blank, expected <= {max}"
+                "dma.unsafe_writes: {unsafe_writes} VRAM byte(s) written during active \
+                 display, expected <= {max} (first: frame {} line {} ch{} \
+                 vram_word ${:04X} src ${:06X})",
+                first.frame, first.line, first.channel, first.vram_word, first.src_full
             ));
         }
         if let Some(max) = dma.max_vblank_bytes {
+            // Forced-blank uploads have no VBlank deadline — exclude
+            // them from the per-frame budget (issue #217).
             let mut per_frame: BTreeMap<u64, u64> = BTreeMap::new();
-            for e in &events {
+            for e in vram_events().filter(|e| !e.force_blank) {
                 *per_frame.entry(e.frame).or_default() += 1;
             }
             if let Some((frame, &n)) = per_frame.iter().max_by_key(|&(_, n)| *n)
                 && n > max
             {
                 failures.push(format!(
-                    "dma.max_vblank_bytes: frame {frame} transferred {n} byte(s), \
-                     expected <= {max}"
+                    "dma.max_vblank_bytes: frame {frame} transferred {n} \
+                     screen-on VRAM byte(s), expected <= {max}"
                 ));
+            }
+        }
+    }
+    // [asserts.oam] — decoded sprite structure (issue #218).
+    if let Some(oam) = &m.asserts.oam {
+        let sprites = em.decode_sprites().map_err(|e| e.to_string())?;
+        if let Some(assert) = &oam.visible {
+            // The probe's on-screen predicate: 0 <= y < 224, -32 < x < 256.
+            let visible = sprites
+                .iter()
+                .filter(|s| u16::from(s.y) < 224 && s.x > -32 && s.x < 256)
+                .count() as i64;
+            match normalize_assert(assert) {
+                Ok((cmp, _)) => {
+                    if let Some(msg) = eval_cmp("oam.visible", visible, &cmp) {
+                        failures.push(msg);
+                    }
+                }
+                Err(e) => return Err(format!("asserts.oam.visible: {e}")),
+            }
+        }
+        for (idx_key, fields) in &oam.sprites {
+            let idx: usize = idx_key
+                .parse()
+                .ok()
+                .filter(|&i| i < sprites.len())
+                .ok_or_else(|| format!("asserts.oam.sprites.{idx_key}: index must be 0-127"))?;
+            let s = &sprites[idx];
+            for (field, assert) in fields {
+                let got: i64 = match field.as_str() {
+                    "x" => s.x.into(),
+                    "y" => s.y.into(),
+                    "tile" => s.tile.into(),
+                    "palette" => s.palette.into(),
+                    "priority" => s.priority.into(),
+                    "hflip" => s.h_flip.into(),
+                    "vflip" => s.v_flip.into(),
+                    "w" => s.w.into(),
+                    "h" => s.h.into(),
+                    other => {
+                        return Err(format!(
+                            "asserts.oam.sprites.{idx_key}.{other}: unknown field \
+                             (x, y, tile, palette, priority, hflip, vflip, w, h)"
+                        ));
+                    }
+                };
+                let cmp = match assert {
+                    OamFieldAssert::Flag(b) => CmpSpec {
+                        eq: Some(i64::from(*b)),
+                        ..Default::default()
+                    },
+                    OamFieldAssert::Val(v) => match normalize_assert(v) {
+                        Ok((cmp, _)) => cmp,
+                        Err(e) => {
+                            return Err(format!("asserts.oam.sprites.{idx_key}.{field}: {e}"));
+                        }
+                    },
+                };
+                if let Some(msg) = eval_cmp(&format!("oam.sprites.{idx_key}.{field}"), got, &cmp) {
+                    failures.push(msg);
+                }
             }
         }
     }

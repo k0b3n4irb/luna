@@ -503,6 +503,187 @@ unsafe_writes = 0
 }
 
 #[test]
+fn dma_classification_matches_the_probe() {
+    // Issue #217: [asserts.dma] must bucket exactly like the probes'
+    // `--dma-trace` CSV parse — VRAM ports only, forced-blank bytes
+    // excluded from the per-frame budget.
+    let dir = fresh_dir("dma_probe");
+
+    // 16-byte DMA ch0 ROM→(B-bus port) with the given mode/target; the
+    // caller prepends any INIDISP setup.
+    let dma_prog = |setup: &[u8], mode: u8, b_port: u8| {
+        let mut p = setup.to_vec();
+        p.extend_from_slice(&[
+            0xA9, mode, 0x8D, 0x00, 0x43, // LDA #mode, STA $4300
+            0xA9, b_port, 0x8D, 0x01, 0x43, // LDA #port, STA $4301
+            0x9C, 0x02, 0x43, // STZ $4302
+            0xA9, 0x80, 0x8D, 0x03, 0x43, // LDA #$80, STA $4303
+            0x9C, 0x04, 0x43, // STZ $4304
+            0xA9, 0x10, 0x8D, 0x05, 0x43, // LDA #$10, STA $4305
+            0x9C, 0x06, 0x43, // STZ $4306
+            0xA9, 0x01, 0x8D, 0x0B, 0x42, // LDA #$01, STA $420B
+            0x80, 0xFE, // BRA *
+        ]);
+        p
+    };
+
+    // 1. Boot upload under power-on forced blank: no VBlank deadline,
+    //    so BOTH ceilings hold at 0 (the probe's dynamic_map/tiled case).
+    synthetic_rom(&dir.join("fblank.sfc"), &dma_prog(&[], 0x01, 0x18));
+    std::fs::write(
+        dir.join("a_fblank.toml"),
+        "rom = \"fblank.sfc\"\nforce_mapper = \"lorom\"\nframes = 3\n\
+         [asserts.dma]\nunsafe_writes = 0\nmax_vblank_bytes = 0\n",
+    )
+    .unwrap();
+
+    // 2. Screen-on DMA to CGRAM ($2122) during active display: not a
+    //    VRAM byte — invisible to both ceilings (the parallax_scroll /
+    //    hdma_helpers regression: register (H)DMA is not "unsafe").
+    let screen_on: &[u8] = &[0xA9, 0x0F, 0x8D, 0x00, 0x21]; // LDA #$0F, STA $2100
+    synthetic_rom(&dir.join("cgram.sfc"), &dma_prog(screen_on, 0x00, 0x22));
+    std::fs::write(
+        dir.join("b_cgram.toml"),
+        "rom = \"cgram.sfc\"\nforce_mapper = \"lorom\"\nframes = 3\n\
+         [asserts.dma]\nunsafe_writes = 0\nmax_vblank_bytes = 0\n",
+    )
+    .unwrap();
+    let out = run(&["a_fblank.toml", "b_cgram.toml"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "stdout: {stdout}");
+    assert!(stdout.contains("2 passed, 0 failed"));
+
+    // 3. Screen-on DMA→VRAM still counts against the budget: 16 bytes
+    //    with the screen on must break an 8-byte ceiling, and the
+    //    unsafe report names the first offending write.
+    synthetic_rom(&dir.join("vram.sfc"), &dma_prog(screen_on, 0x01, 0x18));
+    std::fs::write(
+        dir.join("vram.toml"),
+        "rom = \"vram.sfc\"\nforce_mapper = \"lorom\"\nframes = 3\n\
+         [asserts.dma]\nunsafe_writes = 0\nmax_vblank_bytes = 8\n",
+    )
+    .unwrap();
+    let out = run(&["vram.toml"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "stdout: {stdout}");
+    assert!(stdout.contains("dma.unsafe_writes"), "stdout: {stdout}");
+    assert!(stdout.contains("first: frame"), "stdout: {stdout}");
+    assert!(stdout.contains("dma.max_vblank_bytes"), "stdout: {stdout}");
+}
+
+#[test]
+fn oam_asserts_decode_sprites_and_visible_count() {
+    // Issue #218: [asserts.oam] — decoded sprite fields + the on-screen
+    // count (the oam_struct probe's checks, e.g. simple_sprite's
+    // x=112 y=95 tile=16 priority=3 32x32).
+    let dir = fresh_dir("oam");
+    let mut prog: Vec<u8> = vec![
+        // OAMADD = 0, then park all 128 sprites off-screen: 2×256
+        // writes of $F0 fill the 512-byte low table (y = 240 >= 224).
+        0xA9, 0x00, 0x8D, 0x02, 0x21, // LDA #$00, STA $2102
+        0x8D, 0x03, 0x21, // STA $2103
+    ];
+    for _ in 0..2 {
+        prog.extend_from_slice(&[
+            0xA2, 0x00, // LDX #$00
+            0xA9, 0xF0, // loop: LDA #$F0
+            0x8D, 0x04, 0x21, // STA $2104
+            0xE8, // INX
+            0xD0, 0xF8, // BNE loop (-8)
+        ]);
+    }
+    prog.extend_from_slice(&[
+        // Sprite 0: OAMADD = 0; x=112, y=95, tile=16,
+        // attr $30 (priority 3, palette 0, no flips, tile.8=0).
+        0xA9, 0x00, 0x8D, 0x02, 0x21, // LDA #$00, STA $2102
+        0x8D, 0x03, 0x21, // STA $2103
+        0xA9, 0x70, 0x8D, 0x04, 0x21, // LDA #112, STA $2104
+        0xA9, 0x5F, 0x8D, 0x04, 0x21, // LDA #95,  STA $2104
+        0xA9, 0x10, 0x8D, 0x04, 0x21, // LDA #16,  STA $2104
+        0xA9, 0x30, 0x8D, 0x04, 0x21, // LDA #$30, STA $2104
+        // High table (word $0100): sprite 0 x8=0, size=large; the
+        // second byte keeps sprites 4-7 small at x8=0.
+        0xA9, 0x00, 0x8D, 0x02, 0x21, // LDA #$00, STA $2102
+        0xA9, 0x01, 0x8D, 0x03, 0x21, // LDA #$01, STA $2103
+        0xA9, 0x02, 0x8D, 0x04, 0x21, // LDA #$02, STA $2104
+        0xA9, 0x00, 0x8D, 0x04, 0x21, // LDA #$00, STA $2104
+        // OBSEL size select 1: small 8x8 / large 32x32 → sprite 0 is 32x32.
+        0xA9, 0x20, 0x8D, 0x01, 0x21, // LDA #$20, STA $2101
+        0x80, 0xFE, // BRA *
+    ]);
+    synthetic_rom(&dir.join("oam.sfc"), &prog);
+    std::fs::write(
+        dir.join("oam.toml"),
+        r#"
+rom = "oam.sfc"
+force_mapper = "lorom"
+frames = 3
+
+[asserts.oam]
+visible = 1
+
+[asserts.oam.sprites.0]
+x = 112
+y = 95
+tile = 16
+palette = 0
+priority = 3
+hflip = false
+vflip = false
+w = 32
+h = 32
+"#,
+    )
+    .unwrap();
+    let out = run(&["oam.toml"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Failing direction: wrong tile, a visible floor of 2, a flipped
+    // flag — each failure names its field.
+    std::fs::write(
+        dir.join("oam_fail.toml"),
+        r#"
+rom = "oam.sfc"
+force_mapper = "lorom"
+frames = 3
+
+[asserts.oam]
+visible = { ge = 2 }
+
+[asserts.oam.sprites.0]
+tile = 17
+hflip = true
+"#,
+    )
+    .unwrap();
+    let out = run(&["oam_fail.toml"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "stdout: {stdout}");
+    for needle in ["oam.visible", "oam.sprites.0.tile", "oam.sprites.0.hflip"] {
+        assert!(stdout.contains(needle), "missing `{needle}` in: {stdout}");
+    }
+
+    // Unknown field / out-of-range index are usage errors (exit 2).
+    std::fs::write(
+        dir.join("oam_bad.toml"),
+        "rom = \"oam.sfc\"\nforce_mapper = \"lorom\"\nframes = 1\n[asserts.oam.sprites.0]\nwarp = 1\n",
+    )
+    .unwrap();
+    assert_eq!(run(&["oam_bad.toml"], &dir).status.code(), Some(2));
+    std::fs::write(
+        dir.join("oam_idx.toml"),
+        "rom = \"oam.sfc\"\nforce_mapper = \"lorom\"\nframes = 1\n[asserts.oam.sprites.128]\nx = 0\n",
+    )
+    .unwrap();
+    assert_eq!(run(&["oam_idx.toml"], &dir).status.code(), Some(2));
+}
+
+#[test]
 fn sram_round_trip_across_two_manifests() {
     let dir = fresh_dir("sram");
     // LDA #$5A ; STA $70:0000 (long) ; BRA * — writes battery SRAM.
