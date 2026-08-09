@@ -503,6 +503,75 @@ unsafe_writes = 0
 }
 
 #[test]
+fn dma_classification_matches_the_probe() {
+    // Issue #217: [asserts.dma] must bucket exactly like the probes'
+    // `--dma-trace` CSV parse — VRAM ports only, forced-blank bytes
+    // excluded from the per-frame budget.
+    let dir = fresh_dir("dma_probe");
+
+    // 16-byte DMA ch0 ROM→(B-bus port) with the given mode/target; the
+    // caller prepends any INIDISP setup.
+    let dma_prog = |setup: &[u8], mode: u8, b_port: u8| {
+        let mut p = setup.to_vec();
+        p.extend_from_slice(&[
+            0xA9, mode, 0x8D, 0x00, 0x43, // LDA #mode, STA $4300
+            0xA9, b_port, 0x8D, 0x01, 0x43, // LDA #port, STA $4301
+            0x9C, 0x02, 0x43, // STZ $4302
+            0xA9, 0x80, 0x8D, 0x03, 0x43, // LDA #$80, STA $4303
+            0x9C, 0x04, 0x43, // STZ $4304
+            0xA9, 0x10, 0x8D, 0x05, 0x43, // LDA #$10, STA $4305
+            0x9C, 0x06, 0x43, // STZ $4306
+            0xA9, 0x01, 0x8D, 0x0B, 0x42, // LDA #$01, STA $420B
+            0x80, 0xFE, // BRA *
+        ]);
+        p
+    };
+
+    // 1. Boot upload under power-on forced blank: no VBlank deadline,
+    //    so BOTH ceilings hold at 0 (the probe's dynamic_map/tiled case).
+    synthetic_rom(&dir.join("fblank.sfc"), &dma_prog(&[], 0x01, 0x18));
+    std::fs::write(
+        dir.join("a_fblank.toml"),
+        "rom = \"fblank.sfc\"\nforce_mapper = \"lorom\"\nframes = 3\n\
+         [asserts.dma]\nunsafe_writes = 0\nmax_vblank_bytes = 0\n",
+    )
+    .unwrap();
+
+    // 2. Screen-on DMA to CGRAM ($2122) during active display: not a
+    //    VRAM byte — invisible to both ceilings (the parallax_scroll /
+    //    hdma_helpers regression: register (H)DMA is not "unsafe").
+    let screen_on: &[u8] = &[0xA9, 0x0F, 0x8D, 0x00, 0x21]; // LDA #$0F, STA $2100
+    synthetic_rom(&dir.join("cgram.sfc"), &dma_prog(screen_on, 0x00, 0x22));
+    std::fs::write(
+        dir.join("b_cgram.toml"),
+        "rom = \"cgram.sfc\"\nforce_mapper = \"lorom\"\nframes = 3\n\
+         [asserts.dma]\nunsafe_writes = 0\nmax_vblank_bytes = 0\n",
+    )
+    .unwrap();
+    let out = run(&["a_fblank.toml", "b_cgram.toml"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "stdout: {stdout}");
+    assert!(stdout.contains("2 passed, 0 failed"));
+
+    // 3. Screen-on DMA→VRAM still counts against the budget: 16 bytes
+    //    with the screen on must break an 8-byte ceiling, and the
+    //    unsafe report names the first offending write.
+    synthetic_rom(&dir.join("vram.sfc"), &dma_prog(screen_on, 0x01, 0x18));
+    std::fs::write(
+        dir.join("vram.toml"),
+        "rom = \"vram.sfc\"\nforce_mapper = \"lorom\"\nframes = 3\n\
+         [asserts.dma]\nunsafe_writes = 0\nmax_vblank_bytes = 8\n",
+    )
+    .unwrap();
+    let out = run(&["vram.toml"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "stdout: {stdout}");
+    assert!(stdout.contains("dma.unsafe_writes"), "stdout: {stdout}");
+    assert!(stdout.contains("first: frame"), "stdout: {stdout}");
+    assert!(stdout.contains("dma.max_vblank_bytes"), "stdout: {stdout}");
+}
+
+#[test]
 fn sram_round_trip_across_two_manifests() {
     let dir = fresh_dir("sram");
     // LDA #$5A ; STA $70:0000 (long) ; BRA * — writes battery SRAM.

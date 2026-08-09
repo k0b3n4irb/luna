@@ -4,6 +4,17 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+- `luna test`: `[asserts.dma]` now buckets exactly like the probes'
+  `--dma-trace` CSV parse (#217). Both ceilings count only the VRAM
+  data ports (`$2118`/`$2119`) — OAM/CGRAM/scroll-register (H)DMA
+  writes no longer inflate `unsafe_writes` — and forced-blank bytes
+  are excluded from `max_vblank_bytes` (no VBlank deadline under
+  forced blank). A failing `unsafe_writes` now names the first
+  offending write (frame, line, channel, VRAM word, source).
+
 ## [1.16.0] — 2026-08-09
 
 The adoption-feedback release, same-day: the audio-RMS oracle reads the

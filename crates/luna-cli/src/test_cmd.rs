@@ -177,14 +177,23 @@ struct FootprintAssert {
     nonzero_min: u64,
 }
 
-/// The `[asserts.dma]` ceilings — both are maxima.
+/// The `[asserts.dma]` ceilings — both are maxima, both count only the
+/// VRAM data ports (`$2118`/`$2119`), exactly like the `--dma-trace`
+/// CSV the probes bucket (issue #217): the trace also records OAM /
+/// CGRAM / scroll-register DMA-and-HDMA writes, which are not VRAM
+/// bytes and never race the VRAM deadline.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DmaAssert {
-    /// Max DMA→VRAM bytes written outside VBlank/forced-blank
-    /// (`0` = every VRAM write was display-safe).
+    /// Max DMA→VRAM bytes written during active display — outside both
+    /// `VBlank` and forced blank (`0` = every VRAM write was
+    /// display-safe).
     unsafe_writes: Option<u64>,
-    /// Max DMA→VRAM bytes in any single frame's burst window.
+    /// Max DMA→VRAM bytes in any single frame's burst window,
+    /// **excluding forced-blank bytes**: the ~4 KB budget exists
+    /// because of the `VBlank` deadline with the screen on, and forced
+    /// blank has no deadline (that is exactly why big boot uploads use
+    /// it) — issue #217.
     max_vblank_bytes: Option<u64>,
 }
 
@@ -850,32 +859,43 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
                 "dma: trace hit its {DMA_TRACE_CAP}-event cap — counts would under-report; shorten the run"
             ));
         }
-        // A VRAM write is display-safe iff it happened in VBlank OR
-        // under forced blank (the DmaTraceEvent classification the
-        // Event Viewer already uses).
-        let unsafe_writes = events
-            .iter()
+        // Only the VRAM data ports count (issue #217) — the trace also
+        // records OAM/CGRAM/register (H)DMA writes, which the probes'
+        // CSV bucketing never saw and which don't race the VRAM
+        // deadline. A VRAM write is display-safe iff it happened in
+        // VBlank OR under forced blank (the DmaTraceEvent
+        // classification the Event Viewer already uses).
+        let vram_events = || events.iter().filter(|e| matches!(e.b_offset, 0x18 | 0x19));
+        let unsafe_events: Vec<_> = vram_events()
             .filter(|e| !(e.blank || e.force_blank))
-            .count() as u64;
+            .collect();
+        let unsafe_writes = unsafe_events.len() as u64;
         if let Some(max) = dma.unsafe_writes
             && unsafe_writes > max
         {
+            // Name the first offender so a disagreement with an external
+            // bucketing is diagnosable at a glance (issue #217).
+            let first = unsafe_events[0];
             failures.push(format!(
-                "dma.unsafe_writes: {unsafe_writes} VRAM byte(s) written outside \
-                 VBlank/forced-blank, expected <= {max}"
+                "dma.unsafe_writes: {unsafe_writes} VRAM byte(s) written during active \
+                 display, expected <= {max} (first: frame {} line {} ch{} \
+                 vram_word ${:04X} src ${:06X})",
+                first.frame, first.line, first.channel, first.vram_word, first.src_full
             ));
         }
         if let Some(max) = dma.max_vblank_bytes {
+            // Forced-blank uploads have no VBlank deadline — exclude
+            // them from the per-frame budget (issue #217).
             let mut per_frame: BTreeMap<u64, u64> = BTreeMap::new();
-            for e in &events {
+            for e in vram_events().filter(|e| !e.force_blank) {
                 *per_frame.entry(e.frame).or_default() += 1;
             }
             if let Some((frame, &n)) = per_frame.iter().max_by_key(|&(_, n)| *n)
                 && n > max
             {
                 failures.push(format!(
-                    "dma.max_vblank_bytes: frame {frame} transferred {n} byte(s), \
-                     expected <= {max}"
+                    "dma.max_vblank_bytes: frame {frame} transferred {n} \
+                     screen-on VRAM byte(s), expected <= {max}"
                 ));
             }
         }
