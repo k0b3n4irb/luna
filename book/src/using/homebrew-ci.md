@@ -150,6 +150,27 @@ with checkpoints alone, the last one ends the run). The final
   VBlank deadline, which is exactly why big boot uploads use it. A
   failing `unsafe_writes` names the first offending write (frame,
   line, channel, VRAM word, source address).
+- **`[asserts.oam]`** — decoded sprite structure, no raw-OAM golden
+  needed: `visible = 1` counts on-screen sprites (the standard
+  predicate `0 <= y < 224`, `-32 < x < 256`; comparator tables like
+  `{ ge = 1 }` work), and `[asserts.oam.sprites.N]` (hardware OAM
+  index 0-127) asserts decoded fields — `x`, `y`, `tile`, `palette`,
+  `priority`, `w`, `h` with the comparator grammar, `hflip`/`vflip`
+  as booleans:
+
+  ```toml
+  [asserts.oam]
+  visible = 1
+
+  [asserts.oam.sprites.0]
+  x = 112
+  y = 95
+  tile = 16
+  priority = 3
+  w = 32
+  h = 32
+  ```
+
 - **Battery SRAM round-trip** — `srm_out = "save.srm"` writes SRAM
   after the run; a later manifest (sorted order!) reloads it with
   `srm_in` and asserts the value persisted:

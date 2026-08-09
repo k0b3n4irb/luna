@@ -572,6 +572,118 @@ fn dma_classification_matches_the_probe() {
 }
 
 #[test]
+fn oam_asserts_decode_sprites_and_visible_count() {
+    // Issue #218: [asserts.oam] — decoded sprite fields + the on-screen
+    // count (the oam_struct probe's checks, e.g. simple_sprite's
+    // x=112 y=95 tile=16 priority=3 32x32).
+    let dir = fresh_dir("oam");
+    let mut prog: Vec<u8> = vec![
+        // OAMADD = 0, then park all 128 sprites off-screen: 2×256
+        // writes of $F0 fill the 512-byte low table (y = 240 >= 224).
+        0xA9, 0x00, 0x8D, 0x02, 0x21, // LDA #$00, STA $2102
+        0x8D, 0x03, 0x21, // STA $2103
+    ];
+    for _ in 0..2 {
+        prog.extend_from_slice(&[
+            0xA2, 0x00, // LDX #$00
+            0xA9, 0xF0, // loop: LDA #$F0
+            0x8D, 0x04, 0x21, // STA $2104
+            0xE8, // INX
+            0xD0, 0xF8, // BNE loop (-8)
+        ]);
+    }
+    prog.extend_from_slice(&[
+        // Sprite 0: OAMADD = 0; x=112, y=95, tile=16,
+        // attr $30 (priority 3, palette 0, no flips, tile.8=0).
+        0xA9, 0x00, 0x8D, 0x02, 0x21, // LDA #$00, STA $2102
+        0x8D, 0x03, 0x21, // STA $2103
+        0xA9, 0x70, 0x8D, 0x04, 0x21, // LDA #112, STA $2104
+        0xA9, 0x5F, 0x8D, 0x04, 0x21, // LDA #95,  STA $2104
+        0xA9, 0x10, 0x8D, 0x04, 0x21, // LDA #16,  STA $2104
+        0xA9, 0x30, 0x8D, 0x04, 0x21, // LDA #$30, STA $2104
+        // High table (word $0100): sprite 0 x8=0, size=large; the
+        // second byte keeps sprites 4-7 small at x8=0.
+        0xA9, 0x00, 0x8D, 0x02, 0x21, // LDA #$00, STA $2102
+        0xA9, 0x01, 0x8D, 0x03, 0x21, // LDA #$01, STA $2103
+        0xA9, 0x02, 0x8D, 0x04, 0x21, // LDA #$02, STA $2104
+        0xA9, 0x00, 0x8D, 0x04, 0x21, // LDA #$00, STA $2104
+        // OBSEL size select 1: small 8x8 / large 32x32 → sprite 0 is 32x32.
+        0xA9, 0x20, 0x8D, 0x01, 0x21, // LDA #$20, STA $2101
+        0x80, 0xFE, // BRA *
+    ]);
+    synthetic_rom(&dir.join("oam.sfc"), &prog);
+    std::fs::write(
+        dir.join("oam.toml"),
+        r#"
+rom = "oam.sfc"
+force_mapper = "lorom"
+frames = 3
+
+[asserts.oam]
+visible = 1
+
+[asserts.oam.sprites.0]
+x = 112
+y = 95
+tile = 16
+palette = 0
+priority = 3
+hflip = false
+vflip = false
+w = 32
+h = 32
+"#,
+    )
+    .unwrap();
+    let out = run(&["oam.toml"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Failing direction: wrong tile, a visible floor of 2, a flipped
+    // flag — each failure names its field.
+    std::fs::write(
+        dir.join("oam_fail.toml"),
+        r#"
+rom = "oam.sfc"
+force_mapper = "lorom"
+frames = 3
+
+[asserts.oam]
+visible = { ge = 2 }
+
+[asserts.oam.sprites.0]
+tile = 17
+hflip = true
+"#,
+    )
+    .unwrap();
+    let out = run(&["oam_fail.toml"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "stdout: {stdout}");
+    for needle in ["oam.visible", "oam.sprites.0.tile", "oam.sprites.0.hflip"] {
+        assert!(stdout.contains(needle), "missing `{needle}` in: {stdout}");
+    }
+
+    // Unknown field / out-of-range index are usage errors (exit 2).
+    std::fs::write(
+        dir.join("oam_bad.toml"),
+        "rom = \"oam.sfc\"\nforce_mapper = \"lorom\"\nframes = 1\n[asserts.oam.sprites.0]\nwarp = 1\n",
+    )
+    .unwrap();
+    assert_eq!(run(&["oam_bad.toml"], &dir).status.code(), Some(2));
+    std::fs::write(
+        dir.join("oam_idx.toml"),
+        "rom = \"oam.sfc\"\nforce_mapper = \"lorom\"\nframes = 1\n[asserts.oam.sprites.128]\nx = 0\n",
+    )
+    .unwrap();
+    assert_eq!(run(&["oam_idx.toml"], &dir).status.code(), Some(2));
+}
+
+#[test]
 fn sram_round_trip_across_two_manifests() {
     let dir = fresh_dir("sram");
     // LDA #$5A ; STA $70:0000 (long) ; BRA * — writes battery SRAM.
