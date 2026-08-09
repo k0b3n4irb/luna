@@ -126,6 +126,39 @@ checkpoints (use `frames`, which may extend past the last checkpoint —
 with checkpoints alone, the last one ends the run). The final
 `[asserts]` block still evaluates at the very end.
 
+## The final capabilities (#212)
+
+- **Peripheral input** — top-level or per-checkpoint `mouse =
+  "frame:dx,dy,buttons"` (`;`-separated, the `--mouse` grammar; plugs a
+  SNES Mouse into port 1) and `superscope = "frame:x,y,buttons"`
+  (port 2). Mix freely with joypad `input`.
+- **`[asserts.dsp]`** — the S-DSP register file, by name (`FLG`, `EDL`,
+  `KON`, `MVOL_L`, `V0_VOLL`…`V7_GAIN`, `FIR0`…`FIR7`) or raw hex index
+  (`"7D"`), with the `[asserts.values]` comparator grammar (registers
+  are bytes).
+- **`[asserts.footprint]`** — `vram = { nonzero_min = 5000 }`: at least
+  N non-zero bytes in `wram`/`vram`/`cgram`/`oam`/`aram` — proof an
+  upload happened without pinning exact bytes.
+- **`[asserts.dma]`** — DMA-discipline ceilings from the trace luna
+  records: `unsafe_writes = 0` (max DMA→VRAM bytes written outside
+  VBlank/forced-blank — the writes real hardware drops) and
+  `max_vblank_bytes = 4096` (max bytes in any single frame's burst).
+- **Battery SRAM round-trip** — `srm_out = "save.srm"` writes SRAM
+  after the run; a later manifest (sorted order!) reloads it with
+  `srm_in` and asserts the value persisted:
+
+  ```toml
+  # a_write.toml: play, then persist    # b_read.toml: power-cycle
+  srm_out = "save.srm"                  # srm_in = "save.srm"
+                                        # [asserts.values]
+                                        # "70:0000" = 0x5A
+  ```
+
+- **`firmware = "dsp1b.rom"`** — SKIP (not fail) when the named blob is
+  absent from luna's firmware folder, so a DSP-1 test stays green in CI
+  where Sony firmware can't ship. Skips print `SKIP <name> (reason)`,
+  count separately, and never affect the exit code.
+
 Input scripts use exactly the `--input` grammar (`frame:mask`, `#`
 comments, `@file`), so a recording exported from the GUI or captured
 over MCP (`take_input_capture`) replays verbatim. Checkpoints spend

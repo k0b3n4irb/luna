@@ -68,7 +68,7 @@ wdm_empty = true
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "stdout: {stdout}");
     assert!(stdout.contains("PASS boot"));
-    assert!(stdout.contains("1 passed, 0 failed"));
+    assert!(stdout.contains("1 passed, 0 failed, 0 skipped"));
 }
 
 #[test]
@@ -150,7 +150,7 @@ fn only_filters_manifests() {
     assert!(out.status.success());
     assert!(stdout.contains("PASS alpha"));
     assert!(!stdout.contains("beta"));
-    assert!(stdout.contains("1 passed, 0 failed, 1 total"));
+    assert!(stdout.contains("1 passed, 0 failed, 0 skipped, 1 total"));
 }
 
 #[test]
@@ -179,6 +179,9 @@ audio_rms_min = 0.0            # trivially satisfiable floor (IPL is silent)
 
 [asserts.trace]
 spc = { min = 1 }                     # the SPC700 IPL executed
+
+[asserts.footprint]
+wram = { nonzero_min = 1 }            # the counter made WRAM non-empty
 "#,
     )
     .unwrap();
@@ -405,6 +408,163 @@ audio_rms_min = 99999.0
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| panic!("no sample count in: {stdout}"));
     assert!(count > 16384, "steps path pooled only {count} samples");
+}
+
+#[test]
+fn final_capabilities_dsp_footprint_dma_peripherals() {
+    let dir = fresh_dir("final_caps");
+    // A program that immediately DMAs 16 ROM bytes to VRAM during
+    // active display (scanline 0 → unsafe), then spins:
+    //   $8000: LDA #$01 ; STA $4300   (mode 1: 2 regs write-twice)
+    //          LDA #$18 ; STA $4301   (B-bus $2118 VMDATA)
+    //          STZ $4302 ; LDA #$80 ; STA $4303 ; STZ $4304  (A1T=00:8000)
+    //          LDA #$10 ; STA $4305 ; STZ $4306              (DAS=16)
+    //          LDA #$01 ; STA $420B                          (fire ch0)
+    //          BRA *
+    synthetic_rom(
+        &dir.join("dma.sfc"),
+        &[
+            // Screen ON first (INIDISP = $0F) — the power-on state is
+            // forced blank, under which any DMA is display-safe.
+            0xA9, 0x0F, 0x8D, 0x00, 0x21, // LDA #$0F, STA $2100
+            0xA9, 0x01, 0x8D, 0x00, 0x43, // LDA #$01, STA $4300
+            0xA9, 0x18, 0x8D, 0x01, 0x43, // LDA #$18, STA $4301
+            0x9C, 0x02, 0x43, // STZ $4302
+            0xA9, 0x80, 0x8D, 0x03, 0x43, // LDA #$80, STA $4303
+            0x9C, 0x04, 0x43, // STZ $4304
+            0xA9, 0x10, 0x8D, 0x05, 0x43, // LDA #$10, STA $4305
+            0x9C, 0x06, 0x43, // STZ $4306
+            0xA9, 0x01, 0x8D, 0x0B, 0x42, // LDA #$01, STA $420B
+            0x80, 0xFE, // BRA *
+        ],
+    );
+    // DSP regs + footprint + dma ceilings + a mouse/scope script leg.
+    std::fs::write(
+        dir.join("caps.toml"),
+        r#"
+rom = "dma.sfc"
+force_mapper = "lorom"
+frames = 3
+mouse = "1:5,5,1"
+superscope = "2:100,80,1"
+
+[asserts.dsp]
+FLG = { le = 0xFF }           # named register, byte range
+"7D" = { ge = 0 }             # raw hex index (EDL)
+
+[asserts.dma]
+max_vblank_bytes = 4096
+"#,
+    )
+    .unwrap();
+    let out = run(&["caps.toml"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The failing directions: the boot DMA runs during active display,
+    // so unsafe_writes = 0 must fail; an absurd footprint floor fails;
+    // a wrong DSP exact fails naming the register.
+    std::fs::write(
+        dir.join("caps_fail.toml"),
+        r#"
+rom = "dma.sfc"
+force_mapper = "lorom"
+frames = 3
+
+[asserts.dsp]
+FLG = { eq = 0x1FF }
+
+[asserts.footprint]
+vram = { nonzero_min = 60000 }
+
+[asserts.dma]
+unsafe_writes = 0
+"#,
+    )
+    .unwrap();
+    let out = run(&["caps_fail.toml"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "stdout: {stdout}");
+    for needle in ["dsp.FLG", "footprint.vram", "dma.unsafe_writes"] {
+        assert!(stdout.contains(needle), "missing `{needle}` in: {stdout}");
+    }
+
+    // Unknown DSP register / footprint space are usage errors.
+    std::fs::write(
+        dir.join("caps_bad.toml"),
+        "rom = \"dma.sfc\"\nforce_mapper = \"lorom\"\nframes = 1\n[asserts.dsp]\nWARP = 1\n",
+    )
+    .unwrap();
+    assert_eq!(run(&["caps_bad.toml"], &dir).status.code(), Some(2));
+}
+
+#[test]
+fn sram_round_trip_across_two_manifests() {
+    let dir = fresh_dir("sram");
+    // LDA #$5A ; STA $70:0000 (long) ; BRA * — writes battery SRAM.
+    let mut rom = vec![0u8; 0x1_0000];
+    let prog: &[u8] = &[0xA9, 0x5A, 0x8F, 0x00, 0x00, 0x70, 0x80, 0xFE];
+    rom[..prog.len()].copy_from_slice(prog);
+    rom[0x7FC0..0x7FD5].copy_from_slice(b"LUNA SRAM TEST       ".as_ref());
+    rom[0x7FD5] = 0x20;
+    rom[0x7FD7] = 0x07;
+    rom[0x7FD8] = 0x03; // 8 KB SRAM
+    rom[0x7FFC] = 0x00;
+    rom[0x7FFD] = 0x80;
+    std::fs::write(dir.join("game.sfc"), &rom).unwrap();
+
+    // Sorted order runs a_write before b_read (the power-cycle pattern).
+    std::fs::write(
+        dir.join("a_write.toml"),
+        "rom = \"game.sfc\"\nforce_mapper = \"lorom\"\nsteps = 100\nsrm_out = \"save.srm\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("b_read.toml"),
+        r#"
+rom = "game.sfc"
+force_mapper = "lorom"
+steps = 1
+srm_in = "save.srm"
+
+[asserts.values]
+"70:0000" = 0x5A
+"#,
+    )
+    .unwrap();
+    let out = run(&["."], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("PASS a_write") && stdout.contains("PASS b_read"));
+    assert_eq!(std::fs::read(dir.join("save.srm")).unwrap()[0], 0x5A);
+}
+
+#[test]
+fn firmware_gate_skips_when_blob_absent() {
+    let dir = fresh_dir("fw_skip");
+    synthetic_rom(&dir.join("game.sfc"), &[]);
+    std::fs::write(
+        dir.join("dsp1.toml"),
+        "rom = \"game.sfc\"\nforce_mapper = \"lorom\"\nframes = 1\nfirmware = \"definitely_absent_luna_test.rom\"\n",
+    )
+    .unwrap();
+    let out = run(&["dsp1.toml", "--report", "json"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "a skip is not a failure: {stdout}");
+    assert!(stdout.contains("SKIP dsp1"), "stdout: {stdout}");
+    assert!(stdout.contains("0 passed, 0 failed, 1 skipped, 1 total"));
+    let json_start = stdout.find('{').unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout[json_start..]).unwrap();
+    assert_eq!(report["skipped"], 1);
+    assert!(report["tests"][0]["skipped"].is_string());
 }
 
 #[test]
