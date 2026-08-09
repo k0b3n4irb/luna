@@ -6,6 +6,12 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Added
+- `luna test`: `[asserts.blocks]` entries accept an explicit `offset`
+  field, turning the TOML key into a free label — two spaces at the
+  same offset (e.g. VRAM[0] and CGRAM[0] after a double DMA) can now
+  share one manifest (#210). The key-as-offset form is unchanged.
+
 ### Fixed
 - `luna test`: `audio_rms_min` no longer reads a silent ring for a ROM
   that is audibly playing (#211). The APU sample ring holds 512 ms and
