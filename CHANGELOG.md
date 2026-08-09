@@ -30,6 +30,12 @@ All notable user-facing changes to luna. Releases are cut from `main`
   (frame-at-a-time under a `frames` bound, chunked under `steps`) and
   computes the RMS over the whole pooled stream — the same audio
   `luna run --audio-out` captures.
+- STAT78 (`$213F`) bits 0-3 report PPU2 (5C78) revision **3**, matching
+  both references (ares defaults `versionPPU2` to 3; Mesen2 reports 3).
+  luna reported 2 through v1.15.0 — an unintentional off-by-one from
+  the original diagnostic-registers commit, spotted by OpenSNES's
+  open-bus sweep (#207). A game branching on the PPU version bits now
+  takes the same path as under the references.
 
 ## [1.15.0] — 2026-08-09
 
