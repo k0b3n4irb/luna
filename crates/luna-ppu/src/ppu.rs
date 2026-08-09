@@ -301,7 +301,7 @@ pub struct Ppu {
     pub obj_time_over: bool,
     /// `$213F` STAT78 — read-side latch for the PPU2 status byte.
     /// Bit 7 = interlace odd-field flag, bit 4 = region (1 = PAL,
-    /// 0 = NTSC), bits 0-3 = chip revision (= 2).
+    /// 0 = NTSC), bits 0-3 = chip revision (= 3, the ares/Mesen2 model).
     pub stat78: u8,
     /// Latched H counter (9-bit) from the last $2137/$4201-bit7
     /// trigger. Exposed at OPHCT.
@@ -495,9 +495,14 @@ impl Ppu {
             stat77: 0x01,
             obj_range_over: false,
             obj_time_over: false,
-            // Initial PPU2 chip rev = 2; region bit (4) defaults to 0
-            // (NTSC). PAL emulation can flip this on cart load.
-            stat78: 0x02,
+            // PPU2 (5C78) chip rev = 3 — both references' model: ares
+            // defaults `versionPPU2` to 3 (ppu.cpp:52, read back through
+            // STAT78 at io.cpp:170) and Mesen2 reports 3. Was 2 through
+            // v1.15.0 — an unintentional off-by-one from the original
+            // diagnostic-registers commit, not a console-revision target
+            // (issue #207). Region bit (4) defaults to 0 (NTSC); PAL
+            // emulation can flip this on cart load.
+            stat78: 0x03,
             ophct: 0,
             opvct: 0,
             ophct_hi_pending: false,
@@ -1096,10 +1101,12 @@ mod stat_tests {
     }
 
     #[test]
-    fn stat78_returns_chip_rev_2_and_ntsc_by_default() {
+    fn stat78_returns_chip_rev_3_and_ntsc_by_default() {
         let mut p = Ppu::new();
         let v = p.read(register::STAT78, 0);
-        assert_eq!(v & 0x0F, 0x02, "chip rev = 2");
+        // Rev 3 = the ares default (ppu.cpp:52) and Mesen2's value
+        // (issue #207 — was 2 through v1.15.0).
+        assert_eq!(v & 0x0F, 0x03, "chip rev = 3");
         assert_eq!(v & 0x10, 0x00, "region bit clear = NTSC");
     }
 
