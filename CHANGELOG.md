@@ -4,6 +4,25 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.15.0] — 2026-08-09
+
+`luna test` asserts v2 — the direct answer to OpenSNES's v1.14.0
+adoption feedback (#205): the five assert kinds needed for their
+remaining ~13 Python probes to become manifests, completing the
+harness-retirement arc #181 started.
+
+### Added
+- `luna test` asserts v2 (#205, from OpenSNES's v1.14.0 adoption): the
+  five assert kinds needed to retire their remaining Python probes —
+  `[[checkpoint]]` tables with `delta` directions
+  (`increased`/`decreased`/`changed`/`unchanged` vs the previous
+  checkpoint) and per-checkpoint values; `{eq|ne|ge|gt|le|lt, width?}`
+  comparator tables in `[asserts.values]` (bare ints stay `eq`);
+  `[asserts.blocks]` byte-range equality in any space
+  (`wram`/`vram`/`cgram`/`oam`/`aram`); `[asserts.trace]` minimum event
+  counts (coprocessor liveness); and `audio_rms_min` (the "music is
+  playing" oracle).
+
 ## [1.14.0] — 2026-08-08
 
 The OpenSNES DX release: everything the SDK team asked for in issues
