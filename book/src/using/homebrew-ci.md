@@ -140,9 +140,37 @@ with checkpoints alone, the last one ends the run). The final
   N non-zero bytes in `wram`/`vram`/`cgram`/`oam`/`aram` — proof an
   upload happened without pinning exact bytes.
 - **`[asserts.dma]`** — DMA-discipline ceilings from the trace luna
-  records: `unsafe_writes = 0` (max DMA→VRAM bytes written outside
-  VBlank/forced-blank — the writes real hardware drops) and
-  `max_vblank_bytes = 4096` (max bytes in any single frame's burst).
+  records: `unsafe_writes = 0` (max DMA→VRAM bytes written during
+  active display — the writes real hardware drops) and
+  `max_vblank_bytes = 4096` (max screen-on VRAM bytes in any single
+  frame's burst window). Both count only the VRAM data ports
+  (`$2118`/`$2119`) — OAM/CGRAM/scroll-register (H)DMA writes never
+  race the VRAM deadline and are ignored — and forced-blank bytes are
+  excluded from `max_vblank_bytes`: under forced blank there is no
+  VBlank deadline, which is exactly why big boot uploads use it. A
+  failing `unsafe_writes` names the first offending write (frame,
+  line, channel, VRAM word, source address).
+- **`[asserts.oam]`** — decoded sprite structure, no raw-OAM golden
+  needed: `visible = 1` counts on-screen sprites (the standard
+  predicate `0 <= y < 224`, `-32 < x < 256`; comparator tables like
+  `{ ge = 1 }` work), and `[asserts.oam.sprites.N]` (hardware OAM
+  index 0-127) asserts decoded fields — `x`, `y`, `tile`, `palette`,
+  `priority`, `w`, `h` with the comparator grammar, `hflip`/`vflip`
+  as booleans:
+
+  ```toml
+  [asserts.oam]
+  visible = 1
+
+  [asserts.oam.sprites.0]
+  x = 112
+  y = 95
+  tile = 16
+  priority = 3
+  w = 32
+  h = 32
+  ```
+
 - **Battery SRAM round-trip** — `srm_out = "save.srm"` writes SRAM
   after the run; a later manifest (sorted order!) reloads it with
   `srm_in` and asserts the value persisted:

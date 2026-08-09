@@ -4,6 +4,31 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.17.0] — 2026-08-09
+
+The zero-probe release: `[asserts.dma]` buckets exactly like the
+validated probe (#217) and `[asserts.oam]` asserts decoded sprite
+structure (#218) — every one of the 19 OpenSNES Python probes now has
+a manifest shape, so the Python harness can retire.
+
+### Added
+- `luna test`: `[asserts.oam]` — decoded sprite asserts over the same
+  OAM decode the sprite viewer uses (#218): `visible = N` counts
+  on-screen sprites (`0 <= y < 224`, `-32 < x < 256`) and
+  `[asserts.oam.sprites.N]` asserts per-sprite `x`/`y`/`tile`/
+  `palette`/`priority`/`w`/`h` (comparator grammar) plus
+  `hflip`/`vflip` booleans — retiring the last raw-OAM golden
+  workaround.
+
+### Fixed
+- `luna test`: `[asserts.dma]` now buckets exactly like the probes'
+  `--dma-trace` CSV parse (#217). Both ceilings count only the VRAM
+  data ports (`$2118`/`$2119`) — OAM/CGRAM/scroll-register (H)DMA
+  writes no longer inflate `unsafe_writes` — and forced-blank bytes
+  are excluded from `max_vblank_bytes` (no VBlank deadline under
+  forced blank). A failing `unsafe_writes` now names the first
+  offending write (frame, line, channel, VRAM word, source).
+
 ## [1.16.0] — 2026-08-09
 
 The adoption-feedback release, same-day: the audio-RMS oracle reads the
