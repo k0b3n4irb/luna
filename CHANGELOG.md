@@ -4,7 +4,12 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.15.0] — 2026-08-09
+
+`luna test` asserts v2 — the direct answer to OpenSNES's v1.14.0
+adoption feedback (#205): the five assert kinds needed for their
+remaining ~13 Python probes to become manifests, completing the
+harness-retirement arc #181 started.
 
 ### Added
 - `luna test` asserts v2 (#205, from OpenSNES's v1.14.0 adoption): the
