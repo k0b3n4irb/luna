@@ -302,6 +302,54 @@ at_frame = 2
 }
 
 #[test]
+fn block_labels_with_explicit_offset_share_a_manifest() {
+    // Issue #210: two spaces at the same offset used to collide on the
+    // TOML key; an explicit `offset` frees the key into a label.
+    let dir = fresh_dir("block_labels");
+    synthetic_rom(&dir.join("game.sfc"), &[0xE6, 0x10, 0x80, 0xFC]);
+    std::fs::write(
+        dir.join("labels.toml"),
+        r#"
+rom = "game.sfc"
+force_mapper = "lorom"
+frames = 2
+
+[asserts.blocks]
+vram_zero  = { space = "vram",  offset = "0000", hex = "00000000" }
+cgram_zero = { space = "cgram", offset = "0000", hex = "00000000" }
+prog       = { space = "wram",  offset = "00:8000", hex = "e610" }
+"00:8002"  = "80fc"     # the v1.15.0 key-as-location form still works
+"#,
+    )
+    .unwrap();
+    let out = run(&["labels.toml"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // A failing labelled block names the label, not the offset.
+    std::fs::write(
+        dir.join("labels_fail.toml"),
+        r#"
+rom = "game.sfc"
+force_mapper = "lorom"
+frames = 2
+
+[asserts.blocks]
+font = { space = "vram", offset = "0000", hex = "ff" }
+"#,
+    )
+    .unwrap();
+    let out = run(&["labels_fail.toml"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stdout.contains("blocks.font"), "stdout: {stdout}");
+}
+
+#[test]
 fn audio_rms_pools_the_whole_stream_not_just_the_ring() {
     // Issue #211: the APU ring holds 512 ms (16384 samples) and drops
     // NEW samples when full, so a single end-of-run drain only ever saw
