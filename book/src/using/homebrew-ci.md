@@ -81,10 +81,15 @@ What each assert means:
   hex offset is only valid for `vram`/`cgram`/`oam`/`aram`, whose keys
   are 16-bit offsets). Failures report the first mismatching offset.
 
+  With an explicit `offset`, the key becomes a **free label** — so two
+  spaces at the same offset can share a manifest (#210):
+
   ```toml
   [asserts.blocks]
-  font_tiles = "7cc6ce...00"                    # symbol, CPU bus
-  "0000" = { space = "vram", hex = "7cc6ce" }   # uploaded tiles
+  font_tiles = "7cc6ce...00"                    # symbol key, CPU bus
+  "0000" = { space = "vram", hex = "7cc6ce" }   # key-as-offset form
+  font = { space = "vram",  offset = "0000", hex = "7cc6ce" }  # labelled
+  pal  = { space = "cgram", offset = "0000", hex = "0028ff7f" }
   ```
 
 - **`[asserts.trace]`** — the named trace recorded at least `min`

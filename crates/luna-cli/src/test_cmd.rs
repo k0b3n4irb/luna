@@ -194,6 +194,13 @@ enum BlockAssert {
         /// `wram` (alias of cpu addressing) | `vram` | `cgram` | `oam`
         /// | `aram`.
         space: String,
+        /// Explicit location (issue #210): with it, the TOML key becomes
+        /// a free label — so two spaces at the same offset can share a
+        /// manifest. Same grammar as a key: symbol / `BANK:OFFSET` for
+        /// `wram`, a hex offset for the PPU/APU spaces. Without it, the
+        /// key is the location (the v1.15.0 form).
+        #[serde(default)]
+        offset: Option<String>,
         hex: String,
     },
 }
@@ -767,9 +774,15 @@ fn check_block(
     key: &str,
     block: &BlockAssert,
 ) -> Result<Option<String>, String> {
-    let (space, hex) = match block {
-        BlockAssert::Hex(hex) => ("cpu", hex.as_str()),
-        BlockAssert::Spec { space, hex } => (space.as_str(), hex.as_str()),
+    // With an explicit `offset` the TOML key is a free label (issue
+    // #210); otherwise the key itself is the location (v1.15.0 form).
+    let (space, hex, at) = match block {
+        BlockAssert::Hex(hex) => ("cpu", hex.as_str(), key),
+        BlockAssert::Spec { space, offset, hex } => (
+            space.as_str(),
+            hex.as_str(),
+            offset.as_deref().unwrap_or(key),
+        ),
     };
     let want = parse_hex_bytes(hex)?;
     if want.is_empty() {
@@ -777,14 +790,14 @@ fn check_block(
     }
     let got: Vec<u8> = match space {
         "cpu" | "wram" => {
-            let addr = resolve_key(em, key)?;
+            let addr = resolve_key(em, at)?;
             let len = u16::try_from(want.len()).map_err(|_| "block longer than 64 KB")?;
             em.peek_memory((addr >> 16) as u8, addr as u16, len)
                 .map_err(|e| e.to_string())?
         }
         "vram" | "aram" => {
             let off =
-                u16::from_str_radix(key, 16).map_err(|e| format!("bad {space} offset: {e}"))?;
+                u16::from_str_radix(at, 16).map_err(|e| format!("bad {space} offset: {e}"))?;
             let len = u32::try_from(want.len()).unwrap_or(u32::MAX);
             if space == "vram" {
                 em.peek_vram(off, len).map_err(|e| e.to_string())?
@@ -793,7 +806,7 @@ fn check_block(
             }
         }
         "cgram" => {
-            let off = usize::from_str_radix(key, 16).map_err(|e| format!("bad offset: {e}"))?;
+            let off = usize::from_str_radix(at, 16).map_err(|e| format!("bad offset: {e}"))?;
             let all: Vec<u8> = em
                 .peek_cgram()
                 .map_err(|e| e.to_string())?
@@ -803,7 +816,7 @@ fn check_block(
             slice_at(&all, off, want.len(), "cgram")?
         }
         "oam" => {
-            let off = usize::from_str_radix(key, 16).map_err(|e| format!("bad offset: {e}"))?;
+            let off = usize::from_str_radix(at, 16).map_err(|e| format!("bad offset: {e}"))?;
             let all = em.peek_oam().map_err(|e| e.to_string())?;
             slice_at(&all, off, want.len(), "oam")?
         }
