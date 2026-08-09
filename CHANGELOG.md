@@ -4,7 +4,12 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.17.0] — 2026-08-09
+
+The zero-probe release: `[asserts.dma]` buckets exactly like the
+validated probe (#217) and `[asserts.oam]` asserts decoded sprite
+structure (#218) — every one of the 19 OpenSNES Python probes now has
+a manifest shape, so the Python harness can retire.
 
 ### Added
 - `luna test`: `[asserts.oam]` — decoded sprite asserts over the same
