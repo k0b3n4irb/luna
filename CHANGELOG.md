@@ -4,6 +4,45 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.16.0] — 2026-08-09
+
+The adoption-feedback release, same-day: the audio-RMS oracle reads the
+real stream (#211), block asserts get free labels (#210), the six final
+manifest capabilities land (#212) — every remaining OpenSNES Python
+probe now has its manifest shape — and STAT78 reports PPU2 revision 3
+like both references (#207).
+
+### Added
+- `luna test`: the final manifest capabilities (#212) — per-leg
+  `mouse`/`superscope` scripts (the `--mouse`/`--superscope` grammars,
+  ports 1/2), `[asserts.dsp]` on the S-DSP register file (names or hex
+  indices; new `Emulator::dsp_registers()`), `[asserts.footprint]`
+  non-zero-byte floors per space, `[asserts.dma]` discipline ceilings
+  (`unsafe_writes`, `max_vblank_bytes` — classified from the DMA
+  trace), `srm_in`/`srm_out` for battery power-cycle tests, and a
+  `firmware = "dsp1b.rom"` gate that SKIPs (never fails) when the blob
+  is absent — with `SKIP` lines, a skipped count, and JSON `skipped`
+  fields.
+- `luna test`: `[asserts.blocks]` entries accept an explicit `offset`
+  field, turning the TOML key into a free label — two spaces at the
+  same offset (e.g. VRAM[0] and CGRAM[0] after a double DMA) can now
+  share one manifest (#210). The key-as-offset form is unchanged.
+
+### Fixed
+- `luna test`: `audio_rms_min` no longer reads a silent ring for a ROM
+  that is audibly playing (#211). The APU sample ring holds 512 ms and
+  drops **new** samples when full, so the runner's single end-of-run
+  drain only ever saw the boot silence; it now drains during the run
+  (frame-at-a-time under a `frames` bound, chunked under `steps`) and
+  computes the RMS over the whole pooled stream — the same audio
+  `luna run --audio-out` captures.
+- STAT78 (`$213F`) bits 0-3 report PPU2 (5C78) revision **3**, matching
+  both references (ares defaults `versionPPU2` to 3; Mesen2 reports 3).
+  luna reported 2 through v1.15.0 — an unintentional off-by-one from
+  the original diagnostic-registers commit, spotted by OpenSNES's
+  open-bus sweep (#207). A game branching on the PPU version bits now
+  takes the same path as under the references.
+
 ## [1.15.0] — 2026-08-09
 
 `luna test` asserts v2 — the direct answer to OpenSNES's v1.14.0

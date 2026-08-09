@@ -54,6 +54,10 @@ use crate::rom::load_rom_into;
 /// `--input` replay budget) and per whole `steps` run's frame chase.
 const FRAME_BUDGET: u64 = 200_000;
 
+/// Event cap for the `[asserts.dma]` trace (issue #212) — hitting it is
+/// reported as a failure rather than silently under-counting.
+const DMA_TRACE_CAP: usize = 1_000_000;
+
 /// One parsed manifest.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -73,6 +77,22 @@ struct Manifest {
     steps: Option<u64>,
     /// Optional joypad script (`frame:mask` entries or `@file`).
     input: Option<String>,
+    /// Optional SNES Mouse script (`frame:dx,dy,buttons`, `;`-separated
+    /// — the `--mouse` grammar). Plugs a mouse into port 1 (issue #212).
+    mouse: Option<String>,
+    /// Optional Super Scope script (`frame:x,y,buttons` — the
+    /// `--superscope` grammar). Plugs a scope into port 2 (issue #212).
+    superscope: Option<String>,
+    /// Seed battery SRAM from this `.srm` before the run (issue #212;
+    /// relative to the manifest) — the read half of a power-cycle test.
+    srm_in: Option<PathBuf>,
+    /// Write battery SRAM to this `.srm` after the run (issue #212) —
+    /// the write half; a later manifest reloads it via `srm_in`.
+    srm_out: Option<PathBuf>,
+    /// SKIP (not fail) this test when the named coprocessor firmware
+    /// (e.g. `dsp1b.rom`) is absent from luna's firmware folder — CI
+    /// machines can't ship Sony blobs (issue #212).
+    firmware: Option<String>,
     /// Optional screenshot artifact path (relative to the manifest),
     /// written after the run completes.
     screenshot: Option<PathBuf>,
@@ -93,6 +113,10 @@ struct Checkpoint {
     /// This leg's joypad entries (absolute frames, same grammar as the
     /// top-level `input`).
     input: Option<String>,
+    /// This leg's SNES Mouse entries (issue #212).
+    mouse: Option<String>,
+    /// This leg's Super Scope entries (issue #212).
+    superscope: Option<String>,
     /// Point-in-time value asserts, same grammar as `[asserts.values]`.
     #[serde(default)]
     values: BTreeMap<String, ValueAssert>,
@@ -130,6 +154,48 @@ struct Asserts {
     /// actually executed (issue #205).
     #[serde(default)]
     trace: BTreeMap<String, TraceAssert>,
+    /// S-DSP register asserts (issue #212): register name (`FLG`,
+    /// `EDL`, `V0_VOLL`, …) or raw hex index → the `[asserts.values]`
+    /// comparator grammar (registers are bytes; `width` is ignored).
+    #[serde(default)]
+    dsp: BTreeMap<String, ValueAssert>,
+    /// Non-zero-byte floors per space (issue #212): proof an upload
+    /// happened without pinning exact bytes.
+    #[serde(default)]
+    footprint: BTreeMap<String, FootprintAssert>,
+    /// DMA-discipline ceilings (issue #212), classified from the DMA
+    /// trace luna already records.
+    #[serde(default)]
+    dma: Option<DmaAssert>,
+}
+
+/// A `[asserts.footprint]` entry.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FootprintAssert {
+    /// The space must contain at least this many non-zero bytes.
+    nonzero_min: u64,
+}
+
+/// The `[asserts.dma]` ceilings — both are maxima.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DmaAssert {
+    /// Max DMA→VRAM bytes written outside VBlank/forced-blank
+    /// (`0` = every VRAM write was display-safe).
+    unsafe_writes: Option<u64>,
+    /// Max DMA→VRAM bytes in any single frame's burst window.
+    max_vblank_bytes: Option<u64>,
+}
+
+/// One scripted peripheral event (issue #212).
+enum InEv {
+    /// Joypad-1 mask.
+    Pad(u16),
+    /// SNES Mouse `dx, dy, buttons` (port 1).
+    Mouse(i32, i32, u8),
+    /// Super Scope `x, y, buttons` (port 2).
+    Scope(i32, i32, u8),
 }
 
 /// A `[asserts.values]` entry: bare integer = exact match, or a
@@ -194,6 +260,13 @@ enum BlockAssert {
         /// `wram` (alias of cpu addressing) | `vram` | `cgram` | `oam`
         /// | `aram`.
         space: String,
+        /// Explicit location (issue #210): with it, the TOML key becomes
+        /// a free label — so two spaces at the same offset can share a
+        /// manifest. Same grammar as a key: symbol / `BANK:OFFSET` for
+        /// `wram`, a hex offset for the PPU/APU spaces. Without it, the
+        /// key is the location (the v1.15.0 form).
+        #[serde(default)]
+        offset: Option<String>,
         hex: String,
     },
 }
@@ -214,6 +287,9 @@ struct TestOutcome {
     failures: Vec<String>,
     /// The measured fbhash (for `--update` and the JSON report).
     fbhash: Option<String>,
+    /// `Some(reason)` when the test was skipped (firmware gate, issue
+    /// #212) — neither passed nor failed.
+    skipped: Option<String>,
 }
 
 /// `luna test` entry point.
@@ -282,8 +358,11 @@ pub(crate) fn run_tests(
     }
 
     let failed: Vec<&TestOutcome> = outcomes.iter().filter(|o| !o.failures.is_empty()).collect();
+    let skipped = outcomes.iter().filter(|o| o.skipped.is_some()).count();
     for o in &outcomes {
-        if o.failures.is_empty() {
+        if let Some(reason) = &o.skipped {
+            println!("SKIP {} ({reason})", o.name);
+        } else if o.failures.is_empty() {
             println!("PASS {}", o.name);
         } else {
             println!("FAIL {}", o.name);
@@ -293,21 +372,23 @@ pub(crate) fn run_tests(
         }
     }
     println!(
-        "{} passed, {} failed, {} total",
-        outcomes.len() - failed.len(),
+        "{} passed, {} failed, {skipped} skipped, {} total",
+        outcomes.len() - failed.len() - skipped,
         failed.len(),
         outcomes.len()
     );
 
     if report_json {
         let report = serde_json::json!({
-            "passed": outcomes.len() - failed.len(),
+            "passed": outcomes.len() - failed.len() - skipped,
             "failed": failed.len(),
+            "skipped": skipped,
             "total": outcomes.len(),
             "tests": outcomes.iter().map(|o| serde_json::json!({
                 "name": o.name,
                 "manifest": o.path.display().to_string(),
-                "passed": o.failures.is_empty(),
+                "passed": o.failures.is_empty() && o.skipped.is_none(),
+                "skipped": o.skipped,
                 "failures": o.failures,
                 "fbhash": o.fbhash,
             })).collect::<Vec<_>>(),
@@ -385,6 +466,22 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
         }
     }
 
+    // Firmware gate (issue #212): a manifest that needs a coprocessor
+    // blob luna's firmware folder doesn't have SKIPs instead of failing
+    // — CI machines can't ship Sony firmware.
+    if let Some(fw) = &m.firmware {
+        let present = luna_api::Emulator::firmware_dir().is_some_and(|d| d.join(fw).is_file());
+        if !present {
+            return Ok(TestOutcome {
+                name,
+                path: path.to_path_buf(),
+                failures: Vec::new(),
+                fbhash: None,
+                skipped: Some(format!("firmware `{fw}` not installed")),
+            });
+        }
+    }
+
     // Input scripts resolve `@file` relative to the manifest directory.
     let parse_input = |spec: &str| -> Result<Vec<(u64, u16)>, String> {
         let spec = match spec.strip_prefix('@') {
@@ -393,13 +490,46 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
         };
         parse_input_script(&spec).map_err(|e| format!("input script: {e}"))
     };
-    let mut input_entries: Vec<(u64, u16)> = match &m.input {
-        Some(spec) => parse_input(spec)?,
-        None => Vec::new(),
-    };
-    for cp in &m.checkpoint {
-        if let Some(spec) = &cp.input {
-            input_entries.extend(parse_input(spec)?);
+    // The unified event stream (issue #212): joypad + mouse + scope
+    // entries from the top level and every checkpoint, sorted by frame.
+    let mut input_entries: Vec<(u64, InEv)> = Vec::new();
+    let mut mouse_used = false;
+    let mut scope_used = false;
+    {
+        let mut add_leg = |input: &Option<String>,
+                           mouse: &Option<String>,
+                           scope: &Option<String>|
+         -> Result<(), String> {
+            if let Some(spec) = input {
+                input_entries.extend(
+                    parse_input(spec)?
+                        .into_iter()
+                        .map(|(f, mask)| (f, InEv::Pad(mask))),
+                );
+            }
+            if let Some(spec) = mouse {
+                mouse_used = true;
+                input_entries.extend(
+                    crate::parsers::parse_mouse_script(spec)
+                        .map_err(|e| format!("mouse script: {e}"))?
+                        .into_iter()
+                        .map(|(f, (dx, dy, b))| (f, InEv::Mouse(dx, dy, b))),
+                );
+            }
+            if let Some(spec) = scope {
+                scope_used = true;
+                input_entries.extend(
+                    crate::parsers::parse_mouse_script(spec)
+                        .map_err(|e| format!("superscope script: {e}"))?
+                        .into_iter()
+                        .map(|(f, (x, y, b))| (f, InEv::Scope(x, y, b))),
+                );
+            }
+            Ok(())
+        };
+        add_leg(&m.input, &m.mouse, &m.superscope)?;
+        for cp in &m.checkpoint {
+            add_leg(&cp.input, &cp.mouse, &cp.superscope)?;
         }
     }
     input_entries.sort_by_key(|&(frame, _)| frame);
@@ -415,6 +545,26 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
     if let Some(sym) = &m.sym {
         em.load_symbols(&dir.join(sym))
             .map_err(|e| format!("loading symbols: {e}"))?;
+    }
+    // Peripheral devices (issue #212): mouse rides port 1, scope port 2
+    // — the CLI --port1/--port2 convention.
+    if mouse_used {
+        em.set_port_mouse(0, true).map_err(|e| e.to_string())?;
+    }
+    if scope_used {
+        em.set_port_device(1, luna_api::PortDevice::SuperScope)
+            .map_err(|e| e.to_string())?;
+    }
+    // Battery SRAM seed (issue #212) — before any stepping, like --srm-in.
+    if let Some(srm) = &m.srm_in {
+        let data =
+            std::fs::read(dir.join(srm)).map_err(|e| format!("srm_in {}: {e}", srm.display()))?;
+        em.load_sram(&data).map_err(|e| e.to_string())?;
+    }
+    // DMA-discipline ceilings need the DMA trace (issue #212).
+    if m.asserts.dma.is_some() {
+        em.enable_dma_trace(DMA_TRACE_CAP)
+            .map_err(|e| e.to_string())?;
     }
     // The SDK assert/log channels back the wdm/nocash asserts.
     let _ = em.enable_wdm_log();
@@ -445,26 +595,73 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
     let mut delta_prev: BTreeMap<String, i64> = BTreeMap::new();
     snapshot_deltas(&mut em, &m.checkpoint, 0, &mut delta_prev);
 
+    // audio_rms_min needs the WHOLE sample stream: the APU ring holds
+    // 512 ms and drops NEW samples when full, so a single end-of-run
+    // drain only ever sees the boot silence (issue #211). Drain after
+    // every stepping leg instead and pool the stream.
+    let want_audio = m.asserts.audio_rms_min.is_some();
+    let mut audio_acc: Vec<(i16, i16)> = Vec::new();
+    // Advance to `frame`, draining the audio ring often enough that it
+    // can never overflow between drains (one frame ≈ 533 samples vs the
+    // 16384-sample ring): frame-at-a-time when pooling, one bounded call
+    // otherwise (zero overhead for manifests without the assert).
+    let advance = |em: &mut luna_api::Emulator,
+                   frame: u64,
+                   spent: &mut u64,
+                   audio_acc: &mut Vec<(i16, i16)>|
+     -> Result<(), String> {
+        if !want_audio {
+            *spent += step_to_frame_bounded(em, frame, total_budget.saturating_sub(*spent));
+            return Ok(());
+        }
+        loop {
+            let cur = em.state().scheduler.frame_count;
+            audio_acc.extend(em.drain_audio(usize::MAX).map_err(|e| e.to_string())?);
+            if cur >= frame || total_budget.saturating_sub(*spent) == 0 {
+                return Ok(());
+            }
+            let stepped = step_to_frame_bounded(em, cur + 1, total_budget.saturating_sub(*spent));
+            *spent += stepped;
+            if stepped == 0 {
+                return Ok(());
+            }
+        }
+    };
+    // Apply one scripted event to its device (issue #212).
+    let apply_ev = |em: &mut luna_api::Emulator, ev: &InEv| -> Result<(), String> {
+        match *ev {
+            InEv::Pad(mask) => em.set_joypad(0, mask),
+            InEv::Mouse(dx, dy, b) => em.set_mouse(dx, dy, b),
+            InEv::Scope(x, y, b) => em.set_superscope(x, y, b),
+        }
+        .map_err(|e| e.to_string())
+    };
     let drive_to = |em: &mut luna_api::Emulator,
                     target_frame: u64,
                     spent: &mut u64,
-                    input_iter: &mut std::iter::Peekable<std::slice::Iter<(u64, u16)>>|
+                    input_iter: &mut std::iter::Peekable<std::slice::Iter<(u64, InEv)>>,
+                    audio_acc: &mut Vec<(i16, i16)>|
      -> Result<(), String> {
-        while let Some(&&(frame, mask)) = input_iter.peek() {
+        while let Some(frame) = input_iter.peek().map(|e| e.0) {
             if frame > target_frame {
                 break;
             }
-            *spent += step_to_frame_bounded(em, frame, total_budget.saturating_sub(*spent));
-            em.set_joypad(0, mask).map_err(|e| e.to_string())?;
-            input_iter.next();
+            advance(em, frame, spent, audio_acc)?;
+            let (_, ev) = input_iter.next().expect("peeked entry exists");
+            apply_ev(em, ev)?;
         }
-        *spent += step_to_frame_bounded(em, target_frame, total_budget.saturating_sub(*spent));
-        Ok(())
+        advance(em, target_frame, spent, audio_acc)
     };
 
     // Checkpoints in order, then the final bound.
     for (i, cp) in m.checkpoint.iter().enumerate() {
-        drive_to(&mut em, cp.at_frame, &mut spent, &mut input_iter)?;
+        drive_to(
+            &mut em,
+            cp.at_frame,
+            &mut spent,
+            &mut input_iter,
+            &mut audio_acc,
+        )?;
         let label = format!("checkpoint@{}", cp.at_frame);
         for (key, assert) in &cp.values {
             match check_value(&mut em, key, assert) {
@@ -499,16 +696,31 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
     }
     match bound {
         Some(Bound::Frames(_)) | None => {
-            drive_to(&mut em, final_frame, &mut spent, &mut input_iter)?;
+            drive_to(
+                &mut em,
+                final_frame,
+                &mut spent,
+                &mut input_iter,
+                &mut audio_acc,
+            )?;
         }
         Some(Bound::Steps(s)) => {
             // No checkpoints (validated above): input entries then the rest.
-            for &(frame, mask) in &input_entries {
-                spent += step_to_frame_bounded(&mut em, frame, total_budget.saturating_sub(spent));
-                em.set_joypad(0, mask).map_err(|e| e.to_string())?;
+            for (frame, ev) in &input_entries {
+                advance(&mut em, *frame, &mut spent, &mut audio_acc)?;
+                apply_ev(&mut em, ev)?;
             }
-            em.step(s.saturating_sub(spent))
-                .map_err(|e| e.to_string())?;
+            // Chunked so the 512 ms audio ring can never overflow
+            // between drains (issue #211).
+            let mut left = s.saturating_sub(spent);
+            while left > 0 {
+                let chunk = left.min(100_000);
+                em.step(chunk).map_err(|e| e.to_string())?;
+                left -= chunk;
+                if want_audio {
+                    audio_acc.extend(em.drain_audio(usize::MAX).map_err(|e| e.to_string())?);
+                }
+            }
         }
     }
 
@@ -544,12 +756,14 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
         }
     }
     if let Some(min) = m.asserts.audio_rms_min {
-        let samples = em.drain_audio(usize::MAX).map_err(|e| e.to_string())?;
-        let rms = audio_rms(&samples);
+        // The stream pooled across the whole run (issue #211) plus
+        // whatever the ring still holds.
+        audio_acc.extend(em.drain_audio(usize::MAX).map_err(|e| e.to_string())?);
+        let rms = audio_rms(&audio_acc);
         if rms < min {
             failures.push(format!(
                 "audio_rms_min: RMS {rms:.1} < {min} over {} samples",
-                samples.len()
+                audio_acc.len()
             ));
         }
     }
@@ -577,6 +791,103 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
             Err(e) => failures.push(format!("trace.{trace}: {e}")),
         }
     }
+    // [asserts.dsp] — the S-DSP register file (issue #212).
+    if !m.asserts.dsp.is_empty() {
+        let regs = em.dsp_registers().map_err(|e| e.to_string())?;
+        for (key, assert) in &m.asserts.dsp {
+            let Some(idx) = dsp_register_index(key) else {
+                return Err(format!(
+                    "asserts.dsp.{key}: unknown S-DSP register (name like FLG/EDL/V0_VOLL, or a hex index < 80)"
+                ));
+            };
+            match normalize_assert(assert) {
+                Ok((cmp, _)) => {
+                    // Registers are bytes; any explicit width is moot.
+                    if let Some(msg) = eval_cmp(
+                        &format!("dsp.{key}"),
+                        i64::from(regs[usize::from(idx)]),
+                        &cmp,
+                    ) {
+                        failures.push(msg);
+                    }
+                }
+                Err(e) => return Err(format!("asserts.dsp.{key}: {e}")),
+            }
+        }
+    }
+    // [asserts.footprint] — non-zero-byte floors per space (issue #212).
+    for (space, spec) in &m.asserts.footprint {
+        let bytes: Vec<u8> = match space.as_str() {
+            "wram" => em.wram_snapshot().map_err(|e| e.to_string())?,
+            "vram" => em.peek_vram(0, 0x1_0000).map_err(|e| e.to_string())?,
+            "aram" => em.peek_aram(0, 0x1_0000).map_err(|e| e.to_string())?,
+            "cgram" => em
+                .peek_cgram()
+                .map_err(|e| e.to_string())?
+                .iter()
+                .flat_map(|w| w.to_le_bytes())
+                .collect(),
+            "oam" => em.peek_oam().map_err(|e| e.to_string())?,
+            other => {
+                return Err(format!(
+                    "asserts.footprint.{other}: unknown space (wram, vram, cgram, oam, aram)"
+                ));
+            }
+        };
+        let nonzero = bytes.iter().filter(|&&b| b != 0).count() as u64;
+        if nonzero < spec.nonzero_min {
+            failures.push(format!(
+                "footprint.{space}: {nonzero} non-zero byte(s), expected >= {}",
+                spec.nonzero_min
+            ));
+        }
+    }
+    // [asserts.dma] — DMA-discipline ceilings from the trace (issue #212).
+    if let Some(dma) = &m.asserts.dma {
+        let events = em.take_dma_trace().map_err(|e| e.to_string())?;
+        if events.len() >= DMA_TRACE_CAP {
+            failures.push(format!(
+                "dma: trace hit its {DMA_TRACE_CAP}-event cap — counts would under-report; shorten the run"
+            ));
+        }
+        // A VRAM write is display-safe iff it happened in VBlank OR
+        // under forced blank (the DmaTraceEvent classification the
+        // Event Viewer already uses).
+        let unsafe_writes = events
+            .iter()
+            .filter(|e| !(e.blank || e.force_blank))
+            .count() as u64;
+        if let Some(max) = dma.unsafe_writes
+            && unsafe_writes > max
+        {
+            failures.push(format!(
+                "dma.unsafe_writes: {unsafe_writes} VRAM byte(s) written outside \
+                 VBlank/forced-blank, expected <= {max}"
+            ));
+        }
+        if let Some(max) = dma.max_vblank_bytes {
+            let mut per_frame: BTreeMap<u64, u64> = BTreeMap::new();
+            for e in &events {
+                *per_frame.entry(e.frame).or_default() += 1;
+            }
+            if let Some((frame, &n)) = per_frame.iter().max_by_key(|&(_, n)| *n)
+                && n > max
+            {
+                failures.push(format!(
+                    "dma.max_vblank_bytes: frame {frame} transferred {n} byte(s), \
+                     expected <= {max}"
+                ));
+            }
+        }
+    }
+    // srm_out — the write half of a power-cycle test (issue #212).
+    if let Some(srm) = &m.srm_out {
+        let dest = dir.join(srm);
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(&dest, em.sram()).map_err(|e| format!("srm_out {}: {e}", dest.display()))?;
+    }
 
     if let Some(shot) = &m.screenshot {
         let dest = dir.join(shot);
@@ -598,6 +909,7 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
         path: path.to_path_buf(),
         failures,
         fbhash: measured_fbhash,
+        skipped: None,
     })
 }
 
@@ -688,22 +1000,124 @@ fn check_value(
         }
     };
     let got = read_value(em, key, width)?;
+    Ok(eval_cmp(&format!("values.{key}"), got, cmp))
+}
+
+/// Run one comparator table against an already-read value. `Some(msg)`
+/// = the first violated bound (shared by `[asserts.values]`,
+/// checkpoint values and `[asserts.dsp]` — issue #212).
+fn eval_cmp(label: &str, got: i64, cmp: &CmpSpec) -> Option<String> {
     let check = |ok: bool, op: &str, bound: i64| {
         if ok {
             None
         } else {
-            Some(format!("values.{key}: {got:#X} violates `{op} {bound:#X}`"))
+            Some(format!("{label}: {got:#X} violates `{op} {bound:#X}`"))
         }
     };
-    let fail = cmp
-        .eq
+    cmp.eq
         .and_then(|b| check(got == b, "eq", b))
         .or_else(|| cmp.ne.and_then(|b| check(got != b, "ne", b)))
         .or_else(|| cmp.ge.and_then(|b| check(got >= b, "ge", b)))
         .or_else(|| cmp.gt.and_then(|b| check(got > b, "gt", b)))
         .or_else(|| cmp.le.and_then(|b| check(got <= b, "le", b)))
-        .or_else(|| cmp.lt.and_then(|b| check(got < b, "lt", b)));
-    Ok(fail)
+        .or_else(|| cmp.lt.and_then(|b| check(got < b, "lt", b)))
+}
+
+/// Normalise a [`ValueAssert`] to its comparator table and validate the
+/// bounds; returns the effective read width too.
+fn normalize_assert(assert: &ValueAssert) -> Result<(CmpSpec, u8), String> {
+    let cmp = match assert {
+        ValueAssert::Exact(v) => CmpSpec {
+            eq: Some(*v),
+            ..CmpSpec::default()
+        },
+        ValueAssert::Cmp(c) => CmpSpec {
+            eq: c.eq,
+            ne: c.ne,
+            ge: c.ge,
+            gt: c.gt,
+            le: c.le,
+            lt: c.lt,
+            width: c.width,
+        },
+    };
+    let bounds: Vec<i64> = [cmp.eq, cmp.ne, cmp.ge, cmp.gt, cmp.le, cmp.lt]
+        .into_iter()
+        .flatten()
+        .collect();
+    if bounds.is_empty() {
+        return Err("comparator table needs at least one of eq/ne/ge/gt/le/lt".into());
+    }
+    if bounds.iter().any(|&b| !(0..=0xFFFF).contains(&b)) {
+        return Err("bounds must fit in 16 bits".into());
+    }
+    let width = match cmp.width {
+        Some(w @ (1 | 2)) => w,
+        Some(w) => return Err(format!("width must be 1 or 2, got {w}")),
+        None => {
+            if bounds.iter().all(|&b| b <= 0xFF) {
+                1
+            } else {
+                2
+            }
+        }
+    };
+    Ok((cmp, width))
+}
+
+/// The S-DSP register-name vocabulary for `[asserts.dsp]` (issue #212).
+/// Raw hex indices (`"7D"`) are also accepted.
+fn dsp_register_index(name: &str) -> Option<u8> {
+    let global = match name.to_ascii_uppercase().as_str() {
+        "MVOL_L" | "MVOLL" => 0x0C,
+        "MVOL_R" | "MVOLR" => 0x1C,
+        "EVOL_L" | "EVOLL" => 0x2C,
+        "EVOL_R" | "EVOLR" => 0x3C,
+        "KON" => 0x4C,
+        "KOF" | "KOFF" => 0x5C,
+        "FLG" => 0x6C,
+        "ENDX" => 0x7C,
+        "EFB" => 0x0D,
+        "PMON" => 0x2D,
+        "NON" => 0x3D,
+        "EON" => 0x4D,
+        "DIR" => 0x5D,
+        "ESA" => 0x6D,
+        "EDL" => 0x7D,
+        _ => 0xFF,
+    };
+    if global != 0xFF {
+        return Some(global);
+    }
+    let upper = name.to_ascii_uppercase();
+    // FIR0..FIR7 at $x0F.
+    if let Some(n) = upper.strip_prefix("FIR")
+        && let Ok(i) = n.parse::<u8>()
+        && i < 8
+    {
+        return Some((i << 4) | 0x0F);
+    }
+    // Per-voice: V<n>_<VOLL|VOLR|PITCHL|PITCHH|SRCN|ADSR1|ADSR2|GAIN>.
+    if let Some(rest) = upper.strip_prefix('V')
+        && let Some((v, reg)) = rest.split_once('_')
+        && let Ok(v) = v.parse::<u8>()
+        && v < 8
+    {
+        let lo = match reg {
+            "VOLL" => 0x0,
+            "VOLR" => 0x1,
+            "PITCHL" => 0x2,
+            "PITCHH" => 0x3,
+            "SRCN" => 0x4,
+            "ADSR1" => 0x5,
+            "ADSR2" => 0x6,
+            "GAIN" => 0x7,
+            _ => return None,
+        };
+        return Some((v << 4) | lo);
+    }
+    // Raw hex index.
+    u8::from_str_radix(name, 16).ok().filter(|&i| i < 0x80)
 }
 
 /// Check one `[asserts.blocks]` entry. `Ok(Some(msg))` = mismatch.
@@ -712,9 +1126,15 @@ fn check_block(
     key: &str,
     block: &BlockAssert,
 ) -> Result<Option<String>, String> {
-    let (space, hex) = match block {
-        BlockAssert::Hex(hex) => ("cpu", hex.as_str()),
-        BlockAssert::Spec { space, hex } => (space.as_str(), hex.as_str()),
+    // With an explicit `offset` the TOML key is a free label (issue
+    // #210); otherwise the key itself is the location (v1.15.0 form).
+    let (space, hex, at) = match block {
+        BlockAssert::Hex(hex) => ("cpu", hex.as_str(), key),
+        BlockAssert::Spec { space, offset, hex } => (
+            space.as_str(),
+            hex.as_str(),
+            offset.as_deref().unwrap_or(key),
+        ),
     };
     let want = parse_hex_bytes(hex)?;
     if want.is_empty() {
@@ -722,14 +1142,14 @@ fn check_block(
     }
     let got: Vec<u8> = match space {
         "cpu" | "wram" => {
-            let addr = resolve_key(em, key)?;
+            let addr = resolve_key(em, at)?;
             let len = u16::try_from(want.len()).map_err(|_| "block longer than 64 KB")?;
             em.peek_memory((addr >> 16) as u8, addr as u16, len)
                 .map_err(|e| e.to_string())?
         }
         "vram" | "aram" => {
             let off =
-                u16::from_str_radix(key, 16).map_err(|e| format!("bad {space} offset: {e}"))?;
+                u16::from_str_radix(at, 16).map_err(|e| format!("bad {space} offset: {e}"))?;
             let len = u32::try_from(want.len()).unwrap_or(u32::MAX);
             if space == "vram" {
                 em.peek_vram(off, len).map_err(|e| e.to_string())?
@@ -738,7 +1158,7 @@ fn check_block(
             }
         }
         "cgram" => {
-            let off = usize::from_str_radix(key, 16).map_err(|e| format!("bad offset: {e}"))?;
+            let off = usize::from_str_radix(at, 16).map_err(|e| format!("bad offset: {e}"))?;
             let all: Vec<u8> = em
                 .peek_cgram()
                 .map_err(|e| e.to_string())?
@@ -748,7 +1168,7 @@ fn check_block(
             slice_at(&all, off, want.len(), "cgram")?
         }
         "oam" => {
-            let off = usize::from_str_radix(key, 16).map_err(|e| format!("bad offset: {e}"))?;
+            let off = usize::from_str_radix(at, 16).map_err(|e| format!("bad offset: {e}"))?;
             let all = em.peek_oam().map_err(|e| e.to_string())?;
             slice_at(&all, off, want.len(), "oam")?
         }
