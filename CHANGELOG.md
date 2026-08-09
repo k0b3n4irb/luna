@@ -6,6 +6,15 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Added
+- `luna test`: `[asserts.oam]` — decoded sprite asserts over the same
+  OAM decode the sprite viewer uses (#218): `visible = N` counts
+  on-screen sprites (`0 <= y < 224`, `-32 < x < 256`) and
+  `[asserts.oam.sprites.N]` asserts per-sprite `x`/`y`/`tile`/
+  `palette`/`priority`/`w`/`h` (comparator grammar) plus
+  `hflip`/`vflip` booleans — retiring the last raw-OAM golden
+  workaround.
+
 ### Fixed
 - `luna test`: `[asserts.dma]` now buckets exactly like the probes'
   `--dma-trace` CSV parse (#217). Both ceilings count only the VRAM
