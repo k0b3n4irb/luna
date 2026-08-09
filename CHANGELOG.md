@@ -4,7 +4,13 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.16.0] — 2026-08-09
+
+The adoption-feedback release, same-day: the audio-RMS oracle reads the
+real stream (#211), block asserts get free labels (#210), the six final
+manifest capabilities land (#212) — every remaining OpenSNES Python
+probe now has its manifest shape — and STAT78 reports PPU2 revision 3
+like both references (#207).
 
 ### Added
 - `luna test`: the final manifest capabilities (#212) — per-leg
