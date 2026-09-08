@@ -145,9 +145,10 @@ pub(crate) fn run_state(
     print_fbhash: bool,
     call_stack: bool,
     native_res: bool,
+    power_on: Option<&str>,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
-    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, dsp1_rom) {
+    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, dsp1_rom, power_on) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }

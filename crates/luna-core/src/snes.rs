@@ -23,6 +23,7 @@ use luna_ppu::Ppu;
 use crate::coproc::{Dsp1Mapper, Sa1Chip};
 use crate::dma::{Dma, DmaBus, DmaTraceEvent, DmaTraceLog};
 use crate::mclk::{MclkAccounting, MclkKind};
+use crate::power::PowerOnState;
 
 /// `serde` helper for a heap-boxed fixed byte array (`Box<[u8; N]>`),
 /// which `serde_bytes` does not cover directly. Used for the 128 KB WRAM.
@@ -576,6 +577,39 @@ impl Snes {
     /// luna does not yet emulate (S-DD1, SPC7110). All currently supported
     /// mappers (`LoROM` / `HiROM` / `ExHiROM` / SA-1 / Super FX) succeed.
     pub fn try_from_cartridge(cart: Cartridge) -> Result<Self, UnsupportedMapper> {
+        Self::try_from_cartridge_with(cart, PowerOnState::Zero)
+    }
+
+    /// [`Self::try_from_cartridge`] with an explicit power-on memory state
+    /// (issue #224): WRAM, VRAM, CGRAM (15-bit), OAM and APU RAM are filled
+    /// per `power_on` before anything runs. A later [`Self::reset`] keeps
+    /// them, as hardware / ares / Mesen2 do.
+    pub fn try_from_cartridge_with(
+        cart: Cartridge,
+        power_on: PowerOnState,
+    ) -> Result<Self, UnsupportedMapper> {
+        let mut snes = Self::build(cart)?;
+        snes.apply_power_on(power_on);
+        Ok(snes)
+    }
+
+    /// Fill every RAM array per `power_on` from one seeded generator in a
+    /// fixed order (WRAM, VRAM, CGRAM, OAM, ARAM) — a seed reproduces the
+    /// exact machine. CGRAM entries keep 15 bits (ares `ppu.cpp:124`).
+    pub fn apply_power_on(&mut self, power_on: PowerOnState) {
+        let mut rng = power_on.rng();
+        power_on.fill(&mut self.wram[..], &mut rng);
+        power_on.fill(self.ppu.vram.raw_mut(), &mut rng);
+        let cgram = self.ppu.cgram.raw_mut();
+        power_on.fill(cgram, &mut rng);
+        for hi in cgram.iter_mut().skip(1).step_by(2) {
+            *hi &= 0x7F;
+        }
+        power_on.fill(self.ppu.oam.raw_mut(), &mut rng);
+        power_on.fill(&mut self.apu_real.aram[..], &mut rng);
+    }
+
+    fn build(cart: Cartridge) -> Result<Self, UnsupportedMapper> {
         let sram_bytes = (cart.header.sram_size_kb as usize) * 1024;
         let region = cart.header.region;
         let mapper: Box<dyn Mapper + Send> = match cart.header.mapper_kind {
@@ -952,7 +986,18 @@ impl Snes {
         //    CPU registers ($42xx), master clock, frame/scanline counters
         //    and pending interrupts also return to power-on; VRAM/WRAM/SRAM
         //    and the cartridge mapper persist (re-initialised by boot code).
+        // APU RAM persists across a reset (ares `dsp.cpp:199` randomises
+        // it on power only; Mesen2 `Spc::Reset` never touches it) — only the
+        // SPC700 / DSP / mailbox state returns to power-on (issue #224).
+        let aram = std::mem::replace(
+            &mut self.apu_real.aram,
+            vec![0u8; 0x10000]
+                .into_boxed_slice()
+                .try_into()
+                .expect("64 KB slice into fixed array"),
+        );
         self.apu_real = Apu::new();
+        self.apu_real.aram = aram;
         self.apu_panicked = false;
         self.apu_stub_fallback = ApuStub::new();
         self.cpu_regs = CpuRegs::new();
@@ -2974,6 +3019,37 @@ mod tests {
         assert_eq!(snes.region_scanlines(), 312);
         // STAT78 bit 4 should reflect the region.
         assert_eq!(snes.ppu.stat78 & 0x10, 0x10);
+    }
+
+    #[test]
+    fn power_on_random_is_seeded_masks_cgram_and_survives_reset() {
+        use crate::power::PowerOnState;
+        let mk = |st| Snes::try_from_cartridge_with(demo_lorom(), st).expect("snes");
+        let zero = mk(PowerOnState::Zero);
+        assert!(zero.wram.iter().all(|&b| b == 0));
+        let ones = mk(PowerOnState::Ones);
+        assert!(ones.wram.iter().all(|&b| b == 0xFF));
+        assert!(ones.apu_real.aram.iter().all(|&b| b == 0xFF));
+        // CGRAM stays 15-bit even under `ones`.
+        assert!((0..256).all(|i| ones.ppu.cgram.peek(i * 2 + 1) & 0x80 == 0));
+
+        let a = mk(PowerOnState::Random { seed: 99 });
+        let b = mk(PowerOnState::Random { seed: 99 });
+        let c = mk(PowerOnState::Random { seed: 100 });
+        assert_eq!(a.wram[..], b.wram[..]);
+        assert_eq!(a.apu_real.aram[..], b.apu_real.aram[..]);
+        assert_eq!(a.ppu.vram.peek(0x1234), b.ppu.vram.peek(0x1234));
+        assert_ne!(a.wram[..], c.wram[..]);
+        assert!(a.wram.iter().any(|&x| x != 0));
+        assert!((0..256).all(|i| a.ppu.cgram.peek(i * 2 + 1) & 0x80 == 0));
+
+        // A soft reset keeps every RAM array (ares dsp.cpp:199, cpu.cpp:92).
+        let mut r = mk(PowerOnState::Random { seed: 99 });
+        let aram_before = r.apu_real.aram.clone();
+        let wram_before = r.wram.clone();
+        r.reset();
+        assert_eq!(r.apu_real.aram[..], aram_before[..]);
+        assert_eq!(r.wram[..], wram_before[..]);
     }
 
     #[test]

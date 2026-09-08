@@ -127,6 +127,13 @@ enum Command {
         /// the `PeterLemon` corpus as PAL to match krom's reference captures.
         #[arg(long = "force-region")]
         force_region: Option<String>,
+        /// What RAM holds before the ROM boots (issue #224): `zero`
+        /// (default), `ones`, `random` (a seed is derived and printed) or
+        /// `random=<seed>` (decimal or 0x hex — replays an exact machine).
+        /// Fills WRAM, VRAM, CGRAM, OAM and APU RAM; a boot bug that only
+        /// shows on real hardware's garbage RAM shows here too.
+        #[arg(long = "power-on")]
+        power_on: Option<String>,
     },
     /// Run manifest-driven homebrew tests (issue #181): one TOML per
     /// test (rom, input, run bound, asserts), executed in-process
@@ -204,6 +211,13 @@ enum Command {
         /// the `PeterLemon` corpus as PAL to match krom's reference captures.
         #[arg(long = "force-region")]
         force_region: Option<String>,
+        /// What RAM holds before the ROM boots (issue #224): `zero`
+        /// (default), `ones`, `random` (a seed is derived and printed) or
+        /// `random=<seed>` (decimal or 0x hex — replays an exact machine).
+        /// Fills WRAM, VRAM, CGRAM, OAM and APU RAM; a boot bug that only
+        /// shows on real hardware's garbage RAM shows here too.
+        #[arg(long = "power-on")]
+        power_on: Option<String>,
         /// Install a DSP coprocessor firmware (`dsp1b.rom`) into luna's
         /// firmware folder, then load — needed for DSP-1 games (Super
         /// Mario Kart, Pilotwings). Persists for future runs.
@@ -539,6 +553,13 @@ enum Command {
         /// the `PeterLemon` corpus as PAL to match krom's reference captures.
         #[arg(long = "force-region")]
         force_region: Option<String>,
+        /// What RAM holds before the ROM boots (issue #224): `zero`
+        /// (default), `ones`, `random` (a seed is derived and printed) or
+        /// `random=<seed>` (decimal or 0x hex — replays an exact machine).
+        /// Fills WRAM, VRAM, CGRAM, OAM and APU RAM; a boot bug that only
+        /// shows on real hardware's garbage RAM shows here too.
+        #[arg(long = "power-on")]
+        power_on: Option<String>,
         /// Scripted joypad-1 input, same `frame:hex` format as
         /// `state --input`, applied during the warm-up so the capture
         /// can land in gameplay rather than at a title screen.
@@ -702,6 +723,7 @@ fn main() -> ExitCode {
             native_res,
             force_mapper,
             force_region,
+            power_on,
         } => run(
             &rom,
             steps,
@@ -716,6 +738,7 @@ fn main() -> ExitCode {
             native_res,
             force_mapper.as_deref(),
             force_region.as_deref(),
+            power_on.as_deref(),
         ),
         Command::Test {
             paths,
@@ -745,6 +768,7 @@ fn main() -> ExitCode {
             steps,
             force_mapper,
             force_region,
+            power_on,
             dsp1_rom,
             sym,
             load_state,
@@ -867,6 +891,7 @@ fn main() -> ExitCode {
                 print_fbhash,
                 call_stack,
                 native_res,
+                power_on.as_deref(),
             )
         }
         Command::Frames {
@@ -877,6 +902,7 @@ fn main() -> ExitCode {
             out_dir,
             force_mapper,
             force_region,
+            power_on,
             input,
         } => run_frames(
             &rom,
@@ -887,6 +913,7 @@ fn main() -> ExitCode {
             force_mapper.as_deref(),
             force_region.as_deref(),
             input.as_deref(),
+            power_on.as_deref(),
         ),
         Command::WramTrace {
             rom,
@@ -981,7 +1008,9 @@ fn serve_mcp(
     // errors — an MCP client can't fix a bad --rom path interactively.
     let mut em = luna_api::Emulator::new();
     if let Some(rom) = rom {
-        if let Err(e) = crate::rom::load_rom_into(&mut em, rom, force_mapper, force_region, None) {
+        if let Err(e) =
+            crate::rom::load_rom_into(&mut em, rom, force_mapper, force_region, None, None)
+        {
             eprintln!("error: {e}");
             return ExitCode::from(1);
         }

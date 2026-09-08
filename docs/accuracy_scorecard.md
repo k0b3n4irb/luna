@@ -26,6 +26,7 @@ game impact.
 | DSP-1 (uPD7725) | **A−** | Port-level differential vs Mesen2: the complete DR command/result byte stream is **byte-identical over 380 783 events** (SMK title + demo race, 60 s no-input; SR polling excluded as timing-sensitive). Validates the uPD7725 core + firmware decode + mapper glue end-to-end. Residual = no per-op internal-state oracle (Mesen2 Lua doesn't expose NecDsp registers) | `tests/dsp1_port_differential.rs`, `tools/mesen-dsp1-port-trace.lua`, [`firmware.md`](firmware.md) | **2026-07-26** |
 | S-DD1 | **A−** | Decompressor proven byte-exact (staged differential); MMC banking faithful; Star Ocean and Street Fighter Alpha 2 play | [`sdd1_reference.md`](sdd1_reference.md) | 2026-06-22 |
 | Bus / mappers | **B+** | ROM mirroring, open-bus MDR latch, `score_header` mapper detection, memory-speed table — all faithful and tested. Unaudited corners: exotic boards outside the supported set | `luna-bus/src/speed.rs`, `luna-cartridge` | 2026-06-17 |
+| Power-on / reset state | **B+** | RAM arrays (WRAM, VRAM, CGRAM 15-bit, OAM, ARAM) selectable `zero` / `ones` / seeded `random` at power-on (ares `cpu.cpp:92`, `ppu.cpp:99,123`, `dsp.cpp:199`; Mesen2 `InitializeRam`); every array persists across a soft reset (ARAM fixed 2026-09-08). Open: ares' PPU MDR / latch / register randomisation (ares-only) — issue #224 follow-up | `luna-core/src/power.rs`, `Snes::apply_power_on` tests | 2026-09-08 |
 
 ## What "verified" means
 

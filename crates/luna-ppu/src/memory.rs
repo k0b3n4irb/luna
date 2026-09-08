@@ -89,6 +89,12 @@ impl Vram {
         }
     }
 
+    /// The whole 64 KB backing store, mutable — for power-on fills
+    /// (issue #224). Bypasses the port state machine like `poke`.
+    pub fn raw_mut(&mut self) -> &mut [u8] {
+        &mut self.data[..]
+    }
+
     /// Direct read for tests and the future renderer.
     #[must_use]
     pub fn peek(&self, addr: u16) -> u8 {
@@ -273,6 +279,13 @@ impl Cgram {
         }
     }
 
+    /// The 512-byte backing store, mutable — for power-on fills (issue
+    /// #224). Callers keep entries to 15 bits (`odd byte & 0x7F`) as the
+    /// hardware does.
+    pub const fn raw_mut(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+
     /// Direct read for tests and the renderer.
     #[must_use]
     pub fn peek(&self, addr: u16) -> u8 {
@@ -396,6 +409,12 @@ impl Oam {
             latch: 0,
             priority_rotation: false,
         }
+    }
+
+    /// The 544-byte backing store, mutable — for power-on fills (issue
+    /// #224).
+    pub const fn raw_mut(&mut self) -> &mut [u8] {
+        &mut self.data
     }
 
     /// Direct read for tests and the renderer.
