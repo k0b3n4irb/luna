@@ -59,6 +59,13 @@ enum Command {
         /// Maximum number of CPU instructions to execute before dumping.
         #[arg(short = 'n', long, default_value_t = 64)]
         steps: u64,
+        /// Run until PPU frame N (then dump), instead of stopping at the
+        /// `-n` instruction count — same as `state --until-frame`. Pins a
+        /// `--print-fbhash` / `--screenshot` baseline to a PPU frame so a
+        /// codegen change that shifts the instruction count cannot move
+        /// the capture onto another animation phase (issue #222).
+        #[arg(long = "until-frame")]
+        until_frame: Option<u64>,
         /// If set, render a 256×224 PNG of the composited framebuffer
         /// and write it to the given path.
         #[arg(long)]
@@ -174,7 +181,14 @@ enum Command {
     /// going through any transport.
     State {
         /// Path to the .sfc / .smc ROM file.
-        rom: PathBuf,
+        #[arg(required_unless_present = "schema")]
+        rom: Option<PathBuf>,
+        /// Print the JSON Schema of the state JSON (`EmulatorState`, plus
+        /// the `peeks` array `--out` adds) to stdout and exit — no ROM
+        /// needed. The machine-readable map of every nested field a harness
+        /// can `jq` (issue #222).
+        #[arg(long)]
+        schema: bool,
         /// CPU instructions to execute before snapshotting.
         #[arg(short = 'n', long, default_value_t = 1000)]
         steps: u64,
@@ -282,11 +296,15 @@ enum Command {
         #[arg(long)]
         superscope: Option<String>,
         /// Optional memory peek(s) after snapshot.  Format:
-        /// `BANK:OFFSET:COUNT` (all hex, no `0x` prefix), or a WLA-DX
-        /// label `NAME[:COUNT]` resolved through the loaded `.sym`
-        /// table (auto-detected `<rom>.sym` or `--sym`; count defaults
-        /// to 1).  Can be specified multiple times.  Output goes to
-        /// stderr as a labelled hex dump.  Examples:
+        /// `BANK:OFFSET:COUNT` (ALL hex, no `0x` prefix — `:20` is 32
+        /// bytes), or a WLA-DX label `NAME[:COUNT]` resolved through the
+        /// loaded `.sym` table (auto-detected `<rom>.sym` or `--sym`;
+        /// count defaults to 1).  Can be specified multiple times.  The
+        /// whole 24-bit space is readable (WRAM, ROM incl. `$C0-$FF`
+        /// `HiROM`, SRAM, coproc RAM); the `$2000-$5FFF` register band
+        /// reads `0` (no side effects) and an unmapped range reads `$FF`
+        /// with a stderr note and `unmapped` in the JSON entry.  Output
+        /// goes to stderr as a labelled hex dump.  Examples:
         /// `--peek 7E:0200:220`, `--peek monster_x:2`.
         #[arg(long = "peek")]
         peek: Vec<String>,
@@ -499,6 +517,12 @@ enum Command {
         /// Warm-up CPU instructions to execute before capturing begins.
         #[arg(short = 'n', long, default_value_t = 1000)]
         steps: u64,
+        /// Start the capture at PPU frame N instead of after the `-n`
+        /// warm-up instructions (which are then ignored) — the first PNG
+        /// is frame N. Frame-indexed like `state --until-frame`, so the
+        /// sequence is stable across codegen changes (issue #222).
+        #[arg(long = "from-frame")]
+        from_frame: Option<u64>,
         /// Number of consecutive frames to capture.
         #[arg(short = 'c', long = "count", default_value_t = 8)]
         count: u64,
@@ -667,6 +691,7 @@ fn main() -> ExitCode {
         Command::Run {
             rom,
             steps,
+            until_frame,
             screenshot,
             force_display,
             bg,
@@ -680,6 +705,7 @@ fn main() -> ExitCode {
         } => run(
             &rom,
             steps,
+            until_frame,
             screenshot.as_deref(),
             force_display,
             bg,
@@ -715,6 +741,7 @@ fn main() -> ExitCode {
         ),
         Command::State {
             rom,
+            schema,
             steps,
             force_mapper,
             force_region,
@@ -770,67 +797,82 @@ fn main() -> ExitCode {
             print_fbhash,
             call_stack,
             native_res,
-        } => run_state(
-            &rom,
-            steps,
-            force_mapper.as_deref(),
-            force_region.as_deref(),
-            dump_vram.as_deref(),
-            dump_coproc_ram.as_deref(),
-            dump_aram.as_deref(),
-            &out,
-            screenshot.as_deref(),
-            audio_out.as_deref(),
-            input.as_deref(),
-            &port1,
-            &port2,
-            mouse.as_deref(),
-            superscope.as_deref(),
-            &peek,
-            &assert,
-            &assert_aram,
-            &assert_vram,
-            &assert_cgram,
-            until_frame,
-            srm_in.as_deref(),
-            srm_out.as_deref(),
-            apu_log.as_deref(),
-            dsp_trace.as_deref(),
-            dsp_trace_max,
-            sa1_log.as_deref(),
-            sa1_side_log.as_deref(),
-            sa1_trace.as_deref(),
-            sa1_trace_max,
-            superfx_trace.as_deref(),
-            superfx_trace_max,
-            dsp1_trace.as_deref(),
-            dsp1_trace_max,
-            dsp1_trace_ports,
-            dsp1_trace_commands.as_deref(),
-            spc_trace.as_deref(),
-            spc_trace_max,
-            cpu_trace.as_deref(),
-            cpu_trace_from,
-            cpu_trace_max,
-            mem_trace.as_deref(),
-            mem_trace_from,
-            mem_trace_max,
-            mem_trace_bank.as_deref(),
-            mem_trace_addr.as_deref(),
-            dma_trace.as_deref(),
-            dma_trace_from,
-            dma_trace_max,
-            dsp1_rom.as_deref(),
-            sym.as_deref(),
-            load_state.as_deref(),
-            wdm_out.as_deref(),
-            print_fbhash,
-            call_stack,
-            native_res,
-        ),
+        } => {
+            if schema {
+                // `--schema` needs no ROM: print the `--out` payload's JSON
+                // Schema and stop (issue #222).
+                println!("{}", state::schema_json());
+                return ExitCode::SUCCESS;
+            }
+            // clap enforces `required_unless_present = "schema"`, so a
+            // missing ROM here is unreachable; keep the message anyway.
+            let Some(rom) = rom else {
+                eprintln!("error: <ROM> is required unless --schema is given");
+                return ExitCode::from(2);
+            };
+            run_state(
+                &rom,
+                steps,
+                force_mapper.as_deref(),
+                force_region.as_deref(),
+                dump_vram.as_deref(),
+                dump_coproc_ram.as_deref(),
+                dump_aram.as_deref(),
+                &out,
+                screenshot.as_deref(),
+                audio_out.as_deref(),
+                input.as_deref(),
+                &port1,
+                &port2,
+                mouse.as_deref(),
+                superscope.as_deref(),
+                &peek,
+                &assert,
+                &assert_aram,
+                &assert_vram,
+                &assert_cgram,
+                until_frame,
+                srm_in.as_deref(),
+                srm_out.as_deref(),
+                apu_log.as_deref(),
+                dsp_trace.as_deref(),
+                dsp_trace_max,
+                sa1_log.as_deref(),
+                sa1_side_log.as_deref(),
+                sa1_trace.as_deref(),
+                sa1_trace_max,
+                superfx_trace.as_deref(),
+                superfx_trace_max,
+                dsp1_trace.as_deref(),
+                dsp1_trace_max,
+                dsp1_trace_ports,
+                dsp1_trace_commands.as_deref(),
+                spc_trace.as_deref(),
+                spc_trace_max,
+                cpu_trace.as_deref(),
+                cpu_trace_from,
+                cpu_trace_max,
+                mem_trace.as_deref(),
+                mem_trace_from,
+                mem_trace_max,
+                mem_trace_bank.as_deref(),
+                mem_trace_addr.as_deref(),
+                dma_trace.as_deref(),
+                dma_trace_from,
+                dma_trace_max,
+                dsp1_rom.as_deref(),
+                sym.as_deref(),
+                load_state.as_deref(),
+                wdm_out.as_deref(),
+                print_fbhash,
+                call_stack,
+                native_res,
+            )
+        }
         Command::Frames {
             rom,
             steps,
+            from_frame,
             count,
             out_dir,
             force_mapper,
@@ -839,6 +881,7 @@ fn main() -> ExitCode {
         } => run_frames(
             &rom,
             steps,
+            from_frame,
             count,
             &out_dir,
             force_mapper.as_deref(),
