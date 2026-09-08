@@ -7,6 +7,17 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- `stats.mclk` / `stats.last_frame` (#223): every master cycle split by
+  who consumed it — `cpu_active`, `cpu_wai`, `cpu_stp`, `dma`, `hdma`,
+  `refresh` (+ `total`) — cumulative since reset and for the last
+  completed PPU frame, an exact partition of `total_mclk`. CPU headroom
+  per frame is now `last_frame.cpu_wai / last_frame.total`, and a boot
+  zero-fill's cost is `mclk.dma`. `stats.instructions_active` counts the
+  steps that executed an instruction (a parked `WAI` / `STP` tick is not
+  one), the count that tracks code size — `instructions_executed` grows
+  *faster* on an idle ROM that does *less*. `luna_core::mclk` /
+  `Snes::mclk_acc` carry the accounting; save-states without it load
+  with zeroed buckets.
 - `luna run --until-frame F` and `luna frames --from-frame F` (#222):
   frame-indexed capture on every capture command, so a visual baseline
   is pinned to a PPU frame and survives codegen changes that shift the

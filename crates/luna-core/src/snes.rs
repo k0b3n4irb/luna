@@ -22,6 +22,7 @@ use luna_ppu::Ppu;
 
 use crate::coproc::{Dsp1Mapper, Sa1Chip};
 use crate::dma::{Dma, DmaBus, DmaTraceEvent, DmaTraceLog};
+use crate::mclk::{MclkAccounting, MclkKind};
 
 /// `serde` helper for a heap-boxed fixed byte array (`Box<[u8; N]>`),
 /// which `serde_bytes` does not cover directly. Used for the 128 KB WRAM.
@@ -98,6 +99,11 @@ pub struct Snes {
     pub irq_pending: bool,
     /// Total master cycles consumed since reset.
     pub total_mclk: MCycles,
+    /// Who consumed `total_mclk` (CPU active / `WAI` / `STP`, DMA, HDMA,
+    /// DRAM refresh), cumulative and per last frame (issue #223). An
+    /// exact partition: every master clock charged lands in one bucket.
+    #[serde(default)]
+    pub mclk_acc: MclkAccounting,
 
     // ------------- APU -------------
     /// Real SPC700 + 64 KB ARAM + IPL ROM + mailboxes. Runs in
@@ -641,6 +647,7 @@ impl Snes {
             nmi_pending: false,
             irq_pending: false,
             total_mclk: 0,
+            mclk_acc: MclkAccounting::default(),
             // Compat: post-reset, the IPL ROM has dropped these into
             // the CPU-facing mailbox to signal "audio CPU ready".
             apu_real: Apu::new(),
@@ -890,6 +897,7 @@ impl Snes {
                 joypad2_shift,
                 mdr,
                 irq_wrap_trig,
+                mclk_acc,
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
@@ -931,6 +939,7 @@ impl Snes {
                 joypad2_shift,
                 mdr,
                 irq_wrap_trig,
+                mclk: mclk_acc,
             };
             cpu.reset(&mut bus);
         }
@@ -948,6 +957,7 @@ impl Snes {
         self.apu_stub_fallback = ApuStub::new();
         self.cpu_regs = CpuRegs::new();
         self.total_mclk = 0;
+        self.mclk_acc = MclkAccounting::default();
         self.ppu_line = 0;
         self.mcycles_in_line = 0;
         self.frame_count = 0;
@@ -992,6 +1002,23 @@ impl Snes {
         let ppu_line_snapshot = self.ppu_line;
         let vblank_start_snapshot = vblank_start_line(self.region);
         let cpu_pc_snapshot = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
+        // Who this step's own clocks belong to (issue #223). A parked `WAI`
+        // tick is idle time — unless an interrupt is pending, in which case
+        // the core wakes and runs the dispatch this very step (see
+        // `Cpu::step`), which is CPU work.
+        let idle_kind = if self.cpu.stopped {
+            Some(MclkKind::CpuStp)
+        } else if self.cpu.waiting
+            && !(self.cpu.pending_nmi || self.cpu.pending_irq || self.cpu.irq_line)
+        {
+            Some(MclkKind::CpuWai)
+        } else {
+            None
+        };
+        self.mclk_acc.current = idle_kind.unwrap_or(MclkKind::CpuActive);
+        if idle_kind.is_some() {
+            self.mclk_acc.steps_idle = self.mclk_acc.steps_idle.saturating_add(1);
+        }
         let (rb_line, rb_mil, rb_fc, rb_ns);
         {
             let Self {
@@ -1014,6 +1041,7 @@ impl Snes {
                 joypad2_shift,
                 mdr,
                 irq_wrap_trig,
+                mclk_acc,
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
@@ -1058,6 +1086,7 @@ impl Snes {
                 joypad2_shift,
                 mdr,
                 irq_wrap_trig,
+                mclk: mclk_acc,
             };
             // The scanline scheduler now advances per bus access inside
             // `bus.io_cycle` (per-scanline rendering: each line is drawn
@@ -1141,6 +1170,8 @@ impl Snes {
     /// (`RESET_SEQUENCE_MCLK`). Without it, only the PPU line cursor moves.
     fn advance_no_instruction(&mut self, mcycles: u32, charge_time: bool) {
         let scanlines = self.region_scanlines();
+        // The reset sequence is the CPU's own time (issue #223).
+        self.mclk_acc.current = MclkKind::CpuActive;
         let ppu_line_snapshot = self.ppu_line;
         let vblank_start_snapshot = vblank_start_line(self.region);
         let cpu_pc_snapshot = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
@@ -1165,6 +1196,7 @@ impl Snes {
                 joypad2_shift,
                 mdr,
                 irq_wrap_trig,
+                mclk_acc,
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
@@ -1209,6 +1241,7 @@ impl Snes {
                 joypad2_shift,
                 mdr,
                 irq_wrap_trig,
+                mclk: mclk_acc,
             };
             if charge_time {
                 bus.io_cycle(MCycles::from(mcycles));
@@ -1282,6 +1315,7 @@ impl Snes {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk_acc,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -1323,6 +1357,7 @@ impl Snes {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk: mclk_acc,
         };
         (0..count)
             .map(|i| {
@@ -1458,6 +1493,10 @@ struct SnesBus<'a> {
     /// against.
     clock_count: u32,
     mclk_total: &'a mut MCycles,
+    /// Master-cycle accounting by consumer (issue #223): the owner sets
+    /// `current` to who this bus borrow's own clocks belong to; stalls
+    /// are credited to their own buckets inside `advance_time`.
+    mclk: &'a mut MclkAccounting,
     /// Total scanlines per frame for the current cart's region —
     /// used by the H/V counter latch path (\$2137 / WRIO) to wrap
     /// the V coordinate at the right boundary.
@@ -1863,11 +1902,13 @@ impl SnesBus<'_> {
     /// (dot-precise), instead of only at the boundary. Boundary crossing
     /// is otherwise identical to before (chunks never overshoot a line, so
     /// the per-line events in `sched_one_line` still fire exactly once).
-    /// Returns the total HDMA master-cycle stall accumulated across the
-    /// line crossings in this advance (Phase 4); the caller charges it.
-    fn sched_advance(&mut self, mcycles: u32) -> u32 {
+    /// Returns the `(DRAM refresh, HDMA)` master-cycle stalls accumulated
+    /// across this advance (Phase 4; split per consumer for issue #223); the
+    /// caller charges their sum.
+    fn sched_advance(&mut self, mcycles: u32) -> (u32, u32) {
         let mut remaining = mcycles;
-        let mut stall = 0u32;
+        let mut refresh = 0u32;
+        let mut hdma = 0u32;
         while remaining > 0 {
             let period = self.line_period();
             let room = period - self.mcycles_in_line;
@@ -1899,16 +1940,16 @@ impl SnesBus<'_> {
             // that lands exactly on the position and pushed the 40-clock halt
             // onto the following instruction.
             if lo < refresh_pos && refresh_pos <= hi {
-                stall += DRAM_REFRESH_CYCLES;
+                refresh += DRAM_REFRESH_CYCLES;
             }
             self.mcycles_in_line += chunk;
             remaining -= chunk;
             if self.mcycles_in_line >= period {
                 self.mcycles_in_line -= period;
-                stall += self.sched_one_line(line_start + u64::from(period));
+                hdma += self.sched_one_line(line_start + u64::from(period));
             }
         }
-        stall
+        (refresh, hdma)
     }
 
     /// Dot-precise H/V-counter IRQ poll over the half-open master-cycle
@@ -2135,6 +2176,7 @@ impl SnesBus<'_> {
             // VBlank (now 0, matching hardware).
             self.cpu_regs.nmi_flag = false;
             self.frame_count = self.frame_count.saturating_add(1);
+            self.mclk.on_frame_wrap();
             // Snapshot whether the frame that just completed showed any
             // visible content, paired with the frame counter bump so a
             // front-end polling at this boundary reads a consistent value.
@@ -2244,8 +2286,15 @@ impl SnesBus<'_> {
         // False once we are re-advancing for a stall rather than for the
         // caller's own access — see the coproc note below.
         let mut caller_time = true;
+        // The caller's own time goes to whoever owns this bus borrow (CPU
+        // active / WAI / STP, or the DMA burst); a stall pass is credited to
+        // its own buckets when it is discovered, below (issue #223).
+        let mut kind = Some(self.mclk.current);
         loop {
             *self.mclk_total = self.mclk_total.saturating_add(step);
+            if let Some(k) = kind {
+                self.mclk.credit(k, step);
+            }
             // APU in lockstep with the CPU at bus-access granularity.
             // `Apu::step` carries the sub-84-mclk remainder in
             // `mclk_deficit`, so per-access stepping composes exactly with
@@ -2263,7 +2312,7 @@ impl SnesBus<'_> {
             if !self.sched_enabled {
                 return;
             }
-            let stall = self.sched_advance(step as u32);
+            let (refresh, hdma) = self.sched_advance(step as u32);
             // `advance_coproc` is about the CALLER's time only: on the DMA
             // path the coprocessor was already stepped per transferred byte
             // in `DmaBusView::tick`, so charging it the lumped DMA cost again
@@ -2282,11 +2331,14 @@ impl SnesBus<'_> {
             // came out 15 840 master clocks short of Mesen2's, and every one
             // of those clocks is CPU-vs-scanline phase error that never comes
             // back.
-            if stall == 0 {
+            if refresh == 0 && hdma == 0 {
                 return;
             }
+            self.mclk.credit(MclkKind::Refresh, u64::from(refresh));
+            self.mclk.credit(MclkKind::Hdma, u64::from(hdma));
+            kind = None;
             caller_time = false;
-            step = MCycles::from(stall);
+            step = MCycles::from(refresh + hdma);
         }
     }
 
@@ -2295,6 +2347,19 @@ impl SnesBus<'_> {
     /// after `clock_count` is known (the realignment step is computed against
     /// it) and before the access's own clocks are charged.
     fn dma_edge(&mut self) {
+        if self.dma.pending_mdma == 0 {
+            return;
+        }
+        // The burst's clocks are the DMA's, not the instruction's whose
+        // access ran the edge (issue #223); stalls inside it still land in
+        // their own buckets.
+        let prev = self.mclk.current;
+        self.mclk.current = MclkKind::Dma;
+        self.dma_edge_inner();
+        self.mclk.current = prev;
+    }
+
+    fn dma_edge_inner(&mut self) {
         let value = self.dma.pending_mdma;
         if value == 0 {
             return;
@@ -3008,6 +3073,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk_acc,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -3049,6 +3115,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk: mclk_acc,
         };
         bus.write(make_addr(0x00, 0x0100), 0xAA);
         // Read back from the mirror in $00:
@@ -3089,6 +3156,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk_acc,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -3130,6 +3198,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk: mclk_acc,
         };
         // Falling edge (FF → 00): latch fires, PIO mirror goes low.
         bus.write(make_addr(0x00, 0x4201), 0x00);
@@ -3178,6 +3247,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk_acc,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -3219,6 +3289,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk: mclk_acc,
         };
         // A write drives 0x5A onto the data bus → latches the MDR.
         bus.write(make_addr(0x00, 0x0100), 0x5A);
@@ -3265,6 +3336,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk_acc,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -3306,6 +3378,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk: mclk_acc,
         };
         // WMADD = $00:1F00.
         bus.write(make_addr(0x00, 0x2181), 0x00);
@@ -3351,6 +3424,7 @@ mod tests {
                 joypad2_shift,
                 mdr,
                 irq_wrap_trig,
+                mclk_acc,
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
@@ -3392,6 +3466,7 @@ mod tests {
                 joypad2_shift,
                 mdr,
                 irq_wrap_trig,
+                mclk: mclk_acc,
             };
             bus.write(make_addr(0x00, 0x21FC), b'H');
             bus.write(make_addr(0x00, 0x21FC), b'i');
@@ -3437,6 +3512,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk_acc,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -3478,6 +3554,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk: mclk_acc,
         };
         // Latch then de-strobe.
         bus.write(make_addr(0x00, 0x4016), 0x01);
@@ -3621,6 +3698,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk_acc,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -3662,6 +3740,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk: mclk_acc,
         };
         // Trigger channel-0 sync DMA via the bus (→ the segmented path,
         // since HDMAEN != 0).
@@ -3807,6 +3886,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk_acc,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -3848,6 +3928,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk: mclk_acc,
         };
         let v = bus.read(make_addr(0x00, 0x4210));
         let still_set = bus.cpu_regs.nmi_flag;
@@ -4179,6 +4260,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk_acc,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -4220,6 +4302,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk: mclk_acc,
         };
         bus.write(make_addr(0x00, 0x2100), 0x0F);
         assert_eq!(
