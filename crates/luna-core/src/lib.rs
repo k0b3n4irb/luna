@@ -14,6 +14,7 @@ pub mod coproc;
 pub mod cpu_regs;
 pub mod dma;
 pub mod mclk;
+pub mod power;
 pub mod snes;
 
 pub use apu_stub::{ApuStub, Phase as ApuPhase};
@@ -26,6 +27,7 @@ pub use luna_bus::{
     SuperFxTraceEvent,
 };
 pub use mclk::{MclkAccounting, MclkBuckets, MclkKind};
+pub use power::{PowerOnRng, PowerOnState};
 pub use snes::{
     CpuTraceEvent, CpuTraceLog, MailboxEvent, MailboxEventKind, MemEventKind, MemTraceEvent,
     MemTraceLog, Sa1LogEvent, Snes, UnsupportedMapper,

@@ -21,6 +21,7 @@ use std::path::Path;
 pub use luna_apu::dsp::DspWriteEvent;
 pub use luna_cartridge::Region;
 use luna_cartridge::{CartError, Cartridge};
+pub use luna_core::PowerOnState;
 use luna_core::Snes;
 /// Controller-port device kind (pad / mouse / super scope), re-exported so the
 /// GUI's port-device selector goes through `luna-api`, not `luna-core`.
@@ -936,6 +937,8 @@ pub struct Emulator {
     /// Video-standard override applied to every subsequent ROM load — see
     /// [`Emulator::set_forced_region`]. `None` = honour the cartridge header.
     forced_region: Option<Region>,
+    /// [`Emulator::set_power_on`]: what RAM holds when a ROM is loaded.
+    power_on: PowerOnState,
 }
 
 /// One raw captured Event Viewer event before category/filter decode — either
@@ -1029,6 +1032,7 @@ impl Emulator {
             prev_frame_events: Vec::new(),
             input_capture: None,
             forced_region: None,
+            power_on: PowerOnState::Zero,
         }
     }
 
@@ -1150,6 +1154,21 @@ impl Emulator {
         self.forced_region
     }
 
+    /// Choose what every RAM array (WRAM, VRAM, CGRAM, OAM, APU RAM) holds
+    /// when the next ROM is loaded (issue #224): zero (default), ones, or
+    /// seeded pseudo-random bytes — a boot bug that only shows on real
+    /// hardware's garbage RAM shows here too, reproducibly. Takes effect
+    /// on the next `load_rom*`; `reset` keeps memory as hardware does.
+    pub const fn set_power_on(&mut self, state: PowerOnState) {
+        self.power_on = state;
+    }
+
+    /// The power-on state the next `load_rom*` applies — see
+    /// [`Emulator::set_power_on`].
+    pub const fn power_on(&self) -> PowerOnState {
+        self.power_on
+    }
+
     fn load_cartridge(&mut self, mut cart: Cartridge) -> Result<RomInfo, ApiError> {
         if let Some(region) = self.forced_region {
             cart.header.region = region;
@@ -1184,7 +1203,7 @@ impl Emulator {
         // during construction / `reset`, so a malformed ROM can't tear
         // down the whole transport.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut snes = Snes::try_from_cartridge(cart)?;
+            let mut snes = Snes::try_from_cartridge_with(cart, self.power_on)?;
             snes.reset();
             Ok::<_, luna_core::UnsupportedMapper>(snes)
         }));
@@ -3887,6 +3906,48 @@ mod tests {
         // before any bus access), so its bucket stays empty; the parked
         // steps are still idle steps.
         assert_eq!(s.mclk.cpu_stp, 0);
+    }
+
+    #[test]
+    fn power_on_state_applies_on_load_and_is_reproducible() {
+        let mut e = Emulator::new();
+        assert_eq!(e.power_on(), PowerOnState::Zero);
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        assert!(
+            e.peek_memory(0x7E, 0x1000, 64)
+                .unwrap()
+                .iter()
+                .all(|&b| b == 0)
+        );
+
+        e.set_power_on(PowerOnState::Random { seed: 0x00C0_FFEE });
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        let wram_a = e.peek_memory(0x7E, 0x1000, 64).unwrap();
+        let aram_a = e.peek_aram(0x2000, 64).unwrap();
+        let vram_a = e.peek_vram(0x4000, 64).unwrap();
+        assert!(wram_a.iter().any(|&b| b != 0));
+        assert!(aram_a.iter().any(|&b| b != 0));
+        assert!(vram_a.iter().any(|&b| b != 0));
+        // Same seed, same machine.
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        assert_eq!(e.peek_memory(0x7E, 0x1000, 64).unwrap(), wram_a);
+        assert_eq!(e.peek_aram(0x2000, 64).unwrap(), aram_a);
+        assert_eq!(e.peek_vram(0x4000, 64).unwrap(), vram_a);
+        // Different seed, different machine.
+        e.set_power_on(PowerOnState::Random { seed: 0x00C0_FFEF });
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        assert_ne!(e.peek_memory(0x7E, 0x1000, 64).unwrap(), wram_a);
+        // Ones.
+        e.set_power_on(PowerOnState::Ones);
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        assert!(
+            e.peek_memory(0x7E, 0x1000, 64)
+                .unwrap()
+                .iter()
+                .all(|&b| b == 0xFF)
+        );
+        // CGRAM stays 15-bit.
+        assert!(e.peek_cgram().unwrap().iter().all(|&w| w & 0x8000 == 0));
     }
 
     #[test]

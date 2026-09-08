@@ -68,6 +68,7 @@ luna run [OPTIONS] <ROM>
 | `--audio-out <PATH>` | — | Capture the APU's 32 kHz stereo output to a WAV. |
 | `--force-mapper <M>` | auto | Force a mapper (`lorom`/`hirom`/`exhirom`/`sa1`/`superfx`) for a headerless / checksum-invalid ROM. |
 | `--force-region <R>` | header | Force the video standard (`ntsc`/`pal`) — changes the scanline count (262/312) and frame rate. |
+| `--power-on <S>` | `zero` | What RAM holds before the ROM boots: `zero`, `ones`, `random` (seed derived and printed) or `random=<seed>`. See *Power-on memory state* below. |
 | `--native-res` | off | Emit the native **512×448** frame for `--screenshot`/`--print-fbhash`: hi-res modes 5/6 & pseudo-512 keep both horizontal subpixels, interlace keeps both fields as lines. |
 | `--wdm-out <PATH>` | — | Write captured `WDM $xx` executions (the `SNES_ASSERT` channel) — a non-empty file means an assertion fired. |
 | `--print-fbhash` | off | Print `fbhash=<16-hex>`, a cross-arch-stable key for the displayed frame. |
@@ -99,6 +100,30 @@ The same option exists on `luna state` (with `--input`, asserts and
 traces), and `luna test` manifests take the run bound as `frames = N` /
 `[[checkpoint]] at_frame = N` for the same reason.
 
+**Power-on memory state (`--power-on`).** Real RAM does not come up
+zeroed, and luna's default all-zero machine hides every boot bug that
+depends on it: a ROM that forgets to force-blank the screen renders a
+black frame from zero VRAM/CGRAM, and passes. `--power-on random` fills
+WRAM, VRAM, CGRAM (kept to 15 bits), OAM and APU RAM with seeded
+pseudo-random bytes before the ROM boots — what ares does on power
+(`cpu.cpp`, `ppu.cpp`, `dsp.cpp`) and Mesen2's `Random` RAM state — so
+the bug shows on the emulator too. `ones` fills with `$FF` (Mesen2's
+`AllOnes`), the other classic tripwire. A soft reset keeps memory, as the
+hardware and both references do. Registers and latches are not
+randomised (ares does; Mesen2 does not).
+
+```bash
+# Boot under garbage RAM; the derived seed is printed so a failure replays.
+luna run --power-on random --until-frame 2 --print-fbhash game.sfc
+# → power-on: random (seed=0x18c2a5e34f9b1d07)
+#   fbhash=…
+# Replay that exact machine.
+luna run --power-on random=0x18c2a5e34f9b1d07 --until-frame 2 --print-fbhash game.sfc
+```
+
+Run a corpus in both modes: `luna test` manifests take `power_on =
+"random"` (+ `seed`, default 1) — see the homebrew CI chapter.
+
 ### `luna state` — JSON snapshot + diagnostics (the workhorse)
 
 ```
@@ -117,6 +142,7 @@ and is the hub for every headless diagnostic.
 | `--out <PATH>` | `-` | Where to write the JSON (`-` = stdout). |
 | `--force-mapper <M>` | auto | Force a mapper for headerless ROMs: `lorom`, `hirom`, `exhirom`, `sa1`, `superfx`. |
 | `--force-region <R>` | header | Force the video standard: `ntsc` or `pal`. |
+| `--power-on <S>` | `zero` | What RAM holds before the ROM boots: `zero`, `ones`, `random` (seed derived and printed) or `random=<seed>`. See *Power-on memory state* below. |
 | `--native-res` | off | As in `run` — native 512×448 output for `--screenshot` and `--print-fbhash`. |
 | `--sym <PATH>` | auto-detect `<rom>.sym` | Load a WLA-DX symbol file (annotated disasm, named addresses). |
 | `--dsp1-rom <PATH>` | — | Install `dsp1b.rom` firmware then load (Mario Kart, Pilotwings). Persists. |
@@ -288,6 +314,7 @@ forced-blank flag.
 |---|---|---|
 | `-n, --steps <N>` | `1000` | Warm-up instructions before capture begins. |
 | `--from-frame <F>` | — | Start the capture at PPU frame `F` (the first PNG is frame `F`; `-n` is then ignored). Frame-indexed like `state --until-frame`. |
+| `--power-on <S>` | `zero` | What RAM holds before the ROM boots: `zero`, `ones`, `random` (seed derived and printed) or `random=<seed>`. See *Power-on memory state* below. |
 | `-c, --count <N>` | `8` | Number of consecutive frames to capture. |
 | `--out-dir <DIR>` | `/tmp/luna_frames` | Output directory (created if absent). |
 | `--force-mapper <M>` | auto | As in `state`. |

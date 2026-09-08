@@ -24,7 +24,7 @@ pub(crate) fn run_wram_trace(
     use std::fmt::Write as _;
     const FRAME_BUDGET: u64 = 200_000;
     let mut em = luna_api::Emulator::new();
-    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, None) {
+    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, None, None) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }

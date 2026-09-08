@@ -7,6 +7,14 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- `--power-on zero|ones|random[=<seed>]` on `luna run` / `state` /
+  `frames`, `power_on` + `seed` manifest fields in `luna test`, and
+  `Emulator::set_power_on` (#224): what WRAM, VRAM, CGRAM (15-bit), OAM
+  and APU RAM hold before the ROM boots. `random` is what ares does on
+  power and Mesen2's `Random` RAM state; a seed reproduces the exact
+  machine (an unseeded `random` derives one and prints it). Catches the
+  boot bugs an all-zero machine hides (a missing forced-blank renders
+  black from zero VRAM/CGRAM and passes). Default stays `zero`.
 - `stats.mclk` / `stats.last_frame` (#223): every master cycle split by
   who consumed it — `cpu_active`, `cpu_wai`, `cpu_stp`, `dma`, `hdma`,
   `refresh` (+ `total`) — cumulative since reset and for the last
@@ -32,6 +40,10 @@ All notable user-facing changes to luna. Releases are cut from `main`
   `Emulator::peek_memory_checked` / `luna_api::state_json_schema`.
 
 ### Fixed
+- A soft reset now keeps APU RAM, as WRAM/VRAM already were (#224):
+  ares `dsp.cpp:199` randomises it on power only and Mesen2's
+  `Spc::Reset` never touches it; luna rebuilt the APU with zeroed ARAM.
+  The SPC700 / DSP / mailbox state still returns to power-on.
 - Guide: the state-JSON table placed `nmis_serviced` / the frame count
   under `stats`; they live in `scheduler` (#222). `--peek` help now says
   COUNT is hex.
