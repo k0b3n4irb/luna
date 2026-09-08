@@ -1340,7 +1340,21 @@ impl Snes {
     /// port). WRAM and ROM/SRAM/coproc-work-RAM return their real bytes; the
     /// `$2000-$5FFF` register band returns `0`.
     pub fn dbg_peek_bytes(&mut self, bank: u8, offset: u16, count: usize) -> Vec<u8> {
+        self.dbg_peek_bytes_checked(bank, offset, count).0
+    }
+
+    /// [`Self::dbg_peek_bytes`] plus the number of bytes in the range that
+    /// nothing maps (open bus — reported as `$FF`, the same value the bus
+    /// returns). A harness peeking `$40:0000` on a `LoROM` cart gets
+    /// `(vec![0xFF; n], n)` instead of a silent run of `$FF` (issue #222).
+    pub fn dbg_peek_bytes_checked(
+        &mut self,
+        bank: u8,
+        offset: u16,
+        count: usize,
+    ) -> (Vec<u8>, usize) {
         let mut out = Vec::with_capacity(count);
+        let mut unmapped = 0usize;
         for i in 0..count {
             let off = offset.wrapping_add(i as u16);
             let v = if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && off < 0x2000 {
@@ -1355,18 +1369,24 @@ impl Snes {
                 // the mapper. (Lumping it into the register band below made
                 // every I-RAM peek return 0, which silently broke SA-1 I-RAM
                 // inspection and cross-emulator I-RAM differentials.)
-                self.mapper.read(make_addr(bank, off)).unwrap_or(0xFF)
+                self.mapper.read(make_addr(bank, off)).unwrap_or_else(|| {
+                    unmapped += 1;
+                    0xFF
+                })
             } else if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && (0x2000..=0x5FFF).contains(&off)
             {
                 // PPU/APU/CPU/coproc register band — read side effects, so 0.
                 0
             } else {
                 // ROM / SRAM / coproc work-RAM — side-effect-free here.
-                self.mapper.read(make_addr(bank, off)).unwrap_or(0xFF)
+                self.mapper.read(make_addr(bank, off)).unwrap_or_else(|| {
+                    unmapped += 1;
+                    0xFF
+                })
             };
             out.push(v);
         }
-        out
+        (out, unmapped)
     }
 
     /// Debug poke: write `data` to WRAM (`$7E-$7F` or the `$00-3F`/`$80-BF`

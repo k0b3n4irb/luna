@@ -100,3 +100,66 @@ fn without_peeks_the_array_is_present_and_empty() {
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("state JSON");
     assert_eq!(json["peeks"].as_array().map(Vec::len), Some(0));
 }
+
+#[test]
+fn unmapped_peek_bytes_are_counted_not_silent() {
+    let rom = std::env::temp_dir().join("luna_cli_structured_peeks_unmapped.sfc");
+    synthetic_rom(&rom);
+    let out = Command::new(luna_bin())
+        .arg("state")
+        .arg(&rom)
+        .args([
+            "--force-mapper",
+            "lorom",
+            "-n",
+            "100",
+            "--out",
+            "-",
+            "--peek",
+            "40:0000:04",
+            "--peek",
+            "00:FFFC:02",
+        ])
+        .output()
+        .expect("run luna state");
+    assert!(out.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("state JSON");
+    let peeks = json["peeks"].as_array().expect("peeks array");
+
+    // `$40:0000` on a LoROM cart is open bus: `$FF` bytes AND the count
+    // that tells them apart from a ROM holding `$FF` (issue #222).
+    assert_eq!(peeks[0]["bytes_hex"], "ffffffff");
+    assert_eq!(peeks[0]["unmapped"], 4);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("4 of 4 byte(s) at $40:0000 are unmapped"),
+        "{stderr}"
+    );
+
+    // A mapped ROM range carries no `unmapped` key at all.
+    assert_eq!(peeks[1]["bytes_hex"], "0080");
+    assert!(peeks[1].get("unmapped").is_none());
+}
+
+#[test]
+fn state_schema_needs_no_rom_and_describes_the_out_payload() {
+    let out = Command::new(luna_bin())
+        .args(["state", "--schema"])
+        .output()
+        .expect("run luna state --schema");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let schema: serde_json::Value = serde_json::from_slice(&out.stdout).expect("schema JSON");
+    let props = schema["properties"].as_object().expect("object schema");
+    for key in ["rom", "cpu", "ppu", "dma", "scheduler", "stats", "peeks"] {
+        assert!(props.contains_key(key), "schema lacks `{key}`");
+    }
+    // The `peeks` entry shape is part of the contract too.
+    let peek = &schema["$defs"]["PeekOut"]["properties"];
+    for key in ["spec", "space", "addr", "bytes_hex", "unmapped", "error"] {
+        assert!(peek.get(key).is_some(), "PeekOut schema lacks `{key}`");
+    }
+}

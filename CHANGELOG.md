@@ -4,6 +4,27 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+- `luna run --until-frame F` and `luna frames --from-frame F` (#222):
+  frame-indexed capture on every capture command, so a visual baseline
+  is pinned to a PPU frame and survives codegen changes that shift the
+  instruction count (`state --until-frame` already had it; the guide now
+  documents all three with the baseline recipe).
+- `luna state --schema` (#222): prints the JSON Schema of the `--out`
+  payload (`EmulatorState` flattened + `peeks`), generated from the
+  serialising types — no ROM needed.
+- `--peek` reports **unmapped** bytes (#222): a range nothing maps still
+  reads `$FF` like the open bus, but the stderr dump now says so and the
+  JSON entry carries `unmapped = N`. New
+  `Emulator::peek_memory_checked` / `luna_api::state_json_schema`.
+
+### Fixed
+- Guide: the state-JSON table placed `nmis_serviced` / the frame count
+  under `stats`; they live in `scheduler` (#222). `--peek` help now says
+  COUNT is hex.
+
 ## [1.17.0] — 2026-08-09
 
 The zero-probe release: `[asserts.dma]` buckets exactly like the

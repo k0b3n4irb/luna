@@ -13,6 +13,7 @@ use crate::rom::load_rom_into;
 pub(crate) fn run_frames(
     rom: &std::path::Path,
     steps: u64,
+    from_frame: Option<u64>,
     count: u64,
     out_dir: &std::path::Path,
     force_mapper: Option<&str>,
@@ -52,7 +53,16 @@ pub(crate) fn run_frames(
             return ExitCode::from(1);
         }
     }
-    if let Err(e) = em.step(steps) {
+    if let Some(target) = from_frame {
+        // `--from-frame N` (issue #222): the first capture is PPU frame N.
+        // The loop below steps one frame per PNG, so stop one frame short.
+        while em.frame_count().unwrap_or(0) + 1 < target {
+            if em.step_until_frame(FRAME_BUDGET).unwrap_or(0) == 0 {
+                eprintln!("note: emulator halted before frame {target} — capturing from here");
+                break;
+            }
+        }
+    } else if let Err(e) = em.step(steps) {
         eprintln!("step warning (warm-up): {e}");
     }
     // Capture loop: one PNG per consecutive frame, tagged frame# + blank.

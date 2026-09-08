@@ -702,6 +702,25 @@ pub struct SpriteInfo {
     pub h: u16,
 }
 
+/// A side-effect-free memory peek with its open-bus accounting
+/// ([`Emulator::peek_memory_checked`], issue #222).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeekBytes {
+    /// The bytes read (`$FF` where nothing is mapped, like the bus).
+    pub bytes: Vec<u8>,
+    /// How many of `bytes` fell on an unmapped address.
+    pub unmapped: usize,
+}
+
+/// The JSON Schema of [`EmulatorState`] — the `state` JSON `luna state`
+/// / the MCP `state` tool emit — as pretty-printed JSON (issue #222). Lets
+/// a harness discover the nested field set without exploring by trial;
+/// generated from the same types, so it can never lag the output.
+pub fn state_json_schema() -> String {
+    let schema = schemars::schema_for!(EmulatorState);
+    serde_json::to_string_pretty(&schema).expect("schema serialises")
+}
+
 /// Cumulative metrics since reset.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Stats {
@@ -2166,6 +2185,22 @@ impl Emulator {
     pub fn peek_memory(&mut self, bank: u8, offset: u16, count: u16) -> Result<Vec<u8>, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         Ok(snes.dbg_peek_bytes(bank, offset, usize::from(count)))
+    }
+
+    /// [`Self::peek_memory`] that also reports how many bytes of the range
+    /// nothing maps (issue #222). Those bytes read `$FF` exactly as the open
+    /// bus does, so the count is the only way a caller can tell "the ROM
+    /// holds `$FF` here" from "nothing lives at this address" (e.g.
+    /// `$40:0000` on a `LoROM` cart).
+    pub fn peek_memory_checked(
+        &mut self,
+        bank: u8,
+        offset: u16,
+        count: u16,
+    ) -> Result<PeekBytes, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        let (bytes, unmapped) = snes.dbg_peek_bytes_checked(bank, offset, usize::from(count));
+        Ok(PeekBytes { bytes, unmapped })
     }
 
     /// Debug poke (L8): write bytes into WRAM (`$7E-$7F` or the `$00-3F`/
@@ -4315,6 +4350,36 @@ mod tests {
         // $00, $80.
         let bytes = e.peek_memory(0x00, 0xFFFC, 2).unwrap();
         assert_eq!(bytes, vec![0x00, 0x80]);
+    }
+
+    #[test]
+    fn peek_memory_checked_counts_unmapped_bytes() {
+        let mut e = Emulator::new();
+        assert!(matches!(
+            e.peek_memory_checked(0x00, 0x8000, 1),
+            Err(ApiError::NoRom)
+        ));
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        // ROM and WRAM: everything mapped.
+        let rom = e.peek_memory_checked(0x00, 0xFFFC, 2).unwrap();
+        assert_eq!(rom.bytes, vec![0x00, 0x80]);
+        assert_eq!(rom.unmapped, 0);
+        assert_eq!(e.peek_memory_checked(0x7E, 0x0000, 4).unwrap().unmapped, 0);
+        // The LoROM lower half of a bank ≥ $40 is open bus: `$FF` bytes AND
+        // the count that tells them apart from a ROM holding `$FF`.
+        let hole = e.peek_memory_checked(0x40, 0x0000, 4).unwrap();
+        assert_eq!(hole.bytes, vec![0xFF; 4]);
+        assert_eq!(hole.unmapped, 4);
+    }
+
+    #[test]
+    fn state_json_schema_names_the_top_level_blocks() {
+        let schema: serde_json::Value =
+            serde_json::from_str(&state_json_schema()).expect("valid JSON");
+        let props = schema["properties"].as_object().expect("object schema");
+        for key in ["rom", "cpu", "ppu", "dma", "scheduler", "stats"] {
+            assert!(props.contains_key(key), "schema lacks `{key}`");
+        }
     }
 
     #[test]
