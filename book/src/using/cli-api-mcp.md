@@ -436,7 +436,7 @@ MCP client sees how to drive the emulator before listing a single tool.
 | `scheduler` | Master-clock / line / frame scheduler state: `frame_count`, `ppu_line`, `nmis_serviced`, … |
 | `apu` | SPC700 + S-DSP state (`spc_stopped`, etc.). |
 | `dma` | Per-channel DMA/HDMA registers (see below). |
-| `stats` | Cumulative counters since reset: `instructions_executed`, `total_mclk`. |
+| `stats` | Cumulative counters since reset: `instructions_executed`, `instructions_active`, `total_mclk`, and `total_mclk` split by consumer — `mclk` (cumulative) and `last_frame` (the last completed PPU frame), each `{cpu_active, cpu_wai, cpu_stp, dma, hdma, refresh, total}`. See below. |
 | `sa1`, `dsp1`, `call_stack` | Coprocessor blocks (present when the cart has one) and the `--call-stack` capture. |
 | `peeks` | One entry per `--peek`, in order: `{spec, space: "cpu"\|"aram", addr, bytes_hex, unmapped?, error?}`. Always present (empty without `--peek`); a failed peek keeps its slot with an `error` string instead of vanishing; `unmapped` appears only when part of the range is open bus. |
 
@@ -445,6 +445,29 @@ MCP client sees how to drive the emulator before listing a single tool.
 luna state -n 1000000 --peek 7E:0200:04 --out - game.sfc \
   | jq -r '.peeks[0].bytes_hex'
 # → e.g. 00f04512
+```
+
+**Who used the cycles (`stats.mclk` / `stats.last_frame`).** `total_mclk`
+says how long the machine ran, not who used the time, and
+`instructions_executed` counts every tick of a CPU parked in `WAI`, so on
+an idle ROM *less* work per frame reads as *more* instructions. The
+buckets partition every master cycle exactly: `cpu_active` (instructions,
+interrupt dispatch, reset), `cpu_wai` (parked in `WAI`), `cpu_stp`, `dma`
+(general-purpose bursts), `hdma` (per-line transfers + table fetches +
+frame-start init) and `refresh` (the 40-clock DRAM refresh per scanline);
+`total` is their sum. `last_frame` is the same split for the last
+completed PPU frame — a frame boundary falls inside a bus access, so its
+`total` can differ from the nominal period (357 368 on NTSC) by that one
+access. `instructions_active` excludes the parked ticks.
+
+```bash
+# CPU headroom of the last frame: how much of it the game spent in WAI.
+luna state --until-frame 200 --out - game.sfc \
+  | jq '.stats.last_frame | {headroom: (.cpu_wai / .total), dma, hdma}'
+# → {"headroom": 0.71, "dma": 8536, "hdma": 6080}
+
+# What a boot zero-fill cost: the DMA bucket after the init code ran.
+luna state --until-frame 3 --out - game.sfc | jq '.stats.mclk.dma'
 ```
 
 The full nested field set is the JSON Schema `luna state --schema` prints —

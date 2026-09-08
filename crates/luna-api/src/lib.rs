@@ -721,13 +721,64 @@ pub fn state_json_schema() -> String {
     serde_json::to_string_pretty(&schema).expect("schema serialises")
 }
 
+/// Master cycles split by who consumed them (issue #223). The six
+/// consumer fields partition `total` exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, schemars::JsonSchema)]
+pub struct MclkBuckets {
+    /// CPU executing instructions (bus accesses + internal cycles,
+    /// interrupt dispatch, the reset sequence).
+    pub cpu_active: u64,
+    /// CPU parked in `WAI` waiting for an interrupt — the frame's headroom.
+    pub cpu_wai: u64,
+    /// CPU halted by `STP`.
+    pub cpu_stp: u64,
+    /// General-purpose DMA bursts (`$420B`), CPU halted.
+    pub dma: u64,
+    /// HDMA table fetches + transfers + frame-start init, charged as CPU
+    /// stalls at each scanline crossing.
+    pub hdma: u64,
+    /// The once-per-scanline DRAM refresh halt (40 master clocks).
+    pub refresh: u64,
+    /// Sum of the six buckets.
+    pub total: u64,
+}
+
+impl From<&luna_core::MclkBuckets> for MclkBuckets {
+    fn from(b: &luna_core::MclkBuckets) -> Self {
+        Self {
+            cpu_active: b.cpu_active,
+            cpu_wai: b.cpu_wai,
+            cpu_stp: b.cpu_stp,
+            dma: b.dma,
+            hdma: b.hdma,
+            refresh: b.refresh,
+            total: b.total(),
+        }
+    }
+}
+
 /// Cumulative metrics since reset.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Stats {
-    /// Total CPU instructions executed.
+    /// Total CPU steps, **including** the ticks of a CPU parked in `WAI` /
+    /// `STP` (one per step) — so on an idle ROM this grows *faster* when
+    /// the code does *less*. Use `instructions_active` for work done.
     pub instructions_executed: u64,
+    /// Steps that executed an instruction (a parked `WAI` / `STP` tick is
+    /// not one) — the count that tracks code size and work (issue #223).
+    pub instructions_active: u64,
     /// Total master cycles consumed.
     pub total_mclk: u64,
+    /// `total_mclk` split by consumer, cumulative since reset; the
+    /// buckets sum to `total_mclk` (issue #223).
+    pub mclk: MclkBuckets,
+    /// The same split for the last completed PPU frame (all zero until the
+    /// first frame completes). CPU headroom per frame is
+    /// `last_frame.cpu_wai / last_frame.total`; the frame's DMA budget is
+    /// `last_frame.dma`. Frame boundaries fall inside a bus access, so a
+    /// frame's `total` can differ from the nominal period by that one
+    /// access.
+    pub last_frame: MclkBuckets,
 }
 
 /// Value width for a narrowing memory-search session (issue #177).
@@ -1658,9 +1709,18 @@ impl Emulator {
                     }
                 },
             });
-        let stats = Stats {
-            instructions_executed: self.instructions_executed,
-            total_mclk: self.snes.as_ref().map_or(0, |s| s.total_mclk),
+        let stats = {
+            let acc = self.snes.as_ref().map(|s| &s.mclk_acc);
+            Stats {
+                instructions_executed: self.instructions_executed,
+                instructions_active: self
+                    .instructions_executed
+                    .saturating_sub(acc.map_or(0, |a| a.steps_idle)),
+                total_mclk: self.snes.as_ref().map_or(0, |s| s.total_mclk),
+                mclk: acc.map_or_else(MclkBuckets::default, |a| MclkBuckets::from(&a.cumulative)),
+                last_frame: acc
+                    .map_or_else(MclkBuckets::default, |a| MclkBuckets::from(&a.last_frame)),
+            }
         };
         let sa1 = self
             .snes
@@ -3707,7 +3767,20 @@ mod tests {
     /// Build a minimal 32 KB `LoROM` cart for tests. Has a valid reset
     /// vector + cartridge-checksum so the parser accepts it.
     fn demo_lorom() -> Vec<u8> {
+        demo_lorom_with(&[], None)
+    }
+
+    /// [`demo_lorom`] with `code` placed at `$8000` and, when given, the
+    /// NMI vectors (native `$FFEA` + emulation `$FFFA`) pointed at `nmi`.
+    fn demo_lorom_with(code: &[u8], nmi: Option<u16>) -> Vec<u8> {
         let mut rom = vec![0u8; 0x8000];
+        rom[..code.len()].copy_from_slice(code);
+        if let Some(v) = nmi {
+            for off in [0x7FEA, 0x7FFA] {
+                rom[off] = v as u8;
+                rom[off + 1] = (v >> 8) as u8;
+            }
+        }
         // Reset vector at LoROM $00:FFFC = ROM offset $7FFC → $8000.
         rom[0x7FFC] = 0x00;
         rom[0x7FFD] = 0x80;
@@ -3734,6 +3807,86 @@ mod tests {
         rom[0x7FDE] = checksum as u8;
         rom[0x7FDF] = (checksum >> 8) as u8;
         rom
+    }
+
+    #[test]
+    fn mclk_buckets_partition_total_and_wai_is_idle() {
+        // SEI ; LDA #$80 ; STA $4200 (NMI on) ; loop: WAI ; BRA loop ;
+        // nmi: RTI — the canonical "wait for VBlank" idle ROM.
+        let code = [0x78, 0xA9, 0x80, 0x8D, 0x00, 0x42, 0xCB, 0x80, 0xFD, 0x40];
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom_with(&code, Some(0x8009)))
+            .unwrap();
+        for _ in 0..3 {
+            e.step_until_frame(1_000_000).unwrap();
+        }
+        let st = e.state();
+        let s = &st.stats;
+        // Exact partition of the master clock, cumulative and per frame.
+        assert_eq!(s.mclk.total, s.total_mclk, "{:?}", s.mclk);
+        assert_eq!(
+            s.mclk.cpu_active
+                + s.mclk.cpu_wai
+                + s.mclk.cpu_stp
+                + s.mclk.dma
+                + s.mclk.hdma
+                + s.mclk.refresh,
+            s.mclk.total
+        );
+        // An idle ROM: WAI dominates, the CPU did very little, no DMA/HDMA.
+        assert!(s.mclk.cpu_wai > s.mclk.cpu_active * 10, "{:?}", s.mclk);
+        assert_eq!(s.mclk.dma, 0);
+        assert_eq!(s.mclk.hdma, 0);
+        assert_eq!(s.mclk.cpu_stp, 0);
+        // DRAM refresh: 40 mclk once per scanline, every line of every frame.
+        let lines = st.scheduler.frame_count * 262 + u64::from(st.scheduler.ppu_line);
+        assert!(
+            (s.mclk.refresh / 40).abs_diff(lines) <= 1,
+            "refresh {} lines {lines}",
+            s.mclk.refresh
+        );
+        // The last frame's buckets add up to one NTSC frame, give or take
+        // the bus access the boundary fell inside.
+        let frame = 262 * 1364;
+        assert!(
+            s.last_frame.total.abs_diff(frame) <= 48,
+            "last_frame {:?}",
+            s.last_frame
+        );
+        assert!(
+            s.last_frame.cpu_wai * 10 > s.last_frame.total * 9,
+            "{:?}",
+            s.last_frame
+        );
+        // Parked WAI ticks are steps but not instructions.
+        assert!(s.instructions_active < s.instructions_executed / 10);
+        assert!(s.instructions_active >= 4);
+    }
+
+    #[test]
+    fn mclk_dma_burst_lands_in_the_dma_bucket() {
+        // Fixed-source DMA of $1000 bytes from $00:8000 to $2118 (VRAM):
+        // LDA #$01 ; STA $4300 (mode 1, A→B) ; LDA #$18 ; STA $4301 ;
+        // LDX #$8000 ; STX $4302 ; LDA #$00 ; STA $4304 ;
+        // LDX #$1000 ; STX $4305 ; LDA #$01 ; STA $420B ; STP
+        let code = [
+            0x18, 0xFB, 0xC2, 0x10, // CLC ; XCE (native) ; REP #$10 (16-bit X)
+            0xA9, 0x01, 0x8D, 0x00, 0x43, 0xA9, 0x18, 0x8D, 0x01, 0x43, 0xA2, 0x00, 0x80, 0x8E,
+            0x02, 0x43, 0xA9, 0x00, 0x8D, 0x04, 0x43, 0xA2, 0x00, 0x10, 0x8E, 0x05, 0x43, 0xA9,
+            0x01, 0x8D, 0x0B, 0x42, 0xDB,
+        ];
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
+        e.step(200).unwrap();
+        let s = e.state().stats;
+        assert_eq!(s.mclk.total, s.total_mclk);
+        // 8 mclk per byte, plus the burst's fixed overhead.
+        assert!(s.mclk.dma >= 0x1000 * 8, "{:?}", s.mclk);
+        assert!(s.mclk.dma < 0x1000 * 8 + 200, "{:?}", s.mclk);
+        // A CPU halted by STP charges no clocks at all (`Cpu::step` returns
+        // before any bus access), so its bucket stays empty; the parked
+        // steps are still idle steps.
+        assert_eq!(s.mclk.cpu_stp, 0);
     }
 
     #[test]
