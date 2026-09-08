@@ -781,3 +781,84 @@ fbhash = "0000000000000000"
     let out = run(&["golden.toml"], &dir);
     assert!(out.status.success());
 }
+
+/// `power_on = "random"` (+ `seed`) fills RAM before the ROM boots, so a
+/// footprint floor on WRAM that the all-zero default fails now passes,
+/// and two runs with the same seed agree byte for byte (issue #224).
+#[test]
+fn power_on_random_manifest_fills_ram_reproducibly() {
+    let dir = fresh_dir("power_on");
+    // LDA #$0F ; STA $2100 (display on) ; LDA #$01 ; STA $212C (BG1 on
+    // main) ; BRA -2 — Mode 0 over whatever VRAM/CGRAM hold, so a
+    // garbage-RAM machine draws a garbage picture instead of black.
+    synthetic_rom(
+        &dir.join("game.sfc"),
+        &[
+            0xA9, 0x0F, 0x8D, 0x00, 0x21, 0xA9, 0x01, 0x8D, 0x2C, 0x21, 0x80, 0xFE,
+        ],
+    );
+    let manifest = |name: &str, power: &str| {
+        std::fs::write(
+            dir.join(name),
+            format!(
+                r#"
+rom = "game.sfc"
+force_mapper = "lorom"
+frames = 1
+{power}
+
+[asserts.footprint]
+wram = {{ nonzero_min = 100000 }}
+"#
+            ),
+        )
+        .unwrap();
+    };
+    manifest("zero.toml", "");
+    manifest("rnd.toml", "power_on = \"random\"\nseed = 7");
+    let zero = run(&["zero.toml"], &dir);
+    assert_eq!(
+        zero.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&zero.stdout)
+    );
+    let rnd = run(&["rnd.toml"], &dir);
+    assert!(
+        rnd.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rnd.stdout)
+    );
+
+    // Reproducible: the same seeded machine hashes the same frame twice,
+    // a different seed makes a different one — proven through `--update`
+    // writing the measured fbhash of a garbage-VRAM frame.
+    manifest(
+        "a.toml",
+        "power_on = \"random\"\nseed = 7\n[asserts]\nfbhash = \"0\"",
+    );
+    manifest(
+        "b.toml",
+        "power_on = \"random\"\nseed = 8\n[asserts]\nfbhash = \"0\"",
+    );
+    let _ = run(&["--update", "a.toml", "b.toml"], &dir);
+    let a = std::fs::read_to_string(dir.join("a.toml")).unwrap();
+    let b = std::fs::read_to_string(dir.join("b.toml")).unwrap();
+    let hash = |s: &str| {
+        s.lines()
+            .find_map(|l| l.trim().strip_prefix("fbhash = "))
+            .unwrap()
+            .to_string()
+    };
+    assert_ne!(hash(&a), "\"0\"");
+    assert_ne!(hash(&a), hash(&b));
+    manifest(
+        "c.toml",
+        "power_on = \"random\"\nseed = 7\n[asserts]\nfbhash = \"0\"",
+    );
+    let _ = run(&["--update", "c.toml"], &dir);
+    assert_eq!(
+        hash(&std::fs::read_to_string(dir.join("c.toml")).unwrap()),
+        hash(&a)
+    );
+}

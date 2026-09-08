@@ -19,11 +19,19 @@ pub(crate) fn run(
     native_res: bool,
     force_mapper: Option<&str>,
     force_region: Option<&str>,
+    power_on: Option<&str>,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
     // Shared loader (issue #95): honours `--force-mapper` so a bad-checksum
     // reference ROM (PeterLemon corpus) can reach `--print-fbhash` too.
-    if let Err(e) = load_rom_into(&mut em, rom_path, force_mapper, force_region, None) {
+    if let Err(e) = load_rom_into(
+        &mut em,
+        rom_path,
+        force_mapper,
+        force_region,
+        None,
+        power_on,
+    ) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }
