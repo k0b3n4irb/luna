@@ -19,7 +19,7 @@ use crate::rom::load_rom_into;
 /// One `--peek` result mirrored into the `--out` JSON (issue #175), so a
 /// harness reads peeks from the same machine-readable channel as the
 /// state instead of regex-parsing the stderr hexdump.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, schemars::JsonSchema)]
 struct PeekOut {
     /// The `--peek` spec verbatim.
     spec: String,
@@ -29,6 +29,10 @@ struct PeekOut {
     addr: u32,
     /// The bytes read, lowercase hex, two chars per byte.
     bytes_hex: String,
+    /// Number of bytes in the range that nothing maps (they read `$FF`,
+    /// like the open bus). Present only when non-zero (issue #222).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unmapped: Option<usize>,
     /// Present when the peek failed (bad spec / unknown symbol / error).
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
@@ -41,7 +45,15 @@ impl PeekOut {
             space,
             addr,
             bytes_hex: hex_str(bytes),
+            unmapped: None,
             error: None,
+        }
+    }
+
+    fn checked(spec: &str, addr: u32, peek: &luna_api::PeekBytes) -> Self {
+        Self {
+            unmapped: (peek.unmapped > 0).then_some(peek.unmapped),
+            ..Self::ok(spec, "cpu", addr, &peek.bytes)
         }
     }
 
@@ -51,6 +63,7 @@ impl PeekOut {
             space,
             addr: 0,
             bytes_hex: String::new(),
+            unmapped: None,
             error: Some(error),
         }
     }
@@ -58,11 +71,20 @@ impl PeekOut {
 
 /// The `--out` payload: the [`luna_api::EmulatorState`] fields at the top
 /// level (unchanged for existing consumers) plus the `peeks` array.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, schemars::JsonSchema)]
 struct StateOut<'a> {
     #[serde(flatten)]
     state: &'a luna_api::EmulatorState,
     peeks: &'a [PeekOut],
+}
+
+/// `luna state --schema`: the JSON Schema of the `--out` payload
+/// (`EmulatorState` flattened + `peeks`), pretty-printed (issue #222).
+/// Generated from the same types that serialise the JSON, so it can never
+/// lag the output.
+pub(crate) fn schema_json() -> String {
+    let schema = schemars::schema_for!(StateOut<'static>);
+    serde_json::to_string_pretty(&schema).expect("schema serialises")
 }
 
 /// `luna state` — exercise the public `luna-api` surface end-to-end.
@@ -547,12 +569,28 @@ pub(crate) fn run_state(
             },
         };
         match target {
-            Ok((bank, offset, count)) => match em.peek_memory(bank, offset, count) {
-                Ok(bytes) => {
-                    eprintln!("peek ${:02X}:{:04X} +{:04X}:", bank, offset, bytes.len());
-                    print_hex_dump(bank, offset, &bytes);
+            Ok((bank, offset, count)) => match em.peek_memory_checked(bank, offset, count) {
+                Ok(peek) => {
+                    eprintln!(
+                        "peek ${:02X}:{:04X} +{:04X}:",
+                        bank,
+                        offset,
+                        peek.bytes.len()
+                    );
+                    print_hex_dump(bank, offset, &peek.bytes);
+                    if peek.unmapped > 0 {
+                        // Open bus reads `$FF`; say so rather than let a
+                        // harness mistake it for ROM content (issue #222).
+                        eprintln!(
+                            "note: {} of {} byte(s) at ${:02X}:{:04X} are unmapped (open bus, read as $FF)",
+                            peek.unmapped,
+                            peek.bytes.len(),
+                            bank,
+                            offset
+                        );
+                    }
                     let addr = (u32::from(bank) << 16) | u32::from(offset);
-                    peek_outs.push(PeekOut::ok(spec, "cpu", addr, &bytes));
+                    peek_outs.push(PeekOut::checked(spec, addr, &peek));
                 }
                 Err(e) => {
                     eprintln!("error: peek_memory `{spec}`: {e}");

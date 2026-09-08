@@ -101,3 +101,39 @@ fn input_checkpoints_still_fire_when_the_budget_reaches_them() {
 
     let _ = std::fs::remove_file(&rom);
 }
+
+/// `run --until-frame F` stops at PPU frame F exactly like
+/// `state --until-frame F` (issue #222): the displayed-frame hash both
+/// print is the same key.
+#[test]
+fn run_until_frame_matches_state_until_frame() {
+    let rom = std::env::temp_dir().join("luna_cli_run_until_frame.sfc");
+    synthetic_rom(&rom);
+    let fbhash = |sub: &str| -> String {
+        let out = Command::new(luna_bin())
+            .arg(sub)
+            .arg(&rom)
+            .args([
+                "--force-mapper",
+                "lorom",
+                "--until-frame",
+                "30",
+                "--print-fbhash",
+            ])
+            .output()
+            .expect("run luna");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        stdout
+            .lines()
+            .find_map(|l| l.strip_prefix("fbhash="))
+            .expect("fbhash line")
+            .to_string()
+    };
+    assert_eq!(fbhash("run"), fbhash("state"));
+    assert_eq!(frame_count_after(&rom, &["--until-frame", "30"]), 30);
+}

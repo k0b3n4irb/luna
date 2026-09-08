@@ -8,6 +8,7 @@ use crate::rom::load_rom_into;
 pub(crate) fn run(
     rom_path: &std::path::Path,
     steps: u64,
+    until_frame: Option<u64>,
     screenshot: Option<&std::path::Path>,
     force_display: bool,
     bg: Option<u8>,
@@ -65,7 +66,34 @@ pub(crate) fn run(
     } else {
         Vec::new()
     };
-    if audio_out.is_some() {
+    if let Some(target_frame) = until_frame {
+        // `--until-frame` (issue #222): run to a PPU frame instead of the
+        // `-n` instruction count — the same semantics as `state`. Drain
+        // audio per frame so `--audio-out` still works.
+        const FRAME_BUDGET: u64 = 200_000;
+        while em.frame_count().unwrap_or(0) < target_frame {
+            match em.step_until_frame(FRAME_BUDGET) {
+                Ok(0) => {
+                    stopped = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(luna_api::ApiError::Panic(msg)) => {
+                    panic_msg = Some(msg);
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("error: step_until_frame: {e}");
+                    return ExitCode::from(1);
+                }
+            }
+            if audio_out.is_some()
+                && let Ok(mut chunk) = em.drain_audio(usize::MAX)
+            {
+                audio_samples.append(&mut chunk);
+            }
+        }
+    } else if audio_out.is_some() {
         // Step in 4 096-instruction batches, draining the APU's bounded
         // queue after each so it never saturates over a long run. A
         // short batch (`ran < want`) means the CPU hit STP.

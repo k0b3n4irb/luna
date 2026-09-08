@@ -61,6 +61,7 @@ luna run [OPTIONS] <ROM>
 |---|---|---|
 | `<ROM>` | — | Path to the `.sfc` / `.smc` ROM. |
 | `-n, --steps <N>` | `64` | CPU instructions to execute before dumping. |
+| `--until-frame <F>` | — | Run until PPU frame `F` instead of the `-n` count (which is then ignored). Pins a baseline to a **frame**, not an instruction count — see below. |
 | `--screenshot <PATH>` | — | Render a 256×224 PNG of the framebuffer to `PATH`. |
 | `--force-display` | off | Bypass INIDISP forced-blank so you see whatever is in VRAM/CGRAM. |
 | `--bg <1..=4>` | composited | Render ONLY that BG layer instead of the composited frame. |
@@ -80,6 +81,24 @@ luna run -n 3000000 --force-mapper lorom --print-fbhash "WaveHDMA.sfc"
 # → fbhash=7429bf441a1c7d6c   (record this as the test's expected value)
 ```
 
+**Index baselines by frame, not by instruction count.** A `-n` baseline
+lands on whatever the ROM is doing after N instructions, so any change to
+the code between boot and the capture — a codegen improvement, a longer
+zero-fill, five bytes more of crt0 — moves the capture onto another
+animation phase and the hash changes without any rendering regression.
+`--until-frame` stops at the start of PPU frame `F` instead, so the same
+game frame is captured before and after the change:
+
+```bash
+# Visual baseline at PPU frame 200 — stable across codegen changes.
+luna run --until-frame 200 --print-fbhash --screenshot f200.png "game.sfc"
+# → fbhash=303497668ba19add
+```
+
+The same option exists on `luna state` (with `--input`, asserts and
+traces), and `luna test` manifests take the run bound as `frames = N` /
+`[[checkpoint]] at_frame = N` for the same reason.
+
 ### `luna state` — JSON snapshot + diagnostics (the workhorse)
 
 ```
@@ -91,8 +110,10 @@ and is the hub for every headless diagnostic.
 
 | Option | Default | Purpose |
 |---|---|---|
-| `<ROM>` | — | Path to the ROM. |
+| `<ROM>` | — | Path to the ROM (not needed with `--schema`). |
 | `-n, --steps <N>` | `1000` | CPU instructions before snapshotting. |
+| `--until-frame <F>` | — | Run until PPU frame `F` (then snapshot) instead of the `-n` count, which is then ignored. Frame-indexed baselines and asserts (see `run`). |
+| `--schema` | off | Print the JSON Schema of the `--out` payload (§2) and exit — no ROM needed. |
 | `--out <PATH>` | `-` | Where to write the JSON (`-` = stdout). |
 | `--force-mapper <M>` | auto | Force a mapper for headerless ROMs: `lorom`, `hirom`, `exhirom`, `sa1`, `superfx`. |
 | `--force-region <R>` | header | Force the video standard: `ntsc` or `pal`. |
@@ -103,7 +124,7 @@ and is the hub for every headless diagnostic.
 | `--input <SCRIPT>` | — | Scripted joypad-1 input (§3). |
 | `--screenshot <PATH>` | — | Also write a PNG. |
 | `--audio-out <PATH>` | — | Also write a 32 kHz stereo WAV. |
-| `--peek <B:O:C>` | — | Hex-dump `COUNT` bytes at `BANK:OFFSET` to stderr (repeatable). Each result is also mirrored into the `--out` JSON `peeks` array (see §2) — the machine-readable channel a harness should parse. |
+| `--peek <B:O:C>` | — | Hex-dump `COUNT` bytes at `BANK:OFFSET` to stderr (repeatable; **all three fields are hex** — `7E:0200:20` is 32 bytes). The whole 24-bit space is readable: WRAM, ROM (including `$C0-$FF` HiROM banks), SRAM, coprocessor RAM; the `$2000-$5FFF` register band reads `0` (no side effects). An unmapped range reads `$FF` like the open bus, with a stderr note and an `unmapped` count in the JSON entry. Each result is mirrored into the `--out` JSON `peeks` array (see §2) — the machine-readable channel a harness should parse. |
 | `--dump-vram <PATH>` | — | Dump all 64 KB PPU VRAM (raw). |
 | `--dump-aram <PATH>` | — | Dump all 64 KB APU ARAM (raw). |
 | `--dump-coproc-ram <PATH>` | — | Dump coprocessor work RAM (Super FX Game Pak RAM), ungated. |
@@ -266,6 +287,7 @@ forced-blank flag.
 | Option | Default | Purpose |
 |---|---|---|
 | `-n, --steps <N>` | `1000` | Warm-up instructions before capture begins. |
+| `--from-frame <F>` | — | Start the capture at PPU frame `F` (the first PNG is frame `F`; `-n` is then ignored). Frame-indexed like `state --until-frame`. |
 | `-c, --count <N>` | `8` | Number of consecutive frames to capture. |
 | `--out-dir <DIR>` | `/tmp/luna_frames` | Output directory (created if absent). |
 | `--force-mapper <M>` | auto | As in `state`. |
@@ -411,11 +433,12 @@ MCP client sees how to drive the emulator before listing a single tool.
 | `cpu` | 65c816 registers `a/x/y/sp/pc/pb/db/dp/p` + flags. |
 | `cpu_regs` | Decoded MMIO/CPU register block. |
 | `ppu` | PPU registers + VRAM/CGRAM/OAM occupancy. |
-| `scheduler` | Master-clock / line / frame scheduler state. |
+| `scheduler` | Master-clock / line / frame scheduler state: `frame_count`, `ppu_line`, `nmis_serviced`, … |
 | `apu` | SPC700 + S-DSP state (`spc_stopped`, etc.). |
 | `dma` | Per-channel DMA/HDMA registers (see below). |
-| `stats` | Counters: `nmis_serviced`, frame count, instruction count, NMI rate, … |
-| `peeks` | One entry per `--peek`, in order: `{spec, space: "cpu"\|"aram", addr, bytes_hex, error?}`. Always present (empty without `--peek`); a failed peek keeps its slot with an `error` string instead of vanishing. |
+| `stats` | Cumulative counters since reset: `instructions_executed`, `total_mclk`. |
+| `sa1`, `dsp1`, `call_stack` | Coprocessor blocks (present when the cart has one) and the `--call-stack` capture. |
+| `peeks` | One entry per `--peek`, in order: `{spec, space: "cpu"\|"aram", addr, bytes_hex, unmapped?, error?}`. Always present (empty without `--peek`); a failed peek keeps its slot with an `error` string instead of vanishing; `unmapped` appears only when part of the range is open bus. |
 
 ```bash
 # The harness-friendly peek channel: read bytes from the JSON, not stderr.
@@ -424,7 +447,15 @@ luna state -n 1000000 --peek 7E:0200:04 --out - game.sfc \
 # → e.g. 00f04512
 ```
 
-(See the `luna-api` rustdoc for the full nested field set.)
+The full nested field set is the JSON Schema `luna state --schema` prints —
+generated from the same types that serialise the JSON, so it never lags
+the output. Use it to discover a field instead of exploring by trial:
+
+```bash
+# Every top-level block, then every field of the scheduler block.
+luna state --schema | jq -r '.properties | keys[]'
+luna state --schema | jq -r '.["$defs"].SchedulerState.properties | keys[]'
+```
 
 The `dma` block is the headless surface for the `$43xx` DMA/HDMA registers —
 which read `0` through `--peek` because they are **write-only on hardware**.
