@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand};
 
 mod bench;
 mod csv;
+mod diff;
 mod dumps;
 mod fmt;
 mod frames;
@@ -21,6 +22,7 @@ mod state;
 mod test_cmd;
 mod wram_trace;
 
+use diff::{DiffOptions, run_diff};
 use dumps::{run_assets_dump, run_spc_dump};
 use frames::run_frames;
 use run::run;
@@ -566,6 +568,54 @@ enum Command {
         #[arg(long)]
         input: Option<String>,
     },
+    /// Compare two ROMs frame by frame (issue #225): run both in one
+    /// process, hash the displayed frame at every PPU frame, and print
+    /// MATCH / DIFF for each requested frame — MATCH when A's frame `F`
+    /// equals B's frame at some `F ± tolerance` (the boot-length offset a
+    /// codegen change can introduce). The "compare at equal frame"
+    /// protocol that validates a compiler / library change. Exit 0 = all
+    /// match, 1 = any DIFF, 2 = usage error.
+    Diff {
+        /// The reference build.
+        rom_a: PathBuf,
+        /// The build under test.
+        rom_b: PathBuf,
+        /// PPU frames to compare, comma-separated (e.g. `200,400`).
+        #[arg(long, value_delimiter = ',', required = true)]
+        frames: Vec<u64>,
+        /// Accept a match up to this many frames away (`b = a ± n`).
+        #[arg(long, default_value_t = 0)]
+        tolerance: u64,
+        /// Scripted joypad-1 input applied to BOTH machines (`state --input`
+        /// grammar).
+        #[arg(long)]
+        input: Option<String>,
+        /// Write `frame_<F>_a.png` / `frame_<F>_b.png` here for every DIFF
+        /// frame.
+        #[arg(long = "screenshot-dir")]
+        screenshot_dir: Option<PathBuf>,
+        /// Also write a JSON report (`-` = stdout after the text lines).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Hash the frame with INIDISP forced-blank bypassed (as `run
+        /// --force-display`).
+        #[arg(long)]
+        force_display: bool,
+        /// Hash the native 512×448 frame (issue #115).
+        #[arg(long = "native-res")]
+        native_res: bool,
+        /// Force a cartridge mapper for both ROMs (lorom, hirom, exhirom,
+        /// sa1, superfx).
+        #[arg(long = "force-mapper")]
+        force_mapper: Option<String>,
+        /// Force the video standard for both ROMs (ntsc, pal).
+        #[arg(long = "force-region")]
+        force_region: Option<String>,
+        /// Power-on RAM state for both machines (`zero`, `ones`,
+        /// `random[=<seed>]` — issue #224).
+        #[arg(long = "power-on")]
+        power_on: Option<String>,
+    },
     /// Emit per-frame (vblank-aligned) WRAM page hashes for a
     /// confound-free cross-emulator differential. Each line is
     /// `<ppu_frame> <h0> <h1> ... <hN>` where each `h` is the FNV-1a
@@ -914,6 +964,35 @@ fn main() -> ExitCode {
             force_region.as_deref(),
             input.as_deref(),
             power_on.as_deref(),
+        ),
+        Command::Diff {
+            rom_a,
+            rom_b,
+            frames,
+            tolerance,
+            input,
+            screenshot_dir,
+            out,
+            force_display,
+            native_res,
+            force_mapper,
+            force_region,
+            power_on,
+        } => run_diff(
+            &rom_a,
+            &rom_b,
+            &frames,
+            &DiffOptions {
+                force_mapper: force_mapper.as_deref(),
+                force_region: force_region.as_deref(),
+                power_on: power_on.as_deref(),
+                input_script: input.as_deref(),
+                force_display,
+                native_res,
+                tolerance,
+                screenshot_dir: screenshot_dir.as_deref(),
+                out: out.as_deref(),
+            },
         ),
         Command::WramTrace {
             rom,

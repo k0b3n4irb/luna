@@ -320,6 +320,39 @@ forced-blank flag.
 | `--force-mapper <M>` | auto | As in `state`. |
 | `--input <SCRIPT>` | — | Joypad-1 script applied during warm-up (§3). |
 
+### `luna diff` — two ROMs at equal PPU frame (MATCH / DIFF)
+
+```
+luna diff <ROM_A> <ROM_B> --frames 200,400 [--tolerance N] [OPTIONS]
+```
+
+The "compare at equal frame" protocol that validates a compiler or
+library change: both builds run side by side in one process, the
+displayed frame is hashed at every PPU frame, and each requested frame
+prints `MATCH` when A's frame `F` equals B's frame at some `F ± tolerance`
+(the boot-length offset a codegen change can introduce — the offset is
+reported) or `DIFF` otherwise. Exit `0` = every frame matched, `1` = at
+least one `DIFF`, `2` = usage error — the `luna test` CI contract.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `--frames <F,…>` | — | PPU frames to compare (required). |
+| `--tolerance <N>` | `0` | Accept `b = a ± N` frames; the nearest offset wins. |
+| `--input <SCRIPT>` | — | Joypad-1 script applied to **both** machines (§3). |
+| `--screenshot-dir <DIR>` | — | Write `frame_<F>_a.png` / `frame_<F>_b.png` for every `DIFF` frame. |
+| `--out <PATH>` | — | JSON report (`-` = stdout after the text lines): `{a, b, tolerance, frames: [{frame, status, offset?, a_hash, b_hash, screenshot_a?, screenshot_b?}], diff_count}`. |
+| `--force-display`, `--native-res` | off | Hash as `run` does with the same flags. |
+| `--force-mapper`, `--force-region`, `--power-on` | — | Applied to both ROMs. |
+
+```bash
+# Did the new codegen change what the game draws? Two frames, boot offset allowed.
+luna diff build/old/game.sfc build/new/game.sfc --frames 200,400 --tolerance 3 \
+  --screenshot-dir /tmp/diff
+# frame 200: MATCH (offset +0) a=303497668ba19add b=303497668ba19add
+# frame 400: MATCH (offset -1) a=6b9aeb3479655b43 b=6b9aeb3479655b43
+# 2 frame(s): 2 match, 0 diff (tolerance ±3)
+```
+
 ### `luna wram-trace` — cross-emulator state differential
 
 ```

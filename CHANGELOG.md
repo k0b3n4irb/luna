@@ -7,6 +7,14 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- `luna diff a.sfc b.sfc --frames 200,400 [--tolerance N]` (#225): two
+  ROMs run side by side in one process, the displayed frame hashed at
+  every PPU frame, `MATCH` / `DIFF` per requested frame (a match may sit
+  up to `tolerance` frames away — the boot-length offset a codegen
+  change introduces — and reports the offset). `--screenshot-dir` writes
+  both pictures of every `DIFF` frame, `--out` a JSON report; exit
+  0 / 1 / 2 like `luna test`. The "compare at equal frame" protocol
+  OpenSNES ran as a script over ~20 `luna` invocations per frame.
 - `--power-on zero|ones|random[=<seed>]` on `luna run` / `state` /
   `frames`, `power_on` + `seed` manifest fields in `luna test`, and
   `Emulator::set_power_on` (#224): what WRAM, VRAM, CGRAM (15-bit), OAM
