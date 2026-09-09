@@ -13,6 +13,8 @@
 //! rom = "../game.sfc"            # relative to this manifest
 //! frames = 600                   # run bound: `frames` or `steps`
 //! input = "300:0x1000,310:0"     # optional --input script (or "@file")
+//! power_on = "random"            # zero (default) | ones | random (+ seed, default 1)
+//! seed = 12345
 //!
 //! [asserts]
 //! wdm_empty = true               # SNES_ASSERT never fired
@@ -70,6 +72,12 @@ struct Manifest {
     force_mapper: Option<String>,
     /// Optional forced region (`ntsc` / `pal`).
     force_region: Option<String>,
+    /// Power-on RAM state (issue #224): `zero` (default), `ones` or
+    /// `random`. With `random`, `seed` fixes the machine (default 1) so
+    /// the run is reproducible in CI.
+    power_on: Option<String>,
+    /// Seed for `power_on = "random"` (default 1).
+    seed: Option<u64>,
     /// Run bound: whole frames…
     frames: Option<u64>,
     /// …or raw instructions. One is required unless `[[checkpoint]]`s
@@ -577,12 +585,19 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
     input_entries.sort_by_key(|&(frame, _)| frame);
 
     let mut em = luna_api::Emulator::new();
+    // `power_on = "random"` in a manifest is always seeded (default 1):
+    // a CI failure must replay byte-for-byte.
+    let power_on = match m.power_on.as_deref().map(str::to_ascii_lowercase) {
+        Some(ref p) if p == "random" => Some(format!("random={}", m.seed.unwrap_or(1))),
+        other => other,
+    };
     load_rom_into(
         &mut em,
         &dir.join(&m.rom),
         m.force_mapper.as_deref(),
         m.force_region.as_deref(),
         None,
+        power_on.as_deref(),
     )?;
     if let Some(sym) = &m.sym {
         em.load_symbols(&dir.join(sym))

@@ -19,7 +19,7 @@ use crate::rom::load_rom_into;
 /// One `--peek` result mirrored into the `--out` JSON (issue #175), so a
 /// harness reads peeks from the same machine-readable channel as the
 /// state instead of regex-parsing the stderr hexdump.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, schemars::JsonSchema)]
 struct PeekOut {
     /// The `--peek` spec verbatim.
     spec: String,
@@ -29,6 +29,10 @@ struct PeekOut {
     addr: u32,
     /// The bytes read, lowercase hex, two chars per byte.
     bytes_hex: String,
+    /// Number of bytes in the range that nothing maps (they read `$FF`,
+    /// like the open bus). Present only when non-zero (issue #222).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unmapped: Option<usize>,
     /// Present when the peek failed (bad spec / unknown symbol / error).
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
@@ -41,7 +45,15 @@ impl PeekOut {
             space,
             addr,
             bytes_hex: hex_str(bytes),
+            unmapped: None,
             error: None,
+        }
+    }
+
+    fn checked(spec: &str, addr: u32, peek: &luna_api::PeekBytes) -> Self {
+        Self {
+            unmapped: (peek.unmapped > 0).then_some(peek.unmapped),
+            ..Self::ok(spec, "cpu", addr, &peek.bytes)
         }
     }
 
@@ -51,6 +63,7 @@ impl PeekOut {
             space,
             addr: 0,
             bytes_hex: String::new(),
+            unmapped: None,
             error: Some(error),
         }
     }
@@ -58,11 +71,20 @@ impl PeekOut {
 
 /// The `--out` payload: the [`luna_api::EmulatorState`] fields at the top
 /// level (unchanged for existing consumers) plus the `peeks` array.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, schemars::JsonSchema)]
 struct StateOut<'a> {
     #[serde(flatten)]
     state: &'a luna_api::EmulatorState,
     peeks: &'a [PeekOut],
+}
+
+/// `luna state --schema`: the JSON Schema of the `--out` payload
+/// (`EmulatorState` flattened + `peeks`), pretty-printed (issue #222).
+/// Generated from the same types that serialise the JSON, so it can never
+/// lag the output.
+pub(crate) fn schema_json() -> String {
+    let schema = schemars::schema_for!(StateOut<'static>);
+    serde_json::to_string_pretty(&schema).expect("schema serialises")
 }
 
 /// `luna state` — exercise the public `luna-api` surface end-to-end.
@@ -113,6 +135,7 @@ pub(crate) fn run_state(
     mem_trace_max: usize,
     mem_trace_bank: Option<&str>,
     mem_trace_addr: Option<&str>,
+    trace_writes: Option<&str>,
     dma_trace_path: Option<&std::path::Path>,
     dma_trace_from: u64,
     dma_trace_max: usize,
@@ -123,9 +146,10 @@ pub(crate) fn run_state(
     print_fbhash: bool,
     call_stack: bool,
     native_res: bool,
+    power_on: Option<&str>,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
-    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, dsp1_rom) {
+    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, dsp1_rom, power_on) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }
@@ -397,6 +421,23 @@ pub(crate) fn run_state(
             }
         },
     };
+    // `--trace-writes` (issue #226): an explicit offset list, writes only.
+    let parsed_writes: Option<Vec<u16>> = match trace_writes {
+        None => None,
+        Some(spec) => match crate::parsers::parse_offset_list(spec) {
+            Ok(list) => Some(list),
+            Err(e) => {
+                eprintln!("error: --trace-writes {e}");
+                return ExitCode::from(1);
+            }
+        },
+    };
+    let mem_filter = luna_api::MemTraceFilter {
+        bank: parsed_mem_bank,
+        offsets: parsed_mem_addr,
+        writes_only: parsed_writes.is_some(),
+        only_offsets: parsed_writes,
+    };
     if bridge_target != u64::MAX {
         let current = em.instructions_executed();
         if bridge_target > current {
@@ -417,7 +458,7 @@ pub(crate) fn run_state(
     }
     if mem_trace_path.is_some()
         && em.instructions_executed() >= mem_trace_from
-        && let Err(e) = em.enable_mem_trace(mem_trace_max, parsed_mem_bank, parsed_mem_addr)
+        && let Err(e) = em.enable_mem_trace_filtered(mem_trace_max, mem_filter.clone())
     {
         eprintln!("error: enable_mem_trace: {e}");
         return ExitCode::from(1);
@@ -437,7 +478,7 @@ pub(crate) fn run_state(
                 let _ = em.enable_cpu_trace(cpu_trace_max);
             }
             if mem_trace_path.is_some() && em.instructions_executed() >= mem_trace_from {
-                let _ = em.enable_mem_trace(mem_trace_max, parsed_mem_bank, parsed_mem_addr);
+                let _ = em.enable_mem_trace_filtered(mem_trace_max, mem_filter);
             }
         }
     }
@@ -547,12 +588,28 @@ pub(crate) fn run_state(
             },
         };
         match target {
-            Ok((bank, offset, count)) => match em.peek_memory(bank, offset, count) {
-                Ok(bytes) => {
-                    eprintln!("peek ${:02X}:{:04X} +{:04X}:", bank, offset, bytes.len());
-                    print_hex_dump(bank, offset, &bytes);
+            Ok((bank, offset, count)) => match em.peek_memory_checked(bank, offset, count) {
+                Ok(peek) => {
+                    eprintln!(
+                        "peek ${:02X}:{:04X} +{:04X}:",
+                        bank,
+                        offset,
+                        peek.bytes.len()
+                    );
+                    print_hex_dump(bank, offset, &peek.bytes);
+                    if peek.unmapped > 0 {
+                        // Open bus reads `$FF`; say so rather than let a
+                        // harness mistake it for ROM content (issue #222).
+                        eprintln!(
+                            "note: {} of {} byte(s) at ${:02X}:{:04X} are unmapped (open bus, read as $FF)",
+                            peek.unmapped,
+                            peek.bytes.len(),
+                            bank,
+                            offset
+                        );
+                    }
                     let addr = (u32::from(bank) << 16) | u32::from(offset);
-                    peek_outs.push(PeekOut::ok(spec, "cpu", addr, &bytes));
+                    peek_outs.push(PeekOut::checked(spec, addr, &peek));
                 }
                 Err(e) => {
                     eprintln!("error: peek_memory `{spec}`: {e}");

@@ -40,10 +40,11 @@
 //!   base64-encoded.
 //! - `enable_cpu_trace { max_events }` / `take_cpu_trace` → per-
 //!   instruction CPU trace ring.
-//! - `enable_mem_trace { max_events, bank?, lo?, hi? }` /
+//! - `enable_mem_trace { max_events, bank?, lo?, hi?, offsets?, writes_only? }` /
 //!   `take_mem_trace` → per-bus-access memory trace with filters.
 //! - `set_mouse { dx, dy, buttons }` / `set_superscope { x, y, buttons }`
 //!   → pointer-device input.
+//! - `enable_profile` / `take_profile` → master cycles per symbol (issue #227).
 //! - `enable_nocash_log` / `take_nocash_log` and `enable_wdm_log` /
 //!   `take_wdm_log` → the SDK assert/log channels ($21FC Nocash TTY
 //!   text + WDM assert hits).
@@ -465,6 +466,14 @@ pub struct EnableMemTraceParams {
     /// symbol. Mutually exclusive with `bank`/`lo`/`hi`.
     #[serde(default)]
     pub symbol: Option<String>,
+    /// Only record accesses whose low 16 bits are in this list (e.g.
+    /// `[0x2121, 0x2122, 0x420C]`) — the "who wrote this register" hunt
+    /// (issue #226). Composes with the other filters.
+    #[serde(default)]
+    pub offsets: Option<Vec<u16>>,
+    /// Record writes only.
+    #[serde(default)]
+    pub writes_only: Option<bool>,
 }
 
 /// `bp_add` parameters.
@@ -767,6 +776,10 @@ pub struct MemTraceLine {
     pub blank: bool,
     /// `true` if INIDISP forced-blank was set at the access.
     pub force_blank: bool,
+    /// Who performed the access: `"cpu"`, `"dma<n>"` or `"hdma<n>"`
+    /// (channel 0-7). DMA / HDMA writes carry the burst / line start
+    /// clock and the PC of the instruction whose access ran them.
+    pub origin: String,
     /// Nearest symbol for `addr` when a `.sym` table is loaded.
     pub symbol: Option<String>,
 }
@@ -797,6 +810,18 @@ pub struct WdmEvent {
     pub operand: u8,
     /// Nearest symbol for `pc` when a `.sym` table is loaded.
     pub symbol: Option<String>,
+}
+
+/// `take_profile` result (issue #227).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ProfileResult {
+    /// Master cycles across every sample (the `pct` denominator).
+    pub total_mclk: u64,
+    /// Instructions across every sample.
+    pub instructions: u64,
+    /// Rows, heaviest `mclk` first: `{symbol, addr, instructions, mclk,
+    /// idle_mclk, pct, pcs}`.
+    pub entries: Vec<luna_api::ProfileEntry>,
 }
 
 /// `take_wdm_log` result.
@@ -2114,8 +2139,16 @@ impl LunaServer {
                 }
                 None => (params.bank, offset_filter),
             };
-            em.enable_mem_trace(params.max_events, bank, offset_filter)
-                .map_err(|e| api_err_to_mcp(&e))?;
+            em.enable_mem_trace_filtered(
+                params.max_events,
+                luna_api::MemTraceFilter {
+                    bank,
+                    offsets: offset_filter,
+                    only_offsets: params.offsets.clone(),
+                    writes_only: params.writes_only.unwrap_or(false),
+                },
+            )
+            .map_err(|e| api_err_to_mcp(&e))?;
         }
         Ok(rmcp::Json(EmptyOk { ok: true }))
     }
@@ -2147,6 +2180,7 @@ impl LunaServer {
                 hclock: ev.hclock,
                 blank: ev.blank,
                 force_blank: ev.force_blank,
+                origin: ev.origin.label(),
                 symbol: syms.as_ref().and_then(|t| t.nearest(ev.addr_full)),
             })
             .collect();
@@ -2812,6 +2846,39 @@ impl LunaServer {
             em.enable_wdm_log().map_err(|e| api_err_to_mcp(&e))?;
         }
         Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Start the per-PC profiler (issue #227): from now on every step credits \
+                                its master cycles — bus + internal cycles plus the DMA / HDMA / \
+                                refresh stalls charged during it — to the instruction's address. \
+                                Restarting empties it. Read with `take_profile`."
+    )]
+    async fn enable_profile(&self) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_profile().map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Take the profile folded by symbol, heaviest `mclk` first: each PC goes \
+                                to the nearest loaded `.sym` label at or below it (FastROM mirror \
+                                aware); PCs no label covers fold onto their 256-byte page. `pct` is \
+                                the share of the profile's total master cycles, `idle_mclk` the part \
+                                spent parked in WAI/STP. Empties the profiler (it stays on)."
+    )]
+    async fn take_profile(&self) -> Result<rmcp::Json<ProfileResult>, ErrorData> {
+        let report = {
+            let mut em = self.emulator.lock().await;
+            em.take_profile().map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(ProfileResult {
+            total_mclk: report.total_mclk,
+            instructions: report.instructions,
+            entries: report.entries,
+        }))
     }
 
     #[rmcp::tool(
@@ -3712,6 +3779,8 @@ mod tests {
             lo: None,
             hi: None,
             symbol: None,
+            offsets: None,
+            writes_only: None,
         }))
         .await
         .unwrap();
@@ -3734,6 +3803,8 @@ mod tests {
                 lo: Some(0x2100),
                 hi: None,
                 symbol: None,
+                offsets: None,
+                writes_only: None,
             }))
             .await
             .is_err()
@@ -4415,6 +4486,8 @@ mod tests {
                 lo: None,
                 hi: None,
                 symbol: Some("monster_x".into()),
+                offsets: None,
+                writes_only: None,
             }))
             .await
             .is_err()
@@ -4426,6 +4499,8 @@ mod tests {
             lo: None,
             hi: None,
             symbol: Some("monster_x".into()),
+            offsets: None,
+            writes_only: None,
         }))
         .await
         .unwrap();

@@ -13,6 +13,8 @@ pub mod controller;
 pub mod coproc;
 pub mod cpu_regs;
 pub mod dma;
+pub mod mclk;
+pub mod power;
 pub mod snes;
 
 pub use apu_stub::{ApuStub, Phase as ApuPhase};
@@ -24,9 +26,12 @@ pub use luna_bus::{
     Dsp1TraceEvent, Dsp1TraceKind, Mapper, MapperKind, NullMapper, Sa1SideEvent, Sa1TraceEvent,
     SuperFxTraceEvent,
 };
+pub use mclk::{MclkAccounting, MclkBuckets, MclkKind};
+pub use power::{PowerOnRng, PowerOnState};
 pub use snes::{
-    CpuTraceEvent, CpuTraceLog, MailboxEvent, MailboxEventKind, MemEventKind, MemTraceEvent,
-    MemTraceLog, Sa1LogEvent, Snes, UnsupportedMapper,
+    CpuTraceEvent, CpuTraceLog, MailboxEvent, MailboxEventKind, MemEventKind, MemOrigin,
+    MemTraceEvent, MemTraceFilter, MemTraceLog, Profile, ProfileSample, Sa1LogEvent, Snes,
+    UnsupportedMapper,
 };
 
 /// A placeholder [`Mapper`] trait object that owns no ROM and claims no

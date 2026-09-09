@@ -61,12 +61,14 @@ luna run [OPTIONS] <ROM>
 |---|---|---|
 | `<ROM>` | — | Path to the `.sfc` / `.smc` ROM. |
 | `-n, --steps <N>` | `64` | CPU instructions to execute before dumping. |
+| `--until-frame <F>` | — | Run until PPU frame `F` instead of the `-n` count (which is then ignored). Pins a baseline to a **frame**, not an instruction count — see below. |
 | `--screenshot <PATH>` | — | Render a 256×224 PNG of the framebuffer to `PATH`. |
 | `--force-display` | off | Bypass INIDISP forced-blank so you see whatever is in VRAM/CGRAM. |
 | `--bg <1..=4>` | composited | Render ONLY that BG layer instead of the composited frame. |
 | `--audio-out <PATH>` | — | Capture the APU's 32 kHz stereo output to a WAV. |
 | `--force-mapper <M>` | auto | Force a mapper (`lorom`/`hirom`/`exhirom`/`sa1`/`superfx`) for a headerless / checksum-invalid ROM. |
 | `--force-region <R>` | header | Force the video standard (`ntsc`/`pal`) — changes the scanline count (262/312) and frame rate. |
+| `--power-on <S>` | `zero` | What RAM holds before the ROM boots: `zero`, `ones`, `random` (seed derived and printed) or `random=<seed>`. See *Power-on memory state* below. |
 | `--native-res` | off | Emit the native **512×448** frame for `--screenshot`/`--print-fbhash`: hi-res modes 5/6 & pseudo-512 keep both horizontal subpixels, interlace keeps both fields as lines. |
 | `--wdm-out <PATH>` | — | Write captured `WDM $xx` executions (the `SNES_ASSERT` channel) — a non-empty file means an assertion fired. |
 | `--print-fbhash` | off | Print `fbhash=<16-hex>`, a cross-arch-stable key for the displayed frame. |
@@ -80,6 +82,48 @@ luna run -n 3000000 --force-mapper lorom --print-fbhash "WaveHDMA.sfc"
 # → fbhash=7429bf441a1c7d6c   (record this as the test's expected value)
 ```
 
+**Index baselines by frame, not by instruction count.** A `-n` baseline
+lands on whatever the ROM is doing after N instructions, so any change to
+the code between boot and the capture — a codegen improvement, a longer
+zero-fill, five bytes more of crt0 — moves the capture onto another
+animation phase and the hash changes without any rendering regression.
+`--until-frame` stops at the start of PPU frame `F` instead, so the same
+game frame is captured before and after the change:
+
+```bash
+# Visual baseline at PPU frame 200 — stable across codegen changes.
+luna run --until-frame 200 --print-fbhash --screenshot f200.png "game.sfc"
+# → fbhash=303497668ba19add
+```
+
+The same option exists on `luna state` (with `--input`, asserts and
+traces), and `luna test` manifests take the run bound as `frames = N` /
+`[[checkpoint]] at_frame = N` for the same reason.
+
+**Power-on memory state (`--power-on`).** Real RAM does not come up
+zeroed, and luna's default all-zero machine hides every boot bug that
+depends on it: a ROM that forgets to force-blank the screen renders a
+black frame from zero VRAM/CGRAM, and passes. `--power-on random` fills
+WRAM, VRAM, CGRAM (kept to 15 bits), OAM and APU RAM with seeded
+pseudo-random bytes before the ROM boots — what ares does on power
+(`cpu.cpp`, `ppu.cpp`, `dsp.cpp`) and Mesen2's `Random` RAM state — so
+the bug shows on the emulator too. `ones` fills with `$FF` (Mesen2's
+`AllOnes`), the other classic tripwire. A soft reset keeps memory, as the
+hardware and both references do. Registers and latches are not
+randomised (ares does; Mesen2 does not).
+
+```bash
+# Boot under garbage RAM; the derived seed is printed so a failure replays.
+luna run --power-on random --until-frame 2 --print-fbhash game.sfc
+# → power-on: random (seed=0x18c2a5e34f9b1d07)
+#   fbhash=…
+# Replay that exact machine.
+luna run --power-on random=0x18c2a5e34f9b1d07 --until-frame 2 --print-fbhash game.sfc
+```
+
+Run a corpus in both modes: `luna test` manifests take `power_on =
+"random"` (+ `seed`, default 1) — see the homebrew CI chapter.
+
 ### `luna state` — JSON snapshot + diagnostics (the workhorse)
 
 ```
@@ -91,11 +135,14 @@ and is the hub for every headless diagnostic.
 
 | Option | Default | Purpose |
 |---|---|---|
-| `<ROM>` | — | Path to the ROM. |
+| `<ROM>` | — | Path to the ROM (not needed with `--schema`). |
 | `-n, --steps <N>` | `1000` | CPU instructions before snapshotting. |
+| `--until-frame <F>` | — | Run until PPU frame `F` (then snapshot) instead of the `-n` count, which is then ignored. Frame-indexed baselines and asserts (see `run`). |
+| `--schema` | off | Print the JSON Schema of the `--out` payload (§2) and exit — no ROM needed. |
 | `--out <PATH>` | `-` | Where to write the JSON (`-` = stdout). |
 | `--force-mapper <M>` | auto | Force a mapper for headerless ROMs: `lorom`, `hirom`, `exhirom`, `sa1`, `superfx`. |
 | `--force-region <R>` | header | Force the video standard: `ntsc` or `pal`. |
+| `--power-on <S>` | `zero` | What RAM holds before the ROM boots: `zero`, `ones`, `random` (seed derived and printed) or `random=<seed>`. See *Power-on memory state* below. |
 | `--native-res` | off | As in `run` — native 512×448 output for `--screenshot` and `--print-fbhash`. |
 | `--sym <PATH>` | auto-detect `<rom>.sym` | Load a WLA-DX symbol file (annotated disasm, named addresses). |
 | `--dsp1-rom <PATH>` | — | Install `dsp1b.rom` firmware then load (Mario Kart, Pilotwings). Persists. |
@@ -103,7 +150,7 @@ and is the hub for every headless diagnostic.
 | `--input <SCRIPT>` | — | Scripted joypad-1 input (§3). |
 | `--screenshot <PATH>` | — | Also write a PNG. |
 | `--audio-out <PATH>` | — | Also write a 32 kHz stereo WAV. |
-| `--peek <B:O:C>` | — | Hex-dump `COUNT` bytes at `BANK:OFFSET` to stderr (repeatable). Each result is also mirrored into the `--out` JSON `peeks` array (see §2) — the machine-readable channel a harness should parse. |
+| `--peek <B:O:C>` | — | Hex-dump `COUNT` bytes at `BANK:OFFSET` to stderr (repeatable; **all three fields are hex** — `7E:0200:20` is 32 bytes). The whole 24-bit space is readable: WRAM, ROM (including `$C0-$FF` HiROM banks), SRAM, coprocessor RAM; the `$2000-$5FFF` register band reads `0` (no side effects). An unmapped range reads `$FF` like the open bus, with a stderr note and an `unmapped` count in the JSON entry. Each result is mirrored into the `--out` JSON `peeks` array (see §2) — the machine-readable channel a harness should parse. |
 | `--dump-vram <PATH>` | — | Dump all 64 KB PPU VRAM (raw). |
 | `--dump-aram <PATH>` | — | Dump all 64 KB APU ARAM (raw). |
 | `--dump-coproc-ram <PATH>` | — | Dump coprocessor work RAM (Super FX Game Pak RAM), ungated. |
@@ -114,6 +161,9 @@ and is the hub for every headless diagnostic.
 | `--dsp-trace <PATH>` | — | CSV of every DSP register write: `spc_cycles,reg,name,value`, with `name` decoded (`V0_ADSR1`, `KON`, `FLG`, …). |
 | `--dsp-trace-max <N>` | `100000` | Cap on captured DSP writes. |
 | `--sa1-log <PATH>` | — | CSV of every `$2200-$23FF` SA-1 MMIO access. |
+| `--mem-trace <PATH>` | — | CSV of bus accesses: `mclk_total,frame_ntsc,pc,addr,kind,value,line,hclock,blank,force_blank,origin`. `origin` = `cpu`, `dma<n>` or `hdma<n>` — DMA / HDMA writes (B-bus `$21xx` and A-bus) are in the same stream as CPU accesses, stamped with the burst / line start and the PC whose access ran them. Gated by `--mem-trace-from` / `--mem-trace-max`. |
+| `--mem-trace-bank <B>`, `--mem-trace-addr <LO:HI>` | all | Bank / offset-range filters for `--mem-trace` (both must match). |
+| `--trace-writes <O,…>` | — | With `--mem-trace`: keep only **writes** to these hex offsets, any bank (`2121,2122,420C`). The "who wrote this register" hunt — see below. |
 | `--print-fbhash` | off | Print `fbhash=<16-hex>` for the displayed frame — the same key as `run`, so an `--input`-driven test can carry a visual baseline. |
 | `--wdm-out <PATH>` | — | Write captured `WDM $xx` (`SNES_ASSERT`) executions — keeps the assertion oracle on an `--input` test. |
 
@@ -150,6 +200,27 @@ luna state -n 8000000 --force-mapper lorom --force-region pal --native-res \
   --screenshot /tmp/font.png --print-fbhash \
   "PPU/Interlace/InterlaceFont/InterlaceFont.sfc"   # → a 512×448 PNG
 ```
+
+#### Who wrote this register? (`--trace-writes`)
+
+A palette entry comes out wrong and nothing in the game's own code
+writes it. Rather than diffing `ppu.cgram` between two builds, record
+every write to the CGRAM ports with its author — CPU instruction, DMA
+burst or HDMA channel — and where in the frame it landed:
+
+```bash
+luna state --until-frame 120 --mem-trace writes.csv --trace-writes 2121,2122 game.sfc
+# mclk_total,frame_ntsc,pc,addr,kind,value,line,hclock,blank,force_blank,origin
+# 41822160,117,$00:8A31,$00:2121,W,$02,226,410,1,0,cpu      <- CGADD = 2, in VBlank
+# 41822168,117,$00:8A34,$00:2122,W,$1F,226,418,1,0,cpu
+# 42127540,117,$00:8C02,$00:2122,W,$00,12,1180,0,0,hdma1    <- HDMA channel 1, line 12, mid-frame
+```
+
+The `hdma1` row at line 12 is the overwrite: an HDMA channel enabled
+mid-frame whose table still points at stale data. The same stream is
+available over MCP (`enable_mem_trace { offsets, writes_only }`), and a
+`run_until_mem_write` / `bp_add mem` watchpoint fires on the DMA / HDMA
+write too.
 
 #### Coprocessor liveness and the DSP-1 handshake
 
@@ -266,10 +337,87 @@ forced-blank flag.
 | Option | Default | Purpose |
 |---|---|---|
 | `-n, --steps <N>` | `1000` | Warm-up instructions before capture begins. |
+| `--from-frame <F>` | — | Start the capture at PPU frame `F` (the first PNG is frame `F`; `-n` is then ignored). Frame-indexed like `state --until-frame`. |
+| `--power-on <S>` | `zero` | What RAM holds before the ROM boots: `zero`, `ones`, `random` (seed derived and printed) or `random=<seed>`. See *Power-on memory state* below. |
 | `-c, --count <N>` | `8` | Number of consecutive frames to capture. |
 | `--out-dir <DIR>` | `/tmp/luna_frames` | Output directory (created if absent). |
 | `--force-mapper <M>` | auto | As in `state`. |
 | `--input <SCRIPT>` | — | Joypad-1 script applied during warm-up (§3). |
+
+### `luna diff` — two ROMs at equal PPU frame (MATCH / DIFF)
+
+```
+luna diff <ROM_A> <ROM_B> --frames 200,400 [--tolerance N] [OPTIONS]
+```
+
+The "compare at equal frame" protocol that validates a compiler or
+library change: both builds run side by side in one process, the
+displayed frame is hashed at every PPU frame, and each requested frame
+prints `MATCH` when A's frame `F` equals B's frame at some `F ± tolerance`
+(the boot-length offset a codegen change can introduce — the offset is
+reported) or `DIFF` otherwise. Exit `0` = every frame matched, `1` = at
+least one `DIFF`, `2` = usage error — the `luna test` CI contract.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `--frames <F,…>` | — | PPU frames to compare (required). |
+| `--tolerance <N>` | `0` | Accept `b = a ± N` frames; the nearest offset wins. |
+| `--input <SCRIPT>` | — | Joypad-1 script applied to **both** machines (§3). |
+| `--screenshot-dir <DIR>` | — | Write `frame_<F>_a.png` / `frame_<F>_b.png` for every `DIFF` frame. |
+| `--out <PATH>` | — | JSON report (`-` = stdout after the text lines): `{a, b, tolerance, frames: [{frame, status, offset?, a_hash, b_hash, screenshot_a?, screenshot_b?}], diff_count}`. |
+| `--force-display`, `--native-res` | off | Hash as `run` does with the same flags. |
+| `--force-mapper`, `--force-region`, `--power-on` | — | Applied to both ROMs. |
+
+```bash
+# Did the new codegen change what the game draws? Two frames, boot offset allowed.
+luna diff build/old/game.sfc build/new/game.sfc --frames 200,400 --tolerance 3 \
+  --screenshot-dir /tmp/diff
+# frame 200: MATCH (offset +0) a=303497668ba19add b=303497668ba19add
+# frame 400: MATCH (offset -1) a=6b9aeb3479655b43 b=6b9aeb3479655b43
+# 2 frame(s): 2 match, 0 diff (tolerance ±3)
+```
+
+### `luna profile` — real master cycles per symbol
+
+```
+luna profile [OPTIONS] <ROM>
+```
+
+Where the time goes, measured rather than estimated: every step credits
+its master cycles — bus + internal cycles **plus the DMA / HDMA / refresh
+stalls charged during it** — to the instruction's address, and the report
+folds those onto the nearest `.sym` label at or below the PC (FastROM
+mirror aware: a `00:` label catches code running in `$80:`, a `c0:`
+HiROM label matches bank `$C0`). PCs no label covers fold onto their
+256-byte page. Rows come heaviest first; `idle%` is the share spent
+parked in `WAI` / `STP` under that label.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `-n, --steps <N>` | `3000000` | Instructions to profile (after `--from-frame`). |
+| `--until-frame <F>` | — | Profile until PPU frame `F` instead of `-n`. |
+| `--from-frame <F>` | `0` | Start at PPU frame `F` — skip the boot to profile the game loop. |
+| `--input <SCRIPT>` | — | Joypad-1 script (§3). |
+| `--sym <PATH>` | auto `<rom>.sym` | Labels to fold onto. |
+| `--top <N>` | `25` | Rows printed (the JSON has them all). |
+| `--out <PATH>` | — | JSON report (`-` = stdout after the table): `{rom, from_frame, end_frame, total_mclk, instructions, entries: [{symbol, addr, instructions, mclk, idle_mclk, pct, pcs}]}`. |
+| `--force-mapper`, `--force-region`, `--power-on` | — | As elsewhere. |
+
+```bash
+# The game loop, boot excluded: frames 120..600.
+luna profile --from-frame 120 --until-frame 600 --top 5 game.sfc
+# profile: frames 120..600, 1848213 instructions, 171536640 master cycles, 42 symbol(s)
+#       %            mclk         instr   idle%     pcs  symbol
+#  61.02%       104672880        483840   99.6%       2  WaitForVBlank
+#  12.40%        21270530        291840    0.0%      61  DrawSprites
+#   7.91%        13570200         96480    0.0%      14  DmaOamTable      <- the DMA burst is charged here
+#   …
+```
+
+`WaitForVBlank` at 61 % idle is the frame's headroom (the same number
+`stats.last_frame.cpu_wai` gives); a DMA burst's cost lands on the
+instruction that triggered it, so a "cheap" `STA $420B` routine can top
+the table — that is the real cost.
 
 ### `luna wram-trace` — cross-emulator state differential
 
@@ -411,11 +559,12 @@ MCP client sees how to drive the emulator before listing a single tool.
 | `cpu` | 65c816 registers `a/x/y/sp/pc/pb/db/dp/p` + flags. |
 | `cpu_regs` | Decoded MMIO/CPU register block. |
 | `ppu` | PPU registers + VRAM/CGRAM/OAM occupancy. |
-| `scheduler` | Master-clock / line / frame scheduler state. |
+| `scheduler` | Master-clock / line / frame scheduler state: `frame_count`, `ppu_line`, `nmis_serviced`, … |
 | `apu` | SPC700 + S-DSP state (`spc_stopped`, etc.). |
 | `dma` | Per-channel DMA/HDMA registers (see below). |
-| `stats` | Counters: `nmis_serviced`, frame count, instruction count, NMI rate, … |
-| `peeks` | One entry per `--peek`, in order: `{spec, space: "cpu"\|"aram", addr, bytes_hex, error?}`. Always present (empty without `--peek`); a failed peek keeps its slot with an `error` string instead of vanishing. |
+| `stats` | Cumulative counters since reset: `instructions_executed`, `instructions_active`, `total_mclk`, and `total_mclk` split by consumer — `mclk` (cumulative) and `last_frame` (the last completed PPU frame), each `{cpu_active, cpu_wai, cpu_stp, dma, hdma, refresh, total}`. See below. |
+| `sa1`, `dsp1`, `call_stack` | Coprocessor blocks (present when the cart has one) and the `--call-stack` capture. |
+| `peeks` | One entry per `--peek`, in order: `{spec, space: "cpu"\|"aram", addr, bytes_hex, unmapped?, error?}`. Always present (empty without `--peek`); a failed peek keeps its slot with an `error` string instead of vanishing; `unmapped` appears only when part of the range is open bus. |
 
 ```bash
 # The harness-friendly peek channel: read bytes from the JSON, not stderr.
@@ -424,7 +573,38 @@ luna state -n 1000000 --peek 7E:0200:04 --out - game.sfc \
 # → e.g. 00f04512
 ```
 
-(See the `luna-api` rustdoc for the full nested field set.)
+**Who used the cycles (`stats.mclk` / `stats.last_frame`).** `total_mclk`
+says how long the machine ran, not who used the time, and
+`instructions_executed` counts every tick of a CPU parked in `WAI`, so on
+an idle ROM *less* work per frame reads as *more* instructions. The
+buckets partition every master cycle exactly: `cpu_active` (instructions,
+interrupt dispatch, reset), `cpu_wai` (parked in `WAI`), `cpu_stp`, `dma`
+(general-purpose bursts), `hdma` (per-line transfers + table fetches +
+frame-start init) and `refresh` (the 40-clock DRAM refresh per scanline);
+`total` is their sum. `last_frame` is the same split for the last
+completed PPU frame — a frame boundary falls inside a bus access, so its
+`total` can differ from the nominal period (357 368 on NTSC) by that one
+access. `instructions_active` excludes the parked ticks.
+
+```bash
+# CPU headroom of the last frame: how much of it the game spent in WAI.
+luna state --until-frame 200 --out - game.sfc \
+  | jq '.stats.last_frame | {headroom: (.cpu_wai / .total), dma, hdma}'
+# → {"headroom": 0.71, "dma": 8536, "hdma": 6080}
+
+# What a boot zero-fill cost: the DMA bucket after the init code ran.
+luna state --until-frame 3 --out - game.sfc | jq '.stats.mclk.dma'
+```
+
+The full nested field set is the JSON Schema `luna state --schema` prints —
+generated from the same types that serialise the JSON, so it never lags
+the output. Use it to discover a field instead of exploring by trial:
+
+```bash
+# Every top-level block, then every field of the scheduler block.
+luna state --schema | jq -r '.properties | keys[]'
+luna state --schema | jq -r '.["$defs"].SchedulerState.properties | keys[]'
+```
 
 The `dma` block is the headless surface for the `$43xx` DMA/HDMA registers —
 which read `0` through `--peek` because they are **write-only on hardware**.
@@ -534,7 +714,8 @@ method, so the MCP transport adds reach, not capability.
 | `render_palette` | `render_palette_png` | CGRAM as a 16×16 swatch-grid PNG. |
 | `render_sprite_sheet` | `render_sprite_sheet_png` | All 128 OAM sprites as a transparent PNG sheet. |
 | `enable_cpu_trace` / `take_cpu_trace` | `enable_cpu_trace` / `take_cpu_trace_log` | Per-instruction CPU trace ring (PC + registers). |
-| `enable_mem_trace` / `take_mem_trace` | `enable_mem_trace` / `take_mem_trace_log` | Per-bus-access trace with bank/offset-range filters. |
+| `enable_profile` / `take_profile` | `enable_profile` / `take_profile` | Master cycles per symbol (folded, heaviest first); `take_profile_raw` for per-PC samples. |
+| `enable_mem_trace` / `take_mem_trace` | `enable_mem_trace_filtered` / `take_mem_trace_log` | Per-bus-access trace with bank / offset-range / offset-list / writes-only filters; every event carries `origin` (`cpu`, `dma<n>`, `hdma<n>`). |
 | `bp_add` | `bp_add_exec` / `bp_add_mem` | Register an exec breakpoint or a read/write watchpoint range. `mirror: false` makes a mem watch bank-exact (default follows WRAM/MMIO mirrors); `name` (defaulting to the `symbol` used) labels it in `bp_list`. |
 | `bp_set_enabled` | `bp_set_enabled` | Disable/re-enable without removing — id, name and hit count survive. |
 | `bp_remove` / `bp_clear_all` / `bp_list` | `bp_remove` / `bp_clear` / `bp_list` | Manage the registry. `bp_list` rows now carry `enabled`, `hit_count` (mem: at most one per instruction), `mirror` and `name`. |
