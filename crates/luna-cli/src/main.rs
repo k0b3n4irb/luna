@@ -10,19 +10,23 @@ use clap::{Parser, Subcommand};
 
 mod bench;
 mod csv;
+mod diff;
 mod dumps;
 mod fmt;
 mod frames;
 mod output;
 mod parsers;
+mod profile;
 mod rom;
 mod run;
 mod state;
 mod test_cmd;
 mod wram_trace;
 
+use diff::{DiffOptions, run_diff};
 use dumps::{run_assets_dump, run_spc_dump};
 use frames::run_frames;
+use profile::{ProfileOptions, run_profile};
 use run::run;
 use state::run_state;
 use wram_trace::run_wram_trace;
@@ -59,6 +63,13 @@ enum Command {
         /// Maximum number of CPU instructions to execute before dumping.
         #[arg(short = 'n', long, default_value_t = 64)]
         steps: u64,
+        /// Run until PPU frame N (then dump), instead of stopping at the
+        /// `-n` instruction count — same as `state --until-frame`. Pins a
+        /// `--print-fbhash` / `--screenshot` baseline to a PPU frame so a
+        /// codegen change that shifts the instruction count cannot move
+        /// the capture onto another animation phase (issue #222).
+        #[arg(long = "until-frame")]
+        until_frame: Option<u64>,
         /// If set, render a 256×224 PNG of the composited framebuffer
         /// and write it to the given path.
         #[arg(long)]
@@ -120,6 +131,13 @@ enum Command {
         /// the `PeterLemon` corpus as PAL to match krom's reference captures.
         #[arg(long = "force-region")]
         force_region: Option<String>,
+        /// What RAM holds before the ROM boots (issue #224): `zero`
+        /// (default), `ones`, `random` (a seed is derived and printed) or
+        /// `random=<seed>` (decimal or 0x hex — replays an exact machine).
+        /// Fills WRAM, VRAM, CGRAM, OAM and APU RAM; a boot bug that only
+        /// shows on real hardware's garbage RAM shows here too.
+        #[arg(long = "power-on")]
+        power_on: Option<String>,
     },
     /// Run manifest-driven homebrew tests (issue #181): one TOML per
     /// test (rom, input, run bound, asserts), executed in-process
@@ -174,7 +192,14 @@ enum Command {
     /// going through any transport.
     State {
         /// Path to the .sfc / .smc ROM file.
-        rom: PathBuf,
+        #[arg(required_unless_present = "schema")]
+        rom: Option<PathBuf>,
+        /// Print the JSON Schema of the state JSON (`EmulatorState`, plus
+        /// the `peeks` array `--out` adds) to stdout and exit — no ROM
+        /// needed. The machine-readable map of every nested field a harness
+        /// can `jq` (issue #222).
+        #[arg(long)]
+        schema: bool,
         /// CPU instructions to execute before snapshotting.
         #[arg(short = 'n', long, default_value_t = 1000)]
         steps: u64,
@@ -190,6 +215,13 @@ enum Command {
         /// the `PeterLemon` corpus as PAL to match krom's reference captures.
         #[arg(long = "force-region")]
         force_region: Option<String>,
+        /// What RAM holds before the ROM boots (issue #224): `zero`
+        /// (default), `ones`, `random` (a seed is derived and printed) or
+        /// `random=<seed>` (decimal or 0x hex — replays an exact machine).
+        /// Fills WRAM, VRAM, CGRAM, OAM and APU RAM; a boot bug that only
+        /// shows on real hardware's garbage RAM shows here too.
+        #[arg(long = "power-on")]
+        power_on: Option<String>,
         /// Install a DSP coprocessor firmware (`dsp1b.rom`) into luna's
         /// firmware folder, then load — needed for DSP-1 games (Super
         /// Mario Kart, Pilotwings). Persists for future runs.
@@ -282,11 +314,15 @@ enum Command {
         #[arg(long)]
         superscope: Option<String>,
         /// Optional memory peek(s) after snapshot.  Format:
-        /// `BANK:OFFSET:COUNT` (all hex, no `0x` prefix), or a WLA-DX
-        /// label `NAME[:COUNT]` resolved through the loaded `.sym`
-        /// table (auto-detected `<rom>.sym` or `--sym`; count defaults
-        /// to 1).  Can be specified multiple times.  Output goes to
-        /// stderr as a labelled hex dump.  Examples:
+        /// `BANK:OFFSET:COUNT` (ALL hex, no `0x` prefix — `:20` is 32
+        /// bytes), or a WLA-DX label `NAME[:COUNT]` resolved through the
+        /// loaded `.sym` table (auto-detected `<rom>.sym` or `--sym`;
+        /// count defaults to 1).  Can be specified multiple times.  The
+        /// whole 24-bit space is readable (WRAM, ROM incl. `$C0-$FF`
+        /// `HiROM`, SRAM, coproc RAM); the `$2000-$5FFF` register band
+        /// reads `0` (no side effects) and an unmapped range reads `$FF`
+        /// with a stderr note and `unmapped` in the JSON entry.  Output
+        /// goes to stderr as a labelled hex dump.  Examples:
         /// `--peek 7E:0200:220`, `--peek monster_x:2`.
         #[arg(long = "peek")]
         peek: Vec<String>,
@@ -466,6 +502,13 @@ enum Command {
         /// Composes with `--mem-trace-bank` (both must match).
         #[arg(long = "mem-trace-addr")]
         mem_trace_addr: Option<String>,
+        /// The "who wrote this register" hunt (issue #226): record only
+        /// WRITES to these hex offsets (any bank), e.g. `2121,2122,420C`.
+        /// Each row's `origin` column says who — `cpu`, `dma<n>` or
+        /// `hdma<n>` — with the frame / line / PC. Composes with
+        /// `--mem-trace-bank`; needs `--mem-trace <PATH>`.
+        #[arg(long = "trace-writes", requires = "mem_trace")]
+        trace_writes: Option<String>,
         /// Optional DMA→VRAM transfer-time trace. Captures every byte an
         /// MDMA writes to `$2118/$2119` as CSV
         /// (`seq,frame,line,blank,force_blank,src,vram_word,reg,value`) —
@@ -499,6 +542,12 @@ enum Command {
         /// Warm-up CPU instructions to execute before capturing begins.
         #[arg(short = 'n', long, default_value_t = 1000)]
         steps: u64,
+        /// Start the capture at PPU frame N instead of after the `-n`
+        /// warm-up instructions (which are then ignored) — the first PNG
+        /// is frame N. Frame-indexed like `state --until-frame`, so the
+        /// sequence is stable across codegen changes (issue #222).
+        #[arg(long = "from-frame")]
+        from_frame: Option<u64>,
         /// Number of consecutive frames to capture.
         #[arg(short = 'c', long = "count", default_value_t = 8)]
         count: u64,
@@ -515,11 +564,108 @@ enum Command {
         /// the `PeterLemon` corpus as PAL to match krom's reference captures.
         #[arg(long = "force-region")]
         force_region: Option<String>,
+        /// What RAM holds before the ROM boots (issue #224): `zero`
+        /// (default), `ones`, `random` (a seed is derived and printed) or
+        /// `random=<seed>` (decimal or 0x hex — replays an exact machine).
+        /// Fills WRAM, VRAM, CGRAM, OAM and APU RAM; a boot bug that only
+        /// shows on real hardware's garbage RAM shows here too.
+        #[arg(long = "power-on")]
+        power_on: Option<String>,
         /// Scripted joypad-1 input, same `frame:hex` format as
         /// `state --input`, applied during the warm-up so the capture
         /// can land in gameplay rather than at a title screen.
         #[arg(long)]
         input: Option<String>,
+    },
+    /// Compare two ROMs frame by frame (issue #225): run both in one
+    /// process, hash the displayed frame at every PPU frame, and print
+    /// MATCH / DIFF for each requested frame — MATCH when A's frame `F`
+    /// equals B's frame at some `F ± tolerance` (the boot-length offset a
+    /// codegen change can introduce). The "compare at equal frame"
+    /// protocol that validates a compiler / library change. Exit 0 = all
+    /// match, 1 = any DIFF, 2 = usage error.
+    Diff {
+        /// The reference build.
+        rom_a: PathBuf,
+        /// The build under test.
+        rom_b: PathBuf,
+        /// PPU frames to compare, comma-separated (e.g. `200,400`).
+        #[arg(long, value_delimiter = ',', required = true)]
+        frames: Vec<u64>,
+        /// Accept a match up to this many frames away (`b = a ± n`).
+        #[arg(long, default_value_t = 0)]
+        tolerance: u64,
+        /// Scripted joypad-1 input applied to BOTH machines (`state --input`
+        /// grammar).
+        #[arg(long)]
+        input: Option<String>,
+        /// Write `frame_<F>_a.png` / `frame_<F>_b.png` here for every DIFF
+        /// frame.
+        #[arg(long = "screenshot-dir")]
+        screenshot_dir: Option<PathBuf>,
+        /// Also write a JSON report (`-` = stdout after the text lines).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Hash the frame with INIDISP forced-blank bypassed (as `run
+        /// --force-display`).
+        #[arg(long)]
+        force_display: bool,
+        /// Hash the native 512×448 frame (issue #115).
+        #[arg(long = "native-res")]
+        native_res: bool,
+        /// Force a cartridge mapper for both ROMs (lorom, hirom, exhirom,
+        /// sa1, superfx).
+        #[arg(long = "force-mapper")]
+        force_mapper: Option<String>,
+        /// Force the video standard for both ROMs (ntsc, pal).
+        #[arg(long = "force-region")]
+        force_region: Option<String>,
+        /// Power-on RAM state for both machines (`zero`, `ones`,
+        /// `random[=<seed>]` — issue #224).
+        #[arg(long = "power-on")]
+        power_on: Option<String>,
+    },
+    /// Real master cycles per symbol (issue #227): every step credits its
+    /// cycles — bus + internal cycles plus the DMA / HDMA / refresh
+    /// stalls charged during it — to the instruction's address; the
+    /// report folds those onto the nearest `.sym` label (or a 256-byte
+    /// page without one), heaviest first. Replaces static instruction
+    /// weights with what the machine paid.
+    Profile {
+        /// Path to the .sfc / .smc ROM file.
+        rom: PathBuf,
+        /// CPU instructions to profile (after `--from-frame`).
+        #[arg(short = 'n', long, default_value_t = 3_000_000)]
+        steps: u64,
+        /// Profile until PPU frame N instead of the `-n` count.
+        #[arg(long = "until-frame")]
+        until_frame: Option<u64>,
+        /// Start profiling at PPU frame N (warm-up before it is not
+        /// counted) — e.g. skip the boot to profile the game loop.
+        #[arg(long = "from-frame", default_value_t = 0)]
+        from_frame: u64,
+        /// Scripted joypad-1 input (`state --input` grammar).
+        #[arg(long)]
+        input: Option<String>,
+        /// WLA-DX `.sym` to fold PCs onto (overrides the `<rom>.sym`
+        /// auto-detection).
+        #[arg(long)]
+        sym: Option<PathBuf>,
+        /// Rows to print (the JSON report always has them all).
+        #[arg(long, default_value_t = 25)]
+        top: usize,
+        /// Write the full report as JSON (`-` = stdout after the table).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Force a cartridge mapper (lorom, hirom, exhirom, sa1, superfx).
+        #[arg(long = "force-mapper")]
+        force_mapper: Option<String>,
+        /// Force the video standard (ntsc, pal).
+        #[arg(long = "force-region")]
+        force_region: Option<String>,
+        /// Power-on RAM state (`zero`, `ones`, `random[=<seed>]`).
+        #[arg(long = "power-on")]
+        power_on: Option<String>,
     },
     /// Emit per-frame (vblank-aligned) WRAM page hashes for a
     /// confound-free cross-emulator differential. Each line is
@@ -667,6 +813,7 @@ fn main() -> ExitCode {
         Command::Run {
             rom,
             steps,
+            until_frame,
             screenshot,
             force_display,
             bg,
@@ -677,9 +824,11 @@ fn main() -> ExitCode {
             native_res,
             force_mapper,
             force_region,
+            power_on,
         } => run(
             &rom,
             steps,
+            until_frame,
             screenshot.as_deref(),
             force_display,
             bg,
@@ -690,6 +839,7 @@ fn main() -> ExitCode {
             native_res,
             force_mapper.as_deref(),
             force_region.as_deref(),
+            power_on.as_deref(),
         ),
         Command::Test {
             paths,
@@ -715,9 +865,11 @@ fn main() -> ExitCode {
         ),
         Command::State {
             rom,
+            schema,
             steps,
             force_mapper,
             force_region,
+            power_on,
             dsp1_rom,
             sym,
             load_state,
@@ -761,6 +913,7 @@ fn main() -> ExitCode {
             mem_trace_max,
             mem_trace_bank,
             mem_trace_addr,
+            trace_writes,
             dma_trace,
             dma_trace_from,
             dma_trace_max,
@@ -770,80 +923,156 @@ fn main() -> ExitCode {
             print_fbhash,
             call_stack,
             native_res,
-        } => run_state(
-            &rom,
-            steps,
-            force_mapper.as_deref(),
-            force_region.as_deref(),
-            dump_vram.as_deref(),
-            dump_coproc_ram.as_deref(),
-            dump_aram.as_deref(),
-            &out,
-            screenshot.as_deref(),
-            audio_out.as_deref(),
-            input.as_deref(),
-            &port1,
-            &port2,
-            mouse.as_deref(),
-            superscope.as_deref(),
-            &peek,
-            &assert,
-            &assert_aram,
-            &assert_vram,
-            &assert_cgram,
-            until_frame,
-            srm_in.as_deref(),
-            srm_out.as_deref(),
-            apu_log.as_deref(),
-            dsp_trace.as_deref(),
-            dsp_trace_max,
-            sa1_log.as_deref(),
-            sa1_side_log.as_deref(),
-            sa1_trace.as_deref(),
-            sa1_trace_max,
-            superfx_trace.as_deref(),
-            superfx_trace_max,
-            dsp1_trace.as_deref(),
-            dsp1_trace_max,
-            dsp1_trace_ports,
-            dsp1_trace_commands.as_deref(),
-            spc_trace.as_deref(),
-            spc_trace_max,
-            cpu_trace.as_deref(),
-            cpu_trace_from,
-            cpu_trace_max,
-            mem_trace.as_deref(),
-            mem_trace_from,
-            mem_trace_max,
-            mem_trace_bank.as_deref(),
-            mem_trace_addr.as_deref(),
-            dma_trace.as_deref(),
-            dma_trace_from,
-            dma_trace_max,
-            dsp1_rom.as_deref(),
-            sym.as_deref(),
-            load_state.as_deref(),
-            wdm_out.as_deref(),
-            print_fbhash,
-            call_stack,
-            native_res,
-        ),
+        } => {
+            if schema {
+                // `--schema` needs no ROM: print the `--out` payload's JSON
+                // Schema and stop (issue #222).
+                println!("{}", state::schema_json());
+                return ExitCode::SUCCESS;
+            }
+            // clap enforces `required_unless_present = "schema"`, so a
+            // missing ROM here is unreachable; keep the message anyway.
+            let Some(rom) = rom else {
+                eprintln!("error: <ROM> is required unless --schema is given");
+                return ExitCode::from(2);
+            };
+            run_state(
+                &rom,
+                steps,
+                force_mapper.as_deref(),
+                force_region.as_deref(),
+                dump_vram.as_deref(),
+                dump_coproc_ram.as_deref(),
+                dump_aram.as_deref(),
+                &out,
+                screenshot.as_deref(),
+                audio_out.as_deref(),
+                input.as_deref(),
+                &port1,
+                &port2,
+                mouse.as_deref(),
+                superscope.as_deref(),
+                &peek,
+                &assert,
+                &assert_aram,
+                &assert_vram,
+                &assert_cgram,
+                until_frame,
+                srm_in.as_deref(),
+                srm_out.as_deref(),
+                apu_log.as_deref(),
+                dsp_trace.as_deref(),
+                dsp_trace_max,
+                sa1_log.as_deref(),
+                sa1_side_log.as_deref(),
+                sa1_trace.as_deref(),
+                sa1_trace_max,
+                superfx_trace.as_deref(),
+                superfx_trace_max,
+                dsp1_trace.as_deref(),
+                dsp1_trace_max,
+                dsp1_trace_ports,
+                dsp1_trace_commands.as_deref(),
+                spc_trace.as_deref(),
+                spc_trace_max,
+                cpu_trace.as_deref(),
+                cpu_trace_from,
+                cpu_trace_max,
+                mem_trace.as_deref(),
+                mem_trace_from,
+                mem_trace_max,
+                mem_trace_bank.as_deref(),
+                mem_trace_addr.as_deref(),
+                trace_writes.as_deref(),
+                dma_trace.as_deref(),
+                dma_trace_from,
+                dma_trace_max,
+                dsp1_rom.as_deref(),
+                sym.as_deref(),
+                load_state.as_deref(),
+                wdm_out.as_deref(),
+                print_fbhash,
+                call_stack,
+                native_res,
+                power_on.as_deref(),
+            )
+        }
         Command::Frames {
             rom,
             steps,
+            from_frame,
             count,
             out_dir,
             force_mapper,
             force_region,
+            power_on,
             input,
         } => run_frames(
             &rom,
             steps,
+            from_frame,
             count,
             &out_dir,
             force_mapper.as_deref(),
             force_region.as_deref(),
             input.as_deref(),
+            power_on.as_deref(),
+        ),
+        Command::Diff {
+            rom_a,
+            rom_b,
+            frames,
+            tolerance,
+            input,
+            screenshot_dir,
+            out,
+            force_display,
+            native_res,
+            force_mapper,
+            force_region,
+            power_on,
+        } => run_diff(
+            &rom_a,
+            &rom_b,
+            &frames,
+            &DiffOptions {
+                force_mapper: force_mapper.as_deref(),
+                force_region: force_region.as_deref(),
+                power_on: power_on.as_deref(),
+                input_script: input.as_deref(),
+                force_display,
+                native_res,
+                tolerance,
+                screenshot_dir: screenshot_dir.as_deref(),
+                out: out.as_deref(),
+            },
+        ),
+        Command::Profile {
+            rom,
+            steps,
+            until_frame,
+            from_frame,
+            input,
+            sym,
+            top,
+            out,
+            force_mapper,
+            force_region,
+            power_on,
+        } => run_profile(
+            &rom,
+            &ProfileOptions {
+                steps,
+                until_frame,
+                from_frame,
+                input_script: input.as_deref(),
+                sym: sym.as_deref(),
+                top,
+                out: out.as_deref(),
+                force_mapper: force_mapper.as_deref(),
+                force_region: force_region.as_deref(),
+                power_on: power_on.as_deref(),
+            },
         ),
         Command::WramTrace {
             rom,
@@ -938,7 +1167,9 @@ fn serve_mcp(
     // errors — an MCP client can't fix a bad --rom path interactively.
     let mut em = luna_api::Emulator::new();
     if let Some(rom) = rom {
-        if let Err(e) = crate::rom::load_rom_into(&mut em, rom, force_mapper, force_region, None) {
+        if let Err(e) =
+            crate::rom::load_rom_into(&mut em, rom, force_mapper, force_region, None, None)
+        {
             eprintln!("error: {e}");
             return ExitCode::from(1);
         }

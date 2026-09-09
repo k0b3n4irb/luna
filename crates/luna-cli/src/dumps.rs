@@ -19,7 +19,7 @@ pub(crate) fn run_spc_dump(
     input_script: Option<&str>,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
-    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, dsp1_rom) {
+    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, dsp1_rom, None) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }
@@ -98,7 +98,7 @@ pub(crate) fn run_assets_dump(
     input_script: Option<&str>,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
-    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, dsp1_rom) {
+    if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, dsp1_rom, None) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }

@@ -10,7 +10,16 @@ pub(crate) fn load_rom_into(
     force_mapper: Option<&str>,
     force_region: Option<&str>,
     dsp1_rom: Option<&std::path::Path>,
+    power_on: Option<&str>,
 ) -> Result<(), String> {
+    // `--power-on` (issue #224): what RAM holds before the ROM boots.
+    // Applied by the `load_rom*` below; a derived seed is printed so a
+    // failure under `random` can be replayed with `random=<seed>`.
+    let state = parse_power_on(power_on)?;
+    if let luna_api::PowerOnState::Random { seed } = state {
+        eprintln!("power-on: random (seed=0x{seed:016x})");
+    }
+    em.set_power_on(state);
     match force_region {
         Some(r) => {
             let region = match r.to_ascii_lowercase().as_str() {
@@ -65,4 +74,72 @@ pub(crate) fn load_rom_into(
         }
     }
     Ok(())
+}
+
+/// Parse a `--power-on` / manifest `power_on` value: `zero` (default),
+/// `ones`, `random` (seed derived from the clock + pid, printed by the
+/// caller) or `random=<seed>` (decimal or `0x` hex).
+pub(crate) fn parse_power_on(spec: Option<&str>) -> Result<luna_api::PowerOnState, String> {
+    use luna_api::PowerOnState;
+    let Some(spec) = spec else {
+        return Ok(PowerOnState::Zero);
+    };
+    let lower = spec.trim().to_ascii_lowercase();
+    match lower.as_str() {
+        "zero" | "zeros" => Ok(PowerOnState::Zero),
+        "ones" => Ok(PowerOnState::Ones),
+        "random" => Ok(PowerOnState::Random {
+            seed: derived_seed(),
+        }),
+        s => {
+            let Some(seed) = s.strip_prefix("random=") else {
+                return Err(format!(
+                    "unknown --power-on '{spec}' (zero, ones, random, random=<seed>)"
+                ));
+            };
+            let seed = seed.strip_prefix("0x").map_or_else(
+                || seed.parse::<u64>().ok(),
+                |hex| u64::from_str_radix(hex, 16).ok(),
+            );
+            seed.map(|seed| PowerOnState::Random { seed })
+                .ok_or_else(|| format!("bad --power-on seed in '{spec}' (decimal or 0x hex)"))
+        }
+    }
+}
+
+/// A fresh seed for `random` without one: wall clock mixed with the pid,
+/// never zero.
+fn derived_seed() -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    let seed = nanos ^ (u64::from(std::process::id()).rotate_left(32));
+    if seed == 0 { 0x5EED } else { seed }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_power_on;
+    use luna_api::PowerOnState;
+
+    #[test]
+    fn power_on_spec_parses_every_form() {
+        assert_eq!(parse_power_on(None).unwrap(), PowerOnState::Zero);
+        assert_eq!(parse_power_on(Some("zero")).unwrap(), PowerOnState::Zero);
+        assert_eq!(parse_power_on(Some("ONES")).unwrap(), PowerOnState::Ones);
+        assert_eq!(
+            parse_power_on(Some("random=42")).unwrap(),
+            PowerOnState::Random { seed: 42 }
+        );
+        assert_eq!(
+            parse_power_on(Some("random=0xdead")).unwrap(),
+            PowerOnState::Random { seed: 0xDEAD }
+        );
+        assert!(matches!(
+            parse_power_on(Some("random")).unwrap(),
+            PowerOnState::Random { seed } if seed != 0
+        ));
+        assert!(parse_power_on(Some("random=zz")).is_err());
+        assert!(parse_power_on(Some("garbage")).is_err());
+    }
 }

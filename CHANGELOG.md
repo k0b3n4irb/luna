@@ -4,6 +4,85 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.18.0] — 2026-09-09
+
+The OpenSNES report release: the six lots of the 2026-09-08 compiler-work
+report (#222–#227) — frame-indexed capture everywhere and `luna diff`,
+master cycles split by consumer, `--power-on random`, memory-trace
+origins with `--trace-writes`, and `luna profile` — so the last three
+OpenSNES prototypes (`frame_compare.py`, `steps_to_frame.py`,
+`cyclecount.py`) can retire.
+
+### Added
+- `luna profile rom.sfc [-n N | --until-frame F] [--from-frame F]` (#227):
+  real master cycles per symbol. Every step credits its cycles — bus +
+  internal cycles plus the DMA / HDMA / refresh stalls charged during
+  it — to the instruction's address; the report folds those onto the
+  nearest `.sym` label (FastROM-mirror aware, HiROM `c0:` labels) or a
+  256-byte page, heaviest first, with `idle_mclk` (parked `WAI`/`STP`)
+  and `pct`. Text table + `--out` JSON. API `enable_profile` /
+  `take_profile` (folded) / `take_profile_raw`; MCP `enable_profile` /
+  `take_profile`. Replaces static per-instruction weight estimates.
+- Memory trace `origin` (#226): every event says who performed the
+  access — `cpu`, `dma<n>` or `hdma<n>` — and DMA / HDMA writes to the
+  B-bus (`$21xx`) and the A-bus now land in the same stream as CPU
+  accesses (they were invisible to `--mem-trace` before; only the VRAM
+  ports reached `--dma-trace`). New CSV column `origin` (appended),
+  MCP `take_mem_trace` field `origin`, `Emulator::enable_mem_trace_filtered`
+  with an explicit offset list + writes-only, and the CLI sugar
+  `--trace-writes 2121,2122,420C` (with `--mem-trace`). Memory
+  watchpoints (`run_until_mem_write`, `bp_add mem`) fire on DMA / HDMA
+  writes too. The Event Viewer keeps plotting DMA writes from the DMA
+  trace only (no duplicates).
+- `luna diff a.sfc b.sfc --frames 200,400 [--tolerance N]` (#225): two
+  ROMs run side by side in one process, the displayed frame hashed at
+  every PPU frame, `MATCH` / `DIFF` per requested frame (a match may sit
+  up to `tolerance` frames away — the boot-length offset a codegen
+  change introduces — and reports the offset). `--screenshot-dir` writes
+  both pictures of every `DIFF` frame, `--out` a JSON report; exit
+  0 / 1 / 2 like `luna test`. The "compare at equal frame" protocol
+  OpenSNES ran as a script over ~20 `luna` invocations per frame.
+- `--power-on zero|ones|random[=<seed>]` on `luna run` / `state` /
+  `frames`, `power_on` + `seed` manifest fields in `luna test`, and
+  `Emulator::set_power_on` (#224): what WRAM, VRAM, CGRAM (15-bit), OAM
+  and APU RAM hold before the ROM boots. `random` is what ares does on
+  power and Mesen2's `Random` RAM state; a seed reproduces the exact
+  machine (an unseeded `random` derives one and prints it). Catches the
+  boot bugs an all-zero machine hides (a missing forced-blank renders
+  black from zero VRAM/CGRAM and passes). Default stays `zero`.
+- `stats.mclk` / `stats.last_frame` (#223): every master cycle split by
+  who consumed it — `cpu_active`, `cpu_wai`, `cpu_stp`, `dma`, `hdma`,
+  `refresh` (+ `total`) — cumulative since reset and for the last
+  completed PPU frame, an exact partition of `total_mclk`. CPU headroom
+  per frame is now `last_frame.cpu_wai / last_frame.total`, and a boot
+  zero-fill's cost is `mclk.dma`. `stats.instructions_active` counts the
+  steps that executed an instruction (a parked `WAI` / `STP` tick is not
+  one), the count that tracks code size — `instructions_executed` grows
+  *faster* on an idle ROM that does *less*. `luna_core::mclk` /
+  `Snes::mclk_acc` carry the accounting; save-states without it load
+  with zeroed buckets.
+- `luna run --until-frame F` and `luna frames --from-frame F` (#222):
+  frame-indexed capture on every capture command, so a visual baseline
+  is pinned to a PPU frame and survives codegen changes that shift the
+  instruction count (`state --until-frame` already had it; the guide now
+  documents all three with the baseline recipe).
+- `luna state --schema` (#222): prints the JSON Schema of the `--out`
+  payload (`EmulatorState` flattened + `peeks`), generated from the
+  serialising types — no ROM needed.
+- `--peek` reports **unmapped** bytes (#222): a range nothing maps still
+  reads `$FF` like the open bus, but the stderr dump now says so and the
+  JSON entry carries `unmapped = N`. New
+  `Emulator::peek_memory_checked` / `luna_api::state_json_schema`.
+
+### Fixed
+- A soft reset now keeps APU RAM, as WRAM/VRAM already were (#224):
+  ares `dsp.cpp:199` randomises it on power only and Mesen2's
+  `Spc::Reset` never touches it; luna rebuilt the APU with zeroed ARAM.
+  The SPC700 / DSP / mailbox state still returns to power-on.
+- Guide: the state-JSON table placed `nmis_serviced` / the frame count
+  under `stats`; they live in `scheduler` (#222). `--peek` help now says
+  COUNT is hex.
+
 ## [1.17.0] — 2026-08-09
 
 The zero-probe release: `[asserts.dma]` buckets exactly like the

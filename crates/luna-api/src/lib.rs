@@ -21,6 +21,7 @@ use std::path::Path;
 pub use luna_apu::dsp::DspWriteEvent;
 pub use luna_cartridge::Region;
 use luna_cartridge::{CartError, Cartridge};
+pub use luna_core::PowerOnState;
 use luna_core::Snes;
 /// Controller-port device kind (pad / mouse / super scope), re-exported so the
 /// GUI's port-device selector goes through `luna-api`, not `luna-core`.
@@ -28,8 +29,8 @@ pub use luna_core::controller::PortDevice;
 pub use luna_core::{
     BreakHit, BreakKind, BreakpointInfo, CpuTraceEvent, CpuTraceLog, DmaTraceEvent, DmaTraceLog,
     Dsp1TraceEvent, Dsp1TraceKind, MailboxEvent, MailboxEventKind, MapperKind, MemEventKind,
-    MemTraceEvent, MemTraceLog, Sa1LogEvent, Sa1SideEvent, Sa1TraceEvent, Spc700TraceEvent,
-    SuperFxTraceEvent,
+    MemOrigin, MemTraceEvent, MemTraceFilter, MemTraceLog, Profile, ProfileSample, Sa1LogEvent,
+    Sa1SideEvent, Sa1TraceEvent, Spc700TraceEvent, SuperFxTraceEvent,
 };
 /// Decoded BG tilemap image (Tilemap Viewer), re-exported so the GUI uses
 /// `luna_api::TilemapImage` rather than depending on `luna-ppu`.
@@ -702,13 +703,116 @@ pub struct SpriteInfo {
     pub h: u16,
 }
 
+/// A side-effect-free memory peek with its open-bus accounting
+/// ([`Emulator::peek_memory_checked`], issue #222).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeekBytes {
+    /// The bytes read (`$FF` where nothing is mapped, like the bus).
+    pub bytes: Vec<u8>,
+    /// How many of `bytes` fell on an unmapped address.
+    pub unmapped: usize,
+}
+
+/// The JSON Schema of [`EmulatorState`] — the `state` JSON `luna state`
+/// / the MCP `state` tool emit — as pretty-printed JSON (issue #222). Lets
+/// a harness discover the nested field set without exploring by trial;
+/// generated from the same types, so it can never lag the output.
+pub fn state_json_schema() -> String {
+    let schema = schemars::schema_for!(EmulatorState);
+    serde_json::to_string_pretty(&schema).expect("schema serialises")
+}
+
+/// Master cycles split by who consumed them (issue #223). The six
+/// consumer fields partition `total` exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, schemars::JsonSchema)]
+pub struct MclkBuckets {
+    /// CPU executing instructions (bus accesses + internal cycles,
+    /// interrupt dispatch, the reset sequence).
+    pub cpu_active: u64,
+    /// CPU parked in `WAI` waiting for an interrupt — the frame's headroom.
+    pub cpu_wai: u64,
+    /// CPU halted by `STP`.
+    pub cpu_stp: u64,
+    /// General-purpose DMA bursts (`$420B`), CPU halted.
+    pub dma: u64,
+    /// HDMA table fetches + transfers + frame-start init, charged as CPU
+    /// stalls at each scanline crossing.
+    pub hdma: u64,
+    /// The once-per-scanline DRAM refresh halt (40 master clocks).
+    pub refresh: u64,
+    /// Sum of the six buckets.
+    pub total: u64,
+}
+
+impl From<&luna_core::MclkBuckets> for MclkBuckets {
+    fn from(b: &luna_core::MclkBuckets) -> Self {
+        Self {
+            cpu_active: b.cpu_active,
+            cpu_wai: b.cpu_wai,
+            cpu_stp: b.cpu_stp,
+            dma: b.dma,
+            hdma: b.hdma,
+            refresh: b.refresh,
+            total: b.total(),
+        }
+    }
+}
+
+/// One row of a folded profile (issue #227): a symbol (or, without one, a
+/// 256-byte page) and the cost of every instruction executed under it.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ProfileEntry {
+    /// The `.sym` label the PCs fold onto, or `$BB:PP00 (no symbol)` for
+    /// a page no label covers.
+    pub symbol: String,
+    /// 24-bit address of the label (or the page start).
+    pub addr: u32,
+    /// Instructions executed under the label.
+    pub instructions: u64,
+    /// Master cycles paid under the label: bus + internal cycles and the
+    /// DMA / HDMA / refresh stalls charged while its instructions ran.
+    pub mclk: u64,
+    /// The part of `mclk` spent parked in `WAI` / `STP` under the label.
+    pub idle_mclk: u64,
+    /// `mclk` as a percentage of the profile's total.
+    pub pct: f64,
+    /// Distinct instruction addresses folded into this row.
+    pub pcs: u32,
+}
+
+/// A folded profile (issue #227).
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ProfileReport {
+    /// Master cycles across every sample (the `pct` denominator).
+    pub total_mclk: u64,
+    /// Instructions across every sample.
+    pub instructions: u64,
+    /// Rows, heaviest `mclk` first.
+    pub entries: Vec<ProfileEntry>,
+}
+
 /// Cumulative metrics since reset.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Stats {
-    /// Total CPU instructions executed.
+    /// Total CPU steps, **including** the ticks of a CPU parked in `WAI` /
+    /// `STP` (one per step) — so on an idle ROM this grows *faster* when
+    /// the code does *less*. Use `instructions_active` for work done.
     pub instructions_executed: u64,
+    /// Steps that executed an instruction (a parked `WAI` / `STP` tick is
+    /// not one) — the count that tracks code size and work (issue #223).
+    pub instructions_active: u64,
     /// Total master cycles consumed.
     pub total_mclk: u64,
+    /// `total_mclk` split by consumer, cumulative since reset; the
+    /// buckets sum to `total_mclk` (issue #223).
+    pub mclk: MclkBuckets,
+    /// The same split for the last completed PPU frame (all zero until the
+    /// first frame completes). CPU headroom per frame is
+    /// `last_frame.cpu_wai / last_frame.total`; the frame's DMA budget is
+    /// `last_frame.dma`. Frame boundaries fall inside a bus access, so a
+    /// frame's `total` can differ from the nominal period by that one
+    /// access.
+    pub last_frame: MclkBuckets,
 }
 
 /// Value width for a narrowing memory-search session (issue #177).
@@ -866,6 +970,8 @@ pub struct Emulator {
     /// Video-standard override applied to every subsequent ROM load — see
     /// [`Emulator::set_forced_region`]. `None` = honour the cartridge header.
     forced_region: Option<Region>,
+    /// [`Emulator::set_power_on`]: what RAM holds when a ROM is loaded.
+    power_on: PowerOnState,
 }
 
 /// One raw captured Event Viewer event before category/filter decode — either
@@ -959,6 +1065,7 @@ impl Emulator {
             prev_frame_events: Vec::new(),
             input_capture: None,
             forced_region: None,
+            power_on: PowerOnState::Zero,
         }
     }
 
@@ -1080,6 +1187,21 @@ impl Emulator {
         self.forced_region
     }
 
+    /// Choose what every RAM array (WRAM, VRAM, CGRAM, OAM, APU RAM) holds
+    /// when the next ROM is loaded (issue #224): zero (default), ones, or
+    /// seeded pseudo-random bytes — a boot bug that only shows on real
+    /// hardware's garbage RAM shows here too, reproducibly. Takes effect
+    /// on the next `load_rom*`; `reset` keeps memory as hardware does.
+    pub const fn set_power_on(&mut self, state: PowerOnState) {
+        self.power_on = state;
+    }
+
+    /// The power-on state the next `load_rom*` applies — see
+    /// [`Emulator::set_power_on`].
+    pub const fn power_on(&self) -> PowerOnState {
+        self.power_on
+    }
+
     fn load_cartridge(&mut self, mut cart: Cartridge) -> Result<RomInfo, ApiError> {
         if let Some(region) = self.forced_region {
             cart.header.region = region;
@@ -1114,7 +1236,7 @@ impl Emulator {
         // during construction / `reset`, so a malformed ROM can't tear
         // down the whole transport.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut snes = Snes::try_from_cartridge(cart)?;
+            let mut snes = Snes::try_from_cartridge_with(cart, self.power_on)?;
             snes.reset();
             Ok::<_, luna_core::UnsupportedMapper>(snes)
         }));
@@ -1639,9 +1761,18 @@ impl Emulator {
                     }
                 },
             });
-        let stats = Stats {
-            instructions_executed: self.instructions_executed,
-            total_mclk: self.snes.as_ref().map_or(0, |s| s.total_mclk),
+        let stats = {
+            let acc = self.snes.as_ref().map(|s| &s.mclk_acc);
+            Stats {
+                instructions_executed: self.instructions_executed,
+                instructions_active: self
+                    .instructions_executed
+                    .saturating_sub(acc.map_or(0, |a| a.steps_idle)),
+                total_mclk: self.snes.as_ref().map_or(0, |s| s.total_mclk),
+                mclk: acc.map_or_else(MclkBuckets::default, |a| MclkBuckets::from(&a.cumulative)),
+                last_frame: acc
+                    .map_or_else(MclkBuckets::default, |a| MclkBuckets::from(&a.last_frame)),
+            }
         };
         let sa1 = self
             .snes
@@ -2166,6 +2297,22 @@ impl Emulator {
     pub fn peek_memory(&mut self, bank: u8, offset: u16, count: u16) -> Result<Vec<u8>, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         Ok(snes.dbg_peek_bytes(bank, offset, usize::from(count)))
+    }
+
+    /// [`Self::peek_memory`] that also reports how many bytes of the range
+    /// nothing maps (issue #222). Those bytes read `$FF` exactly as the open
+    /// bus does, so the count is the only way a caller can tell "the ROM
+    /// holds `$FF` here" from "nothing lives at this address" (e.g.
+    /// `$40:0000` on a `LoROM` cart).
+    pub fn peek_memory_checked(
+        &mut self,
+        bank: u8,
+        offset: u16,
+        count: u16,
+    ) -> Result<PeekBytes, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        let (bytes, unmapped) = snes.dbg_peek_bytes_checked(bank, offset, usize::from(count));
+        Ok(PeekBytes { bytes, unmapped })
     }
 
     /// Debug poke (L8): write bytes into WRAM (`$7E-$7F` or the `$00-3F`/
@@ -3229,6 +3376,22 @@ impl Emulator {
         Ok(())
     }
 
+    /// [`Self::enable_mem_trace`] with the full filter set (issue #226):
+    /// bank, offset range, an explicit offset list, writes-only. Every
+    /// event carries its [`MemOrigin`] — DMA / HDMA writes to the B-bus
+    /// (`$21xx`) and the A-bus land in the same stream as CPU accesses,
+    /// stamped with the burst / line start clock and the PC of the
+    /// instruction whose access ran them.
+    pub fn enable_mem_trace_filtered(
+        &mut self,
+        max_events: usize,
+        filter: MemTraceFilter,
+    ) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.enable_mem_trace_filtered(max_events, filter);
+        Ok(())
+    }
+
     /// Take ownership of the accumulated memory access events.
     pub fn take_mem_trace_log(&mut self) -> Result<Vec<MemTraceEvent>, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
@@ -3355,6 +3518,87 @@ impl Emulator {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         snes.cpu.enable_wdm_log();
         Ok(())
+    }
+
+    /// Start the per-PC profiler (issue #227): from now on every step
+    /// credits its master cycles — bus + internal cycles plus the DMA /
+    /// HDMA / refresh stalls charged during it — to the instruction's
+    /// address. Restarting empties it. Off until called; `load_rom`
+    /// turns it off.
+    pub fn enable_profile(&mut self) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.enable_profile();
+        Ok(())
+    }
+
+    /// Stop the profiler and drop its samples.
+    pub fn disable_profile(&mut self) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.disable_profile();
+        Ok(())
+    }
+
+    /// Take the raw per-PC samples (the profiler stays on, emptied).
+    pub fn take_profile_raw(&mut self) -> Result<Profile, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        Ok(snes.take_profile())
+    }
+
+    /// Take the profile folded by symbol (issue #227): each PC goes to the
+    /// nearest loaded `.sym` label at or below it in the same bank
+    /// (`c0:8afc` `HiROM` labels match code running in bank `$C0`; a `LoROM`
+    /// label in `$00-$3F` also catches the `FastROM` mirror in `$80-$BF`
+    /// and vice versa); PCs no label covers fold onto their 256-byte
+    /// page. Rows come heaviest `mclk` first. Empties the profiler.
+    pub fn take_profile(&mut self) -> Result<ProfileReport, ApiError> {
+        let raw = self.take_profile_raw()?;
+        let syms = self.symbols.as_ref();
+        let mut folded: std::collections::HashMap<(String, u32), (ProfileSample, u32)> =
+            std::collections::HashMap::new();
+        for (&pc, s) in &raw.samples {
+            let key = syms
+                .and_then(|t| {
+                    t.nearest_label(pc)
+                        .or_else(|| t.nearest_label(pc ^ 0x80_0000))
+                        .map(|(name, addr)| (name.to_string(), addr))
+                })
+                .unwrap_or_else(|| {
+                    let page = pc & 0x00FF_FF00;
+                    (
+                        format!("${:02X}:{:04X} (no symbol)", page >> 16, page & 0xFFFF),
+                        page,
+                    )
+                });
+            let slot = folded.entry(key).or_default();
+            slot.0.instructions += s.instructions;
+            slot.0.mclk += s.mclk;
+            slot.0.idle_mclk += s.idle_mclk;
+            slot.1 += 1;
+        }
+        let total_mclk = raw.total_mclk();
+        let instructions = raw.samples.values().map(|s| s.instructions).sum();
+        let mut entries: Vec<ProfileEntry> = folded
+            .into_iter()
+            .map(|((symbol, addr), (s, pcs))| ProfileEntry {
+                symbol,
+                addr,
+                instructions: s.instructions,
+                mclk: s.mclk,
+                idle_mclk: s.idle_mclk,
+                pct: if total_mclk == 0 {
+                    0.0
+                } else {
+                    s.mclk as f64 * 100.0 / total_mclk as f64
+                },
+                pcs,
+            })
+            .collect();
+        entries.sort_by(|a, b| b.mclk.cmp(&a.mclk).then(a.addr.cmp(&b.addr)));
+        Ok(ProfileReport {
+            total_mclk,
+            instructions,
+            entries,
+        })
     }
 
     /// Drain the captured `WDM` events as `(pc_full, operand)` per hit.
@@ -3672,7 +3916,20 @@ mod tests {
     /// Build a minimal 32 KB `LoROM` cart for tests. Has a valid reset
     /// vector + cartridge-checksum so the parser accepts it.
     fn demo_lorom() -> Vec<u8> {
+        demo_lorom_with(&[], None)
+    }
+
+    /// [`demo_lorom`] with `code` placed at `$8000` and, when given, the
+    /// NMI vectors (native `$FFEA` + emulation `$FFFA`) pointed at `nmi`.
+    fn demo_lorom_with(code: &[u8], nmi: Option<u16>) -> Vec<u8> {
         let mut rom = vec![0u8; 0x8000];
+        rom[..code.len()].copy_from_slice(code);
+        if let Some(v) = nmi {
+            for off in [0x7FEA, 0x7FFA] {
+                rom[off] = v as u8;
+                rom[off + 1] = (v >> 8) as u8;
+            }
+        }
         // Reset vector at LoROM $00:FFFC = ROM offset $7FFC → $8000.
         rom[0x7FFC] = 0x00;
         rom[0x7FFD] = 0x80;
@@ -3699,6 +3956,198 @@ mod tests {
         rom[0x7FDE] = checksum as u8;
         rom[0x7FDF] = (checksum >> 8) as u8;
         rom
+    }
+
+    #[test]
+    fn mclk_buckets_partition_total_and_wai_is_idle() {
+        // SEI ; LDA #$80 ; STA $4200 (NMI on) ; loop: WAI ; BRA loop ;
+        // nmi: RTI — the canonical "wait for VBlank" idle ROM.
+        let code = [0x78, 0xA9, 0x80, 0x8D, 0x00, 0x42, 0xCB, 0x80, 0xFD, 0x40];
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom_with(&code, Some(0x8009)))
+            .unwrap();
+        for _ in 0..3 {
+            e.step_until_frame(1_000_000).unwrap();
+        }
+        let st = e.state();
+        let s = &st.stats;
+        // Exact partition of the master clock, cumulative and per frame.
+        assert_eq!(s.mclk.total, s.total_mclk, "{:?}", s.mclk);
+        assert_eq!(
+            s.mclk.cpu_active
+                + s.mclk.cpu_wai
+                + s.mclk.cpu_stp
+                + s.mclk.dma
+                + s.mclk.hdma
+                + s.mclk.refresh,
+            s.mclk.total
+        );
+        // An idle ROM: WAI dominates, the CPU did very little, no DMA/HDMA.
+        assert!(s.mclk.cpu_wai > s.mclk.cpu_active * 10, "{:?}", s.mclk);
+        assert_eq!(s.mclk.dma, 0);
+        assert_eq!(s.mclk.hdma, 0);
+        assert_eq!(s.mclk.cpu_stp, 0);
+        // DRAM refresh: 40 mclk once per scanline, every line of every frame.
+        let lines = st.scheduler.frame_count * 262 + u64::from(st.scheduler.ppu_line);
+        assert!(
+            (s.mclk.refresh / 40).abs_diff(lines) <= 1,
+            "refresh {} lines {lines}",
+            s.mclk.refresh
+        );
+        // The last frame's buckets add up to one NTSC frame, give or take
+        // the bus access the boundary fell inside.
+        let frame = 262 * 1364;
+        assert!(
+            s.last_frame.total.abs_diff(frame) <= 48,
+            "last_frame {:?}",
+            s.last_frame
+        );
+        assert!(
+            s.last_frame.cpu_wai * 10 > s.last_frame.total * 9,
+            "{:?}",
+            s.last_frame
+        );
+        // Parked WAI ticks are steps but not instructions.
+        assert!(s.instructions_active < s.instructions_executed / 10);
+        assert!(s.instructions_active >= 4);
+    }
+
+    #[test]
+    fn mclk_dma_burst_lands_in_the_dma_bucket() {
+        // Fixed-source DMA of $1000 bytes from $00:8000 to $2118 (VRAM):
+        // LDA #$01 ; STA $4300 (mode 1, A→B) ; LDA #$18 ; STA $4301 ;
+        // LDX #$8000 ; STX $4302 ; LDA #$00 ; STA $4304 ;
+        // LDX #$1000 ; STX $4305 ; LDA #$01 ; STA $420B ; STP
+        let code = [
+            0x18, 0xFB, 0xC2, 0x10, // CLC ; XCE (native) ; REP #$10 (16-bit X)
+            0xA9, 0x01, 0x8D, 0x00, 0x43, 0xA9, 0x18, 0x8D, 0x01, 0x43, 0xA2, 0x00, 0x80, 0x8E,
+            0x02, 0x43, 0xA9, 0x00, 0x8D, 0x04, 0x43, 0xA2, 0x00, 0x10, 0x8E, 0x05, 0x43, 0xA9,
+            0x01, 0x8D, 0x0B, 0x42, 0xDB,
+        ];
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
+        e.step(200).unwrap();
+        let s = e.state().stats;
+        assert_eq!(s.mclk.total, s.total_mclk);
+        // 8 mclk per byte, plus the burst's fixed overhead.
+        assert!(s.mclk.dma >= 0x1000 * 8, "{:?}", s.mclk);
+        assert!(s.mclk.dma < 0x1000 * 8 + 200, "{:?}", s.mclk);
+        // A CPU halted by STP charges no clocks at all (`Cpu::step` returns
+        // before any bus access), so its bucket stays empty; the parked
+        // steps are still idle steps.
+        assert_eq!(s.mclk.cpu_stp, 0);
+    }
+
+    #[test]
+    fn power_on_state_applies_on_load_and_is_reproducible() {
+        let mut e = Emulator::new();
+        assert_eq!(e.power_on(), PowerOnState::Zero);
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        assert!(
+            e.peek_memory(0x7E, 0x1000, 64)
+                .unwrap()
+                .iter()
+                .all(|&b| b == 0)
+        );
+
+        e.set_power_on(PowerOnState::Random { seed: 0x00C0_FFEE });
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        let wram_a = e.peek_memory(0x7E, 0x1000, 64).unwrap();
+        let aram_a = e.peek_aram(0x2000, 64).unwrap();
+        let vram_a = e.peek_vram(0x4000, 64).unwrap();
+        assert!(wram_a.iter().any(|&b| b != 0));
+        assert!(aram_a.iter().any(|&b| b != 0));
+        assert!(vram_a.iter().any(|&b| b != 0));
+        // Same seed, same machine.
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        assert_eq!(e.peek_memory(0x7E, 0x1000, 64).unwrap(), wram_a);
+        assert_eq!(e.peek_aram(0x2000, 64).unwrap(), aram_a);
+        assert_eq!(e.peek_vram(0x4000, 64).unwrap(), vram_a);
+        // Different seed, different machine.
+        e.set_power_on(PowerOnState::Random { seed: 0x00C0_FFEF });
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        assert_ne!(e.peek_memory(0x7E, 0x1000, 64).unwrap(), wram_a);
+        // Ones.
+        e.set_power_on(PowerOnState::Ones);
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        assert!(
+            e.peek_memory(0x7E, 0x1000, 64)
+                .unwrap()
+                .iter()
+                .all(|&b| b == 0xFF)
+        );
+        // CGRAM stays 15-bit.
+        assert!(e.peek_cgram().unwrap().iter().all(|&w| w & 0x8000 == 0));
+    }
+
+    #[test]
+    fn run_until_mem_write_fires_on_a_dma_write_and_the_trace_says_dma() {
+        // Channel 0: 4 bytes from $7E:2000 to $2122, triggered by $420B —
+        // no CPU instruction ever writes $2122 (issue #226).
+        let code = [
+            0xA9, 0x22, 0x8D, 0x01, 0x43, 0xA9, 0x00, 0x8D, 0x02, 0x43, 0xA9, 0x20, 0x8D, 0x03,
+            0x43, 0xA9, 0x7E, 0x8D, 0x04, 0x43, 0xA9, 0x04, 0x8D, 0x05, 0x43, 0xA9, 0x00, 0x8D,
+            0x00, 0x43, 0xA9, 0x01, 0x8D, 0x0B, 0x42, 0xDB,
+        ];
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
+        e.enable_mem_trace_filtered(
+            100,
+            MemTraceFilter {
+                only_offsets: Some(vec![0x2122]),
+                writes_only: true,
+                ..MemTraceFilter::default()
+            },
+        )
+        .unwrap();
+        let hit = e.run_until_mem_write(0x00_2122, 1000).unwrap();
+        assert!(hit.is_some(), "the DMA write must trip the watchpoint");
+        e.step(100).ok();
+        let ev = e.take_mem_trace_log().unwrap();
+        assert_eq!(ev.len(), 4, "{ev:?}");
+        assert!(ev.iter().all(|x| x.origin == MemOrigin::Dma(0)), "{ev:?}");
+    }
+
+    #[test]
+    fn profile_folds_pcs_onto_symbols_and_pages() {
+        // main: SEI ; LDA #$80 ; STA $4200 ; loop: WAI ; BRA loop ;
+        // nmi (at $8009): RTI — the canonical idle ROM, labelled.
+        let code = [0x78, 0xA9, 0x80, 0x8D, 0x00, 0x42, 0xCB, 0x80, 0xFD, 0x40];
+        let mut e = Emulator::new();
+        assert!(matches!(e.enable_profile(), Err(ApiError::NoRom)));
+        e.load_rom_bytes(demo_lorom_with(&code, Some(0x8009)))
+            .unwrap();
+        e.load_symbols_str("[labels]\n00:8000 main\n00:8006 wait_vblank\n00:8009 nmi_handler\n");
+        e.enable_profile().unwrap();
+        for _ in 0..3 {
+            e.step_until_frame(1_000_000).unwrap();
+        }
+        let r = e.take_profile().unwrap();
+        assert!(r.total_mclk > 0);
+        let by_name = |n: &str| r.entries.iter().find(|x| x.symbol == n).cloned();
+        let wait = by_name("wait_vblank").expect("wait_vblank row");
+        let main = by_name("main").expect("main row");
+        let nmi = by_name("nmi_handler").expect("nmi row");
+        // The parked WAI dominates and is idle time; main ran three
+        // instructions once; the handler ran once per frame.
+        assert!(wait.mclk * 10 > r.total_mclk * 9, "{r:?}");
+        assert!(wait.idle_mclk * 10 > wait.mclk * 9, "{r:?}");
+        assert_eq!(main.instructions, 3);
+        assert_eq!(main.idle_mclk, 0);
+        assert!(nmi.instructions >= 2, "{r:?}");
+        assert_eq!(wait.pcs, 2, "WAI + BRA");
+        // Heaviest first, percentages sum to ~100.
+        assert_eq!(r.entries[0].symbol, "wait_vblank");
+        let pct: f64 = r.entries.iter().map(|x| x.pct).sum();
+        assert!((pct - 100.0).abs() < 1e-6, "{pct}");
+        // Without symbols, PCs fold onto their page.
+        e.clear_symbols();
+        e.enable_profile().unwrap();
+        e.step_until_frame(1_000_000).unwrap();
+        let r = e.take_profile().unwrap();
+        assert_eq!(r.entries.len(), 1, "{r:?}");
+        assert_eq!(r.entries[0].symbol, "$00:8000 (no symbol)");
+        assert_eq!(r.entries[0].addr, 0x00_8000);
     }
 
     #[test]
@@ -4315,6 +4764,36 @@ mod tests {
         // $00, $80.
         let bytes = e.peek_memory(0x00, 0xFFFC, 2).unwrap();
         assert_eq!(bytes, vec![0x00, 0x80]);
+    }
+
+    #[test]
+    fn peek_memory_checked_counts_unmapped_bytes() {
+        let mut e = Emulator::new();
+        assert!(matches!(
+            e.peek_memory_checked(0x00, 0x8000, 1),
+            Err(ApiError::NoRom)
+        ));
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        // ROM and WRAM: everything mapped.
+        let rom = e.peek_memory_checked(0x00, 0xFFFC, 2).unwrap();
+        assert_eq!(rom.bytes, vec![0x00, 0x80]);
+        assert_eq!(rom.unmapped, 0);
+        assert_eq!(e.peek_memory_checked(0x7E, 0x0000, 4).unwrap().unmapped, 0);
+        // The LoROM lower half of a bank ≥ $40 is open bus: `$FF` bytes AND
+        // the count that tells them apart from a ROM holding `$FF`.
+        let hole = e.peek_memory_checked(0x40, 0x0000, 4).unwrap();
+        assert_eq!(hole.bytes, vec![0xFF; 4]);
+        assert_eq!(hole.unmapped, 4);
+    }
+
+    #[test]
+    fn state_json_schema_names_the_top_level_blocks() {
+        let schema: serde_json::Value =
+            serde_json::from_str(&state_json_schema()).expect("valid JSON");
+        let props = schema["properties"].as_object().expect("object schema");
+        for key in ["rom", "cpu", "ppu", "dma", "scheduler", "stats"] {
+            assert!(props.contains_key(key), "schema lacks `{key}`");
+        }
     }
 
     #[test]

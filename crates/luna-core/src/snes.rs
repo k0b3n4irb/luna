@@ -21,7 +21,9 @@ use luna_cpu_65c816::Cpu;
 use luna_ppu::Ppu;
 
 use crate::coproc::{Dsp1Mapper, Sa1Chip};
-use crate::dma::{Dma, DmaBus, DmaTraceEvent, DmaTraceLog};
+use crate::dma::{Dma, DmaBus, DmaTraceEvent, DmaTraceLog, HDMA_CHANNEL_FLAG};
+use crate::mclk::{MclkAccounting, MclkKind};
+use crate::power::PowerOnState;
 
 /// `serde` helper for a heap-boxed fixed byte array (`Box<[u8; N]>`),
 /// which `serde_bytes` does not cover directly. Used for the 128 KB WRAM.
@@ -98,6 +100,11 @@ pub struct Snes {
     pub irq_pending: bool,
     /// Total master cycles consumed since reset.
     pub total_mclk: MCycles,
+    /// Who consumed `total_mclk` (CPU active / `WAI` / `STP`, DMA, HDMA,
+    /// DRAM refresh), cumulative and per last frame (issue #223). An
+    /// exact partition: every master clock charged lands in one bucket.
+    #[serde(default)]
+    pub mclk_acc: MclkAccounting,
 
     // ------------- APU -------------
     /// Real SPC700 + 64 KB ARAM + IPL ROM + mailboxes. Runs in
@@ -189,6 +196,12 @@ pub struct Snes {
     /// [`Snes::enable_cpu_trace`].
     #[serde(skip)]
     pub cpu_trace_log: Option<CpuTraceLog>,
+
+    /// Optional per-PC profiler (issue #227): instructions + master
+    /// cycles paid by each instruction address, including the stalls
+    /// (DMA, HDMA, refresh) charged during it. `None` = off.
+    #[serde(skip)]
+    pub profile: Option<Profile>,
 
     /// Optional memory access trace. When `Some`, every CPU bus
     /// read/write is appended until the log fills. Filterable by
@@ -328,6 +341,89 @@ pub struct MemTraceEvent {
     /// `true` if INIDISP (`$2100`) forced-blank (bit 7) was set at the access.
     /// A VRAM write is safe iff `blank || force_blank`.
     pub force_blank: bool,
+    /// Who performed the access (issue #226): the CPU, or a DMA / HDMA
+    /// channel writing the B-bus (`$21xx`) or the A-bus.
+    pub origin: MemOrigin,
+}
+
+/// Cost paid by one instruction address (issue #227).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProfileSample {
+    /// Instructions executed at this PC (a parked `WAI` / `STP` tick is
+    /// not one).
+    pub instructions: u64,
+    /// Master cycles the machine spent while this PC was the current
+    /// instruction — bus accesses, internal cycles, and the DMA / HDMA /
+    /// refresh stalls charged during it.
+    pub mclk: u64,
+    /// The part of `mclk` spent parked in `WAI` / `STP` at this PC.
+    pub idle_mclk: u64,
+}
+
+/// Per-PC profile (issue #227): where the master cycles went, by the
+/// 24-bit address of the instruction that paid them. Folding by symbol
+/// is the API's job.
+#[derive(Debug, Clone, Default)]
+pub struct Profile {
+    /// `pc_full` → cost.
+    pub samples: std::collections::HashMap<u32, ProfileSample>,
+}
+
+impl Profile {
+    /// Credit one step at `pc` that cost `mclk` (`idle` = a parked tick).
+    /// A parked tick that cost nothing (a `STP`-halted CPU) leaves no
+    /// sample — it is not time, and not an instruction.
+    pub fn record(&mut self, pc: u32, mclk: u64, idle: bool) {
+        if idle && mclk == 0 {
+            return;
+        }
+        let s = self.samples.entry(pc).or_default();
+        s.mclk = s.mclk.saturating_add(mclk);
+        if idle {
+            s.idle_mclk = s.idle_mclk.saturating_add(mclk);
+        } else {
+            s.instructions = s.instructions.saturating_add(1);
+        }
+    }
+
+    /// Total master cycles across every sample.
+    #[must_use]
+    pub fn total_mclk(&self) -> u64 {
+        self.samples.values().map(|s| s.mclk).sum()
+    }
+}
+
+/// Who performed a traced bus access (issue #226).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemOrigin {
+    /// An instruction's own bus access.
+    Cpu,
+    /// A general-purpose DMA burst on this channel (0-7).
+    Dma(u8),
+    /// An HDMA transfer / table fetch on this channel (0-7).
+    Hdma(u8),
+}
+
+impl MemOrigin {
+    /// From the controller's active-channel tag (`HDMA_CHANNEL_FLAG | ch`
+    /// for an HDMA transfer, the bare channel for a DMA burst).
+    pub(crate) const fn from_channel_tag(tag: u8) -> Self {
+        if tag & HDMA_CHANNEL_FLAG != 0 {
+            Self::Hdma(tag & 7)
+        } else {
+            Self::Dma(tag & 7)
+        }
+    }
+
+    /// The CSV / MCP spelling: `cpu`, `dma<n>`, `hdma<n>`.
+    #[must_use]
+    pub fn label(self) -> String {
+        match self {
+            Self::Cpu => "cpu".to_string(),
+            Self::Dma(ch) => format!("dma{ch}"),
+            Self::Hdma(ch) => format!("hdma{ch}"),
+        }
+    }
 }
 
 /// Direction of a CPU bus access.
@@ -362,6 +458,56 @@ pub struct MemTraceLog {
     /// bank filter's code-fetch flood. Composes with `bank_filter`
     /// (both must match).
     pub offset_filter: Option<(u16, u16)>,
+    /// Optional explicit offset list (issue #226): only accesses whose
+    /// low 16 bits are in the list are kept (`--trace-writes 2121,2122`).
+    /// Composes with the other filters.
+    pub only_offsets: Option<Vec<u16>>,
+    /// Keep writes only (reads and the NMI/IRQ markers are dropped).
+    pub writes_only: bool,
+}
+
+/// The filters a memory trace can be opened with (issue #226) — every
+/// field composes (all must match). `Default` = record everything.
+#[derive(Debug, Clone, Default)]
+pub struct MemTraceFilter {
+    /// Bank (high byte of the 24-bit address) to keep.
+    pub bank: Option<u8>,
+    /// Inclusive low-16-bit offset range to keep.
+    pub offsets: Option<(u16, u16)>,
+    /// Explicit low-16-bit offsets to keep.
+    pub only_offsets: Option<Vec<u16>>,
+    /// Keep writes only.
+    pub writes_only: bool,
+}
+
+impl MemTraceLog {
+    /// Whether an access to `addr` of `kind` passes the filters and fits
+    /// under the cap.
+    #[must_use]
+    pub fn accepts(&self, addr: Addr24, kind: MemEventKind) -> bool {
+        if self.events.len() >= self.max_events {
+            return false;
+        }
+        if self.writes_only && !matches!(kind, MemEventKind::Write) {
+            return false;
+        }
+        if let Some(filter) = self.bank_filter
+            && bank_of(addr) != filter
+        {
+            return false;
+        }
+        if let Some((lo, hi)) = self.offset_filter
+            && !(lo..=hi).contains(&offset_of(addr))
+        {
+            return false;
+        }
+        if let Some(list) = &self.only_offsets
+            && !list.contains(&offset_of(addr))
+        {
+            return false;
+        }
+        true
+    }
 }
 
 /// Master cycles per PPU scanline on NTSC (1364 mclk = 4 dots × 341).
@@ -570,6 +716,39 @@ impl Snes {
     /// luna does not yet emulate (S-DD1, SPC7110). All currently supported
     /// mappers (`LoROM` / `HiROM` / `ExHiROM` / SA-1 / Super FX) succeed.
     pub fn try_from_cartridge(cart: Cartridge) -> Result<Self, UnsupportedMapper> {
+        Self::try_from_cartridge_with(cart, PowerOnState::Zero)
+    }
+
+    /// [`Self::try_from_cartridge`] with an explicit power-on memory state
+    /// (issue #224): WRAM, VRAM, CGRAM (15-bit), OAM and APU RAM are filled
+    /// per `power_on` before anything runs. A later [`Self::reset`] keeps
+    /// them, as hardware / ares / Mesen2 do.
+    pub fn try_from_cartridge_with(
+        cart: Cartridge,
+        power_on: PowerOnState,
+    ) -> Result<Self, UnsupportedMapper> {
+        let mut snes = Self::build(cart)?;
+        snes.apply_power_on(power_on);
+        Ok(snes)
+    }
+
+    /// Fill every RAM array per `power_on` from one seeded generator in a
+    /// fixed order (WRAM, VRAM, CGRAM, OAM, ARAM) — a seed reproduces the
+    /// exact machine. CGRAM entries keep 15 bits (ares `ppu.cpp:124`).
+    pub fn apply_power_on(&mut self, power_on: PowerOnState) {
+        let mut rng = power_on.rng();
+        power_on.fill(&mut self.wram[..], &mut rng);
+        power_on.fill(self.ppu.vram.raw_mut(), &mut rng);
+        let cgram = self.ppu.cgram.raw_mut();
+        power_on.fill(cgram, &mut rng);
+        for hi in cgram.iter_mut().skip(1).step_by(2) {
+            *hi &= 0x7F;
+        }
+        power_on.fill(self.ppu.oam.raw_mut(), &mut rng);
+        power_on.fill(&mut self.apu_real.aram[..], &mut rng);
+    }
+
+    fn build(cart: Cartridge) -> Result<Self, UnsupportedMapper> {
         let sram_bytes = (cart.header.sram_size_kb as usize) * 1024;
         let region = cart.header.region;
         let mapper: Box<dyn Mapper + Send> = match cart.header.mapper_kind {
@@ -641,6 +820,7 @@ impl Snes {
             nmi_pending: false,
             irq_pending: false,
             total_mclk: 0,
+            mclk_acc: MclkAccounting::default(),
             // Compat: post-reset, the IPL ROM has dropped these into
             // the CPU-facing mailbox to signal "audio CPU ready".
             apu_real: Apu::new(),
@@ -660,6 +840,7 @@ impl Snes {
             mailbox_log: None,
             sa1_log: None,
             cpu_trace_log: None,
+            profile: None,
             mem_trace_log: None,
             breakpoints: None,
             nocash_log: None,
@@ -774,6 +955,25 @@ impl Snes {
         self.apu_real.take_spc_trace()
     }
 
+    /// Start (or restart, emptied) the per-PC profiler (issue #227).
+    pub fn enable_profile(&mut self) {
+        self.profile = Some(Profile::default());
+    }
+
+    /// Take the accumulated profile, leaving the profiler enabled and
+    /// empty. Empty when it was never enabled.
+    pub fn take_profile(&mut self) -> Profile {
+        match self.profile.as_mut() {
+            Some(p) => std::mem::take(p),
+            None => Profile::default(),
+        }
+    }
+
+    /// Stop the profiler and drop its samples.
+    pub fn disable_profile(&mut self) {
+        self.profile = None;
+    }
+
     /// Enable CPU instruction tracing. From this point onward each
     /// call to [`Snes::step`] appends a pre-instruction register
     /// snapshot until the log fills (`max_events` events). Use
@@ -805,11 +1005,27 @@ impl Snes {
         bank_filter: Option<u8>,
         offset_filter: Option<(u16, u16)>,
     ) {
+        self.enable_mem_trace_filtered(
+            max_events,
+            MemTraceFilter {
+                bank: bank_filter,
+                offsets: offset_filter,
+                ..MemTraceFilter::default()
+            },
+        );
+    }
+
+    /// [`Self::enable_mem_trace`] with the full filter set (issue #226):
+    /// also an explicit offset list and writes-only. DMA / HDMA writes
+    /// (B-bus and A-bus) are recorded too, tagged by [`MemOrigin`].
+    pub fn enable_mem_trace_filtered(&mut self, max_events: usize, filter: MemTraceFilter) {
         self.mem_trace_log = Some(MemTraceLog {
             events: Vec::new(),
             max_events,
-            bank_filter,
-            offset_filter,
+            bank_filter: filter.bank,
+            offset_filter: filter.offsets,
+            only_offsets: filter.only_offsets,
+            writes_only: filter.writes_only,
         });
     }
 
@@ -890,6 +1106,7 @@ impl Snes {
                 joypad2_shift,
                 mdr,
                 irq_wrap_trig,
+                mclk_acc,
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
@@ -931,6 +1148,7 @@ impl Snes {
                 joypad2_shift,
                 mdr,
                 irq_wrap_trig,
+                mclk: mclk_acc,
             };
             cpu.reset(&mut bus);
         }
@@ -943,11 +1161,23 @@ impl Snes {
         //    CPU registers ($42xx), master clock, frame/scanline counters
         //    and pending interrupts also return to power-on; VRAM/WRAM/SRAM
         //    and the cartridge mapper persist (re-initialised by boot code).
+        // APU RAM persists across a reset (ares `dsp.cpp:199` randomises
+        // it on power only; Mesen2 `Spc::Reset` never touches it) — only the
+        // SPC700 / DSP / mailbox state returns to power-on (issue #224).
+        let aram = std::mem::replace(
+            &mut self.apu_real.aram,
+            vec![0u8; 0x10000]
+                .into_boxed_slice()
+                .try_into()
+                .expect("64 KB slice into fixed array"),
+        );
         self.apu_real = Apu::new();
+        self.apu_real.aram = aram;
         self.apu_panicked = false;
         self.apu_stub_fallback = ApuStub::new();
         self.cpu_regs = CpuRegs::new();
         self.total_mclk = 0;
+        self.mclk_acc = MclkAccounting::default();
         self.ppu_line = 0;
         self.mcycles_in_line = 0;
         self.frame_count = 0;
@@ -992,6 +1222,23 @@ impl Snes {
         let ppu_line_snapshot = self.ppu_line;
         let vblank_start_snapshot = vblank_start_line(self.region);
         let cpu_pc_snapshot = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
+        // Who this step's own clocks belong to (issue #223). A parked `WAI`
+        // tick is idle time — unless an interrupt is pending, in which case
+        // the core wakes and runs the dispatch this very step (see
+        // `Cpu::step`), which is CPU work.
+        let idle_kind = if self.cpu.stopped {
+            Some(MclkKind::CpuStp)
+        } else if self.cpu.waiting
+            && !(self.cpu.pending_nmi || self.cpu.pending_irq || self.cpu.irq_line)
+        {
+            Some(MclkKind::CpuWai)
+        } else {
+            None
+        };
+        self.mclk_acc.current = idle_kind.unwrap_or(MclkKind::CpuActive);
+        if idle_kind.is_some() {
+            self.mclk_acc.steps_idle = self.mclk_acc.steps_idle.saturating_add(1);
+        }
         let (rb_line, rb_mil, rb_fc, rb_ns);
         {
             let Self {
@@ -1014,6 +1261,7 @@ impl Snes {
                 joypad2_shift,
                 mdr,
                 irq_wrap_trig,
+                mclk_acc,
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
@@ -1058,6 +1306,7 @@ impl Snes {
                 joypad2_shift,
                 mdr,
                 irq_wrap_trig,
+                mclk: mclk_acc,
             };
             // The scanline scheduler now advances per bus access inside
             // `bus.io_cycle` (per-scanline rendering: each line is drawn
@@ -1075,6 +1324,9 @@ impl Snes {
         self.nmis_serviced = rb_ns;
 
         let consumed = self.total_mclk - before;
+        if let Some(prof) = self.profile.as_mut() {
+            prof.record(cpu_pc_snapshot, consumed, idle_kind.is_some());
+        }
 
         // The cartridge coprocessor (SA-1 / Super FX / DSP-1 / …) now
         // advances per bus access inside `bus.io_cycle` (Phase 1
@@ -1141,6 +1393,8 @@ impl Snes {
     /// (`RESET_SEQUENCE_MCLK`). Without it, only the PPU line cursor moves.
     fn advance_no_instruction(&mut self, mcycles: u32, charge_time: bool) {
         let scanlines = self.region_scanlines();
+        // The reset sequence is the CPU's own time (issue #223).
+        self.mclk_acc.current = MclkKind::CpuActive;
         let ppu_line_snapshot = self.ppu_line;
         let vblank_start_snapshot = vblank_start_line(self.region);
         let cpu_pc_snapshot = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
@@ -1165,6 +1419,7 @@ impl Snes {
                 joypad2_shift,
                 mdr,
                 irq_wrap_trig,
+                mclk_acc,
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
@@ -1209,6 +1464,7 @@ impl Snes {
                 joypad2_shift,
                 mdr,
                 irq_wrap_trig,
+                mclk: mclk_acc,
             };
             if charge_time {
                 bus.io_cycle(MCycles::from(mcycles));
@@ -1282,6 +1538,7 @@ impl Snes {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk_acc,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -1323,6 +1580,7 @@ impl Snes {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk: mclk_acc,
         };
         (0..count)
             .map(|i| {
@@ -1340,7 +1598,21 @@ impl Snes {
     /// port). WRAM and ROM/SRAM/coproc-work-RAM return their real bytes; the
     /// `$2000-$5FFF` register band returns `0`.
     pub fn dbg_peek_bytes(&mut self, bank: u8, offset: u16, count: usize) -> Vec<u8> {
+        self.dbg_peek_bytes_checked(bank, offset, count).0
+    }
+
+    /// [`Self::dbg_peek_bytes`] plus the number of bytes in the range that
+    /// nothing maps (open bus — reported as `$FF`, the same value the bus
+    /// returns). A harness peeking `$40:0000` on a `LoROM` cart gets
+    /// `(vec![0xFF; n], n)` instead of a silent run of `$FF` (issue #222).
+    pub fn dbg_peek_bytes_checked(
+        &mut self,
+        bank: u8,
+        offset: u16,
+        count: usize,
+    ) -> (Vec<u8>, usize) {
         let mut out = Vec::with_capacity(count);
+        let mut unmapped = 0usize;
         for i in 0..count {
             let off = offset.wrapping_add(i as u16);
             let v = if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && off < 0x2000 {
@@ -1355,18 +1627,24 @@ impl Snes {
                 // the mapper. (Lumping it into the register band below made
                 // every I-RAM peek return 0, which silently broke SA-1 I-RAM
                 // inspection and cross-emulator I-RAM differentials.)
-                self.mapper.read(make_addr(bank, off)).unwrap_or(0xFF)
+                self.mapper.read(make_addr(bank, off)).unwrap_or_else(|| {
+                    unmapped += 1;
+                    0xFF
+                })
             } else if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && (0x2000..=0x5FFF).contains(&off)
             {
                 // PPU/APU/CPU/coproc register band — read side effects, so 0.
                 0
             } else {
                 // ROM / SRAM / coproc work-RAM — side-effect-free here.
-                self.mapper.read(make_addr(bank, off)).unwrap_or(0xFF)
+                self.mapper.read(make_addr(bank, off)).unwrap_or_else(|| {
+                    unmapped += 1;
+                    0xFF
+                })
             };
             out.push(v);
         }
-        out
+        (out, unmapped)
     }
 
     /// Debug poke: write `data` to WRAM (`$7E-$7F` or the `$00-3F`/`$80-BF`
@@ -1438,6 +1716,10 @@ struct SnesBus<'a> {
     /// against.
     clock_count: u32,
     mclk_total: &'a mut MCycles,
+    /// Master-cycle accounting by consumer (issue #223): the owner sets
+    /// `current` to who this bus borrow's own clocks belong to; stalls
+    /// are credited to their own buckets inside `advance_time`.
+    mclk: &'a mut MclkAccounting,
     /// Total scanlines per frame for the current cart's region —
     /// used by the H/V counter latch path (\$2137 / WRIO) to wrap
     /// the V coordinate at the right boundary.
@@ -1627,6 +1909,44 @@ struct DmaBusView<'a> {
     /// segment, so captured B-bus writes carry their source channel
     /// (Mesen2 `dma->GetActiveChannel()`).
     dma_channel: u8,
+    /// The CPU's memory trace, so DMA / HDMA writes land in the same
+    /// stream as instruction writes, tagged by origin (issue #226).
+    mem_trace: Option<&'a mut MemTraceLog>,
+    /// The watchpoint registry: a `run_until_mem_write` / `bp_add mem`
+    /// fires on a DMA / HDMA write too (issue #226).
+    breakpoints: Option<&'a mut crate::breakpoints::BreakpointSet>,
+    /// PC of the instruction whose bus access ran this burst / line —
+    /// stamped as the event's `pc_full`.
+    cpu_pc: u32,
+    /// Master clock at the burst / line start — stamped as `mclk_total`
+    /// (byte-level advance within a burst is not modelled).
+    trace_mclk: u64,
+}
+
+impl DmaBusView<'_> {
+    /// Watchpoints + memory trace for a DMA-side write (B-bus register
+    /// `$21xx` as `$00:21xx`, or an A-bus address).
+    fn note_write(&mut self, addr: Addr24, value: u8) {
+        if let Some(bp) = self.breakpoints.as_deref_mut() {
+            bp.check_mem(addr, MemEventKind::Write, value, self.cpu_pc);
+        }
+        if let Some(log) = self.mem_trace.as_deref_mut()
+            && log.accepts(addr, MemEventKind::Write)
+        {
+            log.events.push(MemTraceEvent {
+                mclk_total: self.trace_mclk,
+                pc_full: self.cpu_pc,
+                addr_full: addr,
+                kind: MemEventKind::Write,
+                value,
+                line: self.trace_line,
+                hclock: self.trace_hclock,
+                blank: self.trace_blank,
+                force_blank: self.ppu.inidisp & 0x80 != 0,
+                origin: MemOrigin::from_channel_tag(self.dma_channel),
+            });
+        }
+    }
 }
 
 impl DmaBus for DmaBusView<'_> {
@@ -1643,6 +1963,7 @@ impl DmaBus for DmaBusView<'_> {
     }
 
     fn write_a(&mut self, addr: Addr24, value: u8) {
+        self.note_write(addr, value);
         if let Some(o) = SnesBus::wram_offset(addr) {
             self.wram[o] = value;
             return;
@@ -1669,6 +1990,7 @@ impl DmaBus for DmaBusView<'_> {
     }
 
     fn write_b(&mut self, b_offset: u8, value: u8) {
+        self.note_write(0x2100 | u32::from(b_offset), value);
         if b_offset <= 0x3F {
             // Mirror of the CPU path's intra-line partial flush (gap G6,
             // `write_inner` $21xx): a DMA byte hitting a render-affecting
@@ -1770,20 +2092,9 @@ impl SnesBus<'_> {
             bp.check_mem(addr, kind, value, self.cpu_pc_full);
         }
         let hclock = self.hclock();
-        if let Some(log) = self.mem_trace_log.as_mut() {
-            if log.events.len() >= log.max_events {
-                return;
-            }
-            if let Some(filter) = log.bank_filter
-                && bank_of(addr) != filter
-            {
-                return;
-            }
-            if let Some((lo, hi)) = log.offset_filter
-                && !(lo..=hi).contains(&offset_of(addr))
-            {
-                return;
-            }
+        if let Some(log) = self.mem_trace_log.as_mut()
+            && log.accepts(addr, kind)
+        {
             log.events.push(MemTraceEvent {
                 mclk_total: *self.mclk_total,
                 pc_full: self.cpu_pc_full,
@@ -1794,6 +2105,7 @@ impl SnesBus<'_> {
                 hclock,
                 blank: self.ppu_line >= self.vblank_start_line,
                 force_blank: self.ppu.inidisp & 0x80 != 0,
+                origin: MemOrigin::Cpu,
             });
         }
     }
@@ -1829,6 +2141,7 @@ impl SnesBus<'_> {
                 hclock,
                 blank,
                 force_blank,
+                origin: MemOrigin::Cpu,
             });
         }
     }
@@ -1843,11 +2156,13 @@ impl SnesBus<'_> {
     /// (dot-precise), instead of only at the boundary. Boundary crossing
     /// is otherwise identical to before (chunks never overshoot a line, so
     /// the per-line events in `sched_one_line` still fire exactly once).
-    /// Returns the total HDMA master-cycle stall accumulated across the
-    /// line crossings in this advance (Phase 4); the caller charges it.
-    fn sched_advance(&mut self, mcycles: u32) -> u32 {
+    /// Returns the `(DRAM refresh, HDMA)` master-cycle stalls accumulated
+    /// across this advance (Phase 4; split per consumer for issue #223); the
+    /// caller charges their sum.
+    fn sched_advance(&mut self, mcycles: u32) -> (u32, u32) {
         let mut remaining = mcycles;
-        let mut stall = 0u32;
+        let mut refresh = 0u32;
+        let mut hdma = 0u32;
         while remaining > 0 {
             let period = self.line_period();
             let room = period - self.mcycles_in_line;
@@ -1879,16 +2194,16 @@ impl SnesBus<'_> {
             // that lands exactly on the position and pushed the 40-clock halt
             // onto the following instruction.
             if lo < refresh_pos && refresh_pos <= hi {
-                stall += DRAM_REFRESH_CYCLES;
+                refresh += DRAM_REFRESH_CYCLES;
             }
             self.mcycles_in_line += chunk;
             remaining -= chunk;
             if self.mcycles_in_line >= period {
                 self.mcycles_in_line -= period;
-                stall += self.sched_one_line(line_start + u64::from(period));
+                hdma += self.sched_one_line(line_start + u64::from(period));
             }
         }
-        stall
+        (refresh, hdma)
     }
 
     /// Dot-precise H/V-counter IRQ poll over the half-open master-cycle
@@ -2054,6 +2369,10 @@ impl SnesBus<'_> {
                 trace_blank: self.ppu_line >= self.vblank_start_line,
                 trace_hclock,
                 dma_channel: 0,
+                mem_trace: self.mem_trace_log.as_mut(),
+                breakpoints: self.breakpoints.as_deref_mut(),
+                cpu_pc: self.cpu_pc_full,
+                trace_mclk: line_start_mclk,
             };
             hdma_stall += self
                 .dma
@@ -2115,6 +2434,7 @@ impl SnesBus<'_> {
             // VBlank (now 0, matching hardware).
             self.cpu_regs.nmi_flag = false;
             self.frame_count = self.frame_count.saturating_add(1);
+            self.mclk.on_frame_wrap();
             // Snapshot whether the frame that just completed showed any
             // visible content, paired with the frame counter bump so a
             // front-end polling at this boundary reads a consistent value.
@@ -2141,6 +2461,10 @@ impl SnesBus<'_> {
                 trace_blank: self.ppu_line >= self.vblank_start_line,
                 trace_hclock,
                 dma_channel: 0,
+                mem_trace: self.mem_trace_log.as_mut(),
+                breakpoints: self.breakpoints.as_deref_mut(),
+                cpu_pc: self.cpu_pc_full,
+                trace_mclk: line_start_mclk,
             };
             hdma_stall += self.dma.hdma_init(&mut view, line_start_mclk, clock_count);
         }
@@ -2224,8 +2548,15 @@ impl SnesBus<'_> {
         // False once we are re-advancing for a stall rather than for the
         // caller's own access — see the coproc note below.
         let mut caller_time = true;
+        // The caller's own time goes to whoever owns this bus borrow (CPU
+        // active / WAI / STP, or the DMA burst); a stall pass is credited to
+        // its own buckets when it is discovered, below (issue #223).
+        let mut kind = Some(self.mclk.current);
         loop {
             *self.mclk_total = self.mclk_total.saturating_add(step);
+            if let Some(k) = kind {
+                self.mclk.credit(k, step);
+            }
             // APU in lockstep with the CPU at bus-access granularity.
             // `Apu::step` carries the sub-84-mclk remainder in
             // `mclk_deficit`, so per-access stepping composes exactly with
@@ -2243,7 +2574,7 @@ impl SnesBus<'_> {
             if !self.sched_enabled {
                 return;
             }
-            let stall = self.sched_advance(step as u32);
+            let (refresh, hdma) = self.sched_advance(step as u32);
             // `advance_coproc` is about the CALLER's time only: on the DMA
             // path the coprocessor was already stepped per transferred byte
             // in `DmaBusView::tick`, so charging it the lumped DMA cost again
@@ -2262,11 +2593,14 @@ impl SnesBus<'_> {
             // came out 15 840 master clocks short of Mesen2's, and every one
             // of those clocks is CPU-vs-scanline phase error that never comes
             // back.
-            if stall == 0 {
+            if refresh == 0 && hdma == 0 {
                 return;
             }
+            self.mclk.credit(MclkKind::Refresh, u64::from(refresh));
+            self.mclk.credit(MclkKind::Hdma, u64::from(hdma));
+            kind = None;
             caller_time = false;
-            step = MCycles::from(stall);
+            step = MCycles::from(refresh + hdma);
         }
     }
 
@@ -2275,6 +2609,19 @@ impl SnesBus<'_> {
     /// after `clock_count` is known (the realignment step is computed against
     /// it) and before the access's own clocks are charged.
     fn dma_edge(&mut self) {
+        if self.dma.pending_mdma == 0 {
+            return;
+        }
+        // The burst's clocks are the DMA's, not the instruction's whose
+        // access ran the edge (issue #223); stalls inside it still land in
+        // their own buckets.
+        let prev = self.mclk.current;
+        self.mclk.current = MclkKind::Dma;
+        self.dma_edge_inner();
+        self.mclk.current = prev;
+    }
+
+    fn dma_edge_inner(&mut self) {
         let value = self.dma.pending_mdma;
         if value == 0 {
             return;
@@ -2315,6 +2662,10 @@ impl SnesBus<'_> {
                     trace_blank: self.ppu_line >= self.vblank_start_line,
                     trace_hclock,
                     dma_channel: 0,
+                    mem_trace: self.mem_trace_log.as_mut(),
+                    breakpoints: self.breakpoints.as_deref_mut(),
+                    cpu_pc: self.cpu_pc_full,
+                    trace_mclk: mclk_at_edge,
                 };
                 self.dma.run_mdma(&mut view, value)
             };
@@ -2358,6 +2709,10 @@ impl SnesBus<'_> {
                     trace_blank: self.ppu_line >= self.vblank_start_line,
                     trace_hclock,
                     dma_channel: 0,
+                    mem_trace: self.mem_trace_log.as_mut(),
+                    breakpoints: self.breakpoints.as_deref_mut(),
+                    cpu_pc: self.cpu_pc_full,
+                    trace_mclk: *self.mclk_total,
                 };
                 self.dma.run_mdma_segment(&mut view, value, seg_bytes)
             };
@@ -2892,6 +3247,37 @@ mod tests {
     }
 
     #[test]
+    fn power_on_random_is_seeded_masks_cgram_and_survives_reset() {
+        use crate::power::PowerOnState;
+        let mk = |st| Snes::try_from_cartridge_with(demo_lorom(), st).expect("snes");
+        let zero = mk(PowerOnState::Zero);
+        assert!(zero.wram.iter().all(|&b| b == 0));
+        let ones = mk(PowerOnState::Ones);
+        assert!(ones.wram.iter().all(|&b| b == 0xFF));
+        assert!(ones.apu_real.aram.iter().all(|&b| b == 0xFF));
+        // CGRAM stays 15-bit even under `ones`.
+        assert!((0..256).all(|i| ones.ppu.cgram.peek(i * 2 + 1) & 0x80 == 0));
+
+        let a = mk(PowerOnState::Random { seed: 99 });
+        let b = mk(PowerOnState::Random { seed: 99 });
+        let c = mk(PowerOnState::Random { seed: 100 });
+        assert_eq!(a.wram[..], b.wram[..]);
+        assert_eq!(a.apu_real.aram[..], b.apu_real.aram[..]);
+        assert_eq!(a.ppu.vram.peek(0x1234), b.ppu.vram.peek(0x1234));
+        assert_ne!(a.wram[..], c.wram[..]);
+        assert!(a.wram.iter().any(|&x| x != 0));
+        assert!((0..256).all(|i| a.ppu.cgram.peek(i * 2 + 1) & 0x80 == 0));
+
+        // A soft reset keeps every RAM array (ares dsp.cpp:199, cpu.cpp:92).
+        let mut r = mk(PowerOnState::Random { seed: 99 });
+        let aram_before = r.apu_real.aram.clone();
+        let wram_before = r.wram.clone();
+        r.reset();
+        assert_eq!(r.apu_real.aram[..], aram_before[..]);
+        assert_eq!(r.wram[..], wram_before[..]);
+    }
+
+    #[test]
     fn reset_loads_pc_from_vector_via_lorom_mapper() {
         let cart = demo_lorom();
         let mut snes = Snes::from_cartridge(cart);
@@ -2988,6 +3374,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk_acc,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -3029,6 +3416,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk: mclk_acc,
         };
         bus.write(make_addr(0x00, 0x0100), 0xAA);
         // Read back from the mirror in $00:
@@ -3069,6 +3457,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk_acc,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -3110,6 +3499,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk: mclk_acc,
         };
         // Falling edge (FF → 00): latch fires, PIO mirror goes low.
         bus.write(make_addr(0x00, 0x4201), 0x00);
@@ -3158,6 +3548,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk_acc,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -3199,6 +3590,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk: mclk_acc,
         };
         // A write drives 0x5A onto the data bus → latches the MDR.
         bus.write(make_addr(0x00, 0x0100), 0x5A);
@@ -3245,6 +3637,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk_acc,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -3286,6 +3679,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk: mclk_acc,
         };
         // WMADD = $00:1F00.
         bus.write(make_addr(0x00, 0x2181), 0x00);
@@ -3331,6 +3725,7 @@ mod tests {
                 joypad2_shift,
                 mdr,
                 irq_wrap_trig,
+                mclk_acc,
                 mailbox_log,
                 sa1_log,
                 mem_trace_log,
@@ -3372,6 +3767,7 @@ mod tests {
                 joypad2_shift,
                 mdr,
                 irq_wrap_trig,
+                mclk: mclk_acc,
             };
             bus.write(make_addr(0x00, 0x21FC), b'H');
             bus.write(make_addr(0x00, 0x21FC), b'i');
@@ -3417,6 +3813,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk_acc,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -3458,6 +3855,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk: mclk_acc,
         };
         // Latch then de-strobe.
         bus.write(make_addr(0x00, 0x4016), 0x01);
@@ -3536,6 +3934,124 @@ mod tests {
     }
 
     #[test]
+    fn mem_trace_tags_dma_writes_with_their_origin_and_fires_watchpoints() {
+        // The palette-upload program above, plus one CPU write to $2122
+        // first, with a writes-only trace on $2122 — the "who wrote CGRAM
+        // entry N" hunt (issue #226): the CPU row and the four DMA rows
+        // share one stream, each tagged by origin.
+        let cart = demo_lorom();
+        let mut rom = cart.rom;
+        let prog = [
+            0xA9, 0x55, 0x8D, 0x22, 0x21, // LDA #$55 ; STA $2122 (CPU write)
+            0xA9, 0x22, 0x8D, 0x01, 0x43, // LDA #$22 ; STA $4301
+            0xA9, 0x00, 0x8D, 0x02, 0x43, // LDA #$00 ; STA $4302
+            0xA9, 0x20, 0x8D, 0x03, 0x43, // LDA #$20 ; STA $4303
+            0xA9, 0x7E, 0x8D, 0x04, 0x43, // LDA #$7E ; STA $4304
+            0xA9, 0x04, 0x8D, 0x05, 0x43, // LDA #$04 ; STA $4305
+            0xA9, 0x00, 0x8D, 0x00, 0x43, // LDA #$00 ; STA $4300
+            0xA9, 0x01, 0x8D, 0x0B, 0x42, // LDA #$01 ; STA $420B (trigger)
+            0xDB, // STP
+        ];
+        rom[..prog.len()].copy_from_slice(&prog);
+        let cart = Cartridge::from_bytes(rom).unwrap();
+        let mut snes = Snes::from_cartridge(cart);
+        snes.reset();
+        snes.cpu.db = 0;
+        snes.wram[0x2000..0x2004].copy_from_slice(&[0x1F, 0x00, 0xE0, 0x03]);
+        snes.enable_mem_trace_filtered(
+            1000,
+            MemTraceFilter {
+                only_offsets: Some(vec![0x2122]),
+                writes_only: true,
+                ..MemTraceFilter::default()
+            },
+        );
+        // A watchpoint on $00:2122 must fire on the DMA's write too.
+        let mut bps = crate::breakpoints::BreakpointSet::new();
+        bps.add_mem(0x00_2122, 0x00_2122, false, true, false, None);
+        snes.breakpoints = Some(Box::new(bps));
+        let mut hits = 0;
+        for _ in 0..40 {
+            if snes.cpu.stopped {
+                break;
+            }
+            snes.step();
+            if let Some(bp) = snes.breakpoints.as_mut()
+                && bp.take_pending().is_some()
+            {
+                hits += 1;
+            }
+        }
+        assert!(snes.cpu.stopped);
+        assert_eq!(
+            hits, 2,
+            "one CPU hit, one DMA hit (first byte of the burst)"
+        );
+
+        let ev = snes.take_mem_trace_log();
+        assert_eq!(ev.len(), 5, "{ev:?}");
+        assert!(
+            ev.iter()
+                .all(|e| e.addr_full == 0x00_2122 && e.kind == MemEventKind::Write)
+        );
+        assert_eq!(ev[0].origin, MemOrigin::Cpu);
+        assert_eq!(ev[0].value, 0x55);
+        let dma: Vec<u8> = ev[1..].iter().map(|e| e.value).collect();
+        assert_eq!(dma, vec![0x1F, 0x00, 0xE0, 0x03]);
+        assert!(
+            ev[1..].iter().all(|e| e.origin == MemOrigin::Dma(0)),
+            "{ev:?}"
+        );
+        // The DMA rows carry the PC of the instruction whose access ran the
+        // edge (the STP after `STA $420B`), and the burst-start clock.
+        assert_eq!(ev[1].pc_full, 0x00_8000 + prog.len() as u32 - 1);
+        assert!(ev[1].mclk_total >= ev[0].mclk_total);
+    }
+
+    #[test]
+    fn profile_credits_each_pc_with_its_real_cost() {
+        // LDA #$42 ; STA $7E:0000 ; STP — three PCs, then parked STP ticks
+        // (which cost nothing, are not instructions, and leave no sample).
+        let mut snes = Snes::from_cartridge(demo_lorom());
+        snes.reset();
+        snes.enable_profile();
+        for _ in 0..8 {
+            snes.step();
+        }
+        let p = snes.take_profile();
+        assert_eq!(p.samples.len(), 3, "{p:?}");
+        let lda = p.samples[&0x00_8000];
+        let sta = p.samples[&0x00_8002];
+        let stp = p.samples[&0x00_8006];
+        assert_eq!(lda.instructions, 1);
+        assert_eq!(sta.instructions, 1);
+        assert_eq!(stp.instructions, 1, "the STP itself executes once");
+        // LDA #imm = 2 slow accesses (16 mclk); STA long = 4 accesses + the
+        // WRAM write (40 mclk); every cost is real master clocks, so the
+        // long store costs more than the immediate load.
+        assert!(sta.mclk > lda.mclk, "{p:?}");
+        assert_eq!(p.total_mclk(), lda.mclk + sta.mclk + stp.mclk);
+        assert_eq!(lda.idle_mclk, 0);
+        // Taking empties; the profiler stays on.
+        assert!(snes.take_profile().samples.is_empty());
+        assert!(snes.profile.is_some());
+        snes.disable_profile();
+        assert!(snes.profile.is_none());
+    }
+
+    #[test]
+    fn mem_origin_from_channel_tag_and_labels() {
+        assert_eq!(MemOrigin::from_channel_tag(3), MemOrigin::Dma(3));
+        assert_eq!(
+            MemOrigin::from_channel_tag(HDMA_CHANNEL_FLAG | 5),
+            MemOrigin::Hdma(5)
+        );
+        assert_eq!(MemOrigin::Cpu.label(), "cpu");
+        assert_eq!(MemOrigin::Dma(0).label(), "dma0");
+        assert_eq!(MemOrigin::Hdma(7).label(), "hdma7");
+    }
+
+    #[test]
     fn hdma_preempts_a_long_mid_frame_dma_at_scanline_boundaries() {
         // Phase 5 increment 1: a long sync DMA triggered mid-visible-frame
         // with HDMA armed must *yield* to HDMA at scanline boundaries, not
@@ -3601,6 +4117,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk_acc,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -3642,6 +4159,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk: mclk_acc,
         };
         // Trigger channel-0 sync DMA via the bus (→ the segmented path,
         // since HDMAEN != 0).
@@ -3787,6 +4305,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk_acc,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -3828,6 +4347,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk: mclk_acc,
         };
         let v = bus.read(make_addr(0x00, 0x4210));
         let still_set = bus.cpu_regs.nmi_flag;
@@ -4159,6 +4679,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk_acc,
             mailbox_log,
             sa1_log,
             mem_trace_log,
@@ -4200,6 +4721,7 @@ mod tests {
             joypad2_shift,
             mdr,
             irq_wrap_trig,
+            mclk: mclk_acc,
         };
         bus.write(make_addr(0x00, 0x2100), 0x0F);
         assert_eq!(

@@ -24,6 +24,8 @@ luna test [PATHS...] [--update] [--only SUBSTR] [--report json]
 ```toml
 # tests/boot.toml — "the game boots and reports ready"
 rom = "../build/game.sfc"      # relative to this manifest
+power_on = "random"            # optional: zero (default) | ones | random
+seed = 1                       # optional: fixes the random machine (default 1)
 sym = "../build/game.sym"      # optional (a beside-ROM .sym auto-loads)
 force_mapper = "lorom"         # optional — headerless/WIP images
 frames = 600                   # run bound: `frames` or `steps` (or checkpoints)

@@ -7,7 +7,7 @@
 //! - default colors: `UI/Config/Debugger/SnesEventViewerConfig.cs`
 //! - register names: `UI/Debugger/Labels/DefaultLabelHelper.cs` `SetSnesDefaultLabels`
 
-use luna_core::{DmaTraceEvent, MemEventKind, MemTraceEvent};
+use luna_core::{DmaTraceEvent, MemEventKind, MemOrigin, MemTraceEvent};
 
 /// Number of Event Viewer categories (the `visible[]` mask width).
 pub const CATEGORY_COUNT: usize = 18;
@@ -239,6 +239,12 @@ pub fn decode_event(
     cfg: &EventViewerConfig,
     is_prev_frame: bool,
 ) -> Option<EventViewerEvent> {
+    // DMA / HDMA writes reach the memory trace too (issue #226); the
+    // viewer already plots them from the DMA trace with their channel and
+    // source address, so skip them here rather than draw each twice.
+    if ev.origin != MemOrigin::Cpu {
+        return None;
+    }
     let category = event_category(ev)?;
     if !cfg.visible[category.index()] {
         return None;
