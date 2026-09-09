@@ -161,6 +161,9 @@ and is the hub for every headless diagnostic.
 | `--dsp-trace <PATH>` | — | CSV of every DSP register write: `spc_cycles,reg,name,value`, with `name` decoded (`V0_ADSR1`, `KON`, `FLG`, …). |
 | `--dsp-trace-max <N>` | `100000` | Cap on captured DSP writes. |
 | `--sa1-log <PATH>` | — | CSV of every `$2200-$23FF` SA-1 MMIO access. |
+| `--mem-trace <PATH>` | — | CSV of bus accesses: `mclk_total,frame_ntsc,pc,addr,kind,value,line,hclock,blank,force_blank,origin`. `origin` = `cpu`, `dma<n>` or `hdma<n>` — DMA / HDMA writes (B-bus `$21xx` and A-bus) are in the same stream as CPU accesses, stamped with the burst / line start and the PC whose access ran them. Gated by `--mem-trace-from` / `--mem-trace-max`. |
+| `--mem-trace-bank <B>`, `--mem-trace-addr <LO:HI>` | all | Bank / offset-range filters for `--mem-trace` (both must match). |
+| `--trace-writes <O,…>` | — | With `--mem-trace`: keep only **writes** to these hex offsets, any bank (`2121,2122,420C`). The "who wrote this register" hunt — see below. |
 | `--print-fbhash` | off | Print `fbhash=<16-hex>` for the displayed frame — the same key as `run`, so an `--input`-driven test can carry a visual baseline. |
 | `--wdm-out <PATH>` | — | Write captured `WDM $xx` (`SNES_ASSERT`) executions — keeps the assertion oracle on an `--input` test. |
 
@@ -197,6 +200,27 @@ luna state -n 8000000 --force-mapper lorom --force-region pal --native-res \
   --screenshot /tmp/font.png --print-fbhash \
   "PPU/Interlace/InterlaceFont/InterlaceFont.sfc"   # → a 512×448 PNG
 ```
+
+#### Who wrote this register? (`--trace-writes`)
+
+A palette entry comes out wrong and nothing in the game's own code
+writes it. Rather than diffing `ppu.cgram` between two builds, record
+every write to the CGRAM ports with its author — CPU instruction, DMA
+burst or HDMA channel — and where in the frame it landed:
+
+```bash
+luna state --until-frame 120 --mem-trace writes.csv --trace-writes 2121,2122 game.sfc
+# mclk_total,frame_ntsc,pc,addr,kind,value,line,hclock,blank,force_blank,origin
+# 41822160,117,$00:8A31,$00:2121,W,$02,226,410,1,0,cpu      <- CGADD = 2, in VBlank
+# 41822168,117,$00:8A34,$00:2122,W,$1F,226,418,1,0,cpu
+# 42127540,117,$00:8C02,$00:2122,W,$00,12,1180,0,0,hdma1    <- HDMA channel 1, line 12, mid-frame
+```
+
+The `hdma1` row at line 12 is the overwrite: an HDMA channel enabled
+mid-frame whose table still points at stale data. The same stream is
+available over MCP (`enable_mem_trace { offsets, writes_only }`), and a
+`run_until_mem_write` / `bp_add mem` watchpoint fires on the DMA / HDMA
+write too.
 
 #### Coprocessor liveness and the DSP-1 handshake
 
@@ -648,7 +672,7 @@ method, so the MCP transport adds reach, not capability.
 | `render_palette` | `render_palette_png` | CGRAM as a 16×16 swatch-grid PNG. |
 | `render_sprite_sheet` | `render_sprite_sheet_png` | All 128 OAM sprites as a transparent PNG sheet. |
 | `enable_cpu_trace` / `take_cpu_trace` | `enable_cpu_trace` / `take_cpu_trace_log` | Per-instruction CPU trace ring (PC + registers). |
-| `enable_mem_trace` / `take_mem_trace` | `enable_mem_trace` / `take_mem_trace_log` | Per-bus-access trace with bank/offset-range filters. |
+| `enable_mem_trace` / `take_mem_trace` | `enable_mem_trace_filtered` / `take_mem_trace_log` | Per-bus-access trace with bank / offset-range / offset-list / writes-only filters; every event carries `origin` (`cpu`, `dma<n>`, `hdma<n>`). |
 | `bp_add` | `bp_add_exec` / `bp_add_mem` | Register an exec breakpoint or a read/write watchpoint range. `mirror: false` makes a mem watch bank-exact (default follows WRAM/MMIO mirrors); `name` (defaulting to the `symbol` used) labels it in `bp_list`. |
 | `bp_set_enabled` | `bp_set_enabled` | Disable/re-enable without removing — id, name and hit count survive. |
 | `bp_remove` / `bp_clear_all` / `bp_list` | `bp_remove` / `bp_clear` / `bp_list` | Manage the registry. `bp_list` rows now carry `enabled`, `hit_count` (mem: at most one per instruction), `mirror` and `name`. |

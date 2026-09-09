@@ -19,4 +19,5 @@ mod controller;
 
 pub use bus::DmaBus;
 pub use channel::{Direction, DmaChannel, DmaParams, Increment, TransferMode};
+pub(crate) use controller::HDMA_CHANNEL_FLAG;
 pub use controller::{Dma, DmaTraceEvent, DmaTraceLog};

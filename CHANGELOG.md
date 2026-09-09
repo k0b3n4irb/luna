@@ -7,6 +7,17 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- Memory trace `origin` (#226): every event says who performed the
+  access — `cpu`, `dma<n>` or `hdma<n>` — and DMA / HDMA writes to the
+  B-bus (`$21xx`) and the A-bus now land in the same stream as CPU
+  accesses (they were invisible to `--mem-trace` before; only the VRAM
+  ports reached `--dma-trace`). New CSV column `origin` (appended),
+  MCP `take_mem_trace` field `origin`, `Emulator::enable_mem_trace_filtered`
+  with an explicit offset list + writes-only, and the CLI sugar
+  `--trace-writes 2121,2122,420C` (with `--mem-trace`). Memory
+  watchpoints (`run_until_mem_write`, `bp_add mem`) fire on DMA / HDMA
+  writes too. The Event Viewer keeps plotting DMA writes from the DMA
+  trace only (no duplicates).
 - `luna diff a.sfc b.sfc --frames 200,400 [--tolerance N]` (#225): two
   ROMs run side by side in one process, the displayed frame hashed at
   every PPU frame, `MATCH` / `DIFF` per requested frame (a match may sit

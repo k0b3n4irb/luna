@@ -135,6 +135,7 @@ pub(crate) fn run_state(
     mem_trace_max: usize,
     mem_trace_bank: Option<&str>,
     mem_trace_addr: Option<&str>,
+    trace_writes: Option<&str>,
     dma_trace_path: Option<&std::path::Path>,
     dma_trace_from: u64,
     dma_trace_max: usize,
@@ -420,6 +421,23 @@ pub(crate) fn run_state(
             }
         },
     };
+    // `--trace-writes` (issue #226): an explicit offset list, writes only.
+    let parsed_writes: Option<Vec<u16>> = match trace_writes {
+        None => None,
+        Some(spec) => match crate::parsers::parse_offset_list(spec) {
+            Ok(list) => Some(list),
+            Err(e) => {
+                eprintln!("error: --trace-writes {e}");
+                return ExitCode::from(1);
+            }
+        },
+    };
+    let mem_filter = luna_api::MemTraceFilter {
+        bank: parsed_mem_bank,
+        offsets: parsed_mem_addr,
+        writes_only: parsed_writes.is_some(),
+        only_offsets: parsed_writes,
+    };
     if bridge_target != u64::MAX {
         let current = em.instructions_executed();
         if bridge_target > current {
@@ -440,7 +458,7 @@ pub(crate) fn run_state(
     }
     if mem_trace_path.is_some()
         && em.instructions_executed() >= mem_trace_from
-        && let Err(e) = em.enable_mem_trace(mem_trace_max, parsed_mem_bank, parsed_mem_addr)
+        && let Err(e) = em.enable_mem_trace_filtered(mem_trace_max, mem_filter.clone())
     {
         eprintln!("error: enable_mem_trace: {e}");
         return ExitCode::from(1);
@@ -460,7 +478,7 @@ pub(crate) fn run_state(
                 let _ = em.enable_cpu_trace(cpu_trace_max);
             }
             if mem_trace_path.is_some() && em.instructions_executed() >= mem_trace_from {
-                let _ = em.enable_mem_trace(mem_trace_max, parsed_mem_bank, parsed_mem_addr);
+                let _ = em.enable_mem_trace_filtered(mem_trace_max, mem_filter);
             }
         }
     }

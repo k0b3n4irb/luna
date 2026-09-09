@@ -332,7 +332,7 @@ const fn hdma_cost(mclk_at_fire: u64, clock_count: u32, reads: u32) -> u32 {
 /// `SnesDmaController::HdmaChannelFlag`, `SnesDmaController.h:12`). OR'd onto
 /// the channel index for the Event Viewer; consumers take `& 7` for the
 /// channel number.
-const HDMA_CHANNEL_FLAG: u8 = 0x40;
+pub(crate) const HDMA_CHANNEL_FLAG: u8 = 0x40;
 
 #[cfg(test)]
 mod tests {
