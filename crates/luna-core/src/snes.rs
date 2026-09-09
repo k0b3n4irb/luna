@@ -21,7 +21,7 @@ use luna_cpu_65c816::Cpu;
 use luna_ppu::Ppu;
 
 use crate::coproc::{Dsp1Mapper, Sa1Chip};
-use crate::dma::{Dma, DmaBus, DmaTraceEvent, DmaTraceLog};
+use crate::dma::{Dma, DmaBus, DmaTraceEvent, DmaTraceLog, HDMA_CHANNEL_FLAG};
 use crate::mclk::{MclkAccounting, MclkKind};
 use crate::power::PowerOnState;
 
@@ -335,6 +335,42 @@ pub struct MemTraceEvent {
     /// `true` if INIDISP (`$2100`) forced-blank (bit 7) was set at the access.
     /// A VRAM write is safe iff `blank || force_blank`.
     pub force_blank: bool,
+    /// Who performed the access (issue #226): the CPU, or a DMA / HDMA
+    /// channel writing the B-bus (`$21xx`) or the A-bus.
+    pub origin: MemOrigin,
+}
+
+/// Who performed a traced bus access (issue #226).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemOrigin {
+    /// An instruction's own bus access.
+    Cpu,
+    /// A general-purpose DMA burst on this channel (0-7).
+    Dma(u8),
+    /// An HDMA transfer / table fetch on this channel (0-7).
+    Hdma(u8),
+}
+
+impl MemOrigin {
+    /// From the controller's active-channel tag (`HDMA_CHANNEL_FLAG | ch`
+    /// for an HDMA transfer, the bare channel for a DMA burst).
+    pub(crate) const fn from_channel_tag(tag: u8) -> Self {
+        if tag & HDMA_CHANNEL_FLAG != 0 {
+            Self::Hdma(tag & 7)
+        } else {
+            Self::Dma(tag & 7)
+        }
+    }
+
+    /// The CSV / MCP spelling: `cpu`, `dma<n>`, `hdma<n>`.
+    #[must_use]
+    pub fn label(self) -> String {
+        match self {
+            Self::Cpu => "cpu".to_string(),
+            Self::Dma(ch) => format!("dma{ch}"),
+            Self::Hdma(ch) => format!("hdma{ch}"),
+        }
+    }
 }
 
 /// Direction of a CPU bus access.
@@ -369,6 +405,56 @@ pub struct MemTraceLog {
     /// bank filter's code-fetch flood. Composes with `bank_filter`
     /// (both must match).
     pub offset_filter: Option<(u16, u16)>,
+    /// Optional explicit offset list (issue #226): only accesses whose
+    /// low 16 bits are in the list are kept (`--trace-writes 2121,2122`).
+    /// Composes with the other filters.
+    pub only_offsets: Option<Vec<u16>>,
+    /// Keep writes only (reads and the NMI/IRQ markers are dropped).
+    pub writes_only: bool,
+}
+
+/// The filters a memory trace can be opened with (issue #226) — every
+/// field composes (all must match). `Default` = record everything.
+#[derive(Debug, Clone, Default)]
+pub struct MemTraceFilter {
+    /// Bank (high byte of the 24-bit address) to keep.
+    pub bank: Option<u8>,
+    /// Inclusive low-16-bit offset range to keep.
+    pub offsets: Option<(u16, u16)>,
+    /// Explicit low-16-bit offsets to keep.
+    pub only_offsets: Option<Vec<u16>>,
+    /// Keep writes only.
+    pub writes_only: bool,
+}
+
+impl MemTraceLog {
+    /// Whether an access to `addr` of `kind` passes the filters and fits
+    /// under the cap.
+    #[must_use]
+    pub fn accepts(&self, addr: Addr24, kind: MemEventKind) -> bool {
+        if self.events.len() >= self.max_events {
+            return false;
+        }
+        if self.writes_only && !matches!(kind, MemEventKind::Write) {
+            return false;
+        }
+        if let Some(filter) = self.bank_filter
+            && bank_of(addr) != filter
+        {
+            return false;
+        }
+        if let Some((lo, hi)) = self.offset_filter
+            && !(lo..=hi).contains(&offset_of(addr))
+        {
+            return false;
+        }
+        if let Some(list) = &self.only_offsets
+            && !list.contains(&offset_of(addr))
+        {
+            return false;
+        }
+        true
+    }
 }
 
 /// Master cycles per PPU scanline on NTSC (1364 mclk = 4 dots × 341).
@@ -846,11 +932,27 @@ impl Snes {
         bank_filter: Option<u8>,
         offset_filter: Option<(u16, u16)>,
     ) {
+        self.enable_mem_trace_filtered(
+            max_events,
+            MemTraceFilter {
+                bank: bank_filter,
+                offsets: offset_filter,
+                ..MemTraceFilter::default()
+            },
+        );
+    }
+
+    /// [`Self::enable_mem_trace`] with the full filter set (issue #226):
+    /// also an explicit offset list and writes-only. DMA / HDMA writes
+    /// (B-bus and A-bus) are recorded too, tagged by [`MemOrigin`].
+    pub fn enable_mem_trace_filtered(&mut self, max_events: usize, filter: MemTraceFilter) {
         self.mem_trace_log = Some(MemTraceLog {
             events: Vec::new(),
             max_events,
-            bank_filter,
-            offset_filter,
+            bank_filter: filter.bank,
+            offset_filter: filter.offsets,
+            only_offsets: filter.only_offsets,
+            writes_only: filter.writes_only,
         });
     }
 
@@ -1731,6 +1833,44 @@ struct DmaBusView<'a> {
     /// segment, so captured B-bus writes carry their source channel
     /// (Mesen2 `dma->GetActiveChannel()`).
     dma_channel: u8,
+    /// The CPU's memory trace, so DMA / HDMA writes land in the same
+    /// stream as instruction writes, tagged by origin (issue #226).
+    mem_trace: Option<&'a mut MemTraceLog>,
+    /// The watchpoint registry: a `run_until_mem_write` / `bp_add mem`
+    /// fires on a DMA / HDMA write too (issue #226).
+    breakpoints: Option<&'a mut crate::breakpoints::BreakpointSet>,
+    /// PC of the instruction whose bus access ran this burst / line —
+    /// stamped as the event's `pc_full`.
+    cpu_pc: u32,
+    /// Master clock at the burst / line start — stamped as `mclk_total`
+    /// (byte-level advance within a burst is not modelled).
+    trace_mclk: u64,
+}
+
+impl DmaBusView<'_> {
+    /// Watchpoints + memory trace for a DMA-side write (B-bus register
+    /// `$21xx` as `$00:21xx`, or an A-bus address).
+    fn note_write(&mut self, addr: Addr24, value: u8) {
+        if let Some(bp) = self.breakpoints.as_deref_mut() {
+            bp.check_mem(addr, MemEventKind::Write, value, self.cpu_pc);
+        }
+        if let Some(log) = self.mem_trace.as_deref_mut()
+            && log.accepts(addr, MemEventKind::Write)
+        {
+            log.events.push(MemTraceEvent {
+                mclk_total: self.trace_mclk,
+                pc_full: self.cpu_pc,
+                addr_full: addr,
+                kind: MemEventKind::Write,
+                value,
+                line: self.trace_line,
+                hclock: self.trace_hclock,
+                blank: self.trace_blank,
+                force_blank: self.ppu.inidisp & 0x80 != 0,
+                origin: MemOrigin::from_channel_tag(self.dma_channel),
+            });
+        }
+    }
 }
 
 impl DmaBus for DmaBusView<'_> {
@@ -1747,6 +1887,7 @@ impl DmaBus for DmaBusView<'_> {
     }
 
     fn write_a(&mut self, addr: Addr24, value: u8) {
+        self.note_write(addr, value);
         if let Some(o) = SnesBus::wram_offset(addr) {
             self.wram[o] = value;
             return;
@@ -1773,6 +1914,7 @@ impl DmaBus for DmaBusView<'_> {
     }
 
     fn write_b(&mut self, b_offset: u8, value: u8) {
+        self.note_write(0x2100 | u32::from(b_offset), value);
         if b_offset <= 0x3F {
             // Mirror of the CPU path's intra-line partial flush (gap G6,
             // `write_inner` $21xx): a DMA byte hitting a render-affecting
@@ -1874,20 +2016,9 @@ impl SnesBus<'_> {
             bp.check_mem(addr, kind, value, self.cpu_pc_full);
         }
         let hclock = self.hclock();
-        if let Some(log) = self.mem_trace_log.as_mut() {
-            if log.events.len() >= log.max_events {
-                return;
-            }
-            if let Some(filter) = log.bank_filter
-                && bank_of(addr) != filter
-            {
-                return;
-            }
-            if let Some((lo, hi)) = log.offset_filter
-                && !(lo..=hi).contains(&offset_of(addr))
-            {
-                return;
-            }
+        if let Some(log) = self.mem_trace_log.as_mut()
+            && log.accepts(addr, kind)
+        {
             log.events.push(MemTraceEvent {
                 mclk_total: *self.mclk_total,
                 pc_full: self.cpu_pc_full,
@@ -1898,6 +2029,7 @@ impl SnesBus<'_> {
                 hclock,
                 blank: self.ppu_line >= self.vblank_start_line,
                 force_blank: self.ppu.inidisp & 0x80 != 0,
+                origin: MemOrigin::Cpu,
             });
         }
     }
@@ -1933,6 +2065,7 @@ impl SnesBus<'_> {
                 hclock,
                 blank,
                 force_blank,
+                origin: MemOrigin::Cpu,
             });
         }
     }
@@ -2160,6 +2293,10 @@ impl SnesBus<'_> {
                 trace_blank: self.ppu_line >= self.vblank_start_line,
                 trace_hclock,
                 dma_channel: 0,
+                mem_trace: self.mem_trace_log.as_mut(),
+                breakpoints: self.breakpoints.as_deref_mut(),
+                cpu_pc: self.cpu_pc_full,
+                trace_mclk: line_start_mclk,
             };
             hdma_stall += self
                 .dma
@@ -2248,6 +2385,10 @@ impl SnesBus<'_> {
                 trace_blank: self.ppu_line >= self.vblank_start_line,
                 trace_hclock,
                 dma_channel: 0,
+                mem_trace: self.mem_trace_log.as_mut(),
+                breakpoints: self.breakpoints.as_deref_mut(),
+                cpu_pc: self.cpu_pc_full,
+                trace_mclk: line_start_mclk,
             };
             hdma_stall += self.dma.hdma_init(&mut view, line_start_mclk, clock_count);
         }
@@ -2445,6 +2586,10 @@ impl SnesBus<'_> {
                     trace_blank: self.ppu_line >= self.vblank_start_line,
                     trace_hclock,
                     dma_channel: 0,
+                    mem_trace: self.mem_trace_log.as_mut(),
+                    breakpoints: self.breakpoints.as_deref_mut(),
+                    cpu_pc: self.cpu_pc_full,
+                    trace_mclk: mclk_at_edge,
                 };
                 self.dma.run_mdma(&mut view, value)
             };
@@ -2488,6 +2633,10 @@ impl SnesBus<'_> {
                     trace_blank: self.ppu_line >= self.vblank_start_line,
                     trace_hclock,
                     dma_channel: 0,
+                    mem_trace: self.mem_trace_log.as_mut(),
+                    breakpoints: self.breakpoints.as_deref_mut(),
+                    cpu_pc: self.cpu_pc_full,
+                    trace_mclk: *self.mclk_total,
                 };
                 self.dma.run_mdma_segment(&mut view, value, seg_bytes)
             };
@@ -3706,6 +3855,93 @@ mod tests {
         assert_eq!(snes.ppu.cgram.color(1), 0x03E0, "color 1 = green");
         // DAS is zeroed by hardware on completion.
         assert_eq!(snes.dma.channels[0].das, 0);
+    }
+
+    #[test]
+    fn mem_trace_tags_dma_writes_with_their_origin_and_fires_watchpoints() {
+        // The palette-upload program above, plus one CPU write to $2122
+        // first, with a writes-only trace on $2122 — the "who wrote CGRAM
+        // entry N" hunt (issue #226): the CPU row and the four DMA rows
+        // share one stream, each tagged by origin.
+        let cart = demo_lorom();
+        let mut rom = cart.rom;
+        let prog = [
+            0xA9, 0x55, 0x8D, 0x22, 0x21, // LDA #$55 ; STA $2122 (CPU write)
+            0xA9, 0x22, 0x8D, 0x01, 0x43, // LDA #$22 ; STA $4301
+            0xA9, 0x00, 0x8D, 0x02, 0x43, // LDA #$00 ; STA $4302
+            0xA9, 0x20, 0x8D, 0x03, 0x43, // LDA #$20 ; STA $4303
+            0xA9, 0x7E, 0x8D, 0x04, 0x43, // LDA #$7E ; STA $4304
+            0xA9, 0x04, 0x8D, 0x05, 0x43, // LDA #$04 ; STA $4305
+            0xA9, 0x00, 0x8D, 0x00, 0x43, // LDA #$00 ; STA $4300
+            0xA9, 0x01, 0x8D, 0x0B, 0x42, // LDA #$01 ; STA $420B (trigger)
+            0xDB, // STP
+        ];
+        rom[..prog.len()].copy_from_slice(&prog);
+        let cart = Cartridge::from_bytes(rom).unwrap();
+        let mut snes = Snes::from_cartridge(cart);
+        snes.reset();
+        snes.cpu.db = 0;
+        snes.wram[0x2000..0x2004].copy_from_slice(&[0x1F, 0x00, 0xE0, 0x03]);
+        snes.enable_mem_trace_filtered(
+            1000,
+            MemTraceFilter {
+                only_offsets: Some(vec![0x2122]),
+                writes_only: true,
+                ..MemTraceFilter::default()
+            },
+        );
+        // A watchpoint on $00:2122 must fire on the DMA's write too.
+        let mut bps = crate::breakpoints::BreakpointSet::new();
+        bps.add_mem(0x00_2122, 0x00_2122, false, true, false, None);
+        snes.breakpoints = Some(Box::new(bps));
+        let mut hits = 0;
+        for _ in 0..40 {
+            if snes.cpu.stopped {
+                break;
+            }
+            snes.step();
+            if let Some(bp) = snes.breakpoints.as_mut()
+                && bp.take_pending().is_some()
+            {
+                hits += 1;
+            }
+        }
+        assert!(snes.cpu.stopped);
+        assert_eq!(
+            hits, 2,
+            "one CPU hit, one DMA hit (first byte of the burst)"
+        );
+
+        let ev = snes.take_mem_trace_log();
+        assert_eq!(ev.len(), 5, "{ev:?}");
+        assert!(
+            ev.iter()
+                .all(|e| e.addr_full == 0x00_2122 && e.kind == MemEventKind::Write)
+        );
+        assert_eq!(ev[0].origin, MemOrigin::Cpu);
+        assert_eq!(ev[0].value, 0x55);
+        let dma: Vec<u8> = ev[1..].iter().map(|e| e.value).collect();
+        assert_eq!(dma, vec![0x1F, 0x00, 0xE0, 0x03]);
+        assert!(
+            ev[1..].iter().all(|e| e.origin == MemOrigin::Dma(0)),
+            "{ev:?}"
+        );
+        // The DMA rows carry the PC of the instruction whose access ran the
+        // edge (the STP after `STA $420B`), and the burst-start clock.
+        assert_eq!(ev[1].pc_full, 0x00_8000 + prog.len() as u32 - 1);
+        assert!(ev[1].mclk_total >= ev[0].mclk_total);
+    }
+
+    #[test]
+    fn mem_origin_from_channel_tag_and_labels() {
+        assert_eq!(MemOrigin::from_channel_tag(3), MemOrigin::Dma(3));
+        assert_eq!(
+            MemOrigin::from_channel_tag(HDMA_CHANNEL_FLAG | 5),
+            MemOrigin::Hdma(5)
+        );
+        assert_eq!(MemOrigin::Cpu.label(), "cpu");
+        assert_eq!(MemOrigin::Dma(0).label(), "dma0");
+        assert_eq!(MemOrigin::Hdma(7).label(), "hdma7");
     }
 
     #[test]
