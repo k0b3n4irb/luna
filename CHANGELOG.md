@@ -7,6 +7,15 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- `luna profile rom.sfc [-n N | --until-frame F] [--from-frame F]` (#227):
+  real master cycles per symbol. Every step credits its cycles — bus +
+  internal cycles plus the DMA / HDMA / refresh stalls charged during
+  it — to the instruction's address; the report folds those onto the
+  nearest `.sym` label (FastROM-mirror aware, HiROM `c0:` labels) or a
+  256-byte page, heaviest first, with `idle_mclk` (parked `WAI`/`STP`)
+  and `pct`. Text table + `--out` JSON. API `enable_profile` /
+  `take_profile` (folded) / `take_profile_raw`; MCP `enable_profile` /
+  `take_profile`. Replaces static per-instruction weight estimates.
 - Memory trace `origin` (#226): every event says who performed the
   access — `cpu`, `dma<n>` or `hdma<n>` — and DMA / HDMA writes to the
   B-bus (`$21xx`) and the A-bus now land in the same stream as CPU

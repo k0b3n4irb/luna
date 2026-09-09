@@ -311,6 +311,20 @@ impl SymbolTable {
         ))
     }
 
+    /// The label at or below `addr` in the same bank, as `(name, label
+    /// address)` — the un-annotated form [`Self::nearest`] renders, for
+    /// folding many addresses onto one symbol (issue #227).
+    #[must_use]
+    pub fn nearest_label(&self, addr: u32) -> Option<(&str, u32)> {
+        let addr = addr & 0x00FF_FFFF;
+        let idx = self.cpu_by_addr.partition_point(|&(a, _)| a <= addr);
+        let &(label_addr, name_idx) = self.cpu_by_addr.get(idx.checked_sub(1)?)?;
+        if label_addr >> 16 != addr >> 16 {
+            return None;
+        }
+        Some((self.entries[name_idx].name.as_str(), label_addr))
+    }
+
     /// Nearest ARAM label at or below `addr`, rendered like
     /// [`Self::nearest`] (no bank guard — ARAM is one flat 64 KB).
     #[must_use]

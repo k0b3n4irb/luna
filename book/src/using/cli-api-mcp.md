@@ -377,6 +377,48 @@ luna diff build/old/game.sfc build/new/game.sfc --frames 200,400 --tolerance 3 \
 # 2 frame(s): 2 match, 0 diff (tolerance ±3)
 ```
 
+### `luna profile` — real master cycles per symbol
+
+```
+luna profile [OPTIONS] <ROM>
+```
+
+Where the time goes, measured rather than estimated: every step credits
+its master cycles — bus + internal cycles **plus the DMA / HDMA / refresh
+stalls charged during it** — to the instruction's address, and the report
+folds those onto the nearest `.sym` label at or below the PC (FastROM
+mirror aware: a `00:` label catches code running in `$80:`, a `c0:`
+HiROM label matches bank `$C0`). PCs no label covers fold onto their
+256-byte page. Rows come heaviest first; `idle%` is the share spent
+parked in `WAI` / `STP` under that label.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `-n, --steps <N>` | `3000000` | Instructions to profile (after `--from-frame`). |
+| `--until-frame <F>` | — | Profile until PPU frame `F` instead of `-n`. |
+| `--from-frame <F>` | `0` | Start at PPU frame `F` — skip the boot to profile the game loop. |
+| `--input <SCRIPT>` | — | Joypad-1 script (§3). |
+| `--sym <PATH>` | auto `<rom>.sym` | Labels to fold onto. |
+| `--top <N>` | `25` | Rows printed (the JSON has them all). |
+| `--out <PATH>` | — | JSON report (`-` = stdout after the table): `{rom, from_frame, end_frame, total_mclk, instructions, entries: [{symbol, addr, instructions, mclk, idle_mclk, pct, pcs}]}`. |
+| `--force-mapper`, `--force-region`, `--power-on` | — | As elsewhere. |
+
+```bash
+# The game loop, boot excluded: frames 120..600.
+luna profile --from-frame 120 --until-frame 600 --top 5 game.sfc
+# profile: frames 120..600, 1848213 instructions, 171536640 master cycles, 42 symbol(s)
+#       %            mclk         instr   idle%     pcs  symbol
+#  61.02%       104672880        483840   99.6%       2  WaitForVBlank
+#  12.40%        21270530        291840    0.0%      61  DrawSprites
+#   7.91%        13570200         96480    0.0%      14  DmaOamTable      <- the DMA burst is charged here
+#   …
+```
+
+`WaitForVBlank` at 61 % idle is the frame's headroom (the same number
+`stats.last_frame.cpu_wai` gives); a DMA burst's cost lands on the
+instruction that triggered it, so a "cheap" `STA $420B` routine can top
+the table — that is the real cost.
+
 ### `luna wram-trace` — cross-emulator state differential
 
 ```
@@ -672,6 +714,7 @@ method, so the MCP transport adds reach, not capability.
 | `render_palette` | `render_palette_png` | CGRAM as a 16×16 swatch-grid PNG. |
 | `render_sprite_sheet` | `render_sprite_sheet_png` | All 128 OAM sprites as a transparent PNG sheet. |
 | `enable_cpu_trace` / `take_cpu_trace` | `enable_cpu_trace` / `take_cpu_trace_log` | Per-instruction CPU trace ring (PC + registers). |
+| `enable_profile` / `take_profile` | `enable_profile` / `take_profile` | Master cycles per symbol (folded, heaviest first); `take_profile_raw` for per-PC samples. |
 | `enable_mem_trace` / `take_mem_trace` | `enable_mem_trace_filtered` / `take_mem_trace_log` | Per-bus-access trace with bank / offset-range / offset-list / writes-only filters; every event carries `origin` (`cpu`, `dma<n>`, `hdma<n>`). |
 | `bp_add` | `bp_add_exec` / `bp_add_mem` | Register an exec breakpoint or a read/write watchpoint range. `mirror: false` makes a mem watch bank-exact (default follows WRAM/MMIO mirrors); `name` (defaulting to the `symbol` used) labels it in `bp_list`. |
 | `bp_set_enabled` | `bp_set_enabled` | Disable/re-enable without removing — id, name and hit count survive. |

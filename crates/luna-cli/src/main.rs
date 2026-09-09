@@ -16,6 +16,7 @@ mod fmt;
 mod frames;
 mod output;
 mod parsers;
+mod profile;
 mod rom;
 mod run;
 mod state;
@@ -25,6 +26,7 @@ mod wram_trace;
 use diff::{DiffOptions, run_diff};
 use dumps::{run_assets_dump, run_spc_dump};
 use frames::run_frames;
+use profile::{ProfileOptions, run_profile};
 use run::run;
 use state::run_state;
 use wram_trace::run_wram_trace;
@@ -623,6 +625,48 @@ enum Command {
         #[arg(long = "power-on")]
         power_on: Option<String>,
     },
+    /// Real master cycles per symbol (issue #227): every step credits its
+    /// cycles — bus + internal cycles plus the DMA / HDMA / refresh
+    /// stalls charged during it — to the instruction's address; the
+    /// report folds those onto the nearest `.sym` label (or a 256-byte
+    /// page without one), heaviest first. Replaces static instruction
+    /// weights with what the machine paid.
+    Profile {
+        /// Path to the .sfc / .smc ROM file.
+        rom: PathBuf,
+        /// CPU instructions to profile (after `--from-frame`).
+        #[arg(short = 'n', long, default_value_t = 3_000_000)]
+        steps: u64,
+        /// Profile until PPU frame N instead of the `-n` count.
+        #[arg(long = "until-frame")]
+        until_frame: Option<u64>,
+        /// Start profiling at PPU frame N (warm-up before it is not
+        /// counted) — e.g. skip the boot to profile the game loop.
+        #[arg(long = "from-frame", default_value_t = 0)]
+        from_frame: u64,
+        /// Scripted joypad-1 input (`state --input` grammar).
+        #[arg(long)]
+        input: Option<String>,
+        /// WLA-DX `.sym` to fold PCs onto (overrides the `<rom>.sym`
+        /// auto-detection).
+        #[arg(long)]
+        sym: Option<PathBuf>,
+        /// Rows to print (the JSON report always has them all).
+        #[arg(long, default_value_t = 25)]
+        top: usize,
+        /// Write the full report as JSON (`-` = stdout after the table).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Force a cartridge mapper (lorom, hirom, exhirom, sa1, superfx).
+        #[arg(long = "force-mapper")]
+        force_mapper: Option<String>,
+        /// Force the video standard (ntsc, pal).
+        #[arg(long = "force-region")]
+        force_region: Option<String>,
+        /// Power-on RAM state (`zero`, `ones`, `random[=<seed>]`).
+        #[arg(long = "power-on")]
+        power_on: Option<String>,
+    },
     /// Emit per-frame (vblank-aligned) WRAM page hashes for a
     /// confound-free cross-emulator differential. Each line is
     /// `<ppu_frame> <h0> <h1> ... <hN>` where each `h` is the FNV-1a
@@ -1001,6 +1045,33 @@ fn main() -> ExitCode {
                 tolerance,
                 screenshot_dir: screenshot_dir.as_deref(),
                 out: out.as_deref(),
+            },
+        ),
+        Command::Profile {
+            rom,
+            steps,
+            until_frame,
+            from_frame,
+            input,
+            sym,
+            top,
+            out,
+            force_mapper,
+            force_region,
+            power_on,
+        } => run_profile(
+            &rom,
+            &ProfileOptions {
+                steps,
+                until_frame,
+                from_frame,
+                input_script: input.as_deref(),
+                sym: sym.as_deref(),
+                top,
+                out: out.as_deref(),
+                force_mapper: force_mapper.as_deref(),
+                force_region: force_region.as_deref(),
+                power_on: power_on.as_deref(),
             },
         ),
         Command::WramTrace {

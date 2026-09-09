@@ -44,6 +44,7 @@
 //!   `take_mem_trace` → per-bus-access memory trace with filters.
 //! - `set_mouse { dx, dy, buttons }` / `set_superscope { x, y, buttons }`
 //!   → pointer-device input.
+//! - `enable_profile` / `take_profile` → master cycles per symbol (issue #227).
 //! - `enable_nocash_log` / `take_nocash_log` and `enable_wdm_log` /
 //!   `take_wdm_log` → the SDK assert/log channels ($21FC Nocash TTY
 //!   text + WDM assert hits).
@@ -809,6 +810,18 @@ pub struct WdmEvent {
     pub operand: u8,
     /// Nearest symbol for `pc` when a `.sym` table is loaded.
     pub symbol: Option<String>,
+}
+
+/// `take_profile` result (issue #227).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ProfileResult {
+    /// Master cycles across every sample (the `pct` denominator).
+    pub total_mclk: u64,
+    /// Instructions across every sample.
+    pub instructions: u64,
+    /// Rows, heaviest `mclk` first: `{symbol, addr, instructions, mclk,
+    /// idle_mclk, pct, pcs}`.
+    pub entries: Vec<luna_api::ProfileEntry>,
 }
 
 /// `take_wdm_log` result.
@@ -2833,6 +2846,39 @@ impl LunaServer {
             em.enable_wdm_log().map_err(|e| api_err_to_mcp(&e))?;
         }
         Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Start the per-PC profiler (issue #227): from now on every step credits \
+                                its master cycles — bus + internal cycles plus the DMA / HDMA / \
+                                refresh stalls charged during it — to the instruction's address. \
+                                Restarting empties it. Read with `take_profile`."
+    )]
+    async fn enable_profile(&self) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        {
+            let mut em = self.emulator.lock().await;
+            em.enable_profile().map_err(|e| api_err_to_mcp(&e))?;
+        }
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Take the profile folded by symbol, heaviest `mclk` first: each PC goes \
+                                to the nearest loaded `.sym` label at or below it (FastROM mirror \
+                                aware); PCs no label covers fold onto their 256-byte page. `pct` is \
+                                the share of the profile's total master cycles, `idle_mclk` the part \
+                                spent parked in WAI/STP. Empties the profiler (it stays on)."
+    )]
+    async fn take_profile(&self) -> Result<rmcp::Json<ProfileResult>, ErrorData> {
+        let report = {
+            let mut em = self.emulator.lock().await;
+            em.take_profile().map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(ProfileResult {
+            total_mclk: report.total_mclk,
+            instructions: report.instructions,
+            entries: report.entries,
+        }))
     }
 
     #[rmcp::tool(
