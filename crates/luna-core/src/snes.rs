@@ -197,6 +197,12 @@ pub struct Snes {
     #[serde(skip)]
     pub cpu_trace_log: Option<CpuTraceLog>,
 
+    /// Optional per-PC profiler (issue #227): instructions + master
+    /// cycles paid by each instruction address, including the stalls
+    /// (DMA, HDMA, refresh) charged during it. `None` = off.
+    #[serde(skip)]
+    pub profile: Option<Profile>,
+
     /// Optional memory access trace. When `Some`, every CPU bus
     /// read/write is appended until the log fills. Filterable by
     /// bank to avoid drowning in ROM fetches. Enable via
@@ -338,6 +344,53 @@ pub struct MemTraceEvent {
     /// Who performed the access (issue #226): the CPU, or a DMA / HDMA
     /// channel writing the B-bus (`$21xx`) or the A-bus.
     pub origin: MemOrigin,
+}
+
+/// Cost paid by one instruction address (issue #227).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProfileSample {
+    /// Instructions executed at this PC (a parked `WAI` / `STP` tick is
+    /// not one).
+    pub instructions: u64,
+    /// Master cycles the machine spent while this PC was the current
+    /// instruction — bus accesses, internal cycles, and the DMA / HDMA /
+    /// refresh stalls charged during it.
+    pub mclk: u64,
+    /// The part of `mclk` spent parked in `WAI` / `STP` at this PC.
+    pub idle_mclk: u64,
+}
+
+/// Per-PC profile (issue #227): where the master cycles went, by the
+/// 24-bit address of the instruction that paid them. Folding by symbol
+/// is the API's job.
+#[derive(Debug, Clone, Default)]
+pub struct Profile {
+    /// `pc_full` → cost.
+    pub samples: std::collections::HashMap<u32, ProfileSample>,
+}
+
+impl Profile {
+    /// Credit one step at `pc` that cost `mclk` (`idle` = a parked tick).
+    /// A parked tick that cost nothing (a `STP`-halted CPU) leaves no
+    /// sample — it is not time, and not an instruction.
+    pub fn record(&mut self, pc: u32, mclk: u64, idle: bool) {
+        if idle && mclk == 0 {
+            return;
+        }
+        let s = self.samples.entry(pc).or_default();
+        s.mclk = s.mclk.saturating_add(mclk);
+        if idle {
+            s.idle_mclk = s.idle_mclk.saturating_add(mclk);
+        } else {
+            s.instructions = s.instructions.saturating_add(1);
+        }
+    }
+
+    /// Total master cycles across every sample.
+    #[must_use]
+    pub fn total_mclk(&self) -> u64 {
+        self.samples.values().map(|s| s.mclk).sum()
+    }
 }
 
 /// Who performed a traced bus access (issue #226).
@@ -787,6 +840,7 @@ impl Snes {
             mailbox_log: None,
             sa1_log: None,
             cpu_trace_log: None,
+            profile: None,
             mem_trace_log: None,
             breakpoints: None,
             nocash_log: None,
@@ -899,6 +953,25 @@ impl Snes {
     /// Drain the SPC700 instruction trace (empty if disabled).
     pub fn take_spc_trace(&mut self) -> Vec<luna_apu::Spc700TraceEvent> {
         self.apu_real.take_spc_trace()
+    }
+
+    /// Start (or restart, emptied) the per-PC profiler (issue #227).
+    pub fn enable_profile(&mut self) {
+        self.profile = Some(Profile::default());
+    }
+
+    /// Take the accumulated profile, leaving the profiler enabled and
+    /// empty. Empty when it was never enabled.
+    pub fn take_profile(&mut self) -> Profile {
+        match self.profile.as_mut() {
+            Some(p) => std::mem::take(p),
+            None => Profile::default(),
+        }
+    }
+
+    /// Stop the profiler and drop its samples.
+    pub fn disable_profile(&mut self) {
+        self.profile = None;
     }
 
     /// Enable CPU instruction tracing. From this point onward each
@@ -1251,6 +1324,9 @@ impl Snes {
         self.nmis_serviced = rb_ns;
 
         let consumed = self.total_mclk - before;
+        if let Some(prof) = self.profile.as_mut() {
+            prof.record(cpu_pc_snapshot, consumed, idle_kind.is_some());
+        }
 
         // The cartridge coprocessor (SA-1 / Super FX / DSP-1 / …) now
         // advances per bus access inside `bus.io_cycle` (Phase 1
@@ -3930,6 +4006,37 @@ mod tests {
         // edge (the STP after `STA $420B`), and the burst-start clock.
         assert_eq!(ev[1].pc_full, 0x00_8000 + prog.len() as u32 - 1);
         assert!(ev[1].mclk_total >= ev[0].mclk_total);
+    }
+
+    #[test]
+    fn profile_credits_each_pc_with_its_real_cost() {
+        // LDA #$42 ; STA $7E:0000 ; STP — three PCs, then parked STP ticks
+        // (which cost nothing, are not instructions, and leave no sample).
+        let mut snes = Snes::from_cartridge(demo_lorom());
+        snes.reset();
+        snes.enable_profile();
+        for _ in 0..8 {
+            snes.step();
+        }
+        let p = snes.take_profile();
+        assert_eq!(p.samples.len(), 3, "{p:?}");
+        let lda = p.samples[&0x00_8000];
+        let sta = p.samples[&0x00_8002];
+        let stp = p.samples[&0x00_8006];
+        assert_eq!(lda.instructions, 1);
+        assert_eq!(sta.instructions, 1);
+        assert_eq!(stp.instructions, 1, "the STP itself executes once");
+        // LDA #imm = 2 slow accesses (16 mclk); STA long = 4 accesses + the
+        // WRAM write (40 mclk); every cost is real master clocks, so the
+        // long store costs more than the immediate load.
+        assert!(sta.mclk > lda.mclk, "{p:?}");
+        assert_eq!(p.total_mclk(), lda.mclk + sta.mclk + stp.mclk);
+        assert_eq!(lda.idle_mclk, 0);
+        // Taking empties; the profiler stays on.
+        assert!(snes.take_profile().samples.is_empty());
+        assert!(snes.profile.is_some());
+        snes.disable_profile();
+        assert!(snes.profile.is_none());
     }
 
     #[test]

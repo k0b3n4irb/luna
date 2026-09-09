@@ -29,8 +29,8 @@ pub use luna_core::controller::PortDevice;
 pub use luna_core::{
     BreakHit, BreakKind, BreakpointInfo, CpuTraceEvent, CpuTraceLog, DmaTraceEvent, DmaTraceLog,
     Dsp1TraceEvent, Dsp1TraceKind, MailboxEvent, MailboxEventKind, MapperKind, MemEventKind,
-    MemOrigin, MemTraceEvent, MemTraceFilter, MemTraceLog, Sa1LogEvent, Sa1SideEvent,
-    Sa1TraceEvent, Spc700TraceEvent, SuperFxTraceEvent,
+    MemOrigin, MemTraceEvent, MemTraceFilter, MemTraceLog, Profile, ProfileSample, Sa1LogEvent,
+    Sa1SideEvent, Sa1TraceEvent, Spc700TraceEvent, SuperFxTraceEvent,
 };
 /// Decoded BG tilemap image (Tilemap Viewer), re-exported so the GUI uses
 /// `luna_api::TilemapImage` rather than depending on `luna-ppu`.
@@ -756,6 +756,39 @@ impl From<&luna_core::MclkBuckets> for MclkBuckets {
             total: b.total(),
         }
     }
+}
+
+/// One row of a folded profile (issue #227): a symbol (or, without one, a
+/// 256-byte page) and the cost of every instruction executed under it.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ProfileEntry {
+    /// The `.sym` label the PCs fold onto, or `$BB:PP00 (no symbol)` for
+    /// a page no label covers.
+    pub symbol: String,
+    /// 24-bit address of the label (or the page start).
+    pub addr: u32,
+    /// Instructions executed under the label.
+    pub instructions: u64,
+    /// Master cycles paid under the label: bus + internal cycles and the
+    /// DMA / HDMA / refresh stalls charged while its instructions ran.
+    pub mclk: u64,
+    /// The part of `mclk` spent parked in `WAI` / `STP` under the label.
+    pub idle_mclk: u64,
+    /// `mclk` as a percentage of the profile's total.
+    pub pct: f64,
+    /// Distinct instruction addresses folded into this row.
+    pub pcs: u32,
+}
+
+/// A folded profile (issue #227).
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ProfileReport {
+    /// Master cycles across every sample (the `pct` denominator).
+    pub total_mclk: u64,
+    /// Instructions across every sample.
+    pub instructions: u64,
+    /// Rows, heaviest `mclk` first.
+    pub entries: Vec<ProfileEntry>,
 }
 
 /// Cumulative metrics since reset.
@@ -3487,6 +3520,87 @@ impl Emulator {
         Ok(())
     }
 
+    /// Start the per-PC profiler (issue #227): from now on every step
+    /// credits its master cycles — bus + internal cycles plus the DMA /
+    /// HDMA / refresh stalls charged during it — to the instruction's
+    /// address. Restarting empties it. Off until called; `load_rom`
+    /// turns it off.
+    pub fn enable_profile(&mut self) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.enable_profile();
+        Ok(())
+    }
+
+    /// Stop the profiler and drop its samples.
+    pub fn disable_profile(&mut self) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.disable_profile();
+        Ok(())
+    }
+
+    /// Take the raw per-PC samples (the profiler stays on, emptied).
+    pub fn take_profile_raw(&mut self) -> Result<Profile, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        Ok(snes.take_profile())
+    }
+
+    /// Take the profile folded by symbol (issue #227): each PC goes to the
+    /// nearest loaded `.sym` label at or below it in the same bank
+    /// (`c0:8afc` `HiROM` labels match code running in bank `$C0`; a `LoROM`
+    /// label in `$00-$3F` also catches the `FastROM` mirror in `$80-$BF`
+    /// and vice versa); PCs no label covers fold onto their 256-byte
+    /// page. Rows come heaviest `mclk` first. Empties the profiler.
+    pub fn take_profile(&mut self) -> Result<ProfileReport, ApiError> {
+        let raw = self.take_profile_raw()?;
+        let syms = self.symbols.as_ref();
+        let mut folded: std::collections::HashMap<(String, u32), (ProfileSample, u32)> =
+            std::collections::HashMap::new();
+        for (&pc, s) in &raw.samples {
+            let key = syms
+                .and_then(|t| {
+                    t.nearest_label(pc)
+                        .or_else(|| t.nearest_label(pc ^ 0x80_0000))
+                        .map(|(name, addr)| (name.to_string(), addr))
+                })
+                .unwrap_or_else(|| {
+                    let page = pc & 0x00FF_FF00;
+                    (
+                        format!("${:02X}:{:04X} (no symbol)", page >> 16, page & 0xFFFF),
+                        page,
+                    )
+                });
+            let slot = folded.entry(key).or_default();
+            slot.0.instructions += s.instructions;
+            slot.0.mclk += s.mclk;
+            slot.0.idle_mclk += s.idle_mclk;
+            slot.1 += 1;
+        }
+        let total_mclk = raw.total_mclk();
+        let instructions = raw.samples.values().map(|s| s.instructions).sum();
+        let mut entries: Vec<ProfileEntry> = folded
+            .into_iter()
+            .map(|((symbol, addr), (s, pcs))| ProfileEntry {
+                symbol,
+                addr,
+                instructions: s.instructions,
+                mclk: s.mclk,
+                idle_mclk: s.idle_mclk,
+                pct: if total_mclk == 0 {
+                    0.0
+                } else {
+                    s.mclk as f64 * 100.0 / total_mclk as f64
+                },
+                pcs,
+            })
+            .collect();
+        entries.sort_by(|a, b| b.mclk.cmp(&a.mclk).then(a.addr.cmp(&b.addr)));
+        Ok(ProfileReport {
+            total_mclk,
+            instructions,
+            entries,
+        })
+    }
+
     /// Drain the captured `WDM` events as `(pc_full, operand)` per hit.
     pub fn take_wdm_log(&mut self) -> Result<Vec<(u32, u8)>, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
@@ -3992,6 +4106,48 @@ mod tests {
         let ev = e.take_mem_trace_log().unwrap();
         assert_eq!(ev.len(), 4, "{ev:?}");
         assert!(ev.iter().all(|x| x.origin == MemOrigin::Dma(0)), "{ev:?}");
+    }
+
+    #[test]
+    fn profile_folds_pcs_onto_symbols_and_pages() {
+        // main: SEI ; LDA #$80 ; STA $4200 ; loop: WAI ; BRA loop ;
+        // nmi (at $8009): RTI — the canonical idle ROM, labelled.
+        let code = [0x78, 0xA9, 0x80, 0x8D, 0x00, 0x42, 0xCB, 0x80, 0xFD, 0x40];
+        let mut e = Emulator::new();
+        assert!(matches!(e.enable_profile(), Err(ApiError::NoRom)));
+        e.load_rom_bytes(demo_lorom_with(&code, Some(0x8009)))
+            .unwrap();
+        e.load_symbols_str("[labels]\n00:8000 main\n00:8006 wait_vblank\n00:8009 nmi_handler\n");
+        e.enable_profile().unwrap();
+        for _ in 0..3 {
+            e.step_until_frame(1_000_000).unwrap();
+        }
+        let r = e.take_profile().unwrap();
+        assert!(r.total_mclk > 0);
+        let by_name = |n: &str| r.entries.iter().find(|x| x.symbol == n).cloned();
+        let wait = by_name("wait_vblank").expect("wait_vblank row");
+        let main = by_name("main").expect("main row");
+        let nmi = by_name("nmi_handler").expect("nmi row");
+        // The parked WAI dominates and is idle time; main ran three
+        // instructions once; the handler ran once per frame.
+        assert!(wait.mclk * 10 > r.total_mclk * 9, "{r:?}");
+        assert!(wait.idle_mclk * 10 > wait.mclk * 9, "{r:?}");
+        assert_eq!(main.instructions, 3);
+        assert_eq!(main.idle_mclk, 0);
+        assert!(nmi.instructions >= 2, "{r:?}");
+        assert_eq!(wait.pcs, 2, "WAI + BRA");
+        // Heaviest first, percentages sum to ~100.
+        assert_eq!(r.entries[0].symbol, "wait_vblank");
+        let pct: f64 = r.entries.iter().map(|x| x.pct).sum();
+        assert!((pct - 100.0).abs() < 1e-6, "{pct}");
+        // Without symbols, PCs fold onto their page.
+        e.clear_symbols();
+        e.enable_profile().unwrap();
+        e.step_until_frame(1_000_000).unwrap();
+        let r = e.take_profile().unwrap();
+        assert_eq!(r.entries.len(), 1, "{r:?}");
+        assert_eq!(r.entries[0].symbol, "$00:8000 (no symbol)");
+        assert_eq!(r.entries[0].addr, 0x00_8000);
     }
 
     #[test]
