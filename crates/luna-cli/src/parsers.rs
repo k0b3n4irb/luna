@@ -192,6 +192,25 @@ pub(crate) fn parse_hex_u8(s: &str) -> Result<u8, String> {
     u8::from_str_radix(s.trim_start_matches("0x"), 16).map_err(|e| e.to_string())
 }
 
+/// Parse a comma-separated list of hex 16-bit offsets (`2121,2122,420C`,
+/// `0x` prefixes allowed) — the `--trace-writes` grammar (issue #226).
+pub(crate) fn parse_offset_list(spec: &str) -> Result<Vec<u16>, String> {
+    let mut out = Vec::new();
+    for item in spec.split(',') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let v = u16::from_str_radix(item.trim_start_matches("0x"), 16)
+            .map_err(|_| format!("`{item}`: expected a hex offset (e.g. 2122)"))?;
+        out.push(v);
+    }
+    if out.is_empty() {
+        return Err(format!("`{spec}`: expected at least one hex offset"));
+    }
+    Ok(out)
+}
+
 /// Parse a `LO:HI` 16-bit hex address range with optional `0x` prefixes
 /// (the `--mem-trace-addr` form, e.g. `2100:21FF`). Extracted from the
 /// former inline closure in `run_state`; error strings preserve the

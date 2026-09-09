@@ -40,7 +40,7 @@
 //!   base64-encoded.
 //! - `enable_cpu_trace { max_events }` / `take_cpu_trace` → per-
 //!   instruction CPU trace ring.
-//! - `enable_mem_trace { max_events, bank?, lo?, hi? }` /
+//! - `enable_mem_trace { max_events, bank?, lo?, hi?, offsets?, writes_only? }` /
 //!   `take_mem_trace` → per-bus-access memory trace with filters.
 //! - `set_mouse { dx, dy, buttons }` / `set_superscope { x, y, buttons }`
 //!   → pointer-device input.
@@ -465,6 +465,14 @@ pub struct EnableMemTraceParams {
     /// symbol. Mutually exclusive with `bank`/`lo`/`hi`.
     #[serde(default)]
     pub symbol: Option<String>,
+    /// Only record accesses whose low 16 bits are in this list (e.g.
+    /// `[0x2121, 0x2122, 0x420C]`) — the "who wrote this register" hunt
+    /// (issue #226). Composes with the other filters.
+    #[serde(default)]
+    pub offsets: Option<Vec<u16>>,
+    /// Record writes only.
+    #[serde(default)]
+    pub writes_only: Option<bool>,
 }
 
 /// `bp_add` parameters.
@@ -767,6 +775,10 @@ pub struct MemTraceLine {
     pub blank: bool,
     /// `true` if INIDISP forced-blank was set at the access.
     pub force_blank: bool,
+    /// Who performed the access: `"cpu"`, `"dma<n>"` or `"hdma<n>"`
+    /// (channel 0-7). DMA / HDMA writes carry the burst / line start
+    /// clock and the PC of the instruction whose access ran them.
+    pub origin: String,
     /// Nearest symbol for `addr` when a `.sym` table is loaded.
     pub symbol: Option<String>,
 }
@@ -2114,8 +2126,16 @@ impl LunaServer {
                 }
                 None => (params.bank, offset_filter),
             };
-            em.enable_mem_trace(params.max_events, bank, offset_filter)
-                .map_err(|e| api_err_to_mcp(&e))?;
+            em.enable_mem_trace_filtered(
+                params.max_events,
+                luna_api::MemTraceFilter {
+                    bank,
+                    offsets: offset_filter,
+                    only_offsets: params.offsets.clone(),
+                    writes_only: params.writes_only.unwrap_or(false),
+                },
+            )
+            .map_err(|e| api_err_to_mcp(&e))?;
         }
         Ok(rmcp::Json(EmptyOk { ok: true }))
     }
@@ -2147,6 +2167,7 @@ impl LunaServer {
                 hclock: ev.hclock,
                 blank: ev.blank,
                 force_blank: ev.force_blank,
+                origin: ev.origin.label(),
                 symbol: syms.as_ref().and_then(|t| t.nearest(ev.addr_full)),
             })
             .collect();
@@ -3712,6 +3733,8 @@ mod tests {
             lo: None,
             hi: None,
             symbol: None,
+            offsets: None,
+            writes_only: None,
         }))
         .await
         .unwrap();
@@ -3734,6 +3757,8 @@ mod tests {
                 lo: Some(0x2100),
                 hi: None,
                 symbol: None,
+                offsets: None,
+                writes_only: None,
             }))
             .await
             .is_err()
@@ -4415,6 +4440,8 @@ mod tests {
                 lo: None,
                 hi: None,
                 symbol: Some("monster_x".into()),
+                offsets: None,
+                writes_only: None,
             }))
             .await
             .is_err()
@@ -4426,6 +4453,8 @@ mod tests {
             lo: None,
             hi: None,
             symbol: Some("monster_x".into()),
+            offsets: None,
+            writes_only: None,
         }))
         .await
         .unwrap();

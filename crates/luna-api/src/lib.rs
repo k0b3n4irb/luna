@@ -29,8 +29,8 @@ pub use luna_core::controller::PortDevice;
 pub use luna_core::{
     BreakHit, BreakKind, BreakpointInfo, CpuTraceEvent, CpuTraceLog, DmaTraceEvent, DmaTraceLog,
     Dsp1TraceEvent, Dsp1TraceKind, MailboxEvent, MailboxEventKind, MapperKind, MemEventKind,
-    MemTraceEvent, MemTraceLog, Sa1LogEvent, Sa1SideEvent, Sa1TraceEvent, Spc700TraceEvent,
-    SuperFxTraceEvent,
+    MemOrigin, MemTraceEvent, MemTraceFilter, MemTraceLog, Sa1LogEvent, Sa1SideEvent,
+    Sa1TraceEvent, Spc700TraceEvent, SuperFxTraceEvent,
 };
 /// Decoded BG tilemap image (Tilemap Viewer), re-exported so the GUI uses
 /// `luna_api::TilemapImage` rather than depending on `luna-ppu`.
@@ -3343,6 +3343,22 @@ impl Emulator {
         Ok(())
     }
 
+    /// [`Self::enable_mem_trace`] with the full filter set (issue #226):
+    /// bank, offset range, an explicit offset list, writes-only. Every
+    /// event carries its [`MemOrigin`] — DMA / HDMA writes to the B-bus
+    /// (`$21xx`) and the A-bus land in the same stream as CPU accesses,
+    /// stamped with the burst / line start clock and the PC of the
+    /// instruction whose access ran them.
+    pub fn enable_mem_trace_filtered(
+        &mut self,
+        max_events: usize,
+        filter: MemTraceFilter,
+    ) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.enable_mem_trace_filtered(max_events, filter);
+        Ok(())
+    }
+
     /// Take ownership of the accumulated memory access events.
     pub fn take_mem_trace_log(&mut self) -> Result<Vec<MemTraceEvent>, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
@@ -3948,6 +3964,34 @@ mod tests {
         );
         // CGRAM stays 15-bit.
         assert!(e.peek_cgram().unwrap().iter().all(|&w| w & 0x8000 == 0));
+    }
+
+    #[test]
+    fn run_until_mem_write_fires_on_a_dma_write_and_the_trace_says_dma() {
+        // Channel 0: 4 bytes from $7E:2000 to $2122, triggered by $420B —
+        // no CPU instruction ever writes $2122 (issue #226).
+        let code = [
+            0xA9, 0x22, 0x8D, 0x01, 0x43, 0xA9, 0x00, 0x8D, 0x02, 0x43, 0xA9, 0x20, 0x8D, 0x03,
+            0x43, 0xA9, 0x7E, 0x8D, 0x04, 0x43, 0xA9, 0x04, 0x8D, 0x05, 0x43, 0xA9, 0x00, 0x8D,
+            0x00, 0x43, 0xA9, 0x01, 0x8D, 0x0B, 0x42, 0xDB,
+        ];
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
+        e.enable_mem_trace_filtered(
+            100,
+            MemTraceFilter {
+                only_offsets: Some(vec![0x2122]),
+                writes_only: true,
+                ..MemTraceFilter::default()
+            },
+        )
+        .unwrap();
+        let hit = e.run_until_mem_write(0x00_2122, 1000).unwrap();
+        assert!(hit.is_some(), "the DMA write must trip the watchpoint");
+        e.step(100).ok();
+        let ev = e.take_mem_trace_log().unwrap();
+        assert_eq!(ev.len(), 4, "{ev:?}");
+        assert!(ev.iter().all(|x| x.origin == MemOrigin::Dma(0)), "{ev:?}");
     }
 
     #[test]
