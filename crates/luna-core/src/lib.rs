@@ -30,7 +30,8 @@ pub use mclk::{MclkAccounting, MclkBuckets, MclkKind};
 pub use power::{PowerOnRng, PowerOnState};
 pub use snes::{
     CpuTraceEvent, CpuTraceLog, MailboxEvent, MailboxEventKind, MemEventKind, MemOrigin,
-    MemTraceEvent, MemTraceFilter, MemTraceLog, Sa1LogEvent, Snes, UnsupportedMapper,
+    MemTraceEvent, MemTraceFilter, MemTraceLog, Profile, ProfileSample, Sa1LogEvent, Snes,
+    UnsupportedMapper,
 };
 
 /// A placeholder [`Mapper`] trait object that owns no ROM and claims no
