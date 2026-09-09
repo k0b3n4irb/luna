@@ -4,7 +4,14 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.18.0] — 2026-09-09
+
+The OpenSNES report release: the six lots of the 2026-09-08 compiler-work
+report (#222–#227) — frame-indexed capture everywhere and `luna diff`,
+master cycles split by consumer, `--power-on random`, memory-trace
+origins with `--trace-writes`, and `luna profile` — so the last three
+OpenSNES prototypes (`frame_compare.py`, `steps_to_frame.py`,
+`cyclecount.py`) can retire.
 
 ### Added
 - `luna profile rom.sfc [-n N | --until-frame F] [--from-frame F]` (#227):
