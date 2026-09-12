@@ -59,6 +59,81 @@ fn frame_count_after(rom: &Path, extra: &[&str]) -> u64 {
         .expect("scheduler.frame_count")
 }
 
+/// A `LoROM` that enables auto-joypad read (`$4200 = $01`) then spins, so
+/// `$4218` latches whatever the front-end pushed and `state`'s
+/// `cpu_regs.joy1` reports it — the observable an `--input` checkpoint has
+/// to move.
+fn autojoy_rom(path: &Path) {
+    let mut rom = vec![0u8; 0x1_0000];
+    // $8000: LDA #$01 ; STA $4200 ; BRA -2
+    rom[0x0000..0x0007].copy_from_slice(&[0xA9, 0x01, 0x8D, 0x00, 0x42, 0x80, 0xFE]);
+    rom[0x7FC0..0x7FD5].copy_from_slice(b"LUNA AUTOJOY         ".as_ref());
+    rom[0x7FD5] = 0x20; // LoROM, slow
+    rom[0x7FD7] = 0x07; // size code
+    rom[0x7FFC] = 0x00; // reset vector -> $8000
+    rom[0x7FFD] = 0x80;
+    std::fs::write(path, &rom).expect("write autojoy rom");
+}
+
+/// Run `luna state` and return the latched joypad-1 word (`$4218/$4219`).
+fn joy1_after(rom: &Path, extra: &[&str]) -> u64 {
+    let out = Command::new(luna_bin())
+        .arg("state")
+        .arg(rom)
+        .args(["--force-mapper", "lorom", "--out", "-"])
+        .args(extra)
+        .output()
+        .expect("run luna state");
+    assert!(
+        out.status.success(),
+        "luna state failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("state JSON on stdout");
+    json["cpu_regs"]["joy1"].as_u64().expect("cpu_regs.joy1")
+}
+
+/// `--input` must apply when the run is bounded by `--until-frame`, not
+/// only by `-n` (`OpenSNES` report 2026-09-11). The #126 budgeting made the
+/// checkpoint chase spend from `-n`, whose `state` default is 1000
+/// instructions — exhausted long before the first checkpoint, so every
+/// scripted press was silently dropped while the frame-bounded run went
+/// on without it.
+#[test]
+fn input_checkpoints_apply_under_until_frame() {
+    let dir = std::env::temp_dir().join("luna-input-budget-test");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let rom = dir.join("autojoy.smc");
+    autojoy_rom(&rom);
+
+    // Held from frame 10, still held at frame 30 (no `-n` given at all).
+    assert_eq!(
+        joy1_after(&rom, &["--until-frame", "30", "--input", "10:0x8000"]),
+        0x8000,
+        "the press must reach the ROM under --until-frame"
+    );
+    // Released at frame 20 → nothing held at frame 30.
+    assert_eq!(
+        joy1_after(&rom, &["--until-frame", "30", "--input", "10:0x8000,20:0"]),
+        0,
+        "the release checkpoint must apply too"
+    );
+    // A checkpoint past the target frame never fires.
+    assert_eq!(
+        joy1_after(&rom, &["--until-frame", "30", "--input", "90:0x8000"]),
+        0,
+        "a checkpoint beyond --until-frame must not fire"
+    );
+    // …and the run still stops exactly on the requested frame.
+    assert_eq!(
+        frame_count_after(&rom, &["--until-frame", "30", "--input", "10:0x8000"]),
+        30
+    );
+
+    let _ = std::fs::remove_file(&rom);
+}
+
 #[test]
 fn input_checkpoints_do_not_overrun_the_step_budget() {
     let dir = std::env::temp_dir().join("luna-input-budget-test");

@@ -108,6 +108,46 @@ pre-change baseline.
 
 ---
 
+## ✅ 6. SA-1 CPU interrupt delivery — FIXED 2026-09-11
+
+The timer, DMA and S-CPU → SA-1 interrupt sources were modelled up to
+`sa1_irq_line()` / `sa1_nmi_line()`, but **nothing ever handed them to
+the SA-1's 65c816**: `step_coproc` never set its IRQ line nor latched an
+NMI, and the core does not poll `Bus::irq_pending()`. The SA-1 CPU never
+vectored through CIV/CNV and a SA-1 `WAI` could only end by polling.
+(#5's ✅ above was only proven up to the line — its tests asserted
+`sa1_irq_line()`, not delivery.)
+
+Now, at every SA-1 instruction boundary (ares `SA1::lastCycle`, Mesen2
+`Sa1::ProcessInterrupts`):
+
+- **IRQ** is a level through CIV: S-CPU request (CFR flag **and** the
+  live CCNT bit 7 — both refs drop the request when CCNT is rewritten
+  with bit 7 clear), timer and DMA, each gated by CIE.
+- **NMI** is a one-shot through CNV, armed by a CCNT bit-4 write with
+  the NMI enabled, or by CIE enabling the NMI while its flag is pending.
+
+Tests `scpu_irq_request_vectors_the_sa1_cpu_through_civ`,
+`scpu_nmi_request_vectors_the_sa1_cpu_through_cnv_once`. SMRPG (intro +
+name entry, `nmis_serviced` 3335 @ frame 3988 unchanged), Kirby Super
+Star and Kirby's Dream Land 3 checked after the change.
+
+## 🔴 Open — found by the 2026-09-11 audit (faithful port pending)
+
+| # | Gap | ares / Mesen2 | luna |
+|---|---|---|---|
+| 7 | **CC1 character conversion**: CDMA fields swapped (colour depth = bits 0-1, width = bits 2-4), 4bpp pixel order MSB-first instead of LSB-first, whole transfer converted at once instead of per-tile on S-CPU BW-RAM reads | ares `dma.cpp:64-107`, `io.cpp:453-459`; Mesen2 `Sa1.cpp:319-325,718-730`; fullsnes | `sa1.rs` `cc1_*` |
+| 8 | **CC2** ignores the BRF register file `$2240-$224F` (one byte per pixel) and the 4-bit line counter | ares `dma.cpp:110-128`; Mesen2 `:744-767` | `sa1.rs` `cc2_consume_byte` |
+| 9 | **BW-RAM bitmap view** (`$60-$6F`, BBF `$223F`, CBM bit 7 / `sw46`) missing | ares `bwram.cpp:45-130`, `memory.cpp:39-49` | `sa1.rs` SA-1-side decode |
+| 10 | **CCNT bit 6 (RDYB) wait** ignored — the SA-1 keeps running | ares `sa1.cpp:46-50`; Mesen2 `Run` | `coproc/sa1.rs` |
+| 11 | **Normal DMA** ignores the DCNT source device and decodes through the S-CPU map; costs the SA-1 no time | ares `dma.cpp:2-46`; Mesen2 `RunDma` | `sa1.rs` DMA |
+| 12 | **Register dispatch not split by CPU side** (S-CPU reads of `$2301` return CFR instead of open bus — Kirby does 2.9 M of them) | ares `io.cpp`; Mesen2 `Sa1.cpp:81-428` | `sa1.rs` `read`/`write` |
+| 13 | **ROM not mirrored** for carts under 4 MB | ares `rom.cpp:7-10` `bus.mirror` | `sa1.rs` ROM offset |
+| 14 | **VLBP** advances on the `$230C` read instead of the `$2258` write; data masked | ares `io.cpp:427-439`; Mesen2 `:220-228` | `sa1.rs` VBD |
+| 15 | **BW-RAM protection power-on** `sbwe/cbwe = $80`, `bwpa = $00` (refs: write-protected until enabled) | ares `sa1.cpp:231-237`; Mesen2 `Reset` | `sa1.rs` `new` |
+
+---
+
 ## 🟡 Minor deviations / notes
 
 | # | Issue | ares ref | luna |
@@ -121,7 +161,8 @@ pre-change baseline.
 ## ✅ Verified correct (do not regress)
 
 - **CC1 / CC2 `cdsel` logic** (the old "cdsel inversion" regression is
-  fixed): `cden=1,cdsel=1` → CC1 on the `$2236` DDA byte; `cden=1,
+  fixed — only the *selection*; the conversion formats themselves are
+  open items #7/#8): `cden=1,cdsel=1` → CC1 on the `$2236` DDA byte; `cden=1,
   cdsel=0` → CC2 on the BRF[7]/BRF[15] (`$2247/$224F`) writes; normal
   DMA on the final DDA byte gated by `dd` (IRAM `$2236` / BWRAM
   `$2237`). Matches ares `io.cpp:449-488`.

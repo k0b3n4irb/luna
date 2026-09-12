@@ -42,6 +42,27 @@ fn write_a_valid<B: DmaBus>(bus: &mut B, addr: Addr24, value: u8) {
     }
 }
 
+/// Move one byte between the A-bus address and B-bus port in the channel's
+/// direction — ares `Channel::transfer` (`dma.cpp:90-106`), shared by
+/// general DMA **and HDMA** (anomie-regs: the direction bit "DOES affect
+/// HDMA"). A WRAM ↔ WMDATA (`$2180`) pairing is invalid: the B side is
+/// suppressed and a B→A read returns 0.
+fn transfer_byte<B: DmaBus>(bus: &mut B, a_addr: Addr24, b_offset: u8, direction: Direction) {
+    let b_valid = !(b_offset == 0x80 && is_wram_a(a_addr));
+    match direction {
+        Direction::AToB => {
+            let v = read_a_valid(bus, a_addr);
+            if b_valid {
+                bus.write_b(b_offset, v);
+            }
+        }
+        Direction::BToA => {
+            let v = if b_valid { bus.read_b(b_offset) } else { 0 };
+            write_a_valid(bus, a_addr, v);
+        }
+    }
+}
+
 // =============================================================================
 // Decoded `$43x0` (DMAPx) register.
 // =============================================================================
@@ -376,21 +397,7 @@ impl DmaChannel {
         while done < max_bytes && self.seg_remaining > 0 {
             let b_offset = self.bbad.wrapping_add(pattern[self.seg_byte_idx as usize]);
             let a_addr: Addr24 = make_addr(self.a_bank, self.a_addr);
-            // A WRAM→WMDATA ($2180) transfer is invalid: the B-bus side
-            // is suppressed (ares dma.cpp:94).
-            let b_valid = !(b_offset == 0x80 && is_wram_a(a_addr));
-            match self.params.direction {
-                Direction::AToB => {
-                    let v = read_a_valid(bus, a_addr);
-                    if b_valid {
-                        bus.write_b(b_offset, v);
-                    }
-                }
-                Direction::BToA => {
-                    let v = if b_valid { bus.read_b(b_offset) } else { 0 };
-                    write_a_valid(bus, a_addr, v);
-                }
-            }
+            transfer_byte(bus, a_addr, b_offset, self.params.direction);
             // Advance A-bus address per params.
             self.a_addr = match self.params.a_increment {
                 Increment::Up => self.a_addr.wrapping_add(1),
@@ -478,15 +485,13 @@ impl DmaChannel {
                 } else {
                     make_addr(self.a_bank, self.a2a)
                 };
-                let value = read_a_valid(bus, src);
+                // Same per-byte transfer as general DMA, honouring the
+                // `$43x0` direction bit (ares `hdmaTransfer` → `transfer`).
+                transfer_byte(bus, src, b_offset, self.params.direction);
                 if self.params.hdma_indirect {
                     self.das = self.das.wrapping_add(1);
                 } else {
                     self.a2a = self.a2a.wrapping_add(1);
-                }
-                // Suppress the WRAM→WMDATA ($2180) B-bus write.
-                if !(b_offset == 0x80 && is_wram_a(src)) {
-                    bus.write_b(b_offset, value);
                 }
                 reads += 1;
             }
@@ -898,6 +903,23 @@ mod tests {
         let n = ch.hdma_step_line(&mut bus, true);
         assert_eq!(n, 1);
         assert!(!ch.hdma_active);
+    }
+
+    #[test]
+    fn hdma_b_to_a_direction_reads_the_port_into_the_table() {
+        // `$43x0` bit 7 set: HDMA moves B → A (ares `hdmaTransfer` →
+        // `transfer`, anomie-regs "this bit DOES affect HDMA"). Direct
+        // mode writes the port value over the table's data byte.
+        let mut bus = MockBus::new();
+        bus.poke_a(0x00_2000, &[0x01, 0xEE, 0x00]);
+        bus.b[0x22] = 0x5A;
+        let mut ch = hdma_channel(0x00, 0x2000, 0x22, 0x80);
+        ch.hdma_start_frame(&mut bus);
+        ch.hdma_step_line(&mut bus, true);
+        assert_eq!(bus.a[0x2001], 0x5A, "port read into the table slot");
+        assert_eq!(bus.b[0x22], 0x5A, "port not written");
+        assert!(bus.log.iter().any(|l| l == "RB $22=$5A"));
+        assert!(!bus.log.iter().any(|l| l.starts_with("WB")));
     }
 
     #[test]

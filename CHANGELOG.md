@@ -4,6 +4,62 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.19.0] — 2026-09-12
+
+The audit release: the 2026-09-11 review of every subsystem against ares
+and Mesen2 turned into eleven faithful-port fixes, each with a regression
+test — including the one a player sees, a strip of stray pixels along the
+bottom edge of the picture.
+
+### Fixed
+- **Cartridge detection**: the map mode byte counts only when it is one of
+  the exact documented values; otherwise the layout comes from where the
+  header was found (ares `board()`). Contra III (`$53`) was being loaded
+  as an SA-1 cartridge.
+- **`$420D` MEMSEL**: writes now persist (they were applied to a
+  per-instruction copy and lost), and MEMSEL powers up and resets to
+  SlowROM whatever the header says. Games whose header disagrees with
+  what they write now run at the right speed (Super Bomberman enables
+  FastROM; Mortal Kombat II never does).
+- **PAL audio**: the SPC700 clock ratio now uses the console's master
+  clock. PAL consoles ran the SPC against the NTSC clock, about 0.9 %
+  slow (flat music, GUI audio underruns).
+- **SA-1**: the SA-1 CPU now takes its IRQ (through CIV) and NMI (through
+  CNV). Timer, DMA and S-CPU interrupt sources were modelled but never
+  delivered, so a SA-1 `WAI` could not be woken by an interrupt.
+- **PPU**: Mode 5 uses the Mode 2 priority order and Mode 6 its own ares
+  order (both used Mode 1 minus BG3). OAM priority rotation starts at
+  sprite `byte address >> 2` and follows the live address (it started at
+  half the right sprite).
+- **HDMA** honours the `$43x0` direction bit (B→A channels wrote the
+  table into the PPU instead of reading it).
+- **Reset** keeps the Mouse / Super Scope on their ports, and clears
+  `$420B` / `$420C` (HDMA kept running from stale tables after a reset).
+- **APU ports**: `$2140-$2143` are mirrored across `$2140-$217F`; a `$F3`
+  write through a `$F2` index of `$80` or more is dropped (read-only
+  mirror).
+- **Sprites** are fetched one line ahead of the row they appear on, as on
+  hardware. Every sprite was drawn one row too high since the framebuffer
+  line origin landed, and a sprite parked just below the picture leaked
+  its top row onto the last visible row — visible as a strip of stray
+  pixels along the bottom edge (reported on Kirby's Dream Land 3's
+  level-select map; present since v1.12.0).
+- `state --until-frame F --input …` now applies its checkpoints. The
+  checkpoint chase spent from the `-n` budget (issue #126), whose `state`
+  default is 1000 instructions — exhausted before the first checkpoint —
+  so every scripted press was silently dropped while the frame-bounded run
+  went on without it. Under `--until-frame` the chase is bounded by frames
+  instead, and only checkpoints past the target frame are dropped; `-n`
+  runs keep the #126 semantics. Reported by OpenSNES (2026-09-11).
+
+### Changed
+- Regression baselines re-recorded: the 3 smoke screenshots and 14 golden
+  ROM hashes (12 commercial titles + InterlaceRPG + StarWars) for the
+  sprite line fix, the Super Bomberman smoke + audio goldens (FastROM now
+  enabled) and the 8 PeterLemon SPC700 PCM hashes (their harness boots as
+  PAL). A new test proves one emulated second yields 32 040 samples in
+  both regions.
+
 ## [1.18.0] — 2026-09-09
 
 The OpenSNES report release: the six lots of the 2026-09-08 compiler-work

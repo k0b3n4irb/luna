@@ -467,13 +467,18 @@ impl Oam {
         self.reset_byte_address();
     }
 
-    /// Index of the first sprite evaluated each scanline (0, or
-    /// `word_address >> 2` when priority rotation is enabled). ares
-    /// `object.cpp:6-9` `setFirstSprite`.
+    /// Index of the first sprite evaluated each scanline: 0, or — with
+    /// priority rotation enabled — the sprite the **live internal byte
+    /// address** points at, `address >> 2` (ares `object.cpp:6-9`
+    /// `setFirstSprite`, re-run after every `$2102/$2103/$2104/$2138`
+    /// access; Mesen2 `SnesPpu.cpp:599` `(InternalOamAddress & 0x1FC) >> 2`;
+    /// anomie-regs `(OAMAddr & 0xFE) >> 1` on the word address). Sprite
+    /// `n` occupies words `2n..2n+1`, so this is `word >> 1`, not
+    /// `word >> 2`.
     #[must_use]
     pub const fn first_sprite(&self) -> u8 {
         if self.priority_rotation {
-            ((self.word_address >> 2) & 0x7F) as u8
+            ((self.address >> 2) & 0x7F) as u8
         } else {
             0
         }
