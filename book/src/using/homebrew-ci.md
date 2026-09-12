@@ -30,6 +30,7 @@ sym = "../build/game.sym"      # optional (a beside-ROM .sym auto-loads)
 force_mapper = "lorom"         # optional — headerless/WIP images
 frames = 600                   # run bound: `frames` or `steps` (or checkpoints)
 input = "300:0x1000,310:0"     # optional joypad script, or "@inputs/boot.txt"
+input2 = "300:0x0080"          # optional joypad-2 script, same grammar
 screenshot = "artifacts/boot.png"  # optional artifact, written after the run
 
 [asserts]
@@ -55,11 +56,15 @@ What each assert means:
   an empty log after the run is the "no assertions fired" green light.
 - **`nocash_contains`** — the `$21FC` Nocash TTY is the ROM's printf
   channel (`SNES_NOCASH("...")`); assert on any marker text it prints.
-- **`fbhash`** — the 64-bit displayed-frame hash (the same
-  cross-arch-stable value `luna state --print-fbhash` emits — *not*
-  the golden suite's SHA-256). After an **intended** render change, run
-  `luna test --update` to regenerate every manifest's `fbhash` in
-  place; formatting and comments are preserved.
+- **`fbhash`** — the 64-bit displayed-frame hash (the same value
+  `luna state --print-fbhash` emits — *not* the golden suite's SHA-256).
+  Since v1.21.0 it is **fbhash v2**: FNV-1a 64 over the raw RGBA bytes,
+  a pinned function that is stable across toolchains and architectures by
+  construction (v1 used the standard library's hasher, which is not
+  guaranteed to stay the same between Rust releases). After an
+  **intended** render change — or when moving a corpus from a pre-v1.21.0
+  luna — run `luna test --update` to regenerate every manifest's `fbhash`
+  in place; formatting and comments are preserved.
 - **`[asserts.values]`** — read memory through the loaded symbol table
   (or a literal `"7E:0100"` hex pair) and compare. A bare integer means
   `eq`; a table gives comparators — any of `eq`/`ne`/`ge`/`gt`/`le`/`lt`
@@ -134,6 +139,17 @@ with checkpoints alone, the last one ends the run). The final
   "frame:dx,dy,buttons"` (`;`-separated, the `--mouse` grammar; plugs a
   SNES Mouse into port 1) and `superscope = "frame:x,y,buttons"`
   (port 2). Mix freely with joypad `input`.
+- **Joypad 2** — `input2` beside `input`, top-level or per leg, same
+  `frame:hex` grammar: the second half of a two-player probe, or the
+  replay of an MCP capture's `script_p2`.
+
+  ```toml
+  [[checkpoint]]                 # P2 joins: pad 2 presses Start
+  at_frame = 120
+  input2 = "100:0x1000,105:0"
+  [checkpoint.values]
+  players = 2
+  ```
 - **`[asserts.dsp]`** — the S-DSP register file, by name (`FLG`, `EDL`,
   `KON`, `MVOL_L`, `V0_VOLL`…`V7_GAIN`, `FIR0`…`FIR7`) or raw hex index
   (`"7D"`), with the `[asserts.values]` comparator grammar (registers
@@ -226,7 +242,15 @@ jobs:
 
 `--report json` appends a machine-readable summary (per-test pass/fail,
 failure details, measured `fbhash`) to stdout for dashboards or PR
-comments.
+comments. Each test also carries the machine it ran on — `"power_on":
+"random", "seed": 12345` (a deterministic run reports `"zero"` / `"ones"`
+with `"seed": null`) — so a red `random` run is reproducible from the
+report alone:
+
+```json
+{ "name": "boot", "passed": false, "fbhash": "…",
+  "power_on": "random", "seed": 12345, "failures": ["…"] }
+```
 
 ## Tips
 

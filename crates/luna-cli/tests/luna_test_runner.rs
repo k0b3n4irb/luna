@@ -862,3 +862,117 @@ wram = {{ nonzero_min = 100000 }}
         hash(&a)
     );
 }
+
+/// The JSON report echoes the `power_on` / `seed` pair each test ran with
+/// (`OpenSNES` R-A), so a red `random` run is reproducible from the report
+/// alone; a deterministic run reports `"zero"` and a null seed.
+#[test]
+fn report_json_echoes_the_power_on_pair() {
+    let dir = fresh_dir("report_seed");
+    synthetic_rom(&dir.join("game.sfc"), &[]);
+    let manifest = |name: &str, power: &str| {
+        std::fs::write(
+            dir.join(name),
+            format!("rom = \"game.sfc\"\nforce_mapper = \"lorom\"\nframes = 1\n{power}\n"),
+        )
+        .unwrap();
+    };
+    manifest("zero.toml", "");
+    manifest("seeded.toml", "power_on = \"random\"\nseed = 12345");
+    manifest("default_seed.toml", "power_on = \"random\"");
+    let out = run(
+        &[
+            "zero.toml",
+            "seeded.toml",
+            "default_seed.toml",
+            "--report",
+            "json",
+        ],
+        &dir,
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    let json_start = stdout.find('{').expect("json report");
+    let report: serde_json::Value = serde_json::from_str(&stdout[json_start..]).unwrap();
+    let tests = report["tests"].as_array().unwrap();
+    let by_name = |n: &str| {
+        tests
+            .iter()
+            .find(|t| t["name"] == n)
+            .unwrap_or_else(|| panic!("{n} missing from {report}"))
+    };
+    assert_eq!(by_name("zero")["power_on"], "zero");
+    assert!(by_name("zero")["seed"].is_null());
+    assert_eq!(by_name("seeded")["power_on"], "random");
+    assert_eq!(by_name("seeded")["seed"], 12345);
+    assert_eq!(by_name("default_seed")["power_on"], "random");
+    assert_eq!(
+        by_name("default_seed")["seed"],
+        1,
+        "random defaults to seed 1"
+    );
+}
+
+/// `input2` in a manifest drives joypad 2 with the `input` grammar
+/// (`OpenSNES` R-D), at the top level and per checkpoint leg.
+#[test]
+fn manifest_input2_drives_joypad_2() {
+    let dir = fresh_dir("input2");
+    // LDA #$01 ; STA $4200 (auto-joypad) ; loop: LDA $421A ; STA $10 ;
+    // LDA $421B ; STA $11 ; LDA $4218 ; STA $12 ; BRA loop — the latched
+    // pad-2 word is mirrored to WRAM $10/$11 and pad 1's low byte to $12.
+    synthetic_rom(
+        &dir.join("game.sfc"),
+        &[
+            0xA9, 0x01, 0x8D, 0x00, 0x42, 0xAD, 0x1A, 0x42, 0x85, 0x10, 0xAD, 0x1B, 0x42, 0x85,
+            0x11, 0xAD, 0x18, 0x42, 0x85, 0x12, 0x80, 0xEF,
+        ],
+    );
+    std::fs::write(
+        dir.join("top.toml"),
+        r#"
+rom = "game.sfc"
+force_mapper = "lorom"
+frames = 20
+input = "5:0x0040"
+input2 = "5:0x8000"
+
+[asserts.blocks]
+"7E:0010" = "008040"
+"#,
+    )
+    .unwrap();
+    let out = run(&["top.toml"], &dir);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    std::fs::write(
+        dir.join("legs.toml"),
+        r#"
+rom = "game.sfc"
+force_mapper = "lorom"
+
+[[checkpoint]]
+at_frame = 12
+input2 = "5:0x8000"
+[checkpoint.values]
+"7E:0011" = 0x80
+
+[[checkpoint]]
+at_frame = 24
+input2 = "14:0"
+[checkpoint.values]
+"7E:0011" = 0
+"#,
+    )
+    .unwrap();
+    let out = run(&["legs.toml"], &dir);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
