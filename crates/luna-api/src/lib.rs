@@ -2179,26 +2179,26 @@ impl Emulator {
     /// forced-blank); the two together separate "rendering nothing" from
     /// "rendering the same thing forever".
     pub fn framebuffer_hash(&self) -> Result<u64, ApiError> {
-        use std::hash::{Hash, Hasher};
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        snes.ppu.framebuffer().hash(&mut h);
-        Ok(h.finish())
+        Ok(fnv1a_64(snes.ppu.framebuffer().as_flattened()))
     }
 
     /// Hash of the **displayed** RGBA frame ([`Self::render_frame_rgba`] at the
-    /// given `force_display`) — a stable visual-regression key. Deterministic
-    /// and **cross-architecture** stable (fixed-seed `SipHash` over the
-    /// integer-rendered bytes — no float), so a baseline captured on `x86_64`
-    /// matches one on `aarch64`. Hashes exactly the pixels a `--screenshot` at
-    /// the same `force_display` would write, **before** PNG encoding — avoiding
-    /// the build-dependent encoder variability of hashing the encoded file.
+    /// given `force_display`) — the `fbhash` visual-regression key.
+    ///
+    /// **fbhash v2** (v1.21.0): FNV-1a 64 over the raw RGBA bytes, the same
+    /// pinned function as `rom_hash`. v1 used `std`'s `DefaultHasher`, whose
+    /// algorithm the standard library does not promise to keep across
+    /// toolchain versions — while the guide told users to commit these
+    /// values in `luna test` manifests. The pinned function is stable across
+    /// toolchains and architectures by construction; `luna test --update`
+    /// migrates a manifest's baselines. Hashes exactly the pixels a
+    /// `--screenshot` at the same `force_display` would write, **before**
+    /// PNG encoding, so the encoder's build-to-build variability never
+    /// enters the key.
     pub fn frame_hash(&self, force_display: bool) -> Result<u64, ApiError> {
-        use std::hash::Hasher;
         let rgba = self.render_frame_rgba(force_display)?;
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        h.write(&rgba);
-        Ok(h.finish())
+        Ok(fnv1a_64(&rgba))
     }
 
     /// Enable / disable the **native 512×448 capture** (issue #115).
@@ -2243,19 +2243,16 @@ impl Emulator {
 
     /// Hash of the native 512×448 frame — the exact-resolution regression key
     /// issue #115 asks for. Same construction as [`Self::frame_hash`]
-    /// (fixed-seed hasher over raw pixel bytes, cross-architecture stable).
-    /// Errors if capture is not enabled.
+    /// (fbhash v2: FNV-1a 64 over the raw RGB bytes). Errors if capture is
+    /// not enabled.
     pub fn frame_hash_native(&self) -> Result<u64, ApiError> {
-        use std::hash::{Hash, Hasher};
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
         if snes.ppu.native_framebuffer.is_empty() {
             return Err(ApiError::BadArg(
                 "native capture is not enabled (set_native_capture / --native-res)".into(),
             ));
         }
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        snes.ppu.native_framebuffer.hash(&mut h);
-        Ok(h.finish())
+        Ok(fnv1a_64(snes.ppu.native_framebuffer.as_flattened()))
     }
 
     /// Serialize the full running-machine state into a portable blob.
@@ -3598,6 +3595,26 @@ impl Emulator {
         Ok(())
     }
 
+    /// Every 24-bit PC at which the profiler has credited an instruction
+    /// since it was enabled, sorted ascending and deduplicated — the
+    /// executed-PC set a code-coverage tool folds onto lines (`OpenSNES` R-C).
+    /// Does not drain the profiler. Errors if profiling is off.
+    pub fn profile_pcs(&self) -> Result<Vec<u32>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let prof = snes
+            .profile
+            .as_ref()
+            .ok_or_else(|| ApiError::BadArg("profiling is not enabled".into()))?;
+        let mut pcs: Vec<u32> = prof
+            .samples
+            .iter()
+            .filter(|(_, s)| s.instructions > 0)
+            .map(|(&pc, _)| pc)
+            .collect();
+        pcs.sort_unstable();
+        Ok(pcs)
+    }
+
     /// Take the raw per-PC samples (the profiler stays on, emptied).
     pub fn take_profile_raw(&mut self) -> Result<Profile, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
@@ -4883,16 +4900,13 @@ mod tests {
         // Pure function of state: identical when nothing changed.
         assert_eq!(h1, e.framebuffer_hash().unwrap(), "hash must be stable");
         // It hashes the same displayed pixels render_frame_rgba emits: an
-        // independent hash of the RGB channels of that buffer agrees.
+        // independent FNV-1a of the RGB channels of that buffer agrees.
         let rgba = e.render_frame_rgba(false).unwrap();
-        let mut ref_h = std::collections::hash_map::DefaultHasher::new();
-        let rgb: Vec<[u8; 3]> = rgba.chunks_exact(4).map(|c| [c[0], c[1], c[2]]).collect();
-        std::hash::Hash::hash(&rgb[..], &mut ref_h);
-        assert_eq!(
-            h1,
-            std::hash::Hasher::finish(&ref_h),
-            "hashes the displayed RGB"
-        );
+        let rgb: Vec<u8> = rgba
+            .chunks_exact(4)
+            .flat_map(|c| [c[0], c[1], c[2]])
+            .collect();
+        assert_eq!(h1, fnv1a_64(&rgb), "hashes the displayed RGB");
     }
 
     #[test]
@@ -4935,11 +4949,26 @@ mod tests {
         // Pure function of state — stable across calls (the property a
         // cross-arch baseline relies on).
         assert_eq!(h, e.frame_hash(false).unwrap(), "frame_hash must be stable");
-        // It is exactly a fixed-seed hash of the displayed RGBA bytes.
+        // It is exactly the pinned FNV-1a of the displayed RGBA bytes.
         let rgba = e.render_frame_rgba(false).unwrap();
-        let mut ref_h = std::collections::hash_map::DefaultHasher::new();
-        std::hash::Hasher::write(&mut ref_h, &rgba);
-        assert_eq!(h, std::hash::Hasher::finish(&ref_h));
+        assert_eq!(h, fnv1a_64(&rgba));
+    }
+
+    /// fbhash v2 is a pinned function: these values must never change, or
+    /// every committed manifest baseline silently breaks. (The empty input
+    /// is the FNV offset basis; the others were computed once by hand.)
+    #[test]
+    fn fbhash_v2_is_fnv1a_with_pinned_values() {
+        assert_eq!(fnv1a_64(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a_64(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(fnv1a_64(b"luna"), fnv1a_64(b"luna"));
+        // A black 256x224 RGBA frame, the fbhash of a forced-blank capture.
+        let black = vec![0u8; 256 * 224 * 4];
+        let mut expect: u64 = 0xcbf2_9ce4_8422_2325;
+        for _ in 0..black.len() {
+            expect = expect.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        assert_eq!(fnv1a_64(&black), expect);
     }
 
     #[test]

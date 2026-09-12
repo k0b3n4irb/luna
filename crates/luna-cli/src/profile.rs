@@ -23,6 +23,9 @@ pub(crate) struct ProfileOptions<'a> {
     pub sym: Option<&'a std::path::Path>,
     pub top: usize,
     pub out: Option<&'a std::path::Path>,
+    /// Write every executed 24-bit PC, sorted, as little-endian `u32`s
+    /// (`--pc-set`; `OpenSNES` R-C — a coverage tool folds them onto lines).
+    pub pc_set: Option<&'a std::path::Path>,
     pub force_mapper: Option<&'a str>,
     pub force_region: Option<&'a str>,
     pub power_on: Option<&'a str>,
@@ -141,6 +144,24 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
                 }
             }
         }
+    }
+    if let Some(path) = o.pc_set {
+        let pcs = match em.profile_pcs() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("error: profile_pcs: {e}");
+                return ExitCode::from(1);
+            }
+        };
+        let mut bytes = Vec::with_capacity(pcs.len() * 4);
+        for pc in &pcs {
+            bytes.extend_from_slice(&pc.to_le_bytes());
+        }
+        if let Err(e) = std::fs::write(path, bytes) {
+            eprintln!("error: writing {}: {e}", path.display());
+            return ExitCode::from(1);
+        }
+        eprintln!("pc-set: {} distinct PCs -> {}", pcs.len(), path.display());
     }
     let report = match em.take_profile() {
         Ok(r) => r,
