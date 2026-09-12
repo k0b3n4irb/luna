@@ -18,8 +18,14 @@
 //! reproduces the exact machine; a soft reset keeps every array, as both
 //! references do. OAM follows Mesen2 (random) rather than ares (zero): it
 //! is RAM on hardware, and a stale sprite table is exactly the class of
-//! boot bug this mode exists to expose. Registers and latches (ares-only
-//! randomisation) are out of scope here.
+//! boot bug this mode exists to expose.
+//!
+//! Under [`PowerOnState::Random`] the PPU's registers, latches and both
+//! chip MDRs are randomised too, as ares does in `PPU::power` (`ppu.cpp`)
+//! — that is the second half of issue #224. Mesen2 randomises only a
+//! couple of them (`SnesPpu.cpp:2398`), so this follows ares. `zero` and
+//! `ones` leave the registers at their deterministic defaults, which is
+//! what every golden and every CI run uses.
 
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +53,13 @@ impl PowerOnState {
             Self::Ones => buf.fill(0xFF),
             Self::Random { .. } => rng.fill_bytes(buf),
         }
+    }
+
+    /// `true` when this state randomises registers and latches, not just
+    /// RAM (ares randomises them on power only, never on reset).
+    #[must_use]
+    pub const fn randomises_registers(self) -> bool {
+        matches!(self, Self::Random { .. })
     }
 
     /// The generator for this state (seeded for [`Self::Random`], inert
@@ -101,6 +114,22 @@ impl PowerOnRng {
     }
 
     /// Fill `buf` with random bytes.
+    /// One pseudo-random byte.
+    pub const fn next_u8(&mut self) -> u8 {
+        self.next_u64() as u8
+    }
+
+    /// One pseudo-random 16-bit word.
+    pub const fn next_u16(&mut self) -> u16 {
+        self.next_u64() as u16
+    }
+
+    /// One pseudo-random bit, as ares' `random()` is used for flags.
+    pub const fn next_bool(&mut self) -> bool {
+        self.next_u64() & 1 != 0
+    }
+
+    /// Fill `buf` with pseudo-random bytes.
     pub fn fill_bytes(&mut self, buf: &mut [u8]) {
         for chunk in buf.chunks_mut(8) {
             let bytes = self.next_u64().to_le_bytes();

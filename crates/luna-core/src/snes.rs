@@ -23,7 +23,7 @@ use luna_ppu::Ppu;
 use crate::coproc::{Dsp1Mapper, Sa1Chip};
 use crate::dma::{Dma, DmaBus, DmaTraceEvent, DmaTraceLog, HDMA_CHANNEL_FLAG};
 use crate::mclk::{MclkAccounting, MclkKind};
-use crate::power::PowerOnState;
+use crate::power::{PowerOnRng, PowerOnState};
 
 /// `serde` helper for a heap-boxed fixed byte array (`Box<[u8; N]>`),
 /// which `serde_bytes` does not cover directly. Used for the 128 KB WRAM.
@@ -766,6 +766,60 @@ impl Snes {
         }
         power_on.fill(self.ppu.oam.raw_mut(), &mut rng);
         power_on.fill(&mut self.apu_real.aram[..], &mut rng);
+        if power_on.randomises_registers() {
+            Self::randomise_power_on_registers(&mut self.ppu, &mut rng);
+        }
+    }
+
+    /// Randomise the registers and latches that come up undefined on
+    /// hardware — the second half of issue #224, ported from ares
+    /// `PPU::power` (`ppu.cpp`), which draws each of these from its own
+    /// `random()` on power and leaves them alone on reset.
+    ///
+    /// Only the fields ares randomises are touched, in its order: the two
+    /// chip MDRs, the OAM address trio, the Mode 7 latch and its six
+    /// matrix registers, VMAIN and the VRAM address, CGADD and its latch,
+    /// M7SEL's three flags, and SETINI's EXTBG / pseudo-hires bits.
+    /// INIDISP stays forced-blank at brightness 0 and BGMODE stays 0, as
+    /// ares sets them explicitly.
+    ///
+    /// DMA channel registers are NOT randomised: both references power
+    /// them up at `$FF` (ares `cpu.hpp:217-251`, Mesen2's constructor) and
+    /// `$420C` at `$00` (anomie-regs), which is what
+    /// [`Dma::power_on_defaults`] applies for every power-on state.
+    fn randomise_power_on_registers(ppu: &mut Ppu, rng: &mut PowerOnRng) {
+        ppu.ppu1_mdr = rng.next_u8();
+        ppu.ppu2_mdr = rng.next_u8();
+
+        // $2102/$2103 OAMADD: base address (bit 0 clear), live address and
+        // the priority-rotation flag.
+        ppu.oam.word_address = rng.next_u16() & 0x01FF;
+        ppu.oam.address = rng.next_u16() & 0x03FF;
+        ppu.oam.priority_rotation = rng.next_bool();
+
+        // $2115 VMAIN: ares biases the increment mode towards 1 and
+        // randomises the remap field; the step stays 1.
+        let vmain = (u8::from(rng.next_bool()) << 7) | ((rng.next_u8() & 0x03) << 2);
+        ppu.write(luna_ppu::register::VMAIN, vmain);
+        // $2116/$2117 VMADD.
+        ppu.vram.address = rng.next_u16();
+
+        // $211A M7SEL (screen-over, V-flip, H-flip) and $211B-$2120.
+        ppu.m7sel = (rng.next_u8() & 0xC0) | (rng.next_u8() & 0x03);
+        ppu.m7a = rng.next_u16() as i16;
+        ppu.m7b = rng.next_u16() as i16;
+        ppu.m7c = rng.next_u16() as i16;
+        ppu.m7d = rng.next_u16() as i16;
+        ppu.m7x = rng.next_u16() as i16;
+        ppu.m7y = rng.next_u16() as i16;
+
+        // $2121 CGADD + its low/high latch.
+        ppu.cgram.address = rng.next_u8();
+        ppu.cgram.set_high_pending(rng.next_bool());
+
+        // $2133 SETINI: EXTBG and pseudo-hires are undefined; overscan and
+        // interlace come up clear.
+        ppu.setini = (u8::from(rng.next_bool()) << 6) | (u8::from(rng.next_bool()) << 3);
     }
 
     fn build(cart: Cartridge) -> Result<Self, UnsupportedMapper> {
@@ -829,7 +883,7 @@ impl Snes {
         Ok(Self {
             cpu: Cpu::new(),
             ppu,
-            dma: Dma::new(),
+            dma: Dma::power_on(),
             cpu_regs: CpuRegs::new(),
             wram: vec![0u8; 0x20000]
                 .into_boxed_slice()
@@ -1230,9 +1284,10 @@ impl Snes {
         // $420B/$420C clear on reset (ares `CPU::power` `channels[id] = {}`;
         // anomie-regs: HDMAEN "$00 on power on or reset"). Leaving HDMAEN set
         // kept HDMA firing from the previous run's stale tables during boot.
-        self.dma.mdmaen = 0;
-        self.dma.hdmaen = 0;
-        self.dma.mdma_cursor = None;
+        // ares `CPU::power(reset)` rebuilds every channel, so the `$43xx`
+        // registers return to their `$FF` power-on values along with
+        // `$420B` / `$420C` clearing.
+        self.dma = Dma::power_on();
 
         // 3. Charge the reset sequence — see `RESET_SEQUENCE_MCLK`. The PPU
         //    and APU run through it, so drive it via the scheduler rather than
@@ -3540,6 +3595,63 @@ mod tests {
     }
 
     #[test]
+    fn random_power_on_also_randomises_ppu_registers_and_latches() {
+        use crate::power::PowerOnState;
+        // Issue #224, second lot: ares randomises the PPU's registers,
+        // latches and both chip MDRs on power (`ppu.cpp`), not just RAM.
+        // A seed still reproduces the exact machine.
+        let mk = |st| Snes::try_from_cartridge_with(demo_lorom(), st).expect("snes");
+        let zero = mk(PowerOnState::Zero);
+        assert_eq!(zero.ppu.ppu1_mdr, 0, "zero leaves the registers alone");
+        assert_eq!(zero.ppu.m7a, 0);
+        assert_eq!(zero.ppu.setini, 0);
+
+        let a = mk(PowerOnState::Random { seed: 7 });
+        let b = mk(PowerOnState::Random { seed: 7 });
+        let c = mk(PowerOnState::Random { seed: 8 });
+        assert_eq!(a.ppu.ppu1_mdr, b.ppu.ppu1_mdr, "same seed, same machine");
+        assert_eq!(a.ppu.m7a, b.ppu.m7a);
+        assert_eq!(a.ppu.setini, b.ppu.setini);
+        let differs = [
+            a.ppu.ppu1_mdr != c.ppu.ppu1_mdr,
+            a.ppu.m7a != c.ppu.m7a,
+            a.ppu.vram.address != c.ppu.vram.address,
+            a.ppu.cgram.address != c.ppu.cgram.address,
+        ];
+        assert!(
+            differs.iter().any(|d| *d),
+            "another seed must yield another machine"
+        );
+        // ares sets these explicitly rather than randomising them.
+        assert_eq!(
+            a.ppu.setini & 0x05,
+            0,
+            "overscan and interlace come up clear"
+        );
+        assert_eq!(a.ppu.bgmode, 0, "BGMODE comes up 0");
+    }
+
+    #[test]
+    fn dma_channel_registers_power_on_at_ff() {
+        // ares `cpu.hpp:217-251` and Mesen2's constructor both power the
+        // channel registers up at $FF; `$420B` / `$420C` come up clear
+        // (anomie-regs). luna powered the channels up at zero.
+        let mut snes = Snes::from_cartridge(demo_lorom());
+        for off in 0x0u8..=0x7 {
+            assert_eq!(
+                snes.dma.channels[0].read(off),
+                0xFF,
+                "$430{off:X} at power-on"
+            );
+        }
+        assert_eq!(snes.dma.hdmaen, 0);
+        // A reset rebuilds them, as ares does.
+        snes.dma.channels[0].write(0x0, 0x00);
+        snes.reset();
+        assert_eq!(snes.dma.channels[0].read(0x0), 0xFF, "reset restores $FF");
+    }
+
+    #[test]
     fn reset_keeps_port_devices_and_clears_memsel_and_hdmaen() {
         use crate::controller::PortDevice;
         let mut snes = Snes::from_cartridge(demo_lorom());
@@ -4142,12 +4254,15 @@ mod tests {
         //   LDA #$00 ; STA $4302  ; A1TL = $00
         //   LDA #$20 ; STA $4303  ; A1TH = $20 → A-bus addr $002000
         //   LDA #$7E ; STA $4304  ; A1B  = $7E
-        //   LDA #$04 ; STA $4305  ; DAS  = $0004
+        //   LDA #$04 ; STA $4305  ; DAS low  = $04
+        //   LDA #$00 ; STA $4306  ; DAS high = $00 → $0004 bytes
         //   LDA #$00 ; STA $4300  ; DMAP = mode 0, +1, A→B
         //   LDA #$01 ; STA $420B  ; MDMAEN bit 0
         //   STP
         //
-        // (DAS high byte stays at 0 from reset.)
+        // Both DAS bytes are written, as a real game must: the channel
+        // registers power up at $FF (issue #224), so leaving $4306 alone
+        // would ask for $FF04 bytes.
         let cart = demo_lorom();
         let mut rom = cart.rom;
         let prog = [
@@ -4155,7 +4270,8 @@ mod tests {
             0xA9, 0x00, 0x8D, 0x02, 0x43, // LDA #$00 ; STA $4302
             0xA9, 0x20, 0x8D, 0x03, 0x43, // LDA #$20 ; STA $4303
             0xA9, 0x7E, 0x8D, 0x04, 0x43, // LDA #$7E ; STA $4304
-            0xA9, 0x04, 0x8D, 0x05, 0x43, // LDA #$04 ; STA $4305
+            0xA9, 0x04, 0x8D, 0x05, 0x43, // LDA #$04 ; STA $4305 (DAS low)
+            0xA9, 0x00, 0x8D, 0x06, 0x43, // LDA #$00 ; STA $4306 (DAS high)
             0xA9, 0x00, 0x8D, 0x00, 0x43, // LDA #$00 ; STA $4300
             0xA9, 0x01, 0x8D, 0x0B, 0x42, // LDA #$01 ; STA $420B (trigger)
             0xDB, // STP
@@ -4205,7 +4321,8 @@ mod tests {
             0xA9, 0x00, 0x8D, 0x02, 0x43, // LDA #$00 ; STA $4302
             0xA9, 0x20, 0x8D, 0x03, 0x43, // LDA #$20 ; STA $4303
             0xA9, 0x7E, 0x8D, 0x04, 0x43, // LDA #$7E ; STA $4304
-            0xA9, 0x04, 0x8D, 0x05, 0x43, // LDA #$04 ; STA $4305
+            0xA9, 0x04, 0x8D, 0x05, 0x43, // LDA #$04 ; STA $4305 (DAS low)
+            0xA9, 0x00, 0x8D, 0x06, 0x43, // LDA #$00 ; STA $4306 (DAS high)
             0xA9, 0x00, 0x8D, 0x00, 0x43, // LDA #$00 ; STA $4300
             0xA9, 0x01, 0x8D, 0x0B, 0x42, // LDA #$01 ; STA $420B (trigger)
             0xDB, // STP

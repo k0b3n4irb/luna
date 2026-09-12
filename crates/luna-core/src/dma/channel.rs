@@ -308,6 +308,21 @@ impl DmaChannel {
         Self::default()
     }
 
+    /// The channel as it comes up at power-on: every register reads `$FF`.
+    /// Both references agree (ares `cpu.hpp:217-251` — `transferMode = 7`,
+    /// every address and count byte `0xff`; Mesen2's `DmaController`
+    /// constructor writes `$FF` to `$43x0-$43xB`). luna powered them up at
+    /// zero, so a game reading `$43xx` before writing it saw the wrong
+    /// value. `$420B`/`$420C` still come up clear (anomie-regs).
+    #[must_use]
+    pub fn power_on() -> Self {
+        let mut ch = Self::new();
+        for off in 0x0..=0xF {
+            ch.write(off, 0xFF);
+        }
+        ch
+    }
+
     /// Read a per-channel register at offset `0x0..=0xF` (i.e. the
     /// low nibble of `$43xN`).
     #[must_use]
