@@ -4,7 +4,7 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.21.0] — 2026-09-12
 
 The OpenSNES exchange of 2026-09-12: the fbhash switch we asked to ship
 on its own, and the five small asks that pair with it so one pin and one
