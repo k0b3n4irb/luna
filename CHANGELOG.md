@@ -4,6 +4,107 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.20.0] — 2026-09-12
+
+The faithful-port release: five lots from the 2026-09-11 subsystem audit,
+each read line for line in ares and Mesen2 before the code moved — the
+hardware VBlank line, what happens when the CPU touches the PPU while it
+is drawing, the SA-1's character conversion, the power-on machine, and a
+round of tooling robustness.
+
+### Fixed
+- **VBlank starts on the hardware line in both regions.** It followed the
+  console region — 225 on NTSC, 240 on PAL — and the overscan bit of
+  SETINI (`$2133` bit 2) was read nowhere. Both references derive it from
+  overscan alone (ares `ppu/io.cpp:641`, Mesen2 `SnesPpu.cpp:559`), so
+  every PAL title without overscan was getting its NMI 15 lines late, 15
+  extra HDMA lines on dead table entries, and its VRAM and OAM writes
+  refused on lines 225 to 239; an NTSC title that enabled overscan lost
+  the same 15 lines the other way. `vdisp` is now recomputed on the
+  `$2133` write, as ares does (Mesen2 latches it once per frame).
+  Residual: the framebuffer still stores 224 rows, so a 239-line overscan
+  picture is timed correctly but its last lines are not displayed.
+
+- **Accesses during the active display follow hardware.** `$2104` writes
+  and `$2138` reads are no longer dropped: they land at the sprite
+  evaluation is looking at, as on hardware (ares `io.cpp:31-45`; Mesen2
+  names Uniracers as the title that depends on it). VRAM reads, and the
+  read buffer behind them, return 0 while the PPU owns the bus instead of
+  handing out real data. Residual: CGRAM accesses during the picture still
+  use the CPU's address rather than the PPU's internal one.
+
+- **Clip-to-black runs before the colour math**, not after it. The CGWSEL
+  7:6 region zeroes the main colour and turns halving off, then the blend
+  runs (ares `dac.cpp:121-133`; anomie: "clip … to black (before math …
+  the only difference is that half math will not occur)"). luna clipped
+  afterwards, which turned every clipped pixel solid black and hid the sub
+  screen or the fixed colour an addition should still show.
+- **SA-1 character conversion is a faithful port.** Type-1 decoded the
+  CDMA register with its colour-depth and width fields swapped, read 4bpp
+  pixels MSB-first, and converted the whole transfer in one pass when the
+  DMA was triggered. Hardware converts one character at a time, on the
+  S-CPU's own BW-RAM reads, and answers out of I-RAM (ares `dmaCC1` /
+  `dmaCC1Read`). Type-2 ignored the `$2240-$224F` register file entirely;
+  it now converts one tile row per BRF half, with the 4-bit line counter
+  ares keeps.
+- **The SA-1 honours the CCNT wait bit.** Bit 6 (RDYB) parks the chip; its
+  timer keeps running. luna ran straight through it.
+- **SA-1 ROM is mirrored** for carts smaller than the 4 MB the super-MMC
+  addresses, instead of reading open bus past the end.
+- **The GUI stops freezing the picture at a scene cut.** It held the last
+  frame across up to 8 consecutive forced-blank frames before showing
+  black; Kirby Super Star blanks for 31 frames before its intro's star
+  transition, so the display sat on a stale picture for ~130 ms and only
+  then went black — read as a stutter. The hold is 2 frames now (~33 ms),
+  which still absorbs the isolated blank frame it exists for.
+- **Two MCP tool arguments no longer kill the request.** `render_palette`
+  with a large `cell` overflowed its byte count to zero and then indexed
+  an empty buffer; the swatch size is now clamped to 256 px. A
+  `search_memory` pattern longer than WRAM indexed past the end of the
+  slice; it now matches nothing, as it must.
+- **`pause` is no longer lost.** The flag was cleared after the emulator
+  lock was acquired, so a pause sent while another tool still held the
+  emulator was thrown away and the run went the whole way with
+  `interrupted: false`. The flag is cleared when the request starts,
+  before queueing for the lock, and `step` is interruptible too — a long
+  `step` used to hold the lock to the end, so nothing else could even be
+  served.
+- **Debug peeks and pokes walk the 24-bit address**, so a range that runs
+  off the end of a bank continues into the next one. Two bytes poked at
+  `$7E:FFFF` landed at `$7E:FFFF` and `$7E:0000`, clobbering the direct
+  page instead of writing `$7F:0000`.
+- **The CLI hex parser rejects non-ASCII input** instead of panicking on a
+  character boundary. `--assert '7E:0000=aéb'` aborted the process; it now
+  reports a parse error. Same parser behind `--assert-aram`,
+  `--assert-vram`, `--assert-cgram` and the `luna test` manifests.
+- **The diagnostic logs stop at a cap** (about one million events for the
+  mailbox, SA-1 and WDM logs, matching the Nocash log's existing limit).
+  A log the caller forgets to drain used to grow until the process died —
+  the MCP server is long-running, and a game polling `$2140` produces
+  millions of events per second. Draining re-opens capture.
+- **Panic output is silenced per thread, not process-wide.** The hook was
+  swapped around every stepping call — about 1700 times a second from the
+  GUI — which muted panics on the UI, audio and windowing threads almost
+  all of the time, and could leave the silent hook installed for good if
+  two threads stepped at once.
+- **`--power-on random` now randomises the PPU's registers, latches and
+  both chip MDRs**, not only RAM — the second half of issue #224, ported
+  from ares `PPU::power`. Overscan, interlace and BGMODE still come up
+  clear, as ares sets them explicitly, and a seed still reproduces the
+  exact machine. `zero` and `ones` leave the registers deterministic.
+- **DMA channel registers power up at `$FF`** in every mode, and a reset
+  restores them, as both references do (ares `cpu.hpp:217-251`, Mesen2's
+  constructor); `$420B` / `$420C` still come up clear. A game reading
+  `$43xx` before writing it saw zero. Note for ROM authors: a transfer
+  count must now be written in full — leaving the high byte of `$43x5`
+  alone asks for `$FFxx` bytes, exactly as on hardware.
+
+### Changed
+- Three regression baselines re-recorded: two PeterLemon PPU demos and one
+  SPC700 audio ROM, all three run as PAL by the harness, whose animation
+  phase moves with the corrected VBlank line. Street Fighter II Turbo (E)
+  renders identically before and after, with the same NMI count.
+
 ## [1.19.0] — 2026-09-12
 
 The audit release: the 2026-09-11 review of every subsystem against ares

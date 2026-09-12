@@ -157,7 +157,21 @@ fn run(
     // full-frame forced-blank frames (absorbs the transient per-frame blanks
     // of double-buffered Super FX titles); a longer run is a real
     // transition/fade and is shown as black, like Mesen2.
-    const BLANK_HOLD_FRAMES: u32 = 8;
+    //
+    // Two frames, not eight: hardware blanks the screen the moment the game
+    // sets INIDISP bit 7, so every held frame is a picture the console does
+    // not show. Kirby Super Star force-blanks for 31 consecutive frames
+    // before its intro's next scene; at eight the display froze on the old
+    // picture for ~130 ms and only then went black, which reads as a stutter
+    // right at the cut. At two the freeze is ~33 ms — below what an eye
+    // catches — and an isolated blank frame is still absorbed.
+    //
+    // Measured 2026-09-12 before lowering it: across Star Fox, Doom and
+    // Stunt Race FX, in the intro and in gameplay, `frame_showed_content`
+    // never reported a whole-frame blank, so the alternating-blank case the
+    // eight was chosen for no longer reaches this policy (the per-frame
+    // content latch counts a frame with ANY un-blanked line as content).
+    const BLANK_HOLD_FRAMES: u32 = 2;
 
     if let Ok(mut g) = shared.thread_handle.lock() {
         *g = Some(thread::current());

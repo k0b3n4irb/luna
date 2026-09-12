@@ -136,13 +136,13 @@ Star and Kirby's Dream Land 3 checked after the change.
 
 | # | Gap | ares / Mesen2 | luna |
 |---|---|---|---|
-| 7 | **CC1 character conversion**: CDMA fields swapped (colour depth = bits 0-1, width = bits 2-4), 4bpp pixel order MSB-first instead of LSB-first, whole transfer converted at once instead of per-tile on S-CPU BW-RAM reads | ares `dma.cpp:64-107`, `io.cpp:453-459`; Mesen2 `Sa1.cpp:319-325,718-730`; fullsnes | `sa1.rs` `cc1_*` |
-| 8 | **CC2** ignores the BRF register file `$2240-$224F` (one byte per pixel) and the 4-bit line counter | ares `dma.cpp:110-128`; Mesen2 `:744-767` | `sa1.rs` `cc2_consume_byte` |
+| ~~7~~ | ~~**CC1 character conversion**~~ — ✅ **DONE 2026-09-12**: `dmaCC1` / `dmaCC1Read` ported line for line. CDMA decodes colour depth from bits 0-1 and width from bits 2-4 (they were swapped), pixels come out LSB-first, and the conversion happens ONE CHARACTER AT A TIME on the S-CPU's own BW-RAM reads through `bwram.dma`, answering from I-RAM at DDA — not in one bulk pass at the trigger | ares `dma.cpp:48-107`, `io.cpp:452-461`, `bwram.cpp:29` | `sa1.rs` `dma_cc1`, `dma_cc1_read` |
+| ~~8~~ | ~~**CC2**~~ — ✅ **DONE 2026-09-12**: `dmaCC2` ported. The `$2240-$224F` BRF register file is stored, a write to BRF[7] or BRF[15] converts one tile row into I-RAM at DDA using ares' planar byte map, and the 4-bit line counter advances (reset when DCNT clears DMA enable) | ares `dma.cpp:108-128`, `io.cpp:348-368,327` | `sa1.rs` `dma_cc2` |
 | 9 | **BW-RAM bitmap view** (`$60-$6F`, BBF `$223F`, CBM bit 7 / `sw46`) missing | ares `bwram.cpp:45-130`, `memory.cpp:39-49` | `sa1.rs` SA-1-side decode |
-| 10 | **CCNT bit 6 (RDYB) wait** ignored — the SA-1 keeps running | ares `sa1.cpp:46-50`; Mesen2 `Run` | `coproc/sa1.rs` |
+| ~~10~~ | ~~**CCNT bit 6 (RDYB) wait**~~ — ✅ **DONE 2026-09-12**: the chip is parked while the S-CPU holds RDYB; its timer keeps ticking, as in ares. Test `ccnt_bit_6_parks_the_sa1_but_keeps_its_timer_running` | ares `sa1.cpp:46-50`; Mesen2 `Run` | `coproc/sa1.rs` |
 | 11 | **Normal DMA** ignores the DCNT source device and decodes through the S-CPU map; costs the SA-1 no time | ares `dma.cpp:2-46`; Mesen2 `RunDma` | `sa1.rs` DMA |
 | 12 | **Register dispatch not split by CPU side** (S-CPU reads of `$2301` return CFR instead of open bus — Kirby does 2.9 M of them) | ares `io.cpp`; Mesen2 `Sa1.cpp:81-428` | `sa1.rs` `read`/`write` |
-| 13 | **ROM not mirrored** for carts under 4 MB | ares `rom.cpp:7-10` `bus.mirror` | `sa1.rs` ROM offset |
+| ~~13~~ | ~~**ROM not mirrored**~~ — ✅ **DONE 2026-09-12**: SA-1 ROM addresses run through the shared `rom_mirror` (ares' `bus.mirror`), so a cart smaller than the 4 MB the super-MMC addresses repeats instead of reading open bus | ares `rom.cpp:7-10` | `sa1.rs` `rom_offset` |
 | 14 | **VLBP** advances on the `$230C` read instead of the `$2258` write; data masked | ares `io.cpp:427-439`; Mesen2 `:220-228` | `sa1.rs` VBD |
 | 15 | **BW-RAM protection power-on** `sbwe/cbwe = $80`, `bwpa = $00` (refs: write-protected until enabled) | ares `sa1.cpp:231-237`; Mesen2 `Reset` | `sa1.rs` `new` |
 
