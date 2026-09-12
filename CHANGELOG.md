@@ -27,6 +27,13 @@ All notable user-facing changes to luna. Releases are cut from `main`
   handing out real data. Residual: CGRAM accesses during the picture still
   use the CPU's address rather than the PPU's internal one.
 
+- **Clip-to-black runs before the colour math**, not after it. The CGWSEL
+  7:6 region zeroes the main colour and turns halving off, then the blend
+  runs (ares `dac.cpp:121-133`; anomie: "clip … to black (before math …
+  the only difference is that half math will not occur)"). luna clipped
+  afterwards, which turned every clipped pixel solid black and hid the sub
+  screen or the fixed colour an addition should still show.
+
 ### Changed
 - Three regression baselines re-recorded: two PeterLemon PPU demos and one
   SPC700 audio ROM, all three run as PAL by the harness, whose animation

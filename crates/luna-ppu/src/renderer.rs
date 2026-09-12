@@ -671,11 +671,6 @@ pub(crate) fn render_scanline_partial_into_from(
             coldata_bgr5
         };
 
-        let rgb5 = if layer_enabled_for_math {
-            color_math(main.bgr5, math_operand, subtract, half)
-        } else {
-            main.bgr5
-        };
         // CGWSEL bits 7:6 — force-main-black region. Per ares
         // (window.cpp:36-38 + dac.cpp:120-122) and Mesen2
         // (SnesPpuTypes.h:13-19 + SnesPpu.cpp:1307-1326), value 1 =
@@ -686,7 +681,30 @@ pub(crate) fn render_scanline_partial_into_from(
             2 => in_math_window,
             _ => true,
         };
-        let main_bgr5 = if force_black { (0, 0, 0) } else { rgb5 };
+        // Clipping happens BEFORE the math, not after it: ares
+        // `dac.cpp:121-133` feeds the blend
+        // `math.above.colorEnable ? math.above.color : 0` and computes
+        // `math.colorHalve = io.colorHalve && math.above.colorEnable`, so a
+        // clipped pixel contributes black to the sum AND turns halving off.
+        // Mesen2 `SnesPpu.cpp:1307-1326` zeroes `pixelA` and its
+        // `halfShift` the same way; anomie: "clip … to black (before math
+        // … the only difference is that half math will not occur)".
+        // Applying the clip afterwards turned every clipped pixel solid
+        // black, hiding the sub screen or the fixed colour an addition
+        // should still show.
+        //
+        // The references differ on one case: with CGWSEL 7:6 = 3 ("always
+        // clip") Mesen2 zeroes the main colour but KEEPS halving
+        // (`SnesPpu.cpp:1325`), while ares drops halving for every clipped
+        // pixel because it gates on the same `above.colorEnable`. luna
+        // follows ares.
+        let main_operand = if force_black { (0, 0, 0) } else { main.bgr5 };
+        let half = half && !force_black;
+        let main_bgr5 = if layer_enabled_for_math {
+            color_math(main_operand, math_operand, subtract, half)
+        } else {
+            main_operand
+        };
 
         // Hi-res / pseudo-hires: the dot's left subpixel is the sub-
         // screen winner (`sub`), the right is the main-screen result.
@@ -3096,6 +3114,42 @@ mod tests {
             "blue should rise: baseline {:?} with_math {:?}",
             baseline[0],
             with_math[0],
+        );
+    }
+
+    #[test]
+    fn clip_to_black_runs_before_the_math_not_after() {
+        // CGWSEL bits 7:6 = 3 ("always clip"): the main colour becomes
+        // black BEFORE the math (ares dac.cpp:121-133), so an addition
+        // against the fixed colour must still show that fixed colour —
+        // clipping after the math would leave solid black.
+        let mut p = setup_demo_tile();
+        p.write(register::BGMODE, 0x01);
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::CGADSUB, 0x01); // add, BG1, no half
+        p.write(register::COLDATA, 0x9F); // fixed colour: blue = max
+        p.write(register::CGWSEL, 0xC0); // clip main to black everywhere
+        let clipped = render_frame_with(&p, RenderOptions::default());
+        assert!(
+            clipped[0][2] > 0,
+            "the fixed colour must survive the clip: got {:?}",
+            clipped[0]
+        );
+        assert_eq!(
+            (clipped[0][0], clipped[0][1]),
+            (0, 0),
+            "only the operand remains: {:?}",
+            clipped[0]
+        );
+
+        // Half-math is turned off by the clip too (ares: `colorHalve =
+        // io.colorHalve && math.above.colorEnable`), so the same dot with
+        // CGADSUB's half bit set must not be halved.
+        p.write(register::CGADSUB, 0x41); // add, BG1, half
+        let clipped_half = render_frame_with(&p, RenderOptions::default());
+        assert_eq!(
+            clipped_half[0], clipped[0],
+            "clipped pixels ignore the half bit"
         );
     }
 
