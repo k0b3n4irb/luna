@@ -346,6 +346,12 @@ impl Cgram {
         }
     }
 
+    /// Set the low/high latch directly — used only by the power-on
+    /// randomisation (ares `io.cgramAddressLatch = random()`).
+    pub const fn set_high_pending(&mut self, pending: bool) {
+        self.high_pending = pending;
+    }
+
     /// Whether the next [`Self::read`] will return the HIGH byte of the
     /// current word (the PPU read path needs this to apply the partial
     /// PPU2-MDR update — the high read only drives bits 0-6).
