@@ -96,6 +96,15 @@ luna run --until-frame 200 --print-fbhash --screenshot f200.png "game.sfc"
 # → fbhash=303497668ba19add
 ```
 
+Scripted input is frame-indexed too, so the two combine: each `--input`
+checkpoint lands on its exact PPU frame and any checkpoint past the target
+frame simply never fires.
+
+```bash
+# Hold Right from frame 10, snapshot at frame 130.
+luna state --until-frame 130 --input "10:0x0100" --peek player_x:2 game.sfc
+```
+
 The same option exists on `luna state` (with `--input`, asserts and
 traces), and `luna test` manifests take the run bound as `frames = N` /
 `[[checkpoint]] at_frame = N` for the same reason.

@@ -10,6 +10,11 @@ use crate::csv::{
 };
 use crate::fmt::hex_str;
 use crate::output::{print_hex_dump, write_wav};
+/// Instruction allowance per frame while chasing an `--input` checkpoint
+/// under `--until-frame` — the same per-frame budget the frame-bounded run
+/// loop uses.
+const CHECKPOINT_FRAME_ALLOWANCE: u64 = 200_000;
+
 use crate::parsers::{
     parse_addr_range, parse_assert_spec, parse_assert_spec_no_bank, parse_assert_spec_sym,
     parse_hex_u8, parse_input_script, parse_mouse_script, parse_peek_spec, parse_peek_spec_sym,
@@ -358,19 +363,37 @@ pub(crate) fn run_state(
             )
             .collect();
         events.sort_by_key(|(f, _)| *f);
-        // Chasing checkpoint frames spends from the SAME `-n` budget as
-        // the run itself (issue #126): a checkpoint scheduled beyond the
-        // requested window must never fire, and the total run must be
-        // `-n` instructions — not `-n` on top of an unbounded pre-roll.
+        // What bounds the run also bounds the checkpoint chase.
+        //
+        // With `-n` (issue #126): checkpoints spend from the SAME budget,
+        // so a checkpoint scheduled beyond the requested window never
+        // fires and the total run is `-n` instructions — not `-n` on top
+        // of an unbounded pre-roll.
+        //
+        // With `--until-frame N` the bound is a FRAME, and `-n` is not the
+        // run length at all (it defaults to 1000, which the #126 rule then
+        // exhausted before the first checkpoint — every scripted input was
+        // silently dropped). Chase by frames instead: run each checkpoint's
+        // frame with the same per-frame allowance the `--until-frame` loop
+        // uses, and drop only the checkpoints past the target frame.
         for (frame, ev) in &events {
-            let spent = em
-                .instructions_executed()
-                .saturating_sub(start_instructions);
-            let Some(left) = steps.checked_sub(spent).filter(|l| *l > 0) else {
-                break; // budget exhausted — later checkpoints never happen
+            let left = match until_frame {
+                Some(target) if *frame > target => break, // past the window
+                Some(_) => CHECKPOINT_FRAME_ALLOWANCE
+                    .saturating_mul(frame.saturating_sub(em.frame_count().unwrap_or(0)).max(1)),
+                None => {
+                    let spent = em
+                        .instructions_executed()
+                        .saturating_sub(start_instructions);
+                    match steps.checked_sub(spent).filter(|l| *l > 0) {
+                        Some(l) => l,
+                        // budget exhausted — later checkpoints never happen
+                        None => break,
+                    }
+                }
             };
             crate::parsers::step_to_frame_bounded(&mut em, *frame, left);
-            if em.state().scheduler.frame_count < *frame {
+            if em.frame_count().unwrap_or(0) < *frame {
                 break; // ran out before reaching this checkpoint's frame
             }
             let applied = match ev {

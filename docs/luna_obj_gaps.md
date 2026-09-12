@@ -90,12 +90,43 @@ in already-overflowing scenes.)
 
 ## ✅ 4. OAM priority rotation (`$2103` bit 7) — DONE
 
-When OAM priority is set, the first sprite evaluated rotates to
-`word_address >> 2` (ares `object.cpp:6-9`, `setFirstSprite`).
-Implemented via `Oam::first_sprite()`, feeding `evaluate_sprite_line`.
-Test `oam_priority_rotation_changes_winner`. Previously luna always
+When OAM priority is set, the first sprite evaluated rotates to the
+sprite the **live internal byte address** points at, `address >> 2`
+(ares `object.cpp:6-9` `setFirstSprite` on the byte address; Mesen2
+`SnesPpu.cpp:599`; anomie-regs `(OAMAddr & 0xFE) >> 1` on the word
+address). Implemented via `Oam::first_sprite()`, feeding
+`evaluate_sprite_line`. Tests `oam_priority_rotation_changes_winner`,
+`oam_priority_rotation_follows_the_live_byte_address`.
+**Corrected 2026-09-11:** the first version used `word_address >> 2`
+(sprite N/4 instead of N/2) frozen at the `$2102/3` write, and its test
+enshrined the wrong index. Previously luna always
 evaluates sprite 0..127 in fixed order. Coupled with #3 — it changes
 which sprites survive the per-line cap.
+
+---
+
+## ✅ 5. Sprites are fetched one line AHEAD of the row they appear on — FIXED 2026-09-12
+
+ares `Object::scanline` evaluates with `t.y = vcounter()` into a double
+buffer and `Object::run` paints from the PREVIOUS line's tiles
+(`object.cpp:16-22,57-61`); Mesen2 evaluates `_scanline` and draws on the
+next line (`SnesPpu.cpp:595-625`). luna keyed sprites on the same PPU line
+as the backgrounds, so after the hardware line origin landed (PR #134,
+fb row `r` = PPU line `r+1`) **every sprite was drawn one row too high**,
+and a sprite parked just below the picture (`Y = 224`) leaked its top row
+onto the last visible row.
+
+Reported from the GUI on Kirby's Dream Land 3's level-select map (a strip
+of coloured pixels on row 223 over a flat background), reproduced headless
+at frame 4200, and present on the pre-fix build too — it was **not** a
+regression of the 2026-09-11 lot 1.
+
+Fix: `render_scanline_partial_into_from` and `Ppu::ensure_line_sprites`
+derive the object line as `y - 1` (BGs keep line `y`), and PPU line 0
+evaluates nothing (ares evaluates lines `0..=vdisp-2`). The direct
+`render_sprites_scanline*` helpers still take the object line, so their
+unit tests keep their meaning. 14 own-baseline goldens (12 commercial + 2
+PPU) and the 3 smoke screenshots were re-recorded and eyeballed.
 
 ---
 
