@@ -4,6 +4,27 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+- **VBlank starts on the hardware line in both regions.** It followed the
+  console region — 225 on NTSC, 240 on PAL — and the overscan bit of
+  SETINI (`$2133` bit 2) was read nowhere. Both references derive it from
+  overscan alone (ares `ppu/io.cpp:641`, Mesen2 `SnesPpu.cpp:559`), so
+  every PAL title without overscan was getting its NMI 15 lines late, 15
+  extra HDMA lines on dead table entries, and its VRAM and OAM writes
+  refused on lines 225 to 239; an NTSC title that enabled overscan lost
+  the same 15 lines the other way. `vdisp` is now recomputed on the
+  `$2133` write, as ares does (Mesen2 latches it once per frame).
+  Residual: the framebuffer still stores 224 rows, so a 239-line overscan
+  picture is timed correctly but its last lines are not displayed.
+
+### Changed
+- Three regression baselines re-recorded: two PeterLemon PPU demos and one
+  SPC700 audio ROM, all three run as PAL by the harness, whose animation
+  phase moves with the corrected VBlank line. Street Fighter II Turbo (E)
+  renders identically before and after, with the same NMI count.
+
 ## [1.19.0] — 2026-09-12
 
 The audit release: the 2026-09-11 review of every subsystem against ares
