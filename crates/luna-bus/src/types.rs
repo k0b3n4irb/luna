@@ -55,10 +55,17 @@ pub const fn make_addr(bank: u8, offset: u16) -> Addr24 {
 /// past the end mirrors the trailing largest-power-of-two chunk rather
 /// than returning open bus. `size == 0` yields 0 (caller treats an empty
 /// ROM as unmapped).
+#[inline]
 #[must_use]
 pub const fn rom_mirror(mut address: usize, mut size: usize) -> usize {
     if size == 0 {
         return 0;
+    }
+    // Fast path — the overwhelmingly common case, and the one every ROM
+    // fetch takes. Mirroring is the identity below `size`, so answering it
+    // here keeps the folding loop off the hot path.
+    if address < size {
+        return address;
     }
     let mut base = 0usize;
     // SNES ROM space is 24-bit (max 16 MB); start at the top bit.
