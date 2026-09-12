@@ -733,7 +733,7 @@ ppu_test!(
 ppu_test!(
     ppu_mode7_starwars,
     "Mode7/StarWars/StarWars.sfc",
-    "be60a30fcda54db1f495b121b558cf0987621f1648fd377bb5237b1cbf5631c0"
+    "af0c0d94c3648021a1dc41a8148d112f9959292048c5b0ecbe9714561d3385c1"
 );
 ppu_test!(
     ppu_greenspace,
@@ -789,7 +789,7 @@ ppu_test!(
 ppu_test!(
     ppu_interlace_rpg,
     "Interlace/InterlaceRPG/InterlaceRPG.sfc",
-    "e56b22a580bec9f8e3a665b712d0092ffaa25418ee117beaad77e982b88917ce"
+    "5d4275902b391be90de78a3d6b990b791c8f2e6e8461fee2de4518ea829b7474"
 );
 ppu_test!(
     ppu_interlace_moogle,
@@ -1165,7 +1165,7 @@ macro_rules! spc_test {
 spc_test!(
     spc_italo,
     "ItaloTest/ItaloTest.sfc",
-    "9f3cc4abf78e16acd6d69a3147e303887ec653ababa827e49a92d233932673b0"
+    "cffc62b5d0800b88f445eefebeeedfbd573dea63a2e5c65fcfe4805e7b4ec791"
 );
 spc_test!(
     spc_pitchmod,
@@ -1176,39 +1176,39 @@ spc_test!(
 spc_test!(
     spc_play_brr,
     "PlayBRRSample/PlayBRRSample.sfc",
-    "a47bc23f14447de6111a7c128b349833099964d2224f09000200a3cfd4ee02ee"
+    "f63e508778df81c83237481e1dabec43d30fd3d56666a0697ceebfccea50ada6"
 );
 spc_test!(
     spc_play_noise,
     "PlayNoise/PlayNoise.sfc",
-    "124decc81ceb450910e076396f3e77ea10d9f101e1a08d351ee73b9ff7ad51b2"
+    "1c0d22d2d4c3007562b0145ef5c11d11e63de66c9cd067b74f97c93ab0e7f9bd"
 );
 spc_test!(
     spc_twinkle,
     "Twinkle/Twinkle.sfc",
-    "77183a84670e3e32f77b7b33b6816104a8be8a8e2ccd35d537e9f3930312283b"
+    "443c7d44acdc065359d204afd8f62b227a47a406f8d9c6a431bb1a26d457b2a8"
 );
 // Multi-block uploads — silent until the IPL-ROM `$FFEE` byte fix.
 spc_test!(
     spc_axel_f,
     "Axel-F/Axel-F.sfc",
-    "26c62a40fafa3dbe24664f9defc0eef0572122c35d0779918b9b87d67acddb28"
+    "4f67124261fb0054f371786389e4a0fb5bdb78e2947f4977e3ed83eac44358df"
 );
 spc_test!(
     spc_ffvii_prelude,
     "FFVIIPrelude/FFVIIPrelude.sfc",
-    "2d16c154dc5a24e9a135a725810685370b918b39a6a8a3665cc18d5f40d095c7"
+    "07b55afcd3b98f530f3bca104832cb8652d0aebec3ffef6af54c0c9d5ec6569b"
 );
 spc_test!(
     spc_speech,
     "SpeechSynth/SpeechSynth.sfc",
-    "e455e6e5d6423a76899f4fe68b0d3c90e1d770c566e2c684a79afd42e2adfe2d"
+    "67a2b75791014584f0e8fcce25cf5c64bab1ac477402cefcc8c82c1999d12b11"
 );
 // Plays only on a button press — hold A (song 1) until the driver boots.
 spc_test!(
     spc_play_two_song,
     "PlayTwoSong/PlayTwoSong.sfc",
-    "619879848ba540f89c2c103510b9f8e956a96988791186bdd1b762c37926eb91",
+    "30bc23273d3e36325d74e11a43d26761b2c149635537900b0aa57f62800d22a0",
     hold = PAD_A
 );
 
@@ -1265,26 +1265,26 @@ game_test!(
     game_fzero,
     "F-Zero (USA).sfc",
     2226,
-    "e75992a5e9d55fb30cb8349a1796ab1f860196f896265f255fafaaf09f94b669"
+    "a0e8108d00fd2fbef29c64f08e0bab42142df0c633aee768b5bd5603e6a5cba2"
 );
 game_test!(
     game_mariokart,
     "Super Mario Kart (USA).sfc",
     3587,
-    "aa62f60e42226041fef35dd20bb9642e9deec009b936129811f4eaba1d76f038"
+    "b7bc468dec89ba2f02f36190f0fc4c6945ec2cee1f6e68000452596e8e21456e"
 );
 // SA-1
 game_test!(
     game_smrpg,
     "Super Mario RPG - Legend of the Seven Stars (USA).sfc",
     905,
-    "65d4908b5d63fe0fc8afb8f69b5dae6643f52377e73ec5d2d726b44dd942e8ac"
+    "bf796467635a97e85615b6aa376a277c795a4d8f84ce8394e8a48b00af1637b5"
 );
 game_test!(
     game_kirby_ss,
     "Kirby Super Star (USA).sfc",
     3054,
-    "a4184f024deaa411b30f65621bff893505e6b1b6782dff3c843019b3e8f3ee1a"
+    "389d8a48bfaf05a46c40e5528a4ce2c045d9bf6d40dc335a62a7927d80350f9b"
 );
 // Super FX (GSU)
 game_test!(
@@ -1297,21 +1297,21 @@ game_test!(
     game_stuntfx,
     "Stunt Race FX (USA) (Rev 1).sfc",
     2299,
-    "4ccf73b8c336054676bb48c8dc668c81fddc4123fb2630bf15538e35d79d2008"
+    "429c4731f73fb61627c822217fe359c0baf207fe3c0b160418e915338c4fb5a4"
 );
 // S-DD1
 game_test!(
     game_starocean,
     "Star Ocean (tr).sfc",
     1875,
-    "fa9e3f45b35f8331d9f3aa5a0064a2eaf1ab3d27a6b2b91ccd32784eca976f17"
+    "e17c1c5c7d04e8f4a33a805dc26638de41870f67d09788d3857038aaf84c1dde"
 );
 // DSP-1
 game_test!(
     game_pilotwings,
     "Pilotwings (USA).sfc",
     1395,
-    "6a05fbbe26b4692619b7f66838be6bdefbd7f28acd6e899b14b4fd3c7f56d80f"
+    "f8f76478156ea150f3e8be3fc73f13adb11396be8fcb52d817d920ad475b5a43"
 );
 // Color math / transparency
 game_test!(
@@ -1331,31 +1331,31 @@ game_test!(
     game_metroid,
     "Super Metroid (Japan, USA) (En,Ja).sfc",
     2303,
-    "c0a2ecaadc4020e95d74b41c40275214ac0cda55fea07955bb2e407ae1ea2e0a"
+    "3b3d83cd082b3676051a8d4b601fc0f0151bdf33c870095a56f32e1c9f81efa2"
 );
 game_test!(
     game_chrono,
     "Chrono Trigger (USA).sfc",
     1870,
-    "18aabf052b1ed53c3a8d6a73614f073059b48797ad3a551fabd75a21ec0d72d9"
+    "5d7bdb953bc3f122d15dc1c22ae1e00d1cfc38248c6fa3148967e0e2e7065f1a"
 );
 // Large ROM
 game_test!(
     game_tales,
     "Tales of Phantasia (Japan).sfc",
     2574,
-    "959e2bff422f3c6fb6b89521290009adf5779c34c9783f62d70931e908132573"
+    "1b32965bbd7e33bfb59ad8e80f83df6cc7c3e645bbefe395410471a40dd10f8e"
 );
 // HDMA (raster split + gradient)
 game_test!(
     game_contra3,
     "Contra III - The Alien Wars (USA).sfc",
     4573,
-    "a428991c2a453b533db6f00c732f958cc56ae5ba9932d3a7dc8112fee18db22b"
+    "0e9ef26dd6a3c8986d9e9ae4ed7c9167aeadb36e1daa1b97c8ac373af42632df"
 );
 game_test!(
     game_axelay,
     "Axelay (USA).sfc",
     4801,
-    "2425cfc89488d6ca003b3a9af5a79edb316c0b0828d0af66e92c6b6f270cc734"
+    "d7434531cc2f5d7f4fa766991e20fa746c77235ae9bdefe29bc0e7b0dc95db5d"
 );

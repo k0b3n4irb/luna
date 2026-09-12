@@ -677,6 +677,17 @@ pub const fn vblank_start_line(region: luna_cartridge::Region) -> u16 {
         _ => NTSC_VBLANK_START_LINE,
     }
 }
+/// A powered-on APU whose CPU→SPC clock ratio matches `region`'s master
+/// clock. The SPC has its own crystal in both regions (ares `smp.cpp`,
+/// Mesen2 `Spc.cpp:126`), so a PAL console must not reuse the NTSC ratio.
+fn apu_for_region(region: luna_cartridge::Region) -> Apu {
+    let mut apu = Apu::new();
+    if matches!(region, luna_cartridge::Region::Pal) {
+        apu.set_master_clock_hz(luna_apu::PAL_MASTER_CLOCK_HZ);
+    }
+    apu
+}
+
 /// Total scanlines per NTSC frame (visible + post + vblank).
 pub const NTSC_SCANLINES_PER_FRAME: u16 = 262;
 /// Total scanlines per PAL frame.
@@ -816,14 +827,16 @@ impl Snes {
                 .try_into()
                 .expect("128 KB slice into fixed array"),
             mapper,
-            fast_rom: cart.header.fast_rom,
+            // MEMSEL powers up SLOW whatever the header's FastROM bit says
+            // (ares `cpu.hpp` `romSpeed = 8`); the game opts in via `$420D`.
+            fast_rom: false,
             nmi_pending: false,
             irq_pending: false,
             total_mclk: 0,
             mclk_acc: MclkAccounting::default(),
             // Compat: post-reset, the IPL ROM has dropped these into
             // the CPU-facing mailbox to signal "audio CPU ready".
-            apu_real: Apu::new(),
+            apu_real: apu_for_region(region),
             apu_panicked: false,
             apu_stub_fallback: ApuStub::new(),
             ppu_line: 0,
@@ -1123,7 +1136,7 @@ impl Snes {
                 apu_real,
                 apu_stub_fallback,
                 apu_panicked,
-                fast_rom: *fast_rom,
+                fast_rom,
                 nmi: nmi_pending,
                 irq: irq_pending,
                 mclk_total: total_mclk,
@@ -1171,11 +1184,29 @@ impl Snes {
                 .try_into()
                 .expect("64 KB slice into fixed array"),
         );
-        self.apu_real = Apu::new();
+        self.apu_real = apu_for_region(self.region);
         self.apu_real.aram = aram;
         self.apu_panicked = false;
         self.apu_stub_fallback = ApuStub::new();
-        self.cpu_regs = CpuRegs::new();
+        // Controller ports are host configuration, not console state: the
+        // Reset button does not unplug a Mouse / Super Scope (Mesen2
+        // `InternalRegisters::Reset` only clears the register file). Carry
+        // the devices and the live host inputs across; everything else in
+        // the $42xx register file returns to power-on.
+        let host_ports = std::mem::take(&mut self.cpu_regs);
+        self.cpu_regs = CpuRegs {
+            port1: host_ports.port1,
+            port2: host_ports.port2,
+            mouse: host_ports.mouse,
+            super_scope: host_ports.super_scope,
+            joypad1: host_ports.joypad1,
+            joypad2: host_ports.joypad2,
+            ..CpuRegs::new()
+        };
+        // MEMSEL returns to SLOW: ares `CPU::power` runs `io = {}` on reset
+        // too. (Mesen2 `InternalRegisters::Reset` keeps it; both agree it
+        // powers up slow. ares is the gold standard.)
+        self.fast_rom = false;
         self.total_mclk = 0;
         self.mclk_acc = MclkAccounting::default();
         self.ppu_line = 0;
@@ -1189,6 +1220,12 @@ impl Snes {
         self.joypad1_shift = 0;
         self.joypad2_shift = 0;
         self.dma.pending_mdma = 0;
+        // $420B/$420C clear on reset (ares `CPU::power` `channels[id] = {}`;
+        // anomie-regs: HDMAEN "$00 on power on or reset"). Leaving HDMAEN set
+        // kept HDMA firing from the previous run's stale tables during boot.
+        self.dma.mdmaen = 0;
+        self.dma.hdmaen = 0;
+        self.dma.mdma_cursor = None;
 
         // 3. Charge the reset sequence — see `RESET_SEQUENCE_MCLK`. The PPU
         //    and APU run through it, so drive it via the scheduler rather than
@@ -1281,7 +1318,7 @@ impl Snes {
                 apu_real,
                 apu_stub_fallback,
                 apu_panicked,
-                fast_rom: *fast_rom,
+                fast_rom,
                 nmi: nmi_pending,
                 irq: irq_pending,
                 mclk_total: total_mclk,
@@ -1439,7 +1476,7 @@ impl Snes {
                 apu_real,
                 apu_stub_fallback,
                 apu_panicked,
-                fast_rom: *fast_rom,
+                fast_rom,
                 nmi: nmi_pending,
                 irq: irq_pending,
                 mclk_total: total_mclk,
@@ -1555,7 +1592,7 @@ impl Snes {
             apu_real,
             apu_stub_fallback,
             apu_panicked,
-            fast_rom: *fast_rom,
+            fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
             mclk_total: total_mclk,
@@ -1692,7 +1729,9 @@ struct SnesBus<'a> {
     /// inside [`Bus::io_cycle`], so this must be a mutable borrow (not a
     /// snapshot) to propagate the SPC700 "stopped" transition back.
     apu_panicked: &'a mut bool,
-    fast_rom: bool,
+    /// Live handle to `Snes::fast_rom` so a `$420D` write persists past the
+    /// instruction that made it (a by-value copy was silently discarded).
+    fast_rom: &'a mut bool,
     nmi: &'a mut bool,
     irq: &'a mut bool,
     wm_addr: &'a mut u32,
@@ -1832,13 +1871,15 @@ impl SnesBus<'_> {
         }
     }
 
-    /// Returns `Some(port_idx)` (0-3) if `addr` is an APU mailbox port
-    /// at `$2140-$2143` (or its `$80-$BF` mirror).
+    /// Returns `Some(port_idx)` (0-3) if `addr` is an APU mailbox port:
+    /// `$2140-$2143`, mirrored every 4 bytes across `$2140-$217F` (ares
+    /// `cpu.cpp:74` maps `2140-217f` with `address.bit(0,1)`; Mesen2
+    /// `RegisterHandlerB` `addr & 3`), in banks `$00-$3F` / `$80-$BF`.
     fn apu_port(addr: Addr24) -> Option<usize> {
         let bank = bank_of(addr);
         let offset = offset_of(addr);
-        if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && matches!(offset, 0x2140..=0x2143) {
-            Some(usize::from(offset - 0x2140))
+        if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && matches!(offset, 0x2140..=0x217F) {
+            Some(usize::from(offset & 0x03))
         } else {
             None
         }
@@ -2734,7 +2775,7 @@ impl SnesBus<'_> {
         // `cpu.r.mar`) so the per-access coproc step can model SA-1
         // `conflict()` bus contention against it.
         self.scpu_mar = addr;
-        let speed = address_speed(addr, self.fast_rom);
+        let speed = address_speed(addr, *self.fast_rom);
         // ares `status.clockCount` — the cost of the access in flight, which
         // the DMA/HDMA realignment steps are computed against.
         self.clock_count = speed.mcycles() as u32;
@@ -2941,7 +2982,7 @@ impl SnesBus<'_> {
     fn write_inner(&mut self, addr: Addr24, value: u8) {
         // S-CPU memory-address register (ares `cpu.r.mar`) — see `read_inner`.
         self.scpu_mar = addr;
-        let speed = address_speed(addr, self.fast_rom);
+        let speed = address_speed(addr, *self.fast_rom);
         self.clock_count = speed.mcycles() as u32;
         // ares `CPU::write` runs `dmaEdge()` before stepping (`memory.cpp:24`).
         self.dma_edge();
@@ -3151,7 +3192,7 @@ impl SnesBus<'_> {
             // CpuRegs returned false → maybe a register that lives
             // elsewhere (e.g. $420D MEMSEL → fast_rom). Handle here.
             if reg_off == 0x420D {
-                self.fast_rom = value & 0x01 != 0;
+                *self.fast_rom = value & 0x01 != 0;
             }
             return;
         }
@@ -3287,6 +3328,75 @@ mod tests {
     }
 
     #[test]
+    fn pal_console_clocks_the_spc_against_the_pal_master_clock() {
+        let mut rom = demo_lorom().rom;
+        rom[0x7FD9] = 0x02; // PAL
+        let mut pal = Snes::from_cartridge(Cartridge::from_bytes(rom).unwrap());
+        assert_eq!(
+            pal.apu_real.master_clock_hz(),
+            luna_apu::PAL_MASTER_CLOCK_HZ
+        );
+        pal.reset();
+        assert_eq!(
+            pal.apu_real.master_clock_hz(),
+            luna_apu::PAL_MASTER_CLOCK_HZ
+        );
+        let ntsc = Snes::from_cartridge(demo_lorom());
+        assert_eq!(ntsc.apu_real.master_clock_hz(), luna_apu::MASTER_CLOCK_HZ);
+    }
+
+    #[test]
+    fn apu_ports_mirror_every_four_bytes_up_to_217f() {
+        assert_eq!(SnesBus::apu_port(make_addr(0x00, 0x2140)), Some(0));
+        assert_eq!(SnesBus::apu_port(make_addr(0x00, 0x2145)), Some(1));
+        assert_eq!(SnesBus::apu_port(make_addr(0x80, 0x217F)), Some(3));
+        assert_eq!(SnesBus::apu_port(make_addr(0x00, 0x2180)), None, "WMDATA");
+        assert_eq!(SnesBus::apu_port(make_addr(0x40, 0x2140)), None, "bank $40");
+    }
+
+    #[test]
+    fn memsel_write_persists_and_powers_on_slow() {
+        // Header advertises FastROM ($30), but MEMSEL powers up SLOW; the
+        // game's own `$420D` write must then persist past its instruction.
+        let mut rom = demo_lorom().rom;
+        rom[0x7FD5] = 0x30;
+        rom[0x0000] = 0xA9; // LDA #$01
+        rom[0x0001] = 0x01;
+        rom[0x0002] = 0x8D; // STA $420D
+        rom[0x0003] = 0x0D;
+        rom[0x0004] = 0x42;
+        rom[0x0005] = 0x9C; // STZ $420D
+        rom[0x0006] = 0x0D;
+        rom[0x0007] = 0x42;
+        rom[0x0008] = 0xDB; // STP
+        let mut snes = Snes::from_cartridge(Cartridge::from_bytes(rom).unwrap());
+        snes.reset();
+        assert!(!snes.fast_rom, "MEMSEL powers up slow regardless of header");
+        snes.step(); // LDA
+        snes.step(); // STA $420D
+        assert!(snes.fast_rom, "$420D=1 must persist");
+        snes.step(); // STZ $420D
+        assert!(!snes.fast_rom, "$420D=0 must persist");
+    }
+
+    #[test]
+    fn reset_keeps_port_devices_and_clears_memsel_and_hdmaen() {
+        use crate::controller::PortDevice;
+        let mut snes = Snes::from_cartridge(demo_lorom());
+        snes.cpu_regs.port1 = PortDevice::Mouse;
+        snes.cpu_regs.port2 = PortDevice::SuperScope;
+        snes.cpu_regs.nmitimen = 0x81;
+        snes.fast_rom = true;
+        snes.dma.hdmaen = 0xFF;
+        snes.reset();
+        assert_eq!(snes.cpu_regs.port1, PortDevice::Mouse);
+        assert_eq!(snes.cpu_regs.port2, PortDevice::SuperScope);
+        assert_eq!(snes.cpu_regs.nmitimen, 0, "register file back to power-on");
+        assert!(!snes.fast_rom);
+        assert_eq!(snes.dma.hdmaen, 0);
+    }
+
+    #[test]
     fn step_lda_imm_then_sta_long() {
         let cart = demo_lorom();
         let mut snes = Snes::from_cartridge(cart);
@@ -3391,7 +3501,7 @@ mod tests {
             apu_real,
             apu_stub_fallback,
             apu_panicked,
-            fast_rom: *fast_rom,
+            fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
             mclk_total: total_mclk,
@@ -3474,7 +3584,7 @@ mod tests {
             apu_real,
             apu_stub_fallback,
             apu_panicked,
-            fast_rom: *fast_rom,
+            fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
             mclk_total: total_mclk,
@@ -3565,7 +3675,7 @@ mod tests {
             apu_real,
             apu_stub_fallback,
             apu_panicked,
-            fast_rom: *fast_rom,
+            fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
             mclk_total: total_mclk,
@@ -3654,7 +3764,7 @@ mod tests {
             apu_real,
             apu_stub_fallback,
             apu_panicked,
-            fast_rom: *fast_rom,
+            fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
             mclk_total: total_mclk,
@@ -3742,7 +3852,7 @@ mod tests {
                 apu_real,
                 apu_stub_fallback,
                 apu_panicked,
-                fast_rom: *fast_rom,
+                fast_rom,
                 nmi: nmi_pending,
                 irq: irq_pending,
                 mclk_total: total_mclk,
@@ -3830,7 +3940,7 @@ mod tests {
             apu_real,
             apu_stub_fallback,
             apu_panicked,
-            fast_rom: *fast_rom,
+            fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
             mclk_total: total_mclk,
@@ -4134,7 +4244,7 @@ mod tests {
             apu_real,
             apu_stub_fallback,
             apu_panicked,
-            fast_rom: *fast_rom,
+            fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
             mclk_total: total_mclk,
@@ -4322,7 +4432,7 @@ mod tests {
             apu_real,
             apu_stub_fallback,
             apu_panicked,
-            fast_rom: *fast_rom,
+            fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
             mclk_total: total_mclk,
@@ -4696,7 +4806,7 @@ mod tests {
             apu_real,
             apu_stub_fallback,
             apu_panicked,
-            fast_rom: *fast_rom,
+            fast_rom,
             nmi: nmi_pending,
             irq: irq_pending,
             mclk_total: total_mclk,

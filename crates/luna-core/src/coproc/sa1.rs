@@ -230,6 +230,16 @@ impl Mapper for Sa1Chip {
                     e: self.cpu.e,
                 });
             }
+            // Deliver the SA-1's own interrupt lines to its CPU at the
+            // instruction boundary (ares `SA1::lastCycle`, Mesen2
+            // `Sa1::ProcessInterrupts`): IRQ is a level through CIV
+            // (timer / DMA / S-CPU request, gated by CIE), NMI a one-shot
+            // through CNV. Both also wake a WAI. Without this the SA-1
+            // CPU never took an interrupt at all.
+            self.cpu.set_irq_line(self.inner.sa1_irq_line());
+            if self.inner.take_sa1_nmi_event() {
+                self.cpu.trigger_nmi();
+            }
             // Count this instruction's real SA-1 steps: `Sa1Bus` adds the
             // per-access region cost (1, or 2 for BWRAM) on every read/write
             // and 1 per internal/idle `io_cycle`. Charge `steps × 2` mclk.
@@ -420,6 +430,80 @@ mod tests {
 
     fn sa1_chip() -> Sa1Chip {
         Sa1Chip::new(Sa1Mapper::new(ramp_rom(0x20_0000), 0x10000))
+    }
+
+    /// Load a tiny SA-1 program into I-RAM and release the SA-1 at it:
+    ///   $3000: LDA #$90 / STA $220A   ; CIE = IRQ (bit 7) + NMI (bit 4)
+    ///          CLI / WAI / BRA -3     ; wait for interrupts forever
+    ///   $3010: LDA #$AA / STA $3100 / LDA #$80 / STA $220B / RTI  ; IRQ
+    ///   $3020: LDA #$55 / STA $3101 / LDA #$10 / STA $220B / RTI  ; NMI
+    fn sa1_chip_waiting_for_interrupts() -> Sa1Chip {
+        let mut chip = sa1_chip();
+        let w = |chip: &mut Sa1Chip, off: u16, v: u8| {
+            chip.write(make_addr(0x00, off), v);
+        };
+        w(&mut chip, 0x2229, 0xFF); // SIWP: S-CPU may write all of I-RAM
+        let main = [0xA9, 0x90, 0x8D, 0x0A, 0x22, 0x58, 0xCB, 0x80, 0xFD];
+        let irq = [
+            0xA9, 0xAA, 0x8D, 0x00, 0x31, 0xA9, 0x80, 0x8D, 0x0B, 0x22, 0x40,
+        ];
+        let nmi = [
+            0xA9, 0x55, 0x8D, 0x01, 0x31, 0xA9, 0x10, 0x8D, 0x0B, 0x22, 0x40,
+        ];
+        for (base, code) in [
+            (0x3000u16, &main[..]),
+            (0x3010, &irq[..]),
+            (0x3020, &nmi[..]),
+        ] {
+            for (i, &b) in code.iter().enumerate() {
+                w(&mut chip, base + i as u16, b);
+            }
+        }
+        w(&mut chip, 0x2203, 0x00); // CRV = $3000
+        w(&mut chip, 0x2204, 0x30);
+        w(&mut chip, 0x2205, 0x20); // CNV = $3020
+        w(&mut chip, 0x2206, 0x30);
+        w(&mut chip, 0x2207, 0x10); // CIV = $3010
+        w(&mut chip, 0x2208, 0x30);
+        w(&mut chip, 0x2200, 0x00); // release from reset
+        for _ in 0..8 {
+            chip.step_coproc(2_000, 0);
+        }
+        assert!(chip.cpu.waiting, "SA-1 parked in WAI");
+        chip
+    }
+
+    #[test]
+    fn scpu_irq_request_vectors_the_sa1_cpu_through_civ() {
+        let mut chip = sa1_chip_waiting_for_interrupts();
+        chip.write(make_addr(0x00, 0x2200), 0x80); // CCNT: IRQ to SA-1
+        for _ in 0..8 {
+            chip.step_coproc(2_000, 0);
+        }
+        assert_eq!(
+            chip.read(make_addr(0x00, 0x3100)),
+            Some(0xAA),
+            "IRQ handler ran"
+        );
+        assert!(
+            chip.cpu.waiting,
+            "back in WAI after RTI (CIC acked the IRQ)"
+        );
+    }
+
+    #[test]
+    fn scpu_nmi_request_vectors_the_sa1_cpu_through_cnv_once() {
+        let mut chip = sa1_chip_waiting_for_interrupts();
+        chip.write(make_addr(0x00, 0x2200), 0x10); // CCNT: NMI to SA-1
+        for _ in 0..8 {
+            chip.step_coproc(2_000, 0);
+        }
+        assert_eq!(
+            chip.read(make_addr(0x00, 0x3101)),
+            Some(0x55),
+            "NMI handler ran"
+        );
+        assert!(chip.cpu.waiting, "NMI is one-shot: SA-1 back in WAI");
     }
 
     #[test]
