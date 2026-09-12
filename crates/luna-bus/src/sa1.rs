@@ -126,6 +126,20 @@ pub struct Sa1Mapper {
     timer_irq_to_sa1: bool,
     /// DMA → SA-1 IRQ latch (cleared by `$220B` bit-4 write).
     dma_irq_to_sa1: bool,
+    /// Live CCNT bit 7 (ares `io.sa1_irq`, Mesen2 `Sa1IrqRequested`): the
+    /// S-CPU → SA-1 IRQ *request level*. Both references drop the request
+    /// when CCNT is rewritten with bit 7 clear, while the CFR flag
+    /// ([`Self::main_irq_to_sa1`]) stays latched until CIC.
+    #[serde(default)]
+    ccnt_irq_level: bool,
+    /// One-shot S-CPU → SA-1 NMI delivery event, consumed by the SA-1 CPU
+    /// driver ([`Self::take_sa1_nmi_event`]). Armed when CCNT bit 4 is
+    /// written with the NMI enabled, or when CIE enables the NMI while
+    /// its flag is pending (ares `io.cpp` `$2200` / `$220A` `sa1_nmicl =
+    /// 0`; Mesen2 `ProcessInterrupts` → `SetNmiFlag`). The 65c816 NMI is
+    /// edge-triggered, so a level here would re-fire it forever.
+    #[serde(default)]
+    sa1_nmi_event: bool,
     /// Last value written to `$2200` CCNT (low nibble = message to
     /// SA-1, visible in `$2301` CFR low nibble).
     ccnt_msg: u8,
@@ -343,6 +357,8 @@ impl Sa1Mapper {
             main_nmi_to_sa1: false,
             timer_irq_to_sa1: false,
             dma_irq_to_sa1: false,
+            ccnt_irq_level: false,
+            sa1_nmi_event: false,
             ccnt_msg: 0,
             scnt: 0,
             civ_lo: 0,
@@ -732,9 +748,18 @@ impl Sa1Mapper {
         //   bit 6 = timer IRQ enable
         //   bit 5 = DMA IRQ enable
         //   bit 4 = S-CPU → SA-1 NMI enable
-        (self.main_irq_to_sa1 && (self.cie & 0x80) != 0)
+        (self.main_irq_to_sa1 && self.ccnt_irq_level && (self.cie & 0x80) != 0)
             || (self.timer_irq_to_sa1 && (self.cie & 0x40) != 0)
             || (self.dma_irq_to_sa1 && (self.cie & 0x20) != 0)
+    }
+
+    /// Consume the pending S-CPU → SA-1 NMI delivery event (see
+    /// [`Self::sa1_nmi_event`]). The SA-1 CPU driver calls this once per
+    /// instruction boundary and latches an NMI on `true`.
+    pub const fn take_sa1_nmi_event(&mut self) -> bool {
+        let fired = self.sa1_nmi_event;
+        self.sa1_nmi_event = false;
+        fired
     }
 
     /// `true` while the S-CPU has raised an NMI to the SA-1 and the
@@ -1266,11 +1291,15 @@ impl Sa1Mapper {
                     // CIC ($220B), not implicit on a CCNT clear.
                     let _ = prev;
                     self.ccnt_msg = value & 0x0F;
+                    self.ccnt_irq_level = (value & 0x80) != 0;
                     if (value & 0x80) != 0 {
                         self.main_irq_to_sa1 = true;
                     }
                     if (value & 0x10) != 0 {
                         self.main_nmi_to_sa1 = true;
+                        if (self.cie & 0x10) != 0 {
+                            self.sa1_nmi_event = true;
+                        }
                     }
                 }
                 0x2201 => self.sie = value,
@@ -1317,7 +1346,14 @@ impl Sa1Mapper {
                 //   bit 6 = timer IRQ enable
                 //   bit 5 = DMA IRQ enable
                 //   bit 4 = S-CPU → SA-1 NMI enable
-                0x220A => self.cie = value,
+                0x220A => {
+                    // Enabling the NMI while its flag is pending delivers it
+                    // (ares `io.cpp` `$220A`: `!nmien && bit4 && nmifl`).
+                    if (prev & 0x10) == 0 && (value & 0x10) != 0 && self.main_nmi_to_sa1 {
+                        self.sa1_nmi_event = true;
+                    }
+                    self.cie = value;
+                }
                 // CIC mirror: each bit clears its CFR latch.
                 0x220B => {
                     if (value & 0x80) != 0 {

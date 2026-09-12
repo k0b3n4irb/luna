@@ -24,7 +24,7 @@ pillar subsystem; until every row below is ✅, treat it as an approximation.
 |---|---|---|---|
 | 1 | **Transfer-mode patterns** `transfer()` offsets (mode 1/5→bit0, 3/7→bit1, 4→index) + lengths `{1,2,2,4,4,4,2,4}` | `TransferMode::pattern()` | ✅ match |
 | 2 | **`validA` masks** — A-bus blocks `$2100-21FF`, `$4000-41FF`, `$4200-421F`, `$4300-437F` | `valid_a()` | ✅ identical masks |
-| 3 | **Direction** 0=A→B (readA/writeB), 1=B→A | `channel.rs` transfer/step | ✅ match |
+| 3 | **Direction** 0=A→B (readA/writeB), 1=B→A — for general DMA **and HDMA** (`hdmaTransfer` → `transfer`, `dma.cpp:97-105,180`; anomie-regs: "this bit DOES affect HDMA") | shared `transfer_byte()` for both paths | 🔧 fixed (2026-09-11 audit) — this row claimed ✅ but only general DMA honoured the bit; HDMA always read A and wrote B. Test `hdma_b_to_a_direction_reads_the_port_into_the_table`. |
 | 4 | **WRAM→WRAM suppression** — `addressB==$80` + A in WRAM ⇒ invalid (no write) | `b_offset==0x80 && is_wram_a()` | ✅ match (the Kirby $2180 path) |
 | 5 | **Line-counter model** — full 8-bit `lineCounter--`, reload when `(lineCounter & 0x7F)==0`; a `$80`/low-7-zero header = 128-line entry | full-byte decrement, reload on `& 0x7F == 0` | 🔧 fixed (PR #6 — was `(ntlr&0x7F).saturating_sub(1)` → 1-line; Contra III logo) |
 | 6 | **`hdmaActive() = hdmaEnable && !hdmaCompleted`** — per-line gate on the *live* HDMAEN; a channel enabled mid-frame runs from that point | per-frame `hdma_started` lazy-start on first active line | 🔧 fixed (PR #3 — Yoshi's Island) + row #9 (2026-07-01): the live per-line HDMAEN gate is faithful, and luna now keeps ares' stale state + `hdmaDoTransfer=true`-for-all at setup (no more lazy-init-from-source). |
@@ -35,6 +35,7 @@ pillar subsystem; until every row below is ✅, treat it as an approximation.
 | 11 | **Per-line table read for timing** — `hdmaReload` does `readA` of the header **every** active line (`dma.cpp:153`), even gap lines | `hdma_step_line` performs the read every line (consuming it only at counter==0) and returns the **A-bus read count**; `hdma_cost` charges 8 mclk per read + ares' `step(8)` + the two DMA-clock alignment steps (`timing.cpp:110-119`) | 🔧 **fixed 2026-07-15** — faithful cost model, `HDMA_OVERHEAD_MCLK` retired. luna's cost was ~5 mclk/line short on a 1-channel mode-2 table (~1 000 mclk of CPU phase error per frame). Verified by the Mesen2 per-instruction cycle differential (WaveHDMA drift +2 790 → +1 470 mclk) and the full HDMA corpus sweep. |
 | 12 | **HDMA vs MDMA arbitration / mid-DMA pause** (`hdmaTransfer`/`dmaRun` set `dmaEnable=false`) | a long sync DMA is driven in scanline-bounded segments; HDMA fires at each crossed visible line via `sched_one_line` | 🔧 fixed (Phase 5 inc 1) — HDMA now preempts a mid-frame MDMA at scanline boundaries instead of being deferred to after the whole burst. Test `hdma_preempts_a_long_mid_frame_dma_at_scanline_boundaries`. Sub-line position (ares dot-276 `hdmaPosition=1104`) is still line-granular — **inc 2 deferred, see the note below**. |
 | 13 | **`$420C` write mid-DMA, HDMA on the same line as MDMA, DMA during HDMA** edge interactions | 🔬 | unaudited |
+| 14 | **Reset clears `$420B`/`$420C`** (`CPU::power(reset)` `channels[id] = {}`; anomie-regs: HDMAEN "$00 on power on or reset") | `Snes::reset` clears `mdmaen`, `hdmaen`, the MDMA cursor | 🔧 fixed (2026-09-11 audit) — HDMAEN survived a reset, so HDMA kept firing from the previous run's tables during boot. Test `reset_keeps_port_devices_and_clears_memsel_and_hdmaen`. Residual: channel registers keep their values (ares resets them to `$FF`). |
 
 ## Fixed (regression-tested)
 
@@ -44,6 +45,10 @@ pillar subsystem; until every row below is ✅, treat it as an approximation.
   `hdma_cold_mid_frame_enable_skips_transfer_first_line`.
 - **indirect last-active-channel 1-byte quirk** — test
   `hdma_indirect_terminator_on_last_channel_reads_one_byte` (+ 2 companions).
+- **HDMA direction bit** (row #3) — test
+  `hdma_b_to_a_direction_reads_the_port_into_the_table`.
+- **HDMAEN cleared on reset** (row #14) — test
+  `reset_keeps_port_devices_and_clears_memsel_and_hdmaen`.
 
 ## Open work (priority order)
 
