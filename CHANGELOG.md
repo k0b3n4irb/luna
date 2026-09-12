@@ -51,6 +51,36 @@ All notable user-facing changes to luna. Releases are cut from `main`
   transition, so the display sat on a stale picture for ~130 ms and only
   then went black — read as a stutter. The hold is 2 frames now (~33 ms),
   which still absorbs the isolated blank frame it exists for.
+- **Two MCP tool arguments no longer kill the request.** `render_palette`
+  with a large `cell` overflowed its byte count to zero and then indexed
+  an empty buffer; the swatch size is now clamped to 256 px. A
+  `search_memory` pattern longer than WRAM indexed past the end of the
+  slice; it now matches nothing, as it must.
+- **`pause` is no longer lost.** The flag was cleared after the emulator
+  lock was acquired, so a pause sent while another tool still held the
+  emulator was thrown away and the run went the whole way with
+  `interrupted: false`. The flag is cleared when the request starts,
+  before queueing for the lock, and `step` is interruptible too — a long
+  `step` used to hold the lock to the end, so nothing else could even be
+  served.
+- **Debug peeks and pokes walk the 24-bit address**, so a range that runs
+  off the end of a bank continues into the next one. Two bytes poked at
+  `$7E:FFFF` landed at `$7E:FFFF` and `$7E:0000`, clobbering the direct
+  page instead of writing `$7F:0000`.
+- **The CLI hex parser rejects non-ASCII input** instead of panicking on a
+  character boundary. `--assert '7E:0000=aéb'` aborted the process; it now
+  reports a parse error. Same parser behind `--assert-aram`,
+  `--assert-vram`, `--assert-cgram` and the `luna test` manifests.
+- **The diagnostic logs stop at a cap** (about one million events for the
+  mailbox, SA-1 and WDM logs, matching the Nocash log's existing limit).
+  A log the caller forgets to drain used to grow until the process died —
+  the MCP server is long-running, and a game polling `$2140` produces
+  millions of events per second. Draining re-opens capture.
+- **Panic output is silenced per thread, not process-wide.** The hook was
+  swapped around every stepping call — about 1700 times a second from the
+  GUI — which muted panics on the UI, audio and windowing threads almost
+  all of the time, and could leave the silent hook installed for good if
+  two threads stepped at once.
 
 ### Changed
 - Three regression baselines re-recorded: two PeterLemon PPU demos and one

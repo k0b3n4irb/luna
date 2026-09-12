@@ -2296,11 +2296,23 @@ pub fn render_vram_tiles(ppu: &Ppu, bpp: u8, palette_row: u8) -> TilemapImage {
     }
 }
 
+/// Largest swatch size [`render_cgram_palette`] accepts: a 16×16 grid at
+/// 256 px per swatch is a 4096×4096 image (64 MB of RGBA), which is
+/// already far past useful for a palette viewer.
+pub(crate) const MAX_PALETTE_CELL: u32 = 256;
+
 /// Render the 256-colour CGRAM as a 16×16 swatch grid, each swatch
-/// `cell` px square (clamped to ≥ 1). Index 0 is top-left.
+/// `cell` px square. Index 0 is top-left.
+///
+/// `cell` is clamped to the range 1 to [`MAX_PALETTE_CELL`]: a caller-supplied size
+/// is untrusted (it arrives straight from an MCP tool argument), and at
+/// `cell = 4096` the `16 * cell * 16 * cell * 4` byte count overflowed
+/// `u32` to zero, so the swatch loop then indexed an empty buffer and
+/// panicked. Even without the overflow, four digits of `cell` ask for
+/// gigabytes.
 #[must_use]
 pub fn render_cgram_palette(ppu: &Ppu, cell: u32) -> TilemapImage {
-    let cell = cell.max(1);
+    let cell = cell.clamp(1, MAX_PALETTE_CELL);
     let width = 16 * cell;
     let height = 16 * cell;
     let mut rgba = vec![0u8; (width * height * 4) as usize];
