@@ -42,6 +42,13 @@ fixes, each with a regression test.
   its top row onto the last visible row — visible as a strip of stray
   pixels along the bottom edge (reported on Kirby's Dream Land 3's
   level-select map; present since v1.12.0).
+- `state --until-frame F --input …` now applies its checkpoints. The
+  checkpoint chase spent from the `-n` budget (issue #126), whose `state`
+  default is 1000 instructions — exhausted before the first checkpoint —
+  so every scripted press was silently dropped while the frame-bounded run
+  went on without it. Under `--until-frame` the chase is bounded by frames
+  instead, and only checkpoints past the target frame are dropped; `-n`
+  runs keep the #126 semantics. Reported by OpenSNES (2026-09-11).
 
 ### Changed
 - Regression baselines re-recorded: the 3 smoke screenshots and 14 golden
