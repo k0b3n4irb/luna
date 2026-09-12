@@ -296,6 +296,10 @@ enum Command {
         /// Up/Down/Left/Right(11..8) A(7) X(6) L(5) R(4).
         #[arg(long)]
         input: Option<String>,
+        /// Scripted joypad-2 input, same `frame:hex` grammar as `--input`
+        /// (a two-player probe, or replaying an MCP `script_p2` capture).
+        #[arg(long)]
+        input2: Option<String>,
         /// Controller port-1 device: `pad` (default), `mouse`, or `superscope`.
         #[arg(long, default_value = "pad")]
         port1: String,
@@ -657,6 +661,12 @@ enum Command {
         /// Write the full report as JSON (`-` = stdout after the table).
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Write the set of executed 24-bit PCs (sorted, deduplicated,
+        /// little-endian `u32` each) to this file — the input a code-coverage
+        /// tool folds onto symbols and source lines. Whole 24-bit space:
+        /// `HiROM` `$C0-$FF`, `FastROM` mirrors and WRAM-resident code included.
+        #[arg(long = "pc-set")]
+        pc_set: Option<PathBuf>,
         /// Force a cartridge mapper (lorom, hirom, exhirom, sa1, superfx).
         #[arg(long = "force-mapper")]
         force_mapper: Option<String>,
@@ -878,6 +888,7 @@ fn main() -> ExitCode {
             screenshot,
             audio_out,
             input,
+            input2,
             port1,
             port2,
             mouse,
@@ -948,6 +959,7 @@ fn main() -> ExitCode {
                 screenshot.as_deref(),
                 audio_out.as_deref(),
                 input.as_deref(),
+                input2.as_deref(),
                 &port1,
                 &port2,
                 mouse.as_deref(),
@@ -1056,6 +1068,7 @@ fn main() -> ExitCode {
             sym,
             top,
             out,
+            pc_set,
             force_mapper,
             force_region,
             power_on,
@@ -1069,6 +1082,7 @@ fn main() -> ExitCode {
                 sym: sym.as_deref(),
                 top,
                 out: out.as_deref(),
+                pc_set: pc_set.as_deref(),
                 force_mapper: force_mapper.as_deref(),
                 force_region: force_region.as_deref(),
                 power_on: power_on.as_deref(),

@@ -212,3 +212,57 @@ fn run_until_frame_matches_state_until_frame() {
     assert_eq!(fbhash("run"), fbhash("state"));
     assert_eq!(frame_count_after(&rom, &["--until-frame", "30"]), 30);
 }
+
+/// Run `luna state` and return the latched joypad-2 word (`$421A/$421B`).
+fn joy2_after(rom: &Path, extra: &[&str]) -> u64 {
+    let out = Command::new(luna_bin())
+        .arg("state")
+        .arg(rom)
+        .args(["--force-mapper", "lorom", "--out", "-"])
+        .args(extra)
+        .output()
+        .expect("run luna state");
+    assert!(
+        out.status.success(),
+        "luna state failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("state JSON on stdout");
+    json["cpu_regs"]["joy2"].as_u64().expect("cpu_regs.joy2")
+}
+
+/// `--input2` drives port 2 with the `--input` grammar (`OpenSNES` R-D):
+/// its presses land in `$421A`, never in `$4218`, and the two scripts
+/// are independent.
+#[test]
+fn input2_drives_joypad_2_only() {
+    let dir = std::env::temp_dir().join("luna-input-budget-test");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let rom = dir.join("autojoy2.smc");
+    autojoy_rom(&rom);
+
+    let both = [
+        "--until-frame",
+        "30",
+        "--input",
+        "10:0x0080",
+        "--input2",
+        "10:0x8000",
+    ];
+    assert_eq!(
+        joy2_after(&rom, &both),
+        0x8000,
+        "the pad-2 press must reach $421A"
+    );
+    assert_eq!(
+        joy1_after(&rom, &both),
+        0x0080,
+        "pad 1 keeps its own script"
+    );
+    let only2 = ["--until-frame", "30", "--input2", "10:0x8000,20:0"];
+    assert_eq!(joy1_after(&rom, &only2), 0, "--input2 never touches pad 1");
+    assert_eq!(joy2_after(&rom, &only2), 0, "the pad-2 release applies too");
+
+    let _ = std::fs::remove_file(&rom);
+}

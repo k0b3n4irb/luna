@@ -105,6 +105,7 @@ pub(crate) fn run_state(
     screenshot: Option<&std::path::Path>,
     audio_out: Option<&std::path::Path>,
     input_script: Option<&str>,
+    input2_script: Option<&str>,
     port1: &str,
     port2: &str,
     mouse_script: Option<&str>,
@@ -338,19 +339,35 @@ pub(crate) fn run_state(
             }
         },
     };
+    let checkpoints2: Vec<(u64, u16)> = match input2_script {
+        None => Vec::new(),
+        Some(script) => match parse_input_script(script) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("error: --input2: {e}");
+                return ExitCode::from(2);
+            }
+        },
+    };
     let start_instructions = em.instructions_executed();
-    if !checkpoints.is_empty() || !mouse_checkpoints.is_empty() || !scope_checkpoints.is_empty() {
+    if !checkpoints.is_empty()
+        || !checkpoints2.is_empty()
+        || !mouse_checkpoints.is_empty()
+        || !scope_checkpoints.is_empty()
+    {
         // Merge gamepad (`--input`), mouse (`--mouse`) and super-scope
         // (`--superscope`) checkpoints into one frame-sorted event stream so
         // they all apply at the right moment.
         enum Ev {
             Pad(u16),
+            Pad2(u16),
             Mouse(i32, i32, u8),
             Scope(i32, i32, u8),
         }
         let mut events: Vec<(u64, Ev)> = checkpoints
             .iter()
             .map(|&(f, m)| (f, Ev::Pad(m)))
+            .chain(checkpoints2.iter().map(|&(f, m)| (f, Ev::Pad2(m))))
             .chain(
                 mouse_checkpoints
                     .iter()
@@ -398,6 +415,7 @@ pub(crate) fn run_state(
             }
             let applied = match ev {
                 Ev::Pad(m) => em.set_joypad(0, *m),
+                Ev::Pad2(m) => em.set_joypad(1, *m),
                 Ev::Mouse(dx, dy, b) => em.set_mouse(*dx, *dy, *b),
                 Ev::Scope(x, y, b) => em.set_superscope(*x, *y, *b),
             };

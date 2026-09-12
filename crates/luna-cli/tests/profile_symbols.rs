@@ -95,3 +95,47 @@ fn profile_reports_symbols_heaviest_first_with_json() {
     let total: u64 = entries.iter().map(|e| e["mclk"].as_u64().unwrap()).sum();
     assert_eq!(total, v["total_mclk"].as_u64().unwrap());
 }
+
+/// `--pc-set` (`OpenSNES` R-C) writes every executed 24-bit PC once,
+/// sorted, as little-endian `u32`s — the raw input of a coverage tool.
+#[test]
+fn profile_pc_set_lists_executed_pcs_sorted() {
+    let dir = std::env::temp_dir().join("luna_profile_pc_set");
+    let _ = std::fs::create_dir_all(&dir);
+    let rom = rom_with_sym(&dir);
+    let set = dir.join("pcs.bin");
+    let out = Command::new(luna_bin())
+        .arg("profile")
+        .arg(&rom)
+        .args([
+            "--force-mapper",
+            "lorom",
+            "--from-frame",
+            "2",
+            "--until-frame",
+            "6",
+        ])
+        .arg("--pc-set")
+        .arg(&set)
+        .output()
+        .expect("run luna profile");
+    assert!(
+        out.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let bytes = std::fs::read(&set).expect("pc set written");
+    let pcs: Vec<u32> = bytes
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    // Frames 2..6 only run the wait loop (WAI at $8006, BRA at $8007) and
+    // the handler's RTI at $8009; `main` finished before the window.
+    assert_eq!(pcs, vec![0x8006, 0x8007, 0x8009], "{pcs:x?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("pc-set: 3 distinct PCs"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
