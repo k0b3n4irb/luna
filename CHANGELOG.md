@@ -33,6 +33,18 @@ All notable user-facing changes to luna. Releases are cut from `main`
   the only difference is that half math will not occur)"). luna clipped
   afterwards, which turned every clipped pixel solid black and hid the sub
   screen or the fixed colour an addition should still show.
+- **SA-1 character conversion is a faithful port.** Type-1 decoded the
+  CDMA register with its colour-depth and width fields swapped, read 4bpp
+  pixels MSB-first, and converted the whole transfer in one pass when the
+  DMA was triggered. Hardware converts one character at a time, on the
+  S-CPU's own BW-RAM reads, and answers out of I-RAM (ares `dmaCC1` /
+  `dmaCC1Read`). Type-2 ignored the `$2240-$224F` register file entirely;
+  it now converts one tile row per BRF half, with the 4-bit line counter
+  ares keeps.
+- **The SA-1 honours the CCNT wait bit.** Bit 6 (RDYB) parks the chip; its
+  timer keeps running. luna ran straight through it.
+- **SA-1 ROM is mirrored** for carts smaller than the 4 MB the super-MMC
+  addresses, instead of reading open bus past the end.
 
 ### Changed
 - Three regression baselines re-recorded: two PeterLemon PPU demos and one

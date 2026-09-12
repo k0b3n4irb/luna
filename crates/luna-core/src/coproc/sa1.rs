@@ -195,7 +195,10 @@ impl Mapper for Sa1Chip {
         // how games can sit in CCNT.7-asserted "wait" mode and still
         // generate timer IRQs.
         self.inner.tick_timer(main_mclk);
-        if !self.running {
+        // `running` is CCNT bit 5 (reset); bit 6 (RDYB) parks the chip the
+        // same way, and ares checks both before executing anything
+        // (`sa1.cpp:46-50`). The timer above keeps ticking in either case.
+        if !self.running || self.inner.sa1_waiting() {
             return;
         }
         // Add this advance to the budget, clamped so a stray large lump
@@ -471,6 +474,34 @@ mod tests {
         }
         assert!(chip.cpu.waiting, "SA-1 parked in WAI");
         chip
+    }
+
+    #[test]
+    fn ccnt_bit_6_parks_the_sa1_but_keeps_its_timer_running() {
+        // ares `sa1.cpp:46-50`: with RDYB set the chip steps the clock and
+        // returns without executing. luna ran straight through it.
+        let mut chip = sa1_chip();
+        chip.write(make_addr(0x00, 0x2229), 0xFF); // SIWP: I-RAM writable
+        for i in 0..0x100u16 {
+            chip.write(make_addr(0x00, 0x3000 + i), 0xEA); // a NOP sled
+        }
+        chip.write(make_addr(0x00, 0x2203), 0x00); // CRV = $3000
+        chip.write(make_addr(0x00, 0x2204), 0x30);
+        chip.write(make_addr(0x00, 0x2200), 0x00); // release from reset
+        assert!(chip.running);
+        chip.step_coproc(2_000, 0);
+        let pc_running = chip.cpu.pc;
+        assert!(pc_running > 0x3000, "the SA-1 is executing the sled");
+
+        chip.write(make_addr(0x00, 0x2200), 0x40); // RDYB: park it
+        for _ in 0..4 {
+            chip.step_coproc(2_000, 0);
+        }
+        assert_eq!(chip.cpu.pc, pc_running, "parked: no instruction runs");
+
+        chip.write(make_addr(0x00, 0x2200), 0x00); // release
+        chip.step_coproc(2_000, 0);
+        assert!(chip.cpu.pc > pc_running, "released: it runs again");
     }
 
     #[test]
