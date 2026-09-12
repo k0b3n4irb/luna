@@ -45,6 +45,12 @@ All notable user-facing changes to luna. Releases are cut from `main`
   timer keeps running. luna ran straight through it.
 - **SA-1 ROM is mirrored** for carts smaller than the 4 MB the super-MMC
   addresses, instead of reading open bus past the end.
+- **The GUI stops freezing the picture at a scene cut.** It held the last
+  frame across up to 8 consecutive forced-blank frames before showing
+  black; Kirby Super Star blanks for 31 frames before its intro's star
+  transition, so the display sat on a stale picture for ~130 ms and only
+  then went black — read as a stutter. The hold is 2 frames now (~33 ms),
+  which still absorbs the isolated blank frame it exists for.
 
 ### Changed
 - Three regression baselines re-recorded: two PeterLemon PPU demos and one
