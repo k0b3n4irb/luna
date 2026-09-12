@@ -81,6 +81,17 @@ All notable user-facing changes to luna. Releases are cut from `main`
   GUI — which muted panics on the UI, audio and windowing threads almost
   all of the time, and could leave the silent hook installed for good if
   two threads stepped at once.
+- **`--power-on random` now randomises the PPU's registers, latches and
+  both chip MDRs**, not only RAM — the second half of issue #224, ported
+  from ares `PPU::power`. Overscan, interlace and BGMODE still come up
+  clear, as ares sets them explicitly, and a seed still reproduces the
+  exact machine. `zero` and `ones` leave the registers deterministic.
+- **DMA channel registers power up at `$FF`** in every mode, and a reset
+  restores them, as both references do (ares `cpu.hpp:217-251`, Mesen2's
+  constructor); `$420B` / `$420C` still come up clear. A game reading
+  `$43xx` before writing it saw zero. Note for ROM authors: a transfer
+  count must now be written in full — leaving the high byte of `$43x5`
+  alone asks for `$FFxx` bytes, exactly as on hardware.
 
 ### Changed
 - Three regression baselines re-recorded: two PeterLemon PPU demos and one
