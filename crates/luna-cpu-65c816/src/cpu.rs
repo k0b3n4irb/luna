@@ -110,6 +110,10 @@ impl Cpu {
     }
 
     /// Start capturing `WDM` (`$42`) executions (operand + PC). Idempotent.
+    /// Event ceiling for [`Cpu::wdm_log`] — see `DEBUG_LOG_MAX_EVENTS` in
+    /// `luna-core` for the same rule on the mailbox / SA-1 logs.
+    pub const WDM_LOG_MAX_EVENTS: usize = 1 << 20;
+
     /// See [`Cpu::wdm_log`].
     pub fn enable_wdm_log(&mut self) {
         if self.wdm_log.is_none() {
