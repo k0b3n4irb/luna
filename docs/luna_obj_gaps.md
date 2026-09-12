@@ -130,6 +130,29 @@ PPU) and the 3 smoke screenshots were re-recorded and eyeballed.
 
 ---
 
+## ✅ 6. `$2104` / `$2138` during the active display — FIXED 2026-09-12
+
+Hardware does not drop these accesses: the OAM address bus belongs to
+sprite evaluation, so they land at the **sprite being evaluated** — ares
+`io.cpp:31-45` (`0x000 | latch.oamAddress << 2 | address & 1` for the low
+table, `0x200 | latch.oamAddress >> 2` for the high one), Mesen2
+`SnesPpu.cpp:1916-1948`, whose comment names Uniracers as the dependent
+title. luna dropped the byte and only advanced the counter.
+
+`Ppu::obj_eval_latch` ports the ares latch: evaluation walks one sprite
+every 8 master clocks (`obj.evaluate(hcounter() >> 3)`, i.e. one per 2
+dots) from `firstSprite`, and latches each index that is on the line,
+stopping after 32 items. Tests
+`obj_eval_latch_follows_the_line_evaluation`,
+`oam_write_during_render_redirects_to_the_evaluated_sprite`,
+`oam_read_during_render_reads_the_evaluated_sprite`.
+
+Divergence noted in the code: Mesen2 also mirrors the write into the high
+table and switches to the tile-fetch index past dot 255; ares does
+neither, and luna follows ares.
+
+---
+
 ## 🟡 Precision / rare
 
 | # | Issue | refs | status |
