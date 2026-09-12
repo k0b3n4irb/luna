@@ -4,10 +4,12 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.19.0] — 2026-09-12
 
-Lot 1 of the 2026-09-11 audit against ares and Mesen2: short, verified
-fixes, each with a regression test.
+The audit release: the 2026-09-11 review of every subsystem against ares
+and Mesen2 turned into eleven faithful-port fixes, each with a regression
+test — including the one a player sees, a strip of stray pixels along the
+bottom edge of the picture.
 
 ### Fixed
 - **Cartridge detection**: the map mode byte counts only when it is one of
