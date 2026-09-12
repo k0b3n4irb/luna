@@ -1557,9 +1557,13 @@ impl LunaServer {
         &self,
         Parameters(params): Parameters<StepParams>,
     ) -> Result<rmcp::Json<StepResult>, ErrorData> {
+        // Interruptible like `run`: a long `step` used to hold the emulator
+        // lock to the end, so `pause` could neither stop it nor be served.
+        self.interrupt.store(false, Ordering::Relaxed);
         let executed = {
             let mut em = self.emulator.lock().await;
-            em.step(params.count).map_err(|e| api_err_to_mcp(&e))?
+            em.step_interruptible(params.count, &self.interrupt)
+                .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(StepResult { executed }))
     }
@@ -2745,6 +2749,12 @@ impl LunaServer {
         Parameters(params): Parameters<RunParams>,
     ) -> Result<rmcp::Json<RunUntilBreakResult>, ErrorData> {
         let max_steps = params.max_steps.unwrap_or(u64::MAX);
+        // Clear the pause flag BEFORE queueing for the lock: a raise that
+        // lands from here on belongs to this run. Clearing it after the
+        // wait (which is what the API used to do) threw away a `pause`
+        // sent while an earlier tool still held the emulator, and the run
+        // then went the whole way with `interrupted: false`.
+        self.interrupt.store(false, Ordering::Relaxed);
         let out = {
             let mut em = self.emulator.lock().await;
             em.run_until_break_interruptible(max_steps, &self.interrupt)

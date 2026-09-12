@@ -929,6 +929,45 @@ impl InputCapture {
     }
 }
 
+/// Silence panic output on THIS thread while the guard lives.
+///
+/// A core panic inside `step` is caught and turned into an error, so its
+/// default message would be noise. luna used to do that by swapping the
+/// process-wide hook around every stepping call — about 1700 times a
+/// second from the GUI — which silenced panics on the UI, audio and
+/// windowing threads almost all of the time, and could leave the silent
+/// hook installed for good if two threads stepped at once. The hook is now
+/// installed once and consults a thread-local flag.
+struct QuietPanics;
+
+thread_local! {
+    static PANICS_QUIET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+static QUIET_HOOK: std::sync::Once = std::sync::Once::new();
+
+impl QuietPanics {
+    fn new() -> Self {
+        QUIET_HOOK.call_once(|| {
+            let previous = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                if PANICS_QUIET.with(std::cell::Cell::get) {
+                    return;
+                }
+                previous(info);
+            }));
+        });
+        PANICS_QUIET.with(|q| q.set(true));
+        Self
+    }
+}
+
+impl Drop for QuietPanics {
+    fn drop(&mut self) {
+        PANICS_QUIET.with(|q| q.set(false));
+    }
+}
+
 /// The public emulator handle. Owns at most one cartridge + Snes
 /// machine at a time.
 pub struct Emulator {
@@ -1395,16 +1434,38 @@ impl Emulator {
     /// Step the CPU `count` instructions (or stop early if the CPU
     /// halts or panics). Returns the number actually executed.
     pub fn step(&mut self, count: u64) -> Result<u64, ApiError> {
+        self.step_interruptible(count, &std::sync::atomic::AtomicBool::new(false))
+    }
+
+    /// Like [`Self::step`], but an external `interrupt` flag ends the run
+    /// early — the same escape hatch [`Self::run_until_break_interruptible`]
+    /// offers. A long `step` used to be unstoppable: an MCP session that
+    /// asked for millions of instructions could not be paused, and every
+    /// other tool waited behind the emulator lock until it finished.
+    ///
+    /// The flag is **not** cleared here: its owner decides when a raise
+    /// stops counting, so a pause sent while this call was still queued
+    /// behind the lock is honoured rather than wiped.
+    pub fn step_interruptible(
+        &mut self,
+        count: u64,
+        interrupt: &std::sync::atomic::AtomicBool,
+    ) -> Result<u64, ApiError> {
+        use std::sync::atomic::Ordering;
         let freezes = self.freezes.clone();
         let mut cstack = self.call_stack.take();
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         let mut last_frame = snes.frame_count;
         let mut executed = 0u64;
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        let _quiet = QuietPanics::new();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             while executed < count {
                 if snes.cpu.stopped {
+                    break;
+                }
+                // Same cadence as the interruptible run: cheap enough to be
+                // invisible, responsive enough to stop within microseconds.
+                if executed & 0xFFF == 0 && interrupt.load(Ordering::Relaxed) {
                     break;
                 }
                 let pre = cstack.as_ref().map(|_| Self::call_track_pre(snes));
@@ -1417,7 +1478,6 @@ impl Emulator {
             }
             executed
         }));
-        std::panic::set_hook(prev_hook);
         self.call_stack = cstack;
         match result {
             Ok(n) => {
@@ -1441,8 +1501,7 @@ impl Emulator {
         let start_frame = snes.frame_count;
         let mut last_frame = start_frame;
         let mut executed = 0u64;
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        let _quiet = QuietPanics::new();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             while executed < max_steps && !snes.cpu.stopped && snes.frame_count == start_frame {
                 let pre = cstack.as_ref().map(|_| Self::call_track_pre(snes));
@@ -1455,7 +1514,6 @@ impl Emulator {
             }
             executed
         }));
-        std::panic::set_hook(prev_hook);
         self.call_stack = cstack;
         match result {
             Ok(n) => {
@@ -1484,8 +1542,7 @@ impl Emulator {
         let mut last_frame = snes.frame_count;
         let mut seen = std::collections::HashSet::new();
         let mut executed = 0u64;
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        let _quiet = QuietPanics::new();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             while executed < max_steps && !snes.cpu.stopped {
                 seen.insert((u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc));
@@ -1498,7 +1555,6 @@ impl Emulator {
                 Self::apply_freezes_on_frame_edge(snes, &freezes, &mut last_frame);
             }
         }));
-        std::panic::set_hook(prev_hook);
         self.call_stack = cstack;
         self.instructions_executed += executed;
         result.map_err(|p| ApiError::Panic(panic_message(&p)))?;
@@ -2526,8 +2582,14 @@ impl Emulator {
             return Ok(Vec::new());
         }
         let wram = &snes.wram[..];
+        // A pattern longer than WRAM can never match — and the naive
+        // `0..=len - pattern` range would index past the end (an MCP caller
+        // passing 128 KB + 1 bytes panicked the request handler).
+        if pattern.len() > wram.len() {
+            return Ok(Vec::new());
+        }
         let mut hits = Vec::new();
-        for i in 0..=wram.len().saturating_sub(pattern.len()) {
+        for i in 0..=wram.len() - pattern.len() {
             if &wram[i..i + pattern.len()] == pattern {
                 hits.push(Self::wram_offset_to_addr(i));
             }
@@ -2639,8 +2701,7 @@ impl Emulator {
     /// returns immediately). Panic-safe (a crashing ROM returns `Err`).
     pub fn run_until_pc(&mut self, pc: u32, max_steps: u64) -> Result<bool, ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        let _quiet = QuietPanics::new();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             for _ in 0..max_steps {
                 let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
@@ -2652,7 +2713,6 @@ impl Emulator {
             let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
             cur == pc
         }));
-        std::panic::set_hook(prev_hook);
         match result {
             Ok(hit) => Ok(hit),
             Err(payload) => Err(ApiError::Panic(panic_message(&payload))),
@@ -2861,8 +2921,10 @@ impl Emulator {
         interrupt: &std::sync::atomic::AtomicBool,
     ) -> Result<RunOutcome, ApiError> {
         use std::sync::atomic::Ordering;
-        // Clear any stale raise so this run isn't stopped by a previous pause.
-        interrupt.store(false, Ordering::Relaxed);
+        // The flag is the CALLER's: clearing it here wiped a pause that had
+        // been raised while this call was still waiting for the emulator
+        // lock, so the run then ignored it and could not be stopped at all.
+        // Owners clear it when a request starts, before taking the lock.
         let freezes = self.freezes.clone();
         let mut cstack = self.call_stack.take();
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
@@ -2871,8 +2933,7 @@ impl Emulator {
             bp.take_pending(); // discard stale
         }
         let mut executed = 0u64;
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        let _quiet = QuietPanics::new();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             for i in 0..max_steps {
                 if snes.cpu.stopped {
@@ -2919,7 +2980,6 @@ impl Emulator {
                 interrupted: false,
             }
         }));
-        std::panic::set_hook(prev_hook);
         match result {
             Ok(out) => {
                 self.instructions_executed += out.steps;
@@ -4083,11 +4143,20 @@ mod tests {
     #[test]
     fn run_until_mem_write_fires_on_a_dma_write_and_the_trace_says_dma() {
         // Channel 0: 4 bytes from $7E:2000 to $2122, triggered by $420B —
-        // no CPU instruction ever writes $2122 (issue #226).
+        // no CPU instruction ever writes $2122 (issue #226). Both DAS bytes
+        // are written, as a real game must: the channel registers power up
+        // at $FF (issue #224's second lot), so leaving $4306 alone would
+        // ask for $FF04 bytes.
         let code = [
-            0xA9, 0x22, 0x8D, 0x01, 0x43, 0xA9, 0x00, 0x8D, 0x02, 0x43, 0xA9, 0x20, 0x8D, 0x03,
-            0x43, 0xA9, 0x7E, 0x8D, 0x04, 0x43, 0xA9, 0x04, 0x8D, 0x05, 0x43, 0xA9, 0x00, 0x8D,
-            0x00, 0x43, 0xA9, 0x01, 0x8D, 0x0B, 0x42, 0xDB,
+            0xA9, 0x22, 0x8D, 0x01, 0x43, // LDA #$22 : STA $4301
+            0xA9, 0x00, 0x8D, 0x02, 0x43, // LDA #$00 : STA $4302
+            0xA9, 0x20, 0x8D, 0x03, 0x43, // LDA #$20 : STA $4303
+            0xA9, 0x7E, 0x8D, 0x04, 0x43, // LDA #$7E : STA $4304
+            0xA9, 0x04, 0x8D, 0x05, 0x43, // LDA #$04 : STA $4305 (DAS low)
+            0xA9, 0x00, 0x8D, 0x06, 0x43, // LDA #$00 : STA $4306 (DAS high)
+            0xA9, 0x00, 0x8D, 0x00, 0x43, // LDA #$00 : STA $4300
+            0xA9, 0x01, 0x8D, 0x0B, 0x42, // LDA #$01 : STA $420B
+            0xDB, // STP
         ];
         let mut e = Emulator::new();
         e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
@@ -4823,6 +4892,36 @@ mod tests {
             h1,
             std::hash::Hasher::finish(&ref_h),
             "hashes the displayed RGB"
+        );
+    }
+
+    #[test]
+    fn hostile_tool_arguments_do_not_panic() {
+        // Both of these used to abort the request handler outright: the
+        // palette size overflowed its byte count to zero and then indexed
+        // an empty buffer, and a search pattern longer than WRAM indexed
+        // past the end of the slice.
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).expect("load");
+        let png = e.render_palette_png(4096).expect("huge cell is clamped");
+        assert!(!png.is_empty());
+        let huge = vec![0u8; 0x2_0001];
+        assert!(
+            e.search_memory(&huge).expect("no panic").is_empty(),
+            "a pattern larger than WRAM matches nothing"
+        );
+    }
+
+    #[test]
+    fn a_raised_interrupt_stops_a_long_step() {
+        use std::sync::atomic::AtomicBool;
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).expect("load");
+        let flag = AtomicBool::new(true); // already raised, as a queued pause is
+        let executed = e.step_interruptible(50_000_000, &flag).expect("step");
+        assert!(
+            executed < 50_000_000,
+            "a pause raised before the call must still stop it (ran {executed})"
         );
     }
 

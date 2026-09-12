@@ -671,11 +671,6 @@ pub(crate) fn render_scanline_partial_into_from(
             coldata_bgr5
         };
 
-        let rgb5 = if layer_enabled_for_math {
-            color_math(main.bgr5, math_operand, subtract, half)
-        } else {
-            main.bgr5
-        };
         // CGWSEL bits 7:6 — force-main-black region. Per ares
         // (window.cpp:36-38 + dac.cpp:120-122) and Mesen2
         // (SnesPpuTypes.h:13-19 + SnesPpu.cpp:1307-1326), value 1 =
@@ -686,7 +681,30 @@ pub(crate) fn render_scanline_partial_into_from(
             2 => in_math_window,
             _ => true,
         };
-        let main_bgr5 = if force_black { (0, 0, 0) } else { rgb5 };
+        // Clipping happens BEFORE the math, not after it: ares
+        // `dac.cpp:121-133` feeds the blend
+        // `math.above.colorEnable ? math.above.color : 0` and computes
+        // `math.colorHalve = io.colorHalve && math.above.colorEnable`, so a
+        // clipped pixel contributes black to the sum AND turns halving off.
+        // Mesen2 `SnesPpu.cpp:1307-1326` zeroes `pixelA` and its
+        // `halfShift` the same way; anomie: "clip … to black (before math
+        // … the only difference is that half math will not occur)".
+        // Applying the clip afterwards turned every clipped pixel solid
+        // black, hiding the sub screen or the fixed colour an addition
+        // should still show.
+        //
+        // The references differ on one case: with CGWSEL 7:6 = 3 ("always
+        // clip") Mesen2 zeroes the main colour but KEEPS halving
+        // (`SnesPpu.cpp:1325`), while ares drops halving for every clipped
+        // pixel because it gates on the same `above.colorEnable`. luna
+        // follows ares.
+        let main_operand = if force_black { (0, 0, 0) } else { main.bgr5 };
+        let half = half && !force_black;
+        let main_bgr5 = if layer_enabled_for_math {
+            color_math(main_operand, math_operand, subtract, half)
+        } else {
+            main_operand
+        };
 
         // Hi-res / pseudo-hires: the dot's left subpixel is the sub-
         // screen winner (`sub`), the right is the main-screen result.
@@ -1691,6 +1709,35 @@ pub(crate) struct SpriteEval {
     pub(crate) time_over: bool,
 }
 
+/// ares `latch.oamAddress`: the sprite index object evaluation last found
+/// **on** the scanline, as of dot `dot` of the line it is evaluating.
+///
+/// ares walks one sprite every 8 master clocks (one per 2 dots) in
+/// `main.cpp`'s `cycleObjectEvaluate`, and latches the index whenever the
+/// sprite is on the line (`object.cpp:44`). The CPU sees that latch
+/// through `$2104` and `$2138` while the picture is being drawn.
+/// Evaluation stops after 32 items, so the latch then stays put for the
+/// rest of the line.
+pub(crate) fn obj_eval_latch(ppu: &Ppu, sprites: &[SpriteEntry; 128], y: u16, dot: u16) -> u8 {
+    let first = usize::from(ppu.oam.first_sprite());
+    let interlace = ppu.setini & 0x02 != 0;
+    let last_index = usize::from(dot >> 1).min(127);
+    let mut item_count = 0usize;
+    let mut latch = 0u8;
+    for index in 0..=last_index {
+        if item_count > 32 {
+            break;
+        }
+        let sprite = (first + index) & 0x7F;
+        if !sprite_on_line(&sprites[sprite], y, interlace) {
+            continue;
+        }
+        latch = sprite as u8;
+        item_count += 1;
+    }
+    latch
+}
+
 /// Evaluate one scanline's sprites: the 32-sprite range limit and the
 /// 34-tile time limit, starting from `firstSprite` (OAM priority
 /// rotation). ares `object.cpp:35-49,91-161`, Mesen2
@@ -2249,11 +2296,23 @@ pub fn render_vram_tiles(ppu: &Ppu, bpp: u8, palette_row: u8) -> TilemapImage {
     }
 }
 
+/// Largest swatch size [`render_cgram_palette`] accepts: a 16×16 grid at
+/// 256 px per swatch is a 4096×4096 image (64 MB of RGBA), which is
+/// already far past useful for a palette viewer.
+pub(crate) const MAX_PALETTE_CELL: u32 = 256;
+
 /// Render the 256-colour CGRAM as a 16×16 swatch grid, each swatch
-/// `cell` px square (clamped to ≥ 1). Index 0 is top-left.
+/// `cell` px square. Index 0 is top-left.
+///
+/// `cell` is clamped to the range 1 to [`MAX_PALETTE_CELL`]: a caller-supplied size
+/// is untrusted (it arrives straight from an MCP tool argument), and at
+/// `cell = 4096` the `16 * cell * 16 * cell * 4` byte count overflowed
+/// `u32` to zero, so the swatch loop then indexed an empty buffer and
+/// panicked. Even without the overflow, four digits of `cell` ask for
+/// gigabytes.
 #[must_use]
 pub fn render_cgram_palette(ppu: &Ppu, cell: u32) -> TilemapImage {
-    let cell = cell.max(1);
+    let cell = cell.clamp(1, MAX_PALETTE_CELL);
     let width = 16 * cell;
     let height = 16 * cell;
     let mut rgba = vec![0u8; (width * height * 4) as usize];
@@ -2829,6 +2888,33 @@ mod tests {
     }
 
     #[test]
+    fn obj_eval_latch_follows_the_line_evaluation() {
+        // ares walks one sprite per 2 dots from `firstSprite` and latches
+        // every index that is ON the line (`object.cpp:44`). Park all
+        // sprites off-line except 3 and 10, both on line 0.
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F);
+        for i in 0..128u16 {
+            p.oam.poke(i * 4 + 1, 200); // y = 200: off line 0
+        }
+        p.oam.poke(3 * 4 + 1, 0); // sprite 3 on line 0
+        p.oam.poke(10 * 4 + 1, 0); // sprite 10 on line 0
+        let sprites = decode_all_sprites(&p);
+        // Before sprite 3 is reached (index 3 → dot 6) nothing is latched.
+        assert_eq!(obj_eval_latch(&p, &sprites, 0, 4), 0);
+        assert_eq!(obj_eval_latch(&p, &sprites, 0, 6), 3, "sprite 3 latched");
+        assert_eq!(obj_eval_latch(&p, &sprites, 0, 18), 3, "still 3 until 10");
+        assert_eq!(obj_eval_latch(&p, &sprites, 0, 20), 10, "sprite 10 latched");
+        assert_eq!(
+            obj_eval_latch(&p, &sprites, 0, 255),
+            10,
+            "holds to line end"
+        );
+        // A line with no sprites on it never latches.
+        assert_eq!(obj_eval_latch(&p, &sprites, 100, 255), 0);
+    }
+
+    #[test]
     fn oam_priority_rotation_changes_winner() {
         // Two overlapping sprites at x=0. Normally sprite 0 (front)
         // wins; with OAM priority rotation starting at sprite 1, sprite
@@ -3040,6 +3126,42 @@ mod tests {
             "blue should rise: baseline {:?} with_math {:?}",
             baseline[0],
             with_math[0],
+        );
+    }
+
+    #[test]
+    fn clip_to_black_runs_before_the_math_not_after() {
+        // CGWSEL bits 7:6 = 3 ("always clip"): the main colour becomes
+        // black BEFORE the math (ares dac.cpp:121-133), so an addition
+        // against the fixed colour must still show that fixed colour —
+        // clipping after the math would leave solid black.
+        let mut p = setup_demo_tile();
+        p.write(register::BGMODE, 0x01);
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::CGADSUB, 0x01); // add, BG1, no half
+        p.write(register::COLDATA, 0x9F); // fixed colour: blue = max
+        p.write(register::CGWSEL, 0xC0); // clip main to black everywhere
+        let clipped = render_frame_with(&p, RenderOptions::default());
+        assert!(
+            clipped[0][2] > 0,
+            "the fixed colour must survive the clip: got {:?}",
+            clipped[0]
+        );
+        assert_eq!(
+            (clipped[0][0], clipped[0][1]),
+            (0, 0),
+            "only the operand remains: {:?}",
+            clipped[0]
+        );
+
+        // Half-math is turned off by the clip too (ares: `colorHalve =
+        // io.colorHalve && math.above.colorEnable`), so the same dot with
+        // CGADSUB's half bit set must not be halved.
+        p.write(register::CGADSUB, 0x41); // add, BG1, half
+        let clipped_half = render_frame_with(&p, RenderOptions::default());
+        assert_eq!(
+            clipped_half[0], clipped[0],
+            "clipped pixels ignore the half bit"
         );
     }
 

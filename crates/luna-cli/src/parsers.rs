@@ -111,6 +111,12 @@ pub(crate) fn parse_peek_spec(spec: &str) -> Result<(u8, u16, u16), String> {
 /// Parse an even-length hex string (no `0x`) into bytes.
 pub(crate) fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, String> {
     let s = s.trim();
+    // Slicing by byte index panics mid-character on anything multi-byte, so
+    // reject non-ASCII before touching the string (`--assert '7E:0000=aéb'`
+    // used to abort the process with a slice-boundary panic).
+    if !s.is_ascii() {
+        return Err(format!("expected ASCII hex digits, got `{s}`"));
+    }
     if s.is_empty() || !s.len().is_multiple_of(2) {
         return Err(format!("expected an even-length hex value, got `{s}`"));
     }

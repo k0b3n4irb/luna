@@ -8,7 +8,7 @@
 use crate::memory::{Cgram, Oam, VmainSettings, Vram};
 use crate::renderer::{
     FRAME_H, FRAME_W, RenderOptions, SpriteEntry, SpriteEval, decode_all_sprites,
-    evaluate_sprite_line, render_scanline_partial_into_from,
+    evaluate_sprite_line, obj_eval_latch, render_scanline_partial_into_from,
 };
 // `render_scanline_into` is no longer used directly here — full-line
 // renders go through `flush_partial_scanline`.
@@ -420,6 +420,11 @@ pub struct Ppu {
     /// the address/latch counter still advances. ares ppu_io.cpp:19-45,
     /// Mesen2 SnesPpu.cpp:2046-2057 (`CanAccessVram`).
     pub active_display: bool,
+    /// PPU line the scheduler is currently drawing — the line object
+    /// evaluation is working on (see [`Self::obj_eval_latch`]). Updated by
+    /// the per-line render entry points.
+    #[serde(default)]
+    pub current_line: u16,
 
     /// Accumulator: set `true` whenever a *visible* scanline is rendered
     /// with forced-blank OFF during the current frame. Snapshotted into
@@ -523,6 +528,7 @@ impl Ppu {
             // Post-reset state is forced-blanked (INIDISP=$80), so
             // active_display starts false.
             active_display: false,
+            current_line: 0,
             // Post-reset: nothing displayed yet.
             frame_visible_content_accum: false,
             frame_visible_content: false,
@@ -539,6 +545,16 @@ impl Ppu {
         self.frame_visible_content_accum = false;
     }
 
+    /// ares `latch.oamAddress` for the line being drawn right now: the
+    /// sprite object evaluation last found on it, as far as this line has
+    /// progressed. `$2104` / `$2138` accesses land there while the picture
+    /// is being drawn (see `Oam::write_during_render`).
+    #[must_use]
+    pub fn obj_eval_latch(&self) -> u8 {
+        let sprites = decode_all_sprites(self);
+        obj_eval_latch(self, &sprites, self.current_line, self.last_flushed_dot)
+    }
+
     /// Render the current visible scanline `y` into the persistent
     /// framebuffer, using the live PPU register state. Called by the
     /// scheduler at the end of every visible scanline (gap G6 Phase 1).
@@ -547,6 +563,7 @@ impl Ppu {
     /// `last_flushed_dot..FRAME_W` and resets the partial-flush cursor.
     /// Out-of-range `y` (≥ `FRAME_H`) is a no-op.
     pub fn render_current_scanline(&mut self, y: u16, opts: RenderOptions) {
+        self.current_line = y;
         // OBJ range/time-over flags accumulate over the frame and clear
         // at its start (ares object.cpp:11-14). Evaluate per line and OR
         // in; the renderer applies the matching 32/34 drop.
@@ -609,6 +626,7 @@ impl Ppu {
     /// segment. The cache is `take`n into a local for the render so the
     /// interlace path can still mutate `self.field`, then restored.
     fn flush_partial_scanline_inner(&mut self, y: u16, end_x: u16, opts: RenderOptions) {
+        self.current_line = y;
         // Hardware line origin (gap #7, proven by the HiColor charts vs
         // the hardware references + a Mesen2 capture): the displayed
         // picture is PPU lines 1..=224, and the content the PPU computes
@@ -764,15 +782,20 @@ impl Ppu {
                 self.ppu1_mdr
             }
             register::OAMDATAREAD => {
-                self.ppu1_mdr = self.oam.read();
+                self.ppu1_mdr = if self.active_display {
+                    let latch = self.obj_eval_latch();
+                    self.oam.read_during_render(latch)
+                } else {
+                    self.oam.read()
+                };
                 self.ppu1_mdr
             }
             register::VMDATALREAD => {
-                self.ppu1_mdr = self.vram.read_lo();
+                self.ppu1_mdr = self.vram.read_lo_gated(!self.active_display);
                 self.ppu1_mdr
             }
             register::VMDATAHREAD => {
-                self.ppu1_mdr = self.vram.read_hi();
+                self.ppu1_mdr = self.vram.read_hi_gated(!self.active_display);
                 self.ppu1_mdr
             }
             register::CGDATAREAD => {
@@ -983,7 +1006,16 @@ impl Ppu {
             register::OBSEL => self.obsel = value,
             register::OAMADDL => self.oam.set_address_low(value),
             register::OAMADDH => self.oam.set_address_high(value),
-            register::OAMDATA => self.oam.write_gated(value, !self.active_display),
+            register::OAMDATA => {
+                // Hardware redirects the write to the sprite evaluation is
+                // looking at rather than dropping it (ares `io.cpp:39-45`).
+                if self.active_display {
+                    let latch = self.obj_eval_latch();
+                    self.oam.write_during_render(value, latch);
+                } else {
+                    self.oam.write(value);
+                }
+            }
             register::BGMODE => self.bgmode = value,
             register::MOSAIC => self.mosaic = value,
             register::BG1SC => self.set_bg_tilemap(0, value),
@@ -1038,11 +1070,11 @@ impl Ppu {
             register::VMAIN => self.vram.vmain = VmainSettings::from_byte(value),
             register::VMADDL => {
                 let hi = (self.vram.address >> 8) as u8;
-                self.vram.set_address(value, hi);
+                self.vram.set_address_gated(value, hi, !self.active_display);
             }
             register::VMADDH => {
                 let lo = self.vram.address as u8;
-                self.vram.set_address(lo, value);
+                self.vram.set_address_gated(lo, value, !self.active_display);
             }
             register::VMDATAL => self.vram.write_lo_gated(value, !self.active_display),
             register::VMDATAH => self.vram.write_hi_gated(value, !self.active_display),

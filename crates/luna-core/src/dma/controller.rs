@@ -104,6 +104,16 @@ impl Dma {
     pub fn new() -> Self {
         Self::default()
     }
+    /// The controller as it comes up at power-on: every channel register
+    /// reads `$FF` (see [`DmaChannel::power_on`]), `$420B` / `$420C`
+    /// clear.
+    #[must_use]
+    pub fn power_on() -> Self {
+        Self {
+            channels: std::array::from_fn(|_| DmaChannel::power_on()),
+            ..Self::new()
+        }
+    }
 
     /// Enable the DMA→VRAM transfer-time trace, capped at `max_events`.
     pub fn enable_dma_trace(&mut self, max_events: usize) {

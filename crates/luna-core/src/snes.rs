@@ -23,7 +23,7 @@ use luna_ppu::Ppu;
 use crate::coproc::{Dsp1Mapper, Sa1Chip};
 use crate::dma::{Dma, DmaBus, DmaTraceEvent, DmaTraceLog, HDMA_CHANNEL_FLAG};
 use crate::mclk::{MclkAccounting, MclkKind};
-use crate::power::PowerOnState;
+use crate::power::{PowerOnRng, PowerOnState};
 
 /// `serde` helper for a heap-boxed fixed byte array (`Box<[u8; N]>`),
 /// which `serde_bytes` does not cover directly. Used for the 128 KB WRAM.
@@ -666,15 +666,21 @@ pub const fn scanlines_per_frame(region: luna_cartridge::Region) -> u16 {
     }
 }
 
-/// Scanline on which `VBlank` starts for the given region (the line
-/// the scheduler latches the NMI flag, sets HVBJOY.7, and — if
-/// NMITIMEN.7 is on — triggers an NMI).
+/// Scanline on which `VBlank` starts — the line the scheduler latches the
+/// NMI flag, sets HVBJOY.7 and, if NMITIMEN.7 is on, triggers an NMI. It
+/// is the PPU's `vdisp`, and it depends on **overscan only** (SETINI
+/// `$2133` bit 2), never on the region: ares `ppu/io.cpp:641`
+/// (`state.vdisp = !io.overscan ? 225 : 240`) and Mesen2
+/// `SnesPpu.cpp:559` both compute it without looking at the console.
+/// PAL differs only in its taller frame (312 lines, all the extra ones
+/// inside `VBlank`).
 #[inline]
 #[must_use]
-pub const fn vblank_start_line(region: luna_cartridge::Region) -> u16 {
-    match region {
-        luna_cartridge::Region::Pal => PAL_VBLANK_START_LINE,
-        _ => NTSC_VBLANK_START_LINE,
+pub const fn vblank_start_line(overscan: bool) -> u16 {
+    if overscan {
+        OVERSCAN_VBLANK_START_LINE
+    } else {
+        VBLANK_START_LINE
     }
 }
 /// A powered-on APU whose CPU→SPC clock ratio matches `region`'s master
@@ -692,14 +698,17 @@ fn apu_for_region(region: luna_cartridge::Region) -> Apu {
 pub const NTSC_SCANLINES_PER_FRAME: u16 = 262;
 /// Total scanlines per PAL frame.
 pub const PAL_SCANLINES_PER_FRAME: u16 = 312;
-/// Scanline on which `VBlank` begins on NTSC. The PPU writes the
+/// Scanline on which `VBlank` begins without overscan. The PPU writes the
 /// `$4210` "NMI flag" bit and (if `NMITIMEN.7` is set) raises the NMI
-/// pin at the start of this line.
-pub const NTSC_VBLANK_START_LINE: u16 = 225;
-/// PAL is identical except it has more total scanlines, all of which
-/// fall inside `VBlank` — the visible region is still 224 lines (or
-/// 239 with overscan, which we don't model yet).
-pub const PAL_VBLANK_START_LINE: u16 = 240;
+/// pin at the start of this line. Same in both regions.
+pub const VBLANK_START_LINE: u16 = 225;
+/// Scanline on which `VBlank` begins with overscan (SETINI bit 2): the
+/// picture is 15 lines taller, so `VBlank` starts that much later and is
+/// that much shorter. luna's framebuffer still stores the first 224 rows
+/// — the extra picture lines are not displayed yet, but every timing
+/// consumer (NMI, HVBJOY, HDMA, the VRAM/OAM access gate) follows the
+/// hardware line.
+pub const OVERSCAN_VBLANK_START_LINE: u16 = 240;
 
 /// The cartridge's mapper needs a coprocessor luna does not yet
 /// emulate (S-DD1, SPC7110). Returned by [`Snes::try_from_cartridge`]
@@ -757,6 +766,60 @@ impl Snes {
         }
         power_on.fill(self.ppu.oam.raw_mut(), &mut rng);
         power_on.fill(&mut self.apu_real.aram[..], &mut rng);
+        if power_on.randomises_registers() {
+            Self::randomise_power_on_registers(&mut self.ppu, &mut rng);
+        }
+    }
+
+    /// Randomise the registers and latches that come up undefined on
+    /// hardware — the second half of issue #224, ported from ares
+    /// `PPU::power` (`ppu.cpp`), which draws each of these from its own
+    /// `random()` on power and leaves them alone on reset.
+    ///
+    /// Only the fields ares randomises are touched, in its order: the two
+    /// chip MDRs, the OAM address trio, the Mode 7 latch and its six
+    /// matrix registers, VMAIN and the VRAM address, CGADD and its latch,
+    /// M7SEL's three flags, and SETINI's EXTBG / pseudo-hires bits.
+    /// INIDISP stays forced-blank at brightness 0 and BGMODE stays 0, as
+    /// ares sets them explicitly.
+    ///
+    /// DMA channel registers are NOT randomised: both references power
+    /// them up at `$FF` (ares `cpu.hpp:217-251`, Mesen2's constructor) and
+    /// `$420C` at `$00` (anomie-regs), which is what
+    /// [`Dma::power_on_defaults`] applies for every power-on state.
+    fn randomise_power_on_registers(ppu: &mut Ppu, rng: &mut PowerOnRng) {
+        ppu.ppu1_mdr = rng.next_u8();
+        ppu.ppu2_mdr = rng.next_u8();
+
+        // $2102/$2103 OAMADD: base address (bit 0 clear), live address and
+        // the priority-rotation flag.
+        ppu.oam.word_address = rng.next_u16() & 0x01FF;
+        ppu.oam.address = rng.next_u16() & 0x03FF;
+        ppu.oam.priority_rotation = rng.next_bool();
+
+        // $2115 VMAIN: ares biases the increment mode towards 1 and
+        // randomises the remap field; the step stays 1.
+        let vmain = (u8::from(rng.next_bool()) << 7) | ((rng.next_u8() & 0x03) << 2);
+        ppu.write(luna_ppu::register::VMAIN, vmain);
+        // $2116/$2117 VMADD.
+        ppu.vram.address = rng.next_u16();
+
+        // $211A M7SEL (screen-over, V-flip, H-flip) and $211B-$2120.
+        ppu.m7sel = (rng.next_u8() & 0xC0) | (rng.next_u8() & 0x03);
+        ppu.m7a = rng.next_u16() as i16;
+        ppu.m7b = rng.next_u16() as i16;
+        ppu.m7c = rng.next_u16() as i16;
+        ppu.m7d = rng.next_u16() as i16;
+        ppu.m7x = rng.next_u16() as i16;
+        ppu.m7y = rng.next_u16() as i16;
+
+        // $2121 CGADD + its low/high latch.
+        ppu.cgram.address = rng.next_u8();
+        ppu.cgram.set_high_pending(rng.next_bool());
+
+        // $2133 SETINI: EXTBG and pseudo-hires are undefined; overscan and
+        // interlace come up clear.
+        ppu.setini = (u8::from(rng.next_bool()) << 6) | (u8::from(rng.next_bool()) << 3);
     }
 
     fn build(cart: Cartridge) -> Result<Self, UnsupportedMapper> {
@@ -820,7 +883,7 @@ impl Snes {
         Ok(Self {
             cpu: Cpu::new(),
             ppu,
-            dma: Dma::new(),
+            dma: Dma::power_on(),
             cpu_regs: CpuRegs::new(),
             wram: vec![0u8; 0x20000]
                 .into_boxed_slice()
@@ -1096,7 +1159,6 @@ impl Snes {
         //    SRAM persist across a reset (real hardware doesn't clear them).
         let scanlines = self.region_scanlines();
         let ppu_line_snapshot = self.ppu_line;
-        let vblank_start_snapshot = vblank_start_line(self.region);
         let cpu_pc_snapshot = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
         {
             let Self {
@@ -1148,7 +1210,6 @@ impl Snes {
                 frame_count: 0,
                 nmis_serviced: 0,
                 sched_enabled: false,
-                vblank_start_line: vblank_start_snapshot,
                 cpu_pc_full: cpu_pc_snapshot,
                 mailbox_log,
                 sa1_log,
@@ -1223,9 +1284,10 @@ impl Snes {
         // $420B/$420C clear on reset (ares `CPU::power` `channels[id] = {}`;
         // anomie-regs: HDMAEN "$00 on power on or reset"). Leaving HDMAEN set
         // kept HDMA firing from the previous run's stale tables during boot.
-        self.dma.mdmaen = 0;
-        self.dma.hdmaen = 0;
-        self.dma.mdma_cursor = None;
+        // ares `CPU::power(reset)` rebuilds every channel, so the `$43xx`
+        // registers return to their `$FF` power-on values along with
+        // `$420B` / `$420C` clearing.
+        self.dma = Dma::power_on();
 
         // 3. Charge the reset sequence — see `RESET_SEQUENCE_MCLK`. The PPU
         //    and APU run through it, so drive it via the scheduler rather than
@@ -1257,7 +1319,6 @@ impl Snes {
         }
         let scanlines = self.region_scanlines();
         let ppu_line_snapshot = self.ppu_line;
-        let vblank_start_snapshot = vblank_start_line(self.region);
         let cpu_pc_snapshot = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
         // Who this step's own clocks belong to (issue #223). A parked `WAI`
         // tick is idle time — unless an interrupt is pending, in which case
@@ -1330,7 +1391,6 @@ impl Snes {
                 frame_count: *frame_count,
                 nmis_serviced: *nmis_serviced,
                 sched_enabled: true,
-                vblank_start_line: vblank_start_snapshot,
                 cpu_pc_full: cpu_pc_snapshot,
                 mailbox_log,
                 sa1_log,
@@ -1433,7 +1493,6 @@ impl Snes {
         // The reset sequence is the CPU's own time (issue #223).
         self.mclk_acc.current = MclkKind::CpuActive;
         let ppu_line_snapshot = self.ppu_line;
-        let vblank_start_snapshot = vblank_start_line(self.region);
         let cpu_pc_snapshot = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
         let (rb_line, rb_mil, rb_fc, rb_ns);
         {
@@ -1488,7 +1547,6 @@ impl Snes {
                 frame_count: *frame_count,
                 nmis_serviced: *nmis_serviced,
                 sched_enabled: true,
-                vblank_start_line: vblank_start_snapshot,
                 cpu_pc_full: cpu_pc_snapshot,
                 mailbox_log,
                 sa1_log,
@@ -1554,7 +1612,6 @@ impl Snes {
         // handed the live line cursor — otherwise every peek would look like
         // it happened at H=0 (i.e. permanently in H-blank).
         let mcycles_in_line_snapshot = self.mcycles_in_line;
-        let vblank_start_snapshot = vblank_start_line(self.region);
         let cpu_pc_snapshot = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
         let Self {
             ppu,
@@ -1604,7 +1661,6 @@ impl Snes {
             frame_count: 0,
             nmis_serviced: 0,
             sched_enabled: false,
-            vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
             sa1_log,
@@ -1651,7 +1707,12 @@ impl Snes {
         let mut out = Vec::with_capacity(count);
         let mut unmapped = 0usize;
         for i in 0..count {
-            let off = offset.wrapping_add(i as u16);
+            // Walk the 24-bit address, so a range that runs off the end of a
+            // bank continues into the next one ($7E:FFFF → $7F:0000, the
+            // contiguous half of WRAM). Wrapping inside the bank silently
+            // re-read the bank's own start — a debugger range never means
+            // that.
+            let (bank, off) = next_debug_addr(bank, offset, i);
             let v = if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && off < 0x2000 {
                 // Low-RAM WRAM mirror.
                 self.wram[usize::from(off)]
@@ -1691,7 +1752,10 @@ impl Snes {
     pub fn dbg_poke_bytes(&mut self, bank: u8, offset: u16, data: &[u8]) -> usize {
         let mut written = 0;
         for (i, &b) in data.iter().enumerate() {
-            let off = offset.wrapping_add(i as u16);
+            // Same 24-bit walk as `dbg_peek_bytes_checked`: two bytes poked at
+            // $7E:FFFF used to land at $7E:FFFF and $7E:0000, clobbering the
+            // direct page instead of writing $7F:0000.
+            let (bank, off) = next_debug_addr(bank, offset, i);
             let idx = if matches!(bank, 0x7E..=0x7F) {
                 (usize::from(bank - 0x7E) << 16) | usize::from(off)
             } else if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && off < 0x2000 {
@@ -1704,6 +1768,22 @@ impl Snes {
         }
         written
     }
+}
+
+/// Event ceiling for the diagnostic ring-less logs (mailbox, SA-1 side).
+/// A log the caller forgets to drain must not grow until the process dies:
+/// the MCP server is long-running, and a game polling `$2140` produces
+/// millions of events per second. Past the cap events are dropped;
+/// `take_*` empties the buffer and logging resumes.
+pub const DEBUG_LOG_MAX_EVENTS: usize = 1 << 20;
+
+/// `bank:offset` advanced by `i` bytes through the flat 24-bit address
+/// space (it wraps at `$FF:FFFF`, as the bus does). Debug peeks and pokes
+/// walk memory, not a single bank.
+const fn next_debug_addr(bank: u8, offset: u16, i: usize) -> (u8, u16) {
+    let base = ((bank as u32) << 16) | offset as u32;
+    let addr = base.wrapping_add(i as u32) & 0x00FF_FFFF;
+    ((addr >> 16) as u8, addr as u16)
 }
 
 // =============================================================================
@@ -1779,7 +1859,7 @@ struct SnesBus<'a> {
     /// advance emulation.
     sched_enabled: bool,
     /// First vblank scanline for the current region (225 NTSC / 240 PAL).
-    vblank_start_line: u16,
+
     /// CPU PC snapshot at the start of the instruction step that owns
     /// this bus borrow. Used by the APU mailbox tracer (and any future
     /// debug hook) to attribute reads/writes to the calling
@@ -1800,6 +1880,19 @@ struct SnesBus<'a> {
 }
 
 impl SnesBus<'_> {
+    /// The PPU's live `vdisp`: the first `VBlank` scanline, 225 or — with
+    /// overscan armed in SETINI (`$2133` bit 2) — 240. ares recomputes it
+    /// on every `$2133` write (`updateVideoMode`, `io.cpp:633,641`) and
+    /// every timing consumer reads it through `ppu.vdisp()`, so luna reads
+    /// the register directly rather than snapshotting per instruction.
+    /// (Mesen2 latches it once per frame at scanline 0, `SnesPpu.cpp:407`;
+    /// ares is the gold standard, and anomie-regs describes a mid-frame
+    /// toggle as moving the NMI line.)
+    #[inline]
+    const fn vblank_start_line(&self) -> u16 {
+        vblank_start_line(self.ppu.setini & 0x04 != 0)
+    }
+
     /// Resolve `addr` against the WRAM regions; returns the in-array
     /// offset if it maps to WRAM, else `None`.
     fn wram_offset(addr: Addr24) -> Option<usize> {
@@ -2133,6 +2226,7 @@ impl SnesBus<'_> {
             bp.check_mem(addr, kind, value, self.cpu_pc_full);
         }
         let hclock = self.hclock();
+        let blank_now = self.ppu_line >= self.vblank_start_line();
         if let Some(log) = self.mem_trace_log.as_mut()
             && log.accepts(addr, kind)
         {
@@ -2144,7 +2238,7 @@ impl SnesBus<'_> {
                 value,
                 line: self.ppu_line,
                 hclock,
-                blank: self.ppu_line >= self.vblank_start_line,
+                blank: blank_now,
                 force_blank: self.ppu.inidisp & 0x80 != 0,
                 origin: MemOrigin::Cpu,
             });
@@ -2160,7 +2254,7 @@ impl SnesBus<'_> {
         let pc = self.cpu_pc_full;
         let mclk = *self.mclk_total;
         let line = self.ppu_line;
-        let blank = line >= self.vblank_start_line;
+        let blank = line >= self.vblank_start_line();
         let force_blank = self.ppu.inidisp & 0x80 != 0;
         let hclock = self.hclock();
         if let Some(log) = self.mem_trace_log.as_mut() {
@@ -2346,7 +2440,7 @@ impl SnesBus<'_> {
     /// charge the CPU the stall (Phase 4).
     fn sched_one_line(&mut self, line_start_mclk: u64) -> u32 {
         let clock_count = self.clock_count;
-        let vblank_start = self.vblank_start_line;
+        let vblank_start = self.vblank_start_line();
         let scanlines = self.scanlines_per_frame;
         let mut hdma_stall = 0u32;
 
@@ -2397,6 +2491,7 @@ impl SnesBus<'_> {
             // log is moved into the view for the line and returned after.
             let mut trace = self.dma.dma_trace.take();
             let trace_hclock = self.hclock();
+            let trace_blank_now = self.ppu_line >= self.vblank_start_line();
             let mut view = DmaBusView {
                 wram: &mut *self.wram,
                 mapper: &mut *self.mapper,
@@ -2407,7 +2502,7 @@ impl SnesBus<'_> {
                 last_a_addr: 0,
                 trace_frame: self.frame_count,
                 trace_line: self.ppu_line,
-                trace_blank: self.ppu_line >= self.vblank_start_line,
+                trace_blank: trace_blank_now,
                 trace_hclock,
                 dma_channel: 0,
                 mem_trace: self.mem_trace_log.as_mut(),
@@ -2485,6 +2580,7 @@ impl SnesBus<'_> {
             // flag only — no vertical doubling yet.
             self.ppu.field = !self.ppu.field;
             let trace_hclock = self.hclock();
+            let trace_blank_now = self.ppu_line >= self.vblank_start_line();
             let mut view = DmaBusView {
                 wram: &mut *self.wram,
                 mapper: &mut *self.mapper,
@@ -2499,7 +2595,7 @@ impl SnesBus<'_> {
                 last_a_addr: 0,
                 trace_frame: self.frame_count,
                 trace_line: self.ppu_line,
-                trace_blank: self.ppu_line >= self.vblank_start_line,
+                trace_blank: trace_blank_now,
                 trace_hclock,
                 dma_channel: 0,
                 mem_trace: self.mem_trace_log.as_mut(),
@@ -2690,6 +2786,7 @@ impl SnesBus<'_> {
             let mut trace = self.dma.dma_trace.take();
             let trace_hclock = self.hclock();
             let bytes = {
+                let trace_blank_now = self.ppu_line >= self.vblank_start_line();
                 let mut view = DmaBusView {
                     wram: self.wram,
                     mapper: self.mapper,
@@ -2700,7 +2797,7 @@ impl SnesBus<'_> {
                     last_a_addr: 0,
                     trace_frame: self.frame_count,
                     trace_line: self.ppu_line,
-                    trace_blank: self.ppu_line >= self.vblank_start_line,
+                    trace_blank: trace_blank_now,
                     trace_hclock,
                     dma_channel: 0,
                     mem_trace: self.mem_trace_log.as_mut(),
@@ -2737,6 +2834,7 @@ impl SnesBus<'_> {
             let seg_bytes = (room_mclk / 8).max(1);
             let trace_hclock = self.hclock();
             let done = {
+                let trace_blank_now = self.ppu_line >= self.vblank_start_line();
                 let mut view = DmaBusView {
                     wram: self.wram,
                     mapper: self.mapper,
@@ -2747,7 +2845,7 @@ impl SnesBus<'_> {
                     last_a_addr: 0,
                     trace_frame: self.frame_count,
                     trace_line: self.ppu_line,
-                    trace_blank: self.ppu_line >= self.vblank_start_line,
+                    trace_blank: trace_blank_now,
                     trace_hclock,
                     dma_channel: 0,
                     mem_trace: self.mem_trace_log.as_mut(),
@@ -2823,7 +2921,11 @@ impl SnesBus<'_> {
             } else {
                 self.apu_real.cpu_read_port(port)
             };
-            if let Some(log) = self.mailbox_log.as_mut() {
+            if let Some(log) = self
+                .mailbox_log
+                .as_mut()
+                .filter(|l| l.len() < DEBUG_LOG_MAX_EVENTS)
+            {
                 log.push(MailboxEvent {
                     mclk_total: *self.mclk_total,
                     pc_full: self.cpu_pc_full,
@@ -2925,7 +3027,7 @@ impl SnesBus<'_> {
                 // line at H=0, which let a `BIT $4210 / BPL` poll loop pass
                 // twice in one VBlank (issue #107).
                 let hclock = self.hclock();
-                let on_nmi_line = self.ppu_line == self.vblank_start_line;
+                let on_nmi_line = self.ppu_line == self.vblank_start_line();
                 let raised = !(on_nmi_line && hclock < RDNMI_RAISE_HCLOCK);
                 let in_hold = on_nmi_line && hclock < RDNMI_HOLD_HCLOCK;
                 // Bits 4-6 are CPU open bus (ares io.cpp:24-27 drives
@@ -2949,7 +3051,10 @@ impl SnesBus<'_> {
         }
         if let Some(v) = self.mapper.read(addr) {
             if let Some(reg) = Self::sa1_reg(addr)
-                && let Some(log) = self.sa1_log.as_mut()
+                && let Some(log) = self
+                    .sa1_log
+                    .as_mut()
+                    .filter(|l| l.len() < DEBUG_LOG_MAX_EVENTS)
             {
                 log.push(Sa1LogEvent {
                     mclk_total: *self.mclk_total,
@@ -3013,7 +3118,7 @@ impl SnesBus<'_> {
             // still advances). ares `ppu_io.cpp:19-45` / Mesen2
             // `SnesPpu.cpp:2046-2057`.
             self.ppu.active_display =
-                self.ppu_line < self.vblank_start_line && (self.ppu.inidisp & 0x80) == 0;
+                self.ppu_line < self.vblank_start_line() && (self.ppu.inidisp & 0x80) == 0;
 
             // Phase 2 of gap G6 — intra-line partial flush. If the
             // CPU is writing a render-affecting PPU register ($2100..$2133)
@@ -3021,7 +3126,7 @@ impl SnesBus<'_> {
             // state BEFORE applying the write so the partial line gets
             // the pre-write pixels. (Mesen2 SnesPpu.cpp:1884-1886
             // RenderScanline-before-write pattern.)
-            if off < 0x34 && self.ppu_line < self.vblank_start_line {
+            if off < 0x34 && self.ppu_line < self.vblank_start_line() {
                 let (h, _) = self.hv();
                 let dot = h.min(luna_ppu::FRAME_W as u16);
                 self.ppu.flush_partial_scanline(
@@ -3037,7 +3142,8 @@ impl SnesBus<'_> {
             if off == 0x00 {
                 let was_force_blank = self.ppu.inidisp & 0x80 != 0;
                 let will_force_blank = value & 0x80 != 0;
-                if was_force_blank && !will_force_blank && self.ppu_line == self.vblank_start_line {
+                if was_force_blank && !will_force_blank && self.ppu_line == self.vblank_start_line()
+                {
                     self.ppu.oam.reload_address_from_latch();
                 }
             }
@@ -3052,7 +3158,7 @@ impl SnesBus<'_> {
                 // stale cache said active-display while forced-blank was set.
                 // ares checks `displayDisable` live at the write (ppu io.cpp).
                 self.ppu.active_display =
-                    self.ppu_line < self.vblank_start_line && (self.ppu.inidisp & 0x80) == 0;
+                    self.ppu_line < self.vblank_start_line() && (self.ppu.inidisp & 0x80) == 0;
             }
             return;
         }
@@ -3064,7 +3170,11 @@ impl SnesBus<'_> {
             // is only consulted when the real APU is dead.
             self.apu_real.cpu_write_port(port, value);
             self.apu_stub_fallback.write(port, value);
-            if let Some(log) = self.mailbox_log.as_mut() {
+            if let Some(log) = self
+                .mailbox_log
+                .as_mut()
+                .filter(|l| l.len() < DEBUG_LOG_MAX_EVENTS)
+            {
                 log.push(MailboxEvent {
                     mclk_total: *self.mclk_total,
                     pc_full: self.cpu_pc_full,
@@ -3197,7 +3307,10 @@ impl SnesBus<'_> {
             return;
         }
         if let Some(reg) = Self::sa1_reg(addr)
-            && let Some(log) = self.sa1_log.as_mut()
+            && let Some(log) = self
+                .sa1_log
+                .as_mut()
+                .filter(|l| l.len() < DEBUG_LOG_MAX_EVENTS)
         {
             log.push(Sa1LogEvent {
                 mclk_total: *self.mclk_total,
@@ -3269,8 +3382,67 @@ mod tests {
     fn scanline_helpers_pick_per_region_constants() {
         assert_eq!(scanlines_per_frame(luna_cartridge::Region::Ntsc), 262);
         assert_eq!(scanlines_per_frame(luna_cartridge::Region::Pal), 312);
-        assert_eq!(vblank_start_line(luna_cartridge::Region::Ntsc), 225);
-        assert_eq!(vblank_start_line(luna_cartridge::Region::Pal), 240);
+        // VBlank entry follows OVERSCAN, not the region (ares io.cpp:641,
+        // Mesen2 SnesPpu.cpp:559): PAL differs only in total scanlines.
+        assert_eq!(vblank_start_line(false), 225);
+        assert_eq!(vblank_start_line(true), 240);
+    }
+
+    /// Drive the scheduler until `VBlank` is entered (the `$4210` NMI flag
+    /// rises) and report the PPU line it happened on. The test ROM never
+    /// reads `$4210`, so the first `true` is the entry line.
+    fn vblank_entry_line(snes: &mut Snes, max_frames: u64) -> Option<u16> {
+        let stop = snes.frame_count + max_frames;
+        while snes.frame_count < stop {
+            snes.step();
+            if snes.cpu_regs.nmi_flag {
+                return Some(snes.ppu_line);
+            }
+        }
+        None
+    }
+
+    /// ROM that enables NMI (`$4200 = $80`) and then spins.
+    fn nmi_enable_rom(country: u8, setini: u8) -> Cartridge {
+        let mut rom = demo_lorom().rom;
+        rom[0x7FD9] = country;
+        let mut pc = 0x0000;
+        let emit = |bytes: &[u8], rom: &mut Vec<u8>, pc: &mut usize| {
+            for &b in bytes {
+                rom[*pc] = b;
+                *pc += 1;
+            }
+        };
+        if setini != 0 {
+            // LDA #setini ; STA $2133
+            emit(&[0xA9, setini, 0x8D, 0x33, 0x21], &mut rom, &mut pc);
+        }
+        // LDA #$80 ; STA $4200 ; BRA -2
+        emit(
+            &[0xA9, 0x80, 0x8D, 0x00, 0x42, 0x80, 0xFE],
+            &mut rom,
+            &mut pc,
+        );
+        Cartridge::from_bytes(rom).unwrap()
+    }
+
+    #[test]
+    fn vblank_entry_is_line_225_in_both_regions_and_240_under_overscan() {
+        // PAL used to be hardcoded to 240: a PAL game without overscan got
+        // its NMI 15 lines late (and 15 extra HDMA lines).
+        for country in [0x01u8, 0x02] {
+            let mut snes = Snes::from_cartridge(nmi_enable_rom(country, 0x00));
+            snes.reset();
+            assert_eq!(
+                vblank_entry_line(&mut snes, 3),
+                Some(225),
+                "country {country:#04x}: VBlank starts at line 225 without overscan"
+            );
+        }
+        // SETINI bit 2 moves it to 240 — ares recomputes `vdisp` on the write.
+        let mut snes = Snes::from_cartridge(nmi_enable_rom(0x01, 0x04));
+        snes.reset();
+        assert_eq!(vblank_entry_line(&mut snes, 3), Some(240), "overscan armed");
     }
 
     #[test]
@@ -3346,6 +3518,49 @@ mod tests {
     }
 
     #[test]
+    fn debug_peek_and_poke_walk_into_the_next_bank() {
+        // A debugger range that runs off the end of a bank continues into
+        // the next one: $7E:FFFF + 1 is $7F:0000, the contiguous half of
+        // WRAM — not $7E:0000, which used to get clobbered.
+        let mut snes = Snes::from_cartridge(demo_lorom());
+        assert_eq!(snes.dbg_poke_bytes(0x7E, 0xFFFF, &[0xAA, 0xBB]), 2);
+        assert_eq!(snes.wram[0xFFFF], 0xAA, "last byte of $7E");
+        assert_eq!(snes.wram[0x1_0000], 0xBB, "first byte of $7F");
+        assert_eq!(snes.wram[0], 0, "$7E:0000 untouched");
+        assert_eq!(snes.dbg_peek_bytes(0x7E, 0xFFFF, 2), vec![0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn diagnostic_logs_stop_growing_at_their_cap() {
+        let mut snes = Snes::from_cartridge(demo_lorom());
+        snes.enable_mailbox_log();
+        if let Some(log) = snes.mailbox_log.as_mut() {
+            log.resize(
+                DEBUG_LOG_MAX_EVENTS,
+                MailboxEvent {
+                    mclk_total: 0,
+                    pc_full: 0,
+                    kind: MailboxEventKind::Read,
+                    port: 0,
+                    value: 0,
+                },
+            );
+        }
+        // At the cap, further traffic is dropped rather than queued.
+        for _ in 0..64 {
+            snes.step();
+        }
+        assert_eq!(
+            snes.mailbox_log.as_ref().map(Vec::len),
+            Some(DEBUG_LOG_MAX_EVENTS),
+            "a full log must stop growing"
+        );
+        // Draining it re-opens capture.
+        assert_eq!(snes.take_mailbox_log().len(), DEBUG_LOG_MAX_EVENTS);
+        assert_eq!(snes.mailbox_log.as_ref().map(Vec::len), Some(0));
+    }
+
+    #[test]
     fn apu_ports_mirror_every_four_bytes_up_to_217f() {
         assert_eq!(SnesBus::apu_port(make_addr(0x00, 0x2140)), Some(0));
         assert_eq!(SnesBus::apu_port(make_addr(0x00, 0x2145)), Some(1));
@@ -3377,6 +3592,63 @@ mod tests {
         assert!(snes.fast_rom, "$420D=1 must persist");
         snes.step(); // STZ $420D
         assert!(!snes.fast_rom, "$420D=0 must persist");
+    }
+
+    #[test]
+    fn random_power_on_also_randomises_ppu_registers_and_latches() {
+        use crate::power::PowerOnState;
+        // Issue #224, second lot: ares randomises the PPU's registers,
+        // latches and both chip MDRs on power (`ppu.cpp`), not just RAM.
+        // A seed still reproduces the exact machine.
+        let mk = |st| Snes::try_from_cartridge_with(demo_lorom(), st).expect("snes");
+        let zero = mk(PowerOnState::Zero);
+        assert_eq!(zero.ppu.ppu1_mdr, 0, "zero leaves the registers alone");
+        assert_eq!(zero.ppu.m7a, 0);
+        assert_eq!(zero.ppu.setini, 0);
+
+        let a = mk(PowerOnState::Random { seed: 7 });
+        let b = mk(PowerOnState::Random { seed: 7 });
+        let c = mk(PowerOnState::Random { seed: 8 });
+        assert_eq!(a.ppu.ppu1_mdr, b.ppu.ppu1_mdr, "same seed, same machine");
+        assert_eq!(a.ppu.m7a, b.ppu.m7a);
+        assert_eq!(a.ppu.setini, b.ppu.setini);
+        let differs = [
+            a.ppu.ppu1_mdr != c.ppu.ppu1_mdr,
+            a.ppu.m7a != c.ppu.m7a,
+            a.ppu.vram.address != c.ppu.vram.address,
+            a.ppu.cgram.address != c.ppu.cgram.address,
+        ];
+        assert!(
+            differs.iter().any(|d| *d),
+            "another seed must yield another machine"
+        );
+        // ares sets these explicitly rather than randomising them.
+        assert_eq!(
+            a.ppu.setini & 0x05,
+            0,
+            "overscan and interlace come up clear"
+        );
+        assert_eq!(a.ppu.bgmode, 0, "BGMODE comes up 0");
+    }
+
+    #[test]
+    fn dma_channel_registers_power_on_at_ff() {
+        // ares `cpu.hpp:217-251` and Mesen2's constructor both power the
+        // channel registers up at $FF; `$420B` / `$420C` come up clear
+        // (anomie-regs). luna powered the channels up at zero.
+        let mut snes = Snes::from_cartridge(demo_lorom());
+        for off in 0x0u8..=0x7 {
+            assert_eq!(
+                snes.dma.channels[0].read(off),
+                0xFF,
+                "$430{off:X} at power-on"
+            );
+        }
+        assert_eq!(snes.dma.hdmaen, 0);
+        // A reset rebuilds them, as ares does.
+        snes.dma.channels[0].write(0x0, 0x00);
+        snes.reset();
+        assert_eq!(snes.dma.channels[0].read(0x0), 0xFF, "reset restores $FF");
     }
 
     #[test]
@@ -3463,7 +3735,6 @@ mod tests {
         let mut snes = Snes::from_cartridge(cart);
         let scanlines = snes.region_scanlines();
         let ppu_line_snapshot = snes.ppu_line;
-        let vblank_start_snapshot = vblank_start_line(snes.region);
         let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
         let Snes {
             ppu,
@@ -3513,7 +3784,6 @@ mod tests {
             frame_count: 0,
             nmis_serviced: 0,
             sched_enabled: false,
-            vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
             sa1_log,
@@ -3545,7 +3815,6 @@ mod tests {
         let mut snes = Snes::from_cartridge(cart);
         let scanlines = snes.region_scanlines();
         let ppu_line_snapshot = snes.ppu_line;
-        let vblank_start_snapshot = vblank_start_line(snes.region);
         let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
         assert_eq!(snes.cpu_regs.wrio, 0xFF, "WRIO powers up high");
         let Snes {
@@ -3596,7 +3865,6 @@ mod tests {
             frame_count: 0,
             nmis_serviced: 0,
             sched_enabled: false,
-            vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
             sa1_log,
@@ -3637,7 +3905,6 @@ mod tests {
         let mut snes = Snes::from_cartridge(cart);
         let scanlines = snes.region_scanlines();
         let ppu_line_snapshot = snes.ppu_line;
-        let vblank_start_snapshot = vblank_start_line(snes.region);
         let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
         let Snes {
             ppu,
@@ -3687,7 +3954,6 @@ mod tests {
             frame_count: 0,
             nmis_serviced: 0,
             sched_enabled: false,
-            vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
             sa1_log,
@@ -3725,7 +3991,6 @@ mod tests {
         snes.reset();
         let scanlines = snes.region_scanlines();
         let ppu_line_snapshot = snes.ppu_line;
-        let vblank_start_snapshot = vblank_start_line(snes.region);
         let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
         let Snes {
             cpu: _,
@@ -3776,7 +4041,6 @@ mod tests {
             frame_count: 0,
             nmis_serviced: 0,
             sched_enabled: false,
-            vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
             sa1_log,
@@ -3812,7 +4076,6 @@ mod tests {
         snes.enable_nocash_log();
         let scanlines = snes.region_scanlines();
         let ppu_line_snapshot = snes.ppu_line;
-        let vblank_start_snapshot = vblank_start_line(snes.region);
         let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
         {
             let Snes {
@@ -3864,7 +4127,6 @@ mod tests {
                 frame_count: 0,
                 nmis_serviced: 0,
                 sched_enabled: false,
-                vblank_start_line: vblank_start_snapshot,
                 cpu_pc_full: cpu_pc_snapshot,
                 mailbox_log,
                 sa1_log,
@@ -3901,7 +4163,6 @@ mod tests {
         snes.cpu_regs.set_joypad(0, 0x8001);
         let scanlines = snes.region_scanlines();
         let ppu_line_snapshot = snes.ppu_line;
-        let vblank_start_snapshot = vblank_start_line(snes.region);
         let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
         let Snes {
             cpu: _,
@@ -3952,7 +4213,6 @@ mod tests {
             frame_count: 0,
             nmis_serviced: 0,
             sched_enabled: false,
-            vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
             sa1_log,
@@ -3994,12 +4254,15 @@ mod tests {
         //   LDA #$00 ; STA $4302  ; A1TL = $00
         //   LDA #$20 ; STA $4303  ; A1TH = $20 → A-bus addr $002000
         //   LDA #$7E ; STA $4304  ; A1B  = $7E
-        //   LDA #$04 ; STA $4305  ; DAS  = $0004
+        //   LDA #$04 ; STA $4305  ; DAS low  = $04
+        //   LDA #$00 ; STA $4306  ; DAS high = $00 → $0004 bytes
         //   LDA #$00 ; STA $4300  ; DMAP = mode 0, +1, A→B
         //   LDA #$01 ; STA $420B  ; MDMAEN bit 0
         //   STP
         //
-        // (DAS high byte stays at 0 from reset.)
+        // Both DAS bytes are written, as a real game must: the channel
+        // registers power up at $FF (issue #224), so leaving $4306 alone
+        // would ask for $FF04 bytes.
         let cart = demo_lorom();
         let mut rom = cart.rom;
         let prog = [
@@ -4007,7 +4270,8 @@ mod tests {
             0xA9, 0x00, 0x8D, 0x02, 0x43, // LDA #$00 ; STA $4302
             0xA9, 0x20, 0x8D, 0x03, 0x43, // LDA #$20 ; STA $4303
             0xA9, 0x7E, 0x8D, 0x04, 0x43, // LDA #$7E ; STA $4304
-            0xA9, 0x04, 0x8D, 0x05, 0x43, // LDA #$04 ; STA $4305
+            0xA9, 0x04, 0x8D, 0x05, 0x43, // LDA #$04 ; STA $4305 (DAS low)
+            0xA9, 0x00, 0x8D, 0x06, 0x43, // LDA #$00 ; STA $4306 (DAS high)
             0xA9, 0x00, 0x8D, 0x00, 0x43, // LDA #$00 ; STA $4300
             0xA9, 0x01, 0x8D, 0x0B, 0x42, // LDA #$01 ; STA $420B (trigger)
             0xDB, // STP
@@ -4057,7 +4321,8 @@ mod tests {
             0xA9, 0x00, 0x8D, 0x02, 0x43, // LDA #$00 ; STA $4302
             0xA9, 0x20, 0x8D, 0x03, 0x43, // LDA #$20 ; STA $4303
             0xA9, 0x7E, 0x8D, 0x04, 0x43, // LDA #$7E ; STA $4304
-            0xA9, 0x04, 0x8D, 0x05, 0x43, // LDA #$04 ; STA $4305
+            0xA9, 0x04, 0x8D, 0x05, 0x43, // LDA #$04 ; STA $4305 (DAS low)
+            0xA9, 0x00, 0x8D, 0x06, 0x43, // LDA #$00 ; STA $4306 (DAS high)
             0xA9, 0x00, 0x8D, 0x00, 0x43, // LDA #$00 ; STA $4300
             0xA9, 0x01, 0x8D, 0x0B, 0x42, // LDA #$01 ; STA $420B (trigger)
             0xDB, // STP
@@ -4206,7 +4471,6 @@ mod tests {
         snes.dma.hdmaen = 0x02;
 
         let scanlines = snes.region_scanlines();
-        let vblank_start_snapshot = vblank_start_line(snes.region);
         let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
         let Snes {
             ppu,
@@ -4256,7 +4520,6 @@ mod tests {
             frame_count: 0,
             nmis_serviced: 0,
             sched_enabled: true,
-            vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
             sa1_log,
@@ -4362,9 +4625,9 @@ mod tests {
         let mut snes = Snes::from_cartridge(cart);
         snes.reset();
         snes.cpu_regs.nmitimen = 0x80; // NMI on VBlank enabled
-        snes.ppu_line = NTSC_VBLANK_START_LINE - 1;
+        snes.ppu_line = VBLANK_START_LINE - 1;
         snes.advance_scheduler(MCYCLES_PER_SCANLINE);
-        assert_eq!(snes.ppu_line, NTSC_VBLANK_START_LINE);
+        assert_eq!(snes.ppu_line, VBLANK_START_LINE);
         assert!(snes.cpu_regs.nmi_flag);
         assert_eq!(snes.cpu_regs.hvbjoy & 0x80, 0x80);
         assert_eq!(snes.nmis_serviced, 1);
@@ -4376,9 +4639,9 @@ mod tests {
         let mut snes = Snes::from_cartridge(cart);
         snes.reset();
         snes.cpu_regs.nmitimen = 0x00; // NMI masked
-        snes.ppu_line = NTSC_VBLANK_START_LINE - 1;
+        snes.ppu_line = VBLANK_START_LINE - 1;
         snes.advance_scheduler(MCYCLES_PER_SCANLINE);
-        assert_eq!(snes.ppu_line, NTSC_VBLANK_START_LINE);
+        assert_eq!(snes.ppu_line, VBLANK_START_LINE);
         assert!(snes.cpu_regs.nmi_flag);
         assert_eq!(snes.nmis_serviced, 0);
     }
@@ -4391,7 +4654,7 @@ mod tests {
         let mut snes = Snes::from_cartridge(demo_lorom());
         snes.reset();
         snes.cpu_regs.nmi_flag = true;
-        let vblank = vblank_start_line(snes.region);
+        let vblank = vblank_start_line(snes.ppu.setini & 0x04 != 0);
         snes.ppu_line = vblank;
 
         let scanlines = snes.region_scanlines();
@@ -4444,7 +4707,6 @@ mod tests {
             frame_count: 0,
             nmis_serviced: 0,
             sched_enabled: false,
-            vblank_start_line: vblank,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
             sa1_log,
@@ -4718,9 +4980,9 @@ mod tests {
         snes.ppu.oam.write(0x44);
         assert_eq!(snes.ppu.oam.address, 0x0024);
         // Cross the vblank-entry scanline.
-        snes.ppu_line = NTSC_VBLANK_START_LINE - 1;
+        snes.ppu_line = VBLANK_START_LINE - 1;
         snes.advance_scheduler(MCYCLES_PER_SCANLINE);
-        assert_eq!(snes.ppu_line, NTSC_VBLANK_START_LINE);
+        assert_eq!(snes.ppu_line, VBLANK_START_LINE);
         // Address has been reloaded from the latched word_address.
         assert_eq!(
             snes.ppu.oam.address, 0x0020,
@@ -4741,7 +5003,7 @@ mod tests {
         snes.ppu.oam.write(0x33);
         snes.ppu.oam.write(0x44);
         assert_eq!(snes.ppu.oam.address, 0x0024);
-        snes.ppu_line = NTSC_VBLANK_START_LINE - 1;
+        snes.ppu_line = VBLANK_START_LINE - 1;
         snes.advance_scheduler(MCYCLES_PER_SCANLINE);
         assert_eq!(
             snes.ppu.oam.address, 0x0024,
@@ -4764,11 +5026,10 @@ mod tests {
         snes.ppu.oam.write(0x22);
         assert_eq!(snes.ppu.oam.address, 0x0022);
         // Park on the vblank-entry scanline.
-        snes.ppu_line = NTSC_VBLANK_START_LINE;
+        snes.ppu_line = VBLANK_START_LINE;
         // Drive the bus write for $2100 = $0F (force-blank OFF).
         let scanlines = snes.region_scanlines();
         let ppu_line_snapshot = snes.ppu_line;
-        let vblank_start_snapshot = vblank_start_line(snes.region);
         let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
         let Snes {
             ppu,
@@ -4818,7 +5079,6 @@ mod tests {
             frame_count: 0,
             nmis_serviced: 0,
             sched_enabled: false,
-            vblank_start_line: vblank_start_snapshot,
             cpu_pc_full: cpu_pc_snapshot,
             mailbox_log,
             sa1_log,

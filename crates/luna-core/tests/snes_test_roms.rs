@@ -662,7 +662,7 @@ ppu_test!(
 ppu_test!(
     ppu_bg_8bpp_32x32,
     "BGMAP/8x8/8BPP/32x32/8x8BGMap8BPP32x32.sfc",
-    "b5467e295995c8ad193b81cefb17fa191ab14b6a66b471f3c09ab53ac9ca21fc"
+    "5b1687c40daeaa87d7a260a8a44351f7f4201d3a55eae48ff1e9b73af32488c4"
 );
 ppu_test!(
     ppu_bg_8bpp_32x64,
@@ -733,7 +733,7 @@ ppu_test!(
 ppu_test!(
     ppu_mode7_starwars,
     "Mode7/StarWars/StarWars.sfc",
-    "af0c0d94c3648021a1dc41a8148d112f9959292048c5b0ecbe9714561d3385c1"
+    "406990b17cca553ce576f5f96758f3d2757a6e285dcf456d74da4ae86b1b8716"
 );
 ppu_test!(
     ppu_greenspace,
@@ -1208,7 +1208,7 @@ spc_test!(
 spc_test!(
     spc_play_two_song,
     "PlayTwoSong/PlayTwoSong.sfc",
-    "30bc23273d3e36325d74e11a43d26761b2c149635537900b0aa57f62800d22a0",
+    "26e9a4e69810f679ce8e3a593b067ff50f3edfa462303bed7a9d7f23d37ef5c5",
     hold = PAD_A
 );
 
