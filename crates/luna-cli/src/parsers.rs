@@ -248,7 +248,7 @@ pub(crate) fn parse_addr_range(spec: &str) -> Result<(u16, u16), String> {
 /// dead ROM cannot spin here.
 pub(crate) fn step_to_frame_bounded(em: &mut luna_api::Emulator, frame: u64, budget: u64) -> u64 {
     let start = em.instructions_executed();
-    while em.state().scheduler.frame_count < frame {
+    while em.frame_count().unwrap_or(0) < frame {
         let spent = em.instructions_executed().saturating_sub(start);
         let left = budget.saturating_sub(spent);
         if left == 0 {
