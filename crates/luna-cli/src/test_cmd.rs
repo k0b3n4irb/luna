@@ -13,6 +13,7 @@
 //! rom = "../game.sfc"            # relative to this manifest
 //! frames = 600                   # run bound: `frames` or `steps`
 //! input = "300:0x1000,310:0"     # optional --input script (or "@file")
+//! input2 = "300:0x0080"          # joypad 2, same grammar
 //! power_on = "random"            # zero (default) | ones | random (+ seed, default 1)
 //! seed = 12345
 //!
@@ -85,6 +86,8 @@ struct Manifest {
     steps: Option<u64>,
     /// Optional joypad script (`frame:mask` entries or `@file`).
     input: Option<String>,
+    /// Joypad-2 script, same `frame:hex` grammar as `input` (`OpenSNES` R-D).
+    input2: Option<String>,
     /// Optional SNES Mouse script (`frame:dx,dy,buttons`, `;`-separated
     /// — the `--mouse` grammar). Plugs a mouse into port 1 (issue #212).
     mouse: Option<String>,
@@ -121,6 +124,8 @@ struct Checkpoint {
     /// This leg's joypad entries (absolute frames, same grammar as the
     /// top-level `input`).
     input: Option<String>,
+    /// Joypad-2 script, same `frame:hex` grammar as `input` (`OpenSNES` R-D).
+    input2: Option<String>,
     /// This leg's SNES Mouse entries (issue #212).
     mouse: Option<String>,
     /// This leg's Super Scope entries (issue #212).
@@ -242,6 +247,8 @@ enum OamFieldAssert {
 enum InEv {
     /// Joypad-1 mask.
     Pad(u16),
+    /// Joypad-2 mask (`input2`).
+    Pad2(u16),
     /// SNES Mouse `dx, dy, buttons` (port 1).
     Mouse(i32, i32, u8),
     /// Super Scope `x, y, buttons` (port 2).
@@ -337,6 +344,11 @@ struct TestOutcome {
     failures: Vec<String>,
     /// The measured fbhash (for `--update` and the JSON report).
     fbhash: Option<String>,
+    /// The power-on state the run used, and its seed when random — echoed
+    /// in the JSON report so a failing manifest is reproducible (`OpenSNES`
+    /// R-A: the `power_on` / `seed` pair, as the manifest says it).
+    power_on: String,
+    seed: Option<u64>,
     /// `Some(reason)` when the test was skipped (firmware gate, issue
     /// #212) — neither passed nor failed.
     skipped: Option<String>,
@@ -441,6 +453,8 @@ pub(crate) fn run_tests(
                 "skipped": o.skipped,
                 "failures": o.failures,
                 "fbhash": o.fbhash,
+                "power_on": o.power_on,
+                "seed": o.seed,
             })).collect::<Vec<_>>(),
         });
         println!(
@@ -527,6 +541,8 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
                 path: path.to_path_buf(),
                 failures: Vec::new(),
                 fbhash: None,
+                power_on: power_on_label(&m),
+                seed: power_on_seed(&m),
                 skipped: Some(format!("firmware `{fw}` not installed")),
             });
         }
@@ -547,6 +563,7 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
     let mut scope_used = false;
     {
         let mut add_leg = |input: &Option<String>,
+                           input2: &Option<String>,
                            mouse: &Option<String>,
                            scope: &Option<String>|
          -> Result<(), String> {
@@ -555,6 +572,13 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
                     parse_input(spec)?
                         .into_iter()
                         .map(|(f, mask)| (f, InEv::Pad(mask))),
+                );
+            }
+            if let Some(spec) = input2 {
+                input_entries.extend(
+                    parse_input(spec)?
+                        .into_iter()
+                        .map(|(f, mask)| (f, InEv::Pad2(mask))),
                 );
             }
             if let Some(spec) = mouse {
@@ -577,9 +601,9 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
             }
             Ok(())
         };
-        add_leg(&m.input, &m.mouse, &m.superscope)?;
+        add_leg(&m.input, &m.input2, &m.mouse, &m.superscope)?;
         for cp in &m.checkpoint {
-            add_leg(&cp.input, &cp.mouse, &cp.superscope)?;
+            add_leg(&cp.input, &cp.input2, &cp.mouse, &cp.superscope)?;
         }
     }
     input_entries.sort_by_key(|&(frame, _)| frame);
@@ -688,6 +712,7 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
     let apply_ev = |em: &mut luna_api::Emulator, ev: &InEv| -> Result<(), String> {
         match *ev {
             InEv::Pad(mask) => em.set_joypad(0, mask),
+            InEv::Pad2(mask) => em.set_joypad(1, mask),
             InEv::Mouse(dx, dy, b) => em.set_mouse(dx, dy, b),
             InEv::Scope(x, y, b) => em.set_superscope(x, y, b),
         }
@@ -1038,8 +1063,22 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
         path: path.to_path_buf(),
         failures,
         fbhash: measured_fbhash,
+        power_on: power_on_label(&m),
+        seed: power_on_seed(&m),
         skipped: None,
     })
+}
+
+/// The manifest's `power_on` as the report prints it (`zero` when absent).
+fn power_on_label(m: &Manifest) -> String {
+    m.power_on
+        .as_deref()
+        .map_or_else(|| "zero".to_string(), str::to_ascii_lowercase)
+}
+
+/// The seed a `random` manifest ran with (default 1); `None` otherwise.
+fn power_on_seed(m: &Manifest) -> Option<u64> {
+    (power_on_label(m) == "random").then(|| m.seed.unwrap_or(1))
 }
 
 enum Bound {

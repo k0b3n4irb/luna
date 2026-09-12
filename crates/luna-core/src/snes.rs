@@ -1689,7 +1689,9 @@ impl Snes {
     /// and never touches MMIO (so it never toggles the OPHCT/OPVCT or BG-scroll
     /// latches, clears the NMI/IRQ flags, or advances VMADD/OAMADD/the WRAM
     /// port). WRAM and ROM/SRAM/coproc-work-RAM return their real bytes; the
-    /// `$2000-$5FFF` register band returns `0`.
+    /// `$2000-$5FFF` register band returns `0`, except the DMA channel
+    /// registers at `$4300-$437F`, which are side-effect-free to read and
+    /// return their real values.
     pub fn dbg_peek_bytes(&mut self, bank: u8, offset: u16, count: usize) -> Vec<u8> {
         self.dbg_peek_bytes_checked(bank, offset, count).0
     }
@@ -1729,6 +1731,13 @@ impl Snes {
                     unmapped += 1;
                     0xFF
                 })
+            } else if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && (0x4300..=0x437F).contains(&off)
+            {
+                // DMA channel registers: reading them has no side effect on
+                // hardware either, so the debug peek returns the register
+                // file (`OpenSNES` asked for it to probe the power-on values —
+                // `$43xx` comes up `$FF`, see issue #224).
+                self.dma.channels[usize::from((off >> 4) & 0x7)].read((off & 0xF) as u8)
             } else if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && (0x2000..=0x5FFF).contains(&off)
             {
                 // PPU/APU/CPU/coproc register band — read side effects, so 0.
@@ -3528,6 +3537,26 @@ mod tests {
         assert_eq!(snes.wram[0x1_0000], 0xBB, "first byte of $7F");
         assert_eq!(snes.wram[0], 0, "$7E:0000 untouched");
         assert_eq!(snes.dbg_peek_bytes(0x7E, 0xFFFF, 2), vec![0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn debug_peek_returns_the_dma_channel_registers() {
+        // `$4300-$437F` is the one slice of the register band a debugger
+        // may read without side effects, so the peek returns the channel
+        // file instead of the band's `0`: `$FF` at power-on (issue #224),
+        // and whatever the ROM wrote afterwards.
+        let mut snes = Snes::from_cartridge(demo_lorom());
+        assert_eq!(snes.dbg_peek_bytes(0x00, 0x4300, 12), vec![0xFF; 12]);
+        snes.dma.channels[1].write(0x0, 0x01);
+        snes.dma.channels[1].write(0x5, 0x40);
+        snes.dma.channels[1].write(0x6, 0x02);
+        assert_eq!(
+            snes.dbg_peek_bytes(0x80, 0x4310, 7),
+            vec![0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0x40, 0x02]
+        );
+        // `$4200-$42FF` and `$4380+` stay in the zero band.
+        assert_eq!(snes.dbg_peek_bytes(0x00, 0x42FF, 2), vec![0x00, 0xFF]);
+        assert_eq!(snes.dbg_peek_bytes(0x00, 0x437F, 2), vec![0xFF, 0x00]);
     }
 
     #[test]

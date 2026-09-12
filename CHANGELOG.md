@@ -4,6 +4,42 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+The OpenSNES exchange of 2026-09-12: the fbhash switch we asked to ship
+on its own, and the five small asks that pair with it so one pin and one
+re-baseline cover them together.
+
+### Changed
+- **fbhash v2.** `fbhash` — `luna run` / `luna state --print-fbhash`,
+  the `luna test` manifest key, and the MCP `frame_hash` tool — is now
+  FNV-1a 64 over the raw RGBA bytes of the displayed frame (offset basis
+  `0xcbf29ce484222325`, prime `0x100000001b3`), a pinned function that is
+  stable across toolchains and architectures by construction. v1 used
+  the standard library's `DefaultHasher`, whose algorithm is not
+  guaranteed to stay the same between Rust releases — yet the guide told
+  you to commit those values. **Every existing `fbhash` changes.** Run
+  `luna test --update` once per corpus to regenerate the manifests in
+  place (formatting and comments preserved); the golden suite's SHA-256
+  is untouched.
+
+### Added
+- **`luna test --report json` echoes the power-on pair.** Each test now
+  carries `"power_on": "random", "seed": 12345` (deterministic runs:
+  `"zero"` / `"ones"` with `"seed": null`), so a red `random` run is
+  reproducible from the report alone.
+- **`luna profile --pc-set <PATH>`** writes every distinct 24-bit PC
+  executed in the profiled window, sorted, one little-endian `u32` each
+  — the raw input of a code-coverage tool.
+- **Joypad 2 scripting.** `luna state --input2` and the `luna test`
+  manifest key `input2` (top-level and per `[[checkpoint]]` leg) drive
+  the second pad with the `--input` grammar; an MCP capture's
+  `script_p2` replays headless.
+- **`--peek` reads the DMA channel registers.** `$4300-$437F` returns
+  the channel file (`$FF` at power-on) instead of the register band's
+  `0` — reading them has no side effect on hardware either. The probe
+  for a crt0 that clears them: `--power-on random --peek 00:4300:10`.
+
 ## [1.20.0] — 2026-09-12
 
 The faithful-port release: five lots from the 2026-09-11 subsystem audit,
