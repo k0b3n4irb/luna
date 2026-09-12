@@ -14,7 +14,8 @@ the execution is **bit-identical every run**. (The only floating point in the
 project is the *GUI's* audio resampler and frame pacing — neither touches the
 headless trace/state/screenshot outputs.)
 
-The framebuffer hash (`--print-fbhash`) is a pure function of that full
+The framebuffer hash (`--print-fbhash`, **fbhash v2** since v1.21.0: a
+pinned FNV-1a over the raw pixel bytes) is a pure function of that full
 execution state, and it is **verified identical across architectures** (it is
 the cross-arch visual-regression gate). That makes it the **anchor**: if any
 arch-dependent divergence existed anywhere in the emulation, the fbhash would

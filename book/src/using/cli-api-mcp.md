@@ -157,9 +157,10 @@ and is the hub for every headless diagnostic.
 | `--dsp1-rom <PATH>` | — | Install `dsp1b.rom` firmware then load (Mario Kart, Pilotwings). Persists. |
 | `--load-state <PATH>` | — | Load a `.luna` save-state right after ROM load, before warm-up (resume a GUI-captured scene). |
 | `--input <SCRIPT>` | — | Scripted joypad-1 input (§3). |
+| `--input2 <SCRIPT>` | — | Scripted joypad-2 input, same grammar (§3) — a two-player probe, or replaying an MCP `script_p2` capture. |
 | `--screenshot <PATH>` | — | Also write a PNG. |
 | `--audio-out <PATH>` | — | Also write a 32 kHz stereo WAV. |
-| `--peek <B:O:C>` | — | Hex-dump `COUNT` bytes at `BANK:OFFSET` to stderr (repeatable; **all three fields are hex** — `7E:0200:20` is 32 bytes). The whole 24-bit space is readable: WRAM, ROM (including `$C0-$FF` HiROM banks), SRAM, coprocessor RAM; the `$2000-$5FFF` register band reads `0` (no side effects). An unmapped range reads `$FF` like the open bus, with a stderr note and an `unmapped` count in the JSON entry. Each result is mirrored into the `--out` JSON `peeks` array (see §2) — the machine-readable channel a harness should parse. |
+| `--peek <B:O:C>` | — | Hex-dump `COUNT` bytes at `BANK:OFFSET` to stderr (repeatable; **all three fields are hex** — `7E:0200:20` is 32 bytes). The whole 24-bit space is readable: WRAM, ROM (including `$C0-$FF` HiROM banks), SRAM, coprocessor RAM; the `$2000-$5FFF` register band reads `0` (no side effects), except the DMA channel registers `$4300-$437F`, which read their real values (`$FF` at power-on). An unmapped range reads `$FF` like the open bus, with a stderr note and an `unmapped` count in the JSON entry. Each result is mirrored into the `--out` JSON `peeks` array (see §2) — the machine-readable channel a harness should parse. |
 | `--dump-vram <PATH>` | — | Dump all 64 KB PPU VRAM (raw). |
 | `--dump-aram <PATH>` | — | Dump all 64 KB APU ARAM (raw). |
 | `--dump-coproc-ram <PATH>` | — | Dump coprocessor work RAM (Super FX Game Pak RAM), ungated. |
@@ -189,6 +190,15 @@ luna state -n 55000000 \
 # visual baseline (fbhash) and the assertion oracle (WDM) in one run.
 luna state -n 55000000 --input @repro.input \
   --print-fbhash --wdm-out /tmp/asserts.txt "game.sfc"
+
+# Two players: pad 1 presses Start, pad 2 holds A from frame 200; the
+# latched words land in `cpu_regs.joy1` / `cpu_regs.joy2`.
+luna state --until-frame 300 --input "100:0x1000,110:0" \
+  --input2 "200:0x0080" --out - "game.sfc"
+
+# Did the crt0 clear the DMA channels? `$43x0-$43xB` come up $FF on a real
+# console; a build that clears them reads zeros here.
+luna state -n 200 --power-on random --peek 00:4300:10 "game.sfc"
 ```
 
 Reproduce the golden harness's configuration exactly — it runs the homebrew
@@ -410,6 +420,7 @@ parked in `WAI` / `STP` under that label.
 | `--sym <PATH>` | auto `<rom>.sym` | Labels to fold onto. |
 | `--top <N>` | `25` | Rows printed (the JSON has them all). |
 | `--out <PATH>` | — | JSON report (`-` = stdout after the table): `{rom, from_frame, end_frame, total_mclk, instructions, entries: [{symbol, addr, instructions, mclk, idle_mclk, pct, pcs}]}`. |
+| `--pc-set <PATH>` | — | Write the set of executed PCs: every distinct 24-bit address that ran an instruction in the window, sorted, one little-endian `u32` each — the raw input of a code-coverage tool (fold onto `.sym` labels or a listing on your side). |
 | `--force-mapper`, `--force-region`, `--power-on` | — | As elsewhere. |
 
 ```bash
@@ -427,6 +438,18 @@ luna profile --from-frame 120 --until-frame 600 --top 5 game.sfc
 `stats.last_frame.cpu_wai` gives); a DMA burst's cost lands on the
 instruction that triggered it, so a "cheap" `STA $420B` routine can top
 the table — that is the real cost.
+
+```bash
+# Coverage: which addresses ran at all between frames 120 and 600?
+luna profile --from-frame 120 --until-frame 600 --pc-set /tmp/pcs.bin game.sfc
+# pc-set: 4182 distinct PCs -> /tmp/pcs.bin
+python3 -c "import struct,sys; d=open('/tmp/pcs.bin','rb').read(); \
+  print(*('%06X' % pc for (pc,) in struct.iter_unpack('<I', d)), sep='\n')" | head
+```
+
+Unmapped or WRAM-resident code is listed as it ran (`$7E:xxxx`, `$80:`
+FastROM mirrors and all): fold the mirrors yourself if your listing is in
+`$00:` terms.
 
 ### `luna wram-trace` — cross-emulator state differential
 
@@ -631,7 +654,9 @@ luna state -n 3000000 --force-mapper lorom --out - "WaveHDMA.sfc" \
 
 ## 3. Scripted joypad input (`--input`)
 
-Shared by `state`, `frames`, `wram-trace`, `bench`. Format:
+Shared by `state`, `frames`, `wram-trace`, `bench`; `state` (and a `luna
+test` manifest) also take `--input2` / `input2` for joypad 2, same
+grammar. Format:
 comma-separated `frame:hex` checkpoints — frame number in decimal, mask
 in hex (optional `0x`). The mask is latched at the **start** of the named
 PPU frame and held until the next checkpoint overrides it.
