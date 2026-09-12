@@ -1652,7 +1652,12 @@ impl Snes {
         let mut out = Vec::with_capacity(count);
         let mut unmapped = 0usize;
         for i in 0..count {
-            let off = offset.wrapping_add(i as u16);
+            // Walk the 24-bit address, so a range that runs off the end of a
+            // bank continues into the next one ($7E:FFFF → $7F:0000, the
+            // contiguous half of WRAM). Wrapping inside the bank silently
+            // re-read the bank's own start — a debugger range never means
+            // that.
+            let (bank, off) = next_debug_addr(bank, offset, i);
             let v = if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && off < 0x2000 {
                 // Low-RAM WRAM mirror.
                 self.wram[usize::from(off)]
@@ -1692,7 +1697,10 @@ impl Snes {
     pub fn dbg_poke_bytes(&mut self, bank: u8, offset: u16, data: &[u8]) -> usize {
         let mut written = 0;
         for (i, &b) in data.iter().enumerate() {
-            let off = offset.wrapping_add(i as u16);
+            // Same 24-bit walk as `dbg_peek_bytes_checked`: two bytes poked at
+            // $7E:FFFF used to land at $7E:FFFF and $7E:0000, clobbering the
+            // direct page instead of writing $7F:0000.
+            let (bank, off) = next_debug_addr(bank, offset, i);
             let idx = if matches!(bank, 0x7E..=0x7F) {
                 (usize::from(bank - 0x7E) << 16) | usize::from(off)
             } else if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && off < 0x2000 {
@@ -1705,6 +1713,22 @@ impl Snes {
         }
         written
     }
+}
+
+/// Event ceiling for the diagnostic ring-less logs (mailbox, SA-1 side).
+/// A log the caller forgets to drain must not grow until the process dies:
+/// the MCP server is long-running, and a game polling `$2140` produces
+/// millions of events per second. Past the cap events are dropped;
+/// `take_*` empties the buffer and logging resumes.
+pub const DEBUG_LOG_MAX_EVENTS: usize = 1 << 20;
+
+/// `bank:offset` advanced by `i` bytes through the flat 24-bit address
+/// space (it wraps at `$FF:FFFF`, as the bus does). Debug peeks and pokes
+/// walk memory, not a single bank.
+const fn next_debug_addr(bank: u8, offset: u16, i: usize) -> (u8, u16) {
+    let base = ((bank as u32) << 16) | offset as u32;
+    let addr = base.wrapping_add(i as u32) & 0x00FF_FFFF;
+    ((addr >> 16) as u8, addr as u16)
 }
 
 // =============================================================================
@@ -2842,7 +2866,11 @@ impl SnesBus<'_> {
             } else {
                 self.apu_real.cpu_read_port(port)
             };
-            if let Some(log) = self.mailbox_log.as_mut() {
+            if let Some(log) = self
+                .mailbox_log
+                .as_mut()
+                .filter(|l| l.len() < DEBUG_LOG_MAX_EVENTS)
+            {
                 log.push(MailboxEvent {
                     mclk_total: *self.mclk_total,
                     pc_full: self.cpu_pc_full,
@@ -2968,7 +2996,10 @@ impl SnesBus<'_> {
         }
         if let Some(v) = self.mapper.read(addr) {
             if let Some(reg) = Self::sa1_reg(addr)
-                && let Some(log) = self.sa1_log.as_mut()
+                && let Some(log) = self
+                    .sa1_log
+                    .as_mut()
+                    .filter(|l| l.len() < DEBUG_LOG_MAX_EVENTS)
             {
                 log.push(Sa1LogEvent {
                     mclk_total: *self.mclk_total,
@@ -3084,7 +3115,11 @@ impl SnesBus<'_> {
             // is only consulted when the real APU is dead.
             self.apu_real.cpu_write_port(port, value);
             self.apu_stub_fallback.write(port, value);
-            if let Some(log) = self.mailbox_log.as_mut() {
+            if let Some(log) = self
+                .mailbox_log
+                .as_mut()
+                .filter(|l| l.len() < DEBUG_LOG_MAX_EVENTS)
+            {
                 log.push(MailboxEvent {
                     mclk_total: *self.mclk_total,
                     pc_full: self.cpu_pc_full,
@@ -3217,7 +3252,10 @@ impl SnesBus<'_> {
             return;
         }
         if let Some(reg) = Self::sa1_reg(addr)
-            && let Some(log) = self.sa1_log.as_mut()
+            && let Some(log) = self
+                .sa1_log
+                .as_mut()
+                .filter(|l| l.len() < DEBUG_LOG_MAX_EVENTS)
         {
             log.push(Sa1LogEvent {
                 mclk_total: *self.mclk_total,
@@ -3422,6 +3460,49 @@ mod tests {
         );
         let ntsc = Snes::from_cartridge(demo_lorom());
         assert_eq!(ntsc.apu_real.master_clock_hz(), luna_apu::MASTER_CLOCK_HZ);
+    }
+
+    #[test]
+    fn debug_peek_and_poke_walk_into_the_next_bank() {
+        // A debugger range that runs off the end of a bank continues into
+        // the next one: $7E:FFFF + 1 is $7F:0000, the contiguous half of
+        // WRAM — not $7E:0000, which used to get clobbered.
+        let mut snes = Snes::from_cartridge(demo_lorom());
+        assert_eq!(snes.dbg_poke_bytes(0x7E, 0xFFFF, &[0xAA, 0xBB]), 2);
+        assert_eq!(snes.wram[0xFFFF], 0xAA, "last byte of $7E");
+        assert_eq!(snes.wram[0x1_0000], 0xBB, "first byte of $7F");
+        assert_eq!(snes.wram[0], 0, "$7E:0000 untouched");
+        assert_eq!(snes.dbg_peek_bytes(0x7E, 0xFFFF, 2), vec![0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn diagnostic_logs_stop_growing_at_their_cap() {
+        let mut snes = Snes::from_cartridge(demo_lorom());
+        snes.enable_mailbox_log();
+        if let Some(log) = snes.mailbox_log.as_mut() {
+            log.resize(
+                DEBUG_LOG_MAX_EVENTS,
+                MailboxEvent {
+                    mclk_total: 0,
+                    pc_full: 0,
+                    kind: MailboxEventKind::Read,
+                    port: 0,
+                    value: 0,
+                },
+            );
+        }
+        // At the cap, further traffic is dropped rather than queued.
+        for _ in 0..64 {
+            snes.step();
+        }
+        assert_eq!(
+            snes.mailbox_log.as_ref().map(Vec::len),
+            Some(DEBUG_LOG_MAX_EVENTS),
+            "a full log must stop growing"
+        );
+        // Draining it re-opens capture.
+        assert_eq!(snes.take_mailbox_log().len(), DEBUG_LOG_MAX_EVENTS);
+        assert_eq!(snes.mailbox_log.as_ref().map(Vec::len), Some(0));
     }
 
     #[test]

@@ -1190,7 +1190,14 @@ impl Cpu {
         // fetched). Record that address so a captured hit is locatable.
         let pc_full = (u32::from(self.pb) << 16) | u32::from(self.pc);
         let operand = self.fetch_u8(bus);
-        if let Some(log) = self.wdm_log.as_mut() {
+        // Bounded like the other diagnostic logs: a ROM that hits `WDM` in
+        // a loop must not grow the buffer without end in a long-running
+        // session. `take_wdm_log` empties it and capture resumes.
+        if let Some(log) = self
+            .wdm_log
+            .as_mut()
+            .filter(|l| l.len() < Self::WDM_LOG_MAX_EVENTS)
+        {
             log.push((pc_full, operand));
         }
     }
