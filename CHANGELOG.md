@@ -19,6 +19,14 @@ All notable user-facing changes to luna. Releases are cut from `main`
   Residual: the framebuffer still stores 224 rows, so a 239-line overscan
   picture is timed correctly but its last lines are not displayed.
 
+- **Accesses during the active display follow hardware.** `$2104` writes
+  and `$2138` reads are no longer dropped: they land at the sprite
+  evaluation is looking at, as on hardware (ares `io.cpp:31-45`; Mesen2
+  names Uniracers as the title that depends on it). VRAM reads, and the
+  read buffer behind them, return 0 while the PPU owns the bus instead of
+  handing out real data. Residual: CGRAM accesses during the picture still
+  use the CPU's address rather than the PPU's internal one.
+
 ### Changed
 - Three regression baselines re-recorded: two PeterLemon PPU demos and one
   SPC700 audio ROM, all three run as PAL by the harness, whose animation

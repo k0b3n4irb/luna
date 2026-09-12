@@ -1691,6 +1691,35 @@ pub(crate) struct SpriteEval {
     pub(crate) time_over: bool,
 }
 
+/// ares `latch.oamAddress`: the sprite index object evaluation last found
+/// **on** the scanline, as of dot `dot` of the line it is evaluating.
+///
+/// ares walks one sprite every 8 master clocks (one per 2 dots) in
+/// `main.cpp`'s `cycleObjectEvaluate`, and latches the index whenever the
+/// sprite is on the line (`object.cpp:44`). The CPU sees that latch
+/// through `$2104` and `$2138` while the picture is being drawn.
+/// Evaluation stops after 32 items, so the latch then stays put for the
+/// rest of the line.
+pub(crate) fn obj_eval_latch(ppu: &Ppu, sprites: &[SpriteEntry; 128], y: u16, dot: u16) -> u8 {
+    let first = usize::from(ppu.oam.first_sprite());
+    let interlace = ppu.setini & 0x02 != 0;
+    let last_index = usize::from(dot >> 1).min(127);
+    let mut item_count = 0usize;
+    let mut latch = 0u8;
+    for index in 0..=last_index {
+        if item_count > 32 {
+            break;
+        }
+        let sprite = (first + index) & 0x7F;
+        if !sprite_on_line(&sprites[sprite], y, interlace) {
+            continue;
+        }
+        latch = sprite as u8;
+        item_count += 1;
+    }
+    latch
+}
+
 /// Evaluate one scanline's sprites: the 32-sprite range limit and the
 /// 34-tile time limit, starting from `firstSprite` (OAM priority
 /// rotation). ares `object.cpp:35-49,91-161`, Mesen2
@@ -2826,6 +2855,33 @@ mod tests {
             Some((129, 0)),
             "rectangular vflip mirrors within the top half (row 15, not 31)"
         );
+    }
+
+    #[test]
+    fn obj_eval_latch_follows_the_line_evaluation() {
+        // ares walks one sprite per 2 dots from `firstSprite` and latches
+        // every index that is ON the line (`object.cpp:44`). Park all
+        // sprites off-line except 3 and 10, both on line 0.
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F);
+        for i in 0..128u16 {
+            p.oam.poke(i * 4 + 1, 200); // y = 200: off line 0
+        }
+        p.oam.poke(3 * 4 + 1, 0); // sprite 3 on line 0
+        p.oam.poke(10 * 4 + 1, 0); // sprite 10 on line 0
+        let sprites = decode_all_sprites(&p);
+        // Before sprite 3 is reached (index 3 → dot 6) nothing is latched.
+        assert_eq!(obj_eval_latch(&p, &sprites, 0, 4), 0);
+        assert_eq!(obj_eval_latch(&p, &sprites, 0, 6), 3, "sprite 3 latched");
+        assert_eq!(obj_eval_latch(&p, &sprites, 0, 18), 3, "still 3 until 10");
+        assert_eq!(obj_eval_latch(&p, &sprites, 0, 20), 10, "sprite 10 latched");
+        assert_eq!(
+            obj_eval_latch(&p, &sprites, 0, 255),
+            10,
+            "holds to line end"
+        );
+        // A line with no sprites on it never latches.
+        assert_eq!(obj_eval_latch(&p, &sprites, 100, 255), 0);
     }
 
     #[test]

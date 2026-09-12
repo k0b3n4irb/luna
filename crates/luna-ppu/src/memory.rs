@@ -109,10 +109,16 @@ impl Vram {
     /// Set the word address (`$2116/$2117` writes). The hardware also
     /// triggers a prefetch of the byte at the new address.
     pub fn set_address(&mut self, lo: u8, hi: u8) {
+        self.set_address_gated(lo, hi, true);
+    }
+
+    /// `$2116/$2117` variant honouring the active-display gate: the PPU
+    /// owns the VRAM bus while the picture is being drawn, so the
+    /// prefetch reads back `0` rather than real data (ares `io.cpp:19-22`
+    /// `readVRAM`, Mesen2 `SnesPpu.cpp:1695`).
+    pub fn set_address_gated(&mut self, lo: u8, hi: u8, allow_data: bool) {
         self.address = u16::from(lo) | (u16::from(hi) << 8);
-        let byte_addr = self.byte_addr();
-        self.prefetch_lo = self.data[byte_addr];
-        self.prefetch_hi = self.data[byte_addr.wrapping_add(1) & 0xFFFF];
+        self.fill_prefetch(allow_data);
     }
 
     /// Compute the byte address for the current word address, applying
@@ -164,9 +170,15 @@ impl Vram {
     /// Read the low byte (`$2139`). Returns the buffered byte first,
     /// then refills the buffer.
     pub fn read_lo(&mut self) -> u8 {
-        let v = self.prefetch_lo;
+        self.read_lo_gated(true)
+    }
+
+    /// `$2139` variant honouring the active-display gate (see
+    /// [`Self::set_address_gated`]): the byte and the refill both read 0.
+    pub fn read_lo_gated(&mut self, allow_data: bool) -> u8 {
+        let v = if allow_data { self.prefetch_lo } else { 0 };
         if !self.vmain.increment_on_high {
-            self.refill_prefetch();
+            self.fill_prefetch(allow_data);
             self.advance();
         }
         v
@@ -174,15 +186,27 @@ impl Vram {
 
     /// Read the high byte (`$213A`).
     pub fn read_hi(&mut self) -> u8 {
-        let v = self.prefetch_hi;
+        self.read_hi_gated(true)
+    }
+
+    /// `$213A` variant honouring the active-display gate.
+    pub fn read_hi_gated(&mut self, allow_data: bool) -> u8 {
+        let v = if allow_data { self.prefetch_hi } else { 0 };
         if self.vmain.increment_on_high {
-            self.refill_prefetch();
+            self.fill_prefetch(allow_data);
             self.advance();
         }
         v
     }
 
-    fn refill_prefetch(&mut self) {
+    /// Refill the read buffer from the current address, or with `0` when
+    /// the PPU owns the VRAM bus (active display).
+    fn fill_prefetch(&mut self, allow_data: bool) {
+        if !allow_data {
+            self.prefetch_lo = 0;
+            self.prefetch_hi = 0;
+            return;
+        }
         let byte_addr = self.byte_addr();
         self.prefetch_lo = self.data[byte_addr];
         self.prefetch_hi = self.data[byte_addr.wrapping_add(1) & 0xFFFF];
@@ -487,42 +511,68 @@ impl Oam {
     /// `$2104` write — OAM data write with the even/odd dance for the
     /// low table and direct byte write for the high table.
     pub fn write(&mut self, value: u8) {
-        self.write_gated(value, true);
-    }
-
-    /// `$2104` variant honouring gap G7: when `allow_data` is `false`
-    /// (active display), the byte is dropped but the even/odd latch
-    /// and the address counter still advance, matching the spirit of
-    /// ares (`ppu_io.cpp:40-45`) and Mesen2 (`SnesPpu.cpp:1916-1927`).
-    pub fn write_gated(&mut self, value: u8, allow_data: bool) {
         let addr = self.address;
         if addr & 0x200 != 0 {
-            // High table. The byte is `0x200 | (addr & 0x1F)` — the high
-            // table is indexed by the LOW 5 bits of the address only,
-            // confirmed by both references: ares `ppu/oam.cpp` `OAM::write`
-            // (`n = (n5)address << 2` for the bit-9 branch) and Mesen2
-            // `SnesPpu.cpp:1747` (`_oamRam[0x200 | (oamAddr & 0x1F)]`).
-            // So `addr & 0x21F` is CORRECT here — do NOT "simplify" it to
-            // `% self.data.len()`: for an `addr >= 0x220` (reachable when
-            // OAMADD points past the high table) that modulo wraps into
-            // the low table (e.g. 0x3FE → 0x1DE) instead of the hardware
-            // high-table byte (0x21E).
-            if allow_data {
-                let off = usize::from(addr & 0x21F);
-                self.data[off] = value;
-            }
+            // High table: indexed by the LOW 5 bits of the address only —
+            // ares `ppu/oam.cpp` `OAM::write` and Mesen2
+            // `SnesPpu.cpp:1747` (`_oamRam[0x200 | (oamAddr & 0x1F)]`), so
+            // `addr & 0x21F` is CORRECT here; do NOT "simplify" it to
+            // `% self.data.len()`, which would wrap an `addr >= 0x220`
+            // into the low table instead of the hardware high-table byte.
+            self.data[usize::from(addr & 0x21F)] = value;
         } else if addr & 1 == 0 {
-            // Even byte: always update the latch (kept identical to
-            // the un-gated path so the next odd-byte commit composes
-            // correctly when display turns back on).
             self.latch = value;
-        } else if allow_data {
-            // Odd byte: commit the pair only when allowed.
+        } else {
             let even_off = usize::from(addr.wrapping_sub(1) & 0x1FF);
             self.data[even_off] = self.latch;
             self.data[even_off + 1] = value;
         }
         self.advance();
+    }
+
+    /// `$2104` write while the PPU is drawing the picture. Hardware does
+    /// not drop the byte: the OAM address bus belongs to sprite
+    /// evaluation, so the write lands at the **sprite currently being
+    /// evaluated** (ares `io.cpp:39-45` `writeOAM`: low table
+    /// `0x000 | latch.oamAddress << 2 | address & 1`, high table
+    /// `0x200 | latch.oamAddress >> 2`; Mesen2 `SnesPpu.cpp:1916-1948`,
+    /// commented "needed for Uniracers"). The even/odd latch dance and
+    /// the address counter are unchanged — only the destination moves.
+    ///
+    /// `obj_latch` is that sprite index (see `Ppu::obj_eval_latch`).
+    ///
+    /// The two references differ on one detail: Mesen2 ALSO mirrors the
+    /// write into the high table (`0x200 | ((oamAddr & 0x1F0) >> 4)`)
+    /// while rendering, and switches from the evaluation index to the
+    /// tile-fetch index past dot 255. ares does neither; luna follows
+    /// ares, the gold standard.
+    pub fn write_during_render(&mut self, value: u8, obj_latch: u8) {
+        let addr = self.address;
+        if addr & 0x200 != 0 {
+            self.data[0x200 | usize::from(obj_latch >> 2)] = value;
+        } else if addr & 1 == 0 {
+            self.latch = value;
+        } else {
+            // ares commits the pair at `(address & ~1) + 0` and `+ 1`, both
+            // redirected: the low bit survives into the target offset.
+            let base = usize::from(obj_latch) << 2;
+            self.data[base] = self.latch;
+            self.data[base + 1] = value;
+        }
+        self.advance();
+    }
+
+    /// `$2138` read while the PPU is drawing: same redirection as
+    /// [`Self::write_during_render`] (ares `io.cpp:31-37` `readOAM`).
+    pub fn read_during_render(&mut self, obj_latch: u8) -> u8 {
+        let off = if self.address & 0x200 != 0 {
+            0x200 | usize::from(obj_latch >> 2)
+        } else {
+            (usize::from(obj_latch) << 2) | usize::from(self.address & 1)
+        };
+        let value = self.data[off];
+        self.advance();
+        value
     }
 
     /// `$2138` read — OAM data read at the current byte address.
@@ -738,19 +788,63 @@ mod tests {
     }
 
     #[test]
-    fn oam_write_gated_drops_pair_but_advances_address() {
+    fn vram_reads_are_zero_while_the_display_is_active() {
+        // ares `io.cpp:19-22`: the PPU owns the VRAM bus during the
+        // picture, so a CPU read (and the prefetch behind it) returns 0.
+        let mut v = Vram::new();
+        v.poke(0x0000, 0x11);
+        v.poke(0x0001, 0x22);
+        v.poke(0x0002, 0x33);
+        v.set_address(0x00, 0x00);
+        assert_eq!(v.read_lo(), 0x11, "blanked: real data");
+
+        let mut v = Vram::new();
+        v.poke(0x0000, 0x11);
+        v.poke(0x0002, 0x33);
+        v.set_address_gated(0x00, 0x00, false);
+        assert_eq!(v.read_lo_gated(false), 0, "active display: reads 0");
+        assert_eq!(v.read_lo_gated(false), 0, "…and the refill too");
+        // Back in blank, the buffer refills from the live address.
+        assert_eq!(v.address, 2, "address kept advancing");
+    }
+
+    #[test]
+    fn oam_write_during_render_redirects_to_the_evaluated_sprite() {
+        // ares `io.cpp:39-45`: while the picture is drawn the pair lands at
+        // `latch.oamAddress << 2` (+1), not at the CPU's own address, and
+        // the address counter still advances.
         let mut o = Oam::new();
         o.set_address_low(0x00);
-        o.write_gated(0x11, false); // even — latch only
-        o.write_gated(0x22, false); // odd — would commit, but dropped
-        assert_eq!(o.peek(0), 0, "low-table byte 0 must stay zero");
-        assert_eq!(o.peek(1), 0, "low-table byte 1 must stay zero");
-        assert_eq!(o.address, 2, "address advanced past the dropped pair");
-        // Re-enable data path: next pair lands at addr 2/3.
-        o.write_gated(0x33, true);
-        o.write_gated(0x44, true);
-        assert_eq!(o.peek(2), 0x33);
-        assert_eq!(o.peek(3), 0x44);
+        o.write_during_render(0x11, 9); // even — latch only
+        o.write_during_render(0x22, 9); // odd — commits at sprite 9
+        assert_eq!(o.peek(0), 0, "the CPU's own address is untouched");
+        assert_eq!(o.peek(1), 0);
+        assert_eq!(o.peek(9 * 4), 0x11, "redirected to sprite 9, byte 0");
+        assert_eq!(o.peek(9 * 4 + 1), 0x22, "sprite 9, byte 1");
+        assert_eq!(o.address, 2, "address advanced past the pair");
+
+        // High table: `0x200 | latch >> 2`.
+        let mut o = Oam::new();
+        o.set_address_high(0x01); // word $100 → byte $200
+        o.write_during_render(0x5A, 9);
+        assert_eq!(o.peek(0x200 | (9 >> 2)), 0x5A);
+
+        // Outside the active display the write goes where the CPU asked.
+        let mut o = Oam::new();
+        o.set_address_low(0x00);
+        o.write(0x33);
+        o.write(0x44);
+        assert_eq!((o.peek(0), o.peek(1)), (0x33, 0x44));
+    }
+
+    #[test]
+    fn oam_read_during_render_reads_the_evaluated_sprite() {
+        let mut o = Oam::new();
+        o.poke(7 * 4, 0xAB);
+        o.poke(7 * 4 + 1, 0xCD);
+        o.set_address_low(0x40); // word $40 → byte $80, far from sprite 7
+        assert_eq!(o.read_during_render(7), 0xAB);
+        assert_eq!(o.read_during_render(7), 0xCD, "low bit follows the address");
     }
 
     #[test]
