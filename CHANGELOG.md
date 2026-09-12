@@ -4,7 +4,13 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.20.0] — 2026-09-12
+
+The faithful-port release: five lots from the 2026-09-11 subsystem audit,
+each read line for line in ares and Mesen2 before the code moved — the
+hardware VBlank line, what happens when the CPU touches the PPU while it
+is drawing, the SA-1's character conversion, the power-on machine, and a
+round of tooling robustness.
 
 ### Fixed
 - **VBlank starts on the hardware line in both regions.** It followed the
