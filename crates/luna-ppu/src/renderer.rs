@@ -586,9 +586,20 @@ pub(crate) fn render_scanline_partial_into_from(
         ];
         (s, s)
     };
+    // Sprites are fetched one line AHEAD of the line they appear on: ares
+    // `Object::scanline` evaluates with `t.y = vcounter()` and `Object::run`
+    // paints from the PREVIOUS line's tile buffer (`t.tile[!t.active]`,
+    // `object.cpp:16-22,57-61`); Mesen2 evaluates `_scanline` and draws on
+    // the next one (`SnesPpu.cpp:595-625`). So framebuffer row `y-1` — the
+    // row this call commits, per the hardware line origin — takes the
+    // sprites evaluated on PPU line `y-1`, while the BGs above use line `y`.
+    // Keying sprites on `y` like the BGs drew every sprite one row too
+    // high, and leaked a sprite parked just below the picture (Y = 224)
+    // onto the last visible row — Kirby's Dream Land 3 level-select map.
+    let obj_y = y.wrapping_sub(1);
     let sprites = match precomp {
-        Some((s, e)) => render_sprites_scanline_indexed_from(ppu, y, opts, s, e),
-        None => render_sprites_scanline_indexed_with(ppu, y, opts),
+        Some((s, e)) => render_sprites_scanline_indexed_from(ppu, obj_y, opts, s, e),
+        None => render_sprites_scanline_indexed_with(ppu, obj_y, opts),
     };
 
     for (x, out_pixel) in out[start..end]
@@ -1185,19 +1196,16 @@ const MODE2OR3_TABLE: &[LayerSlot] = &[
     bg(1, 0),
 ];
 
-// Modes 5/6 (hi-res, BG1 + BG2 only) — same layer order as Mode 1
-// minus BG3:
-//   OBJ3, BG1H, BG2H, OBJ2, BG1L, BG2L, OBJ1, OBJ0
-const MODE56_TABLE: &[LayerSlot] = &[
-    obj(3),
-    bg(0, 1),
-    bg(1, 1),
-    obj(2),
-    bg(0, 0),
-    bg(1, 0),
-    obj(1),
-    obj(0),
-];
+// Mode 5 (hi-res, BG1 + BG2) uses the Mode 2 priorities (ares `io.cpp`
+// `updateVideoMode` case 5: BG1 = 3/7, BG2 = 1/5, OBJ = 2/4/6/8; Mesen2
+// `RenderMode5`; anomie-regs "OBJ3, BG1.1, OBJ2, BG2.1, OBJ1, BG1.0, OBJ0,
+// BG2.0") — not Mode 1 minus BG3:
+//   OBJ3, BG1H, OBJ2, BG2H, OBJ1, BG1L, OBJ0, BG2L
+const MODE5_TABLE: &[LayerSlot] = MODE2OR3_TABLE;
+
+// Mode 6 (hi-res, BG1 only): ares case 6 — BG1 = 2/5, OBJ = 1/3/4/6:
+//   OBJ3, BG1H, OBJ2, OBJ1, BG1L, OBJ0
+const MODE6_TABLE: &[LayerSlot] = &[obj(3), bg(0, 1), obj(2), obj(1), bg(0, 0), obj(0)];
 
 // Mode 7: just BG1 (affine) and OBJ. Standard hardware convention:
 //   OBJ3, OBJ2, OBJ1, BG1, OBJ0
@@ -1225,7 +1233,8 @@ const fn priority_table(bgmode: u8) -> &'static [LayerSlot] {
             }
         }
         2..=4 => MODE2OR3_TABLE,
-        5 | 6 => MODE56_TABLE,
+        5 => MODE5_TABLE,
+        6 => MODE6_TABLE,
         7 => MODE7_TABLE,
         _ => MODE1_BG3LO_TABLE, // unreachable (bgmode & 7 ∈ 0..=7)
     }
@@ -2836,10 +2845,25 @@ mod tests {
         p.vram.poke(0x00, 0x80);
         let scan = render_sprites_scanline_indexed_with(&p, 0, RenderOptions::default());
         assert_eq!(scan[0], Some((129, 0)), "default: sprite 0 wins");
-        p.write(register::OAMADDL, 0x04); // word addr 4 → firstSprite 1
+        p.write(register::OAMADDL, 0x02); // word addr 2 = byte 4 → firstSprite 1
         p.write(register::OAMADDH, 0x80); // priority rotation
         let scan = render_sprites_scanline_indexed_with(&p, 0, RenderOptions::default());
         assert_eq!(scan[0], Some((145, 0)), "rotation → sprite 1 wins");
+    }
+
+    #[test]
+    fn oam_priority_rotation_follows_the_live_byte_address() {
+        // anomie-regs: "if you set $2102/3 to $104, then write 4 bytes,
+        // sprite 3 will have priority" — word $104 → sprite $82 & $7F = 2,
+        // and 4 data writes advance the byte address by one sprite.
+        let mut p = Ppu::new();
+        p.write(register::OAMADDL, 0x04);
+        p.write(register::OAMADDH, 0x81); // word $104, rotation on
+        assert_eq!(p.oam.first_sprite(), 2);
+        for _ in 0..4 {
+            p.write(register::OAMDATA, 0);
+        }
+        assert_eq!(p.oam.first_sprite(), 3);
     }
 
     #[test]
@@ -3986,6 +4010,30 @@ mod tests {
         assert!(matches!(hi[0].kind, LayerKind::Bg));
         assert_eq!(hi[0].idx, 2);
         assert_eq!(hi[0].bg_prio, 1);
+    }
+
+    /// Render a priority table as labels (front-most first), e.g. `O3 B0H`.
+    fn table_labels(t: &[LayerSlot]) -> Vec<String> {
+        t.iter()
+            .map(|s| match s.kind {
+                LayerKind::Obj => format!("O{}", s.idx),
+                LayerKind::Bg => format!("B{}{}", s.idx, if s.bg_prio == 1 { 'H' } else { 'L' }),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn hires_mode_priorities_match_ares_update_video_mode() {
+        // ares io.cpp `updateVideoMode`: mode 5 = BG1 3/7, BG2 1/5,
+        // OBJ 2/4/6/8 (same as mode 2); mode 6 = BG1 2/5, OBJ 1/3/4/6.
+        assert_eq!(
+            table_labels(priority_table(0x05)),
+            ["O3", "B0H", "O2", "B1H", "O1", "B0L", "O0", "B1L"]
+        );
+        assert_eq!(
+            table_labels(priority_table(0x06)),
+            ["O3", "B0H", "O2", "O1", "B0L", "O0"]
+        );
     }
 
     #[test]

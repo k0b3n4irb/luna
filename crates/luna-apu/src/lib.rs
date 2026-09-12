@@ -102,6 +102,15 @@ pub const MASTER_CYCLES_PER_SPC_STEP: u32 = 84;
 /// NTSC SNES master clock (Hz) — the CPU/PPU timebase.
 pub const MASTER_CLOCK_HZ: u64 = 21_477_272;
 
+/// PAL SNES master clock (Hz). The APU keeps its own crystal in both
+/// regions, so on PAL the CPU→SPC clock ratio must be computed against this
+/// value (Mesen2 `Spc.cpp:126` divides by `GetMasterClockRate()`).
+pub const PAL_MASTER_CLOCK_HZ: u64 = 21_281_370;
+
+const fn default_master_hz() -> u64 {
+    MASTER_CLOCK_HZ
+}
+
 /// SPC700 / S-DSP clock (Hz): the APU crystal ÷ 24. The crystal is
 /// nominally 24.576 MHz (→ 1.024 MHz) but real hardware measures
 /// ~24.607 MHz; ares (`apuFrequency = 32040·768`) and Mesen2 both use the
@@ -221,11 +230,16 @@ pub struct Apu {
     /// accumulated with zero drift. The SPC chases `cpu_target_2x - 1`.
     #[serde(default)]
     cpu_target_2x: u64,
-    /// Fractional remainder of [`Self::cpu_target_2x`] (`< MASTER_CLOCK_HZ`):
+    /// Fractional remainder of [`Self::cpu_target_2x`] (`< master_hz`):
     /// the sub-unit phase of `master_clock × clockRatio`, needed to decide a
     /// mailbox write's immediate-vs-pending visibility exactly like Mesen.
     #[serde(default)]
     cpu_clock_frac: u64,
+    /// Master clock (Hz) of the console driving this APU: the denominator
+    /// of the CPU→SPC clock ratio. NTSC by default; PAL consoles call
+    /// [`Self::set_master_clock_hz`] with [`PAL_MASTER_CLOCK_HZ`].
+    #[serde(default = "default_master_hz")]
+    master_hz: u64,
     /// `$F1` SPC control register — bit 7 (use IPL ROM) is the only
     /// bit we honour for now; the rest are stored verbatim for round-
     /// trip diagnostics.
@@ -245,7 +259,8 @@ pub struct Apu {
 
     // ------------- DSP (audio synth) — owned by `dsp` -------------
     /// Last value written to `$F2` — the DSP register-index port.
-    /// `$F3` reads/writes `dsp.registers[dsp_index & 0x7F]` via
+    /// `$F3` reads `dsp.registers[dsp_index & 0x7F]` (writes only when
+    /// bit 7 is clear — `$80-$FF` are read-only mirrors) via
     /// [`dsp::Dsp::read`] / [`dsp::Dsp::write`], which fans out the
     /// data to the relevant Voice/Echo/Noise/etc field.
     pub dsp_index: u8,
@@ -330,6 +345,7 @@ impl Apu {
             spc_pos_2x: 0,
             cpu_target_2x: 0,
             cpu_clock_frac: 0,
+            master_hz: MASTER_CLOCK_HZ,
             control: 0x80, // bit 7: IPL ROM exposed
             test: 0x0A,    // timersEnable + ramWritable (ares power-on)
             past_iplrom: false,
@@ -489,7 +505,7 @@ impl Apu {
         }
         self.new_to_spc_ports[port] = value;
         // `master_clock·ratio − Cycle = (cpu_target_2x − spc_pos_2x) + frac`,
-        // where `frac = cpu_clock_frac / MASTER_CLOCK_HZ ∈ [0,1)`. After
+        // where `frac = cpu_clock_frac / master_hz ∈ [0,1)`. After
         // `run_to_target`, `cpu_target_2x − spc_pos_2x ∈ {0, 1}`. So the
         // write is immediate unless the SPC stopped exactly one unit short
         // *and* there is a non-zero fractional phase.
@@ -499,6 +515,21 @@ impl Apu {
         } else {
             self.pending_cpu_reg_update = true;
         }
+    }
+
+    /// Set the master clock (Hz) of the console driving this APU. The SPC
+    /// runs from its own crystal in every region, so a PAL console (whose
+    /// master clock is slower) must pass [`PAL_MASTER_CLOCK_HZ`] or the SPC
+    /// loses ~0.9 % of its cycles. Resets the fractional phase.
+    pub const fn set_master_clock_hz(&mut self, hz: u64) {
+        self.master_hz = hz;
+        self.cpu_clock_frac = 0;
+    }
+
+    /// Master clock (Hz) this APU's clock ratio is computed against.
+    #[must_use]
+    pub const fn master_clock_hz(&self) -> u64 {
+        self.master_hz
     }
 
     /// Drain up to `max` queued stereo samples into `out`, in oldest-
@@ -533,10 +564,10 @@ impl Apu {
         // Advance the CPU's position in the 2× SPC clock domain (Mesen2
         // `_state.Cycle` units = `master_clock × clockRatio`), carrying the
         // fractional remainder so the long-run rate is exactly
-        // `SPC_2X_HZ / MASTER_CLOCK_HZ` with zero drift.
+        // `SPC_2X_HZ / master_hz` with zero drift.
         self.cpu_clock_frac += u64::from(mclk) * SPC_2X_HZ;
-        self.cpu_target_2x += self.cpu_clock_frac / MASTER_CLOCK_HZ;
-        self.cpu_clock_frac %= MASTER_CLOCK_HZ;
+        self.cpu_target_2x += self.cpu_clock_frac / self.master_hz;
+        self.cpu_clock_frac %= self.master_hz;
         self.run_to_target();
     }
 
@@ -975,8 +1006,12 @@ impl SpcBus for ApuBusView<'_> {
             // ESA/DIR/EON/PMON fanout, per-voice volume/pitch/SRCN/
             // ADSR/GAIN demuxing, FIR taps) matching ares' memory.cpp.
             0x00F3 => {
-                let idx = *self.dsp_index & 0x7F;
-                self.dsp.write(idx, value);
+                // `$80-$FF` are read-only mirrors of `$00-$7F`: a write
+                // through them is dropped (ares `smp/io.cpp:133`, Mesen2
+                // `Spc.cpp:326`). Only reads mirror.
+                if *self.dsp_index & 0x80 == 0 {
+                    self.dsp.write(*self.dsp_index, value);
+                }
             }
             // $F4-$F7 — mailbox TO the main CPU.
             0x00F4..=0x00F7 => self.to_cpu_ports[(addr - 0x00F4) as usize] = value,
@@ -1032,6 +1067,33 @@ mod tests {
         // Re-enable → IPL ROM again.
         apu.control = 0x80;
         assert_eq!(apu.peek(IPL_ROM_BASE), IPL_ROM[0]);
+    }
+
+    /// One emulated second of master clock must yield the APU's own
+    /// 32 040 Hz sample rate in BOTH regions — the SPC has its own crystal,
+    /// so only the CPU→SPC ratio's denominator changes (Mesen2
+    /// `Spc.cpp:126`). With the NTSC ratio on a PAL console the SPC fell
+    /// ~0.9 % short (≈ 31 748 samples/s).
+    #[test]
+    fn one_second_of_master_clock_yields_32040_samples_per_region() {
+        for (hz, label) in [(MASTER_CLOCK_HZ, "NTSC"), (PAL_MASTER_CLOCK_HZ, "PAL")] {
+            let mut apu = Apu::new();
+            apu.set_master_clock_hz(hz);
+            let mut out = Vec::new();
+            let chunk = 1364u64; // one scanline of master clock
+            let mut left = hz;
+            while left > 0 {
+                let n = left.min(chunk);
+                apu.step(n as u32);
+                left -= n;
+                apu.drain_audio(&mut out, usize::MAX);
+            }
+            let got = out.len() as i64;
+            assert!(
+                (got - 32_040).abs() <= 2,
+                "{label}: {got} samples in one emulated second, want 32 040"
+            );
+        }
     }
 
     #[test]
@@ -1094,6 +1156,11 @@ mod tests {
         // Index bit 7 is masked when indexing the register array.
         bus.write(0x00F2, 0x88); // bit 7 set + same index 8
         assert_eq!(bus.read(0x00F3), 0x42, "bit 7 of index should be masked");
+        // …but only for reads: `$80-$FF` are read-only mirrors, a write
+        // through them is dropped (ares smp/io.cpp:133, Mesen2 Spc.cpp:326).
+        bus.write(0x00F3, 0x99);
+        bus.write(0x00F2, 0x08);
+        assert_eq!(bus.read(0x00F3), 0x42, "write via $88 must not reach $08");
     }
 
     #[test]

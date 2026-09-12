@@ -557,7 +557,10 @@ impl Ppu {
         // Evaluate this line's sprites ONCE (cached + reused by every
         // segment, PERF-3) and OR in the overflow flags. Blank lines
         // contribute no flags (matching the old guard) and need no decode.
-        if self.inidisp & 0x80 == 0 {
+        // ares evaluates objects for lines 0..=vdisp-2 (`object.cpp:32`),
+        // i.e. exactly the lines that feed the visible rows; PPU line 0
+        // displays nothing, so it evaluates nothing here.
+        if self.inidisp & 0x80 == 0 && y > 0 {
             self.ensure_line_sprites(y);
             let (range_over, time_over) = self
                 .line_sprites
@@ -581,7 +584,10 @@ impl Ppu {
             return;
         }
         let sprites = decode_all_sprites(self);
-        let eval = evaluate_sprite_line(self, &sprites, y);
+        // Evaluated one line ahead of the row it lands on (see the
+        // `obj_y` note in `renderer::render_scanline_partial_into_from`):
+        // the cache key stays the PPU line `y` the caller asked for.
+        let eval = evaluate_sprite_line(self, &sprites, y.wrapping_sub(1));
         self.line_sprites = Some((y, Box::new((sprites, eval))));
     }
 

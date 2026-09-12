@@ -356,7 +356,16 @@ fn parse_at(rom: &[u8], off: usize) -> Header {
     // S-DD1 (graphics decompression — Star Ocean, Street Fighter Alpha 2):
     // chipset high nibble 4. LoROM-based; the chip is a `Sdd1Mapper` shim.
     let is_sdd1 = (chipset & 0x0F) >= 0x03 && (chipset & 0xF0) == 0x40;
-    let base_kind = mapper_from_byte(map_byte).unwrap_or(MapperKind::LoRom);
+    // ares `super-famicom.cpp` board(): the map mode only counts when it
+    // is one of the exact documented values; otherwise (many titles let
+    // an extra title character overwrite it — Contra III carries `$53`)
+    // the layout comes from where the header was found. One title
+    // overwrites it with a plausible-looking `!` (`$21`) on a LoROM board.
+    let base_kind = if title == "YUYU NO QUIZ DE GO!GO" {
+        MapperKind::LoRom
+    } else {
+        mapper_from_byte(map_byte).unwrap_or_else(|| mapper_from_offset(off))
+    };
     // DSP-1 boards exist in both LoROM (DR/SR at $8000) and HiROM (DR/SR at
     // $6000) flavours — the base layout follows the map byte.
     let dsp_hirom = matches!(base_kind, MapperKind::HiRom | MapperKind::ExHiRom);
@@ -412,13 +421,28 @@ fn parse_at(rom: &[u8], off: usize) -> Header {
     }
 }
 
+/// Map mode byte (`$FFD5`) → layout, accepting only the exact values ares
+/// recognises (`board()` in mia/medium/super-famicom.cpp), `FastROM` bit
+/// (`$10`) either way. `$22/$32` is the S-DD1 board, LoROM-based in luna.
+/// Any other value (`$2A/$3A` SPC7110 included) is `None`: the caller falls
+/// back to the header location.
 const fn mapper_from_byte(byte: u8) -> Option<MapperKind> {
-    match byte & 0x0F {
-        0 => Some(MapperKind::LoRom),
-        1 => Some(MapperKind::HiRom),
-        3 => Some(MapperKind::Sa1),
-        5 => Some(MapperKind::ExHiRom),
+    match byte {
+        0x20 | 0x30 | 0x22 | 0x32 => Some(MapperKind::LoRom),
+        0x21 | 0x31 => Some(MapperKind::HiRom),
+        0x23 | 0x33 => Some(MapperKind::Sa1),
+        0x25 | 0x35 => Some(MapperKind::ExHiRom),
         _ => None,
+    }
+}
+
+/// Layout implied by where the internal header was found — ares' fallback
+/// when the map mode byte is not a recognised value.
+const fn mapper_from_offset(off: usize) -> MapperKind {
+    match off {
+        HEADER_OFFSET_HIROM => MapperKind::HiRom,
+        HEADER_OFFSET_EXHIROM => MapperKind::ExHiRom,
+        _ => MapperKind::LoRom,
     }
 }
 
@@ -495,6 +519,43 @@ mod tests {
             parse_at(&rom, HEADER_OFFSET_LOROM).mapper_kind,
             MapperKind::Sa1
         );
+    }
+
+    #[test]
+    fn unrecognised_map_mode_falls_back_to_header_location() {
+        // Contra III (USA) carries map byte $53: its low nibble (3) used to
+        // select SA-1. ares only accepts exact values, then falls back to
+        // the header location — here LoROM.
+        let mut rom = synth_lorom("CONTRA3", 0);
+        rom[HEADER_OFFSET_LOROM + 0x15] = 0x53;
+        assert_eq!(
+            parse_at(&rom, HEADER_OFFSET_LOROM).mapper_kind,
+            MapperKind::LoRom
+        );
+        // Same unrecognised byte in a header found at $FFC0 → HiROM.
+        let mut rom = vec![0xEA; 64 * 1024];
+        rom[HEADER_OFFSET_HIROM + 0x15] = 0x53;
+        assert_eq!(
+            parse_at(&rom, HEADER_OFFSET_HIROM).mapper_kind,
+            MapperKind::HiRom
+        );
+    }
+
+    #[test]
+    fn exact_map_modes_select_their_layout() {
+        for (byte, kind) in [
+            (0x20, MapperKind::LoRom),
+            (0x30, MapperKind::LoRom),
+            (0x21, MapperKind::HiRom),
+            (0x31, MapperKind::HiRom),
+            (0x23, MapperKind::Sa1),
+            (0x25, MapperKind::ExHiRom),
+            (0x35, MapperKind::ExHiRom),
+        ] {
+            assert_eq!(mapper_from_byte(byte), Some(kind), "map byte {byte:#04x}");
+        }
+        assert_eq!(mapper_from_byte(0x53), None);
+        assert_eq!(mapper_from_byte(0x3A), None);
     }
 
     #[test]
