@@ -37,7 +37,7 @@ pub use luna_core::{
 pub use luna_ppu::TilemapImage;
 /// Framebuffer dimensions (256×224), re-exported so front-ends size their
 /// texture/window through `luna-api` rather than depending on `luna-ppu`.
-pub use luna_ppu::{FRAME_H, FRAME_W};
+pub use luna_ppu::{FRAME_H, FRAME_H_MAX, FRAME_W};
 use serde::Serialize;
 
 /// Faithful Mesen2 SNES Event Viewer data layer (categories, colors, register
@@ -1924,7 +1924,8 @@ impl Emulator {
     /// via `render_frame_with` with `bypass_forced_blank: true`.
     pub fn render_frame_png(&self, force_display: bool) -> Result<Vec<u8>, ApiError> {
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
-        let mut buf = Vec::with_capacity(FRAME_W * FRAME_H * 3);
+        let height = snes.ppu.frame_height();
+        let mut buf = Vec::with_capacity(FRAME_W * height * 3);
         if force_display {
             // Debug-only path: rebuild the frame with forced-blank
             // bypass so the user can see VRAM contents even when the
@@ -1942,8 +1943,8 @@ impl Emulator {
             }
         }
         let img =
-            image::RgbImage::from_raw(FRAME_W as u32, FRAME_H as u32, buf).expect("size matches");
-        let mut out = Vec::with_capacity(FRAME_W * FRAME_H);
+            image::RgbImage::from_raw(FRAME_W as u32, height as u32, buf).expect("size matches");
+        let mut out = Vec::with_capacity(FRAME_W * height);
         let dyn_image: image::DynamicImage = img.into();
         dyn_image.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)?;
         Ok(out)
@@ -1961,13 +1962,14 @@ impl Emulator {
         let opts = luna_ppu::RenderOptions {
             bypass_forced_blank: force_display,
         };
-        let mut buf = Vec::with_capacity(FRAME_W * FRAME_H * 3);
+        let height = snes.ppu.frame_height();
+        let mut buf = Vec::with_capacity(FRAME_W * height * 3);
         for px in luna_ppu::render_frame_bg_with(&snes.ppu, bg_idx, opts) {
             buf.extend_from_slice(&px);
         }
         let img =
-            image::RgbImage::from_raw(FRAME_W as u32, FRAME_H as u32, buf).expect("size matches");
-        let mut out = Vec::with_capacity(FRAME_W * FRAME_H);
+            image::RgbImage::from_raw(FRAME_W as u32, height as u32, buf).expect("size matches");
+        let mut out = Vec::with_capacity(FRAME_W * height);
         let dyn_image: image::DynamicImage = img.into();
         dyn_image.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)?;
         Ok(out)
@@ -2012,7 +2014,7 @@ impl Emulator {
     /// forced-blank (debug: see VRAM even while the game blanks).
     pub fn render_frame_rgba(&self, force_display: bool) -> Result<Vec<u8>, ApiError> {
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
-        let mut out = Vec::with_capacity(FRAME_W * FRAME_H * 4);
+        let mut out = Vec::with_capacity(FRAME_W * snes.ppu.frame_height() * 4);
         let mut push_rgb = |px: &[u8; 3]| {
             out.extend_from_slice(px);
             out.push(0xFF);
@@ -2269,9 +2271,9 @@ impl Emulator {
                 "native capture is not enabled (set_native_capture / --native-res)".into(),
             ));
         }
-        let (w, h) = (FRAME_W * 2, FRAME_H * 2);
+        let (w, h) = (FRAME_W * 2, snes.ppu.native_frame_height());
         let mut buf = Vec::with_capacity(w * h * 3);
-        for px in &snes.ppu.native_framebuffer {
+        for px in snes.ppu.native_framebuffer() {
             buf.extend_from_slice(px);
         }
         let img = image::RgbImage::from_raw(w as u32, h as u32, buf)
@@ -2293,7 +2295,15 @@ impl Emulator {
                 "native capture is not enabled (set_native_capture / --native-res)".into(),
             ));
         }
-        Ok(fnv1a_64(snes.ppu.native_framebuffer.as_flattened()))
+        Ok(fnv1a_64(snes.ppu.native_framebuffer().as_flattened()))
+    }
+
+    /// Rows in the displayed frame: 224, or 239 while the game runs in
+    /// overscan (SETINI bit 2, latched per frame). The width is always
+    /// [`FRAME_W`]; the native capture is twice both.
+    pub fn frame_height(&self) -> Result<usize, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        Ok(snes.ppu.frame_height())
     }
 
     /// Serialize the full running-machine state into a portable blob.

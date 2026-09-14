@@ -20,6 +20,10 @@ pub const FRAME_W: usize = 256;
 /// One frame at SNES native resolution — visible scanline count
 /// (NTSC: 224 lines; PAL adds 15 more, modelled later).
 pub const FRAME_H: usize = 224;
+/// Picture height with overscan (SETINI bit 2): PPU lines 1..=239. The
+/// persistent framebuffer is allocated to this; [`crate::Ppu::frame_height`]
+/// says how many rows the current frame uses.
+pub const FRAME_H_MAX: usize = 239;
 
 /// Renderer options — feature-flag-style switches for debugging.
 #[derive(Debug, Clone, Copy, Default)]
@@ -411,14 +415,15 @@ fn render_frame_bg1_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
 /// test corpus until a dedicated path lands).
 #[must_use]
 pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
-    let mut buf = vec![[0u8; 3]; FRAME_W * FRAME_H];
+    let height = ppu.frame_height();
+    let mut buf = vec![[0u8; 3]; FRAME_W * height];
     // Hardware line origin: framebuffer row r carries the content the
     // PPU computes for line V = r+1 (the displayed picture is PPU lines
-    // 1..=224; line 0 is the pre-render line). Mirrors the scheduler
-    // path (`Ppu::flush_partial_scanline_inner` writes line V to row
-    // V-1) so the static full-frame render and the per-line render
-    // cannot disagree.
-    for v in 1..=FRAME_H as u16 {
+    // 1..=224, or 1..=239 with overscan; line 0 is the pre-render line).
+    // Mirrors the scheduler path (`Ppu::flush_partial_scanline_inner`
+    // writes line V to row V-1) so the static full-frame render and the
+    // per-line render cannot disagree.
+    for v in 1..=height as u16 {
         let off = (v as usize - 1) * FRAME_W;
         render_scanline_into(ppu, v, opts, &mut buf[off..off + FRAME_W]);
     }
@@ -628,6 +633,16 @@ pub(crate) fn render_scanline_partial_into_from(
         let sub = pick_pixel_winner(ppu, table, &bgs_below, &sprites, x, backdrop_bgr5, |li| {
             screen_layer_enabled(li, ppu.ts, ppu.tsw)
         });
+        // ares `dac.cpp`: the DAC fetches the sub screen's colour first
+        // (`below`), then the main screen's (`above`), each fetch latching
+        // its CGRAM address — the backdrop is a fetch of entry 0, a
+        // direct-colour pixel fetches nothing. A CPU CGRAM access during
+        // the picture lands on that latch (`Ppu::cgram_access_redirect`).
+        for winner in [&sub, &main] {
+            if !winner.direct {
+                ppu.cgram.note_fetch(winner.cgram_idx);
+            }
+        }
 
         // Colour math gates:
         //   * CGADSUB bits 0..4 = per-layer enable; bit 5 = backdrop.
@@ -1020,6 +1035,9 @@ struct PixelWinner {
     /// for the sub screen (ares dac.cpp:69, 124-130 / Mesen2
     /// SnesPpu.cpp:1354-1364).
     real_layer: bool,
+    /// `true` when the colour came straight from the pixel byte (direct
+    /// colour), so no CGRAM entry was fetched for it.
+    direct: bool,
 }
 
 /// Walk the priority table for one screen and return the winning pixel.
@@ -1068,6 +1086,7 @@ fn pick_pixel_winner(
                 layer: layer_idx as u8,
                 cgram_idx,
                 real_layer: true,
+                direct,
             };
         }
     }
@@ -1076,6 +1095,7 @@ fn pick_pixel_winner(
         layer: 5,
         cgram_idx: 0,
         real_layer: false,
+        direct: false,
     }
 }
 
@@ -1924,9 +1944,10 @@ fn render_sprites_scanline_indexed_from(
 /// bit depth, its scroll, tile-map and char-base addresses.
 #[must_use]
 pub fn render_frame_bg_with(ppu: &Ppu, bg_idx: usize, opts: RenderOptions) -> Vec<[u8; 3]> {
-    let mut buf = vec![[0u8; 3]; FRAME_W * FRAME_H];
+    let height = ppu.frame_height();
+    let mut buf = vec![[0u8; 3]; FRAME_W * height];
     // Same hardware line origin as `render_frame_with`: row r = line r+1.
-    for v in 1..=FRAME_H {
+    for v in 1..=height {
         let line = render_bg_scanline_with(ppu, bg_idx, v as u16, opts);
         let off = (v - 1) * FRAME_W;
         buf[off..off + FRAME_W].copy_from_slice(&line);

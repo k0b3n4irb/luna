@@ -2200,6 +2200,18 @@ impl DmaBus for DmaBusView<'_> {
                     luna_ppu::RenderOptions::default(),
                 );
             }
+            // The picture gate for a DMA'd CGRAM byte (ares `writeCGRAM`):
+            // a burst that lands mid-picture is redirected like a CPU
+            // write; the usual HBlank palette DMA (dot ≥ 274) is not.
+            // (`trace_blank` is the VBlank stamp; the display gate also
+            // needs INIDISP forced blank — SMW uploads its palette by DMA
+            // at picture lines with the screen blanked.)
+            if b_offset == luna_ppu::register::CGDATA {
+                self.ppu.active_display = self.trace_line
+                    < vblank_start_line(self.ppu.setini & 0x04 != 0)
+                    && (self.ppu.inidisp & 0x80) == 0;
+                self.ppu.beam_dot = self.trace_hclock / 4;
+            }
             // DMA B-bus trace: capture (source → VMADD → byte) BEFORE the
             // write, since the $2119 (high) write auto-increments VMADD.
             // Captures EVERY PPU B-bus write ($2100-$213F), not just the
@@ -2963,6 +2975,23 @@ impl SnesBus<'_> {
                 let (h, v) = self.hv();
                 self.ppu.latch_counters(h, v);
             }
+            // A CGRAM read during the picture returns the entry the PPU
+            // is fetching (ares `io.cpp:47-53`): bring the line up to the
+            // current dot so that entry is the pixel under the beam, and
+            // refresh the picture gate the write path maintains.
+            if off == luna_ppu::register::CGDATAREAD {
+                let visible = self.ppu_line < self.vblank_start_line();
+                self.ppu.active_display = visible && (self.ppu.inidisp & 0x80) == 0;
+                self.ppu.beam_dot = self.hv().0;
+                if visible {
+                    let (h, _) = self.hv();
+                    self.ppu.flush_partial_scanline(
+                        self.ppu_line,
+                        h.min(luna_ppu::FRAME_W as u16),
+                        luna_ppu::RenderOptions::default(),
+                    );
+                }
+            }
             return self.ppu.read(off, *self.mdr);
         }
         if let Some(port) = Self::apu_port(addr) {
@@ -3173,6 +3202,9 @@ impl SnesBus<'_> {
             // `SnesPpu.cpp:2046-2057`.
             self.ppu.active_display =
                 self.ppu_line < self.vblank_start_line() && (self.ppu.inidisp & 0x80) == 0;
+            // The real dot of this access, for the CGRAM picture window
+            // (the flush below clamps its cursor to the 256 picture dots).
+            self.ppu.beam_dot = self.hv().0;
 
             // Phase 2 of gap G6 — intra-line partial flush. If the
             // CPU is writing a render-affecting PPU register ($2100..$2133)
