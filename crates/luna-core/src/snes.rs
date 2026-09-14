@@ -5371,27 +5371,27 @@ mod tests {
         // Reach into the SA-1 chip via its mapper trait. We can't
         // downcast safely, so we verify the side-effect: read the I-RAM
         // NOPs that the main CPU wrote (proves the SA-1 mapper claimed
-        // the $3000/$3002 writes), and check that step_coproc
-        // produced visible advancement by reading $2200 CCNT back as
-        // the released value.
+        // the $3000/$3002 writes), and check the chip's snapshot reports
+        // it released (CCNT itself is write-only from the S-CPU).
         let iram_3000 = snes.mapper.read(luna_bus::make_addr(0x00, 0x3000));
         let iram_3002 = snes.mapper.read(luna_bus::make_addr(0x00, 0x3002));
         assert_eq!(iram_3000, Some(0xEA), "NOP should be in SA-1 I-RAM");
         assert_eq!(iram_3002, Some(0xEA), "NOP should be in SA-1 I-RAM");
-        let ccnt = snes.mapper.read(luna_bus::make_addr(0x00, 0x2200));
-        assert_eq!(ccnt, Some(0x00), "CCNT should reflect SA-1 release");
+        let snap = snes.mapper.sa1_snapshot().expect("an SA-1 cart");
+        assert!(snap.running, "the SA-1 should have been released");
     }
 
     /// Build an SA-1 cart where the main CPU:
-    ///   1. Seeds I-RAM with a small SA-1 program: `CLI` then a NOP
-    ///      loop at $3000, and an IRQ handler at $3010 that writes
-    ///      sentinel `$AA` to I-RAM `$3500` then `STP`s.
+    ///   1. Seeds I-RAM with a small SA-1 program: enable its own CIE.7
+    ///      (S-CPU → SA-1 IRQ — CIE is the SA-1's register, the S-CPU
+    ///      cannot write it), `CLI`, then a NOP loop at $3000, and an IRQ
+    ///      handler at $3010 that writes sentinel `$AA` to I-RAM `$3500`
+    ///      then `STP`s.
     ///   2. Sets CRV = $3000 and CIV = $3010.
-    ///   3. Enables CIE.7 (S-CPU → SA-1 IRQ).
-    ///   4. Releases the SA-1 via CCNT 1→0 edge.
-    ///   5. Burns through a NOP run-up so the SA-1 has time to start.
-    ///   6. Triggers the SA-1 IRQ via CCNT.7 0→1 edge.
-    ///   7. NOP-pauses then `STP`s.
+    ///   3. Releases the SA-1 via CCNT 1→0 edge.
+    ///   4. Burns through a NOP run-up so the SA-1 has time to start.
+    ///   5. Triggers the SA-1 IRQ via CCNT.7 0→1 edge.
+    ///   6. NOP-pauses then `STP`s.
     fn demo_sa1_irq_cart() -> Cartridge {
         let mut rom = vec![0xEA; 32 * 1024];
         rom[0x7FFC] = 0x00;
@@ -5431,25 +5431,22 @@ mod tests {
         // Back to 8-bit accumulator for byte writes.
         emit(&[0xE2, 0x20], &mut rom, &mut p);
 
-        // CIE = $80 — enable S-CPU → SA-1 IRQ.
-        emit(&[0xA9, 0x80], &mut rom, &mut p);
-        emit(&[0x8F, 0x0A, 0x22, 0x00], &mut rom, &mut p);
-
         // Seed SA-1 program at I-RAM $3000:
-        //   $3000: CLI                          58
-        //   $3001..$300F: NOP loop              EA…
+        //   $3000: LDA #$80 ; STA $220A         A9 80 8D 0A 22   (CIE.7)
+        //   $3005: CLI                          58
+        //   $3006..$300F: NOP loop              EA…
         //   $3010 (IRQ handler):
         //         LDA #$AA                       A9 AA
         //         STA $3500                      8D 00 35
         //         STP                            DB
         // We store byte-by-byte with STA absolute long ($8F).
         let writes: &[(u32, u8)] = &[
-            (0x00_3000, 0x58), // CLI
-            (0x00_3001, 0xEA),
-            (0x00_3002, 0xEA),
-            (0x00_3003, 0xEA),
-            (0x00_3004, 0xEA),
-            (0x00_3005, 0xEA),
+            (0x00_3000, 0xA9), // LDA #$80
+            (0x00_3001, 0x80),
+            (0x00_3002, 0x8D), // STA $220A
+            (0x00_3003, 0x0A),
+            (0x00_3004, 0x22),
+            (0x00_3005, 0x58), // CLI
             (0x00_3006, 0xEA),
             (0x00_3007, 0xEA),
             (0x00_3008, 0xEA),

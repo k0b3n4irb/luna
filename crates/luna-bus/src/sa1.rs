@@ -75,13 +75,36 @@ pub struct Sa1Mapper {
     /// $2224 BMAPS (SBM) — BW-RAM 8 KB window select for the `$6000-$7FFF`
     /// window as seen by the **main CPU**.
     bmaps: u8,
-    /// $2225 BMAP (CBM) — BW-RAM 8 KB window select for the `$6000-$7FFF`
-    /// window as seen by the **SA-1**. Bit 7 = bitmap source mode (the SA-1
-    /// sees BW-RAM as a 2/4 bpp bitmap there); bits 0-6 = bank in normal
-    /// mode. Previously dropped — the SA-1 then wrongly read the main CPU's
-    /// SBM bank, livelocking SMRPG's attract-demo cmd-$11 routine.
+    /// `$2225 BMAP (CBM)` — BW-RAM 8 KB window select for the `$6000-$7FFF`
+    /// window as seen by the **SA-1**. Bit 7 (`sw46`) = the window is a
+    /// bitmap projection (ares `bwram.cpp:45-67`): bits 0-6 pick one of
+    /// 128 × 8 KB pixel pages; with bit 7 clear bits 0-4 pick one of 32 ×
+    /// 8 KB linear pages. Previously dropped — the SA-1 then wrongly read
+    /// the main CPU's SBM bank, livelocking SMRPG's attract-demo cmd-$11
+    /// routine.
     #[serde(default)]
     cbm: u8,
+    /// `$223F BBF` bit 7 — bitmap pixel format for the SA-1's bitmap
+    /// projections (`$60-$6F` and the `sw46` window): `false` = 4 bpp
+    /// (two pixels a byte), `true` = 2 bpp (four pixels a byte).
+    #[serde(default)]
+    bbf: bool,
+    /// `$2302-$2305` HCR / VCR — the timer counters as latched by the
+    /// `$2302` read (ares `io.cpp:39-50`), in dots.
+    #[serde(default)]
+    hcr: u16,
+    #[serde(default)]
+    vcr: u16,
+    /// SA-1 steps a normal DMA cost since the chip driver last drained
+    /// them (ares `dma.cpp:2-46` charges `step()`s per byte; the batched
+    /// driver charges them to its budget in one go).
+    #[serde(default)]
+    dma_steps: u32,
+    /// The S-CPU's last bus address for the current SA-1 batch (ares
+    /// `cpu.r.mar`), for a DMA's `conflict()` steps when the SA-1 side
+    /// triggers it.
+    #[serde(default)]
+    scpu_mar: u32,
     /// Multiplier / divider operands and result.
     /// `$2251/$2252 MA` — multiplicand (signed 16-bit, write-twice).
     ma: i16,
@@ -244,27 +267,30 @@ pub struct Sa1Mapper {
     /// `$2238/$2239` DTC — 16-bit transfer byte counter.
     dtc: u16,
 
-    // ---- Phase-5 VLBP (Variable-Length Bit Processor) ----
-    /// `$2258 VBD` — variable-length bit-data control. bit 7 = mode
-    /// (0 = fixed, advances on `$230C` read; 1 = variable, advances
-    /// on `$230D` read); bits 3..0 = vlen (1..15 with 0 meaning 16).
+    // ---- VLBP (variable-length bit processing), ares `io.cpp:427-444` ----
+    /// `$2258 VBD` — bit 7 (`hl`): 0 = fixed mode, the cursor advances
+    /// by `vb` bits on the **`$2258` write** itself; 1 = auto-increment
+    /// mode, it advances on the **`$230D` read**. Bits 3..0 = `vb`, the
+    /// length 1..15 (0 means 16).
     vbd: u8,
-    /// `$2259-$225B VDA` — 24-bit source address into the bit-packed
-    /// data stream. Writing VDA-high (`$225B`) zeroes `vbit_offset`.
-    vda_base: u32,
-    /// Bit cursor into the stream, counted from `vda_base`.
-    vbit_offset: u32,
+    /// `$2259-$225B VDA` (`va`) — the byte the 24-bit window starts at;
+    /// advanced by whole bytes as the cursor moves. Writing `$225B`
+    /// zeroes `vbit`.
+    va: u32,
+    /// Bit position 0..7 of the cursor inside `va` (`io.vbit`).
+    vbit: u8,
 
     // ---- Phase-5 memory write protection ----
-    /// `$2226 SBWE` — main-CPU BW-RAM write-enable (bit 7 = 1 lets
-    /// the S-CPU write to BW-RAM at all).
+    /// `$2226 SBWE` — S-CPU BW-RAM write-enable (bit 7). Both enables
+    /// come up **clear** (ares `sa1.cpp:230-234`, Mesen2 `Reset`).
     sbwe: u8,
-    /// `$2227 CBWE` — SA-1 BW-RAM write-enable (bit 7 = 1 lets the
-    /// SA-1 CPU write to BW-RAM at all).
+    /// `$2227 CBWE` — SA-1 BW-RAM write-enable (bit 7).
     cbwe: u8,
-    /// `$2228 BWPA` — BW-RAM write-protected-area size. Protects the
-    /// first `256 << (bwpa & 0x0F)` bytes of BW-RAM from main-CPU
-    /// writes (the SA-1 side ignores BWPA). A value of `0` disables.
+    /// `$2228 BWPA` — BW-RAM write-protected-area size: while **both**
+    /// enables are clear, the first `256 << (bwpa & 0x0F)` bytes refuse
+    /// writes from either side. Comes up `$0F` (ares `io.bwp = 0x0f`,
+    /// Mesen2 `CpuRegisterWrite(0x2228, 0xFF)`): all of BW-RAM is
+    /// write-protected until a game enables one side.
     bwpa: u8,
     /// `$222A SIWP` — main-CPU I-RAM page write-enable mask. Each of
     /// the 8 bits gates one 256-byte page of the 2 KB I-RAM; bit
@@ -275,8 +301,16 @@ pub struct Sa1Mapper {
     ciwp: u8,
 }
 
-/// Which CPU side is performing a write — only relevant for the
-/// `Sa1Mapper`'s memory-protection registers.
+/// Where an SA-1-side BW-RAM access lands (ares `bwram.cpp`): a linear
+/// byte, or one pixel of the bitmap projection.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+enum BwTarget {
+    Linear(usize),
+    Bitmap(u32),
+}
+
+/// Which CPU side is performing an access — the two sides see different
+/// registers and different BW-RAM views, and check different protection.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 enum WriteSide {
     /// Write originated from the main 65C816 (S-CPU) via the SNES bus.
@@ -372,8 +406,13 @@ impl Sa1Mapper {
             dda: 0,
             dtc: 0,
             vbd: 0,
-            vda_base: 0,
-            vbit_offset: 0,
+            va: 0,
+            vbit: 0,
+            bbf: false,
+            hcr: 0,
+            vcr: 0,
+            dma_steps: 0,
+            scpu_mar: 0,
             // Deliberate deviation from ares (`coprocessor/sa1/sa1.cpp:239
             // → io.siwp = 0; io.cpp:112-113 → io.ciwp = 0`) and Mesen2
             // (`Sa1Types.h::CpuIRamWriteProtect/Sa1IRamWriteProtect`
@@ -390,9 +429,13 @@ impl Sa1Mapper {
             // screen go black in luna-gui. The 0xFF default keeps those
             // carts working at the cost of one reset-time bit-pattern
             // mismatch that no test ROM yet observes.
-            sbwe: 0x80,
-            cbwe: 0x80,
-            bwpa: 0x00,
+            // BW-RAM protection powers up ARMED (ares `sa1.cpp:230-237`,
+            // Mesen2 `Sa1::Reset`): both write enables clear and BWPA =
+            // $0F, so every byte refuses writes until the game sets SBWE
+            // or CBWE — which every title does before touching BW-RAM.
+            sbwe: 0x00,
+            cbwe: 0x00,
+            bwpa: 0x0F,
             siwp: 0xFF,
             ciwp: 0xFF,
         }
@@ -424,7 +467,7 @@ impl Sa1Mapper {
         (mask >> page) & 1 != 0
     }
 
-    fn bwram_writable_for(&self, byte_off: usize, _side: WriteSide) -> bool {
+    fn bwram_writable_for(&self, byte_off: usize) -> bool {
         // Per ares (`coprocessor/sa1/bwram.cpp:40-43, 73-84`) and
         // Mesen2 (`CpuBwRamHandler.h:45-57`, `Sa1BwRamHandler.h:41-50`):
         // BWRAM writes are gated by the **OR** of SBWE and CBWE bit 7,
@@ -447,8 +490,8 @@ impl Sa1Mapper {
         // BWPA size formula `0x100 << min(bwp, 10)` matches Mesen2's
         // clamp (max 256 KiB protection); ares uses the raw 4-bit
         // value but no real cart sets `bwp > 10` so both behave the
-        // same in practice. `_side` is kept in the signature for
-        // call-site clarity but ignored — the gate is symmetric.
+        // same in practice. The gate is symmetric — one check for
+        // both sides.
         if (self.sbwe & 0x80) != 0 || (self.cbwe & 0x80) != 0 {
             return true;
         }
@@ -457,78 +500,180 @@ impl Sa1Mapper {
         byte_off >= prot_bytes
     }
 
-    /// Effective bit-length for VLBP reads. VBD bits 0..3 carry the
-    /// length 1..15; an encoded value of 0 means 16.
-    fn vlbp_vlen(&self) -> u32 {
-        let n = u32::from(self.vbd & 0x0F);
+    /// `vb`: the VLBP length in bits, 1..=16 (VBD bits 0-3, 0 = 16).
+    const fn vlbp_vb(&self) -> u32 {
+        let n = (self.vbd & 0x0F) as u32;
         if n == 0 { 16 } else { n }
     }
 
-    /// Pull the current `vlen` bits from the source stream as a 16-bit
-    /// value. Reads three source bytes so a `vbit_offset` of up to 7
-    /// can still slide a 16-bit window cleanly.
-    fn vlbp_data(&mut self) -> u16 {
-        let byte_off = self.vbit_offset / 8;
-        let bit_off = self.vbit_offset & 7;
-        let base = self.vda_base;
-        let a0 = base.wrapping_add(byte_off) & 0x00FF_FFFF;
-        let a1 = base.wrapping_add(byte_off + 1) & 0x00FF_FFFF;
-        let a2 = base.wrapping_add(byte_off + 2) & 0x00FF_FFFF;
-        let b0 = u32::from(self.read(a0).unwrap_or(0));
-        let b1 = u32::from(self.read(a1).unwrap_or(0));
-        let b2 = u32::from(self.read(a2).unwrap_or(0));
-        let raw = b0 | (b1 << 8) | (b2 << 16);
-        let shifted = raw >> bit_off;
-        let vlen = self.vlbp_vlen();
-        let mask = if vlen >= 16 {
-            0xFFFFu32
-        } else {
-            (1u32 << vlen) - 1
-        };
-        (shifted & mask) as u16
-    }
-
-    /// Advance the VLBP bit cursor by `vlen` bits.
+    /// Move the VLBP cursor on by `vb` bits (ares `io.cpp:434-437`,
+    /// `io.cpp:83-86`): whole bytes go into `va`, the rest stays in `vbit`.
     fn vlbp_advance(&mut self) {
-        self.vbit_offset = self.vbit_offset.wrapping_add(self.vlbp_vlen());
+        let vbit = u32::from(self.vbit) + self.vlbp_vb();
+        self.va = self.va.wrapping_add(vbit >> 3) & 0x00FF_FFFF;
+        self.vbit = (vbit & 7) as u8;
     }
 
-    /// Run a normal (non-character-conversion) SA-1 DMA. Copies `dtc`
-    /// bytes from `sda` to `dda` through the regular bus dispatch so
-    /// ROM / BW-RAM / I-RAM source-destination combinations all work.
-    ///
-    /// At completion clears the DMA-enable bit + raises the DMA-IRQ
-    /// latch (gated by `CIE.4`).
-    fn run_normal_dma(&mut self) {
-        let n = self.dtc as usize;
-        for i in 0..n {
-            let s = (self.sda.wrapping_add(i as u32)) & 0x00FF_FFFF;
-            let d = (self.dda.wrapping_add(i as u32)) & 0x00FF_FFFF;
-            let byte = self.read(s).unwrap_or(0xFF);
-            // Use the raw byte path so MMIO doesn't try to interpret
-            // our DMA bursts as register writes.
-            self.write_raw_for_dma(d, byte);
+    /// The 24-bit window at `va`, shifted down to the cursor (ares
+    /// `io.cpp:63-68`): `$230C` returns its low byte, `$230D` its next.
+    /// Unmasked — the reader takes as many bits as it wants.
+    fn vlbp_window(&self) -> u32 {
+        let b = |i: u32| u32::from(self.read_vbr(self.va.wrapping_add(i) & 0x00FF_FFFF));
+        (b(0) | (b(1) << 8) | (b(2) << 16)) >> self.vbit
+    }
+
+    /// The VLBP's own bus (ares `memory.cpp:113-133`): ROM through the
+    /// SA-1's mapping, BW-RAM and I-RAM raw — never the I/O registers,
+    /// so a VDA inside `$2200-$23FF` reads `$FF` instead of a port.
+    fn read_vbr(&self, address: u32) -> u8 {
+        let address = address & 0x00FF_FFFF;
+        if address & 0x40_8000 == 0x00_8000 || address & 0xC0_0000 == 0xC0_0000 {
+            return self.rom_read_sa1(address);
         }
-        self.dcnt &= 0x7F;
-        // Mirror into the memory-backed copy at $2230.
-        self.mmio[0x2230 - 0x2200] = self.dcnt;
-        self.dma_irq_to_sa1 = true;
+        if address & 0x40_E000 == 0x00_6000 || address & 0xF0_0000 == 0x40_0000 {
+            return self.bwram_raw(address);
+        }
+        if address & 0x40_F800 == 0x00_0000 || address & 0x40_F800 == 0x00_3000 {
+            return self.iram[(address & 0x7FF) as usize];
+        }
+        0xFF
     }
 
-    /// Bypass the MMIO write path during DMA — we never want a DMA
-    /// stream into the `$2200-$23FF` window to start re-triggering DMA
-    /// or rebanking ROM mid-burst. The destination is restricted by
-    /// `DCNT.1-0` to BW-RAM / I-RAM, so a direct write is correct.
-    fn write_raw_for_dma(&mut self, addr: u32, value: u8) {
-        let bank = bank_of(addr);
-        let offset = offset_of(addr);
-        if let Some(o) = Self::iram_offset(bank, offset) {
-            self.iram[o] = value;
+    /// BW-RAM by raw 24-bit address, mirrored into the array (ares
+    /// `BWRAM::read`, `bus.mirror(address, size())`) — what the DMA
+    /// engine and the VLBP use: no window, no bank register.
+    fn bwram_raw(&self, address: u32) -> u8 {
+        if self.bwram.is_empty() {
+            return 0xFF;
+        }
+        self.bwram[(address & 0x00FF_FFFF) as usize % self.bwram.len()]
+    }
+
+    fn bwram_raw_write(&mut self, address: u32, value: u8) {
+        if self.bwram.is_empty() {
             return;
         }
-        if let Some(o) = self.bwram_offset(bank, offset, WriteSide::Main) {
-            self.bwram[o] = value;
+        let len = self.bwram.len();
+        self.bwram[(address & 0x00FF_FFFF) as usize % len] = value;
+    }
+
+    /// ROM as the SA-1 side addresses it (ares `rom.cpp:61-66` →
+    /// `readCPU`): a `$00-$3F / $80-$BF:8000-FFFF` address is folded to
+    /// its linear position first, then the four super-MMC registers pick
+    /// the megabyte — a bank-mode register clear leaves the low banks at
+    /// their default megabyte, set redirects them. Any 24-bit address
+    /// resolves to ROM (the DMA engine reads its source through this
+    /// even when SDA points elsewhere), mirrored into the image.
+    fn rom_read_sa1(&self, address: u32) -> u8 {
+        if self.rom.is_empty() {
+            return 0xFF;
         }
+        let mut address = address & 0x00FF_FFFF;
+        if address & 0x40_8000 == 0x00_8000 {
+            address = (address & 0x80_0000) >> 2 | (address & 0x3F_0000) >> 1 | address & 0x7FFF;
+        }
+        let lo = address < 0x40_0000;
+        let address = address & 0x3F_FFFF;
+        let reg = match address >> 20 {
+            0 => self.cxb,
+            1 => self.dxb,
+            2 => self.exb,
+            _ => self.fxb,
+        };
+        let off = if lo && reg & 0x80 == 0 {
+            address
+        } else {
+            (u32::from(reg & 0x07) << 20) | (address & 0x0F_FFFF)
+        };
+        self.rom[crate::types::rom_mirror(off as usize, self.rom.len())]
+    }
+
+    /// S-CPU bus address to charge a DMA's `conflict()` steps against
+    /// (ares `cpu.r.mar`): the S-CPU's last access for this batch when
+    /// the SA-1 side fires the DMA, the `$2236` / `$2237` write itself
+    /// when the S-CPU does — an I/O address, so it never conflicts.
+    pub const fn set_scpu_mar(&mut self, mar: u32) {
+        self.scpu_mar = mar;
+    }
+
+    /// SA-1 steps charged by DMA since the last drain — the chip driver
+    /// subtracts them from its budget so the SA-1 CPU stalls for the
+    /// transfer, as ares' `step()`s inside `dmaNormal` do.
+    pub const fn take_dma_steps(&mut self) -> u32 {
+        let n = self.dma_steps;
+        self.dma_steps = 0;
+        n
+    }
+
+    /// `true` while CCNT bit 5 holds the SA-1 in reset (the last value
+    /// the S-CPU wrote there).
+    #[must_use]
+    pub const fn ccnt_reset_held(&self) -> bool {
+        self.mmio[0] & 0x20 != 0
+    }
+
+    /// CRV (`$2203/$2204`): where the SA-1 starts when the S-CPU releases
+    /// it from reset.
+    #[must_use]
+    pub const fn crv(&self) -> u16 {
+        (self.mmio[0x03] as u16) | ((self.mmio[0x04] as u16) << 8)
+    }
+
+    /// Normal DMA — a line-for-line port of ares `SA1::dmaNormal`
+    /// (`sa1/dma.cpp:2-46`; Mesen2 `Sa1::RunDma`). DCNT names the
+    /// devices: source `sd` = ROM (0) / BW-RAM (1) / I-RAM (2),
+    /// destination `dd` = I-RAM (0) / BW-RAM (1); only the four
+    /// ROM→BW-RAM, ROM→I-RAM, BW-RAM→I-RAM and I-RAM→BW-RAM pairs move
+    /// bytes, any other pair just runs the counter down. ROM is read
+    /// through the SA-1's mapping, BW-RAM and I-RAM by raw address —
+    /// SDA / DDA are offsets into the device, not bus addresses. Each
+    /// byte costs the SA-1 its steps (plus `conflict()` steps when the
+    /// S-CPU holds the same resource). Completion raises the DMA IRQ
+    /// flag; DMA enable stays set, so a game re-fires by rewriting DDA.
+    fn run_normal_dma(&mut self, side: WriteSide) {
+        const SRC_ROM: u8 = 0;
+        const SRC_BWRAM: u8 = 1;
+        const SRC_IRAM: u8 = 2;
+        let sd = self.dcnt & 0x03;
+        let dd_bwram = self.dcnt & 0x04 != 0;
+        let mar = match side {
+            WriteSide::Main => 0x00_2236,
+            WriteSide::Sa1 => self.scpu_mar,
+        };
+        let rom_c = u32::from(Self::scpu_rom_conflict(mar));
+        let bw_c = u32::from(Self::scpu_bwram_conflict(mar));
+        let iram_c = u32::from(Self::scpu_iram_conflict(mar));
+        while self.dtc != 0 {
+            self.dtc -= 1;
+            let source = self.sda;
+            self.sda = self.sda.wrapping_add(1) & 0x00FF_FFFF;
+            let target = self.dda;
+            self.dda = self.dda.wrapping_add(1) & 0x00FF_FFFF;
+            match (sd, dd_bwram) {
+                (SRC_ROM, true) => {
+                    self.dma_steps += 2 + bw_c + bw_c;
+                    let data = self.rom_read_sa1(source);
+                    self.bwram_raw_write(target, data);
+                }
+                (SRC_ROM, false) => {
+                    self.dma_steps += 1 + (iram_c | rom_c) + iram_c;
+                    let data = self.rom_read_sa1(source);
+                    self.iram[(target & 0x7FF) as usize] = data;
+                }
+                (SRC_BWRAM, false) => {
+                    self.dma_steps += 2 + (bw_c | iram_c) + bw_c;
+                    let data = self.bwram_raw(source);
+                    self.iram[(target & 0x7FF) as usize] = data;
+                }
+                (SRC_IRAM, true) => {
+                    self.dma_steps += 2 + (bw_c | iram_c) + bw_c;
+                    let data = self.iram[(source & 0x7FF) as usize];
+                    self.bwram_raw_write(target, data);
+                }
+                _ => {}
+            }
+        }
+        self.dma_irq_to_sa1 = true;
     }
 
     /// Arm a Type-1 character conversion (ares `SA1::dmaCC1`): the
@@ -922,27 +1067,17 @@ impl Sa1Mapper {
         None
     }
 
-    /// BW-RAM access: two views, both gated by the cart having
-    /// declared SRAM:
-    ///   * 8 KB sliding window at `$00-$3F:$6000-$7FFF`, offset by
-    ///     `BMAPS << 13` within BW-RAM.
-    ///   * Linear 256 KB at `$40-$4F:$0000-$FFFF` for the SA-1's own
-    ///     full-bandwidth view.
-    fn bwram_offset(&self, bank: u8, offset: u16, side: WriteSide) -> Option<usize> {
+    /// BW-RAM as the **S-CPU** sees it (ares `bwram.cpp:22-43`), gated
+    /// by the cart having declared SRAM:
+    ///   * the 8 KB window at `$00-$3F / $80-$BF:6000-7FFF`, page
+    ///     `SBM` (`$2224`);
+    ///   * the linear view at `$40-$4F:0000-FFFF`.
+    fn bwram_offset(&self, bank: u8, offset: u16) -> Option<usize> {
         if self.bwram.is_empty() {
             return None;
         }
         if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && (0x6000..=0x7FFF).contains(&offset) {
-            // The `$6000-$7FFF` 8 KB window is bank-selected PER SIDE: the main
-            // CPU uses SBM ($2224), the SA-1 uses CBM ($2225). (CBM bit 7 =
-            // bitmap source mode — not yet modelled; SMRPG's attract uses
-            // normal banking, bit 7 clear.)
-            let bank_reg = match side {
-                WriteSide::Main => self.bmaps,
-                WriteSide::Sa1 => self.cbm,
-            };
-            let window = usize::from(bank_reg & 0x1F) * 0x2000;
-            let off = window + usize::from(offset - 0x6000);
+            let off = usize::from(self.bmaps & 0x1F) * 0x2000 + usize::from(offset - 0x6000);
             return Some(off % self.bwram.len());
         }
         if matches!(bank, 0x40..=0x4F) {
@@ -950,6 +1085,96 @@ impl Sa1Mapper {
             return Some(off % self.bwram.len());
         }
         None
+    }
+
+    /// BW-RAM as the **SA-1** sees it (ares `memory.cpp:39-50`,
+    /// `bwram.cpp:45-67`): three views.
+    ///   * `$40-$5F:0000-FFFF` — linear, mirrored into the array;
+    ///   * `$60-$6F:0000-FFFF` — the bitmap projection: one pixel per
+    ///     address, 4 or 2 bpp per BBF;
+    ///   * the `$6000-$7FFF` window, page `CBM` (`$2225`): linear over 32
+    ///     pages with bit 7 clear, bitmap over 128 pages with it set.
+    fn bwram_target_sa1(&self, bank: u8, offset: u16) -> Option<BwTarget> {
+        if self.bwram.is_empty() {
+            return None;
+        }
+        if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && (0x6000..=0x7FFF).contains(&offset) {
+            let a = u32::from(offset & 0x1FFF);
+            return Some(if self.cbm & 0x80 == 0 {
+                let off = usize::from(self.cbm & 0x1F) * 0x2000 + a as usize;
+                BwTarget::Linear(off % self.bwram.len())
+            } else {
+                BwTarget::Bitmap((u32::from(self.cbm & 0x7F) * 0x2000 + a) & 0x000F_FFFF)
+            });
+        }
+        let full = (u32::from(bank) << 16) | u32::from(offset);
+        if matches!(bank, 0x40..=0x5F) {
+            return Some(BwTarget::Linear(full as usize % self.bwram.len()));
+        }
+        if matches!(bank, 0x60..=0x6F) {
+            return Some(BwTarget::Bitmap(full & 0x000F_FFFF));
+        }
+        None
+    }
+
+    /// One pixel of the bitmap projection (ares `BWRAM::readBitmap`):
+    /// 4 bpp packs two pixels a byte, low nibble first; 2 bpp packs
+    /// four, low pair first.
+    fn bitmap_read(&self, pixel: u32) -> u8 {
+        let len = self.bwram.len();
+        if self.bbf {
+            let byte = self.bwram[(pixel >> 2) as usize % len];
+            (byte >> ((pixel & 3) * 2)) & 0x03
+        } else {
+            let byte = self.bwram[(pixel >> 1) as usize % len];
+            (byte >> ((pixel & 1) * 4)) & 0x0F
+        }
+    }
+
+    /// Write one pixel of the bitmap projection (ares `BWRAM::writeBitmap`):
+    /// a read-modify-write of the byte's other pixels. ares applies no
+    /// BWPA protection on this path (Mesen2 does — `Sa1BwRamHandler::
+    /// WriteValue`); the two only differ while both write enables are
+    /// clear, a state no known title draws in.
+    fn bitmap_write(&mut self, pixel: u32, value: u8) {
+        let len = self.bwram.len();
+        if self.bbf {
+            let o = (pixel >> 2) as usize % len;
+            let shift = (pixel & 3) * 2;
+            self.bwram[o] = (self.bwram[o] & !(0x03 << shift)) | ((value & 0x03) << shift);
+        } else {
+            let o = (pixel >> 1) as usize % len;
+            let shift = (pixel & 1) * 4;
+            self.bwram[o] = (self.bwram[o] & !(0x0F << shift)) | ((value & 0x0F) << shift);
+        }
+    }
+
+    /// Registers the **S-CPU** may write (ares `writeIOCPU`): control,
+    /// its own enables and vectors, the super-MMC banks, its BW-RAM /
+    /// I-RAM protection, and the shared DMA address block.
+    const fn cpu_side_register(absolute: u16) -> bool {
+        matches!(
+            absolute,
+            0x2200..=0x2208 | 0x2220..=0x2224 | 0x2226 | 0x2228 | 0x2229 | 0x2231..=0x2237
+        )
+    }
+
+    /// Registers the **SA-1** may write (ares `writeIOSA1`): S-CPU
+    /// control, its own enables / clears / vectors, the timer, its
+    /// BW-RAM / I-RAM protection, DMA, the bitmap file, the math unit
+    /// and the VLBP.
+    const fn sa1_side_register(absolute: u16) -> bool {
+        matches!(
+            absolute,
+            0x2209..=0x2215
+                | 0x2225
+                | 0x2227
+                | 0x222A
+                | 0x2230..=0x2239
+                | 0x223F..=0x224F
+                | 0x2250..=0x2254
+                | 0x2258..=0x225B
+        )
     }
 
     /// SA-1 I/O register-window check.
@@ -1014,52 +1239,14 @@ impl Mapper for Sa1Mapper {
     fn read(&mut self, addr: Addr24) -> Option<u8> {
         let bank = bank_of(addr);
         let offset = offset_of(addr);
-        // I/O reads — multiplier result is the only "live" path; the
-        // rest of the window is open-bus / memory-backed stub.
+        // The S-CPU's register window (ares `readIOCPU`): only SFR reads
+        // back; every other address — including the SA-1's own CFR, the
+        // counters, the math result and the VLBP ports — is open bus.
         if let Some(idx) = Self::mmio_offset(addr) {
-            let mr_addr = 0x2200 + idx as u16;
-            // VDP reads are side-effecting (auto-advance the bit
-            // cursor on the matching trigger half), so they're not in
-            // the pure-`match` arm below.
-            match mr_addr {
-                0x230C => {
-                    let data = self.vlbp_data();
-                    let lo = data as u8;
-                    if (self.vbd & 0x80) == 0 {
-                        self.vlbp_advance();
-                    }
-                    return Some(lo);
-                }
-                0x230D => {
-                    let data = self.vlbp_data();
-                    let hi = (data >> 8) as u8;
-                    if (self.vbd & 0x80) != 0 {
-                        self.vlbp_advance();
-                    }
-                    return Some(hi);
-                }
-                _ => {}
-            }
-            // $2306-$230A → 40-bit MR result. We expose 5 bytes
-            // little-endian.
-            return Some(match mr_addr {
-                0x2300 => self.read_sfr(),
-                0x2301 => self.read_cfr(),
-                // HCR / VCR — the live H/V timer counters, read back in DOTS
-                // (4 clocks = 1 dot), 9 bits each. H = hcounter >> 2.
-                0x2302 => (self.hcounter >> 2) as u8,
-                0x2303 => ((self.hcounter >> 2) >> 8) as u8 & 0x01,
-                0x2304 => self.vcounter as u8,
-                0x2305 => (self.vcounter >> 8) as u8 & 0x01,
-                0x2306 => self.mr as u8,
-                0x2307 => (self.mr >> 8) as u8,
-                0x2308 => (self.mr >> 16) as u8,
-                0x2309 => (self.mr >> 24) as u8,
-                0x230A => (self.mr >> 32) as u8,
-                // (OF) sigma-mode overflow flag in bit 7.
-                0x230B => u8::from(self.overflow) << 7,
-                _ => self.mmio[idx],
-            });
+            return match 0x2200 + idx as u16 {
+                0x2300 => Some(self.read_sfr()),
+                _ => None,
+            };
         }
         // Main-CPU vector override — when the SA-1 is currently
         // asserting an IRQ/NMI to the S-CPU and the matching IVSW /
@@ -1071,7 +1258,7 @@ impl Mapper for Sa1Mapper {
         if let Some(o) = Self::iram_offset(bank, offset) {
             return Some(self.iram[o]);
         }
-        if let Some(o) = self.bwram_offset(bank, offset, WriteSide::Main) {
+        if let Some(o) = self.bwram_offset(bank, offset) {
             // With a Type-1 conversion armed, the S-CPU's own BW-RAM reads
             // are what drives it: each read that crosses into a new
             // character converts it into I-RAM and answers from there
@@ -1120,33 +1307,66 @@ impl Mapper for Sa1Mapper {
 }
 
 impl Sa1Mapper {
-    /// Side-aware read entry for the SA-1's own bus. Uses
-    /// [`Sa1Mapper::iram_offset_sa1`] which also exposes the I-RAM
-    /// mirror at `$0000-$07FF`, and skips the main-CPU vector
-    /// override (the SA-1 has its own override via
-    /// [`Sa1Mapper::sa1_vector_override`], applied by [`super::Sa1Bus`]).
-    /// MMIO reads route identically to the main-CPU path.
+    /// The SA-1's own view of the bus (ares `memory.cpp:21-63`): its
+    /// register set (`readIOSA1`), I-RAM at both `$3000-$37FF` and the
+    /// `$0000-$07FF` direct-page mirror, BW-RAM in its three views, ROM
+    /// through the super-MMC. The S-CPU's vector override does not apply
+    /// (the SA-1 has [`Sa1Mapper::sa1_vector_override`], applied by
+    /// [`super::Sa1Bus`]). An unmapped address reads `None`.
     pub fn read_from_sa1(&mut self, addr: Addr24) -> Option<u8> {
         let bank = bank_of(addr);
         let offset = offset_of(addr);
         if let Some(idx) = Self::mmio_offset(addr) {
-            // Same MMIO handling as the trait's `read`. We re-dispatch
-            // through it but mask out the main-CPU `main_vector_override`
-            // by intercepting it ourselves first (MMIO addresses live
-            // outside that range so this is a no-op early-out).
-            let _ = idx;
-            return self.read(addr);
+            return self.read_io_sa1(0x2200 + idx as u16);
         }
         if let Some(o) = Self::iram_offset_sa1(bank, offset) {
             return Some(self.iram[o]);
         }
-        if let Some(o) = self.bwram_offset(bank, offset, WriteSide::Sa1) {
-            return Some(self.bwram[o]);
+        match self.bwram_target_sa1(bank, offset) {
+            Some(BwTarget::Linear(o)) => return Some(self.bwram[o]),
+            Some(BwTarget::Bitmap(pixel)) => return Some(self.bitmap_read(pixel)),
+            None => {}
         }
         if let Some(o) = self.rom_offset(bank, offset) {
             return Some(self.rom[o]);
         }
         None
+    }
+
+    /// The SA-1's register reads (ares `readIOSA1`, `io.cpp:24-94`): CFR,
+    /// the timer counters (latched together by the `$2302` read), the
+    /// math result and overflow flag, the two VLBP ports. Everything else
+    /// in the window — SFR included — reads `None` (ares: `$FF`).
+    fn read_io_sa1(&mut self, absolute: u16) -> Option<u8> {
+        Some(match absolute {
+            0x2301 => self.read_cfr(),
+            0x2302 => {
+                self.hcr = self.hcounter >> 2;
+                self.vcr = self.vcounter;
+                self.hcr as u8
+            }
+            0x2303 => (self.hcr >> 8) as u8,
+            0x2304 => self.vcr as u8,
+            0x2305 => (self.vcr >> 8) as u8,
+            0x2306 => self.mr as u8,
+            0x2307 => (self.mr >> 8) as u8,
+            0x2308 => (self.mr >> 16) as u8,
+            0x2309 => (self.mr >> 24) as u8,
+            0x230A => (self.mr >> 32) as u8,
+            0x230B => u8::from(self.overflow) << 7,
+            // VDPL: the window's low byte, never advancing.
+            0x230C => self.vlbp_window() as u8,
+            // VDPH: the next byte; in auto-increment mode the read moves
+            // the cursor on.
+            0x230D => {
+                let hi = (self.vlbp_window() >> 8) as u8;
+                if self.vbd & 0x80 != 0 {
+                    self.vlbp_advance();
+                }
+                hi
+            }
+            _ => return None,
+        })
     }
 
     /// Base SA-1 access cost in **SA-1 steps** (1 step = 2 master cycles)
@@ -1164,7 +1384,7 @@ impl Sa1Mapper {
         // address actually resolves to BWRAM.
         let is_bwram = Self::mmio_offset(addr).is_none()
             && Self::iram_offset_sa1(bank, offset).is_none()
-            && self.bwram_offset(bank, offset, WriteSide::Sa1).is_some();
+            && self.bwram_target_sa1(bank, offset).is_some();
         if is_bwram { 2 } else { 1 }
     }
 
@@ -1251,6 +1471,19 @@ impl Sa1Mapper {
         let offset = offset_of(addr);
         if let Some(idx) = Self::mmio_offset(addr) {
             let absolute = 0x2200 + idx as u16;
+            // Each side owns its registers (ares `writeIOCPU` /
+            // `writeIOSA1`, Mesen2 `CpuRegisterWrite` / `Sa1RegisterWrite`):
+            // the S-CPU cannot set the SA-1's CIE or start its DMA, the
+            // SA-1 cannot rebank ROM or release itself. A write to the
+            // other side's register is dropped — the access is still
+            // claimed, the window is nothing else on the bus.
+            let owned = match side {
+                WriteSide::Main => Self::cpu_side_register(absolute),
+                WriteSide::Sa1 => Self::sa1_side_register(absolute),
+            };
+            if !owned {
+                return true;
+            }
             let prev = self.mmio[idx];
             self.mmio[idx] = value;
             match absolute {
@@ -1412,7 +1645,7 @@ impl Sa1Mapper {
                     // Trigger: normal DMA → I-RAM, or CC1.
                     if self.dma_en {
                         if !self.dma_cden && !self.dma_dd {
-                            self.run_normal_dma();
+                            self.run_normal_dma(side);
                         } else if self.dma_cden && self.dma_cdsel {
                             self.dma_cc1();
                         }
@@ -1422,16 +1655,13 @@ impl Sa1Mapper {
                     self.dda = (self.dda & !0xFF_0000) | (u32::from(value) << 16);
                     // Trigger: normal DMA → BW-RAM.
                     if self.dma_en && !self.dma_cden && self.dma_dd {
-                        self.run_normal_dma();
+                        self.run_normal_dma(side);
                     }
                 }
                 0x2238 => self.dtc = (self.dtc & 0xFF00) | u16::from(value),
                 0x2239 => self.dtc = (self.dtc & 0x00FF) | (u16::from(value) << 8),
-                // $223F BBF is the BW-RAM bitmap-format selector on
-                // real hardware. We also accept it as a luna-internal
-                // CC2 byte feed for back-compat with existing tests.
-                // BRF[7] / BRF[15] ($2247 / $224F) are the real-HW
-                // CC2 row triggers — same per-byte staging path.
+                // BBF: the bitmap projection's pixel format.
+                0x223F => self.bbf = value & 0x80 != 0,
                 // BRF ($2240-$224F): the Type-2 register file. Writing the
                 // last byte of either half converts one tile row (ares
                 // `io.cpp:348-368`).
@@ -1475,17 +1705,21 @@ impl Sa1Mapper {
                     self.mb = (self.mb & 0xFF) | (i16::from(value as i8) << 8);
                     self.update_arith();
                 }
-                // -------- VLBP (Variable-Length Bit Processor) --------
-                0x2258 => self.vbd = value,
-                0x2259 => {
-                    self.vda_base = (self.vda_base & !0x00_00FF) | u32::from(value);
+                // -------- VLBP (ares `io.cpp:427-444`) --------
+                // VBD: in fixed mode (bit 7 clear) the write itself moves
+                // the cursor on by `vb` bits — the game reads `$230C/D`
+                // first, then writes VBD to consume what it took.
+                0x2258 => {
+                    self.vbd = value;
+                    if value & 0x80 == 0 {
+                        self.vlbp_advance();
+                    }
                 }
-                0x225A => {
-                    self.vda_base = (self.vda_base & !0x00_FF00) | (u32::from(value) << 8);
-                }
+                0x2259 => self.va = (self.va & !0x00_00FF) | u32::from(value),
+                0x225A => self.va = (self.va & !0x00_FF00) | (u32::from(value) << 8),
                 0x225B => {
-                    self.vda_base = (self.vda_base & !0xFF_0000) | (u32::from(value) << 16);
-                    self.vbit_offset = 0;
+                    self.va = (self.va & !0xFF_0000) | (u32::from(value) << 16);
+                    self.vbit = 0;
                 }
                 _ => {}
             }
@@ -1506,11 +1740,28 @@ impl Sa1Mapper {
             // through to WRAM, which isn't what protection means.
             return true;
         }
-        if let Some(o) = self.bwram_offset(bank, offset, side) {
-            if self.bwram_writable_for(o, side) {
-                self.bwram[o] = value;
+        match side {
+            WriteSide::Main => {
+                if let Some(o) = self.bwram_offset(bank, offset) {
+                    if self.bwram_writable_for(o) {
+                        self.bwram[o] = value;
+                    }
+                    return true;
+                }
             }
-            return true;
+            WriteSide::Sa1 => match self.bwram_target_sa1(bank, offset) {
+                Some(BwTarget::Linear(o)) => {
+                    if self.bwram_writable_for(o) {
+                        self.bwram[o] = value;
+                    }
+                    return true;
+                }
+                Some(BwTarget::Bitmap(pixel)) => {
+                    self.bitmap_write(pixel, value);
+                    return true;
+                }
+                None => {}
+            },
         }
         self.rom_offset(bank, offset).is_some()
     }
@@ -1551,6 +1802,7 @@ mod tests {
     #[test]
     fn bwram_8kb_window_at_6000() {
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 8 * 1024);
+        m.write(make_addr(0x00, 0x2226), 0x80); // SBWE: the S-CPU may write
         let addr = make_addr(0x00, 0x6000);
         assert!(m.write(addr, 0xAB));
         assert_eq!(m.read(addr), Some(0xAB));
@@ -1559,9 +1811,36 @@ mod tests {
     #[test]
     fn bwram_linear_view_at_bank_40() {
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10_0000);
+        m.write(make_addr(0x00, 0x2226), 0x80);
         let addr = make_addr(0x40, 0x1234);
         assert!(m.write(addr, 0x99));
         assert_eq!(m.read(addr), Some(0x99));
+    }
+
+    /// Power-on (ares `sa1.cpp:230-237`, Mesen2 `Sa1::Reset`): both
+    /// write enables clear and BWPA = $0F, so every BW-RAM byte refuses
+    /// writes from either side until a game enables one; a reset arms
+    /// the protection again.
+    #[test]
+    fn bwram_is_write_protected_at_power_on() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
+        m.write(make_addr(0x40, 0x0000), 0xAA);
+        m.write(make_addr(0x40, 0xFFFF), 0xAA);
+        m.write_from_sa1(make_addr(0x40, 0x0100), 0xAA);
+        assert_eq!(m.read(make_addr(0x40, 0x0000)), Some(0x00));
+        assert_eq!(m.read(make_addr(0x40, 0xFFFF)), Some(0x00));
+        assert_eq!(m.read(make_addr(0x40, 0x0100)), Some(0x00));
+        m.write(make_addr(0x00, 0x2226), 0x80);
+        m.write(make_addr(0x40, 0x0000), 0xAA);
+        assert_eq!(m.read(make_addr(0x40, 0x0000)), Some(0xAA));
+        m.power_reset();
+        m.write(make_addr(0x40, 0x0001), 0xBB);
+        assert_eq!(m.read(make_addr(0x40, 0x0001)), Some(0x00), "armed again");
+        assert_eq!(
+            m.read(make_addr(0x40, 0x0000)),
+            Some(0xAA),
+            "BW-RAM persists"
+        );
     }
 
     #[test]
@@ -1581,54 +1860,54 @@ mod tests {
     fn multiplier_16x16_writes_to_mr() {
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
         // MCNT = 0 → multiply mode.
-        m.write(make_addr(0x00, 0x2250), 0x00);
+        m.write_from_sa1(make_addr(0x00, 0x2250), 0x00);
         // MA = 7 (signed)
-        m.write(make_addr(0x00, 0x2251), 0x07);
-        m.write(make_addr(0x00, 0x2252), 0x00);
+        m.write_from_sa1(make_addr(0x00, 0x2251), 0x07);
+        m.write_from_sa1(make_addr(0x00, 0x2252), 0x00);
         // MB = 8 (signed) → high-byte write triggers
-        m.write(make_addr(0x00, 0x2253), 0x08);
-        m.write(make_addr(0x00, 0x2254), 0x00);
-        assert_eq!(m.read(make_addr(0x00, 0x2306)), Some(56));
-        assert_eq!(m.read(make_addr(0x00, 0x2307)), Some(0));
+        m.write_from_sa1(make_addr(0x00, 0x2253), 0x08);
+        m.write_from_sa1(make_addr(0x00, 0x2254), 0x00);
+        assert_eq!(m.read_from_sa1(make_addr(0x00, 0x2306)), Some(56));
+        assert_eq!(m.read_from_sa1(make_addr(0x00, 0x2307)), Some(0));
     }
 
     #[test]
     fn divider_16_div_16_packs_quotient_and_remainder() {
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
-        m.write(make_addr(0x00, 0x2250), 0x01); // divide
+        m.write_from_sa1(make_addr(0x00, 0x2250), 0x01); // divide
         // MA = 100, MB = 7 → q = 14, r = 2.
-        m.write(make_addr(0x00, 0x2251), 100);
-        m.write(make_addr(0x00, 0x2252), 0);
-        m.write(make_addr(0x00, 0x2253), 7);
-        m.write(make_addr(0x00, 0x2254), 0);
-        assert_eq!(m.read(make_addr(0x00, 0x2306)), Some(14)); // quotient lo
-        assert_eq!(m.read(make_addr(0x00, 0x2307)), Some(0));
-        assert_eq!(m.read(make_addr(0x00, 0x2308)), Some(2)); // remainder lo
+        m.write_from_sa1(make_addr(0x00, 0x2251), 100);
+        m.write_from_sa1(make_addr(0x00, 0x2252), 0);
+        m.write_from_sa1(make_addr(0x00, 0x2253), 7);
+        m.write_from_sa1(make_addr(0x00, 0x2254), 0);
+        assert_eq!(m.read_from_sa1(make_addr(0x00, 0x2306)), Some(14)); // quotient lo
+        assert_eq!(m.read_from_sa1(make_addr(0x00, 0x2307)), Some(0));
+        assert_eq!(m.read_from_sa1(make_addr(0x00, 0x2308)), Some(2)); // remainder lo
     }
 
     #[test]
     fn multiplier_signed_negative() {
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
-        m.write(make_addr(0x00, 0x2250), 0x00);
+        m.write_from_sa1(make_addr(0x00, 0x2250), 0x00);
         // MA = -1 ($FFFF)
-        m.write(make_addr(0x00, 0x2251), 0xFF);
-        m.write(make_addr(0x00, 0x2252), 0xFF);
+        m.write_from_sa1(make_addr(0x00, 0x2251), 0xFF);
+        m.write_from_sa1(make_addr(0x00, 0x2252), 0xFF);
         // MB = 100
-        m.write(make_addr(0x00, 0x2253), 100);
-        m.write(make_addr(0x00, 0x2254), 0);
+        m.write_from_sa1(make_addr(0x00, 0x2253), 100);
+        m.write_from_sa1(make_addr(0x00, 0x2254), 0);
         // Result = -100 = 0xFFFFFF9C.
-        assert_eq!(m.read(make_addr(0x00, 0x2306)), Some(0x9C));
-        assert_eq!(m.read(make_addr(0x00, 0x2307)), Some(0xFF));
-        assert_eq!(m.read(make_addr(0x00, 0x2308)), Some(0xFF));
-        assert_eq!(m.read(make_addr(0x00, 0x2309)), Some(0xFF));
+        assert_eq!(m.read_from_sa1(make_addr(0x00, 0x2306)), Some(0x9C));
+        assert_eq!(m.read_from_sa1(make_addr(0x00, 0x2307)), Some(0xFF));
+        assert_eq!(m.read_from_sa1(make_addr(0x00, 0x2308)), Some(0xFF));
+        assert_eq!(m.read_from_sa1(make_addr(0x00, 0x2309)), Some(0xFF));
     }
 
     /// Read the packed 32-bit MR (quotient = low 16, remainder = high 16).
     fn read_mr_lo32(m: &mut Sa1Mapper) -> (u16, u16) {
-        let q = u16::from(m.read(make_addr(0x00, 0x2306)).unwrap())
-            | (u16::from(m.read(make_addr(0x00, 0x2307)).unwrap()) << 8);
-        let r = u16::from(m.read(make_addr(0x00, 0x2308)).unwrap())
-            | (u16::from(m.read(make_addr(0x00, 0x2309)).unwrap()) << 8);
+        let q = u16::from(m.read_from_sa1(make_addr(0x00, 0x2306)).unwrap())
+            | (u16::from(m.read_from_sa1(make_addr(0x00, 0x2307)).unwrap()) << 8);
+        let r = u16::from(m.read_from_sa1(make_addr(0x00, 0x2308)).unwrap())
+            | (u16::from(m.read_from_sa1(make_addr(0x00, 0x2309)).unwrap()) << 8);
         (q, r)
     }
 
@@ -1638,11 +1917,11 @@ mod tests {
         // ≥ 0). MA = -100 ($FF9C) ÷ MB = 7 → q = -15 ($FFF1), r = 5.
         // (The old signed/signed truncated path gave q = -14, r = -2.)
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
-        m.write(make_addr(0x00, 0x2250), 0x01);
-        m.write(make_addr(0x00, 0x2251), 0x9C);
-        m.write(make_addr(0x00, 0x2252), 0xFF);
-        m.write(make_addr(0x00, 0x2253), 7);
-        m.write(make_addr(0x00, 0x2254), 0);
+        m.write_from_sa1(make_addr(0x00, 0x2250), 0x01);
+        m.write_from_sa1(make_addr(0x00, 0x2251), 0x9C);
+        m.write_from_sa1(make_addr(0x00, 0x2252), 0xFF);
+        m.write_from_sa1(make_addr(0x00, 0x2253), 7);
+        m.write_from_sa1(make_addr(0x00, 0x2254), 0);
         assert_eq!(read_mr_lo32(&mut m), (0xFFF1, 5));
     }
 
@@ -1651,11 +1930,11 @@ mod tests {
         // MB = $8000 is 32768 (unsigned), not -32768. MA = 100 → q = 0,
         // r = 100.
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
-        m.write(make_addr(0x00, 0x2250), 0x01);
-        m.write(make_addr(0x00, 0x2251), 100);
-        m.write(make_addr(0x00, 0x2252), 0);
-        m.write(make_addr(0x00, 0x2253), 0x00);
-        m.write(make_addr(0x00, 0x2254), 0x80);
+        m.write_from_sa1(make_addr(0x00, 0x2250), 0x01);
+        m.write_from_sa1(make_addr(0x00, 0x2251), 100);
+        m.write_from_sa1(make_addr(0x00, 0x2252), 0);
+        m.write_from_sa1(make_addr(0x00, 0x2253), 0x00);
+        m.write_from_sa1(make_addr(0x00, 0x2254), 0x80);
         assert_eq!(read_mr_lo32(&mut m), (0, 100));
     }
 
@@ -1665,14 +1944,14 @@ mod tests {
         // only MBH written (=0) leaves MB = 0 → product 0. (Old code kept
         // MB and gave 15 again.)
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
-        m.write(make_addr(0x00, 0x2250), 0x00);
-        m.write(make_addr(0x00, 0x2251), 5);
-        m.write(make_addr(0x00, 0x2252), 0);
-        m.write(make_addr(0x00, 0x2253), 3);
-        m.write(make_addr(0x00, 0x2254), 0);
-        assert_eq!(m.read(make_addr(0x00, 0x2306)), Some(15));
-        m.write(make_addr(0x00, 0x2254), 0); // MB low was reset to 0
-        assert_eq!(m.read(make_addr(0x00, 0x2306)), Some(0));
+        m.write_from_sa1(make_addr(0x00, 0x2250), 0x00);
+        m.write_from_sa1(make_addr(0x00, 0x2251), 5);
+        m.write_from_sa1(make_addr(0x00, 0x2252), 0);
+        m.write_from_sa1(make_addr(0x00, 0x2253), 3);
+        m.write_from_sa1(make_addr(0x00, 0x2254), 0);
+        assert_eq!(m.read_from_sa1(make_addr(0x00, 0x2306)), Some(15));
+        m.write_from_sa1(make_addr(0x00, 0x2254), 0); // MB low was reset to 0
+        assert_eq!(m.read_from_sa1(make_addr(0x00, 0x2306)), Some(0));
     }
 
     #[test]
@@ -1680,29 +1959,98 @@ mod tests {
         // acm mode (MCNT bit 1) clears MR then accumulates ma·mb. MB is
         // reset each op, so it's re-loaded for the second accumulation.
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
-        m.write(make_addr(0x00, 0x2250), 0x02); // acm → clears MR
-        m.write(make_addr(0x00, 0x2251), 0xE8); // MA = 1000
-        m.write(make_addr(0x00, 0x2252), 0x03);
-        m.write(make_addr(0x00, 0x2253), 0xE8); // MB = 1000
-        m.write(make_addr(0x00, 0x2254), 0x03); // MR += 1_000_000
-        m.write(make_addr(0x00, 0x2253), 0xE8); // re-load MB (was reset)
-        m.write(make_addr(0x00, 0x2254), 0x03); // MR += 1_000_000
+        m.write_from_sa1(make_addr(0x00, 0x2250), 0x02); // acm → clears MR
+        m.write_from_sa1(make_addr(0x00, 0x2251), 0xE8); // MA = 1000
+        m.write_from_sa1(make_addr(0x00, 0x2252), 0x03);
+        m.write_from_sa1(make_addr(0x00, 0x2253), 0xE8); // MB = 1000
+        m.write_from_sa1(make_addr(0x00, 0x2254), 0x03); // MR += 1_000_000
+        m.write_from_sa1(make_addr(0x00, 0x2253), 0xE8); // re-load MB (was reset)
+        m.write_from_sa1(make_addr(0x00, 0x2254), 0x03); // MR += 1_000_000
         let mr = (0u64..5).fold(0u64, |acc, i| {
-            acc | (u64::from(m.read(make_addr(0x00, 0x2306 + i as u16)).unwrap()) << (8 * i))
+            acc | (u64::from(m.read_from_sa1(make_addr(0x00, 0x2306 + i as u16)).unwrap())
+                << (8 * i))
         });
         assert_eq!(mr, 2_000_000);
         // No overflow at this magnitude.
-        assert_eq!(m.read(make_addr(0x00, 0x230B)), Some(0));
+        assert_eq!(m.read_from_sa1(make_addr(0x00, 0x230B)), Some(0));
     }
 
     #[test]
-    fn mmio_writes_are_memory_backed_when_not_special() {
-        // $22FF is an unused / open MMIO slot — verify our backing
-        // store accepts and returns the value (covers the generic
-        // catch-all path).
+    fn unowned_register_slots_read_open_bus_on_both_sides() {
+        // No register is memory-backed: a slot nobody decodes reads open
+        // bus (`None`) from the S-CPU (ares `readIOCPU` returns the MDR)
+        // and `None` (ares `$FF`) from the SA-1.
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
         m.write(make_addr(0x00, 0x22FF), 0x5A);
-        assert_eq!(m.read(make_addr(0x00, 0x22FF)), Some(0x5A));
+        m.write_from_sa1(make_addr(0x00, 0x22FF), 0x5A);
+        assert_eq!(m.read(make_addr(0x00, 0x22FF)), None);
+        assert_eq!(m.read_from_sa1(make_addr(0x00, 0x22FF)), None);
+        // A register the other side owns is open bus too: the S-CPU
+        // cannot read CFR (Kirby Super Star polls `$2301` 2.9 million
+        // times and must see open bus, not the SA-1's flags), the SA-1
+        // cannot read SFR.
+        m.write(make_addr(0x00, 0x2200), 0x85); // CCNT: IRQ + message 5
+        assert_eq!(m.read(make_addr(0x00, 0x2301)), None);
+        assert_eq!(m.read_from_sa1(make_addr(0x00, 0x2301)), Some(0x85));
+        m.write_from_sa1(make_addr(0x00, 0x2209), 0x03); // SCNT: message 3
+        assert_eq!(m.read(make_addr(0x00, 0x2300)), Some(0x03));
+        assert_eq!(m.read_from_sa1(make_addr(0x00, 0x2300)), None);
+    }
+
+    #[test]
+    fn register_writes_are_owned_by_one_side() {
+        // ares `writeIOCPU` / `writeIOSA1`, Mesen2 `CpuRegisterWrite` /
+        // `Sa1RegisterWrite`: the S-CPU cannot arm the SA-1's interrupt
+        // enable, the SA-1 cannot rebank ROM; the shared DMA address block
+        // takes both.
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
+        m.write(make_addr(0x00, 0x220A), 0x80); // CIE from the S-CPU: dropped
+        m.write(make_addr(0x00, 0x2200), 0x80); // CCNT: IRQ to the SA-1
+        assert!(!m.sa1_irq_line(), "the S-CPU's CIE write must not count");
+        m.write_from_sa1(make_addr(0x00, 0x220A), 0x80);
+        assert!(m.sa1_irq_line());
+        m.write_from_sa1(make_addr(0x00, 0x2220), 0x81); // CXB from the SA-1: dropped
+        assert_eq!(m.cxb, 0x00);
+        m.write(make_addr(0x00, 0x2220), 0x81);
+        assert_eq!(m.cxb, 0x81);
+        m.write(make_addr(0x00, 0x2232), 0x11); // SDA is shared
+        m.write_from_sa1(make_addr(0x00, 0x2233), 0x22);
+        assert_eq!(m.sda, 0x2211);
+        // The dropped write is still a claimed access — the window is
+        // nothing else on the bus.
+        assert!(m.write(make_addr(0x00, 0x220A), 0x80));
+    }
+
+    #[test]
+    fn hcr_vcr_latch_on_the_2302_read() {
+        // ares `io.cpp:39-50`: reading HCR-low latches both counters;
+        // the three other bytes return the latched pair, not the live one.
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
+        m.write_from_sa1(make_addr(0x00, 0x2210), 0x80); // linear timer
+        m.tick_timer(400); // H = 100 dots
+        assert_eq!(
+            m.read_from_sa1(make_addr(0x00, 0x2303)),
+            Some(0),
+            "nothing latched yet"
+        );
+        assert_eq!(m.read_from_sa1(make_addr(0x00, 0x2302)), Some(100));
+        m.tick_timer(400); // H = 200 dots live
+        assert_eq!(
+            m.read_from_sa1(make_addr(0x00, 0x2302)),
+            Some(200),
+            "a new latch"
+        );
+        m.tick_timer(4 * 341);
+        assert_eq!(
+            m.read_from_sa1(make_addr(0x00, 0x2303)),
+            Some(0),
+            "latched high byte"
+        );
+        assert_eq!(
+            m.read_from_sa1(make_addr(0x00, 0x2304)),
+            Some(0),
+            "latched V"
+        );
     }
 
     #[test]
@@ -1717,13 +2065,13 @@ mod tests {
     fn main_to_sa1_irq_edge_latches_and_gates_through_cie() {
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
         // Enable S-CPU → SA-1 IRQ on the SA-1 side first.
-        m.write(make_addr(0x00, 0x220A), 0x80);
+        m.write_from_sa1(make_addr(0x00, 0x220A), 0x80);
         assert!(!m.sa1_irq_line(), "no IRQ until the S-CPU triggers it");
         // CCNT bit 7 0→1 latches the IRQ (per ares + Mesen2).
         m.write(make_addr(0x00, 0x2200), 0x80);
         assert!(m.sa1_irq_line(), "edge should latch + gate through CIE");
         // CIC bit 7 clears the latch.
-        m.write(make_addr(0x00, 0x220B), 0x80);
+        m.write_from_sa1(make_addr(0x00, 0x220B), 0x80);
         assert!(!m.sa1_irq_line());
     }
 
@@ -1736,12 +2084,12 @@ mod tests {
         // edge-detected, which silently dropped re-trigger requests
         // and deadlocked SMRPG's second mailbox handshake.
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
-        m.write(make_addr(0x00, 0x220A), 0x80);
+        m.write_from_sa1(make_addr(0x00, 0x220A), 0x80);
         // First write with bit 7 set → latch.
         m.write(make_addr(0x00, 0x2200), 0x80);
         assert!(m.sa1_irq_line());
         // CIC bit 7 acks the flag.
-        m.write(make_addr(0x00, 0x220B), 0x80);
+        m.write_from_sa1(make_addr(0x00, 0x220B), 0x80);
         assert!(!m.sa1_irq_line());
         // Re-writing $80 with no intervening clear must re-latch
         // (level-driven, not edge-detect).
@@ -1766,7 +2114,7 @@ mod tests {
         // Enable the SA-1 → S-CPU IRQ on the main side.
         m.write(make_addr(0x00, 0x2201), 0x80);
         // SCNT bit 7 0→1 → latch.
-        m.write(make_addr(0x00, 0x2209), 0x80);
+        m.write_from_sa1(make_addr(0x00, 0x2209), 0x80);
         assert!(m.main_irq_line());
         // SIC clears it.
         m.write(make_addr(0x00, 0x2202), 0x80);
@@ -1779,7 +2127,7 @@ mod tests {
         m.write(make_addr(0x00, 0x2201), 0x80);
         // SCNT: bit 7 = IRQ, bit 4 = NMIVW (mirror is bit 4? no — bit 4
         // = IVSW-bit 5 of SFR; we only check IRQ bit + message here).
-        m.write(make_addr(0x00, 0x2209), 0x80 | 0x05);
+        m.write_from_sa1(make_addr(0x00, 0x2209), 0x80 | 0x05);
         let sfr = m.read(make_addr(0x00, 0x2300)).unwrap();
         assert_eq!(sfr & 0x80, 0x80, "bit 7 = SA-1 IRQ");
         assert_eq!(sfr & 0x0F, 0x05, "low nibble = message");
@@ -1788,10 +2136,10 @@ mod tests {
     #[test]
     fn cfr_reflects_main_to_sa1_irq_latch_and_message_nibble() {
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
-        m.write(make_addr(0x00, 0x220A), 0x80);
+        m.write_from_sa1(make_addr(0x00, 0x220A), 0x80);
         // CCNT: bit 7 = IRQ trigger, bits 0..3 = message.
         m.write(make_addr(0x00, 0x2200), 0x80 | 0x0A);
-        let cfr = m.read(make_addr(0x00, 0x2301)).unwrap();
+        let cfr = m.read_from_sa1(make_addr(0x00, 0x2301)).unwrap();
         assert_eq!(cfr & 0x80, 0x80);
         assert_eq!(cfr & 0x0F, 0x0A);
     }
@@ -1799,12 +2147,12 @@ mod tests {
     #[test]
     fn main_irq_vector_overrides_to_siv_when_ivsw_and_latched() {
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
-        m.write(make_addr(0x00, 0x220E), 0x34); // SIV lo
-        m.write(make_addr(0x00, 0x220F), 0x12); // SIV hi
+        m.write_from_sa1(make_addr(0x00, 0x220E), 0x34); // SIV lo
+        m.write_from_sa1(make_addr(0x00, 0x220F), 0x12); // SIV hi
         m.write(make_addr(0x00, 0x2201), 0x80); // SIE.7 enable
         // SCNT: IVSW (bit 5… err, in our impl we use $40) + IRQ trigger.
         // IVSW = bit 5 of SCNT per Anomie; our scheme uses $40.
-        m.write(make_addr(0x00, 0x2209), 0x80 | 0x40);
+        m.write_from_sa1(make_addr(0x00, 0x2209), 0x80 | 0x40);
         // Now main reads $00:FFEE/FFEF — they should reflect SIV.
         assert_eq!(m.read(make_addr(0x00, 0xFFEE)), Some(0x34));
         assert_eq!(m.read(make_addr(0x00, 0xFFEF)), Some(0x12));
@@ -1815,13 +2163,13 @@ mod tests {
     #[test]
     fn main_irq_vector_falls_back_to_rom_when_ivsw_clear() {
         let mut m = Sa1Mapper::new(ramp_rom(0x10_0000), 0);
-        m.write(make_addr(0x00, 0x220E), 0x34);
-        m.write(make_addr(0x00, 0x220F), 0x12);
+        m.write_from_sa1(make_addr(0x00, 0x220E), 0x34);
+        m.write_from_sa1(make_addr(0x00, 0x220F), 0x12);
         m.write(make_addr(0x00, 0x2201), 0x80);
         // IVSW (SCNT bit 6) clear → no override. ares + Mesen2
         // explicitly treat the vector override as level-only on the
         // IVSW bit, *not* gated by whether the IRQ line is pending.
-        m.write(make_addr(0x00, 0x2209), 0x00);
+        m.write_from_sa1(make_addr(0x00, 0x2209), 0x00);
         let v = m.read(make_addr(0x00, 0xFFEE)).unwrap();
         assert_ne!(v, 0x34, "no override without IVSW");
     }
@@ -1831,10 +2179,10 @@ mod tests {
     #[test]
     fn timer_linear_mode_fires_irq_on_h_match() {
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
-        m.write(make_addr(0x00, 0x220A), 0x40); // CIE.6 = timer IRQ enable
-        m.write(make_addr(0x00, 0x2210), 0x81); // linear mode + H enable
-        m.write(make_addr(0x00, 0x2212), 100); // HCNT = 100 dots → 400 clocks
-        m.write(make_addr(0x00, 0x2213), 0);
+        m.write_from_sa1(make_addr(0x00, 0x220A), 0x40); // CIE.6 = timer IRQ enable
+        m.write_from_sa1(make_addr(0x00, 0x2210), 0x81); // linear mode + H enable
+        m.write_from_sa1(make_addr(0x00, 0x2212), 100); // HCNT = 100 dots → 400 clocks
+        m.write_from_sa1(make_addr(0x00, 0x2213), 0);
         m.tick_timer(398); // hcounter = 398, not yet the compare
         assert!(!m.sa1_irq_line());
         m.tick_timer(2); // hcounter reaches 400 == HCNT<<2
@@ -1844,20 +2192,20 @@ mod tests {
     #[test]
     fn timer_reset_via_ctr_clears_the_counter() {
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
-        m.write(make_addr(0x00, 0x2210), 0x81);
+        m.write_from_sa1(make_addr(0x00, 0x2210), 0x81);
         m.tick_timer(400); // 400 clocks
         // HCR ($2302) reads back in DOTS: 400 >> 2 = 100.
-        assert_eq!(m.read(make_addr(0x00, 0x2302)), Some(100));
-        m.write(make_addr(0x00, 0x2211), 0x00); // CTR restart
-        assert_eq!(m.read(make_addr(0x00, 0x2302)), Some(0));
+        assert_eq!(m.read_from_sa1(make_addr(0x00, 0x2302)), Some(100));
+        m.write_from_sa1(make_addr(0x00, 0x2211), 0x00); // CTR restart
+        assert_eq!(m.read_from_sa1(make_addr(0x00, 0x2302)), Some(0));
     }
 
     #[test]
     fn timer_hv_mode_fires_irq_on_h_match() {
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
-        m.write(make_addr(0x00, 0x220A), 0x40); // CIE.6 = timer IRQ enable
-        m.write(make_addr(0x00, 0x2210), 0x01); // HV mode + H enable
-        m.write(make_addr(0x00, 0x2212), 100); // HCNT = 100 dots → 400 clocks
+        m.write_from_sa1(make_addr(0x00, 0x220A), 0x40); // CIE.6 = timer IRQ enable
+        m.write_from_sa1(make_addr(0x00, 0x2210), 0x01); // HV mode + H enable
+        m.write_from_sa1(make_addr(0x00, 0x2212), 100); // HCNT = 100 dots → 400 clocks
         m.tick_timer(398);
         assert!(!m.sa1_irq_line());
         m.tick_timer(2); // hcounter == 400
@@ -1868,9 +2216,9 @@ mod tests {
     fn timer_hv_mode_fires_on_v_match() {
         // The raster-timing use case: fire at the start of a target scanline.
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
-        m.write(make_addr(0x00, 0x220A), 0x40); // CIE.6 = timer IRQ enable
-        m.write(make_addr(0x00, 0x2210), 0x02); // HV mode + V enable
-        m.write(make_addr(0x00, 0x2214), 2); // VCNT = scanline 2
+        m.write_from_sa1(make_addr(0x00, 0x220A), 0x40); // CIE.6 = timer IRQ enable
+        m.write_from_sa1(make_addr(0x00, 0x2210), 0x02); // HV mode + V enable
+        m.write_from_sa1(make_addr(0x00, 0x2214), 2); // VCNT = scanline 2
         // V increments once per 1364-clock line; reach the start of line 2.
         m.tick_timer(2 * 1364 - 2);
         assert!(!m.sa1_irq_line());
@@ -1881,12 +2229,12 @@ mod tests {
     #[test]
     fn timer_irq_refires_each_period_after_clear() {
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
-        m.write(make_addr(0x00, 0x220A), 0x40); // CIE.6 = timer IRQ enable
-        m.write(make_addr(0x00, 0x2210), 0x81); // linear mode + H enable
-        m.write(make_addr(0x00, 0x2212), 50); // HCNT = 50 → 200 clocks
+        m.write_from_sa1(make_addr(0x00, 0x220A), 0x40); // CIE.6 = timer IRQ enable
+        m.write_from_sa1(make_addr(0x00, 0x2210), 0x81); // linear mode + H enable
+        m.write_from_sa1(make_addr(0x00, 0x2212), 50); // HCNT = 50 → 200 clocks
         m.tick_timer(200);
         assert!(m.sa1_irq_line());
-        m.write(make_addr(0x00, 0x220B), 0x40); // CIC.6 clears the flag
+        m.write_from_sa1(make_addr(0x00, 0x220B), 0x40); // CIC.6 clears the flag
         assert!(!m.sa1_irq_line());
         // The flag is level, not one-shot: it re-fires one full H period
         // later (linear H wraps at 0x800 = 2048 clocks) when hcounter hits
@@ -1897,58 +2245,131 @@ mod tests {
 
     // ------------- Phase-3 normal DMA tests -------------
 
+    /// Arm a normal DMA the way a game does: DCNT names the devices, SDA /
+    /// DDA are raw offsets into them, the final DDA byte fires it.
+    fn dma_setup(m: &mut Sa1Mapper, dcnt: u8, sda: u32, dtc: u16) {
+        m.write_from_sa1(make_addr(0x00, 0x2230), dcnt);
+        m.write(make_addr(0x00, 0x2232), sda as u8);
+        m.write(make_addr(0x00, 0x2233), (sda >> 8) as u8);
+        m.write(make_addr(0x00, 0x2234), (sda >> 16) as u8);
+        m.write_from_sa1(make_addr(0x00, 0x2238), dtc as u8);
+        m.write_from_sa1(make_addr(0x00, 0x2239), (dtc >> 8) as u8);
+    }
+
+    /// DDA in three bytes; `$2237` last fires a BW-RAM-bound DMA.
+    fn dma_fire_bwram(m: &mut Sa1Mapper, dda: u32) {
+        m.write(make_addr(0x00, 0x2235), dda as u8);
+        m.write(make_addr(0x00, 0x2236), (dda >> 8) as u8);
+        m.write(make_addr(0x00, 0x2237), (dda >> 16) as u8);
+    }
+
+    /// DDA with `$2236` last: an I-RAM-bound DMA fires on the middle byte.
+    fn dma_fire_iram(m: &mut Sa1Mapper, dda: u32) {
+        m.write(make_addr(0x00, 0x2235), dda as u8);
+        m.write(make_addr(0x00, 0x2237), (dda >> 16) as u8);
+        m.write(make_addr(0x00, 0x2236), (dda >> 8) as u8);
+    }
+
     #[test]
     fn normal_dma_copies_iram_to_bwram_and_raises_irq() {
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
-        // Seed I-RAM with a tiny pattern.
         for i in 0..16 {
             m.write(make_addr(0x00, 0x3000 + i), 0xA0 + i as u8);
         }
-        m.write(make_addr(0x00, 0x220A), 0x20); // CIE bit 5 = DMA IRQ
-        // SDA = $00:3000 (I-RAM)
-        m.write(make_addr(0x00, 0x2232), 0x00);
-        m.write(make_addr(0x00, 0x2233), 0x30);
-        m.write(make_addr(0x00, 0x2234), 0x00);
-        // DTC = 16
-        m.write(make_addr(0x00, 0x2238), 16);
-        m.write(make_addr(0x00, 0x2239), 0);
-        // DCNT = bit 7 enable + bit 2 dd=1 (dest = BW-RAM). DMA only
-        // *configures* on this write — the actual byte-copy is
-        // triggered when the final DDA byte ($2237 for BW-RAM dest)
-        // is written. Per ares + Mesen2.
-        m.write(make_addr(0x00, 0x2230), 0x84);
-        // DDA = $40:0000 — writing $2237 fires the burst.
-        m.write(make_addr(0x00, 0x2235), 0x00);
-        m.write(make_addr(0x00, 0x2236), 0x00);
-        m.write(make_addr(0x00, 0x2237), 0x40);
+        m.write_from_sa1(make_addr(0x00, 0x220A), 0x20); // CIE bit 5 = DMA IRQ
+        // sd = I-RAM (2), dd = BW-RAM (bit 2); SDA is an I-RAM offset.
+        dma_setup(&mut m, 0x86, 0x00_0000, 16);
+        dma_fire_bwram(&mut m, 0x40_0000);
         for i in 0..16 {
             assert_eq!(m.read(make_addr(0x40, i as u16)), Some(0xA0 + i as u8));
         }
-        let dcnt = m.read(make_addr(0x00, 0x2230)).unwrap();
-        assert_eq!(dcnt & 0x80, 0, "DMA enable should auto-clear");
         assert!(m.sa1_irq_line(), "DMA IRQ should be asserted");
+        // 2 steps a byte, no contention from an S-CPU-fired DMA.
+        assert_eq!(m.take_dma_steps(), 32);
+        // DMA enable stays set (ares / Mesen2 never clear it): a second
+        // burst needs only a new count and destination.
+        m.write(make_addr(0x00, 0x3000), 0x5A);
+        m.write_from_sa1(make_addr(0x00, 0x2238), 1);
+        m.write_from_sa1(make_addr(0x00, 0x2232), 0x00);
+        dma_fire_bwram(&mut m, 0x40_0020);
+        assert_eq!(m.read(make_addr(0x40, 0x0020)), Some(0x5A));
     }
 
     #[test]
     fn normal_dma_from_rom_to_bwram() {
         let rom = (0..0x1_0000).map(|i| (i & 0xFF) as u8).collect::<Vec<_>>();
         let mut m = Sa1Mapper::new(rom, 0x10000);
-        // SDA = $00:8000 (= ROM[0]).
-        m.write(make_addr(0x00, 0x2232), 0x00);
-        m.write(make_addr(0x00, 0x2233), 0x80);
-        m.write(make_addr(0x00, 0x2234), 0x00);
-        m.write(make_addr(0x00, 0x2238), 4);
-        m.write(make_addr(0x00, 0x2239), 0);
-        // DCNT first: enable + dest = BW-RAM (dd=1, bit 2).
-        m.write(make_addr(0x00, 0x2230), 0x84);
-        // DDA = $40:0000; $2237 write fires.
-        m.write(make_addr(0x00, 0x2235), 0x00);
-        m.write(make_addr(0x00, 0x2236), 0x00);
-        m.write(make_addr(0x00, 0x2237), 0x40);
-        assert_eq!(m.read(make_addr(0x40, 0)), Some(0x00));
-        assert_eq!(m.read(make_addr(0x40, 1)), Some(0x01));
-        assert_eq!(m.read(make_addr(0x40, 2)), Some(0x02));
-        assert_eq!(m.read(make_addr(0x40, 3)), Some(0x03));
+        // sd = ROM (0): the source goes through the SA-1's ROM map, so
+        // `$00:8000` is ROM[0].
+        dma_setup(&mut m, 0x84, 0x00_8000, 4);
+        dma_fire_bwram(&mut m, 0x40_0000);
+        for i in 0..4u16 {
+            assert_eq!(m.read(make_addr(0x40, i)), Some(i as u8));
+        }
+        assert_eq!(m.take_dma_steps(), 8);
+    }
+
+    #[test]
+    fn normal_dma_from_rom_to_iram_fires_on_the_middle_dda_byte() {
+        let rom = (0..0x1_0000).map(|i| (i & 0xFF) as u8).collect::<Vec<_>>();
+        let mut m = Sa1Mapper::new(rom, 0x10000);
+        // sd = ROM, dd = I-RAM; `$C0:0010` is ROM[0x10] through CXB.
+        dma_setup(&mut m, 0x80, 0xC0_0010, 3);
+        dma_fire_iram(&mut m, 0x00_3100); // an I-RAM offset: `& $7FF` = $100
+        assert_eq!(m.read(make_addr(0x00, 0x3100)), Some(0x10));
+        assert_eq!(m.read(make_addr(0x00, 0x3102)), Some(0x12));
+        assert_eq!(m.take_dma_steps(), 3, "one step a byte");
+    }
+
+    #[test]
+    fn normal_dma_from_bwram_to_iram_uses_raw_offsets() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
+        m.write(make_addr(0x00, 0x2226), 0x80);
+        m.write(make_addr(0x40, 0x0010), 0xC3);
+        // sd = BW-RAM (1), dd = I-RAM: SDA $000010 is BW-RAM byte $10, no
+        // bank decoding.
+        dma_setup(&mut m, 0x81, 0x00_0010, 1);
+        dma_fire_iram(&mut m, 0x00_0000);
+        assert_eq!(m.read(make_addr(0x00, 0x3000)), Some(0xC3));
+        assert_eq!(m.take_dma_steps(), 2);
+    }
+
+    #[test]
+    fn normal_dma_over_an_unsupported_device_pair_moves_nothing() {
+        // sd = I-RAM, dd = I-RAM: no such transfer on the chip — the
+        // counter runs down, the IRQ fires, memory and the budget are
+        // untouched.
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
+        m.write(make_addr(0x00, 0x3000), 0x77);
+        dma_setup(&mut m, 0x82, 0x00_0000, 4);
+        dma_fire_iram(&mut m, 0x00_0100);
+        assert_eq!(m.read(make_addr(0x00, 0x3100)), Some(0x00));
+        assert_eq!(m.dtc, 0);
+        assert!(m.dma_irq_to_sa1);
+        assert_eq!(m.take_dma_steps(), 0);
+    }
+
+    #[test]
+    fn normal_dma_fired_by_the_sa1_pays_contention_for_the_scpu_address() {
+        // ares `dma.cpp:8-15`: ROM→BW-RAM costs 2 steps a byte, plus 2
+        // more while the S-CPU is on BW-RAM.
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
+        m.set_scpu_mar(0x40_0100);
+        m.write_from_sa1(make_addr(0x00, 0x2230), 0x84);
+        m.write_from_sa1(make_addr(0x00, 0x2232), 0x00);
+        m.write_from_sa1(make_addr(0x00, 0x2233), 0x80);
+        m.write_from_sa1(make_addr(0x00, 0x2234), 0x00);
+        m.write_from_sa1(make_addr(0x00, 0x2238), 4);
+        m.write_from_sa1(make_addr(0x00, 0x2239), 0);
+        m.write_from_sa1(make_addr(0x00, 0x2235), 0x00);
+        m.write_from_sa1(make_addr(0x00, 0x2236), 0x00);
+        m.write_from_sa1(make_addr(0x00, 0x2237), 0x40);
+        assert_eq!(m.take_dma_steps(), 4 * 4);
+        // The same burst fired by the S-CPU: its own address is the DMA
+        // port, which never contends.
+        dma_setup(&mut m, 0x84, 0x00_8000, 4);
+        dma_fire_bwram(&mut m, 0x40_0000);
+        assert_eq!(m.take_dma_steps(), 4 * 2);
     }
 
     // ------------- Character-conversion DMA (ares port) -------------
@@ -1963,7 +2384,7 @@ mod tests {
         m.write(make_addr(0x00, 0x2233), 0x00);
         m.write(make_addr(0x00, 0x2234), 0x00);
         m.write(make_addr(0x00, 0x2231), cdma);
-        m.write(make_addr(0x00, 0x2230), 0xB0); // enable + CC + cdsel
+        m.write_from_sa1(make_addr(0x00, 0x2230), 0xB0); // enable + CC + cdsel
         m.write(make_addr(0x00, 0x2235), dda as u8);
         m.write(make_addr(0x00, 0x2237), (dda >> 16) as u8);
         m.write(make_addr(0x00, 0x2236), (dda >> 8) as u8);
@@ -1989,6 +2410,7 @@ mod tests {
         // it, and answers out of I-RAM at DDA (ares `dmaCC1Read`). Before
         // the first read, nothing has been converted.
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
+        m.write(make_addr(0x00, 0x2226), 0x80); // SBWE: the S-CPU seeds BW-RAM
         // 2bpp, 1 character wide: 8 source bytes, one per row. Row y has
         // pixel bits taken LSB-first, so 0x03 = the two low planes set for
         // the leftmost four pixels of the row.
@@ -2018,6 +2440,7 @@ mod tests {
         // row at {0,1,16,17,32,33,48,49} — verified here in 4bpp, where a
         // row of colour 5 lights planes 0 and 2 only.
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
+        m.write(make_addr(0x00, 0x2226), 0x80); // SBWE: the S-CPU seeds BW-RAM
         for i in 0..32u16 {
             // 4bpp packs 2 pixels per byte; 0x55 = colour 5 twice.
             m.write(make_addr(0x40, i), 0x55);
@@ -2034,7 +2457,7 @@ mod tests {
     /// clear, then DDA. Rows are fed through BRF afterwards.
     fn cc2_setup(m: &mut Sa1Mapper, cdma: u8) {
         m.write(make_addr(0x00, 0x2231), cdma);
-        m.write(make_addr(0x00, 0x2230), 0xA0); // enable + CC, cdsel = 0
+        m.write_from_sa1(make_addr(0x00, 0x2230), 0xA0); // enable + CC, cdsel = 0
         m.write(make_addr(0x00, 0x2235), 0x00); // DDA = $00:3000
         m.write(make_addr(0x00, 0x2237), 0x00);
         m.write(make_addr(0x00, 0x2236), 0x30);
@@ -2049,7 +2472,7 @@ mod tests {
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
         cc2_setup(&mut m, 0b0000_0001); // 4bpp
         for (i, px) in [1u8, 0, 1, 0, 1, 0, 1, 0].iter().enumerate() {
-            m.write(make_addr(0x00, 0x2240 + i as u16), *px);
+            m.write_from_sa1(make_addr(0x00, 0x2240 + i as u16), *px);
         }
         assert_eq!(m.iram[0], 0xAA, "bit 0 of each pixel, MSB = pixel 0");
         assert_eq!(m.iram[1], 0x00, "plane 1: no pixel has bit 1 set");
@@ -2057,7 +2480,7 @@ mod tests {
 
         // The second half (BRF[8..15], written through $224F) is row 1.
         for i in 8..16u16 {
-            m.write(make_addr(0x00, 0x2240 + i), 0x02);
+            m.write_from_sa1(make_addr(0x00, 0x2240 + i), 0x02);
         }
         assert_eq!(m.iram[2], 0x00, "row 1, plane 0");
         assert_eq!(m.iram[3], 0xFF, "row 1, plane 1 — every pixel has bit 1");
@@ -2069,10 +2492,10 @@ mod tests {
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
         cc2_setup(&mut m, 0b0000_0001);
         for i in 0..8u16 {
-            m.write(make_addr(0x00, 0x2240 + i), 0x01);
+            m.write_from_sa1(make_addr(0x00, 0x2240 + i), 0x01);
         }
         assert_eq!(m.cc2_line, 1);
-        m.write(make_addr(0x00, 0x2230), 0x00); // DMA enable off
+        m.write_from_sa1(make_addr(0x00, 0x2230), 0x00); // DMA enable off
         assert_eq!(m.cc2_line, 0, "ares io.cpp:327");
     }
 
@@ -2080,91 +2503,164 @@ mod tests {
 
     /// Helper — write a `vlen + mode` to VBD and point VDA at the
     /// linear BW-RAM origin (`$40:0000`).
-    fn vlbp_setup(m: &mut Sa1Mapper, vbd: u8) {
-        m.write(make_addr(0x00, 0x2258), vbd);
-        m.write(make_addr(0x00, 0x2259), 0x00);
-        m.write(make_addr(0x00, 0x225A), 0x00);
-        m.write(make_addr(0x00, 0x225B), 0x40);
+    /// A mapper with `[0xAB, 0xCD, 0xEF, 0x12]` at the start of BW-RAM and
+    /// VDA pointing at it (`$40:0000` on the VLBP's own bus is BW-RAM
+    /// byte 0).
+    fn vlbp_mapper() -> Sa1Mapper {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
+        m.write(make_addr(0x00, 0x2226), 0x80);
+        for (i, b) in [0xAB, 0xCD, 0xEF, 0x12].into_iter().enumerate() {
+            m.write(make_addr(0x40, i as u16), b);
+        }
+        m.write_from_sa1(make_addr(0x00, 0x2259), 0x00);
+        m.write_from_sa1(make_addr(0x00, 0x225A), 0x00);
+        m.write_from_sa1(make_addr(0x00, 0x225B), 0x40);
+        m
+    }
+
+    fn vdpl(m: &mut Sa1Mapper) -> u8 {
+        m.read_from_sa1(make_addr(0x00, 0x230C)).unwrap()
+    }
+
+    fn vdph(m: &mut Sa1Mapper) -> u8 {
+        m.read_from_sa1(make_addr(0x00, 0x230D)).unwrap()
     }
 
     #[test]
-    fn vlbp_fixed_4bit_reads_nibbles_in_lsb_first_order() {
-        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
-        // Stream byte 0 = 0xAB → low nibble first, then high.
-        m.write(make_addr(0x40, 0), 0xAB);
-        m.write(make_addr(0x40, 1), 0xCD);
-        vlbp_setup(&mut m, 0x04); // fixed mode, vlen = 4
-        // First read at $230C returns 0xB (low nibble) and advances.
-        assert_eq!(m.read(make_addr(0x00, 0x230C)), Some(0x0B));
-        // Second read returns 0xA (high nibble of byte 0).
-        assert_eq!(m.read(make_addr(0x00, 0x230C)), Some(0x0A));
-        // Cross into byte 1 → 0xD then 0xC.
-        assert_eq!(m.read(make_addr(0x00, 0x230C)), Some(0x0D));
-        assert_eq!(m.read(make_addr(0x00, 0x230C)), Some(0x0C));
+    fn vlbp_fixed_mode_advances_on_the_vbd_write_not_on_reads() {
+        // ares `io.cpp:433-438`: with bit 7 clear the `$2258` write itself
+        // consumes `vb` bits; the ports only ever show the window at the
+        // cursor, unmasked.
+        let mut m = vlbp_mapper();
+        assert_eq!(vdpl(&mut m), 0xAB);
+        assert_eq!(vdpl(&mut m), 0xAB, "reads never advance in fixed mode");
+        m.write_from_sa1(make_addr(0x00, 0x2258), 0x04); // vb = 4: consume 4 bits
+        assert_eq!(vdpl(&mut m), 0xDA, "the window shifted by 4: $CDAB >> 4");
+        m.write_from_sa1(make_addr(0x00, 0x2258), 0x04);
+        assert_eq!(vdpl(&mut m), 0xCD, "8 bits consumed: `va` moved a byte");
+        assert_eq!((m.va, m.vbit), (0x40_0001, 0));
+        m.write_from_sa1(make_addr(0x00, 0x2258), 0x00); // vb = 0 means 16
+        assert_eq!(vdpl(&mut m), 0x12);
+        assert_eq!(m.va, 0x40_0003);
     }
 
     #[test]
-    fn vlbp_fixed_8bit_passthrough() {
-        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
-        m.write(make_addr(0x40, 0), 0xAB);
-        m.write(make_addr(0x40, 1), 0xCD);
-        m.write(make_addr(0x40, 2), 0xEF);
-        vlbp_setup(&mut m, 0x08);
-        assert_eq!(m.read(make_addr(0x00, 0x230C)), Some(0xAB));
-        assert_eq!(m.read(make_addr(0x00, 0x230C)), Some(0xCD));
-        assert_eq!(m.read(make_addr(0x00, 0x230C)), Some(0xEF));
-    }
-
-    #[test]
-    fn vlbp_fixed_16bit_split_across_lo_then_hi() {
-        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
-        m.write(make_addr(0x40, 0), 0xAB);
-        m.write(make_addr(0x40, 1), 0xCD);
-        m.write(make_addr(0x40, 2), 0xEF);
-        m.write(make_addr(0x40, 3), 0x12);
-        // vbd = 0 → vlen = 16, fixed mode.
-        vlbp_setup(&mut m, 0x00);
-        // $230C returns 0xAB and advances 16 bits.
-        assert_eq!(m.read(make_addr(0x00, 0x230C)), Some(0xAB));
-        // $230D after the advance reads the new window:
-        // bytes [0xEF, 0x12] → returns high byte 0x12. Actually we
-        // re-read fresh because $230D is the high half of the SAME
-        // 16-bit value at the *current* bit cursor. After fixed-mode
-        // advance, cursor = 16, so $230D returns hi byte of bytes
-        // [2..4] = 0x12.
-        assert_eq!(m.read(make_addr(0x00, 0x230D)), Some(0x12));
-    }
-
-    #[test]
-    fn vlbp_variable_mode_advances_on_high_byte_read() {
-        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
-        m.write(make_addr(0x40, 0), 0xAB);
-        m.write(make_addr(0x40, 1), 0xCD);
-        // vbd = 0x88 → vlen = 8, variable mode.
-        vlbp_setup(&mut m, 0x88);
-        // Reading $230C repeatedly returns the same byte (no advance).
-        assert_eq!(m.read(make_addr(0x00, 0x230C)), Some(0xAB));
-        assert_eq!(m.read(make_addr(0x00, 0x230C)), Some(0xAB));
-        // Reading $230D advances.
-        assert_eq!(m.read(make_addr(0x00, 0x230D)), Some(0x00));
-        // Now $230C returns the next byte.
-        assert_eq!(m.read(make_addr(0x00, 0x230C)), Some(0xCD));
+    fn vlbp_auto_increment_mode_advances_on_the_high_byte_read() {
+        // ares `io.cpp:81-86`: with bit 7 set the `$230D` read consumes
+        // `vb` bits; `$230C` is free to re-read.
+        let mut m = vlbp_mapper();
+        m.write_from_sa1(make_addr(0x00, 0x2258), 0x88); // hl = 1, vb = 8
+        assert_eq!((m.va, m.vbit), (0x40_0000, 0), "the write did not advance");
+        assert_eq!(vdpl(&mut m), 0xAB);
+        assert_eq!(vdpl(&mut m), 0xAB);
+        assert_eq!(vdph(&mut m), 0xCD, "the high byte, then the cursor moves");
+        assert_eq!(vdpl(&mut m), 0xCD);
+        assert_eq!(vdph(&mut m), 0xEF);
+        assert_eq!(m.va, 0x40_0002);
     }
 
     #[test]
     fn vlbp_high_address_byte_write_resets_the_bit_cursor() {
+        let mut m = vlbp_mapper();
+        m.write_from_sa1(make_addr(0x00, 0x2258), 0x03); // consume 3 bits
+        assert_eq!(m.vbit, 3);
+        m.write_from_sa1(make_addr(0x00, 0x225B), 0x40); // VDA high: vbit = 0
+        assert_eq!((m.va, m.vbit), (0x40_0000, 0));
+        assert_eq!(vdpl(&mut m), 0xAB);
+    }
+
+    #[test]
+    fn vlbp_reads_rom_through_the_sa1_map_and_never_the_registers() {
+        // ares `memory.cpp:113-133` (`readVBR`): ROM by the SA-1's
+        // mapping, I-RAM raw, and never an I/O port — a VDA inside the
+        // register window reads `$FF`.
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
-        m.write(make_addr(0x40, 0), 0x55);
-        m.write(make_addr(0x40, 1), 0xAA);
-        vlbp_setup(&mut m, 0x04);
-        // Consume 3 nibbles.
-        let _ = m.read(make_addr(0x00, 0x230C));
-        let _ = m.read(make_addr(0x00, 0x230C));
-        let _ = m.read(make_addr(0x00, 0x230C));
-        // Re-write VDA-high to reset.
-        m.write(make_addr(0x00, 0x225B), 0x40);
-        // First nibble of byte 0 again.
-        assert_eq!(m.read(make_addr(0x00, 0x230C)), Some(0x05));
+        m.write_from_sa1(make_addr(0x00, 0x2259), 0x10);
+        m.write_from_sa1(make_addr(0x00, 0x225A), 0x80);
+        m.write_from_sa1(make_addr(0x00, 0x225B), 0x00); // $00:8010 = ROM[$10]
+        assert_eq!(vdpl(&mut m), 0x10);
+        assert_eq!(vdph(&mut m), 0x11);
+        m.write(make_addr(0x00, 0x3005), 0x5A);
+        m.write_from_sa1(make_addr(0x00, 0x2259), 0x05);
+        m.write_from_sa1(make_addr(0x00, 0x225A), 0x30);
+        m.write_from_sa1(make_addr(0x00, 0x225B), 0x00); // $00:3005 = I-RAM
+        assert_eq!(vdpl(&mut m), 0x5A);
+        m.write_from_sa1(make_addr(0x00, 0x225A), 0x23); // $00:2305 = a register
+        m.write_from_sa1(make_addr(0x00, 0x225B), 0x00);
+        assert_eq!(vdpl(&mut m), 0xFF);
+        // The ports belong to the SA-1: the S-CPU reads open bus.
+        assert_eq!(m.read(make_addr(0x00, 0x230C)), None);
+    }
+
+    // ------------- BW-RAM bitmap projection (ares `bwram.cpp`) -------------
+
+    #[test]
+    fn sa1_reads_bwram_as_pixels_through_banks_60_to_6f() {
+        // `$60-$6F` is the bitmap projection: one pixel per address, two a
+        // byte at 4 bpp (low nibble first), four a byte at 2 bpp.
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
+        m.write(make_addr(0x00, 0x2226), 0x80);
+        m.write(make_addr(0x40, 0x0000), 0x21);
+        m.write(make_addr(0x40, 0x0001), 0xE4);
+        assert_eq!(m.read_from_sa1(make_addr(0x60, 0x0000)), Some(0x1));
+        assert_eq!(m.read_from_sa1(make_addr(0x60, 0x0001)), Some(0x2));
+        assert_eq!(m.read_from_sa1(make_addr(0x60, 0x0002)), Some(0x4));
+        assert_eq!(m.read_from_sa1(make_addr(0x60, 0x0003)), Some(0xE));
+        // A pixel write is a read-modify-write of its byte.
+        m.write_from_sa1(make_addr(0x60, 0x0001), 0xFF);
+        assert_eq!(m.read(make_addr(0x40, 0x0000)), Some(0xF1));
+        // BBF bit 7: 2 bpp.
+        m.write_from_sa1(make_addr(0x00, 0x223F), 0x80);
+        assert_eq!(m.read_from_sa1(make_addr(0x60, 0x0004)), Some(0b00));
+        assert_eq!(m.read_from_sa1(make_addr(0x60, 0x0005)), Some(0b01));
+        assert_eq!(m.read_from_sa1(make_addr(0x60, 0x0006)), Some(0b10));
+        assert_eq!(m.read_from_sa1(make_addr(0x60, 0x0007)), Some(0b11));
+        m.write_from_sa1(make_addr(0x60, 0x0004), 0x03);
+        assert_eq!(m.read(make_addr(0x40, 0x0001)), Some(0xE7));
+        // Pixel space is 20 bits: bank $61 continues where $60 ends.
+        m.write(make_addr(0x40, 0x4000), 0x39);
+        m.write_from_sa1(make_addr(0x00, 0x223F), 0x00);
+        assert_eq!(m.read_from_sa1(make_addr(0x60, 0x8000)), Some(0x9));
+        // The S-CPU has no such view.
+        assert_eq!(m.read(make_addr(0x60, 0x0000)), None);
+        // A BW-RAM access either way, for the SA-1's cycle cost.
+        assert_eq!(m.sa1_region_steps(make_addr(0x60, 0x0000)), 2);
+    }
+
+    #[test]
+    fn cbm_bit_7_turns_the_sa1_window_into_a_bitmap_page() {
+        // ares `bwram.cpp:45-67`: with `sw46` clear the `$6000-$7FFF`
+        // window is linear page `CBM & $1F`; with it set the window is
+        // bitmap page `CBM & $7F` — 8 KB of pixels, i.e. 4 KB of bytes at
+        // 4 bpp.
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
+        m.write(make_addr(0x00, 0x2226), 0x80);
+        m.write(make_addr(0x40, 0x2000), 0x5A); // linear page 1, byte 0
+        m.write(make_addr(0x40, 0x1000), 0x34); // pixel page 1 = bytes $1000..
+        m.write_from_sa1(make_addr(0x00, 0x2225), 0x01);
+        assert_eq!(m.read_from_sa1(make_addr(0x00, 0x6000)), Some(0x5A));
+        m.write_from_sa1(make_addr(0x00, 0x2225), 0x81);
+        assert_eq!(m.read_from_sa1(make_addr(0x00, 0x6000)), Some(0x4));
+        assert_eq!(m.read_from_sa1(make_addr(0x00, 0x6001)), Some(0x3));
+        m.write_from_sa1(make_addr(0x00, 0x6000), 0x0C);
+        assert_eq!(m.read(make_addr(0x40, 0x1000)), Some(0x3C));
+        // The S-CPU's window keeps its own page register and stays linear.
+        m.write(make_addr(0x00, 0x2224), 0x01);
+        assert_eq!(m.read(make_addr(0x00, 0x6000)), Some(0x5A));
+    }
+
+    #[test]
+    fn sa1_linear_bwram_spans_banks_40_to_5f() {
+        // ares `memory.cpp:40`: the SA-1's linear view is `$40-$5F`,
+        // mirrored into the array; the S-CPU's stops at `$4F`.
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
+        m.write(make_addr(0x00, 0x2226), 0x80);
+        m.write(make_addr(0x40, 0x0123), 0x77);
+        assert_eq!(m.read_from_sa1(make_addr(0x50, 0x0123)), Some(0x77));
+        assert_eq!(m.read_from_sa1(make_addr(0x5F, 0x0123)), Some(0x77));
+        assert_eq!(m.read(make_addr(0x50, 0x0123)), None);
+        m.write_from_sa1(make_addr(0x51, 0x0123), 0x88);
+        assert_eq!(m.read(make_addr(0x40, 0x0123)), Some(0x88));
     }
 
     // ------------- Phase-5 write-protection tests -------------
@@ -2172,40 +2668,43 @@ mod tests {
     #[test]
     fn bwram_write_passes_when_either_enable_is_set() {
         // Per ares (`coprocessor/sa1/bwram.cpp:40-43, 73-84`) and
-        // Mesen2 (`CpuBwRamHandler.h:45-57`): SBWE alone never gates
-        // BWRAM writes — the gate is the OR of SBWE and CBWE. Killing
-        // one side leaves the other free to keep writing.
+        // Mesen2 (`CpuBwRamHandler.h:45-57`): the gate is the OR of
+        // SBWE and CBWE — either side's enable lets both sides write.
+        // Power-on has both clear, so the first write is refused.
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
-        // SBWE off, CBWE still $80 (default) → main write still lands.
+        m.write(make_addr(0x40, 0x0100), 0xAA);
+        assert_eq!(m.read(make_addr(0x40, 0x0100)), Some(0x00));
+        // The SA-1 enables its side: the S-CPU's write lands too.
+        m.write_from_sa1(make_addr(0x00, 0x2227), 0x80);
+        m.write(make_addr(0x40, 0x0100), 0xAA);
+        assert_eq!(m.read(make_addr(0x40, 0x0100)), Some(0xAA));
+        // Swap: only SBWE set, the SA-1's write lands.
+        m.write_from_sa1(make_addr(0x00, 0x2227), 0x00);
+        m.write(make_addr(0x00, 0x2226), 0x80);
+        m.write_from_sa1(make_addr(0x40, 0x0101), 0xBB);
+        assert_eq!(m.read(make_addr(0x40, 0x0101)), Some(0xBB));
+        // Both clear again: BWPA's zone (all of it at the $0F default)
+        // refuses both sides.
         m.write(make_addr(0x00, 0x2226), 0x00);
-        m.write(make_addr(0x40, 0x0000), 0xAA);
-        assert_eq!(m.read(make_addr(0x40, 0x0000)), Some(0xAA));
-        // Kill CBWE too and write outside the BWPA-protected first
-        // 256 bytes (BWPA=0 → prot zone = 0x100 bytes).
-        m.write(make_addr(0x00, 0x2227), 0x00);
-        m.write(make_addr(0x40, 0x0100), 0xBB);
-        assert_eq!(m.read(make_addr(0x40, 0x0100)), Some(0xBB));
-        // Write INSIDE the protected zone → blocked now (both disabled).
         m.write(make_addr(0x40, 0x0040), 0xCC);
+        m.write_from_sa1(make_addr(0x40, 0x0041), 0xCC);
         assert_eq!(m.read(make_addr(0x40, 0x0040)), Some(0x00));
+        assert_eq!(m.read(make_addr(0x40, 0x0041)), Some(0x00));
     }
 
     #[test]
     fn bwpa_protects_first_n_pages_only_when_both_enables_disabled() {
         // Per ares/Mesen2: BWPA's first-block protect zone applies
-        // only when SBWE AND CBWE are both cleared. With either
-        // enable set, BWPA is inert.
+        // only while SBWE AND CBWE are both clear; with either enable
+        // set, BWPA is inert.
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
-        // Disable both enables so BWPA actually gates.
-        m.write(make_addr(0x00, 0x2226), 0x00);
-        m.write(make_addr(0x00, 0x2227), 0x00);
         // BWPA = 1 → prot_bytes = 0x100 << 1 = 512 bytes.
         m.write(make_addr(0x00, 0x2228), 0x01);
         m.write(make_addr(0x40, 0x0000), 0xAA); // inside → blocked
         m.write(make_addr(0x40, 0x0200), 0xBB); // outside → lands
         assert_eq!(m.read(make_addr(0x40, 0x0000)), Some(0x00));
         assert_eq!(m.read(make_addr(0x40, 0x0200)), Some(0xBB));
-        // Re-enable either side → BWPA goes inert, protected slot writes.
+        // Enable either side → BWPA goes inert, protected slot writes.
         m.write(make_addr(0x00, 0x2226), 0x80);
         m.write(make_addr(0x40, 0x0000), 0xDD);
         assert_eq!(m.read(make_addr(0x40, 0x0000)), Some(0xDD));
@@ -2213,25 +2712,15 @@ mod tests {
 
     #[test]
     fn sa1_side_bwram_write_uses_the_same_or_of_enables_gate() {
-        // BW-RAM writes from the SA-1 side are gated by the same
-        // OR-of-enables as main writes (per ares/Mesen2 — the gate
-        // is symmetric). Test the both-disabled-in-BWPA-zone path
-        // here too.
+        // The SA-1's linear writes pass the same gate; only its own CBWE
+        // (`$2227`, an SA-1-side register) or the S-CPU's SBWE opens it.
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
-        m.write(make_addr(0x00, 0x2226), 0x00); // SBWE disabled
-        m.write(make_addr(0x00, 0x2228), 0x0F); // BWPA = 15 → 256<<10 prot
-        // CBWE disabled → both off → write inside protect zone fails.
-        m.write(make_addr(0x00, 0x2227), 0x00);
-        assert!(
-            !m.write_from_sa1(make_addr(0x40, 0x0010), 0xAA) || {
-                // The function returns true (claimed) even on a no-op
-                // protected write — re-check the actual byte.
-                m.read(make_addr(0x40, 0x0010)) == Some(0x00)
-            }
-        );
-        // CBWE enabled → SA-1 side write lands even inside main's
-        // protected window.
-        m.write(make_addr(0x00, 0x2227), 0x80);
+        assert!(m.write_from_sa1(make_addr(0x40, 0x0010), 0xAA), "claimed");
+        assert_eq!(m.read(make_addr(0x40, 0x0010)), Some(0x00), "refused");
+        m.write(make_addr(0x00, 0x2227), 0x80); // from the S-CPU: not its register
+        m.write_from_sa1(make_addr(0x40, 0x0010), 0xAA);
+        assert_eq!(m.read(make_addr(0x40, 0x0010)), Some(0x00));
+        m.write_from_sa1(make_addr(0x00, 0x2227), 0x80);
         m.write_from_sa1(make_addr(0x40, 0x0010), 0xCC);
         assert_eq!(m.read(make_addr(0x40, 0x0010)), Some(0xCC));
     }
@@ -2259,7 +2748,7 @@ mod tests {
     fn ciwp_protection_only_applies_to_sa1_writes() {
         let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x10000);
         // Block all pages from SA-1 side.
-        m.write(make_addr(0x00, 0x222A), 0x00);
+        m.write_from_sa1(make_addr(0x00, 0x222A), 0x00);
         // Main side still writes fine.
         m.write(make_addr(0x00, 0x3000), 0xAA);
         assert_eq!(m.read(make_addr(0x00, 0x3000)), Some(0xAA));
