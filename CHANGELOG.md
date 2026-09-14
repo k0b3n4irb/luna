@@ -4,7 +4,7 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.23.0] — 2026-09-14
 
 The last rows of the 2026-09-11 audit: the SA-1's register, memory and
 DMA model, and the two PPU items left open — each read line for line in
