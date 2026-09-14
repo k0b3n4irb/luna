@@ -819,8 +819,13 @@ pub struct ProfileResult {
     pub total_mclk: u64,
     /// Instructions across every sample.
     pub instructions: u64,
+    /// PPU frames completed inside the window (the `per_frame.mean`
+    /// denominator).
+    pub frames: u64,
     /// Rows, heaviest `mclk` first: `{symbol, addr, instructions, mclk,
-    /// idle_mclk, pct, pcs}`.
+    /// idle_mclk, pct, pcs, per_frame: {max, max_frame, mean, frames} | null}`
+    /// — `per_frame` is the row's master cycles per completed PPU frame,
+    /// the number a VBlank-budget gate compares against.
     pub entries: Vec<luna_api::ProfileEntry>,
 }
 
@@ -2877,7 +2882,8 @@ impl LunaServer {
                                 to the nearest loaded `.sym` label at or below it (FastROM mirror \
                                 aware); PCs no label covers fold onto their 256-byte page. `pct` is \
                                 the share of the profile's total master cycles, `idle_mclk` the part \
-                                spent parked in WAI/STP. Empties the profiler (it stays on)."
+                                spent parked in WAI/STP; `per_frame` the row's cost per completed PPU frame \
+                                (max / max_frame / mean). Empties the profiler (it stays on)."
     )]
     async fn take_profile(&self) -> Result<rmcp::Json<ProfileResult>, ErrorData> {
         let report = {
@@ -2887,6 +2893,7 @@ impl LunaServer {
         Ok(rmcp::Json(ProfileResult {
             total_mclk: report.total_mclk,
             instructions: report.instructions,
+            frames: report.frames,
             entries: report.entries,
         }))
     }

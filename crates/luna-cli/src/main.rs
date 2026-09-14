@@ -667,6 +667,12 @@ enum Command {
         /// `HiROM` `$C0-$FF`, `FastROM` mirrors and WRAM-resident code included.
         #[arg(long = "pc-set")]
         pc_set: Option<PathBuf>,
+        /// Gate: `SYMBOL=MCLK` — the symbol's worst completed frame must
+        /// not exceed MCLK master cycles, else exit 1 (repeatable; an
+        /// unknown symbol is a usage error, exit 2). The VBlank-budget
+        /// check for CI: `--budget NmiHandler=6000`.
+        #[arg(long = "budget")]
+        budget: Vec<String>,
         /// Force a cartridge mapper (lorom, hirom, exhirom, sa1, superfx).
         #[arg(long = "force-mapper")]
         force_mapper: Option<String>,
@@ -1069,6 +1075,7 @@ fn main() -> ExitCode {
             top,
             out,
             pc_set,
+            budget,
             force_mapper,
             force_region,
             power_on,
@@ -1083,6 +1090,7 @@ fn main() -> ExitCode {
                 top,
                 out: out.as_deref(),
                 pc_set: pc_set.as_deref(),
+                budgets: &budget,
                 force_mapper: force_mapper.as_deref(),
                 force_region: force_region.as_deref(),
                 power_on: power_on.as_deref(),

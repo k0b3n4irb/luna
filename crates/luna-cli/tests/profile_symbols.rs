@@ -139,3 +139,87 @@ fn profile_pc_set_lists_executed_pcs_sorted() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// `--budget SYMBOL=MCLK` (`OpenSNES` R-B) gates on the symbol's worst
+/// completed frame: exit 1 on overrun with the frame named, exit 0 under
+/// it, exit 2 for a symbol nobody knows; the JSON carries `per_frame`
+/// per row and one verdict per gate.
+#[test]
+fn profile_budget_gates_on_the_worst_frame() {
+    let dir = std::env::temp_dir().join("luna_profile_budget");
+    let _ = std::fs::create_dir_all(&dir);
+    let rom = rom_with_sym(&dir);
+    let json = dir.join("budget.json");
+    let run = |budgets: &[&str], out: Option<&std::path::Path>| {
+        let mut cmd = Command::new(luna_bin());
+        cmd.arg("profile").arg(&rom).args([
+            "--force-mapper",
+            "lorom",
+            "--from-frame",
+            "2",
+            "--until-frame",
+            "6",
+        ]);
+        for b in budgets {
+            cmd.args(["--budget", b]);
+        }
+        if let Some(o) = out {
+            cmd.arg("--out").arg(o);
+        }
+        cmd.output().expect("run luna profile")
+    };
+
+    // Under budget: the handler is one RTI per frame.
+    let out = run(&["nmi_handler=100000", "main=1"], Some(&json));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("budget: nmi_handler max "), "{stdout}");
+    assert!(stdout.contains("<= 100000 — ok"), "{stdout}");
+    // `main` is a known label that finished before the window: passes.
+    assert!(
+        stdout.contains("budget: main never ran in a completed frame — ok"),
+        "{stdout}"
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+    assert_eq!(v["frames"], 4, "{v}");
+    let nmi = v["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["symbol"] == "nmi_handler")
+        .unwrap();
+    assert_eq!(nmi["per_frame"]["frames"], 4, "{v}");
+    assert!(nmi["per_frame"]["max"].as_u64().unwrap() > 0, "{v}");
+    assert!(nmi["per_frame"]["max_frame"].as_u64().unwrap() >= 2, "{v}");
+    let budgets = v["budgets"].as_array().unwrap();
+    assert_eq!(budgets.len(), 2);
+    assert_eq!(budgets[0]["symbol"], "nmi_handler");
+    assert_eq!(budgets[0]["ok"], true);
+    assert_eq!(budgets[1]["symbol"], "main");
+    assert!(budgets[1]["max"].is_null());
+    assert_eq!(budgets[1]["ok"], true);
+
+    // Over budget: exit 1, the frame named, the table still printed.
+    let out = run(&["nmi_handler=1"], None);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    assert!(stdout.contains("> 1 — OVER"), "{stdout}");
+    assert!(stdout.contains("(frame "), "{stdout}");
+    assert!(stdout.contains("max/frame"), "{stdout}");
+
+    // A typo is a usage error, not a pass.
+    let out = run(&["NmiHandler=6000"], None);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unknown symbol"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = run(&["nmi_handler"], None);
+    assert_eq!(out.status.code(), Some(2));
+}
