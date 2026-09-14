@@ -367,16 +367,46 @@ pub struct ProfileSample {
 pub struct Profile {
     /// `pc_full` → cost.
     pub samples: std::collections::HashMap<u32, ProfileSample>,
+    /// PPU frame the in-progress per-frame bucket belongs to.
+    pub frame: u64,
+    /// Master cycles per `pc_full` in the frame in progress (`OpenSNES`
+    /// R-B: the per-frame cost of a symbol).
+    pub current: std::collections::HashMap<u32, u64>,
+    /// Completed frames not yet drained — `(frame, mclk per pc_full)`.
+    /// The API folds and empties this on every run call, so it holds at
+    /// most the frames one call spanned.
+    pub completed: Vec<(u64, std::collections::HashMap<u32, u64>)>,
 }
 
 impl Profile {
-    /// Credit one step at `pc` that cost `mclk` (`idle` = a parked tick).
-    /// A parked tick that cost nothing (a `STP`-halted CPU) leaves no
-    /// sample — it is not time, and not an instruction.
-    pub fn record(&mut self, pc: u32, mclk: u64, idle: bool) {
+    /// An empty profile whose first per-frame bucket is `frame`.
+    #[must_use]
+    pub fn starting_at(frame: u64) -> Self {
+        Self {
+            frame,
+            ..Self::default()
+        }
+    }
+
+    /// Credit one step at `pc` that cost `mclk` (`idle` = a parked tick),
+    /// executed in PPU frame `frame` — a step that crosses the frame edge
+    /// is credited to the frame it ends in. A parked tick that cost
+    /// nothing (a `STP`-halted CPU) leaves no sample — it is not time,
+    /// and not an instruction.
+    pub fn record(&mut self, pc: u32, mclk: u64, idle: bool, frame: u64) {
+        // One bucket per frame, even for a frame no step ended in — a
+        // 64 KB DMA burst spans more than one, and the frame it skipped
+        // still counts (as 0) in every row's mean.
+        while self.frame < frame {
+            let done = std::mem::take(&mut self.current);
+            self.completed.push((self.frame, done));
+            self.frame += 1;
+        }
         if idle && mclk == 0 {
             return;
         }
+        let f = self.current.entry(pc).or_default();
+        *f = f.saturating_add(mclk);
         let s = self.samples.entry(pc).or_default();
         s.mclk = s.mclk.saturating_add(mclk);
         if idle {
@@ -1033,16 +1063,26 @@ impl Snes {
 
     /// Start (or restart, emptied) the per-PC profiler (issue #227).
     pub fn enable_profile(&mut self) {
-        self.profile = Some(Profile::default());
+        self.profile = Some(Profile::starting_at(self.frame_count));
     }
 
     /// Take the accumulated profile, leaving the profiler enabled and
     /// empty. Empty when it was never enabled.
     pub fn take_profile(&mut self) -> Profile {
+        let frame = self.frame_count;
         match self.profile.as_mut() {
-            Some(p) => std::mem::take(p),
+            Some(p) => std::mem::replace(p, Profile::starting_at(frame)),
             None => Profile::default(),
         }
+    }
+
+    /// Drain the profiler's completed per-frame buckets (`OpenSNES` R-B);
+    /// the frame in progress stays. Empty when profiling is off.
+    pub fn take_profile_frames(&mut self) -> Vec<(u64, std::collections::HashMap<u32, u64>)> {
+        self.profile
+            .as_mut()
+            .map(|p| std::mem::take(&mut p.completed))
+            .unwrap_or_default()
     }
 
     /// Stop the profiler and drop its samples.
@@ -1422,7 +1462,12 @@ impl Snes {
 
         let consumed = self.total_mclk - before;
         if let Some(prof) = self.profile.as_mut() {
-            prof.record(cpu_pc_snapshot, consumed, idle_kind.is_some());
+            prof.record(
+                cpu_pc_snapshot,
+                consumed,
+                idle_kind.is_some(),
+                self.frame_count,
+            );
         }
 
         // The cartridge coprocessor (SA-1 / Super FX / DSP-1 / …) now
@@ -3378,6 +3423,34 @@ mod tests {
         Cartridge::from_bytes(rom).unwrap()
     }
 
+    /// [`demo_lorom`] with the idle program instead — `SEI ; LDA #$80 ;
+    /// STA $4200 ; loop: WAI ; BRA loop ; nmi: RTI` — and the NMI vectors
+    /// pointed at the `RTI`, so frames keep advancing forever.
+    fn idle_lorom() -> Cartridge {
+        let mut rom = vec![0xEA; 32 * 1024];
+        rom[0x7FFC] = 0x00;
+        rom[0x7FFD] = 0x80;
+        let off = 0x7FC0;
+        for (i, b) in b"LUNA IDLE DEMO       ".iter().enumerate() {
+            rom[off + i] = *b;
+        }
+        rom[off + 0x15] = 0x20;
+        rom[off + 0x17] = 0x05;
+        rom[off + 0x18] = 0x00;
+        rom[off + 0x19] = 0x01;
+        rom[off + 0x1C] = 0x34;
+        rom[off + 0x1D] = 0x12;
+        rom[off + 0x1E] = 0xCB;
+        rom[off + 0x1F] = 0xED;
+        let prog = [0x78, 0xA9, 0x80, 0x8D, 0x00, 0x42, 0xCB, 0x80, 0xFD, 0x40];
+        rom[..prog.len()].copy_from_slice(&prog);
+        for v in [0x7FEA, 0x7FFA] {
+            rom[v] = 0x09;
+            rom[v + 1] = 0x80;
+        }
+        Cartridge::from_bytes(rom).unwrap()
+    }
+
     #[test]
     fn from_cartridge_sets_initial_state() {
         let cart = demo_lorom();
@@ -4441,6 +4514,58 @@ mod tests {
         assert!(snes.profile.is_some());
         snes.disable_profile();
         assert!(snes.profile.is_none());
+    }
+
+    #[test]
+    fn profile_splits_the_cost_by_ppu_frame() {
+        // The per-frame buckets (`OpenSNES` R-B): a frame edge closes the
+        // bucket in progress and opens the next; a step is credited to
+        // the frame it ends in; taking the profile restarts the bucket at
+        // the live frame rather than at 0.
+        let mut p = Profile::starting_at(7);
+        p.record(0x8000, 10, false, 7);
+        p.record(0x8002, 20, false, 7);
+        p.record(0x8000, 5, false, 8);
+        p.record(0x8004, 0, true, 8); // a free parked tick: no cost
+        p.record(0x8006, 1, false, 10); // a step spanning frame 9 entirely
+        assert_eq!(p.completed.len(), 3, "{p:?}");
+        assert_eq!(p.completed[0].0, 7);
+        assert_eq!(p.completed[0].1[&0x8000], 10);
+        assert_eq!(p.completed[0].1[&0x8002], 20);
+        assert_eq!(p.completed[1].0, 8);
+        assert_eq!(p.completed[1].1.len(), 1);
+        assert_eq!(p.completed[2].0, 9, "the skipped frame still has a bucket");
+        assert!(p.completed[2].1.is_empty());
+        assert_eq!(p.frame, 10);
+        assert_eq!(p.current[&0x8006], 1);
+        assert_eq!(
+            p.samples[&0x8000].mclk, 15,
+            "the totals still see every frame"
+        );
+
+        // Wired: the live machine tags each step with its frame, and a
+        // take restarts the bucket at that frame. (The idle ROM: `SEI ;
+        // LDA #$80 ; STA $4200 ; loop: WAI ; BRA loop ; nmi: RTI` — the
+        // demo ROM's `STP` would stop time.)
+        let mut snes = Snes::from_cartridge(idle_lorom());
+        snes.reset();
+        snes.enable_profile();
+        let mut guard = 0u32;
+        while snes.frame_count < 2 {
+            snes.step();
+            guard += 1;
+            assert!(guard < 2_000_000, "frames never advanced");
+        }
+        let frames = snes.take_profile_frames();
+        assert_eq!(
+            frames.iter().map(|(f, _)| *f).collect::<Vec<_>>(),
+            vec![0, 1],
+            "two completed frames, the third in progress"
+        );
+        assert!(snes.take_profile_frames().is_empty(), "drained");
+        let taken = snes.take_profile();
+        assert_eq!(taken.frame, 2);
+        assert_eq!(snes.profile.as_ref().unwrap().frame, 2);
     }
 
     #[test]

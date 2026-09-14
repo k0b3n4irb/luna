@@ -419,20 +419,34 @@ parked in `WAI` / `STP` under that label.
 | `--input <SCRIPT>` | — | Joypad-1 script (§3). |
 | `--sym <PATH>` | auto `<rom>.sym` | Labels to fold onto. |
 | `--top <N>` | `25` | Rows printed (the JSON has them all). |
-| `--out <PATH>` | — | JSON report (`-` = stdout after the table): `{rom, from_frame, end_frame, total_mclk, instructions, entries: [{symbol, addr, instructions, mclk, idle_mclk, pct, pcs}]}`. |
+| `--out <PATH>` | — | JSON report (`-` = stdout after the table): `{rom, from_frame, end_frame, total_mclk, instructions, frames, entries: [{symbol, addr, instructions, mclk, idle_mclk, pct, pcs, per_frame: {max, max_frame, mean, frames} \| null}], budgets: [{symbol, limit, max, max_frame, ok}]}`. `per_frame` is the row's master cycles per **completed** PPU frame in the window: `max` (and the frame that paid it), `mean` over every completed frame (a frame the row did not run in counts 0), `frames` it ran in; `null` when no frame completed while it ran. The trailing partial frame is never counted. |
+| `--budget <SYMBOL=MCLK>` | — | Gate (repeatable): the symbol's worst completed frame must not exceed `MCLK` master cycles, else **exit 1** with the frame named. A symbol the loaded `.sym` does not know is a usage error (exit 2) — a typo must not pass; a known symbol that never ran costs 0 and passes. The VBlank-budget check for CI. |
 | `--pc-set <PATH>` | — | Write the set of executed PCs: every distinct 24-bit address that ran an instruction in the window, sorted, one little-endian `u32` each — the raw input of a code-coverage tool (fold onto `.sym` labels or a listing on your side). |
 | `--force-mapper`, `--force-region`, `--power-on` | — | As elsewhere. |
 
 ```bash
 # The game loop, boot excluded: frames 120..600.
 luna profile --from-frame 120 --until-frame 600 --top 5 game.sfc
-# profile: frames 120..600, 1848213 instructions, 171536640 master cycles, 42 symbol(s)
-#       %            mclk         instr   idle%     pcs  symbol
-#  61.02%       104672880        483840   99.6%       2  WaitForVBlank
-#  12.40%        21270530        291840    0.0%      61  DrawSprites
-#   7.91%        13570200         96480    0.0%      14  DmaOamTable      <- the DMA burst is charged here
+# profile: frames 120..600 (480 completed), 1848213 instructions, 171536640 master cycles, 42 symbol(s)
+#       %            mclk         instr   idle%     pcs   max/frame  symbol
+#  61.02%       104672880        483840   99.6%       2      226410  WaitForVBlank
+#  12.40%        21270530        291840    0.0%      61       48120  DrawSprites
+#   7.91%        13570200         96480    0.0%      14       28271  DmaOamTable      <- the DMA burst is charged here
 #   …
 ```
+
+`max/frame` is the row's worst completed frame — the number that decides
+whether a routine fits its VBlank. Gate on it in CI:
+
+```bash
+# The NMI handler must never cost more than 6000 master cycles in a frame.
+luna profile --from-frame 120 --until-frame 600 --budget NmiHandler=6000 game.sfc
+# budget: NmiHandler max 5210 mclk (frame 133) <= 6000 — ok        → exit 0
+# budget: NmiHandler max 6512 mclk (frame 402) > 6000 — OVER       → exit 1
+```
+
+Read `per_frame.max_frame` from the JSON, then `luna state --until-frame
+402 --screenshot` to see what that frame was doing.
 
 `WaitForVBlank` at 61 % idle is the frame's headroom (the same number
 `stats.last_frame.cpu_wai` gives); a DMA burst's cost lands on the
