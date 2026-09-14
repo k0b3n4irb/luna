@@ -32,7 +32,7 @@ and bus together. Each test boots a ROM, runs it until the framebuffer settles
 (or to a fixed, deterministic instruction count for animated scenes), and
 asserts a hash of the result:
 
-- **Display ROMs** hash the 256×224 framebuffer — opcode result screens (every
+- **Display ROMs** hash the 256×224 framebuffer (256×239 under overscan) — opcode result screens (every
   group renders its all-PASS table), background modes, hi-colour blending,
   windows, Mode 7, and mosaic.
 - **Audio ROMs** play music or sound effects rather than draw, so they hash the

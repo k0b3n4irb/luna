@@ -236,8 +236,9 @@ fn dump_png(bytes: &[u8], path: &Path) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let img =
-        image::RgbImage::from_raw(FRAME_W as u32, FRAME_H as u32, bytes.to_vec()).expect("dims");
+    // 224 rows, or 239 when the ROM ran in overscan.
+    let height = (bytes.len() / (FRAME_W * 3)) as u32;
+    let img = image::RgbImage::from_raw(FRAME_W as u32, height, bytes.to_vec()).expect("dims");
     let _ = img.save(path);
 }
 
@@ -372,12 +373,12 @@ fn ppu_interlace_font_native_512x448() {
         snes.step();
     }
     assert_eq!(
-        snes.ppu.native_framebuffer.len(),
+        snes.ppu.native_framebuffer().len(),
         512 * 448,
-        "native buffer must be 512x448"
+        "native buffer must be 512x448 (the ROM runs without overscan)"
     );
     let mut bytes = Vec::with_capacity(512 * 448 * 3);
-    for px in &snes.ppu.native_framebuffer {
+    for px in snes.ppu.native_framebuffer() {
         bytes.extend_from_slice(px);
     }
     let got = hex(&Sha256::digest(&bytes));

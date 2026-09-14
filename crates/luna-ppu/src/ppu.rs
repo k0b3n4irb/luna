@@ -7,7 +7,7 @@
 
 use crate::memory::{Cgram, Oam, VmainSettings, Vram};
 use crate::renderer::{
-    FRAME_H, FRAME_W, RenderOptions, SpriteEntry, SpriteEval, decode_all_sprites,
+    FRAME_H, FRAME_H_MAX, FRAME_W, RenderOptions, SpriteEntry, SpriteEval, decode_all_sprites,
     evaluate_sprite_line, obj_eval_latch, render_scanline_partial_into_from,
 };
 // `render_scanline_into` is no longer used directly here — full-line
@@ -378,7 +378,22 @@ pub struct Ppu {
     /// part of observable state, so restoring rewinds the displayed image
     /// to exactly the save point (front-ends hold the last non-blank frame
     /// between renders, so this must round-trip).
+    ///
+    /// Allocated to [`FRAME_H_MAX`] rows; [`Self::frame_height`] says how
+    /// many the current frame uses (224, or 239 under overscan).
     pub framebuffer: Vec<[u8; 3]>,
+    /// SETINI bit 2 as latched at the top of the current frame (ares
+    /// `main.cpp:4` `state.overscan`, Mesen2 `_overscanFrame`): the
+    /// picture is 239 lines for the whole frame, whatever the register
+    /// does mid-way.
+    #[serde(default)]
+    frame_overscan: bool,
+    /// The dot (H-clock / 4, 0..341) of the CPU or DMA access in progress,
+    /// set by the bus before it touches a register. Unlike
+    /// `last_flushed_dot` it is not clamped to the 256 picture dots, so
+    /// an `HBlank` access reads as `HBlank`.
+    #[serde(default)]
+    pub beam_dot: u16,
     /// Native-resolution capture toggle (issue #115). Off by default — the
     /// dual-write in the compositor and the per-field rows cost time, so only
     /// a consumer that asked for native output pays for it.
@@ -520,7 +535,9 @@ impl Ppu {
             ppu1_mdr: 0,
             ppu2_mdr: 0,
             inidisp_write_count: 0,
-            framebuffer: vec![[0u8; 3]; FRAME_W * FRAME_H],
+            framebuffer: vec![[0u8; 3]; FRAME_W * FRAME_H_MAX],
+            frame_overscan: false,
+            beam_dot: 0,
             native_capture: false,
             native_framebuffer: Vec::new(),
             last_flushed_dot: 0,
@@ -566,10 +583,12 @@ impl Ppu {
         self.current_line = y;
         // OBJ range/time-over flags accumulate over the frame and clear
         // at its start (ares object.cpp:11-14). Evaluate per line and OR
-        // in; the renderer applies the matching 32/34 drop.
+        // in; the renderer applies the matching 32/34 drop. The frame's
+        // picture height is latched here too (ares `main.cpp:4`).
         if y == 0 {
             self.obj_range_over = false;
             self.obj_time_over = false;
+            self.frame_overscan = self.setini & 0x04 != 0;
         }
         // Evaluate this line's sprites ONCE (cached + reused by every
         // segment, PERF-3) and OR in the overflow flags. Blank lines
@@ -639,8 +658,12 @@ impl Ppu {
             return;
         }
         let yi = usize::from(y) - 1;
-        if yi >= FRAME_H {
+        if yi >= self.frame_height() {
             return;
+        }
+        // A save state from before overscan output carries 224 rows.
+        if self.framebuffer.len() < FRAME_W * FRAME_H_MAX {
+            self.framebuffer.resize(FRAME_W * FRAME_H_MAX, [0u8; 3]);
         }
         let start = self.last_flushed_dot.min(FRAME_W as u16);
         let end = end_x.min(FRAME_W as u16);
@@ -750,17 +773,57 @@ impl Ppu {
     pub fn set_native_capture(&mut self, on: bool) {
         self.native_capture = on;
         if on {
-            self.native_framebuffer = vec![[0u8; 3]; FRAME_W * 2 * FRAME_H * 2];
+            self.native_framebuffer = vec![[0u8; 3]; FRAME_W * 2 * FRAME_H_MAX * 2];
         } else {
             self.native_framebuffer = Vec::new();
         }
     }
 
-    /// Borrow the current persistent framebuffer (256 × 224 BGR888
-    /// pixels). Cheap accessor — no rendering happens here.
+    /// Rows the current frame's picture has: 224, or 239 when the frame
+    /// started with SETINI overscan set (ares draws lines 1..vdisp-1;
+    /// Mesen2 fills its 239-row buffer from line 1).
+    #[must_use]
+    pub const fn frame_height(&self) -> usize {
+        if self.frame_overscan {
+            FRAME_H_MAX
+        } else {
+            FRAME_H
+        }
+    }
+
+    /// Rows of the native capture: twice [`Self::frame_height`].
+    #[must_use]
+    pub const fn native_frame_height(&self) -> usize {
+        self.frame_height() * 2
+    }
+
+    /// Borrow the current persistent framebuffer: 256 × [`Self::frame_height`]
+    /// BGR888 pixels. Cheap accessor — no rendering happens here.
     #[must_use]
     pub fn framebuffer(&self) -> &[[u8; 3]] {
-        &self.framebuffer
+        let len = (FRAME_W * self.frame_height()).min(self.framebuffer.len());
+        &self.framebuffer[..len]
+    }
+
+    /// Borrow the native capture: 512 × [`Self::native_frame_height`]
+    /// pixels, empty when capture is off.
+    #[must_use]
+    pub fn native_framebuffer(&self) -> &[[u8; 3]] {
+        let len = (FRAME_W * 2 * self.native_frame_height()).min(self.native_framebuffer.len());
+        &self.native_framebuffer[..len]
+    }
+
+    /// Where a CPU CGRAM access lands right now (ares `io.cpp:47-61`,
+    /// Mesen2 `CanAccessCgram`): while the picture is being drawn —
+    /// display on, a picture line, dots 22..274 (H-clocks 88..1096) —
+    /// the PPU owns CGRAM and the access hits the entry it last fetched
+    /// for the pixel under the beam, not the CPU's CGADD. `None` outside
+    /// that window. The bus sets [`Self::beam_dot`] and flushes the line
+    /// to it before asking, so the latch is the current pixel's.
+    #[must_use]
+    pub fn cgram_access_redirect(&self) -> Option<u8> {
+        (self.active_display && self.current_line > 0 && (22..274).contains(&self.beam_dot))
+            .then(|| self.cgram.latched_address())
     }
 
     /// Read a PPU register. `offset` is the byte offset from `$2100`
@@ -800,9 +863,12 @@ impl Ppu {
             }
             register::CGDATAREAD => {
                 // Second (high) byte only drives bits 0-6 of PPU2's
-                // MDR — bit 7 is stale (ares io.cpp:129-135).
+                // MDR — bit 7 is stale (ares io.cpp:129-135). During the
+                // picture the byte comes from the entry the PPU is
+                // fetching (ares `readCGRAM`).
+                let target = self.cgram_access_redirect();
                 let high = self.cgram.read_high_pending();
-                let v = self.cgram.read();
+                let v = self.cgram.read_at(target);
                 self.ppu2_mdr = if high {
                     (self.ppu2_mdr & 0x80) | (v & 0x7F)
                 } else {
@@ -1080,11 +1146,15 @@ impl Ppu {
             register::VMDATAH => self.vram.write_hi_gated(value, !self.active_display),
             register::CGADD => self.cgram.set_address(value),
             // CGRAM is never dropped on hardware — unlike VRAM/OAM, a CGDATA
-            // write during active display always commits (ares io.cpp:55-60;
-            // only the address is latched, which luna doesn't model). Gating
+            // write during active display always commits (ares io.cpp:55-60),
+            // but while the picture is being drawn it lands on the entry the
+            // PPU is fetching, not on CGADD (`cgram_access_redirect`). Gating
             // it broke ROMs that set the backdrop mid-frame (ControllerLatency)
             // and the HiColor CPU-IRQ palette streams.
-            register::CGDATA => self.cgram.write(value),
+            register::CGDATA => {
+                let target = self.cgram_access_redirect();
+                self.cgram.write_at(value, target);
+            }
             register::W12SEL => self.w12sel = value,
             register::W34SEL => self.w34sel = value,
             register::WOBJSEL => self.wobjsel = value,
@@ -1454,6 +1524,90 @@ mod tests {
     }
 
     #[test]
+    fn compositor_latches_the_cgram_address_of_the_pixel_under_the_beam() {
+        // ares `dac.cpp:158`: every palette fetch latches its address.
+        // The solid BG1 line is colour 1 everywhere, so after any flush
+        // the latch is 1; a blanked line fetches nothing.
+        let mut p = ppu_with_solid_bg1_tile();
+        p.flush_partial_scanline(10, 128, RenderOptions::default());
+        assert_eq!(p.cgram.latched_address(), 1);
+        p.write(register::TM, 0x00); // main screen off: backdrop = entry 0
+        p.flush_partial_scanline(10, 200, RenderOptions::default());
+        assert_eq!(p.cgram.latched_address(), 0);
+    }
+
+    #[test]
+    fn cgram_access_during_the_picture_lands_on_the_ppu_fetch() {
+        // ares `io.cpp:47-61`: display on, a picture line, H-clocks
+        // 88..1096 (dots 22..274) — the access goes to the latched entry
+        // while CGADD still advances. Outside that window it goes to
+        // CGADD.
+        let mut p = ppu_with_solid_bg1_tile();
+        p.active_display = true;
+        p.beam_dot = 100;
+        p.flush_partial_scanline(10, 100, RenderOptions::default());
+        assert_eq!(p.cgram.latched_address(), 1);
+        assert_eq!(p.cgram_access_redirect(), Some(1));
+        p.write(register::CGADD, 5);
+        p.write(register::CGDATA, 0x34);
+        p.write(register::CGDATA, 0x12);
+        assert_eq!(p.cgram.color(1), 0x1234, "landed on the PPU's entry");
+        assert_eq!(p.cgram.color(5), 0x0000, "CGADD's entry untouched");
+        assert_eq!(p.cgram.address, 6, "CGADD advanced anyway");
+        // Reads too: the low byte of entry 1, whatever CGADD says.
+        p.write(register::CGADD, 5);
+        assert_eq!(p.read(register::CGDATAREAD, 0), 0x34);
+        assert_eq!(p.read(register::CGDATAREAD, 0), 0x12);
+        // Past dot 274 (HBlank) the CPU's address applies — the bus hands
+        // the PPU the real dot, not the 256-clamped flush position.
+        p.scanline_reset();
+        p.flush_partial_scanline(11, 256, RenderOptions::default());
+        p.beam_dot = 280;
+        assert_eq!(p.cgram_access_redirect(), None);
+        p.write(register::CGADD, 5);
+        p.write(register::CGDATA, 0x78);
+        p.write(register::CGDATA, 0x56);
+        assert_eq!(p.cgram.color(5), 0x5678);
+        // Before dot 22, on line 0, or with the display off: no redirect.
+        p.beam_dot = 10;
+        assert_eq!(p.cgram_access_redirect(), None);
+        p.beam_dot = 100;
+        p.current_line = 0;
+        assert_eq!(p.cgram_access_redirect(), None);
+        p.current_line = 11;
+        p.active_display = false;
+        assert_eq!(p.cgram_access_redirect(), None);
+    }
+
+    #[test]
+    fn overscan_frames_render_239_rows() {
+        // SETINI bit 2 latched at line 0 (ares `main.cpp:4`): the frame's
+        // picture is lines 1..=239, the framebuffer 239 rows; a frame that
+        // starts without it is back to 224.
+        let mut p = ppu_with_solid_bg1_tile();
+        assert_eq!(p.frame_height(), FRAME_H);
+        assert_eq!(p.framebuffer().len(), FRAME_W * FRAME_H);
+        p.write(register::SETINI, 0x04);
+        assert_eq!(p.frame_height(), FRAME_H, "not until the next frame starts");
+        p.render_current_scanline(0, RenderOptions::default());
+        assert_eq!(p.frame_height(), FRAME_H_MAX);
+        assert_eq!(p.framebuffer().len(), FRAME_W * FRAME_H_MAX);
+        p.render_current_scanline(239, RenderOptions::default());
+        let last = &p.framebuffer()[238 * FRAME_W..];
+        assert!(
+            last.iter().all(|px| px[0] > 0),
+            "row 238 = line 239 is drawn red"
+        );
+        p.write(register::SETINI, 0x00);
+        p.render_current_scanline(0, RenderOptions::default());
+        assert_eq!(p.frame_height(), FRAME_H);
+        assert_eq!(p.framebuffer().len(), FRAME_W * FRAME_H);
+        // Native capture follows.
+        p.set_native_capture(true);
+        assert_eq!(p.native_framebuffer().len(), FRAME_W * 2 * FRAME_H * 2);
+    }
+
+    #[test]
     fn partial_flush_splits_one_scanline_at_dot_x() {
         // Gap G6 Phase 2 — intra-line partial flush. Build a BG1 red
         // line. Render the first 128 dots with COLDATA=0, then turn
@@ -1545,7 +1699,7 @@ mod tests {
         p.set_native_capture(true);
         p.render_current_scanline(1, RenderOptions::default());
         let w = crate::FRAME_W * 2;
-        assert_eq!(p.native_framebuffer.len(), w * crate::FRAME_H * 2);
+        assert_eq!(p.native_framebuffer().len(), w * crate::FRAME_H * 2);
         for x in 0..crate::FRAME_W {
             let displayed = p.framebuffer()[x];
             assert_eq!(p.native_framebuffer[x * 2], displayed, "left subpixel");

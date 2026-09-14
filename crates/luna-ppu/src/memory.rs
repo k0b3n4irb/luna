@@ -283,6 +283,12 @@ pub struct Cgram {
     latch: u8,
     /// `true` ⇒ next `$2122` write is the high byte.
     high_pending: bool,
+    /// The CGRAM address of the last colour the compositor fetched —
+    /// ares `latch.cgramAddress` (`dac.cpp:158`), where a CPU access
+    /// lands while the picture is being drawn. A `Cell` because the
+    /// compositor works through `&Ppu`.
+    #[serde(default)]
+    fetch_latch: std::cell::Cell<u8>,
 }
 
 impl Default for Cgram {
@@ -300,7 +306,20 @@ impl Cgram {
             address: 0,
             latch: 0,
             high_pending: false,
+            fetch_latch: std::cell::Cell::new(0),
         }
+    }
+
+    /// Record a compositor colour fetch (ares `DAC::paletteColor`): the
+    /// address a CPU access during the picture is redirected to.
+    pub fn note_fetch(&self, index: u8) {
+        self.fetch_latch.set(index);
+    }
+
+    /// The address of the last compositor fetch.
+    #[must_use]
+    pub const fn latched_address(&self) -> u8 {
+        self.fetch_latch.get()
     }
 
     /// The 512-byte backing store, mutable — for power-on fills (issue
@@ -331,11 +350,17 @@ impl Cgram {
     /// `$2122` write — first call latches the low byte, second call
     /// stores both bytes and advances the address. CGRAM is *never*
     /// gated by active display (unlike VRAM/OAM): a write mid-frame
-    /// always commits (ares `io.cpp:55-60` — only the address is
-    /// latched during rendering, which luna doesn't model).
+    /// always commits (ares `io.cpp:55-60`).
     pub fn write(&mut self, value: u8) {
+        self.write_at(value, None);
+    }
+
+    /// [`Self::write`] with the picture-time redirect (ares `writeCGRAM`,
+    /// `io.cpp:55-61`): with `target` set, the word lands there — the
+    /// entry the PPU is fetching — while CGADD still advances.
+    pub fn write_at(&mut self, value: u8, target: Option<u8>) {
         if self.high_pending {
-            let off = usize::from(self.address) << 1;
+            let off = usize::from(target.unwrap_or(self.address)) << 1;
             self.data[off] = self.latch;
             self.data[off + 1] = value;
             self.address = self.address.wrapping_add(1);
@@ -363,7 +388,13 @@ impl Cgram {
     /// `$213B` read — returns the byte at the current word address,
     /// alternating low/high and advancing on the high read.
     pub fn read(&mut self) -> u8 {
-        let off = usize::from(self.address) << 1;
+        self.read_at(None)
+    }
+
+    /// [`Self::read`] with the picture-time redirect (ares `readCGRAM`,
+    /// `io.cpp:47-53`): with `target` set, the byte comes from there.
+    pub fn read_at(&mut self, target: Option<u8>) -> u8 {
+        let off = usize::from(target.unwrap_or(self.address)) << 1;
         if self.high_pending {
             // After high-byte read the address advances.
             let v = self.data[off + 1];

@@ -16,8 +16,8 @@ mod tile;
 pub use memory::{Cgram, Oam, Vram};
 pub use ppu::{BgState, Ppu, bg_state, register};
 pub use renderer::{
-    FRAME_H, FRAME_W, IndexedPixel, IndexedScanline, RenderOptions, Scanline, SpriteEntry,
-    TilemapImage, bg_bpp, decode_all_sprites, render_bg_scanline_indexed_with,
+    FRAME_H, FRAME_H_MAX, FRAME_W, IndexedPixel, IndexedScanline, RenderOptions, Scanline,
+    SpriteEntry, TilemapImage, bg_bpp, decode_all_sprites, render_bg_scanline_indexed_with,
     render_bg_scanline_with, render_bg_tilemap, render_cgram_palette, render_frame_bg_with,
     render_frame_with, render_mode7_scanline_indexed, render_obj_sheet, render_scanline_into,
     render_scanline_partial_into, render_sprites_scanline_indexed_with, render_vram_tiles,

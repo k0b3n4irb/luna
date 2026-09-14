@@ -47,7 +47,7 @@ clone of only the test-relevant subdirs (`CPUTest`, `PPU`; not the
 multi-GB whole repo). Harness: `crates/luna-core/tests/snes_test_roms.rs`.
 Each test boots a ROM with a forced LoROM mapper
 (`Cartridge::from_bytes_forced` — these homebrew ROMs have no valid
-header checksum), runs it until the 256×224 framebuffer settles (or a
+header checksum), runs it until the framebuffer (256×224, or 256×239 under overscan) settles (or a
 fixed instruction cap for continuously-animated scenes — deterministic
 by instruction count), and asserts a SHA-256 of the framebuffer against a
 committed golden hash.
