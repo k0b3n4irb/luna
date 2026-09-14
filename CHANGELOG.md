@@ -4,6 +4,57 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.23.0] — 2026-09-14
+
+The last rows of the 2026-09-11 audit: the SA-1's register, memory and
+DMA model, and the two PPU items left open — each read line for line in
+ares and Mesen2 before the code moved.
+
+### Fixed (PPU)
+- **CGRAM accesses during the picture land where the PPU is looking.**
+  While the picture is being drawn (display on, a picture line, H-clocks
+  88..1096) the PPU owns CGRAM: a `$2122` write or `$213B` read hits the
+  entry the PPU last fetched for the pixel under the beam, not CGADD —
+  which still advances (ares `io.cpp:47-61`, `dac.cpp:158`; Mesen2
+  `InternalCgramAddress`). luna used the CPU's address. The bus brings
+  the line up to the access dot first, so the entry is the current
+  pixel's; a palette DMA fired with the screen blanked or in HBlank is
+  untouched, as before.
+- **Overscan pictures are displayed.** A frame that starts with SETINI
+  bit 2 set is 239 rows tall (PPU lines 1..=239), as ares and Mesen2
+  output it; luna timed those 15 lines since v1.20.0 but never showed
+  them. `luna state --screenshot`, `render_frame_rgba`, fbhash, the
+  native capture (512×478) and the GUI follow the frame's height —
+  `Emulator::frame_height` says which. A game without overscan is
+  byte-identical to before (41-title A/B).
+
+### Fixed (SA-1)
+- **SA-1 registers are split by CPU side.** The S-CPU could read and
+  write every SA-1 register; on hardware it reads only SFR (`$2300`) —
+  everything else in `$2200-$23FF` is open bus (Kirby Super Star polls
+  `$2301` 2.9 million times and must not see the SA-1's own flags) — and
+  writes only its own control, vectors, super-MMC banks and protection;
+  the SA-1 owns its enables, the timer, DMA, the bitmap file, the math
+  unit and the VLBP; `$2231-$2237` is shared. A write to the other side's
+  register is dropped. HCR / VCR are latched together by the `$2302` read.
+- **SA-1 normal DMA** decoded its source through the S-CPU's bus map
+  and ignored the DCNT device fields. It now moves bytes between the
+  devices DCNT names (ROM through the SA-1's map, BW-RAM and I-RAM by
+  raw offset), charges the SA-1 its per-byte steps — the SA-1 stalls for
+  the transfer, as it does inside ares' `dmaNormal` — and leaves DMA
+  enable set at completion, as both references do.
+- **SA-1 BW-RAM bitmap view.** The SA-1 sees BW-RAM as a bitmap through
+  `$60-$6F` (one pixel per address, 4 or 2 bpp per BBF `$223F`) and
+  through the `$6000-$7FFF` window when CBM bit 7 is set; its linear
+  view spans `$40-$5F`. None of the three existed.
+- **SA-1 VLBP** advanced on the `$230C` read and masked its data. It
+  advances on the `$2258` write in fixed mode and on the `$230D` read in
+  auto-increment mode, returns the unmasked window, and reads its data
+  on its own bus (never a register), as ares does.
+- **SA-1 BW-RAM protection powers up armed:** both write enables clear
+  and BWPA `$0F`, so BW-RAM refuses writes until a game enables one side
+  — luna powered up with everything writable.
+
 ## [1.22.0] — 2026-09-14
 
 ### Added
