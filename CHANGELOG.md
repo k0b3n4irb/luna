@@ -6,12 +6,29 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
-The SA-1's register, memory and DMA model, read line for line in ares
-(`sa1/io.cpp`, `memory.cpp`, `bwram.cpp`, `dma.cpp`) and Mesen2
-(`Sa1.cpp`, `Sa1BwRamHandler.h`) before the code moved — the five rows
-the 2026-09-11 audit left open.
+The last rows of the 2026-09-11 audit: the SA-1's register, memory and
+DMA model, and the two PPU items left open — each read line for line in
+ares and Mesen2 before the code moved.
 
-### Fixed
+### Fixed (PPU)
+- **CGRAM accesses during the picture land where the PPU is looking.**
+  While the picture is being drawn (display on, a picture line, H-clocks
+  88..1096) the PPU owns CGRAM: a `$2122` write or `$213B` read hits the
+  entry the PPU last fetched for the pixel under the beam, not CGADD —
+  which still advances (ares `io.cpp:47-61`, `dac.cpp:158`; Mesen2
+  `InternalCgramAddress`). luna used the CPU's address. The bus brings
+  the line up to the access dot first, so the entry is the current
+  pixel's; a palette DMA fired with the screen blanked or in HBlank is
+  untouched, as before.
+- **Overscan pictures are displayed.** A frame that starts with SETINI
+  bit 2 set is 239 rows tall (PPU lines 1..=239), as ares and Mesen2
+  output it; luna timed those 15 lines since v1.20.0 but never showed
+  them. `luna state --screenshot`, `render_frame_rgba`, fbhash, the
+  native capture (512×478) and the GUI follow the frame's height —
+  `Emulator::frame_height` says which. A game without overscan is
+  byte-identical to before (41-title A/B).
+
+### Fixed (SA-1)
 - **SA-1 registers are split by CPU side.** The S-CPU could read and
   write every SA-1 register; on hardware it reads only SFR (`$2300`) —
   everything else in `$2200-$23FF` is open bus (Kirby Super Star polls

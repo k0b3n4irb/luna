@@ -171,6 +171,9 @@ pub(crate) struct DebugSnapshot {
 /// State the egui overlay reads to drive its widgets — passed in by
 /// `LunaApp` on every frame.
 pub(crate) struct UiState<'a> {
+    /// Rows of the current frame (224, or 239 under overscan): the part
+    /// of the pixels canvas the game image shows, and its aspect.
+    pub frame_height: usize,
     pub paused: bool,
     /// Debugger halt banner: set when a breakpoint auto-paused the
     /// emulation (`⏸ Break: …`), cleared on resume/reset.
@@ -232,7 +235,7 @@ pub(crate) struct UiOverlay {
     ctx: egui::Context,
     winit_state: egui_winit::State,
     renderer: egui_wgpu::Renderer,
-    /// The SNES framebuffer texture (pixels' 256×224 upload target),
+    /// The SNES framebuffer texture (pixels' 256 × 239 upload target),
     /// registered with egui so the game frame is laid out by egui itself —
     /// aspect-fit in the space **under** the menu bar. `None` until the first
     /// frame registers it.
@@ -264,7 +267,7 @@ impl UiOverlay {
         }
     }
 
-    /// Register pixels' 256×224 frame texture with the egui renderer (once).
+    /// Register pixels' 256 × 239 frame texture with the egui renderer (once).
     /// Nearest filtering keeps the upscale crisp, matching what pixels'
     /// own scaling renderer did.
     pub(crate) fn ensure_game_texture(&mut self, device: &wgpu::Device, texture: &wgpu::Texture) {
@@ -330,17 +333,20 @@ impl UiOverlay {
                     egui::Rect::from_min_max(egui::pos2(screen.min.x, menu_bottom), screen.max);
                 let painter = ui.painter();
                 painter.rect_filled(avail, 0.0, egui::Color32::BLACK);
-                let scale = (avail.width() / crate::CANVAS_W as f32)
-                    .min(avail.height() / crate::CANVAS_H as f32);
-                let size = egui::vec2(
-                    crate::CANVAS_W as f32 * scale,
-                    crate::CANVAS_H as f32 * scale,
-                );
+                // The frame is `frame_height` rows of the 239-row canvas:
+                // aspect-fit those rows and sample only that part of the
+                // texture (a 224-row frame shows no overscan band).
+                let frame_h = state.frame_height.clamp(1, crate::CANVAS_H) as f32;
+                let scale = (avail.width() / crate::CANVAS_W as f32).min(avail.height() / frame_h);
+                let size = egui::vec2(crate::CANVAS_W as f32 * scale, frame_h * scale);
                 let rect = egui::Rect::from_center_size(avail.center(), size);
                 painter.image(
                     tex,
                     rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Rect::from_min_max(
+                        egui::pos2(0.0, 0.0),
+                        egui::pos2(1.0, frame_h / crate::CANVAS_H as f32),
+                    ),
                     egui::Color32::WHITE,
                 );
                 game_rect.set(Some(rect));
