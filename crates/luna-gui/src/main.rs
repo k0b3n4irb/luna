@@ -42,7 +42,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 
-use luna_api::{Emulator, FRAME_H, FRAME_W};
+use luna_api::{Emulator, FRAME_H, FRAME_H_MAX, FRAME_W};
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -72,9 +72,11 @@ const INITIAL_SCALE: u32 = 3;
 /// Logical height of the egui menu bar reserved at the top of the
 /// window. The pixels canvas sits below it.
 const MENU_BAR_LOGICAL_H: u32 = 28;
-/// Pixels canvas dimensions = the SNES framebuffer, no margin.
+/// Pixels canvas dimensions: the SNES framebuffer at its tallest (239 rows
+/// under overscan), no margin. A 224-row frame uses the top 224 rows and
+/// egui draws only those (`UiState::frame_height`).
 const CANVAS_W: usize = FRAME_W;
-const CANVAS_H: usize = FRAME_H;
+const CANVAS_H: usize = FRAME_H_MAX;
 
 /// Application state owned by the winit event loop.
 struct LunaApp {
@@ -168,6 +170,9 @@ struct LunaApp {
     /// Host cursor in SNES framebuffer pixels (`(-1, -1)` = off the screen),
     /// and the previous frame's, so a Mouse gets per-frame deltas.
     cursor_snes: (i32, i32),
+    /// Rows in the last published frame (224, or 239 under overscan):
+    /// how much of the pixels canvas egui shows and the cursor maps to.
+    frame_h: usize,
     prev_cursor_snes: (i32, i32),
     /// Host pointer buttons: bit 0 = left, bit 1 = right.
     pointer_buttons: u8,
@@ -291,6 +296,7 @@ impl LunaApp {
             pending_reload_mtime: None,
             port_device: [luna_api::PortDevice::Pad; 2],
             cursor_snes: (-1, -1),
+            frame_h: FRAME_H,
             prev_cursor_snes: (-1, -1),
             pointer_buttons: 0,
             last_srm_written: Vec::new(),
@@ -956,13 +962,13 @@ impl ApplicationHandler for LunaApp {
         // draws over the top strip with a solid background so the
         // overlap with the game image is invisible to the user.
         let scaled_w = (CANVAS_W as u32) * INITIAL_SCALE;
-        let scaled_h = (CANVAS_H as u32) * INITIAL_SCALE + MENU_BAR_LOGICAL_H;
+        let scaled_h = (FRAME_H as u32) * INITIAL_SCALE + MENU_BAR_LOGICAL_H;
         let mut attrs = WindowAttributes::default()
             .with_title(WINDOW_TITLE)
             .with_inner_size(winit::dpi::LogicalSize::new(scaled_w, scaled_h))
             .with_min_inner_size(winit::dpi::LogicalSize::new(
                 CANVAS_W as u32,
-                (CANVAS_H as u32) + MENU_BAR_LOGICAL_H,
+                (FRAME_H as u32) + MENU_BAR_LOGICAL_H,
             ));
         // Set the desktop-environment application id so GNOME / KWin /
         // sway label the window as "Luna" rather than the generic
@@ -1063,6 +1069,7 @@ impl ApplicationHandler for LunaApp {
                 // The game image is laid out by egui now, so the mapping uses
                 // its rectangle (logical points), not pixels' scaling matrix.
                 let sf = self.window.as_ref().map_or(1.0, |w| w.scale_factor()) as f32;
+                let frame_h = self.frame_h as f32;
                 self.cursor_snes = self
                     .ui
                     .as_ref()
@@ -1075,8 +1082,8 @@ impl ApplicationHandler for LunaApp {
                         }
                         let px = ((lx - rect.min.x) / rect.width() * CANVAS_W as f32)
                             .clamp(0.0, CANVAS_W as f32 - 1.0);
-                        let py = ((ly - rect.min.y) / rect.height() * CANVAS_H as f32)
-                            .clamp(0.0, CANVAS_H as f32 - 1.0);
+                        let py =
+                            ((ly - rect.min.y) / rect.height() * frame_h).clamp(0.0, frame_h - 1.0);
                         Some((px as i32, py as i32))
                     })
                     .unwrap_or((-1, -1));
@@ -1242,18 +1249,25 @@ impl LunaApp {
         };
         let ui = self.ui.as_mut();
         // Copy the latest published SNES frame into the pixels canvas
-        // (256×224). pixels handles the upscaling to the window.
+        // (256 × 239 at most; a 224-row frame fills the top 224 rows and
+        // the rest is cleared so a switch out of overscan leaves nothing
+        // stale). egui draws exactly `frame_h` rows of it.
         {
-            let len = FRAME_W * FRAME_H * 4;
             // Lock-free fetch of the latest published frame (no Mutex).
             let fb = self.framebuffer_out.read();
-            pixels.frame_mut()[..len].copy_from_slice(&fb[..len]);
+            let h = (fb.len() / (FRAME_W * 4)).clamp(1, CANVAS_H);
+            self.frame_h = h;
+            let len = FRAME_W * h * 4;
+            let canvas = pixels.frame_mut();
+            canvas[..len].copy_from_slice(&fb[..len]);
+            canvas[len..].fill(0);
         }
         // Debug panels live in their own native windows now (rendered in
         // `redraw_debug_window`), so the main window only needs the open/
         // closed state to tick the Debug-menu checkmarks.
         let pending: Mutex<Vec<MenuAction>> = Mutex::new(Vec::new());
         let ui_state = UiState {
+            frame_height: self.frame_h,
             paused: self.emu_shared.paused.load(Ordering::Acquire),
             break_status: self.break_status.clone(),
             rom_title: self.rom_title.clone(),
@@ -1765,11 +1779,13 @@ impl LunaApp {
     /// auto-incrementing counter into [`screenshot_dir`]
     /// (`$HOME/.local/luna/screenshots`).
     ///
-    /// We capture the GUI's published RGBA framebuffer (256×224) — the
-    /// exact pixels on screen — so the PNG matches what the user sees.
+    /// We capture the GUI's published RGBA framebuffer (256 × 224, or
+    /// 256 × 239 under overscan) — the exact pixels on screen — so the PNG
+    /// matches what the user sees.
     fn take_screenshot(&mut self) {
         let buf = self.framebuffer_out.read().clone();
-        let Some(img) = image::RgbaImage::from_raw(FRAME_W as u32, FRAME_H as u32, buf) else {
+        let height = (buf.len() / (FRAME_W * 4)) as u32;
+        let Some(img) = image::RgbaImage::from_raw(FRAME_W as u32, height, buf) else {
             eprintln!("luna-gui: screenshot skipped — framebuffer size mismatch");
             return;
         };
@@ -2133,7 +2149,8 @@ fn composite_event_overlay(
     const W: usize = 682;
     const H: usize = 524;
     const FB_W: usize = 256;
-    const FB_H: usize = 224;
+    // 224 rows, or 239 under overscan — both fit the 524-row buffer.
+    let fb_h = (fb.len() / (FB_W * 4)).min(FRAME_H_MAX);
 
     // Clear to 0xFF555555 (dark-gray border).
     let mut buf = vec![0u8; W * H * 4];
@@ -2141,10 +2158,10 @@ fn composite_event_overlay(
         px.copy_from_slice(&[0x55, 0x55, 0x55, 0xFF]);
     }
 
-    // DrawScreen: blit the 256×224 framebuffer with a lo-res 2×2 upsample,
-    // centred at col +44 / row +2 inside the 682-wide buffer.
-    if fb.len() >= FB_W * FB_H * 4 {
-        for dy in 0..(FB_H * 2) {
+    // DrawScreen: blit the framebuffer with a lo-res 2×2 upsample, at
+    // col +44 / row +2 inside the 682-wide buffer.
+    if fb.len() >= FB_W * fb_h * 4 {
+        for dy in 0..(fb_h * 2) {
             for dx in 0..(FB_W * 2) {
                 let s = ((dy >> 1) * FB_W + (dx >> 1)) * 4;
                 let d = ((dy + 2) * W + (dx + 44)) * 4;

@@ -23,7 +23,7 @@
 
 use luna_bus::sa1::Sa1Mapper;
 use luna_bus::{
-    Addr24, Bus, MCycles, Mapper, MapperKind, Sa1SideEvent, Sa1Snapshot, Sa1TraceEvent, make_addr,
+    Addr24, Bus, MCycles, Mapper, MapperKind, Sa1SideEvent, Sa1Snapshot, Sa1TraceEvent,
 };
 use luna_cpu_65c816::Cpu;
 
@@ -95,10 +95,8 @@ impl Sa1Chip {
 
     /// Pull the SA-1's reset vector out of the CRV register at
     /// `$2203/$2204` of the MMIO file and load it into PC.
-    fn load_reset_vector(&mut self) {
-        let lo = self.inner.read(make_addr(0x00, 0x2203)).unwrap_or(0);
-        let hi = self.inner.read(make_addr(0x00, 0x2204)).unwrap_or(0);
-        self.cpu.pc = u16::from(lo) | (u16::from(hi) << 8);
+    const fn load_reset_vector(&mut self) {
+        self.cpu.pc = self.inner.crv();
         self.cpu.pb = 0;
         self.cpu.stopped = false;
         self.cpu.waiting = false;
@@ -133,17 +131,12 @@ impl Mapper for Sa1Chip {
         let bank = (addr >> 16) as u8;
         let offset = (addr & 0xFFFF) as u16;
         let is_ccnt = matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && offset == 0x2200;
-        let prev_ccnt = if is_ccnt {
-            self.inner.read(make_addr(0x00, 0x2200)).unwrap_or(0)
-        } else {
-            0
-        };
+        let was_reset = is_ccnt && self.inner.ccnt_reset_held();
         let claimed = self.inner.write(addr, value);
         if is_ccnt {
             // Per ares + Mesen2: CCNT bit 5 is the SA-1 reset bit.
             // 1 = held in reset, 0 = released. The 1 → 0 edge starts
             // the SA-1 at CRV; the 0 → 1 edge re-asserts reset.
-            let was_reset = prev_ccnt & 0x20 != 0;
             let now_reset = value & 0x20 != 0;
             if was_reset && !now_reset {
                 self.load_reset_vector();
@@ -195,6 +188,7 @@ impl Mapper for Sa1Chip {
         // how games can sit in CCNT.7-asserted "wait" mode and still
         // generate timer IRQs.
         self.inner.tick_timer(main_mclk);
+        self.inner.set_scpu_mar(scpu_mar);
         // `running` is CCNT bit 5 (reset); bit 6 (RDYB) parks the chip the
         // same way, and ares checks both before executing anything
         // (`sa1.cpp:46-50`). The timer above keeps ticking in either case.
@@ -204,6 +198,9 @@ impl Mapper for Sa1Chip {
         // Add this advance to the budget, clamped so a stray large lump
         // can't trigger a runaway catch-up burst.
         self.deficit = (self.deficit.saturating_add(main_mclk as i32)).min(DEFICIT_CAP);
+        // A DMA the S-CPU fired since the last batch stalls the SA-1 for
+        // its length (ares runs the `step()`s inside `dmaNormal`).
+        self.deficit -= self.inner.take_dma_steps() as i32 * MCLK_PER_SA1_STEP;
         while self.deficit > 0 && !self.cpu.stopped {
             // Self-referential bus borrow: `cpu`, `inner` and
             // `sa1_side_log` are disjoint fields of `Sa1Chip`, so we can
@@ -255,6 +252,8 @@ impl Mapper for Sa1Chip {
                 scpu_mar,
             };
             self.cpu.step(&mut bus);
+            // A DMA this instruction fired costs the SA-1 its steps too.
+            steps += self.inner.take_dma_steps();
             // Floor at 1 step so a zero-cost path can never stall the loop.
             self.deficit -= steps.max(1) as i32 * MCLK_PER_SA1_STEP;
         }
@@ -633,7 +632,7 @@ mod tests {
         chip.write(make_addr(0x00, 0x2201), 0x80);
         assert!(!chip.coproc_main_irq_pending());
         // SA-1 side: assert SCNT bit 7.
-        chip.write(make_addr(0x00, 0x2209), 0x80);
+        chip.inner.write_from_sa1(make_addr(0x00, 0x2209), 0x80);
         assert!(
             chip.coproc_main_irq_pending(),
             "chip should expose the SA-1 → S-CPU IRQ line"
@@ -647,7 +646,7 @@ mod tests {
     fn sa1_bus_irq_pending_reflects_main_to_sa1_latch() {
         let mut chip = sa1_chip();
         // SA-1 enables S-CPU → SA-1 IRQ (CIE bit 7).
-        chip.write(make_addr(0x00, 0x220A), 0x80);
+        chip.inner.write_from_sa1(make_addr(0x00, 0x220A), 0x80);
         // Main side asserts CCNT bit 7 (0→1 IRQ trigger). Keep bit 5
         // set so the SA-1 stays in reset for this isolated test.
         chip.write(make_addr(0x00, 0x2200), 0xA0);
@@ -669,11 +668,11 @@ mod tests {
         // and fire IRQs — games rely on this to gate work outside the
         // SA-1's reset window.
         let mut chip = sa1_chip();
-        chip.write(make_addr(0x00, 0x220A), 0x40); // CIE bit 6 = timer
-        chip.write(make_addr(0x00, 0x2210), 0x81); // linear mode, H enable
-        chip.write(make_addr(0x00, 0x2212), 100); // compare lo
-        chip.write(make_addr(0x00, 0x2213), 0);
-        chip.write(make_addr(0x00, 0x2214), 0);
+        chip.inner.write_from_sa1(make_addr(0x00, 0x220A), 0x40); // CIE bit 6 = timer
+        chip.inner.write_from_sa1(make_addr(0x00, 0x2210), 0x81); // linear mode, H enable
+        chip.inner.write_from_sa1(make_addr(0x00, 0x2212), 100); // compare lo
+        chip.inner.write_from_sa1(make_addr(0x00, 0x2213), 0);
+        chip.inner.write_from_sa1(make_addr(0x00, 0x2214), 0);
         assert!(!chip.running, "still in reset");
         // Step enough to reach the compare (HCNT 100 dots = 400 clocks).
         chip.step_coproc(400, 0);
@@ -683,17 +682,17 @@ mod tests {
     #[test]
     fn dma_complete_raises_sa1_irq_via_inner_path() {
         let mut chip = sa1_chip();
-        chip.write(make_addr(0x00, 0x220A), 0x20); // CIE bit 5 = DMA
+        chip.inner.write_from_sa1(make_addr(0x00, 0x220A), 0x20); // CIE bit 5 = DMA
         // Seed I-RAM source.
         chip.write(make_addr(0x00, 0x3100), 0x77);
-        // SDA = $00:3100
+        // SDA = I-RAM offset $100 (the source device is named by DCNT).
         chip.write(make_addr(0x00, 0x2232), 0x00);
-        chip.write(make_addr(0x00, 0x2233), 0x31);
+        chip.write(make_addr(0x00, 0x2233), 0x01);
         chip.write(make_addr(0x00, 0x2234), 0x00);
-        chip.write(make_addr(0x00, 0x2238), 1);
-        chip.write(make_addr(0x00, 0x2239), 0);
-        // Configure DCNT first: enable + dest = BW-RAM (bit 2 = dd = 1).
-        chip.write(make_addr(0x00, 0x2230), 0x84);
+        chip.inner.write_from_sa1(make_addr(0x00, 0x2238), 1);
+        chip.inner.write_from_sa1(make_addr(0x00, 0x2239), 0);
+        // DCNT: enable + source = I-RAM (2) + dest = BW-RAM (bit 2).
+        chip.inner.write_from_sa1(make_addr(0x00, 0x2230), 0x86);
         // DDA = $40:0000 — the $2237 write fires the burst.
         chip.write(make_addr(0x00, 0x2235), 0x00);
         chip.write(make_addr(0x00, 0x2236), 0x00);

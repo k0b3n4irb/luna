@@ -132,19 +132,19 @@ Tests `scpu_irq_request_vectors_the_sa1_cpu_through_civ`,
 name entry, `nmis_serviced` 3335 @ frame 3988 unchanged), Kirby Super
 Star and Kirby's Dream Land 3 checked after the change.
 
-## 🔴 Open — found by the 2026-09-11 audit (faithful port pending)
+## ✅ Found by the 2026-09-11 audit — all ported (2026-09-12 → 2026-09-14)
 
 | # | Gap | ares / Mesen2 | luna |
 |---|---|---|---|
 | ~~7~~ | ~~**CC1 character conversion**~~ — ✅ **DONE 2026-09-12**: `dmaCC1` / `dmaCC1Read` ported line for line. CDMA decodes colour depth from bits 0-1 and width from bits 2-4 (they were swapped), pixels come out LSB-first, and the conversion happens ONE CHARACTER AT A TIME on the S-CPU's own BW-RAM reads through `bwram.dma`, answering from I-RAM at DDA — not in one bulk pass at the trigger | ares `dma.cpp:48-107`, `io.cpp:452-461`, `bwram.cpp:29` | `sa1.rs` `dma_cc1`, `dma_cc1_read` |
 | ~~8~~ | ~~**CC2**~~ — ✅ **DONE 2026-09-12**: `dmaCC2` ported. The `$2240-$224F` BRF register file is stored, a write to BRF[7] or BRF[15] converts one tile row into I-RAM at DDA using ares' planar byte map, and the 4-bit line counter advances (reset when DCNT clears DMA enable) | ares `dma.cpp:108-128`, `io.cpp:348-368,327` | `sa1.rs` `dma_cc2` |
-| 9 | **BW-RAM bitmap view** (`$60-$6F`, BBF `$223F`, CBM bit 7 / `sw46`) missing | ares `bwram.cpp:45-130`, `memory.cpp:39-49` | `sa1.rs` SA-1-side decode |
+| ~~9~~ | ~~**BW-RAM bitmap view**~~ — ✅ **DONE 2026-09-14**: the SA-1 sees BW-RAM three ways (`bwram_target_sa1`): linear `$40-$5F` (mirrored), the bitmap projection `$60-$6F` (one pixel per address, 4 bpp two-a-byte low nibble first or 2 bpp four-a-byte per BBF `$223F` bit 7, writes are read-modify-write), and the `$6000-$7FFF` window as linear page `CBM & $1F` or, with CBM bit 7 (`sw46`), bitmap page `CBM & $7F`. Bitmap writes bypass BWPA as in ares (Mesen2 protects them; the two differ only with both enables clear). Tests `sa1_reads_bwram_as_pixels_through_banks_60_to_6f`, `cbm_bit_7_turns_the_sa1_window_into_a_bitmap_page`, `sa1_linear_bwram_spans_banks_40_to_5f` | ares `bwram.cpp:45-130`, `memory.cpp:39-49` | `sa1.rs` `bwram_target_sa1`, `bitmap_read/write` |
 | ~~10~~ | ~~**CCNT bit 6 (RDYB) wait**~~ — ✅ **DONE 2026-09-12**: the chip is parked while the S-CPU holds RDYB; its timer keeps ticking, as in ares. Test `ccnt_bit_6_parks_the_sa1_but_keeps_its_timer_running` | ares `sa1.cpp:46-50`; Mesen2 `Run` | `coproc/sa1.rs` |
-| 11 | **Normal DMA** ignores the DCNT source device and decodes through the S-CPU map; costs the SA-1 no time | ares `dma.cpp:2-46`; Mesen2 `RunDma` | `sa1.rs` DMA |
-| 12 | **Register dispatch not split by CPU side** (S-CPU reads of `$2301` return CFR instead of open bus — Kirby does 2.9 M of them) | ares `io.cpp`; Mesen2 `Sa1.cpp:81-428` | `sa1.rs` `read`/`write` |
+| ~~11~~ | ~~**Normal DMA**~~ — ✅ **DONE 2026-09-14**: `dmaNormal` ported. DCNT names the devices (sd ROM/BW-RAM/I-RAM, dd I-RAM/BW-RAM); only the four hardware pairs move bytes, any other pair just runs DTC down. ROM is read through the SA-1's map (`rom_read_sa1`, ares `rom.cpp:61-66`), BW-RAM and I-RAM by raw offset. Each byte charges the SA-1 its steps (2 / 1 / 2 / 2 plus `conflict()` steps against the S-CPU's address) through `take_dma_steps`, which the chip driver subtracts from its budget — the SA-1 stalls for the transfer. DMA enable is no longer cleared at completion (neither reference does). Tests `normal_dma_*` (5) | ares `dma.cpp:2-46`; Mesen2 `RunDma` | `sa1.rs` `run_normal_dma`; `coproc/sa1.rs` `step_coproc` |
+| ~~12~~ | ~~**Register dispatch not split by CPU side**~~ — ✅ **DONE 2026-09-14**: `readIOCPU` / `readIOSA1` / `writeIOCPU` / `writeIOSA1` ported. The S-CPU reads only SFR (`$2300`), everything else in `$2200-$23FF` is open bus; the SA-1 reads CFR, HCR/VCR (latched together by the `$2302` read), MR, OF and the VLBP ports. Writes are owned per side (`cpu_side_register` / `sa1_side_register`; `$2231-$2237` shared) — a write to the other side's register is dropped. No register is memory-backed any more. Tests `unowned_register_slots_read_open_bus_on_both_sides`, `register_writes_are_owned_by_one_side`, `hcr_vcr_latch_on_the_2302_read` | ares `io.cpp`; Mesen2 `Sa1.cpp:81-428` | `sa1.rs` `read`, `read_io_sa1`, `write_with_side` |
 | ~~13~~ | ~~**ROM not mirrored**~~ — ✅ **DONE 2026-09-12**: SA-1 ROM addresses run through the shared `rom_mirror` (ares' `bus.mirror`), so a cart smaller than the 4 MB the super-MMC addresses repeats instead of reading open bus | ares `rom.cpp:7-10` | `sa1.rs` `rom_offset` |
-| 14 | **VLBP** advances on the `$230C` read instead of the `$2258` write; data masked | ares `io.cpp:427-439`; Mesen2 `:220-228` | `sa1.rs` VBD |
-| 15 | **BW-RAM protection power-on** `sbwe/cbwe = $80`, `bwpa = $00` (refs: write-protected until enabled) | ares `sa1.cpp:231-237`; Mesen2 `Reset` | `sa1.rs` `new` |
+| ~~14~~ | ~~**VLBP**~~ — ✅ **DONE 2026-09-14**: ares' `va` / `vbit` model. Fixed mode (VBD bit 7 clear) advances on the `$2258` write itself, auto-increment mode on the `$230D` read; `$230C` never advances; the window is unmasked; `$225B` zeroes `vbit`; reads go through `readVBR` (ROM by the SA-1's map, BW-RAM / I-RAM raw, never a register). Tests `vlbp_*` (4) | ares `io.cpp:427-444, 62-89`; `memory.cpp:113-133`; Mesen2 `:220-236, 387-401` | `sa1.rs` `vlbp_*`, `read_vbr` |
+| ~~15~~ | ~~**BW-RAM protection power-on**~~ — ✅ **DONE 2026-09-14**: SBWE / CBWE come up clear and BWPA `$0F`, so every BW-RAM byte refuses writes from either side until a game enables one (SMRPG, Kirby Super Star and Kirby's Dream Land 3 all do; CLI fbhash identical to v1.22.0 at 21 checkpoints). Test `bwram_is_write_protected_at_power_on` | ares `sa1.cpp:231-237`; Mesen2 `Reset` | `sa1.rs` `new` |
 
 ---
 
@@ -178,5 +178,9 @@ Star and Kirby's Dream Land 3 checked after the change.
 ## Suggested order
 
 1. ~~#1 math unit (a/b/c/d)~~ — **done**.
-2. 🟠 #5 timer HV mode — needs the PPU H/V dot view; pair with cycle-accuracy Phase 4.
-3. 🟡 #2-#4 — minor; left as notes.
+2. ~~#5 timer HV mode~~ — **done**.
+3. ~~#6-#15 (the 2026-09-11 audit)~~ — **done** 2026-09-12 → 2026-09-14.
+4. 🟡 #2-#4 — minor; left as notes. #3/#4 are the deliberate I-RAM
+   protection deviation (`archive/sa1_status.md`).
+5. The scheduler grain (batched `step_coproc` vs ares' cothreads) is the
+   remaining accuracy residual — a timing model, not a register.

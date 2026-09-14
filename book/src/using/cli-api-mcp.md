@@ -62,7 +62,7 @@ luna run [OPTIONS] <ROM>
 | `<ROM>` | — | Path to the `.sfc` / `.smc` ROM. |
 | `-n, --steps <N>` | `64` | CPU instructions to execute before dumping. |
 | `--until-frame <F>` | — | Run until PPU frame `F` instead of the `-n` count (which is then ignored). Pins a baseline to a **frame**, not an instruction count — see below. |
-| `--screenshot <PATH>` | — | Render a 256×224 PNG of the framebuffer to `PATH`. |
+| `--screenshot <PATH>` | — | Render a PNG of the framebuffer to `PATH` — 256×224, or 256×239 while the game runs in overscan (SETINI bit 2). |
 | `--force-display` | off | Bypass INIDISP forced-blank so you see whatever is in VRAM/CGRAM. |
 | `--bg <1..=4>` | composited | Render ONLY that BG layer instead of the composited frame. |
 | `--audio-out <PATH>` | — | Capture the APU's 32 kHz stereo output to a WAV. |
@@ -737,7 +737,7 @@ method, so the MCP transport adds reach, not capability.
 | `run_until_mem_write` | `run_until_mem_write` | Step until an address is written; returns PC + value. |
 | `run_until_mem_read` | `run_until_mem_read` | Step until an address is read; returns PC + value. |
 | `state` | `state` | Full observable-state JSON snapshot (§2). |
-| `screenshot` | `render_frame_png` / `render_frame_png_native` / `render_frame_bg_png` | Render the composited 256×224 frame to PNG; `native: true` captures 512×448 (enable `set_native_capture` first), `bg: 1..=4` renders one layer in isolation. |
+| `screenshot` | `render_frame_png` / `render_frame_png_native` / `render_frame_bg_png` | Render the composited 256×224 frame to PNG (256×239 under overscan — `height` in the result says which); `native: true` captures 512×448 (or 512×478; enable `set_native_capture` first), `bg: 1..=4` renders one layer in isolation. |
 | `sram_get` / `sram_set` | `sram` / `load_sram` | Battery-RAM image as base64 — the MCP form of `--srm-out` / `--srm-in`. |
 | `export_spc` | `export_spc` | Standard `.spc` (v0.30) music snapshot, base64 — playable in any SPC player. |
 | `decode_sprites` | `decode_sprites` | All 128 OAM entries as a structured list — the queryable `render_sprite_sheet`. |

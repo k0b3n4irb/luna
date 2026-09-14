@@ -112,7 +112,7 @@ impl EmuShared {
 /// with the cpal callback — the emu thread flips it on first push so
 /// the callback's "silence until ready" gate opens.
 ///
-/// `framebuffer_rgba` is a shared 256×224×4 RGBA byte buffer the emu
+/// `framebuffer_rgba` is a shared 256 × (224 | 239) × 4 RGBA byte buffer the emu
 /// thread fills once per emulated frame; the UI thread just memcpy's
 /// it out under a brief lock and uploads to the GPU. Decouples the
 /// UI's repaint cadence from the Snes Mutex (which the emu thread
