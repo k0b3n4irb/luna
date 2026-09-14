@@ -4,6 +4,19 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.22.0] — 2026-09-14
+
+### Added
+- **`luna profile` measures per frame.** Every row now carries
+  `per_frame: {max, max_frame, mean, frames}` — its master cycles in the
+  worst completed PPU frame (and which frame), the mean over every
+  completed frame of the window, and the frames it ran in; the report's
+  `frames` is the denominator, and the table gains a `max/frame` column.
+  `--budget SYMBOL=MCLK` (repeatable) gates on that maximum: exit 1 with
+  the frame named when a routine overran its VBlank budget, exit 2 for a
+  symbol the `.sym` does not know. The MCP `take_profile` result carries
+  the same `frames` / `per_frame` fields. (`OpenSNES` R-B.)
+
 ## [1.21.0] — 2026-09-12
 
 The OpenSNES exchange of 2026-09-12: the fbhash switch we asked to ship

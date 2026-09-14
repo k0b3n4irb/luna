@@ -778,6 +778,25 @@ pub struct ProfileEntry {
     pub pct: f64,
     /// Distinct instruction addresses folded into this row.
     pub pcs: u32,
+    /// The row's cost per PPU frame over the completed frames of the
+    /// window (`OpenSNES` R-B) — `None` when no frame completed while it
+    /// ran. The trailing partial frame is not counted.
+    pub per_frame: Option<ProfilePerFrame>,
+}
+
+/// One row's master cycles per PPU frame (`OpenSNES` R-B): the number a
+/// VBlank-budget gate compares against.
+#[derive(Debug, Clone, Copy, Serialize, schemars::JsonSchema)]
+pub struct ProfilePerFrame {
+    /// Most master cycles the row cost in one completed frame.
+    pub max: u64,
+    /// The PPU frame that cost `max` (the first one, on a tie).
+    pub max_frame: u64,
+    /// Mean cost over **every** completed frame of the window — a frame
+    /// the row did not run in counts as 0.
+    pub mean: u64,
+    /// Completed frames the row ran in.
+    pub frames: u64,
 }
 
 /// A folded profile (issue #227).
@@ -787,8 +806,20 @@ pub struct ProfileReport {
     pub total_mclk: u64,
     /// Instructions across every sample.
     pub instructions: u64,
+    /// PPU frames completed inside the window (the `per_frame.mean`
+    /// denominator).
+    pub frames: u64,
     /// Rows, heaviest `mclk` first.
     pub entries: Vec<ProfileEntry>,
+}
+
+/// Running per-frame figures of one folded row (`OpenSNES` R-B).
+#[derive(Debug, Clone, Copy, Default)]
+struct ProfileFrameAcc {
+    max: u64,
+    max_frame: u64,
+    sum: u64,
+    frames: u64,
 }
 
 /// Cumulative metrics since reset.
@@ -984,6 +1015,12 @@ pub struct Emulator {
     /// Live narrowing memory-search session (issue #177); `None` until
     /// [`Emulator::search_begin`] runs.
     search_session: Option<SearchSession>,
+    /// The profiler's per-frame figures by folded row (`OpenSNES` R-B),
+    /// folded from the core's completed frames on every run call so the
+    /// pending list never outgrows one call.
+    profile_frames: std::collections::BTreeMap<(String, u32), ProfileFrameAcc>,
+    /// Completed frames folded since the profiler was enabled or taken.
+    profile_frames_done: u64,
     /// Per-frame memory freezes (issue #178): `(canonical $7E/$7F WRAM
     /// address, value)`, re-applied whenever the frame counter advances
     /// in ANY run path — so a freeze behaves identically under the CLI,
@@ -1093,6 +1130,8 @@ impl Emulator {
             rom_hash: 0,
             symbols: None,
             search_session: None,
+            profile_frames: std::collections::BTreeMap::new(),
+            profile_frames_done: 0,
             freezes: Vec::new(),
             call_stack: None,
             event_config: event_viewer::EventViewerConfig {
@@ -1479,6 +1518,7 @@ impl Emulator {
             executed
         }));
         self.call_stack = cstack;
+        self.fold_profile_frames();
         match result {
             Ok(n) => {
                 self.instructions_executed += n;
@@ -1515,6 +1555,7 @@ impl Emulator {
             executed
         }));
         self.call_stack = cstack;
+        self.fold_profile_frames();
         match result {
             Ok(n) => {
                 self.instructions_executed += n;
@@ -3585,6 +3626,8 @@ impl Emulator {
     pub fn enable_profile(&mut self) -> Result<(), ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         snes.enable_profile();
+        self.profile_frames.clear();
+        self.profile_frames_done = 0;
         Ok(())
     }
 
@@ -3592,7 +3635,59 @@ impl Emulator {
     pub fn disable_profile(&mut self) -> Result<(), ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         snes.disable_profile();
+        self.profile_frames.clear();
+        self.profile_frames_done = 0;
         Ok(())
+    }
+
+    /// The row a profiled PC folds onto: the nearest loaded `.sym` label
+    /// at or below it in the same bank (`FastROM` mirror aware), else its
+    /// 256-byte page.
+    fn profile_key(syms: Option<&SymbolTable>, pc: u32) -> (String, u32) {
+        syms.and_then(|t| {
+            t.nearest_label(pc)
+                .or_else(|| t.nearest_label(pc ^ 0x80_0000))
+                .map(|(name, addr)| (name.to_string(), addr))
+        })
+        .unwrap_or_else(|| {
+            let page = pc & 0x00FF_FF00;
+            (
+                format!("${:02X}:{:04X} (no symbol)", page >> 16, page & 0xFFFF),
+                page,
+            )
+        })
+    }
+
+    /// Fold the profiler's completed frames onto rows (`OpenSNES` R-B):
+    /// each frame's per-PC cost sums per row, then feeds that row's
+    /// max / sum. Cheap when profiling is off.
+    fn fold_profile_frames(&mut self) {
+        let Some(snes) = self.snes.as_mut() else {
+            return;
+        };
+        if snes.profile.is_none() {
+            return;
+        }
+        let frames = snes.take_profile_frames();
+        let syms = self.symbols.as_ref();
+        let mut per_row: std::collections::HashMap<(String, u32), u64> =
+            std::collections::HashMap::new();
+        for (frame, costs) in frames {
+            per_row.clear();
+            for (pc, mclk) in costs {
+                *per_row.entry(Self::profile_key(syms, pc)).or_default() += mclk;
+            }
+            for (key, mclk) in per_row.drain() {
+                let acc = self.profile_frames.entry(key).or_default();
+                if mclk > acc.max {
+                    acc.max = mclk;
+                    acc.max_frame = frame;
+                }
+                acc.sum = acc.sum.saturating_add(mclk);
+                acc.frames += 1;
+            }
+            self.profile_frames_done += 1;
+        }
     }
 
     /// Every 24-bit PC at which the profiler has credited an instruction
@@ -3628,24 +3723,15 @@ impl Emulator {
     /// and vice versa); PCs no label covers fold onto their 256-byte
     /// page. Rows come heaviest `mclk` first. Empties the profiler.
     pub fn take_profile(&mut self) -> Result<ProfileReport, ApiError> {
+        self.fold_profile_frames();
         let raw = self.take_profile_raw()?;
+        let frames_done = std::mem::take(&mut self.profile_frames_done);
+        let mut per_frame = std::mem::take(&mut self.profile_frames);
         let syms = self.symbols.as_ref();
         let mut folded: std::collections::HashMap<(String, u32), (ProfileSample, u32)> =
             std::collections::HashMap::new();
         for (&pc, s) in &raw.samples {
-            let key = syms
-                .and_then(|t| {
-                    t.nearest_label(pc)
-                        .or_else(|| t.nearest_label(pc ^ 0x80_0000))
-                        .map(|(name, addr)| (name.to_string(), addr))
-                })
-                .unwrap_or_else(|| {
-                    let page = pc & 0x00FF_FF00;
-                    (
-                        format!("${:02X}:{:04X} (no symbol)", page >> 16, page & 0xFFFF),
-                        page,
-                    )
-                });
+            let key = Self::profile_key(syms, pc);
             let slot = folded.entry(key).or_default();
             slot.0.instructions += s.instructions;
             slot.0.mclk += s.mclk;
@@ -3656,24 +3742,37 @@ impl Emulator {
         let instructions = raw.samples.values().map(|s| s.instructions).sum();
         let mut entries: Vec<ProfileEntry> = folded
             .into_iter()
-            .map(|((symbol, addr), (s, pcs))| ProfileEntry {
-                symbol,
-                addr,
-                instructions: s.instructions,
-                mclk: s.mclk,
-                idle_mclk: s.idle_mclk,
-                pct: if total_mclk == 0 {
-                    0.0
-                } else {
-                    s.mclk as f64 * 100.0 / total_mclk as f64
-                },
-                pcs,
+            .map(|((symbol, addr), (s, pcs))| {
+                let per_frame = per_frame
+                    .remove(&(symbol.clone(), addr))
+                    .filter(|acc| acc.frames > 0)
+                    .map(|acc| ProfilePerFrame {
+                        max: acc.max,
+                        max_frame: acc.max_frame,
+                        mean: acc.sum / frames_done.max(1),
+                        frames: acc.frames,
+                    });
+                ProfileEntry {
+                    symbol,
+                    addr,
+                    instructions: s.instructions,
+                    mclk: s.mclk,
+                    idle_mclk: s.idle_mclk,
+                    pct: if total_mclk == 0 {
+                        0.0
+                    } else {
+                        s.mclk as f64 * 100.0 / total_mclk as f64
+                    },
+                    pcs,
+                    per_frame,
+                }
             })
             .collect();
         entries.sort_by(|a, b| b.mclk.cmp(&a.mclk).then(a.addr.cmp(&b.addr)));
         Ok(ProfileReport {
             total_mclk,
             instructions,
+            frames: frames_done,
             entries,
         })
     }
@@ -4234,6 +4333,64 @@ mod tests {
         assert_eq!(r.entries.len(), 1, "{r:?}");
         assert_eq!(r.entries[0].symbol, "$00:8000 (no symbol)");
         assert_eq!(r.entries[0].addr, 0x00_8000);
+    }
+
+    #[test]
+    fn profile_reports_the_cost_per_frame() {
+        // `OpenSNES` R-B: each row's worst / mean completed frame. On the
+        // idle ROM `main` runs once, in the first frame; the handler and
+        // the wait loop run every frame.
+        let code = [0x78, 0xA9, 0x80, 0x8D, 0x00, 0x42, 0xCB, 0x80, 0xFD, 0x40];
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom_with(&code, Some(0x8009)))
+            .unwrap();
+        e.load_symbols_str("[labels]\n00:8000 main\n00:8006 wait_vblank\n00:8009 nmi_handler\n");
+        e.enable_profile().unwrap();
+        for _ in 0..4 {
+            e.step_until_frame(1_000_000).unwrap();
+        }
+        // A few instructions into frame 4: that partial frame must not
+        // count anywhere.
+        e.step(3).unwrap();
+        let r = e.take_profile().unwrap();
+        assert_eq!(r.frames, 4, "{r:?}");
+        let by_name = |n: &str| r.entries.iter().find(|x| x.symbol == n).cloned().unwrap();
+        let main = by_name("main").per_frame.expect("main ran in frame 0");
+        assert_eq!(main.frames, 1);
+        assert_eq!(main.max_frame, 0);
+        assert_eq!(main.max, by_name("main").mclk);
+        assert_eq!(
+            main.mean,
+            by_name("main").mclk / 4,
+            "mean over every completed frame"
+        );
+        let nmi = by_name("nmi_handler")
+            .per_frame
+            .expect("handler ran every frame");
+        assert_eq!(nmi.frames, 4);
+        assert!(nmi.max > 0 && nmi.max >= nmi.mean, "{nmi:?}");
+        let wait = by_name("wait_vblank")
+            .per_frame
+            .expect("wait loop ran every frame");
+        assert_eq!(wait.frames, 4);
+        assert!(wait.max >= wait.mean && wait.mean > 0, "{wait:?}");
+        // The rows' per-frame totals add up to the window's whole frames,
+        // give or take the boundary steps: sum of means × frames ≈ the
+        // total less the partial frame.
+        let sum_means: u64 = r
+            .entries
+            .iter()
+            .filter_map(|x| x.per_frame)
+            .map(|p| p.mean)
+            .sum();
+        assert!(sum_means * 4 <= r.total_mclk, "{r:?}");
+
+        // Taking empties the per-frame figures too; a window with no
+        // completed frame reports none.
+        e.step(10).unwrap();
+        let r = e.take_profile().unwrap();
+        assert_eq!(r.frames, 0);
+        assert!(r.entries.iter().all(|x| x.per_frame.is_none()), "{r:?}");
     }
 
     #[test]

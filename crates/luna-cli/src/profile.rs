@@ -26,6 +26,9 @@ pub(crate) struct ProfileOptions<'a> {
     /// Write every executed 24-bit PC, sorted, as little-endian `u32`s
     /// (`--pc-set`; `OpenSNES` R-C — a coverage tool folds them onto lines).
     pub pc_set: Option<&'a std::path::Path>,
+    /// `--budget SYMBOL=MCLK` gates (`OpenSNES` R-B): the symbol's worst
+    /// completed frame must not exceed `MCLK`, else exit 1.
+    pub budgets: &'a [String],
     pub force_mapper: Option<&'a str>,
     pub force_region: Option<&'a str>,
     pub power_on: Option<&'a str>,
@@ -41,6 +44,65 @@ struct Report<'a> {
     end_frame: u64,
     #[serde(flatten)]
     profile: luna_api::ProfileReport,
+    /// One verdict per `--budget`, in command-line order.
+    budgets: Vec<BudgetVerdict>,
+}
+
+/// The outcome of one `--budget SYMBOL=MCLK` gate.
+#[derive(serde::Serialize)]
+struct BudgetVerdict {
+    symbol: String,
+    limit: u64,
+    /// The symbol's worst completed frame; `None` when it never ran.
+    max: Option<u64>,
+    max_frame: Option<u64>,
+    ok: bool,
+}
+
+/// Parse one `--budget SYMBOL=MCLK` argument.
+fn parse_budget(spec: &str) -> Result<(String, u64), String> {
+    let (sym, limit) = spec
+        .rsplit_once('=')
+        .ok_or_else(|| format!("`{spec}`: expected SYMBOL=MCLK"))?;
+    let sym = sym.trim();
+    if sym.is_empty() {
+        return Err(format!("`{spec}`: empty symbol"));
+    }
+    let limit = limit
+        .trim()
+        .replace('_', "")
+        .parse::<u64>()
+        .map_err(|e| format!("`{spec}`: bad master-cycle count: {e}"))?;
+    Ok((sym.to_string(), limit))
+}
+
+/// Judge the `--budget` gates against the folded report. A symbol the
+/// loaded table does not know is a usage error (a typo must not pass);
+/// a known symbol that never ran costs 0 and passes.
+fn judge_budgets(
+    em: &luna_api::Emulator,
+    report: &luna_api::ProfileReport,
+    budgets: &[(String, u64)],
+) -> Result<Vec<BudgetVerdict>, String> {
+    let mut out = Vec::with_capacity(budgets.len());
+    for (symbol, limit) in budgets {
+        let entry = report.entries.iter().find(|e| &e.symbol == symbol);
+        if entry.is_none() && em.resolve_symbol(symbol).is_none() {
+            return Err(format!(
+                "--budget {symbol}: unknown symbol (not in the loaded .sym, and it never ran)"
+            ));
+        }
+        let per_frame = entry.and_then(|e| e.per_frame);
+        let max = per_frame.map(|p| p.max);
+        out.push(BudgetVerdict {
+            symbol: symbol.clone(),
+            limit: *limit,
+            max,
+            max_frame: per_frame.map(|p| p.max_frame),
+            ok: max.unwrap_or(0) <= *limit,
+        });
+    }
+    Ok(out)
 }
 
 /// `luna profile` entry point.
@@ -66,6 +128,13 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
             }
         }
     }
+    let budgets: Vec<(String, u64)> = match o.budgets.iter().map(|b| parse_budget(b)).collect() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: --budget {e}");
+            return ExitCode::from(2);
+        }
+    };
     let checkpoints: Vec<(u64, u16)> = match o.input_script.map(parse_input_script) {
         None => Vec::new(),
         Some(Ok(v)) => v,
@@ -173,14 +242,15 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
     let end_frame = frame(&em);
 
     println!(
-        "profile: frames {start_frame}..{end_frame}, {} instructions, {} master cycles, {} symbol(s)",
+        "profile: frames {start_frame}..{end_frame} ({} completed), {} instructions, {} master cycles, {} symbol(s)",
+        report.frames,
         report.instructions,
         report.total_mclk,
         report.entries.len()
     );
     println!(
-        "{:>7}  {:>14}  {:>12}  {:>6}  {:>6}  symbol",
-        "%", "mclk", "instr", "idle%", "pcs"
+        "{:>7}  {:>14}  {:>12}  {:>6}  {:>6}  {:>10}  symbol",
+        "%", "mclk", "instr", "idle%", "pcs", "max/frame"
     );
     for e in report.entries.iter().take(o.top) {
         let idle = if e.mclk == 0 {
@@ -188,9 +258,12 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
         } else {
             e.idle_mclk as f64 * 100.0 / e.mclk as f64
         };
+        let max_frame = e
+            .per_frame
+            .map_or_else(|| "-".to_string(), |p| p.max.to_string());
         println!(
-            "{:>6.2}%  {:>14}  {:>12}  {:>5.1}%  {:>6}  {}",
-            e.pct, e.mclk, e.instructions, idle, e.pcs, e.symbol
+            "{:>6.2}%  {:>14}  {:>12}  {:>5.1}%  {:>6}  {:>10}  {}",
+            e.pct, e.mclk, e.instructions, idle, e.pcs, max_frame, e.symbol
         );
     }
     if report.entries.len() > o.top {
@@ -199,12 +272,36 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
             report.entries.len() - o.top
         );
     }
+    let verdicts = match judge_budgets(&em, &report, &budgets) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut over = false;
+    for v in &verdicts {
+        match (v.max, v.max_frame) {
+            (Some(max), Some(frame)) => println!(
+                "budget: {} max {} mclk (frame {}) {} {} — {}",
+                v.symbol,
+                max,
+                frame,
+                if v.ok { "<=" } else { ">" },
+                v.limit,
+                if v.ok { "ok" } else { "OVER" }
+            ),
+            _ => println!("budget: {} never ran in a completed frame — ok", v.symbol),
+        }
+        over |= !v.ok;
+    }
     if let Some(path) = o.out {
         let json = serde_json::to_string_pretty(&Report {
             rom,
             from_frame: start_frame,
             end_frame,
             profile: report,
+            budgets: verdicts,
         })
         .expect("report serialises");
         let res = if path.as_os_str() == "-" {
@@ -217,6 +314,9 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
             eprintln!("error: writing {}: {e}", path.display());
             return ExitCode::from(1);
         }
+    }
+    if over {
+        return ExitCode::from(1);
     }
     ExitCode::SUCCESS
 }
