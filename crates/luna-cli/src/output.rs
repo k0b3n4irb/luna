@@ -255,17 +255,24 @@ pub(crate) fn save_screenshot(
     path: &std::path::Path,
     force_display: bool,
     bg: Option<u8>,
+    native: bool,
 ) -> Result<(), luna_api::ApiError> {
     // Default path (no --bg, no --force-display) copies the persistent
     // framebuffer; debug paths (`--force-display` or single-BG render)
     // go through the one-shot renderer. All routed through luna-api so
     // the CLI and GUI render the exact same pixels.
-    let png = match bg {
-        Some(n) => {
+    //
+    // `--native-res` writes the captured 512×448 frame, as `state` and
+    // `diff` already did — `run` used to hash natively but save the
+    // averaged view (`OpenSNES` report, 2026-09-17). The single-BG debug
+    // render has no native form, so `--bg` keeps its 256-wide output.
+    let png = match (bg, native) {
+        (Some(n), _) => {
             let idx = (n.saturating_sub(1).min(3)) as usize;
             em.render_frame_bg_png(idx, force_display)?
         }
-        None => em.render_frame_png(force_display)?,
+        (None, true) => em.render_frame_png_native()?,
+        (None, false) => em.render_frame_png(force_display)?,
     };
     std::fs::write(path, png)?;
     Ok(())
