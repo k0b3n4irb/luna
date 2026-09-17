@@ -69,7 +69,7 @@ luna run [OPTIONS] <ROM>
 | `--force-mapper <M>` | auto | Force a mapper (`lorom`/`hirom`/`exhirom`/`sa1`/`superfx`) for a headerless / checksum-invalid ROM. |
 | `--force-region <R>` | header | Force the video standard (`ntsc`/`pal`) — changes the scanline count (262/312) and frame rate. |
 | `--power-on <S>` | `zero` | What RAM holds before the ROM boots: `zero`, `ones`, `random` (seed derived and printed) or `random=<seed>`. See *Power-on memory state* below. |
-| `--native-res` | off | Emit the native **512×448** frame for `--screenshot`/`--print-fbhash`: hi-res modes 5/6 & pseudo-512 keep both horizontal subpixels, interlace keeps both fields as lines. |
+| `--native-res` | off | Emit the native **512×448** frame for `--screenshot` *and* `--print-fbhash` (both, since v1.24.0 — `run`'s screenshot used to stay 256×224 while its hash went native): hi-res modes 5/6 & pseudo-512 keep both horizontal subpixels, interlace keeps both fields as lines. `--bg N` has no native form and stays 256 wide. |
 | `--wdm-out <PATH>` | — | Write captured `WDM $xx` executions (the `SNES_ASSERT` channel) — a non-empty file means an assertion fired. |
 | `--print-fbhash` | off | Print `fbhash=<16-hex>`, a cross-arch-stable key for the displayed frame. |
 
@@ -464,6 +464,17 @@ python3 -c "import struct,sys; d=open('/tmp/pcs.bin','rb').read(); \
 Unmapped or WRAM-resident code is listed as it ran (`$7E:xxxx`, `$80:`
 FastROM mirrors and all): fold the mirrors yourself if your listing is in
 `$00:` terms.
+
+> **Local labels split a routine's row.** An assembler that emits its
+> internal labels (WLA-DX writes `NmiHandler@oam_done`, `@mp5_done`, …)
+> gives each one its own row, because every PC folds onto the *nearest*
+> label at or below it — so `--budget NmiHandler=…` would gate the entry
+> stub alone. Measure the whole routine by handing `--sym` a copy of the
+> symbol file with the child labels stripped; summing the printed rows
+> instead would be wrong twice over (the maximum of a sum is not the sum
+> of maxima, and children below `--top` are not printed).
+> (Found by `OpenSNES`, 2026-09-17: 652 mclk for the stub vs 7258 for the
+> handler.)
 
 ### `luna wram-trace` — cross-emulator state differential
 
