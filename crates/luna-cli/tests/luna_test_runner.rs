@@ -976,3 +976,180 @@ input2 = "14:0"
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+/// Set the PPU registers an `[asserts.ppu]` test reads back: INIDISP,
+/// BGMODE, TM, W12SEL, WH0, BG1SC and M7A (written twice, `$FFFF` = −1,
+/// the field the state JSON prints signed).
+fn ppu_register_rom(path: &Path) {
+    synthetic_rom(
+        path,
+        &[
+            0x78, 0x18, 0xFB, 0xE2, 0x20, // SEI ; CLC ; XCE ; SEP #$20
+            0xA9, 0x0F, 0x8D, 0x00, 0x21, // INIDISP = $0F
+            0xA9, 0x05, 0x8D, 0x05, 0x21, // BGMODE  = $05
+            0xA9, 0x13, 0x8D, 0x2C, 0x21, // TM      = $13
+            0xA9, 0x33, 0x8D, 0x23, 0x21, // W12SEL  = $33
+            0xA9, 0x20, 0x8D, 0x26, 0x21, // WH0     = $20
+            0xA9, 0x40, 0x8D, 0x07, 0x21, // BG1SC   = $40
+            0xA9, 0xFF, 0x8D, 0x1B, 0x21, 0x8D, 0x1B, 0x21, // M7A = $FFFF
+            0x80, 0xFE, // BRA *
+        ],
+    );
+}
+
+/// `[asserts.ppu]` (`OpenSNES` ask, 2026-09-17): the PPU registers by the
+/// names the state JSON prints, with `.` indexing arrays and nested
+/// tables — the handle for an example whose only frame-boundary
+/// observable is a register (an HDMA gradient's `inidisp`, a Mode-7
+/// matrix with no RAM shadow, raw window programming).
+#[test]
+fn manifest_asserts_ppu_registers_by_their_state_json_names() {
+    let dir = fresh_dir("asserts_ppu");
+    ppu_register_rom(&dir.join("game.sfc"));
+    std::fs::write(
+        dir.join("ppu.toml"),
+        r#"
+rom = "game.sfc"
+force_mapper = "lorom"
+frames = 2
+
+[asserts.ppu]
+inidisp = 0x0F
+bgmode = 5
+tm = { eq = 0x13 }
+w12sel = 0x33
+"windows.0" = 0x20                   # WH0, the array the JSON prints
+"windows.1" = 0
+m7a = -1                             # signed: no 16-bit bound clamp here
+"bgs.0.tilemap_addr_words" = 16384    # nested table
+
+[[checkpoint]]
+at_frame = 1
+[checkpoint.ppu]
+bgmode = 5
+"#,
+    )
+    .unwrap();
+    let out = run(&["ppu.toml"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+
+    // A wrong value fails, naming the field and both numbers; a leg's
+    // table is labelled with its checkpoint.
+    std::fs::write(
+        dir.join("ppu_fail.toml"),
+        r#"
+rom = "game.sfc"
+force_mapper = "lorom"
+frames = 2
+
+[asserts.ppu]
+bgmode = 7
+
+[[checkpoint]]
+at_frame = 1
+[checkpoint.ppu]
+"windows.0" = 0x21
+"#,
+    )
+    .unwrap();
+    let out = run(&["ppu_fail.toml"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    assert!(
+        stdout.contains("ppu.bgmode: 0x5 violates `eq 0x7`"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("checkpoint@1 ppu.windows.0: 0x20 violates `eq 0x21`"),
+        "{stdout}"
+    );
+}
+
+/// The `[asserts.ppu]` key errors point at the authority (`luna state`)
+/// instead of guessing: an unknown field, the near-miss a `BGMODE` typo
+/// makes, a container asked for as a scalar, and an out-of-range index.
+#[test]
+fn asserts_ppu_key_errors_name_the_state_json() {
+    let dir = fresh_dir("asserts_ppu_err");
+    ppu_register_rom(&dir.join("game.sfc"));
+    let manifest = |name: &str, body: &str| {
+        std::fs::write(
+            dir.join(name),
+            format!(
+                "rom = \"game.sfc\"\nforce_mapper = \"lorom\"\nframes = 1\n[asserts.ppu]\n{body}\n"
+            ),
+        )
+        .unwrap();
+        let out = run(&[name], &dir);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    assert!(
+        manifest("a.toml", "BGMODE = 5").contains("did you mean `bgmode`?"),
+        "a near-miss should be named"
+    );
+    let unknown = manifest("b.toml", "nosuch = 1");
+    assert!(unknown.contains("has no field `nosuch`"), "{unknown}");
+    assert!(unknown.contains("luna state --out -"), "{unknown}");
+    assert!(
+        manifest("c.toml", "windows = 3").contains("4-element array — index it, e.g. `windows.0`")
+    );
+    assert!(manifest("d.toml", "bgs = 1").contains("index it, e.g. `bgs.0`"));
+    assert!(
+        manifest("e.toml", "\"windows.9\" = 1").contains("index 9 is past the end"),
+        "an index past the end says so"
+    );
+    assert!(
+        manifest("f.toml", "m7a = { ge = 0, width = 2 }").contains("`width` is meaningless here"),
+        "a PPU field carries the width the JSON gives it"
+    );
+}
+
+/// `[asserts.dsp]` names the two per-voice READ-BACK registers, ENVX
+/// (`$x8`) and OUTX (`$x9`) — "is this voice sounding?" (`OpenSNES` ask,
+/// 2026-09-17). The rest of the vocabulary is unchanged.
+#[test]
+fn asserts_dsp_names_the_per_voice_readback_registers() {
+    let dir = fresh_dir("dsp_readback");
+    synthetic_rom(&dir.join("game.sfc"), &[]);
+    std::fs::write(
+        dir.join("dsp.toml"),
+        r#"
+rom = "game.sfc"
+force_mapper = "lorom"
+frames = 2
+
+[asserts.dsp]
+V0_ENVX = 0          # $08 — envelope readback, silent at power-on
+V7_OUTX = 0          # $79 — output readback
+"08" = 0             # the raw index still works, and agrees
+"#,
+    )
+    .unwrap();
+    let out = run(&["dsp.toml"], &dir);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // An unknown per-voice register is still a usage error (exit 2),
+    // and the hint now advertises a readback name.
+    std::fs::write(
+        dir.join("bad.toml"),
+        "rom = \"game.sfc\"\nforce_mapper = \"lorom\"\nframes = 1\n[asserts.dsp]\nV0_NOPE = 0\n",
+    )
+    .unwrap();
+    let out = run(&["bad.toml"], &dir);
+    assert_eq!(out.status.code(), Some(2));
+    // A usage error is a stderr diagnostic, not a test result.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unknown S-DSP register"), "{stderr}");
+    assert!(stderr.contains("V0_ENVX"), "{stderr}");
+}
