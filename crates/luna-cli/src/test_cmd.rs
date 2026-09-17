@@ -34,6 +34,12 @@
 //! [asserts.trace]                # the trace recorded ≥ min events
 //! superfx = { min = 1 }          # dma|dsp|mailbox|sa1|superfx|dsp1|spc
 //!
+//! [asserts.ppu]                  # PPU registers, named as the state JSON
+//! inidisp = 0x0F                 # prints them (`luna state --out -`)
+//! bgmode = { eq = 5 }            # same comparator grammar as values
+//! "windows.0" = 0x20             # `.` indexes arrays and nested tables
+//! "bgs.1.h_scroll" = { le = 64 } # …so every printed field is reachable
+//!
 //! [[checkpoint]]                 # before/after checks along the run (#205)
 //! at_frame = 60
 //! input = "60:0x0100,63:0"       # this leg's presses (absolute frames)
@@ -133,6 +139,10 @@ struct Checkpoint {
     /// Point-in-time value asserts, same grammar as `[asserts.values]`.
     #[serde(default)]
     values: BTreeMap<String, ValueAssert>,
+    /// Point-in-time PPU register asserts, same grammar and vocabulary
+    /// as `[asserts.ppu]` — the registers as of this leg's frame.
+    #[serde(default)]
+    ppu: BTreeMap<String, ValueAssert>,
     /// Directional asserts vs the previous checkpoint (or the run start
     /// for the first one): `increased | decreased | changed | unchanged`.
     #[serde(default)]
@@ -172,6 +182,11 @@ struct Asserts {
     /// comparator grammar (registers are bytes; `width` is ignored).
     #[serde(default)]
     dsp: BTreeMap<String, ValueAssert>,
+    /// PPU register asserts (`OpenSNES` ask, 2026-09-17): the field
+    /// names the state JSON prints under `ppu`, compared with the
+    /// `[asserts.values]` grammar. See [`ppu_field`] for the key form.
+    #[serde(default)]
+    ppu: BTreeMap<String, ValueAssert>,
     /// Non-zero-byte floors per space (issue #212): proof an upload
     /// happened without pinning exact bytes.
     #[serde(default)]
@@ -752,6 +767,7 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
                 Err(e) => failures.push(format!("{label} values.{key}: {e}")),
             }
         }
+        check_ppu(&mut em, &cp.ppu, &format!("{label} "), &mut failures);
         for (key, d) in &cp.delta {
             let prev = delta_prev.get(key).copied();
             match read_value(&mut em, key, d.width()) {
@@ -879,7 +895,7 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
         for (key, assert) in &m.asserts.dsp {
             let Some(idx) = dsp_register_index(key) else {
                 return Err(format!(
-                    "asserts.dsp.{key}: unknown S-DSP register (name like FLG/EDL/V0_VOLL, or a hex index < 80)"
+                    "asserts.dsp.{key}: unknown S-DSP register (name like FLG/EDL/V0_GAIN/V0_ENVX, or a hex index < 80)"
                 ));
             };
             match normalize_assert(assert) {
@@ -897,6 +913,9 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
             }
         }
     }
+    // [asserts.ppu] — the PPU registers, named as the state JSON prints
+    // them (`OpenSNES` ask, 2026-09-17).
+    check_ppu(&mut em, &m.asserts.ppu, "", &mut failures);
     // [asserts.footprint] — non-zero-byte floors per space (issue #212).
     for (space, spec) in &m.asserts.footprint {
         let bytes: Vec<u8> = match space.as_str() {
@@ -1191,6 +1210,144 @@ fn eval_cmp(label: &str, got: i64, cmp: &CmpSpec) -> Option<String> {
         .or_else(|| cmp.lt.and_then(|b| check(got < b, "lt", b)))
 }
 
+/// Evaluate an `[asserts.ppu]` / `[checkpoint.ppu]` table against the
+/// PPU registers exactly as `luna state --out -` prints them under
+/// `ppu`. `prefix` labels the failures (`""` at the end of the run,
+/// `"checkpoint@N "` on a leg). Costs one state snapshot, and only when
+/// the table is non-empty.
+fn check_ppu(
+    em: &mut luna_api::Emulator,
+    asserts: &BTreeMap<String, ValueAssert>,
+    prefix: &str,
+    failures: &mut Vec<String>,
+) {
+    if asserts.is_empty() {
+        return;
+    }
+    let ppu = match serde_json::to_value(em.state().ppu) {
+        Ok(v) => v,
+        Err(e) => {
+            failures.push(format!("{prefix}ppu: could not read the PPU state: {e}"));
+            return;
+        }
+    };
+    for (key, assert) in asserts {
+        let checked = ppu_cmp(assert).and_then(|cmp| Ok((cmp, ppu_field(&ppu, key)?)));
+        match checked {
+            Ok((cmp, got)) => {
+                if let Some(msg) = eval_cmp(&format!("{prefix}ppu.{key}"), got, &cmp) {
+                    failures.push(msg);
+                }
+            }
+            Err(e) => failures.push(format!("{prefix}ppu.{key}: {e}")),
+        }
+    }
+}
+
+/// The comparator table of an `[asserts.ppu]` entry. Unlike
+/// [`normalize_assert`] there is no 16-bit bound check and no `width`:
+/// the value comes from the state JSON, not from memory, and the fields
+/// there are signed (`m7a` is an `i16`), 24-bit (`mpy`) or counts up to
+/// 65 536 (`vram_non_zero`).
+fn ppu_cmp(assert: &ValueAssert) -> Result<CmpSpec, String> {
+    let cmp = match assert {
+        ValueAssert::Exact(v) => CmpSpec {
+            eq: Some(*v),
+            ..CmpSpec::default()
+        },
+        ValueAssert::Cmp(c) => CmpSpec {
+            eq: c.eq,
+            ne: c.ne,
+            ge: c.ge,
+            gt: c.gt,
+            le: c.le,
+            lt: c.lt,
+            width: c.width,
+        },
+    };
+    if cmp.width.is_some() {
+        return Err(
+            "`width` is meaningless here — a PPU field has the width the state JSON gives it"
+                .into(),
+        );
+    }
+    if [cmp.eq, cmp.ne, cmp.ge, cmp.gt, cmp.le, cmp.lt]
+        .iter()
+        .all(Option::is_none)
+    {
+        return Err("comparator table needs at least one of eq/ne/ge/gt/le/lt".into());
+    }
+    Ok(cmp)
+}
+
+/// Resolve an `[asserts.ppu]` key against the `ppu` object of the state
+/// JSON — the same text `luna state --out -` prints, so the vocabulary
+/// can never drift from what the runner observes.
+///
+/// A key is a field name (`bgmode`, `setini`, `m7a`), with `.` stepping
+/// into arrays and nested tables: `windows.0` (WH0), `bgs.1.h_scroll`,
+/// `cgram.16`. Booleans read as 0 / 1.
+fn ppu_field(ppu: &serde_json::Value, key: &str) -> Result<i64, String> {
+    let mut cur = ppu;
+    // The path walked so far, for error messages ("`ppu.bgs.1` …").
+    let mut at = String::from("ppu");
+    for seg in key.split('.') {
+        let next = match cur {
+            serde_json::Value::Object(map) => map.get(seg).ok_or_else(|| {
+                // Name the authority rather than inlining 45 field names,
+                // as the `[asserts.dsp]` error does — plus the near-miss,
+                // which catches the usual `BGMODE` for `bgmode`.
+                let hint = map
+                    .keys()
+                    .find(|n| n.eq_ignore_ascii_case(seg))
+                    .map_or_else(String::new, |n| format!(" (did you mean `{n}`?)"));
+                format!(
+                    "`{at}` has no field `{seg}`{hint} — name a field of the `ppu` \
+                     object that `luna state --out -` prints (bgmode, inidisp, \
+                     setini, windows.0, bgs.0.h_scroll, …)"
+                )
+            })?,
+            serde_json::Value::Array(items) => {
+                let i: usize = seg.parse().map_err(|_| {
+                    format!(
+                        "`{at}` is a {}-element array — index it with a number, not `{seg}`",
+                        items.len()
+                    )
+                })?;
+                items.get(i).ok_or_else(|| {
+                    format!(
+                        "`{at}` has {} element(s); index {i} is past the end",
+                        items.len()
+                    )
+                })?
+            }
+            _ => {
+                return Err(format!(
+                    "`{at}` is a single value — `{seg}` cannot be read from it"
+                ));
+            }
+        };
+        at.push('.');
+        at.push_str(seg);
+        cur = next;
+    }
+    match cur {
+        serde_json::Value::Bool(b) => Ok(i64::from(*b)),
+        serde_json::Value::Number(n) => n
+            .as_i64()
+            .ok_or_else(|| format!("`{at}` is not an integer")),
+        serde_json::Value::Array(items) => Err(format!(
+            "`{at}` is a {}-element array — index it, e.g. `{key}.0`",
+            items.len()
+        )),
+        serde_json::Value::Object(map) => Err(format!(
+            "`{at}` is a table — name a field, e.g. `{key}.{}`",
+            map.keys().next().map_or("field", String::as_str)
+        )),
+        _ => Err(format!("`{at}` is not a number")),
+    }
+}
+
 /// Normalise a [`ValueAssert`] to its comparator table and validate the
 /// bounds; returns the effective read width too.
 fn normalize_assert(assert: &ValueAssert) -> Result<(CmpSpec, u8), String> {
@@ -1265,7 +1422,7 @@ fn dsp_register_index(name: &str) -> Option<u8> {
     {
         return Some((i << 4) | 0x0F);
     }
-    // Per-voice: V<n>_<VOLL|VOLR|PITCHL|PITCHH|SRCN|ADSR1|ADSR2|GAIN>.
+    // Per-voice: V<n>_<VOLL|VOLR|PITCHL|PITCHH|SRCN|ADSR1|ADSR2|GAIN|ENVX|OUTX>.
     if let Some(rest) = upper.strip_prefix('V')
         && let Some((v, reg)) = rest.split_once('_')
         && let Ok(v) = v.parse::<u8>()
@@ -1280,6 +1437,12 @@ fn dsp_register_index(name: &str) -> Option<u8> {
             "ADSR1" => 0x5,
             "ADSR2" => 0x6,
             "GAIN" => 0x7,
+            // The two per-voice READ-BACK registers — "is this voice
+            // actually sounding?" (`OpenSNES` ask, 2026-09-17). ares
+            // `dsp/voice.cpp`, Mesen2 `SnesDsp`: ENVX is the envelope's
+            // top 7 bits, OUTX the voice's last output >> 8.
+            "ENVX" => 0x8,
+            "OUTX" => 0x9,
             _ => return None,
         };
         return Some((v << 4) | lo);
