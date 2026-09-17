@@ -48,6 +48,11 @@ r_score = { ge = 0x1000 }      # …and tables give ge/gt/le/lt/ne thresholds
 
 [asserts.trace]                # coprocessor liveness
 superfx = { min = 1 }
+
+[asserts.ppu]                  # PPU registers, named as `luna state` prints them
+inidisp = 0x0F                 # the screen is on at full brightness
+bgmode = 5                     # …and the mode the example claims to demo
+"windows.0" = 0x20             # `.` indexes arrays and nested tables
 ```
 
 What each assert means:
@@ -151,9 +156,40 @@ with checkpoints alone, the last one ends the run). The final
   players = 2
   ```
 - **`[asserts.dsp]`** — the S-DSP register file, by name (`FLG`, `EDL`,
-  `KON`, `MVOL_L`, `V0_VOLL`…`V7_GAIN`, `FIR0`…`FIR7`) or raw hex index
-  (`"7D"`), with the `[asserts.values]` comparator grammar (registers
-  are bytes).
+  `KON`, `MVOL_L`, `V0_VOLL`…`V7_GAIN`, the per-voice read-backs
+  `V0_ENVX`…`V7_ENVX` / `V0_OUTX`…`V7_OUTX`, `FIR0`…`FIR7`) or raw hex
+  index (`"7D"`), with the `[asserts.values]` comparator grammar
+  (registers are bytes). ENVX is the voice's envelope, OUTX its last
+  output — the pair that answers "is this voice actually sounding?".
+- **`[asserts.ppu]`** — the PPU registers, keyed by the field names
+  `luna state --out -` prints under `ppu`: `inidisp`, `bgmode`, `tm`,
+  `ts`, `tmw`, `tsw`, `w12sel`, `w34sel`, `wobjsel`, `wbglog`, `cgwsel`,
+  `cgadsub`, `coldata_r/g/b`, `mosaic`, `setini`, `obsel`, `m7sel`,
+  `m7a`…`m7d`, `m7x`, `m7y`, and the counts. A `.` steps into the arrays
+  and tables the same JSON prints — `windows.0` is WH0,
+  `bgs.1.h_scroll` BG2's scroll, `cgram.16` palette 1's colour 0. The
+  vocabulary **is** the state JSON, so it cannot drift from what the
+  runner can observe; values are compared with the `[asserts.values]`
+  grammar and may be signed (`m7a = -256`).
+
+  This is the handle for an example whose only frame-boundary
+  observable is a register: an HDMA gradient that rewrites the backdrop
+  and INIDISP per scanline, a Mode-7 matrix written straight to the
+  registers with no RAM shadow, or windows programmed as raw `$2123`
+  writes — where asserting the library's shadow would assert your own
+  bookkeeping rather than the PPU.
+
+  ```toml
+  # "the gradient really is running with the screen on"
+  [asserts.ppu]
+  inidisp = 0x0F
+  "bgs.0.tilemap_addr_words" = 16384
+
+  [[checkpoint]]               # per-leg too
+  at_frame = 120
+  [checkpoint.ppu]
+  m7a = -256
+  ```
 - **`[asserts.footprint]`** — `vram = { nonzero_min = 5000 }`: at least
   N non-zero bytes in `wram`/`vram`/`cgram`/`oam`/`aram` — proof an
   upload happened without pinning exact bytes.

@@ -170,7 +170,7 @@ pub(crate) fn run(
 
     // Screenshot dump: render whatever the PPU has accumulated.
     if let Some(out_path) = screenshot {
-        match save_screenshot(&em, out_path, force_display, bg) {
+        match save_screenshot(&em, out_path, force_display, bg, native_res) {
             Ok(()) => println!("\nScreenshot written to {}", out_path.display()),
             Err(e) => {
                 eprintln!("\nerror: could not write screenshot: {e}");

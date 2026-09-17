@@ -4,6 +4,40 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+Three asks from the OpenSNES report of 2026-09-17, written while their
+example corpus went from 35 to 84 of 85 examples covered by `luna test`.
+
+### Added
+- **`[asserts.ppu]` in `luna test` manifests** — assert the PPU
+  registers, keyed by the field names `luna state --out -` already
+  prints under `ppu` (`inidisp`, `bgmode`, `tm`, `setini`, `m7a`, …),
+  with the `[asserts.values]` comparator grammar and per-`[[checkpoint]]`
+  tables too. A `.` steps into the arrays and tables the same JSON
+  prints: `windows.0` is WH0, `bgs.1.h_scroll` BG2's scroll, `cgram.16`
+  palette 1's colour 0. The vocabulary *is* the state JSON, so it cannot
+  drift from what the runner observes, and values may be signed
+  (`m7a = -256`). This is the only handle for an example whose sole
+  frame-boundary observable is a register — an HDMA gradient rewriting
+  INIDISP per scanline, a Mode-7 matrix with no RAM shadow, windows
+  programmed as raw `$2123` writes — where the alternative was asserting
+  a library shadow (your own bookkeeping, not the PPU) or a whole-frame
+  `fbhash`.
+- **`[asserts.dsp]` names the per-voice read-back registers**:
+  `V0_ENVX`…`V7_ENVX` (`$x8`) and `V0_OUTX`…`V7_OUTX` (`$x9`) — the pair
+  a test reaches for to ask "is this voice actually sounding?". The name
+  table covered the configuration registers only; the raw hex index
+  (`"08"`) still works and agrees.
+
+### Fixed
+- **`luna run --native-res` now writes the native frame it hashes.**
+  `--print-fbhash` honoured the flag but `--screenshot` did not, so a
+  human diffing the saved PNG saw the averaged 256×224 view of a frame
+  the harness gated on at 512×448. `luna state` and `luna diff` were
+  already consistent. `--bg N` is a single-layer debug render with no
+  native form and stays 256 wide.
+
 ## [1.23.0] — 2026-09-14
 
 The last rows of the 2026-09-11 audit: the SA-1's register, memory and
