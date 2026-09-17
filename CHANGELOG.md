@@ -4,7 +4,7 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.24.0] — 2026-09-17
 
 Three asks from the OpenSNES report of 2026-09-17, written while their
 example corpus went from 35 to 84 of 85 examples covered by `luna test`.
