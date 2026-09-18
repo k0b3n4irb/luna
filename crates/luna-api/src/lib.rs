@@ -62,8 +62,8 @@ pub enum ApiError {
     /// Cartridge parsing or layout detection failed.
     #[error("cartridge: {0}")]
     Cart(#[from] CartError),
-    /// Cartridge needs a coprocessor luna does not yet emulate
-    /// (S-DD1, SPC7110) — reachable via a forced mapper.
+    /// Cartridge needs a coprocessor luna does not yet emulate (Cx4,
+    /// OBC1, DSP-2/3/4, SPC7110, …) — the error names the chip.
     #[error("{0}")]
     UnsupportedMapper(#[from] luna_core::UnsupportedMapper),
     /// `step` / etc. panicked inside the core.
