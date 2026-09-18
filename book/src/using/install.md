@@ -72,3 +72,18 @@ prompt installs the file into that firmware folder once, for every later run.
 
 The ROM is copyrighted and is not distributed with Luna — dump it from your own
 cartridge.
+
+## Unsupported coprocessors
+
+Luna emulates **SA-1, Super FX, DSP-1 and S-DD1**. A game that needs any
+other chip — DSP-2/3/4, Cx4 (Mega Man X2/X3), OBC1, S-RTC, ST-010/011,
+ST-018, SPC7110, Super Game Boy — is refused at load with an error naming
+the chip, rather than booting and hanging:
+
+```text
+$ luna run "Mega Man X2 (USA).sfc"
+error: cartridge requires the Cx4 coprocessor, which luna does not emulate yet …
+```
+
+`--force-mapper lorom` (or `hirom`) loads the ROM anyway, without the chip —
+useful for poking at its header or code, not for playing it.

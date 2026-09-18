@@ -1,13 +1,10 @@
 //! SNES cartridge coprocessors.
 //!
-//! Each chip is gated behind a Cargo feature so a minimal build can target a
-//! specific game without pulling in unused coprocessors.
-//!
-//! V1 priorities: SA-1 (Super Mario RPG), Super FX (Star Fox), DSP-1
-//! (Super Mario Kart). V2: DSP-2/3/4, Cx4, S-DD1. V3: SPC7110, OBC1,
-//! ST010+.
-//!
-//! See `ARCHITECTURE.md` §6.5.
+//! The chip-side state of the coprocessors whose bus-side shim lives in
+//! `luna-bus` (`Sa1Mapper`, `Dsp1Mapper`). Emulated today: SA-1, Super FX,
+//! DSP-1, S-DD1. Not yet: DSP-2/3/4, Cx4, OBC1, S-RTC, ST-01x, SPC7110 —
+//! the cartridge parser names those (`luna_cartridge::UnsupportedChip`) and
+//! `Snes::try_from_cartridge` refuses them instead of booting them bare.
 
 pub mod dsp1;
 pub mod sa1;

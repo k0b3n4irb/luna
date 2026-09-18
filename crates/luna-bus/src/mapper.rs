@@ -35,9 +35,9 @@ impl MapperKind {
     /// [`MapperKind`]. This is the canonical name table; front-ends must
     /// not re-implement it. Returns `None` for an unknown token.
     ///
-    /// `sdd1` / `spc7110` parse successfully even though the core cannot
-    /// build them yet — that surfaces as a clean "unsupported mapper"
-    /// error at load time rather than "unknown --force-mapper".
+    /// `spc7110` parses successfully even though the core cannot build it
+    /// yet — that surfaces as a clean "unsupported mapper" error at load
+    /// time rather than "unknown --force-mapper".
     #[must_use]
     pub fn from_cli_str(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {

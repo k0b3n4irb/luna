@@ -740,19 +740,26 @@ pub const VBLANK_START_LINE: u16 = 225;
 /// hardware line.
 pub const OVERSCAN_VBLANK_START_LINE: u16 = 240;
 
-/// The cartridge's mapper needs a coprocessor luna does not yet
-/// emulate (S-DD1, SPC7110). Returned by [`Snes::try_from_cartridge`]
-/// so callers can surface a clean error instead of catching a panic.
+/// The cartridge needs a coprocessor luna does not yet emulate.
+/// Returned by [`Snes::try_from_cartridge`] so callers can surface a
+/// clean, named error instead of a game that boots and then hangs.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnsupportedMapper(pub MapperKind);
+pub enum UnsupportedMapper {
+    /// A known mapper kind with no implementation yet (SPC7110).
+    Mapper(MapperKind),
+    /// A coprocessor identified from the header (Cx4, OBC1, DSP-2/3/4, …).
+    Chip(luna_cartridge::UnsupportedChip),
+}
 
 impl std::fmt::Display for UnsupportedMapper {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "cartridge requires coprocessor support not yet implemented: {:?} \
-             (S-DD1 / SPC7110 land in their own dedicated phases)",
-            self.0
+        match self {
+            Self::Mapper(kind) => write!(f, "cartridge requires the {kind:?} mapper")?,
+            Self::Chip(chip) => write!(f, "cartridge requires the {chip} coprocessor")?,
+        }
+        f.write_str(
+            ", which luna does not emulate yet (supported: SA-1, Super FX, DSP-1, \
+             S-DD1). Forcing a bare mapper loads it anyway, without the chip.",
         )
     }
 }
@@ -763,8 +770,9 @@ impl Snes {
     /// Build a new machine from a parsed cartridge.
     ///
     /// Returns [`UnsupportedMapper`] if the cartridge needs a coprocessor
-    /// luna does not yet emulate (S-DD1, SPC7110). All currently supported
-    /// mappers (`LoROM` / `HiROM` / `ExHiROM` / SA-1 / Super FX) succeed.
+    /// luna does not yet emulate (SPC7110, or a header-identified chip such
+    /// as Cx4 / OBC1 / DSP-2). All supported mappers (`LoROM` / `HiROM` /
+    /// `ExHiROM` / SA-1 / Super FX / DSP-1 / S-DD1) succeed.
     pub fn try_from_cartridge(cart: Cartridge) -> Result<Self, UnsupportedMapper> {
         Self::try_from_cartridge_with(cart, PowerOnState::Zero)
     }
@@ -853,6 +861,9 @@ impl Snes {
     }
 
     fn build(cart: Cartridge) -> Result<Self, UnsupportedMapper> {
+        if let Some(chip) = cart.header.unsupported_chip {
+            return Err(UnsupportedMapper::Chip(chip));
+        }
         let sram_bytes = (cart.header.sram_size_kb as usize) * 1024;
         let region = cart.header.region;
         let mapper: Box<dyn Mapper + Send> = match cart.header.mapper_kind {
@@ -900,7 +911,7 @@ impl Snes {
             // S-DD1 — graphics decompression chip (Star Ocean, SF Alpha 2);
             // LoROM-based MMC, the whole chip in `Sdd1Mapper`.
             MapperKind::Sdd1 => Box::new(Sdd1Mapper::new(cart.rom, sram_bytes)),
-            other => return Err(UnsupportedMapper(other)),
+            other => return Err(UnsupportedMapper::Mapper(other)),
         };
 
         let mut ppu = Ppu::new();

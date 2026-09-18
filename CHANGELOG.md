@@ -4,6 +4,35 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+Follow-ups to the 2026-09-18 full project review.
+
+### Fixed
+- **Games that need an unemulated coprocessor are refused by name** instead
+  of booting on a bare LoROM/HiROM board and hanging without a diagnostic.
+  The header now identifies OBC1, S-RTC, Super Game Boy, ST-010/011,
+  ST-018, Cx4 and SPC7110 (ares `board()`: chipset `$FFD6` + sub-type
+  `$FFBF`), and tells the NEC DSP revisions apart by title as ares
+  `firmwareNEC()` does — **DSP-2/3/4 games were previously misdetected as
+  DSP-1** and handed `dsp1b.rom`. The error names the chip;
+  `--force-mapper lorom|hirom` still loads the ROM without it.
+- **The homebrew-CI recipe and the install page download assets that
+  exist.** Releases now also publish an unversioned
+  `luna-<os>-<arch>.tar.gz|zip` alias of every archive, so
+  `releases/latest/download/…` is a stable URL (the recipe pointed at a
+  name no release ever produced).
+- The install page named the wrong DSP-1 firmware folder
+  (`~/.config/luna/firmware/`, not `~/.config/luna/`); README and the book
+  no longer promise a "spectator" mode that was never built.
+
+### CI
+- The test-ROM corpus cache is actually saved (an absolute path —
+  `actions/cache` rejects `../`), the corpus is pinned to an upstream
+  commit, and `LUNA_SNES_TEST_REQUIRE=1` makes a missing golden ROM a
+  failure instead of a silent skip (`LUNA_GAME_TEST_REQUIRE=1` for the
+  local commercial-ROM goldens).
+
 ## [1.24.0] — 2026-09-17
 
 Three asks from the OpenSNES report of 2026-09-17, written while their
