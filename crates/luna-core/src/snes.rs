@@ -1208,73 +1208,17 @@ impl Snes {
 
         // 1. CPU: re-read the reset vector through the bus. VRAM / WRAM /
         //    SRAM persist across a reset (real hardware doesn't clear them).
-        let scanlines = self.region_scanlines();
         let ppu_line_snapshot = self.ppu_line;
         let cpu_pc_snapshot = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
         {
-            let Self {
-                cpu,
-                ppu,
-                dma,
-                cpu_regs,
-                apu_real,
-                apu_stub_fallback,
-                apu_panicked,
-                wram,
-                mapper,
-                fast_rom,
-                nmi_pending,
-                irq_pending,
-                total_mclk,
-                wm_addr,
-                joypad_strobe,
-                joypad1_shift,
-                joypad2_shift,
-                mdr,
-                irq_wrap_trig,
-                mclk_acc,
-                mailbox_log,
-                sa1_log,
-                mem_trace_log,
-                breakpoints,
-                nocash_log,
-                ..
-            } = self;
-            let mut bus = SnesBus {
-                wram,
-                mapper: mapper.as_mut(),
-                ppu,
-                dma,
-                cpu_regs,
-                apu_real,
-                apu_stub_fallback,
-                apu_panicked,
-                fast_rom,
-                nmi: nmi_pending,
-                irq: irq_pending,
-                mclk_total: total_mclk,
-                scanlines_per_frame: scanlines,
-                scpu_mar: 0,
-                clock_count: 8,
+            let (cpu, mut bus) = self.cpu_and_bus(BusCursor {
                 ppu_line: ppu_line_snapshot,
                 mcycles_in_line: 0,
                 frame_count: 0,
                 nmis_serviced: 0,
                 sched_enabled: false,
                 cpu_pc_full: cpu_pc_snapshot,
-                mailbox_log,
-                sa1_log,
-                mem_trace_log,
-                breakpoints,
-                nocash_log,
-                wm_addr,
-                joypad_strobe,
-                joypad1_shift,
-                joypad2_shift,
-                mdr,
-                irq_wrap_trig,
-                mclk: mclk_acc,
-            };
+            });
             cpu.reset(&mut bus);
         }
 
@@ -1370,7 +1314,6 @@ impl Snes {
                 e: self.cpu.e,
             });
         }
-        let scanlines = self.region_scanlines();
         let ppu_line_snapshot = self.ppu_line;
         let cpu_pc_snapshot = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
         // Who this step's own clocks belong to (issue #223). A parked `WAI`
@@ -1392,72 +1335,14 @@ impl Snes {
         }
         let (rb_line, rb_mil, rb_fc, rb_ns);
         {
-            let Self {
-                cpu,
-                ppu,
-                dma,
-                cpu_regs,
-                apu_real,
-                apu_stub_fallback,
-                apu_panicked,
-                wram,
-                mapper,
-                fast_rom,
-                nmi_pending,
-                irq_pending,
-                total_mclk,
-                wm_addr,
-                joypad_strobe,
-                joypad1_shift,
-                joypad2_shift,
-                mdr,
-                irq_wrap_trig,
-                mclk_acc,
-                mailbox_log,
-                sa1_log,
-                mem_trace_log,
-                breakpoints,
-                nocash_log,
-                mcycles_in_line,
-                frame_count,
-                nmis_serviced,
-                ..
-            } = self;
-            let mut bus = SnesBus {
-                wram,
-                mapper: mapper.as_mut(),
-                ppu,
-                dma,
-                cpu_regs,
-                apu_real,
-                apu_stub_fallback,
-                apu_panicked,
-                fast_rom,
-                nmi: nmi_pending,
-                irq: irq_pending,
-                mclk_total: total_mclk,
-                scanlines_per_frame: scanlines,
-                scpu_mar: 0,
-                clock_count: 8,
+            let (cpu, mut bus) = self.cpu_and_bus(BusCursor {
                 ppu_line: ppu_line_snapshot,
-                mcycles_in_line: *mcycles_in_line,
-                frame_count: *frame_count,
-                nmis_serviced: *nmis_serviced,
+                mcycles_in_line: self.mcycles_in_line,
+                frame_count: self.frame_count,
+                nmis_serviced: self.nmis_serviced,
                 sched_enabled: true,
                 cpu_pc_full: cpu_pc_snapshot,
-                mailbox_log,
-                sa1_log,
-                mem_trace_log,
-                breakpoints,
-                nocash_log,
-                wm_addr,
-                joypad_strobe,
-                joypad1_shift,
-                joypad2_shift,
-                mdr,
-                irq_wrap_trig,
-                mclk: mclk_acc,
-            };
+            });
             // The scanline scheduler now advances per bus access inside
             // `bus.io_cycle` (per-scanline rendering: each line is drawn
             // with the register state live at that point, not the end-of-
@@ -1547,78 +1432,20 @@ impl Snes {
     /// how [`Self::reset`] charges the CPU's reset sequence
     /// (`RESET_SEQUENCE_MCLK`). Without it, only the PPU line cursor moves.
     fn advance_no_instruction(&mut self, mcycles: u32, charge_time: bool) {
-        let scanlines = self.region_scanlines();
         // The reset sequence is the CPU's own time (issue #223).
         self.mclk_acc.current = MclkKind::CpuActive;
         let ppu_line_snapshot = self.ppu_line;
         let cpu_pc_snapshot = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
         let (rb_line, rb_mil, rb_fc, rb_ns);
         {
-            let Self {
-                ppu,
-                dma,
-                cpu_regs,
-                apu_real,
-                apu_stub_fallback,
-                apu_panicked,
-                wram,
-                mapper,
-                fast_rom,
-                nmi_pending,
-                irq_pending,
-                total_mclk,
-                wm_addr,
-                joypad_strobe,
-                joypad1_shift,
-                joypad2_shift,
-                mdr,
-                irq_wrap_trig,
-                mclk_acc,
-                mailbox_log,
-                sa1_log,
-                mem_trace_log,
-                breakpoints,
-                nocash_log,
-                mcycles_in_line,
-                frame_count,
-                nmis_serviced,
-                ..
-            } = self;
-            let mut bus = SnesBus {
-                wram,
-                mapper: mapper.as_mut(),
-                ppu,
-                dma,
-                cpu_regs,
-                apu_real,
-                apu_stub_fallback,
-                apu_panicked,
-                fast_rom,
-                nmi: nmi_pending,
-                irq: irq_pending,
-                mclk_total: total_mclk,
-                scanlines_per_frame: scanlines,
-                scpu_mar: 0,
-                clock_count: 8,
+            let (_, mut bus) = self.cpu_and_bus(BusCursor {
                 ppu_line: ppu_line_snapshot,
-                mcycles_in_line: *mcycles_in_line,
-                frame_count: *frame_count,
-                nmis_serviced: *nmis_serviced,
+                mcycles_in_line: self.mcycles_in_line,
+                frame_count: self.frame_count,
+                nmis_serviced: self.nmis_serviced,
                 sched_enabled: true,
                 cpu_pc_full: cpu_pc_snapshot,
-                mailbox_log,
-                sa1_log,
-                mem_trace_log,
-                breakpoints,
-                nocash_log,
-                wm_addr,
-                joypad_strobe,
-                joypad1_shift,
-                joypad2_shift,
-                mdr,
-                irq_wrap_trig,
-                mclk: mclk_acc,
-            };
+            });
             if charge_time {
                 bus.io_cycle(MCycles::from(mcycles));
             } else {
@@ -1664,75 +1491,20 @@ impl Snes {
     pub fn peek_pc_bytes(&mut self, count: usize) -> Vec<u8> {
         let pc = self.cpu.pc;
         let pb = self.cpu.pb;
-        let scanlines = self.region_scanlines();
         let ppu_line_snapshot = self.ppu_line;
         // H/V now come from the incremental counters, so a debug bus must be
         // handed the live line cursor — otherwise every peek would look like
         // it happened at H=0 (i.e. permanently in H-blank).
         let mcycles_in_line_snapshot = self.mcycles_in_line;
         let cpu_pc_snapshot = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
-        let Self {
-            ppu,
-            dma,
-            cpu_regs,
-            apu_real,
-            apu_stub_fallback,
-            apu_panicked,
-            wram,
-            mapper,
-            fast_rom,
-            nmi_pending,
-            irq_pending,
-            total_mclk,
-            wm_addr,
-            joypad_strobe,
-            joypad1_shift,
-            joypad2_shift,
-            mdr,
-            irq_wrap_trig,
-            mclk_acc,
-            mailbox_log,
-            sa1_log,
-            mem_trace_log,
-            breakpoints,
-            nocash_log,
-            ..
-        } = self;
-        let mut bus = SnesBus {
-            wram,
-            mapper: mapper.as_mut(),
-            ppu,
-            dma,
-            cpu_regs,
-            apu_real,
-            apu_stub_fallback,
-            apu_panicked,
-            fast_rom,
-            nmi: nmi_pending,
-            irq: irq_pending,
-            mclk_total: total_mclk,
-            scanlines_per_frame: scanlines,
-            scpu_mar: 0,
-            clock_count: 8,
+        let (_, mut bus) = self.cpu_and_bus(BusCursor {
             ppu_line: ppu_line_snapshot,
             mcycles_in_line: mcycles_in_line_snapshot,
             frame_count: 0,
             nmis_serviced: 0,
             sched_enabled: false,
             cpu_pc_full: cpu_pc_snapshot,
-            mailbox_log,
-            sa1_log,
-            mem_trace_log,
-            breakpoints,
-            nocash_log,
-            wm_addr,
-            joypad_strobe,
-            joypad1_shift,
-            joypad2_shift,
-            mdr,
-            irq_wrap_trig,
-            mclk: mclk_acc,
-        };
+        });
         (0..count)
             .map(|i| {
                 let off = pc.wrapping_add(i as u16);
@@ -2070,6 +1842,91 @@ impl SnesBus<'_> {
         } else {
             None
         }
+    }
+}
+
+/// The per-borrow cursor a [`SnesBus`] starts from; everything else in it
+/// is a split borrow of the [`Snes`] (see [`Snes::cpu_and_bus`]).
+#[derive(Clone, Copy)]
+struct BusCursor {
+    ppu_line: u16,
+    mcycles_in_line: u32,
+    frame_count: u64,
+    nmis_serviced: u64,
+    sched_enabled: bool,
+    cpu_pc_full: u32,
+}
+
+impl Snes {
+    /// Split the machine into its CPU and a bus over everything else — the
+    /// one place a production [`SnesBus`] is assembled (it used to be
+    /// written out field by field at every call site, ~65 lines each).
+    fn cpu_and_bus(&mut self, cursor: BusCursor) -> (&mut Cpu, SnesBus<'_>) {
+        let scanlines = self.region_scanlines();
+        let Self {
+            cpu,
+            ppu,
+            dma,
+            cpu_regs,
+            apu_real,
+            apu_stub_fallback,
+            apu_panicked,
+            wram,
+            mapper,
+            fast_rom,
+            nmi_pending,
+            irq_pending,
+            total_mclk,
+            wm_addr,
+            joypad_strobe,
+            joypad1_shift,
+            joypad2_shift,
+            mdr,
+            irq_wrap_trig,
+            mclk_acc,
+            mailbox_log,
+            sa1_log,
+            mem_trace_log,
+            breakpoints,
+            nocash_log,
+            ..
+        } = self;
+        let bus = SnesBus {
+            wram,
+            mapper: mapper.as_mut(),
+            ppu,
+            dma,
+            cpu_regs,
+            apu_real,
+            apu_stub_fallback,
+            apu_panicked,
+            fast_rom,
+            nmi: nmi_pending,
+            irq: irq_pending,
+            mclk_total: total_mclk,
+            scanlines_per_frame: scanlines,
+            scpu_mar: 0,
+            clock_count: 8,
+            ppu_line: cursor.ppu_line,
+            mcycles_in_line: cursor.mcycles_in_line,
+            frame_count: cursor.frame_count,
+            nmis_serviced: cursor.nmis_serviced,
+            sched_enabled: cursor.sched_enabled,
+            cpu_pc_full: cursor.cpu_pc_full,
+            mailbox_log,
+            sa1_log,
+            mem_trace_log,
+            breakpoints,
+            nocash_log,
+            wm_addr,
+            joypad_strobe,
+            joypad1_shift,
+            joypad2_shift,
+            mdr,
+            irq_wrap_trig,
+            mclk: mclk_acc,
+        };
+        (cpu, bus)
     }
 }
 
@@ -3927,71 +3784,16 @@ mod tests {
         // in WRAM[0x100] and be visible from bank 0x7E offset 0x100.
         let cart = demo_lorom();
         let mut snes = Snes::from_cartridge(cart);
-        let scanlines = snes.region_scanlines();
         let ppu_line_snapshot = snes.ppu_line;
         let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
-        let Snes {
-            ppu,
-            dma,
-            cpu_regs,
-            apu_real,
-            apu_stub_fallback,
-            apu_panicked,
-            wram,
-            mapper,
-            fast_rom,
-            nmi_pending,
-            irq_pending,
-            total_mclk,
-            wm_addr,
-            joypad_strobe,
-            joypad1_shift,
-            joypad2_shift,
-            mdr,
-            irq_wrap_trig,
-            mclk_acc,
-            mailbox_log,
-            sa1_log,
-            mem_trace_log,
-            breakpoints,
-            nocash_log,
-            ..
-        } = &mut snes;
-        let mut bus = SnesBus {
-            wram,
-            mapper: mapper.as_mut(),
-            ppu,
-            dma,
-            cpu_regs,
-            apu_real,
-            apu_stub_fallback,
-            apu_panicked,
-            fast_rom,
-            nmi: nmi_pending,
-            irq: irq_pending,
-            mclk_total: total_mclk,
-            scanlines_per_frame: scanlines,
-            scpu_mar: 0,
-            clock_count: 8,
+        let (_, mut bus) = snes.cpu_and_bus(BusCursor {
             ppu_line: ppu_line_snapshot,
             mcycles_in_line: 0,
             frame_count: 0,
             nmis_serviced: 0,
             sched_enabled: false,
             cpu_pc_full: cpu_pc_snapshot,
-            mailbox_log,
-            sa1_log,
-            mem_trace_log,
-            breakpoints,
-            nocash_log,
-            wm_addr,
-            joypad_strobe,
-            joypad1_shift,
-            joypad2_shift,
-            mdr,
-            irq_wrap_trig,
-            mclk: mclk_acc,
-        };
+        });
         bus.write(make_addr(0x00, 0x0100), 0xAA);
         // Read back from the mirror in $00:
         assert_eq!(bus.read(make_addr(0x00, 0x0100)), 0xAA);
@@ -4007,72 +3809,17 @@ mod tests {
         // line is high.
         let cart = demo_lorom();
         let mut snes = Snes::from_cartridge(cart);
-        let scanlines = snes.region_scanlines();
         let ppu_line_snapshot = snes.ppu_line;
         let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
         assert_eq!(snes.cpu_regs.wrio, 0xFF, "WRIO powers up high");
-        let Snes {
-            ppu,
-            dma,
-            cpu_regs,
-            apu_real,
-            apu_stub_fallback,
-            apu_panicked,
-            wram,
-            mapper,
-            fast_rom,
-            nmi_pending,
-            irq_pending,
-            total_mclk,
-            wm_addr,
-            joypad_strobe,
-            joypad1_shift,
-            joypad2_shift,
-            mdr,
-            irq_wrap_trig,
-            mclk_acc,
-            mailbox_log,
-            sa1_log,
-            mem_trace_log,
-            breakpoints,
-            nocash_log,
-            ..
-        } = &mut snes;
-        let mut bus = SnesBus {
-            wram,
-            mapper: mapper.as_mut(),
-            ppu,
-            dma,
-            cpu_regs,
-            apu_real,
-            apu_stub_fallback,
-            apu_panicked,
-            fast_rom,
-            nmi: nmi_pending,
-            irq: irq_pending,
-            mclk_total: total_mclk,
-            scanlines_per_frame: scanlines,
-            scpu_mar: 0,
-            clock_count: 8,
+        let (_, mut bus) = snes.cpu_and_bus(BusCursor {
             ppu_line: ppu_line_snapshot,
             mcycles_in_line: 0,
             frame_count: 0,
             nmis_serviced: 0,
             sched_enabled: false,
             cpu_pc_full: cpu_pc_snapshot,
-            mailbox_log,
-            sa1_log,
-            mem_trace_log,
-            breakpoints,
-            nocash_log,
-            wm_addr,
-            joypad_strobe,
-            joypad1_shift,
-            joypad2_shift,
-            mdr,
-            irq_wrap_trig,
-            mclk: mclk_acc,
-        };
+        });
         // Falling edge (FF → 00): latch fires, PIO mirror goes low.
         bus.write(make_addr(0x00, 0x4201), 0x00);
         assert!(bus.ppu.external_latch_hit, "1→0 must latch");
@@ -4097,71 +3844,16 @@ mod tests {
     fn open_bus_read_returns_last_data_bus_value_not_ff() {
         let cart = demo_lorom();
         let mut snes = Snes::from_cartridge(cart);
-        let scanlines = snes.region_scanlines();
         let ppu_line_snapshot = snes.ppu_line;
         let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
-        let Snes {
-            ppu,
-            dma,
-            cpu_regs,
-            apu_real,
-            apu_stub_fallback,
-            apu_panicked,
-            wram,
-            mapper,
-            fast_rom,
-            nmi_pending,
-            irq_pending,
-            total_mclk,
-            wm_addr,
-            joypad_strobe,
-            joypad1_shift,
-            joypad2_shift,
-            mdr,
-            irq_wrap_trig,
-            mclk_acc,
-            mailbox_log,
-            sa1_log,
-            mem_trace_log,
-            breakpoints,
-            nocash_log,
-            ..
-        } = &mut snes;
-        let mut bus = SnesBus {
-            wram,
-            mapper: mapper.as_mut(),
-            ppu,
-            dma,
-            cpu_regs,
-            apu_real,
-            apu_stub_fallback,
-            apu_panicked,
-            fast_rom,
-            nmi: nmi_pending,
-            irq: irq_pending,
-            mclk_total: total_mclk,
-            scanlines_per_frame: scanlines,
-            scpu_mar: 0,
-            clock_count: 8,
+        let (_, mut bus) = snes.cpu_and_bus(BusCursor {
             ppu_line: ppu_line_snapshot,
             mcycles_in_line: 0,
             frame_count: 0,
             nmis_serviced: 0,
             sched_enabled: false,
             cpu_pc_full: cpu_pc_snapshot,
-            mailbox_log,
-            sa1_log,
-            mem_trace_log,
-            breakpoints,
-            nocash_log,
-            wm_addr,
-            joypad_strobe,
-            joypad1_shift,
-            joypad2_shift,
-            mdr,
-            irq_wrap_trig,
-            mclk: mclk_acc,
-        };
+        });
         // A write drives 0x5A onto the data bus → latches the MDR.
         bus.write(make_addr(0x00, 0x0100), 0x5A);
         // $420B (MDMAEN) is write-only → an open-bus read returns the MDR
@@ -4183,72 +3875,16 @@ mod tests {
         let cart = demo_lorom();
         let mut snes = Snes::from_cartridge(cart);
         snes.reset();
-        let scanlines = snes.region_scanlines();
         let ppu_line_snapshot = snes.ppu_line;
         let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
-        let Snes {
-            cpu: _,
-            ppu,
-            dma,
-            cpu_regs,
-            apu_real,
-            apu_stub_fallback,
-            apu_panicked,
-            wram,
-            mapper,
-            fast_rom,
-            nmi_pending,
-            irq_pending,
-            total_mclk,
-            wm_addr,
-            joypad_strobe,
-            joypad1_shift,
-            joypad2_shift,
-            mdr,
-            irq_wrap_trig,
-            mclk_acc,
-            mailbox_log,
-            sa1_log,
-            mem_trace_log,
-            breakpoints,
-            nocash_log,
-            ..
-        } = &mut snes;
-        let mut bus = SnesBus {
-            wram,
-            mapper: mapper.as_mut(),
-            ppu,
-            dma,
-            cpu_regs,
-            apu_real,
-            apu_stub_fallback,
-            apu_panicked,
-            fast_rom,
-            nmi: nmi_pending,
-            irq: irq_pending,
-            mclk_total: total_mclk,
-            scanlines_per_frame: scanlines,
-            scpu_mar: 0,
-            clock_count: 8,
+        let (_, mut bus) = snes.cpu_and_bus(BusCursor {
             ppu_line: ppu_line_snapshot,
             mcycles_in_line: 0,
             frame_count: 0,
             nmis_serviced: 0,
             sched_enabled: false,
             cpu_pc_full: cpu_pc_snapshot,
-            mailbox_log,
-            sa1_log,
-            mem_trace_log,
-            breakpoints,
-            nocash_log,
-            wm_addr,
-            joypad_strobe,
-            joypad1_shift,
-            joypad2_shift,
-            mdr,
-            irq_wrap_trig,
-            mclk: mclk_acc,
-        };
+        });
         // WMADD = $00:1F00.
         bus.write(make_addr(0x00, 0x2181), 0x00);
         bus.write(make_addr(0x00, 0x2182), 0x1F);
@@ -4268,73 +3904,17 @@ mod tests {
         let mut snes = Snes::from_cartridge(cart);
         snes.reset();
         snes.enable_nocash_log();
-        let scanlines = snes.region_scanlines();
         let ppu_line_snapshot = snes.ppu_line;
         let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
         {
-            let Snes {
-                cpu: _,
-                ppu,
-                dma,
-                cpu_regs,
-                apu_real,
-                apu_stub_fallback,
-                apu_panicked,
-                wram,
-                mapper,
-                fast_rom,
-                nmi_pending,
-                irq_pending,
-                total_mclk,
-                wm_addr,
-                joypad_strobe,
-                joypad1_shift,
-                joypad2_shift,
-                mdr,
-                irq_wrap_trig,
-                mclk_acc,
-                mailbox_log,
-                sa1_log,
-                mem_trace_log,
-                breakpoints,
-                nocash_log,
-                ..
-            } = &mut snes;
-            let mut bus = SnesBus {
-                wram,
-                mapper: mapper.as_mut(),
-                ppu,
-                dma,
-                cpu_regs,
-                apu_real,
-                apu_stub_fallback,
-                apu_panicked,
-                fast_rom,
-                nmi: nmi_pending,
-                irq: irq_pending,
-                mclk_total: total_mclk,
-                scanlines_per_frame: scanlines,
-                scpu_mar: 0,
-                clock_count: 8,
+            let (_, mut bus) = snes.cpu_and_bus(BusCursor {
                 ppu_line: ppu_line_snapshot,
                 mcycles_in_line: 0,
                 frame_count: 0,
                 nmis_serviced: 0,
                 sched_enabled: false,
                 cpu_pc_full: cpu_pc_snapshot,
-                mailbox_log,
-                sa1_log,
-                mem_trace_log,
-                breakpoints,
-                nocash_log,
-                wm_addr,
-                joypad_strobe,
-                joypad1_shift,
-                joypad2_shift,
-                mdr,
-                irq_wrap_trig,
-                mclk: mclk_acc,
-            };
+            });
             bus.write(make_addr(0x00, 0x21FC), b'H');
             bus.write(make_addr(0x00, 0x21FC), b'i');
             // A non-$21FC write is NOT captured.
@@ -4355,72 +3935,16 @@ mod tests {
         let mut snes = Snes::from_cartridge(cart);
         snes.reset();
         snes.cpu_regs.set_joypad(0, 0x8001);
-        let scanlines = snes.region_scanlines();
         let ppu_line_snapshot = snes.ppu_line;
         let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
-        let Snes {
-            cpu: _,
-            ppu,
-            dma,
-            cpu_regs,
-            apu_real,
-            apu_stub_fallback,
-            apu_panicked,
-            wram,
-            mapper,
-            fast_rom,
-            nmi_pending,
-            irq_pending,
-            total_mclk,
-            wm_addr,
-            joypad_strobe,
-            joypad1_shift,
-            joypad2_shift,
-            mdr,
-            irq_wrap_trig,
-            mclk_acc,
-            mailbox_log,
-            sa1_log,
-            mem_trace_log,
-            breakpoints,
-            nocash_log,
-            ..
-        } = &mut snes;
-        let mut bus = SnesBus {
-            wram,
-            mapper: mapper.as_mut(),
-            ppu,
-            dma,
-            cpu_regs,
-            apu_real,
-            apu_stub_fallback,
-            apu_panicked,
-            fast_rom,
-            nmi: nmi_pending,
-            irq: irq_pending,
-            mclk_total: total_mclk,
-            scanlines_per_frame: scanlines,
-            scpu_mar: 0,
-            clock_count: 8,
+        let (_, mut bus) = snes.cpu_and_bus(BusCursor {
             ppu_line: ppu_line_snapshot,
             mcycles_in_line: 0,
             frame_count: 0,
             nmis_serviced: 0,
             sched_enabled: false,
             cpu_pc_full: cpu_pc_snapshot,
-            mailbox_log,
-            sa1_log,
-            mem_trace_log,
-            breakpoints,
-            nocash_log,
-            wm_addr,
-            joypad_strobe,
-            joypad1_shift,
-            joypad2_shift,
-            mdr,
-            irq_wrap_trig,
-            mclk: mclk_acc,
-        };
+        });
         // Latch then de-strobe.
         bus.write(make_addr(0x00, 0x4016), 0x01);
         bus.write(make_addr(0x00, 0x4016), 0x00);
@@ -4716,70 +4240,15 @@ mod tests {
         snes.dma.channels[1].hdma_do_transfer = true;
         snes.dma.hdmaen = 0x02;
 
-        let scanlines = snes.region_scanlines();
         let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
-        let Snes {
-            ppu,
-            dma,
-            cpu_regs,
-            apu_real,
-            apu_stub_fallback,
-            apu_panicked,
-            wram,
-            mapper,
-            fast_rom,
-            nmi_pending,
-            irq_pending,
-            total_mclk,
-            wm_addr,
-            joypad_strobe,
-            joypad1_shift,
-            joypad2_shift,
-            mdr,
-            irq_wrap_trig,
-            mclk_acc,
-            mailbox_log,
-            sa1_log,
-            mem_trace_log,
-            breakpoints,
-            nocash_log,
-            ..
-        } = &mut snes;
-        let mut bus = SnesBus {
-            wram,
-            mapper: mapper.as_mut(),
-            ppu,
-            dma,
-            cpu_regs,
-            apu_real,
-            apu_stub_fallback,
-            apu_panicked,
-            fast_rom,
-            nmi: nmi_pending,
-            irq: irq_pending,
-            mclk_total: total_mclk,
-            scanlines_per_frame: scanlines,
-            scpu_mar: 0,
-            clock_count: 8,
+        let (_, mut bus) = snes.cpu_and_bus(BusCursor {
             ppu_line: 50,
             mcycles_in_line: 0,
             frame_count: 0,
             nmis_serviced: 0,
             sched_enabled: true,
             cpu_pc_full: cpu_pc_snapshot,
-            mailbox_log,
-            sa1_log,
-            mem_trace_log,
-            breakpoints,
-            nocash_log,
-            wm_addr,
-            joypad_strobe,
-            joypad1_shift,
-            joypad2_shift,
-            mdr,
-            irq_wrap_trig,
-            mclk: mclk_acc,
-        };
+        });
         // Trigger channel-0 sync DMA via the bus (→ the segmented path,
         // since HDMAEN != 0).
         bus.write(make_addr(0x00, 0x420B), 0x01);
@@ -4903,70 +4372,15 @@ mod tests {
         let vblank = vblank_start_line(snes.ppu.setini & 0x04 != 0);
         snes.ppu_line = vblank;
 
-        let scanlines = snes.region_scanlines();
         let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
-        let Snes {
-            ppu,
-            dma,
-            cpu_regs,
-            apu_real,
-            apu_stub_fallback,
-            apu_panicked,
-            wram,
-            mapper,
-            fast_rom,
-            nmi_pending,
-            irq_pending,
-            total_mclk,
-            wm_addr,
-            joypad_strobe,
-            joypad1_shift,
-            joypad2_shift,
-            mdr,
-            irq_wrap_trig,
-            mclk_acc,
-            mailbox_log,
-            sa1_log,
-            mem_trace_log,
-            breakpoints,
-            nocash_log,
-            ..
-        } = &mut snes;
-        let mut bus = SnesBus {
-            wram,
-            mapper: mapper.as_mut(),
-            ppu,
-            dma,
-            cpu_regs,
-            apu_real,
-            apu_stub_fallback,
-            apu_panicked,
-            fast_rom,
-            nmi: nmi_pending,
-            irq: irq_pending,
-            mclk_total: total_mclk,
-            scanlines_per_frame: scanlines,
-            scpu_mar: 0,
-            clock_count: 8,
+        let (_, mut bus) = snes.cpu_and_bus(BusCursor {
             ppu_line: vblank,
             mcycles_in_line: hclock,
             frame_count: 0,
             nmis_serviced: 0,
             sched_enabled: false,
             cpu_pc_full: cpu_pc_snapshot,
-            mailbox_log,
-            sa1_log,
-            mem_trace_log,
-            breakpoints,
-            nocash_log,
-            wm_addr,
-            joypad_strobe,
-            joypad1_shift,
-            joypad2_shift,
-            mdr,
-            irq_wrap_trig,
-            mclk: mclk_acc,
-        };
+        });
         let v = bus.read(make_addr(0x00, 0x4210));
         let still_set = bus.cpu_regs.nmi_flag;
         (v, still_set)
@@ -5274,71 +4688,16 @@ mod tests {
         // Park on the vblank-entry scanline.
         snes.ppu_line = VBLANK_START_LINE;
         // Drive the bus write for $2100 = $0F (force-blank OFF).
-        let scanlines = snes.region_scanlines();
         let ppu_line_snapshot = snes.ppu_line;
         let cpu_pc_snapshot = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
-        let Snes {
-            ppu,
-            dma,
-            cpu_regs,
-            apu_real,
-            apu_stub_fallback,
-            apu_panicked,
-            wram,
-            mapper,
-            fast_rom,
-            nmi_pending,
-            irq_pending,
-            total_mclk,
-            wm_addr,
-            joypad_strobe,
-            joypad1_shift,
-            joypad2_shift,
-            mdr,
-            irq_wrap_trig,
-            mclk_acc,
-            mailbox_log,
-            sa1_log,
-            mem_trace_log,
-            breakpoints,
-            nocash_log,
-            ..
-        } = &mut snes;
-        let mut bus = SnesBus {
-            wram,
-            mapper: mapper.as_mut(),
-            ppu,
-            dma,
-            cpu_regs,
-            apu_real,
-            apu_stub_fallback,
-            apu_panicked,
-            fast_rom,
-            nmi: nmi_pending,
-            irq: irq_pending,
-            mclk_total: total_mclk,
-            scanlines_per_frame: scanlines,
-            scpu_mar: 0,
-            clock_count: 8,
+        let (_, mut bus) = snes.cpu_and_bus(BusCursor {
             ppu_line: ppu_line_snapshot,
             mcycles_in_line: 0,
             frame_count: 0,
             nmis_serviced: 0,
             sched_enabled: false,
             cpu_pc_full: cpu_pc_snapshot,
-            mailbox_log,
-            sa1_log,
-            mem_trace_log,
-            breakpoints,
-            nocash_log,
-            wm_addr,
-            joypad_strobe,
-            joypad1_shift,
-            joypad2_shift,
-            mdr,
-            irq_wrap_trig,
-            mclk: mclk_acc,
-        };
+        });
         bus.write(make_addr(0x00, 0x2100), 0x0F);
         assert_eq!(
             snes.ppu.oam.address, 0x0020,
