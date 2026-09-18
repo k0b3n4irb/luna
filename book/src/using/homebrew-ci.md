@@ -248,8 +248,12 @@ from the same budget as the run bound (issue #126 semantics).
 
 ## A GitHub Actions recipe
 
-Copy this into a homebrew repo — it builds the ROM, fetches a pinned
-luna release binary (no Rust toolchain), and runs the suite:
+Copy this into a homebrew repo — it builds the ROM, fetches the latest
+luna release binary (no Rust toolchain), and runs the suite. To pin a
+version instead, swap `latest/download/luna-linux-x86_64.tar.gz` for
+`download/v1.25.0/luna-v1.25.0-linux-x86_64.tar.gz` (the unversioned
+alias ships from v1.25.0 on; the folder inside is then
+`luna-v1.25.0-linux-x86_64/`):
 
 ```yaml
 name: test
@@ -264,8 +268,8 @@ jobs:
       - name: Install luna
         run: |
           curl -sL -o luna.tar.gz \
-            https://github.com/k0b3n4irb/luna/releases/latest/download/luna-linux-amd64.tar.gz
-          tar xzf luna.tar.gz && sudo install luna /usr/local/bin/
+            https://github.com/k0b3n4irb/luna/releases/latest/download/luna-linux-x86_64.tar.gz
+          tar xzf luna.tar.gz && sudo install luna-linux-x86_64/luna /usr/local/bin/
       - name: Run the test suite
         run: luna test tests --report json
       - name: Upload screenshots

@@ -100,6 +100,18 @@ jobs:
             tar czf "dist/${PKG}.tar.gz" -C dist "${PKG}"
           fi
           ( cd dist && SHA "${PKG}.${{ matrix.format }}" > "${PKG}.${{ matrix.format }}.sha256" )
+
+          # Unversioned alias (`luna-<os>-<arch>.<fmt>`, same content, folder
+          # `luna-<os>-<arch>/`) so `releases/latest/download/<alias>` is a
+          # stable URL — the book's install + homebrew-CI recipes rely on it.
+          ALIAS="luna-${{ matrix.os }}-${{ matrix.arch }}"
+          cp -r "dist/${PKG}" "dist/${ALIAS}"
+          if [ "${{ matrix.format }}" = "zip" ]; then
+            ( cd dist && 7z a -tzip "${ALIAS}.zip" "${ALIAS}" >/dev/null )
+          else
+            tar czf "dist/${ALIAS}.tar.gz" -C dist "${ALIAS}"
+          fi
+          ( cd dist && SHA "${ALIAS}.${{ matrix.format }}" > "${ALIAS}.${{ matrix.format }}.sha256" )
           ls -l dist
 
       - uses: actions/upload-artifact@v7

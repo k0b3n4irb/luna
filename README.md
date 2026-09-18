@@ -43,8 +43,9 @@ and video paths are reconstructed down to per-access timing, and that accuracy
 is held in place by a self-contained differential harness — so what the headless
 CLI measures is exactly what you see on screen.
 
-One binary runs three ways: **standalone** (a human plays), **spectator** (the
-AI plays, a human watches), or **headless** (driven over MCP, for CI and agents).
+It runs three ways: the **GUI debugger** (`luna-gui`, a human plays), the
+**headless CLI** (`luna run` / `state` / `test`, for scripts and CI), or the
+**MCP server** (`luna mcp`, an agent drives) — all three over the same API.
 
 ## ✨ Features
 
