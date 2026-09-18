@@ -95,7 +95,12 @@ pub enum ApiError {
 /// to explicit FNV-1a-64 over the raw ROM bytes, and the container plus
 /// every mapper/coproc blob moved from bincode 1.x (EOL) to bincode 2
 /// (`standard` config). Both breaks share this single bump.
-pub const SAVE_STATE_VERSION: u32 = 5;
+/// v6 (2026-09): `Snes::mclk_acc` (v1.18.0) and `Apu::master_hz` had been
+/// added under v5 with only `#[serde(default)]` — which bincode, a
+/// positional format, cannot honour: a genuine v5 state mis-decoded. The
+/// bump retires those; `save_state_shape_is_pinned_to_the_version` now
+/// fails whenever the serialized shape moves without one.
+pub const SAVE_STATE_VERSION: u32 = 6;
 
 /// On-disk / on-wire save-state container produced by
 /// [`Emulator::save_state`]. `core` is the bincode-encoded `Snes` (the
@@ -107,6 +112,16 @@ struct SaveStateBundle {
     rom_hash: u64,
     core: Vec<u8>,
     mapper: Vec<u8>,
+}
+
+/// Outcome of the shared instruction loop ([`Emulator::run_core`]).
+struct RunCore<T> {
+    /// Instructions executed.
+    steps: u64,
+    /// The stop value a `before` / `after` predicate returned, if one did.
+    stop: Option<T>,
+    /// The external interrupt flag ended the run.
+    interrupted: bool,
 }
 
 /// FNV-1a 64-bit over raw bytes — the crate's stable hash for anything
@@ -1490,7 +1505,34 @@ impl Emulator {
         count: u64,
         interrupt: &std::sync::atomic::AtomicBool,
     ) -> Result<u64, ApiError> {
+        self.run_core(count, Some(interrupt), |_, _| None::<()>, |_| None)
+            .map(|run| run.steps)
+    }
+
+    /// THE instruction loop — every stepping entry point is this loop with
+    /// a different stop condition, so they cannot drift apart again (they
+    /// had: `run_until_pc` skipped the instruction count, freezes, the call
+    /// stack and the profile; two others skipped the profile fold).
+    ///
+    /// Runs up to `max_steps` instructions, ending early on a `STOP`ped
+    /// CPU, on `interrupt` (polled every 4096 instructions — invisible on
+    /// the run, responsive within microseconds), or when `before` (checked
+    /// ahead of each instruction, with the count executed so far) or
+    /// `after` (checked once it completed) returns a stop value. Each
+    /// instruction gets call-stack tracking and frame-edge freezes; the
+    /// cumulative instruction count and the profile are settled once at
+    /// the end. A core panic is caught and surfaced as [`ApiError::Panic`].
+    fn run_core<T>(
+        &mut self,
+        max_steps: u64,
+        interrupt: Option<&std::sync::atomic::AtomicBool>,
+        mut before: impl FnMut(&Snes, u64) -> Option<T>,
+        mut after: impl FnMut(&mut Snes) -> Option<T>,
+    ) -> Result<RunCore<T>, ApiError> {
         use std::sync::atomic::Ordering;
+        if self.snes.is_none() {
+            return Err(ApiError::NoRom);
+        }
         let freezes = self.freezes.clone();
         let mut cstack = self.call_stack.take();
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
@@ -1498,14 +1540,12 @@ impl Emulator {
         let mut executed = 0u64;
         let _quiet = QuietPanics::new();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            while executed < count {
-                if snes.cpu.stopped {
-                    break;
+            while executed < max_steps && !snes.cpu.stopped {
+                if executed & 0xFFF == 0 && interrupt.is_some_and(|f| f.load(Ordering::Relaxed)) {
+                    return (None, true);
                 }
-                // Same cadence as the interruptible run: cheap enough to be
-                // invisible, responsive enough to stop within microseconds.
-                if executed & 0xFFF == 0 && interrupt.load(Ordering::Relaxed) {
-                    break;
+                if let Some(stop) = before(snes, executed) {
+                    return (Some(stop), false);
                 }
                 let pre = cstack.as_ref().map(|_| Self::call_track_pre(snes));
                 snes.step();
@@ -1514,20 +1554,22 @@ impl Emulator {
                     Self::call_track_post(snes, stack, pre);
                 }
                 Self::apply_freezes_on_frame_edge(snes, &freezes, &mut last_frame);
+                if let Some(stop) = after(snes) {
+                    return (Some(stop), false);
+                }
             }
-            executed
+            (None, false)
         }));
         self.call_stack = cstack;
+        self.instructions_executed += executed;
         self.fold_profile_frames();
         match result {
-            Ok(n) => {
-                self.instructions_executed += n;
-                Ok(n)
-            }
-            Err(payload) => {
-                self.instructions_executed += executed;
-                Err(ApiError::Panic(panic_message(&payload)))
-            }
+            Ok((stop, interrupted)) => Ok(RunCore {
+                steps: executed,
+                stop,
+                interrupted,
+            }),
+            Err(payload) => Err(ApiError::Panic(panic_message(&payload))),
         }
     }
 
@@ -1535,37 +1577,24 @@ impl Emulator {
     /// `frame_count` advances). Returns the number of instructions
     /// executed. Bounded by `max_steps` as a safety belt.
     pub fn step_until_frame(&mut self, max_steps: u64) -> Result<u64, ApiError> {
-        let freezes = self.freezes.clone();
-        let mut cstack = self.call_stack.take();
-        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
-        let start_frame = snes.frame_count;
-        let mut last_frame = start_frame;
-        let mut executed = 0u64;
-        let _quiet = QuietPanics::new();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            while executed < max_steps && !snes.cpu.stopped && snes.frame_count == start_frame {
-                let pre = cstack.as_ref().map(|_| Self::call_track_pre(snes));
-                snes.step();
-                executed += 1;
-                if let (Some(stack), Some(pre)) = (cstack.as_mut(), pre) {
-                    Self::call_track_post(snes, stack, pre);
-                }
-                Self::apply_freezes_on_frame_edge(snes, &freezes, &mut last_frame);
-            }
-            executed
-        }));
-        self.call_stack = cstack;
-        self.fold_profile_frames();
-        match result {
-            Ok(n) => {
-                self.instructions_executed += n;
-                Ok(n)
-            }
-            Err(payload) => {
-                self.instructions_executed += executed;
-                Err(ApiError::Panic(panic_message(&payload)))
-            }
-        }
+        self.step_until_frame_interruptible(max_steps, &std::sync::atomic::AtomicBool::new(false))
+    }
+
+    /// [`Self::step_until_frame`] that an external `interrupt` flag can end
+    /// early (the MCP `pause`), like [`Self::step_interruptible`].
+    pub fn step_until_frame_interruptible(
+        &mut self,
+        max_steps: u64,
+        interrupt: &std::sync::atomic::AtomicBool,
+    ) -> Result<u64, ApiError> {
+        let start_frame = self.snes.as_ref().ok_or(ApiError::NoRom)?.frame_count;
+        self.run_core(
+            max_steps,
+            Some(interrupt),
+            |snes, _| (snes.frame_count != start_frame).then_some(()),
+            |_| None,
+        )
+        .map(|run| run.steps)
     }
 
     /// Probe CPU liveness from the current state: step up to `max_steps`
@@ -1577,31 +1606,19 @@ impl Emulator {
     /// reports). Mutates state (advances the CPU); a diagnostic, not part of
     /// normal stepping. Panic-safe (a crashing ROM returns `Err`).
     pub fn loop_probe(&mut self, max_steps: u64) -> Result<LoopProbe, ApiError> {
-        let freezes = self.freezes.clone();
-        let mut cstack = self.call_stack.take();
-        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
-        let mut last_frame = snes.frame_count;
         let mut seen = std::collections::HashSet::new();
-        let mut executed = 0u64;
-        let _quiet = QuietPanics::new();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            while executed < max_steps && !snes.cpu.stopped {
+        let run = self.run_core(
+            max_steps,
+            None,
+            |snes, _| {
                 seen.insert((u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc));
-                let pre = cstack.as_ref().map(|_| Self::call_track_pre(snes));
-                snes.step();
-                executed += 1;
-                if let (Some(stack), Some(pre)) = (cstack.as_mut(), pre) {
-                    Self::call_track_post(snes, stack, pre);
-                }
-                Self::apply_freezes_on_frame_edge(snes, &freezes, &mut last_frame);
-            }
-        }));
-        self.call_stack = cstack;
-        self.instructions_executed += executed;
-        result.map_err(|p| ApiError::Panic(panic_message(&p)))?;
+                None::<()>
+            },
+            |_| None,
+        )?;
         Ok(LoopProbe {
             distinct_pcs: seen.len(),
-            executed,
+            executed: run.steps,
         })
     }
 
@@ -2359,12 +2376,36 @@ impl Emulator {
         let (mut restored, _): (Snes, usize) =
             bincode::serde::decode_from_slice(&bundle.core, bincode::config::standard())
                 .map_err(|e| ApiError::SaveState(format!("core decode: {e}")))?;
-        // The deserialized `Snes` has a placeholder mapper (the trait object
-        // is `serde(skip)`). Move the LIVE mapper — which still owns the ROM
-        // — into it, then replay the mapper's saved mutable state onto it.
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        // The renderer indexes these by `line * width + x`: a state whose
+        // buffers are not the size this build allocates must not get in.
+        let fb = (restored.ppu.framebuffer.len(), snes.ppu.framebuffer.len());
+        if fb.0 != fb.1 {
+            return Err(ApiError::SaveState(format!(
+                "framebuffer is {} pixels in the state, {} in this build",
+                fb.0, fb.1
+            )));
+        }
+        let native = restored.ppu.native_framebuffer.len();
+        if native != 0 && native != fb.1 * 4 {
+            return Err(ApiError::SaveState(format!(
+                "native framebuffer is {native} pixels in the state, expected 0 or {}",
+                fb.1 * 4
+            )));
+        }
+        // Replay the mapper blob onto the LIVE mapper (it owns the ROM)
+        // BEFORE anything else changes, keeping its current state to roll
+        // back to: a refused blob must leave the running machine untouched,
+        // never half-restored behind an `Ok`.
+        let rollback = snes.mapper.save_state();
+        if let Err(e) = snes.mapper.load_state(&bundle.mapper) {
+            // `rollback` came from this very mapper, so it always loads.
+            let _ = snes.mapper.load_state(&rollback);
+            return Err(ApiError::SaveState(format!("mapper: {e}")));
+        }
+        // The deserialized `Snes` has a placeholder mapper (the trait object
+        // is `serde(skip)`): move the live, now-restored one into it.
         restored.mapper = std::mem::replace(&mut snes.mapper, luna_core::null_mapper());
-        restored.mapper.load_state(&bundle.mapper);
         *snes = restored;
         Ok(())
     }
@@ -2748,23 +2789,27 @@ impl Emulator {
     /// if `pc` was reached (checked BEFORE each step, so a current match
     /// returns immediately). Panic-safe (a crashing ROM returns `Err`).
     pub fn run_until_pc(&mut self, pc: u32, max_steps: u64) -> Result<bool, ApiError> {
-        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
-        let _quiet = QuietPanics::new();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            for _ in 0..max_steps {
-                let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
-                if cur == pc {
-                    return true;
-                }
-                snes.step();
-            }
-            let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
-            cur == pc
-        }));
-        match result {
-            Ok(hit) => Ok(hit),
-            Err(payload) => Err(ApiError::Panic(panic_message(&payload))),
-        }
+        self.run_until_pc_interruptible(pc, max_steps, &std::sync::atomic::AtomicBool::new(false))
+    }
+
+    /// [`Self::run_until_pc`] that an external `interrupt` flag can end
+    /// early (the MCP `pause`). Same service level as [`Self::step`]:
+    /// instructions are counted, freezes / call stack / profile apply.
+    pub fn run_until_pc_interruptible(
+        &mut self,
+        pc: u32,
+        max_steps: u64,
+        interrupt: &std::sync::atomic::AtomicBool,
+    ) -> Result<bool, ApiError> {
+        let at = |snes: &Snes| (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
+        let run = self.run_core(
+            max_steps,
+            Some(interrupt),
+            |snes, _| (at(snes) == pc).then_some(()),
+            |_| None,
+        )?;
+        // Budget exhausted exactly on the target still counts as reached.
+        Ok(run.stop.is_some() || self.snes.as_ref().is_some_and(|s| at(s) == pc))
     }
 
     // -----------------------------------------------------------------
@@ -2968,99 +3013,66 @@ impl Emulator {
         max_steps: u64,
         interrupt: &std::sync::atomic::AtomicBool,
     ) -> Result<RunOutcome, ApiError> {
-        use std::sync::atomic::Ordering;
         // The flag is the CALLER's: clearing it here wiped a pause that had
         // been raised while this call was still waiting for the emulator
         // lock, so the run then ignored it and could not be stopped at all.
         // Owners clear it when a request starts, before taking the lock.
-        let freezes = self.freezes.clone();
-        let mut cstack = self.call_stack.take();
-        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
-        let mut last_frame = snes.frame_count;
-        if let Some(bp) = snes.breakpoints.as_mut() {
+        if let Some(bp) = self
+            .snes
+            .as_mut()
+            .ok_or(ApiError::NoRom)?
+            .breakpoints
+            .as_mut()
+        {
             bp.take_pending(); // discard stale
         }
-        let mut executed = 0u64;
-        let _quiet = QuietPanics::new();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            for i in 0..max_steps {
-                if snes.cpu.stopped {
-                    break;
-                }
-                // Check the pause flag periodically (every 4096 instructions) —
-                // cheap enough to be invisible on the run, responsive enough
-                // that a pause returns within microseconds.
-                if i & 0xFFF == 0 && interrupt.load(Ordering::Relaxed) {
-                    return RunOutcome {
-                        steps: i,
-                        hit: None,
-                        interrupted: true,
-                    };
-                }
-                let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
-                if i > 0
-                    && let Some(hit) = snes.breakpoints.as_ref().and_then(|b| b.check_exec(cur))
-                {
-                    return RunOutcome {
-                        steps: i,
-                        hit: Some(hit),
-                        interrupted: false,
-                    };
-                }
-                let pre = cstack.as_ref().map(|_| Self::call_track_pre(snes));
-                snes.step();
-                executed = i + 1;
-                if let (Some(stack), Some(pre)) = (cstack.as_mut(), pre) {
-                    Self::call_track_post(snes, stack, pre);
-                }
-                Self::apply_freezes_on_frame_edge(snes, &freezes, &mut last_frame);
-                if let Some(hit) = snes.breakpoints.as_mut().and_then(|b| b.take_pending()) {
-                    return RunOutcome {
-                        steps: i + 1,
-                        hit: Some(hit),
-                        interrupted: false,
-                    };
-                }
-            }
-            RunOutcome {
-                steps: executed,
-                hit: None,
-                interrupted: false,
-            }
-        }));
-        match result {
-            Ok(out) => {
-                self.instructions_executed += out.steps;
-                if let Some(hit) = out.hit {
-                    // Surface the hit on the Event Viewer overlay (Mesen2's
-                    // MarkedBreakpoint category, issue #68). Injected straight
-                    // into the completed-frame buffer so it is visible while
-                    // paused at the halt (the in-progress frame won't roll
-                    // until resume). Sorted insert keeps the list ordered.
-                    let (line, hclock) = self.snes.as_ref().map_or((0, 0), |s| {
-                        (
-                            s.ppu_line,
-                            (s.mcycles_in_line).min(u32::from(u16::MAX)) as u16,
-                        )
-                    });
-                    let ev = CapturedEvent::Break {
-                        pc: hit.pc,
-                        line,
-                        hclock,
-                    };
-                    let key = ev.sort_key();
-                    let idx = self
-                        .last_frame_events
-                        .partition_point(|e| e.sort_key() <= key);
-                    self.last_frame_events.insert(idx, ev);
-                }
-                Ok(out)
-            }
-            Err(payload) => {
-                self.instructions_executed += executed;
-                Err(ApiError::Panic(panic_message(&payload)))
-            }
+        let at = |snes: &Snes| (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
+        let out = self
+            .run_core(
+                max_steps,
+                Some(interrupt),
+                // An exec breakpoint on the CURRENT instruction does not fire at
+                // entry (else a resume would never leave it).
+                |snes, executed| {
+                    (executed > 0)
+                        .then(|| {
+                            snes.breakpoints
+                                .as_ref()
+                                .and_then(|b| b.check_exec(at(snes)))
+                        })
+                        .flatten()
+                },
+                |snes| snes.breakpoints.as_mut().and_then(|b| b.take_pending()),
+            )
+            .map(|run| RunOutcome {
+                steps: run.steps,
+                hit: run.stop,
+                interrupted: run.interrupted,
+            })?;
+        if let Some(hit) = out.hit {
+            // Surface the hit on the Event Viewer overlay (Mesen2's
+            // MarkedBreakpoint category, issue #68). Injected straight
+            // into the completed-frame buffer so it is visible while
+            // paused at the halt (the in-progress frame won't roll
+            // until resume). Sorted insert keeps the list ordered.
+            let (line, hclock) = self.snes.as_ref().map_or((0, 0), |s| {
+                (
+                    s.ppu_line,
+                    (s.mcycles_in_line).min(u32::from(u16::MAX)) as u16,
+                )
+            });
+            let ev = CapturedEvent::Break {
+                pc: hit.pc,
+                line,
+                hclock,
+            };
+            let key = ev.sort_key();
+            let idx = self
+                .last_frame_events
+                .partition_point(|e| e.sort_key() <= key);
+            self.last_frame_events.insert(idx, ev);
         }
+        Ok(out)
     }
 
     /// Controlled execution (L10): set a CPU register by name — one of
@@ -3091,7 +3103,22 @@ impl Emulator {
         addr_full: u32,
         max_steps: u64,
     ) -> Result<Option<(u32, u8)>, ApiError> {
-        self.run_until_mem_access(addr_full, MemEventKind::Write, max_steps)
+        self.run_until_mem_write_interruptible(
+            addr_full,
+            max_steps,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+    }
+
+    /// [`Self::run_until_mem_write`] that an external `interrupt` flag can
+    /// end early (returns `Ok(None)`, like an exhausted budget).
+    pub fn run_until_mem_write_interruptible(
+        &mut self,
+        addr_full: u32,
+        max_steps: u64,
+        interrupt: &std::sync::atomic::AtomicBool,
+    ) -> Result<Option<(u32, u8)>, ApiError> {
+        self.run_until_mem_access(addr_full, MemEventKind::Write, max_steps, interrupt)
     }
 
     /// Breakpoint (L7): like [`Self::run_until_mem_write`] but for READS.
@@ -3100,7 +3127,22 @@ impl Emulator {
         addr_full: u32,
         max_steps: u64,
     ) -> Result<Option<(u32, u8)>, ApiError> {
-        self.run_until_mem_access(addr_full, MemEventKind::Read, max_steps)
+        self.run_until_mem_read_interruptible(
+            addr_full,
+            max_steps,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+    }
+
+    /// [`Self::run_until_mem_read`] that an external `interrupt` flag can
+    /// end early (returns `Ok(None)`, like an exhausted budget).
+    pub fn run_until_mem_read_interruptible(
+        &mut self,
+        addr_full: u32,
+        max_steps: u64,
+        interrupt: &std::sync::atomic::AtomicBool,
+    ) -> Result<Option<(u32, u8)>, ApiError> {
+        self.run_until_mem_access(addr_full, MemEventKind::Read, max_steps, interrupt)
     }
 
     fn run_until_mem_access(
@@ -3108,6 +3150,7 @@ impl Emulator {
         addr_full: u32,
         want: MemEventKind,
         max_steps: u64,
+        interrupt: &std::sync::atomic::AtomicBool,
     ) -> Result<Option<(u32, u8)>, ApiError> {
         // A temporary watchpoint on exactly this address, consumed through the
         // same guarded loop as `run_until_break` — unlike the previous
@@ -3121,7 +3164,8 @@ impl Emulator {
             .add_mem(addr_full, addr_full, on_read, !on_read, false, None);
         let mut remaining = max_steps;
         let outcome = loop {
-            match self.run_until_break(remaining) {
+            match self.run_until_break_interruptible(remaining, interrupt) {
+                Ok(out) if out.interrupted => break Ok(None),
                 Ok(out) => {
                     remaining = remaining.saturating_sub(out.steps);
                     match out.hit {
@@ -4144,6 +4188,157 @@ mod tests {
         rom
     }
 
+    /// Every stepping entry point is the same loop (`run_core`): they all
+    /// count instructions, track the call stack, and honour the interrupt
+    /// flag. `run_until_pc` used to do none of the three.
+    #[test]
+    fn every_run_entry_point_gives_the_same_service_level() {
+        // $8000: JSR $8010 ; $8003: BRA $8003 …… $8010: NOP NOP NOP RTS
+        let mut code = vec![0x20, 0x10, 0x80, 0x80, 0xFE];
+        code.resize(0x10, 0xEA);
+        code.extend_from_slice(&[0xEA, 0xEA, 0xEA, 0x60]);
+        let boot = |e: &mut Emulator| {
+            e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
+            e.enable_call_stack(true);
+        };
+
+        // run_until_pc: reaches $8012 inside the subroutine — JSR + 2 NOPs.
+        let mut e = Emulator::new();
+        boot(&mut e);
+        let before = e.instructions_executed();
+        assert!(e.run_until_pc(0x00_8012, 100).unwrap());
+        assert_eq!(
+            e.instructions_executed(),
+            before + 3,
+            "instructions are counted"
+        );
+        assert_eq!(e.call_stack().len(), 1, "the JSR was tracked");
+
+        // …the same point reached by `step` reports the same bookkeeping.
+        let mut s = Emulator::new();
+        boot(&mut s);
+        s.step(3).unwrap();
+        assert_eq!(s.instructions_executed(), e.instructions_executed());
+        assert_eq!(s.call_stack().len(), e.call_stack().len());
+        assert_eq!(s.state().cpu.pc, e.state().cpu.pc);
+
+        // A target never reached: the budget bounds it, and says so.
+        assert!(!e.run_until_pc(0x00_9999, 50).unwrap());
+
+        // A raised interrupt flag stops every interruptible variant at once.
+        let raised = std::sync::atomic::AtomicBool::new(true);
+        let mut i = Emulator::new();
+        boot(&mut i);
+        let before = i.instructions_executed();
+        assert!(
+            !i.run_until_pc_interruptible(0x00_8012, 100, &raised)
+                .unwrap()
+        );
+        assert_eq!(
+            i.step_until_frame_interruptible(1_000_000, &raised)
+                .unwrap(),
+            0
+        );
+        assert_eq!(i.step_interruptible(100, &raised).unwrap(), 0);
+        assert!(
+            i.run_until_break_interruptible(100, &raised)
+                .unwrap()
+                .interrupted
+        );
+        assert_eq!(i.instructions_executed(), before);
+    }
+
+    /// [`demo_lorom`] on a board with 8 KB of battery SRAM — a mapper whose
+    /// save-state blob carries a RAM the loader must size-check.
+    fn demo_lorom_sram() -> Vec<u8> {
+        let mut rom = demo_lorom();
+        rom[0x7FD8] = 0x03;
+        let sum: u32 = rom
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !(0x7FDC..=0x7FDF).contains(i))
+            .map(|(_, b)| u32::from(*b))
+            .sum();
+        let checksum = (sum & 0xFFFF) as u16;
+        rom[0x7FDC..0x7FDE].copy_from_slice(&(!checksum).to_le_bytes());
+        rom[0x7FDE..0x7FE0].copy_from_slice(&checksum.to_le_bytes());
+        rom
+    }
+
+    /// Re-wrap a good state's core with a different mapper blob.
+    fn state_with_mapper_blob(good: &[u8], mapper: Vec<u8>) -> Vec<u8> {
+        let (mut bundle, _): (SaveStateBundle, usize) =
+            bincode::serde::decode_from_slice(good, bincode::config::standard()).unwrap();
+        bundle.mapper = mapper;
+        bincode::serde::encode_to_vec(&bundle, bincode::config::standard()).unwrap()
+    }
+
+    #[test]
+    fn load_state_refuses_a_bad_mapper_blob_and_leaves_the_machine_untouched() {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom_sram()).unwrap();
+        e.step(2_000).unwrap();
+        e.load_sram(&[0xA5; 64]).unwrap();
+        let good = e.save_state().unwrap();
+        e.step(2_000).unwrap();
+        let before = e.save_state().unwrap();
+
+        let cfg = bincode::config::standard();
+        let cases = [
+            ("undecodable", vec![0xFF; 7]),
+            (
+                "SRAM too short",
+                bincode::serde::encode_to_vec(vec![0u8; 16], cfg).unwrap(),
+            ),
+            (
+                "SRAM empty",
+                bincode::serde::encode_to_vec(Vec::<u8>::new(), cfg).unwrap(),
+            ),
+        ];
+        for (what, blob) in cases {
+            let forged = state_with_mapper_blob(&good, blob);
+            match e.load_state(&forged) {
+                Err(ApiError::SaveState(msg)) => assert!(msg.contains("mapper"), "{what}: {msg}"),
+                other => panic!("{what}: expected a SaveState error, got {other:?}"),
+            }
+            // Refused ⇒ nothing moved: not the core, not the mapper.
+            assert_eq!(
+                e.save_state().unwrap(),
+                before,
+                "{what}: machine was modified"
+            );
+            // …and the SRAM keeps its size and contents.
+            assert_eq!(e.sram().len(), 8 * 1024, "{what}");
+            assert_eq!(e.sram()[..64], [0xA5; 64], "{what}");
+        }
+        // The genuine state still loads.
+        e.load_state(&good).unwrap();
+    }
+
+    /// The serialized shape of the machine is part of the save-state
+    /// format. bincode is positional: adding, removing or reordering a
+    /// serialized field silently mis-decodes every older state, and
+    /// `#[serde(default)]` does NOT help. If this test fails you changed
+    /// that shape — bump [`SAVE_STATE_VERSION`] (documenting why), then
+    /// update the two lengths below. (The lengths are of a freshly built
+    /// machine; a changed power-on *value* can move them too, through the
+    /// varint encoding — then only the lengths need updating.)
+    #[test]
+    fn save_state_shape_is_pinned_to_the_version() {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom_sram()).unwrap();
+        let (bundle, _): (SaveStateBundle, usize) = bincode::serde::decode_from_slice(
+            &e.save_state().unwrap(),
+            bincode::config::standard(),
+        )
+        .unwrap();
+        assert_eq!(
+            (SAVE_STATE_VERSION, bundle.core.len(), bundle.mapper.len()),
+            (6, 447_745, 8_195),
+            "serialized machine shape changed — see this test's doc comment"
+        );
+    }
+
     #[test]
     fn mclk_buckets_partition_total_and_wai_is_idle() {
         // SEI ; LDA #$80 ; STA $4200 (NMI on) ; loop: WAI ; BRA loop ;
@@ -4437,7 +4632,7 @@ mod tests {
         let mut e = Emulator::new();
         e.load_rom_bytes(demo_lorom()).unwrap();
 
-        // v5 round-trip.
+        // Current-version round-trip.
         let blob = e.save_state().unwrap();
         e.load_state(&blob).unwrap();
 

@@ -26,7 +26,34 @@ Follow-ups to the 2026-09-18 full project review.
   (`~/.config/luna/firmware/`, not `~/.config/luna/`); README and the book
   no longer promise a "spectator" mode that was never built.
 
+- **`load_state` can no longer return `Ok` on a half-restored machine.**
+  A mapper blob that failed to decode was silently ignored, and one that
+  decoded to the wrong shape was accepted — a Super FX work RAM shorter
+  than its address mask, or an empty SA-1 BW-RAM, then panicked later, in
+  the emulation loop (and, over MCP, in an unguarded `peek`). Mappers now
+  validate the whole blob before touching anything
+  (`Mapper::load_state -> Result`), the framebuffers are size-checked, and
+  a refused state leaves the running machine exactly as it was.
+- **Every stepping entry point is the same loop.** `run_until_pc` did not
+  count its instructions and ignored freezes, the call stack and the
+  profile; `loop_probe` and `run_until_break` never folded the profile.
+  They are now one internal driver with different stop conditions.
+- **MCP: `pause` reaches every run tool**, not just `run` and `step` —
+  `step_until_frame`, `run_until_pc`, `run_until_break` and
+  `run_until_mem_read/write` took an unbounded `max_steps` and held the
+  emulator lock to the end.
+
+### Changed
+- **BREAKING — save-state format v6.** `Snes::mclk_acc` (v1.18.0) and
+  `Apu::master_hz` had been added under v5 behind `#[serde(default)]`,
+  which bincode — a positional format — cannot honour, so genuine v5
+  states already mis-decoded. States from earlier builds are refused with
+  a version error instead. A new test pins the serialized shape to the
+  version, so the next field added without a bump fails CI.
+
 ### CI
+- A `load_state` fuzz target joins the three cartridge ones (the ROM is
+  not the only door for outside bytes).
 - The test-ROM corpus cache is actually saved (an absolute path —
   `actions/cache` rejects `../`), the corpus is pinned to an upstream
   commit, and `LUNA_SNES_TEST_REQUIRE=1` makes a missing golden ROM a

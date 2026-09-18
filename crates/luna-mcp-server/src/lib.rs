@@ -1582,9 +1582,14 @@ impl LunaServer {
         &self,
         Parameters(params): Parameters<StepUntilFrameParams>,
     ) -> Result<rmcp::Json<StepResult>, ErrorData> {
+        // Every run tool is interruptible: `max_steps` is caller-supplied
+        // and unbounded, and without the flag a long call held the emulator
+        // lock to the end with `pause` unable to reach it. Cleared BEFORE
+        // queueing for the lock (see `run`).
+        self.interrupt.store(false, Ordering::Relaxed);
         let executed = {
             let mut em = self.emulator.lock().await;
-            em.step_until_frame(params.max_steps)
+            em.step_until_frame_interruptible(params.max_steps, &self.interrupt)
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(StepResult { executed }))
@@ -1778,10 +1783,11 @@ impl LunaServer {
         &self,
         Parameters(params): Parameters<RunUntilPcParams>,
     ) -> Result<rmcp::Json<RunUntilResult>, ErrorData> {
+        self.interrupt.store(false, Ordering::Relaxed);
         let hit = {
             let mut em = self.emulator.lock().await;
             let pc = resolve_addr(&em, params.symbol.as_deref(), params.pc)?;
-            em.run_until_pc(pc, params.max_steps)
+            em.run_until_pc_interruptible(pc, params.max_steps, &self.interrupt)
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(RunUntilResult { hit }))
@@ -1812,10 +1818,11 @@ impl LunaServer {
         &self,
         Parameters(params): Parameters<MemBreakpointParams>,
     ) -> Result<rmcp::Json<MemBreakResult>, ErrorData> {
+        self.interrupt.store(false, Ordering::Relaxed);
         let hit = {
             let mut em = self.emulator.lock().await;
             let addr = resolve_addr(&em, params.symbol.as_deref(), params.addr)?;
-            em.run_until_mem_write(addr, params.max_steps)
+            em.run_until_mem_write_interruptible(addr, params.max_steps, &self.interrupt)
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(match hit {
@@ -1840,10 +1847,11 @@ impl LunaServer {
         &self,
         Parameters(params): Parameters<MemBreakpointParams>,
     ) -> Result<rmcp::Json<MemBreakResult>, ErrorData> {
+        self.interrupt.store(false, Ordering::Relaxed);
         let hit = {
             let mut em = self.emulator.lock().await;
             let addr = resolve_addr(&em, params.symbol.as_deref(), params.addr)?;
-            em.run_until_mem_read(addr, params.max_steps)
+            em.run_until_mem_read_interruptible(addr, params.max_steps, &self.interrupt)
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(match hit {
@@ -2732,9 +2740,10 @@ impl LunaServer {
         &self,
         Parameters(params): Parameters<RunUntilBreakParams>,
     ) -> Result<rmcp::Json<RunUntilBreakResult>, ErrorData> {
+        self.interrupt.store(false, Ordering::Relaxed);
         let out = {
             let mut em = self.emulator.lock().await;
-            em.run_until_break(params.max_steps)
+            em.run_until_break_interruptible(params.max_steps, &self.interrupt)
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(outcome_to_result(&out)))
@@ -2769,11 +2778,14 @@ impl LunaServer {
     }
 
     #[rmcp::tool(
-        description = "Ask an in-progress `run` to stop as soon as possible (issue #92). \
-                                Raises a shared pause flag without taking the emulator lock, so \
-                                it returns immediately even while `run` holds the emulator; the \
-                                run then returns with `interrupted: true`. A no-op if nothing is \
-                                running."
+        description = "Ask the in-progress run tool to stop as soon as possible (issue \
+                                #92) — `run`, `step`, `step_until_frame`, `run_until_pc`, \
+                                `run_until_break`, `run_until_mem_read/write`. Raises a shared \
+                                pause flag without taking the emulator lock, so it returns \
+                                immediately even while that tool holds the emulator; `run` / \
+                                `run_until_break` then report `interrupted: true`, the others \
+                                return early as if their budget had run out. A no-op if nothing \
+                                is running."
     )]
     async fn pause(&self) -> rmcp::Json<EmptyOk> {
         self.interrupt.store(true, Ordering::Relaxed);

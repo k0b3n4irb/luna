@@ -282,19 +282,27 @@ impl Upd96050 {
     }
 
     /// Restore the mutable state produced by [`Self::save_state`], leaving
-    /// the microcode ROMs intact.
-    pub fn load_state(&mut self, data: &[u8]) {
-        if let Ok((st, _)) =
-            bincode::serde::decode_from_slice::<Upd96050State, _>(data, bincode::config::standard())
-        {
-            self.revision = st.revision;
-            for (slot, w) in self.data_ram.iter_mut().zip(st.data_ram) {
-                *slot = w;
-            }
-            self.regs = st.regs;
-            self.flags_a = st.flags_a;
-            self.flags_b = st.flags_b;
+    /// the microcode ROMs intact. On `Err` (undecodable blob, or a data RAM
+    /// of the wrong size) the chip is left untouched.
+    pub fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
+        let (st, _) = bincode::serde::decode_from_slice::<Upd96050State, _>(
+            data,
+            bincode::config::standard(),
+        )
+        .map_err(|e| format!("uPD96050 state decode: {e}"))?;
+        if st.data_ram.len() != self.data_ram.len() {
+            return Err(format!(
+                "uPD96050 data RAM is {} words in the state, {} in this chip",
+                st.data_ram.len(),
+                self.data_ram.len()
+            ));
         }
+        self.revision = st.revision;
+        self.data_ram.copy_from_slice(&st.data_ram);
+        self.regs = st.regs;
+        self.flags_a = st.flags_a;
+        self.flags_b = st.flags_b;
+        Ok(())
     }
 
     /// Fill the program ROM (24-bit words, masked).
