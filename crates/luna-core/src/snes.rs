@@ -1311,8 +1311,10 @@ impl Snes {
             port2: host_ports.port2,
             mouse: host_ports.mouse,
             super_scope: host_ports.super_scope,
+            multitap: host_ports.multitap,
             joypad1: host_ports.joypad1,
             joypad2: host_ports.joypad2,
+            joypad_tap: host_ports.joypad_tap,
             ..CpuRegs::new()
         };
         // MEMSEL returns to SLOW: ares `CPU::power` runs `io = {}` on reset
@@ -3851,6 +3853,13 @@ mod tests {
         assert_eq!(snes.cpu_regs.nmitimen, 0, "register file back to power-on");
         assert!(!snes.fast_rom);
         assert_eq!(snes.dma.hdmaen, 0);
+
+        // A multitap and its host pads 3-5 are host configuration too.
+        snes.cpu_regs.port2 = PortDevice::Multitap;
+        snes.cpu_regs.set_joypad(4, 0x1000);
+        snes.reset();
+        assert_eq!(snes.cpu_regs.port2, PortDevice::Multitap);
+        assert_eq!(snes.cpu_regs.joypad_tap[2], 0x1000);
     }
 
     #[test]
