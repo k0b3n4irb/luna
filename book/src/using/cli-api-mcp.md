@@ -171,6 +171,13 @@ and is the hub for every headless diagnostic.
 | `--dsp-trace <PATH>` | — | CSV of every DSP register write: `spc_cycles,reg,name,value`, with `name` decoded (`V0_ADSR1`, `KON`, `FLG`, …). |
 | `--dsp-trace-max <N>` | `100000` | Cap on captured DSP writes. |
 | `--sa1-log <PATH>` | — | CSV of every `$2200-$23FF` SA-1 MMIO access. |
+| `--cpu-trace <PATH>` | — | Per-instruction 65C816 register trace: `mclk_total,frame_ntsc,pc,a,x,y,sp,p,db,dp,e` (pre-opcode snapshot). The stream to diff against a Mesen2 trace when bisecting a divergence — see the example below. |
+| `--cpu-trace-from <N>`, `--cpu-trace-max <N>` | `0`, `100000` | Start capturing at instruction count `N`; hard cap on captured events (≈ 40 bytes each). Aim the window at the scene under test instead of tracing from reset. |
+| `--sa1-trace <PATH>`, `--sa1-trace-max <N>` | —, `200000` | Per-instruction SA-1 trace (`seq,pc,a,x,y,sp,p,db,dp,e`) and its event cap. |
+| `--superfx-trace <PATH>`, `--superfx-trace-max <N>` | —, `200000` | Per-opcode GSU trace (`seq,pc,opcode,sfr,r0..r15`, GO/STOP edges included) and its event cap. |
+| `--spc-trace <PATH>`, `--spc-trace-max <N>` | —, `200000` | Per-instruction SPC700 trace (`seq,pc,a,x,y,sp,psw,spc_cycle,t2_int,t2_out`) and its event cap. |
+| `--dma-trace <PATH>` | — | DMA→VRAM bytes as read during the transfer, with `line`, `hclock`, blank flags, the A-bus `src` and the `vram_word` each byte lands at. |
+| `--dma-trace-from <N>`, `--dma-trace-max <N>` | `0`, `500000` | Instruction count at which the DMA trace starts; its event cap. |
 | `--mem-trace <PATH>` | — | CSV of bus accesses: `mclk_total,frame_ntsc,pc,addr,kind,value,line,hclock,blank,force_blank,origin`. `origin` = `cpu`, `dma<n>` or `hdma<n>` — DMA / HDMA writes (B-bus `$21xx` and A-bus) are in the same stream as CPU accesses, stamped with the burst / line start and the PC whose access ran them. Gated by `--mem-trace-from` / `--mem-trace-max`. |
 | `--mem-trace-bank <B>`, `--mem-trace-addr <LO:HI>` | all | Bank / offset-range filters for `--mem-trace` (both must match). |
 | `--trace-writes <O,…>` | — | With `--mem-trace`: keep only **writes** to these hex offsets, any bank (`2121,2122,420C`). The "who wrote this register" hunt — see below. |
@@ -240,6 +247,26 @@ mid-frame whose table still points at stale data. The same stream is
 available over MCP (`enable_mem_trace { offsets, writes_only }`), and a
 `run_until_mem_write` / `bp_add mem` watchpoint fires on the DMA / HDMA
 write too.
+
+#### Tracing a window of CPU execution
+
+The CPU, memory and DMA traces **stop** once their `-max` cap is reached, so
+aim them with `-from` rather than tracing from reset. (The coprocessor
+traces — `--spc-trace`, `--sa1-trace`, `--superfx-trace` — are rings
+instead: when full they drop their oldest half, so the file ends at the
+last instruction executed.) Capture 50 000 CPU instructions starting 12 M
+instructions in:
+
+```bash
+luna state -n 12050000 --cpu-trace /tmp/cpu.csv \
+  --cpu-trace-from 12000000 --cpu-trace-max 50000 "Super Mario World.sfc"
+head -3 /tmp/cpu.csv
+# mclk_total,frame_ntsc,pc,a,x,y,sp,p,db,dp,e
+# 317204990,887,$00:806B,$0100,$0000,$00FE,$01FF,$32,$00,$0000,0
+# 317205014,887,$00:806D,$0100,$0000,$00FE,$01FF,$32,$00,$0000,0
+```
+
+The same capture is `enable_cpu_trace` / `take_cpu_trace` over MCP.
 
 #### Coprocessor liveness and the DSP-1 handshake
 
