@@ -67,8 +67,8 @@ pub struct Dma {
     /// next `dmaEdge()` — the start of the following bus access — and is
     /// charged to that instruction (issue #109).
     pub pending_mdma: u8,
-    /// `$420C HDMAEN` — HDMA enable mask. Stored but not yet acted upon
-    /// (HDMA is in a later phase).
+    /// `$420C HDMAEN` — HDMA enable mask. Read live by [`Dma::hdma_init`]
+    /// and, per line, by [`Dma::hdma_run_line`] (ares `hdmaActive()` gating).
     pub hdmaen: u8,
     /// Optional DMA→VRAM transfer-time trace. `None` = disabled. The
     /// bus moves this into the per-transfer [`DmaBus`] view so the
@@ -222,9 +222,12 @@ impl Dma {
     /// mode the first data pointer. Channels not enabled in
     /// [`Self::hdmaen`] are left untouched.
     /// Returns the master-cycle cost of the frame-start setup so the CPU
-    /// can be charged the stall (Phase 4). Per ares `cpu/dma.cpp`
-    /// `hdmaSetup`: `step(8)` overhead + one header read per enabled
-    /// channel; folded here into the canonical `18 + 8·channels` figure.
+    /// can be charged the stall (Phase 4), computed by `hdma_cost` from
+    /// the A-bus reads the setup actually performed. Per ares `cpu/dma.cpp`
+    /// `hdmaSetup` (wrapped by `cpu/timing.cpp` `dmaEdge`): DMA-clock
+    /// alignment + `step(8)` + 8 mclk per header / indirect-pointer read of
+    /// each enabled channel + realignment to the CPU clock (`clock_count`).
+    /// 0 when no HDMA channel is enabled.
     pub fn hdma_init<B: DmaBus>(
         &mut self,
         bus: &mut B,
@@ -263,10 +266,12 @@ impl Dma {
     /// (lines 0..=224 NTSC). Each enabled, still-active channel fires up
     /// to one mode-pattern's worth of bytes through its configured B-bus
     /// offset. Returns the **master-cycle cost** of the line's HDMA so the
-    /// CPU can be charged the stall (Phase 4): `18 + 8·bytes` when any
-    /// channel was active, else 0 (ares `cpu/dma.cpp` `hdmaRun`: `step(8)`
-    /// overhead + 8 mclk per transferred byte, folded into the canonical
-    /// 18-mclk per-scanline overhead).
+    /// CPU can be charged the stall (Phase 4): `hdma_cost` over the line's
+    /// A-bus read count when any channel was active, else 0. Per ares
+    /// `cpu/dma.cpp` `hdmaRun` (wrapped by `cpu/timing.cpp` `dmaEdge`):
+    /// DMA-clock alignment + `step(8)` + 8 mclk per A-bus read — the
+    /// transferred bytes **plus** the per-line header read (B-bus writes
+    /// are free) + realignment to the CPU clock (`clock_count`).
     pub fn hdma_run_line<B: DmaBus>(
         &mut self,
         bus: &mut B,

@@ -1621,8 +1621,9 @@ pub fn render_bg_scanline_indexed_with(
 /// `SnesPpu.cpp:984`); tiles are 16 hires pixels wide (ares
 /// `background.cpp:79` `htiles = 4`). Mosaic snaps the dot/scanline to
 /// the block before doubling (ares `background.cpp:42-43`). Interlace
-/// vertical doubling (ares `background.cpp:40,43`) is **not** applied —
-/// luna has no interlaced output mode (224-line progressive only).
+/// vertical doubling (ares `background.cpp:40,43`) **is** applied when
+/// `$2133` bit 0 is set, via [`hires_interlace_src`]: each frame renders
+/// one field, screen line `y` sampling logical line `2y | field`.
 fn render_bg_scanline_indexed_hires(
     ppu: &Ppu,
     bg_idx: usize,
