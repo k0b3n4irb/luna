@@ -158,6 +158,7 @@ and is the hub for every headless diagnostic.
 | `--load-state <PATH>` | — | Load a `.luna` save-state right after ROM load, before warm-up (resume a GUI-captured scene). |
 | `--input <SCRIPT>` | — | Scripted joypad-1 input (§3). |
 | `--input2 <SCRIPT>` | — | Scripted joypad-2 input, same grammar (§3) — a two-player probe, or replaying an MCP `script_p2` capture. |
+| `--input3`, `--input4`, `--input5 <SCRIPT>` | — | Players 3-5: a Super Multitap's pads B-D with `--port2 multitap` (pad A is player 2). Same grammar. |
 | `--screenshot <PATH>` | — | Also write a PNG. |
 | `--audio-out <PATH>` | — | Also write a 32 kHz stereo WAV. |
 | `--peek <B:O:C>` | — | Hex-dump `COUNT` bytes at `BANK:OFFSET` to stderr (repeatable; **all three fields are hex** — `7E:0200:20` is 32 bytes). The whole 24-bit space is readable: WRAM, ROM (including `$C0-$FF` HiROM banks), SRAM, coprocessor RAM; the `$2000-$5FFF` register band reads `0` (no side effects), except the DMA channel registers `$4300-$437F`, which read their real values (`$FF` at power-on). An unmapped range reads `$FF` like the open bus, with a stderr note and an `unmapped` count in the JSON entry. Each result is mirrored into the `--out` JSON `peeks` array (see §2) — the machine-readable channel a harness should parse. |
@@ -753,6 +754,26 @@ bit1 = cursor, bit2 = turbo, bit3 = pause). In the GUI these map to the host
 mouse cursor automatically once a port is set to the device under
 **Settings → Devices**.
 
+### Super Multitap (3-5 players)
+
+`--port2 multitap` puts a Super Multitap on port 2: player 2 is its pad A
+(`--input2`), players 3, 4 and 5 its pads B, C, D (`--input3` … `--input5`).
+The game sees the tap's detection signature and reads players 2/3 through
+the auto-read (`$421A`, `$421E`) and players 4/5 through `$4017` with WRIO
+bit 7 low, as on hardware:
+
+```bash
+# Four players pressing Start on frame 300 of a multitap title
+luna state -n 20000000 --port2 multitap \
+  --input "300:0x1000,310:0" --input2 "300:0x1000,310:0" \
+  --input3 "300:0x1000,310:0" --input4 "300:0x1000,310:0" \
+  --screenshot /tmp/four.png "game.sfc"
+```
+
+Over MCP: `set_port_device {port: 1, device: "multitap"}`, then
+`set_joypad {port: 2..4, mask}`. One tap is modelled (the 8-player
+two-tap setup is not).
+
 ---
 
 ## 4. MCP tool catalogue (`luna mcp`)
@@ -764,9 +785,9 @@ method, so the MCP transport adds reach, not capability.
 |---|---|---|
 | `load_rom` | `load_rom` / `load_rom_forced` | Load a `.sfc`/`.smc` from a host path. Optional `force_mapper` (`lorom`, `hirom`, `exhirom`, `sa1`, `superfx`, `dsp1`, `sdd1`, `spc7110`) and `force_region` (`ntsc`, `pal`) bypass header auto-detection — same vocabulary as the CLI `--force-mapper` / `--force-region`. `power_on` (`zero` default, `ones`, `random`, `random=<seed>`) is the CLI `--power-on`; a random load returns the seed as `power_on_seed`. A WLA-DX `<rom>.sym` next to the ROM is loaded automatically (count in `rom.symbols_loaded`). |
 | `load_rom_bytes` | `load_rom_bytes` / `load_rom_bytes_forced` | Load a ROM from base64 bytes (e.g. a freshly assembled image, no host file). Same force and `power_on` params. Unlike `load_rom` it does **not** search the firmware folder (nor for a `.sym`) — check `missing_firmware` in the result. |
-| `set_port_device` | `set_port_device` | Plug `joypad` / `mouse` / `superscope` into port 0 or 1, then feed it with the matching `set_*` tool. |
+| `set_port_device` | `set_port_device` | Plug `joypad` / `mouse` / `superscope` / `multitap` into port 0 or 1, then feed it with the matching `set_*` tool. |
 | `reset` | `reset` | Reset to power-on state. |
-| `set_joypad` | `set_joypad` | Set the button bitmask for `port` (0 = P1, 1 = P2). |
+| `set_joypad` | `set_joypad` | Set the button bitmask for `port` (0 = P1, 1 = P2; 2-4 = a multitap's pads B-D, players 3-5 with the tap on port 2). |
 | `set_mouse` | `set_mouse` | Feed SNES Mouse `dx`/`dy`/buttons for the next auto-read. |
 | `set_superscope` | `set_superscope` | Feed Super Scope aim (`x`, `y`) + buttons. |
 | `step` | `step` | Step `count` instructions (stops early if the CPU halts). |

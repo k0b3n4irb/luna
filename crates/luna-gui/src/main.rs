@@ -726,7 +726,7 @@ impl LunaApp {
                     luna_api::PortDevice::SuperScope => {
                         let _ = em.set_superscope(cx, cy, buttons);
                     }
-                    luna_api::PortDevice::Pad => {}
+                    luna_api::PortDevice::Pad | luna_api::PortDevice::Multitap => {}
                 }
             }
         }

@@ -59,6 +59,15 @@ Follow-ups to the 2026-09-18 full project review.
   `run_until_mem_read/write` took an unbounded `max_steps` and held the
   emulator lock to the end.
 
+### Added
+- **Super Multitap — 3 to 5 players.** A faithful port of ares
+  `controller/super-multitap`: the tap answers its detection signature,
+  WRIO's iobit selects which pad pair drives the two data lines, and
+  `$421C-$421F` now carry the d1 lines instead of a hard `0`. CLI
+  `--port1/--port2 multitap` with `--input3` … `--input5`; MCP
+  `set_port_device {device: "multitap"}` and `set_joypad {port: 2..4}`.
+  (GUI selection pending.)
+
 ### Changed
 - **Scripted input is defined once, in `luna-api`** (`InputScript`,
   `InputEvent`, `ScriptBound`, `Emulator::run_input_script` /
