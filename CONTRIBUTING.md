@@ -44,7 +44,7 @@ The canonical pre-commit sequence (also enforced in CI):
 ```bash
 cargo build --workspace --all-targets \
   && cargo build --release --workspace --all-targets \
-  && cargo test --workspace --lib \
+  && cargo test --workspace --lib --bins \
   && cargo fmt --all --check \
   && cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```

@@ -24,8 +24,8 @@ debugging untrustworthy.
   or pokes core fields (`snes.ppu.*`, `snes.cpu.*`, `snes.apu_real.*`).
 
 - **Only the host I/O *libraries* are GUI-specific:** `cpal` (the audio
-  output device + its ring buffer) and `eframe`/`egui` (the window,
-  texture upload, input-event capture). Everything between the ROM and
+  output device + its ring buffer) and `winit` + `pixels` + `egui-wgpu`
+  (the window, texture upload, input-event capture). Everything between the ROM and
   those libraries — emulation, timing, rendering-to-pixels, audio-sample
   production, register/memory introspection — is `luna-api`'s job.
 

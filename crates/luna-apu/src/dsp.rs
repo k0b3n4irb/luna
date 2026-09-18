@@ -609,11 +609,9 @@ impl Dsp {
 
         for _ in 0..4 {
             // top 4 bits sign-extended
-            let mut s = (nybbles as i16) >> 12;
+            let s = (nybbles as i16) >> 12;
             nybbles = (nybbles << 4) & 0xFFFF;
             let mut s32_s = i32::from(s);
-            // suppress unused-mut warning on `s`
-            let _ = &mut s;
 
             if scale <= 12 {
                 s32_s <<= scale;

@@ -64,7 +64,7 @@ Read the matching rule before touching the relevant code, not after.
 - Rust edition + toolchain version live in `rust-toolchain.toml` and
   the workspace `Cargo.toml`. Don't pin elsewhere.
 - `cargo fmt` is the formatter; `cargo clippy --workspace --all-targets
-  -- -D warnings` is the lint gate.
+  --all-features -- -D warnings` is the lint gate (same form as CI).
 - Public items get a one-line doc comment minimum. Don't write
   multi-paragraph docstrings for internal helpers — the code is the
   contract.

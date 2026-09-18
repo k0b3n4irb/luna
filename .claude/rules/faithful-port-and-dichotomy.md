@@ -42,7 +42,7 @@ real two-thread cycle-interleaved model), not to keep approximating it.
 Never make a big change in one leap; never debug by guessing.
 
 - **Step by step.** Smallest landable increment. Each step: build (the rebuild
-  hook), test (`cargo test --workspace --lib`), and — if it changes anything
+  hook), test (`cargo test --workspace --lib --bins`), and — if it changes anything
   a human can perceive — GUI-validate before the next step. No multi-day
   blind rewrites; stage them.
 

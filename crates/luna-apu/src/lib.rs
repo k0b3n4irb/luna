@@ -452,7 +452,6 @@ impl Apu {
         }
     }
 
-    /// Advance every voice's ADSR state by one 32 kHz audio sample.
     /// Advance one timer (0, 1, or 2) by one base-clock tick.
     fn tick_one_timer(&mut self, idx: usize) {
         if !self.timer_enabled[idx] {
@@ -594,14 +593,6 @@ impl Apu {
         }
     }
 
-    /// Run exactly one SPC700 instruction over the APU bus, clocking the
-    /// timers + S-DSP per cycle in position (the ares grammar), and
-    /// reconciling any SLEEP/STOP cycles the core charges without driving
-    /// the bus. Returns the instruction's cycle cost. Shared by [`step`]
-    /// and the trajectory harness [`trace_step_one`].
-    ///
-    /// [`step`]: Self::step
-    /// [`trace_step_one`]: Self::trace_step_one
     /// Enable the SPC700 instruction trace: a pre-opcode register snapshot
     /// per SPC700 instruction, capped at `max_events` (ring buffer). Drain
     /// with [`Self::take_spc_trace`].
@@ -617,6 +608,10 @@ impl Apu {
         }
     }
 
+    /// Run exactly one SPC700 instruction atomically over the APU bus and
+    /// return its cycle cost, reconciling any SLEEP/STOP cycles the core
+    /// charges without driving the bus. Harness-only (see below) —
+    /// production stepping is the cycle-exact [`Self::run_one_cycle`].
     fn run_one_spc(&mut self) -> u32 {
         // Atomic whole-instruction path — used only by the trajectory harness
         // (`trace_step_one`), which runs with a frozen mailbox, so there is no
@@ -641,7 +636,9 @@ impl Apu {
                 && *max > 0
             {
                 if events.len() >= *max {
-                    events.drain(0..*max / 2);
+                    // `.max(1)`: with `max == 1` half is 0 and nothing
+                    // would ever be dropped — an unbounded "ring".
+                    events.drain(0..(*max / 2).max(1));
                 }
                 events.push(ev);
             }
@@ -701,7 +698,9 @@ impl Apu {
                 && *max > 0
             {
                 if events.len() >= *max {
-                    events.drain(0..*max / 2);
+                    // `.max(1)`: with `max == 1` half is 0 and nothing
+                    // would ever be dropped — an unbounded "ring".
+                    events.drain(0..(*max / 2).max(1));
                 }
                 events.push(ev);
             }
@@ -1043,6 +1042,21 @@ impl SpcBus for ApuBusView<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spc_trace_ring_stays_bounded_at_every_cap() {
+        // `max == 1` used to drain `0..0` (half of 1) and grow without bound.
+        for max in [1usize, 2, 3, 64] {
+            let mut apu = Apu::new();
+            apu.aram[0x0200] = 0x2F; // BRA -2: spin in place
+            apu.aram[0x0201] = 0xFE;
+            apu.cpu.pc = 0x0200;
+            apu.enable_spc_trace(max);
+            apu.step(2_000 * MASTER_CYCLES_PER_SPC_STEP);
+            let n = apu.take_spc_trace().len();
+            assert!((1..=max).contains(&n), "cap {max}: kept {n} events");
+        }
+    }
 
     #[test]
     fn new_resets_spc_into_ipl_rom() {
