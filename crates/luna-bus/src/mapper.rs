@@ -30,6 +30,41 @@ pub enum MapperKind {
     Spc7110,
 }
 
+/// Why a mapper refused a save-state blob: it did not decode, or it
+/// decoded to a shape the live cartridge cannot hold (a RAM of the wrong
+/// size would break the address masks computed at construction).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapperStateError(pub String);
+
+impl std::fmt::Display for MapperStateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for MapperStateError {}
+
+/// Decode a bincode save-state blob, naming `what` in the error.
+pub fn decode_state<T: serde::de::DeserializeOwned>(
+    data: &[u8],
+    what: &str,
+) -> Result<T, MapperStateError> {
+    bincode::serde::decode_from_slice::<T, _>(data, bincode::config::standard())
+        .map(|(v, _)| v)
+        .map_err(|e| MapperStateError(format!("{what} state decode: {e}")))
+}
+
+/// Refuse a restored RAM whose size differs from the live cartridge's.
+pub fn check_state_len(what: &str, got: usize, want: usize) -> Result<(), MapperStateError> {
+    if got == want {
+        Ok(())
+    } else {
+        Err(MapperStateError(format!(
+            "{what} is {got} bytes in the state, {want} in this cartridge"
+        )))
+    }
+}
+
 impl MapperKind {
     /// Parse a `--force-mapper` CLI token (case-insensitive) into a
     /// [`MapperKind`]. This is the canonical name table; front-ends must
@@ -75,7 +110,12 @@ pub trait Mapper {
 
     /// Restore mutable state produced by [`Mapper::save_state`] into the
     /// live mapper, leaving ROM intact. Default: no-op.
-    fn load_state(&mut self, _data: &[u8]) {}
+    ///
+    /// An implementation decodes and validates the WHOLE blob before it
+    /// mutates anything, so an `Err` leaves the mapper as it was.
+    fn load_state(&mut self, _data: &[u8]) -> Result<(), MapperStateError> {
+        Ok(())
+    }
 
     /// Returns `Some(byte)` if `addr` falls inside a region this mapper
     /// owns (ROM / SRAM / coprocessor MMIO), or `None` if it falls

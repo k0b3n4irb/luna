@@ -20,7 +20,9 @@
 //! ares `ares/sfc/coprocessor/superfx/*` + `ares/component/processor/gsu/*`
 //! and Mesen2 `Core/SNES/Coprocessors/GSU`.
 
-use crate::mapper::{Mapper, MapperKind, SuperFxTraceEvent};
+use crate::mapper::{
+    Mapper, MapperKind, MapperStateError, SuperFxTraceEvent, check_state_len, decode_state,
+};
 use crate::types::{Addr24, bank_of, offset_of};
 
 // --- SFR (Status Flag Register) bit masks (spec §1.2) ---------------------
@@ -1561,9 +1563,10 @@ impl Mapper for SuperFxMapper {
         bincode::serde::encode_to_vec(&st, bincode::config::standard()).unwrap_or_default()
     }
 
-    fn load_state(&mut self, data: &[u8]) {
-        if let Ok((st, _)) =
-            bincode::serde::decode_from_slice::<SuperFxState, _>(data, bincode::config::standard())
+    fn load_state(&mut self, data: &[u8]) -> Result<(), MapperStateError> {
+        let st: SuperFxState = decode_state(data, "Super FX")?;
+        // `ram_mask` is fixed at construction and indexes `ram` unchecked.
+        check_state_len("Super FX work RAM", st.ram.len(), self.ram.len())?;
         {
             self.ram = st.ram;
             self.regs = st.regs;
@@ -1577,6 +1580,7 @@ impl Mapper for SuperFxMapper {
             self.modified_r14 = st.modified_r14;
             self.modified_r15 = st.modified_r15;
         }
+        Ok(())
     }
 
     /// Re-power the GSU on a system reset (ares `SuperFX::power()` →
@@ -1729,6 +1733,23 @@ mod tests {
 
     fn fx() -> SuperFxMapper {
         SuperFxMapper::new(ramp_rom(1024 * 1024), 0x8000)
+    }
+
+    #[test]
+    fn load_state_refuses_a_work_ram_of_the_wrong_size() {
+        // `ram_mask` is fixed at construction and indexes `ram` unchecked:
+        // a state saved from a smaller Game Pak RAM must not get in.
+        let small = SuperFxMapper::new(ramp_rom(1024 * 1024), 0x2000).save_state();
+        let mut m = SuperFxMapper::new(ramp_rom(1024 * 1024), 0x8000);
+        let before = m.save_state();
+        assert!(m.load_state(&small).is_err());
+        assert!(m.load_state(&[0xFF; 9]).is_err());
+        assert_eq!(
+            m.save_state(),
+            before,
+            "a refused state must not modify the mapper"
+        );
+        m.load_state(&before).unwrap();
     }
 
     #[test]

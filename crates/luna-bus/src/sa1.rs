@@ -38,7 +38,7 @@
 //! contiguous 256 KB view). I-RAM (2 KB, shared with the SA-1 CPU)
 //! appears at `$00-$3F:$3000-$37FF`.
 
-use crate::mapper::{Mapper, MapperKind};
+use crate::mapper::{Mapper, MapperKind, MapperStateError, check_state_len, decode_state};
 use crate::types::{Addr24, bank_of, offset_of};
 
 /// Up-to-256 KB SA-1 BW-RAM.
@@ -1294,15 +1294,16 @@ impl Mapper for Sa1Mapper {
         bincode::serde::encode_to_vec(self, bincode::config::standard()).unwrap_or_default()
     }
 
-    fn load_state(&mut self, data: &[u8]) {
-        if let Ok((mut tmp, _)) =
-            bincode::serde::decode_from_slice::<Self, _>(data, bincode::config::standard())
-        {
-            // Keep the live ROM (it is `serde(skip)`-defaulted to empty in
-            // `tmp`); swap in every other field by replacing `self` wholesale.
-            tmp.rom = std::mem::take(&mut self.rom);
-            *self = tmp;
-        }
+    fn load_state(&mut self, data: &[u8]) -> Result<(), MapperStateError> {
+        let mut tmp: Self = decode_state(data, "SA-1")?;
+        // BW-RAM is indexed `% bwram.len()`: a wrong (or empty) size would
+        // mis-map or divide by zero.
+        check_state_len("SA-1 BW-RAM", tmp.bwram.len(), self.bwram.len())?;
+        // Keep the live ROM (it is `serde(skip)`-defaulted to empty in
+        // `tmp`); swap in every other field by replacing `self` wholesale.
+        tmp.rom = std::mem::take(&mut self.rom);
+        *self = tmp;
+        Ok(())
     }
 }
 
@@ -1774,6 +1775,22 @@ mod tests {
 
     fn ramp_rom(size: usize) -> Vec<u8> {
         (0..size).map(|i| (i & 0xFF) as u8).collect()
+    }
+
+    #[test]
+    fn load_state_refuses_a_bwram_of_the_wrong_size() {
+        // BW-RAM is indexed `% bwram.len()`; a foreign size would mis-map.
+        let small = Sa1Mapper::new(ramp_rom(0x1_0000), 0x2000).save_state();
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x8000);
+        let before = m.save_state();
+        assert!(m.load_state(&small).is_err());
+        assert!(m.load_state(&[0xFF; 9]).is_err());
+        assert_eq!(
+            m.save_state(),
+            before,
+            "a refused state must not modify the mapper"
+        );
+        m.load_state(&before).unwrap();
     }
 
     #[test]

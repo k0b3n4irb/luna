@@ -37,7 +37,7 @@
 //! Banks `$20..$3F` and `$A0..$BF` at offsets `$6000-$7FFF` expose
 //! battery-backed SRAM, wrapping at the cart-declared size.
 
-use crate::mapper::{Mapper, MapperKind};
+use crate::mapper::{Mapper, MapperKind, MapperStateError, check_state_len, decode_state};
 use crate::types::{Addr24, bank_of, offset_of, rom_mirror};
 
 /// `HiROM` / `ExHiROM` mapper.
@@ -176,12 +176,11 @@ impl Mapper for HiRomMapper {
         bincode::serde::encode_to_vec(&self.sram, bincode::config::standard()).unwrap_or_default()
     }
 
-    fn load_state(&mut self, data: &[u8]) {
-        if let Ok((sram, _)) =
-            bincode::serde::decode_from_slice::<Vec<u8>, _>(data, bincode::config::standard())
-        {
-            self.sram = sram;
-        }
+    fn load_state(&mut self, data: &[u8]) -> Result<(), MapperStateError> {
+        let sram: Vec<u8> = decode_state(data, "HiROM")?;
+        check_state_len("HiROM SRAM", sram.len(), self.sram.len())?;
+        self.sram = sram;
+        Ok(())
     }
 }
 
