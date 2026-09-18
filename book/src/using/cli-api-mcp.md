@@ -762,8 +762,8 @@ method, so the MCP transport adds reach, not capability.
 
 | Tool | Maps to | Purpose |
 |---|---|---|
-| `load_rom` | `load_rom` / `load_rom_forced` | Load a `.sfc`/`.smc` from a host path. Optional `force_mapper` (`lorom`, `hirom`, `exhirom`, `sa1`, `superfx`, `dsp1`, `sdd1`, `spc7110`) and `force_region` (`ntsc`, `pal`) bypass header auto-detection — same vocabulary as the CLI `--force-mapper` / `--force-region`. |
-| `load_rom_bytes` | `load_rom_bytes` / `load_rom_bytes_forced` | Load a ROM from base64 bytes (e.g. a freshly assembled image, no host file). Same force params. Unlike `load_rom` it does **not** search the firmware folder — check `missing_firmware` in the result. |
+| `load_rom` | `load_rom` / `load_rom_forced` | Load a `.sfc`/`.smc` from a host path. Optional `force_mapper` (`lorom`, `hirom`, `exhirom`, `sa1`, `superfx`, `dsp1`, `sdd1`, `spc7110`) and `force_region` (`ntsc`, `pal`) bypass header auto-detection — same vocabulary as the CLI `--force-mapper` / `--force-region`. `power_on` (`zero` default, `ones`, `random`, `random=<seed>`) is the CLI `--power-on`; a random load returns the seed as `power_on_seed`. A WLA-DX `<rom>.sym` next to the ROM is loaded automatically (count in `rom.symbols_loaded`). |
+| `load_rom_bytes` | `load_rom_bytes` / `load_rom_bytes_forced` | Load a ROM from base64 bytes (e.g. a freshly assembled image, no host file). Same force and `power_on` params. Unlike `load_rom` it does **not** search the firmware folder (nor for a `.sym`) — check `missing_firmware` in the result. |
 | `set_port_device` | `set_port_device` | Plug `joypad` / `mouse` / `superscope` into port 0 or 1, then feed it with the matching `set_*` tool. |
 | `reset` | `reset` | Reset to power-on state. |
 | `set_joypad` | `set_joypad` | Set the button bitmask for `port` (0 = P1, 1 = P2). |
@@ -781,6 +781,8 @@ method, so the MCP transport adds reach, not capability.
 | `decode_sprites` | `decode_sprites` | All 128 OAM entries as a structured list — the queryable `render_sprite_sheet`. |
 | `drain_audio` | `drain_audio` | Drain up to `max` stereo samples from the APU. |
 | `peek_memory` | `peek_memory` | Read `count` bytes from the CPU bus at `bank:offset`. |
+| `peek_coproc_ram` | `coproc_ram` | `count` bytes from `offset` of the coprocessor work RAM (Super FX Game Pak RAM, SA-1 BW-RAM), ungated by the CPU mapping — the CLI `--dump-coproc-ram`. Empty on a cart without one. |
+| `dsp_registers` | `dsp_registers` | The 128 S-DSP registers (`$00-$7F`) — what `[asserts.dsp]` in a `luna test` manifest reads. |
 | `peek_aram` | `peek_aram` | Read `count` bytes from the SPC700's 64 KB ARAM (`count` up to `0x10000` — a full dump needs no paging). |
 | `peek_vram` | `peek_vram` | Read `count` bytes from the 64 KB VRAM (same one-call full-dump range). |
 | `peek_cgram` | `peek_cgram` | All 256 CGRAM palette entries as BGR555 words. |

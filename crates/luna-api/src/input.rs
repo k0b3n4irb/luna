@@ -313,7 +313,7 @@ mod tests {
         assert!(parse_pointer_script("5:1,2").is_err());
     }
 
-    /// A 32 KB LoROM that spins forever (`BRA -2`), so frames advance.
+    /// A 32 KB `LoROM` that spins forever (`BRA -2`), so frames advance.
     fn spin_rom() -> Vec<u8> {
         let mut rom = vec![0u8; 0x8000];
         rom[..2].copy_from_slice(&[0x80, 0xFE]);
@@ -340,9 +340,15 @@ mod tests {
         em.load_rom_bytes(spin_rom()).unwrap();
         let mut s = InputScript::new();
         s.add_pad(0, "2:0x1000,900:0x8000").unwrap();
-        let spent = em.run_input_script(&mut s, ScriptBound::Steps(100_000)).unwrap();
+        let spent = em
+            .run_input_script(&mut s, ScriptBound::Steps(100_000))
+            .unwrap();
         assert!(spent <= 100_000, "spent {spent}");
-        assert_eq!(s.next_frame(), Some(900), "frame-2 event fired, frame-900 did not");
+        assert_eq!(
+            s.next_frame(),
+            Some(900),
+            "frame-2 event fired, frame-900 did not"
+        );
         assert!(em.frame_count().unwrap() < 900);
     }
 
@@ -354,7 +360,11 @@ mod tests {
         s.add_pad(0, "3:0x1000,5:0,40:0x8000").unwrap();
         em.run_input_script(&mut s, ScriptBound::Frame(10)).unwrap();
         assert_eq!(s.next_frame(), Some(40));
-        assert_eq!(em.frame_count().unwrap(), 5, "chased to the last due event only");
+        assert_eq!(
+            em.frame_count().unwrap(),
+            5,
+            "chased to the last due event only"
+        );
     }
 
     #[test]
