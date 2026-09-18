@@ -3,7 +3,7 @@
 **Status: rows #1-#12 and #14 ✅/🔧 (2026-07-01, refreshed 2026-09-18).** The
 HDMA table walk / transfer rows are a faithful port of ares + Mesen2. Open:
 the 🔬 edge interactions (#13), one dead-read micro-divergence (#10 residual),
-and the four ⚠️ rows #15-#18 the 2026-09-11 audit found (segmented-path cost,
+and the ⚠️ rows #15-#17 (plus #18, fixed 2026-09-18) the 2026-09-11 audit found (segmented-path cost,
 DMA start edge, same-channel HDMA abort, APU ports on the DMA B-bus) — none
 with known game impact. (`HDMA_OVERHEAD_MCLK` no longer exists — retired
 2026-07-15 by row #11's per-read `hdma_cost`.)
@@ -42,7 +42,7 @@ pillar subsystem; until every row below is ✅, treat it as an approximation.
 | 15 | **MDMA cost on every path** — `dmaEdge` wraps `dmaRun` in `step(8 - dmaCounter())` … `step(clockCount - counter.dma % clockCount)`; `dmaRun` = `step(8)` + per enabled channel `step(8)` + 8 mclk/byte (`timing.cpp:124-131`, `dma.cpp:16-22,108-122`) | Fast path (no HDMA armed): `mdma_cost` (`snes.rs`) is the faithful model. **Segmented path** (HDMA armed, `dma_edge_inner` in `snes.rs`): a flat `advance_time(8)` start overhead + `bytes·8` — no DMA-clock alignment, no per-channel `+8`, no realignment to the CPU clock | ⚠️ gap (2026-09-11 audit) — cycle count only; a burst that runs while HDMA is armed ends a few mclk early. |
 | 16 | **DMA start edge** — the `$420B` write only sets `dmaPending`; the first following `dmaEdge()` just raises `dmaActive` ("Run one full CPU cycle", `timing.cpp:100-108,135-139`), and the burst runs at the edge **after** that | `$420B` arms `Dma::pending_mdma`; `SnesBus::dma_edge` (`snes.rs`) runs the burst at the **first** bus access after the write — no intermediate `dmaActive` cycle | ⚠️ gap (2026-09-11 audit) — one bus access early vs ares. Instruction-level placement already matches Mesen2's trace (issue #109). |
 | 17 | **HDMA aborts the same channel's DMA** — `hdmaSetup` / `hdmaTransfer` clear the channel's `dmaEnable` ("HDMA will stop active DMA mid-transfer", `dma.cpp:146,175`), so `dmaRun`'s `while(dmaEnable && --transferSize)` exits with the remaining count left in `$43x5/6` | `hdma_start_frame` / `hdma_step_line` (`dma/channel.rs`) never touch `seg_running`; after the HDMA line the segmented MDMA **resumes** the same channel to completion (`Dma::run_mdma_segment`, `dma/controller.rs`) | ⚠️ gap (2026-09-11 audit) — only reachable when one channel is both in `$420B` and `$420C` and the burst crosses a visible line. |
-| 18 | **APU ports (`$2140-$217F`) on the DMA B-bus; unmapped B-bus reads** — `readB`/`writeB` go through the full bus: `bus.read(0x2100 \| address, cpu.r.mdr)` / `bus.write(0x2100 \| address, data)` (`dma.cpp:70-83`), so a DMA reaches the APU mailbox, and an unmapped B address reads back the MDR | `DmaBusView::read_b` / `write_b` (`snes.rs`) decode only `$00-$3F` (PPU) and `$80-$83` (WRAM port): a B→A read of anything else returns a hard `0xFF` (not the MDR), and an A→B write to `$40-$7F` is dropped — the APU never sees it | ⚠️ gap (2026-09-11 audit) — no known title DMAs to/from the APU ports. Same family as the Kirby `$2180` bug (7fa6549): a port that works on the CPU bus but is missing from the DMA-side view. |
+| 18 | **APU ports (`$2140-$217F`) on the DMA B-bus; unmapped B-bus reads; MDR** — `readB`/`writeB` go through the full bus: `bus.read(0x2100 \| address, cpu.r.mdr)` / `bus.write(0x2100 \| address, data)` (`dma.cpp:70-83`), and every DMA/HDMA read latches `cpu.r.mdr` (`0` when `validA` / WRAM↔WMDATA blocks it, `dma.cpp:63-75`) | `DmaBusView::read_b` / `write_b` route `$40-$7F` to the APU mailbox (4 ports mirrored, stub fallback — the CPU path's rule); unmapped A/B reads return the MDR; `DmaBus::latch_mdr` is called by the channel for every read (`read_a_valid`, `transfer_byte`) | 🔧 fixed 2026-09-18 (tests `a_dma_to_the_apu_ports_reaches_the_spc700`; goldens byte-identical). Residual: the APU is not clocked *within* a burst, so a mailbox read mid-burst sees the SPC as of the burst start — same granularity the CPU-side coproc had before `DmaBusView::tick`. |
 
 ## Fixed (regression-tested)
 
@@ -69,9 +69,10 @@ Rows #1-#12 and #14 are ✅/🔧. What remains — no known game impact:
    on a `0`-header-at-frame-start (empty table) — dead reads, no observable
    effect; unify `hdma_start_frame`/`hdma_step_line` onto one `hdmaReload` port
    if ever closing the last micro-divergence.
-3. ⚠️ rows #15-#18 (2026-09-11 audit; listed as **open** on the DMA row of
+3. ⚠️ rows #15-#17 (2026-09-11 audit; listed as **open** on the DMA row of
    `accuracy_scorecard.md`): segmented-path cost/realign, DMA start edge,
-   same-channel HDMA abort, APU ports + MDR open bus on the DMA B-bus view.
+   same-channel HDMA abort. (#18, APU ports + MDR on the DMA B-bus view, is
+   🔧 fixed 2026-09-18.)
 
 ## Phase 5 inc 2 (sub-line dot-276 `hdmaPosition`) — ✅ LANDED (2026-07-26)
 

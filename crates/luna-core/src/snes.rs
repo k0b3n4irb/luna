@@ -2087,6 +2087,14 @@ struct DmaBusView<'a> {
     /// `$2180` (WMDATA) writes WRAM and auto-increments — the same state
     /// the CPU port uses.
     wm_addr: &'a mut u32,
+    /// The APU mailbox (`$2140-$217F`, 4 ports mirrored), reachable by DMA
+    /// on the B-bus exactly like the CPU port — ares routes a DMA B-bus
+    /// access through the same `bus.read/write(0x2100 | addr)`.
+    apu: &'a mut Apu,
+    /// Fallback mailbox, consulted only once the SPC700 has panicked (the
+    /// CPU path's rule, mirrored).
+    apu_stub: &'a mut ApuStub,
+    apu_panicked: bool,
     /// Optional DMA→VRAM transfer-time trace (moved in from the [`Dma`]
     /// controller for the duration of one MDMA burst). `None` = off.
     dma_trace: Option<&'a mut DmaTraceLog>,
@@ -2174,12 +2182,20 @@ impl DmaBus for DmaBusView<'_> {
     fn read_b(&mut self, b_offset: u8) -> u8 {
         // B-bus range $00-$3F = PPU. $80 = WMDATA ($2180): a DMA reading
         // WRAM via the port returns WRAM[WMADD] and auto-increments — same
-        // as the CPU port (`read_inner` $2180). Everything else reads the
-        // open bus (ares `bus.read(0x2100 | address, cpu.r.mdr)`) — which
-        // includes the APU ports $40-$7F: not routed on the DMA path yet
-        // (audit row #18).
+        // as the CPU port (`read_inner` $2180). $40-$7F = the APU mailbox.
+        // Everything else reads the open bus (ares `bus.read(0x2100 |
+        // address, cpu.r.mdr)`).
         if b_offset <= 0x3F {
             self.ppu.read(b_offset, *self.mdr)
+        } else if (0x40..=0x7F).contains(&b_offset) {
+            // APU mailbox, 4 ports mirrored across $2140-$217F — the CPU
+            // path's `apu_port` rule and stub fallback.
+            let port = usize::from(b_offset & 0x03);
+            if self.apu_panicked {
+                self.apu_stub.read(port)
+            } else {
+                self.apu.cpu_read_port(port)
+            }
         } else if b_offset == 0x80 {
             let a = (*self.wm_addr & 0x1FFFF) as usize;
             let v = self.wram[a];
@@ -2256,6 +2272,12 @@ impl DmaBus for DmaBusView<'_> {
             // at the source in Ppu::write — ares io.cpp:55-60); VRAM/OAM still
             // drop via their own `active_display` gates.
             self.ppu.write(b_offset, value);
+        } else if (0x40..=0x7F).contains(&b_offset) {
+            // APU mailbox — both the real APU and the fallback stub, as the
+            // CPU path does.
+            let port = usize::from(b_offset & 0x03);
+            self.apu.cpu_write_port(port, value);
+            self.apu_stub.write(port, value);
         } else if matches!(b_offset, 0x80..=0x83) {
             // WRAM port ($2180-$2183), mirroring the CPU path: $80 WMDATA
             // writes WRAM[WMADD]++ ; $81-$83 set the 17-bit WMADD. Games
@@ -2581,6 +2603,9 @@ impl SnesBus<'_> {
                 ppu: &mut *self.ppu,
                 wm_addr: &mut *self.wm_addr,
                 mdr: &mut *self.mdr,
+                apu: &mut *self.apu_real,
+                apu_stub: &mut *self.apu_stub_fallback,
+                apu_panicked: *self.apu_panicked,
                 dma_trace: trace.as_mut(),
                 last_a_addr: 0,
                 trace_frame: self.frame_count,
@@ -2670,6 +2695,9 @@ impl SnesBus<'_> {
                 ppu: &mut *self.ppu,
                 wm_addr: &mut *self.wm_addr,
                 mdr: &mut *self.mdr,
+                apu: &mut *self.apu_real,
+                apu_stub: &mut *self.apu_stub_fallback,
+                apu_panicked: *self.apu_panicked,
                 // hdma_init only reads table headers/pointers (A-bus); it makes
                 // no B-bus register writes, so there is nothing to trace here.
                 // The per-scanline transfers below are what the Event Viewer
@@ -2876,6 +2904,9 @@ impl SnesBus<'_> {
                     ppu: self.ppu,
                     wm_addr: self.wm_addr,
                     mdr: self.mdr,
+                    apu: &mut *self.apu_real,
+                    apu_stub: &mut *self.apu_stub_fallback,
+                    apu_panicked: *self.apu_panicked,
                     dma_trace: trace.as_mut(),
                     last_a_addr: 0,
                     trace_frame: self.frame_count,
@@ -2924,6 +2955,9 @@ impl SnesBus<'_> {
                     ppu: self.ppu,
                     wm_addr: self.wm_addr,
                     mdr: self.mdr,
+                    apu: &mut *self.apu_real,
+                    apu_stub: &mut *self.apu_stub_fallback,
+                    apu_panicked: *self.apu_panicked,
                     dma_trace: trace.as_mut(),
                     last_a_addr: 0,
                     trace_frame: self.frame_count,

@@ -4495,6 +4495,30 @@ mod tests {
     }
 
     #[test]
+    fn a_dma_to_the_apu_ports_reaches_the_spc700() {
+        // $2140-$2143 are on the B-bus: a DMA reaches them like the CPU
+        // does (ares routes both through `bus.write(0x2100 | addr)`). The
+        // DMA path used to drop them. Mode 4 = 4 registers B, B+1, B+2, B+3.
+        let code = [
+            0xA9, 0x40, 0x8D, 0x01, 0x43, // LDA #$40 : STA $4301 (BBAD $2140)
+            0xA9, 0x00, 0x8D, 0x02, 0x43, // LDA #$00 : STA $4302
+            0xA9, 0x20, 0x8D, 0x03, 0x43, // LDA #$20 : STA $4303
+            0xA9, 0x7E, 0x8D, 0x04, 0x43, // LDA #$7E : STA $4304 ($7E:2000)
+            0xA9, 0x04, 0x8D, 0x05, 0x43, // LDA #$04 : STA $4305 (4 bytes)
+            0xA9, 0x00, 0x8D, 0x06, 0x43, // LDA #$00 : STA $4306
+            0xA9, 0x04, 0x8D, 0x00, 0x43, // LDA #$04 : STA $4300 (mode 4)
+            0xA9, 0x01, 0x8D, 0x0B, 0x42, // LDA #$01 : STA $420B
+            0x80, 0xFE, // BRA * (keep the SPC clocked)
+        ];
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
+        e.poke_memory(0x7E, 0x2000, &[0x11, 0x22, 0x33, 0x44])
+            .unwrap();
+        e.step(200).unwrap();
+        assert_eq!(e.state().apu.to_spc_ports, [0x11, 0x22, 0x33, 0x44]);
+    }
+
+    #[test]
     fn run_until_mem_write_fires_on_a_dma_write_and_the_trace_says_dma() {
         // Channel 0: 4 bytes from $7E:2000 to $2122, triggered by $420B —
         // no CPU instruction ever writes $2122 (issue #226). Both DAS bytes
