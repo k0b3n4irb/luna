@@ -50,7 +50,7 @@ It runs three ways: the **GUI debugger** (`luna-gui`, a human plays), the
 ## ✨ Features
 
 - **Cycle-accurate cores** — 65C816 + SPC700 (per-instruction suites 100%), S-DSP audio.
-- **The big coprocessors** — SA-1, Super FX (GSU), DSP-1, S-DD1.
+- **The big coprocessors** — SA-1, Super FX (GSU), DSP-1, S-DD1 (other chips are refused by name; see the [compatibility list](https://k0b3n4irb.github.io/luna/using/compatibility.html)).
 - **AI-native** — a stable introspection API + an MCP server; an agent reads
   state and drives input through one contract the CLI, GUI and MCP all share.
 - **A real debugger GUI** — memory, disassembly and live panels over winit + wgpu,

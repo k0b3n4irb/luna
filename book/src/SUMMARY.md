@@ -5,6 +5,7 @@
 # Using Luna
 
 - [Install & first run](using/install.md)
+- [Compatibility](using/compatibility.md)
 - [Controls](using/controls.md)
 - [Debugging tools](using/debugging.md)
 - [Saves & save states](using/saves.md)
