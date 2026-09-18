@@ -45,10 +45,13 @@ use serde::Serialize;
 /// on [`Emulator`].
 pub mod dsp1_commands;
 pub mod event_viewer;
+pub mod input;
 pub mod symbols;
+
 pub use event_viewer::{
     CATEGORY_COUNT, EventCategory, EventViewerConfig, EventViewerEvent, categorise, register_name,
 };
+pub use input::{FRAME_STEP_BUDGET, InputEvent, InputScript, ScriptBound};
 pub use symbols::{SymbolKind, SymbolSpace, SymbolTable};
 use thiserror::Error;
 

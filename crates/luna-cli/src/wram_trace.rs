@@ -3,7 +3,7 @@
 
 use std::process::ExitCode;
 
-use crate::parsers::parse_input_script;
+use crate::parsers::pad_events;
 use crate::rom::load_rom_into;
 
 /// `luna wram-trace` — emit per-frame (vblank-aligned) WRAM page hashes
@@ -21,23 +21,23 @@ pub(crate) fn run_wram_trace(
     force_region: Option<&str>,
     input_script: Option<&str>,
 ) -> ExitCode {
+    use luna_api::FRAME_STEP_BUDGET as FRAME_BUDGET;
     use std::fmt::Write as _;
-    const FRAME_BUDGET: u64 = 200_000;
     let mut em = luna_api::Emulator::new();
     if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, None, None) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }
-    let checkpoints: Vec<(u64, u16)> = match input_script {
-        None => Vec::new(),
-        Some(script) => match parse_input_script(script) {
-            Ok(v) => v,
+    let mut script = luna_api::InputScript::new();
+    if let Some(s) = input_script {
+        match pad_events(s, 0) {
+            Ok(v) => script.extend(v),
             Err(e) => {
                 eprintln!("error: --input: {e}");
                 return ExitCode::from(2);
             }
-        },
-    };
+        }
+    }
     if steps > 0
         && let Err(e) = em.step(steps)
     {
@@ -47,16 +47,12 @@ pub(crate) fn run_wram_trace(
     // current PPU frame — so a scripted joypad pulse can span the frames
     // being hashed (front-loading them would consume the pulse before the
     // capture even starts).
-    let mut ck_idx = 0usize;
     let mut buf = String::new();
     for _ in 0..count {
         let cur_frame = em.frame_count().unwrap_or(0);
-        while ck_idx < checkpoints.len() && checkpoints[ck_idx].0 <= cur_frame {
-            if let Err(e) = em.set_joypad(0, checkpoints[ck_idx].1) {
-                eprintln!("error: set_joypad: {e}");
-                return ExitCode::from(1);
-            }
-            ck_idx += 1;
+        if let Err(e) = script.apply_due(&mut em, cur_frame) {
+            eprintln!("error: scripted input: {e}");
+            return ExitCode::from(1);
         }
         let executed = em.step_until_frame(FRAME_BUDGET).unwrap_or(0);
         let frame = em.frame_count().unwrap_or(0);

@@ -44,6 +44,20 @@ Follow-ups to the 2026-09-18 full project review.
   emulator lock to the end.
 
 ### Changed
+- **Scripted input is defined once, in `luna-api`** (`InputScript`,
+  `InputEvent`, `ScriptBound`, `Emulator::run_input_script` /
+  `step_to_frame_bounded`, `FRAME_STEP_BUDGET`). The `frame:mask` grammar,
+  the event order and the budget rule had been re-implemented in seven CLI
+  subcommands. Behaviour changes that fall out of it:
+  - `luna frames --input`: checkpoints inside the warm-up now spend from
+    `-n` as in `state` (issue #126) instead of being pre-rolled on top of
+    it, and a checkpoint later than the warm-up fires during the capture on
+    its own frame instead of before it.
+  - `luna bench`: each iteration is one real PPU frame (the per-frame cap
+    was 30 000 instructions, so a slow frame spanned several iterations),
+    and `--input` is keyed by the PPU frame, not by the iteration.
+  - `luna test`: an input event the step budget never reaches no longer
+    fires.
 - **BREAKING — save-state format v6.** `Snes::mclk_acc` (v1.18.0) and
   `Apu::master_hz` had been added under v5 behind `#[serde(default)]`,
   which bincode — a positional format — cannot honour, so genuine v5
