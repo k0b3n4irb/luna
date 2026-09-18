@@ -2156,9 +2156,9 @@ impl DmaBus for DmaBusView<'_> {
         if let Some(o) = SnesBus::wram_offset(addr) {
             return self.wram[o];
         }
-        // A-side ROM / SRAM reads via mapper; everything else is open
-        // bus until those subsystems land.
-        self.mapper.read(addr).unwrap_or(0xFF)
+        // A-side ROM / SRAM reads via the mapper; anything unmapped reads
+        // the open bus — the MDR (ares `bus.read(address, cpu.r.mdr)`).
+        self.mapper.read(addr).unwrap_or(*self.mdr)
     }
 
     fn write_a(&mut self, addr: Addr24, value: u8) {
@@ -2174,8 +2174,10 @@ impl DmaBus for DmaBusView<'_> {
     fn read_b(&mut self, b_offset: u8) -> u8 {
         // B-bus range $00-$3F = PPU. $80 = WMDATA ($2180): a DMA reading
         // WRAM via the port returns WRAM[WMADD] and auto-increments — same
-        // as the CPU port (`read_inner` $2180). APU $40-$43 is still open
-        // bus on the DMA path.
+        // as the CPU port (`read_inner` $2180). Everything else reads the
+        // open bus (ares `bus.read(0x2100 | address, cpu.r.mdr)`) — which
+        // includes the APU ports $40-$7F: not routed on the DMA path yet
+        // (audit row #18).
         if b_offset <= 0x3F {
             self.ppu.read(b_offset, *self.mdr)
         } else if b_offset == 0x80 {
@@ -2184,8 +2186,12 @@ impl DmaBus for DmaBusView<'_> {
             *self.wm_addr = (*self.wm_addr + 1) & 0x1FFFF;
             v
         } else {
-            0xFF
+            *self.mdr
         }
+    }
+
+    fn latch_mdr(&mut self, value: u8) {
+        *self.mdr = value;
     }
 
     fn write_b(&mut self, b_offset: u8, value: u8) {
