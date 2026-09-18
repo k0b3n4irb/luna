@@ -1109,7 +1109,9 @@ impl Cpu {
         let _signature = self.fetch_u8(bus);
         // Per fullsnes / Tom Harte, COP sets B=1 in the pushed P byte
         // in emulation mode (same as BRK). The B=0 case only applies
-        // to hardware IRQ/NMI, which we don't yet service.
+        // to hardware IRQ/NMI (`service_nmi` / `service_irq`, which share
+        // this push/vector sequence but do not yet add the two leading
+        // dummy cycles of ares `interrupt()` — docs/luna_65c816_gaps.md #3).
         self.service_software_interrupt(
             bus, /* vec_native */ 0xFFE4, /* vec_emulation */ 0xFFF4,
             /* set_b_bit_in_emulation */ true,
@@ -3531,7 +3533,7 @@ mod tests {
         assert_eq!(cpu.pc, 0x9000);
         // Per Tom Harte / fullsnes, both BRK and COP set B=1 in the
         // pushed P byte in emulation mode. The B=0 distinction only
-        // applies to hardware IRQ/NMI (not yet serviced).
+        // applies to hardware IRQ/NMI (`service_nmi` / `service_irq`).
         let pushed_p = bus.peek(0x00_01FD);
         assert!(
             pushed_p & 0x10 != 0,

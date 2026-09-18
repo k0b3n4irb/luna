@@ -62,9 +62,10 @@ modelled — `tick_timers` freezes when `timersEnable` is clear or
 still running so phase resumes on re-enable. Test
 `test_register_gates_timer_advance`.
 
-**Remaining** (folds into #6): the wait-state dividers (bits 4-7) and
-`ramWritable`/`ramDisable` (bits 1-2) are stored but not acted on; the
-P-flag write gate is omitted (pathological for `$F0`).
+**Remaining** (status 2026-09-18): the wait-state dividers (bits 4-7)
+are now modelled — see #6, DONE. Still open: `ramWritable`/`ramDisable`
+(bits 1-2) are stored but not acted on, and the P-flag write gate is
+omitted (pathological for `$F0`).
 
 ## ✅ 4. IPL ROM overlay (not baked into ARAM) — DONE
 
@@ -121,6 +122,7 @@ underlying RAM. Tests `ipl_rom_overlay_toggles_with_f1_bit7`,
    **done**.
 3. ~~#4 IPL overlay~~ — **done**.
 4. ~~#3 `$F0` timer gating~~ — **done** (timersEnable/Disable).
-5. 🟡 #6 wait-state timing (incl. the `$F0` wait-state + RAM bits) —
-   approximation, lowest priority; a timing-model refactor for low
-   real-world return (few drivers deviate from the default wait states).
+5. ~~#6 wait-state timing~~ — **done** (`clock_cycle` per-access
+   `cycleWaitStates {2,4,10,20}`, see the table row above). The only
+   `$F0` residue is the `ramWritable`/`ramDisable` bits (1-2), stored but
+   not acted on.

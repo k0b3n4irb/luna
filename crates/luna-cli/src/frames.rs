@@ -31,8 +31,14 @@ pub(crate) fn run_frames(
         eprintln!("error: creating {}: {e}", out_dir.display());
         return ExitCode::from(1);
     }
-    // Scripted input during warm-up (same semantics as `state --input`),
-    // so the capture can land in gameplay rather than at a title screen.
+    // Scripted input during warm-up, so the capture can land in gameplay
+    // rather than at a title screen. Same `frame:mask` script syntax as
+    // `state --input`, but NOT the same budget semantics: here every
+    // checkpoint is pre-rolled to its frame first and the `-n` warm-up is
+    // then spent in full on top, whereas `state -n` spends its checkpoints
+    // from the `-n` budget (issue #126).
+    // NOTE(review 2026-09-18): unifying the scripted-input driver into
+    // `luna-api` (one semantics for `state` / `frames` / `run`) is planned.
     let checkpoints: Vec<(u64, u16)> = match input_script {
         None => Vec::new(),
         Some(script) => match parse_input_script(script) {

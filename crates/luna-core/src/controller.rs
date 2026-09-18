@@ -16,7 +16,7 @@ pub enum PortDevice {
     Pad,
     /// SNES Mouse (serial, [`Mouse`]).
     Mouse,
-    /// Super Scope (serial + PPU-latched beam position) — coming next.
+    /// Super Scope (serial + PPU-latched beam position, [`SuperScope`]).
     SuperScope,
 }
 
