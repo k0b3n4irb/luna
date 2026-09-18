@@ -54,6 +54,21 @@ pub use event_viewer::{
 };
 pub use input::{FRAME_STEP_BUDGET, InputEvent, InputScript, ScriptBound};
 pub use power_on::parse_power_on;
+
+/// Parse a controller-device name — the CLI `--port1/--port2` and MCP
+/// `set_port_device` vocabulary: `pad` (or `joypad`), `mouse`, `superscope`,
+/// `multitap`. Case-insensitive.
+pub fn parse_port_device(name: &str) -> Result<PortDevice, String> {
+    match name.to_ascii_lowercase().as_str() {
+        "pad" | "joypad" => Ok(PortDevice::Pad),
+        "mouse" => Ok(PortDevice::Mouse),
+        "superscope" => Ok(PortDevice::SuperScope),
+        "multitap" => Ok(PortDevice::Multitap),
+        other => Err(format!(
+            "unknown device `{other}` (pad, mouse, superscope, multitap)"
+        )),
+    }
+}
 pub use symbols::{SymbolKind, SymbolSpace, SymbolTable};
 use thiserror::Error;
 
@@ -104,7 +119,8 @@ pub enum ApiError {
 /// added under v5 with only `#[serde(default)]` — which bincode, a
 /// positional format, cannot honour: a genuine v5 state mis-decoded. The
 /// bump retires those; `save_state_shape_is_pinned_to_the_version` now
-/// fails whenever the serialized shape moves without one.
+/// fails whenever the serialized shape moves without one. v6 also carries
+/// the Super Multitap (`CpuRegs::multitap`, `joypad_tap`, `joypad3/4_latched`).
 pub const SAVE_STATE_VERSION: u32 = 6;
 
 /// On-disk / on-wire save-state container produced by
@@ -980,7 +996,7 @@ struct InputCapture {
 impl InputCapture {
     fn note(&mut self, frame: u64, port: u8, mask: u16) {
         let Some(slot) = self.last_mask.get_mut(usize::from(port)) else {
-            return; // only ports 0/1 exist
+            return; // pads 1/2 only (multitap pads 3-5 are not captured)
         };
         if *slot != mask {
             *slot = mask;
@@ -1391,8 +1407,9 @@ impl Emulator {
         Ok(())
     }
 
-    /// Set the joypad button bitmask for controller `port` (`0` or
-    /// `1`). The mask is the SNES JOY1L/JOY1H layout — bit 15 = B,
+    /// Set the joypad button bitmask for controller `port`: `0` / `1` for
+    /// the two ports, `2`-`4` for a Super Multitap's pads B-D (players 3-5
+    /// with the tap on port 2 — see [`PortDevice::Multitap`]). The mask is the SNES JOY1L/JOY1H layout — bit 15 = B,
     /// 14 = Y, 13 = Select, 12 = Start, 11..8 = Up/Down/Left/Right,
     /// 7..4 = A/X/L/R, 3..0 = 0 (signature). The mask is latched on
     /// the next auto-read pulse (`VBlank` entry when `NMITIMEN.0` is
@@ -4367,7 +4384,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             (SAVE_STATE_VERSION, bundle.core.len(), bundle.mapper.len()),
-            (6, 447_745, 8_195),
+            (6, 447_759, 8_195),
             "serialized machine shape changed — see this test's doc comment"
         );
     }
@@ -4492,6 +4509,51 @@ mod tests {
         );
         // CGRAM stays 15-bit.
         assert!(e.peek_cgram().unwrap().iter().all(|&w| w & 0x8000 == 0));
+    }
+
+    #[test]
+    fn a_super_multitap_serves_players_2_to_5() {
+        // The multitap protocol as a game drives it: auto-read with iobit
+        // high gives pads A/B on port 2's d0/d1 ($421A / $421E), then iobit
+        // low and 16 manual $4017 reads give pads C/D on d0/d1.
+        let code = [
+            0xA9, 0x01, 0x8D, 0x00, 0x42, // LDA #$01 : STA $4200 (auto-read)
+            0xAD, 0x12, 0x42, 0x10, 0xFB, // wait: LDA $4212 : BPL wait (vblank)
+            0xAD, 0x12, 0x42, 0x29, 0x01, 0xD0, 0xF9, // busy: AND #1 : BNE
+            0xAD, 0x1A, 0x42, 0x8D, 0x00, 0x00, // JOY2L -> $00
+            0xAD, 0x1B, 0x42, 0x8D, 0x01, 0x00, // JOY2H -> $01
+            0xAD, 0x1E, 0x42, 0x8D, 0x02, 0x00, // JOY4L -> $02
+            0xAD, 0x1F, 0x42, 0x8D, 0x03, 0x00, // JOY4H -> $03
+            0xA9, 0x00, 0x8D, 0x01, 0x42, // LDA #0 : STA $4201 (iobit low)
+            0xA2, 0x10, // LDX #16
+            0xAD, 0x17, 0x40, 0x9D, 0x0F, 0x00, 0xCA, 0xD0, 0xF7, // LDA $4017 : STA $0F,X
+            0x80, 0xFE, // BRA *
+        ];
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
+        e.set_port_device(1, PortDevice::Multitap).unwrap();
+        for (port, mask) in [(1, 0x8000), (2, 0x4000), (3, 0x2000), (4, 0x1000)] {
+            e.set_joypad(port, mask).unwrap(); // B, Y, Select, Start
+        }
+        e.step(200_000).unwrap();
+        let auto = e.peek_memory(0x7E, 0x0000, 4).unwrap();
+        assert_eq!(auto, [0x00, 0x80, 0x00, 0x40], "player 2 = B, player 3 = Y");
+        let manual: Vec<u8> = e
+            .peek_memory(0x7E, 0x0010, 16)
+            .unwrap()
+            .into_iter()
+            .rev()
+            .collect();
+        assert_eq!(
+            manual[..5],
+            [0, 0, 1, 2, 0],
+            "player 4 Select on d0 at bit 2, player 5 Start on d1 at bit 3"
+        );
+        assert_eq!(luna_api_parse("multitap"), Ok(PortDevice::Multitap));
+    }
+
+    fn luna_api_parse(s: &str) -> Result<PortDevice, String> {
+        super::parse_port_device(s)
     }
 
     #[test]

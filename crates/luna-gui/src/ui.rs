@@ -2155,6 +2155,7 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(
                             luna_api::PortDevice::Pad => "Gamepad",
                             luna_api::PortDevice::Mouse => "Mouse",
                             luna_api::PortDevice::SuperScope => "Super Scope",
+                            luna_api::PortDevice::Multitap => "Super Multitap",
                         };
                         ui.menu_button(format!("Port {}: {cur}", port + 1), |ui| {
                             for (label, dev) in [

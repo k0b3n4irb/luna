@@ -233,7 +233,8 @@ pub struct StepParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct SetJoypadParams {
     /// Controller index: `0` = Player 1 (`$4218/$4219`),
-    /// `1` = Player 2 (`$421A/$421B`).
+    /// `1` = Player 2 (`$421A/$421B`), `2`-`4` = a Super Multitap's pads
+    /// B-D (players 3-5 with the tap on port 2).
     pub port: u8,
     /// 16-bit JOY1 bitmask. Bit layout (high → low):
     /// B, Y, Select, Start, Up, Down, Left, Right, A, X, L, R,
@@ -1581,22 +1582,18 @@ impl LunaServer {
 
     #[rmcp::tool(
         description = "Plug a device into a controller port (0 = P1, 1 = P2): `joypad`, \
-                                `mouse`, or `superscope`. Feed it afterwards with `set_joypad`, \
-                                `set_mouse`, or `set_superscope`."
+                                `mouse`, `superscope` or `multitap`. Feed it afterwards with \
+                                `set_joypad` (ports 2-4 = a multitap's pads B-D, players 3-5 \
+                                when it is on port 2), `set_mouse`, or `set_superscope`."
     )]
     async fn set_port_device(
         &self,
         Parameters(params): Parameters<SetPortDeviceParams>,
     ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
-        let device = match params.device.to_ascii_lowercase().as_str() {
-            "joypad" | "pad" => luna_api::PortDevice::Pad,
-            "mouse" => luna_api::PortDevice::Mouse,
-            "superscope" => luna_api::PortDevice::SuperScope,
-            other => {
-                return Err(ErrorData::invalid_params(
-                    format!("unknown device `{other}` (joypad, mouse, superscope)"),
-                    None,
-                ));
+        let device = match luna_api::parse_port_device(&params.device) {
+            Ok(d) => d,
+            Err(e) => {
+                return Err(ErrorData::invalid_params(e, None));
             }
         };
         {

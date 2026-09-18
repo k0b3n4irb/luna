@@ -101,7 +101,7 @@ pub(crate) fn run_state(
     screenshot: Option<&std::path::Path>,
     audio_out: Option<&std::path::Path>,
     input_script: Option<&str>,
-    input2_script: Option<&str>,
+    extra_pad_scripts: &[(u8, Option<&str>)],
     port1: &str,
     port2: &str,
     mouse_script: Option<&str>,
@@ -180,27 +180,11 @@ pub(crate) fn run_state(
     // auto-read / serial path with the SNES Mouse protocol so the game's
     // DETECT succeeds (the signature) and `inputGetMouse` reads its deltas.
     for (port, dev) in [(0u8, port1), (1u8, port2)] {
-        match dev {
-            "pad" => {}
-            "mouse" => {
-                if let Err(e) = em.set_port_mouse(port, true) {
-                    eprintln!("error: --port{}: {e}", port + 1);
-                    return ExitCode::from(1);
-                }
-            }
-            "superscope" => {
-                if let Err(e) = em.set_port_device(port, luna_api::PortDevice::SuperScope) {
-                    eprintln!("error: --port{}: {e}", port + 1);
-                    return ExitCode::from(1);
-                }
-            }
-            other => {
-                eprintln!(
-                    "error: --port{} `{other}`: expected `pad`, `mouse`, or `superscope`",
-                    port + 1
-                );
-                return ExitCode::from(1);
-            }
+        let applied = luna_api::parse_port_device(dev)
+            .and_then(|d| em.set_port_device(port, d).map_err(|e| e.to_string()));
+        if let Err(e) = applied {
+            eprintln!("error: --port{}: {e}", port + 1);
+            return ExitCode::from(1);
         }
     }
     let mouse_checkpoints = match mouse_script.map(parse_mouse_script) {
@@ -327,15 +311,19 @@ pub(crate) fn run_state(
     // budget (issue #126), with `--until-frame N` it is bounded by the frame
     // (where `-n`, defaulting to 1000, is not the run length at all).
     let mut script = luna_api::InputScript::new();
-    for (flag, spec, port) in [
-        ("--input", input_script, 0u8),
-        ("--input2", input2_script, 1),
-    ] {
+    let pads = std::iter::once((0u8, input_script)).chain(extra_pad_scripts.iter().copied());
+    for (port, spec) in pads {
         if let Some(s) = spec {
             match pad_events(s, port) {
                 Ok(v) => script.extend(v),
                 Err(e) => {
-                    eprintln!("error: {flag}: {e}");
+                    // --input, --input2 … --input5 (port 0-based).
+                    let n = if port == 0 {
+                        String::new()
+                    } else {
+                        (port + 1).to_string()
+                    };
+                    eprintln!("error: --input{n}: {e}");
                     return ExitCode::from(2);
                 }
             }
