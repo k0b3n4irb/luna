@@ -388,7 +388,7 @@ forced-blank flag.
 | `-c, --count <N>` | `8` | Number of consecutive frames to capture. |
 | `--out-dir <DIR>` | `/tmp/luna_frames` | Output directory (created if absent). |
 | `--force-mapper <M>` | auto | As in `state`. |
-| `--input <SCRIPT>` | — | Joypad-1 script applied during warm-up (§3). |
+| `--input <SCRIPT>` | — | Joypad-1 script (§3). Checkpoints inside the warm-up spend from `-n` exactly as in `state` (or are chased frame by frame under `--from-frame`); later ones fire during the capture, on their own frame. |
 
 ### `luna diff` — two ROMs at equal PPU frame (MATCH / DIFF)
 

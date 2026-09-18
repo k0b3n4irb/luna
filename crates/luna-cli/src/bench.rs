@@ -11,8 +11,11 @@ use std::process::ExitCode;
 
 use luna_api::Emulator;
 
-/// Instruction budget per frame for `step_until_frame` (matches `run_state`).
-const PER_FRAME_BUDGET: u64 = 30_000;
+/// Instruction budget per frame for `step_until_frame` — the shared
+/// luna-api safety belt. (A 30 000 cap used to live here: a slow frame then
+/// spanned several loop iterations, so `--frames` and the `--input`
+/// checkpoints, keyed by iteration, drifted from the real PPU frame.)
+use luna_api::FRAME_STEP_BUDGET as PER_FRAME_BUDGET;
 /// Frame by which boot/intro should be underway; metrics measured after it.
 const WARMUP_FRAME: u64 = 120;
 
@@ -143,7 +146,12 @@ fn bench_one(path: &Path, frames: u64, input: &[(u64, u16)], screens_dir: &Path)
     };
 
     // Drive frames, applying input checkpoints; sample metrics along the way.
-    let mut applied = 0usize;
+    let mut script = luna_api::InputScript::new();
+    script.extend(
+        input
+            .iter()
+            .map(|&(f, mask)| (f, luna_api::InputEvent::Pad { port: 0, mask })),
+    );
     let mut crash: Option<String> = None;
     let mut nmis_at_warmup = 0u64;
     let mut audio_peak = 0i32;
@@ -152,10 +160,8 @@ fn bench_one(path: &Path, frames: u64, input: &[(u64, u16)], screens_dir: &Path)
     let mut fb_changed = false;
     let mut last_frame = 0u64;
     for f in 0..frames {
-        while applied < input.len() && input[applied].0 <= f {
-            let _ = em.set_joypad(0, input[applied].1);
-            applied += 1;
-        }
+        let now = em.frame_count().unwrap_or(f);
+        let _ = script.apply_due(&mut em, now);
         if let Err(e) = em.step_until_frame(PER_FRAME_BUDGET) {
             crash = Some(e.to_string());
             break;

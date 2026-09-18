@@ -8,11 +8,11 @@
 
 use std::process::ExitCode;
 
-use crate::parsers::parse_input_script;
+use crate::parsers::pad_events;
 use crate::rom::load_rom_into;
 
 /// Instruction budget per frame (matches the other frame-stepping paths).
-const FRAME_BUDGET: u64 = 200_000;
+use luna_api::FRAME_STEP_BUDGET as FRAME_BUDGET;
 
 /// Options for [`run_profile`].
 pub(crate) struct ProfileOptions<'a> {
@@ -135,31 +135,21 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
             return ExitCode::from(2);
         }
     };
-    let checkpoints: Vec<(u64, u16)> = match o.input_script.map(parse_input_script) {
-        None => Vec::new(),
-        Some(Ok(v)) => v,
+    let mut script = luna_api::InputScript::new();
+    match o.input_script.map(|s| pad_events(s, 0)) {
+        None => {}
+        Some(Ok(v)) => script.extend(v),
         Some(Err(e)) => {
             eprintln!("error: --input: {e}");
             return ExitCode::from(2);
         }
-    };
+    }
     // Warm-up to `--from-frame` with the profiler off, applying input on
     // the way; then profile to the end.
     let frame = |em: &luna_api::Emulator| em.frame_count().unwrap_or(0);
-    let mut next_cp = 0usize;
-    let mut apply_input = |em: &mut luna_api::Emulator, f: u64| -> Result<(), String> {
-        while let Some(&(at, mask)) = checkpoints.get(next_cp) {
-            if at > f {
-                break;
-            }
-            em.set_joypad(0, mask).map_err(|e| e.to_string())?;
-            next_cp += 1;
-        }
-        Ok(())
-    };
     let mut step_frame = |em: &mut luna_api::Emulator| -> Result<bool, String> {
         let f = frame(em);
-        apply_input(em, f)?;
+        script.apply_due(em, f).map_err(|e| e.to_string())?;
         let ran = em
             .step_until_frame(FRAME_BUDGET)
             .map_err(|e| e.to_string())?;
@@ -196,7 +186,7 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
         while em.instructions_executed().saturating_sub(start) < o.steps {
             let left = o.steps - em.instructions_executed().saturating_sub(start);
             let f = frame(&em);
-            if let Err(e) = apply_input(&mut em, f) {
+            if let Err(e) = script.apply_due(&mut em, f) {
                 eprintln!("error: {e}");
                 return ExitCode::from(1);
             }
