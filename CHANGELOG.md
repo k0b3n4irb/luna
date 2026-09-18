@@ -38,6 +38,13 @@ Follow-ups to the 2026-09-18 full project review.
   count its instructions and ignored freezes, the call stack and the
   profile; `loop_probe` and `run_until_break` never folded the profile.
   They are now one internal driver with different stop conditions.
+- **DMA reaches the APU mailbox.** `$2140-$217F` were dropped on the DMA
+  B-bus (a DMA write never reached the SPC700, a read returned `$FF`); DMA
+  and HDMA reads now also latch the CPU open-bus MDR, and unmapped reads
+  return it, as ares does (`dma.cpp:63-83`).
+- **A mid-line OBJ-interlace toggle can no longer corrupt (or, in a debug
+  build, panic) the sprite row maths** — the cached line evaluation keeps
+  the SETINI bit it was computed with.
 - **MCP parity with the CLI:** `load_rom` / `load_rom_bytes` take
   `power_on` (the `--power-on` grammar; a random load returns its seed),
   and two new tools, `peek_coproc_ram` and `dsp_registers`, expose what
