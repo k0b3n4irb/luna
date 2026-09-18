@@ -38,6 +38,15 @@ Follow-ups to the 2026-09-18 full project review.
   count its instructions and ignored freezes, the call stack and the
   profile; `loop_probe` and `run_until_break` never folded the profile.
   They are now one internal driver with different stop conditions.
+- **MCP parity with the CLI:** `load_rom` / `load_rom_bytes` take
+  `power_on` (the `--power-on` grammar; a random load returns its seed),
+  and two new tools, `peek_coproc_ram` and `dsp_registers`, expose what
+  only `--dump-coproc-ram` and `[asserts.dsp]` could read.
+- **A `<rom>.sym` next to the ROM loads in every front-end** — it was a
+  CLI-only nicety, so the GUI debugger never showed labels and MCP
+  `load_rom` ignored it. `RomInfo` now reports `symbols_loaded` /
+  `symbols_error`. The CLI `--force-mapper` load also searches the firmware
+  folder now, like the auto-detected one.
 - **MCP: `pause` reaches every run tool**, not just `run` and `step` —
   `step_until_frame`, `run_until_pc`, `run_until_break` and
   `run_until_mem_read/write` took an unbounded `max_steps` and held the

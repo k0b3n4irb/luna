@@ -46,12 +46,14 @@ use serde::Serialize;
 pub mod dsp1_commands;
 pub mod event_viewer;
 pub mod input;
+mod power_on;
 pub mod symbols;
 
 pub use event_viewer::{
     CATEGORY_COUNT, EventCategory, EventViewerConfig, EventViewerEvent, categorise, register_name,
 };
 pub use input::{FRAME_STEP_BUDGET, InputEvent, InputScript, ScriptBound};
+pub use power_on::parse_power_on;
 pub use symbols::{SymbolKind, SymbolSpace, SymbolTable};
 use thiserror::Error;
 
@@ -172,6 +174,15 @@ pub struct RomInfo {
     /// no firmware is needed or it was resolved. The game still loads
     /// (the coprocessor stays inert) so it can be inspected meanwhile.
     pub missing_firmware: Option<String>,
+    /// Labels auto-loaded from the WLA-DX `<rom>.sym` next to the ROM file
+    /// (the wlalink convention, issue #67) — for every front-end, not just
+    /// the CLI. `None` when there is no such file or the load was from bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbols_loaded: Option<usize>,
+    /// Why a `<rom>.sym` sitting next to the ROM could not be parsed (the ROM
+    /// itself loaded fine).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbols_error: Option<String>,
 }
 
 /// Snapshot of the emulator's observable state. Every field maps to
@@ -1194,7 +1205,23 @@ impl Emulator {
         {
             cart.set_coprocessor_firmware(bytes);
         }
-        self.load_cartridge(cart)
+        let info = self.load_cartridge(cart)?;
+        Ok(self.load_sidecar_symbols(path, info))
+    }
+
+    /// Load the WLA-DX `<rom>.sym` next to `rom` into the CPU symbol space,
+    /// recording the outcome in `info` (and in the stored [`RomInfo`]). An
+    /// explicit [`Self::load_symbols`] afterwards replaces it.
+    fn load_sidecar_symbols(&mut self, rom: &Path, mut info: RomInfo) -> RomInfo {
+        let sym = rom.with_extension("sym");
+        if sym.is_file() {
+            match self.load_symbols(&sym) {
+                Ok(n) => info.symbols_loaded = Some(n),
+                Err(e) => info.symbols_error = Some(format!("{}: {e}", sym.display())),
+            }
+            self.rom_info = Some(info.clone());
+        }
+        info
     }
 
     /// luna's coprocessor-firmware folder (`<config>/luna/firmware`), where
@@ -1258,7 +1285,8 @@ impl Emulator {
         {
             cart.set_coprocessor_firmware(fw);
         }
-        self.load_cartridge(cart)
+        let info = self.load_cartridge(cart)?;
+        Ok(self.load_sidecar_symbols(path, info))
     }
 
     /// Force the video standard (NTSC / PAL) for every subsequent ROM load,
@@ -1325,6 +1353,8 @@ impl Emulator {
             } else {
                 None
             },
+            symbols_loaded: None,
+            symbols_error: None,
         };
         // Unsupported coprocessor carts surface as a typed
         // `UnsupportedMapper` error (no longer a panic). The
@@ -5415,6 +5445,30 @@ mod tests {
         e.reset().unwrap();
         assert!(!e.is_capturing_input(), "reset drops the capture");
         assert!(e.take_input_capture().is_empty());
+    }
+
+    #[test]
+    fn a_sym_next_to_the_rom_loads_for_every_front_end() {
+        // Issue #67's sidecar used to be a CLI-only nicety: the GUI and the
+        // MCP `load_rom` never saw it. It is the API's now.
+        let dir = std::env::temp_dir().join(format!("luna_sidecar_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rom = dir.join("game.sfc");
+        std::fs::write(&rom, demo_lorom()).unwrap();
+        std::fs::write(dir.join("game.sym"), "[labels]\n00:8000 main\n").unwrap();
+
+        let mut e = Emulator::new();
+        let info = e.load_rom(&rom).unwrap();
+        assert_eq!(info.symbols_loaded, Some(1));
+        assert_eq!(e.resolve_symbol("main"), Some(0x00_8000));
+        let info = e.load_rom_forced(&rom, MapperKind::LoRom).unwrap();
+        assert_eq!(info.symbols_loaded, Some(1));
+
+        // A broken sidecar never blocks the ROM.
+        std::fs::write(dir.join("game.sym"), "[labels]\nnot a label line\n").unwrap();
+        let info = e.load_rom(&rom).unwrap();
+        assert!(info.symbols_loaded.is_some() || info.symbols_error.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

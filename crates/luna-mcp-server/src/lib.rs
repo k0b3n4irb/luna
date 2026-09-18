@@ -108,6 +108,11 @@ pub struct LoadRomParams {
     /// country byte. Omitting it restores auto-detection.
     #[serde(default)]
     pub force_region: Option<String>,
+    /// What RAM holds before the ROM boots (issue #224): `zero` (default),
+    /// `ones`, `random` (a derived seed, echoed as `power_on_seed` so the
+    /// run replays) or `random=<seed>`. The CLI `--power-on` grammar.
+    #[serde(default)]
+    pub power_on: Option<String>,
 }
 
 /// `load_rom_bytes` parameters.
@@ -123,6 +128,11 @@ pub struct LoadRomBytesParams {
     /// auto-detection.
     #[serde(default)]
     pub force_region: Option<String>,
+    /// What RAM holds before the ROM boots (issue #224): `zero` (default),
+    /// `ones`, `random` (a derived seed, echoed as `power_on_seed` so the
+    /// run replays) or `random=<seed>`. The CLI `--power-on` grammar.
+    #[serde(default)]
+    pub power_on: Option<String>,
 }
 
 /// `set_port_device` parameters.
@@ -296,6 +306,16 @@ pub struct PeekAramParams {
     pub symbol: Option<String>,
     /// Number of bytes to read — up to `0x10000` for the whole ARAM in
     /// one call (the address space wraps; larger counts are clamped).
+    pub count: u32,
+}
+
+/// `peek_coproc_ram` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct PeekCoprocRamParams {
+    /// Byte offset into the coprocessor work RAM.
+    #[serde(default)]
+    pub offset: u32,
+    /// Number of bytes to read (clamped to the RAM's end).
     pub count: u32,
 }
 
@@ -590,6 +610,23 @@ pub struct SetSuperscopeParams {
 pub struct LoadRomResult {
     /// Cartridge metadata extracted from the internal SNES header.
     pub rom: RomInfo,
+    /// The seed a `power_on: "random"` load used — pass it back as
+    /// `random=<seed>` to replay the exact machine.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub power_on_seed: Option<u64>,
+}
+
+/// Resolve a `power_on` parameter (absent = `zero`, deterministic).
+fn parse_power_on_param(spec: Option<&str>) -> Result<luna_api::PowerOnState, ErrorData> {
+    luna_api::parse_power_on(spec).map_err(|e| ErrorData::invalid_params(e, None))
+}
+
+/// The seed of a random power-on, for the load result.
+const fn power_on_seed(state: luna_api::PowerOnState) -> Option<u64> {
+    match state {
+        luna_api::PowerOnState::Random { seed } => Some(seed),
+        _ => None,
+    }
 }
 
 /// `step` result wrapper.
@@ -1452,9 +1489,11 @@ impl LunaServer {
     ) -> Result<rmcp::Json<LoadRomResult>, ErrorData> {
         let mapper = parse_force_mapper(params.force_mapper.as_deref())?;
         let region = parse_force_region(params.force_region.as_deref())?;
+        let power_on = parse_power_on_param(params.power_on.as_deref())?;
         let info = {
             let mut em = self.emulator.lock().await;
             em.set_forced_region(region);
+            em.set_power_on(power_on);
             let path = PathBuf::from(params.path);
             match mapper {
                 Some(kind) => em.load_rom_forced(&path, kind),
@@ -1462,7 +1501,10 @@ impl LunaServer {
             }
             .map_err(|e| api_err_to_mcp(&e))?
         };
-        Ok(rmcp::Json(LoadRomResult { rom: info }))
+        Ok(rmcp::Json(LoadRomResult {
+            rom: info,
+            power_on_seed: power_on_seed(power_on),
+        }))
     }
 
     #[rmcp::tool(
@@ -1483,16 +1525,58 @@ impl LunaServer {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(params.rom_base64.as_bytes())
             .map_err(|e| ErrorData::invalid_params(format!("bad base64: {e}"), None))?;
+        let power_on = parse_power_on_param(params.power_on.as_deref())?;
         let info = {
             let mut em = self.emulator.lock().await;
             em.set_forced_region(region);
+            em.set_power_on(power_on);
             match mapper {
                 Some(kind) => em.load_rom_bytes_forced(bytes, kind),
                 None => em.load_rom_bytes(bytes),
             }
             .map_err(|e| api_err_to_mcp(&e))?
         };
-        Ok(rmcp::Json(LoadRomResult { rom: info }))
+        Ok(rmcp::Json(LoadRomResult {
+            rom: info,
+            power_on_seed: power_on_seed(power_on),
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Read the cartridge coprocessor's work RAM (Super FX Game Pak \
+                                RAM, SA-1 BW-RAM, …): `count` bytes from `offset`, ungated by \
+                                the CPU-side bus mapping — the CLI `--dump-coproc-ram`. \
+                                `bytes` is empty when the cart has no coprocessor RAM."
+    )]
+    async fn peek_coproc_ram(
+        &self,
+        Parameters(params): Parameters<PeekCoprocRamParams>,
+    ) -> Result<rmcp::Json<MemoryResult>, ErrorData> {
+        let ram = {
+            let em = self.emulator.lock().await;
+            em.coproc_ram().map_err(|e| api_err_to_mcp(&e))?
+        }
+        .unwrap_or_default();
+        let start = (params.offset as usize).min(ram.len());
+        let end = start.saturating_add(params.count as usize).min(ram.len());
+        Ok(rmcp::Json(MemoryResult {
+            bytes: ram[start..end].to_vec(),
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "The 128 S-DSP registers (`$00-$7F`: per-voice VOL/PITCH/SRCN/ADSR/\
+                                GAIN/ENVX/OUTX, master volumes, KON/KOFF/FLG/ENDX, echo, FIR) — \
+                                what a `luna test` manifest `[asserts.dsp]` reads."
+    )]
+    async fn dsp_registers(&self) -> Result<rmcp::Json<MemoryResult>, ErrorData> {
+        let regs = {
+            let em = self.emulator.lock().await;
+            em.dsp_registers().map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(MemoryResult {
+            bytes: regs.to_vec(),
+        }))
     }
 
     #[rmcp::tool(
@@ -4190,6 +4274,7 @@ mod tests {
                 path: broken_path.to_string_lossy().into(),
                 force_mapper: Some("lorom".into()),
                 force_region: Some("pal".into()),
+                power_on: None,
             }))
             .await
             .unwrap();
@@ -4202,6 +4287,7 @@ mod tests {
                 path: rom_path.to_string_lossy().into(),
                 force_mapper: Some("wat".into()),
                 force_region: None,
+                power_on: None,
             }))
             .await
             .is_err()
@@ -4211,6 +4297,7 @@ mod tests {
                 path: rom_path.to_string_lossy().into(),
                 force_mapper: None,
                 force_region: Some("secam".into()),
+                power_on: None,
             }))
             .await
             .is_err()
@@ -4222,6 +4309,7 @@ mod tests {
                 rom_base64: b64(&demo_lorom()),
                 force_mapper: None,
                 force_region: None,
+                power_on: None,
             }))
             .await
             .unwrap();
@@ -4231,6 +4319,7 @@ mod tests {
                 rom_base64: "not-base64!!".into(),
                 force_mapper: None,
                 force_region: None,
+                power_on: None,
             }))
             .await
             .is_err()
@@ -4391,6 +4480,7 @@ mod tests {
             path: rom_path.to_string_lossy().into(),
             force_mapper: Some("lorom".into()),
             force_region: None,
+            power_on: None,
         }))
         .await
         .unwrap();
@@ -5010,6 +5100,7 @@ mod tests {
             path: rom_path.to_string_lossy().into(),
             force_mapper: Some("lorom".into()),
             force_region: None,
+            power_on: None,
         }))
         .await
         .unwrap();
@@ -5036,6 +5127,7 @@ mod tests {
             path: path.into(),
             force_mapper: None,
             force_region: None,
+            power_on: None,
         }
     }
 
