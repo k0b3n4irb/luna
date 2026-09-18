@@ -55,8 +55,13 @@ reference-first from the actual ares source
   GSU is caught up to the CPU's exact time before the register is read/written.
 - The GSU's own bus accesses (`read()` in memory.cpp) **block**:
   `while(!regs.scmr.ron){ step(...); }` until it owns ROM/RAM (arbitration).
-- `clsr` selects the GSU Frequency (21.48 MHz fast / 10.74 MHz slow) → it lives
-  in the **scalar**; the per-op `step(clsr?5:6)` counts are GSU *clocks*.
+- `clsr` does **NOT** live in the scalar. The thread `Frequency` is constant
+  (superfx.cpp:61 `Thread::create(Frequency, …)`, assigned once in
+  cartridge/load.cpp:265-267) and `$3039` only stores `regs.clsr`
+  (io.cpp:106). The slow/fast speed is carried by the per-op counts
+  (`step(clsr ? 5 : 6)`, timing.cpp:32,46). *(Corrected 2026-09-18 — an
+  earlier revision of this note put it in the scalar; scaling the clock by
+  `clsr` as well would count it twice.)*
 
 **Net:** all components advance on one absolute time axis; before the CPU
 observes the GSU it runs the GSU to the CPU's exact time; the GSU yields to the
