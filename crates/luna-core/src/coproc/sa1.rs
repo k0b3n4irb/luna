@@ -216,7 +216,7 @@ impl Mapper for Sa1Chip {
                 && *max > 0
             {
                 if events.len() >= *max {
-                    events.drain(0..*max / 2);
+                    events.drain(0..(*max / 2).max(1)); // max == 1: half is 0
                 }
                 events.push(Sa1TraceEvent {
                     pc_full: sa1_pc,

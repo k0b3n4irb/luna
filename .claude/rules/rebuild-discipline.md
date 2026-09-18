@@ -29,8 +29,12 @@ This catches:
   miss with per-crate builds).
 - example / test / benchmark targets that don't get hit by `cargo test`.
 
-Run `cargo test --workspace --lib` separately when relevant — the
-rebuild above does not run tests, only compiles.
+Run `cargo test --workspace --lib --bins` separately when relevant — the
+rebuild above does not run tests, only compiles. `--bins` matters:
+`luna-cli` and `luna-gui` are binary crates, so `--lib` alone silently
+skips their unit tests. (CI runs the wider `cargo test --workspace
+--all-features`, integration tests included; locally those pull the golden
+corpus through a debug build, hence the narrower pre-commit form.)
 
 When the work is purely refactoring a single crate's internals, you
 may still run a per-crate build first to iterate fast, but the
@@ -51,7 +55,7 @@ sequence:
 ```
 cargo build --workspace --all-targets \
   && cargo build --release --workspace --all-targets \
-  && cargo test --workspace --lib \
+  && cargo test --workspace --lib --bins \
   && cargo fmt --all --check \
   && cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```

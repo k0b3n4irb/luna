@@ -196,5 +196,13 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 
+# The shipped binary, but profilable: same optimisation as `release`,
+# symbols + line tables kept. `cargo build --profile profiling -p luna-cli`
+# then perf / callgrind / samply on `target/profiling/luna`.
+[profile.profiling]
+inherits = "release"
+strip = "none"
+debug = "line-tables-only"
+
 [profile.dev]
 opt-level = 1   # Émulation à vitesse acceptable même en dev
