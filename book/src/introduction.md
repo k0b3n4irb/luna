@@ -45,7 +45,7 @@ differential against a reference emulator.
 | **Platform** | Linux (tested) · Windows x86_64 + macOS arm64 (release binaries provided, unsigned) |
 | **License** | [MPL-2.0](https://github.com/k0b3n4irb/luna/blob/main/LICENSE) |
 
-> Luna is one binary that runs three ways: **standalone** (a human plays),
-> **spectator** (the AI plays, a human watches), or **headless** (driven over
-> MCP, for CI and agents) — all through the *same* observation and control
-> surface.
+> Luna runs three ways: the **GUI debugger** (`luna-gui`, a human plays), the
+> **headless CLI** (`luna run` / `state` / `test`, for scripts and CI), or the
+> **MCP server** (`luna mcp`, an agent drives) — all through the *same*
+> observation and control surface.

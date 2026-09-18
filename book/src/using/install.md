@@ -7,15 +7,19 @@ prebuilt binaries — no toolchain needed:
 
 | Platform | Asset |
 |---|---|
-| Linux x86_64 | `luna-v1.24.0-linux-x86_64.tar.gz` |
-| Linux aarch64 | `luna-v1.24.0-linux-aarch64.tar.gz` |
-| Windows x86_64 | `luna-v1.24.0-windows-x86_64.zip` |
-| macOS Apple Silicon (arm64) | `luna-v1.24.0-macos-aarch64.tar.gz` |
+| Linux x86_64 | `luna-linux-x86_64.tar.gz` |
+| Linux aarch64 | `luna-linux-aarch64.tar.gz` |
+| Windows x86_64 | `luna-windows-x86_64.zip` |
+| macOS Apple Silicon (arm64) | `luna-macos-aarch64.tar.gz` |
+
+Each asset also exists under a versioned name
+(`luna-v<version>-<os>-<arch>`) if you want to pin a release; the
+unversioned names above always resolve to the latest one (from v1.25.0 on).
 
 ```bash
 # Linux / macOS (swap the asset name for your platform)
-curl -LO https://github.com/k0b3n4irb/luna/releases/latest/download/luna-v1.24.0-linux-x86_64.tar.gz
-tar xzf luna-v1.24.0-linux-x86_64.tar.gz && cd luna-v1.24.0-linux-x86_64
+curl -LO https://github.com/k0b3n4irb/luna/releases/latest/download/luna-linux-x86_64.tar.gz
+tar xzf luna-linux-x86_64.tar.gz && cd luna-linux-x86_64
 
 ./luna-gui "path/to/game.sfc"   # play in the graphical debugger
 ./luna --help                   # headless CLI: run · state · mcp …
@@ -36,7 +40,7 @@ run `luna-gui.exe` or `luna.exe`. Each archive contains both binaries and a
 
 > **macOS Gatekeeper:** the binaries are unsigned, so the first launch is
 > blocked. Clear the quarantine flag once with
-> `xattr -dr com.apple.quarantine luna-v1.24.0-macos-aarch64`, or right-click →
+> `xattr -dr com.apple.quarantine luna-macos-aarch64`, or right-click →
 > *Open* in Finder and confirm.
 >
 > Intel Macs and 32-bit/ARM Windows are not built — build from source below.
@@ -56,11 +60,15 @@ cargo run --release -p luna-gui -- "path/to/game.sfc"
 
 A handful of games (Super Mario Kart, Pilotwings) use the **DSP-1**
 coprocessor, which needs a user-supplied `dsp1b.rom` dump. Luna looks for it
-in three places, in order:
+in three places, first hit wins:
 
-1. next to the ROM,
-2. a path you pass with `--dsp1-rom` (CLI) or pick in the GUI prompt,
-3. your config directory (`~/.config/luna/`).
+1. embedded in the ROM dump (some `.sfc` files append the 8 KB firmware),
+2. next to the ROM (`dsp1b.rom` in the same folder),
+3. luna's firmware folder — `~/.config/luna/firmware/dsp1b.rom` on Linux
+   (`<config>/luna/firmware` per platform).
+
+If none is found, `--dsp1-rom <path>` (CLI) or the GUI's "locate firmware"
+prompt installs the file into that firmware folder once, for every later run.
 
 The ROM is copyrighted and is not distributed with Luna — dump it from your own
 cartridge.
