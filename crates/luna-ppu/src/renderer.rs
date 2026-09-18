@@ -1728,6 +1728,14 @@ pub(crate) struct SpriteEval {
     pub(crate) range_over: bool,
     /// More than 34 sprite tiles on this line ($213E.7).
     pub(crate) time_over: bool,
+    /// OBJ interlace (SETINI bit 1) as it stood when the line was
+    /// evaluated. The row maths must use THIS, not a re-read of SETINI:
+    /// the evaluation is cached for the whole line, and a mid-line `$2133`
+    /// write would otherwise pair survivors picked for one sprite height
+    /// with row arithmetic for the other (`h - 1 - sr` underflowed).
+    /// Hardware latches it the same way — ares fetches the line's tiles
+    /// during evaluation (object.cpp:109, `if(io.interlace)`).
+    interlace: bool,
 }
 
 /// ares `latch.oamAddress`: the sprite index object evaluation last found
@@ -1812,6 +1820,7 @@ pub(crate) fn evaluate_sprite_line(ppu: &Ppu, sprites: &[SpriteEntry; 128], y: u
         survivor_count: sc,
         range_over,
         time_over,
+        interlace,
     }
 }
 
@@ -1866,7 +1875,8 @@ fn render_sprites_scanline_indexed_from(
     // screen row samples logical sprite row `screen_row*2 + field` (ares
     // object.cpp:109,121-122). Each field is rendered in its own blend pass
     // (Phase C), so `Ppu::field` selects the even/odd logical row here.
-    let interlace = ppu.setini & 0x02 != 0;
+    // Latched with the evaluation — see `SpriteEval::interlace`.
+    let interlace = eval.interlace;
     let field = usize::from(ppu.field);
     // Draw survivors in fetch order: back-most first, front-most last,
     // so the front sprite overwrites and wins the pixel.
@@ -2719,6 +2729,27 @@ mod tests {
             16,
             "SETINI bit 1 (OBJ interlace) applies the small-sprite height quirk"
         );
+    }
+
+    #[test]
+    fn a_mid_line_obj_interlace_toggle_uses_the_latched_evaluation() {
+        // A large v-flipped sprite evaluated WITHOUT OBJ interlace, then
+        // SETINI bit 1 set before the render: the render used to re-read
+        // SETINI, double the row (`sr <<= 1`) past the sprite height and
+        // underflow `h - 1 - sr` (panic in debug, garbage in release).
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F);
+        p.obsel = 0xA0; // sizes 32x32 / 64x64
+        p.oam.poke(0, 0); // x
+        p.oam.poke(1, 0); // y
+        p.oam.poke(3, 0x80); // v-flip
+        p.oam.poke(0x200, 0x02); // sprite 0 large (64x64)
+        let sprites = decode_all_sprites(&p);
+        let eval = evaluate_sprite_line(&p, &sprites, 40);
+        p.setini = 0x02; // mid-line $2133 write
+        let line =
+            render_sprites_scanline_indexed_from(&p, 40, RenderOptions::default(), &sprites, &eval);
+        assert_eq!(line.len(), 256);
     }
 
     #[test]
