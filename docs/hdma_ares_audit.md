@@ -3,9 +3,9 @@
 **Status: rows #1-#12 and #14 ✅/🔧 (2026-07-01, refreshed 2026-09-18).** The
 HDMA table walk / transfer rows are a faithful port of ares + Mesen2. Open:
 the 🔬 edge interactions (#13), one dead-read micro-divergence (#10 residual),
-and the ⚠️ rows #15-#17 (plus #18, fixed 2026-09-18) the 2026-09-11 audit found (segmented-path cost,
-DMA start edge, same-channel HDMA abort, APU ports on the DMA B-bus) — none
-with known game impact. (`HDMA_OVERHEAD_MCLK` no longer exists — retired
+and the ⚠️ rows #15-#17 the 2026-09-11 audit found (segmented-path cost,
+DMA start edge, same-channel HDMA abort — its fourth, #18 APU ports on the
+DMA B-bus, is fixed 2026-09-18) — none with known game impact. (`HDMA_OVERHEAD_MCLK` no longer exists — retired
 2026-07-15 by row #11's per-read `hdma_cost`.)
 Reference: ares `ares/sfc/cpu/dma.cpp` + `timing.cpp` and Mesen2
 `Core/SNES/SnesDmaController.cpp`. Governed by
