@@ -1315,7 +1315,7 @@ game_test!(
     game_smrpg,
     "Super Mario RPG - Legend of the Seven Stars (USA).sfc",
     905,
-    "bf796467635a97e85615b6aa376a277c795a4d8f84ce8394e8a48b00af1637b5"
+    "622fc2b46c8719744f41509848301c93835dc10a9d76ce9e1ba5c04b2ccfb600"
 );
 game_test!(
     game_kirby_ss,
@@ -1328,7 +1328,7 @@ game_test!(
     game_starfox,
     "Star Fox (USA) (Rev 2).sfc",
     1939,
-    "f2898571d973c0c265b27f21ac3d186f8b78cbcf05b688127bfaa9bd4413e1e3"
+    "df7bd17642d3371151fc32c0326840ea1a765a5f86126035fa30fb485bc6a58f"
 );
 game_test!(
     game_stuntfx,
