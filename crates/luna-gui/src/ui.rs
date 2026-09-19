@@ -2162,6 +2162,7 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(
                                 ("Gamepad", luna_api::PortDevice::Pad),
                                 ("Mouse", luna_api::PortDevice::Mouse),
                                 ("Super Scope", luna_api::PortDevice::SuperScope),
+                                ("Super Multitap", luna_api::PortDevice::Multitap),
                             ] {
                                 if ui
                                     .radio(state.port_device[port as usize] == dev, label)
