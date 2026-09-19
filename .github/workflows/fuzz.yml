@@ -1,7 +1,7 @@
 name: fuzz
 
 # Weekly fuzzing of the untrusted-input surface (ROM parsing → system
-# construction). Short per-target budgets: this is a regression net that
+# construction, and save-state loading). Short per-target budgets: this is a regression net that
 # re-explores from the committed corpus, not a discovery campaign — for
 # that, run `cargo +nightly fuzz run <target>` locally for hours.
 #
@@ -19,6 +19,7 @@ on:
   pull_request:
     paths:
       - "crates/luna-cartridge/**"
+      - "crates/luna-bus/src/mapper.rs"
       - "fuzz/**"
       - ".github/workflows/fuzz.yml"
 
@@ -34,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [cartridge_parse, cartridge_forced, cartridge_to_system]
+        target: [cartridge_parse, cartridge_forced, cartridge_to_system, load_state]
     steps:
       - uses: actions/checkout@v4
       - name: Install build deps

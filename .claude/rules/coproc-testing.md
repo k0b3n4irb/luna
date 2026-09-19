@@ -8,7 +8,7 @@ regressions elsewhere are common:
 - `crates/luna-core/src/dma/` (DMA + HDMA controllers)
 - `crates/luna-ppu/`
 
-A change in any of these requires a full `cargo test --workspace --lib`
+A change in any of these requires a full `cargo test --workspace --lib --bins`
 sweep, not just the per-crate test set. Run after the rebuild discipline
 sequence has passed.
 

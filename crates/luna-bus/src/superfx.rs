@@ -7,19 +7,22 @@
 //! handshake — lives here in one [`SuperFxMapper`], driven by the existing
 //! [`Mapper::step_coproc`] hook.
 //!
-//! This is the **scaffolding phase**: memory map, the register/MMIO
-//! surface, the GO / STOP / IRQ handshake, and a diagnostic snapshot. The
-//! GSU *instruction engine* (the opcode interpreter), the ROM/RAM buffer
-//! timing and the pixel-plot pipeline land in later phases — `step_coproc`
-//! is a no-op for now, so a game can arm the GSU and the SNES side behaves
-//! correctly, but the GSU executes no opcodes yet.
+//! Everything is here: the memory map, the register/MMIO surface, the
+//! GO / STOP / IRQ handshake, the GSU instruction engine (byte-exact vs
+//! Mesen2 through the `gsu_differential` / `gsu_trajectory` harnesses), the
+//! ROM/RAM buffer timing, the SCMR `ron`/`ran` bus arbitration and the
+//! PLOT/RPIX pixel pipeline. `step_coproc` runs the GSU up to the CPU's
+//! clock; the remaining gap vs ares is the scheduler *grain* (whole
+//! instructions per catch-up, not a yield after every memory access).
 //!
 //! Reference: `docs/superfx_reference.md` (synthesised ares + Mesen2 spec).
 //! Citations like `(spec §1.9)` index that document; ultimate sources are
 //! ares `ares/sfc/coprocessor/superfx/*` + `ares/component/processor/gsu/*`
 //! and Mesen2 `Core/SNES/Coprocessors/GSU`.
 
-use crate::mapper::{Mapper, MapperKind, SuperFxTraceEvent};
+use crate::mapper::{
+    Mapper, MapperKind, MapperStateError, SuperFxTraceEvent, check_state_len, decode_state,
+};
 use crate::types::{Addr24, bank_of, offset_of};
 
 // --- SFR (Status Flag Register) bit masks (spec §1.2) ---------------------
@@ -789,7 +792,7 @@ impl SuperFxMapper {
             if let Some((events, max)) = self.trace.as_mut() {
                 if *max > 0 {
                     if events.len() >= *max {
-                        events.drain(0..*max / 2);
+                        events.drain(0..(*max / 2).max(1)); // max == 1: half is 0
                     }
                     events.push(ev);
                     Some(events.len() - 1)
@@ -1560,9 +1563,10 @@ impl Mapper for SuperFxMapper {
         bincode::serde::encode_to_vec(&st, bincode::config::standard()).unwrap_or_default()
     }
 
-    fn load_state(&mut self, data: &[u8]) {
-        if let Ok((st, _)) =
-            bincode::serde::decode_from_slice::<SuperFxState, _>(data, bincode::config::standard())
+    fn load_state(&mut self, data: &[u8]) -> Result<(), MapperStateError> {
+        let st: SuperFxState = decode_state(data, "Super FX")?;
+        // `ram_mask` is fixed at construction and indexes `ram` unchecked.
+        check_state_len("Super FX work RAM", st.ram.len(), self.ram.len())?;
         {
             self.ram = st.ram;
             self.regs = st.regs;
@@ -1576,6 +1580,7 @@ impl Mapper for SuperFxMapper {
             self.modified_r14 = st.modified_r14;
             self.modified_r15 = st.modified_r15;
         }
+        Ok(())
     }
 
     /// Re-power the GSU on a system reset (ares `SuperFX::power()` →
@@ -1652,11 +1657,10 @@ impl Mapper for SuperFxMapper {
 
     /// Advance the GSU by `main_mclk` master cycles of main-CPU progress.
     ///
-    /// Phase-2 timing model: accumulate a GSU-clock budget and run
-    /// instructions while it stays positive, deducting each op's cycle cost
-    /// (roughly 1 master clock ≈ 1 GSU clock at the fast rate; the exact
-    /// clsr ratio is the timing phase's job). The loop also exits the moment
-    /// a STOP clears the GO flag.
+    /// Accumulate a GSU-clock budget and run instructions while it stays
+    /// positive, deducting each op's cycle cost (1 master clock = 1 GSU
+    /// clock; CLSR is already inside the per-op costs — see below). The loop
+    /// also exits the moment a STOP clears the GO flag.
     fn step_coproc(&mut self, main_mclk: u32, _scpu_mar: u32) {
         // Advance the shared CPU timeline unconditionally — even while the GSU
         // is stopped — so the trace's `mclk` stamp reflects idle (CPU-only)
@@ -1669,20 +1673,21 @@ impl Mapper for SuperFxMapper {
         // lag, then run the GSU until it catches up to the CPU's clock — ares
         // `cpu.synchronize(gsu)` (run `gsu` until `gsu.clock ≥ cpu.clock`).
         self.clock_deficit += i64::from(main_mclk);
-        // ares `Thread` scalar for the GSU = master clocks per GSU clock. The
-        // GSU runs at master/1 (fast, `clsr` = 1) or master/2 (slow,
-        // `clsr` = 0), so faithfully one GSU clock costs `clsr ? 1 : 2` master
-        // clocks. Kept at 1 (behaviour-preserving) until the cooperative
-        // interleave is exact; the faithful value lands at step 5
-        // (`docs/cooperative_scheduler_reference.md`).
-        let mclk_per_gsu_clock: i64 = 1; // faithful: if self.regs.clsr { 1 } else { 2 }
+        // One GSU clock = one master clock, ALWAYS. ares creates the GSU
+        // thread at a constant `Frequency` (superfx.cpp:61; set once at load,
+        // cartridge/load.cpp:265-267) and `$3039` only stores `regs.clsr`
+        // (io.cpp:106). CLSR's slow/fast speed is carried entirely by the
+        // per-operation clock counts — `clsr ? 5 : 6` for the ROM/RAM buffers
+        // (timing.cpp:32,46) and the opcode/cache costs — which `run_one`
+        // already charges into `self.cycles`. Do NOT also scale the clock by
+        // `clsr` here: that would count it twice and halve slow-mode titles.
         // Mirror Mesen `Gsu::Run`: run whole instructions until caught up to the
         // CPU clock, but STOP the moment the GSU parks on a bus it doesn't own.
         while self.sfr_get(SFR_G) && !self.stalled() && self.clock_deficit > 0 {
             self.run_one();
             // Each instruction is ≥ 1 GSU clock, so this always progresses and
             // the deficit bounds the loop.
-            self.clock_deficit -= i64::from(self.cycles.max(1)) * mclk_per_gsu_clock;
+            self.clock_deficit -= i64::from(self.cycles.max(1));
         }
         // While parked (waiting for the CPU to release ROM/RAM), the GSU still
         // advances its clock with no work — Mesen `Run`'s trailing
@@ -1728,6 +1733,23 @@ mod tests {
 
     fn fx() -> SuperFxMapper {
         SuperFxMapper::new(ramp_rom(1024 * 1024), 0x8000)
+    }
+
+    #[test]
+    fn load_state_refuses_a_work_ram_of_the_wrong_size() {
+        // `ram_mask` is fixed at construction and indexes `ram` unchecked:
+        // a state saved from a smaller Game Pak RAM must not get in.
+        let small = SuperFxMapper::new(ramp_rom(1024 * 1024), 0x2000).save_state();
+        let mut m = SuperFxMapper::new(ramp_rom(1024 * 1024), 0x8000);
+        let before = m.save_state();
+        assert!(m.load_state(&small).is_err());
+        assert!(m.load_state(&[0xFF; 9]).is_err());
+        assert_eq!(
+            m.save_state(),
+            before,
+            "a refused state must not modify the mapper"
+        );
+        m.load_state(&before).unwrap();
     }
 
     #[test]

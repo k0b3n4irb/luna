@@ -2,7 +2,7 @@
 
 use std::process::ExitCode;
 
-use crate::parsers::parse_input_script;
+use crate::parsers::pad_events;
 use crate::rom::load_rom_into;
 
 /// `luna frames` — capture `count` exactly-consecutive PPU frames as
@@ -21,7 +21,7 @@ pub(crate) fn run_frames(
     input_script: Option<&str>,
     power_on: Option<&str>,
 ) -> ExitCode {
-    const FRAME_BUDGET: u64 = 200_000;
+    use luna_api::FRAME_STEP_BUDGET as FRAME_BUDGET;
     let mut em = luna_api::Emulator::new();
     if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, None, power_on) {
         eprintln!("error: {e}");
@@ -31,43 +31,51 @@ pub(crate) fn run_frames(
         eprintln!("error: creating {}: {e}", out_dir.display());
         return ExitCode::from(1);
     }
-    // Scripted input during warm-up (same semantics as `state --input`),
-    // so the capture can land in gameplay rather than at a title screen.
-    let checkpoints: Vec<(u64, u16)> = match input_script {
-        None => Vec::new(),
-        Some(script) => match parse_input_script(script) {
-            Ok(v) => v,
+    // Scripted input, so the capture can land in gameplay rather than at a
+    // title screen. The luna-api rule, as in `state`: during the `-n`
+    // warm-up the checkpoints spend from `-n` (issue #126), under
+    // `--from-frame` they are chased frame by frame; a checkpoint later than
+    // the warm-up fires during the capture, on its own frame.
+    let mut script = luna_api::InputScript::new();
+    if let Some(s) = input_script {
+        match pad_events(s, 0) {
+            Ok(v) => script.extend(v),
             Err(e) => {
                 eprintln!("error: --input: {e}");
                 return ExitCode::from(2);
             }
-        },
-    };
-    for (frame, mask) in &checkpoints {
-        while em.state().scheduler.frame_count < *frame {
-            if em.step_until_frame(FRAME_BUDGET).unwrap_or(0) == 0 {
-                break;
-            }
-        }
-        if let Err(e) = em.set_joypad(0, *mask) {
-            eprintln!("error: set_joypad: {e}");
-            return ExitCode::from(1);
         }
     }
+    // `--from-frame N` (issue #222): the first capture is PPU frame N. The
+    // capture loop steps one frame per PNG, so the warm-up stops one short.
+    let bound = match from_frame {
+        Some(target) => luna_api::ScriptBound::Frame(target.saturating_sub(1)),
+        None => luna_api::ScriptBound::Steps(steps),
+    };
+    let spent = match em.run_input_script(&mut script, bound) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("error: scripted input: {e}");
+            return ExitCode::from(1);
+        }
+    };
     if let Some(target) = from_frame {
-        // `--from-frame N` (issue #222): the first capture is PPU frame N.
-        // The loop below steps one frame per PNG, so stop one frame short.
         while em.frame_count().unwrap_or(0) + 1 < target {
             if em.step_until_frame(FRAME_BUDGET).unwrap_or(0) == 0 {
                 eprintln!("note: emulator halted before frame {target} — capturing from here");
                 break;
             }
         }
-    } else if let Err(e) = em.step(steps) {
+    } else if let Err(e) = em.step(steps.saturating_sub(spent)) {
         eprintln!("step warning (warm-up): {e}");
     }
     // Capture loop: one PNG per consecutive frame, tagged frame# + blank.
     for i in 0..count {
+        let due = em.frame_count().unwrap_or(0);
+        if let Err(e) = script.apply_due(&mut em, due) {
+            eprintln!("error: scripted input: {e}");
+            return ExitCode::from(1);
+        }
         let executed = em.step_until_frame(FRAME_BUDGET).unwrap_or(0);
         let frame = em.frame_count().unwrap_or(0);
         let blanked = em.forced_blank().unwrap_or(false);

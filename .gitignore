@@ -41,3 +41,6 @@ Thumbs.db
 # + commands/ are checked in.
 .claude/settings.local.json
 book/book/
+
+# CI checks the SNES test corpus out here (absolute path for actions/cache).
+/.luna_tests/

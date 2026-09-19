@@ -56,12 +56,12 @@ use std::process::ExitCode;
 
 use serde::Deserialize;
 
-use crate::parsers::{parse_input_script, step_to_frame_bounded};
+use crate::parsers::pad_events;
 use crate::rom::load_rom_into;
 
 /// Instruction budget granted per frame of `frames` bound (matches the
 /// `--input` replay budget) and per whole `steps` run's frame chase.
-const FRAME_BUDGET: u64 = 200_000;
+use luna_api::FRAME_STEP_BUDGET as FRAME_BUDGET;
 
 /// Event cap for the `[asserts.dma]` trace (issue #212) — hitting it is
 /// reported as a failure rather than silently under-counting.
@@ -256,18 +256,6 @@ struct OamAssert {
 enum OamFieldAssert {
     Flag(bool),
     Val(ValueAssert),
-}
-
-/// One scripted peripheral event (issue #212).
-enum InEv {
-    /// Joypad-1 mask.
-    Pad(u16),
-    /// Joypad-2 mask (`input2`).
-    Pad2(u16),
-    /// SNES Mouse `dx, dy, buttons` (port 1).
-    Mouse(i32, i32, u8),
-    /// Super Scope `x, y, buttons` (port 2).
-    Scope(i32, i32, u8),
 }
 
 /// A `[asserts.values]` entry: bare integer = exact match, or a
@@ -564,55 +552,36 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
     }
 
     // Input scripts resolve `@file` relative to the manifest directory.
-    let parse_input = |spec: &str| -> Result<Vec<(u64, u16)>, String> {
-        let spec = match spec.strip_prefix('@') {
-            Some(rel) => format!("@{}", dir.join(rel).display()),
-            None => spec.to_string(),
-        };
-        parse_input_script(&spec).map_err(|e| format!("input script: {e}"))
+    let resolve = |spec: &str| match spec.strip_prefix('@') {
+        Some(rel) => format!("@{}", dir.join(rel).display()),
+        None => spec.to_string(),
     };
     // The unified event stream (issue #212): joypad + mouse + scope
-    // entries from the top level and every checkpoint, sorted by frame.
-    let mut input_entries: Vec<(u64, InEv)> = Vec::new();
-    let mut mouse_used = false;
-    let mut scope_used = false;
+    // entries from the top level and every checkpoint, frame-sorted.
+    let mut script = luna_api::InputScript::new();
     {
         let mut add_leg = |input: &Option<String>,
                            input2: &Option<String>,
                            mouse: &Option<String>,
                            scope: &Option<String>|
          -> Result<(), String> {
-            if let Some(spec) = input {
-                input_entries.extend(
-                    parse_input(spec)?
-                        .into_iter()
-                        .map(|(f, mask)| (f, InEv::Pad(mask))),
-                );
-            }
-            if let Some(spec) = input2 {
-                input_entries.extend(
-                    parse_input(spec)?
-                        .into_iter()
-                        .map(|(f, mask)| (f, InEv::Pad2(mask))),
-                );
+            for (spec, port) in [(input, 0u8), (input2, 1)] {
+                if let Some(spec) = spec {
+                    script.extend(
+                        pad_events(&resolve(spec), port)
+                            .map_err(|e| format!("input script: {e}"))?,
+                    );
+                }
             }
             if let Some(spec) = mouse {
-                mouse_used = true;
-                input_entries.extend(
-                    crate::parsers::parse_mouse_script(spec)
-                        .map_err(|e| format!("mouse script: {e}"))?
-                        .into_iter()
-                        .map(|(f, (dx, dy, b))| (f, InEv::Mouse(dx, dy, b))),
-                );
+                script
+                    .add_mouse(spec)
+                    .map_err(|e| format!("mouse script: {e}"))?;
             }
             if let Some(spec) = scope {
-                scope_used = true;
-                input_entries.extend(
-                    crate::parsers::parse_mouse_script(spec)
-                        .map_err(|e| format!("superscope script: {e}"))?
-                        .into_iter()
-                        .map(|(f, (x, y, b))| (f, InEv::Scope(x, y, b))),
-                );
+                script
+                    .add_scope(spec)
+                    .map_err(|e| format!("superscope script: {e}"))?;
             }
             Ok(())
         };
@@ -621,7 +590,7 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
             add_leg(&cp.input, &cp.input2, &cp.mouse, &cp.superscope)?;
         }
     }
-    input_entries.sort_by_key(|&(frame, _)| frame);
+    let (mouse_used, scope_used) = (script.uses_mouse(), script.uses_scope());
 
     let mut em = luna_api::Emulator::new();
     // `power_on = "random"` in a manifest is always seeded (default 1):
@@ -686,7 +655,6 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
 
     let mut failures = Vec::new();
     let mut spent = 0u64;
-    let mut input_iter = input_entries.iter().peekable();
     // Baseline snapshot for the first checkpoint's deltas.
     let mut delta_prev: BTreeMap<String, i64> = BTreeMap::new();
     snapshot_deltas(&mut em, &m.checkpoint, 0, &mut delta_prev);
@@ -707,7 +675,7 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
                    audio_acc: &mut Vec<(i16, i16)>|
      -> Result<(), String> {
         if !want_audio {
-            *spent += step_to_frame_bounded(em, frame, total_budget.saturating_sub(*spent));
+            *spent += em.step_to_frame_bounded(frame, total_budget.saturating_sub(*spent));
             return Ok(());
         }
         loop {
@@ -716,36 +684,28 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
             if cur >= frame || total_budget.saturating_sub(*spent) == 0 {
                 return Ok(());
             }
-            let stepped = step_to_frame_bounded(em, cur + 1, total_budget.saturating_sub(*spent));
+            let stepped = em.step_to_frame_bounded(cur + 1, total_budget.saturating_sub(*spent));
             *spent += stepped;
             if stepped == 0 {
                 return Ok(());
             }
         }
     };
-    // Apply one scripted event to its device (issue #212).
-    let apply_ev = |em: &mut luna_api::Emulator, ev: &InEv| -> Result<(), String> {
-        match *ev {
-            InEv::Pad(mask) => em.set_joypad(0, mask),
-            InEv::Pad2(mask) => em.set_joypad(1, mask),
-            InEv::Mouse(dx, dy, b) => em.set_mouse(dx, dy, b),
-            InEv::Scope(x, y, b) => em.set_superscope(x, y, b),
-        }
-        .map_err(|e| e.to_string())
-    };
+    // Chase each due event's frame and apply it on arrival; an event the
+    // budget never reaches does not fire (the luna-api rule, issue #126).
     let drive_to = |em: &mut luna_api::Emulator,
                     target_frame: u64,
                     spent: &mut u64,
-                    input_iter: &mut std::iter::Peekable<std::slice::Iter<(u64, InEv)>>,
+                    script: &mut luna_api::InputScript,
                     audio_acc: &mut Vec<(i16, i16)>|
      -> Result<(), String> {
-        while let Some(frame) = input_iter.peek().map(|e| e.0) {
-            if frame > target_frame {
+        while let Some(frame) = script.next_frame().filter(|&f| f <= target_frame) {
+            advance(em, frame, spent, audio_acc)?;
+            let now = em.frame_count().map_err(|e| e.to_string())?;
+            if now < frame {
                 break;
             }
-            advance(em, frame, spent, audio_acc)?;
-            let (_, ev) = input_iter.next().expect("peeked entry exists");
-            apply_ev(em, ev)?;
+            script.apply_due(em, now).map_err(|e| e.to_string())?;
         }
         advance(em, target_frame, spent, audio_acc)
     };
@@ -756,7 +716,7 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
             &mut em,
             cp.at_frame,
             &mut spent,
-            &mut input_iter,
+            &mut script,
             &mut audio_acc,
         )?;
         let label = format!("checkpoint@{}", cp.at_frame);
@@ -798,16 +758,13 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
                 &mut em,
                 final_frame,
                 &mut spent,
-                &mut input_iter,
+                &mut script,
                 &mut audio_acc,
             )?;
         }
         Some(Bound::Steps(s)) => {
             // No checkpoints (validated above): input entries then the rest.
-            for (frame, ev) in &input_entries {
-                advance(&mut em, *frame, &mut spent, &mut audio_acc)?;
-                apply_ev(&mut em, ev)?;
-            }
+            drive_to(&mut em, u64::MAX, &mut spent, &mut script, &mut audio_acc)?;
             // Chunked so the 512 ms audio ring can never overflow
             // between drains (issue #211).
             let mut left = s.saturating_sub(spent);

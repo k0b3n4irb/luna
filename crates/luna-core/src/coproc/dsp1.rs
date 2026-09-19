@@ -13,7 +13,7 @@
 
 use luna_bus::hirom::HiRomMapper;
 use luna_bus::lorom::LoRomMapper;
-use luna_bus::mapper::{Mapper, MapperKind};
+use luna_bus::mapper::{Mapper, MapperKind, MapperStateError, decode_state};
 use luna_bus::types::{Addr24, NTSC_MASTER_HZ, bank_of, offset_of};
 use luna_cpu_upd96050::{Revision, Upd96050};
 
@@ -158,14 +158,14 @@ impl Mapper for Dsp1Mapper {
         bincode::serde::encode_to_vec(&st, bincode::config::standard()).unwrap_or_default()
     }
 
-    fn load_state(&mut self, data: &[u8]) {
-        if let Ok((st, _)) =
-            bincode::serde::decode_from_slice::<Dsp1State, _>(data, bincode::config::standard())
-        {
-            self.base.load_state(&st.base);
-            self.dsp.load_state(&st.dsp);
-            self.cycle_acc = st.cycle_acc;
-        }
+    fn load_state(&mut self, data: &[u8]) -> Result<(), MapperStateError> {
+        let st: Dsp1State = decode_state(data, "DSP-1")?;
+        // The chip first: it validates without touching the base board, so
+        // a bad chip blob leaves both halves as they were.
+        self.dsp.load_state(&st.dsp).map_err(MapperStateError)?;
+        self.base.load_state(&st.base)?;
+        self.cycle_acc = st.cycle_acc;
+        Ok(())
     }
 
     fn reset(&mut self) {
@@ -342,10 +342,11 @@ mod tests {
         let blob = m.save_state();
         assert!(!blob.is_empty(), "shim must serialise base + chip + acc");
         let mut restored = Dsp1Mapper::new(rom(), 0, Some(&firmware()), true);
-        restored.load_state(&blob);
+        restored.load_state(&blob).unwrap();
         assert_eq!(restored.cycle_acc, 12_345);
-        // A corrupt blob is ignored rather than panicking.
-        restored.load_state(&[0xFF; 4]);
+        // A corrupt blob is refused, leaving the shim as it was.
+        assert!(restored.load_state(&[0xFF; 4]).is_err());
+        assert_eq!(restored.cycle_acc, 12_345);
     }
 
     #[test]

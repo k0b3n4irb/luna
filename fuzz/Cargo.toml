@@ -18,6 +18,9 @@ arbitrary = { version = "1", features = ["derive"] }
 luna-cartridge = { path = "../crates/luna-cartridge" }
 luna-bus = { path = "../crates/luna-bus" }
 luna-core = { path = "../crates/luna-core" }
+luna-api = { path = "../crates/luna-api" }
+serde = { version = "1", features = ["derive"] }
+bincode = { version = "2.0", features = ["serde"] }
 
 [[bin]]
 name = "cartridge_parse"
@@ -36,6 +39,13 @@ bench = false
 [[bin]]
 name = "cartridge_to_system"
 path = "fuzz_targets/cartridge_to_system.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "load_state"
+path = "fuzz_targets/load_state.rs"
 test = false
 doc = false
 bench = false

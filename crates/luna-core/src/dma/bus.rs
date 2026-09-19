@@ -23,6 +23,13 @@ pub trait DmaBus {
     /// Write one byte to the PPU's B-bus at `$2100 + b_offset`.
     fn write_b(&mut self, b_offset: u8, value: u8);
 
+    /// Latch a DMA / HDMA read's byte into the CPU's open-bus MDR — every
+    /// A- and B-bus read the controller makes drives the data bus, `0` for
+    /// an access the `validA` / WRAM↔WMDATA rules block (ares `dma.cpp:65,72`
+    /// `cpu.r.mdr = valid ? bus.read(…, cpu.r.mdr) : 0`). Default no-op for
+    /// the test buses.
+    fn latch_mdr(&mut self, _value: u8) {}
+
     /// Per-byte cooperative tick — called by the DMA channel after
     /// every transferred byte so cartridge coprocessors (SA-1, Super
     /// FX, DSP-N, …) get a chance to run *during* the burst instead

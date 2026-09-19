@@ -57,6 +57,10 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@v2
+      # NOTE: this also runs the `snes_test_roms` golden binary WITHOUT a
+      # corpus, so its ~90 tests print "[skip]" and pass in 0.00s — they
+      # verify nothing here. The real golden gate is the `snes-test-roms`
+      # job below, which fetches the corpus and sets LUNA_SNES_TEST_REQUIRE.
       - run: cargo test --workspace --all-features
 
   # ---------------------------------------------------------------------
@@ -144,6 +148,14 @@ jobs:
     name: snes-test-roms
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      # An absolute corpus path: actions/cache rejects `../luna_tests`
+      # ("Relative pathing '.' and '..' is not allowed"), so the sibling
+      # default was never actually cached. The harness + fetch script both
+      # honour this variable.
+      LUNA_SNES_TEST_DIR: ${{ github.workspace }}/.luna_tests
+      # A missing corpus ROM is a FAILURE here, never a silent skip.
+      LUNA_SNES_TEST_REQUIRE: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
@@ -156,7 +168,7 @@ jobs:
         id: rom-cache
         uses: actions/cache@v6
         with:
-          path: ../luna_tests
+          path: ${{ github.workspace }}/.luna_tests
           key: snes-test-roms-${{ hashFiles('tools/fetch-snes-test-roms.sh') }}
       - name: Fetch corpus (on cache miss)
         if: steps.rom-cache.outputs.cache-hit != 'true'

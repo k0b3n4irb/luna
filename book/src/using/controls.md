@@ -10,6 +10,12 @@ drive them), or from the CLI with `--port1`/`--port2` plus scripted
 injects pad bitmasks for either port for scripted/agent input; the GUI wires
 both pad ports from the keyboard.)
 
+A **Super Multitap** (Settings → Devices → Port 2 → Super Multitap) adds
+players 3-5. They come from host gamepads only: the 3rd, 4th and 5th
+connected gamepads drive players 3, 4 and 5 (players 1-2 keep their keyboard
+bindings and the first two gamepads). From the CLI: `--port2 multitap` with
+`--input3` … `--input5`.
+
 Bindings are stored by physical `KeyCode` (layout-agnostic), so the key
 *positions* hold on AZERTY/QWERTZ. Remap them per-player in the GUI under
 **Settings → Input** (a Player 1 / Player 2 tab). That dialog also has a

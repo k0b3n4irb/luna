@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use crate::parsers::parse_input_script;
+use crate::parsers::pad_events;
 use crate::rom::load_rom_into;
 
 /// `luna spc-dump` — run until the music driver is live, then write a
@@ -23,39 +23,11 @@ pub(crate) fn run_spc_dump(
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }
-    let checkpoints: Vec<(u64, u16)> = match input_script {
-        None => Vec::new(),
-        Some(script) => match parse_input_script(script) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("error: --input: {e}");
-                return ExitCode::from(2);
-            }
-        },
+    // Checkpoints spend from the SAME `-n` budget as the run (issue #126).
+    let remaining = match warm_up_with_script(&mut em, input_script, steps) {
+        Ok(remaining) => remaining,
+        Err(code) => return code,
     };
-    // Checkpoint chasing spends from the SAME `-n` budget as the run
-    // (issue #126) — see `parsers::step_to_frame_bounded`.
-    let start_instructions = em.instructions_executed();
-    for (frame, mask) in &checkpoints {
-        let spent = em
-            .instructions_executed()
-            .saturating_sub(start_instructions);
-        let Some(left) = steps.checked_sub(spent).filter(|l| *l > 0) else {
-            break;
-        };
-        crate::parsers::step_to_frame_bounded(&mut em, *frame, left);
-        if em.state().scheduler.frame_count < *frame {
-            break;
-        }
-        if let Err(e) = em.set_joypad(0, *mask) {
-            eprintln!("error: set_joypad: {e}");
-            return ExitCode::from(1);
-        }
-    }
-    let remaining = steps.saturating_sub(
-        em.instructions_executed()
-            .saturating_sub(start_instructions),
-    );
     if let Err(e) = em.step(remaining) {
         eprintln!("step warning (warm-up): {e}");
     }
@@ -102,39 +74,11 @@ pub(crate) fn run_assets_dump(
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }
-    let checkpoints: Vec<(u64, u16)> = match input_script {
-        None => Vec::new(),
-        Some(script) => match parse_input_script(script) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("error: --input: {e}");
-                return ExitCode::from(2);
-            }
-        },
+    // Checkpoints spend from the SAME `-n` budget as the run (issue #126).
+    let remaining = match warm_up_with_script(&mut em, input_script, steps) {
+        Ok(remaining) => remaining,
+        Err(code) => return code,
     };
-    // Checkpoint chasing spends from the SAME `-n` budget as the run
-    // (issue #126) — see `parsers::step_to_frame_bounded`.
-    let start_instructions = em.instructions_executed();
-    for (frame, mask) in &checkpoints {
-        let spent = em
-            .instructions_executed()
-            .saturating_sub(start_instructions);
-        let Some(left) = steps.checked_sub(spent).filter(|l| *l > 0) else {
-            break;
-        };
-        crate::parsers::step_to_frame_bounded(&mut em, *frame, left);
-        if em.state().scheduler.frame_count < *frame {
-            break;
-        }
-        if let Err(e) = em.set_joypad(0, *mask) {
-            eprintln!("error: set_joypad: {e}");
-            return ExitCode::from(1);
-        }
-    }
-    let remaining = steps.saturating_sub(
-        em.instructions_executed()
-            .saturating_sub(start_instructions),
-    );
     if let Err(e) = em.step(remaining) {
         eprintln!("step warning (warm-up): {e}");
     }
@@ -214,4 +158,30 @@ pub(crate) fn run_assets_dump(
         out.display()
     );
     ExitCode::SUCCESS
+}
+
+/// Replay a `--input` script inside the `-n` warm-up budget; returns the
+/// instructions left to run (or the exit code of a bad script).
+fn warm_up_with_script(
+    em: &mut luna_api::Emulator,
+    input_script: Option<&str>,
+    steps: u64,
+) -> Result<u64, ExitCode> {
+    let mut script = luna_api::InputScript::new();
+    if let Some(s) = input_script {
+        match pad_events(s, 0) {
+            Ok(v) => script.extend(v),
+            Err(e) => {
+                eprintln!("error: --input: {e}");
+                return Err(ExitCode::from(2));
+            }
+        }
+    }
+    match em.run_input_script(&mut script, luna_api::ScriptBound::Steps(steps)) {
+        Ok(spent) => Ok(steps.saturating_sub(spent)),
+        Err(e) => {
+            eprintln!("error: scripted input: {e}");
+            Err(ExitCode::from(1))
+        }
+    }
 }
