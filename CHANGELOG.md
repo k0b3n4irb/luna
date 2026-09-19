@@ -4,7 +4,7 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
-## [1.25.0] — unreleased
+## [1.25.0] — 2026-09-19
 
 Follow-ups to the 2026-09-18 full project review: silent failures made
 loud, one implementation of the input and stepping policy in `luna-api`,
