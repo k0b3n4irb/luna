@@ -66,7 +66,7 @@ Follow-ups to the 2026-09-18 full project review.
   `$421C-$421F` now carry the d1 lines instead of a hard `0`. CLI
   `--port1/--port2 multitap` with `--input3` … `--input5`; MCP
   `set_port_device {device: "multitap"}` and `set_joypad {port: 2..4}`.
-  (GUI selection pending.)
+  In the GUI: Settings → Devices → Port 2 → Super Multitap, host gamepads 3-5.
 
 ### Changed
 - **Scripted input is defined once, in `luna-api`** (`InputScript`,
