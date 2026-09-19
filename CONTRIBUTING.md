@@ -81,14 +81,37 @@ assert, and how to replay a crash reproducer.
 
 ## Versioning & releases
 
-- **Application SemVer**: `minor` = new features / accuracy improvements,
-  `patch` = hotfix on a released binary (e.g. v1.10.1). There is no API
-  stability promise — the crates are not published (`publish = false`).
+### Versioning
+
+The version tracks luna's **user-facing contract**, not the Rust API:
+
+- **What the contract covers:** the `luna` CLI (subcommands, flags, their
+  output formats), the MCP tool catalogue (names, parameters, result
+  fields), `luna test` manifests, the `fbhash` values a manifest can pin,
+  and the release asset names (including the unversioned
+  `luna-<os>-<arch>` alias).
+- **`major`** — a change that breaks that contract for users *in general*:
+  removing or renaming a flag or MCP tool, changing a manifest key's
+  meaning, changing every `fbhash`.
+- **`minor`** — new features and accuracy work. Accuracy work routinely
+  moves what a given ROM does at a given frame (that is the point of it),
+  and a minor may correct a CLI behaviour that contradicted its own
+  documentation or a sibling subcommand; such corrections are marked
+  **BREAKING** in the CHANGELOG.
+- **`patch`** — a hotfix on a released binary (e.g. v1.10.1).
+- **Not covered:** the **save-state format** is only guaranteed to reload
+  in the version that wrote it (a changed format bumps
+  `SAVE_STATE_VERSION` and old states are refused with a clear error, never
+  mis-loaded); the **Rust crate APIs** carry no stability promise — the
+  crates are not published (`publish = false`). MCP changes are kept
+  additive (new optional parameters, new tools, new result fields) within
+  a major.
 - **Release flow**: bump `version` + finalize `CHANGELOG.md` in a PR to
   `develop`; merge `develop` → `main`; tag `vX.Y.Z` on `main`
   (`release.yml` builds and attaches the 4-platform binaries +
-  checksums); then reconcile `develop` with `main`. Update the pinned
-  asset names in `book/src/using/install.md` as part of the bump PR.
+  checksums); then reconcile `develop` with `main`. The book links the
+  unversioned `luna-<os>-<arch>` asset alias, so no doc edit is needed per
+  release.
 - **Before tagging, run the full suite locally *with* `tests/roms/`
   populated** — `cargo test --workspace --all-targets`. The commercial
   smoke and game goldens SKIP on CI (copyrighted ROMs are never

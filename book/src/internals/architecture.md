@@ -1389,7 +1389,10 @@ Direct consequence: `luna-api` becomes the **flagship crate** of the
 ecosystem, the one that must have the strongest stability. We apply a
 discipline to it that is stricter than the other crates:
 
-- **Strict SemVer**: no breaking change without a major bump.
+- **Strict SemVer**: no breaking change without a major bump. *(Superseded:
+  the crates were never published, and luna versions its user-facing
+  contract instead — CLI, MCP, manifests; see "Versioning" in
+  CONTRIBUTING.md.)*
 - **Deprecation policy**: ≥ 1 minor with `#[deprecated]` before removal.
 - **Public API tests**: `cargo-public-api` in CI, detects any undocumented
   change.
