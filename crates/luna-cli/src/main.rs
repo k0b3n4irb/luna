@@ -300,10 +300,23 @@ enum Command {
         /// (a two-player probe, or replaying an MCP `script_p2` capture).
         #[arg(long)]
         input2: Option<String>,
-        /// Controller port-1 device: `pad` (default), `mouse`, or `superscope`.
+        /// Scripted input for Super Multitap pads B, C, D — players 3, 4, 5
+        /// with `--port2 multitap` (pad A is player 2, `--input2`). Same
+        /// grammar as `--input`.
+        #[arg(long)]
+        input3: Option<String>,
+        /// Player 4 (multitap pad C) — see `--input3`.
+        #[arg(long)]
+        input4: Option<String>,
+        /// Player 5 (multitap pad D) — see `--input3`.
+        #[arg(long)]
+        input5: Option<String>,
+        /// Controller port-1 device: `pad` (default), `mouse`, `superscope`
+        /// or `multitap`.
         #[arg(long, default_value = "pad")]
         port1: String,
-        /// Controller port-2 device: `pad` (default), `mouse`, or `superscope`.
+        /// Controller port-2 device: `pad` (default), `mouse`, `superscope`
+        /// or `multitap` (players 2-5: `--input2` … `--input5`).
         #[arg(long, default_value = "pad")]
         port2: String,
         /// Scripted SNES Mouse motion, applied to whichever port is set to
@@ -895,6 +908,9 @@ fn main() -> ExitCode {
             audio_out,
             input,
             input2,
+            input3,
+            input4,
+            input5,
             port1,
             port2,
             mouse,
@@ -965,7 +981,12 @@ fn main() -> ExitCode {
                 screenshot.as_deref(),
                 audio_out.as_deref(),
                 input.as_deref(),
-                input2.as_deref(),
+                &[
+                    (1, input2.as_deref()),
+                    (2, input3.as_deref()),
+                    (3, input4.as_deref()),
+                    (4, input5.as_deref()),
+                ],
                 &port1,
                 &port2,
                 mouse.as_deref(),

@@ -4,6 +4,116 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.25.0] — 2026-09-19
+
+Follow-ups to the 2026-09-18 full project review: silent failures made
+loud, one implementation of the input and stepping policy in `luna-api`,
+the Super Multitap, and the one active CPU-timing divergence found.
+
+**Upgrading from 1.24:** save-states from earlier versions are refused
+(format v6), and three CLI behaviours change (marked **BREAKING** below).
+See *Versioning* in [CONTRIBUTING.md](CONTRIBUTING.md) for what the
+version number promises.
+
+### Fixed
+- **Hardware NMI / IRQ entry takes 8 cycles, not 6.** The 65C816's
+  interrupt sequence (ares `WDC65816::interrupt()`, Mesen2
+  `ProcessInterrupt`) spends a discarded `PB:PC` read and an idle cycle
+  before its stack frame; BRK/COP do not. luna shared BRK's sequence, so
+  every NMI/IRQ handler started 14 master clocks early — measured against
+  Mesen2 with a probe ROM, now on the reference. Timing-sensitive titles
+  shift by an animation phase (the SMRPG and Star Fox goldens were
+  re-recorded).
+- **Games that need an unemulated coprocessor are refused by name** instead
+  of booting on a bare LoROM/HiROM board and hanging without a diagnostic.
+  The header now identifies OBC1, S-RTC, Super Game Boy, ST-010/011,
+  ST-018, Cx4 and SPC7110 (ares `board()`: chipset `$FFD6` + sub-type
+  `$FFBF`), and tells the NEC DSP revisions apart by title as ares
+  `firmwareNEC()` does — **DSP-2/3/4 games were previously misdetected as
+  DSP-1** and handed `dsp1b.rom`. The error names the chip;
+  `--force-mapper lorom|hirom` still loads the ROM without it.
+- **The homebrew-CI recipe and the install page download assets that
+  exist.** Releases now also publish an unversioned
+  `luna-<os>-<arch>.tar.gz|zip` alias of every archive, so
+  `releases/latest/download/…` is a stable URL (the recipe pointed at a
+  name no release ever produced).
+- The install page named the wrong DSP-1 firmware folder
+  (`~/.config/luna/firmware/`, not `~/.config/luna/`); README and the book
+  no longer promise a "spectator" mode that was never built.
+
+- **`load_state` can no longer return `Ok` on a half-restored machine.**
+  A mapper blob that failed to decode was silently ignored, and one that
+  decoded to the wrong shape was accepted — a Super FX work RAM shorter
+  than its address mask, or an empty SA-1 BW-RAM, then panicked later, in
+  the emulation loop (and, over MCP, in an unguarded `peek`). Mappers now
+  validate the whole blob before touching anything
+  (`Mapper::load_state -> Result`), the framebuffers are size-checked, and
+  a refused state leaves the running machine exactly as it was.
+- **Every stepping entry point is the same loop.** `run_until_pc` did not
+  count its instructions and ignored freezes, the call stack and the
+  profile; `loop_probe` and `run_until_break` never folded the profile.
+  They are now one internal driver with different stop conditions.
+- **DMA reaches the APU mailbox.** `$2140-$217F` were dropped on the DMA
+  B-bus (a DMA write never reached the SPC700, a read returned `$FF`); DMA
+  and HDMA reads now also latch the CPU open-bus MDR, and unmapped reads
+  return it, as ares does (`dma.cpp:63-83`).
+- **A mid-line OBJ-interlace toggle can no longer corrupt (or, in a debug
+  build, panic) the sprite row maths** — the cached line evaluation keeps
+  the SETINI bit it was computed with.
+- **MCP parity with the CLI:** `load_rom` / `load_rom_bytes` take
+  `power_on` (the `--power-on` grammar; a random load returns its seed),
+  and two new tools, `peek_coproc_ram` and `dsp_registers`, expose what
+  only `--dump-coproc-ram` and `[asserts.dsp]` could read.
+- **A `<rom>.sym` next to the ROM loads in every front-end** — it was a
+  CLI-only nicety, so the GUI debugger never showed labels and MCP
+  `load_rom` ignored it. `RomInfo` now reports `symbols_loaded` /
+  `symbols_error`. The CLI `--force-mapper` load also searches the firmware
+  folder now, like the auto-detected one.
+- **MCP: `pause` reaches every run tool**, not just `run` and `step` —
+  `step_until_frame`, `run_until_pc`, `run_until_break` and
+  `run_until_mem_read/write` took an unbounded `max_steps` and held the
+  emulator lock to the end.
+
+### Added
+- **Super Multitap — 3 to 5 players.** A faithful port of ares
+  `controller/super-multitap`: the tap answers its detection signature,
+  WRIO's iobit selects which pad pair drives the two data lines, and
+  `$421C-$421F` now carry the d1 lines instead of a hard `0`. CLI
+  `--port1/--port2 multitap` with `--input3` … `--input5`; MCP
+  `set_port_device {device: "multitap"}` and `set_joypad {port: 2..4}`.
+  In the GUI: Settings → Devices → Port 2 → Super Multitap, host gamepads 3-5.
+
+### Changed
+- **Scripted input is defined once, in `luna-api`** (`InputScript`,
+  `InputEvent`, `ScriptBound`, `Emulator::run_input_script` /
+  `step_to_frame_bounded`, `FRAME_STEP_BUDGET`). The `frame:mask` grammar,
+  the event order and the budget rule had been re-implemented in seven CLI
+  subcommands. Behaviour changes that fall out of it:
+  - **BREAKING** — `luna frames --input`: checkpoints inside the warm-up now spend from
+    `-n` as in `state` (issue #126) instead of being pre-rolled on top of
+    it, and a checkpoint later than the warm-up fires during the capture on
+    its own frame instead of before it.
+  - **BREAKING** — `luna bench`: each iteration is one real PPU frame (the per-frame cap
+    was 30 000 instructions, so a slow frame spanned several iterations),
+    and `--input` is keyed by the PPU frame, not by the iteration.
+  - **BREAKING** — `luna test`: an input event the step budget never reaches no longer
+    fires.
+- **BREAKING — save-state format v6.** `Snes::mclk_acc` (v1.18.0) and
+  `Apu::master_hz` had been added under v5 behind `#[serde(default)]`,
+  which bincode — a positional format — cannot honour, so genuine v5
+  states already mis-decoded. States from earlier builds are refused with
+  a version error instead. A new test pins the serialized shape to the
+  version, so the next field added without a bump fails CI.
+
+### CI
+- A `load_state` fuzz target joins the three cartridge ones (the ROM is
+  not the only door for outside bytes).
+- The test-ROM corpus cache is actually saved (an absolute path —
+  `actions/cache` rejects `../`), the corpus is pinned to an upstream
+  commit, and `LUNA_SNES_TEST_REQUIRE=1` makes a missing golden ROM a
+  failure instead of a silent skip (`LUNA_GAME_TEST_REQUIRE=1` for the
+  local commercial-ROM goldens).
+
 ## [1.24.0] — 2026-09-17
 
 Three asks from the OpenSNES report of 2026-09-17, written while their

@@ -1,9 +1,12 @@
 # HDMA / DMA — faithful-port audit vs ares (living document)
 
-**Status: all visual/behavioral rows ✅/🔧 (2026-07-01).** Every row that can
-affect what a game draws is now a faithful port of ares + Mesen2; the only open
-items are cycle-count refinements luna folds into `HDMA_OVERHEAD_MCLK` (#11/#13)
-and one dead-read micro-divergence (#10 residual) — none with known game impact.
+**Status: rows #1-#12 and #14 ✅/🔧 (2026-07-01, refreshed 2026-09-18).** The
+HDMA table walk / transfer rows are a faithful port of ares + Mesen2. Open:
+the 🔬 edge interactions (#13), one dead-read micro-divergence (#10 residual),
+and the ⚠️ rows #15-#17 the 2026-09-11 audit found (segmented-path cost,
+DMA start edge, same-channel HDMA abort — its fourth, #18 APU ports on the
+DMA B-bus, is fixed 2026-09-18) — none with known game impact. (`HDMA_OVERHEAD_MCLK` no longer exists — retired
+2026-07-15 by row #11's per-read `hdma_cost`.)
 Reference: ares `ares/sfc/cpu/dma.cpp` + `timing.cpp` and Mesen2
 `Core/SNES/SnesDmaController.cpp`. Governed by
 `.claude/rules/hdma-dma-faithful-audit.md`. luna impl:
@@ -31,11 +34,15 @@ pillar subsystem; until every row below is ✅, treat it as an approximation.
 | 7 | **Indirect address reload** — on a new entry read 2 bytes (`lo`, `hi`) into `indirectAddress` | reads `lo`+`hi` on reload | ✅ match (the common path) |
 | 8 | **Frame-start init timing** — `hdmaSetup` at V=0 (`hcounter ≥ ~12`), `hdmaReset` clears completed/doTransfer for all | `hdma_init` at frame wrap | ✅ functionally; sub-dot H position not modelled (🔬 timing) |
 | 9 | **`hdmaSetup` sets `hdmaDoTransfer=true` for ALL channels** (even disabled) when any HDMA is enabled (`dma.cpp:143`, Mesen2 `InitHdmaChannels:131`); a channel enabled mid-frame runs from its **stale** table pointer (no source re-copy) | `hdma_init` resets `hdma_active`/`do_transfer` for all 8, arms `do_transfer=true` for all when `hdmaen!=0`, sets up only the enabled ones from source; `hdma_run_line` no longer lazy-starts-from-source | 🔧 fixed — faithful port. luna previously invented a lazy-start-**from-source** (absent from both refs). Yoshi's Island (the canonical mid-frame `$420C=$F0` @ line ~12) renders correctly under the faithful model — screenshot-verified across 3 intro frames (text bands + HDMA gradient sky). Byte-identical fbhash on 7 other HDMA titles incl. the Contra III golden. Tests `hdma_mid_frame_enable_uses_stale_pointer_not_source`, `hdma_cold_mid_frame_enable_skips_transfer_first_line`. **A faithful port cannot regress a real game — real games are validated against the refs luna now matches.** |
-| 10 | **Indirect "last active channel" 1-byte quirk** (`dma.cpp:162-169`) — a terminating (0 header) indirect reload still reads the pointer; but if this is the last active HDMA channel (`hdmaCompleted && hdmaFinished()`) only **1** byte is read (`indirectAddress = data << 8`, address ends one short, one fewer A-bus read) | `hdma_step_line(.., last_active)` mirrors ares `hdmaReload`: reads the pointer on a terminating header too, 1 byte when last-active else 2; controller computes `last_active` = no higher-indexed channel still active | 🔧 fixed — faithful port. Tests `hdma_indirect_terminator_on_last_channel_reads_one_byte`, `..._with_later_channel_reads_two_bytes`, `hdma_indirect_terminator_1byte_quirk_tracks_the_last_active_channel`. Visual no-op (das/a2a are dead after termination; cycles folded into `HDMA_OVERHEAD_MCLK`) — proven byte-identical fbhash on 5 HDMA titles. **Residual:** a `0` header at *frame start* (`hdma_start_frame`, empty table) still skips the indirect pointer read — a distinct, even-more-theoretical dead-read divergence, not this row. |
+| 10 | **Indirect "last active channel" 1-byte quirk** (`dma.cpp:162-169`) — a terminating (0 header) indirect reload still reads the pointer; but if this is the last active HDMA channel (`hdmaCompleted && hdmaFinished()`) only **1** byte is read (`indirectAddress = data << 8`, address ends one short, one fewer A-bus read) | `hdma_step_line(.., last_active)` mirrors ares `hdmaReload`: reads the pointer on a terminating header too, 1 byte when last-active else 2; controller computes `last_active` = no higher-indexed channel still active | 🔧 fixed — faithful port. Tests `hdma_indirect_terminator_on_last_channel_reads_one_byte`, `..._with_later_channel_reads_two_bytes`, `hdma_indirect_terminator_1byte_quirk_tracks_the_last_active_channel`. Visual no-op (das/a2a are dead after termination; the saved A-bus read is now charged exactly by row #11's `hdma_cost`) — proven byte-identical fbhash on 5 HDMA titles. **Residual:** a `0` header at *frame start* (`hdma_start_frame`, empty table) still skips the indirect pointer read — a distinct, even-more-theoretical dead-read divergence, not this row. |
 | 11 | **Per-line table read for timing** — `hdmaReload` does `readA` of the header **every** active line (`dma.cpp:153`), even gap lines | `hdma_step_line` performs the read every line (consuming it only at counter==0) and returns the **A-bus read count**; `hdma_cost` charges 8 mclk per read + ares' `step(8)` + the two DMA-clock alignment steps (`timing.cpp:110-119`) | 🔧 **fixed 2026-07-15** — faithful cost model, `HDMA_OVERHEAD_MCLK` retired. luna's cost was ~5 mclk/line short on a 1-channel mode-2 table (~1 000 mclk of CPU phase error per frame). Verified by the Mesen2 per-instruction cycle differential (WaveHDMA drift +2 790 → +1 470 mclk) and the full HDMA corpus sweep. |
-| 12 | **HDMA vs MDMA arbitration / mid-DMA pause** (`hdmaTransfer`/`dmaRun` set `dmaEnable=false`) | a long sync DMA is driven in scanline-bounded segments; HDMA fires at each crossed visible line via `sched_one_line` | 🔧 fixed (Phase 5 inc 1) — HDMA now preempts a mid-frame MDMA at scanline boundaries instead of being deferred to after the whole burst. Test `hdma_preempts_a_long_mid_frame_dma_at_scanline_boundaries`. Sub-line position (ares dot-276 `hdmaPosition=1104`) is still line-granular — **inc 2 deferred, see the note below**. |
+| 12 | **HDMA vs MDMA arbitration / mid-DMA pause** (`hdmaTransfer`/`dmaRun` set `dmaEnable=false`) | a long sync DMA is driven in scanline-bounded segments; HDMA fires at each crossed visible line via `sched_one_line` | 🔧 fixed (Phase 5 inc 1) — HDMA now preempts a mid-frame MDMA at scanline boundaries instead of being deferred to after the whole burst. Test `hdma_preempts_a_long_mid_frame_dma_at_scanline_boundaries`. Sub-line position (ares dot-276 `hdmaPosition=1104`) was line-granular — **inc 2 landed 2026-07-26 (end-of-line application point), see the note below**. |
 | 13 | **`$420C` write mid-DMA, HDMA on the same line as MDMA, DMA during HDMA** edge interactions | 🔬 | unaudited |
 | 14 | **Reset clears `$420B`/`$420C`** (`CPU::power(reset)` `channels[id] = {}`; anomie-regs: HDMAEN "$00 on power on or reset") | `Snes::reset` clears `mdmaen`, `hdmaen`, the MDMA cursor | 🔧 fixed (2026-09-11 audit) — HDMAEN survived a reset, so HDMA kept firing from the previous run's tables during boot. Test `reset_keeps_port_devices_and_clears_memsel_and_hdmaen`. Residual: channel registers keep their values (ares resets them to `$FF`). |
+| 15 | **MDMA cost on every path** — `dmaEdge` wraps `dmaRun` in `step(8 - dmaCounter())` … `step(clockCount - counter.dma % clockCount)`; `dmaRun` = `step(8)` + per enabled channel `step(8)` + 8 mclk/byte (`timing.cpp:124-131`, `dma.cpp:16-22,108-122`) | Fast path (no HDMA armed): `mdma_cost` (`snes.rs`) is the faithful model. **Segmented path** (HDMA armed, `dma_edge_inner` in `snes.rs`): a flat `advance_time(8)` start overhead + `bytes·8` — no DMA-clock alignment, no per-channel `+8`, no realignment to the CPU clock | ⚠️ gap (2026-09-11 audit) — cycle count only; a burst that runs while HDMA is armed ends a few mclk early. |
+| 16 | **DMA start edge** — the `$420B` write only sets `dmaPending`; the first following `dmaEdge()` just raises `dmaActive` ("Run one full CPU cycle", `timing.cpp:100-108,135-139`), and the burst runs at the edge **after** that | `$420B` arms `Dma::pending_mdma`; `SnesBus::dma_edge` (`snes.rs`) runs the burst at the **first** bus access after the write — no intermediate `dmaActive` cycle | ⚠️ gap (2026-09-11 audit) — one bus access early vs ares. Instruction-level placement already matches Mesen2's trace (issue #109). |
+| 17 | **HDMA aborts the same channel's DMA** — `hdmaSetup` / `hdmaTransfer` clear the channel's `dmaEnable` ("HDMA will stop active DMA mid-transfer", `dma.cpp:146,175`), so `dmaRun`'s `while(dmaEnable && --transferSize)` exits with the remaining count left in `$43x5/6` | `hdma_start_frame` / `hdma_step_line` (`dma/channel.rs`) never touch `seg_running`; after the HDMA line the segmented MDMA **resumes** the same channel to completion (`Dma::run_mdma_segment`, `dma/controller.rs`) | ⚠️ gap (2026-09-11 audit) — only reachable when one channel is both in `$420B` and `$420C` and the burst crosses a visible line. |
+| 18 | **APU ports (`$2140-$217F`) on the DMA B-bus; unmapped B-bus reads; MDR** — `readB`/`writeB` go through the full bus: `bus.read(0x2100 \| address, cpu.r.mdr)` / `bus.write(0x2100 \| address, data)` (`dma.cpp:70-83`), and every DMA/HDMA read latches `cpu.r.mdr` (`0` when `validA` / WRAM↔WMDATA blocks it, `dma.cpp:63-75`) | `DmaBusView::read_b` / `write_b` route `$40-$7F` to the APU mailbox (4 ports mirrored, stub fallback — the CPU path's rule); unmapped A/B reads return the MDR; `DmaBus::latch_mdr` is called by the channel for every read (`read_a_valid`, `transfer_byte`) | 🔧 fixed 2026-09-18 (tests `a_dma_to_the_apu_ports_reaches_the_spc700`; goldens byte-identical). Residual: the APU is not clocked *within* a burst, so a mailbox read mid-burst sees the SPC as of the burst start — same granularity the CPU-side coproc had before `DmaBusView::tick`. |
 
 ## Fixed (regression-tested)
 
@@ -52,8 +59,7 @@ pillar subsystem; until every row below is ✅, treat it as an approximation.
 
 ## Open work (priority order)
 
-All visual/behavioral rows are ✅/🔧. Only cycle-count refinements remain — no
-known game impact:
+Rows #1-#12 and #14 are ✅/🔧. What remains — no known game impact:
 
 1. ~~#11 cycle-accurate per-line HDMA timing~~ — **closed 2026-07-15** (see
    row #11: faithful per-read cost model, `HDMA_OVERHEAD_MCLK` retired).
@@ -63,6 +69,10 @@ known game impact:
    on a `0`-header-at-frame-start (empty table) — dead reads, no observable
    effect; unify `hdma_start_frame`/`hdma_step_line` onto one `hdmaReload` port
    if ever closing the last micro-divergence.
+3. ⚠️ rows #15-#17 (2026-09-11 audit; listed as **open** on the DMA row of
+   `accuracy_scorecard.md`): segmented-path cost/realign, DMA start edge,
+   same-channel HDMA abort. (#18, APU ports + MDR on the DMA B-bus view, is
+   🔧 fixed 2026-09-18.)
 
 ## Phase 5 inc 2 (sub-line dot-276 `hdmaPosition`) — ✅ LANDED (2026-07-26)
 

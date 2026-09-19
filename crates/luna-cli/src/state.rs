@@ -10,14 +10,10 @@ use crate::csv::{
 };
 use crate::fmt::hex_str;
 use crate::output::{print_hex_dump, write_wav};
-/// Instruction allowance per frame while chasing an `--input` checkpoint
-/// under `--until-frame` — the same per-frame budget the frame-bounded run
-/// loop uses.
-const CHECKPOINT_FRAME_ALLOWANCE: u64 = 200_000;
 
 use crate::parsers::{
-    parse_addr_range, parse_assert_spec, parse_assert_spec_no_bank, parse_assert_spec_sym,
-    parse_hex_u8, parse_input_script, parse_mouse_script, parse_peek_spec, parse_peek_spec_sym,
+    pad_events, parse_addr_range, parse_assert_spec, parse_assert_spec_no_bank,
+    parse_assert_spec_sym, parse_hex_u8, parse_mouse_script, parse_peek_spec, parse_peek_spec_sym,
 };
 use crate::rom::load_rom_into;
 
@@ -105,7 +101,7 @@ pub(crate) fn run_state(
     screenshot: Option<&std::path::Path>,
     audio_out: Option<&std::path::Path>,
     input_script: Option<&str>,
-    input2_script: Option<&str>,
+    extra_pad_scripts: &[(u8, Option<&str>)],
     port1: &str,
     port2: &str,
     mouse_script: Option<&str>,
@@ -184,27 +180,11 @@ pub(crate) fn run_state(
     // auto-read / serial path with the SNES Mouse protocol so the game's
     // DETECT succeeds (the signature) and `inputGetMouse` reads its deltas.
     for (port, dev) in [(0u8, port1), (1u8, port2)] {
-        match dev {
-            "pad" => {}
-            "mouse" => {
-                if let Err(e) = em.set_port_mouse(port, true) {
-                    eprintln!("error: --port{}: {e}", port + 1);
-                    return ExitCode::from(1);
-                }
-            }
-            "superscope" => {
-                if let Err(e) = em.set_port_device(port, luna_api::PortDevice::SuperScope) {
-                    eprintln!("error: --port{}: {e}", port + 1);
-                    return ExitCode::from(1);
-                }
-            }
-            other => {
-                eprintln!(
-                    "error: --port{} `{other}`: expected `pad`, `mouse`, or `superscope`",
-                    port + 1
-                );
-                return ExitCode::from(1);
-            }
+        let applied = luna_api::parse_port_device(dev)
+            .and_then(|d| em.set_port_device(port, d).map_err(|e| e.to_string()));
+        if let Err(e) = applied {
+            eprintln!("error: --port{}: {e}", port + 1);
+            return ExitCode::from(1);
         }
     }
     let mouse_checkpoints = match mouse_script.map(parse_mouse_script) {
@@ -325,105 +305,48 @@ pub(crate) fn run_state(
         eprintln!("error: enable_wdm_log: {e}");
         return ExitCode::from(1);
     }
-    // Parse `frame:hex` checkpoints into a sorted vector. We apply
-    // them by stepping `step_until_frame` between checkpoints — a
-    // ~30k-instruction budget per frame is enough for any real ROM,
-    // including SA-1 carts.
-    let checkpoints: Vec<(u64, u16)> = match input_script {
-        None => Vec::new(),
-        Some(script) => match parse_input_script(script) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("error: --input: {e}");
-                return ExitCode::from(2);
-            }
-        },
-    };
-    let checkpoints2: Vec<(u64, u16)> = match input2_script {
-        None => Vec::new(),
-        Some(script) => match parse_input_script(script) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("error: --input2: {e}");
-                return ExitCode::from(2);
-            }
-        },
-    };
-    let start_instructions = em.instructions_executed();
-    if !checkpoints.is_empty()
-        || !checkpoints2.is_empty()
-        || !mouse_checkpoints.is_empty()
-        || !scope_checkpoints.is_empty()
-    {
-        // Merge gamepad (`--input`), mouse (`--mouse`) and super-scope
-        // (`--superscope`) checkpoints into one frame-sorted event stream so
-        // they all apply at the right moment.
-        enum Ev {
-            Pad(u16),
-            Pad2(u16),
-            Mouse(i32, i32, u8),
-            Scope(i32, i32, u8),
-        }
-        let mut events: Vec<(u64, Ev)> = checkpoints
-            .iter()
-            .map(|&(f, m)| (f, Ev::Pad(m)))
-            .chain(checkpoints2.iter().map(|&(f, m)| (f, Ev::Pad2(m))))
-            .chain(
-                mouse_checkpoints
-                    .iter()
-                    .map(|&(f, (dx, dy, b))| (f, Ev::Mouse(dx, dy, b))),
-            )
-            .chain(
-                scope_checkpoints
-                    .iter()
-                    .map(|&(f, (x, y, b))| (f, Ev::Scope(x, y, b))),
-            )
-            .collect();
-        events.sort_by_key(|(f, _)| *f);
-        // What bounds the run also bounds the checkpoint chase.
-        //
-        // With `-n` (issue #126): checkpoints spend from the SAME budget,
-        // so a checkpoint scheduled beyond the requested window never
-        // fires and the total run is `-n` instructions — not `-n` on top
-        // of an unbounded pre-roll.
-        //
-        // With `--until-frame N` the bound is a FRAME, and `-n` is not the
-        // run length at all (it defaults to 1000, which the #126 rule then
-        // exhausted before the first checkpoint — every scripted input was
-        // silently dropped). Chase by frames instead: run each checkpoint's
-        // frame with the same per-frame allowance the `--until-frame` loop
-        // uses, and drop only the checkpoints past the target frame.
-        for (frame, ev) in &events {
-            let left = match until_frame {
-                Some(target) if *frame > target => break, // past the window
-                Some(_) => CHECKPOINT_FRAME_ALLOWANCE
-                    .saturating_mul(frame.saturating_sub(em.frame_count().unwrap_or(0)).max(1)),
-                None => {
-                    let spent = em
-                        .instructions_executed()
-                        .saturating_sub(start_instructions);
-                    match steps.checked_sub(spent).filter(|l| *l > 0) {
-                        Some(l) => l,
-                        // budget exhausted — later checkpoints never happen
-                        None => break,
-                    }
+    // Gamepad (`--input` / `--input2`), mouse (`--mouse`) and super-scope
+    // (`--superscope`) checkpoints form one frame-sorted event stream, and
+    // luna-api replays it: with `-n` the chase spends from that SAME
+    // budget (issue #126), with `--until-frame N` it is bounded by the frame
+    // (where `-n`, defaulting to 1000, is not the run length at all).
+    let mut script = luna_api::InputScript::new();
+    let pads = std::iter::once((0u8, input_script)).chain(extra_pad_scripts.iter().copied());
+    for (port, spec) in pads {
+        if let Some(s) = spec {
+            match pad_events(s, port) {
+                Ok(v) => script.extend(v),
+                Err(e) => {
+                    // --input, --input2 … --input5 (port 0-based).
+                    let n = if port == 0 {
+                        String::new()
+                    } else {
+                        (port + 1).to_string()
+                    };
+                    eprintln!("error: --input{n}: {e}");
+                    return ExitCode::from(2);
                 }
-            };
-            crate::parsers::step_to_frame_bounded(&mut em, *frame, left);
-            if em.frame_count().unwrap_or(0) < *frame {
-                break; // ran out before reaching this checkpoint's frame
-            }
-            let applied = match ev {
-                Ev::Pad(m) => em.set_joypad(0, *m),
-                Ev::Pad2(m) => em.set_joypad(1, *m),
-                Ev::Mouse(dx, dy, b) => em.set_mouse(*dx, *dy, *b),
-                Ev::Scope(x, y, b) => em.set_superscope(*x, *y, *b),
-            };
-            if let Err(e) = applied {
-                eprintln!("error: applying scripted input: {e}");
-                return ExitCode::from(1);
             }
         }
+    }
+    script.extend(
+        mouse_checkpoints
+            .iter()
+            .map(|&(f, (dx, dy, buttons))| (f, luna_api::InputEvent::Mouse { dx, dy, buttons })),
+    );
+    script.extend(
+        scope_checkpoints
+            .iter()
+            .map(|&(f, (x, y, buttons))| (f, luna_api::InputEvent::Scope { x, y, buttons })),
+    );
+    let start_instructions = em.instructions_executed();
+    let bound = until_frame.map_or(
+        luna_api::ScriptBound::Steps(steps),
+        luna_api::ScriptBound::Frame,
+    );
+    if let Err(e) = em.run_input_script(&mut script, bound) {
+        eprintln!("error: applying scripted input: {e}");
+        return ExitCode::from(1);
     }
     // Trace gating: bridge to the earliest of the two "trace-from"
     // targets, enable whichever crossed; bridge to the later one if
@@ -548,9 +471,12 @@ pub(crate) fn run_state(
     if let Some(target_frame) = until_frame {
         // RFE-5: run to a specific PPU frame instead of the `-n` instruction
         // count, draining audio along the way so `--audio-out` still works.
-        const FRAME_BUDGET: u64 = 200_000;
         while em.state().scheduler.frame_count < target_frame {
-            if em.step_until_frame(FRAME_BUDGET).unwrap_or(0) == 0 {
+            if em
+                .step_until_frame(luna_api::FRAME_STEP_BUDGET)
+                .unwrap_or(0)
+                == 0
+            {
                 break;
             }
             if audio_out.is_some()

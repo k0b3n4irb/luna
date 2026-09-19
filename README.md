@@ -43,13 +43,14 @@ and video paths are reconstructed down to per-access timing, and that accuracy
 is held in place by a self-contained differential harness — so what the headless
 CLI measures is exactly what you see on screen.
 
-One binary runs three ways: **standalone** (a human plays), **spectator** (the
-AI plays, a human watches), or **headless** (driven over MCP, for CI and agents).
+It runs three ways: the **GUI debugger** (`luna-gui`, a human plays), the
+**headless CLI** (`luna run` / `state` / `test`, for scripts and CI), or the
+**MCP server** (`luna mcp`, an agent drives) — all three over the same API.
 
 ## ✨ Features
 
 - **Cycle-accurate cores** — 65C816 + SPC700 (per-instruction suites 100%), S-DSP audio.
-- **The big coprocessors** — SA-1, Super FX (GSU), DSP-1, S-DD1.
+- **The big coprocessors** — SA-1, Super FX (GSU), DSP-1, S-DD1 (other chips are refused by name; see the [compatibility list](https://k0b3n4irb.github.io/luna/using/compatibility.html)).
 - **AI-native** — a stable introspection API + an MCP server; an agent reads
   state and drives input through one contract the CLI, GUI and MCP all share.
 - **A real debugger GUI** — memory, disassembly and live panels over winit + wgpu,

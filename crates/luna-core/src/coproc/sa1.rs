@@ -23,7 +23,8 @@
 
 use luna_bus::sa1::Sa1Mapper;
 use luna_bus::{
-    Addr24, Bus, MCycles, Mapper, MapperKind, Sa1SideEvent, Sa1Snapshot, Sa1TraceEvent,
+    Addr24, Bus, MCycles, Mapper, MapperKind, MapperStateError, Sa1SideEvent, Sa1Snapshot,
+    Sa1TraceEvent,
 };
 use luna_cpu_65c816::Cpu;
 
@@ -172,15 +173,13 @@ impl Mapper for Sa1Chip {
         bincode::serde::encode_to_vec(&st, bincode::config::standard()).unwrap_or_default()
     }
 
-    fn load_state(&mut self, data: &[u8]) {
-        if let Ok((st, _)) =
-            bincode::serde::decode_from_slice::<Sa1ChipState, _>(data, bincode::config::standard())
-        {
-            self.inner.load_state(&st.inner);
-            self.cpu = st.cpu;
-            self.running = st.running;
-            self.deficit = 0; // transient; re-accrues on the next step
-        }
+    fn load_state(&mut self, data: &[u8]) -> Result<(), MapperStateError> {
+        let st: Sa1ChipState = luna_bus::decode_state(data, "SA-1 chip")?;
+        self.inner.load_state(&st.inner)?;
+        self.cpu = st.cpu;
+        self.running = st.running;
+        self.deficit = 0; // transient; re-accrues on the next step
+        Ok(())
     }
 
     fn step_coproc(&mut self, main_mclk: u32, scpu_mar: u32) {
@@ -216,7 +215,7 @@ impl Mapper for Sa1Chip {
                 && *max > 0
             {
                 if events.len() >= *max {
-                    events.drain(0..*max / 2);
+                    events.drain(0..(*max / 2).max(1)); // max == 1: half is 0
                 }
                 events.push(Sa1TraceEvent {
                     pc_full: sa1_pc,

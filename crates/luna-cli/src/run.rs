@@ -78,9 +78,8 @@ pub(crate) fn run(
         // `--until-frame` (issue #222): run to a PPU frame instead of the
         // `-n` instruction count — the same semantics as `state`. Drain
         // audio per frame so `--audio-out` still works.
-        const FRAME_BUDGET: u64 = 200_000;
         while em.frame_count().unwrap_or(0) < target_frame {
-            match em.step_until_frame(FRAME_BUDGET) {
+            match em.step_until_frame(luna_api::FRAME_STEP_BUDGET) {
                 Ok(0) => {
                     stopped = true;
                     break;

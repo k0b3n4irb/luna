@@ -9,6 +9,18 @@ frame/scanline HDMA hooks).
 
 Authored 2026-05-30.
 
+> **Status 2026-09-18 — historical snapshot; the living audit is
+> [`hdma_ares_audit.md`](hdma_ares_audit.md).** This doc predates the
+> 2026-07 pillar work. Since it was written: the MDMA/HDMA cycle-cost
+> models were ported from ares (`mdma_cost` in `snes.rs`, `hdma_cost` in
+> `dma/controller.rs`), a long MDMA now yields to HDMA at scanline
+> boundaries (`run_mdma_segment`), the indirect last-active-channel 1-byte
+> reload quirk landed (`channel.rs`), and gap #7 was cracked (framebuffer
+> line origin, 2026-07-26 — HiColor64 is pixel-exact; only #7b HiColor128,
+> 91 %, stays open). The rows below were corrected in place; for current
+> status and the open DMA items use the audit doc and the DMA row of
+> [`accuracy_scorecard.md`](accuracy_scorecard.md).
+
 **Headline:** the DMA/HDMA *core* (table walk, transfer modes, indirect
 addressing, A-bus restrictions) is faithful and well-covered. The
 2026-05-31 HDMA-ROM coverage work surfaced and **fixed** one real visible
@@ -101,6 +113,18 @@ the mandrill **pixel-clean** (`ppu_hdma_hicolor64_pseudohires` promoted to
 a passing golden); SMRPG + Chrono Trigger smoke screenshots are unchanged
 (CT byte-identical, SMRPG correct); full `--lib` + golden suites green.
 
+> **Status 2026-09-18 — the sub-item below is RESOLVED for HiColor64;
+> its root-cause analysis was wrong.** Gap #7 was cracked 2026-07-26: it
+> was never sub-scanline CGRAM timing but the **framebuffer line origin**
+> (hardware displays PPU lines 1..=224, so row r is scanned during line
+> r+1). With the hardware origin, the DMA-path partial flush
+> (`DmaBusView::write_b`, `snes.rs`) and the HDMA end-of-line application
+> point, HiColor64 and 15 other corpus references are **pixel-exact**. The
+> only residual is **#7b** — HiColor128, 91 % exact (band-group parity
+> around the every-16-lines CGADD reset). See `accuracy_scorecard.md`
+> "Open items" #1 and `hdma_ares_audit.md` "Phase 5 inc 2". The text
+> below is kept as the 2026-05-31 record (81.2 %, "Deferred").
+
 **Remaining sub-item** (kept `#[ignore]`d): the two *non*-pseudo-hires
 HiColor demos display an RGB colour *chart* and still show residual
 striping vs the reference PNG that ships with each ROM
@@ -145,10 +169,10 @@ real, just not the ordering issue first suspected.
 
 | # | Issue | ares ref | luna |
 |---|---|---|---|
-| 3 | MDMA cost charged as flat `8 + bytes·8`; ares adds a per-channel `+8` (and aligns the burst start to a whole CPU cycle) | `dma.cpp:16-22,108-122` | `snes.rs:1444` lumps per-channel into per-byte |
-| 4 | Sync DMA is **atomic** (runs all bytes in one `run_mdma` call) so it never yields to HDMA mid-transfer; ares lets HDMA stop an active DMA at a scanline boundary (`dmaEnable = false`) | `dma.cpp:146,175` | OK in practice — sync DMA almost always runs in V-blank with no active HDMA |
+| ~~3~~ | ~~MDMA cost charged as flat `8 + bytes·8`~~ — **DONE** on the common path: `mdma_cost` (`snes.rs`) is ares' model — DMA-clock alignment + `step(8)` preamble + `+8` per enabled channel + 8 mclk/byte + realignment to the CPU clock. **Residual:** the segmented path (HDMA armed, `dma_edge_inner`) still charges a flat `8 + bytes·8` with no per-channel `+8` and no align/realign — audit row #15 | `dma.cpp:16-22,108-122`, `timing.cpp:125-130` | `snes.rs` `mdma_cost` ✅ / segmented path ⚠️ |
+| ~~4~~ | ~~Sync DMA is atomic, never yields to HDMA mid-transfer~~ — **DONE** (Phase 5 inc 1): when HDMA is armed the burst runs in scanline-bounded segments (`Dma::run_mdma_segment`) and HDMA fires at each crossed line. **Residual:** ares' HDMA also *aborts* the in-flight DMA of the **same channel** (`dmaEnable = false`); luna resumes it — audit row #17 | `dma.cpp:146,175` | `controller.rs` `run_mdma_segment` ✅ + test `hdma_preempts_a_long_mid_frame_dma_at_scanline_boundaries` |
 | ~~5~~ | ~~Enabling an HDMA channel mid-frame via `$420C` doesn't set it up until the next frame~~ — **DONE** (PR #3): live `hdma_started` lazy-start + ares `hdmaActive()` gating (Yoshi's Island intro text) | `dma.cpp:28-33` | `controller.rs:204-237` ✅ + regression test |
-| 6 | Indirect-HDMA `hdmaCompleted && hdmaFinished()` early-out after reading the first pointer byte not modelled | `dma.cpp:165` | `channel.rs:337-343` reads both pointer bytes regardless |
+| ~~6~~ | ~~Indirect-HDMA `hdmaCompleted && hdmaFinished()` early-out after reading the first pointer byte not modelled~~ — **DONE** (audit row #10): `hdma_step_line(.., last_active)` reads only the first pointer byte when the reload terminates the last active channel (`if !(completed && last_active)`) | `dma.cpp:165` | `channel.rs` `hdma_step_line` ✅ + 3 regression tests |
 
 ---
 
@@ -164,6 +188,9 @@ real, just not the ordering issue first suspected.
   chaining, terminator (`00`) handling. luna's "preserve header bit 7
   for continuation `do_transfer`" is equivalent to ares' "current
   counter `.bit(7)`" for all valid line counts (1-127).
+  *(Status 2026-09-18: this bullet missed two edge cases fixed later —
+  the low-7-zero `$80` header = 128-line entry, and mid-frame `$420C`
+  enable; see audit rows #5, #6, #9.)*
 - **`$43x5/6` shared** between the DMA byte count and the HDMA indirect
   address — correct (hardware shares the register pair).
 - Channel register read/write (`$43x0-$43xF`); `$420B` ascending
@@ -179,7 +206,8 @@ real, just not the ordering issue first suspected.
 2. ~~#2 WRAM→WRAM block~~ — **done**.
 3. ~~#7 HDMA CGRAM drop~~ — **done**: CGDATA via DMA/HDMA no longer gated
    by `active_display`; fixed the HiColor per-tile-row banding (pseudo-hires
-   mandrill now pixel-clean). HiColor64/128 charts remain (finer per-scanline
-   timing + no reference image).
-4. 🟡 #3-#6 — timing approximations; low real-world return (the current
-   model is game-compatible). Left as documented approximations.
+   mandrill now pixel-clean). ~~HiColor64/128 charts remain~~ — HiColor64
+   is pixel-exact since 2026-07-26 (line origin); HiColor128 = gap #7b.
+4. ~~#3-#6 timing approximations~~ — **done** (see the table; status
+   2026-09-18). What is still open lives in `hdma_ares_audit.md` rows
+   #13 and #15-#18.

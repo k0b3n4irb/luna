@@ -9,14 +9,16 @@
 //! runs the SMP as a cooperative thread; Mesen2 as an explicit
 //! `_opCode`/`_opStep` state machine — this mirrors the latter).
 //!
-//! ## Staging (see the cycle-stepped-SPC plan)
+//! ## Status — landed (all opcodes, production driver)
 //!
-//! Opcodes are ported to micro-steps **group by group**, each validated
-//! byte- and cycle-exact against the atomic `step()` by the equivalence
+//! Every opcode is ported to micro-steps (`execute_cycle` is an
+//! exhaustive match with no panicking fallback), each validated byte-
+//! and cycle-exact against the atomic `step()` by the equivalence
 //! harness in this module's tests (and, downstream, the Tom-Harte +
-//! trajectory harnesses). Until every opcode is ported, `step_cycle`
-//! panics on an un-ported opcode and the atomic path still drives
-//! emulation — there is no behavioural cutover yet.
+//! trajectory harnesses). `step_cycle` is the production path: the APU
+//! driver (`luna-apu`, `run_one_cycle`) calls it once per SPC bus
+//! access. The atomic `step()` is kept as the equivalence oracle and
+//! for the frozen-mailbox trajectory harness (`trace_step_one`).
 
 use crate::bus::SpcBus;
 use crate::cpu::Spc700;

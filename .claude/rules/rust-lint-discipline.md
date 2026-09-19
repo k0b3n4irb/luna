@@ -1,8 +1,8 @@
 # Rust lint discipline — full clippy sweep before every commit (auto-loaded)
 
-luna is a Rust workspace. The clippy gate **already in
-`rebuild-discipline.md`** is the bare minimum (`cargo clippy --workspace
---all-targets -- -D warnings`). This rule tightens it: every code
+luna is a Rust workspace. The clippy gate in `rebuild-discipline.md`
+(`cargo clippy --workspace --all-targets --all-features -- -D warnings`)
+is the floor. This rule spells out what it implies: every code
 change in this repo MUST keep the **entire workspace lint-clean** —
 no warnings, no skipped lints, no localised `#[allow]` shortcuts.
 
@@ -58,7 +58,7 @@ accumulate that debt again.
 ```bash
 cargo build --workspace --all-targets \
   && cargo build --release --workspace --all-targets \
-  && cargo test --workspace --lib \
+  && cargo test --workspace --lib --bins \
   && cargo fmt --all --check \
   && cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```

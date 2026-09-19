@@ -1,10 +1,14 @@
 # Fuzzing luna's untrusted-input surface
 
-A ROM file is the one input luna accepts from anywhere. The parser scores
-candidate headers across offsets, turns header bytes into allocation
+luna takes outside bytes through two doors. A **ROM file**: the parser
+scores candidate headers across offsets, turns header bytes into allocation
 sizes, and strips SMC / DSP-1 tails — all driven by arbitrary bytes — and
 whatever it accepts then sizes RAM and address masks inside the mapper
-shims. That whole chain is fuzzed here.
+shims. And a **save-state** (a GUI slot file, `--load-state`, base64 over
+MCP), which is decoded straight *into* a running machine. Both chains are
+fuzzed here. (Not yet fuzzed: `.sym` symbol files, `luna test` TOML
+manifests, `--input` scripts — all parsed by the CLI from files the user
+wrote.)
 
 ## Targets
 
@@ -12,11 +16,13 @@ shims. That whole chain is fuzzed here.
 |---|---|
 | `cartridge_parse` | `Cartridge::from_bytes` — auto-detect, header scoring, SMC/firmware stripping |
 | `cartridge_forced` | `Cartridge::from_bytes_forced` for all 8 `MapperKind`s (first input byte picks one) — the `--force-mapper` / GUI "load as…" path, which **skips checksum validation** and is therefore the weaker door |
-| `cartridge_to_system` | parse → `Snes::from_cartridge` → `reset` → 256 steps: the accepted-but-malformed cart reaching the mapper shims |
+| `cartridge_to_system` | parse → `Snes::try_from_cartridge` → `reset` → 256 steps: the accepted-but-malformed cart reaching the mapper shims (a header naming an unemulated chip is a clean refusal) |
+| `load_state` | `Emulator::load_state` on a live machine, then 64 steps + peeks. The first input byte picks the layer: raw container, or a genuine container carrying the input as its **mapper** blob or its **core** blob — so the fuzzer gets past the version / ROM-hash gate |
 
-**Contract under test:** any input either parses or returns `CartError`.
-It must never panic (out-of-bounds, capacity overflow) and never allocate
-unboundedly.
+**Contract under test:** any input either parses or returns an error
+(`CartError` / `ApiError::SaveState`). It must never panic (out-of-bounds,
+capacity overflow), never allocate unboundedly, and — for `load_state` — a
+refused state must leave the machine running.
 
 ## Running
 

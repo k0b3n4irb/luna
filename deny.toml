@@ -9,17 +9,20 @@ all-features = true
 # Fail on any advisory (vulnerability, unmaintained, unsound, notice).
 version = 2
 yanked = "deny"
-# Each ignore is a considered decision — re-evaluate when Dependabot
-# offers the relevant major bump.
+# Each ignore is a considered decision — re-evaluate it whenever the
+# weekly `deny` workflow turns red or the dependency is bumped by hand
+# (there is deliberately no bot opening upgrade PRs).
 ignore = [
     # quick-xml 0.39 DoS vectors (quadratic dup-attribute check,
     # unbounded NS allocation). Transitive via the rfd/zbus desktop
     # portal stack — parses local portal replies, not remote input.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
-    # bincode 1.x is unmaintained. Direct dep (save-state format);
-    # migrating to bincode 2 changes the on-disk format — planned
-    # separately, not a drive-by bump.
+    # bincode is unmaintained upstream (the advisory covers every
+    # version; luna is already on 2.x). Direct dep (save-state format):
+    # replacing it changes the on-disk format, so it is a planned
+    # migration, not a drive-by bump. Save-states are local files the
+    # user created, never remote input.
     "RUSTSEC-2025-0141",
     # Unmaintained, transitive, no safe upgrade path published:
     "RUSTSEC-2024-0436", # paste (via egui/wgpu stack)

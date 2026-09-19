@@ -15,7 +15,10 @@
 //!
 //! Or point `LUNA_SNES_TEST_DIR` at a corpus root. If the corpus is
 //! absent, every test prints a skip notice and passes — so `cargo test`
-//! works with or without the checkout.
+//! works with or without the checkout. A skip is therefore NOT a pass:
+//! set `LUNA_SNES_TEST_REQUIRE=1` (CI does) to turn a missing corpus ROM
+//! into a failure, and `LUNA_GAME_TEST_REQUIRE=1` to do the same for the
+//! commercial ROMs under `tests/roms/` (local pre-release check).
 //!
 //! ## Regenerating hashes
 //!
@@ -100,6 +103,23 @@ const STABLE_SAMPLES: u32 = 8;
 // the five `CPUTest` goldens ended up as half-drawn "BCC PASS / BCS PASS /
 // BNE…" screens. In frames the window is what it says it is, whatever the CPU
 // timing does.
+
+/// Set to make a missing corpus ROM a FAILURE instead of a skip. CI's
+/// `snes-test-roms` job sets it, so a broken fetch can never read as green.
+const CORPUS_REQUIRE: &str = "LUNA_SNES_TEST_REQUIRE";
+/// Same, for the gitignored commercial ROMs under `tests/roms/` — set it
+/// locally before tagging a release (CI never has these ROMs).
+const GAMES_REQUIRE: &str = "LUNA_GAME_TEST_REQUIRE";
+
+/// Report a test that cannot run: a skip notice, or a panic when the
+/// matching `*_REQUIRE` variable is set.
+fn skip(require_var: &str, why: &str) {
+    assert!(
+        std::env::var_os(require_var).is_none(),
+        "{why} — and {require_var} is set, so a skip is a failure"
+    );
+    eprintln!("[skip] {why}");
+}
 
 /// Corpus root: `$LUNA_SNES_TEST_DIR`, else the sibling `../luna_tests`.
 fn corpus_root() -> Option<PathBuf> {
@@ -299,15 +319,19 @@ fn run_game_to_frame(rom: Vec<u8>, frames: u64) -> Vec<u8> {
 /// the specific ROM is absent.
 fn test_display(rel: &str, expected: &str, hold: u16, region: luna_cartridge::Region) {
     let Some(root) = corpus_root() else {
-        eprintln!(
-            "[skip] SNES test corpus not found — checkout ../luna_tests \
-             (tools/fetch-snes-test-roms.sh) or set LUNA_SNES_TEST_DIR"
+        skip(
+            CORPUS_REQUIRE,
+            "SNES test corpus not found — checkout ../luna_tests \
+             (tools/fetch-snes-test-roms.sh) or set LUNA_SNES_TEST_DIR",
         );
         return;
     };
     let path = root.join(rel);
     if !path.is_file() {
-        eprintln!("[skip] {rel}: not present under {}", root.display());
+        skip(
+            CORPUS_REQUIRE,
+            &format!("{rel}: not present under {}", root.display()),
+        );
         return;
     }
 
@@ -356,12 +380,12 @@ macro_rules! cpu_test {
 #[test]
 fn ppu_interlace_font_native_512x448() {
     let Some(root) = corpus_root() else {
-        eprintln!("[skip] SNES test corpus not found");
+        skip(CORPUS_REQUIRE, "SNES test corpus not found");
         return;
     };
     let path = root.join("PPU/Interlace/InterlaceFont/InterlaceFont.sfc");
     let Ok(rom) = std::fs::read(&path) else {
-        eprintln!("[skip] {} absent", path.display());
+        skip(CORPUS_REQUIRE, &format!("{} absent", path.display()));
         return;
     };
     let mut cart = Cartridge::from_bytes_forced(rom, MapperKind::LoRom).expect("forced LoROM load");
@@ -549,12 +573,18 @@ macro_rules! spc700_test {
         fn $fn() {
             let rel = concat!("CPUTest/SPC700/", $name, "/SPC700", $name, ".sfc");
             let Some(root) = corpus_root() else {
-                eprintln!("[skip] SNES test corpus not found (tools/fetch-snes-test-roms.sh)");
+                skip(
+                    CORPUS_REQUIRE,
+                    "SNES test corpus not found (tools/fetch-snes-test-roms.sh)",
+                );
                 return;
             };
             let path = root.join(rel);
             if !path.is_file() {
-                eprintln!("[skip] {rel}: not present under {}", root.display());
+                skip(
+                    CORPUS_REQUIRE,
+                    &format!("{rel}: not present under {}", root.display()),
+                );
                 return;
             }
             let rom = std::fs::read(&path).expect("read rom");
@@ -1077,12 +1107,18 @@ fn write_wav(path: &Path, samples: &[(i16, i16)]) {
 /// `expected`. Skips gracefully if the corpus / ROM is absent.
 fn test_audio(rel: &str, expected: &str, hold: u16) {
     let Some(root) = corpus_root() else {
-        eprintln!("[skip] SNES test corpus not found (run tools/fetch-snes-test-roms.sh)");
+        skip(
+            CORPUS_REQUIRE,
+            "SNES test corpus not found (run tools/fetch-snes-test-roms.sh)",
+        );
         return;
     };
     let path = root.join(rel);
     if !path.is_file() {
-        eprintln!("[skip] {rel}: not present under {}", root.display());
+        skip(
+            CORPUS_REQUIRE,
+            &format!("{rel}: not present under {}", root.display()),
+        );
         return;
     }
 
@@ -1233,12 +1269,12 @@ macro_rules! game_test {
         #[test]
         fn $fn() {
             let Some(root) = games_root() else {
-                eprintln!("[skip] commercial ROMs (tests/roms/) absent — gitignored, dump your own");
+                skip(GAMES_REQUIRE, "commercial ROMs (tests/roms/) absent — gitignored, dump your own");
                 return;
             };
             let path = root.join($file);
             if !path.is_file() {
-                eprintln!("[skip] {}: not present under {}", $file, root.display());
+                skip(GAMES_REQUIRE, &format!("{}: not present under {}", $file, root.display()));
                 return;
             }
             let rom = std::fs::read(&path).expect("read rom");
@@ -1279,7 +1315,7 @@ game_test!(
     game_smrpg,
     "Super Mario RPG - Legend of the Seven Stars (USA).sfc",
     905,
-    "bf796467635a97e85615b6aa376a277c795a4d8f84ce8394e8a48b00af1637b5"
+    "622fc2b46c8719744f41509848301c93835dc10a9d76ce9e1ba5c04b2ccfb600"
 );
 game_test!(
     game_kirby_ss,
@@ -1292,7 +1328,7 @@ game_test!(
     game_starfox,
     "Star Fox (USA) (Rev 2).sfc",
     1939,
-    "f2898571d973c0c265b27f21ac3d186f8b78cbcf05b688127bfaa9bd4413e1e3"
+    "df7bd17642d3371151fc32c0326840ea1a765a5f86126035fa30fb485bc6a58f"
 );
 game_test!(
     game_stuntfx,

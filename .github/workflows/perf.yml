@@ -22,6 +22,9 @@ jobs:
     name: perf (headless throughput)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # Absolute: actions/cache rejects a `../` path (see ci.yml).
+      LUNA_SNES_TEST_DIR: ${{ github.workspace }}/.luna_tests
     steps:
       - uses: actions/checkout@v7
       - name: Install ALSA headers (cpal → alsa-sys)
@@ -34,7 +37,7 @@ jobs:
         id: rom-cache
         uses: actions/cache@v6
         with:
-          path: ../luna_tests
+          path: ${{ github.workspace }}/.luna_tests
           key: snes-test-roms-${{ hashFiles('tools/fetch-snes-test-roms.sh') }}
       - name: Fetch corpus (on cache miss)
         if: steps.rom-cache.outputs.cache-hit != 'true'
@@ -58,8 +61,8 @@ jobs:
             echo "|---|---:|---:|---:|---:|"
           } >> "$GITHUB_STEP_SUMMARY"
           for rom in \
-            "../luna_tests/PPU/Mode7/Perspective/Perspective.sfc" \
-            "../luna_tests/PPU/HDMA/WaveHDMA/WaveHDMA.sfc"; do
+            "$LUNA_SNES_TEST_DIR/PPU/Mode7/Perspective/Perspective.sfc" \
+            "$LUNA_SNES_TEST_DIR/PPU/HDMA/WaveHDMA/WaveHDMA.sfc"; do
             name=$(basename "$rom" .sfc)
             start=$(date +%s.%N)
             ./target/release/luna state -n 30000000 --force-mapper lorom \

@@ -35,8 +35,9 @@ first if it isn't built.
 
 Expected: **#1** the intro cinematic (Peach in the garden — bird,
 treehouse, bushes); **#2** the **"Your name?"** name-entry screen (Mario
-+ alphabet grid), with `nmis_serviced` climbing past the title (≥ ~5000,
-NMI rate ≥ 80%). A no-input run freezing at `nmis_serviced` ≈ 1598 is the
++ alphabet grid), with `nmis_serviced` climbing past the title (≈ 3335 at
+frame ≈ 3988 for `-n 55000000` since #126 — the `--input` checkpoints now
+spend from the `-n` budget; NMI rate ≥ 80%). A no-input run freezing at `nmis_serviced` ≈ 1598 is the
 title wait, not a deadlock.
 
 ### `smw` — Super Mario World Yoshi's House intro

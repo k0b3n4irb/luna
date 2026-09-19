@@ -10,7 +10,7 @@
 //! SRAM, when present, lives in banks `$70-$7D` (mirror `$F0-$FD`) at
 //! offsets `$0000-$7FFF`.
 
-use crate::mapper::{Mapper, MapperKind};
+use crate::mapper::{Mapper, MapperKind, MapperStateError, check_state_len, decode_state};
 use crate::types::{Addr24, bank_of, offset_of, rom_mirror};
 
 /// `LoROM` mapper.
@@ -121,12 +121,11 @@ impl Mapper for LoRomMapper {
         bincode::serde::encode_to_vec(&self.sram, bincode::config::standard()).unwrap_or_default()
     }
 
-    fn load_state(&mut self, data: &[u8]) {
-        if let Ok((sram, _)) =
-            bincode::serde::decode_from_slice::<Vec<u8>, _>(data, bincode::config::standard())
-        {
-            self.sram = sram;
-        }
+    fn load_state(&mut self, data: &[u8]) -> Result<(), MapperStateError> {
+        let sram: Vec<u8> = decode_state(data, "LoROM")?;
+        check_state_len("LoROM SRAM", sram.len(), self.sram.len())?;
+        self.sram = sram;
+        Ok(())
     }
 }
 

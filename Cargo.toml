@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.24.0"
+version = "1.25.0"
 edition = "2024"
 # Kept equal to the pinned toolchain (rust-toolchain.toml) — the only
 # rustc this workspace is actually built and tested with. The previous
@@ -195,6 +195,14 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# The shipped binary, but profilable: same optimisation as `release`,
+# symbols + line tables kept. `cargo build --profile profiling -p luna-cli`
+# then perf / callgrind / samply on `target/profiling/luna`.
+[profile.profiling]
+inherits = "release"
+strip = "none"
+debug = "line-tables-only"
 
 [profile.dev]
 opt-level = 1   # Émulation à vitesse acceptable même en dev

@@ -62,6 +62,48 @@ impl Region {
     }
 }
 
+/// A coprocessor / add-on board the header identifies but luna does not
+/// emulate. Detected the way ares does (`board()` + `firmwareNEC()` in
+/// mia/medium/super-famicom.cpp): chipset byte `$FFD6`, sub-type `$FFBF`,
+/// and — for the NEC DSP revisions, which share one chipset code — the title.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnsupportedChip {
+    /// NEC DSP-2 (Dungeon Master).
+    Dsp2,
+    /// NEC DSP-3 (SD Gundam GX).
+    Dsp3,
+    /// NEC DSP-4 (Top Gear 3000).
+    Dsp4,
+    /// OBC1 (Metal Combat).
+    Obc1,
+    /// Sharp S-RTC real-time clock (Daikaijuu Monogatari II).
+    SharpRtc,
+    /// Super Game Boy.
+    SuperGameBoy,
+    /// Seta ST-010 / ST-011 (NEC uPD96050).
+    SetaSt01x,
+    /// Seta ST-018 (ARM).
+    SetaSt018,
+    /// Hitachi Cx4 (Mega Man X2 / X3).
+    Cx4,
+}
+
+impl std::fmt::Display for UnsupportedChip {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Dsp2 => "DSP-2",
+            Self::Dsp3 => "DSP-3",
+            Self::Dsp4 => "DSP-4",
+            Self::Obc1 => "OBC1",
+            Self::SharpRtc => "S-RTC",
+            Self::SuperGameBoy => "Super Game Boy",
+            Self::SetaSt01x => "ST-010/ST-011",
+            Self::SetaSt018 => "ST-018",
+            Self::Cx4 => "Cx4",
+        })
+    }
+}
+
 /// Decoded SNES internal header.
 #[derive(Debug, Clone)]
 pub struct Header {
@@ -73,6 +115,10 @@ pub struct Header {
     /// (`true`, e.g. Super Mario Kart) or `LoROM` (`false`). Ignored for
     /// non-DSP mappers.
     pub dsp_hirom: bool,
+    /// A coprocessor the header names but luna does not emulate. When set,
+    /// `mapper_kind` is only the bare base layout and the system refuses to
+    /// build (a forced mapper clears it — the explicit "try it anyway").
+    pub unsupported_chip: Option<UnsupportedChip>,
     /// `true` if the `FastROM` bit is set in the mapping byte.
     pub fast_rom: bool,
     /// ROM size in kilobytes (advertised by the cartridge, may exceed the
@@ -201,6 +247,7 @@ impl Cartridge {
         }
         let mut header = parse_at(&rom, off);
         header.mapper_kind = mapper;
+        header.unsupported_chip = None;
         Ok(Self {
             rom,
             header,
@@ -346,7 +393,36 @@ fn parse_at(rom: &[u8], off: usize) -> Header {
     // Coprocessor overrides keyed on the chipset byte: low nibble >= 3 flags
     // a coprocessor, high nibble selects which (1 = Super FX, 0 = NEC DSP).
     let is_superfx = (chipset & 0x0F) >= 0x03 && (chipset & 0xF0) == 0x10;
-    let is_dsp = (chipset & 0x0F) >= 0x03 && (chipset & 0xF0) == 0x00;
+    let is_nec = (chipset & 0x0F) >= 0x03 && (chipset & 0xF0) == 0x00;
+    // Every NEC DSP revision shares that chipset code; ares `firmwareNEC()`
+    // (and Mesen2) tell them apart by title. Only DSP-1/1B is emulated.
+    let nec_other = match trimmed_title(&title_bytes) {
+        b"DUNGEON MASTER" => Some(UnsupportedChip::Dsp2),
+        // "SDガンダムGX" in half-width katakana.
+        b"SD\xB6\xDE\xDD\xC0\xDE\xD1GX" => Some(UnsupportedChip::Dsp3),
+        b"PLANETS CHAMP TG3000" | b"TOP GEAR 3000" => Some(UnsupportedChip::Dsp4),
+        _ => None,
+    };
+    let is_dsp = is_nec && nec_other.is_none();
+    // The remaining coprocessor codes of ares `board()`. `$Fx` boards are
+    // selected by the sub-type byte `$FFBF` (one below the title block).
+    let subtype = off.checked_sub(1).and_then(|i| rom.get(i)).copied();
+    let is_spc7110 = matches!(chipset, 0xF5 | 0xF9) && subtype == Some(0x00);
+    let unsupported_chip = if is_nec {
+        nec_other
+    } else if (chipset & 0x0F) < 0x03 {
+        None
+    } else {
+        match (chipset >> 4, subtype) {
+            (0x2, _) => Some(UnsupportedChip::Obc1),
+            (0x5, _) => Some(UnsupportedChip::SharpRtc),
+            (0xE, _) if chipset == 0xE3 => Some(UnsupportedChip::SuperGameBoy),
+            (0xF, Some(0x01)) => Some(UnsupportedChip::SetaSt01x),
+            (0xF, Some(0x02)) => Some(UnsupportedChip::SetaSt018),
+            (0xF, Some(0x10)) => Some(UnsupportedChip::Cx4),
+            _ => None,
+        }
+    };
     // SA-1's canonical signal is the chipset/RomType byte ($FFD6): low
     // nibble >= 3 (coprocessor present) + high nibble 3 (= SA-1) — e.g.
     // SMRPG / Kirby Super Star carry $34/$35. The MapMode byte's low
@@ -377,6 +453,9 @@ fn parse_at(rom: &[u8], off: usize) -> Header {
         MapperKind::Sa1
     } else if is_sdd1 {
         MapperKind::Sdd1
+    } else if is_spc7110 {
+        // Recognised so the system can refuse it by name (not emulated yet).
+        MapperKind::Spc7110
     } else {
         base_kind
     };
@@ -409,6 +488,7 @@ fn parse_at(rom: &[u8], off: usize) -> Header {
         title,
         mapper_kind,
         dsp_hirom,
+        unsupported_chip,
         fast_rom,
         rom_size_kb,
         sram_size_kb,
@@ -419,6 +499,16 @@ fn parse_at(rom: &[u8], off: usize) -> Header {
         checksum_complement: u16::from_le_bytes([rom[off + 0x1C], rom[off + 0x1D]]),
         checksum: u16::from_le_bytes([rom[off + 0x1E], rom[off + 0x1F]]),
     }
+}
+
+/// The header title with its `$00` / `$20` / `$FF` padding trimmed, as raw
+/// bytes — what ares `label()` compares before Shift-JIS decoding.
+fn trimmed_title(title: &[u8; 21]) -> &[u8] {
+    let end = title
+        .iter()
+        .rposition(|&b| !matches!(b, 0x00 | 0x20 | 0xFF))
+        .map_or(0, |i| i + 1);
+    &title[..end]
 }
 
 /// Map mode byte (`$FFD5`) → layout, accepting only the exact values ares
@@ -493,6 +583,72 @@ mod tests {
         rom[header_off + 0x1E] = 0xCB;
         rom[header_off + 0x1F] = 0xED;
         rom
+    }
+
+    /// A synthetic `LoROM` whose chipset (`$FFD6`) / sub-type (`$FFBF`)
+    /// bytes name a coprocessor board.
+    fn synth_chip(title: &[u8], chipset: u8, subtype: u8) -> Header {
+        let mut rom = synth_lorom("", 0);
+        rom[HEADER_OFFSET_LOROM..HEADER_OFFSET_LOROM + 21].fill(b' ');
+        rom[HEADER_OFFSET_LOROM..HEADER_OFFSET_LOROM + title.len()].copy_from_slice(title);
+        rom[HEADER_OFFSET_LOROM + 0x16] = chipset;
+        rom[HEADER_OFFSET_LOROM - 1] = subtype;
+        Cartridge::from_bytes(rom).unwrap().header
+    }
+
+    #[test]
+    fn nec_dsp_revisions_are_told_apart_by_title() {
+        // ares firmwareNEC(): one chipset code, the title picks the revision.
+        let dsp1 = synth_chip(b"SUPER MARIO KART", 0x05, 0x00);
+        assert_eq!(dsp1.mapper_kind, MapperKind::Dsp1);
+        assert_eq!(dsp1.unsupported_chip, None);
+        for (title, chip) in [
+            (&b"DUNGEON MASTER"[..], UnsupportedChip::Dsp2),
+            (&b"SD\xB6\xDE\xDD\xC0\xDE\xD1GX"[..], UnsupportedChip::Dsp3),
+            (&b"TOP GEAR 3000"[..], UnsupportedChip::Dsp4),
+            (&b"PLANETS CHAMP TG3000"[..], UnsupportedChip::Dsp4),
+        ] {
+            let h = synth_chip(title, 0x05, 0x00);
+            assert_eq!(h.unsupported_chip, Some(chip), "{title:?}");
+            assert_ne!(
+                h.mapper_kind,
+                MapperKind::Dsp1,
+                "{title:?} must not run as DSP-1"
+            );
+        }
+    }
+
+    #[test]
+    fn unemulated_coprocessor_boards_are_named() {
+        // ares board(): chipset high nibble, `$Fx` split by the sub-type.
+        for (chipset, subtype, chip) in [
+            (0x25, 0x00, UnsupportedChip::Obc1),
+            (0x55, 0x00, UnsupportedChip::SharpRtc),
+            (0xE3, 0x00, UnsupportedChip::SuperGameBoy),
+            (0xF6, 0x01, UnsupportedChip::SetaSt01x),
+            (0xF5, 0x02, UnsupportedChip::SetaSt018),
+            (0xF3, 0x10, UnsupportedChip::Cx4),
+        ] {
+            let h = synth_chip(b"CHIP TEST", chipset, subtype);
+            assert_eq!(h.unsupported_chip, Some(chip), "chipset ${chipset:02X}");
+            assert_eq!(h.mapper_kind, MapperKind::LoRom);
+        }
+        let spc = synth_chip(b"CHIP TEST", 0xF5, 0x00);
+        assert_eq!(spc.mapper_kind, MapperKind::Spc7110);
+        // Supported boards and plain carts stay clean.
+        for chipset in [0x00, 0x02, 0x13, 0x15, 0x34, 0x35, 0x43, 0x45] {
+            let h = synth_chip(b"CHIP TEST", chipset, 0x00);
+            assert_eq!(h.unsupported_chip, None, "chipset ${chipset:02X}");
+        }
+    }
+
+    #[test]
+    fn forcing_a_mapper_clears_the_unsupported_chip() {
+        let mut rom = synth_lorom("CHIP TEST", 0);
+        rom[HEADER_OFFSET_LOROM + 0x16] = 0xF3;
+        rom[HEADER_OFFSET_LOROM - 1] = 0x10;
+        let cart = Cartridge::from_bytes_forced(rom, MapperKind::LoRom).unwrap();
+        assert_eq!(cart.header.unsupported_chip, None);
     }
 
     #[test]

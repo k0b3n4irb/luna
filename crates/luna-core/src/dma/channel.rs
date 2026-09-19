@@ -30,9 +30,12 @@ const fn is_wram_a(addr: Addr24) -> bool {
     addr & 0xFE_0000 == 0x7E_0000 || addr & 0x40_E000 == 0x0000
 }
 
-/// A-bus read with the `validA` gate (open bus = 0 when blocked).
+/// A-bus read with the `validA` gate (0 when blocked), latched into the
+/// MDR either way — ares `Channel::readA` (`dma.cpp:63-68`).
 fn read_a_valid<B: DmaBus>(bus: &mut B, addr: Addr24) -> u8 {
-    if valid_a(addr) { bus.read_a(addr) } else { 0 }
+    let v = if valid_a(addr) { bus.read_a(addr) } else { 0 };
+    bus.latch_mdr(v);
+    v
 }
 
 /// A-bus write with the `validA` gate (dropped when blocked).
@@ -57,7 +60,9 @@ fn transfer_byte<B: DmaBus>(bus: &mut B, a_addr: Addr24, b_offset: u8, direction
             }
         }
         Direction::BToA => {
+            // ares `Channel::readB` (`dma.cpp:70-75`): latched into the MDR.
             let v = if b_valid { bus.read_b(b_offset) } else { 0 };
+            bus.latch_mdr(v);
             write_a_valid(bus, a_addr, v);
         }
     }

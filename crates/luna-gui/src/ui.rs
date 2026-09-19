@@ -409,7 +409,6 @@ impl UiOverlay {
     }
 }
 
-#[allow(deprecated)]
 pub(crate) fn install_dark_theme(ctx: &egui::Context) {
     use egui::{Color32, Stroke, Visuals, epaint::Shadow};
     let mut visuals = Visuals::dark();
@@ -446,11 +445,11 @@ pub(crate) fn install_dark_theme(ctx: &egui::Context) {
     visuals.menu_corner_radius = egui::CornerRadius::same(6);
     ctx.set_visuals(visuals);
 
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     style.spacing.item_spacing = egui::vec2(10.0, 6.0);
     style.spacing.button_padding = egui::vec2(10.0, 4.0);
     style.spacing.menu_margin = egui::Margin::same(6);
-    ctx.set_style(style);
+    ctx.set_global_style(style);
 }
 
 fn draw_input_config<F: FnMut(MenuAction)>(ctx: &egui::Context, state: &UiState<'_>, emit: &mut F) {
@@ -1965,9 +1964,13 @@ fn draw_force_mapper_prompt<F: FnMut(MenuAction)>(ctx: &egui::Context, file: &st
         });
 }
 
-#[allow(deprecated)]
 /// Draws the top menu strip. Returns the strip's bottom edge in logical
 /// points — the game-frame layout anchors just below it.
+// egui deprecated the ctx-level `TopBottomPanel::show` for `Panel::show_inside`,
+// which needs a parent `Ui`; luna draws this strip straight on the `Context`
+// (no root `Ui` exists in the hand-rolled winit loop). Revisit with the next
+// egui bump that removes the alias.
+#[allow(deprecated)]
 fn draw_menu_bar<F: FnMut(MenuAction)>(
     ctx: &egui::Context,
     state: &UiState<'_>,
@@ -2152,12 +2155,14 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(
                             luna_api::PortDevice::Pad => "Gamepad",
                             luna_api::PortDevice::Mouse => "Mouse",
                             luna_api::PortDevice::SuperScope => "Super Scope",
+                            luna_api::PortDevice::Multitap => "Super Multitap",
                         };
                         ui.menu_button(format!("Port {}: {cur}", port + 1), |ui| {
                             for (label, dev) in [
                                 ("Gamepad", luna_api::PortDevice::Pad),
                                 ("Mouse", luna_api::PortDevice::Mouse),
                                 ("Super Scope", luna_api::PortDevice::SuperScope),
+                                ("Super Multitap", luna_api::PortDevice::Multitap),
                             ] {
                                 if ui
                                     .radio(state.port_device[port as usize] == dev, label)

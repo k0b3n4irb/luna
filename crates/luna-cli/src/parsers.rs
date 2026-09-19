@@ -30,67 +30,32 @@ pub(crate) fn parse_input_script(script: &str) -> Result<Vec<(u64, u16)>, String
     }
 }
 
+/// A `--input` / `--input2` script (inline or `@file`) as joypad `port`
+/// events, ready for a [`luna_api::InputScript`].
+pub(crate) fn pad_events(
+    script: &str,
+    port: u8,
+) -> Result<Vec<(u64, luna_api::InputEvent)>, String> {
+    Ok(parse_input_script(script)?
+        .into_iter()
+        .map(|(f, mask)| (f, luna_api::InputEvent::Pad { port, mask }))
+        .collect())
+}
+
 /// Pure `frame:hex` body parser (no I/O): comma/newline-separated entries,
 /// `#` line comments, sorted by frame. See [`parse_input_script`].
 pub(crate) fn parse_input_script_body(script: &str) -> Result<Vec<(u64, u16)>, String> {
-    let mut out: Vec<(u64, u16)> = Vec::new();
-    for line in script.lines() {
-        // Drop a `#` comment (whole-line or trailing) before splitting.
-        let line = line.split('#').next().unwrap_or("");
-        for entry in line.split(',') {
-            let entry = entry.trim();
-            if entry.is_empty() {
-                continue;
-            }
-            let (frame_str, mask_str) = entry
-                .split_once(':')
-                .ok_or_else(|| format!("missing ':' in entry `{entry}`"))?;
-            let frame: u64 = frame_str
-                .trim()
-                .parse()
-                .map_err(|e| format!("bad frame `{frame_str}`: {e}"))?;
-            let mask_str = mask_str
-                .trim()
-                .trim_start_matches("0x")
-                .trim_start_matches("0X");
-            let mask: u16 = u16::from_str_radix(mask_str, 16)
-                .map_err(|e| format!("bad hex mask `{mask_str}`: {e}"))?;
-            out.push((frame, mask));
-        }
-    }
-    out.sort_by_key(|(f, _)| *f);
-    Ok(out)
+    luna_api::input::parse_pad_script(script)
 }
 
 /// A scripted mouse checkpoint: `(frame, (dx, dy, buttons))`.
-pub(crate) type MouseCheckpoint = (u64, (i32, i32, u8));
+pub(crate) type MouseCheckpoint = luna_api::input::PointerCheckpoint;
 
 /// Parse a `--mouse` script: `;`-separated `frame:dx,dy,buttons` entries
 /// (signed `dx`/`dy`; `buttons` bit0 = left, bit1 = right). Returns the
 /// checkpoints sorted by frame.
 pub(crate) fn parse_mouse_script(script: &str) -> Result<Vec<MouseCheckpoint>, String> {
-    let mut out = Vec::new();
-    for entry in script.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-        let (frame, rest) = entry
-            .split_once(':')
-            .ok_or_else(|| format!("`{entry}`: expected `frame:dx,dy,buttons`"))?;
-        let frame: u64 = frame
-            .trim()
-            .parse()
-            .map_err(|_| format!("`{entry}`: bad frame"))?;
-        let p: Vec<&str> = rest.split(',').map(str::trim).collect();
-        if p.len() != 3 {
-            return Err(format!("`{entry}`: expected `dx,dy,buttons` (3 values)"));
-        }
-        let dx: i32 = p[0].parse().map_err(|_| format!("`{entry}`: bad dx"))?;
-        let dy: i32 = p[1].parse().map_err(|_| format!("`{entry}`: bad dy"))?;
-        let buttons: u8 = p[2]
-            .parse()
-            .map_err(|_| format!("`{entry}`: bad buttons"))?;
-        out.push((frame, (dx, dy, buttons)));
-    }
-    out.sort_by_key(|(f, _)| *f);
-    Ok(out)
+    luna_api::input::parse_pointer_script(script)
 }
 
 /// Parse a `BANK:OFFSET:COUNT` peek spec (all hex, no `0x` prefix).
@@ -238,45 +203,6 @@ pub(crate) fn parse_addr_range(spec: &str) -> Result<(u16, u16), String> {
 // mis-parse corrupts a debugging session, so every accepted/rejected form
 // is pinned here.
 // =============================================================================
-
-/// Step `em` until PPU frame `frame` is reached, spending **at most**
-/// `budget` instructions. Returns the instructions consumed.
-///
-/// This bound is what makes a scripted `--input` checkpoint honour
-/// `-n` (issue #126): the pre-roll used to step to each checkpoint's
-/// frame unconditionally and only THEN spend the requested budget, so
-/// `-n 100000 --input "900:0x8000"` ran to frame 910 instead of frame
-/// 12 — a run 75x longer than asked, in which a press scheduled far
-/// beyond the requested window still reached the ROM. A checkpoint the
-/// run never reaches must simply not fire.
-///
-/// Stops early when the emulator makes no progress (halted core), so a
-/// dead ROM cannot spin here.
-pub(crate) fn step_to_frame_bounded(em: &mut luna_api::Emulator, frame: u64, budget: u64) -> u64 {
-    let start = em.instructions_executed();
-    while em.frame_count().unwrap_or(0) < frame {
-        let spent = em.instructions_executed().saturating_sub(start);
-        let left = budget.saturating_sub(spent);
-        if left == 0 {
-            break;
-        }
-        // Never overshoot the budget: cap the per-frame step by what is
-        // left, so the last partial frame stops exactly on the limit.
-        if em
-            .step_until_frame(left.min(FRAME_STEP_BUDGET))
-            .unwrap_or(0)
-            == 0
-        {
-            break;
-        }
-    }
-    em.instructions_executed().saturating_sub(start)
-}
-
-/// Per-call instruction cap while chasing a checkpoint frame. Large
-/// enough for any real frame (a slow one is ~40k instructions), small
-/// enough that the budget check above stays responsive.
-const FRAME_STEP_BUDGET: u64 = 200_000;
 
 /// An `APU:OFFSET:COUNT` peek target (issue #122): `OFFSET`/`COUNT` are
 /// hex, and the read goes to **ARAM** (the SPC700's 64 KB address

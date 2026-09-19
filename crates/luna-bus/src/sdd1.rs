@@ -16,7 +16,7 @@
 //! control registers) plus — wired in a later stage — the DMA-triggered
 //! decompression.
 
-use crate::mapper::{Mapper, MapperKind};
+use crate::mapper::{Mapper, MapperKind, MapperStateError, check_state_len, decode_state};
 use crate::types::{Addr24, bank_of, offset_of, rom_mirror};
 
 /// Raw (already MMC-bank-switched) ROM byte source for the decompressor — the
@@ -656,7 +656,7 @@ impl Mapper for Sdd1Mapper {
         .unwrap_or_default()
     }
 
-    fn load_state(&mut self, data: &[u8]) {
+    fn load_state(&mut self, data: &[u8]) -> Result<(), MapperStateError> {
         type State = (
             Vec<u8>,
             u8,
@@ -670,10 +670,9 @@ impl Mapper for Sdd1Mapper {
             bool,
             Sdd1Decompressor,
         );
-        if let Ok((
-            (sram, r4800, r4801, r4804, r4805, r4806, r4807, dma_addr, dma_size, ready, dec),
-            _,
-        )) = bincode::serde::decode_from_slice::<State, _>(data, bincode::config::standard())
+        let (sram, r4800, r4801, r4804, r4805, r4806, r4807, dma_addr, dma_size, ready, dec): State =
+            decode_state(data, "S-DD1")?;
+        check_state_len("S-DD1 SRAM", sram.len(), self.sram.len())?;
         {
             self.sram = sram;
             self.r4800 = r4800;
@@ -687,6 +686,7 @@ impl Mapper for Sdd1Mapper {
             self.dma_ready = ready;
             self.decompressor = dec;
         }
+        Ok(())
     }
 }
 
@@ -882,7 +882,7 @@ mod tests {
         m.write(make_addr(0x00, 0x4806), 0x03);
         let blob = m.save_state();
         let mut m2 = mapper_with_ramp_rom(0x1_0000);
-        m2.load_state(&blob);
+        m2.load_state(&blob).unwrap();
         assert_eq!(m2.read(make_addr(0x70, 0x0010)), Some(0x5A));
         assert_eq!(m2.read(make_addr(0x00, 0x4806)), Some(0x03));
     }

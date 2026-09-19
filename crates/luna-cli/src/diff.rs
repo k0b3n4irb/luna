@@ -12,11 +12,11 @@
 use std::collections::BTreeMap;
 use std::process::ExitCode;
 
-use crate::parsers::parse_input_script;
+use crate::parsers::pad_events;
 use crate::rom::load_rom_into;
 
 /// Instruction budget per frame (matches the other frame-stepping paths).
-const FRAME_BUDGET: u64 = 200_000;
+use luna_api::FRAME_STEP_BUDGET as FRAME_BUDGET;
 
 /// Options shared by both machines.
 pub(crate) struct DiffOptions<'a> {
@@ -36,6 +36,8 @@ pub(crate) struct DiffOptions<'a> {
 /// decides whether it is written).
 struct Machine {
     em: luna_api::Emulator,
+    /// This machine's replay cursor over the shared `--input` script.
+    script: luna_api::InputScript,
     hashes: BTreeMap<u64, u64>,
     pngs: BTreeMap<u64, Vec<u8>>,
     halted: bool,
@@ -57,6 +59,7 @@ impl Machine {
         }
         Ok(Self {
             em,
+            script: luna_api::InputScript::new(),
             hashes: BTreeMap::new(),
             pngs: BTreeMap::new(),
             halted: false,
@@ -92,14 +95,14 @@ impl Machine {
 
     /// Advance to the next PPU frame, applying any input checkpoint due
     /// on the frame being left. `false` once the machine has halted.
-    fn step_frame(&mut self, checkpoints: &[(u64, u16)]) -> Result<bool, String> {
+    fn step_frame(&mut self) -> Result<bool, String> {
         if self.halted {
             return Ok(false);
         }
         let f = self.frame();
-        for &(_, mask) in checkpoints.iter().filter(|&&(at, _)| at == f) {
-            self.em.set_joypad(0, mask).map_err(|e| e.to_string())?;
-        }
+        self.script
+            .apply_due(&mut self.em, f)
+            .map_err(|e| e.to_string())?;
         let ran = match self.em.step_until_frame(FRAME_BUDGET) {
             Ok(n) => n,
             Err(luna_api::ApiError::Panic(msg)) => {
@@ -158,14 +161,15 @@ pub(crate) fn run_diff(
         eprintln!("error: --frames needs at least one PPU frame number");
         return ExitCode::from(2);
     }
-    let checkpoints: Vec<(u64, u16)> = match o.input_script.map(parse_input_script) {
-        None => Vec::new(),
-        Some(Ok(v)) => v,
+    let mut script = luna_api::InputScript::new();
+    match o.input_script.map(|s| pad_events(s, 0)) {
+        None => {}
+        Some(Ok(v)) => script.extend(v),
         Some(Err(e)) => {
             eprintln!("error: --input: {e}");
             return ExitCode::from(2);
         }
-    };
+    }
     let (mut a, mut b) = match (Machine::load(rom_a, o), Machine::load(rom_b, o)) {
         (Ok(a), Ok(b)) => (a, b),
         (Err(e), _) | (_, Err(e)) => {
@@ -173,6 +177,8 @@ pub(crate) fn run_diff(
             return ExitCode::from(1);
         }
     };
+    a.script = script.clone();
+    b.script = script;
     let last = *frames.last().expect("non-empty");
     let horizon = last + o.tolerance;
     let want_png = o.screenshot_dir.is_some();
@@ -180,11 +186,11 @@ pub(crate) fn run_diff(
     // Run both machines frame by frame to the horizon. A only needs its
     // hash at the requested frames; B needs one at every frame inside a
     // tolerance window, i.e. simply every frame (one u64 each).
-    if let Err(e) = drive(&mut a, o, &frames, want_png, last, &checkpoints, false) {
+    if let Err(e) = drive(&mut a, o, &frames, want_png, last, false) {
         eprintln!("error: rom A: {e}");
         return ExitCode::from(1);
     }
-    if let Err(e) = drive(&mut b, o, &frames, want_png, horizon, &checkpoints, true) {
+    if let Err(e) = drive(&mut b, o, &frames, want_png, horizon, true) {
         eprintln!("error: rom B: {e}");
         return ExitCode::from(1);
     }
@@ -292,7 +298,6 @@ fn drive(
     frames: &[u64],
     want_png: bool,
     horizon: u64,
-    checkpoints: &[(u64, u16)],
     every: bool,
 ) -> Result<(), String> {
     loop {
@@ -301,7 +306,7 @@ fn drive(
         if every || requested {
             m.record(o, want_png && requested)?;
         }
-        if f >= horizon || !m.step_frame(checkpoints)? {
+        if f >= horizon || !m.step_frame()? {
             return Ok(());
         }
     }

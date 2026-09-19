@@ -7,7 +7,7 @@
 //!
 //! Reference: <https://problemkaputt.de/fullsnes.htm> §"S-CPU Registers".
 
-use crate::controller::{Mouse, PortDevice, SuperScope};
+use crate::controller::{Mouse, Multitap, PortDevice, SuperScope, clean_dpad};
 
 /// CPU-side registers.
 ///
@@ -77,6 +77,15 @@ pub struct CpuRegs {
     pub joypad1_latched: u16,
     /// `$421A/$421B` — latched player-2 state.
     pub joypad2_latched: u16,
+    /// Pads B, C, D of a Super Multitap (players 3-5 when it sits on port 2,
+    /// 2-4 on port 1). Pad A is the port's own `joypad1` / `joypad2`. One
+    /// tap is modelled (the 8-player double-tap setup is not).
+    pub joypad_tap: [u16; 3],
+    /// `$421C/$421D` — the auto-read's port-1 **d1** line (joypad 3): 0 for
+    /// a pad, a multitap's second selected pad.
+    pub joypad3_latched: u16,
+    /// `$421E/$421F` — the auto-read's port-2 d1 line (joypad 4).
+    pub joypad4_latched: u16,
 
     /// Device on controller port 1 (the auto-read + `$4016` serial path).
     pub port1: PortDevice,
@@ -87,6 +96,8 @@ pub struct CpuRegs {
     pub mouse: Mouse,
     /// Super Scope state — used when a port is [`PortDevice::SuperScope`].
     pub super_scope: SuperScope,
+    /// Super Multitap state — used when a port is [`PortDevice::Multitap`].
+    pub multitap: Multitap,
 }
 
 impl CpuRegs {
@@ -103,12 +114,31 @@ impl CpuRegs {
 
     /// One serial bit for `port`'s peripheral (Mouse / Super Scope) on a
     /// manual `$4016` (port 0) / `$4017` (port 1) read; `None` for a pad.
+    ///
+    /// The value carries both data lines (bit 0 = d0, bit 1 = d1, ares
+    /// `data.bit(0,1) = controllerPort.data()`): only a Multitap drives d1.
     pub fn port_serial_bit(&mut self, port: usize) -> Option<u8> {
         match if port == 0 { self.port1 } else { self.port2 } {
             PortDevice::Mouse => Some(self.mouse.data() & 1),
             PortDevice::SuperScope => Some(self.super_scope.data() & 1),
+            PortDevice::Multitap => {
+                let (iobit, live) = self.tap_lines(port);
+                Some(self.multitap.data(iobit, live) & 3)
+            }
             PortDevice::Pad => None,
         }
+    }
+
+    /// A multitap on `port`: its iobit (WRIO bit 6 for port 1, bit 7 for
+    /// port 2 — ares `Controller::iobit`) and its four pads' live masks.
+    const fn tap_lines(&self, port: usize) -> (bool, [u16; 4]) {
+        let (bit, pad_a) = if port == 0 {
+            (0x40, self.joypad1)
+        } else {
+            (0x80, self.joypad2)
+        };
+        let [b, c, d] = self.joypad_tap;
+        (self.wrio & bit != 0, [pad_a, b, c, d])
     }
 
     /// If a Super Scope is connected and aimed onscreen, and the beam has
@@ -133,6 +163,12 @@ impl CpuRegs {
         }
         if self.port1 == PortDevice::SuperScope || self.port2 == PortDevice::SuperScope {
             self.super_scope.latch(strobe);
+        }
+        for port in 0..2 {
+            if [self.port1, self.port2][port] == PortDevice::Multitap {
+                let (_, live) = self.tap_lines(port);
+                self.multitap.latch(strobe, live);
+            }
         }
     }
 
@@ -165,14 +201,17 @@ impl CpuRegs {
             0x4215 => (self.rddiv >> 8) as u8,
             0x4216 => self.rdmpy as u8,
             0x4217 => (self.rdmpy >> 8) as u8,
-            // Joypad auto-read latches at $4218-$421F. Standard SNES
-            // only has 2 controller ports, so $421C-$421F (joypads 3
-            // and 4 via multitap) return 0.
+            // Joypad auto-read latches at $4218-$421F: the d0 lines of
+            // ports 1/2, then their d1 lines ($421C = port 1, $421E =
+            // port 2) — non-zero only behind a Super Multitap.
             0x4218 => self.joypad1_latched as u8,
             0x4219 => (self.joypad1_latched >> 8) as u8,
             0x421A => self.joypad2_latched as u8,
             0x421B => (self.joypad2_latched >> 8) as u8,
-            0x421C..=0x421F => 0x00,
+            0x421C => self.joypad3_latched as u8,
+            0x421D => (self.joypad3_latched >> 8) as u8,
+            0x421E => self.joypad4_latched as u8,
+            0x421F => (self.joypad4_latched >> 8) as u8,
             0x4200..=0x420F | 0x4213 => return None,
             _ => return None,
         };
@@ -231,32 +270,32 @@ impl CpuRegs {
         // A Mouse on a port feeds the auto-read its first 16 protocol bits
         // (signature + buttons + speed) instead of the pad's button mask —
         // that is how the SDK's `mouseInit` detects it.
+        let (mut d1_port1, mut d1_port2) = (0, 0);
         self.joypad1_latched = match self.port1 {
             PortDevice::Mouse => self.mouse.auto_read_16(),
             PortDevice::SuperScope => self.super_scope.auto_read_16(),
-            PortDevice::Pad => Self::clean_dpad(self.joypad1),
+            PortDevice::Multitap => {
+                let (iobit, live) = self.tap_lines(0);
+                let (d0, d1) = self.multitap.auto_read(iobit, live);
+                d1_port1 = d1;
+                d0
+            }
+            PortDevice::Pad => clean_dpad(self.joypad1),
         };
         self.joypad2_latched = match self.port2 {
             PortDevice::Mouse => self.mouse.auto_read_16(),
             PortDevice::SuperScope => self.super_scope.auto_read_16(),
-            PortDevice::Pad => Self::clean_dpad(self.joypad2),
+            PortDevice::Multitap => {
+                let (iobit, live) = self.tap_lines(1);
+                let (d0, d1) = self.multitap.auto_read(iobit, live);
+                d1_port2 = d1;
+                d0
+            }
+            PortDevice::Pad => clean_dpad(self.joypad2),
         };
+        self.joypad3_latched = d1_port1;
+        self.joypad4_latched = d1_port2;
         self.hvbjoy |= 0x01;
-    }
-
-    /// Clear opposing D-pad bits (Up vs Down, Left vs Right) to model
-    /// the physical lockout on real-HW controllers. Bit layout per
-    /// the SNES JOY1L/JOY1H pair: bit 11 = Up, bit 10 = Down, bit 9
-    /// = Left, bit 8 = Right.
-    const fn clean_dpad(mask: u16) -> u16 {
-        let mut m = mask;
-        if m & 0x0C00 == 0x0C00 {
-            m &= !0x0C00; // up + down → drop both
-        }
-        if m & 0x0300 == 0x0300 {
-            m &= !0x0300; // left + right → drop both
-        }
-        m
     }
 
     /// Drop the auto-read busy bit. Called a few scanlines after
@@ -272,10 +311,14 @@ impl CpuRegs {
     ///
     /// Bit layout (high → low): B Y SEL START Up Down Left Right
     /// A X L R 0 0 0 0.
+    ///
+    /// `idx` 2-4 are a Super Multitap's pads B-D (players 3-5 with the tap
+    /// on port 2); ignored unless a port holds one.
     pub const fn set_joypad(&mut self, idx: usize, mask: u16) {
         match idx {
             0 => self.joypad1 = mask,
             1 => self.joypad2 = mask,
+            2..=4 => self.joypad_tap[idx - 2] = mask,
             _ => {}
         }
     }

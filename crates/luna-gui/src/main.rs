@@ -125,7 +125,9 @@ struct LunaApp {
     gilrs: Option<gilrs::Gilrs>,
     /// Live SNES button mask per player derived from gamepads 1 and 2,
     /// OR-merged with the keyboard mask in `push_joypad`.
-    pad_masks: [u16; 2],
+    /// Host gamepad masks by connection order: players 1-2, then a Super
+    /// Multitap's pads B-D (players 3-5 with the tap on port 2).
+    pad_masks: [u16; 5],
 
     /// Set of keys currently held down — recomputed each
     /// `KeyboardInput` event, sampled before every joypad push.
@@ -280,7 +282,7 @@ impl LunaApp {
             gilrs: gilrs::Gilrs::new()
                 .map_err(|e| eprintln!("luna-gui: gamepad backend unavailable: {e}"))
                 .ok(),
-            pad_masks: [0; 2],
+            pad_masks: [0; 5],
             pressed_keys: HashSet::new(),
             modifiers: ModifiersState::empty(),
             key_bindings: KeyBindings::load_or_default(),
@@ -597,8 +599,8 @@ impl LunaApp {
         if !saw_event {
             return;
         }
-        let mut masks = [0u16; 2];
-        for (slot, (_, pad)) in g.gamepads().take(2).enumerate() {
+        let mut masks = [0u16; 5];
+        for (slot, (_, pad)) in g.gamepads().take(5).enumerate() {
             masks[slot] = snes_mask_from_gamepad(&pad);
         }
         if masks != self.pad_masks {
@@ -695,6 +697,11 @@ impl LunaApp {
         {
             let _ = em.set_joypad(0, p1);
             let _ = em.set_joypad(1, p2);
+            // Players 3-5 (a Super Multitap's pads B-D) come from host
+            // gamepads 3-5 only; the core ignores them without a tap.
+            for (idx, mask) in (2u8..).zip(&self.pad_masks[2..]) {
+                let _ = em.set_joypad(idx, *mask);
+            }
         }
     }
 
@@ -726,7 +733,7 @@ impl LunaApp {
                     luna_api::PortDevice::SuperScope => {
                         let _ = em.set_superscope(cx, cy, buttons);
                     }
-                    luna_api::PortDevice::Pad => {}
+                    luna_api::PortDevice::Pad | luna_api::PortDevice::Multitap => {}
                 }
             }
         }

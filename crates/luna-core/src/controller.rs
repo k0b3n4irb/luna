@@ -5,7 +5,8 @@
 //! `$4016/$4017` shift). These devices need their own serial protocols: the
 //! Mouse clocks out a 32-bit stream carrying a 4-bit device **signature**
 //! (`0001`) that a game's DETECT loop checks, and the Super Scope reports its
-//! buttons plus a beam position latched against the PPU H/V counters.
+//! buttons plus a beam position latched against the PPU H/V counters. The
+//! Super Multitap multiplexes four serial pads onto one port's two data lines.
 
 /// Which device occupies a controller port. Port 1 is currently always a
 /// [`Pad`](Self::Pad); port 2 can be reassigned to a peripheral.
@@ -16,8 +17,10 @@ pub enum PortDevice {
     Pad,
     /// SNES Mouse (serial, [`Mouse`]).
     Mouse,
-    /// Super Scope (serial + PPU-latched beam position) — coming next.
+    /// Super Scope (serial + PPU-latched beam position, [`SuperScope`]).
     SuperScope,
+    /// Super Multitap: four pads on one port ([`Multitap`]).
+    Multitap,
 }
 
 /// SNES Mouse — faithful port of ares `controller/mouse/mouse.cpp`.
@@ -202,9 +205,116 @@ impl SuperScope {
     }
 }
 
+/// Super Multitap — faithful port of ares `controller/super-multitap`.
+///
+/// Four standard pads behind one port. The port's `iobit` (WRIO `$4201`
+/// bit 6 for port 1, bit 7 for port 2) selects which pair drives the two
+/// data lines: high → pads A/B on d0/d1, low → pads C/D. While the strobe
+/// is held the tap answers `2` (d1 high) — the detection a multitap game
+/// probes. Each pad is an independent serial shifter (ares `Gamepad`): only
+/// the selected pair is clocked by a read, which is how a game reads A/B
+/// through the auto-read and then C/D by hand with iobit low.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct Multitap {
+    latched: bool,
+    counters: [u8; 4],
+    snapshot: [u16; 4],
+}
+
+impl Multitap {
+    /// Drive the shared `$4016` latch line. `live` is the four pads' button
+    /// masks (A, B, C, D); the falling edge snapshots them (ares
+    /// `Gamepad::latch`), any change resets the serial counters.
+    pub fn latch(&mut self, strobe: bool, live: [u16; 4]) {
+        if self.latched == strobe {
+            return;
+        }
+        self.latched = strobe;
+        self.counters = [0; 4];
+        if !strobe {
+            self.snapshot = live.map(clean_dpad);
+        }
+    }
+
+    /// One pad's serial bit (ares `Gamepad::data`): the live B button while
+    /// latched, else the 16 snapshot bits MSB-first, then 1s.
+    const fn pad_bit(&mut self, pad: usize, live: [u16; 4]) -> u8 {
+        if self.latched {
+            return (live[pad] >> 15) as u8 & 1;
+        }
+        let c = self.counters[pad];
+        if c >= 16 {
+            return 1;
+        }
+        self.counters[pad] = c + 1;
+        (self.snapshot[pad] >> (15 - c)) as u8 & 1
+    }
+
+    /// The port's two data lines for one clock (ares `SuperMultitap::data`):
+    /// bit 0 = d0, bit 1 = d1.
+    pub const fn data(&mut self, iobit: bool, live: [u16; 4]) -> u8 {
+        if self.latched {
+            return 2; // Super Multitap device detection
+        }
+        let (a, b) = if iobit { (0, 1) } else { (2, 3) };
+        self.pad_bit(a, live) | (self.pad_bit(b, live) << 1)
+    }
+
+    /// The auto-joypad read (ares `CPU::joypadEdge`): latch, release, then
+    /// 16 clocks shifted MSB-first into the port's d0 word (`$4218`/`$421A`)
+    /// and d1 word (`$421C`/`$421E`).
+    pub fn auto_read(&mut self, iobit: bool, live: [u16; 4]) -> (u16, u16) {
+        self.latch(true, live);
+        self.latch(false, live);
+        let (mut d0, mut d1) = (0u16, 0u16);
+        for _ in 0..16 {
+            let bits = self.data(iobit, live);
+            d0 = (d0 << 1) | u16::from(bits & 1);
+            d1 = (d1 << 1) | u16::from(bits >> 1 & 1);
+        }
+        (d0, d1)
+    }
+}
+
+/// Clear opposing D-pad bits (Up+Down, Left+Right): the physical lockout a
+/// real pad has (ares `gamepad.cpp` `latch`), resolved as "no direction".
+pub(crate) const fn clean_dpad(mask: u16) -> u16 {
+    let mut m = mask;
+    if m & 0x0C00 == 0x0C00 {
+        m &= !0x0C00;
+    }
+    if m & 0x0300 == 0x0300 {
+        m &= !0x0300;
+    }
+    m
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multitap_detects_selects_pairs_and_clocks_only_them() {
+        let live = [0x8000, 0x4000, 0x2000, 0x1000]; // B, Y, Select, Start
+        let mut t = Multitap::default();
+        t.latch(true, live);
+        assert_eq!(t.data(true, live), 2, "latched: the detection answer");
+        // Auto-read with iobit high: pads A/B on d0/d1.
+        let (d0, d1) = t.auto_read(true, live);
+        assert_eq!((d0, d1), (0x8000, 0x4000));
+        // iobit low: pads C/D, from THEIR first bit (not clocked yet).
+        let bits: Vec<u8> = (0..4).map(|_| t.data(false, live)).collect();
+        assert_eq!(
+            bits,
+            [0, 0, 1, 2],
+            "Select on C at bit 2, Start on D at bit 3"
+        );
+        // Past 16 clocks a pad answers 1.
+        for _ in 0..12 {
+            t.data(false, live);
+        }
+        assert_eq!(t.data(false, live), 3);
+    }
 
     /// Clock the full 32-bit stream out of a freshly-latched mouse.
     fn stream(m: &mut Mouse) -> [u8; 32] {

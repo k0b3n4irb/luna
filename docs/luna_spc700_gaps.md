@@ -86,7 +86,7 @@ implemented (the `TCALL` family is handled via grouped arms).
 | # | Sev | Item | ares | luna |
 |---|-----|------|------|------|
 | 1 | 🟡 | **Reset register values.** ares `power()` cold-boots `S=0xEF`, `P=0x02` (`spc700.cpp:32-41`); luna `reset()` uses `SP=0xFF`, `PSW=0` (`cpu.rs:50-62`). The IPL ROM's opening `MOV X,#$EF; MOV SP,X` overwrites SP within ~2 instructions and the difference never reaches game code; Tom Harte supplies explicit state, so it isn't gated either. luna's `PC = [$FFFE/$FFFF]` reset-vector load is correct. | `S=0xEF, P=0x02` | `SP=0xFF, PSW=0` |
-| 2 | 🟡 | **Halt/branch timing granularity.** `SLEEP`/`STOP` return a fixed conservative tick per `step()` rather than ares' per-cycle `read+idle` spin; the taken-branch `+2` penalty is added in `step()` rather than threaded per access. Cycle-exactness only; no state effect. | per-cycle spin | `opcodes.rs:28-50` |
+| 2 | 🟡 | **Halt timing granularity.** ~~Fixed conservative tick per atomic `step()`; taken-branch `+2` added after the fact.~~ **Superseded (status 2026-09-18):** production now runs the cycle-stepped core (`step.rs` `step_cycle`, one bus access per call, driven by `luna-apu` `run_one_cycle`), so the taken-branch cycles are real per-access cycles. Residual: a halted core (`SLEEP`/`STOP`) is modelled as a 2-cycle `idle+idle` pseudo-op (`step.rs:44-66`) rather than ares' `read(PC)+idle` spin, and the APU driver freezes the SPC clock outright once `stopped` (`luna-apu/src/lib.rs` `run_to_target`). No state effect (there is no wake path). The atomic `step()` (`opcodes.rs:28-50`) survives only as the equivalence oracle / trajectory-harness path. | per-cycle `read+idle` spin | `step.rs:42-75` |
 
 ---
 
@@ -131,6 +131,12 @@ The instruction core is machine-proven (Tom Harte 100%) and the
 `BRK`/`SLEEP`/`STOP`/PSW/reset paths are a faithful match to ares. One
 real defect was found and fixed (the IPL-ROM byte above) — note it lived
 in the boot ROM data, not the CPU logic, so Tom Harte could never catch
-it. The remaining residue is cosmetic reset values and the
-cycle-granularity inherent to the atomic / per-opcode-tick timing model
-(the same trade-off documented for the 65C816, APU, and PPU cores).
+it. The remaining residue is cosmetic reset values and the halt-spin
+shape of row #2.
+
+> **Status 2026-09-18:** the "atomic / per-opcode-tick timing model"
+> this verdict originally named is gone — all 254 non-halt opcodes are
+> cycle-stepped (`crates/luna-cpu-spc700/src/step.rs`), proven byte- and
+> cycle-exact against the atomic core, and the APU drives the SPC one bus
+> access at a time (cooperative CPU↔SPC interleave). See the SPC700 row
+> of [`accuracy_scorecard.md`](accuracy_scorecard.md) (A−).

@@ -158,6 +158,7 @@ and is the hub for every headless diagnostic.
 | `--load-state <PATH>` | — | Load a `.luna` save-state right after ROM load, before warm-up (resume a GUI-captured scene). |
 | `--input <SCRIPT>` | — | Scripted joypad-1 input (§3). |
 | `--input2 <SCRIPT>` | — | Scripted joypad-2 input, same grammar (§3) — a two-player probe, or replaying an MCP `script_p2` capture. |
+| `--input3`, `--input4`, `--input5 <SCRIPT>` | — | Players 3-5: a Super Multitap's pads B-D with `--port2 multitap` (pad A is player 2). Same grammar. |
 | `--screenshot <PATH>` | — | Also write a PNG. |
 | `--audio-out <PATH>` | — | Also write a 32 kHz stereo WAV. |
 | `--peek <B:O:C>` | — | Hex-dump `COUNT` bytes at `BANK:OFFSET` to stderr (repeatable; **all three fields are hex** — `7E:0200:20` is 32 bytes). The whole 24-bit space is readable: WRAM, ROM (including `$C0-$FF` HiROM banks), SRAM, coprocessor RAM; the `$2000-$5FFF` register band reads `0` (no side effects), except the DMA channel registers `$4300-$437F`, which read their real values (`$FF` at power-on). An unmapped range reads `$FF` like the open bus, with a stderr note and an `unmapped` count in the JSON entry. Each result is mirrored into the `--out` JSON `peeks` array (see §2) — the machine-readable channel a harness should parse. |
@@ -171,6 +172,13 @@ and is the hub for every headless diagnostic.
 | `--dsp-trace <PATH>` | — | CSV of every DSP register write: `spc_cycles,reg,name,value`, with `name` decoded (`V0_ADSR1`, `KON`, `FLG`, …). |
 | `--dsp-trace-max <N>` | `100000` | Cap on captured DSP writes. |
 | `--sa1-log <PATH>` | — | CSV of every `$2200-$23FF` SA-1 MMIO access. |
+| `--cpu-trace <PATH>` | — | Per-instruction 65C816 register trace: `mclk_total,frame_ntsc,pc,a,x,y,sp,p,db,dp,e` (pre-opcode snapshot). The stream to diff against a Mesen2 trace when bisecting a divergence — see the example below. |
+| `--cpu-trace-from <N>`, `--cpu-trace-max <N>` | `0`, `100000` | Start capturing at instruction count `N`; hard cap on captured events (≈ 40 bytes each). Aim the window at the scene under test instead of tracing from reset. |
+| `--sa1-trace <PATH>`, `--sa1-trace-max <N>` | —, `200000` | Per-instruction SA-1 trace (`seq,pc,a,x,y,sp,p,db,dp,e`) and its event cap. |
+| `--superfx-trace <PATH>`, `--superfx-trace-max <N>` | —, `200000` | Per-opcode GSU trace (`seq,pc,opcode,sfr,r0..r15`, GO/STOP edges included) and its event cap. |
+| `--spc-trace <PATH>`, `--spc-trace-max <N>` | —, `200000` | Per-instruction SPC700 trace (`seq,pc,a,x,y,sp,psw,spc_cycle,t2_int,t2_out`) and its event cap. |
+| `--dma-trace <PATH>` | — | DMA→VRAM bytes as read during the transfer, with `line`, `hclock`, blank flags, the A-bus `src` and the `vram_word` each byte lands at. |
+| `--dma-trace-from <N>`, `--dma-trace-max <N>` | `0`, `500000` | Instruction count at which the DMA trace starts; its event cap. |
 | `--mem-trace <PATH>` | — | CSV of bus accesses: `mclk_total,frame_ntsc,pc,addr,kind,value,line,hclock,blank,force_blank,origin`. `origin` = `cpu`, `dma<n>` or `hdma<n>` — DMA / HDMA writes (B-bus `$21xx` and A-bus) are in the same stream as CPU accesses, stamped with the burst / line start and the PC whose access ran them. Gated by `--mem-trace-from` / `--mem-trace-max`. |
 | `--mem-trace-bank <B>`, `--mem-trace-addr <LO:HI>` | all | Bank / offset-range filters for `--mem-trace` (both must match). |
 | `--trace-writes <O,…>` | — | With `--mem-trace`: keep only **writes** to these hex offsets, any bank (`2121,2122,420C`). The "who wrote this register" hunt — see below. |
@@ -240,6 +248,26 @@ mid-frame whose table still points at stale data. The same stream is
 available over MCP (`enable_mem_trace { offsets, writes_only }`), and a
 `run_until_mem_write` / `bp_add mem` watchpoint fires on the DMA / HDMA
 write too.
+
+#### Tracing a window of CPU execution
+
+The CPU, memory and DMA traces **stop** once their `-max` cap is reached, so
+aim them with `-from` rather than tracing from reset. (The coprocessor
+traces — `--spc-trace`, `--sa1-trace`, `--superfx-trace` — are rings
+instead: when full they drop their oldest half, so the file ends at the
+last instruction executed.) Capture 50 000 CPU instructions starting 12 M
+instructions in:
+
+```bash
+luna state -n 12050000 --cpu-trace /tmp/cpu.csv \
+  --cpu-trace-from 12000000 --cpu-trace-max 50000 "Super Mario World.sfc"
+head -3 /tmp/cpu.csv
+# mclk_total,frame_ntsc,pc,a,x,y,sp,p,db,dp,e
+# 317204990,887,$00:806B,$0100,$0000,$00FE,$01FF,$32,$00,$0000,0
+# 317205014,887,$00:806D,$0100,$0000,$00FE,$01FF,$32,$00,$0000,0
+```
+
+The same capture is `enable_cpu_trace` / `take_cpu_trace` over MCP.
 
 #### Coprocessor liveness and the DSP-1 handshake
 
@@ -361,7 +389,7 @@ forced-blank flag.
 | `-c, --count <N>` | `8` | Number of consecutive frames to capture. |
 | `--out-dir <DIR>` | `/tmp/luna_frames` | Output directory (created if absent). |
 | `--force-mapper <M>` | auto | As in `state`. |
-| `--input <SCRIPT>` | — | Joypad-1 script applied during warm-up (§3). |
+| `--input <SCRIPT>` | — | Joypad-1 script (§3). Checkpoints inside the warm-up spend from `-n` exactly as in `state` (or are chased frame by frame under `--from-frame`); later ones fire during the capture, on their own frame. |
 
 ### `luna diff` — two ROMs at equal PPU frame (MATCH / DIFF)
 
@@ -726,6 +754,26 @@ bit1 = cursor, bit2 = turbo, bit3 = pause). In the GUI these map to the host
 mouse cursor automatically once a port is set to the device under
 **Settings → Devices**.
 
+### Super Multitap (3-5 players)
+
+`--port2 multitap` puts a Super Multitap on port 2: player 2 is its pad A
+(`--input2`), players 3, 4 and 5 its pads B, C, D (`--input3` … `--input5`).
+The game sees the tap's detection signature and reads players 2/3 through
+the auto-read (`$421A`, `$421E`) and players 4/5 through `$4017` with WRIO
+bit 7 low, as on hardware:
+
+```bash
+# Four players pressing Start on frame 300 of a multitap title
+luna state -n 20000000 --port2 multitap \
+  --input "300:0x1000,310:0" --input2 "300:0x1000,310:0" \
+  --input3 "300:0x1000,310:0" --input4 "300:0x1000,310:0" \
+  --screenshot /tmp/four.png "game.sfc"
+```
+
+Over MCP: `set_port_device {port: 1, device: "multitap"}`, then
+`set_joypad {port: 2..4, mask}`. One tap is modelled (the 8-player
+two-tap setup is not).
+
 ---
 
 ## 4. MCP tool catalogue (`luna mcp`)
@@ -735,11 +783,11 @@ method, so the MCP transport adds reach, not capability.
 
 | Tool | Maps to | Purpose |
 |---|---|---|
-| `load_rom` | `load_rom` / `load_rom_forced` | Load a `.sfc`/`.smc` from a host path. Optional `force_mapper` (`lorom`, `hirom`, `exhirom`, `sa1`, `superfx`, `dsp1`, `sdd1`, `spc7110`) and `force_region` (`ntsc`, `pal`) bypass header auto-detection — same vocabulary as the CLI `--force-mapper` / `--force-region`. |
-| `load_rom_bytes` | `load_rom_bytes` / `load_rom_bytes_forced` | Load a ROM from base64 bytes (e.g. a freshly assembled image, no host file). Same force params. Unlike `load_rom` it does **not** search the firmware folder — check `missing_firmware` in the result. |
-| `set_port_device` | `set_port_device` | Plug `joypad` / `mouse` / `superscope` into port 0 or 1, then feed it with the matching `set_*` tool. |
+| `load_rom` | `load_rom` / `load_rom_forced` | Load a `.sfc`/`.smc` from a host path. Optional `force_mapper` (`lorom`, `hirom`, `exhirom`, `sa1`, `superfx`, `dsp1`, `sdd1`, `spc7110`) and `force_region` (`ntsc`, `pal`) bypass header auto-detection — same vocabulary as the CLI `--force-mapper` / `--force-region`. `power_on` (`zero` default, `ones`, `random`, `random=<seed>`) is the CLI `--power-on`; a random load returns the seed as `power_on_seed`. A WLA-DX `<rom>.sym` next to the ROM is loaded automatically (count in `rom.symbols_loaded`). |
+| `load_rom_bytes` | `load_rom_bytes` / `load_rom_bytes_forced` | Load a ROM from base64 bytes (e.g. a freshly assembled image, no host file). Same force and `power_on` params. Unlike `load_rom` it does **not** search the firmware folder (nor for a `.sym`) — check `missing_firmware` in the result. |
+| `set_port_device` | `set_port_device` | Plug `joypad` / `mouse` / `superscope` / `multitap` into port 0 or 1, then feed it with the matching `set_*` tool. |
 | `reset` | `reset` | Reset to power-on state. |
-| `set_joypad` | `set_joypad` | Set the button bitmask for `port` (0 = P1, 1 = P2). |
+| `set_joypad` | `set_joypad` | Set the button bitmask for `port` (0 = P1, 1 = P2; 2-4 = a multitap's pads B-D, players 3-5 with the tap on port 2). |
 | `set_mouse` | `set_mouse` | Feed SNES Mouse `dx`/`dy`/buttons for the next auto-read. |
 | `set_superscope` | `set_superscope` | Feed Super Scope aim (`x`, `y`) + buttons. |
 | `step` | `step` | Step `count` instructions (stops early if the CPU halts). |
@@ -754,6 +802,8 @@ method, so the MCP transport adds reach, not capability.
 | `decode_sprites` | `decode_sprites` | All 128 OAM entries as a structured list — the queryable `render_sprite_sheet`. |
 | `drain_audio` | `drain_audio` | Drain up to `max` stereo samples from the APU. |
 | `peek_memory` | `peek_memory` | Read `count` bytes from the CPU bus at `bank:offset`. |
+| `peek_coproc_ram` | `coproc_ram` | `count` bytes from `offset` of the coprocessor work RAM (Super FX Game Pak RAM, SA-1 BW-RAM), ungated by the CPU mapping — the CLI `--dump-coproc-ram`. Empty on a cart without one. |
+| `dsp_registers` | `dsp_registers` | The 128 S-DSP registers (`$00-$7F`) — what `[asserts.dsp]` in a `luna test` manifest reads. |
 | `peek_aram` | `peek_aram` | Read `count` bytes from the SPC700's 64 KB ARAM (`count` up to `0x10000` — a full dump needs no paging). |
 | `peek_vram` | `peek_vram` | Read `count` bytes from the 64 KB VRAM (same one-call full-dump range). |
 | `peek_cgram` | `peek_cgram` | All 256 CGRAM palette entries as BGR555 words. |
@@ -779,7 +829,7 @@ method, so the MCP transport adds reach, not capability.
 | `bp_set_enabled` | `bp_set_enabled` | Disable/re-enable without removing — id, name and hit count survive. |
 | `bp_remove` / `bp_clear_all` / `bp_list` | `bp_remove` / `bp_clear` / `bp_list` | Manage the registry. `bp_list` rows now carry `enabled`, `hit_count` (mem: at most one per instruction), `mirror` and `name`. |
 | `run_until_break` | `run_until_break` | Run at full speed until a breakpoint fires (or a step budget). |
-| `run` / `pause` | `run_until_break_interruptible` | Unbounded interruptible run: `run` goes until a breakpoint / `STOP` / `pause`; `pause` stops it (returns `interrupted: true`). No mandatory step budget. |
+| `run` / `pause` | `run_until_break_interruptible` | Unbounded interruptible run: `run` goes until a breakpoint / `STOP` / `pause`; `pause` stops it (returns `interrupted: true`). No mandatory step budget. `pause` also ends every other run tool early — `step`, `step_until_frame`, `run_until_pc`, `run_until_break`, `run_until_mem_read` / `_write` — so a huge `max_steps` can never wedge the session. |
 | `peek_oam` | `peek_oam` | All 544 OAM bytes (512 low table + 32 high table). |
 | `capabilities` | — | luna `version` + the live tool catalogue, for client feature-detection (the handshake `serverInfo` also reports luna's identity since #174). |
 | `start_input_capture` / `take_input_capture` | `start_input_capture` / `take_input_capture` | Record joypad changes and export a `frame:mask` script (replay with `--input @file`). |

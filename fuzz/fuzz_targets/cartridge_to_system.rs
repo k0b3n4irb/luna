@@ -18,7 +18,11 @@ fuzz_target!(|data: &[u8]| {
     let Ok(cart) = luna_cartridge::Cartridge::from_bytes(data.to_vec()) else {
         return;
     };
-    let mut snes = luna_core::Snes::from_cartridge(cart);
+    // A header may legitimately name a coprocessor luna does not emulate
+    // (Cx4, SPC7110, …): that is a clean refusal, not a finding.
+    let Ok(mut snes) = luna_core::Snes::try_from_cartridge(cart) else {
+        return;
+    };
     snes.reset();
     // A short burst: enough to fault on a bad reset vector / mapper
     // mask, short enough to keep the fuzzer's throughput up.
