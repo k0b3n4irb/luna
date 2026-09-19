@@ -4,6 +4,17 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+- **HiColor128 is pixel-exact (gap #7b closed).** Peter Lemon's
+  HiColor128PerTileRow chart now matches its hardware reference pixel for
+  pixel (was 11 % exact / "91 %" by the tolerant metric). The residual was
+  never in the PPU or DMA: the chart drives its palette DMA from an H-IRQ,
+  and luna entered every hardware interrupt two cycles (14 master clocks)
+  early — the 65C816 fix already shipped in v1.25.0. Measured at frames 60,
+  120 and 300; the tripwire test is now a regular golden.
+
 ## [1.25.0] — 2026-09-19
 
 Follow-ups to the 2026-09-18 full project review: silent failures made
