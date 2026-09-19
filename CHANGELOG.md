@@ -4,11 +4,26 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.25.0] — unreleased
 
-Follow-ups to the 2026-09-18 full project review.
+Follow-ups to the 2026-09-18 full project review: silent failures made
+loud, one implementation of the input and stepping policy in `luna-api`,
+the Super Multitap, and the one active CPU-timing divergence found.
+
+**Upgrading from 1.24:** save-states from earlier versions are refused
+(format v6), and three CLI behaviours change (marked **BREAKING** below).
+See *Versioning* in [CONTRIBUTING.md](CONTRIBUTING.md) for what the
+version number promises.
 
 ### Fixed
+- **Hardware NMI / IRQ entry takes 8 cycles, not 6.** The 65C816's
+  interrupt sequence (ares `WDC65816::interrupt()`, Mesen2
+  `ProcessInterrupt`) spends a discarded `PB:PC` read and an idle cycle
+  before its stack frame; BRK/COP do not. luna shared BRK's sequence, so
+  every NMI/IRQ handler started 14 master clocks early — measured against
+  Mesen2 with a probe ROM, now on the reference. Timing-sensitive titles
+  shift by an animation phase (the SMRPG and Star Fox goldens were
+  re-recorded).
 - **Games that need an unemulated coprocessor are refused by name** instead
   of booting on a bare LoROM/HiROM board and hanging without a diagnostic.
   The header now identifies OBC1, S-RTC, Super Game Boy, ST-010/011,
@@ -74,14 +89,14 @@ Follow-ups to the 2026-09-18 full project review.
   `step_to_frame_bounded`, `FRAME_STEP_BUDGET`). The `frame:mask` grammar,
   the event order and the budget rule had been re-implemented in seven CLI
   subcommands. Behaviour changes that fall out of it:
-  - `luna frames --input`: checkpoints inside the warm-up now spend from
+  - **BREAKING** — `luna frames --input`: checkpoints inside the warm-up now spend from
     `-n` as in `state` (issue #126) instead of being pre-rolled on top of
     it, and a checkpoint later than the warm-up fires during the capture on
     its own frame instead of before it.
-  - `luna bench`: each iteration is one real PPU frame (the per-frame cap
+  - **BREAKING** — `luna bench`: each iteration is one real PPU frame (the per-frame cap
     was 30 000 instructions, so a slow frame spanned several iterations),
     and `--input` is keyed by the PPU frame, not by the iteration.
-  - `luna test`: an input event the step budget never reaches no longer
+  - **BREAKING** — `luna test`: an input event the step budget never reaches no longer
     fires.
 - **BREAKING — save-state format v6.** `Snes::mclk_acc` (v1.18.0) and
   `Apu::master_hz` had been added under v5 behind `#[serde(default)]`,
