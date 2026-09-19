@@ -132,6 +132,7 @@ impl Cpu {
     /// has the B bit CLEARED — that's how the handler distinguishes a
     /// BRK from an NMI/IRQ in emulation mode.
     fn service_nmi<B: Bus>(&mut self, bus: &mut B) {
+        self.hardware_interrupt_entry(bus);
         self.service_software_interrupt(
             bus, /* vec_native */ 0xFFEA, /* vec_emulation */ 0xFFFA,
             /* set_b_bit_in_emulation */ false,
@@ -143,6 +144,7 @@ impl Cpu {
     /// The B bit is CLEARED on the pushed status so the handler can
     /// tell apart a BRK from an IRQ/NMI in emulation mode.
     fn service_irq<B: Bus>(&mut self, bus: &mut B) {
+        self.hardware_interrupt_entry(bus);
         self.service_software_interrupt(
             bus, /* vec_native */ 0xFFEE, /* vec_emulation */ 0xFFFE,
             /* set_b_bit_in_emulation */ false,
@@ -1110,14 +1112,29 @@ impl Cpu {
         // Per fullsnes / Tom Harte, COP sets B=1 in the pushed P byte
         // in emulation mode (same as BRK). The B=0 case only applies
         // to hardware IRQ/NMI (`service_nmi` / `service_irq`, which share
-        // this push/vector sequence but do not yet add the two leading
-        // dummy cycles of ares `interrupt()` — docs/luna_65c816_gaps.md #3).
+        // this push/vector sequence after their two extra entry cycles —
+        // `hardware_interrupt_entry`).
         self.service_software_interrupt(
             bus, /* vec_native */ 0xFFE4, /* vec_emulation */ 0xFFF4,
             /* set_b_bit_in_emulation */ true,
         );
     }
 
+    /// The two cycles a HARDWARE interrupt spends before its stack frame:
+    /// a read of `PB:PC` (discarded — the PC does not advance) and an
+    /// internal cycle. ares `WDC65816::interrupt()` (`read(PC.d); idle();`),
+    /// Mesen2 `ProcessInterrupt(…, forHardwareInterrupt = true)` ("IRQ/NMI
+    /// waste 2 cycles here. BRK/COP do not" — they spend them fetching the
+    /// opcode and the signature byte), so it is NOT part of the shared
+    /// frame sequence below.
+    fn hardware_interrupt_entry<B: Bus>(&self, bus: &mut B) {
+        let _ = bus.read(make_addr(self.pb, self.pc));
+        self.io(bus);
+    }
+
+    /// The interrupt stack frame + vector fetch shared by NMI, IRQ, BRK and
+    /// COP (a hardware interrupt runs [`Self::hardware_interrupt_entry`]
+    /// first).
     fn service_software_interrupt<B: Bus>(
         &mut self,
         bus: &mut B,
@@ -2958,6 +2975,40 @@ mod tests {
         cpu.reset(&mut bus);
         bus.reset_cycle_counter();
         (cpu, bus)
+    }
+
+    #[test]
+    fn hardware_interrupts_spend_two_cycles_brk_does_not() {
+        // ares `interrupt()` / Mesen2 `ProcessInterrupt(.., true)`: NMI/IRQ
+        // open with a discarded read of PB:PC and an idle cycle before the
+        // stack frame; BRK/COP spend those cycles on the opcode + signature.
+        // Measured vs Mesen2: luna's NMI entry ran 14 mclk early without it.
+        use luna_bus::testing::TraceKind::{Internal, Read, Write};
+
+        let (mut cpu, mut bus) = run(&[0x18, 0xFB, 0xEA]); // CLC ; XCE (native) ; NOP
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        bus.enable_trace();
+        cpu.trigger_nmi();
+        cpu.step(&mut bus);
+        let t = bus.take_trace();
+        assert_eq!(t[0].0, Read, "dummy read first");
+        assert_eq!(t[0].1, Some(0x00_8002), "…of PB:PC, which does not advance");
+        let kinds: Vec<_> = t.iter().map(|e| e.0).collect();
+        assert_eq!(
+            kinds,
+            [Read, Internal, Write, Write, Write, Write, Read, Read],
+            "NMI: read, idle, push PB/PCH/PCL/P, vector lo/hi"
+        );
+
+        // BRK: opcode + signature fetches, then the same frame — no extra pair.
+        let (mut cpu, mut bus) = run(&[0x18, 0xFB, 0x00, 0x00]); // … ; BRK #0
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        bus.enable_trace();
+        cpu.step(&mut bus);
+        let kinds: Vec<_> = bus.take_trace().into_iter().map(|e| e.0).collect();
+        assert_eq!(kinds, [Read, Read, Write, Write, Write, Write, Read, Read]);
     }
 
     // -------------------------------------------------------------------
