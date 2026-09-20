@@ -31,12 +31,14 @@ full feature set (background modes, Mode 7, hi-res, windows, mosaic, interlace),
 the audio path is reconstructed to per-access timing, and the coprocessors
 (SA-1, Super FX, DSP-1, S-DD1) are faithful ports.
 
-Where Luna's timing model is a deliberate simplification — for example, taking
-interrupts at the instruction boundary rather than at a per-cycle poll point —
-the differential harness has been used to *prove* the simplification is
-**unobservable**: the delivery cadence matches the reference on real games. So
-the honest statement is that Luna is **observably accurate everywhere it has
-been measured**.
+Where Luna's timing model is a deliberate simplification, the differential
+harness is used to measure whether the simplification is observable, rather
+than to argue that it isn't. That measurement is evidence about the present,
+not a licence to stop: interrupt sampling was one such simplification, measured
+unobservable on *Doom* — and porting it faithfully anyway is what later closed
+two named CPU gaps. So the honest statement is that Luna is **observably
+accurate everywhere it has been measured**, and that being unobservable is a
+reason to deprioritise a port, never a reason to skip it.
 
 ## What "A everywhere" still asks for
 

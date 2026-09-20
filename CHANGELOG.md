@@ -6,6 +6,36 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Fixed
+- **NMI and IRQ are sampled at the instruction's last cycle.** Both 65C816s
+  — the main CPU and the SA-1 — now take the interrupt decision one cycle
+  before the running instruction's final bus access, where ares
+  (`lastCycle()`, marked `L` in its instruction tables) and Mesen2 (which
+  recomputes the flags every cycle and reads them back) take it. Neither
+  reference interrupts mid-instruction, so what moved is the sampling
+  point, not the service point — but it means an interrupt arriving during
+  an instruction's final access is no longer taken a whole instruction
+  early, and `CLI` / `SEI` / `PLP` / `REP` / `SEP` get their
+  one-instruction recognition delay, which neither reference implements
+  with a counter. The two-cycle implied opcodes also spend a dummy read of
+  `PB:PC` instead of an internal cycle when an interrupt is already
+  pending (ares `idleIRQ()`). Closes the last two named 65C816 gaps.
+- **The interrupt sequence raises `I` before its vector fetch**, as both
+  references do, instead of at the end of the frame. Latent until the
+  above landed: the vector's high byte is where the poll now sits, so a
+  still-asserted level — an H/V IRQ the handler had yet to acknowledge —
+  re-latched inside the entry sequence and re-entered the handler
+  forever.
+
+### Changed
+- **Save states are format v7.** `Cpu::irq_line` is gone: the coprocessor
+  and H/V levels belong to the device, and the poll reads them where they
+  live. States from 1.25 and earlier are refused.
+- Star Fox's golden framebuffer was re-recorded: it holds a coprocessor
+  IRQ level, so the implied-opcode dummy read shifts its 3D intro by one
+  animation step. Every other golden — all 91, including the 16
+  pixel-exact hardware references — is byte-identical.
+
 ### Verified
 - **HiColor128 is pixel-exact — gap #7b is closed.** Peter Lemon's
   HiColor128PerTileRow chart now matches its hardware reference pixel for

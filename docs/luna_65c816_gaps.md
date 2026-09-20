@@ -108,37 +108,51 @@ ares `power()` (`p=0x34`, `s=0x01ff`, `e=1`).
 ## 🟠 / 🟡 Timing-model gaps (inherent to the atomic / bus-as-clock core)
 
 luna's CPU does not track master cycles itself; each bus access pays its
-cost through `Bus::io_cycle` (`lib.rs:8-11`), and interrupts are polled
-at instruction boundaries. That design choice is the source of every
-item below — none changes architectural register/RAM state (so Tom Harte
-stays green), but each is a cycle-accuracy deviation from ares' per-cycle
-`lastCycle()` / `idleIRQ()` model.
+cost through `Bus::io_cycle` (`lib.rs:8-11`). That design choice is the
+source of the items below — none changes architectural register/RAM state
+(so Tom Harte stays green), each is a cycle-accuracy question.
+
+Interrupts are no longer among them: since 2026-09-20 both 65C816s
+sample the lines at the instruction's last cycle, as ares' `lastCycle()`
+and Mesen2's per-cycle `DetectNmiSignalEdge` do (#1, #2 below).
 
 | # | Sev | Gap | ares ref | luna |
 |---|-----|-----|----------|------|
-| 1 | 🟠 | **Interrupt poll granularity.** NMI/IRQ are recognized only at the *start of the next* `step()`, never mid-instruction. ares polls at the precise last cycle of the instruction in progress. | `instruction.cpp` `L`/`idleIRQ`, `sfc/cpu/irq.cpp` | `opcodes.rs:74-91` (boundary only) |
-| 2 | 🟡 | **Interrupt-enable delay quirk.** Real 65xx delays interrupt *recognition* one instruction after `CLI`/`SEI`/`PLP` change `I`. luna uses the post-instruction `I` at the next boundary, so a pending IRQ after `CLI` is taken one instruction early. | poll point vs flag write order | `opcodes.rs:84` reads current `I` |
+| 1 | 🔧 | **Interrupt poll granularity** — **fixed 2026-09-20**. NMI/IRQ were recognised only at the *start of the next* `step()`, so an interrupt arriving during an instruction's final access got in up to a whole instruction early. Both CPUs now sample at the instruction's last cycle, where the references do: `Bus::last_cycle(i_flag)` is ares' `nmiTest()`/`irqTest()`, called from the `last_*` helpers that mark every instruction's final access. Neither reference interrupts mid-instruction — both still *service* at the boundary; only the sampling point moved. `idleIRQ()` came with it: the dead cycle of a two-cycle implied opcode is now a dummy read of `PB:PC` when an interrupt is pending. | `wdc65816/registers.hpp:30` (`#define L lastCycle();`), `sfc/cpu/irq.cpp:83-93`, `wdc65816/memory.cpp:1-16`; Mesen2 `SnesCpu.Shared.h:315-347,387-394` | `cpu.rs` `last_cycle`, `snes.rs` / `coproc/sa1.rs` `last_cycle`; tests `last_cycle_invariant.rs` (exactly one poll per instruction, all 256 opcodes × 5 modes) |
+| 2 | 🔧 | **Interrupt-enable delay quirk** — **fixed 2026-09-20**, with no code of its own. Neither reference has a recognition-delay counter: the quirk falls out of polling before the instruction's final action (`L idleIRQ(); flag = 0;`). So `CLI` cannot unmask an IRQ for its own instruction, `SEI` cannot mask one its own poll already saw, and `PLP` / `REP` / `SEP` behave the same way. | `instructions-other.cpp:97-100,113-120`; Mesen2 reads `I` in `DetectNmiSignalEdge` | `opcodes.rs` (implied ops poll before their register effect; REP/SEP after the operand fetch); tests `cli_does_not_unmask_an_irq_for_its_own_instruction`, `sei_does_not_mask_an_irq_its_own_poll_already_saw` |
 | 3 | 🔧 | **Dummy bus cycles in the interrupt sequence** — **fixed 2026-09-19** (`d117412`, shipped in v1.25.0). ares `interrupt()` opens with `read(PC.d); idle();` before the pushes; luna omitted both, so a hardware NMI/IRQ took 6 bus cycles in native mode where hardware takes 8 — every handler started 14 mclk early. `hardware_interrupt_entry` now performs them, called from `service_nmi`/`service_irq` only (BRK/COP correctly keep the short sequence). The trailing `idleJump()` is owed nothing: it is an empty virtual in `wdc65816.hpp:12` that the SNES CPU never overrides. This was the root cause of PPU gap #7b (HiColor128, now pixel-exact). | `instruction.cpp:1-14`, `wdc65816.hpp:12` | `opcodes.rs` `hardware_interrupt_entry`; test `hardware_interrupts_spend_two_cycles_brk_does_not` |
 | 4 | 🟡 | **WAI resume granularity.** luna advances the bus in fixed `WAI_TICK_MCYCLES` (8 mclk) chunks while waiting, so wake latency is quantized rather than single-cycle. Harmless for the `WAI; BRA -3` VBlank idiom. | single `idle()` loop | `opcodes.rs:58` |
+| 5 | 🟡 | **Post-DMA interrupt delay — the references disagree.** Mesen2 delays NMI/IRQ recognition by one cycle after a DMA/HDMA burst (`SnesCpu.cpp:124-128`, `SnesCpu.Shared.h:323-346`). ares has the same field, `status.irqLock`, set by `dmaRun` / `hdmaSetup` / `hdmaRun` and on a `$4200` write — but `CPU::step()` clears it at its top and every access and DMA step calls `step()`, so it is **always 0** by the time any `lastCycle()` runs. It is dead code as ares is written. luna follows ares and does not implement it; adopting Mesen2's live rule would be a separate, separately-measured change. | ares `timing.cpp:12`, `dma.cpp:21,32,40`, `irq.cpp:49,89` vs Mesen2 as above | not implemented (deliberate) |
 
 ---
 
 ## Verdict
 
-No correctness (🔴) defects found. The instruction core is
-machine-proven (Tom Harte 100%) and the asynchronous-interrupt path is a
-faithful port of ares `interrupt()`. The open items are all
-cycle-granularity deviations that follow directly from the atomic /
-bus-as-clock architecture — the same trade-off documented for the APU
-and PPU cores. They would only be worth closing as part of a deliberate
-per-cycle CPU-timing rewrite (cf. the cycle-accuracy phase plan), not as
-point fixes.
+No correctness (🔴) defects found, and as of 2026-09-20 no 🟠 ones
+either. The instruction core is machine-proven (Tom Harte 100%, and the
+`cycles[]` oracle reports zero cycle mismatches), and the asynchronous
+interrupt path is now a faithful port end to end: the lines, the sampling
+point, the `I` mask's position, and the entry sequence.
 
-## Suggested order (if/when pursued)
+What remains is one quantisation (#4, `WAI` on an 8-mclk grid) and one
+place where the two references genuinely disagree (#5), where we follow
+ares. Both are timing-only, with no known game impact.
 
-1. 🟠 #1 interrupt poll granularity — the highest-value item, but it
-   implies threading a cycle position through the instruction core (a
-   structural change, not a patch).
-2. 🟡 #2 and #4 — only meaningful once #1 exists; low real-world return.
-   (#3 is closed — it was a self-contained sequence fix, not a
-   cycle-position one, which is why it landed without #1.)
+## History
+
+The 2026-06 audit called #1 "the highest-value item, but it implies
+threading a cycle position through the instruction core (a structural
+change, not a patch)". That turned out to overstate it. Reading both
+references in full showed **neither interrupts mid-instruction** — they
+service at the boundary exactly as luna did, and differ only in *when the
+decision is sampled*. ares marks the cycle before each instruction's
+final access with `L`; Mesen2 recomputes every cycle and reads the value
+back at the boundary. So the work was 101 markers and one bus hook, not a
+per-cycle CPU rewrite — and #2 then needed no code at all.
+
+The part that did bite was a latent ordering bug: luna raised `I` at the
+*end* of the interrupt frame, where both references raise it *before* the
+vector fetch. Since the vector's high byte carries the poll, luna polled
+its own entry sequence unmasked, and a still-asserted level re-latched
+inside it — an infinite handler re-entry. Harmless while the poll sat at
+the boundary; fatal the moment it moved.

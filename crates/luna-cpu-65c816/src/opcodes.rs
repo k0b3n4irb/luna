@@ -155,6 +155,28 @@ impl Cpu {
         );
     }
 
+    /// ares `idleIRQ()` (`wdc65816/memory.cpp:1-16`): the dead cycle of a
+    /// two-cycle implied opcode becomes a **bus read of `PB:PC`** — with no
+    /// PC increment — when an interrupt is already pending, and a plain
+    /// internal cycle otherwise.
+    ///
+    /// The source's own comment lists the affected opcodes; they are
+    /// exactly [`is_implied_io`] minus REP/SEP. Mesen2 does the same in
+    /// `IdleOrRead()` (`SnesCpu.Shared.h:387-394`). "Pending" is read after
+    /// this instruction's own poll has run (ares `interruptPending()` on
+    /// `status.interruptPending`, set by `lastCycle()`), so an interrupt
+    /// recognised by *this* instruction already converts the cycle.
+    ///
+    /// No register state changes either way; what moves is the MDR / open
+    /// bus and the cycle's cost (a bus access, not a fixed internal cycle).
+    fn idle_irq<B: Bus>(&mut self, bus: &mut B) {
+        if self.pending_nmi || self.pending_irq {
+            let _ = bus.read(make_addr(self.pb, self.pc));
+        } else {
+            self.io(bus);
+        }
+    }
+
     /// Dispatch on a fetched opcode. Inlined into the match by LLVM.
     fn execute<B: Bus>(&mut self, opcode: u8, bus: &mut B) {
         // Default 16-bit accesses to bank-carrying (ares readBank/read);
@@ -560,15 +582,19 @@ impl Cpu {
             // The compiler validates exhaustiveness; no catch-all needed.
         }
         // Implied / register-only ops spend one internal "dead" cycle that
-        // does no operand bus access (ares `idleIRQ`). XBA spends two. The
-        // op above already updated the registers; the cycle is charged here.
+        // does no operand bus access. XBA spends two. The op above already
+        // updated the registers; the cycle is charged here.
         match opcode {
             0xEB => {
-                // ares `instructionExchangeBA`: `idle(); L idle();`.
+                // ares `instructionExchangeBA`: `idle(); L idle();` — plain
+                // idles, not `idleIRQ`.
                 self.io(bus);
                 self.last_io(bus);
             }
-            _ if is_implied_io(opcode) => self.io(bus),
+            // REP/SEP are two-cycle implied ops too, but ares gives them a
+            // plain `idle()` (`instructionResetP`/`SetP`), not `idleIRQ`.
+            0xC2 | 0xE2 => self.io(bus),
+            _ if is_implied_io(opcode) => self.idle_irq(bus),
             _ => {}
         }
     }
@@ -3691,6 +3717,45 @@ mod tests {
             !cpu.pending_irq,
             "and the sequence's own poll did not re-latch the held line"
         );
+    }
+
+    #[test]
+    fn a_pending_interrupt_turns_the_implied_dead_cycle_into_a_dummy_read() {
+        // ares `idleIRQ()`: with an interrupt pending, the dead cycle of a
+        // two-cycle implied opcode is a bus READ of PB:PC that does not
+        // advance PC — otherwise it is a plain internal cycle. No register
+        // state changes either way; the MDR and the cycle cost do.
+        use luna_bus::testing::TraceKind;
+
+        // No interrupt: opcode fetch + internal cycle.
+        let (mut cpu, mut bus) = run(&[0xEA]); // NOP
+        bus.enable_trace();
+        cpu.step(&mut bus);
+        let quiet: Vec<TraceKind> = bus.take_trace().into_iter().map(|(k, _, _)| k).collect();
+        assert_eq!(quiet, vec![TraceKind::Read, TraceKind::Internal]);
+
+        // Interrupt pending: the same opcode reads PB:PC instead. The
+        // instruction to watch is the one whose OWN poll latches the IRQ —
+        // the poll of an implied op runs before its dead cycle, so the
+        // conversion happens within that same instruction. (The step after
+        // it would enter the handler, not run an opcode at all.)
+        let (mut cpu, mut bus) = run(&[0xEA, 0xEA]);
+        bus.poke_slice(0x00_FFFE, &[0x00, 0x90]);
+        bus.set_irq(true);
+        cpu.p.remove(bit::I);
+        let pc_before = cpu.pc;
+        bus.enable_trace();
+        cpu.step(&mut bus);
+        assert!(cpu.pending_irq, "the NOP's own poll latched it");
+        let busy = bus.take_trace();
+        let kinds: Vec<TraceKind> = busy.iter().map(|(k, _, _)| *k).collect();
+        assert_eq!(kinds, vec![TraceKind::Read, TraceKind::Read]);
+        assert_eq!(
+            busy[1].1,
+            Some(u32::from(pc_before) + 1),
+            "the dummy read is at PB:PC, after the opcode fetch advanced it"
+        );
+        assert_eq!(cpu.pc, pc_before.wrapping_add(1), "and PC did not advance");
     }
 
     #[test]
