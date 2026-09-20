@@ -6,7 +6,46 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Added
+- **`luna profile` takes the same controller flags as `luna state`**
+  (`--input2` … `--input5`, `--port1`, `--port2`, `--mouse`,
+  `--superscope`), same grammars. A coverage run replaying a manifest that
+  plugs a mouse or a Super Scope was silently running it with an empty
+  port, so the peripheral's code counted as executed without ever being
+  driven. Both verbs now share one implementation of the flags, which is
+  what stops them drifting again (`OpenSNES` R2).
+- **How deep the stack actually went.** Every run reports the deepest the
+  stack reached, the instruction that took it there, the frame, and the
+  `.sym` label covering it — `cpu.sp_min` in `luna state`'s JSON, a
+  `stack` block in `luna profile`'s, and `--stack-floor <ADDR>` gates it
+  in CI (exit 1 if the stack ever reached below the address). A link-time
+  RAM budget can only guess this; a stack sized at 512 bytes that really
+  reaches 989 overwrites the globals under it silently. Only a push moves
+  the mark, and only in native mode — emulation mode pins `S` to page 1,
+  and every ROM carries `$01FF` out of reset until it installs its real
+  stack (`OpenSNES` R3).
+- **An empty controller port** — `--port1 none` / `--port2 none`, or
+  **Devices → Nothing (unplugged)** in the GUI — so a "is a controller
+  connected?" routine can be exercised at all. Note what it can tell you:
+  auto-read gives `$0000` for an empty port, which is also what an idle
+  pad gives, so `$4218`/`$4219` cannot distinguish them. The difference is
+  past bit 15 of a manual serial read, where a pad's line idles high and
+  an empty port keeps reading 0. Both references agree on that value
+  (ares `ControllerPort::data()`, Mesen2 `SnesControlManager::Read`); it
+  is a modelled convention they share, not a measurement of real silicon
+  (`OpenSNES` R4).
+
 ### Fixed
+- **An invalid coprocessor firmware can no longer destroy a working one.**
+  `--dsp1-rom` copied whatever it was handed: a shell variable that
+  expanded to an existing but empty file replaced a valid 8 KB `dsp1b.rom`
+  with 0 bytes, reported success, and left every DSP-1 game running with
+  an inert chip. The source is now vetted before the destination is
+  touched at all, and the install goes through a rename so an interrupted
+  write cannot truncate what was already there. A dump that is present but
+  unusable is also no longer mistaken for firmware — it is reported as
+  missing, which restores the warning that was already there to be printed
+  (`OpenSNES` R1).
 - **NMI and IRQ are sampled at the instruction's last cycle.** Both 65C816s
   — the main CPU and the SA-1 — now take the interrupt decision one cycle
   before the running instruction's final bus access, where ares

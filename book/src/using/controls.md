@@ -16,6 +16,28 @@ connected gamepads drive players 3, 4 and 5 (players 1-2 keep their keyboard
 bindings and the first two gamepads). From the CLI: `--port2 multitap` with
 `--input3` … `--input5`.
 
+## An empty port
+
+`--port1 none` / `--port2 none` (or **Devices → Nothing (unplugged)**) runs
+with nothing in the port, which is what you need to exercise a
+"`is a controller connected?`" routine.
+
+Be aware of what it can and cannot tell you. Auto-read gives `$0000` for an
+empty port — which is also exactly what an idle connected pad gives, so
+`$4218`/`$4219` alone **cannot** distinguish them. The difference appears
+only past bit 15 of a manual serial read: a standard pad's data line idles
+**high** once its 16 button bits and 4 signature bits have been clocked out,
+while an empty port keeps reading **0** for ever. Clocking `$4016`/`$4017`
+past the 16th bit and looking for a `1` is therefore the detection, and it
+is the one luna models.
+
+Both reference emulators agree on the empty-port value (ares returns 0 from
+`ControllerPort::data()` when no device is allocated; Mesen2 masks the data
+bits out of open bus and has nothing to OR back in). Treat it as a modelled
+convention the two references share, not as a measurement of a floating line
+on real silicon — if you have a console and a logic analyser, that one is
+still worth checking.
+
 Bindings are stored by physical `KeyCode` (layout-agnostic), so the key
 *positions* hold on AZERTY/QWERTZ. Remap them per-player in the GUI under
 **Settings → Input** (a Player 1 / Player 2 tab). That dialog also has a

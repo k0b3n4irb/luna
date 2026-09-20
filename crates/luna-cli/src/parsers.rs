@@ -232,6 +232,97 @@ pub(crate) fn parse_apu_peek_spec(spec: &str) -> Option<Result<(u16, u32), Strin
     Some(Ok((offset, count)))
 }
 
+// =============================================================================
+// Controller flags → port devices + one event stream
+//
+// `state`, `profile` and any other subcommand that drives input share this,
+// so the grammars cannot drift apart. They did: `profile` grew `--input`
+// alone, which quietly ran every mouse and Super Scope manifest with no
+// device plugged (`OpenSNES` R2).
+// =============================================================================
+
+/// The controller-selection flags a subcommand exposes.
+pub(crate) struct InputFlags<'a> {
+    /// `--input` (joypad 1).
+    pub input: Option<&'a str>,
+    /// `(port, spec)` for the extra pads — `--input2` … `--input5`.
+    pub extra_pads: &'a [(u8, Option<&'a str>)],
+    /// `--port1` / `--port2` device names.
+    pub port1: &'a str,
+    pub port2: &'a str,
+    /// `--mouse` / `--superscope` pointer scripts.
+    pub mouse: Option<&'a str>,
+    pub superscope: Option<&'a str>,
+}
+
+/// Apply the port devices to `em`, then fold every scripted input into one
+/// frame-sorted stream. `Err` carries the exit code the CLI should return
+/// (1 = the emulator refused, 2 = the flag was malformed); the message is
+/// already on stderr.
+pub(crate) fn apply_input_flags(
+    em: &mut luna_api::Emulator,
+    f: &InputFlags<'_>,
+) -> Result<luna_api::InputScript, u8> {
+    // Port device selection (RFE-3): a `mouse` answers the auto-read /
+    // serial path with the SNES Mouse protocol so the game's DETECT
+    // succeeds and `inputGetMouse` reads its deltas.
+    for (port, dev) in [(0u8, f.port1), (1u8, f.port2)] {
+        let applied = luna_api::parse_port_device(dev)
+            .and_then(|d| em.set_port_device(port, d).map_err(|e| e.to_string()));
+        if let Err(e) = applied {
+            eprintln!("error: --port{}: {e}", port + 1);
+            return Err(1);
+        }
+    }
+
+    let mut script = luna_api::InputScript::new();
+    let pads = std::iter::once((0u8, f.input)).chain(f.extra_pads.iter().copied());
+    for (port, spec) in pads {
+        if let Some(s) = spec {
+            match pad_events(s, port) {
+                Ok(v) => script.extend(v),
+                Err(e) => {
+                    // --input, --input2 … --input5 (port is 0-based).
+                    let n = if port == 0 {
+                        String::new()
+                    } else {
+                        (port + 1).to_string()
+                    };
+                    eprintln!("error: --input{n}: {e}");
+                    return Err(2);
+                }
+            }
+        }
+    }
+
+    match f.mouse.map(parse_mouse_script) {
+        Some(Ok(v)) => {
+            script.extend(v.iter().map(|&(fr, (dx, dy, buttons))| {
+                (fr, luna_api::InputEvent::Mouse { dx, dy, buttons })
+            }));
+        }
+        Some(Err(e)) => {
+            eprintln!("error: --mouse: {e}");
+            return Err(2);
+        }
+        None => {}
+    }
+    // `--superscope` shares the `frame:a,b,c` triplet grammar with `--mouse`
+    // (here a,b = absolute aim x,y; c = the button mask).
+    match f.superscope.map(parse_mouse_script) {
+        Some(Ok(v)) => script.extend(
+            v.iter()
+                .map(|&(fr, (x, y, buttons))| (fr, luna_api::InputEvent::Scope { x, y, buttons })),
+        ),
+        Some(Err(e)) => {
+            eprintln!("error: --superscope: {e}");
+            return Err(2);
+        }
+        None => {}
+    }
+    Ok(script)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

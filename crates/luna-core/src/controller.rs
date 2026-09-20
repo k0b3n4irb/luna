@@ -21,6 +21,28 @@ pub enum PortDevice {
     SuperScope,
     /// Super Multitap: four pads on one port ([`Multitap`]).
     Multitap,
+    /// Nothing plugged in.
+    ///
+    /// Both references model an empty port the same way: its two data
+    /// lines read **0**, for ever. ares returns `0` from
+    /// `ControllerPort::data()` when no device is allocated
+    /// (`controller/port.cpp:12`); Mesen2 masks the data bits out of open
+    /// bus and has no device to OR anything back in
+    /// (`SnesControlManager::Read`). Auto-read therefore shifts in zeros
+    /// and `$4218/$4219` read `$0000`.
+    ///
+    /// That is what makes detection possible at all, and why auto-read
+    /// alone cannot do it: `$0000` is also what an idle connected pad
+    /// reports. The difference shows only past bit 15 — a standard pad
+    /// keeps returning 1 on further clocks (its serial line idles high,
+    /// ares `gamepad.cpp:45-46`), an empty port keeps returning 0.
+    ///
+    /// Note this is a *modelled* value agreed by both emulators, not a
+    /// measurement of a floating line on real silicon.
+    ///
+    /// Appended last on purpose: bincode encodes a variant by index, so a
+    /// new variant must not renumber the existing ones.
+    None,
 }
 
 /// SNES Mouse — faithful port of ares `controller/mouse/mouse.cpp`.
