@@ -125,6 +125,10 @@ impl CpuRegs {
                 let (iobit, live) = self.tap_lines(port);
                 Some(self.multitap.data(iobit, live) & 3)
             }
+            // An empty port drives both data lines low, on every clock —
+            // including past bit 15, where a connected pad idles high. That
+            // asymmetry is the only way software can tell them apart.
+            PortDevice::None => Some(0),
             PortDevice::Pad => None,
         }
     }
@@ -280,6 +284,7 @@ impl CpuRegs {
                 d1_port1 = d1;
                 d0
             }
+            PortDevice::None => 0,
             PortDevice::Pad => clean_dpad(self.joypad1),
         };
         self.joypad2_latched = match self.port2 {
@@ -291,6 +296,7 @@ impl CpuRegs {
                 d1_port2 = d1;
                 d0
             }
+            PortDevice::None => 0,
             PortDevice::Pad => clean_dpad(self.joypad2),
         };
         self.joypad3_latched = d1_port1;
@@ -456,6 +462,44 @@ mod tests {
     // ---------------------------------------------------------------
     // NMITIMEN, RDNMI, TIMEUP
     // ---------------------------------------------------------------
+
+    #[test]
+    fn an_unplugged_port_reads_zero_where_a_pad_idles_high() {
+        // Both references model an empty port as data lines low, for ever:
+        // ares returns 0 from `ControllerPort::data()` with no device
+        // allocated, Mesen2 masks the data bits out of open bus with no
+        // device to OR them back. A connected pad, by contrast, idles HIGH
+        // past bit 15 (ares `gamepad.cpp:45-46`) — and that asymmetry is
+        // the only thing software can detect, because auto-read gives
+        // $0000 for both an empty port and an idle pad.
+        let mut r = CpuRegs {
+            nmitimen: 0x01,
+            port2: PortDevice::None,
+            ..Default::default()
+        };
+        r.set_joypad(0, 0x0000); // an idle pad on port 1
+        r.set_joypad(1, 0xFFFF); // ...on the empty port, must be ignored
+
+        r.latch_joypad_auto_read();
+        assert_eq!(r.joypad1_latched, 0x0000, "idle pad");
+        assert_eq!(
+            r.joypad2_latched, 0x0000,
+            "empty port reads the same as an idle pad — auto-read cannot tell them apart"
+        );
+
+        // The serial path is where they differ: the empty port answers
+        // every clock with 0, including the ones past the 16 button bits.
+        for clock in 0..24 {
+            assert_eq!(
+                r.port_serial_bit(1),
+                Some(0),
+                "empty port must read 0 on clock {clock}"
+            );
+        }
+        // A pad defers to the shift register (`None` here means "not a
+        // serial peripheral"), which is what supplies its idle-high 1s.
+        assert_eq!(r.port_serial_bit(0), None);
+    }
 
     #[test]
     fn nmitimen_stores_byte_verbatim() {

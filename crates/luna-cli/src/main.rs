@@ -45,6 +45,19 @@ struct Cli {
     command: Command,
 }
 
+/// `0x`-hex or decimal, so an address copied out of a linker script or a
+/// `.sym` pastes in unchanged.
+fn parse_u16_auto(s: &str) -> Result<u16, String> {
+    let t = s.trim();
+    let (digits, radix) = t
+        .strip_prefix("0x")
+        .or_else(|| t.strip_prefix("0X"))
+        .or_else(|| t.strip_prefix('$'))
+        .map_or((t, 10), |h| (h, 16));
+    u16::from_str_radix(&digits.replace('_', ""), radix)
+        .map_err(|e| format!("`{s}`: not a 16-bit address ({e})"))
+}
+
 #[derive(Subcommand, Debug)]
 // The `State` variant carries many optional diagnostic-output paths (one
 // per trace/log kind); adding `--sa1-log` tipped it past the 200-byte
@@ -664,6 +677,34 @@ enum Command {
         /// Scripted joypad-1 input (`state --input` grammar).
         #[arg(long)]
         input: Option<String>,
+        /// Scripted joypad-2 input (`state --input2` grammar).
+        #[arg(long)]
+        input2: Option<String>,
+        /// Multitap pads B, C, D — players 3, 4, 5 (`state --input3`).
+        #[arg(long)]
+        input3: Option<String>,
+        /// Player 4 (multitap pad C) — see `--input3`.
+        #[arg(long)]
+        input4: Option<String>,
+        /// Player 5 (multitap pad D) — see `--input3`.
+        #[arg(long)]
+        input5: Option<String>,
+        /// Controller port-1 device: `pad` (default), `mouse`, `superscope`
+        /// or `multitap`.
+        #[arg(long, default_value = "pad")]
+        port1: String,
+        /// Controller port-2 device: `pad` (default), `mouse`, `superscope`
+        /// or `multitap`.
+        #[arg(long, default_value = "pad")]
+        port2: String,
+        /// Scripted SNES Mouse motion (`state --mouse` grammar), applied to
+        /// whichever port is set to `mouse`.
+        #[arg(long)]
+        mouse: Option<String>,
+        /// Scripted Super Scope aim (`state --superscope` grammar), applied
+        /// to whichever port is set to `superscope`.
+        #[arg(long)]
+        superscope: Option<String>,
         /// WLA-DX `.sym` to fold PCs onto (overrides the `<rom>.sym`
         /// auto-detection).
         #[arg(long)]
@@ -686,6 +727,13 @@ enum Command {
         /// check for CI: `--budget NmiHandler=6000`.
         #[arg(long = "budget")]
         budget: Vec<String>,
+        /// Gate: the stack must never reach below this address, else exit 1
+        /// — the RAM-budget check a link-time guess cannot make
+        /// (`--stack-floor 0x1C60`). Accepts `0x`-hex or decimal. The
+        /// figure is reported either way, with the routine that went
+        /// deepest when a `.sym` is loaded.
+        #[arg(long = "stack-floor", value_parser = parse_u16_auto)]
+        stack_floor: Option<u16>,
         /// Force a cartridge mapper (lorom, hirom, exhirom, sa1, superfx).
         #[arg(long = "force-mapper")]
         force_mapper: Option<String>,
@@ -1092,11 +1140,20 @@ fn main() -> ExitCode {
             until_frame,
             from_frame,
             input,
+            input2,
+            input3,
+            input4,
+            input5,
+            port1,
+            port2,
+            mouse,
+            superscope,
             sym,
             top,
             out,
             pc_set,
             budget,
+            stack_floor,
             force_mapper,
             force_region,
             power_on,
@@ -1106,12 +1163,25 @@ fn main() -> ExitCode {
                 steps,
                 until_frame,
                 from_frame,
-                input_script: input.as_deref(),
+                input: parsers::InputFlags {
+                    input: input.as_deref(),
+                    extra_pads: &[
+                        (1, input2.as_deref()),
+                        (2, input3.as_deref()),
+                        (3, input4.as_deref()),
+                        (4, input5.as_deref()),
+                    ],
+                    port1: &port1,
+                    port2: &port2,
+                    mouse: mouse.as_deref(),
+                    superscope: superscope.as_deref(),
+                },
                 sym: sym.as_deref(),
                 top,
                 out: out.as_deref(),
                 pc_set: pc_set.as_deref(),
                 budgets: &budget,
+                stack_floor,
                 force_mapper: force_mapper.as_deref(),
                 force_region: force_region.as_deref(),
                 power_on: power_on.as_deref(),
@@ -1243,6 +1313,47 @@ fn serve_mcp(
         Err(e) => {
             eprintln!("error: MCP server: {e}");
             ExitCode::from(1)
+        }
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    use clap::Parser;
+
+    /// `luna profile` must take the same controller flags as `luna state`.
+    ///
+    /// They drifted once: `profile` had `--input` alone, so a coverage run
+    /// replaying a mouse or Super Scope manifest silently ran with nothing
+    /// plugged into the port, and the peripheral's code counted as
+    /// "executed" without ever being driven (`OpenSNES` R2). The two now
+    /// share `parsers::apply_input_flags`; this pins the surface.
+    #[test]
+    fn profile_takes_the_same_controller_flags_as_state() {
+        let peripherals = [
+            "--input2",
+            "--input3",
+            "--input4",
+            "--input5",
+            "--port1",
+            "--port2",
+            "--mouse",
+            "--superscope",
+        ];
+        for flag in peripherals {
+            let value = match flag {
+                "--port1" | "--port2" => "mouse",
+                "--mouse" | "--superscope" => "30:0,0,0",
+                _ => "10:0x1000",
+            };
+            for verb in ["state", "profile"] {
+                let argv = ["luna", verb, "rom.sfc", flag, value];
+                assert!(
+                    Cli::try_parse_from(argv).is_ok(),
+                    "`luna {verb}` rejected {flag}"
+                );
+            }
         }
     }
 }
