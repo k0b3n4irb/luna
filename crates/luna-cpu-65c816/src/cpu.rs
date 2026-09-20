@@ -210,6 +210,90 @@ impl Cpu {
     }
 
     // -------------------------------------------------------------------
+    // The interrupt poll (ares `lastCycle()`).
+    //
+    // ares marks the cycle before an instruction's LAST bus access with
+    // the `L` prefix (`#define L lastCycle();`, `wdc65816/registers.hpp:30`)
+    // and samples NMI/IRQ there — "test one cycle early to simulate the
+    // two-stage pipeline of the 65816 CPU" (`sfc/cpu/irq.cpp:83-93`).
+    // Mesen2 gets the same result by recomputing the flags every cycle and
+    // reading them back at the boundary (`SnesCpu.Shared.h:336-338`).
+    //
+    // The helpers below are luna's `L`: one per final-access shape, so a
+    // handler reads `self.last_write8(...)` where ares reads
+    // `L writeBank(...)`. Exactly one must run per instruction — the
+    // `last_cycle_invariant` test proves it for all 256 opcodes.
+    // -------------------------------------------------------------------
+
+    /// Sample the interrupt lines for this instruction (ares `lastCycle()`).
+    ///
+    /// The `I` mask is read **here**, before the instruction's final action
+    /// — that is what gives `CLI` / `SEI` / `PLP` their one-instruction
+    /// recognition delay without any dedicated counter.
+    #[inline]
+    pub fn last_cycle<B: Bus>(&mut self, bus: &mut B) {
+        let sample = bus.last_cycle(self.p.contains(bit::I));
+        if sample.nmi {
+            self.pending_nmi = true;
+        }
+        if sample.irq {
+            self.pending_irq = true;
+        }
+        if sample.wake {
+            // ares `nmiTest()` / `irqTest()` clear `r.wai` before the `I`
+            // check: a masked IRQ still ends a `WAI`, it just doesn't
+            // enter the handler.
+            self.waiting = false;
+        }
+    }
+
+    /// ares `L read(addr)` — the instruction's final bus read.
+    #[inline]
+    pub fn last_read8<B: Bus>(&mut self, bus: &mut B, addr: Addr24) -> u8 {
+        self.last_cycle(bus);
+        bus.read(addr)
+    }
+
+    /// 16-bit operand read whose **high** byte is the final cycle
+    /// (ares `…Read16`: `W.l = read(v+0); L W.h = read(v+1);`).
+    #[inline]
+    pub fn last_read16<B: Bus>(&mut self, bus: &mut B, addr: Addr24) -> u16 {
+        let lo = bus.read(addr);
+        let hi_addr = self.hi_addr(addr);
+        let hi = self.last_read8(bus, hi_addr);
+        u16::from(lo) | (u16::from(hi) << 8)
+    }
+
+    /// ares `L write(addr, data)` — the instruction's final bus write.
+    #[inline]
+    pub fn last_write8<B: Bus>(&mut self, bus: &mut B, addr: Addr24, value: u8) {
+        self.last_cycle(bus);
+        bus.write(addr, value);
+    }
+
+    /// ares `L idle()` — an instruction whose final cycle is internal.
+    #[inline]
+    pub fn last_io<B: Bus>(&mut self, bus: &mut B) {
+        self.last_cycle(bus);
+        self.io(bus);
+    }
+
+    /// ares `L fetch()` — the final cycle is an operand/opcode fetch.
+    #[inline]
+    pub fn last_fetch_u8<B: Bus>(&mut self, bus: &mut B) -> u8 {
+        self.last_cycle(bus);
+        self.fetch_u8(bus)
+    }
+
+    /// 16-bit immediate whose **high** byte is the final cycle.
+    #[inline]
+    pub fn last_fetch_u16<B: Bus>(&mut self, bus: &mut B) -> u16 {
+        let lo = self.fetch_u8(bus);
+        let hi = self.last_fetch_u8(bus);
+        u16::from(lo) | (u16::from(hi) << 8)
+    }
+
+    // -------------------------------------------------------------------
     // Internal (idle) cycles — Phase 3 cycle accuracy.
     //
     // The CPU spends some cycles doing no bus access (effective-address

@@ -68,12 +68,13 @@ impl Cpu {
         // would never reach line 225. 8 mclk ≈ one "slow" bus tick; the
         // exact value doesn't matter as long as it's > 0.
         if self.waiting {
-            // Per ares' `irq.cpp` `nmiTest()` / `irqTest()`: both NMI
-            // and IRQ wake the CPU from WAI, *regardless of the I
-            // flag*. The I flag only gates whether the IRQ vector is
-            // actually taken; the WAI wake-up is unconditional. Games
-            // that `SEI; WAI; BRA -3` rely on this — the IRQ wakes
-            // them but the handler isn't entered.
+            // ares parks in `while(r.wai && ...) { L idle(); }`, so the
+            // poll runs on every stalled tick — that IS the wake-up path.
+            // Both NMI and IRQ end the wait *regardless of the I flag*
+            // (`nmiTest()`/`irqTest()` clear `r.wai` before the `I`
+            // check); I only gates whether the vector is taken. Games
+            // that `SEI; WAI; BRA -3` rely on exactly that.
+            self.last_cycle(bus);
             if self.pending_nmi || self.pending_irq || self.irq_line {
                 self.waiting = false;
             } else {
@@ -157,6 +158,16 @@ impl Cpu {
         // the direct-page / stack-relative addressing helpers flip this on
         // when they resolve a bank-0 effective address.
         self.bank0_wrap = false;
+        // The two-cycle implied opcodes spend one internal cycle and ares
+        // marks it `L idleIRQ()` **before** the register effect
+        // (`instructions-other.cpp`: `L idleIRQ(); flag = 0;`). Polling
+        // first is what gives `CLI` / `SEI` / `PLP` their one-instruction
+        // recognition delay — no delay counter exists in either reference.
+        // REP/SEP are in the same family but poll inside their handler,
+        // after the operand fetch (ares `W.l = fetch(); L idle();`).
+        if is_implied_io(opcode) && !matches!(opcode, 0xC2 | 0xE2) {
+            self.last_cycle(bus);
+        }
         match opcode {
             // -----------------------------------------------------------
             // Mode control
@@ -517,8 +528,17 @@ impl Cpu {
             // Misc
             // -----------------------------------------------------------
             0xEA => { /* NOP */ }
-            0xCB => self.waiting = true, // WAI
-            0xDB => self.stopped = true, // STP
+            // ares `instructionWait` / `instructionStop`:
+            // `r.wai = true; while(r.wai && ...) { L idle(); }` — the wait
+            // loop polls from its very first iteration, which is this one.
+            0xCB => {
+                self.waiting = true;
+                self.last_cycle(bus);
+            }
+            0xDB => {
+                self.stopped = true;
+                self.last_cycle(bus);
+            }
 
             // -----------------------------------------------------------
             // Interrupts & misc
@@ -541,8 +561,9 @@ impl Cpu {
         // op above already updated the registers; the cycle is charged here.
         match opcode {
             0xEB => {
+                // ares `instructionExchangeBA`: `idle(); L idle();`.
                 self.io(bus);
-                self.io(bus);
+                self.last_io(bus);
             }
             _ if is_implied_io(opcode) => self.io(bus),
             _ => {}
@@ -576,6 +597,10 @@ impl Cpu {
     /// needed beyond the index-width truncation.
     fn sep<B: Bus>(&mut self, bus: &mut B) {
         let mask = self.fetch_u8(bus);
+        // ares `instructionSetP`: `W.l = fetch(); L idle(); P = P | W.l;`
+        // — the poll precedes the flag change, so `SEP #$04` cannot mask
+        // an IRQ that was already pending.
+        self.last_cycle(bus);
         self.p.insert(mask);
         if self.p.idx8() {
             self.x &= 0x00FF;
@@ -587,6 +612,9 @@ impl Cpu {
     /// are forced to 1 and cannot be cleared by REP.
     fn rep<B: Bus>(&mut self, bus: &mut B) {
         let mask = self.fetch_u8(bus);
+        // ares `instructionResetP`: the poll precedes the flag change, so
+        // `REP #$04` cannot unmask an IRQ for its own instruction.
+        self.last_cycle(bus);
         let mut effective = mask;
         if self.e {
             effective &= !(bit::M | bit::X);
@@ -600,11 +628,11 @@ impl Cpu {
 
     fn lda_imm<B: Bus>(&mut self, bus: &mut B) {
         if self.p.acc8() {
-            let v = self.fetch_u8(bus);
+            let v = self.last_fetch_u8(bus);
             self.set_a_low(v);
             self.set_nz8(v);
         } else {
-            let v = self.fetch_u16(bus);
+            let v = self.last_fetch_u16(bus);
             self.a = v;
             self.set_nz16(v);
         }
@@ -612,11 +640,11 @@ impl Cpu {
 
     fn lda_from_addr<B: Bus>(&mut self, bus: &mut B, addr: luna_bus::Addr24) {
         if self.p.acc8() {
-            let v = bus.read(addr);
+            let v = self.last_read8(bus, addr);
             self.set_a_low(v);
             self.set_nz8(v);
         } else {
-            let v = self.read_word16(bus, addr);
+            let v = self.last_read16(bus, addr);
             self.a = v;
             self.set_nz16(v);
         }
@@ -698,11 +726,11 @@ impl Cpu {
 
     fn ldx_imm<B: Bus>(&mut self, bus: &mut B) {
         if self.p.idx8() {
-            let v = self.fetch_u8(bus);
+            let v = self.last_fetch_u8(bus);
             self.set_x_low(v);
             self.set_nz8(v);
         } else {
-            let v = self.fetch_u16(bus);
+            let v = self.last_fetch_u16(bus);
             self.x = v;
             self.set_nz16(v);
         }
@@ -710,11 +738,11 @@ impl Cpu {
 
     fn ldx_from_addr<B: Bus>(&mut self, bus: &mut B, addr: Addr24) {
         if self.p.idx8() {
-            let v = bus.read(addr);
+            let v = self.last_read8(bus, addr);
             self.set_x_low(v);
             self.set_nz8(v);
         } else {
-            let v = self.read_word16(bus, addr);
+            let v = self.last_read16(bus, addr);
             self.x = v;
             self.set_nz16(v);
         }
@@ -742,11 +770,11 @@ impl Cpu {
 
     fn ldy_imm<B: Bus>(&mut self, bus: &mut B) {
         if self.p.idx8() {
-            let v = self.fetch_u8(bus);
+            let v = self.last_fetch_u8(bus);
             self.set_y_low(v);
             self.set_nz8(v);
         } else {
-            let v = self.fetch_u16(bus);
+            let v = self.last_fetch_u16(bus);
             self.y = v;
             self.set_nz16(v);
         }
@@ -754,11 +782,11 @@ impl Cpu {
 
     fn ldy_from_addr<B: Bus>(&mut self, bus: &mut B, addr: Addr24) {
         if self.p.idx8() {
-            let v = bus.read(addr);
+            let v = self.last_read8(bus, addr);
             self.set_y_low(v);
             self.set_nz8(v);
         } else {
-            let v = self.read_word16(bus, addr);
+            let v = self.last_read16(bus, addr);
             self.y = v;
             self.set_nz16(v);
         }
@@ -790,10 +818,11 @@ impl Cpu {
 
     fn sta_to_addr<B: Bus>(&mut self, bus: &mut B, addr: luna_bus::Addr24) {
         if self.p.acc8() {
-            bus.write(addr, self.a8());
+            self.last_write8(bus, addr, self.a8());
         } else {
             bus.write(addr, self.a as u8);
-            bus.write(self.hi_addr(addr), (self.a >> 8) as u8);
+            let hi = self.hi_addr(addr);
+            self.last_write8(bus, hi, (self.a >> 8) as u8);
         }
     }
 
@@ -873,19 +902,21 @@ impl Cpu {
 
     fn stx_to_addr<B: Bus>(&mut self, bus: &mut B, addr: Addr24) {
         if self.p.idx8() {
-            bus.write(addr, self.x8());
+            self.last_write8(bus, addr, self.x8());
         } else {
             bus.write(addr, self.x as u8);
-            bus.write(self.hi_addr(addr), (self.x >> 8) as u8);
+            let hi = self.hi_addr(addr);
+            self.last_write8(bus, hi, (self.x >> 8) as u8);
         }
     }
 
     fn sty_to_addr<B: Bus>(&mut self, bus: &mut B, addr: Addr24) {
         if self.p.idx8() {
-            bus.write(addr, self.y8());
+            self.last_write8(bus, addr, self.y8());
         } else {
             bus.write(addr, self.y as u8);
-            bus.write(self.hi_addr(addr), (self.y >> 8) as u8);
+            let hi = self.hi_addr(addr);
+            self.last_write8(bus, hi, (self.y >> 8) as u8);
         }
     }
 
@@ -924,9 +955,12 @@ impl Cpu {
     // ===================================================================
 
     fn stz_to_addr<B: Bus>(&mut self, bus: &mut B, addr: Addr24) {
-        bus.write(addr, 0);
-        if !self.p.acc8() {
-            bus.write(self.hi_addr(addr), 0);
+        if self.p.acc8() {
+            self.last_write8(bus, addr, 0);
+        } else {
+            bus.write(addr, 0);
+            let hi = self.hi_addr(addr);
+            self.last_write8(bus, hi, 0);
         }
     }
 
@@ -955,12 +989,16 @@ impl Cpu {
     // ===================================================================
 
     fn jmp_abs<B: Bus>(&mut self, bus: &mut B) {
-        let target = self.fetch_u16(bus);
+        let target = self.last_fetch_u16(bus);
         self.pc = target;
     }
 
     fn jmp_long<B: Bus>(&mut self, bus: &mut B) {
-        let target = self.fetch_u24(bus);
+        // ares `instructionJumpLong`: `L V.b = fetch();` — the bank byte.
+        let lo = self.fetch_u8(bus);
+        let hi = self.fetch_u8(bus);
+        let bank = self.last_fetch_u8(bus);
+        let target = Addr24::from(lo) | (Addr24::from(hi) << 8) | (Addr24::from(bank) << 16);
         self.pc = target as u16;
         self.pb = (target >> 16) as u8;
     }
@@ -970,7 +1008,7 @@ impl Cpu {
     fn jmp_abs_indirect<B: Bus>(&mut self, bus: &mut B) {
         let ptr_off = self.fetch_u16(bus);
         let lo = bus.read(make_addr(0, ptr_off));
-        let hi = bus.read(make_addr(0, ptr_off.wrapping_add(1)));
+        let hi = self.last_read8(bus, make_addr(0, ptr_off.wrapping_add(1)));
         self.pc = u16::from(lo) | (u16::from(hi) << 8);
     }
 
@@ -980,7 +1018,7 @@ impl Cpu {
         let ptr_off = self.fetch_u16(bus);
         let lo = bus.read(make_addr(0, ptr_off));
         let mid = bus.read(make_addr(0, ptr_off.wrapping_add(1)));
-        let hi = bus.read(make_addr(0, ptr_off.wrapping_add(2)));
+        let hi = self.last_read8(bus, make_addr(0, ptr_off.wrapping_add(2)));
         self.pc = u16::from(lo) | (u16::from(mid) << 8);
         self.pb = hi;
     }
@@ -992,7 +1030,7 @@ impl Cpu {
         self.io(bus); // ares JumpIndexedIndirect internal cycle
         let ptr_off = base.wrapping_add(self.x);
         let lo = bus.read(make_addr(self.pb, ptr_off));
-        let hi = bus.read(make_addr(self.pb, ptr_off.wrapping_add(1)));
+        let hi = self.last_read8(bus, make_addr(self.pb, ptr_off.wrapping_add(1)));
         self.pc = u16::from(lo) | (u16::from(hi) << 8);
     }
 
@@ -1003,7 +1041,7 @@ impl Cpu {
         let target = self.fetch_u16(bus);
         self.io(bus); // ares CallShort internal cycle
         let return_addr = self.pc.wrapping_sub(1);
-        self.push_u16(bus, return_addr);
+        self.last_push_u16(bus, return_addr);
         self.pc = target;
     }
 
@@ -1023,7 +1061,7 @@ impl Cpu {
         self.io(bus); // ares CallLong internal cycle (between PBR push and bank fetch)
         let bank = self.fetch_u8(bus);
         let return_pc = self.pc.wrapping_sub(1);
-        self.push_u16_native(bus, return_pc);
+        self.last_push_u16_native(bus, return_pc);
         self.pb = bank;
         self.pc = u16::from(lo) | (u16::from(hi) << 8);
     }
@@ -1048,7 +1086,7 @@ impl Cpu {
         let base = u16::from(lo) | (u16::from(hi) << 8);
         let ptr_off = base.wrapping_add(self.x);
         let p_lo = bus.read(make_addr(self.pb, ptr_off));
-        let p_hi = bus.read(make_addr(self.pb, ptr_off.wrapping_add(1)));
+        let p_hi = self.last_read8(bus, make_addr(self.pb, ptr_off.wrapping_add(1)));
         self.pc = u16::from(p_lo) | (u16::from(p_hi) << 8);
     }
 
@@ -1058,7 +1096,7 @@ impl Cpu {
         self.io(bus);
         self.io(bus);
         let pc = self.pull_u16(bus);
-        self.io(bus);
+        self.last_io(bus);
         self.pc = pc.wrapping_add(1);
     }
 
@@ -1068,7 +1106,7 @@ impl Cpu {
         self.io(bus);
         self.io(bus);
         let pc = self.pull_u16_native(bus);
-        let pb = self.pull_u8_native(bus);
+        let pb = self.last_pull_u8_native(bus);
         self.pc = pc.wrapping_add(1);
         self.pb = pb;
     }
@@ -1077,7 +1115,7 @@ impl Cpu {
     /// displacement.
     fn brl<B: Bus>(&mut self, bus: &mut B) {
         let rel = self.fetch_u16(bus) as i16;
-        self.io(bus); // ares BranchLong internal cycle
+        self.last_io(bus); // ares BranchLong internal cycle
         self.pc = self.pc.wrapping_add_signed(rel);
     }
 
@@ -1152,7 +1190,7 @@ impl Cpu {
             };
             self.push_u8(bus, pushed_p);
             let lo = bus.read(make_addr(0, vec_emulation));
-            let hi = bus.read(make_addr(0, vec_emulation.wrapping_add(1)));
+            let hi = self.last_read8(bus, make_addr(0, vec_emulation.wrapping_add(1)));
             self.pc = u16::from(lo) | (u16::from(hi) << 8);
         } else {
             // Native mode: full 65816 stack frame.
@@ -1160,7 +1198,7 @@ impl Cpu {
             self.push_u16(bus, self.pc);
             self.push_u8(bus, self.p.bits());
             let lo = bus.read(make_addr(0, vec_native));
-            let hi = bus.read(make_addr(0, vec_native.wrapping_add(1)));
+            let hi = self.last_read8(bus, make_addr(0, vec_native.wrapping_add(1)));
             self.pc = u16::from(lo) | (u16::from(hi) << 8);
         }
         self.pb = 0;
@@ -1180,7 +1218,13 @@ impl Cpu {
         self.io(bus);
         self.io(bus);
         let new_p = self.pull_u8(bus);
-        self.pc = self.pull_u16(bus);
+        // ares `instructionReturnInterrupt`: emulation ends on `L PC.h`,
+        // native on `L PC.b`.
+        self.pc = if self.e {
+            self.last_pull_u16(bus)
+        } else {
+            self.pull_u16(bus)
+        };
         // Emulation forces M and X to stay set in P.
         let effective = if self.e {
             new_p | bit::M | bit::X
@@ -1189,7 +1233,7 @@ impl Cpu {
         };
         self.p = crate::flags::StatusFlags(effective);
         if !self.e {
-            self.pb = self.pull_u8(bus);
+            self.pb = self.last_pull_u8(bus);
         }
         if self.p.idx8() {
             self.x &= 0x00FF;
@@ -1208,7 +1252,7 @@ impl Cpu {
         // PC currently points at the operand byte (the opcode was already
         // fetched). Record that address so a captured hit is locatable.
         let pc_full = (u32::from(self.pb) << 16) | u32::from(self.pc);
-        let operand = self.fetch_u8(bus);
+        let operand = self.last_fetch_u8(bus);
         // Bounded like the other diagnostic logs: a ROM that hits `WDM` in
         // a loop must not grow the buffer without end in a long-running
         // session. `take_wdm_log` empties it and capture resumes.
@@ -1286,7 +1330,7 @@ impl Cpu {
             self.x &= 0x00FF;
             self.y &= 0x00FF;
         }
-        self.io(bus);
+        self.last_io(bus);
 
         let count = self.a; // 16-bit count; full C even when M = 1.
         self.a = self.a.wrapping_sub(1);
@@ -1310,14 +1354,20 @@ impl Cpu {
     // ===================================================================
 
     fn branch_if<B: Bus>(&mut self, bus: &mut B, condition: bool) {
-        let offset = self.fetch_u8(bus) as i8;
+        // ares `instructionBranch`: not taken ends on `L fetch()`, taken
+        // ends on the `L idle()` that precedes the PC update.
+        let offset = if condition {
+            self.fetch_u8(bus) as i8
+        } else {
+            self.last_fetch_u8(bus) as i8
+        };
         if condition {
             // ares instructionBranch(take): when taken, an emulation-mode
             // page-cross cycle (idle6, comparing the not-yet-updated PC to
             // the target) then one fixed taken-branch internal cycle.
             let target = self.pc.wrapping_add_signed(i16::from(offset));
             self.idle6(bus, target);
-            self.io(bus);
+            self.last_io(bus);
             self.pc = target;
         }
     }
@@ -1359,7 +1409,7 @@ impl Cpu {
             // between the read and the write-back).
             self.io(bus);
             let new = op(u16::from(v)) as u8;
-            bus.write(addr, new);
+            self.last_write8(bus, addr, new);
             self.set_nz8(new);
         } else {
             let v = self.read_word16(bus, addr);
@@ -1369,8 +1419,9 @@ impl Cpu {
             // `instruction*Modify16`: `writeBank(V+1, W.h)` before
             // `writeBank(V+0, W.l)`). State-identical to low-first, but the
             // per-cycle bus order is what the Tom Harte cycles[] oracle checks.
-            bus.write(self.hi_addr(addr), (new >> 8) as u8);
-            bus.write(addr, new as u8);
+            let hi = self.hi_addr(addr);
+            bus.write(hi, (new >> 8) as u8);
+            self.last_write8(bus, addr, new as u8);
             self.set_nz16(new);
         }
     }
@@ -1630,18 +1681,18 @@ impl Cpu {
 
     fn adc_imm<B: Bus>(&mut self, bus: &mut B) {
         let v = if self.p.acc8() {
-            u16::from(self.fetch_u8(bus))
+            u16::from(self.last_fetch_u8(bus))
         } else {
-            self.fetch_u16(bus)
+            self.last_fetch_u16(bus)
         };
         self.adc_value(v);
     }
 
     fn sbc_imm<B: Bus>(&mut self, bus: &mut B) {
         let v = if self.p.acc8() {
-            u16::from(self.fetch_u8(bus))
+            u16::from(self.last_fetch_u8(bus))
         } else {
-            self.fetch_u16(bus)
+            self.last_fetch_u16(bus)
         };
         self.sbc_value(v);
     }
@@ -1651,7 +1702,7 @@ impl Cpu {
     /// stack-relative accesses wrap the high byte within bank 0 (ares
     /// `readDirect`/`readStack`, masked to `n16`); every other mode carries
     /// into the next bank (ares `readBank`/`read`).
-    fn hi_addr(&self, addr: Addr24) -> Addr24 {
+    pub(crate) fn hi_addr(&self, addr: Addr24) -> Addr24 {
         if self.bank0_wrap {
             Addr24::from((addr as u16).wrapping_add(1))
         } else {
@@ -1668,9 +1719,9 @@ impl Cpu {
 
     fn arithmetic_read_from<B: Bus>(&mut self, bus: &mut B, addr: Addr24) -> u16 {
         if self.p.acc8() {
-            u16::from(bus.read(addr))
+            u16::from(self.last_read8(bus, addr))
         } else {
-            self.read_word16(bus, addr)
+            self.last_read16(bus, addr)
         }
     }
 
@@ -1861,9 +1912,9 @@ impl Cpu {
 
     fn cmp_imm<B: Bus>(&mut self, bus: &mut B) {
         let v = if self.p.acc8() {
-            u16::from(self.fetch_u8(bus))
+            u16::from(self.last_fetch_u8(bus))
         } else {
-            self.fetch_u16(bus)
+            self.last_fetch_u16(bus)
         };
         self.cmp_value(v);
     }
@@ -1942,17 +1993,17 @@ impl Cpu {
 
     fn index_read_from<B: Bus>(&mut self, bus: &mut B, addr: Addr24) -> u16 {
         if self.p.idx8() {
-            u16::from(bus.read(addr))
+            u16::from(self.last_read8(bus, addr))
         } else {
-            self.read_word16(bus, addr)
+            self.last_read16(bus, addr)
         }
     }
 
     fn cpx_imm<B: Bus>(&mut self, bus: &mut B) {
         let v = if self.p.idx8() {
-            u16::from(self.fetch_u8(bus))
+            u16::from(self.last_fetch_u8(bus))
         } else {
-            self.fetch_u16(bus)
+            self.last_fetch_u16(bus)
         };
         self.compare_index(self.x, v);
     }
@@ -1968,9 +2019,9 @@ impl Cpu {
     }
     fn cpy_imm<B: Bus>(&mut self, bus: &mut B) {
         let v = if self.p.idx8() {
-            u16::from(self.fetch_u8(bus))
+            u16::from(self.last_fetch_u8(bus))
         } else {
-            self.fetch_u16(bus)
+            self.last_fetch_u16(bus)
         };
         self.compare_index(self.y, v);
     }
@@ -1994,9 +2045,9 @@ impl Cpu {
 
     fn logical_imm_fetch<B: Bus>(&mut self, bus: &mut B) -> u16 {
         if self.p.acc8() {
-            u16::from(self.fetch_u8(bus))
+            u16::from(self.last_fetch_u8(bus))
         } else {
-            self.fetch_u16(bus)
+            self.last_fetch_u16(bus)
         }
     }
 
@@ -2406,14 +2457,15 @@ impl Cpu {
             let v = u16::from(bus.read(addr));
             self.io(bus); // RMW dead cycle
             let new = op(self, v) as u8;
-            bus.write(addr, new);
+            self.last_write8(bus, addr, new);
         } else {
             let v = self.read_word16(bus, addr);
             self.io(bus); // RMW dead cycle
             let new = op(self, v);
             // ares writes the HIGH byte first (see `modify_memory`).
-            bus.write(self.hi_addr(addr), (new >> 8) as u8);
-            bus.write(addr, new as u8);
+            let hi = self.hi_addr(addr);
+            bus.write(hi, (new >> 8) as u8);
+            self.last_write8(bus, addr, new as u8);
         }
     }
 
@@ -2777,14 +2829,55 @@ impl Cpu {
         bus.read(make_addr(0, self.sp))
     }
 
-    fn push_u16_native<B: Bus>(&mut self, bus: &mut B, value: u16) {
-        self.push_u8_native(bus, (value >> 8) as u8);
-        self.push_u8_native(bus, value as u8);
-    }
-
     fn pull_u16_native<B: Bus>(&mut self, bus: &mut B) -> u16 {
         let lo = self.pull_u8_native(bus);
         let hi = self.pull_u8_native(bus);
+        u16::from(lo) | (u16::from(hi) << 8)
+    }
+
+    // --- the `L`-marked forms (ares marks the LAST push/pull) -----------
+    // A 16-bit push ends on the low byte (`push(F.h); L push(F.l);`), a
+    // 16-bit pull ends on the high byte (`T.l = pull(); L T.h = pull();`).
+
+    fn last_push_u8<B: Bus>(&mut self, bus: &mut B, value: u8) {
+        self.last_cycle(bus);
+        self.push_u8(bus, value);
+    }
+
+    fn last_push_u16<B: Bus>(&mut self, bus: &mut B, value: u16) {
+        self.push_u8(bus, (value >> 8) as u8);
+        self.last_push_u8(bus, value as u8);
+    }
+
+    fn last_pull_u8<B: Bus>(&mut self, bus: &mut B) -> u8 {
+        self.last_cycle(bus);
+        self.pull_u8(bus)
+    }
+
+    fn last_pull_u16<B: Bus>(&mut self, bus: &mut B) -> u16 {
+        let lo = self.pull_u8(bus);
+        let hi = self.last_pull_u8(bus);
+        u16::from(lo) | (u16::from(hi) << 8)
+    }
+
+    fn last_push_u8_native<B: Bus>(&mut self, bus: &mut B, value: u8) {
+        self.last_cycle(bus);
+        self.push_u8_native(bus, value);
+    }
+
+    fn last_push_u16_native<B: Bus>(&mut self, bus: &mut B, value: u16) {
+        self.push_u8_native(bus, (value >> 8) as u8);
+        self.last_push_u8_native(bus, value as u8);
+    }
+
+    fn last_pull_u8_native<B: Bus>(&mut self, bus: &mut B) -> u8 {
+        self.last_cycle(bus);
+        self.pull_u8_native(bus)
+    }
+
+    fn last_pull_u16_native<B: Bus>(&mut self, bus: &mut B) -> u16 {
+        let lo = self.pull_u8_native(bus);
+        let hi = self.last_pull_u8_native(bus);
         u16::from(lo) | (u16::from(hi) << 8)
     }
 
@@ -2796,9 +2889,9 @@ impl Cpu {
         self.io(bus); // stack-op internal cycle (ares Push)
 
         if self.p.acc8() {
-            self.push_u8(bus, self.a8());
+            self.last_push_u8(bus, self.a8());
         } else {
-            self.push_u16(bus, self.a);
+            self.last_push_u16(bus, self.a);
         }
     }
 
@@ -2806,9 +2899,9 @@ impl Cpu {
         self.io(bus); // stack-op internal cycle (ares Push)
 
         if self.p.idx8() {
-            self.push_u8(bus, self.x8());
+            self.last_push_u8(bus, self.x8());
         } else {
-            self.push_u16(bus, self.x);
+            self.last_push_u16(bus, self.x);
         }
     }
 
@@ -2816,34 +2909,34 @@ impl Cpu {
         self.io(bus); // stack-op internal cycle (ares Push)
 
         if self.p.idx8() {
-            self.push_u8(bus, self.y8());
+            self.last_push_u8(bus, self.y8());
         } else {
-            self.push_u16(bus, self.y);
+            self.last_push_u16(bus, self.y);
         }
     }
 
     fn php<B: Bus>(&mut self, bus: &mut B) {
         self.io(bus); // stack-op internal cycle (ares Push)
 
-        self.push_u8(bus, self.p.bits());
+        self.last_push_u8(bus, self.p.bits());
     }
 
     fn phb<B: Bus>(&mut self, bus: &mut B) {
         self.io(bus); // stack-op internal cycle (ares Push)
 
-        self.push_u8(bus, self.db);
+        self.last_push_u8(bus, self.db);
     }
 
     fn phd<B: Bus>(&mut self, bus: &mut B) {
         self.io(bus); // stack-op internal cycle (ares Push)
 
-        self.push_u16_native(bus, self.dp);
+        self.last_push_u16_native(bus, self.dp);
     }
 
     fn phk<B: Bus>(&mut self, bus: &mut B) {
         self.io(bus); // stack-op internal cycle (ares Push)
 
-        self.push_u8(bus, self.pb);
+        self.last_push_u8(bus, self.pb);
     }
 
     fn pla<B: Bus>(&mut self, bus: &mut B) {
@@ -2851,11 +2944,11 @@ impl Cpu {
         self.io(bus);
 
         if self.p.acc8() {
-            let v = self.pull_u8(bus);
+            let v = self.last_pull_u8(bus);
             self.set_a_low(v);
             self.set_nz8(v);
         } else {
-            let v = self.pull_u16(bus);
+            let v = self.last_pull_u16(bus);
             self.a = v;
             self.set_nz16(v);
         }
@@ -2866,11 +2959,11 @@ impl Cpu {
         self.io(bus);
 
         if self.p.idx8() {
-            let v = self.pull_u8(bus);
+            let v = self.last_pull_u8(bus);
             self.set_x_low(v);
             self.set_nz8(v);
         } else {
-            let v = self.pull_u16(bus);
+            let v = self.last_pull_u16(bus);
             self.x = v;
             self.set_nz16(v);
         }
@@ -2881,11 +2974,11 @@ impl Cpu {
         self.io(bus);
 
         if self.p.idx8() {
-            let v = self.pull_u8(bus);
+            let v = self.last_pull_u8(bus);
             self.set_y_low(v);
             self.set_nz8(v);
         } else {
-            let v = self.pull_u16(bus);
+            let v = self.last_pull_u16(bus);
             self.y = v;
             self.set_nz16(v);
         }
@@ -2895,7 +2988,7 @@ impl Cpu {
         self.io(bus); // stack-op internal cycles (ares Pull)
         self.io(bus);
 
-        let new_p = self.pull_u8(bus);
+        let new_p = self.last_pull_u8(bus);
         // Emulation mode forces M and X to 1 in P (they cannot be
         // cleared while E=1).
         let effective = if self.e {
@@ -2914,7 +3007,7 @@ impl Cpu {
         self.io(bus); // stack-op internal cycles (ares Pull)
         self.io(bus);
 
-        let v = self.pull_u8_native(bus);
+        let v = self.last_pull_u8_native(bus);
         self.db = v;
         self.set_nz8(v);
     }
@@ -2923,7 +3016,7 @@ impl Cpu {
         self.io(bus); // stack-op internal cycles (ares Pull)
         self.io(bus);
 
-        let v = self.pull_u16_native(bus);
+        let v = self.last_pull_u16_native(bus);
         self.dp = v;
         self.set_nz16(v);
     }
@@ -2938,7 +3031,7 @@ impl Cpu {
 
     fn pea<B: Bus>(&mut self, bus: &mut B) {
         let v = self.fetch_u16(bus);
-        self.push_u16_native(bus, v);
+        self.last_push_u16_native(bus, v);
     }
 
     fn pei<B: Bus>(&mut self, bus: &mut B) {
@@ -2948,14 +3041,14 @@ impl Cpu {
         let lo = bus.read(make_addr(0, ptr));
         let hi = bus.read(make_addr(0, ptr.wrapping_add(1)));
         let v = u16::from(lo) | (u16::from(hi) << 8);
-        self.push_u16_native(bus, v);
+        self.last_push_u16_native(bus, v);
     }
 
     fn per<B: Bus>(&mut self, bus: &mut B) {
         let rel = self.fetch_u16(bus) as i16;
         self.io(bus); // PER internal cycle (ares PushEffectiveRelativeAddress)
         let target = self.pc.wrapping_add_signed(rel);
-        self.push_u16_native(bus, target);
+        self.last_push_u16_native(bus, target);
     }
 }
 
