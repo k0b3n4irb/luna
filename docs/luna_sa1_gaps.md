@@ -118,8 +118,10 @@ vectored through CIV/CNV and a SA-1 `WAI` could only end by polling.
 (#5's ✅ above was only proven up to the line — its tests asserted
 `sa1_irq_line()`, not delivery.)
 
-Now, at every SA-1 instruction boundary (ares `SA1::lastCycle`, Mesen2
-`Sa1::ProcessInterrupts`):
+Now, at every SA-1 instruction's **last cycle** — the poll one cycle
+before its final bus access, which is where ares puts `SA1::lastCycle`
+(2026-09-20; it was the instruction boundary before, see
+[`luna_65c816_gaps.md`](luna_65c816_gaps.md) #1):
 
 - **IRQ** is a level through CIV: S-CPU request (CFR flag **and** the
   live CCNT bit 7 — both refs drop the request when CCNT is rewritten

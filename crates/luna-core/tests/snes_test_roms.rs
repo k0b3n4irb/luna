@@ -1332,7 +1332,7 @@ game_test!(
     game_starfox,
     "Star Fox (USA) (Rev 2).sfc",
     1939,
-    "df7bd17642d3371151fc32c0326840ea1a765a5f86126035fa30fb485bc6a58f"
+    "f2898571d973c0c265b27f21ac3d186f8b78cbcf05b688127bfaa9bd4413e1e3"
 );
 game_test!(
     game_stuntfx,

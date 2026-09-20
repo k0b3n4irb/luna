@@ -29,15 +29,30 @@ difference a player would see.
 
 ## A worked example: interrupt delivery
 
-Luna takes interrupts at the instruction boundary rather than at a per-cycle
-poll point — a documented simplification. Is it observable?
+Luna used to sample interrupts at the instruction boundary rather than one
+cycle earlier, where the references sample them — a documented simplification.
+Is it observable?
 
-The harness answers directly. A reference trace of the NMI vector fetches on
+The harness answered directly. A reference trace of the NMI vector fetches on
 *Doom* over 300 frames, compared against Luna's, showed the **same ~47
 deliveries** and the **same ~357,366-master-clock inter-NMI cadence**, jitter
-distribution included. The conclusion is evidence, not hope: Luna's interrupt
-model is cycle-correct at the observable level, and a per-cycle-poll rewrite
-would be a theoretical refinement below the measurement floor.
+distribution included. So the simplification was below the measurement floor on
+that title, and the rewrite was deprioritised rather than skipped.
+
+It was done in the end (2026-09, gaps #1 and #2), and the sequel is the more
+useful half of the lesson. Reading both references in full showed the rewrite
+was not a rewrite at all: **neither emulator interrupts mid-instruction**, so
+only the sampling point had to move — 101 markers and one bus hook. *Doom*
+still renders byte-identically, exactly as the harness predicted. What the
+harness could not have told us is that the change would expose a real bug
+elsewhere: Luna raised the `I` mask at the end of the interrupt frame instead
+of before the vector fetch, which was harmless until the poll moved onto that
+fetch and the handler began re-entering itself forever.
+
+Two things to take from that. A measurement that says "unobservable here" is
+evidence about the titles measured, not a proof of equivalence. And a faithful
+port pays off even when the thing it fixes was invisible, because the next
+change is written against a model that matches the reference.
 
 That is the method working as designed — sometimes it *refutes* Luna and points
 at the fix; here it *confirmed* Luna and saved a risky rewrite. Either way the
