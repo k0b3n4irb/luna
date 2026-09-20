@@ -36,29 +36,27 @@ pub struct Cpu {
     pub stopped: bool,
     /// Set by `WAI`; CPU pauses until an interrupt.
     pub waiting: bool,
-    /// Edge-latched NMI line. Set externally via [`Cpu::trigger_nmi`]
-    /// (typically by the system at `VBlank` when NMITIMEN.7 is on);
-    /// cleared automatically when the CPU services the NMI sequence at
-    /// the next instruction boundary.
+    /// NMI latched for servicing at the next instruction boundary.
+    ///
+    /// Set by [`Cpu::last_cycle`] — the poll one cycle before the
+    /// running instruction's final bus access (ares `status.nmiPending`,
+    /// set from `nmiTest()`). Consumed when the NMI sequence runs.
     pub pending_nmi: bool,
-    /// Edge-latched IRQ line. Set externally via [`Cpu::trigger_irq`]
-    /// (by the scheduler when an H- or V-timer match fires, gated by
-    /// NMITIMEN bits 5:4); cleared automatically when the CPU
-    /// services the IRQ at an instruction boundary, IF the `I` flag
-    /// allows it. NMI always wins over IRQ.
+    /// IRQ latched for servicing at the next instruction boundary.
+    ///
+    /// Set by [`Cpu::last_cycle`] and **already filtered by the `I`
+    /// mask** — the poll reads `I` as it stands one cycle before the
+    /// instruction ends (ares `irqTest()` returns `!r.p.i`), so the
+    /// boundary only consumes this latch and never re-decides. That is
+    /// what gives `CLI` / `SEI` / `PLP` their one-instruction
+    /// recognition delay.
+    ///
+    /// Both the H/V timer and a coprocessor `/IRQ` reach it through the
+    /// same poll. A held line (SA-1 / Super FX until the program acks,
+    /// the H/V level until `$4211` is read) simply re-qualifies at the
+    /// next poll, where `I` is now set by the interrupt sequence — which
+    /// is why one device IRQ can no longer be serviced twice.
     pub pending_irq: bool,
-    /// **Level**-sensitive IRQ line, distinct from the edge-latched
-    /// [`Cpu::pending_irq`]. A coprocessor (Super FX / SA-1) holds the
-    /// S-CPU `/IRQ` pin asserted until the program acknowledges it
-    /// (Super FX: read `$3031`; SA-1: write `$2200` SIC) — that is a
-    /// *level*, not an edge. The bus re-samples it every instruction via
-    /// [`Cpu::set_irq_line`] (set AND clear), so once the device
-    /// deasserts there is nothing left pending. Modelling it as a sticky
-    /// edge on `pending_irq` re-armed the latch *during* the handler
-    /// (while `I` masked it) and then double-serviced one IRQ after the
-    /// `RTI` — the Star Fox object-flag corruption. Service consumes
-    /// `pending_irq` but never this line; the device clears it.
-    pub irq_line: bool,
     /// Per-instruction latch: when set, a 16-bit data access wraps its
     /// high byte within bank 0 (ares `readDirect`/`readStack`, masked to
     /// `n16`) instead of carrying into the next bank (ares `readBank`).
@@ -103,7 +101,6 @@ impl Cpu {
             waiting: false,
             pending_nmi: false,
             pending_irq: false,
-            irq_line: false,
             bank0_wrap: false,
             wdm_log: None,
         }
@@ -130,34 +127,23 @@ impl Cpu {
         }
     }
 
-    /// Latch an NMI for servicing at the next instruction boundary.
+    /// Latch an NMI directly, bypassing the poll.
     ///
-    /// Idempotent: calling this when `pending_nmi` is already `true`
-    /// has no effect (NMI is edge-triggered on the 65C816).
+    /// Production interrupts arrive through [`Cpu::last_cycle`]; this is
+    /// for tests and for a standalone consumer whose bus has no
+    /// interrupt source of its own. Idempotent — NMI is edge-triggered.
     pub const fn trigger_nmi(&mut self) {
         self.pending_nmi = true;
     }
 
-    /// Latch the PPU H/V-counter IRQ (NMITIMEN bits 5:4) for servicing
-    /// at the next instruction boundary, gated by the `I` mask flag.
-    /// This `pending_irq` edge-latch covers the internal H/V timer
-    /// source; the bus clears it when `$4211 TIMEUP` is read or the
-    /// match condition lapses. The **coprocessor** `/IRQ` is modelled
-    /// separately as a level line — see [`Cpu::set_irq_line`] /
-    /// [`Cpu::irq_line`], which prevents a single coprocessor IRQ from
-    /// being serviced twice.
+    /// Latch an IRQ directly, bypassing the poll.
+    ///
+    /// Production interrupts arrive through [`Cpu::last_cycle`]; this is
+    /// for tests and for a standalone consumer whose bus has no
+    /// interrupt source of its own. It does **not** apply the `I` mask —
+    /// the caller is asserting "this IRQ is to be taken".
     pub const fn trigger_irq(&mut self) {
         self.pending_irq = true;
-    }
-
-    /// Sample the **level**-sensitive coprocessor `/IRQ` line. Called by
-    /// the bus every instruction with the device's *current* line state,
-    /// so the line is set when asserted and cleared as soon as the device
-    /// deasserts (Super FX `$3031` read / SA-1 SIC). Unlike
-    /// [`Cpu::trigger_irq`] this never sticks — that is what prevents one
-    /// coprocessor IRQ from being serviced twice. See [`Cpu::irq_line`].
-    pub const fn set_irq_line(&mut self, asserted: bool) {
-        self.irq_line = asserted;
     }
 
     /// Perform a reset sequence: read the reset vector at `$00:FFFC` and

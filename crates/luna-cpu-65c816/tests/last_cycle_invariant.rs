@@ -45,12 +45,6 @@ impl Bus for CountingBus {
         self.polls += 1;
         InterruptSample::NONE
     }
-    fn nmi_pending(&self) -> bool {
-        false
-    }
-    fn irq_pending(&self) -> bool {
-        false
-    }
 }
 
 /// One CPU configuration to run every opcode under.

@@ -121,7 +121,11 @@ pub enum ApiError {
 /// bump retires those; `save_state_shape_is_pinned_to_the_version` now
 /// fails whenever the serialized shape moves without one. v6 also carries
 /// the Super Multitap (`CpuRegs::multitap`, `joypad_tap`, `joypad3/4_latched`).
-pub const SAVE_STATE_VERSION: u32 = 6;
+/// v7 (2026-09): `Cpu::irq_line` is gone. The 65C816 now samples both
+/// interrupt lines at the instruction's last cycle (ares `lastCycle()`),
+/// so the CPU no longer keeps its own copy of the coprocessor / H-V
+/// level — the bus reports it at the poll instead.
+pub const SAVE_STATE_VERSION: u32 = 7;
 
 /// On-disk / on-wire save-state container produced by
 /// [`Emulator::save_state`]. `core` is the bincode-encoded `Snes` (the
