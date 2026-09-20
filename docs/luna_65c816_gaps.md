@@ -33,6 +33,7 @@ byte-for-byte against ares.
 - 🟠 accuracy gap that can affect timing-sensitive software
 - 🟡 precision / cycle-exactness, low real-world impact
 - 🟢 verified correct (do not regress) / intentional non-gap
+- 🔧 was wrong, now fixed (kept for the record)
 
 ---
 
@@ -117,7 +118,7 @@ stays green), but each is a cycle-accuracy deviation from ares' per-cycle
 |---|-----|-----|----------|------|
 | 1 | 🟠 | **Interrupt poll granularity.** NMI/IRQ are recognized only at the *start of the next* `step()`, never mid-instruction. ares polls at the precise last cycle of the instruction in progress. | `instruction.cpp` `L`/`idleIRQ`, `sfc/cpu/irq.cpp` | `opcodes.rs:74-91` (boundary only) |
 | 2 | 🟡 | **Interrupt-enable delay quirk.** Real 65xx delays interrupt *recognition* one instruction after `CLI`/`SEI`/`PLP` change `I`. luna uses the post-instruction `I` at the next boundary, so a pending IRQ after `CLI` is taken one instruction early. | poll point vs flag write order | `opcodes.rs:84` reads current `I` |
-| 3 | 🟡 | **Dummy bus cycles in the interrupt sequence.** ares `interrupt()` does `read(PC.d); idle();` before the pushes and `idleJump()` after; luna omits these (timing delegated to the bus). Affects open-bus/MDR and exact cycle counts, not state. | `instruction.cpp:2-3,13` | `service_software_interrupt` |
+| 3 | 🔧 | **Dummy bus cycles in the interrupt sequence** — **fixed 2026-09-19** (`d117412`, shipped in v1.25.0). ares `interrupt()` opens with `read(PC.d); idle();` before the pushes; luna omitted both, so a hardware NMI/IRQ took 6 bus cycles in native mode where hardware takes 8 — every handler started 14 mclk early. `hardware_interrupt_entry` now performs them, called from `service_nmi`/`service_irq` only (BRK/COP correctly keep the short sequence). The trailing `idleJump()` is owed nothing: it is an empty virtual in `wdc65816.hpp:12` that the SNES CPU never overrides. This was the root cause of PPU gap #7b (HiColor128, now pixel-exact). | `instruction.cpp:1-14`, `wdc65816.hpp:12` | `opcodes.rs` `hardware_interrupt_entry`; test `hardware_interrupts_spend_two_cycles_brk_does_not` |
 | 4 | 🟡 | **WAI resume granularity.** luna advances the bus in fixed `WAI_TICK_MCYCLES` (8 mclk) chunks while waiting, so wake latency is quantized rather than single-cycle. Harmless for the `WAI; BRA -3` VBlank idiom. | single `idle()` loop | `opcodes.rs:58` |
 
 ---
@@ -138,4 +139,6 @@ point fixes.
 1. 🟠 #1 interrupt poll granularity — the highest-value item, but it
    implies threading a cycle position through the instruction core (a
    structural change, not a patch).
-2. 🟡 #2–#4 — only meaningful once #1 exists; low real-world return.
+2. 🟡 #2 and #4 — only meaningful once #1 exists; low real-world return.
+   (#3 is closed — it was a self-contained sequence fix, not a
+   cycle-position one, which is why it landed without #1.)
