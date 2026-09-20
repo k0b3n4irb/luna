@@ -42,7 +42,7 @@ pub mod types;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
 
-pub use bus::{Bus, BusDevice};
+pub use bus::{Bus, BusDevice, InterruptSample};
 pub use mapper::{
     Dsp1Snapshot, Dsp1TraceEvent, Dsp1TraceKind, Mapper, MapperKind, MapperStateError, NullMapper,
     Sa1SideEvent, Sa1Snapshot, Sa1TraceEvent, SuperFxTraceEvent, check_state_len, decode_state,
