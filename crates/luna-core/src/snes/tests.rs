@@ -431,6 +431,17 @@ fn late_nmi_enable_fires_when_line_asserted() {
     snes.nmi_pending = false;
     snes.step(); // LDA #$80
     snes.step(); // STA $4200 — the 0→1 raise
+    assert!(
+        snes.nmi_pending,
+        "late NMITIMEN.7 enable raises the NMI line"
+    );
+    // The CPU has not seen it yet, and must not: the poll that decides
+    // this instruction's interrupt runs one cycle BEFORE its final access
+    // (ares `lastCycle()`), and that final access is the `$4200` write
+    // itself. So the raise is picked up by the NEXT instruction's poll —
+    // the same one-instruction delay ares has.
+    assert!(!snes.cpu.pending_nmi, "not sampled by the write's own poll");
+    snes.step(); // STP — its poll samples the line
     assert!(snes.cpu.pending_nmi, "late NMITIMEN.7 enable fires the NMI");
 }
 

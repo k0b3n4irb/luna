@@ -14,7 +14,8 @@ use luna_bus::sa1::Sa1Mapper;
 use luna_bus::sdd1::Sdd1Mapper;
 use luna_bus::superfx::SuperFxMapper;
 use luna_bus::{
-    Addr24, Bus, MCycles, Mapper, MapperKind, address_speed, bank_of, make_addr, offset_of,
+    Addr24, Bus, InterruptSample, MCycles, Mapper, MapperKind, address_speed, bank_of, make_addr,
+    offset_of,
 };
 use luna_cartridge::Cartridge;
 use luna_cpu_65c816::Cpu;
@@ -1322,9 +1323,7 @@ impl Snes {
         // `Cpu::step`), which is CPU work.
         let idle_kind = if self.cpu.stopped {
             Some(MclkKind::CpuStp)
-        } else if self.cpu.waiting
-            && !(self.cpu.pending_nmi || self.cpu.pending_irq || self.cpu.irq_line)
-        {
+        } else if self.cpu.waiting && !self.interrupt_line_asserted() {
             Some(MclkKind::CpuWai)
         } else {
             None
@@ -1377,45 +1376,26 @@ impl Snes {
         // tick) *and* again by this lump, running it ~2× too fast
         // through DMA-heavy code.
 
-        // Sample the coprocessor's level-driven IRQ line into the CPU's
-        // dedicated *level* input (ares `coprocessor/sa1/io.cpp:134-163`,
-        // Super FX `coprocessor/superfx/io.cpp:18-22`): the device holds
-        // the S-CPU IRQ pin until the program acks (Super FX `$3031` read,
-        // SA-1 SIC), so this is a level, not an edge. Sampling it fresh
-        // each instruction (set AND clear) — rather than re-arming the
-        // sticky `pending_irq` — means a single coproc IRQ is serviced
-        // exactly once: re-arming `pending_irq` while `I` masked the
-        // handler used to leave a stale latch that double-serviced after
-        // the `RTI`, corrupting Star Fox's object table.
-        //
-        // The **H/V-timer IRQ is also a level**, not an edge (ares
-        // `cpu/irq.cpp`: `status.irqLine` held until `timeup()`/$4211 read;
-        // Mesen2 `_irqFlag` -> `SetIrqSource(Ppu)` held until `ClearIrqSource`).
-        // `cpu_regs.irq_flag` IS that level — raised at the H/V coincidence in
-        // `poll_hv_irq`, lowered when the program reads $4211. Sampling it into
-        // the CPU's level input (instead of the old one-shot `pending_irq`
-        // edge) means an H/V IRQ that fires while `I` is masked is HELD and
-        // serviced the moment `I` clears, never lost. Doom chains H+V IRQs
-        // (re-arming VTIME) to write INIDISP every frame; the edge model
-        // dropped ~64% of those writes -> its letterbox border flickered.
-        self.cpu
-            .set_irq_line(self.cpu_regs.irq_flag || self.mapper.coproc_main_irq_pending());
-
-        // Apply interrupt edges the scanline scheduler latched during this
-        // instruction's bus accesses. Deferring the CPU poke to the
-        // instruction boundary keeps NMI/IRQ delivery timing identical to
-        // the old end-of-step model — the CPU only services interrupts
-        // between instructions anyway.
-        if self.nmi_pending {
-            self.nmi_pending = false;
-            self.cpu.trigger_nmi();
-        }
-        if self.irq_pending {
-            self.irq_pending = false;
-            self.cpu.trigger_irq();
-        }
+        // Nothing is poked into the CPU here any more. Both interrupt
+        // lines reach it through `SnesBus::last_cycle` — the poll one
+        // cycle before the running instruction's final bus access, which
+        // is where ares samples them. Delivering at this boundary instead
+        // let an interrupt that arrived during the final access in up to
+        // a whole instruction early.
 
         consumed
+    }
+
+    /// Is any interrupt line asserted right now?
+    ///
+    /// Used only to classify a parked `WAI` tick as idle or CPU time
+    /// (issue #223) — the lines themselves reach the CPU through
+    /// [`SnesBus::last_cycle`].
+    fn interrupt_line_asserted(&self) -> bool {
+        self.nmi_pending
+            || self.irq_pending
+            || self.cpu_regs.irq_flag
+            || self.mapper.coproc_main_irq_pending()
     }
 
     /// Advance the scanline scheduler by `mcycles` without executing an
@@ -1460,14 +1440,9 @@ impl Snes {
         self.mcycles_in_line = rb_mil;
         self.frame_count = rb_fc;
         self.nmis_serviced = rb_ns;
-        if self.nmi_pending {
-            self.nmi_pending = false;
-            self.cpu.trigger_nmi();
-        }
-        if self.irq_pending {
-            self.irq_pending = false;
-            self.cpu.trigger_irq();
-        }
+        // No CPU poke: an edge latched while no instruction was running
+        // stays latched, and the next instruction's `last_cycle` poll
+        // picks it up.
     }
 
     /// Set the live joypad state for controller `idx` (0 = pad 1,
@@ -2385,10 +2360,9 @@ impl SnesBus<'_> {
     /// Raise the held H/V-IRQ level (ares `status.irqLine`, Mesen
     /// `_irqFlag`) and stamp the raise clock for the `$4211` hold window.
     /// `irq_flag` stays set until the program reads `$4211`; the CPU
-    /// samples it as a *level* via `set_irq_line` at each instruction
-    /// boundary, so the IRQ is never lost to `I`-masking the way the old
-    /// one-shot edge was (it coalesced/dropped ~64% of Doom's chained
-    /// H+V writes).
+    /// samples it as a *level* in `SnesBus::last_cycle`, so the IRQ is
+    /// never lost to `I`-masking the way the old one-shot edge was (it
+    /// coalesced/dropped ~64% of Doom's chained H+V writes).
     fn raise_hv_irq(&mut self, raise_mclk: u64) {
         self.cpu_regs.irq_flag = true;
         self.cpu_regs.irq_raise_mclk = raise_mclk;
@@ -2602,13 +2576,36 @@ impl Bus for SnesBus<'_> {
     fn io_cycle(&mut self, mcycles: MCycles) {
         self.advance_time(mcycles, true);
     }
-    fn nmi_pending(&self) -> bool {
-        *self.nmi
-    }
-    fn irq_pending(&self) -> bool {
-        // H/V-timer IRQ is the held level `cpu_regs.irq_flag` (no longer the
-        // one-shot `*self.irq` edge); coproc holds its own level line.
-        *self.irq || self.cpu_regs.irq_flag || self.mapper.coproc_main_irq_pending()
+    fn last_cycle(&mut self, i_flag: bool) -> InterruptSample {
+        // ares `CPU::lastCycle()` (`sfc/cpu/irq.cpp:88-93`), which is
+        // `nmiTest()` + `irqTest()`:
+        //
+        // - `nmiTest()` consumes `status.nmiTransition`. luna's edge is
+        //   `Snes::nmi_pending`, raised by the scanline scheduler at
+        //   VBlank entry when NMITIMEN.7 allows it.
+        // - `irqTest()` consumes `status.irqTransition` but also sees the
+        //   held `r.irq` pin, so a line still asserted re-qualifies at
+        //   every poll. luna's held lines are `cpu_regs.irq_flag` (H/V
+        //   timer, until `$4211` is read) and the coprocessor's own line.
+        // - Both clear `r.wai` **before** the `I` check, so a masked IRQ
+        //   still ends a `WAI` without entering the handler.
+        //
+        // ares' `status.irqLock` is deliberately not ported: it is set on
+        // a `$4200` write and after a DMA burst, but `CPU::step()` clears
+        // it at its top and every access and DMA step calls `step()`, so
+        // it is always 0 by the time any `lastCycle()` runs. (Mesen2's
+        // equivalent IS live — a one-cycle delay after DMA. That is a
+        // real divergence between the references; we follow ares here and
+        // track it as its own row.)
+        let nmi = std::mem::replace(self.nmi, false);
+        let edge = std::mem::replace(self.irq, false);
+        let line = self.cpu_regs.irq_flag || self.mapper.coproc_main_irq_pending();
+        let irq = edge || line;
+        InterruptSample {
+            nmi,
+            irq: irq && !i_flag,
+            wake: nmi || irq,
+        }
     }
 }
 

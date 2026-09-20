@@ -84,12 +84,6 @@ pub trait Bus {
     fn last_cycle(&mut self, _i_flag: bool) -> InterruptSample {
         InterruptSample::NONE
     }
-
-    /// Returns whether an NMI is currently latched as pending.
-    fn nmi_pending(&self) -> bool;
-
-    /// Returns whether an IRQ is currently asserted (and unmasked).
-    fn irq_pending(&self) -> bool;
 }
 
 /// A component that responds to a memory-mapped region (PPU, DMA, APU

@@ -191,7 +191,7 @@ fn save_state_shape_is_pinned_to_the_version() {
             .unwrap();
     assert_eq!(
         (SAVE_STATE_VERSION, bundle.core.len(), bundle.mapper.len()),
-        (6, 447_759, 8_195),
+        (7, 447_758, 8_195),
         "serialized machine shape changed — see this test's doc comment"
     );
 }

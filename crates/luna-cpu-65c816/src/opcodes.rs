@@ -75,9 +75,13 @@ impl Cpu {
             // check); I only gates whether the vector is taken. Games
             // that `SEI; WAI; BRA -3` rely on exactly that.
             self.last_cycle(bus);
-            if self.pending_nmi || self.pending_irq || self.irq_line {
+            // The poll clears `waiting` itself when it sees a transition;
+            // a latch set by other means (`trigger_nmi` from a host whose
+            // bus has no interrupt source) ends the wait too.
+            if self.pending_nmi || self.pending_irq {
                 self.waiting = false;
-            } else {
+            }
+            if self.waiting {
                 bus.io_cycle(WAI_TICK_MCYCLES);
                 return;
             }
@@ -102,14 +106,13 @@ impl Cpu {
             }
             return;
         }
-        // IRQ is checked after NMI (NMI always wins) and only fires
-        // when the `I` mask flag is clear. Two sources: the edge-latched
-        // `pending_irq` (H/V timer) and the level-sensitive `irq_line`
-        // (coprocessor, held until the program acks). Servicing consumes
-        // only the edge latch — the device controls the level line, so a
-        // still-asserted coproc line correctly re-fires while an acked one
-        // does not (no double-service).
-        if (self.pending_irq || self.irq_line) && !self.p.contains(bit::I) {
+        // IRQ is checked after NMI (ares `main()`: NMI always wins). The
+        // `I` mask was already applied at the poll, so there is nothing
+        // left to decide here — only a latch to consume. A device that
+        // still holds its line re-qualifies at the next poll, where `I`
+        // is now set by this very sequence, so one IRQ is never serviced
+        // twice.
+        if self.pending_irq {
             self.pending_irq = false;
             self.service_irq(bus);
             if self.e {
@@ -1189,6 +1192,15 @@ impl Cpu {
                 self.p.bits() & !0x10 // B clear for hardware-style IRQ/COP
             };
             self.push_u8(bus, pushed_p);
+            // ares `interrupt()` sets `IF = 1; DF = 0;` **before** the
+            // vector fetch, and the fetch's high byte is the `L` poll. So
+            // by the time this instruction samples the lines, the mask it
+            // just raised is already in effect — which is what stops a
+            // still-asserted level (an H/V IRQ the handler has yet to ack
+            // at `$4211`) from re-latching itself here and re-entering the
+            // handler forever.
+            self.p.remove(bit::D);
+            self.p.insert(bit::I);
             let lo = bus.read(make_addr(0, vec_emulation));
             let hi = self.last_read8(bus, make_addr(0, vec_emulation.wrapping_add(1)));
             self.pc = u16::from(lo) | (u16::from(hi) << 8);
@@ -1197,13 +1209,15 @@ impl Cpu {
             self.push_u8(bus, self.pb);
             self.push_u16(bus, self.pc);
             self.push_u8(bus, self.p.bits());
+            // See the emulation branch: the mask goes up before the
+            // vector fetch, because that fetch carries the poll.
+            self.p.remove(bit::D);
+            self.p.insert(bit::I);
             let lo = bus.read(make_addr(0, vec_native));
             let hi = self.last_read8(bus, make_addr(0, vec_native.wrapping_add(1)));
             self.pc = u16::from(lo) | (u16::from(hi) << 8);
         }
         self.pb = 0;
-        self.p.remove(bit::D);
-        self.p.insert(bit::I);
     }
 
     // ===================================================================
@@ -3591,16 +3605,92 @@ mod tests {
     }
 
     #[test]
-    fn irq_is_masked_when_i_flag_set() {
-        let (mut cpu, mut bus) = run(&[0xEA]); // NOP
-        bus.poke_slice(0x00_FFFE, &[0x00, 0x80]);
+    fn the_i_flag_masks_the_irq_at_the_poll_not_at_the_boundary() {
+        // ares `irqTest()` returns `!r.p.i` — the mask is applied where
+        // the line is sampled, one cycle before the instruction ends. A
+        // masked line therefore never becomes pending at all; it is not
+        // "latched but held back".
+        let (mut cpu, mut bus) = run(&[0xEA, 0xEA, 0xEA]); // NOP NOP NOP
+        bus.poke_slice(0x00_FFFE, &[0x00, 0x90]);
+        bus.set_irq(true); // the device holds its line asserted
         cpu.p.insert(bit::I);
-        cpu.trigger_irq();
+
         let pc_before = cpu.pc;
         cpu.step(&mut bus);
-        // The NOP ran, the IRQ stayed pending.
-        assert_eq!(cpu.pc, pc_before.wrapping_add(1));
-        assert!(cpu.pending_irq, "still latched while I masks it");
+        assert_eq!(cpu.pc, pc_before.wrapping_add(1), "the NOP ran");
+        assert!(!cpu.pending_irq, "a masked line is not latched");
+
+        // The line is still held, so the next poll — now with I clear —
+        // takes it. Nothing was lost in between.
+        cpu.p.remove(bit::I);
+        cpu.step(&mut bus);
+        assert!(cpu.pending_irq, "the held line re-qualifies once unmasked");
+        cpu.step(&mut bus);
+        assert_eq!(cpu.pc, 0x9000, "and is serviced at the next boundary");
+    }
+
+    #[test]
+    fn cli_does_not_unmask_an_irq_for_its_own_instruction() {
+        // The one-instruction recognition delay, which neither reference
+        // implements with a counter: ares `instructionClearFlag` is
+        // `L idleIRQ(); flag = 0;`, so the poll runs while `I` is still
+        // set and the pending line cannot be taken at the end of the CLI.
+        let (mut cpu, mut bus) = run(&[0x58, 0xEA, 0xEA]); // CLI NOP NOP
+        bus.poke_slice(0x00_FFFE, &[0x00, 0x90]);
+        bus.set_irq(true); // a device holds its line asserted
+        cpu.p.insert(bit::I);
+
+        cpu.step(&mut bus); // CLI
+        assert!(!cpu.p.contains(bit::I), "CLI cleared I");
+        assert!(
+            !cpu.pending_irq,
+            "but its own poll ran before that, with I still set"
+        );
+
+        cpu.step(&mut bus); // NOP — the first poll that sees I clear
+        assert!(cpu.pending_irq, "taken one instruction later");
+    }
+
+    #[test]
+    fn sei_does_not_mask_an_irq_its_own_poll_already_saw() {
+        // The mirror image, and the reason the delay is not a "delay":
+        // `SEI` polls before raising the mask, so an IRQ recognised there
+        // is serviced even though `I` is set by the time the boundary
+        // comes round.
+        let (mut cpu, mut bus) = run(&[0x78, 0xEA]); // SEI NOP
+        bus.poke_slice(0x00_FFFE, &[0x00, 0x90]);
+        bus.set_irq(true);
+        cpu.p.remove(bit::I);
+
+        cpu.step(&mut bus); // SEI
+        assert!(cpu.p.contains(bit::I), "SEI set I");
+        assert!(cpu.pending_irq, "its poll ran before the mask went up");
+
+        cpu.step(&mut bus);
+        assert_eq!(cpu.pc, 0x9000, "so the IRQ is still taken");
+    }
+
+    #[test]
+    fn the_interrupt_sequence_masks_itself_before_its_vector_fetch() {
+        // ares `interrupt()` raises `IF` before `PC.l = read(vector)`, and
+        // the vector's high byte carries the `L` poll. Without that order
+        // a still-asserted level re-latches inside its own entry sequence
+        // and the handler is re-entered forever (it stormed every
+        // IRQ-driven golden when luna raised `I` at the end instead).
+        let (mut cpu, mut bus) = run(&[0xEA, 0xEA]);
+        bus.poke_slice(0x00_FFFE, &[0x00, 0x90]);
+        bus.set_irq(true); // held, as an unacked H/V or coprocessor line
+        cpu.p.remove(bit::I);
+
+        cpu.step(&mut bus); // NOP — latches the IRQ
+        assert!(cpu.pending_irq);
+        cpu.step(&mut bus); // the interrupt sequence
+        assert_eq!(cpu.pc, 0x9000, "entered the handler");
+        assert!(cpu.p.contains(bit::I), "I is up");
+        assert!(
+            !cpu.pending_irq,
+            "and the sequence's own poll did not re-latch the held line"
+        );
     }
 
     #[test]
