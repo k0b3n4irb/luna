@@ -6,14 +6,18 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
-### Fixed
-- **HiColor128 is pixel-exact (gap #7b closed).** Peter Lemon's
+### Verified
+- **HiColor128 is pixel-exact — gap #7b is closed.** Peter Lemon's
   HiColor128PerTileRow chart now matches its hardware reference pixel for
-  pixel (was 11 % exact / "91 %" by the tolerant metric). The residual was
-  never in the PPU or DMA: the chart drives its palette DMA from an H-IRQ,
-  and luna entered every hardware interrupt two cycles (14 master clocks)
-  early — the 65C816 fix already shipped in v1.25.0. Measured at frames 60,
-  120 and 300; the tripwire test is now a regular golden.
+  pixel (was 11 % exact, "91 %" by the tolerant metric). Nothing shipped
+  here to make that happen: the cause was the 65C816 interrupt-entry
+  correction **already released in 1.25.0**. The chart drives its palette
+  DMA from an H-IRQ, so entering every hardware interrupt two cycles
+  (14 master clocks) early shifted alternate 8-line bands' bursts by a
+  line — the PPU and the DMA controller were never at fault. Only the
+  proof came afterwards: bisection pinned that single commit as the whole
+  residual, so the chart's tripwire is promoted from `#[ignore]` to a
+  regular golden (checked at frames 60, 120 and 300).
 
 ## [1.25.0] — 2026-09-19
 
