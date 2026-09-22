@@ -92,8 +92,9 @@ Rows #1-#12 and #14 are ✅/🔧. What remains — no known game impact:
 > **pixel-exact vs their hardware reference PNGs** (36/42 improved).
 > A DMA B-bus write that lands mid-line also partial-flushes the
 > in-progress row with the pre-write state (the CPU-path G6 flush,
-> mirrored in `DmaBusView::write_b`). Residual: per-BYTE clock advance
-> within one burst (HiColor128's second per-line DMA, gap #7b).
+> mirrored in `DmaBusView::write_b`). The suspected residual (per-BYTE
+> clock advance within one burst, HiColor128, gap #7b) was not a DMA issue:
+> #7b closed 2026-09-19 with the 65C816 interrupt-entry fix (d117412).
 
 ### The original 2026-06-17 deferral (historical — root cause was the line origin)
 

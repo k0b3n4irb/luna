@@ -64,8 +64,9 @@ pub fn parse_port_device(name: &str) -> Result<PortDevice, String> {
         "mouse" => Ok(PortDevice::Mouse),
         "superscope" => Ok(PortDevice::SuperScope),
         "multitap" => Ok(PortDevice::Multitap),
+        "none" | "empty" | "unplugged" => Ok(PortDevice::None),
         other => Err(format!(
-            "unknown device `{other}` (pad, mouse, superscope, multitap)"
+            "unknown device `{other}` (pad, mouse, superscope, multitap, none)"
         )),
     }
 }
@@ -99,6 +100,10 @@ pub enum ApiError {
     /// PNG encoding failed during `render_frame`.
     #[error("image: {0}")]
     Image(#[from] image::ImageError),
+    /// A coprocessor-firmware file was refused: wrong size, unreadable, or
+    /// it would have replaced a working install with a broken one.
+    #[error("firmware: {0}")]
+    Firmware(String),
     /// Generic I/O.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -121,7 +126,11 @@ pub enum ApiError {
 /// bump retires those; `save_state_shape_is_pinned_to_the_version` now
 /// fails whenever the serialized shape moves without one. v6 also carries
 /// the Super Multitap (`CpuRegs::multitap`, `joypad_tap`, `joypad3/4_latched`).
-pub const SAVE_STATE_VERSION: u32 = 6;
+/// v7 (2026-09): `Cpu::irq_line` is gone. The 65C816 now samples both
+/// interrupt lines at the instruction's last cycle (ares `lastCycle()`),
+/// so the CPU no longer keeps its own copy of the coprocessor / H-V
+/// level — the bus reports it at the poll instead.
+pub const SAVE_STATE_VERSION: u32 = 7;
 
 /// On-disk / on-wire save-state container produced by
 /// [`Emulator::save_state`]. `core` is the bincode-encoded `Snes` (the
@@ -271,6 +280,35 @@ pub struct Sa1State {
     pub running: bool,
 }
 
+/// How deep the stack ever reached, and where.
+///
+/// This is a *reach*, not simply the smallest `S` ever seen: only an
+/// instruction that **lowered** `S` — a push — can move the mark, and only
+/// while the CPU is in native mode.
+///
+/// Both rules earn their place. Emulation mode confines `S` to page 1 in
+/// hardware, a régime whose absolute value says nothing about a native
+/// stack. And every ROM carries `S = $01FF` out of reset into native mode
+/// until `TXS` installs the real stack, so counting a value the program
+/// merely inherited would pin the mark at `$01FF` for the whole run —
+/// below any floor worth checking, and never actually reached by a push.
+///
+/// A run that never pushes in native mode reports `None`.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct StackLow {
+    /// Lowest `S` observed, i.e. the deepest the stack ever reached.
+    pub sp: u16,
+    /// Full 24-bit PC of the instruction that took it there (numeric, like
+    /// [`ProfileEntry::addr`]).
+    pub pc: u32,
+    /// PPU frame it happened on.
+    pub frame: u64,
+    /// `.sym` label covering `pc`, when a symbol table is loaded. Filled in
+    /// when the figure is reported, not while the run is measuring it —
+    /// "which routine went deepest" is the question this answers.
+    pub symbol: Option<String>,
+}
+
 /// 65C816 register snapshot.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct CpuState {
@@ -298,6 +336,14 @@ pub struct CpuState {
     pub stopped: bool,
     /// `true` after WAI, until an interrupt arrives.
     pub waiting: bool,
+    /// Deepest `S` reached since the last reset / watermark clear, with the
+    /// instruction and frame that reached it (native mode only — see
+    /// [`StackLow`]). `None` before any native-mode instruction has run.
+    ///
+    /// A link-time RAM budget can only guess how much stack a program
+    /// needs; this is what it actually used, so "stack vs globals" becomes
+    /// a CI check instead of a debugging session.
+    pub sp_min: Option<StackLow>,
 }
 
 /// SPC700 (audio CPU) register snapshot — the APU-core analogue of
@@ -1050,6 +1096,13 @@ pub struct Emulator {
     snes: Option<Snes>,
     rom_info: Option<RomInfo>,
     instructions_executed: u64,
+    /// Deepest native-mode stack reach since the last clear (`OpenSNES`
+    /// R3). Sampled at every instruction boundary, which is exact: no
+    /// 65C816 instruction pushes and then pulls within itself, so `S` is
+    /// monotonic across one instruction and the boundary minimum IS the
+    /// true minimum. It lives here rather than in `Snes` so the save-state
+    /// shape is untouched — a measurement of the run, not of the machine.
+    stack_low: Option<StackLow>,
     /// Stable hash of the loaded ROM bytes, captured at `load_rom` time.
     /// A save state records this so [`Emulator::load_state`] can refuse a
     /// state produced against a different ROM.
@@ -1172,6 +1225,7 @@ impl Emulator {
             snes: None,
             rom_info: None,
             instructions_executed: 0,
+            stack_low: None,
             rom_hash: 0,
             symbols: None,
             search_session: None,
@@ -1253,13 +1307,50 @@ impl Emulator {
     /// prompt; afterwards `load_rom` finds it automatically. `target` picks
     /// the destination filename (e.g. `"dsp1b.rom"`).
     pub fn install_firmware(src: &Path, target: &str) -> Result<std::path::PathBuf, ApiError> {
+        // Read and vet the source BEFORE touching the destination. The
+        // previous `fs::copy` took whatever it was given: a shell variable
+        // that expanded to an existing but empty file replaced a good
+        // 8 KB dump with 0 bytes, reported success, and left every DSP-1
+        // game running with an inert chip. A firmware dump is not
+        // re-downloadable, so this path must never destroy a working one.
+        let bytes = std::fs::read(src)
+            .map_err(|e| ApiError::Firmware(format!("cannot read {}: {e}", src.display())))?;
+        if let Some(want) = Self::expected_firmware_len(target)
+            && bytes.len() != want
+        {
+            return Err(ApiError::Firmware(format!(
+                "{} is {} bytes; '{target}' must be exactly {want} \u{2014} refusing to \
+                 install, so the file already installed (if any) is untouched",
+                src.display(),
+                bytes.len()
+            )));
+        }
         let dir = Self::firmware_dir().ok_or_else(|| {
             ApiError::Io(std::io::Error::other("no config directory for firmware"))
         })?;
         std::fs::create_dir_all(&dir)?;
         let dest = dir.join(target);
-        std::fs::copy(src, &dest)?;
+        // Write beside the target and rename, so an interrupted or failing
+        // write cannot truncate an install that was already good.
+        let staging = dir.join(format!("{target}.incoming"));
+        std::fs::write(&staging, &bytes)?;
+        std::fs::rename(&staging, &dest)?;
         Ok(dest)
+    }
+
+    /// Exact byte length a firmware file must have to be that firmware, or
+    /// `None` for a name luna has no expectation for.
+    ///
+    /// Size is checked, not content: the DSP-1 and DSP-1B dumps are both
+    /// legitimate at this length and other regional variants may exist, so
+    /// pinning a hash would lock out valid files to catch a case the length
+    /// already catches.
+    #[must_use]
+    pub const fn expected_firmware_len(target: &str) -> Option<usize> {
+        match target.as_bytes() {
+            b"dsp1b.rom" | b"dsp1.rom" => Some(luna_cartridge::DSP1_FIRMWARE_LEN),
+            _ => None,
+        }
     }
 
     /// Lower-level entry point used by tests: load a ROM blob
@@ -1401,10 +1492,30 @@ impl Emulator {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         snes.reset();
         self.instructions_executed = 0;
+        // The stack watermark measures a run; a reset starts a new one.
+        self.stack_low = None;
         // A reset rewinds frame_count to 0; a capture spanning it would have
         // incoherent frames, so drop it (issue #83).
         self.input_capture = None;
         Ok(())
+    }
+
+    /// Deepest native-mode stack reach so far, or `None` if no native-mode
+    /// instruction has run yet. See [`StackLow`].
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn, reason = "resolves a symbol")]
+    pub fn stack_low(&self) -> Option<StackLow> {
+        self.stack_low.clone().map(|mut l| {
+            l.symbol = self.symbol_for_addr(l.pc);
+            l
+        })
+    }
+
+    /// Start a fresh stack measurement from here — e.g. after warming up to
+    /// the frame a profile run actually cares about, so the figure is the
+    /// game loop's rather than the boot's.
+    pub fn clear_stack_low(&mut self) {
+        self.stack_low = None;
     }
 
     /// Set the joypad button bitmask for controller `port`: `0` / `1` for
@@ -1588,6 +1699,7 @@ impl Emulator {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         let mut last_frame = snes.frame_count;
         let mut executed = 0u64;
+        let mut stack_low = self.stack_low.clone();
         let _quiet = QuietPanics::new();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             while executed < max_steps && !snes.cpu.stopped {
@@ -1598,8 +1710,37 @@ impl Emulator {
                     return (Some(stop), false);
                 }
                 let pre = cstack.as_ref().map(|_| Self::call_track_pre(snes));
+                // Whose instruction this is, for the stack watermark below —
+                // after the step, `pc` is already the next one.
+                let sp_pc = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
+                let sp_before = snes.cpu.sp;
                 snes.step();
                 executed += 1;
+                // Deepest native-mode stack REACH (`OpenSNES` R3). Two rules,
+                // both needed for the figure to mean anything:
+                //
+                // - only while native. In emulation mode the hardware pins S
+                //   to page 1, so its value belongs to another régime and
+                //   would permanently undercut a native stack.
+                // - only when this instruction LOWERED S, i.e. pushed. A value
+                //   merely inherited or loaded is not a reach: every ROM
+                //   carries S = $01FF out of reset into native mode before
+                //   `TXS` installs the real stack, and recording that would
+                //   pin the mark at $01FF for the whole run, below any floor
+                //   worth checking.
+                if !snes.cpu.e
+                    && snes.cpu.sp < sp_before
+                    && stack_low
+                        .as_ref()
+                        .is_none_or(|l: &StackLow| snes.cpu.sp < l.sp)
+                {
+                    stack_low = Some(StackLow {
+                        sp: snes.cpu.sp,
+                        pc: sp_pc,
+                        frame: snes.frame_count,
+                        symbol: None,
+                    });
+                }
                 if let (Some(stack), Some(pre)) = (cstack.as_mut(), pre) {
                     Self::call_track_post(snes, stack, pre);
                 }
@@ -1611,6 +1752,7 @@ impl Emulator {
             (None, false)
         }));
         self.call_stack = cstack;
+        self.stack_low = stack_low;
         self.instructions_executed += executed;
         self.fold_profile_frames();
         match result {
@@ -1675,6 +1817,10 @@ impl Emulator {
     /// Take a JSON-serialisable snapshot of the entire observable
     /// emulator state.
     pub fn state(&mut self) -> EmulatorState {
+        let stack_low = self.stack_low.clone().map(|mut l| {
+            l.symbol = self.symbol_for_addr(l.pc);
+            l
+        });
         let cpu = self
             .snes
             .as_ref()
@@ -1691,6 +1837,7 @@ impl Emulator {
                 e: s.cpu.e,
                 stopped: s.cpu.stopped,
                 waiting: s.cpu.waiting,
+                sp_min: stack_low,
             });
         let ppu = self.snes.as_ref().map_or_else(default_ppu_state, |s| {
             let mut vram_nz = 0;
@@ -2121,6 +2268,10 @@ impl Emulator {
             e: c.e,
             stopped: c.stopped,
             waiting: c.waiting,
+            sp_min: self.stack_low.clone().map(|mut l| {
+                l.symbol = self.symbol_for_addr(l.pc);
+                l
+            }),
         })
     }
 
@@ -4007,6 +4158,7 @@ const fn default_cpu_state() -> CpuState {
         e: false,
         stopped: false,
         waiting: false,
+        sp_min: None,
     }
 }
 

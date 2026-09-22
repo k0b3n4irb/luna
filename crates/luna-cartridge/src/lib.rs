@@ -171,7 +171,12 @@ pub struct Cartridge {
 }
 
 /// Combined DSP-1 firmware size (program `0x1800` + data `0x800`).
-const DSP1_FIRMWARE_LEN: usize = 0x2000;
+/// Size of a combined DSP-1 / DSP-1B microcode dump: 2048 24-bit program
+/// words (`0x1800`) followed by 1024 16-bit data words (`0x800`). A blob of
+/// any other size cannot be that firmware, so it is refused rather than
+/// stored — a truncated file that *looks* installed leaves the chip inert
+/// while [`Cartridge::needs_coprocessor_firmware`] reports all is well.
+pub const DSP1_FIRMWARE_LEN: usize = 0x2000;
 
 impl Cartridge {
     /// Load and parse a ROM file from disk. For a DSP game with no firmware
@@ -265,8 +270,22 @@ impl Cartridge {
 
     /// Supply the coprocessor firmware (e.g. an 8 KB `dsp1b.rom`). Used by
     /// front-ends that resolve the file via a CLI flag / firmware folder.
-    pub fn set_coprocessor_firmware(&mut self, bytes: Vec<u8>) {
+    ///
+    /// Returns `false` — leaving the cartridge untouched — when `bytes` is
+    /// not a plausible dump for this cartridge's coprocessor. Accepting a
+    /// short blob here is what made a truncated `dsp1b.rom` *look*
+    /// installed: [`Self::needs_coprocessor_firmware`] then answered
+    /// "nothing missing" while the DSP core, which checks the length
+    /// itself, silently refused to run. The caller can surface the refusal;
+    /// ignoring it leaves the firmware reported as missing, which is the
+    /// honest state.
+    pub fn set_coprocessor_firmware(&mut self, bytes: Vec<u8>) -> bool {
+        if !matches!(self.header.mapper_kind, MapperKind::Dsp1) || bytes.len() != DSP1_FIRMWARE_LEN
+        {
+            return false;
+        }
         self.coprocessor_firmware = Some(bytes);
+        true
     }
 
     /// The loaded coprocessor firmware, if any.
@@ -594,6 +613,55 @@ mod tests {
         rom[HEADER_OFFSET_LOROM + 0x16] = chipset;
         rom[HEADER_OFFSET_LOROM - 1] = subtype;
         Cartridge::from_bytes(rom).unwrap().header
+    }
+
+    /// Build a synthetic DSP-1 cartridge (chipset `$05`, SMK's title picks
+    /// the DSP-1 revision) with no firmware supplied.
+    fn synth_dsp1_cart() -> Cartridge {
+        let mut rom = synth_lorom("", 0);
+        rom[HEADER_OFFSET_LOROM..HEADER_OFFSET_LOROM + 21].fill(b' ');
+        let title = b"SUPER MARIO KART";
+        rom[HEADER_OFFSET_LOROM..HEADER_OFFSET_LOROM + title.len()].copy_from_slice(title);
+        rom[HEADER_OFFSET_LOROM + 0x16] = 0x05;
+        Cartridge::from_bytes(rom).unwrap()
+    }
+
+    #[test]
+    fn a_firmware_blob_of_the_wrong_size_is_refused_not_stored() {
+        // A truncated `dsp1b.rom` used to be accepted here, which made
+        // `needs_coprocessor_firmware()` answer "nothing missing" while the
+        // DSP core — which checks the length itself — quietly refused to
+        // run. The cartridge must keep reporting the firmware as missing.
+        let mut cart = synth_dsp1_cart();
+        assert!(cart.needs_coprocessor_firmware());
+
+        for bad in [vec![], vec![0u8; 1], vec![0u8; DSP1_FIRMWARE_LEN - 1]] {
+            let n = bad.len();
+            assert!(
+                !cart.set_coprocessor_firmware(bad),
+                "{n} bytes was accepted"
+            );
+            assert!(
+                cart.needs_coprocessor_firmware(),
+                "{n} bytes left the cart claiming it has firmware"
+            );
+            assert!(cart.coprocessor_firmware().is_none());
+        }
+
+        assert!(cart.set_coprocessor_firmware(vec![0xAB; DSP1_FIRMWARE_LEN]));
+        assert!(!cart.needs_coprocessor_firmware());
+        assert_eq!(
+            cart.coprocessor_firmware().map(<[u8]>::len),
+            Some(DSP1_FIRMWARE_LEN)
+        );
+    }
+
+    #[test]
+    fn a_cart_with_no_coprocessor_takes_no_firmware() {
+        let mut cart = Cartridge::from_bytes(synth_lorom("PLAIN", 0)).unwrap();
+        assert!(!cart.needs_coprocessor_firmware());
+        assert!(!cart.set_coprocessor_firmware(vec![0xAB; DSP1_FIRMWARE_LEN]));
+        assert!(cart.coprocessor_firmware().is_none());
     }
 
     #[test]

@@ -16,8 +16,8 @@ Authored 2026-05-30.
 > `dma/controller.rs`), a long MDMA now yields to HDMA at scanline
 > boundaries (`run_mdma_segment`), the indirect last-active-channel 1-byte
 > reload quirk landed (`channel.rs`), and gap #7 was cracked (framebuffer
-> line origin, 2026-07-26 — HiColor64 is pixel-exact; only #7b HiColor128,
-> 91 %, stays open). The rows below were corrected in place; for current
+> line origin, 2026-07-26 — HiColor64 is pixel-exact; #7b HiColor128 followed
+> on 2026-09-19 — root cause the 65C816 interrupt entry, not DMA). The rows below were corrected in place; for current
 > status and the open DMA items use the audit doc and the DMA row of
 > [`accuracy_scorecard.md`](accuracy_scorecard.md).
 
@@ -120,8 +120,9 @@ a passing golden); SMRPG + Chrono Trigger smoke screenshots are unchanged
 > r+1). With the hardware origin, the DMA-path partial flush
 > (`DmaBusView::write_b`, `snes.rs`) and the HDMA end-of-line application
 > point, HiColor64 and 15 other corpus references are **pixel-exact**. The
-> only residual is **#7b** — HiColor128, 91 % exact (band-group parity
-> around the every-16-lines CGADD reset). See `accuracy_scorecard.md`
+> last residual, **#7b** (HiColor128), closed 2026-09-19: its cause was the
+> 65C816 hardware-interrupt entry being two cycles short (d117412), which
+> shifted the H-IRQ-driven palette bursts. See `accuracy_scorecard.md`
 > "Open items" #1 and `hdma_ares_audit.md` "Phase 5 inc 2". The text
 > below is kept as the 2026-05-31 record (81.2 %, "Deferred").
 
@@ -207,7 +208,8 @@ real, just not the ordering issue first suspected.
 3. ~~#7 HDMA CGRAM drop~~ — **done**: CGDATA via DMA/HDMA no longer gated
    by `active_display`; fixed the HiColor per-tile-row banding (pseudo-hires
    mandrill now pixel-clean). ~~HiColor64/128 charts remain~~ — HiColor64
-   is pixel-exact since 2026-07-26 (line origin); HiColor128 = gap #7b.
+   is pixel-exact since 2026-07-26 (line origin); HiColor128 since
+   2026-09-19 (#7b — interrupt entry).
 4. ~~#3-#6 timing approximations~~ — **done** (see the table; status
    2026-09-18). What is still open lives in `hdma_ares_audit.md` rows
    #13 and #15-#18.

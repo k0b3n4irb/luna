@@ -25,7 +25,6 @@ ignore = [
     # user created, never remote input.
     "RUSTSEC-2025-0141",
     # Unmaintained, transitive, no safe upgrade path published:
-    "RUSTSEC-2024-0436", # paste (via egui/wgpu stack)
     "RUSTSEC-2026-0192", # ttf-parser (via winit -> sctk-adwaita)
 ]
 

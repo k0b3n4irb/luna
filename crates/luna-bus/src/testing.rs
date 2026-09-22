@@ -3,7 +3,7 @@
 //! Gated behind the `test-utils` feature so downstream crates' tests can
 //! use [`RamBus`] without paying its (tiny) cost in production builds.
 
-use crate::bus::Bus;
+use crate::bus::{Bus, InterruptSample};
 use crate::types::{Addr24, MCycles};
 
 /// Flat 16 MB RAM bus, for unit-testing CPUs and individual components.
@@ -165,12 +165,16 @@ impl Bus for RamBus {
         }
     }
 
-    fn nmi_pending(&self) -> bool {
-        self.nmi
-    }
-
-    fn irq_pending(&self) -> bool {
-        self.irq
+    fn last_cycle(&mut self, i_flag: bool) -> InterruptSample {
+        // `nmi` is an edge (consumed by the poll, as ares' `nmiTest()`
+        // consumes `nmiTransition`); `irq` is a held line a test sets and
+        // clears itself.
+        let nmi = std::mem::replace(&mut self.nmi, false);
+        InterruptSample {
+            nmi,
+            irq: self.irq && !i_flag,
+            wake: nmi || self.irq,
+        }
     }
 }
 
@@ -203,14 +207,22 @@ mod tests {
     }
 
     #[test]
-    fn nmi_and_irq_lines() {
+    fn nmi_and_irq_lines_reach_the_last_cycle_poll() {
         let mut bus = RamBus::new();
-        assert!(!bus.nmi_pending());
-        assert!(!bus.irq_pending());
+        assert_eq!(bus.last_cycle(false), InterruptSample::NONE);
+
         bus.set_nmi(true);
         bus.set_irq(true);
-        assert!(bus.nmi_pending());
-        assert!(bus.irq_pending());
+        let sample = bus.last_cycle(false);
+        assert!(sample.nmi && sample.irq && sample.wake);
+
+        // The NMI edge is consumed by the poll; the IRQ line is held
+        // until the test clears it, and `I` masks the handler without
+        // suppressing the `WAI` wake-up.
+        let sample = bus.last_cycle(true);
+        assert!(!sample.nmi, "NMI edge consumed by the first poll");
+        assert!(!sample.irq, "I masks the IRQ");
+        assert!(sample.wake, "but the line still ends a WAI");
     }
 
     #[test]

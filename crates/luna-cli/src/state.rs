@@ -12,8 +12,8 @@ use crate::fmt::hex_str;
 use crate::output::{print_hex_dump, write_wav};
 
 use crate::parsers::{
-    pad_events, parse_addr_range, parse_assert_spec, parse_assert_spec_no_bank,
-    parse_assert_spec_sym, parse_hex_u8, parse_mouse_script, parse_peek_spec, parse_peek_spec_sym,
+    parse_addr_range, parse_assert_spec, parse_assert_spec_no_bank, parse_assert_spec_sym,
+    parse_hex_u8, parse_peek_spec, parse_peek_spec_sym,
 };
 use crate::rom::load_rom_into;
 
@@ -176,35 +176,6 @@ pub(crate) fn run_state(
             }
         }
     }
-    // Controller port device selection (RFE-3): a `mouse` answers the
-    // auto-read / serial path with the SNES Mouse protocol so the game's
-    // DETECT succeeds (the signature) and `inputGetMouse` reads its deltas.
-    for (port, dev) in [(0u8, port1), (1u8, port2)] {
-        let applied = luna_api::parse_port_device(dev)
-            .and_then(|d| em.set_port_device(port, d).map_err(|e| e.to_string()));
-        if let Err(e) = applied {
-            eprintln!("error: --port{}: {e}", port + 1);
-            return ExitCode::from(1);
-        }
-    }
-    let mouse_checkpoints = match mouse_script.map(parse_mouse_script) {
-        Some(Ok(v)) => v,
-        Some(Err(e)) => {
-            eprintln!("error: --mouse: {e}");
-            return ExitCode::from(2);
-        }
-        None => Vec::new(),
-    };
-    // `--superscope` shares the `frame:a,b,c` triplet grammar with `--mouse`
-    // (here a,b = absolute aim x,y; c = the button mask).
-    let scope_checkpoints = match superscope_script.map(parse_mouse_script) {
-        Some(Ok(v)) => v,
-        Some(Err(e)) => {
-            eprintln!("error: --superscope: {e}");
-            return ExitCode::from(2);
-        }
-        None => Vec::new(),
-    };
     // --srm-in: seed battery SRAM from a `.srm` file (the read half of a
     // cross-run power-cycle test), before the warm-up runs.
     if let Some(path) = srm_in {
@@ -305,40 +276,28 @@ pub(crate) fn run_state(
         eprintln!("error: enable_wdm_log: {e}");
         return ExitCode::from(1);
     }
-    // Gamepad (`--input` / `--input2`), mouse (`--mouse`) and super-scope
+    // Gamepad (`--input` / `--input2` …), mouse (`--mouse`) and Super Scope
     // (`--superscope`) checkpoints form one frame-sorted event stream, and
     // luna-api replays it: with `-n` the chase spends from that SAME
     // budget (issue #126), with `--until-frame N` it is bounded by the frame
     // (where `-n`, defaulting to 1000, is not the run length at all).
-    let mut script = luna_api::InputScript::new();
-    let pads = std::iter::once((0u8, input_script)).chain(extra_pad_scripts.iter().copied());
-    for (port, spec) in pads {
-        if let Some(s) = spec {
-            match pad_events(s, port) {
-                Ok(v) => script.extend(v),
-                Err(e) => {
-                    // --input, --input2 … --input5 (port 0-based).
-                    let n = if port == 0 {
-                        String::new()
-                    } else {
-                        (port + 1).to_string()
-                    };
-                    eprintln!("error: --input{n}: {e}");
-                    return ExitCode::from(2);
-                }
-            }
-        }
-    }
-    script.extend(
-        mouse_checkpoints
-            .iter()
-            .map(|&(f, (dx, dy, buttons))| (f, luna_api::InputEvent::Mouse { dx, dy, buttons })),
-    );
-    script.extend(
-        scope_checkpoints
-            .iter()
-            .map(|&(f, (x, y, buttons))| (f, luna_api::InputEvent::Scope { x, y, buttons })),
-    );
+    //
+    // Port selection and parsing live in `parsers::apply_input_flags`, shared
+    // with `luna profile` so the two cannot drift.
+    let mut script = match crate::parsers::apply_input_flags(
+        &mut em,
+        &crate::parsers::InputFlags {
+            input: input_script,
+            extra_pads: extra_pad_scripts,
+            port1,
+            port2,
+            mouse: mouse_script,
+            superscope: superscope_script,
+        },
+    ) {
+        Ok(s) => s,
+        Err(code) => return ExitCode::from(code),
+    };
     let start_instructions = em.instructions_executed();
     let bound = until_frame.map_or(
         luna_api::ScriptBound::Steps(steps),
