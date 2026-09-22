@@ -179,7 +179,7 @@ egui-winit           = { version = "0.34", default-features = false, features = 
 
 # Audio output — cpal cross-platform stream + ringbuf SPSC.
 cpal                 = "0.16"
-ringbuf              = { version = "0.4", default-features = false, features = ["std"] }
+ringbuf              = { version = "0.5", default-features = false, features = ["std"] }
 
 # Host gamepads (luna-gui): cross-platform pad input, SDL-style mappings.
 gilrs                = "0.11"
