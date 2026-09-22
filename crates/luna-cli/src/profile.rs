@@ -8,7 +8,6 @@
 
 use std::process::ExitCode;
 
-use crate::parsers::pad_events;
 use crate::rom::load_rom_into;
 
 /// Instruction budget per frame (matches the other frame-stepping paths).
@@ -19,7 +18,9 @@ pub(crate) struct ProfileOptions<'a> {
     pub steps: u64,
     pub until_frame: Option<u64>,
     pub from_frame: u64,
-    pub input_script: Option<&'a str>,
+    /// Controller flags — the same set `state` takes, so a coverage run
+    /// can replay a manifest that plugs a mouse or a Super Scope.
+    pub input: crate::parsers::InputFlags<'a>,
     pub sym: Option<&'a std::path::Path>,
     pub top: usize,
     pub out: Option<&'a std::path::Path>,
@@ -29,6 +30,8 @@ pub(crate) struct ProfileOptions<'a> {
     /// `--budget SYMBOL=MCLK` gates (`OpenSNES` R-B): the symbol's worst
     /// completed frame must not exceed `MCLK`, else exit 1.
     pub budgets: &'a [String],
+    /// `--stack-floor N`: exit 1 if `S` ever went below N (`OpenSNES` R3).
+    pub stack_floor: Option<u16>,
     pub force_mapper: Option<&'a str>,
     pub force_region: Option<&'a str>,
     pub power_on: Option<&'a str>,
@@ -46,6 +49,20 @@ struct Report<'a> {
     profile: luna_api::ProfileReport,
     /// One verdict per `--budget`, in command-line order.
     budgets: Vec<BudgetVerdict>,
+    /// Deepest native-mode stack reach over the profiled window, and the
+    /// `--stack-floor` verdict if one was asked for.
+    stack: StackReport,
+}
+
+/// The stack low-water mark plus its optional gate (`OpenSNES` R3).
+#[derive(serde::Serialize)]
+struct StackReport {
+    /// `None` when the run never left emulation mode.
+    low: Option<luna_api::StackLow>,
+    /// The `--stack-floor` value, if given.
+    floor: Option<u16>,
+    /// `false` only when a floor was given and the stack went below it.
+    ok: bool,
 }
 
 /// The outcome of one `--budget SYMBOL=MCLK` gate.
@@ -135,15 +152,10 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
             return ExitCode::from(2);
         }
     };
-    let mut script = luna_api::InputScript::new();
-    match o.input_script.map(|s| pad_events(s, 0)) {
-        None => {}
-        Some(Ok(v)) => script.extend(v),
-        Some(Err(e)) => {
-            eprintln!("error: --input: {e}");
-            return ExitCode::from(2);
-        }
-    }
+    let mut script = match crate::parsers::apply_input_flags(&mut em, &o.input) {
+        Ok(s) => s,
+        Err(code) => return ExitCode::from(code),
+    };
     // Warm-up to `--from-frame` with the profiler off, applying input on
     // the way; then profile to the end.
     let frame = |em: &luna_api::Emulator| em.frame_count().unwrap_or(0);
@@ -166,6 +178,10 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
         }
     }
     let start_frame = frame(&em);
+    // The warm-up to `--from-frame` is not part of what is being measured,
+    // and boot pushes deeper than a game loop does. Start the stack
+    // watermark here, with the profile.
+    em.clear_stack_low();
     if let Err(e) = em.enable_profile() {
         eprintln!("error: enable_profile: {e}");
         return ExitCode::from(1);
@@ -285,6 +301,39 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
         }
         over |= !v.ok;
     }
+    let low = em.stack_low();
+    let stack_ok = match (o.stack_floor, low.as_ref()) {
+        (Some(floor), Some(l)) => {
+            let ok = l.sp >= floor;
+            let sym = l.symbol.as_deref().unwrap_or("?");
+            println!(
+                "stack: deepest S ${:04X} at ${:06X} ({sym}, frame {}) {} ${floor:04X} — {}",
+                l.sp,
+                l.pc,
+                l.frame,
+                if ok { ">=" } else { "<" },
+                if ok { "ok" } else { "UNDER" }
+            );
+            ok
+        }
+        (Some(floor), None) => {
+            // Nothing to compare: `S` is hardware-confined to page 1 until
+            // the program goes native, so there is no native low to judge.
+            println!(
+                "stack: never left emulation mode, no native low to check against ${floor:04X} — ok"
+            );
+            true
+        }
+        (None, Some(l)) => {
+            let sym = l.symbol.as_deref().unwrap_or("?");
+            println!(
+                "stack: deepest S ${:04X} at ${:06X} ({sym}, frame {})",
+                l.sp, l.pc, l.frame
+            );
+            true
+        }
+        (None, None) => true,
+    };
     if let Some(path) = o.out {
         let json = serde_json::to_string_pretty(&Report {
             rom,
@@ -292,6 +341,11 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
             end_frame,
             profile: report,
             budgets: verdicts,
+            stack: StackReport {
+                low,
+                floor: o.stack_floor,
+                ok: stack_ok,
+            },
         })
         .expect("report serialises");
         let res = if path.as_os_str() == "-" {
@@ -305,7 +359,7 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
             return ExitCode::from(1);
         }
     }
-    if over {
+    if over || !stack_ok {
         return ExitCode::from(1);
     }
     ExitCode::SUCCESS

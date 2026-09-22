@@ -174,6 +174,99 @@ fn load_state_refuses_a_bad_mapper_blob_and_leaves_the_machine_untouched() {
     e.load_state(&good).unwrap();
 }
 
+/// The stack watermark is the deepest `S` a run actually reached, not the
+/// value it started at — and it ignores emulation mode, where the hardware
+/// pins `S` to page 1 and the figure would say nothing about the program.
+#[test]
+fn the_stack_watermark_is_the_deepest_native_reach() {
+    // CLC, XCE            → native
+    // LDX #$1FFF, TXS     → stack at $1FFF
+    // PHA, PHA, PHA       → three bytes deep (A is 16-bit? no: M defaults
+    //                        to 8-bit after reset, so one byte each)
+    // BRA -2              → park
+    let code = [
+        0x18, 0xFB, // CLC, XCE       → native, S still $01FF from reset
+        0xC2, 0x10, // REP #$10       → 16-bit X (A stays 8-bit, so PHA is 1 byte)
+        0xA2, 0xFF, 0x1F, // LDX #$1FFF
+        0x9A, // TXS            → the real stack
+        0x48, 0x48, 0x48, // PHA PHA PHA
+        0x80, 0xFE, // BRA -2
+    ];
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
+
+    // Nothing has run: no native instruction, so nothing to report.
+    assert!(e.stack_low().is_none());
+
+    // CLC, XCE, REP, LDX, TXS: native for four of them, and S was $01FF
+    // for three — but nothing pushed, so there is still nothing to report.
+    // This is the case that makes the figure usable: an inherited $01FF
+    // would otherwise sit below every floor worth checking, for ever.
+    e.step(5).unwrap();
+    assert!(
+        e.stack_low().is_none(),
+        "S was $01FF in native mode, but no instruction pushed"
+    );
+
+    // Each PHA takes it one byte lower.
+    e.step(3).unwrap();
+    let low = e.stack_low().expect("three pushes happened");
+    assert_eq!(low.sp, 0x1FFC, "three pushes from $1FFF");
+    assert_eq!(
+        low.pc, 0x00_800A,
+        "the third PHA is the instruction that got there"
+    );
+
+    // The mark is a low-WATER mark: pulling back up does not raise it.
+    let before = e.stack_low().unwrap().sp;
+    e.step(1).unwrap(); // BRA, no stack traffic
+    assert_eq!(e.stack_low().unwrap().sp, before);
+
+    // A reset starts a new measurement.
+    e.reset().unwrap();
+    assert!(e.stack_low().is_none());
+}
+
+/// A firmware dump cannot be re-downloaded, so installing one must never
+/// be able to destroy a working install. The source is vetted before the
+/// destination is touched at all.
+#[test]
+fn install_firmware_vets_the_source_before_touching_anything() {
+    let dir = std::env::temp_dir().join(format!("luna_fw_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // An existing-but-empty file: exactly the case that replaced a valid
+    // 8 KB dump with 0 bytes and reported success.
+    let empty = dir.join("empty.rom");
+    std::fs::write(&empty, b"").unwrap();
+    let err = Emulator::install_firmware(&empty, "dsp1b.rom").unwrap_err();
+    assert!(matches!(err, ApiError::Firmware(_)), "{err:?}");
+    assert!(err.to_string().contains("8192"), "{err}");
+
+    // Truncated, and absent, are refused the same way.
+    let short = dir.join("short.rom");
+    std::fs::write(&short, vec![0u8; 4096]).unwrap();
+    assert!(matches!(
+        Emulator::install_firmware(&short, "dsp1b.rom"),
+        Err(ApiError::Firmware(_))
+    ));
+    assert!(matches!(
+        Emulator::install_firmware(&dir.join("absent.rom"), "dsp1b.rom"),
+        Err(ApiError::Firmware(_))
+    ));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn firmware_size_is_known_only_for_names_luna_recognises() {
+    assert_eq!(Emulator::expected_firmware_len("dsp1b.rom"), Some(8192));
+    assert_eq!(Emulator::expected_firmware_len("dsp1.rom"), Some(8192));
+    // An unknown name carries no expectation, so it is not silently
+    // rejected — only names luna knows the shape of are enforced.
+    assert_eq!(Emulator::expected_firmware_len("st010.rom"), None);
+}
+
 /// The serialized shape of the machine is part of the save-state
 /// format. bincode is positional: adding, removing or reordering a
 /// serialized field silently mis-decodes every older state, and
@@ -191,7 +284,7 @@ fn save_state_shape_is_pinned_to_the_version() {
             .unwrap();
     assert_eq!(
         (SAVE_STATE_VERSION, bundle.core.len(), bundle.mapper.len()),
-        (6, 447_759, 8_195),
+        (7, 447_758, 8_195),
         "serialized machine shape changed — see this test's doc comment"
     );
 }
@@ -345,12 +438,19 @@ fn a_super_multitap_serves_players_2_to_5() {
     e.step(200_000).unwrap();
     let auto = e.peek_memory(0x7E, 0x0000, 4).unwrap();
     assert_eq!(auto, [0x00, 0x80, 0x00, 0x40], "player 2 = B, player 3 = Y");
-    let manual: Vec<u8> = e
+    let raw: Vec<u8> = e
         .peek_memory(0x7E, 0x0010, 16)
         .unwrap()
         .into_iter()
         .rev()
         .collect();
+    // Only bits 0-1 are the controller; $4017's bits 2-4 are tied high and
+    // the rest is open bus (ares `cpu/io.cpp:19-22`, Mesen2 `|= 0x1C`).
+    assert!(
+        raw.iter().all(|b| b & 0x1C == 0x1C),
+        "$4017 bits 2-4 read high on every clock: {raw:02X?}"
+    );
+    let manual: Vec<u8> = raw.iter().map(|b| b & 0x03).collect();
     assert_eq!(
         manual[..5],
         [0, 0, 1, 2, 0],

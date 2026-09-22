@@ -154,7 +154,7 @@ and is the hub for every headless diagnostic.
 | `--power-on <S>` | `zero` | What RAM holds before the ROM boots: `zero`, `ones`, `random` (seed derived and printed) or `random=<seed>`. See *Power-on memory state* below. |
 | `--native-res` | off | As in `run` — native 512×448 output for `--screenshot` and `--print-fbhash`. |
 | `--sym <PATH>` | auto-detect `<rom>.sym` | Load a WLA-DX symbol file (annotated disasm, named addresses). |
-| `--dsp1-rom <PATH>` | — | Install `dsp1b.rom` firmware then load (Mario Kart, Pilotwings). Persists. |
+| `--dsp1-rom <PATH>` | — | Install `dsp1b.rom` firmware then load (Mario Kart, Pilotwings). Persists. The file must be exactly 8192 bytes or it is refused with the reason, leaving any working install untouched — a firmware dump cannot be re-downloaded, and an empty or truncated one that installed "successfully" would leave every DSP-1 game running with an inert chip and no error. A dump that is present but unusable is reported as missing. |
 | `--load-state <PATH>` | — | Load a `.luna` save-state right after ROM load, before warm-up (resume a GUI-captured scene). |
 | `--input <SCRIPT>` | — | Scripted joypad-1 input (§3). |
 | `--input2 <SCRIPT>` | — | Scripted joypad-2 input, same grammar (§3) — a two-player probe, or replaying an MCP `script_p2` capture. |
@@ -445,10 +445,12 @@ parked in `WAI` / `STP` under that label.
 | `--until-frame <F>` | — | Profile until PPU frame `F` instead of `-n`. |
 | `--from-frame <F>` | `0` | Start at PPU frame `F` — skip the boot to profile the game loop. |
 | `--input <SCRIPT>` | — | Joypad-1 script (§3). |
+| `--input2` … `--input5`, `--port1`, `--port2`, `--mouse`, `--superscope` | `pad` | The same controller flags as `state`, same grammars — so a coverage run can replay a manifest that plugs a mouse or a Super Scope instead of running it with an empty port. |
 | `--sym <PATH>` | auto `<rom>.sym` | Labels to fold onto. |
 | `--top <N>` | `25` | Rows printed (the JSON has them all). |
 | `--out <PATH>` | — | JSON report (`-` = stdout after the table): `{rom, from_frame, end_frame, total_mclk, instructions, frames, entries: [{symbol, addr, instructions, mclk, idle_mclk, pct, pcs, per_frame: {max, max_frame, mean, frames} \| null}], budgets: [{symbol, limit, max, max_frame, ok}]}`. `per_frame` is the row's master cycles per **completed** PPU frame in the window: `max` (and the frame that paid it), `mean` over every completed frame (a frame the row did not run in counts 0), `frames` it ran in; `null` when no frame completed while it ran. The trailing partial frame is never counted. |
 | `--budget <SYMBOL=MCLK>` | — | Gate (repeatable): the symbol's worst completed frame must not exceed `MCLK` master cycles, else **exit 1** with the frame named. A symbol the loaded `.sym` does not know is a usage error (exit 2) — a typo must not pass; a known symbol that never ran costs 0 and passes. The VBlank-budget check for CI. |
+| `--stack-floor <ADDR>` | — | Gate: the stack must never reach below `ADDR` (`0x`-hex, `$`-hex or decimal), else **exit 1**. Measured, not guessed — see below. |
 | `--pc-set <PATH>` | — | Write the set of executed PCs: every distinct 24-bit address that ran an instruction in the window, sorted, one little-endian `u32` each — the raw input of a code-coverage tool (fold onto `.sym` labels or a listing on your side). |
 | `--force-mapper`, `--force-region`, `--power-on` | — | As elsewhere. |
 
@@ -475,6 +477,34 @@ luna profile --from-frame 120 --until-frame 600 --budget NmiHandler=6000 game.sf
 
 Read `per_frame.max_frame` from the JSON, then `luna state --until-frame
 402 --screenshot` to see what that frame was doing.
+
+### How deep the stack actually went
+
+A link-time RAM budget can only *guess* how much stack a program needs, and
+the guess is what fails: a stack sized at 512 bytes that really reaches 989
+overwrites the globals under it, silently, and only on the path that goes
+that deep. luna measures it instead — every run reports the deepest the
+stack got, the instruction that took it there and the frame it happened on:
+
+```bash
+luna profile --from-frame 120 --until-frame 600 --stack-floor 0x1C60 game.sfc
+# stack: deepest S $1C23 at $00CB5B (AudioDriverBoot, frame 4) < $1C60 — UNDER   → exit 1
+```
+
+The same figure is in `luna state`'s JSON as `cpu.sp_min`
+(`{sp, pc, frame, symbol}`, `null` if the run never pushed in native mode)
+and in the profile JSON under `stack`.
+
+Two rules make the number mean something, and both matter if you compare it
+with your own bookkeeping. Only an instruction that **lowers** `S` — a push
+— can move the mark, so a value the program merely inherited or loaded with
+`TXS` is not counted. And it is tracked only in **native** mode, because
+emulation mode pins `S` to page 1 in hardware: every ROM carries `S = $01FF`
+out of reset until it installs its real stack, and counting that would peg
+the mark at `$01FF` for the whole run, below any floor worth checking.
+
+`profile` starts the measurement at `--from-frame`, so the figure is the
+window's and not the boot's; `state` measures from reset.
 
 `WaitForVBlank` at 61 % idle is the frame's headroom (the same number
 `stats.last_frame.cpu_wai` gives); a DMA burst's cost lands on the

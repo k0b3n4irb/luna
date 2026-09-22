@@ -934,11 +934,15 @@ ppu_test!(
     "HDMA/HiColor64PerTileRow/HiColor64PerTileRow.sfc",
     "5b3439273c97532f00b1c233d3423b05d4ef04b6a6fa79153f7254512ed086dd"
 );
+// HiColor128 (gap #7b): pixel-exact vs the hardware reference since the
+// 65C816 hardware-interrupt entry gained ares' two cycles (2026-09-19). The
+// chart fires its palette DMA from an H-IRQ; entering every IRQ 14 master
+// clocks early moved alternate 8-line bands' bursts across a line (the old
+// "band-group parity" signature, 91-ish % by the tolerant metric, 11 % exact).
 ppu_test!(
     ppu_hdma_hicolor128,
     "HDMA/HiColor128PerTileRow/HiColor128PerTileRow.sfc",
-    "24f07ecd1ef6839b042d15fce801340720b9dc1d8b7678b315678fa3da2214f5",
-    ignore = "HiColor128 residual (gap #7b): 91.0% vs the hardware reference after the line-origin + HDMA-phase fixes (was 83.7%). MEASURED 2026-07-26, second pass with the NMI-vector clock calibration (the FIRST pass's ~200-clock IRQ-entry-skew lead was an ARTIFACT of comparing uncalibrated master-clock line phases across emulators — deltas-not-absolutes; after calibrating on the $FFEA fetch position, luna's IRQ raise, vector fetch, handler length AND $420B/CGRAM-burst positions are all cycle-aligned with Mesen2, and the burst is post-visible on hardware too). The REAL residual signature: in the bottom half, every SECOND 8-line tile-row band (y 168-175, 184-191, 200-207, 216-223) renders exactly ONE LINE EARLY (band content matches the reference at local shift -1 within 256 px), plus rows 95/111 — an alternating per-tile-row palette-group parity, likely in how the every-16-lines CGADD reset interacts with which batch each band's first row samples. CGRAM write timeline itself is byte-identical to Mesen2."
+    "238610ed67b080242bc4a5fad903486516b39c48e2f3c07ef26fc1869b1da9b1"
 );
 
 // INPUT/ControllerLatency: "any button → white screen, none → black". Held
@@ -1328,7 +1332,7 @@ game_test!(
     game_starfox,
     "Star Fox (USA) (Rev 2).sfc",
     1939,
-    "df7bd17642d3371151fc32c0326840ea1a765a5f86126035fa30fb485bc6a58f"
+    "f2898571d973c0c265b27f21ac3d186f8b78cbcf05b688127bfaa9bd4413e1e3"
 );
 game_test!(
     game_stuntfx,

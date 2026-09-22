@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.25.0"
+version = "1.26.0"
 edition = "2024"
 # Kept equal to the pinned toolchain (rust-toolchain.toml) — the only
 # rustc this workspace is actually built and tested with. The previous
@@ -179,7 +179,7 @@ egui-winit           = { version = "0.34", default-features = false, features = 
 
 # Audio output — cpal cross-platform stream + ringbuf SPSC.
 cpal                 = "0.16"
-ringbuf              = { version = "0.4", default-features = false, features = ["std"] }
+ringbuf              = { version = "0.5", default-features = false, features = ["std"] }
 
 # Host gamepads (luna-gui): cross-platform pad input, SDL-style mappings.
 gilrs                = "0.11"

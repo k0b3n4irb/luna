@@ -23,8 +23,8 @@
 
 use luna_bus::sa1::Sa1Mapper;
 use luna_bus::{
-    Addr24, Bus, MCycles, Mapper, MapperKind, MapperStateError, Sa1SideEvent, Sa1Snapshot,
-    Sa1TraceEvent,
+    Addr24, Bus, InterruptSample, MCycles, Mapper, MapperKind, MapperStateError, Sa1SideEvent,
+    Sa1Snapshot, Sa1TraceEvent,
 };
 use luna_cpu_65c816::Cpu;
 
@@ -229,16 +229,11 @@ impl Mapper for Sa1Chip {
                     e: self.cpu.e,
                 });
             }
-            // Deliver the SA-1's own interrupt lines to its CPU at the
-            // instruction boundary (ares `SA1::lastCycle`, Mesen2
-            // `Sa1::ProcessInterrupts`): IRQ is a level through CIV
-            // (timer / DMA / S-CPU request, gated by CIE), NMI a one-shot
-            // through CNV. Both also wake a WAI. Without this the SA-1
-            // CPU never took an interrupt at all.
-            self.cpu.set_irq_line(self.inner.sa1_irq_line());
-            if self.inner.take_sa1_nmi_event() {
-                self.cpu.trigger_nmi();
-            }
+            // The SA-1's interrupt lines reach its CPU through
+            // `Sa1Bus::last_cycle` (ares `SA1::lastCycle`), the poll one
+            // cycle before the instruction's final access — not a poke at
+            // this boundary.
+
             // Count this instruction's real SA-1 steps: `Sa1Bus` adds the
             // per-access region cost (1, or 2 for BWRAM) on every read/write
             // and 1 per internal/idle `io_cycle`. Charge `steps × 2` mclk.
@@ -411,12 +406,21 @@ impl Bus for Sa1Bus<'_> {
         *self.steps += 1;
     }
 
-    fn nmi_pending(&self) -> bool {
-        self.mapper.sa1_nmi_line()
-    }
-
-    fn irq_pending(&self) -> bool {
-        self.mapper.sa1_irq_line()
+    fn last_cycle(&mut self, i_flag: bool) -> InterruptSample {
+        // ares `SA1::lastCycle()` (`coprocessor/sa1/sa1.cpp:96-121`) — the
+        // same virtual the S-CPU overrides, with the SA-1's own sources:
+        // NMI through CNV first, then — **only when `I` is clear** — the
+        // timer / DMA / S-CPU-request IRQs through CIV. Each also clears
+        // `r.wai`. The CIV / CNV vector redirection happens on the read
+        // path (`Sa1Bus::read` -> `sa1_vector_override`), so the CPU's
+        // ordinary vector fetch lands on the right address.
+        let nmi = self.mapper.take_sa1_nmi_event();
+        let irq = self.mapper.sa1_irq_line();
+        InterruptSample {
+            nmi,
+            irq: irq && !i_flag,
+            wake: nmi || irq,
+        }
     }
 }
 
@@ -650,15 +654,20 @@ mod tests {
         // set so the SA-1 stays in reset for this isolated test.
         chip.write(make_addr(0x00, 0x2200), 0xA0);
         let mut sa1_steps = 0u32;
-        let bus = Sa1Bus {
+        let mut bus = Sa1Bus {
             mapper: &mut chip.inner,
             log: None,
             sa1_pc: 0,
             steps: &mut sa1_steps,
             scpu_mar: 0,
         };
-        assert!(bus.irq_pending());
-        assert!(!bus.nmi_pending());
+        let sample = bus.last_cycle(false);
+        assert!(sample.irq, "the S-CPU's request reaches the SA-1's poll");
+        assert!(!sample.nmi);
+        // ares checks `I` at the poll, so a masked SA-1 still wakes from
+        // WAI but does not enter its handler.
+        let masked = bus.last_cycle(true);
+        assert!(!masked.irq && masked.wake);
     }
 
     #[test]
@@ -698,13 +707,13 @@ mod tests {
         chip.write(make_addr(0x00, 0x2237), 0x40);
         assert_eq!(chip.read(make_addr(0x40, 0)), Some(0x77));
         let mut sa1_steps = 0u32;
-        let bus = Sa1Bus {
+        let mut bus = Sa1Bus {
             mapper: &mut chip.inner,
             log: None,
             sa1_pc: 0,
             steps: &mut sa1_steps,
             scpu_mar: 0,
         };
-        assert!(bus.irq_pending());
+        assert!(bus.last_cycle(false).irq);
     }
 }

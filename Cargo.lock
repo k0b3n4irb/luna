@@ -694,7 +694,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -880,7 +880,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1706,7 +1706,7 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
 name = "luna-api"
-version = "1.25.0"
+version = "1.26.0"
 dependencies = [
  "bincode",
  "dirs",
@@ -1725,7 +1725,7 @@ dependencies = [
 
 [[package]]
 name = "luna-apu"
-version = "1.25.0"
+version = "1.26.0"
 dependencies = [
  "luna-cpu-spc700",
  "serde",
@@ -1734,7 +1734,7 @@ dependencies = [
 
 [[package]]
 name = "luna-bus"
-version = "1.25.0"
+version = "1.26.0"
 dependencies = [
  "bincode",
  "serde",
@@ -1743,7 +1743,7 @@ dependencies = [
 
 [[package]]
 name = "luna-cartridge"
-version = "1.25.0"
+version = "1.26.0"
 dependencies = [
  "luna-bus",
  "serde",
@@ -1752,7 +1752,7 @@ dependencies = [
 
 [[package]]
 name = "luna-cli"
-version = "1.25.0"
+version = "1.26.0"
 dependencies = [
  "clap",
  "luna-api",
@@ -1767,7 +1767,7 @@ dependencies = [
 
 [[package]]
 name = "luna-core"
-version = "1.25.0"
+version = "1.26.0"
 dependencies = [
  "bincode",
  "image",
@@ -1784,7 +1784,7 @@ dependencies = [
 
 [[package]]
 name = "luna-cpu-65c816"
-version = "1.25.0"
+version = "1.26.0"
 dependencies = [
  "luna-bus",
  "serde",
@@ -1793,7 +1793,7 @@ dependencies = [
 
 [[package]]
 name = "luna-cpu-spc700"
-version = "1.25.0"
+version = "1.26.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1801,7 +1801,7 @@ dependencies = [
 
 [[package]]
 name = "luna-cpu-upd96050"
-version = "1.25.0"
+version = "1.26.0"
 dependencies = [
  "bincode",
  "serde",
@@ -1809,7 +1809,7 @@ dependencies = [
 
 [[package]]
 name = "luna-gui"
-version = "1.25.0"
+version = "1.26.0"
 dependencies = [
  "cpal",
  "egui",
@@ -1830,7 +1830,7 @@ dependencies = [
 
 [[package]]
 name = "luna-mcp-server"
-version = "1.25.0"
+version = "1.26.0"
 dependencies = [
  "base64 0.22.1",
  "luna-api",
@@ -1843,7 +1843,7 @@ dependencies = [
 
 [[package]]
 name = "luna-ppu"
-version = "1.25.0"
+version = "1.26.0"
 dependencies = [
  "serde",
  "serde_bytes",
@@ -2756,9 +2756,9 @@ dependencies = [
 
 [[package]]
 name = "ringbuf"
-version = "0.4.8"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe47b720588c8702e34b5979cb3271a8b1842c7cb6f57408efa70c779363488c"
+checksum = "0b123165531e325df9079f56c036f2da4103a5d5abfef9e2fda4b9c34d1ef7aa"
 dependencies = [
  "crossbeam-utils",
  "portable-atomic",
@@ -2846,7 +2846,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4010,7 +4010,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

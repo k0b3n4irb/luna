@@ -4,6 +4,105 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.26.0] — 2026-09-22
+
+The interrupt poll moves to where the references take it, and the four
+capability requests from the OpenSNES SDK team.
+
+**Upgrading from 1.25:** save-states from earlier versions are refused
+(format v7), and `--dsp1-rom` now refuses a source file that is not a
+firmware image instead of installing it (marked **BREAKING** below — it
+used to succeed, destructively). See *Versioning* in
+[CONTRIBUTING.md](CONTRIBUTING.md) for what the version number promises.
+
+### Added
+- **`luna profile` takes the same controller flags as `luna state`**
+  (`--input2` … `--input5`, `--port1`, `--port2`, `--mouse`,
+  `--superscope`), same grammars. A coverage run replaying a manifest that
+  plugs a mouse or a Super Scope was silently running it with an empty
+  port, so the peripheral's code counted as executed without ever being
+  driven. Both verbs now share one implementation of the flags, which is
+  what stops them drifting again (`OpenSNES` R2).
+- **How deep the stack actually went.** Every run reports the deepest the
+  stack reached, the instruction that took it there, the frame, and the
+  `.sym` label covering it — `cpu.sp_min` in `luna state`'s JSON, a
+  `stack` block in `luna profile`'s, and `--stack-floor <ADDR>` gates it
+  in CI (exit 1 if the stack ever reached below the address). A link-time
+  RAM budget can only guess this; a stack sized at 512 bytes that really
+  reaches 989 overwrites the globals under it silently. Only a push moves
+  the mark, and only in native mode — emulation mode pins `S` to page 1,
+  and every ROM carries `$01FF` out of reset until it installs its real
+  stack (`OpenSNES` R3).
+- **`$4016` / `$4017` reads carry open bus in the bits the port does not
+  drive, and `$4017` ties bits 2-4 high** (ares `cpu/io.cpp:15-22`, Mesen2
+  `SnesControlManager::Read`). luna returned a bare `0` / `1` byte, which
+  neither reference produces, so a game reading the whole byte instead of
+  masking bit 0 saw a value that exists on no hardware. Asked for by the
+  OpenSNES team, who are about to read `$4017` right after the auto-read.
+- **An empty controller port** — `--port1 none` / `--port2 none`, or
+  **Devices → Nothing (unplugged)** in the GUI — so a "is a controller
+  connected?" routine can be exercised at all. Note what it can tell you:
+  auto-read gives `$0000` for an empty port, which is also what an idle
+  pad gives, so `$4218`/`$4219` cannot distinguish them. The difference is
+  past bit 15 of a manual serial read, where a pad's line idles high and
+  an empty port keeps reading 0. Both references agree on that value
+  (ares `ControllerPort::data()`, Mesen2 `SnesControlManager::Read`); it
+  is a modelled convention they share, not a measurement of real silicon
+  (`OpenSNES` R4).
+
+### Fixed
+- **BREAKING** — **an invalid coprocessor firmware can no longer destroy a working one.**
+  `--dsp1-rom` copied whatever it was handed: a shell variable that
+  expanded to an existing but empty file replaced a valid 8 KB `dsp1b.rom`
+  with 0 bytes, reported success, and left every DSP-1 game running with
+  an inert chip. The source is now vetted before the destination is
+  touched at all, and the install goes through a rename so an interrupted
+  write cannot truncate what was already there. A dump that is present but
+  unusable is also no longer mistaken for firmware — it is reported as
+  missing, which restores the warning that was already there to be printed
+  (`OpenSNES` R1).
+- **NMI and IRQ are sampled at the instruction's last cycle.** Both 65C816s
+  — the main CPU and the SA-1 — now take the interrupt decision one cycle
+  before the running instruction's final bus access, where ares
+  (`lastCycle()`, marked `L` in its instruction tables) and Mesen2 (which
+  recomputes the flags every cycle and reads them back) take it. Neither
+  reference interrupts mid-instruction, so what moved is the sampling
+  point, not the service point — but it means an interrupt arriving during
+  an instruction's final access is no longer taken a whole instruction
+  early, and `CLI` / `SEI` / `PLP` / `REP` / `SEP` get their
+  one-instruction recognition delay, which neither reference implements
+  with a counter. The two-cycle implied opcodes also spend a dummy read of
+  `PB:PC` instead of an internal cycle when an interrupt is already
+  pending (ares `idleIRQ()`). Closes the last two named 65C816 gaps.
+- **The interrupt sequence raises `I` before its vector fetch**, as both
+  references do, instead of at the end of the frame. Latent until the
+  above landed: the vector's high byte is where the poll now sits, so a
+  still-asserted level — an H/V IRQ the handler had yet to acknowledge —
+  re-latched inside the entry sequence and re-entered the handler
+  forever.
+
+### Changed
+- **Save states are format v7.** `Cpu::irq_line` is gone: the coprocessor
+  and H/V levels belong to the device, and the poll reads them where they
+  live. States from 1.25 and earlier are refused.
+- Star Fox's golden framebuffer was re-recorded: it holds a coprocessor
+  IRQ level, so the implied-opcode dummy read shifts its 3D intro by one
+  animation step. Every other golden — all 91, including the 16
+  pixel-exact hardware references — is byte-identical.
+
+### Verified
+- **HiColor128 is pixel-exact — gap #7b is closed.** Peter Lemon's
+  HiColor128PerTileRow chart now matches its hardware reference pixel for
+  pixel (was 11 % exact, "91 %" by the tolerant metric). Nothing shipped
+  here to make that happen: the cause was the 65C816 interrupt-entry
+  correction **already released in 1.25.0**. The chart drives its palette
+  DMA from an H-IRQ, so entering every hardware interrupt two cycles
+  (14 master clocks) early shifted alternate 8-line bands' bursts by a
+  line — the PPU and the DMA controller were never at fault. Only the
+  proof came afterwards: bisection pinned that single commit as the whole
+  residual, so the chart's tripwire is promoted from `#[ignore]` to a
+  regular golden (checked at frames 60, 120 and 300).
+
 ## [1.25.0] — 2026-09-19
 
 Follow-ups to the 2026-09-18 full project review: silent failures made

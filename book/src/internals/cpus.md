@@ -22,9 +22,13 @@ A few deliberate notes:
 
 - For the `(dp,X)` emulation-mode pointer wrap, Luna follows the per-instruction
   test suite's verified hardware behaviour.
-- Interrupts are taken at the **instruction boundary**. A headless differential
-  confirms this matches the observable NMI/IRQ delivery cadence on real games
-  (see [The differential harness](../method/differential.md)).
+- Interrupts are **sampled one cycle before an instruction's last bus access**
+  and taken at the boundary that follows — which is what both reference
+  emulators do. Neither interrupts mid-instruction; the sampling point is what
+  decides whether an interrupt arriving late in an instruction is taken now or
+  one instruction later, and it is also what gives `CLI` / `SEI` their
+  one-instruction recognition delay (see
+  [The differential harness](../method/differential.md)).
 
 ## SPC700 — the audio CPU
 
