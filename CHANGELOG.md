@@ -4,7 +4,16 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.26.0] — 2026-09-22
+
+The interrupt poll moves to where the references take it, and the four
+capability requests from the OpenSNES SDK team.
+
+**Upgrading from 1.25:** save-states from earlier versions are refused
+(format v7), and `--dsp1-rom` now refuses a source file that is not a
+firmware image instead of installing it (marked **BREAKING** below — it
+used to succeed, destructively). See *Versioning* in
+[CONTRIBUTING.md](CONTRIBUTING.md) for what the version number promises.
 
 ### Added
 - **`luna profile` takes the same controller flags as `luna state`**
@@ -42,7 +51,7 @@ All notable user-facing changes to luna. Releases are cut from `main`
   (`OpenSNES` R4).
 
 ### Fixed
-- **An invalid coprocessor firmware can no longer destroy a working one.**
+- **BREAKING** — **an invalid coprocessor firmware can no longer destroy a working one.**
   `--dsp1-rom` copied whatever it was handed: a shell variable that
   expanded to an existing but empty file replaced a valid 8 KB `dsp1b.rom`
   with 0 bytes, reported success, and left every DSP-1 game running with
