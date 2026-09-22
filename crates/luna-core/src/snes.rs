@@ -2961,9 +2961,24 @@ impl SnesBus<'_> {
             // A Mouse on this port answers the manual serial read with its own
             // 32-bit stream (device signature + signed dx/dy) instead of the
             // pad shift register. The $4016 strobe drives its latch (below).
+            // Only bits 0-1 are driven by the port. The rest of the byte:
+            // ares `cpu/io.cpp:15-22` returns the MDR it was passed with
+            // `data.bit(0,1)` overwritten, and for `$4017` additionally
+            // forces `data.bit(2,4) = 0b111` ("these pins are connected to
+            // GND"); Mesen2 `SnesControlManager::Read` masks open bus with
+            // `0xFC` / `0xE0` and ORs `0x1C` back for `$4017`. luna used to
+            // return a bare `0`/`1`, so any game reading the whole byte —
+            // rather than masking bit 0 — saw a value neither reference
+            // produces.
+            let open = *self.mdr;
+            let other_bits = if offset == 0x4016 {
+                open & 0xFC
+            } else {
+                (open & 0xE0) | 0x1C
+            };
             let port = usize::from(offset != 0x4016);
             if let Some(bit) = self.cpu_regs.port_serial_bit(port) {
-                return bit;
+                return other_bits | bit;
             }
             let shift = if offset == 0x4016 {
                 &mut *self.joypad1_shift
@@ -2980,7 +2995,7 @@ impl SnesBus<'_> {
             }
             let bit = (*shift >> 15) & 1;
             *shift = shift.wrapping_shl(1) | 1;
-            return bit as u8;
+            return other_bits | bit as u8;
         }
         if let Some(offset) = Self::dma_offset(addr) {
             return self.dma.read_register(offset).unwrap_or(*self.mdr);

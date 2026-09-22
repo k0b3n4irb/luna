@@ -24,6 +24,12 @@ All notable user-facing changes to luna. Releases are cut from `main`
   the mark, and only in native mode — emulation mode pins `S` to page 1,
   and every ROM carries `$01FF` out of reset until it installs its real
   stack (`OpenSNES` R3).
+- **`$4016` / `$4017` reads carry open bus in the bits the port does not
+  drive, and `$4017` ties bits 2-4 high** (ares `cpu/io.cpp:15-22`, Mesen2
+  `SnesControlManager::Read`). luna returned a bare `0` / `1` byte, which
+  neither reference produces, so a game reading the whole byte instead of
+  masking bit 0 saw a value that exists on no hardware. Asked for by the
+  OpenSNES team, who are about to read `$4017` right after the auto-read.
 - **An empty controller port** — `--port1 none` / `--port2 none`, or
   **Devices → Nothing (unplugged)** in the GUI — so a "is a controller
   connected?" routine can be exercised at all. Note what it can tell you:

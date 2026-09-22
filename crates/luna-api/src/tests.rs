@@ -438,12 +438,19 @@ fn a_super_multitap_serves_players_2_to_5() {
     e.step(200_000).unwrap();
     let auto = e.peek_memory(0x7E, 0x0000, 4).unwrap();
     assert_eq!(auto, [0x00, 0x80, 0x00, 0x40], "player 2 = B, player 3 = Y");
-    let manual: Vec<u8> = e
+    let raw: Vec<u8> = e
         .peek_memory(0x7E, 0x0010, 16)
         .unwrap()
         .into_iter()
         .rev()
         .collect();
+    // Only bits 0-1 are the controller; $4017's bits 2-4 are tied high and
+    // the rest is open bus (ares `cpu/io.cpp:19-22`, Mesen2 `|= 0x1C`).
+    assert!(
+        raw.iter().all(|b| b & 0x1C == 0x1C),
+        "$4017 bits 2-4 read high on every clock: {raw:02X?}"
+    );
+    let manual: Vec<u8> = raw.iter().map(|b| b & 0x03).collect();
     assert_eq!(
         manual[..5],
         [0, 0, 1, 2, 0],
