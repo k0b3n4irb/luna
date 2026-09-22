@@ -324,12 +324,15 @@ enum Command {
         /// Player 5 (multitap pad D) — see `--input3`.
         #[arg(long)]
         input5: Option<String>,
-        /// Controller port-1 device: `pad` (default), `mouse`, `superscope`
-        /// or `multitap`.
+        /// Controller port-1 device: `pad` (default), `mouse`, `superscope`,
+        /// `multitap`, or `none` for an unplugged port (its data lines read
+        /// 0 for ever, where a pad's idle high — auto-read cannot tell them
+        /// apart, only a manual read past bit 15 can).
         #[arg(long, default_value = "pad")]
         port1: String,
-        /// Controller port-2 device: `pad` (default), `mouse`, `superscope`
-        /// or `multitap` (players 2-5: `--input2` … `--input5`).
+        /// Controller port-2 device: `pad` (default), `mouse`, `superscope`,
+        /// `multitap` (players 2-5: `--input2` … `--input5`), or `none` for
+        /// an unplugged port — see `--port1`.
         #[arg(long, default_value = "pad")]
         port2: String,
         /// Scripted SNES Mouse motion, applied to whichever port is set to
@@ -689,12 +692,14 @@ enum Command {
         /// Player 5 (multitap pad D) — see `--input3`.
         #[arg(long)]
         input5: Option<String>,
-        /// Controller port-1 device: `pad` (default), `mouse`, `superscope`
-        /// or `multitap`.
+        /// Controller port-1 device: `pad` (default), `mouse`, `superscope`,
+        /// `multitap`, or `none` for an unplugged port (its data lines read
+        /// 0 for ever, where a pad's idle high — auto-read cannot tell them
+        /// apart, only a manual read past bit 15 can).
         #[arg(long, default_value = "pad")]
         port1: String,
-        /// Controller port-2 device: `pad` (default), `mouse`, `superscope`
-        /// or `multitap`.
+        /// Controller port-2 device: `pad` (default), `mouse`, `superscope`,
+        /// `multitap`, or `none` for an unplugged port — see `--port1`.
         #[arg(long, default_value = "pad")]
         port2: String,
         /// Scripted SNES Mouse motion (`state --mouse` grammar), applied to
