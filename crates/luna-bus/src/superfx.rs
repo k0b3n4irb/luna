@@ -195,6 +195,15 @@ pub struct SuperFxSnapshot {
     pub scbr: u8,
     /// Screen-mode register, packed wire byte.
     pub scmr: u8,
+    /// SCMR `RON`: the GSU owns Game Pak ROM (the SNES reads the busy
+    /// vector instead).
+    pub scmr_ron: bool,
+    /// SCMR `RAN`: the GSU owns Game Pak RAM (SNES reads are open bus).
+    pub scmr_ran: bool,
+    /// SCMR height select, unscrambled from the wire layout (spec §1.4).
+    pub scmr_ht: u8,
+    /// SCMR colour-depth mode (0..3 → 2/4/4/8 bpp).
+    pub scmr_md: u8,
     /// Colour register.
     pub colr: u8,
     /// Plot-option register (raw 5 bits).
@@ -209,6 +218,8 @@ pub struct SuperFxSnapshot {
     pub clsr: bool,
     /// `true` while the GSU is running (SFR go flag set).
     pub running: bool,
+    /// Cumulative GSU instructions retired since reset.
+    pub instructions_executed: u64,
 }
 
 /// One 8-pixel plot run awaiting writeback to Game Pak RAM (spec §4.1).
@@ -264,6 +275,10 @@ pub struct SuperFxMapper {
     clock_deficit: i64,
     /// Per-instruction cycle accumulator (set by `step`), read by `run_one`.
     cycles: u32,
+    /// Cumulative GSU instructions retired since reset — a diagnostic, not
+    /// machine state, so it stays out of `SuperFxState` and the save-state
+    /// blob (the same reasoning as the API's stack watermark).
+    instructions_executed: u64,
     /// Cumulative main-CPU master clocks since reset (advanced by every
     /// `step_coproc`, even while the GSU is stopped). The shared time axis the
     /// GSU clock is read against — see [`SuperFxTraceEvent::mclk`].
@@ -306,6 +321,7 @@ impl SuperFxMapper {
             pixelcache: [PixelCache::reset(); 2],
             clock_deficit: 0,
             cycles: 0,
+            instructions_executed: 0,
             cpu_mclk: 0,
             gsu_running_prev: false,
             modified_r14: false,
@@ -326,6 +342,10 @@ impl SuperFxMapper {
             cbr: self.regs.cbr,
             scbr: self.regs.scbr,
             scmr: self.regs.scmr_byte(),
+            scmr_ron: self.regs.scmr_ron,
+            scmr_ran: self.regs.scmr_ran,
+            scmr_ht: self.regs.scmr_ht,
+            scmr_md: self.regs.scmr_md,
             colr: self.regs.colr,
             por: self.regs.por,
             bramr: self.regs.bramr,
@@ -333,6 +353,7 @@ impl SuperFxMapper {
             cfgr: self.regs.cfgr,
             clsr: self.regs.clsr,
             running: self.regs.sfr & SFR_G != 0,
+            instructions_executed: self.instructions_executed,
         }
     }
 
@@ -763,6 +784,7 @@ impl SuperFxMapper {
     /// `sfr.g` set). The per-instruction cycle cost is left in `self.cycles`.
     fn run_one(&mut self) {
         self.cycles = 0;
+        self.instructions_executed = self.instructions_executed.saturating_add(1);
         self.modified_r14 = false;
         self.modified_r15 = false;
         let opcode = self.peekpipe();
@@ -1544,6 +1566,10 @@ struct SuperFxState {
 impl Mapper for SuperFxMapper {
     fn kind(&self) -> MapperKind {
         MapperKind::SuperFx
+    }
+
+    fn superfx_snapshot(&self) -> Option<SuperFxSnapshot> {
+        Some(self.snapshot())
     }
 
     fn save_state(&self) -> Vec<u8> {
