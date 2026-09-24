@@ -336,6 +336,11 @@ pub struct GsuState {
     pub clsr: bool,
     /// Cumulative GSU instructions retired since reset.
     pub instructions_executed: u64,
+    /// CPU accesses to the cartridge made while the GSU owned it: each one
+    /// read a dummy byte (ROM) or open bus (RAM) instead of the data the
+    /// program expected, silently — on hardware as in every emulator. A
+    /// runtime that keeps the CPU busy during GSU jobs asserts this is 0.
+    pub bus_violations: u64,
 }
 
 /// How deep the stack ever reached, and where.
@@ -2179,6 +2184,7 @@ impl Emulator {
                 cfgr: g.cfgr,
                 clsr: g.clsr,
                 instructions_executed: g.instructions_executed,
+                bus_violations: g.bus_violations,
             });
         let dsp1_instructions = self
             .snes
