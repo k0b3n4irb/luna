@@ -197,6 +197,16 @@ pub trait Mapper {
         None
     }
 
+    /// Snapshot the Super FX (GSU) coprocessor's architectural state, if
+    /// this mapper hosts one. Everything else returns `None`.
+    ///
+    /// The sibling of [`Mapper::sa1_snapshot`] — the GSU had the snapshot
+    /// type from the start but no way up to a front-end, so it could be
+    /// traced and never asserted on.
+    fn superfx_snapshot(&self) -> Option<crate::superfx::SuperFxSnapshot> {
+        None
+    }
+
     /// A read-only DSP-1 (uPD7725) state snapshot for the debugger, or
     /// `None` for non-DSP mappers.
     fn dsp1_snapshot(&self) -> Option<Dsp1Snapshot> {

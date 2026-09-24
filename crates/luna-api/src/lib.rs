@@ -235,6 +235,8 @@ pub struct EmulatorState {
     /// debugging — lets you see at a glance whether the SA-1 PC is
     /// stuck in a polling loop, running random ROM bytes, or halted.
     pub sa1: Option<Sa1State>,
+    /// Super FX (GSU) state, or `None` when the cart has no GSU.
+    pub gsu: Option<GsuState>,
     /// DSP-1 (NEC uPD7725) state, if the loaded cartridge hosts one.
     /// `None` for non-DSP carts.
     pub dsp1: Option<Dsp1State>,
@@ -278,6 +280,62 @@ pub struct Sa1State {
     pub p: u8,
     /// `true` while the SA-1 is released from reset (CCNT.5 clear).
     pub running: bool,
+}
+
+/// Super FX (GSU) architectural state — the sibling of [`Sa1State`].
+///
+/// The GSU could be traced but not asserted on: it had a snapshot type in
+/// `luna-bus` from the start and no route to a front-end. `SCMR` is given
+/// both raw and decoded, because its wire layout is scrambled and a caller
+/// re-deriving `RON` / `RAN` from the byte is a bug waiting to happen —
+/// and those two bits are what decide who owns the cartridge bus.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct GsuState {
+    /// `true` once a Super FX cartridge is loaded (the block is absent
+    /// otherwise).
+    pub present: bool,
+    /// Version code register (`VCR`).
+    pub version: u8,
+    /// `true` while the GSU is running (SFR `G` set).
+    pub running: bool,
+    /// R0–R15; R15 is the GSU program counter.
+    pub r: [u16; 16],
+    /// Status/flag register, raw.
+    pub sfr: u16,
+    /// Program bank register.
+    pub pbr: u8,
+    /// ROM data bank register.
+    pub rombr: u8,
+    /// RAM data bank register.
+    pub rambr: bool,
+    /// Cache base register.
+    pub cbr: u16,
+    /// Screen base register (the tile map lives at `scbr << 10`).
+    pub scbr: u8,
+    /// Screen-mode register, raw wire byte.
+    pub scmr: u8,
+    /// `SCMR.RON` — the GSU owns Game Pak ROM, so a 65816 read of it
+    /// returns the busy vector rather than ROM data.
+    pub scmr_ron: bool,
+    /// `SCMR.RAN` — the GSU owns Game Pak RAM, so a 65816 read of it is
+    /// open bus. This is why `peek` reports cart RAM as unmapped mid-job.
+    pub scmr_ran: bool,
+    /// Screen height select, unscrambled.
+    pub scmr_ht: u8,
+    /// Colour-depth mode (0..3 → 2/4/4/8 bpp).
+    pub scmr_md: u8,
+    /// Colour register.
+    pub colr: u8,
+    /// Plot-option register.
+    pub por: u8,
+    /// Backup-RAM write enable.
+    pub bramr: bool,
+    /// Config register.
+    pub cfgr: u8,
+    /// Clock select: `false` = 10.7 MHz, `true` = 21.4 MHz.
+    pub clsr: bool,
+    /// Cumulative GSU instructions retired since reset.
+    pub instructions_executed: u64,
 }
 
 /// How deep the stack ever reached, and where.
@@ -2095,6 +2153,33 @@ impl Emulator {
                 p: snap.p,
                 running: snap.running,
             });
+        let gsu = self
+            .snes
+            .as_ref()
+            .and_then(|s| s.mapper.superfx_snapshot())
+            .map(|g| GsuState {
+                present: true,
+                version: g.vcr,
+                running: g.running,
+                r: g.r,
+                sfr: g.sfr,
+                pbr: g.pbr,
+                rombr: g.rombr,
+                rambr: g.rambr,
+                cbr: g.cbr,
+                scbr: g.scbr,
+                scmr: g.scmr,
+                scmr_ron: g.scmr_ron,
+                scmr_ran: g.scmr_ran,
+                scmr_ht: g.scmr_ht,
+                scmr_md: g.scmr_md,
+                colr: g.colr,
+                por: g.por,
+                bramr: g.bramr,
+                cfgr: g.cfgr,
+                clsr: g.clsr,
+                instructions_executed: g.instructions_executed,
+            });
         let dsp1_instructions = self
             .snes
             .as_ref()
@@ -2122,6 +2207,7 @@ impl Emulator {
             apu,
             stats,
             sa1,
+            gsu,
             dma,
             dsp1,
             call_stack: self.call_stack.as_ref().map(|_| self.call_stack()),

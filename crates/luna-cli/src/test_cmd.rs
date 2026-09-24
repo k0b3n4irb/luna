@@ -143,6 +143,9 @@ struct Checkpoint {
     /// as `[asserts.ppu]` — the registers as of this leg's frame.
     #[serde(default)]
     ppu: BTreeMap<String, ValueAssert>,
+    /// Point-in-time Super FX asserts, same grammar as `[asserts.gsu]`.
+    #[serde(default)]
+    gsu: BTreeMap<String, ValueAssert>,
     /// Directional asserts vs the previous checkpoint (or the run start
     /// for the first one): `increased | decreased | changed | unchanged`.
     #[serde(default)]
@@ -187,6 +190,13 @@ struct Asserts {
     /// `[asserts.values]` grammar. See [`ppu_field`] for the key form.
     #[serde(default)]
     ppu: BTreeMap<String, ValueAssert>,
+    /// Super FX asserts (`OpenSNES` ask, 2026-09-24): the field names the
+    /// state JSON prints under `gsu`, same grammar as `[asserts.ppu]`.
+    /// `r.15` addresses the GSU program counter; `scmr_ron` / `scmr_ran`
+    /// say who owns the cartridge bus. A cart with no GSU fails the
+    /// assert rather than passing it vacuously.
+    #[serde(default)]
+    gsu: BTreeMap<String, ValueAssert>,
     /// Non-zero-byte floors per space (issue #212): proof an upload
     /// happened without pinning exact bytes.
     #[serde(default)]
@@ -727,7 +737,11 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
                 Err(e) => failures.push(format!("{label} values.{key}: {e}")),
             }
         }
-        check_ppu(&mut em, &cp.ppu, &format!("{label} "), &mut failures);
+        if !cp.ppu.is_empty() || !cp.gsu.is_empty() {
+            let (ppu, gsu) = state_blocks(&mut em);
+            check_state_block(ppu, "ppu", &cp.ppu, &format!("{label} "), &mut failures);
+            check_state_block(gsu, "gsu", &cp.gsu, &format!("{label} "), &mut failures);
+        }
         for (key, d) in &cp.delta {
             let prev = delta_prev.get(key).copied();
             match read_value(&mut em, key, d.width()) {
@@ -872,7 +886,11 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
     }
     // [asserts.ppu] — the PPU registers, named as the state JSON prints
     // them (`OpenSNES` ask, 2026-09-17).
-    check_ppu(&mut em, &m.asserts.ppu, "", &mut failures);
+    if !m.asserts.ppu.is_empty() || !m.asserts.gsu.is_empty() {
+        let (ppu, gsu) = state_blocks(&mut em);
+        check_state_block(ppu, "ppu", &m.asserts.ppu, "", &mut failures);
+        check_state_block(gsu, "gsu", &m.asserts.gsu, "", &mut failures);
+    }
     // [asserts.footprint] — non-zero-byte floors per space (issue #212).
     for (space, spec) in &m.asserts.footprint {
         let bytes: Vec<u8> = match space.as_str() {
@@ -1167,13 +1185,16 @@ fn eval_cmp(label: &str, got: i64, cmp: &CmpSpec) -> Option<String> {
         .or_else(|| cmp.lt.and_then(|b| check(got < b, "lt", b)))
 }
 
-/// Evaluate an `[asserts.ppu]` / `[checkpoint.ppu]` table against the
-/// PPU registers exactly as `luna state --out -` prints them under
-/// `ppu`. `prefix` labels the failures (`""` at the end of the run,
-/// `"checkpoint@N "` on a leg). Costs one state snapshot, and only when
-/// the table is non-empty.
-fn check_ppu(
-    em: &mut luna_api::Emulator,
+/// Evaluate an `[asserts.<block>]` / `[checkpoint.<block>]` table against
+/// one block of `luna state --out -`, addressed by the very names that
+/// command prints. `prefix` labels the failures (`""` at the end of the
+/// run, `"checkpoint@N "` on a leg).
+///
+/// Generic over the block so a new one costs a call, not a copy: `ppu`
+/// and `gsu` share every line of this.
+fn check_state_block(
+    block: Option<serde_json::Value>,
+    label: &str,
     asserts: &BTreeMap<String, ValueAssert>,
     prefix: &str,
     failures: &mut Vec<String>,
@@ -1181,24 +1202,34 @@ fn check_ppu(
     if asserts.is_empty() {
         return;
     }
-    let ppu = match serde_json::to_value(em.state().ppu) {
-        Ok(v) => v,
-        Err(e) => {
-            failures.push(format!("{prefix}ppu: could not read the PPU state: {e}"));
-            return;
-        }
+    let Some(block) = block else {
+        failures.push(format!(
+            "{prefix}{label}: the cartridge has no {label} to assert on"
+        ));
+        return;
     };
     for (key, assert) in asserts {
-        let checked = ppu_cmp(assert).and_then(|cmp| Ok((cmp, ppu_field(&ppu, key)?)));
+        let checked = ppu_cmp(assert).and_then(|cmp| Ok((cmp, ppu_field(&block, key)?)));
         match checked {
             Ok((cmp, got)) => {
-                if let Some(msg) = eval_cmp(&format!("{prefix}ppu.{key}"), got, &cmp) {
+                if let Some(msg) = eval_cmp(&format!("{prefix}{label}.{key}"), got, &cmp) {
                     failures.push(msg);
                 }
             }
-            Err(e) => failures.push(format!("{prefix}ppu.{key}: {e}")),
+            Err(e) => failures.push(format!("{prefix}{label}.{key}: {e}")),
         }
     }
+}
+
+/// The `ppu` and `gsu` blocks of one state snapshot, as JSON. Taken
+/// together so a leg asserting on both costs one snapshot, not two.
+fn state_blocks(
+    em: &mut luna_api::Emulator,
+) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
+    let st = em.state();
+    let ppu = serde_json::to_value(st.ppu).ok();
+    let gsu = st.gsu.and_then(|g| serde_json::to_value(g).ok());
+    (ppu, gsu)
 }
 
 /// The comparator table of an `[asserts.ppu]` entry. Unlike
