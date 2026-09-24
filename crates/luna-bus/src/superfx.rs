@@ -220,6 +220,9 @@ pub struct SuperFxSnapshot {
     pub running: bool,
     /// Cumulative GSU instructions retired since reset.
     pub instructions_executed: u64,
+    /// CPU accesses to the cartridge while the GSU owned it — each one got
+    /// a dummy byte (ROM) or open bus (RAM) instead of real data.
+    pub bus_violations: u64,
 }
 
 /// One 8-pixel plot run awaiting writeback to Game Pak RAM (spec §4.1).
@@ -279,6 +282,11 @@ pub struct SuperFxMapper {
     /// machine state, so it stays out of `SuperFxState` and the save-state
     /// blob (the same reasoning as the API's stack watermark).
     instructions_executed: u64,
+    /// CPU accesses to the cartridge while the GSU owned it (`OpenSNES`
+    /// R2). Each one read a dummy byte or open bus instead of the data the
+    /// program expected — silently, on hardware and in every emulator.
+    /// Diagnostic, so it stays out of `SuperFxState` like the counter above.
+    bus_violations: u64,
     /// Cumulative main-CPU master clocks since reset (advanced by every
     /// `step_coproc`, even while the GSU is stopped). The shared time axis the
     /// GSU clock is read against — see [`SuperFxTraceEvent::mclk`].
@@ -322,6 +330,7 @@ impl SuperFxMapper {
             clock_deficit: 0,
             cycles: 0,
             instructions_executed: 0,
+            bus_violations: 0,
             cpu_mclk: 0,
             gsu_running_prev: false,
             modified_r14: false,
@@ -354,6 +363,7 @@ impl SuperFxMapper {
             clsr: self.regs.clsr,
             running: self.regs.sfr & SFR_G != 0,
             instructions_executed: self.instructions_executed,
+            bus_violations: self.bus_violations,
         }
     }
 
@@ -415,6 +425,27 @@ impl SuperFxMapper {
         } else {
             None
         }
+    }
+
+    /// Would a 65816 read of `addr` right now be denied because the GSU
+    /// owns that part of the cartridge? `Some(true)` = ROM (the SNES gets
+    /// the busy vector), `Some(false)` = Game Pak RAM (open bus).
+    ///
+    /// Pure — the counter is bumped by the read itself. This exists so the
+    /// system bus, which knows the CPU's PC, frame and line, can stamp a
+    /// trace entry the mapper could not fill in on its own.
+    pub(crate) const fn bus_denied(&self, addr: Addr24) -> Option<bool> {
+        if !self.sfr_get(SFR_G) {
+            return None;
+        }
+        let (bank, offset) = (bank_of(addr), offset_of(addr));
+        if self.regs.scmr_ron && Self::rom_offset(bank, offset).is_some() {
+            return Some(true);
+        }
+        if self.regs.scmr_ran && Self::ram_offset(bank, offset).is_some() {
+            return Some(false);
+        }
+        None
     }
 
     /// The fixed 16-byte "GSU busy" vector the SNES sees in place of ROM
@@ -1572,6 +1603,10 @@ impl Mapper for SuperFxMapper {
         Some(self.snapshot())
     }
 
+    fn superfx_bus_denied(&self, addr: Addr24) -> Option<bool> {
+        self.bus_denied(addr)
+    }
+
     fn save_state(&self) -> Vec<u8> {
         let st = SuperFxState {
             ram: self.ram.clone(),
@@ -1640,6 +1675,7 @@ impl Mapper for SuperFxMapper {
         // vector instead of ROM data (spec §3.3).
         if let Some(o) = Self::rom_offset(bank, offset) {
             if self.sfr_get(SFR_G) && self.regs.scmr_ron {
+                self.bus_violations = self.bus_violations.saturating_add(1);
                 return Some(Self::busy_rom_vector(offset as u8));
             }
             return Some(self.rom[o & self.rom_mask]);
@@ -1648,6 +1684,7 @@ impl Mapper for SuperFxMapper {
         // (spec §3.3); we surface `None` so the bus returns its open-bus.
         if let Some(o) = Self::ram_offset(bank, offset) {
             if self.sfr_get(SFR_G) && self.regs.scmr_ran {
+                self.bus_violations = self.bus_violations.saturating_add(1);
                 return None;
             }
             return Some(self.ram[o & self.ram_mask]);
@@ -1759,6 +1796,44 @@ mod tests {
 
     fn fx() -> SuperFxMapper {
         SuperFxMapper::new(ramp_rom(1024 * 1024), 0x8000)
+    }
+
+    #[test]
+    fn a_cpu_read_while_the_gsu_owns_the_cartridge_is_counted() {
+        // The silent bug class an emulator is the only place to see: while
+        // SCMR RON/RAN grant the cartridge to the GSU, a 65816 read of ROM
+        // returns the busy vector and of Game Pak RAM returns open bus.
+        // Neither raises anything on hardware — the program just reads
+        // garbage. luna already modelled both; this counts them.
+        let mut m = fx();
+        let rom_addr = make_addr(0x00, 0x8004);
+        let ram_addr = make_addr(0x70, 0x0000);
+
+        // GSU stopped: ordinary reads, nothing counted.
+        assert_eq!(m.snapshot().bus_violations, 0);
+        assert!(m.read(rom_addr).is_some());
+        assert!(m.read(ram_addr).is_some());
+        assert_eq!(m.snapshot().bus_violations, 0, "a stopped GSU owns nothing");
+        assert_eq!(m.bus_denied(rom_addr), None);
+
+        // GSU running and holding both grants.
+        m.regs.sfr |= SFR_G;
+        m.regs.scmr_ron = true;
+        m.regs.scmr_ran = true;
+
+        assert_eq!(m.bus_denied(rom_addr), Some(true), "ROM is the GSU's");
+        assert_eq!(m.bus_denied(ram_addr), Some(false), "so is cart RAM");
+
+        // The ROM read returns the busy vector, keyed on the low nibble.
+        assert_eq!(m.read(rom_addr), Some(SuperFxMapper::busy_rom_vector(0x04)));
+        assert_eq!(m.snapshot().bus_violations, 1);
+
+        // The cart-RAM read is open bus — `None` here, `$FF` to the caller.
+        assert_eq!(m.read(ram_addr), None);
+        assert_eq!(m.snapshot().bus_violations, 2);
+
+        // An address the GSU does not own is not a violation.
+        assert_eq!(m.bus_denied(make_addr(0x7E, 0x0000)), None);
     }
 
     #[test]

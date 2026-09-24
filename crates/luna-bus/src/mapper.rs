@@ -207,6 +207,17 @@ pub trait Mapper {
         None
     }
 
+    /// Would a 65816 read of `addr` be denied right now because the Super
+    /// FX owns that part of the cartridge? `Some(true)` = Game Pak ROM
+    /// (the SNES reads the busy vector), `Some(false)` = Game Pak RAM
+    /// (open bus), `None` = allowed, or no GSU.
+    ///
+    /// The mapper counts these itself; this is for the system bus, which
+    /// is the only place that knows which instruction made the access.
+    fn superfx_bus_denied(&self, _addr: Addr24) -> Option<bool> {
+        None
+    }
+
     /// A read-only DSP-1 (uPD7725) state snapshot for the debugger, or
     /// `None` for non-DSP mappers.
     fn dsp1_snapshot(&self) -> Option<Dsp1Snapshot> {
