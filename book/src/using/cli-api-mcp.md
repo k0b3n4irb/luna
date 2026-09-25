@@ -176,6 +176,7 @@ and is the hub for every headless diagnostic.
 | `--cpu-trace-from <N>`, `--cpu-trace-max <N>` | `0`, `100000` | Start capturing at instruction count `N`; hard cap on captured events (≈ 40 bytes each). Aim the window at the scene under test instead of tracing from reset. |
 | `--sa1-trace <PATH>`, `--sa1-trace-max <N>` | —, `200000` | Per-instruction SA-1 trace (`seq,pc,a,x,y,sp,p,db,dp,e`) and its event cap. |
 | `--superfx-trace <PATH>`, `--superfx-trace-max <N>` | —, `200000` | Per-opcode GSU trace (`seq,pc,opcode,sfr,r0..r15`, GO/STOP edges included) and its event cap. |
+| `--gsu-bus-trace <PATH>`, `--gsu-bus-trace-max <N>` | —, `200000` | Every CPU read of Game Pak ROM or RAM made **while the Super FX owned it** (`seq,frame,line,mclk,pc,addr,kind`). See *Who owns the cartridge* below. |
 | `--spc-trace <PATH>`, `--spc-trace-max <N>` | —, `200000` | Per-instruction SPC700 trace (`seq,pc,a,x,y,sp,psw,spc_cycle,t2_int,t2_out`) and its event cap. |
 | `--dma-trace <PATH>` | — | DMA→VRAM bytes as read during the transfer, with `line`, `hclock`, blank flags, the A-bus `src` and the `vram_word` each byte lands at. |
 | `--dma-trace-from <N>`, `--dma-trace-max <N>` | `0`, `500000` | Instruction count at which the DMA trace starts; its event cap. |
@@ -450,6 +451,7 @@ parked in `WAI` / `STP` under that label.
 | `--top <N>` | `25` | Rows printed (the JSON has them all). |
 | `--out <PATH>` | — | JSON report (`-` = stdout after the table): `{rom, from_frame, end_frame, total_mclk, instructions, frames, entries: [{symbol, addr, instructions, mclk, idle_mclk, pct, pcs, per_frame: {max, max_frame, mean, frames} \| null}], budgets: [{symbol, limit, max, max_frame, ok}]}`. `per_frame` is the row's master cycles per **completed** PPU frame in the window: `max` (and the frame that paid it), `mean` over every completed frame (a frame the row did not run in counts 0), `frames` it ran in; `null` when no frame completed while it ran. The trailing partial frame is never counted. |
 | `--budget <SYMBOL=MCLK>` | — | Gate (repeatable): the symbol's worst completed frame must not exceed `MCLK` master cycles, else **exit 1** with the frame named. A symbol the loaded `.sym` does not know is a usage error (exit 2) — a typo must not pass; a known symbol that never ran costs 0 and passes. The VBlank-budget check for CI. |
+| `--gsu-pc-set <PATH>` | — | The distinct **GSU** PCs executed, same encoding as `--pc-set`, in a separate file (a GSU PC and a 65816 PC can be the same number and mean different code). |
 | `--stack-floor <ADDR>` | — | Gate: the stack must never reach below `ADDR` (`0x`-hex, `$`-hex or decimal), else **exit 1**. Measured, not guessed — see below. |
 | `--pc-set <PATH>` | — | Write the set of executed PCs: every distinct 24-bit address that ran an instruction in the window, sorted, one little-endian `u32` each — the raw input of a code-coverage tool (fold onto `.sym` labels or a listing on your side). |
 | `--force-mapper`, `--force-region`, `--power-on` | — | As elsewhere. |
@@ -477,6 +479,71 @@ luna profile --from-frame 120 --until-frame 600 --budget NmiHandler=6000 game.sf
 
 Read `per_frame.max_frame` from the JSON, then `luna state --until-frame
 402 --screenshot` to see what that frame was doing.
+
+### What a Super FX job cost
+
+A renderer's frame budget is per **job** — everything between the GSU's GO
+and the STOP that ends it — not per frame, because a frame may run several.
+`luna profile` reports them:
+
+```bash
+luna profile --from-frame 60 --until-frame 120 --top 0 game.sfc
+# gsu: 184 job(s), 3507194 instr, 11175728 clocks (99.9% cache hits, 356300 stalled)
+# gsu: worst job #0 — 959024 clocks, 431964 instr, 0 stalled
+```
+
+The `--out` JSON carries every job under `gsu.per_job`
+(`seq, start_mclk, end_mclk, gsu_cycles, instructions, cache_hits,
+cache_misses, stall_cycles`), plus the totals and the worst job by clocks.
+
+**`stall_cycles` is the figure to look at first.** It counts clocks the GSU
+was running but parked, waiting for the CPU to release ROM or Game Pak RAM
+(`SCMR` `RON` / `RAN` not granted) — the difference between a job that was
+slow and one that was blocked, which a total cannot tell you.
+
+There is no "CPU cycles waiting for the GSU" counterpart, because there is
+nothing to count: a 65816 read of a cartridge the GSU owns is not stalled,
+on hardware or here — it gets the busy vector or open bus immediately and
+carries on (see below). For wall-clock budgeting use `start_mclk` /
+`end_mclk`; the gaps between jobs are CPU-only time.
+
+### Who owns the cartridge (Super FX)
+
+While `SCMR`'s `RON` / `RAN` bits grant the cartridge to the GSU, a 65816
+read of Game Pak ROM returns a dummy "busy" byte and a read of Game Pak RAM
+returns open bus. Nothing raises — on hardware or here. A program that
+forgets, an NMI handler still in ROM, a routine touching `$70:xxxx`
+mid-frame, silently reads garbage.
+
+`luna state --out -` counts it under `gsu`:
+
+```json
+"gsu": { "running": true, "scmr_ron": true, "scmr_ran": true,
+         "bus_violations": 0, "bus_vector_fetches": 452, … }
+```
+
+Gate on **`bus_violations`**, and note the second counter exists so you
+can. A denied read of the `$FFE0-$FFFF` vector page is not a fault: the
+busy vector is shaped so those fetches resolve to `$0108` (NMI) and
+`$010C` (IRQ), which is exactly why Super FX titles keep their handlers in
+WRAM at those addresses. Star Fox does it once a frame. Folding the two
+together would make `bus_violations == 0` fail on correct code.
+
+When the count is non-zero, `--gsu-bus-trace` names the instruction:
+
+```bash
+luna state -n 8000000 --gsu-bus-trace bus.csv "Star Fox (USA) (Rev 2).sfc"
+# seq,frame,line,mclk,pc,addr,kind
+# 0,149,207,53530022,$7E:4F00,$00:FFEE,vector
+```
+
+`kind` is `rom` (got the busy byte), `ram` (got open bus) or `vector` (the
+interrupt mechanism above). The capture reports how many accesses it saw
+as well as how many it kept, so a hit cap cannot quietly under-report.
+
+This is also why `--peek` on cart RAM can come back `unmapped` mid-job:
+the GSU owns it at that instant, and luna is reporting what the CPU would
+have read.
 
 ### How deep the stack actually went
 

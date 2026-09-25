@@ -197,6 +197,47 @@ pub trait Mapper {
         None
     }
 
+    /// Snapshot the Super FX (GSU) coprocessor's architectural state, if
+    /// this mapper hosts one. Everything else returns `None`.
+    ///
+    /// The sibling of [`Mapper::sa1_snapshot`] — the GSU had the snapshot
+    /// type from the start but no way up to a front-end, so it could be
+    /// traced and never asserted on.
+    fn superfx_snapshot(&self) -> Option<crate::superfx::SuperFxSnapshot> {
+        None
+    }
+
+    /// Drain the Super FX job records accumulated so far (`OpenSNES` R3),
+    /// leaving the job in flight open. `None` for a cart with no GSU.
+    fn take_superfx_jobs(&mut self) -> Option<Vec<SuperFxJob>> {
+        None
+    }
+
+    /// Start collecting the distinct GSU PCs executed (`OpenSNES` R3).
+    /// No-op without a GSU.
+    fn enable_superfx_pc_set(&mut self) {}
+
+    /// The GSU PCs executed since collection was enabled, sorted, or
+    /// `None` if it never was.
+    ///
+    /// Deliberately separate from the 65816 set: a GSU PC and a CPU PC can
+    /// be the same 24-bit number and mean different code, so merging them
+    /// would mis-attribute coverage.
+    fn superfx_pc_set(&self) -> Option<Vec<u32>> {
+        None
+    }
+
+    /// Would a 65816 read of `addr` be denied right now because the Super
+    /// FX owns that part of the cartridge? `Some(true)` = Game Pak ROM
+    /// (the SNES reads the busy vector), `Some(false)` = Game Pak RAM
+    /// (open bus), `None` = allowed, or no GSU.
+    ///
+    /// The mapper counts these itself; this is for the system bus, which
+    /// is the only place that knows which instruction made the access.
+    fn superfx_bus_denied(&self, _addr: Addr24) -> Option<bool> {
+        None
+    }
+
     /// A read-only DSP-1 (uPD7725) state snapshot for the debugger, or
     /// `None` for non-DSP mappers.
     fn dsp1_snapshot(&self) -> Option<Dsp1Snapshot> {
@@ -284,6 +325,33 @@ impl Mapper for NullMapper {
 
 /// One per-opcode snapshot of the GSU register file — the Super FX
 /// analogue of [`Sa1TraceEvent`]. Diffing this PC + register stream against
+/// One Super FX job — everything between a GO (the `sfr.g` flag setting)
+/// and the STOP that clears it (`OpenSNES` R3).
+///
+/// A renderer's frame budget is measured per job, not per frame: a frame
+/// may run several, and the interesting question is what each one cost.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct SuperFxJob {
+    /// Job index since reset, from 0.
+    pub seq: u64,
+    /// Main-CPU master clock when the job started.
+    pub start_mclk: u64,
+    /// Main-CPU master clock when it stopped.
+    pub end_mclk: u64,
+    /// GSU clocks the job actually spent executing.
+    pub gsu_cycles: u64,
+    /// GSU instructions retired in the job.
+    pub instructions: u64,
+    /// Opcode fetches served from the 512-byte cache.
+    pub cache_hits: u64,
+    /// Fetches that missed and refilled a 16-byte cache line.
+    pub cache_misses: u64,
+    /// GSU clocks the job spent parked waiting for the CPU to release ROM
+    /// or Game Pak RAM (`SCMR` `RON` / `RAN` not granted) — time the GSU
+    /// was running but doing nothing.
+    pub stall_cycles: u64,
+}
+
 /// a reference GSU trace (bsnes / siena) pinpoints the first divergence.
 #[derive(Debug, Clone, Copy)]
 pub struct SuperFxTraceEvent {

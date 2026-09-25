@@ -451,6 +451,17 @@ enum Command {
         /// 200 000).
         #[arg(long = "superfx-trace-max", default_value_t = 200_000)]
         superfx_trace_max: usize,
+        /// Optional Super FX bus-ownership trace: every CPU read of Game
+        /// Pak ROM or RAM made while the GSU owned it, as CSV
+        /// (`seq,frame,line,mclk,pc,addr,kind`). Those reads return the
+        /// busy vector or open bus — silently, on hardware too — so this
+        /// names the instruction that did it. `gsu.bus_violations` in
+        /// `--out -` counts them without the trace.
+        #[arg(long = "gsu-bus-trace")]
+        gsu_bus_trace: Option<PathBuf>,
+        /// Cap the Super FX bus-ownership trace (default 200 000).
+        #[arg(long = "gsu-bus-trace-max", default_value_t = 200_000)]
+        gsu_bus_trace_max: usize,
         /// Optional DSP-1 (`µPD77C25`) trace: microcode execution AND the
         /// CPU-side DR/SR port traffic in ONE interleaved stream, as CSV
         /// (`seq,kind,pc,opcode,value,a,b,dr,sr,rqm`). `kind` is E/W/R/S
@@ -739,6 +750,12 @@ enum Command {
         /// deepest when a `.sym` is loaded.
         #[arg(long = "stack-floor", value_parser = parse_u16_auto)]
         stack_floor: Option<u16>,
+        /// Write the set of executed **GSU** PCs (same encoding as
+        /// `--pc-set`): a separate file, because a GSU PC and a 65816 PC
+        /// can be the same number and mean different code — merging them
+        /// would mis-attribute coverage. Lets a coverage tool count `.sfx`.
+        #[arg(long = "gsu-pc-set")]
+        gsu_pc_set: Option<PathBuf>,
         /// Force a cartridge mapper (lorom, hirom, exhirom, sa1, superfx).
         #[arg(long = "force-mapper")]
         force_mapper: Option<String>,
@@ -985,6 +1002,8 @@ fn main() -> ExitCode {
             sa1_trace_max,
             superfx_trace,
             superfx_trace_max,
+            gsu_bus_trace,
+            gsu_bus_trace_max,
             dsp1_trace,
             dsp1_trace_max,
             dsp1_trace_ports,
@@ -1061,6 +1080,8 @@ fn main() -> ExitCode {
                 sa1_trace_max,
                 superfx_trace.as_deref(),
                 superfx_trace_max,
+                gsu_bus_trace.as_deref(),
+                gsu_bus_trace_max,
                 dsp1_trace.as_deref(),
                 dsp1_trace_max,
                 dsp1_trace_ports,
@@ -1159,6 +1180,7 @@ fn main() -> ExitCode {
             pc_set,
             budget,
             stack_floor,
+            gsu_pc_set,
             force_mapper,
             force_region,
             power_on,
@@ -1187,6 +1209,7 @@ fn main() -> ExitCode {
                 pc_set: pc_set.as_deref(),
                 budgets: &budget,
                 stack_floor,
+                gsu_pc_set: gsu_pc_set.as_deref(),
                 force_mapper: force_mapper.as_deref(),
                 force_region: force_region.as_deref(),
                 power_on: power_on.as_deref(),
