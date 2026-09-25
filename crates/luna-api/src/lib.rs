@@ -30,7 +30,8 @@ pub use luna_core::{
     BreakHit, BreakKind, BreakpointInfo, CpuTraceEvent, CpuTraceLog, DmaTraceEvent, DmaTraceLog,
     Dsp1TraceEvent, Dsp1TraceKind, GsuBusAccess, GsuBusEvent, MailboxEvent, MailboxEventKind,
     MapperKind, MemEventKind, MemOrigin, MemTraceEvent, MemTraceFilter, MemTraceLog, Profile,
-    ProfileSample, Sa1LogEvent, Sa1SideEvent, Sa1TraceEvent, Spc700TraceEvent, SuperFxTraceEvent,
+    ProfileSample, Sa1LogEvent, Sa1SideEvent, Sa1TraceEvent, Spc700TraceEvent, SuperFxJob,
+    SuperFxTraceEvent,
 };
 /// Decoded BG tilemap image (Tilemap Viewer), re-exported so the GUI uses
 /// `luna_api::TilemapImage` rather than depending on `luna-ppu`.
@@ -3866,6 +3867,35 @@ impl Emulator {
     /// Enable per-access memory tracing. Every CPU bus read/write
     /// from this point matching `bank_filter` (or every access when
     /// `None`) is captured into the log until `max_events` is
+    /// Start collecting the distinct GSU PCs executed (`OpenSNES` R3), so
+    /// a coverage tool can count `.sfx` code. No-op without a GSU.
+    pub fn enable_gsu_pc_set(&mut self) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.mapper.enable_superfx_pc_set();
+        Ok(())
+    }
+
+    /// The GSU PCs executed since collection was enabled, sorted.
+    ///
+    /// A separate set from [`Self::profile_pcs`] on purpose: a GSU PC and a
+    /// 65816 PC can be the same number and mean different code, so a
+    /// coverage tool must not union them blindly.
+    pub fn gsu_pc_set(&self) -> Result<Vec<u32>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        Ok(snes.mapper.superfx_pc_set().unwrap_or_default())
+    }
+
+    /// Drain the Super FX job records — one per GO→STOP (`OpenSNES` R3).
+    ///
+    /// A renderer's frame budget is measured per job, not per frame: a
+    /// frame may run several, and `stall_cycles` separates "the job was
+    /// slow" from "the job was blocked waiting for the CPU to hand the
+    /// cartridge back", which a total cannot.
+    pub fn take_gsu_jobs(&mut self) -> Result<Vec<SuperFxJob>, ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        Ok(snes.mapper.take_superfx_jobs().unwrap_or_default())
+    }
+
     /// Start capturing CPU cartridge accesses made while the Super FX owns
     /// the bus (`OpenSNES` R2).
     ///

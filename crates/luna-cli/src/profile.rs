@@ -32,6 +32,8 @@ pub(crate) struct ProfileOptions<'a> {
     pub budgets: &'a [String],
     /// `--stack-floor N`: exit 1 if `S` ever went below N (`OpenSNES` R3).
     pub stack_floor: Option<u16>,
+    /// `--gsu-pc-set`: write the distinct GSU PCs executed (`OpenSNES` R3).
+    pub gsu_pc_set: Option<&'a std::path::Path>,
     pub force_mapper: Option<&'a str>,
     pub force_region: Option<&'a str>,
     pub power_on: Option<&'a str>,
@@ -52,6 +54,30 @@ struct Report<'a> {
     /// Deepest native-mode stack reach over the profiled window, and the
     /// `--stack-floor` verdict if one was asked for.
     stack: StackReport,
+    /// Super FX jobs completed in the window, or `None` without a GSU.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gsu: Option<GsuReport>,
+}
+
+/// Super FX accounting over the profiled window (`OpenSNES` R3).
+#[derive(serde::Serialize)]
+struct GsuReport {
+    /// Jobs (GO→STOP) completed in the window.
+    jobs: usize,
+    /// GSU clocks spent executing, summed.
+    gsu_cycles: u64,
+    /// GSU instructions retired, summed.
+    instructions: u64,
+    /// Opcode fetches served from the 512-byte cache.
+    cache_hits: u64,
+    /// Fetches that missed and refilled a cache line.
+    cache_misses: u64,
+    /// Clocks the GSU was running but parked on a bus it did not own.
+    stall_cycles: u64,
+    /// The worst job by GSU clocks, which is what a frame budget is set by.
+    worst: Option<luna_api::SuperFxJob>,
+    /// Every job, in order.
+    per_job: Vec<luna_api::SuperFxJob>,
 }
 
 /// The stack low-water mark plus its optional gate (`OpenSNES` R3).
@@ -122,6 +148,17 @@ fn judge_budgets(
     Ok(out)
 }
 
+/// Write a sorted PC set as little-endian `u32`s — the encoding a
+/// coverage tool reads. Shared by the 65816 and GSU sets so they cannot
+/// drift apart in format.
+fn write_pc_set(path: &std::path::Path, pcs: &[u32]) -> std::io::Result<()> {
+    let mut bytes = Vec::with_capacity(pcs.len() * 4);
+    for pc in pcs {
+        bytes.extend_from_slice(&pc.to_le_bytes());
+    }
+    std::fs::write(path, bytes)
+}
+
 /// `luna profile` entry point.
 pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> ExitCode {
     let mut em = luna_api::Emulator::new();
@@ -182,6 +219,12 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
     // and boot pushes deeper than a game loop does. Start the stack
     // watermark here, with the profile.
     em.clear_stack_low();
+    if o.gsu_pc_set.is_some()
+        && let Err(e) = em.enable_gsu_pc_set()
+    {
+        eprintln!("error: enable_gsu_pc_set: {e}");
+        return ExitCode::from(1);
+    }
     if let Err(e) = em.enable_profile() {
         eprintln!("error: enable_profile: {e}");
         return ExitCode::from(1);
@@ -228,11 +271,7 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
                 return ExitCode::from(1);
             }
         };
-        let mut bytes = Vec::with_capacity(pcs.len() * 4);
-        for pc in &pcs {
-            bytes.extend_from_slice(&pc.to_le_bytes());
-        }
-        if let Err(e) = std::fs::write(path, bytes) {
+        if let Err(e) = write_pc_set(path, &pcs) {
             eprintln!("error: writing {}: {e}", path.display());
             return ExitCode::from(1);
         }
@@ -301,6 +340,59 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
         }
         over |= !v.ok;
     }
+    // Super FX accounting (`OpenSNES` R3). Drained after the run so the
+    // window matches the profile's.
+    let gsu = match em.take_gsu_jobs() {
+        Ok(jobs) if !jobs.is_empty() => {
+            let worst = jobs.iter().copied().max_by_key(|j| j.gsu_cycles);
+            let rep = GsuReport {
+                jobs: jobs.len(),
+                gsu_cycles: jobs.iter().map(|j| j.gsu_cycles).sum(),
+                instructions: jobs.iter().map(|j| j.instructions).sum(),
+                cache_hits: jobs.iter().map(|j| j.cache_hits).sum(),
+                cache_misses: jobs.iter().map(|j| j.cache_misses).sum(),
+                stall_cycles: jobs.iter().map(|j| j.stall_cycles).sum(),
+                worst,
+                per_job: jobs,
+            };
+            let fetches = rep.cache_hits + rep.cache_misses;
+            // The ratio is what a renderer tunes its code layout against;
+            // print it only when there were fetches to divide by.
+            let hit_pct = if fetches > 0 {
+                format!(
+                    "{:.1}% cache hits",
+                    100.0 * rep.cache_hits as f64 / fetches as f64
+                )
+            } else {
+                "no fetches".to_string()
+            };
+            println!(
+                "gsu: {} job(s), {} instr, {} clocks ({hit_pct}, {} stalled)",
+                rep.jobs, rep.instructions, rep.gsu_cycles, rep.stall_cycles
+            );
+            if let Some(w) = rep.worst {
+                println!(
+                    "gsu: worst job #{} — {} clocks, {} instr, {} stalled",
+                    w.seq, w.gsu_cycles, w.instructions, w.stall_cycles
+                );
+            }
+            Some(rep)
+        }
+        _ => None,
+    };
+    if let Some(path) = o.gsu_pc_set {
+        match em.gsu_pc_set() {
+            Ok(pcs) => match write_pc_set(path, &pcs) {
+                Ok(()) => eprintln!(
+                    "gsu pc-set: {} distinct GSU PC(s) -> {}",
+                    pcs.len(),
+                    path.display()
+                ),
+                Err(e) => eprintln!("error: writing {}: {e}", path.display()),
+            },
+            Err(e) => eprintln!("error: gsu_pc_set: {e}"),
+        }
+    }
     let low = em.stack_low();
     let stack_ok = match (o.stack_floor, low.as_ref()) {
         (Some(floor), Some(l)) => {
@@ -346,6 +438,7 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
                 floor: o.stack_floor,
                 ok: stack_ok,
             },
+            gsu,
         })
         .expect("report serialises");
         let res = if path.as_os_str() == "-" {
