@@ -21,7 +21,8 @@
 //! and Mesen2 `Core/SNES/Coprocessors/GSU`.
 
 use crate::mapper::{
-    Mapper, MapperKind, MapperStateError, SuperFxTraceEvent, check_state_len, decode_state,
+    Mapper, MapperKind, MapperStateError, SuperFxJob, SuperFxTraceEvent, check_state_len,
+    decode_state,
 };
 use crate::types::{Addr24, bank_of, offset_of};
 
@@ -302,6 +303,21 @@ pub struct SuperFxMapper {
     /// resolve to `$0108` (NMI) / `$010C` (IRQ), which is why Super FX
     /// titles keep their handlers in WRAM there. Reported, not gated.
     bus_vector_fetches: u64,
+    /// Per-job accounting (`OpenSNES` R3): completed jobs, plus the one in
+    /// flight. Diagnostics, so out of `SuperFxState` like the counters
+    /// above — the save-state shape is untouched.
+    jobs: Vec<SuperFxJob>,
+    /// The job being executed, if the GSU is running.
+    job_open: Option<SuperFxJob>,
+    /// Cap on retained jobs; the oldest are dropped past it.
+    jobs_max: usize,
+    /// Jobs completed since reset — the `seq` source, so it keeps counting
+    /// past the retention cap.
+    jobs_closed: u64,
+    /// Distinct GSU PCs executed, when collection is on (`OpenSNES` R3).
+    /// `None` = off, and then it costs nothing: a hash insert per GSU
+    /// instruction is not free at five million instructions a second.
+    pc_set: Option<std::collections::HashSet<u32>>,
     /// Cumulative main-CPU master clocks since reset (advanced by every
     /// `step_coproc`, even while the GSU is stopped). The shared time axis the
     /// GSU clock is read against — see [`SuperFxTraceEvent::mclk`].
@@ -347,6 +363,11 @@ impl SuperFxMapper {
             instructions_executed: 0,
             bus_violations: 0,
             bus_vector_fetches: 0,
+            jobs: Vec::new(),
+            job_open: None,
+            jobs_max: 4096,
+            jobs_closed: 0,
+            pc_set: None,
             cpu_mclk: 0,
             gsu_running_prev: false,
             modified_r14: false,
@@ -781,9 +802,15 @@ impl SuperFxMapper {
         if offset < 512 {
             let line = (offset >> 4) as usize;
             if self.cache_valid[line] {
+                if let Some(j) = self.job_open.as_mut() {
+                    j.cache_hits += 1;
+                }
                 let hc = self.hit_cycles();
                 self.step(hc);
             } else {
+                if let Some(j) = self.job_open.as_mut() {
+                    j.cache_misses += 1;
+                }
                 let dp = (offset & 0xFFF0) as usize;
                 let sp = (u32::from(self.regs.pbr) << 16)
                     + u32::from(self.regs.cbr.wrapping_add(offset & 0xFFF0) & 0xFFF0);
@@ -826,6 +853,29 @@ impl SuperFxMapper {
         result
     }
 
+    /// The GSU's clock on the shared master-clock axis: the CPU timeline
+    /// minus the GSU's lag.
+    fn gsu_clock(&self) -> u64 {
+        i64::try_from(self.cpu_mclk)
+            .unwrap_or(i64::MAX)
+            .saturating_sub(self.clock_deficit)
+            .max(0) as u64
+    }
+
+    /// Close the job in flight and retain it, dropping the oldest once the
+    /// cap is reached so a long run cannot grow without bound.
+    fn close_job(&mut self) {
+        let Some(mut job) = self.job_open.take() else {
+            return;
+        };
+        job.end_mclk = self.gsu_clock();
+        self.jobs_closed = self.jobs_closed.saturating_add(1);
+        if self.jobs.len() >= self.jobs_max {
+            self.jobs.drain(0..(self.jobs_max / 2).max(1));
+        }
+        self.jobs.push(job);
+    }
+
     // --- top-level execution loop ----------------------------------------
 
     /// Execute exactly one GSU instruction (one pass of ares `main()` with
@@ -835,11 +885,30 @@ impl SuperFxMapper {
         self.instructions_executed = self.instructions_executed.saturating_add(1);
         self.modified_r14 = false;
         self.modified_r15 = false;
+        let pc_full = (u32::from(self.regs.pbr) << 16) | u32::from(self.regs.r[15]);
+        if let Some(set) = self.pc_set.as_mut() {
+            set.insert(pc_full);
+        }
         let opcode = self.peekpipe();
         // `go_start` = first instruction since the GSU was last stopped (task
         // boundary). The GSU is running by definition inside `run_one`.
         let go_start = !self.gsu_running_prev;
         self.gsu_running_prev = true;
+        // Open a job at the GO edge (`OpenSNES` R3). A renderer's budget is
+        // per job, not per frame: a frame may run several.
+        if go_start {
+            let seq = self.jobs_closed;
+            self.job_open = Some(SuperFxJob {
+                seq,
+                start_mclk: self.gsu_clock(),
+                end_mclk: 0,
+                gsu_cycles: 0,
+                instructions: 0,
+                cache_hits: 0,
+                cache_misses: 0,
+                stall_cycles: 0,
+            });
+        }
         // Record the pushed event's index so `stop` can be patched in once
         // `execute` reveals whether this op cleared `sfr.g`.
         let traced_idx = if self.trace.is_some() {
@@ -884,8 +953,15 @@ impl SuperFxMapper {
         }
         // A cleared GO flag means this instruction ended the GO task (STOP).
         // Mark the next executed op as a fresh task start.
+        // Charge this instruction to the open job before the STOP check —
+        // the instruction that stops the GSU is part of the job it ends.
+        if let Some(j) = self.job_open.as_mut() {
+            j.instructions += 1;
+            j.gsu_cycles += u64::from(self.cycles);
+        }
         if !self.sfr_get(SFR_G) {
             self.gsu_running_prev = false;
+            self.close_job();
             if let Some(idx) = traced_idx
                 && let Some((events, _)) = self.trace.as_mut()
                 && let Some(e) = events.get_mut(idx)
@@ -1624,6 +1700,23 @@ impl Mapper for SuperFxMapper {
         self.bus_denied(addr)
     }
 
+    fn take_superfx_jobs(&mut self) -> Option<Vec<SuperFxJob>> {
+        Some(std::mem::take(&mut self.jobs))
+    }
+
+    fn enable_superfx_pc_set(&mut self) {
+        self.pc_set
+            .get_or_insert_with(std::collections::HashSet::new);
+    }
+
+    fn superfx_pc_set(&self) -> Option<Vec<u32>> {
+        self.pc_set.as_ref().map(|s| {
+            let mut v: Vec<u32> = s.iter().copied().collect();
+            v.sort_unstable();
+            v
+        })
+    }
+
     fn save_state(&self) -> Vec<u8> {
         let st = SuperFxState {
             ram: self.ram.clone(),
@@ -1779,6 +1872,17 @@ impl Mapper for SuperFxMapper {
         // clock-synced to the CPU so it resumes in phase, with no catch-up
         // burst of instructions when SCMR grants access back.
         if self.stalled() {
+            // The deficit discarded here IS the parked time: clocks the GSU
+            // was running for and spent doing nothing, waiting for the CPU
+            // to hand back ROM or RAM. Charge it to the job before dropping
+            // it (`OpenSNES` R3) — it is the difference between "the job was
+            // slow" and "the job was blocked", which the totals alone
+            // cannot tell apart.
+            if self.clock_deficit > 0
+                && let Some(j) = self.job_open.as_mut()
+            {
+                j.stall_cycles = j.stall_cycles.saturating_add(self.clock_deficit as u64);
+            }
             self.clock_deficit = 0;
         }
     }
@@ -1817,6 +1921,43 @@ mod tests {
 
     fn fx() -> SuperFxMapper {
         SuperFxMapper::new(ramp_rom(1024 * 1024), 0x8000)
+    }
+
+    #[test]
+    fn a_job_spans_go_to_stop_and_carries_its_own_costs() {
+        // A renderer's budget is per job, not per frame — a frame may run
+        // several — so the accounting has to close on the STOP that ends
+        // each one, and the instruction that stops the GSU belongs to the
+        // job it ends, not to the next.
+        let mut m = fx();
+        assert!(m.take_superfx_jobs().is_some_and(|j| j.is_empty()));
+
+        // Drive one instruction with the GSU running, then stop it.
+        m.regs.sfr |= SFR_G;
+        m.regs.scmr_ron = true;
+        m.regs.scmr_ran = true;
+        m.run_one();
+        assert!(m.job_open.is_some(), "a GO edge opens a job");
+        let open_instr = m.job_open.expect("open").instructions;
+        assert_eq!(open_instr, 1, "the first instruction is charged to it");
+
+        // Clearing `g` from outside is what STOP does internally.
+        m.regs.sfr &= !SFR_G;
+        m.regs.sfr |= SFR_G;
+        m.run_one();
+        m.regs.sfr &= !SFR_G;
+        m.run_one();
+
+        let jobs = m.take_superfx_jobs().expect("a Super FX mapper has jobs");
+        assert!(!jobs.is_empty(), "the STOP closed a job");
+        let j = jobs[0];
+        assert!(j.instructions >= 1);
+        assert!(
+            j.end_mclk >= j.start_mclk,
+            "a job cannot end before it began"
+        );
+        // Draining leaves nothing behind but keeps counting.
+        assert!(m.take_superfx_jobs().is_some_and(|j| j.is_empty()));
     }
 
     #[test]

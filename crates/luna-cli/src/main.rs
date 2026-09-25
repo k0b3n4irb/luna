@@ -750,6 +750,12 @@ enum Command {
         /// deepest when a `.sym` is loaded.
         #[arg(long = "stack-floor", value_parser = parse_u16_auto)]
         stack_floor: Option<u16>,
+        /// Write the set of executed **GSU** PCs (same encoding as
+        /// `--pc-set`): a separate file, because a GSU PC and a 65816 PC
+        /// can be the same number and mean different code — merging them
+        /// would mis-attribute coverage. Lets a coverage tool count `.sfx`.
+        #[arg(long = "gsu-pc-set")]
+        gsu_pc_set: Option<PathBuf>,
         /// Force a cartridge mapper (lorom, hirom, exhirom, sa1, superfx).
         #[arg(long = "force-mapper")]
         force_mapper: Option<String>,
@@ -1174,6 +1180,7 @@ fn main() -> ExitCode {
             pc_set,
             budget,
             stack_floor,
+            gsu_pc_set,
             force_mapper,
             force_region,
             power_on,
@@ -1202,6 +1209,7 @@ fn main() -> ExitCode {
                 pc_set: pc_set.as_deref(),
                 budgets: &budget,
                 stack_floor,
+                gsu_pc_set: gsu_pc_set.as_deref(),
                 force_mapper: force_mapper.as_deref(),
                 force_region: force_region.as_deref(),
                 power_on: power_on.as_deref(),
