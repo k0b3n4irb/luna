@@ -176,6 +176,7 @@ and is the hub for every headless diagnostic.
 | `--cpu-trace-from <N>`, `--cpu-trace-max <N>` | `0`, `100000` | Start capturing at instruction count `N`; hard cap on captured events (≈ 40 bytes each). Aim the window at the scene under test instead of tracing from reset. |
 | `--sa1-trace <PATH>`, `--sa1-trace-max <N>` | —, `200000` | Per-instruction SA-1 trace (`seq,pc,a,x,y,sp,p,db,dp,e`) and its event cap. |
 | `--superfx-trace <PATH>`, `--superfx-trace-max <N>` | —, `200000` | Per-opcode GSU trace (`seq,pc,opcode,sfr,r0..r15`, GO/STOP edges included) and its event cap. |
+| `--gsu-bus-trace <PATH>`, `--gsu-bus-trace-max <N>` | —, `200000` | Every CPU read of Game Pak ROM or RAM made **while the Super FX owned it** (`seq,frame,line,mclk,pc,addr,kind`). See *Who owns the cartridge* below. |
 | `--spc-trace <PATH>`, `--spc-trace-max <N>` | —, `200000` | Per-instruction SPC700 trace (`seq,pc,a,x,y,sp,psw,spc_cycle,t2_int,t2_out`) and its event cap. |
 | `--dma-trace <PATH>` | — | DMA→VRAM bytes as read during the transfer, with `line`, `hclock`, blank flags, the A-bus `src` and the `vram_word` each byte lands at. |
 | `--dma-trace-from <N>`, `--dma-trace-max <N>` | `0`, `500000` | Instruction count at which the DMA trace starts; its event cap. |
@@ -477,6 +478,44 @@ luna profile --from-frame 120 --until-frame 600 --budget NmiHandler=6000 game.sf
 
 Read `per_frame.max_frame` from the JSON, then `luna state --until-frame
 402 --screenshot` to see what that frame was doing.
+
+### Who owns the cartridge (Super FX)
+
+While `SCMR`'s `RON` / `RAN` bits grant the cartridge to the GSU, a 65816
+read of Game Pak ROM returns a dummy "busy" byte and a read of Game Pak RAM
+returns open bus. Nothing raises — on hardware or here. A program that
+forgets, an NMI handler still in ROM, a routine touching `$70:xxxx`
+mid-frame, silently reads garbage.
+
+`luna state --out -` counts it under `gsu`:
+
+```json
+"gsu": { "running": true, "scmr_ron": true, "scmr_ran": true,
+         "bus_violations": 0, "bus_vector_fetches": 452, … }
+```
+
+Gate on **`bus_violations`**, and note the second counter exists so you
+can. A denied read of the `$FFE0-$FFFF` vector page is not a fault: the
+busy vector is shaped so those fetches resolve to `$0108` (NMI) and
+`$010C` (IRQ), which is exactly why Super FX titles keep their handlers in
+WRAM at those addresses. Star Fox does it once a frame. Folding the two
+together would make `bus_violations == 0` fail on correct code.
+
+When the count is non-zero, `--gsu-bus-trace` names the instruction:
+
+```bash
+luna state -n 8000000 --gsu-bus-trace bus.csv "Star Fox (USA) (Rev 2).sfc"
+# seq,frame,line,mclk,pc,addr,kind
+# 0,149,207,53530022,$7E:4F00,$00:FFEE,vector
+```
+
+`kind` is `rom` (got the busy byte), `ram` (got open bus) or `vector` (the
+interrupt mechanism above). The capture reports how many accesses it saw
+as well as how many it kept, so a hit cap cannot quietly under-report.
+
+This is also why `--peek` on cart RAM can come back `unmapped` mid-job:
+the GSU owns it at that instant, and luna is reporting what the CPU would
+have read.
 
 ### How deep the stack actually went
 
