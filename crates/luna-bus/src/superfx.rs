@@ -220,9 +220,13 @@ pub struct SuperFxSnapshot {
     pub running: bool,
     /// Cumulative GSU instructions retired since reset.
     pub instructions_executed: u64,
-    /// CPU accesses to the cartridge while the GSU owned it — each one got
-    /// a dummy byte (ROM) or open bus (RAM) instead of real data.
+    /// CPU accesses to the cartridge while the GSU owned it that got
+    /// garbage instead of data — the number to gate on. Excludes vector
+    /// fetches, which are the interrupt mechanism.
     pub bus_violations: u64,
+    /// Denied `$FFE0-$FFFF` fetches: the Super FX interrupt mechanism
+    /// (they resolve to `$0108` / `$010C` in WRAM), reported not gated.
+    pub bus_vector_fetches: u64,
 }
 
 /// One 8-pixel plot run awaiting writeback to Game Pak RAM (spec §4.1).
@@ -282,11 +286,22 @@ pub struct SuperFxMapper {
     /// machine state, so it stays out of `SuperFxState` and the save-state
     /// blob (the same reasoning as the API's stack watermark).
     instructions_executed: u64,
-    /// CPU accesses to the cartridge while the GSU owned it (`OpenSNES`
-    /// R2). Each one read a dummy byte or open bus instead of the data the
-    /// program expected — silently, on hardware and in every emulator.
-    /// Diagnostic, so it stays out of `SuperFxState` like the counter above.
+    /// CPU accesses to the cartridge while the GSU owned it that got
+    /// garbage: a dummy byte for ROM data, open bus for RAM (`OpenSNES`
+    /// R2). Silent on hardware as in every emulator — this is the count a
+    /// runtime gates on.
+    ///
+    /// Deliberately excludes the `$FFE0-$FFFF` vector page, which is
+    /// counted separately: a denied vector fetch is the Super FX's
+    /// *interrupt mechanism*, not a mistake. Folding the two together
+    /// would make `bus_violations == 0` fail on correct code — Star Fox
+    /// trips it once a frame — which would have made the gate useless to
+    /// the very runtime that asked for it.
     bus_violations: u64,
+    /// Denied reads of the vector page: the busy vector is shaped so they
+    /// resolve to `$0108` (NMI) / `$010C` (IRQ), which is why Super FX
+    /// titles keep their handlers in WRAM there. Reported, not gated.
+    bus_vector_fetches: u64,
     /// Cumulative main-CPU master clocks since reset (advanced by every
     /// `step_coproc`, even while the GSU is stopped). The shared time axis the
     /// GSU clock is read against — see [`SuperFxTraceEvent::mclk`].
@@ -331,6 +346,7 @@ impl SuperFxMapper {
             cycles: 0,
             instructions_executed: 0,
             bus_violations: 0,
+            bus_vector_fetches: 0,
             cpu_mclk: 0,
             gsu_running_prev: false,
             modified_r14: false,
@@ -364,6 +380,7 @@ impl SuperFxMapper {
             running: self.regs.sfr & SFR_G != 0,
             instructions_executed: self.instructions_executed,
             bus_violations: self.bus_violations,
+            bus_vector_fetches: self.bus_vector_fetches,
         }
     }
 
@@ -1675,7 +1692,11 @@ impl Mapper for SuperFxMapper {
         // vector instead of ROM data (spec §3.3).
         if let Some(o) = Self::rom_offset(bank, offset) {
             if self.sfr_get(SFR_G) && self.regs.scmr_ron {
-                self.bus_violations = self.bus_violations.saturating_add(1);
+                if offset >= 0xFFE0 {
+                    self.bus_vector_fetches = self.bus_vector_fetches.saturating_add(1);
+                } else {
+                    self.bus_violations = self.bus_violations.saturating_add(1);
+                }
                 return Some(Self::busy_rom_vector(offset as u8));
             }
             return Some(self.rom[o & self.rom_mask]);
@@ -1834,6 +1855,28 @@ mod tests {
 
         // An address the GSU does not own is not a violation.
         assert_eq!(m.bus_denied(make_addr(0x7E, 0x0000)), None);
+
+        // The vector page is the exception that decides whether the gate is
+        // usable at all. A denied fetch there is the Super FX's interrupt
+        // mechanism: the busy vector is shaped so $FFEA/$FFEE resolve to
+        // $0108 / $010C in WRAM, which is where Super FX titles keep their
+        // handlers. Star Fox does it once a frame, so folding these into
+        // `bus_violations` would make `== 0` fail on correct code.
+        let before = m.snapshot().bus_violations;
+        assert_eq!(m.read(make_addr(0x00, 0xFFEE)), Some(0x0C));
+        assert_eq!(m.read(make_addr(0x00, 0xFFEF)), Some(0x01));
+        assert_eq!(
+            m.snapshot().bus_violations,
+            before,
+            "a vector fetch is the mechanism, not a fault"
+        );
+        assert_eq!(m.snapshot().bus_vector_fetches, 2);
+        // …and the two bytes are the little-endian IRQ handler address.
+        assert_eq!(
+            u16::from(SuperFxMapper::busy_rom_vector(0x0E))
+                | u16::from(SuperFxMapper::busy_rom_vector(0x0F)) << 8,
+            0x010C
+        );
     }
 
     #[test]

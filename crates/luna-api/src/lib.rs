@@ -28,9 +28,9 @@ use luna_core::Snes;
 pub use luna_core::controller::PortDevice;
 pub use luna_core::{
     BreakHit, BreakKind, BreakpointInfo, CpuTraceEvent, CpuTraceLog, DmaTraceEvent, DmaTraceLog,
-    Dsp1TraceEvent, Dsp1TraceKind, MailboxEvent, MailboxEventKind, MapperKind, MemEventKind,
-    MemOrigin, MemTraceEvent, MemTraceFilter, MemTraceLog, Profile, ProfileSample, Sa1LogEvent,
-    Sa1SideEvent, Sa1TraceEvent, Spc700TraceEvent, SuperFxTraceEvent,
+    Dsp1TraceEvent, Dsp1TraceKind, GsuBusAccess, GsuBusEvent, MailboxEvent, MailboxEventKind,
+    MapperKind, MemEventKind, MemOrigin, MemTraceEvent, MemTraceFilter, MemTraceLog, Profile,
+    ProfileSample, Sa1LogEvent, Sa1SideEvent, Sa1TraceEvent, Spc700TraceEvent, SuperFxTraceEvent,
 };
 /// Decoded BG tilemap image (Tilemap Viewer), re-exported so the GUI uses
 /// `luna_api::TilemapImage` rather than depending on `luna-ppu`.
@@ -336,11 +336,17 @@ pub struct GsuState {
     pub clsr: bool,
     /// Cumulative GSU instructions retired since reset.
     pub instructions_executed: u64,
-    /// CPU accesses to the cartridge made while the GSU owned it: each one
-    /// read a dummy byte (ROM) or open bus (RAM) instead of the data the
-    /// program expected, silently — on hardware as in every emulator. A
-    /// runtime that keeps the CPU busy during GSU jobs asserts this is 0.
+    /// CPU accesses to the cartridge made while the GSU owned it that read
+    /// garbage: a dummy byte for ROM, open bus for RAM. Silent on hardware
+    /// as in every emulator. A runtime that keeps the CPU busy during GSU
+    /// jobs asserts this is 0 — and can, because vector fetches are
+    /// counted separately.
     pub bus_violations: u64,
+    /// Denied reads of the `$FFE0-$FFFF` vector page. Not a fault: the
+    /// busy vector is shaped so they resolve to `$0108` (NMI) and `$010C`
+    /// (IRQ), which is why Super FX titles keep their handlers in WRAM at
+    /// those addresses. Star Fox does this once per frame.
+    pub bus_vector_fetches: u64,
 }
 
 /// How deep the stack ever reached, and where.
@@ -2185,6 +2191,7 @@ impl Emulator {
                 clsr: g.clsr,
                 instructions_executed: g.instructions_executed,
                 bus_violations: g.bus_violations,
+                bus_vector_fetches: g.bus_vector_fetches,
             });
         let dsp1_instructions = self
             .snes
@@ -3809,6 +3816,26 @@ impl Emulator {
     /// Enable per-access memory tracing. Every CPU bus read/write
     /// from this point matching `bank_filter` (or every access when
     /// `None`) is captured into the log until `max_events` is
+    /// Start capturing CPU cartridge accesses made while the Super FX owns
+    /// the bus (`OpenSNES` R2).
+    ///
+    /// The access itself is already faithful — ROM reads return the busy
+    /// vector, Game Pak RAM reads open bus — and `gsu.bus_violations`
+    /// counts them without this. What the capture adds is the PC, frame and
+    /// line of each one: which routine forgot, not merely that one did.
+    pub fn enable_gsu_bus_trace(&mut self, max_events: usize) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.enable_gsu_bus_trace(max_events);
+        Ok(())
+    }
+
+    /// Drain the capture: `(events, seen)`, where `seen` counts every
+    /// access including those dropped once `max_events` was reached.
+    pub fn take_gsu_bus_trace(&mut self) -> Result<(Vec<GsuBusEvent>, u64), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        Ok(snes.take_gsu_bus_trace())
+    }
+
     /// reached. Drain with [`Emulator::take_mem_trace_log`].
     pub fn enable_mem_trace(
         &mut self,
