@@ -5,8 +5,9 @@ use std::process::ExitCode;
 
 use crate::csv::{
     write_cpu_trace_csv, write_dma_trace_csv, write_dsp_trace_csv, write_dsp1_commands_csv,
-    write_dsp1_trace_csv, write_mailbox_log_csv, write_mem_trace_csv, write_sa1_log_csv,
-    write_sa1_side_log_csv, write_sa1_trace_csv, write_spc_trace_csv, write_superfx_trace_csv,
+    write_dsp1_trace_csv, write_gsu_bus_trace_csv, write_mailbox_log_csv, write_mem_trace_csv,
+    write_sa1_log_csv, write_sa1_side_log_csv, write_sa1_trace_csv, write_spc_trace_csv,
+    write_superfx_trace_csv,
 };
 use crate::fmt::hex_str;
 use crate::output::{print_hex_dump, write_wav};
@@ -123,6 +124,8 @@ pub(crate) fn run_state(
     sa1_trace_max: usize,
     superfx_trace_path: Option<&std::path::Path>,
     superfx_trace_max: usize,
+    gsu_bus_trace_path: Option<&std::path::Path>,
+    gsu_bus_trace_max: usize,
     dsp1_trace_path: Option<&std::path::Path>,
     dsp1_trace_max: usize,
     dsp1_trace_ports: bool,
@@ -260,6 +263,12 @@ pub(crate) fn run_state(
         && let Err(e) = em.enable_superfx_trace(superfx_trace_max)
     {
         eprintln!("error: enable_superfx_trace: {e}");
+        return ExitCode::from(1);
+    }
+    if gsu_bus_trace_path.is_some()
+        && let Err(e) = em.enable_gsu_bus_trace(gsu_bus_trace_max)
+    {
+        eprintln!("error: enable_gsu_bus_trace: {e}");
         return ExitCode::from(1);
     }
     if spc_trace_path.is_some()
@@ -788,6 +797,29 @@ pub(crate) fn run_state(
                 Err(e) => eprintln!("error: writing Super FX trace: {e}"),
             },
             Err(e) => eprintln!("error: take_superfx_trace: {e}"),
+        }
+    }
+    if let Some(path) = gsu_bus_trace_path {
+        match em.take_gsu_bus_trace() {
+            Ok((events, seen)) => match write_gsu_bus_trace_csv(path, &events) {
+                Ok(()) => {
+                    // `seen` is the honest total; `events` is what fitted.
+                    // Reporting only the latter would under-report exactly
+                    // the problem this trace exists to find.
+                    let capped = if seen as usize > events.len() {
+                        format!(" of {seen} (capped — raise --gsu-bus-trace-max)")
+                    } else {
+                        String::new()
+                    };
+                    eprintln!(
+                        "GSU bus-ownership trace written to {} ({} event(s){capped})",
+                        path.display(),
+                        events.len()
+                    );
+                }
+                Err(e) => eprintln!("error: writing GSU bus trace: {e}"),
+            },
+            Err(e) => eprintln!("error: take_gsu_bus_trace: {e}"),
         }
     }
     if let Some(path) = spc_trace_path {

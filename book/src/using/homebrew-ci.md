@@ -50,6 +50,7 @@ r_score = { ge = 0x1000 }      # …and tables give ge/gt/le/lt/ne thresholds
 superfx = { min = 1 }
 
 [asserts.ppu]                  # PPU registers, named as `luna state` prints them
+[asserts.gsu]                  # Super FX state, same vocabulary
 inidisp = 0x0F                 # the screen is on at full brightness
 bgmode = 5                     # …and the mode the example claims to demo
 "windows.0" = 0x20             # `.` indexes arrays and nested tables
@@ -190,6 +191,31 @@ with checkpoints alone, the last one ends the run). The final
   [checkpoint.ppu]
   m7a = -256
   ```
+- **`[asserts.gsu]`** — the Super FX, keyed by the field names
+  `luna state --out -` prints under `gsu`, same grammar and the same `.`
+  into arrays: `running`, `pbr`, `cbr`, `scbr`, `colr`, `por`, `clsr`,
+  `instructions_executed`, `r.15` for the GSU program counter, and the
+  two that say who owns the cartridge, `scmr_ron` / `scmr_ran`.
+
+  `SCMR` is given decoded as well as raw because its wire layout is
+  scrambled; assert on `scmr_ron`, not on a bit of `scmr`.
+
+  A cartridge with no GSU **fails** an `[asserts.gsu]` table rather than
+  passing it vacuously — an assert that cannot fail is worse than none.
+
+  ```toml
+  # "the renderer ran, and the CPU never read the cartridge under it"
+  [asserts.gsu]
+  instructions_executed = { gt = 10000 }
+  bus_violations = 0
+  ```
+
+  `bus_violations` counts CPU reads that got a dummy byte or open bus
+  because the GSU held the bus. Vector-page fetches are counted separately
+  (`bus_vector_fetches`) and are *not* faults — the busy vector is shaped
+  so they land on `$0108` / `$010C` in WRAM, which is how Super FX titles
+  take interrupts during a job. When a violation does appear,
+  `luna state --gsu-bus-trace` names the instruction.
 - **`[asserts.footprint]`** — `vram = { nonzero_min = 5000 }`: at least
   N non-zero bytes in `wram`/`vram`/`cgram`/`oam`/`aram` — proof an
   upload happened without pinning exact bytes.

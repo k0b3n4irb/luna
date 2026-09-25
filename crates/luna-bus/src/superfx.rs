@@ -21,7 +21,8 @@
 //! and Mesen2 `Core/SNES/Coprocessors/GSU`.
 
 use crate::mapper::{
-    Mapper, MapperKind, MapperStateError, SuperFxTraceEvent, check_state_len, decode_state,
+    Mapper, MapperKind, MapperStateError, SuperFxJob, SuperFxTraceEvent, check_state_len,
+    decode_state,
 };
 use crate::types::{Addr24, bank_of, offset_of};
 
@@ -195,6 +196,15 @@ pub struct SuperFxSnapshot {
     pub scbr: u8,
     /// Screen-mode register, packed wire byte.
     pub scmr: u8,
+    /// SCMR `RON`: the GSU owns Game Pak ROM (the SNES reads the busy
+    /// vector instead).
+    pub scmr_ron: bool,
+    /// SCMR `RAN`: the GSU owns Game Pak RAM (SNES reads are open bus).
+    pub scmr_ran: bool,
+    /// SCMR height select, unscrambled from the wire layout (spec §1.4).
+    pub scmr_ht: u8,
+    /// SCMR colour-depth mode (0..3 → 2/4/4/8 bpp).
+    pub scmr_md: u8,
     /// Colour register.
     pub colr: u8,
     /// Plot-option register (raw 5 bits).
@@ -209,6 +219,15 @@ pub struct SuperFxSnapshot {
     pub clsr: bool,
     /// `true` while the GSU is running (SFR go flag set).
     pub running: bool,
+    /// Cumulative GSU instructions retired since reset.
+    pub instructions_executed: u64,
+    /// CPU accesses to the cartridge while the GSU owned it that got
+    /// garbage instead of data — the number to gate on. Excludes vector
+    /// fetches, which are the interrupt mechanism.
+    pub bus_violations: u64,
+    /// Denied `$FFE0-$FFFF` fetches: the Super FX interrupt mechanism
+    /// (they resolve to `$0108` / `$010C` in WRAM), reported not gated.
+    pub bus_vector_fetches: u64,
 }
 
 /// One 8-pixel plot run awaiting writeback to Game Pak RAM (spec §4.1).
@@ -264,6 +283,41 @@ pub struct SuperFxMapper {
     clock_deficit: i64,
     /// Per-instruction cycle accumulator (set by `step`), read by `run_one`.
     cycles: u32,
+    /// Cumulative GSU instructions retired since reset — a diagnostic, not
+    /// machine state, so it stays out of `SuperFxState` and the save-state
+    /// blob (the same reasoning as the API's stack watermark).
+    instructions_executed: u64,
+    /// CPU accesses to the cartridge while the GSU owned it that got
+    /// garbage: a dummy byte for ROM data, open bus for RAM (`OpenSNES`
+    /// R2). Silent on hardware as in every emulator — this is the count a
+    /// runtime gates on.
+    ///
+    /// Deliberately excludes the `$FFE0-$FFFF` vector page, which is
+    /// counted separately: a denied vector fetch is the Super FX's
+    /// *interrupt mechanism*, not a mistake. Folding the two together
+    /// would make `bus_violations == 0` fail on correct code — Star Fox
+    /// trips it once a frame — which would have made the gate useless to
+    /// the very runtime that asked for it.
+    bus_violations: u64,
+    /// Denied reads of the vector page: the busy vector is shaped so they
+    /// resolve to `$0108` (NMI) / `$010C` (IRQ), which is why Super FX
+    /// titles keep their handlers in WRAM there. Reported, not gated.
+    bus_vector_fetches: u64,
+    /// Per-job accounting (`OpenSNES` R3): completed jobs, plus the one in
+    /// flight. Diagnostics, so out of `SuperFxState` like the counters
+    /// above — the save-state shape is untouched.
+    jobs: Vec<SuperFxJob>,
+    /// The job being executed, if the GSU is running.
+    job_open: Option<SuperFxJob>,
+    /// Cap on retained jobs; the oldest are dropped past it.
+    jobs_max: usize,
+    /// Jobs completed since reset — the `seq` source, so it keeps counting
+    /// past the retention cap.
+    jobs_closed: u64,
+    /// Distinct GSU PCs executed, when collection is on (`OpenSNES` R3).
+    /// `None` = off, and then it costs nothing: a hash insert per GSU
+    /// instruction is not free at five million instructions a second.
+    pc_set: Option<std::collections::HashSet<u32>>,
     /// Cumulative main-CPU master clocks since reset (advanced by every
     /// `step_coproc`, even while the GSU is stopped). The shared time axis the
     /// GSU clock is read against — see [`SuperFxTraceEvent::mclk`].
@@ -306,6 +360,14 @@ impl SuperFxMapper {
             pixelcache: [PixelCache::reset(); 2],
             clock_deficit: 0,
             cycles: 0,
+            instructions_executed: 0,
+            bus_violations: 0,
+            bus_vector_fetches: 0,
+            jobs: Vec::new(),
+            job_open: None,
+            jobs_max: 4096,
+            jobs_closed: 0,
+            pc_set: None,
             cpu_mclk: 0,
             gsu_running_prev: false,
             modified_r14: false,
@@ -326,6 +388,10 @@ impl SuperFxMapper {
             cbr: self.regs.cbr,
             scbr: self.regs.scbr,
             scmr: self.regs.scmr_byte(),
+            scmr_ron: self.regs.scmr_ron,
+            scmr_ran: self.regs.scmr_ran,
+            scmr_ht: self.regs.scmr_ht,
+            scmr_md: self.regs.scmr_md,
             colr: self.regs.colr,
             por: self.regs.por,
             bramr: self.regs.bramr,
@@ -333,6 +399,9 @@ impl SuperFxMapper {
             cfgr: self.regs.cfgr,
             clsr: self.regs.clsr,
             running: self.regs.sfr & SFR_G != 0,
+            instructions_executed: self.instructions_executed,
+            bus_violations: self.bus_violations,
+            bus_vector_fetches: self.bus_vector_fetches,
         }
     }
 
@@ -394,6 +463,27 @@ impl SuperFxMapper {
         } else {
             None
         }
+    }
+
+    /// Would a 65816 read of `addr` right now be denied because the GSU
+    /// owns that part of the cartridge? `Some(true)` = ROM (the SNES gets
+    /// the busy vector), `Some(false)` = Game Pak RAM (open bus).
+    ///
+    /// Pure — the counter is bumped by the read itself. This exists so the
+    /// system bus, which knows the CPU's PC, frame and line, can stamp a
+    /// trace entry the mapper could not fill in on its own.
+    pub(crate) const fn bus_denied(&self, addr: Addr24) -> Option<bool> {
+        if !self.sfr_get(SFR_G) {
+            return None;
+        }
+        let (bank, offset) = (bank_of(addr), offset_of(addr));
+        if self.regs.scmr_ron && Self::rom_offset(bank, offset).is_some() {
+            return Some(true);
+        }
+        if self.regs.scmr_ran && Self::ram_offset(bank, offset).is_some() {
+            return Some(false);
+        }
+        None
     }
 
     /// The fixed 16-byte "GSU busy" vector the SNES sees in place of ROM
@@ -712,9 +802,15 @@ impl SuperFxMapper {
         if offset < 512 {
             let line = (offset >> 4) as usize;
             if self.cache_valid[line] {
+                if let Some(j) = self.job_open.as_mut() {
+                    j.cache_hits += 1;
+                }
                 let hc = self.hit_cycles();
                 self.step(hc);
             } else {
+                if let Some(j) = self.job_open.as_mut() {
+                    j.cache_misses += 1;
+                }
                 let dp = (offset & 0xFFF0) as usize;
                 let sp = (u32::from(self.regs.pbr) << 16)
                     + u32::from(self.regs.cbr.wrapping_add(offset & 0xFFF0) & 0xFFF0);
@@ -757,19 +853,62 @@ impl SuperFxMapper {
         result
     }
 
+    /// The GSU's clock on the shared master-clock axis: the CPU timeline
+    /// minus the GSU's lag.
+    fn gsu_clock(&self) -> u64 {
+        i64::try_from(self.cpu_mclk)
+            .unwrap_or(i64::MAX)
+            .saturating_sub(self.clock_deficit)
+            .max(0) as u64
+    }
+
+    /// Close the job in flight and retain it, dropping the oldest once the
+    /// cap is reached so a long run cannot grow without bound.
+    fn close_job(&mut self) {
+        let Some(mut job) = self.job_open.take() else {
+            return;
+        };
+        job.end_mclk = self.gsu_clock();
+        self.jobs_closed = self.jobs_closed.saturating_add(1);
+        if self.jobs.len() >= self.jobs_max {
+            self.jobs.drain(0..(self.jobs_max / 2).max(1));
+        }
+        self.jobs.push(job);
+    }
+
     // --- top-level execution loop ----------------------------------------
 
     /// Execute exactly one GSU instruction (one pass of ares `main()` with
     /// `sfr.g` set). The per-instruction cycle cost is left in `self.cycles`.
     fn run_one(&mut self) {
         self.cycles = 0;
+        self.instructions_executed = self.instructions_executed.saturating_add(1);
         self.modified_r14 = false;
         self.modified_r15 = false;
+        let pc_full = (u32::from(self.regs.pbr) << 16) | u32::from(self.regs.r[15]);
+        if let Some(set) = self.pc_set.as_mut() {
+            set.insert(pc_full);
+        }
         let opcode = self.peekpipe();
         // `go_start` = first instruction since the GSU was last stopped (task
         // boundary). The GSU is running by definition inside `run_one`.
         let go_start = !self.gsu_running_prev;
         self.gsu_running_prev = true;
+        // Open a job at the GO edge (`OpenSNES` R3). A renderer's budget is
+        // per job, not per frame: a frame may run several.
+        if go_start {
+            let seq = self.jobs_closed;
+            self.job_open = Some(SuperFxJob {
+                seq,
+                start_mclk: self.gsu_clock(),
+                end_mclk: 0,
+                gsu_cycles: 0,
+                instructions: 0,
+                cache_hits: 0,
+                cache_misses: 0,
+                stall_cycles: 0,
+            });
+        }
         // Record the pushed event's index so `stop` can be patched in once
         // `execute` reveals whether this op cleared `sfr.g`.
         let traced_idx = if self.trace.is_some() {
@@ -814,8 +953,15 @@ impl SuperFxMapper {
         }
         // A cleared GO flag means this instruction ended the GO task (STOP).
         // Mark the next executed op as a fresh task start.
+        // Charge this instruction to the open job before the STOP check —
+        // the instruction that stops the GSU is part of the job it ends.
+        if let Some(j) = self.job_open.as_mut() {
+            j.instructions += 1;
+            j.gsu_cycles += u64::from(self.cycles);
+        }
         if !self.sfr_get(SFR_G) {
             self.gsu_running_prev = false;
+            self.close_job();
             if let Some(idx) = traced_idx
                 && let Some((events, _)) = self.trace.as_mut()
                 && let Some(e) = events.get_mut(idx)
@@ -1546,6 +1692,31 @@ impl Mapper for SuperFxMapper {
         MapperKind::SuperFx
     }
 
+    fn superfx_snapshot(&self) -> Option<SuperFxSnapshot> {
+        Some(self.snapshot())
+    }
+
+    fn superfx_bus_denied(&self, addr: Addr24) -> Option<bool> {
+        self.bus_denied(addr)
+    }
+
+    fn take_superfx_jobs(&mut self) -> Option<Vec<SuperFxJob>> {
+        Some(std::mem::take(&mut self.jobs))
+    }
+
+    fn enable_superfx_pc_set(&mut self) {
+        self.pc_set
+            .get_or_insert_with(std::collections::HashSet::new);
+    }
+
+    fn superfx_pc_set(&self) -> Option<Vec<u32>> {
+        self.pc_set.as_ref().map(|s| {
+            let mut v: Vec<u32> = s.iter().copied().collect();
+            v.sort_unstable();
+            v
+        })
+    }
+
     fn save_state(&self) -> Vec<u8> {
         let st = SuperFxState {
             ram: self.ram.clone(),
@@ -1614,6 +1785,11 @@ impl Mapper for SuperFxMapper {
         // vector instead of ROM data (spec §3.3).
         if let Some(o) = Self::rom_offset(bank, offset) {
             if self.sfr_get(SFR_G) && self.regs.scmr_ron {
+                if offset >= 0xFFE0 {
+                    self.bus_vector_fetches = self.bus_vector_fetches.saturating_add(1);
+                } else {
+                    self.bus_violations = self.bus_violations.saturating_add(1);
+                }
                 return Some(Self::busy_rom_vector(offset as u8));
             }
             return Some(self.rom[o & self.rom_mask]);
@@ -1622,6 +1798,7 @@ impl Mapper for SuperFxMapper {
         // (spec §3.3); we surface `None` so the bus returns its open-bus.
         if let Some(o) = Self::ram_offset(bank, offset) {
             if self.sfr_get(SFR_G) && self.regs.scmr_ran {
+                self.bus_violations = self.bus_violations.saturating_add(1);
                 return None;
             }
             return Some(self.ram[o & self.ram_mask]);
@@ -1695,6 +1872,17 @@ impl Mapper for SuperFxMapper {
         // clock-synced to the CPU so it resumes in phase, with no catch-up
         // burst of instructions when SCMR grants access back.
         if self.stalled() {
+            // The deficit discarded here IS the parked time: clocks the GSU
+            // was running for and spent doing nothing, waiting for the CPU
+            // to hand back ROM or RAM. Charge it to the job before dropping
+            // it (`OpenSNES` R3) — it is the difference between "the job was
+            // slow" and "the job was blocked", which the totals alone
+            // cannot tell apart.
+            if self.clock_deficit > 0
+                && let Some(j) = self.job_open.as_mut()
+            {
+                j.stall_cycles = j.stall_cycles.saturating_add(self.clock_deficit as u64);
+            }
             self.clock_deficit = 0;
         }
     }
@@ -1733,6 +1921,103 @@ mod tests {
 
     fn fx() -> SuperFxMapper {
         SuperFxMapper::new(ramp_rom(1024 * 1024), 0x8000)
+    }
+
+    #[test]
+    fn a_job_spans_go_to_stop_and_carries_its_own_costs() {
+        // A renderer's budget is per job, not per frame — a frame may run
+        // several — so the accounting has to close on the STOP that ends
+        // each one, and the instruction that stops the GSU belongs to the
+        // job it ends, not to the next.
+        let mut m = fx();
+        assert!(m.take_superfx_jobs().is_some_and(|j| j.is_empty()));
+
+        // Drive one instruction with the GSU running, then stop it.
+        m.regs.sfr |= SFR_G;
+        m.regs.scmr_ron = true;
+        m.regs.scmr_ran = true;
+        m.run_one();
+        assert!(m.job_open.is_some(), "a GO edge opens a job");
+        let open_instr = m.job_open.expect("open").instructions;
+        assert_eq!(open_instr, 1, "the first instruction is charged to it");
+
+        // Clearing `g` from outside is what STOP does internally.
+        m.regs.sfr &= !SFR_G;
+        m.regs.sfr |= SFR_G;
+        m.run_one();
+        m.regs.sfr &= !SFR_G;
+        m.run_one();
+
+        let jobs = m.take_superfx_jobs().expect("a Super FX mapper has jobs");
+        assert!(!jobs.is_empty(), "the STOP closed a job");
+        let j = jobs[0];
+        assert!(j.instructions >= 1);
+        assert!(
+            j.end_mclk >= j.start_mclk,
+            "a job cannot end before it began"
+        );
+        // Draining leaves nothing behind but keeps counting.
+        assert!(m.take_superfx_jobs().is_some_and(|j| j.is_empty()));
+    }
+
+    #[test]
+    fn a_cpu_read_while_the_gsu_owns_the_cartridge_is_counted() {
+        // The silent bug class an emulator is the only place to see: while
+        // SCMR RON/RAN grant the cartridge to the GSU, a 65816 read of ROM
+        // returns the busy vector and of Game Pak RAM returns open bus.
+        // Neither raises anything on hardware — the program just reads
+        // garbage. luna already modelled both; this counts them.
+        let mut m = fx();
+        let rom_addr = make_addr(0x00, 0x8004);
+        let ram_addr = make_addr(0x70, 0x0000);
+
+        // GSU stopped: ordinary reads, nothing counted.
+        assert_eq!(m.snapshot().bus_violations, 0);
+        assert!(m.read(rom_addr).is_some());
+        assert!(m.read(ram_addr).is_some());
+        assert_eq!(m.snapshot().bus_violations, 0, "a stopped GSU owns nothing");
+        assert_eq!(m.bus_denied(rom_addr), None);
+
+        // GSU running and holding both grants.
+        m.regs.sfr |= SFR_G;
+        m.regs.scmr_ron = true;
+        m.regs.scmr_ran = true;
+
+        assert_eq!(m.bus_denied(rom_addr), Some(true), "ROM is the GSU's");
+        assert_eq!(m.bus_denied(ram_addr), Some(false), "so is cart RAM");
+
+        // The ROM read returns the busy vector, keyed on the low nibble.
+        assert_eq!(m.read(rom_addr), Some(SuperFxMapper::busy_rom_vector(0x04)));
+        assert_eq!(m.snapshot().bus_violations, 1);
+
+        // The cart-RAM read is open bus — `None` here, `$FF` to the caller.
+        assert_eq!(m.read(ram_addr), None);
+        assert_eq!(m.snapshot().bus_violations, 2);
+
+        // An address the GSU does not own is not a violation.
+        assert_eq!(m.bus_denied(make_addr(0x7E, 0x0000)), None);
+
+        // The vector page is the exception that decides whether the gate is
+        // usable at all. A denied fetch there is the Super FX's interrupt
+        // mechanism: the busy vector is shaped so $FFEA/$FFEE resolve to
+        // $0108 / $010C in WRAM, which is where Super FX titles keep their
+        // handlers. Star Fox does it once a frame, so folding these into
+        // `bus_violations` would make `== 0` fail on correct code.
+        let before = m.snapshot().bus_violations;
+        assert_eq!(m.read(make_addr(0x00, 0xFFEE)), Some(0x0C));
+        assert_eq!(m.read(make_addr(0x00, 0xFFEF)), Some(0x01));
+        assert_eq!(
+            m.snapshot().bus_violations,
+            before,
+            "a vector fetch is the mechanism, not a fault"
+        );
+        assert_eq!(m.snapshot().bus_vector_fetches, 2);
+        // …and the two bytes are the little-endian IRQ handler address.
+        assert_eq!(
+            u16::from(SuperFxMapper::busy_rom_vector(0x0E))
+                | u16::from(SuperFxMapper::busy_rom_vector(0x0F)) << 8,
+            0x010C
+        );
     }
 
     #[test]
