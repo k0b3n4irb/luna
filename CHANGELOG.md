@@ -4,6 +4,55 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.27.0] — 2026-09-25
+
+The Super FX becomes something a test can assert on, not only something
+that renders. Four capability requests from the OpenSNES SDK team
+(2026-09-24), sized for a runtime that keeps the CPU running while the GSU
+draws every frame.
+
+**Upgrading from 1.26:** nothing to do. Save-states still load (the new
+counters and job records are measurements of a run, deliberately kept out
+of the serialized machine), and no flag changed meaning.
+
+### Added
+- **A `gsu` block in `luna state --out -`**, beside `sa1` and `dsp1`:
+  R0-R15, SFR, PBR, ROMBR, RAMBR, CBR, SCBR, SCMR, COLR, POR, BRAMR, CFGR,
+  CLSR, whether a job is running, and a cumulative instruction count.
+  `SCMR` is reported **decoded as well as raw** — its wire layout is
+  scrambled and its `RON` / `RAN` bits decide who owns the cartridge bus,
+  so a caller re-deriving them from the byte is a bug waiting to happen.
+- **`[asserts.gsu]` / `[checkpoint.gsu]`** in `luna test` manifests, keyed
+  by those same names with dotted paths into arrays (`r.15` is the GSU
+  program counter). A cartridge with no GSU **fails** the table rather
+  than passing it vacuously.
+- **Who owns the cartridge.** While `SCMR`'s `RON` / `RAN` grant it to the
+  GSU, a 65816 read of Game Pak ROM returns a dummy byte and a read of
+  Game Pak RAM returns open bus — silently, on hardware as here.
+  `gsu.bus_violations` counts those, and `--gsu-bus-trace` names the
+  instruction (`seq,frame,line,mclk,pc,addr,kind`).
+
+  Vector-page fetches are counted **separately** as
+  `gsu.bus_vector_fetches` and are not faults: the busy vector is shaped
+  so they resolve to `$0108` (NMI) and `$010C` (IRQ), which is exactly why
+  Super FX titles keep their handlers in WRAM at those addresses. Star Fox
+  does it once a frame. Gate on `bus_violations`.
+- **Per-job Super FX accounting in `luna profile`** — a job being
+  everything between a GO and the STOP that ends it, because a frame runs
+  several and a renderer's budget is set per job. Reports GSU clocks,
+  instructions, cache hits and misses, and `stall_cycles`: the clocks the
+  GSU was running but parked waiting for the CPU to release ROM or RAM,
+  which is the difference between a job that was slow and one that was
+  blocked.
+- **`--gsu-pc-set`** writes the distinct GSU PCs, same encoding as
+  `--pc-set`, to a separate file — a GSU PC and a 65816 PC can be the same
+  24-bit number and mean different code, so a coverage tool must not union
+  them blindly.
+- **`run_until_gsu_stop` / `run_until_gsu_go`** over MCP, so stepping a GSU
+  job no longer means diffing a 200 000-line trace for its edges. The
+  transition is watched, not the level; a cartridge with no Super FX is an
+  error rather than a silent miss.
+
 ## [1.26.0] — 2026-09-22
 
 The interrupt poll moves to where the references take it, and the four
