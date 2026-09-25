@@ -210,6 +210,11 @@ pub struct Snes {
     /// [`Snes::enable_mem_trace`].
     #[serde(skip)]
     pub mem_trace_log: Option<MemTraceLog>,
+    /// Capture of CPU cartridge accesses made while the GSU owned the bus
+    /// (`OpenSNES` R2); `None` when not capturing. Skipped like every other
+    /// diagnostic capture, so the save-state shape is untouched.
+    #[serde(skip)]
+    pub gsu_bus_log: Option<GsuBusLog>,
 
     /// Optional breakpoint/watchpoint registry (issue #66). When `Some`,
     /// `SnesBus::trace_mem_access` matches every CPU bus access against
@@ -315,6 +320,60 @@ pub struct CpuTraceLog {
     /// no-op until the buffer is taken (the cap exists to avoid
     /// blowing out memory on long runs).
     pub max_events: usize,
+}
+
+/// One CPU access to the cartridge made while the Super FX owned it
+/// (`OpenSNES` R2).
+///
+/// The access itself is faithful — luna returns the busy vector for ROM
+/// and open bus for Game Pak RAM, exactly as hardware does. What no other
+/// layer can say is *which instruction* did it, which is the whole
+/// diagnostic: a runtime that keeps the CPU busy during GSU jobs wants the
+/// PC of the one routine that forgot.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct GsuBusEvent {
+    /// Position in the capture, from 0.
+    pub seq: u64,
+    /// Master cycles since reset.
+    pub mclk_total: u64,
+    /// PPU frame at the access.
+    pub frame: u64,
+    /// PPU scanline at the access.
+    pub line: u16,
+    /// 24-bit CPU PC of the instruction performing the access.
+    pub pc_full: u32,
+    /// 24-bit cartridge address read.
+    pub addr_full: u32,
+    /// What the CPU was reaching for, and therefore what it got.
+    pub kind: GsuBusAccess,
+}
+
+/// How a denied cartridge access should be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GsuBusAccess {
+    /// Game Pak ROM: the CPU read the busy vector instead of ROM data.
+    Rom,
+    /// Game Pak RAM: the CPU read open bus.
+    Ram,
+    /// A read of the `$FFE0-$FFFF` vector page while the GSU owned ROM —
+    /// **the documented mechanism, not a mistake.** The busy vector is
+    /// shaped so those fetches resolve to `$0108` (NMI) and `$010C` (IRQ),
+    /// which is why Super FX titles put their handlers in WRAM at exactly
+    /// those addresses. Star Fox does this once per frame.
+    Vector,
+}
+
+/// Capture buffer for [`GsuBusEvent`] with a hard cap.
+#[derive(Debug, Default)]
+pub struct GsuBusLog {
+    /// Recorded events, oldest first.
+    pub events: Vec<GsuBusEvent>,
+    /// Hard cap on event count; the capture stops growing past it.
+    pub max_events: usize,
+    /// Accesses seen, whether or not they fitted in `events` — so a capped
+    /// capture still reports the true total.
+    pub seen: u64,
 }
 
 /// One CPU bus access, captured by the optional memory tracer.
@@ -960,6 +1019,7 @@ impl Snes {
             cpu_trace_log: None,
             profile: None,
             mem_trace_log: None,
+            gsu_bus_log: None,
             breakpoints: None,
             nocash_log: None,
         })
@@ -1126,6 +1186,31 @@ impl Snes {
 
     /// Enable memory access tracing. Every CPU bus read/write
     /// matching `bank_filter` (or every access when `None`) is
+    /// Start capturing CPU cartridge accesses made while the Super FX owns
+    /// the bus (`OpenSNES` R2). No-op on a cart without a GSU — nothing
+    /// can be denied, so nothing is ever recorded.
+    pub fn enable_gsu_bus_trace(&mut self, max_events: usize) {
+        self.gsu_bus_log = Some(GsuBusLog {
+            events: Vec::new(),
+            max_events,
+            seen: 0,
+        });
+    }
+
+    /// Drain the capture: the events kept, and how many accesses were seen
+    /// in total (larger than `events.len()` when the cap was reached).
+    /// Capturing continues.
+    pub fn take_gsu_bus_trace(&mut self) -> (Vec<GsuBusEvent>, u64) {
+        match self.gsu_bus_log.as_mut() {
+            Some(log) => {
+                let seen = log.seen;
+                log.seen = 0;
+                (std::mem::take(&mut log.events), seen)
+            }
+            None => (Vec::new(), 0),
+        }
+    }
+
     /// appended to the log until it fills.
     pub fn enable_mem_trace(
         &mut self,
@@ -1686,6 +1771,7 @@ struct SnesBus<'a> {
     sa1_log: &'a mut Option<Vec<Sa1LogEvent>>,
     /// Memory access trace. `None` = disabled. See [`Snes::enable_mem_trace`].
     mem_trace_log: &'a mut Option<MemTraceLog>,
+    gsu_bus_log: &'a mut Option<GsuBusLog>,
     /// Breakpoint/watchpoint registry (issue #66) — watch hits are parked
     /// on the registry's `pending_hit` for the driving loop.
     breakpoints: &'a mut Option<Box<crate::breakpoints::BreakpointSet>>,
@@ -1862,6 +1948,7 @@ impl Snes {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            gsu_bus_log,
             breakpoints,
             nocash_log,
             ..
@@ -1891,6 +1978,7 @@ impl Snes {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            gsu_bus_log,
             breakpoints,
             nocash_log,
             wm_addr,
@@ -2856,12 +2944,58 @@ impl SnesBus<'_> {
         self.dma_edge();
         // Every bus speed is >= 6 mclk, so the pre-sample step is >= 2.
         self.io_cycle(speed.mcycles() - READ_SAMPLE_TAIL);
+        // Was this cartridge read denied because the GSU owns the bus? Ask
+        // before the read, while the grants still describe it, and only when
+        // someone is capturing (`OpenSNES` R2). The mapper counts these on
+        // its own; what only this layer knows is which instruction did it.
+        if self.gsu_bus_log.is_some()
+            && let Some(rom) = self.mapper.superfx_bus_denied(addr)
+        {
+            self.record_gsu_bus_access(addr, rom);
+        }
         let data = self.read_sampled(addr);
         // Timestamp the trace / fire watchpoints at the sampling point — that
         // is where the byte was latched.
         self.trace_mem_access(addr, MemEventKind::Read, data);
         self.io_cycle(READ_SAMPLE_TAIL);
         data
+    }
+
+    /// Append one denied cartridge access to the capture (`OpenSNES` R2).
+    ///
+    /// `seen` counts every one, whether or not it fitted under
+    /// `max_events`, so a capped capture still reports the true total
+    /// rather than quietly under-reporting the problem it exists to find.
+    fn record_gsu_bus_access(&mut self, addr: Addr24, rom: bool) {
+        // A denied read of the vector page is the Super FX's interrupt
+        // mechanism, not a program error — call it what it is so a reader
+        // of the trace does not go hunting.
+        let kind = if rom && (addr & 0xFFFF) >= 0xFFE0 {
+            GsuBusAccess::Vector
+        } else if rom {
+            GsuBusAccess::Rom
+        } else {
+            GsuBusAccess::Ram
+        };
+        let mclk = *self.mclk_total;
+        let frame = self.frame_count;
+        let line = self.ppu_line;
+        let pc = self.cpu_pc_full;
+        if let Some(log) = self.gsu_bus_log.as_mut() {
+            let seq = log.seen;
+            log.seen = log.seen.saturating_add(1);
+            if log.events.len() < log.max_events {
+                log.events.push(GsuBusEvent {
+                    seq,
+                    mclk_total: mclk,
+                    frame,
+                    line,
+                    pc_full: pc,
+                    addr_full: addr & 0x00FF_FFFF,
+                    kind,
+                });
+            }
+        }
     }
 
     /// Decode + perform the read itself, at the point in the access

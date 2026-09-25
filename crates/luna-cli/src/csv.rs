@@ -155,6 +155,39 @@ pub(crate) fn write_spc_trace_csv(
 /// `seq, pc, opcode, sfr, r0..r15`. Diff the `pc` / register columns
 /// against a reference (bsnes / siena) GSU trace to find the first
 /// divergence in the rendering.
+/// `seq,frame,line,mclk,pc,addr,kind` — every CPU cartridge access made
+/// while the GSU owned the bus (`OpenSNES` R2). `kind` is `rom` (the CPU
+/// read the busy vector in place of ROM data), `ram` (open bus), or
+/// `vector` — a `$FFE0-$FFFF` fetch, which is the Super FX's documented
+/// interrupt mechanism rather than a mistake.
+pub(crate) fn write_gsu_bus_trace_csv(
+    path: &std::path::Path,
+    events: &[luna_api::GsuBusEvent],
+) -> std::io::Result<()> {
+    write_csv(
+        path,
+        "seq,frame,line,mclk,pc,addr,kind",
+        events,
+        |f, _i, ev| {
+            writeln!(
+                f,
+                "{},{},{},{},{},{},{}",
+                ev.seq,
+                ev.frame,
+                ev.line,
+                ev.mclk_total,
+                fmt_pc(ev.pc_full),
+                fmt_pc(ev.addr_full),
+                match ev.kind {
+                    luna_api::GsuBusAccess::Rom => "rom",
+                    luna_api::GsuBusAccess::Ram => "ram",
+                    luna_api::GsuBusAccess::Vector => "vector",
+                },
+            )
+        },
+    )
+}
+
 pub(crate) fn write_superfx_trace_csv(
     path: &std::path::Path,
     events: &[luna_api::SuperFxTraceEvent],
