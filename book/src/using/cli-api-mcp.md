@@ -451,6 +451,7 @@ parked in `WAI` / `STP` under that label.
 | `--top <N>` | `25` | Rows printed (the JSON has them all). |
 | `--out <PATH>` | — | JSON report (`-` = stdout after the table): `{rom, from_frame, end_frame, total_mclk, instructions, frames, entries: [{symbol, addr, instructions, mclk, idle_mclk, pct, pcs, per_frame: {max, max_frame, mean, frames} \| null}], budgets: [{symbol, limit, max, max_frame, ok}]}`. `per_frame` is the row's master cycles per **completed** PPU frame in the window: `max` (and the frame that paid it), `mean` over every completed frame (a frame the row did not run in counts 0), `frames` it ran in; `null` when no frame completed while it ran. The trailing partial frame is never counted. |
 | `--budget <SYMBOL=MCLK>` | — | Gate (repeatable): the symbol's worst completed frame must not exceed `MCLK` master cycles, else **exit 1** with the frame named. A symbol the loaded `.sym` does not know is a usage error (exit 2) — a typo must not pass; a known symbol that never ran costs 0 and passes. The VBlank-budget check for CI. |
+| `--gsu-pc-set <PATH>` | — | The distinct **GSU** PCs executed, same encoding as `--pc-set`, in a separate file (a GSU PC and a 65816 PC can be the same number and mean different code). |
 | `--stack-floor <ADDR>` | — | Gate: the stack must never reach below `ADDR` (`0x`-hex, `$`-hex or decimal), else **exit 1**. Measured, not guessed — see below. |
 | `--pc-set <PATH>` | — | Write the set of executed PCs: every distinct 24-bit address that ran an instruction in the window, sorted, one little-endian `u32` each — the raw input of a code-coverage tool (fold onto `.sym` labels or a listing on your side). |
 | `--force-mapper`, `--force-region`, `--power-on` | — | As elsewhere. |
@@ -478,6 +479,33 @@ luna profile --from-frame 120 --until-frame 600 --budget NmiHandler=6000 game.sf
 
 Read `per_frame.max_frame` from the JSON, then `luna state --until-frame
 402 --screenshot` to see what that frame was doing.
+
+### What a Super FX job cost
+
+A renderer's frame budget is per **job** — everything between the GSU's GO
+and the STOP that ends it — not per frame, because a frame may run several.
+`luna profile` reports them:
+
+```bash
+luna profile --from-frame 60 --until-frame 120 --top 0 game.sfc
+# gsu: 184 job(s), 3507194 instr, 11175728 clocks (99.9% cache hits, 356300 stalled)
+# gsu: worst job #0 — 959024 clocks, 431964 instr, 0 stalled
+```
+
+The `--out` JSON carries every job under `gsu.per_job`
+(`seq, start_mclk, end_mclk, gsu_cycles, instructions, cache_hits,
+cache_misses, stall_cycles`), plus the totals and the worst job by clocks.
+
+**`stall_cycles` is the figure to look at first.** It counts clocks the GSU
+was running but parked, waiting for the CPU to release ROM or Game Pak RAM
+(`SCMR` `RON` / `RAN` not granted) — the difference between a job that was
+slow and one that was blocked, which a total cannot tell you.
+
+There is no "CPU cycles waiting for the GSU" counterpart, because there is
+nothing to count: a 65816 read of a cartridge the GSU owns is not stalled,
+on hardware or here — it gets the busy vector or open bus immediately and
+carries on (see below). For wall-clock budgeting use `start_mclk` /
+`end_mclk`; the gaps between jobs are CPU-only time.
 
 ### Who owns the cartridge (Super FX)
 
