@@ -174,6 +174,20 @@ fn load_state_refuses_a_bad_mapper_blob_and_leaves_the_machine_untouched() {
     e.load_state(&good).unwrap();
 }
 
+/// `run_until_gsu` watches the GO/STOP *transition*, not the level, and
+/// refuses a cartridge that has no Super FX rather than reporting a miss.
+#[test]
+fn run_until_gsu_needs_a_super_fx_and_watches_the_edge() {
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom()).unwrap();
+    // A plain LoROM has no GSU: a silent `false` would read as "the job
+    // never finished", sending the caller after the wrong thing.
+    match e.run_until_gsu(false, 1000) {
+        Err(ApiError::BadArg(m)) => assert!(m.contains("no Super FX"), "{m}"),
+        other => panic!("expected a BadArg, got {other:?}"),
+    }
+}
+
 /// The stack watermark is the deepest `S` a run actually reached, not the
 /// value it started at — and it ignores emulation mode, where the hardware
 /// pins `S` to page 1 and the figure would say nothing about the program.
