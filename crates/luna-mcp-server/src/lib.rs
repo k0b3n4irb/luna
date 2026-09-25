@@ -23,6 +23,8 @@
 //! - `poke_memory { bank, offset, data }` → inject WRAM bytes.
 //! - `search_memory { pattern }` → find a byte pattern in WRAM.
 //! - `run_until_pc { pc, max_steps }` → step to a target PC.
+//! - `run_until_gsu_stop` / `run_until_gsu_go { max_steps }` → step to a
+//!   Super FX job boundary.
 //! - `set_cpu_register { reg, val }` → set a CPU register.
 //!
 //! Interactive-debugger surface (issue #65 / epic #63 — feeds the
@@ -364,6 +366,13 @@ pub struct RunUntilPcParams {
     #[serde(default)]
     pub symbol: Option<String>,
     /// Maximum instructions to step before giving up.
+    pub max_steps: u64,
+}
+
+/// `run_until_gsu_stop` / `run_until_gsu_go` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct RunUntilGsuParams {
+    /// Maximum main-CPU instructions to step before giving up.
     pub max_steps: u64,
 }
 
@@ -1869,6 +1878,44 @@ impl LunaServer {
             let mut em = self.emulator.lock().await;
             let pc = resolve_addr(&em, params.symbol.as_deref(), params.pc)?;
             em.run_until_pc_interruptible(pc, params.max_steps, &self.interrupt)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(RunUntilResult { hit }))
+    }
+
+    #[rmcp::tool(
+        description = "Step until the Super FX finishes a job (its `go` flag clears on \
+                                STOP) or `max_steps` instructions elapse. Pairs with the \
+                                `gsu` block of `state` to inspect a job's result without \
+                                diffing a 200 000-line trace. Errors on a cart with no GSU."
+    )]
+    async fn run_until_gsu_stop(
+        &self,
+        Parameters(params): Parameters<RunUntilGsuParams>,
+    ) -> Result<rmcp::Json<RunUntilResult>, ErrorData> {
+        self.interrupt.store(false, Ordering::Relaxed);
+        let hit = {
+            let mut em = self.emulator.lock().await;
+            em.run_until_gsu_interruptible(false, params.max_steps, &self.interrupt)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(RunUntilResult { hit }))
+    }
+
+    #[rmcp::tool(
+        description = "Step until the Super FX starts a job (its `go` flag sets) or \
+                                `max_steps` instructions elapse. The transition is what is \
+                                watched, not the level: calling this while a job already \
+                                runs waits for the NEXT one."
+    )]
+    async fn run_until_gsu_go(
+        &self,
+        Parameters(params): Parameters<RunUntilGsuParams>,
+    ) -> Result<rmcp::Json<RunUntilResult>, ErrorData> {
+        self.interrupt.store(false, Ordering::Relaxed);
+        let hit = {
+            let mut em = self.emulator.lock().await;
+            em.run_until_gsu_interruptible(true, params.max_steps, &self.interrupt)
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(RunUntilResult { hit }))

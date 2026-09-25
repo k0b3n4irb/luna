@@ -3112,6 +3112,56 @@ impl Emulator {
         Ok(run.stop.is_some() || self.snes.as_ref().is_some_and(|s| at(s) == pc))
     }
 
+    /// Run until the Super FX starts a job (`go` = `true`) or finishes one
+    /// (`go` = `false`), or `max_steps` main-CPU instructions elapse
+    /// (`OpenSNES` R4).
+    ///
+    /// Stepping a GSU job otherwise means diffing a 200 000-line trace to
+    /// find its edges. `Ok(true)` = the transition happened.
+    ///
+    /// The edge is sampled per main-CPU instruction, which is the grain the
+    /// run loop has; a job shorter than one 65816 instruction would be
+    /// missed, and no real one is.
+    pub fn run_until_gsu(&mut self, go: bool, max_steps: u64) -> Result<bool, ApiError> {
+        self.run_until_gsu_interruptible(go, max_steps, &std::sync::atomic::AtomicBool::new(false))
+    }
+
+    /// [`Self::run_until_gsu`] that an external `interrupt` flag can end
+    /// early (the MCP `pause`).
+    pub fn run_until_gsu_interruptible(
+        &mut self,
+        go: bool,
+        max_steps: u64,
+        interrupt: &std::sync::atomic::AtomicBool,
+    ) -> Result<bool, ApiError> {
+        let running = |snes: &Snes| snes.mapper.superfx_snapshot().is_some_and(|g| g.running);
+        if self
+            .snes
+            .as_ref()
+            .is_none_or(|s| s.mapper.superfx_snapshot().is_none())
+        {
+            return Err(ApiError::BadArg(
+                "run_until_gsu: this cartridge has no Super FX".to_string(),
+            ));
+        }
+        // Watch for the transition, not the level: starting the call while
+        // the GSU already runs must not report "reached" without a job
+        // boundary having gone past.
+        let mut prev = self.snes.as_ref().is_some_and(running);
+        let run = self.run_core(
+            max_steps,
+            Some(interrupt),
+            |_, _| None,
+            |snes| {
+                let now = running(snes);
+                let hit = now != prev && now == go;
+                prev = now;
+                hit.then_some(())
+            },
+        )?;
+        Ok(run.stop.is_some())
+    }
+
     // -----------------------------------------------------------------
     // WLA-DX symbol tables (issue #67, epic #63)
     // -----------------------------------------------------------------
