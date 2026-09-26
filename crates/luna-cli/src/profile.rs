@@ -57,6 +57,26 @@ struct Report<'a> {
     /// Super FX jobs completed in the window, or `None` without a GSU.
     #[serde(skip_serializing_if = "Option::is_none")]
     gsu: Option<GsuReport>,
+    /// SA-1 accounting for the window, or `None` without an SA-1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sa1: Option<Sa1Report>,
+}
+
+/// SA-1 accounting over the profiled window (`OpenSNES` R5): the
+/// difference between two cumulative readings.
+#[derive(serde::Serialize)]
+struct Sa1Report {
+    #[serde(flatten)]
+    window: luna_api::Sa1Stats,
+    /// Share of SA-1 clocks spent parked in `WAI`.
+    idle_share: f64,
+    /// Share of the SA-1's *busy* clocks lost to bus contention.
+    conflict_share: f64,
+    /// How fast the SA-1 runs while it runs: the nominal 10.74 MHz scaled
+    /// by the busy clocks not lost to contention or DMA. Idle time is left
+    /// out on purpose — it says whether the chip is used, not how fast it
+    /// goes — and reported as `idle_share`. `None` if it never ran.
+    effective_mhz: Option<f64>,
 }
 
 /// Super FX accounting over the profiled window (`OpenSNES` R3).
@@ -159,6 +179,9 @@ fn write_pc_set(path: &std::path::Path, pcs: &[u32]) -> std::io::Result<()> {
     std::fs::write(path, bytes)
 }
 
+/// The SA-1's nominal clock: master / 2 (ares `SA1::step()` = `step(2)`).
+const SA1_NOMINAL_MHZ: f64 = 21.477_272 / 2.0;
+
 /// `luna profile` entry point.
 pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> ExitCode {
     let mut em = luna_api::Emulator::new();
@@ -219,6 +242,9 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
     // and boot pushes deeper than a game loop does. Start the stack
     // watermark here, with the profile.
     em.clear_stack_low();
+    // SA-1 counters are cumulative since power-on; read them here so the
+    // report covers the profiled window, not the boot.
+    let sa1_start = em.sa1_stats().ok().flatten();
     if o.gsu_pc_set.is_some()
         && let Err(e) = em.enable_gsu_pc_set()
     {
@@ -393,6 +419,63 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
             Err(e) => eprintln!("error: gsu_pc_set: {e}"),
         }
     }
+    let sa1 = match (sa1_start, em.sa1_stats().ok().flatten()) {
+        (Some(a), Some(b)) if b.steps > a.steps => {
+            let w = luna_api::Sa1Stats {
+                instructions: b.instructions - a.instructions,
+                steps: b.steps - a.steps,
+                conflict_steps: b.conflict_steps - a.conflict_steps,
+                rom_conflict_steps: b.rom_conflict_steps - a.rom_conflict_steps,
+                bwram_conflict_steps: b.bwram_conflict_steps - a.bwram_conflict_steps,
+                iram_conflict_steps: b.iram_conflict_steps - a.iram_conflict_steps,
+                dma_steps: b.dma_steps - a.dma_steps,
+                idle_steps: b.idle_steps - a.idle_steps,
+                rom_accesses: b.rom_accesses - a.rom_accesses,
+                iram_accesses: b.iram_accesses - a.iram_accesses,
+                bwram_accesses: b.bwram_accesses - a.bwram_accesses,
+                other_accesses: b.other_accesses - a.other_accesses,
+            };
+            let busy = w.steps.saturating_sub(w.idle_steps);
+            let idle_share = w.idle_steps as f64 / w.steps.max(1) as f64;
+            let conflict_share = w.conflict_steps as f64 / busy.max(1) as f64;
+            let effective_mhz = (busy > 0).then(|| {
+                SA1_NOMINAL_MHZ * busy.saturating_sub(w.conflict_steps + w.dma_steps) as f64
+                    / busy as f64
+            });
+            let acc = (w.rom_accesses + w.iram_accesses + w.bwram_accesses + w.other_accesses)
+                .max(1) as f64;
+            let pct = |n: u64| 100.0 * n as f64 / acc;
+            let speed = effective_mhz.map_or_else(
+                || "never ran".to_string(),
+                |m| format!("~{m:.2} MHz while running"),
+            );
+            println!(
+                "sa1: {} instr, {} clocks ({:.1}% idle in WAI), {:.1}% of busy clocks lost to \
+                 bus conflicts (rom {}, bwram {}, iram {}) — {speed}",
+                w.instructions,
+                w.steps,
+                100.0 * idle_share,
+                100.0 * conflict_share,
+                w.rom_conflict_steps,
+                w.bwram_conflict_steps,
+                w.iram_conflict_steps,
+            );
+            println!(
+                "sa1: accesses {:.1}% rom, {:.1}% iram, {:.1}% bwram, {:.1}% other",
+                pct(w.rom_accesses),
+                pct(w.iram_accesses),
+                pct(w.bwram_accesses),
+                pct(w.other_accesses),
+            );
+            Some(Sa1Report {
+                window: w,
+                idle_share,
+                conflict_share,
+                effective_mhz,
+            })
+        }
+        _ => None,
+    };
     let low = em.stack_low();
     let stack_ok = match (o.stack_floor, low.as_ref()) {
         (Some(floor), Some(l)) => {
@@ -439,6 +522,7 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
                 ok: stack_ok,
             },
             gsu,
+            sa1,
         })
         .expect("report serialises");
         let res = if path.as_os_str() == "-" {

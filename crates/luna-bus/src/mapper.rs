@@ -238,6 +238,12 @@ pub trait Mapper {
         None
     }
 
+    /// Cumulative SA-1 accounting since power-on (`OpenSNES` R5), or `None`
+    /// for a cart without an SA-1.
+    fn sa1_stats(&self) -> Option<Sa1Stats> {
+        None
+    }
+
     /// A read-only DSP-1 (uPD7725) state snapshot for the debugger, or
     /// `None` for non-DSP mappers.
     fn dsp1_snapshot(&self) -> Option<Dsp1Snapshot> {
@@ -329,6 +335,64 @@ impl Mapper for NullMapper {
 /// and the STOP that clears it (`OpenSNES` R3).
 ///
 /// A renderer's frame budget is measured per job, not per frame: a frame
+/// Cumulative SA-1 accounting since power-on (`OpenSNES` R5).
+///
+/// The SA-1 runs at 10.74 MHz, but only while nothing else wants the bus
+/// it is reading: ares' `conflict()` model makes a ROM fetch cost one extra
+/// step when the S-CPU is also in ROM, and a BW-RAM or I-RAM access two
+/// when it is also there. "3x the S-CPU" holds for code in I-RAM and can
+/// halve for ROM against ROM — which is exactly the question these numbers
+/// answer. Accesses are classified by the same masks the conflict model
+/// uses, so the region split and the conflict steps cannot disagree.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Sa1Stats {
+    /// SA-1 instructions retired.
+    pub instructions: u64,
+    /// SA-1 clocks consumed (one step = 2 master clocks): base access
+    /// costs, idle cycles, conflict penalties and DMA stalls together.
+    pub steps: u64,
+    /// Steps lost to bus contention with the S-CPU, all regions.
+    pub conflict_steps: u64,
+    /// …of which while both were in ROM (`+1` each).
+    pub rom_conflict_steps: u64,
+    /// …while both were in BW-RAM (`+2` each).
+    pub bwram_conflict_steps: u64,
+    /// …while both were in I-RAM (`+2` each).
+    pub iram_conflict_steps: u64,
+    /// Steps the SA-1 spent stalled on DMA.
+    pub dma_steps: u64,
+    /// Steps the SA-1 spent parked in `WAI`, waiting for an interrupt —
+    /// counted as clocks but not as instructions, and kept apart so an
+    /// idle SA-1 is not mistaken for a fast one.
+    pub idle_steps: u64,
+    /// SA-1 bus accesses (opcode fetches included) by region.
+    pub rom_accesses: u64,
+    /// See `rom_accesses`.
+    pub iram_accesses: u64,
+    /// See `rom_accesses`.
+    pub bwram_accesses: u64,
+    /// SA-1 MMIO (`$2200-$23FF`) and open-bus accesses.
+    pub other_accesses: u64,
+}
+
+impl Sa1Stats {
+    /// All zero — usable in `const` constructors.
+    pub const ZERO: Self = Self {
+        instructions: 0,
+        steps: 0,
+        conflict_steps: 0,
+        rom_conflict_steps: 0,
+        bwram_conflict_steps: 0,
+        iram_conflict_steps: 0,
+        dma_steps: 0,
+        idle_steps: 0,
+        rom_accesses: 0,
+        iram_accesses: 0,
+        bwram_accesses: 0,
+        other_accesses: 0,
+    };
+}
+
 /// may run several, and the interesting question is what each one cost.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct SuperFxJob {
