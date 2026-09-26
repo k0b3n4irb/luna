@@ -285,9 +285,11 @@ impl Upd96050 {
     /// the microcode ROMs intact. On `Err` (undecodable blob, or a data RAM
     /// of the wrong size) the chip is left untouched.
     pub fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
+        // Capped: a forged length prefix must fail the decode, not ask the
+        // allocator for exabytes (which aborts). The real state is ~4 KB.
         let (st, _) = bincode::serde::decode_from_slice::<Upd96050State, _>(
             data,
-            bincode::config::standard(),
+            bincode::config::standard().with_limit::<{ 1 << 20 }>(),
         )
         .map_err(|e| format!("uPD96050 state decode: {e}"))?;
         if st.data_ram.len() != self.data_ram.len() {

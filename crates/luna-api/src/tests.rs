@@ -1530,3 +1530,38 @@ fn peek_oam_matches_state_oam_full() {
     assert_eq!(oam.len(), 0x220, "544 OAM bytes");
     assert_eq!(oam, e.state().ppu.oam_full, "peek_oam == state oam_full");
 }
+
+/// Found by the `load_state` fuzzer: a 27-byte core blob whose length
+/// prefix claims exabytes. Unbounded, the decode asked the allocator for
+/// them and the process aborted — no panic to catch, so a GUI or MCP
+/// server died on a 50-byte file. Every decode layer must refuse it.
+#[test]
+fn load_state_refuses_a_forged_length_prefix_at_every_layer() {
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom_sram()).unwrap();
+    let good = e.save_state().unwrap();
+    let forged: Vec<u8> = vec![
+        0, 0, 64, 42, 0, 0, 61, 0, 0, 0, 0, 0, 0, 0, 0, 253, 75, 6, 0, 0, 0, 0, 0, 50, 42, 0,
+    ];
+    // A huge `u64` varint length: `0xFD` then eight bytes.
+    let huge = [0xFD, 0x4B, 0x06, 0, 0, 0, 0, 0, 0x32];
+    let cfg = bincode::config::standard();
+    let (mut bundle, _): (SaveStateBundle, usize) =
+        bincode::serde::decode_from_slice(&good, cfg).unwrap();
+    bundle.core = forged;
+    let core = bincode::serde::encode_to_vec(&bundle, cfg).unwrap();
+    let cases = [
+        ("container", [&[0x02, 0x00][..], &huge].concat()),
+        ("core", core),
+        ("mapper", state_with_mapper_blob(&good, huge.to_vec())),
+    ];
+    for (what, state) in cases {
+        assert!(
+            matches!(e.load_state(&state), Err(ApiError::SaveState(_))),
+            "{what}: a forged length must be a SaveState error"
+        );
+    }
+    // Refused ⇒ the machine still runs, and the genuine state still loads.
+    e.step(64).unwrap();
+    e.load_state(&good).unwrap();
+}
