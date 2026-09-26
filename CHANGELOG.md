@@ -4,7 +4,14 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.28.0] — 2026-09-26
+
+Three asks from the OpenSNES team's 2026-09-26 reply, and one flag they
+had noted in passing.
+
+**Upgrading from 1.27:** nothing to do. Save-states still load and no flag
+changed meaning. Existing manifests keep their behaviour: an unset
+`port1` / `port2` infers the device exactly as before.
 
 ### Added
 - **How fast the SA-1 actually runs.** `luna profile` reports SA-1
