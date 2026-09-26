@@ -145,6 +145,23 @@ with checkpoints alone, the last one ends the run). The final
   "frame:dx,dy,buttons"` (`;`-separated, the `--mouse` grammar; plugs a
   SNES Mouse into port 1) and `superscope = "frame:x,y,buttons"`
   (port 2). Mix freely with joypad `input`.
+- **Port devices** — `port1` / `port2` take the `--port1` vocabulary
+  (`pad`, `mouse`, `superscope`, `multitap`, `none`). Left unset, a port
+  keeps the inference above; set, it wins, which is the only way a
+  manifest can **unplug** a port — the case a "is a controller
+  connected?" routine needs:
+
+  ```toml
+  port1 = "none"          # nothing in either port
+  port2 = "none"
+  [asserts.values]
+  pad_connected = 0
+  ```
+
+  A script whose device no port carries is a manifest error (exit 2)
+  rather than a silent pass: `port1 = "none"` beside a `mouse` script would
+  otherwise feed the mouse input into nothing. The scripts follow their
+  device, so `port2 = "mouse"` with a `mouse` script is fine.
 - **Joypad 2** — `input2` beside `input`, top-level or per leg, same
   `frame:hex` grammar: the second half of a two-player probe, or the
   replay of an MCP capture's `script_p2`.

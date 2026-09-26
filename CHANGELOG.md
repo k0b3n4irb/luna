@@ -7,6 +7,11 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- **`port1` / `port2` keys in `luna test` manifests**, with the `--port1`
+  vocabulary. Unset, a port keeps the old inference (a `mouse` script plugs
+  a mouse into port 1, a `superscope` script a scope into port 2); set, it
+  wins — the only way a manifest can unplug a port. A script whose device
+  no port carries is a manifest error rather than a silent pass.
 - **`--superfx-trace-from <N>`** starts the Super FX trace at instruction
   `N`, like `--dma-trace-from` — an instruction count, as every
   `*-trace-from` is. The trace is a ring that keeps the most recent events,

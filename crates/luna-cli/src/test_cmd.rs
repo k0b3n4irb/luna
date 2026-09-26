@@ -100,6 +100,14 @@ struct Manifest {
     /// Optional Super Scope script (`frame:x,y,buttons` — the
     /// `--superscope` grammar). Plugs a scope into port 2 (issue #212).
     superscope: Option<String>,
+    /// Controller port-1 device, the `--port1` vocabulary: `pad`, `mouse`,
+    /// `superscope`, `multitap` or `none` (`OpenSNES` ask, 2026-09-26).
+    /// Unset, a `mouse` script still plugs a mouse here as before; set, it
+    /// wins — which is what lets a manifest *unplug* a port at all.
+    port1: Option<String>,
+    /// Controller port-2 device, same vocabulary. Unset, a `superscope`
+    /// script still plugs a scope here.
+    port2: Option<String>,
     /// Seed battery SRAM from this `.srm` before the run (issue #212;
     /// relative to the manifest) — the read half of a power-cycle test.
     srm_in: Option<PathBuf>,
@@ -621,15 +629,14 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
         em.load_symbols(&dir.join(sym))
             .map_err(|e| format!("loading symbols: {e}"))?;
     }
-    // Peripheral devices (issue #212): mouse rides port 1, scope port 2
-    // — the CLI --port1/--port2 convention.
-    if mouse_used {
-        em.set_port_mouse(0, true).map_err(|e| e.to_string())?;
-    }
-    if scope_used {
-        em.set_port_device(1, luna_api::PortDevice::SuperScope)
-            .map_err(|e| e.to_string())?;
-    }
+    let [port1, port2] = resolve_ports(
+        m.port1.as_deref(),
+        m.port2.as_deref(),
+        mouse_used,
+        scope_used,
+    )?;
+    em.set_port_device(0, port1).map_err(|e| e.to_string())?;
+    em.set_port_device(1, port2).map_err(|e| e.to_string())?;
     // Battery SRAM seed (issue #212) — before any stepping, like --srm-in.
     if let Some(srm) = &m.srm_in {
         let data =
@@ -1098,6 +1105,50 @@ fn snapshot_deltas(
 }
 
 /// Resolve `key` (loaded symbol or `BANK:OFFSET` hex) to a CPU address.
+/// The two port devices a manifest runs with.
+///
+/// An explicit `port1` / `port2` key wins. A port left unset keeps the
+/// behaviour manifests always had: a `mouse` script plugs a mouse into port
+/// 1, a `superscope` script a scope into port 2, anything else a pad.
+///
+/// A script whose device no port carries is an error, not a quiet no-op:
+/// `port1 = "none"` beside a mouse script would otherwise run the mouse
+/// input into nothing and pass, which is the one outcome a test must not
+/// have. The scripts follow the device wherever it is plugged, as on the
+/// CLI, so `port2 = "mouse"` with a mouse script is fine.
+fn resolve_ports(
+    port1: Option<&str>,
+    port2: Option<&str>,
+    mouse_used: bool,
+    scope_used: bool,
+) -> Result<[luna_api::PortDevice; 2], String> {
+    use luna_api::PortDevice;
+    let parse = |key: &str, v: Option<&str>| {
+        v.map(|d| luna_api::parse_port_device(d).map_err(|e| format!("{key}: {e}")))
+            .transpose()
+    };
+    let (mut p1, mut p2) = (parse("port1", port1)?, parse("port2", port2)?);
+    let carries =
+        |d: PortDevice, a: Option<PortDevice>, b: Option<PortDevice>| a == Some(d) || b == Some(d);
+    if mouse_used && !carries(PortDevice::Mouse, p1, p2) {
+        if p1.is_none() {
+            p1 = Some(PortDevice::Mouse);
+        } else {
+            return Err("a `mouse` script needs a port set to `mouse` (port1 is taken)".into());
+        }
+    }
+    if scope_used && !carries(PortDevice::SuperScope, p1, p2) {
+        if p2.is_none() {
+            p2 = Some(PortDevice::SuperScope);
+        } else {
+            return Err(
+                "a `superscope` script needs a port set to `superscope` (port2 is taken)".into(),
+            );
+        }
+    }
+    Ok([p1.unwrap_or(PortDevice::Pad), p2.unwrap_or(PortDevice::Pad)])
+}
+
 fn resolve_key(em: &luna_api::Emulator, key: &str) -> Result<u32, String> {
     if let Some(a) = em.resolve_symbol(key) {
         return Ok(a);
@@ -1594,4 +1645,44 @@ fn update_fbhash(path: &Path, hash: &str) -> Result<(), String> {
     }
     doc["asserts"]["fbhash"] = toml_edit::value(hash);
     std::fs::write(path, doc.to_string()).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_ports;
+    use luna_api::PortDevice::{Mouse, None as Unplugged, Pad, SuperScope};
+
+    #[test]
+    fn unset_ports_keep_the_old_inference() {
+        assert_eq!(resolve_ports(None, None, false, false), Ok([Pad, Pad]));
+        assert_eq!(resolve_ports(None, None, true, false), Ok([Mouse, Pad]));
+        assert_eq!(
+            resolve_ports(None, None, false, true),
+            Ok([Pad, SuperScope])
+        );
+    }
+
+    #[test]
+    fn an_explicit_port_wins_and_can_unplug() {
+        // The ask: a manifest that tests `padIsConnected()` with nothing
+        // plugged, which inference alone could never express.
+        assert_eq!(
+            resolve_ports(Some("none"), Some("none"), false, false),
+            Ok([Unplugged, Unplugged])
+        );
+        // The mouse follows its port, as on the CLI.
+        assert_eq!(
+            resolve_ports(Some("pad"), Some("mouse"), true, false),
+            Ok([Pad, Mouse])
+        );
+    }
+
+    #[test]
+    fn a_script_with_no_port_for_its_device_is_an_error() {
+        // Otherwise the mouse input would run into nothing and the test
+        // would pass — the one outcome a test must never have.
+        assert!(resolve_ports(Some("none"), None, true, false).is_err());
+        assert!(resolve_ports(None, Some("pad"), false, true).is_err());
+        assert!(resolve_ports(Some("joystick"), None, false, false).is_err());
+    }
 }
