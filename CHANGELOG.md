@@ -7,6 +7,10 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- **Manifest keys relative to a symbol**: `"results+16"` is sixteen bytes
+  into `results`, in `values`, checkpoint `values` and `blocks`. An array
+  element named this way survives the array moving in RAM. `N` is decimal
+  unless prefixed `0x` / `$`, as an offset reads in assembly.
 - **`port1` / `port2` keys in `luna test` manifests**, with the `--port1`
   vocabulary. Unset, a port keeps the old inference (a `mouse` script plugs
   a mouse into port 1, a `superscope` script a scope into port 2); set, it

@@ -1150,15 +1150,59 @@ fn resolve_ports(
 }
 
 fn resolve_key(em: &luna_api::Emulator, key: &str) -> Result<u32, String> {
-    if let Some(a) = em.resolve_symbol(key) {
+    // The key exactly as written first, so a symbol whose name happens to
+    // contain `+` or `-` still resolves as itself.
+    if let Some(a) = resolve_base(em, key) {
         return Ok(a);
     }
-    let (bank_s, off_s) = key
-        .split_once(':')
-        .ok_or_else(|| "not a loaded symbol and not BANK:OFFSET".to_string())?;
-    let bank = u8::from_str_radix(bank_s, 16).map_err(|e| format!("bad bank: {e}"))?;
-    let off = u16::from_str_radix(off_s, 16).map_err(|e| format!("bad offset: {e}"))?;
-    Ok((u32::from(bank) << 16) | u32::from(off))
+    // `symbol+N` / `symbol-N` / `BANK:OFFSET+N` (`OpenSNES` ask, 2026-09-26):
+    // an array element named relative to its array, so a variable that
+    // moves in RAM no longer breaks every assert that pointed into it.
+    if let Some(i) = key.rfind(['+', '-'])
+        && i > 0
+    {
+        let (base, rest) = key.split_at(i);
+        let n = parse_key_offset(&rest[1..]).map_err(|e| format!("bad offset in `{key}`: {e}"))?;
+        let a = resolve_base(em, base.trim())
+            .ok_or_else(|| format!("`{}`: not a loaded symbol and not BANK:OFFSET", base.trim()))?;
+        let a = i64::from(a) + if rest.starts_with('-') { -n } else { n };
+        return u32::try_from(a)
+            .ok()
+            .filter(|&a| a <= 0xFF_FFFF)
+            .ok_or_else(|| format!("`{key}` lands outside the 24-bit address space"));
+    }
+    Err("not a loaded symbol and not BANK:OFFSET".to_string())
+}
+
+/// A key without an offset: a loaded symbol, or `BANK:OFFSET` in hex.
+fn resolve_base(em: &luna_api::Emulator, key: &str) -> Option<u32> {
+    if let Some(a) = em.resolve_symbol(key) {
+        return Some(a);
+    }
+    let (bank_s, off_s) = key.split_once(':')?;
+    let bank = u8::from_str_radix(bank_s, 16).ok()?;
+    let off = u16::from_str_radix(off_s, 16).ok()?;
+    Some((u32::from(bank) << 16) | u32::from(off))
+}
+
+/// The `N` of `symbol+N`: **decimal** unless prefixed `0x` or `$`, as an
+/// offset reads in assembly (`results+16` is sixteen bytes in).
+///
+/// Deliberately not hex by default, even though `BANK:OFFSET` and the
+/// `--peek` count are: an element offset is arithmetic on an address, and
+/// `+16` meaning twenty-two bytes would be a trap no one would ever
+/// suspect. The prefix is there for anyone who wants hex.
+fn parse_key_offset(s: &str) -> Result<i64, String> {
+    let s = s.trim();
+    let (digits, radix) = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .or_else(|| s.strip_prefix('$'))
+        .map_or((s, 10), |h| (h, 16));
+    if digits.is_empty() {
+        return Err("empty".to_string());
+    }
+    i64::from_str_radix(digits, radix).map_err(|e| e.to_string())
 }
 
 /// Read a 1- or 2-byte little-endian value at `key`.
@@ -1675,6 +1719,34 @@ mod tests {
             resolve_ports(Some("pad"), Some("mouse"), true, false),
             Ok([Pad, Mouse])
         );
+    }
+
+    #[test]
+    fn a_key_offset_is_decimal_unless_prefixed() {
+        use super::parse_key_offset;
+        assert_eq!(parse_key_offset("16"), Ok(16));
+        assert_eq!(parse_key_offset("0x10"), Ok(16));
+        assert_eq!(parse_key_offset("$10"), Ok(16));
+        assert!(parse_key_offset("").is_err());
+        assert!(parse_key_offset("0x").is_err());
+        assert!(parse_key_offset("ten").is_err());
+    }
+
+    #[test]
+    fn a_key_can_point_into_an_array() {
+        use super::resolve_key;
+        let em = luna_api::Emulator::new();
+        // BANK:OFFSET keeps working, and takes an offset too.
+        assert_eq!(resolve_key(&em, "7E:0010"), Ok(0x7E_0010));
+        assert_eq!(resolve_key(&em, "7E:0010+16"), Ok(0x7E_0020));
+        assert_eq!(resolve_key(&em, "7E:0010+0x10"), Ok(0x7E_0020));
+        assert_eq!(resolve_key(&em, "7E:0010-2"), Ok(0x7E_000E));
+        // Out of the address space is an error, not a wrap.
+        assert!(resolve_key(&em, "00:0000-1").is_err());
+        assert!(resolve_key(&em, "FF:FFFF+1").is_err());
+        // A base that is not a symbol is named in the error.
+        let e = resolve_key(&em, "results+16").unwrap_err();
+        assert!(e.contains("results"), "{e}");
     }
 
     #[test]
