@@ -44,12 +44,25 @@ impl std::fmt::Display for MapperStateError {
 
 impl std::error::Error for MapperStateError {}
 
+/// Most memory one save-state decode may reserve. Real states are about
+/// half a megabyte; without a bound, a forged length prefix asks the
+/// allocator for exabytes, which aborts the process instead of failing.
+pub const STATE_DECODE_LIMIT: usize = 64 << 20;
+
+/// The bincode configuration every save-state decode uses: the encoding
+/// of `standard()`, capped at [`STATE_DECODE_LIMIT`].
+pub const STATE_DECODE_CONFIG: bincode::config::Configuration<
+    bincode::config::LittleEndian,
+    bincode::config::Varint,
+    bincode::config::Limit<STATE_DECODE_LIMIT>,
+> = bincode::config::standard().with_limit::<STATE_DECODE_LIMIT>();
+
 /// Decode a bincode save-state blob, naming `what` in the error.
 pub fn decode_state<T: serde::de::DeserializeOwned>(
     data: &[u8],
     what: &str,
 ) -> Result<T, MapperStateError> {
-    bincode::serde::decode_from_slice::<T, _>(data, bincode::config::standard())
+    bincode::serde::decode_from_slice::<T, _>(data, STATE_DECODE_CONFIG)
         .map(|(v, _)| v)
         .map_err(|e| MapperStateError(format!("{what} state decode: {e}")))
 }

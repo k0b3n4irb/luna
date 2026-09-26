@@ -23,8 +23,8 @@ pub use cpu_regs::CpuRegs;
 pub use dma::{DmaTraceEvent, DmaTraceLog};
 pub use luna_apu::Spc700TraceEvent;
 pub use luna_bus::{
-    Dsp1TraceEvent, Dsp1TraceKind, Mapper, MapperKind, NullMapper, Sa1SideEvent, Sa1Stats,
-    Sa1TraceEvent, SuperFxJob, SuperFxTraceEvent,
+    Dsp1TraceEvent, Dsp1TraceKind, Mapper, MapperKind, NullMapper, STATE_DECODE_CONFIG,
+    Sa1SideEvent, Sa1Stats, Sa1TraceEvent, SuperFxJob, SuperFxTraceEvent,
 };
 pub use mclk::{MclkAccounting, MclkBuckets, MclkKind};
 pub use power::{PowerOnRng, PowerOnState};
