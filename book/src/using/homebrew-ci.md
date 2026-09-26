@@ -42,6 +42,7 @@ audio_rms_min = 100.0          # the music is audibly playing
 [asserts.values]               # loaded symbol (or "BANK:OFFSET") = expected
 r_game_state = 0x02            # bare int = eq; ≤ 0xFF checks one byte…
 r_score = { ge = 0x1000 }      # …and tables give ge/gt/le/lt/ne thresholds
+"results+16" = 0xFFFF          # symbol+N: N bytes in — decimal, 0x for hex
 
 [asserts.blocks]               # byte-range equality, any memory space
 "0000" = { space = "vram", hex = "7cc6cede..." }
@@ -93,6 +94,17 @@ What each assert means:
   `space = "wram"` — both use **symbol or `BANK:OFFSET` keys** (a bare
   hex offset is only valid for `vram`/`cgram`/`oam`/`aram`, whose keys
   are 16-bit offsets). Failures report the first mismatching offset.
+- **Keys relative to a symbol** — anywhere a symbol or `BANK:OFFSET` key
+  is accepted (`values`, checkpoint `values`, `blocks`), `symbol+N` and
+  `symbol-N` name an address relative to it: `"results+16"` is sixteen
+  bytes into `results`. Name an array element this way and it survives the
+  array moving in RAM; a raw address breaks the moment the linker shifts
+  anything above it.
+
+  `N` is **decimal** unless prefixed `0x` or `$`, as an offset reads in
+  assembly. That differs on purpose from `BANK:OFFSET` and from the
+  `--peek` count, which are hex: `+16` quietly meaning twenty-two bytes
+  would be a trap nobody would suspect. `BANK:OFFSET+N` works too.
 
   With an explicit `offset`, the key becomes a **free label** — so two
   spaces at the same offset can share a manifest (#210):
@@ -145,6 +157,23 @@ with checkpoints alone, the last one ends the run). The final
   "frame:dx,dy,buttons"` (`;`-separated, the `--mouse` grammar; plugs a
   SNES Mouse into port 1) and `superscope = "frame:x,y,buttons"`
   (port 2). Mix freely with joypad `input`.
+- **Port devices** — `port1` / `port2` take the `--port1` vocabulary
+  (`pad`, `mouse`, `superscope`, `multitap`, `none`). Left unset, a port
+  keeps the inference above; set, it wins, which is the only way a
+  manifest can **unplug** a port — the case a "is a controller
+  connected?" routine needs:
+
+  ```toml
+  port1 = "none"          # nothing in either port
+  port2 = "none"
+  [asserts.values]
+  pad_connected = 0
+  ```
+
+  A script whose device no port carries is a manifest error (exit 2)
+  rather than a silent pass: `port1 = "none"` beside a `mouse` script would
+  otherwise feed the mouse input into nothing. The scripts follow their
+  device, so `port2 = "mouse"` with a `mouse` script is fine.
 - **Joypad 2** — `input2` beside `input`, top-level or per leg, same
   `frame:hex` grammar: the second half of a two-player probe, or the
   replay of an MCP capture's `script_p2`.

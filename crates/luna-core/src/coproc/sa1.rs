@@ -21,10 +21,10 @@
 //! Character-conversion DMA (Type-1 / Type-2) remains the one
 //! larger piece deferred — non-CC bulk DMA already works.
 
-use luna_bus::sa1::Sa1Mapper;
+use luna_bus::sa1::{Sa1Mapper, Sa1Region};
 use luna_bus::{
     Addr24, Bus, InterruptSample, MCycles, Mapper, MapperKind, MapperStateError, Sa1SideEvent,
-    Sa1Snapshot, Sa1TraceEvent,
+    Sa1Snapshot, Sa1Stats, Sa1TraceEvent,
 };
 use luna_cpu_65c816::Cpu;
 
@@ -69,6 +69,10 @@ pub struct Sa1Chip {
     /// pre-instruction register snapshot per SA-1 opcode, capped at
     /// `max_events`. Enabled via [`Mapper::enable_sa1_trace`].
     sa1_trace: Option<(Vec<Sa1TraceEvent>, usize)>,
+    /// Cumulative accounting since power-on (`OpenSNES` R5). A measurement
+    /// of the run, deliberately absent from `Sa1ChipState`, so the
+    /// save-state shape is untouched.
+    stats: Sa1Stats,
 }
 
 /// One SA-1 step = 2 master clocks (SA-1 @ 10.74 MHz; ares
@@ -91,6 +95,7 @@ impl Sa1Chip {
             deficit: 0,
             sa1_side_log: None,
             sa1_trace: None,
+            stats: Sa1Stats::ZERO,
         }
     }
 
@@ -199,7 +204,10 @@ impl Mapper for Sa1Chip {
         self.deficit = (self.deficit.saturating_add(main_mclk as i32)).min(DEFICIT_CAP);
         // A DMA the S-CPU fired since the last batch stalls the SA-1 for
         // its length (ares runs the `step()`s inside `dmaNormal`).
-        self.deficit -= self.inner.take_dma_steps() as i32 * MCLK_PER_SA1_STEP;
+        let dma_stall = self.inner.take_dma_steps();
+        self.stats.dma_steps += u64::from(dma_stall);
+        self.stats.steps += u64::from(dma_stall);
+        self.deficit -= dma_stall as i32 * MCLK_PER_SA1_STEP;
         while self.deficit > 0 && !self.cpu.stopped {
             // Self-referential bus borrow: `cpu`, `inner` and
             // `sa1_side_log` are disjoint fields of `Sa1Chip`, so we can
@@ -244,10 +252,23 @@ impl Mapper for Sa1Chip {
                 sa1_pc,
                 steps: &mut steps,
                 scpu_mar,
+                stats: &mut self.stats,
             };
+            let was_waiting = self.cpu.waiting;
             self.cpu.step(&mut bus);
             // A DMA this instruction fired costs the SA-1 its steps too.
-            steps += self.inner.take_dma_steps();
+            let dma = self.inner.take_dma_steps();
+            steps += dma;
+            // A step that began and ended parked in WAI retired nothing: it
+            // was one idle tick. Counting it as an instruction made an SA-1
+            // doing nothing look like one running flat out.
+            if was_waiting && self.cpu.waiting {
+                self.stats.idle_steps += u64::from(steps.max(1));
+            } else {
+                self.stats.instructions += 1;
+            }
+            self.stats.dma_steps += u64::from(dma);
+            self.stats.steps += u64::from(steps.max(1));
             // Floor at 1 step so a zero-cost path can never stall the loop.
             self.deficit -= steps.max(1) as i32 * MCLK_PER_SA1_STEP;
         }
@@ -255,6 +276,10 @@ impl Mapper for Sa1Chip {
 
     fn coproc_main_irq_pending(&self) -> bool {
         self.inner.main_irq_line()
+    }
+
+    fn sa1_stats(&self) -> Option<Sa1Stats> {
+        Some(self.stats)
     }
 
     fn sa1_snapshot(&self) -> Option<Sa1Snapshot> {
@@ -309,6 +334,8 @@ struct Sa1Bus<'a> {
     /// of this SA-1 batch, used to add `conflict()` contention steps when
     /// both chips touch the same shared resource (Increment B).
     scpu_mar: u32,
+    /// Cumulative accounting the chip reports (`OpenSNES` R5).
+    stats: &'a mut Sa1Stats,
 }
 
 /// SA-1 MMIO register (`$2200-$23FF`) if `addr` hits the register window.
@@ -344,6 +371,31 @@ const fn sa1_iram_addr(addr: Addr24) -> Option<u16> {
     }
 }
 
+impl Sa1Bus<'_> {
+    /// Charge one SA-1 access to its region and any contention to the
+    /// region that caused it (`OpenSNES` R5).
+    fn account(&mut self, addr: Addr24, conflict: u8) {
+        let c = u64::from(conflict);
+        let s = &mut *self.stats;
+        s.conflict_steps += c;
+        match Sa1Mapper::sa1_access_region(addr) {
+            Sa1Region::Rom => {
+                s.rom_accesses += 1;
+                s.rom_conflict_steps += c;
+            }
+            Sa1Region::Bwram => {
+                s.bwram_accesses += 1;
+                s.bwram_conflict_steps += c;
+            }
+            Sa1Region::Iram => {
+                s.iram_accesses += 1;
+                s.iram_conflict_steps += c;
+            }
+            Sa1Region::Other => s.other_accesses += 1,
+        }
+    }
+}
+
 impl Bus for Sa1Bus<'_> {
     fn read(&mut self, addr: Addr24) -> u8 {
         // Charge this access's SA-1 cycle cost (Phase 5b): ROM/IRAM/IO = 1
@@ -351,8 +403,9 @@ impl Bus for Sa1Bus<'_> {
         // core fetches via `bus.read`), mirroring ares `memory.cpp`.
         // Plus the shared-bus `conflict()` contention steps (Increment B)
         // when the S-CPU holds the same resource.
-        *self.steps += u32::from(self.mapper.sa1_region_steps(addr))
-            + u32::from(self.mapper.sa1_conflict_steps(addr, self.scpu_mar));
+        let conflict = self.mapper.sa1_conflict_steps(addr, self.scpu_mar);
+        *self.steps += u32::from(self.mapper.sa1_region_steps(addr)) + u32::from(conflict);
+        self.account(addr, conflict);
         let bank = (addr >> 16) as u8;
         let offset = (addr & 0xFFFF) as u16;
         // SA-1 vector fetches at bank 0 redirect through CRV/CNV/CIV.
@@ -376,8 +429,9 @@ impl Bus for Sa1Bus<'_> {
     fn write(&mut self, addr: Addr24, value: u8) {
         // Charge this access's SA-1 cycle cost (Phase 5b) + `conflict()`
         // contention (Increment B), as in `read`.
-        *self.steps += u32::from(self.mapper.sa1_region_steps(addr))
-            + u32::from(self.mapper.sa1_conflict_steps(addr, self.scpu_mar));
+        let conflict = self.mapper.sa1_conflict_steps(addr, self.scpu_mar);
+        *self.steps += u32::from(self.mapper.sa1_region_steps(addr)) + u32::from(conflict);
+        self.account(addr, conflict);
         // Log SA-1-side writes to MMIO ($2200-23FF) AND to I-RAM
         // ($3000-37FF / $0000-07FF mirror). The I-RAM writes are the
         // cross-CPU handshake flags (e.g. Kirby's $300A/$300E) that the
@@ -660,6 +714,7 @@ mod tests {
             sa1_pc: 0,
             steps: &mut sa1_steps,
             scpu_mar: 0,
+            stats: &mut Sa1Stats::default(),
         };
         let sample = bus.last_cycle(false);
         assert!(sample.irq, "the S-CPU's request reaches the SA-1's poll");
@@ -713,6 +768,7 @@ mod tests {
             sa1_pc: 0,
             steps: &mut sa1_steps,
             scpu_mar: 0,
+            stats: &mut Sa1Stats::default(),
         };
         assert!(bus.last_cycle(false).irq);
     }

@@ -1389,6 +1389,27 @@ impl Sa1Mapper {
         if is_bwram { 2 } else { 1 }
     }
 
+    /// Which shared resource an SA-1 access at `addr` targets, by the same
+    /// raw ares masks [`Self::sa1_conflict_steps`] uses — so a region count
+    /// and a conflict count can never disagree about where an access went.
+    #[must_use]
+    pub const fn sa1_access_region(addr: Addr24) -> Sa1Region {
+        let a = addr & 0xFF_FFFF;
+        if a & 0x40_FE00 == 0x00_2200 {
+            return Sa1Region::Other;
+        }
+        if a & 0x40_8000 == 0x00_8000 || a & 0xC0_0000 == 0xC0_0000 {
+            return Sa1Region::Rom;
+        }
+        if a & 0x40_E000 == 0x00_6000 || a & 0xE0_0000 == 0x40_0000 || a & 0xF0_0000 == 0x60_0000 {
+            return Sa1Region::Bwram;
+        }
+        if a & 0x40_F800 == 0x00_0000 || a & 0x40_F800 == 0x00_3000 {
+            return Sa1Region::Iram;
+        }
+        Sa1Region::Other
+    }
+
     /// Extra SA-1 bus-**contention** steps for an access at `sa1_addr` while
     /// the S-CPU holds `scpu_mar` on the shared bus — ares' `conflict()`
     /// model (`coprocessor/sa1/{rom,bwram,iram}.cpp` + the conditional
@@ -1768,9 +1789,49 @@ impl Sa1Mapper {
     }
 }
 
+/// The shared resource an SA-1 access targets (see
+/// [`Sa1Mapper::sa1_access_region`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sa1Region {
+    /// Cartridge ROM.
+    Rom,
+    /// BW-RAM (either view).
+    Bwram,
+    /// The SA-1's internal RAM.
+    Iram,
+    /// MMIO or open bus — never contended.
+    Other,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_region_split_and_the_conflict_penalty_agree() {
+        // The profile reports accesses per region and conflict steps per
+        // region; both must classify an address the same way, or the two
+        // numbers would contradict each other. Sample each region, put the
+        // S-CPU in the same one, and check the penalty is that region's.
+        let m = Sa1Mapper::new(vec![0; 0x10_0000], 0x2000);
+        let cases = [
+            (0x00_8000, 0x00_8000, Sa1Region::Rom, 1), // ROM vs ROM: +1
+            (0xC0_1234, 0x80_9000, Sa1Region::Rom, 1),
+            (0x40_0000, 0x40_0010, Sa1Region::Bwram, 2), // BW-RAM vs BW-RAM: +2
+            (0x00_3000, 0x00_3010, Sa1Region::Iram, 2),  // I-RAM vs I-RAM: +2
+            (0x00_2200, 0x00_2200, Sa1Region::Other, 0), // MMIO: never contends
+        ];
+        for (sa1, scpu, region, penalty) in cases {
+            assert_eq!(Sa1Mapper::sa1_access_region(sa1), region, "${sa1:06X}");
+            assert_eq!(
+                m.sa1_conflict_steps(sa1, scpu),
+                penalty,
+                "${sa1:06X} with the S-CPU at ${scpu:06X}"
+            );
+        }
+        // The S-CPU elsewhere: same region for the SA-1, no penalty.
+        assert_eq!(m.sa1_conflict_steps(0x00_8000, 0x7E_0000), 0);
+    }
     use crate::types::make_addr;
 
     fn ramp_rom(size: usize) -> Vec<u8> {

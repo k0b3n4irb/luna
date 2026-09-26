@@ -451,6 +451,15 @@ enum Command {
         /// 200 000).
         #[arg(long = "superfx-trace-max", default_value_t = 200_000)]
         superfx_trace_max: usize,
+        /// Instruction count at which to begin the Super FX trace, like
+        /// `--dma-trace-from` (an instruction count, not a frame: for frame
+        /// N, take `stats.instructions_executed` from
+        /// `luna state --until-frame N --out -`). The trace is a ring that
+        /// keeps the most recent events once full, so the run's end picks
+        /// the window; this trims its head, giving exactly [from, end] as
+        /// long as that fits under `--superfx-trace-max`.
+        #[arg(long = "superfx-trace-from", default_value_t = 0)]
+        superfx_trace_from: u64,
         /// Optional Super FX bus-ownership trace: every CPU read of Game
         /// Pak ROM or RAM made while the GSU owned it, as CSV
         /// (`seq,frame,line,mclk,pc,addr,kind`). Those reads return the
@@ -1002,6 +1011,7 @@ fn main() -> ExitCode {
             sa1_trace_max,
             superfx_trace,
             superfx_trace_max,
+            superfx_trace_from,
             gsu_bus_trace,
             gsu_bus_trace_max,
             dsp1_trace,
@@ -1080,6 +1090,7 @@ fn main() -> ExitCode {
                 sa1_trace_max,
                 superfx_trace.as_deref(),
                 superfx_trace_max,
+                superfx_trace_from,
                 gsu_bus_trace.as_deref(),
                 gsu_bus_trace_max,
                 dsp1_trace.as_deref(),
@@ -1357,6 +1368,30 @@ mod cli_tests {
     /// plugged into the port, and the peripheral's code counted as
     /// "executed" without ever being driven (`OpenSNES` R2). The two now
     /// share `parsers::apply_input_flags`; this pins the surface.
+    #[test]
+    fn superfx_trace_from_parses_as_an_instruction_count() {
+        // Same unit as every other `*-trace-from`: two sibling flags that
+        // counted in different units would be a trap.
+        let argv = [
+            "luna",
+            "state",
+            "rom.sfc",
+            "--superfx-trace",
+            "t.csv",
+            "--superfx-trace-from",
+            "8000000",
+        ];
+        assert!(Cli::try_parse_from(argv).is_ok());
+        let bad = [
+            "luna",
+            "state",
+            "rom.sfc",
+            "--superfx-trace-from",
+            "frame12",
+        ];
+        assert!(Cli::try_parse_from(bad).is_err(), "not a count");
+    }
+
     #[test]
     fn profile_takes_the_same_controller_flags_as_state() {
         let peripherals = [

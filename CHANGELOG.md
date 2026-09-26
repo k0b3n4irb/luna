@@ -4,6 +4,51 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.28.0] — 2026-09-26
+
+Three asks from the OpenSNES team's 2026-09-26 reply, and one flag they
+had noted in passing.
+
+**Upgrading from 1.27:** nothing to do. Save-states still load and no flag
+changed meaning. Existing manifests keep their behaviour: an unset
+`port1` / `port2` infers the device exactly as before.
+
+### Added
+- **How fast the SA-1 actually runs.** `luna profile` reports SA-1
+  instructions, clocks, the clocks lost to bus contention with the S-CPU
+  (split by ROM / BW-RAM / I-RAM), the access split by region, and the
+  resulting speed while running — the check for a "3x the S-CPU" claim,
+  which holds for I-RAM code and can halve for ROM against ROM. Clocks
+  parked in `WAI` are reported separately so an idle SA-1 is not mistaken
+  for a fast one. `luna state` gains `sa1.instructions_executed`.
+- **Manifest keys relative to a symbol**: `"results+16"` is sixteen bytes
+  into `results`, in `values`, checkpoint `values` and `blocks`. An array
+  element named this way survives the array moving in RAM. `N` is decimal
+  unless prefixed `0x` / `$`, as an offset reads in assembly.
+- **`port1` / `port2` keys in `luna test` manifests**, with the `--port1`
+  vocabulary. Unset, a port keeps the old inference (a `mouse` script plugs
+  a mouse into port 1, a `superscope` script a scope into port 2); set, it
+  wins — the only way a manifest can unplug a port. A script whose device
+  no port carries is a manifest error rather than a silent pass.
+- **`--superfx-trace-from <N>`** starts the Super FX trace at instruction
+  `N`, like `--dma-trace-from` — an instruction count, as every
+  `*-trace-from` is. The trace is a ring that keeps the most recent events,
+  so the end of the run picks the window and this trims its head. When
+  both `--dma-trace-from` and `--superfx-trace-from` are given, luna
+  bridges to the earlier start first, so neither trace is switched on late
+  and loses its beginning.
+
+### Fixed
+
+- **A forged save-state can no longer kill the process.** A length prefix
+  in the blob was trusted, so a 27-byte state claiming exabytes made the
+  decoder ask the allocator for them — an abort, not a panic, so the GUI or
+  an MCP server died instead of reporting an error. Every save-state decode
+  (the container, the core, each mapper and the uPD96050) is now capped at
+  64 MiB, over a hundred times the largest real state, and a forged length
+  is an ordinary `load_state` error. Found by the `load_state` fuzz target
+  in CI.
+
 ## [1.27.0] — 2026-09-25
 
 The Super FX becomes something a test can assert on, not only something

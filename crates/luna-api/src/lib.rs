@@ -30,8 +30,8 @@ pub use luna_core::{
     BreakHit, BreakKind, BreakpointInfo, CpuTraceEvent, CpuTraceLog, DmaTraceEvent, DmaTraceLog,
     Dsp1TraceEvent, Dsp1TraceKind, GsuBusAccess, GsuBusEvent, MailboxEvent, MailboxEventKind,
     MapperKind, MemEventKind, MemOrigin, MemTraceEvent, MemTraceFilter, MemTraceLog, Profile,
-    ProfileSample, Sa1LogEvent, Sa1SideEvent, Sa1TraceEvent, Spc700TraceEvent, SuperFxJob,
-    SuperFxTraceEvent,
+    ProfileSample, Sa1LogEvent, Sa1SideEvent, Sa1Stats, Sa1TraceEvent, Spc700TraceEvent,
+    SuperFxJob, SuperFxTraceEvent,
 };
 /// Decoded BG tilemap image (Tilemap Viewer), re-exported so the GUI uses
 /// `luna_api::TilemapImage` rather than depending on `luna-ppu`.
@@ -281,6 +281,10 @@ pub struct Sa1State {
     pub p: u8,
     /// `true` while the SA-1 is released from reset (CCNT.5 clear).
     pub running: bool,
+    /// Cumulative SA-1 instructions retired since power-on — the sibling
+    /// of `gsu.instructions_executed`. The breakdown (clocks, bus
+    /// conflicts, region split) is in `luna profile`.
+    pub instructions_executed: u64,
 }
 
 /// Super FX (GSU) architectural state — the sibling of [`Sa1State`].
@@ -2158,12 +2162,17 @@ impl Emulator {
         let sa1 = self
             .snes
             .as_ref()
-            .and_then(|s| s.mapper.sa1_snapshot())
-            .map(|snap| Sa1State {
+            .and_then(|s| {
+                s.mapper
+                    .sa1_snapshot()
+                    .map(|snap| (snap, s.mapper.sa1_stats()))
+            })
+            .map(|(snap, stats)| Sa1State {
                 pc: snap.pc,
                 pb: snap.pb,
                 p: snap.p,
                 running: snap.running,
+                instructions_executed: stats.map_or(0, |st| st.instructions),
             });
         let gsu = self
             .snes
@@ -2661,7 +2670,7 @@ impl Emulator {
             return Err(ApiError::NoRom);
         }
         let (bundle, _): (SaveStateBundle, usize) =
-            bincode::serde::decode_from_slice(data, bincode::config::standard())
+            bincode::serde::decode_from_slice(data, luna_core::STATE_DECODE_CONFIG)
                 .map_err(|e| ApiError::SaveState(format!("bundle decode: {e}")))?;
         if bundle.version != SAVE_STATE_VERSION {
             return Err(ApiError::SaveState(format!(
@@ -2675,7 +2684,7 @@ impl Emulator {
             ));
         }
         let (mut restored, _): (Snes, usize) =
-            bincode::serde::decode_from_slice(&bundle.core, bincode::config::standard())
+            bincode::serde::decode_from_slice(&bundle.core, luna_core::STATE_DECODE_CONFIG)
                 .map_err(|e| ApiError::SaveState(format!("core decode: {e}")))?;
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         // The renderer indexes these by `line * width + x`: a state whose
@@ -3883,6 +3892,13 @@ impl Emulator {
     pub fn gsu_pc_set(&self) -> Result<Vec<u32>, ApiError> {
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
         Ok(snes.mapper.superfx_pc_set().unwrap_or_default())
+    }
+
+    /// Cumulative SA-1 accounting since power-on (`OpenSNES` R5), or `None`
+    /// without an SA-1. Diff two readings to measure a window.
+    pub fn sa1_stats(&self) -> Result<Option<Sa1Stats>, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        Ok(snes.mapper.sa1_stats())
     }
 
     /// Drain the Super FX job records — one per GO→STOP (`OpenSNES` R3).
