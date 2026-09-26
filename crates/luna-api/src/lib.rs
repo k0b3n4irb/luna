@@ -2670,7 +2670,7 @@ impl Emulator {
             return Err(ApiError::NoRom);
         }
         let (bundle, _): (SaveStateBundle, usize) =
-            bincode::serde::decode_from_slice(data, bincode::config::standard())
+            bincode::serde::decode_from_slice(data, luna_core::STATE_DECODE_CONFIG)
                 .map_err(|e| ApiError::SaveState(format!("bundle decode: {e}")))?;
         if bundle.version != SAVE_STATE_VERSION {
             return Err(ApiError::SaveState(format!(
@@ -2684,7 +2684,7 @@ impl Emulator {
             ));
         }
         let (mut restored, _): (Snes, usize) =
-            bincode::serde::decode_from_slice(&bundle.core, bincode::config::standard())
+            bincode::serde::decode_from_slice(&bundle.core, luna_core::STATE_DECODE_CONFIG)
                 .map_err(|e| ApiError::SaveState(format!("core decode: {e}")))?;
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         // The renderer indexes these by `line * width + x`: a state whose

@@ -38,6 +38,17 @@ changed meaning. Existing manifests keep their behaviour: an unset
   bridges to the earlier start first, so neither trace is switched on late
   and loses its beginning.
 
+### Fixed
+
+- **A forged save-state can no longer kill the process.** A length prefix
+  in the blob was trusted, so a 27-byte state claiming exabytes made the
+  decoder ask the allocator for them — an abort, not a panic, so the GUI or
+  an MCP server died instead of reporting an error. Every save-state decode
+  (the container, the core, each mapper and the uPD96050) is now capped at
+  64 MiB, over a hundred times the largest real state, and a forged length
+  is an ordinary `load_state` error. Found by the `load_state` fuzz target
+  in CI.
+
 ## [1.27.0] — 2026-09-25
 
 The Super FX becomes something a test can assert on, not only something
