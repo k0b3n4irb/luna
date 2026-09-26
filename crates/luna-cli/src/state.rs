@@ -124,6 +124,7 @@ pub(crate) fn run_state(
     sa1_trace_max: usize,
     superfx_trace_path: Option<&std::path::Path>,
     superfx_trace_max: usize,
+    superfx_trace_from: u64,
     gsu_bus_trace_path: Option<&std::path::Path>,
     gsu_bus_trace_max: usize,
     dsp1_trace_path: Option<&std::path::Path>,
@@ -260,6 +261,7 @@ pub(crate) fn run_state(
         return ExitCode::from(1);
     }
     if superfx_trace_path.is_some()
+        && superfx_trace_from == 0
         && let Err(e) = em.enable_superfx_trace(superfx_trace_max)
     {
         eprintln!("error: enable_superfx_trace: {e}");
@@ -417,17 +419,39 @@ pub(crate) fn run_state(
     // DMA→VRAM trace: bridge to its start instruction independently of the
     // cpu/mem traces, then enable. Capturing from boot would drown the
     // window of interest, so `--dma-trace-from` skips the early uploads.
+    //
+    // `--superfx-trace-from` is the same idea for the GSU: a 200 000-event
+    // cap covers about a frame, so the start point is what picks WHICH
+    // frame. Both are instruction counts, like every `*-trace-from`.
+    //
+    // The two are bridged in start order: bridging to the later one first
+    // would switch the earlier trace on late and silently drop its head.
+    let mut deferred: Vec<(u64, bool)> = Vec::new(); // (start, is_dma)
     if dma_trace_path.is_some() {
+        deferred.push((dma_trace_from, true));
+    }
+    if superfx_trace_path.is_some() && superfx_trace_from > 0 {
+        deferred.push((superfx_trace_from, false));
+    }
+    deferred.sort_by_key(|&(from, _)| from);
+    for (from, is_dma) in deferred {
         let current = em.instructions_executed();
-        if dma_trace_from > current {
-            let bridge = (dma_trace_from - current).min(remaining);
+        if from > current {
+            let bridge = (from - current).min(remaining);
             if let Err(e) = em.step(bridge) {
-                eprintln!("step warning (pre-dma-trace bridge): {e}");
+                eprintln!("step warning (pre-trace bridge): {e}");
             }
             remaining = remaining.saturating_sub(bridge);
         }
-        if let Err(e) = em.enable_dma_trace(dma_trace_max) {
-            eprintln!("error: enable_dma_trace: {e}");
+        let enabled = if is_dma {
+            em.enable_dma_trace(dma_trace_max)
+                .map_err(|e| format!("enable_dma_trace: {e}"))
+        } else {
+            em.enable_superfx_trace(superfx_trace_max)
+                .map_err(|e| format!("enable_superfx_trace: {e}"))
+        };
+        if let Err(e) = enabled {
+            eprintln!("error: {e}");
             return ExitCode::from(1);
         }
     }

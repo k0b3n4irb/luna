@@ -4,6 +4,17 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+- **`--superfx-trace-from <N>`** starts the Super FX trace at instruction
+  `N`, like `--dma-trace-from` — an instruction count, as every
+  `*-trace-from` is. The trace is a ring that keeps the most recent events,
+  so the end of the run picks the window and this trims its head. When
+  both `--dma-trace-from` and `--superfx-trace-from` are given, luna
+  bridges to the earlier start first, so neither trace is switched on late
+  and loses its beginning.
+
 ## [1.27.0] — 2026-09-25
 
 The Super FX becomes something a test can assert on, not only something

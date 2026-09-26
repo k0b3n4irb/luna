@@ -176,6 +176,7 @@ and is the hub for every headless diagnostic.
 | `--cpu-trace-from <N>`, `--cpu-trace-max <N>` | `0`, `100000` | Start capturing at instruction count `N`; hard cap on captured events (≈ 40 bytes each). Aim the window at the scene under test instead of tracing from reset. |
 | `--sa1-trace <PATH>`, `--sa1-trace-max <N>` | —, `200000` | Per-instruction SA-1 trace (`seq,pc,a,x,y,sp,p,db,dp,e`) and its event cap. |
 | `--superfx-trace <PATH>`, `--superfx-trace-max <N>` | —, `200000` | Per-opcode GSU trace (`seq,pc,opcode,sfr,r0..r15`, GO/STOP edges included) and its event cap. |
+| `--superfx-trace-from <N>` | `0` | Start the GSU trace at instruction `N` — an instruction count like `--dma-trace-from`, not a frame. The trace is a ring that keeps the most recent events once full, so the run's end (`-n` / `--until-frame`) chooses the window and this trims its head: you get exactly `[N, end]` as long as it fits under the cap. For frame `F`, read `stats.instructions_executed` from `luna state --until-frame F --out -`. |
 | `--gsu-bus-trace <PATH>`, `--gsu-bus-trace-max <N>` | —, `200000` | Every CPU read of Game Pak ROM or RAM made **while the Super FX owned it** (`seq,frame,line,mclk,pc,addr,kind`). See *Who owns the cartridge* below. |
 | `--spc-trace <PATH>`, `--spc-trace-max <N>` | —, `200000` | Per-instruction SPC700 trace (`seq,pc,a,x,y,sp,psw,spc_cycle,t2_int,t2_out`) and its event cap. |
 | `--dma-trace <PATH>` | — | DMA→VRAM bytes as read during the transfer, with `line`, `hclock`, blank flags, the A-bus `src` and the `vram_word` each byte lands at. |
