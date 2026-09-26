@@ -7,6 +7,13 @@ All notable user-facing changes to luna. Releases are cut from `main`
 ## [Unreleased]
 
 ### Added
+- **How fast the SA-1 actually runs.** `luna profile` reports SA-1
+  instructions, clocks, the clocks lost to bus contention with the S-CPU
+  (split by ROM / BW-RAM / I-RAM), the access split by region, and the
+  resulting speed while running — the check for a "3x the S-CPU" claim,
+  which holds for I-RAM code and can halve for ROM against ROM. Clocks
+  parked in `WAI` are reported separately so an idle SA-1 is not mistaken
+  for a fast one. `luna state` gains `sa1.instructions_executed`.
 - **Manifest keys relative to a symbol**: `"results+16"` is sixteen bytes
   into `results`, in `values`, checkpoint `values` and `blocks`. An array
   element named this way survives the array moving in RAM. `N` is decimal

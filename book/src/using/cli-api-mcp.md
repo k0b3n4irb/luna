@@ -508,6 +508,39 @@ on hardware or here — it gets the busy vector or open bus immediately and
 carries on (see below). For wall-clock budgeting use `start_mclk` /
 `end_mclk`; the gaps between jobs are CPU-only time.
 
+### How fast the SA-1 actually runs
+
+"The SA-1 runs at 10.74 MHz, three times the S-CPU" is true for code
+running out of its I-RAM. Every access to a resource the S-CPU is using at
+the same moment costs extra — one step when both are in ROM, two when both
+are in BW-RAM or I-RAM (ares' `conflict()` model) — so ROM-against-ROM code
+can fall to half speed. `luna profile` measures which case you are in:
+
+```bash
+luna profile --from-frame 60 --until-frame 180 --top 0 game.sfc
+# sa1: 4391220 instr, 21441240 clocks (0.0% idle in WAI), 20.2% of busy clocks lost to bus conflicts (rom 4324140, bwram 0, iram 13380) — ~8.57 MHz while running
+# sa1: accesses 85.9% rom, 14.1% iram, 0.0% bwram, 0.0% other
+```
+
+That example lands between the two textbook figures: 86% of its accesses
+are in ROM, but the S-CPU is only in ROM part of the time, so a fifth of the
+clocks are lost rather than half.
+
+Two things to read carefully:
+
+- **Idle time is reported apart.** Clocks spent parked in `WAI` are counted
+  as clocks but not as instructions, and they are left out of the MHz
+  figure: an SA-1 waiting for work is not a fast SA-1. A chip that only
+  idled in the window reports `never ran`.
+- **The window is the profiled one.** The counters are cumulative since
+  power-on; `profile` reads them at `--from-frame` and at the end, so boot
+  does not skew the figure. `luna state` carries the running total as
+  `sa1.instructions_executed`.
+
+The `--out` JSON has every counter under `sa1`: per-region accesses and
+conflict steps, DMA and idle steps, `conflict_share`, `idle_share` and
+`effective_mhz`.
+
 ### Who owns the cartridge (Super FX)
 
 While `SCMR`'s `RON` / `RAN` bits grant the cartridge to the GSU, a 65816
