@@ -14,6 +14,10 @@ All notable user-facing changes to luna. Releases are cut from `main`
   last_nmi_frame <= 1` answers "is it still alive" from one run (asked by
   the OpenSNES team, whose liveness gate ran every example twice). Not
   serialized: save-states are unchanged.
+- **`luna test --jobs N`** — run up to N manifests at once (`0` = one per
+  CPU). Same report, same order, same exit code as a serial run; 121
+  manifests went from 73 s to 16 s on six cores (asked by the OpenSNES
+  team, for whom one serial `luna test` had become the longest CI step).
 
 ### Fixed
 

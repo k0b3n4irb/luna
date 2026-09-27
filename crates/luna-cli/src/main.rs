@@ -171,6 +171,11 @@ enum Command {
         /// Also print a machine-readable JSON report to stdout.
         #[arg(long = "report", value_parser = ["json"])]
         report: Option<String>,
+        /// Run up to N manifests at once (0 = one per CPU). Each manifest
+        /// gets its own emulator; the report is the same lines in the same
+        /// order, and the same exit code, as a serial run.
+        #[arg(long, default_value_t = 1)]
+        jobs: usize,
     },
     /// Serve the Luna MCP server on stdio.
     ///
@@ -954,11 +959,13 @@ fn main() -> ExitCode {
             update,
             only,
             report,
+            jobs,
         } => test_cmd::run_tests(
             &paths,
             update,
             only.as_deref(),
             report.as_deref() == Some("json"),
+            jobs,
         ),
         Command::Mcp {
             rom,
