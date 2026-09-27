@@ -18,6 +18,14 @@ All notable user-facing changes to luna. Releases are cut from `main`
   luna agrees with Mesen2 on the jump page. `luna profile`'s SA-1 speed is
   lower for ROM-resident code accordingly. Super Mario RPG and Kirby Super
   Star goldens re-recorded (same scenes, a few frames of SA-1 work later).
+- **SA-1: it keeps its time during HDMA, and sees the DMA's address.** The
+  SA-1 received a scanline's HDMA time in one lump and clamped it at 120
+  master clocks, dropping most of it; and during a DMA its bus-conflict
+  check saw address `0` instead of the address the DMA was reading (ares
+  sets `cpu.r.mar` on every A-bus access). On the Speed Test: HDMA WRAM|ROM
+  10.067 MHz (console 10.054; was 8.40), DMA ROM|ROM 5.059 (5.075; was
+  10.46), DMA to BW-RAM 2.699 (2.708; was 5.23). Super Mario RPG and Kirby
+  Super Star goldens re-recorded again.
 
 ## [1.29.0] — 2026-09-27
 
