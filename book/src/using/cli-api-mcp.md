@@ -775,7 +775,7 @@ MCP client sees how to drive the emulator before listing a single tool.
 | `cpu` | 65c816 registers `a/x/y/sp/pc/pb/db/dp/p` + flags. |
 | `cpu_regs` | Decoded MMIO/CPU register block. |
 | `ppu` | PPU registers + VRAM/CGRAM/OAM occupancy. |
-| `scheduler` | Master-clock / line / frame scheduler state: `frame_count`, `ppu_line`, `nmis_serviced`, … |
+| `scheduler` | Master-clock / line / frame scheduler state: `frame_count`, `ppu_line`, `nmis_serviced`, `last_nmi_frame` (see below), … |
 | `apu` | SPC700 + S-DSP state (`spc_stopped`, etc.). |
 | `dma` | Per-channel DMA/HDMA registers (see below). |
 | `stats` | Cumulative counters since reset: `instructions_executed`, `instructions_active`, `total_mclk`, and `total_mclk` split by consumer — `mclk` (cumulative) and `last_frame` (the last completed PPU frame), each `{cpu_active, cpu_wai, cpu_stp, dma, hdma, refresh, total}`. See below. |
@@ -788,6 +788,23 @@ luna state -n 1000000 --peek 7E:0200:04 --out - game.sfc \
   | jq -r '.peeks[0].bytes_hex'
 # → e.g. 00f04512
 ```
+
+**Is the NMI still alive (`scheduler.last_nmi_frame`).** `nmis_serviced >
+0` passes a ROM whose NMI ran during boot and died later — a handler that
+crashed, or code that wrote `$4200 = 0` and never turned it back on.
+`last_nmi_frame` is the `frame_count` at which the latest NMI was
+delivered (`null` if none since power-on, reset or a state load), so one run
+answers it:
+
+```bash
+luna state --until-frame 300 --out - game.sfc \
+  | jq '.scheduler | .frame_count - .last_nmi_frame <= 1'
+# → true while the NMI fires every frame
+```
+
+A ROM that leaves `NMITIMEN` off on purpose for a while (a long decompress,
+a transition) reads `false` during that window; pick the frame you probe
+accordingly.
 
 **Who used the cycles (`stats.mclk` / `stats.last_frame`).** `total_mclk`
 says how long the machine ran, not who used the time, and

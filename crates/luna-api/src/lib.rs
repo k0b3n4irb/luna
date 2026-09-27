@@ -697,6 +697,11 @@ pub struct SchedulerState {
     pub frame_count: u64,
     /// Number of NMIs delivered to the CPU.
     pub nmis_serviced: u64,
+    /// `frame_count` when the last NMI was delivered, `null` if none since
+    /// power-on, reset or a state load. `frame_count - last_nmi_frame <= 1`
+    /// means the NMI is still alive, where `nmis_serviced > 0` also passes
+    /// a ROM whose NMI died after boot.
+    pub last_nmi_frame: Option<u64>,
 }
 
 /// One DSP voice, as a debugger wants to read it: the register file
@@ -2042,6 +2047,7 @@ impl Emulator {
                 mcycles_in_line: s.mcycles_in_line,
                 frame_count: s.frame_count,
                 nmis_serviced: s.nmis_serviced,
+                last_nmi_frame: s.last_nmi_frame,
             });
         let apu = self
             .snes
@@ -4477,6 +4483,7 @@ const fn default_scheduler_state() -> SchedulerState {
         mcycles_in_line: 0,
         frame_count: 0,
         nmis_serviced: 0,
+        last_nmi_frame: None,
     }
 }
 
