@@ -13,11 +13,25 @@ surface the GUI and MCP use, with the CLI's exit-code contract:
 | `2` | Manifest / usage error (bad TOML, missing ROM, no manifests found). |
 
 ```
-luna test [PATHS...] [--update] [--only SUBSTR] [--report json]
+luna test [PATHS...] [--update] [--only SUBSTR] [--report json] [--jobs N]
 ```
 
 `PATHS` are manifest files, or directories scanned recursively for
 `*.toml` (default: `./tests`).
+
+**`--jobs N`** runs up to N manifests at once, each on its own emulator
+(`0` = one per CPU; the default `1` is serial). The report is unchanged:
+the same `PASS` / `FAIL` lines in the same order, the same `--report json`,
+the same exit code. A corpus of 121 manifests takes 73 s serially and 16 s
+with `--jobs 0` on six cores:
+
+```bash
+luna test --jobs 0 tests/
+```
+
+Only stderr (symbol-loading notes, warnings) interleaves across manifests.
+A malformed manifest still exits 2 with its error, but in parallel the
+other manifests have already run by then.
 
 ## The manifest
 
