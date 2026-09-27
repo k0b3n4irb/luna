@@ -6,6 +6,15 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Added
+
+- **`scheduler.last_nmi_frame`** — the frame of the latest delivered NMI
+  (`null` until one since power-on, reset or a state load). `nmis_serviced >
+  0` also passes a ROM whose NMI died after boot; `frame_count -
+  last_nmi_frame <= 1` answers "is it still alive" from one run (asked by
+  the OpenSNES team, whose liveness gate ran every example twice). Not
+  serialized: save-states are unchanged.
+
 ### Fixed
 
 - **`luna state --audio-out` keeps the whole run under `--input` and the
