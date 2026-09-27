@@ -184,6 +184,11 @@ pub trait Mapper {
     /// without bus contention ignore it.
     fn step_coproc(&mut self, _main_mclk: u32, _scpu_mar: u32) {}
 
+    /// Whether the S-CPU is in the active part of its DRAM refresh (ares
+    /// `cpu.refresh()`): the SA-1 has no I-RAM conflict then. Set around the
+    /// refresh's `step_coproc` calls; a no-op for other coprocessors.
+    fn set_scpu_refresh(&mut self, _active: bool) {}
+
     /// `true` while the cartridge coprocessor is asserting an IRQ line
     /// onto the main CPU (SA-1 SCNT bit 7 latched + SIE bit 7 enabled,
     /// for instance). The main-CPU bus ORs this into its own

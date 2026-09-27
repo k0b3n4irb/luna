@@ -150,6 +150,26 @@ Star and Kirby's Dream Land 3 checked after the change.
 
 ---
 
+## ✅ SA-1 speed vs a console — ported 2026-09-27
+
+Found by running the **SNES-SA1 Speed Test v5.1** (VitorVilela7,
+`speed_test_v51.sfc`) against the photos of a real 1L8B-10 console in the
+same repository (`img/hardware/v51-1L8B-10/`), with Mesen2 as second
+source. Three ares mechanisms, plus one invented guard, were missing:
+
+| # | Gap | ares | luna | Speed Test (console / Mesen2 / before → after) |
+|---|---|---|---|---|
+| ~~16~~ | ~~ROM penalty on jumps~~ — ✅ `idleJump` / `idleBranch` hooks on `Bus`, called at ares' 15 sites; SA-1 charges one step (+ ROM conflict) when the new PC is in ROM, branches only when it is odd | `wdc65816.hpp:11-12`, `instructions-pc.cpp`, `sa1/memory.cpp:6-19` | `Bus::idle_jump/idle_branch`, `Sa1Bus` | WRAM\|ROM 10.068 / 10.068 / 10.738 → **10.068**; `RTI` ROM 15.586 / 15.588 / 16.106 → **15.586** |
+| ~~17~~ | ~~DMA address in the conflict check~~ — ✅ `DmaBusView` sets the S-CPU `mar` on every A-bus access | `cpu/dma.cpp:96,153,163,167` | `DmaBusView::read_a/write_a/tick` | DMA ROM\|ROM 5.075 / 5.093 / 10.46 → **5.059** |
+| ~~18~~ | ~~120-mclk budget clamp~~ — ✅ removed (no counterpart in ares; it dropped a scanline's HDMA time) | SA-1 thread always catches up | `Sa1Chip::step_coproc` | HDMA WRAM\|ROM 10.054 / 10.068 / 8.40 → **10.067** |
+| ~~19~~ | ~~I-RAM conflict during refresh~~ — ✅ skipped while `dramRefresh == 1` (the refresh replayed as five 6+2 pairs) | `sa1/iram.cpp:2`, `cpu/timing.cpp:24-28` | `Mapper::set_scpu_refresh`, `advance_time` | I-RAM\|I-RAM 3.722 / 3.591 / 3.590 → **3.679** |
+
+**Residuals shared with the references** (not luna gaps): `JMP` in ROM
+reads 8.477 in luna **and** Mesen2 against 7.670 on the console; the SA-1
+core during an I-RAM↔BW-RAM SA-1 DMA reads 0.14 in both against ~10.3.
+**Residual vs Mesen2:** S-CPU DMA from I-RAM reads 3.71 (console 5.51,
+Mesen2 5.43) — ares' address-based `conflict()` gives the same as luna.
+
 ## 🟡 Minor deviations / notes
 
 | # | Issue | ares ref | luna |

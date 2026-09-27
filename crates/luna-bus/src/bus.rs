@@ -84,6 +84,17 @@ pub trait Bus {
     fn last_cycle(&mut self, _i_flag: bool) -> InterruptSample {
         InterruptSample::NONE
     }
+
+    /// ares `WDC65816::idleJump()` (`wdc65816.hpp:12`): called after every
+    /// `JMP` / `JML` / `JSR` / `JSL` / `RTS` / `RTL` / `RTI` and hardware
+    /// interrupt entry, with the **new** 24-bit PC. A no-op for the S-CPU;
+    /// the SA-1 pays a ROM penalty cycle there (`sa1/memory.cpp:6-15`).
+    fn idle_jump(&mut self, _pc: Addr24) {}
+
+    /// ares `WDC65816::idleBranch()` (`wdc65816.hpp:11`): called after a
+    /// taken branch and `BRL`, with the new PC. A no-op for the S-CPU; the
+    /// SA-1 pays its jump penalty when the target is odd.
+    fn idle_branch(&mut self, _pc: Addr24) {}
 }
 
 /// A component that responds to a memory-mapped region (PPU, DMA, APU

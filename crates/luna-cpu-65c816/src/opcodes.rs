@@ -141,6 +141,9 @@ impl Cpu {
             bus, /* vec_native */ 0xFFEA, /* vec_emulation */ 0xFFFA,
             /* set_b_bit_in_emulation */ false,
         );
+        // ares `interrupt()` ends on `idleJump()`; BRK / COP
+        // (`instructionInterrupt`) do not.
+        self.idle_jump(bus);
     }
 
     /// Run the IRQ service sequence — identical to NMI but jumps
@@ -153,6 +156,7 @@ impl Cpu {
             bus, /* vec_native */ 0xFFEE, /* vec_emulation */ 0xFFFE,
             /* set_b_bit_in_emulation */ false,
         );
+        self.idle_jump(bus);
     }
 
     /// ares `idleIRQ()` (`wdc65816/memory.cpp:1-16`): the dead cycle of a
@@ -175,6 +179,17 @@ impl Cpu {
         } else {
             self.io(bus);
         }
+    }
+
+    /// ares `idleJump()` after a jump, call, return or interrupt entry: the
+    /// bus sees the new PC (the SA-1 charges its ROM penalty there).
+    fn idle_jump<B: Bus>(&self, bus: &mut B) {
+        bus.idle_jump(make_addr(self.pb, self.pc));
+    }
+
+    /// ares `idleBranch()` after a taken branch or `BRL`.
+    fn idle_branch<B: Bus>(&self, bus: &mut B) {
+        bus.idle_branch(make_addr(self.pb, self.pc));
     }
 
     /// Dispatch on a fetched opcode. Inlined into the match by LLVM.
@@ -1020,6 +1035,7 @@ impl Cpu {
     fn jmp_abs<B: Bus>(&mut self, bus: &mut B) {
         let target = self.last_fetch_u16(bus);
         self.pc = target;
+        self.idle_jump(bus);
     }
 
     fn jmp_long<B: Bus>(&mut self, bus: &mut B) {
@@ -1030,6 +1046,7 @@ impl Cpu {
         let target = Addr24::from(lo) | (Addr24::from(hi) << 8) | (Addr24::from(bank) << 16);
         self.pc = target as u16;
         self.pb = (target >> 16) as u8;
+        self.idle_jump(bus);
     }
 
     /// `JMP ($abs)` — read 16-bit pointer at $00:operand, jump to it
@@ -1039,6 +1056,7 @@ impl Cpu {
         let lo = bus.read(make_addr(0, ptr_off));
         let hi = self.last_read8(bus, make_addr(0, ptr_off.wrapping_add(1)));
         self.pc = u16::from(lo) | (u16::from(hi) << 8);
+        self.idle_jump(bus);
     }
 
     /// `JMP [$abs]` — read 24-bit pointer at $00:operand, jump to it
@@ -1050,6 +1068,7 @@ impl Cpu {
         let hi = self.last_read8(bus, make_addr(0, ptr_off.wrapping_add(2)));
         self.pc = u16::from(lo) | (u16::from(mid) << 8);
         self.pb = hi;
+        self.idle_jump(bus);
     }
 
     /// `JMP ($abs,X)` — pointer is fetched from `PB:(operand + X)`.
@@ -1061,6 +1080,7 @@ impl Cpu {
         let lo = bus.read(make_addr(self.pb, ptr_off));
         let hi = self.last_read8(bus, make_addr(self.pb, ptr_off.wrapping_add(1)));
         self.pc = u16::from(lo) | (u16::from(hi) << 8);
+        self.idle_jump(bus);
     }
 
     /// `JSR $abs` — push (PC - 1) at the post-fetch PC (so the return
@@ -1072,6 +1092,7 @@ impl Cpu {
         let return_addr = self.pc.wrapping_sub(1);
         self.last_push_u16(bus, return_addr);
         self.pc = target;
+        self.idle_jump(bus);
     }
 
     /// `JSL $long` — push the program bank, then push PC-1 (16-bit),
@@ -1093,6 +1114,7 @@ impl Cpu {
         self.last_push_u16_native(bus, return_pc);
         self.pb = bank;
         self.pc = u16::from(lo) | (u16::from(hi) << 8);
+        self.idle_jump(bus);
     }
 
     /// `JSR ($abs,X)` — like JMP (abs,X) but pushes the return address.
@@ -1117,6 +1139,7 @@ impl Cpu {
         let p_lo = bus.read(make_addr(self.pb, ptr_off));
         let p_hi = self.last_read8(bus, make_addr(self.pb, ptr_off.wrapping_add(1)));
         self.pc = u16::from(p_lo) | (u16::from(p_hi) << 8);
+        self.idle_jump(bus);
     }
 
     /// `RTS` — pull PC, increment by 1, stay in the same program bank.
@@ -1127,6 +1150,7 @@ impl Cpu {
         let pc = self.pull_u16(bus);
         self.last_io(bus);
         self.pc = pc.wrapping_add(1);
+        self.idle_jump(bus);
     }
 
     /// `RTL` — pull PC (16-bit), then PB; increment PC by 1.
@@ -1138,6 +1162,7 @@ impl Cpu {
         let pb = self.last_pull_u8_native(bus);
         self.pc = pc.wrapping_add(1);
         self.pb = pb;
+        self.idle_jump(bus);
     }
 
     /// `BRL rel16` — branch always, with a signed 16-bit PC-relative
@@ -1146,6 +1171,7 @@ impl Cpu {
         let rel = self.fetch_u16(bus) as i16;
         self.last_io(bus); // ares BranchLong internal cycle
         self.pc = self.pc.wrapping_add_signed(rel);
+        self.idle_branch(bus);
     }
 
     // ===================================================================
@@ -1279,6 +1305,7 @@ impl Cpu {
             self.x &= 0x00FF;
             self.y &= 0x00FF;
         }
+        self.idle_jump(bus);
     }
 
     // ===================================================================
@@ -1409,6 +1436,7 @@ impl Cpu {
             self.idle6(bus, target);
             self.last_io(bus);
             self.pc = target;
+            self.idle_branch(bus);
         }
     }
 

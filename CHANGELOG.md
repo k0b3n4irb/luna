@@ -4,6 +4,45 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.30.0] — 2026-09-27
+
+The SA-1, checked against a real console: the SNES-SA1 Speed Test v5.1
+run on luna and compared with the photos of a 1L8B-10 console, with Mesen2
+as second source. Three timing mechanisms ported from ares, and one
+invented guard removed.
+
+**Upgrading from 1.29:** nothing to do. Save-states still load and no flag
+changed meaning. SA-1 games run at their real speed now, which is lower for
+code that jumps around in ROM and higher around HDMA; Super Mario RPG and
+Kirby Super Star render the same scenes a few frames of SA-1 work apart.
+`luna profile`'s SA-1 MHz figure follows.
+
+### Fixed
+
+- **SA-1: a jump, call or return into ROM costs its extra cycle.** ares
+  charges the SA-1 one more step after `JMP` / `JML` / `JSR` / `JSL` /
+  `RTS` / `RTL` / `RTI` / interrupt entry when the target is in ROM, and
+  after a taken branch or `BRL` to an odd address (`idleJump` /
+  `idleBranch`); luna did not. On the SNES-SA1 Speed Test the rows without
+  a bus conflict now match a console's photos to the digit (WRAM|ROM
+  10.06766 MHz, `JML` 8.94803, `RTI` 15.58648 — all were 10.74-16.11), and
+  luna agrees with Mesen2 on the jump page. `luna profile`'s SA-1 speed is
+  lower for ROM-resident code accordingly. Super Mario RPG and Kirby Super
+  Star goldens re-recorded (same scenes, a few frames of SA-1 work later).
+- **SA-1: it keeps its time during HDMA, and sees the DMA's address.** The
+  SA-1 received a scanline's HDMA time in one lump and clamped it at 120
+  master clocks, dropping most of it; and during a DMA its bus-conflict
+  check saw address `0` instead of the address the DMA was reading (ares
+  sets `cpu.r.mar` on every A-bus access). On the Speed Test: HDMA WRAM|ROM
+  10.067 MHz (console 10.054; was 8.40), DMA ROM|ROM 5.059 (5.075; was
+  10.46), DMA to BW-RAM 2.699 (2.708; was 5.23). Super Mario RPG and Kirby
+  Super Star goldens re-recorded again.
+- **SA-1: no I-RAM conflict during the S-CPU's DRAM refresh.** ares checks
+  `cpu.refresh()` in the SA-1's I-RAM `conflict()`, and runs the refresh as
+  five 6-clock active / 2-clock idle pairs; luna charged the conflict
+  throughout. Speed Test I-RAM|I-RAM: 3.679 MHz (console 3.722, Mesen2
+  3.591; was 3.590). No golden moved.
+
 ## [1.29.0] — 2026-09-27
 
 Four items from the OpenSNES team's 2026-09-27 reply: two fixes, a field
