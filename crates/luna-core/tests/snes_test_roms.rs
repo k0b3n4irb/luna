@@ -1268,6 +1268,10 @@ spc_test!(
 // in play, Star Fox's 3D intro, Tales' forest). `game_starfox` had been red on
 // develop for a while — its golden predated a render change and is refreshed
 // here too.
+// Re-baselined 2026-09-27: a stopped GSU now drains its RAM write buffer
+// (ares superfx.cpp:29), so the last byte of a job lands before the CPU copies
+// the framebuffer. Star Fox shifts phase, Stunt Race FX's demo takes another
+// line; both render cleanly (GUI-validated).
 macro_rules! game_test {
     ($fn:ident, $file:literal, $frames:literal, $hash:literal) => {
         #[test]
@@ -1332,13 +1336,13 @@ game_test!(
     game_starfox,
     "Star Fox (USA) (Rev 2).sfc",
     1939,
-    "f2898571d973c0c265b27f21ac3d186f8b78cbcf05b688127bfaa9bd4413e1e3"
+    "a8c96784d2ada45a5a7288331c6e85d45be572d1fd505fa57abe7ca58c2a2df6"
 );
 game_test!(
     game_stuntfx,
     "Stunt Race FX (USA) (Rev 1).sfc",
     2299,
-    "429c4731f73fb61627c822217fe359c0baf207fe3c0b160418e915338c4fb5a4"
+    "5fbff90c93959457c44a756089d3457d585038d44061004dffa308b3f486faa2"
 );
 // S-DD1
 game_test!(
