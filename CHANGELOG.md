@@ -4,6 +4,29 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.28.1] — 2026-09-27
+
+One fix, reported by the OpenSNES team: the last RAM write of a Super FX job
+run from the code cache.
+
+**Upgrading from 1.28.0:** nothing to do. Save-states still load. Super FX
+titles may render a few pixels differently, because a byte that used to land
+late now lands on time.
+
+### Fixed
+
+- **The last Game Pak RAM write of a Super FX job is no longer lost.** A
+  `STW` writes through the GSU's RAM buffer, one byte at a time, 5-6 clocks
+  each. luna stopped clocking the GSU at `STOP`, so a byte still in the
+  buffer stayed there — until the next job's first RAM access, or for ever.
+  From ROM the last ops are slow enough to drain it first; from the code
+  cache they cost 1-2 clocks, and the high byte of the final `STW` went
+  missing (reported by the OpenSNES team). A stopped GSU now keeps clocking
+  its buffers as in ares, and the write waits for `RAN` if the CPU has taken
+  the RAM back. Commercial titles see the byte land before the CPU copies
+  the framebuffer: Star Fox and Stunt Race FX render the same, a few pixels
+  apart, and their goldens were re-recorded.
+
 ## [1.28.0] — 2026-09-26
 
 Three asks from the OpenSNES team's 2026-09-26 reply, and one flag they
