@@ -2046,6 +2046,12 @@ struct DmaBusView<'a> {
     /// the immediately-following `write_b` to record a VRAM byte's
     /// source (DMA reads then writes each byte in lockstep, A→B).
     last_a_addr: u32,
+    /// The S-CPU's memory address register (ares `cpu.r.mar`): every A-bus
+    /// access of a DMA or HDMA sets it (`cpu/dma.cpp:96,153,163,167`), so
+    /// the SA-1 sees the transfer's address, not the CPU's last one, when
+    /// it checks for a shared-bus conflict. It stays after the burst, as in
+    /// ares, until the CPU's next access.
+    scpu_mar: &'a mut u32,
     /// Frame / scanline / vblank snapshot at the start of this DMA burst,
     /// stamped onto each `DmaTraceEvent` for per-VBlank bucketing.
     trace_frame: u64,
@@ -2105,6 +2111,7 @@ impl DmaBus for DmaBusView<'_> {
         // Remember this byte's source so the paired write_b (A→B runs
         // read-then-write per byte) can record where a VRAM byte came from.
         self.last_a_addr = addr;
+        *self.scpu_mar = addr;
         if let Some(o) = SnesBus::wram_offset(addr) {
             return self.wram[o];
         }
@@ -2114,6 +2121,7 @@ impl DmaBus for DmaBusView<'_> {
     }
 
     fn write_a(&mut self, addr: Addr24, value: u8) {
+        *self.scpu_mar = addr;
         self.note_write(addr, value);
         if let Some(o) = SnesBus::wram_offset(addr) {
             self.wram[o] = value;
@@ -2250,11 +2258,11 @@ impl DmaBus for DmaBusView<'_> {
         // ruining the synchronisation the demo's `$3001 SA1_SYNC`
         // handshake depends on.
         //
-        // No S-CPU bus access drives this DMA-side tick (the CPU is halted
-        // for the transfer), so there is no shared-bus `conflict()` partner —
-        // pass `mar = 0` (the ares `dma.cpp` DMA-vs-coproc contention is a
-        // separate, finer refinement).
-        self.mapper.step_coproc(mcycles, 0);
+        // The CPU is halted for the transfer, but the DMA drives its address
+        // bus: ares sets `cpu.r.mar` to each A-bus address (`dma.cpp:96`),
+        // which is what the SA-1's `conflict()` reads. A DMA from ROM slows
+        // a SA-1 running from ROM (Speed Test: DMA ROM|ROM 5.08 MHz).
+        self.mapper.step_coproc(mcycles, *self.scpu_mar);
     }
 
     fn set_active_channel(&mut self, channel: u8) {
@@ -2551,6 +2559,7 @@ impl SnesBus<'_> {
                 apu_panicked: *self.apu_panicked,
                 dma_trace: trace.as_mut(),
                 last_a_addr: 0,
+                scpu_mar: &mut self.scpu_mar,
                 trace_frame: self.frame_count,
                 trace_line: self.ppu_line,
                 trace_blank: trace_blank_now,
@@ -2648,6 +2657,7 @@ impl SnesBus<'_> {
                 // captures.
                 dma_trace: None,
                 last_a_addr: 0,
+                scpu_mar: &mut self.scpu_mar,
                 trace_frame: self.frame_count,
                 trace_line: self.ppu_line,
                 trace_blank: trace_blank_now,
@@ -2763,6 +2773,8 @@ impl SnesBus<'_> {
         // False once we are re-advancing for a stall rather than for the
         // caller's own access — see the coproc note below.
         let mut caller_time = true;
+        // The DRAM-refresh part of a stall pass (0 on the caller's pass).
+        let mut stall_refresh = 0u32;
         // The caller's own time goes to whoever owns this bus borrow (CPU
         // active / WAI / STP, or the DMA burst); a stall pass is credited to
         // its own buckets when it is discovered, below (issue #223).
@@ -2796,8 +2808,26 @@ impl SnesBus<'_> {
             // would double-count. A stall is different — it is time nobody has
             // accounted for yet, and the coprocessor runs through it (the CPU
             // and the DMA are both halted), so always step it for one.
-            if advance_coproc || !caller_time {
-                self.mapper.step_coproc(step as u32, self.scpu_mar);
+            if caller_time {
+                if advance_coproc {
+                    self.mapper.step_coproc(step as u32, self.scpu_mar);
+                }
+            } else {
+                // ares runs the refresh as five `dramRefresh = 1; step(6);
+                // dramRefresh = 2; step(2);` pairs (`cpu/timing.cpp:24-28`),
+                // and the SA-1's I-RAM `conflict()` is off while it is 1.
+                let mut left = stall_refresh;
+                while left >= 8 {
+                    self.mapper.set_scpu_refresh(true);
+                    self.mapper.step_coproc(6, self.scpu_mar);
+                    self.mapper.set_scpu_refresh(false);
+                    self.mapper.step_coproc(2, self.scpu_mar);
+                    left -= 8;
+                }
+                let rest = step as u32 - (stall_refresh - left);
+                if rest > 0 {
+                    self.mapper.step_coproc(rest, self.scpu_mar);
+                }
             }
             // The stall is charged on EVERY path, DMA included. ares checks
             // the DRAM refresh inside `CPU::step` (`cpu/timing.cpp:21-29`),
@@ -2815,6 +2845,7 @@ impl SnesBus<'_> {
             self.mclk.credit(MclkKind::Hdma, u64::from(hdma));
             kind = None;
             caller_time = false;
+            stall_refresh = refresh;
             step = MCycles::from(refresh + hdma);
         }
     }
@@ -2876,6 +2907,7 @@ impl SnesBus<'_> {
                     apu_panicked: *self.apu_panicked,
                     dma_trace: trace.as_mut(),
                     last_a_addr: 0,
+                    scpu_mar: &mut self.scpu_mar,
                     trace_frame: self.frame_count,
                     trace_line: self.ppu_line,
                     trace_blank: trace_blank_now,
@@ -2927,6 +2959,7 @@ impl SnesBus<'_> {
                     apu_panicked: *self.apu_panicked,
                     dma_trace: trace.as_mut(),
                     last_a_addr: 0,
+                    scpu_mar: &mut self.scpu_mar,
                     trace_frame: self.frame_count,
                     trace_line: self.ppu_line,
                     trace_blank: trace_blank_now,

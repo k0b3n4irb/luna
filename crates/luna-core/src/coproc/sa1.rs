@@ -84,11 +84,6 @@ pub struct Sa1Chip {
 /// `SA1::step()` = `Thread::step(2)`).
 const MCLK_PER_SA1_STEP: i32 = 2;
 
-/// Upper bound on the carried budget (mclk). Bounds the catch-up burst if
-/// a large `main_mclk` ever leaks in (the per-byte DMA tick keeps the
-/// normal cadence fine-grained). ~a handful of SA-1 instructions.
-const DEFICIT_CAP: i32 = 120;
-
 impl Sa1Chip {
     /// Build a new SA-1 chip wrapping the given mapper.
     #[must_use]
@@ -226,9 +221,12 @@ impl Mapper for Sa1Chip {
         if !self.running || self.inner.sa1_waiting() {
             return;
         }
-        // Add this advance to the budget, clamped so a stray large lump
-        // can't trigger a runaway catch-up burst.
-        self.deficit = (self.deficit.saturating_add(main_mclk as i32)).min(DEFICIT_CAP);
+        // Add this advance to the budget, whole. ares' SA-1 thread always
+        // catches up to the CPU; it never drops time. luna used to clamp the
+        // budget at 120 mclk, which threw away most of a scanline's HDMA
+        // (charged here in one lump): the Speed Test ran HDMA WRAM|ROM at
+        // 7.89 MHz against 10.05 on a console.
+        self.deficit = self.deficit.saturating_add(main_mclk as i32);
         // A DMA the S-CPU fired since the last batch stalls the SA-1 for
         // its length (ares runs the `step()`s inside `dmaNormal`).
         let dma_stall = self.inner.take_dma_steps();
@@ -299,6 +297,15 @@ impl Mapper for Sa1Chip {
             // Floor at 1 step so a zero-cost path can never stall the loop.
             self.deficit -= steps.max(1) as i32 * MCLK_PER_SA1_STEP;
         }
+        // A CPU stopped by `STP` spends its time idling (ares loops `idle()`
+        // until reset): nothing to carry into the run after the reset.
+        if self.cpu.stopped {
+            self.deficit = 0;
+        }
+    }
+
+    fn set_scpu_refresh(&mut self, active: bool) {
+        self.inner.set_scpu_refresh(active);
     }
 
     fn coproc_main_irq_pending(&self) -> bool {
@@ -487,6 +494,28 @@ impl Bus for Sa1Bus<'_> {
         *self.steps += 1;
     }
 
+    /// ares `SA1::idleJump()` (`sa1/memory.cpp:6-15`): a jump, call, return
+    /// or interrupt entry whose target is in ROM costs one more step, plus
+    /// the ROM conflict step when the S-CPU is on ROM too. Not charged for
+    /// BW-RAM or I-RAM. The Speed Test measures it: a `JMP` loop in ROM runs
+    /// at 7.67 MHz on a console, not 10.74.
+    fn idle_jump(&mut self, pc: Addr24) {
+        if Sa1Mapper::sa1_access_region(pc) == Sa1Region::Rom {
+            let conflict = self.mapper.sa1_conflict_steps(pc, self.scpu_mar);
+            *self.steps += 1 + u32::from(conflict);
+            let c = u64::from(conflict);
+            self.stats.conflict_steps += c;
+            self.stats.rom_conflict_steps += c;
+        }
+    }
+
+    /// ares `SA1::idleBranch()`: the jump penalty, for an odd target only.
+    fn idle_branch(&mut self, pc: Addr24) {
+        if pc & 1 != 0 {
+            self.idle_jump(pc);
+        }
+    }
+
     fn last_cycle(&mut self, i_flag: bool) -> InterruptSample {
         // ares `SA1::lastCycle()` (`coprocessor/sa1/sa1.cpp:96-121`) — the
         // same virtual the S-CPU overrides, with the SA-1's own sources:
@@ -584,6 +613,42 @@ mod tests {
         chip
     }
 
+    /// ares `SA1::idleJump()`: a jump whose target is in ROM costs one more
+    /// step; in I-RAM it does not. The SA-1 Speed Test measures the
+    /// difference on a console (WRAM|ROM 10.07 MHz against WRAM|I-RAM
+    /// 10.74), and luna had it at 10.74 both ways.
+    #[test]
+    fn a_jump_into_rom_pays_the_penalty_step_and_one_into_iram_does_not() {
+        let steps_per_jmp = |at_rom: bool| {
+            let mut rom = vec![0xEAu8; 0x8000];
+            rom[..3].copy_from_slice(&[0x4C, 0x00, 0x80]); // $8000: JMP $8000
+            let mut chip = Sa1Chip::new(Sa1Mapper::new(rom, 0x2000));
+            chip.write(make_addr(0x00, 0x2229), 0xFF); // SIWP: I-RAM writable
+            for (i, b) in [0x4C, 0x00, 0x30].into_iter().enumerate() {
+                chip.write(make_addr(0x00, 0x3000 + i as u16), b); // $3000: JMP $3000
+            }
+            let entry: u16 = if at_rom { 0x8000 } else { 0x3000 };
+            chip.write(make_addr(0x00, 0x2203), entry as u8); // CRV
+            chip.write(make_addr(0x00, 0x2204), (entry >> 8) as u8);
+            chip.write(make_addr(0x00, 0x2200), 0x00); // release from reset
+            for _ in 0..50 {
+                chip.step_coproc(2_000, 0); // the S-CPU sits in WRAM: no conflict
+            }
+            let s = chip.sa1_stats().unwrap();
+            s.steps as f64 / s.instructions as f64
+        };
+        let rom = steps_per_jmp(true);
+        let iram = steps_per_jmp(false);
+        assert!(
+            (rom - 4.0).abs() < 0.01,
+            "ROM: 3 accesses + the penalty, got {rom}"
+        );
+        assert!(
+            (iram - 3.0).abs() < 0.01,
+            "I-RAM: 3 accesses, no penalty, got {iram}"
+        );
+    }
+
     #[test]
     fn ccnt_bit_6_parks_the_sa1_but_keeps_its_timer_running() {
         // ares `sa1.cpp:46-50`: with RDYB set the chip steps the clock and
@@ -597,18 +662,18 @@ mod tests {
         chip.write(make_addr(0x00, 0x2204), 0x30);
         chip.write(make_addr(0x00, 0x2200), 0x00); // release from reset
         assert!(chip.running);
-        chip.step_coproc(2_000, 0);
+        chip.step_coproc(200, 0); // ~100 SA-1 steps: stays on the 256-byte sled
         let pc_running = chip.cpu.pc;
         assert!(pc_running > 0x3000, "the SA-1 is executing the sled");
 
         chip.write(make_addr(0x00, 0x2200), 0x40); // RDYB: park it
         for _ in 0..4 {
-            chip.step_coproc(2_000, 0);
+            chip.step_coproc(200, 0);
         }
         assert_eq!(chip.cpu.pc, pc_running, "parked: no instruction runs");
 
         chip.write(make_addr(0x00, 0x2200), 0x00); // release
-        chip.step_coproc(2_000, 0);
+        chip.step_coproc(200, 0); // ~100 SA-1 steps: stays on the 256-byte sled
         assert!(chip.cpu.pc > pc_running, "released: it runs again");
     }
 

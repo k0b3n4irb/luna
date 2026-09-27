@@ -105,6 +105,11 @@ pub struct Sa1Mapper {
     /// triggers it.
     #[serde(default)]
     scpu_mar: u32,
+    /// The S-CPU is in the active part of its DRAM refresh (ares
+    /// `cpu.refresh()`, `status.dramRefresh == 1`): no I-RAM conflict then.
+    /// A timing signal, not state — not serialized.
+    #[serde(skip)]
+    scpu_refresh: bool,
     /// Multiplier / divider operands and result.
     /// `$2251/$2252 MA` — multiplicand (signed 16-bit, write-twice).
     ma: i16,
@@ -413,6 +418,7 @@ impl Sa1Mapper {
             vcr: 0,
             dma_steps: 0,
             scpu_mar: 0,
+            scpu_refresh: false,
             // Deliberate deviation from ares (`coprocessor/sa1/sa1.cpp:239
             // → io.siwp = 0; io.cpp:112-113 → io.ciwp = 0`) and Mesen2
             // (`Sa1Types.h::CpuIRamWriteProtect/Sa1IRamWriteProtect`
@@ -608,6 +614,12 @@ impl Sa1Mapper {
         self.scpu_mar = mar;
     }
 
+    /// Whether the S-CPU is in the active part of its DRAM refresh — ares
+    /// `cpu.refresh()`, which `IRAM::conflict()` checks (`sa1/iram.cpp:2`).
+    pub const fn set_scpu_refresh(&mut self, active: bool) {
+        self.scpu_refresh = active;
+    }
+
     /// SA-1 steps charged by DMA since the last drain — the chip driver
     /// subtracts them from its budget so the SA-1 CPU stalls for the
     /// transfer, as ares' `step()`s inside `dmaNormal` do.
@@ -654,7 +666,7 @@ impl Sa1Mapper {
         };
         let rom_c = u32::from(Self::scpu_rom_conflict(mar));
         let bw_c = u32::from(Self::scpu_bwram_conflict(mar));
-        let iram_c = u32::from(Self::scpu_iram_conflict(mar));
+        let iram_c = u32::from(Self::scpu_iram_conflict(mar) && !self.scpu_refresh);
         while self.dtc != 0 {
             self.dtc -= 1;
             let source = self.sda;
@@ -1463,7 +1475,7 @@ impl Sa1Mapper {
         // SA-1 I-RAM region ($0000-07ff mirror or $3000-37ff) → conflict iff
         // the S-CPU is also in I-RAM (+2).
         if a & 0x40_F800 == 0x00_0000 || a & 0x40_F800 == 0x00_3000 {
-            return if Self::scpu_iram_conflict(scpu_mar) {
+            return if Self::scpu_iram_conflict(scpu_mar) && !self.scpu_refresh {
                 2
             } else {
                 0
@@ -1485,9 +1497,8 @@ impl Sa1Mapper {
         mar & 0x40_E000 == 0x00_6000 || mar & 0xF0_0000 == 0x40_0000
     }
 
-    /// ares `SA1::IRAM::conflict()` — S-CPU in `00-3f/80-bf:3000-37ff` (the
-    /// `cpu.refresh()==0` exemption is approximated as always-active; see
-    /// [`Self::sa1_conflict_steps`]).
+    /// ares `SA1::IRAM::conflict()` — S-CPU in `00-3f/80-bf:3000-37ff`. The
+    /// `cpu.refresh() == 0` half is `scpu_refresh`, checked by the callers.
     const fn scpu_iram_conflict(mar: u32) -> bool {
         mar & 0x40_F800 == 0x00_3000
     }
@@ -2863,6 +2874,23 @@ mod tests {
         assert_eq!(m.sa1_vector_override(0, 0xFFEB), Some(0x56));
         assert_eq!(m.sa1_vector_override(0, 0xFFEE), Some(0xBC));
         assert_eq!(m.sa1_vector_override(0, 0xFFEF), Some(0x9A));
+    }
+
+    #[test]
+    /// ares `SA1::IRAM::conflict()` returns `cpu.refresh() == 0`: while the
+    /// S-CPU is in the active part of its DRAM refresh, I-RAM does not
+    /// conflict. ROM and BW-RAM conflicts do not look at the refresh.
+    fn the_iram_conflict_pauses_during_the_active_refresh() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x20_0000), 0x10000);
+        let iram = make_addr(0x00, 0x3100);
+        let rom = make_addr(0x01, 0x9000);
+        assert_eq!(m.sa1_conflict_steps(iram, iram), 2);
+        assert_eq!(m.sa1_conflict_steps(rom, rom), 1);
+        m.set_scpu_refresh(true);
+        assert_eq!(m.sa1_conflict_steps(iram, iram), 0, "I-RAM: no conflict");
+        assert_eq!(m.sa1_conflict_steps(rom, rom), 1, "ROM: unchanged");
+        m.set_scpu_refresh(false);
+        assert_eq!(m.sa1_conflict_steps(iram, iram), 2);
     }
 
     #[test]
