@@ -26,6 +26,11 @@ All notable user-facing changes to luna. Releases are cut from `main`
   10.067 MHz (console 10.054; was 8.40), DMA ROM|ROM 5.059 (5.075; was
   10.46), DMA to BW-RAM 2.699 (2.708; was 5.23). Super Mario RPG and Kirby
   Super Star goldens re-recorded again.
+- **SA-1: no I-RAM conflict during the S-CPU's DRAM refresh.** ares checks
+  `cpu.refresh()` in the SA-1's I-RAM `conflict()`, and runs the refresh as
+  five 6-clock active / 2-clock idle pairs; luna charged the conflict
+  throughout. Speed Test I-RAM|I-RAM: 3.679 MHz (console 3.722, Mesen2
+  3.591; was 3.590). No golden moved.
 
 ## [1.29.0] — 2026-09-27
 
