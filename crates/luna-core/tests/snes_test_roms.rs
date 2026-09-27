@@ -1275,6 +1275,8 @@ spc_test!(
 // Re-baselined 2026-09-27 (SA-1 idleJump/idleBranch, ares sa1/memory.cpp):
 // a SA-1 jump into ROM costs one more step, so SMRPG's intro and Kirby's
 // play run a few frames' worth of SA-1 work later; both render cleanly.
+// Again 2026-09-27: the SA-1 now keeps its HDMA time (no 120-mclk budget
+// clamp) and sees the DMA's address in its bus-conflict check.
 macro_rules! game_test {
     ($fn:ident, $file:literal, $frames:literal, $hash:literal) => {
         #[test]
@@ -1326,13 +1328,13 @@ game_test!(
     game_smrpg,
     "Super Mario RPG - Legend of the Seven Stars (USA).sfc",
     905,
-    "42e9be48c6893f30641c2c7b54fe55dd364e8930b24247c7c9b95022e527d137"
+    "47eb9b35d655c2360482fe7821bdf6cd7e5bc913599e454ff57c3cbb9c04e1f8"
 );
 game_test!(
     game_kirby_ss,
     "Kirby Super Star (USA).sfc",
     3054,
-    "1c3522e42749664a7d12d6414d94434d2bb104cb296e3ff6918ab162a5b9d2e4"
+    "c95226c41ecf5860d59ab4faaabfbedf6fcce4fba8a448fbbbe8a26779c9cfb0"
 );
 // Super FX (GSU)
 game_test!(

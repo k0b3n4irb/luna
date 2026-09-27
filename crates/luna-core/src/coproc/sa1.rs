@@ -84,11 +84,6 @@ pub struct Sa1Chip {
 /// `SA1::step()` = `Thread::step(2)`).
 const MCLK_PER_SA1_STEP: i32 = 2;
 
-/// Upper bound on the carried budget (mclk). Bounds the catch-up burst if
-/// a large `main_mclk` ever leaks in (the per-byte DMA tick keeps the
-/// normal cadence fine-grained). ~a handful of SA-1 instructions.
-const DEFICIT_CAP: i32 = 120;
-
 impl Sa1Chip {
     /// Build a new SA-1 chip wrapping the given mapper.
     #[must_use]
@@ -226,9 +221,12 @@ impl Mapper for Sa1Chip {
         if !self.running || self.inner.sa1_waiting() {
             return;
         }
-        // Add this advance to the budget, clamped so a stray large lump
-        // can't trigger a runaway catch-up burst.
-        self.deficit = (self.deficit.saturating_add(main_mclk as i32)).min(DEFICIT_CAP);
+        // Add this advance to the budget, whole. ares' SA-1 thread always
+        // catches up to the CPU; it never drops time. luna used to clamp the
+        // budget at 120 mclk, which threw away most of a scanline's HDMA
+        // (charged here in one lump): the Speed Test ran HDMA WRAM|ROM at
+        // 7.89 MHz against 10.05 on a console.
+        self.deficit = self.deficit.saturating_add(main_mclk as i32);
         // A DMA the S-CPU fired since the last batch stalls the SA-1 for
         // its length (ares runs the `step()`s inside `dmaNormal`).
         let dma_stall = self.inner.take_dma_steps();
@@ -298,6 +296,11 @@ impl Mapper for Sa1Chip {
             self.stats.steps += u64::from(steps.max(1));
             // Floor at 1 step so a zero-cost path can never stall the loop.
             self.deficit -= steps.max(1) as i32 * MCLK_PER_SA1_STEP;
+        }
+        // A CPU stopped by `STP` spends its time idling (ares loops `idle()`
+        // until reset): nothing to carry into the run after the reset.
+        if self.cpu.stopped {
+            self.deficit = 0;
         }
     }
 
@@ -655,18 +658,18 @@ mod tests {
         chip.write(make_addr(0x00, 0x2204), 0x30);
         chip.write(make_addr(0x00, 0x2200), 0x00); // release from reset
         assert!(chip.running);
-        chip.step_coproc(2_000, 0);
+        chip.step_coproc(200, 0); // ~100 SA-1 steps: stays on the 256-byte sled
         let pc_running = chip.cpu.pc;
         assert!(pc_running > 0x3000, "the SA-1 is executing the sled");
 
         chip.write(make_addr(0x00, 0x2200), 0x40); // RDYB: park it
         for _ in 0..4 {
-            chip.step_coproc(2_000, 0);
+            chip.step_coproc(200, 0);
         }
         assert_eq!(chip.cpu.pc, pc_running, "parked: no instruction runs");
 
         chip.write(make_addr(0x00, 0x2200), 0x00); // release
-        chip.step_coproc(2_000, 0);
+        chip.step_coproc(200, 0); // ~100 SA-1 steps: stays on the 256-byte sled
         assert!(chip.cpu.pc > pc_running, "released: it runs again");
     }
 

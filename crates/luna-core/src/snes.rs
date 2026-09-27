@@ -2046,6 +2046,12 @@ struct DmaBusView<'a> {
     /// the immediately-following `write_b` to record a VRAM byte's
     /// source (DMA reads then writes each byte in lockstep, A→B).
     last_a_addr: u32,
+    /// The S-CPU's memory address register (ares `cpu.r.mar`): every A-bus
+    /// access of a DMA or HDMA sets it (`cpu/dma.cpp:96,153,163,167`), so
+    /// the SA-1 sees the transfer's address, not the CPU's last one, when
+    /// it checks for a shared-bus conflict. It stays after the burst, as in
+    /// ares, until the CPU's next access.
+    scpu_mar: &'a mut u32,
     /// Frame / scanline / vblank snapshot at the start of this DMA burst,
     /// stamped onto each `DmaTraceEvent` for per-VBlank bucketing.
     trace_frame: u64,
@@ -2105,6 +2111,7 @@ impl DmaBus for DmaBusView<'_> {
         // Remember this byte's source so the paired write_b (A→B runs
         // read-then-write per byte) can record where a VRAM byte came from.
         self.last_a_addr = addr;
+        *self.scpu_mar = addr;
         if let Some(o) = SnesBus::wram_offset(addr) {
             return self.wram[o];
         }
@@ -2114,6 +2121,7 @@ impl DmaBus for DmaBusView<'_> {
     }
 
     fn write_a(&mut self, addr: Addr24, value: u8) {
+        *self.scpu_mar = addr;
         self.note_write(addr, value);
         if let Some(o) = SnesBus::wram_offset(addr) {
             self.wram[o] = value;
@@ -2250,11 +2258,11 @@ impl DmaBus for DmaBusView<'_> {
         // ruining the synchronisation the demo's `$3001 SA1_SYNC`
         // handshake depends on.
         //
-        // No S-CPU bus access drives this DMA-side tick (the CPU is halted
-        // for the transfer), so there is no shared-bus `conflict()` partner —
-        // pass `mar = 0` (the ares `dma.cpp` DMA-vs-coproc contention is a
-        // separate, finer refinement).
-        self.mapper.step_coproc(mcycles, 0);
+        // The CPU is halted for the transfer, but the DMA drives its address
+        // bus: ares sets `cpu.r.mar` to each A-bus address (`dma.cpp:96`),
+        // which is what the SA-1's `conflict()` reads. A DMA from ROM slows
+        // a SA-1 running from ROM (Speed Test: DMA ROM|ROM 5.08 MHz).
+        self.mapper.step_coproc(mcycles, *self.scpu_mar);
     }
 
     fn set_active_channel(&mut self, channel: u8) {
@@ -2551,6 +2559,7 @@ impl SnesBus<'_> {
                 apu_panicked: *self.apu_panicked,
                 dma_trace: trace.as_mut(),
                 last_a_addr: 0,
+                scpu_mar: &mut self.scpu_mar,
                 trace_frame: self.frame_count,
                 trace_line: self.ppu_line,
                 trace_blank: trace_blank_now,
@@ -2648,6 +2657,7 @@ impl SnesBus<'_> {
                 // captures.
                 dma_trace: None,
                 last_a_addr: 0,
+                scpu_mar: &mut self.scpu_mar,
                 trace_frame: self.frame_count,
                 trace_line: self.ppu_line,
                 trace_blank: trace_blank_now,
@@ -2876,6 +2886,7 @@ impl SnesBus<'_> {
                     apu_panicked: *self.apu_panicked,
                     dma_trace: trace.as_mut(),
                     last_a_addr: 0,
+                    scpu_mar: &mut self.scpu_mar,
                     trace_frame: self.frame_count,
                     trace_line: self.ppu_line,
                     trace_blank: trace_blank_now,
@@ -2927,6 +2938,7 @@ impl SnesBus<'_> {
                     apu_panicked: *self.apu_panicked,
                     dma_trace: trace.as_mut(),
                     last_a_addr: 0,
+                    scpu_mar: &mut self.scpu_mar,
                     trace_frame: self.frame_count,
                     trace_line: self.ppu_line,
                     trace_blank: trace_blank_now,
