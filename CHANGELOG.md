@@ -17,6 +17,13 @@ All notable user-facing changes to luna. Releases are cut from `main`
   `--input 150:0`. Both paths now drain as they go, and the WAV is the same
   whatever the script or trace flags (reported by the OpenSNES team). API:
   `Emulator::run_input_script_with_audio`. `luna test` was not affected.
+- **SA-1 and DSP-1 cartridges have a save file again.** Their mappers never
+  exposed the battery RAM, so `luna test`'s `srm_out` wrote 0 bytes, `srm_in`
+  loaded nothing, and the GUI kept no `.srm` for Super Mario RPG, Kirby Super
+  Star or Super Mario Kart. An SA-1 save is the part of BW-RAM the header
+  declares (a cart that declares none still has BW-RAM, and no save); a DSP-1
+  save is its base board's SRAM (reported by the OpenSNES team). Super FX
+  save RAM is not modelled separately yet and still has no `.srm`.
 
 ## [1.28.1] — 2026-09-27
 
