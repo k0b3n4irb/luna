@@ -4,7 +4,18 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.30.0] — 2026-09-27
+
+The SA-1, checked against a real console: the SNES-SA1 Speed Test v5.1
+run on luna and compared with the photos of a 1L8B-10 console, with Mesen2
+as second source. Three timing mechanisms ported from ares, and one
+invented guard removed.
+
+**Upgrading from 1.29:** nothing to do. Save-states still load and no flag
+changed meaning. SA-1 games run at their real speed now, which is lower for
+code that jumps around in ROM and higher around HDMA; Super Mario RPG and
+Kirby Super Star render the same scenes a few frames of SA-1 work apart.
+`luna profile`'s SA-1 MHz figure follows.
 
 ### Fixed
 
