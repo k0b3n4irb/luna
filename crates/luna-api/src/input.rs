@@ -238,6 +238,19 @@ impl Emulator {
     /// Returns the instructions consumed; stops early on a halted core, so a
     /// dead ROM cannot spin here.
     pub fn step_to_frame_bounded(&mut self, frame: u64, budget: u64) -> u64 {
+        self.step_to_frame_draining(frame, budget, None)
+    }
+
+    /// [`Self::step_to_frame_bounded`], moving the APU's audio into `audio`
+    /// after every frame. The APU queue holds ~0.5 s and drops new samples
+    /// once full, so a caller that wants the whole stream must drain at
+    /// least that often.
+    fn step_to_frame_draining(
+        &mut self,
+        frame: u64,
+        budget: u64,
+        mut audio: Option<&mut Vec<(i16, i16)>>,
+    ) -> u64 {
         let start = self.instructions_executed();
         while self.frame_count().unwrap_or(0) < frame {
             let spent = self.instructions_executed().saturating_sub(start);
@@ -251,6 +264,11 @@ impl Emulator {
                 == 0
             {
                 break;
+            }
+            if let Some(acc) = audio.as_deref_mut()
+                && let Ok(mut chunk) = self.drain_audio(usize::MAX)
+            {
+                acc.append(&mut chunk);
             }
         }
         self.instructions_executed().saturating_sub(start)
@@ -266,6 +284,27 @@ impl Emulator {
         script: &mut InputScript,
         bound: ScriptBound,
     ) -> Result<u64, ApiError> {
+        self.run_input_script_inner(script, bound, None)
+    }
+
+    /// [`Self::run_input_script`] that also collects the audio produced on
+    /// the way into `audio`, frame by frame — without it, everything before
+    /// the last event is lost to the APU queue's ~0.5 s capacity.
+    pub fn run_input_script_with_audio(
+        &mut self,
+        script: &mut InputScript,
+        bound: ScriptBound,
+        audio: &mut Vec<(i16, i16)>,
+    ) -> Result<u64, ApiError> {
+        self.run_input_script_inner(script, bound, Some(audio))
+    }
+
+    fn run_input_script_inner(
+        &mut self,
+        script: &mut InputScript,
+        bound: ScriptBound,
+        mut audio: Option<&mut Vec<(i16, i16)>>,
+    ) -> Result<u64, ApiError> {
         let start = self.instructions_executed();
         while let Some(frame) = script.next_frame() {
             let left = match bound {
@@ -280,7 +319,7 @@ impl Emulator {
                     }
                 }
             };
-            self.step_to_frame_bounded(frame, left);
+            self.step_to_frame_draining(frame, left, audio.as_deref_mut());
             let now = self.frame_count()?;
             if now < frame {
                 break; // ran out before reaching this event's frame

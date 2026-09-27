@@ -4,6 +4,20 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- **`luna state --audio-out` keeps the whole run under `--input` and the
+  `--*-trace-from` flags.** The APU queue holds about half a second and
+  drops new samples once full. The input-script pre-roll and the bridges to
+  a trace's start stepped without draining it, so the WAV kept the first
+  16 384 samples, then jumped to the last input checkpoint (or the trace
+  start): 95 819 samples instead of 159 936 for 300 frames with
+  `--input 150:0`. Both paths now drain as they go, and the WAV is the same
+  whatever the script or trace flags (reported by the OpenSNES team). API:
+  `Emulator::run_input_script_with_audio`. `luna test` was not affected.
+
 ## [1.28.1] — 2026-09-27
 
 One fix, reported by the OpenSNES team: the last RAM write of a Super FX job

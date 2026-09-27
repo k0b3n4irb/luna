@@ -314,7 +314,15 @@ pub(crate) fn run_state(
         luna_api::ScriptBound::Steps(steps),
         luna_api::ScriptBound::Frame,
     );
-    if let Err(e) = em.run_input_script(&mut script, bound) {
+    // With --audio-out, the pre-roll's audio is kept: the script can run for
+    // hundreds of frames, far past the APU queue's ~0.5 s.
+    let mut audio_accum: Vec<(i16, i16)> = Vec::new();
+    let ran = if audio_out.is_some() {
+        em.run_input_script_with_audio(&mut script, bound, &mut audio_accum)
+    } else {
+        em.run_input_script(&mut script, bound)
+    };
+    if let Err(e) = ran {
         eprintln!("error: applying scripted input: {e}");
         return ExitCode::from(1);
     }
@@ -376,7 +384,9 @@ pub(crate) fn run_state(
         let current = em.instructions_executed();
         if bridge_target > current {
             let bridge = (bridge_target - current).min(remaining);
-            if let Err(e) = em.step(bridge) {
+            if let Err(e) =
+                step_keeping_audio(&mut em, bridge, audio_out.is_some(), &mut audio_accum)
+            {
                 eprintln!("step warning (pre-trace bridge 1): {e}");
             }
             remaining = remaining.saturating_sub(bridge);
@@ -403,7 +413,9 @@ pub(crate) fn run_state(
         let current = em.instructions_executed();
         if second_target > current {
             let bridge = (second_target - current).min(remaining);
-            if let Err(e) = em.step(bridge) {
+            if let Err(e) =
+                step_keeping_audio(&mut em, bridge, audio_out.is_some(), &mut audio_accum)
+            {
                 eprintln!("step warning (pre-trace bridge 2): {e}");
             }
             remaining = remaining.saturating_sub(bridge);
@@ -438,7 +450,9 @@ pub(crate) fn run_state(
         let current = em.instructions_executed();
         if from > current {
             let bridge = (from - current).min(remaining);
-            if let Err(e) = em.step(bridge) {
+            if let Err(e) =
+                step_keeping_audio(&mut em, bridge, audio_out.is_some(), &mut audio_accum)
+            {
                 eprintln!("step warning (pre-trace bridge): {e}");
             }
             remaining = remaining.saturating_sub(bridge);
@@ -458,8 +472,8 @@ pub(crate) fn run_state(
     // When --audio-out is set, step in chunks and drain the APU's
     // ~16k-sample bounded queue after each chunk; otherwise we'd lose
     // ~99% of audio on any run longer than ~0.5 s of emulated time.
-    // The accumulated Vec is written to disk after the run.
-    let mut audio_accum: Vec<(i16, i16)> = Vec::new();
+    // The accumulated Vec (started by the input pre-roll) is written to disk
+    // after the run.
     if let Some(target_frame) = until_frame {
         // RFE-5: run to a specific PPU frame instead of the `-n` instruction
         // count, draining audio along the way so `--audio-out` still works.
@@ -478,22 +492,8 @@ pub(crate) fn run_state(
             }
         }
     } else if audio_out.is_some() {
-        // Chunk = 100k instructions ≈ ~10 ms of emulated SPC time
-        // (well under the 512 ms queue capacity even at peak DSP
-        // output rate). Drain the full queue after each chunk.
-        const AUDIO_CHUNK: u64 = 100_000;
-        let mut left = remaining;
-        while left > 0 {
-            let take = left.min(AUDIO_CHUNK);
-            if let Err(e) = em.step(take) {
-                eprintln!("step warning: {e}");
-                break;
-            }
-            left -= take;
-            match em.drain_audio(usize::MAX) {
-                Ok(mut chunk) => audio_accum.append(&mut chunk),
-                Err(e) => eprintln!("warning: drain_audio mid-run: {e}"),
-            }
+        if let Err(e) = step_keeping_audio(&mut em, remaining, true, &mut audio_accum) {
+            eprintln!("step warning: {e}");
         }
     } else {
         match em.step(remaining) {
@@ -1040,4 +1040,27 @@ pub(crate) fn run_state(
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// Step `n` instructions; with `keep`, move the APU's audio into `acc` every
+/// 100k instructions (~10 ms of emulated time, far under the queue's ~0.5 s,
+/// which drops new samples once full).
+fn step_keeping_audio(
+    em: &mut luna_api::Emulator,
+    n: u64,
+    keep: bool,
+    acc: &mut Vec<(i16, i16)>,
+) -> Result<(), luna_api::ApiError> {
+    const AUDIO_CHUNK: u64 = 100_000;
+    if !keep {
+        return em.step(n).map(|_| ());
+    }
+    let mut left = n;
+    while left > 0 {
+        let take = left.min(AUDIO_CHUNK);
+        em.step(take)?;
+        left -= take;
+        acc.append(&mut em.drain_audio(usize::MAX)?);
+    }
+    Ok(())
 }
