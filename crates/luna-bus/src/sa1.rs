@@ -467,6 +467,18 @@ impl Sa1Mapper {
         (mask >> page) & 1 != 0
     }
 
+    /// The whole BW-RAM, as the cartridge holds it (the battery-backed save
+    /// is its declared prefix — see `Sa1Chip`).
+    #[must_use]
+    pub fn bwram(&self) -> &[u8] {
+        &self.bwram
+    }
+
+    /// Mutable BW-RAM, for loading a `.srm`.
+    pub fn bwram_mut(&mut self) -> &mut [u8] {
+        &mut self.bwram
+    }
+
     fn bwram_writable_for(&self, byte_off: usize) -> bool {
         // Per ares (`coprocessor/sa1/bwram.cpp:40-43, 73-84`) and
         // Mesen2 (`CpuBwRamHandler.h:45-57`, `Sa1BwRamHandler.h:41-50`):

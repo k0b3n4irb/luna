@@ -935,7 +935,9 @@ impl Snes {
             // MMIO wrapped in a [`Sa1Chip`] that also drives the SA-1's
             // own 65C816 (released from reset by main-CPU writes to
             // `$2200 CCNT`).
-            MapperKind::Sa1 => Box::new(Sa1Chip::new(Sa1Mapper::new(cart.rom, sram_bytes))),
+            MapperKind::Sa1 => Box::new(
+                Sa1Chip::new(Sa1Mapper::new(cart.rom, sram_bytes)).with_save_bytes(sram_bytes),
+            ),
             // Super FX — the GSU is self-contained (no embedded 65C816), so
             // the whole chip lives in `SuperFxMapper`, driven by the
             // `step_coproc` hook. The Game Pak **work** RAM (the GSU's plot

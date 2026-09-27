@@ -149,6 +149,14 @@ impl Mapper for Dsp1Mapper {
         self.base.sram_size()
     }
 
+    fn sram(&self) -> &[u8] {
+        self.base.sram()
+    }
+
+    fn load_sram(&mut self, data: &[u8]) {
+        self.base.load_sram(data);
+    }
+
     fn save_state(&self) -> Vec<u8> {
         let st = Dsp1State {
             base: self.base.save_state(),
@@ -251,6 +259,16 @@ mod tests {
     /// against Mesen2 (`tests/dsp1_port_differential.rs`).
     fn firmware() -> Vec<u8> {
         vec![0u8; FIRMWARE_BYTES]
+    }
+
+    /// Super Mario Kart keeps its records in the base board's SRAM: the
+    /// DSP-1 wrapper must hand it through, or the `.srm` is empty.
+    #[test]
+    fn the_base_boards_sram_is_the_save() {
+        let mut m = Dsp1Mapper::new(rom(), 0x800, Some(&firmware()), false);
+        assert_eq!(m.sram().len(), 0x800);
+        m.load_sram(&[1, 2, 3]);
+        assert_eq!(m.sram()[..3], [1, 2, 3]);
     }
 
     #[test]
