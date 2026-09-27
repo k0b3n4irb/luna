@@ -487,6 +487,28 @@ impl Bus for Sa1Bus<'_> {
         *self.steps += 1;
     }
 
+    /// ares `SA1::idleJump()` (`sa1/memory.cpp:6-15`): a jump, call, return
+    /// or interrupt entry whose target is in ROM costs one more step, plus
+    /// the ROM conflict step when the S-CPU is on ROM too. Not charged for
+    /// BW-RAM or I-RAM. The Speed Test measures it: a `JMP` loop in ROM runs
+    /// at 7.67 MHz on a console, not 10.74.
+    fn idle_jump(&mut self, pc: Addr24) {
+        if Sa1Mapper::sa1_access_region(pc) == Sa1Region::Rom {
+            let conflict = self.mapper.sa1_conflict_steps(pc, self.scpu_mar);
+            *self.steps += 1 + u32::from(conflict);
+            let c = u64::from(conflict);
+            self.stats.conflict_steps += c;
+            self.stats.rom_conflict_steps += c;
+        }
+    }
+
+    /// ares `SA1::idleBranch()`: the jump penalty, for an odd target only.
+    fn idle_branch(&mut self, pc: Addr24) {
+        if pc & 1 != 0 {
+            self.idle_jump(pc);
+        }
+    }
+
     fn last_cycle(&mut self, i_flag: bool) -> InterruptSample {
         // ares `SA1::lastCycle()` (`coprocessor/sa1/sa1.cpp:96-121`) — the
         // same virtual the S-CPU overrides, with the SA-1's own sources:
@@ -582,6 +604,42 @@ mod tests {
         }
         assert!(chip.cpu.waiting, "SA-1 parked in WAI");
         chip
+    }
+
+    /// ares `SA1::idleJump()`: a jump whose target is in ROM costs one more
+    /// step; in I-RAM it does not. The SA-1 Speed Test measures the
+    /// difference on a console (WRAM|ROM 10.07 MHz against WRAM|I-RAM
+    /// 10.74), and luna had it at 10.74 both ways.
+    #[test]
+    fn a_jump_into_rom_pays_the_penalty_step_and_one_into_iram_does_not() {
+        let steps_per_jmp = |at_rom: bool| {
+            let mut rom = vec![0xEAu8; 0x8000];
+            rom[..3].copy_from_slice(&[0x4C, 0x00, 0x80]); // $8000: JMP $8000
+            let mut chip = Sa1Chip::new(Sa1Mapper::new(rom, 0x2000));
+            chip.write(make_addr(0x00, 0x2229), 0xFF); // SIWP: I-RAM writable
+            for (i, b) in [0x4C, 0x00, 0x30].into_iter().enumerate() {
+                chip.write(make_addr(0x00, 0x3000 + i as u16), b); // $3000: JMP $3000
+            }
+            let entry: u16 = if at_rom { 0x8000 } else { 0x3000 };
+            chip.write(make_addr(0x00, 0x2203), entry as u8); // CRV
+            chip.write(make_addr(0x00, 0x2204), (entry >> 8) as u8);
+            chip.write(make_addr(0x00, 0x2200), 0x00); // release from reset
+            for _ in 0..50 {
+                chip.step_coproc(2_000, 0); // the S-CPU sits in WRAM: no conflict
+            }
+            let s = chip.sa1_stats().unwrap();
+            s.steps as f64 / s.instructions as f64
+        };
+        let rom = steps_per_jmp(true);
+        let iram = steps_per_jmp(false);
+        assert!(
+            (rom - 4.0).abs() < 0.01,
+            "ROM: 3 accesses + the penalty, got {rom}"
+        );
+        assert!(
+            (iram - 3.0).abs() < 0.01,
+            "I-RAM: 3 accesses, no penalty, got {iram}"
+        );
     }
 
     #[test]

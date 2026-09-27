@@ -1272,6 +1272,9 @@ spc_test!(
 // (ares superfx.cpp:29), so the last byte of a job lands before the CPU copies
 // the framebuffer. Star Fox shifts phase, Stunt Race FX's demo takes another
 // line; both render cleanly (GUI-validated).
+// Re-baselined 2026-09-27 (SA-1 idleJump/idleBranch, ares sa1/memory.cpp):
+// a SA-1 jump into ROM costs one more step, so SMRPG's intro and Kirby's
+// play run a few frames' worth of SA-1 work later; both render cleanly.
 macro_rules! game_test {
     ($fn:ident, $file:literal, $frames:literal, $hash:literal) => {
         #[test]
@@ -1323,13 +1326,13 @@ game_test!(
     game_smrpg,
     "Super Mario RPG - Legend of the Seven Stars (USA).sfc",
     905,
-    "622fc2b46c8719744f41509848301c93835dc10a9d76ce9e1ba5c04b2ccfb600"
+    "42e9be48c6893f30641c2c7b54fe55dd364e8930b24247c7c9b95022e527d137"
 );
 game_test!(
     game_kirby_ss,
     "Kirby Super Star (USA).sfc",
     3054,
-    "389d8a48bfaf05a46c40e5528a4ce2c045d9bf6d40dc335a62a7927d80350f9b"
+    "1c3522e42749664a7d12d6414d94434d2bb104cb296e3ff6918ab162a5b9d2e4"
 );
 // Super FX (GSU)
 game_test!(

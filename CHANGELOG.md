@@ -4,6 +4,21 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- **SA-1: a jump, call or return into ROM costs its extra cycle.** ares
+  charges the SA-1 one more step after `JMP` / `JML` / `JSR` / `JSL` /
+  `RTS` / `RTL` / `RTI` / interrupt entry when the target is in ROM, and
+  after a taken branch or `BRL` to an odd address (`idleJump` /
+  `idleBranch`); luna did not. On the SNES-SA1 Speed Test the rows without
+  a bus conflict now match a console's photos to the digit (WRAM|ROM
+  10.06766 MHz, `JML` 8.94803, `RTI` 15.58648 — all were 10.74-16.11), and
+  luna agrees with Mesen2 on the jump page. `luna profile`'s SA-1 speed is
+  lower for ROM-resident code accordingly. Super Mario RPG and Kirby Super
+  Star goldens re-recorded (same scenes, a few frames of SA-1 work later).
+
 ## [1.29.0] — 2026-09-27
 
 Four items from the OpenSNES team's 2026-09-27 reply: two fixes, a field
