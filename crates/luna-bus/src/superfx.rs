@@ -769,6 +769,22 @@ impl SuperFxMapper {
         self.regs.romdr
     }
 
+    /// Clock a stopped GSU: ares keeps stepping it (`if(regs.sfr.g == 0)
+    /// return step(6);`, superfx.cpp:29), so a delayed ROM read or RAM write
+    /// armed just before STOP still lands after it. From the code cache the
+    /// last ops cost 1-2 clocks, less than the 5-6 the buffer needs, so the
+    /// final byte of a `STW` is still pending at STOP. The access lands only
+    /// once SCMR grants its bus: ares' `read`/`write` spin in `step(6)` until
+    /// `RON` / `RAN` come back (memory.cpp:3, 34).
+    fn idle_clock(&mut self, clocks: u32) {
+        let pending = self.regs.romcl > 0 || self.regs.ramcl > 0;
+        let blocked = (self.regs.romcl > 0 && !self.regs.scmr_ron)
+            || (self.regs.ramcl > 0 && !self.regs.scmr_ran);
+        if pending && !blocked {
+            self.step(clocks);
+        }
+    }
+
     /// Drain any pending delayed RAM write to completion.
     fn sync_ram_buffer(&mut self) {
         if self.regs.ramcl > 0 {
@@ -1844,6 +1860,7 @@ impl Mapper for SuperFxMapper {
         // time between GO tasks, not just GSU-active time.
         self.cpu_mclk = self.cpu_mclk.wrapping_add(u64::from(main_mclk));
         if !self.sfr_get(SFR_G) {
+            self.idle_clock(main_mclk);
             return;
         }
         // The CPU advanced `main_mclk` master clocks; add that to the GSU's
@@ -2744,6 +2761,42 @@ mod tests {
         m.step_coproc(1000, 0); // ample budget
         assert!(!m.snapshot().running, "GSU halted on STOP");
         assert_eq!(m.snapshot().r[0], 1, "INC r0 executed exactly once");
+    }
+
+    /// `OpenSNES` 2026-09-27: a job run from the code cache lost the high
+    /// byte of its last `STW`. Cache ops cost 1-2 clocks, so STOP came before
+    /// the 5-6 the RAM buffer needs, and a stopped GSU never clocked again.
+    /// ares keeps stepping it (superfx.cpp:29), and the write waits for RAN.
+    #[test]
+    fn a_ram_write_pending_at_stop_lands_once_ram_is_granted() {
+        let mut m = fx();
+        m.regs.scmr_ran = true;
+        load_and_go(
+            &mut m,
+            &[
+                0xF0, 0xDE, 0xC0, // iwt r0, #$C0DE
+                0xA1, 0x04, // ibt r1, #4
+                0x31, // stw (r1)
+                0xF0, 0xEF, 0xBE, // iwt r0, #$BEEF
+                0xA1, 0x06, // ibt r1, #6
+                0x31, // stw (r1)
+                0x00, // stop
+                0x01, // nop
+            ],
+        );
+        m.step_coproc(1000, 0);
+        assert!(!m.snapshot().running, "reached STOP");
+        assert_eq!(m.ram[4..7], [0xDE, 0xC0, 0xEF], "earlier bytes landed");
+        assert_eq!(m.ram[7], 0x00, "the last byte is still in the buffer");
+
+        // The CPU takes RAM back: the write waits (ares write(): `while(!ran)`).
+        m.regs.scmr_ran = false;
+        m.step_coproc(100, 0);
+        assert_eq!(m.ram[7], 0x00, "no RAM write without RAN");
+
+        m.regs.scmr_ran = true;
+        m.step_coproc(100, 0);
+        assert_eq!(m.ram[4..8], [0xDE, 0xC0, 0xEF, 0xBE], "lands once granted");
     }
 
     // ----- phase 2b: memory ops, multiplies, immediate loads -------------
