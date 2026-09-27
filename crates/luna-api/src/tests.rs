@@ -1565,3 +1565,36 @@ fn load_state_refuses_a_forged_length_prefix_at_every_layer() {
     e.step(64).unwrap();
     e.load_state(&good).unwrap();
 }
+
+/// `OpenSNES` 2026-09-27: `luna state --input 150:0 --audio-out` kept 16 384
+/// samples of the pre-roll and then jumped to frame 150 — the APU queue
+/// holds ~0.5 s and drops new samples once full. The script run must hand
+/// over the whole stream, whatever frames its events fall on.
+#[test]
+fn an_input_script_keeps_the_audio_of_its_pre_roll() {
+    let run = |events: &str| {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom_sram()).unwrap();
+        let mut script = crate::InputScript::new();
+        script.add_pad(0, events).unwrap();
+        let mut audio = Vec::new();
+        e.run_input_script_with_audio(&mut script, crate::ScriptBound::Frame(90), &mut audio)
+            .unwrap();
+        // The tail past the last event is short enough for the queue.
+        e.step_to_frame_bounded(90, u64::MAX);
+        audio.extend(e.drain_audio(usize::MAX).unwrap());
+        audio
+    };
+    let late = run("80:0");
+    assert!(
+        late.len() > 40_000,
+        "90 frames is about 48 000 samples, got {} (the queue caps at 16 384)",
+        late.len()
+    );
+    let spread = run("20:0,85:0");
+    assert_eq!(late.len(), spread.len(), "same length");
+    assert!(
+        late == spread,
+        "same stream whatever frames the events fall on"
+    );
+}

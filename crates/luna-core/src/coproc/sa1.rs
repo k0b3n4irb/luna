@@ -73,6 +73,11 @@ pub struct Sa1Chip {
     /// of the run, deliberately absent from `Sa1ChipState`, so the
     /// save-state shape is untouched.
     stats: Sa1Stats,
+    /// Bytes of BW-RAM the header declares as save RAM: what a `.srm`
+    /// carries. BW-RAM itself is never smaller than 2 KB, so a cart that
+    /// declares none still has some — and no save. Construction data, not
+    /// state: absent from `Sa1ChipState`.
+    save_bytes: usize,
 }
 
 /// One SA-1 step = 2 master clocks (SA-1 @ 10.74 MHz; ares
@@ -96,7 +101,16 @@ impl Sa1Chip {
             sa1_side_log: None,
             sa1_trace: None,
             stats: Sa1Stats::ZERO,
+            save_bytes: 0,
         }
+    }
+
+    /// Declare how much of the BW-RAM is battery-backed save RAM (the
+    /// header's SRAM size): the part `sram()` / `load_sram()` carry.
+    #[must_use]
+    pub const fn with_save_bytes(mut self, bytes: usize) -> Self {
+        self.save_bytes = bytes;
+        self
     }
 
     /// Pull the SA-1's reset vector out of the CRV register at
@@ -167,6 +181,19 @@ impl Mapper for Sa1Chip {
 
     fn sram_size(&self) -> usize {
         self.inner.sram_size()
+    }
+
+    fn sram(&self) -> &[u8] {
+        let bwram = self.inner.bwram();
+        &bwram[..self.save_bytes.min(bwram.len())]
+    }
+
+    fn load_sram(&mut self, data: &[u8]) {
+        let n = data
+            .len()
+            .min(self.save_bytes)
+            .min(self.inner.bwram().len());
+        self.inner.bwram_mut()[..n].copy_from_slice(&data[..n]);
     }
 
     fn save_state(&self) -> Vec<u8> {
@@ -481,6 +508,31 @@ impl Bus for Sa1Bus<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `OpenSNES` 2026-09-27: `srm_out` wrote 0 bytes for an SA-1 cart, and
+    /// the GUI kept no `.srm` either. The save is the declared prefix of the
+    /// BW-RAM, never the 2 KB floor of a cart that declares none.
+    #[test]
+    fn the_save_is_the_declared_part_of_bw_ram() {
+        let mut chip =
+            Sa1Chip::new(Sa1Mapper::new(ramp_rom(0x8000), 0x8000)).with_save_bytes(0x8000);
+        assert_eq!(chip.sram().len(), 0x8000);
+        chip.load_sram(&[0xC1, 0xD2, 0xE3, 0xF4]);
+        assert_eq!(
+            chip.inner.bwram()[..4],
+            [0xC1, 0xD2, 0xE3, 0xF4],
+            "loaded into BW-RAM"
+        );
+        assert_eq!(
+            chip.sram()[..4],
+            [0xC1, 0xD2, 0xE3, 0xF4],
+            "and saved from it"
+        );
+
+        let none = Sa1Chip::new(Sa1Mapper::new(ramp_rom(0x8000), 0));
+        assert!(none.inner.bwram().len() >= 0x800, "BW-RAM exists");
+        assert!(none.sram().is_empty(), "but no save is declared");
+    }
     use luna_bus::types::make_addr;
 
     fn ramp_rom(size: usize) -> Vec<u8> {

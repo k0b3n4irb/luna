@@ -4,6 +4,50 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.29.0] — 2026-09-27
+
+Four items from the OpenSNES team's 2026-09-27 reply: two fixes, a field
+and a flag.
+
+**Upgrading from 1.28:** nothing to do. Save-states still load and no flag
+changed meaning. Two things may look different: SA-1 and DSP-1 games now
+get a `.srm` in the GUI, as LoROM games always did; and a WAV recorded by
+`luna state --audio-out` together with `--input` or a `--*-trace-from` flag
+is now the whole run — a baseline recorded that way on 1.28 came from a
+spliced file and needs re-recording.
+
+### Added
+
+- **`scheduler.last_nmi_frame`** — the frame of the latest delivered NMI
+  (`null` until one since power-on, reset or a state load). `nmis_serviced >
+  0` also passes a ROM whose NMI died after boot; `frame_count -
+  last_nmi_frame <= 1` answers "is it still alive" from one run (asked by
+  the OpenSNES team, whose liveness gate ran every example twice). Not
+  serialized: save-states are unchanged.
+- **`luna test --jobs N`** — run up to N manifests at once (`0` = one per
+  CPU). Same report, same order, same exit code as a serial run; 121
+  manifests went from 73 s to 16 s on six cores (asked by the OpenSNES
+  team, for whom one serial `luna test` had become the longest CI step).
+
+### Fixed
+
+- **`luna state --audio-out` keeps the whole run under `--input` and the
+  `--*-trace-from` flags.** The APU queue holds about half a second and
+  drops new samples once full. The input-script pre-roll and the bridges to
+  a trace's start stepped without draining it, so the WAV kept the first
+  16 384 samples, then jumped to the last input checkpoint (or the trace
+  start): 95 819 samples instead of 159 936 for 300 frames with
+  `--input 150:0`. Both paths now drain as they go, and the WAV is the same
+  whatever the script or trace flags (reported by the OpenSNES team). API:
+  `Emulator::run_input_script_with_audio`. `luna test` was not affected.
+- **SA-1 and DSP-1 cartridges have a save file again.** Their mappers never
+  exposed the battery RAM, so `luna test`'s `srm_out` wrote 0 bytes, `srm_in`
+  loaded nothing, and the GUI kept no `.srm` for Super Mario RPG, Kirby Super
+  Star or Super Mario Kart. An SA-1 save is the part of BW-RAM the header
+  declares (a cart that declares none still has BW-RAM, and no save); a DSP-1
+  save is its base board's SRAM (reported by the OpenSNES team). Super FX
+  save RAM is not modelled separately yet and still has no `.srm`.
+
 ## [1.28.1] — 2026-09-27
 
 One fix, reported by the OpenSNES team: the last RAM write of a Super FX job

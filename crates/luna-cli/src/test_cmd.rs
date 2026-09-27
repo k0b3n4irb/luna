@@ -381,6 +381,7 @@ pub(crate) fn run_tests(
     update: bool,
     only: Option<&str>,
     report_json: bool,
+    jobs: usize,
 ) -> ExitCode {
     // Collect manifests: explicit files verbatim, directories scanned
     // recursively for `*.toml`.
@@ -416,8 +417,8 @@ pub(crate) fn run_tests(
     }
 
     let mut outcomes: Vec<TestOutcome> = Vec::new();
-    for path in &manifests {
-        match run_one(path) {
+    for (path, result) in manifests.iter().zip(run_all(&manifests, jobs)) {
+        match result {
             Ok(outcome) => outcomes.push(outcome),
             Err(e) => {
                 // A malformed manifest is a usage error, not a test failure.
@@ -489,6 +490,60 @@ pub(crate) fn run_tests(
     } else {
         ExitCode::from(1)
     }
+}
+
+/// Run every manifest, `jobs` at a time (0 = one per CPU), and return the
+/// results in manifest order — so the report does not depend on `jobs`.
+/// Serially, a malformed manifest stops the run where it stands, as it
+/// always has; in parallel the others still finish, and the first error in
+/// manifest order is the one reported.
+fn run_all(manifests: &[PathBuf], jobs: usize) -> Vec<Result<TestOutcome, String>> {
+    let jobs = match jobs {
+        0 => std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
+        n => n,
+    }
+    .min(manifests.len())
+    .max(1);
+    if jobs == 1 {
+        let mut out = Vec::with_capacity(manifests.len());
+        for path in manifests {
+            let result = run_one(path);
+            let stop = result.is_err();
+            out.push(result);
+            if stop {
+                break;
+            }
+        }
+        return out;
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let slots: Vec<std::sync::Mutex<Option<Result<TestOutcome, String>>>> = manifests
+        .iter()
+        .map(|_| std::sync::Mutex::new(None))
+        .collect();
+    std::thread::scope(|scope| {
+        for _ in 0..jobs {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(path) = manifests.get(i) else { break };
+                    let result = run_one(path);
+                    if let Ok(mut slot) = slots[i].lock() {
+                        *slot = Some(result);
+                    }
+                }
+            });
+        }
+    });
+    slots
+        .into_iter()
+        .map(|slot| {
+            slot.into_inner()
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| Err("worker thread panicked".to_string()))
+        })
+        .collect()
 }
 
 fn collect_tomls(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -1730,6 +1785,45 @@ mod tests {
         assert!(parse_key_offset("").is_err());
         assert!(parse_key_offset("0x").is_err());
         assert!(parse_key_offset("ten").is_err());
+    }
+
+    /// `--jobs` must not change the report: results come back in manifest
+    /// order however the workers finish. Serially, the first malformed
+    /// manifest still stops the run.
+    #[test]
+    fn parallel_results_keep_manifest_order() {
+        let dir = std::env::temp_dir().join(format!("luna-jobs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifests: Vec<std::path::PathBuf> = (0..7)
+            .map(|i| {
+                let p = dir.join(format!("m{i}.toml"));
+                // Even: a ROM that does not exist. Odd: TOML that does not parse.
+                let body = if i % 2 == 0 {
+                    "rom = \"missing.sfc\"\nframes = 1\n"
+                } else {
+                    "rom = \n"
+                };
+                std::fs::write(&p, body).unwrap();
+                p
+            })
+            .collect();
+        let parallel = super::run_all(&manifests, 3);
+        assert_eq!(parallel.len(), 7);
+        for (i, r) in parallel.iter().enumerate() {
+            let e = r.as_ref().err().expect("every manifest fails");
+            let expected = if i % 2 == 0 {
+                "reading ROM"
+            } else {
+                "parsing manifest"
+            };
+            assert!(e.contains(expected), "manifest {i}: {e}");
+        }
+        assert_eq!(
+            super::run_all(&manifests, 1).len(),
+            1,
+            "serial stops at the first"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

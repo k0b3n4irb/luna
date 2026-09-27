@@ -136,6 +136,12 @@ pub struct Snes {
     /// How many NMIs we have actually delivered to the CPU. Stays
     /// behind `frame_count` if `NMITIMEN.7` is off.
     pub nmis_serviced: u64,
+    /// `frame_count` when the last NMI was delivered; `None` until one is
+    /// since power-on, reset or a state load. A liveness probe: a ROM whose
+    /// NMI died after boot keeps `nmis_serviced` but not this. Not
+    /// serialized, so the save-state shape is unchanged.
+    #[serde(skip)]
+    pub last_nmi_frame: Option<u64>,
     /// Video region as decoded from the cartridge header. Drives
     /// the scheduler's scanlines-per-frame + VBlank-entry line and
     /// the PPU's `STAT78` region bit (bit 4).
@@ -935,7 +941,9 @@ impl Snes {
             // MMIO wrapped in a [`Sa1Chip`] that also drives the SA-1's
             // own 65C816 (released from reset by main-CPU writes to
             // `$2200 CCNT`).
-            MapperKind::Sa1 => Box::new(Sa1Chip::new(Sa1Mapper::new(cart.rom, sram_bytes))),
+            MapperKind::Sa1 => Box::new(
+                Sa1Chip::new(Sa1Mapper::new(cart.rom, sram_bytes)).with_save_bytes(sram_bytes),
+            ),
             // Super FX — the GSU is self-contained (no embedded 65C816), so
             // the whole chip lives in `SuperFxMapper`, driven by the
             // `step_coproc` hook. The Game Pak **work** RAM (the GSU's plot
@@ -1007,6 +1015,7 @@ impl Snes {
             mcycles_in_line: 0,
             frame_count: 0,
             nmis_serviced: 0,
+            last_nmi_frame: None,
             region,
             wm_addr: 0,
             mdr: 0,
@@ -1302,6 +1311,7 @@ impl Snes {
                 mcycles_in_line: 0,
                 frame_count: 0,
                 nmis_serviced: 0,
+                last_nmi_frame: None,
                 sched_enabled: false,
                 cpu_pc_full: cpu_pc_snapshot,
             });
@@ -1357,6 +1367,7 @@ impl Snes {
         self.mcycles_in_line = 0;
         self.frame_count = 0;
         self.nmis_serviced = 0;
+        self.last_nmi_frame = None;
         self.nmi_pending = false;
         self.irq_pending = false;
         self.wm_addr = 0;
@@ -1417,13 +1428,14 @@ impl Snes {
         if idle_kind.is_some() {
             self.mclk_acc.steps_idle = self.mclk_acc.steps_idle.saturating_add(1);
         }
-        let (rb_line, rb_mil, rb_fc, rb_ns);
+        let (rb_line, rb_mil, rb_fc, rb_ns, rb_lnf);
         {
             let (cpu, mut bus) = self.cpu_and_bus(BusCursor {
                 ppu_line: ppu_line_snapshot,
                 mcycles_in_line: self.mcycles_in_line,
                 frame_count: self.frame_count,
                 nmis_serviced: self.nmis_serviced,
+                last_nmi_frame: self.last_nmi_frame,
                 sched_enabled: true,
                 cpu_pc_full: cpu_pc_snapshot,
             });
@@ -1436,11 +1448,13 @@ impl Snes {
             rb_mil = bus.mcycles_in_line;
             rb_fc = bus.frame_count;
             rb_ns = bus.nmis_serviced;
+            rb_lnf = bus.last_nmi_frame;
         }
         self.ppu_line = rb_line;
         self.mcycles_in_line = rb_mil;
         self.frame_count = rb_fc;
         self.nmis_serviced = rb_ns;
+        self.last_nmi_frame = rb_lnf;
 
         let consumed = self.total_mclk - before;
         if let Some(prof) = self.profile.as_mut() {
@@ -1501,13 +1515,14 @@ impl Snes {
         self.mclk_acc.current = MclkKind::CpuActive;
         let ppu_line_snapshot = self.ppu_line;
         let cpu_pc_snapshot = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
-        let (rb_line, rb_mil, rb_fc, rb_ns);
+        let (rb_line, rb_mil, rb_fc, rb_ns, rb_lnf);
         {
             let (_, mut bus) = self.cpu_and_bus(BusCursor {
                 ppu_line: ppu_line_snapshot,
                 mcycles_in_line: self.mcycles_in_line,
                 frame_count: self.frame_count,
                 nmis_serviced: self.nmis_serviced,
+                last_nmi_frame: self.last_nmi_frame,
                 sched_enabled: true,
                 cpu_pc_full: cpu_pc_snapshot,
             });
@@ -1520,11 +1535,13 @@ impl Snes {
             rb_mil = bus.mcycles_in_line;
             rb_fc = bus.frame_count;
             rb_ns = bus.nmis_serviced;
+            rb_lnf = bus.last_nmi_frame;
         }
         self.ppu_line = rb_line;
         self.mcycles_in_line = rb_mil;
         self.frame_count = rb_fc;
         self.nmis_serviced = rb_ns;
+        self.last_nmi_frame = rb_lnf;
         // No CPU poke: an edge latched while no instruction was running
         // stays latched, and the next instruction's `last_cycle` poll
         // picks it up.
@@ -1562,6 +1579,7 @@ impl Snes {
             mcycles_in_line: mcycles_in_line_snapshot,
             frame_count: 0,
             nmis_serviced: 0,
+            last_nmi_frame: None,
             sched_enabled: false,
             cpu_pc_full: cpu_pc_snapshot,
         });
@@ -1753,6 +1771,8 @@ struct SnesBus<'a> {
     frame_count: u64,
     /// Live delivered-NMI counter.
     nmis_serviced: u64,
+    /// Live frame of the last delivered NMI.
+    last_nmi_frame: Option<u64>,
     /// When `true`, `io_cycle` ticks the scanline scheduler per bus
     /// access. `false` for debug peeks / mapping tests so they never
     /// advance emulation.
@@ -1914,6 +1934,7 @@ struct BusCursor {
     mcycles_in_line: u32,
     frame_count: u64,
     nmis_serviced: u64,
+    last_nmi_frame: Option<u64>,
     sched_enabled: bool,
     cpu_pc_full: u32,
 }
@@ -1973,6 +1994,7 @@ impl Snes {
             mcycles_in_line: cursor.mcycles_in_line,
             frame_count: cursor.frame_count,
             nmis_serviced: cursor.nmis_serviced,
+            last_nmi_frame: cursor.last_nmi_frame,
             sched_enabled: cursor.sched_enabled,
             cpu_pc_full: cursor.cpu_pc_full,
             mailbox_log,
@@ -2553,6 +2575,7 @@ impl SnesBus<'_> {
             if self.cpu_regs.nmitimen & 0x80 != 0 {
                 *self.nmi = true;
                 self.nmis_serviced = self.nmis_serviced.saturating_add(1);
+                self.last_nmi_frame = Some(self.frame_count);
                 self.trace_irq_signal(MemEventKind::NmiSignal, self.cpu_regs.nmitimen);
             }
             // OAM address auto-reset (ares `object.cpp:31-32`), unless

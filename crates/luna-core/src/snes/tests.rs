@@ -475,6 +475,7 @@ fn wram_low_mirror_aliases_bank_7e() {
         mcycles_in_line: 0,
         frame_count: 0,
         nmis_serviced: 0,
+        last_nmi_frame: None,
         sched_enabled: false,
         cpu_pc_full: cpu_pc_snapshot,
     });
@@ -501,6 +502,7 @@ fn wrio_latch_fires_on_falling_edge_and_slhv_gates_on_pio_high() {
         mcycles_in_line: 0,
         frame_count: 0,
         nmis_serviced: 0,
+        last_nmi_frame: None,
         sched_enabled: false,
         cpu_pc_full: cpu_pc_snapshot,
     });
@@ -535,6 +537,7 @@ fn open_bus_read_returns_last_data_bus_value_not_ff() {
         mcycles_in_line: 0,
         frame_count: 0,
         nmis_serviced: 0,
+        last_nmi_frame: None,
         sched_enabled: false,
         cpu_pc_full: cpu_pc_snapshot,
     });
@@ -566,6 +569,7 @@ fn wram_port_round_trips_through_2180_and_address_registers() {
         mcycles_in_line: 0,
         frame_count: 0,
         nmis_serviced: 0,
+        last_nmi_frame: None,
         sched_enabled: false,
         cpu_pc_full: cpu_pc_snapshot,
     });
@@ -596,6 +600,7 @@ fn nocash_21fc_writes_are_captured_and_filtered() {
             mcycles_in_line: 0,
             frame_count: 0,
             nmis_serviced: 0,
+            last_nmi_frame: None,
             sched_enabled: false,
             cpu_pc_full: cpu_pc_snapshot,
         });
@@ -626,6 +631,7 @@ fn manual_joypad_serial_shifts_msb_first() {
         mcycles_in_line: 0,
         frame_count: 0,
         nmis_serviced: 0,
+        last_nmi_frame: None,
         sched_enabled: false,
         cpu_pc_full: cpu_pc_snapshot,
     });
@@ -930,6 +936,7 @@ fn hdma_preempts_a_long_mid_frame_dma_at_scanline_boundaries() {
         mcycles_in_line: 0,
         frame_count: 0,
         nmis_serviced: 0,
+        last_nmi_frame: None,
         sched_enabled: true,
         cpu_pc_full: cpu_pc_snapshot,
     });
@@ -1045,6 +1052,35 @@ fn scheduler_does_not_trigger_nmi_when_masked_but_still_sets_flag() {
     assert_eq!(snes.nmis_serviced, 0);
 }
 
+/// `OpenSNES` 2026-09-27: `nmis_serviced > 0` also passes a ROM whose NMI
+/// died after boot. `last_nmi_frame` records the frame of the latest one,
+/// and stops moving the moment `NMITIMEN.7` is cleared.
+#[test]
+fn last_nmi_frame_follows_the_latest_nmi_and_stops_when_it_dies() {
+    let mut snes = Snes::from_cartridge(demo_lorom());
+    snes.reset();
+    assert_eq!(snes.last_nmi_frame, None, "none since reset");
+    let one_frame = MCYCLES_PER_SCANLINE * u32::from(NTSC_SCANLINES_PER_FRAME);
+    snes.cpu_regs.nmitimen = 0x80;
+    for _ in 0..3 {
+        snes.advance_scheduler(one_frame);
+    }
+    let alive = snes.last_nmi_frame.expect("NMIs delivered");
+    assert!(
+        snes.frame_count - alive <= 1,
+        "alive: {} vs {}",
+        snes.frame_count,
+        alive
+    );
+
+    snes.cpu_regs.nmitimen = 0x00; // the NMI dies
+    for _ in 0..3 {
+        snes.advance_scheduler(one_frame);
+    }
+    assert_eq!(snes.last_nmi_frame, Some(alive), "no longer moves");
+    assert!(snes.frame_count - alive >= 3, "the gap grows");
+}
+
 /// Read `$4210` through the CPU bus with the line cursor parked at `hclock`
 /// of the `VBlank` scanline and the NMI flag already raised. The scheduler
 /// is off, so the cursor does not move and the read lands exactly there.
@@ -1062,6 +1098,7 @@ fn rdnmi_read_at(hclock: u32) -> (u8, bool) {
         mcycles_in_line: hclock,
         frame_count: 0,
         nmis_serviced: 0,
+        last_nmi_frame: None,
         sched_enabled: false,
         cpu_pc_full: cpu_pc_snapshot,
     });
@@ -1379,6 +1416,7 @@ fn inidisp_write_exiting_force_blank_at_vblank_line_reloads_oam_address() {
         mcycles_in_line: 0,
         frame_count: 0,
         nmis_serviced: 0,
+        last_nmi_frame: None,
         sched_enabled: false,
         cpu_pc_full: cpu_pc_snapshot,
     });
