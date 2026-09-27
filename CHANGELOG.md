@@ -4,7 +4,17 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.29.0] — 2026-09-27
+
+Four items from the OpenSNES team's 2026-09-27 reply: two fixes, a field
+and a flag.
+
+**Upgrading from 1.28:** nothing to do. Save-states still load and no flag
+changed meaning. Two things may look different: SA-1 and DSP-1 games now
+get a `.srm` in the GUI, as LoROM games always did; and a WAV recorded by
+`luna state --audio-out` together with `--input` or a `--*-trace-from` flag
+is now the whole run — a baseline recorded that way on 1.28 came from a
+spliced file and needs re-recording.
 
 ### Added
 
