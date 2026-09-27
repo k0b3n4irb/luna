@@ -2773,6 +2773,8 @@ impl SnesBus<'_> {
         // False once we are re-advancing for a stall rather than for the
         // caller's own access — see the coproc note below.
         let mut caller_time = true;
+        // The DRAM-refresh part of a stall pass (0 on the caller's pass).
+        let mut stall_refresh = 0u32;
         // The caller's own time goes to whoever owns this bus borrow (CPU
         // active / WAI / STP, or the DMA burst); a stall pass is credited to
         // its own buckets when it is discovered, below (issue #223).
@@ -2806,8 +2808,26 @@ impl SnesBus<'_> {
             // would double-count. A stall is different — it is time nobody has
             // accounted for yet, and the coprocessor runs through it (the CPU
             // and the DMA are both halted), so always step it for one.
-            if advance_coproc || !caller_time {
-                self.mapper.step_coproc(step as u32, self.scpu_mar);
+            if caller_time {
+                if advance_coproc {
+                    self.mapper.step_coproc(step as u32, self.scpu_mar);
+                }
+            } else {
+                // ares runs the refresh as five `dramRefresh = 1; step(6);
+                // dramRefresh = 2; step(2);` pairs (`cpu/timing.cpp:24-28`),
+                // and the SA-1's I-RAM `conflict()` is off while it is 1.
+                let mut left = stall_refresh;
+                while left >= 8 {
+                    self.mapper.set_scpu_refresh(true);
+                    self.mapper.step_coproc(6, self.scpu_mar);
+                    self.mapper.set_scpu_refresh(false);
+                    self.mapper.step_coproc(2, self.scpu_mar);
+                    left -= 8;
+                }
+                let rest = step as u32 - (stall_refresh - left);
+                if rest > 0 {
+                    self.mapper.step_coproc(rest, self.scpu_mar);
+                }
             }
             // The stall is charged on EVERY path, DMA included. ares checks
             // the DRAM refresh inside `CPU::step` (`cpu/timing.cpp:21-29`),
@@ -2825,6 +2845,7 @@ impl SnesBus<'_> {
             self.mclk.credit(MclkKind::Hdma, u64::from(hdma));
             kind = None;
             caller_time = false;
+            stall_refresh = refresh;
             step = MCycles::from(refresh + hdma);
         }
     }

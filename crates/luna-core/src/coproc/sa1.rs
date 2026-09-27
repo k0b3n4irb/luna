@@ -304,6 +304,10 @@ impl Mapper for Sa1Chip {
         }
     }
 
+    fn set_scpu_refresh(&mut self, active: bool) {
+        self.inner.set_scpu_refresh(active);
+    }
+
     fn coproc_main_irq_pending(&self) -> bool {
         self.inner.main_irq_line()
     }
