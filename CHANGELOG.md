@@ -4,7 +4,14 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.28.1] — 2026-09-27
+
+One fix, reported by the OpenSNES team: the last RAM write of a Super FX job
+run from the code cache.
+
+**Upgrading from 1.28.0:** nothing to do. Save-states still load. Super FX
+titles may render a few pixels differently, because a byte that used to land
+late now lands on time.
 
 ### Fixed
 
