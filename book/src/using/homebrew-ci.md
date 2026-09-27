@@ -33,6 +33,15 @@ Only stderr (symbol-loading notes, warnings) interleaves across manifests.
 A malformed manifest still exits 2 with its error, but in parallel the
 other manifests have already run by then.
 
+**A power-cycle pair keeps its order.** A manifest whose `srm_in` is another
+one's `srm_out` (or two that write the same `srm_out`) runs after it, in
+path order, exactly as a serial run would; `luna test` finds these chains
+before starting and runs each one as a unit, in parallel with the rest.
+Paths are compared by where the file lands, so `save.srm` and
+`./sub/../save.srm` are the same file. Nothing else is ordered between
+manifests: two that talk through anything but a battery file — a file a
+script writes, a shared screenshot path — should not rely on `--jobs`.
+
 ## The manifest
 
 ```toml
