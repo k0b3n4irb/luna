@@ -173,7 +173,10 @@ enum Command {
         report: Option<String>,
         /// Run up to N manifests at once (0 = one per CPU). Each manifest
         /// gets its own emulator; the report is the same lines in the same
-        /// order, and the same exit code, as a serial run.
+        /// order, and the same exit code, as a serial run. Manifests chained
+        /// through a battery file (one's `srm_out` is another's `srm_in`)
+        /// still run one after another, in path order; there is no other
+        /// ordering between manifests.
         #[arg(long, default_value_t = 1)]
         jobs: usize,
     },
