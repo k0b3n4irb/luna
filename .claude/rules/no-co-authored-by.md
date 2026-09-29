@@ -1,28 +1,46 @@
-# No `Co-authored-by` / tool-attribution trailers (auto-loaded)
+# One author: the maintainer's `~/.gitconfig`. No `Co-authored-by`, no tool attribution (auto-loaded)
 
-NEVER add `Co-authored-by:` trailers — or any tool/assistant attribution
-(`Generated with …`, `Co-authored-by: Claude …`, etc.) — to commit
-messages, PR descriptions, PR merge bodies, tag messages, or issue
-comments in this repo. Authorship is the human committer's; the commit
-message is about the *change*, not who/what produced it.
+Every commit, merge and tag in this repository is authored **and committed**
+by the identity in the maintainer's `~/.gitconfig` (`git config --global
+user.name` / `user.email`), and by nothing else. The commit message is about
+the *change*, never about who or what produced it.
 
-## What this means in practice
+## The rules
 
-- **`git commit`**: write the subject + body only. No trailer block of
-  `Co-authored-by:` lines. (Keep the real `type(scope): description`
-  convention from `CLAUDE.md`.)
-- **`gh pr merge --squash`**: GitHub auto-appends a `Co-authored-by:`
-  trailer for each squashed commit's author when it generates the squash
-  message. To prevent that, pass an explicit clean body:
-  `gh pr merge <n> --squash --subject "<subj>" --body "<body>"` (no
-  trailer), or merge with a body file that omits trailers. Do **not**
-  accept the auto-generated message that carries `Co-authored-by:`.
-- **PR / release / issue text**: never sign with a tool attribution
-  footer.
+- **Identity: always `~/.gitconfig`.** Never pass `--author`, `-c user.name`,
+  `-c user.email`, `GIT_AUTHOR_*` / `GIT_COMMITTER_*`, or a repo-local
+  `user.*` override. If `git config --global user.email` is not the
+  maintainer's, stop and ask.
+- **No trailers of any kind that attribute the work**: no `Co-authored-by:`,
+  no `Generated with …`, no `Claude-Session:` or other session / tool link —
+  in commit messages, tag messages, PR descriptions, merge bodies, release
+  notes or issue comments. Subject + body only, `type(scope): description`
+  as in `CLAUDE.md`.
+- **Never let GitHub commit on our behalf.** `gh pr merge` (any mode) and the
+  web merge / "Update branch" / web-editor buttons create commits whose
+  committer is `GitHub <noreply@github.com>`. Do not use them.
+  - **Releases:** `main` is always an ancestor of `develop` (it is recreated
+    from `main` after each release), so a release is a **fast-forward**:
+    wait for `develop`'s CI to be green on the exact commit, then
+    `git push origin develop:main`. Branch protection accepts it because
+    that SHA already carries the required checks. Tag with `git tag -a`
+    locally (the tagger is `~/.gitconfig` too). A PR may still be opened for
+    the review trail; GitHub closes it as merged when `main` receives its
+    commits.
+  - If a fast-forward is impossible, stop and ask — do not fall back to a
+    GitHub merge.
+- **Before any push, check**:
+  `git log origin/main..HEAD --format='%an <%ae> | %cn <%ce>' | sort -u`
+  must print exactly one line, the `~/.gitconfig` identity for both.
 
 ## Why
 
-The maintainer's released history (e.g. `v0.0.1`) had to be rewritten to
-strip 9 GitHub-squash-injected `Co-authored-by: k0b3n4irb …` trailers.
-That history rewrite (force-push + retag) is exactly the cost this rule
-exists to avoid. Keep the log clean from the first commit.
+The public history had to be rewritten twice to undo exactly this: first
+GitHub-squash `Co-authored-by` trailers (v0.0.1) and a bot's commits
+(2026-08), then, on 2026-09-29, four stray identities (early placeholder
+e-mails), 208 commits committed by `GitHub <noreply@github.com>` through
+web merges, and nine `Claude-Session:` trailers. Each rewrite costs a
+force-push, retagging every release and invalidating every SHA quoted
+elsewhere (partner reports cite them). The maintainer's decision
+(2026-09-29): one identity, from `~/.gitconfig`, forever — part of the
+project's DNA.
