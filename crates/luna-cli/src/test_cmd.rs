@@ -497,6 +497,11 @@ pub(crate) fn run_tests(
 /// Serially, a malformed manifest stops the run where it stands, as it
 /// always has; in parallel the others still finish, and the first error in
 /// manifest order is the one reported.
+///
+/// Manifests chained through a battery file (one's `srm_out` is another's
+/// `srm_in`, or two write the same `srm_out`) form a group that runs
+/// serially in manifest order, as a serial run would; groups run in
+/// parallel with each other.
 fn run_all(manifests: &[PathBuf], jobs: usize) -> Vec<Result<TestOutcome, String>> {
     let jobs = match jobs {
         0 => std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
@@ -516,20 +521,23 @@ fn run_all(manifests: &[PathBuf], jobs: usize) -> Vec<Result<TestOutcome, String
         }
         return out;
     }
+    let groups = srm_groups(manifests);
     let next = std::sync::atomic::AtomicUsize::new(0);
     let slots: Vec<std::sync::Mutex<Option<Result<TestOutcome, String>>>> = manifests
         .iter()
         .map(|_| std::sync::Mutex::new(None))
         .collect();
     std::thread::scope(|scope| {
-        for _ in 0..jobs {
+        for _ in 0..jobs.min(groups.len()) {
             scope.spawn(|| {
                 loop {
-                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let Some(path) = manifests.get(i) else { break };
-                    let result = run_one(path);
-                    if let Ok(mut slot) = slots[i].lock() {
-                        *slot = Some(result);
+                    let g = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(group) = groups.get(g) else { break };
+                    for &i in group {
+                        let result = run_one(&manifests[i]);
+                        if let Ok(mut slot) = slots[i].lock() {
+                            *slot = Some(result);
+                        }
                     }
                 }
             });
@@ -544,6 +552,66 @@ fn run_all(manifests: &[PathBuf], jobs: usize) -> Vec<Result<TestOutcome, String
                 .unwrap_or_else(|| Err("worker thread panicked".to_string()))
         })
         .collect()
+}
+
+/// Union-find root, with path halving.
+fn root(parent: &mut [usize], mut i: usize) -> usize {
+    while parent[i] != i {
+        parent[i] = parent[parent[i]];
+        i = parent[i];
+    }
+    i
+}
+
+/// Partition manifest indices into groups that must run one after another:
+/// connected through a shared battery file (`srm_out` → `srm_in`, or the same
+/// `srm_out` twice). Each group keeps manifest order; the groups come back in
+/// the order of their first manifest. A manifest that cannot be read or
+/// parsed stands alone — `run_one` reports it.
+fn srm_groups(manifests: &[PathBuf]) -> Vec<Vec<usize>> {
+    let srm = |path: &Path| -> (Option<PathBuf>, Option<PathBuf>) {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return (None, None);
+        };
+        let Ok(m) = toml::from_str::<Manifest>(&text) else {
+            return (None, None);
+        };
+        let dir = path.parent().unwrap_or_else(|| Path::new("."));
+        let key = |p: &Path| {
+            let joined = dir.join(p);
+            // Compare where the file lands, however the manifests spell it.
+            match (joined.parent(), joined.file_name()) {
+                (Some(d), Some(f)) => d
+                    .canonicalize()
+                    .map_or_else(|_| joined.clone(), |d| d.join(f)),
+                _ => joined,
+            }
+        };
+        (m.srm_in.as_deref().map(key), m.srm_out.as_deref().map(key))
+    };
+    let files: Vec<_> = manifests.iter().map(|p| srm(p)).collect();
+    // Union-find over manifest indices.
+    let mut parent: Vec<usize> = (0..manifests.len()).collect();
+    for (i, (_, out_i)) in files.iter().enumerate() {
+        let Some(out_i) = out_i else { continue };
+        for (j, (in_j, out_j)) in files.iter().enumerate() {
+            if i != j && (in_j.as_ref() == Some(out_i) || out_j.as_ref() == Some(out_i)) {
+                let (a, b) = (root(&mut parent, i), root(&mut parent, j));
+                parent[a.max(b)] = a.min(b);
+            }
+        }
+    }
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut group_of: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    for i in 0..manifests.len() {
+        let r = root(&mut parent, i);
+        let g = *group_of.entry(r).or_insert_with(|| {
+            groups.push(Vec::new());
+            groups.len() - 1
+        });
+        groups[g].push(i);
+    }
+    groups
 }
 
 fn collect_tomls(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -1823,6 +1891,36 @@ mod tests {
             1,
             "serial stops at the first"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `OpenSNES` 2026-09-27: `--jobs` ran a manifest reading a `.srm`
+    /// before the one writing it. Manifests chained through a battery file
+    /// share a group (run serially, in order), however they spell the path.
+    #[test]
+    fn manifests_chained_by_a_battery_file_share_a_group() {
+        let dir = std::env::temp_dir().join(format!("luna-srm-groups-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let bodies = [
+            "rom = \"x.sfc\"\nsrm_out = \"save.srm\"\n", // 0 writes
+            "rom = \"x.sfc\"\n",                         // 1 alone
+            "rom = \"x.sfc\"\nsrm_in = \"./sub/../save.srm\"\n", // 2 reads 0's file
+            "rom = \"x.sfc\"\nsrm_out = \"other.srm\"\n", // 3 alone
+            "rom = \n",                                  // 4 malformed, alone
+            "rom = \"x.sfc\"\nsrm_in = \"save.srm\"\nsrm_out = \"next.srm\"\n", // 5 reads 0, writes
+            "rom = \"x.sfc\"\nsrm_in = \"next.srm\"\n",  // 6 reads 5's file
+        ];
+        let manifests: Vec<std::path::PathBuf> = bodies
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let p = dir.join(format!("m{i}.toml"));
+                std::fs::write(&p, b).unwrap();
+                p
+            })
+            .collect();
+        let groups = super::srm_groups(&manifests);
+        assert_eq!(groups, vec![vec![0, 2, 5, 6], vec![1], vec![3], vec![4]]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

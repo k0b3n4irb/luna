@@ -4,6 +4,23 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.30.1] — 2026-09-30
+
+One fix, reported by the OpenSNES team: `luna test --jobs` and manifests
+that hand a battery file to each other.
+
+**Upgrading from 1.30.0:** nothing to do. Manifests chained through a
+`.srm` can go back into the same directory as the rest.
+
+### Fixed
+
+- **`luna test --jobs` keeps power-cycle pairs in order.** A manifest
+  reading a `.srm` (`srm_in`) could start before the one writing it
+  (`srm_out`), read a stale file or none, and fail — every time, in a quick
+  test. Manifests chained through a battery file now run one after another,
+  in path order, in parallel with the rest; `--help` and the guide say
+  that nothing else is ordered (reported by the OpenSNES team).
+
 ## [1.30.0] — 2026-09-27
 
 The SA-1, checked against a real console: the SNES-SA1 Speed Test v5.1
