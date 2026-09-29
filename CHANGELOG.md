@@ -4,7 +4,14 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.30.2] — 2026-09-29
+
+Two fixes from the OpenSNES team's 2026-09-29 report: trace windows aimed
+at a frame, and `[asserts.dma]` on long runs.
+
+**Upgrading from 1.30.1:** nothing to do. A DMA or Super FX trace taken
+with `--*-trace-from` under `--until-frame` on 1.30.1 started at instruction
+~1000 whatever was asked; re-take it if its start mattered.
 
 ### Fixed
 
