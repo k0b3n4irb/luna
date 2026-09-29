@@ -380,17 +380,18 @@ pub(crate) fn run_state(
         writes_only: parsed_writes.is_some(),
         only_offsets: parsed_writes,
     };
-    if bridge_target != u64::MAX {
-        let current = em.instructions_executed();
-        if bridge_target > current {
-            let bridge = (bridge_target - current).min(remaining);
-            if let Err(e) =
-                step_keeping_audio(&mut em, bridge, audio_out.is_some(), &mut audio_accum)
-            {
-                eprintln!("step warning (pre-trace bridge 1): {e}");
-            }
-            remaining = remaining.saturating_sub(bridge);
-        }
+    let keep_audio = audio_out.is_some();
+    if bridge_target != u64::MAX
+        && let Err(e) = bridge_to(
+            &mut em,
+            bridge_target,
+            &mut remaining,
+            until_frame,
+            keep_audio,
+            &mut audio_accum,
+        )
+    {
+        eprintln!("step warning (pre-trace bridge 1): {e}");
     }
     // Enable whichever traces are at or past their target now.
     if cpu_trace_path.is_some()
@@ -410,15 +411,17 @@ pub(crate) fn run_state(
     // If the two targets differ, bridge to the second one and enable.
     if cpu_trace_path.is_some() && mem_trace_path.is_some() && cpu_trace_from != mem_trace_from {
         let second_target = cpu_trace_from.max(mem_trace_from);
-        let current = em.instructions_executed();
-        if second_target > current {
-            let bridge = (second_target - current).min(remaining);
-            if let Err(e) =
-                step_keeping_audio(&mut em, bridge, audio_out.is_some(), &mut audio_accum)
-            {
+        if second_target > em.instructions_executed() {
+            if let Err(e) = bridge_to(
+                &mut em,
+                second_target,
+                &mut remaining,
+                until_frame,
+                keep_audio,
+                &mut audio_accum,
+            ) {
                 eprintln!("step warning (pre-trace bridge 2): {e}");
             }
-            remaining = remaining.saturating_sub(bridge);
             // Re-check enables (whichever wasn't enabled yet).
             if cpu_trace_path.is_some() && em.instructions_executed() >= cpu_trace_from {
                 let _ = em.enable_cpu_trace(cpu_trace_max);
@@ -447,15 +450,15 @@ pub(crate) fn run_state(
     }
     deferred.sort_by_key(|&(from, _)| from);
     for (from, is_dma) in deferred {
-        let current = em.instructions_executed();
-        if from > current {
-            let bridge = (from - current).min(remaining);
-            if let Err(e) =
-                step_keeping_audio(&mut em, bridge, audio_out.is_some(), &mut audio_accum)
-            {
-                eprintln!("step warning (pre-trace bridge): {e}");
-            }
-            remaining = remaining.saturating_sub(bridge);
+        if let Err(e) = bridge_to(
+            &mut em,
+            from,
+            &mut remaining,
+            until_frame,
+            keep_audio,
+            &mut audio_accum,
+        ) {
+            eprintln!("step warning (pre-trace bridge): {e}");
         }
         let enabled = if is_dma {
             em.enable_dma_trace(dma_trace_max)
@@ -1063,4 +1066,46 @@ fn step_keeping_audio(
         acc.append(&mut em.drain_audio(usize::MAX)?);
     }
     Ok(())
+}
+
+/// Advance to instruction `target`, where a `--*-trace-from` switches its
+/// trace on. With `-n` the run's length is an instruction budget, and the
+/// bridge spends from it. With `--until-frame` the frame is the budget (`-n`
+/// keeps its unused default of 1000): the bridge stops at `target` or at the
+/// end of the frame the run ends on, whichever comes first, and never runs
+/// past it. It used to take `-n` as its budget there too, so every trace
+/// starting after instruction 1000 never switched on (`OpenSNES` 2026-09-29).
+fn bridge_to(
+    em: &mut luna_api::Emulator,
+    target: u64,
+    remaining: &mut u64,
+    until_frame: Option<u64>,
+    keep_audio: bool,
+    acc: &mut Vec<(i16, i16)>,
+) -> Result<(), luna_api::ApiError> {
+    let current = em.instructions_executed();
+    if target <= current {
+        return Ok(());
+    }
+    let Some(end) = until_frame else {
+        let bridge = (target - current).min(*remaining);
+        step_keeping_audio(em, bridge, keep_audio, acc)?;
+        *remaining -= bridge;
+        return Ok(());
+    };
+    loop {
+        let cur = em.instructions_executed();
+        if cur >= target || em.frame_count()? >= end {
+            return Ok(());
+        }
+        // Stops at the next frame boundary or after the budget: one frame's
+        // audio at most, well inside the APU queue.
+        let ran = em.step_until_frame((target - cur).min(luna_api::FRAME_STEP_BUDGET))?;
+        if keep_audio {
+            acc.append(&mut em.drain_audio(usize::MAX)?);
+        }
+        if ran == 0 {
+            return Ok(());
+        }
+    }
 }
