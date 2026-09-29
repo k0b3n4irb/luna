@@ -246,7 +246,9 @@ luna state --until-frame 120 --mem-trace writes.csv --trace-writes 2121,2122 gam
 ```
 
 The `hdma1` row at line 12 is the overwrite: an HDMA channel enabled
-mid-frame whose table still points at stale data. The same stream is
+mid-frame whose table still points at stale data. The CSV also keeps the
+interrupt markers, to place the writes in time — `kind` `N` (NMI, at
+`$4210`) and `I` (IRQ, at `$4211`) — so count writes on `kind` `W`. The same stream is
 available over MCP (`enable_mem_trace { offsets, writes_only }`), and a
 `run_until_mem_write` / `bp_add mem` watchpoint fires on the DMA / HDMA
 write too.
@@ -270,6 +272,18 @@ head -3 /tmp/cpu.csv
 ```
 
 The same capture is `enable_cpu_trace` / `take_cpu_trace` over MCP.
+
+The window can also end on a frame: with `--until-frame`, every `-from`
+starts where it is asked and the run still stops on that frame (a start
+past it records nothing). To aim at frame `F`, read
+`stats.instructions_executed` from `luna state --until-frame F --out -`
+and pass it as the `-from`:
+
+```bash
+from=$(luna state --until-frame 600 --out - game.sfc | jq '.stats.instructions_executed')
+luna state --until-frame 610 --cpu-trace /tmp/cpu.csv --cpu-trace-from "$from" game.sfc
+# the CPU trace covers frames 600-610
+```
 
 #### Coprocessor liveness and the DSP-1 handshake
 

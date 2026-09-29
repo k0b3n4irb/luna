@@ -4,6 +4,28 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- **`--*-trace-from` works under `--until-frame`.** The bridge to a trace's
+  start instruction spent from `-n`, which keeps its default of 1000 when
+  the run is bounded by a frame: a CPU or memory trace starting after
+  instruction ~1000 recorded nothing, and a DMA or Super FX trace started
+  at ~1000 whatever was asked. The bridge now runs to the start or to the
+  end of the frame, and the run still stops on that frame. The documented
+  recipe (take `stats.instructions_executed` at frame N, pass it as
+  `-from`) works (reported by the OpenSNES team).
+- **`[asserts.dma]` has no event cap any more.** It stored the whole DMA
+  trace and refused past one million events (a 200-frame Super FX run hit
+  it); it now counts frame by frame, so a run of any length fits, with the
+  same verdicts.
+
+### Changed
+
+- `--trace-writes`: the help and the guide say that the interrupt markers
+  (`kind` `N` / `I`) stay in the CSV next to the writes (`W`).
+
 ## [1.30.1] — 2026-09-30
 
 One fix, reported by the OpenSNES team: `luna test --jobs` and manifests

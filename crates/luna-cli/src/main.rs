@@ -566,8 +566,11 @@ enum Command {
         /// The "who wrote this register" hunt (issue #226): record only
         /// WRITES to these hex offsets (any bank), e.g. `2121,2122,420C`.
         /// Each row's `origin` column says who — `cpu`, `dma<n>` or
-        /// `hdma<n>` — with the frame / line / PC. Composes with
-        /// `--mem-trace-bank`; needs `--mem-trace <PATH>`.
+        /// `hdma<n>` — with the frame / line / PC. The interrupt markers
+        /// stay in the CSV to place the writes in time: `kind` `N` (NMI,
+        /// at `$4210`) and `I` (IRQ, at `$4211`) — filter on `kind` `W` to
+        /// count writes. Composes with `--mem-trace-bank`; needs
+        /// `--mem-trace <PATH>`.
         #[arg(long = "trace-writes", requires = "mem_trace")]
         trace_writes: Option<String>,
         /// Optional DMA→VRAM transfer-time trace. Captures every byte an

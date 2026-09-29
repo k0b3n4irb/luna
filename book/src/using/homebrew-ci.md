@@ -281,7 +281,9 @@ with checkpoints alone, the last one ends the run). The final
   excluded from `max_vblank_bytes`: under forced blank there is no
   VBlank deadline, which is exactly why big boot uploads use it. A
   failing `unsafe_writes` names the first offending write (frame,
-  line, channel, VRAM word, source address).
+  line, channel, VRAM word, source address). The counts are kept frame
+  by frame as the run goes, not from a stored trace, so a run of any
+  length fits.
 - **`[asserts.oam]`** — decoded sprite structure, no raw-OAM golden
   needed: `visible = 1` counts on-screen sprites (the standard
   predicate `0 <= y < 224`, `-32 < x < 256`; comparator tables like

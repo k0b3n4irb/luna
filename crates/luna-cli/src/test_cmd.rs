@@ -63,8 +63,10 @@ use crate::rom::load_rom_into;
 /// `--input` replay budget) and per whole `steps` run's frame chase.
 use luna_api::FRAME_STEP_BUDGET as FRAME_BUDGET;
 
-/// Event cap for the `[asserts.dma]` trace (issue #212) — hitting it is
-/// reported as a failure rather than silently under-counting.
+/// Ring size for the `[asserts.dma]` trace (issue #212). The trace is
+/// drained into counters after every frame, so this only has to hold one
+/// frame's (H)DMA writes — a full 64 KB VRAM upload in a single frame fits.
+/// A drain that fills it is reported rather than silently under-counted.
 const DMA_TRACE_CAP: usize = 1_000_000;
 
 /// One parsed manifest.
@@ -628,6 +630,74 @@ fn collect_tomls(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// What `[asserts.dma]` needs from the DMA trace, folded frame by frame so
+/// no event is stored: a run of any length fits (`OpenSNES` 2026-09-29, a
+/// 200-frame Super FX run hit the old one-million-event cap).
+#[derive(Default)]
+struct DmaTally {
+    /// VRAM data-port bytes written during active display.
+    unsafe_writes: u64,
+    /// The first of them: frame, line, channel, VRAM word, source.
+    first_unsafe: Option<(u64, u16, u8, u16, u32)>,
+    /// Screen-on VRAM bytes per frame (forced blank excluded, issue #217).
+    per_frame: BTreeMap<u64, u64>,
+    /// A drain filled the ring: the counts may be short.
+    overflowed: bool,
+}
+
+impl DmaTally {
+    fn fold(&mut self, events: &[luna_api::DmaTraceEvent]) {
+        if events.len() >= DMA_TRACE_CAP {
+            self.overflowed = true;
+        }
+        // Only the VRAM data ports count (issue #217) — the trace also
+        // records OAM/CGRAM/register (H)DMA writes, which don't race the
+        // VRAM deadline. A VRAM write is display-safe iff it happened in
+        // VBlank OR under forced blank.
+        for e in events.iter().filter(|e| matches!(e.b_offset, 0x18 | 0x19)) {
+            if !(e.blank || e.force_blank) {
+                self.unsafe_writes += 1;
+                self.first_unsafe.get_or_insert((
+                    e.frame,
+                    e.line,
+                    e.channel,
+                    e.vram_word,
+                    e.src_full,
+                ));
+            }
+            if !e.force_blank {
+                *self.per_frame.entry(e.frame).or_default() += 1;
+            }
+        }
+    }
+}
+
+/// The streams a manifest's asserts pool over the whole run, drained after
+/// every frame (or 100k-instruction chunk) so neither ring can overflow:
+/// the audio for `audio_rms_min` (issue #211), the DMA trace for
+/// `[asserts.dma]`.
+struct Pooled {
+    audio: Option<Vec<(i16, i16)>>,
+    dma: Option<DmaTally>,
+}
+
+impl Pooled {
+    /// Whether the run must be stepped a frame at a time.
+    const fn per_frame(&self) -> bool {
+        self.audio.is_some() || self.dma.is_some()
+    }
+
+    fn drain(&mut self, em: &mut luna_api::Emulator) -> Result<(), String> {
+        if let Some(audio) = self.audio.as_mut() {
+            audio.extend(em.drain_audio(usize::MAX).map_err(|e| e.to_string())?);
+        }
+        if let Some(dma) = self.dma.as_mut() {
+            dma.fold(&em.take_dma_trace().map_err(|e| e.to_string())?);
+        }
+        Ok(())
+    }
+}
+
 /// Run one manifest. `Err` = manifest/setup problem (exit 2 at the top
 /// level); assert failures land in the returned outcome.
 fn run_one(path: &Path) -> Result<TestOutcome, String> {
@@ -803,8 +873,10 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
     // 512 ms and drops NEW samples when full, so a single end-of-run
     // drain only ever sees the boot silence (issue #211). Drain after
     // every stepping leg instead and pool the stream.
-    let want_audio = m.asserts.audio_rms_min.is_some();
-    let mut audio_acc: Vec<(i16, i16)> = Vec::new();
+    let mut pooled = Pooled {
+        audio: m.asserts.audio_rms_min.is_some().then(Vec::new),
+        dma: m.asserts.dma.is_some().then(DmaTally::default),
+    };
     // Advance to `frame`, draining the audio ring often enough that it
     // can never overflow between drains (one frame ≈ 533 samples vs the
     // 16384-sample ring): frame-at-a-time when pooling, one bounded call
@@ -812,15 +884,15 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
     let advance = |em: &mut luna_api::Emulator,
                    frame: u64,
                    spent: &mut u64,
-                   audio_acc: &mut Vec<(i16, i16)>|
+                   pooled: &mut Pooled|
      -> Result<(), String> {
-        if !want_audio {
+        if !pooled.per_frame() {
             *spent += em.step_to_frame_bounded(frame, total_budget.saturating_sub(*spent));
             return Ok(());
         }
         loop {
             let cur = em.state().scheduler.frame_count;
-            audio_acc.extend(em.drain_audio(usize::MAX).map_err(|e| e.to_string())?);
+            pooled.drain(em)?;
             if cur >= frame || total_budget.saturating_sub(*spent) == 0 {
                 return Ok(());
             }
@@ -837,28 +909,22 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
                     target_frame: u64,
                     spent: &mut u64,
                     script: &mut luna_api::InputScript,
-                    audio_acc: &mut Vec<(i16, i16)>|
+                    pooled: &mut Pooled|
      -> Result<(), String> {
         while let Some(frame) = script.next_frame().filter(|&f| f <= target_frame) {
-            advance(em, frame, spent, audio_acc)?;
+            advance(em, frame, spent, pooled)?;
             let now = em.frame_count().map_err(|e| e.to_string())?;
             if now < frame {
                 break;
             }
             script.apply_due(em, now).map_err(|e| e.to_string())?;
         }
-        advance(em, target_frame, spent, audio_acc)
+        advance(em, target_frame, spent, pooled)
     };
 
     // Checkpoints in order, then the final bound.
     for (i, cp) in m.checkpoint.iter().enumerate() {
-        drive_to(
-            &mut em,
-            cp.at_frame,
-            &mut spent,
-            &mut script,
-            &mut audio_acc,
-        )?;
+        drive_to(&mut em, cp.at_frame, &mut spent, &mut script, &mut pooled)?;
         let label = format!("checkpoint@{}", cp.at_frame);
         for (key, assert) in &cp.values {
             match check_value(&mut em, key, assert) {
@@ -898,17 +964,11 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
     }
     match bound {
         Some(Bound::Frames(_)) | None => {
-            drive_to(
-                &mut em,
-                final_frame,
-                &mut spent,
-                &mut script,
-                &mut audio_acc,
-            )?;
+            drive_to(&mut em, final_frame, &mut spent, &mut script, &mut pooled)?;
         }
         Some(Bound::Steps(s)) => {
             // No checkpoints (validated above): input entries then the rest.
-            drive_to(&mut em, u64::MAX, &mut spent, &mut script, &mut audio_acc)?;
+            drive_to(&mut em, u64::MAX, &mut spent, &mut script, &mut pooled)?;
             // Chunked so the 512 ms audio ring can never overflow
             // between drains (issue #211).
             let mut left = s.saturating_sub(spent);
@@ -916,8 +976,8 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
                 let chunk = left.min(100_000);
                 em.step(chunk).map_err(|e| e.to_string())?;
                 left -= chunk;
-                if want_audio {
-                    audio_acc.extend(em.drain_audio(usize::MAX).map_err(|e| e.to_string())?);
+                if pooled.per_frame() {
+                    pooled.drain(&mut em)?;
                 }
             }
         }
@@ -957,12 +1017,13 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
     if let Some(min) = m.asserts.audio_rms_min {
         // The stream pooled across the whole run (issue #211) plus
         // whatever the ring still holds.
-        audio_acc.extend(em.drain_audio(usize::MAX).map_err(|e| e.to_string())?);
-        let rms = audio_rms(&audio_acc);
+        pooled.drain(&mut em)?;
+        let audio = pooled.audio.as_deref().unwrap_or_default();
+        let rms = audio_rms(audio);
         if rms < min {
             failures.push(format!(
                 "audio_rms_min: RMS {rms:.1} < {min} over {} samples",
-                audio_acc.len()
+                audio.len()
             ));
         }
     }
@@ -1048,53 +1109,38 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
             ));
         }
     }
-    // [asserts.dma] — DMA-discipline ceilings from the trace (issue #212).
+    // [asserts.dma] — DMA-discipline ceilings from the trace (issue #212),
+    // counted frame by frame as the run went (see `DmaTally`).
     if let Some(dma) = &m.asserts.dma {
-        let events = em.take_dma_trace().map_err(|e| e.to_string())?;
-        if events.len() >= DMA_TRACE_CAP {
+        pooled.drain(&mut em)?;
+        let tally = pooled.dma.take().unwrap_or_default();
+        if tally.overflowed {
             failures.push(format!(
-                "dma: trace hit its {DMA_TRACE_CAP}-event cap — counts would under-report; shorten the run"
+                "dma: one frame's DMA trace filled its {DMA_TRACE_CAP}-event ring — counts \
+                 would under-report"
             ));
         }
-        // Only the VRAM data ports count (issue #217) — the trace also
-        // records OAM/CGRAM/register (H)DMA writes, which the probes'
-        // CSV bucketing never saw and which don't race the VRAM
-        // deadline. A VRAM write is display-safe iff it happened in
-        // VBlank OR under forced blank (the DmaTraceEvent
-        // classification the Event Viewer already uses).
-        let vram_events = || events.iter().filter(|e| matches!(e.b_offset, 0x18 | 0x19));
-        let unsafe_events: Vec<_> = vram_events()
-            .filter(|e| !(e.blank || e.force_blank))
-            .collect();
-        let unsafe_writes = unsafe_events.len() as u64;
         if let Some(max) = dma.unsafe_writes
-            && unsafe_writes > max
+            && tally.unsafe_writes > max
         {
             // Name the first offender so a disagreement with an external
             // bucketing is diagnosable at a glance (issue #217).
-            let first = unsafe_events[0];
+            let (frame, line, ch, word, src) = tally.first_unsafe.unwrap_or_default();
             failures.push(format!(
-                "dma.unsafe_writes: {unsafe_writes} VRAM byte(s) written during active \
-                 display, expected <= {max} (first: frame {} line {} ch{} \
-                 vram_word ${:04X} src ${:06X})",
-                first.frame, first.line, first.channel, first.vram_word, first.src_full
+                "dma.unsafe_writes: {} VRAM byte(s) written during active \
+                 display, expected <= {max} (first: frame {frame} line {line} ch{ch} \
+                 vram_word ${word:04X} src ${src:06X})",
+                tally.unsafe_writes
             ));
         }
-        if let Some(max) = dma.max_vblank_bytes {
-            // Forced-blank uploads have no VBlank deadline — exclude
-            // them from the per-frame budget (issue #217).
-            let mut per_frame: BTreeMap<u64, u64> = BTreeMap::new();
-            for e in vram_events().filter(|e| !e.force_blank) {
-                *per_frame.entry(e.frame).or_default() += 1;
-            }
-            if let Some((frame, &n)) = per_frame.iter().max_by_key(|&(_, n)| *n)
-                && n > max
-            {
-                failures.push(format!(
-                    "dma.max_vblank_bytes: frame {frame} transferred {n} \
-                     screen-on VRAM byte(s), expected <= {max}"
-                ));
-            }
+        if let Some(max) = dma.max_vblank_bytes
+            && let Some((frame, &n)) = tally.per_frame.iter().max_by_key(|&(_, n)| *n)
+            && n > max
+        {
+            failures.push(format!(
+                "dma.max_vblank_bytes: frame {frame} transferred {n} \
+                 screen-on VRAM byte(s), expected <= {max}"
+            ));
         }
     }
     // [asserts.oam] — decoded sprite structure (issue #218).
@@ -1922,6 +1968,53 @@ mod tests {
         let groups = super::srm_groups(&manifests);
         assert_eq!(groups, vec![vec![0, 2, 5, 6], vec![1], vec![3], vec![4]]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `[asserts.dma]` counts frame by frame instead of storing the trace
+    /// (`OpenSNES` 2026-09-29): folding the events in pieces must give the
+    /// same counts as folding them at once, and only VRAM data-port bytes
+    /// count — screen-on for the per-frame budget, outside any blank for
+    /// `unsafe_writes`.
+    #[test]
+    fn the_dma_tally_counts_the_same_in_pieces() {
+        let ev = |frame, b_offset, blank, force_blank| luna_api::DmaTraceEvent {
+            src_full: 0x7E_0000,
+            vram_word: 0x1000,
+            b_offset,
+            value: 0,
+            channel: 0,
+            frame,
+            line: 10,
+            hclock: 0,
+            blank,
+            force_blank,
+        };
+        let events = [
+            ev(1, 0x18, true, false),  // VBlank: safe, screen-on
+            ev(1, 0x19, false, false), // active display: unsafe
+            ev(2, 0x18, false, true),  // forced blank: safe, not budgeted
+            ev(2, 0x22, false, false), // CGRAM: not a VRAM byte
+            ev(3, 0x18, false, false), // unsafe
+            ev(3, 0x19, true, false),  // safe
+        ];
+        let mut whole = super::DmaTally::default();
+        whole.fold(&events);
+        let mut pieces = super::DmaTally::default();
+        for chunk in events.chunks(2) {
+            pieces.fold(chunk);
+        }
+        for t in [&whole, &pieces] {
+            assert_eq!(t.unsafe_writes, 2);
+            assert_eq!(
+                t.first_unsafe.map(|f| f.0),
+                Some(1),
+                "first offender: frame 1"
+            );
+            assert_eq!(t.per_frame.get(&1), Some(&2));
+            assert_eq!(t.per_frame.get(&2), None, "forced blank is not budgeted");
+            assert_eq!(t.per_frame.get(&3), Some(&2));
+            assert!(!t.overflowed);
+        }
     }
 
     #[test]
