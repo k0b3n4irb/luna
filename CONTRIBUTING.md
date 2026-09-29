@@ -65,6 +65,15 @@ cargo build --workspace --all-targets \
 - **Anything a human can see or hear** (rendering, audio, GUI behaviour)
   gets validated in the GUI before merge, not just by unit tests.
 
+## Dependencies
+
+Dependency updates are **manual**, made by the maintainer as ordinary
+commits. `cargo deny` (in CI and weekly) reports advisories, license and
+source problems; acting on them is a maintainer decision. Automated
+dependency bots (Dependabot, Renovate, or any app that opens pull requests
+on its own) are **not allowed**: CI fails on their config files and on pull
+requests opened by a bot.
+
 ## Fuzzing
 
 The ROM parser is the one surface that takes untrusted input, so it is

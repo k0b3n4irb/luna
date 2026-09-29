@@ -1027,17 +1027,6 @@ further than a raw instruction dump — the byte stream can be read back
 as command transactions, checked against the OpenSNES command table
 without ever letting that table decide what it is looking at.
 
-### Removed
-- **Dependabot** (`.github/dependabot.yml`) — the bot was never
-  authorised by the maintainer. It arrived bundled inside the
-  supply-chain lot (#129) rather than as a decision of its own, and a
-  third-party app opening pull requests against this repository is
-  exactly the kind of change that needs to be asked for, not inferred.
-  Dependency updates are now manual; `cargo deny` (CI + weekly) remains
-  the gate that *surfaces* advisories, and acting on one is a maintainer
-  call. Dependabot alerts and automated security fixes were already off
-  at the repository level and stay off.
-
 ### Added
 - **`--dsp1-trace` for DSP-1 (µPD77C25) visibility**
   ([#158](https://github.com/k0b3n4irb/luna/issues/158)) — parity with
@@ -1246,7 +1235,7 @@ accuracy scorecard now has no row below A−, with the PPU at **A**.
   **byte-identical over 380 783 events** across Super Mario Kart's
   title + demo race (60 s, no input). DSP-1 grade: B+ → A−.
 - **Supply-chain & repo hardening** (#127-#129): cargo-deny (advisories
-  / licenses / sources) in CI + weekly, Dependabot, SECURITY.md, issue
+  / licenses / sources) in CI + weekly, SECURITY.md, issue
   and PR templates, a CI badge, and the Tom Harte suites now gate every
   PR that touches a CPU core. The declared MSRV is now the tested
   toolchain (1.95 — the old 1.85 claim never compiled), stale founding

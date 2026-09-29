@@ -108,6 +108,25 @@ jobs:
           toolchain: stable
           components: rustfmt
       - run: cargo fmt --all --check
+      # No automated dependency bots, ever (.claude/rules/no-dependency-bots.md).
+      # Lives in this required job so it gates every PR without a settings
+      # change. Fails on a bot config file, or on a pull request opened by a bot.
+      - name: No dependency bots
+        env:
+          PR_AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          found=$(ls -1 .github/dependabot.yml .github/dependabot.yaml \
+            renovate.json renovate.json5 .renovaterc .renovaterc.json \
+            .github/renovate.json .github/renovate.json5 2>/dev/null || true)
+          if [ -n "$found" ]; then
+            echo "::error::dependency-bot config is not allowed: $found"
+            exit 1
+          fi
+          if [ "$PR_AUTHOR_TYPE" = "Bot" ]; then
+            echo "::error::pull requests opened by bots are not allowed ($PR_AUTHOR)"
+            exit 1
+          fi
 
   # ---------------------------------------------------------------------
   # Lints (cargo clippy with -D warnings on top of workspace lints).
