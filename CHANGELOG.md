@@ -4,7 +4,13 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.30.1] — 2026-09-30
+
+One fix, reported by the OpenSNES team: `luna test --jobs` and manifests
+that hand a battery file to each other.
+
+**Upgrading from 1.30.0:** nothing to do. Manifests chained through a
+`.srm` can go back into the same directory as the rest.
 
 ### Fixed
 
