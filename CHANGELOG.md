@@ -4,6 +4,18 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Super FX cartridges with a battery have a save.** The save of a Super
+  FX board is its whole GSU work RAM, kept when the header's chipset byte
+  says the board has a battery (`$15`, `$1A`, …): Yoshi's Island (32 KB),
+  Stunt Race FX and Star Fox 2 (64 KB). luna gave every Super FX cart an
+  empty save, so `srm_out` wrote nothing and the GUI kept no `.srm`. Boards
+  without a battery (Star Fox, Doom) still have none, as on hardware. As in
+  ares and Mesen2; the header gains `has_battery`.
+
 ## [1.30.2] — 2026-09-29
 
 Two fixes from the OpenSNES team's 2026-09-29 report: trace windows aimed

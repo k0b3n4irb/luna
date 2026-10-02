@@ -960,7 +960,7 @@ impl Snes {
                 } else {
                     0x1_0000
                 };
-                Box::new(SuperFxMapper::new(cart.rom, ram))
+                Box::new(SuperFxMapper::new(cart.rom, ram).with_battery(cart.header.has_battery))
             }
             // DSP-1 (Super Mario Kart, Pilotwings) — a base ROM/SRAM map
             // (HiROM or LoROM per the board) plus the NEC uPD7725 chip,

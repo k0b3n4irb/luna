@@ -132,6 +132,12 @@ pub struct Header {
     /// distinct from `sram_size_kb` (battery save RAM, `$FFD8`). See Mesen2
     /// `BaseCartridge.cpp` (`ExpansionRamSize`).
     pub expansion_ram_kb: u32,
+    /// The board keeps its save RAM on a battery: the chipset byte (`$FFD6`)
+    /// low nibble is `$2`, `$5`, `$6`, `$9` or `$A` (Mesen2 `BaseCartridge.cpp`,
+    /// `_hasBattery`). For a Super FX cart the save is the GSU work RAM, so
+    /// Yoshi's Island (`$15`) and Stunt Race FX (`$1A`) have one, Star Fox
+    /// (`$13`) and Doom (`$14`) do not.
+    pub has_battery: bool,
     /// Region / video standard.
     pub region: Region,
     /// Maker code (old-style single byte).
@@ -512,6 +518,7 @@ fn parse_at(rom: &[u8], off: usize) -> Header {
         rom_size_kb,
         sram_size_kb,
         expansion_ram_kb,
+        has_battery: matches!(chipset & 0x0F, 0x02 | 0x05 | 0x06 | 0x09 | 0x0A),
         region: Region::from_country(rom[off + 0x19]),
         maker: rom[off + 0x1A],
         version: rom[off + 0x1B],
@@ -613,6 +620,28 @@ mod tests {
         rom[HEADER_OFFSET_LOROM + 0x16] = chipset;
         rom[HEADER_OFFSET_LOROM - 1] = subtype;
         Cartridge::from_bytes(rom).unwrap().header
+    }
+
+    /// The battery flag reads the chipset byte's low nibble, as Mesen2 does:
+    /// the real Super FX boards split between battery (Yoshi's Island `$15`,
+    /// Stunt Race FX `$1A`) and none (Star Fox `$13`, Doom `$14`).
+    #[test]
+    fn the_battery_flag_follows_the_chipset_low_nibble() {
+        for (chipset, battery) in [
+            (0x13, false),
+            (0x14, false),
+            (0x15, true),
+            (0x1A, true),
+            (0x00, false),
+            (0x02, true),
+            (0x35, true),
+        ] {
+            assert_eq!(
+                synth_chip(b"SFX", chipset, 0).has_battery,
+                battery,
+                "${chipset:02X}"
+            );
+        }
     }
 
     /// Build a synthetic DSP-1 cartridge (chipset `$05`, SMK's title picks

@@ -316,6 +316,13 @@ with checkpoints alone, the last one ends the run). The final
                                         # "70:0000" = 0x5A
   ```
 
+  What the `.srm` holds depends on the board, as on a real cartridge: the
+  SRAM of a LoROM / HiROM / S-DD1 / DSP-1 cart; the part of BW-RAM an SA-1
+  header declares; the **whole GSU work RAM** of a Super FX cart whose
+  header has a battery (chipset byte `$15` or `$1A`, e.g. Yoshi's Island,
+  Stunt Race FX). A board without a battery (Star Fox `$13`, Doom `$14`)
+  has no save: `srm_out` writes an empty file and `srm_in` is ignored.
+
 - **`firmware = "dsp1b.rom"`** — SKIP (not fail) when the named blob is
   absent from luna's firmware folder, so a DSP-1 test stays green in CI
   where Sony firmware can't ship. Skips print `SKIP <name> (reason)`,

@@ -266,6 +266,11 @@ pub struct SuperFxMapper {
     ram: Vec<u8>,
     /// Original (unpadded) RAM length, reported by [`Mapper::sram_size`].
     ram_len: usize,
+    /// The board keeps the work RAM on a battery: it is then the cart's
+    /// save, the whole of it (ares `saveSuperFX` writes `superfx.ram` unless
+    /// the board marks it volatile; Mesen2 `Gsu::SaveBattery`). Construction
+    /// data, not state: absent from the save-state.
+    battery: bool,
     ram_mask: usize,
     /// Register file.
     regs: Registers,
@@ -353,6 +358,7 @@ impl SuperFxMapper {
             rom_mask: rom_alloc - 1,
             ram: vec![0; ram_alloc],
             ram_len,
+            battery: false,
             ram_mask: ram_alloc - 1,
             regs: Registers::reset(),
             cache: Box::new([0; 512]),
@@ -374,6 +380,14 @@ impl SuperFxMapper {
             modified_r15: false,
             trace: None,
         }
+    }
+
+    /// Declare that the board keeps the work RAM on a battery (the header's
+    /// chipset byte): the RAM is then what `sram()` / `load_sram()` carry.
+    #[must_use]
+    pub const fn with_battery(mut self, battery: bool) -> Self {
+        self.battery = battery;
+        self
     }
 
     /// Diagnostic snapshot of the GSU's architectural registers.
@@ -1848,6 +1862,21 @@ impl Mapper for SuperFxMapper {
         self.ram_len
     }
 
+    fn sram(&self) -> &[u8] {
+        if self.battery {
+            &self.ram[..self.ram_len]
+        } else {
+            &[]
+        }
+    }
+
+    fn load_sram(&mut self, data: &[u8]) {
+        if self.battery {
+            let n = data.len().min(self.ram_len);
+            self.ram[..n].copy_from_slice(&data[..n]);
+        }
+    }
+
     /// Advance the GSU by `main_mclk` master cycles of main-CPU progress.
     ///
     /// Accumulate a GSU-clock budget and run instructions while it stays
@@ -1938,6 +1967,23 @@ mod tests {
 
     fn fx() -> SuperFxMapper {
         SuperFxMapper::new(ramp_rom(1024 * 1024), 0x8000)
+    }
+
+    /// A Super FX cart's save is its whole GSU work RAM when the board has a
+    /// battery (ares `saveSuperFX`, Mesen2 `Gsu::SaveBattery`), and nothing
+    /// otherwise — luna gave none in both cases.
+    #[test]
+    fn the_work_ram_is_the_save_only_with_a_battery() {
+        let mut saved = SuperFxMapper::new(ramp_rom(1024 * 1024), 0x8000).with_battery(true);
+        assert_eq!(saved.sram().len(), 0x8000, "the whole work RAM");
+        saved.load_sram(&[0xAB, 0xCD]);
+        assert_eq!(saved.ram[..2], [0xAB, 0xCD], "loaded into the work RAM");
+        assert_eq!(saved.sram()[..2], [0xAB, 0xCD]);
+
+        let mut volatile = fx();
+        assert!(volatile.sram().is_empty(), "no battery, no save");
+        volatile.load_sram(&[0xAB, 0xCD]);
+        assert_eq!(volatile.ram[..2], [0, 0], "a .srm is ignored");
     }
 
     #[test]
