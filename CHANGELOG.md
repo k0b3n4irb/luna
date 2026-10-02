@@ -4,7 +4,13 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.30.3] — 2026-10-02
+
+One fix: Super FX cartridges with a battery keep their save.
+
+**Upgrading from 1.30.2:** nothing to do. Yoshi's Island, Stunt Race FX and
+Star Fox 2 now get a `.srm` beside the ROM in the GUI (the whole GSU work
+RAM, 32 or 64 KB), and `luna test`'s `srm_out` / `srm_in` work for them.
 
 ### Fixed
 
