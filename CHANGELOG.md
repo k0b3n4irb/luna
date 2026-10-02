@@ -4,7 +4,15 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.30.4] — 2026-10-02
+
+One fix: `luna mcp` works again with MCP clients that speak protocol
+2026-07-28, Claude Code 2.1.287 among them.
+
+**Upgrading from 1.30.3:** nothing to do. If your client showed
+"fetching tools failed: Invalid result for tools/list … ttlMs", luna's
+tools come back once you point it at this build. The emulator itself is
+unchanged.
 
 ### Fixed
 
