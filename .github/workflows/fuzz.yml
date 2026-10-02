@@ -16,10 +16,27 @@ on:
         description: "Minutes per target"
         required: false
         default: "5"
+  # Releases are fast-forwards of main (no pull request), so a change to the
+  # fuzzed surface is also fuzzed when it lands on develop.
+  push:
+    branches: [develop]
+    paths:
+      # The untrusted-input surface the targets drive: ROM parsing, and
+      # every save-state decoder (luna-api's bundle, each mapper's blob).
+      - "crates/luna-cartridge/**"
+      - "crates/luna-bus/src/**"
+      - "crates/luna-core/src/coproc/**"
+      - "crates/luna-api/src/lib.rs"
+      - "fuzz/**"
+      - ".github/workflows/fuzz.yml"
   pull_request:
     paths:
+      # The untrusted-input surface the targets drive: ROM parsing, and
+      # every save-state decoder (luna-api's bundle, each mapper's blob).
       - "crates/luna-cartridge/**"
-      - "crates/luna-bus/src/mapper.rs"
+      - "crates/luna-bus/src/**"
+      - "crates/luna-core/src/coproc/**"
+      - "crates/luna-api/src/lib.rs"
       - "fuzz/**"
       - ".github/workflows/fuzz.yml"
 
