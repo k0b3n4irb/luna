@@ -4,6 +4,17 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- **`luna mcp` works with clients speaking MCP 2026-07-28.** Under that
+  protocol version, a `tools/list` result must carry `ttlMs` and
+  `cacheScope`. rmcp 3.1.0 left them out, so a client that negotiates it
+  (Claude Code 2.1.287) rejected the whole tool catalogue and luna's tools
+  disappeared. rmcp 3.1.1 fills them in; clients on older versions see no
+  change. A protocol test now checks both versions on the raw wire.
+
 ## [1.30.3] — 2026-10-02
 
 One fix: Super FX cartridges with a battery keep their save.

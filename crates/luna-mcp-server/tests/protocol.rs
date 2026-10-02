@@ -203,3 +203,64 @@ async fn load_step_and_screenshot_round_trip() {
     client.cancel().await.ok();
     let _ = std::fs::remove_file(&path);
 }
+
+/// Raw `tools/list` result after an `initialize` that negotiates
+/// `version` — the bytes a client parses, not rmcp's typed view of them.
+async fn raw_tools_list(version: &str) -> serde_json::Value {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (server_io, client_io) = tokio::io::duplex(1 << 20);
+    tokio::spawn(async move {
+        if let Ok(server) = LunaServer::new().serve(server_io).await {
+            let _ = server.waiting().await;
+        }
+    });
+    let (read, mut write) = tokio::io::split(client_io);
+    let mut lines = BufReader::new(read).lines();
+    let init = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": version,
+            "capabilities": {},
+            "clientInfo": { "name": "raw", "version": "0" },
+        },
+    });
+    for msg in [
+        init,
+        serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} }),
+    ] {
+        let line = format!("{msg}\n");
+        write.write_all(line.as_bytes()).await.expect("write");
+    }
+    while let Some(line) = lines.next_line().await.expect("read") {
+        let msg: serde_json::Value = serde_json::from_str(&line).expect("json");
+        if msg["id"] == 2 {
+            return msg["result"].clone();
+        }
+    }
+    panic!("no tools/list response");
+}
+
+/// Protocol 2026-07-28 requires `ttlMs` and `cacheScope` on list results
+/// (SEP-2549). rmcp 3.1.0 left them out, and a client speaking that
+/// version (Claude Code 2.1.287) rejected the whole catalogue; older
+/// versions must still get neither field.
+#[tokio::test]
+async fn tools_list_carries_the_cache_hints_its_protocol_version_requires() {
+    let current = raw_tools_list("2026-07-28").await;
+    assert!(
+        current["ttlMs"].is_u64(),
+        "2026-07-28 needs a numeric ttlMs: {}",
+        current["ttlMs"]
+    );
+    assert!(
+        matches!(current["cacheScope"].as_str(), Some("public" | "private")),
+        "2026-07-28 needs cacheScope public|private: {}",
+        current["cacheScope"]
+    );
+
+    let legacy = raw_tools_list("2025-06-18").await;
+    assert!(legacy.get("ttlMs").is_none() && legacy.get("cacheScope").is_none());
+    assert!(legacy["tools"].as_array().is_some_and(|t| !t.is_empty()));
+}
