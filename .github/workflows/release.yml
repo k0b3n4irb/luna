@@ -137,16 +137,27 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      # Only for CHANGELOG.md and the notes script; the binaries come from `build`.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: dist
           merge-multiple: true
 
+      # The release page is titled `luna vX.Y.Z` and its body is this
+      # version's CHANGELOG.md section plus the download table. The step fails
+      # when the changelog has no section for the tag, so a release can never
+      # go out with empty notes. An RC tag shows its final version's section.
+      - name: Release notes from CHANGELOG.md
+        run: tools/release-notes.py "$GITHUB_REF_NAME" > release_notes.md
+
       - name: Publish
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
+          name: luna ${{ github.ref_name }}
+          body_path: release_notes.md
           files: dist/*
-          generate_release_notes: true
           fail_on_unmatched_files: true
           # Pre-release semver tags (a hyphen: v1.0.0-rc1, -beta…) publish as
           # a GitHub pre-release so they never become the "latest" stable

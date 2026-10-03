@@ -118,7 +118,9 @@ The version tracks luna's **user-facing contract**, not the Rust API:
 - **Release flow**: bump `version` + finalize `CHANGELOG.md` in a PR to
   `develop`; merge `develop` → `main`; tag `vX.Y.Z` on `main`
   (`release.yml` builds and attaches the 4-platform binaries +
-  checksums); then reconcile `develop` with `main`. The book links the
+  checksums, titles the page `luna vX.Y.Z` and fills it with that
+  version's `CHANGELOG.md` section — `tools/release-notes.py vX.Y.Z`
+  prints it locally); then reconcile `develop` with `main`. The book links the
   unversioned `luna-<os>-<arch>` asset alias, so no doc edit is needed per
   release.
 - **Housekeeping**: only the five highest versions keep a GitHub release
