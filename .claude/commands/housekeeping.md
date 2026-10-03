@@ -11,7 +11,7 @@ tools/housekeeping.sh --apply    # then delete
 ```
 
 Before `--apply`, check that the release OpenSNES pins on its `main`
-(`tools/luna-test/luna.version`) is not in the "would delete" list; if it
+(`tools/luna-test/luna.version`, in the OpenSNES repository) is not in the "would delete" list; if it
 is, stop and write them a partner note first.
 
 Report:

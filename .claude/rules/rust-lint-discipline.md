@@ -13,7 +13,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 `--all-features` is what catches lints in conditional code paths
-(test-utils, debug-only counters, etc.). Since 2026-07 the CI clippy
+(today the workspace has one feature, `luna-bus`'s `test-utils`). Since 2026-07 the CI clippy
 job runs this exact form too (`ci.yml`), so the local and CI gates are
 identical — run it locally before committing and CI will never
 surprise you.
@@ -40,7 +40,9 @@ When a clippy finding shows up:
 ## Why this matters here
 
 The clippy default set (`all` = correctness + suspicious + complexity
-+ style + perf, already enabled workspace-wide) catches a long tail of
++ style + perf, enabled workspace-wide in the root `Cargo.toml` together
+with `pedantic` and `nursery`, minus a list of named allows, plus rustc's
+`missing_docs` and `unreachable_pub`) catches a long tail of
 real hazards: out-of-bounds indexing, `needless_range_loop` in the
 per-pixel renderer, redundant clones in hot loops, ranges that can
 never match. luna's code is dense bit-level address math, and every
@@ -63,9 +65,12 @@ cargo build --workspace --all-targets \
   && cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-This is now THE canonical sequence. The `--all-features` clippy step
-supersedes the plain form in `rebuild-discipline.md`, and since 2026-07
-it is also what CI runs — one gate everywhere.
+This is THE canonical sequence, the same one `rebuild-discipline.md`
+gives. Its `--all-features` clippy step and its `cargo fmt --all --check`
+are, since 2026-07, the exact commands CI runs. The build and test steps
+differ from CI on purpose: CI runs `cargo check --workspace --all-targets`
+and the wider `cargo test --workspace --all-features` (see
+`rebuild-discipline.md`).
 
 If any step fails, fix it — don't `--no-verify` past it. The hooks /
 lint gates exist because every previous time we skipped them, we

@@ -18,11 +18,12 @@ first if it isn't built.
 > SMRPG plays an intro and then **waits at its title/demo screen for a
 > Start press**. With no input it sits there forever (forced-blank →
 > black) and reads as a hang — that is NOT a bug (it cost us several
-> sessions; see `.claude/rules/coproc-testing.md` and the
-> `project_smrpg_sa1_deadlock` memory). Two checkpoints:
+> sessions chasing a phantom "SA-1 deadlock"; see
+> `.claude/rules/coproc-testing.md`). Two checkpoints:
 
 ```bash
-# 1. Intro cinematic (no input): Peach-in-the-garden scene at ~frame 392.
+# 1. Intro cinematic (no input): Peach-in-the-garden scene
+#    (`frame_count` ≈ 909, `nmis_serviced` ≈ 417).
 ./target/release/luna state -n 12000000 --screenshot /tmp/smrpg_intro.png \
   "tests/roms/Super Mario RPG - Legend of the Seven Stars (USA).sfc"
 
@@ -37,8 +38,12 @@ Expected: **#1** the intro cinematic (Peach in the garden — bird,
 treehouse, bushes); **#2** the **"Your name?"** name-entry screen (Mario
 + alphabet grid), with `nmis_serviced` climbing past the title (≈ 3335 at
 frame ≈ 3988 for `-n 55000000` since #126 — the `--input` checkpoints now
-spend from the `-n` budget; NMI rate ≥ 80%). A no-input run freezing at `nmis_serviced` ≈ 1598 is the
-title wait, not a deadlock.
+spend from the `-n` budget; NMI rate ≥ 80%). A no-input run never
+reaches that screen: it stays on the title / attract-demo loop, with
+`nmis_serviced` still climbing but slowly (≈ 2147 at frame ≈ 4171 for
+`-n 55000000`, NMI rate ≈ 50%; ≈ 1651 at frame ≈ 2219 and a black
+forced-blank screenshot for `-n 30000000`). That is the title wait, not a
+deadlock.
 
 ### `smw` — Super Mario World Yoshi's House intro
 
@@ -66,6 +71,6 @@ Run both targets sequentially. Each leaves its PNG in `/tmp/`.
 
 Read the resulting screenshot(s) and describe what you see (sprites
 present, BG layers visible, palette correctness). Compare against the
-last-known-good if there's a baseline image in `tests/screenshots/`.
+last-known-good if there's a baseline image in `tests/golden/smoke/`.
 
 If $ARGUMENTS is empty, default to `smrpg`.

@@ -16,5 +16,5 @@ See `.claude/rules/rebuild-discipline.md` for the rationale.
 After the rebuild completes, report:
 
 1. Whether both profiles built successfully.
-2. Any warnings (clippy or otherwise) that appeared.
+2. Any compiler warnings that appeared (this command does not run clippy).
 3. Build time for each profile.

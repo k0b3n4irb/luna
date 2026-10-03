@@ -1,6 +1,6 @@
 ---
 description: Fetch ares + Mesen2 reference sources for a SNES subsystem into /tmp/
-argument-hint: "<subsystem> (e.g. ppu, dma, cpu, sa1, dsp)"
+argument-hint: "<subsystem> (e.g. ppu, dma, cpu, sa1, dsp, superfx, dsp1, sdd1)"
 allowed-tools: Bash(curl *), Bash(gh *), Bash(mkdir *), Bash(ls *), Read
 ---
 
@@ -13,10 +13,13 @@ both reference emulators into `/tmp/` so they can be diffed and read.
 | `$ARGUMENTS` | ares directory | Mesen2 file |
 |---|---|---|
 | `ppu`  | `ares/sfc/ppu/`  | `Core/SNES/SnesPpu.cpp` + `SnesPpuTypes.h` |
-| `dma`  | `ares/sfc/cpu/dma.cpp` + `timing.cpp` | `Core/SNES/DmaController.cpp` |
-| `cpu`  | `ares/sfc/cpu/`  | `Core/SNES/Cpu/SnesCpu.cpp` |
+| `dma`  | `ares/sfc/cpu/dma.cpp` + `timing.cpp` | `Core/SNES/SnesDmaController.cpp` |
+| `cpu`  | `ares/sfc/cpu/`  | `Core/SNES/SnesCpu.cpp` |
 | `sa1`  | `ares/sfc/coprocessor/sa1/` | `Core/SNES/Coprocessors/SA1/` |
-| `dsp`  | `ares/sfc/dsp/` + `ares/sfc/smp/` | `Core/SNES/SpcRam.cpp` + `Spc.cpp` + `Dsp.cpp` |
+| `dsp`  | `ares/sfc/dsp/` + `ares/sfc/smp/` | `Core/SNES/Spc.cpp` + `Core/SNES/DSP/Dsp.cpp` |
+| `superfx` | `ares/sfc/coprocessor/superfx/` + `ares/component/processor/gsu/` | `Core/SNES/Coprocessors/GSU/` |
+| `dsp1` | `ares/sfc/coprocessor/necdsp/` + `ares/component/processor/upd96050/` | `Core/SNES/Coprocessors/DSP/` |
+| `sdd1` | `ares/sfc/coprocessor/sdd1/` | `Core/SNES/Coprocessors/SDD1/` |
 
 ## Workflow
 

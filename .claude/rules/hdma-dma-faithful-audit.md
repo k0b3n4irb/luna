@@ -7,7 +7,9 @@ days, each from a single commercial title, each invisible to the golden
 test suite:
 
 - **mid-frame HDMA enable** ignored — Yoshi's Island intro text (`$420C`
-  written at scanline ~12, not vblank). Fixed: live `hdmaActive()` gating.
+  written at scanline ~12, not vblank). Fixed: live `hdmaActive()` gating;
+  a channel enabled mid-frame runs from its **stale** table pointer, with
+  no re-copy from the source address (`docs/hdma_ares_audit.md` row 9).
 - **count-0 line-count header** treated as 1 line instead of 128 — Contra
   III title logo (`$80` header). Fixed: full-8-bit decrement, reload when
   `& 0x7F == 0`.
@@ -33,14 +35,16 @@ an unknown number of remaining edge cases. Treat it accordingly.
    HDMA get a row.
 
 3. **The golden suite is NOT sufficient for HDMA.** Both 2026-06 bugs passed
-   all 59 golden ROM tests (no golden exercised count-0 or mid-frame enable).
+   all the golden ROM tests (no golden exercised count-0 or mid-frame enable).
    Visual regression on real titles is mandatory: run
    **`tools/validate-hdma-corpus.sh`** (gradients, raster/status-bar splits,
    Mode 7, mid-frame splits) and eyeball the output for any HDMA change. Add
    a title to that script whenever a new HDMA case is found.
 
 4. **A confirmed HDMA divergence gets a regression unit test** in
-   `crates/luna-core/src/dma/` (see `hdma_enabled_mid_frame_starts_from_source`,
+   `crates/luna-core/src/dma/` (see
+   `hdma_mid_frame_enable_uses_stale_pointer_not_source`,
+   `hdma_cold_mid_frame_enable_skips_transfer_first_line`,
    `hdma_header_low7_zero_is_a_128_line_entry`) — a synthetic table that
    isolates the exact edge case, so the golden gap is closed permanently.
 

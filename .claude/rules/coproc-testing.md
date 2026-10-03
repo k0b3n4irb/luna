@@ -20,11 +20,12 @@ sequence has passed.
 > game that is working perfectly will sit there forever (often
 > forced-blank → black) and read as a "hang." Before suspecting the
 > emulator, **inject Start** with `--input` (see below). This is the
-> inverse of the [[feedback_audit_deviations_test_in_gui]] gotcha: there
-> a CLI pass hid a real bug; here a CLI "fail" hid a working emulator.
-> (Cost us several sessions chasing a phantom "SA-1 deadlock" in SMRPG
-> that was just the title screen waiting for Start — see the
-> `project_smrpg_sa1_deadlock` memory.)
+> inverse of the GUI-validation gotcha (a CLI smoke screenshot can pass
+> while the GUI shows a regression, so an audit-flagged deviation is
+> validated in the GUI too): there a CLI pass hid a real bug; here a CLI
+> "fail" hid a working emulator. (Cost us several sessions chasing a
+> phantom "SA-1 deadlock" in SMRPG that was just the title screen waiting
+> for Start.)
 
 When DMA / PPU / SA-1 logic changes, screenshot Super Mario RPG via the
 CLI as a quick visual regression check:
@@ -37,7 +38,8 @@ Two checkpoints — the no-input intro **and** the post-Start path,
 because SA-1 graphics are exercised by both:
 
 ```
-# 1. Intro cinematic (no input): the Peach-in-the-garden scene at ~frame 392.
+# 1. Intro cinematic (no input): the Peach-in-the-garden scene
+#    (`frame_count` ≈ 909, `nmis_serviced` ≈ 417).
 ./target/release/luna state -n 12000000 --screenshot /tmp/smrpg_intro.png \
   "tests/roms/Super Mario RPG - Legend of the Seven Stars (USA).sfc"
 
@@ -55,8 +57,13 @@ A working build:
 - **#2** reaches the **"Your name?"** name-entry screen, and crucially
   `nmis_serviced` keeps climbing past the title (**≈ 3335 at frame ≈ 3988**
   for `-n 55000000`, NMI service rate ≥ 80%). Without the `--input` the
-  run **freezes at `nmis_serviced` ≈ 1598** — that plateau is the title
-  wait, not a deadlock.
+  same run **never reaches the name-entry screen**: the game stays on its
+  title / attract-demo loop. The counter does not freeze there — it keeps
+  climbing, but slowly (measured 2026-10-04: ≈ 1651 at frame ≈ 2219 for
+  `-n 30000000`, a black forced-blank screenshot; ≈ 2147 at frame ≈ 4171
+  for `-n 55000000`, the attract-demo battle on screen — NMI service rate
+  ≈ 50%). That low rate, or a black frame, is the title wait, not a
+  deadlock.
 
   > The counts above were re-measured 2026-08-01, after `--input`
   > checkpoints started spending from the `-n` budget instead of

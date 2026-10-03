@@ -10,7 +10,8 @@ belongs in `docs/`.
 A cycle-accurate-ish SNES emulator written in Rust. 12-crate workspace:
 
 - `crates/luna-bus/` — foundation: `Bus` trait, `Addr24`, `MapperKind`
-  enum, the per-mapper shims (LoROM / HiROM / ExHiROM / SA-1). Used by
+  enum, the per-mapper shims (LoROM / HiROM / ExHiROM / SA-1 /
+  Super FX / S-DD1; the DSP-1 mapper lives in `luna-core`). Used by
   every CPU and the system glue.
 - `crates/luna-cartridge/` — ROM header parser, mapper detection.
 - `crates/luna-cpu-65c816/`, `crates/luna-cpu-spc700/` — CPU cores.
@@ -21,20 +22,21 @@ A cycle-accurate-ish SNES emulator written in Rust. 12-crate workspace:
   in `src/dsp.rs`, see commit `25c3691`).
 - `crates/luna-ppu/` — PPU + renderer + compositor.
 - `crates/luna-core/` — system glue. Owns the top-level `Snes` struct,
-  the CPU-driven master-clock scheduler, and the **DMA + SA-1 / future
-  coprocessor** subsystems as `crate::dma` and `crate::coproc` modules
+  the CPU-driven master-clock scheduler, and the **DMA + coprocessor**
+  (SA-1 chip side, DSP-1) subsystems as `crate::dma` and `crate::coproc` modules
   (merged from the former `luna-dma` / `luna-coproc` crates in
   commit `5cf2220`).
 - `crates/luna-api/` — introspection surface; produces serialisable
   `EmulatorState` snapshots for the CLI, GUI, and MCP server.
 - `crates/luna-mcp-server/` — MCP transport (the GUI does not use it;
   invoked from `luna mcp` in the CLI binary).
-- `crates/luna-cli/` — `luna run` / `luna state` / `luna mcp` binary.
+- `crates/luna-cli/` — the `luna` binary (`luna run` / `luna state` /
+  `luna test` / `luna mcp` and more; `luna --help` lists the subcommands).
 - `crates/luna-gui/` — hand-rolled debugger UI (winit + pixels +
   egui-wgpu; eframe was removed 2026-05-28). Owns the dedicated emu
-  thread (`src/emu_thread.rs`, audio-as-clock pacing) and the cpal
-  output stream (`src/audio.rs`, with 6-point cubic Hermite resampler
-  + 5 Hz DC blocker).
+  thread (`src/emu_thread.rs`, video-as-clock frame limiter) and the
+  cpal output stream (`src/audio.rs`, with 6-point cubic Hermite
+  resampler, dynamic rate control + 5 Hz DC blocker).
 
 ## Mandates (auto-loaded from `.claude/rules/`)
 
@@ -45,7 +47,7 @@ A cycle-accurate-ish SNES emulator written in Rust. 12-crate workspace:
 | Reference-first implementation | `.claude/rules/reference-first.md` | Any SNES subsystem feature change |
 | Rebuild + lint discipline | `.claude/rules/rebuild-discipline.md` | Every code change before commit |
 | Rust lint discipline (clippy `--all-features`) | `.claude/rules/rust-lint-discipline.md` | Every code change before commit (extends rebuild) |
-| Coprocessor / DMA / PPU test sweep | `.claude/rules/coproc-testing.md` | Edits to luna-ppu, luna-core/src/dma/, luna-core/src/coproc/, luna-bus/sa1.rs |
+| Coprocessor / DMA / PPU test sweep | `.claude/rules/coproc-testing.md` | Edits to `crates/luna-ppu/`, `crates/luna-core/src/dma/`, `crates/luna-core/src/coproc/`, `crates/luna-bus/src/sa1.rs` |
 | Test audible / visible fixes before commit | `.claude/rules/audible-fixes-test-first.md` | Any change to APU / PPU rendering / GUI audio or framebuffer |
 | API-first (CLI / MCP / GUI all drive `luna-api`, never `luna-core` directly) | `.claude/rules/api-first.md` | Any `luna-gui` change touching emulation / input / audio / framebuffer, or any front-end need for core state |
 | **One author: `~/.gitconfig`** — no `Co-authored-by` / tool trailers, never let GitHub commit (releases = fast-forward `develop:main`) | `.claude/rules/no-co-authored-by.md` | Every commit, merge, tag, PR or release |
@@ -80,7 +82,8 @@ Read the matching rule before touching the relevant code, not after.
 
 ## Reference docs (in `docs/`)
 
-- `CONTROLLER_BINDINGS.md` — keyboard → SNES button mapping (GUI).
+- `book/src/using/controls.md` (in the user guide, not `docs/`) —
+  keyboard → SNES button mapping (GUI).
 - `ppu_compositor_reference.md` — synthesised ares + Mesen2 spec for
   the PPU compositor, color math, windows, DMA, NMI.
 - `ares_ppu_notes.md`, `mesen2_ppu_notes.md` — raw per-source research

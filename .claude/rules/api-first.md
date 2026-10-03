@@ -46,7 +46,7 @@ debugging untrustworthy.
 ## Why the MCP "isn't used" is fine
 
 `luna mcp` (the MCP server) exposes the *same* `luna_api::Emulator`
-surface over stdio (`step` / `step_until_frame` / `get_state` /
+surface over stdio (`step` / `step_until_frame` / `state` /
 `screenshot`). The CLI (`luna state` / `luna run`) is that same API over
 argv. So driving the emulator from the CLI **is** driving it through the
 API — the MCP adds a transport, not capability. Use whichever transport
