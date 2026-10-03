@@ -801,8 +801,8 @@ ppu_test!(
 // -----------------------------------------------------------------------
 // Interlace scenes (512x448 = Mode 5/6 hi-res + SETINI bit 0). luna
 // collapses to 256x224 by averaging both fields (Phase C). Validated
-// against each ROM's 512x448 reference (downsampled). BG-driven demos are
-// wired; sprite-heavy ones await OBJ-interlace (obj_gaps #6, Phase D).
+// against each ROM's 512x448 reference (downsampled). OBJ interlace
+// (SETINI bit 1) is rendered too — see `ppu_interlace_rpg` below.
 // -----------------------------------------------------------------------
 ppu_test!(
     ppu_interlace_font,
@@ -900,13 +900,14 @@ ppu_test!(
 //
 // luna was DROPPING those CGDATA writes whenever the ISR also wrote CGADD
 // ($2121) mid-line: that CPU write flipped `active_display` true, and the
-// following CGDATA DMA was gated off (`write_gated(!active_display)`).
-// Fixed in `DmaBusView::write_b` — CGDATA via DMA/HDMA bypasses the gate
-// (CGRAM is never dropped on hardware, ares `io.cpp:55-60`), VRAM/OAM stay
-// gated (`io.cpp:26,40`). The pseudo-hires variant — whose per-8-line
+// following CGDATA DMA was dropped by the active-display write gate.
+// Fixed: `Ppu::write` never drops a CGDATA write, from the CPU or from
+// DMA/HDMA (CGRAM is never dropped on hardware, ares `io.cpp:55-60`);
+// VRAM/OAM stay gated (`io.cpp:26,40`).
+// The pseudo-hires variant — whose per-8-line
 // ("per tile row") cadence + photo content hides the residual sub-line
 // timing — now renders the full-colour mandrill cleanly → passing golden.
-// See docs/luna_dma_gaps.md #7.
+// See docs/archive/luna_dma_gaps.md #7.
 ppu_test!(
     ppu_hdma_hicolor64_pseudohires,
     "HDMA/HiColor64PerTileRowPseudoHiRes/HiColor64PerTileRowPseudoHiRes.sfc",

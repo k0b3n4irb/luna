@@ -347,12 +347,6 @@ impl Mapper for NullMapper {
     }
 }
 
-/// One per-opcode snapshot of the GSU register file — the Super FX
-/// analogue of [`Sa1TraceEvent`]. Diffing this PC + register stream against
-/// One Super FX job — everything between a GO (the `sfr.g` flag setting)
-/// and the STOP that clears it (`OpenSNES` R3).
-///
-/// A renderer's frame budget is measured per job, not per frame: a frame
 /// Cumulative SA-1 accounting since power-on (`OpenSNES` R5).
 ///
 /// The SA-1 runs at 10.74 MHz, but only while nothing else wants the bus
@@ -411,6 +405,10 @@ impl Sa1Stats {
     };
 }
 
+/// One Super FX job — everything between a GO (the `sfr.g` flag setting)
+/// and the STOP that clears it (`OpenSNES` R3).
+///
+/// A renderer's frame budget is measured per job, not per frame: a frame
 /// may run several, and the interesting question is what each one cost.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct SuperFxJob {
@@ -434,6 +432,8 @@ pub struct SuperFxJob {
     pub stall_cycles: u64,
 }
 
+/// One per-opcode snapshot of the GSU register file — the Super FX
+/// analogue of [`Sa1TraceEvent`]. Diffing this PC + register stream against
 /// a reference GSU trace (bsnes / siena) pinpoints the first divergence.
 #[derive(Debug, Clone, Copy)]
 pub struct SuperFxTraceEvent {

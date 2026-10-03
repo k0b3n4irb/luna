@@ -117,8 +117,8 @@ impl EventCategory {
 /// `SnesEventManager::GetEventConfig` (`SnesEventManager.cpp:116-149`).
 ///
 /// NMI/IRQ are categorised by event *type*, not address — see
-/// [`event_category`]. DMA-channel gating is not applied here (see the
-/// `TODO` on [`EventViewerConfig::show_dma_channels`]).
+/// [`event_category`]. DMA-channel gating is not applied here: it is done
+/// in [`decode_dma_event`] (see [`EventViewerConfig::show_dma_channels`]).
 #[must_use]
 pub const fn categorise(reg: u16, is_write: bool) -> Option<EventCategory> {
     if reg <= 0x213F {

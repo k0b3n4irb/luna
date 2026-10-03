@@ -159,7 +159,7 @@ enum CaseResult {
 type CycleCheck = Result<(), String>;
 
 /// Run one case. Returns the state-comparison result plus — when the
-/// instruction actually executed (didn't panic / isn't unimplemented) —
+/// instruction actually executed (didn't panic) —
 /// a `CycleCheck`. The cycle check is independent of the state result so
 /// a cycle-grammar bug surfaces even on an opcode whose state is correct.
 fn run_case(case: &TestCase, opcode: u8) -> (Result<CaseResult, String>, Option<CycleCheck>) {

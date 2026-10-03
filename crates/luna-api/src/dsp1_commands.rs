@@ -9,16 +9,16 @@
 //!
 //! Word counts per command come from the `OpenSNES` `dsp1` module. They are
 //! **never** used to decide where a transaction ends — the boundaries come
-//! from the observable protocol (see [`decode`]). The table only supplies an
+//! from the observable protocol (see `decode`). The table only supplies an
 //! *expectation*, which is then compared against what actually happened.
 //!
 //! That distinction is the whole safety property. A wrong table entry here
 //! must not silently mis-group a handshake and send someone chasing a
-//! phantom emulator bug: it surfaces as [`TxStatus::Mismatch`] on that one
+//! phantom emulator bug: it surfaces as `TxStatus::Mismatch` on that one
 //! transaction, with both counts printed, and every other transaction stays
 //! correct.
 //!
-//! Counts carry a [`Confidence`] for the same reason — a `Provisional` row
+//! Counts carry a `Confidence` for the same reason — a `Provisional` row
 //! that disagrees with the stream is far more likely to be a stale table
 //! than an emulator defect, and the output says so rather than implying a
 //! verdict it has not earned.
@@ -34,7 +34,7 @@ pub enum Confidence {
     Documented,
     /// Provisional — do not read a mismatch here as an emulator bug.
     Provisional,
-    /// Output length is not a fixed count (see [`Operation::bounded`]).
+    /// Output length is not a fixed count (see `Operation::bounded`).
     Unbounded,
     /// Command byte not in the table at all.
     Unknown,

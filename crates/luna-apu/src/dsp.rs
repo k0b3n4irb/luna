@@ -1,9 +1,12 @@
 // The `pub _name: T` fields mirror ares' S-DSP `n3 _name;` placeholders
 // — internal latches the upstream pipeline writes / reads, kept on the
 // Voice / Echo / Latch structs so the 32-step pipeline transliteration
-// stays line-for-line with ares. Some are not wired yet on the luna
-// side; the `_` prefix marks them as "ares-port scaffold, not part of
-// the luna public API". Removing them now would diverge from
+// stays line-for-line with ares. Every one of them is read and written
+// by the pipeline; the `_` prefix marks them as "ares-port scaffold,
+// not part of the luna public API". (The fields the pipeline never
+// reads are two non-underscore ones, `Voice.end` — never touched —
+// and `Voice.keyon` — written only; both mirror ares' `dsp.hpp` too.)
+// Removing any of them would diverge from
 // `ares/sfc/dsp/dsp.hpp` and make the next round-trip review (when we
 // re-port from ares head) noisier.
 #![allow(clippy::pub_underscore_fields)]
@@ -13,7 +16,7 @@
 //!
 //! Mirrors `ares/sfc/dsp/` 1-for-1: the `Dsp` struct holds the same
 //! sub-structs (Voice, Echo, Noise, BRR, Latch, MainVol, Clock) and
-//! the 32-step macro pipeline in [`Dsp::main`] is a transliteration of
+//! the 32-step macro pipeline in `Dsp::main` is a transliteration of
 //! `DSP::main()`. Per-method implementations live in this single file
 //! grouped by source file (voice / brr / echo / envelope / counter /
 //! gaussian / misc / memory) — see the matching `ares/sfc/dsp/*.cpp`
@@ -22,7 +25,7 @@
 //! Integer-size convention: ares uses `n8` (u8), `n16` (u16), `s32`
 //! (i32), `i16`, `i17` etc. We use Rust primitives directly; widening
 //! casts are explicit. The few places ares' `sclamp<16>` is used we
-//! call [`sclamp16`].
+//! call `sclamp16`.
 //!
 //! Field-level docs are suppressed here because the field shapes match
 //! the ares Voice / Echo / BRR / Latch struct definitions exactly;

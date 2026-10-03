@@ -7,9 +7,10 @@
 //!   Implementations route these to the matching subsystem state.
 //! - The rest is plain RAM.
 //!
-//! Unlike the 65C816 `Bus`, the SPC700 bus does **not** model cycle
-//! costs explicitly — the SPC700 is a fixed 1.024 MHz CPU with a
-//! simple per-opcode cycle table that we can apply post-execute.
+//! The bus carries no explicit cycle cost: every [`SpcBus::read`],
+//! [`SpcBus::write`] and [`SpcBus::idle`] call **is** one SPC cycle, and
+//! a timing-accurate implementation clocks its timers and DSP on each
+//! call (see the trait doc below).
 
 /// View of the system exposed to the SPC700.
 ///
@@ -34,7 +35,7 @@ pub trait SpcBus {
     /// An internal/idle cycle: no memory access, but the SPC still
     /// burns a cycle and clocks the DSP + timers. Default is a no-op so
     /// flat-RAM consumers (tests) that don't model timing need not care;
-    /// the timing-accurate consumer ([`luna_apu`]'s bus view) overrides
+    /// the timing-accurate consumer (`luna_apu`'s bus view) overrides
     /// it to clock one cycle.
     fn idle(&mut self) {}
 }

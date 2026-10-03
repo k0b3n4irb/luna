@@ -13,7 +13,7 @@
 //! normal-mode DMA, CC1 + CC2 character-conversion DMA, VLBP
 //! bit-stream reader, and the per-side I-RAM / BW-RAM
 //! write-protection masks. The SA-1's own 65C816 instance is
-//! layered on top in [`luna_coproc::Sa1Chip`].
+//! layered on top in `Sa1Chip` (`luna-core`, `coproc::sa1`).
 //!
 //! Reference: <https://problemkaputt.de/fullsnes.htm> §"SNES SA-1".
 //!
@@ -320,7 +320,7 @@ enum BwTarget {
 enum WriteSide {
     /// Write originated from the main 65C816 (S-CPU) via the SNES bus.
     Main,
-    /// Write originated from the SA-1's own 65C816 via [`super::Sa1Bus`].
+    /// Write originated from the SA-1's own 65C816 via [`Sa1Bus` in `luna-core`'s `coproc::sa1`].
     Sa1,
 }
 
@@ -891,7 +891,7 @@ impl Sa1Mapper {
     }
 
     /// Consume the pending S-CPU → SA-1 NMI delivery event (see
-    /// [`Self::sa1_nmi_event`]). The SA-1 CPU driver calls this once per
+    /// `Self::sa1_nmi_event`). The SA-1 CPU driver calls this once per
     /// instruction boundary and latches an NMI on `true`.
     pub const fn take_sa1_nmi_event(&mut self) -> bool {
         let fired = self.sa1_nmi_event;
@@ -1337,7 +1337,7 @@ impl Sa1Mapper {
     /// `$0000-$07FF` direct-page mirror, BW-RAM in its three views, ROM
     /// through the super-MMC. The S-CPU's vector override does not apply
     /// (the SA-1 has [`Sa1Mapper::sa1_vector_override`], applied by
-    /// [`super::Sa1Bus`]). An unmapped address reads `None`.
+    /// `Sa1Bus` in `luna-core`'s `coproc::sa1`). An unmapped address reads `None`.
     pub fn read_from_sa1(&mut self, addr: Addr24) -> Option<u8> {
         let bank = bank_of(addr);
         let offset = offset_of(addr);
@@ -1447,12 +1447,11 @@ impl Sa1Mapper {
     /// Charged on top of [`Self::sa1_region_steps`] (the base cost). This is
     /// the "Increment B" the Phase-5b doc deferred.
     ///
-    /// Two faithful approximations vs ares, both bounded: (1) luna evaluates
-    /// `scpu_mar` once per SA-1 batch (the deficit model runs ~1-2 SA-1
-    /// instructions per S-CPU access, so the S-CPU address is effectively
-    /// fixed across the batch); (2) the I-RAM exemption during S-CPU DRAM
-    /// refresh (`iram.conflict()` returns `cpu.refresh()==0`) is not modelled
-    /// — a ≤2-step over-charge confined to the ~40-mclk refresh window.
+    /// One bounded approximation vs ares: luna evaluates `scpu_mar` once per
+    /// SA-1 batch (the deficit model runs ~1-2 SA-1 instructions per S-CPU
+    /// access, so the S-CPU address is effectively fixed across the batch).
+    /// The I-RAM exemption during S-CPU DRAM refresh (`iram.conflict()`
+    /// returns `cpu.refresh()==0`) is modelled through `scpu_refresh`.
     #[must_use]
     pub fn sa1_conflict_steps(&self, sa1_addr: Addr24, scpu_mar: u32) -> u8 {
         let a = sa1_addr & 0xFF_FFFF;
@@ -1537,7 +1536,7 @@ impl Sa1Mapper {
                     // CCNT bit layout (per ares `io.cpp` $2200 +
                     // Mesen2 `Sa1.cpp:240-258`):
                     //   bit 7 = SA-1 IRQ request (level-driven)
-                    //   bit 6 = SA-1 wait (not modelled)
+                    //   bit 6 = SA-1 wait (RDYB, latched in `sa1_wait` below)
                     //   bit 5 = SA-1 reset (handled in Sa1Chip::write)
                     //   bit 4 = SA-1 NMI request (level-driven)
                     //   bits 3..0 = message to SA-1

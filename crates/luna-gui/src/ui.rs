@@ -2,12 +2,12 @@
 //!
 //! Architecture:
 //!   - winit owns the window + events.
-//!   - pixels owns the wgpu device + a surface texture that renders
-//!     the 256×224 SNES framebuffer with nearest-neighbour upscaling.
-//!   - egui (this module) renders UI primitives via `egui-wgpu` as a
-//!     second pass on the SAME wgpu surface, so the menu bar floats
-//!     over the top of the game image with native-quality text and
-//!     proper hit-testing.
+//!   - pixels owns the wgpu device, the surface and the 256×239 frame
+//!     texture the SNES framebuffer is uploaded to.
+//!   - egui (this module) renders via `egui-wgpu` on the SAME wgpu
+//!     surface: the menu bar at the top, and the game frame itself,
+//!     aspect-fit below the bar with nearest-neighbour sampling
+//!     (pixels' own scaling renderer is not used).
 //!
 //! Inspired by `pixels/examples/minimal-egui`.
 

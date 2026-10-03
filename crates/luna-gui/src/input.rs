@@ -463,7 +463,8 @@ impl KeyBindings {
     }
 }
 
-/// `~/.config/luna/<file>` on Linux / equivalent on macOS & Windows.
+/// `$XDG_CONFIG_HOME/luna/<file>`, else `$HOME/.config/luna/<file>`; an
+/// error when neither variable is set (no native macOS / Windows lookup).
 pub(crate) fn config_file(file: &str) -> std::io::Result<PathBuf> {
     let base = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         PathBuf::from(xdg)

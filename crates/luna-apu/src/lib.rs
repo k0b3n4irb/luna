@@ -24,12 +24,15 @@
 //! side last wrote**, not your own writes. This matches real hardware
 //! and is what the IPL ROM relies on for the boot handshake.
 //!
-//! # Clock ratio
+//! # Clocking
 //!
-//! SNES master = 21.477 MHz, SPC = 1.024 MHz, ratio ≈ 21. We run one
-//! SPC instruction per 84 master cycles, which assumes ~4-cycle
-//! average SPC instructions — good enough until we wire timer-driven
-//! cycle accounting in.
+//! SNES master = 21.477 MHz, SPC = 1.024 MHz, ratio ≈ 21. The SPC700
+//! is cycle-stepped: [`Apu::step`] converts master cycles to the 2× SPC
+//! clock domain (exact ratio, fractional carry) and runs one
+//! `Spc700::step_cycle` per SPC bus access until the SPC sits half an
+//! SPC cycle behind the CPU. Every access clocks the timers and the
+//! S-DSP in position (`ApuBusView::clock_cycle`), at the cost set by
+//! the `$F0` wait-state fields.
 
 use luna_cpu_spc700::{IPL_ROM, IPL_ROM_BASE, Spc700, SpcBus};
 
@@ -93,10 +96,10 @@ pub(crate) mod boxed_byte_array {
 }
 
 /// Nominal master cycles per SPC instruction (~4 SPC cycles × the
-/// 20.97 master/SPC ratio). Since Phase 2 this is **no longer** the
-/// scheduler quantum — `Apu::step` charges each instruction its real
-/// per-opcode cost — but it is kept as a convenience multiplier for
-/// tests that want "≈N instructions of headroom".
+/// 20.97 master/SPC ratio). This is **not** the scheduler quantum —
+/// `Apu::step` runs the SPC cycle by cycle — it is kept as a
+/// convenience multiplier for tests that want "≈N instructions of
+/// headroom".
 pub const MASTER_CYCLES_PER_SPC_STEP: u32 = 84;
 
 /// NTSC SNES master clock (Hz) — the CPU/PPU timebase.
@@ -190,14 +193,14 @@ pub struct Spc700TraceEvent {
 pub struct Apu {
     /// The SPC700 CPU.
     pub cpu: Spc700,
-    /// Cycle-accurate ares-port S-DSP. Owns its own register file
-    /// (mirrored into `dsp_regs` for legacy introspection), Voice[8],
-    /// Echo, Noise, BRR, Latch, Clock, `MainVol` state. `tick_voices`
-    /// drives one `dsp.main()` per 32 SPC cycles → one stereo sample.
+    /// Cycle-accurate ares-port S-DSP. Owns its own register file,
+    /// Voice\[8\], Echo, Noise, BRR, Latch, Clock, `MainVol` state. The
+    /// bus view's `clock_cycle` runs one `dsp.main()` per 32 SPC
+    /// cycles → one stereo sample.
     pub dsp: dsp::Dsp,
     /// 64 KB of physical audio RAM. The 64-byte IPL ROM is *not* baked
     /// in — it's a read overlay over `$FFC0..=$FFFF` on the SPC side,
-    /// gated on `$F1` bit 7 (see [`aram_with_ipl`] / [`Apu::peek`]). The
+    /// gated on `$F1` bit 7 (see `aram_with_ipl` / [`Apu::peek`]). The
     /// DSP reads this array directly, bypassing the overlay.
     #[serde(with = "boxed_byte_array")]
     pub aram: Box<[u8; 0x10000]>,
@@ -205,7 +208,7 @@ pub struct Apu {
     pub to_spc_ports: [u8; 4],
     /// SPC → CPU mailbox (SPC writes `$F4-$F7`, CPU reads `$2140-$2143`).
     /// This is Mesen2's `OutputReg`; the CPU reads it as-of the SPC run to
-    /// `target-1` (see [`Self::run_to_target`]) — the echo half-cycle.
+    /// `target-1` (see `Self::run_to_target`) — the echo half-cycle.
     pub to_cpu_ports: [u8; 4],
     /// Shadow of the CPU→SPC mailbox (Mesen2 `NewCpuRegs`): the value the
     /// CPU most recently wrote. Copied into [`Self::to_spc_ports`]
@@ -240,21 +243,21 @@ pub struct Apu {
     /// [`Self::set_master_clock_hz`] with [`PAL_MASTER_CLOCK_HZ`].
     #[serde(default = "default_master_hz")]
     master_hz: u64,
-    /// `$F1` SPC control register — bit 7 (use IPL ROM) is the only
-    /// bit we honour for now; the rest are stored verbatim for round-
-    /// trip diagnostics.
+    /// `$F1` SPC control register, as last written: bits 0-2 enable
+    /// timers T0-T2, bits 4-5 clear the CPU→SPC ports, bit 7 maps the
+    /// IPL ROM over `$FFC0-$FFFF`.
     pub control: u8,
     /// `$F0` TEST register. Bit 0 = `timersDisable`, bit 3 =
     /// `timersEnable` (ares io.cpp:81-94) — together they gate timer
     /// advance. Reset default `0x0A` (timersEnable + ramWritable set)
     /// keeps timers running, matching the ares power-on state. The
-    /// RAM-writable/disable and wait-state bits are stored, not modelled.
+    /// wait-state fields (bits 4-7) set the per-access clock cost in
+    /// `clock_cycle`; the RAM-writable/disable bits are stored only.
     pub test: u8,
-    /// `true` once the SPC has executed at least one instruction past
-    /// the IPL ROM region (i.e. it `JMP`'d into user code). When that
-    /// happens we expect uploaded music driver code; until our
-    /// opcode coverage catches up to the most popular drivers, this
-    /// is mostly informational.
+    /// `true` once the SPC's PC has been seen below the IPL ROM region
+    /// (i.e. it `JMP`'d into uploaded code — normally the music
+    /// driver). Informational: exposed in the state snapshot, read by
+    /// nothing in the emulation.
     pub past_iplrom: bool,
 
     // ------------- DSP (audio synth) — owned by `dsp` -------------
@@ -493,10 +496,10 @@ impl Apu {
     /// Main CPU writes `value` to mailbox port (0..=3). Mesen2
     /// `CpuWriteRegister`: the SPC was already `Run` to `target-1` (by
     /// [`Self::step`] before this call). Shadow the value into `NewCpuRegs`
-    /// ([`Self::new_to_spc_ports`]); make it visible to the SPC (`CpuRegs` =
+    /// (`Self::new_to_spc_ports`); make it visible to the SPC (`CpuRegs` =
     /// [`Self::to_spc_ports`]) **immediately** when the CPU is within one 2×
     /// unit of the SPC (`master_clock·ratio − Cycle ≤ 1`), otherwise **one
-    /// SPC cycle later** via [`Self::pending_cpu_reg_update`] — the
+    /// SPC cycle later** via `Self::pending_cpu_reg_update` — the
     /// write-visibility delay Mesen needs for e.g. Kishin Douji Zenki.
     pub const fn cpu_write_port(&mut self, port: usize, value: u8) {
         if self.new_to_spc_ports[port] == value {
@@ -546,19 +549,19 @@ impl Apu {
 
     /// Snapshot of the most recent stereo audio sample produced by
     /// the DSP. Returns `(left, right)` 16-bit signed PCM at 32 kHz.
-    /// Future audio backends can consume this in a tight loop;
-    /// today it's mostly a sanity-check probe.
+    /// A probe for the state snapshot; audio output goes through
+    /// [`Self::drain_audio`].
     #[must_use]
     pub const fn audio_sample(&self) -> (i16, i16) {
         (self.audio_left, self.audio_right)
     }
 
     /// Advance the SPC700 by `mclk` master cycles. Converts master
-    /// cycles into an SPC-cycle budget at the exact 21.477 MHz : 1.024
-    /// MHz ratio (with fractional carry), then runs SPC instructions —
-    /// each charged its **actual** per-opcode cost (incl. the taken-
-    /// branch penalty) — until the budget is spent. Timers and the DSP
-    /// voice clock advance by the same real per-instruction cycles.
+    /// cycles into the 2× SPC clock domain at the exact master : SPC
+    /// ratio (with fractional carry), then runs the SPC one cycle (one
+    /// bus access) at a time until it has caught up — it may stop
+    /// mid-instruction. Timers and the DSP are clocked on every one of
+    /// those cycles.
     pub fn step(&mut self, mclk: u32) {
         // Advance the CPU's position in the 2× SPC clock domain (Mesen2
         // `_state.Cycle` units = `master_clock × clockRatio`), carrying the
@@ -958,12 +961,13 @@ impl SpcBus for ApuBusView<'_> {
         match addr {
             // $F0 — TEST register. Bit 0 = timersDisable, bit 3 =
             // timersEnable gate the timers (ares io.cpp:81-94); the
-            // other bits (RAM writable/disable, wait states) are stored
-            // but not yet modelled. The P-flag write gate is omitted
+            // wait-state fields (bits 4-7) set the clock cost in
+            // `clock_cycle`; the RAM writable/disable bits are stored
+            // only. The P-flag write gate is omitted
             // (writes with PSW.P set are pathological for $F0).
             0x00F0 => *self.test = value,
             // $F1 — control register. Bit 7 controls IPL ROM
-            // visibility (we don't yet model un-mapping). Bits 0-2
+            // visibility (see `aram_with_ipl`). Bits 0-2
             // enable timers T0/T1/T2; a 0→1 transition resets the
             // corresponding internal counter on real HW.
             0x00F1 => {
@@ -1483,8 +1487,7 @@ mod tests {
     #[test]
     fn dsp_register_writes_are_silently_accepted() {
         // Music drivers smash a lot of bytes through $F2/$F3 once
-        // they start running. With our stub we just want them not
-        // to panic.
+        // they start running. Here we just want them not to panic.
         let mut apu = Apu::new();
         apu.step(2000 * MASTER_CYCLES_PER_SPC_STEP);
         apu.cpu_write_port(0, 0xCC);

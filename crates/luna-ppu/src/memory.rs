@@ -95,7 +95,8 @@ impl Vram {
         &mut self.data[..]
     }
 
-    /// Direct read for tests and the future renderer.
+    /// Direct read, bypassing the port state machine (renderer, debug
+    /// views, tests).
     #[must_use]
     pub fn peek(&self, addr: u16) -> u8 {
         self.data[usize::from(addr)]
@@ -408,7 +409,7 @@ impl Cgram {
     }
 
     /// Decode a CGRAM word as a 16-bit BGR555 color (low byte first).
-    /// Useful for tests and the future renderer.
+    /// Used by the renderer and the state snapshot.
     #[must_use]
     pub fn color(&self, index: u8) -> u16 {
         let off = usize::from(index) << 1;

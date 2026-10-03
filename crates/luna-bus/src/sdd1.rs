@@ -13,8 +13,7 @@
 //! testable in isolation from the SNES bus.
 //!
 //! [`Sdd1Mapper`] is the whole chip: the MMC (ROM banking + `$4800-$4807`
-//! control registers) plus — wired in a later stage — the DMA-triggered
-//! decompression.
+//! control registers) plus the DMA-triggered decompression.
 
 use crate::mapper::{Mapper, MapperKind, MapperStateError, check_state_len, decode_state};
 use crate::types::{Addr24, bank_of, offset_of, rom_mirror};

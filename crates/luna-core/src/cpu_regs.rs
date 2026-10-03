@@ -177,13 +177,14 @@ impl CpuRegs {
     }
 
     /// Read a register at the 16-bit CPU bank-0 offset (`$4200-$421F`).
-    /// Returns `None` if `offset` is outside that range.
+    /// Returns `None` for an offset outside that range and for every
+    /// register without an arm below (`$4200-$420F`, `$4211`, `$4213`):
+    /// the caller decides what such a read returns.
     pub const fn read(&mut self, offset: u16) -> Option<u8> {
         let v = match offset {
-            // Most $4200-$420A registers are write-only; reads return
-            // open-bus on real hardware. We return 0 so tests can
-            // distinguish "definitely write-only" from "stub MMIO" at
-            // the SnesBus level.
+            // The write-only registers ($4200-$420D) are open bus on
+            // real hardware: they are not answered here (the `None` arms
+            // at the bottom).
             0x4210 => {
                 // RDNMI: bit 7 = nmi flag (cleared by this read).
                 // For the cleared-on-read semantics with the 4-cycle
@@ -255,9 +256,10 @@ impl CpuRegs {
     }
 
     /// Push the current per-frame joypad state into the auto-read
-    /// latches. Called by [`crate::Snes::advance_one_scanline`] when
-    /// the scheduler crosses the `VBlank` entry line, IF `NMITIMEN.0`
-    /// is set. Also raises `HVBJOY.0` (auto-read busy) for the few
+    /// latches. Called by the scanline scheduler
+    /// (`SnesBus::sched_one_line`) when it crosses the `VBlank` entry
+    /// line, IF `NMITIMEN.0` is set.
+    /// Also raises `HVBJOY.0` (auto-read busy) for the few
     /// scanlines the hardware spends in the auto-read sequence — see
     /// [`Self::clear_joypad_busy`].
     ///
@@ -337,10 +339,9 @@ impl CpuRegs {
                 // ares `nmitimenUpdate` (irq.cpp:40-43): disabling BOTH
                 // H/V IRQ sources drops the held line at once — a stale
                 // TIMEUP flag must not linger past the disable. (The
-                // NMI-side late-enable retrigger is deliberately NOT
-                // ported: luna's nmi_flag is not a faithful nmiLine and
-                // the retrigger fires spuriously — see the
-                // NMITIMEN/SMRPG note in the project memory.)
+                // NMI-side late-enable retrigger of the same ares
+                // function is ported in the bus write path, `snes.rs`
+                // `write_inner`, which sees the previous NMITIMEN.7.)
                 if value & 0x30 == 0 {
                     self.irq_flag = false;
                 }

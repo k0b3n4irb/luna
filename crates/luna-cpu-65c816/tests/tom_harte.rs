@@ -20,8 +20,7 @@
 //! Set `LUNA_TOM_HARTE_REQUIRE=1` to make any unexpected failure (i.e.
 //! a failure on an opcode marked implemented in [`is_implemented`] below)
 //! cause the test to fail. Without this env var the test always passes
-//! and just prints a report — that's the friendly default during P0.4b
-//! development.
+//! and just prints a report.
 
 use luna_bus::testing::{RamBus, TraceKind};
 use luna_cpu_65c816::{Cpu, StatusFlags};
@@ -140,7 +139,8 @@ fn run_case(case: &TestCase, opcode: u8) -> RunResult {
     bus.reset_cycle_counter();
     bus.enable_trace();
 
-    // Catch the panic that unimplemented opcodes raise (P0.4b territory).
+    // All 256 opcodes are dispatched, so a panic here is unexpected: the
+    // case is counted as skipped instead of aborting the run.
     if catch_unwind(AssertUnwindSafe(|| cpu.step(&mut bus))).is_err() {
         return (Ok(CaseResult::Skip), None, None);
     }

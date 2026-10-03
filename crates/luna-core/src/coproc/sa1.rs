@@ -6,20 +6,19 @@
 //! plus a `running` flag controlled by the main-CPU's writes to
 //! `$2200 CCNT`:
 //!
-//!   * On reset, the SA-1 CPU is held in reset (CCNT.7 = 1 default).
-//!   * When the main CPU clears CCNT.7 (1 → 0 edge), the SA-1 CPU
+//!   * On reset, the SA-1 CPU is held in reset (CCNT.5 = 1 default).
+//!   * When the main CPU clears CCNT.5 (1 → 0 edge), the SA-1 CPU
 //!     loads its PC from `$2203/$2204 CRV` and starts executing.
-//!   * Setting CCNT.7 back to 1 halts the SA-1 again.
+//!   * Setting CCNT.5 back to 1 halts the SA-1 again.
 //!
-//! Each main-CPU master cycle, [`Sa1Chip::step_coproc`] runs roughly
-//! `mclk / 6` SA-1 instructions and ticks the SA-1 timer at full
-//! main-cycle resolution so timer IRQs fire even while the SA-1 CPU
+//! On every main-CPU advance (bus access or DMA byte),
+//! [`Sa1Chip::step_coproc`] adds the elapsed master clocks to a deficit
+//! and runs SA-1 instructions — each charged its real per-access cost —
+//! until it has caught up. The SA-1 timer is ticked first, at full
+//! main-cycle resolution, so timer IRQs fire even while the SA-1 CPU
 //! is held in reset. The chip's [`Sa1Chip::coproc_main_irq_pending`]
 //! implementation surfaces the `Sa1Mapper`'s `main_irq_line()` to
 //! the host bus so the main CPU can be IRQ'd by the SA-1 directly.
-//!
-//! Character-conversion DMA (Type-1 / Type-2) remains the one
-//! larger piece deferred — non-CC bulk DMA already works.
 
 use luna_bus::sa1::{Sa1Mapper, Sa1Region};
 use luna_bus::{
@@ -159,10 +158,11 @@ impl Mapper for Sa1Chip {
                 // NOTE: ares io.cpp:113 also clears CIWP=0 here. luna does
                 // NOT — it deliberately deviates on the I-RAM write-
                 // protection model (CIWP/SIWP default 0xFF; see
-                // docs/archive/sa1_status.md). Clearing CIWP here breaks SA-1 code
-                // that doesn't pre-arm it (and is the fragile, GUI-blackout-
-                // prone area flagged in that doc). Deferred until the
-                // protection model is revisited holistically. (#4)
+                // docs/luna_sa1_gaps.md, open rows #3 and #4). Clearing CIWP
+                // here breaks SA-1 code that doesn't pre-arm it (and is the
+                // fragile, GUI-blackout-prone area flagged in that doc).
+                // Deferred until the protection model is revisited
+                // holistically. (#4)
             } else if !was_reset && now_reset {
                 self.running = false;
             }
@@ -211,8 +211,8 @@ impl Mapper for Sa1Chip {
 
     fn step_coproc(&mut self, main_mclk: u32, scpu_mar: u32) {
         // Timer ticks even while the SA-1 CPU is held in reset — that's
-        // how games can sit in CCNT.7-asserted "wait" mode and still
-        // generate timer IRQs.
+        // how games can sit with CCNT.5 (reset) or CCNT.6 (RDYB wait)
+        // asserted and still generate timer IRQs.
         self.inner.tick_timer(main_mclk);
         self.inner.set_scpu_mar(scpu_mar);
         // `running` is CCNT bit 5 (reset); bit 6 (RDYB) parks the chip the

@@ -160,8 +160,8 @@ impl Dma {
     /// `$420B MDMAEN`. Channels with their bit set in `mask` run in
     /// ascending order; each transfers `das` bytes (or 64 KB if
     /// `das == 0`). Returns the total number of bytes transferred
-    /// across all triggered channels (useful for cycle counting in
-    /// later phases).
+    /// across all triggered channels (the caller derives the burst's
+    /// master-clock cost from it).
     pub fn run_mdma<B: DmaBus>(&mut self, bus: &mut B, mask: u8) -> u32 {
         // One-shot wrapper: an unbounded budget runs the whole burst in a
         // single call and clears the cursor (the legacy lump behaviour).
@@ -284,7 +284,7 @@ impl Dma {
             if self.hdmaen & (1 << ch) != 0 {
                 // Live HDMAEN gate (ares `hdmaActive()` / Mesen2 per-line
                 // `HdmaChannels & (1<<i)`): a channel enabled mid-frame runs
-                // from here using the `do_transfer`/pointer state left by
+                // from here using the `hdma_do_transfer`/pointer state left by
                 // `hdma_init` — the references keep that (stale) state; they do
                 // NOT re-copy the source on a mid-frame enable.
                 // Tag B-bus writes this channel makes with its channel id so
@@ -500,8 +500,7 @@ mod tests {
 
     #[test]
     fn hdma_charges_overhead_plus_per_byte_stall() {
-        // Phase 4 HDMA time cost: 18 mclk/scanline overhead when any
-        // channel is active, + 8 mclk per transferred byte. Table
+        // HDMA time cost, per `hdma_cost` (see below). Table
         // `02 11 00` = non-repeat 2-line entry (transfer line 1, gap
         // line 2), then terminator. Mode 0 (1 byte/line) → BBAD $22.
         let mut bus = MockBus::new();

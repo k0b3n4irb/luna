@@ -1,7 +1,7 @@
 //! Host audio output for the SNES APU.
 //!
-//! The APU generates a steady 32 kHz stereo sample stream (see
-//! `luna_apu::Apu::tick_one_sample`). We connect that to the host
+//! The APU generates a steady 32 kHz stereo sample stream (drained
+//! through `luna_api::Emulator::drain_audio`). We connect that to the host
 //! audio device via [cpal] and a lock-free SPSC ring buffer
 //! (the `ringbuf` crate) so the audio callback thread can drain
 //! samples without ever blocking on the emulation thread:
@@ -9,7 +9,7 @@
 //! ```text
 //!   Emulation thread                                Audio callback
 //! ────────────────────                              ──────────────
-//!   Apu::drain_audio →  feed(samples)
+//!   Emulator::drain_audio → try_push
 //!                            │
 //!                            ▼
 //!                       ┌─────────────┐
@@ -25,11 +25,12 @@
 //! ```
 //!
 //! The host device's sample rate is usually 44.1 kHz or 48 kHz, not
-//! 32 kHz. We request 32 kHz from cpal where supported; otherwise a
+//! 32 kHz. We request 32 kHz from cpal where supported; in every case a
 //! 6-point cubic Hermite [`Resampler`] (Niemitalo 2009) sits between
 //! the ring consumer and the device buffer. The resampler tracks a
 //! sub-sample fractional position and steps it by
-//! `32000 / device_rate` per output sample — well below the audible
+//! `32000 / device_rate` per output sample (nudged by the dynamic rate
+//! control, see `apply_drc`) — well below the audible
 //! stopband ripple of a naïve linear interpolator.
 
 use std::sync::Arc;
@@ -172,7 +173,7 @@ impl AudioBackend {
                             &primed_inner,
                             f32::from_bits(vol.load(Ordering::Relaxed)),
                         );
-                        // Audio-as-clock: each callback drained samples
+                        // Back-pressure: each callback drained samples
                         // from the ring → tell the emu thread it can
                         // push more (it parks on a full ring).
                         emu_inner.unpark_emu();
@@ -281,11 +282,11 @@ fn fill_buffer_f32(
 /// Dynamic rate control, run once per device callback: measure the input
 /// ring's fill level and nudge the resampler step toward keeping it at
 /// half capacity. A too-full ring (emulator ahead of the device clock)
-/// raises the step so the callback consumes input faster; the emulator,
-/// paced by the ring backpressure, then slows to match the device — and
-/// vice versa. Bounded to ±0.5 % so the pitch shift is inaudible. This
-/// locks the SNES 60.0988 Hz to the real audio-device clock, killing the
-/// slow drift/beat between the two ~60 Hz clocks (jgenesis DRC).
+/// raises the step so the callback consumes input faster — and vice
+/// versa. Bounded to ±0.5 % so the pitch shift is inaudible. The
+/// emulator keeps its own pace (the frame limiter in `emu_thread.rs`);
+/// this makes audio consumption follow it, absorbing the slow drift
+/// between the emulated frame rate and the audio-device clock (jgenesis DRC).
 fn apply_drc(consumer: &ringbuf::HeapCons<(i16, i16)>, resampler: &mut Resampler) {
     let occupied = consumer.occupied_len() as f32;
     let target = (RING_CAPACITY / 2) as f32;

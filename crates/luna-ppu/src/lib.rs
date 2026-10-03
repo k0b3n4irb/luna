@@ -1,8 +1,9 @@
 //! SNES Picture Processing Unit.
 //!
-//! P1.1 scope: data-flow plumbing only — VRAM (64 KB), CGRAM (512 B)
-//! and OAM (544 B) with the corresponding MMIO registers and auto-
-//! increment behaviour. No rendering yet (lands in P1.4+).
+//! VRAM (64 KB), CGRAM (512 B) and OAM (544 B), the `$21xx` register
+//! file with its auto-increment ports, the scanline renderer (BG modes
+//! 0-7, hi-res, Mode 7, OBJ, interlace) and the compositor (priorities,
+//! windows, colour math).
 //!
 //! Reference: <https://problemkaputt.de/fullsnes.htm> §"PPU Registers".
 //!

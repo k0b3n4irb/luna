@@ -1,6 +1,7 @@
 //! Luna SNES emulator — command-line entry point.
 //!
-//! Dispatches between execution modes (run / mcp / replay).
+//! Dispatches the `luna` subcommands (run, test, mcp, state, frames,
+//! diff, profile, wram-trace, bench, spc-dump, assets-dump).
 //! See `ARCHITECTURE.md` §3.2.
 
 use std::path::PathBuf;

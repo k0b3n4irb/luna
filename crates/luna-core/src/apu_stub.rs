@@ -2,6 +2,11 @@
 //! progress past the boot handshake and the IPL upload phase
 //! **without** a real SPC700 + DSP emulation.
 //!
+//! It predates luna's real APU. Today `Snes` runs the real SPC700 + S-DSP
+//! and lets this stub answer the mailbox only after the SPC700 has
+//! executed `STOP` (`Snes::apu_panicked`) — an open row,
+//! `docs/luna_apu_gaps.md` #8.
+//!
 //! # Hardware model
 //!
 //! The four `$2140-$2143` mailbox ports are actually **two**
@@ -91,7 +96,7 @@ impl ApuStub {
         }
     }
 
-    /// Current phase — exposed for the GUI Stubs panel.
+    /// Current phase of the state machine (diagnostic).
     #[must_use]
     pub const fn phase(&self) -> Phase {
         self.phase

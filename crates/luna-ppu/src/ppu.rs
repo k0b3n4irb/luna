@@ -99,7 +99,7 @@ pub mod register {
     /// `$2120` M7Y — Mode-7 centre Y.
     pub const M7Y: u8 = 0x20;
     /// `$2134` MPYL — low byte of the Mode-7 hardware multiplier
-    /// result (signed-16 M7A × signed-8 M7B[high], 24-bit total).
+    /// result (signed-16 M7A × signed-8 M7B\[high\], 24-bit total).
     pub const MPYL: u8 = 0x34;
     /// `$2135` MPYM — middle byte.
     pub const MPYM: u8 = 0x35;
@@ -170,7 +170,6 @@ pub struct BgState {
     /// 10-bit vertical scroll.
     pub v_scroll: u16,
     /// Tilemap SC bits 0-1 from `BG*SC`: 0=32x32, 1=64x32, 2=32x64, 3=64x64.
-    /// Not yet honoured by the renderer; stored for forward compat.
     pub tilemap_size: u8,
 }
 
@@ -182,9 +181,10 @@ pub const fn bg_state(ppu: &Ppu, idx: usize) -> BgState {
 
 /// The SNES Picture Processing Unit.
 ///
-/// P1.1 scope: the data-flow plumbing — VRAM, CGRAM, OAM and the
-/// minimum register subset to upload data to them. The rendering side
-/// (modes, scroll, sprites on screen) lands in P1.4+.
+/// Owns VRAM / CGRAM / OAM, the `$21xx` register state and the
+/// persistent framebuffer, which the scheduler fills one scanline (or
+/// one partial segment) at a time through
+/// [`Ppu::render_current_scanline`] and [`Ppu::flush_partial_scanline`].
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Ppu {
     /// 64 KB tile and tilemap memory.
@@ -194,7 +194,7 @@ pub struct Ppu {
     /// 544 B object attribute memory.
     pub oam: Oam,
 
-    // ---------- Visual registers (stored but not yet rendered) ----------
+    // ---------- Visual registers ----------
     /// `$2100` INIDISP — bit 7 = forced blank, bits 0-3 = brightness.
     pub inidisp: u8,
     /// `$2101` OBSEL — sprite OAM size & character base.
@@ -327,7 +327,8 @@ pub struct Ppu {
     /// Interlace field parity, exposed at STAT78 ($213F) bit 7. Toggles
     /// every frame at the V-counter wrap (ares `counter/inline.hpp:32`
     /// `time.field ^= 1`) — unconditionally, even in progressive mode.
-    /// Interlace Phase A: state + flag only; vertical doubling is later.
+    /// With interlace on, it also selects the even/odd logical row the
+    /// hi-res BG and OBJ renderers sample.
     pub field: bool,
     /// `$2134-$2136 MPYL/M/H` — 24-bit hardware multiplier result.
     /// Updated whenever M7A or M7B's high byte is written:
@@ -360,8 +361,8 @@ pub struct Ppu {
 
     // ---------- Diagnostic counters (debug-only, not on hot path) ----------
     /// How many times `$2100` (INIDISP) has been written since reset.
-    /// Used by the GUI's Stubs panel to detect "the game never touched
-    /// INIDISP again after init" (= NMI handler not running).
+    /// Exposed in the `luna-api` state snapshot to detect "the game never
+    /// touched INIDISP again after init" (= NMI handler not running).
     pub inidisp_write_count: u64,
 
     /// Persistent framebuffer, written one scanline at a time by the
@@ -578,7 +579,8 @@ impl Ppu {
     ///
     /// Equivalent to a full-line flush: renders pixels
     /// `last_flushed_dot..FRAME_W` and resets the partial-flush cursor.
-    /// Out-of-range `y` (≥ `FRAME_H`) is a no-op.
+    /// PPU line 0 (the pre-render line) and lines past the picture
+    /// ([`Ppu::frame_height`]) render nothing.
     pub fn render_current_scanline(&mut self, y: u16, opts: RenderOptions) {
         self.current_line = y;
         // OBJ range/time-over flags accumulate over the frame and clear
@@ -633,8 +635,9 @@ impl Ppu {
     /// bus layer calls this BEFORE applying a `$21xx` write so the
     /// in-progress scanline gets the pre-write pixels committed.
     ///
-    /// Out-of-range `y` (≥ `FRAME_H`) or `end_x <= last_flushed_dot`
-    /// is a no-op.
+    /// PPU line 0 (the pre-render line), a line past the picture
+    /// ([`Ppu::frame_height`]) or `end_x <= last_flushed_dot` renders
+    /// nothing.
     pub fn flush_partial_scanline(&mut self, y: u16, end_x: u16, opts: RenderOptions) {
         self.flush_partial_scanline_inner(y, end_x, opts);
     }
@@ -1187,12 +1190,10 @@ impl Ppu {
                     self.coldata_b = intensity;
                 }
             }
-            // FALLTHROUGH for unmodelled registers.
-            // Other registers are stored as raw bytes for now (BG
-            // scroll, window state, etc. — wired here in P1.4+).
+            // Offsets with no arm above: the write is ignored (nothing
+            // is stored).
             _ => {
-                // Drop silently; we'll wire each register as the
-                // renderer needs it.
+                // Dropped.
             }
         }
     }

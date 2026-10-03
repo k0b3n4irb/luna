@@ -164,8 +164,7 @@ pub struct DmaParams {
     pub a_increment: Increment,
     /// The mode pattern (1/2/4 bytes per cycle, register layout).
     pub mode: TransferMode,
-    /// Bit 6 of `$43x0` — HDMA indirect-mode flag. Only honoured by
-    /// HDMA (not P1.2 scope).
+    /// Bit 6 of `$43x0` — HDMA indirect-addressing flag.
     pub hdma_indirect: bool,
 }
 

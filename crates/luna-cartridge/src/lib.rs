@@ -176,7 +176,6 @@ pub struct Cartridge {
     coprocessor_firmware: Option<Vec<u8>>,
 }
 
-/// Combined DSP-1 firmware size (program `0x1800` + data `0x800`).
 /// Size of a combined DSP-1 / DSP-1B microcode dump: 2048 24-bit program
 /// words (`0x1800`) followed by 1024 16-bit data words (`0x800`). A blob of
 /// any other size cannot be that firmware, so it is refused rather than
@@ -410,13 +409,11 @@ fn parse_at(rom: &[u8], off: usize) -> Header {
 
     let map_byte = rom[off + 0x15];
     let chipset = rom[off + 0x16];
-    // Coprocessor override from the chipset byte ($FFD6): when the low
-    // nibble flags a coprocessor (>= 3) the high nibble selects which.
-    // Super FX games (Star Fox = $13, Yoshi's Island = $15) carry a LoROM
-    // map mode ($20), so the GSU is only visible via this byte — high
-    // nibble 1 = GSU. (Empirically verified against both ROMs' headers.)
-    // Coprocessor overrides keyed on the chipset byte: low nibble >= 3 flags
-    // a coprocessor, high nibble selects which (1 = Super FX, 0 = NEC DSP).
+    // Coprocessor overrides keyed on the chipset byte ($FFD6): low nibble
+    // >= 3 flags a coprocessor, high nibble selects which (1 = Super FX,
+    // 0 = NEC DSP). Super FX games (Star Fox = $13, Yoshi's Island = $15)
+    // carry a LoROM map mode ($20), so the GSU is only visible via this
+    // byte. (Empirically verified against both ROMs' headers.)
     let is_superfx = (chipset & 0x0F) >= 0x03 && (chipset & 0xF0) == 0x10;
     let is_nec = (chipset & 0x0F) >= 0x03 && (chipset & 0xF0) == 0x00;
     // Every NEC DSP revision shares that chipset code; ares `firmwareNEC()`

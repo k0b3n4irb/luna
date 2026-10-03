@@ -1,11 +1,14 @@
 //! Scanline-based PPU renderer.
 //!
-//! P1.4b scope: BG1 only, Mode 0 (2bpp), at the layer's current
-//! H/V scroll. Higher BGs and the other modes land in P1.4c+.
+//! Per-layer indexed renderers (BG modes 0-7, the Mode 5/6 hi-res
+//! sampler, the Mode 7 affine plane, OBJ) feeding the per-pixel
+//! priority / window / colour-math compositor.
 //!
-//! Output: one row of `[u8; 3]` (RGB888) per call to [`render_bg1_scanline`].
-//! The renderer is a free function that takes a `&Ppu` so it doesn't
-//! depend on the PPU's internal mutability.
+//! Output: `[u8; 3]` (RGB888) pixels — one scanline, or one dot range
+//! of it, per call to [`render_scanline_partial_into`];
+//! [`render_frame_with`] loops it over a whole frame. The renderers are
+//! free functions that take a `&Ppu` so they don't depend on the PPU's
+//! internal mutability.
 
 use crate::ppu::{Ppu, bg_state};
 use crate::tile::{
@@ -18,7 +21,7 @@ pub type Scanline = [[u8; 3]; 256];
 /// One frame at SNES native resolution — pixel width.
 pub const FRAME_W: usize = 256;
 /// One frame at SNES native resolution — visible scanline count
-/// (NTSC: 224 lines; PAL adds 15 more, modelled later).
+/// without overscan (see [`FRAME_H_MAX`]).
 pub const FRAME_H: usize = 224;
 /// Picture height with overscan (SETINI bit 2): PPU lines 1..=239. The
 /// persistent framebuffer is allocated to this; [`crate::Ppu::frame_height`]
@@ -35,18 +38,9 @@ pub struct RenderOptions {
     pub bypass_forced_blank: bool,
 }
 
-/// Render one scanline of BG1 in Mode 0 (2bpp).
-///
-/// Pixels are produced by:
-/// 1. adding the BG1 H/V scroll to `(x, y)`
-/// 2. looking up the tilemap entry at the resulting (tile-row, tile-col)
-/// 3. decoding the 2bpp tile row addressed by the entry
-/// 4. mapping the 0..=3 palette index through the entry's palette
-///    offset into CGRAM and converting BGR555 → RGB888
-///
-/// Color index 0 in any BG palette is **transparent**; this rendering
-/// pass replaces it with CGRAM index 0 (the backdrop / "color 0"
-/// global), which matches the behaviour of a single-BG composite.
+/// Test helper: one scanline of BG1 alone as RGB, at the bit depth
+/// `BGMODE` selects ([`render_bg1_scanline_with`] with default options).
+/// A transparent pixel shows the backdrop (CGRAM index 0).
 // Legacy RGB-output renderers, kept only as convenience helpers for the
 // unit tests below — the production pipeline uses the `*_indexed_*`
 // renderers + the compositor in `ppu.rs`. `#[cfg(test)]` so they neither
@@ -97,8 +91,8 @@ fn bg1_bpp(bgmode: u8) -> u8 {
 /// - **8bpp** (Mode 3/4/7): 64 bytes/tile, full 256-colour palette
 ///   indexed straight by `idx` (tilemap palette offset ignored).
 ///
-/// Mode 7 affine is still handled the planar way for now — close
-/// enough to show *something* until the real Mode-7 path lands.
+/// Test helper: planar tilemap path only. The Mode 7 affine plane is
+/// rendered by [`render_mode7_scanline_indexed`], not here.
 #[cfg(test)]
 #[must_use]
 fn render_bg1_scanline_with(ppu: &Ppu, y: u16, opts: RenderOptions) -> Scanline {
@@ -348,10 +342,9 @@ pub fn decode_all_sprites(ppu: &Ppu) -> [SpriteEntry; 128] {
 /// no sprite contributes. The caller composites this on top of the
 /// BG layers.
 ///
-/// Per-sprite priority bits *are* decoded but not yet used to slot
-/// sprites between BG layers — that lands once the per-pixel priority
-/// engine is in place. For now the simple "sprites on top of all
-/// BGs" rule is enough for title-screen Mario/Yoshi visibility.
+/// Test helper: the per-sprite priority is dropped here. Slotting
+/// sprites between BG layers is the compositor's job
+/// ([`render_scanline_partial_into`]).
 #[cfg(test)]
 #[must_use]
 fn render_sprites_scanline(ppu: &Ppu, y: u16, opts: RenderOptions) -> [Option<[u8; 3]>; 256] {
@@ -376,9 +369,9 @@ fn render_sprites_scanline(ppu: &Ppu, y: u16, opts: RenderOptions) -> [Option<[u
     out
 }
 
-/// Render the full visible frame for BG1-only Mode 0.
-///
-/// 224 scanlines (NTSC native). For 239-line PAL we'll extend later.
+/// Test helper: the full composited frame (every layer, any mode) with
+/// default options — [`Ppu::frame_height`] rows, through
+/// [`render_frame_with`].
 #[cfg(test)]
 #[must_use]
 fn render_frame_bg1(ppu: &Ppu) -> Vec<[u8; 3]> {
@@ -398,8 +391,7 @@ fn render_frame_bg1_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
 /// that x wins. If no layer contributes, the CGRAM backdrop (index 0)
 /// shows through.
 ///
-/// The implementation differs from the previous "back-to-front layer
-/// overlay" by:
+/// The engine works by:
 ///   * tracking transparency vs backdrop explicitly through
 ///     [`IndexedScanline`] (CGRAM index + priority bit, `None` =
 ///     transparent — not "backdrop colour");
@@ -410,9 +402,9 @@ fn render_frame_bg1_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
 ///     BG layer (e.g. SMW status-bar text in front of clouds);
 ///   * routing BG3 to the top in Mode 1 when BGMODE bit 3 is set.
 ///
-/// Modes 0-4 are fully wired through this engine; modes 5, 6 and 7
-/// fall back to the Mode-1 table (close enough for the games in our
-/// test corpus until a dedicated path lands).
+/// All eight modes are wired: Mode 7 through the affine renderer
+/// ([`render_mode7_scanline_indexed`]), Modes 5/6 through the hi-res
+/// sampler; `priority_table` picks each mode's own priority table.
 #[must_use]
 pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
     let height = ppu.frame_height();
@@ -1837,7 +1829,7 @@ pub(crate) fn sprite_line_overflow(ppu: &Ppu, y: u16) -> (bool, bool) {
     (eval.range_over, eval.time_over)
 }
 
-/// Same as [`render_sprites_scanline`] but returns CGRAM indices
+/// Same as `render_sprites_scanline` but returns CGRAM indices
 /// and the sprite's 2-bit priority value. Allows the compositor to
 /// interleave sprites with BG layers per the mode's priority table
 /// instead of always painting them on top.
@@ -1966,7 +1958,7 @@ pub fn render_frame_bg_with(ppu: &Ppu, bg_idx: usize, opts: RenderOptions) -> Ve
     buf
 }
 
-/// Bits-per-pixel for any BG in any mode (cf. [`bg1_bpp`]).
+/// Bits-per-pixel for any BG in any mode (cf. `bg1_bpp`).
 #[must_use]
 pub const fn bg_bpp(bgmode: u8, bg_idx: usize) -> u8 {
     let m = bgmode & 0x07;
@@ -2336,7 +2328,7 @@ pub(crate) const MAX_PALETTE_CELL: u32 = 256;
 /// Render the 256-colour CGRAM as a 16×16 swatch grid, each swatch
 /// `cell` px square. Index 0 is top-left.
 ///
-/// `cell` is clamped to the range 1 to [`MAX_PALETTE_CELL`]: a caller-supplied size
+/// `cell` is clamped to the range 1 to `MAX_PALETTE_CELL`: a caller-supplied size
 /// is untrusted (it arrives straight from an MCP tool argument), and at
 /// `cell = 4096` the `16 * cell * 16 * cell * 4` byte count overflowed
 /// `u32` to zero, so the swatch loop then indexed an empty buffer and
@@ -2467,7 +2459,7 @@ mod tests {
         p.write(0x0B, 0x01); // BG12NBA: BG1 char addr low nibble = 1
         //  → BG1 char base = 1 << 12 (words) = byte $2000
         // No scroll yet.
-        // (Scroll registers $210D-$2114 land in P1.4c; default 0.)
+        // (Scroll registers $210D-$2114 are left at their default, 0.)
 
         // Tile #0 lives at VRAM byte $2000-$200F.
         // Make it a checkerboard:

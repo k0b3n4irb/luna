@@ -351,7 +351,7 @@ impl Cpu {
             0x88 => self.dey(),
 
             // -----------------------------------------------------------
-            // Arithmetic — ADC (Add with Carry, binary mode only for now)
+            // Arithmetic — ADC (Add with Carry; binary and decimal mode)
             // -----------------------------------------------------------
             0x69 => self.adc_imm(bus),
             0x65 => self.adc_dp(bus),

@@ -278,7 +278,7 @@ pub fn read_byte<B: Bus>(bus: &mut B, addr: Addr24) -> u8 {
 /// bank (ares `readBank`: `addr + 1`). This is the bank/long-mode rule.
 ///
 /// Direct-page and stack-relative accesses instead wrap the high byte
-/// within bank 0; the opcode handlers use [`crate::cpu::Cpu::read_word16`],
+/// within bank 0; the opcode handlers use `crate::cpu::Cpu::read_word16`,
 /// which honors the per-instruction `bank0_wrap` latch. Kept here as the
 /// pure bank-carrying primitive for tests.
 #[inline]

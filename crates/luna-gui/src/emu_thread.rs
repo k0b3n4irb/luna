@@ -1,21 +1,24 @@
-//! Dedicated emulator thread, paced by the cpal audio callback.
+//! Dedicated emulator thread, paced by a video-as-clock frame limiter.
 //!
-//! The thread owns the [`Snes`] state behind an `Arc<Mutex<>>` shared
-//! with the UI thread. It loops:
+//! The thread shares the [`Emulator`] (`Arc<Mutex<Option<Emulator>>>`)
+//! with the UI thread and drives it only through `luna-api`. It loops:
 //!
-//!   1. Acquire the Snes lock briefly,
+//!   1. Acquire the emulator lock briefly,
 //!   2. Step a short batch of CPU instructions,
-//!   3. Drain the APU's audio queue into the cpal producer ring,
-//!   4. Release the lock,
-//!   5. If the ring filled up before the queue drained, [`park`] until
-//!      the cpal callback [`unpark`]s us (signal: "I consumed samples,
-//!      you can produce more"). Otherwise [`yield_now`] so the UI
-//!      thread gets a chance to lock for its framebuffer snapshot.
+//!   3. Drain as many audio samples as the cpal producer ring can take,
+//!   4. When a PPU frame completed, publish it into the triple buffer
+//!      the UI reads without taking the lock,
+//!   5. Release the lock,
+//!   6. If a frame completed, sleep until that frame's wall-clock
+//!      deadline (the cart's real rate, `Emulator::frame_rate_hz`).
+//!      Otherwise, if the ring was full, [`park`] until the cpal
+//!      callback [`unpark`]s us (or 50 ms pass); else [`yield_now`].
 //!
-//! This is the standard "audio-as-clock" pattern: the host audio
-//! device's wall-clock rate (the cpal callback frequency) sets the
-//! emulator's pace. The UI's repaint cadence has no influence on
-//! emulation speed — it just snapshots whatever state is current.
+//! The frame limiter sets the pace. The audio ring only applies
+//! back-pressure (no sample is dropped), and the resampler's dynamic
+//! rate control in `audio.rs` absorbs the small difference between the
+//! emulated rate and the audio device's clock. The UI's repaint cadence
+//! has no influence on emulation speed.
 //!
 //! [`park`]: std::thread::park
 //! [`unpark`]: std::thread::Thread::unpark
@@ -93,10 +96,10 @@ impl EmuShared {
     }
 
     /// Wake the emu thread if it is currently parked. Called from the
-    /// cpal audio callback every time it consumes samples — the
-    /// frequency of this matches the host device's pull rate, so the
-    /// emu thread's effective production rate equals the cpal drain
-    /// rate.
+    /// cpal audio callback every time it consumes samples (the emu
+    /// thread parks on a full producer ring) and by the UI when it
+    /// changes something the thread must notice (pause, step, audio
+    /// swap).
     pub(crate) fn unpark_emu(&self) {
         if let Ok(g) = self.thread_handle.lock()
             && let Some(t) = g.as_ref()
@@ -107,26 +110,26 @@ impl EmuShared {
 }
 
 /// Spawn the emu thread. Returns its `JoinHandle` so the UI can `.join()`
-/// on shutdown / ROM unload to ensure the thread releases its `Snes`
-/// borrow before the UI drops the Mutex. The `primed` flag is shared
+/// on shutdown / ROM unload to ensure the thread has stopped using the
+/// emulator before the UI replaces it. The `primed` flag is shared
 /// with the cpal callback — the emu thread flips it on first push so
 /// the callback's "silence until ready" gate opens.
 ///
-/// `framebuffer_rgba` is a shared 256 × (224 | 239) × 4 RGBA byte buffer the emu
-/// thread fills once per emulated frame; the UI thread just memcpy's
-/// it out under a brief lock and uploads to the GPU. Decouples the
-/// UI's repaint cadence from the Snes Mutex (which the emu thread
-/// holds for the duration of each ~1024-instruction batch). This is
-/// the visual analogue of the audio-as-clock decoupling.
+/// `framebuffer_in` is the writer side of a triple buffer holding a
+/// 256 × (224 | 239) × 4 RGBA frame: the emu thread publishes once per
+/// emulated frame and the UI thread reads the latest one without any
+/// lock, then uploads it to the GPU. This decouples the UI's repaint
+/// cadence from the emulator mutex (which the emu thread holds for
+/// the duration of each 1024-instruction batch).
 ///
-/// Forced-blank (INIDISP bit 7) frames are NOT published — the UI
-/// keeps showing the previous good frame. Most games toggle bit 7
-/// every `VBlank` to upload tiles/OAM safely, so without this the
-/// screen would flash black once per second.
+/// A frame that was forced-blank (INIDISP bit 7) on every line is held
+/// back at first — the UI keeps showing the previous frame, which
+/// absorbs an isolated blank. When the run of blank frames reaches
+/// `BLANK_HOLD_FRAMES` the black frame is published (a real transition).
 /// `audio` is `None` when no output device could be opened — emulation
 /// still runs (paced by the video-as-clock frame limiter alone) and the
 /// APU output is discarded; a stream rebuilt later is adopted hot via
-/// [`EmuShared::audio_swap`]. The `Snes` must never be held hostage by
+/// [`EmuShared::audio_swap`]. The emulator must never be held hostage by
 /// the host's audio stack.
 pub(crate) fn spawn(
     emu: Arc<Mutex<Option<Emulator>>>,
@@ -311,7 +314,7 @@ fn run(
                 }
             };
 
-            // Audio (audio-as-clock backpressure): drain only as many
+            // Audio (ring back-pressure): drain only as many
             // samples as the host ring can accept, so none are lost. If
             // the API queue still holds more afterwards, the ring (not
             // the queue) was the limiter → `full` → we park until cpal

@@ -20,7 +20,7 @@
 //!   map **and** the GSU core itself.
 //! - [`mod@sdd1`]: [`sdd1::Sdd1Mapper`] + [`sdd1::Sdd1Decompressor`] —
 //!   S-DD1 graphics-decompression chip.
-//! - [`mod@testing`]: [`testing::RamBus`] — a flat-RAM `Bus` for unit
+//! - `testing`: `testing::RamBus` — a flat-RAM `Bus` for unit
 //!   tests in downstream crates (gated behind the `test-utils` feature
 //!   or `#[cfg(test)]`).
 //!

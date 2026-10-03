@@ -1,9 +1,10 @@
 //! Top-level [`Snes`] machine struct.
 //!
-//! Wires together the `Cpu65816` main CPU, 128 KB of WRAM, the cartridge
+//! Wires together the `Cpu` (65C816) main CPU, 128 KB of WRAM, the cartridge
 //! mapper, the `Ppu`, the real APU (`apu_real`: SPC700 + S-DSP, with an
-//! [`ApuStub`] kept only as a panic-fallback), and the DMA / HDMA and
-//! coprocessor subsystems — all driven by the master-clock scheduler.
+//! [`ApuStub`] that answers the mailbox once the SPC700 has executed
+//! `STOP`), and the DMA / HDMA and coprocessor subsystems — all driven by
+//! the master-clock scheduler.
 
 use crate::apu_stub::ApuStub;
 use crate::cpu_regs::CpuRegs;
@@ -83,7 +84,8 @@ pub struct Snes {
     /// 128 KB Work RAM (banks `$7E-$7F` and the `LowRAM` mirror).
     #[serde(with = "boxed_byte_array")]
     pub wram: Box<[u8; 0x20000]>,
-    /// Cartridge mapper (`LoROM` in P0.6; other mappers in V1+).
+    /// Cartridge mapper (any [`MapperKind`] luna supports, coprocessor
+    /// boards included).
     ///
     /// Not serialized — the trait object cannot derive `Deserialize`, and
     /// the ROM must not be baked into the save-state. The save-state layer
@@ -95,7 +97,8 @@ pub struct Snes {
     /// `FastROM` `MEMSEL` bit — when set, ROM in banks `$80-$FF` at
     /// `$8000-$FFFF` is FAST (6 mclk) instead of SLOW (8 mclk).
     pub fast_rom: bool,
-    /// Latched NMI line (`$4210` read clears it).
+    /// Pending NMI edge: set at `VBlank` entry (or by a late `NMITIMEN.7`
+    /// enable) and consumed by the CPU's interrupt poll.
     pub nmi_pending: bool,
     /// IRQ line currently asserted.
     pub irq_pending: bool,
@@ -111,23 +114,24 @@ pub struct Snes {
     /// Real SPC700 + 64 KB ARAM + IPL ROM + mailboxes. Runs in
     /// parallel with the main CPU at a 21 mclk : 1 spc-cycle ratio.
     pub apu_real: Apu,
-    /// `true` once the SPC700 has hit an opcode our handler doesn't
-    /// implement (panic-caught). Subsequent reads of `$2140-$2143`
-    /// fall back to the cached state and the dumb mailbox stub takes
-    /// over for any further CPU writes so the game doesn't deadlock.
+    /// `true` once the SPC700 has executed `STOP` (despite the name, no
+    /// panic is involved). From then on the real APU is no longer stepped
+    /// and reads of `$2140-$2143` are served by `apu_stub_fallback`.
+    /// Cleared by reset. Open row: `docs/luna_apu_gaps.md` #8.
     pub apu_panicked: bool,
-    /// Legacy heuristic mailbox stub — used only after the real APU
-    /// has stopped (panic) so commercial games that depend on
-    /// driver-specific acks still have *some* fallback.
+    /// Heuristic mailbox stub, written before luna had a real SPC700. It
+    /// mirrors every CPU write to `$2140-$2143` and answers the reads once
+    /// `apu_panicked` is set.
     pub apu_stub_fallback: ApuStub,
 
     // ------------- Scanline-accurate scheduler -------------
-    /// Current PPU scanline (0..=261 for NTSC). Lines 0-223 are the
-    /// visible region; 224 is the post-visible "1 dot of overlap"
-    /// line; 225-261 are vertical blank. VBlank-NMI fires on entry
-    /// to line 225.
+    /// Current PPU scanline (0..=261 NTSC, 0..=311 PAL). Line 0 is the
+    /// pre-render line and the picture is lines 1..=224 (1..=239 with
+    /// overscan). `VBlank` — and the NMI, if enabled — starts on entry to
+    /// line 225 (240 with overscan), see `vblank_start_line`.
     pub ppu_line: u16,
-    /// Master cycles consumed within the current scanline (0..1364).
+    /// Master cycles consumed within the current scanline (0..1364, or
+    /// 0..1360 on the short line — see `line_period`).
     /// Wraps to 0 each time we cross a scanline boundary.
     pub mcycles_in_line: u32,
     /// Number of full PPU frames completed since reset. Increments
@@ -800,10 +804,9 @@ pub const PAL_SCANLINES_PER_FRAME: u16 = 312;
 pub const VBLANK_START_LINE: u16 = 225;
 /// Scanline on which `VBlank` begins with overscan (SETINI bit 2): the
 /// picture is 15 lines taller, so `VBlank` starts that much later and is
-/// that much shorter. luna's framebuffer still stores the first 224 rows
-/// — the extra picture lines are not displayed yet, but every timing
-/// consumer (NMI, HVBJOY, HDMA, the VRAM/OAM access gate) follows the
-/// hardware line.
+/// that much shorter. The framebuffer then carries 239 rows
+/// (`Ppu::frame_height`), and every timing consumer (NMI, HVBJOY, HDMA,
+/// the VRAM/OAM access gate) follows the hardware line.
 pub const OVERSCAN_VBLANK_START_LINE: u16 = 240;
 
 /// The cartridge needs a coprocessor luna does not yet emulate.
@@ -890,7 +893,7 @@ impl Snes {
     /// DMA channel registers are NOT randomised: both references power
     /// them up at `$FF` (ares `cpu.hpp:217-251`, Mesen2's constructor) and
     /// `$420C` at `$00` (anomie-regs), which is what
-    /// [`Dma::power_on_defaults`] applies for every power-on state.
+    /// [`Dma::power_on`] applies for every power-on state.
     fn randomise_power_on_registers(ppu: &mut Ppu, rng: &mut PowerOnRng) {
         ppu.ppu1_mdr = rng.next_u8();
         ppu.ppu2_mdr = rng.next_u8();
@@ -937,8 +940,8 @@ impl Snes {
             kind @ (MapperKind::HiRom | MapperKind::ExHiRom) => {
                 Box::new(HiRomMapper::with_kind(kind, cart.rom, sram_bytes))
             }
-            // SA-1 — phase-2: ROM banking + I-RAM + BW-RAM + multiplier
-            // MMIO wrapped in a [`Sa1Chip`] that also drives the SA-1's
+            // SA-1: the bus-side `Sa1Mapper` (ROM banking, I-RAM, BW-RAM,
+            // MMIO) wrapped in a [`Sa1Chip`] that also drives the SA-1's
             // own 65C816 (released from reset by main-CPU writes to
             // `$2200 CCNT`).
             MapperKind::Sa1 => Box::new(
@@ -1006,8 +1009,6 @@ impl Snes {
             irq_pending: false,
             total_mclk: 0,
             mclk_acc: MclkAccounting::default(),
-            // Compat: post-reset, the IPL ROM has dropped these into
-            // the CPU-facing mailbox to signal "audio CPU ready".
             apu_real: apu_for_region(region),
             apu_panicked: false,
             apu_stub_fallback: ApuStub::new(),
@@ -1193,8 +1194,6 @@ impl Snes {
         }
     }
 
-    /// Enable memory access tracing. Every CPU bus read/write
-    /// matching `bank_filter` (or every access when `None`) is
     /// Start capturing CPU cartridge accesses made while the Super FX owns
     /// the bus (`OpenSNES` R2). No-op on a cart without a GSU — nothing
     /// can be denied, so nothing is ever recorded.
@@ -1220,7 +1219,9 @@ impl Snes {
         }
     }
 
-    /// appended to the log until it fills.
+    /// Enable memory access tracing. Every CPU bus read/write
+    /// matching `bank_filter` and `offset_filter` (every access when both
+    /// are `None`) is appended to the log until it fills.
     pub fn enable_mem_trace(
         &mut self,
         max_events: usize,
@@ -1719,8 +1720,8 @@ struct SnesBus<'a> {
     /// Real SPC700 + ARAM + IPL ROM. CPU mailbox reads pull from
     /// `apu_real.to_cpu_ports`; writes land in `apu_real.to_spc_ports`.
     apu_real: &'a mut Apu,
-    /// Legacy heuristic stub — used when [`Snes::apu_panicked`] is
-    /// `true` (i.e. the real SPC700 hit an unimplemented opcode).
+    /// Heuristic stub — answers mailbox reads when [`Snes::apu_panicked`]
+    /// is `true` (i.e. the real SPC700 has executed `STOP`).
     apu_stub_fallback: &'a mut ApuStub,
     /// Live handle to `Snes::apu_panicked`. Phase 1 advances the real APU
     /// inside [`Bus::io_cycle`], so this must be a mutable borrow (not a
@@ -1777,8 +1778,6 @@ struct SnesBus<'a> {
     /// access. `false` for debug peeks / mapping tests so they never
     /// advance emulation.
     sched_enabled: bool,
-    /// First vblank scanline for the current region (225 NTSC / 240 PAL).
-
     /// CPU PC snapshot at the start of the instruction step that owns
     /// this bus borrow. Used by the APU mailbox tracer (and any future
     /// debug hook) to attribute reads/writes to the calling
@@ -2035,8 +2034,8 @@ struct DmaBusView<'a> {
     /// on the B-bus exactly like the CPU port — ares routes a DMA B-bus
     /// access through the same `bus.read/write(0x2100 | addr)`.
     apu: &'a mut Apu,
-    /// Fallback mailbox, consulted only once the SPC700 has panicked (the
-    /// CPU path's rule, mirrored).
+    /// Fallback mailbox, consulted only once the SPC700 has executed `STOP`
+    /// (the CPU path's rule, mirrored).
     apu_stub: &'a mut ApuStub,
     apu_panicked: bool,
     /// Optional DMA→VRAM transfer-time trace (moved in from the [`Dma`]
@@ -2302,10 +2301,10 @@ impl SnesBus<'_> {
         }
     }
 
-    /// Emit a synthetic NMI/IRQ delivery-timing marker into the memory trace
-    /// (P0 of the cycle-accuracy roadmap). Unlike a bus access it bypasses the
-    /// bank/offset filters — it is a *when did the line get raised* event, the
-    /// thing the deferred Phase-4 NMI/IRQ work needs to diff against ares/Mesen.
+    /// Emit a synthetic NMI/IRQ delivery-timing marker into the memory trace.
+    /// Unlike a bus access it bypasses the bank/offset filters — it is a
+    /// *when did the line get raised* event, the thing to diff against
+    /// ares/Mesen when checking interrupt timing.
     #[inline]
     fn trace_irq_signal(&mut self, kind: MemEventKind, value: u8) {
         let pc = self.cpu_pc_full;
@@ -2488,9 +2487,8 @@ impl SnesBus<'_> {
     }
 
     /// Cross one scanline boundary, applying the per-line PPU events.
-    /// Mirrors the former `Snes::advance_one_scanline`, but raises NMI/IRQ
-    /// via the bus `nmi`/`irq` latches (the CPU is borrowed here; `step`
-    /// applies the edge at the instruction boundary).
+    /// The `VBlank` NMI is raised through the bus `nmi` latch (the CPU is
+    /// borrowed here); the CPU samples it in [`SnesBus::last_cycle`].
     /// Returns the master-cycle cost of any HDMA performed on this line
     /// crossing (frame-start setup + per-line transfer), so the caller can
     /// charge the CPU the stall (Phase 4).
@@ -2637,8 +2635,8 @@ impl SnesBus<'_> {
             // front-end polling at this boundary reads a consistent value.
             self.ppu.latch_frame_content();
             // Interlace field parity flips every frame at the V-counter wrap
-            // (ares counter/inline.hpp:32), exposed at STAT78 bit 7. Phase A:
-            // flag only — no vertical doubling yet.
+            // (ares counter/inline.hpp:32), exposed at STAT78 bit 7. The
+            // renderer also uses it to pick the interlaced field's rows.
             self.ppu.field = !self.ppu.field;
             let trace_hclock = self.hclock();
             let trace_blank_now = self.ppu_line >= self.vblank_start_line();
@@ -2785,10 +2783,10 @@ impl SnesBus<'_> {
                 self.mclk.credit(k, step);
             }
             // APU in lockstep with the CPU at bus-access granularity.
-            // `Apu::step` carries the sub-84-mclk remainder in
-            // `mclk_deficit`, so per-access stepping composes exactly with
-            // the old lump (same SPC instruction count) — only the CPU↔APU
-            // port interleaving is finer.
+            // `Apu::step` carries the fractional clock remainder itself, so
+            // stepping per bus access loses no time. Once the SPC700 has
+            // executed `STOP` the APU is no longer stepped at all (open
+            // row: `docs/luna_apu_gaps.md` #8).
             if !*self.apu_panicked {
                 self.apu_real.step(step as u32);
                 if self.apu_real.cpu.stopped {
@@ -3092,10 +3090,9 @@ impl SnesBus<'_> {
             return self.ppu.read(off, *self.mdr);
         }
         if let Some(port) = Self::apu_port(addr) {
-            // Mailbox reads: prefer the real SPC (now timer-driven,
-            // so its driver actually loops). Fall back to the
-            // heuristic stub only if the SPC has stopped on an
-            // unimplemented opcode.
+            // Mailbox reads come from the real SPC700. The heuristic
+            // stub answers instead once the SPC has executed `STOP`
+            // (`apu_panicked`).
             let value = if *self.apu_panicked {
                 self.apu_stub_fallback.read(port)
             } else {
@@ -3202,7 +3199,7 @@ impl SnesBus<'_> {
             // Per ares' `cpu/io.cpp`:
             //   data.bit(6) = hcounter() <= 2 || hcounter() >= 1096;
             // The `hcounter()` is in master cycles (0..1364); our
-            // `current_hv` returns H in *dots* (`mclk / 4`, 0..341),
+            // `hv()` returns H in *dots* (`mclk / 4`, 0..341),
             // so the equivalent threshold is `h == 0 || h >= 274`.
             //
             // Without the live hblank bit, games that do `BIT $4212;
@@ -3363,9 +3360,8 @@ impl SnesBus<'_> {
         if let Some(port) = Self::apu_port(addr) {
             // CPU writes the byte to BOTH the real APU's to_spc port
             // (so the SPC700 reads it at $F4-$F7) and the fallback
-            // stub (in case the SPC has panicked and we need it
-            // later). Cheap, no consistency issues since the stub
-            // is only consulted when the real APU is dead.
+            // stub, which answers the reads once the SPC has executed
+            // `STOP` (`apu_panicked`).
             self.apu_real.cpu_write_port(port, value);
             self.apu_stub_fallback.write(port, value);
             if let Some(log) = self

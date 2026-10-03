@@ -1,15 +1,17 @@
-//! SPC700 opcode dispatch + first batch of instruction handlers (TDD).
+//! Atomic (whole-instruction) SPC700 interpreter: [`Spc700::step`]
+//! fetches, dispatches and executes one complete instruction per call.
+//! All 256 opcodes are implemented (the dispatch `match` is exhaustive).
 //!
-//! Scope of this file (P2.SPC.1):
-//! - dispatch infrastructure (match-based, LLVM lowers to jump-table)
-//! - flag-toggle family (CLRP / SETP / CLRC / SETC / EI / DI / CLRV / NOTC)
-//! - immediate MOVs for A / X / Y
-//! - direct-page and absolute MOV A,!abs / MOV !abs,A round-trips
-//! - the 8 conditional + unconditional branches
-//! - NOP / SLEEP / STOP
-//!
-//! The remaining ~225 opcodes land in subsequent batches with the
-//! same TDD pattern as the 65C816 work.
+//! Production does not run this file: the APU driver (`luna-apu`,
+//! `run_one_cycle`) runs the cycle-stepped core in `step.rs`
+//! (`Spc700::step_cycle`, one bus access per call). This interpreter is
+//! kept as the equivalence oracle for that core: the
+//! `differential_all_ported_opcodes` test in `step.rs` (with the
+//! `equiv_*` tests beside it) runs both on random states and requires
+//! identical cycle counts, bus traces, registers and memory (SLEEP and
+//! STOP excluded). It is also what `tests/tom_harte.rs` and the
+//! frozen-mailbox trajectory harness (`Apu::trace_step_one` in
+//! `luna-apu`) drive.
 
 use crate::bus::SpcBus;
 use crate::cpu::Spc700;

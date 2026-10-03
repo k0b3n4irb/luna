@@ -39,7 +39,7 @@ const SFR_B: u16 = 1 << 12; // "with" prefix flag
 const SFR_IRQ: u16 = 1 << 15; // interrupt asserted to SNES
 
 /// The GSU register file (spec §1). Owned by [`SuperFxMapper`]; MMIO at
-/// `$3000-$303F` reads/writes it, and the engine phase will consume it.
+/// `$3000-$303F` reads/writes it, and the instruction engine runs on it.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct Registers {
     /// R0–R15. R14 = ROM-load trigger, R15 = PC (spec §1.1).
@@ -75,7 +75,7 @@ struct Registers {
     wait_for_ram_access: bool,
     /// Colour register (PLOT colour).
     colr: u8,
-    /// Plot Option Register — raw 5 bits (decoded by the plot phase).
+    /// Plot Option Register — raw 5 bits (decoded by the PLOT pipeline).
     por: u8,
     /// Backup-RAM write enable ($3033).
     bramr: bool,
@@ -617,15 +617,13 @@ const POR_FREEZEHIGH: u8 = 1 << 3;
 const POR_OBJ: u8 = 1 << 4; // OBJ mode — forces the ht==3 tile layout
 
 // ===========================================================================
-// GSU instruction engine — phase 2a
+// GSU instruction engine
 //
-// The execution spine: fetch / pipeline / instruction-cache, the ALT1/2/3
-// prefix mechanism, the TO/FROM/WITH register-select prefixes, the ALU +
-// shift ops, branches, and control flow (NOP/STOP/CACHE/LOOP/LINK/JMP/LJMP)
-// plus COLOR/CMODE (register-only). The memory ops (LD/ST + RAM/ROM
-// buffers), the MULT family and the immediate loads land in phase 2b; the
-// pixel-plot pipeline (PLOT/RPIX) in phase 3. Those opcodes are dispatched
-// here to operand-aligned placeholders so the pipeline never desyncs.
+// Fetch / pipeline / instruction-cache, the ALT1/2/3 prefix mechanism, the
+// TO/FROM/WITH register-select prefixes, the ALU + shift ops, branches,
+// control flow (NOP/STOP/CACHE/LOOP/LINK/JMP/LJMP), COLOR/CMODE, the memory
+// ops (LD/ST + RAM/ROM buffers), the MULT family, the immediate loads and
+// the pixel-plot pipeline (PLOT/RPIX). Every opcode is implemented.
 //
 // Semantics are a direct port of ares `component/processor/gsu` +
 // `sfc/coprocessor/superfx` (see docs/superfx_reference.md §2, §6).
@@ -675,7 +673,7 @@ impl SuperFxMapper {
     }
 
     /// Resolve [`color`](Self::color) of a source byte using COLR + POR
-    /// (spec §4.2). Used by COLOR ($4E) and GETC ($DF, phase 2b).
+    /// (spec §4.2). Used by COLOR ($4E) and GETC ($DF).
     const fn color(&self, source: u8) -> u8 {
         if self.regs.por & POR_HIGHNIBBLE != 0 {
             return (self.regs.colr & 0xF0) | (source >> 4);
@@ -688,8 +686,7 @@ impl SuperFxMapper {
 
     // --- GSU-side memory bus (spec §3.1) ---------------------------------
 
-    /// The GSU's own view of ROM / Game Pak RAM. Phase 2 skips the ron/ran
-    /// access-stall spin (a timing nicety) and accesses directly.
+    /// The GSU's own view of ROM / Game Pak RAM.
     /// Bus arbitration (Mesen `WaitForRomAccess`/`WaitForRamAccess`): a running
     /// GSU touching ROM/RAM it does not own (SCMR `ron`/`ran` = 0) raises the
     /// stall flag; `step_coproc` then stops it until the CPU grants access.
@@ -1548,7 +1545,7 @@ impl SuperFxMapper {
         self.regs.reset_prefix();
     }
 
-    // ===================== pixel-plot pipeline (phase 3, spec §4) =========
+    // ===================== pixel-plot pipeline (spec §4) ==================
 
     /// Colour depth in bitplanes for the current SCMR mode (spec §4.6):
     /// md{0,1,2,3} → bpp{2,4,4,8}.
@@ -1934,7 +1931,7 @@ impl Mapper for SuperFxMapper {
     }
 
     /// The GSU asserts the main-CPU IRQ line while `sfr.irq` is latched
-    /// (spec §7.3). Set by the STOP opcode (next phase); acknowledged by a
+    /// (spec §7.3). Set by the STOP opcode; acknowledged by a
     /// SNES read of SFR high byte ($3031).
     fn coproc_main_irq_pending(&self) -> bool {
         self.sfr_get(SFR_IRQ)
@@ -2624,7 +2621,7 @@ mod tests {
         );
     }
 
-    // ----- phase 2a: instruction engine ----------------------------------
+    // ----- instruction engine --------------------------------------------
 
     /// Load a GSU program into the instruction cache at CBR=0 and prime the
     /// pipeline so the first `run_one()` executes `program[0]`. PBR=0, GO set.
@@ -2845,7 +2842,7 @@ mod tests {
         assert_eq!(m.ram[4..8], [0xDE, 0xC0, 0xEF, 0xBE], "lands once granted");
     }
 
-    // ----- phase 2b: memory ops, multiplies, immediate loads -------------
+    // ----- memory ops, multiplies, immediate loads -----------------------
 
     #[test]
     fn engine_store_then_load_word() {
@@ -2927,7 +2924,7 @@ mod tests {
         assert_eq!(m.regs.r[3], 0xFF80);
     }
 
-    // ----- phase 3: pixel-plot pipeline ----------------------------------
+    // ----- pixel-plot pipeline -------------------------------------------
 
     #[test]
     fn engine_plot_then_rpix_roundtrip() {

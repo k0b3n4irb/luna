@@ -8,10 +8,10 @@
 //!
 //! ## Stability
 //!
-//! From V1 onward this crate carries strict `SemVer` guarantees: new
-//! methods are additive, breaking changes bump the major version.
-//! Today (P3.3) we're still pre-V1 and the surface is allowed to
-//! churn freely.
+//! The workspace version tracks luna's user-facing contract (the CLI,
+//! the MCP tool catalogue, `luna test` manifests, `fbhash` values), not
+//! this Rust API: the crate is not published and its methods carry no
+//! stability promise. See "Versioning" in `CONTRIBUTING.md`.
 
 use std::path::Path;
 
@@ -36,7 +36,7 @@ pub use luna_core::{
 /// Decoded BG tilemap image (Tilemap Viewer), re-exported so the GUI uses
 /// `luna_api::TilemapImage` rather than depending on `luna-ppu`.
 pub use luna_ppu::TilemapImage;
-/// Framebuffer dimensions (256×224), re-exported so front-ends size their
+/// Framebuffer dimensions (256×224, 239 rows in overscan), re-exported so front-ends size their
 /// texture/window through `luna-api` rather than depending on `luna-ppu`.
 pub use luna_ppu::{FRAME_H, FRAME_H_MAX, FRAME_W};
 use serde::Serialize;
@@ -98,7 +98,7 @@ pub enum ApiError {
     /// the running ROM / save-state format version.
     #[error("save state: {0}")]
     SaveState(String),
-    /// PNG encoding failed during `render_frame`.
+    /// PNG encoding failed (e.g. in `render_frame_png`).
     #[error("image: {0}")]
     Image(#[from] image::ImageError),
     /// A coprocessor-firmware file was refused: wrong size, unreadable, or
@@ -1697,8 +1697,8 @@ impl Emulator {
         Ok(())
     }
 
-    /// The device currently on a controller port, so the GUI can reflect the
-    /// active selection (defaults to pad with no ROM).
+    /// The device currently on a controller port (pad with no ROM loaded).
+    /// No front-end reads it today: the GUI keeps its own copy of the selection.
     pub fn port_device(&self, port: u8) -> PortDevice {
         self.snes.as_ref().map_or(PortDevice::Pad, |s| {
             if port == 0 {
@@ -2242,8 +2242,8 @@ impl Emulator {
         }
     }
 
-    /// Render the current PPU framebuffer (256×224, composited
-    /// BG3-over-BG1-over-BG2 + sprites) as a PNG-encoded byte vector.
+    /// Render the current PPU framebuffer (the composited picture, 256 wide
+    /// and 224 rows, or 239 in overscan) as a PNG-encoded byte vector.
     ///
     /// Default path (`force_display=false`) is zero-cost — it copies
     /// the persistent framebuffer that the scheduler has been
@@ -2335,7 +2335,7 @@ impl Emulator {
     }
 
     /// Render the current PPU framebuffer as raw **RGBA** bytes
-    /// (`256 × 224 × 4`, row-major, alpha forced to `0xFF`) — the
+    /// (`256 × frame_height × 4`, row-major, alpha forced to `0xFF`) — the
     /// uncompressed form a GUI uploads straight to a texture, sharing the
     /// exact render path as [`Emulator::render_frame_png`] so the CLI and
     /// GUI cannot disagree on pixels. `force_display` bypasses INIDISP

@@ -1,4 +1,5 @@
-//! `luna run` — plain headless execution with input scripting.
+//! `luna run` — plain headless execution (no input scripting: `--input`
+//! belongs to `luna state` and the other subcommands).
 
 use std::process::ExitCode;
 
@@ -163,8 +164,9 @@ pub(crate) fn run(
         println!();
         println!("Stopped on CPU panic:");
         println!("  {msg}");
-        // Returning success here: hitting an unimplemented opcode is the
-        // expected state of P0.6, not a CLI failure.
+        // Returning success here: the partial state above is the output.
+        // Every opcode is implemented, so a panic is a core bug; whether
+        // it should fail the command is an open decision.
     }
 
     // Screenshot dump: render whatever the PPU has accumulated.

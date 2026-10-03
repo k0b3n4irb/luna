@@ -36,7 +36,7 @@ pub enum StepResult {
 impl Spc700 {
     /// Advance the SPC700 by **exactly one cycle** (one bus access),
     /// resuming mid-instruction. The first cycle of an instruction
-    /// fetches the opcode; subsequent cycles run [`Self::execute_cycle`].
+    /// fetches the opcode; subsequent cycles run `Self::execute_cycle`.
     ///
     /// Returns [`StepResult::Complete`] on the cycle that finishes the
     /// instruction (so a full instruction is N `step_cycle` calls = its

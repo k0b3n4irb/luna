@@ -20,9 +20,9 @@
 //! 6. Finishes by `JMP [$0000+X]` into whatever code was uploaded.
 //!
 //! The ROM is read-only on real hardware (the SPC700 has a bit in
-//! its control register `$F1` to expose it or hide it), but we only
-//! model the "exposed" path for now — it's how every commercial
-//! SNES game boots.
+//! its control register `$F1` to expose it or hide it). This crate only
+//! provides the bytes: `luna-apu` overlays them on `$FFC0-$FFFF` while
+//! `$F1` bit 7 is set and shows the RAM underneath otherwise.
 //!
 //! See also: <https://problemkaputt.de/fullsnes.htm#snesapu>.
 

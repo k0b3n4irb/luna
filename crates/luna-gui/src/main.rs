@@ -1,9 +1,10 @@
 //! Luna SNES emulator — desktop GUI entry point.
 //!
-//! Single-window winit + pixels stack. The emulator runs on a
-//! dedicated thread paced by the cpal audio callback (audio-as-clock);
-//! the main thread owns the winit event loop and just blits the
-//! shared 256×224 RGBA framebuffer that the emu thread publishes.
+//! winit + pixels + egui-wgpu stack. The emulator runs on a dedicated
+//! thread paced by a video-as-clock frame limiter (`emu_thread.rs`);
+//! the main thread owns the winit event loop and presents the
+//! 256×(224|239) RGBA frame that the emu thread publishes. Debug
+//! panels are separate winit windows (`debug_window.rs`).
 //!
 //! Replaces the previous eframe + egui + wgpu stack on 2026-05-28.
 //! That stack's wgpu state caching and immediate-mode redraws
@@ -685,7 +686,7 @@ impl LunaApp {
         self.last_srm_written = data;
     }
 
-    /// Push the current keyboard mask into the loaded Snes.
+    /// Push the current keyboard + gamepad masks to the emulator (`set_joypad`).
     fn push_joypad(&self) {
         if !self.rom_loaded {
             return;
@@ -966,10 +967,10 @@ impl ApplicationHandler for LunaApp {
             return;
         }
         // Window is the SNES image area + a logical 28 px menu strip
-        // at the top hosted by the egui overlay. Pixels fills the
-        // whole window with the SNES framebuffer; the egui menu bar
-        // draws over the top strip with a solid background so the
-        // overlap with the game image is invisible to the user.
+        // at the top hosted by the egui overlay. egui draws the menu
+        // bar and lays the game frame out below it (aspect-fit, see
+        // `UiOverlay::render`); pixels only owns the surface and the
+        // frame texture.
         let scaled_w = (CANVAS_W as u32) * INITIAL_SCALE;
         let scaled_h = (FRAME_H as u32) * INITIAL_SCALE + MENU_BAR_LOGICAL_H;
         let mut attrs = WindowAttributes::default()
@@ -2189,8 +2190,8 @@ fn composite_event_overlay(
         }
     }
     // TODO: pause-mode current-scanline line (yellow) + cursor dot (magenta) —
-    // Mesen2 draws these only when broken/paused; luna runs live, so deferred
-    // until an Event Viewer pause/step mode exists.
+    // Mesen2 draws these only when broken/paused. Not drawn here yet, although
+    // the GUI can now pause, break and single-step (issue #68).
     (buf, W, H)
 }
 

@@ -62,7 +62,7 @@ pub struct Cpu {
     /// `n16`) instead of carrying into the next bank (ares `readBank`).
     /// Set by the direct-page and stack-relative addressing helpers;
     /// reset to `false` at the start of every instruction in
-    /// [`Cpu::execute`].
+    /// `Cpu::execute`.
     pub bank0_wrap: bool,
     /// Optional capture of `WDM` (`$42`) executions — `(pc_full, operand)`
     /// per hit. `WDM` is a reserved no-op on hardware but a debugger signal

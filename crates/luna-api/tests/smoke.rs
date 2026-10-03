@@ -1,5 +1,5 @@
-//! Smoke tests: drive luna against a small set of commercial ROMs at
-//! fixed instruction counts and compare the produced screenshot +
+//! Smoke tests: drive luna against a small set of commercial ROMs for
+//! fixed frame counts and compare the produced screenshot +
 //! audio against committed goldens.
 //!
 //! - **Screenshots** (`tests/golden/smoke/<name>.png`): byte-compared
@@ -8,8 +8,8 @@
 //!   before they were spotted; a byte-exact gate catches them on the
 //!   next `cargo test`.
 //! - **Audio** (`tests/golden/audio/<name>.json`): compared on summary
-//!   statistics (peak / RMS / mean / non-zero ratio) with tolerances
-//!   matching `tools/audio_goldens.py`. No FFT comparison — the
+//!   statistics (peak / RMS / mean / non-zero ratio) with the tolerances
+//!   `TOL_AMPLITUDE_PCT` / `TOL_NONZERO_ABS` below. No FFT comparison — the
 //!   simple stats already catch the "echo died" / "voices silent"
 //!   regressions we care about, and skipping the FFT keeps the test
 //!   under 2 s wall time per case.
@@ -30,7 +30,7 @@ use std::path::PathBuf;
 
 use luna_api::Emulator;
 
-/// One ROM × instruction-count combination to exercise.
+/// One ROM × frame-count combination to exercise.
 struct Case {
     /// Short identifier used to name the goldens. Stays the same forever.
     id: &'static str,
@@ -238,8 +238,8 @@ fn write_audio_golden(case: &Case, stats: &AudioStats, duration_s: f64) {
         .join("tests/golden/audio")
         .join(format!("{}.json", case.id));
     std::fs::create_dir_all(path.parent().unwrap()).ok();
-    // Preserve any spectrum_peaks from a previous golden (the Python
-    // tool populates these; we don't recompute them here).
+    // Preserve any spectrum_peaks from a previous golden (a Python tool,
+    // since deleted, wrote these; nothing here recomputes or checks them).
     let prev_peaks = std::fs::read_to_string(&path)
         .ok()
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
