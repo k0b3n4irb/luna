@@ -44,3 +44,7 @@ book/book/
 
 # CI checks the SNES test corpus out here (absolute path for actions/cache).
 /.luna_tests/
+
+# Python bytecode (tools/*.py)
+__pycache__/
+*.pyc
