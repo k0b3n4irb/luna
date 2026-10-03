@@ -6,6 +6,16 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Changed
+
+- **Only the five most recent versions keep a GitHub release with
+  binaries.** Older releases were removed on 2026-10-03 (`v1.0.0` to
+  `v1.30.1`) and the rule now applies after every release. Every git tag
+  is kept: build an older version from its tag
+  (`git checkout vX.Y.Z && cargo build --release -p luna-cli`). If a
+  script downloads a pinned release older than the five listed on the
+  releases page, move the pin or build from the tag.
+
 ## [1.32.0] — 2026-10-03
 
 One new command for projects that keep an audio baseline:

@@ -121,6 +121,11 @@ The version tracks luna's **user-facing contract**, not the Rust API:
   checksums); then reconcile `develop` with `main`. The book links the
   unversioned `luna-<os>-<arch>` asset alias, so no doc edit is needed per
   release.
+- **Housekeeping**: only the five highest versions keep a GitHub release
+  with binaries; older releases are deleted after each release, and
+  Actions runs older than a month are deleted too
+  (`tools/housekeeping.sh`, dry run by default). Tags are never deleted:
+  an older version is rebuilt from its tag.
 - **Before tagging, run the full suite locally *with* `tests/roms/`
   populated** — `cargo test --workspace --all-targets`. The commercial
   smoke and game goldens SKIP on CI (copyrighted ROMs are never

@@ -16,6 +16,13 @@ Each asset also exists under a versioned name
 (`luna-v<version>-<os>-<arch>`) if you want to pin a release; the
 unversioned names above always resolve to the latest one (from v1.25.0 on).
 
+Only the five most recent versions keep a release with binaries. To run an
+older one, build it from its tag (every tag is kept):
+
+```bash
+git checkout v1.24.0 && cargo build --release -p luna-cli
+```
+
 ```bash
 # Linux / macOS (swap the asset name for your platform)
 curl -LO https://github.com/k0b3n4irb/luna/releases/latest/download/luna-linux-x86_64.tar.gz
