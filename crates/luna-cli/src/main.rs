@@ -155,7 +155,10 @@ enum Command {
     /// Run manifest-driven homebrew tests (issue #181): one TOML per
     /// test (rom, input, run bound, asserts), executed in-process
     /// through `luna-api`. Exit 0 = all pass, 1 = assert failures,
-    /// 2 = manifest/usage errors — the CI contract.
+    /// 2 = manifest/usage errors — the CI contract. The machine is set
+    /// per manifest, not by flags: `region = "pal"` (or `"ntsc"`) forces
+    /// the video standard as `--force-region` does, `force_mapper` the
+    /// mapper, `power_on` / `seed` the RAM the ROM boots on.
     Test {
         /// Manifest files, or directories scanned recursively for
         /// `*.toml`. Defaults to `./tests`.

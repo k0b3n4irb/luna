@@ -863,6 +863,67 @@ wram = {{ nonzero_min = 100000 }}
     );
 }
 
+/// `region = "pal"` runs the ROM as a PAL cartridge whatever its header
+/// says (the CLI's `--force-region`), `force_region` is the older spelling
+/// of the same key, and the JSON report echoes it. The run is asserted on
+/// `$213F`, whose bit 4 is the console's PAL flag (`$03` NTSC, `$13` PAL).
+#[test]
+fn region_key_forces_the_video_standard_and_is_echoed() {
+    let dir = fresh_dir("region");
+    synthetic_rom(&dir.join("game.sfc"), &[]);
+    let manifest = |name: &str, region: &str, stat78: u8| {
+        std::fs::write(
+            dir.join(name),
+            format!(
+                "rom = \"game.sfc\"\nforce_mapper = \"lorom\"\nframes = 2\n{region}\n\
+                 [asserts.ppu]\nstat78 = {stat78}\n"
+            ),
+        )
+        .unwrap();
+    };
+    manifest("header.toml", "", 0x03);
+    manifest("pal.toml", "region = \"pal\"", 0x13);
+    manifest("ntsc.toml", "region = \"NTSC\"", 0x03);
+    manifest("old_name.toml", "force_region = \"pal\"", 0x13);
+    let out = run(
+        &[
+            "header.toml",
+            "pal.toml",
+            "ntsc.toml",
+            "old_name.toml",
+            "--report",
+            "json",
+        ],
+        &dir,
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    let json_start = stdout.find('{').expect("json report");
+    let report: serde_json::Value = serde_json::from_str(&stdout[json_start..]).unwrap();
+    let region = |n: &str| {
+        report["tests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == n)
+            .unwrap_or_else(|| panic!("{n} missing from {report}"))["region"]
+            .clone()
+    };
+    assert!(region("header").is_null());
+    assert_eq!(region("pal"), "pal");
+    assert_eq!(region("ntsc"), "ntsc");
+    assert_eq!(region("old_name"), "pal");
+
+    // An unknown standard is a manifest error (exit 2), not a silent NTSC run.
+    std::fs::write(
+        dir.join("bad.toml"),
+        "rom = \"game.sfc\"\nforce_mapper = \"lorom\"\nframes = 1\nregion = \"secam\"\n",
+    )
+    .unwrap();
+    let bad = run(&["bad.toml"], &dir);
+    assert_eq!(bad.status.code(), Some(2));
+}
+
 /// The JSON report echoes the `power_on` / `seed` pair each test ran with
 /// (`OpenSNES` R-A), so a red `random` run is reproducible from the report
 /// alone; a deterministic run reports `"zero"` and a null seed.

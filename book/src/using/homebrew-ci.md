@@ -51,6 +51,7 @@ power_on = "random"            # optional: zero (default) | ones | random
 seed = 1                       # optional: fixes the random machine (default 1)
 sym = "../build/game.sym"      # optional (a beside-ROM .sym auto-loads)
 force_mapper = "lorom"         # optional — headerless/WIP images
+region = "pal"                 # optional: ntsc | pal — overrides the header
 frames = 600                   # run bound: `frames` or `steps` (or checkpoints)
 input = "300:0x1000,310:0"     # optional joypad script, or "@inputs/boot.txt"
 input2 = "300:0x0080"          # optional joypad-2 script, same grammar
@@ -78,6 +79,32 @@ superfx = { min = 1 }
 inidisp = 0x0F                 # the screen is on at full brightness
 bgmode = 5                     # …and the mode the example claims to demo
 "windows.0" = 0x20             # `.` indexes arrays and nested tables
+```
+
+**Which console the ROM runs on** is set by three optional keys, all in
+the manifest so a run never depends on a command-line flag:
+
+- **`region`** — `"ntsc"` or `"pal"`, the video standard, whatever the
+  cartridge header's country byte says (the CLI's `--force-region`; the
+  older spelling `force_region` still works). It changes what the ROM can
+  observe: 262 or 312 scanlines, 60 or 50 frames a second, and the PAL
+  flag in `$213F`. Use it to check that a game behaves on the other
+  standard **without building it twice**, including the case no header
+  can express: an NTSC cartridge on a PAL console.
+- **`power_on`** / **`seed`** — what RAM holds before the ROM boots.
+- **`force_mapper`** — for headerless or work-in-progress images.
+
+```toml
+# tests/boot_pal.toml — the same ROM, on a PAL console
+rom = "../build/game.sfc"
+region = "pal"
+frames = 500                   # 10 s at 50 Hz
+
+[asserts]
+wdm_empty = true
+
+[asserts.ppu]
+stat78 = 0x13                  # $213F: bit 4 set, the console is PAL
 ```
 
 What each assert means:
@@ -372,11 +399,12 @@ failure details, measured `fbhash`) to stdout for dashboards or PR
 comments. Each test also carries the machine it ran on — `"power_on":
 "random", "seed": 12345` (a deterministic run reports `"zero"` / `"ones"`
 with `"seed": null`) — so a red `random` run is reproducible from the
-report alone:
+report alone — and the `"region"` its manifest forced (`null` when the
+cartridge header decided):
 
 ```json
 { "name": "boot", "passed": false, "fbhash": "…",
-  "power_on": "random", "seed": 12345, "failures": ["…"] }
+  "power_on": "random", "seed": 12345, "region": "pal", "failures": ["…"] }
 ```
 
 ## Tips

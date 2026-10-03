@@ -16,6 +16,7 @@
 //! input2 = "300:0x0080"          # joypad 2, same grammar
 //! power_on = "random"            # zero (default) | ones | random (+ seed, default 1)
 //! seed = 12345
+//! region = "pal"                 # ntsc | pal — overrides the cartridge header
 //!
 //! [asserts]
 //! wdm_empty = true               # SNES_ASSERT never fired
@@ -79,8 +80,11 @@ struct Manifest {
     sym: Option<PathBuf>,
     /// Optional forced mapper (the `--force-mapper` vocabulary).
     force_mapper: Option<String>,
-    /// Optional forced region (`ntsc` / `pal`).
-    force_region: Option<String>,
+    /// Optional video standard (`ntsc` / `pal`), overriding the cartridge
+    /// header — the CLI's `--force-region`. `force_region` is the older
+    /// spelling of the same key.
+    #[serde(alias = "force_region")]
+    region: Option<String>,
     /// Power-on RAM state (issue #224): `zero` (default), `ones` or
     /// `random`. With `random`, `seed` fixes the machine (default 1) so
     /// the run is reproducible in CI.
@@ -372,6 +376,9 @@ struct TestOutcome {
     /// R-A: the `power_on` / `seed` pair, as the manifest says it).
     power_on: String,
     seed: Option<u64>,
+    /// The `region` the manifest forced (`ntsc` / `pal`), echoed in the
+    /// JSON report; `None` when the cartridge header decided.
+    region: Option<String>,
     /// `Some(reason)` when the test was skipped (firmware gate, issue
     /// #212) — neither passed nor failed.
     skipped: Option<String>,
@@ -479,6 +486,7 @@ pub(crate) fn run_tests(
                 "fbhash": o.fbhash,
                 "power_on": o.power_on,
                 "seed": o.seed,
+                "region": o.region,
             })).collect::<Vec<_>>(),
         });
         println!(
@@ -757,6 +765,7 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
                 fbhash: None,
                 power_on: power_on_label(&m),
                 seed: power_on_seed(&m),
+                region: region_label(&m),
                 skipped: Some(format!("firmware `{fw}` not installed")),
             });
         }
@@ -814,7 +823,7 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
         &mut em,
         &dir.join(&m.rom),
         m.force_mapper.as_deref(),
-        m.force_region.as_deref(),
+        m.region.as_deref(),
         None,
         power_on.as_deref(),
     )?;
@@ -1235,6 +1244,7 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
         fbhash: measured_fbhash,
         power_on: power_on_label(&m),
         seed: power_on_seed(&m),
+        region: region_label(&m),
         skipped: None,
     })
 }
@@ -1244,6 +1254,12 @@ fn power_on_label(m: &Manifest) -> String {
     m.power_on
         .as_deref()
         .map_or_else(|| "zero".to_string(), str::to_ascii_lowercase)
+}
+
+/// The video standard the manifest forced, lower-cased; `None` when it
+/// leaves the choice to the cartridge header.
+fn region_label(m: &Manifest) -> Option<String> {
+    m.region.as_deref().map(str::to_ascii_lowercase)
 }
 
 /// The seed a `random` manifest ran with (default 1); `None` otherwise.

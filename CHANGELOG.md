@@ -4,6 +4,18 @@ All notable user-facing changes to luna. Releases are cut from `main`
 (tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
 `develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+
+- **`luna test`: `region = "pal"` (or `"ntsc"`) in a manifest**, and
+  `"region"` in `--report json`. The key runs the ROM on the other video
+  standard whatever its header says, as `--force-region` does, so a PAL
+  pass no longer needs a second build. The manifest already accepted it
+  as `force_region`, but neither the guide nor `--help` said so; that
+  spelling keeps working. The report echoes the value (`null` when the
+  header decided), next to `power_on` and `seed`.
+
 ## [1.30.4] — 2026-10-02
 
 One fix: `luna mcp` works again with MCP clients that speak protocol
