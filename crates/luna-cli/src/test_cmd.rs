@@ -710,7 +710,14 @@ impl Pooled {
 /// level); assert failures land in the returned outcome.
 fn run_one(path: &Path) -> Result<TestOutcome, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("reading manifest: {e}"))?;
-    let m: Manifest = toml::from_str(&text).map_err(|e| format!("parsing manifest: {e}"))?;
+    let m: Manifest = toml::from_str(&text).map_err(|e| parse_error(&e))?;
+    // Checked here rather than left to the ROM loader, whose message names
+    // the CLI flag (`--force-region`) a manifest author never typed.
+    if let Some(r) = &m.region
+        && !matches!(r.to_ascii_lowercase().as_str(), "ntsc" | "pal")
+    {
+        return Err(format!("unknown `region` '{r}' (ntsc, pal)"));
+    }
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let name = path.file_stem().map_or_else(
         || path.display().to_string(),
@@ -1258,6 +1265,18 @@ fn power_on_label(m: &Manifest) -> String {
 
 /// The video standard the manifest forced, lower-cased; `None` when it
 /// leaves the choice to the cartridge header.
+/// A manifest parse error, with the one case TOML's own message leaves
+/// unexplained: `region` and its older spelling `force_region` are the
+/// same key, so writing both reads as a duplicate of the one not written.
+fn parse_error(e: &toml::de::Error) -> String {
+    let hint = if e.message().contains("duplicate field `region`") {
+        "\n`force_region` is the older name of `region`: keep only one of them"
+    } else {
+        ""
+    };
+    format!("parsing manifest: {e}{hint}")
+}
+
 fn region_label(m: &Manifest) -> Option<String> {
     m.region.as_deref().map(str::to_ascii_lowercase)
 }

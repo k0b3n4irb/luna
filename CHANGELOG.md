@@ -6,6 +6,15 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Changed
+
+- **`luna test`: two manifest errors about `region` now say what to fix.**
+  An unknown value reads ``unknown `region` 'secam' (ntsc, pal)`` instead
+  of naming the `--force-region` flag, which a manifest author never
+  typed. A manifest holding both `region` and `force_region` still fails
+  as a duplicate field, and the message now adds that the two are the
+  same key. Exit codes are unchanged (2 in both cases).
+
 ## [1.31.0] — 2026-10-03
 
 One addition, for `luna test`: a manifest can say which console the ROM

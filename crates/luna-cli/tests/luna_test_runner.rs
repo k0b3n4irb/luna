@@ -922,6 +922,27 @@ fn region_key_forces_the_video_standard_and_is_echoed() {
     .unwrap();
     let bad = run(&["bad.toml"], &dir);
     assert_eq!(bad.status.code(), Some(2));
+    // The message names the manifest key, not the CLI flag behind it.
+    let err = String::from_utf8_lossy(&bad.stderr).into_owned();
+    assert!(
+        err.contains("unknown `region` 'secam' (ntsc, pal)"),
+        "{err}"
+    );
+    assert!(!err.contains("--force-region"), "{err}");
+
+    // Both spellings at once: TOML reports a duplicate `region`, which the
+    // author of `force_region` cannot place without the alias being named.
+    std::fs::write(
+        dir.join("both.toml"),
+        "rom = \"game.sfc\"\nforce_mapper = \"lorom\"\nframes = 1\n\
+         region = \"pal\"\nforce_region = \"pal\"\n",
+    )
+    .unwrap();
+    let both = run(&["both.toml"], &dir);
+    assert_eq!(both.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&both.stderr).into_owned();
+    assert!(err.contains("duplicate field `region`"), "{err}");
+    assert!(err.contains("`force_region` is the older name"), "{err}");
 }
 
 /// The JSON report echoes the `power_on` / `seed` pair each test ran with
