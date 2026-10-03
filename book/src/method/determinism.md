@@ -29,7 +29,7 @@ therefore stable by the same mechanism.
 | `--print-fbhash` (`fbhash=<16 hex>`) | **Exact** | **Exact — verified** (the visual gate) | Assert exact equality. |
 | Trace **event counts** — `--superfx-trace` / `--sa1-trace` instruction counts, `--dma-trace` / `--mem-trace` row counts, `instructions_executed`, `frame_count`, `nmis_serviced` | **Exact** | **Exact** — a count is a direct consequence of the execution path the fbhash already pins; a divergence would perturb the fbhash | Assert exact counts (a much stronger gate than `> 0`). |
 | Trace **row content** — per-row `pc`/`addr`/`value`/`vram_word`, the `blank`/`force_blank` flags, mailbox/SA-1 side events | **Exact** | **Exact** — same integer execution; same anchor argument | Assert exact, OR diff the whole CSV against a committed golden. |
-| **WRAM / ARAM byte dumps** (`--assert`, `--assert-aram`, `--assert-vram`, `--assert-cgram`, `peek_*`) | **Exact** | **Exact in practice** (same integer core), but **not yet pinned by a standing cross-arch differential** — the cross-arch WRAM harness needs an x86_64 host luna's CI does not yet have | Assert exact same-arch. Cross-arch, treat fbhash as the guaranteed gate and these as expected-equal-but-unpinned. |
+| **WRAM / ARAM byte dumps** (`--assert`, `--assert-aram`, `--assert-vram`, `--assert-cgram`, `peek_*`) | **Exact** | **Exact in practice** (same integer core), but **not yet pinned by a standing cross-arch differential** — no CI job diffs WRAM bytes between the x86_64 and aarch64 runners yet | Assert exact same-arch. Cross-arch, treat fbhash as the guaranteed gate and these as expected-equal-but-unpinned. |
 | `--print-fbhash` timing fields, wall-clock, any GUI audio/pacing | n/a (host-dependent) | not stable | Never assert. |
 
 ## Practical guidance
@@ -40,7 +40,8 @@ therefore stable by the same mechanism.
   `> 0 instructions executed` with the exact count.
 - **WRAM/ARAM/CGRAM byte assertions:** rock-solid run-to-run and same-arch.
   Cross-arch they are expected-identical (same integer core) but luna has not
-  yet *run* the cross-arch byte differential (no x86_64 CI host); until it does,
+  yet *run* the cross-arch byte differential (no standing job compares the
+  x86_64 and aarch64 runners byte for byte); until it does,
   prefer the fbhash for the cross-arch leg and keep byte asserts same-arch.
 
 If you ever observe a cross-arch mismatch in a count or row that the fbhash
@@ -49,10 +50,15 @@ should not happen.
 
 ## Save states (`.luna` blobs)
 
-Since format **v5** (#167) a save state is **portable across luna builds and
-toolchains**: the ROM-identity hash that binds a state to its ROM is an
-explicit FNV-1a-64 over the raw ROM bytes (previously `std`'s `DefaultHasher`,
-whose algorithm Rust does not specify across releases — states silently broke
-on a toolchain bump), and the container is bincode 2 `standard`. A state is
-still rejected on a format-version or ROM mismatch, with a clean error. v4 and
-older blobs are not readable by v5 builds — re-save from a live run.
+A save state is **portable across toolchains and architectures for the same
+format version**: the ROM-identity hash that binds a state to its ROM is an
+explicit FNV-1a-64 over the raw ROM bytes (it used to be `std`'s
+`DefaultHasher`, whose algorithm Rust does not specify across releases —
+states silently broke on a toolchain bump), and the container is bincode 2
+`standard`.
+
+It is **not** portable across luna versions that changed the format. Each
+build reads the current format version only: a state written by another
+format version is refused with a clean error (`format version mismatch:
+state is vN, this build expects vM`), as is a state made from a different
+ROM. Re-save from a live run after upgrading.

@@ -25,6 +25,8 @@ Commands:
   run         Load a ROM, step N instructions, optionally dump a screenshot.
   state       Run through luna-api and emit a JSON state snapshot (+ dumps/traces).
   frames      Capture EXACTLY-consecutive PPU frames as PNGs (temporal artefacts).
+  diff        Compare two ROMs at equal PPU frame (or their sound): MATCH / DIFF.
+  profile     Real master cycles per symbol, stack depth, coprocessor cost.
   wram-trace  Per-frame vblank-aligned WRAM page hashes (cross-emulator differential).
   bench       Run a whole ROM directory headless and write a compatibility report.
   spc-dump    Export the live APU state as a playable .spc sound file.
@@ -66,11 +68,12 @@ luna run [OPTIONS] <ROM>
 | `--force-display` | off | Bypass INIDISP forced-blank so you see whatever is in VRAM/CGRAM. |
 | `--bg <1..=4>` | composited | Render ONLY that BG layer instead of the composited frame. |
 | `--audio-out <PATH>` | — | Capture the APU's 32 kHz stereo output to a WAV. |
-| `--force-mapper <M>` | auto | Force a mapper (`lorom`/`hirom`/`exhirom`/`sa1`/`superfx`) for a headerless / checksum-invalid ROM. |
+| `--force-mapper <M>` | auto | Force a mapper for a headerless / checksum-invalid ROM: `lorom`, `hirom`, `exhirom`, `sa1`, `superfx`, `dsp1`, `sdd1`. (`spc7110` is recognised but not emulated: forcing it fails at load with an unsupported-mapper error.) |
 | `--force-region <R>` | header | Force the video standard (`ntsc`/`pal`) — changes the scanline count (262/312) and frame rate. |
 | `--power-on <S>` | `zero` | What RAM holds before the ROM boots: `zero`, `ones`, `random` (seed derived and printed) or `random=<seed>`. See *Power-on memory state* below. |
 | `--native-res` | off | Emit the native **512×448** frame for `--screenshot` *and* `--print-fbhash` (both, since v1.24.0 — `run`'s screenshot used to stay 256×224 while its hash went native): hi-res modes 5/6 & pseudo-512 keep both horizontal subpixels, interlace keeps both fields as lines. `--bg N` has no native form and stays 256 wide. |
 | `--wdm-out <PATH>` | — | Write captured `WDM $xx` executions (the `SNES_ASSERT` channel) — a non-empty file means an assertion fired. |
+| `--nocash-out <PATH>` | — | Write everything the ROM printed to the `$21FC` Nocash TTY (the SDK's `SNES_NOCASH` text channel), as raw bytes — the ROM's own log, readable with no debugger attached. |
 | `--print-fbhash` | off | Print `fbhash=<16-hex>`, a cross-arch-stable key for the displayed frame. |
 
 ```bash
@@ -80,6 +83,11 @@ luna run -n 12000000 --screenshot /tmp/title.png "game.sfc"
 # test ROM): force the mapper so it renders, and print the hash key.
 luna run -n 3000000 --force-mapper lorom --print-fbhash "WaveHDMA.sfc"
 # → fbhash=7429bf441a1c7d6c   (record this as the test's expected value)
+
+# Read the ROM's own printf channel and its assertion channel after 60 frames.
+luna run --until-frame 60 --nocash-out /tmp/tty.txt --wdm-out /tmp/wdm.txt "game.sfc"
+# → Nocash ($21FC) log written to /tmp/tty.txt  (0 bytes)     <- the ROM printed nothing
+#   WDM log written to /tmp/wdm.txt  (0 hit(s))               <- no assertion fired
 ```
 
 **Index baselines by frame, not by instruction count.** A `-n` baseline
@@ -149,9 +157,9 @@ and is the hub for every headless diagnostic.
 | `--until-frame <F>` | — | Run until PPU frame `F` (then snapshot) instead of the `-n` count, which is then ignored. Frame-indexed baselines and asserts (see `run`). |
 | `--schema` | off | Print the JSON Schema of the `--out` payload (§2) and exit — no ROM needed. |
 | `--out <PATH>` | `-` | Where to write the JSON (`-` = stdout). |
-| `--force-mapper <M>` | auto | Force a mapper for headerless ROMs: `lorom`, `hirom`, `exhirom`, `sa1`, `superfx`. |
+| `--force-mapper <M>` | auto | Force a mapper for headerless ROMs: `lorom`, `hirom`, `exhirom`, `sa1`, `superfx`, `dsp1`, `sdd1` (as in `run`; `spc7110` is recognised but not emulated). |
 | `--force-region <R>` | header | Force the video standard: `ntsc` or `pal`. |
-| `--power-on <S>` | `zero` | What RAM holds before the ROM boots: `zero`, `ones`, `random` (seed derived and printed) or `random=<seed>`. See *Power-on memory state* below. |
+| `--power-on <S>` | `zero` | What RAM holds before the ROM boots: `zero`, `ones`, `random` (seed derived and printed) or `random=<seed>`. See *Power-on memory state* above. |
 | `--native-res` | off | As in `run` — native 512×448 output for `--screenshot` and `--print-fbhash`. |
 | `--sym <PATH>` | auto-detect `<rom>.sym` | Load a WLA-DX symbol file (annotated disasm, named addresses). |
 | `--dsp1-rom <PATH>` | — | Install `dsp1b.rom` firmware then load (Mario Kart, Pilotwings). Persists. The file must be exactly 8192 bytes or it is refused with the reason, leaving any working install untouched — a firmware dump cannot be re-downloaded, and an empty or truncated one that installed "successfully" would leave every DSP-1 game running with an inert chip and no error. A dump that is present but unusable is reported as missing. |
@@ -159,29 +167,39 @@ and is the hub for every headless diagnostic.
 | `--input <SCRIPT>` | — | Scripted joypad-1 input (§3). |
 | `--input2 <SCRIPT>` | — | Scripted joypad-2 input, same grammar (§3) — a two-player probe, or replaying an MCP `script_p2` capture. |
 | `--input3`, `--input4`, `--input5 <SCRIPT>` | — | Players 3-5: a Super Multitap's pads B-D with `--port2 multitap` (pad A is player 2). Same grammar. |
+| `--port1 <DEV>`, `--port2 <DEV>` | `pad` | What is plugged into each controller port: `pad`, `mouse`, `superscope`, `multitap` or `none` (§3). |
+| `--mouse <SCRIPT>`, `--superscope <SCRIPT>` | — | Scripted SNES Mouse motion / Super Scope aim for whichever port holds that device (§3). |
+| `--srm-in <PATH>` | — | Load battery SRAM from a `.srm` file before running — the second half of a power-cycle test. See *Asserting on memory* below. |
+| `--srm-out <PATH>` | — | Write battery SRAM to a `.srm` file after the run (an empty file on a cartridge with no battery). |
 | `--screenshot <PATH>` | — | Also write a PNG. |
 | `--audio-out <PATH>` | — | Also write a 32 kHz stereo WAV. |
 | `--peek <B:O:C>` | — | Hex-dump `COUNT` bytes at `BANK:OFFSET` to stderr (repeatable; **all three fields are hex** — `7E:0200:20` is 32 bytes). The whole 24-bit space is readable: WRAM, ROM (including `$C0-$FF` HiROM banks), SRAM, coprocessor RAM; the `$2000-$5FFF` register band reads `0` (no side effects), except the DMA channel registers `$4300-$437F`, which read their real values (`$FF` at power-on). An unmapped range reads `$FF` like the open bus, with a stderr note and an `unmapped` count in the JSON entry. Each result is mirrored into the `--out` JSON `peeks` array (see §2) — the machine-readable channel a harness should parse. |
+| `--assert <SPEC>` | — | After the run, check that memory holds the expected bytes: `BANK:OFFSET=HEX` (all hex) or `SYMBOL=HEX` through the loaded `.sym`. Prints `PASS` / `FAIL` per spec; any `FAIL` makes the exit code `1`. Repeatable. See *Asserting on memory* below. |
+| `--assert-aram <SPEC>`, `--assert-vram <SPEC>`, `--assert-cgram <SPEC>` | — | The same check over APU RAM, VRAM and CGRAM: `OFFSET=HEX`, a hex byte offset into that memory (CGRAM is 512 bytes, low byte of each colour first). Repeatable. |
+| `--call-stack` | off | Track the 65C816 call stack during the run (JSR / JSL / RTS / RTL and interrupts); the `--out` JSON gains a `call_stack` array. See *Where is the CPU, and how did it get there* below. |
 | `--dump-vram <PATH>` | — | Dump all 64 KB PPU VRAM (raw). |
 | `--dump-aram <PATH>` | — | Dump all 64 KB APU ARAM (raw). |
 | `--dump-coproc-ram <PATH>` | — | Dump coprocessor work RAM (Super FX Game Pak RAM), ungated. |
 | `--apu-log <PATH>` | — | CSV of every `$2140-$2143` CPU↔APU mailbox access. |
 | `--dsp1-trace <PATH>` | — | DSP-1 (µPD77C25) trace: microcode execution **and** CPU-side DR/SR traffic in one stream — `seq,kind,pc,opcode,value,a,b,dr,sr,rqm` (`kind` = E/W/R/S). |
 | `--dsp1-trace-ports` | off | Restrict the above to the DR/SR transactions (the stock firmware idles in an RQM loop, so a full trace is mostly idle spin). |
+| `--dsp1-trace-commands <PATH>` | — | The DSP-1 port traffic grouped into one CSV row per command (implies `--dsp1-trace-ports`). See *Command transactions* below. |
 | `--dsp1-trace-max <N>` | `200000` | Cap on captured DSP-1 events. |
 | `--dsp-trace <PATH>` | — | CSV of every DSP register write: `spc_cycles,reg,name,value`, with `name` decoded (`V0_ADSR1`, `KON`, `FLG`, …). |
 | `--dsp-trace-max <N>` | `100000` | Cap on captured DSP writes. |
 | `--sa1-log <PATH>` | — | CSV of every `$2200-$23FF` SA-1 MMIO access. |
+| `--sa1-side-log <PATH>` | — | The same registers seen from the **SA-1's** side: its own reads and writes of `$2200-$23FF`, plus its writes to I-RAM (`$3000-$37FF`), each with the SA-1 PC — `seq,sa1_pc,kind,reg,value`. Shows the handshake flags the two CPUs exchange, which the S-CPU-side `--sa1-log` cannot. |
 | `--cpu-trace <PATH>` | — | Per-instruction 65C816 register trace: `mclk_total,frame_ntsc,pc,a,x,y,sp,p,db,dp,e` (pre-opcode snapshot). The stream to diff against a Mesen2 trace when bisecting a divergence — see the example below. |
 | `--cpu-trace-from <N>`, `--cpu-trace-max <N>` | `0`, `100000` | Start capturing at instruction count `N`; hard cap on captured events (≈ 40 bytes each). Aim the window at the scene under test instead of tracing from reset. |
 | `--sa1-trace <PATH>`, `--sa1-trace-max <N>` | —, `200000` | Per-instruction SA-1 trace (`seq,pc,a,x,y,sp,p,db,dp,e`) and its event cap. |
-| `--superfx-trace <PATH>`, `--superfx-trace-max <N>` | —, `200000` | Per-opcode GSU trace (`seq,pc,opcode,sfr,r0..r15`, GO/STOP edges included) and its event cap. |
+| `--superfx-trace <PATH>`, `--superfx-trace-max <N>` | —, `200000` | Per-opcode GSU trace (`seq,mclk,go,stop,pc,opcode,sfr,r0..r15`; `go` / `stop` are `1` on the row where a job starts / ends) and its event cap. |
 | `--superfx-trace-from <N>` | `0` | Start the GSU trace at instruction `N` — an instruction count like `--dma-trace-from`, not a frame. The trace is a ring that keeps the most recent events once full, so the run's end (`-n` / `--until-frame`) chooses the window and this trims its head: you get exactly `[N, end]` as long as it fits under the cap. For frame `F`, read `stats.instructions_executed` from `luna state --until-frame F --out -`. |
 | `--gsu-bus-trace <PATH>`, `--gsu-bus-trace-max <N>` | —, `200000` | Every CPU read of Game Pak ROM or RAM made **while the Super FX owned it** (`seq,frame,line,mclk,pc,addr,kind`). See *Who owns the cartridge* below. |
 | `--spc-trace <PATH>`, `--spc-trace-max <N>` | —, `200000` | Per-instruction SPC700 trace (`seq,pc,a,x,y,sp,psw,spc_cycle,t2_int,t2_out`) and its event cap. |
 | `--dma-trace <PATH>` | — | DMA→VRAM bytes as read during the transfer, with `line`, `hclock`, blank flags, the A-bus `src` and the `vram_word` each byte lands at. |
 | `--dma-trace-from <N>`, `--dma-trace-max <N>` | `0`, `500000` | Instruction count at which the DMA trace starts; its event cap. |
-| `--mem-trace <PATH>` | — | CSV of bus accesses: `mclk_total,frame_ntsc,pc,addr,kind,value,line,hclock,blank,force_blank,origin`. `origin` = `cpu`, `dma<n>` or `hdma<n>` — DMA / HDMA writes (B-bus `$21xx` and A-bus) are in the same stream as CPU accesses, stamped with the burst / line start and the PC whose access ran them. Gated by `--mem-trace-from` / `--mem-trace-max`. |
+| `--mem-trace <PATH>` | — | CSV of bus accesses: `mclk_total,frame_ntsc,pc,addr,kind,value,line,hclock,blank,force_blank,origin`. `origin` = `cpu`, `dma<n>` or `hdma<n>` — DMA / HDMA writes (B-bus `$21xx` and A-bus) are in the same stream as CPU accesses, stamped with the burst / line start and the PC whose access ran them. |
+| `--mem-trace-from <N>`, `--mem-trace-max <N>` | `0`, `100000` | Instruction count at which the memory trace starts; its event cap. |
 | `--mem-trace-bank <B>`, `--mem-trace-addr <LO:HI>` | all | Bank / offset-range filters for `--mem-trace` (both must match). |
 | `--trace-writes <O,…>` | — | With `--mem-trace`: keep only **writes** to these hex offsets, any bank (`2121,2122,420C`). The "who wrote this register" hunt — see below. |
 | `--print-fbhash` | off | Print `fbhash=<16-hex>` for the displayed frame — the same key as `run`, so an `--input`-driven test can carry a visual baseline. |
@@ -220,7 +238,7 @@ luna state -n 5000000 --force-mapper lorom --force-region pal \
   --screenshot /tmp/bra.png "CPUTest/CPU/BRA/CPUBRA.sfc"
 ```
 
-Exact-resolution regression for the hi-res / interlace demos (issue #115): the
+Exact-resolution regression for the hi-res / interlace demos: the
 PPU really computes 512 horizontal subpixels and two interlace fields, then
 averages them into the displayed 256×224 — `--native-res` keeps them:
 
@@ -229,6 +247,84 @@ luna state -n 8000000 --force-mapper lorom --force-region pal --native-res \
   --screenshot /tmp/font.png --print-fbhash \
   "PPU/Interlace/InterlaceFont/InterlaceFont.sfc"   # → a 512×448 PNG
 ```
+
+#### Asserting on memory (`--assert*`, `--srm-in` / `--srm-out`)
+
+A one-off check does not need a `luna test` manifest. `--assert` compares
+bytes on the CPU bus after the run, and its three siblings do the same in
+APU RAM, VRAM and CGRAM; each spec prints a `PASS` or `FAIL` line on stdout
+and one `FAIL` is enough for exit code `1`. The expected value is a run of
+hex bytes **in memory order**, so a 16-bit variable holding `$FDA5` is
+written `A5FD`.
+
+```bash
+luna state --until-frame 120 \
+  --assert 7E:0000=A5FD --assert-aram 0000=0000 \
+  --assert-vram 0000=00000000 --assert-cgram 0000=0000 \
+  --out /dev/null "game.sfc"
+# PASS $7E:0000=a5fd
+# PASS aram:0000=0000
+# PASS vram:0000=00000000
+# PASS cgram:0000=0000                                   → exit 0
+# FAIL $7E:0000 expected a5fe got a5fd                   → exit 1 (when it differs)
+```
+
+With a symbol file loaded (`--sym`, or a `<rom>.sym` beside the ROM) the
+CPU-bus form takes a label instead of an address: `--assert r_done=EFBE`.
+
+`--srm-out` and `--srm-in` are the two halves of a **power-cycle test**:
+run A plays and writes the battery RAM to a file, run B boots a fresh
+machine from that file and checks that the save survived.
+
+```bash
+# Run A: play (add --input to reach a save), then keep what the battery would keep.
+luna state --until-frame 600 --srm-out /tmp/save.srm --out /dev/null "game.sfc"
+# wrote 8192 bytes of SRAM to /tmp/save.srm
+
+# Run B: a new machine with that battery RAM; the first save byte is still there.
+luna state --until-frame 2 --srm-in /tmp/save.srm --assert 70:0000=5A \
+  --out /dev/null "game.sfc"
+# loaded 8192 bytes of SRAM from /tmp/save.srm
+# PASS $70:0000=5a
+```
+
+(`$70:0000` is where a LoROM cartridge maps its SRAM; a HiROM one has it
+from `$20:6000`.) In a `luna test` suite the same pair is the manifest keys
+`srm_out` / `srm_in`.
+
+#### Where is the CPU, and how did it get there (`--call-stack`)
+
+A snapshot gives a PC; `--call-stack` gives the chain of calls that led to
+it. Tracking is off by default (it costs one opcode peek per instruction)
+and starts with the run, so the stack holds the calls made since reset.
+The array is ordered oldest first, each frame `{pc, from, kind, symbol}`:
+the address entered, the address of the call, `jsr` / `jsl` / `interrupt`,
+and the nearest label when a symbol file is loaded.
+
+```bash
+luna state --until-frame 120 --call-stack --out - "game.sfc" \
+  | jq -c '.call_stack[-2:][]'
+# {"pc":34316,"from":34228,"kind":"jsl","symbol":null}
+# {"pc":34310,"from":34344,"kind":"jsr","symbol":null}   <- the innermost call
+```
+
+#### What the SA-1 itself did (`--sa1-side-log`)
+
+`--sa1-log` records the S-CPU touching the SA-1's registers.
+`--sa1-side-log` records the other half of the conversation: what the SA-1
+read and wrote, with the SA-1's own PC. Use both when one CPU is waiting
+for a flag the other never sets.
+
+```bash
+luna state -n 2000000 --sa1-side-log /tmp/sa1_side.csv --out /dev/null "Kirby Super Star (USA).sfc"
+# SA-1-side log written to /tmp/sa1_side.csv (24071 events)
+head -2 /tmp/sa1_side.csv
+# seq,sa1_pc,kind,reg,value
+# 0,$00:8BF9,W,$2230,$00
+```
+
+Reads of I-RAM are not logged: an SA-1 spinning on a flag would fill the
+file with them.
 
 #### Who wrote this register? (`--trace-writes`)
 
@@ -401,10 +497,11 @@ forced-blank flag.
 |---|---|---|
 | `-n, --steps <N>` | `1000` | Warm-up instructions before capture begins. |
 | `--from-frame <F>` | — | Start the capture at PPU frame `F` (the first PNG is frame `F`; `-n` is then ignored). Frame-indexed like `state --until-frame`. |
-| `--power-on <S>` | `zero` | What RAM holds before the ROM boots: `zero`, `ones`, `random` (seed derived and printed) or `random=<seed>`. See *Power-on memory state* below. |
+| `--power-on <S>` | `zero` | What RAM holds before the ROM boots: `zero`, `ones`, `random` (seed derived and printed) or `random=<seed>`. See *Power-on memory state* above. |
 | `-c, --count <N>` | `8` | Number of consecutive frames to capture. |
 | `--out-dir <DIR>` | `/tmp/luna_frames` | Output directory (created if absent). |
 | `--force-mapper <M>` | auto | As in `state`. |
+| `--force-region <R>` | header | As in `state`. |
 | `--input <SCRIPT>` | — | Joypad-1 script (§3). Checkpoints inside the warm-up spend from `-n` exactly as in `state` (or are chased frame by frame under `--from-frame`); later ones fire during the capture, on their own frame. |
 
 ### `luna diff` — two ROMs at equal PPU frame (MATCH / DIFF)
@@ -714,6 +811,7 @@ state divergence (THE method's confound-free oracle). Line format:
 | `--dump-frame <N>` | — | Also dump the full 128 KiB WRAM as raw `.bin` at frame `N`. |
 | `--dump-out <PATH>` | `/tmp/luna_wram_frame.bin` | Where the `--dump-frame` snapshot goes. |
 | `--force-mapper <M>` | auto | As in `state`. |
+| `--force-region <R>` | header | As in `state`. |
 | `--input <SCRIPT>` | — | Joypad-1 script (§3). |
 
 ### `luna bench` — whole-corpus compatibility report
@@ -729,8 +827,8 @@ local (gitignored under `--out`).
 
 | Option | Default | Purpose |
 |---|---|---|
-| `[DIR]` | the bundled ROM dir | Directory of ROMs to scan. |
-| `--out <DIR>` | a `bench` subdir | Output dir for `report.md`, `bugs/*`, `screenshots/*`. |
+| `[DIR]` | `tests/roms` | Directory of ROMs to scan. No ROM ships with luna: point it at your own dumps. |
+| `--out <DIR>` | `tests/roms/bench` | Output dir for `report.md`, `bugs/*`, `screenshots/*`. |
 | `-f, --frames <N>` | `600` | Frames to run per ROM. |
 | `--input <SCRIPT>` | Start-pulse | Override the default title-clearing input (§3). |
 
@@ -752,6 +850,7 @@ music has started before the snapshot.
 | `-n, --steps <N>` | `5000000` | CPU instructions before the snapshot. |
 | `-o, --out <PATH>` | `<rom-stem>.spc` | Output path for the `.spc`. |
 | `--force-mapper <M>` | auto | As in `state`. |
+| `--force-region <R>` | header | As in `state`. |
 | `--dsp1-rom <PATH>` | — | Install `dsp1b.rom` then load (DSP-1 games). |
 | `--input <SCRIPT>` | — | Joypad-1 script applied before the snapshot (§3). |
 
@@ -786,6 +885,7 @@ raw `vram.bin` / `cgram.bin` and `oam.json` (sprite metadata).
 | `--bpp <2\|4\|8>` | auto (BG1 mode) | Bit-depth for the VRAM tile sheet. |
 | `--palette <N>` | `0` | CGRAM sub-palette row for the tile sheet (2/4bpp). |
 | `--force-mapper <M>` | auto | As in `state`. |
+| `--force-region <R>` | header | As in `state`. |
 | `--dsp1-rom <PATH>` | — | Install `dsp1b.rom` then load (DSP-1 games). |
 | `--input <SCRIPT>` | — | Joypad-1 script applied before the snapshot (§3). |
 
@@ -829,15 +929,15 @@ MCP client sees how to drive the emulator before listing a single tool.
 
 | Field | Contents |
 |---|---|
-| `rom` | `RomInfo`: `title`, `mapper`, `rom_bytes`, `header_rom_size_kb`, `sram_kb`, `region`, `fast_rom`, `version`, `checksum{,_complement,_valid}`, `missing_firmware`. |
+| `rom` | `RomInfo`: `title`, `mapper`, `rom_bytes`, `header_rom_size_kb`, `sram_kb`, `region`, `fast_rom`, `version`, `checksum{,_complement,_valid}`, `missing_firmware`, and `symbols_loaded` / `symbols_error` (how many labels the `.sym` gave, or why it could not be read). |
 | `cpu` | 65c816 registers `a/x/y/sp/pc/pb/db/dp/p` + flags. |
 | `cpu_regs` | Decoded MMIO/CPU register block. |
 | `ppu` | PPU registers + VRAM/CGRAM/OAM occupancy. |
 | `scheduler` | Master-clock / line / frame scheduler state: `frame_count`, `ppu_line`, `nmis_serviced`, `last_nmi_frame` (see below), … |
 | `apu` | SPC700 + S-DSP state (`spc_stopped`, etc.). |
-| `dma` | Per-channel DMA/HDMA registers (see below). |
+| `dma` | `mdmaen` / `hdmaen` (the `$420B` / `$420C` enable masks) and the per-channel DMA/HDMA registers (see below). |
 | `stats` | Cumulative counters since reset: `instructions_executed`, `instructions_active`, `total_mclk`, and `total_mclk` split by consumer — `mclk` (cumulative) and `last_frame` (the last completed PPU frame), each `{cpu_active, cpu_wai, cpu_stp, dma, hdma, refresh, total}`. See below. |
-| `sa1`, `dsp1`, `call_stack` | Coprocessor blocks (present when the cart has one) and the `--call-stack` capture. |
+| `sa1`, `gsu`, `dsp1`, `call_stack` | Coprocessor blocks — SA-1, Super FX, DSP-1 (present when the cart has one; `gsu` is described under *Who owns the cartridge*) — and the `--call-stack` capture. |
 | `peeks` | One entry per `--peek`, in order: `{spec, space: "cpu"\|"aram", addr, bytes_hex, unmapped?, error?}`. Always present (empty without `--peek`); a failed peek keeps its slot with an `error` string instead of vanishing; `unmapped` appears only when part of the range is open bus. |
 
 ```bash
@@ -897,11 +997,12 @@ luna state --schema | jq -r '.properties | keys[]'
 luna state --schema | jq -r '.["$defs"].SchedulerState.properties | keys[]'
 ```
 
-The `dma` block is the headless surface for the `$43xx` DMA/HDMA registers —
-which read `0` through `--peek` because they are **write-only on hardware**.
-Each of `dma.channels[0..8]` gives `params` (DMAP), `bbad` (BBAD, target
-`$2100+bbad`), `a_addr` (A1T, table start), `a_bank`, `das`, `a2a` (HDMA
-indirect / table pointer) and `ntlr` (HDMA line counter):
+The `dma` block is the decoded view of the `$43xx` DMA/HDMA registers
+(`--peek 00:4300:80` gives the same bytes raw). Each of `dma.channels[0..8]`
+gives `params` (DMAP), `bbad` (BBAD, target `$2100+bbad`), `a_addr` (A1T,
+table start), `a_bank`, `das` and `dasb` (the byte count / HDMA indirect
+address, and its bank), `a2a` (HDMA table pointer) and `ntlr` (HDMA line
+counter):
 
 ```bash
 # Watch an HDMA table pointer advance per frame (e.g. a scanline wave effect)
@@ -913,9 +1014,11 @@ luna state -n 3000000 --force-mapper lorom --out - "WaveHDMA.sfc" \
 
 ## 3. Scripted joypad input (`--input`)
 
-Shared by `state`, `frames`, `wram-trace`, `bench`; `state` (and a `luna
-test` manifest) also take `--input2` / `input2` for joypad 2, same
-grammar. Format:
+Shared by every subcommand that runs a ROM except `run` — `state`,
+`frames`, `diff`, `profile`, `wram-trace`, `bench`, `spc-dump`,
+`assets-dump`. `state` and `profile` also take `--input2` … `--input5`
+for the other pads (a `luna test` manifest has `input` and `input2`),
+same grammar. Format:
 comma-separated `frame:hex` checkpoints — frame number in decimal, mask
 in hex (optional `0x`). The mask is latched at the **start** of the named
 PPU frame and held until the next checkpoint overrides it.
@@ -943,8 +1046,9 @@ Left(9) Right(8) A(7) X(6) L(5) R(4)`. So Start = `$1000`, A = `$80`.
 ### Pointer devices (Mouse / Super Scope)
 
 A port can hold a **Mouse** or **Super Scope** instead of a pad. Select the
-device with `--port1`/`--port2` (`pad` · `mouse` · `superscope`), then script
-its motion:
+device with `--port1`/`--port2`, then script its motion. The device names
+are `pad` (`joypad` is accepted too), `mouse`, `superscope`, `multitap` and
+`none` for an empty port:
 
 ```
 # Super Scope on port 2, fire at screen pixel (128, 112) on frame 120
@@ -989,9 +1093,9 @@ method, so the MCP transport adds reach, not capability.
 
 | Tool | Maps to | Purpose |
 |---|---|---|
-| `load_rom` | `load_rom` / `load_rom_forced` | Load a `.sfc`/`.smc` from a host path. Optional `force_mapper` (`lorom`, `hirom`, `exhirom`, `sa1`, `superfx`, `dsp1`, `sdd1`, `spc7110`) and `force_region` (`ntsc`, `pal`) bypass header auto-detection — same vocabulary as the CLI `--force-mapper` / `--force-region`. `power_on` (`zero` default, `ones`, `random`, `random=<seed>`) is the CLI `--power-on`; a random load returns the seed as `power_on_seed`. A WLA-DX `<rom>.sym` next to the ROM is loaded automatically (count in `rom.symbols_loaded`). |
+| `load_rom` | `load_rom` / `load_rom_forced` | Load a `.sfc`/`.smc` from a host path. Optional `force_mapper` (`lorom`, `hirom`, `exhirom`, `sa1`, `superfx`, `dsp1`, `sdd1`; `spc7110` is recognised but not emulated, so forcing it fails with an unsupported-mapper error) and `force_region` (`ntsc`, `pal`) bypass header auto-detection — same vocabulary as the CLI `--force-mapper` / `--force-region`. `power_on` (`zero` default, `ones`, `random`, `random=<seed>`) is the CLI `--power-on`; a random load returns the seed as `power_on_seed`. A WLA-DX `<rom>.sym` next to the ROM is loaded automatically (count in `rom.symbols_loaded`). |
 | `load_rom_bytes` | `load_rom_bytes` / `load_rom_bytes_forced` | Load a ROM from base64 bytes (e.g. a freshly assembled image, no host file). Same force and `power_on` params. Unlike `load_rom` it does **not** search the firmware folder (nor for a `.sym`) — check `missing_firmware` in the result. |
-| `set_port_device` | `set_port_device` | Plug `joypad` / `mouse` / `superscope` / `multitap` into port 0 or 1, then feed it with the matching `set_*` tool. |
+| `set_port_device` | `set_port_device` | Plug a device into port 0 or 1, then feed it with the matching `set_*` tool. Same names as the CLI `--port1`: `pad` (or `joypad`), `mouse`, `superscope`, `multitap`, and `none` to unplug the port. |
 | `reset` | `reset` | Reset to power-on state. |
 | `set_joypad` | `set_joypad` | Set the button bitmask for `port` (0 = P1, 1 = P2; 2-4 = a multitap's pads B-D, players 3-5 with the tap on port 2). |
 | `set_mouse` | `set_mouse` | Feed SNES Mouse `dx`/`dy`/buttons for the next auto-read. |
@@ -1001,8 +1105,9 @@ method, so the MCP transport adds reach, not capability.
 | `run_until_pc` | `run_until_pc` | Step until PB:PC hits a 24-bit target (bounded). |
 | `run_until_mem_write` | `run_until_mem_write` | Step until an address is written; returns PC + value. |
 | `run_until_mem_read` | `run_until_mem_read` | Step until an address is read; returns PC + value. |
+| `run_until_gsu_go` / `run_until_gsu_stop` | `run_until_gsu` | Step until the Super FX starts / finishes a job, or `max_steps` instructions elapse; returns `{hit}`. The **transition** is watched, not the level: called while a job runs, `run_until_gsu_go` waits for the next one. An error on a cartridge with no Super FX. See the example below. |
 | `state` | `state` | Full observable-state JSON snapshot (§2). |
-| `screenshot` | `render_frame_png` / `render_frame_png_native` / `render_frame_bg_png` | Render the composited 256×224 frame to PNG (256×239 under overscan — `height` in the result says which); `native: true` captures 512×448 (or 512×478; enable `set_native_capture` first), `bg: 1..=4` renders one layer in isolation. |
+| `screenshot` | `render_frame_png` / `render_frame_png_native` / `render_frame_bg_png` | Render the composited 256×224 frame to PNG (256×239 under overscan — `height` in the result says which); `native: true` captures 512×448 (or 512×478; enable `set_native_capture` first), `bg: 1..=4` renders one layer in isolation, `force_display: true` renders through forced blank at full brightness. |
 | `sram_get` / `sram_set` | `sram` / `load_sram` | Battery-RAM image as base64 — the MCP form of `--srm-out` / `--srm-in`. |
 | `export_spc` | `export_spc` | Standard `.spc` (v0.30) music snapshot, base64 — playable in any SPC player. |
 | `decode_sprites` | `decode_sprites` | All 128 OAM entries as a structured list — the queryable `render_sprite_sheet`. |
@@ -1018,7 +1123,7 @@ method, so the MCP transport adds reach, not capability.
 | `freeze_add` / `freeze_remove` / `freeze_list` | same names | Cheat-style per-frame pinning: the byte is re-applied at every frame boundary in **every** run path (CLI, MCP and GUI behave identically), and once immediately on add. WRAM only. |
 | `enable_call_stack` / `call_stack` | `enable_call_stack` / `call_stack` | Opt-in JSR/JSL/RTS/RTL + interrupt tracking → `[{pc, from, kind, symbol}]`, oldest first. The CLI form is `luna state --call-stack` (the `--out` JSON gains a `call_stack` array). |
 | `search_memory` | `search_memory` | Find a byte pattern in `$7E-$7F` WRAM (hits report canonical `$7E`/`$7F` addresses). |
-| `search_begin` / `search_refine` / `search_results` | `search_begin` / `search_refine` / `search_results` | The classic narrowing "find my variable" loop: begin (`u8`/`u16`), then alternate gameplay with refines (`eq`/`ne`/`lt`/`gt` a value, or `changed`/`unchanged` vs the last snapshot) until few candidates remain. |
+| `search_begin` / `search_refine` / `search_results` | `search_begin` / `search_refine` / `search_results` | The classic narrowing "find my variable" loop: begin (`u8`/`u16`), then alternate gameplay with refines (`eq`/`ne`/`lt`/`gt` a value, or `changed`/`unchanged` vs the last snapshot) until few candidates remain. `search_results` returns up to `limit` rows (default 64). |
 | `set_cpu_register` | `set_cpu_register` | Set a CPU register by name. |
 | `disasm_cpu` | `disassemble_cpu` | 65C816 disassembly (defaults: live PC + live M/X widths). |
 | `disasm_spc` | `disassemble_spc` | SPC700 disassembly (default: live SPC PC). |
@@ -1029,7 +1134,7 @@ method, so the MCP transport adds reach, not capability.
 | `render_palette` | `render_palette_png` | CGRAM as a 16×16 swatch-grid PNG. |
 | `render_sprite_sheet` | `render_sprite_sheet_png` | All 128 OAM sprites as a transparent PNG sheet. |
 | `enable_cpu_trace` / `take_cpu_trace` | `enable_cpu_trace` / `take_cpu_trace_log` | Per-instruction CPU trace ring (PC + registers). |
-| `enable_profile` / `take_profile` | `enable_profile` / `take_profile` | Master cycles per symbol (folded, heaviest first); `take_profile_raw` for per-PC samples. |
+| `enable_profile` / `take_profile` | `enable_profile` / `take_profile` | Master cycles per symbol (folded, heaviest first). (Per-PC samples are the Rust API's `take_profile_raw`; there is no MCP tool for them.) |
 | `enable_mem_trace` / `take_mem_trace` | `enable_mem_trace_filtered` / `take_mem_trace_log` | Per-bus-access trace with bank / offset-range / offset-list / writes-only filters; every event carries `origin` (`cpu`, `dma<n>`, `hdma<n>`). |
 | `bp_add` | `bp_add_exec` / `bp_add_mem` | Register an exec breakpoint or a read/write watchpoint range. `mirror: false` makes a mem watch bank-exact (default follows WRAM/MMIO mirrors); `name` (defaulting to the `symbol` used) labels it in `bp_list`. |
 | `bp_set_enabled` | `bp_set_enabled` | Disable/re-enable without removing — id, name and hit count survive. |
@@ -1037,7 +1142,7 @@ method, so the MCP transport adds reach, not capability.
 | `run_until_break` | `run_until_break` | Run at full speed until a breakpoint fires (or a step budget). |
 | `run` / `pause` | `run_until_break_interruptible` | Unbounded interruptible run: `run` goes until a breakpoint / `STOP` / `pause`; `pause` stops it (returns `interrupted: true`). No mandatory step budget. `pause` also ends every other run tool early — `step`, `step_until_frame`, `run_until_pc`, `run_until_break`, `run_until_mem_read` / `_write` — so a huge `max_steps` can never wedge the session. |
 | `peek_oam` | `peek_oam` | All 544 OAM bytes (512 low table + 32 high table). |
-| `capabilities` | — | luna `version` + the live tool catalogue, for client feature-detection (the handshake `serverInfo` also reports luna's identity since #174). |
+| `capabilities` | — | luna `version` + the live tool catalogue, for client feature-detection (the handshake `serverInfo` also reports luna's name and version). |
 | `start_input_capture` / `take_input_capture` | `start_input_capture` / `take_input_capture` | Record joypad changes and export a `frame:mask` script (replay with `--input @file`). |
 | `load_symbols` | `load_symbols` | Load a WLA-DX `.sym`; disasm + traces become annotated. |
 | `load_symbols_str` | `load_symbols_str` | Load `.sym` text directly (no host file — e.g. an in-memory build's output). Replaces the table. |
@@ -1051,9 +1156,9 @@ method, so the MCP transport adds reach, not capability.
 | `enable_sa1_side_log` / `take_sa1_side_log` | `enable_sa1_side_log` / `take_sa1_side_log` | SA-1-side MMIO accesses (the CLI `--sa1-side-log`). |
 | `enable_sa1_trace` / `take_sa1_trace` | `enable_sa1_trace` / `take_sa1_trace` | Per-instruction SA-1 register trace (the CLI `--sa1-trace`). |
 | `enable_superfx_trace` / `take_superfx_trace` | `enable_superfx_trace` / `take_superfx_trace` | Per-opcode GSU trace incl. GO/STOP edges (the CLI `--superfx-trace`). |
-| `enable_dsp1_trace` / `take_dsp1_trace` | `enable_dsp1_trace` / `take_dsp1_trace` | DSP-1 microcode + DR/SR port stream; `take` optionally decodes command transactions (the CLI `--dsp1-trace` / `--dsp1-trace-commands`). |
+| `enable_dsp1_trace` / `take_dsp1_trace` | `enable_dsp1_trace` / `take_dsp1_trace` | DSP-1 microcode + DR/SR port stream; `ports_only: true` on enable keeps only the DR/SR traffic (the CLI `--dsp1-trace-ports`); `take` optionally decodes command transactions (the CLI `--dsp1-trace` / `--dsp1-trace-commands`). |
 | `enable_spc_trace` / `take_spc_trace` | `enable_spc_trace` / `take_spc_trace` | Per-instruction SPC700 trace with timer-2 state (the CLI `--spc-trace`). |
-| `frame_hash` | `frame_hash` / `frame_hash_native` | 64-bit pixel hash of the current frame as 16 hex chars — the CLI's `fbhash=` value. `native: true` hashes the 512×448 capture (enable it first; native and non-native values are not comparable). |
+| `frame_hash` | `frame_hash` / `frame_hash_native` | 64-bit pixel hash of the current frame as 16 hex chars — the CLI's `fbhash=` value. `force_display: true` hashes the frame as rendered through forced blank; `native: true` hashes the 512×448 capture (enable it first; native and non-native values are not comparable). |
 | `set_native_capture` | `set_native_capture` | Toggle native 512×448 capture for `screenshot`/`frame_hash` `native` modes. |
 | `wram_page_hashes` | `wram_page_hashes` | Stable FNV-1a-64 per WRAM page (default 4 KiB → 32 hashes). Diff two calls to localise a WRAM change. |
 | `wram_snapshot` | `wram_snapshot` | Full-WRAM FNV-1a-64 hash (+ the raw 128 KiB base64 with `include_data`). |
@@ -1061,14 +1166,18 @@ method, so the MCP transport adds reach, not capability.
 | `enable_nocash_log` / `take_nocash_log` | `enable_nocash_log` / `take_nocash_log` | The `$21FC` Nocash TTY (`SNES_NOCASH` text): drain returns `{text, base64}`. |
 | `enable_wdm_log` / `take_wdm_log` | `enable_wdm_log` / `take_wdm_log` | The `WDM` assert channel (`SNES_ASSERT` → `WDM $00`): drain returns `[{pc, operand, symbol}]`. |
 
+The `enable_*_trace` tools that record a stream (CPU, memory, DMA, DSP,
+DSP-1, SA-1, Super FX, SPC700) take `max_events`, the cap on what one
+capture keeps — the MCP form of the CLI's `--…-trace-max` flags.
+
 With a symbol table loaded, the address-taking tools (`peek_memory`,
 `poke_memory`, `run_until_pc`, `run_until_mem_*`, `bp_add`, `disasm_cpu`,
-`enable_mem_trace`) also accept a `symbol` name in place of the numeric
+`enable_mem_trace`, `freeze_add`, `freeze_remove`) also accept a `symbol` name in place of the numeric
 address — e.g. `peek_memory {symbol: "monster_x", count: 2}`, or a
 symbol-bounded watch range `bp_add {kind: "mem", symbol: "buf_start",
 hi_symbol: "buf_end"}`.
 
-Since symbols v2 (#179) the table carries **two address spaces**: the
+The symbol table carries **two address spaces**: the
 24-bit CPU bus and the SPC700's 16-bit ARAM. `load_symbols` /
 `load_symbols_str` take `space: "aram"` for a wla-spc700 driver's `.sym`
 (loading one space never clobbers the other), `resolve_symbol` /
@@ -1086,7 +1195,7 @@ drain:
 
 ```text
 enable_nocash_log {}   # $21FC TTY — SNES_NOCASH("...") text output
-enable_wdm_log {}      # WDM $42 — SNES_ASSERT "fired here" events
+enable_wdm_log {}      # WDM (opcode $42) — SNES_ASSERT is `WDM $00`, "fired here" events
 run {}                 # or step / step_until_frame / run_until_break
 pause {}
 take_nocash_log {}     # → {text: "hello\n", base64: "aGVsbG8K"}
@@ -1097,6 +1206,24 @@ An empty `take_wdm_log` after a run is the "no assertions fired" green
 light a CI-style probe wants; the Nocash text is the ROM's own printf
 channel. Draining resets each channel, so successive takes return only
 new output.
+
+#### Stopping on a Super FX job
+
+A Super FX renderer works in jobs: the game writes the GSU's program
+counter, the chip runs until its `STOP`, the game copies the result out.
+Two tools stop on those edges, so a job's inputs and its result can be
+read without searching a 200 000-line opcode trace for them:
+
+```text
+load_rom {path: "Star Fox (USA) (Rev 2).sfc"}
+run_until_gsu_go {max_steps: 20000000}     # → {hit: true}   a job has just started
+state {}                                   # state.gsu.running = true, state.gsu.r = the job's arguments
+run_until_gsu_stop {max_steps: 20000000}   # → {hit: true}   that job has just finished
+peek_coproc_ram {offset: 0, count: 64}     # what it left in Game Pak RAM
+```
+
+`hit: false` means `max_steps` ran out first. On a cartridge without the
+chip both tools return the error `this cartridge has no Super FX`.
 
 #### Loading homebrew straight from the assembler
 

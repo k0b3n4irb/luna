@@ -297,7 +297,7 @@ luna-libretro     # ❌ libretro core (V2, native-only)
 
 # ──────────── BINARIES & GUI ───────────────────────────────
 luna-cli          # ❌ `luna` binary, dispatches the modes
-luna-gui          # ⚠️ egui/wgpu (native + WASM via eframe)
+luna-gui          # ⚠️ egui/wgpu (planned: native + WASM; as built: native only, winit + pixels + egui-wgpu)
 luna-overlay      # ⚠️ spectator overlays (native + WASM)
 ```
 
@@ -317,7 +317,7 @@ and the golden reference frames used by the visual tests.
 | Serialization       | `serde` + `serde_json`                         | Essential for MCP                                           |
 | MCP server          | `rmcp` (official Anthropic) — native only      | No `wasm32-unknown-unknown` support                         |
 | Schemas             | `schemars` + `ts-rs` (build-time) + `utoipa`   | JSON Schema / TS / OpenAPI generation                       |
-| Rendering (gui)     | `wgpu` + `egui` / `eframe`                     | Cross-platform native + WASM via WebGPU/WebGL               |
+| Rendering (gui)     | `wgpu` + `egui` (as built: `winit` + `pixels` + `egui-wgpu`, no `eframe`) | Planned: cross-platform native + WASM via WebGPU/WebGL |
 | Native audio        | `cpal`                                         | Cross-platform low-latency                                  |
 | Web audio           | `cpal` (wasm-bindgen backend, output only)     | Web Audio API bridge; ~50-100ms latency                     |
 | 65C816 testing      | per-instruction state-vector suite (JSON)      | Exhaustive opcode-level conformance vectors                 |
@@ -412,15 +412,20 @@ pub trait Bus {
     fn nmi_pending(&self) -> bool;
     fn irq_pending(&self) -> bool;
 }
-
-/// Trait for components stored behind the bus (PPU, DMA, etc.)
-pub trait BusDevice {
-    fn read(&mut self, addr: u32) -> u8;
-    fn write(&mut self, addr: u32, value: u8);
-    fn snapshot(&self) -> Vec<u8>;
-    fn restore(&mut self, data: &[u8]) -> Result<(), SnapshotError>;
-}
 ```
+
+> **As built** (`crates/luna-bus/src/bus.rs`). The trait kept this shape:
+> `read` / `write` take an `Addr24` and pay their own access cost through
+> `io_cycle(mcycles)`. Two things differ from the sketch above. The
+> interrupt probes became one method, `last_cycle(i_flag) ->
+> InterruptSample { nmi, irq, wake }`, which the CPU calls one cycle before
+> an instruction's final bus access — the point where ares samples the
+> lines. And two hooks with empty defaults, `idle_jump(pc)` and
+> `idle_branch(pc)`, let the SA-1's bus charge its jump penalties. There is
+> no generic trait for "a component behind the bus": the PPU, the APU ports
+> and the DMA controller are plain fields of the system that the bus
+> implementation in `luna-core` addresses directly; only the cartridge is
+> behind a trait (next section).
 
 **Why `io_cycle()`?** It is the primitive that separates a "moderately
 accurate" SNES emulator from a truly cycle-accurate one. Without it, the
@@ -431,16 +436,27 @@ guarantees accuracy while staying zero-alloc in the hot loop.
 
 ### Cartridge mappers
 
-A `Mapper` trait that implements `BusDevice` and exposes the topology
-specific to the cartridge type:
+A `Mapper` trait (`crates/luna-bus/src/mapper.rs`) is the cartridge as the
+bus sees it. Its two core methods say whether the cartridge owns an
+address at all: `read(addr) -> Option<u8>` returns `None`, and
+`write(addr, value) -> bool` returns `false`, when the address is not the
+cartridge's, and the bus then falls through to WRAM, the PPU and the other
+registers. The mapper never charges access time — that stays with the bus.
+The rest of the trait has default implementations that a plain cartridge
+leaves alone: battery RAM (`sram`, `load_sram`), save-state bytes
+(`save_state`, `load_state`), `reset`, and the coprocessor hooks
+(`step_coproc`, `coproc_main_irq_pending`, snapshots and traces).
+
+`MapperKind` names the mapping modes:
 
 - `LoRom` (mode 20)
 - `HiRom` (mode 21)
 - `ExHiRom` (mode 25)
-- `Sa1Mapper`
-- `SuperFxMapper`
-- `SDD1Mapper`
-- `SPC7110Mapper`
+- `Sa1`
+- `SuperFx`
+- `Dsp1`
+- `Sdd1`
+- `Spc7110` (named, not emulated: such a cartridge is refused at load)
 
 Detection is done by `luna-cartridge`, which parses the SNES internal
 header (offset 0x7FC0 or 0xFFC0) to choose the mapper.
@@ -1458,10 +1474,10 @@ goes through the `luna-async` facade (§4.1) to stay cross-target.
 │                   │ Rc<RefCell<EmuState>>                       │
 │                   ▼                                             │
 │  ┌─────────────────────────────────────────────────────────┐   │
-│  │ Microtask queue: luna-mcp-client + GUI eframe           │   │
+│  │ Microtask queue: luna-mcp-client + GUI (egui)           │   │
 │  │  - WebSocket to a remote native Luna (NO embedded MCP   │   │
 │  │    server — rmcp incompatible with WASM)                │   │
-│  │  - egui/wgpu via eframe (WebGPU or WebGL2)              │   │
+│  │  - egui/wgpu (WebGPU or WebGL2) — never built           │   │
 │  └─────────────────────────────────────────────────────────┘   │
 └────────────────────────────────────────────────────────────────┘
 ```
@@ -1757,8 +1773,8 @@ Optional phases depending on traction & community feedback:
    (simple) or several parallel sessions (unlocks "cloud sandbox")?
 8. **`!Send` everywhere vs cfg-gate**: does the simplicity of `!Send`
    everywhere outweigh the lost native parallelism? Research recommendation:
-   `!Send` everywhere (see eframe, the majority of cross-target Rust
-   emulators).
+   `!Send` everywhere (as the majority of cross-target Rust emulators
+   do).
 
 ### Product questions
 

@@ -33,8 +33,9 @@ tar xzf luna-linux-x86_64.tar.gz && cd luna-linux-x86_64
 ```
 
 On Windows, download the `.zip`, extract it (Explorer opens it natively), and
-run `luna-gui.exe` or `luna.exe`. Each archive contains both binaries and a
-`.sha256` checksum.
+run `luna-gui.exe` or `luna.exe`. Each archive contains both binaries (plus
+`LICENSE` and `README.md`); a matching `<asset>.sha256` checksum is
+published beside it on the release page.
 
 ### Runtime requirements
 

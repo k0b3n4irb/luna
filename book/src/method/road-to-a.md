@@ -29,8 +29,8 @@ own.
    "observably correct where measured" into "observably correct, broadly." This
    is confidence work, and it is cheap now that the harness is self-contained.
 
-2. **Sub-cycle refinements below the floor.** A few timing details — the exact
-   poll point of an interrupt, a one-byte edge in an obscure transfer mode — are
+2. **Sub-cycle refinements below the floor.** A few timing details — a
+   one-byte edge in an obscure transfer mode, for example — are
    theoretically more faithful than Luna's current model, yet sit *below* the
    threshold any measurement (or any game) can detect. They are worth doing for
    completeness, not because anything is wrong.

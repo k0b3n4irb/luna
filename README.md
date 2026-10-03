@@ -54,7 +54,7 @@ It runs three ways: the **GUI debugger** (`luna-gui`, a human plays), the
 - **AI-native** — a stable introspection API + an MCP server; an agent reads
   state and drives input through one contract the CLI, GUI and MCP all share.
 - **A real debugger GUI** — memory, disassembly and live panels over winit + wgpu,
-  two remappable controllers, plus SNES Mouse & Super Scope.
+  two remappable controllers, plus SNES Mouse, Super Scope & Super Multitap (5 players).
 - **Never lose progress** — automatic `.srm` battery saves + 9 save-state slots.
 
 ## 🙏 Acknowledgements

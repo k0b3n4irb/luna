@@ -120,9 +120,10 @@ binding is stored by physical key position and persisted across sessions.
 
 ## Gamepads
 
-Plug in up to two host gamepads (SDL-style mappings via `gilrs`): the
+Plug in up to five host gamepads (SDL-style mappings via `gilrs`): the
 first connected pad drives Player 1, the second Player 2, merged with
-the keyboard (both work at once). Fixed, Mesen2-like layout:
+the keyboard (both work at once); the third to fifth drive players 3-5
+when a Super Multitap is on port 2. Fixed, Mesen2-like layout:
 
 | Gamepad             | SNES        |
 |---------------------|-------------|

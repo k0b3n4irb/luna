@@ -1,7 +1,7 @@
 # Developing homebrew with luna — `luna test`
 
 Homebrew developers have had no serious CI story: the classic loop is
-"build, open an emulator, eyeball it". `luna test` (issue #181) turns
+"build, open an emulator, eyeball it". `luna test` turns
 that into a declarative suite a pipeline can run in seconds — one TOML
 manifest per test, executed in-process against the same `luna-api`
 surface the GUI and MCP use, with the CLI's exit-code contract:
@@ -71,14 +71,31 @@ r_score = { ge = 0x1000 }      # …and tables give ge/gt/le/lt/ne thresholds
 [asserts.blocks]               # byte-range equality, any memory space
 "0000" = { space = "vram", hex = "7cc6cede..." }
 
-[asserts.trace]                # coprocessor liveness
-superfx = { min = 1 }
+[asserts.trace]                # a trace recorded at least `min` events
+dma = { min = 1 }              # the boot uploaded something to VRAM by DMA
 
 [asserts.ppu]                  # PPU registers, named as `luna state` prints them
-[asserts.gsu]                  # Super FX state, same vocabulary
 inidisp = 0x0F                 # the screen is on at full brightness
 bgmode = 5                     # …and the mode the example claims to demo
 "windows.0" = 0x20             # `.` indexes arrays and nested tables
+```
+
+A Super FX cartridge adds one more table, `[asserts.gsu]`, with the same
+vocabulary idea (the field names `luna state` prints under `gsu`). Keep it
+out of a manifest for any other cartridge: with no GSU on board the table
+fails instead of passing vacuously.
+
+```toml
+# tests/render.toml — a Super FX game: "the GSU ran, and nothing read under it"
+rom = "../build/fxgame.sfc"
+frames = 300
+
+[asserts.trace]
+superfx = { min = 1 }          # the GSU executed at least one opcode
+
+[asserts.gsu]                  # Super FX state, named as `luna state` prints it
+bus_violations = 0             # the CPU never read the cartridge while the GSU held it
+instructions_executed = { gt = 10000 }
 ```
 
 **Which console the ROM runs on** is set by three optional keys, all in
@@ -157,7 +174,7 @@ What each assert means:
   would be a trap nobody would suspect. `BANK:OFFSET+N` works too.
 
   With an explicit `offset`, the key becomes a **free label** — so two
-  spaces at the same offset can share a manifest (#210):
+  spaces at the same offset can share a manifest:
 
   ```toml
   [asserts.blocks]
@@ -196,12 +213,17 @@ yloc = "unchanged"
 r_mode = { dir = "unchanged", width = 1 }
 ```
 
+A `delta` entry compares a **little-endian u16** unless it says
+`width = 1` — unlike `[asserts.values]`, which reads one byte when the
+expected value fits in one. A counter that is a single byte next to an
+unrelated one needs the table form, as `r_mode` above.
+
 `at_frame` values must increase; `steps` cannot be combined with
 checkpoints (use `frames`, which may extend past the last checkpoint —
 with checkpoints alone, the last one ends the run). The final
 `[asserts]` block still evaluates at the very end.
 
-## The final capabilities (#212)
+## More asserts and inputs
 
 - **Peripheral input** — top-level or per-checkpoint `mouse =
   "frame:dx,dy,buttons"` (`;`-separated, the `--mouse` grammar; plugs a
@@ -270,6 +292,9 @@ with checkpoints alone, the last one ends the run). The final
   [checkpoint.ppu]
   m7a = -256
   ```
+
+  `[checkpoint.gsu]` is the same per-leg form for the Super FX table
+  below.
 - **`[asserts.gsu]`** — the Super FX, keyed by the field names
   `luna state --out -` prints under `gsu`, same grammar and the same `.`
   into arrays: `running`, `pbr`, `cbr`, `scbr`, `colr`, `por`, `clsr`,
@@ -287,6 +312,11 @@ with checkpoints alone, the last one ends the run). The final
   [asserts.gsu]
   instructions_executed = { gt = 10000 }
   bus_violations = 0
+
+  [[checkpoint]]               # per-leg: the GSU has started by frame 200
+  at_frame = 200
+  [checkpoint.gsu]
+  instructions_executed = { gt = 0 }
   ```
 
   `bus_violations` counts CPU reads that got a dummy byte or open bus
@@ -357,17 +387,21 @@ with checkpoints alone, the last one ends the run). The final
 
 Input scripts use exactly the `--input` grammar (`frame:mask`, `#`
 comments, `@file`), so a recording exported from the GUI or captured
-over MCP (`take_input_capture`) replays verbatim. Checkpoints spend
-from the same budget as the run bound (issue #126 semantics).
+over MCP (`take_input_capture`) replays verbatim. Script entries
+spend from the run bound: under `steps = N` the run is exactly N
+instructions long, and an entry whose frame it never reaches does not
+fire.
 
 ## A GitHub Actions recipe
 
 Copy this into a homebrew repo — it builds the ROM, fetches the latest
 luna release binary (no Rust toolchain), and runs the suite. To pin a
 version instead, swap `latest/download/luna-linux-x86_64.tar.gz` for
-`download/v1.25.0/luna-v1.25.0-linux-x86_64.tar.gz` (the unversioned
-alias ships from v1.25.0 on; the folder inside is then
-`luna-v1.25.0-linux-x86_64/`):
+`download/vX.Y.Z/luna-vX.Y.Z-linux-x86_64.tar.gz` (the folder inside is
+then `luna-vX.Y.Z-linux-x86_64/`). Only the five most recent versions keep
+a release with binaries, so a pin has to be moved forward from time to
+time; an older version is built from its tag instead (every tag is kept —
+see [Installing](install.md)):
 
 ```yaml
 name: test
@@ -394,17 +428,25 @@ jobs:
           path: tests/artifacts/
 ```
 
-`--report json` appends a machine-readable summary (per-test pass/fail,
-failure details, measured `fbhash`) to stdout for dashboards or PR
-comments. Each test also carries the machine it ran on — `"power_on":
+`--report json` appends a machine-readable summary to stdout, after the
+`PASS` / `FAIL` lines, for dashboards or PR comments: the four counters,
+then one object per test (pass/fail, failure details, measured `fbhash`,
+the `manifest` path, and `skipped` — the skip reason, or `null`). Each
+test also carries the machine it ran on — `"power_on":
 "random", "seed": 12345` (a deterministic run reports `"zero"` / `"ones"`
 with `"seed": null`) — so a red `random` run is reproducible from the
 report alone — and the `"region"` its manifest forced (`null` when the
 cartridge header decided):
 
 ```json
-{ "name": "boot", "passed": false, "fbhash": "…",
-  "power_on": "random", "seed": 12345, "region": "pal", "failures": ["…"] }
+{
+  "passed": 0, "failed": 1, "skipped": 0, "total": 1,
+  "tests": [
+    { "name": "boot", "manifest": "tests/boot.toml", "passed": false,
+      "skipped": null, "failures": ["…"], "fbhash": "…",
+      "power_on": "random", "seed": 12345, "region": "pal" }
+  ]
+}
 ```
 
 ## Tips

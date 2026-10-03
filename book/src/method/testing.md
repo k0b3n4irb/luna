@@ -9,8 +9,9 @@ validated and *why* it is trustworthy.
 ## Tier 1 — per-instruction CPU suites (hardware truth)
 
 Both CPU cores are checked against **exhaustive single-instruction
-state-transition vectors** — roughly ten thousand cases per opcode, covering
-every addressing mode and flag combination. Each case sets the processor to a
+state-transition vectors** — ten thousand cases per opcode for the 65C816
+(in each of its two modes, native and emulation), one thousand for the
+SPC700 — covering every addressing mode and flag combination. Each case sets the processor to a
 known state, runs one instruction, and asserts the resulting registers, flags
 and memory.
 
