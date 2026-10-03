@@ -134,7 +134,7 @@ The version tracks luna's **user-facing contract**, not the Rust API:
   commit, never a GitHub merge.
   1. On `develop`: bump `version` in the workspace `Cargo.toml` (which
      updates `Cargo.lock`), regenerate `fuzz/Cargo.lock`
-     (`cargo fetch --manifest-path fuzz/Cargo.toml` — `fuzz/` is its own
+     (`cargo update --manifest-path fuzz/Cargo.toml --workspace` — `fuzz/` is its own
      workspace, so its lock file does not follow the main one), and
      finalize the version's `CHANGELOG.md` section.
   2. Optional dry run: tag that commit `vX.Y.Z-rc1` and push the tag.

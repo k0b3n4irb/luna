@@ -8,7 +8,6 @@
 // re-port from ares head) noisier.
 #![allow(clippy::pub_underscore_fields)]
 #![allow(clippy::used_underscore_binding)]
-#![allow(clippy::used_underscore_items)]
 
 //! Cycle-accurate port of ares' S-DSP (Sony CXD1222Q-1).
 //!

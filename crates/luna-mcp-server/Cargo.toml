@@ -14,15 +14,13 @@ publish.workspace = true
 luna-api   = { workspace = true }
 
 rmcp       = { workspace = true }
-schemars   = { workspace = true }
 base64     = { workspace = true }
 serde      = { workspace = true, features = ["std", "derive"] }
-serde_json = { workspace = true, features = ["std"] } # used by the rmcp::tool macro expansion
 
-# Tokio runtime — we need the multi-thread runtime + io-std for stdio
-# transport. The workspace default has `default-features = false`, so
-# enable the bits we actually need here.
-tokio      = { workspace = true, features = ["macros", "rt-multi-thread", "io-std", "sync"] }
+# The server itself only takes `tokio::sync::Mutex`. The runtime is built
+# by the caller (luna-cli) and the stdio transport's tokio features come
+# from rmcp's own `transport-io`.
+tokio      = { workspace = true, features = ["sync"] }
 
 # Protocol contract tests (tests/protocol.rs) drive the server with a REAL
 # rmcp client over an in-memory duplex: `client` gives us that peer (the

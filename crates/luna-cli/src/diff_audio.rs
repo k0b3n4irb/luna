@@ -80,7 +80,6 @@ fn rms(samples: &[(i16, i16)]) -> f64 {
             l.mul_add(l, r * r)
         })
         .sum();
-    #[allow(clippy::cast_precision_loss)] // sample counts are far below 2^52
     let n = (samples.len() * 2) as f64;
     (sum / n).sqrt()
 }

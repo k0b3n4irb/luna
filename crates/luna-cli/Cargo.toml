@@ -1,6 +1,6 @@
 [package]
 name = "luna-cli"
-description = "Luna SNES emulator — command-line entry point dispatching between run / mcp / replay modes"
+description = "Luna SNES emulator — the `luna` command-line binary (run / test / state / frames / diff / profile / bench / mcp and the dump subcommands)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -26,12 +26,7 @@ schemars   = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }
 toml       = { workspace = true }
 toml_edit  = { workspace = true }
-tokio      = { workspace = true, features = ["macros", "rt-multi-thread", "io-std"] }
+tokio      = { workspace = true, features = ["rt-multi-thread"] }
 
 [lints]
 workspace = true
-
-# `state --out -` emits JSON that the CLI-level regression tests parse
-# (tests/input_script_budget.rs).
-[dev-dependencies]
-serde_json = { workspace = true, features = ["std"] }

@@ -23,8 +23,6 @@
 //! and just prints a report — that's the friendly default during P0.4b
 //! development.
 
-#![allow(clippy::cast_possible_truncation)]
-
 use luna_bus::testing::{RamBus, TraceKind};
 use luna_cpu_65c816::{Cpu, StatusFlags};
 use serde::Deserialize;

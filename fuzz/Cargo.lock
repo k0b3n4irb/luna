@@ -13,9 +13,6 @@ name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
-dependencies = [
- "derive_arbitrary",
-]
 
 [[package]]
 name = "autocfg"
@@ -86,17 +83,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "01a7799fd6b852db0e61728dde9a204c423b44d689dbd432522543614b490e78"
 dependencies = [
  "cfg-if",
-]
-
-[[package]]
-name = "derive_arbitrary"
-version = "1.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e567bd82dcff979e4b03460c307b3cdc9e96fde3d73bed1496d2bc75d9dd62a"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -219,7 +205,7 @@ dependencies = [
 
 [[package]]
 name = "luna-api"
-version = "1.24.0"
+version = "1.32.0"
 dependencies = [
  "bincode",
  "dirs",
@@ -238,7 +224,7 @@ dependencies = [
 
 [[package]]
 name = "luna-apu"
-version = "1.24.0"
+version = "1.32.0"
 dependencies = [
  "luna-cpu-spc700",
  "serde",
@@ -247,7 +233,7 @@ dependencies = [
 
 [[package]]
 name = "luna-bus"
-version = "1.24.0"
+version = "1.32.0"
 dependencies = [
  "bincode",
  "serde",
@@ -256,7 +242,7 @@ dependencies = [
 
 [[package]]
 name = "luna-cartridge"
-version = "1.24.0"
+version = "1.32.0"
 dependencies = [
  "luna-bus",
  "serde",
@@ -265,7 +251,7 @@ dependencies = [
 
 [[package]]
 name = "luna-core"
-version = "1.24.0"
+version = "1.32.0"
 dependencies = [
  "bincode",
  "luna-apu",
@@ -280,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "luna-cpu-65c816"
-version = "1.24.0"
+version = "1.32.0"
 dependencies = [
  "luna-bus",
  "serde",
@@ -288,14 +274,14 @@ dependencies = [
 
 [[package]]
 name = "luna-cpu-spc700"
-version = "1.24.0"
+version = "1.32.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "luna-cpu-upd96050"
-version = "1.24.0"
+version = "1.32.0"
 dependencies = [
  "bincode",
  "serde",
@@ -305,7 +291,6 @@ dependencies = [
 name = "luna-fuzz"
 version = "0.0.0"
 dependencies = [
- "arbitrary",
  "bincode",
  "libfuzzer-sys",
  "luna-api",
@@ -317,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "luna-ppu"
-version = "1.24.0"
+version = "1.32.0"
 dependencies = [
  "serde",
  "serde_bytes",
@@ -444,7 +429,7 @@ checksum = "92ecd8964f8453721699a1ed72037b0db49ce2f5a5138486ee89bed6f67cdf3a"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn",
 ]
 
 [[package]]
@@ -469,7 +454,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "serde_derive_internals",
- "syn 3.0.3",
+ "syn",
 ]
 
 [[package]]
@@ -509,7 +494,7 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn",
 ]
 
 [[package]]
@@ -520,7 +505,7 @@ checksum = "f852137cce035d6a4df67ccce505ff6b3e9fd3a10e3e52b24dc71e650bb1a9bd"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn",
 ]
 
 [[package]]
@@ -550,17 +535,6 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "syn"
-version = "2.0.119"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
-dependencies = [
- "proc-macro2",
- "quote",
- "unicode-ident",
-]
-
-[[package]]
-name = "syn"
 version = "3.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
@@ -587,7 +561,7 @@ checksum = "43cbfe0cf76104d42a574802844187e84a305e531ed54455f11fbde0f10541cd"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn",
 ]
 
 [[package]]

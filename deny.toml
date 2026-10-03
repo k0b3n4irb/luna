@@ -14,8 +14,10 @@ yanked = "deny"
 # (there is deliberately no bot opening upgrade PRs).
 ignore = [
     # quick-xml 0.39 DoS vectors (quadratic dup-attribute check,
-    # unbounded NS allocation). Transitive via the rfd/zbus desktop
-    # portal stack — parses local portal replies, not remote input.
+    # unbounded NS allocation). Its only dependent is wayland-scanner,
+    # a proc-macro (via winit / rfd's wayland-client): it parses the
+    # protocol XML shipped inside the wayland crates at build time, is
+    # not linked into luna or luna-gui, and sees no runtime input.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
     # bincode is unmaintained upstream (the advisory covers every
@@ -43,7 +45,6 @@ allow = [
     "MPL-2.0",
     "Unicode-3.0",
     "CC0-1.0",
-    "BSL-1.0",
     "OFL-1.1",
     "Ubuntu-font-1.0",
 ]

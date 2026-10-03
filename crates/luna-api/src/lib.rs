@@ -1582,7 +1582,6 @@ impl Emulator {
     /// Deepest native-mode stack reach so far, or `None` if no native-mode
     /// instruction has run yet. See [`StackLow`].
     #[must_use]
-    #[allow(clippy::missing_const_for_fn, reason = "resolves a symbol")]
     pub fn stack_low(&self) -> Option<StackLow> {
         self.stack_low.clone().map(|mut l| {
             l.symbol = self.symbol_for_addr(l.pc);

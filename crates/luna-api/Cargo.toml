@@ -1,6 +1,6 @@
 [package]
 name = "luna-api"
-description = "Luna's public stable API — Control, Debug, Semantic and Events traits exposed to every transport"
+description = "Luna's public API — the `Emulator` type through which the CLI, the MCP server and the GUI drive and observe the emulator"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

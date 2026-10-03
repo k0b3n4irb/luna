@@ -22,8 +22,6 @@
 //! and just prints a report. This mirrors the 65C816 harness in
 //! `crates/luna-cpu-65c816/tests/tom_harte.rs`.
 
-#![allow(clippy::cast_possible_truncation)]
-
 use luna_cpu_spc700::flags::Psw;
 use luna_cpu_spc700::{Spc700, SpcBus};
 use serde::Deserialize;

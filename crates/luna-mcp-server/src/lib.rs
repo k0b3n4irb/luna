@@ -3589,10 +3589,8 @@ pub struct EmptyOk {
 
 #[rmcp::tool_handler]
 impl ServerHandler for LunaServer {
-    // rmcp's ServerInfo/Implementation are #[non_exhaustive], so the
-    // struct-expression form clippy suggests cannot compile — mutate a
-    // Default instead.
-    #[allow(clippy::field_reassign_with_default)]
+    // rmcp's ServerInfo/Implementation are #[non_exhaustive], so a
+    // struct expression cannot compile — mutate a Default instead.
     fn get_info(&self) -> rmcp::model::ServerInfo {
         let mut info = rmcp::model::ServerInfo::default();
         let mut implementation = rmcp::model::Implementation::default();
