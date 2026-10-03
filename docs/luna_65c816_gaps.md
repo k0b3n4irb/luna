@@ -4,7 +4,7 @@ Reference-first audit of `crates/luna-cpu-65c816` against ares
 (`ares/component/processor/wdc65816/*`, with the SNES interrupt glue in
 `ares/sfc/cpu/{irq,timing}.cpp` for cross-reference). Companion to
 `luna_bg_gaps.md` / `luna_obj_gaps.md` / `luna_apu_gaps.md` /
-`luna_dma_gaps.md` / `luna_sa1_gaps.md` / `luna_spc700_gaps.md`.
+`hdma_ares_audit.md` / `luna_sa1_gaps.md` / `luna_spc700_gaps.md`.
 
 ## Methodology note — what is already gated
 

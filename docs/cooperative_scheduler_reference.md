@@ -15,16 +15,16 @@
 >
 > What survives, and why this doc is kept: the ares Thread/Scheduler
 > cothread model below is an accurate reference for genuine remaining
-> timing residuals, and two real items are recorded here — the missing
-> **DRAM refresh** feature, and the **shipped SCMR GSU-side bus
-> arbitration** stall. Everything that framed the flicker as a scheduling
-> problem has been cut.
+> timing residuals, and two real items are recorded here — the **DRAM
+> refresh** (missing when this was written, **landed 2026-06-18** — see §3),
+> and the **shipped SCMR GSU-side bus arbitration** stall. Everything that
+> framed the flicker as a scheduling problem has been cut.
 
 > **See also (2026-06):** the SMW2 Yoshi's Island intro "barcode" text bug
 > was traced *away* from GSU timing — the GSU engine and its per-op cycle
 > model are faithful (verified against Mesen `Gsu::Run`/`Step`), and the
 > text glyphs are not GSU-rendered at all. Full log:
-> `docs/yoshis_island_text_barcode_investigation.md`.
+> `docs/archive/yoshis_island_text_barcode_investigation.md`.
 
 Governed by `.claude/rules/faithful-port-and-dichotomy.md`. Written
 reference-first from the actual ares source
@@ -91,34 +91,36 @@ The GSU engine logic itself is **proven byte-exact** (`gsu_differential` /
 `ramcl` ROM/RAM-buffer latency, and the internal `step(clocks)` that services
 buffers + accumulates `self.cycles` all mirror ares. Do NOT touch it.
 
-## 3. Real residual — DRAM refresh (missing feature)
-
-A genuine missing ares feature, independent of the (retracted) flicker thesis.
+## 3. DRAM refresh — landed 2026-06-18 (was: missing feature)
 
 ares (`cpu/timing.cpp:21-29,70-72`) halts the S-CPU **40 master cycles every
-scanline** (5×`step(6)+step(2)`, hcounter ≈ 538) to refresh work RAM. luna
-omits it, so the CPU runs ~40 mclk/line (≈2.9 %/frame) too fast and multi-frame
-tasks finish slightly early.
+scanline** (5×`step(6)+step(2)`) to refresh work RAM. luna models it, in
+`crates/luna-core/src/snes.rs`:
 
-A faithful implementation (per-scanline 40-mclk CPU stall, charged like the HDMA
-stall in `sched_one_line`) was prototyped and **helped non-GSU timing**: DKC's
-first WRAM divergence moved from frame 89 → gone (0 diffs at f89, was 8);
-residual 17 → 13 bytes; the CPU per-frame rate correctly dropped.
+- `DRAM_REFRESH_CYCLES` (40) is the halt; `SnesBus::sched_advance` adds it
+  to the stall it returns when the access crosses the line's refresh
+  position, and `SnesBus::advance_time` re-advances every other subsystem
+  by that stall — the APU, PPU and coprocessor keep running while the CPU
+  is halted.
+- The position is **not** the constant 538 this section used to quote:
+  `dram_refresh_pos` aligns it to the DMA clock divider sampled at the
+  start of the scanline (531..=538), as ares does.
+- The refresh is also charged during DMA, and an SA-1 cart sees it through
+  `Mapper::set_scpu_refresh` (the I-RAM `conflict()` exemption,
+  [`luna_sa1_gaps.md`](luna_sa1_gaps.md) #19).
 
-It is **not landed.** When refresh re-advances the master clock it also steps
-the coprocessor (correct — the GSU runs on its own clock during the S-CPU
-work-RAM refresh pause), so composing it with luna's GSU integration shifts the
-GSU launch phase and regressed the GSU titles (Star Fox blacked out, WRAM diff
-@ frame 200: 21 → 2087). The regression was bisected to a **sub-frame phase
-residual** in luna's pre-GSU-launch CPU/VRAM-upload timing that refresh tips
-across a vblank boundary, not to the GSU engine or the upload loop (both match
-Mesen at frame and instruction granularity). Closing that residual requires
-comprehensive sub-cycle CPU-position fidelity for an **invisible** payoff (all
-games already play fine).
+The CPU↔scanline phase that the refresh depends on has since been locked
+against Mesen2 (cycle-identical over 841 386 instructions on CPUBRA — see
+"Open items" #4 of [`accuracy_scorecard.md`](accuracy_scorecard.md)).
 
-**Status:** DRAM refresh is a real, faithful missing piece. Keep the patch in
-git history; revisit only as part of a deliberate full-cycle-accuracy effort.
-Until then the residual stays — invisible, games play fine.
+*Historical note.* When this document was written (2026-06-11) the refresh
+was only a prototype: it helped non-GSU timing (DKC's first WRAM divergence
+at frame 89 disappeared) but regressed the GSU titles — Star Fox blacked
+out — because it tipped a sub-frame phase residual in luna's pre-GSU-launch
+timing across a VBlank boundary. This section then read "It is not landed
+… keep the patch in git history". That residual was the CPU-vs-scanline
+phase (reset preamble, refresh position, DMA cost models), closed in
+2026-07; nothing in this section is open any more.
 
 ## 4. Shipped — SCMR GSU-side bus arbitration (faithful correctness fix)
 
@@ -143,7 +145,7 @@ resumability is needed. ares uses the same idea via the blocking
 
 **luna's gap (was):** luna already had the `scmr_ron`/`scmr_ran` bits, the
 CPU-side `busy_rom_vector` returned on CPU ROM reads during GSU run
-(`superfx.rs:1453`), and RAM-busy gating (`1461`). It **lacked only the
+(`crates/luna-bus/src/superfx.rs`), and RAM-busy gating. It **lacked only the
 GSU-SIDE stall**: `gsu_read`/`gsu_write` read/write ROM/RAM directly and never
 stalled on `!scmr_ron`/`!scmr_ran`.
 
@@ -162,6 +164,9 @@ luna stays **CPU-driven** (no global cothread rewrite). The `clock_deficit`
 mechanism already reproduces ares' `synchronize` for the GSU↔CPU pair, and both
 references run the GSU at whole-instruction granularity, so a full ares cothread
 scheduler is unnecessary and Rust-hostile (no native `co_switch`, huge blast
-radius). The remaining real residual is the sub-frame CPU-timing precision that
-gates DRAM refresh (§3); it is a frontier full-cycle-accuracy item with an
-invisible payoff, not a scheduling-architecture problem.
+radius). The sub-frame CPU-timing precision that used to gate DRAM refresh
+(§3) is closed. What remains is the batched scheduling grain itself — the
+GSU and the SA-1 are stepped in bursts between S-CPU bus accesses rather than
+as cothreads — recorded as the residual of the Super FX and SA-1 rows of
+[`accuracy_scorecard.md`](accuracy_scorecard.md); engine outputs are exact,
+only stall placement differs.

@@ -1,3 +1,5 @@
+Archived 2026-10-04: historical; see [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md) for the architecture that was actually built (this pre-code research describes options, some never implemented).
+
 # Luna — Pre-Phase-0 Research
 
 > Synthesis of the three research tracks conducted ahead of any code, to validate

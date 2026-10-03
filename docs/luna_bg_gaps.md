@@ -34,12 +34,13 @@ BG1's palette region — wrong colours.
 
 **Fixed**: the renderer now carries a `mode0_palette_base` (`(bg_idx)
 << 5` when `bgmode & 0x07 == 0`, else 0) and applies it to the 2bpp
-CGRAM index (`renderer.rs` ~1209/1244). Max index 127, inside the BG
+CGRAM index (`BgGeom::mode0_palette_base` in
+`crates/luna-ppu/src/renderer.rs`). Max index 127, inside the BG
 half of CGRAM.
 
 ---
 
-## ✅ 2. Offset-per-tile (Modes 2 / 4) — DONE (Mode 6 deferred)
+## ✅ 2. Offset-per-tile (Modes 2 / 4 / 6) — DONE
 
 ares `background.cpp:52-69` + `fetchOffset()` reinterpret BG3's tilemap
 as per-column H/V offset words for BG1/BG2. Implemented in
@@ -57,9 +58,8 @@ as per-column H/V offset words for BG1/BG2. Implemented in
   Chrono Trigger title (the "TRIGGER" logo now waves per-column instead
   of rendering flat).
 
-**Mode 6 deferred**: it is hi-res *and* OPT, so OPT must move into the
-512-sampling path — rare (≈no commercial game uses Mode 6). Tracked
-in 🟡 below.
+**Mode 6** (hi-res *and* OPT) was first deferred, then done: OPT is wired
+into the 512-sampling path — rows #13 and #15 in the table below.
 
 ## ✅ 3. Hi-res Modes 5/6 (512 px) — DONE (Option A, downsample 512→256)
 
@@ -72,19 +72,24 @@ horizontal blend. Faithful to ares `dac.cpp:39-40` and Mesen2
   doubled, 8-px hires tiles) → `(above[x]=col 2x+1, below[x]=col 2x)`.
 - Compositor: hires `main`←`bgs_above`, `sub`←`bgs_below`, then
   `out[x] = average_bgr5(sub, main)`.
-- `MODE56_TABLE` (Mode-1 order minus BG3) wired into `priority_table`.
+- `priority_table` selects `MODE5_TABLE` (= `MODE2OR3_TABLE`: OBJ3, BG1H,
+  OBJ2, BG2H, OBJ1, BG1L, OBJ0, BG2L) and `MODE6_TABLE` (OBJ3, BG1H, OBJ2,
+  OBJ1, BG1L, OBJ0). The first implementation used a single shared table
+  in "Mode-1 order minus BG3"; that was wrong and was replaced by the
+  2026-09-11 audit (ares `io.cpp` `updateVideoMode` cases 5 and 6).
 - Shared `BgGeom` + `sample_bg_pixel` keep lores/hires in lockstep.
 - Gated on `is_hires` → modes 0-4/7 are byte-identical to before.
-- Tests: `hires_samples_two_distinct_subpixels_per_dot`; full suite
-  (96) green. Not GUI-validated — no Mode 5/6 test ROM available.
+- Tests: `hires_samples_two_distinct_subpixels_per_dot`, plus the corpus
+  goldens on Mode 5 scenes (`MosaicMode5`, the `PPU/Interlace/*` family)
+  and the hand-built Mode 6 repro in `tests/mode6opt/` (rows #14-#16).
 
 **Pseudo-hires** (`$2133` bit 3) is also done: it reuses the same
 main/sub interleave-and-average but with lores (256) BG content — the
 transparency trick (Kirby waterfalls, Jurassic Park). Gated on the bit,
 so the existing test ROMs (all `setini & 8 == 0`) are unchanged.
 
-Still pending (follow-ups, see 🟡 below): **mosaic in hi-res** and
-exact color-math on the sub subpixel.
+Still pending: exact color-math on the sub subpixel (row #12). Mosaic in
+hi-res is done (row #11).
 
 ## ✅ 4. Mode 7 EXTBG (BG2 overlay) — DONE
 
@@ -115,7 +120,7 @@ GUI-validated (no test ROM enables EXTBG).
 | 12 | Hi-res sub-subpixel uses raw winner, not its own color-math | `dac.cpp:43-80` | **approximation accepted** — the common case (pseudo-hires transparency, color-math off) averages correctly; only hi-res *with* color-math (rare) is approximate |
 | ~~16~~ | ~~Interlace vertical doubling~~ — **DONE (Phases A-C)**: `field` parity toggles each frame at the V-counter wrap, exposed at STAT78 bit 7 (Phase A); a screen line `y` samples logical line `y*2+field` (Phase B, ares `background.cpp:40`); interlace collapses 448→224 by averaging both fields in `flush_partial_scanline`, the vertical analog of the hi-res 512→256 Option A (Phase C). OBJ interlace (height>>1 + sprite row `*2+field` + `baseSize≥6→16` quirk) in `obj_gaps` #6 (Phase D). Mosaic+interlace correct per `background.cpp:38-44`: mosaic snaps the screen line then doubles, the field bit drops under mosaic, and lores interlace does **not** double (line 40 is hires-only). All 6 `PPU/Interlace/*` ROMs wired + validated; mosaic+interlace eyeball-validated on MosaicMode5 (R held). | `background.cpp:38-44` | ✅ |
 | ~~13~~ | ~~Offset-per-tile in Mode 6~~ — **DONE**: OPT now wired into the hi-res path for Mode 6 (BG1) | `background.cpp:52-69` | ✅ |
-| ~~14~~ | ~~Mode 5 hi-res scene rendered duplicated~~ — **DONE**: in hi-res, BG tile columns are always 16 *hires* px wide regardless of the tile-size bit (ares `background.cpp:79` `htiles = 4`), with the right 8-px half from `character + 1`. luna treated them as 8-wide, so a 32-wide map filled only 256 of the 512 hires px and repeated. `sample_bg_pixel` now decouples horizontal/vertical tile span (`force_wide`). `MosaicMode5` renders the single figure, matching the reference. Mode 6 shares the same path — covered by the `mode6_hires_tile_columns_are_16_wide_no_duplication` unit test (no Mode 6 ROM exists). | `background.cpp:78-101` | ✅ |
+| ~~14~~ | ~~Mode 5 hi-res scene rendered duplicated~~ — **DONE**: in hi-res, BG tile columns are always 16 *hires* px wide regardless of the tile-size bit (ares `background.cpp:79` `htiles = 4`), with the right 8-px half from `character + 1`. luna treated them as 8-wide, so a 32-wide map filled only 256 of the 512 hires px and repeated. `sample_bg_pixel` now decouples horizontal/vertical tile span (`force_wide`). `MosaicMode5` renders the single figure, matching the reference. Mode 6 shares the same path — covered by the `mode6_hires_tile_columns_are_16_wide_no_duplication` unit test (the corpus has no Mode 6 ROM; the hand-built `tests/mode6opt/mode6opt.sfc` of row #15 is not booted by any test). | `background.cpp:78-101` | ✅ |
 | ~~15~~ | ~~Mode 6 OPT-in-hi-res scroll math~~ — **DONE**: in hi-res the base scroll doubles but an OPT override does **not** (ares `background.cpp:66`: `hoffset = hpixel + (hlookup & ~7) + (hscroll & 7)` — `hscroll` already doubled, `hlookup`/OPT raw). luna doubled the whole effective scroll (`eff.0 << 1`), shifting OPT columns twice as far. Fixed: `opt_scroll` now reports `h_from_opt`, and the hi-res path uses `(opt & ~7) + ((hscroll << 1) & 7)` for OPT-active columns. Built a minimal Mode 6 OPT repro (`tests/mode6opt/`) to settle it — the right half now shifts by ONE tile (was two). Guarded by `mode6_opt_offset_is_not_doubled_in_hires`. | `background.cpp:49,66` | ✅ |
 
 | ~~18~~ | ~~Clip-to-black applied after the colour math~~ | `dac.cpp:121-133` | ✅ **DONE 2026-09-12**: the CGWSEL 7:6 region zeroes the main colour BEFORE the blend and turns halving off, so a clipped pixel still shows the sub screen or the fixed colour in add mode instead of solid black. Mesen2 keeps halving in the "always" case; luna follows ares. Test `clip_to_black_runs_before_the_math_not_after`. |
@@ -156,8 +161,9 @@ compositor against ares `background.cpp` (run/fetch loop) and `dac.cpp`
 - **Mode 6 = BG1-only + BG3-as-OPT** — `is_opt` gated on mode 6, OPT
   enable bit `0x2000`/`0x4000` = ares `valid = 13 + id`. ✓ (#13)
 
-Only deviations: #12 (sub-subpixel color-math approximation) and #16
-(no interlaced output). No new bugs found; the stale "Mosaic is not
+Only deviation: #12 (sub-subpixel color-math approximation). (#16,
+interlaced output, was open when this audit was written and is done since —
+see the table.) No new bugs found; the stale "Mosaic is not
 applied here" doc-comment in `render_bg_scanline_indexed_hires` was
 corrected (mosaic *is* applied since #11).
 
@@ -196,4 +202,11 @@ corrected (mosaic *is* applied since #11).
 
 **All gaps closed** except #12 (hi-res sub-subpixel color-math), kept as
 a deliberate, documented approximation. The 🟠 set and the entire 🟡
-tail (#5/#6/#7/#8/#9/#11/#13) are done.
+tail (#5-#9, #11, #13-#18) are done.
+
+> **Note (2026-10-04 audit).** Row #16 says mosaic+interlace was
+> eyeball-validated on MosaicMode5 with R held. The committed golden
+> `ppu_mosaic_mode5` (`crates/luna-core/tests/snes_test_roms.rs`) does
+> **not** hold R — it has the same hash as `ppu_interlace_moogle` — so it
+> covers Mode 5 hi-res + interlace but not the mosaic itself: hi-res
+> mosaic (#11) has a unit-level guard only, no golden.

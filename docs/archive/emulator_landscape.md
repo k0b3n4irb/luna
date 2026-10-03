@@ -1,3 +1,5 @@
+Archived 2026-10-04: historical; see [`../accuracy_scorecard.md`](../accuracy_scorecard.md) for luna itself — this generic survey of third-party emulators has no live successor, and luna's references are ares and Mesen2 only (`.claude/rules/reference-first.md`).
+
 # SNES Emulators — Comparative Survey
 
 An overview of the principal Super Nintendo (SNES / Super Famicom) emulators,

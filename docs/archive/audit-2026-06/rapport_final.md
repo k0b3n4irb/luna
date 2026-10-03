@@ -204,7 +204,7 @@ Plus les 2 résidus architecturaux Phase 5 (DMA stepping, préemption HDMA).
 ## 6. ⚠️ Le scintillement Doom — diagnostic réactualisé (2026-06-10)
 
 C'est le point le plus important pour orienter l'effort. Le doc
-`emulator_comparison_ness_jgenesis.md` §6 documente une **réfutation instrumentée** :
+`docs/archive/emulator_comparison_ness_jgenesis.md` §6 documente une **réfutation instrumentée** :
 
 - Hypothèse « lump-DMA cause le flicker » → **RÉFUTÉE pour Doom** : seulement
   **2 GP-DMA sur 1556** chevauchent les scanlines d'IRQ (23/199) ; les gros DMA

@@ -8,9 +8,14 @@ same-arch-only vs visual-anchor-only. It answers OpenSNES follow-up RFE-4.
 
 luna's entire **headless** path — every CPU core (65C816, SPC700, uPD96050,
 GSU), the PPU, S-DSP, DMA/HDMA, and the coprocessors — is **integer-only**.
-There is no floating point, no `Date::now`, no RNG, and no hash-map iteration on
-the emulation path. So for a fixed `(ROM, mapper, input script, start state)`
-the execution is **bit-identical every run**. (The only floating point in the
+There is no floating point, no `Date::now`, no unseeded RNG, and no hash-map
+iteration on the emulation path. So for a fixed `(ROM, mapper, region, input
+script, power-on state, start state)` the execution is **bit-identical every
+run**. The power-on state is part of that tuple: the default (`--power-on
+zero`) and `ones` are constants, and `--power-on random` fills RAM from one
+**seeded** generator (`crates/luna-core/src/power.rs`) — the seed is printed,
+and `--power-on random=<seed>` replays the exact machine. A `random` run
+without an explicit seed is therefore *not* comparable run to run. (The only floating point in the
 project is the *GUI's* audio resampler and frame pacing — neither touches the
 headless trace/state/screenshot outputs.)
 
@@ -28,7 +33,7 @@ therefore stable by the same mechanism.
 | `--print-fbhash` (`fbhash=<16 hex>`) | **Exact** | **Exact — verified** (the visual gate) | Assert exact equality. |
 | Trace **event counts** — `--superfx-trace` / `--sa1-trace` instruction counts, `--dma-trace` / `--mem-trace` row counts, `instructions_executed`, `frame_count`, `nmis_serviced` | **Exact** | **Exact** — a count is a direct consequence of the execution path the fbhash already pins; a divergence would perturb the fbhash | Assert exact counts (a much stronger gate than `> 0`). |
 | Trace **row content** — per-row `pc`/`addr`/`value`/`vram_word`, the `blank`/`force_blank` flags, mailbox/SA-1 side events | **Exact** | **Exact** — same integer execution; same anchor argument | Assert exact, OR diff the whole CSV against a committed golden. |
-| **WRAM / ARAM byte dumps** (`--assert`, `--assert-aram`, `--assert-vram`, `--assert-cgram`, `peek_*`) | **Exact** | **Exact in practice** (same integer core), but **not yet pinned by a standing cross-arch differential** — the cross-arch WRAM harness needs an x86_64 host luna's CI does not yet have | Assert exact same-arch. Cross-arch, treat fbhash as the guaranteed gate and these as expected-equal-but-unpinned. |
+| **WRAM / ARAM byte dumps** (`--assert`, `--assert-aram`, `--assert-vram`, `--assert-cgram`, `peek_*`) | **Exact** | **Exact in practice** (same integer core), but **not pinned by a standing cross-arch differential** — no test compares a memory dump taken on one architecture with one taken on another (CI itself runs on x86_64 Linux, `runs-on: ubuntu-latest` in `.github/workflows/ci.yml`; the missing piece is the harness, not the host) | Assert exact same-arch. Cross-arch, treat fbhash as the guaranteed gate and these as expected-equal-but-unpinned. |
 | `--print-fbhash` timing fields, wall-clock, any GUI audio/pacing | n/a (host-dependent) | not stable | Never assert. |
 
 ## Practical guidance
@@ -38,9 +43,9 @@ therefore stable by the same mechanism.
   **row content** — they cannot diverge without also moving the fbhash. Replace
   `> 0 instructions executed` with the exact count.
 - **WRAM/ARAM/CGRAM byte assertions:** rock-solid run-to-run and same-arch.
-  Cross-arch they are expected-identical (same integer core) but luna has not
-  yet *run* the cross-arch byte differential (no x86_64 CI host); until it does,
-  prefer the fbhash for the cross-arch leg and keep byte asserts same-arch.
+  Cross-arch they are expected-identical (same integer core) but luna has no
+  standing cross-arch byte differential; until it has one, prefer the fbhash
+  for the cross-arch leg and keep byte asserts same-arch.
 
 If you ever observe a cross-arch mismatch in a count or row that the fbhash
 agrees on, that is a luna bug — please report it; the anchor argument says it
@@ -48,10 +53,17 @@ should not happen.
 
 ## Save states (`.luna` blobs)
 
-Since format **v5** (#167) a save state is **portable across luna builds and
-toolchains**: the ROM-identity hash that binds a state to its ROM is an
-explicit FNV-1a-64 over the raw ROM bytes (previously `std`'s `DefaultHasher`,
-whose algorithm Rust does not specify across releases — states silently broke
-on a toolchain bump), and the container is bincode 2 `standard`. A state is
-still rejected on a format-version or ROM mismatch, with a clean error. v4 and
-older blobs are not readable by v5 builds — re-save from a live run.
+A save state is **portable across luna builds and toolchains of the same
+format version**: the ROM-identity hash that binds a state to its ROM is an
+explicit FNV-1a-64 over the raw ROM bytes (before format v5, #167, it was
+`std`'s `DefaultHasher`, whose algorithm Rust does not specify across
+releases — states silently broke on a toolchain bump), and the container is
+bincode 2 `standard`.
+
+The format version is the constant `SAVE_STATE_VERSION` in
+`crates/luna-api/src/lib.rs`; its doc comment lists what each bump changed.
+`Emulator::load_state` accepts **only the current format version** — a blob
+written by any other version, older or newer, is rejected with a clean
+"format version mismatch" error, as is a blob made against a different ROM.
+There is no migration path: re-save from a live run after upgrading across a
+version bump (each bump is announced in `CHANGELOG.md`).

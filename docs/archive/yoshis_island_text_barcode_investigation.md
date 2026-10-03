@@ -1,3 +1,5 @@
+Archived 2026-10-04: historical; see [`../hdma_ares_audit.md`](../hdma_ares_audit.md) rows #6 and #9 — the fix described below (a per-frame `hdma_started` lazy start from the source address, test `hdma_enabled_mid_frame_starts_from_source`) was itself replaced by the faithful stale-pointer model; neither name exists any more.
+
 # SMW2 Yoshi's Island intro "barcode" — investigation log (2026-06)
 
 **Status: RESOLVED** (commit `7f9f728`, `fix(dma): honor mid-frame HDMA

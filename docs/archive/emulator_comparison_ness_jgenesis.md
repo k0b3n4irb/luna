@@ -1,3 +1,5 @@
+Archived 2026-10-04: historical; see [`../accuracy_scorecard.md`](../accuracy_scorecard.md) for luna's current state (this comparison's thesis was retracted, see below).
+
 # ness & jgenesis — Rust SNES emulator dissection (backend reference + frontend backlog)
 
 > **RETRACTED 2026-06-11.** This doc's original §0/§6 conclusion — that the Doom

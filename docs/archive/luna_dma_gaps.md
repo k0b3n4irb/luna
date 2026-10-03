@@ -1,3 +1,5 @@
+Archived 2026-10-04: historical; see [`../hdma_ares_audit.md`](../hdma_ares_audit.md), the living DMA/HDMA audit.
+
 # luna DMA / HDMA subsystem — correctness gaps vs ares
 
 Reference-first audit of luna's DMA/HDMA against ares
@@ -10,7 +12,7 @@ frame/scanline HDMA hooks).
 Authored 2026-05-30.
 
 > **Status 2026-09-18 — historical snapshot; the living audit is
-> [`hdma_ares_audit.md`](hdma_ares_audit.md).** This doc predates the
+> [`hdma_ares_audit.md`](../hdma_ares_audit.md).** This doc predates the
 > 2026-07 pillar work. Since it was written: the MDMA/HDMA cycle-cost
 > models were ported from ares (`mdma_cost` in `snes.rs`, `hdma_cost` in
 > `dma/controller.rs`), a long MDMA now yields to HDMA at scanline
@@ -19,7 +21,7 @@ Authored 2026-05-30.
 > line origin, 2026-07-26 — HiColor64 is pixel-exact; #7b HiColor128 followed
 > on 2026-09-19 — root cause the 65C816 interrupt entry, not DMA). The rows below were corrected in place; for current
 > status and the open DMA items use the audit doc and the DMA row of
-> [`accuracy_scorecard.md`](accuracy_scorecard.md).
+> [`accuracy_scorecard.md`](../accuracy_scorecard.md).
 
 **Headline:** the DMA/HDMA *core* (table walk, transfer modes, indirect
 addressing, A-bus restrictions) is faithful and well-covered. The

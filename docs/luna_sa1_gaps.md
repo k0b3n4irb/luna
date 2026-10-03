@@ -2,8 +2,14 @@
 
 Reference-first audit of luna's SA-1 against ares
 (`ares/sfc/coprocessor/sa1/io.cpp`, `memory.cpp`, `dma.cpp`). Companion
-to the BG / OBJ / APU / DMA gap docs; complements `archive/sa1_status.md` (the
-fix-snapshot + the deliberate CIWP/SIWP `0xFF` deviation).
+to the BG / OBJ / APU gap docs and the DMA audit
+([`hdma_ares_audit.md`](hdma_ares_audit.md)). The May-2026 fix snapshot is
+frozen in [`archive/sa1_status.md`](archive/sa1_status.md); the rationale for
+the deliberate CIWP/SIWP `0xFF` deviation it used to hold now lives **here**
+(row #3 below).
+
+> **Status 2026-10-04:** rows #1 and #5-#19 are done. **Open:** #2, #3, #4
+> and #20 — see "⚠️ Open divergences" below.
 
 Scope: the register I/O + math unit + DMA/MMC in
 `crates/luna-bus/src/sa1.rs` and the chip-side state in
@@ -29,7 +35,7 @@ the four divergences below are fixed. New tests
 0-pixel before/after diff — the fix makes the math hardware-correct so
 it can only help.
 
-The original divergences:
+The original divergences (1a-1d describe the code **before** the fix):
 
 ### 1a. Division is signed/signed truncated, not signed-÷-unsigned floored
 
@@ -66,9 +72,10 @@ reading MA/MB back after an op sees stale operands instead of 0.
 ### 1d. MCNT (`$2250`) MR-clear condition too narrow
 
 ares clears MR whenever `acm` (bit 1) is set: `if(io.acm) io.mr = 0;`.
-luna (`sa1.rs:1254`) clears only when the byte equals **exactly** `0x02`
+luna cleared it only when the byte equalled **exactly** `0x02`
 (`value & 0x02 != 0 && value == 0x02`), so `$2250 = 0x03` (acm + md)
-fails to clear MR.
+failed to clear MR. (Pre-fix description; the fixed code is `update_arith`
+and the `$2250` arm in `crates/luna-bus/src/sa1.rs`.)
 
 **Why it matters:** SA-1 titles (Super Mario RPG, Kirby Super Star,
 Kirby's Dream Land 3, PGA Tour, etc.) lean on the math unit for
@@ -98,9 +105,10 @@ back the live counters in dots. Unit-tested (`sa1.rs` `timer_*`: H match
 linear + HV, V match HV, CTR restart, level-flag re-fire).
 
 The IRQ-vs-PPU-scanline *alignment* is as accurate as luna's SA-1
-stepping cadence (master-clock-driven; exact dot precision is the
-general SA-1 cycle-accuracy refinement, Phase 4/5) — but the timer fires
-correctly and games using HV-mode raster timing are no longer dead.
+stepping cadence (master-clock-driven; exact dot precision is bounded by
+the batched scheduler grain, the residual named at the end of this
+document) — and the timer fires and games using HV-mode raster timing are no
+longer dead. **Open:** the V wrap is fixed at the NTSC line count — row #20.
 
 **No regression risk for SMRPG:** it writes TMC once (`= $00`, timer
 off) and never touches `$2211-$2215`; smoke is byte-identical to the
@@ -170,21 +178,57 @@ core during an I-RAM↔BW-RAM SA-1 DMA reads 0.14 in both against ~10.3.
 **Residual vs Mesen2:** S-CPU DMA from I-RAM reads 3.71 (console 5.51,
 Mesen2 5.43) — ares' address-based `conflict()` gives the same as luna.
 
-## 🟡 Minor deviations / notes
+## ⚠️ Open divergences
 
-| # | Issue | ares ref | luna |
-|---|---|---|---|
-| 2 | `$2202` (SIC) models a bit-6 "S-CPU NMI clear" that hardware doesn't have (SIC only has chdma=bit5, cpu=bit7) | `io.cpp:155-163` | `sa1.rs:1097-1099` |
-| 3 | CIWP/SIWP reset default is `0xFF` (allow-all) not `0x00` — a **deliberate** deviation (an opensnes demo depends on it); see `archive/sa1_status.md` | `io.cpp` reset | intentional |
-| 4 | CCNT reset edge sets `CIWP = 0` (`io.cpp:113`) | `io.cpp:103-114` | **deferred** — verified absent, but it lives in the deliberately-deviated I-RAM protection model (CIWP/SIWP default `0xFF`, `archive/sa1_status.md`). Adding it broke an SA-1 I-RAM test (synthetic handler doesn't pre-arm CIWP) and is the GUI-blackout-prone area the status doc warns about. Revisit with the protection model holistically + GUI validation. |
+Rows #2 and #20 and the rationale under #3 were recorded by the 2026-10-04
+repository audit: **found by the 2026-10-04 audit, not yet checked against
+ares / Mesen2** beyond the citations already in the table. No fix is
+proposed here; each is to be resolved by a faithful port
+(`.claude/rules/faithful-port-and-dichotomy.md`).
+
+| # | Issue | ares ref | luna | Status |
+|---|---|---|---|---|
+| 2 | `$2202` (SIC) models a bit-6 "S-CPU NMI clear" that hardware doesn't have (SIC only has chdma=bit5, cpu=bit7). The latch it clears, `s_nmi_to_main`, is a **placeholder**: it is initialised `false`, written `false` by that arm and by nothing else, and read nowhere — and its doc comment ("raised on `$2209` bit-6 0→1 edge") contradicts the `$2209` decode beside it | `io.cpp:155-163` | `crates/luna-bus/src/sa1.rs`: field `Sa1Mapper::s_nmi_to_main`, the `0x2202` arm of the register write | ⚠️ open — inert today (no observable effect); the field is part of the save-state layout |
+| 3 | CIWP/SIWP reset default is `0xFF` (allow-all) where ares **and** Mesen2 reset both to `0x00` (block-all) — a **deliberate** deviation chosen to keep one homebrew demo working; rationale below | `sa1.cpp:239` (`io.siwp = 0`), `io.cpp:112-113` (`io.ciwp = 0`); Mesen2 `Sa1Types.h` value-init + `Sa1::CpuRegisterWrite` `$2200` | `crates/luna-bus/src/sa1.rs`: `Sa1Mapper::new` (`siwp: 0xFF, ciwp: 0xFF`) | ⚠️ open — intentional, against both references |
+| 4 | CCNT reset edge sets `CIWP = 0` (`io.cpp:113`) | `io.cpp:103-114` | `crates/luna-core/src/coproc/sa1.rs`: the `is_ccnt` branch of the chip-side register write (comment "ares io.cpp:113 also clears CIWP=0 here. luna does NOT") | ⚠️ open — **deferred**: verified absent, but it lives in the same deliberately-deviated I-RAM protection model as #3. Adding it broke an SA-1 I-RAM test (the synthetic handler doesn't pre-arm CIWP) and it is the GUI-blackout-prone area described below. Revisit with the protection model as a whole + GUI validation. |
+| 20 | **HV-timer V wrap is fixed at 262 lines** — ares' `SA1::status.scanlines` follows the console's region, so on a PAL console the SA-1 HV timer wraps V at 312 | `sa1.cpp:63-94` (`SA1::step`; region-dependent `scanlines` — not re-read for this row) | `crates/luna-bus/src/sa1.rs`: field `Sa1Mapper::scanlines`, initialised `262` in `Sa1Mapper::new` (which takes no region) and never written again; read by `timer_step2` (`vcounter >= self.scanlines`) | ⚠️ open — PAL SA-1 carts only: an HV-mode timer IRQ on `vcnt` ≥ 262 never fires and the V counter runs 50 lines short per frame. NTSC is unaffected. |
+
+### Row #3 — why the CIWP/SIWP default is `0xFF` (moved here from `archive/sa1_status.md`, 2026-10-04)
+
+`$2229` SIWP and `$222A` CIWP are the per-page I-RAM write-protect masks
+for the S-CPU and the SA-1 side. Both references reset them to `0x00`
+(every page refuses writes until the game opens it). luna starts from
+`0xFF` (every page writable).
+
+The reference default was tried on 2026-05-27 and the opensnes
+`sa1_starfield` demo went **black in luna-gui**: its `sa1_boot.asm` writes
+`CIWP = $FF` (`$222A`) and never touches `$2229`, so it depends on an open
+SIWP default — with `0x00` the main CPU's I-RAM seed is silently dropped.
+The `0xFF` default was kept "until we hit a real cart that probes the reset
+state". The same reasoning is written at the site, in the comment above
+`siwp` / `ciwp` in `Sa1Mapper::new`.
+
+What that leaves **open** — none of it resolved:
+
+- The value was chosen to make one homebrew program work, against both
+  references. Whether that program runs on a console, in ares or in Mesen2
+  with the `0x00` default has **not** been established; if it does, the
+  real divergence is elsewhere in luna's I-RAM write path (which side's
+  mask gates which writer), not in the reset value.
+- The failure was visible **only in the GUI**: the CLI smoke screenshot
+  passed. Any change here needs GUI validation, not a CLI screenshot.
+- Row #4 (CCNT reset edge) cannot be ported while this default stands.
+- The masks themselves are tested (`siwp_page_mask_protects_iram_from_main`,
+  `ciwp_protection_only_applies_to_sa1_writes`); only the reset state
+  deviates.
 
 ---
 
 ## ✅ Verified correct (do not regress)
 
 - **CC1 / CC2 `cdsel` logic** (the old "cdsel inversion" regression is
-  fixed — only the *selection*; the conversion formats themselves are
-  open items #7/#8): `cden=1,cdsel=1` → CC1 on the `$2236` DDA byte; `cden=1,
+  fixed; the conversion formats themselves were ported later — rows #7 and
+  #8, `dma_cc1` / `dma_cc2`): `cden=1,cdsel=1` → CC1 on the `$2236` DDA byte; `cden=1,
   cdsel=0` → CC2 on the BRF[7]/BRF[15] (`$2247/$224F`) writes; normal
   DMA on the final DDA byte gated by `dd` (IRAM `$2236` / BWRAM
   `$2237`). Matches ares `io.cpp:449-488`.
@@ -202,7 +246,7 @@ Mesen2 5.43) — ares' address-based `conflict()` gives the same as luna.
 1. ~~#1 math unit (a/b/c/d)~~ — **done**.
 2. ~~#5 timer HV mode~~ — **done**.
 3. ~~#6-#15 (the 2026-09-11 audit)~~ — **done** 2026-09-12 → 2026-09-14.
-4. 🟡 #2-#4 — minor; left as notes. #3/#4 are the deliberate I-RAM
-   protection deviation (`archive/sa1_status.md`).
+4. ⚠️ #2-#4 and #20 — open, see "⚠️ Open divergences". #3/#4 are the
+   deliberate I-RAM protection deviation (rationale under row #3).
 5. The scheduler grain (batched `step_coproc` vs ares' cothreads) is the
    remaining accuracy residual — a timing model, not a register.

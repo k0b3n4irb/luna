@@ -258,14 +258,16 @@ if(address.bit(9)) {
 obj.setFirstSprite();                   // refresh OAM-priority rotation
 ```
 
-luna's `memory.rs:425-454` (`Oam::write_gated`) implements the even-byte
-latch correctly. luna does not maintain a *cached* firstSprite refreshed
-on every `$2104` write the way ares' `setFirstSprite()` does; instead it
-derives it on demand each scanline from the priority-rotation flag and
-`$2103` word address — `Oam::first_sprite()` (memory.rs:407) returns
-`(word_address >> 2) & 0x7F` when priority rotation is on, else 0. Same
-observable result; the firstSprite index is just recomputed lazily rather
-than stamped per write.
+luna's `Oam::write` (`crates/luna-ppu/src/memory.rs`) implements the
+even-byte latch. luna does not keep a *cached* firstSprite stamped on every
+`$2104` write the way ares' `setFirstSprite()` does; it derives it on demand
+from the priority-rotation flag and the **live internal byte address**:
+`Oam::first_sprite()` returns `(address >> 2) & 0x7F` when priority rotation
+is on, else 0 — the same value as ares' `io.oamAddress >> 2` and Mesen2's
+`(InternalOamAddress & 0x1FC) >> 2`. (Until the 2026-09-11 audit this used
+the `$2102/$2103` **word** address, `(word_address >> 2) & 0x7F`, which is
+wrong by a factor of two and ignored `$2104` advances; test
+`oam_priority_rotation_follows_the_live_byte_address`.)
 
 ### 6.4 Sprite double-buffering
 
@@ -273,16 +275,22 @@ ares double-buffers the per-line tile cache: `t.active ^= 1` at start of each sc
 
 Mesen2 evaluates sprites for line N at the end of line N-1 — same effective behavior, different code shape.
 
-luna decodes the sprite set **once per scanline** and shares it across the
-whole line: `render_current_scanline` (ppu.rs:493) evaluates sprites once
-and threads the decode into `render_scanline_partial_into_from` via the
-`precomp` argument (renderer.rs:460, ppu.rs:511), so per-pixel composition
-does not re-walk OAM. What luna does NOT do is ares' cross-scanline
-double-buffer (fetch line N's tiles while running line N-1); it evaluates
-the current line's sprites against live OAM at the start of that line. The
-practical effect is the same for static OAM; only a game that rewrites OAM
-mid-scanline expecting the previous line's fetched tiles to already be
-latched would differ — and no commercial title in the corpus relies on it.
+luna decodes and evaluates the sprite set **once per scanline** and shares
+it across the whole line: `Ppu::ensure_line_sprites`
+(`crates/luna-ppu/src/ppu.rs`) caches the decode + evaluation for the line,
+and `render_scanline_partial_into_from` (`renderer.rs`) reuses it for every
+partial flush, so per-pixel composition does not re-walk OAM.
+
+Since 2026-09-12 the fetch-ahead is modelled: sprites are evaluated **one
+line ahead** of the row they appear on. The picture row drawn during PPU
+line `y` uses the object line `y - 1` (`ensure_line_sprites` calls
+`evaluate_sprite_line(.., y - 1)`; the `obj_y` note in
+`render_scanline_partial_into_from`) — the same effective behaviour as ares'
+`tile[!t.active]` and Mesen2's end-of-previous-line evaluation. It is not a
+literal two-buffer structure: OAM is read when the line is first drawn, not
+during the previous line's HBlank, so a game rewriting OAM between the two
+would still differ. Detail and tests: [`luna_obj_gaps.md`](luna_obj_gaps.md)
+(sprite fetch-ahead).
 
 ---
 
@@ -384,7 +392,7 @@ Both refs treat PPU register writes as **instantaneous, mid-scanline**. The pixe
 - Mesen2 calls `RenderScanline()` before applying a register write that affects rendering (`SnesPpu.cpp:1712-1714, 1884-1886`).
 
 luna renders **per scanline**, not in one end-of-frame pass: the scheduler
-calls `Ppu::render_current_scanline` (ppu.rs:493) at the end of every
+calls `Ppu::render_current_scanline` (`crates/luna-ppu/src/ppu.rs`) at the end of every
 visible line, committing it to the persistent framebuffer. So a register
 write on line N is already seen by lines N+1.. — mid-frame tilemap/palette
 changes for status-bar split, parallax, and HDMA-driven effects render
@@ -392,7 +400,7 @@ correctly at scanline granularity.
 
 luna additionally models **mid-scanline** writes: a rendering-affecting
 register write flushes the in-progress line up to the current dot via
-`Ppu::flush_partial_scanline` (ppu.rs:526) so pixels left of the write
+`Ppu::flush_partial_scanline` so pixels left of the write
 keep the OLD state and pixels right of it use the NEW state — matching
 Mesen2's `RenderScanline()`-before-write model. The remaining gap vs ares
 is purely sub-dot ordering, not whole-frame staleness.
@@ -406,21 +414,39 @@ Both refs implement (ares `ppu_io.cpp:19-61`, Mesen2 also enforced):
 - CGRAM write during active display lands at `latch.cgramAddress` (the address-mux updated by `DAC::paletteColor()` per pixel), not the address the game programmed.
 - OAM read/write during active display routes through `latch.oamAddress` (updated by the OBJ evaluator).
 
-luna implements the VRAM and OAM gates: it tracks `Ppu::active_display`
-(true when not forced-blank AND on a visible scanline) and routes the data
-ports through gated writers — VRAM via `Vram::write_lo_gated` /
-`write_hi_gated` (ppu.rs:825-826) and OAM via `Oam::write_gated`
-(ppu.rs:764). When `active_display` is true the byte is dropped but the
-address counter (and OAM even/odd latch) still advance, matching ares
-(`ppu_io.cpp:40-45`) and Mesen2 (`SnesPpu.cpp:1916-1927`).
+luna implements all three (`crates/luna-ppu/src/ppu.rs`, `memory.rs`). The
+bus refreshes `Ppu::active_display` (display on **and** a picture line)
+before each access:
 
-CGRAM is **deliberately ungated** (`Cgram::write`, memory.rs:261): on real
-hardware an active-display CGRAM write still commits, just at the
-DAC's `latch.cgramAddress` rather than the programmed address. luna commits
-at the programmed address — it does not yet model the per-pixel
-address-mux, so the *value* lands but at the wrong slot only in the rare
-case a game writes CGRAM mid-active-line. This is the one remaining
-sub-quirk; the blanket "implements none of these gates" was stale.
+- **VRAM** — `Vram::write_lo_gated` / `write_hi_gated` drop the byte and
+  `read_lo_gated` / `read_hi_gated` return 0 while `active_display` is
+  true; the address counter still advances (`set_address_gated` covers the
+  prefetch).
+- **OAM** — not dropped: since 2026-09-12 a `$2104` write or `$2138` read
+  during the picture is **redirected** to the sprite the evaluation is
+  currently looking at (`Ppu::obj_eval_latch` → `Oam::write_during_render`
+  / `Oam::read_during_render`, ares `io.cpp:39-45`). The even/odd latch and
+  the address counter behave as usual; only the destination moves. Where
+  the references differ (Mesen2 also mirrors the write into the high table
+  and switches to the tile-fetch index past dot 255) luna follows ares.
+  Tests `oam_write_during_render_redirects_to_the_evaluated_sprite`,
+  `oam_read_during_render_reads_the_evaluated_sprite`.
+- **CGRAM** — since 2026-09-14 an access during the picture (display on,
+  a picture line, dots 22..274) lands on the entry the PPU last fetched for
+  the pixel under the beam, while CGADD still advances:
+  `Ppu::cgram_access_redirect` returns the compositor's latched address
+  (`Cgram::latched_address`) and `Cgram::write_at` takes it as the target.
+  The bus sets `Ppu::beam_dot` to the real dot and flushes the line up to
+  it first, so the latch is the current pixel's. Outside that window
+  (HBlank past dot 274 — the usual palette-DMA slot — VBlank, forced
+  blank) the access uses the programmed address. Tests
+  `compositor_latches_the_cgram_address_of_the_pixel_under_the_beam`,
+  `cgram_access_during_the_picture_lands_on_the_ppu_fetch`.
+
+**Open:** the DMA path refreshes the gate and the dot only for `$2122`,
+not for every `$21xx` write as the CPU path does — see
+[`hdma_ares_audit.md`](hdma_ares_audit.md) row #19 (2026-10-04 audit, not
+yet checked against the references).
 
 ---
 

@@ -1,9 +1,11 @@
+Archived 2026-10-04: historical; see [`../accuracy_scorecard.md`](../accuracy_scorecard.md) (current status) and [`../hdma_ares_audit.md`](../hdma_ares_audit.md) (DMA/HDMA).
+
 # Cycle-Accuracy Milestone — APU↔CPU↔PPU Synchronization Plan
 
 > **Status 2026-09-18 — this is a dated plan (last status 2026-06-20);
 > every item it lists as "deferred" has since LANDED.** Current status
-> lives in [`accuracy_scorecard.md`](accuracy_scorecard.md) ("Open items"
-> #1 and #4) and [`hdma_ares_audit.md`](hdma_ares_audit.md).
+> lives in [`accuracy_scorecard.md`](../accuracy_scorecard.md) ("Open items"
+> #1 and #4) and [`hdma_ares_audit.md`](../hdma_ares_audit.md).
 >
 > - **Phase 5 inc 2** (HDMA application point) — **landed 2026-07-26**
 >   (v1.11.0). The "cannot be represented on luna's whole-line renderer"

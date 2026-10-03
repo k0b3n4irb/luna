@@ -91,6 +91,20 @@ underlying RAM. Tests `ipl_rom_overlay_toggles_with_f1_bit7`,
 
 ---
 
+## ⚠️ Open divergences (2026-10-04 audit)
+
+Both rows were **found by the 2026-10-04 repository audit and are not yet
+checked against ares / Mesen2**. They are recorded, not fixed; each is to be
+resolved by reading the references first
+(`.claude/rules/reference-first.md`).
+
+| # | Issue | Reference (to be read) | luna site | Status |
+|---|---|---|---|---|
+| 8 | **After the SPC700 executes `STOP` (`$FF`) the whole APU stops and a heuristic stub answers the mailbox.** `STOP` sets `Spc700::stopped`; the system glue then latches `Snes::apu_panicked` and never calls `Apu::step` again, so the S-DSP and the timers freeze with the core (and `Apu::run_to_target` itself parks the SPC clock while `stopped`). From then on CPU reads of `$2140-$2143` — and DMA reads of the same ports — are served by `ApuStub`, an echo state machine written before luna had a real SPC700 (`HANDSHAKE_RESPIN_THRESHOLD`: after 100 reads without a write it pretends the driver re-announced `$AA`/`$BB`). The latch is cleared only by `Snes::reset` and is part of the save state. The field docs still describe the trigger as a "panic" on an unimplemented opcode; the only trigger left is the legal `STOP` opcode. Expected reference behaviour (unverified): only the SMP core halts and the ports keep the last values the SPC wrote | ares `sfc/smp/` (`STOP` / `wait` handling, whether the DSP thread keeps running); Mesen2 `Spc.cpp` | `crates/luna-core/src/apu_stub.rs` (`ApuStub`, `HANDSHAKE_RESPIN_THRESHOLD`); `crates/luna-core/src/snes.rs` — fields `Snes::apu_panicked` / `Snes::apu_stub_fallback`, the `apu_panicked` gate around `apu_real.step` in `SnesBus::advance_time`, the `apu_port` arms of `read_sampled` / `write_inner`, `DmaBusView::read_b` / `write_b`; `crates/luna-cpu-spc700/src/step.rs` (`0xFF` arm); `crates/luna-apu/src/lib.rs` `run_to_target` | ⚠️ open — reachable by any ROM whose SPC program executes `$FF`; the `spc_pitchmod` golden (kept `#[ignore]`) is one. See also [`luna_spc700_gaps.md`](luna_spc700_gaps.md) row #3 |
+| 9 | **Output rate: the core produces 32 040 Hz, every consumer assumes 32 000 Hz.** `SPC_CLOCK_HZ` (1 025 280) ÷ `SPC_CYCLES_PER_SAMPLE` (32) = 32 040 samples/s — the measured rate both references use, asserted by `one_second_of_master_clock_yields_32040_samples_per_region`. No crate exports a sample-rate constant, and each front-end hard-codes the nominal 32 000: the WAV header, the printed durations, the `luna diff --audio` window clock and the GUI resampler's input rate. Effect: 0.125 % (a WAV plays about 2 cents flat; durations and window timestamps are off by the same factor). Whether 32 000 is a deliberate nominal value for the container has not been decided | ares `apuFrequency = 32040·768`; Mesen2 `spcSampleRate` (both as cited in the `SPC_CLOCK_HZ` doc comment — not re-read for this row) | producer: `crates/luna-apu/src/lib.rs` (`SPC_CLOCK_HZ`, `SPC_CYCLES_PER_SAMPLE`). Consumers: `crates/luna-cli/src/output.rs` `write_wav`; `crates/luna-cli/src/diff_audio.rs` `SAMPLE_RATE`; `crates/luna-cli/src/run.rs` and `crates/luna-cli/src/state.rs` (duration prints); `crates/luna-gui/src/audio.rs` `TARGET_SAMPLE_RATE`; the test WAV writer `write_wav` in `crates/luna-core/tests/snes_test_roms.rs` | ⚠️ open — audible path: any change needs the listen step of `.claude/rules/audible-fixes-test-first.md` |
+
+---
+
 ## ✅ Verified correct (do not regress)
 
 - **DSP port (`dsp.rs`)** is a faithful ares transliteration:
@@ -126,3 +140,6 @@ underlying RAM. Tests `ipl_rom_overlay_toggles_with_f1_bit7`,
    `cycleWaitStates {2,4,10,20}`, see the table row above). The only
    `$F0` residue is the `ramWritable`/`ramDisable` bits (1-2), stored but
    not acted on.
+6. ⚠️ #8 (`STOP` → frozen APU + heuristic mailbox stub) and #9 (32 040 Hz
+   produced, 32 000 Hz assumed) — **open**, recorded 2026-10-04, not yet
+   checked against the references.

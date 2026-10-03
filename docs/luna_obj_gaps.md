@@ -18,8 +18,16 @@ Authored 2026-05-30.
 
 ---
 
-> **Status:** #1 and #2 fixed (commit pending). The remaining open
-> items are #3, #4 (🟠) and #5, #6 (🟡).
+> **Status (2026-10-04):** every numbered item, #1-#8, is done. The only
+> residual is the last bullet of "Salvaged PPU-compositor residuals" at the
+> end (exact-dot register latching).
+>
+> **Numbering.** #5 (non-square vflip) and #6 (OBJ interlace) are the two
+> rows of the "Precision / rare" table — the numbers other documents use
+> (`luna_bg_gaps.md` and the golden suite cite "`obj_gaps` #6" for
+> interlace). The two sections added on 2026-09-12 were also headed 5 and
+> 6; they are now **#7** (sprite fetch-ahead) and **#8** (`$2104` / `$2138`
+> during the picture).
 
 ## ✅ 1. Sprite tile index per-nibble wrap (`& 0x0F`), page fixed — DONE
 
@@ -34,7 +42,7 @@ column = (charLow  + columnOffset) & 0x0F      // horizontal wrap
 tileIndex = (row << 4) | column                // page never changes
 ```
 
-luna (`renderer.rs:1514`) instead does a **linear 9-bit add**:
+luna instead did a **linear 9-bit add** (pre-fix code):
 
 ```rust
 let tile_id = (sp.tile.wrapping_add((tile_y * 16 + tile_x) as u16)) & 0x01FF;
@@ -51,7 +59,7 @@ page held fixed. Test `sprite_tile_index_wraps_within_name_page`.
 
 ares `onScanline` (`object.cpp:51-55`) uses `within<0,255>` — the
 row-in-sprite is computed **mod 256**, so a sprite near the bottom
-wraps to the top of the screen. luna (`renderer.rs:1493`):
+wraps to the top of the screen. luna's pre-fix code:
 
 ```rust
 let row_in_sprite = y.wrapping_sub(sp.y as u16);
@@ -99,13 +107,13 @@ address). Implemented via `Oam::first_sprite()`, feeding
 `oam_priority_rotation_follows_the_live_byte_address`.
 **Corrected 2026-09-11:** the first version used `word_address >> 2`
 (sprite N/4 instead of N/2) frozen at the `$2102/3` write, and its test
-enshrined the wrong index. Previously luna always
-evaluates sprite 0..127 in fixed order. Coupled with #3 — it changes
+enshrined the wrong index. (Before #4 at all, luna always evaluated
+sprites 0..127 in fixed order.) Coupled with #3 — it changes
 which sprites survive the per-line cap.
 
 ---
 
-## ✅ 5. Sprites are fetched one line AHEAD of the row they appear on — FIXED 2026-09-12
+## ✅ 7. Sprites are fetched one line AHEAD of the row they appear on — FIXED 2026-09-12
 
 ares `Object::scanline` evaluates with `t.y = vcounter()` into a double
 buffer and `Object::run` paints from the PREVIOUS line's tiles
@@ -130,7 +138,7 @@ PPU) and the 3 smoke screenshots were re-recorded and eyeballed.
 
 ---
 
-## ✅ 6. `$2104` / `$2138` during the active display — FIXED 2026-09-12
+## ✅ 8. `$2104` / `$2138` during the active display — FIXED 2026-09-12
 
 Hardware does not drop these accesses: the OAM address bus belongs to
 sprite evaluation, so they land at the **sprite being evaluated** — ares
@@ -182,6 +190,9 @@ neither, and luna follows ares.
 3. ~~#3 per-line limits + range/time over~~ — **done**.
 4. ~~#4 OAM priority rotation~~ — **done**.
 5. ~~#5 non-square vflip~~ — **done**.
+6. ~~#6 OBJ interlace~~ — **done** (Phase D).
+7. ~~#7 sprite fetch-ahead~~, ~~#8 `$2104` / `$2138` redirect~~ — **done**
+   2026-09-12.
 
 All items are now done, including #6 (OBJ interlace, Phase D). The entire
 sprite audit is complete; interlace is implemented end-to-end (`bg_gaps`
@@ -192,12 +203,13 @@ sprite audit is complete; interlace is implemented end-to-end (`bg_gaps`
 The old SMW-Yoshi's-House worksheet (`luna_ppu_gaps.md`) was deleted — its
 marquee bugs (force-black polarity, sub-screen compositor, OAM auto-reset,
 empty-sub fallback, direct-color group bits, EXTBG, hi-res) are all FIXED and
-verified in `renderer.rs`. Three genuinely-open, minor items are preserved here
-so they aren't lost:
+verified in `renderer.rs`. Three minor items were preserved here so they
+weren't lost; two have since been closed and one is still open:
 
-- **OBJ cross-scanline sprite fetch-ahead** — ares evaluates line N+1's sprites
-  during line N; luna decodes once per scanline with no fetch-ahead. Cosmetic
-  at most (affects only exact mid-OAM-write timing).
+- ~~**OBJ cross-scanline sprite fetch-ahead**~~ — **FIXED 2026-09-12**, see #7
+  above: the object line is `y - 1`. What remains of the original note is
+  only that OAM is sampled when the row is first drawn rather than during
+  the previous line's HBlank (affects exact mid-OAM-write timing only).
 - ~~**PPU register read open-bus**~~ — **FIXED 2026-07-26**: `Ppu::read` now
   models the two per-chip MDR latches faithfully (ares `ppu1.mdr`/`ppu2.mdr`,
   io.cpp readIO; Mesen2 `SnesPpu::Read` agrees): the PPU1 write-only family
@@ -210,6 +222,6 @@ so they aren't lost:
   was inverted), the WRIO reset value ($FF — pins power up high) and the
   SLHV gate (latches only while the line is high). ares cpu/io.cpp:143 +
   Mesen2 InternalRegisters.cpp:338 agree on all four.
-- **General mid-scanline register latching** — per-scanline render + a partial
+- **General mid-scanline register latching** (still open) — per-scanline render + a partial
   mid-scanline flush exist (`flush_partial_scanline`), but not every register is
   latched at its exact dot.

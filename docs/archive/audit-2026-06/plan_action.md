@@ -32,7 +32,7 @@
     page-256 **non implémenté** sur le `direct_page` nu (inerte, mais le commentaire
     induit en erreur). Corriger le commentaire (« wrap inerte ici car offset u8 sur
     dp aligné-page »), pas le code.
-  - `docs/emulator_comparison_ness_jgenesis.md` §2b : marquer **OBSOLÈTE** — luna a
+  - `docs/archive/emulator_comparison_ness_jgenesis.md` §2b : marquer **OBSOLÈTE** — luna a
     déjà migré le framebuffer vers `triple_buffer` (`main.rs:88`).
 - **Validation** : revue ; `cargo fmt --check`.
 - **Effort** : 🟢 · **Dépendances** : aucune.

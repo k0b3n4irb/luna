@@ -1,3 +1,5 @@
+Archived snapshot (2026-05-27): historical; see [`../luna_sa1_gaps.md`](../luna_sa1_gaps.md) for the current SA-1 status and open rows.
+
 # SA-1 status
 
 Snapshot: 2026-05-27. SA-1 ROMs now run end-to-end in luna — the
@@ -42,6 +44,12 @@ architecturally correct independent of #1 — without it the SA-1
 sees a frozen timeline during long DMAs.
 
 ## Deliberate deviations from ares + Mesen2
+
+> **Moved 2026-10-04.** The live record of this deviation — rationale,
+> what it leaves open, and the related CCNT-reset gap — is
+> [`../luna_sa1_gaps.md`](../luna_sa1_gaps.md), rows #3 and #4. The
+> paragraph below is the May-2026 text, kept as written; do not cite it as
+> current.
 
 - **CIWP/SIWP reset defaults** (`luna-bus/src/sa1.rs:355-373`). ares +
   Mesen2 reset both protections to `0x00` (block-all); luna ships
