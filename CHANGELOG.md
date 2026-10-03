@@ -6,6 +6,15 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+## [1.31.0] — 2026-10-03
+
+One addition, for `luna test`: a manifest can say which console the ROM
+runs on, under a name the guide documents.
+
+**Upgrading from 1.30.4:** nothing to do. Manifests that use
+`force_region` keep working; `--report json` gains one field, `"region"`.
+The emulator itself is unchanged.
+
 ### Added
 
 - **`luna test`: `region = "pal"` (or `"ntsc"`) in a manifest**, and
