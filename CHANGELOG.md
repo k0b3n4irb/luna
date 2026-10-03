@@ -1,8 +1,9 @@
 # Changelog
 
-All notable user-facing changes to luna. Releases are cut from `main`
-(tags `vX.Y.Z`, binaries attached by CI); day-to-day development happens on
-`develop`. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
+All notable user-facing changes to luna. Day-to-day development happens on
+`develop`; a release is a tag `vX.Y.Z` on the `develop` commit that `main` is
+fast-forwarded to (binaries attached by CI). Format inspired by
+[Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
@@ -133,7 +134,7 @@ with `--*-trace-from` under `--until-frame` on 1.30.1 started at instruction
 - `--trace-writes`: the help and the guide say that the interrupt markers
   (`kind` `N` / `I`) stay in the CSV next to the writes (`W`).
 
-## [1.30.1] — 2026-09-30
+## [1.30.1] — 2026-09-29
 
 One fix, reported by the OpenSNES team: `luna test --jobs` and manifests
 that hand a battery file to each other.
@@ -1722,6 +1723,9 @@ First stable release.
   attract demo).
 
 ## [0.0.1 – 0.0.4] — 2026-06-15 … 2026-06-17
+
+(Of these early tags only `v0.0.2`, `v0.0.3` and `v0.0.4` were kept; there
+is no `v0.0.1` tag.)
 
 Early development: first public tags while the emulator grew from a booting
 core to a playable machine — 65c816/SPC700/PPU/APU cores, LoROM/HiROM/ExHiROM

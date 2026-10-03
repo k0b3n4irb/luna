@@ -6,8 +6,8 @@ body:
     id: version
     attributes:
       label: Luna version
-      description: Release tag (e.g. v1.10.1) or commit hash, and OS.
-      placeholder: v1.10.1 · Fedora 44 aarch64
+      description: Release tag (what `luna --version` prints) or commit hash, and OS.
+      placeholder: vX.Y.Z · Fedora 44 aarch64
     validations:
       required: true
   - type: input

@@ -39,7 +39,7 @@ external data skip cleanly when it is absent. To run the full suites:
 
 ## Before you commit
 
-The canonical pre-commit sequence (also enforced in CI):
+The canonical pre-commit sequence:
 
 ```bash
 cargo build --workspace --all-targets \
@@ -49,14 +49,25 @@ cargo build --workspace --all-targets \
   && cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
+CI runs the `fmt` and `clippy` lines exactly as written. For the rest it
+runs `cargo check --workspace --all-targets` instead of the two builds, the
+wider `cargo test --workspace --all-features` (integration tests included),
+and the golden ROM suite in release mode. The local sequence builds for
+real so that a stale binary is never what you test by hand.
+
 ## Conventions
 
 - **Commits**: `type(scope): description` — e.g. `fix(ppu): ...`,
   `feat(cli): ...`, `docs: ...`. No `Co-authored-by`/tool-attribution
   trailers.
-- **Branches/PRs**: branch from `develop`, PR back to `develop`
-  (squash-merged). `main` only receives release merges. A change landing
-  on `main` directly makes the next release PR conflict on `Cargo.lock`.
+- **Branches/PRs**: branch from `develop` and open the pull request
+  against `develop`. A pull request is the proposal and the review trail;
+  it is never merged with GitHub's buttons or `gh pr merge` (no squash, no
+  merge commit, no "Update branch"), because those create commits whose
+  committer is GitHub. The maintainer lands the change on `develop` from a
+  local clone, as ordinary commits under the repository's single identity.
+  `main` only moves by fast-forward to a released `develop` commit, so
+  nothing is ever committed on `main` directly.
 - **Accuracy work**: read the matching reference implementation (ares +
   Mesen2) *first* — see
   [`.claude/rules/reference-first.md`](.claude/rules/reference-first.md) —
@@ -76,13 +87,17 @@ requests opened by a bot.
 
 ## Fuzzing
 
-The ROM parser is the one surface that takes untrusted input, so it is
-fuzzed (`fuzz/`, three targets, weekly in CI). Before changing
-`luna-cartridge` or the mapper shims, a quick local run is cheap:
+Two surfaces take untrusted input: the ROM parser (with the mapper shims
+behind it) and the save-state loader. Both are fuzzed (`fuzz/`, four
+targets — `cartridge_parse`, `cartridge_forced`, `cartridge_to_system`,
+`load_state` — weekly in CI, and on any push to `develop` or pull request
+that touches the fuzzed code or `fuzz/`). Before changing `luna-cartridge`, the mapper shims or the
+save-state format, a quick local run is cheap:
 
 ```bash
 cargo install cargo-fuzz
 cargo +nightly fuzz run cartridge_parse -- -max_total_time=120
+cargo +nightly fuzz run load_state -- -max_total_time=120
 ```
 
 See [`fuzz/README.md`](fuzz/README.md) for the targets, the contract they
@@ -115,26 +130,55 @@ The version tracks luna's **user-facing contract**, not the Rust API:
   crates are not published (`publish = false`). MCP changes are kept
   additive (new optional parameters, new tools, new result fields) within
   a major.
-- **Release flow**: bump `version` + finalize `CHANGELOG.md` in a PR to
-  `develop`; merge `develop` → `main`; tag `vX.Y.Z` on `main`
-  (`release.yml` builds and attaches the 4-platform binaries +
-  checksums, titles the page `luna vX.Y.Z` and fills it with that
-  version's `CHANGELOG.md` section — `tools/release-notes.py vX.Y.Z`
-  prints it locally); then reconcile `develop` with `main`. The book links the
-  unversioned `luna-<os>-<arch>` asset alias, so no doc edit is needed per
-  release.
+- **Release flow**: a release is a fast-forward of `main` to a `develop`
+  commit, never a GitHub merge.
+  1. On `develop`: bump `version` in the workspace `Cargo.toml` (which
+     updates `Cargo.lock`), regenerate `fuzz/Cargo.lock`
+     (`cargo fetch --manifest-path fuzz/Cargo.toml` — `fuzz/` is its own
+     workspace, so its lock file does not follow the main one), and
+     finalize the version's `CHANGELOG.md` section.
+  2. Optional dry run: tag that commit `vX.Y.Z-rc1` and push the tag.
+     `release.yml` builds it like a real release and publishes it as a
+     GitHub *pre-release* carrying the notes of `X.Y.Z`. Check the four
+     archives, then delete the pre-release and the tag (locally and on
+     the remote); an RC tag is never kept.
+  3. Wait for CI to be green on the exact `develop` commit, then
+     `git push origin develop:main`. `main` is always an ancestor of
+     `develop`, so this is a fast-forward; if it is not, stop — do not
+     fall back to a merge.
+  4. `git tag -a vX.Y.Z` on that commit, locally, and push the tag.
+     `release.yml` builds and attaches the 4-platform binaries +
+     checksums, titles the page `luna vX.Y.Z` and fills it with that
+     version's `CHANGELOG.md` section — `tools/release-notes.py vX.Y.Z`
+     prints it locally.
+
+  `develop` and `main` then point at the same commit: there is nothing to
+  reconcile. The book links the unversioned `luna-<os>-<arch>` asset
+  alias, so no doc edit is needed per release.
 - **Housekeeping**: only the five highest versions keep a GitHub release
   with binaries; older releases are deleted after each release, and
   Actions runs older than a month are deleted too
   (`tools/housekeeping.sh`, dry run by default). Tags are never deleted:
   an older version is rebuilt from its tag.
 - **Before tagging, run the full suite locally *with* `tests/roms/`
-  populated** — `cargo test --workspace --all-targets`. The commercial
-  smoke and game goldens SKIP on CI (copyrighted ROMs are never
-  committed), so a stale golden passes CI silently and only a local run
-  catches it. That is exactly how the v1.12.0 prep caught three
-  `tests/golden/smoke/` PNGs left un-anchored by the line-origin
-  change.
+  populated**:
+
+  ```bash
+  LUNA_SNES_TEST_DIR=<corpus> LUNA_SNES_TEST_REQUIRE=1 LUNA_GAME_TEST_REQUIRE=1 \
+    cargo test --workspace --all-targets
+  ```
+
+  `<corpus>` is the directory `tools/fetch-snes-test-roms.sh` filled
+  (`../luna_tests` by default). `LUNA_SNES_TEST_REQUIRE=1` turns a missing
+  corpus, or a missing ROM of the homebrew golden suite, into a failure
+  instead of a skip. `LUNA_GAME_TEST_REQUIRE=1` does the same for the
+  commercial-game goldens of that suite when `tests/roms/` or one of its
+  ROMs is absent. Without them a missing or renamed ROM skips and the run
+  still reads green. The commercial smoke and game goldens SKIP on CI
+  (copyrighted ROMs are never committed), so a stale golden passes CI
+  silently and only a local run catches it. That is exactly how the
+  v1.12.0 prep caught three `tests/golden/smoke/` PNGs left un-anchored
+  by the line-origin change.
 
 ## License
 

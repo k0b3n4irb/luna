@@ -47,16 +47,24 @@ committing new seeds.
 ## CI
 
 `.github/workflows/fuzz.yml` runs each target weekly (Mondays, after the
-Tom Harte suites) and on any PR touching `luna-cartridge` or `fuzz/`,
+Tom Harte suites) and on any push to `develop` or PR touching the fuzzed
+surface (`luna-cartridge`, `luna-bus`, `luna-core`'s `coproc/`,
+`luna-api`'s `lib.rs`) or `fuzz/`,
 with a short per-target budget — a regression net, not a discovery
 campaign. Crash reproducers are uploaded as build artifacts.
 
 ## Status
 
 First campaign, 2026-08-01 (local, cargo-fuzz 0.13.2):
-**~67 million executions across the three targets, zero crashes** —
+**~67 million executions across the three cartridge targets (the only
+ones at the time), zero crashes** —
 26.8M `cartridge_parse`, 39.7M `cartridge_forced`, 0.43M
 `cartridge_to_system` (the slow one: it boots and steps a system per
 input). This confirms the hardening the 2026-07-26 audit read in the
 source (clamped size exponents, `rom_mirror` on every mapper index,
 `checked_sub` on the extended header) holds under adversarial input.
+
+The fourth target, `load_state`, was added in 1.25.0. In CI it found a
+save-state length prefix that made the decoder request an unbounded
+allocation and abort; every decode is now capped at 64 MiB
+(`STATE_DECODE_CONFIG`, fixed in 1.28.0).
