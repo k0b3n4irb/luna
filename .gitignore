@@ -28,8 +28,6 @@ Thumbs.db
 # Proprietary game ROMs — never commit.
 /tests/roms/*
 !/tests/roms/.gitkeep
-/tests/golden/*.png
-!/tests/golden/.gitkeep
 
 # Local config
 /.envrc

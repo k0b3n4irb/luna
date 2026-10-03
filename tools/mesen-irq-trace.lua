@@ -1,12 +1,16 @@
 -- mesen-irq-trace.lua — Mesen2 reference capture for luna's P0 delivery-timing
--- differential harness (the cycle-accuracy roadmap, docs/roadmap_to_A.md).
+-- differential harness (the cycle-accuracy roadmap,
+-- docs/archive/roadmap_to_A.md).
 --
 -- WHAT IT DOES
 --   Logs the interrupt-delivery-relevant S-CPU bus events with the master
 --   clock, so they can be diffed against luna's
---     luna state <rom> --mem-trace luna_irq.csv --mem-trace-addr 4200:4211
---   (luna also emits synthetic `N`/`I` markers at the moment it raises the
---   NMI / H-V-IRQ line — the thing the deferred Phase-4 work changes).
+--     ./target/release/luna state "<rom>" --until-frame 600 -n 999999999 \
+--       --mem-trace luna_irq.csv --mem-trace-addr 4200:4211
+--   (luna also emits synthetic `N`/`I` marker rows, at `$4210` / `$4211`,
+--   at the moment it raises the NMI / H-V-IRQ line; Mesen has no
+--   equivalent row. Add `--mem-trace-addr FFEA:FFEA` in a second run for
+--   the vector fetches: the option takes one range.)
 --   Captured here:
 --     $4200 NMITIMEN writes
 --     $4210 RDNMI / $4211 TIMEUP reads
@@ -14,10 +18,15 @@
 --       — the actual delivery moment, bus-observable on both emulators.
 --
 -- HOW TO RUN
---   ~/bin/Mesen --testRunner tools/mesen-irq-trace.lua "<rom>" -novideo -noaudio
---   (writes /tmp/mesen_irq.csv). Then diff vs luna_irq.csv — compare the event
---   SEQUENCE and inter-event master-clock DELTAS, not absolute clocks (the two
---   emulators' clock origins differ; align on the first shared event).
+--   IRQ_STOP_FRAME=300 ~/bin/Mesen --testRunner tools/mesen-irq-trace.lua \
+--     "<rom>" -novideo -noaudio
+--   (writes /tmp/mesen_irq.csv, columns master_clock,addr,kind,value; stops
+--   after IRQ_STOP_FRAME frames, 600 by default).
+--   tools/irq-trace-diff.py consumes it, but only its $FFEA rows (the NMI
+--   cadence). For the other events, diff by hand vs luna_irq.csv — compare
+--   the event SEQUENCE and inter-event master-clock DELTAS, not absolute
+--   clocks (the two emulators' clock origins differ; align on the first
+--   shared event).
 --
 -- NOTES (Mesen2 specifics)
 --   * getState() inside a memory callback exposes only top-level fields —

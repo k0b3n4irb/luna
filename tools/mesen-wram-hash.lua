@@ -1,5 +1,4 @@
--- mesen-smrpg-wram-hash.lua
--- Mesen2 reference generator for luna's `wram-trace` differential.
+-- mesen-wram-hash.lua — Mesen2 side of luna's `wram-trace` differential.
 --
 -- Emits, once per frame (at EndFrame = end of VBlank, matching luna's
 -- frame-boundary sample), an FNV-1a 64-bit hash of each 4 KiB WRAM page
@@ -8,12 +7,25 @@
 -- pins the first real state divergence (no input => one game-frame per
 -- NMI in both emulators).
 --
--- USAGE (headless, fastest):
---   <mesen-binary> --testrunner "Super Mario RPG ... .sfc" tools/mesen-smrpg-wram-hash.lua
--- or load it via Debug > Script Window in the GUI and let it run.
--- Output: /tmp/mesen_wram.txt  (format: "<frame> <h0> ... <h31>")
+-- SAME JOB AS tools/snes-wram-perframe-hash.lua: same event, same pages,
+-- same FNV-1a, same output file and line format. Prefer that one — its
+-- frame cap is the MAXF environment variable, where this script's is the
+-- MAX_FRAMES constant below (2200, sized for the SMRPG intro it was
+-- written for). The only other difference: this one reads WRAM a word at
+-- a time, so it makes half as many emu.* calls per frame.
 --
--- Run with NO controller input (we are diffing the no-input intro).
+-- HOW TO RUN (headless)
+--   ~/bin/Mesen --testRunner tools/mesen-wram-hash.lua "<rom>" -novideo -noaudio
+--   or load it via Debug > Script Window in the GUI and let it run.
+--   Output: /tmp/mesen_wram.txt  (format: "<frame> <h0> ... <h31>", hex)
+--   Run with NO controller input (the method assumes a no-input run).
+--
+-- luna side (4 KiB pages are the default):
+--   ./target/release/luna wram-trace -c 2200 --out /tmp/luna_wram.txt "<rom>"
+-- Compare with:
+--   tools/diff-wram-hashes.py /tmp/luna_wram.txt /tmp/mesen_wram.txt
+-- Byte-level follow-up on the diverging frame: tools/mesen-wram-dump.lua.
+-- First used in docs/archive/smrpg_intro_sa1_divergence.md.
 
 local OUT = "/tmp/mesen_wram.txt"
 local MAX_FRAMES = 2200

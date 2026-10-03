@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
 """Compare NMI/IRQ delivery timing between luna and Mesen2 (cycle-accuracy P3).
 
-The self-contained delivery-timing differential (docs/roadmap_to_A.md):
+The self-contained delivery-timing differential
+(docs/archive/roadmap_to_A.md):
   1. Mesen reference (headless):
        IRQ_STOP_FRAME=300 ~/bin/Mesen --testRunner tools/mesen-irq-trace.lua \
-         "<rom>"                         # writes /tmp/mesen_irq.csv
+         "<rom>" -novideo -noaudio       # writes /tmp/mesen_irq.csv
   2. luna's NMI vector fetches, frame-aligned:
-       luna state "<rom>" --until-frame 300 -n 999999999 \
+       ./target/release/luna state "<rom>" --until-frame 300 -n 999999999 \
          --mem-trace /tmp/luna_vec.csv --mem-trace-addr FFEA:FFEA
+     (--mem-trace keeps at most --mem-trace-max events, 100000 by default)
   3. this diff:
        tools/irq-trace-diff.py /tmp/luna_vec.csv /tmp/mesen_irq.csv
+
+Only the native NMI vector ($FFEA) is compared: the other events
+mesen-irq-trace.lua logs ($4200 writes, $4210/$4211 reads, the IRQ and
+emulation-mode vectors) are ignored here, and so are luna's `N`/`I` marker
+rows. Columns read: luna `mclk_total` (0) and `addr` (3); Mesen
+`master_clock` (0) and `addr` (1). NTSC line count is assumed.
 
 Both clocks are absolute-since-reset with DIFFERENT origins, so we compare
 the ORIGIN-INDEPENDENT signal: the inter-NMI delta cadence (master clocks
@@ -19,9 +27,9 @@ filtered out.
 
 Result on Doom (2026-06-23): luna and Mesen agree — same ~47 deliveries over
 300 frames, same ~357366-clock inter-NMI cadence + jitter. luna's
-instruction-atomic interrupt model is cycle-correct at the observable level;
-no per-access-poll fix is warranted (the residual is below this measurement's
-floor). Reuse this to validate any future interrupt-timing change vs Mesen.
+interrupt delivery was cycle-correct at this measurement's resolution. (That
+is a dated result: the interrupt sampling point and entry length have been
+reworked since.) Reuse this to validate any interrupt-timing change vs Mesen.
 """
 import sys
 from collections import Counter
@@ -49,7 +57,7 @@ def deltas(c):
 def main():
     luna_csv = sys.argv[1] if len(sys.argv) > 1 else "/tmp/luna_vec.csv"
     mesen_csv = sys.argv[2] if len(sys.argv) > 2 else "/tmp/mesen_irq.csv"
-    luna = nmi_deliveries(luna_csv, 0, 3)   # mclk,frame,pc,addr,kind,...
+    luna = nmi_deliveries(luna_csv, 0, 3)   # mclk_total,frame_ntsc,pc,addr,kind,...
     mesen = nmi_deliveries(mesen_csv, 0, 1)  # master_clock,addr,kind,value
     print(f"real NMI deliveries: luna={len(luna)} mesen={len(mesen)}")
     print("luna  inter-NMI delta histogram:", sorted(Counter(deltas(luna)).items()))

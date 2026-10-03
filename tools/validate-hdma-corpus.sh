@@ -5,7 +5,7 @@
 #
 # WHY: the HDMA controller is shared by every game, so a change there
 # (e.g. the mid-frame-enable fix — Yoshi's Island text band, see
-# docs/yoshis_island_text_barcode_investigation.md) must be eyeballed
+# docs/archive/yoshis_island_text_barcode_investigation.md) must be eyeballed
 # across a broad set, not just the title that motivated it. The titles
 # below were chosen because each leans on HDMA differently; Contra III's
 # top status bar and Tales of Phantasia's bottom window are *direct* tests

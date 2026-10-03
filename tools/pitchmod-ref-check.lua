@@ -28,6 +28,28 @@
 --      log: it prints whether the SPC700 HALTED and at what PC, plus a bounded
 --      SPC PC stream for an optional diff against luna.
 --
+--   Power-cycling is equivalent to the hard reset. It is a GUI procedure:
+--   the script never stops the emulator, so it is not a --testRunner script.
+--   Verdict lines:
+--     ">>> SPC700 HALTED on STOP ($FF) at PC=$XXXX ..." -> fragile ROM, luna
+--       correct (PC=$FA42 is the exact same halt as luna).
+--     ">>> ~3 s elapsed, SPC700 still running ..., NO halt" -> luna bug.
+--
+-- WITHOUT THE SCRIPT
+--   Mesen2: Debug -> Debugger, SPC tab; run a few seconds and watch whether
+--   the SPC PC stays in the driver loops or wanders to $FAxx (an exec
+--   breakpoint on $FA42 firing = the halt reproduces). Or listen: the tone
+--   should be continuous; silence from ~1.7 s matches luna.
+--   bsnes-plus (https://github.com/devinacker/bsnes-plus): Tools -> Debugger
+--   -> SMP view, exec breakpoint on $FA42.
+--
+-- luna's reference points: halt at SPC PC $FA42 (a $FF); first timer
+-- divergence at SPC instruction 274093 ($F090, T0 read); audio stops at
+-- sample 56620 of 96000.
+--
+-- OUTCOME: Mesen2 halts on STOP too, so the `spc_pitchmod` golden stays
+-- `#[ignore]` (crates/luna-core/tests/snes_test_roms.rs cites this script).
+--
 -- NOTE: field/callback names are Mesen2's SPC (sound CPU) Lua API. If a name
 -- differs in your build, run once:  for k,_ in pairs(emu.getState().spc) do emu.log(k) end
 

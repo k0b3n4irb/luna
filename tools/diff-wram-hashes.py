@@ -7,8 +7,19 @@ may differ by a constant boot offset between emulators, so we auto-detect the
 offset that best aligns the two hash *sequences*, then report the first frame
 (in luna's numbering) where any page hash differs, and WHICH pages diverged.
 
+Inputs:
+  luna:   ./target/release/luna wram-trace -c 700 --out /tmp/luna_wram.txt "<rom>"
+          (without --out it writes /tmp/luna_wram_hashes.txt)
+  Mesen2: MAXF=700 ~/bin/Mesen --testRunner tools/snes-wram-perframe-hash.lua \
+            "<rom>" -novideo -noaudio          # writes /tmp/mesen_wram.txt
+          (tools/mesen-wram-hash.lua writes the same file in the same format)
+
 Usage:
   tools/diff-wram-hashes.py /tmp/luna_wram.txt /tmp/mesen_wram.txt
+
+The offset search covers -90..+90 frames. The page-address line it prints
+assumes 4 KiB pages (luna's default --page-size). To look at the bytes of
+the diverging frame, see tools/mesen-wram-dump.lua.
 """
 import sys
 
@@ -47,7 +58,7 @@ def main():
         if score > best_score:
             best_off, best_score = off, score
     print(f"best frame offset (mesen = luna + {best_off}); "
-          f"matched {best_score} frames")
+          f"matched {best_score} pages")
 
     first = None
     for i in range(len(lh)):
