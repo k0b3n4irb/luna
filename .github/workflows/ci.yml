@@ -2,9 +2,10 @@ name: CI
 
 on:
   # CI runs continuously on `develop` (the integration branch) and on every
-  # pull request. `main` is NOT a push trigger: it only ever receives merges
-  # from a green PR, gated by branch protection (required status checks), so a
-  # post-merge re-run on main would be redundant.
+  # pull request. `main` is NOT a push trigger: a release is a fast-forward
+  # push of a `develop` commit whose CI is already green (`git push origin
+  # develop:main`, see .claude/rules/no-co-authored-by.md), so a re-run on main
+  # would test the same commit twice.
   push:
     branches: [develop]
   pull_request:
@@ -29,6 +30,10 @@ env:
 jobs:
   # ---------------------------------------------------------------------
   # cargo check on the host (Linux x86_64). Catches any warning as error.
+  # `--locked` fails the job when Cargo.lock is out of step with the
+  # manifests; the release build of the two shipped binaries is the same
+  # command release.yml runs at tag time, so a release-only break (or a
+  # stale lock) shows here and not on the tag.
   # ---------------------------------------------------------------------
   check:
     name: check (native)
@@ -37,11 +42,15 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install ALSA headers (cpal → alsa-sys)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
+      # rust-toolchain.toml is the only place the toolchain is declared
+      # (channel, components, targets). rustup is preinstalled on the runner;
+      # with no argument it installs exactly what that file asks for.
+      - name: Install the Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --all-targets
+      - run: cargo check --workspace --all-targets --locked
+      - name: Build release binaries (as release.yml does)
+        run: cargo build --release --locked -p luna-cli -p luna-gui
 
   # ---------------------------------------------------------------------
   # cargo test on the host.
@@ -53,9 +62,11 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install ALSA headers (cpal → alsa-sys)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
+      # rust-toolchain.toml is the only place the toolchain is declared
+      # (channel, components, targets). rustup is preinstalled on the runner;
+      # with no argument it installs exactly what that file asks for.
+      - name: Install the Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       # NOTE: this also runs the `snes_test_roms` golden binary WITHOUT a
       # corpus, so its ~90 tests print "[skip]" and pass in 0.00s — they
@@ -66,21 +77,21 @@ jobs:
   # ---------------------------------------------------------------------
   # cargo check on wasm32-unknown-unknown for every cross-target crate.
   #
-  # The exclusion list = the "native-only" crates from ARCHITECTURE.md §4:
-  #   luna-mcp-server, luna-rest, luna-ws, luna-ffi, luna-libretro,
-  #   luna-cli (binary), luna-gui (eframe — supports WASM but pulls
-  #   native-only deps in dev), luna-overlay.
-  # Everything else MUST build for wasm32 or the design is broken.
+  # Native-only, not checked here: luna-mcp-server, luna-cli (binary) and
+  # luna-gui (winit / pixels / cpal). The nine other crates — the emulation
+  # core and luna-api — MUST build for wasm32 or the design is broken.
   # ---------------------------------------------------------------------
   wasm-check:
     name: check (wasm32)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-          targets: wasm32-unknown-unknown
+      # rust-toolchain.toml is the only place the toolchain is declared
+      # (channel, components, targets). rustup is preinstalled on the runner;
+      # with no argument it installs exactly what that file asks for,
+      # the wasm32-unknown-unknown target included.
+      - name: Install the Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
           key: wasm
@@ -89,6 +100,7 @@ jobs:
             -p luna-bus \
             -p luna-cpu-65c816 \
             -p luna-cpu-spc700 \
+            -p luna-cpu-upd96050 \
             -p luna-ppu \
             -p luna-apu \
             -p luna-cartridge \
@@ -103,10 +115,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-          components: rustfmt
+      # rust-toolchain.toml is the only place the toolchain is declared
+      # (channel, components, targets). rustup is preinstalled on the runner;
+      # with no argument it installs exactly what that file asks for,
+      # rustfmt included.
+      - name: Install the Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
       - run: cargo fmt --all --check
       # No automated dependency bots, ever (.claude/rules/no-dependency-bots.md).
       # Lives in this required job so it gates every PR without a settings
@@ -131,8 +145,9 @@ jobs:
   # ---------------------------------------------------------------------
   # Lints (cargo clippy with -D warnings on top of workspace lints).
   # `--all-features` matches the local pre-commit gate
-  # (.claude/rules/rust-lint-discipline.md) so feature-gated code paths
-  # (test-utils, debug-only counters) are linted in CI too.
+  # (.claude/rules/rust-lint-discipline.md) so feature-gated code (today
+  # the one feature of the workspace, luna-bus `test-utils`) is linted in
+  # CI too.
   # ---------------------------------------------------------------------
   clippy:
     name: clippy
@@ -141,10 +156,12 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install ALSA headers (cpal → alsa-sys)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-          components: clippy
+      # rust-toolchain.toml is the only place the toolchain is declared
+      # (channel, components, targets). rustup is preinstalled on the runner;
+      # with no argument it installs exactly what that file asks for,
+      # clippy included.
+      - name: Install the Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
@@ -152,9 +169,10 @@ jobs:
   # NOTE: the Tom Harte SingleStepTests (both CPU cores) used to run here on
   # every push. They are the exhaustive instruction-semantics gate but the
   # 65C816 run alone is ~25 min on GitHub runners — overkill per push. They
-  # now live in a dedicated, manually-dispatched workflow:
-  # `.github/workflows/tom-harte.yml` (Actions → "Tom Harte CPU suites" →
-  # Run workflow). Run it before merging CPU-core changes.
+  # now live in a dedicated workflow, `.github/workflows/tom-harte.yml`,
+  # which runs by itself on any push to `develop` or pull request touching
+  # a CPU core, weekly on `main`, and on demand (Actions → "Tom Harte CPU
+  # suites" → Run workflow).
   # ---------------------------------------------------------------------
 
   # ---------------------------------------------------------------------
@@ -177,9 +195,11 @@ jobs:
       LUNA_SNES_TEST_REQUIRE: "1"
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
+      # rust-toolchain.toml is the only place the toolchain is declared
+      # (channel, components, targets). rustup is preinstalled on the runner;
+      # with no argument it installs exactly what that file asks for.
+      - name: Install the Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
           key: snes-test-roms

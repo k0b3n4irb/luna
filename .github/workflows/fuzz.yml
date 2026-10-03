@@ -22,20 +22,30 @@ on:
     branches: [develop]
     paths:
       # The untrusted-input surface the targets drive: ROM parsing, and
-      # every save-state decoder (luna-api's bundle, each mapper's blob).
+      # the save-state decoders (luna-api's bundle, each mapper's blob, the
+      # DSP-1 core's blob, the `Snes` tree itself). State that lives in the
+      # PPU, APU and the two CPU crates is not listed: the weekly run is
+      # the backstop for those.
       - "crates/luna-cartridge/**"
       - "crates/luna-bus/src/**"
+      - "crates/luna-cpu-upd96050/src/**"
       - "crates/luna-core/src/coproc/**"
+      - "crates/luna-core/src/snes.rs"
       - "crates/luna-api/src/lib.rs"
       - "fuzz/**"
       - ".github/workflows/fuzz.yml"
   pull_request:
     paths:
       # The untrusted-input surface the targets drive: ROM parsing, and
-      # every save-state decoder (luna-api's bundle, each mapper's blob).
+      # the save-state decoders (luna-api's bundle, each mapper's blob, the
+      # DSP-1 core's blob, the `Snes` tree itself). State that lives in the
+      # PPU, APU and the two CPU crates is not listed: the weekly run is
+      # the backstop for those.
       - "crates/luna-cartridge/**"
       - "crates/luna-bus/src/**"
+      - "crates/luna-cpu-upd96050/src/**"
       - "crates/luna-core/src/coproc/**"
+      - "crates/luna-core/src/snes.rs"
       - "crates/luna-api/src/lib.rs"
       - "fuzz/**"
       - ".github/workflows/fuzz.yml"
@@ -49,6 +59,13 @@ env:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
+    # cargo-fuzz needs nightly (`-Zsanitizer`). rust-toolchain.toml pins
+    # another channel and would win for every cargo/rustc call made inside
+    # the checkout (rust-cache's key, `cargo install`, cargo-fuzz's inner
+    # `cargo build`) — and get installed as a second toolchain. Forcing
+    # nightly for the whole job keeps it to the one installed below.
+    env:
+      RUSTUP_TOOLCHAIN: nightly
     strategy:
       fail-fast: false
       matrix:
@@ -57,7 +74,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
-      # cargo-fuzz needs nightly for -Z sanitizer support.
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly
@@ -67,11 +83,6 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
       - name: Fuzz ${{ matrix.target }}
-        # The repo pins stable in rust-toolchain.toml, which would win
-        # over the installed nightly for cargo-fuzz's inner `cargo build`
-        # (`-Zsanitizer` is nightly-only) — force it for this step.
-        env:
-          RUSTUP_TOOLCHAIN: nightly
         run: |
           MINUTES="${{ github.event.inputs.minutes || '5' }}"
           cargo fuzz run "${{ matrix.target }}" -- \

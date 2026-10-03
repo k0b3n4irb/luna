@@ -10,7 +10,7 @@ on:
   pull_request:
     paths: ["Cargo.lock", "**/Cargo.toml", "deny.toml", ".github/workflows/deny.yml"]
   schedule:
-    - cron: "0 6 * * 1" # Mondays 06:00 UTC, alongside tom-harte/perf
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC, alongside tom-harte
   workflow_dispatch:
 
 permissions:
@@ -21,7 +21,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # The action runs in its own container and installs the toolchain
+      # named by `rust-version`. Hand it the channel rust-toolchain.toml
+      # declares, so cargo inside the checkout does not fetch a second one.
+      - name: Read the channel from rust-toolchain.toml
+        id: toolchain
+        run: |
+          channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
-          rust-version: stable
+          rust-version: ${{ steps.toolchain.outputs.channel }}

@@ -24,10 +24,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-          components: llvm-tools-preview
+      # rust-toolchain.toml is the only place the toolchain is declared
+      # (channel, components, targets). rustup is preinstalled on the runner;
+      # with no argument it installs exactly what that file asks for.
+      - name: Install the Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      # cargo-llvm-cov needs llvm-tools on the toolchain cargo really uses
+      # (the one rust-toolchain.toml selects in this checkout).
+      - name: Add llvm-tools to that toolchain
+        run: rustup component add llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-llvm-cov
       # `--lib` on purpose, NOT --all-targets. Measured 2026-08-02:

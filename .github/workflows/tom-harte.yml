@@ -2,9 +2,11 @@ name: Tom Harte CPU suites
 
 # The exhaustive SingleStepTests instruction-semantics gate for both CPU
 # cores. The 65C816 release run of 5.08M cases is ~8 min locally but ~25 min
-# on GitHub's 2-core runners, so it's NOT part of the per-push `CI` workflow
-# — run it on demand (Actions → this workflow → "Run workflow"), e.g. before
-# merging any change to a CPU core (luna-cpu-65c816 / luna-cpu-spc700).
+# on GitHub's 2-core runners, so it's NOT part of the per-push `CI` workflow.
+# It runs by itself on any push to `develop` or pull request that touches a
+# CPU core (luna-cpu-65c816 / luna-cpu-spc700) or the test bus they run on,
+# weekly on the released code, and on demand (Actions → this workflow →
+# "Run workflow").
 #
 # These tests are #[ignore] by default and need large external datasets.
 # LUNA_TOM_HARTE_REQUIRE=1 turns any mismatch into a hard failure.
@@ -27,6 +29,27 @@ on:
     paths:
       - "crates/luna-cpu-65c816/**"
       - "crates/luna-cpu-spc700/**"
+      # The 65C816 harness runs on luna-bus' `RamBus` (testing.rs), which is
+      # built on the `Bus` trait (bus.rs) and `Addr24` / `MCycles` (types.rs).
+      - "crates/luna-bus/src/testing.rs"
+      - "crates/luna-bus/src/bus.rs"
+      - "crates/luna-bus/src/types.rs"
+      - "tools/fetch-tom-harte.sh"
+      - "tools/fetch-tom-harte-spc700.sh"
+      - ".github/workflows/tom-harte.yml"
+  # Most commits are pushed straight to `develop` with no pull request, and
+  # a release is a fast-forward of main: without this trigger a CPU-core
+  # change would first meet the suites on the Monday after its release.
+  push:
+    branches: [develop]
+    paths:
+      - "crates/luna-cpu-65c816/**"
+      - "crates/luna-cpu-spc700/**"
+      # The 65C816 harness runs on luna-bus' `RamBus` (testing.rs), which is
+      # built on the `Bus` trait (bus.rs) and `Addr24` / `MCycles` (types.rs).
+      - "crates/luna-bus/src/testing.rs"
+      - "crates/luna-bus/src/bus.rs"
+      - "crates/luna-bus/src/types.rs"
       - "tools/fetch-tom-harte.sh"
       - "tools/fetch-tom-harte-spc700.sh"
       - ".github/workflows/tom-harte.yml"
@@ -46,9 +69,11 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
+      # rust-toolchain.toml is the only place the toolchain is declared
+      # (channel, components, targets). rustup is preinstalled on the runner;
+      # with no argument it installs exactly what that file asks for.
+      - name: Install the Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
           key: tom-harte

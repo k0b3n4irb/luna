@@ -59,7 +59,8 @@ jobs:
 
       # Linux's only build-time system dep for both binaries: ALSA headers
       # (cpal → alsa-sys). winit/wgpu dlopen X11/Wayland/Vulkan at runtime; rfd
-      # uses the pure-Rust xdg-portal backend — no GTK build dep. Windows (WASAPI)
+      # brings no GTK or D-Bus crate (its Linux dependencies in Cargo.lock are
+      # the pure-Rust wayland-* crates) — no GTK build dep. Windows (WASAPI)
       # and macOS (CoreAudio) need no extra system package; cpal links the OS
       # audio framework directly.
       - name: Install ALSA headers

@@ -40,7 +40,11 @@ jobs:
       - name: Build the guide
         run: mdbook build book
 
-      - uses: dtolnay/rust-toolchain@stable
+      # rust-toolchain.toml is the only place the toolchain is declared
+      # (channel, components, targets). rustup is preinstalled on the runner;
+      # with no argument it installs exactly what that file asks for.
+      - name: Install the Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
 
       - name: System deps (libasound for the workspace)

@@ -29,7 +29,11 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install ALSA headers (cpal → alsa-sys)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
-      - uses: dtolnay/rust-toolchain@stable
+      # rust-toolchain.toml is the only place the toolchain is declared
+      # (channel, components, targets). rustup is preinstalled on the runner;
+      # with no argument it installs exactly what that file asks for.
+      - name: Install the Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
           key: perf
