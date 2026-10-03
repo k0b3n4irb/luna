@@ -6,6 +6,16 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+## [1.32.0] — 2026-10-03
+
+One new command for projects that keep an audio baseline:
+`luna diff --audio` says whether two builds sound the same when their
+audio hashes differ. Two `luna test` error messages are clearer.
+
+**Upgrading from 1.31.0:** nothing to do. If a script compares the text
+of the two `region` errors below, update it; their exit codes are
+unchanged. The emulator itself is unchanged.
+
 ### Added
 
 - **`luna diff --audio A.sfc B.sfc --until-frame N`** compares the sound
