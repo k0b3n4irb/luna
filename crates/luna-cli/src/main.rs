@@ -11,6 +11,7 @@ use clap::{Parser, Subcommand};
 mod bench;
 mod csv;
 mod diff;
+mod diff_audio;
 mod dumps;
 mod fmt;
 mod frames;
@@ -24,6 +25,7 @@ mod test_cmd;
 mod wram_trace;
 
 use diff::{DiffOptions, run_diff};
+use diff_audio::{AudioDiffOptions, run_audio_diff};
 use dumps::{run_assets_dump, run_spc_dump};
 use frames::run_frames;
 use profile::{ProfileOptions, run_profile};
@@ -651,34 +653,65 @@ enum Command {
     /// codegen change can introduce). The "compare at equal frame"
     /// protocol that validates a compiler / library change. Exit 0 = all
     /// match, 1 = any DIFF, 2 = usage error.
+    ///
+    /// With `--audio`, the two ROMs' sound is compared instead: both run
+    /// to `--until-frame`, the output is cut into windows and each
+    /// window's RMS level compared. MATCH when every window is within
+    /// `--tolerance-pct` — the comparison that survives the same sound
+    /// arriving a few samples earlier or later, which an audio hash does
+    /// not.
     Diff {
         /// The reference build.
         rom_a: PathBuf,
         /// The build under test.
         rom_b: PathBuf,
         /// PPU frames to compare, comma-separated (e.g. `200,400`).
-        #[arg(long, value_delimiter = ',', required = true)]
+        #[arg(
+            long,
+            value_delimiter = ',',
+            required_unless_present = "audio",
+            conflicts_with = "audio"
+        )]
         frames: Vec<u64>,
         /// Accept a match up to this many frames away (`b = a ± n`).
-        #[arg(long, default_value_t = 0)]
+        #[arg(long, default_value_t = 0, conflicts_with = "audio")]
         tolerance: u64,
+        /// Compare the audio output instead of the displayed frames.
+        #[arg(long, requires = "until_frame")]
+        audio: bool,
+        /// `--audio`: run both ROMs to this PPU frame.
+        #[arg(long = "until-frame")]
+        until_frame: Option<u64>,
+        /// `--audio`: window length, in milliseconds of output
+        /// [default: 500].
+        #[arg(long = "window-ms")]
+        window_ms: Option<u64>,
+        /// `--audio`: largest RMS difference a window may show, in percent
+        /// of the louder of the two [default: 2].
+        #[arg(long = "tolerance-pct")]
+        tolerance_pct: Option<f64>,
+        /// `--audio`: sample level counted as silence (0-32767). It is the
+        /// threshold of the reported onset, and the floor a window's
+        /// difference is measured against [default: 64].
+        #[arg(long)]
+        silence: Option<u16>,
         /// Scripted joypad-1 input applied to BOTH machines (`state --input`
         /// grammar).
         #[arg(long)]
         input: Option<String>,
         /// Write `frame_<F>_a.png` / `frame_<F>_b.png` here for every DIFF
         /// frame.
-        #[arg(long = "screenshot-dir")]
+        #[arg(long = "screenshot-dir", conflicts_with = "audio")]
         screenshot_dir: Option<PathBuf>,
         /// Also write a JSON report (`-` = stdout after the text lines).
         #[arg(long)]
         out: Option<PathBuf>,
         /// Hash the frame with INIDISP forced-blank bypassed (as `run
         /// --force-display`).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "audio")]
         force_display: bool,
         /// Hash the native 512×448 frame (issue #115).
-        #[arg(long = "native-res")]
+        #[arg(long = "native-res", conflicts_with = "audio")]
         native_res: bool,
         /// Force a cartridge mapper for both ROMs (lorom, hirom, exhirom,
         /// sa1, superfx).
@@ -1161,6 +1194,35 @@ fn main() -> ExitCode {
         Command::Diff {
             rom_a,
             rom_b,
+            audio: true,
+            until_frame: Some(until_frame),
+            window_ms,
+            tolerance_pct,
+            silence,
+            input,
+            out,
+            force_mapper,
+            force_region,
+            power_on,
+            ..
+        } => run_audio_diff(
+            &rom_a,
+            &rom_b,
+            &AudioDiffOptions {
+                force_mapper: force_mapper.as_deref(),
+                force_region: force_region.as_deref(),
+                power_on: power_on.as_deref(),
+                input_script: input.as_deref(),
+                until_frame,
+                window_ms: window_ms.unwrap_or(500),
+                tolerance_pct: tolerance_pct.unwrap_or(2.0),
+                silence: silence.unwrap_or(64),
+                out: out.as_deref(),
+            },
+        ),
+        Command::Diff {
+            rom_a,
+            rom_b,
             frames,
             tolerance,
             input,
@@ -1171,22 +1233,42 @@ fn main() -> ExitCode {
             force_mapper,
             force_region,
             power_on,
-        } => run_diff(
-            &rom_a,
-            &rom_b,
-            &frames,
-            &DiffOptions {
-                force_mapper: force_mapper.as_deref(),
-                force_region: force_region.as_deref(),
-                power_on: power_on.as_deref(),
-                input_script: input.as_deref(),
-                force_display,
-                native_res,
-                tolerance,
-                screenshot_dir: screenshot_dir.as_deref(),
-                out: out.as_deref(),
-            },
-        ),
+            until_frame,
+            window_ms,
+            tolerance_pct,
+            silence,
+            ..
+        } => {
+            // clap's `requires` is satisfied by a flag's default `false`,
+            // so the audio-only options are refused here.
+            if until_frame.is_some()
+                || window_ms.is_some()
+                || tolerance_pct.is_some()
+                || silence.is_some()
+            {
+                eprintln!(
+                    "error: --until-frame, --window-ms, --tolerance-pct and --silence \
+                     belong to `luna diff --audio`"
+                );
+                return ExitCode::from(2);
+            }
+            run_diff(
+                &rom_a,
+                &rom_b,
+                &frames,
+                &DiffOptions {
+                    force_mapper: force_mapper.as_deref(),
+                    force_region: force_region.as_deref(),
+                    power_on: power_on.as_deref(),
+                    input_script: input.as_deref(),
+                    force_display,
+                    native_res,
+                    tolerance,
+                    screenshot_dir: screenshot_dir.as_deref(),
+                    out: out.as_deref(),
+                },
+            )
+        }
         Command::Profile {
             rom,
             steps,

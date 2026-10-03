@@ -6,6 +6,19 @@ All notable user-facing changes to luna. Releases are cut from `main`
 
 ## [Unreleased]
 
+### Added
+
+- **`luna diff --audio A.sfc B.sfc --until-frame N`** compares the sound
+  of two builds instead of their frames. Both run to the same PPU frame,
+  the output is cut into windows (`--window-ms`, default 500) and each
+  window's RMS level is compared: `MATCH` when every window is within
+  `--tolerance-pct` (default 2), `DIFF` otherwise, with the exit codes
+  of the frame `luna diff`. An audio hash flips when the code that talks
+  to the SPC700 moves by a few cycles and the same sound comes out a few
+  samples later; this says whether that is all that happened. It also
+  prints each build's first non-silent sample. It compares loudness, not
+  pitch, so it backs up a hash rather than replacing it.
+
 ### Changed
 
 - **`luna test`: two manifest errors about `region` now say what to fix.**

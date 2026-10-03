@@ -137,3 +137,96 @@ fn missing_frames_is_a_usage_error() {
     let (code, _, stderr) = diff(&[a.to_str().unwrap(), a.to_str().unwrap()]);
     assert_eq!(code, Some(2), "{stderr}");
 }
+
+/// `luna diff --audio`: both ROMs run to `--until-frame`, the output is cut
+/// into windows and the report carries one level pair per window. The
+/// synthetic ROM never starts its APU, so this pins the plumbing (capture
+/// length, window count, report shape, exit code); the level arithmetic is
+/// unit-tested in `diff_audio.rs`.
+#[test]
+fn audio_compares_levels_per_window_and_reports_json() {
+    let dir = std::env::temp_dir().join("luna_diff_audio");
+    let _ = std::fs::create_dir_all(&dir);
+    let (a, b) = (dir.join("a.sfc"), dir.join("b.sfc"));
+    counter_rom(&a, 0);
+    counter_rom(&b, 1);
+    let report = dir.join("report.json");
+    let (code, stdout, stderr) = diff(&[
+        a.to_str().unwrap(),
+        b.to_str().unwrap(),
+        "--force-mapper",
+        "lorom",
+        "--audio",
+        "--until-frame",
+        "60",
+        "--window-ms",
+        "250",
+        "--out",
+        report.to_str().unwrap(),
+    ]);
+    assert_eq!(code, Some(0), "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("window      0 ms:"), "{stdout}");
+    assert!(
+        stdout.contains("first sample above 64: a=none b=none"),
+        "{stdout}"
+    );
+    assert!(stdout.trim_end().ends_with("MATCH"), "{stdout}");
+
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+    assert_eq!(json["status"], "match");
+    assert_eq!(json["until_frame"], 60);
+    assert_eq!(json["window_ms"], 250);
+    assert!(json["onset_a"].is_null());
+    // 60 NTSC frames are one second of output: four 250 ms windows, give
+    // or take the partial one the frame boundary leaves at the end.
+    let samples = json["samples_a"].as_u64().unwrap();
+    assert!((31_000..=33_000).contains(&samples), "{samples}");
+    assert_eq!(json["samples_b"], json["samples_a"]);
+    let windows = json["windows"].as_array().unwrap();
+    assert_eq!(windows.len() as u64, samples.div_ceil(8_000));
+    assert_eq!(windows[1]["start_ms"], 250);
+}
+
+#[test]
+fn audio_usage_errors_exit_two() {
+    for args in [
+        // No run bound.
+        vec!["a.sfc", "b.sfc", "--audio"],
+        // The frame comparison's options do not mix with the audio one.
+        vec![
+            "a.sfc",
+            "b.sfc",
+            "--audio",
+            "--until-frame",
+            "9",
+            "--frames",
+            "5",
+        ],
+        vec![
+            "a.sfc",
+            "b.sfc",
+            "--audio",
+            "--until-frame",
+            "9",
+            "--tolerance",
+            "1",
+        ],
+        // …and the audio options need `--audio`.
+        vec!["a.sfc", "b.sfc", "--frames", "5", "--until-frame", "9"],
+        vec!["a.sfc", "b.sfc", "--frames", "5", "--tolerance-pct", "1"],
+        // A zero-length window compares nothing.
+        vec![
+            "a.sfc",
+            "b.sfc",
+            "--audio",
+            "--until-frame",
+            "9",
+            "--window-ms",
+            "0",
+        ],
+    ] {
+        let (code, _, stderr) = diff(&args);
+        assert_eq!(code, Some(2), "{args:?}: {stderr}");
+    }
+}

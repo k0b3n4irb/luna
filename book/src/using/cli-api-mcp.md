@@ -440,6 +440,50 @@ luna diff build/old/game.sfc build/new/game.sfc --frames 200,400 --tolerance 3 \
 # 2 frame(s): 2 match, 0 diff (tolerance ±3)
 ```
 
+#### `luna diff --audio` — the same sound, a few samples apart
+
+```
+luna diff --audio <ROM_A> <ROM_B> --until-frame N [--window-ms 500] [--tolerance-pct 2]
+```
+
+A hash of the audio output is a good tripwire and a poor judge: it flips
+as soon as the code that talks to the SPC700 moves by a few CPU cycles,
+because the same sound then comes out a handful of samples earlier or
+later. `--audio` is the comparison that survives that. Both ROMs run to
+`--until-frame` (the capture `run --until-frame N --audio-out` writes),
+the output is cut into windows, and each window's RMS level is compared.
+`MATCH` when every window is within the tolerance, `DIFF` otherwise;
+same exit codes as above.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `--audio` | off | Compare the sound instead of the frames. Excludes `--frames`, `--tolerance`, `--screenshot-dir`, `--force-display`, `--native-res`. |
+| `--until-frame <N>` | — | PPU frame both ROMs run to (required). |
+| `--window-ms <MS>` | `500` | Window length. The last window is whatever is left. |
+| `--tolerance-pct <P>` | `2` | Largest difference a window may show, in percent of the louder of the two levels. |
+| `--silence <LEVEL>` | `64` | Sample level counted as silence (of 32767): the threshold of the reported onset, and the floor differences are measured against, so two near-silent windows are not a 100 % difference over one LSB. |
+| `--input`, `--out`, `--force-mapper`, `--force-region`, `--power-on` | — | As for the frame comparison. The JSON report is `{a, b, until_frame, window_ms, tolerance_pct, silence, samples_a, samples_b, onset_a, onset_b, windows: [{start_ms, rms_a, rms_b, delta_pct}], max_delta_pct, status}`. |
+
+```bash
+# Two builds of a music player; the second adds two instructions to its init.
+# Their audio hashes differ. Is it the same sound?
+luna diff --audio build/old/music.sfc build/new/music.sfc --until-frame 300
+# window      0 ms: a=     0.00 b=     0.00 delta=0.00%
+# window    500 ms: a=     0.00 b=     0.00 delta=0.00%
+# window   1000 ms: a=  5491.35 b=  5491.35 delta=0.00%
+# window   1500 ms: a=  5716.50 b=  5716.44 delta=0.00%
+# window   2000 ms: a=  4510.42 b=  4508.98 delta=0.03%
+# …
+# first sample above 64: a=32384 b=32384 (of 159936 / 159936)
+# 10 window(s) of 500 ms, max delta 0.04% (tolerance 2%): MATCH
+```
+
+**What it does not see.** It compares a loudness envelope, not a
+spectrum: a wrong note played at the same level passes. Keep the hash as
+the signal that something moved, and use this to say how much. Two
+silent captures also `MATCH` (the onset line then reads `none`), so
+check that line when a ROM is expected to play.
+
 ### `luna profile` — real master cycles per symbol
 
 ```
