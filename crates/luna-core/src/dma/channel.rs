@@ -191,34 +191,6 @@ impl DmaParams {
             hdma_indirect: byte & 0x40 != 0,
         }
     }
-
-    /// Encode back to `$43x0`. Useful for read-back semantics.
-    #[must_use]
-    pub fn to_byte(self) -> u8 {
-        let mut b = 0;
-        if self.direction == Direction::BToA {
-            b |= 0x80;
-        }
-        if self.hdma_indirect {
-            b |= 0x40;
-        }
-        b |= match self.a_increment {
-            Increment::Up => 0b00 << 3,
-            Increment::Down => 0b10 << 3,
-            Increment::Fixed => 0b01 << 3, // canonical "fixed" encoding
-        };
-        b |= match self.mode {
-            TransferMode::OneByteOneReg => 0,
-            TransferMode::TwoBytesTwoRegs => 1,
-            TransferMode::TwoBytesOneReg => 2,
-            TransferMode::FourBytesTwoPairs => 3,
-            TransferMode::FourBytesFourRegs => 4,
-            TransferMode::FourBytesTwoRegsAlt => 5,
-            TransferMode::TwoBytesOneRegAlt => 6,
-            TransferMode::FourBytesTwoPairsAlt => 7,
-        };
-        b
-    }
 }
 
 // =============================================================================
@@ -238,7 +210,7 @@ pub struct DmaChannel {
     /// `$43xx` block and use these registers as fast zero-page scratch
     /// (e.g. Ms. Pac-Man's graphics decompressor stores its source
     /// pointer's low byte in `$4340`) rely on lossless read-back; a
-    /// re-encode via [`DmaParams::to_byte`] silently corrupts a quarter
+    /// re-encode from the decoded [`DmaParams`] silently corrupts a quarter
     /// of all values (any with bit 5 set). ares `cpu/io.cpp` readIO
     /// reconstructs the byte from independently-stored bits — same
     /// observable result.
@@ -1140,7 +1112,7 @@ mod tests {
     #[test]
     fn dmap_reads_back_raw_byte_not_reencoded() {
         // Regression: $43x0 is a full 8-bit R/W latch. Re-encoding the
-        // read through DmaParams::to_byte() drops bit 5 (and folds the
+        // read from the decoded DmaParams drops bit 5 (and folds the
         // independent fixed/reverse increment bits), corrupting a
         // quarter of all values. Ms. Pac-Man parks DP on $4300 and
         // stores its decompressor's source-pointer low byte in $4340

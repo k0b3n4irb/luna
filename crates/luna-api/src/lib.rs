@@ -663,7 +663,8 @@ pub struct CpuRegsState {
 /// One DMA/HDMA channel's registers (`$43x0-$43xA`).
 #[derive(Debug, Clone, Copy, Serialize, schemars::JsonSchema)]
 pub struct DmaChannelState {
-    /// `$43x0` `DMAPx` (raw byte).
+    /// `$43x0` `DMAPx` — the byte as last written, which is what a read of
+    /// the register returns (bit 5 included).
     pub params: u8,
     /// `$43x1` `BBADx` — B-bus address (`$2100 + bbad`).
     pub bbad: u8,
@@ -2031,7 +2032,7 @@ impl Emulator {
                 channels: std::array::from_fn(|i| {
                     let c = &s.dma.channels[i];
                     DmaChannelState {
-                        params: c.params.to_byte(),
+                        params: c.dmap,
                         bbad: c.bbad,
                         a_addr: c.a_addr,
                         a_bank: c.a_bank,

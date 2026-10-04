@@ -1753,3 +1753,36 @@ fn dsp_trace_timestamps_count_spc_cycles() {
     assert_eq!(ev[1].spc_cycles - ev[0].spc_cycles, 5);
     assert_eq!(ev[2].spc_cycles - ev[1].spc_cycles, 11);
 }
+
+/// The state's DMAP of each channel, next to what the bus reads at `$43x0`.
+fn dmap_exported_and_read(e: &mut Emulator) -> ([u8; 8], [u8; 8]) {
+    let exported = e.state().dma.channels.map(|c| c.params);
+    let read =
+        std::array::from_fn(|ch| e.peek_memory(0x00, 0x4300 | ((ch as u16) << 4), 1).unwrap()[0]);
+    (exported, read)
+}
+
+#[test]
+fn the_exported_dmap_is_the_byte_the_bus_reads() {
+    // `$43x0` is an 8-bit latch: bit 5 has no function and the two
+    // increment bits are stored separately, so a value rebuilt from the
+    // decoded fields is not the register (`$FF` came out as `$CF`).
+    let values: [u8; 8] = [0xFF, 0x20, 0x18, 0x38, 0x00, 0xA9, 0x5F, 0x10];
+    let mut code = Vec::new();
+    for (ch, v) in values.iter().enumerate() {
+        code.extend_from_slice(&[0xA9, *v, 0x8D, (ch as u8) << 4, 0x43]); // LDA #v, STA $43x0
+    }
+    code.extend_from_slice(&[0x80, 0xFE]); // BRA -2
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
+
+    // Power-on: every channel register comes up `$FF`.
+    let (exported, read) = dmap_exported_and_read(&mut e);
+    assert_eq!(read, [0xFF; 8]);
+    assert_eq!(exported, read, "power-on");
+
+    e.step(17).unwrap();
+    let (exported, read) = dmap_exported_and_read(&mut e);
+    assert_eq!(read, values, "the program wrote every channel");
+    assert_eq!(exported, read, "after the writes");
+}

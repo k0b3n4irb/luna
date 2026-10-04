@@ -53,6 +53,16 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ### Fixed
 
+- **The state's `dma.channels[n].params` is the DMAP register, not a
+  rebuilt copy.** The field (in `luna state --out`, the MCP `state` tool
+  and the GUI's register viewer) was re-encoded from the decoded transfer
+  settings, which loses bit 5 and one of the two address-step bits: at
+  power-on it read `$CF` (207) where the register, and `--peek 00:4300:1`,
+  read `$FF` (255); a game writing `$20` showed `$00`, `$18` or `$38`
+  showed `$08`. It now holds the byte a read of `$43x0` returns. Any script
+  comparing `params` against one of the old values — 207 before the game
+  sets a channel up is the likely one — must take the register value
+  instead. Emulation is unchanged: the bus always read the right byte.
 - **`--dsp-trace` timestamps are no longer all 0.** The `spc_cycles`
   column (and the `spc_cycles` field of the MCP `take_dsp_trace`) read 0
   on every row: the counter was only advanced by a stepping path the
