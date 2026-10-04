@@ -48,6 +48,22 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   any other malformed one: `FAIL`, ``blocks.7E:0000: expected ASCII hex
   digits, got `aéb` ``, exit 1, and the remaining manifests run. A block
   with a digit that is not hex now quotes it (``bad hex `zz`: …``).
+- **A corrupted or hostile save state can no longer crash or freeze a
+  coprocessor game after it loaded.** A state is checked for sizes, but
+  a few restored numbers were trusted: on a Super FX game a register
+  selector past the sixteen registers or a colour mode wider than its two
+  bits killed the emulation on the next GSU instruction, and a forged
+  clock debt kept the GSU running inside a single step — a frozen GUI, an
+  MCP call that never returns. S-DD1 games (Star Ocean, Street Fighter
+  Alpha 2) had the same crash through the decompressor's bitplane and
+  context indices, SA-1 games through the character-conversion format, the
+  bit cursor and the timer counters, DSP-1 games through the chip's
+  pointers and its cycle counter. Such a state is now refused when it is
+  loaded (`save state: mapper: Super FX source register is 16 in the
+  state, at most 15`) and the running game is left as it was. A `$2115`
+  remap mode outside its two bits, which stopped the emulation on the next
+  VRAM access, is now read as its two low bits. States saved by luna load
+  exactly as before; the format is unchanged (v7).
 
 ## [1.32.0] — 2026-10-03
 

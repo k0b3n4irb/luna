@@ -4,8 +4,9 @@
 //! path, or base64 over MCP. Unlike a ROM it is not "parse then run": it
 //! is decoded straight INTO a running machine, so a blob that decodes but
 //! is the wrong shape (a coprocessor RAM shorter than the address mask
-//! built at construction, a framebuffer of the wrong size) would panic
-//! later, in the emulation loop, far from the load.
+//! built at construction, a framebuffer of the wrong size, a register
+//! selector past the register file) would panic later, in the emulation
+//! loop, far from the load.
 //!
 //! The first input byte picks how the rest is delivered, so the fuzzer can
 //! get past the container's version + ROM-hash gate and reach each layer:
@@ -14,6 +15,13 @@
 //! - `1`: a genuine container with the bytes as its MAPPER blob;
 //! - `2`: a genuine container with the bytes as its CORE blob.
 //!
+//! (modulo 3), on a plain `LoROM` machine. Every mapper kind decodes its own
+//! blob, so an input that starts with the escape byte [`COPROCESSOR`]
+//! carries a second byte choosing one of the coprocessor machines of
+//! [`machines`] (`% 4`: Super FX, S-DD1, SA-1, DSP-1) and the layer
+//! (`/ 4 % 3`, as above). The escape leaves every other first byte meaning
+//! what it always has, which is what keeps the committed seeds valid.
+//!
 //! Contract: `load_state` returns `Ok` or `ApiError`, never panics; after
 //! an `Err` the machine still runs; after an `Ok` it runs without
 //! panicking too.
@@ -21,6 +29,13 @@
 
 use libfuzzer_sys::fuzz_target;
 use luna_api::Emulator;
+
+#[path = "load_state_machines.rs"]
+mod machines;
+
+/// First byte of an input aimed at a coprocessor machine. Chosen because
+/// no committed seed starts with it.
+const COPROCESSOR: u8 = 0xF5;
 
 /// Mirror of luna-api's private `SaveStateBundle` (bincode is positional,
 /// so field order and types are the whole contract).
@@ -32,49 +47,29 @@ struct Bundle {
     mapper: Vec<u8>,
 }
 
-/// A 32 KB LoROM with 8 KB of SRAM: `SEI ; loop: BRA loop`.
-fn rom() -> Vec<u8> {
-    let mut rom = vec![0u8; 0x8000];
-    rom[..3].copy_from_slice(&[0x78, 0x80, 0xFE]);
-    rom[0x7FFC] = 0x00;
-    rom[0x7FFD] = 0x80;
-    rom[0x7FC0..0x7FC0 + 21].copy_from_slice(b"LUNA FUZZ LOAD STATE ");
-    rom[0x7FD5] = 0x20; // LoROM
-    rom[0x7FD7] = 0x05; // 32 KB
-    rom[0x7FD8] = 0x03; // 8 KB SRAM
-    let sum: u32 = rom
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| !(0x7FDC..=0x7FDF).contains(i))
-        .map(|(_, b)| u32::from(*b))
-        .sum();
-    let checksum = (sum & 0xFFFF) as u16;
-    rom[0x7FDC..0x7FDE].copy_from_slice(&(!checksum).to_le_bytes());
-    rom[0x7FDE..0x7FE0].copy_from_slice(&checksum.to_le_bytes());
-    rom
-}
-
 thread_local! {
-    /// One machine per fuzzing process plus its pristine state: building an
-    /// `Emulator` per input costs ~20 ms, reloading the pristine state far
-    /// less — and that reload is itself a `load_state` round-trip.
-    static MACHINE: std::cell::RefCell<(Emulator, Vec<u8>)> = {
-        let mut emu = Emulator::new();
-        emu.load_rom_bytes(rom()).expect("the fixed ROM loads");
-        let good = emu.save_state().expect("a fresh machine saves");
-        std::cell::RefCell::new((emu, good))
-    };
+    /// One machine per kind per fuzzing process, each with its pristine
+    /// state: building an `Emulator` per input costs ~20 ms, reloading the
+    /// pristine state far less — and that reload is itself a `load_state`
+    /// round-trip.
+    static MACHINES: std::cell::RefCell<Vec<(Emulator, Vec<u8>)>> =
+        std::cell::RefCell::new(machines::build());
 }
 
 fuzz_target!(|data: &[u8]| {
-    let Some((&mode, payload)) = data.split_first() else {
-        return;
+    let (kind, layer, payload) = match data {
+        [COPROCESSOR, select, payload @ ..] => {
+            (1 + usize::from(select % 4), (select / 4) % 3, payload)
+        }
+        [mode, payload @ ..] => (machines::LOROM, mode % 3, payload),
+        [] => return,
     };
-    MACHINE.with_borrow_mut(|(emu, good)| {
+    MACHINES.with_borrow_mut(|all| {
+        let (emu, good) = &mut all[kind];
         emu.load_state(good).expect("the pristine state always loads");
 
         let cfg = bincode::config::standard();
-        let state = match mode % 3 {
+        let state = match layer {
             0 => payload.to_vec(),
             m => {
                 let (mut bundle, _): (Bundle, usize) =
@@ -89,10 +84,12 @@ fuzz_target!(|data: &[u8]| {
         };
 
         // Whatever the verdict, the machine must keep running and stay
-        // readable.
+        // readable. A coprocessor gets a longer burst: its restored state
+        // is consumed by the chip's own loop, a few instructions in.
         let _ = emu.load_state(&state);
-        let _ = emu.step(64);
+        let _ = emu.step(if kind == machines::LOROM { 64 } else { 256 });
         let _ = emu.peek_memory(0x70, 0x0000, 16);
         let _ = emu.peek_memory(0x7E, 0x0000, 16);
+        let _ = emu.peek_memory(0xC0, 0x0000, 16);
     });
 });

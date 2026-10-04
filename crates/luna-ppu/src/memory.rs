@@ -252,14 +252,17 @@ impl VmainSettings {
 
     /// Apply the word-address remap. Mode 0 is identity; the other
     /// modes shuffle bits to make tile uploads contiguous.
+    ///
+    /// Only bits 1:0 of `remap_mode` exist (`$2115` bits 3:2). The field
+    /// is a serialized byte, so a save state can carry more: they are
+    /// ignored here rather than trusted.
     #[must_use]
-    pub fn remap(self, word_addr: u16) -> u16 {
-        match self.remap_mode {
+    pub const fn remap(self, word_addr: u16) -> u16 {
+        match self.remap_mode & 0x03 {
             0 => word_addr,
             1 => (word_addr & 0xFF00) | ((word_addr & 0x001F) << 3) | ((word_addr & 0x00E0) >> 5),
             2 => (word_addr & 0xFE00) | ((word_addr & 0x003F) << 3) | ((word_addr & 0x01C0) >> 6),
-            3 => (word_addr & 0xFC00) | ((word_addr & 0x007F) << 3) | ((word_addr & 0x0380) >> 7),
-            _ => unreachable!(),
+            _ => (word_addr & 0xFC00) | ((word_addr & 0x007F) << 3) | ((word_addr & 0x0380) >> 7),
         }
     }
 }
@@ -650,6 +653,36 @@ impl Oam {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vmain_remap_is_total_over_a_restored_mode_byte() {
+        // `remap_mode` is a serialized `u8`, so a save state can carry any
+        // value; `$2115` only has the two bits. The four real modes keep
+        // their exact mapping, and no other value may panic the VRAM port.
+        let at = |remap_mode: u8| VmainSettings {
+            increment_on_high: false,
+            step: 1,
+            remap_mode,
+        };
+        for addr in [0x0000, 0x1234, 0x5A5A, 0xFFFF] {
+            assert_eq!(at(0).remap(addr), addr);
+            assert_eq!(
+                at(1).remap(addr),
+                (addr & 0xFF00) | ((addr & 0x001F) << 3) | ((addr & 0x00E0) >> 5)
+            );
+            assert_eq!(
+                at(2).remap(addr),
+                (addr & 0xFE00) | ((addr & 0x003F) << 3) | ((addr & 0x01C0) >> 6)
+            );
+            assert_eq!(
+                at(3).remap(addr),
+                (addr & 0xFC00) | ((addr & 0x007F) << 3) | ((addr & 0x0380) >> 7)
+            );
+            for mode in 4..=u8::MAX {
+                assert_eq!(at(mode).remap(addr), at(mode & 0x03).remap(addr));
+            }
+        }
+    }
 
     #[test]
     fn vmain_decodes_step_and_remap_modes() {

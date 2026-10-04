@@ -25,6 +25,16 @@ pub enum Revision {
     Upd96050,
 }
 
+impl Revision {
+    /// Bit widths of `pc` / `rp` / `dp`.
+    const fn pointer_bits(self) -> (u32, u32, u32) {
+        match self {
+            Self::Upd7725 => (11, 10, 8),
+            Self::Upd96050 => (14, 11, 11),
+        }
+    }
+}
+
 /// One ALU flag set (per accumulator).
 #[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 struct Flag {
@@ -252,10 +262,7 @@ impl Upd96050 {
 
     /// Reset to power-on state (ROM contents preserved).
     pub fn power(&mut self) {
-        let (pc, rp, dp) = match self.revision {
-            Revision::Upd7725 => (11, 10, 8),
-            Revision::Upd96050 => (14, 11, 11),
-        };
+        let (pc, rp, dp) = self.revision.pointer_bits();
         self.regs = Registers {
             pc: Vn::new(pc),
             rp: Vn::new(rp),
@@ -282,8 +289,9 @@ impl Upd96050 {
     }
 
     /// Restore the mutable state produced by [`Self::save_state`], leaving
-    /// the microcode ROMs intact. On `Err` (undecodable blob, or a data RAM
-    /// of the wrong size) the chip is left untouched.
+    /// the microcode ROMs intact. On `Err` (undecodable blob, a data RAM of
+    /// the wrong size, or a pointer the chip cannot hold) the chip is left
+    /// untouched.
     pub fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
         // Capped: a forged length prefix must fail the decode, not ask the
         // allocator for exabytes (which aborts). The real state is ~4 KB.
@@ -297,6 +305,35 @@ impl Upd96050 {
                 "uPD96050 data RAM is {} words in the state, {} in this chip",
                 st.data_ram.len(),
                 self.data_ram.len()
+            ));
+        }
+        // The revision is the chip that was built; it fixes the pointer
+        // widths, which are what keep `pc` / `rp` / `dp` inside the ROMs and
+        // the RAM. A state must agree with it on both.
+        if st.revision != self.revision {
+            return Err(format!(
+                "uPD96050 state is for a {:?}, this chip is a {:?}",
+                st.revision, self.revision
+            ));
+        }
+        let (pc, rp, dp) = self.revision.pointer_bits();
+        for (what, reg, bits) in [
+            ("pc", st.regs.pc, pc),
+            ("rp", st.regs.rp, rp),
+            ("dp", st.regs.dp, dp),
+        ] {
+            if reg.mask != Vn::new(bits).mask || reg.value > reg.mask {
+                return Err(format!(
+                    "uPD96050 {what} is {:#06x} under mask {:#06x} in the state, {bits} bits in this chip",
+                    reg.value, reg.mask
+                ));
+            }
+        }
+        // Indexes `stack[16]`; every push and pop masks it to 4 bits.
+        if st.regs.sp > 15 {
+            return Err(format!(
+                "uPD96050 stack pointer is {} in the state, at most 15",
+                st.regs.sp
             ));
         }
         self.revision = st.revision;
@@ -849,6 +886,85 @@ mod tests {
         d.exec(); // A = 5
         d.exec(); // A = 5 + 3 = 8
         assert_eq!(d.a(), 8);
+    }
+
+    /// A chip mid-program: a ROM read, a RAM read, then a call back to 0,
+    /// so `pc`, `rp`, `dp` and `sp` are all consumed within three steps.
+    fn running_dsp() -> Upd96050 {
+        let mut d = dsp();
+        // OP src = ROM[rp] ; OP src = RAM[dp] ; LCALL 0
+        d.load_program(&[6 << 4, 15 << 4, jp(0x140, 0)]);
+        for _ in 0..7 {
+            d.exec();
+        }
+        d
+    }
+
+    /// A state with one forged field must be refused and leave the chip
+    /// untouched. Should it get in, the chip is stepped, so the failure
+    /// shows what the field does to the microcode loop.
+    fn assert_state_refused(what: &str, forge: impl FnOnce(&mut Upd96050State)) {
+        let cfg = bincode::config::standard();
+        let mut d = running_dsp();
+        let before = d.save_state();
+        let (mut st, _): (Upd96050State, usize) =
+            bincode::serde::decode_from_slice(&before, cfg).unwrap();
+        forge(&mut st);
+        let verdict = d.load_state(&bincode::serde::encode_to_vec(&st, cfg).unwrap());
+        if verdict.is_ok() {
+            for _ in 0..6 {
+                d.exec();
+            }
+        }
+        assert!(verdict.is_err(), "{what}: the forged state was accepted");
+        assert_eq!(d.save_state(), before, "{what}: the chip was modified");
+        d.load_state(&before).unwrap();
+    }
+
+    #[test]
+    fn load_state_refuses_pointers_wider_than_the_revision() {
+        // `pc` indexes the program ROM, `rp` the data ROM, `dp` the data RAM;
+        // each is a value under a width mask, and both halves are restored.
+        assert_state_refused("pc = 16384", |st| st.regs.pc.value = 16_384);
+        assert_state_refused("rp = 2048", |st| st.regs.rp.value = 2048);
+        assert_state_refused("dp = 2048", |st| st.regs.dp.value = 2048);
+        assert_state_refused("pc one past its mask", |st| st.regs.pc.value = 0x0800);
+        assert_state_refused("pc mask = $FFFF", |st| st.regs.pc.mask = 0xFFFF);
+        assert_state_refused("rp mask = $FFFF", |st| st.regs.rp.mask = 0xFFFF);
+        assert_state_refused("dp mask = 0", |st| st.regs.dp.mask = 0);
+    }
+
+    #[test]
+    fn load_state_refuses_a_stack_pointer_outside_the_stack() {
+        // `sp` indexes `stack[16]` before a call masks it.
+        assert_state_refused("sp = 16", |st| st.regs.sp = 16);
+        assert_state_refused("sp = 255", |st| st.regs.sp = 0xFF);
+    }
+
+    #[test]
+    fn load_state_refuses_another_revision() {
+        // The revision is the chip that was built, not machine state.
+        assert_state_refused("revision = uPD96050", |st| {
+            st.revision = Revision::Upd96050;
+        });
+    }
+
+    #[test]
+    fn load_state_accepts_every_value_the_chip_can_reach() {
+        let cfg = bincode::config::standard();
+        let mut d = running_dsp();
+        let (mut st, _): (Upd96050State, usize) =
+            bincode::serde::decode_from_slice(&d.save_state(), cfg).unwrap();
+        st.regs.pc.value = 0x07FF;
+        st.regs.rp.value = 0x03FF;
+        st.regs.dp.value = 0x00FF;
+        st.regs.sp = 15;
+        let state = bincode::serde::encode_to_vec(&st, cfg).unwrap();
+        d.load_state(&state).unwrap();
+        assert_eq!(d.save_state(), state, "restored byte-identical");
+        for _ in 0..64 {
+            d.exec();
+        }
     }
 }
 

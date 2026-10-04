@@ -17,12 +17,13 @@ wrote.)
 | `cartridge_parse` | `Cartridge::from_bytes` — auto-detect, header scoring, SMC/firmware stripping |
 | `cartridge_forced` | `Cartridge::from_bytes_forced` for all 8 `MapperKind`s (first input byte picks one) — the `--force-mapper` / GUI "load as…" path, which **skips checksum validation** and is therefore the weaker door |
 | `cartridge_to_system` | parse → `Snes::try_from_cartridge` → `reset` → 256 steps: the accepted-but-malformed cart reaching the mapper shims (a header naming an unemulated chip is a clean refusal) |
-| `load_state` | `Emulator::load_state` on a live machine, then 64 steps + peeks. The first input byte picks the layer: raw container, or a genuine container carrying the input as its **mapper** blob or its **core** blob — so the fuzzer gets past the version / ROM-hash gate |
+| `load_state` | `Emulator::load_state` on a live machine, then a burst of steps + peeks. The first input byte picks the layer: raw container, or a genuine container carrying the input as its **mapper** blob or its **core** blob — so the fuzzer gets past the version / ROM-hash gate. That is a plain LoROM machine; an input starting with `0xF5` carries a second byte that picks a **Super FX, S-DD1, SA-1 or DSP-1** machine (and the layer), each a synthetic cart whose chip is running, so every mapper's own blob decoder is reached |
 
 **Contract under test:** any input either parses or returns an error
 (`CartError` / `ApiError::SaveState`). It must never panic (out-of-bounds,
 capacity overflow), never allocate unboundedly, and — for `load_state` — a
-refused state must leave the machine running.
+refused state must leave the machine running, and an accepted one must
+run without panicking or hanging.
 
 ## Running
 
@@ -68,3 +69,13 @@ The fourth target, `load_state`, was added in 1.25.0. In CI it found a
 save-state length prefix that made the decoder request an unbounded
 allocation and abort; every decode is now capped at 64 MiB
 (`STATE_DECODE_CONFIG`, fixed in 1.28.0).
+
+Until 2026-10 the target only built a LoROM machine, so the coprocessor
+mappers' blobs were never fuzzed. Reading their restore paths found
+numbers that got in unchecked and were then used as an index, a shift or
+a loop bound (Super FX register selectors and clock deficit, S-DD1
+decompressor indices, SA-1 conversion format and timer counters, DSP-1
+pointers and cycle accumulator); they are now refused at load, and the
+target loads all five machine kinds. The escape byte `0xF5` was chosen
+because no committed seed starts with it: the LoROM seeds mean exactly
+what they did.

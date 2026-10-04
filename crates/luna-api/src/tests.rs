@@ -1566,6 +1566,68 @@ fn load_state_refuses_a_forged_length_prefix_at_every_layer() {
     e.load_state(&good).unwrap();
 }
 
+/// A DSP-1 cart with its firmware appended to the dump (noise: any
+/// microcode clocks the chip) — a coprocessor machine with no commercial
+/// ROM, whose mapper blob is `(base, chip, cycle accumulator)`.
+fn demo_dsp1() -> Vec<u8> {
+    let mut rom = demo_lorom();
+    rom[0x7FC0..0x7FC0 + 21].copy_from_slice(b"SUPER MARIO KART     ");
+    rom[0x7FD6] = 0x05;
+    let sum: u32 = rom
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !(0x7FDC..=0x7FDF).contains(i))
+        .map(|(_, b)| u32::from(*b))
+        .sum();
+    let checksum = (sum & 0xFFFF) as u16;
+    rom[0x7FDC..0x7FDE].copy_from_slice(&(!checksum).to_le_bytes());
+    rom[0x7FDE..0x7FE0].copy_from_slice(&checksum.to_le_bytes());
+    rom.extend((0..0x2000u32).map(|i| (i.wrapping_mul(0x9E37_79B1) >> 24) as u8));
+    rom
+}
+
+/// The length checks were not the whole story: a restored *number* the
+/// coprocessor loops or indexes by got in behind an `Ok` and took the
+/// machine down later, in `step`. Here the DSP-1's cycle accumulator —
+/// one chip instruction per `NTSC_MASTER_HZ` it holds, so a forged one is
+/// a hang no `catch_unwind` ends. It must be refused at the door, with the
+/// machine untouched and still running. (Each mapper's own tests forge
+/// every field it checks.)
+#[test]
+fn load_state_refuses_a_forged_coprocessor_scalar_and_keeps_running() {
+    type Dsp1Blob = (Vec<u8>, Vec<u8>, u64);
+    let cfg = bincode::config::standard();
+    let mut e = Emulator::new();
+    let info = e.load_rom_bytes(demo_dsp1()).unwrap();
+    assert_eq!(info.mapper, "Dsp1", "{info:?}");
+    e.step(2_000).unwrap();
+    assert!(e.dsp1_instructions().unwrap().unwrap() > 0, "chip is live");
+    let good = e.save_state().unwrap();
+
+    let (bundle, _): (SaveStateBundle, usize) =
+        bincode::serde::decode_from_slice(&good, cfg).unwrap();
+    let ((base, chip, acc), _): (Dsp1Blob, usize) =
+        bincode::serde::decode_from_slice(&bundle.mapper, cfg).unwrap();
+    assert_eq!(
+        bincode::serde::encode_to_vec((&base, &chip, acc), cfg).unwrap(),
+        bundle.mapper,
+        "the mirror re-encodes the blob byte for byte"
+    );
+    let forged = bincode::serde::encode_to_vec((&base, &chip, u64::MAX / 2), cfg).unwrap();
+
+    match e.load_state(&state_with_mapper_blob(&good, forged)) {
+        Err(ApiError::SaveState(msg)) => {
+            assert!(msg.contains("mapper: DSP-1 cycle accumulator"), "{msg}");
+        }
+        other => panic!("expected a SaveState error, got {other:?}"),
+    }
+    assert_eq!(e.save_state().unwrap(), good, "machine was modified");
+    e.step(2_000).unwrap();
+    // The genuine state still loads, and round-trips byte for byte.
+    e.load_state(&good).unwrap();
+    assert_eq!(e.save_state().unwrap(), good);
+}
+
 /// `OpenSNES` 2026-09-27: `luna state --input 150:0 --audio-out` kept 16 384
 /// samples of the pre-roll and then jumped to frame 150 — the APU queue
 /// holds ~0.5 s and drops new samples once full. The script run must hand

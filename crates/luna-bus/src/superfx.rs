@@ -600,6 +600,11 @@ impl SuperFxMapper {
     }
 }
 
+/// Widest `clock_deficit` a save state may carry, either sign: ~3 frames of
+/// master clocks, where a run leaves about one `step_coproc` advance (what
+/// a STOP did not use) or minus one instruction (the last one's overshoot).
+const MAX_RESTORED_CLOCK_DEFICIT: i64 = 1 << 20;
+
 /// Round `n` up to the next power of two (≥ 1).
 const fn round_up_pow2(n: usize) -> usize {
     if n <= 1 {
@@ -1765,6 +1770,40 @@ impl Mapper for SuperFxMapper {
         let st: SuperFxState = decode_state(data, "Super FX")?;
         // `ram_mask` is fixed at construction and indexes `ram` unchecked.
         check_state_len("Super FX work RAM", st.ram.len(), self.ram.len())?;
+        // The scalars the engine indexes, shifts or loops by. Each bound is
+        // what the engine itself can produce, so a real state always passes.
+        let refuse = |what: &str, value: &dyn std::fmt::Display, bound: &str| {
+            Err(MapperStateError(format!(
+                "Super FX {what} is {value} in the state, {bound}"
+            )))
+        };
+        // Indexes of `r[16]`.
+        if st.regs.sreg > 15 {
+            return refuse("source register", &st.regs.sreg, "at most 15");
+        }
+        if st.regs.dreg > 15 {
+            return refuse("destination register", &st.regs.dreg, "at most 15");
+        }
+        // SCMR `md` is 2 bits; `bpp()` shifts by it and bounds PLOT / RPIX.
+        if st.regs.scmr_md > 3 {
+            return refuse("colour mode", &st.regs.scmr_md, "at most 3");
+        }
+        // A buffer countdown starts at `mem_cycles()` (5 or 6) and only
+        // falls; the instruction that drains it is charged the whole of it.
+        if st.regs.romcl > 6 {
+            return refuse("ROM buffer countdown", &st.regs.romcl, "at most 6");
+        }
+        if st.regs.ramcl > 6 {
+            return refuse("RAM buffer countdown", &st.regs.ramcl, "at most 6");
+        }
+        // One GSU instruction runs per clock of deficit.
+        if st.clock_deficit.unsigned_abs() > MAX_RESTORED_CLOCK_DEFICIT.unsigned_abs() {
+            return refuse(
+                "clock deficit",
+                &st.clock_deficit,
+                "outside what a run can leave",
+            );
+        }
         {
             self.ram = st.ram;
             self.regs = st.regs;
@@ -2095,6 +2134,115 @@ mod tests {
             "a refused state must not modify the mapper"
         );
         m.load_state(&before).unwrap();
+    }
+
+    /// A GSU caught mid-job: it owns ROM and RAM and loops over ADD, PLOT,
+    /// RPIX and GETB, so every restored field is live on the next clock.
+    fn running_fx() -> SuperFxMapper {
+        // ADD R0 ; PLOT ; ALT1 ; RPIX ; GETB
+        const PROGRAM: [u8; 5] = [0x50, 0x4C, 0x3D, 0x4C, 0xEF];
+        let rom = (0..0x8000).map(|i| PROGRAM[i % PROGRAM.len()]).collect();
+        let mut m = SuperFxMapper::new(rom, 0x2000);
+        m.regs.set_scmr(0x18); // RON | RAN
+        m.regs.colr = 0x11;
+        m.regs.sfr |= SFR_G;
+        m.step_coproc(200, 0);
+        // Park with ADD prefetched, so the next instruction reads `sreg`.
+        while m.regs.pipeline != 0x50 {
+            m.step_coproc(1, 0);
+        }
+        assert!(m.sfr_get(SFR_G), "the fixture must still be running");
+        m
+    }
+
+    /// Save `m`, forge one field of the decoded state, re-encode.
+    fn forged_state(m: &SuperFxMapper, forge: impl FnOnce(&mut SuperFxState)) -> Vec<u8> {
+        let mut st: SuperFxState = decode_state(&m.save_state(), "Super FX").unwrap();
+        forge(&mut st);
+        bincode::serde::encode_to_vec(&st, bincode::config::standard()).unwrap()
+    }
+
+    /// A state with one forged field must be refused and leave the mapper
+    /// untouched. Should it get in, `drive` clocks the GSU so the failure
+    /// shows what the field does to the emulation loop (never for a field
+    /// that would hang it).
+    fn assert_state_refused(what: &str, drive: bool, forge: impl FnOnce(&mut SuperFxState)) {
+        let mut m = running_fx();
+        let before = m.save_state();
+        let forged = forged_state(&m, forge);
+        let verdict = m.load_state(&forged);
+        if verdict.is_ok() && drive {
+            m.step_coproc(2_000, 0);
+        }
+        assert!(verdict.is_err(), "{what}: the forged state was accepted");
+        assert_eq!(m.save_state(), before, "{what}: the mapper was modified");
+        m.load_state(&before).unwrap();
+    }
+
+    #[test]
+    fn load_state_refuses_a_register_selector_outside_the_register_file() {
+        // `sreg` / `dreg` index `r[16]` on the next ALU or move op.
+        assert_state_refused("sreg = 16", true, |st| st.regs.sreg = 16);
+        assert_state_refused("dreg = 16", true, |st| st.regs.dreg = 16);
+        assert_state_refused("sreg = usize::MAX", true, |st| {
+            st.regs.sreg = usize::MAX;
+        });
+    }
+
+    #[test]
+    fn load_state_refuses_a_colour_mode_wider_than_two_bits() {
+        // `bpp()` shifts by it, and the result bounds the PLOT / RPIX
+        // bitplane loops.
+        assert_state_refused("scmr_md = 255", true, |st| st.regs.scmr_md = 0xFF);
+        assert_state_refused("scmr_md = 4", true, |st| st.regs.scmr_md = 4);
+    }
+
+    #[test]
+    fn load_state_refuses_a_buffer_countdown_longer_than_one_access() {
+        // `romcl` / `ramcl` are charged whole to the instruction that
+        // drains them, which is what keeps `clock_deficit` in its bounds.
+        assert_state_refused("romcl = 7", true, |st| st.regs.romcl = 7);
+        assert_state_refused("ramcl = u32::MAX", true, |st| {
+            st.regs.ramcl = u32::MAX;
+        });
+    }
+
+    #[test]
+    fn load_state_refuses_a_clock_deficit_no_run_can_leave() {
+        // The catch-up loop runs one instruction per clock of deficit: a
+        // forged one is a hang (or an overflow), so it is never driven here.
+        for bad in [
+            i64::MAX,
+            i64::MIN,
+            1 << 40,
+            MAX_RESTORED_CLOCK_DEFICIT + 1,
+            -MAX_RESTORED_CLOCK_DEFICIT - 1,
+        ] {
+            assert_state_refused(&format!("clock_deficit = {bad}"), false, |st| {
+                st.clock_deficit = bad;
+            });
+        }
+    }
+
+    #[test]
+    fn load_state_accepts_every_value_a_run_can_leave() {
+        // The bounds themselves are legitimate, and the catch-up they allow
+        // terminates.
+        for deficit in [MAX_RESTORED_CLOCK_DEFICIT, -MAX_RESTORED_CLOCK_DEFICIT] {
+            let mut m = running_fx();
+            let state = forged_state(&m, |st| {
+                st.clock_deficit = deficit;
+                st.regs.sreg = 15;
+                st.regs.dreg = 15;
+                st.regs.scmr_md = 3;
+                st.regs.romcl = 6;
+                st.regs.ramcl = 6;
+            });
+            m.load_state(&state).unwrap();
+            assert_eq!(m.save_state(), state, "restored byte-identical");
+            m.step_coproc(2_000, 0);
+            assert!(m.clock_deficit <= 0 || !m.sfr_get(SFR_G) || m.stalled());
+        }
     }
 
     #[test]

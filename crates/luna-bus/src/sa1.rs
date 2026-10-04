@@ -47,6 +47,9 @@ const BWRAM_SIZE: usize = 0x40000;
 const IRAM_SIZE: usize = 0x800;
 /// SA-1 MMIO byte range — we memory-back the whole window.
 const MMIO_SIZE: usize = 0x200;
+/// Most pending `dma_steps` a save state may carry: 64 full-length normal
+/// DMAs (`$FFFF` bytes at up to 4 steps each), where a run drains every one.
+const MAX_RESTORED_DMA_STEPS: u32 = 1 << 24;
 
 /// SA-1 cartridge mapper (Mode 23).
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -804,6 +807,37 @@ impl Sa1Mapper {
         self.cc2_line = (self.cc2_line + 1) & 15;
     }
 
+    /// Refuse a restored state the chip cannot have reached: the scalars
+    /// it shifts, subtracts or advances by. Each bound is what the register
+    /// writes and the timer themselves produce, so a real state always
+    /// passes.
+    fn check_restored(&self) -> Result<(), MapperStateError> {
+        // (what, value, highest value the chip can hold)
+        let bounds: [(&str, u32, u32); 8] = [
+            // `$2231` stores `(value & 3).min(2)` and `(.. & 7).min(5)`.
+            ("CC colour depth", u32::from(self.dmacb), 2),
+            ("CC virtual width", u32::from(self.dmasize), 5),
+            // 4-bit CC2 line counter.
+            ("CC2 line", u32::from(self.cc2_line), 15),
+            // VLBP bit position inside a byte.
+            ("VLBP bit cursor", u32::from(self.vbit), 7),
+            // 11-bit H (HV mode wraps it at 1364), 9-bit V.
+            ("timer H counter", u32::from(self.hcounter), 0x07FF),
+            ("timer V counter", u32::from(self.vcounter), 0x01FF),
+            // The odd master clock carried between `tick_timer` calls.
+            ("timer clock carry", self.timer_rem, 1),
+            ("pending DMA steps", self.dma_steps, MAX_RESTORED_DMA_STEPS),
+        ];
+        for (what, value, max) in bounds {
+            if value > max {
+                return Err(MapperStateError(format!(
+                    "SA-1 {what} is {value} in the state, at most {max}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// HCNT/VCNT compare values (9-bit, in dots) from their lo/hi pairs.
     fn timer_compare(&self) -> (u16, u16) {
         let hcnt = ((u16::from(self.hcnt_hi) << 8) | u16::from(self.hcnt_lo)) & 0x01FF;
@@ -1323,6 +1357,7 @@ impl Mapper for Sa1Mapper {
         // BW-RAM is indexed `% bwram.len()`: a wrong (or empty) size would
         // mis-map or divide by zero.
         check_state_len("SA-1 BW-RAM", tmp.bwram.len(), self.bwram.len())?;
+        tmp.check_restored()?;
         // Keep the live ROM (it is `serde(skip)`-defaulted to empty in
         // `tmp`); swap in every other field by replacing `self` wholesale.
         tmp.rom = std::mem::take(&mut self.rom);
@@ -1874,6 +1909,103 @@ mod tests {
             "a refused state must not modify the mapper"
         );
         m.load_state(&before).unwrap();
+    }
+
+    /// A state with one forged field must be refused and leave the mapper
+    /// untouched. Should it get in, `drive` runs the code that consumes the
+    /// field, so the failure shows what it does to the emulation loop.
+    fn assert_state_refused(
+        what: &str,
+        forge: impl FnOnce(&mut Sa1Mapper),
+        drive: impl FnOnce(&mut Sa1Mapper),
+    ) {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x2000);
+        m.tick_timer(12_345);
+        m.dtc = 4; // a normal DMA about to run
+        let before = m.save_state();
+        let mut bad: Sa1Mapper = decode_state(&before, "SA-1").unwrap();
+        forge(&mut bad);
+        let verdict = m.load_state(&bad.save_state());
+        if verdict.is_ok() {
+            drive(&mut m);
+        }
+        assert!(verdict.is_err(), "{what}: the forged state was accepted");
+        assert_eq!(m.save_state(), before, "{what}: the mapper was modified");
+        m.load_state(&before).unwrap();
+    }
+
+    #[test]
+    fn load_state_refuses_a_character_conversion_format_the_register_cannot_hold() {
+        // `$2231` stores `dmacb` 0..=2 and `dmasize` 0..=5; both are shift
+        // amounts (and `2 - dmacb`, `6 - dmacb` subtrahends) in CC1 / CC2.
+        let cc1 = |m: &mut Sa1Mapper| {
+            m.dma_cc1_read(0);
+        };
+        assert_state_refused("dmacb = 3", |m| m.dmacb = 3, cc1);
+        assert_state_refused("dmacb = 255", |m| m.dmacb = 0xFF, Sa1Mapper::dma_cc2);
+        assert_state_refused("dmasize = 40", |m| m.dmasize = 40, cc1);
+        assert_state_refused("dmasize = 6", |m| m.dmasize = 6, cc1);
+        // The CC2 line counter is 4 bits.
+        assert_state_refused("cc2_line = 255", |m| m.cc2_line = 0xFF, Sa1Mapper::dma_cc2);
+        assert_state_refused("cc2_line = 16", |m| m.cc2_line = 16, Sa1Mapper::dma_cc2);
+    }
+
+    #[test]
+    fn load_state_refuses_a_vlbp_bit_cursor_outside_a_byte() {
+        // `vbit` shifts the 24-bit window.
+        let window = |m: &mut Sa1Mapper| {
+            m.vlbp_window();
+        };
+        assert_state_refused("vbit = 32", |m| m.vbit = 32, window);
+        assert_state_refused("vbit = 8", |m| m.vbit = 8, window);
+    }
+
+    #[test]
+    fn load_state_refuses_timer_counters_the_timer_cannot_reach() {
+        let line = |m: &mut Sa1Mapper| m.tick_timer(1364);
+        // H is 11 bits, V is 9; both are advanced by plain additions.
+        assert_state_refused("hcounter = $FFFF", |m| m.hcounter = 0xFFFF, line);
+        assert_state_refused("hcounter = $0800", |m| m.hcounter = 0x0800, line);
+        assert_state_refused("vcounter = $FFFF", |m| m.vcounter = 0xFFFF, line);
+        assert_state_refused("vcounter = $0200", |m| m.vcounter = 0x0200, line);
+        // The odd-clock carry is 0 or 1; the timer steps once per two of it.
+        assert_state_refused("timer_rem = u32::MAX", |m| m.timer_rem = u32::MAX, line);
+        assert_state_refused("timer_rem = 2", |m| m.timer_rem = 2, |_| {});
+    }
+
+    #[test]
+    fn load_state_refuses_a_dma_stall_no_transfer_can_charge() {
+        let dma = |m: &mut Sa1Mapper| m.run_normal_dma(WriteSide::Main);
+        assert_state_refused("dma_steps = u32::MAX", |m| m.dma_steps = u32::MAX, dma);
+        assert_state_refused(
+            "dma_steps past the bound",
+            |m| m.dma_steps = MAX_RESTORED_DMA_STEPS + 1,
+            dma,
+        );
+    }
+
+    #[test]
+    fn load_state_accepts_every_value_the_chip_can_reach() {
+        let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x2000);
+        let mut edge: Sa1Mapper = decode_state(&m.save_state(), "SA-1").unwrap();
+        edge.dmacb = 2;
+        edge.dmasize = 5;
+        edge.cc2_line = 15;
+        edge.vbit = 7;
+        edge.hcounter = 0x07FF;
+        edge.vcounter = 0x01FF;
+        edge.timer_rem = 1;
+        edge.dma_steps = MAX_RESTORED_DMA_STEPS;
+        edge.dtc = 0xFFFF;
+        let state = edge.save_state();
+        m.load_state(&state).unwrap();
+        assert_eq!(m.save_state(), state, "restored byte-identical");
+        // Everything that consumes those fields stays in bounds.
+        m.dma_cc1_read(0);
+        m.dma_cc2();
+        m.vlbp_window();
+        m.tick_timer(1364 * 2);
+        m.run_normal_dma(WriteSide::Main);
     }
 
     #[test]

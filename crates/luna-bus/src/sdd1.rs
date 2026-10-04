@@ -113,6 +113,10 @@ const EVOLUTION_TABLE: [EvolutionState; 33] = [
     EvolutionState { code_num: 7, next_mps: 24, next_lps: 22 },
 ];
 
+/// Highest input `offset` a save state may carry: a stream starts at a
+/// 24-bit address and reads at most a byte per bit of a ≤ 64 KiB transfer.
+const MAX_RESTORED_OFFSET: u32 = 0x01FF_FFFF;
+
 /// The S-DD1 streaming decompressor. One `init` per DMA stream, then one
 /// [`Self::decompress_byte`] per output byte. All six pipeline stages are
 /// flattened into this single struct (idiomatic Rust vs. ares' parent-ref
@@ -166,6 +170,33 @@ impl Sdd1Decompressor {
             r1: 0,
             r2: 0,
         }
+    }
+
+    /// Refuse a restored state the decompressor cannot have reached: the
+    /// scalars it indexes, shifts or advances by. Each bound is what the
+    /// pipeline itself produces, so a real state always passes.
+    fn check_restored(&self) -> Result<(), MapperStateError> {
+        let refuse = |what: &str, value: u32, bound: &str| {
+            Err(MapperStateError(format!(
+                "S-DD1 {what} is {value} in the state, {bound}"
+            )))
+        };
+        // Indexes `prev_bitplane_bits[8]`; every mode keeps it under 8.
+        if self.curr_bitplane > 7 {
+            return refuse("bitplane", u32::from(self.curr_bitplane), "at most 7");
+        }
+        // Indexes the 33-state `EVOLUTION_TABLE`.
+        if let Some(&status) = self.context_status.iter().find(|&&s| s > 32) {
+            return refuse("context status", u32::from(status), "at most 32");
+        }
+        // A bit position inside the current input byte.
+        if self.bit_count > 7 {
+            return refuse("input bit count", self.bit_count, "at most 7");
+        }
+        if self.offset > MAX_RESTORED_OFFSET {
+            return refuse("input offset", self.offset, "past any stream");
+        }
+        Ok(())
     }
 
     /// Begin a new decompression stream at MMC-decoded ROM `offset`. The byte
@@ -672,6 +703,7 @@ impl Mapper for Sdd1Mapper {
         let (sram, r4800, r4801, r4804, r4805, r4806, r4807, dma_addr, dma_size, ready, dec): State =
             decode_state(data, "S-DD1")?;
         check_state_len("S-DD1 SRAM", sram.len(), self.sram.len())?;
+        dec.check_restored()?;
         {
             self.sram = sram;
             self.r4800 = r4800;
@@ -884,6 +916,91 @@ mod tests {
         m2.load_state(&blob).unwrap();
         assert_eq!(m2.read(make_addr(0x70, 0x0010)), Some(0x5A));
         assert_eq!(m2.read(make_addr(0x00, 0x4806)), Some(0x03));
+    }
+
+    /// A mapper caught in the middle of a decompressing DMA on channel 0:
+    /// the next `$C0:0000` read goes straight into the restored decompressor.
+    fn mapper_mid_stream() -> Sdd1Mapper {
+        // Dense, non-repeating input: every code length and both run kinds.
+        let rom: Vec<u8> = (0..0x1_0000usize)
+            .map(|i| (i.wrapping_mul(0x9E37_79B1) >> 13) as u8)
+            .collect();
+        let mut m = Sdd1Mapper::new(rom, 0x2000);
+        m.write(make_addr(0x00, 0x4800), 0x01);
+        m.write(make_addr(0x00, 0x4801), 0x01);
+        m.write(make_addr(0x00, 0x4304), 0xC0); // source $C0:0000
+        m.write(make_addr(0x00, 0x4306), 0x10); // $1000 bytes
+        for _ in 0..33 {
+            m.read(make_addr(0xC0, 0x0000));
+        }
+        assert!(m.dma_ready, "the fixture must be mid-stream");
+        m
+    }
+
+    /// A state with one forged decompressor field must be refused and leave
+    /// the mapper untouched. Should it get in, the stream is read on, so the
+    /// failure shows what the field does to the decompressor.
+    fn assert_state_refused(what: &str, forge: impl FnOnce(&mut Sdd1Decompressor)) {
+        let mut m = mapper_mid_stream();
+        let before = m.save_state();
+        let mut bad = m.clone();
+        forge(&mut bad.decompressor);
+        let verdict = m.load_state(&bad.save_state());
+        if verdict.is_ok() {
+            for _ in 0..256 {
+                m.read(make_addr(0xC0, 0x0000));
+            }
+        }
+        assert!(verdict.is_err(), "{what}: the forged state was accepted");
+        assert_eq!(m.save_state(), before, "{what}: the mapper was modified");
+        m.load_state(&before).unwrap();
+    }
+
+    #[test]
+    fn load_state_refuses_a_bitplane_outside_the_eight_histories() {
+        // Indexes `prev_bitplane_bits[8]`; no mode brings it back in range.
+        assert_state_refused("curr_bitplane = 8", |d| d.curr_bitplane = 8);
+        assert_state_refused("curr_bitplane = 255", |d| d.curr_bitplane = 0xFF);
+    }
+
+    #[test]
+    fn load_state_refuses_a_context_status_outside_the_evolution_table() {
+        // Indexes the 33-state `EVOLUTION_TABLE`.
+        assert_state_refused("context_status = 33", |d| d.context_status = [33; 32]);
+        assert_state_refused("one context_status = 255", |d| {
+            d.context_status[31] = 0xFF;
+        });
+    }
+
+    #[test]
+    fn load_state_refuses_an_input_cursor_no_stream_can_reach() {
+        // `bit_count` is a bit position inside a byte (it is a shift amount
+        // and a subtrahend); `offset` is a ROM address that only climbs.
+        assert_state_refused("offset = u32::MAX", |d| d.offset = u32::MAX);
+        assert_state_refused("bit_count = 40", |d| d.bit_count = 40);
+        assert_state_refused("bit_count = 8", |d| d.bit_count = 8);
+        assert_state_refused("offset past the bound", |d| {
+            d.offset = MAX_RESTORED_OFFSET + 1;
+        });
+    }
+
+    #[test]
+    fn load_state_accepts_every_value_a_stream_can_reach() {
+        let mut m = mapper_mid_stream();
+        let mut edge = m.clone();
+        edge.decompressor.curr_bitplane = 7;
+        edge.decompressor.context_status = [32; 32];
+        edge.decompressor.bit_count = 7;
+        edge.decompressor.offset = MAX_RESTORED_OFFSET;
+        let state = edge.save_state();
+        m.load_state(&state).unwrap();
+        assert_eq!(m.save_state(), state, "restored byte-identical");
+        // A whole 64 KiB transfer from there stays in bounds.
+        m.dma_size[0] = 0;
+        for _ in 0..0x1_0000 {
+            m.read(make_addr(0xC0, 0x0000));
+        }
+        assert!(!m.dma_ready, "the stream ran to its end");
     }
 
     #[test]

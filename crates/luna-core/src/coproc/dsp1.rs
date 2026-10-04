@@ -168,6 +168,14 @@ impl Mapper for Dsp1Mapper {
 
     fn load_state(&mut self, data: &[u8]) -> Result<(), MapperStateError> {
         let st: Dsp1State = decode_state(data, "DSP-1")?;
+        // `step_coproc` runs one DSP instruction per `NTSC_MASTER_HZ` held
+        // here and always leaves less than one.
+        if st.cycle_acc >= NTSC_MASTER_HZ {
+            return Err(MapperStateError(format!(
+                "DSP-1 cycle accumulator is {} in the state, under {NTSC_MASTER_HZ}",
+                st.cycle_acc
+            )));
+        }
         // The chip first: it validates without touching the base board, so
         // a bad chip blob leaves both halves as they were.
         self.dsp.load_state(&st.dsp).map_err(MapperStateError)?;
@@ -243,9 +251,9 @@ impl Mapper for Dsp1Mapper {
 
 #[cfg(test)]
 mod tests {
-    use super::{Dsp1Mapper, FIRMWARE_BYTES};
-    use luna_bus::mapper::{Mapper, MapperKind};
-    use luna_bus::types::make_addr;
+    use super::{Dsp1Mapper, Dsp1State, FIRMWARE_BYTES};
+    use luna_bus::mapper::{Mapper, MapperKind, decode_state};
+    use luna_bus::types::{NTSC_MASTER_HZ, make_addr};
 
     /// A 64 KB LoROM-shaped image; contents don't matter for the shim,
     /// only that base reads return *something* distinguishable.
@@ -365,6 +373,31 @@ mod tests {
         // A corrupt blob is refused, leaving the shim as it was.
         assert!(restored.load_state(&[0xFF; 4]).is_err());
         assert_eq!(restored.cycle_acc, 12_345);
+    }
+
+    #[test]
+    fn load_state_refuses_a_cycle_accumulator_holding_whole_instructions() {
+        // `step_coproc` runs one DSP instruction per `NTSC_MASTER_HZ` in the
+        // accumulator: a forged one is a hang (or an overflow), so the
+        // refused state is never stepped here.
+        let mut m = Dsp1Mapper::new(rom(), 0, Some(&firmware()), true);
+        m.step_coproc(1_000, 0);
+        let before = m.save_state();
+        for bad in [NTSC_MASTER_HZ, 1 << 40, u64::MAX] {
+            let mut st: Dsp1State = decode_state(&before, "DSP-1").unwrap();
+            st.cycle_acc = bad;
+            let forged = bincode::serde::encode_to_vec(&st, bincode::config::standard()).unwrap();
+            assert!(m.load_state(&forged).is_err(), "cycle_acc = {bad} accepted");
+            assert_eq!(m.save_state(), before, "cycle_acc = {bad}: shim modified");
+        }
+        // The largest remainder a run can leave is accepted, and steps.
+        let mut st: Dsp1State = decode_state(&before, "DSP-1").unwrap();
+        st.cycle_acc = NTSC_MASTER_HZ - 1;
+        let edge = bincode::serde::encode_to_vec(&st, bincode::config::standard()).unwrap();
+        m.load_state(&edge).unwrap();
+        assert_eq!(m.save_state(), edge, "restored byte-identical");
+        m.step_coproc(1_000, 0);
+        assert!(m.cycle_acc < NTSC_MASTER_HZ);
     }
 
     #[test]
