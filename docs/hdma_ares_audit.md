@@ -103,7 +103,7 @@ Rows #1-#12 and #14 are ✅/🔧. What remains — no known game impact:
 > in-progress row with the pre-write state (the CPU-path G6 flush,
 > mirrored in `DmaBusView::write_b`). The suspected residual (per-BYTE
 > clock advance within one burst, HiColor128, gap #7b) was not a DMA issue:
-> #7b closed 2026-09-19 with the 65C816 interrupt-entry fix (d117412).
+> #7b closed 2026-09-19 with the 65C816 interrupt-entry fix (ad8855f).
 
 ### The original 2026-06-17 deferral (historical — root cause was the line origin)
 
@@ -151,7 +151,7 @@ effect can only land on the **next** line. luna's `sched_one_line`
 `hdma_run_line`, which is the exact ares ordering. There is no visible
 sub-line split to represent: nothing visible happens at dot 276.
 
-The `ca3e28b` regression was therefore a *bug*, not a missing feature — it
+The regression of the dot-276 experiment (2026-06-17, reverted; the deferral is recorded in `b0f63f6`) was therefore a *bug*, not a missing feature — it
 applied HDMA at dot 276 **within** line N's whole-line flush, retroactively
 repainting line N. The fix was never a per-dot renderer; it was to keep the
 boundary model and never repaint an already-scanned-out line.

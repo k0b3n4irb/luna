@@ -12,7 +12,7 @@
 ## CHANTIER 0 — Quick wins & hygiène (faire en premier, ⭐)
 
 ### 0.1 — Régénérer le scorecard contre HEAD 🟢⭐
-- **Objectif** : `docs/accuracy_scorecard.md` (commit `f690f74`, 29 mai) décrit un
+- **Objectif** : `docs/accuracy_scorecard.md` (commit `55503f9`, 29 mai) décrit un
   état périmé — 16/27 bugs corrigés depuis. Rechasser ces fantômes coûte des
   sessions (piège `project_subsystem_gap_docs`).
 - **Où** : `docs/accuracy_scorecard.md` ; source des verdicts :

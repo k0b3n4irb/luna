@@ -322,7 +322,7 @@ While the auto-read is in progress, `$4212` bit 0 reads 1 ("auto-joypad-read bus
 ### 7.4 HVBJOY ($4212)
 
 - bit 0: auto-joypad-read busy.
-- bit 6: HBlank — TRUE during HBlank (hcounter ≥ 274) of *every* line including non-visible. The recent luna commit (a802112-prev: `9d801f8 fix(core): $4212 HVBJOY bit 6 = live Hblank (ares)`) was about this.
+- bit 6: HBlank — TRUE during HBlank (hcounter ≥ 274) of *every* line including non-visible. luna commit `427b9a6` (`fix(core): $4212 HVBJOY bit 6 = live Hblank (ares)`) was about this.
 - bit 7: VBlank — TRUE from scanline vdisp until line 261/311 (NTSC/PAL).
 
 ---

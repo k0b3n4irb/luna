@@ -8,7 +8,7 @@
 > **[`book/src/internals/architecture.md`](book/src/internals/architecture.md)**
 >
 > The previous full text of this file is in git history
-> (`git log --follow -- ARCHITECTURE.md`; last full revision `2ec94fa`).
+> (`git log --follow -- ARCHITECTURE.md`; last full revision `6f7f78d`).
 
 ## What that document is
 

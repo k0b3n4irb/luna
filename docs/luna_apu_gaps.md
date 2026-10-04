@@ -131,7 +131,7 @@ resolved by reading the references first
 
 ## Suggested order
 
-1. ~~#1 ENDX read-clear~~ — **done** (`036f65f`).
+1. ~~#1 ENDX read-clear~~ — **done** (`8e554a6`).
 2. ~~#7 dead scaffolding~~, ~~#2 `$F1` port-clear~~, ~~#5 `$F8/$F9`~~ —
    **done**.
 3. ~~#4 IPL overlay~~ — **done**.

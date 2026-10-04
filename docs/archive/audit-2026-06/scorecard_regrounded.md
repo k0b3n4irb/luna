@@ -1,6 +1,6 @@
 # Luna — Scorecard RE-GROUNDÉ contre HEAD (2026-06-10)
 
-> Vérification du `docs/accuracy_scorecard.md` (commit `f690f74`, 2026-05-29)
+> Vérification du `docs/accuracy_scorecard.md` (commit `55503f9`, 2026-05-29)
 > contre le code actuel. Méthode : 5 agents parallèles, chaque affirmation
 > localisée par contenu (les n° de ligne de mai ont dérivé) et tranchée au code.
 > **Verdicts : TOUJOURS RÉEL / CORRIGÉ / PARTIEL.**
@@ -32,23 +32,23 @@ correctifs PPU/SA-1.
 | # | Bug (note mai) | Corrigé par | Preuve actuelle |
 |---|---|---|---|
 | CPU-1 | DP 16-bit fuit en banque 1 (**D**) | latch `bank0_wrap` + `hi_addr` | `opcodes.rs:1596` — confine `(addr as u16).wrapping_add(1)` ; tous les opcodes read/store/RMW passent par là |
-| CPU-3 | IRQ edge-latched (**C**) | `86e9702` | `cpu.rs:49` `irq_line: bool` level + `set_irq_line` set/clear ; service ne consomme que le latch edge |
-| SPC-4 | Pénalité branch-taken jamais appliquée (**C**) | `cfef84a` (Phase 2) | `opcodes.rs:42` (SPC) `+= SPC700_BRANCH_TAKEN_PENALTY` (=2) ; test `cycles.rs:136` |
-| SPC-5 | DIV YA,X (A, à confirmer) | `de0ce63` | `opcodes.rs:1104` H/V depuis Y/X originaux + branche `256-X` ; non régressé |
-| PPU-1 | Sprite Y-wrap 8-bit (**D**) | `fefdc91` | `renderer.rs:1607,1752` `& 0xFF` |
-| PPU-2 | Tile large-sprite déborde (**D**) | `fefdc91` | `renderer.rs:1804` `col_nib/row_nib` masqués `& 0x0F` indépendamment |
-| PPU-4 | Mode 7 OOB / sign-extend (**C**) | `35be343` | `renderer.rs:816` sign-extend 13-bit ; OOB distingue screen_over 3/2/0-1 |
-| PPU-5 | Hi-res 5/6 absent (**D**) | `3f8f4ab`,`0950e42` | `renderer.rs:554` chemin `is_hires` dédié, downsample 512→256 |
-| PPU-6 | EXTBG Mode 7 ignoré (**F**) | `713ef12` | `renderer.rs:497` `extbg`, BG2 dérivé du plan, test passant |
-| DMA-1 | Double-charge coproc (**C−**) | Phase 1 `7c5bef0` | `snes.rs:1830` lump `advance_coproc=false` ; seul `tick` per-byte avance le coproc |
-| DMA-2 | H/V IRQ ignore HTIME (**D**) | `f1ef75e`,`9981e52` | `snes.rs:1314` `poll_hv_irq` dot-précis `htime*4` ; IRQ tenu en niveau jusqu'à `$4211` |
+| CPU-3 | IRQ edge-latched (**C**) | `022b62c` | `cpu.rs:49` `irq_line: bool` level + `set_irq_line` set/clear ; service ne consomme que le latch edge |
+| SPC-4 | Pénalité branch-taken jamais appliquée (**C**) | `8bc873f` (Phase 2) | `opcodes.rs:42` (SPC) `+= SPC700_BRANCH_TAKEN_PENALTY` (=2) ; test `cycles.rs:136` |
+| SPC-5 | DIV YA,X (A, à confirmer) | `c67cc9e` | `opcodes.rs:1104` H/V depuis Y/X originaux + branche `256-X` ; non régressé |
+| PPU-1 | Sprite Y-wrap 8-bit (**D**) | `0f5d2ae` | `renderer.rs:1607,1752` `& 0xFF` |
+| PPU-2 | Tile large-sprite déborde (**D**) | `0f5d2ae` | `renderer.rs:1804` `col_nib/row_nib` masqués `& 0x0F` indépendamment |
+| PPU-4 | Mode 7 OOB / sign-extend (**C**) | `87776f7` | `renderer.rs:816` sign-extend 13-bit ; OOB distingue screen_over 3/2/0-1 |
+| PPU-5 | Hi-res 5/6 absent (**D**) | `36c0879` (+ le commit pseudo-hires du 2026-05-30) | `renderer.rs:554` chemin `is_hires` dédié, downsample 512→256 |
+| PPU-6 | EXTBG Mode 7 ignoré (**F**) | `db2800e` | `renderer.rs:497` `extbg`, BG2 dérivé du plan, test passant |
+| DMA-1 | Double-charge coproc (**C−**) | Phase 1 `3b260dc` | `snes.rs:1830` lump `advance_coproc=false` ; seul `tick` per-byte avance le coproc |
+| DMA-2 | H/V IRQ ignore HTIME (**D**) | `9bf7fec`,`a3e517c` | `snes.rs:1314` `poll_hv_irq` dot-précis `htime*4` ; IRQ tenu en niveau jusqu'à `$4211` |
 | DMA-5 | Scheduler lump-charge (**D arch**) | Phase 1 | `snes.rs:1471` `advance_time` avance PPU/APU/coproc par accès ; plus aucun lump en fin de `step()` |
-| SA1-1 | Diviseur signé÷signé (**D**) | `105edde` | `sa1.rs:930` `divisor = i32::from(self.mb as u16)` (non-signé), floored |
-| SA1-2 | Guard clear MAC mort (**D**) | `105edde` | `sa1.rs:1277` `if value & 0x02 != 0 { self.mr = 0 }` |
+| SA1-1 | Diviseur signé÷signé (**D**) | `b0cc5ea` | `sa1.rs:930` `divisor = i32::from(self.mb as u16)` (non-signé), floored |
+| SA1-2 | Guard clear MAC mort (**D**) | `b0cc5ea` | `sa1.rs:1277` `if value & 0x02 != 0 { self.mr = 0 }` |
 | SA1-3 | CC1 bpp/width inversés (**D**) | port CDMA | `sa1.rs:575` `bpp=(cdma>>2)&7`, `width=8<<(cdma&3)` *(orientation exacte à re-checker vs ares si régression CC1)* |
-| SA1-4 | MAC saturating sans OF (**C**) | `105edde` | `sa1.rs:919` `wrapping_add` 40-bit + flag bit-40 exposé en `$230B` b7 |
-| Bus-2 | Table vitesse $2000-5FFF (**D**) | `47032bd` | `speed.rs:61` 2000-3FFF→6, 4000-41FF→12, 4200-5FFF→6 ; test `io_region_speeds_match_ares_wait` |
-| APU-7 | Code mort ADSR/gaussian | `33def23` | supprimé de `lib.rs` (AdsrPhase, ADSR_RATE_PERIODS, gaussian dupli) |
+| SA1-4 | MAC saturating sans OF (**C**) | `b0cc5ea` | `sa1.rs:919` `wrapping_add` 40-bit + flag bit-40 exposé en `$230B` b7 |
+| Bus-2 | Table vitesse $2000-5FFF (**D**) | `8da2c46` | `speed.rs:61` 2000-3FFF→6, 4000-41FF→12, 4200-5FFF→6 ; test `io_region_speeds_match_ares_wait` |
+| APU-7 | Code mort ADSR/gaussian | `193241a` | supprimé de `lib.rs` (AdsrPhase, ADSR_RATE_PERIODS, gaussian dupli) |
 
 *(18 lignes — CPU-1/3, SPC-4/5, PPU-1/2/4/5/6, DMA-1/2/5, SA1-1/2/3/4, Bus-2, APU-7)*
 

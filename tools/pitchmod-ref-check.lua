@@ -5,7 +5,7 @@
 --   In luna, PitchMod's SPC700 runs the music driver, then RUNS AWAY into a
 --   data region and HALTS on a $FF (STOP) opcode at PC $FA42 — audio freezes
 --   at ~56620 of 96000 samples (~1.77 s of ~3 s). This regressed when the
---   Phase-2 cycle fix (081e78d) corrected 9 SPC700 opcode cycle counts; a T0
+--   Phase-2 cycle fix (8ffb323) corrected 9 SPC700 opcode cycle counts; a T0
 --   ($FD, reload=1) read lands on the other side of a 128-cycle boundary.
 --   luna's cycles (Tom-Harte) and timer model (ares) both check out, so the
 --   open question is whether luna has a hidden bug or PitchMod is a knife-edge

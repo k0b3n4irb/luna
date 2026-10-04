@@ -19,13 +19,13 @@ A cycle-accurate-ish SNES emulator written in Rust. 12-crate workspace:
 - `crates/luna-cpu-upd96050/` — NEC uPD7725 / uPD96050 DSP core (drives
   DSP-1, etc.); standalone like the other CPU cores.
 - `crates/luna-apu/` — SPC700 bridge + S-DSP (cycle-accurate ares port
-  in `src/dsp.rs`, see commit `25c3691`).
+  in `src/dsp.rs`, see commit `7a5c599`).
 - `crates/luna-ppu/` — PPU + renderer + compositor.
 - `crates/luna-core/` — system glue. Owns the top-level `Snes` struct,
   the CPU-driven master-clock scheduler, and the **DMA + coprocessor**
   (SA-1 chip side, DSP-1) subsystems as `crate::dma` and `crate::coproc` modules
   (merged from the former `luna-dma` / `luna-coproc` crates in
-  commit `5cf2220`).
+  commit `1398a2c`).
 - `crates/luna-api/` — introspection surface; produces serialisable
   `EmulatorState` snapshots for the CLI, GUI, and MCP server.
 - `crates/luna-mcp-server/` — MCP transport (the GUI does not use it;

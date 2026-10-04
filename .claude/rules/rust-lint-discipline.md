@@ -50,7 +50,7 @@ warning we let pile up is one more place a genuine defect hides unseen.
 
 What clippy will NOT catch is *semantic* error: the 2026-05-25 OAM
 peek-mask bug (`& 0x21F` where the 544-byte OAM needs `% 0x220`,
-commit `0ae7249`) is perfectly valid code no clippy lint covers. That
+commit `9c85552`) is perfectly valid code no clippy lint covers. That
 is exactly the argument for a zero-warning workspace — we can't afford
 lint noise burying the findings that ARE machine-detectable. Don't
 accumulate that debt again.

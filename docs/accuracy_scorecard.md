@@ -55,7 +55,7 @@ on one screen"):
    displays lines 1..=224 → row r is scanned during line r+1). Fixed with
    the hardware origin + the DMA-path partial flush + the HDMA end-of-line
    application point; HiColor64 and 15 other corpus refs are now
-   pixel-exact. ~~Residual **#7b**~~ — **#7b closed 2026-09-19** — HiColor128 is pixel-exact (100 %, tolerance 0, stable over frames 60-300) since the 65C816 hardware-interrupt entry gained ares' two cycles (d117412, v1.25.0): the chart fires its palette DMA from an H-IRQ, and entering every IRQ 14 master clocks early moved alternate bands' bursts across a line. The earlier investigation could not see it because it calibrated the two emulators on the vector fetch, which comes AFTER the short entry. Historical record of the
+   pixel-exact. ~~Residual **#7b**~~ — **#7b closed 2026-09-19** — HiColor128 is pixel-exact (100 %, tolerance 0, stable over frames 60-300) since the 65C816 hardware-interrupt entry gained ares' two cycles (ad8855f, v1.25.0): the chart fires its palette DMA from an H-IRQ, and entering every IRQ 14 master clocks early moved alternate bands' bursts across a line. The earlier investigation could not see it because it calibrated the two emulators on the vector fetch, which comes AFTER the short entry. Historical record of the
    previous reading (HiColor128 at "91% exact"): in the bottom half every SECOND 8-line tile-row band (y
    168-175, 184-191, 200-207, 216-223, plus rows 95/111) renders exactly
    ONE LINE EARLY — an alternating palette-GROUP parity around the

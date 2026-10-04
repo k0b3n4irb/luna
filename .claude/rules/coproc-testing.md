@@ -92,7 +92,7 @@ crisp, readable sprite logo (no horizontal banding, no ghosted/doubled
 letters). RPM Racing exposed a real bug the homebrew `PPU/Interlace/*`
 ROMs could not: it sets BG interlace (SETINI bit 0) **without** OBJ
 interlace (bit 1), so gating OBJ interlace on the wrong bit garbled its
-sprites (fixed `0cc6da4`). No public corpus covers that combination, so
+sprites (fixed `83d4811`). No public corpus covers that combination, so
 this commercial smoke is worth keeping.
 
 The ROM is copyrighted and **not committed** (`tests/roms/*` is

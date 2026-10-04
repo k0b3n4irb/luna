@@ -7,7 +7,7 @@
 > `CLAUDE.md` or `ls crates/`) — `luna-async`, `luna-mcp-core`,
 > `luna-mcp-client`, `luna-rest`, `luna-ws`, `luna-wasm`, `luna-ffi`,
 > `luna-libretro` and `luna-overlay` were never built, and `luna-dma` /
-> `luna-coproc` were merged into `luna-core` (`5cf2220`); the GUI is
+> `luna-coproc` were merged into `luna-core` (`1398a2c`); the GUI is
 > hand-rolled winit + pixels + egui-wgpu (eframe was removed 2026-05-28);
 > the real API is synchronous (no async traits); the real CLI flags and
 > MCP tool catalogue are in the guide

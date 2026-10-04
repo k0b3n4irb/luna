@@ -1,7 +1,7 @@
 # luna — Emulation Accuracy Scorecard vs ares & Mesen2
 
 **Reviewer:** Claude (Opus 4.8) — source-level accuracy correlation
-**Date:** 2026-05-29 · **Commit:** `6b9d6da` (`main`)
+**Date:** 2026-05-29 · **Commit:** `main` as of 2026-05-29 (the SHA did not survive the history rewrite)
 **⟳ RE-GROUNDED vs HEAD: 2026-06-10** — see the re-grounded banner under §1.
 The May grades were markedly pessimistic: **16 of 27 flagged bugs are now
 fixed**, and the "self-consistent but wrong" family is nearly emptied.
@@ -34,17 +34,17 @@ truly-open list is short.** Use *this* table, not §1, as current truth.
 | SPC700 | B | **A−** | cycle model complete (2026-06-22): all 254 opcodes cycle-stepped byte/cycle-exact vs the atomic core, taken-branch +2 applied, cooperative CPU↔SPC interleave active at bus-access granularity, `$F0` wait-state dividers modelled (gap 6 closed) |
 | PPU | C+ | **A−** | *(OPHCT/OPVCT read-latch **+** BG scroll write-twice — both **FIXED 2026-06-11**; the OPVCT latch was the Doom-flicker root)* |
 | DMA/HDMA | C+ | **B−** | DMA per-byte + line-granular HDMA preempt (Phase 5). dot-276 sub-line is **visually a no-op** (276 = HBlank → effect on line N+1, which luna's boundary model already does — see `hdma_ares_audit.md` "Resolution 2026-06-20"); residual is the HDMA stall **cycle-count** timing only (no known game impact). |
-| SA-1 | C+ | **A−** | ~~flat instruction timing~~ — **FIXED**: per-access cycle cost (Phase 5b `097ffe7`) + `conflict()` BWRAM/IRAM/ROM contention steps (Increment B, 2026-06-20). ~~HV-mode timer unimplemented~~ — **FIXED 2026-06-23** (faithful ares `SA1::step` port, both modes, unit-tested). The remaining "−" is purely the batched (non-cothread) scheduler grain, not a value or feature bug. |
+| SA-1 | C+ | **A−** | ~~flat instruction timing~~ — **FIXED**: per-access cycle cost (Phase 5b `55b70b7`) + `conflict()` BWRAM/IRAM/ROM contention steps (Increment B, 2026-06-20). ~~HV-mode timer unimplemented~~ — **FIXED 2026-06-23** (faithful ares `SA1::step` port, both modes, unit-tested). The remaining "−" is purely the batched (non-cothread) scheduler grain, not a value or feature bug. |
 | Bus/mappers | C+ | **B** | ~~ROM mirroring, open-bus MDR, mapper-detect scoring~~ — all **FIXED 2026-06-17** |
 
 **Truly-open work list (was 6, now 1 after OPVCT + BG-scroll + BRR-test + bus trio):**
-0. ~~PPU OPHCT/OPVCT read-latch not reset on $213F~~ — **FIXED 2026-06-11** (`08e68fe`, ares io.cpp:167-169). This was the **Doom border-flicker root** (see below).
+0. ~~PPU OPHCT/OPVCT read-latch not reset on $213F~~ — **FIXED 2026-06-11** (`324b082`, ares io.cpp:167-169). This was the **Doom border-flicker root** (see below).
 1. ~~PPU BG scroll write-twice~~ — **FIXED** (two shared latches, ares io.cpp:312; `ppu.rs:bg H/V scroll`, test `bg_h_scroll_uses_two_shared_latches`).
 2. ~~DSP golden-vector PCM tests absent~~ — **FIXED 2026-06-17**. The BRR→PCM decoder now has curated absolute goldens (all 4 filters + scale-13..15 overflow + clamp) **and** a differential proving luna's ares-port matches an independent Mesen2-form decoder bit-exactly over 200 000 random groups (`dsp.rs` tests `brr_curated_goldens_*` / `brr_differential_luna_matches_mesen_form_over_random_corpus`). ares and Mesen2 agree bit-exactly because every stored sample is `(s<<1)` (even buffer ⇒ inline `p>>1` == pre-shifted `prev>>1`).
 3. ~~Bus: ROM mirroring of non-pow2 images returns open-bus instead of wrapping~~ — **FIXED 2026-06-17** (`types::rom_mirror`, ares `Bus::mirror`; used by `lorom.rs`/`hirom.rs`).
 4. ~~Bus: open-bus is a fixed `0xFF`, not the last MDR latch~~ — **FIXED 2026-06-17** (`Snes::mdr`; CPU-visible open-bus sites return it, reads/writes update it).
 5. ~~Bus: mapper detection is first-checksum-pass-wins; SA-1 via MapMode not RomType~~ — **FIXED 2026-06-17** (`score_header` port of ares `scoreHeader` disambiguates checksum-passers; SA-1 keyed on the chipset/RomType high-nibble).
-6. ~~SA-1 flat instruction timing (`coproc/sa1.rs` `MCLK_PER_SA1_INSN=6`)~~ — **FIXED**: Phase 5b (`097ffe7`) replaced the flat lump with a signed-deficit per-access cost (BWRAM=2 / else=1 step), and the `conflict()` shared-bus contention steps (ROM +1, BWRAM/IRAM +2 when the S-CPU holds the same resource; ares `coprocessor/sa1/{rom,bwram,iram}.cpp`) landed 2026-06-20. SA-1 → A−.
+6. ~~SA-1 flat instruction timing (`coproc/sa1.rs` `MCLK_PER_SA1_INSN=6`)~~ — **FIXED**: Phase 5b (`55b70b7`) replaced the flat lump with a signed-deficit per-access cost (BWRAM=2 / else=1 step), and the `conflict()` shared-bus contention steps (ROM +1, BWRAM/IRAM +2 when the S-CPU holds the same resource; ares `coprocessor/sa1/{rom,bwram,iram}.cpp`) landed 2026-06-20. SA-1 → A−.
 
 Plus the 2 architectural residuals (Phase 5: DMA per-byte grid stepping, mid-line
 HDMA preemption) — genuine HDMA-accuracy items.
@@ -53,14 +53,14 @@ HDMA preemption) — genuine HDMA-accuracy items.
 PPU rows confirmed stale.**
 - **SPC700 → A−.** The cycle-stepped core is byte/cycle-exact for all 254 opcodes
   vs the atomic core (`differential_all_ported_opcodes`); the taken-branch +2
-  penalty is applied (`ef44271`); the CPU↔SPC interleave is cycle-exact at
+  penalty is applied (`8bc873f`); the CPU↔SPC interleave is cycle-exact at
   bus-access granularity (cooperative grammar, active — not the old chunked
   model); and the **`$F0` wait-state dividers** `{2,4,10,20}` clock / `{2,4,8,16}`
   timer (the 8/16→10/20 glitch) are now modelled per access — **last named APU
   gap (`luna_apu_gaps.md` §6) closed**. ws=0 byte-identical (24 APU tests + the
   differential + 58 goldens unchanged); `wait_states_divide_the_spc_clock` proves
   ws=1≈½ / ws=3≈⅒.
-- **Star Ocean (S-DD1) plays past the intro** (`f4fc744`): MMC bank selects power
+- **Star Ocean (S-DD1) plays past the intro** (shipped in v0.3.1): MMC bank selects power
   on to identity (green tri-Ace logo) and `$C0-FF` is MMC ROM not SRAM (`$F0-FD`
   was returning zeroed save-RAM, dead-looping the post-intro script engine).
 - **Audit of the §1 May PPU rows (below):** every grade-D/C claim spot-checked is
@@ -76,7 +76,7 @@ PPU rows confirmed stale.**
 **UPDATE 2026-06-11 — the Doom flicker is SOLVED, and it was NOT a scheduler/timing
 problem.** The earlier theory here (Doom loop "~3.3× slow", attack only with the
 state-injection oracle / cooperative-scheduler port) was **wrong** and is retracted.
-Root cause: the `$213F`/OPVCT read-latch bug above (`08e68fe`). A 50%-wrong V-counter
+Root cause: the `$213F`/OPVCT read-latch bug above (`324b082`). A 50%-wrong V-counter
 read sent Doom's raster IRQ handler down its no-ack branch, re-firing the H/V IRQ
 ~200×/frame and pinning the S-CPU at I=1 ~90% of alternating frames (which *looked*
 like a 3.3×-slow loop). Fixed surgically — the cooperative-scheduler port was NOT
@@ -87,8 +87,8 @@ The differential method (luna CLI traces vs Mesen oracles) localised it; see the
 **UPDATE 2026-06-13 — save state landed (no grade change, but a new
 determinism check).** Full machine-state serialization across the entire `Snes`
 tree (CPU/PPU/APU+S-DSP/DMA/coproc/WRAM/mappers) plus `Emulator::save_state` /
-`load_state` (commits `c58b639` engine+API, `06070b8` GUI slots+hotkeys,
-`a3e0a16` cleanup + `SAVE_STATE_VERSION` bump). This touched **no emulation
+`load_state` (commits `11abf8d` engine+API, `7c3a67d` GUI slots+hotkeys,
+`f9ef99e` cleanup + `SAVE_STATE_VERSION` bump). This touched **no emulation
 logic** — it is `#[derive(Serialize/Deserialize)]` + a `Mapper::save_state/
 load_state` pair (mutable state only; ROM never serialized, kept live and
 replayed). Accuracy relevance is *verification*, not behavior: the round-trip
@@ -110,7 +110,7 @@ on the real SMW ROM and in-GUI (F5/F9). No subsystem grade moves.
 |---|:---:|---|
 | **DSP — S-DSP audio** | **A** | Faithful near-line-for-line ares port; BRR/gaussian/envelope/echo/noise all match. Golden-vector coverage now complete: curated BRR goldens + a Mesen2 differential + a full-voice integration golden (`dsp.rs`) + the re-baselined end-to-end PCM ROM goldens. |
 | **CPU — 65c816** | **A−** *(was B)* | **99.99996 % Tom Harte (2 fails / 5.08M)** after fixing the 16-bit BCD adjust, MVN/MVP per-byte interruptibility, and E-mode stack + (dp,X) pointer wrap. Functionally byte-faithful to ares; the "−" is the instruction-atomic core (no cycle-stepping; edge-latched IRQ). |
-| **SMP — SPC700** | **A−** *(was B)* | 256/256 opcodes + ALU/MUL/DAA/DAS byte-faithful; `DIV YA,X` ares-faithful. The cycle model is now complete: all 254 opcodes are cycle-stepped byte-/cycle-exact vs the atomic core (`differential_all_ported_opcodes`), the taken-branch +2 penalty is applied (`ef44271`), the CPU↔SPC interleave is cycle-exact at bus-access granularity (cooperative grammar, active), and the `$F0` wait-state dividers `{2,4,10,20}` + the 8/16→10/20 timer glitch are modelled (gap 6 closed). |
+| **SMP — SPC700** | **A−** *(was B)* | 256/256 opcodes + ALU/MUL/DAA/DAS byte-faithful; `DIV YA,X` ares-faithful. The cycle model is now complete: all 254 opcodes are cycle-stepped byte-/cycle-exact vs the atomic core (`differential_all_ported_opcodes`), the taken-branch +2 penalty is applied (`8bc873f`), the CPU↔SPC interleave is cycle-exact at bus-access granularity (cooperative grammar, active), and the `$F0` wait-state dividers `{2,4,10,20}` + the 8/16→10/20 timer glitch are modelled (gap 6 closed). |
 | **PPU — graphics** | **C+** | Color-math/CGWSEL/OAM-modulo reference-accurate; real bugs in sprite Y-wrap, large-sprite tile addressing, BG scroll write-twice, Mode-7 screen-over; hi-res modes 5/6 + EXTBG absent. |
 | **DMA / HDMA / timing** | **C+** | Byte-movement & HDMA table walk accurate & well-tested; **timing is architecturally coarse** (atomic burst + lump cycle-charge) → no mid-line HDMA preemption, H-IRQ ignores HTIME, **coprocessor double-charge bug**. |
 | **SA-1 coprocessor** | **C+** | IRQ/mailbox/banking/multiplier reference-accurate (incl. correct CCNT bit-5 polarity); divergences in divider signedness, MAC-clear guard, **CC1 bpp/width fields swapped**, flat instruction timing. |
@@ -247,7 +247,7 @@ one cycle-timing divergence remains.
 | **DIV YA,X** ✅ *fixed* | ares-faithful: H/V from **pre-div** Y, `Y<(X<<1)` overflow branch, X==0 via 256-X (`opcodes.rs:1096`) | H/V pre-div Y + overflow branch (`instructions.cpp:358`) | bit-loop, same semantics (`Spc.Instr.cpp:1163`) | **A** |
 | MUL | NZ from Y (`opcodes.rs:1087`) | `instructions.cpp:505` | matches | A |
 | DAA/DAS | `opcodes.rs:1676` | `instructions.cpp:199` | matches | A |
-| **Cycle — taken branch** ✅ *fixed* | +2 on take via `SPC700_BRANCH_TAKEN_PENALTY` (`ef44271`) | +2 idle on take (`instructions.cpp:85`) | +2 idle (`Spc.Instr.cpp:1625`) | **A** |
+| **Cycle — taken branch** ✅ *fixed* | +2 on take via `SPC700_BRANCH_TAKEN_PENALTY` (`8bc873f`) | +2 idle on take (`instructions.cpp:85`) | +2 idle (`Spc.Instr.cpp:1625`) | **A** |
 | Cycle — per-opcode base | table, plausible | per-access | per-access | B |
 | Reset / IPL | vector + SP=$FF (`cpu.rs:46`) | `timing.cpp:9` | equiv | B |
 | Timers T0/T1/T2 | 128/128/16 divider (`apu/lib.rs:205`) | 2-stage divider (`timing.cpp:34`) | `SpcTimer.h` | B− |

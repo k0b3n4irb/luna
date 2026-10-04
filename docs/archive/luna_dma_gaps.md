@@ -123,7 +123,7 @@ a passing golden); SMRPG + Chrono Trigger smoke screenshots are unchanged
 > (`DmaBusView::write_b`, `snes.rs`) and the HDMA end-of-line application
 > point, HiColor64 and 15 other corpus references are **pixel-exact**. The
 > last residual, **#7b** (HiColor128), closed 2026-09-19: its cause was the
-> 65C816 hardware-interrupt entry being two cycles short (d117412), which
+> 65C816 hardware-interrupt entry being two cycles short (ad8855f), which
 > shifted the H-IRQ-driven palette bursts. See `accuracy_scorecard.md`
 > "Open items" #1 and `hdma_ares_audit.md` "Phase 5 inc 2". The text
 > below is kept as the 2026-05-31 record (81.2 %, "Deferred").

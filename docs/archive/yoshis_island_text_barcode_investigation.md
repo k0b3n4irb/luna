@@ -2,7 +2,7 @@ Archived 2026-10-04: historical; see [`../hdma_ares_audit.md`](../hdma_ares_audi
 
 # SMW2 Yoshi's Island intro "barcode" — investigation log (2026-06)
 
-**Status: RESOLVED** (commit `7f9f728`, `fix(dma): honor mid-frame HDMA
+**Status: RESOLVED** (commit `f3bfffd`, `fix(dma): honor mid-frame HDMA
 enable`). The intro story text is on **BG4**, shown via a per-line HDMA
 Mode-0 split that the game enables **mid-frame**; luna ignored mid-frame
 HDMA enable, so the split never ran and the text never composited.

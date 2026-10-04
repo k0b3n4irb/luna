@@ -1,6 +1,6 @@
 # SMRPG intro deadlock — cross-emulator WRAM differential (RESOLVED)
 
-**Status: RESOLVED** (commit `2e51c78`, 2026-06-19 — "fix(sa1): wire \$2225
+**Status: RESOLVED** (commit `6a6fd38`, 2026-06-19 — "fix(sa1): wire \$2225
 CBM so the SA-1 uses its own BW-RAM bank"). Root cause: `$2225` (the SA-1
 side's BW-RAM bank register) had no handler, so the SA-1 read the S-CPU's
 `$2224` SBM bank instead — command `$11` graphics work got wrong data and
@@ -111,7 +111,7 @@ NOT the SA-1 and NOT a wrong SPC700 port echo.
 
 ### SPC700 instruction-trace differential (done): timer 2 is the root
 
-Built `--spc-trace` (commit `d6eae1d`; per-opcode `seq,pc,a,x,y,sp,psw`,
+Built `--spc-trace` (commit `6744a9c`; per-opcode `seq,pc,a,x,y,sp,psw`,
 mirrors `--sa1-trace`) and a Mesen2 SPC700 PC trace (Lua exec callback,
 `cpuType=spc`, `memType=spcMemory` — note: `emu.getState()` inside a memory
 callback aborts it, so log PC-only). Both from IPL boot (`$FFC0`).

@@ -5,7 +5,7 @@
 > [`../accuracy_scorecard.md`](../accuracy_scorecard.md) (kept current
 > per-PR): DMA/HDMA is now A− (audit closed 2026-07-01), Bus is B+, the
 > P4 RDNMI/\$4210 half landed via #107/#109/#118, and the "quick wins"
-> below (bus speed table `47032bd`, indirect-HDMA 1-byte quirk `23d3318`)
+> below (bus speed table `8da2c46`, indirect-HDMA 1-byte quirk `57e7282`)
 > shipped. The two "do NOT rewrite" conclusions (§1 libco, §2 renderer)
 > remain valid.
 
