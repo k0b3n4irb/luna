@@ -38,6 +38,18 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   the MCP `set_port_device` (`pad`, `mouse`, `superscope`, `multitap`,
   `none`) and which MCP traces are rings. Issue numbers are gone from the
   help texts. No option, key or tool was added, removed or renamed.
+- **Save states written by 1.32.0 and earlier are refused.** The
+  save-state format moves to version 8: two fields that nothing ever read
+  (an SPC700 scratch latch and a raw copy of the SA-1 `$2231` register)
+  are no longer stored. Emulation is unchanged, but the format is
+  positional, so an older state cannot be read back. Loading one fails
+  cleanly with `save state: format version mismatch: state is v7, this
+  build expects v8` — `luna state --load-state` exits 1 with that error,
+  the MCP `load_state` returns it, and a GUI slot shows `Load failed:`
+  followed by it — and the running game is left untouched. There is no
+  conversion: reach the scene again and save it with this version.
+  Battery saves (`.srm`) are a separate file with a different format and
+  are **not** affected.
 
 ### Fixed
 

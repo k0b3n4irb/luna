@@ -281,24 +281,70 @@ fn firmware_size_is_known_only_for_names_luna_recognises() {
     assert_eq!(Emulator::expected_firmware_len("st010.rom"), None);
 }
 
+/// `(core, mapper)` blob lengths of the state `e` saves right now.
+fn state_shape(e: &Emulator) -> (usize, usize) {
+    let (bundle, _): (SaveStateBundle, usize) =
+        bincode::serde::decode_from_slice(&e.save_state().unwrap(), bincode::config::standard())
+            .unwrap();
+    (bundle.core.len(), bundle.mapper.len())
+}
+
+/// A blank cart of `size` bytes for a board forced by kind, with 2 KB of
+/// cartridge RAM declared at header offset `ram_size_at`: all the shape
+/// pin needs is the mapper, at power-on.
+fn blank_cart(size: usize, ram_size_at: usize) -> Vec<u8> {
+    let mut rom = vec![0u8; size];
+    rom[0x7FFD] = 0x80;
+    rom[ram_size_at] = 0x01;
+    rom
+}
+
 /// The serialized shape of the machine is part of the save-state
 /// format. bincode is positional: adding, removing or reordering a
 /// serialized field silently mis-decodes every older state, and
 /// `#[serde(default)]` does NOT help. If this test fails you changed
 /// that shape — bump [`SAVE_STATE_VERSION`] (documenting why), then
-/// update the two lengths below. (The lengths are of a freshly built
+/// update the lengths below. (The lengths are of a freshly built
 /// machine; a changed power-on *value* can move them too, through the
 /// varint encoding — then only the lengths need updating.)
+///
+/// One row per mapper that encodes its own blob: the core is shared, but
+/// a field added to or dropped from a coprocessor moves only that
+/// coprocessor's blob, which a `LoROM` machine alone never shows.
 #[test]
 fn save_state_shape_is_pinned_to_the_version() {
-    let mut e = Emulator::new();
-    e.load_rom_bytes(demo_lorom_sram()).unwrap();
-    let (bundle, _): (SaveStateBundle, usize) =
-        bincode::serde::decode_from_slice(&e.save_state().unwrap(), bincode::config::standard())
-            .unwrap();
+    use luna_core::MapperKind::{Sa1, Sdd1, SuperFx};
+    let machine = |rom: Vec<u8>, forced: Option<luna_core::MapperKind>| {
+        let mut e = Emulator::new();
+        match forced {
+            Some(kind) => e.load_rom_bytes_forced(rom, kind),
+            None => e.load_rom_bytes(rom),
+        }
+        .unwrap();
+        state_shape(&e)
+    };
+    let shapes = [
+        ("LoROM", machine(demo_lorom_sram(), None)),
+        ("SA-1", machine(blank_cart(0x8000, 0x7FD8), Some(Sa1))),
+        (
+            "Super FX",
+            machine(blank_cart(0x8000, 0x7FBD), Some(SuperFx)),
+        ),
+        ("S-DD1", machine(blank_cart(0x1_0000, 0xFFD8), Some(Sdd1))),
+        ("DSP-1", machine(demo_dsp1(), None)),
+    ];
     assert_eq!(
-        (SAVE_STATE_VERSION, bundle.core.len(), bundle.mapper.len()),
-        (7, 447_758, 8_195),
+        (SAVE_STATE_VERSION, shapes),
+        (
+            8,
+            [
+                ("LoROM", (447_757, 8_195)),
+                ("SA-1", (447_757, 4_723)),
+                ("Super FX", (447_757, 2_671)),
+                ("S-DD1", (447_757, 2_171)),
+                ("DSP-1", (447_757, 2_129)),
+            ]
+        ),
         "serialized machine shape changed — see this test's doc comment"
     );
 }
@@ -685,7 +731,13 @@ fn save_state_v5_stable_hash_roundtrip_and_rejections() {
     };
     let bytes = bincode::serde::encode_to_vec(&stale, bincode::config::standard()).unwrap();
     match e.load_state(&bytes) {
-        Err(ApiError::SaveState(msg)) => assert!(msg.contains("version")),
+        Err(ApiError::SaveState(msg)) => assert_eq!(
+            msg,
+            format!(
+                "format version mismatch: state is v{}, this build expects v{SAVE_STATE_VERSION}",
+                SAVE_STATE_VERSION - 1
+            )
+        ),
         other => panic!("expected SaveState version error, got {other:?}"),
     }
 

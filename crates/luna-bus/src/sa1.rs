@@ -242,10 +242,6 @@ pub struct Sa1Mapper {
     /// DCNT bit 2 — destination device. `false` = I-RAM, `true` =
     /// BW-RAM. Selects which DDA byte fires normal-mode DMA.
     dma_dd: bool,
-    /// `$2231 CDMA` — character-conversion parameters (colour depth +
-    /// tile width). Stored for the Type-1 path; the normal-DMA fast
-    /// path ignores it.
-    cdma: u8,
     /// CDMA bits 0-1 (`dmacb` in ares `io.cpp:454`, clamped to 2): colour
     /// depth of the character-conversion source — 0 = 8bpp, 1 = 4bpp,
     /// 2 = 2bpp.
@@ -404,7 +400,6 @@ impl Sa1Mapper {
             dma_cden: false,
             dma_cdsel: false,
             dma_dd: false,
-            cdma: 0,
             dmacb: 0,
             dmasize: 0,
             bwram_dma: false,
@@ -1699,7 +1694,6 @@ impl Sa1Mapper {
                     // 0-1, virtual bitmap width in bits 2-4 — luna had the
                     // two fields swapped — and bit 7 (CDEND) ends an armed
                     // Type-1 conversion.
-                    self.cdma = value;
                     self.dmacb = (value & 0x03).min(2);
                     self.dmasize = ((value >> 2) & 0x07).min(5);
                     if (value & 0x80) != 0 {

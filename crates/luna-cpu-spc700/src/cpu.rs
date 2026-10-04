@@ -55,8 +55,6 @@ pub struct Spc700 {
     /// Per-instruction latched pointer / data value, carried across
     /// micro-steps (e.g. a resolved indirect pointer, a RMW data byte).
     pub ptr_lat: u16,
-    /// Per-instruction latched bit index (bit-on-memory ops).
-    pub bit_lat: u8,
     /// `true` between the opcode fetch and the final micro-step of the
     /// instruction currently running under `step_cycle`.
     pub in_instruction: bool,

@@ -132,7 +132,12 @@ pub enum ApiError {
 /// interrupt lines at the instruction's last cycle (ares `lastCycle()`),
 /// so the CPU no longer keeps its own copy of the coprocessor / H-V
 /// level — the bus reports it at the poll instead.
-pub const SAVE_STATE_VERSION: u32 = 7;
+/// v8 (2026-10): two fields nothing read are gone — `Spc700::bit_lat`
+/// (a scratch latch neither SPC700 interpreter ever used) and
+/// `Sa1Mapper::cdma` (the raw `$2231` byte; the conversion runs on the
+/// `dmacb` / `dmasize` decoded from it, which stay). No behaviour change:
+/// the core blob and the SA-1 mapper blob are each one byte shorter.
+pub const SAVE_STATE_VERSION: u32 = 8;
 
 /// On-disk / on-wire save-state container produced by
 /// [`Emulator::save_state`]. `core` is the bincode-encoded `Snes` (the
