@@ -110,7 +110,7 @@ pub struct MclkAccounting {
 
 impl MclkAccounting {
     /// Credit `mclk` to the current consumer.
-    #[inline]
+    #[cfg(test)]
     pub const fn credit_current(&mut self, mclk: u64) {
         self.cumulative.credit(self.current, mclk);
     }

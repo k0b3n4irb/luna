@@ -77,6 +77,7 @@ impl RamBus {
 
     /// Total master cycles paid via [`Bus::io_cycle`] since the bus was
     /// created (or the last `reset_cycle_counter` call).
+    #[cfg(test)]
     #[must_use]
     pub const fn io_cycles_paid(&self) -> MCycles {
         self.io_cycles_paid
@@ -103,6 +104,7 @@ impl RamBus {
     /// Mark the NMI line as asserted (latched until cleared by the CPU
     /// via a real bus implementation reading `$4210`). In this test bus,
     /// we expose it as a simple field for explicit control.
+    #[cfg(test)]
     pub const fn set_nmi(&mut self, pending: bool) {
         self.nmi = pending;
     }

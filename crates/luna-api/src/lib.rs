@@ -27,11 +27,10 @@ use luna_core::Snes;
 /// GUI's port-device selector goes through `luna-api`, not `luna-core`.
 pub use luna_core::controller::PortDevice;
 pub use luna_core::{
-    BreakHit, BreakKind, BreakpointInfo, CpuTraceEvent, CpuTraceLog, DmaTraceEvent, DmaTraceLog,
-    Dsp1TraceEvent, Dsp1TraceKind, GsuBusAccess, GsuBusEvent, MailboxEvent, MailboxEventKind,
-    MapperKind, MemEventKind, MemOrigin, MemTraceEvent, MemTraceFilter, MemTraceLog, Profile,
-    ProfileSample, Sa1LogEvent, Sa1SideEvent, Sa1Stats, Sa1TraceEvent, Spc700TraceEvent,
-    SuperFxJob, SuperFxTraceEvent,
+    BreakHit, BreakKind, BreakpointInfo, CpuTraceEvent, DmaTraceEvent, Dsp1TraceEvent,
+    Dsp1TraceKind, GsuBusAccess, GsuBusEvent, MailboxEvent, MailboxEventKind, MapperKind,
+    MemEventKind, MemOrigin, MemTraceEvent, MemTraceFilter, Profile, ProfileSample, Sa1LogEvent,
+    Sa1SideEvent, Sa1Stats, Sa1TraceEvent, Spc700TraceEvent, SuperFxJob, SuperFxTraceEvent,
 };
 /// Decoded BG tilemap image (Tilemap Viewer), re-exported so the GUI uses
 /// `luna_api::TilemapImage` rather than depending on `luna-ppu`.
@@ -52,7 +51,7 @@ pub mod symbols;
 mod vocab;
 
 pub use event_viewer::{
-    CATEGORY_COUNT, EventCategory, EventViewerConfig, EventViewerEvent, categorise, register_name,
+    CATEGORY_COUNT, EventCategory, EventViewerConfig, EventViewerEvent, register_name,
 };
 pub use input::{FRAME_STEP_BUDGET, InputEvent, InputScript, ScriptBound};
 pub use power_on::parse_power_on;
@@ -1427,7 +1426,7 @@ impl Emulator {
     /// pinning a hash would lock out valid files to catch a case the length
     /// already catches.
     #[must_use]
-    pub const fn expected_firmware_len(target: &str) -> Option<usize> {
+    pub(crate) const fn expected_firmware_len(target: &str) -> Option<usize> {
         match target.as_bytes() {
             b"dsp1b.rom" | b"dsp1.rom" => Some(luna_cartridge::DSP1_FIRMWARE_LEN),
             _ => None,

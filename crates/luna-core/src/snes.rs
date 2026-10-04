@@ -2545,7 +2545,6 @@ impl SnesBus<'_> {
             // log is moved into the view for the line and returned after.
             let mut trace = self.dma.dma_trace.take();
             let trace_hclock = self.hclock();
-            let trace_blank_now = self.ppu_line >= self.vblank_start_line();
             let mut view = DmaBusView {
                 wram: &mut *self.wram,
                 mapper: &mut *self.mapper,
@@ -2560,7 +2559,9 @@ impl SnesBus<'_> {
                 scpu_mar: &mut self.scpu_mar,
                 trace_frame: self.frame_count,
                 trace_line: self.ppu_line,
-                trace_blank: trace_blank_now,
+                // A picture line (`ppu_line < vblank_start`, or line 0 at
+                // the frame wrap): never `VBlank`.
+                trace_blank: false,
                 trace_hclock,
                 dma_channel: 0,
                 mem_trace: self.mem_trace_log.as_mut(),
@@ -2639,7 +2640,6 @@ impl SnesBus<'_> {
             // renderer also uses it to pick the interlaced field's rows.
             self.ppu.field = !self.ppu.field;
             let trace_hclock = self.hclock();
-            let trace_blank_now = self.ppu_line >= self.vblank_start_line();
             let mut view = DmaBusView {
                 wram: &mut *self.wram,
                 mapper: &mut *self.mapper,
@@ -2658,7 +2658,9 @@ impl SnesBus<'_> {
                 scpu_mar: &mut self.scpu_mar,
                 trace_frame: self.frame_count,
                 trace_line: self.ppu_line,
-                trace_blank: trace_blank_now,
+                // A picture line (`ppu_line < vblank_start`, or line 0 at
+                // the frame wrap): never `VBlank`.
+                trace_blank: false,
                 trace_hclock,
                 dma_channel: 0,
                 mem_trace: self.mem_trace_log.as_mut(),
@@ -2867,9 +2869,6 @@ impl SnesBus<'_> {
 
     fn dma_edge_inner(&mut self) {
         let value = self.dma.pending_mdma;
-        if value == 0 {
-            return;
-        }
         self.dma.pending_mdma = 0;
         // ares charges the burst against the DMA clock divider at the edge
         // and the cost of the access whose edge runs it — see `mdma_cost`.

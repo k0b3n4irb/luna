@@ -15,7 +15,7 @@
 /// each pixel's bit 1. Returned indices are in `0..=3`. Pixel 0 is the
 /// **leftmost** pixel — i.e. bit 7 of each byte.
 #[must_use]
-pub fn decode_2bpp_row(lo: u8, hi: u8) -> [u8; 8] {
+pub(crate) fn decode_2bpp_row(lo: u8, hi: u8) -> [u8; 8] {
     let mut out = [0u8; 8];
     for (i, slot) in out.iter_mut().enumerate() {
         let shift = 7 - i;
@@ -32,7 +32,7 @@ pub fn decode_2bpp_row(lo: u8, hi: u8) -> [u8; 8] {
 /// as `(p3[n]<<3) | (p2[n]<<2) | (p1[n]<<1) | p0[n]`. Returned indices
 /// are in `0..=15`.
 #[must_use]
-pub fn decode_4bpp_row(p0: u8, p1: u8, p2: u8, p3: u8) -> [u8; 8] {
+pub(crate) fn decode_4bpp_row(p0: u8, p1: u8, p2: u8, p3: u8) -> [u8; 8] {
     let mut out = [0u8; 8];
     for (i, slot) in out.iter_mut().enumerate() {
         let shift = 7 - i;
@@ -51,7 +51,7 @@ pub fn decode_4bpp_row(p0: u8, p1: u8, p2: u8, p3: u8) -> [u8; 8] {
 /// bit 10-14, green bit 5-9, red bit 0-4). The bit-15 high bit is
 /// ignored by the renderer.
 #[must_use]
-pub const fn bgr555_to_rgb888(color: u16) -> [u8; 3] {
+pub(crate) const fn bgr555_to_rgb888(color: u16) -> [u8; 3] {
     let r5 = (color & 0x001F) as u8;
     let g5 = ((color >> 5) & 0x001F) as u8;
     let b5 = ((color >> 10) & 0x001F) as u8;
@@ -63,7 +63,7 @@ pub const fn bgr555_to_rgb888(color: u16) -> [u8; 3] {
 /// with smooth quantization in between.
 #[inline]
 #[must_use]
-pub const fn scale_5_to_8(c5: u8) -> u8 {
+pub(crate) const fn scale_5_to_8(c5: u8) -> u8 {
     let c5 = c5 & 0x1F;
     (c5 << 3) | (c5 >> 2)
 }
@@ -80,7 +80,7 @@ pub const fn scale_5_to_8(c5: u8) -> u8 {
 /// hardware reference here.
 #[inline]
 #[must_use]
-pub fn apply_brightness(rgb: [u8; 3], brightness: u8) -> [u8; 3] {
+pub(crate) fn apply_brightness(rgb: [u8; 3], brightness: u8) -> [u8; 3] {
     let b = u16::from(brightness & 0x0F);
     let scale = b + 1;
     // Brightness 0 gets an additional right-shift of 2 (the ×0.25).

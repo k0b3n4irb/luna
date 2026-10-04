@@ -120,7 +120,7 @@ impl EventCategory {
 /// [`event_category`]. DMA-channel gating is not applied here: it is done
 /// in [`decode_dma_event`] (see [`EventViewerConfig::show_dma_channels`]).
 #[must_use]
-pub const fn categorise(reg: u16, is_write: bool) -> Option<EventCategory> {
+pub(crate) const fn categorise(reg: u16, is_write: bool) -> Option<EventCategory> {
     if reg <= 0x213F {
         if is_write {
             Some(match reg {
@@ -163,7 +163,7 @@ pub const fn categorise(reg: u16, is_write: bool) -> Option<EventCategory> {
 /// straight to [`EventCategory::Nmi`]/[`EventCategory::Irq`]; register accesses
 /// go through [`categorise`].
 #[must_use]
-pub fn event_category(ev: &MemTraceEvent) -> Option<EventCategory> {
+pub(crate) fn event_category(ev: &MemTraceEvent) -> Option<EventCategory> {
     match ev.kind {
         MemEventKind::NmiSignal => return Some(EventCategory::Nmi),
         MemEventKind::IrqSignal => return Some(EventCategory::Irq),
@@ -191,7 +191,7 @@ pub struct EventViewerConfig {
     /// is `false` is excluded (Mesen2 `GetEventConfig` `:106-109`, the
     /// `ShowDmaChannels[DmaChannel & 7]` gate). luna tags each DMA B-bus
     /// write with its channel (the controller's `dma->GetActiveChannel()`
-    /// equivalent), so this filter is enforced in [`decode_dma_event`].
+    /// equivalent), so this filter is enforced in `decode_dma_event`.
     pub show_dma_channels: [bool; 8],
 }
 
@@ -234,7 +234,7 @@ pub struct EventViewerEvent {
 /// Decode one raw event into a snapshot row, honouring the config visibility
 /// mask. Returns `None` if the access has no category or its category is hidden.
 #[must_use]
-pub fn decode_event(
+pub(crate) fn decode_event(
     ev: &MemTraceEvent,
     cfg: &EventViewerConfig,
     is_prev_frame: bool,
@@ -269,7 +269,7 @@ pub fn decode_event(
 /// the access has no category, its category is hidden, or its channel is
 /// hidden by `show_dma_channels` (Mesen2 `GetEventConfig` `:106-109`).
 #[must_use]
-pub fn decode_dma_event(
+pub(crate) fn decode_dma_event(
     ev: &DmaTraceEvent,
     cfg: &EventViewerConfig,
     is_prev_frame: bool,

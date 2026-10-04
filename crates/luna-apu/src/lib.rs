@@ -110,10 +110,6 @@ pub const MASTER_CLOCK_HZ: u64 = 21_477_272;
 /// value (Mesen2 `Spc.cpp:126` divides by `GetMasterClockRate()`).
 pub const PAL_MASTER_CLOCK_HZ: u64 = 21_281_370;
 
-const fn default_master_hz() -> u64 {
-    MASTER_CLOCK_HZ
-}
-
 /// SPC700 / S-DSP clock (Hz): the APU crystal ÷ 24. The crystal is
 /// nominally 24.576 MHz (→ 1.024 MHz) but real hardware measures
 /// ~24.607 MHz; ares (`apuFrequency = 32040·768`) and Mesen2 both use the
@@ -215,33 +211,27 @@ pub struct Apu {
     /// (`CpuRegs`, what the SPC actually reads) either immediately or one
     /// SPC cycle later — the write-visibility delay (see
     /// [`Self::cpu_write_port`] / [`Self::pending_cpu_reg_update`]).
-    #[serde(default)]
     new_to_spc_ports: [u8; 4],
     /// Mesen2 `_pendingCpuRegUpdate`: when a CPU mailbox write lands while
     /// the SPC is more than 1 (2×) unit behind, the SPC sees the new value
     /// only after one more SPC cycle. Applied in [`Self::run_one_cycle`]
     /// (Mesen `ProcessCycle`). Lets e.g. Kishin Douji Zenki boot.
-    #[serde(default)]
     pending_cpu_reg_update: bool,
     /// SPC executed position in the **2× SPC clock domain** (Mesen2
     /// `_state.Cycle`): `SPC_2X_HZ` units, advanced `+2` per SPC cycle. The
     /// driver runs the SPC up to `cpu_target_2x - 1` so it sits half a 1×
     /// SPC cycle behind the CPU at every mailbox access.
-    #[serde(default)]
     spc_pos_2x: u64,
     /// CPU position in the same 2× domain (`master_clock × clockRatio`),
     /// accumulated with zero drift. The SPC chases `cpu_target_2x - 1`.
-    #[serde(default)]
     cpu_target_2x: u64,
     /// Fractional remainder of [`Self::cpu_target_2x`] (`< master_hz`):
     /// the sub-unit phase of `master_clock × clockRatio`, needed to decide a
     /// mailbox write's immediate-vs-pending visibility exactly like Mesen.
-    #[serde(default)]
     cpu_clock_frac: u64,
     /// Master clock (Hz) of the console driving this APU: the denominator
     /// of the CPU→SPC clock ratio. NTSC by default; PAL consoles call
     /// [`Self::set_master_clock_hz`] with [`PAL_MASTER_CLOCK_HZ`].
-    #[serde(default = "default_master_hz")]
     master_hz: u64,
     /// `$F1` SPC control register, as last written: bits 0-2 enable
     /// timers T0-T2, bits 4-5 clear the CPU→SPC ports, bit 7 maps the

@@ -140,8 +140,6 @@ pub struct Header {
     pub has_battery: bool,
     /// Region / video standard.
     pub region: Region,
-    /// Maker code (old-style single byte).
-    pub maker: u8,
     /// Mask ROM revision.
     pub version: u8,
     /// 16-bit checksum claimed by the header.
@@ -517,7 +515,6 @@ fn parse_at(rom: &[u8], off: usize) -> Header {
         expansion_ram_kb,
         has_battery: matches!(chipset & 0x0F, 0x02 | 0x05 | 0x06 | 0x09 | 0x0A),
         region: Region::from_country(rom[off + 0x19]),
-        maker: rom[off + 0x1A],
         version: rom[off + 0x1B],
         checksum_complement: u16::from_le_bytes([rom[off + 0x1C], rom[off + 0x1D]]),
         checksum: u16::from_le_bytes([rom[off + 0x1E], rom[off + 0x1F]]),

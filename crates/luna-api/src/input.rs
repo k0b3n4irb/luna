@@ -225,7 +225,7 @@ pub fn parse_pointer_script(body: &str) -> Result<Vec<PointerCheckpoint>, String
 
 impl Emulator {
     /// Apply one scripted input change to its device.
-    pub fn apply_input(&mut self, ev: InputEvent) -> Result<(), ApiError> {
+    pub(crate) fn apply_input(&mut self, ev: InputEvent) -> Result<(), ApiError> {
         match ev {
             InputEvent::Pad { port, mask } => self.set_joypad(port, mask),
             InputEvent::Mouse { dx, dy, buttons } => self.set_mouse(dx, dy, buttons),

@@ -933,13 +933,6 @@ impl Sa1Mapper {
         fired
     }
 
-    /// `true` while the S-CPU has raised an NMI to the SA-1 and the
-    /// SA-1's enable mask permits it.
-    #[must_use]
-    pub const fn sa1_nmi_line(&self) -> bool {
-        self.main_nmi_to_sa1 && (self.cie & 0x10) != 0
-    }
-
     /// Returns the override byte for a main-CPU vector fetch from
     /// bank 0 at `$FFE0-$FFFF`, or `None` if the SA-1 doesn't override
     /// that vector right now.
@@ -1582,7 +1575,6 @@ impl Sa1Mapper {
                     // — games that re-write CCNT=$80 after a single ack
                     // never got the second IRQ. Acks are explicit via
                     // CIC ($220B), not implicit on a CCNT clear.
-                    let _ = prev;
                     self.ccnt_msg = value & 0x0F;
                     self.ccnt_irq_level = (value & 0x80) != 0;
                     // Bit 6 (RDYB) parks the SA-1: ares `sa1.cpp:46-50`
@@ -1633,7 +1625,6 @@ impl Sa1Mapper {
                     // and subsequent SCNT writes never re-latched, so
                     // the main↔SA-1 mailbox deadlocked on the second
                     // handshake. Acks are explicit through SIC ($2202).
-                    let _ = prev;
                     self.scnt = value;
                     if (value & 0x80) != 0 {
                         self.s_irq_to_main = true;

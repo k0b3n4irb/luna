@@ -175,7 +175,7 @@ pub struct BgState {
 
 /// Convenience accessor for the renderer.
 #[must_use]
-pub const fn bg_state(ppu: &Ppu, idx: usize) -> BgState {
+pub(crate) const fn bg_state(ppu: &Ppu, idx: usize) -> BgState {
     ppu.bg[idx]
 }
 
@@ -387,13 +387,11 @@ pub struct Ppu {
     /// `main.cpp:4` `state.overscan`, Mesen2 `_overscanFrame`): the
     /// picture is 239 lines for the whole frame, whatever the register
     /// does mid-way.
-    #[serde(default)]
     frame_overscan: bool,
     /// The dot (H-clock / 4, 0..341) of the CPU or DMA access in progress,
     /// set by the bus before it touches a register. Unlike
     /// `last_flushed_dot` it is not clamped to the 256 picture dots, so
     /// an `HBlank` access reads as `HBlank`.
-    #[serde(default)]
     pub beam_dot: u16,
     /// Native-resolution capture toggle (issue #115). Off by default — the
     /// dual-write in the compositor and the per-field rows cost time, so only
@@ -439,7 +437,6 @@ pub struct Ppu {
     /// PPU line the scheduler is currently drawing — the line object
     /// evaluation is working on (see [`Self::obj_eval_latch`]). Updated by
     /// the per-line render entry points.
-    #[serde(default)]
     pub current_line: u16,
 
     /// Accumulator: set `true` whenever a *visible* scanline is rendered

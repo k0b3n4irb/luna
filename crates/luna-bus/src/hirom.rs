@@ -60,6 +60,7 @@ impl HiRomMapper {
 
     /// Build an `ExHiROM` mapper (Mode 25) — same as [`Self::new`] but
     /// routes banks `$00..$7F` to the upper 4 MB of ROM.
+    #[cfg(test)]
     #[must_use]
     pub fn new_exhirom(rom: Vec<u8>, sram_size: usize) -> Self {
         Self::with_kind(MapperKind::ExHiRom, rom, sram_size)

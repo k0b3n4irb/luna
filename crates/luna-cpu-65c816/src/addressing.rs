@@ -264,16 +264,6 @@ pub fn stack_relative_indirect_y<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Addr24 {
     make_addr(bank, new_off)
 }
 
-/// Read an 8- or 16-bit operand from a given effective address.
-///
-/// Width is governed by the M flag for accumulator-targeted reads or by
-/// X for index-register-targeted reads. Callers pass the relevant flag
-/// query as a closure to avoid having two helpers.
-#[inline]
-pub fn read_byte<B: Bus>(bus: &mut B, addr: Addr24) -> u8 {
-    bus.read(addr)
-}
-
 /// Read 16 bits little-endian with the high byte carrying into the next
 /// bank (ares `readBank`: `addr + 1`). This is the bank/long-mode rule.
 ///
@@ -281,8 +271,8 @@ pub fn read_byte<B: Bus>(bus: &mut B, addr: Addr24) -> u8 {
 /// within bank 0; the opcode handlers use `crate::cpu::Cpu::read_word16`,
 /// which honors the per-instruction `bank0_wrap` latch. Kept here as the
 /// pure bank-carrying primitive for tests.
-#[inline]
-pub fn read_word<B: Bus>(bus: &mut B, addr: Addr24) -> u16 {
+#[cfg(test)]
+fn read_word<B: Bus>(bus: &mut B, addr: Addr24) -> u16 {
     let lo = bus.read(addr);
     let hi = bus.read(addr.wrapping_add(1) & 0x00FF_FFFF);
     u16::from(lo) | (u16::from(hi) << 8)

@@ -51,35 +51,6 @@ fn render_bg1_scanline(ppu: &Ppu, y: u16) -> Scanline {
     render_bg1_scanline_with(ppu, y, RenderOptions::default())
 }
 
-/// BG1's bit-depth derived from `BGMODE` (the low 3 bits select the
-/// PPU mode). Returns 2, 4 or 8 — matching the SNES per-mode mapping
-/// from <https://problemkaputt.de/fullsnes.htm> §"PPU Background
-/// Modes":
-///
-/// | Mode | BG1 | BG2 | BG3 | BG4 |
-/// |:----:|----:|----:|----:|----:|
-/// |  0   | 2   | 2   | 2   | 2   |
-/// |  1   | 4   | 4   | 2   | —   |
-/// |  2   | 4   | 4   | —   | —   |
-/// |  3   | 8   | 4   | —   | —   |
-/// |  4   | 8   | 2   | —   | —   |
-/// |  5   | 4   | 2   | —   | —   |
-/// |  6   | 4   | —   | —   | —   |
-/// |  7   | 8   | —   | —   | —   |
-///
-/// Modes 5/6 are high-res (512px); Mode 7 is affine. We render either
-/// the way Mode 1/2/3 would (planar tiles + tilemap) for now.
-#[cfg(test)]
-#[must_use]
-fn bg1_bpp(bgmode: u8) -> u8 {
-    match bgmode & 0x07 {
-        0 => 2,
-        1 | 2 | 5 | 6 => 4,
-        3 | 4 | 7 => 8,
-        _ => unreachable!(),
-    }
-}
-
 /// Same as [`render_bg1_scanline`] but with debug options.
 ///
 /// Honours `BGMODE` for BG1 bit-depth:
@@ -254,7 +225,7 @@ pub(crate) fn sprite_tile_byte_offset(obsel: u8, tile: u16) -> usize {
 /// and 7 — and **code 7's large size is `32×32` (not `32×64`)**, an
 /// easy-to-miss hardware quirk.
 #[must_use]
-pub fn sprite_size_pair(obsel: u8) -> ((u16, u16), (u16, u16)) {
+pub(crate) fn sprite_size_pair(obsel: u8) -> ((u16, u16), (u16, u16)) {
     match (obsel >> 5) & 0x07 {
         0 => ((8, 8), (16, 16)),
         1 => ((8, 8), (32, 32)),
@@ -375,14 +346,7 @@ fn render_sprites_scanline(ppu: &Ppu, y: u16, opts: RenderOptions) -> [Option<[u
 #[cfg(test)]
 #[must_use]
 fn render_frame_bg1(ppu: &Ppu) -> Vec<[u8; 3]> {
-    render_frame_bg1_with(ppu, RenderOptions::default())
-}
-
-/// Same as [`render_frame_bg1`] but with debug options.
-#[cfg(test)]
-#[must_use]
-fn render_frame_bg1_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
-    render_frame_with(ppu, opts)
+    render_frame_with(ppu, RenderOptions::default())
 }
 
 /// Render the full visible frame using the SNES per-pixel priority
@@ -393,7 +357,7 @@ fn render_frame_bg1_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
 ///
 /// The engine works by:
 ///   * tracking transparency vs backdrop explicitly through
-///     [`IndexedScanline`] (CGRAM index + priority bit, `None` =
+///     `IndexedScanline` (CGRAM index + priority bit, `None` =
 ///     transparent — not "backdrop colour");
 ///   * routing sprites BETWEEN BG layers based on their per-sprite
 ///     priority (0-3), not always on top;
@@ -403,7 +367,7 @@ fn render_frame_bg1_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
 ///   * routing BG3 to the top in Mode 1 when BGMODE bit 3 is set.
 ///
 /// All eight modes are wired: Mode 7 through the affine renderer
-/// ([`render_mode7_scanline_indexed`]), Modes 5/6 through the hi-res
+/// (`render_mode7_scanline_indexed`), Modes 5/6 through the hi-res
 /// sampler; `priority_table` picks each mode's own priority table.
 #[must_use]
 pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
@@ -432,7 +396,7 @@ pub fn render_frame_with(ppu: &Ppu, opts: RenderOptions) -> Vec<[u8; 3]> {
 ///
 /// If forced blank is active (and not bypassed), the slice is filled
 /// with `[0, 0, 0]` and the function returns immediately.
-pub fn render_scanline_into(ppu: &Ppu, y: u16, opts: RenderOptions, out: &mut [[u8; 3]]) {
+pub(crate) fn render_scanline_into(ppu: &Ppu, y: u16, opts: RenderOptions, out: &mut [[u8; 3]]) {
     render_scanline_partial_into(ppu, y, 0, FRAME_W as u16, opts, out);
 }
 
@@ -444,7 +408,7 @@ pub fn render_scanline_into(ppu: &Ppu, y: u16, opts: RenderOptions, out: &mut [[
 ///
 /// `start_x` and `end_x` are clamped to `[0, FRAME_W]`. If forced blank
 /// is active (and not bypassed), only the requested range is zeroed.
-pub fn render_scanline_partial_into(
+pub(crate) fn render_scanline_partial_into(
     ppu: &Ppu,
     y: u16,
     start_x: u16,
@@ -871,7 +835,11 @@ fn compute_window_masks(ppu: &Ppu) -> WindowMasks {
 /// Horizontal and vertical flips (`M7SEL` bits 6, 7) negate the
 /// screen-space coordinate before the matrix multiply.
 #[must_use]
-pub fn render_mode7_scanline_indexed(ppu: &Ppu, y: u16, opts: RenderOptions) -> IndexedScanline {
+pub(crate) fn render_mode7_scanline_indexed(
+    ppu: &Ppu,
+    y: u16,
+    opts: RenderOptions,
+) -> IndexedScanline {
     let mut out: IndexedScanline = [None; 256];
     if ppu.inidisp & 0x80 != 0 && !opts.bypass_forced_blank {
         return out;
@@ -1128,10 +1096,10 @@ fn color_math(main: (u8, u8, u8), sub: (u8, u8, u8), subtract: bool, half: bool)
 /// (0 or 1). For sprites it's the OBJ priority (0..=3 from the OAM
 /// attribute byte). `None` represents a transparent pixel — colour 0
 /// in any sub-palette / sprite palette.
-pub type IndexedPixel = Option<(u8, u8)>;
+pub(crate) type IndexedPixel = Option<(u8, u8)>;
 
 /// Indexed scanline buffer for one layer — 256 pixels.
-pub type IndexedScanline = [IndexedPixel; 256];
+pub(crate) type IndexedScanline = [IndexedPixel; 256];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LayerKind {
@@ -1553,7 +1521,7 @@ pub(crate) fn hires_interlace_src(ppu: &Ppu, y: u16, mosaic_size: u16) -> u16 {
 /// sub-palette) return `None` so the compositor can route them to
 /// a lower-priority layer instead of the backdrop.
 #[must_use]
-pub fn render_bg_scanline_indexed_with(
+pub(crate) fn render_bg_scanline_indexed_with(
     ppu: &Ppu,
     bg_idx: usize,
     y: u16,
@@ -1834,7 +1802,7 @@ pub(crate) fn sprite_line_overflow(ppu: &Ppu, y: u16) -> (bool, bool) {
 /// interleave sprites with BG layers per the mode's priority table
 /// instead of always painting them on top.
 #[must_use]
-pub fn render_sprites_scanline_indexed_with(
+pub(crate) fn render_sprites_scanline_indexed_with(
     ppu: &Ppu,
     y: u16,
     opts: RenderOptions,
@@ -1958,7 +1926,7 @@ pub fn render_frame_bg_with(ppu: &Ppu, bg_idx: usize, opts: RenderOptions) -> Ve
     buf
 }
 
-/// Bits-per-pixel for any BG in any mode (cf. `bg1_bpp`).
+/// Bits-per-pixel for any BG in any mode (0 = BG disabled in that mode).
 #[must_use]
 pub const fn bg_bpp(bgmode: u8, bg_idx: usize) -> u8 {
     let m = bgmode & 0x07;
@@ -1981,7 +1949,12 @@ pub const fn bg_bpp(bgmode: u8, bg_idx: usize) -> u8 {
 
 /// Render one scanline for the requested BG layer.
 #[must_use]
-pub fn render_bg_scanline_with(ppu: &Ppu, bg_idx: usize, y: u16, opts: RenderOptions) -> Scanline {
+pub(crate) fn render_bg_scanline_with(
+    ppu: &Ppu,
+    bg_idx: usize,
+    y: u16,
+    opts: RenderOptions,
+) -> Scanline {
     let mut out = [[0u8; 3]; 256];
     if ppu.inidisp & 0x80 != 0 && !opts.bypass_forced_blank {
         return out;
@@ -2536,16 +2509,16 @@ mod tests {
 
     #[test]
     fn bg1_bpp_table_matches_snes_modes() {
-        assert_eq!(bg1_bpp(0), 2);
-        assert_eq!(bg1_bpp(1), 4);
-        assert_eq!(bg1_bpp(2), 4);
-        assert_eq!(bg1_bpp(3), 8);
-        assert_eq!(bg1_bpp(4), 8);
-        assert_eq!(bg1_bpp(5), 4);
-        assert_eq!(bg1_bpp(6), 4);
-        assert_eq!(bg1_bpp(7), 8);
+        assert_eq!(bg_bpp(0, 0), 2);
+        assert_eq!(bg_bpp(1, 0), 4);
+        assert_eq!(bg_bpp(2, 0), 4);
+        assert_eq!(bg_bpp(3, 0), 8);
+        assert_eq!(bg_bpp(4, 0), 8);
+        assert_eq!(bg_bpp(5, 0), 4);
+        assert_eq!(bg_bpp(6, 0), 4);
+        assert_eq!(bg_bpp(7, 0), 8);
         // Mode 1 with high bit set (BG3 priority) still mode 1 = 4bpp.
-        assert_eq!(bg1_bpp(0x09), 4);
+        assert_eq!(bg_bpp(0x09, 0), 4);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! The [`Bus`] and [`BusDevice`] traits.
+//! The [`Bus`] trait.
 
 use crate::types::{Addr24, MCycles};
 
@@ -95,17 +95,4 @@ pub trait Bus {
     /// taken branch and `BRL`, with the new PC. A no-op for the S-CPU; the
     /// SA-1 pays its jump penalty when the target is odd.
     fn idle_branch(&mut self, _pc: Addr24) {}
-}
-
-/// A component that responds to a memory-mapped region (PPU, DMA, APU
-/// ports, etc.).
-///
-/// Unlike [`Bus`], a `BusDevice` does not pay its own access cost — that's
-/// the parent bus's job. It just reads / writes its own state.
-pub trait BusDevice {
-    /// Read one byte from the device.
-    fn read(&mut self, addr: Addr24) -> u8;
-
-    /// Write one byte to the device.
-    fn write(&mut self, addr: Addr24, value: u8);
 }

@@ -634,21 +634,6 @@ macro_rules! ppu_test {
             );
         }
     };
-    // A scene luna renders wrong (tracked PPU gap). `#[ignore]`d, with the
-    // committed hash characterising the current (wrong) output — once the
-    // gap is fixed the render changes, the `--ignored` run goes red.
-    ($fn:ident, $path:literal, $hash:literal, ignore = $reason:literal) => {
-        #[test]
-        #[ignore = $reason]
-        fn $fn() {
-            test_display(
-                concat!("PPU/", $path),
-                $hash,
-                0,
-                luna_cartridge::Region::Pal,
-            );
-        }
-    };
 }
 
 // Curated PPU scenes (the twvd/siena selection): BG maps, hi-colour
@@ -1186,15 +1171,6 @@ macro_rules! spc_test {
         #[ignore = $reason]
         fn $fn() {
             test_audio(concat!("SPC700/", $path), $hash, 0);
-        }
-    };
-    // Ignored, but keeps its input `hold` mask for when the WAV is auditioned
-    // and the hash regenerated.
-    ($fn:ident, $path:literal, $hash:literal, hold = $mask:expr, ignore = $reason:literal) => {
-        #[test]
-        #[ignore = $reason]
-        fn $fn() {
-            test_audio(concat!("SPC700/", $path), $hash, $mask);
         }
     };
 }

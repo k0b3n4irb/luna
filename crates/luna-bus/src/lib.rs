@@ -9,7 +9,7 @@
 //! - [`mod@types`]: time / address aliases (`MCycles`, address helpers).
 //! - [`mod@speed`]: SNES memory access speed lookup
 //!   (`FAST` / `SLOW` / `XSLOW`).
-//! - [`mod@bus`]: [`Bus`] and [`BusDevice`] traits.
+//! - [`mod@bus`]: the [`Bus`] trait.
 //! - [`mod@mapper`]: [`Mapper`] trait for cartridge mappings.
 //! - [`mod@lorom`]: [`lorom::LoRomMapper`] — Mode 20 cartridge mapping.
 //! - [`mod@hirom`]: [`hirom::HiRomMapper`] — Mode 21 `HiROM` and Mode 25
@@ -42,7 +42,7 @@ pub mod types;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
 
-pub use bus::{Bus, BusDevice, InterruptSample};
+pub use bus::{Bus, InterruptSample};
 pub use mapper::{
     Dsp1Snapshot, Dsp1TraceEvent, Dsp1TraceKind, Mapper, MapperKind, MapperStateError, NullMapper,
     STATE_DECODE_CONFIG, STATE_DECODE_LIMIT, Sa1SideEvent, Sa1Snapshot, Sa1Stats, Sa1TraceEvent,

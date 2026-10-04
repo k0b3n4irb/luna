@@ -18,15 +18,6 @@ pub type Addr24 = u32;
 /// Master-clock frequency (NTSC), Hz.
 pub const NTSC_MASTER_HZ: u64 = 21_477_272;
 
-/// Master-clock frequency (PAL), Hz.
-pub const PAL_MASTER_HZ: u64 = 21_281_370;
-
-/// Number of master cycles per NTSC frame (262 scanlines × 1364 dots).
-pub const MCYCLES_PER_NTSC_FRAME: MCycles = 262 * 1364;
-
-/// Number of master cycles per PAL frame (312 scanlines × 1364 dots).
-pub const MCYCLES_PER_PAL_FRAME: MCycles = 312 * 1364;
-
 /// Extract the 8-bit bank component of a 24-bit address.
 #[inline]
 #[must_use]
@@ -117,15 +108,5 @@ mod tests {
         assert_eq!(rom_mirror(0x1F_FFFF, 0x18_0000), 0x17_FFFF);
         // Non-pow2 6 MB ExHiROM: end mirrors the trailing 2 MB.
         assert_eq!(rom_mirror(0x60_0000, 0x60_0000), 0x40_0000);
-    }
-
-    #[test]
-    fn ntsc_frame_cycles_match_spec() {
-        // 262 × 1364 = 357 368 mclk per frame at the steady-state
-        // (non-interlaced) NTSC clock. Real hardware drops one cycle on
-        // odd frames when the PPU is in non-interlace; we keep the
-        // ideal value here and let the scheduler/PPU model the dropped
-        // cycle.
-        assert_eq!(MCYCLES_PER_NTSC_FRAME, 357_368);
     }
 }

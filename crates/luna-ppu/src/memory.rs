@@ -134,11 +134,13 @@ impl Vram {
 
     /// Write the low byte (`$2118`) at the current address. Increments
     /// the address if VMAIN says "increment on low".
+    #[cfg(test)]
     pub fn write_lo(&mut self, value: u8) {
         self.write_lo_gated(value, true);
     }
 
     /// Write the high byte (`$2119`) at the current address + 1.
+    #[cfg(test)]
     pub fn write_hi(&mut self, value: u8) {
         self.write_hi_gated(value, true);
     }
@@ -170,6 +172,7 @@ impl Vram {
 
     /// Read the low byte (`$2139`). Returns the buffered byte first,
     /// then refills the buffer.
+    #[cfg(test)]
     pub fn read_lo(&mut self) -> u8 {
         self.read_lo_gated(true)
     }
@@ -186,6 +189,7 @@ impl Vram {
     }
 
     /// Read the high byte (`$213A`).
+    #[cfg(test)]
     pub fn read_hi(&mut self) -> u8 {
         self.read_hi_gated(true)
     }
@@ -351,17 +355,20 @@ impl Cgram {
         self.high_pending = false;
     }
 
-    /// `$2122` write — first call latches the low byte, second call
-    /// stores both bytes and advances the address. CGRAM is *never*
-    /// gated by active display (unlike VRAM/OAM): a write mid-frame
-    /// always commits (ares `io.cpp:55-60`).
+    /// [`Self::write_at`] with no redirect (test helper).
+    #[cfg(test)]
     pub fn write(&mut self, value: u8) {
         self.write_at(value, None);
     }
 
-    /// [`Self::write`] with the picture-time redirect (ares `writeCGRAM`,
-    /// `io.cpp:55-61`): with `target` set, the word lands there — the
-    /// entry the PPU is fetching — while CGADD still advances.
+    /// `$2122` write — first call latches the low byte, second call
+    /// stores both bytes and advances the address. CGRAM is *never*
+    /// gated by active display (unlike VRAM/OAM): a write mid-frame
+    /// always commits (ares `io.cpp:55-60`).
+    ///
+    /// The picture-time redirect (ares `writeCGRAM`, `io.cpp:55-61`):
+    /// with `target` set, the word lands there — the entry the PPU is
+    /// fetching — while CGADD still advances.
     pub fn write_at(&mut self, value: u8, target: Option<u8>) {
         if self.high_pending {
             let off = usize::from(target.unwrap_or(self.address)) << 1;
@@ -381,7 +388,7 @@ impl Cgram {
         self.high_pending = pending;
     }
 
-    /// Whether the next [`Self::read`] will return the HIGH byte of the
+    /// Whether the next [`Self::read_at`] will return the HIGH byte of the
     /// current word (the PPU read path needs this to apply the partial
     /// PPU2-MDR update — the high read only drives bits 0-6).
     #[must_use]
@@ -391,12 +398,9 @@ impl Cgram {
 
     /// `$213B` read — returns the byte at the current word address,
     /// alternating low/high and advancing on the high read.
-    pub fn read(&mut self) -> u8 {
-        self.read_at(None)
-    }
-
-    /// [`Self::read`] with the picture-time redirect (ares `readCGRAM`,
-    /// `io.cpp:47-53`): with `target` set, the byte comes from there.
+    ///
+    /// The picture-time redirect (ares `readCGRAM`, `io.cpp:47-53`):
+    /// with `target` set, the byte comes from there.
     pub fn read_at(&mut self, target: Option<u8>) -> u8 {
         let off = usize::from(target.unwrap_or(self.address)) << 1;
         if self.high_pending {

@@ -51,8 +51,7 @@
 //!   `take_wdm_log` → the SDK assert/log channels ($21FC Nocash TTY
 //!   text + WDM assert hits).
 //!
-//! Transport is stdio by default ([`serve_stdio`]); a future commit
-//! will add HTTP-SSE for browser clients.
+//! Transport is stdio ([`serve_stdio_with`]), the only one implemented.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -3728,17 +3727,11 @@ fn outcome_to_result(out: &luna_api::RunOutcome) -> RunUntilBreakResult {
     }
 }
 
-/// Run the Luna MCP server on stdio until the client disconnects.
-///
-/// Intended entry point for the `luna mcp serve` CLI subcommand and
-/// for `claude_desktop_config.json`-style spawns. Blocks until the
-/// MCP client closes the stream or sends a shutdown.
-pub async fn serve_stdio() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    serve_stdio_with(Emulator::new()).await
-}
-
-/// Like [`serve_stdio`], but serving an existing (typically preloaded)
-/// `Emulator` — the `luna mcp --rom <path>` entry point.
+/// Run the Luna MCP server on stdio around `emulator` until the client
+/// disconnects — the `luna mcp` entry point (the CLI hands over a fresh
+/// `Emulator`, or one preloaded by `--rom <path>`), also used by
+/// `claude_desktop_config.json`-style spawns. Blocks until the MCP client
+/// closes the stream or sends a shutdown.
 pub async fn serve_stdio_with(
     emulator: Emulator,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

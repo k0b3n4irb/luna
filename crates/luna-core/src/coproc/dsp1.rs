@@ -15,20 +15,21 @@ use luna_bus::hirom::HiRomMapper;
 use luna_bus::lorom::LoRomMapper;
 use luna_bus::mapper::{Mapper, MapperKind, MapperStateError, decode_state};
 use luna_bus::types::{Addr24, NTSC_MASTER_HZ, bank_of, offset_of};
+use luna_cartridge::DSP1_FIRMWARE_LEN;
 use luna_cpu_upd96050::{Revision, Upd96050};
 
 /// DSP-1 oscillator (ares `loaduPD7725` default).
 const DSP1_HZ: u64 = 7_600_000;
 
 /// Combined `dsp1b.rom` firmware: program `0x1800` (2048 × 3-byte LE words)
-/// followed by data `0x800` (1024 × 2-byte LE words).
+/// followed by data `0x800` (1024 × 2-byte LE words) — together
+/// [`DSP1_FIRMWARE_LEN`] bytes.
 const PROGRAM_BYTES: usize = 0x1800;
-const FIRMWARE_BYTES: usize = 0x2000;
 
 /// Parse a combined `dsp1b.rom` (little-endian) into the core's program +
 /// data ROM. Returns `false` if the blob is too small.
 fn load_firmware(dsp: &mut Upd96050, fw: &[u8]) -> bool {
-    if fw.len() < FIRMWARE_BYTES {
+    if fw.len() < DSP1_FIRMWARE_LEN {
         return false;
     }
     let program: Vec<u32> = (0..2048)
@@ -251,7 +252,7 @@ impl Mapper for Dsp1Mapper {
 
 #[cfg(test)]
 mod tests {
-    use super::{Dsp1Mapper, Dsp1State, FIRMWARE_BYTES};
+    use super::{DSP1_FIRMWARE_LEN, Dsp1Mapper, Dsp1State};
     use luna_bus::mapper::{Mapper, MapperKind, decode_state};
     use luna_bus::types::{NTSC_MASTER_HZ, make_addr};
 
@@ -266,7 +267,7 @@ mod tests {
     /// the uPD7725 core, which has its own byte-exact DR differential
     /// against Mesen2 (`tests/dsp1_port_differential.rs`).
     fn firmware() -> Vec<u8> {
-        vec![0u8; FIRMWARE_BYTES]
+        vec![0u8; DSP1_FIRMWARE_LEN]
     }
 
     /// Super Mario Kart keeps its records in the base board's SRAM: the

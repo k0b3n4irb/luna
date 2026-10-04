@@ -23,18 +23,18 @@
 //!   in address annotation — a constant is not a location).
 //! - Two **address spaces**: the 24-bit CPU bus and the SPC700's 16-bit
 //!   ARAM ([`SymbolSpace`]). A wla-spc700 driver's `.sym` loads into the
-//!   ARAM space ([`SymbolTable::parse_spc`]) so `disassemble_spc` can
+//!   ARAM space (`SymbolTable::parse_spc`) so `disassemble_spc` can
 //!   annotate without a `$00`-bank CPU label ever claiming an ARAM
 //!   address. Loading one space never clobbers the other
-//!   ([`SymbolTable::replace_space`]).
+//!   (`SymbolTable::replace_space`).
 //! - Name lookups are binary searches (O(log n)); parsing dedups via a
 //!   sort instead of the old per-line scan (O(n log n) total).
 //!
 //! The table answers both directions per space:
 //! - name → address/value ([`SymbolTable::resolve`],
-//!   [`SymbolTable::resolve_spc`])
+//!   `SymbolTable::resolve_spc`)
 //! - address → nearest label at or below, same bank, as `name` or
-//!   `name+0xNN` ([`SymbolTable::nearest`], [`SymbolTable::nearest_spc`])
+//!   `name+0xNN` ([`SymbolTable::nearest`], `SymbolTable::nearest_spc`)
 
 use std::path::Path;
 
@@ -94,7 +94,7 @@ impl SymbolTable {
     /// emits is meaningless on the SPC700 bus). `[definitions]`
     /// constants parse the same as in [`Self::parse`].
     #[must_use]
-    pub fn parse_spc(text: &str) -> Self {
+    pub(crate) fn parse_spc(text: &str) -> Self {
         Self::parse_into_space(text, SymbolSpace::Aram)
     }
 
@@ -233,7 +233,7 @@ impl SymbolTable {
     }
 
     /// Load and parse an SPC700 `.sym` file from disk into the ARAM space.
-    pub fn load_spc(path: &Path) -> std::io::Result<Self> {
+    pub(crate) fn load_spc(path: &Path) -> std::io::Result<Self> {
         Ok(Self::parse_spc(&std::fs::read_to_string(path)?))
     }
 
@@ -241,7 +241,7 @@ impl SymbolTable {
     /// constants that arrived with that load) with `other`'s, keeping
     /// the other space intact — so loading a driver's SPC symbols never
     /// clobbers the game's CPU symbols, and vice versa.
-    pub fn replace_space(&mut self, space: SymbolSpace, other: Self) {
+    pub(crate) fn replace_space(&mut self, space: SymbolSpace, other: Self) {
         let mut entries: Vec<Entry> = std::mem::take(&mut self.entries)
             .into_iter()
             .filter(|e| e.space != space)
@@ -287,7 +287,7 @@ impl SymbolTable {
 
     /// Resolve an ARAM-space label to its 16-bit offset. O(log n).
     #[must_use]
-    pub fn resolve_spc(&self, name: &str) -> Option<u16> {
+    pub(crate) fn resolve_spc(&self, name: &str) -> Option<u16> {
         self.find_in_space(name, SymbolSpace::Aram)
             .filter(|e| e.kind == SymbolKind::Label)
             .map(|e| e.value as u16)
@@ -315,7 +315,7 @@ impl SymbolTable {
     /// address)` — the un-annotated form [`Self::nearest`] renders, for
     /// folding many addresses onto one symbol (issue #227).
     #[must_use]
-    pub fn nearest_label(&self, addr: u32) -> Option<(&str, u32)> {
+    pub(crate) fn nearest_label(&self, addr: u32) -> Option<(&str, u32)> {
         let addr = addr & 0x00FF_FFFF;
         let idx = self.cpu_by_addr.partition_point(|&(a, _)| a <= addr);
         let &(label_addr, name_idx) = self.cpu_by_addr.get(idx.checked_sub(1)?)?;
@@ -328,7 +328,7 @@ impl SymbolTable {
     /// Nearest ARAM label at or below `addr`, rendered like
     /// [`Self::nearest`] (no bank guard — ARAM is one flat 64 KB).
     #[must_use]
-    pub fn nearest_spc(&self, addr: u16) -> Option<String> {
+    pub(crate) fn nearest_spc(&self, addr: u16) -> Option<String> {
         let idx = self.aram_by_addr.partition_point(|&(a, _)| a <= addr);
         let &(label_addr, name_idx) = self.aram_by_addr.get(idx.checked_sub(1)?)?;
         Some(Self::annotate(
