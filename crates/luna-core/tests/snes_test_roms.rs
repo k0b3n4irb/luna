@@ -31,6 +31,9 @@
 //! LUNA_SNES_TEST_RECORD=1 LUNA_SNES_TEST_PNG=/tmp/snestests \
 //!   cargo test -p luna-core --test snes_test_roms -- --nocapture
 //! ```
+//!
+//! Only the value `1` records, and recording with a `*_REQUIRE` variable
+//! set is refused (see `record_mode`).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -119,6 +122,25 @@ fn skip(require_var: &str, why: &str) {
         "{why} — and {require_var} is set, so a skip is a failure"
     );
     eprintln!("[skip] {why}");
+}
+
+/// `LUNA_SNES_TEST_RECORD=1`: print the freshly computed hash and return
+/// without asserting. Only the value `1` enables it — a stray
+/// `LUNA_SNES_TEST_RECORD=0` (or an empty one) must not switch every golden
+/// off. Recording while a `*_REQUIRE` gate is set is a contradiction (the
+/// gate would pass having asserted nothing), so that combination panics.
+fn record_mode() -> bool {
+    if std::env::var("LUNA_SNES_TEST_RECORD").as_deref() != Ok("1") {
+        return false;
+    }
+    for gate in [CORPUS_REQUIRE, GAMES_REQUIRE] {
+        assert!(
+            std::env::var_os(gate).is_none(),
+            "LUNA_SNES_TEST_RECORD=1 skips every assertion, and {gate} is set: \
+             a gate run cannot record. Unset one of them."
+        );
+    }
+    true
 }
 
 /// Corpus root: `$LUNA_SNES_TEST_DIR`, else the sibling `../luna_tests`.
@@ -339,7 +361,7 @@ fn test_display(rel: &str, expected: &str, hold: u16, region: luna_cartridge::Re
     let bytes = run_to_stable(rom, hold, region);
     let got = hex(&Sha256::digest(&bytes));
 
-    if std::env::var("LUNA_SNES_TEST_RECORD").is_ok() {
+    if record_mode() {
         if let Ok(dir) = std::env::var("LUNA_SNES_TEST_PNG") {
             let safe = rel.replace(['/', ' '], "_");
             dump_png(&bytes, &Path::new(&dir).join(format!("{safe}.png")));
@@ -406,7 +428,7 @@ fn ppu_interlace_font_native_512x448() {
         bytes.extend_from_slice(px);
     }
     let got = hex(&Sha256::digest(&bytes));
-    if std::env::var("LUNA_SNES_TEST_RECORD").is_ok() {
+    if record_mode() {
         println!("RECORD native InterlaceFont => {got}");
         return;
     }
@@ -535,14 +557,31 @@ cpu_test!(
     "1aa58b7e0202d88c4fb40298b160ffd080f5acb323c058f1cd687658b2f09716"
 );
 
+/// Outcome of one Peter Lemon `CPUTest/SPC700/<NAME>` run.
+struct Spc700Run {
+    /// Last value read from CPUIO0 (`$2140`).
+    port0: u8,
+    /// The emulator panicked before the ROM reached a verdict.
+    panicked: bool,
+    /// S-CPU instructions executed.
+    executed: u64,
+}
+
 /// Peter Lemon `CPUTest/SPC700/<NAME>` ALU hardware test — checked by its
 /// **memory-result protocol**, not a framebuffer hash (the result display
 /// cycles per addressing mode, so a hash settles on a non-deterministic
-/// transient). Per the ROM's `.asm`, on the first divergent opcode the SPC700
-/// writes `$81` to CPUIO0 (`$2140`) and HALTS in a fail loop; on success it
-/// runs every mode to completion. Objective pass = the SPC→CPU mailbox port 0
-/// is never `$81`. Complements the cycle-stepped 65c816/SPC700 differential.
-fn run_spc700_fail_port(rom: Vec<u8>) -> u8 {
+/// transient). Per the ROM's `SPC700<NAME>_spc.asm`, the SPC700 program runs
+/// its sub-tests in order and reports each on CPUIO0 (`$2140`):
+///
+/// - sub-test `k` passed → it writes `k` (`$01`, `$02`, …) and goes on;
+/// - sub-test `k` failed → it writes `$80 | k` and halts in a `bra` loop.
+///
+/// So the run is over when CPUIO0 shows either a fail code or `tests` (the
+/// last sub-test's pass value), and the only passing outcome is the latter.
+/// The mailbox is ignored until the SPC700 has left the IPL ROM and reported
+/// sub-test 1: before that it carries the boot protocol (`$AA`, then the
+/// upload's echoes), whose values mean nothing here.
+fn run_spc700_mailbox(rom: Vec<u8>, tests: u8) -> Spc700Run {
     let mut cart = Cartridge::from_bytes_forced(rom, MapperKind::LoRom).expect("forced LoROM load");
     cart.header.region = luna_cartridge::Region::Pal;
     let mut snes = Snes::from_cartridge(cart);
@@ -551,24 +590,39 @@ fn run_spc700_fail_port(rom: Vec<u8>) -> u8 {
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let mut executed = 0u64;
+    let mut panicked = false;
+    let mut started = false;
     'run: while executed < SPC700_STEP_CAP {
         for _ in 0..SPC_POLL_EVERY {
             if catch_unwind(AssertUnwindSafe(|| snes.step())).is_err() {
+                panicked = true;
                 break 'run;
             }
             executed += 1;
         }
-        // The fail path halts immediately with $81 in CPUIO0 — bail early.
-        if snes.apu_real.cpu_read_port(0) == 0x81 {
+        if !snes.apu_real.past_iplrom {
+            continue;
+        }
+        let port0 = snes.apu_real.cpu_read_port(0);
+        started |= port0 & 0x7F == 1;
+        let failed = port0 & 0x80 != 0 && (1..=tests).contains(&(port0 & 0x7F));
+        if started && (failed || port0 == tests) {
             break;
         }
     }
     std::panic::set_hook(prev_hook);
-    snes.apu_real.cpu_read_port(0)
+    Spc700Run {
+        port0: snes.apu_real.cpu_read_port(0),
+        panicked,
+        executed,
+    }
 }
 
+/// `$tests` is the number of sub-tests in the ROM, i.e. the pass value of the
+/// last one (the highest `str REG_CPUIO0=#$xx` below `$80` in its
+/// `SPC700<NAME>_spc.asm`).
 macro_rules! spc700_test {
-    ($fn:ident, $name:literal) => {
+    ($fn:ident, $name:literal, $tests:literal) => {
         #[test]
         fn $fn() {
             let rel = concat!("CPUTest/SPC700/", $name, "/SPC700", $name, ".sfc");
@@ -588,23 +642,38 @@ macro_rules! spc700_test {
                 return;
             }
             let rom = std::fs::read(&path).expect("read rom");
-            let port0 = run_spc700_fail_port(rom);
-            assert_ne!(
-                port0, 0x81,
-                "SPC700 {} test FAILED on hardware-result protocol: CPUIO0/$2140 = $81 (fail halt)",
-                $name
+            let run = run_spc700_mailbox(rom, $tests);
+            assert!(
+                !run.panicked,
+                "SPC700 {}: the emulator panicked after {} instructions (CPUIO0 = ${:02X})",
+                $name, run.executed, run.port0
+            );
+            assert!(
+                run.port0 & 0x80 == 0,
+                "SPC700 {}: sub-test {} of {} FAILED on the hardware-result protocol \
+                 (CPUIO0/$2140 = ${:02X}, the SPC700 halted in its fail loop)",
+                $name,
+                run.port0 & 0x7F,
+                $tests,
+                run.port0
+            );
+            assert_eq!(
+                run.port0, $tests,
+                "SPC700 {}: did not run to completion — CPUIO0/$2140 = ${:02X} after {} \
+                 instructions (cap {}), the last sub-test reports ${:02X}",
+                $name, run.port0, run.executed, SPC700_STEP_CAP, $tests
             );
         }
     };
 }
 
-spc700_test!(spc700_adc, "ADC");
-spc700_test!(spc700_and, "AND");
-spc700_test!(spc700_dec, "DEC");
-spc700_test!(spc700_eor, "EOR");
-spc700_test!(spc700_inc, "INC");
-spc700_test!(spc700_ora, "ORA");
-spc700_test!(spc700_sbc, "SBC");
+spc700_test!(spc700_adc, "ADC", 26);
+spc700_test!(spc700_and, "AND", 28);
+spc700_test!(spc700_dec, "DEC", 14);
+spc700_test!(spc700_eor, "EOR", 26);
+spc700_test!(spc700_inc, "INC", 14);
+spc700_test!(spc700_ora, "ORA", 28);
+spc700_test!(spc700_sbc, "SBC", 26);
 
 /// Declare a Peter Lemon `PPU/<path>` golden test. The PPU suite has an
 /// irregular directory layout, so the full relative path is given.
@@ -625,6 +694,20 @@ macro_rules! ppu_test {
     // is held).
     ($fn:ident, $path:literal, $hash:literal, hold = $mask:expr) => {
         #[test]
+        fn $fn() {
+            test_display(
+                concat!("PPU/", $path),
+                $hash,
+                $mask,
+                luna_cartridge::Region::Pal,
+            );
+        }
+    };
+    // A golden that is recorded but not blessed yet: it runs only with
+    // `--ignored`, and fails there if the render moves.
+    ($fn:ident, $path:literal, $hash:literal, hold = $mask:expr, ignore = $reason:literal) => {
+        #[test]
+        #[ignore = $reason]
         fn $fn() {
             test_display(
                 concat!("PPU/", $path),
@@ -772,15 +855,35 @@ ppu_test!(
     "9424df0b5273fd06c961a6c57ff64b81949f0f39fff5d947917761f6bab93b8b",
     hold = PAD_R
 );
-// Mode 5 hi-res + INTERLACE (SETINI bit 0): the Moogle figure. Interlace
-// renders the full 448-line image collapsed to 224 by averaging both fields
-// (logical lines y*2 and y*2+1, ares background.cpp:40 + Phase C blend) —
-// previously sampled as progressive, showing only the top 224 rows stretched
-// 2x (a zoomed-in head). Validated against the ROM's 512x448 reference.
+// MosaicMode5: Mode 5 hi-res + interlace, the Moogle figure, with a mosaic
+// whose size only grows while R is held (`MosaicMode5.asm`: `$2106` starts at
+// `%00000001`, size 0, and gains `$10` every 8 frames of R). Until 2026-10-04
+// this test held nothing, so it rendered the un-mosaicked picture — the very
+// frame of `ppu_interlace_moogle`, same hash — and Mode 5 mosaic had no
+// coverage at all. It now holds R like `ppu_mosaic_mode3`; the ramp never
+// settles, so the capture is the frame-cap one (`$2106` = `$31`, 4-pixel
+// blocks).
+//
+// The hash below is a CANDIDATE, recorded 2026-10-04 and not blessed. At the
+// demo's largest size (`$F1`) luna's native 512x448 frame does not match the
+// corpus' `MosaicMode5.png`:
+//   - block size: luna 32x32 native pixels, the PNG 16x32. A Mesen2 frame of
+//     the same demo has luna's proportions (28x28 one step earlier), and so
+//     does ares' code (the counter runs once per dot), so the PNG looks like
+//     the outlier here;
+//   - inside a block: in luna the two hi-res half-pixels of a dot differ
+//     (vertical stripes, 2560 differing column pairs); in Mesen2's frame no
+//     pair differs, and ares gives both half-pixels the block's pixel
+//     (`background.cpp`, the `mosaic.pixel` latch); the PNG's two FIELDS
+//     differ instead (horizontal stripes).
+// The second point is an open emulation question. Until it is settled the
+// test stays ignored — an un-validated picture must not become a baseline.
 ppu_test!(
     ppu_mosaic_mode5,
     "Mosaic/Mode5/MosaicMode5.sfc",
-    "fdec5062bbc5532825b7a34011970cbed12ddc70ca6106096f668bd54e0cc14d"
+    "128044931d9733d3f7ed8928ae2d56a305aaf6d8206f414157e5a41266debb96",
+    hold = PAD_R,
+    ignore = "pending maintainer validation of the Mode 5 mosaic golden (2026-10-04)"
 );
 
 // -----------------------------------------------------------------------
@@ -1117,7 +1220,7 @@ fn test_audio(rel: &str, expected: &str, hold: u16) {
     let got = hex(&Sha256::digest(audio_bytes(&samples)));
     let nonsilent = samples.iter().filter(|(l, r)| *l != 0 || *r != 0).count();
 
-    if std::env::var("LUNA_SNES_TEST_RECORD").is_ok() {
+    if record_mode() {
         if let Ok(dir) = std::env::var("LUNA_SNES_TEST_PNG") {
             let safe = rel.replace(['/', ' '], "_");
             write_wav(&Path::new(&dir).join(format!("{safe}.wav")), &samples);
@@ -1270,7 +1373,7 @@ macro_rules! game_test {
             let rom = std::fs::read(&path).expect("read rom");
             let bytes = run_game_to_frame(rom, $frames);
             let got = hex(&Sha256::digest(&bytes));
-            if std::env::var("LUNA_SNES_TEST_RECORD").is_ok() {
+            if record_mode() {
                 if let Ok(dir) = std::env::var("LUNA_SNES_TEST_PNG") {
                     dump_png(&bytes, &Path::new(&dir).join(concat!(stringify!($fn), ".png")));
                 }

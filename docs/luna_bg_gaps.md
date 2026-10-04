@@ -210,3 +210,15 @@ tail (#5-#9, #11, #13-#18) are done.
 > **not** hold R — it has the same hash as `ppu_interlace_moogle` — so it
 > covers Mode 5 hi-res + interlace but not the mosaic itself: hi-res
 > mosaic (#11) has a unit-level guard only, no golden.
+>
+> **⚠️ Open — Mode 5 mosaic, half-pixels inside a block (found the same
+> day, not yet checked line by line against ares).** The test now holds R
+> and carries a candidate hash, but stays `#[ignore]`d: at the largest
+> mosaic size luna's native 512-wide frame shows **vertical stripes inside
+> some blocks** — the two hi-res half-pixels of a dot differ — where a
+> Mesen2 frame of the same scene has solid blocks, and ares gives both
+> half-pixels the block's latched pixel (`background.cpp`, the
+> `mosaic.pixel` latch). The reference PNG shipped with the corpus shows a
+> third shape (16×32 blocks, horizontal field stripes) and is not a
+> usable oracle here. Row #11 is therefore **not** closed for Mode 5/6:
+> port the latch from ares before blessing the golden.

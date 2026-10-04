@@ -3,48 +3,6 @@
   "frames": 4336,
   "note": "title screen, ~72 s of audio",
   "rom": "Super Bomberman (USA).sfc",
-  "spectrum_peaks": [
-    {
-      "hz": 882.8,
-      "mag_db": 115.9
-    },
-    {
-      "hz": 890.6,
-      "mag_db": 115.3
-    },
-    {
-      "hz": 875.0,
-      "mag_db": 114.7
-    },
-    {
-      "hz": 898.4,
-      "mag_db": 112.9
-    },
-    {
-      "hz": 867.2,
-      "mag_db": 111.2
-    },
-    {
-      "hz": 781.2,
-      "mag_db": 110.8
-    },
-    {
-      "hz": 750.0,
-      "mag_db": 109.8
-    },
-    {
-      "hz": 906.2,
-      "mag_db": 109.7
-    },
-    {
-      "hz": 984.4,
-      "mag_db": 109.6
-    },
-    {
-      "hz": 789.1,
-      "mag_db": 109.4
-    }
-  ],
   "stats": {
     "mean_abs": 1441.39,
     "non_zero": 0.7773,

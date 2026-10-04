@@ -27,13 +27,25 @@ LUNA_TOM_HARTE_REQUIRE=1 cargo test -p luna-cpu-65c816 --test tom_harte -- --ign
 LUNA_TOM_HARTE_REQUIRE=1 cargo test -p luna-cpu-spc700 --test tom_harte -- --ignored
 ```
 
-`LUNA_TOM_HARTE_REQUIRE=1` turns any state mismatch into a hard failure
-(otherwise the test just prints a report). Current state: **both pass
-100%** (65C816 5,080,000/5,080,000; SPC700 256,000/256,000). CI runs them
-in the `tom-harte` workflow (`.github/workflows/tom-harte.yml`), not in the
-main `ci.yml`. The datasets are gitignored. The 65C816 harness also counts
-cycles; that comparison only fails the run when `LUNA_TOM_HARTE_CYCLES` is
-set as well (§4).
+`LUNA_TOM_HARTE_REQUIRE=1` turns the run into a gate (otherwise the test
+just prints a report). It then fails on a state mismatch, on a cycle
+mismatch, on a core that panics, and on a dataset that is missing, empty or
+shorter than the counts below — a run that compared nothing is not a pass.
+CI runs both in the `tom-harte` workflow
+(`.github/workflows/tom-harte.yml`), not in the main `ci.yml`. The datasets
+are gitignored.
+
+Measured 2026-10-04 on the full datasets:
+
+| Core | State | Cycles |
+|---|---|---|
+| 65C816 | 5,080,000 / 5,080,000 (508 files × 10,000; the 4 MVN/MVP files are not run) | count: 5,040,000 / 5,040,000 (WAI, STP excluded). Per-cycle bus trace: 4,740,000 / 5,040,000 — the rest is exactly the 30 files of `TRACE_RESIDUAL` in the harness (emulation-mode read-modify-write opcodes and `WDM`), every case of each. The gate fails on a divergence outside that list **and** on a listed file that stops diverging. |
+| SPC700, production core (`step_cycle`) | 256,000 / 256,000 | per-cycle bus trace: 254,000 / 254,000 (SLEEP, STOP excluded) |
+| SPC700, atomic core (`step`) | 256,000 / 256,000 | 254,000 / 254,000 |
+
+The SPC700 harness runs every case on both cores: the cycle-stepped one
+that `luna-apu` drives, and the atomic interpreter kept as the equivalence
+oracle.
 
 ## 2. Peter Lemon SNES — full-system golden display tests
 
@@ -89,19 +101,23 @@ trusting a number written here.
   `Perspective`, `StarWars`), `Rings`, `GreenSpace`, the `Interlace/*`
   family (Mode 5 hi-res + interlace) and `Mosaic` (Mode 3 / Mode 5).
   `MosaicMode3` holds **R** so the demo ramps the `$2106` mosaic size.
-  `MosaicMode5` is run **without** input, so today it covers Mode 5 hi-res
-  + interlace but not the mosaic itself (its hash equals
-  `ppu_interlace_moogle`'s) — a known hole, recorded by the 2026-10-04
-  audit.
+  `MosaicMode5` holds **R** too since 2026-10-04 (it used to hold nothing
+  and so rendered `ppu_interlace_moogle`'s frame, same hash), but its
+  golden is a candidate and the test is `#[ignore]`d: at the largest
+  mosaic size luna's frame does not match the corpus' `MosaicMode5.png`
+  (see the comment on the test). Mode 5 mosaic therefore still has **no
+  blessed coverage**.
 - **`ppu_interlace_font_native_512x448`** — the native 512×448 capture
   path, hashed on its own buffer.
 - **`input_controller_latency` — `INPUT/ControllerLatency`**: holds **A**
   and expects the white screen (joypad auto-read end to end).
 - **`spc700_test!` — `CPUTest/SPC700/*`** (ADC, AND, DEC, EOR, INC, ORA,
-  SBC): these are validated by the ROM's own verdict, not a hash — on the
-  first failing case the SPC700 writes `$81` to port 0 (`$2140`) and halts;
-  the test asserts that value never appears (`run_spc700_fail_port`). It
-  proves "did not fail", not "ran to completion".
+  SBC): these are validated by the ROM's own verdict, not a hash. The
+  SPC700 program reports each sub-test on port 0
+  (`$2140`): `k` when sub-test `k` passes, `$80 | k` when it fails (and it
+  then halts). The test (`run_spc700_mailbox`) asserts that the emulator
+  did not panic, that no fail code appeared, and that port 0 ends on the
+  **last** sub-test's pass value — i.e. the ROM ran to completion.
 - **`spc_test!` — `SPC700/*`** audio ROMs: these play music / sounds rather
   than draw a screen, so they assert a SHA-256 of the APU's **PCM output**
   (the first `AUDIO_SAMPLES` stereo samples, about 3 s) instead of the
@@ -152,8 +168,10 @@ LUNA_SNES_TEST_RECORD=1 LUNA_SNES_TEST_PNG=/tmp/snes \
   cargo test -p luna-core --test snes_test_roms -- --nocapture
 ```
 
-`LUNA_SNES_TEST_RECORD` prints the new hashes and **skips every assertion**
-— a run with it set proves nothing.
+`LUNA_SNES_TEST_RECORD=1` prints the new hashes and **skips every assertion**
+— a run with it proves nothing. Only the value `1` enables it, and it is
+refused (the test panics) while `LUNA_SNES_TEST_REQUIRE` or
+`LUNA_GAME_TEST_REQUIRE` is set.
 
 ## 3. Commercial titles — developer-local goldens
 
@@ -165,10 +183,28 @@ they live in `tests/roms/` (gitignored), and each test skips when its ROM is
 missing — CI never runs them. Set `LUNA_GAME_TEST_REQUIRE=1` locally before
 a release so a missing dump fails instead of skipping.
 
-Also developer-local: the `smoke` test (`crates/luna-api/tests/smoke.rs`,
-screenshot + audio statistics on three titles, goldens under `tests/golden/`)
-and the HDMA corpus sweep (`tools/validate-hdma-corpus.sh`, eyeballed — see
-`.claude/rules/hdma-dma-faithful-audit.md`).
+Also developer-local, and under the same `LUNA_GAME_TEST_REQUIRE` switch:
+
+- the `smoke` test (`crates/luna-api/tests/smoke.rs`, screenshot + audio
+  statistics on three titles, goldens under `tests/golden/`);
+- `reset_repro` (`crates/luna-api/tests/`, three titles reboot after a
+  reset);
+- `mouse` and `superscope` (`crates/luna-api/tests/`), which drive two
+  OpenSNES example ROMs named by `LUNA_MOUSE_ROM` / `LUNA_SUPERSCOPE_ROM`;
+- `dsp1_port_differential` (`crates/luna-core/tests/`), a manual
+  `#[ignore]`d harness: it compares against a Mesen2 trace
+  (`tools/mesen-dsp1-port-trace.lua` writes `/tmp/mesen_dsp1_port.csv`) and
+  runs only with `-- --ignored`.
+
+Two harnesses are **manual** (`#[ignore]`, run with `--ignored`): the GSU
+differentials in `crates/luna-bus/src/superfx.rs`
+(`gsu_differential_vs_mesen`, `gsu_trajectory_vs_mesen`). They need a
+Mesen2 capture of Star Fox (`tools/snes-gsu-trajectory-capture.lua`) and
+fail — never skip — when it is absent; with it they assert zero divergence.
+
+The HDMA corpus sweep (`tools/validate-hdma-corpus.sh`) is eyeballed — see
+`.claude/rules/hdma-dma-faithful-audit.md`. It is frame-anchored and exits
+non-zero when a ROM is present but its screenshot was not written.
 
 ## 4. Environment variables read by the tests
 
@@ -179,8 +215,8 @@ Each row was checked in the file named.
 |---|---|---|
 | `LUNA_SNES_TEST_DIR` | `crates/luna-core/tests/snes_test_roms.rs` (`corpus_root`), `tools/fetch-snes-test-roms.sh` | Corpus root. Default: the sibling `../luna_tests`. |
 | `LUNA_SNES_TEST_REQUIRE` | same file (`CORPUS_REQUIRE`, `skip`) | Set: a missing corpus or corpus ROM **fails** instead of skipping. Set by CI's `snes-test-roms` job. |
-| `LUNA_GAME_TEST_REQUIRE` | same file (`GAMES_REQUIRE`, `skip`) | Same, for the commercial ROMs under `tests/roms/`. Set by no workflow — local pre-release check. |
-| `LUNA_SNES_TEST_RECORD` | same file (`test_display`, `test_audio`, `game_test!`, the native-capture test) | Set: print the freshly computed hash and **return without asserting**. |
+| `LUNA_GAME_TEST_REQUIRE` | same file (`GAMES_REQUIRE`, `skip`); `crates/luna-api/tests/{smoke,reset_repro,mouse,superscope}.rs` and `crates/luna-core/tests/dsp1_port_differential.rs` (`skip`) | Same, for everything the repository cannot ship: the commercial ROMs under `tests/roms/`, the OpenSNES example ROMs, the DSP-1 firmware and Mesen2 trace. Set by no workflow — local pre-release check. |
+| `LUNA_SNES_TEST_RECORD` | same file (`record_mode`) | `=1` (only that value): print the freshly computed hash and **return without asserting**. Panics if a `*_REQUIRE` variable above is set. |
 | `LUNA_SNES_TEST_PNG` | same file | With `…_RECORD`: directory that receives a PNG per display test and a WAV per audio test. |
 | `LUNA_SNES_TEST_HOLD` | same file (`run_to_stable`, `run_audio`) | Hex pad mask that **overrides** the test's own held buttons — it silently changes the test input; for ad-hoc experiments only. |
 | `LUNA_SNES_TEST_AUDIO_N` | same file (`run_audio`) | Number of stereo samples to capture instead of `AUDIO_SAMPLES` — changes the hash. |
@@ -188,13 +224,12 @@ Each row was checked in the file named.
 | `LUNA_SNES_TEST_APUDIAG` | same file (`run_audio`) | Set: print APU / DSP state after the run. Diagnostic only. |
 | `LUNA_TOM_HARTE_DIR` | `crates/luna-cpu-65c816/tests/tom_harte.rs` (`dataset_path`) | 65C816 dataset directory (the `v1/` level). Default `tests/tom-harte/v1`. |
 | `LUNA_TOM_HARTE_SPC700_DIR` | `crates/luna-cpu-spc700/tests/tom_harte.rs` (`dataset_path`) | SPC700 dataset directory. Default `tests/tom-harte-spc700/v1`. |
-| `LUNA_TOM_HARTE_REQUIRE` | both `tom_harte.rs` (`enforce_baseline`) | Set: a state mismatch fails the test. Unset: report only. |
-| `LUNA_TOM_HARTE_CYCLES` | 65C816 `tom_harte.rs` (`enforce_baseline`) | With `…_REQUIRE`: a cycle-count mismatch fails too. Set by no workflow. |
+| `LUNA_TOM_HARTE_REQUIRE` | both `tom_harte.rs` (`require`, `enforce_baseline`) | Set: the run is a gate — a state or cycle mismatch, a panic of the core, a missing dataset or one with fewer files / cases than expected fails the test. Unset: report only. Set by the `tom-harte` workflow. |
 | `LUNA_TOM_HARTE_SAMPLE` | 65C816 `tom_harte.rs` | Run only the first N cases of each opcode file (fast iteration). |
-| `UPDATE_GOLDENS` | `crates/luna-api/tests/smoke.rs` | Set: rewrite the smoke screenshots / audio statistics instead of comparing. |
-| `LUNA_MOUSE_ROM`, `LUNA_SUPERSCOPE_ROM` | `crates/luna-api/tests/mouse.rs`, `superscope.rs` | Path of the OpenSNES example ROM the test drives. The default is a path on the maintainer's machine; the test skips when the file is absent. |
-| `LUNA_GSU_DIFF_CSV` | `crates/luna-bus/src/superfx.rs` (`gsu_differential_vs_mesen`) | Mesen2 GSU trace to diff against. Default `/tmp/mesen_gsu_full.csv`; skips when absent. |
-| `LUNA_GSU_DIFF_DIR` | same file (`gsu_trajectory_vs_mesen`) | Directory holding the trajectory capture (`mesen_gsu_full.csv`, `mesen_gsu_init.txt`, `mesen_gsu_ram_start.bin`). Default `/tmp`. |
+| `UPDATE_GOLDENS` | `crates/luna-api/tests/smoke.rs` | `=1` (only that value): rewrite the smoke screenshots / audio statistics instead of comparing. Panics if `LUNA_GAME_TEST_REQUIRE` is set. |
+| `LUNA_MOUSE_ROM`, `LUNA_SUPERSCOPE_ROM` | `crates/luna-api/tests/mouse.rs`, `superscope.rs` | Path of the OpenSNES example ROM the test drives (`<opensnes>/examples/input/mouse/mouse.sfc`, `…/superscope/superscope.sfc`). No default: unset, or not a file, the test skips — or fails under `LUNA_GAME_TEST_REQUIRE`. |
+| `LUNA_GSU_DIFF_CSV` | `crates/luna-bus/src/superfx.rs` (`gsu_differential_vs_mesen`, manual) | Mesen2 GSU trace to diff against. Default `/tmp/mesen_gsu_full.csv`; the test fails when it is absent. |
+| `LUNA_GSU_DIFF_DIR` | same file (`gsu_trajectory_vs_mesen`, manual) | Directory holding the trajectory capture (`mesen_gsu_full.csv`, `mesen_gsu_init.txt`, `mesen_gsu_ram_start.bin`, `mesen_gsu_ram_stop1.bin`). Default `/tmp`; the test fails when a file is absent. |
 | `LUNA_SF_ROM` | same file, both GSU harnesses | Star Fox ROM path. Default under `tests/roms/`. |
-| `LUNA_DSP1_PORT_CSV` | `crates/luna-core/tests/dsp1_port_differential.rs` | Mesen2 DSP-1 port trace. Default `/tmp/mesen_dsp1_port.csv`; skips when absent. |
+| `LUNA_DSP1_PORT_CSV` | `crates/luna-core/tests/dsp1_port_differential.rs` | Mesen2 DSP-1 port trace. Default `/tmp/mesen_dsp1_port.csv`. The test is `#[ignore]`d (manual); run explicitly, an absent trace is a failure. |
 | `LUNA_SPC_RESET_TIMER` | `crates/luna-core/tests/spc_trajectory.rs` | Set: zero the APU timer phase before the (ignored, manual) SPC trajectory run. |

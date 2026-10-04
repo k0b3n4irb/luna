@@ -20,11 +20,14 @@
 //! ~/bin/Mesen --testRunner tools/mesen-dsp1-port-trace.lua \
 //!     "tests/roms/Super Mario Kart (USA).sfc" -novideo -noaudio
 //! LUNA_DSP1_PORT_CSV=/tmp/mesen_dsp1_port.csv \
-//!     cargo test -p luna-core --test dsp1_port_differential --release
+//!     cargo test -p luna-core --test dsp1_port_differential --release -- --ignored
 //! ```
 //!
-//! Skips silently when the ROM, the firmware or the reference CSV is
-//! absent (commercial ROMs are gitignored; CI never runs this).
+//! Manual, like the GSU differentials: the reference is a Mesen2 capture,
+//! so the test is `#[ignore]`d and never part of an ordinary run. Run
+//! explicitly, a missing reference CSV is a failure. A missing ROM or
+//! firmware skips (commercial ROMs are gitignored) — and fails instead when
+//! `LUNA_GAME_TEST_REQUIRE` is set, naming what is missing.
 //!
 //! The two streams may differ in LENGTH: SMK reads uninitialized memory
 //! (Mesen2 logs it), so the input-less attract PATH eventually diverges
@@ -48,6 +51,18 @@ const STEP_CAP: u64 = 900_000_000;
 /// The comparison must cover at least this many DR events to count as
 /// evidence — a short prefix match on an idle boot proves nothing.
 const MIN_EVENTS: usize = 100_000;
+
+/// Report a test that cannot run: a skip notice, or a failure when
+/// `LUNA_GAME_TEST_REQUIRE` is set — the switch of the commercial goldens in
+/// `luna-core/tests/snes_test_roms.rs`, so one variable covers every test
+/// that needs a file the repository cannot ship.
+fn skip(why: &str) {
+    assert!(
+        std::env::var_os("LUNA_GAME_TEST_REQUIRE").is_none(),
+        "{why} — and LUNA_GAME_TEST_REQUIRE is set, so a skip is a failure"
+    );
+    eprintln!("[skip] {why}");
+}
 
 fn roms_root() -> Option<PathBuf> {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -94,20 +109,23 @@ fn mesen_dr_sequence(csv: &str) -> Vec<(bool, u8)> {
 }
 
 #[test]
+#[ignore = "manual: needs a Mesen2 capture (tools/mesen-dsp1-port-trace.lua), see the module doc"]
 fn dsp1_dr_stream_matches_mesen_over_smk_demo() {
     let csv_path =
         std::env::var("LUNA_DSP1_PORT_CSV").unwrap_or_else(|_| "/tmp/mesen_dsp1_port.csv".into());
-    let Ok(csv) = std::fs::read_to_string(&csv_path) else {
-        eprintln!("[skip] Mesen reference trace absent ({csv_path}) — see the module doc");
-        return;
-    };
+    let csv = std::fs::read_to_string(&csv_path).unwrap_or_else(|e| {
+        panic!(
+            "Mesen reference trace absent ({csv_path}: {e}) — capture it with \
+             tools/mesen-dsp1-port-trace.lua, see the module doc"
+        )
+    });
     let Some(root) = roms_root() else {
-        eprintln!("[skip] tests/roms/ absent (gitignored — dump your own)");
+        skip("tests/roms/ absent (gitignored — dump your own)");
         return;
     };
     let rom_path = root.join("Super Mario Kart (USA).sfc");
     if !rom_path.is_file() {
-        eprintln!("[skip] Super Mario Kart (USA).sfc not present");
+        skip(&format!("{} not present", rom_path.display()));
         return;
     }
 
@@ -123,7 +141,10 @@ fn dsp1_dr_stream_matches_mesen_over_smk_demo() {
     // tests/roms/ carries it (gitignored, like the ROMs).
     let cart = Cartridge::load(&rom_path).expect("auto-detect cartridge");
     if cart.needs_coprocessor_firmware() {
-        eprintln!("[skip] dsp1b.rom not present next to the ROM — the DSP would run inert");
+        skip(&format!(
+            "dsp1b.rom not present in {} — the DSP would run inert",
+            root.display()
+        ));
         return;
     }
     let mut snes = Snes::from_cartridge(cart);

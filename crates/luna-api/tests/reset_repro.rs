@@ -9,18 +9,31 @@
 //! that is what this asserts.
 //!
 //! The ROMs live under `tests/roms/` (gitignored — dump your own); each
-//! case skips when its ROM is absent, so CI without ROMs stays green.
+//! case skips when its ROM is absent, so CI without ROMs stays green — and
+//! fails instead when `LUNA_GAME_TEST_REQUIRE` is set.
 
 use luna_api::Emulator;
 use std::path::Path;
 
+/// Report a test that cannot run: a skip notice, or a failure when
+/// `LUNA_GAME_TEST_REQUIRE` is set — the switch of the commercial goldens in
+/// `luna-core/tests/snes_test_roms.rs`, so one variable covers every test
+/// that needs a file the repository cannot ship.
+fn skip(why: &str) {
+    assert!(
+        std::env::var_os("LUNA_GAME_TEST_REQUIRE").is_none(),
+        "{why} — and LUNA_GAME_TEST_REQUIRE is set, so a skip is a failure"
+    );
+    eprintln!("[skip] {why}");
+}
+
 /// Boot `rom`, run it to gameplay, reset, then assert it reboots and
-/// draws content again within `settle_frames`. Returns silently (skips)
-/// if the ROM is not present.
+/// draws content again within `settle_frames`. Skips if the ROM is not
+/// present (see [`skip`]).
 fn assert_reboots(rom: &str, settle_frames: u32) {
     let p = Path::new(rom);
     if !p.exists() {
-        eprintln!("[skip] {rom} (absent)");
+        skip(&format!("{rom}: ROM absent"));
         return;
     }
     let mut em = Emulator::default();

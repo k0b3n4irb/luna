@@ -17,10 +17,17 @@
 //! cargo test -p luna-cpu-65c816 --test tom_harte -- --ignored --nocapture
 //! ```
 //!
-//! Set `LUNA_TOM_HARTE_REQUIRE=1` to make any unexpected failure (i.e.
-//! a failure on an opcode marked implemented in [`is_implemented`] below)
-//! cause the test to fail. Without this env var the test always passes
-//! and just prints a report.
+//! Set `LUNA_TOM_HARTE_REQUIRE=1` to make the run a gate. It then fails on:
+//! a state mismatch; a cycle-count mismatch; a per-cycle bus-trace
+//! divergence outside [`TRACE_RESIDUAL`] (or an entry of that list that no
+//! longer diverges); a core that panics; a missing dataset; a dataset with
+//! fewer files or cases than [`EXPECTED_FILES`] × [`CASES_PER_FILE`]. Without
+//! this env var the test always passes and just prints a report.
+//!
+//! Measured 2026-10-04 on the full dataset: state 5,080,000 / 5,080,000;
+//! cycle count 5,040,000 / 5,040,000 (WAI and STP have no finite count);
+//! bus trace 4,740,000 / 5,040,000 (94.0 %), the rest being exactly the 30
+//! files of [`TRACE_RESIDUAL`], 10,000 cases each.
 
 use luna_bus::testing::{RamBus, TraceKind};
 use luna_cpu_65c816::{Cpu, StatusFlags};
@@ -84,18 +91,37 @@ fn dataset_path() -> Option<PathBuf> {
     p.is_dir().then_some(p)
 }
 
-/// Set of opcodes that are claimed to be implemented in `luna-cpu-65c816`.
+/// Files in the dataset: 256 opcodes × emulation (`.e`) and native (`.n`).
+const EXPECTED_FILES: usize = 512;
+/// Of those, the MVN/MVP files the run cannot gate (see [`tom_harte`]).
+const UNGATEABLE_FILES: usize = 4;
+/// Cases per file. (512 − 4) × 10,000 = the 5,080,000 cases
+/// `docs/test_corpora.md` quotes. Under `LUNA_TOM_HARTE_REQUIRE` a smaller
+/// dataset is a failure, not a shorter run.
+const CASES_PER_FILE: usize = 10_000;
+
+/// Files whose per-cycle bus trace is known to differ from the dataset on
+/// EVERY case, while their state and cycle COUNT match. These are places
+/// where luna follows ares and the dataset records what the chip's pins do
+/// (see `docs/accuracy_scorecard.md`, 65c816 row: "the residual ~30 opcodes
+/// are ares-faithful — don't chase"). Enumerated from the full run of
+/// 2026-10-04; under `LUNA_TOM_HARTE_REQUIRE` the list is exact in both
+/// directions — a divergence in any other file fails, and so does a listed
+/// file that stops diverging (remove it from the list then).
 ///
-/// Kept in sync with the dispatch table in `src/opcodes.rs`. Any
-/// implemented opcode that fails a Tom Harte case is a real regression
-/// and should be flagged (via `LUNA_TOM_HARTE_REQUIRE=1`).
-const fn is_implemented(_opcode: u8) -> bool {
-    // As of P0.4b.13 (full 256-opcode coverage including BCD ADC/SBC),
-    // every opcode is dispatched. The earlier per-opcode allow-list
-    // existed so the strict-mode regression gate could exclude
-    // not-yet-implemented opcodes; that gate is now universal.
-    true
-}
+/// - The read-modify-write opcodes, **emulation mode only** (ASL, LSR, ROL,
+///   ROR, INC, DEC, TSB, TRB on direct / direct,X / absolute / absolute,X):
+///   the dataset shows a WRITE on the modify cycle (the 6502-style dummy
+///   write-back of the unmodified value), luna emits an internal cycle
+///   there (`kind Internal != Write`). In native mode both agree.
+/// - `$42` WDM, both modes: luna reads its operand byte on cycle 1, the
+///   dataset flags that cycle as neither VDA nor VPA (`kind Read !=
+///   Internal`).
+const TRACE_RESIDUAL: [&str; 30] = [
+    "04.e", "06.e", "0c.e", "0e.e", "14.e", "16.e", "1c.e", "1e.e", "26.e", "2e.e", "36.e", "3e.e",
+    "42.e", "42.n", "46.e", "4e.e", "56.e", "5e.e", "66.e", "6e.e", "76.e", "7e.e", "c6.e", "ce.e",
+    "d6.e", "de.e", "e6.e", "ee.e", "f6.e", "fe.e",
+];
 
 /// Parse an opcode from a Tom Harte filename like `ea.n.json` or
 /// `00 e.json`. Returns the leading 2-hex-digit byte if present.
@@ -115,7 +141,8 @@ fn opcode_from_filename(stem: &str) -> Option<u8> {
 #[derive(Debug, Clone, Copy)]
 enum CaseResult {
     Pass,
-    Skip,
+    /// The core panicked: a failure under `LUNA_TOM_HARTE_REQUIRE`.
+    Panicked,
 }
 
 /// Cycle-backstop outcome for one executed case: the number of `io_cycle`
@@ -139,10 +166,11 @@ fn run_case(case: &TestCase, opcode: u8) -> RunResult {
     bus.reset_cycle_counter();
     bus.enable_trace();
 
-    // All 256 opcodes are dispatched, so a panic here is unexpected: the
-    // case is counted as skipped instead of aborting the run.
+    // All 256 opcodes are dispatched, so a panic here is a defect. It is
+    // counted (and fails the gate) instead of aborting the run, so the report
+    // still covers every file.
     if catch_unwind(AssertUnwindSafe(|| cpu.step(&mut bus))).is_err() {
-        return (Ok(CaseResult::Skip), None, None);
+        return (Ok(CaseResult::Panicked), None, None);
     }
 
     // WAI (0xCB) / STP (0xDB) halt the CPU: their Tom Harte trace is a
@@ -155,10 +183,8 @@ fn run_case(case: &TestCase, opcode: u8) -> RunResult {
     });
     // Entry-for-entry per-cycle bus-trace check (the faithful cycle-grammar
     // oracle): compares luna's recorded read/write/internal sequence to the
-    // Tom Harte `cycles[]` order/addr/value. Informational — a divergence on
-    // a hardware dummy-read cycle (luna emits an internal where the chip
-    // drives the bus) is the known instruction-atomic gap, surfaced as a
-    // precise work-list, not a hard failure.
+    // Tom Harte `cycles[]` order/addr/value. The files known to diverge are
+    // listed in `TRACE_RESIDUAL`; anything else is a regression.
     let trace =
         (opcode != 0xCB && opcode != 0xDB).then(|| compare_trace(&bus.take_trace(), &case.cycles));
     match compare_state(&cpu, &bus, &case.final_) {
@@ -274,7 +300,7 @@ fn compare_state(cpu: &Cpu, bus: &RamBus, expected: &State) -> Result<(), String
 struct OpStats {
     passed: u32,
     failed: u32,
-    skipped: u32,
+    panicked: u32,
     first_failure: Option<String>,
     /// Cycle backstop: executed cases whose emitted `io_cycle` count
     /// matched the bus-cycle trace length, vs. those that didn't.
@@ -297,6 +323,11 @@ fn tom_harte() {
         eprintln!("Tom Harte dataset not found.");
         eprintln!("Run `tools/fetch-tom-harte.sh` from the workspace root");
         eprintln!("or set LUNA_TOM_HARTE_DIR to point at the `v1/` directory.");
+        assert!(
+            !require(),
+            "Tom Harte 65C816 dataset not found (tests/tom-harte/v1, or \
+             LUNA_TOM_HARTE_DIR) — and LUNA_TOM_HARTE_REQUIRE is set"
+        );
         return;
     };
 
@@ -364,7 +395,7 @@ fn tom_harte() {
             let (state, cycle, trace) = run_case(case, opcode);
             match state {
                 Ok(CaseResult::Pass) => op.passed += 1,
-                Ok(CaseResult::Skip) => op.skipped += 1,
+                Ok(CaseResult::Panicked) => op.panicked += 1,
                 Err(reason) => {
                     op.failed += 1;
                     if op.first_failure.is_none() {
@@ -400,7 +431,12 @@ fn tom_harte() {
     }
 
     print_report(&stats, files_with_unknown_opcode);
-    enforce_baseline(&stats);
+    enforce_baseline(&stats, total_files, CASES_PER_FILE.min(sample));
+}
+
+/// `LUNA_TOM_HARTE_REQUIRE` is set: the run is a gate, not a report.
+fn require() -> bool {
+    std::env::var_os("LUNA_TOM_HARTE_REQUIRE").is_some()
 }
 
 fn print_report(stats: &BTreeMap<String, OpStats>, unknown: usize) {
@@ -409,7 +445,7 @@ fn print_report(stats: &BTreeMap<String, OpStats>, unknown: usize) {
         (
             p + u64::from(o.passed),
             f + u64::from(o.failed),
-            s + u64::from(o.skipped),
+            s + u64::from(o.panicked),
         )
     });
 
@@ -423,7 +459,7 @@ fn print_report(stats: &BTreeMap<String, OpStats>, unknown: usize) {
     }
     eprintln!("  Pass:    {pass}");
     eprintln!("  Fail:    {fail}");
-    eprintln!("  Skipped: {skip}   (panic = opcode not yet implemented)");
+    eprintln!("  Panicked: {skip}");
 
     let (cyc_pass, cyc_fail): (u64, u64) = stats.values().fold((0, 0), |(p, f), o| {
         (p + u64::from(o.cycle_passed), f + u64::from(o.cycle_failed))
@@ -474,7 +510,7 @@ fn print_report(stats: &BTreeMap<String, OpStats>, unknown: usize) {
     });
     eprintln!("  Per-cycle bus-trace oracle (entry-for-entry kind+addr+value):");
     eprintln!("    Match:    {tr_pass}");
-    eprintln!("    Diverge:  {tr_fail}   (dummy-read / instruction-atomic work-list)");
+    eprintln!("    Diverge:  {tr_fail}   (expected: the TRACE_RESIDUAL files, every case)");
     eprintln!();
     let mut tr_failing: Vec<(&String, &OpStats)> =
         stats.iter().filter(|(_, s)| s.trace_failed > 0).collect();
@@ -494,48 +530,82 @@ fn print_report(stats: &BTreeMap<String, OpStats>, unknown: usize) {
         }
         eprintln!();
     }
-
-    let implemented_ok: u32 = stats
-        .iter()
-        .filter(|(name, _)| opcode_from_filename(name).is_some_and(is_implemented))
-        .map(|(_, s)| s.passed)
-        .sum();
-    let implemented_ko: u32 = stats
-        .iter()
-        .filter(|(name, _)| opcode_from_filename(name).is_some_and(is_implemented))
-        .map(|(_, s)| s.failed)
-        .sum();
-    eprintln!("Among implemented opcodes: {implemented_ok} pass / {implemented_ko} fail");
 }
 
-fn enforce_baseline(stats: &BTreeMap<String, OpStats>) {
-    if std::env::var("LUNA_TOM_HARTE_REQUIRE").is_err() {
+/// The gate. `total_files` is the number of JSON files found, `cases` the
+/// number each file must have run (`CASES_PER_FILE`, or the
+/// `LUNA_TOM_HARTE_SAMPLE` cap when smaller).
+fn enforce_baseline(stats: &BTreeMap<String, OpStats>, total_files: usize, cases: usize) {
+    if !require() {
         return;
     }
+    // A dataset that is absent, empty, renamed or truncated must not read
+    // as "no regression".
+    assert!(
+        total_files >= EXPECTED_FILES && stats.len() >= EXPECTED_FILES - UNGATEABLE_FILES,
+        "Tom Harte: {total_files} JSON files found, {} run; {EXPECTED_FILES} expected \
+         ({UNGATEABLE_FILES} of them MVN/MVP, not run)",
+        stats.len()
+    );
+    let short: Vec<&String> = stats
+        .iter()
+        .filter(|(_, s)| ((s.passed + s.failed + s.panicked) as usize) < cases)
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        short.is_empty(),
+        "Tom Harte: files with fewer than {cases} cases: {short:?}"
+    );
+    let panicked: Vec<&String> = stats
+        .iter()
+        .filter(|(_, s)| s.panicked > 0)
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        panicked.is_empty(),
+        "Tom Harte: the core panicked on: {panicked:?}"
+    );
     let regressions: Vec<&String> = stats
         .iter()
-        .filter(|(name, s)| opcode_from_filename(name).is_some_and(is_implemented) && s.failed > 0)
+        .filter(|(_, s)| s.failed > 0)
         .map(|(name, _)| name)
         .collect();
     assert!(
         regressions.is_empty(),
-        "Tom Harte: state regressions on implemented opcodes: {regressions:?}\n\
+        "Tom Harte: state regressions: {regressions:?}\n\
          (run without LUNA_TOM_HARTE_REQUIRE to see the full report)"
     );
-    // Cycle backstop gate is opt-in separately: the 65c816 internal/idle
-    // cycles land incrementally (Phase 3), so only enforce zero cycle
-    // mismatches once asked, to avoid blocking state-correctness CI on a
-    // mid-migration cycle table.
-    if std::env::var("LUNA_TOM_HARTE_CYCLES").is_ok() {
-        let cycle_regressions: Vec<&String> = stats
-            .iter()
-            .filter(|(_, s)| s.cycle_failed > 0)
-            .map(|(name, _)| name)
-            .collect();
-        assert!(
-            cycle_regressions.is_empty(),
-            "Tom Harte: cycle-count mismatches: {cycle_regressions:?}\n\
-             (run without LUNA_TOM_HARTE_CYCLES to see the full report)"
-        );
-    }
+    // Cycle count: zero mismatches on the full dataset (2026-10-04), so it
+    // is part of the gate. (It used to hide behind a second variable,
+    // LUNA_TOM_HARTE_CYCLES, that no workflow set.)
+    let cycle_regressions: Vec<&String> = stats
+        .iter()
+        .filter(|(_, s)| s.cycle_failed > 0)
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        cycle_regressions.is_empty(),
+        "Tom Harte: cycle-count mismatches: {cycle_regressions:?}\n\
+         (run without LUNA_TOM_HARTE_REQUIRE to see the full report)"
+    );
+    // Per-cycle bus trace: exactly the residual list, no more, no less.
+    let trace_regressions: Vec<&String> = stats
+        .iter()
+        .filter(|(name, s)| s.trace_failed > 0 && !TRACE_RESIDUAL.contains(&name.as_str()))
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        trace_regressions.is_empty(),
+        "Tom Harte: per-cycle bus-trace divergences outside TRACE_RESIDUAL: \
+         {trace_regressions:?}"
+    );
+    let stale: Vec<&&str> = TRACE_RESIDUAL
+        .iter()
+        .filter(|name| stats.get(**name).is_none_or(|s| s.trace_passed > 0))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "Tom Harte: TRACE_RESIDUAL lists files that no longer diverge on every case \
+         (or were not run): {stale:?} — update the list"
+    );
 }

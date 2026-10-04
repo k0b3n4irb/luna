@@ -9,7 +9,9 @@ name: Tom Harte CPU suites
 # "Run workflow").
 #
 # These tests are #[ignore] by default and need large external datasets.
-# LUNA_TOM_HARTE_REQUIRE=1 turns any mismatch into a hard failure.
+# LUNA_TOM_HARTE_REQUIRE=1 turns any mismatch into a hard failure — state,
+# cycles, a panic of the core — and so does a dataset that is missing, empty
+# or shorter than expected: a run that compared nothing is not a pass.
 #
 # Datasets are large external shallow clones (not committed): fetched on a
 # cache miss and cached across runs, keyed on the corresponding fetch script.

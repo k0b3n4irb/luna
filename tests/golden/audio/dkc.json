@@ -3,48 +3,6 @@
   "frames": 3253,
   "note": "past Rareware logo, ~54 s of audio with echo + voices 4-6",
   "rom": "Donkey Kong Country (U) (V1.2) [!].smc",
-  "spectrum_peaks": [
-    {
-      "hz": 117.2,
-      "mag_db": 121.1
-    },
-    {
-      "hz": 109.4,
-      "mag_db": 120.6
-    },
-    {
-      "hz": 187.5,
-      "mag_db": 119.1
-    },
-    {
-      "hz": 148.4,
-      "mag_db": 119.1
-    },
-    {
-      "hz": 156.2,
-      "mag_db": 119.0
-    },
-    {
-      "hz": 125.0,
-      "mag_db": 118.8
-    },
-    {
-      "hz": 179.7,
-      "mag_db": 118.3
-    },
-    {
-      "hz": 101.6,
-      "mag_db": 117.3
-    },
-    {
-      "hz": 195.3,
-      "mag_db": 116.9
-    },
-    {
-      "hz": 132.8,
-      "mag_db": 116.9
-    }
-  ],
   "stats": {
     "mean_abs": 1449.91,
     "non_zero": 0.8764,

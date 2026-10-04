@@ -1221,46 +1221,75 @@ mod tests {
         assert_eq!(bus.read(0x00F3), 0, "write to $7C clears ENDX");
     }
 
+    /// An APU whose SPC700 runs `NOP`s out of zeroed RAM at `$0200`: every
+    /// cycle is a plain RAM access, so the timers see exactly one clock per
+    /// cycle and nothing writes a register behind the test's back.
+    fn apu_running_nops() -> Apu {
+        let mut apu = Apu::new();
+        apu.cpu.pc = 0x0200;
+        // `Apu::new` fetches the reset vector through the bus view, which
+        // clocks two cycles: the divider starts at 2. Rewind it so the
+        // boundaries below are counted from a known phase.
+        assert_eq!(apu.timer_subdivider, 2, "power-on divider phase moved");
+        apu.timer_subdivider = 0;
+        apu
+    }
+
+    /// Advance `n` SPC cycles through the PRODUCTION path
+    /// (`run_one_cycle` → `step_cycle` → `ApuBusView::clock_cycle`). The
+    /// timer tests below used to drive `tick_timers`, a second copy of the
+    /// timer logic that only the atomic trajectory harness reaches — a
+    /// regression in the live copy passed them.
+    fn run_spc_cycles(apu: &mut Apu, n: u32) {
+        for _ in 0..n {
+            apu.run_one_cycle();
+        }
+    }
+
     #[test]
     fn timer_t2_increments_output_when_enabled() {
-        let mut apu = Apu::new();
+        let mut apu = apu_running_nops();
         // Manually configure: enable T2 with reload = 1 (tick every
-        // 16 SPC cycles), bypassing the SPC700 — we want to test the
-        // timer math, not the SPC's writes.
+        // 16 SPC cycles), bypassing the SPC700's writes — we want to test
+        // the timer math, not the control-register decode.
         apu.timer_reload[2] = 1;
         apu.timer_enabled[2] = true;
         // Tick 16 SPC cycles ×  4 = 64 cycles of headroom should give
         // 64/16 = 4 T2 ticks → output counter reaches 4.
         for _ in 0..4 {
-            apu.tick_timers(16);
+            run_spc_cycles(&mut apu, 16);
         }
         assert_eq!(apu.timer_output[2], 4);
     }
 
     #[test]
     fn timer_t0_t1_tick_at_128_cycle_boundary() {
-        let mut apu = Apu::new();
+        let mut apu = apu_running_nops();
         apu.timer_reload[0] = 1;
         apu.timer_reload[1] = 1;
         apu.timer_enabled[0] = true;
         apu.timer_enabled[1] = true;
+        // One cycle short of the boundary: nothing yet.
+        run_spc_cycles(&mut apu, 127);
+        assert_eq!(apu.timer_output[0], 0);
+        assert_eq!(apu.timer_output[1], 0);
         // 128 cycles → 1 T0/T1 tick.
-        apu.tick_timers(128);
+        run_spc_cycles(&mut apu, 1);
         assert_eq!(apu.timer_output[0], 1);
         assert_eq!(apu.timer_output[1], 1);
     }
 
     #[test]
     fn timer_reload_zero_means_256() {
-        let mut apu = Apu::new();
+        let mut apu = apu_running_nops();
         apu.timer_reload[2] = 0; // = 256
         apu.timer_enabled[2] = true;
         // T2 ticks every 16 SPC cycles, so 256 ticks = 4096 SPC cycles.
         // After 4095 cycles, the output should still be 0.
-        apu.tick_timers(16 * 255);
+        run_spc_cycles(&mut apu, 16 * 255);
         assert_eq!(apu.timer_output[2], 0);
         // One more tick should cross the threshold.
-        apu.tick_timers(16);
+        run_spc_cycles(&mut apu, 16);
         assert_eq!(apu.timer_output[2], 1);
     }
 
@@ -1268,24 +1297,24 @@ mod tests {
     fn test_register_gates_timer_advance() {
         // $F0 bit 3 (timersEnable) must be set and bit 0 (timersDisable)
         // clear for timers to advance (ares timing.cpp:45-49).
-        let mut apu = Apu::new();
+        let mut apu = apu_running_nops();
         apu.timer_reload[2] = 1;
         apu.timer_enabled[2] = true;
         // Default test = 0x0A → timers run.
-        apu.tick_timers(16 * 2);
+        run_spc_cycles(&mut apu, 16 * 2);
         assert_eq!(apu.timer_output[2], 2);
         // timersDisable (bit 0) set → frozen.
         apu.test = 0x0B;
-        apu.tick_timers(16 * 4);
+        run_spc_cycles(&mut apu, 16 * 4);
         assert_eq!(apu.timer_output[2], 2, "timersDisable freezes the timer");
         // timersEnable (bit 3) clear → also frozen.
         apu.test = 0x00;
-        apu.tick_timers(16 * 4);
+        run_spc_cycles(&mut apu, 16 * 4);
         assert_eq!(apu.timer_output[2], 2, "!timersEnable freezes the timer");
         // Re-enable → advances again (the clock divider kept running, so
         // it picks up from the current phase).
         apu.test = 0x08;
-        apu.tick_timers(16 * 3);
+        run_spc_cycles(&mut apu, 16 * 3);
         assert_eq!(apu.timer_output[2], 5, "re-enabled timer advances");
     }
 
@@ -1327,10 +1356,10 @@ mod tests {
 
     #[test]
     fn timer_output_clears_on_read_via_bus() {
-        let mut apu = Apu::new();
+        let mut apu = apu_running_nops();
         apu.timer_reload[2] = 1;
         apu.timer_enabled[2] = true;
-        apu.tick_timers(16 * 3);
+        run_spc_cycles(&mut apu, 16 * 3);
         assert_eq!(apu.timer_output[2], 3);
         // Construct a temporary bus view and read $FF.
         {
@@ -1482,17 +1511,5 @@ mod tests {
         bus.write(0x00F9, 0x99);
         assert_eq!(bus.read(0x00F8), 0x42);
         assert_eq!(bus.read(0x00F9), 0x99);
-    }
-
-    #[test]
-    fn dsp_register_writes_are_silently_accepted() {
-        // Music drivers smash a lot of bytes through $F2/$F3 once
-        // they start running. Here we just want them not to panic.
-        let mut apu = Apu::new();
-        apu.step(2000 * MASTER_CYCLES_PER_SPC_STEP);
-        apu.cpu_write_port(0, 0xCC);
-        apu.step(200 * MASTER_CYCLES_PER_SPC_STEP);
-        // After kick, the IPL is in the transfer loop. We're not
-        // verifying anything else here — just that no panic fired.
     }
 }

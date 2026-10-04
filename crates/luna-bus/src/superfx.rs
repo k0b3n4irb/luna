@@ -2261,38 +2261,33 @@ mod tests {
         r: [u16; 16],
     }
 
-    // GSU differential harness: replay a reference (Mesen) GSU instruction
-    // trace one op at a time and flag opcodes whose register output diverges.
-    // Diagnostic — skips silently unless both the reference CSV and the ROM
-    // are present (so CI is unaffected). Run with:
-    //   cargo test -p luna-bus gsu_differential -- --nocapture
-    #[test]
-    fn gsu_differential_vs_mesen() {
-        use std::path::Path;
-        let csv_path =
-            std::env::var("LUNA_GSU_DIFF_CSV").unwrap_or_else(|_| "/tmp/mesen_gsu_full.csv".into());
-        // ROM is gitignored; default to the repo-relative path, override
-        // with LUNA_SF_ROM. Test skips silently if either file is absent.
-        let rom_path = std::env::var("LUNA_SF_ROM")
-            .unwrap_or_else(|_| "../../tests/roms/Star Fox (USA) (Rev 2).sfc".into());
-        if !Path::new(&csv_path).exists() || !Path::new(&rom_path).exists() {
-            eprintln!("gsu_differential: reference CSV or ROM absent — skipping");
-            return;
-        }
-        let rom = std::fs::read(&rom_path).expect("read ROM");
-        let text = std::fs::read_to_string(&csv_path).expect("read CSV");
-
-        // Parse rows: seq,pc,opcode,sfr,sreg,dreg,pbr,rombr,colr,r0..r15
+    /// Read a Mesen2 GSU instruction trace
+    /// (`tools/snes-gsu-trajectory-capture.lua`). Columns:
+    /// `seq,pc,opcode,sfr,sreg,dreg,pbr,x,y,r0..r15` — `x` and `y` are two
+    /// unused placeholders the script writes as 0. Every row is the state
+    /// BEFORE the opcode runs. A malformed row panics: a fixture that
+    /// silently loses rows would shrink the comparison.
+    fn read_gsu_trace(path: &str) -> Vec<Row> {
+        let text = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("GSU reference trace {path}: {e}"));
         let mut rows: Vec<Row> = Vec::new();
-        for (i, line) in text.lines().enumerate() {
-            if i == 0 {
-                continue; // header
-            }
+        for (i, line) in text.lines().enumerate().skip(1) {
             let f: Vec<&str> = line.split(',').collect();
-            if f.len() < 25 {
-                continue;
-            }
-            let g = |k: usize| f[k].trim().parse::<i64>().unwrap_or(0);
+            assert!(
+                f.len() >= 25,
+                "{path}: line {} has {} columns, 25 expected",
+                i + 1,
+                f.len()
+            );
+            let g = |k: usize| {
+                f[k].trim().parse::<i64>().unwrap_or_else(|_| {
+                    panic!(
+                        "{path}: line {}, column {k}: {:?} is not a number",
+                        i + 1,
+                        f[k]
+                    )
+                })
+            };
             let mut r = [0u16; 16];
             for (j, rr) in r.iter_mut().enumerate() {
                 *rr = g(9 + j) as u16;
@@ -2307,6 +2302,41 @@ mod tests {
                 r,
             });
         }
+        rows
+    }
+
+    /// The Star Fox ROM both GSU harnesses replay (`LUNA_SF_ROM`, default
+    /// under the gitignored `tests/roms/`).
+    fn read_gsu_rom() -> Vec<u8> {
+        let rom_path = std::env::var("LUNA_SF_ROM")
+            .unwrap_or_else(|_| "../../tests/roms/Star Fox (USA) (Rev 2).sfc".into());
+        std::fs::read(&rom_path).unwrap_or_else(|e| panic!("GSU harness ROM {rom_path}: {e}"))
+    }
+
+    /// Fewest single-step comparisons a capture must yield: below this the
+    /// trace is truncated and "zero divergence" would say nothing.
+    const GSU_MIN_OPS: u64 = 1000;
+
+    // GSU differential harness: replay a reference (Mesen2) GSU instruction
+    // trace one op at a time and fail on any opcode whose register output,
+    // flags or control flow diverge.
+    //
+    // Manual: the fixture is a Mesen2 capture of a copyrighted ROM, so it is
+    // neither committed nor available on CI. Capture, then run:
+    //   ARM_FRAME=1500 Mesen --testRunner tools/snes-gsu-trajectory-capture.lua \
+    //     "tests/roms/Star Fox (USA) (Rev 2).sfc" -novideo -noaudio
+    //   cargo test -p luna-bus --lib gsu_ -- --ignored --nocapture
+    // A missing fixture is a failure, never a pass.
+    //
+    // Measured 2026-10-04 on two Star Fox captures (16 005 and 3 615 ops
+    // compared): 0 data, 0 flag, 0 control-flow divergences.
+    #[test]
+    #[ignore = "manual: needs a Mesen2 GSU capture (tools/snes-gsu-trajectory-capture.lua) and the Star Fox ROM"]
+    fn gsu_differential_vs_mesen() {
+        let csv_path =
+            std::env::var("LUNA_GSU_DIFF_CSV").unwrap_or_else(|_| "/tmp/mesen_gsu_full.csv".into());
+        let rom = read_gsu_rom();
+        let rows = read_gsu_trace(&csv_path);
 
         // Skip opcodes whose register output depends on un-injected state
         // (RAM/ROM reads, pixel cache) — v1 covers pure-register ops.
@@ -2420,68 +2450,64 @@ mod tests {
         for s in &pc_samples {
             eprintln!("  {s}");
         }
+
+        assert!(
+            tested >= GSU_MIN_OPS,
+            "{csv_path}: only {tested} comparable ops (floor {GSU_MIN_OPS}) — truncated capture?"
+        );
+        assert_eq!(
+            (data_div, flag_div, pc_div),
+            (0, 0, 0),
+            "GSU single-step replay diverges from Mesen2 (data, flags, control flow) over {tested} ops"
+        );
     }
 
     // GSU TRAJECTORY harness: inject the full engine state + work RAM ONCE,
     // then run luna's GSU FREELY (accumulating) and compare each step to the
     // reference trace. Unlike the single-step harness, this catches bugs in
     // loads / accumulation / control flow that only surface over a run. Stops
-    // at the first GSU STOP (no CPU to re-GO). Skips silently w/o the files.
-    // Run: cargo test -p luna-bus gsu_trajectory -- --nocapture
+    // at the first GSU STOP (no CPU to re-GO). Manual, like the harness
+    // above (same capture, same command); a missing fixture is a failure.
+    //
+    // The work-RAM comparison only means something when the trace ENDS on the
+    // STOP luna reaches: `mesen_gsu_ram_stop1.bin` must be the RAM at that
+    // STOP. The capture script stops logging at 20 000 rows and dumps the RAM
+    // at the next frame boundary, so:
+    //   - a row-capped capture (no STOP in it) has no comparable RAM image —
+    //     the reference GSU kept running after the last row. Measured
+    //     2026-10-04 (ARM_FRAME=1500): 19 999 instructions replayed with zero
+    //     register divergence, 2 391 RAM bytes "different" for that reason
+    //     alone. The RAM check is skipped there, and says so.
+    //   - a capture that ends on a STOP is compared byte for byte. Measured
+    //     the same day on a burst captured from GO to STOP with the RAM
+    //     dumped at the STOP itself: 4 298 instructions, 0 of 65 536 bytes
+    //     differ. If the script's frame-end dump lets the S-CPU touch the RAM
+    //     first, this fails loudly: fix the capture, not the assertion.
     #[test]
+    #[ignore = "manual: needs a Mesen2 GSU capture (tools/snes-gsu-trajectory-capture.lua) and the Star Fox ROM"]
     fn gsu_trajectory_vs_mesen() {
-        use std::path::Path;
         let dir = std::env::var("LUNA_GSU_DIFF_DIR").unwrap_or_else(|_| "/tmp".into());
         let csv = format!("{dir}/mesen_gsu_full.csv");
         let initp = format!("{dir}/mesen_gsu_init.txt");
         let ramp = format!("{dir}/mesen_gsu_ram_start.bin");
-        let rom_path = std::env::var("LUNA_SF_ROM")
-            .unwrap_or_else(|_| "../../tests/roms/Star Fox (USA) (Rev 2).sfc".into());
-        if ![&csv, &initp, &ramp, &rom_path]
-            .iter()
-            .all(|p| Path::new(p).exists())
-        {
-            eprintln!("gsu_trajectory: reference files or ROM absent — skipping");
-            return;
-        }
-        let rom = std::fs::read(&rom_path).expect("rom");
-        let ram_start = std::fs::read(&ramp).expect("ram");
+        let rom = read_gsu_rom();
+        let ram_start = std::fs::read(&ramp).unwrap_or_else(|e| panic!("{ramp}: {e}"));
         let init: std::collections::HashMap<String, i64> = std::fs::read_to_string(&initp)
-            .expect("init")
+            .unwrap_or_else(|e| panic!("{initp}: {e}"))
             .lines()
             .filter_map(|l| {
                 let (k, v) = l.split_once('=')?;
                 Some((k.to_string(), v.trim().parse().ok()?))
             })
             .collect();
-        let g = |k: &str| *init.get(k).unwrap_or(&0);
+        let g = |k: &str| {
+            *init
+                .get(k)
+                .unwrap_or_else(|| panic!("{initp}: key `{k}` missing or not a number"))
+        };
 
         // Parse the reference instruction trace.
-        let text = std::fs::read_to_string(&csv).expect("csv");
-        let mut rows: Vec<Row> = Vec::new();
-        for (i, line) in text.lines().enumerate() {
-            if i == 0 {
-                continue;
-            }
-            let f: Vec<&str> = line.split(',').collect();
-            if f.len() < 25 {
-                continue;
-            }
-            let gv = |k: usize| f[k].trim().parse::<i64>().unwrap_or(0);
-            let mut r = [0u16; 16];
-            for (j, rr) in r.iter_mut().enumerate() {
-                *rr = gv(9 + j) as u16;
-            }
-            rows.push(Row {
-                pc: gv(1) as u32,
-                opcode: (gv(2) & 0xFF) as u8,
-                sfr: gv(3) as u16,
-                sreg: gv(4) as usize,
-                dreg: gv(5) as usize,
-                pbr: gv(6) as u8,
-                r,
-            });
-        }
+        let rows = read_gsu_trace(&csv);
         assert!(rows.len() > 2, "need a trace");
 
         let ram_size = g("ramSize") as usize;
@@ -2523,6 +2549,8 @@ mod tests {
         let flag_mask: u16 = SFR_Z | SFR_CY | SFR_S | SFR_OV | SFR_ALT1 | SFR_ALT2 | SFR_B;
         let mut steps = 0usize;
         let mut diverged = false;
+        // Row index of the STOP luna executed, when the run ended on one.
+        let mut stopped_at: Option<usize> = None;
         for i in 0..rows.len() - 1 {
             // Control-flow sync: the op luna is about to run must match the ref.
             let luna_op = m.regs.pipeline;
@@ -2541,6 +2569,7 @@ mod tests {
                     "\nreached GSU STOP at step {i} (op {:02X}) — end of GO run",
                     rows[i].opcode
                 );
+                stopped_at = Some(i);
                 break;
             }
             let post = &rows[i + 1];
@@ -2578,40 +2607,78 @@ mod tests {
         eprintln!(
             "\n=== GSU trajectory: replayed {steps} instrs, diverged={diverged} ===\n(clean = loads/compute/control-flow all match the reference over a free run)"
         );
+        assert!(
+            !diverged,
+            "GSU free run diverges from the Mesen2 trace after {steps} instructions (see stderr)"
+        );
+        assert!(
+            steps as u64 >= GSU_MIN_OPS,
+            "{csv}: only {steps} instructions replayed (floor {GSU_MIN_OPS}) — truncated capture?"
+        );
 
         // RAM (PLOT/store) check: registers don't reveal framebuffer writes,
         // so compare luna's work RAM after the GO-run to the reference's RAM
-        // at its first STOP. This is where a PLOT/flush bug would surface.
-        let stop_ram = format!("{dir}/mesen_gsu_ram_stop1.bin");
-        if !diverged && Path::new(&stop_ram).exists() {
-            let ref_ram = std::fs::read(&stop_ram).expect("stop ram");
-            if ref_ram.len() == m.ram.len() {
-                let diffs: Vec<usize> = (0..m.ram.len())
-                    .filter(|&i| m.ram[i] != ref_ram[i])
-                    .collect();
-                eprintln!(
-                    "RAM after GO-run: {} / {} bytes differ from reference ({:.2}%)",
-                    diffs.len(),
-                    m.ram.len(),
-                    100.0 * diffs.len() as f64 / m.ram.len() as f64
-                );
-                // Cluster the diffs into 0x100-byte regions to localize.
-                let mut region: std::collections::BTreeMap<usize, usize> =
-                    std::collections::BTreeMap::new();
-                for &i in &diffs {
-                    *region.entry(i & !0xFF).or_insert(0) += 1;
-                }
-                eprintln!("differing RAM regions ($base: count):");
-                for (base, n) in region.iter().take(40) {
-                    eprintln!("  ${base:05X}: {n}");
-                }
-                // Show a few concrete differing bytes.
-                eprintln!("sample differing bytes (addr: luna vs ref):");
-                for &i in diffs.iter().take(20) {
-                    eprintln!("  ${:05X}: {:02X} vs {:02X}", i, m.ram[i], ref_ram[i]);
-                }
-            }
+        // at its STOP. This is where a PLOT/flush bug would surface.
+        if let Some(i) = stopped_at {
+            // The loop never runs the last row, so luna stopped mid-trace.
+            assert_eq!(
+                rows[i].opcode, 0x00,
+                "luna's GSU stopped at row {i} on an opcode that is not STOP"
+            );
+            eprintln!(
+                "RAM check NOT RUN: the trace continues past the STOP at row {i} of {}",
+                rows.len()
+            );
+            return;
         }
+        if rows.last().is_none_or(|r| r.opcode != 0x00) {
+            // Row-capped capture: the reference RAM image is from a later point.
+            eprintln!(
+                "RAM check NOT RUN: the trace does not end on a STOP (row-capped capture, {} rows)",
+                rows.len()
+            );
+            return;
+        }
+        let stop_ram = format!("{dir}/mesen_gsu_ram_stop1.bin");
+        let ref_ram = std::fs::read(&stop_ram).unwrap_or_else(|e| panic!("{stop_ram}: {e}"));
+        assert_eq!(ref_ram.len(), m.ram.len(), "{stop_ram}: RAM size mismatch");
+        // The trace's last row is the STOP itself, about to run: execute it so
+        // luna's pixel cache is flushed like the reference's.
+        assert_eq!(
+            m.regs.pipeline, 0x00,
+            "luna is not on the trace's final STOP"
+        );
+        m.run_one();
+        let diffs: Vec<usize> = (0..m.ram.len())
+            .filter(|&i| m.ram[i] != ref_ram[i])
+            .collect();
+        eprintln!(
+            "RAM after GO-run: {} / {} bytes differ from reference ({:.2}%)",
+            diffs.len(),
+            m.ram.len(),
+            100.0 * diffs.len() as f64 / m.ram.len() as f64
+        );
+        // Cluster the diffs into 0x100-byte regions to localize.
+        let mut region: std::collections::BTreeMap<usize, usize> =
+            std::collections::BTreeMap::new();
+        for &i in &diffs {
+            *region.entry(i & !0xFF).or_insert(0) += 1;
+        }
+        eprintln!("differing RAM regions ($base: count):");
+        for (base, n) in region.iter().take(40) {
+            eprintln!("  ${base:05X}: {n}");
+        }
+        // Show a few concrete differing bytes.
+        eprintln!("sample differing bytes (addr: luna vs ref):");
+        for &i in diffs.iter().take(20) {
+            eprintln!("  ${:05X}: {:02X} vs {:02X}", i, m.ram[i], ref_ram[i]);
+        }
+        assert!(
+            diffs.is_empty(),
+            "GSU work RAM differs from Mesen2 at the STOP: {} of {} bytes",
+            diffs.len(),
+            m.ram.len()
+        );
     }
 
     #[test]

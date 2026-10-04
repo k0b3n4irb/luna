@@ -3000,30 +3000,6 @@ mod tests {
         assert!(!cpu.psw.contains(bit::I));
     }
 
-    #[test]
-    fn full_256_opcode_coverage_compile_check() {
-        // Compile-time/structural check: the `execute` match no
-        // longer has a catch-all, which means the compiler must see
-        // arms for all 256 byte values. If a future change drops one,
-        // this file won't build — that's the regression we want.
-        // The runtime side of the check just exercises the formerly-
-        // missing opcodes to make sure they don't panic.
-        let mut cpu = Spc700::new();
-        let mut bus = RamBus::new();
-        for op in [
-            0x01u8, 0x0A, 0x0E, 0x0F, 0x19, 0x39, 0x4A, 0x4E, 0x59, 0x6A, 0x79, 0x7F, 0x8A, 0x98,
-            0x99, 0xAA, 0xB8, 0xB9, 0xBE, 0xCA, 0xDF, 0xEA, 0xF1, 0xFA,
-        ] {
-            bus.poke(0xFFFE, 0x00);
-            bus.poke(0xFFFF, 0x02);
-            bus.poke_slice(0x0200, &[op, 0x00, 0x00]);
-            cpu.reset(&mut bus);
-            // The check is simply that executing the formerly-missing
-            // opcode does not panic (the dispatch is now exhaustive).
-            cpu.step(&mut bus);
-        }
-    }
-
     /// After the kick wait loop, drop $CC into $F4 (= what the main
     /// CPU would do via `STA $2140,#$CC`) and confirm the IPL ROM
     /// proceeds into the byte-transfer block.

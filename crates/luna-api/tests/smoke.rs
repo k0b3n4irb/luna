@@ -16,7 +16,8 @@
 //!
 //! ROMs aren't redistributable; the test SKIPs gracefully when a ROM
 //! file is missing (CI on public repos won't have them; contributors
-//! who own the ROMs locally drop them into `tests/roms/`).
+//! who own the ROMs locally drop them into `tests/roms/`). With
+//! `LUNA_GAME_TEST_REQUIRE` set, a missing ROM is a failure instead.
 //!
 //! ## Regenerating goldens
 //!
@@ -25,6 +26,8 @@
 //! ```
 //!
 //! Inspect the diff (`git diff tests/golden/`) and commit if intentional.
+//! Only the value `1` rewrites the goldens, and it is refused while
+//! `LUNA_GAME_TEST_REQUIRE` is set (a gate run must compare, not record).
 
 use std::path::PathBuf;
 
@@ -154,13 +157,27 @@ fn check_audio(case: &Case, actual: &AudioStats, duration_s: f64) -> Vec<String>
         violations.push(format!("audio golden {} is not valid JSON", path.display()));
         return violations;
     };
+    // Every field compared below must be in the golden: a missing one read
+    // as 0 would turn its check into "is the value near zero".
     let stats = &g["stats"];
-    let g_peak_pos = stats["peak_pos"].as_f64().unwrap_or_default();
-    let g_peak_neg = stats["peak_neg"].as_f64().unwrap_or_default();
-    let g_rms = stats["rms"].as_f64().unwrap_or_default();
-    let g_mean_abs = stats["mean_abs"].as_f64().unwrap_or_default();
-    let g_non_zero = stats["non_zero"].as_f64().unwrap_or_default();
-    let g_duration = g["duration_s"].as_f64().unwrap_or_default();
+    let mut field = |v: &serde_json::Value, name: &str| {
+        v[name].as_f64().unwrap_or_else(|| {
+            violations.push(format!(
+                "audio golden {} has no numeric `{name}`",
+                path.display()
+            ));
+            f64::NAN
+        })
+    };
+    let g_peak_pos = field(stats, "peak_pos");
+    let g_peak_neg = field(stats, "peak_neg");
+    let g_rms = field(stats, "rms");
+    let g_mean_abs = field(stats, "mean_abs");
+    let g_non_zero = field(stats, "non_zero");
+    let g_duration = field(&g, "duration_s");
+    if !violations.is_empty() {
+        return violations;
+    }
 
     if !within_pct(f64::from(actual.peak_pos), g_peak_pos, TOL_AMPLITUDE_PCT) {
         violations.push(format!(
@@ -238,13 +255,6 @@ fn write_audio_golden(case: &Case, stats: &AudioStats, duration_s: f64) {
         .join("tests/golden/audio")
         .join(format!("{}.json", case.id));
     std::fs::create_dir_all(path.parent().unwrap()).ok();
-    // Preserve any spectrum_peaks from a previous golden (a Python tool,
-    // since deleted, wrote these; nothing here recomputes or checks them).
-    let prev_peaks = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-        .and_then(|v| v.get("spectrum_peaks").cloned())
-        .unwrap_or(serde_json::Value::Array(vec![]));
     let golden = serde_json::json!({
         "rom": case.rom_filename,
         "frames": case.frames,
@@ -257,7 +267,6 @@ fn write_audio_golden(case: &Case, stats: &AudioStats, duration_s: f64) {
             "mean_abs": (stats.mean_abs * 100.0).round() / 100.0,
             "non_zero": (stats.non_zero * 10000.0).round() / 10000.0,
         },
-        "spectrum_peaks": prev_peaks,
     });
     std::fs::write(&path, serde_json::to_string_pretty(&golden).unwrap() + "\n")
         .unwrap_or_else(|e| panic!("write {}: {}", path.display(), e));
@@ -271,10 +280,27 @@ fn write_screenshot_golden(case: &Case, png: &[u8]) {
     std::fs::write(&path, png).unwrap_or_else(|e| panic!("write {}: {}", path.display(), e));
 }
 
+/// Report a ROM the test cannot run on: a skip notice, or a failure when
+/// `LUNA_GAME_TEST_REQUIRE` is set — the switch of the commercial goldens in
+/// `luna-core/tests/snes_test_roms.rs`.
+fn skip(why: &str) {
+    assert!(
+        std::env::var_os("LUNA_GAME_TEST_REQUIRE").is_none(),
+        "{why} — and LUNA_GAME_TEST_REQUIRE is set, so a skip is a failure"
+    );
+    eprintln!("SKIP {why}");
+}
+
 #[test]
 fn smoke() {
     const AUDIO_CHUNK: u64 = 100_000;
-    let update = std::env::var("UPDATE_GOLDENS").is_ok();
+    // Only `1` rewrites the goldens: a stray `UPDATE_GOLDENS=0` must not.
+    let update = std::env::var("UPDATE_GOLDENS").as_deref() == Ok("1");
+    assert!(
+        !(update && std::env::var_os("LUNA_GAME_TEST_REQUIRE").is_some()),
+        "UPDATE_GOLDENS=1 rewrites the goldens instead of comparing them, and \
+         LUNA_GAME_TEST_REQUIRE is set: a gate run cannot record. Unset one of them."
+    );
     let mut violations: Vec<String> = Vec::new();
     let mut ran = 0;
     let mut skipped = 0;
@@ -282,7 +308,7 @@ fn smoke() {
     for case in CASES {
         let rom_path = workspace_root().join("tests/roms").join(case.rom_filename);
         if !rom_path.exists() {
-            eprintln!("SKIP {}: ROM not at {}", case.id, rom_path.display());
+            skip(&format!("{}: ROM not at {}", case.id, rom_path.display()));
             skipped += 1;
             continue;
         }

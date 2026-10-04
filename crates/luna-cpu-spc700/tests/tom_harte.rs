@@ -18,11 +18,19 @@
 //! ```
 //!
 //! Set `LUNA_TOM_HARTE_REQUIRE=1` to make any failure cause the test to
-//! fail (the strict regression gate). Without it the test always passes
-//! and just prints a report. This mirrors the 65C816 harness in
-//! `crates/luna-cpu-65c816/tests/tom_harte.rs`.
+//! fail (the strict regression gate): a state or cycle-trace mismatch, a
+//! core that panics, a missing dataset, or a dataset with fewer files or
+//! cases than [`EXPECTED_FILES`] × [`CASES_PER_FILE`]. Without it the test
+//! always passes and just prints a report. This mirrors the 65C816 harness
+//! in `crates/luna-cpu-65c816/tests/tom_harte.rs`.
+//!
+//! Every case runs on **both** cores: the cycle-stepped one production
+//! drives (`Spc700::step_instruction`, i.e. `step_cycle` to completion — the
+//! path `luna-apu` calls once per bus access), and the atomic interpreter
+//! (`Spc700::step`), kept as the equivalence oracle.
 
 use luna_cpu_spc700::flags::Psw;
+use luna_cpu_spc700::step::StepResult;
 use luna_cpu_spc700::{Spc700, SpcBus};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -144,10 +152,43 @@ fn opcode_from_filename(stem: &str) -> Option<u8> {
 // Per-case runner
 // =============================================================================
 
+/// Opcode files in the dataset (one per opcode) and cases in each: the
+/// 256,000 cases `docs/test_corpora.md` quotes. Under
+/// `LUNA_TOM_HARTE_REQUIRE` a smaller dataset is a failure, not a shorter
+/// run.
+const EXPECTED_FILES: usize = 256;
+const CASES_PER_FILE: usize = 1000;
+
+/// Upper bound on the cycles of one instruction (the longest, `DIV`, takes
+/// 12): a production-core case that has not completed by then is reported as
+/// a failure instead of hanging the suite.
+const MAX_CYCLES_PER_INSTRUCTION: u32 = 64;
+
+/// Which SPC700 core a case runs on.
+#[derive(Debug, Clone, Copy)]
+enum Core {
+    /// `step_cycle` until the instruction completes — what `luna-apu` runs.
+    Production,
+    /// The atomic `Spc700::step` — the equivalence oracle.
+    Atomic,
+}
+
+const CORES: [Core; 2] = [Core::Production, Core::Atomic];
+
+impl Core {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Production => "production (step_cycle)",
+            Self::Atomic => "atomic (step)",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum CaseResult {
     Pass,
-    Skip,
+    /// The core panicked: a failure under `LUNA_TOM_HARTE_REQUIRE`.
+    Panicked,
 }
 
 /// Outcome of the per-opcode cycle check for one executed case: the
@@ -158,17 +199,38 @@ enum CaseResult {
 /// not just a wrong total. `Ok(())` = byte-exact; `Err` = first divergence.
 type CycleCheck = Result<(), String>;
 
-/// Run one case. Returns the state-comparison result plus — when the
-/// instruction actually executed (didn't panic) —
+/// Run one case on `core`. Returns the state-comparison result plus — when
+/// the instruction actually executed (didn't panic) —
 /// a `CycleCheck`. The cycle check is independent of the state result so
 /// a cycle-grammar bug surfaces even on an opcode whose state is correct.
-fn run_case(case: &TestCase, opcode: u8) -> (Result<CaseResult, String>, Option<CycleCheck>) {
+fn run_case(
+    case: &TestCase,
+    opcode: u8,
+    core: Core,
+) -> (Result<CaseResult, String>, Option<CycleCheck>) {
     let mut cpu = Spc700::new();
     let mut bus = Box::new(RamBus::new());
     apply_state(&mut cpu, &mut bus, &case.initial);
 
-    if catch_unwind(AssertUnwindSafe(|| cpu.step(&mut *bus))).is_err() {
-        return (Ok(CaseResult::Skip), None);
+    let ran = catch_unwind(AssertUnwindSafe(|| match core {
+        Core::Atomic => {
+            cpu.step(&mut *bus);
+            true
+        }
+        Core::Production => (0..MAX_CYCLES_PER_INSTRUCTION)
+            .any(|_| cpu.step_cycle(&mut *bus) == StepResult::Complete),
+    }));
+    match ran {
+        Err(_) => return (Ok(CaseResult::Panicked), None),
+        Ok(false) => {
+            return (
+                Err(format!(
+                    "instruction not complete after {MAX_CYCLES_PER_INSTRUCTION} cycles"
+                )),
+                None,
+            );
+        }
+        Ok(true) => {}
     }
 
     // SLEEP (0xEF) / STOP (0xFF) halt the core: their Tom Harte trace is a
@@ -277,7 +339,7 @@ fn compare_state(cpu: &Spc700, bus: &RamBus, expected: &State) -> Result<(), Str
 struct OpStats {
     passed: u32,
     failed: u32,
-    skipped: u32,
+    panicked: u32,
     first_failure: Option<String>,
     /// Cycle-count backstop: executed cases whose `step()` total matched
     /// the bus-cycle trace length, vs. those that didn't.
@@ -293,11 +355,17 @@ fn tom_harte() {
         eprintln!("Tom Harte SPC700 dataset not found.");
         eprintln!("Run `tools/fetch-tom-harte-spc700.sh` from the workspace root");
         eprintln!("or set LUNA_TOM_HARTE_SPC700_DIR to point at the JSON directory.");
+        assert!(
+            !require(),
+            "Tom Harte SPC700 dataset not found (tests/tom-harte-spc700/v1, or \
+             LUNA_TOM_HARTE_SPC700_DIR) — and LUNA_TOM_HARTE_REQUIRE is set"
+        );
         return;
     };
 
     eprintln!("Reading Tom Harte SPC700 tests from {}", dir.display());
-    let mut stats: BTreeMap<String, OpStats> = BTreeMap::new();
+    // One table per core, in `CORES` order.
+    let mut stats: [BTreeMap<String, OpStats>; 2] = [BTreeMap::new(), BTreeMap::new()];
     let mut files_with_unknown_opcode = 0;
 
     let entries: Vec<_> = fs::read_dir(&dir)
@@ -328,26 +396,28 @@ fn tom_harte() {
         let bytes = fs::read(&path).expect("read json");
         let cases: Vec<TestCase> = serde_json::from_slice(&bytes).expect("parse Tom Harte json");
 
-        let op = stats.entry(stem.clone()).or_default();
-        for case in &cases {
-            let (state, cycle) = run_case(case, opcode);
-            match state {
-                Ok(CaseResult::Pass) => op.passed += 1,
-                Ok(CaseResult::Skip) => op.skipped += 1,
-                Err(reason) => {
-                    op.failed += 1;
-                    if op.first_failure.is_none() {
-                        op.first_failure = Some(format!("{}: {reason}", case.name));
+        for (core, table) in CORES.into_iter().zip(&mut stats) {
+            let op = table.entry(stem.clone()).or_default();
+            for case in &cases {
+                let (state, cycle) = run_case(case, opcode, core);
+                match state {
+                    Ok(CaseResult::Pass) => op.passed += 1,
+                    Ok(CaseResult::Panicked) => op.panicked += 1,
+                    Err(reason) => {
+                        op.failed += 1;
+                        if op.first_failure.is_none() {
+                            op.first_failure = Some(format!("{}: {reason}", case.name));
+                        }
                     }
                 }
-            }
-            if let Some(c) = cycle {
-                match c {
-                    Ok(()) => op.cycle_passed += 1,
-                    Err(diff) => {
-                        op.cycle_failed += 1;
-                        if op.first_cycle_failure.is_none() {
-                            op.first_cycle_failure = Some(format!("{}: {diff}", case.name));
+                if let Some(c) = cycle {
+                    match c {
+                        Ok(()) => op.cycle_passed += 1,
+                        Err(diff) => {
+                            op.cycle_failed += 1;
+                            if op.first_cycle_failure.is_none() {
+                                op.first_cycle_failure = Some(format!("{}: {diff}", case.name));
+                            }
                         }
                     }
                 }
@@ -355,23 +425,32 @@ fn tom_harte() {
         }
     }
 
-    print_report(&stats, files_with_unknown_opcode);
-    enforce_baseline(&stats);
+    for (core, table) in CORES.into_iter().zip(&stats) {
+        print_report(core, table, files_with_unknown_opcode);
+    }
+    for (core, table) in CORES.into_iter().zip(&stats) {
+        enforce_baseline(core, table);
+    }
 }
 
-fn print_report(stats: &BTreeMap<String, OpStats>, unknown: usize) {
+/// `LUNA_TOM_HARTE_REQUIRE` is set: the run is a gate, not a report.
+fn require() -> bool {
+    std::env::var_os("LUNA_TOM_HARTE_REQUIRE").is_some()
+}
+
+fn print_report(core: Core, stats: &BTreeMap<String, OpStats>, unknown: usize) {
     let total_files = stats.len();
     let (pass, fail, skip): (u64, u64, u64) = stats.values().fold((0, 0, 0), |(p, f, s), o| {
         (
             p + u64::from(o.passed),
             f + u64::from(o.failed),
-            s + u64::from(o.skipped),
+            s + u64::from(o.panicked),
         )
     });
 
     eprintln!();
     eprintln!("============================================");
-    eprintln!("  Tom Harte SPC700 — results");
+    eprintln!("  Tom Harte SPC700 — {} core", core.name());
     eprintln!("============================================");
     eprintln!("  Files processed: {total_files}");
     if unknown > 0 {
@@ -379,7 +458,7 @@ fn print_report(stats: &BTreeMap<String, OpStats>, unknown: usize) {
     }
     eprintln!("  Pass:    {pass}");
     eprintln!("  Fail:    {fail}");
-    eprintln!("  Skipped: {skip}   (panic = opcode not yet implemented)");
+    eprintln!("  Panicked: {skip}");
 
     let (cyc_pass, cyc_fail): (u64, u64) = stats.values().fold((0, 0), |(p, f), o| {
         (p + u64::from(o.cycle_passed), f + u64::from(o.cycle_failed))
@@ -424,10 +503,36 @@ fn print_report(stats: &BTreeMap<String, OpStats>, unknown: usize) {
     }
 }
 
-fn enforce_baseline(stats: &BTreeMap<String, OpStats>) {
-    if std::env::var("LUNA_TOM_HARTE_REQUIRE").is_err() {
+fn enforce_baseline(core: Core, stats: &BTreeMap<String, OpStats>) {
+    if !require() {
         return;
     }
+    let core = core.name();
+    // A dataset that is absent, empty, renamed or truncated must not read
+    // as "no regression".
+    assert!(
+        stats.len() >= EXPECTED_FILES,
+        "Tom Harte SPC700 ({core}): {} opcode files processed, {EXPECTED_FILES} expected",
+        stats.len()
+    );
+    let short: Vec<&String> = stats
+        .iter()
+        .filter(|(_, s)| ((s.passed + s.failed + s.panicked) as usize) < CASES_PER_FILE)
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        short.is_empty(),
+        "Tom Harte SPC700 ({core}): files with fewer than {CASES_PER_FILE} cases: {short:?}"
+    );
+    let panicked: Vec<&String> = stats
+        .iter()
+        .filter(|(_, s)| s.panicked > 0)
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        panicked.is_empty(),
+        "Tom Harte SPC700 ({core}): the core panicked on: {panicked:?}"
+    );
     let regressions: Vec<&String> = stats
         .iter()
         .filter(|(_, s)| s.failed > 0)
@@ -435,7 +540,7 @@ fn enforce_baseline(stats: &BTreeMap<String, OpStats>) {
         .collect();
     assert!(
         regressions.is_empty(),
-        "Tom Harte SPC700: state regressions: {regressions:?}\n\
+        "Tom Harte SPC700 ({core}): state regressions: {regressions:?}\n\
          (run without LUNA_TOM_HARTE_REQUIRE to see the full report)"
     );
     let cycle_regressions: Vec<&String> = stats
@@ -445,7 +550,7 @@ fn enforce_baseline(stats: &BTreeMap<String, OpStats>) {
         .collect();
     assert!(
         cycle_regressions.is_empty(),
-        "Tom Harte SPC700: cycle-count regressions: {cycle_regressions:?}\n\
+        "Tom Harte SPC700 ({core}): cycle-trace regressions: {cycle_regressions:?}\n\
          (run without LUNA_TOM_HARTE_REQUIRE to see the full report)"
     );
 }

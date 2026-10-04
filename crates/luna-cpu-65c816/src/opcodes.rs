@@ -9,8 +9,10 @@
 //! Opcode dispatch and the full 65c816 instruction-handler set.
 //!
 //! All 256 opcodes are implemented (no stubs, no panics) and validated
-//! against the Tom Harte `SingleStepTests` suite — 100% pass, including
-//! the per-entry `cycles[]` bus-order oracle (see `tests/tom_harte.rs`).
+//! against the Tom Harte `SingleStepTests` suite — 100% pass on state and
+//! on cycle count; the per-entry `cycles[]` bus-order oracle matches on 94%
+//! of the cases, the rest being the 30 files listed in `TRACE_RESIDUAL`
+//! (see `tests/tom_harte.rs`).
 //! Handlers are grouped by family (loads/stores, ALU, RMW, branches,
 //! stack, mode control) with separator banners.
 

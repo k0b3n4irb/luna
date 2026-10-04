@@ -165,15 +165,20 @@ The version tracks luna's **user-facing contract**, not the Rust API:
 
   ```bash
   LUNA_SNES_TEST_DIR=<corpus> LUNA_SNES_TEST_REQUIRE=1 LUNA_GAME_TEST_REQUIRE=1 \
+  LUNA_MOUSE_ROM=<opensnes>/examples/input/mouse/mouse.sfc \
+  LUNA_SUPERSCOPE_ROM=<opensnes>/examples/input/superscope/superscope.sfc \
     cargo test --workspace --all-targets
   ```
 
   `<corpus>` is the directory `tools/fetch-snes-test-roms.sh` filled
   (`../luna_tests` by default). `LUNA_SNES_TEST_REQUIRE=1` turns a missing
   corpus, or a missing ROM of the homebrew golden suite, into a failure
-  instead of a skip. `LUNA_GAME_TEST_REQUIRE=1` does the same for the
-  commercial-game goldens of that suite when `tests/roms/` or one of its
-  ROMs is absent. Without them a missing or renamed ROM skips and the run
+  instead of a skip. `LUNA_GAME_TEST_REQUIRE=1` does the same for every
+  test that needs a file the repository cannot ship: the commercial-game
+  goldens, the smoke and reset tests (`tests/roms/`), the mouse and Super
+  Scope tests (the two OpenSNES example ROMs named above). The
+  differentials against a Mesen2 capture (GSU, DSP-1 port) are `#[ignore]`d
+  manual harnesses and are not part of this run. Without them a missing or renamed ROM skips and the run
   still reads green. The commercial smoke and game goldens SKIP on CI
   (copyrighted ROMs are never committed), so a stale golden passes CI
   silently and only a local run catches it. That is exactly how the

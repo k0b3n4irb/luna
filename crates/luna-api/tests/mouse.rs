@@ -1,22 +1,38 @@
 //! RFE-3 acceptance: the `OpenSNES` `examples/input/mouse` ROM detects the SNES
 //! Mouse on port 1 (via the auto-joypad-read signature) and shows its cursor
 //! instead of the "No mouse detected" diagnostic. The ROM is not vendored
-//! (it lives in the `OpenSNES` tree); the test skips if it is absent.
+//! (it lives in the `OpenSNES` tree): point `LUNA_MOUSE_ROM` at
+//! `<opensnes>/examples/input/mouse/mouse.sfc`. Without it the test skips —
+//! or fails, when `LUNA_GAME_TEST_REQUIRE` is set.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use luna_api::Emulator;
 
-/// `$LUNA_MOUSE_ROM`, else the default `OpenSNES` example location.
-fn mouse_rom() -> Option<std::path::PathBuf> {
-    if let Ok(p) = std::env::var("LUNA_MOUSE_ROM") {
-        let p = std::path::PathBuf::from(p);
-        return p.is_file().then_some(p);
-    }
-    let p = std::path::PathBuf::from(
-        "/home/kobenairb/workspace/opensnes/examples/input/mouse/mouse.sfc",
+/// Report a test that cannot run: a skip notice, or a failure when
+/// `LUNA_GAME_TEST_REQUIRE` is set — the switch of the commercial goldens in
+/// `luna-core/tests/snes_test_roms.rs`, so one variable covers every test
+/// that needs a file the repository cannot ship.
+fn skip(why: &str) {
+    assert!(
+        std::env::var_os("LUNA_GAME_TEST_REQUIRE").is_none(),
+        "{why} — and LUNA_GAME_TEST_REQUIRE is set, so a skip is a failure"
     );
-    p.is_file().then_some(p)
+    eprintln!("[skip] {why}");
+}
+
+/// `$LUNA_MOUSE_ROM`. There is no default: the ROM lives in another
+/// checkout, whose location is the developer's business.
+fn mouse_rom() -> Option<PathBuf> {
+    let Some(p) = std::env::var_os("LUNA_MOUSE_ROM").map(PathBuf::from) else {
+        skip("LUNA_MOUSE_ROM is not set (the OpenSNES examples/input/mouse/mouse.sfc)");
+        return None;
+    };
+    if !p.is_file() {
+        skip(&format!("LUNA_MOUSE_ROM: {} is not a file", p.display()));
+        return None;
+    }
+    Some(p)
 }
 
 fn settle_hash(rom: &Path, mouse_on_port1: bool) -> u64 {
@@ -33,7 +49,6 @@ fn settle_hash(rom: &Path, mouse_on_port1: bool) -> u64 {
 #[test]
 fn mouse_is_detected_on_port1() {
     let Some(rom) = mouse_rom() else {
-        eprintln!("[skip] mouse example ROM absent (set LUNA_MOUSE_ROM)");
         return;
     };
     let pad = settle_hash(&rom, false);
