@@ -199,7 +199,14 @@ pub struct RomInfo {
     /// 16-bit header checksum complement.
     pub checksum_complement: u16,
     /// Whether `checksum` and `checksum_complement` are bitwise complements.
+    /// This checks the pair only, not the ROM: compare `checksum` with
+    /// `checksum_computed` for that.
     pub checksum_valid: bool,
+    /// The checksum of the loaded image, summed over every byte (the tail
+    /// of an image whose size is not a power of two is mirrored, as the
+    /// header convention has it). Equal to `checksum` on a ROM whose
+    /// header was fixed up after the last byte changed.
+    pub checksum_computed: u16,
     /// When the cart needs an external coprocessor firmware that wasn't
     /// found (e.g. a DSP-1 game with no `dsp1b.rom`), the required
     /// filename — so a front-end can prompt for / install it. `None` when
@@ -1541,6 +1548,7 @@ impl Emulator {
             checksum: cart.header.checksum,
             checksum_complement: cart.header.checksum_complement,
             checksum_valid: cart.header.checksum_valid(),
+            checksum_computed: luna_cartridge::computed_checksum(&cart.rom),
             missing_firmware: if cart.needs_coprocessor_firmware() {
                 cart.required_firmware_filename().map(str::to_string)
             } else {

@@ -157,6 +157,35 @@ impl Header {
     }
 }
 
+/// The 16-bit checksum of a ROM image, as the header's `checksum` field is
+/// meant to hold it: the wrapping sum of every byte, with the tail of an
+/// image whose size is not a power of two repeated until it fills the
+/// power-of-two half it sits in.
+#[must_use]
+pub fn computed_checksum(rom: &[u8]) -> u16 {
+    mirror_sum(rom).0
+}
+
+/// Sum of `rom` and the power-of-two length it stands for once mirrored.
+fn mirror_sum(rom: &[u8]) -> (u16, usize) {
+    let byte_sum = |b: &[u8]| b.iter().fold(0u16, |s, &v| s.wrapping_add(u16::from(v)));
+    if rom.is_empty() {
+        return (0, 0);
+    }
+    // Largest power of two that fits.
+    let head = 1usize << rom.len().ilog2();
+    let head_sum = byte_sum(&rom[..head]);
+    if rom.len() == head {
+        return (head_sum, head);
+    }
+    let (mut tail_sum, mut tail_len) = mirror_sum(&rom[head..]);
+    while tail_len < head {
+        tail_len *= 2;
+        tail_sum = tail_sum.wrapping_add(tail_sum);
+    }
+    (head_sum.wrapping_add(tail_sum), head * 2)
+}
+
 // =============================================================================
 // Cartridge
 // =============================================================================
@@ -888,5 +917,32 @@ mod tests {
         // between 'E' and 'X', giving one space — the trailing spaces
         // are stripped by trim_end.
         assert_eq!(decode_title(&bytes), "SAMPLE X");
+    }
+
+    #[test]
+    fn computed_checksum_sums_a_power_of_two_image() {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x100] = 0xFF;
+        rom[0x7FFF] = 0x02;
+        assert_eq!(computed_checksum(&rom), 0x0101);
+        // 65536 bytes of $FF wrap the 16-bit sum.
+        assert_eq!(computed_checksum(&vec![0xFF; 0x1_0000]), 0x0000);
+        assert_eq!(computed_checksum(&[]), 0);
+    }
+
+    #[test]
+    fn computed_checksum_mirrors_a_tail_that_is_not_a_power_of_two() {
+        // 3 units = 2 + 1: the last unit counts twice, as if the image
+        // were 4 units with the tail repeated.
+        let mut rom = vec![0u8; 0x1_8000];
+        rom[0] = 1;
+        rom[0x1_0000] = 5;
+        assert_eq!(computed_checksum(&rom), 1 + 5 * 2);
+        // 2 + 1 + 0.5: the half unit is repeated to fill a one-unit
+        // slot; the tail is then two units, as long as the head.
+        let mut rom = vec![0u8; 0x1_C000];
+        rom[0x1_0000] = 5;
+        rom[0x1_8000] = 7;
+        assert_eq!(computed_checksum(&rom), 5 + 7 * 2);
     }
 }

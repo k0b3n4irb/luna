@@ -119,8 +119,8 @@ pub(crate) fn print_header(info: &luna_api::RomInfo) {
     println!("Region:      {}", info.region);
     println!("Version:     v{}", info.version);
     println!(
-        "Checksum:    ${:04X} / complement ${:04X} (valid: {})",
-        info.checksum, info.checksum_complement, info.checksum_valid
+        "Checksum:    ${:04X} / complement ${:04X} (valid: {}) / computed ${:04X}",
+        info.checksum, info.checksum_complement, info.checksum_valid, info.checksum_computed
     );
 }
 

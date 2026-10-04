@@ -9,6 +9,22 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ### Added
 
+- **`rom.checksum_computed`: the checksum of the ROM as loaded.** The
+  state's `rom.checksum_valid` only says the header's checksum and its
+  complement agree with each other; a ROM with one byte changed after the
+  header was written still reads `true`. The new field sums the image
+  (the tail of a size that is not a power of two mirrored, as the header
+  convention has it), so `checksum == checksum_computed` is the test that
+  the header matches the bytes. The header summary `luna run` prints
+  shows it too (`… / computed $AF40`).
+  `checksum_valid` keeps its meaning: it is the signal header detection
+  uses, and commercial ROMs are judged on it.
+
+  ```bash
+  luna state game.sfc --until-frame 0 --out - \
+    | jq '.rom | .checksum == .checksum_computed'
+  ```
+
 - **`[asserts.dsp]` takes the register names the `--dsp-trace` CSV
   prints.** A pitch register copied out of a trace (`V3_PL`, `V3_PH`) was
   an unknown register in a `luna test` manifest, which only knew

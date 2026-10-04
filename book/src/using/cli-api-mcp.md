@@ -932,7 +932,7 @@ MCP client sees how to drive the emulator before listing a single tool.
 
 | Field | Contents |
 |---|---|
-| `rom` | `RomInfo`: `title`, `mapper`, `rom_bytes`, `header_rom_size_kb`, `sram_kb`, `region`, `fast_rom`, `version`, `checksum{,_complement,_valid}`, `missing_firmware`, and `symbols_loaded` / `symbols_error` (how many labels the `.sym` gave, or why it could not be read). |
+| `rom` | `RomInfo`: `title`, `mapper`, `rom_bytes`, `header_rom_size_kb`, `sram_kb`, `region`, `fast_rom`, `version`, `checksum{,_complement,_valid,_computed}` (`checksum_valid` only says the header pair is consistent; `checksum == checksum_computed` says the header matches the ROM bytes: `luna state game.sfc --until-frame 0 --out - \| jq '.rom \| .checksum == .checksum_computed'`), `missing_firmware`, and `symbols_loaded` / `symbols_error` (how many labels the `.sym` gave, or why it could not be read). |
 | `cpu` | 65c816 registers `a/x/y/sp/pc/pb/db/dp/p` + flags. |
 | `cpu_regs` | Decoded MMIO/CPU register block. |
 | `ppu` | PPU registers + VRAM/CGRAM/OAM occupancy. |

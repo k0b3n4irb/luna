@@ -1786,3 +1786,22 @@ fn the_exported_dmap_is_the_byte_the_bus_reads() {
     assert_eq!(read, values, "the program wrote every channel");
     assert_eq!(exported, read, "after the writes");
 }
+
+#[test]
+fn checksum_computed_sees_a_byte_the_header_pair_does_not() {
+    let mut rom = demo_lorom_with(&[0x80, 0xFE], None);
+    let load = |rom: &[u8]| {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(rom.to_vec()).unwrap()
+    };
+    let before = load(&rom);
+    // One byte changes, the header is left as it was.
+    rom[0x100] = rom[0x100].wrapping_add(3);
+    let after = load(&rom);
+    assert_eq!(after.checksum, before.checksum);
+    assert_eq!(after.checksum_valid, before.checksum_valid);
+    assert_eq!(
+        after.checksum_computed,
+        before.checksum_computed.wrapping_add(3)
+    );
+}
