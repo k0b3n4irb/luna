@@ -1235,3 +1235,84 @@ V7_OUTX = 0          # $79 — output readback
     assert!(stderr.contains("unknown S-DSP register"), "{stderr}");
     assert!(stderr.contains("V0_ENVX"), "{stderr}");
 }
+
+/// A hex block with a multi-byte character is a reported manifest error,
+/// like any other malformed block — not a crash. `"aéb"` is four bytes, so
+/// it passed the even-length check and was then sliced inside the `é`,
+/// which aborted the whole `luna test` run (exit 101) and lost the verdict
+/// of every other manifest with it.
+#[test]
+fn non_ascii_hex_block_is_reported_not_a_panic() {
+    let dir = fresh_dir("hex_non_ascii");
+    synthetic_rom(&dir.join("game.sfc"), &[]);
+    for (name, block) in [
+        ("plain", r#""7E:0000" = "aéb""#),
+        (
+            "spec",
+            r#"font = { space = "vram", offset = "0000", hex = "aé b" }"#,
+        ),
+    ] {
+        std::fs::write(
+            dir.join(format!("{name}.toml")),
+            format!(
+                "rom = \"game.sfc\"\nforce_mapper = \"lorom\"\nframes = 1\n\n[asserts.blocks]\n{block}\n"
+            ),
+        )
+        .unwrap();
+        let out = run(&[&format!("{name}.toml")], &dir);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!stderr.contains("panicked"), "{name}: {stderr}");
+        // The exit code of every other malformed hex block (odd length, a
+        // non-hex digit): the block is a failed assert of that manifest.
+        assert_eq!(out.status.code(), Some(1), "{name}: {stdout}\n{stderr}");
+        assert!(stdout.contains(&format!("FAIL {name}")), "{stdout}");
+        assert!(stdout.contains("expected ASCII hex digits"), "{stdout}");
+        assert!(stdout.contains("1 failed"), "the run finished: {stdout}");
+    }
+
+    // What the block accepted before is still accepted: whitespace anywhere
+    // between the digits.
+    std::fs::write(
+        dir.join("spaced.toml"),
+        "rom = \"game.sfc\"\nforce_mapper = \"lorom\"\nframes = 1\n\n[asserts.blocks]\n\"00:8000\" = \" 8 0\\tfe \"\n",
+    )
+    .unwrap();
+    let out = run(&["spaced.toml"], &dir);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// `[asserts.dsp]` takes the names the `--dsp-trace` CSV prints: a pitch
+/// register copied out of a trace (`V3_PL`) used to be an unknown register,
+/// only the longer `V3_PITCHL` was known.
+#[test]
+fn dsp_asserts_take_the_trace_csv_spelling() {
+    let dir = fresh_dir("dsp_csv_names");
+    synthetic_rom(&dir.join("game.sfc"), &[]);
+    std::fs::write(
+        dir.join("dsp.toml"),
+        r#"
+rom = "game.sfc"
+force_mapper = "lorom"
+frames = 2
+
+[asserts.dsp]
+V3_PL = 0            # $32, as the CSV prints it
+V3_PITCHL = 0        # the same register, the longer spelling
+V3_PH = 0            # $33
+"32" = 0
+"#,
+    )
+    .unwrap();
+    let out = run(&["dsp.toml"], &dir);
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

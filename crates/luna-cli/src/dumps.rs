@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use crate::parsers::pad_events;
+use crate::parsers::{InputFlags, apply_input_flags};
 use crate::rom::load_rom_into;
 
 /// `luna spc-dump` — run until the music driver is live, then write a
@@ -167,16 +167,8 @@ fn warm_up_with_script(
     input_script: Option<&str>,
     steps: u64,
 ) -> Result<u64, ExitCode> {
-    let mut script = luna_api::InputScript::new();
-    if let Some(s) = input_script {
-        match pad_events(s, 0) {
-            Ok(v) => script.extend(v),
-            Err(e) => {
-                eprintln!("error: --input: {e}");
-                return Err(ExitCode::from(2));
-            }
-        }
-    }
+    let mut script =
+        apply_input_flags(em, &InputFlags::pad1(input_script)).map_err(ExitCode::from)?;
     match em.run_input_script(&mut script, luna_api::ScriptBound::Steps(steps)) {
         Ok(spent) => Ok(steps.saturating_sub(spent)),
         Err(e) => {

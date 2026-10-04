@@ -510,7 +510,7 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
         (None, None) => true,
     };
     if let Some(path) = o.out {
-        let json = serde_json::to_string_pretty(&Report {
+        let report = Report {
             rom,
             from_frame: start_frame,
             end_frame,
@@ -523,17 +523,9 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
             },
             gsu,
             sa1,
-        })
-        .expect("report serialises");
-        let res = if path.as_os_str() == "-" {
-            println!("{json}");
-            Ok(())
-        } else {
-            std::fs::write(path, json)
         };
-        if let Err(e) = res {
-            eprintln!("error: writing {}: {e}", path.display());
-            return ExitCode::from(1);
+        if let Err(code) = crate::output::write_json_report(path, &report) {
+            return code;
         }
     }
     if over || !stack_ok {

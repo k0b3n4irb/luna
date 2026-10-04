@@ -260,8 +260,10 @@ with checkpoints alone, the last one ends the run). The final
 - **`[asserts.dsp]`** — the S-DSP register file, by name (`FLG`, `EDL`,
   `KON`, `MVOL_L`, `V0_VOLL`…`V7_GAIN`, the per-voice read-backs
   `V0_ENVX`…`V7_ENVX` / `V0_OUTX`…`V7_OUTX`, `FIR0`…`FIR7`) or raw hex
-  index (`"7D"`), with the `[asserts.values]` comparator grammar
-  (registers are bytes). ENVX is the voice's envelope, OUTX its last
+  index (`"7D"`). The names the `--dsp-trace` CSV prints are accepted as
+  they are (`V3_PL` is `V3_PITCHL`, `KOFF` is `KOF`, `MVOLL` is
+  `MVOL_L`), so a register can be copied from a trace. Asserts use the
+  `[asserts.values]` comparator grammar (registers are bytes). ENVX is the voice's envelope, OUTX its last
   output — the pair that answers "is this voice actually sounding?".
 - **`[asserts.ppu]`** — the PPU registers, keyed by the field names
   `luna state --out -` prints under `ppu`: `inidisp`, `bgmode`, `tm`,

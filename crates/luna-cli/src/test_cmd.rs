@@ -714,7 +714,7 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
     // Checked here rather than left to the ROM loader, whose message names
     // the CLI flag (`--force-region`) a manifest author never typed.
     if let Some(r) = &m.region
-        && !matches!(r.to_ascii_lowercase().as_str(), "ntsc" | "pal")
+        && luna_api::parse_region(r).is_none()
     {
         return Err(format!("unknown `region` '{r}' (ntsc, pal)"));
     }
@@ -1035,7 +1035,7 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
         // whatever the ring still holds.
         pooled.drain(&mut em)?;
         let audio = pooled.audio.as_deref().unwrap_or_default();
-        let rms = audio_rms(audio);
+        let rms = crate::diff_audio::rms(audio);
         if rms < min {
             failures.push(format!(
                 "audio_rms_min: RMS {rms:.1} < {min} over {} samples",
@@ -1071,7 +1071,7 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
     if !m.asserts.dsp.is_empty() {
         let regs = em.dsp_registers().map_err(|e| e.to_string())?;
         for (key, assert) in &m.asserts.dsp {
-            let Some(idx) = dsp_register_index(key) else {
+            let Some(idx) = luna_api::dsp_register_index(key) else {
                 return Err(format!(
                     "asserts.dsp.{key}: unknown S-DSP register (name like FLG/EDL/V0_GAIN/V0_ENVX, or a hex index < 80)"
                 ));
@@ -1427,41 +1427,9 @@ fn check_value(
     key: &str,
     assert: &ValueAssert,
 ) -> Result<Option<String>, String> {
-    // Normalise the bare-integer form to `{eq = N}`.
-    let owned;
-    let cmp: &CmpSpec = match assert {
-        ValueAssert::Exact(v) => {
-            owned = CmpSpec {
-                eq: Some(*v),
-                ..CmpSpec::default()
-            };
-            &owned
-        }
-        ValueAssert::Cmp(c) => c,
-    };
-    let bounds: Vec<i64> = [cmp.eq, cmp.ne, cmp.ge, cmp.gt, cmp.le, cmp.lt]
-        .into_iter()
-        .flatten()
-        .collect();
-    if bounds.is_empty() {
-        return Err("comparator table needs at least one of eq/ne/ge/gt/le/lt".into());
-    }
-    if bounds.iter().any(|&b| !(0..=0xFFFF).contains(&b)) {
-        return Err("bounds must fit in 16 bits".into());
-    }
-    let width = match cmp.width {
-        Some(w @ (1 | 2)) => w,
-        Some(w) => return Err(format!("width must be 1 or 2, got {w}")),
-        None => {
-            if bounds.iter().all(|&b| b <= 0xFF) {
-                1
-            } else {
-                2
-            }
-        }
-    };
+    let (cmp, width) = normalize_assert(assert)?;
     let got = read_value(em, key, width)?;
-    Ok(eval_cmp(&format!("values.{key}"), got, cmp))
+    Ok(eval_cmp(&format!("values.{key}"), got, &cmp))
 }
 
 /// Run one comparator table against an already-read value. `Some(msg)`
@@ -1531,13 +1499,10 @@ fn state_blocks(
     (ppu, gsu)
 }
 
-/// The comparator table of an `[asserts.ppu]` entry. Unlike
-/// [`normalize_assert`] there is no 16-bit bound check and no `width`:
-/// the value comes from the state JSON, not from memory, and the fields
-/// there are signed (`m7a` is an `i16`), 24-bit (`mpy`) or counts up to
-/// 65 536 (`vram_non_zero`).
-fn ppu_cmp(assert: &ValueAssert) -> Result<CmpSpec, String> {
-    let cmp = match assert {
+/// A value assert as its comparator table: the bare-integer form is
+/// `{eq = N}`.
+fn cmp_spec(assert: &ValueAssert) -> CmpSpec {
+    match assert {
         ValueAssert::Exact(v) => CmpSpec {
             eq: Some(*v),
             ..CmpSpec::default()
@@ -1551,7 +1516,16 @@ fn ppu_cmp(assert: &ValueAssert) -> Result<CmpSpec, String> {
             lt: c.lt,
             width: c.width,
         },
-    };
+    }
+}
+
+/// The comparator table of an `[asserts.ppu]` entry. Unlike
+/// [`normalize_assert`] there is no 16-bit bound check and no `width`:
+/// the value comes from the state JSON, not from memory, and the fields
+/// there are signed (`m7a` is an `i16`), 24-bit (`mpy`) or counts up to
+/// 65 536 (`vram_non_zero`).
+fn ppu_cmp(assert: &ValueAssert) -> Result<CmpSpec, String> {
+    let cmp = cmp_spec(assert);
     if cmp.width.is_some() {
         return Err(
             "`width` is meaningless here — a PPU field has the width the state JSON gives it"
@@ -1638,21 +1612,7 @@ fn ppu_field(ppu: &serde_json::Value, key: &str) -> Result<i64, String> {
 /// Normalise a [`ValueAssert`] to its comparator table and validate the
 /// bounds; returns the effective read width too.
 fn normalize_assert(assert: &ValueAssert) -> Result<(CmpSpec, u8), String> {
-    let cmp = match assert {
-        ValueAssert::Exact(v) => CmpSpec {
-            eq: Some(*v),
-            ..CmpSpec::default()
-        },
-        ValueAssert::Cmp(c) => CmpSpec {
-            eq: c.eq,
-            ne: c.ne,
-            ge: c.ge,
-            gt: c.gt,
-            le: c.le,
-            lt: c.lt,
-            width: c.width,
-        },
-    };
+    let cmp = cmp_spec(assert);
     let bounds: Vec<i64> = [cmp.eq, cmp.ne, cmp.ge, cmp.gt, cmp.le, cmp.lt]
         .into_iter()
         .flatten()
@@ -1677,67 +1637,6 @@ fn normalize_assert(assert: &ValueAssert) -> Result<(CmpSpec, u8), String> {
     Ok((cmp, width))
 }
 
-/// The S-DSP register-name vocabulary for `[asserts.dsp]` (issue #212).
-/// Raw hex indices (`"7D"`) are also accepted.
-fn dsp_register_index(name: &str) -> Option<u8> {
-    let global = match name.to_ascii_uppercase().as_str() {
-        "MVOL_L" | "MVOLL" => 0x0C,
-        "MVOL_R" | "MVOLR" => 0x1C,
-        "EVOL_L" | "EVOLL" => 0x2C,
-        "EVOL_R" | "EVOLR" => 0x3C,
-        "KON" => 0x4C,
-        "KOF" | "KOFF" => 0x5C,
-        "FLG" => 0x6C,
-        "ENDX" => 0x7C,
-        "EFB" => 0x0D,
-        "PMON" => 0x2D,
-        "NON" => 0x3D,
-        "EON" => 0x4D,
-        "DIR" => 0x5D,
-        "ESA" => 0x6D,
-        "EDL" => 0x7D,
-        _ => 0xFF,
-    };
-    if global != 0xFF {
-        return Some(global);
-    }
-    let upper = name.to_ascii_uppercase();
-    // FIR0..FIR7 at $x0F.
-    if let Some(n) = upper.strip_prefix("FIR")
-        && let Ok(i) = n.parse::<u8>()
-        && i < 8
-    {
-        return Some((i << 4) | 0x0F);
-    }
-    // Per-voice: V<n>_<VOLL|VOLR|PITCHL|PITCHH|SRCN|ADSR1|ADSR2|GAIN|ENVX|OUTX>.
-    if let Some(rest) = upper.strip_prefix('V')
-        && let Some((v, reg)) = rest.split_once('_')
-        && let Ok(v) = v.parse::<u8>()
-        && v < 8
-    {
-        let lo = match reg {
-            "VOLL" => 0x0,
-            "VOLR" => 0x1,
-            "PITCHL" => 0x2,
-            "PITCHH" => 0x3,
-            "SRCN" => 0x4,
-            "ADSR1" => 0x5,
-            "ADSR2" => 0x6,
-            "GAIN" => 0x7,
-            // The two per-voice READ-BACK registers — "is this voice
-            // actually sounding?" (`OpenSNES` ask, 2026-09-17). ares
-            // `dsp/voice.cpp`, Mesen2 `SnesDsp`: ENVX is the envelope's
-            // top 7 bits, OUTX the voice's last output >> 8.
-            "ENVX" => 0x8,
-            "OUTX" => 0x9,
-            _ => return None,
-        };
-        return Some((v << 4) | lo);
-    }
-    // Raw hex index.
-    u8::from_str_radix(name, 16).ok().filter(|&i| i < 0x80)
-}
-
 /// Check one `[asserts.blocks]` entry. `Ok(Some(msg))` = mismatch.
 fn check_block(
     em: &mut luna_api::Emulator,
@@ -1754,7 +1653,7 @@ fn check_block(
             offset.as_deref().unwrap_or(key),
         ),
     };
-    let want = parse_hex_bytes(hex)?;
+    let want = parse_hex_block(hex)?;
     if want.is_empty() {
         return Err("empty hex block".into());
     }
@@ -1822,16 +1721,19 @@ fn slice_at(all: &[u8], off: usize, len: usize, space: &str) -> Result<Vec<u8>, 
         })
 }
 
-/// Parse an even-length hex string into bytes.
-fn parse_hex_bytes(hex: &str) -> Result<Vec<u8>, String> {
+/// The bytes of an `[asserts.blocks]` hex string. Whitespace may sit
+/// anywhere between the digits; what is left goes to the parser `--assert`
+/// uses, which refuses a non-ASCII character instead of slicing through it.
+/// An empty block comes back empty, for the caller to report.
+fn parse_hex_block(hex: &str) -> Result<Vec<u8>, String> {
     let hex: String = hex.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    if hex.is_empty() {
+        return Ok(Vec::new());
+    }
     if !hex.len().is_multiple_of(2) {
         return Err("hex block must have an even number of digits".into());
     }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| format!("bad hex: {e}")))
-        .collect()
+    crate::parsers::parse_hex_bytes(&hex)
 }
 
 /// Enable the named trace with `cap` events (issue #205).
@@ -1866,19 +1768,6 @@ fn take_trace_count(em: &mut luna_api::Emulator, name: &str) -> Result<u64, Stri
         other => return Err(format!("unknown trace `{other}`")),
     };
     Ok(n as u64)
-}
-
-/// RMS over interleaved stereo samples (both channels pooled).
-fn audio_rms(samples: &[(i16, i16)]) -> f64 {
-    if samples.is_empty() {
-        return 0.0;
-    }
-    let sum_sq: f64 = samples
-        .iter()
-        .flat_map(|&(l, r)| [f64::from(l), f64::from(r)])
-        .map(|s| s * s)
-        .sum();
-    (sum_sq / (samples.len() as f64 * 2.0)).sqrt()
 }
 
 /// Rewrite `asserts.fbhash` in place, preserving the manifest's

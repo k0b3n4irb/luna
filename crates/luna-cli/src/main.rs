@@ -34,8 +34,6 @@ use run::run;
 use state::run_state;
 use wram_trace::run_wram_trace;
 
-use parsers::parse_input_script;
-
 #[derive(Parser, Debug)]
 #[command(
     name = "luna",
@@ -48,7 +46,7 @@ struct Cli {
     command: Command,
 }
 
-/// `0x`-hex or decimal, so an address copied out of a linker script or a
+/// `0x`- or `$`-hex, or decimal, so an address copied out of a linker script or a
 /// `.sym` pastes in unchanged.
 fn parse_u16_auto(s: &str) -> Result<u16, String> {
     let t = s.trim();
@@ -61,6 +59,13 @@ fn parse_u16_auto(s: &str) -> Result<u16, String> {
         .map_err(|e| format!("`{s}`: not a 16-bit address ({e})"))
 }
 
+/// A `--force-mapper` help text: `intro`, then the names. They come from
+/// `MapperKind::CLI_NAMES` through luna-api, so the nine subcommands that
+/// take the flag list the same mappers as the parser accepts.
+fn mapper_help(intro: &str) -> String {
+    format!("{intro} One of: {}", luna_api::force_mapper_names())
+}
+
 #[derive(Subcommand, Debug)]
 // The `State` variant carries many optional diagnostic-output paths (one
 // per trace/log kind); adding `--sa1-log` tipped it past the 200-byte
@@ -71,8 +76,8 @@ enum Command {
     /// Load a ROM, step the CPU N instructions, optionally dump a
     /// screenshot of the resulting PPU state.
     ///
-    /// Unimplemented opcodes panic and are caught — partial state is
-    /// still dumped.
+    /// A panic inside the core is caught and reported — the state reached
+    /// so far is still dumped.
     Run {
         /// Path to the .sfc / .smc ROM file.
         rom: PathBuf,
@@ -83,11 +88,12 @@ enum Command {
         /// `-n` instruction count — same as `state --until-frame`. Pins a
         /// `--print-fbhash` / `--screenshot` baseline to a PPU frame so a
         /// codegen change that shifts the instruction count cannot move
-        /// the capture onto another animation phase (issue #222).
+        /// the capture onto another animation phase.
         #[arg(long = "until-frame")]
         until_frame: Option<u64>,
-        /// If set, render a 256×224 PNG of the composited framebuffer
-        /// and write it to the given path.
+        /// If set, render the composited framebuffer as a PNG and write it
+        /// to the given path: 256×224, 256×239 while the game runs in
+        /// overscan, or 512×448 (512×478 in overscan) with `--native-res`.
         #[arg(long)]
         screenshot: Option<PathBuf>,
         /// Bypass INIDISP forced-blank when rendering. Lets you see
@@ -128,18 +134,19 @@ enum Command {
         /// and how strongly each may be asserted.
         #[arg(long)]
         print_fbhash: bool,
-        /// Emit the native 512×448 frame (issue #115): hi-res modes 5/6 and
+        /// Emit the native 512×448 frame: hi-res modes 5/6 and
         /// pseudo-512 keep their two horizontal subpixels per dot, interlace
         /// keeps both fields as separate lines — instead of the default
         /// 256×224 averaged view. Applies to `--screenshot` and
         /// `--print-fbhash`.
         #[arg(long = "native-res")]
         native_res: bool,
-        /// Force a cartridge mapper, bypassing header auto-detection — same as
-        /// `state`/`frames` (issue #95). Needed for checksum-invalid homebrew /
-        /// reference ROMs (e.g. the `PeterLemon` corpus) so they can reach
-        /// `--print-fbhash`. One of: lorom, hirom, exhirom, sa1, superfx.
-        #[arg(long = "force-mapper")]
+        #[arg(
+            long = "force-mapper",
+            help = mapper_help(
+                "Force a cartridge mapper, bypassing header auto-detection — same as `state`/`frames`. Needed for checksum-invalid homebrew / reference ROMs (e.g. the `PeterLemon` corpus) so they can reach `--print-fbhash`."
+            )
+        )]
         force_mapper: Option<String>,
         /// Force the video standard (ntsc, pal), overriding the cartridge
         /// header's country byte. Changes the scanline count (262/312) and
@@ -147,7 +154,7 @@ enum Command {
         /// the `PeterLemon` corpus as PAL to match krom's reference captures.
         #[arg(long = "force-region")]
         force_region: Option<String>,
-        /// What RAM holds before the ROM boots (issue #224): `zero`
+        /// What RAM holds before the ROM boots: `zero`
         /// (default), `ones`, `random` (a seed is derived and printed) or
         /// `random=<seed>` (decimal or 0x hex — replays an exact machine).
         /// Fills WRAM, VRAM, CGRAM, OAM and APU RAM; a boot bug that only
@@ -155,7 +162,7 @@ enum Command {
         #[arg(long = "power-on")]
         power_on: Option<String>,
     },
-    /// Run manifest-driven homebrew tests (issue #181): one TOML per
+    /// Run manifest-driven homebrew tests: one TOML per
     /// test (rom, input, run bound, asserts), executed in-process
     /// through `luna-api`. Exit 0 = all pass, 1 = assert failures,
     /// 2 = manifest/usage errors — the CI contract. The machine is set
@@ -203,9 +210,13 @@ enum Command {
         /// beside-ROM auto-detection).
         #[arg(long, requires = "rom")]
         sym: Option<std::path::PathBuf>,
-        /// Force the mapper for `--rom` (lorom, hirom, exhirom, sa1,
-        /// superfx, dsp1, sdd1, spc7110) instead of header auto-detection.
-        #[arg(long = "force-mapper", requires = "rom")]
+        #[arg(
+            long = "force-mapper",
+            requires = "rom",
+            help = mapper_help(
+                "Force the mapper for `--rom` instead of header auto-detection."
+            )
+        )]
         force_mapper: Option<String>,
         /// Force the video standard for `--rom` (ntsc, pal).
         #[arg(long = "force-region", requires = "rom")]
@@ -224,17 +235,18 @@ enum Command {
         /// Print the JSON Schema of the state JSON (`EmulatorState`, plus
         /// the `peeks` array `--out` adds) to stdout and exit — no ROM
         /// needed. The machine-readable map of every nested field a harness
-        /// can `jq` (issue #222).
+        /// can `jq`.
         #[arg(long)]
         schema: bool,
         /// CPU instructions to execute before snapshotting.
         #[arg(short = 'n', long, default_value_t = 1000)]
         steps: u64,
-        /// Force a cartridge mapper, bypassing header auto-detection.
-        /// Needed for headerless homebrew test ROMs (e.g. the `PeterLemon`
-        /// Super FX / GSU plot tests). One of: lorom, hirom, exhirom, sa1,
-        /// superfx.
-        #[arg(long = "force-mapper")]
+        #[arg(
+            long = "force-mapper",
+            help = mapper_help(
+                "Force a cartridge mapper, bypassing header auto-detection. Needed for headerless homebrew test ROMs (e.g. the `PeterLemon` Super FX / GSU plot tests)."
+            )
+        )]
         force_mapper: Option<String>,
         /// Force the video standard (ntsc, pal), overriding the cartridge
         /// header's country byte. Changes the scanline count (262/312) and
@@ -242,7 +254,7 @@ enum Command {
         /// the `PeterLemon` corpus as PAL to match krom's reference captures.
         #[arg(long = "force-region")]
         force_region: Option<String>,
-        /// What RAM holds before the ROM boots (issue #224): `zero`
+        /// What RAM holds before the ROM boots: `zero`
         /// (default), `ones`, `random` (a seed is derived and printed) or
         /// `random=<seed>` (decimal or 0x hex — replays an exact machine).
         /// Fills WRAM, VRAM, CGRAM, OAM and APU RAM; a boot bug that only
@@ -267,21 +279,21 @@ enum Command {
         #[arg(long = "load-state")]
         load_state: Option<PathBuf>,
         /// Write captured `WDM $xx` executions (the SDK breakpoint /
-        /// `SNES_ASSERT` channel) to this file — parity with `luna run`
-        /// (issue #85), so an input-driven test keeps the WDM oracle.
+        /// `SNES_ASSERT` channel) to this file — parity with `luna run`,
+        /// so an input-driven test keeps the WDM oracle.
         #[arg(long = "wdm-out")]
         wdm_out: Option<PathBuf>,
         /// Print `fbhash=<16-hex>` — the cross-arch-stable displayed-frame key
-        /// (same as `luna run --print-fbhash`, issue #85) — so an input-driven
+        /// (same as `luna run --print-fbhash`) — so an input-driven
         /// `state` run can also emit a visual baseline.
         #[arg(long)]
         print_fbhash: bool,
-        /// Track the 65C816 call stack (JSR/JSL/RTS/RTL + interrupts,
-        /// issue #180) during the run; the `--out` JSON gains a
+        /// Track the 65C816 call stack (JSR/JSL/RTS/RTL + interrupts)
+        /// during the run; the `--out` JSON gains a
         /// `call_stack` array of `{pc, from, kind, symbol}` frames.
         #[arg(long = "call-stack")]
         call_stack: bool,
-        /// Emit the native 512×448 frame (issue #115): hi-res modes 5/6 and
+        /// Emit the native 512×448 frame: hi-res modes 5/6 and
         /// pseudo-512 keep their two horizontal subpixels per dot, interlace
         /// keeps both fields as separate lines — instead of the default
         /// 256×224 averaged view. Applies to `--screenshot` and
@@ -367,7 +379,8 @@ enum Command {
         /// count defaults to 1).  Can be specified multiple times.  The
         /// whole 24-bit space is readable (WRAM, ROM incl. `$C0-$FF`
         /// `HiROM`, SRAM, coproc RAM); the `$2000-$5FFF` register band
-        /// reads `0` (no side effects) and an unmapped range reads `$FF`
+        /// reads `0` (no side effects), except the DMA registers
+        /// `$4300-$437F` which read their real values, and an unmapped range reads `$FF`
         /// with a stderr note and `unmapped` in the JSON entry.  Output
         /// goes to stderr as a labelled hex dump.  Examples:
         /// `--peek 7E:0200:220`, `--peek monster_x:2`.
@@ -409,12 +422,12 @@ enum Command {
         /// Optional CPU↔APU mailbox traffic log. When set, every
         /// CPU read/write of `$2140-$2143` during the run is captured
         /// and written to the given path as CSV with columns:
-        /// `mclk_total,frame,pc,kind,port,value` (one row per event).
+        /// `mclk_total,frame_ntsc,pc,kind,port,value` (one row per event).
         /// Useful for diagnosing APU handshake stalls (e.g. SMW's
         /// music-driver "wait for ack" deadlock).
         #[arg(long = "apu-log")]
         apu_log: Option<PathBuf>,
-        /// Optional DSP register-write trace (issue #122). Captures every
+        /// Optional DSP register-write trace. Captures every
         /// write to a `$00-$7F` DSP register with an SPC-cycle timestamp
         /// and writes CSV columns `spc_cycles,reg,name,value` — `name`
         /// decodes the register (`V0_ADSR1`, `KON`, `FLG`, …). Answers
@@ -456,7 +469,8 @@ enum Command {
         #[arg(long = "sa1-trace-max", default_value_t = 200_000)]
         sa1_trace_max: usize,
         /// Optional FULL Super FX (GSU) instruction trace: a per-opcode
-        /// snapshot written as CSV (`seq,pc,opcode,sfr,r0..r15`). Diff this
+        /// snapshot written as CSV (`seq,mclk,go,stop,pc,opcode,sfr,r0..r15`).
+        /// Diff this
         /// PC/register stream against a bsnes/siena GSU trace to localise
         /// rendering divergences.
         #[arg(long = "superfx-trace")]
@@ -518,7 +532,8 @@ enum Command {
         #[arg(long = "dsp1-trace-commands")]
         dsp1_trace_commands: Option<PathBuf>,
         /// Optional FULL SPC700 instruction trace: a per-opcode register
-        /// snapshot written as CSV (`seq,pc,a,x,y,sp,psw`). Diff this PC
+        /// snapshot written as CSV
+        /// (`seq,pc,a,x,y,sp,psw,spc_cycle,t2_int,t2_out`). Diff this PC
         /// stream against a Mesen2 SPC700 trace to localise audio-driver
         /// (Akao CPU↔SPC handshake) divergences (e.g. SMRPG/CT).
         #[arg(long = "spc-trace")]
@@ -547,9 +562,11 @@ enum Command {
         cpu_trace_max: usize,
         /// Optional memory access trace. When set, captures every
         /// CPU bus read/write into a CSV at PATH, columns
-        /// `mclk_total,frame_ntsc,pc,addr,kind,value,line,blank,force_blank`
-        /// (`blank` = V-blank, `force_blank` = INIDISP `$2100` bit 7 at the
-        /// access; a VRAM write is safe iff `blank||force_blank`). Default: all
+        /// `mclk_total,frame_ntsc,pc,addr,kind,value,line,hclock,blank,force_blank,origin`
+        /// (`line` / `hclock` = the beam position, `blank` = V-blank,
+        /// `force_blank` = INIDISP `$2100` bit 7 at the access; a VRAM write
+        /// is safe iff `blank||force_blank`; `origin` = `cpu`, `dma<n>` or
+        /// `hdma<n>`). Default: all
         /// banks. Combine with `--mem-trace-bank 7E` to focus on
         /// WRAM and skip ROM fetches. Gated by `--mem-trace-from`
         /// and `--mem-trace-max` analogous to `--cpu-trace-*`.
@@ -569,7 +586,7 @@ enum Command {
         /// Composes with `--mem-trace-bank` (both must match).
         #[arg(long = "mem-trace-addr")]
         mem_trace_addr: Option<String>,
-        /// The "who wrote this register" hunt (issue #226): record only
+        /// The "who wrote this register" hunt: record only
         /// WRITES to these hex offsets (any bank), e.g. `2121,2122,420C`.
         /// Each row's `origin` column says who — `cpu`, `dma<n>` or
         /// `hdma<n>` — with the frame / line / PC. The interrupt markers
@@ -615,7 +632,7 @@ enum Command {
         /// Start the capture at PPU frame N instead of after the `-n`
         /// warm-up instructions (which are then ignored) — the first PNG
         /// is frame N. Frame-indexed like `state --until-frame`, so the
-        /// sequence is stable across codegen changes (issue #222).
+        /// sequence is stable across codegen changes.
         #[arg(long = "from-frame")]
         from_frame: Option<u64>,
         /// Number of consecutive frames to capture.
@@ -624,9 +641,12 @@ enum Command {
         /// Output directory for the PNG sequence (created if absent).
         #[arg(long = "out-dir", default_value = "/tmp/luna_frames")]
         out_dir: PathBuf,
-        /// Force a cartridge mapper, bypassing header auto-detection
-        /// (lorom, hirom, exhirom, sa1, superfx).
-        #[arg(long = "force-mapper")]
+        #[arg(
+            long = "force-mapper",
+            help = mapper_help(
+                "Force a cartridge mapper, bypassing header auto-detection."
+            )
+        )]
         force_mapper: Option<String>,
         /// Force the video standard (ntsc, pal), overriding the cartridge
         /// header's country byte. Changes the scanline count (262/312) and
@@ -634,7 +654,7 @@ enum Command {
         /// the `PeterLemon` corpus as PAL to match krom's reference captures.
         #[arg(long = "force-region")]
         force_region: Option<String>,
-        /// What RAM holds before the ROM boots (issue #224): `zero`
+        /// What RAM holds before the ROM boots: `zero`
         /// (default), `ones`, `random` (a seed is derived and printed) or
         /// `random=<seed>` (decimal or 0x hex — replays an exact machine).
         /// Fills WRAM, VRAM, CGRAM, OAM and APU RAM; a boot bug that only
@@ -647,7 +667,7 @@ enum Command {
         #[arg(long)]
         input: Option<String>,
     },
-    /// Compare two ROMs frame by frame (issue #225): run both in one
+    /// Compare two ROMs frame by frame: run both in one
     /// process, hash the displayed frame at every PPU frame, and print
     /// MATCH / DIFF for each requested frame — MATCH when A's frame `F`
     /// equals B's frame at some `F ± tolerance` (the boot-length offset a
@@ -711,22 +731,25 @@ enum Command {
         /// --force-display`).
         #[arg(long, conflicts_with = "audio")]
         force_display: bool,
-        /// Hash the native 512×448 frame (issue #115).
+        /// Hash the native 512×448 frame.
         #[arg(long = "native-res", conflicts_with = "audio")]
         native_res: bool,
-        /// Force a cartridge mapper for both ROMs (lorom, hirom, exhirom,
-        /// sa1, superfx).
-        #[arg(long = "force-mapper")]
+        #[arg(
+            long = "force-mapper",
+            help = mapper_help(
+                "Force a cartridge mapper for both ROMs."
+            )
+        )]
         force_mapper: Option<String>,
         /// Force the video standard for both ROMs (ntsc, pal).
         #[arg(long = "force-region")]
         force_region: Option<String>,
         /// Power-on RAM state for both machines (`zero`, `ones`,
-        /// `random[=<seed>]` — issue #224).
+        /// `random[=<seed>]`).
         #[arg(long = "power-on")]
         power_on: Option<String>,
     },
-    /// Real master cycles per symbol (issue #227): every step credits its
+    /// Real master cycles per symbol: every step credits its
     /// cycles — bus + internal cycles plus the DMA / HDMA / refresh
     /// stalls charged during it — to the instruction's address; the
     /// report folds those onto the nearest `.sym` label (or a 256-byte
@@ -802,7 +825,7 @@ enum Command {
         budget: Vec<String>,
         /// Gate: the stack must never reach below this address, else exit 1
         /// — the RAM-budget check a link-time guess cannot make
-        /// (`--stack-floor 0x1C60`). Accepts `0x`-hex or decimal. The
+        /// (`--stack-floor 0x1C60`). Accepts `0x`- or `$`-hex, or decimal. The
         /// figure is reported either way, with the routine that went
         /// deepest when a `.sym` is loaded.
         #[arg(long = "stack-floor", value_parser = parse_u16_auto)]
@@ -813,8 +836,7 @@ enum Command {
         /// would mis-attribute coverage. Lets a coverage tool count `.sfx`.
         #[arg(long = "gsu-pc-set")]
         gsu_pc_set: Option<PathBuf>,
-        /// Force a cartridge mapper (lorom, hirom, exhirom, sa1, superfx).
-        #[arg(long = "force-mapper")]
+        #[arg(long = "force-mapper", help = mapper_help("Force a cartridge mapper."))]
         force_mapper: Option<String>,
         /// Force the video standard (ntsc, pal).
         #[arg(long = "force-region")]
@@ -854,8 +876,7 @@ enum Command {
         /// Output path for the `--dump-frame` raw WRAM snapshot.
         #[arg(long = "dump-out", default_value = "/tmp/luna_wram_frame.bin")]
         dump_out: PathBuf,
-        /// Force a cartridge mapper (lorom, hirom, exhirom, sa1, superfx).
-        #[arg(long = "force-mapper")]
+        #[arg(long = "force-mapper", help = mapper_help("Force a cartridge mapper."))]
         force_mapper: Option<String>,
         /// Force the video standard (ntsc, pal), overriding the cartridge
         /// header's country byte. Changes the scanline count (262/312) and
@@ -901,8 +922,7 @@ enum Command {
         /// `.spc` extension, in the current directory.
         #[arg(short = 'o', long)]
         out: Option<PathBuf>,
-        /// Force a cartridge mapper (lorom, hirom, exhirom, sa1, superfx).
-        #[arg(long = "force-mapper")]
+        #[arg(long = "force-mapper", help = mapper_help("Force a cartridge mapper."))]
         force_mapper: Option<String>,
         /// Force the video standard (ntsc, pal), overriding the cartridge
         /// header's country byte. Changes the scanline count (262/312) and
@@ -944,8 +964,7 @@ enum Command {
         /// CGRAM sub-palette row for the VRAM tile sheet (2bpp/4bpp).
         #[arg(long, default_value_t = 0)]
         palette: u8,
-        /// Force a cartridge mapper (lorom, hirom, exhirom, sa1, superfx).
-        #[arg(long = "force-mapper")]
+        #[arg(long = "force-mapper", help = mapper_help("Force a cartridge mapper."))]
         force_mapper: Option<String>,
         /// Force the video standard (ntsc, pal), overriding the cartridge
         /// header's country byte. Changes the scanline count (262/312) and
@@ -1354,15 +1373,15 @@ fn main() -> ExitCode {
             frames,
             input,
         } => {
-            let checkpoints = match input.as_deref().map(parse_input_script) {
-                Some(Ok(c)) => Some(c),
-                Some(Err(e)) => {
-                    eprintln!("error: --input: {e}");
-                    return ExitCode::from(2);
-                }
+            // No `--input` keeps bench's own Start pulses.
+            let script = match input.as_deref() {
+                Some(s) => match parsers::input_script(&parsers::InputFlags::pad1(Some(s))) {
+                    Ok(script) => Some(script),
+                    Err(code) => return ExitCode::from(code),
+                },
                 None => None,
             };
-            bench::run_bench(&dir, &out, frames, checkpoints)
+            bench::run_bench(&dir, &out, frames, script)
         }
         Command::SpcDump {
             rom,

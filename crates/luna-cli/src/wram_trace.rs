@@ -3,7 +3,7 @@
 
 use std::process::ExitCode;
 
-use crate::parsers::pad_events;
+use crate::parsers::{InputFlags, apply_input_flags};
 use crate::rom::load_rom_into;
 
 /// `luna wram-trace` — emit per-frame (vblank-aligned) WRAM page hashes
@@ -28,16 +28,10 @@ pub(crate) fn run_wram_trace(
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }
-    let mut script = luna_api::InputScript::new();
-    if let Some(s) = input_script {
-        match pad_events(s, 0) {
-            Ok(v) => script.extend(v),
-            Err(e) => {
-                eprintln!("error: --input: {e}");
-                return ExitCode::from(2);
-            }
-        }
-    }
+    let mut script = match apply_input_flags(&mut em, &InputFlags::pad1(input_script)) {
+        Ok(script) => script,
+        Err(code) => return ExitCode::from(code),
+    };
     if steps > 0
         && let Err(e) = em.step(steps)
     {

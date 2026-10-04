@@ -3,7 +3,9 @@
 
 use std::process::ExitCode;
 
-use crate::output::{print_cpu_state, print_diag_state, print_header, save_screenshot, write_wav};
+use crate::output::{
+    print_cpu_state, print_diag_state, print_header, save_screenshot, write_wav, write_wdm_log,
+};
 use crate::rom::load_rom_into;
 
 pub(crate) fn run(
@@ -208,18 +210,8 @@ pub(crate) fn run(
         }
     }
     if let Some(path) = wdm_out {
-        use std::fmt::Write as _;
-        let hits = em.take_wdm_log().unwrap_or_default();
-        let mut body = String::new();
-        for (pc, op) in &hits {
-            let _ = writeln!(body, "PC=${pc:06X} operand=${op:02X}");
-        }
-        match std::fs::write(path, &body) {
-            Ok(()) => println!(
-                "WDM log written to {}  ({} hit(s))",
-                path.display(),
-                hits.len(),
-            ),
+        match write_wdm_log(&mut em, path) {
+            Ok(hits) => println!("WDM log written to {}  ({hits} hit(s))", path.display()),
             Err(e) => {
                 eprintln!("\nerror: could not write WDM log: {e}");
                 return ExitCode::from(1);
@@ -228,19 +220,9 @@ pub(crate) fn run(
     }
     // Stable, cross-arch visual-regression key (hashes the displayed RGBA,
     // pre-PNG). Printed last so a harness can `grep '^fbhash='`.
-    if print_fbhash {
-        let hash = if native_res {
-            em.frame_hash_native()
-        } else {
-            em.frame_hash(force_display)
-        };
-        match hash {
-            Ok(h) => println!("fbhash={h:016x}"),
-            Err(e) => {
-                eprintln!("\nerror: could not hash frame: {e}");
-                return ExitCode::from(1);
-            }
-        }
+    if print_fbhash && let Err(e) = crate::output::print_fbhash(&em, native_res, force_display) {
+        eprintln!("\nerror: could not hash frame: {e}");
+        return ExitCode::from(1);
     }
     ExitCode::SUCCESS
 }

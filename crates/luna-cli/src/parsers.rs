@@ -235,10 +235,11 @@ pub(crate) fn parse_apu_peek_spec(spec: &str) -> Option<Result<(u16, u32), Strin
 // =============================================================================
 // Controller flags → port devices + one event stream
 //
-// `state`, `profile` and any other subcommand that drives input share this,
-// so the grammars cannot drift apart. They did: `profile` grew `--input`
-// alone, which quietly ran every mouse and Super Scope manifest with no
-// device plugged (`OpenSNES` R2).
+// Every subcommand that drives input goes through this, so the grammars
+// cannot drift apart. They did: `profile` grew `--input` alone, which
+// quietly ran every mouse and Super Scope manifest with no device plugged
+// (`OpenSNES` R2). A subcommand with `--input` alone passes
+// [`InputFlags::pad1`].
 // =============================================================================
 
 /// The controller-selection flags a subcommand exposes.
@@ -253,6 +254,21 @@ pub(crate) struct InputFlags<'a> {
     /// `--mouse` / `--superscope` pointer scripts.
     pub mouse: Option<&'a str>,
     pub superscope: Option<&'a str>,
+}
+
+impl<'a> InputFlags<'a> {
+    /// The flags of a subcommand that has `--input` and nothing else: one
+    /// joypad script, a pad on each port.
+    pub(crate) const fn pad1(input: Option<&'a str>) -> Self {
+        Self {
+            input,
+            extra_pads: &[],
+            port1: "pad",
+            port2: "pad",
+            mouse: None,
+            superscope: None,
+        }
+    }
 }
 
 /// Apply the port devices to `em`, then fold every scripted input into one
@@ -274,7 +290,14 @@ pub(crate) fn apply_input_flags(
             return Err(1);
         }
     }
+    input_script(f)
+}
 
+/// The scripted-input half of [`apply_input_flags`], for a caller with no
+/// machine to plug the ports on yet: `luna diff` checks its script before
+/// it loads either ROM and replays it on both, `luna bench` on every ROM.
+/// `Err` is the exit code (2); the message is already on stderr.
+pub(crate) fn input_script(f: &InputFlags<'_>) -> Result<luna_api::InputScript, u8> {
     let mut script = luna_api::InputScript::new();
     let pads = std::iter::once((0u8, f.input)).chain(f.extra_pads.iter().copied());
     for (port, spec) in pads {

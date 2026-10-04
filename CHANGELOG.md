@@ -7,6 +7,14 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+### Added
+
+- **`[asserts.dsp]` takes the register names the `--dsp-trace` CSV
+  prints.** A pitch register copied out of a trace (`V3_PL`, `V3_PH`) was
+  an unknown register in a `luna test` manifest, which only knew
+  `V3_PITCHL` / `V3_PITCHH`. Both spellings now name the same register;
+  every name accepted before still is, and the CSV is unchanged.
+
 ### Changed
 
 - **Only the five most recent versions keep a GitHub release with
@@ -16,6 +24,30 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   (`git checkout vX.Y.Z && cargo build --release -p luna-cli`). If a
   script downloads a pinned release older than the five listed on the
   releases page, move the pin or build from the tag.
+- **`--help` says what the binary does.** `--force-mapper` listed five
+  mappers on eight subcommands where eight names parse; every subcommand
+  now lists the same ones, from the parser's own table: `lorom`, `hirom`,
+  `exhirom`, `sa1`, `superfx`, `dsp1`, `sdd1`, and `spc7110` set apart as
+  recognised but refused at load. An unknown `--force-mapper` (or MCP
+  `force_mapper`) error lists them too. Also corrected: the CSV columns of
+  `--mem-trace` (`hclock`, `origin`), `--superfx-trace` (`mclk`, `go`,
+  `stop`), `--spc-trace` (`spc_cycle`, `t2_int`, `t2_out`) and `--apu-log`
+  (`frame_ntsc`); the sizes `run --screenshot` writes (256×239 in
+  overscan, 512×448 with `--native-res`); `--peek` reading the DMA
+  registers `$4300-$437F`; `--stack-floor` taking `$`-hex; the devices of
+  the MCP `set_port_device` (`pad`, `mouse`, `superscope`, `multitap`,
+  `none`) and which MCP traces are rings. Issue numbers are gone from the
+  help texts. No option, key or tool was added, removed or renamed.
+
+### Fixed
+
+- **`luna test`: a non-ASCII character in a hex block no longer aborts
+  the run.** `"7E:0000" = "aéb"` under `[asserts.blocks]` crashed `luna
+  test` with a Rust panic (exit 101), and the verdict of every other
+  manifest in the run was lost with it. The block is now reported like
+  any other malformed one: `FAIL`, ``blocks.7E:0000: expected ASCII hex
+  digits, got `aéb` ``, exit 1, and the remaining manifests run. A block
+  with a digit that is not hex now quotes it (``bad hex `zz`: …``).
 
 ## [1.32.0] — 2026-10-03
 

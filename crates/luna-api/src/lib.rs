@@ -49,12 +49,14 @@ pub mod event_viewer;
 pub mod input;
 mod power_on;
 pub mod symbols;
+mod vocab;
 
 pub use event_viewer::{
     CATEGORY_COUNT, EventCategory, EventViewerConfig, EventViewerEvent, categorise, register_name,
 };
 pub use input::{FRAME_STEP_BUDGET, InputEvent, InputScript, ScriptBound};
 pub use power_on::parse_power_on;
+pub use vocab::{dsp_register_index, dsp_register_name, force_mapper_names, parse_region};
 
 /// Parse a controller-device name — the CLI `--port1/--port2` and MCP
 /// `set_port_device` vocabulary: `pad` (or `joypad`), `mouse`, `superscope`,
@@ -436,7 +438,7 @@ pub struct Spc700State {
     pub pc: u16,
     /// Program status word (N V P B H I Z C).
     pub psw: u8,
-    /// `true` after `STOP` or an unimplemented opcode.
+    /// `true` once the SPC700 has executed `STOP`, until reset.
     pub stopped: bool,
     /// `true` after `SLEEP`, until an interrupt wakes the core.
     pub sleeping: bool,

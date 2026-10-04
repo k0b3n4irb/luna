@@ -79,15 +79,20 @@ const AUDIO_TAIL_FRAMES: u64 = 1800;
 
 /// Default scripted input: pulse Start a few times to clear title/menu screens
 /// (a static title is NOT a bug — `coproc-testing.md`). `frame:mask`, Start=0x1000.
-fn default_input() -> Vec<(u64, u16)> {
-    vec![
-        (90, 0x1000),
-        (95, 0x0000),
-        (240, 0x1000),
-        (245, 0x0000),
-        (420, 0x1000),
-        (425, 0x0000),
-    ]
+fn default_input() -> luna_api::InputScript {
+    let mut script = luna_api::InputScript::new();
+    script.extend(
+        [
+            (90, 0x1000),
+            (95, 0x0000),
+            (240, 0x1000),
+            (245, 0x0000),
+            (420, 0x1000),
+            (425, 0x0000),
+        ]
+        .map(|(f, mask)| (f, luna_api::InputEvent::Pad { port: 0, mask })),
+    );
+    script
 }
 
 /// `lowercase-kebab` slug of a ROM filename stem, for output paths.
@@ -111,7 +116,12 @@ fn slug(name: &str) -> String {
 }
 
 /// Run one ROM and classify it.
-fn bench_one(path: &Path, frames: u64, input: &[(u64, u16)], screens_dir: &Path) -> RomResult {
+fn bench_one(
+    path: &Path,
+    frames: u64,
+    input: &luna_api::InputScript,
+    screens_dir: &Path,
+) -> RomResult {
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -146,12 +156,7 @@ fn bench_one(path: &Path, frames: u64, input: &[(u64, u16)], screens_dir: &Path)
     };
 
     // Drive frames, applying input checkpoints; sample metrics along the way.
-    let mut script = luna_api::InputScript::new();
-    script.extend(
-        input
-            .iter()
-            .map(|&(f, mask)| (f, luna_api::InputEvent::Pad { port: 0, mask })),
-    );
+    let mut script = input.clone();
     let mut crash: Option<String> = None;
     let mut nmis_at_warmup = 0u64;
     let mut audio_peak = 0i32;
@@ -315,7 +320,7 @@ pub(crate) fn run_bench(
     dir: &Path,
     out: &Path,
     frames: u64,
-    input: Option<Vec<(u64, u16)>>,
+    input: Option<luna_api::InputScript>,
 ) -> ExitCode {
     let input = input.unwrap_or_else(default_input);
 

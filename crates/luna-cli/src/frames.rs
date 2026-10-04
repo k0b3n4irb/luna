@@ -2,7 +2,7 @@
 
 use std::process::ExitCode;
 
-use crate::parsers::pad_events;
+use crate::parsers::{InputFlags, apply_input_flags};
 use crate::rom::load_rom_into;
 
 /// `luna frames` — capture `count` exactly-consecutive PPU frames as
@@ -36,16 +36,10 @@ pub(crate) fn run_frames(
     // warm-up the checkpoints spend from `-n` (issue #126), under
     // `--from-frame` they are chased frame by frame; a checkpoint later than
     // the warm-up fires during the capture, on its own frame.
-    let mut script = luna_api::InputScript::new();
-    if let Some(s) = input_script {
-        match pad_events(s, 0) {
-            Ok(v) => script.extend(v),
-            Err(e) => {
-                eprintln!("error: --input: {e}");
-                return ExitCode::from(2);
-            }
-        }
-    }
+    let mut script = match apply_input_flags(&mut em, &InputFlags::pad1(input_script)) {
+        Ok(script) => script,
+        Err(code) => return ExitCode::from(code),
+    };
     // `--from-frame N` (issue #222): the first capture is PPU frame N. The
     // capture loop steps one frame per PNG, so the warm-up stops one short.
     let bound = match from_frame {

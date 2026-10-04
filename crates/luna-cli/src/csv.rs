@@ -337,49 +337,10 @@ pub(crate) fn write_dsp_trace_csv(
             "{},${:02X},{},${:02X}",
             ev.spc_cycles,
             ev.reg,
-            dsp_reg_name(ev.reg),
+            luna_api::dsp_register_name(ev.reg),
             ev.value
         )
     })
-}
-
-/// Human name for a DSP register index (`$00-$7F`).
-fn dsp_reg_name(reg: u8) -> String {
-    let voice = reg >> 4;
-    match reg & 0x0F {
-        0x0 => format!("V{voice}_VOLL"),
-        0x1 => format!("V{voice}_VOLR"),
-        0x2 => format!("V{voice}_PL"),
-        0x3 => format!("V{voice}_PH"),
-        0x4 => format!("V{voice}_SRCN"),
-        0x5 => format!("V{voice}_ADSR1"),
-        0x6 => format!("V{voice}_ADSR2"),
-        0x7 => format!("V{voice}_GAIN"),
-        0x8 => format!("V{voice}_ENVX"),
-        0x9 => format!("V{voice}_OUTX"),
-        0xC => match voice {
-            0x0 => "MVOLL".into(),
-            0x1 => "MVOLR".into(),
-            0x2 => "EVOLL".into(),
-            0x3 => "EVOLR".into(),
-            0x4 => "KON".into(),
-            0x5 => "KOFF".into(),
-            0x6 => "FLG".into(),
-            _ => "ENDX".into(),
-        },
-        0xD => match voice {
-            0x0 => "EFB".into(),
-            0x2 => "PMON".into(),
-            0x3 => "NON".into(),
-            0x4 => "EON".into(),
-            0x5 => "DIR".into(),
-            0x6 => "ESA".into(),
-            0x7 => "EDL".into(),
-            _ => format!("${reg:02X}"),
-        },
-        0xF => format!("FIR{voice}"),
-        _ => format!("${reg:02X}"),
-    }
 }
 
 /// Write the DSP-1 (`µPD77C25`) trace as CSV: `seq,kind,pc,opcode,value,

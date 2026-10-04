@@ -22,11 +22,8 @@ pub(crate) fn load_rom_into(
     em.set_power_on(state);
     match force_region {
         Some(r) => {
-            let region = match r.to_ascii_lowercase().as_str() {
-                "ntsc" => luna_api::Region::Ntsc,
-                "pal" => luna_api::Region::Pal,
-                _ => return Err(format!("unknown --force-region '{r}' (ntsc, pal)")),
-            };
+            let region = luna_api::parse_region(r)
+                .ok_or_else(|| format!("unknown --force-region '{r}' (ntsc, pal)"))?;
             em.set_forced_region(Some(region));
         }
         None => em.set_forced_region(None),
@@ -41,8 +38,12 @@ pub(crate) fn load_rom_into(
     }
     let info = match force_mapper {
         Some(kind_str) => {
-            let kind = luna_api::MapperKind::from_cli_str(kind_str)
-                .ok_or_else(|| format!("unknown --force-mapper '{kind_str}'"))?;
+            let kind = luna_api::MapperKind::from_cli_str(kind_str).ok_or_else(|| {
+                format!(
+                    "unknown --force-mapper '{kind_str}' ({})",
+                    luna_api::force_mapper_names()
+                )
+            })?;
             em.load_rom_forced(rom, kind)
                 .map_err(|e| format!("{}: {e}", rom.display()))?
         }

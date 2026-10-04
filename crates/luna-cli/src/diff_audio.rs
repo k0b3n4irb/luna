@@ -15,7 +15,8 @@
 
 use std::process::ExitCode;
 
-use crate::parsers::pad_events;
+use crate::output::write_json_report;
+use crate::parsers::{InputFlags, input_script};
 use crate::rom::load_rom_into;
 
 /// The S-DSP's output rate, the rate of every sample luna drains.
@@ -69,7 +70,7 @@ struct Report<'a> {
 }
 
 /// RMS level of a run of stereo samples, both channels together.
-fn rms(samples: &[(i16, i16)]) -> f64 {
+pub(crate) fn rms(samples: &[(i16, i16)]) -> f64 {
     if samples.is_empty() {
         return 0.0;
     }
@@ -165,15 +166,10 @@ pub(crate) fn run_audio_diff(
         eprintln!("error: --tolerance-pct must be a percentage of 0 or more");
         return ExitCode::from(2);
     }
-    let mut script = luna_api::InputScript::new();
-    match o.input_script.map(|s| pad_events(s, 0)) {
-        None => {}
-        Some(Ok(v)) => script.extend(v),
-        Some(Err(e)) => {
-            eprintln!("error: --input: {e}");
-            return ExitCode::from(2);
-        }
-    }
+    let script = match input_script(&InputFlags::pad1(o.input_script)) {
+        Ok(script) => script,
+        Err(code) => return ExitCode::from(code),
+    };
     let (a, b) = match (capture(rom_a, o, script.clone()), capture(rom_b, o, script)) {
         (Ok(a), Ok(b)) => (a, b),
         (Err(e), _) | (_, Err(e)) => {
@@ -228,16 +224,8 @@ pub(crate) fn run_audio_diff(
             max_delta_pct,
             status,
         };
-        let json = serde_json::to_string_pretty(&report).expect("report serialises");
-        let res = if path.as_os_str() == "-" {
-            println!("{json}");
-            Ok(())
-        } else {
-            std::fs::write(path, json)
-        };
-        if let Err(e) = res {
-            eprintln!("error: writing {}: {e}", path.display());
-            return ExitCode::from(1);
+        if let Err(code) = write_json_report(path, &report) {
+            return code;
         }
     }
     if matched {

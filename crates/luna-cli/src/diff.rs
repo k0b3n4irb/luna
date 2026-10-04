@@ -12,7 +12,8 @@
 use std::collections::BTreeMap;
 use std::process::ExitCode;
 
-use crate::parsers::pad_events;
+use crate::output::write_json_report;
+use crate::parsers::{InputFlags, input_script};
 use crate::rom::load_rom_into;
 
 /// Instruction budget per frame (matches the other frame-stepping paths).
@@ -161,15 +162,10 @@ pub(crate) fn run_diff(
         eprintln!("error: --frames needs at least one PPU frame number");
         return ExitCode::from(2);
     }
-    let mut script = luna_api::InputScript::new();
-    match o.input_script.map(|s| pad_events(s, 0)) {
-        None => {}
-        Some(Ok(v)) => script.extend(v),
-        Some(Err(e)) => {
-            eprintln!("error: --input: {e}");
-            return ExitCode::from(2);
-        }
-    }
+    let script = match input_script(&InputFlags::pad1(o.input_script)) {
+        Ok(script) => script,
+        Err(code) => return ExitCode::from(code),
+    };
     let (mut a, mut b) = match (Machine::load(rom_a, o), Machine::load(rom_b, o)) {
         (Ok(a), Ok(b)) => (a, b),
         (Err(e), _) | (_, Err(e)) => {
@@ -270,16 +266,8 @@ pub(crate) fn run_diff(
             frames: verdicts,
             diff_count,
         };
-        let json = serde_json::to_string_pretty(&report).expect("report serialises");
-        let res = if path.as_os_str() == "-" {
-            println!("{json}");
-            Ok(())
-        } else {
-            std::fs::write(path, json)
-        };
-        if let Err(e) = res {
-            eprintln!("error: writing {}: {e}", path.display());
-            return ExitCode::from(1);
+        if let Err(code) = write_json_report(path, &report) {
+            return code;
         }
     }
     if diff_count == 0 {

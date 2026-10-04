@@ -79,6 +79,17 @@ pub fn check_state_len(what: &str, got: usize, want: usize) -> Result<(), Mapper
 }
 
 impl MapperKind {
+    /// Every token [`Self::from_cli_str`] accepts, in the order help texts
+    /// list them: the one copy of the `--force-mapper` vocabulary, for the
+    /// help and error texts of every front-end.
+    pub const CLI_NAMES: [&'static str; 8] = [
+        "lorom", "hirom", "exhirom", "sa1", "superfx", "dsp1", "sdd1", "spc7110",
+    ];
+
+    /// The [`Self::CLI_NAMES`] that parse although the core cannot build
+    /// the mapper yet: the load refuses them.
+    pub const CLI_NAMES_NOT_EMULATED: [&'static str; 1] = ["spc7110"];
+
     /// Parse a `--force-mapper` CLI token (case-insensitive) into a
     /// [`MapperKind`]. This is the canonical name table; front-ends must
     /// not re-implement it. Returns `None` for an unknown token.

@@ -50,6 +50,59 @@ pub(crate) fn write_wav(path: &std::path::Path, samples: &[(i16, i16)]) -> std::
     Ok(())
 }
 
+/// Write a subcommand's `--out` JSON report, pretty-printed: to `path`, or
+/// to stdout when it is `-`. `Err` is the exit code; the message is already
+/// on stderr.
+pub(crate) fn write_json_report(
+    path: &std::path::Path,
+    report: &impl serde::Serialize,
+) -> Result<(), std::process::ExitCode> {
+    let json = serde_json::to_string_pretty(report).expect("report serialises");
+    let res = if path.as_os_str() == "-" {
+        println!("{json}");
+        Ok(())
+    } else {
+        std::fs::write(path, json)
+    };
+    res.map_err(|e| {
+        eprintln!("error: writing {}: {e}", path.display());
+        std::process::ExitCode::from(1)
+    })
+}
+
+/// Drain the captured `WDM $xx` executions into `path`, one
+/// `PC=$xxxxxx operand=$xx` line per hit; returns how many there were. The
+/// caller reports it, on its own stream.
+pub(crate) fn write_wdm_log(
+    em: &mut luna_api::Emulator,
+    path: &std::path::Path,
+) -> std::io::Result<usize> {
+    use std::fmt::Write as _;
+    let hits = em.take_wdm_log().unwrap_or_default();
+    let mut body = String::new();
+    for (pc, op) in &hits {
+        let _ = writeln!(body, "PC=${pc:06X} operand=${op:02X}");
+    }
+    std::fs::write(path, &body)?;
+    Ok(hits.len())
+}
+
+/// Print `fbhash=<16-hex>` on stdout: the hash of the displayed frame, or
+/// of the native 512-wide capture with `native`.
+pub(crate) fn print_fbhash(
+    em: &luna_api::Emulator,
+    native: bool,
+    force_display: bool,
+) -> Result<(), luna_api::ApiError> {
+    let hash = if native {
+        em.frame_hash_native()
+    } else {
+        em.frame_hash(force_display)
+    }?;
+    println!("fbhash={hash:016x}");
+    Ok(())
+}
+
 pub(crate) fn print_header(info: &luna_api::RomInfo) {
     println!("=== ROM ===");
     println!("Title:       {:?}", info.title);

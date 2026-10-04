@@ -1006,37 +1006,17 @@ pub(crate) fn run_state(
     // parity with `luna run`, so an input-driven test can also emit a visual
     // baseline). Printed last so a harness can `grep '^fbhash='`.
     if let Some(path) = wdm_out {
-        use std::fmt::Write as _;
-        let hits = em.take_wdm_log().unwrap_or_default();
-        let mut body = String::new();
-        for (pc, op) in &hits {
-            let _ = writeln!(body, "PC=${pc:06X} operand=${op:02X}");
-        }
-        match std::fs::write(path, &body) {
-            Ok(()) => eprintln!(
-                "WDM log written to {} ({} hit(s))",
-                path.display(),
-                hits.len()
-            ),
+        match crate::output::write_wdm_log(&mut em, path) {
+            Ok(hits) => eprintln!("WDM log written to {} ({hits} hit(s))", path.display()),
             Err(e) => {
                 eprintln!("error: could not write WDM log: {e}");
                 return ExitCode::from(1);
             }
         }
     }
-    if print_fbhash {
-        let hash = if native_res {
-            em.frame_hash_native()
-        } else {
-            em.frame_hash(false)
-        };
-        match hash {
-            Ok(h) => println!("fbhash={h:016x}"),
-            Err(e) => {
-                eprintln!("error: could not hash frame: {e}");
-                return ExitCode::from(1);
-            }
-        }
+    if print_fbhash && let Err(e) = crate::output::print_fbhash(&em, native_res, false) {
+        eprintln!("error: could not hash frame: {e}");
+        return ExitCode::from(1);
     }
     if assert_failed {
         ExitCode::from(1)

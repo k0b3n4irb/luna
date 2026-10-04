@@ -103,7 +103,8 @@ pub struct LoadRomParams {
     pub path: String,
     /// Force the mapper instead of header auto-detection — needed for
     /// headerless / checksum-invalid homebrew. One of `lorom`, `hirom`,
-    /// `exhirom`, `sa1`, `superfx`, `dsp1`, `sdd1`, `spc7110`.
+    /// `exhirom`, `sa1`, `superfx`, `dsp1`, `sdd1`; `spc7110` is recognised
+    /// but not emulated, the load refuses it.
     #[serde(default)]
     pub force_mapper: Option<String>,
     /// Force the video standard (`ntsc` or `pal`), overriding the header's
@@ -142,7 +143,8 @@ pub struct LoadRomBytesParams {
 pub struct SetPortDeviceParams {
     /// Controller port: `0` = P1, `1` = P2.
     pub port: u8,
-    /// Device to plug in: `joypad`, `mouse`, or `superscope`.
+    /// Device to plug in: `pad` (or `joypad`), `mouse`, `superscope`,
+    /// `multitap`, or `none` for an unplugged port.
     pub device: String,
 }
 
@@ -199,7 +201,10 @@ pub struct LoopProbeParams {
 /// (dma / dsp / `sa1_trace` / superfx / spc).
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct EnableRingTraceParams {
-    /// Hard cap on recorded events; recording stops when the ring is full.
+    /// Cap on recorded events. The DMA and S-DSP traces stop recording
+    /// once it is reached; the SA-1, Super FX and SPC700 traces are rings
+    /// that drop their oldest half each time they fill, so they hold the
+    /// most recent events.
     pub max_events: usize,
 }
 
@@ -1488,7 +1493,8 @@ impl LunaServer {
     #[rmcp::tool(
         description = "Load a SNES ROM (.sfc / .smc) from a path on the host filesystem. \
                                 Returns parsed cartridge metadata. Optional `force_mapper` \
-                                (lorom/hirom/exhirom/sa1/superfx/dsp1/sdd1/spc7110) bypasses \
+                                (lorom/hirom/exhirom/sa1/superfx/dsp1/sdd1; spc7110 is \
+                                recognised but not emulated, the load refuses it) bypasses \
                                 header auto-detection for headerless or checksum-invalid \
                                 homebrew; optional `force_region` (ntsc/pal) overrides the \
                                 header's country byte — omit either to auto-detect."
@@ -1590,8 +1596,9 @@ impl LunaServer {
     }
 
     #[rmcp::tool(
-        description = "Plug a device into a controller port (0 = P1, 1 = P2): `joypad`, \
-                                `mouse`, `superscope` or `multitap`. Feed it afterwards with \
+        description = "Plug a device into a controller port (0 = P1, 1 = P2): `pad` \
+                                (or `joypad`), `mouse`, `superscope`, `multitap`, or `none` \
+                                for an unplugged port. Feed it afterwards with \
                                 `set_joypad` (ports 2-4 = a multitap's pads B-D, players 3-5 \
                                 when it is on port 2), `set_mouse`, or `set_superscope`."
     )]
@@ -3422,8 +3429,9 @@ impl LunaServer {
 
     #[rmcp::tool(
         description = "Start recording a per-opcode Super FX (GSU) trace (PC, opcode, \
-                                SFR, R0-R15, mclk, GO/STOP edges), capped at `max_events`. \
-                                Drain with `take_superfx_trace`."
+                                SFR, R0-R15, mclk, GO/STOP edges), capped at `max_events`: a \
+                                ring that drops its oldest half each time it fills, so it \
+                                holds the most recent events. Drain with `take_superfx_trace`."
     )]
     async fn enable_superfx_trace(
         &self,
@@ -3652,8 +3660,8 @@ fn parse_force_mapper(s: Option<&str>) -> Result<Option<luna_api::MapperKind>, E
         luna_api::MapperKind::from_cli_str(k).ok_or_else(|| {
             ErrorData::invalid_params(
                 format!(
-                    "unknown force_mapper `{k}` (lorom, hirom, exhirom, sa1, superfx, dsp1, \
-                     sdd1, spc7110)"
+                    "unknown force_mapper `{k}` ({})",
+                    luna_api::force_mapper_names()
                 ),
                 None,
             )
@@ -3665,13 +3673,10 @@ fn parse_force_mapper(s: Option<&str>) -> Result<Option<luna_api::MapperKind>, E
 /// Parse an optional `force_region` tool param, sharing the CLI's
 /// `--force-region` vocabulary.
 fn parse_force_region(s: Option<&str>) -> Result<Option<luna_api::Region>, ErrorData> {
-    s.map(|r| match r.to_ascii_lowercase().as_str() {
-        "ntsc" => Ok(luna_api::Region::Ntsc),
-        "pal" => Ok(luna_api::Region::Pal),
-        _ => Err(ErrorData::invalid_params(
-            format!("unknown force_region `{r}` (ntsc, pal)"),
-            None,
-        )),
+    s.map(|r| {
+        luna_api::parse_region(r).ok_or_else(|| {
+            ErrorData::invalid_params(format!("unknown force_region `{r}` (ntsc, pal)"), None)
+        })
     })
     .transpose()
 }
