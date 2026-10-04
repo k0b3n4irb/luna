@@ -1369,7 +1369,7 @@ mod tests {
         // hardware-correct: dot 276 is in HBlank, so a line's own HDMA (or
         // a late-HBlank register write) lands on the NEXT line, never
         // repainting the already-scanned-out visible dots. The reverted
-        // `ca3e28b` broke this; this test keeps it from coming back.
+        // dot-276 experiment (2026-06-17) broke this; this test keeps it from coming back.
         let mut p = Ppu::new();
         p.write(register::INIDISP, 0x0F); // full brightness, not forced-blank
         // All layers off (TM = 0 default) → every dot is the backdrop

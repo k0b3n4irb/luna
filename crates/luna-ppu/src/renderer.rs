@@ -291,7 +291,7 @@ pub fn decode_all_sprites(ppu: &Ppu) -> [SpriteEntry; 128] {
         // sprites per scanline against live OAM (Phase 1), so the game's
         // VBlank hide-then-repopulate has already settled by the time the
         // visible lines draw — no resurrection needed. (Removed the P1.19
-        // `$F0 → shadow_y` fallback `6c06f64`, a band-aid for the old
+        // `$F0 → shadow_y` fallback `ecf4a7f`, a band-aid for the old
         // free-running snapshot renderer; it wrongly resurrected genuinely
         // hidden sprites, e.g. DKC's parked sprites leaking 1-px slivers at
         // x=255.)
@@ -3001,7 +3001,7 @@ mod tests {
     fn oam_y_f0_hides_the_sprite() {
         // Writing y=$F0 (240) parks a sprite off-screen — it must NOT
         // render. (Regression guard for the removed P1.19 `$F0 → shadow_y`
-        // resurrection hack `6c06f64`, which wrongly redrew hidden sprites
+        // resurrection hack `ecf4a7f`, which wrongly redrew hidden sprites
         // at their last position — e.g. DKC's parked sprites leaked 1-px
         // slivers at x=255.)
         let mut p = Ppu::new();
