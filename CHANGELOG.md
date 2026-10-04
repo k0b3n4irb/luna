@@ -41,6 +41,16 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ### Fixed
 
+- **`--dsp-trace` timestamps are no longer all 0.** The `spc_cycles`
+  column (and the `spc_cycles` field of the MCP `take_dsp_trace`) read 0
+  on every row: the counter was only advanced by a stepping path the
+  emulator no longer runs. It now holds the SPC700 cycle of each write,
+  counted from the moment the trace is enabled — the start of the run for
+  `luna state`, the `enable_dsp_trace` call over MCP — at 1 024 000 cycles
+  per second, 32 per output sample, so two writes can be placed against
+  each other and against an `--audio-out` capture. The `reg`, `name` and
+  `value` columns are unchanged, and so is emulation.
+
 - **`luna test`: a non-ASCII character in a hex block no longer aborts
   the run.** `"7E:0000" = "aéb"` under `[asserts.blocks]` crashed `luna
   test` with a Rust panic (exit 101), and the verdict of every other

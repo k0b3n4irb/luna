@@ -435,7 +435,9 @@ impl Apu {
     fn tick_voices(&mut self, spc_cycles: u32) {
         // Timestamp source for the optional DSP write trace (#122):
         // advanced with the same cycles that drive the sample pipeline,
-        // so a traced write is placed relative to audio output.
+        // so a traced write is placed relative to audio output. Only the
+        // cycles no bus access clocked reach here; `clock_cycle` counts
+        // the others.
         if self.dsp.write_log.is_some() {
             self.dsp.trace_cycles = self.dsp.trace_cycles.wrapping_add(u64::from(spc_cycles));
         }
@@ -898,6 +900,14 @@ impl ApuBusView<'_> {
         // --- S-DSP: one 32 kHz sample every 32 SPC clocks. The DSP follows the
         // SMP *clock* (ares `step()` syncs the dsp thread), so it scales with
         // the clock divider, not the timer one.
+        // The DSP write trace is stamped on that same clock, and before the
+        // access itself: a `$F3` write carries the cycle it lands on.
+        if self.dsp.write_log.is_some() {
+            self.dsp.trace_cycles = self
+                .dsp
+                .trace_cycles
+                .wrapping_add(u64::from(SPC_SAMPLE_WAIT[ws]));
+        }
         *self.sample_tick_deficit += SPC_SAMPLE_WAIT[ws];
         if *self.sample_tick_deficit >= SPC_CYCLES_PER_SAMPLE {
             *self.sample_tick_deficit -= SPC_CYCLES_PER_SAMPLE;

@@ -1660,3 +1660,44 @@ fn an_input_script_keeps_the_audio_of_its_pre_roll() {
         "same stream whatever frames the events fall on"
     );
 }
+
+/// The `--dsp-trace` timestamp counts SPC700 cycles. The live stepping
+/// path never advanced it, so every event read 0 (audit 2026-10-04, A1).
+///
+/// The 65C816 asks the IPL to jump to `$0200` (port 1 = 0, ports 2/3 =
+/// address, port 0 = `$CC`), where a hand-poked SPC700 program writes
+/// MVOLL three times: `MOV $F3,#imm` is 5 cycles with the write on the
+/// last one, a `NOP` is 2.
+#[test]
+fn dsp_trace_timestamps_count_spc_cycles() {
+    let cpu = [
+        0xA9, 0x00, 0x8D, 0x42, 0x21, // LDA #$00 ; STA $2142
+        0xA9, 0x02, 0x8D, 0x43, 0x21, // LDA #$02 ; STA $2143
+        0x9C, 0x41, 0x21, // STZ $2141 (0 = execute)
+        0xA9, 0xCC, 0x8D, 0x40, 0x21, // LDA #$CC ; STA $2140
+        0x80, 0xFE, // BRA self
+    ];
+    let spc = [
+        0x8F, 0x0C, 0xF2, // MOV $F2,#$0C (MVOLL)
+        0x8F, 0x11, 0xF3, // MOV $F3,#$11
+        0x8F, 0x22, 0xF3, // MOV $F3,#$22   +5
+        0x00, 0x00, 0x00, // NOP ×3         +6
+        0x8F, 0x33, 0xF3, // MOV $F3,#$33   +5
+        0x2F, 0xFE, // BRA self
+    ];
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom_with(&cpu, None)).unwrap();
+    e.poke_aram(0x0200, &spc).unwrap();
+    e.enable_dsp_trace(16).unwrap();
+    e.step(20_000).unwrap();
+
+    let ev = e.take_dsp_trace().unwrap();
+    let seen: Vec<(u8, u8)> = ev.iter().map(|w| (w.reg, w.value)).collect();
+    assert_eq!(seen, [(0x0C, 0x11), (0x0C, 0x22), (0x0C, 0x33)]);
+    assert!(
+        ev[0].spc_cycles > 0,
+        "the IPL boot alone is hundreds of cycles"
+    );
+    assert_eq!(ev[1].spc_cycles - ev[0].spc_cycles, 5);
+    assert_eq!(ev[2].spc_cycles - ev[1].spc_cycles, 11);
+}

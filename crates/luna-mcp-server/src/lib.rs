@@ -966,7 +966,8 @@ pub struct DmaTraceResult {
 /// One S-DSP register write (`take_dsp_trace`).
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct DspTraceLine {
-    /// SPC700 cycles since reset at the write.
+    /// SPC700 cycles since `enable_dsp_trace`, the cycle of the write
+    /// included. 32 of them make one output sample.
     pub spc_cycles: u64,
     /// DSP register index (`$00-$7F`).
     pub reg: u8,

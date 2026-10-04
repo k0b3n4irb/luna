@@ -3751,8 +3751,8 @@ impl Emulator {
     }
 
     /// Enable the DSP register-write trace (issue #122): every write to
-    /// a `$00-$7F` DSP register is captured with an SPC-cycle timestamp,
-    /// up to `max_events`. Answers "did my KON/KOFF sequence reach the
+    /// a `$00-$7F` DSP register is captured with an SPC-cycle timestamp
+    /// (counted from this call), up to `max_events`. Answers "did my KON/KOFF sequence reach the
     /// chip in the order I intended?" — invisible in a WAV capture.
     pub fn enable_dsp_trace(&mut self, max_events: usize) -> Result<(), ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;

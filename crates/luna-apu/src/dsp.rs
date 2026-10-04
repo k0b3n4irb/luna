@@ -304,7 +304,8 @@ pub fn gaussian_table() -> &'static [i16; 512] {
 /// the writes reached the chip in the intended order.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct DspWriteEvent {
-    /// SPC700 cycles since reset at the moment of the write.
+    /// SPC700 cycles since the trace was enabled, the cycle of the write
+    /// included. 32 of them make one output sample.
     pub spc_cycles: u64,
     /// Register index (`$00-$7F`).
     pub reg: u8,
@@ -337,7 +338,8 @@ pub struct Dsp {
     /// the write path pays a single `Option` check.
     #[serde(skip)]
     pub write_log: Option<DspWriteLog>,
-    /// Timestamp source for the trace, ticked by the APU bridge.
+    /// Timestamp source for the trace: SPC700 cycles since it was enabled,
+    /// ticked by the APU bridge while `write_log` is on.
     #[serde(skip)]
     pub trace_cycles: u64,
 }

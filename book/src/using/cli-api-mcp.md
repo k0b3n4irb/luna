@@ -185,7 +185,7 @@ and is the hub for every headless diagnostic.
 | `--dsp1-trace-ports` | off | Restrict the above to the DR/SR transactions (the stock firmware idles in an RQM loop, so a full trace is mostly idle spin). |
 | `--dsp1-trace-commands <PATH>` | — | The DSP-1 port traffic grouped into one CSV row per command (implies `--dsp1-trace-ports`). See *Command transactions* below. |
 | `--dsp1-trace-max <N>` | `200000` | Cap on captured DSP-1 events. |
-| `--dsp-trace <PATH>` | — | CSV of every DSP register write: `spc_cycles,reg,name,value`, with `name` decoded (`V0_ADSR1`, `KON`, `FLG`, …). |
+| `--dsp-trace <PATH>` | — | CSV of every DSP register write: `spc_cycles,reg,name,value`, with `name` decoded (`V0_ADSR1`, `KON`, `FLG`, …). `spc_cycles` counts SPC700 cycles from the start of the run (1 024 000 per second; 32 per output sample). |
 | `--dsp-trace-max <N>` | `100000` | Cap on captured DSP writes. |
 | `--sa1-log <PATH>` | — | CSV of every `$2200-$23FF` SA-1 MMIO access. |
 | `--sa1-side-log <PATH>` | — | The same registers seen from the **SA-1's** side: its own reads and writes of `$2200-$23FF`, plus its writes to I-RAM (`$3000-$37FF`), each with the SA-1 PC — `seq,sa1_pc,kind,reg,value`. Shows the handshake flags the two CPUs exchange, which the S-CPU-side `--sa1-log` cannot. |
@@ -477,9 +477,12 @@ luna state game.sfc -n 3000000 --peek APU:0200:40 --peek APU:00F0:10
 #    KON/KOFF pulses reach the chip in the intended order?
 luna state game.sfc -n 2000000 --dsp-trace dsp.csv
 # spc_cycles,reg,name,value
-# 0,$6C,FLG,$20
-# 0,$5C,KOFF,$FF     <- driver mutes every voice before setup
-# 0,$5D,DIR,$0A      <- sample directory at $0A00
+# 159382,$6C,FLG,$20
+# 159499,$5D,DIR,$0A      <- sample directory at $0A00
+# 162748,$5C,KOFF,$FF     <- driver mutes every voice before setup
+#
+# spc_cycles is the SPC700 cycle of the write, counted from the start of
+# the run: divide by 32 for the sample index in an --audio-out capture.
 ```
 
 ### `luna frames` — consecutive-frame capture (temporal artefacts)
