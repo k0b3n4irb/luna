@@ -7,6 +7,18 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+## [1.33.1] — 2026-10-05
+
+One fix, for Windows: the GUI now keeps its settings and writes its
+files under `%APPDATA%\luna\`. It has not been run on a Windows machine
+by the maintainers — the folder rules are covered by tests only — so a
+report from a Windows user, either way, is welcome. Linux and macOS are
+unchanged; the emulator is unchanged.
+
+**Upgrading from 1.33.0:** nothing to do on Linux and macOS. On Windows,
+files an earlier build wrote next to its start directory are not moved:
+copy `states\` into `%APPDATA%\luna\` to keep the slots.
+
 ### Fixed
 
 - **GUI on Windows: bindings, hotkeys, volume and the last ROM folder are
