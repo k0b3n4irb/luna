@@ -852,38 +852,37 @@ ppu_test!(
 ppu_test!(
     ppu_mosaic_mode3,
     "Mosaic/Mode3/MosaicMode3.sfc",
-    "9424df0b5273fd06c961a6c57ff64b81949f0f39fff5d947917761f6bab93b8b",
+    "664bfdd293b8e60a83a93ba2e912adec4bbd56a48ce276391ab9bd0fdc2483df",
     hold = PAD_R
 );
+// Re-baselined 2026-10-05 (both mosaic goldens): the vertical mosaic counter
+// is now ares' / Mesen2's (blocks start on PPU line 1, reload when `$2106`
+// switches mosaic on), where luna rounded the line down (blocks from line 0).
+// At the demo's largest size (16) luna's frame is pixel-identical to the
+// corpus' `MosaicMode3.png`, which the old grid was one line off from.
+//
 // MosaicMode5: Mode 5 hi-res + interlace, the Moogle figure, with a mosaic
 // whose size only grows while R is held (`MosaicMode5.asm`: `$2106` starts at
 // `%00000001`, size 0, and gains `$10` every 8 frames of R). Until 2026-10-04
 // this test held nothing, so it rendered the un-mosaicked picture — the very
 // frame of `ppu_interlace_moogle`, same hash — and Mode 5 mosaic had no
-// coverage at all. It now holds R like `ppu_mosaic_mode3`; the ramp never
+// coverage at all. It holds R like `ppu_mosaic_mode3`; the ramp never
 // settles, so the capture is the frame-cap one (`$2106` = `$31`, 4-pixel
 // blocks).
 //
-// The hash below is a CANDIDATE, recorded 2026-10-04 and not blessed. At the
-// demo's largest size (`$F1`) luna's native 512x448 frame does not match the
-// corpus' `MosaicMode5.png`:
-//   - block size: luna 32x32 native pixels, the PNG 16x32. A Mesen2 frame of
-//     the same demo has luna's proportions (28x28 one step earlier), and so
-//     does ares' code (the counter runs once per dot), so the PNG looks like
-//     the outlier here;
-//   - inside a block: in luna the two hi-res half-pixels of a dot differ
-//     (vertical stripes, 2560 differing column pairs); in Mesen2's frame no
-//     pair differs, and ares gives both half-pixels the block's pixel
-//     (`background.cpp`, the `mosaic.pixel` latch); the PNG's two FIELDS
-//     differ instead (horizontal stripes).
-// The second point is an open emulation question. Until it is settled the
-// test stays ignored — an un-validated picture must not become a baseline.
+// Blessed 2026-10-05: in hi-res the mosaic latch is taken on the below
+// (left) half-pixel and the above half reads it (ares `background.cpp`,
+// Mesen2 `RenderTilemap`), so a block is one colour across both halves —
+// luna sampled the two halves separately (vertical stripes). With that and
+// the vertical counter above, luna's native 512x448 frame at size 14 is
+// pixel-identical to a Mesen2 capture of the same scene. The corpus'
+// `MosaicMode5.png` (16x32 blocks, horizontal field stripes) matches neither
+// reference and is not used.
 ppu_test!(
     ppu_mosaic_mode5,
     "Mosaic/Mode5/MosaicMode5.sfc",
-    "128044931d9733d3f7ed8928ae2d56a305aaf6d8206f414157e5a41266debb96",
-    hold = PAD_R,
-    ignore = "pending maintainer validation of the Mode 5 mosaic golden (2026-10-04)"
+    "b89a07587a39f552671c38f59878433008d7c55614cbe59ea494ec0dbd4d2254",
+    hold = PAD_R
 );
 
 // -----------------------------------------------------------------------

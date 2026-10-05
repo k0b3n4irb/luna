@@ -203,6 +203,15 @@ pub struct Ppu {
     pub bgmode: u8,
     /// `$2106` MOSAIC.
     pub mosaic: u8,
+    /// The vertical mosaic counter (ares `mosaic.vcounter`, Mesen2
+    /// `_mosaicScanlineCounter`): reloaded to `size + 1` on line 1 and when
+    /// mosaic goes from all-off to on, decremented at the start of every
+    /// line, reloaded to `size` when it reaches 0. A block's source line is
+    /// `line - (size - counter)`.
+    pub mosaic_vcounter: u8,
+    /// The line [`Self::mosaic_vcounter`] was last stepped for: the counter
+    /// describes that line only.
+    pub mosaic_line: u16,
     /// `$2130` CGWSEL — bit 7:6 force-main-black region, bit 5:4
     /// math-enable region (both reference the colour-math window),
     /// bit 1 sub-BG/OBJ enable, bit 0 direct-colour mode for 8bpp.
@@ -473,6 +482,8 @@ impl Ppu {
             obsel: 0,
             bgmode: 0,
             mosaic: 0,
+            mosaic_vcounter: 0,
+            mosaic_line: u16::MAX,
             cgwsel: 0,
             cgadsub: 0,
             coldata_r: 0,
@@ -606,6 +617,40 @@ impl Ppu {
         }
         self.flush_partial_scanline_inner(y, FRAME_W as u16, opts);
         self.scanline_reset();
+        self.mosaic_scanline(y + 1);
+    }
+
+    /// Step the vertical mosaic counter for line `v`, at its start (ares
+    /// `Mosaic::scanline`, H = 0).
+    const fn mosaic_scanline(&mut self, v: u16) {
+        let on = self.mosaic & 0x0F != 0;
+        let size = (self.mosaic >> 4) + 1;
+        if v == 1 {
+            self.mosaic_vcounter = if on { size + 1 } else { 0 };
+        }
+        if self.mosaic_vcounter != 0 {
+            self.mosaic_vcounter -= 1;
+            if self.mosaic_vcounter == 0 {
+                self.mosaic_vcounter = if on { size } else { 0 };
+            }
+        }
+        self.mosaic_line = v;
+    }
+
+    /// ares `mosaic.voffset()` for line `y`: how many lines above `y` its
+    /// mosaic block starts (`size - vcounter`, which is negative on the
+    /// line `$2106` switched mosaic on). The live counter answers for the
+    /// line being drawn; any other line (a whole-frame re-render from the
+    /// final register state) gets what the counter holds when nothing
+    /// changes during the frame: blocks start on line 1.
+    #[must_use]
+    pub(crate) fn mosaic_voffset(&self, y: u16) -> i32 {
+        let size = i32::from(self.mosaic >> 4) + 1;
+        if y == self.mosaic_line {
+            size - i32::from(self.mosaic_vcounter)
+        } else {
+            i32::from(y.saturating_sub(1)) % size
+        }
     }
 
     /// Decode + evaluate this scanline's OBJ once and cache it on
@@ -1083,7 +1128,16 @@ impl Ppu {
                 }
             }
             register::BGMODE => self.bgmode = value,
-            register::MOSAIC => self.mosaic = value,
+            register::MOSAIC => {
+                let was_on = self.mosaic & 0x0F != 0;
+                self.mosaic = value;
+                if !was_on && value & 0x0F != 0 {
+                    // The vertical counter is reloaded when mosaic becomes
+                    // enabled (ares `io.cpp` `$2106`; Mesen2 `SnesPpu.cpp`,
+                    // "FF6's mosaic effect is broken ... without this").
+                    self.mosaic_vcounter = (value >> 4) + 2;
+                }
+            }
             register::BG1SC => self.set_bg_tilemap(0, value),
             register::BG2SC => self.set_bg_tilemap(1, value),
             register::BG3SC => self.set_bg_tilemap(2, value),
@@ -1822,5 +1876,52 @@ mod tests {
         // Out-of-range line is a no-op (doesn't panic) — line FRAME_H+1
         // would target row FRAME_H, one past the last framebuffer row.
         p.render_current_scanline(crate::FRAME_H as u16 + 1, RenderOptions::default());
+    }
+
+    #[test]
+    fn mosaic_blocks_start_on_line_1() {
+        // ares `Mosaic::scanline` / Mesen2 `_mosaicScanlineCounter`: the
+        // counter is reloaded on line 1, so with size 4 the blocks are
+        // lines 1-4, 5-8, ... — not 0-3, 4-7.
+        let mut p = Ppu::new();
+        p.write(register::MOSAIC, 0x31); // BG1, size 4
+        let offsets: Vec<i32> = (1..=9u16)
+            .map(|v| {
+                p.mosaic_scanline(v);
+                p.mosaic_voffset(v)
+            })
+            .collect();
+        assert_eq!(offsets, [0, 1, 2, 3, 0, 1, 2, 3, 0]);
+        // A line the counter was not stepped for (whole-frame re-render)
+        // gets the same grid.
+        let fallback: Vec<i32> = (0..=9u16).map(|y| p.mosaic_voffset(y + 20)).collect();
+        assert_eq!(fallback, [3, 0, 1, 2, 3, 0, 1, 2, 3, 0]);
+        assert_eq!(p.mosaic_voffset(0), 0);
+    }
+
+    #[test]
+    fn mosaic_counter_reloads_when_mosaic_is_switched_on() {
+        // `$2106` going from all-off to on reloads the counter (ares
+        // `io.cpp`, Mesen2 `SnesPpu.cpp` — the FF6 case): the block grid
+        // restarts on the NEXT line, and the line of the write itself reads
+        // one line down (`size - (size + 1)` = -1).
+        let mut p = Ppu::new();
+        for v in 1..=6u16 {
+            p.mosaic_scanline(v);
+        }
+        assert_eq!(p.mosaic_vcounter, 0, "mosaic off: the counter stays 0");
+        p.write(register::MOSAIC, 0x31); // switched on during line 6
+        assert_eq!(p.mosaic_voffset(6), -1);
+        let offsets: Vec<i32> = (7..=11u16)
+            .map(|v| {
+                p.mosaic_scanline(v);
+                p.mosaic_voffset(v)
+            })
+            .collect();
+        assert_eq!(offsets, [0, 1, 2, 3, 0], "blocks restart on line 7");
+        // Changing the size while already on does not reload.
+        let before = p.mosaic_vcounter;
+        p.write(register::MOSAIC, 0x71);
+        assert_eq!(p.mosaic_vcounter, before);
     }
 }

@@ -204,21 +204,26 @@ corrected (mosaic *is* applied since #11).
 a deliberate, documented approximation. The 🟠 set and the entire 🟡
 tail (#5-#9, #11, #13-#18) are done.
 
-> **Note (2026-10-04 audit).** Row #16 says mosaic+interlace was
-> eyeball-validated on MosaicMode5 with R held. The committed golden
-> `ppu_mosaic_mode5` (`crates/luna-core/tests/snes_test_roms.rs`) does
-> **not** hold R — it has the same hash as `ppu_interlace_moogle` — so it
-> covers Mode 5 hi-res + interlace but not the mosaic itself: hi-res
-> mosaic (#11) has a unit-level guard only, no golden.
+> **Note (2026-10-04 audit, closed 2026-10-05).** The committed golden
+> `ppu_mosaic_mode5` did not hold R (same hash as `ppu_interlace_moogle`),
+> so Mode 5 mosaic had no golden; holding R exposed **vertical stripes
+> inside the blocks** — the two hi-res half-pixels of a dot sampled
+> separately, where ares takes the mosaic latch on the below half-pixel
+> and gives it to the above half (`background.cpp:196-205`) and Mesen2
+> does the same (`RenderTilemap`, `color = hiresSubColor`). Fixed
+> 2026-10-05 (`render_bg_scanline_indexed_hires`): a block is one colour
+> across both halves, at every size, 1 included.
 >
-> **⚠️ Open — Mode 5 mosaic, half-pixels inside a block (found the same
-> day, not yet checked line by line against ares).** The test now holds R
-> and carries a candidate hash, but stays `#[ignore]`d: at the largest
-> mosaic size luna's native 512-wide frame shows **vertical stripes inside
-> some blocks** — the two hi-res half-pixels of a dot differ — where a
-> Mesen2 frame of the same scene has solid blocks, and ares gives both
-> half-pixels the block's latched pixel (`background.cpp`, the
-> `mosaic.pixel` latch). The reference PNG shipped with the corpus shows a
-> third shape (16×32 blocks, horizontal field stripes) and is not a
-> usable oracle here. Row #11 is therefore **not** closed for Mode 5/6:
-> port the latch from ares before blessing the golden.
+> Comparing the result with a Mesen2 capture found a second divergence,
+> in **every** mode: luna snapped the line to `y / size * size`, so
+> blocks started on line 0. Both references run a vertical counter
+> (ares `mosaic.cpp` `vcounter`, Mesen2 `_mosaicScanlineCounter`):
+> reloaded to `size + 1` on line 1 and when `$2106` turns mosaic on
+> from all-off (the FF6 case), decremented each line, reloaded to `size`
+> at 0 — so blocks start on line 1 and a mid-frame enable restarts the
+> grid on the next line. Ported as `Ppu::mosaic_vcounter` /
+> `mosaic_voffset`, used by the lores, hi-res and Mode 7 paths. Both
+> mosaic goldens re-baselined: MosaicMode3 at size 16 is pixel-identical
+> to the corpus PNG, MosaicMode5 at size 14 pixel-identical to the Mesen2
+> frame (`luna-audit-2026-10-04/mosaic/mesen_mosaic5_size15_f388.png`).
+> Rows #11 and #16 are closed for Mode 5/6 as well.

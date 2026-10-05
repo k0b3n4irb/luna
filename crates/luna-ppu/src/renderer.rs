@@ -874,7 +874,13 @@ pub(crate) fn render_mode7_scanline_indexed(
     } else {
         1
     };
-    let mosaic_y = i32::from(y) / mosaic_size * mosaic_size;
+    // Vertically the block is the one the frame's mosaic counter is in
+    // (`y -= mosaic.voffset()`, mode7.cpp:13), not `y` rounded down.
+    let mosaic_y = if ppu.mosaic & 0x01 != 0 {
+        i32::from(y) - ppu.mosaic_voffset(y)
+    } else {
+        i32::from(y)
+    };
 
     // V-flip mirrors the screen-space scanline (ares mode7.cpp:24).
     let yy = if v_flip { 255 - mosaic_y } else { mosaic_y };
@@ -1491,28 +1497,25 @@ fn opt_scroll(
     (eff_h, eff_v, h_from_opt)
 }
 
-/// Hi-res interlace vertical source ($2133 bit 0, modes 5/6): the logical
-/// line a screen scanline `y` samples, with mosaic in ares' order
-/// (`background.cpp:38-44`). Mosaic snaps the *screen* line to its block
-/// first; hi-res interlace then doubles (`block<<1`), adding the field bit
-/// only when mosaic is off (`vpixel<<1 | (field && !mosaic.enable)`) — the
-/// mosaic offset doubling (`voffset << (hires&&interlace)`) falls out of
-/// snapping in screen space before the `<<1`. Progressive / non-interlace
-/// reduces to the plain block. Lores interlace does **not** double (line 40
-/// lives inside `if(hires())`), so the lores renderer skips this entirely.
+/// The logical BG line a hi-res (mode 5/6) screen scanline `y` samples, in
+/// ares' order (`background.cpp:38-44`): hi-res interlace doubles the line
+/// and adds the field bit only when this BG's mosaic is off
+/// (`vpixel << 1 | (field && !mosaic.enable)`); mosaic then steps back to
+/// the block's first line, by twice the offset in interlace
+/// (`vpixel -= mosaic.voffset() << (hires && interlace)`). Lores interlace
+/// does **not** double (line 40 lives inside `if(hires())`), so the lores
+/// renderer skips this entirely.
 #[inline]
-pub(crate) fn hires_interlace_src(ppu: &Ppu, y: u16, mosaic_size: u16) -> u16 {
-    let block = (y / mosaic_size) * mosaic_size;
-    if ppu.setini & 0x01 != 0 {
-        let field_bit = if mosaic_size > 1 {
-            0
-        } else {
-            u16::from(ppu.field)
-        };
-        (block << 1) | field_bit
-    } else {
-        block
+pub(crate) fn hires_interlace_src(ppu: &Ppu, y: u16, mosaic_on: bool) -> u16 {
+    let interlace = ppu.setini & 0x01 != 0;
+    let mut vpixel = i32::from(y);
+    if interlace {
+        vpixel = vpixel << 1 | i32::from(ppu.field && !mosaic_on);
     }
+    if mosaic_on {
+        vpixel -= ppu.mosaic_voffset(y) << u32::from(interlace);
+    }
+    vpixel as u16
 }
 
 /// Same as [`render_bg_scanline_with`] but returns CGRAM indices
@@ -1547,7 +1550,13 @@ pub(crate) fn render_bg_scanline_indexed_with(
     } else {
         1
     };
-    let mosaic_y = (y / mosaic_size) * mosaic_size;
+    // Vertically the block is the one the frame's mosaic counter is in
+    // (ares `background.cpp:42-44`, `vpixel -= mosaic.voffset()`).
+    let mosaic_y = if ppu.mosaic & (1 << bg_idx) != 0 {
+        (i32::from(y) - ppu.mosaic_voffset(y)) as u16
+    } else {
+        y
+    };
     // Offset-per-tile applies to BG1/BG2 in Modes 2/4 (Mode 6 is hi-res,
     // handled elsewhere). Effective scroll is recomputed per 8-pixel
     // screen column.
@@ -1600,14 +1609,15 @@ fn render_bg_scanline_indexed_hires(
     };
     let bg = bg_state(ppu, bg_idx);
     // Mosaic snaps the screen dot/scanline to the block.
-    let mosaic_size = if ppu.mosaic & (1 << bg_idx) != 0 {
+    let mosaic_on = ppu.mosaic & (1 << bg_idx) != 0;
+    let mosaic_size = if mosaic_on {
         u16::from((ppu.mosaic >> 4) & 0x0F) + 1
     } else {
         1
     };
     // Interlace (mode 5/6 + $2133 bit 0): mosaic-snap in screen space, THEN
     // double (field bit dropped when mosaic is on) — ares background.cpp:38-44.
-    let mosaic_y = hires_interlace_src(ppu, y, mosaic_size);
+    let mosaic_y = hires_interlace_src(ppu, y, mosaic_on);
     // Mode 6 is hi-res *and* offset-per-tile (BG1 only; Mode 5 has no
     // OPT, Modes 2/4 use the lores path). Effective scroll is per column.
     let is_opt = ppu.bgmode & 0x07 == 6 && bg_idx < 2;
@@ -1637,7 +1647,15 @@ fn render_bg_scanline_indexed_hires(
         let src_y = mosaic_y.wrapping_add(eff.1);
         let cx = (mosaic_x << 1).wrapping_add(h2);
         below[x as usize] = sample_bg_pixel(ppu, &g, cx, src_y, &mut cache);
-        above[x as usize] = sample_bg_pixel(ppu, &g, cx.wrapping_add(1), src_y, &mut cache);
+        // With mosaic on, the latch is taken on the below half-pixel only
+        // and the above half reads it (ares `background.cpp:196-205`, below
+        // runs first; Mesen2 `RenderTilemap`, `color = hiresSubColor`) —
+        // at every size, 1 included.
+        above[x as usize] = if mosaic_on {
+            below[x as usize]
+        } else {
+            sample_bg_pixel(ppu, &g, cx.wrapping_add(1), src_y, &mut cache)
+        };
     }
     (above, below)
 }
@@ -3831,29 +3849,34 @@ mod tests {
     fn hires_interlace_src_doubles_and_handles_mosaic() {
         let mut p = Ppu::new();
         // Progressive, no mosaic: identity.
-        assert_eq!(hires_interlace_src(&p, 10, 1), 10);
+        assert_eq!(hires_interlace_src(&p, 10, false), 10);
         // Interlace on, no mosaic, field 0/1: y*2 (+ field).
         p.setini |= 0x01;
         p.field = false;
-        assert_eq!(hires_interlace_src(&p, 10, 1), 20);
+        assert_eq!(hires_interlace_src(&p, 10, false), 20);
         p.field = true;
-        assert_eq!(hires_interlace_src(&p, 10, 1), 21);
+        assert_eq!(hires_interlace_src(&p, 10, false), 21);
         assert_eq!(
-            hires_interlace_src(&p, 223, 1),
+            hires_interlace_src(&p, 223, false),
             447,
             "screen 223 → logical 447"
         );
-        // Mosaic on (size 4) + interlace: snap screen line to the block
-        // FIRST (8), THEN double (16) — and the field bit is dropped, so
-        // both parities give the same value (ares background.cpp:40,43).
+        // Mosaic on (size 4) + interlace. Blocks start on line 1, so line
+        // 10 is one line into the block that starts on line 9: the line is
+        // doubled (20), the field bit is dropped, and the offset is doubled
+        // too (20 - 2) — ares background.cpp:40,43.
+        p.mosaic = 0x31;
         p.field = false;
-        assert_eq!(hires_interlace_src(&p, 10, 4), 16);
+        assert_eq!(hires_interlace_src(&p, 10, true), 18);
         p.field = true;
         assert_eq!(
-            hires_interlace_src(&p, 10, 4),
-            16,
+            hires_interlace_src(&p, 10, true),
+            18,
             "field dropped under mosaic"
         );
+        // Size 1: no offset, but the field bit is still dropped.
+        p.mosaic = 0x01;
+        assert_eq!(hires_interlace_src(&p, 10, true), 20);
     }
 
     #[test]
@@ -3916,6 +3939,53 @@ mod tests {
             Some(17),
             "dot 128 is tile column 16 (16-px hi-res tiles), not a repeat of column 0"
         );
+    }
+
+    #[test]
+    fn hires_mosaic_gives_both_half_pixels_the_block_pixel() {
+        // Mode 5, BG1. In hi-res the mosaic latch is taken on the below
+        // (left) half-pixel only and the above half then reads the latch
+        // (ares `background.cpp:196-205`, below runs first; Mesen2
+        // `RenderTilemap`: `color = hiresSubColor` at a block start, and
+        // mosaic applies in Modes 5/6 even at size 1). So a block is one
+        // colour: the left half-pixel of its first dot.
+        let mut p = Ppu::new();
+        p.write(register::INIDISP, 0x0F);
+        p.write(register::BGMODE, 0x05);
+        p.write(0x07, 0x00); // BG1SC: tilemap word base 0
+        p.write(0x0B, 0x01); // BG12NBA: BG1 char base byte $2000
+        // Char 0, row 0: only hi-res column 0 is index 1.
+        p.vram.poke(0x2000, 0x80);
+        let idx = |line: &IndexedScanline, x: usize| line[x].map(|(i, _)| i);
+
+        // Mosaic off: the two half-pixels of dot 0 differ.
+        let (above, below) = render_bg_scanline_indexed_hires(&p, 0, 0, RenderOptions::default());
+        assert_eq!(idx(&below, 0), Some(1));
+        assert_eq!(idx(&above, 0), None);
+
+        // Mosaic on BG1, size 1 ($2106 = $01): the above half reads the latch.
+        p.write(0x06, 0x01);
+        let (above, below) = render_bg_scanline_indexed_hires(&p, 0, 0, RenderOptions::default());
+        assert_eq!(idx(&below, 0), Some(1));
+        assert_eq!(idx(&above, 0), Some(1), "size 1: above = below");
+        assert_eq!(idx(&below, 1), None);
+        assert_eq!(idx(&above, 1), None);
+
+        // Size 4 ($2106 = $31): dots 0-3 are one colour on both halves.
+        p.write(0x06, 0x31);
+        let (above, below) = render_bg_scanline_indexed_hires(&p, 0, 0, RenderOptions::default());
+        for x in 0..4 {
+            assert_eq!(idx(&below, x), Some(1), "below dot {x}");
+            assert_eq!(idx(&above, x), Some(1), "above dot {x}");
+        }
+        assert_eq!(idx(&below, 4), None);
+        assert_eq!(idx(&above, 4), None);
+
+        // Mosaic on another layer only does not touch BG1.
+        p.write(0x06, 0x32);
+        let (above, below) = render_bg_scanline_indexed_hires(&p, 0, 0, RenderOptions::default());
+        assert_eq!(idx(&below, 0), Some(1));
+        assert_eq!(idx(&above, 0), None);
     }
 
     #[test]

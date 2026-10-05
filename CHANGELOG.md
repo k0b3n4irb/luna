@@ -84,6 +84,20 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ### Fixed
 
+- **Mosaic blocks start on the right line, and are solid in Mode 5/6.**
+  Two divergences from ares and Mesen2, found on the corpus' MosaicMode5
+  demo. In every mode, luna's blocks started on the first line of the
+  picture rounded down from the scanline number; the hardware runs a
+  counter that starts the grid on line 1 and restarts it on the next
+  line when `$2106` turns mosaic on in mid-frame (the Final Fantasy VI
+  transitions rely on that). Every mosaic block was therefore one line
+  off, and a mid-frame enable did not restart the grid. In Modes 5 and 6
+  the two hi-res half-pixels of a dot were sampled separately inside a
+  block, which drew vertical stripes where the hardware latches one pixel
+  for both halves. Verified pixel-for-pixel: MosaicMode3 at size 16
+  against the corpus' reference PNG, MosaicMode5 at size 14 against a
+  Mesen2 capture. Both `ppu_mosaic_*` goldens are re-baselined, and the
+  Mode 5 one is no longer ignored.
 - **The state's `dma.channels[n].params` is the DMAP register, not a
   rebuilt copy.** The field (in `luna state --out`, the MCP `state` tool
   and the GUI's register viewer) was re-encoded from the decoded transfer

@@ -338,11 +338,11 @@ fn save_state_shape_is_pinned_to_the_version() {
         (
             8,
             [
-                ("LoROM", (447_757, 8_195)),
-                ("SA-1", (447_757, 4_723)),
-                ("Super FX", (447_757, 2_671)),
-                ("S-DD1", (447_757, 2_171)),
-                ("DSP-1", (447_757, 2_129)),
+                ("LoROM", (447_761, 8_195)),
+                ("SA-1", (447_761, 4_723)),
+                ("Super FX", (447_761, 2_671)),
+                ("S-DD1", (447_761, 2_171)),
+                ("DSP-1", (447_761, 2_129)),
             ]
         ),
         "serialized machine shape changed — see this test's doc comment"
