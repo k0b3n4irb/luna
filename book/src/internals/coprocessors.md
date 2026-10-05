@@ -14,6 +14,22 @@ hardware-accurate port:
 The DSP-1 core is shared with `luna-cpu-upd96050`, a standalone NEC
 uPD7725 / uPD96050 DSP — usable on its own like the other CPU cores.
 
+## DSP-1
+
+| | |
+|---|---|
+| **On the console** | a NEC uPD7725 running a fixed program: the game writes a command and its arguments, reads the result |
+| **In luna** | `crates/luna-cpu-upd96050/src/lib.rs` (the DSP core), `crates/luna-core/src/coproc/dsp1.rs` (the board) |
+| **Proven by** | the command and result byte stream compared with Mesen2 over 380 783 events (`crates/luna-core/tests/dsp1_port_differential.rs`) |
+| **Grade** | **A−** (scorecard: *DSP-1 (uPD7725)*) |
+| **Open gaps** | no oracle for the DSP's internal state, only for its ports |
+| **Reference** | [`docs/firmware.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/firmware.md) (the `dsp1b.rom` dump the user supplies) |
+
+> The table above opens every subsystem page: what the hardware is, where
+> luna's port lives, what proves it, its grade in the
+> [accuracy scorecard](../method/accuracy.md#where-luna-stands), and what is
+> still open.
+
 Each coprocessor page covers its register model, how it is detected and wired
 onto the bus, and where its implementation stands against the reference.
 

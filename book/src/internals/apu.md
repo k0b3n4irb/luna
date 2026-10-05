@@ -3,6 +3,17 @@
 luna's faithful-port reference for the SNES audio subsystem (SPC700 CPU +
 S-DSP), describing the hardware-accurate behaviour each component models.
 
+| | |
+|---|---|
+| **On the console** | the S-DSP: eight voices of BRR samples, envelopes, echo, 32 kHz stereo, programmed by the SPC700 through `$F2` / `$F3` |
+| **In luna** | `crates/luna-apu/src/dsp.rs` (the S-DSP, a cycle-accurate port) and `crates/luna-apu/src/lib.rs` (the SPC700 bridge, the CPU ports `$2140-$2143`) |
+| **Proven by** | nine PCM goldens in `crates/luna-core/tests/snes_test_roms.rs`; the BRR decoder compared with an independent decoder over 200 000 random groups |
+| **Grade** | **A** (scorecard: *S-DSP (audio)*) |
+| **Open gaps** | [`docs/luna_apu_gaps.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_apu_gaps.md): the core produces 32 040 Hz where every consumer assumes 32 000 (#9); the S-DSP stops with the SPC700 after `STOP` (#8) |
+| **Reference** | [`docs/apu_dsp_reference.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/apu_dsp_reference.md); the SPC700 itself is on [The CPUs](cpus.md#spc700--the-audio-cpu) |
+
+The rest of this page is the hardware behaviour the port follows.
+
 ---
 
 ## 1. Clocks

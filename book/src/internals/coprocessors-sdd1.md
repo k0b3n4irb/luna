@@ -15,6 +15,14 @@ up-to-8 MB ROM into the bus), and (2) a **streaming decompressor** that runs
 
 ---
 
+| | |
+|---|---|
+| **On the console** | a decompressor between the ROM and the DMA: the game reads graphics that were never stored uncompressed |
+| **In luna** | `crates/luna-bus/src/sdd1.rs` |
+| **Proven by** | the decompressor compared stage by stage with the reference, byte-exact; Star Ocean and Street Fighter Alpha 2 play |
+| **Grade** | **A−** (scorecard: *S-DD1*) |
+| **Reference** | [`docs/sdd1_reference.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/sdd1_reference.md) |
+
 ## 1. Registers + memory map
 
 S-DD1 control registers (`$4800-$480F`, banks `$00-3F`/`$80-BF`; address masked to

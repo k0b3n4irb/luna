@@ -68,7 +68,8 @@ its subject: relative links and anchors resolve, every quoted
 `docs/…`/`tools/…`/`crates/…` path exists, the workspace version is the
 CHANGELOG head and every cited `vX.Y.Z` is a tag, every subcommand and long
 option of the built `luna` and every tool the MCP server lists has its place
-in the guide, the task index names only real options and tools, and an
+in the guide, the task index names only real options and tools, a grade
+shown in the guide is the scorecard's, and an
 option the CHANGELOG adds is named in the guide. It
 needs a built `luna` (`LUNA_BIN`, else `target/release/luna`, else
 `target/debug/luna`); `--list` names the checks, and a subset runs as

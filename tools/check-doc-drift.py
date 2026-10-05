@@ -20,6 +20,9 @@ claim is about, and fails when they disagree:
              subcommand is named somewhere in the guide.
   mcp        every tool the MCP server lists (`tools/list` over stdio) is
              named in the guide's MCP catalogue section.
+  grades     every grade the guide shows is the scorecard's: the
+             `**A−** (scorecard: *Row*)` form on a subsystem page, and the
+             table of `method/accuracy.md`, which carries every row.
   changelog  every `--option` the CHANGELOG adds under `[Unreleased]` or the
              head version is named in the guide (a new option lands with
              its example, not just a CHANGELOG line).
@@ -103,6 +106,7 @@ def headings_of(p: Path) -> set[str]:
 
 
 LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+OWN_BLOB_RE = r"^https://github\.com/k0b3n4irb/luna/(?:blob|tree)/[^/]+/([^#?]+)"
 # an HTML image is a link too (the README table, the guide's capture strips)
 IMG_SRC_RE = re.compile(r"<img\s[^>]*?\bsrc=\"([^\"]+)\"")
 
@@ -131,6 +135,13 @@ def check_links() -> list[str]:
     for src in sources:
         text = strip_code_blocks(read(src))
         for target in LINK_RE.findall(text) + IMG_SRC_RE.findall(text):
+            own = re.match(OWN_BLOB_RE, target)
+            if own:
+                # a link to a file of this repository on GitHub: the file
+                # must be in the tree (the branch is not checked)
+                if not (ROOT / own.group(1)).exists():
+                    fails.append(f"{rel(src)}: GitHub link to a file not in the tree: {own.group(1)}")
+                continue
             if re.match(r"^(https?:|mailto:|data:)", target):
                 continue
             if src.is_relative_to(BOOK) and target.startswith("api/"):
@@ -350,6 +361,32 @@ def check_index(binary: Path | None) -> list[str]:
     return fails
 
 
+SCORECARD = ROOT / "docs" / "accuracy_scorecard.md"
+GRADE = r"[A-D][+−-]?"
+
+
+def check_grades() -> list[str]:
+    scorecard = dict(re.findall(rf"^\| ([^|]+?) \| \*\*({GRADE})\*\* \|", read(SCORECARD), re.M))
+    fails = []
+    for src in md_files(BOOK):
+        for grade, row in re.findall(rf"\*\*({GRADE})\*\* \(scorecard: \*([^*]+)\*\)", read(src)):
+            if row not in scorecard:
+                fails.append(f"{rel(src)}: no scorecard row named '{row}'")
+            elif scorecard[row] != grade:
+                fails.append(f"{rel(src)}: {row} shown as {grade}, the scorecard says {scorecard[row]}")
+    page = BOOK / "method" / "accuracy.md"
+    shown = dict(re.findall(rf"^\| ([^|]+?) \| \*\*({GRADE})\*\* \|", read(page), re.M))
+    for row, grade in scorecard.items():
+        if row not in shown:
+            fails.append(f"{rel(page)}: scorecard row '{row}' is missing from the table")
+        elif shown[row] != grade:
+            fails.append(f"{rel(page)}: {row} shown as {shown[row]}, the scorecard says {grade}")
+    for row in shown:
+        if row not in scorecard:
+            fails.append(f"{rel(page)}: '{row}' is not a scorecard row")
+    return fails
+
+
 def check_changelog() -> list[str]:
     text = read(ROOT / "CHANGELOG.md")
     # [Unreleased] + the head version section
@@ -368,7 +405,7 @@ def check_changelog() -> list[str]:
 
 # ---------------------------------------------------------------------------
 
-CHECKS = ["links", "orphans", "paths", "version", "cli", "mcp", "index", "changelog"]
+CHECKS = ["links", "orphans", "paths", "version", "cli", "mcp", "index", "grades", "changelog"]
 
 
 def main() -> int:
@@ -395,6 +432,7 @@ def main() -> int:
             "cli": lambda: check_cli(binary),
             "mcp": lambda: check_mcp(binary),
             "index": lambda: check_index(binary),
+            "grades": check_grades,
             "changelog": check_changelog,
         }[name]()
         status = "OK" if not fails else f"{len(fails)} finding(s)"

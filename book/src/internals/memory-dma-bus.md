@@ -2,6 +2,19 @@
 
 ## The bus & mappers
 
+| | |
+|---|---|
+| **On the console** | one 24-bit address bus; the cartridge board decides what answers where |
+| **In luna** | `crates/luna-bus/src/` (`bus.rs`, `mapper.rs`, one file per board, `speed.rs`), `crates/luna-cartridge/src/lib.rs` (the header and the detection) |
+| **Proven by** | unit tests of the mirroring, the open bus and the speed table; the golden suite boots through it |
+| **Grade** | **B+** (scorecard: *Bus / mappers*) |
+| **Open gaps** | LoROM save RAM mapping up to 2 MB, the checksum hard-reject, boards outside the supported set ([the scorecard row](https://github.com/k0b3n4irb/luna/blob/main/docs/accuracy_scorecard.md)) |
+
+> The table above opens every subsystem page: what the hardware is, where
+> luna's port lives, what proves it, its grade in the
+> [accuracy scorecard](../method/accuracy.md#where-luna-stands), and what is
+> still open.
+
 `luna-bus` is the foundation every CPU and the system glue build on. It defines
 the `Bus` trait, the 24-bit `Addr24` address type, the `MapperKind` enum, and
 the per-mapper shims that translate a SNES address into a physical location:
@@ -12,6 +25,9 @@ the per-mapper shims that translate a SNES address into a physical location:
 | **HiROM** | larger / later titles |
 | **ExHiROM** | a few oversized carts |
 | **SA-1** | the SA-1 coprocessor board |
+| **Super FX** | the GSU boards |
+| **DSP-1** | the uPD7725 boards |
+| **S-DD1** | the decompressor board |
 
 Mapper detection scores the ROM header (reset-vector validity, opcode
 plausibility, checksum, map-mode/offset agreement) the way the hardware
@@ -25,6 +41,14 @@ extra-slow (12), and FastROM (`$80–$FF` at `$8000–$FFFF`) drops from 8 to 6 
 enabled.
 
 ## DMA & HDMA
+
+| | |
+|---|---|
+| **On the console** | eight channels that copy between the A-bus and a `$21xx` port: in one burst (DMA) or a few bytes per scanline (HDMA) |
+| **In luna** | `crates/luna-core/src/dma/` (`controller.rs`, `channel.rs`, `bus.rs`) |
+| **Proven by** | a regression test per confirmed divergence in that module; `tools/validate-hdma-corpus.sh` on commercial titles, because the golden suite does not reach the edge cases |
+| **Grade** | **A−** (scorecard: *DMA / HDMA*) |
+| **Open gaps** | [`docs/hdma_ares_audit.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/hdma_ares_audit.md), a line-by-line comparison with ares: rows 13, 15 to 17 and 19 are open |
 
 The DMA and HDMA controllers live in `luna-core` as the `crate::dma` module.
 **DMA** moves a block between the A-bus and a B-bus port (typically a PPU

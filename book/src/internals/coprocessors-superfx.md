@@ -11,6 +11,15 @@ layer that owns the memory map, timing, MMIO, and SNES handshake.
 
 ---
 
+| | |
+|---|---|
+| **On the console** | a RISC processor on the cartridge that draws into its own RAM; the game copies the result to VRAM |
+| **In luna** | `crates/luna-bus/src/superfx.rs` (the GSU core and its board) |
+| **Proven by** | two differential harnesses against Mesen2 in that file: one instruction at a time, and a whole job's trajectory, both byte-exact |
+| **Grade** | **A−** (scorecard: *Super FX (GSU)*) |
+| **Open gaps** | the scheduler steps the chip in batches, as for the SA-1 ([the scorecard row](https://github.com/k0b3n4irb/luna/blob/main/docs/accuracy_scorecard.md)) |
+| **Reference** | [`docs/superfx_reference.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/superfx_reference.md) |
+
 ## 1. Register model
 
 ### 1.1 General-purpose registers R0–R15

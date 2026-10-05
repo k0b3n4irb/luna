@@ -11,6 +11,19 @@ isolation against an exhaustive per-instruction test suite.
 
 ## 65C816 — the main CPU
 
+| | |
+|---|---|
+| **On the console** | the S-CPU: 16-bit, 24-bit addresses, an 8-bit emulation mode |
+| **In luna** | `crates/luna-cpu-65c816/src/` (`cpu.rs`, `opcodes.rs`, `addressing.rs`) |
+| **Proven by** | the per-instruction suite, 5.08M cases at 100% (`crates/luna-cpu-65c816/tests/tom_harte.rs`), and its `cycles[]` bus-order oracle |
+| **Grade** | **A−** (scorecard: *CPU 65c816*) |
+| **Open gaps** | [`docs/luna_65c816_gaps.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_65c816_gaps.md): `WAI` wakes on an 8-master-clock grid (#4); the interrupt delay after a DMA burst, where the two references disagree (#5) |
+
+> The table above opens every subsystem page: what the hardware is, where
+> luna's port lives, what proves it, its grade in the
+> [accuracy scorecard](../method/accuracy.md#where-luna-stands), and what is
+> still open.
+
 A 16-bit processor with an 8-bit emulation mode, three index/accumulator width
 modes (the `M` and `X` flag bits), 24-bit addressing, and a rich set of
 addressing modes. Luna's core passes **100% of the processor test suite for the
@@ -31,6 +44,14 @@ A few deliberate notes:
   [The differential harness](../method/differential.md)).
 
 ## SPC700 — the audio CPU
+
+| | |
+|---|---|
+| **On the console** | the S-SMP: 8-bit, its own 64 KB of RAM, its own clock |
+| **In luna** | `crates/luna-cpu-spc700/src/` (`step.rs` is the cycle-stepped core that runs; `opcodes.rs` is an atomic interpreter kept as a test oracle) |
+| **Proven by** | the per-instruction suite, 256K cases at 100% (`crates/luna-cpu-spc700/tests/tom_harte.rs`); the cycle-stepped core compared byte for byte with the atomic one |
+| **Grade** | **A−** (scorecard: *SPC700*) |
+| **Open gaps** | [`docs/luna_spc700_gaps.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_spc700_gaps.md): the reset values of `S` and `PSW` (#1); after `STOP` the whole APU stops and a stub answers the ports (#3) |
 
 An 8-bit processor running in its own clock domain, in lockstep with the main
 CPU at bus-access granularity. Luna's core passes **100% of the processor test

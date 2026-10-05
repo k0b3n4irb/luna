@@ -25,6 +25,36 @@ because it looks right on one screen.
 
 ## Where Luna stands
 
+The grades are kept in one table, the
+[accuracy scorecard](https://github.com/k0b3n4irb/luna/blob/main/docs/accuracy_scorecard.md), updated in the same change
+as any accuracy fix. They measure correspondence with the two reference
+emulators, not code quality: **A** is a faithful port whose residuals are
+below what can be observed, **A−** a faithful port with named residuals
+and no known effect on a game, **B+** correct on everything tested with
+corners not yet audited.
+
+| Subsystem | Grade | In this guide |
+|---|:---:|---|
+| CPU 65c816 | **A−** | [The CPUs](../internals/cpus.md#65c816--the-main-cpu) |
+| SPC700 | **A−** | [The CPUs](../internals/cpus.md#spc700--the-audio-cpu) |
+| S-DSP (audio) | **A** | [The APU](../internals/apu.md) |
+| PPU | **A** | [The PPU](../internals/ppu.md) |
+| DMA / HDMA | **A−** | [Memory, DMA & the bus](../internals/memory-dma-bus.md#dma--hdma) |
+| SA-1 | **A−** | [SA-1](../internals/coprocessors-sa1.md) |
+| Super FX (GSU) | **A−** | [Super FX](../internals/coprocessors-superfx.md) |
+| DSP-1 (uPD7725) | **A−** | [Coprocessors](../internals/coprocessors.md#dsp-1) |
+| S-DD1 | **A−** | [S-DD1](../internals/coprocessors-sdd1.md) |
+| Bus / mappers | **B+** | [Memory, DMA & the bus](../internals/memory-dma-bus.md#the-bus--mappers) |
+| Power-on / reset state | **A−** | [Determinism guarantees](determinism.md) |
+| Controllers | **B+** | [Controls](../using/controls.md) |
+
+Each row of the scorecard names its evidence and its open items; the
+per-subsystem lists are the gap documents
+([65C816](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_65c816_gaps.md), [SPC700](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_spc700_gaps.md),
+[APU](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_apu_gaps.md), [backgrounds](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_bg_gaps.md),
+[sprites](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_obj_gaps.md), [SA-1](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_sa1_gaps.md)) and the
+[HDMA audit](https://github.com/k0b3n4irb/luna/blob/main/docs/hdma_ares_audit.md).
+
 Subsystem by subsystem, the implementation gaps that once separated Luna from
 the hardware are closed: the CPUs are exhaustively verified, the PPU renders the
 full feature set (background modes, Mode 7, hi-res, windows, mosaic, interlace),

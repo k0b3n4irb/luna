@@ -3,6 +3,17 @@
 luna's faithful-port reference for the PPU compositor and the DMA/OAM pipeline.
 Every rule below describes hardware-accurate behaviour.
 
+| | |
+|---|---|
+| **On the console** | two chips (S-PPU1, S-PPU2): four background layers, 128 sprites, two windows, colour math, eight background modes |
+| **In luna** | `crates/luna-ppu/src/` (`ppu.rs` registers and latches, `renderer.rs` the per-line compositor, `tile.rs`, `memory.rs`) |
+| **Proven by** | sixteen corpus ROMs pixel-exact against hardware reference pictures (`crates/luna-core/tests/snes_test_roms.rs`) |
+| **Grade** | **A** (scorecard: *PPU*) |
+| **Open gaps** | [`docs/luna_bg_gaps.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_bg_gaps.md) (backgrounds), [`docs/luna_obj_gaps.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_obj_gaps.md) (sprites) |
+| **Reference** | [`docs/ppu_compositor_reference.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/ppu_compositor_reference.md), built from [`docs/ares_ppu_notes.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/ares_ppu_notes.md) and [`docs/mesen2_ppu_notes.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/mesen2_ppu_notes.md) |
+
+The rest of this page is the hardware behaviour the port follows.
+
 ---
 
 ## 1. Pixel mixer overview
@@ -269,7 +280,12 @@ frame, so the picture carries 819 distinct colours where CGRAM holds 256:
 
 ### 7.2 HDMA enable / service ($420C)
 
-`$420C` enables HDMA channels for the *next* HDMA setup at the start of the next frame.
+`$420C` is read live on every scanline: a channel enabled in the middle of
+a frame runs from that line on. It is not set up again, so it starts from
+the table pointer it already held (a stale one, not the source address),
+and it skips the transfer on its first line if no HDMA was enabled when
+the frame started. Both references agree; the line-by-line comparison is
+[`docs/hdma_ares_audit.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/hdma_ares_audit.md) (rows 6 and 9).
 
 HDMA setup runs at H=6 of scanline 0 (visible frame start), resetting per-channel state. HDMA transfer runs on every visible scanline at H=278 (just before HBlank), performing one transfer per enabled channel based on the channel's repeat counter.
 
