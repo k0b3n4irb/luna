@@ -74,6 +74,12 @@ needs a built `luna` (`LUNA_BIN`, else `target/release/luna`, else
 `target/debug/luna`); `--list` names the checks, and a subset runs as
 `tools/check-doc-drift.py links version`.
 
+The pictures in the guide and the README are rendered by luna from the
+pinned test corpus. `tools/doc-captures.py` rewrites them and
+`tools/doc-captures.py --check` (CI, job `snes-test-roms`) fails when a
+committed picture is no longer what luna renders. Add a picture by adding
+a row to that script's table.
+
 ## Conventions
 
 - **Commits**: `type(scope): description` — e.g. `fix(ppu): ...`,

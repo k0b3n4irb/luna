@@ -896,6 +896,14 @@ raw `vram.bin` / `cgram.bin` and `oam.json` (sprite metadata).
 luna assets-dump "game.sfc" -n 8000000 --out /tmp/assets
 ```
 
+Two of the files it writes for a Mode 7 test ROM, `bg1_tilemap_mode7.png`
+and `palette.png`:
+
+<div class="captures">
+<figure><img src="../assets/captures/mode7-tilemap.png" alt="A flat 1024 by 1024 tilemap: sky, trees, a tiled floor"><figcaption>The tilemap, before the PPU transforms it</figcaption></figure>
+<figure><img src="../assets/captures/mode7-palette.png" alt="A 16 by 16 grid of colour swatches, the first two rows in use"><figcaption>CGRAM, sixteen entries per row</figcaption></figure>
+</div>
+
 ### `luna test` — manifest-driven homebrew tests
 
 ```

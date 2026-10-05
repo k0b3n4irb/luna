@@ -259,6 +259,14 @@ Write to `$420B` with a 1-bit set per active channel:
 - Transfers happen one channel at a time, in channel-number order.
 - 8 cycles per byte transferred + overhead.
 
+A general DMA is not confined to VBlank. This test ROM starts one to
+CGRAM (`$2122`) from an IRQ on every scanline, more than two hundred per
+frame, so the picture carries 819 distinct colours where CGRAM holds 256:
+
+<div class="captures">
+<figure><img src="../assets/captures/cgram-hicolor.png" alt="A colour test chart with smooth ramps"><figcaption>819 colours in one frame: the palette is reloaded by DMA on every scanline</figcaption></figure>
+</div>
+
 ### 7.2 HDMA enable / service ($420C)
 
 `$420C` enables HDMA channels for the *next* HDMA setup at the start of the next frame.
@@ -266,6 +274,16 @@ Write to `$420B` with a 1-bit set per active channel:
 HDMA setup runs at H=6 of scanline 0 (visible frame start), resetting per-channel state. HDMA transfer runs on every visible scanline at H=278 (just before HBlank), performing one transfer per enabled channel based on the channel's repeat counter.
 
 The hardware dispatches HDMA event-driven.
+
+Three test ROMs, one register family each. The scroll (`$210D`), a
+palette entry (`$2121` / `$2122`) and the Mode 7 matrix (`$211B`,
+`$211E`, `$2120`) are rewritten on every scanline:
+
+<div class="captures">
+<figure><img src="../assets/captures/hdma-wave.png" alt="A water texture bent into waves"><figcaption>One HDMA channel writes the BG1 scroll on every scanline</figcaption></figure>
+<figure><img src="../assets/captures/hdma-gradient.png" alt="A red gradient from top to bottom"><figcaption>One HDMA channel writes a palette entry on every scanline</figcaption></figure>
+<figure><img src="../assets/captures/mode7-hdma.png" alt="A Mode 7 floor in perspective under a flat sky"><figcaption>Mode 7: three HDMA channels rewrite the matrix on every scanline</figcaption></figure>
+</div>
 
 ### 7.3 Auto-joypad-read ($4200 bit 0)
 
@@ -379,6 +397,15 @@ sub-quirk; the blanket "implements none of these gates" was stale.
 ## 11. Mode-7 and EXTBG
 
 Mode 7 (BGMODE=7): BG1 is a 1024×1024 affine-transformed 8bpp tilemap. M7A/M7B/M7C/M7D matrix (signed 8.8), M7X/M7Y center (signed 13-bit).
+
+The tilemap as it sits in VRAM (`luna assets-dump`, 1024×1024), and the
+frame the PPU draws from it once HDMA has given each scanline its own
+matrix:
+
+<div class="captures">
+<figure><img src="../assets/captures/mode7-tilemap.png" alt="A flat 1024 by 1024 tilemap: sky, trees, a tiled floor"><figcaption>The Mode 7 tilemap, untransformed</figcaption></figure>
+<figure><img src="../assets/captures/mode7-hdma.png" alt="A Mode 7 floor in perspective under a flat sky"><figcaption>Mode 7: three HDMA channels rewrite the matrix on every scanline</figcaption></figure>
+</div>
 
 EXTBG (SETINI bit 6): BG2 reuses the Mode-7 framebuffer with priority bits
 from the high tile-byte — used by F-Zero, Pilotwings.

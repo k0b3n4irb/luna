@@ -23,6 +23,24 @@ are not checked. Globs (`docs/luna_*_gaps.md`), templates (`<rom>`) and
 `tests/roms/` (gitignored) are skipped. A path that must *not* exist
 (`.github/dependabot.yml`) fails the check when it appears.
 
+## The captures
+
+Every picture under `book/src/assets/captures/` (the guide and the
+`README.md` table show them) is a frame luna rendered from the pinned
+PeterLemon corpus. `tools/doc-captures.py` is the only writer of that
+folder; `--check` re-renders and compares byte for byte, and fails on a
+file the table does not name. CI runs it in the `snes-test-roms` job,
+where the corpus is.
+
+- A render change that moves a capture: regenerate (`tools/doc-captures.py`
+  with `LUNA_SNES_TEST_DIR` set), look at the new picture, commit it with
+  the change.
+- A new picture: add a row to the table in the script, never a file by
+  hand. Write its caption from what the ROM does (`luna state --out -`,
+  `--mem-trace`), not from its name: `Rings` was captioned "windows
+  driven by HDMA" for months and uses neither.
+- ROMs whose art comes from a commercial game stay out of the table.
+
 ## When to run it
 
 - Before committing anything under `book/`, `docs/`, `.claude/`, or

@@ -250,3 +250,11 @@ jobs:
         run: tools/fetch-snes-test-roms.sh
       - name: Run golden suite
         run: cargo test -p luna-core --test snes_test_roms --release
+      # The pictures in the guide and the README are frames of this corpus
+      # (tools/doc-captures.py is their only writer). Re-render them and
+      # compare: a capture that luna no longer produces, or a picture added
+      # by hand, fails here. It lives in this job because the corpus does.
+      - name: The guide's captures are what luna renders
+        run: |
+          cargo build --release --locked -p luna-cli
+          python3 tools/doc-captures.py --check

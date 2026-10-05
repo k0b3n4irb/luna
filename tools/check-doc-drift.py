@@ -103,6 +103,8 @@ def headings_of(p: Path) -> set[str]:
 
 
 LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+# an HTML image is a link too (the README table, the guide's capture strips)
+IMG_SRC_RE = re.compile(r"<img\s[^>]*?\bsrc=\"([^\"]+)\"")
 
 
 def luna_binary(allow_missing: bool) -> Path | None:
@@ -128,7 +130,7 @@ def check_links() -> list[str]:
     sources = md_files(BOOK, ROOT / "docs", ROOT / "README.md", ROOT / "CONTRIBUTING.md")
     for src in sources:
         text = strip_code_blocks(read(src))
-        for target in LINK_RE.findall(text):
+        for target in LINK_RE.findall(text) + IMG_SRC_RE.findall(text):
             if re.match(r"^(https?:|mailto:|data:)", target):
                 continue
             if src.is_relative_to(BOOK) and target.startswith("api/"):

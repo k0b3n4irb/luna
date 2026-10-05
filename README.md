@@ -12,18 +12,19 @@
 
 <table>
   <tr>
-    <td><img src="docs/assets/demo-mode7-hdma.png" alt="Mode 7 perspective ground driven by per-scanline HDMA" width="256"/></td>
-    <td><img src="docs/assets/demo-hdma-wave.png" alt="Per-scanline HDMA horizontal-scroll wave distortion" width="256"/></td>
+    <td><img src="book/src/assets/captures/mode7-hdma.png" alt="Mode 7 perspective ground driven by per-scanline HDMA" width="256"/></td>
+    <td><img src="book/src/assets/captures/hdma-wave.png" alt="Per-scanline HDMA horizontal-scroll wave distortion" width="256"/></td>
   </tr>
   <tr>
-    <td><img src="docs/assets/demo-window-rings.png" alt="Circular PPU windows driven by HDMA" width="256"/></td>
-    <td><img src="docs/assets/demo-hdma-gradient.png" alt="HDMA per-scanline CGRAM colour gradient" width="256"/></td>
+    <td><img src="book/src/assets/captures/bg-rings.png" alt="Two background layers, a ring pattern on each, one over the other" width="256"/></td>
+    <td><img src="book/src/assets/captures/hdma-gradient.png" alt="HDMA per-scanline CGRAM colour gradient" width="256"/></td>
   </tr>
 </table>
 
 *Rendered by Luna's headless CLI (`luna state --screenshot`) from the open-source
 [PeterLemon SNES test corpus](https://github.com/PeterLemon/SNES) — Mode 7 perspective,
-HDMA wave, windowing and gradient effects.*
+an HDMA scroll wave, two overlaid layers and an HDMA palette gradient. `tools/doc-captures.py`
+regenerates them.*
 
 **[📖 Documentation](https://k0b3n4irb.github.io/luna/) · [⬇️ Download](https://github.com/k0b3n4irb/luna/releases/latest) · [📚 API reference](https://k0b3n4irb.github.io/luna/api/)**
 

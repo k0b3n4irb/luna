@@ -27,3 +27,28 @@
 .content code {
     border-radius: 4px;
 }
+
+/* Captures: frames luna rendered (tools/doc-captures.py), shown at their
+   pixel grid. */
+.captures {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin: 1.2rem 0;
+}
+.captures figure {
+    margin: 0;
+    width: 256px;
+    max-width: 100%;
+}
+.captures img {
+    display: block;
+    width: 100%;
+    image-rendering: pixelated;
+    border-radius: 4px;
+}
+.captures figcaption {
+    margin-top: 0.3rem;
+    font-size: 0.8em;
+    opacity: 0.8;
+}
