@@ -51,7 +51,7 @@ running, your saves on disk in a format other emulators read.
 2. [Developing homebrew with luna](using/homebrew-ci.md): one TOML
    manifest per test (ROM, inputs, how long to run, what must be true),
    and a GitHub Actions job to copy.
-3. [`luna profile`](using/cli-api-mcp.md#luna-profile--real-master-cycles-per-symbol):
+3. [`luna profile`](using/cli-analysis.md#luna-profile--real-master-cycles-per-symbol):
    what each function costs in master cycles, and a gate that fails the
    build when the NMI handler overruns.
 
@@ -60,11 +60,11 @@ knows whether the game still boots, draws and sounds as it did.
 
 ### C. An agent drives the console
 
-1. [`luna mcp`](using/cli-api-mcp.md#luna-mcp--mcp-server-over-stdio):
+1. [`luna mcp`](using/mcp.md#luna-mcp--mcp-server-over-stdio):
    start the server with the ROM already loaded.
-2. [The MCP tool catalogue](using/cli-api-mcp.md#4-mcp-tool-catalogue-luna-mcp):
+2. [The MCP tool catalogue](using/mcp.md#mcp-tool-catalogue):
    every tool, and the `luna-api` method behind it.
-3. [The state JSON](using/cli-api-mcp.md#2-the-state-json-emulatorstate):
+3. [The state JSON](using/state-json.md):
    what one `state` call returns, block by block.
 
 At the end: the agent loads a ROM, presses buttons, reads registers and

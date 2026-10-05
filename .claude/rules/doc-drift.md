@@ -13,9 +13,10 @@ The guide (`book/src/`), `docs/`, `README.md`, `CONTRIBUTING.md`,
 | `orphans` | every page under `book/src/` | `SUMMARY.md` |
 | `paths` | every backticked (or extension-bearing) `docs/…`, `tools/…`, `crates/…`, `book/…`, `tests/…`, `fuzz/…`, `.claude/…`, `.github/…` path in `CLAUDE.md`, `.claude/`, `CONTRIBUTING.md`, the guide | the tree (and no dependency-bot config exists) |
 | `version` | the workspace `version`, every `vX.Y.Z` cited in the guide, `README.md`, `CONTRIBUTING.md` | the `CHANGELOG.md` head, `git tag` |
-| `cli` | every subcommand has its `### \`luna <cmd>\`` section in the CLI reference; every long option is named in the guide | `luna --help`, `luna <cmd> --help` |
-| `mcp` | every MCP tool is named in the guide's catalogue section | the tool list `luna mcp` serves over stdio |
+| `cli` | every subcommand has its `## \`luna <cmd>\`` section in a page of `book/src/using/`; every long option is named in the guide | `luna --help`, `luna <cmd> --help` |
+| `mcp` | every MCP tool is named in the guide's MCP page (`book/src/using/mcp.md`) | the tool list `luna mcp` serves over stdio |
 | `index` | every `--option`, `luna <cmd>` and `snake_case` tool name in the task index (`book/src/task-index.md`); every subcommand has a task there | `luna <cmd> --help`, the MCP tool list |
+| `crates` | the crate table of `book/src/internals/architecture.md`: every crate named, none invented | `crates/*/Cargo.toml` |
 | `grades` | every grade the guide shows: the `**A−** (scorecard: *Row*)` line of a subsystem page's status block, and the table of `book/src/method/accuracy.md` (which carries every row) | `docs/accuracy_scorecard.md` |
 | `changelog` | every `--option` added under `[Unreleased]` or the head version | the guide |
 

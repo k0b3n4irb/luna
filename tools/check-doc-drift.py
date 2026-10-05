@@ -15,11 +15,13 @@ claim is about, and fails when they disagree:
   version    the workspace version in `Cargo.toml` is the head version of
              `CHANGELOG.md`, and every `vX.Y.Z` the guide, `README.md` or
              `CONTRIBUTING.md` cites is a git tag.
-  cli        every subcommand of `luna --help` has its `### \\`luna <cmd>\\``
-             section in the CLI reference, and every long option of every
-             subcommand is named somewhere in the guide.
+  cli        every subcommand of `luna --help` has its `## \\`luna <cmd>\\``
+             section in a page of `book/src/using`, and every long option
+             of every subcommand is named somewhere in the guide.
   mcp        every tool the MCP server lists (`tools/list` over stdio) is
-             named in the guide's MCP catalogue section.
+             named in the guide's MCP page (`using/mcp.md`).
+  crates     the architecture overview names every crate under `crates/`,
+             and names no crate that is not there.
   grades     every grade the guide shows is the scorecard's: the
              `**A−** (scorecard: *Row*)` form on a subsystem page, and the
              table of `method/accuracy.md`, which carries every row.
@@ -53,7 +55,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BOOK = ROOT / "book" / "src"
-GUIDE_CLI_PAGE = BOOK / "using" / "cli-api-mcp.md"
+# the CLI reference is the pages under `using/`; the MCP catalogue is one page
+GUIDE_CLI_DIR = BOOK / "using"
+GUIDE_MCP_PAGE = BOOK / "using" / "mcp.md"
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -272,10 +276,10 @@ def check_cli(binary: Path | None) -> list[str]:
     fails: list[str] = []
     commands = cli_commands(binary)
     guide = "\n".join(read(p) for p in md_files(BOOK))
-    cli_page = read(GUIDE_CLI_PAGE)
+    cli_pages = "\n".join(read(p) for p in md_files(GUIDE_CLI_DIR))
     for cmd in commands:
-        if not re.search(rf"^### `luna {re.escape(cmd)}`", cli_page, re.M):
-            fails.append(f"{rel(GUIDE_CLI_PAGE)}: no `### `luna {cmd}`` section")
+        if not re.search(rf"^##+ `luna {re.escape(cmd)}`", cli_pages, re.M):
+            fails.append(f"{rel(GUIDE_CLI_DIR)}: no page has a `## `luna {cmd}`` section")
         for opt in cli_options(binary, cmd):
             if opt in ("--help", "--version"):
                 continue
@@ -322,13 +326,11 @@ def mcp_tool_names(binary: Path) -> list[str]:
 def check_mcp(binary: Path | None) -> list[str]:
     if binary is None:
         return []
-    page = read(GUIDE_CLI_PAGE)
-    m = re.search(r"^## 4\..*?(?=^## 5\.)", page, re.M | re.S)
-    section = m.group(0) if m else page
+    page = read(GUIDE_MCP_PAGE)
     fails = []
     for name in mcp_tool_names(binary):
-        if f"`{name}`" not in section:
-            fails.append(f"{rel(GUIDE_CLI_PAGE)}: MCP tool `{name}` has no row in §4")
+        if f"`{name}`" not in page:
+            fails.append(f"{rel(GUIDE_MCP_PAGE)}: MCP tool `{name}` has no row in the catalogue")
     return fails
 
 
@@ -358,6 +360,18 @@ def check_index(binary: Path | None) -> list[str]:
     for cmd in commands:
         if not re.search(rf"`luna {re.escape(cmd)}(?![\w-])", page):
             fails.append(f"{where}: subcommand `luna {cmd}` has no task")
+    return fails
+
+
+ARCHITECTURE = BOOK / "internals" / "architecture.md"
+
+
+def check_crates() -> list[str]:
+    real = {d.name for d in (ROOT / "crates").iterdir() if (d / "Cargo.toml").is_file()}
+    named = set(re.findall(r"`(luna-[a-z0-9-]+)`", read(ARCHITECTURE)))
+    binaries = {"luna-gui"}  # also the name of a binary; a crate too
+    fails = [f"{rel(ARCHITECTURE)}: crate `{c}` is not named" for c in sorted(real - named)]
+    fails += [f"{rel(ARCHITECTURE)}: `{c}` is not a crate of the workspace" for c in sorted(named - real - binaries)]
     return fails
 
 
@@ -405,7 +419,7 @@ def check_changelog() -> list[str]:
 
 # ---------------------------------------------------------------------------
 
-CHECKS = ["links", "orphans", "paths", "version", "cli", "mcp", "index", "grades", "changelog"]
+CHECKS = ["links", "orphans", "paths", "version", "cli", "mcp", "index", "crates", "grades", "changelog"]
 
 
 def main() -> int:
@@ -432,6 +446,7 @@ def main() -> int:
             "cli": lambda: check_cli(binary),
             "mcp": lambda: check_mcp(binary),
             "index": lambda: check_index(binary),
+            "crates": check_crates,
             "grades": check_grades,
             "changelog": check_changelog,
         }[name]()

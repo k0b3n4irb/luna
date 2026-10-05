@@ -11,11 +11,18 @@
 - [Debugging tools](using/debugging.md)
 - [Saves & save states](using/saves.md)
 - [CLI, API & MCP](using/cli-api-mcp.md)
+  - [`luna run` and `luna state`](using/cli-run-state.md)
+  - [Compare, measure, export](using/cli-analysis.md)
+  - [The state JSON](using/state-json.md)
+  - [Scripted joypad input](using/input-scripts.md)
+  - [The MCP server](using/mcp.md)
+  - [The Rust API](using/rust-api.md)
 - [Developing homebrew with luna](using/homebrew-ci.md)
 
 # How Luna Works
 
 - [Architecture overview](internals/architecture.md)
+  - [The founding design paper](internals/founding-design.md)
 - [The PPU — graphics](internals/ppu.md)
 - [The APU — audio](internals/apu.md)
 - [The CPUs — 65C816 & SPC700](internals/cpus.md)
