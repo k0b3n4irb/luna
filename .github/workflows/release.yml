@@ -14,12 +14,23 @@ on:
   push:
     tags:
       - "v*"
+  # Rebuild an existing tag's release in the current layout (the zips are
+  # built from the tag's own sources; the notes come from this ref's
+  # CHANGELOG.md). Used on 2026-10-05 to redo the kept releases.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)publish, e.g. v1.33.1"
+        required: true
+        type: string
 
 # Needed by softprops/action-gh-release to create the release + upload assets.
 permissions:
   contents: write
 
 env:
+  # The tag being released: the pushed one, or the one given to a dispatch.
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   # actions/cache still ships a Node 20 entrypoint; opt into Node 24 (see ci.yml).
@@ -55,6 +66,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       # Linux's only build-time system dep for both binaries: ALSA headers
       # (cpal → alsa-sys). winit/wgpu dlopen X11/Wayland/Vulkan at runtime; rfd
@@ -82,7 +95,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          PKG="luna_${GITHUB_REF_NAME}_${{ matrix.os }}_${{ matrix.arch }}"
+          PKG="luna_${RELEASE_TAG}_${{ matrix.os }}_${{ matrix.arch }}"
           mkdir -p "dist/${PKG}"
           if [ "${{ matrix.os }}" = "windows" ]; then
             cp target/release/luna.exe target/release/luna-gui.exe "dist/${PKG}/"
@@ -112,7 +125,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      # Only for CHANGELOG.md and the notes script; the binaries come from `build`.
+      # Only for CHANGELOG.md and the notes script; the binaries come from
+      # `build`. On a dispatch this is the branch the run was started from,
+      # whose changelog holds every version's section.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -125,16 +140,17 @@ jobs:
       # when the changelog has no section for the tag, so a release can never
       # go out with empty notes. An RC tag shows its final version's section.
       - name: Release notes from CHANGELOG.md
-        run: tools/release-notes.py "$GITHUB_REF_NAME" > release_notes.md
+        run: tools/release-notes.py "$RELEASE_TAG" > release_notes.md
 
       - name: Publish
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
-          name: luna ${{ github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: luna ${{ env.RELEASE_TAG }}
           body_path: release_notes.md
           files: dist/*
           fail_on_unmatched_files: true
           # Pre-release semver tags (a hyphen: v1.0.0-rc1, -beta…) publish as
           # a GitHub pre-release so they never become the "latest" stable
           # release; clean tags (v1.0.0) publish as a full release.
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
