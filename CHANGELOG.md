@@ -7,6 +7,25 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+## [1.33.0] — 2026-10-05
+
+One emulation fix, found while cleaning the repository: mosaic blocks
+started one line too high in every mode and were striped in the hi-res
+modes; both are now pixel-exact against the references. For scripts, the
+state gains `rom.checksum_computed`, `luna run` / `state` / `profile`
+exit 1 on a core panic, the exported DMAP byte and the `--dsp-trace`
+timestamps are right, and `luna test` no longer aborts on a non-ASCII
+hex block. The save-state format moves to v8.
+
+**Upgrading from 1.32.0:** save states written by 1.32.0 and earlier are
+refused (`format version mismatch`); reach the scene again and save it.
+A script that relied on exit code `0` after `Stopped on CPU panic:`, or
+compared `dma.channels[n].params` against `207` (`$CF`), must be
+updated. Battery saves, manifests, hashes and every other output are
+unchanged. With this release `v1.30.2` leaves the five releases that
+keep binaries: a download pinned to it needs a newer pin or a build from
+the tag.
+
 ### Added
 
 - **`rom.checksum_computed`: the checksum of the ROM as loaded.** The
@@ -117,7 +136,6 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   per second, 32 per output sample, so two writes can be placed against
   each other and against an `--audio-out` capture. The `reg`, `name` and
   `value` columns are unchanged, and so is emulation.
-
 - **`luna test`: a non-ASCII character in a hex block no longer aborts
   the run.** `"7E:0000" = "aéb"` under `[asserts.blocks]` crashed `luna
   test` with a Rust panic (exit 101), and the verdict of every other
@@ -139,8 +157,8 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   loaded (`save state: mapper: Super FX source register is 16 in the
   state, at most 15`) and the running game is left as it was. A `$2115`
   remap mode outside its two bits, which stopped the emulation on the next
-  VRAM access, is now read as its two low bits. States saved by luna load
-  exactly as before; the format is unchanged (v7).
+  VRAM access, is now read as its two low bits. States saved by luna are
+  not affected by these checks.
 
 ## [1.32.0] — 2026-10-03
 
