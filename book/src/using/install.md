@@ -3,18 +3,15 @@
 ## Prebuilt binaries (recommended)
 
 Every [GitHub release](https://github.com/k0b3n4irb/luna/releases/latest) ships
-prebuilt binaries — no toolchain needed:
+prebuilt binaries — no toolchain needed. One zip per platform, named after
+the version (`vX.Y.Z` below is the one on the release page):
 
 | Platform | Asset |
 |---|---|
-| Linux x86_64 | `luna-linux-x86_64.tar.gz` |
-| Linux aarch64 | `luna-linux-aarch64.tar.gz` |
-| Windows x86_64 | `luna-windows-x86_64.zip` |
-| macOS Apple Silicon (arm64) | `luna-macos-aarch64.tar.gz` |
-
-Each asset also exists under a versioned name
-(`luna-v<version>-<os>-<arch>`) if you want to pin a release; the
-unversioned names above always resolve to the latest one (from v1.25.0 on).
+| Linux x86_64 | `luna_vX.Y.Z_linux_x86_64.zip` |
+| Linux arm64 | `luna_vX.Y.Z_linux_arm64.zip` |
+| Windows x86_64 | `luna_vX.Y.Z_windows_x86_64.zip` |
+| macOS Apple Silicon (arm64) | `luna_vX.Y.Z_darwin_arm64.zip` |
 
 Only the five most recent versions keep a release with binaries. To run an
 older one, build it from its tag (every tag is kept):
@@ -24,18 +21,19 @@ git checkout v1.24.0 && cargo build --release -p luna-cli
 ```
 
 ```bash
-# Linux / macOS (swap the asset name for your platform)
-curl -LO https://github.com/k0b3n4irb/luna/releases/latest/download/luna-linux-x86_64.tar.gz
-tar xzf luna-linux-x86_64.tar.gz && cd luna-linux-x86_64
+# Linux / macOS (swap the version and the platform suffix)
+curl -LO https://github.com/k0b3n4irb/luna/releases/download/vX.Y.Z/luna_vX.Y.Z_linux_x86_64.zip
+unzip -q luna_vX.Y.Z_linux_x86_64.zip && cd luna_vX.Y.Z_linux_x86_64
 
 ./luna-gui "path/to/game.sfc"   # play in the graphical debugger
 ./luna --help                   # headless CLI: run · state · mcp …
 ```
 
 On Windows, download the `.zip`, extract it (Explorer opens it natively), and
-run `luna-gui.exe` or `luna.exe`. Each archive contains both binaries (plus
-`LICENSE` and `README.md`); a matching `<asset>.sha256` checksum is
-published beside it on the release page.
+run `luna-gui.exe` or `luna.exe`. Each zip contains both binaries plus
+`LICENSE` and `README.md`; the release page shows the SHA-256 digest of each
+file. Releases up to v1.33.1 used other names (`luna-<os>-<arch>.tar.gz`,
+with a `.sha256` beside it); their pages keep them.
 
 ### Runtime requirements
 

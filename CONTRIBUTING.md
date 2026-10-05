@@ -112,8 +112,7 @@ The version tracks luna's **user-facing contract**, not the Rust API:
 - **What the contract covers:** the `luna` CLI (subcommands, flags, their
   output formats), the MCP tool catalogue (names, parameters, result
   fields), `luna test` manifests, the `fbhash` values a manifest can pin,
-  and the release asset names (including the unversioned
-  `luna-<os>-<arch>` alias).
+  and the release asset names (`luna_vX.Y.Z_<os>_<arch>.zip`).
 - **`major`** — a change that breaks that contract for users *in general*:
   removing or renaming a flag or MCP tool, changing a manifest key's
   meaning, changing every `fbhash`.
@@ -147,14 +146,14 @@ The version tracks luna's **user-facing contract**, not the Rust API:
      `develop`, so this is a fast-forward; if it is not, stop — do not
      fall back to a merge.
   4. `git tag -a vX.Y.Z` on that commit, locally, and push the tag.
-     `release.yml` builds and attaches the 4-platform binaries +
-     checksums, titles the page `luna vX.Y.Z` and fills it with that
+     `release.yml` builds and attaches the four platform zips
+     (`luna_vX.Y.Z_<os>_<arch>.zip`), titles the page `luna vX.Y.Z` and fills it with that
      version's `CHANGELOG.md` section — `tools/release-notes.py vX.Y.Z`
      prints it locally.
 
   `develop` and `main` then point at the same commit: there is nothing to
-  reconcile. The book links the unversioned `luna-<os>-<arch>` asset
-  alias, so no doc edit is needed per release.
+  reconcile. The book names the assets with a `vX.Y.Z` placeholder, so no
+  doc edit is needed per release.
 - **Housekeeping**: only the five highest versions keep a GitHub release
   with binaries; older releases are deleted after each release, and
   Actions runs older than a month are deleted too

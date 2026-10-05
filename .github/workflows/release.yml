@@ -2,11 +2,14 @@ name: Release
 
 # Build and publish runnable binaries when a version tag is pushed.
 # Native build per target — no cross-compilation:
-#   - Linux  x86_64  (ubuntu-latest)        tar.gz
-#   - Linux  aarch64 (ubuntu-24.04-arm)     tar.gz   (free arm64 runner: public repo)
-#   - Windows x86_64 (windows-latest)       zip      (Explorer-native extraction)
-#   - macOS  aarch64 (macos-14, Apple Si.)  tar.gz
-# The auto-generated source archives stay; these binaries attach alongside them.
+#   - Linux   x86_64 (ubuntu-latest)
+#   - Linux   arm64  (ubuntu-24.04-arm, free arm64 runner: public repo)
+#   - Windows x86_64 (windows-latest)
+#   - macOS   arm64  (macos-14, Apple Silicon)
+# One zip per platform, `luna_<tag>_<os>_<arch>.zip`, the OpenSNES layout
+# (`opensnes_<tag>_<os>_<arch>.zip`): one file to pick, Explorer opens it,
+# GitHub shows its digest on the release page. The auto-generated source
+# archives stay; these zips attach alongside them.
 on:
   push:
     tags:
@@ -29,7 +32,7 @@ env:
 jobs:
   # ---------------------------------------------------------------------
   # Build both binaries (`luna` CLI + `luna-gui`) natively per platform
-  # and package each with LICENSE + README + a SHA256 sidecar.
+  # and package each with LICENSE + README into one zip.
   # ---------------------------------------------------------------------
   build:
     name: build ${{ matrix.os }} ${{ matrix.arch }}
@@ -40,19 +43,15 @@ jobs:
           - runner: ubuntu-latest
             os: linux
             arch: x86_64
-            format: tar.gz
           - runner: ubuntu-24.04-arm
             os: linux
-            arch: aarch64
-            format: tar.gz
+            arch: arm64
           - runner: windows-latest
             os: windows
             arch: x86_64
-            format: zip
           - runner: macos-14
-            os: macos
-            arch: aarch64
-            format: tar.gz
+            os: darwin
+            arch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -78,15 +77,12 @@ jobs:
         run: cargo build --release --locked -p luna-cli -p luna-gui
 
       # One bash step for every platform — Git Bash is on PATH on the Windows
-      # runner, so tar/7z/sha256sum all resolve. macOS lacks `sha256sum`, so we
-      # fall back to `shasum -a 256` (identical `<hash>  <file>` output, and
-      # `shasum -c` verifies a `sha256sum`-style file).
-      - name: Package archive + checksum
+      # runner. `zip` is on the Linux and macOS images, `7z` on Windows.
+      - name: Package zip
         shell: bash
         run: |
           set -euo pipefail
-          VER="${GITHUB_REF_NAME#v}"
-          PKG="luna-v${VER}-${{ matrix.os }}-${{ matrix.arch }}"
+          PKG="luna_${GITHUB_REF_NAME}_${{ matrix.os }}_${{ matrix.arch }}"
           mkdir -p "dist/${PKG}"
           if [ "${{ matrix.os }}" = "windows" ]; then
             cp target/release/luna.exe target/release/luna-gui.exe "dist/${PKG}/"
@@ -94,39 +90,17 @@ jobs:
             cp target/release/luna target/release/luna-gui "dist/${PKG}/"
           fi
           cp LICENSE README.md "dist/${PKG}/"
-
-          if command -v sha256sum >/dev/null 2>&1; then
-            SHA() { sha256sum "$@"; }
+          if command -v zip >/dev/null 2>&1; then
+            ( cd dist && zip -qr "${PKG}.zip" "${PKG}" )
           else
-            SHA() { shasum -a 256 "$@"; }
-          fi
-
-          if [ "${{ matrix.format }}" = "zip" ]; then
             ( cd dist && 7z a -tzip "${PKG}.zip" "${PKG}" >/dev/null )
-          else
-            tar czf "dist/${PKG}.tar.gz" -C dist "${PKG}"
           fi
-          ( cd dist && SHA "${PKG}.${{ matrix.format }}" > "${PKG}.${{ matrix.format }}.sha256" )
-
-          # Unversioned alias (`luna-<os>-<arch>.<fmt>`, same content, folder
-          # `luna-<os>-<arch>/`) so `releases/latest/download/<alias>` is a
-          # stable URL — the book's install + homebrew-CI recipes rely on it.
-          ALIAS="luna-${{ matrix.os }}-${{ matrix.arch }}"
-          cp -r "dist/${PKG}" "dist/${ALIAS}"
-          if [ "${{ matrix.format }}" = "zip" ]; then
-            ( cd dist && 7z a -tzip "${ALIAS}.zip" "${ALIAS}" >/dev/null )
-          else
-            tar czf "dist/${ALIAS}.tar.gz" -C dist "${ALIAS}"
-          fi
-          ( cd dist && SHA "${ALIAS}.${{ matrix.format }}" > "${ALIAS}.${{ matrix.format }}.sha256" )
           ls -l dist
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: luna-${{ matrix.os }}-${{ matrix.arch }}
-          path: |
-            dist/*.tar.gz*
-            dist/*.zip*
+          path: dist/*.zip
           if-no-files-found: error
 
   # ---------------------------------------------------------------------

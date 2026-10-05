@@ -7,6 +7,22 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+### Changed
+
+- **One zip per platform on the release page, named like OpenSNES's.**
+  A release attached sixteen files: each archive twice (`luna-linux-x86_64.tar.gz`
+  and `luna-v1.33.1-linux-x86_64.tar.gz`, same bytes) with a `.sha256`
+  beside each. It now attaches four: `luna_vX.Y.Z_linux_x86_64.zip`,
+  `luna_vX.Y.Z_linux_arm64.zip`, `luna_vX.Y.Z_windows_x86_64.zip`,
+  `luna_vX.Y.Z_darwin_arm64.zip` (the OpenSNES layout,
+  `opensnes_<tag>_<os>_<arch>.zip`), each holding `luna`, `luna-gui`,
+  `LICENSE` and `README.md`; GitHub shows the SHA-256 digest of each file
+  on the page. The `releases/latest/download/luna-<os>-<arch>` URL no
+  longer exists: a download names its version, as
+  `releases/download/vX.Y.Z/luna_vX.Y.Z_<os>_<arch>.zip` — the guide's
+  install page and its CI recipe are updated. Releases up to v1.33.1 keep
+  their old files.
+
 ## [1.33.1] — 2026-10-05
 
 One fix, for Windows: the GUI now keeps its settings and writes its

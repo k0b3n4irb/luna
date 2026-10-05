@@ -396,11 +396,9 @@ fire.
 
 ## A GitHub Actions recipe
 
-Copy this into a homebrew repo — it builds the ROM, fetches the latest
-luna release binary (no Rust toolchain), and runs the suite. To pin a
-version instead, swap `latest/download/luna-linux-x86_64.tar.gz` for
-`download/vX.Y.Z/luna-vX.Y.Z-linux-x86_64.tar.gz` (the folder inside is
-then `luna-vX.Y.Z-linux-x86_64/`). Only the five most recent versions keep
+Copy this into a homebrew repo — it builds the ROM, fetches a pinned luna
+release binary (no Rust toolchain), and runs the suite. Set `LUNA_VERSION`
+to the version you test against. Only the five most recent versions keep
 a release with binaries, so a pin has to be moved forward from time to
 time; an older version is built from its tag instead (every tag is kept —
 see [Installing](install.md)):
@@ -416,10 +414,13 @@ jobs:
       - name: Build the ROM
         run: make        # your wla-dx build
       - name: Install luna
+        env:
+          LUNA_VERSION: vX.Y.Z
         run: |
-          curl -sL -o luna.tar.gz \
-            https://github.com/k0b3n4irb/luna/releases/latest/download/luna-linux-x86_64.tar.gz
-          tar xzf luna.tar.gz && sudo install luna-linux-x86_64/luna /usr/local/bin/
+          PKG=luna_${LUNA_VERSION}_linux_x86_64
+          curl -sL -o luna.zip \
+            https://github.com/k0b3n4irb/luna/releases/download/${LUNA_VERSION}/${PKG}.zip
+          unzip -q luna.zip && sudo install ${PKG}/luna /usr/local/bin/
       - name: Run the test suite
         run: luna test tests --report json
       - name: Upload screenshots

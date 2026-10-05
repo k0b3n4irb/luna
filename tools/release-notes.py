@@ -5,8 +5,9 @@
 
 Prints the `## [1.32.0]` section of CHANGELOG.md, followed by the download
 table. A pre-release tag (v1.33.0-rc1) uses the section of its final version,
-so a release-candidate dry run shows the notes the real release will carry.
-Exits 1 when CHANGELOG.md has no section for the version.
+so a release-candidate dry run shows the notes the real release will carry;
+before that section is written, it falls back to `## [Unreleased]`.
+Exits 1 when CHANGELOG.md has no section for a release version.
 
 GitHub renders every newline of a release body as a line break, and the
 changelog is wrapped at ~72 columns: paragraphs and list items are unwrapped
@@ -21,11 +22,13 @@ ROOT = Path(__file__).resolve().parent.parent
 # A line that opens a block of its own and so never continues the previous one.
 BLOCK_START = re.compile(r"\s*([-*+] |\d+[.)] |#|\||>|```|~~~)")
 
+# One zip per platform, named `luna_<tag>_<os>_<arch>.zip` like OpenSNES's
+# `opensnes_<tag>_<os>_<arch>.zip` (release.yml builds them).
 ASSETS = [
-    ("Linux", "x86_64", "luna-linux-x86_64.tar.gz"),
-    ("Linux", "aarch64", "luna-linux-aarch64.tar.gz"),
-    ("Windows", "x86_64", "luna-windows-x86_64.zip"),
-    ("macOS", "Apple Silicon (arm64)", "luna-macos-aarch64.tar.gz"),
+    ("Linux", "x86_64", "linux_x86_64"),
+    ("Linux", "arm64", "linux_arm64"),
+    ("Windows", "x86_64", "windows_x86_64"),
+    ("macOS", "Apple Silicon (arm64)", "darwin_arm64"),
 ]
 
 
@@ -73,7 +76,10 @@ def main() -> int:
         return 2
     tag = sys.argv[1]
     version = tag.removeprefix("v").split("-")[0]
-    notes = section((ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), version)
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    notes = section(changelog, version)
+    if not notes and "-" in tag:
+        notes = section(changelog, "Unreleased")
     body = "\n".join(unwrap(notes)).strip()
     if not body:
         print(f"release-notes: CHANGELOG.md has no section [{version}]", file=sys.stderr)
@@ -84,12 +90,11 @@ def main() -> int:
     print("\n---\n\n## Download\n")
     print("| Platform | Architecture | File |")
     print("|---|---|---|")
-    for platform, arch, name in ASSETS:
-        print(f"| **{platform}** | {arch} | `{name}` |")
+    for platform, arch, suffix in ASSETS:
+        print(f"| **{platform}** | {arch} | `luna_{tag}_{suffix}.zip` |")
     print(
-        "\nEach archive holds `luna` (the headless CLI) and `luna-gui`, and has a"
-        " `.sha256` beside it. The same files also exist under a versioned name"
-        f" (`luna-v{tag.removeprefix('v')}-<os>-<arch>`)."
+        "\nEach zip holds `luna` (the headless CLI) and `luna-gui`, with `LICENSE`"
+        " and `README.md`; GitHub shows each file's SHA-256 digest on this page."
         " See [Install & first run](https://k0b3n4irb.github.io/luna/using/install.html)."
     )
     return 0
