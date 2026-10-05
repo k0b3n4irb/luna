@@ -463,20 +463,12 @@ impl KeyBindings {
     }
 }
 
-/// `$XDG_CONFIG_HOME/luna/<file>`, else `$HOME/.config/luna/<file>`; an
-/// error when neither variable is set (no native macOS / Windows lookup).
+/// The settings file `file` in luna's settings folder, as `luna-api`
+/// resolves it (`~/.config/luna` on Linux and macOS, `%APPDATA%\luna` on
+/// Windows); an error when the environment names no folder.
 pub(crate) fn config_file(file: &str) -> std::io::Result<PathBuf> {
-    let base = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        PathBuf::from(xdg)
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".config")
-    } else {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "no $HOME / $XDG_CONFIG_HOME",
-        ));
-    };
-    Ok(base.join("luna").join(file))
+    luna_api::paths::config_file(file)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no settings folder"))
 }
 
 /// `~/.config/luna/input.json` — pad bindings.

@@ -46,6 +46,7 @@ use serde::Serialize;
 pub mod dsp1_commands;
 pub mod event_viewer;
 pub mod input;
+pub mod paths;
 mod power_on;
 pub mod symbols;
 mod vocab;

@@ -7,6 +7,20 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+### Fixed
+
+- **GUI on Windows: bindings, hotkeys, volume and the last ROM folder are
+  kept between sessions.** The GUI looked for its settings folder through
+  `HOME` / `XDG_CONFIG_HOME` only, which Windows does not set, so nothing
+  was saved, and screenshots, save states and recordings went to whatever
+  directory luna was started from. On Windows everything now lives under
+  `%APPDATA%\luna\` — the settings files, and `screenshots\`, `states\`,
+  `recordings\` beside the `firmware\` folder already there. Files written
+  by an earlier Windows build are not moved: copy `states\` from the old
+  start directory to keep the slots. Linux and macOS are unchanged
+  (`~/.config/luna/`, or `$XDG_CONFIG_HOME/luna/`, and `~/.local/luna/`);
+  the folders are listed in the guide under *Saves & save states*.
+
 ## [1.33.0] — 2026-10-05
 
 One emulation fix, found while cleaning the repository: mosaic blocks

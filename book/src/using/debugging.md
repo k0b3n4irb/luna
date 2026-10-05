@@ -62,7 +62,8 @@ A few workflow helpers in the **File** and **Emulation** menus:
   click, and the submenu pre-sets a sticky default for a whole test corpus.
 - **Record input** (*Emulation ▸ ● Record input*): capture what you play as a
   replayable `frame:mask` script. A red **⏺ REC** badge shows while recording;
-  stopping writes a `.input` file to `~/.local/luna/recordings/` that replays
+  stopping writes a `.input` file to `~/.local/luna/recordings/`
+  (`%APPDATA%\luna\recordings\` on Windows) that replays
   with `luna state --input @<file>`.
 - **Reload ROM** (*File ▸ Reload ROM*) + **Auto-reload on file change**: reboot
   the current ROM from disk in place — turn on auto-reload and an external SDK

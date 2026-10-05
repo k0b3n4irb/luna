@@ -1787,7 +1787,7 @@ impl LunaApp {
     /// `BaseVideoFilter::TakeScreenshot(romName, …)`: snapshot the
     /// output buffer, then write `<rom>_NNN.png` with a zero-padded
     /// auto-incrementing counter into [`screenshot_dir`]
-    /// (`$HOME/.local/luna/screenshots`).
+    /// (`~/.local/luna/screenshots`; `%APPDATA%\luna\screenshots` on Windows).
     ///
     /// We capture the GUI's published RGBA framebuffer (256 × 224, or
     /// 256 × 239 under overscan) — the exact pixels on screen — so the PNG
@@ -1925,20 +1925,12 @@ impl LunaApp {
     }
 }
 
-/// Directory screenshots are written to: `$HOME/.local/luna/screenshots`
-/// (a fixed location, like Mesen2's `~/Screenshots`, so captures land in
-/// the same place regardless of the launch directory). Falls back to a
-/// cwd-relative `screenshots/` if `$HOME` is unset.
+/// Directory screenshots are written to: `~/.local/luna/screenshots`
+/// (`%APPDATA%\luna\screenshots` on Windows) — a fixed location, like
+/// Mesen2's `~/Screenshots`, so captures land in the same place regardless
+/// of the launch directory.
 fn screenshot_dir() -> PathBuf {
-    std::env::var_os("HOME").map_or_else(
-        || PathBuf::from("screenshots"),
-        |home| {
-            PathBuf::from(home)
-                .join(".local")
-                .join("luna")
-                .join("screenshots")
-        },
-    )
+    luna_api::paths::data_dir("screenshots")
 }
 
 /// Directory for exported input recordings (issue #83): `~/.local/luna/recordings`.
@@ -2023,15 +2015,7 @@ fn rom_mtime(path: &Path) -> Option<std::time::SystemTime> {
 }
 
 fn recordings_dir() -> PathBuf {
-    std::env::var_os("HOME").map_or_else(
-        || PathBuf::from("recordings"),
-        |home| {
-            PathBuf::from(home)
-                .join(".local")
-                .join("luna")
-                .join("recordings")
-        },
-    )
+    luna_api::paths::data_dir("recordings")
 }
 
 /// Next free `<base>_NNN.input` path under [`recordings_dir`].
@@ -2047,19 +2031,10 @@ fn next_recording_path(base: &str) -> PathBuf {
     dir.join(format!("{base}_overflow.input"))
 }
 
-/// Directory save states are written to: `$HOME/.local/luna/states`, a
-/// sibling of [`screenshot_dir`]. Falls back to a cwd-relative `states/`
-/// if `$HOME` is unset.
+/// Directory save states are written to: `~/.local/luna/states`
+/// (`%APPDATA%\luna\states` on Windows), a sibling of [`screenshot_dir`].
 fn states_dir() -> PathBuf {
-    std::env::var_os("HOME").map_or_else(
-        || PathBuf::from("states"),
-        |home| {
-            PathBuf::from(home)
-                .join(".local")
-                .join("luna")
-                .join("states")
-        },
-    )
+    luna_api::paths::data_dir("states")
 }
 
 /// Filename for a ROM's save-state slot: `<rom-slug>.slot<N>.luna`.
@@ -2118,17 +2093,10 @@ fn main() {
     }
 }
 
-/// `~/.config/luna/last_rom_dir` — single-line text file holding the
-/// directory the user last opened a ROM from.
+/// `last_rom_dir` in the settings folder — single-line text file holding
+/// the directory the user last opened a ROM from.
 fn last_rom_dir_path() -> Option<PathBuf> {
-    let base = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        PathBuf::from(xdg)
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".config")
-    } else {
-        return None;
-    };
-    Some(base.join("luna").join("last_rom_dir"))
+    luna_api::paths::config_file("last_rom_dir")
 }
 
 fn load_last_rom_dir() -> Option<PathBuf> {

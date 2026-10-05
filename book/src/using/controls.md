@@ -116,7 +116,9 @@ auto-read latches.
 ## Remap dialog
 
 The GUI exposes a key-remap dialog under **Settings → Input**, where each
-binding is stored by physical key position and persisted across sessions.
+binding is stored by physical key position and persisted across sessions
+(`input.json` and `hotkeys.json` in the settings folder — see
+[Saves & save states](saves.md#where-luna-keeps-its-files)).
 
 ## Gamepads
 
@@ -141,7 +143,7 @@ when a Super Multitap is on port 2. Fixed, Mesen2-like layout:
   — borderless, toggle to return.
 - **Volume**: *Settings → Audio* — a 0-100 slider plus *Mute*, applied
   live in the audio callback and persisted to
-  `~/.config/luna/audio.json`.
+  `~/.config/luna/audio.json` (`%APPDATA%\luna\audio.json` on Windows).
 - The *Step frame* debugger hotkey moved from `F11` to `F6` (fullscreen
   claimed the universal key); saved hotkey configs keep working and can
   be rebound under *Settings → Hotkeys*.
