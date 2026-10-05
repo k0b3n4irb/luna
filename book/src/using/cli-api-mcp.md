@@ -896,6 +896,28 @@ raw `vram.bin` / `cgram.bin` and `oam.json` (sprite metadata).
 luna assets-dump "game.sfc" -n 8000000 --out /tmp/assets
 ```
 
+### `luna test` — manifest-driven homebrew tests
+
+```
+luna test [OPTIONS] [PATHS]...
+```
+
+Runs one TOML manifest per test (ROM, input, run bound, asserts) in
+process, and exits `0` when every manifest passes, `1` on an assert
+failure, `2` on a manifest or usage error. `[PATHS]` are manifest files or
+directories scanned for `*.toml` (default `./tests`). The machine is set
+per manifest, not by flags (`region`, `force_mapper`, `power_on`, `seed`).
+
+| Option | Default | Purpose |
+|---|---|---|
+| `--update` | off | Rewrite each manifest's `asserts.fbhash` with the measured value (regenerate goldens after an intended render change); formatting and comments are kept. |
+| `--only <SUBSTR>` | all | Only run manifests whose path contains the substring. |
+| `--report json` | — | Also print a machine-readable JSON report to stdout. |
+| `--jobs <N>` | `1` | Run up to N manifests at once (`0` = one per CPU); same lines, same order and same exit code as a serial run. |
+
+The manifest format, the assert families and a GitHub Actions recipe are
+the subject of [Developing homebrew with luna](homebrew-ci.md).
+
 ### `luna mcp` — MCP server over stdio
 
 ```

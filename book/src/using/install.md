@@ -46,7 +46,7 @@ highest versions; the older pages were republished on 2026-10-05).
 
 > **macOS Gatekeeper:** the binaries are unsigned, so the first launch is
 > blocked. Clear the quarantine flag once with
-> `xattr -dr com.apple.quarantine luna-macos-aarch64`, or right-click →
+> `xattr -dr com.apple.quarantine luna_vX.Y.Z_darwin_arm64`, or right-click →
 > *Open* in Finder and confirm.
 >
 > Intel Macs and 32-bit/ARM Windows are not built — build from source below.

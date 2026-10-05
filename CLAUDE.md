@@ -93,7 +93,7 @@ Read the matching rule before touching the relevant code, not after.
 
 ## What NOT to put here
 
-- Long workflows — use `.claude/commands/` or `.claude/skills/`.
+- Long workflows — use `.claude/commands/`.
 - Reference tables (key bindings, register maps, build matrices) —
   use `docs/`.
 - Per-subsystem deep-dives — use `docs/` and link from the

@@ -33,7 +33,7 @@ threshold) still needs an explicit yes.
 ## Before a release leaves the list
 
 OpenSNES downloads a pinned luna release
-(`tools/luna-test/luna.version` in their repository). When the version
+(`testing/luna.version` in their repository). When the version
 their `main` pins is about to become the sixth, tell them **before**
 deleting it, in a partner note.
 
