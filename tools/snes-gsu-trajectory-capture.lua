@@ -8,15 +8,26 @@
 --     mesen_gsu_full.csv       per-instruction (pc,opcode,sfr,sreg,dreg,pbr,r0..r15)
 --     mesen_gsu_init.txt       GO-entry GSU control state (cbr/scbr/scmr/por/cfgr/…)
 --     mesen_gsu_ram_start.bin  GSU work RAM at burst start
---     mesen_gsu_ram_stop1.bin  GSU work RAM at the burst's STOP (or row cap)
+--     mesen_gsu_ram_stop1.bin  GSU work RAM right after the burst's STOP (or row cap)
 --
 -- HOW TO RUN
 --   ARM_FRAME=1500 ~/bin/Mesen --testRunner \
 --     tools/snes-gsu-trajectory-capture.lua "<Super FX rom>"
+--   OUT_DIR (default /tmp) is where the four files go; MAX_ROWS (default
+--   3000000) caps the burst.
 --   Strip any 512-byte .smc copier header from the ROM you pass to luna's
 --   harness (the harness reads the file raw; GSU PCs are headerless-space).
---   Then: LUNA_GSU_DIFF_DIR=/tmp LUNA_SF_ROM=<headerless.sfc> \
---           cargo test -p luna-bus gsu_trajectory_vs_mesen -- --nocapture
+--   Then: LUNA_GSU_DIFF_DIR=/tmp LUNA_GSU_DIFF_CSV=/tmp/mesen_gsu_full.csv \
+--         LUNA_SF_ROM=<absolute path to headerless.sfc> \
+--           cargo test -p luna-bus --lib gsu_ -- --ignored --nocapture
+--   (DIFF_DIR feeds the trajectory harness, DIFF_CSV the single-step one.)
+--
+-- WHEN IT CAPTURES
+--   From ARM_FRAME on it waits for a STOP, so the capture starts on the
+--   first instruction of the NEXT burst (a whole GO, not the tail of one).
+--   The RAM is dumped on the first instruction any CPU executes after that
+--   burst's STOP — before the S-CPU can touch it, which a frame-end dump
+--   does not guarantee.
 --
 -- NOTES (Mesen2 specifics, learned the hard way)
 --   * GSU register state lives under getState() keys "cart.coprocessor.*"
@@ -27,7 +38,9 @@
 --   * Mesen GSU work RAM is `emu.memType.gsuWorkRam` (32 KB for YI; the size
 --     comes from the $FFBD expansion-RAM byte: 1024<<n, GSU default 64 KB).
 local ARM_FRAME = tonumber(os.getenv("ARM_FRAME") or "1500")
-local MAX_ROWS  = 20000
+local MAX_ROWS  = tonumber(os.getenv("MAX_ROWS") or "3000000")
+local OUT = os.getenv("OUT_DIR") or "/tmp"
+local phase = 0
 
 local frame = 0
 local armed = false
@@ -66,10 +79,15 @@ end
 
 local function gsuExec(addr, opcode)
   if not capturing or saved then return end
+  if phase == 0 then
+    if opcode == 0 then phase = 1 end
+    return
+  end
+  if phase == 3 then return end
   local st = emu.getState()
   if ramStart == nil then
     -- first captured instruction: snapshot RAM + init state (pre-execution)
-    dumpRam("/tmp/mesen_gsu_ram_start.bin")
+    dumpRam(OUT .. "/mesen_gsu_ram_start.bin")
     ramStart = true
     local md_from_bpp = { [2]=0, [4]=1, [8]=3 }
     local por = b(st,"cart.coprocessor.plotTransparent")*1
@@ -79,7 +97,7 @@ local function gsuExec(addr, opcode)
               + b(st,"cart.coprocessor.objMode")*16
     local cfgr = b(st,"cart.coprocessor.irqDisabled")*128
                + b(st,"cart.coprocessor.highSpeedMode")*32
-    local init = io.open("/tmp/mesen_gsu_init.txt", "w")
+    local init = io.open(OUT .. "/mesen_gsu_init.txt", "w")
     init:write("ramSize="  .. emu.getMemorySize(emu.memType.gsuWorkRam) .. "\n")
     init:write("cbr="      .. g(st,"cart.coprocessor.cacheBase") .. "\n")
     init:write("scbr="     .. g(st,"cart.coprocessor.screenBase") .. "\n")
@@ -113,27 +131,27 @@ local function gsuExec(addr, opcode)
     0, 0,
     table.concat(r, ",")
   }, ",")
-  if opcode == 0 then sawStop = true end          -- STOP opcode
-  if sawStop or #rows >= MAX_ROWS then
-    capturing = false                              -- stop logging; save next frame
-  end
+  if opcode == 0 then sawStop = true end
+  if sawStop or #rows >= MAX_ROWS then phase = 3 end
 end
 
+
+local function finish()
+  if saved or phase ~= 3 then return end
+  saved = true
+  dumpRam(OUT .. "/mesen_gsu_ram_stop1.bin")
+  local csv = io.open(OUT .. "/mesen_gsu_full.csv", "w")
+  csv:write("seq,pc,opcode,sfr,sreg,dreg,pbr,x,y,r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11,r12,r13,r14,r15\n")
+  for _,line in ipairs(rows) do csv:write(line .. "\n") end
+  csv:close()
+  emu.exit()
+end
 emu.addEventCallback(function()
   frame = frame + 1
   if frame >= ARM_FRAME and not armed then
     armed = true; capturing = true
     emu.addMemoryCallback(gsuExec, emu.callbackType.exec, 0, 0xFFFFFF,
                           emu.memType.gsuMemory, emu.cpuType.gsu)
-  end
-  if armed and not capturing and not saved and ramStart then
-    saved = true
-    dumpRam("/tmp/mesen_gsu_ram_stop1.bin")
-    local csv = io.open("/tmp/mesen_gsu_full.csv", "w")
-    csv:write("seq,pc,opcode,sfr,sreg,dreg,pbr,x,y,r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11,r12,r13,r14,r15\n")
-    for _,line in ipairs(rows) do csv:write(line .. "\n") end
-    csv:close()
-    emu.log("captured " .. #rows .. " GSU rows (sawStop=" .. tostring(sawStop) .. ")")
-    emu.exit()
+    emu.addMemoryCallback(finish, emu.callbackType.exec, 0, 0xFFFFFF)
   end
 end, emu.eventType.endFrame)

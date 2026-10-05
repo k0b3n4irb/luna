@@ -2471,18 +2471,15 @@ mod tests {
     //
     // The work-RAM comparison only means something when the trace ENDS on the
     // STOP luna reaches: `mesen_gsu_ram_stop1.bin` must be the RAM at that
-    // STOP. The capture script stops logging at 20 000 rows and dumps the RAM
-    // at the next frame boundary, so:
-    //   - a row-capped capture (no STOP in it) has no comparable RAM image —
-    //     the reference GSU kept running after the last row. Measured
-    //     2026-10-04 (ARM_FRAME=1500): 19 999 instructions replayed with zero
-    //     register divergence, 2 391 RAM bytes "different" for that reason
-    //     alone. The RAM check is skipped there, and says so.
+    // STOP. The capture script starts on the first instruction of a burst
+    // and dumps the RAM right after that burst's STOP (first instruction any
+    // CPU executes next), so:
+    //   - a row-capped capture (`MAX_ROWS` reached, no STOP in it) has no
+    //     comparable RAM image — the reference GSU kept running after the
+    //     last row. The RAM check is skipped there, and says so.
     //   - a capture that ends on a STOP is compared byte for byte. Measured
-    //     the same day on a burst captured from GO to STOP with the RAM
-    //     dumped at the STOP itself: 4 298 instructions, 0 of 65 536 bytes
-    //     differ. If the script's frame-end dump lets the S-CPU touch the RAM
-    //     first, this fails loudly: fix the capture, not the assertion.
+    //     2026-10-05 (ARM_FRAME=1500): 4 298 instructions, 0 of 65 536 bytes
+    //     differ. A difference here is a divergence, not a capture artefact.
     #[test]
     #[ignore = "manual: needs a Mesen2 GSU capture (tools/snes-gsu-trajectory-capture.lua) and the Star Fox ROM"]
     fn gsu_trajectory_vs_mesen() {
