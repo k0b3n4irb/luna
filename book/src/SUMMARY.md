@@ -1,6 +1,7 @@
 # Summary
 
 [Introduction](introduction.md)
+[I want to…](task-index.md)
 
 # Using Luna
 

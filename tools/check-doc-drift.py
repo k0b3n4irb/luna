@@ -23,6 +23,10 @@ claim is about, and fails when they disagree:
   changelog  every `--option` the CHANGELOG adds under `[Unreleased]` or the
              head version is named in the guide (a new option lands with
              its example, not just a CHANGELOG line).
+  index      the task index (`book/src/task-index.md`) names only real
+             things: every `--option` is an option of some subcommand,
+             every `luna <cmd>` a subcommand, every `snake_case` name an
+             MCP tool; and every subcommand appears in it.
 
 `cli` and `mcp` need a `luna` binary: `LUNA_BIN`, else `target/release/luna`,
 else `target/debug/luna`. Without one they fail (CI builds the binary first);
@@ -236,24 +240,30 @@ def _help(binary: Path, *args: str) -> str:
     ).stdout
 
 
-def check_cli(binary: Path | None) -> list[str]:
-    if binary is None:
-        return []
-    fails: list[str] = []
-    top = _help(binary)
-    cmds_block = top.split("Commands:", 1)[1].split("Options:", 1)[0]
-    commands = [
+def cli_commands(binary: Path) -> list[str]:
+    cmds_block = _help(binary).split("Commands:", 1)[1].split("Options:", 1)[0]
+    return [
         line.split()[0]
         for line in cmds_block.splitlines()
         if re.match(r"^  \S", line) and line.split()[0] != "help"
     ]
+
+
+def cli_options(binary: Path, cmd: str) -> list[str]:
+    return sorted(set(re.findall(r"^\s+(?:-\w, )?(--[a-z0-9][a-z0-9-]*)", _help(binary, cmd), re.M)))
+
+
+def check_cli(binary: Path | None) -> list[str]:
+    if binary is None:
+        return []
+    fails: list[str] = []
+    commands = cli_commands(binary)
     guide = "\n".join(read(p) for p in md_files(BOOK))
     cli_page = read(GUIDE_CLI_PAGE)
     for cmd in commands:
         if not re.search(rf"^### `luna {re.escape(cmd)}`", cli_page, re.M):
             fails.append(f"{rel(GUIDE_CLI_PAGE)}: no `### `luna {cmd}`` section")
-        options = sorted(set(re.findall(r"^\s+(?:-\w, )?(--[a-z0-9][a-z0-9-]*)", _help(binary, cmd), re.M)))
-        for opt in options:
+        for opt in cli_options(binary, cmd):
             if opt in ("--help", "--version"):
                 continue
             if not re.search(rf"(?<![\w-]){re.escape(opt)}(?![\w-])", guide):
@@ -309,6 +319,35 @@ def check_mcp(binary: Path | None) -> list[str]:
     return fails
 
 
+TASK_INDEX = BOOK / "task-index.md"
+# `tool`, or `tool {params}`: a snake_case name standing alone in backticks
+TOOL_TOKEN_RE = re.compile(r"`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)(?: \{[^}`]*\})?`")
+
+
+def check_index(binary: Path | None) -> list[str]:
+    if binary is None:
+        return []
+    page = read(TASK_INDEX)
+    commands = cli_commands(binary)
+    options = {opt for cmd in commands for opt in cli_options(binary, cmd)}
+    tools = set(mcp_tool_names(binary))
+    where = rel(TASK_INDEX)
+    fails = []
+    for opt in sorted(set(re.findall(r"(?<![\w-])(--[a-z0-9][a-z0-9-]*)", page))):
+        if opt not in options:
+            fails.append(f"{where}: {opt} is not an option of any subcommand")
+    for cmd in sorted(set(re.findall(r"`luna ([a-z][a-z0-9-]*)", page))):
+        if cmd not in commands:
+            fails.append(f"{where}: `luna {cmd}` is not a subcommand")
+    for name in sorted(set(TOOL_TOKEN_RE.findall(page))):
+        if name not in tools:
+            fails.append(f"{where}: `{name}` is not an MCP tool")
+    for cmd in commands:
+        if not re.search(rf"`luna {re.escape(cmd)}(?![\w-])", page):
+            fails.append(f"{where}: subcommand `luna {cmd}` has no task")
+    return fails
+
+
 def check_changelog() -> list[str]:
     text = read(ROOT / "CHANGELOG.md")
     # [Unreleased] + the head version section
@@ -327,22 +366,22 @@ def check_changelog() -> list[str]:
 
 # ---------------------------------------------------------------------------
 
-CHECKS = ["links", "orphans", "paths", "version", "cli", "mcp", "changelog"]
+CHECKS = ["links", "orphans", "paths", "version", "cli", "mcp", "index", "changelog"]
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("checks", nargs="*", choices=CHECKS + [[]], help="subset to run (default: all)")
     ap.add_argument("--list", action="store_true", help="print the check names")
-    ap.add_argument("--allow-missing-binary", action="store_true", help="skip cli/mcp without a luna binary")
+    ap.add_argument("--allow-missing-binary", action="store_true", help="skip cli/mcp/index without a luna binary")
     args = ap.parse_args()
     if args.list:
         print("\n".join(CHECKS))
         return 0
     selected = args.checks or CHECKS
-    binary = luna_binary(args.allow_missing_binary) if {"cli", "mcp"} & set(selected) else None
-    if binary is None and {"cli", "mcp"} & set(selected):
-        print("note: no luna binary, cli/mcp skipped")
+    binary = luna_binary(args.allow_missing_binary) if {"cli", "mcp", "index"} & set(selected) else None
+    if binary is None and {"cli", "mcp", "index"} & set(selected):
+        print("note: no luna binary, cli/mcp/index skipped")
 
     total = 0
     for name in selected:
@@ -353,6 +392,7 @@ def main() -> int:
             "version": check_version,
             "cli": lambda: check_cli(binary),
             "mcp": lambda: check_mcp(binary),
+            "index": lambda: check_index(binary),
             "changelog": check_changelog,
         }[name]()
         status = "OK" if not fails else f"{len(fails)} finding(s)"
