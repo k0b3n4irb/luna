@@ -180,7 +180,11 @@ jobs:
     name: docs
     runs-on: ubuntu-latest
     steps:
+      # The `version` check compares every cited vX.Y.Z with `git tag`; a
+      # shallow checkout sees no tags and would flag every citation.
       - uses: actions/checkout@v7
+        with:
+          fetch-tags: true
       - name: Install ALSA headers (cpal → alsa-sys)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
       - name: Install the Rust toolchain (rust-toolchain.toml)

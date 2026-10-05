@@ -219,6 +219,10 @@ def check_version() -> list[str]:
             ["git", "tag", "-l", "v*"], cwd=ROOT, capture_output=True, text=True, check=True
         ).stdout.split()
     )
+    if not tags:
+        # A shallow clone without tags would flag every citation; say so
+        # instead (CI checks out with fetch-tags: true).
+        return fails + ["git sees no v* tag (shallow checkout?): fetch the tags first"]
     for src in md_files(BOOK, ROOT / "README.md", ROOT / "CONTRIBUTING.md"):
         for v in sorted(set(VERSION_RE.findall(read(src)))):
             if f"v{v}" not in tags:
