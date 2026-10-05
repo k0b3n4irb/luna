@@ -381,6 +381,7 @@ impl Apu {
         apu
     }
 
+    #[cfg(any(test, feature = "atomic-oracle"))]
     /// Tick the three SPC timers by `spc_cycles` of headroom.
     ///
     /// T0 / T1 base clock: 8 kHz = one tick every 128 SPC cycles.
@@ -417,6 +418,7 @@ impl Apu {
         }
     }
 
+    #[cfg(any(test, feature = "atomic-oracle"))]
     /// Tick the per-voice envelope state machines. We accumulate SPC
     /// cycles in `sample_tick_deficit`; each time it crosses a
     /// 32-cycle boundary the DSP advances by one 32 kHz audio sample
@@ -447,6 +449,7 @@ impl Apu {
         }
     }
 
+    #[cfg(any(test, feature = "atomic-oracle"))]
     /// Advance one timer (0, 1, or 2) by one base-clock tick.
     fn tick_one_timer(&mut self, idx: usize) {
         if !self.timer_enabled[idx] {
@@ -603,6 +606,7 @@ impl Apu {
         }
     }
 
+    #[cfg(any(test, feature = "atomic-oracle"))]
     /// Run exactly one SPC700 instruction atomically over the APU bus and
     /// return its cycle cost, reconciling any SLEEP/STOP cycles the core
     /// charges without driving the bus. Harness-only (see below) —
@@ -740,6 +744,7 @@ impl Apu {
         cost_2x
     }
 
+    #[cfg(any(test, feature = "atomic-oracle"))]
     /// Trajectory-harness hook (Tales OP derail differential): capture the
     /// pre-instruction SPC register snapshot `(pc, a, x, y, sp, psw)`, then
     /// free-run exactly one SPC700 instruction (full timer/DSP clocking, a

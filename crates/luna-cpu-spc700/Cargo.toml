@@ -14,8 +14,17 @@ publish.workspace = true
 # Save-state: serde derives on Spc700 + Psw.
 serde = { workspace = true, features = ["std", "derive"] }
 
-# Tom Harte JSON tests integration (see tests/tom_harte.rs).
+[features]
+default = []
+# The atomic, whole-instruction interpreter (`Spc700::step`). Production
+# runs the cycle-stepped core (`step_cycle`); the atomic one is kept as an
+# equivalence oracle for the tests and stays out of a release binary.
+atomic-oracle = []
+
+# Tom Harte JSON tests integration (see tests/tom_harte.rs), which runs
+# both cores: the crate's own tests turn the oracle on.
 [dev-dependencies]
+luna-cpu-spc700 = { path = ".", features = ["atomic-oracle"] }
 serde_json = { workspace = true, features = ["std"] }
 
 [lints]

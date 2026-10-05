@@ -98,7 +98,7 @@ pub const SPC700_CYCLES: [u8; 256] = [
 /// Extra SPC cycles a branch-family opcode costs when the branch is
 /// **taken** — two pipeline idles on real hardware (ares
 /// `instructionBranch`: two `idle()` calls past the condition). Added
-/// by [`crate::Spc700::step`] on top of the not-taken base in
+/// by the atomic `Spc700::step` on top of the not-taken base in
 /// [`SPC700_CYCLES`] for BRA / Bcc / CBNE / DBNZ / BBS / BBC.
 pub const SPC700_BRANCH_TAKEN_PENALTY: u8 = 2;
 

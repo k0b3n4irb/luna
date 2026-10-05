@@ -1,6 +1,6 @@
 //! Cycle-stepped (mid-instruction-resumable) SPC700 execution.
 //!
-//! The atomic [`Spc700::step`](crate::Spc700::step) runs a whole
+//! The atomic `Spc700::step` (tests and the `atomic-oracle` feature) runs a whole
 //! instruction per call; this module adds [`Spc700::step_cycle`], which
 //! advances **exactly one SPC cycle** (one bus access — read / write /
 //! idle) and resumes at [`Spc700::op_step`](crate::Spc700) on the next

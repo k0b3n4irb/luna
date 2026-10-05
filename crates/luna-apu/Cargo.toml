@@ -10,6 +10,12 @@ repository.workspace = true
 readme.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+# `Apu::trace_step_one`, the frozen-mailbox trajectory harness entry: it
+# steps the SPC700 with the atomic oracle interpreter. Tests only.
+atomic-oracle = ["luna-cpu-spc700/atomic-oracle"]
+
 [dependencies]
 luna-cpu-spc700 = { workspace = true }
 # Save-state: serde derives on APU + DSP state.

@@ -27,6 +27,8 @@ serde_bytes = { workspace = true }
 bincode     = { workspace = true }
 
 [dev-dependencies]
+# tests/spc_trajectory.rs drives `Apu::trace_step_one`.
+luna-apu = { workspace = true, features = ["atomic-oracle"] }
 # SNES test-ROM golden suite (tests/snes_test_roms.rs): hash the
 # framebuffer and, in record mode, dump a PNG to eyeball.
 sha2  = { workspace = true }

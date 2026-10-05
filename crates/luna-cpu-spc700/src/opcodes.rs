@@ -1,11 +1,15 @@
-//! Atomic (whole-instruction) SPC700 interpreter: [`Spc700::step`]
+//! Atomic (whole-instruction) SPC700 interpreter: `Spc700::step`
 //! fetches, dispatches and executes one complete instruction per call.
 //! All 256 opcodes are implemented (the dispatch `match` is exhaustive).
 //!
-//! Production does not run this file: the APU driver (`luna-apu`,
+//! Production does not run it, and a release binary does not contain it:
+//! `Spc700::step` and its dispatch are compiled only under `cfg(test)` or
+//! the `atomic-oracle` feature. The APU driver (`luna-apu`,
 //! `run_one_cycle`) runs the cycle-stepped core in `step.rs`
-//! (`Spc700::step_cycle`, one bus access per call). This interpreter is
-//! kept as the equivalence oracle for that core: the
+//! (`Spc700::step_cycle`, one bus access per call). What is always
+//! compiled here are the ALU and stack helpers both cores share
+//! (`adc_u8`, `sbc_u8`, `cmp_u8`, `push_u8`, `pop_u8`). The interpreter is
+//! kept as the equivalence oracle for the production core: the
 //! `differential_all_ported_opcodes` test in `step.rs` (with the
 //! `equiv_*` tests beside it) runs both on random states and requires
 //! identical cycle counts, bus traces, registers and memory (SLEEP and
@@ -18,6 +22,7 @@ use crate::cpu::Spc700;
 use crate::flags::bit;
 
 impl Spc700 {
+    #[cfg(any(test, feature = "atomic-oracle"))]
     /// Execute one instruction. Returns the canonical SPC bus-cycle
     /// cost of that opcode (gap A1 — was previously a flat 4 in the
     /// caller, which silently broke music tempo + DSP pitch by the
@@ -51,6 +56,7 @@ impl Spc700 {
         cycles
     }
 
+    #[cfg(any(test, feature = "atomic-oracle"))]
     fn execute<B: SpcBus>(&mut self, opcode: u8, bus: &mut B) {
         match opcode {
             // ---------------------------------------------------------
@@ -1978,6 +1984,7 @@ impl Spc700 {
         }
     }
 
+    #[cfg(any(test, feature = "atomic-oracle"))]
     fn branch_if<B: SpcBus>(&mut self, bus: &mut B, condition: bool) {
         let offset = self.fetch_u8(bus) as i8;
         if condition {
@@ -2037,6 +2044,7 @@ impl Spc700 {
         bus.read(0x0100 | u16::from(self.sp))
     }
 
+    #[cfg(any(test, feature = "atomic-oracle"))]
     /// Fetch a `dp` byte, resolve `[dp+X]` as a 16-bit pointer in
     /// direct page, and read the byte the pointer points to.
     fn read_indirect_x<B: SpcBus>(&mut self, bus: &mut B) -> u8 {
@@ -2049,6 +2057,7 @@ impl Spc700 {
         bus.read(target)
     }
 
+    #[cfg(any(test, feature = "atomic-oracle"))]
     /// Fetch the 2-byte `m.b` operand used by bit-on-memory ops
     /// (`MOV1 C, m.b`, `AND1 C, m.b`, etc.).
     ///
@@ -2062,6 +2071,7 @@ impl Spc700 {
         (addr, bit)
     }
 
+    #[cfg(any(test, feature = "atomic-oracle"))]
     /// Fetch a `dp` byte, resolve `[dp]` as a 16-bit pointer, then
     /// read the byte at `pointer + Y`.
     fn read_indirect_y<B: SpcBus>(&mut self, bus: &mut B) -> u8 {

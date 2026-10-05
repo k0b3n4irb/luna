@@ -1654,6 +1654,7 @@ dependencies = [
 name = "luna-cpu-spc700"
 version = "1.32.0"
 dependencies = [
+ "luna-cpu-spc700",
  "serde",
  "serde_json",
 ]
