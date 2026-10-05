@@ -53,6 +53,7 @@ A cycle-accurate-ish SNES emulator written in Rust. 12-crate workspace:
 | **One author: `~/.gitconfig`** — no `Co-authored-by` / tool trailers, never let GitHub commit (releases = fast-forward `develop:main`) | `.claude/rules/no-co-authored-by.md` | Every commit, merge, tag, PR or release |
 | No dependency bots (Dependabot, Renovate…) — permanently banned | `.claude/rules/no-dependency-bots.md` | Any dependency update, CI or repository-settings change |
 | GitHub housekeeping — five releases keep binaries, Actions runs older than a month go (`tools/housekeeping.sh`) | `.claude/rules/housekeeping.md` | After every release; during ordinary work when the dry run lists something |
+| Documentation drift — the guide, `docs/` and the rules are checked against the tree (`tools/check-doc-drift.py`, CI job `docs`) | `.claude/rules/doc-drift.md` | Any change to `book/`, `docs/`, `.claude/`, the root `.md` files, a `luna` option or an MCP tool |
 
 Read the matching rule before touching the relevant code, not after.
 

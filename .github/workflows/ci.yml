@@ -166,6 +166,38 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   # ---------------------------------------------------------------------
+  # Documentation drift. The guide, docs/ and the rules must describe the
+  # luna in the tree: tools/check-doc-drift.py compares each documented
+  # claim with its subject (links and anchors resolve, every quoted path
+  # exists, the workspace version is the CHANGELOG head, every `luna`
+  # subcommand and option and every MCP tool is in the guide, a new option
+  # in the CHANGELOG has its page). The cli/mcp checks ask the real binary
+  # (`--help`, `tools/list`), hence the build. The guide is also built
+  # strictly here, so a broken SUMMARY fails the PR and not the Pages
+  # deploy (docs.yml runs on push only).
+  # ---------------------------------------------------------------------
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install ALSA headers (cpal → alsa-sys)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
+      - name: Install the Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the CLI the checks interrogate
+        run: cargo build --release --locked -p luna-cli
+      - name: Install mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: "0.4.40"
+      - name: Build the guide
+        run: mdbook build book
+      - name: Check the documentation against the tree
+        run: python3 tools/check-doc-drift.py
+
+  # ---------------------------------------------------------------------
   # NOTE: the Tom Harte SingleStepTests (both CPU cores) used to run here on
   # every push. They are the exhaustive instruction-semantics gate but the
   # 65C816 run alone is ~25 min on GitHub runners — overkill per push. They

@@ -55,6 +55,24 @@ wider `cargo test --workspace --all-features` (integration tests included),
 and the golden ROM suite in release mode. The local sequence builds for
 real so that a stale binary is never what you test by hand.
 
+When the change touches the documentation (`book/`, `docs/`, `README.md`,
+this file, `CHANGELOG.md`, `CLAUDE.md`, `.claude/`) or the surface it
+describes (a `luna` subcommand or option, an MCP tool), also run
+
+```bash
+mdbook build book && tools/check-doc-drift.py
+```
+
+CI runs both (job `docs`). The script compares every documented claim with
+its subject: relative links and anchors resolve, every quoted
+`docs/…`/`tools/…`/`crates/…` path exists, the workspace version is the
+CHANGELOG head and every cited `vX.Y.Z` is a tag, every subcommand and long
+option of the built `luna` and every tool the MCP server lists has its place
+in the guide, and an option the CHANGELOG adds is named in the guide. It
+needs a built `luna` (`LUNA_BIN`, else `target/release/luna`, else
+`target/debug/luna`); `--list` names the checks, and a subset runs as
+`tools/check-doc-drift.py links version`.
+
 ## Conventions
 
 - **Commits**: `type(scope): description` — e.g. `fix(ppu): ...`,
