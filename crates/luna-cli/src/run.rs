@@ -162,13 +162,14 @@ pub(crate) fn run(
     print_diag_state(&mut em);
     println!("Instructions executed: {}", em.instructions_executed());
     println!("Total master cycles:   {}", em.state().stats.total_mclk);
+    // Every opcode is implemented, so a panic is a core bug: the partial
+    // state above and the outputs below are still produced, then the
+    // command exits 1.
+    let core_panicked = panic_msg.is_some();
     if let Some(msg) = panic_msg {
         println!();
         println!("Stopped on CPU panic:");
         println!("  {msg}");
-        // Returning success here: the partial state above is the output.
-        // Every opcode is implemented, so a panic is a core bug; whether
-        // it should fail the command is an open decision.
     }
 
     // Screenshot dump: render whatever the PPU has accumulated.
@@ -222,6 +223,9 @@ pub(crate) fn run(
     // pre-PNG). Printed last so a harness can `grep '^fbhash='`.
     if print_fbhash && let Err(e) = crate::output::print_fbhash(&em, native_res, force_display) {
         eprintln!("\nerror: could not hash frame: {e}");
+        return ExitCode::from(1);
+    }
+    if core_panicked {
         return ExitCode::from(1);
     }
     ExitCode::SUCCESS

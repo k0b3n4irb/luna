@@ -33,6 +33,14 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ### Changed
 
+- **A core panic makes `luna run`, `luna state` and `luna profile -n`
+  exit 1.** They exited 0: the panic was only a line of text
+  (`Stopped on CPU panic:`, `step warning: emulator panicked: …`), which a
+  CI job reading the exit code never saw. The state, screenshot, traces
+  and report of where the machine stopped are still written; the exit
+  code is then `1`, the one already used for "the ROM regressed". A
+  script that relied on `0` there must now read the message. Nothing
+  changes for a run that does not panic.
 - **Only the five most recent versions keep a GitHub release with
   binaries.** Older releases were removed on 2026-10-03 (`v1.0.0` to
   `v1.30.1`) and the rule now applies after every release. Every git tag

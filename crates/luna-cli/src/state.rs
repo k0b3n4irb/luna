@@ -317,6 +317,9 @@ pub(crate) fn run_state(
     // With --audio-out, the pre-roll's audio is kept: the script can run for
     // hundreds of frames, far past the APU queue's ~0.5 s.
     let mut audio_accum: Vec<(i16, i16)> = Vec::new();
+    // A step that fails (the core panicked) still yields the snapshot and
+    // every requested output, but the command then exits 1.
+    let mut step_failed = false;
     let ran = if audio_out.is_some() {
         em.run_input_script_with_audio(&mut script, bound, &mut audio_accum)
     } else {
@@ -392,6 +395,7 @@ pub(crate) fn run_state(
         )
     {
         eprintln!("step warning (pre-trace bridge 1): {e}");
+        step_failed = true;
     }
     // Enable whichever traces are at or past their target now.
     if cpu_trace_path.is_some()
@@ -421,6 +425,7 @@ pub(crate) fn run_state(
                 &mut audio_accum,
             ) {
                 eprintln!("step warning (pre-trace bridge 2): {e}");
+                step_failed = true;
             }
             // Re-check enables (whichever wasn't enabled yet).
             if cpu_trace_path.is_some() && em.instructions_executed() >= cpu_trace_from {
@@ -459,6 +464,7 @@ pub(crate) fn run_state(
             &mut audio_accum,
         ) {
             eprintln!("step warning (pre-trace bridge): {e}");
+            step_failed = true;
         }
         let enabled = if is_dma {
             em.enable_dma_trace(dma_trace_max)
@@ -497,14 +503,15 @@ pub(crate) fn run_state(
     } else if audio_out.is_some() {
         if let Err(e) = step_keeping_audio(&mut em, remaining, true, &mut audio_accum) {
             eprintln!("step warning: {e}");
+            step_failed = true;
         }
     } else {
         match em.step(remaining) {
             Ok(_) => {}
             Err(e) => {
-                // Step errors are informational — we still want a state
-                // snapshot.
+                // We still want the state snapshot of where it stopped.
                 eprintln!("step warning: {e}");
+                step_failed = true;
             }
         }
     }
@@ -1018,7 +1025,7 @@ pub(crate) fn run_state(
         eprintln!("error: could not hash frame: {e}");
         return ExitCode::from(1);
     }
-    if assert_failed {
+    if assert_failed || step_failed {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS

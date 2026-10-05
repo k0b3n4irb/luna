@@ -255,6 +255,7 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
         eprintln!("error: enable_profile: {e}");
         return ExitCode::from(1);
     }
+    let mut core_panicked = false;
     if let Some(target) = o.until_frame {
         while frame(&em) < target {
             match step_frame(&mut em) {
@@ -279,7 +280,10 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
                 Ok(0) => break,
                 Ok(_) => {}
                 Err(luna_api::ApiError::Panic(msg)) => {
-                    eprintln!("note: CPU panic: {msg}");
+                    // The report of what ran is still written; the
+                    // command then exits 1, as the frame-bounded runs do.
+                    eprintln!("error: CPU panic: {msg}");
+                    core_panicked = true;
                     break;
                 }
                 Err(e) => {
@@ -528,7 +532,7 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
             return code;
         }
     }
-    if over || !stack_ok {
+    if over || !stack_ok || core_panicked {
         return ExitCode::from(1);
     }
     ExitCode::SUCCESS

@@ -46,8 +46,8 @@ Build it with `cargo build --release -p luna-cli`; the binary is
 
 | Code | Meaning |
 |---|---|
-| `0` | Run completed; every `--assert*` spec passed. (A ROM hitting an unimplemented core path still exits 0 — emulation gaps are reported, not treated as CLI failures.) |
-| `1` | Runtime failure (ROM load, I/O, trace enable) **or** at least one `--assert*` spec failed (each failing spec prints a `FAIL …` line on stdout). |
+| `0` | Run completed; every `--assert*` spec passed. |
+| `1` | Runtime failure (ROM load, I/O, trace enable), at least one `--assert*` spec failed (each failing spec prints a `FAIL …` line on stdout), **or the emulator core panicked** during the run. In that last case `luna run`, `luna state` and `luna profile` still write the state, screenshot and traces of where it stopped (`step warning: emulator panicked: …` or `Stopped on CPU panic:` names the cause), then exit `1`. |
 | `2` | Usage error — a malformed `--input` / `--mouse` / `--superscope` script (any subcommand). Fix the invocation, not the ROM. |
 
 A test harness should treat `1` as "the ROM regressed" and `2` as "the
