@@ -41,6 +41,12 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   code is then `1`, the one already used for "the ROM regressed". A
   script that relied on `0` there must now read the message. Nothing
   changes for a run that does not panic.
+- **GUI: the S-DSP register viewer uses the names of the CLI.** The
+  panel (*Debug ▸ Registers*, "S-DSP registers") had its own spellings:
+  `V0 PITCHL`, `KOF`, `COEF0`. It now shows the names `--dsp-trace` and
+  `[asserts.dsp]` use (`V0_PL`, `KOFF`, `FIR0`, and `V0_VOLL` with an
+  underscore), so a register found in the viewer can be pasted into a
+  manifest. Same registers, same order, same values.
 - **Only the five most recent versions keep a GitHub release with
   binaries.** Older releases were removed on 2026-10-03 (`v1.0.0` to
   `v1.30.1`) and the rule now applies after every release. Every git tag
@@ -65,7 +71,8 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 - **Save states written by 1.32.0 and earlier are refused.** The
   save-state format moves to version 8: two fields that nothing ever read
   (an SPC700 scratch latch and a raw copy of the SA-1 `$2231` register)
-  are no longer stored. Emulation is unchanged, but the format is
+  are no longer stored, and the PPU's vertical mosaic counter (see
+  *Fixed*) is. Emulation is otherwise unchanged, but the format is
   positional, so an older state cannot be read back. Loading one fails
   cleanly with `save state: format version mismatch: state is v7, this
   build expects v8` — `luna state --load-state` exits 1 with that error,

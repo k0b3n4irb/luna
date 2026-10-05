@@ -55,7 +55,9 @@ pub use event_viewer::{
 };
 pub use input::{FRAME_STEP_BUDGET, InputEvent, InputScript, ScriptBound};
 pub use power_on::parse_power_on;
-pub use vocab::{dsp_register_index, dsp_register_name, force_mapper_names, parse_region};
+pub use vocab::{
+    dsp_register_index, dsp_register_name, dsp_register_table, force_mapper_names, parse_region,
+};
 
 /// Parse a controller-device name — the CLI `--port1/--port2` and MCP
 /// `set_port_device` vocabulary: `pad` (or `joypad`), `mouse`, `superscope`,

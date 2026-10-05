@@ -95,6 +95,25 @@ pub fn dsp_register_name(reg: u8) -> String {
     format!("${reg:02X}")
 }
 
+/// The S-DSP registers a debugger lists, in display order, each with the
+/// name [`dsp_register_name`] gives it: the eighty per-voice registers
+/// (`V0_VOLL` … `V7_OUTX`), the fifteen globals in Mesen2's order
+/// (`MVOLL`, `MVOLR`, `EVOLL`, `EVOLR`, `KON`, `KOFF`, `FLG`, `ENDX`,
+/// `EFB`, `PMON`, `NON`, `EON`, `DIR`, `ESA`, `EDL`), then `FIR0` … `FIR7`.
+/// The 25 indices with no register behind them are left out. The GUI's
+/// register viewer is this table, row for row.
+#[must_use]
+pub fn dsp_register_table() -> Vec<(u8, String)> {
+    let voices = (0..8u8).flat_map(|v| (0..10u8).map(move |lo| (v << 4) | lo));
+    let globals = DSP_GLOBAL_REGS.iter().map(|(i, ..)| *i);
+    let fir = (0..8u8).map(|n| (n << 4) | 0x0F);
+    voices
+        .chain(globals)
+        .chain(fir)
+        .map(|i| (i, dsp_register_name(i)))
+        .collect()
+}
+
 /// The index of the S-DSP register called `name`, case-insensitive: any
 /// name [`dsp_register_name`] prints, the longer spellings (`V0_PITCHL`,
 /// `MVOL_L`, `KOF`), or a raw hex index below `80`.
@@ -262,5 +281,35 @@ mod tests {
         for name in ["V8_GAIN", "V0_NOPE", "FIR8", "80", "BOGUS", ""] {
             assert_eq!(dsp_register_index(name), None, "{name}");
         }
+    }
+
+    #[test]
+    fn the_register_table_is_every_named_register_under_the_csv_name() {
+        let table = dsp_register_table();
+        assert_eq!(table.len(), 103);
+        // Every index exactly once, no `$xx` placeholder, and each name
+        // resolves back to its index: a row pasted into `[asserts.dsp]`
+        // or read off a `--dsp-trace` CSV names the same register.
+        let mut seen = std::collections::BTreeSet::new();
+        for (index, name) in &table {
+            assert!(seen.insert(*index), "{index:#04x} listed twice");
+            assert!(!name.starts_with('$'), "{index:#04x} has no name");
+            assert_eq!(dsp_register_index(name), Some(*index), "{name}");
+        }
+        // The named registers are exactly those with a name.
+        let named: Vec<u8> = (0..0x80u8)
+            .filter(|&i| !dsp_register_name(i).starts_with('$'))
+            .collect();
+        assert_eq!(seen.into_iter().collect::<Vec<_>>(), named);
+        // Display order and the spellings the viewer shows.
+        let row = |n: usize| (table[n].0, table[n].1.as_str());
+        assert_eq!(row(0), (0x00, "V0_VOLL"));
+        assert_eq!(row(2), (0x02, "V0_PL"));
+        assert_eq!(row(79), (0x79, "V7_OUTX"));
+        assert_eq!(row(80), (0x0C, "MVOLL"));
+        assert_eq!(row(85), (0x5C, "KOFF"));
+        assert_eq!(row(94), (0x7D, "EDL"));
+        assert_eq!(row(95), (0x0F, "FIR0"));
+        assert_eq!(row(102), (0x7F, "FIR7"));
     }
 }

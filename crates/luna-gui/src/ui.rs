@@ -1003,97 +1003,26 @@ pub(crate) fn registers_body(ui: &mut egui::Ui, snap: &DebugSnapshot) {
             }
         });
     rv_header(ui, "S-DSP registers");
-    let dsp = |r: usize| a.dsp_regs.get(r).copied().unwrap_or(0);
+    // The rows are `luna_api::dsp_register_table`: which registers, in
+    // which order, under which name is the API's say (the names are the
+    // ones `--dsp-trace` and `[asserts.dsp]` use), and its test covers it.
+    let dsp = |r: u8| a.dsp_regs.get(usize::from(r)).copied().unwrap_or(0);
+    let table = luna_api::dsp_register_table();
+    let (voices, rest) = table.split_at(80);
     egui::Grid::new("rv_dsp_voices")
         .num_columns(3)
         .spacing([12.0, 4.0])
         .show(ui, |ui| {
-            for v in 0..8usize {
-                let base = v << 4;
-                rv_row(
-                    ui,
-                    &format!("${:02X}", base),
-                    &format!("V{v} VOLL"),
-                    &b(dsp(base)),
-                );
-                rv_row(
-                    ui,
-                    &format!("${:02X}", base + 1),
-                    &format!("V{v} VOLR"),
-                    &b(dsp(base + 1)),
-                );
-                rv_row(
-                    ui,
-                    &format!("${:02X}", base + 2),
-                    &format!("V{v} PITCHL"),
-                    &b(dsp(base + 2)),
-                );
-                rv_row(
-                    ui,
-                    &format!("${:02X}", base + 3),
-                    &format!("V{v} PITCHH"),
-                    &b(dsp(base + 3)),
-                );
-                rv_row(
-                    ui,
-                    &format!("${:02X}", base + 4),
-                    &format!("V{v} SRCN"),
-                    &b(dsp(base + 4)),
-                );
-                rv_row(
-                    ui,
-                    &format!("${:02X}", base + 5),
-                    &format!("V{v} ADSR1"),
-                    &b(dsp(base + 5)),
-                );
-                rv_row(
-                    ui,
-                    &format!("${:02X}", base + 6),
-                    &format!("V{v} ADSR2"),
-                    &b(dsp(base + 6)),
-                );
-                rv_row(
-                    ui,
-                    &format!("${:02X}", base + 7),
-                    &format!("V{v} GAIN"),
-                    &b(dsp(base + 7)),
-                );
-                rv_row(
-                    ui,
-                    &format!("${:02X}", base + 8),
-                    &format!("V{v} ENVX"),
-                    &b(dsp(base + 8)),
-                );
-                rv_row(
-                    ui,
-                    &format!("${:02X}", base + 9),
-                    &format!("V{v} OUTX"),
-                    &b(dsp(base + 9)),
-                );
+            for (r, name) in voices {
+                rv_row(ui, &format!("${r:02X}"), name, &b(dsp(*r)));
             }
         });
     egui::Grid::new("rv_dsp_global")
         .num_columns(3)
         .spacing([12.0, 4.0])
         .show(ui, |ui| {
-            rv_row(ui, "$0C", "MVOLL", &b(dsp(0x0C)));
-            rv_row(ui, "$1C", "MVOLR", &b(dsp(0x1C)));
-            rv_row(ui, "$2C", "EVOLL", &b(dsp(0x2C)));
-            rv_row(ui, "$3C", "EVOLR", &b(dsp(0x3C)));
-            rv_row(ui, "$4C", "KON", &b(dsp(0x4C)));
-            rv_row(ui, "$5C", "KOF", &b(dsp(0x5C)));
-            rv_row(ui, "$6C", "FLG", &b(dsp(0x6C)));
-            rv_row(ui, "$7C", "ENDX", &b(dsp(0x7C)));
-            rv_row(ui, "$0D", "EFB", &b(dsp(0x0D)));
-            rv_row(ui, "$2D", "PMON", &b(dsp(0x2D)));
-            rv_row(ui, "$3D", "NON", &b(dsp(0x3D)));
-            rv_row(ui, "$4D", "EON", &b(dsp(0x4D)));
-            rv_row(ui, "$5D", "DIR", &b(dsp(0x5D)));
-            rv_row(ui, "$6D", "ESA", &b(dsp(0x6D)));
-            rv_row(ui, "$7D", "EDL", &b(dsp(0x7D)));
-            for n in 0..8usize {
-                let r = (n << 4) | 0x0F;
-                rv_row(ui, &format!("${r:02X}"), &format!("COEF{n}"), &b(dsp(r)));
+            for (r, name) in rest {
+                rv_row(ui, &format!("${r:02X}"), name, &b(dsp(*r)));
             }
         });
 
