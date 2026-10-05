@@ -32,8 +32,8 @@ unzip -q luna_vX.Y.Z_linux_x86_64.zip && cd luna_vX.Y.Z_linux_x86_64
 On Windows, download the `.zip`, extract it (Explorer opens it natively), and
 run `luna-gui.exe` or `luna.exe`. Each zip contains both binaries plus
 `LICENSE` and `README.md`; the release page shows the SHA-256 digest of each
-file. Releases up to v1.33.1 used other names (`luna-<os>-<arch>.tar.gz`,
-with a `.sha256` beside it); their pages keep them.
+file. Every release that keeps binaries uses these names (the five
+highest versions; the older pages were republished on 2026-10-05).
 
 ### Runtime requirements
 

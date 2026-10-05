@@ -20,8 +20,9 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   on the page. The `releases/latest/download/luna-<os>-<arch>` URL no
   longer exists: a download names its version, as
   `releases/download/vX.Y.Z/luna_vX.Y.Z_<os>_<arch>.zip` — the guide's
-  install page and its CI recipe are updated. Releases up to v1.33.1 keep
-  their old files.
+  install page and its CI recipe are updated. The five releases that keep
+  binaries (v1.30.4 to v1.33.1) were republished in this layout on
+  2026-10-05, built from their tags: their old file names are gone too.
 
 ## [1.33.1] — 2026-10-05
 
