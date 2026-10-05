@@ -24,6 +24,20 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   binaries (v1.30.4 to v1.33.1) were republished in this layout on
   2026-10-05, built from their tags: their old file names are gone too.
 
+- **The guide is reorganised; some of its pages moved.** The introduction
+  opens with four paths, one per reader (plays, writes homebrew, runs an
+  agent, works on luna), and a new page, *I want to…*, lists tasks with
+  the command, the MCP tool and the section that shows each one. The CLI
+  reference, one 78 KB page, is now an overview and six pages (`luna run`
+  and `luna state`; compare, measure, export; the state JSON; scripted
+  input; the MCP server; the Rust API): `using/cli-api-mcp.html` still
+  exists, but a link to one of its sections must now point at the page
+  that holds it. The architecture page describes the current workspace;
+  the May 2026 design paper it used to be is at
+  `internals/founding-design.html`. Every subsystem page opens with the
+  same status block (source, proof, grade, open gaps), and the guide
+  carries pictures, each one rendered by luna from the open test corpus.
+
 ## [1.33.1] — 2026-10-05
 
 One fix, for Windows: the GUI now keeps its settings and writes its
