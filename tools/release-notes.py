@@ -25,10 +25,10 @@ BLOCK_START = re.compile(r"\s*([-*+] |\d+[.)] |#|\||>|```|~~~)")
 # One zip per platform, named `luna_<tag>_<os>_<arch>.zip` like OpenSNES's
 # `opensnes_<tag>_<os>_<arch>.zip` (release.yml builds them).
 ASSETS = [
-    ("Linux", "x86_64", "linux_x86_64"),
-    ("Linux", "arm64", "linux_arm64"),
-    ("Windows", "x86_64", "windows_x86_64"),
-    ("macOS", "Apple Silicon (arm64)", "darwin_arm64"),
+    ("Linux", "linux_x86_64", "x86_64"),
+    ("Linux", "linux_arm64", "arm64 (aarch64)"),
+    ("macOS", "darwin_arm64", "arm64 (Apple Silicon)"),
+    ("Windows", "windows_x86_64", "x86_64"),
 ]
 
 
@@ -88,15 +88,15 @@ def main() -> int:
     print("## What's in this release\n")
     print(body)
     print("\n---\n\n## Download\n")
-    print("| Platform | Architecture | File |")
-    print("|---|---|---|")
-    for platform, arch, suffix in ASSETS:
-        print(f"| **{platform}** | {arch} | `luna_{tag}_{suffix}.zip` |")
-    print(
-        "\nEach zip holds `luna` (the headless CLI) and `luna-gui`, with `LICENSE`"
-        " and `README.md`; GitHub shows each file's SHA-256 digest on this page."
-        " See [Install & first run](https://k0b3n4irb.github.io/luna/using/install.html)."
-    )
+    print("| Platform | File | Architecture |")
+    print("|----------|------|--------------|")
+    for platform, suffix, arch in ASSETS:
+        print(f"| **{platform}** | `luna_{tag}_{suffix}.zip` | {arch} |")
+    print("\n### Quick start\n")
+    print("1. Download and extract the zip for your platform")
+    print("2. `luna-gui game.sfc` to play in the debugger, `luna --help` for the CLI")
+    print("3. See [Install & first run](https://k0b3n4irb.github.io/luna/using/install.html)"
+          " for the runtime requirements")
     return 0
 
 

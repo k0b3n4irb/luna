@@ -6,12 +6,12 @@ Every [GitHub release](https://github.com/k0b3n4irb/luna/releases/latest) ships
 prebuilt binaries — no toolchain needed. One zip per platform, named after
 the version (`vX.Y.Z` below is the one on the release page):
 
-| Platform | Asset |
-|---|---|
-| Linux x86_64 | `luna_vX.Y.Z_linux_x86_64.zip` |
-| Linux arm64 | `luna_vX.Y.Z_linux_arm64.zip` |
-| Windows x86_64 | `luna_vX.Y.Z_windows_x86_64.zip` |
-| macOS Apple Silicon (arm64) | `luna_vX.Y.Z_darwin_arm64.zip` |
+| Platform | File | Architecture |
+|----------|------|--------------|
+| **Linux** | `luna_vX.Y.Z_linux_x86_64.zip` | x86_64 |
+| **Linux** | `luna_vX.Y.Z_linux_arm64.zip` | arm64 (aarch64) |
+| **macOS** | `luna_vX.Y.Z_darwin_arm64.zip` | arm64 (Apple Silicon) |
+| **Windows** | `luna_vX.Y.Z_windows_x86_64.zip` | x86_64 |
 
 Only the five most recent versions keep a release with binaries. To run an
 older one, build it from its tag (every tag is kept):
