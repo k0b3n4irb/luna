@@ -547,11 +547,9 @@ pub(crate) fn run_state(
         let target = match parse_peek_spec(spec) {
             Ok(t) => Ok(t),
             Err(num_err) => match parse_peek_spec_sym(spec) {
-                Ok((name, count)) => match em.resolve_symbol(&name) {
-                    Some(addr) => Ok(((addr >> 16) as u8, addr as u16, count)),
-                    None => Err(format!(
-                        "unknown symbol `{name}` (and not BANK:OFFSET:COUNT: {num_err})"
-                    )),
+                Ok((name, count)) => match em.lookup_symbol(&name) {
+                    Ok(addr) => Ok(((addr >> 16) as u8, addr as u16, count)),
+                    Err(e) => Err(format!("{e} (and not BANK:OFFSET:COUNT: {num_err})")),
                 },
                 Err(_) => Err(num_err),
             },
@@ -602,11 +600,9 @@ pub(crate) fn run_state(
         let target = match parse_assert_spec(spec) {
             Ok(t) => Ok(t),
             Err(num_err) => match parse_assert_spec_sym(spec) {
-                Ok((name, want)) => match em.resolve_symbol(&name) {
-                    Some(addr) => Ok(((addr >> 16) as u8, addr as u16, want)),
-                    None => Err(format!(
-                        "unknown symbol `{name}` (and not BANK:OFFSET=HEX: {num_err})"
-                    )),
+                Ok((name, want)) => match em.lookup_symbol(&name) {
+                    Ok(addr) => Ok(((addr >> 16) as u8, addr as u16, want)),
+                    Err(e) => Err(format!("{e} (and not BANK:OFFSET=HEX: {num_err})")),
                 },
                 Err(_) => Err(num_err),
             },

@@ -56,6 +56,43 @@ pub enum SymbolKind {
     Constant,
 }
 
+/// Why a name did not resolve ([`SymbolTable::lookup`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SymbolError {
+    /// No label or constant of that name, and no `name.<suffix>` label.
+    Unknown(String),
+    /// No exact entry, and more than one `name.<suffix>` label.
+    Ambiguous {
+        /// The name as asked.
+        name: String,
+        /// Every `name.<suffix>` label with its address, in name order.
+        candidates: Vec<(String, u32)>,
+    },
+}
+
+impl std::fmt::Display for SymbolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unknown(name) => write!(f, "unknown symbol `{name}`"),
+            Self::Ambiguous { name, candidates } => {
+                write!(f, "ambiguous symbol `{name}`: ")?;
+                for (i, (full, addr)) in candidates.iter().enumerate() {
+                    let sep = if i == 0 { "" } else { ", " };
+                    write!(
+                        f,
+                        "{sep}`{full}` (${:02X}:{:04X})",
+                        addr >> 16,
+                        addr & 0xFFFF
+                    )?;
+                }
+                write!(f, " (write the full name)")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SymbolError {}
+
 /// One parsed symbol.
 #[derive(Debug, Clone)]
 struct Entry {
@@ -279,10 +316,45 @@ impl SymbolTable {
     }
 
     /// Resolve a CPU-space label to its 24-bit `bank:offset` address, or
-    /// a `[definitions]` constant to its value. O(log n).
+    /// a `[definitions]` constant to its value. O(log n). A name with no
+    /// exact entry resolves through [`Self::lookup`]'s suffix rule; an
+    /// ambiguous one is `None` here.
     #[must_use]
     pub fn resolve(&self, name: &str) -> Option<u32> {
-        self.find_in_space(name, SymbolSpace::Cpu).map(|e| e.value)
+        self.lookup(name).ok()
+    }
+
+    /// [`Self::resolve`] with the reason for a miss. The exact name wins.
+    /// Failing that, `name` stands for the **only** CPU label spelled
+    /// `name.<suffix>`: a C `static` reaches the `.sym` as
+    /// `player_x.main` (its source file appended, so two files can each
+    /// own a `player_x`), and the name its author reads in the C is
+    /// `player_x`. Two or more such labels are an ambiguity, named in
+    /// the error (`OpenSNES` ask, 2026-10-06).
+    pub fn lookup(&self, name: &str) -> Result<u32, SymbolError> {
+        if let Some(e) = self.find_in_space(name, SymbolSpace::Cpu) {
+            return Ok(e.value);
+        }
+        let prefix = format!("{name}.");
+        let start = self.name_range_start(&prefix);
+        let found: Vec<&Entry> = self.by_name[start..]
+            .iter()
+            .map(|&i| &self.entries[i])
+            .take_while(|e| e.name.starts_with(&prefix))
+            .filter(|e| {
+                e.space == SymbolSpace::Cpu
+                    && e.kind == SymbolKind::Label
+                    && e.name.len() > prefix.len()
+            })
+            .collect();
+        match found.as_slice() {
+            [] => Err(SymbolError::Unknown(name.to_string())),
+            [only] => Ok(only.value),
+            many => Err(SymbolError::Ambiguous {
+                name: name.to_string(),
+                candidates: many.iter().map(|e| (e.name.clone(), e.value)).collect(),
+            }),
+        }
     }
 
     /// Resolve an ARAM-space label to its 16-bit offset. O(log n).
@@ -442,6 +514,43 @@ version 1
         assert_eq!(t.resolve("main2"), Some(0x00_8000));
         assert_eq!(t.resolve("main"), None);
         assert_eq!(t.resolve_spc("driver_loop"), Some(0x0500));
+    }
+
+    /// `OpenSNES` ask of 2026-10-06, with their own fixture's two lines
+    /// (`static_dup.sym`) as the negative control.
+    #[test]
+    fn a_bare_static_name_resolves_only_when_one_file_owns_it() {
+        let t = SymbolTable::parse(
+            "[labels]\n\
+             7e:0040 player_x.main\n\
+             00:00c3 k.main\n\
+             00:00c9 k.other\n\
+             7e:0050 score\n\
+             7e:0060 score.hud\n\
+             00:9000 kart\n\
+             [definitions]\n\
+             00000002 _sizeof_lives.main\n",
+        );
+        assert_eq!(t.resolve("player_x"), Some(0x7E_0040));
+        assert_eq!(t.resolve("player_x.main"), Some(0x7E_0040));
+        // The exact name wins over a suffixed one.
+        assert_eq!(t.resolve("score"), Some(0x7E_0050));
+        // Two owners: refused, both named. `kart` is not `k.<suffix>`.
+        assert_eq!(t.resolve("k"), None);
+        let err = t.lookup("k").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "ambiguous symbol `k`: `k.main` ($00:00C3), `k.other` ($00:00C9) (write the full name)"
+        );
+        // A constant is not a location: it never stands for a bare name.
+        assert_eq!(
+            t.lookup("_sizeof_lives"),
+            Err(SymbolError::Unknown("_sizeof_lives".into()))
+        );
+        assert_eq!(
+            t.lookup("player_x.").unwrap_err().to_string(),
+            "unknown symbol `player_x.`"
+        );
     }
 
     #[test]

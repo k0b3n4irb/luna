@@ -1458,11 +1458,13 @@ pub struct DecodeSpritesResult {
 fn resolve_addr(em: &Emulator, symbol: Option<&str>, numeric: u32) -> Result<u32, ErrorData> {
     match symbol {
         None => Ok(numeric),
-        Some(name) => em.resolve_symbol(name).ok_or_else(|| {
-            ErrorData::invalid_params(
-                format!("unknown symbol `{name}` (is the right .sym loaded?)"),
-                None,
-            )
+        Some(name) => em.lookup_symbol(name).map_err(|e| match e {
+            luna_api::SymbolError::Unknown(_) => {
+                ErrorData::invalid_params(format!("{e} (is the right .sym loaded?)"), None)
+            }
+            luna_api::SymbolError::Ambiguous { .. } => {
+                ErrorData::invalid_params(e.to_string(), None)
+            }
         }),
     }
 }
@@ -2369,7 +2371,9 @@ impl LunaServer {
 
     #[rmcp::tool(
         description = "Resolve a loaded WLA-DX label to its 24-bit `bank:offset` \
-                                address (null if unknown)."
+                                address (null if unknown). A bare name also stands for the only \
+                                label spelled `name.<suffix>` (a C `static`: `player_x` for \
+                                `player_x.main`); several such labels are an error naming them."
     )]
     async fn resolve_symbol(
         &self,
@@ -2379,7 +2383,11 @@ impl LunaServer {
         let addr = {
             let em = self.emulator.lock().await;
             match space {
-                luna_api::SymbolSpace::Cpu => em.resolve_symbol(&params.name),
+                luna_api::SymbolSpace::Cpu => match em.lookup_symbol(&params.name) {
+                    Ok(addr) => Some(addr),
+                    Err(luna_api::SymbolError::Unknown(_)) => None,
+                    Err(e) => return Err(ErrorData::invalid_params(e.to_string(), None)),
+                },
                 luna_api::SymbolSpace::Aram => em.resolve_symbol_spc(&params.name).map(u32::from),
             }
         };

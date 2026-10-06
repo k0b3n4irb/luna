@@ -75,7 +75,7 @@ pub fn parse_port_device(name: &str) -> Result<PortDevice, String> {
         )),
     }
 }
-pub use symbols::{SymbolKind, SymbolSpace, SymbolTable};
+pub use symbols::{SymbolError, SymbolKind, SymbolSpace, SymbolTable};
 use thiserror::Error;
 
 /// Errors surfaced from [`Emulator`] methods.
@@ -3265,10 +3265,22 @@ impl Emulator {
         self.symbols = None;
     }
 
-    /// Resolve a label name to its 24-bit `bank:offset` address.
+    /// Resolve a label name to its 24-bit `bank:offset` address. `None`
+    /// for an unknown name and for an ambiguous one; a front-end that
+    /// reports the miss calls [`Self::lookup_symbol`] for the reason.
     #[must_use]
     pub fn resolve_symbol(&self, name: &str) -> Option<u32> {
-        self.symbols.as_ref().and_then(|t| t.resolve(name))
+        self.lookup_symbol(name).ok()
+    }
+
+    /// [`Self::resolve_symbol`] with the reason for a miss: the name is
+    /// unknown, or it stands for several `name.<suffix>` labels (see
+    /// [`SymbolTable::lookup`]).
+    pub fn lookup_symbol(&self, name: &str) -> Result<u32, SymbolError> {
+        self.symbols.as_ref().map_or_else(
+            || Err(SymbolError::Unknown(name.to_string())),
+            |t| t.lookup(name),
+        )
     }
 
     /// Nearest label at or below `addr` in the same bank (`name` or

@@ -1367,15 +1367,26 @@ fn resolve_key(em: &luna_api::Emulator, key: &str) -> Result<u32, String> {
     {
         let (base, rest) = key.split_at(i);
         let n = parse_key_offset(&rest[1..]).map_err(|e| format!("bad offset in `{key}`: {e}"))?;
-        let a = resolve_base(em, base.trim())
-            .ok_or_else(|| format!("`{}`: not a loaded symbol and not BANK:OFFSET", base.trim()))?;
+        let a = resolve_base(em, base.trim()).ok_or_else(|| unresolved_key(em, base.trim()))?;
         let a = i64::from(a) + if rest.starts_with('-') { -n } else { n };
         return u32::try_from(a)
             .ok()
             .filter(|&a| a <= 0xFF_FFFF)
             .ok_or_else(|| format!("`{key}` lands outside the 24-bit address space"));
     }
-    Err("not a loaded symbol and not BANK:OFFSET".to_string())
+    Err(match em.lookup_symbol(key) {
+        Err(e @ luna_api::SymbolError::Ambiguous { .. }) => e.to_string(),
+        _ => "not a loaded symbol and not BANK:OFFSET".to_string(),
+    })
+}
+
+/// Why the base of a `symbol+N` key did not resolve: an ambiguous bare
+/// name lists its candidates, anything else is neither symbol nor address.
+fn unresolved_key(em: &luna_api::Emulator, base: &str) -> String {
+    match em.lookup_symbol(base) {
+        Err(e @ luna_api::SymbolError::Ambiguous { .. }) => e.to_string(),
+        _ => format!("`{base}`: not a loaded symbol and not BANK:OFFSET"),
+    }
 }
 
 /// A key without an offset: a loaded symbol, or `BANK:OFFSET` in hex.

@@ -167,6 +167,11 @@ What each assert means:
   bytes into `results`. Name an array element this way and it survives the
   array moving in RAM; a raw address breaks the moment the linker shifts
   anything above it.
+- **A C `static` by its bare name** — `player_x = 120` resolves when the
+  table holds one label spelled `player_x.<file>` (OpenSNES names a
+  file-level `static` that way). Two files owning a `player_x` make the
+  key ambiguous: the failure names both, and the key takes the full
+  name, quoted (`"player_x.main" = 120`).
 
   `N` is **decimal** unless prefixed `0x` or `$`, as an offset reads in
   assembly. That differs on purpose from `BANK:OFFSET` and from the
