@@ -7,6 +7,19 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+## [1.34.0] — 2026-10-06
+
+Two asks from OpenSNES's report on 1.33.1: a C `static` is named as it
+is written in the C, and `--power-on` now reaches the cartridge's own
+RAM. The release page carries four zips, named like OpenSNES's, and the
+guide is reorganised by reader.
+
+**Upgrading from 1.33.1:** a run with the default power-on state gives
+the same frames. Under `--power-on random` or `ones`, a ROM that reads
+unbacked cartridge RAM before writing it now reads the fill instead of
+zero. After a reset, an SA-1 cartridge's I-RAM keeps its content. A
+download names its version: `releases/latest/download/…` is gone.
+
 ### Added
 
 - **A C `static` resolves by the name written in the C.** OpenSNES names
