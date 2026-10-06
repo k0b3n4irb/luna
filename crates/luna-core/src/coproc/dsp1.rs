@@ -154,6 +154,10 @@ impl Mapper for Dsp1Mapper {
         self.base.sram()
     }
 
+    fn fill_volatile_ram(&mut self, battery: bool, fill: &mut dyn FnMut(&mut [u8])) {
+        self.base.fill_volatile_ram(battery, fill);
+    }
+
     fn load_sram(&mut self, data: &[u8]) {
         self.base.load_sram(data);
     }

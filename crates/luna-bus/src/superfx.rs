@@ -1898,6 +1898,13 @@ impl Mapper for SuperFxMapper {
         self.ram_len
     }
 
+    /// The board's own flag decides (`with_battery`), not the caller's.
+    fn fill_volatile_ram(&mut self, _battery: bool, fill: &mut dyn FnMut(&mut [u8])) {
+        if !self.battery {
+            fill(&mut self.ram);
+        }
+    }
+
     fn sram(&self) -> &[u8] {
         if self.battery {
             &self.ram[..self.ram_len]
@@ -2020,6 +2027,19 @@ mod tests {
         assert!(volatile.sram().is_empty(), "no battery, no save");
         volatile.load_sram(&[0xAB, 0xCD]);
         assert_eq!(volatile.ram[..2], [0, 0], "a .srm is ignored");
+    }
+
+    /// `--power-on` fills the work RAM unless the board's battery keeps it,
+    /// whatever flag the caller passes (`OpenSNES` ask, 2026-10-06).
+    #[test]
+    fn the_work_ram_powers_on_undefined_only_without_a_battery() {
+        let mut volatile = fx();
+        volatile.fill_volatile_ram(true, &mut |ram| ram.fill(0xFF));
+        assert!(volatile.ram.iter().all(|&b| b == 0xFF));
+
+        let mut saved = fx().with_battery(true);
+        saved.fill_volatile_ram(false, &mut |ram| ram.fill(0xFF));
+        assert!(saved.ram.iter().all(|&b| b == 0));
     }
 
     #[test]

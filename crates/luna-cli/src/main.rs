@@ -157,7 +157,8 @@ enum Command {
         /// What RAM holds before the ROM boots: `zero`
         /// (default), `ones`, `random` (a seed is derived and printed) or
         /// `random=<seed>` (decimal or 0x hex — replays an exact machine).
-        /// Fills WRAM, VRAM, CGRAM, OAM and APU RAM; a boot bug that only
+        /// Fills WRAM, VRAM, CGRAM, OAM, APU RAM and the cartridge RAM no
+        /// battery keeps (Game Pak RAM, BW-RAM, I-RAM); a boot bug that only
         /// shows on real hardware's garbage RAM shows here too.
         #[arg(long = "power-on")]
         power_on: Option<String>,
@@ -257,7 +258,8 @@ enum Command {
         /// What RAM holds before the ROM boots: `zero`
         /// (default), `ones`, `random` (a seed is derived and printed) or
         /// `random=<seed>` (decimal or 0x hex — replays an exact machine).
-        /// Fills WRAM, VRAM, CGRAM, OAM and APU RAM; a boot bug that only
+        /// Fills WRAM, VRAM, CGRAM, OAM, APU RAM and the cartridge RAM no
+        /// battery keeps (Game Pak RAM, BW-RAM, I-RAM); a boot bug that only
         /// shows on real hardware's garbage RAM shows here too.
         #[arg(long = "power-on")]
         power_on: Option<String>,
@@ -657,7 +659,8 @@ enum Command {
         /// What RAM holds before the ROM boots: `zero`
         /// (default), `ones`, `random` (a seed is derived and printed) or
         /// `random=<seed>` (decimal or 0x hex — replays an exact machine).
-        /// Fills WRAM, VRAM, CGRAM, OAM and APU RAM; a boot bug that only
+        /// Fills WRAM, VRAM, CGRAM, OAM, APU RAM and the cartridge RAM no
+        /// battery keeps (Game Pak RAM, BW-RAM, I-RAM); a boot bug that only
         /// shows on real hardware's garbage RAM shows here too.
         #[arg(long = "power-on")]
         power_on: Option<String>,

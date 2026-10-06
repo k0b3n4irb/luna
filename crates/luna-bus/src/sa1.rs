@@ -445,21 +445,28 @@ impl Sa1Mapper {
         }
     }
 
-    /// Re-power the SA-1 MMIO / register state on a system reset (ares
-    /// `SA1::power()`): every `$2200-$23FF` register, the IRAM and the
-    /// math/DMA/character-conversion state return to power-on, including
-    /// the CCNT.5 reset bit so the SA-1 boots held in reset again. ROM
-    /// and battery-backed BW-RAM persist (ares clears IRAM but not
-    /// BW-RAM). Implemented by rebuilding from [`Sa1Mapper::new`] — the
-    /// single source of truth for the power-on layout — then restoring
-    /// the ROM and BW-RAM buffers.
+    /// Re-power the SA-1 MMIO / register state on a system reset: every
+    /// `$2200-$23FF` register and the math/DMA/character-conversion state
+    /// return to power-on, including the CCNT.5 reset bit so the SA-1
+    /// boots held in reset again. ROM, BW-RAM and I-RAM persist.
+    /// Implemented by rebuilding from [`Sa1Mapper::new`] — the single
+    /// source of truth for the power-on layout — then restoring the
+    /// three buffers.
+    ///
+    /// I-RAM is RAM, and the reset line does not clear RAM: the SA-1
+    /// manual offers a backup battery for it (book 2, §1.2), and Mesen2
+    /// fills it once at power-on and never again (`Sa1.cpp:36`). ares
+    /// zeroes it in `SA1::power()` (`sa1.cpp:139`), its convention for a
+    /// power-on value; luna's is [`Mapper::fill_volatile_ram`].
     pub fn power_reset(&mut self) {
         let rom = std::mem::take(&mut self.rom);
         let bwram = std::mem::take(&mut self.bwram);
+        let iram = self.iram;
         // `new` re-derives the clamped BW-RAM size from `bwram.len()`,
         // so the restored buffer length matches exactly.
         *self = Self::new(rom, bwram.len());
         self.bwram = bwram;
+        self.iram = iram;
     }
 
     const fn iram_writable_for(&self, byte_off: usize, side: WriteSide) -> bool {
@@ -1332,6 +1339,14 @@ impl Mapper for Sa1Mapper {
         self.rom.len()
     }
 
+    /// I-RAM first, then BW-RAM when no battery keeps it.
+    fn fill_volatile_ram(&mut self, battery: bool, fill: &mut dyn FnMut(&mut [u8])) {
+        fill(&mut self.iram);
+        if !battery {
+            fill(&mut self.bwram);
+        }
+    }
+
     fn sram_size(&self) -> usize {
         self.bwram.len()
     }
@@ -2050,7 +2065,14 @@ mod tests {
         m.write(make_addr(0x00, 0x2226), 0x80);
         m.write(make_addr(0x40, 0x0000), 0xAA);
         assert_eq!(m.read(make_addr(0x40, 0x0000)), Some(0xAA));
+        m.write(make_addr(0x00, 0x2229), 0xFF);
+        m.write(make_addr(0x00, 0x3000), 0x5A);
         m.power_reset();
+        assert_eq!(
+            m.read(make_addr(0x00, 0x3000)),
+            Some(0x5A),
+            "I-RAM persists"
+        );
         m.write(make_addr(0x40, 0x0001), 0xBB);
         assert_eq!(m.read(make_addr(0x40, 0x0001)), Some(0x00), "armed again");
         assert_eq!(
@@ -2058,6 +2080,19 @@ mod tests {
             Some(0xAA),
             "BW-RAM persists"
         );
+    }
+
+    /// `--power-on` reaches the cartridge: I-RAM always, BW-RAM unless a
+    /// battery keeps it (`OpenSNES` ask, 2026-10-06).
+    #[test]
+    fn volatile_ram_is_iram_and_unbacked_bwram() {
+        for battery in [false, true] {
+            let mut m = Sa1Mapper::new(ramp_rom(0x1_0000), 0x2000);
+            m.fill_volatile_ram(battery, &mut |ram| ram.fill(0xFF));
+            assert!(m.iram.iter().all(|&b| b == 0xFF));
+            let want = if battery { 0x00 } else { 0xFF };
+            assert!(m.bwram.iter().all(|&b| b == want), "battery={battery}");
+        }
     }
 
     #[test]

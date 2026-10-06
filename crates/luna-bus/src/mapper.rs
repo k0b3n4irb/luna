@@ -168,6 +168,12 @@ pub trait Mapper {
     /// smaller of the two lengths; no-op if the cartridge has no SRAM.
     fn load_sram(&mut self, _data: &[u8]) {}
 
+    /// Hand `fill` every cartridge RAM array that powers on undefined:
+    /// the RAM no battery keeps (`battery` is the header's flag, `$FFD6`),
+    /// and RAM a battery never keeps (the SA-1's I-RAM). Battery-backed
+    /// RAM is left alone: it holds the save. Default = no cartridge RAM.
+    fn fill_volatile_ram(&mut self, _battery: bool, _fill: &mut dyn FnMut(&mut [u8])) {}
+
     /// Re-power the cartridge coprocessor to its power-on state, as the
     /// SNES reset line does on real hardware (ares `SuperFX::power()` /
     /// `SA1::power()`). ROM and battery-backed SRAM persist; the

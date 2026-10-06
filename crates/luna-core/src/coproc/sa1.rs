@@ -125,8 +125,8 @@ impl Mapper for Sa1Chip {
     /// Re-power the SA-1 on a system reset (ares `SA1::power()`): the
     /// SA-1's own 65C816 returns to power-on, the chip is held in reset
     /// again (`running = false`, CCNT.5 set by the inner mapper's
-    /// `power_reset`), and the sub-clock budget is cleared. ROM and
-    /// BW-RAM persist (handled by the inner mapper).
+    /// `power_reset`), and the sub-clock budget is cleared. ROM,
+    /// BW-RAM and I-RAM persist (handled by the inner mapper).
     fn reset(&mut self) {
         self.inner.power_reset();
         self.cpu = Cpu::new();
@@ -181,6 +181,10 @@ impl Mapper for Sa1Chip {
     fn sram(&self) -> &[u8] {
         let bwram = self.inner.bwram();
         &bwram[..self.save_bytes.min(bwram.len())]
+    }
+
+    fn fill_volatile_ram(&mut self, battery: bool, fill: &mut dyn FnMut(&mut [u8])) {
+        self.inner.fill_volatile_ram(battery, fill);
     }
 
     fn load_sram(&mut self, data: &[u8]) {

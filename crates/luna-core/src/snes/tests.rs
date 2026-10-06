@@ -38,6 +38,15 @@ fn demo_lorom() -> Cartridge {
     Cartridge::from_bytes(rom).unwrap()
 }
 
+/// [`demo_lorom`] with 8 KB of cartridge RAM and the given chipset byte
+/// (`$01` ROM+RAM, `$02` ROM+RAM+battery).
+fn ram_lorom(chipset: u8) -> Cartridge {
+    let mut rom = demo_lorom().rom;
+    rom[0x7FC0 + 0x16] = chipset;
+    rom[0x7FC0 + 0x18] = 0x03;
+    Cartridge::from_bytes(rom).unwrap()
+}
+
 /// [`demo_lorom`] with the idle program instead — `SEI ; LDA #$80 ;
 /// STA $4200 ; loop: WAI ; BRA loop ; nmi: RTI` — and the NMI vectors
 /// pointed at the `RTI`, so frames keep advancing forever.
@@ -185,6 +194,46 @@ fn power_on_random_is_seeded_masks_cgram_and_survives_reset() {
     r.reset();
     assert_eq!(r.apu_real.aram[..], aram_before[..]);
     assert_eq!(r.wram[..], wram_before[..]);
+}
+
+/// `OpenSNES` ask, 2026-10-06: cartridge RAM no battery keeps follows
+/// `--power-on` like the console's own; a battery's RAM is the save. It
+/// is drawn last, so a seed still yields the WRAM it always did.
+#[test]
+fn power_on_fills_cartridge_ram_only_without_a_battery() {
+    use crate::power::PowerOnState;
+    let mk = |chipset, st| Snes::try_from_cartridge_with(ram_lorom(chipset), st).expect("snes");
+    let cart_ram = |snes: &mut Snes| -> Vec<u8> {
+        (0..0x2000u16)
+            .map(|o| snes.mapper.read(luna_bus::make_addr(0x70, o)).unwrap())
+            .collect()
+    };
+    let seed = PowerOnState::Random { seed: 99 };
+
+    let mut volatile = mk(0x01, seed);
+    let ram = cart_ram(&mut volatile);
+    assert!(ram.iter().any(|&b| b != 0), "filled");
+    assert_eq!(ram, cart_ram(&mut mk(0x01, seed)), "seeded");
+    assert!(
+        cart_ram(&mut mk(0x01, PowerOnState::Ones))
+            .iter()
+            .all(|&b| b == 0xFF)
+    );
+    assert!(
+        cart_ram(&mut mk(0x01, PowerOnState::Zero))
+            .iter()
+            .all(|&b| b == 0)
+    );
+
+    let mut saved = mk(0x02, seed);
+    assert!(cart_ram(&mut saved).iter().all(|&b| b == 0), "the save");
+
+    let no_ram = Snes::try_from_cartridge_with(demo_lorom(), seed).expect("snes");
+    assert_eq!(volatile.wram[..], no_ram.wram[..]);
+    assert_eq!(volatile.apu_real.aram[..], no_ram.apu_real.aram[..]);
+
+    volatile.reset();
+    assert_eq!(cart_ram(&mut volatile), ram, "a reset keeps it");
 }
 
 #[test]

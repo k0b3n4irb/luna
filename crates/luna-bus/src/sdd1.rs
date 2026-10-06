@@ -637,6 +637,12 @@ impl Mapper for Sdd1Mapper {
         self.rom.len()
     }
 
+    fn fill_volatile_ram(&mut self, battery: bool, fill: &mut dyn FnMut(&mut [u8])) {
+        if !battery {
+            fill(&mut self.sram);
+        }
+    }
+
     fn sram_size(&self) -> usize {
         self.sram.len()
     }

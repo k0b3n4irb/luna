@@ -847,22 +847,30 @@ impl Snes {
     }
 
     /// [`Self::try_from_cartridge`] with an explicit power-on memory state
-    /// (issue #224): WRAM, VRAM, CGRAM (15-bit), OAM and APU RAM are filled
-    /// per `power_on` before anything runs. A later [`Self::reset`] keeps
-    /// them, as hardware / ares / Mesen2 do.
+    /// (issue #224): WRAM, VRAM, CGRAM (15-bit), OAM, APU RAM and the
+    /// cartridge RAM no battery keeps are filled per `power_on` before
+    /// anything runs. A later [`Self::reset`] keeps them, as hardware /
+    /// ares / Mesen2 do (the SA-1's I-RAM excepted: its reset clears it).
     pub fn try_from_cartridge_with(
         cart: Cartridge,
         power_on: PowerOnState,
     ) -> Result<Self, UnsupportedMapper> {
+        let battery = cart.header.has_battery;
         let mut snes = Self::build(cart)?;
-        snes.apply_power_on(power_on);
+        snes.apply_power_on(power_on, battery);
         Ok(snes)
     }
 
     /// Fill every RAM array per `power_on` from one seeded generator in a
-    /// fixed order (WRAM, VRAM, CGRAM, OAM, ARAM) — a seed reproduces the
-    /// exact machine. CGRAM entries keep 15 bits (ares `ppu.cpp:124`).
-    pub fn apply_power_on(&mut self, power_on: PowerOnState) {
+    /// fixed order (WRAM, VRAM, CGRAM, OAM, ARAM, the registers, then the
+    /// cartridge RAM) — a seed reproduces the exact machine. CGRAM entries
+    /// keep 15 bits (ares `ppu.cpp:124`).
+    ///
+    /// The cartridge RAM comes last so a seed still yields the WRAM it
+    /// always did. `battery` is the header's flag: RAM a battery keeps is
+    /// the save, and is not touched (`OpenSNES` ask, 2026-10-06; Mesen2
+    /// runs its `InitializeRam` over save RAM, I-RAM and GSU RAM alike).
+    pub fn apply_power_on(&mut self, power_on: PowerOnState, battery: bool) {
         let mut rng = power_on.rng();
         power_on.fill(&mut self.wram[..], &mut rng);
         power_on.fill(self.ppu.vram.raw_mut(), &mut rng);
@@ -876,6 +884,8 @@ impl Snes {
         if power_on.randomises_registers() {
             Self::randomise_power_on_registers(&mut self.ppu, &mut rng);
         }
+        self.mapper
+            .fill_volatile_ram(battery, &mut |ram| power_on.fill(ram, &mut rng));
     }
 
     /// Randomise the registers and latches that come up undefined on
