@@ -78,8 +78,26 @@ pseudo-random bytes before the ROM boots — what ares does on power
 (`cpu.cpp`, `ppu.cpp`, `dsp.cpp`) and Mesen2's `Random` RAM state — so
 the bug shows on the emulator too. `ones` fills with `$FF` (Mesen2's
 `AllOnes`), the other classic tripwire. A soft reset keeps memory, as the
-hardware and both references do. Registers and latches are not
-randomised (ares does; Mesen2 does not).
+hardware and both references do. `random` also draws the PPU registers
+and latches that come up undefined (ares does; `zero` and `ones` leave
+them at their defaults).
+
+The cartridge's own RAM follows the same rule when **no battery keeps
+it**: a Super FX board's Game Pak RAM (`$70:0000`), an SA-1 board's
+BW-RAM (`$40:0000`) and I-RAM (`$00:3000`), the save RAM of a `ROM+RAM`
+header. A read of a Super FX framebuffer nobody cleared, or of an I-RAM
+byte nobody wrote, then shows as it would on a console. RAM the header
+declares battery-backed (`$FFD6` low nibble 2, 5, 6, 9 or A) is the save:
+it stays zero, or what `--srm-in` loaded. The I-RAM is filled either way
+(no save file carries it). It is drawn after everything else, so a seed
+still gives the WRAM, VRAM and APU RAM it gave when the cartridge was
+left out.
+
+```bash
+# Seed 1: the Game Pak RAM no longer reads zero before the GSU has drawn.
+luna state --power-on random=1 --until-frame 0 --peek 70:0000:10 game.sfc
+# →   $700000  8E 84 DB 22 1D 73 AC 2D A6 11 DA B0 B5 B9 2A AB
+```
 
 ```bash
 # Boot under garbage RAM; the derived seed is printed so a failure replays.
@@ -223,6 +241,25 @@ luna state --until-frame 120 \
 
 With a symbol file loaded (`--sym`, or a `<rom>.sym` beside the ROM) the
 CPU-bus form takes a label instead of an address: `--assert r_done=EFBE`.
+
+**A C `static` by the name you wrote.** A compiler that lets two source
+files each own a `static` of the same name writes the file into the
+label: OpenSNES emits `player_x.main` for `static u16 player_x` in
+`main.c`. Where a label is accepted (`--peek`, `--assert`, the keys of a
+`luna test` manifest, the `symbol` argument of the MCP tools), the bare
+name stands for that label when it is the **only** `name.<suffix>` in the
+table. The exact name always wins, and two candidates are refused by name
+rather than picked:
+
+```bash
+# OpenSNES's dsp1_ground: `static … tab_ab` in main.c, `7e:2000 tab_ab.main` in the .sym.
+luna state --until-frame 60 --peek tab_ab:8 dsp1_ground.sfc
+# peek $7E:2000 +0008:
+#   $7E2000  62 00 01 00 00 FE FE 55
+# Their static_dup fixture: main.c and other.c each own a `static u16 k`.
+luna state --until-frame 5 --peek k:2 static_dup.sfc
+# error: --peek `k:2`: ambiguous symbol `k`: `k.main` ($00:00C3), `k.other` ($00:00C9) (write the full name) (and not BANK:OFFSET:COUNT: …)
+```
 
 `--srm-out` and `--srm-in` are the two halves of a **power-cycle test**:
 run A plays and writes the battery RAM to a file, run B boots a fresh

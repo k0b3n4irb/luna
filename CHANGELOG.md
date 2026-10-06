@@ -7,6 +7,32 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+### Added
+
+- **A C `static` resolves by the name written in the C.** OpenSNES names
+  a file-level `static` after its source file in the `.sym`
+  (`player_x.main`), so two files can each own one. Wherever luna takes a
+  label (`--peek`, `--assert`, the keys of a `luna test` manifest, the MCP
+  `symbol` arguments and `resolve_symbol`), a bare name now stands for the
+  only label spelled `name.<suffix>`. The exact name still wins; two
+  candidates are refused, both named with their addresses
+  (``ambiguous symbol `k`: `k.main` ($00:00C3), `k.other` ($00:00C9)``).
+- **`--power-on` reaches the cartridge RAM.** `random` and `ones` filled
+  the console's RAM and left the cartridge's at zero, so a read of a
+  Super FX framebuffer or of an SA-1 I-RAM byte nobody had written could
+  not show. The same seed now also fills the RAM no battery keeps: Game
+  Pak RAM, BW-RAM, I-RAM, the save RAM of a `ROM+RAM` header.
+  Battery-backed RAM is untouched (zero, or the `.srm`). The cartridge is
+  drawn last: a seed gives the same WRAM, VRAM, CGRAM, OAM and APU RAM as
+  before, and a ROM without volatile cartridge RAM the same frames.
+
+### Fixed
+
+- **A reset no longer clears the SA-1's I-RAM.** luna zeroed it on every
+  reset, as ares does at power-on. It is RAM (the SA-1 manual offers a
+  battery for it; Mesen2 never clears it), and the reset line does not
+  touch RAM. Nothing changes at power-on with the default `zero` state.
+
 ### Changed
 
 - **One zip per platform on the release page, named like OpenSNES's.**

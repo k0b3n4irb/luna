@@ -40,7 +40,7 @@ method, so the MCP transport adds reach, not capability.
 
 | Tool | Maps to | Purpose |
 |---|---|---|
-| `load_rom` | `load_rom` / `load_rom_forced` | Load a `.sfc`/`.smc` from a host path. Optional `force_mapper` (`lorom`, `hirom`, `exhirom`, `sa1`, `superfx`, `dsp1`, `sdd1`; `spc7110` is recognised but not emulated, so forcing it fails with an unsupported-mapper error) and `force_region` (`ntsc`, `pal`) bypass header auto-detection — same vocabulary as the CLI `--force-mapper` / `--force-region`. `power_on` (`zero` default, `ones`, `random`, `random=<seed>`) is the CLI `--power-on`; a random load returns the seed as `power_on_seed`. A WLA-DX `<rom>.sym` next to the ROM is loaded automatically (count in `rom.symbols_loaded`). |
+| `load_rom` | `load_rom` / `load_rom_forced` | Load a `.sfc`/`.smc` from a host path. Optional `force_mapper` (`lorom`, `hirom`, `exhirom`, `sa1`, `superfx`, `dsp1`, `sdd1`; `spc7110` is recognised but not emulated, so forcing it fails with an unsupported-mapper error) and `force_region` (`ntsc`, `pal`) bypass header auto-detection — same vocabulary as the CLI `--force-mapper` / `--force-region`. `power_on` (`zero` default, `ones`, `random`, `random=<seed>`) is the CLI `--power-on` (cartridge RAM without a battery included); a random load returns the seed as `power_on_seed`. A WLA-DX `<rom>.sym` next to the ROM is loaded automatically (count in `rom.symbols_loaded`). |
 | `load_rom_bytes` | `load_rom_bytes` / `load_rom_bytes_forced` | Load a ROM from base64 bytes (e.g. a freshly assembled image, no host file). Same force and `power_on` params. Unlike `load_rom` it does **not** search the firmware folder (nor for a `.sym`) — check `missing_firmware` in the result. |
 | `set_port_device` | `set_port_device` | Plug a device into port 0 or 1, then feed it with the matching `set_*` tool. Same names as the CLI `--port1`: `pad` (or `joypad`), `mouse`, `superscope`, `multitap`, and `none` to unplug the port. |
 | `reset` | `reset` | Reset to power-on state. |
@@ -94,7 +94,7 @@ method, so the MCP transport adds reach, not capability.
 | `load_symbols` | `load_symbols` | Load a WLA-DX `.sym`; disasm + traces become annotated. |
 | `load_symbols_str` | `load_symbols_str` | Load `.sym` text directly (no host file — e.g. an in-memory build's output). Replaces the table. |
 | `clear_symbols` | `clear_symbols` | Drop the loaded table. |
-| `resolve_symbol` | `resolve_symbol` | Label name → 24-bit address. |
+| `resolve_symbol` | `resolve_symbol` | Label name → 24-bit address (null if unknown). A bare name stands for the only label spelled `name.<suffix>` (a C `static`: `player_x` for `player_x.main`); several candidates are an error that names them. The same rule applies to every tool's `symbol` argument. |
 | `symbol_for_addr` | `symbol_for_addr` | 24-bit address → nearest preceding label in its bank (the inverse). |
 | `enable_dma_trace` / `take_dma_trace` | `enable_dma_trace` / `take_dma_trace` | DMA→VRAM transfer bytes with scanline/H-clock + blank flags (the CLI `--dma-trace`). |
 | `enable_dsp_trace` / `take_dsp_trace` | `enable_dsp_trace` / `take_dsp_trace` | S-DSP register writes from the SPC700 side (the CLI `--dsp-trace`). |
