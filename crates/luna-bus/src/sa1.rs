@@ -445,6 +445,16 @@ impl Sa1Mapper {
         }
     }
 
+    /// Set the frame height the HV timer wraps V at: 262 lines on an NTSC
+    /// console, 312 on a PAL one (ares `sa1.cpp:147`,
+    /// `status.scanlines = Region::PAL() ? 312 : 262`; SA-1 manual, VCR:
+    /// "NTSC, 0~261 PAL, 0~311"). [`Sa1Mapper::new`] is NTSC.
+    #[must_use]
+    pub const fn with_scanlines(mut self, scanlines: u16) -> Self {
+        self.scanlines = scanlines;
+        self
+    }
+
     /// Re-power the SA-1 MMIO / register state on a system reset: every
     /// `$2200-$23FF` register and the math/DMA/character-conversion state
     /// return to power-on, including the CCNT.5 reset bit so the SA-1
@@ -464,7 +474,8 @@ impl Sa1Mapper {
         let iram = self.iram;
         // `new` re-derives the clamped BW-RAM size from `bwram.len()`,
         // so the restored buffer length matches exactly.
-        *self = Self::new(rom, bwram.len());
+        // The frame height is the console's, not register state.
+        *self = Self::new(rom, bwram.len()).with_scanlines(self.scanlines);
         self.bwram = bwram;
         self.iram = iram;
     }
@@ -1364,6 +1375,8 @@ impl Mapper for Sa1Mapper {
         // Keep the live ROM (it is `serde(skip)`-defaulted to empty in
         // `tmp`); swap in every other field by replacing `self` wholesale.
         tmp.rom = std::mem::take(&mut self.rom);
+        // The frame height belongs to the console the state is loaded on.
+        tmp.scanlines = self.scanlines;
         *self = tmp;
         Ok(())
     }
@@ -1971,6 +1984,54 @@ mod tests {
         // The odd-clock carry is 0 or 1; the timer steps once per two of it.
         assert_state_refused("timer_rem = u32::MAX", |m| m.timer_rem = u32::MAX, line);
         assert_state_refused("timer_rem = 2", |m| m.timer_rem = 2, |_| {});
+    }
+
+    /// V counter after `lines` whole scanlines of the HV timer.
+    fn vcounter_after(m: &mut Sa1Mapper, lines: u32) -> u16 {
+        for _ in 0..lines {
+            m.tick_timer(1364);
+        }
+        m.vcounter
+    }
+
+    #[test]
+    fn the_hv_timer_wraps_v_at_the_frame_height_of_the_console() {
+        let mut ntsc = Sa1Mapper::new(ramp_rom(0x1_0000), 0);
+        assert_eq!(vcounter_after(&mut ntsc, 261), 261);
+        assert_eq!(vcounter_after(&mut ntsc, 1), 0);
+        let mut pal = Sa1Mapper::new(ramp_rom(0x1_0000), 0).with_scanlines(312);
+        assert_eq!(vcounter_after(&mut pal, 262), 262);
+        assert_eq!(vcounter_after(&mut pal, 49), 311);
+        assert_eq!(vcounter_after(&mut pal, 1), 0);
+    }
+
+    #[test]
+    fn a_v_compare_past_line_261_fires_only_on_a_pal_console() {
+        // TMC = V compare only; VCNT = 300.
+        let fires = |mut m: Sa1Mapper| {
+            m.tmc = 0x02;
+            m.vcnt_lo = 0x2C;
+            m.vcnt_hi = 0x01;
+            m.timer_irq_to_sa1 = false;
+            for _ in 0..312 {
+                m.tick_timer(1364);
+            }
+            m.timer_irq_to_sa1
+        };
+        assert!(!fires(Sa1Mapper::new(ramp_rom(0x1_0000), 0)));
+        assert!(fires(
+            Sa1Mapper::new(ramp_rom(0x1_0000), 0).with_scanlines(312)
+        ));
+    }
+
+    #[test]
+    fn the_frame_height_survives_a_reset_and_a_state_from_another_console() {
+        let mut pal = Sa1Mapper::new(ramp_rom(0x1_0000), 0x2000).with_scanlines(312);
+        pal.power_reset();
+        assert_eq!(pal.scanlines, 312);
+        let ntsc_state = Sa1Mapper::new(ramp_rom(0x1_0000), 0x2000).save_state();
+        pal.load_state(&ntsc_state).unwrap();
+        assert_eq!(pal.scanlines, 312);
     }
 
     #[test]

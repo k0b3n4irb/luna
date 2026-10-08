@@ -1571,6 +1571,49 @@ fn demo_sa1_cart() -> Cartridge {
     Cartridge::from_bytes(rom).unwrap()
 }
 
+/// [`demo_sa1_cart`] for a console of `country`, whose S-CPU spins
+/// instead of stopping and whose SA-1 runs, from ROM, a loop that stores
+/// the V counter's low byte at `$3010` once it reads a line past 261:
+///
+/// ```text
+/// 8100: LDA $2302   ; latch H and V
+///       LDA $2305 : BEQ 8100
+///       LDA $2304 : CMP #$06 : BCC 8100
+///       STA $3010 : BRA 8100
+/// ```
+fn sa1_v_counter_probe_cart(country: u8) -> Cartridge {
+    let mut rom = demo_sa1_cart().rom;
+    rom[0x7FD9] = country;
+    assert_eq!(rom[18..20], [0xA9, 0x30], "LDA #$30 (CRV high)");
+    rom[19] = 0x81;
+    assert_eq!(rom[36], 0xDB, "STP");
+    rom[36..38].copy_from_slice(&[0x80, 0xFE]);
+    let probe = [
+        0xAD, 0x02, 0x23, 0xAD, 0x05, 0x23, 0xF0, 0xF8, 0xAD, 0x04, 0x23, 0xC9, 0x06, 0x90, 0xF1,
+        0x8D, 0x10, 0x30, 0x80, 0xEC,
+    ];
+    rom[0x100..0x100 + probe.len()].copy_from_slice(&probe);
+    Cartridge::from_bytes(rom).unwrap()
+}
+
+#[test]
+fn the_sa1_v_counter_passes_line_261_only_on_a_pal_console() {
+    // ares `sa1.cpp:147`: `status.scanlines = Region::PAL() ? 312 : 262`.
+    let seen_past_261 = |country: u8| {
+        let mut snes = Snes::from_cartridge(sa1_v_counter_probe_cart(country));
+        snes.reset();
+        // Three frames of the S-CPU's `BRA` loop, whatever the region.
+        for _ in 0..80_000 {
+            snes.step();
+        }
+        assert!(snes.frame_count >= 2, "ran for whole frames");
+        snes.mapper.read(luna_bus::make_addr(0x00, 0x3010))
+    };
+    assert_eq!(seen_past_261(0x01), Some(0x00), "NTSC: V stays in 0..=261");
+    let pal = seen_past_261(0x02).unwrap();
+    assert!((0x06..=0x37).contains(&pal), "PAL: V reached {pal:#04x}");
+}
+
 #[test]
 fn sa1_main_cpu_releases_coproc_and_step_runs_it() {
     // End-to-end: the main CPU's boot path runs through `Snes::step`,

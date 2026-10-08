@@ -15,7 +15,7 @@ cumulative-sum), and bitmap/character-conversion helpers.
 | **In luna** | `crates/luna-bus/src/sa1.rs` (the board: memory map, registers), `crates/luna-core/src/coproc/sa1.rs` (the chip: its CPU, timers, DMA) |
 | **Proven by** | the SNES-SA1 Speed Test v5.1: the rows without bus conflict match photographs of a console to the digit |
 | **Grade** | **A−** (scorecard: *SA-1*) |
-| **Open gaps** | [`docs/luna_sa1_gaps.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_sa1_gaps.md): the scheduler steps the chip in batches; the write-protection registers reset to allow-all where both references block (#3, #4, a deliberate choice explained there); the HV timer wraps at 262 lines, wrong on a PAL cartridge (#20) |
+| **Open gaps** | [`docs/luna_sa1_gaps.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/luna_sa1_gaps.md): the scheduler steps the chip in batches; the write-protection registers reset to allow-all where both references block (#3, #4, a deliberate choice explained there) |
 
 ## What the chip provides
 

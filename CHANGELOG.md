@@ -7,6 +7,16 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+### Fixed
+
+- **The SA-1's HV timer counts 312 lines on a PAL console.** It wrapped
+  its V counter at 262 lines whatever the region, so on a PAL SA-1
+  cartridge (or under `--force-region pal`) a timer interrupt set on
+  line 262 or later never fired, and `$2304` never read past 261. It now
+  follows the console, as ares does and as the SA-1 manual specifies
+  (0 to 311 on PAL). NTSC is unchanged. A save state loaded on a PAL
+  machine takes that machine's frame height.
+
 ## [1.34.0] — 2026-10-06
 
 Two asks from OpenSNES's report on 1.33.1: a C `static` is named as it

@@ -181,9 +181,9 @@ Mesen2 5.43) — ares' address-based `conflict()` gives the same as luna.
 ## ⚠️ Open divergences
 
 Rows #2 and #20 and the rationale under #3 were recorded by the 2026-10-04
-repository audit: **found by the 2026-10-04 audit, not yet checked against
-ares / Mesen2** beyond the citations already in the table. No fix is
-proposed here; each is to be resolved by a faithful port
+repository audit. #20 was checked against the references and fixed on
+2026-10-08. #2 is **not yet checked against ares / Mesen2** beyond the
+citation in the table; it is to be resolved by a faithful port
 (`.claude/rules/faithful-port-and-dichotomy.md`).
 
 | # | Issue | ares ref | luna | Status |
@@ -192,7 +192,7 @@ proposed here; each is to be resolved by a faithful port
 | 3 | CIWP/SIWP reset default is `0xFF` (allow-all) where ares **and** Mesen2 reset both to `0x00` (block-all) — a **deliberate** deviation chosen to keep one homebrew demo working; rationale below | `sa1.cpp:239` (`io.siwp = 0`), `io.cpp:112-113` (`io.ciwp = 0`); Mesen2 `Sa1Types.h` value-init + `Sa1::CpuRegisterWrite` `$2200` | `crates/luna-bus/src/sa1.rs`: `Sa1Mapper::new` (`siwp: 0xFF, ciwp: 0xFF`) | ⚠️ open — intentional, against both references |
 | 4 | CCNT reset edge sets `CIWP = 0` (`io.cpp:113`) | `io.cpp:103-114` | `crates/luna-core/src/coproc/sa1.rs`: the `is_ccnt` branch of the chip-side register write (comment "ares io.cpp:113 also clears CIWP=0 here. luna does NOT") | ⚠️ open — **deferred**: verified absent, but it lives in the same deliberately-deviated I-RAM protection model as #3. Adding it broke an SA-1 I-RAM test (the synthetic handler doesn't pre-arm CIWP) and it is the GUI-blackout-prone area described below. Revisit with the protection model as a whole + GUI validation. |
 | 21 | **I-RAM survives a reset** where ares zeroes it in `SA1::power()` — a **deliberate** choice (2026-10-06): I-RAM is RAM, the SA-1 manual offers a backup battery for it (book 2, §1.2), and Mesen2 fills it once at power-on (`Sa1.cpp:36`) and never clears it. Its power-on value is `--power-on`'s (zero by default, as ares). Measured on Super Mario RPG, Kirby Super Star and Kirby's Dream Land 3: the frame after a mid-game reset is identical with and without the clear | `sa1.cpp:139-141` | `crates/luna-bus/src/sa1.rs` `power_reset`, `fill_volatile_ram` | ✅ decided — Mesen2 + manual over ares |
-| 20 | **HV-timer V wrap is fixed at 262 lines** — ares' `SA1::status.scanlines` follows the console's region, so on a PAL console the SA-1 HV timer wraps V at 312 | `sa1.cpp:63-94` (`SA1::step`; region-dependent `scanlines` — not re-read for this row) | `crates/luna-bus/src/sa1.rs`: field `Sa1Mapper::scanlines`, initialised `262` in `Sa1Mapper::new` (which takes no region) and never written again; read by `timer_step2` (`vcounter >= self.scanlines`) | ⚠️ open — PAL SA-1 carts only: an HV-mode timer IRQ on `vcnt` ≥ 262 never fires and the V counter runs 50 lines short per frame. NTSC is unaffected. |
+| 20 | **HV-timer V wrap follows the console's region** — 262 lines on NTSC, 312 on PAL | `sa1.cpp:147` (`status.scanlines = Region::PAL() ? 312 : 262`), read by `SA1::step` (`sa1.cpp:75`). The SA-1 manual agrees (book 2, VCR `$2304`: "NTSC, 0~261 PAL, 0~311"), as does fullsnes (VCNT `$2214`). Mesen2 has no SA-1 HV timer to compare (`Sa1.cpp`: `$2302`/`$2304` read nothing, "TODO: Timer irq flag") | `crates/luna-bus/src/sa1.rs`: `Sa1Mapper::with_scanlines`, given `scanlines_per_frame(region)` when `luna-core` builds the machine; kept across `power_reset` and across `load_state` (the frame height belongs to the console, not to the state). Tests: `the_hv_timer_wraps_v_at_the_frame_height_of_the_console`, `a_v_compare_past_line_261_fires_only_on_a_pal_console`, `the_frame_height_survives_a_reset_and_a_state_from_another_console`, and at machine level `the_sa1_v_counter_passes_line_261_only_on_a_pal_console` | 🔧 fixed 2026-10-08. It was fixed at 262: on a PAL console an HV-mode timer IRQ on `vcnt` ≥ 262 never fired and the V counter ran 50 lines short per frame. NTSC is unchanged. No PAL SA-1 title was at hand: proven by tests, not on a game. |
 
 ### Row #3 — why the CIWP/SIWP default is `0xFF` (moved here from `archive/sa1_status.md`, 2026-10-04)
 
@@ -247,7 +247,7 @@ What that leaves **open** — none of it resolved:
 1. ~~#1 math unit (a/b/c/d)~~ — **done**.
 2. ~~#5 timer HV mode~~ — **done**.
 3. ~~#6-#15 (the 2026-09-11 audit)~~ — **done** 2026-09-12 → 2026-09-14.
-4. ⚠️ #2-#4 and #20 — open, see "⚠️ Open divergences". #3/#4 are the
+4. ⚠️ #2-#4 — open (#20 fixed 2026-10-08), see "⚠️ Open divergences". #3/#4 are the
    deliberate I-RAM protection deviation (rationale under row #3).
 5. The scheduler grain (batched `step_coproc` vs ares' cothreads) is the
    remaining accuracy residual — a timing model, not a register.
