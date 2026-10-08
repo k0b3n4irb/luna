@@ -122,6 +122,8 @@ struct LunaApp {
     volume_percent: u8,
     /// Mute toggle, persisted to audio.json.
     muted: bool,
+    /// On-screen frame-rate counter, persisted to video.json.
+    show_fps: bool,
     /// Host gamepads (gilrs). `None` when the backend failed to init.
     gilrs: Option<gilrs::Gilrs>,
     /// Live SNES button mask per player derived from gamepads 1 and 2,
@@ -280,6 +282,7 @@ impl LunaApp {
             volume,
             volume_percent,
             muted,
+            show_fps: load_video_config(),
             gilrs: gilrs::Gilrs::new()
                 .map_err(|e| eprintln!("luna-gui: gamepad backend unavailable: {e}"))
                 .ok(),
@@ -1284,6 +1287,8 @@ impl LunaApp {
             port_device: self.port_device,
             volume_percent: self.volume_percent,
             muted: self.muted,
+            show_fps: self.show_fps,
+            fps_tenths: self.emu_shared.fps_tenths.load(Ordering::Relaxed),
             show_input_config: self.show_input_config,
             show_hotkey_config: self.show_hotkey_config,
             key_bindings: &self.key_bindings,
@@ -1672,6 +1677,12 @@ impl LunaApp {
                 self.muted = !self.muted;
                 self.apply_volume();
             }
+            MenuAction::ToggleShowFps => {
+                self.show_fps = !self.show_fps;
+                if let Err(e) = save_video_config(self.show_fps) {
+                    eprintln!("luna-gui: could not persist video settings: {e}");
+                }
+            }
             MenuAction::ToggleInputRecording => self.toggle_input_recording(),
             MenuAction::SetForcedMapper(mapper) => {
                 self.forced_mapper = mapper;
@@ -2010,6 +2021,31 @@ fn save_audio_config(volume: u8, muted: bool) -> std::io::Result<()> {
     )
 }
 
+/// `show_fps` as stored in the text of `video.json`; `false` for a file
+/// that is absent, unreadable or does not say.
+fn parse_video_config(json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v.get("show_fps").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false)
+}
+
+/// Load `show_fps` from `~/.config/luna/video.json`; off by default.
+fn load_video_config() -> bool {
+    crate::input::config_file("video.json")
+        .and_then(std::fs::read_to_string)
+        .is_ok_and(|json| parse_video_config(&json))
+}
+
+/// Persist the video settings next to the audio ones.
+fn save_video_config(show_fps: bool) -> std::io::Result<()> {
+    let path = crate::input::config_file("video.json")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, format!("{{\n  \"show_fps\": {show_fps}\n}}\n"))
+}
+
 fn rom_mtime(path: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
@@ -2194,5 +2230,19 @@ fn draw_event_dot(
             let d = (py as usize * w + px as usize) * 4;
             buf[d..d + 4].copy_from_slice(&[r, g, b, 0xFF]);
         }
+    }
+}
+
+#[cfg(test)]
+mod video_config_tests {
+    use super::parse_video_config;
+
+    #[test]
+    fn the_fps_counter_is_off_unless_the_file_says_true() {
+        assert!(parse_video_config("{\n  \"show_fps\": true\n}\n"));
+        assert!(!parse_video_config("{\n  \"show_fps\": false\n}\n"));
+        assert!(!parse_video_config("{}"));
+        assert!(!parse_video_config("{\"show_fps\": 1}"));
+        assert!(!parse_video_config("not json"));
     }
 }

@@ -47,6 +47,8 @@ pub(crate) enum MenuAction {
     SetVolume(u8),
     /// Mute toggle (keeps the slider position).
     ToggleMute,
+    /// Show or hide the on-screen frame-rate counter.
+    ToggleShowFps,
     // Debug panels (api-first: data comes from `luna_api::Emulator`).
     ToggleCpuState,
     ToggleCpuMemory,
@@ -185,6 +187,11 @@ pub(crate) struct UiState<'a> {
     pub volume_percent: u8,
     /// Mute state (menu checkbox).
     pub muted: bool,
+    /// On-screen frame-rate counter enabled (Settings ▸ Video).
+    pub show_fps: bool,
+    /// Emulated frames per second in tenths, as last reported by the emu
+    /// thread; `0` before the first report.
+    pub fps_tenths: u32,
     pub show_input_config: bool,
     pub show_hotkey_config: bool,
     pub key_bindings: &'a crate::input::KeyBindings,
@@ -350,6 +357,11 @@ impl UiOverlay {
                     egui::Color32::WHITE,
                 );
                 game_rect.set(Some(rect));
+                if state.show_fps
+                    && let Some(text) = fps_label(state.fps_tenths, state.paused)
+                {
+                    draw_fps_counter(painter, rect, &text);
+                }
             }
             if state.show_input_config {
                 draw_input_config(ui.ctx(), state, &mut emit);
@@ -407,6 +419,35 @@ impl UiOverlay {
         self.renderer.render(&mut rpass, &paint_jobs, &screen);
         drop(rpass);
     }
+}
+
+/// Text of the on-screen frame-rate counter: the emulated frame rate
+/// with one decimal (`60.1 fps`). `None` while paused or before the emu
+/// thread's first report, when there is no rate to show.
+fn fps_label(fps_tenths: u32, paused: bool) -> Option<String> {
+    if paused || fps_tenths == 0 {
+        return None;
+    }
+    Some(format!("{}.{} fps", fps_tenths / 10, fps_tenths % 10))
+}
+
+/// Paint the frame-rate counter in the top-right corner of the game
+/// image, on a translucent plate so it reads over any picture.
+fn draw_fps_counter(painter: &egui::Painter, game: egui::Rect, text: &str) {
+    const MARGIN: f32 = 6.0;
+    const PAD: egui::Vec2 = egui::vec2(5.0, 2.0);
+    let galley = painter.layout_no_wrap(
+        text.to_owned(),
+        egui::FontId::monospace(14.0),
+        egui::Color32::from_rgb(0xFF, 0xE0, 0x40),
+    );
+    let size = galley.size() + PAD * 2.0;
+    let plate = egui::Rect::from_min_size(
+        egui::pos2(game.max.x - MARGIN - size.x, game.min.y + MARGIN),
+        size,
+    );
+    painter.rect_filled(plate, 3.0, egui::Color32::from_black_alpha(170));
+    painter.galley(plate.min + PAD, galley, egui::Color32::WHITE);
 }
 
 pub(crate) fn install_dark_theme(ctx: &egui::Context) {
@@ -2060,6 +2101,11 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(
                         emit(MenuAction::ToggleMute);
                     }
                     ui.separator();
+                    ui.label(egui::RichText::new("Video").weak().small());
+                    if ui.selectable_label(state.show_fps, "Show FPS").clicked() {
+                        emit(MenuAction::ToggleShowFps);
+                    }
+                    ui.separator();
                     ui.label(egui::RichText::new("Input").weak().small());
                     if ui
                         .selectable_label(state.show_input_config, "Controller…")
@@ -2257,4 +2303,19 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(
             });
         });
     response.response.rect.bottom()
+}
+
+#[cfg(test)]
+mod fps_tests {
+    use super::fps_label;
+
+    #[test]
+    fn the_counter_shows_one_decimal_and_hides_when_there_is_no_rate() {
+        assert_eq!(fps_label(601, false).as_deref(), Some("60.1 fps"));
+        assert_eq!(fps_label(500, false).as_deref(), Some("50.0 fps"));
+        assert_eq!(fps_label(87, false).as_deref(), Some("8.7 fps"));
+        // Paused: the last rate is stale. Before the first report: none yet.
+        assert_eq!(fps_label(601, true), None);
+        assert_eq!(fps_label(0, false), None);
+    }
 }

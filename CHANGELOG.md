@@ -7,6 +7,13 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+### Added
+
+- **GUI: an on-screen frame-rate counter.** *Settings → Video → Show
+  FPS* draws the emulated frame rate in the top-right corner of the
+  picture (`60.1 fps`), refreshed once a second. Off by default; the
+  choice is kept in `video.json` next to the other settings.
+
 ### Fixed
 
 - **The SA-1's HV timer counts 312 lines on a PAL console.** It wrapped

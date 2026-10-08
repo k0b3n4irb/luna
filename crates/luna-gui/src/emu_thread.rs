@@ -78,6 +78,10 @@ pub(crate) struct EmuShared {
     /// Cheap flag checked every batch so the hot path never touches
     /// [`Self::audio_swap`]'s mutex unless a swap is actually queued.
     pub audio_swap_pending: AtomicBool,
+    /// Emulated frames per second over the last report window, in tenths
+    /// (601 = 60.1 fps). Written once a second by the emu thread while it
+    /// runs, read by the UI for the on-screen counter.
+    pub fps_tenths: AtomicU32,
 }
 
 impl EmuShared {
@@ -92,6 +96,7 @@ impl EmuShared {
             last_break: Mutex::new(None),
             audio_swap: Mutex::new(None),
             audio_swap_pending: AtomicBool::new(false),
+            fps_tenths: AtomicU32::new(0),
         }
     }
 
@@ -187,7 +192,7 @@ fn run(
     let mut last_report = Instant::now();
     let mut batches_since_report = 0u64;
     let mut samples_since_report = 0u64;
-    let mut frames_since_report = 0u64;
+    let mut frames_since_report = 0u32;
     // Wall-clock deadline for the next emulated frame (the frame-rate limiter).
     let mut next_frame_at = Instant::now();
     let mut ring_full_count = 0u64;
@@ -258,6 +263,12 @@ fn run(
                 }
                 continue; // more requests may already be queued
             }
+            // The pause is not part of a rate: restart the report window
+            // so the first second after resuming is measured on its own.
+            last_report = Instant::now();
+            frames_since_report = 0;
+            batches_since_report = 0;
+            samples_since_report = 0;
             thread::park_timeout(Duration::from_millis(50));
             continue;
         }
@@ -412,7 +423,12 @@ fn run(
             ring_full_count += 1;
         }
 
-        if last_report.elapsed() >= Duration::from_secs(1) {
+        let report_window = last_report.elapsed();
+        if report_window >= Duration::from_secs(1) {
+            shared.fps_tenths.store(
+                fps_tenths(frames_since_report, report_window),
+                Ordering::Relaxed,
+            );
             eprintln!(
                 "luna-emu: {frames_since_report} fps, {batches_since_report} batches/s, \
                  {samples_since_report} samples/s ({:.1}/frame), ring_full×{ring_full_count}",
@@ -449,6 +465,7 @@ fn run(
         }
     }
 
+    shared.fps_tenths.store(0, Ordering::Relaxed);
     eprintln!("luna-emu: exiting");
     if let Ok(mut g) = shared.thread_handle.lock() {
         *g = None;
@@ -458,4 +475,29 @@ fn run(
     // consumer is held by the audio callback of the live stream, so the
     // producer must round-trip across ROM swaps.
     audio
+}
+
+/// `frames` produced over `window`, as frames per second in tenths.
+fn fps_tenths(frames: u32, window: Duration) -> u32 {
+    let secs = window.as_secs_f64();
+    if secs <= 0.0 {
+        return 0;
+    }
+    (f64::from(frames) * 10.0 / secs).round() as u32
+}
+
+#[cfg(test)]
+mod fps_tests {
+    use super::*;
+
+    #[test]
+    fn the_rate_is_frames_over_the_real_window_not_over_one_second() {
+        assert_eq!(fps_tenths(60, Duration::from_secs(1)), 600);
+        // The report fires a little after the second: 61 frames in
+        // 1.015 s is still 60.1 fps, not 61.
+        assert_eq!(fps_tenths(61, Duration::from_millis(1015)), 601);
+        assert_eq!(fps_tenths(50, Duration::from_secs(1)), 500);
+        assert_eq!(fps_tenths(0, Duration::from_secs(1)), 0);
+        assert_eq!(fps_tenths(60, Duration::ZERO), 0);
+    }
 }

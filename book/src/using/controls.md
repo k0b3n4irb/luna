@@ -144,6 +144,13 @@ when a Super Multitap is on port 2. Fixed, Mesen2-like layout:
 - **Volume**: *Settings → Audio* — a 0-100 slider plus *Mute*, applied
   live in the audio callback and persisted to
   `~/.config/luna/audio.json` (`%APPDATA%\luna\audio.json` on Windows).
+- **Frame rate**: *Settings → Video → Show FPS* draws the emulated
+  frame rate in the top-right corner of the picture, refreshed once a
+  second (`60.1 fps` for an NTSC game at full speed, `50.0 fps` for a
+  PAL one). A lower figure means the machine cannot keep up with the
+  console. It is hidden while the emulation is paused, never appears in
+  a screenshot, and the choice is kept in `~/.config/luna/video.json`
+  (`%APPDATA%\luna\video.json` on Windows).
 - The *Step frame* debugger hotkey moved from `F11` to `F6` (fullscreen
   claimed the universal key); saved hotkey configs keep working and can
   be rebound under *Settings → Hotkeys*.
