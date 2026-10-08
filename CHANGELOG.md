@@ -7,6 +7,19 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+## [1.35.0] — 2026-10-08
+
+Four asks from OpenSNES's report on 1.34.0, all on `luna diff`, `luna
+test` and `luna assets-dump`: comparing what two builds show when their
+timing moved, and recapturing a memory block in one run. The GUI gains a
+frame-rate counter, and the SA-1's timer counts a PAL frame.
+
+**Upgrading from 1.34.0:** frames, audio and save states are unchanged on
+an NTSC machine. `luna diff --audio` no longer compares a last window that
+is partial: a run that ended on one reports a window fewer, and can turn
+from `DIFF` to `MATCH`. An SA-1 cartridge on a PAL machine (or under
+`--force-region pal`) now has a 312-line timer.
+
 ### Added
 
 - **`luna diff --sequence`: the same pictures at another cadence.** Every
