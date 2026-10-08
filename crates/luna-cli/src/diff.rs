@@ -35,17 +35,17 @@ pub(crate) struct DiffOptions<'a> {
 /// One machine being stepped frame by frame: its hash at every frame
 /// passed, plus the PNG at each requested frame (kept until the verdict
 /// decides whether it is written).
-struct Machine {
+pub(crate) struct Machine {
     em: luna_api::Emulator,
     /// This machine's replay cursor over the shared `--input` script.
-    script: luna_api::InputScript,
-    hashes: BTreeMap<u64, u64>,
+    pub(crate) script: luna_api::InputScript,
+    pub(crate) hashes: BTreeMap<u64, u64>,
     pngs: BTreeMap<u64, Vec<u8>>,
     halted: bool,
 }
 
 impl Machine {
-    fn load(rom: &std::path::Path, o: &DiffOptions<'_>) -> Result<Self, String> {
+    pub(crate) fn load(rom: &std::path::Path, o: &DiffOptions<'_>) -> Result<Self, String> {
         let mut em = luna_api::Emulator::new();
         load_rom_into(
             &mut em,
@@ -280,7 +280,7 @@ pub(crate) fn run_diff(
 /// Step `m` to `horizon`, recording its hash at every frame (`every`) or
 /// only at the requested `frames`, with PNGs at the requested frames when
 /// `want_png`.
-fn drive(
+pub(crate) fn drive(
     m: &mut Machine,
     o: &DiffOptions<'_>,
     frames: &[u64],

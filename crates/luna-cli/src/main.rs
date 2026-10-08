@@ -13,6 +13,7 @@ mod bench;
 mod csv;
 mod diff;
 mod diff_audio;
+mod diff_sequence;
 mod dumps;
 mod fmt;
 mod frames;
@@ -27,6 +28,7 @@ mod wram_trace;
 
 use diff::{DiffOptions, run_diff};
 use diff_audio::{AudioDiffOptions, run_audio_diff};
+use diff_sequence::{MinCommon, run_sequence_diff};
 use dumps::{run_assets_dump, run_spc_dump};
 use frames::run_frames;
 use profile::{ProfileOptions, run_profile};
@@ -684,6 +686,12 @@ enum Command {
     /// `--tolerance-pct` — the comparison that survives the same sound
     /// arriving a few samples earlier or later, which an audio hash does
     /// not.
+    ///
+    /// With `--sequence`, time is ignored: every frame of `--from`..`--to`
+    /// is hashed, each run of identical frames counts as one picture, and
+    /// the longest run of pictures both ROMs show in the same order is
+    /// measured. SAME-SEQUENCE when it reaches `--min-common` — the same
+    /// animation at another cadence, or after a boot of another length.
     Diff {
         /// The reference build.
         rom_a: PathBuf,
@@ -693,13 +701,32 @@ enum Command {
         #[arg(
             long,
             value_delimiter = ',',
-            required_unless_present = "audio",
-            conflicts_with = "audio"
+            required_unless_present_any = ["audio", "sequence"],
+            conflicts_with_all = ["audio", "sequence"]
         )]
         frames: Vec<u64>,
         /// Accept a match up to this many frames away (`b = a ± n`).
-        #[arg(long, default_value_t = 0, conflicts_with = "audio")]
+        #[arg(long, default_value_t = 0, conflicts_with_all = ["audio", "sequence"])]
         tolerance: u64,
+        /// Compare the sequence of pictures over a range of frames instead
+        /// of the frames one by one.
+        #[arg(long, requires = "to", conflicts_with = "audio")]
+        sequence: bool,
+        /// `--sequence`: first PPU frame of the range [default: 1].
+        #[arg(long)]
+        from: Option<u64>,
+        /// `--sequence`: last PPU frame of the range.
+        #[arg(long)]
+        to: Option<u64>,
+        /// `--sequence`: SAME-SEQUENCE when the longest common run holds
+        /// at least this many pictures.
+        #[arg(long = "min-common", conflicts_with = "min_common_pct")]
+        min_common: Option<usize>,
+        /// `--sequence`: SAME-SEQUENCE when the longest common run holds at
+        /// least this percentage of the pictures of the ROM that shows
+        /// fewer of them [default: 90].
+        #[arg(long = "min-common-pct")]
+        min_common_pct: Option<f64>,
         /// Compare the audio output instead of the displayed frames.
         #[arg(long, requires = "until_frame")]
         audio: bool,
@@ -714,6 +741,12 @@ enum Command {
         /// of the louder of the two [default: 2].
         #[arg(long = "tolerance-pct")]
         tolerance_pct: Option<f64>,
+        /// `--audio`: start the windows at each ROM's first sample above
+        /// the silence level instead of at sample 0, and report the shift
+        /// between the two — for the same sound starting a frame earlier
+        /// or later.
+        #[arg(long = "align-onset")]
+        align_onset: bool,
         /// `--audio`: sample level counted as silence (0-32767). It is the
         /// threshold of the reported onset, and the floor a window's
         /// difference is measured against [default: 64].
@@ -725,7 +758,7 @@ enum Command {
         input: Option<String>,
         /// Write `frame_<F>_a.png` / `frame_<F>_b.png` here for every DIFF
         /// frame.
-        #[arg(long = "screenshot-dir", conflicts_with = "audio")]
+        #[arg(long = "screenshot-dir", conflicts_with_all = ["audio", "sequence"])]
         screenshot_dir: Option<PathBuf>,
         /// Also write a JSON report (`-` = stdout after the text lines).
         #[arg(long)]
@@ -957,6 +990,12 @@ enum Command {
         /// CPU instructions to execute before the snapshot.
         #[arg(short = 'n', long, default_value_t = 5_000_000)]
         steps: u64,
+        /// Run until PPU frame N (then dump), instead of stopping at the
+        /// `-n` instruction count — same as `state --until-frame`. Takes
+        /// the assets at the frame a manifest checks, whatever the speed
+        /// of the code that got there.
+        #[arg(long = "until-frame", conflicts_with = "steps")]
+        until_frame: Option<u64>,
         /// Output directory (created if absent).
         #[arg(long = "out", default_value = "/tmp/luna_assets")]
         out: PathBuf,
@@ -1222,6 +1261,7 @@ fn main() -> ExitCode {
             window_ms,
             tolerance_pct,
             silence,
+            align_onset,
             input,
             out,
             force_mapper,
@@ -1240,6 +1280,7 @@ fn main() -> ExitCode {
                 window_ms: window_ms.unwrap_or(500),
                 tolerance_pct: tolerance_pct.unwrap_or(2.0),
                 silence: silence.unwrap_or(64),
+                align_onset,
                 out: out.as_deref(),
             },
         ),
@@ -1260,6 +1301,12 @@ fn main() -> ExitCode {
             window_ms,
             tolerance_pct,
             silence,
+            align_onset,
+            sequence,
+            from,
+            to,
+            min_common,
+            min_common_pct,
             ..
         } => {
             // clap's `requires` is satisfied by a flag's default `false`,
@@ -1268,29 +1315,48 @@ fn main() -> ExitCode {
                 || window_ms.is_some()
                 || tolerance_pct.is_some()
                 || silence.is_some()
+                || align_onset
             {
                 eprintln!(
-                    "error: --until-frame, --window-ms, --tolerance-pct and --silence \
-                     belong to `luna diff --audio`"
+                    "error: --until-frame, --window-ms, --tolerance-pct, --silence and \
+                     --align-onset belong to `luna diff --audio`"
                 );
                 return ExitCode::from(2);
             }
-            run_diff(
-                &rom_a,
-                &rom_b,
-                &frames,
-                &DiffOptions {
-                    force_mapper: force_mapper.as_deref(),
-                    force_region: force_region.as_deref(),
-                    power_on: power_on.as_deref(),
-                    input_script: input.as_deref(),
-                    force_display,
-                    native_res,
-                    tolerance,
-                    screenshot_dir: screenshot_dir.as_deref(),
-                    out: out.as_deref(),
-                },
-            )
+            let options = DiffOptions {
+                force_mapper: force_mapper.as_deref(),
+                force_region: force_region.as_deref(),
+                power_on: power_on.as_deref(),
+                input_script: input.as_deref(),
+                force_display,
+                native_res,
+                tolerance,
+                screenshot_dir: screenshot_dir.as_deref(),
+                out: out.as_deref(),
+            };
+            match (sequence, to) {
+                (true, Some(to)) => run_sequence_diff(
+                    &rom_a,
+                    &rom_b,
+                    (from.unwrap_or(1), to),
+                    min_common
+                        .map(MinCommon::Pictures)
+                        .or_else(|| min_common_pct.map(MinCommon::Percent)),
+                    &options,
+                ),
+                _ if from.is_some()
+                    || to.is_some()
+                    || min_common.is_some()
+                    || min_common_pct.is_some() =>
+                {
+                    eprintln!(
+                        "error: --from, --to, --min-common and --min-common-pct \
+                         belong to `luna diff --sequence`"
+                    );
+                    ExitCode::from(2)
+                }
+                _ => run_diff(&rom_a, &rom_b, &frames, &options),
+            }
         }
         Command::Profile {
             rom,
@@ -1406,6 +1472,7 @@ fn main() -> ExitCode {
         Command::AssetsDump {
             rom,
             steps,
+            until_frame,
             out,
             bpp,
             palette,
@@ -1416,6 +1483,7 @@ fn main() -> ExitCode {
         } => run_assets_dump(
             &rom,
             steps,
+            until_frame,
             &out,
             bpp,
             palette,

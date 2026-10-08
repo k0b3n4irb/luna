@@ -58,6 +58,8 @@ means that transport has no form of it.
 | assert on a byte without a manifest | `luna state --assert`, `--assert-aram`, `--assert-vram`, `--assert-cgram` | `peek_memory`, `peek_aram`, `peek_vram`, `peek_cgram` | [Asserting on memory](using/cli-run-state.md#asserting-on-memory---assert---srm-in----srm-out) |
 | read my ROM's printf and its assertions | `--nocash-out`, `--wdm-out` | `enable_nocash_log`, `enable_wdm_log` and their `take_*` | [The SDK channels over MCP](using/mcp.md#reading-the-sdk-assertlog-channels-over-mcp) |
 | know that a rebuild draws the same thing | `luna diff a.sfc b.sfc --frames …` | — | [`luna diff`](using/cli-analysis.md#luna-diff--two-roms-at-equal-ppu-frame-match--diff) |
+| know that a rebuild shows the same pictures at another pace | `luna diff a.sfc b.sfc --sequence --to …` | — | [`luna diff --sequence`](using/cli-analysis.md#luna-diff---sequence--the-same-pictures-another-cadence) |
+| recapture a memory block after an intended change | `luna test --update` | — | [Recapturing a block](using/homebrew-ci.md#recapturing-a-block) |
 | know that a rebuild sounds the same | `luna diff --audio` | — | [`luna diff --audio`](using/cli-analysis.md#luna-diff---audio--the-same-sound-a-few-samples-apart) |
 | what each exit code means | `0` pass, `1` assert, `2` usage | — | [Exit codes](using/cli-api-mcp.md#exit-codes-the-ci-contract) |
 

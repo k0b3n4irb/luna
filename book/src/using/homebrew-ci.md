@@ -160,7 +160,9 @@ What each assert means:
   space. A bare hex string reads the CPU bus, and so does
   `space = "wram"` — both use **symbol or `BANK:OFFSET` keys** (a bare
   hex offset is only valid for `vram`/`cgram`/`oam`/`aram`, whose keys
-  are 16-bit offsets). Failures report the first mismatching offset.
+  are 16-bit offsets). Failures report the first mismatching offset; the
+  JSON report carries the whole block, and `--update` recaptures it (see
+  [Recapturing a block](#recapturing-a-block)).
 - **Keys relative to a symbol** — anywhere a symbol or `BANK:OFFSET` key
   is accepted (`values`, checkpoint `values`, `blocks`), `symbol+N` and
   `symbol-N` name an address relative to it: `"results+16"` is sixteen
@@ -193,6 +195,48 @@ What each assert means:
   events: `dma`, `dsp` (S-DSP writes), `mailbox`, `sa1`, `superfx`,
   `dsp1`, `spc`. `superfx = { min = 1 }` is the "the GSU actually ran"
   liveness check.
+
+## Recapturing a block
+
+A block that follows something you meant to change (a table that depends
+on how long the boot takes, say) has to be measured again. The text
+report names the first wrong byte only:
+
+```
+FAIL blk
+     blocks.row1 (vram): first mismatch at +0x0 (expected 00, got 44)
+```
+
+`luna test --update` rewrites the hex of every block that did not match
+with the bytes the machine held, as it rewrites `fbhash`. The hex keeps
+its own layout (the spaces and line breaks between digits stay where
+they are, and the letters keep their case), and so do the comments:
+
+```toml
+# before
+row1 = { space = "vram", offset = "6040", hex = "0000 0000 0000 0000" }  # 8 bytes
+# after `luna test --update`
+row1 = { space = "vram", offset = "6040", hex = "4420 3b20 3220 2920" }  # 8 bytes
+```
+
+Blocks that matched are not touched. As with `fbhash`, `--update` records
+what the machine does, right or wrong: read the diff before committing
+it.
+
+To see the bytes without rewriting anything, `--report json` gives each
+mismatched block whole, next to the `failures` sentences:
+
+```json
+"block_mismatches": [
+  {
+    "assert": "blocks.row1",
+    "space": "vram",
+    "offset": "6040",
+    "expected_hex": "0000000000000000",
+    "actual_hex": "44203b2032202920"
+  }
+]
+```
 
 ## Checkpoints — before/after assertions
 

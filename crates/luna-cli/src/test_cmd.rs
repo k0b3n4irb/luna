@@ -371,6 +371,9 @@ struct TestOutcome {
     failures: Vec<String>,
     /// The measured fbhash (for `--update` and the JSON report).
     fbhash: Option<String>,
+    /// Every `[asserts.blocks]` entry that did not match, with the bytes
+    /// the machine held (for `--update` and the JSON report).
+    block_mismatches: Vec<BlockMismatch>,
     /// The power-on state the run used, and its seed when random — echoed
     /// in the JSON report so a failing manifest is reproducible (`OpenSNES`
     /// R-A: the `power_on` / `seed` pair, as the manifest says it).
@@ -437,17 +440,22 @@ pub(crate) fn run_tests(
         }
     }
 
-    // --update: rewrite each manifest's asserts.fbhash with the measured
-    // value, preserving formatting and comments (toml_edit).
+    // --update: rewrite each manifest's asserts.fbhash, and the hex of
+    // every block that did not match, with the measured values, preserving
+    // formatting and comments (toml_edit).
     if update {
+        let mut blocks = 0usize;
         for o in &outcomes {
-            let Some(hash) = &o.fbhash else { continue };
-            if let Err(e) = update_fbhash(&o.path, hash) {
+            if let Err(e) = update_manifest(&o.path, o.fbhash.as_deref(), &o.block_mismatches) {
                 eprintln!("error: updating {}: {e}", o.path.display());
                 return ExitCode::from(2);
             }
+            blocks += o.block_mismatches.len();
         }
-        eprintln!("updated fbhash in {} manifest(s)", outcomes.len());
+        eprintln!(
+            "updated fbhash in {} manifest(s), {blocks} block(s)",
+            outcomes.len()
+        );
     }
 
     let failed: Vec<&TestOutcome> = outcomes.iter().filter(|o| !o.failures.is_empty()).collect();
@@ -484,6 +492,8 @@ pub(crate) fn run_tests(
                 "skipped": o.skipped,
                 "failures": o.failures,
                 "fbhash": o.fbhash,
+                "block_mismatches": o.block_mismatches.iter()
+                    .map(BlockMismatch::to_json).collect::<Vec<_>>(),
                 "power_on": o.power_on,
                 "seed": o.seed,
                 "region": o.region,
@@ -770,6 +780,7 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
                 path: path.to_path_buf(),
                 failures: Vec::new(),
                 fbhash: None,
+                block_mismatches: Vec::new(),
                 power_on: power_on_label(&m),
                 seed: power_on_seed(&m),
                 region: region_label(&m),
@@ -1050,10 +1061,14 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
             Err(e) => failures.push(format!("values.{key}: {e}")),
         }
     }
+    let mut block_mismatches = Vec::new();
     for (key, block) in &m.asserts.blocks {
         match check_block(&mut em, key, block) {
             Ok(None) => {}
-            Ok(Some(msg)) => failures.push(msg),
+            Ok(Some(mismatch)) => {
+                failures.push(mismatch.to_string());
+                block_mismatches.push(mismatch);
+            }
             Err(e) => failures.push(format!("blocks.{key}: {e}")),
         }
     }
@@ -1249,6 +1264,7 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
         path: path.to_path_buf(),
         failures,
         fbhash: measured_fbhash,
+        block_mismatches,
         power_on: power_on_label(&m),
         seed: power_on_seed(&m),
         region: region_label(&m),
@@ -1648,12 +1664,72 @@ fn normalize_assert(assert: &ValueAssert) -> Result<(CmpSpec, u8), String> {
     Ok((cmp, width))
 }
 
-/// Check one `[asserts.blocks]` entry. `Ok(Some(msg))` = mismatch.
+/// An `[asserts.blocks]` entry whose bytes differ from the machine's.
+#[derive(Debug, PartialEq, Eq)]
+struct BlockMismatch {
+    /// The TOML key of the entry.
+    key: String,
+    /// The memory space compared (`cpu` for a bare hex string).
+    space: String,
+    /// Where the block starts, as the manifest wrote it.
+    offset: String,
+    expected: Vec<u8>,
+    actual: Vec<u8>,
+}
+
+impl BlockMismatch {
+    /// The JSON report's entry: the whole block on both sides, so one run
+    /// is enough to recapture it.
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "assert": format!("blocks.{}", self.key),
+            "space": self.space,
+            "offset": self.offset,
+            "expected_hex": hex_string(&self.expected, false),
+            "actual_hex": hex_string(&self.actual, false),
+        })
+    }
+}
+
+impl std::fmt::Display for BlockMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let first = self
+            .actual
+            .iter()
+            .zip(&self.expected)
+            .position(|(g, w)| g != w)
+            .unwrap_or_else(|| self.actual.len().min(self.expected.len()));
+        write!(
+            f,
+            "blocks.{} ({}): first mismatch at +{first:#X} (expected {:02x}, got {:02x})",
+            self.key,
+            self.space,
+            self.expected.get(first).copied().unwrap_or_default(),
+            self.actual.get(first).copied().unwrap_or_default(),
+        )
+    }
+}
+
+/// `bytes` as contiguous hex digits.
+fn hex_string(bytes: &[u8], upper: bool) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = if upper {
+            write!(out, "{b:02X}")
+        } else {
+            write!(out, "{b:02x}")
+        };
+    }
+    out
+}
+
+/// Check one `[asserts.blocks]` entry. `Ok(Some(_))` = mismatch.
 fn check_block(
     em: &mut luna_api::Emulator,
     key: &str,
     block: &BlockAssert,
-) -> Result<Option<String>, String> {
+) -> Result<Option<BlockMismatch>, String> {
     // With an explicit `offset` the TOML key is a free label (issue
     // #210); otherwise the key itself is the location (v1.15.0 form).
     let (space, hex, at) = match block {
@@ -1709,16 +1785,13 @@ fn check_block(
     if got == want {
         return Ok(None);
     }
-    let first = got
-        .iter()
-        .zip(&want)
-        .position(|(g, w)| g != w)
-        .unwrap_or_else(|| got.len().min(want.len()));
-    Ok(Some(format!(
-        "blocks.{key} ({space}): first mismatch at +{first:#X} (expected {:02x}, got {:02x})",
-        want.get(first).copied().unwrap_or_default(),
-        got.get(first).copied().unwrap_or_default(),
-    )))
+    Ok(Some(BlockMismatch {
+        key: key.to_string(),
+        space: space.to_string(),
+        offset: at.to_string(),
+        expected: want,
+        actual: got,
+    }))
 }
 
 fn slice_at(all: &[u8], off: usize, len: usize, space: &str) -> Result<Vec<u8>, String> {
@@ -1781,24 +1854,177 @@ fn take_trace_count(em: &mut luna_api::Emulator, name: &str) -> Result<u64, Stri
     Ok(n as u64)
 }
 
-/// Rewrite `asserts.fbhash` in place, preserving the manifest's
-/// formatting and comments.
-fn update_fbhash(path: &Path, hash: &str) -> Result<(), String> {
+/// `luna test --update` on one manifest file: see [`updated_manifest`].
+/// The file is left alone when nothing in it changes.
+fn update_manifest(
+    path: &Path,
+    fbhash: Option<&str>,
+    blocks: &[BlockMismatch],
+) -> Result<(), String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("{e}"))?;
-    // Only touch manifests that assert an fbhash at all.
-    let has = doc.get("asserts").and_then(|a| a.get("fbhash")).is_some();
-    if !has {
+    let updated = updated_manifest(&text, fbhash, blocks)?;
+    if updated == text {
         return Ok(());
     }
-    doc["asserts"]["fbhash"] = toml_edit::value(hash);
-    std::fs::write(path, doc.to_string()).map_err(|e| e.to_string())
+    std::fs::write(path, updated).map_err(|e| e.to_string())
+}
+
+/// The manifest `text` with `asserts.fbhash` set to the measured hash
+/// (when the manifest asserts one) and the hex of every mismatched block
+/// replaced by the bytes the machine held. Formatting and comments are
+/// preserved; a block's hex keeps its own layout (see [`relaid_hex`]).
+fn updated_manifest(
+    text: &str,
+    fbhash: Option<&str>,
+    blocks: &[BlockMismatch],
+) -> Result<String, String> {
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("{e}"))?;
+    let Some(asserts) = doc.get_mut("asserts") else {
+        return Ok(text.to_string());
+    };
+    if let Some(hash) = fbhash
+        && let Some(item) = asserts.get_mut("fbhash")
+    {
+        set_string(item, hash);
+    }
+    for b in blocks {
+        let item = asserts
+            .get_mut("blocks")
+            .and_then(|t| t.get_mut(&b.key))
+            .ok_or_else(|| format!("asserts.blocks.{} is not in the file", b.key))?;
+        // A bare string, or the `hex` of a `{ space, offset, hex }` table.
+        let item = if item.is_str() {
+            item
+        } else {
+            item.get_mut("hex")
+                .ok_or_else(|| format!("asserts.blocks.{} has no `hex`", b.key))?
+        };
+        let old = item
+            .as_str()
+            .ok_or_else(|| format!("asserts.blocks.{}: `hex` is not a string", b.key))?
+            .to_string();
+        set_string(item, &relaid_hex(&old, &b.actual));
+    }
+    Ok(doc.to_string())
+}
+
+/// Replace a TOML string's content, keeping the comment and spacing
+/// around it.
+fn set_string(item: &mut toml_edit::Item, content: &str) {
+    let Some(value) = item.as_value_mut() else {
+        return;
+    };
+    let decor = value.decor().clone();
+    *value = toml_edit::Value::from(content);
+    *value.decor_mut() = decor;
+}
+
+/// `bytes` written in the layout of `old`: each hex digit of `old` is
+/// replaced in turn, so spaces and line breaks stay where the author put
+/// them, and the letters keep `old`'s case. `bytes` is as long as the
+/// block `old` describes (the comparison read exactly that many).
+fn relaid_hex(old: &str, bytes: &[u8]) -> String {
+    let upper =
+        old.chars().any(|c| c.is_ascii_uppercase()) && !old.chars().any(|c| c.is_ascii_lowercase());
+    let fresh = hex_string(bytes, upper);
+    let mut digits = fresh.chars();
+    let mut out: String = old
+        .chars()
+        .map(|c| {
+            if c.is_ascii_hexdigit() {
+                digits.next().unwrap_or(c)
+            } else {
+                c
+            }
+        })
+        .collect();
+    out.extend(digits);
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::resolve_ports;
     use luna_api::PortDevice::{Mouse, None as Unplugged, Pad, SuperScope};
+
+    fn mismatch(key: &str, actual: &[u8]) -> super::BlockMismatch {
+        super::BlockMismatch {
+            key: key.into(),
+            space: "vram".into(),
+            offset: "6040".into(),
+            expected: vec![0; actual.len()],
+            actual: actual.to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_recaptured_block_keeps_the_layout_and_case_of_its_hex() {
+        use super::relaid_hex;
+        assert_eq!(relaid_hex("00000000", &[0x44, 0xab, 0, 1]), "44ab0001");
+        assert_eq!(
+            relaid_hex("00 00\n00 00", &[0x44, 0xab, 0, 1]),
+            "44 ab\n00 01"
+        );
+        assert_eq!(relaid_hex("FF00", &[0xab, 0xcd]), "ABCD");
+        assert_eq!(relaid_hex("Ff00", &[0xab, 0xcd]), "abcd");
+    }
+
+    #[test]
+    fn update_rewrites_the_mismatched_blocks_and_nothing_else() {
+        let text = concat!(
+            "rom = \"a.sfc\"  # the ROM\n",
+            "frames = 200\n",
+            "\n",
+            "[asserts]\n",
+            "fbhash = \"0000000000000000\"   # refreshed by --update\n",
+            "\n",
+            "[asserts.blocks]\n",
+            "# the offset-per-tile table\n",
+            "row1 = { space = \"vram\", offset = \"6040\", hex = \"00 00 00\" }  # row 1\n",
+            "\"7E:0010\" = \"0000\"\n",
+            "kept = \"1234\"\n",
+        );
+        let out = super::updated_manifest(
+            text,
+            Some("7429bf441a1c7d6c"),
+            &[
+                mismatch("row1", &[0x44, 0x01, 0xfe]),
+                mismatch("7E:0010", &[0xbe, 0xef]),
+            ],
+        )
+        .unwrap();
+        let want = text
+            .replace("0000000000000000", "7429bf441a1c7d6c")
+            .replace("00 00 00", "44 01 fe")
+            .replace("\"7E:0010\" = \"0000\"", "\"7E:0010\" = \"beef\"");
+        assert_eq!(out, want);
+    }
+
+    #[test]
+    fn update_leaves_a_manifest_with_nothing_to_refresh_byte_identical() {
+        let text = "rom = \"a.sfc\"\n[asserts.blocks]\nk = \"12 34\"  # two bytes\n";
+        assert_eq!(
+            super::updated_manifest(text, Some("7429bf441a1c7d6c"), &[]).unwrap(),
+            text
+        );
+        assert!(super::updated_manifest(text, None, &[mismatch("gone", &[1])]).is_err());
+    }
+
+    #[test]
+    fn a_block_mismatch_reports_the_whole_block_in_json() {
+        let m = mismatch("row1", &[0x44, 0x00]);
+        assert_eq!(
+            m.to_string(),
+            "blocks.row1 (vram): first mismatch at +0x0 (expected 00, got 44)"
+        );
+        assert_eq!(
+            m.to_json(),
+            serde_json::json!({
+                "assert": "blocks.row1", "space": "vram", "offset": "6040",
+                "expected_hex": "0000", "actual_hex": "4400",
+            })
+        );
+    }
 
     #[test]
     fn unset_ports_keep_the_old_inference() {

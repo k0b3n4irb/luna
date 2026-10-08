@@ -9,10 +9,38 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ### Added
 
+- **`luna diff --sequence`: the same pictures at another cadence.** Every
+  frame of `--from`..`--to` is hashed on both ROMs, each run of identical
+  frames counts as one picture, and the longest run of pictures both show
+  in the same order is measured: `SAME-SEQUENCE` above `--min-common N` or
+  `--min-common-pct P` (90 by default), `DIFF` otherwise. For a boot that
+  moved by more than `--tolerance`, and for a free-running loop that
+  changed pace, where no single frame offset lines the two builds up.
+  Specified by OpenSNES's prototype, which it replaces.
+- **`luna diff --audio --align-onset`.** The windows start at each ROM's
+  first sample above the silence level, and the verdict names the shift
+  (`onset shift -536 samples`): a `MATCH` when the same sound starts a
+  frame earlier or later.
+- **`luna test --update` recaptures blocks.** The hex of every
+  `[asserts.blocks]` entry that did not match is rewritten with the bytes
+  the machine held, in the layout and case the manifest used. The JSON
+  report gains `block_mismatches`, each with `expected_hex` and
+  `actual_hex`.
+- **`luna assets-dump --until-frame`**, as `run`, `state`, `profile` and
+  `diff` already had.
 - **GUI: an on-screen frame-rate counter.** *Settings → Video → Show
   FPS* draws the emulated frame rate in the top-right corner of the
   picture (`60.1 fps`), refreshed once a second. Off by default; the
   choice is kept in `video.json` next to the other settings.
+
+### Changed
+
+- **`luna diff --audio` compares only windows complete on both sides.**
+  Two captures to the same frame end a few samples apart; the last
+  window, partial on one side and empty on the other, read 100 % and
+  turned a `MATCH` into a `DIFF`. In exchange, a capture a whole window
+  shorter than the other is now a `DIFF` by itself. A run that used to
+  end on a partial window reports one window fewer.
 
 ### Fixed
 

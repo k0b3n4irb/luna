@@ -60,6 +60,55 @@ luna diff build/old/game.sfc build/new/game.sfc --frames 200,400 --tolerance 3 \
 # 2 frame(s): 2 match, 0 diff (tolerance ±3)
 ```
 
+### `luna diff --sequence` — the same pictures, another cadence
+
+```
+luna diff <ROM_A> <ROM_B> --sequence [--from F1] --to F2 [--min-common N | --min-common-pct P]
+```
+
+`--tolerance N` asks whether B shows at `F ± N` what A shows at `F`. Two
+harmless changes escape it: a boot that moved by more than `N` frames,
+and a loop that runs freely and now fits in a frame more often, so that
+no single offset lines the two ROMs up. `--sequence` ignores time. Every
+frame of the range is hashed on both machines, each run of identical
+frames counts as one *picture*, and the longest run of pictures the two
+ROMs show **in the same order** is measured. `SAME-SEQUENCE` when that
+run reaches the threshold, `DIFF` otherwise; exit `0` / `1`, `2` for a
+usage error.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `--sequence` | off | Compare the sequence of pictures. Excludes `--frames`, `--tolerance`, `--screenshot-dir`, `--audio`. |
+| `--from <F1>` | `1` | First PPU frame of the range. |
+| `--to <F2>` | — | Last PPU frame of the range (required). |
+| `--min-common <N>` | — | `SAME-SEQUENCE` when the common run holds at least `N` pictures. |
+| `--min-common-pct <P>` | `90` | …or at least `P` percent of the pictures of the ROM that shows fewer of them. One threshold or the other. |
+| `--input`, `--force-display`, `--native-res`, `--force-mapper`, `--force-region`, `--power-on` | — | As for the frame comparison. |
+| `--out <PATH>` | — | JSON report: `{a, b, from, to, side_a: {pictures, frames_per_picture}, side_b: {…}, common_run: {pictures, a_frame, b_frame, offset, pct_of_shorter}, min_common \| min_common_pct, status}`. |
+
+```bash
+# The compiler made a sprite-copy loop faster: it now fits in one frame
+# more often. --frames 200,400 --tolerance 40 says DIFF twice.
+luna diff build/old/starfield.sfc build/new/starfield.sfc --sequence --to 200
+# frames 1-200
+# A: 100 pictures, frames per picture [1, 2]
+# B: 165 pictures, frames per picture [1, 2]
+# longest common run: 98 pictures in the same order (from frame 6 in A, frame 6 in B, offset +0)
+# 98 of 100 pictures (98.0% of the shorter sequence, at least 90% asked): SAME-SEQUENCE
+```
+
+98 of A's 100 pictures are in B, in order: the same animation, and B gets
+through it faster. `frames per picture` lists the distinct durations (the
+first and last picture, cut by the range, are left out), and `offset` is
+the frame the run starts at in B minus the frame in A — the boot offset,
+when that is all that moved.
+
+**Read the counts, not only the verdict.** Two unrelated ROMs share one
+picture, the black screen of their boot: `1 of 100 pictures`, `DIFF`. But
+a range that covers nothing except that black screen is one picture on
+each side, and `1 of 1` is `SAME-SEQUENCE`. Choose a range in which the
+program draws something, or ask for a count with `--min-common`.
+
 ### `luna diff --audio` — the same sound, a few samples apart
 
 ```
@@ -79,10 +128,11 @@ same exit codes as above.
 |---|---|---|
 | `--audio` | off | Compare the sound instead of the frames. Excludes `--frames`, `--tolerance`, `--screenshot-dir`, `--force-display`, `--native-res`. |
 | `--until-frame <N>` | — | PPU frame both ROMs run to (required). |
-| `--window-ms <MS>` | `500` | Window length. The last window is whatever is left. |
+| `--window-ms <MS>` | `500` | Window length. Only windows complete on **both** sides are compared: the two captures end a few samples apart, and a last window partial on one side and empty on the other is not a difference in the sound. Captures too short for one window are compared as a single window over their common length. |
+| `--align-onset` | off | Start the windows at each ROM's first sample above `--silence` instead of at sample 0, and report the shift between the two (see below). |
 | `--tolerance-pct <P>` | `2` | Largest difference a window may show, in percent of the louder of the two levels. |
 | `--silence <LEVEL>` | `64` | Sample level counted as silence (of 32767): the threshold of the reported onset, and the floor differences are measured against, so two near-silent windows are not a 100 % difference over one LSB. |
-| `--input`, `--out`, `--force-mapper`, `--force-region`, `--power-on` | — | As for the frame comparison. The JSON report is `{a, b, until_frame, window_ms, tolerance_pct, silence, samples_a, samples_b, onset_a, onset_b, windows: [{start_ms, rms_a, rms_b, delta_pct}], max_delta_pct, status}`. |
+| `--input`, `--out`, `--force-mapper`, `--force-region`, `--power-on` | — | As for the frame comparison. The JSON report is `{a, b, until_frame, window_ms, tolerance_pct, silence, samples_a, samples_b, onset_a, onset_b, align_onset, onset_shift, length_mismatch, windows: [{start_ms, rms_a, rms_b, delta_pct}], max_delta_pct, status}`. |
 
 ```bash
 # Two builds of a music player; the second adds two instructions to its init.
@@ -97,6 +147,32 @@ luna diff --audio build/old/music.sfc build/new/music.sfc --until-frame 300
 # first sample above 64: a=32384 b=32384 (of 159936 / 159936)
 # 10 window(s) of 500 ms, max delta 0.04% (tolerance 2%): MATCH
 ```
+
+**The same sound, a frame earlier.** A few samples of shift disappear in
+a 500 ms window; a whole frame does not. When the code that starts the
+music gains a frame, the sound comes out 536 samples sooner, and the
+window that holds the start compares 500 ms of music with 483 ms: a
+`DIFF`, for a sound nobody could tell apart. `--align-onset` starts each
+capture's windows at its own first sample above `--silence`, and the
+verdict line names the shift:
+
+```bash
+luna diff --audio --align-onset build/old/music.sfc build/new/music.sfc --until-frame 300
+# window      0 ms: a=  4000.99 b=  4000.54 delta=0.01%
+# window    500 ms: a=  1639.02 b=  1639.02 delta=0.00%
+# …
+# first sample above 64: a=47906 b=47370 (of 159936 / 159936)
+# 7 window(s) of 500 ms, max delta 0.09% (tolerance 2%), onset shift -536 samples: MATCH
+```
+
+Without the option the same two ROMs read `max delta 85.24%: DIFF`. The
+shift is `b - a`: negative when B starts sooner. If only one of the two
+captures is silent there is nothing to align, and the verdict is `DIFF`.
+
+**A capture that stops short** is a `DIFF` whatever its windows say: both
+ROMs ran to the same frame, so one capture a whole window shorter than
+the other is a machine that halted, not a late sound. The report says so
+(`length_mismatch`).
 
 **What it does not see.** It compares a loudness envelope, not a
 spectrum: a wrong note played at the same level passes. Keep the hash as
@@ -395,8 +471,8 @@ current mode; Mode 7 → one `bg1_tilemap_mode7.png`), `palette.png`, and
 raw `vram.bin` / `cgram.bin` and `oam.json` (sprite metadata).
 
 > **This captures only what is loaded at that instant** (already
-> decompressed by the game). Snapshot several scenes — different `-n`,
-> or `--input` to reach them — to cover a whole game. A static
+> decompressed by the game). Snapshot several scenes — different `-n`
+> or `--until-frame`, or `--input` to reach them — to cover a whole game. A static
 > whole-ROM rip is **not** possible: SNES graphics are
 > game-specific-compressed with no standard layout.
 
@@ -404,6 +480,7 @@ raw `vram.bin` / `cgram.bin` and `oam.json` (sprite metadata).
 |---|---|---|
 | `<ROM>` | — | Path to the ROM. |
 | `-n, --steps <N>` | `5000000` | CPU instructions before the snapshot. |
+| `--until-frame <F>` | — | Run to PPU frame `F` instead, as `state --until-frame` does. The frame reached under `-n` depends on how fast the code is; this takes the assets at the frame a test manifest checks. Excludes `-n`. |
 | `--out <DIR>` | `/tmp/luna_assets` | Output directory (created if absent). |
 | `--bpp <2\|4\|8>` | auto (BG1 mode) | Bit-depth for the VRAM tile sheet. |
 | `--palette <N>` | `0` | CGRAM sub-palette row for the tile sheet (2/4bpp). |
@@ -414,6 +491,12 @@ raw `vram.bin` / `cgram.bin` and `oam.json` (sprite metadata).
 
 ```bash
 luna assets-dump "game.sfc" -n 8000000 --out /tmp/assets
+
+# The VRAM a manifest with `frames = 200` asserts on, to read a block back.
+luna assets-dump "game.sfc" --until-frame 200 --out /tmp/assets
+# assets @ frame 200 (BGMODE $02, tile sheet 4bpp):
+#   /tmp/assets/screen.png (5842 bytes)
+#   …
 ```
 
 Two of the files it writes for a Mode 7 test ROM, `bg1_tilemap_mode7.png`

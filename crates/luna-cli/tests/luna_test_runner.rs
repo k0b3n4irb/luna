@@ -782,6 +782,46 @@ fbhash = "0000000000000000"
     assert!(out.status.success());
 }
 
+/// `--update` recaptures a block that did not match (`OpenSNES`
+/// 2026-10-08: 64 runs to remeasure a table one byte at a time). The hex
+/// keeps its layout and its comment; the block that matched is untouched;
+/// the JSON report carries the bytes without rewriting anything.
+#[test]
+fn update_recaptures_the_blocks_that_did_not_match() {
+    let dir = fresh_dir("update_blocks");
+    synthetic_rom(&dir.join("game.sfc"), &[]);
+    let manifest = dir.join("blocks.toml");
+    let text = r#"rom = "game.sfc"
+force_mapper = "lorom"
+frames = 3
+
+[asserts.blocks]
+"00:FFFC" = "FF FF"   # the reset vector
+vector = { space = "wram", offset = "00:FFFC", hex = "0080" }
+"#;
+    std::fs::write(&manifest, text).unwrap();
+
+    let out = run(&["blocks.toml", "--report", "json"], &dir);
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout[stdout.find("\n{").unwrap()..]).unwrap();
+    let blocks = json["tests"][0]["block_mismatches"].as_array().unwrap();
+    assert_eq!(blocks.len(), 1, "{blocks:?}");
+    assert_eq!(blocks[0]["assert"], "blocks.00:FFFC");
+    assert_eq!(blocks[0]["expected_hex"], "ffff");
+    assert_eq!(blocks[0]["actual_hex"], "0080");
+    assert_eq!(std::fs::read_to_string(&manifest).unwrap(), text);
+
+    let out = run(&["blocks.toml", "--update"], &dir);
+    assert!(out.status.success());
+    assert_eq!(
+        std::fs::read_to_string(&manifest).unwrap(),
+        text.replace("FF FF", "00 80")
+    );
+    assert!(run(&["blocks.toml"], &dir).status.success());
+}
+
 /// `power_on = "random"` (+ `seed`) fills RAM before the ROM boots, so a
 /// footprint floor on WRAM that the all-zero default fails now passes,
 /// and two runs with the same seed agree byte for byte (issue #224).

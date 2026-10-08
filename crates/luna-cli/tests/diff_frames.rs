@@ -178,14 +178,156 @@ fn audio_compares_levels_per_window_and_reports_json() {
     assert_eq!(json["until_frame"], 60);
     assert_eq!(json["window_ms"], 250);
     assert!(json["onset_a"].is_null());
-    // 60 NTSC frames are one second of output: four 250 ms windows, give
-    // or take the partial one the frame boundary leaves at the end.
+    // 60 NTSC frames are one second of output: the 250 ms windows that
+    // fit whole in it, the partial one at the end left out.
     let samples = json["samples_a"].as_u64().unwrap();
     assert!((31_000..=33_000).contains(&samples), "{samples}");
     assert_eq!(json["samples_b"], json["samples_a"]);
     let windows = json["windows"].as_array().unwrap();
-    assert_eq!(windows.len() as u64, samples.div_ceil(8_000));
+    assert_eq!(windows.len() as u64, samples / 8_000);
     assert_eq!(windows[1]["start_ms"], 250);
+    assert_eq!(json["align_onset"], false);
+    assert_eq!(json["length_mismatch"], false);
+}
+
+/// `--align-onset` on two captures with no onset: nothing to align, they
+/// are compared whole and the verdict names no shift.
+#[test]
+fn audio_align_onset_compares_two_silences_whole() {
+    let dir = std::env::temp_dir().join("luna_diff_audio_align");
+    let _ = std::fs::create_dir_all(&dir);
+    let (a, b) = (dir.join("a.sfc"), dir.join("b.sfc"));
+    counter_rom(&a, 0);
+    counter_rom(&b, 1);
+    let (code, stdout, stderr) = diff(&[
+        a.to_str().unwrap(),
+        b.to_str().unwrap(),
+        "--force-mapper",
+        "lorom",
+        "--audio",
+        "--align-onset",
+        "--until-frame",
+        "60",
+        "--out",
+        "-",
+    ]);
+    assert_eq!(code, Some(0), "stdout: {stdout}\nstderr: {stderr}");
+    assert!(!stdout.contains("onset shift"), "{stdout}");
+    assert!(stdout.contains("\"align_onset\": true"), "{stdout}");
+    assert!(stdout.contains("\"onset_shift\": null"), "{stdout}");
+}
+
+/// `luna diff --sequence`: the counter ROM shows a new picture every
+/// frame, and the build that starts three counts ahead shows A's frame
+/// `F` at `F - 3`. No `--tolerance` is asked for: the sequence is the same.
+#[test]
+fn sequence_finds_the_same_pictures_at_another_offset() {
+    let dir = std::env::temp_dir().join("luna_diff_sequence");
+    let _ = std::fs::create_dir_all(&dir);
+    let (a, b) = (dir.join("a.sfc"), dir.join("b.sfc"));
+    counter_rom(&a, 0);
+    counter_rom(&b, 3);
+    let report = dir.join("report.json");
+    let common = [
+        a.to_str().unwrap(),
+        b.to_str().unwrap(),
+        "--force-mapper",
+        "lorom",
+        "--sequence",
+        "--from",
+        "10",
+        "--to",
+        "60",
+    ];
+    let (code, stdout, stderr) =
+        diff(&[&common[..], &["--out", report.to_str().unwrap()]].concat());
+    assert_eq!(code, Some(0), "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("frames 10-60"), "{stdout}");
+    assert!(
+        stdout.contains("A: 51 pictures, frames per picture [1]"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "longest common run: 48 pictures in the same order \
+             (from frame 13 in A, frame 10 in B, offset -3)"
+        ),
+        "{stdout}"
+    );
+    assert!(stdout.trim_end().ends_with("SAME-SEQUENCE"), "{stdout}");
+
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+    assert_eq!(json["status"], "same-sequence");
+    assert_eq!(json["side_b"]["pictures"], 51);
+    assert_eq!(json["common_run"]["pictures"], 48);
+    assert_eq!(json["common_run"]["offset"], -3);
+    assert_eq!(json["min_common_pct"], 90.0);
+
+    // The whole of A is not in B's range: asking for all 51 is a DIFF.
+    let (code, stdout, _) = diff(&[&common[..], &["--min-common", "51"]].concat());
+    assert_eq!(code, Some(1), "{stdout}");
+    assert!(stdout.trim_end().ends_with("DIFF"), "{stdout}");
+}
+
+#[test]
+fn sequence_usage_errors_exit_two() {
+    for args in [
+        // No end of range.
+        vec!["a.sfc", "b.sfc", "--sequence"],
+        // An empty range.
+        vec!["a.sfc", "b.sfc", "--sequence", "--from", "9", "--to", "5"],
+        // The sequence comparison's options need `--sequence`…
+        vec!["a.sfc", "b.sfc", "--frames", "5", "--to", "9"],
+        vec!["a.sfc", "b.sfc", "--frames", "5", "--min-common", "3"],
+        // …and do not mix with the other two comparisons.
+        vec!["a.sfc", "b.sfc", "--sequence", "--to", "9", "--frames", "5"],
+        vec![
+            "a.sfc",
+            "b.sfc",
+            "--sequence",
+            "--to",
+            "9",
+            "--tolerance",
+            "1",
+        ],
+        vec![
+            "a.sfc",
+            "b.sfc",
+            "--sequence",
+            "--to",
+            "9",
+            "--audio",
+            "--until-frame",
+            "9",
+        ],
+        // One threshold, and a percentage that is one.
+        vec![
+            "a.sfc",
+            "b.sfc",
+            "--sequence",
+            "--to",
+            "9",
+            "--min-common",
+            "3",
+            "--min-common-pct",
+            "50",
+        ],
+        vec![
+            "a.sfc",
+            "b.sfc",
+            "--sequence",
+            "--to",
+            "9",
+            "--min-common-pct",
+            "150",
+        ],
+        // `--align-onset` belongs to `--audio`.
+        vec!["a.sfc", "b.sfc", "--frames", "5", "--align-onset"],
+    ] {
+        let (code, _, stderr) = diff(&args);
+        assert_eq!(code, Some(2), "{args:?}: {stderr}");
+    }
 }
 
 #[test]

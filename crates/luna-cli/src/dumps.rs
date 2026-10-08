@@ -61,6 +61,7 @@ pub(crate) fn run_spc_dump(
 pub(crate) fn run_assets_dump(
     rom: &std::path::Path,
     steps: u64,
+    until_frame: Option<u64>,
     out: &std::path::Path,
     bpp: Option<u8>,
     palette: u8,
@@ -74,13 +75,19 @@ pub(crate) fn run_assets_dump(
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }
-    // Checkpoints spend from the SAME `-n` budget as the run (issue #126).
-    let remaining = match warm_up_with_script(&mut em, input_script, steps) {
-        Ok(remaining) => remaining,
-        Err(code) => return code,
-    };
-    if let Err(e) = em.step(remaining) {
-        eprintln!("step warning (warm-up): {e}");
+    if let Some(frame) = until_frame {
+        if let Err(code) = run_to_frame(&mut em, input_script, frame) {
+            return code;
+        }
+    } else {
+        // Checkpoints spend from the SAME `-n` budget as the run (issue #126).
+        let remaining = match warm_up_with_script(&mut em, input_script, steps) {
+            Ok(remaining) => remaining,
+            Err(code) => return code,
+        };
+        if let Err(e) = em.step(remaining) {
+            eprintln!("step warning (warm-up): {e}");
+        }
     }
     if let Err(e) = std::fs::create_dir_all(out) {
         eprintln!("error: creating {}: {e}", out.display());
@@ -158,6 +165,37 @@ pub(crate) fn run_assets_dump(
         out.display()
     );
     ExitCode::SUCCESS
+}
+
+/// Run to PPU frame `frame`, replaying a `--input` script on the way —
+/// the stop of `luna state --until-frame`. A machine that halts before
+/// the frame is dumped where it stopped, with a warning.
+fn run_to_frame(
+    em: &mut luna_api::Emulator,
+    input_script: Option<&str>,
+    frame: u64,
+) -> Result<(), ExitCode> {
+    let mut script =
+        apply_input_flags(em, &InputFlags::pad1(input_script)).map_err(ExitCode::from)?;
+    if let Err(e) = em.run_input_script(&mut script, luna_api::ScriptBound::Frame(frame)) {
+        eprintln!("error: scripted input: {e}");
+        return Err(ExitCode::from(1));
+    }
+    while em.frame_count().unwrap_or(0) < frame {
+        match em.step_until_frame(luna_api::FRAME_STEP_BUDGET) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("step warning: {e}");
+                break;
+            }
+        }
+    }
+    let reached = em.frame_count().unwrap_or(0);
+    if reached < frame {
+        eprintln!("warning: the machine stopped at frame {reached}, before frame {frame}");
+    }
+    Ok(())
 }
 
 /// Replay a `--input` script inside the `-n` warm-up budget; returns the
