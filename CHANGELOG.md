@@ -7,6 +7,18 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+### Fixed
+
+- **An arrival on a routine is counted once when an interrupt is taken
+  on its first instruction.** When the NMI or an IRQ was latched with
+  the program counter standing on the watched instruction, the arrival
+  was reported, the interrupt ran, and the same arrival was reported
+  again after the `RTI`. Every count of arrivals was then one ahead:
+  `--hit N` (`--until-pc`, `--poke-at`, `at_symbol` checkpoints, `luna
+  profile`), the rows of `--peek-at`, and the entries of an `--input-at`
+  script. An arrival is now the instruction about to run, not the
+  interrupt about to be taken in front of it.
+
 ## [1.38.0] — 2026-10-10
 
 Two tools asked for by the first game ported with luna: assert what is

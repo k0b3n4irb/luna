@@ -3277,7 +3277,8 @@ impl Emulator {
     /// while it replays a frame-indexed input script.
     ///
     /// A PC is *reached* when the instruction there is about to execute:
-    /// a CPU parked in `WAI` in front of it is not there yet. `skip_first`
+    /// a CPU parked in `WAI` in front of it is not there yet, and neither
+    /// is one about to take an interrupt instead. `skip_first`
     /// lets the caller leave a PC it was just told about; without it the
     /// same hit is reported again.
     pub fn run_to_pc_or_frame(
@@ -3297,6 +3298,14 @@ impl Emulator {
                     return Some(PcStop::Frame);
                 }
                 if (executed == 0 && skip_first) || snes.cpu.waiting {
+                    return None;
+                }
+                // An interrupt latched at the end of the last instruction
+                // is what the next step runs, not the instruction the PC
+                // stands on: that one runs after the `RTI`, and is the
+                // arrival. Without this, a routine interrupted on its
+                // first instruction was reached twice.
+                if snes.cpu.pending_nmi || snes.cpu.pending_irq {
                     return None;
                 }
                 let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);

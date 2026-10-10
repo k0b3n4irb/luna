@@ -1880,6 +1880,49 @@ fn the_profile_frame_series_is_the_frame_buckets_and_flags_lag() {
 }
 
 #[test]
+fn an_interrupt_taken_on_a_watched_instruction_is_not_an_arrival() {
+    // A loop that never waits, its first instruction watched, and the
+    // NMI on: sooner or later the NMI is taken with the PC standing on
+    // the watched instruction, which then runs after the `RTI`. That is
+    // one arrival, not two (a game whose tick routine was interrupted
+    // on its first instruction counted that tick twice, 2026-10-10).
+    // The loop counts its own passes in `$10`/`$11`.
+    let code = [
+        0x78, // 8000 SEI
+        0xA9, 0x80, // 8001 LDA #$80
+        0x8D, 0x00, 0x42, // 8003 STA $4200
+        0xE6, 0x10, // 8006 INC $10         watched
+        0xD0, 0xFC, // 8008 BNE $8006
+        0xE6, 0x11, // 800A INC $11
+        0x80, 0xF8, // 800C BRA $8006
+        0x40, // 800E RTI
+    ];
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom_with(&code, Some(0x800E)))
+        .unwrap();
+    let mut arrivals = 0u32;
+    e.run_script_watching(
+        &mut InputScript::new(),
+        ScriptBound::Frame(4),
+        &[0x00_8006],
+        |_, ev| {
+            arrivals += u32::from(ev == WatchEvent::Pc(0));
+            false
+        },
+    )
+    .unwrap();
+    let passes = e.peek_memory(0x7E, 0x0010, 2).unwrap();
+    let passes = u32::from(u16::from_le_bytes([passes[0], passes[1]]));
+    assert!(passes > 1000, "the loop ran: {passes}");
+    // Every arrival reported was followed by its pass; the last one may
+    // still be standing in front of the instruction when the frame ends.
+    assert!(
+        arrivals == passes || arrivals == passes + 1,
+        "{arrivals} arrivals for {passes} passes"
+    );
+}
+
+#[test]
 fn a_watched_pc_is_reached_once_per_pass_and_frames_keep_the_script() {
     let run = |pc: u32| {
         let mut e = Emulator::new();
