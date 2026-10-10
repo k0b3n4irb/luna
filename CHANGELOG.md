@@ -7,6 +7,29 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+## [1.37.0] — 2026-10-10
+
+A DMA now lasts what it lasts on the console, and three tools grow from
+the first game ported with luna: input scripts and memory writes indexed
+by arrivals on a routine, and a value assert that compares a 16-bit
+variable whole. Two requests from OpenSNES: the audio comparison fits
+each window by itself, and `luna test --update` says what it rewrote.
+
+**Upgrading from 1.36.0:** save states are unchanged. Three things can
+move a result:
+
+- **Cycle counts around a DMA.** A burst started from a 6-clock access
+  ends 2 or 4 master clocks elsewhere; one started while an HDMA channel
+  is enabled costs 16 to 24 more per one-channel burst. Pictures are
+  unchanged on our references except a Super FX intro, where the same
+  pictures come in the same order up to three frames apart (`luna diff
+  --sequence` is the comparison for that). A cycle budget or an audio
+  hash recorded on 1.36.0 may need recapturing.
+- **A manifest that passed on a low byte alone now fails**, when the
+  `.sym` gives the variable two bytes.
+- **`luna diff --audio --align-onset`** searches a shift per window; its
+  verdict line and JSON keys changed (`onset_shift` is gone).
+
 ### Added
 
 - **`--input-at SYMBOL`: input scripts indexed by arrivals on a
