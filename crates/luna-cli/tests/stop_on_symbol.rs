@@ -499,6 +499,17 @@ fn profile_gives_the_cost_of_each_frame_and_gates_on_it() {
     let s = &v["frame_summary"];
     assert_eq!((&s["frames"], &s["lag_run"]), (&12.into(), &2.into()));
     assert_eq!(s["lag_frames"], 8);
+    // Every run of two or more, with its first frame: how many, how regular.
+    let runs = s["lag_runs"].as_array().unwrap();
+    // (The window opens on the last frame of a tick: a single lag frame.)
+    assert_eq!(runs.len(), 3, "{s:#}");
+    assert!(runs.iter().all(|r| r["length"] == 2));
+    let starts: Vec<u64> = runs.iter().map(|r| r["frame"].as_u64().unwrap()).collect();
+    assert!(starts.windows(2).all(|w| w[1] - w[0] == 3), "{starts:?}");
+    assert!(
+        stdout.contains("lag runs of 2 or more: 3 (from frame 4, 7, 10)"),
+        "{stdout}"
+    );
     let worst = v["worst_frames"].as_array().unwrap();
     assert_eq!(worst.len(), 2);
     assert_eq!(worst[0]["active_mclk"], s["active_max"]);

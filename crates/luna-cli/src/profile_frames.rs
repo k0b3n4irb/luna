@@ -49,8 +49,21 @@ pub(crate) struct FrameSummary {
     lag_run: u64,
     /// …and its first frame.
     lag_run_frame: Option<u64>,
+    /// Every run of two or more lag frames in a row, in order — two is
+    /// where a tick that may take two frames has taken a third. "How
+    /// many, and how regular" without a pass over the series.
+    lag_runs: Vec<LagRun>,
     /// One verdict per gate asked for.
     gates: Vec<GateVerdict>,
+}
+
+/// One run of consecutive lag frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct LagRun {
+    /// Its first frame.
+    frame: u64,
+    /// How many lag frames in a row.
+    length: u64,
 }
 
 impl FrameSummary {
@@ -71,6 +84,7 @@ pub(crate) fn summarize(series: &[ProfileFrame], gates: &FrameGates) -> FrameSum
     let mean = |f: fn(&ProfileFrame) -> u64| series.iter().map(f).sum::<u64>() / frames.max(1);
     let (mut lag_run, mut lag_run_frame) = (0u64, None);
     let (mut run, mut run_start) = (0u64, 0u64);
+    let mut lag_runs: Vec<LagRun> = Vec::new();
     for f in series {
         if f.lag {
             if run == 0 {
@@ -80,6 +94,14 @@ pub(crate) fn summarize(series: &[ProfileFrame], gates: &FrameGates) -> FrameSum
             if run > lag_run {
                 lag_run = run;
                 lag_run_frame = Some(run_start);
+            }
+            match lag_runs.last_mut().filter(|r| r.frame == run_start) {
+                Some(r) => r.length = run,
+                None if run == 2 => lag_runs.push(LagRun {
+                    frame: run_start,
+                    length: run,
+                }),
+                None => {}
             }
         } else {
             run = 0;
@@ -120,9 +142,13 @@ pub(crate) fn summarize(series: &[ProfileFrame], gates: &FrameGates) -> FrameSum
         lag_frames,
         lag_run,
         lag_run_frame,
+        lag_runs,
         gates,
     }
 }
+
+/// How many starts of lag runs the summary line lists before `…`.
+const LAG_RUNS_SHOWN: usize = 8;
 
 /// Print the summary line and one line per gate.
 pub(crate) fn print_summary(s: &FrameSummary) {
@@ -145,6 +171,24 @@ pub(crate) fn print_summary(s: &FrameSummary) {
             s.total_mean,
             s.active_max,
             s.active_max_frame.unwrap_or(0),
+        );
+    }
+    if !s.lag_runs.is_empty() {
+        let starts: Vec<String> = s
+            .lag_runs
+            .iter()
+            .take(LAG_RUNS_SHOWN)
+            .map(|r| r.frame.to_string())
+            .collect();
+        println!(
+            "lag runs of 2 or more: {} (from frame {}{})",
+            s.lag_runs.len(),
+            starts.join(", "),
+            if s.lag_runs.len() > LAG_RUNS_SHOWN {
+                ", …"
+            } else {
+                ""
+            }
         );
     }
     for g in &s.gates {
@@ -254,6 +298,14 @@ mod tests {
         assert_eq!((s.active_max, s.active_max_frame), (1000, Some(14)));
         assert_eq!(s.lag_frames, 4);
         assert_eq!((s.lag_run, s.lag_run_frame), (2, Some(14)));
+        assert_eq!(
+            s.lag_runs,
+            [LagRun {
+                frame: 14,
+                length: 2
+            }],
+            "single lag frames are not runs"
+        );
         assert!(s.ok(), "no gate asked, none failed");
     }
 

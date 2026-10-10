@@ -44,7 +44,8 @@ on stderr; what it reads has not changed.
   the NMI found the CPU still executing); `--worst N` prints the
   per-symbol table of the N heaviest frames; `--max-frame-mclk`,
   `--max-lag-frames` and `--max-lag-run` gate on the series. The JSON
-  gains `frame_series`, `worst_frames` and `frame_summary` (#270).
+  gains `frame_series`, `worst_frames` and `frame_summary`, whose `lag_runs`
+  lists every run of two or more lag frames (#270).
 - **`--peek` counts that say their base:** `NAME:0x24` (hex) and
   `NAME:#36` (decimal). A bare count stays hex (#269).
 - **luna-api:** `Emulator::run_script_watching`, `run_to_pc_or_frame`,
