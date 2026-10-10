@@ -7,6 +7,16 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+## [1.38.0] — 2026-10-10
+
+Two tools asked for by the first game ported with luna: assert what is
+on screen where the game writes it, and profile a number of game ticks
+instead of a number of frames.
+
+**Upgrading from 1.37.0:** nothing to do. Emulation, frames, audio, save
+states and every existing output are unchanged; both additions are new
+keys and options.
+
 ### Added
 
 - **`vram:WORD` keys in value asserts, and `--peek VRAM:WORD:COUNT`.** A
