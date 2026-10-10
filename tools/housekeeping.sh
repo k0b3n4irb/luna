@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # housekeeping.sh — keep the GitHub side of the repository small:
-#   * Releases: only the KEEP_RELEASES highest versions keep their page and
-#     binaries. Git tags are never deleted, so an older version is rebuilt
-#     from its tag (git checkout vX.Y.Z && cargo build --release -p luna-cli).
+#   * Releases: the KEEP_RELEASES highest versions keep their page and
+#     binaries, plus the version OpenSNES's latest release pins (the file
+#     `luna.version` on their `main`): their installer downloads that one
+#     and fails in 404 once its binaries are gone. Git tags are never
+#     deleted, so an older version is rebuilt from its tag
+#     (git checkout vX.Y.Z && cargo build --release -p luna-cli).
 #   * Actions: workflow runs created more than RUNS_MAX_AGE ago are deleted
 #     (logs and run artifacts go with them; release assets are untouched).
 #
@@ -14,6 +17,8 @@
 #   tools/housekeeping.sh            # dry run: prints what would be deleted
 #   tools/housekeeping.sh --apply    # deletes
 #   KEEP_RELEASES=5 RUNS_MAX_AGE="1 month ago" tools/housekeeping.sh
+#   PINNED=v1.34.0 tools/housekeeping.sh   # skip the lookup, name the pin
+#   PINNED=none tools/housekeeping.sh      # no pinned version to protect
 #
 # Needs `gh` authenticated on the repository (GH_TOKEN, or `gh auth login`).
 # Deleting a release is not undoable in practice: its binaries would have to
@@ -23,6 +28,11 @@ set -u
 REPO="${REPO:-k0b3n4irb/luna}"
 KEEP_RELEASES="${KEEP_RELEASES:-5}"
 RUNS_MAX_AGE="${RUNS_MAX_AGE:-1 month ago}"
+# Where OpenSNES names the luna its release installs: the path moved
+# between their versions, so both are tried on their default branch.
+PIN_REPO="${PIN_REPO:-k0b3n4irb/opensnes}"
+PIN_REF="${PIN_REF:-main}"
+PIN_PATHS="${PIN_PATHS:-testing/luna.version tools/luna-test/luna.version}"
 
 apply=0
 case "${1:-}" in
@@ -39,6 +49,29 @@ all="$(gh release list --repo "$REPO" --limit 1000 --exclude-drafts \
   --exclude-pre-releases --json tagName --jq '.[].tagName')" || exit 1
 drop="$(printf '%s\n' "$all" | sort -V | head -n "-$KEEP_RELEASES")"
 kept="$(printf '%s\n' "$all" | sort -V | tail -n "$KEEP_RELEASES" | tr '\n' ' ')"
+
+# The version OpenSNES's latest release pins stays, whatever its rank.
+pinned="${PINNED:-}"
+if [ -z "$pinned" ]; then
+  for path in $PIN_PATHS; do
+    pinned="$(gh api "repos/$PIN_REPO/contents/$path?ref=$PIN_REF" \
+      -H "Accept: application/vnd.github.raw" 2>/dev/null | head -n 1 | tr -d '[:space:]')"
+    case "$pinned" in v[0-9]*) break ;; *) pinned="" ;; esac
+  done
+fi
+if [ -z "$pinned" ]; then
+  # Not knowing the pin is not the same as there being none: deleting a
+  # release cannot be undone, so no release goes on a guess.
+  if [ -n "$drop" ]; then
+    echo "cannot read the luna version pinned by $PIN_REPO@$PIN_REF:" \
+      "no release deleted (set PINNED=vX.Y.Z, or PINNED=none)" >&2
+    failed=$((failed + 1))
+  fi
+  drop=""
+elif [ "$pinned" != "none" ]; then
+  drop="$(printf '%s\n' "$drop" | grep -vxF "$pinned")"
+  case " $kept" in *" $pinned "*) ;; *) kept="$kept$pinned (pinned by $PIN_REPO@$PIN_REF) " ;; esac
+fi
 
 echo "releases kept: $kept"
 dropped=0

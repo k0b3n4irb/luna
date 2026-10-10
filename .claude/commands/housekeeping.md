@@ -1,5 +1,5 @@
 ---
-description: Delete GitHub releases beyond the five highest and Actions runs older than a month
+description: Delete GitHub releases beyond the five highest and the one OpenSNES pins, and Actions runs older than a month
 allowed-tools: Bash(tools/housekeeping.sh*), Bash(gh *)
 ---
 
@@ -10,9 +10,10 @@ tools/housekeeping.sh            # dry run first
 tools/housekeeping.sh --apply    # then delete
 ```
 
-Before `--apply`, check that the release OpenSNES pins on its `main`
-(`testing/luna.version`, in the OpenSNES repository) is not in the "would delete" list; if it
-is, stop and write them a partner note first.
+The script keeps the release OpenSNES pins on its `main` by itself (it
+appears in "releases kept" as "pinned by …"). If it reports that it
+cannot read the pin, it deletes no release: find out why before naming
+the pin by hand with `PINNED=`.
 
 Report:
 

@@ -52,7 +52,7 @@ A cycle-accurate-ish SNES emulator written in Rust. 12-crate workspace:
 | API-first (CLI / MCP / GUI all drive `luna-api`, never `luna-core` directly) | `.claude/rules/api-first.md` | Any `luna-gui` change touching emulation / input / audio / framebuffer, or any front-end need for core state |
 | **One author: `~/.gitconfig`** — no `Co-authored-by` / tool trailers, never let GitHub commit (releases = fast-forward `develop:main`) | `.claude/rules/no-co-authored-by.md` | Every commit, merge, tag, PR or release |
 | No dependency bots (Dependabot, Renovate…) — permanently banned | `.claude/rules/no-dependency-bots.md` | Any dependency update, CI or repository-settings change |
-| GitHub housekeeping — five releases keep binaries, Actions runs older than a month go (`tools/housekeeping.sh`) | `.claude/rules/housekeeping.md` | After every release; during ordinary work when the dry run lists something |
+| GitHub housekeeping — five releases keep binaries, plus the one OpenSNES pins; Actions runs older than a month go (`tools/housekeeping.sh`) | `.claude/rules/housekeeping.md` | After every release; during ordinary work when the dry run lists something |
 | Documentation drift — the guide, `docs/` and the rules are checked against the tree (`tools/check-doc-drift.py`, CI job `docs`) | `.claude/rules/doc-drift.md` | Any change to `book/`, `docs/`, `.claude/`, the root `.md` files, a `luna` option or an MCP tool |
 | Direct exchanges with OpenSNES and the game — session to session, no GitHub issue between the three; the game tests with `target/stable/luna` | `.claude/rules/exchanges.md` | Start of a session; any request from or to a neighbour; any commit that lands on `develop` for one of them |
 
@@ -65,7 +65,7 @@ Read the matching rule before touching the relevant code, not after.
 | `/rebuild` | Canonical workspace rebuild (debug + release, all targets) |
 | `/smoke-test [smrpg\|smw\|both]` | Visual regression screenshot via luna-cli |
 | `/reference-fetch <subsys>` | Fetch ares + Mesen2 sources for a subsystem into `/tmp/` |
-| `/housekeeping` | Delete releases beyond the five highest and Actions runs older than a month |
+| `/housekeeping` | Delete releases beyond the five highest and the one OpenSNES pins, and Actions runs older than a month |
 
 ## Code style
 
