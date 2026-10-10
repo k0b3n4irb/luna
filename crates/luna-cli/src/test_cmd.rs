@@ -1815,12 +1815,17 @@ fn parse_key_offset(s: &str) -> Result<i64, String> {
     i64::from_str_radix(digits, radix).map_err(|e| e.to_string())
 }
 
-/// Read a 1- or 2-byte little-endian value at `key`.
+/// Read a 1- or 2-byte little-endian value at `key`: a CPU-bus location
+/// (see [`resolve_key`]), or `vram:WORD`, a VRAM word address.
 fn read_value(em: &mut luna_api::Emulator, key: &str, width: u8) -> Result<i64, String> {
-    let addr = resolve_key(em, key)?;
-    let bytes = em
-        .peek_memory((addr >> 16) as u8, addr as u16, u16::from(width.max(1)))
-        .map_err(|e| e.to_string())?;
+    let bytes = if let Some(word) = crate::parsers::parse_vram_word(key) {
+        em.peek_vram(word? * 2, u32::from(width.max(1)))
+            .map_err(|e| e.to_string())?
+    } else {
+        let addr = resolve_key(em, key)?;
+        em.peek_memory((addr >> 16) as u8, addr as u16, u16::from(width.max(1)))
+            .map_err(|e| e.to_string())?
+    };
     Ok(match width {
         1 => i64::from(bytes[0]),
         _ => i64::from(u16::from_le_bytes([bytes[0], bytes[1]])),
@@ -1837,7 +1842,12 @@ fn check_value(
     // What the `.sym` says the variable is (issue #271). An expected value
     // that fits in a byte used to compare one byte of a 16-bit variable:
     // `cam_x = 21` passed while the variable held 277.
-    let size = em.symbol_size(key);
+    // A `vram:WORD` key names a word: it is compared whole.
+    let size = if crate::parsers::parse_vram_word(key).is_some() {
+        Some(2)
+    } else {
+        em.symbol_size(key)
+    };
     let width = value_width(cmp.width, fit, size);
     let got = read_value(em, key, width)?;
     let label = match size {

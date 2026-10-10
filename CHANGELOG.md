@@ -7,6 +7,17 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+### Added
+
+- **`vram:WORD` keys in value asserts, and `--peek VRAM:WORD:COUNT`.** A
+  manifest can assert what is on screen where the game writes it: in
+  `[asserts.values]` and in a checkpoint's `values` and `delta`, a key
+  `"vram:7340"` reads the VRAM word at that word address (as `VMADD`
+  takes it) and compares it whole. A status bar's digits no longer need
+  a frame hash that changes with every compiler. `luna state --peek
+  VRAM:7340:6` reads bytes from a word address, and with `--peek-at`
+  samples them at every arrival on a routine.
+
 ## [1.37.0] — 2026-10-10
 
 A DMA now lasts what it lasts on the console, and three tools grow from

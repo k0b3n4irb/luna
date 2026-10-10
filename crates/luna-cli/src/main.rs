@@ -389,6 +389,9 @@ enum Command {
         /// with a stderr note and `unmapped` in the JSON entry.  Output
         /// goes to stderr as a labelled hex dump.  Examples:
         /// `--peek 7E:0200:220`, `--peek monster_x:2`.
+        /// `APU:OFFSET:COUNT` reads the SPC700's RAM, and `VRAM:WORD:COUNT`
+        /// reads `COUNT` bytes of PPU VRAM from a **word** address (as
+        /// `VMADD` takes it): `--peek VRAM:7340:6` is three tilemap entries.
         #[arg(long = "peek")]
         peek: Vec<String>,
         /// Assert memory equals expected bytes after warm-up. Format:

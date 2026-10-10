@@ -1351,6 +1351,27 @@ fn read_peeks(em: &mut luna_api::Emulator, peek_specs: &[String], verbose: bool)
             }
             continue;
         }
+        // `VRAM:WORD:COUNT` reads the PPU's VRAM, from a word address.
+        if let Some(vram) = crate::parsers::parse_vram_peek_spec(spec) {
+            match vram.and_then(|(word, count)| {
+                em.peek_vram(word * 2, count)
+                    .map(|bytes| (word, bytes))
+                    .map_err(|e| e.to_string())
+            }) {
+                Ok((word, bytes)) => {
+                    say!("peek VRAM:{:04X} +{:04X}:", word, bytes.len());
+                    if verbose {
+                        print_hex_dump(0, word * 2, &bytes);
+                    }
+                    peek_outs.push(PeekOut::ok(spec, "vram", u32::from(word), &bytes));
+                }
+                Err(e) => {
+                    say!("error: --peek `{spec}`: {e}");
+                    peek_outs.push(PeekOut::err(spec, "vram", e));
+                }
+            }
+            continue;
+        }
         // Numeric `BANK:OFFSET:COUNT` first; else a WLA-DX label
         // `NAME[:COUNT]` resolved through the loaded .sym table (#77).
         let target = match parse_peek_spec(spec) {

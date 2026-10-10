@@ -169,6 +169,26 @@ What each assert means:
   are 16-bit offsets). Failures report the first mismatching offset; the
   JSON report carries the whole block, and `--update` recaptures it (see
   [Recapturing a block](#recapturing-a-block)).
+- **What is on screen: `vram:WORD` keys** — in `values` and in a
+  checkpoint's `values` and `delta`, a key `"vram:7340"` reads the VRAM
+  **word** at that word address (hex, as `VMADD` `$2116` takes it and as
+  `--dma-trace` prints it): a tilemap entry, a row of a tile. The word is
+  compared whole (`width = 1` takes its low byte). A status bar's digits
+  are then asserted where the game writes them, with no frame hash to
+  recapture each time the compiler moves a frame:
+
+  ```toml
+  [[checkpoint]]
+  at_symbol = "matchDecide"
+  hit = 100
+  [checkpoint.values]
+  "vram:7340" = 0x3415          # the tile and attributes of the first digit
+  [checkpoint.delta]
+  "vram:7341" = "changed"       # since the previous checkpoint
+  ```
+
+  A byte range of VRAM is still `[asserts.blocks]` with `space = "vram"`,
+  whose offsets are in bytes (word address × 2).
 - **Keys relative to a symbol** — anywhere a symbol or `BANK:OFFSET` key
   is accepted (`values`, checkpoint `values`, `blocks`), `symbol+N` and
   `symbol-N` name an address relative to it: `"results+16"` is sixteen

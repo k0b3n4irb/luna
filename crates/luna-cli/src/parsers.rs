@@ -263,6 +263,47 @@ pub(crate) fn parse_apu_peek_spec(spec: &str) -> Option<Result<(u16, u32), Strin
     Some(Ok((offset, count)))
 }
 
+/// A `vram:WORD` location: a VRAM **word** address in hex, as `VMADD`
+/// (`$2116`) takes it and as `--dma-trace` prints it — where a tilemap
+/// entry or a tile row lives. `None` when `key` has no such prefix.
+pub(crate) fn parse_vram_word(key: &str) -> Option<Result<u16, String>> {
+    let key = key.trim();
+    let rest = key
+        .strip_prefix("vram:")
+        .or_else(|| key.strip_prefix("VRAM:"))?;
+    let digits = rest.trim().trim_start_matches("0x").trim_start_matches('$');
+    Some(match u16::from_str_radix(digits, 16) {
+        Ok(word) if word < 0x8000 => Ok(word),
+        Ok(word) => Err(format!(
+            "VRAM word address ${word:04X} is past the 32 K words of VRAM ($0000-$7FFF)"
+        )),
+        Err(e) => Err(format!("bad VRAM word address `{rest}`: {e}")),
+    })
+}
+
+/// A `--peek VRAM:WORD:COUNT` spec: `COUNT` **bytes** (same forms as any
+/// `--peek` count) from the VRAM word address `WORD`, low byte first.
+/// `None` when the spec is not VRAM-prefixed.
+pub(crate) fn parse_vram_peek_spec(spec: &str) -> Option<Result<(u16, u32), String>> {
+    let spec = spec.trim();
+    if !(spec.starts_with("VRAM:") || spec.starts_with("vram:")) {
+        return None;
+    }
+    let Some((at, count_s)) = spec.rsplit_once(':').filter(|(at, _)| at.len() > 4) else {
+        return Some(Err(format!(
+            "expected VRAM:WORD:COUNT (word address in hex, count in bytes), got `{spec}`"
+        )));
+    };
+    let word = match parse_vram_word(at)? {
+        Ok(word) => word,
+        Err(e) => return Some(Err(e)),
+    };
+    Some(match parse_peek_count(count_s) {
+        Ok(count) => Ok((word, u32::from(count))),
+        Err(e) => Err(format!("bad count `{count_s}`: {e}")),
+    })
+}
+
 // =============================================================================
 // Controller flags → port devices + one event stream
 //

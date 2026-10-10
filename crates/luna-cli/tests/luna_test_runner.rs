@@ -1416,3 +1416,103 @@ V3_PH = 0            # $33
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// A program that writes the tilemap word `$3415` at VRAM word `$7340`,
+/// then counts in `$10` for ever from `$801E`.
+fn vram_word_rom(path: &Path) {
+    synthetic_rom(
+        path,
+        &[
+            0xA9, 0x80, 0x8D, 0x00, 0x21, // 8000 LDA #$80 : STA $2100  forced blank
+            0xA9, 0x80, 0x8D, 0x15, 0x21, // 8005 LDA #$80 : STA $2115  step on the high byte
+            0xA9, 0x40, 0x8D, 0x16, 0x21, // 800A LDA #$40 : STA $2116
+            0xA9, 0x73, 0x8D, 0x17, 0x21, // 800F LDA #$73 : STA $2117  VMADD = $7340
+            0xA9, 0x15, 0x8D, 0x18, 0x21, // 8014 LDA #$15 : STA $2118
+            0xA9, 0x34, 0x8D, 0x19, 0x21, // 8019 LDA #$34 : STA $2119  word $3415
+            0xE6, 0x10, // 801E INC $10
+            0x80, 0xFC, // 8020 BRA $801E
+        ],
+    );
+}
+
+/// A `vram:WORD` key reads a VRAM word in a value assert and in a delta,
+/// at the end of the run and at an arrival on a routine: what is on
+/// screen, asserted without a frame hash.
+#[test]
+fn a_vram_word_is_asserted_by_its_word_address() {
+    let dir = fresh_dir("vram_word");
+    vram_word_rom(&dir.join("game.sfc"));
+    std::fs::write(
+        dir.join("hud.toml"),
+        r#"rom = "game.sfc"
+force_mapper = "lorom"
+frames = 3
+
+[[checkpoint]]
+at_symbol = "00:801E"
+hit = 2
+[checkpoint.values]
+"vram:7340" = 0x3415
+"VRAM:$7341" = 0
+[checkpoint.delta]
+"vram:7340" = "changed"
+
+[asserts.values]
+"vram:7340" = { eq = 0x15, width = 1 }
+"vram:0x7340" = 0x3415
+"#,
+    )
+    .unwrap();
+    let out = run(&["hud.toml"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+
+    // A wrong word fails on the whole word, although 0x16 fits in a byte.
+    std::fs::write(
+        dir.join("wrong.toml"),
+        r#"rom = "game.sfc"
+force_mapper = "lorom"
+frames = 3
+
+[asserts.values]
+"vram:7340" = 0x16
+"vram:8000" = 0
+"#,
+    )
+    .unwrap();
+    let out = run(&["wrong.toml"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    assert!(stdout.contains("values.vram:7340"), "{stdout}");
+    assert!(stdout.contains("0x3415"), "{stdout}");
+    assert!(stdout.contains("past the 32 K words of VRAM"), "{stdout}");
+}
+
+/// `luna state --peek VRAM:WORD:COUNT` reads bytes from a word address,
+/// low byte first, and reports the space.
+#[test]
+fn state_peeks_vram_from_a_word_address() {
+    let dir = fresh_dir("vram_peek");
+    vram_word_rom(&dir.join("game.sfc"));
+    let out = Command::new(luna_bin())
+        .args([
+            "state",
+            "game.sfc",
+            "--force-mapper",
+            "lorom",
+            "--until-frame",
+            "3",
+            "--peek",
+            "VRAM:7340:4",
+            "--out",
+            "-",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("run luna state");
+    assert!(out.status.success(), "{out:?}");
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let peek = &json["peeks"][0];
+    assert_eq!(peek["bytes_hex"], "15340000", "{peek}");
+    assert_eq!(peek["space"], "vram", "{peek}");
+}

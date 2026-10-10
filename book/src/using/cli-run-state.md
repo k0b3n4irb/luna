@@ -565,3 +565,17 @@ luna state game.sfc -n 2000000 --dsp-trace dsp.csv
 # spc_cycles is the SPC700 cycle of the write, counted from the start of
 # the run: divide by 32 for the sample index in an --audio-out capture.
 ```
+
+**VRAM by word address.** `--peek VRAM:WORD:COUNT` reads the PPU's VRAM:
+`COUNT` bytes starting at the **word** address `WORD` (hex, as `VMADD`
+`$2116` takes it), low byte first — two bytes per tilemap entry. With
+`--peek-at` it samples what the game shows each time a routine is
+reached:
+
+```bash
+# Three tilemap entries of a status bar, at every game tick.
+luna state game.sfc --until-frame 600 --peek-at tickEnd --peek VRAM:7340:6
+```
+
+In the JSON the entry's `space` is `vram` and its `addr` the word
+address.
