@@ -72,6 +72,11 @@ pub enum WatchEvent {
 pub struct InputScript {
     events: Vec<(u64, InputEvent)>,
     next: usize,
+    /// When set, the events are indexed by arrivals on this PC instead of
+    /// by PPU frame (see [`Self::set_clock_pc`]).
+    clock: Option<u32>,
+    /// Arrivals on `clock` counted so far.
+    arrivals: u64,
 }
 
 impl InputScript {
@@ -116,6 +121,30 @@ impl InputScript {
                 .map(|(f, (x, y, buttons))| (f, InputEvent::Scope { x, y, buttons })),
         );
         Ok(())
+    }
+
+    /// Index the events by **arrivals on a routine** instead of by frame:
+    /// event `N` is applied the `N`-th time execution reaches `pc`, just
+    /// before its first instruction runs.
+    ///
+    /// A frame number says when a press lands on the wall clock; which
+    /// game tick it lands in depends on how fast the code ran until then,
+    /// so the same script drives two builds of a game differently. An
+    /// arrival number is a point in the program: the run then depends on
+    /// the game's logic alone.
+    ///
+    /// The press is a change of the controller, not of the game's
+    /// variables: the game sees it at its next read of the pad. With the
+    /// auto-read, that is the `VBlank` after arrival `N` — so a loop that
+    /// reads the pad once per pass sees it from arrival `N + 1` on.
+    pub const fn set_clock_pc(&mut self, pc: u32) {
+        self.clock = Some(pc);
+    }
+
+    /// The PC whose arrivals index the events, if any.
+    #[must_use]
+    pub const fn clock_pc(&self) -> Option<u32> {
+        self.clock
     }
 
     /// No events at all.
@@ -328,13 +357,24 @@ impl Emulator {
         mut on_event: impl FnMut(&mut Self, WatchEvent) -> bool,
     ) -> Result<bool, ApiError> {
         let start = self.instructions_executed();
+        // A script clocked by a routine adds that routine to the watch;
+        // its arrivals are not the caller's events unless it asked too.
+        let mut watched = pcs.to_vec();
+        let clock = script.clock.map(|pc| {
+            watched.iter().position(|&p| p == pc).unwrap_or_else(|| {
+                watched.push(pc);
+                watched.len() - 1
+            })
+        });
         // The PC we stand on was already reported — by this call or, when
         // nothing ran in between, by the one that stopped here: step off
         // it first.
         let mut reported = self.watch_stood_at == Some(start);
         loop {
             let frame = self.frame_count()?;
-            script.apply_due(self, frame)?;
+            if clock.is_none() {
+                script.apply_due(self, frame)?;
+            }
             let left = match bound {
                 ScriptBound::Frame(target) if frame >= target => return Ok(false),
                 ScriptBound::Frame(_) => FRAME_STEP_BUDGET,
@@ -347,11 +387,16 @@ impl Emulator {
                 }
             };
             let before = self.instructions_executed();
-            match self.run_to_pc_or_frame(pcs, left, reported)? {
+            match self.run_to_pc_or_frame(&watched, left, reported)? {
                 crate::PcStop::Pc(i) => {
                     reported = true;
                     self.watch_stood_at = Some(self.instructions_executed());
-                    if on_event(self, WatchEvent::Pc(i)) {
+                    if clock == Some(i) {
+                        script.arrivals += 1;
+                        let arrival = script.arrivals;
+                        script.apply_due(self, arrival)?;
+                    }
+                    if i < pcs.len() && on_event(self, WatchEvent::Pc(i)) {
                         return Ok(true);
                     }
                 }
@@ -378,6 +423,21 @@ impl Emulator {
         mut audio: Option<&mut Vec<(i16, i16)>>,
     ) -> Result<u64, ApiError> {
         let start = self.instructions_executed();
+        if script.clock.is_some() {
+            // Events fire on arrivals, which only a watching run sees; it
+            // goes to the bound itself, there being no "last event's
+            // frame" to stop at.
+            self.run_script_watching(script, bound, &[], |em, ev| {
+                if ev == WatchEvent::Frame
+                    && let Some(acc) = audio.as_deref_mut()
+                    && let Ok(mut chunk) = em.drain_audio(usize::MAX)
+                {
+                    acc.append(&mut chunk);
+                }
+                false
+            })?;
+            return Ok(self.instructions_executed().saturating_sub(start));
+        }
         while let Some(frame) = script.next_frame() {
             let left = match bound {
                 ScriptBound::Frame(target) if frame > target => break,

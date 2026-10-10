@@ -583,3 +583,129 @@ fn a_value_assert_compares_a_word_when_the_symbol_is_a_word() {
     assert!(run("lone.toml", "lone = 3").status.success());
     assert!(run("addr.toml", "\"7E:0010\" = 3").status.success());
 }
+
+/// A game that logs, at the start of each tick, the pad it sees (the low
+/// byte of the auto-read, `$80` = A) into `$20+tick`, then works for
+/// `work` outer loops: `$50` makes a tick three frames long, `$30` two.
+/// Two builds of the same game, one faster.
+fn pad_log_rom(dir: &Path, work: u8) -> PathBuf {
+    let prog = [
+        0x78, // 8000 SEI
+        0xA9, 0x81, // 8001 LDA #$81
+        0x8D, 0x00, 0x42, // 8003 STA $4200      NMI + auto-read
+        0xCB, // 8006 WAI               wait:
+        0xA6, 0x10, // 8007 LDX $10         tick:
+        0xAD, 0x18, 0x42, // 8009 LDA $4218
+        0x95, 0x20, // 800C STA $20,X
+        0xE6, 0x10, // 800E INC $10
+        0xA0, work, // 8010 LDY #work
+        0xA2, 0x00, // 8012 LDX #$00
+        0xCA, // 8014 DEX
+        0xD0, 0xFD, // 8015 BNE $8014
+        0x88, // 8017 DEY
+        0xD0, 0xF8, // 8018 BNE $8012
+        0x80, 0xEA, // 801A BRA $8006
+        0x40, // 801C RTI               nmi:
+    ];
+    let mut r = vec![0u8; 0x1_0000];
+    r[..prog.len()].copy_from_slice(&prog);
+    r[0x7FC0..0x7FD5].copy_from_slice(b"LUNA PAD LOG         ".as_ref());
+    r[0x7FD5] = 0x20;
+    r[0x7FD7] = 0x07;
+    r[0x7FFC] = 0x00;
+    r[0x7FFD] = 0x80;
+    for off in [0x7FEA, 0x7FFA] {
+        r[off] = 0x1C;
+        r[off + 1] = 0x80;
+    }
+    let rom = dir.join("game.sfc");
+    std::fs::write(&rom, &r).expect("write rom");
+    std::fs::write(
+        dir.join("game.sym"),
+        "[labels]\n00:8000 main\n00:8007 tick\n00:801c nmi\n7e:0010 ticks\n7e:0020 seen\n",
+    )
+    .unwrap();
+    rom
+}
+
+#[test]
+fn input_clocked_by_a_routine_drives_two_builds_through_the_same_ticks() {
+    let (slow_dir, fast_dir) = (fresh_dir("input_at_slow"), fresh_dir("input_at_fast"));
+    let (slow, fast) = (pad_log_rom(&slow_dir, 0x50), pad_log_rom(&fast_dir, 0x30));
+    // What each of the first nine ticks saw, read at the tenth.
+    let seen = |rom: &Path, args: &[&str]| {
+        let out = luna(
+            "state",
+            rom,
+            &[
+                &[
+                    "--until-pc",
+                    "tick",
+                    "--hit",
+                    "10",
+                    "--peek",
+                    "seen:#9",
+                    "--out",
+                    "-",
+                ],
+                args,
+            ]
+            .concat(),
+        );
+        assert!(out.status.success(), "{}", text(&out));
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        v["peeks"][0]["bytes_hex"].as_str().unwrap().to_string()
+    };
+    // A held for arrivals 3..6: the controller changes at the arrival,
+    // the game reads it at the next one — in both builds.
+    let by_tick = ["--input-at", "tick", "--input", "3:0x0080,6:0"];
+    assert_eq!(seen(&slow, &by_tick), "000000808080000000");
+    assert_eq!(seen(&fast, &by_tick), "000000808080000000");
+    // The same press by frame number lands in other ticks once the code
+    // is faster: this is what the option is for.
+    let by_frame = ["--input", "8:0x0080,17:0"];
+    assert_ne!(seen(&slow, &by_frame), seen(&fast, &by_frame));
+
+    // A manifest: the script's clock and a checkpoint on the same routine.
+    let manifest = "rom = \"game.sfc\"\nforce_mapper = \"lorom\"\nframes = 60\n\
+                    input_at = \"tick\"\ninput = \"3:0x0080,6:0\"\n\
+                    [[checkpoint]]\nat_symbol = \"tick\"\nhit = 5\n[checkpoint.values]\n\
+                    \"seen+3\" = 0x80\n\"seen+2\" = { eq = 0, width = 1 }\n\
+                    [[checkpoint]]\nat_symbol = \"tick\"\nhit = 9\ninput = \"7:0x0080\"\n\
+                    [checkpoint.values]\n\"seen+6\" = 0\n\"seen+7\" = 0x80\n";
+    for dir in [&slow_dir, &fast_dir] {
+        let out = luna_test(dir, "pad.toml", manifest, &[]);
+        assert!(out.status.success(), "{}", text(&out));
+    }
+    // Without `frames` there is no horizon; an unknown routine is named.
+    let out = luna_test(
+        &slow_dir,
+        "nohorizon.toml",
+        "rom = \"game.sfc\"\nforce_mapper = \"lorom\"\nsteps = 1000\ninput_at = \"tick\"\n",
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    let out = luna("state", &slow, &["--input-at", "nowhere", "--input", "1:0"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+
+    // The profiler replays the same clocked script: both builds run the
+    // same number of ticks' worth of presses, and it stays a profile.
+    let out = luna(
+        "profile",
+        &fast,
+        &[
+            "--input-at",
+            "tick",
+            "--input",
+            "3:0x0080,6:0",
+            "--until-frame",
+            "30",
+        ],
+    );
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("frames: 30 completed"),
+        "{}",
+        text(&out)
+    );
+}

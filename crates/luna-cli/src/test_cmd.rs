@@ -106,6 +106,11 @@ struct Manifest {
     input: Option<String>,
     /// Joypad-2 script, same `frame:hex` grammar as `input` (`OpenSNES` R-D).
     input2: Option<String>,
+    /// Index every input script of the manifest — top level and
+    /// checkpoints — by arrivals on this routine instead of by frame
+    /// (`luna state --input-at`): the presses then land in the same game
+    /// ticks whatever the speed of the code. Needs `frames`.
+    input_at: Option<String>,
     /// Optional SNES Mouse script (`frame:dx,dy,buttons`, `;`-separated
     /// — the `--mouse` grammar). Plugs a mouse into port 1 (issue #212).
     mouse: Option<String>,
@@ -953,14 +958,20 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
         .filter_map(|c| c.at_frame)
         .max()
         .unwrap_or(0);
-    let by_symbol = m.checkpoint.iter().any(|c| c.at_symbol.is_some());
+    // Anything keyed on a routine — a checkpoint, or the input script's
+    // clock — makes the whole run a watching one.
+    let by_symbol = m.checkpoint.iter().any(|c| c.at_symbol.is_some()) || m.input_at.is_some();
     if by_symbol && !matches!(bound, Some(Bound::Frames(_))) {
         // A routine that is never reached must end the run somewhere.
         return Err(
-            "`at_symbol` checkpoints need `frames`: the frame the run gives up at when a \
-             routine is not reached"
+            "`at_symbol` checkpoints and `input_at` need `frames`: the frame the run gives \
+             up at when a routine is not reached"
                 .into(),
         );
+    }
+    if let Some(sym) = &m.input_at {
+        let pc = resolve_key(&em, sym).map_err(|e| format!("input_at `{sym}`: {e}"))?;
+        script.set_clock_pc(pc);
     }
     // Resolve every watched routine once (the symbols are loaded by now).
     let mut watch = SymbolWatch {

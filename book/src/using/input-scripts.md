@@ -69,3 +69,39 @@ luna state -n 20000000 --port2 multitap \
 Over MCP: `set_port_device {port: 1, device: "multitap"}`, then
 `set_joypad {port: 2..4, mask}`. One tap is modelled (the 8-player
 two-tap setup is not).
+
+## A script clocked by the game, not by the frame
+
+A frame number says when a press lands on the wall clock. Which game
+tick it lands in depends on how fast the code ran until then: make the
+game faster (a compiler step, an optimisation) and the press of frame
+210 arrives one tick earlier or later, the run diverges, and every hash
+and counter after it moves — with no change in the game's logic.
+
+`--input-at <SYMBOL>` indexes the script by **arrivals on a routine**
+instead: entry `N:` applies the N-th time execution reaches it (a `.sym`
+label, `label+N`, or `BANK:OFFSET`). Give it the routine that starts a
+game tick, and the numbers are tick numbers:
+
+```bash
+# A held from the 3rd tick to the 6th — on any build of the game.
+luna state --input-at tick --input "3:0x0080,6:0" \
+  --until-pc tick --hit 10 --peek seen:#9 --out /dev/null game.sfc
+#   $7E0020  00 00 00 80 80 80 00 00 00
+```
+
+It applies to every script of the command (`--input` … `--input5`,
+`--mouse`, `--superscope`). `luna state`, `luna profile` and a `luna
+test` manifest (`input_at = "tick"`, see
+[Checkpoints](homebrew-ci.md#checkpoints--beforeafter-assertions)) take
+it.
+
+**When the game sees the press.** The press changes the *controller* at
+arrival `N`, just before the routine's first instruction; it does not
+write the game's variables. The game sees it at its next read of the
+pad. With the auto-read that is the VBlank after arrival `N`, so a loop
+that reads the pad once per pass sees it from arrival `N + 1` on, as
+above. This holds whatever the speed of the code as long as an
+auto-read completes between two arrivals — true of any loop that waits
+for VBlank — and as long as the game does not read `$4218` in the three
+scanlines the auto-read takes after VBlank starts.

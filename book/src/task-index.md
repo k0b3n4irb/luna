@@ -56,6 +56,7 @@ means that transport has no form of it.
 | a ready GitHub Actions job | — | — | [A GitHub Actions recipe](using/homebrew-ci.md#a-github-actions-recipe) |
 | assert before and after a button press | `[[checkpoint]]` in a manifest | — | [Checkpoints](using/homebrew-ci.md#checkpoints--beforeafter-assertions) |
 | read or assert state at the end of a game tick, not at a frame boundary | `luna state --until-pc tickEnd --hit N`, or a symbol checkpoint in a manifest | `run_until_pc` | [Stopping on a routine](using/cli-run-state.md#stopping-on-a-routine-not-on-a-frame) |
+| make a scripted press land in the same game tick on every build | `--input-at tickStart --input "81:0x0800"`, or the same key in a manifest | — | [A script clocked by the game](using/input-scripts.md#a-script-clocked-by-the-game-not-by-the-frame) |
 | sample variables at every tick, in one run | `--peek-at tickEnd --peek var --peek-at-out ticks.csv` | — | [Stopping on a routine](using/cli-run-state.md#stopping-on-a-routine-not-on-a-frame) |
 | assert on a byte without a manifest | `luna state --assert`, `--assert-aram`, `--assert-vram`, `--assert-cgram` | `peek_memory`, `peek_aram`, `peek_vram`, `peek_cgram` | [Asserting on memory](using/cli-run-state.md#asserting-on-memory---assert---srm-in----srm-out) |
 | read my ROM's printf and its assertions | `--nocash-out`, `--wdm-out` | `enable_nocash_log`, `enable_wdm_log` and their `take_*` | [The SDK channels over MCP](using/mcp.md#reading-the-sdk-assertlog-channels-over-mcp) |

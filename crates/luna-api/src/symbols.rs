@@ -365,22 +365,21 @@ impl SymbolTable {
     #[must_use]
     pub fn size_of(&self, name: &str) -> Option<u32> {
         let label = |e: &&Entry| e.space == SymbolSpace::Cpu && e.kind == SymbolKind::Label;
-        let full = match self.find_in_space(name, SymbolSpace::Cpu).filter(label) {
-            Some(e) => e.name.clone(),
-            None => {
-                let prefix = format!("{name}.");
-                let start = self.name_range_start(&prefix);
-                let mut found = self.by_name[start..]
-                    .iter()
-                    .map(|&i| &self.entries[i])
-                    .take_while(|e| e.name.starts_with(&prefix))
-                    .filter(|e| label(e) && e.name.len() > prefix.len());
-                let only = found.next()?;
-                if found.next().is_some() {
-                    return None;
-                }
-                only.name.clone()
+        let full = if let Some(e) = self.find_in_space(name, SymbolSpace::Cpu).filter(label) {
+            e.name.clone()
+        } else {
+            let prefix = format!("{name}.");
+            let start = self.name_range_start(&prefix);
+            let mut found = self.by_name[start..]
+                .iter()
+                .map(|&i| &self.entries[i])
+                .take_while(|e| e.name.starts_with(&prefix))
+                .filter(|e| label(e) && e.name.len() > prefix.len());
+            let only = found.next()?;
+            if found.next().is_some() {
+                return None;
             }
+            only.name.clone()
         };
         self.find_in_space(&format!("_sizeof_{full}"), SymbolSpace::Cpu)
             .filter(|e| e.kind == SymbolKind::Constant)

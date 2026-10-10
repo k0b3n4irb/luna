@@ -456,6 +456,20 @@ enum Command {
         /// column of hex bytes per `--peek`) instead of printing them.
         #[arg(long = "peek-at-out", requires = "peek_at")]
         peek_at_out: Option<PathBuf>,
+        /// Index every input script (`--input` … `--input5`, `--mouse`,
+        /// `--superscope`) by **arrivals on this routine** instead of by
+        /// frame: entry `N:` applies the N-th time execution reaches it
+        /// (a `.sym` label, `label+N`, or `BANK:OFFSET`). A frame number
+        /// lands in a different game tick when the code gets faster or
+        /// slower; an arrival does not, so the run depends on the game's
+        /// logic alone. The press changes the controller, and the game
+        /// sees it at its next read: with the auto-read, from arrival N+1.
+        /// Example: `--input-at tickStart --input "81:0x0800,96:0"`.
+        #[arg(
+            long = "input-at",
+            conflicts_with_all = ["cpu_trace_from", "mem_trace_from", "dma_trace_from", "superfx_trace_from"]
+        )]
+        input_at: Option<String>,
         /// Load battery SRAM from a `.srm` file before running (the other
         /// half of a power-cycle test — write it with `--srm-out` in run A,
         /// read it back in run B).
@@ -913,6 +927,11 @@ enum Command {
         /// would mis-attribute coverage. Lets a coverage tool count `.sfx`.
         #[arg(long = "gsu-pc-set")]
         gsu_pc_set: Option<PathBuf>,
+        /// Index the input scripts by arrivals on this routine instead of
+        /// by frame (`state --input-at`): the same script then drives two
+        /// builds of a game through the same ticks, whatever their speed.
+        #[arg(long = "input-at")]
+        input_at: Option<String>,
         /// Write the window frame by frame as CSV
         /// (`frame,active_mclk,idle_mclk,cpu_mclk,dma_mclk,hdma_mclk,refresh_mclk,total_mclk,nmi,lag`):
         /// `active` is what the program used (CPU + the DMA it started),
@@ -1184,6 +1203,7 @@ fn main() -> ExitCode {
             hit,
             peek_at,
             peek_at_out,
+            input_at,
             srm_in,
             srm_out,
             apu_log,
@@ -1307,6 +1327,7 @@ fn main() -> ExitCode {
                 hit,
                 peek_at.as_deref(),
                 peek_at_out.as_deref(),
+                input_at.as_deref(),
             )
         }
         Command::Frames {
@@ -1456,6 +1477,7 @@ fn main() -> ExitCode {
             budget,
             stack_floor,
             gsu_pc_set,
+            input_at,
             frames_out,
             worst,
             max_frame_mclk,
@@ -1490,6 +1512,7 @@ fn main() -> ExitCode {
                 budgets: &budget,
                 stack_floor,
                 gsu_pc_set: gsu_pc_set.as_deref(),
+                input_at: input_at.as_deref(),
                 frames_out: frames_out.as_deref(),
                 worst,
                 frame_gates: profile_frames::FrameGates {

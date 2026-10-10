@@ -7,6 +7,18 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+### Added
+
+- **`--input-at SYMBOL`: input scripts indexed by arrivals on a
+  routine.** In `luna state`, `luna profile` and a manifest (`input_at`),
+  entry `N:` of every input script applies the N-th time execution
+  reaches the routine instead of at frame N. A frame number lands in a
+  different game tick when the code gets faster or slower; an arrival
+  does not, so a scripted run depends on the game's logic alone. The
+  press changes the controller; the game sees it at its next read (with
+  the auto-read, from arrival N+1).
+- **luna-api:** `InputScript::set_clock_pc`.
+
 ### Changed
 
 - **A value assert compares a 16-bit variable whole.** In `[asserts.values]`

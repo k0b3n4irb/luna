@@ -140,12 +140,13 @@ struct Watch {
 
 impl Watch {
     /// Resolve the two options against the loaded symbols. `None` when
-    /// neither was given.
+    /// neither was given and the input script runs on frames.
     fn resolve(
         em: &luna_api::Emulator,
         until_pc: Option<&str>,
         hit: u64,
         peek_at: Option<&str>,
+        clocked_input: bool,
     ) -> Result<Option<Self>, String> {
         let addr = |opt: &str, spec: &str| {
             crate::test_cmd::resolve_key(em, spec).map_err(|e| format!("{opt} `{spec}`: {e}"))
@@ -172,7 +173,9 @@ impl Watch {
             .chain(peek_at.iter().map(|p| p.1))
             .collect();
         pcs.dedup();
-        Ok((!pcs.is_empty()).then_some(Self {
+        // A script clocked by a routine needs the watching run too, even
+        // with nothing else to watch.
+        Ok((!pcs.is_empty() || clocked_input).then_some(Self {
             pcs,
             until,
             peek_at,
@@ -306,6 +309,7 @@ pub(crate) fn run_state(
     hit: u64,
     peek_at: Option<&str>,
     peek_at_out: Option<&std::path::Path>,
+    input_at: Option<&str>,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
     if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, dsp1_rom, power_on) {
@@ -476,7 +480,18 @@ pub(crate) fn run_state(
     // `--until-pc` / `--peek-at` (issue #269): the run watches a routine,
     // so it cannot pre-roll to the last input event — that may lie past
     // the stop. The watching run below replays the script itself.
-    let mut watch = match Watch::resolve(&em, until_pc, hit, peek_at) {
+    // `--input-at`: the script's numbers are arrivals on a routine, which
+    // only the watching run sees.
+    if let Some(spec) = input_at {
+        match crate::test_cmd::resolve_key(&em, spec) {
+            Ok(pc) => script.set_clock_pc(pc),
+            Err(e) => {
+                eprintln!("error: --input-at `{spec}`: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let mut watch = match Watch::resolve(&em, until_pc, hit, peek_at, input_at.is_some()) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("error: {e}");

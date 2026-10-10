@@ -34,6 +34,8 @@ pub(crate) struct ProfileOptions<'a> {
     pub stack_floor: Option<u16>,
     /// `--gsu-pc-set`: write the distinct GSU PCs executed (`OpenSNES` R3).
     pub gsu_pc_set: Option<&'a std::path::Path>,
+    /// `--input-at`: the routine whose arrivals index the input scripts.
+    pub input_at: Option<&'a str>,
     /// `--frames-out`: the frame series as CSV (issue #270).
     pub frames_out: Option<&'a std::path::Path>,
     /// `--worst N`: per-symbol tables of the N heaviest frames.
@@ -227,8 +229,30 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
     // Warm-up to `--from-frame` with the profiler off, applying input on
     // the way; then profile to the end.
     let frame = |em: &luna_api::Emulator| em.frame_count().unwrap_or(0);
+    if let Some(spec) = o.input_at {
+        match crate::test_cmd::resolve_key(&em, spec) {
+            Ok(pc) => script.set_clock_pc(pc),
+            Err(e) => {
+                eprintln!("error: --input-at `{spec}`: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let clocked = script.clock_pc().is_some();
     let mut step_frame = |em: &mut luna_api::Emulator| -> Result<bool, String> {
         let f = frame(em);
+        if clocked {
+            // The script fires on arrivals: the watching run applies it.
+            let before = em.instructions_executed();
+            em.run_script_watching(
+                &mut script,
+                luna_api::ScriptBound::Frame(f + 1),
+                &[],
+                |_, _| false,
+            )
+            .map_err(|e| e.to_string())?;
+            return Ok(em.instructions_executed() > before && frame(em) > f);
+        }
         script.apply_due(em, f).map_err(|e| e.to_string())?;
         let ran = em
             .step_until_frame(FRAME_BUDGET)
@@ -280,11 +304,23 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
         while em.instructions_executed().saturating_sub(start) < o.steps {
             let left = o.steps - em.instructions_executed().saturating_sub(start);
             let f = frame(&em);
-            if let Err(e) = script.apply_due(&mut em, f) {
-                eprintln!("error: {e}");
-                return ExitCode::from(1);
-            }
-            match em.step(left.min(FRAME_BUDGET)) {
+            let stepped = if clocked {
+                let before = em.instructions_executed();
+                em.run_script_watching(
+                    &mut script,
+                    luna_api::ScriptBound::Steps(left.min(FRAME_BUDGET)),
+                    &[],
+                    |_, _| false,
+                )
+                .map(|_| em.instructions_executed() - before)
+            } else {
+                if let Err(e) = script.apply_due(&mut em, f) {
+                    eprintln!("error: {e}");
+                    return ExitCode::from(1);
+                }
+                em.step(left.min(FRAME_BUDGET))
+            };
+            match stepped {
                 Ok(0) => break,
                 Ok(_) => {}
                 Err(luna_api::ApiError::Panic(msg)) => {
