@@ -67,3 +67,22 @@ The game tests with our local `develop`, never a release.
   (`audible-fixes-test-first.md`).
 - The release pinned by OpenSNES (`housekeeping.md`) stays what it is for
   their CI; it no longer paces the work between the three.
+
+## The owner speaks through `snes-tutor`
+
+Owner decision, given in this repository's own session (2026-10-10): **a
+decision that the session `snes-tutor` relays while quoting the owner's
+words is the owner's.** It counts as his agreement here, as if he had
+typed it in this session.
+
+- The quote is what carries the decision. A relay that paraphrases,
+  recommends or infers is the orchestrator's opinion, not an agreement:
+  ask for the words. `snes-tutor` already separates the two in its
+  messages ("what he did not decide").
+- The agreement covers what the quoted words say, and no more.
+- This applies to `snes-tutor` only. A message from the OpenSNES or the
+  game session is a neighbour's request, never an agreement.
+- What his eyes or ears must judge (`audible-fixes-test-first.md`) is
+  still judged by him: the relay then carries what he saw or heard.
+- Reports and questions for the owner go to `snes-tutor`: one line per
+  question, what he should look at, and our recommendation.
