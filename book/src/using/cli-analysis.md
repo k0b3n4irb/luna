@@ -220,6 +220,8 @@ parked in `WAI` / `STP` under that label.
 | `--input <SCRIPT>` | — | Joypad-1 script ([input scripts](input-scripts.md)). |
 | `--input2` … `--input5`, `--port1`, `--port2`, `--mouse`, `--superscope` | `pad` | The same controller flags as `state`, same grammars — so a coverage run can replay a manifest that plugs a mouse or a Super Scope instead of running it with an empty port. |
 | `--input-at <SYMBOL>` | — | Index the input scripts by arrivals on this routine instead of by frame ([input scripts](input-scripts.md#a-script-clocked-by-the-game-not-by-the-frame)): two builds are then profiled over the same game ticks. |
+| `--until-pc <SYMBOL>` | — | End the profile when execution reaches this routine (a `.sym` label, `label+N`, `BANK:OFFSET`), just before its first instruction: a window of N game ticks instead of N frames (see below). Bounded by `--until-frame` when given, else 36000 frames; `-n` does not apply. Not reaching it is an error, exit 1; the report is still written. |
+| `--hit <N>` | `1` | With `--until-pc`: which arrival, counted from power-on. |
 | `--sym <PATH>` | auto `<rom>.sym` | Labels to fold onto. |
 | `--top <N>` | `25` | Rows printed (the JSON has them all). |
 | `--out <PATH>` | — | JSON report (`-` = stdout after the table): `{rom, from_frame, end_frame, total_mclk, instructions, frames, entries: [{symbol, addr, instructions, mclk, idle_mclk, pct, pcs, per_frame: {max, max_frame, mean, frames} \| null}], budgets: [{symbol, limit, max, max_frame, ok}], frame_series: [{frame, active_mclk, idle_mclk, cpu_mclk, dma_mclk, hdma_mclk, refresh_mclk, total_mclk, nmi, lag}], worst_frames: [{…the same fields, entries: [{symbol, addr, mclk}]}], frame_summary: {frames, active_mean, active_max, active_max_frame, total_mean, lag_frames, lag_run, lag_run_frame, lag_runs: [{frame, length}], gates: [{gate, limit, value, frame, ok}]}}`. `per_frame` is the row's master cycles per **completed** PPU frame in the window: `max` (and the frame that paid it), `mean` over every completed frame (a frame the row did not run in counts 0), `frames` it ran in; `null` when no frame completed while it ran. The trailing partial frame is never counted. |
@@ -257,6 +259,33 @@ luna profile --from-frame 120 --until-frame 600 --budget NmiHandler=6000 game.sf
 
 Read `per_frame.max_frame` from the JSON, then `luna state --until-frame
 402 --screenshot` to see what that frame was doing.
+
+### The same work on two builds — `--until-pc`
+
+A window in frames compares two builds over different work as soon as
+one of them is faster: in 600 frames the faster build plays more ticks.
+End the window on an arrival instead, and both run the same ticks; the
+total is then the cost of that work, and the frames it took are a
+result:
+
+```bash
+# Five ticks of the game, whatever number of frames they take.
+luna profile game.sfc --until-pc tick_end --hit 5 --top 2
+# reached tick_end ($00:8015), hit 5 — frame 14, line 260
+# profile: frames 0..14 (14 completed), 206057 instructions, 5358848 master cycles, 5 symbol(s)
+#       %            mclk         instr   idle%     pcs   max/frame  symbol
+#  99.98%         5358000        206030   28.7%       8      357318  tick
+#   0.01%             660            15    0.0%       1          44  nmi
+```
+
+With `--input-at` on the same or another routine, the input script
+follows the ticks too.
+
+The stop is the one `luna state --until-pc` makes, to the scanline, and
+the JSON report carries it as `until_pc`
+(`{spec, addr, hit, reached, hits_seen, frame, line}`). The last frame is
+not complete: the frame series and the frame gates cover the completed
+ones, the table and the totals cover everything up to the stop.
 
 ### Frame by frame — which frame overran, and what ran in it
 

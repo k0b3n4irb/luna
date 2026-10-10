@@ -36,6 +36,10 @@ pub(crate) struct ProfileOptions<'a> {
     pub gsu_pc_set: Option<&'a std::path::Path>,
     /// `--input-at`: the routine whose arrivals index the input scripts.
     pub input_at: Option<&'a str>,
+    /// `--until-pc`: end the profile when execution reaches this routine…
+    pub until_pc: Option<&'a str>,
+    /// …at its `--hit`-th arrival, counted from power-on.
+    pub hit: u64,
     /// `--frames-out`: the frame series as CSV (issue #270).
     pub frames_out: Option<&'a std::path::Path>,
     /// `--worst N`: per-symbol tables of the N heaviest frames.
@@ -61,6 +65,9 @@ struct Report<'a> {
     budgets: Vec<BudgetVerdict>,
     /// The frame series in a few numbers, and the frame gates' verdicts.
     frame_summary: crate::profile_frames::FrameSummary,
+    /// Where `--until-pc` ended the window (absent without it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    until_pc: Option<UntilPc>,
     /// Deepest native-mode stack reach over the profiled window, and the
     /// `--stack-floor` verdict if one was asked for.
     stack: StackReport,
@@ -71,6 +78,38 @@ struct Report<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     sa1: Option<Sa1Report>,
 }
+
+/// The `--until-pc` stop of a profile: the same fields `luna state` gives.
+#[derive(serde::Serialize)]
+struct UntilPc {
+    /// The routine as written on the command line.
+    spec: String,
+    /// The 24-bit address it resolved to.
+    addr: u32,
+    /// Which arrival was asked for, counted from power-on.
+    hit: u64,
+    /// Whether the run got there before its bound.
+    reached: bool,
+    /// How many arrivals the run saw.
+    hits_seen: u64,
+    /// The PPU frame and scanline of the stop.
+    frame: Option<u64>,
+    line: Option<u16>,
+}
+
+/// What one frame's worth of stepping ended on.
+enum Step {
+    /// A frame completed.
+    Frame,
+    /// Nothing ran: the CPU is halted.
+    Halted,
+    /// `--until-pc` reached its arrival.
+    Reached,
+}
+
+/// How far a `--until-pc` profile runs when no `--until-frame` bounds it
+/// (ten minutes of console time, as `luna state --until-pc`).
+const UNTIL_PC_FRAME_CAP: u64 = 36_000;
 
 /// SA-1 accounting over the profiled window (`OpenSNES` R5): the
 /// difference between two cumulative readings.
@@ -239,30 +278,87 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
         }
     }
     let clocked = script.clock_pc().is_some();
-    let mut step_frame = |em: &mut luna_api::Emulator| -> Result<bool, String> {
-        let f = frame(em);
-        if clocked {
-            // The script fires on arrivals: the watching run applies it.
-            let before = em.instructions_executed();
-            em.run_script_watching(
-                &mut script,
-                luna_api::ScriptBound::Frame(f + 1),
-                &[],
-                |_, _| false,
-            )
-            .map_err(|e| e.to_string())?;
-            return Ok(em.instructions_executed() > before && frame(em) > f);
+    let mut until = match o.until_pc {
+        None => None,
+        Some(_) if o.hit == 0 => {
+            eprintln!("error: --hit counts from 1");
+            return ExitCode::from(2);
         }
-        script.apply_due(em, f).map_err(|e| e.to_string())?;
-        let ran = em
-            .step_until_frame(FRAME_BUDGET)
-            .map_err(|e| e.to_string())?;
-        Ok(ran > 0 && frame(em) > f)
+        Some(spec) => match crate::test_cmd::resolve_key(&em, spec) {
+            Ok(addr) => Some(UntilPc {
+                spec: spec.to_string(),
+                addr,
+                hit: o.hit,
+                reached: false,
+                hits_seen: 0,
+                frame: None,
+                line: None,
+            }),
+            Err(e) => {
+                eprintln!("error: --until-pc `{spec}`: {e}");
+                return ExitCode::from(2);
+            }
+        },
     };
+    let watched: Vec<u32> = until.iter().map(|u| u.addr).collect();
+    let mut step_frame =
+        |em: &mut luna_api::Emulator, until: &mut Option<UntilPc>| -> Result<Step, String> {
+            let f = frame(em);
+            if clocked || !watched.is_empty() {
+                // The script fires on arrivals, or the window ends on one: the
+                // watching run does both.
+                let before = em.instructions_executed();
+                let stopped = em
+                    .run_script_watching(
+                        &mut script,
+                        luna_api::ScriptBound::Frame(f + 1),
+                        &watched,
+                        |em, ev| match (ev, until.as_mut()) {
+                            (luna_api::WatchEvent::Pc(_), Some(u)) => {
+                                u.hits_seen += 1;
+                                if u.hits_seen == u.hit {
+                                    u.reached = true;
+                                    u.frame = em.frame_count().ok();
+                                    u.line = em.beam().map(|(line, _)| line).ok();
+                                }
+                                u.reached
+                            }
+                            _ => false,
+                        },
+                    )
+                    .map_err(|e| e.to_string())?;
+                return Ok(if stopped {
+                    Step::Reached
+                } else if em.instructions_executed() > before && frame(em) > f {
+                    Step::Frame
+                } else {
+                    Step::Halted
+                });
+            }
+            script.apply_due(em, f).map_err(|e| e.to_string())?;
+            let ran = em
+                .step_until_frame(FRAME_BUDGET)
+                .map_err(|e| e.to_string())?;
+            Ok(if ran > 0 && frame(em) > f {
+                Step::Frame
+            } else {
+                Step::Halted
+            })
+        };
     while frame(&em) < o.from_frame {
-        match step_frame(&mut em) {
-            Ok(true) => {}
-            Ok(false) => break,
+        match step_frame(&mut em, &mut until) {
+            Ok(Step::Frame) => {}
+            Ok(Step::Halted) => break,
+            Ok(Step::Reached) => {
+                eprintln!(
+                    "error: --until-pc {} was reached at frame {}, before --from-frame {}: \
+                     nothing to profile",
+                    o.until_pc.unwrap_or_default(),
+                    frame(&em),
+                    o.from_frame
+                );
+                return ExitCode::from(1);
+            }
             Err(e) => {
                 eprintln!("error: {e}");
                 return ExitCode::from(1);
@@ -288,11 +384,16 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
         return ExitCode::from(1);
     }
     let mut core_panicked = false;
-    if let Some(target) = o.until_frame {
+    // A window that ends on a routine is bounded in frames, like one that
+    // ends on a frame: `-n` does not apply to it.
+    let frame_bound = o
+        .until_frame
+        .or_else(|| until.as_ref().map(|_| start_frame + UNTIL_PC_FRAME_CAP));
+    if let Some(target) = frame_bound {
         while frame(&em) < target {
-            match step_frame(&mut em) {
-                Ok(true) => {}
-                Ok(false) => break,
+            match step_frame(&mut em, &mut until) {
+                Ok(Step::Frame) => {}
+                Ok(Step::Halted | Step::Reached) => break,
                 Err(e) => {
                     eprintln!("error: {e}");
                     return ExitCode::from(1);
@@ -335,6 +436,28 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
                     return ExitCode::from(1);
                 }
             }
+        }
+    }
+    // Not reaching the routine is an error, as in `luna state`: the report
+    // of what ran is still written, and the command exits 1.
+    let mut until_missed = false;
+    if let Some(u) = &until {
+        let (bank, offset) = (u.addr >> 16, u.addr & 0xFFFF);
+        if let (true, Some(f), Some(line)) = (u.reached, u.frame, u.line) {
+            eprintln!(
+                "reached {} (${bank:02X}:{offset:04X}), hit {} — frame {f}, line {line}",
+                u.spec, u.hit
+            );
+        } else {
+            eprintln!(
+                "error: --until-pc {} (${bank:02X}:{offset:04X}): hit {} not reached by frame {} \
+                 (reached {} time(s))",
+                u.spec,
+                u.hit,
+                frame(&em),
+                u.hits_seen
+            );
+            until_missed = true;
         }
     }
     if let Some(path) = o.pc_set {
@@ -582,6 +705,7 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
             profile: report,
             budgets: verdicts,
             frame_summary,
+            until_pc: until,
             stack: StackReport {
                 low,
                 floor: o.stack_floor,
@@ -594,7 +718,7 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
             return code;
         }
     }
-    if over || !stack_ok || core_panicked {
+    if over || !stack_ok || core_panicked || until_missed {
         return ExitCode::from(1);
     }
     ExitCode::SUCCESS

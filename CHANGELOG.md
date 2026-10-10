@@ -17,6 +17,12 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   a frame hash that changes with every compiler. `luna state --peek
   VRAM:7340:6` reads bytes from a word address, and with `--peek-at`
   samples them at every arrival on a routine.
+- **`luna profile --until-pc SYMBOL --hit N`.** The profile ends when
+  execution reaches a routine at its N-th arrival, where `luna state
+  --until-pc` stops. A window of N game ticks instead of N frames: two
+  builds are measured over the same work, and the frames it took become
+  a result. The report carries the stop as `until_pc`; not reaching it
+  is an error, exit 1.
 
 ## [1.37.0] — 2026-10-10
 

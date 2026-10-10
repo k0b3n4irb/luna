@@ -826,3 +826,93 @@ fn a_poke_on_arrival_puts_the_game_in_a_state_it_does_not_reach() {
     );
     assert_eq!(out.status.code(), Some(2), "{}", text(&out));
 }
+
+/// `luna profile --until-pc SYMBOL --hit N` ends the window where
+/// `luna state --until-pc` stops: a profile of N ticks, not of N frames.
+#[test]
+fn a_profile_ends_on_an_arrival_like_a_state_run() {
+    let dir = fresh_dir("profile_until_pc");
+    let rom = slow_tick_rom(&dir);
+    let json = dir.join("profile.json");
+    let out = luna(
+        "profile",
+        &rom,
+        &[
+            "--until-pc",
+            "tick_end",
+            "--hit",
+            "5",
+            "--out",
+            json.to_str().unwrap(),
+        ],
+    );
+    assert!(out.status.success(), "{}", text(&out));
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+    let stop = &report["until_pc"];
+    assert_eq!(stop["reached"], true, "{stop}");
+    assert_eq!((&stop["hit"], &stop["hits_seen"]), (&5.into(), &5.into()));
+    assert_eq!(stop["addr"], 0x8015);
+
+    // The same stop as `luna state`, to the frame and the scanline.
+    let state = luna(
+        "state",
+        &rom,
+        &["--until-pc", "tick_end", "--hit", "5", "--out", "-"],
+    );
+    let state: serde_json::Value = serde_json::from_slice(&state.stdout).unwrap();
+    assert_eq!(stop["frame"], state["until_pc"]["frame"], "{stop}");
+    assert_eq!(stop["line"], state["until_pc"]["line"], "{stop}");
+    assert_eq!(report["end_frame"], state["until_pc"]["frame"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("reached tick_end ($00:8015), hit 5 — frame "),
+        "{stderr}"
+    );
+
+    // An arrival the run does not reach is an error; the report is kept.
+    let out = luna(
+        "profile",
+        &rom,
+        &[
+            "--until-pc",
+            "tick_end",
+            "--hit",
+            "999",
+            "--until-frame",
+            "10",
+            "--out",
+            json.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("hit 999 not reached by frame 10"),
+        "{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+    assert_eq!(report["until_pc"]["reached"], false);
+    assert_eq!(report["end_frame"], 10);
+
+    // Reached before the window opens: nothing to profile.
+    let out = luna(
+        "profile",
+        &rom,
+        &["--from-frame", "20", "--until-pc", "tick_end"],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("before --from-frame 20"),
+        "{}",
+        text(&out)
+    );
+    // Usage errors.
+    for args in [
+        &["--until-pc", "tick_end", "--hit", "0"][..],
+        &["--until-pc", "nowhere"][..],
+    ] {
+        assert_eq!(luna("profile", &rom, args).status.code(), Some(2));
+    }
+}

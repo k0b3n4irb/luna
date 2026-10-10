@@ -966,6 +966,19 @@ enum Command {
         /// builds of a game through the same ticks, whatever their speed.
         #[arg(long = "input-at")]
         input_at: Option<String>,
+        /// End the profile when execution reaches this routine (a `.sym`
+        /// label, `label+N`, or `BANK:OFFSET` in hex), just before its
+        /// first instruction: a window of N game ticks rather than N
+        /// frames, which stays the same work when the code gets faster.
+        /// Bounded by `--until-frame` when given (else 36000 frames; `-n`
+        /// does not apply); not reaching it is an error, exit 1. Example:
+        /// `--from-frame 60 --until-pc tickEnd --hit 340`.
+        #[arg(long = "until-pc")]
+        until_pc: Option<String>,
+        /// With `--until-pc`: which arrival, counted from power-on
+        /// [default: 1].
+        #[arg(long)]
+        hit: Option<u64>,
         /// Write the window frame by frame as CSV
         /// (`frame,active_mclk,idle_mclk,cpu_mclk,dma_mclk,hdma_mclk,refresh_mclk,total_mclk,nmi,lag`):
         /// `active` is what the program used (CPU + the DMA it started),
@@ -1531,6 +1544,8 @@ fn main() -> ExitCode {
             stack_floor,
             gsu_pc_set,
             input_at,
+            until_pc,
+            hit,
             frames_out,
             worst,
             max_frame_mclk,
@@ -1566,6 +1581,8 @@ fn main() -> ExitCode {
                 stack_floor,
                 gsu_pc_set: gsu_pc_set.as_deref(),
                 input_at: input_at.as_deref(),
+                until_pc: until_pc.as_deref(),
+                hit: hit.unwrap_or(1),
                 frames_out: frames_out.as_deref(),
                 worst,
                 frame_gates: profile_frames::FrameGates {
