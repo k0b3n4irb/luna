@@ -823,12 +823,16 @@ enum Command {
         /// of the louder of the two [default: 2].
         #[arg(long = "tolerance-pct")]
         tolerance_pct: Option<f64>,
-        /// `--audio`: start the windows at each ROM's first sample above
-        /// the silence level instead of at sample 0, and report the shift
-        /// between the two — for the same sound starting a frame earlier
-        /// or later.
+        /// `--audio`: compare each window with the stretch of the other
+        /// ROM's output that fits it best within `--max-shift` samples,
+        /// and print the shift kept — for the same sounds, each a few
+        /// samples earlier or later.
         #[arg(long = "align-onset")]
         align_onset: bool,
+        /// `--align-onset`: how far a window may be moved, in samples. A
+        /// frame is 534 [default: 64].
+        #[arg(long = "max-shift")]
+        max_shift: Option<usize>,
         /// `--audio`: sample level counted as silence (0-32767). It is the
         /// threshold of the reported onset, and the floor a window's
         /// difference is measured against [default: 64].
@@ -1395,28 +1399,37 @@ fn main() -> ExitCode {
             tolerance_pct,
             silence,
             align_onset,
+            max_shift,
             input,
             out,
             force_mapper,
             force_region,
             power_on,
             ..
-        } => run_audio_diff(
-            &rom_a,
-            &rom_b,
-            &AudioDiffOptions {
-                force_mapper: force_mapper.as_deref(),
-                force_region: force_region.as_deref(),
-                power_on: power_on.as_deref(),
-                input_script: input.as_deref(),
-                until_frame,
-                window_ms: window_ms.unwrap_or(500),
-                tolerance_pct: tolerance_pct.unwrap_or(2.0),
-                silence: silence.unwrap_or(64),
-                align_onset,
-                out: out.as_deref(),
-            },
-        ),
+        } => {
+            // clap's `requires` is satisfied by a flag's default `false`.
+            if max_shift.is_some() && !align_onset {
+                eprintln!("error: --max-shift belongs to --align-onset");
+                return ExitCode::from(2);
+            }
+            run_audio_diff(
+                &rom_a,
+                &rom_b,
+                &AudioDiffOptions {
+                    force_mapper: force_mapper.as_deref(),
+                    force_region: force_region.as_deref(),
+                    power_on: power_on.as_deref(),
+                    input_script: input.as_deref(),
+                    until_frame,
+                    window_ms: window_ms.unwrap_or(500),
+                    tolerance_pct: tolerance_pct.unwrap_or(2.0),
+                    silence: silence.unwrap_or(64),
+                    align_onset,
+                    max_shift: max_shift.unwrap_or(64),
+                    out: out.as_deref(),
+                },
+            )
+        }
         Command::Diff {
             rom_a,
             rom_b,
@@ -1435,6 +1448,7 @@ fn main() -> ExitCode {
             tolerance_pct,
             silence,
             align_onset,
+            max_shift,
             sequence,
             from,
             to,
@@ -1449,10 +1463,11 @@ fn main() -> ExitCode {
                 || tolerance_pct.is_some()
                 || silence.is_some()
                 || align_onset
+                || max_shift.is_some()
             {
                 eprintln!(
-                    "error: --until-frame, --window-ms, --tolerance-pct, --silence and \
-                     --align-onset belong to `luna diff --audio`"
+                    "error: --until-frame, --window-ms, --tolerance-pct, --silence, \
+                     --align-onset and --max-shift belong to `luna diff --audio`"
                 );
                 return ExitCode::from(2);
             }

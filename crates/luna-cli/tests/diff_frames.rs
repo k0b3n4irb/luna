@@ -190,8 +190,8 @@ fn audio_compares_levels_per_window_and_reports_json() {
     assert_eq!(json["length_mismatch"], false);
 }
 
-/// `--align-onset` on two captures with no onset: nothing to align, they
-/// are compared whole and the verdict names no shift.
+/// `--align-onset` on two silent captures: every shift fits, each window
+/// keeps none, and the verdict line names the method.
 #[test]
 fn audio_align_onset_compares_two_silences_whole() {
     let dir = std::env::temp_dir().join("luna_diff_audio_align");
@@ -212,9 +212,13 @@ fn audio_align_onset_compares_two_silences_whole() {
         "-",
     ]);
     assert_eq!(code, Some(0), "stdout: {stdout}\nstderr: {stderr}");
-    assert!(!stdout.contains("onset shift"), "{stdout}");
+    assert!(
+        stdout.contains("per-window shift, max 0 samples (searched ±64): MATCH"),
+        "{stdout}"
+    );
     assert!(stdout.contains("\"align_onset\": true"), "{stdout}");
-    assert!(stdout.contains("\"onset_shift\": null"), "{stdout}");
+    assert!(stdout.contains("\"shift_limit\": 64"), "{stdout}");
+    assert!(stdout.contains("\"largest_shift\": 0"), "{stdout}");
 }
 
 /// `luna diff --sequence`: the counter ROM shows a new picture every
@@ -324,6 +328,16 @@ fn sequence_usage_errors_exit_two() {
         ],
         // `--align-onset` belongs to `--audio`.
         vec!["a.sfc", "b.sfc", "--frames", "5", "--align-onset"],
+        // `--max-shift` belongs to `--align-onset`.
+        vec![
+            "a.sfc",
+            "b.sfc",
+            "--audio",
+            "--until-frame",
+            "5",
+            "--max-shift",
+            "8",
+        ],
     ] {
         let (code, _, stderr) = diff(&args);
         assert_eq!(code, Some(2), "{args:?}: {stderr}");

@@ -15,11 +15,14 @@
 //! whole window shorter than the other is one (a machine that stopped),
 //! and is a DIFF by itself.
 //!
-//! `--align-onset` handles the larger shift: the code that starts the
-//! music gained or lost a frame, so the same sound comes out some hundreds
-//! of samples away and the window holding the start compares different
-//! amounts of it. The windows then start at each capture's first sample
-//! above the silence level, and the verdict names the shift.
+//! `--align-onset` handles the shift a window's edge turns into a level
+//! difference: a sound that starts a few samples later puts less of its
+//! attack in the window that holds it. Each window of A is then compared
+//! with the window of B that fits it best within `--max-shift` samples
+//! (least sum of absolute differences), and every line names the shift it
+//! kept. The search is per window because sounds move independently: the
+//! first can stay put while the second comes two samples late (`OpenSNES`,
+//! 2026-10-10), which one shift for the whole capture cannot follow.
 //!
 //! What it does NOT see: two sounds of equal loudness. It compares an
 //! envelope, not a spectrum, so it backs up an audio hash ("something
@@ -45,6 +48,8 @@ pub(crate) struct AudioDiffOptions<'a> {
     pub tolerance_pct: f64,
     pub silence: u16,
     pub align_onset: bool,
+    /// `--max-shift`: how far a window of B may be moved, in samples.
+    pub max_shift: usize,
     pub out: Option<&'a std::path::Path>,
 }
 
@@ -59,6 +64,9 @@ pub(crate) struct Window {
     /// the silence level as a floor so two near-silent windows don't
     /// produce a huge ratio out of a one-LSB difference.
     delta_pct: f64,
+    /// `--align-onset`: how many samples later (`+`) or earlier (`-`) B's
+    /// window was taken to fit A's best (`null` without the option).
+    shift: Option<i64>,
 }
 
 /// The `--out` JSON report.
@@ -76,11 +84,14 @@ struct Report<'a> {
     /// (`null` when the whole capture is silent).
     onset_a: Option<usize>,
     onset_b: Option<usize>,
-    /// Whether the windows start at each capture's onset (`--align-onset`).
+    /// Whether each window of B was fitted to A's (`--align-onset`).
     align_onset: bool,
-    /// `onset_b - onset_a` in samples when the windows were aligned on it
-    /// (`null` otherwise, or when both captures are silent).
-    onset_shift: Option<i64>,
+    /// `--max-shift`: the widest shift searched (`null` without
+    /// `--align-onset`).
+    shift_limit: Option<usize>,
+    /// The shift of largest magnitude a window kept (`null` without
+    /// `--align-onset`).
+    largest_shift: Option<i64>,
     /// `true` when one capture is a whole window or more shorter than the
     /// other — a DIFF whatever the windows say.
     length_mismatch: bool,
@@ -113,10 +124,69 @@ fn onset(samples: &[(i16, i16)], silence: u16) -> Option<usize> {
         .position(|&(l, r)| l.unsigned_abs() > silence || r.unsigned_abs() > silence)
 }
 
+/// A run of stereo samples.
+type Capture<'s> = &'s [(i16, i16)];
+
+/// Sum of absolute differences between two runs of equal length.
+fn distance(a: Capture<'_>, b: Capture<'_>) -> u64 {
+    a.iter()
+        .zip(b)
+        .map(|(&(al, ar), &(bl, br))| {
+            u64::from((i32::from(al) - i32::from(bl)).unsigned_abs())
+                + u64::from((i32::from(ar) - i32::from(br)).unsigned_abs())
+        })
+        .sum()
+}
+
+/// `len` samples of `b` from `at + shift`. Before sample 0 the machine was
+/// not running: that is silence. Past the end nothing is known: `None`.
+fn shifted(b: Capture<'_>, at: usize, shift: i64, len: usize) -> Option<Vec<(i16, i16)>> {
+    let start = at as i64 + shift;
+    let lead = usize::try_from(-start).unwrap_or(0).min(len);
+    let from = usize::try_from(start).unwrap_or(0);
+    let rest = b.get(from..from + (len - lead))?;
+    Some([&vec![(0, 0); lead][..], rest].concat())
+}
+
+/// B's window that is closest to `a[at..at + len]` within `±limit`
+/// samples, and its shift. Of several equally close ones the smallest
+/// shift wins (0, then +1, -1…), so a silent or periodic window keeps the
+/// shift nearest to none.
+fn best_fit(
+    a: Capture<'_>,
+    b: Capture<'_>,
+    at: usize,
+    len: usize,
+    limit: usize,
+) -> (i64, Vec<(i16, i16)>) {
+    let reference = &a[at..at + len];
+    let mut best = (u64::MAX, 0i64, b[at..at + len].to_vec());
+    for magnitude in 0..=limit as i64 {
+        for shift in [magnitude, -magnitude] {
+            let Some(candidate) = shifted(b, at, shift, len) else {
+                continue;
+            };
+            let d = distance(reference, &candidate);
+            if d < best.0 {
+                best = (d, shift, candidate);
+            }
+        }
+    }
+    (best.1, best.2)
+}
+
 /// Cut both captures into `window` stereo samples and compare the levels
 /// of every window complete on both sides. Captures too short to hold one
-/// are compared as a single window over their common length.
-fn compare(a: &[(i16, i16)], b: &[(i16, i16)], window: usize, silence: u16) -> Vec<Window> {
+/// are compared as a single window over their common length. With
+/// `max_shift`, B's window is the one that fits A's best within that many
+/// samples.
+fn compare(
+    a: Capture<'_>,
+    b: Capture<'_>,
+    window: usize,
+    silence: u16,
+    max_shift: Option<usize>,
+) -> Vec<Window> {
     let floor = f64::from(silence).max(1.0);
     let common = a.len().min(b.len());
     let (count, len) = if common >= window {
@@ -127,40 +197,21 @@ fn compare(a: &[(i16, i16)], b: &[(i16, i16)], window: usize, silence: u16) -> V
     (0..count)
         .map(|i| {
             let at = i * window;
-            let (rms_a, rms_b) = (rms(&a[at..at + len]), rms(&b[at..at + len]));
+            let fit = max_shift.map(|limit| best_fit(a, b, at, len, limit));
+            let rms_a = rms(&a[at..at + len]);
+            let rms_b = fit
+                .as_ref()
+                .map_or_else(|| rms(&b[at..at + len]), |(_, fitted)| rms(fitted));
+            let shift = fit.map(|(shift, _)| shift);
             Window {
                 start_ms: at as u64 * 1000 / SAMPLE_RATE,
                 rms_a,
                 rms_b,
                 delta_pct: (rms_a - rms_b).abs() / rms_a.max(rms_b).max(floor) * 100.0,
+                shift,
             }
         })
         .collect()
-}
-
-/// A run of stereo samples.
-type Capture<'s> = &'s [(i16, i16)];
-
-/// The two captures as they are compared, and the onset shift
-/// `onset_b - onset_a` when they were cut at their onsets. With
-/// `align`, both start at their first sample above the silence level;
-/// two silent captures have no onset and are compared whole. `Err` when
-/// only one of them is silent: there is nothing to align, and it is a
-/// difference.
-fn aligned<'s>(
-    a: Capture<'s>,
-    b: Capture<'s>,
-    onsets: (Option<usize>, Option<usize>),
-    align: bool,
-) -> Result<(Capture<'s>, Capture<'s>, Option<i64>), ()> {
-    if !align {
-        return Ok((a, b, None));
-    }
-    match onsets {
-        (Some(oa), Some(ob)) => Ok((&a[oa..], &b[ob..], Some(ob as i64 - oa as i64))),
-        (None, None) => Ok((a, b, None)),
-        _ => Err(()),
-    }
 }
 
 /// Run `rom` to `o.until_frame`, draining the APU every frame — the same
@@ -211,6 +262,13 @@ pub(crate) fn run_audio_diff(
         eprintln!("error: --window-ms must be at least 1");
         return ExitCode::from(2);
     }
+    if o.align_onset && o.max_shift >= window {
+        eprintln!(
+            "error: --max-shift must be shorter than a window ({window} samples at --window-ms {})",
+            o.window_ms
+        );
+        return ExitCode::from(2);
+    }
     if !o.tolerance_pct.is_finite() || o.tolerance_pct < 0.0 {
         eprintln!("error: --tolerance-pct must be a percentage of 0 or more");
         return ExitCode::from(2);
@@ -228,12 +286,14 @@ pub(crate) fn run_audio_diff(
     };
 
     let (onset_a, onset_b) = (onset(&a, o.silence), onset(&b, o.silence));
-    let cut = aligned(&a, &b, (onset_a, onset_b), o.align_onset);
-    let (cut_a, cut_b, onset_shift) = cut.unwrap_or((&a, &b, None));
-    let windows = compare(cut_a, cut_b, window, o.silence);
+    let shift_limit = o.align_onset.then_some(o.max_shift);
+    let windows = compare(&a, &b, window, o.silence, shift_limit);
     for w in &windows {
+        let shift = w
+            .shift
+            .map_or_else(String::new, |s| format!(" shift={s:+}"));
         println!(
-            "window {:>6} ms: a={:>9.2} b={:>9.2} delta={:.2}%",
+            "window {:>6} ms: a={:>9.2} b={:>9.2} delta={:.2}%{shift}",
             w.start_ms, w.rms_a, w.rms_b, w.delta_pct
         );
     }
@@ -258,13 +318,21 @@ pub(crate) fn run_audio_diff(
             a.len().abs_diff(b.len())
         );
     }
-    if cut.is_err() {
-        println!("--align-onset: one capture is silent, the other is not");
-    }
-    let matched =
-        !windows.is_empty() && max_delta_pct <= o.tolerance_pct && !length_mismatch && cut.is_ok();
+    let matched = !windows.is_empty() && max_delta_pct <= o.tolerance_pct && !length_mismatch;
     let status = if matched { "match" } else { "diff" };
-    let shift = onset_shift.map_or_else(String::new, |s| format!(", onset shift {s:+} samples"));
+    let largest_shift = windows
+        .iter()
+        .filter_map(|w| w.shift)
+        .max_by_key(|s| s.unsigned_abs());
+    // The method is on the verdict line: a line quoted from before this
+    // search existed ("onset shift") cannot be taken for one from after.
+    let shift = largest_shift.map_or_else(String::new, |s| {
+        format!(
+            ", per-window shift, max {} samples (searched ±{})",
+            s.unsigned_abs(),
+            o.max_shift
+        )
+    });
     println!(
         "{} window(s) of {} ms, max delta {:.2}% (tolerance {}%){shift}: {}",
         windows.len(),
@@ -286,7 +354,8 @@ pub(crate) fn run_audio_diff(
             onset_a,
             onset_b,
             align_onset: o.align_onset,
-            onset_shift,
+            shift_limit,
+            largest_shift,
             length_mismatch,
             windows,
             max_delta_pct,
@@ -328,7 +397,7 @@ mod tests {
         let a = [vec![(0, 0); 1000], square(8000, 31_000)].concat();
         let b = [vec![(0, 0); 1003], square(8000, 30_997)].concat();
         assert_ne!(a, b);
-        let w = compare(&a, &b, 16_000, 64);
+        let w = compare(&a, &b, 16_000, 64, None);
         assert_eq!(w.len(), 2);
         assert!(w.iter().all(|w| w.delta_pct < 1.0), "{w:?}");
         assert_eq!(onset(&a, 64), Some(1000));
@@ -337,7 +406,13 @@ mod tests {
 
     #[test]
     fn half_the_volume_is_fifty_percent() {
-        let w = compare(&square(8000, 16_000), &square(4000, 16_000), 16_000, 64);
+        let w = compare(
+            &square(8000, 16_000),
+            &square(4000, 16_000),
+            16_000,
+            64,
+            None,
+        );
         assert_eq!(w.len(), 1);
         assert!((w[0].delta_pct - 50.0).abs() < 1e-9, "{w:?}");
     }
@@ -346,7 +421,7 @@ mod tests {
     fn near_silence_is_measured_against_the_floor() {
         // 1 LSB against digital silence: 100 % of itself, 1/64 of the
         // floor — not a difference worth a DIFF.
-        let w = compare(&square(1, 16_000), &square(0, 16_000), 16_000, 64);
+        let w = compare(&square(1, 16_000), &square(0, 16_000), 16_000, 64, None);
         assert!(w[0].delta_pct < 2.0, "{w:?}");
         assert_eq!(onset(&square(1, 100), 64), None);
     }
@@ -356,48 +431,96 @@ mod tests {
         // OpenSNES 2026-10-08: 160007 samples against 159945. The eleventh
         // window held 7 samples on one side and none on the other, and
         // read 100 %.
-        let w = compare(&square(8000, 160_007), &square(8000, 159_945), 16_000, 64);
+        let w = compare(
+            &square(8000, 160_007),
+            &square(8000, 159_945),
+            16_000,
+            64,
+            None,
+        );
         assert_eq!(w.len(), 9);
         assert!(w.iter().all(|w| w.delta_pct < 1e-9), "{w:?}");
         assert_eq!(w[8].start_ms, 4000);
         // Exactly ten windows on both sides: ten are compared.
-        let w = compare(&square(8000, 160_007), &square(8000, 160_000), 16_000, 64);
+        let w = compare(
+            &square(8000, 160_007),
+            &square(8000, 160_000),
+            16_000,
+            64,
+            None,
+        );
         assert_eq!(w.len(), 10);
     }
 
     #[test]
     fn captures_shorter_than_a_window_are_one_window_over_their_common_length() {
-        let w = compare(&square(8000, 9000), &square(4000, 8000), 16_000, 64);
+        let w = compare(&square(8000, 9000), &square(4000, 8000), 16_000, 64, None);
         assert_eq!(w.len(), 1);
         assert!((w[0].delta_pct - 50.0).abs() < 1e-9, "{w:?}");
-        assert!(compare(&square(8000, 9000), &[], 16_000, 64).is_empty());
+        assert!(compare(&square(8000, 9000), &[], 16_000, 64, None).is_empty());
+    }
+
+    /// Two bursts of a decaying tone after `lead` and `gap` samples of
+    /// silence — no two shifts of it look alike.
+    fn two_bursts(lead: usize, gap: usize, total: usize) -> Vec<(i16, i16)> {
+        let burst = |n: usize| -> Vec<(i16, i16)> {
+            (0..n)
+                .map(|i| {
+                    let v = (((i * 37) % 251) as i32 - 125) * 60 * (n - i) as i32 / n as i32;
+                    (v as i16, (v / 2) as i16)
+                })
+                .collect()
+        };
+        let mut out = [
+            vec![(0, 0); lead],
+            burst(12_000),
+            vec![(0, 0); gap],
+            burst(12_000),
+        ]
+        .concat();
+        out.resize(total, (0, 0));
+        out
     }
 
     #[test]
-    fn aligning_on_the_onset_matches_a_start_one_frame_early() {
-        // The same sound, 536 samples (one frame) earlier in B. Unaligned,
-        // the window holding the start compares different amounts of it.
-        let a = [vec![(0, 0); 47_906], square(8000, 112_030)].concat();
-        let b = [vec![(0, 0); 47_370], square(8000, 112_566)].concat();
-        let unaligned = compare(&a, &b, 16_000, 64);
-        assert!(unaligned.iter().any(|w| w.delta_pct > 2.0), "{unaligned:?}");
-
-        let onsets = (onset(&a, 64), onset(&b, 64));
-        let (ca, cb, shift) = aligned(&a, &b, onsets, true).unwrap();
-        assert_eq!(shift, Some(-536));
-        let w = compare(ca, cb, 16_000, 64);
-        assert_eq!(w.len(), 7);
-        assert!(w.iter().all(|w| w.delta_pct < 1e-9), "{w:?}");
-        // Without the option the captures are compared from sample 0.
-        assert_eq!(aligned(&a, &b, onsets, false).unwrap().2, None);
+    fn each_window_is_fitted_by_its_own_shift() {
+        // OpenSNES 2026-10-10: the first sound has not moved, the second
+        // comes two samples late, and a window edge falls in its attack.
+        let a = two_bursts(1000, 9000, 48_100);
+        let b = two_bursts(1000, 9002, 48_100);
+        let plain = compare(&a, &b, 16_000, 64, None);
+        assert!(
+            plain[1].delta_pct > 0.0,
+            "the edge cuts the attack: {plain:?}"
+        );
+        let w = compare(&a, &b, 16_000, 64, Some(64));
+        assert_eq!(
+            w.iter().map(|w| w.shift).collect::<Vec<_>>(),
+            [Some(0), Some(2), Some(2)]
+        );
+        assert!(w.iter().all(|w| w.delta_pct < 0.01), "{w:?}");
     }
 
     #[test]
-    fn aligning_two_silences_compares_them_whole_and_one_silence_is_a_diff() {
-        let quiet = vec![(0i16, 0i16); 32_000];
-        let loud = square(8000, 32_000);
-        let (a, b, shift) = aligned(&quiet, &quiet, (None, None), true).unwrap();
-        assert_eq!((a.len(), b.len(), shift), (32_000, 32_000, None));
-        assert!(aligned(&quiet, &loud, (None, Some(0)), true).is_err());
+    fn a_shift_beyond_the_limit_is_not_found_and_silence_keeps_zero() {
+        // One frame (536 samples) early: out of reach at 64, a fact to
+        // explain; within reach when asked for.
+        let a = two_bursts(8000, 2000, 64_000);
+        let b = two_bursts(8000 - 536, 2000, 64_000);
+        let near = compare(&a, &b, 16_000, 64, Some(64));
+        assert!(near.iter().any(|w| w.delta_pct > 2.0), "{near:?}");
+        let far = compare(&a, &b, 16_000, 64, Some(536));
+        assert_eq!(far[0].shift, Some(-536));
+        assert!(far[0].delta_pct < 0.01, "{far:?}");
+        // The last window is silent on both sides: every shift fits, the
+        // one nearest to none is kept, and it is still printed. B's first
+        // window was read from before its sample 0: silence.
+        assert_eq!(
+            far.iter().map(|w| w.shift).collect::<Vec<_>>(),
+            [Some(-536), Some(-536), Some(-536), Some(0)]
+        );
+        // The other way round the shift is forward.
+        let late = compare(&b, &a, 16_000, 64, Some(600));
+        assert_eq!(late[0].shift, Some(536));
     }
 }

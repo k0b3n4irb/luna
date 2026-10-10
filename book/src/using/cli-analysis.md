@@ -129,10 +129,11 @@ same exit codes as above.
 | `--audio` | off | Compare the sound instead of the frames. Excludes `--frames`, `--tolerance`, `--screenshot-dir`, `--force-display`, `--native-res`. |
 | `--until-frame <N>` | — | PPU frame both ROMs run to (required). |
 | `--window-ms <MS>` | `500` | Window length. Only windows complete on **both** sides are compared: the two captures end a few samples apart, and a last window partial on one side and empty on the other is not a difference in the sound. Captures too short for one window are compared as a single window over their common length. |
-| `--align-onset` | off | Start the windows at each ROM's first sample above `--silence` instead of at sample 0, and report the shift between the two (see below). |
+| `--align-onset` | off | Compare each window with the stretch of B that fits it best within `--max-shift` samples, and print the shift kept (see below). |
+| `--max-shift <N>` | `64` | With `--align-onset`: how far a window may be moved, in samples (a frame is 534). Shorter than a window. |
 | `--tolerance-pct <P>` | `2` | Largest difference a window may show, in percent of the louder of the two levels. |
 | `--silence <LEVEL>` | `64` | Sample level counted as silence (of 32767): the threshold of the reported onset, and the floor differences are measured against, so two near-silent windows are not a 100 % difference over one LSB. |
-| `--input`, `--out`, `--force-mapper`, `--force-region`, `--power-on` | — | As for the frame comparison. The JSON report is `{a, b, until_frame, window_ms, tolerance_pct, silence, samples_a, samples_b, onset_a, onset_b, align_onset, onset_shift, length_mismatch, windows: [{start_ms, rms_a, rms_b, delta_pct}], max_delta_pct, status}`. |
+| `--input`, `--out`, `--force-mapper`, `--force-region`, `--power-on` | — | As for the frame comparison. The JSON report is `{a, b, until_frame, window_ms, tolerance_pct, silence, samples_a, samples_b, onset_a, onset_b, align_onset, shift_limit, largest_shift, length_mismatch, windows: [{start_ms, rms_a, rms_b, delta_pct, shift}], max_delta_pct, status}`. |
 
 ```bash
 # Two builds of a music player; the second adds two instructions to its init.
@@ -148,26 +149,42 @@ luna diff --audio build/old/music.sfc build/new/music.sfc --until-frame 300
 # 10 window(s) of 500 ms, max delta 0.04% (tolerance 2%): MATCH
 ```
 
-**The same sound, a frame earlier.** A few samples of shift disappear in
-a 500 ms window; a whole frame does not. When the code that starts the
-music gains a frame, the sound comes out 536 samples sooner, and the
-window that holds the start compares 500 ms of music with 483 ms: a
-`DIFF`, for a sound nobody could tell apart. `--align-onset` starts each
-capture's windows at its own first sample above `--silence`, and the
-verdict line names the shift:
+**The same sounds, each a few samples away.** A shift of a few samples
+disappears in a 500 ms window, unless the window's edge falls in a
+sound's attack: then two samples of shift put a different amount of the
+attack in the window, and its level moves by twenty percent for a sound
+nobody could tell apart. And sounds move independently: the first can
+stay where it was while the second comes two samples late.
+`--align-onset` compares each window of A with the stretch of B that
+fits it best (least sum of absolute differences, sample against sample)
+within `--max-shift` samples either way, and prints the shift it kept:
 
 ```bash
-luna diff --audio --align-onset build/old/music.sfc build/new/music.sfc --until-frame 300
-# window      0 ms: a=  4000.99 b=  4000.54 delta=0.01%
-# window    500 ms: a=  1639.02 b=  1639.02 delta=0.00%
+luna diff --audio --align-onset build/old/echo.sfc build/new/echo.sfc --until-frame 300
+# window      0 ms: a=   473.72 b=   473.72 delta=0.00% shift=+2
+# window    500 ms: a=   459.01 b=   458.76 delta=0.05% shift=+0
+# window   1000 ms: a=   193.96 b=   193.67 delta=0.15% shift=+0
+# window   1500 ms: a=   484.44 b=   484.05 delta=0.08% shift=-2
 # …
-# first sample above 64: a=47906 b=47370 (of 159936 / 159936)
-# 7 window(s) of 500 ms, max delta 0.09% (tolerance 2%), onset shift -536 samples: MATCH
+# first sample above 64: a=9672 b=9674 (of 159936 / 159936)
+# 9 window(s) of 500 ms, max delta 0.15% (tolerance 2%), per-window shift, max 2 samples (searched ±64): MATCH
 ```
 
-Without the option the same two ROMs read `max delta 85.24%: DIFF`. The
-shift is `b - a`: negative when B starts sooner. If only one of the two
-captures is silent there is nothing to align, and the verdict is `DIFF`.
+A shift is `b - a`: positive when B's sound comes later. The verdict
+line names the method and the largest shift, so "the same sound, every
+window within 2 samples" is one line to quote. A window where several
+shifts fit equally (silence, a steady tone) keeps the one nearest to
+none. Before sample 0 the machine was not running, and is read as
+silence.
+
+The default reach of 64 samples is deliberate: a sound that starts a
+whole frame sooner (534 samples) stays a `DIFF`, because that is a fact
+to explain, not noise. When it is explained, `--max-shift 534` names it.
+
+> Until 1.36.0 `--align-onset` cut both captures at their first sample
+> above `--silence` and printed `onset shift N samples`: one shift for
+> everything, taken from the first sound. The `onset_shift` key of the
+> JSON report is gone with it.
 
 **A capture that stops short** is a `DIFF` whatever its windows say: both
 ROMs ran to the same frame, so one capture a whole window shorter than

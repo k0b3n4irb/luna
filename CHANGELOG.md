@@ -34,6 +34,18 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   rule. **A manifest that passed on a low byte alone now fails**, which is
   the point. A failure on fewer bytes than the symbol has says so:
   `values.cam_x (first byte of a 2-byte symbol): …` (#271).
+- **`luna diff --audio --align-onset` fits every window by itself.** It
+  used to cut both captures at their first sample above the silence
+  level: one shift for the whole run, taken from the first sound. Two
+  captures of the same sounds, the second one two samples later, read
+  `DIFF` at 21.83 % when a window's edge fell in its attack. Each window
+  of A is now compared with the stretch of B that fits it best within
+  `--max-shift` samples (new, default 64), each line prints the shift
+  kept, and the verdict reads `per-window shift, max N samples (searched
+  ±64)`. A sound that starts a whole frame sooner is out of the default
+  reach and stays a `DIFF` until `--max-shift 534` names it. In the JSON
+  report `onset_shift` is replaced by `shift_limit`, `largest_shift` and
+  a `shift` per window.
 - **luna-api:** `Emulator::symbol_size`, `SymbolTable::size_of`.
 
 ## [1.36.0] — 2026-10-10
