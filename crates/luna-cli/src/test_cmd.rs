@@ -473,6 +473,42 @@ impl SymbolWatch {
     }
 }
 
+/// How the failure line of a frame hash that did not match begins.
+const FBHASH_MISMATCH: &str = "fbhash: expected";
+
+impl TestOutcome {
+    /// What `--update` rewrote in this test's manifest, one line each: the
+    /// frame hash and the blocks that did not match.
+    fn updated(&self) -> Vec<String> {
+        let hash = self
+            .failures
+            .iter()
+            .any(|f| f.starts_with(FBHASH_MISMATCH))
+            .then(|| format!("fbhash -> {}", self.fbhash.as_deref().unwrap_or("?")));
+        let blocks = self.block_mismatches.iter().map(|b| {
+            format!(
+                "blocks.{} -> {} ({} byte(s))",
+                b.key,
+                hex_string(&b.actual, false),
+                b.actual.len()
+            )
+        });
+        hash.into_iter().chain(blocks).collect()
+    }
+
+    /// The failures `--update` does not rewrite: every assertion but the
+    /// frame hash and the blocks.
+    fn not_updated(&self) -> Vec<&String> {
+        self.failures
+            .iter()
+            .filter(|f| {
+                !f.starts_with(FBHASH_MISMATCH)
+                    && !self.block_mismatches.iter().any(|b| b.to_string() == **f)
+            })
+            .collect()
+    }
+}
+
 /// `luna test` entry point.
 pub(crate) fn run_tests(
     paths: &[PathBuf],
@@ -530,45 +566,71 @@ pub(crate) fn run_tests(
     // every block that did not match, with the measured values, preserving
     // formatting and comments (toml_edit).
     if update {
-        let mut blocks = 0usize;
+        let (mut rewritten, mut blocks) = (0usize, 0usize);
         for o in &outcomes {
-            if let Err(e) = update_manifest(&o.path, o.fbhash.as_deref(), &o.block_mismatches) {
-                eprintln!("error: updating {}: {e}", o.path.display());
-                return ExitCode::from(2);
+            match update_manifest(&o.path, o.fbhash.as_deref(), &o.block_mismatches) {
+                Ok(changed) => rewritten += usize::from(changed),
+                Err(e) => {
+                    eprintln!("error: updating {}: {e}", o.path.display());
+                    return ExitCode::from(2);
+                }
             }
             blocks += o.block_mismatches.len();
         }
-        eprintln!(
-            "updated fbhash in {} manifest(s), {blocks} block(s)",
-            outcomes.len()
-        );
+        eprintln!("rewrote {rewritten} manifest(s), {blocks} block(s)");
     }
 
-    let failed: Vec<&TestOutcome> = outcomes.iter().filter(|o| !o.failures.is_empty()).collect();
+    // After `--update` a test whose only failures were just rewritten is
+    // neither passed nor failed: it is UPDATED, and says what changed. A
+    // failure `--update` does not rewrite is still a failure.
+    let remaining = |o: &TestOutcome| -> Vec<String> {
+        if update {
+            o.not_updated().into_iter().cloned().collect()
+        } else {
+            o.failures.clone()
+        }
+    };
+    let failed = outcomes.iter().filter(|o| !remaining(o).is_empty()).count();
+    let updated = outcomes
+        .iter()
+        .filter(|o| update && !o.failures.is_empty() && remaining(o).is_empty())
+        .count();
     let skipped = outcomes.iter().filter(|o| o.skipped.is_some()).count();
     for o in &outcomes {
+        let left = remaining(o);
+        let rewritten = if update { o.updated() } else { Vec::new() };
         if let Some(reason) = &o.skipped {
             println!("SKIP {} ({reason})", o.name);
         } else if o.failures.is_empty() {
             println!("PASS {}", o.name);
+        } else if left.is_empty() {
+            println!("UPDATED {}", o.name);
         } else {
             println!("FAIL {}", o.name);
-            for f in &o.failures {
-                println!("     {f}");
-            }
+        }
+        for f in &left {
+            println!("     {f}");
+        }
+        for u in &rewritten {
+            println!("     updated: {u}");
         }
     }
+    let passed = outcomes.len() - failed - updated - skipped;
+    let updated_part = if update {
+        format!("{updated} updated, ")
+    } else {
+        String::new()
+    };
     println!(
-        "{} passed, {} failed, {skipped} skipped, {} total",
-        outcomes.len() - failed.len() - skipped,
-        failed.len(),
+        "{passed} passed, {updated_part}{failed} failed, {skipped} skipped, {} total",
         outcomes.len()
     );
 
     if report_json {
         let report = serde_json::json!({
-            "passed": outcomes.len() - failed.len() - skipped,
-            "failed": failed.len(),
+            "passed": passed,
+            "failed": failed,
+            "updated": updated,
             "skipped": skipped,
             "total": outcomes.len(),
             "tests": outcomes.iter().map(|o| serde_json::json!({
@@ -577,6 +639,7 @@ pub(crate) fn run_tests(
                 "passed": o.failures.is_empty() && o.skipped.is_none(),
                 "skipped": o.skipped,
                 "failures": o.failures,
+                "updated": if update { o.updated() } else { Vec::new() },
                 "fbhash": o.fbhash,
                 "block_mismatches": o.block_mismatches.iter()
                     .map(BlockMismatch::to_json).collect::<Vec<_>>(),
@@ -592,7 +655,7 @@ pub(crate) fn run_tests(
         );
     }
 
-    if update || failed.is_empty() {
+    if update || failed == 0 {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
@@ -1287,7 +1350,7 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
         match &measured_fbhash {
             Some(got) if got.eq_ignore_ascii_case(want) => {}
             Some(got) => failures.push(format!(
-                "fbhash: expected {want}, got {got} (run `luna test --update` after an intended render change)"
+                "{FBHASH_MISMATCH} {want}, got {got} (run `luna test --update` after an intended render change)"
             )),
             None => failures.push("fbhash: no frame rendered".into()),
         }
@@ -2201,18 +2264,21 @@ fn take_trace_count(em: &mut luna_api::Emulator, name: &str) -> Result<u64, Stri
 }
 
 /// `luna test --update` on one manifest file: see [`updated_manifest`].
-/// The file is left alone when nothing in it changes.
+/// The file is left alone when nothing in it changes; `Ok(true)` when it
+/// was rewritten.
 fn update_manifest(
     path: &Path,
     fbhash: Option<&str>,
     blocks: &[BlockMismatch],
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let updated = updated_manifest(&text, fbhash, blocks)?;
     if updated == text {
-        return Ok(());
+        return Ok(false);
     }
-    std::fs::write(path, updated).map_err(|e| e.to_string())
+    std::fs::write(path, updated)
+        .map(|()| true)
+        .map_err(|e| e.to_string())
 }
 
 /// The manifest `text` with `asserts.fbhash` set to the measured hash

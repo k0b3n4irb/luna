@@ -773,6 +773,28 @@ fbhash = "0000000000000000"
     // --update rewrites it (comments preserved) and exits 0…
     let out = run(&["golden.toml", "--update"], &dir);
     assert!(out.status.success());
+    // …and says UPDATED, not FAIL: the line that failed is the one it
+    // just rewrote (`OpenSNES` 2026-10-10).
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("UPDATED golden"), "{stdout}");
+    assert!(stdout.contains("     updated: fbhash -> "), "{stdout}");
+    assert!(!stdout.contains("FAIL"), "{stdout}");
+    assert!(
+        stdout.contains("0 passed, 1 updated, 0 failed, 0 skipped, 1 total"),
+        "{stdout}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("rewrote 1 manifest(s), 0 block(s)"),
+        "{out:?}"
+    );
+    // A second --update has nothing to rewrite, and passes.
+    let again = run(&["golden.toml", "--update"], &dir);
+    let stdout = String::from_utf8_lossy(&again.stdout);
+    assert!(stdout.contains("PASS golden"), "{stdout}");
+    assert!(
+        String::from_utf8_lossy(&again.stderr).contains("rewrote 0 manifest(s)"),
+        "{again:?}"
+    );
     let text = std::fs::read_to_string(&manifest).unwrap();
     assert!(text.contains("# golden comment survives --update"));
     assert!(!text.contains("0000000000000000"));
@@ -780,6 +802,38 @@ fbhash = "0000000000000000"
     // …after which a plain run passes.
     let out = run(&["golden.toml"], &dir);
     assert!(out.status.success());
+}
+
+/// `--update` rewrites the frame hash; a value assert that fails is not
+/// something it can rewrite, and the test stays a FAIL with that line only.
+#[test]
+fn update_leaves_what_it_cannot_rewrite_as_a_failure() {
+    let dir = fresh_dir("update_mixed");
+    synthetic_rom(&dir.join("game.sfc"), &[]);
+    std::fs::write(
+        dir.join("mixed.toml"),
+        r#"rom = "game.sfc"
+force_mapper = "lorom"
+frames = 3
+
+[asserts]
+fbhash = "0000000000000000"
+
+[asserts.values]
+"7E:0000" = 99
+"#,
+    )
+    .unwrap();
+    let out = run(&["mixed.toml", "--update"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("FAIL mixed"), "{stdout}");
+    assert!(stdout.contains("values.7E:0000"), "{stdout}");
+    assert!(!stdout.contains("fbhash: expected"), "{stdout}");
+    assert!(stdout.contains("     updated: fbhash -> "), "{stdout}");
+    assert!(
+        stdout.contains("0 passed, 0 updated, 1 failed, 0 skipped, 1 total"),
+        "{stdout}"
+    );
 }
 
 /// `--update` recaptures a block that did not match (`OpenSNES`
@@ -815,6 +869,12 @@ vector = { space = "wram", offset = "00:FFFC", hex = "0080" }
 
     let out = run(&["blocks.toml", "--update"], &dir);
     assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("UPDATED blocks"), "{stdout}");
+    assert!(
+        stdout.contains("     updated: blocks.00:FFFC -> 0080 (2 byte(s))"),
+        "{stdout}"
+    );
     assert_eq!(
         std::fs::read_to_string(&manifest).unwrap(),
         text.replace("FF FF", "00 80")

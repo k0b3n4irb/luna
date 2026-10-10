@@ -229,6 +229,23 @@ Blocks that matched are not touched. As with `fbhash`, `--update` records
 what the machine does, right or wrong: read the diff before committing
 it.
 
+The run that rewrites says so. A test whose only failures were the hash
+or the blocks reads `UPDATED`, with one line for each thing rewritten; a
+failure `--update` cannot rewrite (a value, a register, a trace count)
+is still a `FAIL`:
+
+```
+$ luna test tests/ --update
+rewrote 1 manifest(s), 1 block(s)
+PASS boot
+UPDATED blk
+     updated: blocks.row1 -> 44203b2032202920 (8 byte(s))
+1 passed, 1 updated, 0 failed, 0 skipped, 2 total
+```
+
+With `--report json` the report gains `updated` (the count, and per test
+the same lines). The exit code of an `--update` run is 0, as before.
+
 To see the bytes without rewriting anything, `--report json` gives each
 mismatched block whole, next to the `failures` sentences:
 

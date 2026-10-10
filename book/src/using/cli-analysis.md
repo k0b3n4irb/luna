@@ -597,7 +597,7 @@ per manifest, not by flags (`region`, `force_mapper`, `power_on`, `seed`).
 
 | Option | Default | Purpose |
 |---|---|---|
-| `--update` | off | Rewrite each manifest's `asserts.fbhash` with the measured value (regenerate goldens after an intended render change); formatting and comments are kept. |
+| `--update` | off | Rewrite each manifest's `asserts.fbhash` and the blocks that did not match with the measured values (regenerate goldens after an intended render change); formatting and comments are kept. A test it just rewrote reads `UPDATED`, not `FAIL`. |
 | `--only <SUBSTR>` | all | Only run manifests whose path contains the substring. |
 | `--report json` | — | Also print a machine-readable JSON report to stdout. |
 | `--jobs <N>` | `1` | Run up to N manifests at once (`0` = one per CPU); same lines, same order and same exit code as a serial run. |

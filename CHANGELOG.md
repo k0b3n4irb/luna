@@ -48,6 +48,18 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   a `shift` per window.
 - **luna-api:** `Emulator::symbol_size`, `SymbolTable::size_of`.
 
+### Fixed
+
+- **`luna test --update` no longer reports as failed what it just
+  rewrote.** It printed `FAIL`, the mismatch and `0 passed, 1 failed`
+  for a manifest it had corrected in the same run. Such a test now reads
+  `UPDATED`, with one line per thing rewritten (`updated: fbhash -> …`,
+  `updated: blocks.KEY -> …`), and the summary counts it apart: `1
+  passed, 1 updated, 0 failed, …`. A failure `--update` cannot rewrite
+  is still a `FAIL`. The first line says how many files were really
+  rewritten (`rewrote N manifest(s), M block(s)`; it used to count every
+  manifest run). `--report json` gains `updated`.
+
 ## [1.36.0] — 2026-10-10
 
 Two requests from a game port (issues #269 and #270): read and assert
