@@ -48,7 +48,7 @@ enabled.
 | **In luna** | `crates/luna-core/src/dma/` (`controller.rs`, `channel.rs`, `bus.rs`) |
 | **Proven by** | a regression test per confirmed divergence in that module; `tools/validate-hdma-corpus.sh` on commercial titles, because the golden suite does not reach the edge cases |
 | **Grade** | **A−** (scorecard: *DMA / HDMA*) |
-| **Open gaps** | [`docs/hdma_ares_audit.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/hdma_ares_audit.md), a line-by-line comparison with ares: rows 13, 15 to 17 and 19 are open |
+| **Open gaps** | [`docs/hdma_ares_audit.md`](https://github.com/k0b3n4irb/luna/blob/main/docs/hdma_ares_audit.md), a line-by-line comparison with ares: rows 13, 16, 17 and 19 are open |
 
 The DMA and HDMA controllers live in `luna-core` as the `crate::dma` module.
 **DMA** moves a block between the A-bus and a B-bus port (typically a PPU

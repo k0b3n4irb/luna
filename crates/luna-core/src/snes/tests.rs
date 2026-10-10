@@ -1018,6 +1018,87 @@ fn hdma_preempts_a_long_mid_frame_dma_at_scanline_boundaries() {
 }
 
 #[test]
+fn a_dma_burst_lasts_a_whole_number_of_cpu_clocks_since_the_pause() {
+    // anomie's timing document, "STA $420b : NOP", one channel, 3 bytes,
+    // CPU clock 6: 2 (or 4, 6, 8) clocks to a multiple of 8 since reset,
+    // 8 + 8 + 3*8 = 40 for the transfer, then to a whole CPU clock since
+    // the pause. Totals 48, 48, 48 and 54.
+    for (mclk_at_pause, total) in [(6, 48), (4, 48), (2, 48), (0, 54)] {
+        assert_eq!(mdma_cost(mclk_at_pause, 1, 3, 6), total, "{mclk_at_pause}");
+    }
+    // An 8-clock access: every burst already ends on a CPU clock once
+    // aligned, so the realignment is a full clock.
+    assert_eq!(mdma_cost(0, 2, 5, 8), 8 + 8 + 2 * 8 + 5 * 8 + 8);
+}
+
+/// Run a two-channel DMA to `$2118` (3 and `second` bytes) from the given
+/// beam position, the edge on a 6-clock access. Returns the master clock
+/// at the edge and the clocks the edge's access took, burst included.
+fn timed_dma(hdmaen: u8, line: u16, mcycles_in_line: u32, second: u16) -> (u64, u64) {
+    use crate::dma::DmaParams;
+
+    let mut snes = Snes::from_cartridge(demo_lorom());
+    snes.reset();
+    snes.ppu.inidisp = 0x80;
+    snes.ppu.active_display = false;
+    for (ch, das) in [(0usize, 3u16), (2, second)] {
+        snes.dma.channels[ch].params = DmaParams::from_byte(0x08); // AToB, fixed, mode 0
+        snes.dma.channels[ch].bbad = 0x18;
+        snes.dma.channels[ch].a_addr = 0x4000;
+        snes.dma.channels[ch].a_bank = 0x7E;
+        snes.dma.channels[ch].das = das;
+    }
+    // HDMA ch1: direct mode 0, a repeat entry, already running its table.
+    snes.dma.channels[1].params = DmaParams::from_byte(0x00);
+    snes.dma.channels[1].bbad = 0x18;
+    snes.dma.channels[1].a_bank = 0x7E;
+    snes.dma.channels[1].a2a = 0x5000;
+    snes.dma.channels[1].ntlr = 0x86;
+    snes.dma.channels[1].hdma_active = true;
+    snes.dma.channels[1].hdma_do_transfer = true;
+    snes.dma.hdmaen = hdmaen;
+
+    let cpu_pc_full = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
+    let (_, mut bus) = snes.cpu_and_bus(BusCursor {
+        ppu_line: line,
+        mcycles_in_line,
+        frame_count: 0,
+        nmis_serviced: 0,
+        last_nmi_frame: None,
+        sched_enabled: true,
+        cpu_pc_full,
+    });
+    bus.write(make_addr(0x00, 0x420B), 0x05);
+    let at_edge = *bus.mclk_total;
+    // `$4212` is a 6-clock access: the CPU clock the burst realigns to.
+    let _ = bus.read(make_addr(0x00, 0x4212));
+    (at_edge, *bus.mclk_total - at_edge)
+}
+
+#[test]
+fn a_dma_costs_the_same_whether_or_not_an_hdma_is_armed() {
+    // hdma_ares_audit row 15. In vertical blank no HDMA runs, so arming one
+    // must not change what the burst costs: the model is `mdma_cost` on
+    // both paths, plus the 6 clocks of the access that ran the edge.
+    let (at_edge, plain) = timed_dma(0x00, 230, 0, 5);
+    let (_, armed) = timed_dma(0x02, 230, 0, 5);
+    assert_eq!(plain, mdma_cost(at_edge, 2, 8, 6) + 6);
+    assert_eq!(armed, plain);
+}
+
+#[test]
+fn an_hdma_inside_a_dma_adds_its_clocks_to_the_burst_without_realigning() {
+    // The burst crosses the end of line 50, where the armed channel runs:
+    // ares takes neither alignment step there (`if(!dmaEnable())`), only
+    // `step(8)` and the two A-bus reads (the byte, the next header), and
+    // the final realignment is on the whole count.
+    let (at_edge, spent) = timed_dma(0x02, 50, 1300, 17);
+    let counter = u64::from(mdma_preamble(at_edge)) + 2 * 8 + 20 * 8 + (8 + 2 * 8);
+    assert_eq!(spent, counter + mdma_realign(counter, 6) + 6);
+    assert_eq!((spent - 6) % 6, 0, "a whole number of CPU clocks");
+}
+
+#[test]
 fn cpu_writes_to_ppu_register_reach_the_ppu() {
     // Build a program that writes $42 to PPU $2100 (INIDISP).
     // Reuse demo_lorom() so the SRAM exponent / checksum etc. are

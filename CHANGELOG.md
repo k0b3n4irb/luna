@@ -59,6 +59,16 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   is still a `FAIL`. The first line says how many files were really
   rewritten (`rewrote N manifest(s), M block(s)`; it used to count every
   manifest run). `--report json` gains `updated`.
+- **A DMA lasts a whole number of CPU clocks since the pause.** The step
+  that puts the CPU back on its clock after a DMA was computed from the
+  first clocks of the burst instead of all of it, so a transfer started
+  from a 6-clock access ended 2 or 4 master clocks off, depending on its
+  length. And a DMA started while an HDMA channel was enabled was charged
+  a flat cost: no alignment, no 8 clocks per channel. Both now follow
+  ares, Mesen2 and anomie's timing document. A routine timed to the
+  master clock around a DMA moves by those few clocks. Of our reference
+  pictures only Star Fox's intro moves: the same pictures in the same
+  order, each up to three frames apart.
 
 ## [1.36.0] — 2026-10-10
 

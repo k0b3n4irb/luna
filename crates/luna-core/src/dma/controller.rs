@@ -85,6 +85,13 @@ pub struct Dma {
     /// frame boundary, never mid-DMA).
     #[serde(skip)]
     pub mdma_cursor: Option<MdmaCursor>,
+    /// ares `counter.dma` while a segmented sync DMA is in flight: the
+    /// master clocks the burst has spent since the pause. Each channel
+    /// started adds 8, each byte 8, and an HDMA that runs inside the burst
+    /// adds its own clocks — the bus realigns to the CPU clock on the
+    /// total. `None` outside a segmented burst. Transient, like the cursor.
+    #[serde(skip)]
+    pub mdma_clock: Option<u32>,
 }
 
 /// Resume state for a segmented sync DMA (Phase 5). The per-channel
@@ -197,7 +204,12 @@ impl Dma {
                 // Tag the bus view with the active channel so its B-bus
                 // writes carry the channel (Mesen2 `dma->GetActiveChannel()`).
                 bus.set_active_channel(ch as u8);
+                // ares `Channel::dmaRun`: `step(8)` before the first byte.
+                let starting = !self.channels[ch].seg_running;
                 let done = self.channels[ch].run_segment(bus, budget);
+                if let Some(clock) = self.mdma_clock.as_mut() {
+                    *clock += 8 * (u32::from(starting) + done);
+                }
                 total += done;
                 budget -= done;
                 if self.channels[ch].seg_running {
@@ -259,7 +271,7 @@ impl Dma {
                 reads += self.channels[ch].hdma_start_frame(bus);
             }
         }
-        hdma_cost(mclk_at_fire, clock_count, reads)
+        self.hdma_charge(mclk_at_fire, clock_count, reads)
     }
 
     /// Per-scanline HDMA step. Called once per visible scanline
@@ -306,9 +318,26 @@ impl Dma {
             }
         }
         if any_active {
-            hdma_cost(mclk_at_fire, clock_count, reads)
+            self.hdma_charge(mclk_at_fire, clock_count, reads)
         } else {
             0
+        }
+    }
+}
+
+impl Dma {
+    /// The clocks of an HDMA setup or line of `reads` A-bus reads. On its
+    /// own it is `hdma_cost`. Inside a sync DMA (`cpu/timing.cpp:110-121`,
+    /// the `if(!dmaEnable())` guards) neither alignment step runs: it is the
+    /// `step(8)` and the reads alone, added to the burst's counter.
+    const fn hdma_charge(&mut self, mclk_at_fire: u64, clock_count: u32, reads: u32) -> u32 {
+        match self.mdma_clock.as_mut() {
+            Some(clock) => {
+                let spent = 8 + 8 * reads;
+                *clock += spent;
+                spent
+            }
+            None => hdma_cost(mclk_at_fire, clock_count, reads),
         }
     }
 }

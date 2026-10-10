@@ -687,19 +687,35 @@ const fn dram_refresh_pos(line_start_mclk: u64) -> u32 {
 /// ```
 ///
 /// `dmaCounter()` is `counter.cpu & 7` — the DMA clock divider — and
-/// `clockCount` is the cost of the access that wrote `$420B` (6 mclk). Note
-/// `step()` does not touch `counter.dma`, so it is just `(8 - dmaCounter) + 8`
-/// when the realignment is computed.
+/// `clockCount` is the cost of the access that wrote `$420B` (6 mclk).
+/// `counter.dma` counts **the whole burst**: a channel's steps go through
+/// `Channel::step` (`cpu/dma.cpp:45-48`), which adds to it, and Mesen2's
+/// `_dmaClockCounter` does the same (`SnesDmaController.cpp:75,99`). So the
+/// burst lasts a whole number of CPU clocks since the pause — anomie's
+/// timing document works the example the unit test replays.
 ///
-/// luna used to charge a flat 8-mclk overhead, so every burst finished early
-/// by the alignment steps plus 8 mclk per channel — phase error that never
-/// comes back.
+/// luna computed the realignment from the preamble alone until 2026-10-10,
+/// which left the burst 2 or 4 mclk off whenever the access that ran the
+/// edge was a 6-clock one and `channels + bytes` not a multiple of three.
 #[inline]
 const fn mdma_cost(mclk_at_write: u64, channels: u32, bytes: u64, clock_count: u32) -> u64 {
-    let align = 8 - (mclk_at_write & 7) as u32; // 1..=8
-    let counter_dma = align + 8;
-    let realign = clock_count - counter_dma % clock_count;
-    (counter_dma + channels * 8 + realign) as u64 + bytes * 8
+    let counter_dma = mdma_preamble(mclk_at_write) as u64 + channels as u64 * 8 + bytes * 8;
+    counter_dma + mdma_realign(counter_dma, clock_count)
+}
+
+/// The clocks a DMA burst spends before its first channel: the step to the
+/// next multiple of 8 of the master clock (1..=8), then `dmaRun()`'s 8.
+#[inline]
+const fn mdma_preamble(mclk_at_edge: u64) -> u32 {
+    8 - (mclk_at_edge & 7) as u32 + 8
+}
+
+/// The step back onto the CPU clock that ends a burst of `counter_dma`
+/// clocks. A full `clock_count` when the burst already ends on one.
+#[inline]
+const fn mdma_realign(counter_dma: u64, clock_count: u32) -> u64 {
+    let cc = clock_count as u64;
+    cc - counter_dma % cc
 }
 
 /// Master clocks the CPU's reset sequence burns before its first opcode fetch.
@@ -3055,7 +3071,14 @@ impl SnesBus<'_> {
         // `sched_one_line`. A DMA yields to HDMA at most once per line,
         // so line-granular segmentation reproduces ares' per-byte
         // `dmaEdge` ordering for this case.
-        self.advance_time(8, false); // one-shot start overhead
+        //
+        // The cost is the fast path's (`mdma_cost`), kept as ares keeps it:
+        // one counter for the whole burst, which the channels, the bytes
+        // and any HDMA that runs inside the burst all add to
+        // (`Dma::mdma_clock`), and which the final realignment reads.
+        let preamble = mdma_preamble(mclk_at_edge);
+        self.dma.mdma_clock = Some(preamble);
+        self.advance_time(u64::from(preamble), false);
         let mut trace = self.dma.dma_trace.take();
         loop {
             let room_mclk = self.line_period().saturating_sub(self.mcycles_in_line);
@@ -3063,7 +3086,8 @@ impl SnesBus<'_> {
             // 8 mclk/byte, matching `DmaChannel::run_segment`.
             let seg_bytes = (room_mclk / 8).max(1);
             let trace_hclock = self.hclock();
-            let done = {
+            let clock_before = self.dma.mdma_clock.unwrap_or(0);
+            {
                 let trace_blank_now = self.ppu_line >= self.vblank_start_line();
                 let mut view = DmaBusView {
                     wram: self.wram,
@@ -3087,15 +3111,20 @@ impl SnesBus<'_> {
                     cpu_pc: self.cpu_pc_full,
                     trace_mclk: *self.mclk_total,
                 };
-                self.dma.run_mdma_segment(&mut view, value, seg_bytes)
-            };
-            // Charge this segment's master clock; crosses the line
-            // boundary and fires HDMA for any visible line crossed.
-            self.advance_time(u64::from(done) * 8, false);
+                self.dma.run_mdma_segment(&mut view, value, seg_bytes);
+            }
+            // Charge what this segment added to the burst's counter (8 per
+            // channel started, 8 per byte); crosses the line boundary and
+            // fires HDMA for any visible line crossed.
+            let spent = self.dma.mdma_clock.unwrap_or(0) - clock_before;
+            self.advance_time(u64::from(spent), false);
             if self.dma.mdma_cursor.is_none() {
                 break; // burst complete
             }
         }
+        // The burst is over: an HDMA from here on is its own event again.
+        let counter_dma = u64::from(self.dma.mdma_clock.take().unwrap_or(0));
+        self.advance_time(mdma_realign(counter_dma, clock_count), false);
         self.dma.dma_trace = trace;
     }
 

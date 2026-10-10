@@ -1356,6 +1356,10 @@ spc_test!(
 // play run a few frames' worth of SA-1 work later; both render cleanly.
 // Again 2026-09-27: the SA-1 now keeps its HDMA time (no 120-mclk budget
 // clamp) and sees the DMA's address in its bus-conflict check.
+// Re-baselined 2026-10-10 (Star Fox only): a DMA burst is realigned on its
+// whole length (hdma_ares_audit row 15). Over frames 1700-2100 the intro
+// shows the same 61 pictures in the same order; each one arrives up to
+// three frames apart, and frame 1939 holds the previous one.
 macro_rules! game_test {
     ($fn:ident, $file:literal, $frames:literal, $hash:literal) => {
         #[test]
@@ -1420,7 +1424,7 @@ game_test!(
     game_starfox,
     "Star Fox (USA) (Rev 2).sfc",
     1939,
-    "a8c96784d2ada45a5a7288331c6e85d45be572d1fd505fa57abe7ca58c2a2df6"
+    "014d210ea9c8d3714af81c7c89db07408de684d3c98bb60afb82c1c99f7e3755"
 );
 game_test!(
     game_stuntfx,
