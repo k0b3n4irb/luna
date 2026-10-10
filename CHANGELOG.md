@@ -7,6 +7,19 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+### Changed
+
+- **A value assert compares a 16-bit variable whole.** In `[asserts.values]`
+  and `[checkpoint.values]`, an expected value that fits in a byte used to
+  compare one byte, so `cam_x = 21` passed while the variable held 277.
+  When the `.sym` records the symbol as 2 bytes (`_sizeof_<name>`), both
+  are now compared; `width = 1` still narrows it. A symbol without a
+  recorded size, an array, an address and a `symbol+N` key keep the old
+  rule. **A manifest that passed on a low byte alone now fails**, which is
+  the point. A failure on fewer bytes than the symbol has says so:
+  `values.cam_x (first byte of a 2-byte symbol): …` (#271).
+- **luna-api:** `Emulator::symbol_size`, `SymbolTable::size_of`.
+
 ## [1.36.0] — 2026-10-10
 
 Two requests from a game port (issues #269 and #270): read and assert

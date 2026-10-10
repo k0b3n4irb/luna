@@ -64,7 +64,7 @@ fbhash = "7429bf441a1c7d6c"    # displayed-frame hash — see below
 audio_rms_min = 100.0          # the music is audibly playing
 
 [asserts.values]               # loaded symbol (or "BANK:OFFSET") = expected
-r_game_state = 0x02            # bare int = eq; ≤ 0xFF checks one byte…
+r_game_state = 0x02            # bare int = eq; a 16-bit variable is compared whole…
 r_score = { ge = 0x1000 }      # …and tables give ge/gt/le/lt/ne thresholds
 "results+16" = 0xFFFF          # symbol+N: N bytes in — decimal, 0x for hex
 
@@ -142,8 +142,14 @@ What each assert means:
 - **`[asserts.values]`** — read memory through the loaded symbol table
   (or a literal `"7E:0100"` hex pair) and compare. A bare integer means
   `eq`; a table gives comparators — any of `eq`/`ne`/`ge`/`gt`/`le`/`lt`
-  plus an optional `width = 1|2` (default: 1 byte if every bound fits,
-  else a little-endian u16):
+  plus an optional `width = 1|2`. Without it the width is the
+  variable's own: a symbol the `.sym` records as 2 bytes
+  (`_sizeof_<name>`, which WLA-DX writes) is compared as a little-endian
+  u16, so `cam_x = 21` fails when the variable holds 277. A symbol with
+  no recorded size, an array, an address or a `symbol+N` key compares 1
+  byte if every bound fits, else a u16. A failure on fewer bytes than
+  the symbol has says so (`values.cam_x (first byte of a 2-byte
+  symbol): …`):
 
   ```toml
   [asserts.values]
@@ -263,8 +269,9 @@ r_mode = { dir = "unchanged", width = 1 }
 ```
 
 A `delta` entry compares a **little-endian u16** unless it says
-`width = 1` — unlike `[asserts.values]`, which reads one byte when the
-expected value fits in one. A counter that is a single byte next to an
+`width = 1` — unlike `[asserts.values]`, which takes the size the `.sym`
+records and, without one, reads one byte when the expected value fits in
+one. A counter that is a single byte next to an
 unrelated one needs the table form, as `r_mode` above.
 
 `at_frame` values must increase; `steps` cannot be combined with

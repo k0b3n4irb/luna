@@ -1667,9 +1667,39 @@ fn check_value(
     key: &str,
     assert: &ValueAssert,
 ) -> Result<Option<String>, String> {
-    let (cmp, width) = normalize_assert(assert)?;
+    let (cmp, fit) = normalize_assert(assert)?;
+    // What the `.sym` says the variable is (issue #271). An expected value
+    // that fits in a byte used to compare one byte of a 16-bit variable:
+    // `cam_x = 21` passed while the variable held 277.
+    let size = em.symbol_size(key);
+    let width = value_width(cmp.width, fit, size);
     let got = read_value(em, key, width)?;
-    Ok(eval_cmp(&format!("values.{key}"), got, &cmp))
+    let label = match size {
+        Some(size) if u32::from(width) < size => format!(
+            "values.{key} ({} of a {size}-byte symbol)",
+            if width == 1 {
+                "first byte"
+            } else {
+                "first 2 bytes"
+            }
+        ),
+        _ => format!("values.{key}"),
+    };
+    Ok(eval_cmp(&label, got, &cmp))
+}
+
+/// How many bytes a value assert compares: the `width` the manifest
+/// gives, else the variable's own size when the `.sym` records it as 1 or
+/// 2 bytes (never narrower than the bounds need), else what the bounds
+/// fit in. An array, an address or a `symbol+N` key has no such size and
+/// keeps the last rule.
+const fn value_width(explicit: Option<u8>, fit: u8, size: Option<u32>) -> u8 {
+    // `fit` already is the manifest's width when it gave one.
+    if explicit.is_none() && matches!(size, Some(2)) {
+        2
+    } else {
+        fit
+    }
 }
 
 /// Run one comparator table against an already-read value. `Some(msg)`
@@ -2262,6 +2292,22 @@ mod tests {
             resolve_ports(Some("pad"), Some("mouse"), true, false),
             Ok([Pad, Mouse])
         );
+    }
+
+    #[test]
+    fn a_value_is_compared_over_the_size_its_symbol_has() {
+        use super::value_width;
+        // A 16-bit variable is compared whole, whatever the expected value.
+        assert_eq!(value_width(None, 1, Some(2)), 2);
+        // The manifest's `width` wins; a byte stays a byte; bounds above
+        // 0xFF still need two.
+        assert_eq!(value_width(Some(1), 1, Some(2)), 1);
+        assert_eq!(value_width(None, 1, Some(1)), 1);
+        assert_eq!(value_width(None, 2, Some(1)), 2);
+        // No size, or an array's: the "fits in a byte" rule, as before.
+        assert_eq!(value_width(None, 1, None), 1);
+        assert_eq!(value_width(None, 1, Some(36)), 1);
+        assert_eq!(value_width(None, 2, None), 2);
     }
 
     #[test]

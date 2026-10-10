@@ -3447,6 +3447,13 @@ impl Emulator {
         )
     }
 
+    /// The size in bytes the loaded `.sym` records for a label (see
+    /// [`SymbolTable::size_of`]): what tells a 16-bit variable from a byte.
+    #[must_use]
+    pub fn symbol_size(&self, name: &str) -> Option<u32> {
+        self.symbols.as_ref().and_then(|t| t.size_of(name))
+    }
+
     /// Nearest label at or below `addr` in the same bank (`name` or
     /// `name+0xNN`), when a table is loaded.
     #[must_use]

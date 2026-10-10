@@ -542,3 +542,44 @@ fn profile_gives_the_cost_of_each_frame_and_gates_on_it() {
             .success()
     );
 }
+
+#[test]
+fn a_value_assert_compares_a_word_when_the_symbol_is_a_word() {
+    // Issue #271. `$10` counts ticks and `$11` follows it: read as the
+    // 16-bit variable the `.sym` says it is, the pair is `$0303` after
+    // three ticks, and an expected value that fits in a byte must not
+    // pass on its low byte alone.
+    let dir = fresh_dir("value_width");
+    slow_tick_rom(&dir);
+    let mut sym = std::fs::read_to_string(dir.join("game.sym")).unwrap();
+    sym.push_str("7e:0010 pair\n7e:0010 lone\n[definitions]\n00000002 _sizeof_pair\n");
+    std::fs::write(dir.join("game.sym"), sym).unwrap();
+    let head = "rom = \"game.sfc\"\nforce_mapper = \"lorom\"\nframes = 40\n\
+                [[checkpoint]]\nat_symbol = \"tick_end\"\nhit = 3\n[checkpoint.values]\n";
+    let run = |name: &str, line: &str| luna_test(&dir, name, &format!("{head}{line}\n"), &[]);
+    // The word is compared whole: 3 is not $0303, and the line says what
+    // was read.
+    let out = run("word.toml", "pair = 3");
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("values.pair: 0x303 violates `eq 0x3`"),
+        "{stdout}"
+    );
+    assert!(run("word_ok.toml", "pair = 0x0303").status.success());
+    // An explicit width still narrows it, and a failure then says so.
+    assert!(
+        run("byte.toml", "pair = { eq = 3, width = 1 }")
+            .status
+            .success()
+    );
+    let out = run("byte_bad.toml", "pair = { eq = 4, width = 1 }");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("values.pair (first byte of a 2-byte symbol): 0x3 violates `eq 0x4`"),
+        "{stdout}"
+    );
+    // A symbol with no recorded size, and an address, keep the old rule.
+    assert!(run("lone.toml", "lone = 3").status.success());
+    assert!(run("addr.toml", "\"7E:0010\" = 3").status.success());
+}
