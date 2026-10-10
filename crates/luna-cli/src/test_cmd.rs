@@ -142,8 +142,38 @@ struct Manifest {
     /// `at_frame`, then evaluates its `values` and `delta` asserts.
     #[serde(default)]
     checkpoint: Vec<Checkpoint>,
+    /// Bytes written into memory when execution reaches a routine: puts
+    /// the game in a state it does not reach by itself.
+    #[serde(default)]
+    poke: Vec<Poke>,
     #[serde(default)]
     asserts: Asserts,
+}
+
+/// One `[[poke]]`: values written at the `hit`-th arrival on `at_symbol`,
+/// just before its first instruction.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Poke {
+    /// The routine: a loaded symbol, `symbol+N` or `BANK:OFFSET`.
+    at_symbol: String,
+    /// Which arrival, counted from power-on (default 1).
+    hit: Option<u64>,
+    /// `key = value`, the keys and widths of `[asserts.values]`: two
+    /// bytes, little-endian, when the `.sym` records the symbol as two or
+    /// the value needs them; one byte otherwise.
+    values: BTreeMap<String, i64>,
+}
+
+/// A `[[poke]]` resolved against the loaded symbols.
+struct PendingPoke {
+    /// Index of its routine in the watch.
+    pc: usize,
+    hit: u64,
+    /// `poke@symbol#hit`, for the failure line.
+    label: String,
+    writes: Vec<(u32, Vec<u8>)>,
+    done: bool,
 }
 
 /// One `[[checkpoint]]` (issue #205): a mid-run measurement point.
@@ -427,6 +457,20 @@ struct SymbolCheckpoint {
 struct SymbolWatch {
     pcs: Vec<u32>,
     counts: Vec<u64>,
+    pokes: Vec<PendingPoke>,
+    /// The first write the machine refused.
+    poke_error: Option<String>,
+}
+
+impl SymbolWatch {
+    /// The index of `addr` in the watch, added if new.
+    fn index_of(&mut self, addr: u32) -> usize {
+        self.pcs.iter().position(|&p| p == addr).unwrap_or_else(|| {
+            self.pcs.push(addr);
+            self.counts.push(0);
+            self.pcs.len() - 1
+        })
+    }
 }
 
 /// `luna test` entry point.
@@ -960,12 +1004,14 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
         .unwrap_or(0);
     // Anything keyed on a routine — a checkpoint, or the input script's
     // clock — makes the whole run a watching one.
-    let by_symbol = m.checkpoint.iter().any(|c| c.at_symbol.is_some()) || m.input_at.is_some();
+    let by_symbol = m.checkpoint.iter().any(|c| c.at_symbol.is_some())
+        || m.input_at.is_some()
+        || !m.poke.is_empty();
     if by_symbol && !matches!(bound, Some(Bound::Frames(_))) {
         // A routine that is never reached must end the run somewhere.
         return Err(
-            "`at_symbol` checkpoints and `input_at` need `frames`: the frame the run gives \
-             up at when a routine is not reached"
+            "`at_symbol` checkpoints, `input_at` and `[[poke]]` need `frames`: the frame \
+             the run gives up at when a routine is not reached"
                 .into(),
         );
     }
@@ -977,24 +1023,42 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
     let mut watch = SymbolWatch {
         pcs: Vec::new(),
         counts: Vec::new(),
+        pokes: Vec::new(),
+        poke_error: None,
     };
+    for p in &m.poke {
+        let hit = p.hit.unwrap_or(1);
+        let label = format!("poke@{}#{hit}", p.at_symbol);
+        if hit == 0 {
+            return Err(format!("{label}: `hit` counts from 1"));
+        }
+        let at = resolve_key(&em, &p.at_symbol).map_err(|e| format!("{label}: {e}"))?;
+        let mut writes = Vec::with_capacity(p.values.len());
+        for (key, &value) in &p.values {
+            let addr = resolve_key(&em, key).map_err(|e| format!("{label} values.{key}: {e}"))?;
+            let value = u16::try_from(value)
+                .map_err(|_| format!("{label} values.{key}: {value} does not fit in 16 bits"))?;
+            let fit = if value <= 0xFF { 1 } else { 2 };
+            let bytes = value.to_le_bytes();
+            let width = usize::from(value_width(None, fit, em.symbol_size(key)));
+            writes.push((addr, bytes[..width].to_vec()));
+        }
+        let pc = watch.index_of(at);
+        watch.pokes.push(PendingPoke {
+            pc,
+            hit,
+            label,
+            writes,
+            done: false,
+        });
+    }
     let mut cp_pc: Vec<Option<usize>> = Vec::with_capacity(m.checkpoint.len());
     for cp in &m.checkpoint {
         cp_pc.push(match &cp.at_symbol {
             None => None,
             Some(sym) => {
                 let addr = resolve_key(&em, sym).map_err(|e| format!("at_symbol `{sym}`: {e}"))?;
-                Some(
-                    watch
-                        .pcs
-                        .iter()
-                        .position(|&p| p == addr)
-                        .unwrap_or_else(|| {
-                            watch.pcs.push(addr);
-                            watch.counts.push(0);
-                            watch.pcs.len() - 1
-                        }),
-                )
+                Some(watch.index_of(addr))
             }
         });
     }
@@ -1183,6 +1247,18 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
                 }
             }
         }
+    }
+
+    // A write that never happened, or that the machine refused, fails the
+    // test: every assert after it reads a state the manifest did not mean.
+    if let Some(e) = watch.poke_error.take() {
+        failures.push(e);
+    }
+    for p in watch.pokes.iter().filter(|p| !p.done) {
+        failures.push(format!(
+            "{}: not reached by frame {final_frame} (reached {} time(s)); nothing was written",
+            p.label, watch.counts[p.pc]
+        ));
     }
 
     // ---- Final asserts ----
@@ -1509,7 +1585,23 @@ fn drive_watching(
             |em, ev| match ev {
                 luna_api::WatchEvent::Pc(i) => {
                     watch.counts[i] += 1;
-                    stop == Some((i, watch.counts[i]))
+                    let arrival = watch.counts[i];
+                    // Writes land before a checkpoint on the same arrival
+                    // reads the machine.
+                    for p in &mut watch.pokes {
+                        if p.pc != i || p.hit != arrival {
+                            continue;
+                        }
+                        for (at, bytes) in &p.writes {
+                            if let Err(e) = em.poke_memory((at >> 16) as u8, *at as u16, bytes) {
+                                watch
+                                    .poke_error
+                                    .get_or_insert_with(|| format!("{}: ${at:06X}: {e}", p.label));
+                            }
+                        }
+                        p.done = true;
+                    }
+                    stop == Some((i, arrival))
                 }
                 luna_api::WatchEvent::Frame => {
                     if pooled.per_frame()

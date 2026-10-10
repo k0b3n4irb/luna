@@ -129,6 +129,7 @@ and is the hub for every headless diagnostic.
 | `--hit <N>` | `1` | With `--until-pc`: stop the `N`-th time execution reaches it. |
 | `--peek-at <SYMBOL>` | — | Read every `--peek` **each time** execution reaches this routine, one line per arrival with its frame and scanline. The run length stays `-n` / `--until-frame` / `--until-pc`. |
 | `--peek-at-out <PATH>` | — | Write the `--peek-at` rows as CSV (`hit,frame,line`, then one column of hex bytes per `--peek`) instead of printing them. |
+| `--poke-at <SYMBOL>`, `--poke-hit <N>`, `--poke <NAME=HEX>` | —, `1`, — | Write bytes into memory at the `N`-th arrival on a routine, just before its first instruction: puts the game in a state it does not reach by itself. See *Stopping on a routine* below. |
 | `--input-at <SYMBOL>` | — | Index the input scripts by arrivals on this routine instead of by frame, so the presses land in the same game ticks whatever the speed of the code ([input scripts](input-scripts.md#a-script-clocked-by-the-game-not-by-the-frame)). |
 | `--schema` | off | Print the JSON Schema of the `--out` payload ([the state JSON](state-json.md)) and exit — no ROM needed. |
 | `--out <PATH>` | `-` | Where to write the JSON (`-` = stdout). |
@@ -294,6 +295,25 @@ cat ticks.csv
 # 3,8,260,03,03
 # 4,11,260,04,04
 ```
+
+`--poke-at` writes instead of reading: every `--poke` (`NAME=HEX` or
+`BANK:OFFSET=HEX`, the `--assert` grammar — bytes in memory order, so a
+16-bit `$0140` is `4001`) is written at the `--poke-hit`-th arrival on
+the routine. It is for the branch a game does not reach by itself in a
+test — the ball in front of a goal, a counter one step from its limit —
+without test code in the ROM and without a save state that breaks at
+every rebuild. On the same routine the order is: writes, then
+`--peek-at` reads, then the `--until-pc` stop.
+
+```bash
+luna state --poke-at tick --poke-hit 2 --poke half_a=10 \
+  --until-pc tick_end --hit 2 --peek half_a:2 --out /dev/null game.sfc
+# poked 1 value(s) at tick hit 2 — frame 2, line 260
+#   $7E0010  11 02
+```
+
+An arrival the run never reaches writes nothing, and that is an error
+(exit 1).
 
 Without `--peek-at-out` the rows are printed on stderr, one line per
 arrival; either way they are `peek_hits` in the `--out` JSON. The two

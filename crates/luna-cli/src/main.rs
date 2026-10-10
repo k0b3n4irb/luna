@@ -456,6 +456,33 @@ enum Command {
         /// column of hex bytes per `--peek`) instead of printing them.
         #[arg(long = "peek-at-out", requires = "peek_at")]
         peek_at_out: Option<PathBuf>,
+        /// Write every `--poke` into memory when execution reaches this
+        /// routine (a `.sym` label, `label+N`, `BANK:OFFSET`), at its
+        /// `--poke-hit`-th arrival, just before its first instruction:
+        /// puts the game in a state it does not reach by itself, with no
+        /// test code in the ROM. A `--peek-at` on the same routine reads
+        /// the bytes written. Example: `--poke-at tickStart --poke-hit 91
+        /// --poke ball_x=4001 --poke ball_y=3000`.
+        #[arg(
+            long = "poke-at",
+            requires = "poke",
+            conflicts_with_all = ["cpu_trace_from", "mem_trace_from", "dma_trace_from", "superfx_trace_from"]
+        )]
+        poke_at: Option<String>,
+        /// With `--poke-at`: the arrival the bytes are written at
+        /// (default 1, the first).
+        #[arg(
+            long = "poke-hit",
+            default_value_t = 1,
+            requires = "poke_at",
+            value_parser = clap::value_parser!(u64).range(1..)
+        )]
+        poke_hit: u64,
+        /// Bytes to write at `--poke-at`: `NAME=HEX` or `BANK:OFFSET=HEX`,
+        /// the `--assert` grammar — hex bytes in memory order, so a 16-bit
+        /// `$0140` is `4001`. Repeatable.
+        #[arg(long = "poke", requires = "poke_at")]
+        poke: Vec<String>,
         /// Index every input script (`--input` … `--input5`, `--mouse`,
         /// `--superscope`) by **arrivals on this routine** instead of by
         /// frame: entry `N:` applies the N-th time execution reaches it
@@ -1204,6 +1231,9 @@ fn main() -> ExitCode {
             peek_at,
             peek_at_out,
             input_at,
+            poke_at,
+            poke_hit,
+            poke,
             srm_in,
             srm_out,
             apu_log,
@@ -1328,6 +1358,11 @@ fn main() -> ExitCode {
                 peek_at.as_deref(),
                 peek_at_out.as_deref(),
                 input_at.as_deref(),
+                &state::PokeFlags {
+                    at: poke_at.as_deref(),
+                    hit: poke_hit,
+                    pokes: &poke,
+                },
             )
         }
         Command::Frames {

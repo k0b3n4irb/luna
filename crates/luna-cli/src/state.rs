@@ -86,6 +86,27 @@ struct StateOut<'a> {
     /// the option).
     #[serde(skip_serializing_if = "Option::is_none")]
     peek_hits: Option<&'a [PeekHit]>,
+    /// Whether the `--poke`s were written (absent without `--poke-at`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    poke: Option<&'a PokeAt>,
+}
+
+/// The `--poke`s to write at one arrival on `--poke-at`.
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct PokeAt {
+    /// The `--poke-at` spec verbatim.
+    spec: String,
+    /// The address it resolved to.
+    addr: u32,
+    /// The arrival the bytes are written at (`--poke-hit`).
+    hit: u64,
+    /// Arrivals seen before the run ended.
+    hits_seen: u64,
+    /// The bytes were written. `false` = the run ended first.
+    applied: bool,
+    /// `(address, bytes)` of each `--poke`.
+    #[serde(skip)]
+    writes: Vec<(u32, Vec<u8>)>,
 }
 
 /// The outcome of `--until-pc` (issue #269).
@@ -136,6 +157,14 @@ struct Watch {
     /// `--peek-at`: its spec and address.
     peek_at: Option<(String, u32)>,
     hits: Vec<PeekHit>,
+    poke: Option<PokeAt>,
+}
+
+/// The `--poke-at` / `--poke-hit` / `--poke` flags.
+pub(crate) struct PokeFlags<'a> {
+    pub at: Option<&'a str>,
+    pub hit: u64,
+    pub pokes: &'a [String],
 }
 
 impl Watch {
@@ -147,6 +176,7 @@ impl Watch {
         hit: u64,
         peek_at: Option<&str>,
         clocked_input: bool,
+        poke: &PokeFlags<'_>,
     ) -> Result<Option<Self>, String> {
         let addr = |opt: &str, spec: &str| {
             crate::test_cmd::resolve_key(em, spec).map_err(|e| format!("{opt} `{spec}`: {e}"))
@@ -167,12 +197,44 @@ impl Watch {
         let peek_at = peek_at
             .map(|spec| addr("--peek-at", spec).map(|a| (spec.to_string(), a)))
             .transpose()?;
-        let mut pcs: Vec<u32> = until
+        let poke = poke
+            .at
+            .map(|spec| -> Result<PokeAt, String> {
+                let writes = poke
+                    .pokes
+                    .iter()
+                    .map(|p| {
+                        let (key, hex) = p
+                            .split_once('=')
+                            .ok_or_else(|| format!("--poke `{p}`: expected NAME=HEX"))?;
+                        let at = crate::test_cmd::resolve_key(em, key.trim())
+                            .map_err(|e| format!("--poke `{p}`: {e}"))?;
+                        let bytes = crate::parsers::parse_hex_bytes(hex)
+                            .map_err(|e| format!("--poke `{p}`: {e}"))?;
+                        Ok((at, bytes))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(PokeAt {
+                    spec: spec.to_string(),
+                    addr: addr("--poke-at", spec)?,
+                    hit: poke.hit,
+                    hits_seen: 0,
+                    applied: false,
+                    writes,
+                })
+            })
+            .transpose()?;
+        let mut pcs: Vec<u32> = Vec::new();
+        for pc in until
             .iter()
             .map(|u| u.addr)
             .chain(peek_at.iter().map(|p| p.1))
-            .collect();
-        pcs.dedup();
+            .chain(poke.iter().map(|p| p.addr))
+        {
+            if !pcs.contains(&pc) {
+                pcs.push(pc);
+            }
+        }
         // A script clocked by a routine needs the watching run too, even
         // with nothing else to watch.
         Ok((!pcs.is_empty() || clocked_input).then_some(Self {
@@ -180,6 +242,7 @@ impl Watch {
             until,
             peek_at,
             hits: Vec::new(),
+            poke,
         }))
     }
 
@@ -188,6 +251,24 @@ impl Watch {
         let addr = self.pcs[i];
         let frame = em.frame_count().unwrap_or(0);
         let line = em.beam().map_or(0, |(line, _)| line);
+        // Writes first: a `--peek-at` on the same routine reads them.
+        if let Some(p) = self.poke.as_mut().filter(|p| p.addr == addr) {
+            p.hits_seen += 1;
+            if p.hits_seen == p.hit {
+                for (at, bytes) in &p.writes {
+                    if let Err(e) = em.poke_memory((at >> 16) as u8, *at as u16, bytes) {
+                        eprintln!("error: --poke at ${at:06X}: {e}");
+                    }
+                }
+                p.applied = true;
+                eprintln!(
+                    "poked {} value(s) at {} hit {} — frame {frame}, line {line}",
+                    p.writes.len(),
+                    p.spec,
+                    p.hit
+                );
+            }
+        }
         if self.peek_at.as_ref().is_some_and(|p| p.1 == addr) {
             self.hits.push(PeekHit {
                 hit: self.hits.len() as u64 + 1,
@@ -310,6 +391,7 @@ pub(crate) fn run_state(
     peek_at: Option<&str>,
     peek_at_out: Option<&std::path::Path>,
     input_at: Option<&str>,
+    poke: &PokeFlags<'_>,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
     if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, dsp1_rom, power_on) {
@@ -491,7 +573,7 @@ pub(crate) fn run_state(
             }
         }
     }
-    let mut watch = match Watch::resolve(&em, until_pc, hit, peek_at, input_at.is_some()) {
+    let mut watch = match Watch::resolve(&em, until_pc, hit, peek_at, input_at.is_some(), poke) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("error: {e}");
@@ -707,6 +789,14 @@ pub(crate) fn run_state(
                 );
                 step_failed = true;
             }
+        }
+        if let Some(p) = w.poke.as_ref().filter(|p| !p.applied) {
+            eprintln!(
+                "error: --poke-at {}: hit {} not reached by frame {end_frame} (reached {} \
+                 time(s)); nothing was written",
+                p.spec, p.hit, p.hits_seen
+            );
+            step_failed = true;
         }
         if let Some((spec, _)) = &w.peek_at {
             if let Some(path) = peek_at_out {
@@ -1135,6 +1225,7 @@ pub(crate) fn run_state(
             .as_ref()
             .filter(|w| w.peek_at.is_some())
             .map(|w| w.hits.as_slice()),
+        poke: watch.as_ref().and_then(|w| w.poke.as_ref()),
     }) {
         Ok(s) => s,
         Err(e) => {

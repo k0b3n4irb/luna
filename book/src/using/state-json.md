@@ -15,6 +15,7 @@
 | `sa1`, `gsu`, `dsp1`, `call_stack` | Coprocessor blocks — SA-1, Super FX, DSP-1 (present when the cart has one; `gsu` is described under *Who owns the cartridge*) — and the `--call-stack` capture. |
 | `peeks` | One entry per `--peek`, in order: `{spec, space: "cpu"\|"aram", addr, bytes_hex, unmapped?, error?}`. Always present (empty without `--peek`); a failed peek keeps its slot with an `error` string instead of vanishing; `unmapped` appears only when part of the range is open bus. |
 | `until_pc` | Only with `--until-pc`: `{spec, addr, hit, hits_seen, reached, frame?, line?}` — where the run stopped, or `reached: false` when the bound came first. |
+| `poke` | Only with `--poke-at`: `{spec, addr, hit, hits_seen, applied}` — whether the bytes were written. |
 | `peek_hits` | Only with `--peek-at`: one `{hit, frame, line, peeks: […]}` per arrival on the routine, `peeks` shaped as above. |
 
 ```bash

@@ -17,6 +17,10 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   does not, so a scripted run depends on the game's logic alone. The
   press changes the controller; the game sees it at its next read (with
   the auto-read, from arrival N+1).
+- **`--poke-at SYMBOL --poke-hit N --poke NAME=HEX`, and `[[poke]]` in a
+  manifest: write memory at an arrival on a routine.** Puts a game in a
+  state it does not reach by itself in a test, with no test code in the
+  ROM. A poke whose arrival is never reached is an error.
 - **luna-api:** `InputScript::set_clock_pc`.
 
 ### Changed

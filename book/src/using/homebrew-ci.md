@@ -308,6 +308,23 @@ that receives the press does; with both on the routine, a test that
 fails after a compiler change means the logic changed
 ([input scripts](input-scripts.md#a-script-clocked-by-the-game-not-by-the-frame)).
 
+**Writing a state the game does not reach.** `[[poke]]` writes values
+when execution reaches a routine, just before its first instruction:
+
+```toml
+[[poke]]
+at_symbol = "tick_start"
+hit = 91                       # default 1
+[poke.values]
+ball_x = 0x140                 # the keys and widths of [asserts.values]:
+ball_y = 0x30                  # two bytes when the .sym says two
+```
+
+A checkpoint on the same arrival reads the values written. A `[[poke]]`
+whose arrival the run never reaches fails the test (`poke@tick_start#91:
+not reached by frame 600 …; nothing was written`): every assert after it
+would read a state the manifest did not mean.
+
 A failure names the routine, the arrival, and where it happened:
 `checkpoint@tick_end#120 (frame 243, line 31) values.cam_x: …`. A
 routine not reached by `frames` fails its checkpoint (`not reached by

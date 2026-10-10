@@ -709,3 +709,120 @@ fn input_clocked_by_a_routine_drives_two_builds_through_the_same_ticks() {
         text(&out)
     );
 }
+
+#[test]
+fn a_poke_on_arrival_puts_the_game_in_a_state_it_does_not_reach() {
+    let dir = fresh_dir("poke_at");
+    let rom = slow_tick_rom(&dir);
+    let mut sym = std::fs::read_to_string(dir.join("game.sym")).unwrap();
+    sym.push_str("7e:0010 pair\n[definitions]\n00000002 _sizeof_pair\n");
+    std::fs::write(dir.join("game.sym"), sym).unwrap();
+
+    // At the second arrival on `tick` both halves hold 1. Writing $10 into
+    // the first one there, the tick then counts from it: $11, and 2.
+    let out = luna(
+        "state",
+        &rom,
+        &[
+            "--poke-at",
+            "tick",
+            "--poke-hit",
+            "2",
+            "--poke",
+            "half_a=10",
+            "--peek-at",
+            "tick",
+            "--until-pc",
+            "tick_end",
+            "--hit",
+            "2",
+            "--peek",
+            "half_a:2",
+            "--out",
+            "-",
+        ],
+    );
+    assert!(out.status.success(), "{}", text(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("poked 1 value(s) at tick hit 2"),
+        "{stderr}"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["peeks"][0]["bytes_hex"], "1102", "{v:#}");
+    assert_eq!(v["poke"]["applied"], true);
+    // The `--peek-at` on the same routine reads what was just written.
+    assert_eq!(v["peek_hits"][0]["peeks"][0]["bytes_hex"], "0000");
+    assert_eq!(v["peek_hits"][1]["peeks"][0]["bytes_hex"], "1001");
+
+    // An arrival the run never reaches writes nothing, and says so.
+    let out = luna(
+        "state",
+        &rom,
+        &[
+            "--poke-at",
+            "tick",
+            "--poke-hit",
+            "90",
+            "--poke",
+            "half_a=10",
+            "--until-frame",
+            "12",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("--poke-at tick: hit 90 not reached by frame 12 (reached 4 time(s))"),
+        "{}",
+        text(&out)
+    );
+    // Malformed: no value, an unknown name, a poke with no routine.
+    for args in [
+        &["--poke-at", "tick", "--poke", "half_a"][..],
+        &["--poke-at", "tick", "--poke", "nowhere=10"],
+        &["--poke", "half_a=10"],
+        &["--poke-at", "tick"],
+    ] {
+        assert_eq!(luna("state", &rom, args).status.code(), Some(2), "{args:?}");
+    }
+
+    // The same in a manifest. `pair` is two bytes in the `.sym`: the
+    // value is written as a word, so its high byte lands in `half_b`.
+    let head = "rom = \"game.sfc\"\nforce_mapper = \"lorom\"\nframes = 40\n";
+    let out = luna_test(
+        &dir,
+        "poke.toml",
+        &format!(
+            "{head}[[poke]]\nat_symbol = \"tick\"\nhit = 2\n[poke.values]\nhalf_a = 0x10\n\n\
+             [[poke]]\nat_symbol = \"tick\"\nhit = 4\n[poke.values]\npair = 0x20\n\n\
+             [[checkpoint]]\nat_symbol = \"tick_end\"\nhit = 2\n[checkpoint.values]\n\
+             half_a = 0x11\nhalf_b = 2\n\n\
+             [[checkpoint]]\nat_symbol = \"tick\"\nhit = 4\n[checkpoint.values]\npair = 0x20\n\n\
+             [[checkpoint]]\nat_symbol = \"tick_end\"\nhit = 4\n[checkpoint.values]\n\
+             half_a = 0x21\nhalf_b = 1\n"
+        ),
+        &[],
+    );
+    assert!(out.status.success(), "{}", text(&out));
+    let out = luna_test(
+        &dir,
+        "poke_far.toml",
+        &format!("{head}[[poke]]\nat_symbol = \"tick\"\nhit = 99\n[poke.values]\nhalf_a = 1\n"),
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .contains("poke@tick#99: not reached by frame 40 (reached 14 time(s))"),
+        "{}",
+        text(&out)
+    );
+    let out = luna_test(
+        &dir,
+        "poke_big.toml",
+        &format!("{head}[[poke]]\nat_symbol = \"tick\"\n[poke.values]\nhalf_a = 0x10000\n"),
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+}
