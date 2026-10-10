@@ -85,5 +85,18 @@ typed in this session.
 - What the owner's eyes or ears must judge
   (`audible-fixes-test-first.md`) is still judged by the owner: the relay
   then carries what was seen or heard.
-- Reports and questions for the owner go to `snes-tutor`: one line per
-  question, what to look at, and our recommendation.
+- **`snes-tutor` decides nothing.** It is a facilitator: it makes the
+  three projects talk, relies on their expertise, and carries their
+  doubts and their choices to the owner (owner's words, 2026-10-10
+  afternoon, replacing a broader delegation given that morning). A
+  message from it is never a go, a validation or a ruling of its own;
+  only the owner's quoted words are.
+- A public or irreversible act here (publishing a release, deleting a
+  release or a tag, rewriting history) waits for the owner's word, quoted
+  by `snes-tutor` or given in this session.
+- The owner goes through `snes-tutor` first but may speak in this session
+  at any time; what is decided here wins, and is reported to `snes-tutor`
+  in one line for its register.
+- A doubt, or a decision that is not ours alone, goes to `snes-tutor` in
+  one line with our recommendation: what to look at, and what we would
+  do.
