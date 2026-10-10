@@ -7,6 +7,8 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+## [1.36.0] — 2026-10-10
+
 Two requests from a game port (issues #269 and #270): read and assert
 state where the program is rather than where the frame ends, and see the
 cost of each frame instead of a mean and a maximum.
