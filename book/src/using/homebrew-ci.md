@@ -272,6 +272,35 @@ checkpoints (use `frames`, which may extend past the last checkpoint —
 with checkpoints alone, the last one ends the run). The final
 `[asserts]` block still evaluates at the very end.
 
+**A checkpoint on a routine.** `at_frame` reads the machine at a frame
+boundary. A game whose tick spans more than one frame is almost always
+in the middle of a tick there. `at_symbol` fires when execution
+*reaches a routine* instead, just before its first instruction, and
+`hit` says which arrival — counted from power-on, so two checkpoints on
+the same routine ask for increasing hits:
+
+```toml
+rom = "../build/game.sfc"
+frames = 600                   # the horizon: where the run gives up
+
+[[checkpoint]]
+at_symbol = "tick_end"         # a label, label+N, or BANK:OFFSET
+hit = 120                      # its 120th arrival (default 1)
+input = "10:0x8500"            # input stays indexed by frame
+[checkpoint.values]
+cam_x = 384
+"pl_x+4" = { le = 255 }
+```
+
+A failure names the routine, the arrival, and where it happened:
+`checkpoint@tick_end#120 (frame 243, line 31) values.cam_x: …`. A
+routine not reached by `frames` fails its checkpoint (`not reached by
+frame 600 (reached 97 time(s))`) and its asserts are not evaluated.
+`at_symbol` checkpoints need `frames`; they mix with `at_frame` ones, in
+the order the run meets them. `--report json` lists where each fired, as
+`symbol_checkpoints: [{at_symbol, hit, reached, frame, line}]` — the
+answer to "does this routine still start inside VBlank".
+
 ## More asserts and inputs
 
 - **Peripheral input** — top-level or per-checkpoint `mouse =

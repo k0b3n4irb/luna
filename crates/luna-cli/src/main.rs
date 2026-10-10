@@ -20,6 +20,7 @@ mod frames;
 mod output;
 mod parsers;
 mod profile;
+mod profile_frames;
 mod rom;
 mod run;
 mod state;
@@ -377,8 +378,8 @@ enum Command {
         #[arg(long)]
         superscope: Option<String>,
         /// Optional memory peek(s) after snapshot.  Format:
-        /// `BANK:OFFSET:COUNT` (ALL hex, no `0x` prefix — `:20` is 32
-        /// bytes), or a WLA-DX label `NAME[:COUNT]` resolved through the
+        /// `BANK:OFFSET:COUNT` (ALL hex — `:20` is 32 bytes; a count can
+        /// say its base, `:0x20` hex or `:#32` decimal), or a WLA-DX label `NAME[:COUNT]` resolved through the
         /// loaded `.sym` table (auto-detected `<rom>.sym` or `--sym`;
         /// count defaults to 1).  Can be specified multiple times.  The
         /// whole 24-bit space is readable (WRAM, ROM incl. `$C0-$FF`
@@ -415,6 +416,46 @@ enum Command {
         /// frame rather than a generous `-n`.
         #[arg(long = "until-frame")]
         until_frame: Option<u64>,
+        /// Run until execution reaches this routine (then snapshot): a
+        /// `.sym` label, `label+N`, or `BANK:OFFSET` in hex. The stop is
+        /// just before its first instruction runs, so `--peek` reads the
+        /// state the routine receives — consistent where a frame boundary
+        /// falls in the middle of a game tick. `--input` scripts stay
+        /// indexed by frame. Bounded by `--until-frame` when given (else
+        /// 36000 frames); not reaching it is an error, exit 1. The frame
+        /// and scanline of the stop are printed and land in the JSON as
+        /// `until_pc`. Example: `--until-pc tickEnd --hit 120`.
+        #[arg(
+            long = "until-pc",
+            conflicts_with_all = ["cpu_trace_from", "mem_trace_from", "dma_trace_from", "superfx_trace_from"]
+        )]
+        until_pc: Option<String>,
+        /// With `--until-pc`: stop the N-th time execution reaches it
+        /// (default 1, the first).
+        #[arg(
+            long = "hit",
+            default_value_t = 1,
+            requires = "until_pc",
+            value_parser = clap::value_parser!(u64).range(1..)
+        )]
+        hit: u64,
+        /// Read every `--peek` EACH time execution reaches this routine
+        /// (same forms as `--until-pc`), one line per arrival with its
+        /// frame and scanline: a whole run's worth of consistent samples
+        /// in one emulator run, with no trace code in the ROM. The run
+        /// length stays `-n` / `--until-frame` / `--until-pc`. Rows go to
+        /// stderr, to `--peek-at-out` as CSV, and into the JSON as
+        /// `peek_hits`. Example:
+        /// `--peek-at tickEnd --peek pl_x:#36 --until-frame 600`.
+        #[arg(
+            long = "peek-at",
+            conflicts_with_all = ["cpu_trace_from", "mem_trace_from", "dma_trace_from", "superfx_trace_from"]
+        )]
+        peek_at: Option<String>,
+        /// Write the `--peek-at` rows as CSV (`hit,frame,line` then one
+        /// column of hex bytes per `--peek`) instead of printing them.
+        #[arg(long = "peek-at-out", requires = "peek_at")]
+        peek_at_out: Option<PathBuf>,
         /// Load battery SRAM from a `.srm` file before running (the other
         /// half of a power-cycle test — write it with `--srm-out` in run A,
         /// read it back in run B).
@@ -872,6 +913,34 @@ enum Command {
         /// would mis-attribute coverage. Lets a coverage tool count `.sfx`.
         #[arg(long = "gsu-pc-set")]
         gsu_pc_set: Option<PathBuf>,
+        /// Write the window frame by frame as CSV
+        /// (`frame,active_mclk,idle_mclk,cpu_mclk,dma_mclk,hdma_mclk,refresh_mclk,total_mclk,nmi,lag`):
+        /// `active` is what the program used (CPU + the DMA it started),
+        /// `idle` the time parked in `WAI`, `lag` a frame whose NMI found
+        /// the CPU still executing. The same rows are `frame_series` in
+        /// `--out`. Finds WHICH frame overran, in one run.
+        #[arg(long = "frames-out")]
+        frames_out: Option<PathBuf>,
+        /// Print the per-symbol table of the N heaviest frames (by
+        /// `active_mclk`), and put them in `--out` as `worst_frames` —
+        /// what was running in the frame that overran.
+        #[arg(long = "worst", default_value_t = 0)]
+        worst: usize,
+        /// Gate: no completed frame may use more than N active master
+        /// cycles, else exit 1.
+        #[arg(long = "max-frame-mclk")]
+        max_frame_mclk: Option<u64>,
+        /// Gate: at most N lag frames in the window, else exit 1. A lag
+        /// frame is one whose NMI came while the CPU was executing rather
+        /// than parked in `WAI`.
+        #[arg(long = "max-lag-frames")]
+        max_lag_frames: Option<u64>,
+        /// Gate: at most N lag frames IN A ROW, else exit 1. A game whose
+        /// tick takes two frames lags every other frame by design:
+        /// `--max-lag-run 1` passes it and fails the tick that spills
+        /// into a third.
+        #[arg(long = "max-lag-run")]
+        max_lag_run: Option<u64>,
         #[arg(long = "force-mapper", help = mapper_help("Force a cartridge mapper."))]
         force_mapper: Option<String>,
         /// Force the video standard (ntsc, pal).
@@ -1111,6 +1180,10 @@ fn main() -> ExitCode {
             assert_vram,
             assert_cgram,
             until_frame,
+            until_pc,
+            hit,
+            peek_at,
+            peek_at_out,
             srm_in,
             srm_out,
             apu_log,
@@ -1230,6 +1303,10 @@ fn main() -> ExitCode {
                 call_stack,
                 native_res,
                 power_on.as_deref(),
+                until_pc.as_deref(),
+                hit,
+                peek_at.as_deref(),
+                peek_at_out.as_deref(),
             )
         }
         Command::Frames {
@@ -1379,6 +1456,11 @@ fn main() -> ExitCode {
             budget,
             stack_floor,
             gsu_pc_set,
+            frames_out,
+            worst,
+            max_frame_mclk,
+            max_lag_frames,
+            max_lag_run,
             force_mapper,
             force_region,
             power_on,
@@ -1408,6 +1490,13 @@ fn main() -> ExitCode {
                 budgets: &budget,
                 stack_floor,
                 gsu_pc_set: gsu_pc_set.as_deref(),
+                frames_out: frames_out.as_deref(),
+                worst,
+                frame_gates: profile_frames::FrameGates {
+                    frame_mclk: max_frame_mclk,
+                    lag_frames: max_lag_frames,
+                    lag_run: max_lag_run,
+                },
                 force_mapper: force_mapper.as_deref(),
                 force_region: force_region.as_deref(),
                 power_on: power_on.as_deref(),

@@ -54,7 +54,7 @@ mod vocab;
 pub use event_viewer::{
     CATEGORY_COUNT, EventCategory, EventViewerConfig, EventViewerEvent, register_name,
 };
-pub use input::{FRAME_STEP_BUDGET, InputEvent, InputScript, ScriptBound};
+pub use input::{FRAME_STEP_BUDGET, InputEvent, InputScript, ScriptBound, WatchEvent};
 pub use power_on::parse_power_on;
 pub use vocab::{
     dsp_register_index, dsp_register_name, dsp_register_table, force_mapper_names, parse_region,
@@ -175,6 +175,17 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     h
+}
+
+/// What ended [`Emulator::run_to_pc_or_frame`] (issue #269).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PcStop {
+    /// Execution reached the watched PC at this index.
+    Pc(usize),
+    /// The PPU frame advanced.
+    Frame,
+    /// The instruction budget ran out, or the CPU is `STP`-halted.
+    Budget,
 }
 
 /// Cartridge metadata returned by [`Emulator::load_rom`].
@@ -998,6 +1009,84 @@ pub struct ProfileReport {
     pub frames: u64,
     /// Rows, heaviest `mclk` first.
     pub entries: Vec<ProfileEntry>,
+    /// One row per completed PPU frame of the window, in order: where the
+    /// frame's time went and whether the NMI found the program still
+    /// working (issue #270).
+    pub frame_series: Vec<ProfileFrame>,
+    /// The heaviest frames with their per-symbol cost, heaviest first.
+    /// Empty unless [`Emulator::enable_profile_worst`] asked for some.
+    pub worst_frames: Vec<ProfileWorstFrame>,
+}
+
+/// One PPU frame of a profile (issue #270). `active_mclk + idle_mclk +
+/// hdma_mclk + refresh_mclk == total_mclk`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct ProfileFrame {
+    /// The PPU frame.
+    pub frame: u64,
+    /// What the program used: `cpu_mclk + dma_mclk`.
+    pub active_mclk: u64,
+    /// CPU parked in `WAI` / `STP` — the frame's headroom.
+    pub idle_mclk: u64,
+    /// CPU executing instructions.
+    pub cpu_mclk: u64,
+    /// General-purpose DMA bursts, CPU halted.
+    pub dma_mclk: u64,
+    /// HDMA stalls.
+    pub hdma_mclk: u64,
+    /// DRAM refresh halts (40 master clocks a line).
+    pub refresh_mclk: u64,
+    /// The whole frame.
+    pub total_mclk: u64,
+    /// The NMI was raised in this frame.
+    pub nmi: bool,
+    /// A lag frame: the NMI came while the CPU was executing, not parked
+    /// in `WAI` — the main loop had not finished. Meaningful for a loop
+    /// that waits for `VBlank` with `WAI`; one that polls a flag is
+    /// executing at every NMI.
+    pub lag: bool,
+}
+
+impl From<&luna_core::ProfileFrameTime> for ProfileFrame {
+    fn from(t: &luna_core::ProfileFrameTime) -> Self {
+        let b = &t.mclk;
+        Self {
+            frame: t.frame,
+            active_mclk: b.cpu_active + b.dma,
+            idle_mclk: b.cpu_wai + b.cpu_stp,
+            cpu_mclk: b.cpu_active,
+            dma_mclk: b.dma,
+            hdma_mclk: b.hdma,
+            refresh_mclk: b.refresh,
+            total_mclk: b.total(),
+            nmi: t.nmi,
+            lag: t.nmi && t.nmi_busy,
+        }
+    }
+}
+
+/// One of the heaviest frames of a profile, with what ran in it
+/// (issue #270).
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ProfileWorstFrame {
+    /// The frame's time.
+    #[serde(flatten)]
+    pub time: ProfileFrame,
+    /// Its cost per symbol, heaviest first. A step that crosses the frame
+    /// edge is credited whole to the frame it ends in, so the rows can
+    /// differ from `total_mclk` by that one step.
+    pub entries: Vec<ProfileFrameRow>,
+}
+
+/// One symbol's cost inside one frame.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ProfileFrameRow {
+    /// The `.sym` label, or the page (see [`ProfileEntry::symbol`]).
+    pub symbol: String,
+    /// 24-bit address of the label (or the page start).
+    pub addr: u32,
+    /// Master cycles paid under it in this frame, `WAI` time included.
+    pub mclk: u64,
 }
 
 /// Running per-frame figures of one folded row (`OpenSNES` R-B).
@@ -1027,9 +1116,9 @@ pub struct Stats {
     /// The same split for the last completed PPU frame (all zero until the
     /// first frame completes). CPU headroom per frame is
     /// `last_frame.cpu_wai / last_frame.total`; the frame's DMA budget is
-    /// `last_frame.dma`. Frame boundaries fall inside a bus access, so a
-    /// frame's `total` can differ from the nominal period by that one
-    /// access.
+    /// `last_frame.dma`. A charge that crosses the frame boundary (a bus
+    /// access, a DMA burst) is split at the boundary, so `total` is the
+    /// frame's length.
     pub last_frame: MclkBuckets,
 }
 
@@ -1215,6 +1304,17 @@ pub struct Emulator {
     profile_frames: std::collections::BTreeMap<(String, u32), ProfileFrameAcc>,
     /// Completed frames folded since the profiler was enabled or taken.
     profile_frames_done: u64,
+    /// The instruction count at which [`Self::run_script_watching`] last
+    /// reported a watched PC: while it has not moved, the machine is still
+    /// standing on that PC, and a new call must step off it rather than
+    /// report it a second time.
+    pub(crate) watch_stood_at: Option<u64>,
+    /// Completed frames of the profile, in order (issue #270).
+    profile_series: Vec<ProfileFrame>,
+    /// How many of the heaviest frames keep their per-symbol rows.
+    profile_worst_keep: usize,
+    /// Those frames, unordered until the profile is taken.
+    profile_worst: Vec<ProfileWorstFrame>,
     /// Per-frame memory freezes (issue #178): `(canonical $7E/$7F WRAM
     /// address, value)`, re-applied whenever the frame counter advances
     /// in ANY run path — so a freeze behaves identically under the CLI,
@@ -1327,6 +1427,10 @@ impl Emulator {
             search_session: None,
             profile_frames: std::collections::BTreeMap::new(),
             profile_frames_done: 0,
+            watch_stood_at: None,
+            profile_series: Vec::new(),
+            profile_worst_keep: 0,
+            profile_worst: Vec::new(),
             freezes: Vec::new(),
             call_stack: None,
             event_config: event_viewer::EventViewerConfig {
@@ -3145,6 +3249,66 @@ impl Emulator {
         Ok(run.stop.is_some() || self.snes.as_ref().is_some_and(|s| at(s) == pc))
     }
 
+    /// Where the beam is: `(scanline, master clocks into the line)`. Cheap,
+    /// unlike [`Self::state`] — what a run that stops on a routine reports
+    /// for each hit (issue #269).
+    pub fn beam(&self) -> Result<(u16, u16), ApiError> {
+        let s = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        Ok((
+            s.ppu_line,
+            s.mcycles_in_line.min(u32::from(u16::MAX)) as u16,
+        ))
+    }
+
+    /// Is `cur` the instruction at `target`? The same address, or its
+    /// bank-bit-7 mirror: a `LoROM` / `HiROM` label linked in `$00-$7D`
+    /// runs in `$80-$FD` under `FastROM`, and the reverse. Not for WRAM
+    /// (`$7E-$7F` has no mirror) nor `ExHiROM`, whose two halves hold
+    /// different code.
+    const fn exec_at(cur: u32, target: u32, mirrored: bool) -> bool {
+        cur == target
+            || (mirrored && cur ^ target == 0x80_0000 && !matches!((cur >> 16) & 0x7F, 0x7E | 0x7F))
+    }
+
+    /// Step until execution reaches one of `pcs` (`pb << 16 | pc`, the
+    /// bank-bit-7 mirror included), the PPU frame advances, or
+    /// `max_steps` instructions elapse — whichever comes first
+    /// (issue #269). The building block of a run that watches a routine
+    /// while it replays a frame-indexed input script.
+    ///
+    /// A PC is *reached* when the instruction there is about to execute:
+    /// a CPU parked in `WAI` in front of it is not there yet. `skip_first`
+    /// lets the caller leave a PC it was just told about; without it the
+    /// same hit is reported again.
+    pub fn run_to_pc_or_frame(
+        &mut self,
+        pcs: &[u32],
+        max_steps: u64,
+        skip_first: bool,
+    ) -> Result<PcStop, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let start_frame = snes.frame_count;
+        let mirrored = self.rom_info.as_ref().is_none_or(|r| r.mapper != "ExHiRom");
+        let run = self.run_core(
+            max_steps,
+            None,
+            |snes, executed| {
+                if snes.frame_count != start_frame {
+                    return Some(PcStop::Frame);
+                }
+                if (executed == 0 && skip_first) || snes.cpu.waiting {
+                    return None;
+                }
+                let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
+                pcs.iter()
+                    .position(|&pc| Self::exec_at(cur, pc, mirrored))
+                    .map(PcStop::Pc)
+            },
+            |_| None,
+        )?;
+        Ok(run.stop.unwrap_or(PcStop::Budget))
+    }
+
     /// Run until the Super FX starts a job (`go` = `true`) or finishes one
     /// (`go` = `false`), or `max_steps` main-CPU instructions elapse
     /// (`OpenSNES` R4).
@@ -4133,6 +4297,20 @@ impl Emulator {
         snes.enable_profile();
         self.profile_frames.clear();
         self.profile_frames_done = 0;
+        self.profile_series.clear();
+        self.profile_worst.clear();
+        self.profile_worst_keep = 0;
+        Ok(())
+    }
+
+    /// [`Self::enable_profile`], keeping the per-symbol rows of the `n`
+    /// heaviest frames (by `active_mclk`) for the report's `worst_frames`
+    /// (issue #270): the answer to "what was running in the frame that
+    /// overran", which the per-symbol maxima cannot give because they do
+    /// not fall on the same frame.
+    pub fn enable_profile_worst(&mut self, n: usize) -> Result<(), ApiError> {
+        self.enable_profile()?;
+        self.profile_worst_keep = n;
         Ok(())
     }
 
@@ -4142,6 +4320,8 @@ impl Emulator {
         snes.disable_profile();
         self.profile_frames.clear();
         self.profile_frames_done = 0;
+        self.profile_series.clear();
+        self.profile_worst.clear();
         Ok(())
     }
 
@@ -4174,6 +4354,12 @@ impl Emulator {
             return;
         }
         let frames = snes.take_profile_frames();
+        // Both drains stop at the frame in progress, so they cover the
+        // same frames.
+        let times = snes.take_profile_frame_times();
+        let first_new = self.profile_series.len();
+        self.profile_series
+            .extend(times.iter().map(ProfileFrame::from));
         let syms = self.symbols.as_ref();
         let mut per_row: std::collections::HashMap<(String, u32), u64> =
             std::collections::HashMap::new();
@@ -4181,6 +4367,39 @@ impl Emulator {
             per_row.clear();
             for (pc, mclk) in costs {
                 *per_row.entry(Self::profile_key(syms, pc)).or_default() += mclk;
+            }
+            // Keep this frame's rows if it is among the heaviest so far.
+            if self.profile_worst_keep > 0
+                && let Some(time) = self.profile_series[first_new..]
+                    .iter()
+                    .find(|t| t.frame == frame)
+            {
+                let lightest = self
+                    .profile_worst
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, w)| w.time.active_mclk)
+                    .map(|(i, w)| (i, w.time.active_mclk));
+                let full = self.profile_worst.len() >= self.profile_worst_keep;
+                if !full || lightest.is_some_and(|(_, m)| time.active_mclk > m) {
+                    let mut entries: Vec<ProfileFrameRow> = per_row
+                        .iter()
+                        .map(|((symbol, addr), &mclk)| ProfileFrameRow {
+                            symbol: symbol.clone(),
+                            addr: *addr,
+                            mclk,
+                        })
+                        .collect();
+                    entries.sort_by(|a, b| b.mclk.cmp(&a.mclk).then(a.addr.cmp(&b.addr)));
+                    let worst = ProfileWorstFrame {
+                        time: *time,
+                        entries,
+                    };
+                    match lightest {
+                        Some((i, _)) if full => self.profile_worst[i] = worst,
+                        _ => self.profile_worst.push(worst),
+                    }
+                }
             }
             for (key, mclk) in per_row.drain() {
                 let acc = self.profile_frames.entry(key).or_default();
@@ -4274,11 +4493,20 @@ impl Emulator {
             })
             .collect();
         entries.sort_by(|a, b| b.mclk.cmp(&a.mclk).then(a.addr.cmp(&b.addr)));
+        let mut worst_frames = std::mem::take(&mut self.profile_worst);
+        worst_frames.sort_by(|a, b| {
+            b.time
+                .active_mclk
+                .cmp(&a.time.active_mclk)
+                .then(a.time.frame.cmp(&b.time.frame))
+        });
         Ok(ProfileReport {
             total_mclk,
             instructions,
             frames: frames_done,
             entries,
+            frame_series: std::mem::take(&mut self.profile_series),
+            worst_frames,
         })
     }
 

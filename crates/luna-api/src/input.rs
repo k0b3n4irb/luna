@@ -57,6 +57,16 @@ pub enum ScriptBound {
     Frame(u64),
 }
 
+/// What [`Emulator::run_script_watching`] tells its caller (issue #269).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchEvent {
+    /// Execution reached the watched PC at this index; the instruction
+    /// there has not run yet.
+    Pc(usize),
+    /// A PPU frame completed.
+    Frame,
+}
+
 /// A frame-sorted stream of [`InputEvent`]s with a replay cursor.
 #[derive(Debug, Clone, Default)]
 pub struct InputScript {
@@ -297,6 +307,68 @@ impl Emulator {
         audio: &mut Vec<(i16, i16)>,
     ) -> Result<u64, ApiError> {
         self.run_input_script_inner(script, bound, Some(audio))
+    }
+
+    /// Replay `script` within `bound` while watching `pcs`: `on_event` is
+    /// called each time execution reaches one of them and each time a
+    /// frame completes, and ends the run by returning `true` (issue #269).
+    /// Returns whether it did; `false` means the bound was reached first,
+    /// or the CPU halted.
+    ///
+    /// Input events stay indexed by frame and are applied as their frame
+    /// starts, exactly as [`Self::run_input_script`] does, so a run that
+    /// stops on a routine sees the same presses as one that stops on a
+    /// frame. With [`ScriptBound::Frame`] the run ends when that frame is
+    /// reached; with [`ScriptBound::Steps`], after that many instructions.
+    pub fn run_script_watching(
+        &mut self,
+        script: &mut InputScript,
+        bound: ScriptBound,
+        pcs: &[u32],
+        mut on_event: impl FnMut(&mut Self, WatchEvent) -> bool,
+    ) -> Result<bool, ApiError> {
+        let start = self.instructions_executed();
+        // The PC we stand on was already reported — by this call or, when
+        // nothing ran in between, by the one that stopped here: step off
+        // it first.
+        let mut reported = self.watch_stood_at == Some(start);
+        loop {
+            let frame = self.frame_count()?;
+            script.apply_due(self, frame)?;
+            let left = match bound {
+                ScriptBound::Frame(target) if frame >= target => return Ok(false),
+                ScriptBound::Frame(_) => FRAME_STEP_BUDGET,
+                ScriptBound::Steps(total) => {
+                    let spent = self.instructions_executed().saturating_sub(start);
+                    match total.checked_sub(spent).filter(|l| *l > 0) {
+                        Some(l) => l.min(FRAME_STEP_BUDGET),
+                        None => return Ok(false),
+                    }
+                }
+            };
+            let before = self.instructions_executed();
+            match self.run_to_pc_or_frame(pcs, left, reported)? {
+                crate::PcStop::Pc(i) => {
+                    reported = true;
+                    self.watch_stood_at = Some(self.instructions_executed());
+                    if on_event(self, WatchEvent::Pc(i)) {
+                        return Ok(true);
+                    }
+                }
+                crate::PcStop::Frame => {
+                    reported = false;
+                    if on_event(self, WatchEvent::Frame) {
+                        return Ok(true);
+                    }
+                }
+                crate::PcStop::Budget => {
+                    if self.instructions_executed() == before {
+                        return Ok(false); // a halted core: nothing more will run
+                    }
+                    reported = false;
+                }
+            }
+        }
     }
 
     fn run_input_script_inner(

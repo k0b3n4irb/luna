@@ -55,6 +55,8 @@ means that transport has no form of it.
 | a test suite my CI runs | `luna test tests/` | — | [Developing homebrew](using/homebrew-ci.md#the-manifest) |
 | a ready GitHub Actions job | — | — | [A GitHub Actions recipe](using/homebrew-ci.md#a-github-actions-recipe) |
 | assert before and after a button press | `[[checkpoint]]` in a manifest | — | [Checkpoints](using/homebrew-ci.md#checkpoints--beforeafter-assertions) |
+| read or assert state at the end of a game tick, not at a frame boundary | `luna state --until-pc tickEnd --hit N`, or a symbol checkpoint in a manifest | `run_until_pc` | [Stopping on a routine](using/cli-run-state.md#stopping-on-a-routine-not-on-a-frame) |
+| sample variables at every tick, in one run | `--peek-at tickEnd --peek var --peek-at-out ticks.csv` | — | [Stopping on a routine](using/cli-run-state.md#stopping-on-a-routine-not-on-a-frame) |
 | assert on a byte without a manifest | `luna state --assert`, `--assert-aram`, `--assert-vram`, `--assert-cgram` | `peek_memory`, `peek_aram`, `peek_vram`, `peek_cgram` | [Asserting on memory](using/cli-run-state.md#asserting-on-memory---assert---srm-in----srm-out) |
 | read my ROM's printf and its assertions | `--nocash-out`, `--wdm-out` | `enable_nocash_log`, `enable_wdm_log` and their `take_*` | [The SDK channels over MCP](using/mcp.md#reading-the-sdk-assertlog-channels-over-mcp) |
 | know that a rebuild draws the same thing | `luna diff a.sfc b.sfc --frames …` | — | [`luna diff`](using/cli-analysis.md#luna-diff--two-roms-at-equal-ppu-frame-match--diff) |
@@ -85,6 +87,8 @@ means that transport has no form of it.
 |---|---|---|---|
 | master cycles per function | `luna profile --sym game.sym` | `enable_profile`, `take_profile` | [`luna profile`](using/cli-analysis.md#luna-profile--real-master-cycles-per-symbol) |
 | fail the build when the NMI handler is too slow | `--budget NmiHandler=6000` | — | [`luna profile`](using/cli-analysis.md#luna-profile--real-master-cycles-per-symbol) |
+| find which frame overran, and what ran in it | `luna profile --frames-out frames.csv --worst 3` | — | [Frame by frame](using/cli-analysis.md#frame-by-frame--which-frame-overran-and-what-ran-in-it) |
+| fail the build when a tick spills into one frame too many | `--max-lag-run 1`, `--max-lag-frames`, `--max-frame-mclk` | — | [Frame by frame](using/cli-analysis.md#frame-by-frame--which-frame-overran-and-what-ran-in-it) |
 | know how deep the stack went | `--stack-floor` | — | [How deep the stack went](using/cli-analysis.md#how-deep-the-stack-actually-went) |
 | know which code ran at all | `--pc-set` | — | [How deep the stack went](using/cli-analysis.md#how-deep-the-stack-actually-went) |
 | how much of the frame is left | `stats.last_frame` in the state JSON | `state` | [The state JSON](using/state-json.md) |

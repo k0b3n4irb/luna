@@ -34,6 +34,12 @@ pub(crate) struct ProfileOptions<'a> {
     pub stack_floor: Option<u16>,
     /// `--gsu-pc-set`: write the distinct GSU PCs executed (`OpenSNES` R3).
     pub gsu_pc_set: Option<&'a std::path::Path>,
+    /// `--frames-out`: the frame series as CSV (issue #270).
+    pub frames_out: Option<&'a std::path::Path>,
+    /// `--worst N`: per-symbol tables of the N heaviest frames.
+    pub worst: usize,
+    /// `--max-frame-mclk` / `--max-lag-frames` / `--max-lag-run`.
+    pub frame_gates: crate::profile_frames::FrameGates,
     pub force_mapper: Option<&'a str>,
     pub force_region: Option<&'a str>,
     pub power_on: Option<&'a str>,
@@ -51,6 +57,8 @@ struct Report<'a> {
     profile: luna_api::ProfileReport,
     /// One verdict per `--budget`, in command-line order.
     budgets: Vec<BudgetVerdict>,
+    /// The frame series in a few numbers, and the frame gates' verdicts.
+    frame_summary: crate::profile_frames::FrameSummary,
     /// Deepest native-mode stack reach over the profiled window, and the
     /// `--stack-floor` verdict if one was asked for.
     stack: StackReport,
@@ -251,7 +259,7 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
         eprintln!("error: enable_gsu_pc_set: {e}");
         return ExitCode::from(1);
     }
-    if let Err(e) = em.enable_profile() {
+    if let Err(e) = em.enable_profile_worst(o.worst) {
         eprintln!("error: enable_profile: {e}");
         return ExitCode::from(1);
     }
@@ -369,6 +377,23 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
             _ => println!("budget: {} never ran in a completed frame — ok", v.symbol),
         }
         over |= !v.ok;
+    }
+    // The window frame by frame (issue #270): what the per-symbol maxima
+    // cannot say, since they do not fall on the same frame.
+    let frame_summary = crate::profile_frames::summarize(&report.frame_series, &o.frame_gates);
+    crate::profile_frames::print_summary(&frame_summary);
+    crate::profile_frames::print_worst(&report.worst_frames, o.top);
+    over |= !frame_summary.ok();
+    if let Some(path) = o.frames_out {
+        if let Err(e) = std::fs::write(path, crate::profile_frames::csv(&report.frame_series)) {
+            eprintln!("error: writing {}: {e}", path.display());
+            return ExitCode::from(1);
+        }
+        eprintln!(
+            "frame series: {} frame(s) -> {}",
+            report.frame_series.len(),
+            path.display()
+        );
     }
     // Super FX accounting (`OpenSNES` R3). Drained after the run so the
     // window matches the profile's.
@@ -520,6 +545,7 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
             end_frame,
             profile: report,
             budgets: verdicts,
+            frame_summary,
             stack: StackReport {
                 low,
                 floor: o.stack_floor,

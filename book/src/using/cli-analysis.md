@@ -204,7 +204,12 @@ parked in `WAI` / `STP` under that label.
 | `--input2` … `--input5`, `--port1`, `--port2`, `--mouse`, `--superscope` | `pad` | The same controller flags as `state`, same grammars — so a coverage run can replay a manifest that plugs a mouse or a Super Scope instead of running it with an empty port. |
 | `--sym <PATH>` | auto `<rom>.sym` | Labels to fold onto. |
 | `--top <N>` | `25` | Rows printed (the JSON has them all). |
-| `--out <PATH>` | — | JSON report (`-` = stdout after the table): `{rom, from_frame, end_frame, total_mclk, instructions, frames, entries: [{symbol, addr, instructions, mclk, idle_mclk, pct, pcs, per_frame: {max, max_frame, mean, frames} \| null}], budgets: [{symbol, limit, max, max_frame, ok}]}`. `per_frame` is the row's master cycles per **completed** PPU frame in the window: `max` (and the frame that paid it), `mean` over every completed frame (a frame the row did not run in counts 0), `frames` it ran in; `null` when no frame completed while it ran. The trailing partial frame is never counted. |
+| `--out <PATH>` | — | JSON report (`-` = stdout after the table): `{rom, from_frame, end_frame, total_mclk, instructions, frames, entries: [{symbol, addr, instructions, mclk, idle_mclk, pct, pcs, per_frame: {max, max_frame, mean, frames} \| null}], budgets: [{symbol, limit, max, max_frame, ok}], frame_series: [{frame, active_mclk, idle_mclk, cpu_mclk, dma_mclk, hdma_mclk, refresh_mclk, total_mclk, nmi, lag}], worst_frames: [{…the same fields, entries: [{symbol, addr, mclk}]}], frame_summary: {frames, active_mean, active_max, active_max_frame, total_mean, lag_frames, lag_run, lag_run_frame, gates: [{gate, limit, value, frame, ok}]}}`. `per_frame` is the row's master cycles per **completed** PPU frame in the window: `max` (and the frame that paid it), `mean` over every completed frame (a frame the row did not run in counts 0), `frames` it ran in; `null` when no frame completed while it ran. The trailing partial frame is never counted. |
+| `--frames-out <PATH>` | — | The window **frame by frame**, as CSV: `frame,active_mclk,idle_mclk,cpu_mclk,dma_mclk,hdma_mclk,refresh_mclk,total_mclk,nmi,lag`, one row per completed frame. The same rows are `frame_series` in `--out`. See *Frame by frame* below. |
+| `--worst <N>` | `0` | Print the per-symbol table of the `N` heaviest frames (by `active_mclk`); they are `worst_frames` in `--out`. |
+| `--max-frame-mclk <N>` | — | Gate: no completed frame may use more than `N` active master cycles, else **exit 1**. |
+| `--max-lag-frames <N>` | — | Gate: at most `N` lag frames in the window, else **exit 1**. |
+| `--max-lag-run <N>` | — | Gate: at most `N` lag frames **in a row**, else **exit 1** — the check for a game whose tick is allowed to take more than one frame. |
 | `--budget <SYMBOL=MCLK>` | — | Gate (repeatable): the symbol's worst completed frame must not exceed `MCLK` master cycles, else **exit 1** with the frame named. A symbol the loaded `.sym` does not know is a usage error (exit 2) — a typo must not pass; a known symbol that never ran costs 0 and passes. The VBlank-budget check for CI. |
 | `--gsu-pc-set <PATH>` | — | The distinct **GSU** PCs executed, same encoding as `--pc-set`, in a separate file (a GSU PC and a 65816 PC can be the same number and mean different code). |
 | `--stack-floor <ADDR>` | — | Gate: the stack must never reach below `ADDR` (`0x`-hex, `$`-hex or decimal), else **exit 1**. Measured, not guessed — see below. |
@@ -234,6 +239,58 @@ luna profile --from-frame 120 --until-frame 600 --budget NmiHandler=6000 game.sf
 
 Read `per_frame.max_frame` from the JSON, then `luna state --until-frame
 402 --screenshot` to see what that frame was doing.
+
+### Frame by frame — which frame overran, and what ran in it
+
+The per-symbol maxima do not fall on the same frame, so their sum is an
+upper bound, not a measurement: it cannot say "frame 263 was the heavy
+one". The frame series can. Every completed frame of the window gets one
+row:
+
+| Column | Meaning |
+|---|---|
+| `active_mclk` | What the program used: `cpu_mclk` (instructions) + `dma_mclk` (the DMA it started). |
+| `idle_mclk` | CPU parked in `WAI` (or `STP`): the frame's headroom. |
+| `hdma_mclk`, `refresh_mclk` | HDMA stalls, and the DRAM refresh (40 master clocks a line). |
+| `total_mclk` | The four above added up: the frame's length (357 368 on NTSC, give or take the short line). |
+| `nmi` | The NMI was raised in this frame. |
+| `lag` | A **lag frame**: the NMI came while the CPU was executing, not parked in `WAI` — the main loop had not finished its frame. |
+
+A step that crosses the frame edge is split at the edge, a DMA burst
+included, so each row is the frame's own time. `lag` is meaningful for a
+main loop that waits for VBlank with `WAI` (OpenSNES's `WaitForVBlank`
+does); one that polls a flag is executing at every NMI, and reads `idle`
+0 everywhere.
+
+```bash
+# A game whose tick is meant to take two frames, measured over 12:
+luna profile --from-frame 2 --until-frame 14 --top 3 \
+  --frames-out frames.csv --worst 1 --max-lag-run 1 game.sfc
+# …the per-symbol table…
+# frames: 12 completed, active mean 247123 mclk of 357366 a frame, max 346888 (frame 4); 8 lag frame(s), longest run 2 (from frame 4)
+# gate: max-lag-run 2 (frame 4) > 1 — OVER                          → exit 1
+# worst frame 4: active 346888 mclk (cpu 346888, dma 0), idle 0, hdma 0, lag
+#  99.99%          357318  tick
+#   0.01%              44  nmi
+```
+
+Three gates, for CI:
+
+- `--max-frame-mclk N` — no frame may use more than `N` active master
+  cycles. For a loop that must fit one frame with room to spare.
+- `--max-lag-frames N` — at most `N` lag frames in the window. `0` for a
+  game that must never drop a frame.
+- `--max-lag-run N` — at most `N` lag frames in a row. A tick that takes
+  two frames lags every other frame by design: `--max-lag-run 1` passes
+  it and fails the tick that spills into a third, which a lag *counter*
+  cannot tell apart.
+
+`--worst N` is the breakdown of the heaviest frames. A row there is a
+symbol's cost in that one frame, `WAI` time included; a step that
+crosses the frame edge is credited whole to the frame it ends in, as in
+`max/frame`, so the rows can differ from `total_mclk` by that one step.
+For any other frame `F` the series pointed at, profile it alone:
+`--from-frame F --until-frame F+1`.
 
 ## What a Super FX job cost
 

@@ -67,9 +67,32 @@ impl MclkBuckets {
         *slot = slot.saturating_add(mclk);
     }
 
+    /// Take `mclk` back from the bucket `kind` names (saturating).
+    const fn debit(&mut self, kind: MclkKind, mclk: u64) {
+        let slot = match kind {
+            MclkKind::CpuActive => &mut self.cpu_active,
+            MclkKind::CpuWai => &mut self.cpu_wai,
+            MclkKind::CpuStp => &mut self.cpu_stp,
+            MclkKind::Dma => &mut self.dma,
+            MclkKind::Hdma => &mut self.hdma,
+            MclkKind::Refresh => &mut self.refresh,
+        };
+        *slot = slot.saturating_sub(mclk);
+    }
+
     /// Sum of every bucket — equals `total_mclk` for the cumulative set.
     pub const fn total(&self) -> u64 {
         self.cpu_active + self.cpu_wai + self.cpu_stp + self.dma + self.hdma + self.refresh
+    }
+
+    /// `self += other`, field by field (saturating).
+    pub const fn add(&mut self, other: &Self) {
+        self.cpu_active = self.cpu_active.saturating_add(other.cpu_active);
+        self.cpu_wai = self.cpu_wai.saturating_add(other.cpu_wai);
+        self.cpu_stp = self.cpu_stp.saturating_add(other.cpu_stp);
+        self.dma = self.dma.saturating_add(other.dma);
+        self.hdma = self.hdma.saturating_add(other.hdma);
+        self.refresh = self.refresh.saturating_add(other.refresh);
     }
 
     /// `self - other`, field by field (saturating).
@@ -122,9 +145,19 @@ impl MclkAccounting {
     }
 
     /// Called at the PPU frame wrap: close the frame's buckets.
-    pub const fn on_frame_wrap(&mut self) {
-        self.last_frame = self.cumulative.delta(&self.frame_start);
-        self.frame_start = self.cumulative;
+    ///
+    /// `cumulative` is credited a whole time charge at once — a bus
+    /// access, or a DMA burst of up to a frame and a half — before the
+    /// scheduler walks the lines it covers. `overhang` is the part of that
+    /// charge still to walk when the wrap is reached, and the bucket it
+    /// went to: it belongs to the next frame (issue #270). Without it a
+    /// burst that crossed the wrap was counted whole in the frame it
+    /// started in.
+    pub const fn on_frame_wrap(&mut self, overhang: (MclkKind, u64)) {
+        let mut at_wrap = self.cumulative;
+        at_wrap.debit(overhang.0, overhang.1);
+        self.last_frame = at_wrap.delta(&self.frame_start);
+        self.frame_start = at_wrap;
     }
 }
 
@@ -144,14 +177,14 @@ mod tests {
         assert_eq!(acc.cumulative.total(), 158);
         assert_eq!(acc.last_frame, MclkBuckets::default());
 
-        acc.on_frame_wrap();
+        acc.on_frame_wrap((MclkKind::CpuActive, 0));
         assert_eq!(acc.last_frame.cpu_wai, 100);
         assert_eq!(acc.last_frame.refresh, 40);
         assert_eq!(acc.last_frame.hdma, 18);
 
         acc.current = MclkKind::Dma;
         acc.credit_current(8);
-        acc.on_frame_wrap();
+        acc.on_frame_wrap((MclkKind::CpuActive, 0));
         assert_eq!(acc.last_frame.total(), 8);
         assert_eq!(acc.last_frame.dma, 8);
         assert_eq!(acc.cumulative.total(), 166);

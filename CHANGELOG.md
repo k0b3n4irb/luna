@@ -7,6 +7,54 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+Two requests from a game port (issues #269 and #270): read and assert
+state where the program is rather than where the frame ends, and see the
+cost of each frame instead of a mean and a maximum.
+
+**Upgrading from 1.35.0:** frames, audio and save states are unchanged.
+`stats.last_frame` in the state JSON now splits a time charge that
+crosses the frame boundary, where it used to count it whole in the frame
+it started in: its `total` is the frame's length exactly, and a DMA
+burst that crosses the boundary is shared between the two frames. A
+`--peek NAME:COUNT` whose bare count also reads as decimal prints a note
+on stderr; what it reads has not changed.
+
+### Added
+
+- **`luna state --until-pc SYMBOL [--hit N]`: stop on a routine.** The
+  run ends just before the first instruction of a label (`label+N` and
+  `BANK:OFFSET` too), the N-th time execution reaches it, with `--input`
+  still indexed by frame. A game whose tick spans several frames is in
+  the middle of one at almost every frame boundary; the end of the tick
+  is a consistent state. The frame and scanline of the stop are printed
+  and are `until_pc` in the JSON; not reaching it is exit 1 (#269).
+- **`luna state --peek-at SYMBOL`: every arrival, in one run.** Each
+  `--peek` is read each time execution reaches the routine: one line per
+  arrival with its frame and scanline, `--peek-at-out` for CSV,
+  `peek_hits` in the JSON. Replaces a debug build of the ROM that copies
+  its state into trace arrays (#269).
+- **`[[checkpoint]] at_symbol` / `hit` in a `luna test` manifest.** A
+  checkpoint fires on a routine instead of a frame; its asserts read the
+  machine there. `--report json` lists where each fired, as
+  `symbol_checkpoints` (#269).
+- **`luna profile` frame by frame.** `--frames-out` writes one CSV row
+  per completed frame (active, idle, CPU, DMA, HDMA, refresh, and `lag`:
+  the NMI found the CPU still executing); `--worst N` prints the
+  per-symbol table of the N heaviest frames; `--max-frame-mclk`,
+  `--max-lag-frames` and `--max-lag-run` gate on the series. The JSON
+  gains `frame_series`, `worst_frames` and `frame_summary` (#270).
+- **`--peek` counts that say their base:** `NAME:0x24` (hex) and
+  `NAME:#36` (decimal). A bare count stays hex (#269).
+- **luna-api:** `Emulator::run_script_watching`, `run_to_pc_or_frame`,
+  `beam`, `enable_profile_worst`; `ProfileReport.frame_series` and
+  `.worst_frames`.
+
+### Fixed
+
+- **A DMA burst that crosses the frame boundary is no longer counted
+  whole in the frame it started in** by `stats.last_frame`. Accounting
+  only: the machine runs the same clocks (#270).
+
 ## [1.35.0] — 2026-10-08
 
 Four asks from OpenSNES's report on 1.34.0, all on `luna diff`, `luna

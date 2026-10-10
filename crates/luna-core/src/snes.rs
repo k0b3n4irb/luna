@@ -24,7 +24,7 @@ use luna_ppu::Ppu;
 
 use crate::coproc::{Dsp1Mapper, Sa1Chip};
 use crate::dma::{Dma, DmaBus, DmaTraceEvent, DmaTraceLog, HDMA_CHANNEL_FLAG};
-use crate::mclk::{MclkAccounting, MclkKind};
+use crate::mclk::{MclkAccounting, MclkBuckets, MclkKind};
 use crate::power::{PowerOnRng, PowerOnState};
 
 /// `serde` helper for a heap-boxed fixed byte array (`Box<[u8; N]>`),
@@ -446,6 +446,25 @@ pub struct Profile {
     /// The API folds and empties this on every run call, so it holds at
     /// most the frames one call spanned.
     pub completed: Vec<(u64, std::collections::HashMap<u32, u64>)>,
+    /// Time per PPU frame, by consumer, oldest first; the last one is the
+    /// frame in progress (issue #270).
+    pub times: Vec<ProfileFrameTime>,
+}
+
+/// One PPU frame's master cycles by consumer, and what the NMI found
+/// (issue #270). Unlike the per-PC buckets, a step that crosses the frame
+/// edge is split at the edge, so `mclk` is the frame's own time.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProfileFrameTime {
+    /// The PPU frame.
+    pub frame: u64,
+    /// Its master cycles, by consumer.
+    pub mclk: MclkBuckets,
+    /// The NMI was raised in this frame (`NMITIMEN` bit 7 set at `VBlank`).
+    pub nmi: bool,
+    /// …and the CPU was executing when it came, not parked in `WAI`: the
+    /// main loop had not finished its frame.
+    pub nmi_busy: bool,
 }
 
 impl Profile {
@@ -484,6 +503,31 @@ impl Profile {
         } else {
             s.instructions = s.instructions.saturating_add(1);
         }
+    }
+
+    /// The time slot of `frame`: the newest one when it matches, else a
+    /// fresh one (frames are credited in order).
+    fn time_slot(&mut self, frame: u64) -> &mut ProfileFrameTime {
+        if let Some(i) = self.times.iter().rposition(|t| t.frame == frame) {
+            return &mut self.times[i];
+        }
+        self.times.push(ProfileFrameTime {
+            frame,
+            ..ProfileFrameTime::default()
+        });
+        self.times.last_mut().expect("just pushed")
+    }
+
+    /// Credit `mclk` to `frame`'s time (issue #270).
+    pub fn credit_time(&mut self, frame: u64, mclk: &MclkBuckets) {
+        self.time_slot(frame).mclk.add(mclk);
+    }
+
+    /// The NMI was raised in `frame`; `busy` = the CPU was executing.
+    pub fn note_nmi(&mut self, frame: u64, busy: bool) {
+        let slot = self.time_slot(frame);
+        slot.nmi = true;
+        slot.nmi_busy = busy;
     }
 
     /// Total master cycles across every sample.
@@ -1181,6 +1225,18 @@ impl Snes {
             .unwrap_or_default()
     }
 
+    /// Drain the time of every completed frame (issue #270); the frame in
+    /// progress stays. Empty when profiling is off.
+    pub fn take_profile_frame_times(&mut self) -> Vec<ProfileFrameTime> {
+        let now = self.frame_count;
+        let Some(p) = self.profile.as_mut() else {
+            return Vec::new();
+        };
+        let keep = p.times.iter().position(|t| t.frame >= now);
+        let rest = keep.map_or_else(Vec::new, |i| p.times.split_off(i));
+        std::mem::replace(&mut p.times, rest)
+    }
+
     /// Stop the profiler and drop its samples.
     pub fn disable_profile(&mut self) {
         self.profile = None;
@@ -1443,6 +1499,12 @@ impl Snes {
         if idle_kind.is_some() {
             self.mclk_acc.steps_idle = self.mclk_acc.steps_idle.saturating_add(1);
         }
+        // Where the frame-time series starts from (issue #270).
+        let prof_before = self.profile.is_some().then_some((
+            self.mclk_acc.cumulative,
+            self.frame_count,
+            self.nmis_serviced,
+        ));
         let (rb_line, rb_mil, rb_fc, rb_ns, rb_lnf);
         {
             let (cpu, mut bus) = self.cpu_and_bus(BusCursor {
@@ -1479,6 +1541,37 @@ impl Snes {
                 idle_kind.is_some(),
                 self.frame_count,
             );
+            if let Some((cum0, frame0, nmis0)) = prof_before {
+                let now = self.mclk_acc.cumulative;
+                if self.frame_count == frame0 {
+                    prof.credit_time(frame0, &now.delta(&cum0));
+                } else {
+                    // The step crossed the frame edge: split it there.
+                    // `frame_start` is the clock at the latest wrap,
+                    // `last_frame` the frame that wrap closed.
+                    let start = self.mclk_acc.frame_start;
+                    if self.frame_count == frame0 + 1 {
+                        prof.credit_time(frame0, &start.delta(&cum0));
+                    } else {
+                        // It spanned a whole frame (a 64 KB DMA burst is
+                        // 1.5 frames long): the wrap before the latest one
+                        // is `last_frame` earlier.
+                        let last = self.mclk_acc.last_frame;
+                        prof.credit_time(frame0, &start.delta(&last).delta(&cum0));
+                        for f in frame0 + 1..self.frame_count - 1 {
+                            prof.credit_time(f, &MclkBuckets::default());
+                        }
+                        prof.credit_time(self.frame_count - 1, &last);
+                    }
+                    prof.credit_time(self.frame_count, &now.delta(&start));
+                }
+                if self.nmis_serviced != nmis0 {
+                    prof.note_nmi(
+                        self.last_nmi_frame.unwrap_or(self.frame_count),
+                        idle_kind != Some(MclkKind::CpuWai),
+                    );
+                }
+            }
         }
 
         // The cartridge coprocessor (SA-1 / Super FX / DSP-1 / …) now
@@ -1792,6 +1885,10 @@ struct SnesBus<'a> {
     /// access. `false` for debug peeks / mapping tests so they never
     /// advance emulation.
     sched_enabled: bool,
+    /// The part of the time charge in progress that the scheduler has not
+    /// walked yet, and whose bucket it was credited to: what a frame wrap
+    /// must leave to the next frame (issue #270).
+    wrap_overhang: (MclkKind, u64),
     /// CPU PC snapshot at the start of the instruction step that owns
     /// this bus borrow. Used by the APU mailbox tracer (and any future
     /// debug hook) to attribute reads/writes to the calling
@@ -2009,6 +2106,7 @@ impl Snes {
             nmis_serviced: cursor.nmis_serviced,
             last_nmi_frame: cursor.last_nmi_frame,
             sched_enabled: cursor.sched_enabled,
+            wrap_overhang: (MclkKind::CpuActive, 0),
             cpu_pc_full: cursor.cpu_pc_full,
             mailbox_log,
             sa1_log,
@@ -2403,6 +2501,7 @@ impl SnesBus<'_> {
             }
             self.mcycles_in_line += chunk;
             remaining -= chunk;
+            self.wrap_overhang.1 = u64::from(remaining);
             if self.mcycles_in_line >= period {
                 self.mcycles_in_line -= period;
                 hdma += self.sched_one_line(line_start + u64::from(period));
@@ -2644,7 +2743,7 @@ impl SnesBus<'_> {
             // VBlank (now 0, matching hardware).
             self.cpu_regs.nmi_flag = false;
             self.frame_count = self.frame_count.saturating_add(1);
-            self.mclk.on_frame_wrap();
+            self.mclk.on_frame_wrap(self.wrap_overhang);
             // Snapshot whether the frame that just completed showed any
             // visible content, paired with the frame counter bump so a
             // front-end polling at this boundary reads a consistent value.
@@ -2815,6 +2914,13 @@ impl SnesBus<'_> {
             if !self.sched_enabled {
                 return;
             }
+            // Whose clocks a frame wrap inside this pass splits: the
+            // caller's, or — on a stall pass — the stall's.
+            self.wrap_overhang.0 = kind.unwrap_or(if stall_refresh > 0 {
+                MclkKind::Refresh
+            } else {
+                MclkKind::Hdma
+            });
             let (refresh, hdma) = self.sched_advance(step as u32);
             // `advance_coproc` is about the CALLER's time only: on the DMA
             // path the coprocessor was already stepped per transferred byte

@@ -125,6 +125,10 @@ and is the hub for every headless diagnostic.
 | `<ROM>` | — | Path to the ROM (not needed with `--schema`). |
 | `-n, --steps <N>` | `1000` | CPU instructions before snapshotting. |
 | `--until-frame <F>` | — | Run until PPU frame `F` (then snapshot) instead of the `-n` count, which is then ignored. Frame-indexed baselines and asserts (see `run`). |
+| `--until-pc <SYMBOL>` | — | Run until execution **reaches a routine** (then snapshot): a `.sym` label, `label+N`, or `BANK:OFFSET` in hex. The stop is just before its first instruction runs. Bounded by `--until-frame` when given, else by 36000 frames; not reaching it is an error (exit 1). See *Stopping on a routine* below. |
+| `--hit <N>` | `1` | With `--until-pc`: stop the `N`-th time execution reaches it. |
+| `--peek-at <SYMBOL>` | — | Read every `--peek` **each time** execution reaches this routine, one line per arrival with its frame and scanline. The run length stays `-n` / `--until-frame` / `--until-pc`. |
+| `--peek-at-out <PATH>` | — | Write the `--peek-at` rows as CSV (`hit,frame,line`, then one column of hex bytes per `--peek`) instead of printing them. |
 | `--schema` | off | Print the JSON Schema of the `--out` payload ([the state JSON](state-json.md)) and exit — no ROM needed. |
 | `--out <PATH>` | `-` | Where to write the JSON (`-` = stdout). |
 | `--force-mapper <M>` | auto | Force a mapper for headerless ROMs: `lorom`, `hirom`, `exhirom`, `sa1`, `superfx`, `dsp1`, `sdd1` (as in `run`; `spc7110` is recognised but not emulated). |
@@ -143,7 +147,7 @@ and is the hub for every headless diagnostic.
 | `--srm-out <PATH>` | — | Write battery SRAM to a `.srm` file after the run (an empty file on a cartridge with no battery). |
 | `--screenshot <PATH>` | — | Also write a PNG. |
 | `--audio-out <PATH>` | — | Also write a 32 kHz stereo WAV. |
-| `--peek <B:O:C>` | — | Hex-dump `COUNT` bytes at `BANK:OFFSET` to stderr (repeatable; **all three fields are hex** — `7E:0200:20` is 32 bytes). The whole 24-bit space is readable: WRAM, ROM (including `$C0-$FF` HiROM banks), SRAM, coprocessor RAM; the `$2000-$5FFF` register band reads `0` (no side effects), except the DMA channel registers `$4300-$437F`, which read their real values (`$FF` at power-on). An unmapped range reads `$FF` like the open bus, with a stderr note and an `unmapped` count in the JSON entry. Each result is mirrored into the `--out` JSON `peeks` array (see [the state JSON](state-json.md)) — the machine-readable channel a harness should parse. |
+| `--peek <B:O:C>` | — | Hex-dump `COUNT` bytes at `BANK:OFFSET` to stderr (repeatable; **all three fields are hex** — `7E:0200:20` is 32 bytes; a count can say its base, `:0x20` hex or `:#32` decimal). With a label, `NAME[:COUNT]`. The whole 24-bit space is readable: WRAM, ROM (including `$C0-$FF` HiROM banks), SRAM, coprocessor RAM; the `$2000-$5FFF` register band reads `0` (no side effects), except the DMA channel registers `$4300-$437F`, which read their real values (`$FF` at power-on). An unmapped range reads `$FF` like the open bus, with a stderr note and an `unmapped` count in the JSON entry. Each result is mirrored into the `--out` JSON `peeks` array (see [the state JSON](state-json.md)) — the machine-readable channel a harness should parse. |
 | `--assert <SPEC>` | — | After the run, check that memory holds the expected bytes: `BANK:OFFSET=HEX` (all hex) or `SYMBOL=HEX` through the loaded `.sym`. Prints `PASS` / `FAIL` per spec; any `FAIL` makes the exit code `1`. Repeatable. See *Asserting on memory* below. |
 | `--assert-aram <SPEC>`, `--assert-vram <SPEC>`, `--assert-cgram <SPEC>` | — | The same check over APU RAM, VRAM and CGRAM: `OFFSET=HEX`, a hex byte offset into that memory (CGRAM is 512 bytes, low byte of each colour first). Repeatable. |
 | `--call-stack` | off | Track the 65C816 call stack during the run (JSR / JSL / RTS / RTL and interrupts); the `--out` JSON gains a `call_stack` array. See *Where is the CPU, and how did it get there* below. |
@@ -241,6 +245,73 @@ luna state --until-frame 120 \
 
 With a symbol file loaded (`--sym`, or a `<rom>.sym` beside the ROM) the
 CPU-bus form takes a label instead of an address: `--assert r_done=EFBE`.
+
+### Stopping on a routine, not on a frame
+
+`--until-frame N` snapshots at a frame boundary. That is the right place
+as long as the game finishes its work inside the frame. Once a game tick
+spans two frames or more, the boundary almost always falls in the middle
+of one: half of the objects updated, the other half not yet. Comparing
+that state to a reference model compares nothing.
+
+`--until-pc` stops where the *program* is instead: just before the first
+instruction of a routine, the `--hit`-th time execution reaches it.
+`--input` scripts stay indexed by frame.
+
+```bash
+# The state at the end of the third tick: both halves are in.
+luna state --until-pc tick_end --hit 3 --peek half_a:2 --out /dev/null game.sfc
+# reached tick_end ($00:8015), hit 3 — frame 8, line 260
+# peek $7E:0010 +0002:
+#   $7E0010  03 03
+# The same instant by frame number is mid-tick:
+luna state --until-frame 8 --peek half_a:2 --out /dev/null game.sfc
+#   $7E0010  03 02
+```
+
+The target is a label of the `.sym`, `label+N` (decimal, or `0x`-hex),
+or `BANK:OFFSET` in hex; a label linked in `$00-$7D` also matches the
+same code running in `$80-$FD` under FastROM. The frame and scanline of
+the stop are printed and land in the JSON as `until_pc` — which also
+answers *does this routine still start inside VBlank* (line 225 or
+later; 240 with overscan). A routine that is not reached by
+`--until-frame` (36000 frames without it) is an error: exit 1, with the
+number of times it was reached.
+
+`--peek-at` reads every `--peek` at **each** arrival, in one run of the
+emulator — the samples a debug build of the ROM would have had to copy
+into trace arrays, without the trace code and without its cost:
+
+```bash
+luna state --peek-at tick_end --peek half_a --peek half_b \
+  --until-frame 14 --peek-at-out ticks.csv --out /dev/null game.sfc
+# tick_end: reached 4 time(s) -> ticks.csv
+cat ticks.csv
+# hit,frame,line,half_a,half_b
+# 1,2,260,01,01
+# 2,5,260,02,02
+# 3,8,260,03,03
+# 4,11,260,04,04
+```
+
+Without `--peek-at-out` the rows are printed on stderr, one line per
+arrival; either way they are `peek_hits` in the `--out` JSON. The two
+options combine (`--peek-at tick_end --until-pc tick_end --hit 120`
+samples 120 ticks and stops on the last). Neither can be combined with
+a `--cpu-trace-from` / `--mem-trace-from` / `--dma-trace-from` /
+`--superfx-trace-from`: those bridge by instruction count. In a `luna
+test` manifest the same stop is a checkpoint's `at_symbol`
+([Checkpoints](homebrew-ci.md#checkpoints--beforeafter-assertions)).
+
+**The count is hex, and can say so.** `--peek pl_x:36` reads `$36` = 54
+bytes, as the address beside a count is hex. Where a bare count also
+reads as decimal, luna prints a note, since the read succeeds either way:
+
+```bash
+luna state --until-frame 60 --peek pl_x:36 game.sfc
+# note: --peek pl_x:36 reads 54 bytes: a bare count is hex. Write pl_x:0x36 to say so, or pl_x:#36 for 36 bytes
+luna state --until-frame 60 --peek pl_x:#36 game.sfc      # 36 bytes, no note
+```
 
 **A C `static` by the name you wrote.** A compiler that lets two source
 files each own a `static` of the same name writes the file into the

@@ -58,7 +58,39 @@ pub(crate) fn parse_mouse_script(script: &str) -> Result<Vec<MouseCheckpoint>, S
     luna_api::input::parse_pointer_script(script)
 }
 
-/// Parse a `BANK:OFFSET:COUNT` peek spec (all hex, no `0x` prefix).
+/// A `--peek` byte count: hex when bare (`20` is 32 bytes, as the address
+/// beside it is hex), and two explicit spellings for whoever wants to say
+/// which — `0x24` hex, `#36` decimal (issue #269).
+pub(crate) fn parse_peek_count(s: &str) -> Result<u16, String> {
+    let s = s.trim();
+    if let Some(dec) = s.strip_prefix('#') {
+        return dec.parse::<u16>().map_err(|e| e.to_string());
+    }
+    let hex = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
+    u16::from_str_radix(hex, 16).map_err(|e| e.to_string())
+}
+
+/// A `NAME:COUNT` whose bare count reads as decimal just as well
+/// (`pl_x:36`): `(bytes it reads, bytes its author may have meant)`. The
+/// read succeeds either way, so only a note can catch the wrong one
+/// (issue #269). `None` for an explicit count, or one with a single
+/// reading.
+pub(crate) fn ambiguous_peek_count(spec: &str) -> Option<(u16, u16)> {
+    let (_, count) = spec.trim().rsplit_once(':')?;
+    let count = count.trim();
+    if count.is_empty() || !count.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let as_hex = u16::from_str_radix(count, 16).ok()?;
+    let as_dec = count.parse::<u16>().ok()?;
+    (as_hex != as_dec).then_some((as_hex, as_dec))
+}
+
+/// Parse a `BANK:OFFSET:COUNT` peek spec (all hex; the count also takes
+/// the explicit forms of [`parse_peek_count`]).
 pub(crate) fn parse_peek_spec(spec: &str) -> Result<(u8, u16, u16), String> {
     let parts: Vec<&str> = spec.split(':').collect();
     if parts.len() != 3 {
@@ -68,8 +100,7 @@ pub(crate) fn parse_peek_spec(spec: &str) -> Result<(u8, u16, u16), String> {
         .map_err(|e| format!("bad bank `{}`: {e}", parts[0]))?;
     let offset = u16::from_str_radix(parts[1].trim(), 16)
         .map_err(|e| format!("bad offset `{}`: {e}", parts[1]))?;
-    let count = u16::from_str_radix(parts[2].trim(), 16)
-        .map_err(|e| format!("bad count `{}`: {e}", parts[2]))?;
+    let count = parse_peek_count(parts[2]).map_err(|e| format!("bad count `{}`: {e}", parts[2]))?;
     Ok((bank, offset, count))
 }
 
@@ -142,7 +173,7 @@ pub(crate) fn parse_assert_spec_sym(spec: &str) -> Result<(String, Vec<u8>), Str
 pub(crate) fn parse_peek_spec_sym(spec: &str) -> Result<(String, u16), String> {
     let spec = spec.trim();
     if let Some((name, count_s)) = spec.rsplit_once(':')
-        && let Ok(count) = u16::from_str_radix(count_s.trim(), 16)
+        && let Ok(count) = parse_peek_count(count_s)
     {
         let name = name.trim();
         if name.is_empty() {
@@ -594,6 +625,27 @@ mod tests {
             ("ns:label".into(), 1)
         );
         assert!(parse_peek_spec_sym("").is_err());
+        // The two explicit counts (issue #269), and the bare one unchanged.
+        assert_eq!(
+            parse_peek_spec_sym("pl_x:0x24").unwrap(),
+            ("pl_x".to_string(), 0x24)
+        );
+        assert_eq!(
+            parse_peek_spec_sym("pl_x:#36").unwrap(),
+            ("pl_x".to_string(), 36)
+        );
+        assert_eq!(
+            parse_peek_spec_sym("pl_x:36").unwrap(),
+            ("pl_x".to_string(), 0x36)
+        );
+        assert_eq!(parse_peek_spec("7E:0200:#16").unwrap(), (0x7E, 0x200, 16));
+        // Only a bare, all-digit count that reads two ways is ambiguous.
+        assert_eq!(ambiguous_peek_count("pl_x:36"), Some((0x36, 36)));
+        assert_eq!(ambiguous_peek_count("pl_x:2"), None);
+        assert_eq!(ambiguous_peek_count("pl_x:0x36"), None);
+        assert_eq!(ambiguous_peek_count("pl_x:#36"), None);
+        assert_eq!(ambiguous_peek_count("pl_x:2A"), None);
+        assert_eq!(ambiguous_peek_count("pl_x"), None);
         assert!(
             parse_peek_spec_sym(":10")
                 .unwrap_err()

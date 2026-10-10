@@ -1,6 +1,7 @@
 //! `luna state` — the diagnostic run: traces, dumps, asserts,
 //! screenshots, JSON state.
 
+use std::fmt::Write as _;
 use std::process::ExitCode;
 
 use crate::csv::{
@@ -78,6 +79,154 @@ struct StateOut<'a> {
     #[serde(flatten)]
     state: &'a luna_api::EmulatorState,
     peeks: &'a [PeekOut],
+    /// Where `--until-pc` stopped (absent without the option).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    until_pc: Option<&'a UntilPcOut>,
+    /// One entry per time execution reached `--peek-at` (absent without
+    /// the option).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    peek_hits: Option<&'a [PeekHit]>,
+}
+
+/// The outcome of `--until-pc` (issue #269).
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct UntilPcOut {
+    /// The `--until-pc` spec verbatim.
+    spec: String,
+    /// The address it resolved to (`bank << 16 | offset`).
+    addr: u32,
+    /// The `--hit` asked for.
+    hit: u64,
+    /// How many times execution reached it before the run ended.
+    hits_seen: u64,
+    /// The run stopped on the asked hit. `false` = the bound came first.
+    reached: bool,
+    /// PPU frame of the stop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frame: Option<u64>,
+    /// Scanline of the stop: a routine meant for `VBlank` reads 225 or
+    /// more here (240 with overscan).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line: Option<u16>,
+}
+
+/// The `--peek`s read at one arrival on `--peek-at` (issue #269).
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct PeekHit {
+    /// 1 for the first arrival.
+    hit: u64,
+    /// PPU frame of the arrival.
+    frame: u64,
+    /// Scanline of the arrival.
+    line: u16,
+    /// The `--peek`s, in command-line order, as read at that instant.
+    peeks: Vec<PeekOut>,
+}
+
+/// Frames `--until-pc` may run when no `--until-frame` bounds it: ten
+/// minutes of NTSC, so a routine that is never reached ends the command
+/// instead of hanging it.
+const UNTIL_PC_FRAME_CAP: u64 = 36_000;
+
+/// What `--until-pc` / `--peek-at` watch during the run (issue #269).
+struct Watch {
+    /// The distinct addresses watched.
+    pcs: Vec<u32>,
+    until: Option<UntilPcOut>,
+    /// `--peek-at`: its spec and address.
+    peek_at: Option<(String, u32)>,
+    hits: Vec<PeekHit>,
+}
+
+impl Watch {
+    /// Resolve the two options against the loaded symbols. `None` when
+    /// neither was given.
+    fn resolve(
+        em: &luna_api::Emulator,
+        until_pc: Option<&str>,
+        hit: u64,
+        peek_at: Option<&str>,
+    ) -> Result<Option<Self>, String> {
+        let addr = |opt: &str, spec: &str| {
+            crate::test_cmd::resolve_key(em, spec).map_err(|e| format!("{opt} `{spec}`: {e}"))
+        };
+        let until = until_pc
+            .map(|spec| {
+                addr("--until-pc", spec).map(|addr| UntilPcOut {
+                    spec: spec.to_string(),
+                    addr,
+                    hit,
+                    hits_seen: 0,
+                    reached: false,
+                    frame: None,
+                    line: None,
+                })
+            })
+            .transpose()?;
+        let peek_at = peek_at
+            .map(|spec| addr("--peek-at", spec).map(|a| (spec.to_string(), a)))
+            .transpose()?;
+        let mut pcs: Vec<u32> = until
+            .iter()
+            .map(|u| u.addr)
+            .chain(peek_at.iter().map(|p| p.1))
+            .collect();
+        pcs.dedup();
+        Ok((!pcs.is_empty()).then_some(Self {
+            pcs,
+            until,
+            peek_at,
+            hits: Vec::new(),
+        }))
+    }
+
+    /// Execution reached `pcs[i]`. Returns `true` to end the run.
+    fn on_pc(&mut self, em: &mut luna_api::Emulator, i: usize, peek_specs: &[String]) -> bool {
+        let addr = self.pcs[i];
+        let frame = em.frame_count().unwrap_or(0);
+        let line = em.beam().map_or(0, |(line, _)| line);
+        if self.peek_at.as_ref().is_some_and(|p| p.1 == addr) {
+            self.hits.push(PeekHit {
+                hit: self.hits.len() as u64 + 1,
+                frame,
+                line,
+                peeks: read_peeks(em, peek_specs, false),
+            });
+        }
+        if let Some(u) = self.until.as_mut().filter(|u| u.addr == addr) {
+            u.hits_seen += 1;
+            if u.hits_seen == u.hit {
+                u.reached = true;
+                u.frame = Some(frame);
+                u.line = Some(line);
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// The `--peek-at-out` CSV: one row per arrival, one column per `--peek`.
+fn peek_hits_csv(peek_specs: &[String], hits: &[PeekHit]) -> String {
+    let mut out = String::from("hit,frame,line");
+    for spec in peek_specs {
+        out.push(',');
+        out.push_str(spec);
+    }
+    out.push('\n');
+    for h in hits {
+        let _ = write!(out, "{},{},{}", h.hit, h.frame, h.line);
+        for p in &h.peeks {
+            out.push(',');
+            out.push_str(if p.error.is_some() {
+                "error"
+            } else {
+                &p.bytes_hex
+            });
+        }
+        out.push('\n');
+    }
+    out
 }
 
 /// `luna state --schema`: the JSON Schema of the `--out` payload
@@ -153,6 +302,10 @@ pub(crate) fn run_state(
     call_stack: bool,
     native_res: bool,
     power_on: Option<&str>,
+    until_pc: Option<&str>,
+    hit: u64,
+    peek_at: Option<&str>,
+    peek_at_out: Option<&std::path::Path>,
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
     if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, dsp1_rom, power_on) {
@@ -320,7 +473,19 @@ pub(crate) fn run_state(
     // A step that fails (the core panicked) still yields the snapshot and
     // every requested output, but the command then exits 1.
     let mut step_failed = false;
-    let ran = if audio_out.is_some() {
+    // `--until-pc` / `--peek-at` (issue #269): the run watches a routine,
+    // so it cannot pre-roll to the last input event — that may lie past
+    // the stop. The watching run below replays the script itself.
+    let mut watch = match Watch::resolve(&em, until_pc, hit, peek_at) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let ran = if watch.is_some() {
+        Ok(0)
+    } else if audio_out.is_some() {
         em.run_input_script_with_audio(&mut script, bound, &mut audio_accum)
     } else {
         em.run_input_script(&mut script, bound)
@@ -483,7 +648,86 @@ pub(crate) fn run_state(
     // ~99% of audio on any run longer than ~0.5 s of emulated time.
     // The accumulated Vec (started by the input pre-roll) is written to disk
     // after the run.
-    if let Some(target_frame) = until_frame {
+    if let Some(w) = watch.as_mut() {
+        let bound = match until_frame {
+            Some(frame) => luna_api::ScriptBound::Frame(frame),
+            None if w.until.is_some() => {
+                luna_api::ScriptBound::Frame(em.frame_count().unwrap_or(0) + UNTIL_PC_FRAME_CAP)
+            }
+            None => luna_api::ScriptBound::Steps(remaining),
+        };
+        let pcs = w.pcs.clone();
+        let run = em.run_script_watching(&mut script, bound, &pcs, |em, ev| match ev {
+            luna_api::WatchEvent::Pc(i) => w.on_pc(em, i, peek_specs),
+            luna_api::WatchEvent::Frame => {
+                if keep_audio && let Ok(mut chunk) = em.drain_audio(usize::MAX) {
+                    audio_accum.append(&mut chunk);
+                }
+                false
+            }
+        });
+        if let Err(e) = run {
+            eprintln!("step warning: {e}");
+            step_failed = true;
+        }
+        let end_frame = em.frame_count().unwrap_or(0);
+        if let Some(u) = &w.until {
+            if let (true, Some(frame), Some(line)) = (u.reached, u.frame, u.line) {
+                eprintln!(
+                    "reached {} (${:02X}:{:04X}), hit {} — frame {frame}, line {line}",
+                    u.spec,
+                    u.addr >> 16,
+                    u.addr & 0xFFFF,
+                    u.hit
+                );
+            } else {
+                eprintln!(
+                    "error: --until-pc {} (${:02X}:{:04X}): hit {} not reached by frame \
+                     {end_frame} (reached {} time(s))",
+                    u.spec,
+                    u.addr >> 16,
+                    u.addr & 0xFFFF,
+                    u.hit,
+                    u.hits_seen
+                );
+                step_failed = true;
+            }
+        }
+        if let Some((spec, _)) = &w.peek_at {
+            if let Some(path) = peek_at_out {
+                match std::fs::write(path, peek_hits_csv(peek_specs, &w.hits)) {
+                    Ok(()) => eprintln!(
+                        "{spec}: reached {} time(s) -> {}",
+                        w.hits.len(),
+                        path.display()
+                    ),
+                    Err(e) => {
+                        eprintln!("error: writing {}: {e}", path.display());
+                        return ExitCode::from(1);
+                    }
+                }
+            } else {
+                for h in &w.hits {
+                    let values: Vec<String> = h
+                        .peeks
+                        .iter()
+                        .map(|p| match &p.error {
+                            Some(e) => format!("{}=<{e}>", p.spec),
+                            None => format!("{}={}", p.spec, p.bytes_hex),
+                        })
+                        .collect();
+                    eprintln!(
+                        "{spec} hit {} frame {} line {}: {}",
+                        h.hit,
+                        h.frame,
+                        h.line,
+                        values.join(" ")
+                    );
+                }
+                eprintln!("{spec}: reached {} time(s)", w.hits.len());
+            }
+        }
+    } else if let Some(target_frame) = until_frame {
         // RFE-5: run to a specific PPU frame instead of the `-n` instruction
         // count, draining audio along the way so `--audio-out` still works.
         while em.state().scheduler.frame_count < target_frame {
@@ -518,77 +762,7 @@ pub(crate) fn run_state(
 
     // Each --peek result also lands, machine-readable, in the --out JSON
     // (issue #175) — the stderr hexdump stays for humans.
-    let mut peek_outs: Vec<PeekOut> = Vec::new();
-    for spec in peek_specs {
-        // `APU:OFFSET:COUNT` reads ARAM instead of the CPU bus (#122):
-        // checked first because the prefix is unambiguous.
-        if let Some(apu) = crate::parsers::parse_apu_peek_spec(spec) {
-            match apu {
-                Ok((offset, count)) => match em.peek_aram(offset, count) {
-                    Ok(bytes) => {
-                        eprintln!("peek APU:{:04X} +{:04X}:", offset, bytes.len());
-                        print_hex_dump(0, offset, &bytes);
-                        peek_outs.push(PeekOut::ok(spec, "aram", u32::from(offset), &bytes));
-                    }
-                    Err(e) => {
-                        eprintln!("error: peek_aram `{spec}`: {e}");
-                        peek_outs.push(PeekOut::err(spec, "aram", e.to_string()));
-                    }
-                },
-                Err(e) => {
-                    eprintln!("error: --peek `{spec}`: {e}");
-                    peek_outs.push(PeekOut::err(spec, "aram", e));
-                }
-            }
-            continue;
-        }
-        // Numeric `BANK:OFFSET:COUNT` first; else a WLA-DX label
-        // `NAME[:COUNT]` resolved through the loaded .sym table (#77).
-        let target = match parse_peek_spec(spec) {
-            Ok(t) => Ok(t),
-            Err(num_err) => match parse_peek_spec_sym(spec) {
-                Ok((name, count)) => match em.lookup_symbol(&name) {
-                    Ok(addr) => Ok(((addr >> 16) as u8, addr as u16, count)),
-                    Err(e) => Err(format!("{e} (and not BANK:OFFSET:COUNT: {num_err})")),
-                },
-                Err(_) => Err(num_err),
-            },
-        };
-        match target {
-            Ok((bank, offset, count)) => match em.peek_memory_checked(bank, offset, count) {
-                Ok(peek) => {
-                    eprintln!(
-                        "peek ${:02X}:{:04X} +{:04X}:",
-                        bank,
-                        offset,
-                        peek.bytes.len()
-                    );
-                    print_hex_dump(bank, offset, &peek.bytes);
-                    if peek.unmapped > 0 {
-                        // Open bus reads `$FF`; say so rather than let a
-                        // harness mistake it for ROM content (issue #222).
-                        eprintln!(
-                            "note: {} of {} byte(s) at ${:02X}:{:04X} are unmapped (open bus, read as $FF)",
-                            peek.unmapped,
-                            peek.bytes.len(),
-                            bank,
-                            offset
-                        );
-                    }
-                    let addr = (u32::from(bank) << 16) | u32::from(offset);
-                    peek_outs.push(PeekOut::checked(spec, addr, &peek));
-                }
-                Err(e) => {
-                    eprintln!("error: peek_memory `{spec}`: {e}");
-                    peek_outs.push(PeekOut::err(spec, "cpu", e.to_string()));
-                }
-            },
-            Err(e) => {
-                eprintln!("error: --peek `{spec}`: {e}");
-                peek_outs.push(PeekOut::err(spec, "cpu", e));
-            }
-        }
-    }
+    let peek_outs = read_peeks(&mut em, peek_specs, true);
 
     // --assert / --assert-aram / --assert-vram: native pass/fail (exit 0/1) so
     // headless consumers don't have to parse the peek dump.
@@ -941,6 +1115,11 @@ pub(crate) fn run_state(
     let json = match serde_json::to_string_pretty(&StateOut {
         state: &state,
         peeks: &peek_outs,
+        until_pc: watch.as_ref().and_then(|w| w.until.as_ref()),
+        peek_hits: watch
+            .as_ref()
+            .filter(|w| w.peek_at.is_some())
+            .map(|w| w.hits.as_slice()),
     }) {
         Ok(s) => s,
         Err(e) => {
@@ -1026,6 +1205,106 @@ pub(crate) fn run_state(
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// Read every `--peek` spec. `verbose` prints the labelled hexdumps and
+/// the notes on stderr (the end-of-run peeks); the per-arrival reads of
+/// `--peek-at` stay quiet.
+fn read_peeks(em: &mut luna_api::Emulator, peek_specs: &[String], verbose: bool) -> Vec<PeekOut> {
+    // Everything this says goes to stderr, and only for the end-of-run read.
+    macro_rules! say {
+        ($($t:tt)*) => {
+            if verbose {
+                eprintln!($($t)*);
+            }
+        };
+    }
+    let mut peek_outs: Vec<PeekOut> = Vec::new();
+    for spec in peek_specs {
+        // `APU:OFFSET:COUNT` reads ARAM instead of the CPU bus (#122):
+        // checked first because the prefix is unambiguous.
+        if let Some(apu) = crate::parsers::parse_apu_peek_spec(spec) {
+            match apu {
+                Ok((offset, count)) => match em.peek_aram(offset, count) {
+                    Ok(bytes) => {
+                        say!("peek APU:{:04X} +{:04X}:", offset, bytes.len());
+                        if verbose {
+                            print_hex_dump(0, offset, &bytes);
+                        }
+                        peek_outs.push(PeekOut::ok(spec, "aram", u32::from(offset), &bytes));
+                    }
+                    Err(e) => {
+                        say!("error: peek_aram `{spec}`: {e}");
+                        peek_outs.push(PeekOut::err(spec, "aram", e.to_string()));
+                    }
+                },
+                Err(e) => {
+                    say!("error: --peek `{spec}`: {e}");
+                    peek_outs.push(PeekOut::err(spec, "aram", e));
+                }
+            }
+            continue;
+        }
+        // Numeric `BANK:OFFSET:COUNT` first; else a WLA-DX label
+        // `NAME[:COUNT]` resolved through the loaded .sym table (#77).
+        let target = match parse_peek_spec(spec) {
+            Ok(t) => Ok(t),
+            Err(num_err) => match parse_peek_spec_sym(spec) {
+                Ok((name, count)) => match em.lookup_symbol(&name) {
+                    Ok(addr) => {
+                        // The read succeeds either way, so say which count
+                        // was taken (issue #269).
+                        if let Some((hex, dec)) = crate::parsers::ambiguous_peek_count(spec) {
+                            say!(
+                                "note: --peek {spec} reads {hex} bytes: a bare count is hex. \
+                                 Write {name}:0x{hex:X} to say so, or {name}:#{dec} for {dec} bytes"
+                            );
+                        }
+                        Ok(((addr >> 16) as u8, addr as u16, count))
+                    }
+                    Err(e) => Err(format!("{e} (and not BANK:OFFSET:COUNT: {num_err})")),
+                },
+                Err(_) => Err(num_err),
+            },
+        };
+        match target {
+            Ok((bank, offset, count)) => match em.peek_memory_checked(bank, offset, count) {
+                Ok(peek) => {
+                    say!(
+                        "peek ${:02X}:{:04X} +{:04X}:",
+                        bank,
+                        offset,
+                        peek.bytes.len()
+                    );
+                    if verbose {
+                        print_hex_dump(bank, offset, &peek.bytes);
+                    }
+                    if peek.unmapped > 0 {
+                        // Open bus reads `$FF`; say so rather than let a
+                        // harness mistake it for ROM content (issue #222).
+                        say!(
+                            "note: {} of {} byte(s) at ${:02X}:{:04X} are unmapped (open bus, read as $FF)",
+                            peek.unmapped,
+                            peek.bytes.len(),
+                            bank,
+                            offset
+                        );
+                    }
+                    let addr = (u32::from(bank) << 16) | u32::from(offset);
+                    peek_outs.push(PeekOut::checked(spec, addr, &peek));
+                }
+                Err(e) => {
+                    say!("error: peek_memory `{spec}`: {e}");
+                    peek_outs.push(PeekOut::err(spec, "cpu", e.to_string()));
+                }
+            },
+            Err(e) => {
+                say!("error: --peek `{spec}`: {e}");
+                peek_outs.push(PeekOut::err(spec, "cpu", e));
+            }
+        }
+    }
+    peek_outs
 }
 
 /// Step `n` instructions; with `keep`, move the APU's audio into `acc` every

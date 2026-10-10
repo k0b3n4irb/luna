@@ -14,6 +14,8 @@
 | `stats` | Cumulative counters since reset: `instructions_executed`, `instructions_active`, `total_mclk`, and `total_mclk` split by consumer — `mclk` (cumulative) and `last_frame` (the last completed PPU frame), each `{cpu_active, cpu_wai, cpu_stp, dma, hdma, refresh, total}`. See below. |
 | `sa1`, `gsu`, `dsp1`, `call_stack` | Coprocessor blocks — SA-1, Super FX, DSP-1 (present when the cart has one; `gsu` is described under *Who owns the cartridge*) — and the `--call-stack` capture. |
 | `peeks` | One entry per `--peek`, in order: `{spec, space: "cpu"\|"aram", addr, bytes_hex, unmapped?, error?}`. Always present (empty without `--peek`); a failed peek keeps its slot with an `error` string instead of vanishing; `unmapped` appears only when part of the range is open bus. |
+| `until_pc` | Only with `--until-pc`: `{spec, addr, hit, hits_seen, reached, frame?, line?}` — where the run stopped, or `reached: false` when the bound came first. |
+| `peek_hits` | Only with `--peek-at`: one `{hit, frame, line, peeks: […]}` per arrival on the routine, `peeks` shaped as above. |
 
 ```bash
 # The harness-friendly peek channel: read bytes from the JSON, not stderr.
@@ -48,9 +50,12 @@ interrupt dispatch, reset), `cpu_wai` (parked in `WAI`), `cpu_stp`, `dma`
 (general-purpose bursts), `hdma` (per-line transfers + table fetches +
 frame-start init) and `refresh` (the 40-clock DRAM refresh per scanline);
 `total` is their sum. `last_frame` is the same split for the last
-completed PPU frame — a frame boundary falls inside a bus access, so its
-`total` can differ from the nominal period (357 368 on NTSC) by that one
-access. `instructions_active` excludes the parked ticks.
+completed PPU frame. A charge that crosses the frame boundary — a bus
+access, or a DMA burst — is split at the boundary, so `total` is the
+frame's length (357 368 on NTSC, four clocks less on the frames with the
+short line). `instructions_active` excludes the parked ticks. For every
+frame of a window instead of the last one, see `luna profile
+--frames-out`.
 
 ```bash
 # CPU headroom of the last frame: how much of it the game spent in WAI.

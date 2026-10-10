@@ -1805,3 +1805,202 @@ fn checksum_computed_sees_a_byte_the_header_pair_does_not() {
         before.checksum_computed.wrapping_add(3)
     );
 }
+
+/// A game whose tick takes more than two frames: wait for the NMI, work
+/// for about 2.3 frames, wait again. `$8006` waits, `$8007` is the first
+/// instruction of the tick, `$8013` the NMI handler.
+fn demo_slow_tick() -> Vec<u8> {
+    let code = [
+        0x78, // 8000 SEI
+        0xA9, 0x80, // 8001 LDA #$80
+        0x8D, 0x00, 0x42, // 8003 STA $4200
+        0xCB, // 8006 WAI
+        0xA0, 0x50, // 8007 LDY #$50
+        0xA2, 0x00, // 8009 LDX #$00
+        0xCA, // 800B DEX
+        0xD0, 0xFD, // 800C BNE $800B
+        0x88, // 800E DEY
+        0xD0, 0xF8, // 800F BNE $8009
+        0x80, 0xF3, // 8011 BRA $8006
+        0x40, // 8013 RTI
+    ];
+    demo_lorom_with(&code, Some(0x8013))
+}
+
+#[test]
+fn the_profile_frame_series_is_the_frame_buckets_and_flags_lag() {
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_slow_tick()).unwrap();
+    e.load_symbols_str("[labels]\n00:8000 main\n00:8006 wait\n00:8007 tick\n00:8013 nmi\n");
+    // Past the boot, so every frame of the window has its NMI.
+    for _ in 0..2 {
+        e.step_until_frame(1_000_000).unwrap();
+    }
+    e.enable_profile_worst(2).unwrap();
+    let mut closed = Vec::new();
+    for _ in 0..12 {
+        e.step_until_frame(1_000_000).unwrap();
+        closed.push(e.state().stats.last_frame);
+    }
+    let r = e.take_profile().unwrap();
+    assert_eq!(r.frame_series.len(), 12, "{:?}", r.frame_series);
+    for (f, b) in r.frame_series.iter().zip(&closed) {
+        // The series splits a step at the frame edge, as the scheduler's
+        // own buckets do: the same numbers, frame by frame.
+        assert_eq!(f.total_mclk, b.total, "frame {}", f.frame);
+        assert_eq!(f.cpu_mclk, b.cpu_active, "frame {}", f.frame);
+        assert_eq!(f.idle_mclk, b.cpu_wai + b.cpu_stp, "frame {}", f.frame);
+        assert_eq!(f.refresh_mclk, b.refresh, "frame {}", f.frame);
+        assert_eq!(
+            f.active_mclk + f.idle_mclk + f.hdma_mclk + f.refresh_mclk,
+            f.total_mclk
+        );
+        assert!(f.nmi, "the NMI is on: {f:?}");
+    }
+    assert_eq!(r.frame_series[0].frame, 2);
+    // The tick spans three frames: two NMIs find the CPU working, the
+    // third finds it parked.
+    let lag: Vec<bool> = r.frame_series.iter().map(|f| f.lag).collect();
+    assert!(lag.windows(3).any(|w| w == [true, true, false]), "{lag:?}");
+    assert!(!lag.windows(3).any(|w| w == [true, true, true]), "{lag:?}");
+    for f in r.frame_series.iter().filter(|f| !f.lag) {
+        assert!(f.idle_mclk > 0, "a frame that waited has headroom: {f:?}");
+    }
+    // The two heaviest frames, heaviest first, with what ran in them.
+    assert_eq!(r.worst_frames.len(), 2);
+    assert!(r.worst_frames[0].time.active_mclk >= r.worst_frames[1].time.active_mclk);
+    let heaviest = r.frame_series.iter().map(|f| f.active_mclk).max().unwrap();
+    assert_eq!(r.worst_frames[0].time.active_mclk, heaviest);
+    assert_eq!(r.worst_frames[0].entries[0].symbol, "tick");
+    // Without the request, no frame keeps its rows.
+    e.enable_profile().unwrap();
+    e.step_until_frame(1_000_000).unwrap();
+    e.step_until_frame(1_000_000).unwrap();
+    assert!(e.take_profile().unwrap().worst_frames.is_empty());
+}
+
+#[test]
+fn a_watched_pc_is_reached_once_per_pass_and_frames_keep_the_script() {
+    let run = |pc: u32| {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_slow_tick()).unwrap();
+        let mut script = InputScript::new();
+        script.add_pad(0, "3:0x1000").unwrap();
+        let (mut hits, mut frames) = (Vec::new(), 0u64);
+        let stopped = e
+            .run_script_watching(&mut script, ScriptBound::Frame(12), &[pc], |e, ev| {
+                match ev {
+                    WatchEvent::Pc(0) => {
+                        let st = e.cpu_state().unwrap();
+                        assert_eq!(st.pc, 0x8007, "stopped before the instruction ran");
+                        hits.push(e.frame_count().unwrap());
+                    }
+                    WatchEvent::Pc(i) => panic!("one PC watched, got index {i}"),
+                    WatchEvent::Frame => frames += 1,
+                }
+                false
+            })
+            .unwrap();
+        assert!(!stopped, "the frame bound ended the run");
+        assert_eq!(e.frame_count().unwrap(), 12);
+        assert_eq!(frames, 12);
+        assert_eq!(
+            script.next_frame(),
+            None,
+            "the press of frame 3 was applied"
+        );
+        hits
+    };
+    let hits = run(0x00_8007);
+    // The CPU parks in `WAI` right before `$8007` for most of a frame:
+    // that is one arrival per tick, not one per parked step. A tick takes
+    // three frames.
+    assert!((3..=5).contains(&hits.len()), "{hits:?}");
+    assert!(hits.windows(2).all(|w| w[1] - w[0] == 3), "{hits:?}");
+    // A `FastROM` label names the same instruction through its mirror.
+    assert_eq!(run(0x80_8007), hits);
+
+    // Ending on the second arrival: the callback says stop.
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_slow_tick()).unwrap();
+    let mut seen = 0;
+    let stopped = e
+        .run_script_watching(
+            &mut InputScript::new(),
+            ScriptBound::Frame(100),
+            &[0x00_8007],
+            |_, ev| {
+                seen += u32::from(ev == WatchEvent::Pc(0));
+                seen == 2
+            },
+        )
+        .unwrap();
+    assert!(stopped);
+    assert_eq!(e.frame_count().unwrap(), hits[1]);
+    assert_eq!(e.cpu_state().unwrap().pc, 0x8007);
+    // A second call from that stop does not report the same arrival
+    // again: the next one is a whole tick later.
+    let stopped = e
+        .run_script_watching(
+            &mut InputScript::new(),
+            ScriptBound::Frame(100),
+            &[0x00_8007],
+            |_, ev| ev == WatchEvent::Pc(0),
+        )
+        .unwrap();
+    assert!(stopped);
+    assert_eq!(e.frame_count().unwrap(), hits[2]);
+    // An instruction budget bounds it too, and a PC never executed is
+    // simply not reached.
+    let stopped = e
+        .run_script_watching(
+            &mut InputScript::new(),
+            ScriptBound::Steps(5_000),
+            &[0x00_9999],
+            |_, ev| matches!(ev, WatchEvent::Pc(_)),
+        )
+        .unwrap();
+    assert!(!stopped);
+}
+
+#[test]
+fn a_step_longer_than_a_frame_is_split_across_the_series() {
+    // A 64 KB DMA to VRAM is one CPU step of 524 288 master clocks, about
+    // a frame and a half. Started two thirds into frame 0, it covers
+    // frame 1 entirely and ends in frame 2. Each frame of the series must
+    // still be one frame long, with its own share of the burst.
+    let code = [
+        0x18, 0xFB, 0xC2, 0x10, // CLC ; XCE ; REP #$10
+        0xA2, 0x00, 0x1C, 0xCA, 0xD0, 0xFD, // LDX #$1C00 ; DEX ; BNE -3
+        0xA9, 0x01, 0x8D, 0x00, 0x43, // LDA #$01 ; STA $4300
+        0xA9, 0x18, 0x8D, 0x01, 0x43, // LDA #$18 ; STA $4301
+        0xA2, 0x00, 0x80, 0x8E, 0x02, 0x43, // LDX #$8000 ; STX $4302
+        0xA9, 0x00, 0x8D, 0x04, 0x43, // LDA #$00 ; STA $4304
+        0xA2, 0x00, 0x00, 0x8E, 0x05, 0x43, // LDX #$0000 ; STX $4305 (64 KB)
+        0xA9, 0x01, 0x8D, 0x0B, 0x42, // LDA #$01 ; STA $420B
+        0x80, 0xFE, // BRA -2
+    ];
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
+    e.enable_profile().unwrap();
+    while e.frame_count().unwrap() < 5 {
+        e.step_until_frame(1_000_000).unwrap();
+    }
+    let r = e.take_profile().unwrap();
+    let frames: Vec<u64> = r.frame_series.iter().map(|f| f.frame).collect();
+    assert_eq!(frames, [0, 1, 2, 3, 4], "no frame skipped");
+    let frame_len = 262 * 1364;
+    for f in &r.frame_series[1..] {
+        assert!(f.total_mclk.abs_diff(frame_len) <= 48, "{f:?}");
+    }
+    let whole = &r.frame_series[1];
+    assert_eq!(whole.cpu_mclk, 0, "the CPU is halted all frame: {whole:?}");
+    assert_eq!(whole.dma_mclk, whole.total_mclk, "{whole:?}");
+    assert!(r.frame_series[0].dma_mclk > 0 && r.frame_series[2].dma_mclk > 0);
+    assert_eq!(r.frame_series[3].dma_mclk, 0);
+    // The scheduler's own buckets agree: the last frame it closed.
+    let last = e.state().stats.last_frame;
+    assert_eq!(r.frame_series[4].total_mclk, last.total);
+    let dma: u64 = r.frame_series.iter().map(|f| f.dma_mclk).sum();
+    assert!((0x1_0000 * 8..0x1_0000 * 8 + 200).contains(&dma), "{dma}");
+}

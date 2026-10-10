@@ -41,6 +41,12 @@
 //! "windows.0" = 0x20             # `.` indexes arrays and nested tables
 //! "bgs.1.h_scroll" = { le = 64 } # …so every printed field is reachable
 //!
+//! [[checkpoint]]                 # stop on a routine, not a frame (#269)
+//! at_symbol = "tickEnd"          # symbol, symbol+N or BANK:OFFSET
+//! hit = 120                      # its 120th arrival since power-on (default 1)
+//! [checkpoint.values]            # read just before its first instruction
+//! cam_x = 384
+//!
 //! [[checkpoint]]                 # before/after checks along the run (#205)
 //! at_frame = 60
 //! input = "60:0x0100,63:0"       # this leg's presses (absolute frames)
@@ -140,7 +146,15 @@ struct Manifest {
 #[serde(deny_unknown_fields)]
 struct Checkpoint {
     /// Absolute frame this checkpoint fires at (must be increasing).
-    at_frame: u64,
+    /// One of `at_frame` / `at_symbol` is required.
+    at_frame: Option<u64>,
+    /// Fire when execution reaches this routine instead (issue #269): a
+    /// loaded symbol, `symbol+N` or `BANK:OFFSET`. The asserts read the
+    /// machine just before its first instruction — a state a frame
+    /// boundary cannot give once a game tick spans more than one frame.
+    at_symbol: Option<String>,
+    /// With `at_symbol`: which arrival, counted from power-on (default 1).
+    hit: Option<u64>,
     /// This leg's joypad entries (absolute frames, same grammar as the
     /// top-level `input`).
     input: Option<String>,
@@ -385,6 +399,29 @@ struct TestOutcome {
     /// `Some(reason)` when the test was skipped (firmware gate, issue
     /// #212) — neither passed nor failed.
     skipped: Option<String>,
+    /// Where each `at_symbol` checkpoint fired (issue #269), for the JSON
+    /// report: "does this routine still run inside `VBlank`".
+    symbol_checkpoints: Vec<SymbolCheckpoint>,
+}
+
+/// Where an `at_symbol` checkpoint fired.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct SymbolCheckpoint {
+    at_symbol: String,
+    hit: u64,
+    /// `false` = the run's horizon came first.
+    reached: bool,
+    /// PPU frame and scanline of the stop (where the run ended, if not
+    /// reached).
+    frame: u64,
+    line: u16,
+}
+
+/// The routines a manifest's `at_symbol` checkpoints watch, and how many
+/// times execution reached each since power-on.
+struct SymbolWatch {
+    pcs: Vec<u32>,
+    counts: Vec<u64>,
 }
 
 /// `luna test` entry point.
@@ -497,6 +534,7 @@ pub(crate) fn run_tests(
                 "power_on": o.power_on,
                 "seed": o.seed,
                 "region": o.region,
+                "symbol_checkpoints": o.symbol_checkpoints,
             })).collect::<Vec<_>>(),
         });
         println!(
@@ -748,17 +786,45 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
     if m.steps.is_some() && !m.checkpoint.is_empty() {
         return Err("`steps` cannot be combined with `[[checkpoint]]`s (use `frames`)".into());
     }
-    let mut prev_frame = 0u64;
+    let mut prev_frame: Option<u64> = None;
+    let mut prev_hit: BTreeMap<&str, u64> = BTreeMap::new();
     for (i, cp) in m.checkpoint.iter().enumerate() {
-        if i > 0 && cp.at_frame <= prev_frame {
-            return Err(format!(
-                "checkpoint at_frame values must increase (checkpoint {} is at {} after {})",
-                i + 1,
-                cp.at_frame,
-                prev_frame
-            ));
+        match (cp.at_frame, cp.at_symbol.as_deref()) {
+            (Some(frame), None) => {
+                if cp.hit.is_some() {
+                    return Err(format!("checkpoint {}: `hit` goes with `at_symbol`", i + 1));
+                }
+                if let Some(prev) = prev_frame.filter(|&p| frame <= p) {
+                    return Err(format!(
+                        "checkpoint at_frame values must increase (checkpoint {} is at {frame} after {prev})",
+                        i + 1,
+                    ));
+                }
+                prev_frame = Some(frame);
+            }
+            (None, Some(sym)) => {
+                let hit = cp.hit.unwrap_or(1);
+                if hit == 0 {
+                    return Err(format!("checkpoint {}: `hit` counts from 1", i + 1));
+                }
+                // Arrivals are counted from power-on, so a later checkpoint
+                // on the same routine must ask for a later one.
+                if let Some(&prev) = prev_hit.get(sym).filter(|&&p| hit <= p) {
+                    return Err(format!(
+                        "checkpoint {}: `{sym}` hit {hit} comes after hit {prev} — hits count \
+                         from power-on and must increase",
+                        i + 1
+                    ));
+                }
+                prev_hit.insert(sym, hit);
+            }
+            _ => {
+                return Err(format!(
+                    "checkpoint {}: exactly one of `at_frame` and `at_symbol` is required",
+                    i + 1
+                ));
+            }
         }
-        prev_frame = cp.at_frame;
         for d in cp.delta.values() {
             let dir = d.dir();
             if !matches!(dir, "increased" | "decreased" | "changed" | "unchanged") {
@@ -785,6 +851,7 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
                 seed: power_on_seed(&m),
                 region: region_label(&m),
                 skipped: Some(format!("firmware `{fw}` not installed")),
+                symbol_checkpoints: Vec::new(),
             });
         }
     }
@@ -880,7 +947,47 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
 
     // The whole run's frame horizon: the later of the top-level `frames`
     // bound and the last checkpoint.
-    let last_cp_frame = m.checkpoint.last().map_or(0, |c| c.at_frame);
+    let last_cp_frame = m
+        .checkpoint
+        .iter()
+        .filter_map(|c| c.at_frame)
+        .max()
+        .unwrap_or(0);
+    let by_symbol = m.checkpoint.iter().any(|c| c.at_symbol.is_some());
+    if by_symbol && !matches!(bound, Some(Bound::Frames(_))) {
+        // A routine that is never reached must end the run somewhere.
+        return Err(
+            "`at_symbol` checkpoints need `frames`: the frame the run gives up at when a \
+             routine is not reached"
+                .into(),
+        );
+    }
+    // Resolve every watched routine once (the symbols are loaded by now).
+    let mut watch = SymbolWatch {
+        pcs: Vec::new(),
+        counts: Vec::new(),
+    };
+    let mut cp_pc: Vec<Option<usize>> = Vec::with_capacity(m.checkpoint.len());
+    for cp in &m.checkpoint {
+        cp_pc.push(match &cp.at_symbol {
+            None => None,
+            Some(sym) => {
+                let addr = resolve_key(&em, sym).map_err(|e| format!("at_symbol `{sym}`: {e}"))?;
+                Some(
+                    watch
+                        .pcs
+                        .iter()
+                        .position(|&p| p == addr)
+                        .unwrap_or_else(|| {
+                            watch.pcs.push(addr);
+                            watch.counts.push(0);
+                            watch.pcs.len() - 1
+                        }),
+                )
+            }
+        });
+    }
+    let mut symbol_checkpoints: Vec<SymbolCheckpoint> = Vec::new();
     let final_frame = match bound {
         Some(Bound::Frames(f)) => f.max(last_cp_frame),
         _ => last_cp_frame,
@@ -951,8 +1058,55 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
 
     // Checkpoints in order, then the final bound.
     for (i, cp) in m.checkpoint.iter().enumerate() {
-        drive_to(&mut em, cp.at_frame, &mut spent, &mut script, &mut pooled)?;
-        let label = format!("checkpoint@{}", cp.at_frame);
+        let label = if !by_symbol {
+            // No routine to watch: the frame-bounded driver, as ever.
+            let frame = cp.at_frame.unwrap_or(0);
+            drive_to(&mut em, frame, &mut spent, &mut script, &mut pooled)?;
+            format!("checkpoint@{frame}")
+        } else if let (Some(sym), Some(pc)) = (&cp.at_symbol, cp_pc[i]) {
+            let hit = cp.hit.unwrap_or(1);
+            let reached = drive_watching(
+                &mut em,
+                &mut script,
+                &mut pooled,
+                &mut watch,
+                final_frame,
+                Some((pc, hit)),
+            )?;
+            let frame = em.frame_count().map_err(|e| e.to_string())?;
+            let line = em.beam().map_or(0, |(line, _)| line);
+            symbol_checkpoints.push(SymbolCheckpoint {
+                at_symbol: sym.clone(),
+                hit,
+                reached,
+                frame,
+                line,
+            });
+            if !reached {
+                // Asserting on wherever the run gave up would compare
+                // against a state the manifest never meant.
+                failures.push(format!(
+                    "checkpoint@{sym}#{hit}: not reached by frame {frame} (reached {} time(s))",
+                    watch.counts[pc]
+                ));
+                snapshot_deltas(&mut em, &m.checkpoint, i + 1, &mut delta_prev);
+                continue;
+            }
+            format!("checkpoint@{sym}#{hit} (frame {frame}, line {line})")
+        } else {
+            let frame = cp.at_frame.unwrap_or(0);
+            drive_watching(&mut em, &mut script, &mut pooled, &mut watch, frame, None)?;
+            let now = em.frame_count().map_err(|e| e.to_string())?;
+            if now > frame {
+                failures.push(format!(
+                    "checkpoint@{frame}: frame {frame} was already past (the previous \
+                     checkpoint stopped in frame {now})"
+                ));
+                snapshot_deltas(&mut em, &m.checkpoint, i + 1, &mut delta_prev);
+                continue;
+            }
+            format!("checkpoint@{frame}")
+        };
         for (key, assert) in &cp.values {
             match check_value(&mut em, key, assert) {
                 Ok(None) => {}
@@ -990,6 +1144,16 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
         snapshot_deltas(&mut em, &m.checkpoint, i + 1, &mut delta_prev);
     }
     match bound {
+        Some(Bound::Frames(_)) if by_symbol => {
+            drive_watching(
+                &mut em,
+                &mut script,
+                &mut pooled,
+                &mut watch,
+                final_frame,
+                None,
+            )?;
+        }
         Some(Bound::Frames(_)) | None => {
             drive_to(&mut em, final_frame, &mut spent, &mut script, &mut pooled)?;
         }
@@ -1269,6 +1433,7 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
         seed: power_on_seed(&m),
         region: region_label(&m),
         skipped: None,
+        symbol_checkpoints,
     })
 }
 
@@ -1305,6 +1470,52 @@ fn power_on_seed(m: &Manifest) -> Option<u64> {
 enum Bound {
     Frames(u64),
     Steps(u64),
+}
+
+/// Advance to frame `to_frame` while counting arrivals on the watched
+/// routines (issue #269); with `stop = (pc index, hit)`, end the run the
+/// moment that routine is reached for the `hit`-th time since power-on.
+/// Returns whether it was. Input events fire on their frames either way,
+/// and the per-frame pools are drained as the frame-bounded driver does.
+fn drive_watching(
+    em: &mut luna_api::Emulator,
+    script: &mut luna_api::InputScript,
+    pooled: &mut Pooled,
+    watch: &mut SymbolWatch,
+    to_frame: u64,
+    stop: Option<(usize, u64)>,
+) -> Result<bool, String> {
+    if stop.is_some_and(|(pc, hit)| watch.counts[pc] >= hit) {
+        return Ok(false); // that arrival is behind us
+    }
+    let pcs = watch.pcs.clone();
+    let mut drain_err = None;
+    let reached = em
+        .run_script_watching(
+            script,
+            luna_api::ScriptBound::Frame(to_frame),
+            &pcs,
+            |em, ev| match ev {
+                luna_api::WatchEvent::Pc(i) => {
+                    watch.counts[i] += 1;
+                    stop == Some((i, watch.counts[i]))
+                }
+                luna_api::WatchEvent::Frame => {
+                    if pooled.per_frame()
+                        && let Err(e) = pooled.drain(em)
+                    {
+                        drain_err = Some(e);
+                        return true;
+                    }
+                    false
+                }
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    match drain_err {
+        Some(e) => Err(e),
+        None => Ok(reached),
+    }
 }
 
 /// Record the current values of every delta key of checkpoint `idx`
@@ -1369,7 +1580,9 @@ fn resolve_ports(
     Ok([p1.unwrap_or(PortDevice::Pad), p2.unwrap_or(PortDevice::Pad)])
 }
 
-fn resolve_key(em: &luna_api::Emulator, key: &str) -> Result<u32, String> {
+/// Resolve a manifest key — a loaded symbol, `BANK:OFFSET` in hex, or
+/// either followed by `+N` / `-N` — to a 24-bit address.
+pub(crate) fn resolve_key(em: &luna_api::Emulator, key: &str) -> Result<u32, String> {
     // The key exactly as written first, so a symbol whose name happens to
     // contain `+` or `-` still resolves as itself.
     if let Some(a) = resolve_base(em, key) {
