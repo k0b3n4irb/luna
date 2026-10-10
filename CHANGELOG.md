@@ -19,6 +19,17 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   script. An arrival is now the instruction about to run, not the
   interrupt about to be taken in front of it.
 
+### Changed
+
+- **`luna diff --audio --align-onset` marks a shift that is the search
+  limit.** On a held sound that starts a frame sooner, the best fit
+  within ±64 samples is the edge of the search and the levels still
+  agree: the verdict read `max 64 samples (searched ±64): MATCH`, a
+  number that is the limit and not the shift. Such a window now prints
+  `shift=-64 (limit)`, the verdict line adds `at the search limit —
+  widen --max-shift`, and the JSON report carries `shift_at_limit`. The
+  verdict itself is unchanged.
+
 ## [1.38.0] — 2026-10-10
 
 Two tools asked for by the first game ported with luna: assert what is

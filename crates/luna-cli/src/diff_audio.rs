@@ -92,6 +92,9 @@ struct Report<'a> {
     /// The shift of largest magnitude a window kept (`null` without
     /// `--align-onset`).
     largest_shift: Option<i64>,
+    /// `true` when a window kept a shift equal to the limit: the search
+    /// stopped at its edge, and the real shift may be larger.
+    shift_at_limit: bool,
     /// `true` when one capture is a whole window or more shorter than the
     /// other — a DIFF whatever the windows say.
     length_mismatch: bool,
@@ -126,6 +129,13 @@ fn onset(samples: &[(i16, i16)], silence: u16) -> Option<usize> {
 
 /// A run of stereo samples.
 type Capture<'s> = &'s [(i16, i16)];
+
+/// Whether a window's best fit sits on the edge of the search: the shift
+/// printed is then the limit, not a measurement (`OpenSNES` 2026-10-10: a
+/// held sound one frame early read "max 64 samples" at `±64`).
+fn at_limit(shift: Option<i64>, limit: usize) -> bool {
+    limit > 0 && shift.is_some_and(|s| s.unsigned_abs() == limit as u64)
+}
 
 /// Sum of absolute differences between two runs of equal length.
 fn distance(a: Capture<'_>, b: Capture<'_>) -> u64 {
@@ -289,9 +299,14 @@ pub(crate) fn run_audio_diff(
     let shift_limit = o.align_onset.then_some(o.max_shift);
     let windows = compare(&a, &b, window, o.silence, shift_limit);
     for w in &windows {
-        let shift = w
-            .shift
-            .map_or_else(String::new, |s| format!(" shift={s:+}"));
+        let shift = w.shift.map_or_else(String::new, |s| {
+            let edge = if at_limit(w.shift, o.max_shift) {
+                " (limit)"
+            } else {
+                ""
+            };
+            format!(" shift={s:+}{edge}")
+        });
         println!(
             "window {:>6} ms: a={:>9.2} b={:>9.2} delta={:.2}%{shift}",
             w.start_ms, w.rms_a, w.rms_b, w.delta_pct
@@ -326,11 +341,19 @@ pub(crate) fn run_audio_diff(
         .max_by_key(|s| s.unsigned_abs());
     // The method is on the verdict line: a line quoted from before this
     // search existed ("onset shift") cannot be taken for one from after.
+    // A fit on the edge of the search is not a measured shift: say so,
+    // on the line that gets quoted.
+    let shift_at_limit = windows.iter().any(|w| at_limit(w.shift, o.max_shift));
     let shift = largest_shift.map_or_else(String::new, |s| {
         format!(
-            ", per-window shift, max {} samples (searched ±{})",
+            ", per-window shift, max {} samples (searched ±{}){}",
             s.unsigned_abs(),
-            o.max_shift
+            o.max_shift,
+            if shift_at_limit {
+                ", at the search limit — widen --max-shift"
+            } else {
+                ""
+            }
         )
     });
     println!(
@@ -356,6 +379,7 @@ pub(crate) fn run_audio_diff(
             align_onset: o.align_onset,
             shift_limit,
             largest_shift,
+            shift_at_limit,
             length_mismatch,
             windows,
             max_delta_pct,
@@ -522,5 +546,29 @@ mod tests {
         // The other way round the shift is forward.
         let late = compare(&b, &a, 16_000, 64, Some(600));
         assert_eq!(late[0].shift, Some(536));
+    }
+
+    #[test]
+    fn a_fit_on_the_edge_of_the_search_is_flagged() {
+        // A slow ramp, 536 samples early in B: within 64 samples the best
+        // fit is the edge itself, and the levels are close enough to
+        // pass. The shift printed is the limit, not the shift.
+        let ramp = |lead: usize| -> Vec<(i16, i16)> {
+            (0..48_100usize)
+                .map(|i| {
+                    let v = (i.saturating_sub(lead) / 4).min(8000) as i16;
+                    (v, v)
+                })
+                .collect()
+        };
+        let (a, b) = (ramp(1000), ramp(1000 - 536));
+        let near = compare(&a, &b, 16_000, 64, Some(64));
+        assert_eq!(near[0].shift, Some(-64));
+        assert!(near.iter().any(|w| at_limit(w.shift, 64)), "{near:?}");
+        let far = compare(&a, &b, 16_000, 64, Some(1200));
+        assert_eq!(far[0].shift, Some(-536));
+        assert!(!far.iter().any(|w| at_limit(w.shift, 1200)), "{far:?}");
+        // No shift searched, or none kept at a zero limit: nothing to flag.
+        assert!(!at_limit(None, 64) && !at_limit(Some(0), 0));
     }
 }

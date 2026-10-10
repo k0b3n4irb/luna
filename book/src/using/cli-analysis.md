@@ -133,7 +133,7 @@ same exit codes as above.
 | `--max-shift <N>` | `64` | With `--align-onset`: how far a window may be moved, in samples (a frame is 534). Shorter than a window. |
 | `--tolerance-pct <P>` | `2` | Largest difference a window may show, in percent of the louder of the two levels. |
 | `--silence <LEVEL>` | `64` | Sample level counted as silence (of 32767): the threshold of the reported onset, and the floor differences are measured against, so two near-silent windows are not a 100 % difference over one LSB. |
-| `--input`, `--out`, `--force-mapper`, `--force-region`, `--power-on` | — | As for the frame comparison. The JSON report is `{a, b, until_frame, window_ms, tolerance_pct, silence, samples_a, samples_b, onset_a, onset_b, align_onset, shift_limit, largest_shift, length_mismatch, windows: [{start_ms, rms_a, rms_b, delta_pct, shift}], max_delta_pct, status}`. |
+| `--input`, `--out`, `--force-mapper`, `--force-region`, `--power-on` | — | As for the frame comparison. The JSON report is `{a, b, until_frame, window_ms, tolerance_pct, silence, samples_a, samples_b, onset_a, onset_b, align_onset, shift_limit, largest_shift, shift_at_limit, length_mismatch, windows: [{start_ms, rms_a, rms_b, delta_pct, shift}], max_delta_pct, status}`. |
 
 ```bash
 # Two builds of a music player; the second adds two instructions to its init.
@@ -178,8 +178,20 @@ none. Before sample 0 the machine was not running, and is read as
 silence.
 
 The default reach of 64 samples is deliberate: a sound that starts a
-whole frame sooner (534 samples) stays a `DIFF`, because that is a fact
-to explain, not noise. When it is explained, `--max-shift 534` names it.
+whole frame sooner (534 samples) is a fact to explain, not noise. On a
+sound with attacks it stays a `DIFF`. On a held sound it may still
+`MATCH`, because the levels agree at any shift: the best fit is then the
+edge of the search, and the shift printed is the limit, not a
+measurement. That case is marked, per window (`shift=-64 (limit)`) and on
+the verdict line:
+
+```
+9 window(s) of 500 ms, max delta 0.56% (tolerance 2%), per-window shift, max 64 samples (searched ±64), at the search limit — widen --max-shift: MATCH
+```
+
+Widen the search until the mark goes (`--max-shift 1200` reads `-534`
+here): the number is then the shift. The JSON report says the same with
+`shift_at_limit`.
 
 > Until 1.36.0 `--align-onset` cut both captures at their first sample
 > above `--silence` and printed `onset shift N samples`: one shift for

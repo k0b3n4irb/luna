@@ -219,6 +219,7 @@ fn audio_align_onset_compares_two_silences_whole() {
     assert!(stdout.contains("\"align_onset\": true"), "{stdout}");
     assert!(stdout.contains("\"shift_limit\": 64"), "{stdout}");
     assert!(stdout.contains("\"largest_shift\": 0"), "{stdout}");
+    assert!(stdout.contains("\"shift_at_limit\": false"), "{stdout}");
 }
 
 /// `luna diff --sequence`: the counter ROM shows a new picture every
