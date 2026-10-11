@@ -465,25 +465,26 @@ enum Command {
         /// puts the game in a state it does not reach by itself, with no
         /// test code in the ROM. A `--peek-at` on the same routine reads
         /// the bytes written. Example: `--poke-at tickStart --poke-hit 91
-        /// --poke ball_x=4001 --poke ball_y=3000`.
+        /// --poke ball_x=4001 --poke ball_y=3000`. Repeatable: each
+        /// `--poke-at` takes the `--poke-hit` and the `--poke`s that
+        /// follow it, up to the next one.
         #[arg(
             long = "poke-at",
             requires = "poke",
             conflicts_with_all = ["cpu_trace_from", "mem_trace_from", "dma_trace_from", "superfx_trace_from"]
         )]
-        poke_at: Option<String>,
+        poke_at: Vec<String>,
         /// With `--poke-at`: the arrival the bytes are written at
-        /// (default 1, the first).
+        /// (default 1, the first). One per `--poke-at`.
         #[arg(
             long = "poke-hit",
-            default_value_t = 1,
             requires = "poke_at",
             value_parser = clap::value_parser!(u64).range(1..)
         )]
-        poke_hit: u64,
-        /// Bytes to write at `--poke-at`: `NAME=HEX` or `BANK:OFFSET=HEX`,
-        /// the `--assert` grammar — hex bytes in memory order, so a 16-bit
-        /// `$0140` is `4001`. Repeatable.
+        poke_hit: Vec<u64>,
+        /// Bytes to write at the `--poke-at` before it: `NAME=HEX` or
+        /// `BANK:OFFSET=HEX`, the `--assert` grammar — hex bytes in memory
+        /// order, so a 16-bit `$0140` is `4001`. Repeatable.
         #[arg(long = "poke", requires = "poke_at")]
         poke: Vec<String>,
         /// Index every input script (`--input` … `--input5`, `--mouse`,
@@ -1159,8 +1160,38 @@ enum Command {
     },
 }
 
+/// The values of one option of `luna state`, each with its place on the
+/// command line.
+fn indexed<T: Clone + Send + Sync + 'static>(
+    matches: &clap::ArgMatches,
+    id: &str,
+) -> Vec<(usize, T)> {
+    let Some(sub) = matches.subcommand_matches("state") else {
+        return Vec::new();
+    };
+    match (sub.indices_of(id), sub.get_many::<T>(id)) {
+        (Some(indices), Some(values)) => indices.zip(values.cloned()).collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    use clap::{CommandFactory, FromArgMatches};
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    // `--poke-at` is repeatable and owns the flags that follow it: only
+    // the argument indices say which.
+    let poke_groups = match state::PokeGroup::group(
+        &indexed::<String>(&matches, "poke_at"),
+        &indexed::<u64>(&matches, "poke_hit"),
+        &indexed::<String>(&matches, "poke"),
+    ) {
+        Ok(groups) => groups,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
     match cli.command {
         Command::Run {
             rom,
@@ -1251,9 +1282,9 @@ fn main() -> ExitCode {
             peek_at,
             peek_at_out,
             input_at,
-            poke_at,
-            poke_hit,
-            poke,
+            poke_at: _,
+            poke_hit: _,
+            poke: _,
             srm_in,
             srm_out,
             apu_log,
@@ -1378,11 +1409,7 @@ fn main() -> ExitCode {
                 peek_at.as_deref(),
                 peek_at_out.as_deref(),
                 input_at.as_deref(),
-                &state::PokeFlags {
-                    at: poke_at.as_deref(),
-                    hit: poke_hit,
-                    pokes: &poke,
-                },
+                &poke_groups,
             )
         }
         Command::Frames {

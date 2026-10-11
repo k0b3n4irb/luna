@@ -7,6 +7,17 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+### Added
+
+- **`luna state --poke-at` is repeatable.** A state that takes two
+  writes at two moments (a flag set at `main`, a position set ninety
+  ticks later) needed two runs or test code in the ROM. Each `--poke-at`
+  now takes the `--poke-hit` and the `--poke`s that follow it, up to the
+  next one: `--poke-at main --poke skip_intro=01 --poke-at tick
+  --poke-hit 91 --poke ball_x=4001`. The JSON report gains `pokes`, one
+  entry per `--poke-at`; `poke` stays, and is the first of them. A
+  command line with one `--poke-at` reads as before, in any order.
+
 ## [1.38.1] — 2026-10-11
 
 A count of arrivals that could be one ahead is corrected (the defect

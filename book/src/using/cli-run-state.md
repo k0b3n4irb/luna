@@ -129,7 +129,7 @@ and is the hub for every headless diagnostic.
 | `--hit <N>` | `1` | With `--until-pc`: stop the `N`-th time execution reaches it. |
 | `--peek-at <SYMBOL>` | — | Read every `--peek` **each time** execution reaches this routine, one line per arrival with its frame and scanline. The run length stays `-n` / `--until-frame` / `--until-pc`. |
 | `--peek-at-out <PATH>` | — | Write the `--peek-at` rows as CSV (`hit,frame,line`, then one column of hex bytes per `--peek`) instead of printing them. |
-| `--poke-at <SYMBOL>`, `--poke-hit <N>`, `--poke <NAME=HEX>` | —, `1`, — | Write bytes into memory at the `N`-th arrival on a routine, just before its first instruction: puts the game in a state it does not reach by itself. See *Stopping on a routine* below. |
+| `--poke-at <SYMBOL>`, `--poke-hit <N>`, `--poke <NAME=HEX>` | —, `1`, — | Write bytes into memory at the `N`-th arrival on a routine, just before its first instruction: puts the game in a state it does not reach by itself. Repeatable: each `--poke-at` takes the `--poke-hit` and `--poke`s that follow it. See *Stopping on a routine* below. |
 | `--input-at <SYMBOL>` | — | Index the input scripts by arrivals on this routine instead of by frame, so the presses land in the same game ticks whatever the speed of the code ([input scripts](input-scripts.md#a-script-clocked-by-the-game-not-by-the-frame)). |
 | `--schema` | off | Print the JSON Schema of the `--out` payload ([the state JSON](state-json.md)) and exit — no ROM needed. |
 | `--out <PATH>` | `-` | Where to write the JSON (`-` = stdout). |
@@ -311,6 +311,21 @@ luna state --poke-at tick --poke-hit 2 --poke half_a=10 \
 # poked 1 value(s) at tick hit 2 — frame 2, line 260
 #   $7E0010  11 02
 ```
+
+`--poke-at` may be given several times, for a state that takes two
+writes at two moments — a flag set when the program starts, a position
+set ninety ticks later. Each `--poke-at` takes the `--poke-hit` and the
+`--poke`s that follow it, up to the next `--poke-at`:
+
+```bash
+luna state --poke-at main --poke skip_intro=01 \
+  --poke-at tick --poke-hit 91 --poke ball_x=4001 --poke ball_y=3000 \
+  --until-pc tick_end --hit 91 --out /dev/null game.sfc
+```
+
+With several `--poke-at`, a `--poke` in front of the first one, a
+`--poke-at` with no `--poke` after it and two `--poke-hit` for the same
+one are refused (exit 2).
 
 An arrival the run never reaches writes nothing, and that is an error
 (exit 1).

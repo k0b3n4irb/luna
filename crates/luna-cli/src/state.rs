@@ -86,9 +86,15 @@ struct StateOut<'a> {
     /// the option).
     #[serde(skip_serializing_if = "Option::is_none")]
     peek_hits: Option<&'a [PeekHit]>,
-    /// Whether the `--poke`s were written (absent without `--poke-at`).
+    /// The first `--poke-at` and whether its bytes were written (absent
+    /// without the option). Kept for scripts written when the option
+    /// could be given once; `pokes` carries every one.
     #[serde(skip_serializing_if = "Option::is_none")]
     poke: Option<&'a PokeAt>,
+    /// One entry per `--poke-at`, in command-line order (absent without
+    /// the option).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pokes: Option<&'a [PokeAt]>,
 }
 
 /// The `--poke`s to write at one arrival on `--poke-at`.
@@ -157,14 +163,69 @@ struct Watch {
     /// `--peek-at`: its spec and address.
     peek_at: Option<(String, u32)>,
     hits: Vec<PeekHit>,
-    poke: Option<PokeAt>,
+    /// One per `--poke-at`.
+    pokes: Vec<PokeAt>,
 }
 
-/// The `--poke-at` / `--poke-hit` / `--poke` flags.
-pub(crate) struct PokeFlags<'a> {
-    pub at: Option<&'a str>,
+/// One `--poke-at` with the `--poke-hit` and `--poke`s that follow it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PokeGroup {
+    pub at: String,
     pub hit: u64,
-    pub pokes: &'a [String],
+    pub pokes: Vec<String>,
+}
+
+impl PokeGroup {
+    /// Group the three flags by their place on the command line: each
+    /// value comes with its argument index, and a `--poke-hit` or a
+    /// `--poke` belongs to the nearest `--poke-at` before it. With a
+    /// single `--poke-at` the order is free, as when it could be given
+    /// only once.
+    pub(crate) fn group(
+        ats: &[(usize, String)],
+        hits: &[(usize, u64)],
+        pokes: &[(usize, String)],
+    ) -> Result<Vec<Self>, String> {
+        let mut groups: Vec<(Self, bool)> = ats
+            .iter()
+            .map(|(_, at)| {
+                let group = Self {
+                    at: at.clone(),
+                    hit: 1,
+                    pokes: Vec::new(),
+                };
+                (group, false)
+            })
+            .collect();
+        let owner = |index: usize, flag: &str| -> Result<usize, String> {
+            if ats.len() == 1 {
+                return Ok(0);
+            }
+            ats.iter().rposition(|(at, _)| *at < index).ok_or_else(|| {
+                format!("{flag} comes before the first --poke-at: with several --poke-at, each one takes the {flag} that follow it")
+            })
+        };
+        for &(index, hit) in hits {
+            let (group, has_hit) = &mut groups[owner(index, "--poke-hit")?];
+            if std::mem::replace(has_hit, true) {
+                return Err(format!("--poke-at {}: two --poke-hit", group.at));
+            }
+            group.hit = hit;
+        }
+        for (index, poke) in pokes {
+            groups[owner(*index, "--poke")?].0.pokes.push(poke.clone());
+        }
+        groups
+            .into_iter()
+            .map(|(group, _)| {
+                if group.pokes.is_empty() {
+                    Err(format!("--poke-at {}: no --poke follows it", group.at))
+                } else {
+                    Ok(group)
+                }
+            })
+            .collect()
+    }
 }
 
 impl Watch {
@@ -176,7 +237,7 @@ impl Watch {
         hit: u64,
         peek_at: Option<&str>,
         clocked_input: bool,
-        poke: &PokeFlags<'_>,
+        poke: &[PokeGroup],
     ) -> Result<Option<Self>, String> {
         let addr = |opt: &str, spec: &str| {
             crate::test_cmd::resolve_key(em, spec).map_err(|e| format!("{opt} `{spec}`: {e}"))
@@ -197,10 +258,11 @@ impl Watch {
         let peek_at = peek_at
             .map(|spec| addr("--peek-at", spec).map(|a| (spec.to_string(), a)))
             .transpose()?;
-        let poke = poke
-            .at
-            .map(|spec| -> Result<PokeAt, String> {
-                let writes = poke
+        let pokes = poke
+            .iter()
+            .map(|group| -> Result<PokeAt, String> {
+                let spec = group.at.as_str();
+                let writes = group
                     .pokes
                     .iter()
                     .map(|p| {
@@ -217,19 +279,19 @@ impl Watch {
                 Ok(PokeAt {
                     spec: spec.to_string(),
                     addr: addr("--poke-at", spec)?,
-                    hit: poke.hit,
+                    hit: group.hit,
                     hits_seen: 0,
                     applied: false,
                     writes,
                 })
             })
-            .transpose()?;
+            .collect::<Result<Vec<_>, String>>()?;
         let mut pcs: Vec<u32> = Vec::new();
         for pc in until
             .iter()
             .map(|u| u.addr)
             .chain(peek_at.iter().map(|p| p.1))
-            .chain(poke.iter().map(|p| p.addr))
+            .chain(pokes.iter().map(|p| p.addr))
         {
             if !pcs.contains(&pc) {
                 pcs.push(pc);
@@ -242,7 +304,7 @@ impl Watch {
             until,
             peek_at,
             hits: Vec::new(),
-            poke,
+            pokes,
         }))
     }
 
@@ -252,7 +314,7 @@ impl Watch {
         let frame = em.frame_count().unwrap_or(0);
         let line = em.beam().map_or(0, |(line, _)| line);
         // Writes first: a `--peek-at` on the same routine reads them.
-        if let Some(p) = self.poke.as_mut().filter(|p| p.addr == addr) {
+        for p in self.pokes.iter_mut().filter(|p| p.addr == addr) {
             p.hits_seen += 1;
             if p.hits_seen == p.hit {
                 for (at, bytes) in &p.writes {
@@ -391,7 +453,7 @@ pub(crate) fn run_state(
     peek_at: Option<&str>,
     peek_at_out: Option<&std::path::Path>,
     input_at: Option<&str>,
-    poke: &PokeFlags<'_>,
+    poke: &[PokeGroup],
 ) -> ExitCode {
     let mut em = luna_api::Emulator::new();
     if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, dsp1_rom, power_on) {
@@ -790,7 +852,7 @@ pub(crate) fn run_state(
                 step_failed = true;
             }
         }
-        if let Some(p) = w.poke.as_ref().filter(|p| !p.applied) {
+        for p in w.pokes.iter().filter(|p| !p.applied) {
             eprintln!(
                 "error: --poke-at {}: hit {} not reached by frame {end_frame} (reached {} \
                  time(s)); nothing was written",
@@ -1225,7 +1287,11 @@ pub(crate) fn run_state(
             .as_ref()
             .filter(|w| w.peek_at.is_some())
             .map(|w| w.hits.as_slice()),
-        poke: watch.as_ref().and_then(|w| w.poke.as_ref()),
+        poke: watch.as_ref().and_then(|w| w.pokes.first()),
+        pokes: watch
+            .as_ref()
+            .filter(|w| !w.pokes.is_empty())
+            .map(|w| w.pokes.as_slice()),
     }) {
         Ok(s) => s,
         Err(e) => {

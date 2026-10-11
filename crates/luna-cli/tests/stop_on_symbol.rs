@@ -777,12 +777,79 @@ fn a_poke_on_arrival_puts_the_game_in_a_state_it_does_not_reach() {
         "{}",
         text(&out)
     );
-    // Malformed: no value, an unknown name, a poke with no routine.
+    // Two routines in one run: each `--poke-at` takes the flags that
+    // follow it. `half_b` is written at the first `tick_end` (hit 1 by
+    // default) and counted once more by the second tick: $41.
+    let out = luna(
+        "state",
+        &rom,
+        &[
+            "--poke-at",
+            "tick",
+            "--poke-hit",
+            "2",
+            "--poke",
+            "half_a=10",
+            "--poke-at",
+            "tick_end",
+            "--poke",
+            "half_b=40",
+            "--until-pc",
+            "tick_end",
+            "--hit",
+            "2",
+            "--peek",
+            "half_a:2",
+            "--out",
+            "-",
+        ],
+    );
+    assert!(out.status.success(), "{}", text(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["peeks"][0]["bytes_hex"], "1141", "{v:#}");
+    assert_eq!(v["pokes"][0]["spec"], "tick");
+    assert_eq!(v["pokes"][0]["hit"], 2);
+    assert_eq!(v["pokes"][1]["spec"], "tick_end");
+    assert_eq!(v["pokes"][1]["hit"], 1);
+    assert_eq!(v["pokes"][1]["applied"], true);
+    assert_eq!(v["poke"]["spec"], "tick");
+
+    // Malformed: no value, an unknown name, a poke with no routine; with
+    // two routines, a value in front of the first, a routine with no
+    // value, two arrivals for one routine.
     for args in [
         &["--poke-at", "tick", "--poke", "half_a"][..],
         &["--poke-at", "tick", "--poke", "nowhere=10"],
         &["--poke", "half_a=10"],
         &["--poke-at", "tick"],
+        &[
+            "--poke",
+            "half_a=10",
+            "--poke-at",
+            "tick",
+            "--poke-at",
+            "tick_end",
+            "--poke",
+            "half_b=40",
+        ],
+        &[
+            "--poke-at",
+            "tick",
+            "--poke-at",
+            "tick_end",
+            "--poke",
+            "half_b=40",
+        ],
+        &[
+            "--poke-at",
+            "tick",
+            "--poke-hit",
+            "2",
+            "--poke-hit",
+            "3",
+            "--poke",
+            "half_a=10",
+        ],
     ] {
         assert_eq!(luna("state", &rom, args).status.code(), Some(2), "{args:?}");
     }
