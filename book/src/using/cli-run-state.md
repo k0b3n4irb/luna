@@ -594,3 +594,16 @@ luna state game.sfc --until-frame 600 --peek-at tickEnd --peek VRAM:7340:6
 
 In the JSON the entry's `space` is `vram` and its `addr` the word
 address.
+
+**The palette by colour index.** `--peek CGRAM:COLOR:COUNT` reads the
+PPU's palette: `COUNT` bytes starting at the colour `COLOR` (hex, as
+`CGADD` `$2121` takes it), two bytes per colour, low byte first. Where
+`--assert-cgram` compares, this one shows:
+
+```bash
+# The sixteen colours of palette 1 (colours $10-$1F), 32 bytes.
+luna state game.sfc --until-frame 600 --peek CGRAM:10:#32
+```
+
+The read stops at colour `$FF`. In the JSON the entry's `space` is
+`cgram` and its `addr` the colour index.

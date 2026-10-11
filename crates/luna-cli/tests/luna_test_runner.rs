@@ -1417,6 +1417,50 @@ V3_PH = 0            # $33
     );
 }
 
+/// `luna state --peek CGRAM:COLOR:COUNT` reads the palette from a colour
+/// index, low byte first, and stops at the last colour.
+#[test]
+fn state_peeks_the_palette_from_a_colour_index() {
+    let dir = fresh_dir("cgram_peek");
+    synthetic_rom(
+        &dir.join("game.sfc"),
+        &[
+            0xA9, 0x80, 0x8D, 0x00, 0x21, // 8000 LDA #$80 : STA $2100  forced blank
+            0xA9, 0x11, 0x8D, 0x21, 0x21, // 8005 LDA #$11 : STA $2121  CGADD = $11
+            0xA9, 0xE0, 0x8D, 0x22, 0x21, // 800A LDA #$E0 : STA $2122
+            0xA9, 0x03, 0x8D, 0x22, 0x21, // 800F LDA #$03 : STA $2122  colour $03E0
+            0x80, 0xFE, // 8014 BRA $8014
+        ],
+    );
+    let out = Command::new(luna_bin())
+        .args([
+            "state",
+            "game.sfc",
+            "--force-mapper",
+            "lorom",
+            "--until-frame",
+            "3",
+            "--peek",
+            "CGRAM:10:4",
+            "--peek",
+            "cgram:FF:#8",
+            "--peek",
+            "CGRAM:100:2",
+            "--out",
+            "-",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("run luna state");
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let peek = &json["peeks"][0];
+    assert_eq!(peek["bytes_hex"], "0000e003", "{peek}");
+    assert_eq!(peek["space"], "cgram", "{peek}");
+    assert_eq!(peek["addr"], 0x10, "{peek}");
+    assert_eq!(json["peeks"][1]["bytes_hex"], "0000", "{json:#}");
+    assert!(json["peeks"][2]["error"].is_string(), "{json:#}");
+}
+
 /// A program that writes the tilemap word `$3415` at VRAM word `$7340`,
 /// then counts in `$10` for ever from `$801E`.
 fn vram_word_rom(path: &Path) {

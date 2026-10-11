@@ -1438,6 +1438,35 @@ fn read_peeks(em: &mut luna_api::Emulator, peek_specs: &[String], verbose: bool)
             }
             continue;
         }
+        // `CGRAM:COLOR:COUNT` reads the palette, from a colour index; the
+        // read stops at the last colour.
+        if let Some(cgram) = crate::parsers::parse_cgram_peek_spec(spec) {
+            match cgram.and_then(|(color, count)| {
+                em.peek_cgram()
+                    .map(|colors| {
+                        let bytes: Vec<u8> = colors[usize::from(color)..]
+                            .iter()
+                            .flat_map(|c| c.to_le_bytes())
+                            .take(count as usize)
+                            .collect();
+                        (color, bytes)
+                    })
+                    .map_err(|e| e.to_string())
+            }) {
+                Ok((color, bytes)) => {
+                    say!("peek CGRAM:{:02X} +{:04X}:", color, bytes.len());
+                    if verbose {
+                        print_hex_dump(0, u16::from(color) * 2, &bytes);
+                    }
+                    peek_outs.push(PeekOut::ok(spec, "cgram", u32::from(color), &bytes));
+                }
+                Err(e) => {
+                    say!("error: --peek `{spec}`: {e}");
+                    peek_outs.push(PeekOut::err(spec, "cgram", e));
+                }
+            }
+            continue;
+        }
         // Numeric `BANK:OFFSET:COUNT` first; else a WLA-DX label
         // `NAME[:COUNT]` resolved through the loaded .sym table (#77).
         let target = match parse_peek_spec(spec) {

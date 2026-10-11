@@ -17,6 +17,11 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   --poke-hit 91 --poke ball_x=4001`. The JSON report gains `pokes`, one
   entry per `--poke-at`; `poke` stays, and is the first of them. A
   command line with one `--poke-at` reads as before, in any order.
+- **`--peek CGRAM:COLOR:COUNT`.** `luna state` reads the palette as it
+  reads VRAM: `COUNT` bytes from a colour index (as `CGADD` takes it),
+  two bytes per colour, low byte first — `--peek CGRAM:10:#32` is
+  palette 1. `--assert-cgram` compared; nothing showed. With `--peek-at`
+  it samples the palette at every arrival on a routine.
 
 ## [1.38.1] — 2026-10-11
 

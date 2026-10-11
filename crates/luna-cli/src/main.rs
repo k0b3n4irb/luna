@@ -392,6 +392,9 @@ enum Command {
         /// `APU:OFFSET:COUNT` reads the SPC700's RAM, and `VRAM:WORD:COUNT`
         /// reads `COUNT` bytes of PPU VRAM from a **word** address (as
         /// `VMADD` takes it): `--peek VRAM:7340:6` is three tilemap entries.
+        /// `CGRAM:COLOR:COUNT` reads `COUNT` bytes of the palette from a
+        /// colour index (as `CGADD` takes it): `--peek CGRAM:10:#32` is
+        /// the sixteen colours of palette 1.
         #[arg(long = "peek")]
         peek: Vec<String>,
         /// Assert memory equals expected bytes after warm-up. Format:

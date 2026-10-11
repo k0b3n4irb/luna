@@ -304,6 +304,35 @@ pub(crate) fn parse_vram_peek_spec(spec: &str) -> Option<Result<(u16, u32), Stri
     })
 }
 
+/// A `--peek CGRAM:COLOR:COUNT` spec: `COUNT` **bytes** (same forms as
+/// any `--peek` count) from the colour index `COLOR` in hex, as `CGADD`
+/// (`$2121`) takes it, low byte first. `None` when the spec is not
+/// CGRAM-prefixed.
+pub(crate) fn parse_cgram_peek_spec(spec: &str) -> Option<Result<(u8, u32), String>> {
+    let spec = spec.trim();
+    let rest = spec
+        .strip_prefix("CGRAM:")
+        .or_else(|| spec.strip_prefix("cgram:"))?;
+    let Some((at, count_s)) = rest.rsplit_once(':') else {
+        return Some(Err(format!(
+            "expected CGRAM:COLOR:COUNT (colour index in hex, count in bytes), got `{spec}`"
+        )));
+    };
+    let digits = at.trim().trim_start_matches("0x").trim_start_matches('$');
+    let color = match u8::from_str_radix(digits, 16) {
+        Ok(color) => color,
+        Err(e) => {
+            return Some(Err(format!(
+                "bad colour index `{at}` (CGRAM holds colours $00-$FF): {e}"
+            )));
+        }
+    };
+    Some(match parse_peek_count(count_s) {
+        Ok(count) => Ok((color, u32::from(count))),
+        Err(e) => Err(format!("bad count `{count_s}`: {e}")),
+    })
+}
+
 // =============================================================================
 // Controller flags → port devices + one event stream
 //
