@@ -333,6 +333,29 @@ pub(crate) fn parse_cgram_peek_spec(spec: &str) -> Option<Result<(u8, u32), Stri
     })
 }
 
+/// A `--screenshot-frames` range: `A..B` (every frame from `A` to `B`,
+/// both included) or `A..B/K` (one frame in `K`, starting at `A`), as
+/// `(first, last, step)`.
+pub(crate) fn parse_frame_range(spec: &str) -> Result<(u64, u64, u64), String> {
+    let form = || format!("expected A..B or A..B/K (frame numbers), got `{spec}`");
+    let (range, step) = match spec.trim().split_once('/') {
+        Some((range, step)) => (range, step.trim().parse::<u64>().map_err(|_| form())?),
+        None => (spec.trim(), 1),
+    };
+    let (first, last) = range.split_once("..").ok_or_else(form)?;
+    let first = first.trim().parse::<u64>().map_err(|_| form())?;
+    let last = last.trim().parse::<u64>().map_err(|_| form())?;
+    if step == 0 {
+        return Err(format!("`{spec}`: the step counts from 1"));
+    }
+    if first == 0 || last < first {
+        return Err(format!(
+            "`{spec}`: frames count from 1, and the range ends at or after its start"
+        ));
+    }
+    Ok((first, last, step))
+}
+
 // =============================================================================
 // Controller flags → port devices + one event stream
 //

@@ -30,6 +30,7 @@ means that transport has no form of it.
 | the picture behind a forced blank | `--force-display` | `screenshot {force_display}` | [`luna run`](using/cli-run-state.md#luna-run--quick-render--audio-dump) |
 | the true 512-wide hi-res frame | `--native-res` | `set_native_capture`, `screenshot {native}` | [`luna run`](using/cli-run-state.md#luna-run--quick-render--audio-dump) |
 | a hash of the frame, to compare runs | `--print-fbhash` | `frame_hash` | [`luna run`](using/cli-run-state.md#luna-run--quick-render--audio-dump) |
+| a picture per frame over a range, in one run | `luna state --until-frame B --screenshot-frames A..B/K --screenshot-dir DIR` | `step_until_frame`, `screenshot` | [A picture per frame](using/cli-run-state.md#a-picture-per-frame-in-one-run) |
 | consecutive frames, to catch a flicker | `luna frames --from-frame N -c K` | — | [`luna frames`](using/cli-analysis.md#luna-frames--consecutive-frame-capture-temporal-artefacts) |
 | the tiles, tilemaps, palette and sprites as PNGs | `luna assets-dump` | `render_vram_tiles`, `render_tilemap`, `render_palette`, `render_sprite_sheet` | [`luna assets-dump`](using/cli-analysis.md#luna-assets-dump--export-the-loaded-graphics-as-pngs) |
 | the sprites as data, not pixels | `oam.json` from `luna assets-dump` | `decode_sprites`, `peek_oam` | [MCP catalogue](using/mcp.md#mcp-tool-catalogue) |

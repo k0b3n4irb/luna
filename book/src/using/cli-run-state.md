@@ -148,6 +148,7 @@ and is the hub for every headless diagnostic.
 | `--srm-in <PATH>` | — | Load battery SRAM from a `.srm` file before running — the second half of a power-cycle test. See *Asserting on memory* below. |
 | `--srm-out <PATH>` | — | Write battery SRAM to a `.srm` file after the run (an empty file on a cartridge with no battery). |
 | `--screenshot <PATH>` | — | Also write a PNG. |
+| `--screenshot-frames <A..B[/K]>`, `--screenshot-dir <DIR>` | — | One PNG per frame of a range, in this one run: `frame_NNNNNN.png` in `DIR`. Repeatable. Needs `--until-frame`. See *A picture per frame, in one run* below. |
 | `--audio-out <PATH>` | — | Also write a 32 kHz stereo WAV. |
 | `--peek <B:O:C>` | — | Hex-dump `COUNT` bytes at `BANK:OFFSET` to stderr (repeatable; **all three fields are hex** — `7E:0200:20` is 32 bytes; a count can say its base, `:0x20` hex or `:#32` decimal). With a label, `NAME[:COUNT]`. The whole 24-bit space is readable: WRAM, ROM (including `$C0-$FF` HiROM banks), SRAM, coprocessor RAM; the `$2000-$5FFF` register band reads `0` (no side effects), except the DMA channel registers `$4300-$437F`, which read their real values (`$FF` at power-on). An unmapped range reads `$FF` like the open bus, with a stderr note and an `unmapped` count in the JSON entry. Each result is mirrored into the `--out` JSON `peeks` array (see [the state JSON](state-json.md)) — the machine-readable channel a harness should parse. |
 | `--assert <SPEC>` | — | After the run, check that memory holds the expected bytes: `BANK:OFFSET=HEX` (all hex) or `SYMBOL=HEX` through the loaded `.sym`. Prints `PASS` / `FAIL` per spec; any `FAIL` makes the exit code `1`. Repeatable. See *Asserting on memory* below. |
@@ -247,6 +248,33 @@ luna state --until-frame 120 \
 
 With a symbol file loaded (`--sym`, or a `<rom>.sym` beside the ROM) the
 CPU-bus form takes a label instead of an address: `--assert r_done=EFBE`.
+
+### A picture per frame, in one run
+
+Looking for one picture among many — the frame a replay shows again, the
+first frame of a transition — took one `--until-frame N --screenshot`
+per frame, each run starting over from power-on with its input script.
+`--screenshot-frames` writes them all as the run crosses them:
+
+```bash
+# One frame in 2 from 1090 to 1150, one in 3 from 1440 to 1560.
+luna state --until-frame 1560 --input "600:0x1000,610:0" \
+  --screenshot-frames 1090..1150/2 --screenshot-frames 1440..1560/3 \
+  --screenshot-dir shots --out /dev/null game.sfc
+# 72 screenshot(s) written to shots
+```
+
+`A..B` is every frame from `A` to `B`, both included; `A..B/K` is `A`,
+`A+K`, `A+2K`… up to `B`. Each file is `frame_NNNNNN.png` (the frame
+number on six digits), byte for byte the picture `--until-frame N
+--screenshot` writes; `--native-res` applies to them too. The range
+must end at or before `--until-frame`. Everything else the run was
+asked for (`--input-at`, `--poke-at`, `--peek-at`, the final
+`--screenshot`) works as without it; a run that `--until-pc` ends early
+writes the pictures it reached and says how many.
+
+`luna frames` remains the tool for a flicker: it tags each consecutive
+frame with whether the screen showed anything.
 
 ### Stopping on a routine, not on a frame
 

@@ -22,6 +22,13 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   two bytes per colour, low byte first — `--peek CGRAM:10:#32` is
   palette 1. `--assert-cgram` compared; nothing showed. With `--peek-at`
   it samples the palette at every arrival on a routine.
+- **`luna state --screenshot-frames A..B[/K] --screenshot-dir DIR`.**
+  One PNG per frame of a range, written as the run crosses it, instead
+  of one run from power-on per picture (72 runs of several minutes
+  became one of five seconds on the case that asked for it). Each file
+  is `frame_NNNNNN.png`, byte for byte what `--until-frame N
+  --screenshot` writes. Repeatable, with its own step per range; needs
+  `--until-frame`.
 
 ## [1.38.1] — 2026-10-11
 

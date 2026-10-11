@@ -324,6 +324,24 @@ enum Command {
         /// Optional screenshot output path (PNG).
         #[arg(long)]
         screenshot: Option<PathBuf>,
+        /// Write one PNG per frame of a range into `--screenshot-dir`, in
+        /// this one run: `A..B` is every frame from `A` to `B` included,
+        /// `A..B/K` one frame in `K` from `A`. Each file is
+        /// `frame_NNNNNN.png`, the picture `--until-frame N --screenshot`
+        /// would write. Repeatable. Example: `--screenshot-frames
+        /// 1090..1150/2 --screenshot-frames 1440..1560/3 --screenshot-dir
+        /// shots --until-frame 1560`.
+        #[arg(
+            long = "screenshot-frames",
+            value_name = "A..B[/K]",
+            requires_all = ["screenshot_dir", "until_frame"],
+            conflicts_with_all = ["cpu_trace_from", "mem_trace_from", "dma_trace_from", "superfx_trace_from"]
+        )]
+        screenshot_frames: Vec<String>,
+        /// The directory `--screenshot-frames` writes into (created if
+        /// absent).
+        #[arg(long = "screenshot-dir", requires = "screenshot_frames")]
+        screenshot_dir: Option<PathBuf>,
         /// Optional audio dump path (32 kHz stereo WAV).
         #[arg(long)]
         audio_out: Option<PathBuf>,
@@ -1288,6 +1306,8 @@ fn main() -> ExitCode {
             poke_at: _,
             poke_hit: _,
             poke: _,
+            screenshot_frames,
+            screenshot_dir,
             srm_in,
             srm_out,
             apu_log,
@@ -1413,6 +1433,8 @@ fn main() -> ExitCode {
                 peek_at_out.as_deref(),
                 input_at.as_deref(),
                 &poke_groups,
+                &screenshot_frames,
+                screenshot_dir.as_deref(),
             )
         }
         Command::Frames {

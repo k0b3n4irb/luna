@@ -1417,6 +1417,104 @@ V3_PH = 0            # $33
     );
 }
 
+/// `luna state --screenshot-frames` writes, in one run, the picture a
+/// run to each frame would write.
+#[test]
+fn state_captures_a_range_of_frames_in_one_run() {
+    let dir = fresh_dir("shot_range");
+    // The backdrop colour follows a counter: no two frames look alike.
+    synthetic_rom(
+        &dir.join("game.sfc"),
+        &[
+            0xA9, 0x0F, 0x8D, 0x00, 0x21, // 8000 LDA #$0F : STA $2100  display on
+            0xE6, 0x10, // 8005 INC $10
+            0x9C, 0x21, 0x21, // 8007 STZ $2121
+            0xA5, 0x10, 0x8D, 0x22, 0x21, // 800A LDA $10 : STA $2122
+            0x9C, 0x22, 0x21, // 800F STZ $2122
+            0x80, 0xF1, // 8012 BRA $8005
+        ],
+    );
+    let state = |args: &[&str]| {
+        Command::new(luna_bin())
+            .args(["state", "game.sfc", "--force-mapper", "lorom", "--out", "-"])
+            .args(args)
+            .current_dir(&dir)
+            .output()
+            .expect("run luna state")
+    };
+    let out = state(&[
+        "--until-frame",
+        "9",
+        "--screenshot-frames",
+        "3..7/2",
+        "--screenshot-frames",
+        "8..9",
+        "--screenshot-dir",
+        "shots",
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let mut names: Vec<String> = std::fs::read_dir(dir.join("shots"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [3, 5, 7, 8, 9].map(|f| format!("frame_{f:06}.png")),
+        "{out:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("5 screenshot(s) written to shots"),
+        "{out:?}"
+    );
+    let shot = |name: &str| std::fs::read(dir.join(name)).unwrap();
+    for frame in ["5", "9"] {
+        let alone = state(&["--until-frame", frame, "--screenshot", "alone.png"]);
+        assert!(alone.status.success(), "{alone:?}");
+        assert_eq!(
+            shot(&format!("shots/frame_00000{frame}.png")),
+            shot("alone.png"),
+            "frame {frame}"
+        );
+    }
+    assert_ne!(
+        shot("shots/frame_000005.png"),
+        shot("shots/frame_000007.png")
+    );
+
+    // A range past the end of the run, a malformed one, no directory.
+    for args in [
+        &[
+            "--until-frame",
+            "9",
+            "--screenshot-frames",
+            "3..12",
+            "--screenshot-dir",
+            "s",
+        ][..],
+        &[
+            "--until-frame",
+            "9",
+            "--screenshot-frames",
+            "7..3",
+            "--screenshot-dir",
+            "s",
+        ],
+        &[
+            "--until-frame",
+            "9",
+            "--screenshot-frames",
+            "3..7/0",
+            "--screenshot-dir",
+            "s",
+        ],
+        &["--until-frame", "9", "--screenshot-frames", "3..7"],
+        &["--screenshot-frames", "3..7", "--screenshot-dir", "s"],
+    ] {
+        assert_eq!(state(args).status.code(), Some(2), "{args:?}");
+    }
+}
+
 /// `luna state --peek CGRAM:COLOR:COUNT` reads the palette from a colour
 /// index, low byte first, and stops at the last colour.
 #[test]

@@ -155,6 +155,51 @@ struct PeekHit {
 /// instead of hanging it.
 const UNTIL_PC_FRAME_CAP: u64 = 36_000;
 
+/// `--screenshot-frames` / `--screenshot-dir`: one PNG per frame of the
+/// ranges, written as the run crosses it.
+struct FrameShots<'a> {
+    dir: &'a std::path::Path,
+    /// `(first, last, step)` of each range.
+    ranges: Vec<(u64, u64, u64)>,
+    native_res: bool,
+    written: u64,
+    error: Option<String>,
+}
+
+impl FrameShots<'_> {
+    /// The run just completed a frame: write its picture when a range
+    /// asks for it. Returns `true` to end the run (a write failed).
+    fn on_frame(&mut self, em: &luna_api::Emulator) -> bool {
+        let frame = em.frame_count().unwrap_or(0);
+        if !self.ranges.iter().any(|&(first, last, step)| {
+            (first..=last).contains(&frame) && (frame - first).is_multiple_of(step)
+        }) {
+            return false;
+        }
+        let png = if self.native_res {
+            em.render_frame_png_native()
+        } else {
+            em.render_frame_png(false)
+        };
+        let path = self.dir.join(format!("frame_{frame:06}.png"));
+        let written = png
+            .map_err(|e| format!("render_frame_png: {e}"))
+            .and_then(|png| {
+                std::fs::write(&path, png).map_err(|e| format!("writing {}: {e}", path.display()))
+            });
+        match written {
+            Ok(()) => {
+                self.written += 1;
+                false
+            }
+            Err(e) => {
+                self.error = Some(e);
+                true
+            }
+        }
+    }
+}
+
 /// What `--until-pc` / `--peek-at` watch during the run (issue #269).
 struct Watch {
     /// The distinct addresses watched.
@@ -236,7 +281,7 @@ impl Watch {
         until_pc: Option<&str>,
         hit: u64,
         peek_at: Option<&str>,
-        clocked_input: bool,
+        needs_watching_run: bool,
         poke: &[PokeGroup],
     ) -> Result<Option<Self>, String> {
         let addr = |opt: &str, spec: &str| {
@@ -297,9 +342,9 @@ impl Watch {
                 pcs.push(pc);
             }
         }
-        // A script clocked by a routine needs the watching run too, even
-        // with nothing else to watch.
-        Ok((!pcs.is_empty() || clocked_input).then_some(Self {
+        // A script clocked by a routine and a capture per frame need the
+        // watching run too, even with nothing else to watch.
+        Ok((!pcs.is_empty() || needs_watching_run).then_some(Self {
             pcs,
             until,
             peek_at,
@@ -454,7 +499,43 @@ pub(crate) fn run_state(
     peek_at_out: Option<&std::path::Path>,
     input_at: Option<&str>,
     poke: &[PokeGroup],
+    screenshot_frames: &[String],
+    screenshot_dir: Option<&std::path::Path>,
 ) -> ExitCode {
+    let mut shots = match screenshot_dir {
+        None => None,
+        Some(dir) => {
+            let ranges = screenshot_frames
+                .iter()
+                .map(|spec| crate::parsers::parse_frame_range(spec))
+                .collect::<Result<Vec<_>, String>>();
+            let ranges = match ranges {
+                Ok(ranges) => ranges,
+                Err(e) => {
+                    eprintln!("error: --screenshot-frames {e}");
+                    return ExitCode::from(2);
+                }
+            };
+            let horizon = until_frame.unwrap_or(0);
+            if let Some(&(_, last, _)) = ranges.iter().find(|r| r.1 > horizon) {
+                eprintln!(
+                    "error: --screenshot-frames ends at frame {last}, past --until-frame {horizon}"
+                );
+                return ExitCode::from(2);
+            }
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                eprintln!("error: creating {}: {e}", dir.display());
+                return ExitCode::from(1);
+            }
+            Some(FrameShots {
+                dir,
+                ranges,
+                native_res,
+                written: 0,
+                error: None,
+            })
+        }
+    };
     let mut em = luna_api::Emulator::new();
     if let Err(e) = load_rom_into(&mut em, rom, force_mapper, force_region, dsp1_rom, power_on) {
         eprintln!("error: {e}");
@@ -635,7 +716,14 @@ pub(crate) fn run_state(
             }
         }
     }
-    let mut watch = match Watch::resolve(&em, until_pc, hit, peek_at, input_at.is_some(), poke) {
+    let mut watch = match Watch::resolve(
+        &em,
+        until_pc,
+        hit,
+        peek_at,
+        input_at.is_some() || shots.is_some(),
+        poke,
+    ) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("error: {e}");
@@ -822,12 +910,23 @@ pub(crate) fn run_state(
                 if keep_audio && let Ok(mut chunk) = em.drain_audio(usize::MAX) {
                     audio_accum.append(&mut chunk);
                 }
-                false
+                shots.as_mut().is_some_and(|shots| shots.on_frame(em))
             }
         });
         if let Err(e) = run {
             eprintln!("step warning: {e}");
             step_failed = true;
+        }
+        if let Some(shots) = &shots {
+            if let Some(e) = &shots.error {
+                eprintln!("error: {e}");
+                return ExitCode::from(1);
+            }
+            eprintln!(
+                "{} screenshot(s) written to {}",
+                shots.written,
+                shots.dir.display()
+            );
         }
         let end_frame = em.frame_count().unwrap_or(0);
         if let Some(u) = &w.until {
