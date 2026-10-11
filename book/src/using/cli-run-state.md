@@ -148,6 +148,7 @@ and is the hub for every headless diagnostic.
 | `--srm-in <PATH>` | — | Load battery SRAM from a `.srm` file before running — the second half of a power-cycle test. See *Asserting on memory* below. |
 | `--srm-out <PATH>` | — | Write battery SRAM to a `.srm` file after the run (an empty file on a cartridge with no battery). |
 | `--screenshot <PATH>` | — | Also write a PNG. |
+| `--vram-writers <PATH>`, `--vram-writers-from <FRAME>` | —, `0` | Who wrote what into VRAM over the run: ranges of words by source, and the words two sources both wrote. See *Who wrote this into VRAM?* below. |
 | `--screenshot-frames <A..B[/K]>`, `--screenshot-dir <DIR>` | — | One PNG per frame of a range, in this one run: `frame_NNNNNN.png` in `DIR`. Repeatable. Needs `--until-frame`. See *A picture per frame, in one run* below. |
 | `--audio-out <PATH>` | — | Also write a 32 kHz stereo WAV. |
 | `--peek <B:O:C>` | — | Hex-dump `COUNT` bytes at `BANK:OFFSET` to stderr (repeatable; **all three fields are hex** — `7E:0200:20` is 32 bytes; a count can say its base, `:0x20` hex or `:#32` decimal). With a label, `NAME[:COUNT]`. The whole 24-bit space is readable: WRAM, ROM (including `$C0-$FF` HiROM banks), SRAM, coprocessor RAM; the `$2000-$5FFF` register band reads `0` (no side effects), except the DMA channel registers `$4300-$437F`, which read their real values (`$FF` at power-on). An unmapped range reads `$FF` like the open bus, with a stderr note and an `unmapped` count in the JSON entry. Each result is mirrored into the `--out` JSON `peeks` array (see [the state JSON](state-json.md)) — the machine-readable channel a harness should parse. |
@@ -472,6 +473,55 @@ interrupt markers, to place the writes in time — `kind` `N` (NMI, at
 available over MCP (`enable_mem_trace { offsets, writes_only }`), and a
 `run_until_mem_write` / `bp_add mem` watchpoint fires on the DMA / HDMA
 write too.
+
+### Who wrote this into VRAM? (`--vram-writers`)
+
+A tile sheet loaded a few hundred words too far lands on a tilemap. The
+picture is wrong, a frame hash says so and nothing more, and the corrupt
+words have to be looked for in the ROM by hand. `--vram-writers` records
+every byte sent to `$2118/$2119` during the run and folds them by
+**source**:
+
+- for a DMA, the `.sym` label that holds the address the bytes were read
+  from (a table in ROM, a buffer in RAM);
+- for a CPU write to the port, the label that holds the instruction.
+
+```bash
+luna state --until-frame 800 --vram-writers writers.txt \
+  --vram-writers-from 314 --out /dev/null game.sfc
+# VRAM writers written to writers.txt (3 range(s), 1 overlap(s))
+```
+
+```text
+# writes from frame 314
+words          bytes  source        how  frames
+$2000-$460F    19488  pitch_tiles   dma  314
+$6800-$6AFF     1536  text_tiles    dma  318
+$6800-$6FFF     4096  pitch_map     dma  320-790
+
+overlaps: 1
+$6800-$6AFF    768 word(s)  text_tiles (frame 318)  then  pitch_map (frame 320)
+```
+
+One line per range of contiguous words and per source, by address, with
+the bytes written and the first and last frame. Then `overlaps`: one
+line per pair of **different** sources that wrote the same words (here
+a tile sheet that ran into the tilemap two frames before it) — the
+lowest and highest shared word, how many are shared, and the frame each
+source first wrote one. A map rewritten five hundred times by the same
+table is no overlap; a tile sheet over that map is one line.
+
+An overlap is not a fault by itself: a change of screen loads new tiles
+over the old ones, and a status bar is drawn over its blank background.
+The report shows; which pair is wrong is the reader's call.
+`--vram-writers-from FRAME` leaves out the writes before a frame, to
+keep one screen's loading out of the next one's report.
+
+Without a `.sym` a source is a 256-byte page, `$BB:AA00`. A label is the
+nearest one at or below the address: a DMA from a table with no label of
+its own carries the name of the one before it. The JSON report carries
+the same table under `vram_writers`. The option takes the DMA trace for
+itself, so it does not combine with `--dma-trace`.
 
 ### Tracing a window of CPU execution
 

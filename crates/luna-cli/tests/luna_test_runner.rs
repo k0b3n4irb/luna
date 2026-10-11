@@ -1417,6 +1417,76 @@ V3_PH = 0            # $33
     );
 }
 
+/// `luna state --vram-writers` says which routine wrote each VRAM word,
+/// and which words two routines both wrote.
+#[test]
+fn state_reports_who_wrote_vram_and_what_two_sources_share() {
+    let dir = fresh_dir("vram_writers");
+    synthetic_rom(
+        &dir.join("game.sfc"),
+        &[
+            0xA9, 0x80, 0x8D, 0x00, 0x21, // 8000 first: forced blank
+            0xA9, 0x80, 0x8D, 0x15, 0x21, // 8005 step on the high byte
+            0xA9, 0x40, 0x8D, 0x16, 0x21, // 800A
+            0xA9, 0x73, 0x8D, 0x17, 0x21, // 800F VMADD = $7340
+            0xA9, 0x15, 0x8D, 0x18, 0x21, // 8014
+            0xA9, 0x34, 0x8D, 0x19, 0x21, // 8019 word $7340
+            0xA9, 0x22, 0x8D, 0x18, 0x21, // 801E
+            0xA9, 0x11, 0x8D, 0x19, 0x21, // 8023 word $7341
+            0xA9, 0x41, 0x8D, 0x16, 0x21, // 8028 second: VMADD = $7341
+            0xA9, 0x73, 0x8D, 0x17, 0x21, // 802D
+            0xA9, 0x33, 0x8D, 0x18, 0x21, // 8032
+            0xA9, 0x44, 0x8D, 0x19, 0x21, // 8037 word $7341 again
+            0x80, 0xFE, // 803C BRA $803C
+        ],
+    );
+    std::fs::write(
+        dir.join("game.sym"),
+        "[labels]\n00:8000 first\n00:8028 second\n",
+    )
+    .unwrap();
+    let state = |args: &[&str]| {
+        Command::new(luna_bin())
+            .args(["state", "game.sfc", "--force-mapper", "lorom", "--out", "-"])
+            .args(["--until-frame", "3", "--vram-writers", "writers.txt"])
+            .args(args)
+            .current_dir(&dir)
+            .output()
+            .expect("run luna state")
+    };
+    let out = state(&[]);
+    assert!(out.status.success(), "{out:?}");
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let report = &json["vram_writers"];
+    let rows = report["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "{report:#}");
+    assert_eq!(rows[0]["source"], "first");
+    assert_eq!(rows[0]["how"], "cpu");
+    assert_eq!(rows[0]["first_word"], 0x7340);
+    assert_eq!(rows[0]["last_word"], 0x7341);
+    assert_eq!(rows[0]["bytes"], 4);
+    assert_eq!(rows[1]["source"], "second");
+    assert_eq!(rows[1]["first_word"], 0x7341);
+    let overlaps = report["overlaps"].as_array().unwrap();
+    assert_eq!(overlaps.len(), 1, "{report:#}");
+    assert_eq!(overlaps[0]["first"], "first");
+    assert_eq!(overlaps[0]["then"], "second");
+    assert_eq!(overlaps[0]["words"], 1);
+    assert_eq!(overlaps[0]["first_word"], 0x7341);
+    let text = std::fs::read_to_string(dir.join("writers.txt")).unwrap();
+    assert!(text.contains("$7340-$7341        4  first "), "{text}");
+    assert!(
+        text.contains("$7341-$7341      1 word(s)  first (frame 0)  then  second (frame 0)"),
+        "{text}"
+    );
+
+    // A window that starts after the writes holds nothing.
+    let out = state(&["--vram-writers-from", "2"]);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["vram_writers"]["rows"].as_array().unwrap().len(), 0);
+    assert_eq!(json["vram_writers"]["from_frame"], 2);
+}
+
 /// `luna state --screenshot-frames` writes, in one run, the picture a
 /// run to each frame would write.
 #[test]

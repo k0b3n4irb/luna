@@ -342,6 +342,28 @@ enum Command {
         /// absent).
         #[arg(long = "screenshot-dir", requires = "screenshot_frames")]
         screenshot_dir: Option<PathBuf>,
+        /// Write who wrote what into VRAM over the run: one line per range
+        /// of words and per source — the label a DMA read its bytes from,
+        /// or the routine that wrote `$2118/$2119` — then the ranges two
+        /// different sources both wrote. A tile sheet loaded over a
+        /// tilemap shows there, where a frame hash only says the picture
+        /// changed. The JSON report carries the same table
+        /// (`vram_writers`).
+        #[arg(
+            long = "vram-writers",
+            value_name = "PATH",
+            conflicts_with = "dma_trace"
+        )]
+        vram_writers: Option<PathBuf>,
+        /// With `--vram-writers`: leave out the writes before this frame
+        /// (the loading of the first screen).
+        #[arg(
+            long = "vram-writers-from",
+            value_name = "FRAME",
+            default_value_t = 0,
+            requires = "vram_writers"
+        )]
+        vram_writers_from: u64,
         /// Optional audio dump path (32 kHz stereo WAV).
         #[arg(long)]
         audio_out: Option<PathBuf>,
@@ -1308,6 +1330,8 @@ fn main() -> ExitCode {
             poke: _,
             screenshot_frames,
             screenshot_dir,
+            vram_writers,
+            vram_writers_from,
             srm_in,
             srm_out,
             apu_log,
@@ -1435,6 +1459,8 @@ fn main() -> ExitCode {
                 &poke_groups,
                 &screenshot_frames,
                 screenshot_dir.as_deref(),
+                vram_writers.as_deref(),
+                vram_writers_from,
             )
         }
         Command::Frames {

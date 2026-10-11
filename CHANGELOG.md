@@ -29,6 +29,14 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   is `frame_NNNNNN.png`, byte for byte what `--until-frame N
   --screenshot` writes. Repeatable, with its own step per range; needs
   `--until-frame`.
+- **`luna state --vram-writers PATH`, with `--vram-writers-from
+  FRAME`.** Who wrote what into VRAM over a run: every byte sent to
+  `$2118/$2119` is folded by source — the `.sym` label a DMA read from,
+  or the routine that wrote the port — into ranges of words, then one
+  line per pair of different sources that wrote the same words. A tile
+  sheet loaded over a tilemap is one line there; a frame hash only said
+  the picture had changed. The JSON report carries the table as
+  `vram_writers`.
 
 ## [1.38.1] — 2026-10-11
 

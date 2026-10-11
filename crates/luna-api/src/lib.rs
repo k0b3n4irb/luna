@@ -50,6 +50,7 @@ pub mod paths;
 mod power_on;
 pub mod symbols;
 mod vocab;
+mod vram_writers;
 
 pub use event_viewer::{
     CATEGORY_COUNT, EventCategory, EventViewerConfig, EventViewerEvent, register_name,
@@ -59,6 +60,7 @@ pub use power_on::parse_power_on;
 pub use vocab::{
     dsp_register_index, dsp_register_name, dsp_register_table, force_mapper_names, parse_region,
 };
+pub use vram_writers::{VramOverlap, VramWriteKind, VramWriterRow, VramWriters, VramWritersReport};
 
 /// Parse a controller-device name — the CLI `--port1/--port2` and MCP
 /// `set_port_device` vocabulary: `pad` (or `joypad`), `mouse`, `superscope`,

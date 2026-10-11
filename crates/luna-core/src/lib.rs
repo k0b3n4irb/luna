@@ -31,7 +31,7 @@ pub use power::{PowerOnRng, PowerOnState};
 pub use snes::{
     CpuTraceEvent, CpuTraceLog, GsuBusAccess, GsuBusEvent, GsuBusLog, MailboxEvent,
     MailboxEventKind, MemEventKind, MemOrigin, MemTraceEvent, MemTraceFilter, MemTraceLog, Profile,
-    ProfileFrameTime, ProfileSample, Sa1LogEvent, Snes, UnsupportedMapper,
+    ProfileFrameTime, ProfileSample, Sa1LogEvent, Snes, UnsupportedMapper, VramCpuWrite,
 };
 
 /// A placeholder [`Mapper`] trait object that owns no ROM and claims no

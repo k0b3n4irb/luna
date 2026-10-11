@@ -30,6 +30,7 @@ means that transport has no form of it.
 | the picture behind a forced blank | `--force-display` | `screenshot {force_display}` | [`luna run`](using/cli-run-state.md#luna-run--quick-render--audio-dump) |
 | the true 512-wide hi-res frame | `--native-res` | `set_native_capture`, `screenshot {native}` | [`luna run`](using/cli-run-state.md#luna-run--quick-render--audio-dump) |
 | a hash of the frame, to compare runs | `--print-fbhash` | `frame_hash` | [`luna run`](using/cli-run-state.md#luna-run--quick-render--audio-dump) |
+| which table or routine wrote a range of VRAM, and what two of them both wrote | `luna state --vram-writers writers.txt` | — | [Who wrote this into VRAM?](using/cli-run-state.md#who-wrote-this-into-vram---vram-writers) |
 | a picture per frame over a range, in one run | `luna state --until-frame B --screenshot-frames A..B/K --screenshot-dir DIR` | `step_until_frame`, `screenshot` | [A picture per frame](using/cli-run-state.md#a-picture-per-frame-in-one-run) |
 | consecutive frames, to catch a flicker | `luna frames --from-frame N -c K` | — | [`luna frames`](using/cli-analysis.md#luna-frames--consecutive-frame-capture-temporal-artefacts) |
 | the tiles, tilemaps, palette and sprites as PNGs | `luna assets-dump` | `render_vram_tiles`, `render_tilemap`, `render_palette`, `render_sprite_sheet` | [`luna assets-dump`](using/cli-analysis.md#luna-assets-dump--export-the-loaded-graphics-as-pngs) |

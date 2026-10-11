@@ -95,6 +95,9 @@ struct StateOut<'a> {
     /// the option).
     #[serde(skip_serializing_if = "Option::is_none")]
     pokes: Option<&'a [PokeAt]>,
+    /// Who wrote what into VRAM (absent without `--vram-writers`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vram_writers: Option<&'a luna_api::VramWritersReport>,
 }
 
 /// The `--poke`s to write at one arrival on `--poke-at`.
@@ -397,6 +400,59 @@ impl Watch {
     }
 }
 
+/// The `--vram-writers` text: one line per range and source, then one
+/// per pair of sources that wrote the same words.
+fn vram_writers_text(report: &luna_api::VramWritersReport) -> String {
+    let how = |kind: luna_api::VramWriteKind| match kind {
+        luna_api::VramWriteKind::Dma => "dma",
+        luna_api::VramWriteKind::Cpu => "cpu",
+    };
+    let frames = |first: u64, last: u64| {
+        if first == last {
+            first.to_string()
+        } else {
+            format!("{first}-{last}")
+        }
+    };
+    let width = report
+        .rows
+        .iter()
+        .map(|r| r.source.len())
+        .max()
+        .unwrap_or(0)
+        .max("source".len());
+    let mut out = String::new();
+    if report.from_frame > 0 {
+        let _ = writeln!(out, "# writes from frame {}", report.from_frame);
+    }
+    let _ = writeln!(
+        out,
+        "{:<11}  {:>7}  {:<width$}  how  frames",
+        "words", "bytes", "source"
+    );
+    for r in &report.rows {
+        let _ = writeln!(
+            out,
+            "${:04X}-${:04X}  {:>7}  {:<width$}  {}  {}",
+            r.first_word,
+            r.last_word,
+            r.bytes,
+            r.source,
+            how(r.how),
+            frames(r.first_frame, r.last_frame)
+        );
+    }
+    let _ = writeln!(out, "\noverlaps: {}", report.overlaps.len());
+    for o in &report.overlaps {
+        let _ = writeln!(
+            out,
+            "${:04X}-${:04X}  {:>5} word(s)  {} (frame {})  then  {} (frame {})",
+            o.first_word, o.last_word, o.words, o.first, o.first_frame, o.then, o.then_frame
+        );
+    }
+    out
+}
+
 /// The `--peek-at-out` CSV: one row per arrival, one column per `--peek`.
 fn peek_hits_csv(peek_specs: &[String], hits: &[PeekHit]) -> String {
     let mut out = String::from("hit,frame,line");
@@ -501,7 +557,10 @@ pub(crate) fn run_state(
     poke: &[PokeGroup],
     screenshot_frames: &[String],
     screenshot_dir: Option<&std::path::Path>,
+    vram_writers: Option<&std::path::Path>,
+    vram_writers_from: u64,
 ) -> ExitCode {
+    let mut writers = vram_writers.map(|_| luna_api::VramWriters::new(vram_writers_from));
     let mut shots = match screenshot_dir {
         None => None,
         Some(dir) => {
@@ -721,7 +780,7 @@ pub(crate) fn run_state(
         until_pc,
         hit,
         peek_at,
-        input_at.is_some() || shots.is_some(),
+        input_at.is_some() || shots.is_some() || writers.is_some(),
         poke,
     ) {
         Ok(w) => w,
@@ -895,6 +954,12 @@ pub(crate) fn run_state(
     // ~99% of audio on any run longer than ~0.5 s of emulated time.
     // The accumulated Vec (started by the input pre-roll) is written to disk
     // after the run.
+    if writers.is_some()
+        && let Err(e) = em.enable_vram_writers()
+    {
+        eprintln!("error: --vram-writers: {e}");
+        return ExitCode::from(1);
+    }
     if let Some(w) = watch.as_mut() {
         let bound = match until_frame {
             Some(frame) => luna_api::ScriptBound::Frame(frame),
@@ -909,6 +974,9 @@ pub(crate) fn run_state(
             luna_api::WatchEvent::Frame => {
                 if keep_audio && let Ok(mut chunk) = em.drain_audio(usize::MAX) {
                     audio_accum.append(&mut chunk);
+                }
+                if let Some(writers) = writers.as_mut() {
+                    let _ = em.collect_vram_writes(writers);
                 }
                 shots.as_mut().is_some_and(|shots| shots.on_frame(em))
             }
@@ -1377,6 +1445,24 @@ pub(crate) fn run_state(
         }
     }
 
+    // The writes since the last completed frame, then the folded table.
+    let writers_report = writers.as_mut().map(|writers| {
+        let _ = em.collect_vram_writes(writers);
+        writers.report()
+    });
+    if let (Some(path), Some(report)) = (vram_writers, &writers_report) {
+        if let Err(e) = std::fs::write(path, vram_writers_text(report)) {
+            eprintln!("error: writing {}: {e}", path.display());
+            return ExitCode::from(1);
+        }
+        eprintln!(
+            "VRAM writers written to {} ({} range(s), {} overlap(s))",
+            path.display(),
+            report.rows.len(),
+            report.overlaps.len()
+        );
+    }
+
     let state = em.state();
     let json = match serde_json::to_string_pretty(&StateOut {
         state: &state,
@@ -1391,6 +1477,7 @@ pub(crate) fn run_state(
             .as_ref()
             .filter(|w| !w.pokes.is_empty())
             .map(|w| w.pokes.as_slice()),
+        vram_writers: writers_report.as_ref(),
     }) {
         Ok(s) => s,
         Err(e) => {

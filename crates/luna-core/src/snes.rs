@@ -220,6 +220,12 @@ pub struct Snes {
     /// [`Snes::enable_mem_trace`].
     #[serde(skip)]
     pub mem_trace_log: Option<MemTraceLog>,
+    /// CPU writes to the VRAM data ports (`$2118/$2119`), each with the
+    /// word it lands on and the instruction that wrote it; `None` when
+    /// not capturing. The DMA side of the same question is the DMA
+    /// trace. Drained by the consumer, frame by frame.
+    #[serde(skip)]
+    pub vram_cpu_writes: Option<Vec<VramCpuWrite>>,
     /// Capture of CPU cartridge accesses made while the GSU owned the bus
     /// (`OpenSNES` R2); `None` when not capturing. Skipped like every other
     /// diagnostic capture, so the save-state shape is untouched.
@@ -385,6 +391,21 @@ pub struct GsuBusLog {
     /// capture still reports the true total.
     pub seen: u64,
 }
+
+/// One byte the CPU wrote to a VRAM data port (`$2118/$2119`).
+#[derive(Debug, Clone, Copy)]
+pub struct VramCpuWrite {
+    /// The VRAM word address (`VMADD`) the byte lands on.
+    pub word: u16,
+    /// 24-bit PC of the instruction that wrote it.
+    pub pc_full: u32,
+    /// Completed-frame counter at the write.
+    pub frame: u64,
+}
+
+/// What an undrained [`Snes::vram_cpu_writes`] stops at: more than a
+/// frame of CPU writes can hold.
+const VRAM_CPU_WRITES_CAP: usize = 1 << 20;
 
 /// One CPU bus access, captured by the optional memory tracer.
 #[derive(Debug, Clone, Copy)]
@@ -1103,6 +1124,7 @@ impl Snes {
             cpu_trace_log: None,
             profile: None,
             mem_trace_log: None,
+            vram_cpu_writes: None,
             gsu_bus_log: None,
             breakpoints: None,
             nocash_log: None,
@@ -1917,6 +1939,8 @@ struct SnesBus<'a> {
     sa1_log: &'a mut Option<Vec<Sa1LogEvent>>,
     /// Memory access trace. `None` = disabled. See [`Snes::enable_mem_trace`].
     mem_trace_log: &'a mut Option<MemTraceLog>,
+    /// CPU writes to the VRAM data ports; `None` = disabled.
+    vram_cpu_writes: &'a mut Option<Vec<VramCpuWrite>>,
     gsu_bus_log: &'a mut Option<GsuBusLog>,
     /// Breakpoint/watchpoint registry (issue #66) — watch hits are parked
     /// on the registry's `pending_hit` for the driving loop.
@@ -2095,6 +2119,7 @@ impl Snes {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            vram_cpu_writes,
             gsu_bus_log,
             breakpoints,
             nocash_log,
@@ -2127,6 +2152,7 @@ impl Snes {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            vram_cpu_writes,
             gsu_bus_log,
             breakpoints,
             nocash_log,
@@ -2408,6 +2434,19 @@ impl SnesBus<'_> {
         // class as the trace hook itself.
         if let Some(bp) = self.breakpoints.as_mut() {
             bp.check_mem(addr, kind, value, self.cpu_pc_full);
+        }
+        // Before the write: the high-byte port may step the address.
+        if let Some(log) = self.vram_cpu_writes.as_mut()
+            && matches!(kind, MemEventKind::Write)
+            && matches!(addr & 0xFFFF, 0x2118 | 0x2119)
+            && (addr >> 16) & 0x7F < 0x40
+            && log.len() < VRAM_CPU_WRITES_CAP
+        {
+            log.push(VramCpuWrite {
+                word: self.ppu.vram.address,
+                pc_full: self.cpu_pc_full,
+                frame: self.frame_count,
+            });
         }
         let hclock = self.hclock();
         let blank_now = self.ppu_line >= self.vblank_start_line();
