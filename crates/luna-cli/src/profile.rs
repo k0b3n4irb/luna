@@ -36,6 +36,8 @@ pub(crate) struct ProfileOptions<'a> {
     pub gsu_pc_set: Option<&'a std::path::Path>,
     /// `--input-at`: the routine whose arrivals index the input scripts.
     pub input_at: Option<&'a str>,
+    /// `--poke-at` groups: bytes written at an arrival on a routine.
+    pub pokes: &'a [crate::state::PokeGroup],
     /// `--until-pc`: end the profile when execution reaches this routine…
     pub until_pc: Option<&'a str>,
     /// …at its `--hit`-th arrival, counted from power-on.
@@ -68,6 +70,10 @@ struct Report<'a> {
     /// Where `--until-pc` ended the window (absent without it).
     #[serde(skip_serializing_if = "Option::is_none")]
     until_pc: Option<UntilPc>,
+    /// One per `--poke-at`: whether its bytes were written (absent
+    /// without it).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pokes: Vec<crate::state::PokeAt>,
     /// Deepest native-mode stack reach over the profiled window, and the
     /// `--stack-floor` verdict if one was asked for.
     stack: StackReport,
@@ -300,53 +306,80 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
             }
         },
     };
-    let watched: Vec<u32> = until.iter().map(|u| u.addr).collect();
-    let mut step_frame =
-        |em: &mut luna_api::Emulator, until: &mut Option<UntilPc>| -> Result<Step, String> {
-            let f = frame(em);
-            if clocked || !watched.is_empty() {
-                // The script fires on arrivals, or the window ends on one: the
-                // watching run does both.
-                let before = em.instructions_executed();
-                let stopped = em
-                    .run_script_watching(
-                        &mut script,
-                        luna_api::ScriptBound::Frame(f + 1),
-                        &watched,
-                        |em, ev| match (ev, until.as_mut()) {
-                            (luna_api::WatchEvent::Pc(_), Some(u)) => {
-                                u.hits_seen += 1;
-                                if u.hits_seen == u.hit {
-                                    u.reached = true;
-                                    u.frame = em.frame_count().ok();
-                                    u.line = em.beam().map(|(line, _)| line).ok();
-                                }
-                                u.reached
-                            }
-                            _ => false,
-                        },
-                    )
-                    .map_err(|e| e.to_string())?;
-                return Ok(if stopped {
-                    Step::Reached
-                } else if em.instructions_executed() > before && frame(em) > f {
-                    Step::Frame
-                } else {
-                    Step::Halted
-                });
+    let mut pokes = match crate::state::PokeAt::resolve(&em, o.pokes) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut watched: Vec<u32> = until.iter().map(|u| u.addr).collect();
+    for p in &pokes {
+        if !watched.contains(&p.addr) {
+            watched.push(p.addr);
+        }
+    }
+    // Execution reached `watched[i]`: the writes first, then the end of the
+    // window. Returns `true` to end the run.
+    let arrival = |em: &mut luna_api::Emulator,
+                   i: usize,
+                   pokes: &mut [crate::state::PokeAt],
+                   until: &mut Option<UntilPc>| {
+        let addr = watched[i];
+        for p in pokes.iter_mut().filter(|p| p.addr == addr) {
+            p.on_arrival(em);
+        }
+        until.as_mut().filter(|u| u.addr == addr).is_some_and(|u| {
+            u.hits_seen += 1;
+            if u.hits_seen == u.hit {
+                u.reached = true;
+                u.frame = em.frame_count().ok();
+                u.line = em.beam().map(|(line, _)| line).ok();
             }
-            script.apply_due(em, f).map_err(|e| e.to_string())?;
-            let ran = em
-                .step_until_frame(FRAME_BUDGET)
+            u.reached
+        })
+    };
+    let watching = clocked || !watched.is_empty();
+    let mut step_frame = |em: &mut luna_api::Emulator,
+                          pokes: &mut [crate::state::PokeAt],
+                          until: &mut Option<UntilPc>|
+     -> Result<Step, String> {
+        let f = frame(em);
+        if watching {
+            // The script fires on arrivals, bytes are written on one, or the
+            // window ends on one: the watching run does all three.
+            let before = em.instructions_executed();
+            let stopped = em
+                .run_script_watching(
+                    &mut script,
+                    luna_api::ScriptBound::Frame(f + 1),
+                    &watched,
+                    |em, ev| match ev {
+                        luna_api::WatchEvent::Pc(i) => arrival(em, i, pokes, until),
+                        luna_api::WatchEvent::Frame => false,
+                    },
+                )
                 .map_err(|e| e.to_string())?;
-            Ok(if ran > 0 && frame(em) > f {
+            return Ok(if stopped {
+                Step::Reached
+            } else if em.instructions_executed() > before && frame(em) > f {
                 Step::Frame
             } else {
                 Step::Halted
-            })
-        };
+            });
+        }
+        script.apply_due(em, f).map_err(|e| e.to_string())?;
+        let ran = em
+            .step_until_frame(FRAME_BUDGET)
+            .map_err(|e| e.to_string())?;
+        Ok(if ran > 0 && frame(em) > f {
+            Step::Frame
+        } else {
+            Step::Halted
+        })
+    };
     while frame(&em) < o.from_frame {
-        match step_frame(&mut em, &mut until) {
+        match step_frame(&mut em, &mut pokes, &mut until) {
             Ok(Step::Frame) => {}
             Ok(Step::Halted) => break,
             Ok(Step::Reached) => {
@@ -391,7 +424,7 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
         .or_else(|| until.as_ref().map(|_| start_frame + UNTIL_PC_FRAME_CAP));
     if let Some(target) = frame_bound {
         while frame(&em) < target {
-            match step_frame(&mut em, &mut until) {
+            match step_frame(&mut em, &mut pokes, &mut until) {
                 Ok(Step::Frame) => {}
                 Ok(Step::Halted | Step::Reached) => break,
                 Err(e) => {
@@ -405,13 +438,16 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
         while em.instructions_executed().saturating_sub(start) < o.steps {
             let left = o.steps - em.instructions_executed().saturating_sub(start);
             let f = frame(&em);
-            let stepped = if clocked {
+            let stepped = if watching {
                 let before = em.instructions_executed();
                 em.run_script_watching(
                     &mut script,
                     luna_api::ScriptBound::Steps(left.min(FRAME_BUDGET)),
-                    &[],
-                    |_, _| false,
+                    &watched,
+                    |em, ev| match ev {
+                        luna_api::WatchEvent::Pc(i) => arrival(em, i, &mut pokes, &mut until),
+                        luna_api::WatchEvent::Frame => false,
+                    },
                 )
                 .map(|_| em.instructions_executed() - before)
             } else {
@@ -459,6 +495,12 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
             );
             until_missed = true;
         }
+    }
+    // A `--poke-at` the run never reached wrote nothing: what was profiled
+    // is not the scene asked for.
+    for p in pokes.iter().filter(|p| !p.applied) {
+        eprintln!("error: {}", p.missed(frame(&em)));
+        until_missed = true;
     }
     if let Some(path) = o.pc_set {
         let pcs = match em.profile_pcs() {
@@ -706,6 +748,7 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
             budgets: verdicts,
             frame_summary,
             until_pc: until,
+            pokes,
             stack: StackReport {
                 low,
                 floor: o.stack_floor,

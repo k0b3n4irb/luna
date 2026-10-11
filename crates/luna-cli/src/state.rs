@@ -102,20 +102,90 @@ struct StateOut<'a> {
 
 /// The `--poke`s to write at one arrival on `--poke-at`.
 #[derive(serde::Serialize, schemars::JsonSchema)]
-struct PokeAt {
+pub(crate) struct PokeAt {
     /// The `--poke-at` spec verbatim.
-    spec: String,
+    pub(crate) spec: String,
     /// The address it resolved to.
-    addr: u32,
+    pub(crate) addr: u32,
     /// The arrival the bytes are written at (`--poke-hit`).
-    hit: u64,
+    pub(crate) hit: u64,
     /// Arrivals seen before the run ended.
-    hits_seen: u64,
+    pub(crate) hits_seen: u64,
     /// The bytes were written. `false` = the run ended first.
-    applied: bool,
+    pub(crate) applied: bool,
     /// `(address, bytes)` of each `--poke`.
     #[serde(skip)]
     writes: Vec<(u32, Vec<u8>)>,
+}
+
+impl PokeAt {
+    /// Resolve every group against the loaded symbols.
+    pub(crate) fn resolve(
+        em: &luna_api::Emulator,
+        groups: &[PokeGroup],
+    ) -> Result<Vec<Self>, String> {
+        groups
+            .iter()
+            .map(|group| -> Result<Self, String> {
+                let spec = group.at.as_str();
+                let writes = group
+                    .pokes
+                    .iter()
+                    .map(|p| {
+                        let (key, hex) = p
+                            .split_once('=')
+                            .ok_or_else(|| format!("--poke `{p}`: expected NAME=HEX"))?;
+                        let at = crate::test_cmd::resolve_key(em, key.trim())
+                            .map_err(|e| format!("--poke `{p}`: {e}"))?;
+                        let bytes = crate::parsers::parse_hex_bytes(hex)
+                            .map_err(|e| format!("--poke `{p}`: {e}"))?;
+                        Ok((at, bytes))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(Self {
+                    spec: spec.to_string(),
+                    addr: crate::test_cmd::resolve_key(em, spec)
+                        .map_err(|e| format!("--poke-at `{spec}`: {e}"))?,
+                    hit: group.hit,
+                    hits_seen: 0,
+                    applied: false,
+                    writes,
+                })
+            })
+            .collect()
+    }
+
+    /// Execution reached the routine: count the arrival, and write the
+    /// bytes when it is the one asked for.
+    pub(crate) fn on_arrival(&mut self, em: &mut luna_api::Emulator) {
+        self.hits_seen += 1;
+        if self.hits_seen != self.hit {
+            return;
+        }
+        for (at, bytes) in &self.writes {
+            if let Err(e) = em.poke_memory((at >> 16) as u8, *at as u16, bytes) {
+                eprintln!("error: --poke at ${at:06X}: {e}");
+            }
+        }
+        self.applied = true;
+        eprintln!(
+            "poked {} value(s) at {} hit {} — frame {}, line {}",
+            self.writes.len(),
+            self.spec,
+            self.hit,
+            em.frame_count().unwrap_or(0),
+            em.beam().map_or(0, |(line, _)| line)
+        );
+    }
+
+    /// The error line of a `--poke-at` the run never reached.
+    pub(crate) fn missed(&self, end_frame: u64) -> String {
+        format!(
+            "--poke-at {}: hit {} not reached by frame {end_frame} (reached {} time(s)); \
+             nothing was written",
+            self.spec, self.hit, self.hits_seen
+        )
+    }
 }
 
 /// The outcome of `--until-pc` (issue #269).
@@ -306,34 +376,7 @@ impl Watch {
         let peek_at = peek_at
             .map(|spec| addr("--peek-at", spec).map(|a| (spec.to_string(), a)))
             .transpose()?;
-        let pokes = poke
-            .iter()
-            .map(|group| -> Result<PokeAt, String> {
-                let spec = group.at.as_str();
-                let writes = group
-                    .pokes
-                    .iter()
-                    .map(|p| {
-                        let (key, hex) = p
-                            .split_once('=')
-                            .ok_or_else(|| format!("--poke `{p}`: expected NAME=HEX"))?;
-                        let at = crate::test_cmd::resolve_key(em, key.trim())
-                            .map_err(|e| format!("--poke `{p}`: {e}"))?;
-                        let bytes = crate::parsers::parse_hex_bytes(hex)
-                            .map_err(|e| format!("--poke `{p}`: {e}"))?;
-                        Ok((at, bytes))
-                    })
-                    .collect::<Result<Vec<_>, String>>()?;
-                Ok(PokeAt {
-                    spec: spec.to_string(),
-                    addr: addr("--poke-at", spec)?,
-                    hit: group.hit,
-                    hits_seen: 0,
-                    applied: false,
-                    writes,
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
+        let pokes = PokeAt::resolve(em, poke)?;
         let mut pcs: Vec<u32> = Vec::new();
         for pc in until
             .iter()
@@ -363,21 +406,7 @@ impl Watch {
         let line = em.beam().map_or(0, |(line, _)| line);
         // Writes first: a `--peek-at` on the same routine reads them.
         for p in self.pokes.iter_mut().filter(|p| p.addr == addr) {
-            p.hits_seen += 1;
-            if p.hits_seen == p.hit {
-                for (at, bytes) in &p.writes {
-                    if let Err(e) = em.poke_memory((at >> 16) as u8, *at as u16, bytes) {
-                        eprintln!("error: --poke at ${at:06X}: {e}");
-                    }
-                }
-                p.applied = true;
-                eprintln!(
-                    "poked {} value(s) at {} hit {} — frame {frame}, line {line}",
-                    p.writes.len(),
-                    p.spec,
-                    p.hit
-                );
-            }
+            p.on_arrival(em);
         }
         if self.peek_at.as_ref().is_some_and(|p| p.1 == addr) {
             self.hits.push(PeekHit {
@@ -1020,11 +1049,7 @@ pub(crate) fn run_state(
             }
         }
         for p in w.pokes.iter().filter(|p| !p.applied) {
-            eprintln!(
-                "error: --poke-at {}: hit {} not reached by frame {end_frame} (reached {} \
-                 time(s)); nothing was written",
-                p.spec, p.hit, p.hits_seen
-            );
+            eprintln!("error: {}", p.missed(end_frame));
             step_failed = true;
         }
         if let Some((spec, _)) = &w.peek_at {

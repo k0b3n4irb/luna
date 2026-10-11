@@ -234,6 +234,7 @@ parked in `WAI` / `STP` under that label.
 | `--input-at <SYMBOL>` | — | Index the input scripts by arrivals on this routine instead of by frame ([input scripts](input-scripts.md#a-script-clocked-by-the-game-not-by-the-frame)): two builds are then profiled over the same game ticks. |
 | `--until-pc <SYMBOL>` | — | End the profile when execution reaches this routine (a `.sym` label, `label+N`, `BANK:OFFSET`), just before its first instruction: a window of N game ticks instead of N frames (see below). Bounded by `--until-frame` when given, else 36000 frames; `-n` does not apply. Not reaching it is an error, exit 1; the report is still written. |
 | `--hit <N>` | `1` | With `--until-pc`: which arrival, counted from power-on. |
+| `--poke-at <SYMBOL>`, `--poke-hit <N>`, `--poke <NAME=HEX>` | — | Write bytes into memory when execution reaches a routine, at its N-th arrival counted from power-on, before its first instruction: the grammar and the meaning of [`luna state --poke-at`](cli-run-state.md#stopping-on-a-routine-not-on-a-frame), repeatable the same way (see below). An arrival the run never reaches is an error, exit 1. |
 | `--sym <PATH>` | auto `<rom>.sym` | Labels to fold onto. |
 | `--top <N>` | `25` | Rows printed (the JSON has them all). |
 | `--out <PATH>` | — | JSON report (`-` = stdout after the table): `{rom, from_frame, end_frame, total_mclk, instructions, frames, entries: [{symbol, addr, instructions, mclk, idle_mclk, pct, pcs, per_frame: {max, max_frame, mean, frames} \| null}], budgets: [{symbol, limit, max, max_frame, ok}], frame_series: [{frame, active_mclk, idle_mclk, cpu_mclk, dma_mclk, hdma_mclk, refresh_mclk, total_mclk, nmi, lag}], worst_frames: [{…the same fields, entries: [{symbol, addr, mclk}]}], frame_summary: {frames, active_mean, active_max, active_max_frame, total_mean, lag_frames, lag_run, lag_run_frame, lag_runs: [{frame, length}], gates: [{gate, limit, value, frame, ok}]}}`. `per_frame` is the row's master cycles per **completed** PPU frame in the window: `max` (and the frame that paid it), `mean` over every completed frame (a frame the row did not run in counts 0), `frames` it ran in; `null` when no frame completed while it ran. The trailing partial frame is never counted. |
@@ -298,6 +299,40 @@ the JSON report carries it as `until_pc`
 (`{spec, addr, hit, reached, hits_seen, frame, line}`). The last frame is
 not complete: the frame series and the frame gates cover the completed
 ones, the table and the totals cover everything up to the stop.
+
+### A scene behind a menu — `--poke-at`
+
+A game with a menu starts its match only after a choice, and a profile
+of "frames 316 to 400" then measures the menu. The input script cannot
+always walk through it: with `--input-at` the script follows a routine
+of the match, and a run has one clock for its inputs. Write the choice
+into memory instead, as a test does:
+
+```bash
+# Left alone the game waits: nothing but `wait` in the window.
+luna profile game.sfc --from-frame 6 --until-frame 12 --top 2
+# profile: frames 6..12 (6 completed), 30 instructions, 2144200 master cycles, 2 symbol(s)
+#       %            mclk         instr   idle%     pcs   max/frame  symbol
+#  99.99%         2143936            24  100.0%       3      357324  wait
+#   0.01%             264             6    0.0%       1          44  nmi
+
+# The byte the menu would have set, written at the third arrival on `wait`.
+luna profile game.sfc --poke-at wait --poke-hit 3 --poke go=01 \
+    --from-frame 6 --until-frame 12 --top 2
+# poked 1 value(s) at wait hit 3 — frame 1, line 225
+# profile: frames 6..12 (6 completed), 3114 instructions, 2144196 master cycles, 3 symbol(s)
+#       %            mclk         instr   idle%     pcs   max/frame  symbol
+#  97.32%         2086764            24  100.0%       3      347798  wait
+#   2.67%           57168          3084    0.0%       4        9528  work
+```
+
+Arrivals are counted from power-on, the warm-up before `--from-frame`
+included, so the write usually lands before the window opens. Several
+`--poke-at` are grouped as in `luna state`: each takes the `--poke-hit`
+and the `--poke`s that follow it. The JSON report carries one
+`{spec, addr, hit, hits_seen, applied}` per `--poke-at` under `pokes`.
+Watching for the arrival does not change what is measured: a write that
+changes no behaviour leaves every figure of the report as it was.
 
 ### Frame by frame — which frame overran, and what ran in it
 

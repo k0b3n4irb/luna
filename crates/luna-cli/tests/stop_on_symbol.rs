@@ -983,3 +983,115 @@ fn a_profile_ends_on_an_arrival_like_a_state_run() {
         assert_eq!(luna("profile", &rom, args).status.code(), Some(2));
     }
 }
+
+/// A game that idles until a byte of RAM says go, as one that waits in
+/// a menu: `wait` loops on `go`, and `work` runs only once it is set.
+fn gated_rom(dir: &Path) -> PathBuf {
+    let prog = [
+        0x78, // 8000 SEI
+        0xA9, 0x80, // 8001 LDA #$80
+        0x8D, 0x00, 0x42, // 8003 STA $4200      NMI on
+        0xCB, // 8006 WAI               wait:
+        0xA5, 0x10, // 8007 LDA $10
+        0xF0, 0xFB, // 8009 BEQ $8006
+        0xA2, 0x00, // 800B LDX #$00        work:
+        0xCA, // 800D DEX
+        0xD0, 0xFD, // 800E BNE $800D
+        0x80, 0xF4, // 8010 BRA $8006
+        0x40, // 8012 RTI               nmi:
+    ];
+    let mut r = vec![0u8; 0x1_0000];
+    r[..prog.len()].copy_from_slice(&prog);
+    r[0x7FC0..0x7FD5].copy_from_slice(b"LUNA GATED           ".as_ref());
+    r[0x7FD5] = 0x20;
+    r[0x7FD7] = 0x07;
+    r[0x7FFC] = 0x00;
+    r[0x7FFD] = 0x80;
+    for off in [0x7FEA, 0x7FFA] {
+        r[off] = 0x12;
+        r[off + 1] = 0x80;
+    }
+    let rom = dir.join("game.sfc");
+    std::fs::write(&rom, &r).expect("write rom");
+    std::fs::write(
+        dir.join("game.sym"),
+        "[labels]\n00:8000 main\n00:8006 wait\n00:800b work\n00:8012 nmi\n7e:0010 go\n",
+    )
+    .unwrap();
+    rom
+}
+
+/// `luna profile --poke-at` writes at an arrival as `luna state` does, so
+/// the window can cover a scene the game reaches only through a choice.
+#[test]
+fn a_profile_pokes_on_arrival_to_reach_the_scene_it_measures() {
+    let dir = fresh_dir("profile_poke_at");
+    let rom = gated_rom(&dir);
+    let json = dir.join("profile.json");
+    let window = ["--from-frame", "6", "--until-frame", "12", "--out"];
+    let run = |args: &[&str]| {
+        let out = luna(
+            "profile",
+            &rom,
+            &[&window[..], &[json.to_str().unwrap()], args].concat(),
+        );
+        let report: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+        (out, report)
+    };
+    let ran = |report: &serde_json::Value, symbol: &str| {
+        report["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["symbol"] == symbol)
+    };
+
+    // Left alone, the game never leaves its wait.
+    let (out, idle) = run(&[]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!ran(&idle, "work"), "{idle}");
+    assert!(idle.get("pokes").is_none(), "{idle}");
+
+    // The byte written at the third arrival on `wait`, before the window
+    // opens: the window measures the work.
+    let (out, poked) = run(&["--poke-at", "wait", "--poke-hit", "3", "--poke", "go=01"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("poked 1 value(s) at wait hit 3"),
+        "{}",
+        text(&out)
+    );
+    assert!(ran(&poked, "work"), "{poked}");
+    assert_eq!(poked["pokes"][0]["spec"], "wait");
+    assert_eq!(poked["pokes"][0]["applied"], true);
+
+    // Watching for the arrival costs the measure nothing: a write that
+    // changes no behaviour leaves every figure as it was.
+    let (out, same) = run(&["--poke-at", "wait", "--poke", "7E:0020=00"]);
+    assert!(out.status.success(), "{}", text(&out));
+    for key in ["total_mclk", "instructions", "frames", "entries"] {
+        assert_eq!(same[key], idle[key], "{key}");
+    }
+
+    // An arrival the run never reaches wrote nothing: exit 1.
+    let (out, missed) = run(&["--poke-at", "work", "--poke", "go=01"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("--poke-at work: hit 1 not reached by frame 12 (reached 0 time(s))"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(missed["pokes"][0]["applied"], false);
+
+    // Usage errors, as in `luna state`.
+    for args in [
+        &["--poke-at", "wait", "--poke", "go"][..],
+        &["--poke-at", "nowhere", "--poke", "go=01"][..],
+        &["--poke", "go=01"][..],
+        &["--poke-at", "wait"][..],
+    ] {
+        assert_eq!(luna("profile", &rom, args).status.code(), Some(2));
+    }
+}

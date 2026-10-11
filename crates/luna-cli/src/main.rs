@@ -1010,6 +1010,26 @@ enum Command {
         /// builds of a game through the same ticks, whatever their speed.
         #[arg(long = "input-at")]
         input_at: Option<String>,
+        /// Write every `--poke` into memory when execution reaches this
+        /// routine, at its `--poke-hit`-th arrival counted from power-on,
+        /// just before its first instruction (`state --poke-at`): profile
+        /// a scene the game only reaches through a menu. Repeatable: each
+        /// `--poke-at` takes the `--poke-hit` and the `--poke`s that
+        /// follow it. Example: `--poke-at main --poke skip_menu=01`.
+        #[arg(long = "poke-at", requires = "poke")]
+        poke_at: Vec<String>,
+        /// With `--poke-at`: the arrival the bytes are written at
+        /// (default 1, the first). One per `--poke-at`.
+        #[arg(
+            long = "poke-hit",
+            requires = "poke_at",
+            value_parser = clap::value_parser!(u64).range(1..)
+        )]
+        poke_hit: Vec<u64>,
+        /// Bytes to write at the `--poke-at` before it: `NAME=HEX` or
+        /// `BANK:OFFSET=HEX`, hex bytes in memory order. Repeatable.
+        #[arg(long = "poke", requires = "poke_at")]
+        poke: Vec<String>,
         /// End the profile when execution reaches this routine (a `.sym`
         /// label, `label+N`, or `BANK:OFFSET` in hex), just before its
         /// first instruction: a window of N game ticks rather than N
@@ -1203,13 +1223,16 @@ enum Command {
     },
 }
 
-/// The values of one option of `luna state`, each with its place on the
-/// command line.
+/// The values of one option of `luna state` or `luna profile`, each with
+/// its place on the command line.
 fn indexed<T: Clone + Send + Sync + 'static>(
     matches: &clap::ArgMatches,
     id: &str,
 ) -> Vec<(usize, T)> {
-    let Some(sub) = matches.subcommand_matches("state") else {
+    let Some((_, sub)) = matches
+        .subcommand()
+        .filter(|(name, _)| matches!(*name, "state" | "profile"))
+    else {
         return Vec::new();
     };
     match (sub.indices_of(id), sub.get_many::<T>(id)) {
@@ -1622,6 +1645,9 @@ fn main() -> ExitCode {
             stack_floor,
             gsu_pc_set,
             input_at,
+            poke_at: _,
+            poke_hit: _,
+            poke: _,
             until_pc,
             hit,
             frames_out,
@@ -1659,6 +1685,7 @@ fn main() -> ExitCode {
                 stack_floor,
                 gsu_pc_set: gsu_pc_set.as_deref(),
                 input_at: input_at.as_deref(),
+                pokes: &poke_groups,
                 until_pc: until_pc.as_deref(),
                 hit: hit.unwrap_or(1),
                 frames_out: frames_out.as_deref(),

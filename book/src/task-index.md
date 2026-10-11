@@ -92,6 +92,7 @@ means that transport has no form of it.
 | master cycles per function | `luna profile --sym game.sym` | `enable_profile`, `take_profile` | [`luna profile`](using/cli-analysis.md#luna-profile--real-master-cycles-per-symbol) |
 | fail the build when the NMI handler is too slow | `--budget NmiHandler=6000` | — | [`luna profile`](using/cli-analysis.md#luna-profile--real-master-cycles-per-symbol) |
 | profile the same game ticks on two builds | `luna profile --until-pc tickEnd --hit 340` | — | [The same work on two builds](using/cli-analysis.md#the-same-work-on-two-builds----until-pc) |
+| profile a scene the game reaches only through a menu | `luna profile --poke-at main --poke skip_menu=01` | — | [A scene behind a menu](using/cli-analysis.md#a-scene-behind-a-menu----poke-at) |
 | find which frame overran, and what ran in it | `luna profile --frames-out frames.csv --worst 3` | — | [Frame by frame](using/cli-analysis.md#frame-by-frame--which-frame-overran-and-what-ran-in-it) |
 | fail the build when a tick spills into one frame too many | `--max-lag-run 1`, `--max-lag-frames`, `--max-frame-mclk` | — | [Frame by frame](using/cli-analysis.md#frame-by-frame--which-frame-overran-and-what-ran-in-it) |
 | know how deep the stack went | `--stack-floor` | — | [How deep the stack went](using/cli-analysis.md#how-deep-the-stack-actually-went) |

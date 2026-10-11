@@ -17,6 +17,14 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   --poke-hit 91 --poke ball_x=4001`. The JSON report gains `pokes`, one
   entry per `--poke-at`; `poke` stays, and is the first of them. A
   command line with one `--poke-at` reads as before, in any order.
+- **`luna profile --poke-at`, `--poke-hit`, `--poke`.** A game with a
+  menu starts its match only after a choice, and a profile window then
+  measured the menu; `luna state` and the manifests could write the
+  choice at an arrival on a routine, `luna profile` could not. It takes
+  the same three flags, with the same meaning and the same grouping:
+  `luna profile game.sfc --poke-at main --poke skip_menu=01 --from-frame
+  316 --until-frame 400`. The report carries `pokes`; an arrival the run
+  never reaches is an error, exit 1.
 - **`--peek CGRAM:COLOR:COUNT`.** `luna state` reads the palette as it
   reads VRAM: `COUNT` bytes from a colour index (as `CGADD` takes it),
   two bytes per colour, low byte first — `--peek CGRAM:10:#32` is
