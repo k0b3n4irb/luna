@@ -17,6 +17,7 @@
 //! power_on = "random"            # zero (default) | ones | random (+ seed, default 1)
 //! seed = 12345
 //! region = "pal"                 # ntsc | pal — overrides the cartridge header
+//! render = false                 # leave the picture uncomputed (no fbhash / screenshot)
 //!
 //! [asserts]
 //! wdm_empty = true               # SNES_ASSERT never fired
@@ -97,6 +98,10 @@ struct Manifest {
     power_on: Option<String>,
     /// Seed for `power_on = "random"` (default 1).
     seed: Option<u64>,
+    /// `false` leaves the picture uncomputed, the CLI's `--no-render`: the
+    /// same machine in about half the time, for a test that reads memory.
+    /// Refused with `asserts.fbhash` or `screenshot`.
+    render: Option<bool>,
     /// Run bound: whole frames…
     frames: Option<u64>,
     /// …or raw instructions. One is required unless `[[checkpoint]]`s
@@ -878,6 +883,18 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
     {
         return Err(format!("unknown `region` '{r}' (ntsc, pal)"));
     }
+    if m.render == Some(false) {
+        for (set, key) in [
+            (m.asserts.fbhash.is_some(), "asserts.fbhash"),
+            (m.screenshot.is_some(), "screenshot"),
+        ] {
+            if set {
+                return Err(format!(
+                    "`render = false` leaves the picture uncomputed: remove `{key}` or the key"
+                ));
+            }
+        }
+    }
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let name = path.file_stem().map_or_else(
         || path.display().to_string(),
@@ -1024,6 +1041,9 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
         None,
         power_on.as_deref(),
     )?;
+    if m.render == Some(false) {
+        em.set_rendering(false).map_err(|e| e.to_string())?;
+    }
     if let Some(sym) = &m.sym {
         em.load_symbols(&dir.join(sym))
             .map_err(|e| format!("loading symbols: {e}"))?;

@@ -2732,6 +2732,7 @@ impl Emulator {
         let rgba = self.render_frame_rgba(force_display)?;
         Ok(fnv1a_64(&rgba))
     }
+
     /// Turn the computation of the picture on or off (on by default).
     ///
     /// Off, the emulated machine runs exactly as before — registers,

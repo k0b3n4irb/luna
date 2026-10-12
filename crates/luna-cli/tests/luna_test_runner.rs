@@ -1030,6 +1030,33 @@ fn region_key_forces_the_video_standard_and_is_echoed() {
     );
     assert!(!err.contains("--force-region"), "{err}");
 
+    // `render = false` runs the same machine without the picture, and is
+    // refused with a key that reads it.
+    std::fs::write(
+        dir.join("blind.toml"),
+        "rom = \"game.sfc\"\nforce_mapper = \"lorom\"\nframes = 2\nrender = false\n",
+    )
+    .unwrap();
+    let blind = run(&["blind.toml"], &dir);
+    assert!(
+        blind.status.success(),
+        "{}",
+        String::from_utf8_lossy(&blind.stdout)
+    );
+    std::fs::write(
+        dir.join("blind_hash.toml"),
+        "rom = \"game.sfc\"\nforce_mapper = \"lorom\"\nframes = 2\nrender = false\n\
+         [asserts]\nfbhash = \"0000000000000000\"\n",
+    )
+    .unwrap();
+    let blind_hash = run(&["blind_hash.toml"], &dir);
+    assert_eq!(blind_hash.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&blind_hash.stderr).contains("remove `asserts.fbhash`"),
+        "{}",
+        String::from_utf8_lossy(&blind_hash.stderr)
+    );
+
     // Both spellings at once: TOML reports a duplicate `region`, which the
     // author of `force_region` cannot place without the alias being named.
     std::fs::write(

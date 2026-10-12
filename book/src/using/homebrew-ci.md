@@ -109,6 +109,20 @@ the manifest so a run never depends on a command-line flag:
   standard **without building it twice**, including the case no header
   can express: an NTSC cartridge on a PAL console.
 - **`power_on`** / **`seed`** — what RAM holds before the ROM boots.
+- **`render = false`** — leave the picture uncomputed, as `--no-render`
+  does: the same machine in about half the time, for a test that reads
+  memory and never the screen. A manifest error with `asserts.fbhash` or
+  `screenshot`.
+
+  ```toml
+  rom = "../build/game.sfc"
+  render = false               # nothing below looks at the picture
+  frames = 6000
+  [[checkpoint]]
+  at_symbol = "round_done"
+  [checkpoint.values]
+  round = 1
+  ```
 - **`force_mapper`** — for headerless or work-in-progress images.
 
 ```toml

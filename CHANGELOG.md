@@ -53,7 +53,9 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   in about half the time (6.1 s to 2.9 s on that case). The report
   carries `ppu.rendering`. An option that reads the screen is refused
   with it, and the API (`Emulator::set_rendering`) returns an error
-  from every picture reader rather than a stale frame.
+  from every picture reader rather than a stale frame. In a `luna test`
+  manifest the key is `render = false`, an error next to
+  `asserts.fbhash` or `screenshot`.
 - **`gsu.ms0_at_21mhz` in the state report.** A Super FX program that
   sets the fast multiplier (CFGR bit 5) and 21 MHz (CLSR bit 0) together
   ran without a word, though the manual forbids the pair and the console
