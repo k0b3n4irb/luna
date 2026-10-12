@@ -45,6 +45,15 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   sheet loaded over a tilemap is one line there; a frame hash only said
   the picture had changed. The JSON report carries the table as
   `vram_writers`.
+- **`--no-render` on `luna state` and `luna profile`.** Composing the
+  picture is over half the work of a run (59 % of the instructions
+  executed on the case measured), and a run that reads memory never
+  opens it. `--no-render` leaves the pixels uncomputed: the same
+  cycles, registers, WRAM, VRAM, OAM, CGRAM and `$213E` sprite flags,
+  in about half the time (6.1 s to 2.9 s on that case). The report
+  carries `ppu.rendering`. An option that reads the screen is refused
+  with it, and the API (`Emulator::set_rendering`) returns an error
+  from every picture reader rather than a stale frame.
 - **`gsu.ms0_at_21mhz` in the state report.** A Super FX program that
   sets the fast multiplier (CFGR bit 5) and 21 MHz (CLSR bit 0) together
   ran without a word, though the manual forbids the pair and the console

@@ -137,6 +137,7 @@ and is the hub for every headless diagnostic.
 | `--force-region <R>` | header | Force the video standard: `ntsc` or `pal`. |
 | `--power-on <S>` | `zero` | What RAM holds before the ROM boots: `zero`, `ones`, `random` (seed derived and printed) or `random=<seed>`. See *Power-on memory state* above. |
 | `--native-res` | off | As in `run` — native 512×448 output for `--screenshot` and `--print-fbhash`. |
+| `--no-render` | off | Leave the picture uncomputed: the same machine state in about half the time. Refused with `--screenshot`, `--screenshot-frames`, `--print-fbhash` and `--native-res`. See [A run that never looks at the screen](#a-run-that-never-looks-at-the-screen---no-render). |
 | `--sym <PATH>` | auto-detect `<rom>.sym` | Load a WLA-DX symbol file (annotated disasm, named addresses). |
 | `--dsp1-rom <PATH>` | — | Install `dsp1b.rom` firmware then load (Mario Kart, Pilotwings). Persists. The file must be exactly 8192 bytes or it is refused with the reason, leaving any working install untouched — a firmware dump cannot be re-downloaded, and an empty or truncated one that installed "successfully" would leave every DSP-1 game running with an inert chip and no error. A dump that is present but unusable is reported as missing. |
 | `--load-state <PATH>` | — | Load a `.luna` save-state right after ROM load, before warm-up (resume a GUI-captured scene). |
@@ -276,6 +277,28 @@ writes the pictures it reached and says how many.
 
 `luna frames` remains the tool for a flicker: it tags each consecutive
 frame with whether the screen showed anything.
+
+### A run that never looks at the screen (`--no-render`)
+
+Composing the pixels of each scanline is more than half of what luna
+does in a run (59 % of the instructions executed, measured on a game
+checking its league tables). A run that only reads memory — a
+`--peek`, an `--assert`, a `--peek-at` table over a whole season — pays
+for a picture nobody opens. `--no-render` skips it:
+
+```bash
+luna state game.sfc --until-pc round_done --hit 14 --until-frame 600000 \
+  --peek-at round_done --peek standings:#16 --peek-at-out league.csv \
+  --no-render --out /dev/null
+```
+
+The machine is the same one: the compositor only reads the PPU, so the
+cycles, the registers, WRAM, VRAM, OAM and CGRAM, and the sprite
+evaluation behind the `$213E` overflow flags are computed as before. The
+report says so with `"ppu": { "rendering": false, … }`, its only
+difference. What reads the screen is refused on the command line
+(`--screenshot`, `--screenshot-frames`, `--print-fbhash`,
+`--native-res`), exit 2, rather than answered with a black frame.
 
 ### Stopping on a routine, not on a frame
 

@@ -305,6 +305,16 @@ enum Command {
         /// `--print-fbhash`.
         #[arg(long = "native-res")]
         native_res: bool,
+        /// Leave the picture uncomputed. The machine runs exactly the
+        /// same (cycles, registers, VRAM / OAM / CGRAM, the `$213E` sprite
+        /// flags) but no pixel is composed, about half the time of a run.
+        /// For a run that reads memory and never the screen; refused with
+        /// an option that reads the picture.
+        #[arg(
+            long = "no-render",
+            conflicts_with_all = ["screenshot", "screenshot_frames", "print_fbhash", "native_res"]
+        )]
+        no_render: bool,
         /// Dump all 64 KB of PPU VRAM (raw bytes) to this file after the
         /// run. For diagnosing the framebuffer DMA → VRAM → display path.
         #[arg(long = "dump-vram")]
@@ -1072,6 +1082,11 @@ enum Command {
         /// into a third.
         #[arg(long = "max-lag-run")]
         max_lag_run: Option<u64>,
+        /// Leave the picture uncomputed: the same cycles and the same
+        /// report, in about half the time. A profile never reads the
+        /// screen.
+        #[arg(long = "no-render")]
+        no_render: bool,
         #[arg(long = "force-mapper", help = mapper_help("Force a cartridge mapper."))]
         force_mapper: Option<String>,
         /// Force the video standard (ntsc, pal).
@@ -1394,6 +1409,7 @@ fn main() -> ExitCode {
             print_fbhash,
             call_stack,
             native_res,
+            no_render,
         } => {
             if schema {
                 // `--schema` needs no ROM: print the `--out` payload's JSON
@@ -1474,6 +1490,7 @@ fn main() -> ExitCode {
                 print_fbhash,
                 call_stack,
                 native_res,
+                no_render,
                 power_on.as_deref(),
                 until_pc.as_deref(),
                 hit,
@@ -1656,6 +1673,7 @@ fn main() -> ExitCode {
             max_frame_mclk,
             max_lag_frames,
             max_lag_run,
+            no_render,
             force_mapper,
             force_region,
             power_on,
@@ -1687,6 +1705,7 @@ fn main() -> ExitCode {
                 gsu_pc_set: gsu_pc_set.as_deref(),
                 input_at: input_at.as_deref(),
                 pokes: &poke_groups,
+                no_render,
                 until_pc: until_pc.as_deref(),
                 hit: hit.unwrap_or(1),
                 frames_out: frames_out.as_deref(),

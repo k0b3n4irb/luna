@@ -577,6 +577,7 @@ pub(crate) fn run_state(
     print_fbhash: bool,
     call_stack: bool,
     native_res: bool,
+    no_render: bool,
     power_on: Option<&str>,
     until_pc: Option<&str>,
     hit: u64,
@@ -638,6 +639,9 @@ pub(crate) fn run_state(
         // Issue #115: keep the un-collapsed 512×448 pixels alongside the
         // displayed frame; --screenshot / --print-fbhash emit them below.
         em.set_native_capture(true).expect("rom just loaded");
+    }
+    if no_render {
+        em.set_rendering(false).expect("rom just loaded");
     }
     // Explicit `--sym` overrides the `<rom>.sym` auto-detection done by
     // `load_rom_into` (issue #67).

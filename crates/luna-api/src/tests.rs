@@ -1362,6 +1362,49 @@ fn framebuffer_hash_is_deterministic_and_matches_rgba_pixels() {
 }
 
 #[test]
+fn rendering_off_changes_no_state_and_refuses_the_picture() {
+    // The compositor only reads the PPU, so leaving the picture
+    // uncomputed must leave the machine where it would have been.
+    let run = |rendering: bool| {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom()).unwrap();
+        e.set_rendering(rendering).unwrap();
+        for _ in 0..5 {
+            e.step_until_frame(1_000_000).unwrap();
+        }
+        e
+    };
+    let (mut on, mut off) = (run(true), run(false));
+    let mut a = serde_json::to_value(on.state()).unwrap();
+    let mut b = serde_json::to_value(off.state()).unwrap();
+    assert_eq!(a["ppu"]["rendering"], true);
+    assert_eq!(b["ppu"]["rendering"], false);
+    a["ppu"]["rendering"] = serde_json::Value::Null;
+    b["ppu"]["rendering"] = serde_json::Value::Null;
+    assert_eq!(a, b, "the same machine, picture or not");
+    assert_eq!(
+        on.save_state().unwrap().len(),
+        off.save_state().unwrap().len()
+    );
+
+    // A stale frame is never handed out: every reader of the picture says
+    // why it has none.
+    let refused = |r: Result<(), ApiError>| {
+        assert!(
+            matches!(&r, Err(ApiError::BadArg(m)) if m.contains("rendering is off")),
+            "{r:?}"
+        );
+    };
+    refused(off.render_frame_png(false).map(drop));
+    refused(off.render_frame_png(true).map(drop));
+    refused(off.render_frame_rgba(false).map(drop));
+    refused(off.framebuffer_hash().map(drop));
+    refused(off.render_frame_png_native().map(drop));
+    refused(off.frame_hash_native().map(drop));
+    assert!(on.framebuffer_hash().is_ok());
+}
+
+#[test]
 fn hostile_tool_arguments_do_not_panic() {
     // Both of these used to abort the request handler outright: the
     // palette size overflowed its byte count to zero and then indexed

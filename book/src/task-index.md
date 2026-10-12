@@ -29,6 +29,7 @@ means that transport has no form of it.
 | one background layer alone | `--bg <1..4>` | `screenshot {bg}` | [`luna run`](using/cli-run-state.md#luna-run--quick-render--audio-dump) |
 | the picture behind a forced blank | `--force-display` | `screenshot {force_display}` | [`luna run`](using/cli-run-state.md#luna-run--quick-render--audio-dump) |
 | the true 512-wide hi-res frame | `--native-res` | `set_native_capture`, `screenshot {native}` | [`luna run`](using/cli-run-state.md#luna-run--quick-render--audio-dump) |
+| a run twice as fast when nothing reads the screen | `--no-render` (`state`, `profile`) | — | [`luna state`](using/cli-run-state.md#a-run-that-never-looks-at-the-screen---no-render) |
 | a hash of the frame, to compare runs | `--print-fbhash` | `frame_hash` | [`luna run`](using/cli-run-state.md#luna-run--quick-render--audio-dump) |
 | which table or routine wrote a range of VRAM, and what two of them both wrote | `luna state --vram-writers writers.txt` | — | [Who wrote this into VRAM?](using/cli-run-state.md#who-wrote-this-into-vram---vram-writers) |
 | a picture per frame over a range, in one run | `luna state --until-frame B --screenshot-frames A..B/K --screenshot-dir DIR` | `step_until_frame`, `screenshot` | [A picture per frame](using/cli-run-state.md#a-picture-per-frame-in-one-run) |

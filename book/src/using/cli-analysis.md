@@ -242,6 +242,7 @@ parked in `WAI` / `STP` under that label.
 | `--worst <N>` | `0` | Print the per-symbol table of the `N` heaviest frames (by `active_mclk`); they are `worst_frames` in `--out`. |
 | `--max-frame-mclk <N>` | — | Gate: no completed frame may use more than `N` active master cycles, else **exit 1**. |
 | `--max-lag-frames <N>` | — | Gate: at most `N` lag frames in the window, else **exit 1**. |
+| `--no-render` | off | Leave the picture uncomputed: the same cycles and the same report, in about half the time (`luna profile game.sfc --until-frame 3000 --no-render`). A profile never reads the screen. |
 | `--max-lag-run <N>` | — | Gate: at most `N` lag frames **in a row**, else **exit 1** — the check for a game whose tick is allowed to take more than one frame. |
 | `--budget <SYMBOL=MCLK>` | — | Gate (repeatable): the symbol's worst completed frame must not exceed `MCLK` master cycles, else **exit 1** with the frame named. A symbol the loaded `.sym` does not know is a usage error (exit 2) — a typo must not pass; a known symbol that never ran costs 0 and passes. The VBlank-budget check for CI. |
 | `--gsu-pc-set <PATH>` | — | The distinct **GSU** PCs executed, same encoding as `--pc-set`, in a separate file (a GSU PC and a 65816 PC can be the same number and mean different code). |

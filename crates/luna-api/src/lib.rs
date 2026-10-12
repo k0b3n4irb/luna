@@ -547,6 +547,10 @@ pub struct DisasmLine {
 /// PPU register snapshot + memory occupancy stats.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct PpuState {
+    /// `false` when the run left the picture uncomputed (`--no-render`,
+    /// [`Emulator::set_rendering`]): the machine's state is exact, and
+    /// nothing that reads the screen is available.
+    pub rendering: bool,
     /// `$2100` — bit 7 forced-blank, bits 0-3 brightness.
     pub inidisp: u8,
     /// `$2105` — bits 0-2 BG mode, bit 3 BG3 priority, bits 4-7 tile sizes.
@@ -2098,6 +2102,7 @@ impl Emulator {
                 tilemap_size: s.ppu.bg[i].tilemap_size,
             });
             PpuState {
+                rendering: !s.ppu.skip_pixels,
                 inidisp: s.ppu.inidisp,
                 bgmode: s.ppu.bgmode,
                 vram_addr_words: s.ppu.vram.address,
@@ -2400,6 +2405,7 @@ impl Emulator {
     /// force-display debug path still re-renders the whole frame
     /// via `render_frame_with` with `bypass_forced_blank: true`.
     pub fn render_frame_png(&self, force_display: bool) -> Result<Vec<u8>, ApiError> {
+        self.require_picture()?;
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
         let height = snes.ppu.frame_height();
         let mut buf = Vec::with_capacity(FRAME_W * height * 3);
@@ -2490,6 +2496,7 @@ impl Emulator {
     /// GUI cannot disagree on pixels. `force_display` bypasses INIDISP
     /// forced-blank (debug: see VRAM even while the game blanks).
     pub fn render_frame_rgba(&self, force_display: bool) -> Result<Vec<u8>, ApiError> {
+        self.require_picture()?;
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
         let mut out = Vec::with_capacity(FRAME_W * snes.ppu.frame_height() * 4);
         let mut push_rgb = |px: &[u8; 3]| {
@@ -2703,6 +2710,7 @@ impl Emulator {
     /// forced-blank); the two together separate "rendering nothing" from
     /// "rendering the same thing forever".
     pub fn framebuffer_hash(&self) -> Result<u64, ApiError> {
+        self.require_picture()?;
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
         Ok(fnv1a_64(snes.ppu.framebuffer().as_flattened()))
     }
@@ -2723,6 +2731,32 @@ impl Emulator {
     pub fn frame_hash(&self, force_display: bool) -> Result<u64, ApiError> {
         let rgba = self.render_frame_rgba(force_display)?;
         Ok(fnv1a_64(&rgba))
+    }
+    /// Turn the computation of the picture on or off (on by default).
+    ///
+    /// Off, the emulated machine runs exactly as before — registers,
+    /// VRAM / OAM / CGRAM, sprite evaluation and its `$213E` flags, every
+    /// cycle — but no pixel is composed, which is over half the work of a
+    /// run. Every call that reads the picture then returns an error
+    /// instead of a stale frame: [`Self::render_frame_png`],
+    /// [`Self::render_frame_rgba`], [`Self::framebuffer_hash`] and their
+    /// native variants. Turn it back on and let a frame elapse to read
+    /// one again.
+    pub fn set_rendering(&mut self, on: bool) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.ppu.skip_pixels = !on;
+        Ok(())
+    }
+
+    /// The error a picture reader returns while rendering is off.
+    fn require_picture(&self) -> Result<(), ApiError> {
+        match &self.snes {
+            Some(snes) if snes.ppu.skip_pixels => Err(ApiError::BadArg(
+                "the picture is not computed: rendering is off (set_rendering / --no-render)"
+                    .into(),
+            )),
+            _ => Ok(()),
+        }
     }
 
     /// Enable / disable the **native 512×448 capture** (issue #115).
@@ -2746,6 +2780,7 @@ impl Emulator {
     /// The native 512×448 frame as PNG bytes — see
     /// [`Self::set_native_capture`]. Errors if capture is not enabled.
     pub fn render_frame_png_native(&self) -> Result<Vec<u8>, ApiError> {
+        self.require_picture()?;
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
         if snes.ppu.native_framebuffer.is_empty() {
             return Err(ApiError::BadArg(
@@ -2770,6 +2805,7 @@ impl Emulator {
     /// (fbhash v2: FNV-1a 64 over the raw RGB bytes). Errors if capture is
     /// not enabled.
     pub fn frame_hash_native(&self) -> Result<u64, ApiError> {
+        self.require_picture()?;
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
         if snes.ppu.native_framebuffer.is_empty() {
             return Err(ApiError::BadArg(
@@ -4685,6 +4721,7 @@ const fn default_cpu_state() -> CpuState {
 
 const fn default_ppu_state() -> PpuState {
     PpuState {
+        rendering: true,
         inidisp: 0,
         bgmode: 0,
         vram_addr_words: 0,

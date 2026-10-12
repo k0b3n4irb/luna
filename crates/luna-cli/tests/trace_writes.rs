@@ -102,3 +102,40 @@ fn trace_writes_requires_mem_trace() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("--mem-trace"), "{err}");
 }
+
+#[test]
+fn no_render_is_refused_with_an_option_that_reads_the_picture() {
+    let dir = std::env::temp_dir().join("luna_no_render");
+    let _ = std::fs::create_dir_all(&dir);
+    let rom_path = dir.join("game.sfc");
+    rom(&rom_path);
+    let run = |extra: &[&str]| {
+        Command::new(luna_bin())
+            .arg("state")
+            .arg(&rom_path)
+            .args(["--force-mapper", "lorom", "-n", "100", "--out", "-"])
+            .args(extra)
+            .output()
+            .expect("run luna state")
+    };
+    let png = dir.join("x.png");
+    for reader in [
+        vec!["--screenshot", png.to_str().unwrap()],
+        vec!["--print-fbhash"],
+        vec!["--native-res"],
+    ] {
+        let mut args = vec!["--no-render"];
+        args.extend(reader);
+        let out = run(&args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+    }
+    // Alone it runs, and reports the same machine.
+    let (with, without) = (run(&[]), run(&["--no-render"]));
+    assert!(without.status.success());
+    let json = |o: &std::process::Output| {
+        let mut v: serde_json::Value = serde_json::from_slice(&o.stdout).expect("json");
+        v["ppu"]["rendering"] = serde_json::Value::Null;
+        v
+    };
+    assert_eq!(json(&with), json(&without));
+}

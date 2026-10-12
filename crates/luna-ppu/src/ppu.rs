@@ -407,6 +407,14 @@ pub struct Ppu {
     /// a consumer that asked for native output pays for it.
     #[serde(skip)]
     pub native_capture: bool,
+    /// Leave the picture uncomputed: the per-scanline flush advances its
+    /// cursor and writes no pixel. Everything a program can observe is
+    /// unchanged — registers, VRAM / OAM / CGRAM, the per-line sprite
+    /// evaluation and its `$213E` flags, the mosaic counter — since the
+    /// compositor only reads the PPU. For a run that reads memory and
+    /// never the screen, where composing pixels is over half the work.
+    #[serde(skip)]
+    pub skip_pixels: bool,
     /// The native 512×448 frame, maintained per scanline when
     /// [`Self::native_capture`] is on: hi-res dots keep their sub/main
     /// subpixel pair side by side (lores dots are duplicated), and the two
@@ -548,6 +556,7 @@ impl Ppu {
             frame_overscan: false,
             beam_dot: 0,
             native_capture: false,
+            skip_pixels: false,
             native_framebuffer: Vec::new(),
             last_flushed_dot: 0,
             line_sprites: None,
@@ -713,6 +722,10 @@ impl Ppu {
         let start = self.last_flushed_dot.min(FRAME_W as u16);
         let end = end_x.min(FRAME_W as u16);
         if start >= end {
+            return;
+        }
+        if self.skip_pixels {
+            self.last_flushed_dot = end;
             return;
         }
         // Per-line OBJ eval, decoded once and reused (blank lines need

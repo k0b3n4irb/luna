@@ -38,6 +38,8 @@ pub(crate) struct ProfileOptions<'a> {
     pub input_at: Option<&'a str>,
     /// `--poke-at` groups: bytes written at an arrival on a routine.
     pub pokes: &'a [crate::state::PokeGroup],
+    /// `--no-render`: leave the picture uncomputed.
+    pub no_render: bool,
     /// `--until-pc`: end the profile when execution reaches this routine…
     pub until_pc: Option<&'a str>,
     /// …at its `--hit`-th arrival, counted from power-on.
@@ -250,6 +252,9 @@ pub(crate) fn run_profile(rom: &std::path::Path, o: &ProfileOptions<'_>) -> Exit
     ) {
         eprintln!("error: {e}");
         return ExitCode::from(1);
+    }
+    if o.no_render {
+        em.set_rendering(false).expect("rom just loaded");
     }
     if let Some(sym) = o.sym {
         match em.load_symbols(sym) {

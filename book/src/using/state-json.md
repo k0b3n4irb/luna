@@ -7,7 +7,7 @@
 | `rom` | `RomInfo`: `title`, `mapper`, `rom_bytes`, `header_rom_size_kb`, `sram_kb`, `region`, `fast_rom`, `version`, `checksum{,_complement,_valid,_computed}` (`checksum_valid` only says the header pair is consistent; `checksum == checksum_computed` says the header matches the ROM bytes: `luna state game.sfc --until-frame 0 --out - \| jq '.rom \| .checksum == .checksum_computed'`), `missing_firmware`, `board_note` (set when the header describes a cartridge no known board carries — a DSP-1 LoROM over 1 MB without save RAM — with what luna does about it; the CLI prints it as a warning at load), and `symbols_loaded` / `symbols_error` (how many labels the `.sym` gave, or why it could not be read). |
 | `cpu` | 65c816 registers `a/x/y/sp/pc/pb/db/dp/p` + flags. |
 | `cpu_regs` | Decoded MMIO/CPU register block. |
-| `ppu` | PPU registers + VRAM/CGRAM/OAM occupancy. |
+| `ppu` | PPU registers + VRAM/CGRAM/OAM occupancy. `rendering` is `false` when the run left the picture uncomputed (`--no-render`). |
 | `scheduler` | Master-clock / line / frame scheduler state: `frame_count`, `ppu_line`, `nmis_serviced`, `last_nmi_frame` (see below), … |
 | `apu` | SPC700 + S-DSP state (`spc_stopped`, etc.). |
 | `dma` | `mdmaen` / `hdmaen` (the `$420B` / `$420C` enable masks) and the per-channel DMA/HDMA registers (see below). |
