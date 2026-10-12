@@ -2863,7 +2863,10 @@ impl Bus for SnesBus<'_> {
         self.write_inner(addr, value);
     }
     fn io_cycle(&mut self, mcycles: MCycles) {
+        // ares `CPU::idle` (`cpu/memory.cpp:1-6`): the clocks, then the
+        // multiplier / divider's cycle.
         self.advance_time(mcycles, true);
+        self.cpu_regs.alu_edge();
     }
     fn last_cycle(&mut self, i_flag: bool) -> InterruptSample {
         // ares `CPU::lastCycle()` (`sfc/cpu/irq.cpp:88-93`), which is
@@ -3018,6 +3021,14 @@ impl SnesBus<'_> {
             }
             self.mclk.credit(MclkKind::Refresh, u64::from(refresh));
             self.mclk.credit(MclkKind::Hdma, u64::from(hdma));
+            // Each of the five refresh accesses ends on `aluEdge()` (ares
+            // `cpu/timing.cpp:24-28`): the unit keeps computing while the
+            // CPU is halted.
+            if refresh > 0 {
+                for _ in 0..5 {
+                    self.cpu_regs.alu_edge();
+                }
+            }
             kind = None;
             caller_time = false;
             stall_refresh = refresh;
@@ -3184,7 +3195,7 @@ impl SnesBus<'_> {
         // this instruction — see `dma_edge`.
         self.dma_edge();
         // Every bus speed is >= 6 mclk, so the pre-sample step is >= 2.
-        self.io_cycle(speed.mcycles() - READ_SAMPLE_TAIL);
+        self.advance_time(speed.mcycles() - READ_SAMPLE_TAIL, true);
         // Was this cartridge read denied because the GSU owns the bus? Ask
         // before the read, while the grants still describe it, and only when
         // someone is capturing (`OpenSNES` R2). The mapper counts these on
@@ -3198,7 +3209,10 @@ impl SnesBus<'_> {
         // Timestamp the trace / fire watchpoints at the sampling point — that
         // is where the byte was latched.
         self.trace_mem_access(addr, MemEventKind::Read, data);
-        self.io_cycle(READ_SAMPLE_TAIL);
+        self.advance_time(READ_SAMPLE_TAIL, true);
+        // ares `aluEdge()` closes the read (`cpu/memory.cpp:15`): a read of
+        // RDMPY / RDDIV sees the cycles before its own, not its own.
+        self.cpu_regs.alu_edge();
         data
     }
 
@@ -3466,11 +3480,13 @@ impl SnesBus<'_> {
     fn write_inner(&mut self, addr: Addr24, value: u8) {
         // S-CPU memory-address register (ares `cpu.r.mar`) — see `read_inner`.
         self.scpu_mar = addr;
+        // ares `CPU::write` opens with `aluEdge()` (`memory.cpp:22`).
+        self.cpu_regs.alu_edge();
         let speed = address_speed(addr, *self.fast_rom);
         self.clock_count = speed.mcycles() as u32;
         // ares `CPU::write` runs `dmaEdge()` before stepping (`memory.cpp:24`).
         self.dma_edge();
-        self.io_cycle(speed.mcycles());
+        self.advance_time(speed.mcycles(), true);
 
         // Nocash debug TTY: capture `$21FC` writes (no$/Mesen console port —
         // the SDK's `SNES_NOCASH`/`SNES_ASSERT`) when enabled, bounded so a

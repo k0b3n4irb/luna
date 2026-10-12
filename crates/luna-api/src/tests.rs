@@ -336,13 +336,13 @@ fn save_state_shape_is_pinned_to_the_version() {
     assert_eq!(
         (SAVE_STATE_VERSION, shapes),
         (
-            8,
+            9,
             [
-                ("LoROM", (447_761, 8_195)),
-                ("SA-1", (447_761, 4_723)),
-                ("Super FX", (447_761, 2_671)),
-                ("S-DD1", (447_761, 2_171)),
-                ("DSP-1", (447_761, 2_129)),
+                ("LoROM", (447_764, 8_195)),
+                ("SA-1", (447_764, 4_723)),
+                ("Super FX", (447_764, 2_671)),
+                ("S-DD1", (447_764, 2_171)),
+                ("DSP-1", (447_764, 2_129)),
             ]
         ),
         "serialized machine shape changed — see this test's doc comment"
@@ -2046,4 +2046,34 @@ fn a_step_longer_than_a_frame_is_split_across_the_series() {
     assert_eq!(r.frame_series[4].total_mclk, last.total);
     let dma: u64 = r.frame_series.iter().map(|f| f.dma_mclk).sum();
     assert!((0x1_0000 * 8..0x1_0000 * 8 + 200).contains(&dma), "{dma}");
+}
+
+/// The 5A22 builds a product one bit per CPU cycle over eight (ares
+/// `aluEdge`, Mesen2 `AluMulDiv::Run`): a read that comes too early gets
+/// the value in progress, and a routine that waits too little fails here
+/// as it does on the console.
+#[test]
+fn a_product_read_too_early_is_the_one_in_progress() {
+    #[rustfmt::skip]
+    let code = [
+        0xA9, 0xFF, 0x8D, 0x02, 0x42,       // LDA #$FF ; STA $4202
+        0x8D, 0x03, 0x42,                   // STA $4203
+        0xAD, 0x16, 0x42, 0x85, 0x10,       // LDA $4216 ; STA $10   3 cycles in
+        0xA9, 0xFF, 0x8D, 0x03, 0x42,       // LDA #$FF ; STA $4203
+        0xEA,                               // NOP
+        0xAD, 0x16, 0x42, 0x85, 0x11,       // LDA $4216 ; STA $11   5 cycles in
+        0xA9, 0xFF, 0x8D, 0x03, 0x42,       // LDA #$FF ; STA $4203
+        0xEA, 0xEA, 0xEA,                   // NOP x3
+        0xAD, 0x16, 0x42, 0x85, 0x12,       // LDA $4216 ; STA $12   9 cycles in
+        0xAD, 0x17, 0x42, 0x85, 0x13,       // LDA $4217 ; STA $13
+        0xDB,                               // STP
+    ];
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
+    e.step(64).unwrap();
+    // 0xFF x 0xFF after 3, 5 and 8 cycles: $06F9, $1EE1, $FE01.
+    assert_eq!(
+        e.peek_memory(0x7E, 0x0010, 4).unwrap(),
+        [0xF9, 0xE1, 0x01, 0xFE]
+    );
 }

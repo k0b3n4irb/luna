@@ -62,6 +62,13 @@ pub struct CpuRegs {
     pub rdmpy: u16,
     /// Result of the division ($4214/$4215).
     pub rddiv: u16,
+    /// Cycles left of a running multiplication (ares `alu.mpyctr`): the
+    /// product is built one bit per CPU cycle over eight.
+    pub alu_mpyctr: u8,
+    /// Cycles left of a running division (ares `alu.divctr`), sixteen.
+    pub alu_divctr: u8,
+    /// The unit's shift register (ares `alu.shift`).
+    pub alu_shift: u32,
 
     // ---------- Joypad auto-read ----------
     /// Current bitmask for player 1 (16-bit). Bit layout per SNES
@@ -331,6 +338,30 @@ impl CpuRegs {
         }
     }
 
+    /// One CPU cycle of the multiplier / divider (ares `CPU::aluEdge`,
+    /// `cpu/timing.cpp:81-98`): shift-and-add for a product, restoring
+    /// division for a quotient. A read before the last cycle sees the
+    /// intermediate value.
+    pub const fn alu_edge(&mut self) {
+        if self.alu_mpyctr > 0 {
+            self.alu_mpyctr -= 1;
+            if self.rddiv & 1 != 0 {
+                self.rdmpy = self.rdmpy.wrapping_add(self.alu_shift as u16);
+            }
+            self.rddiv >>= 1;
+            self.alu_shift <<= 1;
+        }
+        if self.alu_divctr > 0 {
+            self.alu_divctr -= 1;
+            self.rddiv <<= 1;
+            self.alu_shift >>= 1;
+            if self.rdmpy as u32 >= self.alu_shift {
+                self.rdmpy -= self.alu_shift as u16;
+                self.rddiv |= 1;
+            }
+        }
+    }
+
     /// Write a register at the 16-bit CPU bank-0 offset.
     pub fn write(&mut self, offset: u16, value: u8) -> bool {
         match offset {
@@ -349,28 +380,30 @@ impl CpuRegs {
             0x4201 => self.wrio = value,
             0x4202 => self.wrmpya = value,
             0x4203 => {
-                self.wrmpyb = value;
-                // 8x8 = 16-bit unsigned multiplication. Result writes
-                // RDMPY ($4216/$4217). Real hardware takes 8 mclk.
-                self.rdmpy = u16::from(self.wrmpya) * u16::from(self.wrmpyb);
+                // ares `cpu/io.cpp:152-160`. The product is not there yet:
+                // `alu_edge` builds it over the next eight CPU cycles. A
+                // write while the unit is busy clears RDMPY and starts
+                // nothing.
+                self.rdmpy = 0;
+                if self.alu_mpyctr == 0 && self.alu_divctr == 0 {
+                    self.wrmpyb = value;
+                    self.rddiv = (u16::from(value) << 8) | u16::from(self.wrmpya);
+                    self.alu_mpyctr = 8;
+                    self.alu_shift = u32::from(value);
+                }
             }
             0x4204 => self.wrdiv = (self.wrdiv & 0xFF00) | u16::from(value),
             0x4205 => self.wrdiv = (self.wrdiv & 0x00FF) | (u16::from(value) << 8),
             0x4206 => {
-                self.wrdvdd = value;
-                // 16/8 = 16-bit unsigned division. Quotient → RDDIV
-                // ($4214/$4215). Remainder → RDMPY ($4216/$4217).
-                // Division by zero on the SNES gives:
-                //   quotient = $FFFF
-                //   remainder = original dividend
-                if value == 0 {
-                    self.rddiv = 0xFFFF;
-                    self.rdmpy = self.wrdiv;
-                } else {
-                    let dividend = u32::from(self.wrdiv);
-                    let divisor = u32::from(value);
-                    self.rddiv = (dividend / divisor) as u16;
-                    self.rdmpy = (dividend % divisor) as u16;
+                // ares `cpu/io.cpp:171-178`: RDMPY takes the dividend, and
+                // `alu_edge` turns it into the remainder over sixteen CPU
+                // cycles while the quotient shifts into RDDIV. A zero
+                // divisor leaves `$FFFF` and the dividend by itself.
+                self.rdmpy = self.wrdiv;
+                if self.alu_mpyctr == 0 && self.alu_divctr == 0 {
+                    self.wrdvdd = value;
+                    self.alu_divctr = 16;
+                    self.alu_shift = u32::from(value) << 16;
                 }
             }
             0x4207 => self.htime = (self.htime & 0xFF00) | u16::from(value),
@@ -406,6 +439,7 @@ mod tests {
         let mut r = CpuRegs::new();
         r.write(0x4202, 7);
         r.write(0x4203, 8); // triggers multiply
+        settle(&mut r);
         assert_eq!(r.read(0x4216).unwrap(), 56);
         assert_eq!(r.read(0x4217).unwrap(), 0);
     }
@@ -416,7 +450,65 @@ mod tests {
         let mut r = CpuRegs::new();
         r.write(0x4202, 0xFF);
         r.write(0x4203, 0xFF);
+        settle(&mut r);
         assert_eq!(r.rdmpy, 0xFE01);
+    }
+
+    /// Run the unit to the end of whatever it is computing.
+    fn settle(r: &mut CpuRegs) {
+        for _ in 0..16 {
+            r.alu_edge();
+        }
+    }
+
+    #[test]
+    fn a_product_is_built_one_bit_per_cycle() {
+        // ares `aluEdge`: 0xFF x 0xFF read after each of the eight cycles.
+        let mut r = CpuRegs::new();
+        r.write(0x4202, 0xFF);
+        r.write(0x4203, 0xFF);
+        let mut seen = vec![r.rdmpy];
+        for _ in 0..8 {
+            r.alu_edge();
+            seen.push(r.rdmpy);
+        }
+        assert_eq!(
+            seen,
+            [
+                0x0000, 0x00FF, 0x02FD, 0x06F9, 0x0EF1, 0x1EE1, 0x3EC1, 0x7E81, 0xFE01
+            ]
+        );
+        // Done: further cycles change nothing, and RDDIV holds factor B.
+        r.alu_edge();
+        assert_eq!((r.rdmpy, r.rddiv), (0xFE01, 0x00FF));
+    }
+
+    #[test]
+    fn a_quotient_is_built_one_bit_per_cycle() {
+        let mut r = CpuRegs::new();
+        r.write(0x4204, 100);
+        r.write(0x4205, 0);
+        r.write(0x4206, 3);
+        // The remainder register starts as the dividend.
+        assert_eq!((r.rddiv, r.rdmpy), (0, 100));
+        for _ in 0..15 {
+            r.alu_edge();
+        }
+        assert_eq!((r.rddiv, r.rdmpy), (16, 4));
+        r.alu_edge();
+        assert_eq!((r.rddiv, r.rdmpy), (33, 1));
+    }
+
+    #[test]
+    fn a_write_while_the_unit_is_busy_starts_nothing() {
+        // ares `io.cpp:153,172`: the write clears (or reloads) RDMPY and
+        // returns; the operation in flight carries on from there.
+        let mut r = CpuRegs::new();
+        r.write(0x4202, 3);
+        r.write(0x4203, 5);
+        r.alu_edge();
+        r.write(0x4203, 7);
+        assert_eq!((r.rdmpy, r.wrmpyb, r.alu_mpyctr), (0, 5, 7));
     }
 
     #[test]
@@ -437,6 +529,7 @@ mod tests {
         r.write(0x4204, 100);
         r.write(0x4205, 0);
         r.write(0x4206, 3); // triggers division
+        settle(&mut r);
         assert_eq!(r.rddiv, 33);
         assert_eq!(r.rdmpy, 1);
     }
@@ -447,6 +540,7 @@ mod tests {
         r.write(0x4204, 0x34);
         r.write(0x4205, 0x12); // dividend = $1234
         r.write(0x4206, 0); // divisor = 0
+        settle(&mut r);
         assert_eq!(r.rddiv, 0xFFFF);
         assert_eq!(r.rdmpy, 0x1234);
     }

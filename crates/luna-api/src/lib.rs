@@ -142,7 +142,10 @@ pub enum ApiError {
 /// `Sa1Mapper::cdma` (the raw `$2231` byte; the conversion runs on the
 /// `dmacb` / `dmasize` decoded from it, which stay). No behaviour change:
 /// the core blob and the SA-1 mapper blob are each one byte shorter.
-pub const SAVE_STATE_VERSION: u32 = 8;
+/// v9 (2026-10): the 5A22 multiplier / divider computes over eight and
+/// sixteen CPU cycles instead of at once, so its counters and shift
+/// register (`CpuRegs::alu_mpyctr`, `alu_divctr`, `alu_shift`) are state.
+pub const SAVE_STATE_VERSION: u32 = 9;
 
 /// On-disk / on-wire save-state container produced by
 /// [`Emulator::save_state`]. `core` is the bincode-encoded `Snes` (the

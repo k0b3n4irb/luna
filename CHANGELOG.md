@@ -46,6 +46,27 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   the picture had changed. The JSON report carries the table as
   `vram_writers`.
 
+### Fixed
+
+- **The 5A22 multiplier and divider take their time.** A product was
+  complete in `$4216/$4217` the moment `$4203` was written, and a
+  quotient the moment `$4206` was; the console builds the first over
+  eight CPU cycles and the second over sixteen, one bit per cycle, and a
+  read that comes too early gets the value in progress. luna now does
+  the same (ares `aluEdge`, Mesen2 `AluMulDiv`, which agree): 0xFF x
+  0xFF read four cycles after the write gives `$0EF1`, six cycles after
+  `$3EC1`, eight cycles after `$FE01`. A write to `$4203` or `$4206`
+  while the unit is busy starts nothing, and a finished multiplication
+  leaves factor B in `$4214`. A routine that waits too little now fails
+  in luna as it does on the console (reported by OpenSNES, whose tests
+  passed with no wait at all).
+
+### Changed
+
+- **Save states are version 9.** The multiplier's counters and shift
+  register are part of the machine. A state saved by an earlier version
+  is refused with the version mismatch message.
+
 ## [1.38.1] — 2026-10-11
 
 A count of arrivals that could be one ahead is corrected (the defect
