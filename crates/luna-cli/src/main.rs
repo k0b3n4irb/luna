@@ -695,11 +695,12 @@ enum Command {
         cpu_trace_max: usize,
         /// Optional memory access trace. When set, captures every
         /// CPU bus read/write into a CSV at PATH, columns
-        /// `mclk_total,frame_ntsc,pc,addr,kind,value,line,hclock,blank,force_blank,origin`
+        /// `mclk_total,frame_ntsc,pc,addr,kind,value,line,hclock,blank,force_blank,origin,symbol`
         /// (`line` / `hclock` = the beam position, `blank` = V-blank,
         /// `force_blank` = INIDISP `$2100` bit 7 at the access; a VRAM write
         /// is safe iff `blank||force_blank`; `origin` = `cpu`, `dma<n>` or
-        /// `hdma<n>`). Default: all
+        /// `hdma<n>`; `symbol` = the nearest label at or below the PC, empty
+        /// without a `.sym`). Default: all
         /// banks. Combine with `--mem-trace-bank 7E` to focus on
         /// WRAM and skip ROM fetches. Gated by `--mem-trace-from`
         /// and `--mem-trace-max` analogous to `--cpu-trace-*`.

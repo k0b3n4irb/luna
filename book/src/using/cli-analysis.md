@@ -462,6 +462,18 @@ mid-frame, silently reads garbage.
          "bus_violations": 0, "bus_vector_fetches": 452, … }
 ```
 
+A third counter, **`ms0_at_21mhz`**, counts the multiplies (`MULT`,
+`UMULT`, `FMULT`, `LMULT`) run with the fast multiplier (CFGR `$3037`
+bit 5, MS0) while the chip is at 21 MHz (CLSR `$3039` bit 0). Nintendo's
+manual fixes MS0 at 0 in that mode and the console may then multiply
+wrong; no source says which products, so luna computes them exactly and
+counts. A ROM that sets both is green here and can be wrong on a
+cartridge: gate on 0.
+
+```bash
+luna state game.sfc --until-frame 120 --out - | jq '.gsu.ms0_at_21mhz'   # 0, or the launcher sets both bits
+```
+
 Gate on **`bus_violations`**, and note the second counter exists so you
 can. A denied read of the `$FFE0-$FFFF` vector page is not a fault: the
 busy vector is shaped so those fetches resolve to `$0108` (NMI) and

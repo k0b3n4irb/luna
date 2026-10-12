@@ -61,6 +61,9 @@ pub(crate) fn load_rom_into(
             info.title.trim()
         );
     }
+    if let Some(note) = &info.board_note {
+        eprintln!("warning: '{}': {note}", info.title.trim());
+    }
     // WLA-DX symbol auto-detection (issue #67) is luna-api's: a `<rom>.sym`
     // next to the ROM is loaded by `load_rom*` for every front-end. Explicit
     // `--sym` on the subcommands overrides it afterwards.

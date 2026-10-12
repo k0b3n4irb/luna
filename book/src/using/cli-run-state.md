@@ -176,7 +176,7 @@ and is the hub for every headless diagnostic.
 | `--spc-trace <PATH>`, `--spc-trace-max <N>` | —, `200000` | Per-instruction SPC700 trace (`seq,pc,a,x,y,sp,psw,spc_cycle,t2_int,t2_out`) and its event cap. |
 | `--dma-trace <PATH>` | — | DMA→VRAM bytes as read during the transfer, with `line`, `hclock`, blank flags, the A-bus `src` and the `vram_word` each byte lands at. |
 | `--dma-trace-from <N>`, `--dma-trace-max <N>` | `0`, `500000` | Instruction count at which the DMA trace starts; its event cap. |
-| `--mem-trace <PATH>` | — | CSV of bus accesses: `mclk_total,frame_ntsc,pc,addr,kind,value,line,hclock,blank,force_blank,origin`. `origin` = `cpu`, `dma<n>` or `hdma<n>` — DMA / HDMA writes (B-bus `$21xx` and A-bus) are in the same stream as CPU accesses, stamped with the burst / line start and the PC whose access ran them. |
+| `--mem-trace <PATH>` | — | CSV of bus accesses: `mclk_total,frame_ntsc,pc,addr,kind,value,line,hclock,blank,force_blank,origin,symbol`. `origin` = `cpu`, `dma<n>` or `hdma<n>` — DMA / HDMA writes (B-bus `$21xx` and A-bus) are in the same stream as CPU accesses, stamped with the burst / line start and the PC whose access ran them. `symbol`, last, is the nearest label at or below the PC (`name` or `name+0xNN`) when a `.sym` is loaded, and empty otherwise: the routine that wrote, without a lookup by hand. |
 | `--mem-trace-from <N>`, `--mem-trace-max <N>` | `0`, `100000` | Instruction count at which the memory trace starts; its event cap. |
 | `--mem-trace-bank <B>`, `--mem-trace-addr <LO:HI>` | all | Bank / offset-range filters for `--mem-trace` (both must match). |
 | `--trace-writes <O,…>` | — | With `--mem-trace`: keep only **writes** to these hex offsets, any bank (`2121,2122,420C`). The "who wrote this register" hunt — see below. |
@@ -460,11 +460,14 @@ burst or HDMA channel — and where in the frame it landed:
 
 ```bash
 luna state --until-frame 120 --mem-trace writes.csv --trace-writes 2121,2122 game.sfc
-# mclk_total,frame_ntsc,pc,addr,kind,value,line,hclock,blank,force_blank,origin
-# 41822160,117,$00:8A31,$00:2121,W,$02,226,410,1,0,cpu      <- CGADD = 2, in VBlank
-# 41822168,117,$00:8A34,$00:2122,W,$1F,226,418,1,0,cpu
-# 42127540,117,$00:8C02,$00:2122,W,$00,12,1180,0,0,hdma1    <- HDMA channel 1, line 12, mid-frame
+# mclk_total,frame_ntsc,pc,addr,kind,value,line,hclock,blank,force_blank,origin,symbol
+# 41822160,117,$00:8A31,$00:2121,W,$02,226,410,1,0,cpu,setPalette+0x11      <- CGADD = 2, in VBlank
+# 41822168,117,$00:8A34,$00:2122,W,$1F,226,418,1,0,cpu,setPalette+0x14
+# 42127540,117,$00:8C02,$00:2122,W,$00,12,1180,0,0,hdma1,waitVBlank+0x02    <- HDMA channel 1, line 12, mid-frame
 ```
+
+The last column names the routine when a `.sym` is loaded (the one beside
+the ROM, or `--sym`); it is empty without one.
 
 The `hdma1` row at line 12 is the overwrite: an HDMA channel enabled
 mid-frame whose table still points at stale data. The CSV also keeps the

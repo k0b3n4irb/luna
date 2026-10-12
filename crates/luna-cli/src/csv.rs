@@ -287,14 +287,17 @@ pub(crate) fn write_cpu_trace_csv(
 }
 
 /// Write per-access memory trace events as CSV. Columns:
-/// `mclk_total, frame_ntsc, pc, addr, kind, value_hex`.
+/// `mclk_total, frame_ntsc, pc, addr, kind, value_hex`, then the beam, the
+/// origin, and last `symbol`: the nearest label at or below the PC, empty
+/// when no table is loaded or the bank has no label below it.
 pub(crate) fn write_mem_trace_csv(
     path: &std::path::Path,
     events: &[luna_api::MemTraceEvent],
+    symbols: Option<&luna_api::SymbolTable>,
 ) -> std::io::Result<()> {
     write_csv(
         path,
-        "mclk_total,frame_ntsc,pc,addr,kind,value,line,hclock,blank,force_blank,origin",
+        "mclk_total,frame_ntsc,pc,addr,kind,value,line,hclock,blank,force_blank,origin,symbol",
         events,
         |f, _, ev| {
             let kind = match ev.kind {
@@ -306,7 +309,7 @@ pub(crate) fn write_mem_trace_csv(
             };
             writeln!(
                 f,
-                "{},{},{},{},{},${:02X},{},{},{},{},{}",
+                "{},{},{},{},{},${:02X},{},{},{},{},{},{}",
                 ev.mclk_total,
                 ev.mclk_total / NTSC_MCLK_PER_FRAME,
                 fmt_pc(ev.pc_full),
@@ -318,6 +321,9 @@ pub(crate) fn write_mem_trace_csv(
                 u8::from(ev.blank),
                 u8::from(ev.force_blank),
                 ev.origin.label(),
+                symbols
+                    .and_then(|t| t.nearest(ev.pc_full))
+                    .unwrap_or_default(),
             )
         },
     )

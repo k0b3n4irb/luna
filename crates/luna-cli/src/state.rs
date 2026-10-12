@@ -1445,7 +1445,7 @@ pub(crate) fn run_state(
     }
     if let Some(path) = mem_trace_path {
         match em.take_mem_trace_log() {
-            Ok(events) => match write_mem_trace_csv(path, &events) {
+            Ok(events) => match write_mem_trace_csv(path, &events, em.symbols_cloned().as_ref()) {
                 Ok(()) => eprintln!(
                     "Memory trace written to {} ({} events)",
                     path.display(),

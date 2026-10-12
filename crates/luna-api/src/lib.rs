@@ -232,6 +232,11 @@ pub struct RomInfo {
     /// no firmware is needed or it was resolved. The game still loads
     /// (the coprocessor stays inert) so it can be inspected meanwhile.
     pub missing_firmware: Option<String>,
+    /// Set when the header describes a cartridge no known board carries
+    /// (today: a DSP-1 `LoROM` over 1 MB without save RAM), with what luna
+    /// does about it. The ROM still loads; on a console it would not find
+    /// its hardware where it looks.
+    pub board_note: Option<String>,
     /// Labels auto-loaded from the WLA-DX `<rom>.sym` next to the ROM file
     /// (the wlalink convention, issue #67) — for every front-end, not just
     /// the CLI. `None` when there is no such file or the load was from bytes.
@@ -384,6 +389,11 @@ pub struct GsuState {
     /// (IRQ), which is why Super FX titles keep their handlers in WRAM at
     /// those addresses. Star Fox does this once per frame.
     pub bus_vector_fetches: u64,
+    /// Multiplies (`MULT`, `UMULT`, `FMULT`, `LMULT`) run with the fast
+    /// multiplier (CFGR bit 5, MS0) while the chip was at 21 MHz (CLSR
+    /// bit 0). The pair is forbidden on the console, where the product may
+    /// be wrong; luna computes it exactly and counts. A runtime asserts 0.
+    pub ms0_at_21mhz: u64,
 }
 
 /// How deep the stack ever reached, and where.
@@ -1666,6 +1676,17 @@ impl Emulator {
             } else {
                 None
             },
+            board_note: if matches!(cart.header.mapper_kind, MapperKind::Dsp1) {
+                luna_core::coproc::Dsp1Board::for_cartridge(
+                    cart.header.dsp_hirom,
+                    cart.rom.len(),
+                    (cart.header.sram_size_kb as usize) * 1024,
+                )
+                .mismatch(cart.rom.len())
+                .map(str::to_string)
+            } else {
+                None
+            },
             symbols_loaded: None,
             symbols_error: None,
         };
@@ -2334,6 +2355,7 @@ impl Emulator {
                 instructions_executed: g.instructions_executed,
                 bus_violations: g.bus_violations,
                 bus_vector_fetches: g.bus_vector_fetches,
+                ms0_at_21mhz: g.ms0_at_21mhz,
             });
         let dsp1_instructions = self
             .snes

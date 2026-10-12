@@ -474,7 +474,9 @@ answer to "does this routine still start inside VBlank".
   (`bus_vector_fetches`) and are *not* faults — the busy vector is shaped
   so they land on `$0108` / `$010C` in WRAM, which is how Super FX titles
   take interrupts during a job. When a violation does appear,
-  `luna state --gsu-bus-trace` names the instruction.
+  `luna state --gsu-bus-trace` names the instruction. `ms0_at_21mhz = 0`
+  asserts no multiply ran with the fast multiplier at 21 MHz, a pair the
+  console forbids and luna runs exactly.
 - **`[asserts.footprint]`** — `vram = { nonzero_min = 5000 }`: at least
   N non-zero bytes in `wram`/`vram`/`cgram`/`oam`/`aram` — proof an
   upload happened without pinning exact bytes.

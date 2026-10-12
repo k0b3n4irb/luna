@@ -65,7 +65,7 @@ fn trace_writes_csv_tags_cpu_and_dma_rows_by_origin() {
     let text = std::fs::read_to_string(&csv).unwrap();
     let mut lines = text.lines();
     let header = lines.next().unwrap();
-    assert!(header.ends_with(",force_blank,origin"), "{header}");
+    assert!(header.ends_with(",force_blank,origin,symbol"), "{header}");
     let rows: Vec<Vec<&str>> = lines.map(|l| l.split(',').collect()).collect();
     assert_eq!(rows.len(), 5, "{text}");
     // Every row: a write to $00:2122 (the list filter + writes-only).
@@ -75,6 +75,11 @@ fn trace_writes_csv_tags_cpu_and_dma_rows_by_origin() {
     );
     assert_eq!(rows[0][5], "$55");
     assert_eq!(rows[0][10], "cpu");
+    // No `.sym` beside this ROM: the column is there and empty.
+    assert!(
+        rows.iter().all(|r| r.len() == 12 && r[11].is_empty()),
+        "{text}"
+    );
     assert!(rows[1..].iter().all(|r| r[10] == "dma0"), "{text}");
     let dma: Vec<&str> = rows[1..].iter().map(|r| r[5]).collect();
     // WRAM is zero, so the four DMA bytes are $00 (the origin is the point).

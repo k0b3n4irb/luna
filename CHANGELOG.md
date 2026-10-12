@@ -45,6 +45,20 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   sheet loaded over a tilemap is one line there; a frame hash only said
   the picture had changed. The JSON report carries the table as
   `vram_writers`.
+- **`gsu.ms0_at_21mhz` in the state report.** A Super FX program that
+  sets the fast multiplier (CFGR bit 5) and 21 MHz (CLSR bit 0) together
+  ran without a word, though the manual forbids the pair and the console
+  may multiply wrong. The counter is the number of `MULT`, `UMULT`,
+  `FMULT` and `LMULT` run that way; products stay exact, since no source
+  says which ones the console gets wrong. Usable in `[asserts.gsu]`.
+- **`symbol`, last column of the `--mem-trace` CSV.** The nearest label
+  at or below the PC of each access when a `.sym` is loaded, empty
+  otherwise: `--trace-writes` now names the routine that wrote. A reader
+  that takes columns by position is unaffected; one that compares the
+  header line is not.
+- **`rom.board_note`, and a warning at load.** A DSP-1 LoROM over 1 MB
+  without save RAM matches no known board; luna says so and names the
+  window it decodes.
 
 ### Fixed
 
@@ -60,6 +74,13 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   leaves factor B in `$4214`. A routine that waits too little now fails
   in luna as it does on the console (reported by OpenSNES, whose tests
   passed with no wait at all).
+
+- **DSP-1 LoROM boards have their own windows.** Every LoROM DSP-1
+  cartridge had its chip at `$20-$3F:8000-FFFF`. As in ares' board table
+  and fullsnes: without save RAM (SHVC-1B0N) it is at `$30-$3F`; with
+  save RAM and 1 MB or less, at `$20-$3F`; with save RAM and more than
+  1 MB (SHVC-2B3B-01), at `$60-$6F:0000-7FFF`, data below `$4000` and
+  status above. All mirrored in `$80-$FF`.
 
 ### Changed
 

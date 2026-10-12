@@ -228,6 +228,10 @@ pub struct SuperFxSnapshot {
     /// Denied `$FFE0-$FFFF` fetches: the Super FX interrupt mechanism
     /// (they resolve to `$0108` / `$010C` in WRAM), reported not gated.
     pub bus_vector_fetches: u64,
+    /// Multiplies run with the fast multiplier (CFGR bit 5) at 21 MHz
+    /// (CLSR bit 0), a pair the chip's manual forbids. Reported, since no
+    /// source says which products come out wrong.
+    pub ms0_at_21mhz: u64,
 }
 
 /// One 8-pixel plot run awaiting writeback to Game Pak RAM (spec §4.1).
@@ -308,6 +312,12 @@ pub struct SuperFxMapper {
     /// resolve to `$0108` (NMI) / `$010C` (IRQ), which is why Super FX
     /// titles keep their handlers in WRAM there. Reported, not gated.
     bus_vector_fetches: u64,
+    /// `MULT` / `UMULT` / `FMULT` / `LMULT` run with MS0 (CFGR bit 5) and
+    /// 21 MHz (CLSR bit 0) both set. Nintendo's manual fixes MS0 at 0 in
+    /// that mode and fullsnes says it must be; ares only notes the
+    /// products "may sometimes be invalid". Nothing says which, so the
+    /// product stays exact here and the multiply is counted.
+    ms0_at_21mhz: u64,
     /// Per-job accounting (`OpenSNES` R3): completed jobs, plus the one in
     /// flight. Diagnostics, so out of `SuperFxState` like the counters
     /// above — the save-state shape is untouched.
@@ -369,6 +379,7 @@ impl SuperFxMapper {
             instructions_executed: 0,
             bus_violations: 0,
             bus_vector_fetches: 0,
+            ms0_at_21mhz: 0,
             jobs: Vec::new(),
             job_open: None,
             jobs_max: 4096,
@@ -416,6 +427,7 @@ impl SuperFxMapper {
             instructions_executed: self.instructions_executed,
             bus_violations: self.bus_violations,
             bus_vector_fetches: self.bus_vector_fetches,
+            ms0_at_21mhz: self.ms0_at_21mhz,
         }
     }
 
@@ -1443,10 +1455,18 @@ impl SuperFxMapper {
         self.write_dr(v);
         self.set_sz(v);
         self.regs.reset_prefix();
+        self.count_ms0_at_21mhz();
         if self.regs.cfgr & 0x20 == 0 {
             // !ms0: high-speed multiply not selected → extra cycle.
             let c = if self.regs.clsr { 1 } else { 2 };
             self.step(c);
+        }
+    }
+
+    /// Count a multiply run in the forbidden MS0 + 21 MHz configuration.
+    const fn count_ms0_at_21mhz(&mut self) {
+        if self.regs.cfgr & 0x20 != 0 && self.regs.clsr {
+            self.ms0_at_21mhz = self.ms0_at_21mhz.saturating_add(1);
         }
     }
 
@@ -1463,6 +1483,7 @@ impl SuperFxMapper {
         self.sfr_set(SFR_CY, result & 0x8000 != 0);
         self.sfr_set(SFR_Z, v == 0);
         self.regs.reset_prefix();
+        self.count_ms0_at_21mhz();
         let mul = if self.regs.cfgr & 0x20 != 0 { 3 } else { 7 };
         let clk = if self.regs.clsr { 1 } else { 2 };
         self.step(mul * clk);
@@ -2077,6 +2098,32 @@ mod tests {
         );
         // Draining leaves nothing behind but keeps counting.
         assert!(m.take_superfx_jobs().is_some_and(|j| j.is_empty()));
+    }
+
+    #[test]
+    fn a_multiply_with_ms0_at_21mhz_is_counted_and_stays_exact() {
+        // The manual fixes MS0 at 0 in 21 MHz mode; no source says which
+        // products the console gets wrong, so the product is exact and the
+        // multiply is counted. Either bit alone is a legal configuration.
+        let mut m = fx();
+        for (cfgr, clsr, counted) in [(0x20, false, 0), (0x00, true, 0), (0xA0, true, 2)] {
+            m.regs.cfgr = cfgr;
+            m.regs.clsr = clsr;
+            m.regs.reset_prefix();
+            m.regs.r[0] = 0x2000;
+            m.regs.r[6] = 0x2000;
+            m.op_fmult_lmult();
+            assert_eq!(m.regs.r[0], 0x0400, "FMULT keeps the high word");
+            m.regs.r[0] = 3;
+            m.regs.r[1] = 5;
+            m.op_mult_umult(1);
+            assert_eq!(m.regs.r[0], 15);
+            assert_eq!(
+                m.snapshot().ms0_at_21mhz,
+                counted,
+                "cfgr {cfgr:#04x} clsr {clsr}"
+            );
+        }
     }
 
     #[test]

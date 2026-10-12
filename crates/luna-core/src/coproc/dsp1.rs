@@ -59,13 +59,64 @@ struct Dsp1State {
     cycle_acc: u64,
 }
 
+/// Where a DSP-1 board puts the chip's two ports. ares picks the board
+/// from the base layout, the presence of save RAM and the ROM size
+/// (`mia/medium/super-famicom.cpp`: `NEC-LOROM`, `NEC-LOROM-RAM`, and its
+/// `#A` variant when the ROM is 1 MB or less); the windows are its board
+/// table's, which fullsnes' "DSP Mapping" table gives too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dsp1Board {
+    /// `HiROM` (`SHVC-1K0N`, `1K1B`): `$00-1F:6000-7FFF`, select on bit 12.
+    HiRom,
+    /// `LoROM` without save RAM (`SHVC-1B0N`): `$30-3F:8000-FFFF`, select on
+    /// bit 14.
+    LoRom,
+    /// `LoROM` with save RAM, ROM of 1 MB or less (`SHVC-1B5B`):
+    /// `$20-3F:8000-FFFF`, select on bit 14.
+    LoRomRam,
+    /// `LoROM` with save RAM, ROM over 1 MB (`SHVC-2B3B-01`):
+    /// `$60-6F:0000-7FFF`, select on bit 14.
+    LoRomRam2M,
+}
+
+impl Dsp1Board {
+    /// The board a cartridge of this shape is, as ares chooses it.
+    #[must_use]
+    pub const fn for_cartridge(hirom: bool, rom_bytes: usize, sram_bytes: usize) -> Self {
+        if hirom {
+            Self::HiRom
+        } else if sram_bytes == 0 {
+            Self::LoRom
+        } else if rom_bytes <= 0x10_0000 {
+            Self::LoRomRam
+        } else {
+            Self::LoRomRam2M
+        }
+    }
+
+    /// What to tell whoever loads a cartridge no known board carries: a
+    /// `LoROM` without save RAM maps 1 MB of ROM, and the only 2 MB board
+    /// has RAM and its DSP elsewhere.
+    #[must_use]
+    pub const fn mismatch(self, rom_bytes: usize) -> Option<&'static str> {
+        match self {
+            Self::LoRom if rom_bytes > 0x10_0000 => Some(
+                "a DSP-1 LoROM over 1 MB without save RAM matches no known board: \
+                 SHVC-1B0N carries 1 MB, and the 2 MB board (SHVC-2B3B-01) has save \
+                 RAM and its DSP at $60-$6F:0000-7FFF; the DSP is decoded at \
+                 $30-$3F:8000-FFFF as on SHVC-1B0N",
+            ),
+            _ => None,
+        }
+    }
+}
+
 /// A DSP-1 cartridge: a base ROM/SRAM mapper + the uPD7725 chip.
 pub struct Dsp1Mapper {
     base: Box<dyn Mapper + Send>,
     dsp: Upd96050,
-    /// `true` = `HiROM` `1K` board (DSP at `$00-1F:6000`); `false` = `LoROM`
-    /// `1B` board (DSP at `$20-3F:8000`).
-    hirom: bool,
+    /// The board, which fixes the DSP window.
+    board: Dsp1Board,
     /// `false` when no firmware was supplied — the chip stays inert (the
     /// game runs but Mode 7 math returns nothing, as before).
     has_firmware: bool,
@@ -78,6 +129,7 @@ impl Dsp1Mapper {
     /// `firmware` is the combined `dsp1b.rom` (8 KB) when available.
     #[must_use]
     pub fn new(rom: Vec<u8>, sram_bytes: usize, firmware: Option<&[u8]>, hirom: bool) -> Self {
+        let board = Dsp1Board::for_cartridge(hirom, rom.len(), sram_bytes);
         let base: Box<dyn Mapper + Send> = if hirom {
             Box::new(HiRomMapper::new(rom, sram_bytes))
         } else {
@@ -88,7 +140,7 @@ impl Dsp1Mapper {
         Self {
             base,
             dsp,
-            hirom,
+            board,
             has_firmware,
             cycle_acc: 0,
         }
@@ -100,17 +152,25 @@ impl Dsp1Mapper {
     /// board `mask` compacts the offset so `necdsp`'s `address.bit(0)` is
     /// really that high bit. For the `HiROM` `1K` board (`$6000-$7FFF`, mask
     /// `0xfff`) that's bit 12: `$6xxx` = DR (16-bit, low byte at `$x000`,
-    /// high at `$x001`), `$7xxx` = SR. For the `LoROM` `1B` board
-    /// (`$8000-$FFFF`, mask `0x3fff`) it's bit 14.
+    /// high at `$x001`), `$7xxx` = SR. For the `LoROM` boards (mask
+    /// `0x3fff`) it's bit 14. Every window is mirrored in `$80-$FF`.
     const fn dsp_select(&self, bank: u8, offset: u16) -> Option<bool> {
-        if self.hirom {
-            if matches!(bank, 0x00..=0x1F | 0x80..=0x9F) && offset >= 0x6000 && offset <= 0x7FFF {
-                return Some(offset & 0x1000 != 0);
+        let bank = bank & 0x7F;
+        match self.board {
+            Dsp1Board::HiRom if bank <= 0x1F && offset >= 0x6000 && offset <= 0x7FFF => {
+                Some(offset & 0x1000 != 0)
             }
-        } else if matches!(bank, 0x20..=0x3F | 0xA0..=0xBF) && offset >= 0x8000 {
-            return Some(offset & 0x4000 != 0);
+            Dsp1Board::LoRom if bank >= 0x30 && bank <= 0x3F && offset >= 0x8000 => {
+                Some(offset & 0x4000 != 0)
+            }
+            Dsp1Board::LoRomRam if bank >= 0x20 && bank <= 0x3F && offset >= 0x8000 => {
+                Some(offset & 0x4000 != 0)
+            }
+            Dsp1Board::LoRomRam2M if bank >= 0x60 && bank <= 0x6F && offset <= 0x7FFF => {
+                Some(offset & 0x4000 != 0)
+            }
+            _ => None,
         }
-        None
     }
 }
 
@@ -256,7 +316,7 @@ impl Mapper for Dsp1Mapper {
 
 #[cfg(test)]
 mod tests {
-    use super::{DSP1_FIRMWARE_LEN, Dsp1Mapper, Dsp1State};
+    use super::{DSP1_FIRMWARE_LEN, Dsp1Board, Dsp1Mapper, Dsp1State};
     use luna_bus::mapper::{Mapper, MapperKind, decode_state};
     use luna_bus::types::{NTSC_MASTER_HZ, make_addr};
 
@@ -306,8 +366,9 @@ mod tests {
 
     #[test]
     fn lorom_board_decodes_dr_and_sr_on_bit_14() {
-        // LoROM 1B board: window $20-3F:8000-FFFF, select on bit 14.
-        let m = Dsp1Mapper::new(rom(), 0, Some(&firmware()), false);
+        // LoROM board with save RAM, 1 MB or less: window $20-3F:8000-FFFF,
+        // select on bit 14.
+        let m = Dsp1Mapper::new(rom(), 0x800, Some(&firmware()), false);
         assert_eq!(m.dsp_select(0x20, 0x8000), Some(false), "$8000 = DR");
         assert_eq!(m.dsp_select(0x20, 0xBFFF), Some(false), "$BFFF = DR");
         assert_eq!(m.dsp_select(0x20, 0xC000), Some(true), "$C000 = SR");
@@ -318,12 +379,56 @@ mod tests {
     }
 
     #[test]
+    fn the_lorom_window_follows_the_board() {
+        // ares picks the board from save RAM and ROM size; fullsnes' "DSP
+        // Mapping" table gives the same three windows.
+        let no_ram = Dsp1Mapper::new(rom(), 0, Some(&firmware()), false);
+        assert_eq!(no_ram.board, Dsp1Board::LoRom);
+        assert_eq!(
+            no_ram.dsp_select(0x30, 0x8000),
+            Some(false),
+            "$30:8000 = DR"
+        );
+        assert_eq!(no_ram.dsp_select(0xBF, 0xC000), Some(true), "mirror, SR");
+        assert_eq!(
+            no_ram.dsp_select(0x20, 0x8000),
+            None,
+            "SHVC-1B0N starts at $30"
+        );
+
+        let two_mb = Dsp1Mapper::new(vec![0; 0x20_0000], 0x2000, Some(&firmware()), false);
+        assert_eq!(two_mb.board, Dsp1Board::LoRomRam2M);
+        assert_eq!(
+            two_mb.dsp_select(0x60, 0x0000),
+            Some(false),
+            "$60:0000 = DR"
+        );
+        assert_eq!(two_mb.dsp_select(0x6F, 0x3FFF), Some(false));
+        assert_eq!(two_mb.dsp_select(0x60, 0x4000), Some(true), "$60:4000 = SR");
+        assert_eq!(two_mb.dsp_select(0xE0, 0x7FFF), Some(true), "mirror");
+        assert_eq!(two_mb.dsp_select(0x60, 0x8000), None, "above the window");
+        assert_eq!(
+            two_mb.dsp_select(0x30, 0x8000),
+            None,
+            "not where 1 MB boards have it"
+        );
+    }
+
+    #[test]
+    fn a_cartridge_no_board_carries_is_named() {
+        assert!(Dsp1Board::LoRom.mismatch(0x20_0000).is_some());
+        assert!(Dsp1Board::LoRom.mismatch(0x10_0000).is_none());
+        assert!(Dsp1Board::LoRomRam2M.mismatch(0x20_0000).is_none());
+        assert!(Dsp1Board::HiRom.mismatch(0x40_0000).is_none());
+    }
+
+    #[test]
     fn the_two_boards_do_not_share_a_window() {
         // A HiROM-board address must not decode on a LoROM board and
         // vice versa — the shim picks one layout at construction.
         let hi = Dsp1Mapper::new(rom(), 0, Some(&firmware()), true);
         let lo = Dsp1Mapper::new(rom(), 0, Some(&firmware()), false);
-        assert!(hi.dsp_select(0x20, 0x8000).is_none());
+        assert!(hi.dsp_select(0x30, 0x8000).is_none());
         assert!(lo.dsp_select(0x00, 0x6000).is_none());
     }
 
