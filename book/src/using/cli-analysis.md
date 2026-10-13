@@ -73,6 +73,14 @@ The timeline is what costs least to read:
 | 468 | 2.80 | still picture, 778 frames (fbhash `f8d3bf30fdafa7cc`) |
 ```
 
+A scene behind a menu is reached the way a test reaches it, and the
+timeline says what drove the run:
+
+```
+luna record game.sfc --poke-at main --poke skip_menu=01 \
+  --input-at game_tick --input "80:0x0800" --input2 "100:0x0400" --out /tmp/match
+```
+
 A picture is *still* once it holds 30 frames and the screen is *off*
 once it stays off 4; a game that draws every other frame reads as
 moving, with half as many distinct pictures as frames. A pad row names
@@ -86,6 +94,10 @@ level and the notes started on each S-DSP voice.
 | `--from-frame <F>` | `1` | First PPU frame recorded, frame-indexed like `state --until-frame`. |
 | `-c, --count <N>` | `600` | Consecutive frames recorded (600 is ten seconds of NTSC). |
 | `--input <SCRIPT>` | — | Joypad-1 script ([input scripts](input-scripts.md)), inline or `@file` — a recording exported from the GUI replays as it is; an event before `--from-frame` is applied on its frame during the warm-up. |
+| `--input2 <SCRIPT>` | — | Joypad-2 script, as in `state`. |
+| `--input-at <ROUTINE>` | — | Number the input scripts by arrivals on this routine instead of by frame, as in `state`. |
+| `--poke-at <ROUTINE>`, `--poke-hit <N>`, `--poke <NAME=HEX>` | — | Write bytes at an arrival on a routine, as in `state`: record a scene the game only reaches through a menu. A `--poke-at` the run never reaches fails the record (exit `1`). |
+| `--sym <FILE>` | the `.sym` beside the ROM | The names `--poke-at`, `--poke` and `--input-at` resolve. |
 | `--video-kbps <N>` | `500` | Bitrate the picture is held to, which bounds the size of the file. |
 | `--sheet-every <N>` | one second | Frames between two pictures of the contact sheets. |
 | `--no-video` | off | Write the timeline and the sheets only; `ffmpeg` is not needed. |

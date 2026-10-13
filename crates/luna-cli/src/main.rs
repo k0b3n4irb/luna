@@ -875,6 +875,36 @@ enum Command {
         /// on its frame during the warm-up.
         #[arg(long)]
         input: Option<String>,
+        /// Scripted joypad-2 input (`state --input2` grammar).
+        #[arg(long)]
+        input2: Option<String>,
+        /// Index the input scripts by arrivals on this routine instead of
+        /// by frame (`state --input-at`).
+        #[arg(long = "input-at")]
+        input_at: Option<String>,
+        /// Write every `--poke` into memory when execution reaches this
+        /// routine, at its `--poke-hit`-th arrival counted from power-on
+        /// (`state --poke-at`): record a scene the game only reaches
+        /// through a menu. Repeatable: each `--poke-at` takes the
+        /// `--poke-hit` and the `--poke`s that follow it.
+        #[arg(long = "poke-at", requires = "poke")]
+        poke_at: Vec<String>,
+        /// With `--poke-at`: the arrival the bytes are written at
+        /// (default 1, the first). One per `--poke-at`.
+        #[arg(
+            long = "poke-hit",
+            requires = "poke_at",
+            value_parser = clap::value_parser!(u64).range(1..)
+        )]
+        poke_hit: Vec<u64>,
+        /// Bytes to write at the `--poke-at` before it: `NAME=HEX` or
+        /// `BANK:OFFSET=HEX`, hex bytes in memory order. Repeatable.
+        #[arg(long = "poke", requires = "poke_at")]
+        poke: Vec<String>,
+        /// Symbol file naming the routines and variables of `--poke-at`,
+        /// `--poke` and `--input-at`. Default: the `.sym` beside the ROM.
+        #[arg(long)]
+        sym: Option<PathBuf>,
     },
     /// Compare two ROMs frame by frame: run both in one
     /// process, hash the displayed frame at every PPU frame, and print
@@ -1311,7 +1341,7 @@ fn indexed<T: Clone + Send + Sync + 'static>(
 ) -> Vec<(usize, T)> {
     let Some((_, sub)) = matches
         .subcommand()
-        .filter(|(name, _)| matches!(*name, "state" | "profile"))
+        .filter(|(name, _)| matches!(*name, "state" | "profile" | "record"))
     else {
         return Vec::new();
     };
@@ -1602,6 +1632,12 @@ fn main() -> ExitCode {
             force_region,
             power_on,
             input,
+            input2,
+            input_at,
+            poke_at: _,
+            poke_hit: _,
+            poke: _,
+            sym,
         } => record::run_record(&record::RecordOptions {
             rom: &rom,
             out: &out,
@@ -1615,6 +1651,10 @@ fn main() -> ExitCode {
             force_region: force_region.as_deref(),
             power_on: power_on.as_deref(),
             input: input.as_deref(),
+            input2: input2.as_deref(),
+            input_at: input_at.as_deref(),
+            pokes: &poke_groups,
+            sym: sym.as_deref(),
         }),
         Command::Diff {
             rom_a,

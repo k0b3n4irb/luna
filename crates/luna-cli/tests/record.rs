@@ -104,7 +104,7 @@ fn the_timeline_and_the_sheets_need_no_encoder() {
 
     let md = std::fs::read_to_string(dir.join("demo.md")).unwrap();
     assert!(md.starts_with("# game.sfc — frames 10 to 109\n"), "{md}");
-    assert!(md.contains("Input script: `40:0x8000`"), "{md}");
+    assert!(md.contains("Input script, pad 1: `40:0x8000`"), "{md}");
     assert!(
         md.contains("| `demo-1.png` | one picture every 10 frames"),
         "{md}"
@@ -153,4 +153,103 @@ fn a_count_of_zero_is_a_usage_error() {
         &["--no-video", "--count", "0", "-o", base.to_str().unwrap()],
     );
     assert_eq!(out.status.code(), Some(2));
+}
+
+/// The piloting options of `state`: a second pad, bytes written at an
+/// arrival on a routine, and scripts numbered by arrivals.
+#[test]
+fn a_record_is_driven_like_a_state_run() {
+    let dir = fresh_dir("driven");
+    let rom = dir.join("game.sfc");
+    synthetic_rom(&rom);
+    let base = dir.join("demo");
+    let out = record(
+        &rom,
+        &[
+            "--no-video",
+            "--count",
+            "60",
+            "--input2",
+            "20:0x0080",
+            "--poke-at",
+            "00:800A",
+            "--poke-hit",
+            "3",
+            "--poke",
+            "7E:0010=40",
+            "-o",
+            base.to_str().unwrap(),
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("poked 1 value(s) at 00:800A hit 3"),
+        "{stderr}"
+    );
+    let md = std::fs::read_to_string(dir.join("demo.md")).unwrap();
+    assert!(md.contains("Input script, pad 2: `20:0x0080`"), "{md}");
+    assert!(
+        md.contains("Written at arrival 3 on `00:800A`: `7E:0010=40`"),
+        "{md}"
+    );
+    assert!(md.contains("| 21 | 0.33 | pad 2: A held |"), "{md}");
+
+    // Numbered by arrivals on the loop, which turns many times a frame,
+    // the fiftieth comes within the first frames; by frame it would be 51.
+    let out = record(
+        &rom,
+        &[
+            "--no-video",
+            "--count",
+            "60",
+            "--input",
+            "50:0x8000",
+            "--input-at",
+            "00:800A",
+            "-o",
+            base.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let md = std::fs::read_to_string(dir.join("demo.md")).unwrap();
+    assert!(md.contains("numbered by arrivals on `00:800A`"), "{md}");
+    let row = md
+        .lines()
+        .find(|l| l.ends_with("| pad 1: B held |"))
+        .expect(&md);
+    let frame: u64 = row.split('|').nth(1).unwrap().trim().parse().unwrap();
+    assert!(frame <= 3, "{row}");
+}
+
+#[test]
+fn a_poke_the_run_never_reaches_fails_the_record() {
+    let dir = fresh_dir("missed");
+    let rom = dir.join("game.sfc");
+    synthetic_rom(&rom);
+    let base = dir.join("demo");
+    let out = record(
+        &rom,
+        &[
+            "--no-video",
+            "--count",
+            "10",
+            "--poke-at",
+            "00:9000",
+            "--poke",
+            "7E:0010=40",
+            "-o",
+            base.to_str().unwrap(),
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("--poke-at 00:9000: hit 1 not reached"),
+        "{stderr}"
+    );
 }

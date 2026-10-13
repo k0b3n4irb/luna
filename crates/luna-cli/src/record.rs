@@ -9,6 +9,7 @@ use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
 
 use crate::parsers::{InputFlags, apply_input_flags};
 use crate::rom::load_rom_into;
+use crate::state::{PokeAt, PokeGroup};
 
 /// Width of the video picture: the native capture, two dots per pixel.
 const VIDEO_W: usize = 512;
@@ -45,6 +46,10 @@ pub(crate) struct RecordOptions<'a> {
     pub force_region: Option<&'a str>,
     pub power_on: Option<&'a str>,
     pub input: Option<&'a str>,
+    pub input2: Option<&'a str>,
+    pub input_at: Option<&'a str>,
+    pub pokes: &'a [PokeGroup],
+    pub sym: Option<&'a Path>,
 }
 
 /// A failure with the exit code it maps to; an empty message was already
@@ -206,21 +211,13 @@ fn pad_slots(mask: u16) -> String {
         .collect()
 }
 
-fn pad_names(mask: u16) -> String {
+fn pad_names(port: usize, mask: u16) -> String {
     let names: Vec<&str> = held(mask).map(|(_, name)| name).collect();
     if names.is_empty() {
-        "pad 1: nothing held".to_owned()
+        format!("pad {}: nothing held", port + 1)
     } else {
-        format!("pad 1: {} held", names.join(" + "))
+        format!("pad {}: {} held", port + 1, names.join(" + "))
     }
-}
-
-/// The pad-1 mask in force while the frame that starts at `frame` runs.
-fn mask_at(pad: &[(u64, u16)], frame: u64) -> u16 {
-    pad.iter()
-        .take_while(|(at, _)| *at <= frame)
-        .last()
-        .map_or(0, |&(_, mask)| mask)
 }
 
 // =============================================================================
@@ -359,7 +356,8 @@ struct Shot {
     frame: u64,
     hash: u64,
     showed: bool,
-    mask: u16,
+    /// What pads 1 and 2 held while the frame ran.
+    masks: [u16; 2],
 }
 
 /// One second of sound.
@@ -432,12 +430,15 @@ fn timeline(shots: &[Shot]) -> Vec<(u64, String)> {
         rows.push((shots[start].frame, event));
         start = end;
     }
-    let mut mask = None;
-    for shot in shots {
-        if mask != Some(shot.mask) && (mask.is_some() || shot.mask != 0) {
-            rows.push((shot.frame, pad_names(shot.mask)));
+    for port in 0..2 {
+        let mut mask = None;
+        for shot in shots {
+            let now = shot.masks[port];
+            if mask != Some(now) && (mask.is_some() || now != 0) {
+                rows.push((shot.frame, pad_names(port, now)));
+            }
+            mask = Some(now);
         }
-        mask = Some(shot.mask);
     }
     rows.sort_by_key(|&(frame, _)| frame);
     rows
@@ -527,8 +528,86 @@ impl Canvas {
 // The run
 // =============================================================================
 
+/// What the capture keeps from one frame to the next.
+struct Capture<'a> {
+    fps: f64,
+    canvas: Canvas,
+    encoder: Option<Encoder>,
+    sheets: Sheets<'a>,
+    shots: Vec<Shot>,
+    audio: Vec<(i16, i16)>,
+    seconds: Vec<Second>,
+}
+
+impl Capture<'_> {
+    /// A frame just completed: keep its picture, its sound and what the
+    /// timeline says of it.
+    fn frame(&mut self, em: &mut luna_api::Emulator) -> Result<(), Fail> {
+        let i = self.shots.len() as u64;
+        let shot = Shot {
+            frame: em.frame_count().map_err(Fail::run)?,
+            hash: em.frame_hash(false).map_err(Fail::run)?,
+            showed: em.frame_showed_content().unwrap_or(true),
+            masks: [
+                em.joypad(0).map_err(Fail::run)?,
+                em.joypad(1).map_err(Fail::run)?,
+            ],
+        };
+        let time = i as f64 / self.fps;
+        let stamp = format!("F{:06} T{time:07.2}", shot.frame);
+
+        if let Some(encoder) = self.encoder.as_mut() {
+            let native = em.render_frame_rgb_native().map_err(Fail::run)?;
+            let picture = self.canvas.h - STRIP_H;
+            self.canvas.fill_rows(0, picture, 0);
+            let rows = (native.len() / (VIDEO_W * 3)).min(picture);
+            self.canvas
+                .blit(0, 0, &native[..rows * VIDEO_W * 3], VIDEO_W);
+            // Black under large white dots: what a starved encoder keeps.
+            self.canvas.fill_rows(picture, STRIP_H, 0);
+            let strip = format!(
+                "F{:06} T{time:06.2} {}",
+                shot.frame,
+                pad_slots(shot.masks[0])
+            );
+            self.canvas.text(4, picture + 2, 3, &strip);
+            encoder.frame(&self.canvas.rgb)?;
+        }
+        if i.is_multiple_of(self.sheets.every) {
+            let rgba = em.render_frame_rgba(false).map_err(Fail::run)?;
+            let rgb: Vec<u8> = rgba
+                .chunks_exact(4)
+                .flat_map(|px| [px[0], px[1], px[2]])
+                .collect();
+            self.sheets.add(&rgb, &stamp)?;
+        }
+
+        let second = time as usize;
+        if self.seconds.len() <= second {
+            self.seconds.resize(second + 1, Second::default());
+            self.seconds[second].frame = shot.frame;
+        }
+        let samples = em.drain_audio(usize::MAX).map_err(Fail::run)?;
+        self.seconds[second].samples += 2 * samples.len() as u64;
+        self.seconds[second].squares += samples
+            .iter()
+            .map(|&(l, r)| i64::from(l).pow(2) + i64::from(r).pow(2))
+            .sum::<i64>() as f64;
+        for write in em.take_dsp_trace().map_err(Fail::run)? {
+            if write.reg == DSP_KON {
+                for voice in (0..8).filter(|v| write.value & (1 << v) != 0) {
+                    self.seconds[second].key_ons[voice] += 1;
+                }
+            }
+        }
+        self.audio.extend(samples);
+        self.shots.push(shot);
+        Ok(())
+    }
+}
+
 fn record(o: &RecordOptions<'_>) -> Result<(), Fail> {
-    use luna_api::FRAME_STEP_BUDGET as FRAME_BUDGET;
+    use luna_api::{ScriptBound, WatchEvent};
     if o.count == 0 {
         return Err(Fail(2, "--count must be at least 1".into()));
     }
@@ -557,31 +636,60 @@ fn record(o: &RecordOptions<'_>) -> Result<(), Fail> {
         o.power_on,
     )
     .map_err(Fail::run)?;
+    if let Some(sym) = o.sym {
+        let n = em
+            .load_symbols(sym)
+            .map_err(|e| Fail::run(format!("--sym {}: {e}", sym.display())))?;
+        eprintln!("loaded {n} symbols from {}", sym.display());
+    }
     if codec.is_some() {
         em.set_native_capture(true).map_err(Fail::run)?;
     }
-    let mut script = apply_input_flags(&mut em, &InputFlags::pad1(o.input))
-        .map_err(|code| Fail(code, String::new()))?;
-    let pad: Vec<(u64, u16)> = script
-        .events()
-        .iter()
-        .filter_map(|&(at, ev)| match ev {
-            luna_api::InputEvent::Pad { port: 0, mask } => Some((at, mask)),
-            _ => None,
-        })
-        .collect();
-
-    // The warm-up, as `luna frames --from-frame`: stop one frame short, the
-    // capture loop steps one frame per picture.
-    let first = o.from_frame.max(1);
-    em.run_input_script(&mut script, luna_api::ScriptBound::Frame(first - 1))
-        .map_err(|e| Fail::run(format!("scripted input: {e}")))?;
-    while em.frame_count().unwrap_or(0) + 1 < first {
-        if em.step_until_frame(FRAME_BUDGET).unwrap_or(0) == 0 {
-            return Err(Fail::run(format!(
-                "the emulator halted before frame {first}"
-            )));
+    let extra_pads = [(1u8, o.input2)];
+    let flags = InputFlags {
+        extra_pads: &extra_pads,
+        ..InputFlags::pad1(o.input)
+    };
+    let mut script =
+        apply_input_flags(&mut em, &flags).map_err(|code| Fail(code, String::new()))?;
+    if let Some(spec) = o.input_at {
+        let pc = crate::test_cmd::resolve_key(&em, spec)
+            .map_err(|e| Fail(2, format!("--input-at `{spec}`: {e}")))?;
+        script.set_clock_pc(pc);
+    }
+    let mut pokes = PokeAt::resolve(&em, o.pokes).map_err(|e| Fail(2, e))?;
+    let mut watched: Vec<u32> = Vec::new();
+    for p in &pokes {
+        if !watched.contains(&p.addr) {
+            watched.push(p.addr);
         }
+    }
+    // Execution reached `watched[i]`: the bytes of its `--poke-at`.
+    let arrive = |em: &mut luna_api::Emulator, i: usize, pokes: &mut [PokeAt]| {
+        for p in pokes.iter_mut().filter(|p| p.addr == watched[i]) {
+            p.on_arrival(em);
+        }
+    };
+    let script_failed = |e: luna_api::ApiError| Fail::run(format!("scripted input: {e}"));
+
+    // The warm-up: everything up to the frame before the first one kept.
+    let first = o.from_frame.max(1);
+    em.run_script_watching(
+        &mut script,
+        ScriptBound::Frame(first - 1),
+        &watched,
+        |em, ev| {
+            if let WatchEvent::Pc(i) = ev {
+                arrive(em, i, &mut pokes);
+            }
+            false
+        },
+    )
+    .map_err(script_failed)?;
+    if em.frame_count().unwrap_or(0) + 1 < first {
+        return Err(Fail::run(format!(
+            "the emulator halted before frame {first}"
+        )));
     }
     // What the warm-up left in the queue is sound from before the capture.
     em.drain_audio(usize::MAX).map_err(Fail::run)?;
@@ -590,83 +698,62 @@ fn record(o: &RecordOptions<'_>) -> Result<(), Fail> {
     let fps = em.frame_rate_hz();
     let every = o.sheet_every.unwrap_or_else(|| fps.round() as u64);
     let tile_h = em.frame_height().map_err(Fail::run)?;
-    let mut sheets = Sheets::new(&base, every, tile_h);
     let video_tmp = beside(&base, ".video.tmp.mp4");
     let pcm_tmp = beside(&base, ".audio.tmp.pcm");
-    let mut frame_canvas = Canvas::new(VIDEO_W, tile_h * 2 + STRIP_H);
-    let mut encoder = match &codec {
+    let canvas = Canvas::new(VIDEO_W, tile_h * 2 + STRIP_H);
+    let encoder = match &codec {
         Some(codec) => Some(Encoder::start(
             o.ffmpeg,
             codec,
-            (frame_canvas.w, frame_canvas.h),
+            (canvas.w, canvas.h),
             fps,
             &video_tmp,
         )?),
         None => None,
     };
-
-    let mut shots: Vec<Shot> = Vec::new();
-    let mut audio: Vec<(i16, i16)> = Vec::new();
-    let mut seconds: Vec<Second> = Vec::new();
-    for i in 0..o.count {
-        let due = em.frame_count().map_err(Fail::run)?;
-        script
-            .apply_due(&mut em, due)
-            .map_err(|e| Fail::run(format!("scripted input: {e}")))?;
-        if em.step_until_frame(FRAME_BUDGET).unwrap_or(0) == 0 {
-            eprintln!("note: the emulator halted at frame {due}; the record stops there");
-            break;
-        }
-        let shot = Shot {
-            frame: em.frame_count().map_err(Fail::run)?,
-            hash: em.frame_hash(false).map_err(Fail::run)?,
-            showed: em.frame_showed_content().unwrap_or(true),
-            mask: mask_at(&pad, due),
-        };
-        let time = i as f64 / fps;
-        let stamp = format!("F{:06} T{time:07.2}", shot.frame);
-
-        if let Some(encoder) = encoder.as_mut() {
-            let native = em.render_frame_rgb_native().map_err(Fail::run)?;
-            let picture = frame_canvas.h - STRIP_H;
-            frame_canvas.fill_rows(0, picture, 0);
-            let rows = (native.len() / (VIDEO_W * 3)).min(picture);
-            frame_canvas.blit(0, 0, &native[..rows * VIDEO_W * 3], VIDEO_W);
-            // Black under large white dots: what a starved encoder keeps.
-            frame_canvas.fill_rows(picture, STRIP_H, 0);
-            let strip = format!("F{:06} T{time:06.2} {}", shot.frame, pad_slots(shot.mask));
-            frame_canvas.text(4, picture + 2, 3, &strip);
-            encoder.frame(&frame_canvas.rgb)?;
-        }
-        if i % sheets.every == 0 {
-            let rgba = em.render_frame_rgba(false).map_err(Fail::run)?;
-            let rgb: Vec<u8> = rgba
-                .chunks_exact(4)
-                .flat_map(|px| [px[0], px[1], px[2]])
-                .collect();
-            sheets.add(&rgb, &stamp)?;
-        }
-
-        let second = time as usize;
-        if seconds.len() <= second {
-            seconds.resize(second + 1, Second::default());
-            seconds[second].frame = shot.frame;
-        }
-        let samples = em.drain_audio(usize::MAX).map_err(Fail::run)?;
-        seconds[second].samples += 2 * samples.len() as u64;
-        seconds[second].squares += samples
-            .iter()
-            .map(|&(l, r)| i64::from(l).pow(2) + i64::from(r).pow(2))
-            .sum::<i64>() as f64;
-        for write in em.take_dsp_trace().map_err(Fail::run)? {
-            if write.reg == DSP_KON {
-                for voice in (0..8).filter(|v| write.value & (1 << v) != 0) {
-                    seconds[second].key_ons[voice] += 1;
-                }
+    let mut capture = Capture {
+        fps,
+        canvas,
+        encoder,
+        sheets: Sheets::new(&base, every, tile_h),
+        shots: Vec::new(),
+        audio: Vec::new(),
+        seconds: Vec::new(),
+    };
+    let mut failure = None;
+    em.run_script_watching(
+        &mut script,
+        ScriptBound::Frame(first - 1 + o.count),
+        &watched,
+        |em, ev| match ev {
+            WatchEvent::Pc(i) => {
+                arrive(em, i, &mut pokes);
+                false
             }
-        }
-        audio.extend(samples);
-        shots.push(shot);
+            WatchEvent::Frame => capture.frame(em).is_err_and(|e| {
+                failure = Some(e);
+                true
+            }),
+        },
+    )
+    .map_err(script_failed)?;
+    if let Some(e) = failure {
+        return Err(e);
+    }
+    let Capture {
+        canvas: frame_canvas,
+        mut encoder,
+        mut sheets,
+        shots,
+        audio,
+        seconds,
+        ..
+    } = capture;
+    if (shots.len() as u64) < o.count {
+        eprintln!(
+            "note: the emulator halted after {} frames; the record stops there",
+            shots.len()
+        );
     }
     sheets.flush()?;
     let Some(last) = shots.last() else {
@@ -727,7 +814,12 @@ fn record(o: &RecordOptions<'_>) -> Result<(), Fail> {
         let bytes = std::fs::metadata(path).map_or(0, |m| m.len());
         println!("  {:>9} bytes  {}", bytes, path.display());
     }
-    Ok(())
+    // A `--poke-at` the run never reached wrote nothing: what was
+    // recorded is not the scene that was asked for.
+    match pokes.iter().find(|p| !p.applied) {
+        Some(p) => Err(Fail::run(p.missed(last.frame))),
+        None => Ok(()),
+    }
 }
 
 // =============================================================================
@@ -763,8 +855,25 @@ impl Report<'_> {
             self.shots.len() as f64 / self.fps,
             self.fps,
         );
-        if let Some(input) = self.o.input {
-            let _ = writeln!(s, "Input script: `{input}`\n");
+        for (pad, script) in [(1, self.o.input), (2, self.o.input2)] {
+            if let Some(script) = script {
+                let _ = writeln!(s, "Input script, pad {pad}: `{script}`\n");
+            }
+        }
+        if let Some(at) = self.o.input_at {
+            let _ = writeln!(
+                s,
+                "The input scripts are numbered by arrivals on `{at}`, not by frame.\n"
+            );
+        }
+        for group in self.o.pokes {
+            let _ = writeln!(
+                s,
+                "Written at arrival {} on `{}`: `{}`\n",
+                group.hit,
+                group.at,
+                group.pokes.join("`, `")
+            );
         }
         let _ = writeln!(s, "| File | What it holds |\n|---|---|");
         if let Some((path, w, h)) = self.video {
@@ -794,7 +903,12 @@ impl Report<'_> {
             s,
             "A picture is *still* once it holds {STILL_MIN} frames, the screen is *off* once \
              it stays off {BLANK_MIN}. A pad row names the first picture drawn with those \
-             buttons; the frame of the input script is one less.\n"
+             buttons{}.\n",
+            if self.o.input_at.is_some() {
+                ""
+            } else {
+                "; the frame of the input script is one less"
+            }
         );
         let _ = writeln!(s, "| frame | time (s) | event |\n|---|---|---|");
         for (frame, event) in timeline(self.shots) {
@@ -845,12 +959,12 @@ impl Report<'_> {
 mod tests {
     use super::*;
 
-    fn shot(frame: u64, hash: u64, showed: bool, mask: u16) -> Shot {
+    fn shot(frame: u64, hash: u64, showed: bool, pad1: u16) -> Shot {
         Shot {
             frame,
             hash,
             showed,
-            mask,
+            masks: [pad1, 0],
         }
     }
 
@@ -895,8 +1009,6 @@ mod tests {
         assert!(rows.contains(&(2, "pad 1: B + Start held".to_owned())));
         assert!(rows.contains(&(4, "pad 1: nothing held".to_owned())));
         assert_eq!(pad_slots(0x9000), "B..S........");
-        assert_eq!(mask_at(&[(3, 0x80), (7, 0)], 2), 0);
-        assert_eq!(mask_at(&[(3, 0x80), (7, 0)], 6), 0x80);
-        assert_eq!(mask_at(&[(3, 0x80), (7, 0)], 7), 0);
+        assert_eq!(pad_names(1, 0x0080), "pad 2: A held");
     }
 }

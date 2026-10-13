@@ -20,7 +20,9 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   its frame number, the time and the buttons held. The video is encoded
   by the `ffmpeg` of the machine, held to `--video-kbps` (500);
   `--no-video` writes the rest without it. `--sheet-every` spaces the
-  pictures of the sheets, `--ffmpeg` names the encoder.
+  pictures of the sheets, `--ffmpeg` names the encoder. It is driven
+  like a `state` run: `--input`, `--input2`, `--input-at`, `--poke-at` /
+  `--poke-hit` / `--poke`, `--sym`.
 
 - **`fbhash` in a `[[checkpoint]]`.** A frame hash taken at a fixed
   frame shows whichever tick the game has reached by then, so a faster

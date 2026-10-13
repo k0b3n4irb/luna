@@ -1768,6 +1768,17 @@ impl Emulator {
         Ok(())
     }
 
+    /// The button mask joypad `port` (0 = pad 1, 1 = pad 2) holds now:
+    /// what [`Self::set_joypad`] or an input script last gave it.
+    pub fn joypad(&self, port: u8) -> Result<u16, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        match port {
+            0 => Ok(snes.cpu_regs.joypad1),
+            1 => Ok(snes.cpu_regs.joypad2),
+            _ => Err(ApiError::BadArg(format!("joypad port {port}: 0 or 1"))),
+        }
+    }
+
     /// Start recording joypad input (issue #83): every subsequent
     /// [`Self::set_joypad`] change is logged as a `frame:mask` checkpoint.
     /// The masks currently in effect become the capture's baseline, so a
