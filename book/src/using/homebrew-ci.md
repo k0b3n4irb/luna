@@ -111,8 +111,8 @@ the manifest so a run never depends on a command-line flag:
 - **`power_on`** / **`seed`** — what RAM holds before the ROM boots.
 - **`render = false`** — leave the picture uncomputed, as `--no-render`
   does: the same machine in about half the time, for a test that reads
-  memory and never the screen. A manifest error with `asserts.fbhash` or
-  `screenshot`.
+  memory and never the screen. A manifest error with `asserts.fbhash`, a
+  checkpoint's `fbhash` or `screenshot`.
 
   ```toml
   rom = "../build/game.sfc"
@@ -358,6 +358,35 @@ input on frames still depend on the speed of the code, because the tick
 that receives the press does; with both on the routine, a test that
 fails after a compiler change means the logic changed
 ([input scripts](input-scripts.md#a-script-clocked-by-the-game-not-by-the-frame)).
+
+**The picture at an arrival.** A frame hash taken at a fixed frame
+(`asserts.fbhash`) shows whichever tick the game has reached by then: a
+faster compiler or a lighter library moves it, and the hash with it,
+though nothing drawn changed. `fbhash` in a checkpoint follows the
+routine instead:
+
+```toml
+[[checkpoint]]
+at_symbol = "tick_start"
+hit = 516
+fbhash = "ad64152ce963c062"    # `luna test --update` records it
+```
+
+It hashes the picture of **the first frame that begins after the
+arrival**: every line of it is drawn after the routine was reached,
+wherever in the frame that was (in the middle of the display or in
+VBlank), and the rule does not depend on it. The run goes on meanwhile:
+a later checkpoint is not delayed, and `frames` must reach two frames
+past the arrival or the test fails saying so. On an `at_frame`
+checkpoint the key hashes the picture as it stands at that frame, what
+`frames = N` and `asserts.fbhash` would give. `--update` rewrites these
+hashes as it does the final one, and `--report json` lists them as
+`checkpoint_fbhashes: [{checkpoint, fbhash}]`. A manifest error with
+`render = false`.
+
+The hash is as steady as the picture is a function of the game's state
+at that arrival: an effect the game advances once per frame, whatever
+the tick, still moves it.
 
 **Writing a state the game does not reach.** `[[poke]]` writes values
 when execution reaches a routine, just before its first instruction:

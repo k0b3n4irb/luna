@@ -9,6 +9,17 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ### Added
 
+- **`fbhash` in a `[[checkpoint]]`.** A frame hash taken at a fixed
+  frame shows whichever tick the game has reached by then, so a faster
+  compiler moved the hash of a picture that had not changed. On an
+  `at_symbol` checkpoint, `fbhash` is the picture of the first frame that
+  begins after the arrival — every line of it drawn after the routine
+  was reached, wherever in the frame that was. The run is not delayed:
+  the hash is read as that frame completes, and `frames` must reach two
+  frames past the arrival. On an `at_frame` checkpoint it is the picture
+  at that frame. `luna test --update` records these hashes as it does
+  `asserts.fbhash`; `--report json` lists them in `checkpoint_fbhashes`.
+  A manifest error with `render = false`.
 - **`luna state --poke-at` is repeatable.** A state that takes two
   writes at two moments (a flag set at `main`, a position set ninety
   ticks later) needed two runs or test code in the ROM. Each `--poke-at`

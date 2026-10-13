@@ -45,6 +45,7 @@
 //! [[checkpoint]]                 # stop on a routine, not a frame (#269)
 //! at_symbol = "tickEnd"          # symbol, symbol+N or BANK:OFFSET
 //! hit = 120                      # its 120th arrival since power-on (default 1)
+//! fbhash = "7429bf441a1c7d6c"    # the first frame that begins after the arrival
 //! [checkpoint.values]            # read just before its first instruction
 //! cam_x = 384
 //!
@@ -218,6 +219,37 @@ struct Checkpoint {
     /// for the first one): `increased | decreased | changed | unchanged`.
     #[serde(default)]
     delta: BTreeMap<String, DeltaAssert>,
+    /// The displayed-frame hash at this checkpoint (`--update` refreshes
+    /// it). With `at_frame`, the picture `frames = N` would hash. With
+    /// `at_symbol`, the picture of the first frame that begins after the
+    /// arrival: every line of it is drawn after the routine was reached,
+    /// wherever in the frame that was, so the hash follows the game's
+    /// state and not the frame its computing time lands it on.
+    fbhash: Option<String>,
+}
+
+/// The frame hash a `[[checkpoint]]` asks for: read at once at a frame,
+/// or when frame `due` begins after an arrival on a routine.
+struct CheckpointHash {
+    /// Index of the checkpoint in the manifest.
+    cp: usize,
+    /// `checkpoint@…`, for the failure and `--update` lines.
+    label: String,
+    want: String,
+    /// The frame count at which the picture is complete.
+    due: u64,
+    got: Option<String>,
+    /// Its failure line, when the hash did not match.
+    failure: Option<String>,
+}
+
+impl CheckpointHash {
+    /// Read the picture once it is complete.
+    fn measure(&mut self, em: &luna_api::Emulator) {
+        if self.got.is_none() && em.frame_count().is_ok_and(|now| now >= self.due) {
+            self.got = em.frame_hash(false).map(|h| format!("{h:016x}")).ok();
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -442,6 +474,9 @@ struct TestOutcome {
     /// Where each `at_symbol` checkpoint fired (issue #269), for the JSON
     /// report: "does this routine still run inside `VBlank`".
     symbol_checkpoints: Vec<SymbolCheckpoint>,
+    /// The frame hash of every `[[checkpoint]]` that asserts one (for
+    /// `--update` and the JSON report).
+    checkpoint_hashes: Vec<CheckpointHash>,
 }
 
 /// Where an `at_symbol` checkpoint fired.
@@ -465,6 +500,8 @@ struct SymbolWatch {
     pokes: Vec<PendingPoke>,
     /// The first write the machine refused.
     poke_error: Option<String>,
+    /// The checkpoint frame hashes, read as their picture completes.
+    hashes: Vec<CheckpointHash>,
 }
 
 impl SymbolWatch {
@@ -490,6 +527,11 @@ impl TestOutcome {
             .iter()
             .any(|f| f.starts_with(FBHASH_MISMATCH))
             .then(|| format!("fbhash -> {}", self.fbhash.as_deref().unwrap_or("?")));
+        let at_checkpoints = self
+            .checkpoint_hashes
+            .iter()
+            .filter(|h| h.failure.is_some())
+            .map(|h| format!("{} fbhash -> {}", h.label, h.got.as_deref().unwrap_or("?")));
         let blocks = self.block_mismatches.iter().map(|b| {
             format!(
                 "blocks.{} -> {} ({} byte(s))",
@@ -498,7 +540,10 @@ impl TestOutcome {
                 b.actual.len()
             )
         });
-        hash.into_iter().chain(blocks).collect()
+        hash.into_iter()
+            .chain(at_checkpoints)
+            .chain(blocks)
+            .collect()
     }
 
     /// The failures `--update` does not rewrite: every assertion but the
@@ -509,6 +554,10 @@ impl TestOutcome {
             .filter(|f| {
                 !f.starts_with(FBHASH_MISMATCH)
                     && !self.block_mismatches.iter().any(|b| b.to_string() == **f)
+                    && !self
+                        .checkpoint_hashes
+                        .iter()
+                        .any(|h| h.failure.as_ref() == Some(*f))
             })
             .collect()
     }
@@ -573,7 +622,12 @@ pub(crate) fn run_tests(
     if update {
         let (mut rewritten, mut blocks) = (0usize, 0usize);
         for o in &outcomes {
-            match update_manifest(&o.path, o.fbhash.as_deref(), &o.block_mismatches) {
+            match update_manifest(
+                &o.path,
+                o.fbhash.as_deref(),
+                &o.checkpoint_hashes,
+                &o.block_mismatches,
+            ) {
                 Ok(changed) => rewritten += usize::from(changed),
                 Err(e) => {
                     eprintln!("error: updating {}: {e}", o.path.display());
@@ -652,6 +706,10 @@ pub(crate) fn run_tests(
                 "seed": o.seed,
                 "region": o.region,
                 "symbol_checkpoints": o.symbol_checkpoints,
+                "checkpoint_fbhashes": o.checkpoint_hashes.iter().map(|h| serde_json::json!({
+                    "checkpoint": h.label,
+                    "fbhash": h.got,
+                })).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
         });
         println!(
@@ -886,6 +944,10 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
     if m.render == Some(false) {
         for (set, key) in [
             (m.asserts.fbhash.is_some(), "asserts.fbhash"),
+            (
+                m.checkpoint.iter().any(|c| c.fbhash.is_some()),
+                "checkpoint.fbhash",
+            ),
             (m.screenshot.is_some(), "screenshot"),
         ] {
             if set {
@@ -981,6 +1043,7 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
                 region: region_label(&m),
                 skipped: Some(format!("firmware `{fw}` not installed")),
                 symbol_checkpoints: Vec::new(),
+                checkpoint_hashes: Vec::new(),
             });
         }
     }
@@ -1108,6 +1171,7 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
         counts: Vec::new(),
         pokes: Vec::new(),
         poke_error: None,
+        hashes: Vec::new(),
     };
     for p in &m.poke {
         let hit = p.hit.unwrap_or(1);
@@ -1265,6 +1329,21 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
             }
             format!("checkpoint@{frame}")
         };
+        if let Some(want) = &cp.fbhash {
+            let now = em.frame_count().map_err(|e| e.to_string())?;
+            let mut hash = CheckpointHash {
+                cp: i,
+                label: label.clone(),
+                want: want.clone(),
+                // At a frame the picture is there; after an arrival it is
+                // the next frame's, complete when the one after begins.
+                due: if cp.at_symbol.is_some() { now + 2 } else { now },
+                got: None,
+                failure: None,
+            };
+            hash.measure(&em);
+            watch.hashes.push(hash);
+        }
         for (key, assert) in &cp.values {
             match check_value(&mut em, key, assert) {
                 Ok(None) => {}
@@ -1336,6 +1415,26 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
     // test: every assert after it reads a state the manifest did not mean.
     if let Some(e) = watch.poke_error.take() {
         failures.push(e);
+    }
+    for h in &mut watch.hashes {
+        h.measure(&em);
+        match &h.got {
+            Some(got) if got.eq_ignore_ascii_case(&h.want) => {}
+            Some(got) => {
+                let line = format!(
+                    "{} {FBHASH_MISMATCH} {}, got {got} (run `luna test --update` after an \
+                     intended render change)",
+                    h.label, h.want
+                );
+                failures.push(line.clone());
+                h.failure = Some(line);
+            }
+            None => failures.push(format!(
+                "{} fbhash: the run ends at frame {final_frame}, before the frame after the \
+                 arrival is complete (raise `frames`)",
+                h.label
+            )),
+        }
     }
     for p in watch.pokes.iter().filter(|p| !p.done) {
         failures.push(format!(
@@ -1604,6 +1703,7 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
         region: region_label(&m),
         skipped: None,
         symbol_checkpoints,
+        checkpoint_hashes: watch.hashes,
     })
 }
 
@@ -1687,6 +1787,9 @@ fn drive_watching(
                     stop == Some((i, arrival))
                 }
                 luna_api::WatchEvent::Frame => {
+                    for h in &mut watch.hashes {
+                        h.measure(em);
+                    }
                     if pooled.per_frame()
                         && let Err(e) = pooled.drain(em)
                     {
@@ -2299,10 +2402,11 @@ fn take_trace_count(em: &mut luna_api::Emulator, name: &str) -> Result<u64, Stri
 fn update_manifest(
     path: &Path,
     fbhash: Option<&str>,
+    checkpoints: &[CheckpointHash],
     blocks: &[BlockMismatch],
 ) -> Result<bool, String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let updated = updated_manifest(&text, fbhash, blocks)?;
+    let updated = updated_manifest(&text, fbhash, checkpoints, blocks)?;
     if updated == text {
         return Ok(false);
     }
@@ -2318,11 +2422,23 @@ fn update_manifest(
 fn updated_manifest(
     text: &str,
     fbhash: Option<&str>,
+    checkpoints: &[CheckpointHash],
     blocks: &[BlockMismatch],
 ) -> Result<String, String> {
     let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("{e}"))?;
+    for h in checkpoints {
+        if let Some(got) = &h.got
+            && let Some(item) = doc
+                .get_mut("checkpoint")
+                .and_then(toml_edit::Item::as_array_of_tables_mut)
+                .and_then(|a| a.get_mut(h.cp))
+                .and_then(|t| t.get_mut("fbhash"))
+        {
+            set_string(item, got);
+        }
+    }
     let Some(asserts) = doc.get_mut("asserts") else {
-        return Ok(text.to_string());
+        return Ok(doc.to_string());
     };
     if let Some(hash) = fbhash
         && let Some(item) = asserts.get_mut("fbhash")
@@ -2429,6 +2545,7 @@ mod tests {
         let out = super::updated_manifest(
             text,
             Some("7429bf441a1c7d6c"),
+            &[],
             &[
                 mismatch("row1", &[0x44, 0x01, 0xfe]),
                 mismatch("7E:0010", &[0xbe, 0xef]),
@@ -2443,13 +2560,44 @@ mod tests {
     }
 
     #[test]
+    fn update_rewrites_the_hash_of_the_checkpoint_that_measured_it() {
+        let text = concat!(
+            "rom = \"a.sfc\"\nframes = 9\n\n",
+            "[[checkpoint]]\nat_symbol = \"tick\"\nfbhash = \"0\"  # first\n\n",
+            "[[checkpoint]]\nat_symbol = \"tick\"\nhit = 2\n\n",
+            "[[checkpoint]]\nat_frame = 8\nfbhash = \"0\"\n",
+        );
+        let hash = |cp, got: Option<&str>| super::CheckpointHash {
+            cp,
+            label: String::new(),
+            want: "0".into(),
+            due: 0,
+            got: got.map(str::to_string),
+            failure: None,
+        };
+        // The second checkpoint asserts no hash and the third measured
+        // none: only the first changes, and no `[asserts]` is needed.
+        let out = super::updated_manifest(
+            text,
+            None,
+            &[hash(0, Some("7429bf441a1c7d6c")), hash(2, None)],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            text.replacen("\"0\"  # first", "\"7429bf441a1c7d6c\"  # first", 1)
+        );
+    }
+
+    #[test]
     fn update_leaves_a_manifest_with_nothing_to_refresh_byte_identical() {
         let text = "rom = \"a.sfc\"\n[asserts.blocks]\nk = \"12 34\"  # two bytes\n";
         assert_eq!(
-            super::updated_manifest(text, Some("7429bf441a1c7d6c"), &[]).unwrap(),
+            super::updated_manifest(text, Some("7429bf441a1c7d6c"), &[], &[]).unwrap(),
             text
         );
-        assert!(super::updated_manifest(text, None, &[mismatch("gone", &[1])]).is_err());
+        assert!(super::updated_manifest(text, None, &[], &[mismatch("gone", &[1])]).is_err());
     }
 
     #[test]

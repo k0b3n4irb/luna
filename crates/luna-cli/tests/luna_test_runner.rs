@@ -1727,6 +1727,121 @@ frames = 3
     assert!(stdout.contains("past the 32 K words of VRAM"), "{stdout}");
 }
 
+/// A screen whose backdrop colour changes on every turn of a loop: no
+/// two frames show the same picture.
+fn moving_backdrop_rom(path: &Path) {
+    synthetic_rom(
+        path,
+        &[
+            0xA9, 0x0F, 0x8D, 0x00, 0x21, // 8000 LDA #$0F : STA $2100  screen on
+            0x9C, 0x21, 0x21, // 8005 STZ $2121
+            0xA5, 0x10, // 8008 LDA $10
+            0x8D, 0x22, 0x21, // 800A STA $2122
+            0x9C, 0x22, 0x21, // 800D STZ $2122
+            0xE6, 0x10, // 8010 INC $10
+            0x80, 0xF1, // 8012 BRA $8005
+        ],
+    );
+}
+
+/// The `tests[0]` object of a `--report json` run.
+fn first_test_report(args: &[&str], dir: &Path) -> serde_json::Value {
+    let out = run(args, dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout[stdout.find("\n{").unwrap()..]).unwrap();
+    json["tests"][0].clone()
+}
+
+/// `fbhash` in a checkpoint on a routine is the picture of the first
+/// frame that begins after the arrival, read while the run goes on;
+/// `--update` records it.
+#[test]
+fn a_checkpoint_on_a_routine_hashes_the_first_frame_begun_after_it() {
+    let dir = fresh_dir("checkpoint_fbhash");
+    moving_backdrop_rom(&dir.join("game.sfc"));
+    let manifest = dir.join("tick.toml");
+    std::fs::write(
+        &manifest,
+        r#"rom = "game.sfc"
+force_mapper = "lorom"
+frames = 12
+
+[[checkpoint]]
+at_symbol = "00:8010"
+hit = 7000
+fbhash = "0000000000000000"   # at the arrival
+
+[[checkpoint]]
+at_symbol = "00:8010"
+hit = 7001
+[checkpoint.values]
+"7E:0010" = { ne = 0x100 }
+"#,
+    )
+    .unwrap();
+    let test = first_test_report(&["tick.toml", "--report", "json"], &dir);
+    // The second checkpoint, one turn of the loop later, is reached in the
+    // same frame: reading the hash did not run the machine past it.
+    let at = &test["symbol_checkpoints"];
+    assert_eq!(at[1]["reached"], true, "{test}");
+    assert_eq!(at[0]["frame"], at[1]["frame"], "{test}");
+    let frame = at[0]["frame"].as_u64().unwrap();
+    let hash = test["checkpoint_fbhashes"][0]["fbhash"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // The same picture as a run that ends when the frame after the
+    // arrival's is complete, and not the one before it.
+    let at_frame = |n: u64| {
+        std::fs::write(
+            dir.join("frame.toml"),
+            format!("rom = \"game.sfc\"\nforce_mapper = \"lorom\"\nframes = {n}\n"),
+        )
+        .unwrap();
+        first_test_report(&["frame.toml", "--report", "json"], &dir)["fbhash"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(hash, at_frame(frame + 2));
+    assert_ne!(hash, at_frame(frame + 1));
+
+    // --update records it, keeps the comment, and the test then passes.
+    let out = run(&["tick.toml", "--update"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(stdout.contains("UPDATED tick"), "{stdout}");
+    assert!(stdout.contains(&format!("fbhash -> {hash}")), "{stdout}");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    assert!(
+        text.contains(&format!("fbhash = \"{hash}\"   # at the arrival")),
+        "{text}"
+    );
+    assert!(run(&["tick.toml"], &dir).status.success());
+
+    // A horizon that ends before that frame is complete fails, saying so.
+    std::fs::write(
+        &manifest,
+        text.replace("frames = 12", &format!("frames = {}", frame + 1)),
+    )
+    .unwrap();
+    let out = run(&["tick.toml"], &dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    assert!(stdout.contains("raise `frames`"), "{stdout}");
+
+    // And the picture is not computed under `render = false`.
+    std::fs::write(&manifest, format!("render = false\n{text}")).unwrap();
+    let out = run(&["tick.toml"], &dir);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("checkpoint.fbhash"),
+        "{out:?}"
+    );
+}
+
 /// `luna state --peek VRAM:WORD:COUNT` reads bytes from a word address,
 /// low byte first, and reports the space.
 #[test]
