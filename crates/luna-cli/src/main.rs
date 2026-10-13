@@ -21,6 +21,7 @@ mod output;
 mod parsers;
 mod profile;
 mod profile_frames;
+mod record;
 mod rom;
 mod run;
 mod state;
@@ -812,6 +813,69 @@ enum Command {
         #[arg(long)]
         input: Option<String>,
     },
+    /// Record a run as a small video, a text timeline and contact
+    /// sheets: `<OUT>.mp4` (H.264 + AAC, the picture at twice its size
+    /// with a strip under it naming the frame, the time and the buttons
+    /// held), `<OUT>.md` (when the picture moves, holds or goes off, when
+    /// the pad changes, the sound second by second) and `<OUT>-1.png` …
+    /// (one labelled picture per second). The video is for eyes and for
+    /// the models that take one; the text and the sheets are for the
+    /// ones that do not. The video needs `ffmpeg` on the machine;
+    /// `--no-video` writes the rest without it. Exit 0 = written, 1 =
+    /// the run or the encoder failed, 2 = usage error.
+    Record {
+        /// Path to the .sfc / .smc ROM file.
+        rom: PathBuf,
+        /// Base path of the files written: `--out /tmp/demo` gives
+        /// `/tmp/demo.mp4`, `/tmp/demo.md`, `/tmp/demo-1.png` … (a
+        /// trailing `.mp4` is dropped).
+        #[arg(short = 'o', long)]
+        out: PathBuf,
+        /// First PPU frame recorded, frame-indexed like
+        /// `state --until-frame`.
+        #[arg(long = "from-frame", default_value_t = 1)]
+        from_frame: u64,
+        /// Number of consecutive frames recorded (600 is ten seconds of
+        /// NTSC).
+        #[arg(short = 'c', long = "count", default_value_t = 600)]
+        count: u64,
+        /// Frames between two pictures of the contact sheets. Default:
+        /// one per second (60 on NTSC, 50 on PAL).
+        #[arg(long = "sheet-every")]
+        sheet_every: Option<u64>,
+        /// Bitrate the picture is held to, in kbit/s: what bounds the
+        /// size of the file (at 500, a minute weighs 3 to 5 MB with its
+        /// sound; a busy scene is soft at that rate and sharp at 1000).
+        #[arg(long = "video-kbps", default_value_t = record::DEFAULT_VIDEO_KBPS)]
+        video_kbps: u32,
+        /// The `ffmpeg` to run.
+        #[arg(long, default_value = "ffmpeg")]
+        ffmpeg: String,
+        /// Write the timeline and the contact sheets only: no video, and
+        /// no `ffmpeg` needed.
+        #[arg(long = "no-video")]
+        no_video: bool,
+        #[arg(
+            long = "force-mapper",
+            help = mapper_help(
+                "Force a cartridge mapper, bypassing header auto-detection."
+            )
+        )]
+        force_mapper: Option<String>,
+        /// Force the video standard (ntsc, pal), overriding the cartridge
+        /// header's country byte.
+        #[arg(long = "force-region")]
+        force_region: Option<String>,
+        /// What RAM holds before the ROM boots: `zero` (default), `ones`,
+        /// `random` (a seed is derived and printed) or `random=<seed>`.
+        #[arg(long = "power-on")]
+        power_on: Option<String>,
+        /// Scripted joypad-1 input, same `frame:hex` format as
+        /// `state --input`; an event before `--from-frame` is applied
+        /// on its frame during the warm-up.
+        #[arg(long)]
+        input: Option<String>,
+    },
     /// Compare two ROMs frame by frame: run both in one
     /// process, hash the displayed frame at every PPU frame, and print
     /// MATCH / DIFF for each requested frame — MATCH when A's frame `F`
@@ -1525,6 +1589,33 @@ fn main() -> ExitCode {
             input.as_deref(),
             power_on.as_deref(),
         ),
+        Command::Record {
+            rom,
+            out,
+            from_frame,
+            count,
+            sheet_every,
+            video_kbps,
+            ffmpeg,
+            no_video,
+            force_mapper,
+            force_region,
+            power_on,
+            input,
+        } => record::run_record(&record::RecordOptions {
+            rom: &rom,
+            out: &out,
+            from_frame,
+            count,
+            sheet_every,
+            video_kbps,
+            ffmpeg: &ffmpeg,
+            no_video,
+            force_mapper: force_mapper.as_deref(),
+            force_region: force_region.as_deref(),
+            power_on: power_on.as_deref(),
+            input: input.as_deref(),
+        }),
         Command::Diff {
             rom_a,
             rom_b,

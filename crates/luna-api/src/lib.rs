@@ -2816,6 +2816,21 @@ impl Emulator {
         Ok(fnv1a_64(snes.ppu.native_framebuffer().as_flattened()))
     }
 
+    /// The native capture as raw **RGB** bytes, row-major, 512 pixels wide
+    /// and twice [`Self::frame_height`] rows — what
+    /// [`Self::render_frame_png_native`] encodes. Errors if capture is not
+    /// enabled.
+    pub fn render_frame_rgb_native(&self) -> Result<Vec<u8>, ApiError> {
+        self.require_picture()?;
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        if snes.ppu.native_framebuffer.is_empty() {
+            return Err(ApiError::BadArg(
+                "native capture is not enabled (set_native_capture / --native-res)".into(),
+            ));
+        }
+        Ok(snes.ppu.native_framebuffer().as_flattened().to_vec())
+    }
+
     /// Rows in the displayed frame: 224, or 239 while the game runs in
     /// overscan (SETINI bit 2, latched per frame). The width is always
     /// [`FRAME_W`]; the native capture is twice both.
@@ -4696,6 +4711,21 @@ impl Emulator {
 fn tilemap_to_png(img: &TilemapImage) -> Result<Vec<u8>, ApiError> {
     let buf = image::RgbaImage::from_raw(img.width, img.height, img.rgba.clone())
         .expect("rgba length matches width*height*4");
+    let mut out = Vec::new();
+    image::DynamicImage::from(buf)
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)?;
+    Ok(out)
+}
+
+/// PNG-encode a row-major **RGB** buffer of `width × height` pixels — for
+/// a front-end that composes its own picture out of rendered frames.
+pub fn encode_png_rgb(width: u32, height: u32, rgb: Vec<u8>) -> Result<Vec<u8>, ApiError> {
+    let buf = image::RgbImage::from_raw(width, height, rgb).ok_or_else(|| {
+        ApiError::BadArg(format!(
+            "an RGB picture of {width}x{height} needs {} bytes",
+            u64::from(width) * u64::from(height) * 3
+        ))
+    })?;
     let mut out = Vec::new();
     image::DynamicImage::from(buf)
         .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)?;

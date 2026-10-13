@@ -1,7 +1,7 @@
 # Compare, measure, export
 
 The subcommands built on top of a run: capture consecutive frames,
-compare two ROMs, measure what the code costs, compare with another
+record a run as a video, compare two ROMs, measure what the code costs, compare with another
 emulator, sweep a folder of ROMs, export the music and the graphics, run
 a test suite.
 
@@ -26,6 +26,93 @@ forced-blank flag.
 | `--force-mapper <M>` | auto | As in `state`. |
 | `--force-region <R>` | header | As in `state`. |
 | `--input <SCRIPT>` | — | Joypad-1 script ([input scripts](input-scripts.md)). Checkpoints inside the warm-up spend from `-n` exactly as in `state` (or are chased frame by frame under `--from-frame`); later ones fire during the capture, on their own frame. |
+
+## `luna record` — a run as a video, a timeline and contact sheets
+
+```
+luna record <ROM> --out <BASE> [OPTIONS]
+```
+
+Shows a run to someone who was not there: a person, or a model. One
+run writes three things, named after `--out`:
+
+| File | What it holds | Who reads it |
+|---|---|---|
+| `<BASE>.mp4` | the picture at twice its size (512 wide, the true hi-res frame when the game uses one) and the sound, H.264 + AAC | eyes, and the models that take a video |
+| `<BASE>.md` | when the picture moves, holds or goes off; when the pad changes; the sound second by second | any model: about 5 KB for a minute |
+| `<BASE>-1.png` … | one labelled picture per second, 36 to a sheet | the models that take pictures but no video |
+
+A model that takes a video looks at about one picture a second, so the
+frame number cannot come from the file's clock: a strip under each
+picture carries it, with the time and the buttons held, as
+`F001803 T025.01 B......>....`. The twelve slots are B, Y, E (Select),
+S (Start), up, down, left, right, A, X, L, R; a dot is a released
+button.
+
+```
+luna record game.sfc --from-frame 300 --count 3600 \
+  --input "400:0x1000,410:0,1500:0x8100" --out /tmp/demo
+```
+
+```
+recorded frames 300..3899 (3600 frames, 59.90 s, sound at 32040 Hz)
+    4851251 bytes  /tmp/demo.mp4
+       4950 bytes  /tmp/demo.md
+    1534092 bytes  /tmp/demo-1.png
+    1330901 bytes  /tmp/demo-2.png
+```
+
+The timeline is what costs least to read:
+
+```
+| frame | time (s) | event |
+|---|---|---|
+| 300 | 0.00 | moving, 63 distinct pictures in 103 frames |
+| 401 | 1.68 | pad 1: Start held |
+| 403 | 1.71 | screen off, 52 frames |
+| 468 | 2.80 | still picture, 778 frames (fbhash `f8d3bf30fdafa7cc`) |
+```
+
+A picture is *still* once it holds 30 frames and the screen is *off*
+once it stays off 4; a game that draws every other frame reads as
+moving, with half as many distinct pictures as frames. A pad row names
+the first picture drawn with those buttons, one frame after the frame
+the input script gives. The sound table gives, for each second, the RMS
+level and the notes started on each S-DSP voice.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `-o, --out <BASE>` | required | Base path of the files written (a trailing `.mp4` is dropped). |
+| `--from-frame <F>` | `1` | First PPU frame recorded, frame-indexed like `state --until-frame`. |
+| `-c, --count <N>` | `600` | Consecutive frames recorded (600 is ten seconds of NTSC). |
+| `--input <SCRIPT>` | — | Joypad-1 script ([input scripts](input-scripts.md)), inline or `@file` — a recording exported from the GUI replays as it is; an event before `--from-frame` is applied on its frame during the warm-up. |
+| `--video-kbps <N>` | `500` | Bitrate the picture is held to, which bounds the size of the file. |
+| `--sheet-every <N>` | one second | Frames between two pictures of the contact sheets. |
+| `--no-video` | off | Write the timeline and the sheets only; `ffmpeg` is not needed. |
+| `--ffmpeg <PATH>` | `ffmpeg` | The encoder to run. |
+| `--force-mapper <M>` | auto | As in `state`. |
+| `--force-region <R>` | header | As in `state`. |
+| `--power-on <S>` | `zero` | As in `frames`. |
+
+**The size.** Measured on two commercial games, a minute weighs 3 MB
+when the picture is calm and 5 MB in an action scene, sound included.
+The bitrate is a ceiling: at 500 kbit/s a scene where the whole picture
+changes at every frame is soft, and `--video-kbps 1000` makes it sharp
+for about twice the weight.
+
+**The encoder.** The video is written by the `ffmpeg` of the machine,
+with `libx264` when it has it and `libopenh264` otherwise; luna checks
+before the run and says so when there is none. Everything else is
+written by luna itself.
+
+**The sound.** The console's audio clock is its own, a little faster
+than the 32000 Hz a `.wav` from `--audio-out` declares. `record` plays
+the samples of the run at the rate that makes them last exactly as long
+as its pictures (the line it prints gives that rate), so the two do not
+drift.
+
+Exit `0` when every file was written, `1` when the run or the encoder
+failed, `2` on a malformed option.
 
 ## `luna diff` — two ROMs at equal PPU frame (MATCH / DIFF)
 

@@ -34,6 +34,7 @@ means that transport has no form of it.
 | which table or routine wrote a range of VRAM, and what two of them both wrote | `luna state --vram-writers writers.txt` | — | [Who wrote this into VRAM?](using/cli-run-state.md#who-wrote-this-into-vram---vram-writers) |
 | a picture per frame over a range, in one run | `luna state --until-frame B --screenshot-frames A..B/K --screenshot-dir DIR` | `step_until_frame`, `screenshot` | [A picture per frame](using/cli-run-state.md#a-picture-per-frame-in-one-run) |
 | consecutive frames, to catch a flicker | `luna frames --from-frame N -c K` | — | [`luna frames`](using/cli-analysis.md#luna-frames--consecutive-frame-capture-temporal-artefacts) |
+| a run as a small video, with a text timeline and contact sheets a model can read | `luna record --from-frame N -c K --out BASE` | — | [`luna record`](using/cli-analysis.md#luna-record--a-run-as-a-video-a-timeline-and-contact-sheets) |
 | the tiles, tilemaps, palette and sprites as PNGs | `luna assets-dump` | `render_vram_tiles`, `render_tilemap`, `render_palette`, `render_sprite_sheet` | [`luna assets-dump`](using/cli-analysis.md#luna-assets-dump--export-the-loaded-graphics-as-pngs) |
 | the sprites as data, not pixels | `oam.json` from `luna assets-dump` | `decode_sprites`, `peek_oam` | [MCP catalogue](using/mcp.md#mcp-tool-catalogue) |
 | every register at once | `luna state --out -` | `state` | [The state JSON](using/state-json.md) |

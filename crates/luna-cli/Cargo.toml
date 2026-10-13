@@ -1,6 +1,6 @@
 [package]
 name = "luna-cli"
-description = "Luna SNES emulator — the `luna` command-line binary (run / test / state / frames / diff / profile / bench / mcp and the dump subcommands)"
+description = "Luna SNES emulator — the `luna` command-line binary (run / test / state / frames / record / diff / profile / bench / mcp and the dump subcommands)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

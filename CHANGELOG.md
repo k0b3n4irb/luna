@@ -9,6 +9,19 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ### Added
 
+- **`luna record`: a run as a small video, a text timeline and contact
+  sheets.** `luna record game.sfc --from-frame 300 --count 3600 --out
+  demo` writes `demo.mp4` (H.264 + AAC, the picture at twice its size,
+  3 to 5 MB a minute), `demo.md` (when the picture moves, holds or goes
+  off, when the pad changes, the sound second by second) and
+  `demo-1.png` … (one labelled picture per second). The video is for
+  eyes and for the models that take one; the text and the sheets are for
+  the ones that do not. A strip under each picture of the video carries
+  its frame number, the time and the buttons held. The video is encoded
+  by the `ffmpeg` of the machine, held to `--video-kbps` (500);
+  `--no-video` writes the rest without it. `--sheet-every` spaces the
+  pictures of the sheets, `--ffmpeg` names the encoder.
+
 - **`fbhash` in a `[[checkpoint]]`.** A frame hash taken at a fixed
   frame shows whichever tick the game has reached by then, so a faster
   compiler moved the hash of a picture that had not changed. On an
