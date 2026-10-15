@@ -151,6 +151,33 @@ when a Super Multitap is on port 2. Fixed, Mesen2-like layout:
   console. It is hidden while the emulation is paused, never appears in
   a screenshot, and the choice is kept in `~/.config/luna/video.json`
   (`%APPDATA%\luna\video.json` on Windows).
+- **Video size**: *Settings → Video → Video Size → 1x … 10x* (`Alt+1` …
+  `Alt+9`, `Alt+0` for 10x, as in Mesen2) sizes the window so the picture
+  is that many screen pixels per console line, at the width the aspect
+  ratio gives; the entry matching the current picture is ticked. In a
+  maximised or fullscreen window the picture is shown at that size,
+  centred. When the picture's shape changes (overscan, filter, aspect
+  ratio) the window keeps the nearest whole size. *Fullscreen* sits at
+  the bottom of the same menu.
+- **Aspect ratio**: *Settings → Video → Aspect Ratio*, Mesen2's list.
+  *No Stretching* (the default) shows square pixels; *NTSC (8:7 PAR)*
+  and *PAL (11:8 PAR)* widen each pixel as a television did; *Auto*
+  follows the cart's region; *Standard* and *Widescreen* force a 4:3 or
+  16:9 picture; *Custom* uses the ratio typed under it (0.1 to 5). For
+  example, to see a game as on an NTSC television at three times its
+  size: *Aspect Ratio → NTSC (8:7 PAR)*, then `Alt+3`.
+- **Video filter**: *Settings → Video → Video Filter*, Mesen2's list.
+  *Prescale 2x … 10x* repeat each pixel (combine with *Use bilinear
+  interpolation* for a soft picture with sharp pixel edges); *Scale 2x …
+  4x* round off diagonals (the Scale2x / Scale3x algorithm); *LCD Grid*
+  draws each pixel as four cells, three of them dimmed. *Use bilinear
+  interpolation* smooths the final stretch instead of keeping square
+  pixels. NTSC (blargg and Bisqwit), xBRZ, HQx, 2xSaI, Super2xSaI and
+  SuperEagle are listed greyed out: their only implementations are
+  copyleft code, which luna's licence (MPL-2.0) does not take in. A
+  screenshot goes through the filter, not the aspect ratio. Filter,
+  aspect ratio and bilinear choice are kept in `video.json` with the
+  frame-rate counter.
 - The *Step frame* debugger hotkey moved from `F11` to `F6` (fullscreen
   claimed the universal key); saved hotkey configs keep working and can
   be rebound under *Settings → Hotkeys*.

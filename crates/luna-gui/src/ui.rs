@@ -49,6 +49,16 @@ pub(crate) enum MenuAction {
     ToggleMute,
     /// Show or hide the on-screen frame-rate counter.
     ToggleShowFps,
+    /// Settings ▸ Video Size: show the picture at this whole scale (1..=10).
+    SetVideoScale(u8),
+    /// Settings ▸ Video Filter.
+    SetVideoFilter(luna_api::video::VideoFilter),
+    /// Settings ▸ Video Filter ▸ Use bilinear interpolation.
+    ToggleBilinear,
+    /// Settings ▸ Aspect Ratio.
+    SetAspectRatio(luna_api::video::AspectRatio),
+    /// The Custom aspect ratio, in thousandths.
+    SetCustomAspect(u32),
     // Debug panels (api-first: data comes from `luna_api::Emulator`).
     ToggleCpuState,
     ToggleCpuMemory,
@@ -187,8 +197,15 @@ pub(crate) struct UiState<'a> {
     pub volume_percent: u8,
     /// Mute state (menu checkbox).
     pub muted: bool,
-    /// On-screen frame-rate counter enabled (Settings ▸ Video).
-    pub show_fps: bool,
+    /// Settings ▸ Video (frame-rate counter, filter, aspect ratio).
+    pub video: &'a crate::video::VideoSettings,
+    /// Width over height of the shown picture (Settings ▸ Aspect Ratio).
+    pub aspect_ratio: f64,
+    /// Picture size in physical pixels a Video Size entry set while the
+    /// window is maximised or fullscreen; `None` = fill the game area.
+    pub renderer_size: Option<(f64, f64)>,
+    /// The Video Size entry the picture's height ticks (`0` = none).
+    pub checked_scale: u32,
     /// Emulated frames per second in tenths, as last reported by the emu
     /// thread; `0` before the first report.
     pub fps_tenths: u32,
@@ -247,6 +264,9 @@ pub(crate) struct UiOverlay {
     /// aspect-fit in the space **under** the menu bar. `None` until the first
     /// frame registers it.
     game_tex: Option<egui::TextureId>,
+    /// Size and bilinear flag of the texture `game_tex` was made from: a
+    /// filter changes the size, the bilinear setting the sampler.
+    game_tex_key: (u32, u32, bool),
     /// Where the game image landed this frame, in logical points — the
     /// mouse→SNES-pixel mapping (Super Scope / SNES Mouse) reads it.
     last_game_rect: Option<egui::Rect>,
@@ -270,22 +290,40 @@ impl UiOverlay {
             winit_state,
             renderer,
             game_tex: None,
+            game_tex_key: (0, 0, false),
             last_game_rect: None,
         }
     }
 
-    /// Register pixels' 256 × 239 frame texture with the egui renderer (once).
-    /// Nearest filtering keeps the upscale crisp, matching what pixels'
-    /// own scaling renderer did.
-    pub(crate) fn ensure_game_texture(&mut self, device: &wgpu::Device, texture: &wgpu::Texture) {
-        if self.game_tex.is_none() {
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            self.game_tex = Some(self.renderer.register_native_texture(
-                device,
-                &view,
-                wgpu::FilterMode::Nearest,
-            ));
+    /// Register pixels' frame texture with the egui renderer, again when a
+    /// video filter resized it or the bilinear setting changed. Nearest
+    /// filtering keeps the upscale crisp; bilinear smooths it (Mesen2's
+    /// "Use bilinear interpolation").
+    pub(crate) fn ensure_game_texture(
+        &mut self,
+        device: &wgpu::Device,
+        texture: &wgpu::Texture,
+        bilinear: bool,
+    ) {
+        let key = (texture.width(), texture.height(), bilinear);
+        if self.game_tex.is_some() && self.game_tex_key == key {
+            return;
         }
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mode = if bilinear {
+            wgpu::FilterMode::Linear
+        } else {
+            wgpu::FilterMode::Nearest
+        };
+        match self.game_tex {
+            Some(id) => self
+                .renderer
+                .update_egui_texture_from_wgpu_texture(device, &view, mode, id),
+            None => {
+                self.game_tex = Some(self.renderer.register_native_texture(device, &view, mode));
+            }
+        }
+        self.game_tex_key = key;
     }
 
     /// The game image's on-screen rectangle (logical points) from the last
@@ -343,9 +381,17 @@ impl UiOverlay {
                 // The frame is `frame_height` rows of the 239-row canvas:
                 // aspect-fit those rows and sample only that part of the
                 // texture (a 224-row frame shows no overscan band).
+                // Its shape is the aspect ratio's (Mesen2
+                // `RendererPanel_LayoutUpdated`): as tall as the area, or as a
+                // Video Size entry set it in a maximised / fullscreen window.
                 let frame_h = state.frame_height.clamp(1, crate::CANVAS_H) as f32;
-                let scale = (avail.width() / crate::CANVAS_W as f32).min(avail.height() / frame_h);
-                let size = egui::vec2(crate::CANVAS_W as f32 * scale, frame_h * scale);
+                let ppp = f64::from(pixels_per_point);
+                let (avail_w, avail_h) = (f64::from(avail.width()), f64::from(avail.height()));
+                let (area_w, area_h) = state.renderer_size.map_or((avail_w, avail_h), |(w, h)| {
+                    ((w / ppp).min(avail_w), (h / ppp).min(avail_h))
+                });
+                let (w, h) = crate::video::fit(area_w, area_h, state.aspect_ratio);
+                let size = egui::vec2(w as f32, h as f32);
                 let rect = egui::Rect::from_center_size(avail.center(), size);
                 painter.image(
                     tex,
@@ -357,7 +403,7 @@ impl UiOverlay {
                     egui::Color32::WHITE,
                 );
                 game_rect.set(Some(rect));
-                if state.show_fps
+                if state.video.show_fps
                     && let Some(text) = fps_label(state.fps_tenths, state.paused)
                 {
                     draw_fps_counter(painter, rect, &text);
@@ -1934,6 +1980,96 @@ fn draw_force_mapper_prompt<F: FnMut(MenuAction)>(ctx: &egui::Context, file: &st
         });
 }
 
+/// Settings ▸ Video Size, Video Filter and Aspect Ratio, in Mesen2's order
+/// and wording (`MainMenuViewModel.cs`), separators between its sections.
+fn draw_video_menus<F: FnMut(MenuAction)>(ui: &mut egui::Ui, state: &UiState<'_>, emit: &mut F) {
+    use luna_api::video::{AspectRatio, CUSTOM_ASPECT_RANGE, VideoFilter};
+    ui.menu_button("Video Size", |ui| {
+        for n in 1u8..=10 {
+            let key = n % 10;
+            if ui
+                .radio(
+                    state.checked_scale == u32::from(n),
+                    format!("{n}x (Alt+{key})"),
+                )
+                .clicked()
+            {
+                emit(MenuAction::SetVideoScale(n));
+                ui.close();
+            }
+        }
+        ui.separator();
+        let fs_key = state
+            .key_bindings
+            .get_hotkey(crate::input::Hotkey::Fullscreen);
+        if ui.button(format!("Fullscreen ({fs_key:?})")).clicked() {
+            emit(MenuAction::ToggleFullscreen);
+            ui.close();
+        }
+    });
+    ui.menu_button("Video Filter", |ui| {
+        let mut group = 0;
+        for filter in VideoFilter::ALL {
+            if filter.group() != group {
+                ui.separator();
+                group = filter.group();
+            }
+            let radio = egui::RadioButton::new(state.video.filter == filter, filter.label());
+            if ui
+                .add_enabled(filter.is_available(), radio)
+                .on_disabled_hover_text(
+                    "Not in luna: this filter's only implementation is copyleft code, \
+                     which luna's licence (MPL-2.0) does not take in",
+                )
+                .clicked()
+            {
+                emit(MenuAction::SetVideoFilter(filter));
+                ui.close();
+            }
+        }
+        ui.separator();
+        let mut bilinear = state.video.bilinear;
+        if ui
+            .checkbox(&mut bilinear, "Use bilinear interpolation")
+            .clicked()
+        {
+            emit(MenuAction::ToggleBilinear);
+            ui.close();
+        }
+    });
+    ui.menu_button("Aspect Ratio", |ui| {
+        let mut group = 0;
+        for aspect in AspectRatio::ALL {
+            if aspect.group() != group {
+                ui.separator();
+                group = aspect.group();
+            }
+            if ui
+                .radio(state.video.aspect == aspect, aspect.label())
+                .clicked()
+            {
+                emit(MenuAction::SetAspectRatio(aspect));
+                ui.close();
+            }
+        }
+        // Mesen2 sets this ratio in its Video options; luna has no such
+        // window, so it sits under the Custom entry.
+        let mut custom = state.video.custom_aspect;
+        if ui
+            .add(
+                egui::DragValue::new(&mut custom)
+                    .range(CUSTOM_ASPECT_RANGE)
+                    .speed(0.01)
+                    .fixed_decimals(3)
+                    .prefix("Custom ratio: "),
+            )
+            .changed()
+        {
+            emit(MenuAction::SetCustomAspect((custom * 1000.0).round() as u32));
+        }
+    });
+}
+
 /// Draws the top menu strip. Returns the strip's bottom edge in logical
 /// points — the game-frame layout anchors just below it.
 // egui deprecated the ctx-level `TopBottomPanel::show` for `Panel::show_inside`,
@@ -2102,7 +2238,11 @@ fn draw_menu_bar<F: FnMut(MenuAction)>(
                     }
                     ui.separator();
                     ui.label(egui::RichText::new("Video").weak().small());
-                    if ui.selectable_label(state.show_fps, "Show FPS").clicked() {
+                    draw_video_menus(ui, state, emit);
+                    if ui
+                        .selectable_label(state.video.show_fps, "Show FPS")
+                        .clicked()
+                    {
                         emit(MenuAction::ToggleShowFps);
                     }
                     ui.separator();

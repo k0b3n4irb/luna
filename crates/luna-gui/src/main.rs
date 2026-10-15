@@ -33,6 +33,7 @@ mod debug_window;
 mod emu_thread;
 mod input;
 mod ui;
+mod video;
 
 use std::collections::HashSet;
 use std::num::NonZeroU32;
@@ -122,8 +123,20 @@ struct LunaApp {
     volume_percent: u8,
     /// Mute toggle, persisted to audio.json.
     muted: bool,
-    /// On-screen frame-rate counter, persisted to video.json.
-    show_fps: bool,
+    /// Settings ▸ Video (frame-rate counter, filter, aspect ratio),
+    /// persisted to video.json.
+    video: video::VideoSettings,
+    /// Picture size (physical px) a Video Size entry set in a maximised or
+    /// fullscreen window; `None` = fill the game area (Mesen2 `_rendererSize`).
+    renderer_size: Option<(f64, f64)>,
+    /// The loaded cart is PAL (the Auto aspect ratio follows it).
+    region_pal: bool,
+    /// The filtered frame, reused across redraws.
+    filter_buf: Vec<u8>,
+    /// What the picture's size last derived from: frame rows, filter scale
+    /// and aspect ratio. A change re-applies the Video Size scale (Mesen2
+    /// `ProcessResolutionChange`).
+    last_resolution: Option<(usize, usize, u64)>,
     /// Host gamepads (gilrs). `None` when the backend failed to init.
     gilrs: Option<gilrs::Gilrs>,
     /// Live SNES button mask per player derived from gamepads 1 and 2,
@@ -282,7 +295,11 @@ impl LunaApp {
             volume,
             volume_percent,
             muted,
-            show_fps: load_video_config(),
+            video: video::VideoSettings::load(),
+            renderer_size: None,
+            region_pal: false,
+            filter_buf: Vec::new(),
+            last_resolution: None,
             gilrs: gilrs::Gilrs::new()
                 .map_err(|e| eprintln!("luna-gui: gamepad backend unavailable: {e}"))
                 .ok(),
@@ -396,6 +413,7 @@ impl LunaApp {
             }
         }
         self.srm_path = Some(srm_path);
+        self.region_pal = em.region() == luna_api::Region::Pal;
         // Remember the ROM path + its mtime so it can be reloaded in place
         // (issue #93); reset the debounce so the just-loaded build isn't
         // immediately re-triggered.
@@ -564,13 +582,85 @@ impl LunaApp {
     }
 
     /// Toggle borderless fullscreen on the game window (F11 / View menu).
-    fn toggle_fullscreen(&self) {
+    /// The picture then fills the screen until a Video Size entry is picked.
+    fn toggle_fullscreen(&mut self) {
+        self.renderer_size = None;
         if let Some(win) = self.window.as_ref() {
             if win.fullscreen().is_some() {
                 win.set_fullscreen(None);
             } else {
                 win.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
             }
+        }
+    }
+
+    /// Settings ▸ Video Size (Mesen2 `MainWindow.SetScale`): a windowed
+    /// window is resized so the picture is `scale` × the frame's height in
+    /// physical pixels, at the aspect ratio's width; a maximised or
+    /// fullscreen one shows the picture at that size, centred.
+    fn set_video_scale(&mut self, scale: f64) {
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        let scale = scale.max(1.0);
+        let (base_w, base_h) = (CANVAS_W as f64, self.frame_h as f64);
+        let ratio = self.video.ratio(self.region_pal, CANVAS_W, self.frame_h);
+        if is_windowed(&window) {
+            self.renderer_size = None;
+            let sf = window.scale_factor();
+            let (w, h) = video::window_size(
+                base_h,
+                ratio,
+                scale,
+                f64::from(MENU_BAR_LOGICAL_H) * sf,
+                (base_w * sf, FRAME_H as f64 * sf),
+            );
+            // A compositor may apply the size at once without a `Resized`
+            // event: follow it on the surface here.
+            if let Some(size) = window.request_inner_size(winit::dpi::PhysicalSize::new(w, h))
+                && let Some(pixels) = self.pixels.as_mut()
+                && let Err(e) = pixels.resize_surface(size.width.max(1), size.height.max(1))
+            {
+                eprintln!("luna-gui: pixels resize failed: {e}");
+            }
+        } else {
+            self.renderer_size = Some(video::renderer_size(base_w, base_h, ratio, scale));
+        }
+    }
+
+    /// Re-apply the Video Size scale when what the picture's size derives
+    /// from changed — frame rows (overscan), filter or aspect ratio (Mesen2
+    /// `ProcessResolutionChange`). The first frame only records it: the
+    /// window was just created at its size.
+    fn process_resolution_change(&mut self) {
+        let ratio = self.video.ratio(self.region_pal, CANVAS_W, self.frame_h);
+        let key = (self.frame_h, self.video.filter.scale(), ratio.to_bits());
+        let previous = self.last_resolution.replace(key);
+        if previous.is_none() || previous == Some(key) {
+            return;
+        }
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        let (base_w, base_h) = (CANVAS_W as f64, self.frame_h as f64);
+        if is_windowed(&window) {
+            let size = window.inner_size();
+            let menu = f64::from(MENU_BAR_LOGICAL_H) * window.scale_factor();
+            self.set_video_scale(video::windowed_rescale(
+                f64::from(size.width),
+                f64::from(size.height) - menu,
+                base_w,
+                base_h,
+            ));
+        } else if let Some(size) = self.renderer_size {
+            self.set_video_scale(video::fullscreen_rescale(size, base_w, base_h));
+        }
+    }
+
+    /// Persist the video settings, reporting a failure on stderr.
+    fn save_video(&self) {
+        if let Err(e) = self.video.save() {
+            eprintln!("luna-gui: could not persist video settings: {e}");
         }
     }
 
@@ -974,8 +1064,14 @@ impl ApplicationHandler for LunaApp {
         // bar and lays the game frame out below it (aspect-fit, see
         // `UiOverlay::render`); pixels only owns the surface and the
         // frame texture.
-        let scaled_w = (CANVAS_W as u32) * INITIAL_SCALE;
-        let scaled_h = (FRAME_H as u32) * INITIAL_SCALE + MENU_BAR_LOGICAL_H;
+        // Sized like Video Size at INITIAL_SCALE, in logical points.
+        let (scaled_w, scaled_h) = video::window_size(
+            FRAME_H as f64,
+            self.video.ratio(false, CANVAS_W, FRAME_H),
+            f64::from(INITIAL_SCALE),
+            f64::from(MENU_BAR_LOGICAL_H),
+            (CANVAS_W as f64, FRAME_H as f64),
+        );
         let mut attrs = WindowAttributes::default()
             .with_title(WINDOW_TITLE)
             .with_inner_size(winit::dpi::LogicalSize::new(scaled_w, scaled_h))
@@ -1188,6 +1284,15 @@ impl ApplicationHandler for LunaApp {
                     }
                     return;
                 }
+                // Video Size shortcuts: Alt+1 … Alt+9, Alt+0 = 10x (Mesen2).
+                if pressed
+                    && !repeat
+                    && self.modifiers.alt_key()
+                    && let Some(n) = video_size_key(code)
+                {
+                    self.set_video_scale(f64::from(n));
+                    return;
+                }
                 if pressed && !repeat && self.modifiers.control_key() {
                     match code {
                         KeyCode::KeyO => self.open_rom_dialog(),
@@ -1254,6 +1359,22 @@ impl LunaApp {
         // Compute the occupied-slot flags before borrowing `pixels` mutably
         // (it scans `self`), so the borrow checker stays happy.
         let occupied_slots = self.occupied_slots();
+        // The Video Size entry the last picture's height ticks.
+        let checked_scale = self
+            .ui
+            .as_ref()
+            .and_then(UiOverlay::game_rect)
+            .map_or(0, |r| {
+                video::checked_scale(
+                    f64::from(r.height()) * window.scale_factor(),
+                    self.frame_h as f64,
+                )
+            });
+        let renderer_size = if is_windowed(&window) {
+            None
+        } else {
+            self.renderer_size
+        };
         // Disjoint borrows: pixels and ui live in separate fields so the
         // closure passed to render_with can capture `&mut ui` without
         // aliasing `self`.
@@ -1270,10 +1391,29 @@ impl LunaApp {
             let fb = self.framebuffer_out.read();
             let h = (fb.len() / (FRAME_W * 4)).clamp(1, CANVAS_H);
             self.frame_h = h;
-            let len = FRAME_W * h * 4;
+            // Settings ▸ Video Filter: the canvas is the filter's scale
+            // times the 256 × 239 one.
+            let filter = self.video.filter;
+            let s = filter.scale();
+            let (tw, th) = ((CANVAS_W * s) as u32, (CANVAS_H * s) as u32);
+            let texture = pixels.texture();
+            if (texture.width(), texture.height()) != (tw, th)
+                && let Err(e) = pixels.resize_buffer(tw, th)
+            {
+                eprintln!("luna-gui: pixels buffer resize failed: {e}");
+            }
+            let frame = &fb[..FRAME_W * h * 4];
+            let src: &[u8] = if s == 1 {
+                frame
+            } else {
+                filter.apply(frame, FRAME_W, h, &mut self.filter_buf);
+                &self.filter_buf
+            };
             let canvas = pixels.frame_mut();
-            canvas[..len].copy_from_slice(&fb[..len]);
-            canvas[len..].fill(0);
+            if let Some(dst) = canvas.get_mut(..src.len()) {
+                dst.copy_from_slice(src);
+                canvas[src.len()..].fill(0);
+            }
         }
         // Debug panels live in their own native windows now (rendered in
         // `redraw_debug_window`), so the main window only needs the open/
@@ -1287,7 +1427,10 @@ impl LunaApp {
             port_device: self.port_device,
             volume_percent: self.volume_percent,
             muted: self.muted,
-            show_fps: self.show_fps,
+            video: &self.video,
+            aspect_ratio: self.video.ratio(self.region_pal, CANVAS_W, self.frame_h),
+            renderer_size,
+            checked_scale,
             fps_tenths: self.emu_shared.fps_tenths.load(Ordering::Relaxed),
             show_input_config: self.show_input_config,
             show_hotkey_config: self.show_hotkey_config,
@@ -1328,7 +1471,7 @@ impl LunaApp {
                 // menu bar) — see `UiOverlay`. pixels' scaling renderer is
                 // NOT used: it centred the image in the whole window, leaving
                 // a black bar at the bottom equal to ~half the menu strip.
-                ui.ensure_game_texture(&ctx.device, &ctx.texture);
+                ui.ensure_game_texture(&ctx.device, &ctx.texture, ui_state.video.bilinear);
                 // The Mutex is frame-local; recover from a (theoretical)
                 // poison rather than aborting the render path.
                 let mut sink = pending
@@ -1358,6 +1501,7 @@ impl LunaApp {
         for action in pending.into_inner().unwrap_or_default() {
             self.dispatch_menu_action(action, event_loop);
         }
+        self.process_resolution_change();
     }
 
     /// Build the `luna-api` snapshot for a single debug panel (api-first).
@@ -1678,10 +1822,25 @@ impl LunaApp {
                 self.apply_volume();
             }
             MenuAction::ToggleShowFps => {
-                self.show_fps = !self.show_fps;
-                if let Err(e) = save_video_config(self.show_fps) {
-                    eprintln!("luna-gui: could not persist video settings: {e}");
-                }
+                self.video.show_fps = !self.video.show_fps;
+                self.save_video();
+            }
+            MenuAction::SetVideoScale(n) => self.set_video_scale(f64::from(n)),
+            MenuAction::SetVideoFilter(filter) => {
+                self.video.filter = filter;
+                self.save_video();
+            }
+            MenuAction::ToggleBilinear => {
+                self.video.bilinear = !self.video.bilinear;
+                self.save_video();
+            }
+            MenuAction::SetAspectRatio(aspect) => {
+                self.video.aspect = aspect;
+                self.save_video();
+            }
+            MenuAction::SetCustomAspect(thousandths) => {
+                self.video.custom_aspect = f64::from(thousandths) / 1000.0;
+                self.save_video();
             }
             MenuAction::ToggleInputRecording => self.toggle_input_recording(),
             MenuAction::SetForcedMapper(mapper) => {
@@ -1804,9 +1963,15 @@ impl LunaApp {
     /// 256 × 239 under overscan) — the exact pixels on screen — so the PNG
     /// matches what the user sees.
     fn take_screenshot(&mut self) {
+        // Like Mesen2's `TakeScreenshot`, the picture goes through the video
+        // filter (not the aspect ratio).
         let buf = self.framebuffer_out.read().clone();
-        let height = (buf.len() / (FRAME_W * 4)) as u32;
-        let Some(img) = image::RgbaImage::from_raw(FRAME_W as u32, height, buf) else {
+        let mut filtered = Vec::new();
+        let (width, height) =
+            self.video
+                .filter
+                .apply(&buf, FRAME_W, buf.len() / (FRAME_W * 4), &mut filtered);
+        let Some(img) = image::RgbaImage::from_raw(width as u32, height as u32, filtered) else {
             eprintln!("luna-gui: screenshot skipped — framebuffer size mismatch");
             return;
         };
@@ -2021,29 +2186,26 @@ fn save_audio_config(volume: u8, muted: bool) -> std::io::Result<()> {
     )
 }
 
-/// `show_fps` as stored in the text of `video.json`; `false` for a file
-/// that is absent, unreadable or does not say.
-fn parse_video_config(json: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(json)
-        .ok()
-        .and_then(|v| v.get("show_fps").and_then(serde_json::Value::as_bool))
-        .unwrap_or(false)
+/// Whether the window is neither maximised nor fullscreen.
+fn is_windowed(window: &Window) -> bool {
+    window.fullscreen().is_none() && !window.is_maximized()
 }
 
-/// Load `show_fps` from `~/.config/luna/video.json`; off by default.
-fn load_video_config() -> bool {
-    crate::input::config_file("video.json")
-        .and_then(std::fs::read_to_string)
-        .is_ok_and(|json| parse_video_config(&json))
-}
-
-/// Persist the video settings next to the audio ones.
-fn save_video_config(show_fps: bool) -> std::io::Result<()> {
-    let path = crate::input::config_file("video.json")?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, format!("{{\n  \"show_fps\": {show_fps}\n}}\n"))
+/// The Video Size a digit key selects with Alt (`0` = 10x).
+const fn video_size_key(code: KeyCode) -> Option<u8> {
+    Some(match code {
+        KeyCode::Digit1 => 1,
+        KeyCode::Digit2 => 2,
+        KeyCode::Digit3 => 3,
+        KeyCode::Digit4 => 4,
+        KeyCode::Digit5 => 5,
+        KeyCode::Digit6 => 6,
+        KeyCode::Digit7 => 7,
+        KeyCode::Digit8 => 8,
+        KeyCode::Digit9 => 9,
+        KeyCode::Digit0 => 10,
+        _ => return None,
+    })
 }
 
 fn rom_mtime(path: &Path) -> Option<std::time::SystemTime> {
@@ -2230,19 +2392,5 @@ fn draw_event_dot(
             let d = (py as usize * w + px as usize) * 4;
             buf[d..d + 4].copy_from_slice(&[r, g, b, 0xFF]);
         }
-    }
-}
-
-#[cfg(test)]
-mod video_config_tests {
-    use super::parse_video_config;
-
-    #[test]
-    fn the_fps_counter_is_off_unless_the_file_says_true() {
-        assert!(parse_video_config("{\n  \"show_fps\": true\n}\n"));
-        assert!(!parse_video_config("{\n  \"show_fps\": false\n}\n"));
-        assert!(!parse_video_config("{}"));
-        assert!(!parse_video_config("{\"show_fps\": 1}"));
-        assert!(!parse_video_config("not json"));
     }
 }

@@ -9,6 +9,17 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ### Added
 
+- **GUI: Settings → Video → Video Size, Video Filter and Aspect Ratio,
+  as in Mesen2.** Video Size (1x … 10x, `Alt+1` … `Alt+0`) sizes the
+  window to a whole multiple of the picture; Aspect Ratio offers Mesen2's
+  seven choices (square pixels by default, NTSC 8:7, PAL 11:8, Auto by
+  region, 4:3, 16:9, a custom ratio); Video Filter offers Prescale 2x …
+  10x, Scale 2x … 4x, LCD Grid and bilinear interpolation. Mesen2's
+  other filters (NTSC, xBRZ, HQx, the 2xSaI family) are listed greyed
+  out: their only implementations are copyleft code, which MPL-2.0 luna
+  does not take in. `luna_api::video` holds the filters and the ratios,
+  and `Emulator::region` the cart's region.
+
 - **`luna record`: a run as a small video, a text timeline and contact
   sheets.** `luna record game.sfc --from-frame 300 --count 3600 --out
   demo` writes `demo.mp4` (H.264 + AAC, the picture at twice its size,

@@ -49,6 +49,7 @@ pub mod input;
 pub mod paths;
 mod power_on;
 pub mod symbols;
+pub mod video;
 mod vocab;
 mod vram_writers;
 
@@ -3998,6 +3999,12 @@ impl Emulator {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         snes.mapper.load_sram(data);
         Ok(())
+    }
+
+    /// Video region of the loaded cart (NTSC with no ROM): the region a
+    /// front-end's "Auto" aspect ratio follows ([`video::AspectRatio::Auto`]).
+    pub fn region(&self) -> Region {
+        self.snes.as_ref().map_or(Region::Ntsc, |s| s.region)
     }
 
     /// Nominal display frame rate of the loaded cart's region — NTSC
