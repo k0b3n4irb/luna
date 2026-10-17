@@ -936,6 +936,7 @@ impl LunaApp {
                     hit.id
                 )
             }
+            source => format!("\u{23f8} Break: {source:?} at ${:06X}{sym}", hit.pc),
         });
         // Jump the disassembly to the halt PC and make sure it is visible.
         self.cpu_disasm_addr = hit.pc;

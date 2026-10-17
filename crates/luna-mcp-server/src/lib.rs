@@ -1335,6 +1335,33 @@ pub struct AbsoluteAddressParams {
     pub symbol: Option<String>,
 }
 
+/// `set_break_sources` parameters: what else than the breakpoints stops
+/// `run_until_break` / `run`. Every field defaults to off.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+pub struct BreakSourcesParams {
+    /// Stop before a `BRK` runs.
+    #[serde(default)]
+    pub brk: bool,
+    /// Stop before a `COP` runs.
+    #[serde(default)]
+    pub cop: bool,
+    /// Stop before a `WDM` runs.
+    #[serde(default)]
+    pub wdm: bool,
+    /// Stop before a `STP` runs.
+    #[serde(default)]
+    pub stp: bool,
+    /// Stop on the first instruction of the NMI handler ("run to NMI").
+    #[serde(default)]
+    pub nmi: bool,
+    /// Stop on the first instruction of the IRQ handler ("run to IRQ").
+    #[serde(default)]
+    pub irq: bool,
+    /// Stop when the PPU reaches this scanline.
+    #[serde(default)]
+    pub scanline: Option<u16>,
+}
+
 /// `eval` parameters.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct EvalParams {
@@ -2791,6 +2818,33 @@ impl LunaServer {
     }
 
     #[rmcp::tool(
+        description = "Choose what else than the breakpoints stops `run_until_break` / \
+                                `run` (Mesen2's break-on options): `brk`, `cop`, `wdm`, `stp` stop \
+                                before that opcode runs; `nmi` / `irq` stop on the first \
+                                instruction of the handler; `scanline` stops when the PPU reaches \
+                                that line. Each defaults to off; the call replaces the whole set. \
+                                A stop by one of them reports `kind` = its name and no `bp_id`."
+    )]
+    async fn set_break_sources(
+        &self,
+        Parameters(params): Parameters<BreakSourcesParams>,
+    ) -> Result<rmcp::Json<BreakSourcesParams>, ErrorData> {
+        self.emulator
+            .lock()
+            .await
+            .set_break_sources(luna_api::BreakSources {
+                brk: params.brk,
+                cop: params.cop,
+                wdm: params.wdm,
+                stp: params.stp,
+                nmi: params.nmi,
+                irq: params.irq,
+                scanline: params.scanline,
+            });
+        Ok(rmcp::Json(params))
+    }
+
+    #[rmcp::tool(
         description = "Evaluate a debugger expression in Mesen2's language, as a watch \
                                 does: registers (`a`, `x`, `pc`, `ps`, `pscarry`…), \
                                 `scanline`, `hclock`, `frame`, `nmi`, `irq`, `.sym` labels \
@@ -3968,12 +4022,19 @@ fn outcome_to_result(out: &luna_api::RunOutcome) -> RunUntilBreakResult {
         Some(hit) => RunUntilBreakResult {
             steps: out.steps,
             hit: true,
-            bp_id: Some(hit.id),
+            bp_id: (hit.id != luna_api::BREAK_SOURCE_ID).then_some(hit.id),
             kind: Some(
                 match hit.kind {
                     luna_api::BreakKind::Exec => "exec",
                     luna_api::BreakKind::Read => "read",
                     luna_api::BreakKind::Write => "write",
+                    luna_api::BreakKind::Brk => "brk",
+                    luna_api::BreakKind::Cop => "cop",
+                    luna_api::BreakKind::Wdm => "wdm",
+                    luna_api::BreakKind::Stp => "stp",
+                    luna_api::BreakKind::Nmi => "nmi",
+                    luna_api::BreakKind::Irq => "irq",
+                    luna_api::BreakKind::Scanline => "scanline",
                 }
                 .into(),
             ),

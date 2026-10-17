@@ -29,7 +29,26 @@ pub enum BreakKind {
     Read,
     /// An instruction wrote a watched address.
     Write,
+    /// A break source (not a registry entry): the CPU is about to run a
+    /// `BRK`.
+    Brk,
+    /// About to run a `COP`.
+    Cop,
+    /// About to run a `WDM`.
+    Wdm,
+    /// About to run a `STP`.
+    Stp,
+    /// The CPU has just entered its NMI handler.
+    Nmi,
+    /// The CPU has just entered its IRQ handler.
+    Irq,
+    /// The PPU has just reached the chosen scanline.
+    Scanline,
 }
+
+/// The id a [`BreakHit`] carries when a break source, not a registered
+/// breakpoint, stopped the run.
+pub const BREAK_SOURCE_ID: u32 = u32::MAX;
 
 /// One registered breakpoint, as reported by [`BreakpointSet::list`].
 #[derive(Debug, Clone, Serialize, Deserialize)]

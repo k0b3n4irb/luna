@@ -90,7 +90,8 @@ method, so the MCP transport adds reach, not capability.
 | `bp_add` | `bp_add_exec` / `bp_add_mem`, `bp_set_condition`, `bp_set_mark` | Register an exec breakpoint or a read/write watchpoint range. `mirror: false` makes a mem watch bank-exact (default follows WRAM/MMIO mirrors); `name` (defaulting to the `symbol` used) labels it in `bp_list`. `condition` is an [expression](#expressions) that must be non-zero for it to fire; `mark: true` puts a mark on the Event Viewer instead of halting. See [Conditional breakpoints](#conditional-breakpoints). |
 | `bp_set_enabled` | `bp_set_enabled` | Disable/re-enable without removing — id, name and hit count survive. |
 | `bp_remove` / `bp_clear_all` / `bp_list` | `bp_remove` / `bp_clear` / `bp_list` | Manage the registry. `bp_list` rows now carry `enabled`, `hit_count` (mem: at most one per instruction), `mirror` and `name`. |
-| `run_until_break` | `run_until_break` | Run at full speed until a breakpoint fires (or a step budget). |
+| `run_until_break` | `run_until_break` | Run at full speed until a breakpoint or a break source fires (or a step budget). |
+| `set_break_sources` | `set_break_sources` | What else stops `run_until_break` / `run`, as Mesen2's "break on" options: `brk`, `cop`, `wdm`, `stp` (before that opcode runs), `nmi` / `irq` (on the handler's first instruction — Mesen2's "run to NMI / IRQ"), `scanline: N`. The result's `kind` names the source and `bp_id` is absent. |
 | `run` / `pause` | `run_until_break_interruptible` | Unbounded interruptible run: `run` goes until a breakpoint / `STOP` / `pause`; `pause` stops it (returns `interrupted: true`). No mandatory step budget. `pause` also ends every other run tool early — `step`, `step_until_frame`, `run_until_pc`, `run_until_break`, `run_until_mem_read` / `_write` — so a huge `max_steps` can never wedge the session. |
 | `peek_oam` | `peek_oam` | All 544 OAM bytes (512 low table + 32 high table). |
 | `capabilities` | — | luna `version` + the live tool catalogue, for client feature-detection (the handshake `serverInfo` also reports luna's name and version). |
@@ -260,6 +261,18 @@ bp_list {}                                                          # condition,
   - One that does not parse is refused when it is set.
 - **Counting.** The hit count counts firings, marks included; a match whose
   condition is false does not count.
+
+Mesen2's "break on" options and its "run to NMI / IRQ" are break sources,
+set once for every run:
+
+```text
+set_break_sources {brk: true, wdm: true}   # a crash into BRK, or an SDK assert's WDM
+run_until_break {max_steps: 50000000}      # → {hit: true, kind: "wdm", pc: …}, before the WDM runs
+set_break_sources {nmi: true}
+run_until_break {max_steps: 1000000}       # → {kind: "nmi"}: PC is the handler's first instruction
+set_break_sources {scanline: 225}          # the first VBlank line
+set_break_sources {}                       # all off again
+```
 
 ### Loading homebrew straight from the assembler
 

@@ -18,7 +18,7 @@ pub mod power;
 pub mod snes;
 
 pub use apu_stub::{ApuStub, Phase as ApuPhase};
-pub use breakpoints::{BreakHit, BreakKind, BreakpointInfo, BreakpointSet};
+pub use breakpoints::{BREAK_SOURCE_ID, BreakHit, BreakKind, BreakpointInfo, BreakpointSet};
 pub use cpu_regs::CpuRegs;
 pub use dma::{DmaTraceEvent, DmaTraceLog};
 pub use luna_apu::Spc700TraceEvent;

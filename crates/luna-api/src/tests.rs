@@ -2399,3 +2399,53 @@ fn breakpoint_conditions_and_marks_decide_the_stop() {
     e.bp_set_condition(z, None).unwrap();
     assert_eq!(e.run_until_break(2_000).unwrap().hit.map(|h| h.id), Some(z));
 }
+
+#[test]
+fn break_sources_stop_on_opcodes_interrupts_and_scanlines() {
+    // 8000 LDA #$80 ; 8002 STA $4200 (NMI on) ; 8005 NOP ; 8006 WDM #$00 ;
+    // 8008 BRA $8005 ; 8010 RTI (NMI handler).
+    let mut code = vec![0xA9, 0x80, 0x8D, 0x00, 0x42, 0xEA, 0x42, 0x00, 0x80, 0xFB];
+    code.resize(0x10, 0xEA);
+    code.push(0x40);
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom_with(&code, Some(0x8010)))
+        .unwrap();
+    let pc = |e: &Emulator| {
+        let c = e.cpu_state().unwrap();
+        (u32::from(c.pb) << 16) | u32::from(c.pc)
+    };
+
+    e.set_break_sources(BreakSources {
+        wdm: true,
+        ..BreakSources::default()
+    });
+    let hit = e.run_until_break(1_000).unwrap().hit.unwrap();
+    assert_eq!(
+        (hit.kind, hit.id, hit.pc),
+        (BreakKind::Wdm, BREAK_SOURCE_ID, 0x00_8006)
+    );
+    assert_eq!(pc(&e), 0x00_8006, "before the WDM runs");
+    // Resuming moves past it, to the next one.
+    let hit = e.run_until_break(1_000).unwrap().hit.unwrap();
+    assert_eq!(hit.pc, 0x00_8006);
+
+    e.set_break_sources(BreakSources {
+        nmi: true,
+        ..BreakSources::default()
+    });
+    let hit = e.run_until_break(2_000_000).unwrap().hit.unwrap();
+    assert_eq!(hit.kind, BreakKind::Nmi);
+    assert_eq!(pc(&e), 0x00_8010, "on the handler's first instruction");
+    assert_eq!(e.bp_list().unwrap().len(), 0, "no registry entry was made");
+
+    e.set_break_sources(BreakSources {
+        scanline: Some(100),
+        ..BreakSources::default()
+    });
+    let hit = e.run_until_break(2_000_000).unwrap().hit.unwrap();
+    assert_eq!(hit.kind, BreakKind::Scanline);
+    assert_eq!(e.beam().unwrap().0, 100);
+
+    e.set_break_sources(BreakSources::default());
+    assert!(e.run_until_break(5_000).unwrap().hit.is_none(), "all off");
+}

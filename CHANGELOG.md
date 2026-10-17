@@ -9,6 +9,13 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ### Added
 
+- **Break sources: BRK, COP, WDM, STP, NMI, IRQ, a scanline.** Besides the
+  registered breakpoints, a run stops, as chosen, before a `BRK`, `COP`,
+  `WDM` or `STP` runs, on the first instruction of the NMI or IRQ handler
+  (Mesen2's "run to NMI / IRQ"), or when the PPU reaches a scanline. The
+  hit's `kind` names the source and its `id` is `BREAK_SOURCE_ID`. API:
+  `set_break_sources` (`BreakSources`); MCP: `set_break_sources`.
+
 - **Conditional breakpoints and marks.** A breakpoint takes a condition in
   Mesen2's expression language and fires only when it holds (`x == 5` on
   an exec breakpoint, `value & $80` on a watchpoint, where `value` and

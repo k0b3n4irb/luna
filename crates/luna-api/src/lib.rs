@@ -27,10 +27,11 @@ use luna_core::Snes;
 /// GUI's port-device selector goes through `luna-api`, not `luna-core`.
 pub use luna_core::controller::PortDevice;
 pub use luna_core::{
-    BreakHit, BreakKind, BreakpointInfo, CpuTraceEvent, DmaTraceEvent, Dsp1TraceEvent,
-    Dsp1TraceKind, GsuBusAccess, GsuBusEvent, MailboxEvent, MailboxEventKind, MapperKind,
-    MemEventKind, MemOrigin, MemTraceEvent, MemTraceFilter, Profile, ProfileSample, Sa1LogEvent,
-    Sa1SideEvent, Sa1Stats, Sa1TraceEvent, Spc700TraceEvent, SuperFxJob, SuperFxTraceEvent,
+    BREAK_SOURCE_ID, BreakHit, BreakKind, BreakpointInfo, CpuTraceEvent, DmaTraceEvent,
+    Dsp1TraceEvent, Dsp1TraceKind, GsuBusAccess, GsuBusEvent, MailboxEvent, MailboxEventKind,
+    MapperKind, MemEventKind, MemOrigin, MemTraceEvent, MemTraceFilter, Profile, ProfileSample,
+    Sa1LogEvent, Sa1SideEvent, Sa1Stats, Sa1TraceEvent, Spc700TraceEvent, SuperFxJob,
+    SuperFxTraceEvent,
 };
 /// Decoded BG tilemap image (Tilemap Viewer), re-exported so the GUI uses
 /// `luna_api::TilemapImage` rather than depending on `luna-ppu`.
@@ -1371,6 +1372,30 @@ pub struct Emulator {
     /// Event Viewer marks of *mark* breakpoints that fired since the last
     /// [`Emulator::swap_frame_events`].
     pending_marks: Vec<CapturedEvent>,
+    /// What else than a breakpoint stops [`Emulator::run_until_break`].
+    break_sources: BreakSources,
+}
+
+/// What, besides the registered breakpoints, stops
+/// [`Emulator::run_until_break`] (Mesen2's "break on" options and its
+/// "run to NMI / IRQ"). A stop by one of them reports a [`BreakHit`]
+/// whose `kind` names it and whose `id` is [`BREAK_SOURCE_ID`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BreakSources {
+    /// Stop before a `BRK` runs.
+    pub brk: bool,
+    /// Stop before a `COP` runs.
+    pub cop: bool,
+    /// Stop before a `WDM` runs.
+    pub wdm: bool,
+    /// Stop before a `STP` runs.
+    pub stp: bool,
+    /// Stop on the first instruction of the NMI handler.
+    pub nmi: bool,
+    /// Stop on the first instruction of the IRQ handler.
+    pub irq: bool,
+    /// Stop when the PPU reaches this scanline.
+    pub scanline: Option<u16>,
 }
 
 /// One raw captured Event Viewer event before category/filter decode — either
@@ -1474,6 +1499,15 @@ impl Emulator {
             power_on: PowerOnState::Zero,
             bp_conditions: std::collections::BTreeMap::new(),
             pending_marks: Vec::new(),
+            break_sources: BreakSources {
+                brk: false,
+                cop: false,
+                wdm: false,
+                stp: false,
+                nmi: false,
+                irq: false,
+                scanline: None,
+            },
         }
     }
 
@@ -3685,6 +3719,18 @@ impl Emulator {
         Ok(true)
     }
 
+    /// Choose what else than the breakpoints stops
+    /// [`Self::run_until_break`] (see [`BreakSources`]).
+    pub const fn set_break_sources(&mut self, sources: BreakSources) {
+        self.break_sources = sources;
+    }
+
+    /// The break sources in force.
+    #[must_use]
+    pub const fn break_sources(&self) -> BreakSources {
+        self.break_sources
+    }
+
     /// Make breakpoint `id` a *mark* (Mesen2's "mark" breakpoints): when it
     /// fires it puts a breakpoint event on the Event Viewer and the run goes
     /// on. Returns `false` for an unknown id.
@@ -3750,6 +3796,8 @@ impl Emulator {
         }
         let at = |snes: &Snes| (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
         let conditions = self.bp_conditions.clone();
+        let sources = self.break_sources;
+        let before_step: std::cell::Cell<(bool, bool, u16)> = std::cell::Cell::default();
         // Marks that fired, with their beam position: shared by the two
         // checks below.
         let marks: std::cell::RefCell<Vec<(BreakHit, u16, u16)>> = std::cell::RefCell::default();
@@ -3790,8 +3838,32 @@ impl Emulator {
                 // An exec breakpoint on the CURRENT instruction does not fire at
                 // entry (else a resume would never leave it).
                 |snes, executed| {
+                    // What this step is about to do, for the check after it.
+                    before_step.set((snes.cpu.pending_nmi, snes.cpu.pending_irq, snes.ppu_line));
                     if executed == 0 {
                         return None;
+                    }
+                    let source = |kind| BreakHit {
+                        id: BREAK_SOURCE_ID,
+                        kind,
+                        pc: at(snes),
+                        addr: None,
+                        value: None,
+                        dma: false,
+                    };
+                    // An interrupt about to be served runs no opcode.
+                    let opcodes = sources.brk || sources.cop || sources.wdm || sources.stp;
+                    if opcodes && !snes.cpu.pending_nmi && !snes.cpu.pending_irq {
+                        let kind = match memory::View(snes).bus_peek(at(snes), 0) {
+                            0x00 if sources.brk => Some(BreakKind::Brk),
+                            0x02 if sources.cop => Some(BreakKind::Cop),
+                            0x42 if sources.wdm => Some(BreakKind::Wdm),
+                            0xDB if sources.stp => Some(BreakKind::Stp),
+                            _ => None,
+                        };
+                        if let Some(kind) = kind {
+                            return Some(source(kind));
+                        }
                     }
                     let hits = snes.breakpoints.as_ref()?.check_exec(at(snes));
                     if hits.is_empty() {
@@ -3800,6 +3872,27 @@ impl Emulator {
                     decide(snes, hits)
                 },
                 |snes| {
+                    let (nmi, irq, line) = before_step.get();
+                    let source = |kind| BreakHit {
+                        id: BREAK_SOURCE_ID,
+                        kind,
+                        pc: at(snes),
+                        addr: None,
+                        value: None,
+                        dma: false,
+                    };
+                    if nmi && sources.nmi {
+                        return Some(source(BreakKind::Nmi));
+                    }
+                    if irq && !nmi && sources.irq {
+                        return Some(source(BreakKind::Irq));
+                    }
+                    if sources
+                        .scanline
+                        .is_some_and(|l| line != l && snes.ppu_line == l)
+                    {
+                        return Some(source(BreakKind::Scanline));
+                    }
                     let hits = snes.breakpoints.as_mut()?.take_pending();
                     if hits.is_empty() {
                         return None;
@@ -3813,7 +3906,9 @@ impl Emulator {
                 interrupted: run.interrupted,
             })?;
         let marks = marks.into_inner();
-        if let Some(bp) = self.snes.as_mut().and_then(|s| s.breakpoints.as_mut()) {
+        if let Some(bp) = self.snes.as_mut().and_then(|s| s.breakpoints.as_mut())
+            && out.hit.is_none_or(|h| h.id != BREAK_SOURCE_ID)
+        {
             for (hit, _, _) in &marks {
                 bp.count_hit(hit.id);
             }
