@@ -87,7 +87,7 @@ method, so the MCP transport adds reach, not capability.
 | `enable_cpu_trace` / `take_cpu_trace` | `enable_cpu_trace` / `take_cpu_trace_log` | Per-instruction CPU trace ring (PC + registers). |
 | `enable_profile` / `take_profile` | `enable_profile` / `take_profile` | Master cycles per symbol (folded, heaviest first). (Per-PC samples are the Rust API's `take_profile_raw`; there is no MCP tool for them.) |
 | `enable_mem_trace` / `take_mem_trace` | `enable_mem_trace_filtered` / `take_mem_trace_log` | Per-bus-access trace with bank / offset-range / offset-list / writes-only filters; every event carries `origin` (`cpu`, `dma<n>`, `hdma<n>`). |
-| `bp_add` | `bp_add_exec` / `bp_add_mem`, `bp_set_condition`, `bp_set_mark` | Register an exec breakpoint or a read/write watchpoint range. `mirror: false` makes a mem watch bank-exact (default follows WRAM/MMIO mirrors); `name` (defaulting to the `symbol` used) labels it in `bp_list`. `condition` is an [expression](#expressions) that must be non-zero for it to fire; `mark: true` puts a mark on the Event Viewer instead of halting. `kind: "spc_exec"` stops with the SPC700 at the start of an instruction (`addr` in ARAM, or an ARAM `symbol`). `memory: "SnesVideoRam"` / `"SnesCgRam"` / `"SnesSpriteRam"` on a `mem` watch watches a PPU memory's writes. See [Conditional breakpoints](#conditional-breakpoints). |
+| `bp_add` | `bp_add_exec` / `bp_add_mem`, `bp_set_condition`, `bp_set_mark` | Register an exec breakpoint or a read/write watchpoint range. `mirror: false` makes a mem watch bank-exact (default follows WRAM/MMIO mirrors); `name` (defaulting to the `symbol` used) labels it in `bp_list`. `condition` is an [expression](#expressions) that must be non-zero for it to fire; `mark: true` puts a mark on the Event Viewer instead of halting. `kind: "spc_exec"` stops with the SPC700 at the start of an instruction (`addr` in ARAM, or an ARAM `symbol`). `memory` on a `mem` watch watches another memory: `"SnesVideoRam"` / `"SnesCgRam"` / `"SnesSpriteRam"` (through the PPU's ports), `"SpcMemory"` / `"SpcRam"` / `"SpcRom"` (the SPC700's data accesses). See [Conditional breakpoints](#conditional-breakpoints). |
 | `bp_set_enabled` | `bp_set_enabled` | Disable/re-enable without removing — id, name and hit count survive. |
 | `bp_remove` / `bp_clear_all` / `bp_list` | `bp_remove` / `bp_clear` / `bp_list` | Manage the registry. `bp_list` rows now carry `enabled`, `hit_count` (mem: at most one per instruction), `mirror` and `name`. |
 | `run_until_break` | `run_until_break` | Run at full speed until a breakpoint or a break source fires (or a step budget). |
@@ -264,19 +264,27 @@ bp_list {}                                                          # condition,
   condition is false does not count.
 
 **VRAM, CGRAM, OAM.** With `memory`, a `mem` watchpoint watches a PPU
-memory instead of the CPU bus. It fires when the CPU or a DMA writes
-there, at the address the PPU actually writes: after VMAIN's remap, and
-on the entry the picture redirects a mid-frame write to:
+memory instead of the CPU bus. It fires when the CPU or a DMA reads or
+writes there through the PPU's ports, at the address the PPU actually
+uses: after VMAIN's remap, and on the entry the picture redirects a
+mid-frame access to:
 
 ```text
 bp_add {kind: "mem", memory: "SnesVideoRam", addr: 0x4000, hi: 0x41FF}   # who writes this tile?
 run_until_break {max_steps: 50000000}  # → {kind: "write", space: "vram", addr: 16386, value: 190, dma: true, pc: …}
 bp_add {kind: "mem", memory: "SnesCgRam", addr: 0, hi: 1, condition: "value != 0"}   # the backdrop goes non-black
+bp_add {kind: "mem", memory: "SnesSpriteRam", addr: 0x200, hi: 0x21F, on_read: true, on_write: false}   # who reads the high table back?
 ```
 
-`addr` and `address` in a condition are the byte address in that memory.
-`pc` is the instruction that wrote, or that started the DMA. PPU
-memories are watched for writes only.
+- `addr` and `address` in a condition are the byte address in that
+  memory. `pc` is the instruction that made the access, or that started
+  the DMA.
+- **A VRAM read** is the word the read buffer fetches: on a VMADD write,
+  and on the `$2139` / `$213A` read VMAIN increments on. That read fetches
+  the word at the address before it moves, as on the console; the CPU
+  receives the buffer's previous contents.
+- During the picture the PPU owns VRAM and OAM: a port write is dropped
+  or redirected, and a VRAM read fetches nothing, so no read fires.
 
 **The SPC700.** `kind: "spc_exec"` puts a breakpoint on an SPC700
 instruction:
@@ -296,6 +304,25 @@ disasm_spc {}                           # the SPC700 stands on $0400
 - **Outside a breakpoint run.** These breakpoints are armed only for
   `run_until_break` / `run`, so a plain `step` never stops the SPC700.
 - **Marks** are for the 65C816 only.
+
+The SPC700's memories take watchpoints too: `SpcMemory` (its 16-bit bus,
+the `$F0-$FF` registers included), `SpcRam` (its 64 KB, the registers
+left out) and `SpcRom` (the IPL ROM, read only). They see the SPC700's
+data accesses; its code fetches are not reads. The SPC700 stops just
+after the access, in the middle of its instruction if need be, and `pc`
+is that instruction's address. The IPL ROM clearing page zero, from `$EF`
+down:
+
+```text
+bp_add {kind: "mem", memory: "SpcRam", addr: 0x80}
+run_until_break {max_steps: 100000}  # → {kind: "spc_write", pc: 65477, addr: 128, value: 0, space: "aram"}
+eval {expression: "x", cpu: "spc"}   # → 128: `MOV (X),A` at $FFC5 has written, `DEC X` has not run
+bp_add {kind: "mem", memory: "SpcMemory", addr: 0xF4, on_read: true, on_write: false}   # the SPC700 reads mailbox 0
+```
+
+`symbol` and `hi_symbol` are then ARAM labels. A condition sees the
+access (`value`, `address`, `iswrite`), and the SPC700's registers at
+that point of the instruction.
 
 Mesen2's "break on" options and its "run to NMI / IRQ" are break sources,
 set once for every run:

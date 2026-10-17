@@ -38,4 +38,12 @@ pub trait SpcBus {
     /// the timing-accurate consumer (`luna_apu`'s bus view) overrides
     /// it to clock one cycle.
     fn idle(&mut self) {}
+
+    /// A code read at PC: the opcode, an operand, or the dummy read of the
+    /// next byte. One bus cycle, like [`read`](Self::read), which it
+    /// defaults to; a debugger's view overrides it to tell code reads from
+    /// data reads.
+    fn fetch(&mut self, addr: u16) -> u8 {
+        self.read(addr)
+    }
 }

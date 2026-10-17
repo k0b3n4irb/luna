@@ -2577,7 +2577,9 @@ fn ppu_memory_watchpoints_see_the_address_the_ppu_writes() {
     let first_hit = |memory, addr| {
         let mut e = Emulator::new();
         e.load_rom_bytes(rom.clone()).unwrap();
-        let id = e.bp_add_watch(memory, addr, addr, None).unwrap();
+        let id = e
+            .bp_add_watch(memory, addr, addr, false, true, None)
+            .unwrap();
         let hit = e.run_until_break(1_000).unwrap().hit.unwrap();
         assert_eq!(hit.id, id);
         (hit.addr.unwrap(), hit.value.unwrap(), hit.dma, hit.space)
@@ -2603,7 +2605,7 @@ fn ppu_memory_watchpoints_see_the_address_the_ppu_writes() {
     let mut e = Emulator::new();
     e.load_rom_bytes(rom.clone()).unwrap();
     let id = e
-        .bp_add_watch(MemoryKind::SnesVideoRam, 0x4000, 0x4003, None)
+        .bp_add_watch(MemoryKind::SnesVideoRam, 0x4000, 0x4003, false, true, None)
         .unwrap();
     e.bp_set_condition(id, Some("value == $EF && address == $4003 && isdma"))
         .unwrap();
@@ -2611,9 +2613,135 @@ fn ppu_memory_watchpoints_see_the_address_the_ppu_writes() {
     assert_eq!(hit.addr, Some(0x4003));
     // Out-of-range ranges and memories without watchpoints are refused.
     assert!(
-        e.bp_add_watch(MemoryKind::SnesCgRam, 0, 0x200, None)
+        e.bp_add_watch(MemoryKind::SnesCgRam, 0, 0x200, false, true, None)
             .is_err()
     );
-    assert!(e.bp_add_watch(MemoryKind::SpcRam, 0, 1, None).is_err());
+    assert!(
+        e.bp_add_watch(MemoryKind::SnesWorkRam, 0, 1, false, true, None)
+            .is_err()
+    );
     assert_eq!(e.bp_list().unwrap()[0].space, WatchSpace::Vram);
+}
+
+#[test]
+fn ppu_memory_watchpoints_see_the_reads_through_the_ports() {
+    let mut code: Vec<u8> = vec![
+        0xA9, 0x80, 0x8D, 0x00, 0x21, // forced blank
+        0x8D, 0x15, 0x21, // VMAIN: increment after $2119 / $213A
+        0xA9, 0x00, 0x8D, 0x16, 0x21, 0xA9, 0x10, 0x8D, 0x17, 0x21, // word $1000
+        0xA9, 0xAA, 0x8D, 0x18, 0x21, 0xA9, 0xBB, 0x8D, 0x19, 0x21, // bytes $2000, $2001
+        0xA9, 0x00, 0x8D, 0x16, 0x21, 0xA9, 0x10, 0x8D, 0x17, 0x21, // word $1000 again
+        0xAD, 0x39, 0x21, 0xAD, 0x3A, 0x21, // read the buffer, which refills
+        0xA9, 0x05, 0x8D, 0x21, 0x21, // CGADD 5
+        0xA9, 0x11, 0x8D, 0x22, 0x21, 0xA9, 0x22, 0x8D, 0x22, 0x21, // bytes 10, 11
+        0xA9, 0x05, 0x8D, 0x21, 0x21, 0xAD, 0x3B, 0x21, 0xAD, 0x3B, 0x21, // read 10, 11
+        0x9C, 0x02, 0x21, 0x9C, 0x03, 0x21, // OAMADD 0
+        0xA9, 0x33, 0x8D, 0x04, 0x21, 0xA9, 0x44, 0x8D, 0x04, 0x21, // bytes 0, 1
+        0x9C, 0x02, 0x21, 0x9C, 0x03, 0x21, 0xAD, 0x38, 0x21, 0xAD, 0x38, 0x21, // read 0, 1
+        0x80, 0xFE,
+    ];
+    code.resize(0x80, 0xEA);
+    let rom = demo_lorom_with(&code, None);
+    let first_hit = |memory, addr, condition: Option<&str>| {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(rom.clone()).unwrap();
+        let id = e
+            .bp_add_watch(memory, addr, addr, true, false, None)
+            .unwrap();
+        e.bp_set_condition(id, condition).unwrap();
+        let hit = e.run_until_break(1_000).unwrap().hit.unwrap();
+        assert_eq!(hit.id, id);
+        (hit.kind, hit.pc, hit.value.unwrap())
+    };
+    // A VMADD write fetches the word at the new address: the first fetch
+    // of $2000 (on the high byte) reads 0, before the bytes are written.
+    assert_eq!(
+        first_hit(MemoryKind::SnesVideoRam, 0x2000, None),
+        (BreakKind::Read, 0x00_800F, 0)
+    );
+    // Later each VMADD byte fetches it again, and so does the `$213A` read
+    // VMAIN increments on (the word at the address, before it moves).
+    let mut e = Emulator::new();
+    e.load_rom_bytes(rom.clone()).unwrap();
+    let id = e
+        .bp_add_watch(MemoryKind::SnesVideoRam, 0x2000, 0x2000, true, false, None)
+        .unwrap();
+    e.bp_set_condition(id, Some("value == $AA")).unwrap();
+    let pcs: Vec<u32> = (0..3)
+        .map(|_| e.run_until_break(1_000).unwrap().hit.unwrap().pc)
+        .collect();
+    assert_eq!(pcs, [0x00_801E, 0x00_8023, 0x00_8029]);
+    assert_eq!(
+        first_hit(MemoryKind::SnesCgRam, 11, None),
+        (BreakKind::Read, 0x00_8043, 0x22)
+    );
+    assert_eq!(
+        first_hit(MemoryKind::SnesSpriteRam, 1, None),
+        (BreakKind::Read, 0x00_805F, 0x44)
+    );
+}
+
+#[test]
+fn spc700_watchpoints_stop_it_just_after_the_access() {
+    // The IPL ROM: $FFC5 `MOV (X),A` clears page zero from $EF down, then
+    // `MOV $F4,#$AA` / `MOV $F5,#$BB`, and waits reading $F4.
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom()).unwrap();
+    let spc_x = |e: &Emulator| e.evaluate("x", ExprCpu::Spc).unwrap().value;
+
+    let id = e
+        .bp_add_watch(MemoryKind::SpcRam, 0, 0xEF, false, true, None)
+        .unwrap();
+    e.bp_set_condition(id, Some("address == $80")).unwrap();
+    let hit = e.run_until_break(100_000).unwrap().hit.unwrap();
+    assert_eq!(
+        (hit.kind, hit.pc, hit.addr, hit.value, hit.space),
+        (
+            BreakKind::SpcWrite,
+            0xFFC5,
+            Some(0x80),
+            Some(0),
+            WatchSpace::Aram
+        )
+    );
+    assert_eq!(
+        spc_x(&e),
+        0x80,
+        "stopped inside the instruction, before DEC X"
+    );
+    assert_eq!(e.bp_list().unwrap()[0].cpu, BreakCpu::Spc);
+    // A resume goes on from the access to the next match.
+    e.bp_set_condition(id, None).unwrap();
+    let hit = e.run_until_break(100_000).unwrap().hit.unwrap();
+    assert_eq!(hit.addr, Some(0x7F));
+    e.bp_clear().unwrap();
+
+    // The registers at $F0-$FF are on the bus, not in ARAM.
+    let ram = e
+        .bp_add_watch(MemoryKind::SpcRam, 0xF4, 0xF4, false, true, None)
+        .unwrap();
+    let bus = e
+        .bp_add_watch(MemoryKind::SpcMemory, 0xF4, 0xF4, false, true, None)
+        .unwrap();
+    let hit = e.run_until_break(100_000).unwrap().hit.unwrap();
+    assert_eq!((hit.id, hit.value), (bus, Some(0xAA)));
+    assert_ne!(hit.id, ram);
+    e.bp_clear().unwrap();
+    let read = e
+        .bp_add_watch(MemoryKind::SpcMemory, 0xF4, 0xF4, true, false, None)
+        .unwrap();
+    let hit = e.run_until_break(100_000).unwrap().hit.unwrap();
+    assert_eq!((hit.id, hit.kind), (read, BreakKind::SpcRead));
+    e.bp_clear().unwrap();
+
+    // Code fetches are not data reads: the IPL ROM runs, its watch stays
+    // quiet. It cannot be watched for writes.
+    e.reset().unwrap();
+    e.bp_add_watch(MemoryKind::SpcRom, 0, 0x3F, true, false, None)
+        .unwrap();
+    assert!(e.run_until_break(20_000).unwrap().hit.is_none());
+    assert!(
+        e.bp_add_watch(MemoryKind::SpcRom, 0, 0, false, true, None)
+            .is_err()
+    );
 }

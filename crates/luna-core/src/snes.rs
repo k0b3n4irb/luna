@@ -2291,7 +2291,16 @@ impl DmaBus for DmaBusView<'_> {
         // Everything else reads the open bus (ares `bus.read(0x2100 |
         // address, cpu.r.mdr)`).
         if b_offset <= 0x3F {
-            self.ppu.read(b_offset, *self.mdr)
+            let value = self.ppu.read(b_offset, *self.mdr);
+            if let (Some(bp), Some(log)) = (
+                self.breakpoints.as_deref_mut(),
+                self.ppu.debug_accesses.as_mut(),
+            ) {
+                for a in log.drain(..) {
+                    bp.check_ppu(a, self.cpu_pc, true);
+                }
+            }
+            value
         } else if (0x40..=0x7F).contains(&b_offset) {
             // APU mailbox, 4 ports mirrored across $2140-$217F — the CPU
             // path's `apu_port` rule and stub fallback.
@@ -2379,7 +2388,7 @@ impl DmaBus for DmaBusView<'_> {
             self.ppu.write(b_offset, value);
             if let (Some(bp), Some(log)) = (
                 self.breakpoints.as_deref_mut(),
-                self.ppu.debug_writes.as_mut(),
+                self.ppu.debug_accesses.as_mut(),
             ) {
                 for w in log.drain(..) {
                     bp.check_ppu(w, self.cpu_pc, true);
@@ -3296,7 +3305,15 @@ impl SnesBus<'_> {
                     );
                 }
             }
-            return self.ppu.read(off, *self.mdr);
+            let value = self.ppu.read(off, *self.mdr);
+            if let (Some(bp), Some(log)) =
+                (self.breakpoints.as_mut(), self.ppu.debug_accesses.as_mut())
+            {
+                for a in log.drain(..) {
+                    bp.check_ppu(a, self.cpu_pc_full, false);
+                }
+            }
+            return value;
         }
         if let Some(port) = Self::apu_port(addr) {
             // Mailbox reads come from the real SPC700. The heuristic
@@ -3555,7 +3572,7 @@ impl SnesBus<'_> {
             }
             self.ppu.write(off, value);
             if let (Some(bp), Some(log)) =
-                (self.breakpoints.as_mut(), self.ppu.debug_writes.as_mut())
+                (self.breakpoints.as_mut(), self.ppu.debug_accesses.as_mut())
             {
                 for w in log.drain(..) {
                     bp.check_ppu(w, self.cpu_pc_full, false);

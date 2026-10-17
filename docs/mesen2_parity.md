@@ -36,8 +36,9 @@ lands it.
 | D1c | Conditions (Mesen2's language) and marks on the 65C816's exec breakpoints and watchpoints; every match of an instruction checked; DMA flagged | ✅ |
 | D1c | Break sources: BRK, COP, WDM, STP, NMI and IRQ handler entry, a scanline; MCP `set_break_sources` | ✅ |
 | D1c | SPC700 exec breakpoints, with conditions, stopping at the instruction start; MCP `bp_add {kind: "spc_exec"}` | ✅ |
-| D1c | VRAM, CGRAM, OAM write watchpoints (CPU and DMA, at the PPU's own address); MCP `bp_add {memory}` | ✅ |
-| D1c | Read watchpoints on PPU memories; ARAM watchpoints; SA-1, GSU, DSP-1 breakpoints and their expression contexts | ⬜ |
+| D1c | VRAM, CGRAM, OAM read and write watchpoints (CPU and DMA, through the ports, at the PPU's own address); MCP `bp_add {memory}` | ✅ |
+| D1c | SPC700 watchpoints on `SpcMemory`, `SpcRam`, `SpcRom` (data accesses, stopping just after the access) | ✅ |
+| D1c | SA-1, GSU, DSP-1 breakpoints and their expression contexts | ⬜ |
 | D1c | *Forbid* breakpoints | ⬜ |
 | D1d | Step types: into, over, out, scanline, frame, *break in N* instructions / scanlines / frames (to NMI / IRQ are break sources; run to here is `run_until_pc`; move PC is `set_cpu_register`); MCP `step_kind` | ✅ |
 | D1d | CPU-cycle and PPU-cycle steps — not possible while luna runs instructions whole | ⬜ |

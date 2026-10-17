@@ -92,7 +92,7 @@ impl Spc700 {
     /// Read one byte at PC and advance PC by 1.
     #[inline]
     pub fn fetch_u8<B: SpcBus>(&mut self, bus: &mut B) -> u8 {
-        let v = bus.read(self.pc);
+        let v = bus.fetch(self.pc);
         self.pc = self.pc.wrapping_add(1);
         v
     }
@@ -105,7 +105,7 @@ impl Spc700 {
     /// clocking, not for state.
     #[inline]
     pub fn dummy_read_pc<B: SpcBus>(&mut self, bus: &mut B) {
-        let _ = bus.read(self.pc);
+        let _ = bus.fetch(self.pc);
     }
 
     /// An internal idle cycle: no bus access, but the SPC still burns a

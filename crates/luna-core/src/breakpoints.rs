@@ -49,6 +49,11 @@ pub enum BreakKind {
     /// The SPC700 is about to execute the instruction at the registered
     /// address (`pc` is that 16-bit address).
     SpcExec,
+    /// An SPC700 instruction read a watched address (`pc` is the
+    /// instruction's, `addr` the offset in the watched memory).
+    SpcRead,
+    /// An SPC700 instruction wrote a watched address.
+    SpcWrite,
 }
 
 /// The memory a watchpoint watches.
@@ -58,12 +63,16 @@ pub enum WatchSpace {
     /// The 65C816's 24-bit bus.
     #[default]
     Bus,
-    /// Video RAM, byte-addressed, written through `$2118` / `$2119`.
+    /// Video RAM, byte-addressed, through `$2118`-`$2119` / `$2139`-`$213A`.
     Vram,
-    /// Palette RAM, byte-addressed, written through `$2122`.
+    /// Palette RAM, byte-addressed, through `$2122` / `$213B`.
     Cgram,
-    /// Sprite memory, byte-addressed, written through `$2104`.
+    /// Sprite memory, byte-addressed, through `$2104` / `$2138`.
     Oam,
+    /// The SPC700's 64 KB of RAM (its `$F0-$FF` registers excluded).
+    Aram,
+    /// The SPC700's 64-byte IPL ROM, read at `$FFC0-$FFFF`.
+    Ipl,
 }
 
 /// The CPU a breakpoint watches.
@@ -202,6 +211,7 @@ struct MemWatch {
     mirror: bool,
     clo: u32,
     chi: u32,
+    cpu: BreakCpu,
     space: WatchSpace,
     extra: Extra,
 }
@@ -271,8 +281,8 @@ impl BreakpointSet {
     /// The CPU breakpoint `id` watches, `None` for an unknown id.
     #[must_use]
     pub fn cpu_of(&self, id: u32) -> Option<BreakCpu> {
-        if self.mem.iter().any(|w| w.id == id) {
-            return Some(BreakCpu::Snes);
+        if let Some(w) = self.mem.iter().find(|w| w.id == id) {
+            return Some(w.cpu);
         }
         self.exec.iter().find(|b| b.id == id).map(|b| b.cpu)
     }
@@ -331,9 +341,37 @@ impl BreakpointSet {
             mirror,
             clo: fold_mirror(lo),
             chi: fold_mirror(hi),
+            cpu: BreakCpu::Snes,
             space,
             extra: Self::extra(name),
         });
+        id
+    }
+
+    /// Register an SPC700 memory watchpoint over `lo..=hi` of `space`
+    /// ([`WatchSpace::Bus`] for its 16-bit bus, [`WatchSpace::Aram`],
+    /// [`WatchSpace::Ipl`]). The APU checks it; the registry keeps it.
+    pub fn add_spc_mem(
+        &mut self,
+        space: WatchSpace,
+        lo: u16,
+        hi: u16,
+        on_read: bool,
+        on_write: bool,
+        name: Option<String>,
+    ) -> u32 {
+        let id = self.add_mem_in(
+            space,
+            u32::from(lo),
+            u32::from(hi),
+            on_read,
+            on_write,
+            false,
+            name,
+        );
+        if let Some(w) = self.mem.last_mut() {
+            w.cpu = BreakCpu::Spc;
+        }
         id
     }
 
@@ -343,31 +381,37 @@ impl BreakpointSet {
     pub fn has_ppu_watches(&self) -> bool {
         self.mem
             .iter()
-            .any(|w| w.space != WatchSpace::Bus && w.extra.enabled)
+            .any(|w| w.cpu == BreakCpu::Snes && w.space != WatchSpace::Bus && w.extra.enabled)
     }
 
-    /// Park every enabled watchpoint a PPU memory write matches (`dma`
-    /// marks a DMA cycle). PPU memories are watched for writes.
-    pub fn check_ppu(&mut self, write: luna_ppu::PpuWrite, pc: u32, dma: bool) {
-        let space = match write.memory {
+    /// Park every enabled watchpoint a PPU memory access through a port
+    /// matches (`dma` marks a DMA cycle).
+    pub fn check_ppu(&mut self, access: luna_ppu::PpuAccess, pc: u32, dma: bool) {
+        let space = match access.memory {
             luna_ppu::PpuMemory::Vram => WatchSpace::Vram,
             luna_ppu::PpuMemory::Cgram => WatchSpace::Cgram,
             luna_ppu::PpuMemory::Oam => WatchSpace::Oam,
         };
-        let addr = u32::from(write.addr);
+        let addr = u32::from(access.addr);
+        let kind = if access.write {
+            BreakKind::Write
+        } else {
+            BreakKind::Read
+        };
         for w in &self.mem {
-            if w.space == space
+            if w.cpu == BreakCpu::Snes
+                && w.space == space
                 && w.extra.enabled
-                && w.on_write
+                && (if access.write { w.on_write } else { w.on_read })
                 && (w.lo..=w.hi).contains(&addr)
                 && self.pending.len() < PENDING_MAX
             {
                 self.pending.push(BreakHit {
                     id: w.id,
-                    kind: BreakKind::Write,
+                    kind,
                     pc,
                     addr: Some(addr),
-                    value: Some(write.value),
+                    value: Some(access.value),
                     dma,
                     space,
                 });
@@ -488,16 +532,7 @@ impl BreakpointSet {
             .chain(self.mem.iter().map(|w| {
                 let (lo, hi) = (w.lo, w.hi);
                 info(
-                    w.id,
-                    BreakCpu::Snes,
-                    w.space,
-                    false,
-                    lo,
-                    hi,
-                    w.on_read,
-                    w.on_write,
-                    w.mirror,
-                    &w.extra,
+                    w.id, w.cpu, w.space, false, lo, hi, w.on_read, w.on_write, w.mirror, &w.extra,
                 )
             }))
             .collect();
@@ -539,7 +574,8 @@ impl BreakpointSet {
         let faddr = fold_mirror(addr);
         for w in &self.mem {
             let kind_ok = if is_read { w.on_read } else { w.on_write };
-            if w.space == WatchSpace::Bus
+            if w.cpu == BreakCpu::Snes
+                && w.space == WatchSpace::Bus
                 && w.extra.enabled
                 && kind_ok
                 && ((w.lo..=w.hi).contains(&addr)

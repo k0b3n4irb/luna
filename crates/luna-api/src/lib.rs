@@ -3703,24 +3703,41 @@ impl Emulator {
             .add_mem(lo, hi, on_read, on_write, mirror, name))
     }
 
-    /// Register a write watchpoint over the byte range `lo..=hi` of a PPU
-    /// memory (`SnesVideoRam`, `SnesCgRam`, `SnesSpriteRam`), firing when
-    /// the CPU or a DMA writes it through its port, at the address the
-    /// PPU actually writes (VMAIN's remap, the picture-time redirects).
-    /// The hit's `addr` is that address and its `space` the memory.
-    /// [`MemoryKind::SnesMemory`] is [`Self::bp_add_mem`]. Returns its id.
+    /// Register a watchpoint over the byte range `lo..=hi` of `memory`,
+    /// firing on reads and/or writes. Returns its id. The hit's `addr` is
+    /// the offset in that memory and its `space` the memory.
+    ///
+    /// - [`MemoryKind::SnesMemory`] is [`Self::bp_add_mem`] (mirrors on).
+    /// - `SnesVideoRam`, `SnesCgRam`, `SnesSpriteRam`: the CPU's or a
+    ///   DMA's accesses through the PPU's ports, at the address the PPU
+    ///   actually uses (VMAIN's remap, the picture-time redirects). A VRAM
+    ///   read is the word the read buffer fetches.
+    /// - `SpcMemory` (the SPC700's bus), `SpcRam`, `SpcRom` (the IPL ROM,
+    ///   reads only): the SPC700's data accesses, its code fetches left
+    ///   out. The SPC700 stops just after the access, in the middle of its
+    ///   instruction if need be (a [`BreakKind::SpcRead`] /
+    ///   [`BreakKind::SpcWrite`] hit, `pc` the instruction's address);
+    ///   `SpcRam` does not see the `$F0-$FF` registers.
     pub fn bp_add_watch(
         &mut self,
         memory: MemoryKind,
         lo: u32,
         hi: u32,
+        on_read: bool,
+        on_write: bool,
         name: Option<&str>,
     ) -> Result<u32, ApiError> {
+        use luna_core::WatchSpace;
         let space = match memory {
-            MemoryKind::SnesMemory => return self.bp_add_mem(lo, hi, false, true, true, name),
-            MemoryKind::SnesVideoRam => luna_core::WatchSpace::Vram,
-            MemoryKind::SnesCgRam => luna_core::WatchSpace::Cgram,
-            MemoryKind::SnesSpriteRam => luna_core::WatchSpace::Oam,
+            MemoryKind::SnesMemory => {
+                return self.bp_add_mem(lo, hi, on_read, on_write, true, name);
+            }
+            MemoryKind::SnesVideoRam => WatchSpace::Vram,
+            MemoryKind::SnesCgRam => WatchSpace::Cgram,
+            MemoryKind::SnesSpriteRam => WatchSpace::Oam,
+            MemoryKind::SpcMemory => WatchSpace::Bus,
+            MemoryKind::SpcRam => WatchSpace::Aram,
+            MemoryKind::SpcRom => WatchSpace::Ipl,
             other => {
                 return Err(ApiError::BadArg(format!(
                     "{}: no watchpoints on this memory yet",
@@ -3728,6 +3745,16 @@ impl Emulator {
                 )));
             }
         };
+        if !on_read && !on_write {
+            return Err(ApiError::BadArg(
+                "watchpoint must fire on reads, writes, or both".into(),
+            ));
+        }
+        if memory == MemoryKind::SpcRom && on_write {
+            return Err(ApiError::BadArg(
+                "SpcRom: the IPL ROM is read-only (a write there lands in SpcRam)".into(),
+            ));
+        }
         let size = self.memory_size(memory)? as u32;
         if lo > hi || hi >= size {
             return Err(ApiError::BadArg(format!(
@@ -3736,9 +3763,13 @@ impl Emulator {
             )));
         }
         let name = name.map(str::to_string);
-        Ok(self
-            .bp_registry()?
-            .add_mem_in(space, lo, hi, false, true, false, name))
+        let bp = self.bp_registry()?;
+        Ok(match memory {
+            MemoryKind::SpcMemory | MemoryKind::SpcRam | MemoryKind::SpcRom => {
+                bp.add_spc_mem(space, lo as u16, hi as u16, on_read, on_write, name)
+            }
+            _ => bp.add_mem_in(space, lo, hi, on_read, on_write, false, name),
+        })
     }
 
     /// Enable / disable a breakpoint without removing it (issue #176) —
@@ -3982,25 +4013,49 @@ impl Emulator {
                 .breakpoints
                 .as_ref()
                 .is_some_and(|b| b.has_ppu_watches());
-            snes.ppu.debug_writes = ppu.then(Vec::new);
+            snes.ppu.debug_accesses = ppu.then(Vec::new);
             let spc = snes
                 .breakpoints
                 .as_ref()
                 .map(|b| b.spc_exec())
                 .unwrap_or_default();
+            let condition = |id: u32| {
+                conditions.get(&id).map(|e| {
+                    let e = e.clone();
+                    let check: luna_apu::SpcCondition =
+                        std::sync::Arc::new(move |apu: &luna_apu::Apu, access| {
+                            expr::spc_holds(&e, apu, access)
+                        });
+                    check
+                })
+            };
             snes.apu_real.breaks = spc
                 .into_iter()
                 .map(|(id, pc)| luna_apu::SpcBreak {
                     id,
                     pc,
-                    condition: conditions.get(&id).map(|e| {
-                        let e = e.clone();
-                        let check: luna_apu::SpcCondition =
-                            std::sync::Arc::new(move |apu: &luna_apu::Apu| {
-                                expr::spc_holds(&e, apu)
-                            });
-                        check
-                    }),
+                    condition: condition(id),
+                })
+                .collect();
+            snes.apu_real.watches = snes
+                .breakpoints
+                .as_ref()
+                .map(|b| b.list())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|b| b.cpu == luna_core::BreakCpu::Spc && !b.exec && b.enabled)
+                .map(|b| luna_apu::SpcWatch {
+                    id: b.id,
+                    region: match b.space {
+                        luna_core::WatchSpace::Aram => luna_apu::SpcRegion::Ram,
+                        luna_core::WatchSpace::Ipl => luna_apu::SpcRegion::Rom,
+                        _ => luna_apu::SpcRegion::Bus,
+                    },
+                    lo: b.lo as u16,
+                    hi: b.hi as u16,
+                    read: b.on_read,
+                    write: b.on_write,
+                    condition: condition(b.id),
                 })
                 .collect();
         }
@@ -4098,15 +4153,24 @@ impl Emulator {
                         dma: false,
                         space: luna_core::WatchSpace::Bus,
                     };
-                    if let Some((id, pc)) = snes.apu_real.break_hit {
+                    if let Some(hit) = snes.apu_real.break_hit {
+                        let space = snes
+                            .breakpoints
+                            .as_ref()
+                            .and_then(|b| b.list().into_iter().find(|i| i.id == hit.id))
+                            .map_or(luna_core::WatchSpace::Bus, |i| i.space);
                         return Some(BreakHit {
-                            id,
-                            kind: BreakKind::SpcExec,
-                            pc: u32::from(pc),
-                            addr: None,
-                            value: None,
+                            id: hit.id,
+                            kind: match hit.access {
+                                None => BreakKind::SpcExec,
+                                Some(a) if a.write => BreakKind::SpcWrite,
+                                Some(_) => BreakKind::SpcRead,
+                            },
+                            pc: u32::from(hit.pc),
+                            addr: hit.access.map(|a| u32::from(a.addr)),
+                            value: hit.access.map(|a| a.value),
                             dma: false,
-                            space: luna_core::WatchSpace::Bus,
+                            space,
                         });
                     }
                     let ran = (!nmi && !irq).then(|| opcode.get());
@@ -4140,7 +4204,8 @@ impl Emulator {
         let marks = marks.into_inner();
         if let Some(snes) = self.snes.as_mut() {
             snes.apu_real.breaks.clear();
-            snes.ppu.debug_writes = None;
+            snes.apu_real.watches.clear();
+            snes.ppu.debug_accesses = None;
         }
         if let Some(bp) = self.snes.as_mut().and_then(|s| s.breakpoints.as_mut())
             && out.hit.is_none_or(|h| h.id != BREAK_SOURCE_ID)

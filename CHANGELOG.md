@@ -27,12 +27,21 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   frames ("break in N"). A breakpoint or break source met on the way stops
   it first. MCP: `step_kind`.
 
+- **SPC700 watchpoints.** `bp_add_watch` on `SpcMemory` (its bus),
+  `SpcRam` (ARAM, the `$F0-$FF` registers left out) or `SpcRom` (the IPL
+  ROM, reads) watches the SPC700's data accesses, its code fetches left
+  out. The SPC700 stops just after the access, in the middle of its
+  instruction if need be, as Mesen2 does; the hit's `kind` is `SpcRead` /
+  `SpcWrite` and `pc` the instruction's address. MCP: `bp_add {kind:
+  "mem", memory: "SpcRam"}`, `symbol` then an ARAM label.
+
 - **VRAM, CGRAM and OAM watchpoints.** `Emulator::bp_add_watch` (MCP:
   `bp_add {kind: "mem", memory: "SnesVideoRam" | "SnesCgRam" |
-  "SnesSpriteRam"}`) watches a PPU memory's writes, by the CPU or a DMA,
-  at the address the PPU actually writes (VMAIN's remap, the picture-time
-  redirects). The hit's `space` names the memory and `dma` says whether a
-  DMA wrote; a condition sees that address and byte.
+  "SnesSpriteRam"}`) watches a PPU memory's reads and writes through its
+  ports, by the CPU or a DMA, at the address the PPU actually uses
+  (VMAIN's remap, the picture-time redirects). A VRAM read is the word the
+  read buffer fetches. The hit's `space` names the memory and `dma` says
+  whether a DMA made the access; a condition sees that address and byte.
 
 - **SPC700 breakpoints.** `Emulator::bp_add_spc_exec` (MCP:
   `bp_add {kind: "spc_exec"}`) stops a breakpoint run with the SPC700 at

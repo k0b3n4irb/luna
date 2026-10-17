@@ -310,20 +310,101 @@ pub struct Apu {
     /// (a debugger's; never in a save-state).
     #[serde(skip)]
     pub breaks: Vec<SpcBreak>,
-    /// The breakpoint that froze the SPC700, `(id, pc)`. While it is set
-    /// the APU does not advance: the SPC700 stands at the start of that
-    /// instruction until [`Self::resume_break`].
+    /// SPC700 memory watchpoints, checked on every data access (a
+    /// debugger's; never in a save-state).
     #[serde(skip)]
-    pub break_hit: Option<(u32, u16)>,
+    pub watches: Vec<SpcWatch>,
+    /// The breakpoint that froze the SPC700. While it is set the APU does
+    /// not advance: the SPC700 stands at the start of the instruction an
+    /// exec breakpoint names, or just after the access a watchpoint saw,
+    /// until [`Self::resume_break`].
+    #[serde(skip)]
+    pub break_hit: Option<SpcHit>,
+    /// The address of the instruction the SPC700 is running (a
+    /// watchpoint hit reports it).
+    #[serde(skip)]
+    inst_pc: u16,
     /// The PC a resume steps over once, so the breakpoint the SPC700
     /// stands on does not fire again at once.
     #[serde(skip)]
     break_resume: Option<u16>,
 }
 
-/// A condition an SPC700 breakpoint fires on, given the APU at the start
-/// of the instruction.
-pub type SpcCondition = std::sync::Arc<dyn Fn(&Apu) -> bool + Send + Sync>;
+/// A condition an SPC700 breakpoint fires on, given the APU and, for a
+/// watchpoint, the access at its bus address (an exec breakpoint's is
+/// checked at the start of the instruction, with no access).
+pub type SpcCondition = std::sync::Arc<dyn Fn(&Apu, Option<SpcAccess>) -> bool + Send + Sync>;
+
+/// One SPC700 data access a watchpoint saw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpcAccess {
+    /// The SPC700 bus address.
+    pub addr: u16,
+    /// The byte read or written.
+    pub value: u8,
+    /// A write (else a read).
+    pub write: bool,
+}
+
+/// The memory an SPC700 watchpoint's range is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpcRegion {
+    /// The SPC700's 16-bit bus: whatever answers at the address.
+    Bus,
+    /// ARAM: every bus address but the `$F0-$FF` registers and, while
+    /// the IPL ROM is mapped, its reads at `$FFC0-$FFFF`.
+    Ram,
+    /// The 64-byte IPL ROM, read at `$FFC0-$FFFF` while it is mapped.
+    Rom,
+}
+
+/// One SPC700 memory watchpoint (an inclusive range of its region).
+#[derive(Clone)]
+pub struct SpcWatch {
+    /// The debugger's id for it.
+    pub id: u32,
+    /// The memory the range is in.
+    pub region: SpcRegion,
+    /// The range start, an offset in `region`.
+    pub lo: u16,
+    /// The inclusive range end.
+    pub hi: u16,
+    /// Fire on reads.
+    pub read: bool,
+    /// Fire on writes.
+    pub write: bool,
+    /// Fire only when this holds; `None` fires every time.
+    pub condition: Option<SpcCondition>,
+}
+
+impl SpcWatch {
+    /// The offset in this watch's region an access lands at, `None` when
+    /// it lands elsewhere (`ipl` is whether the IPL ROM is mapped).
+    #[must_use]
+    pub const fn offset(&self, access: SpcAccess, ipl: bool) -> Option<u16> {
+        let a = access.addr;
+        let rom = ipl && !access.write && a >= IPL_ROM_BASE;
+        match self.region {
+            SpcRegion::Bus => Some(a),
+            SpcRegion::Ram if rom || (a >= 0xF0 && a <= 0xFF) => None,
+            SpcRegion::Ram => Some(a),
+            SpcRegion::Rom if rom => Some(a - IPL_ROM_BASE),
+            SpcRegion::Rom => None,
+        }
+    }
+}
+
+/// What froze the SPC700.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpcHit {
+    /// The breakpoint's id.
+    pub id: u32,
+    /// The address of the instruction: the one about to run for an exec
+    /// breakpoint, the one that made the access for a watchpoint.
+    pub pc: u16,
+    /// A watchpoint's access, its `addr` an offset in the watch's region.
+    pub access: Option<SpcAccess>,
+}
 
 /// One SPC700 exec breakpoint.
 #[derive(Clone)]
@@ -384,7 +465,9 @@ impl Apu {
             timer_subdivider: 0,
             spc_trace: None,
             breaks: Vec::new(),
+            watches: Vec::new(),
             break_hit: None,
+            inst_pc: 0,
             break_resume: None,
         };
         // Reset the SPC700 — reads $FFFE/$FFFF for the PC vector,
@@ -621,12 +704,45 @@ impl Apu {
                 self.spc_pos_2x = self.cpu_target_2x;
                 break;
             }
-            if !self.breaks.is_empty() && !self.cpu.in_instruction && self.check_break() {
-                return;
+            if !self.cpu.in_instruction {
+                if !self.breaks.is_empty() && self.check_break() {
+                    return;
+                }
+                self.inst_pc = self.cpu.pc;
             }
             // Advance by the access's wait-state cost (ares `cycleWaitStates`;
             // 2 at the default ws=0, i.e. the old fixed `+= 2`).
             self.spc_pos_2x += u64::from(self.run_one_cycle());
+            if self.break_hit.is_some() {
+                return; // a watchpoint saw this cycle's access
+            }
+        }
+    }
+
+    /// Freeze on the first watchpoint `access` matches whose condition
+    /// holds.
+    fn check_watches(&mut self, access: SpcAccess) {
+        let ipl = self.control & 0x80 != 0;
+        let hit = self.watches.iter().find_map(|w| {
+            let wanted = if access.write { w.write } else { w.read };
+            let offset = w
+                .offset(access, ipl)
+                .filter(|o| wanted && (w.lo..=w.hi).contains(o))?;
+            let seen = SpcAccess {
+                addr: offset,
+                ..access
+            };
+            w.condition
+                .as_ref()
+                .is_none_or(|c| c(self, Some(access)))
+                .then_some((w.id, seen))
+        });
+        if let Some((id, seen)) = hit {
+            self.break_hit = Some(SpcHit {
+                id,
+                pc: self.inst_pc,
+                access: Some(seen),
+            });
         }
     }
 
@@ -640,19 +756,34 @@ impl Apu {
         let hit = self
             .breaks
             .iter()
-            .find(|b| b.pc == pc && b.condition.as_ref().is_none_or(|c| c(self)))
+            .find(|b| b.pc == pc && b.condition.as_ref().is_none_or(|c| c(self, None)))
             .map(|b| b.id);
         if let Some(id) = hit {
-            self.break_hit = Some((id, pc));
+            self.break_hit = Some(SpcHit {
+                id,
+                pc,
+                access: None,
+            });
         }
         hit.is_some()
+    }
+
+    /// The address of the instruction the SPC700 is running, while
+    /// watchpoints are armed (what a watchpoint hit reports).
+    #[must_use]
+    pub const fn instruction_pc(&self) -> u16 {
+        self.inst_pc
     }
 
     /// Leave the breakpoint the SPC700 is frozen on: it runs again, the
     /// time it stood still caught up at its next step, and that
     /// breakpoint does not fire again before the next instruction.
     pub const fn resume_break(&mut self) {
-        if let Some((_, pc)) = self.break_hit.take() {
+        // A watchpoint froze it after the access: nothing to step over.
+        if let Some(SpcHit {
+            pc, access: None, ..
+        }) = self.break_hit.take()
+        {
             self.break_resume = Some(pc);
         }
     }
@@ -791,7 +922,17 @@ impl Apu {
             clocked: 0,
             cost_2x: 2,
         };
-        self.cpu.step_cycle(&mut bus);
+        let mut access = None;
+        if self.watches.is_empty() {
+            self.cpu.step_cycle(&mut bus);
+        } else {
+            let mut watched = WatchedBus {
+                bus: &mut bus,
+                access: None,
+            };
+            self.cpu.step_cycle(&mut watched);
+            access = watched.access;
+        }
         // The access's 2×-domain wait-state cost (ares `cycleWaitStates`),
         // captured before `bus` drops so the borrow ends here. `run_to_target`
         // advances `spc_pos_2x` by this instead of a fixed 2.
@@ -806,6 +947,9 @@ impl Apu {
         }
         if self.cpu.pc < IPL_ROM_BASE {
             self.past_iplrom = true;
+        }
+        if let Some(access) = access {
+            self.check_watches(access);
         }
         cost_2x
     }
@@ -979,6 +1123,42 @@ impl ApuBusView<'_> {
             *self.audio_left = l;
             *self.audio_right = r;
         }
+    }
+}
+
+/// The bus as a watchpoint sees it: it keeps the cycle's data access
+/// (code reads at PC are not data).
+struct WatchedBus<'a, 'b> {
+    bus: &'a mut ApuBusView<'b>,
+    access: Option<SpcAccess>,
+}
+
+impl SpcBus for WatchedBus<'_, '_> {
+    fn read(&mut self, addr: u16) -> u8 {
+        let value = self.bus.read(addr);
+        self.access = Some(SpcAccess {
+            addr,
+            value,
+            write: false,
+        });
+        value
+    }
+
+    fn write(&mut self, addr: u16, value: u8) {
+        self.bus.write(addr, value);
+        self.access = Some(SpcAccess {
+            addr,
+            value,
+            write: true,
+        });
+    }
+
+    fn idle(&mut self) {
+        self.bus.idle();
+    }
+
+    fn fetch(&mut self, addr: u16) -> u8 {
+        self.bus.read(addr)
     }
 }
 

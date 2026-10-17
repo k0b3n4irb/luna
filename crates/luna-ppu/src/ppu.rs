@@ -179,26 +179,30 @@ pub(crate) const fn bg_state(ppu: &Ppu, idx: usize) -> BgState {
     ppu.bg[idx]
 }
 
-/// A PPU memory a port writes.
+/// A PPU memory a port reads or writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PpuMemory {
-    /// Video RAM (`$2118` / `$2119`), byte-addressed.
+    /// Video RAM (`$2118` / `$2119`, read through `$2139` / `$213A`),
+    /// byte-addressed.
     Vram,
-    /// Palette RAM (`$2122`), byte-addressed.
+    /// Palette RAM (`$2122`, read through `$213B`), byte-addressed.
     Cgram,
-    /// Sprite attribute memory (`$2104`), byte-addressed.
+    /// Sprite attribute memory (`$2104`, read through `$2138`),
+    /// byte-addressed.
     Oam,
 }
 
-/// One byte a port wrote into a PPU memory.
+/// One byte a port read from or wrote into a PPU memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PpuWrite {
+pub struct PpuAccess {
     /// The memory.
     pub memory: PpuMemory,
     /// The byte's address in it.
     pub addr: u16,
-    /// The byte written.
+    /// The byte read or written.
     pub value: u8,
+    /// A write (else a read).
+    pub write: bool,
 }
 
 /// The SNES Picture Processing Unit.
@@ -211,11 +215,13 @@ pub struct PpuWrite {
 pub struct Ppu {
     /// 64 KB tile and tilemap memory.
     pub vram: Vram,
-    /// Every byte the CPU or a DMA writes into VRAM, CGRAM or OAM, in
-    /// order, when a debugger asks for it (`None`, the default, records
-    /// nothing). Never in a save-state.
+    /// Every byte the CPU or a DMA reads from or writes into VRAM, CGRAM
+    /// or OAM through a port, in order, when a debugger asks for it
+    /// (`None`, the default, records nothing). A VRAM read is the word
+    /// the read buffer fetches, on a `$2139`/`$213A` read or a VMADD
+    /// write. Never in a save-state.
     #[serde(skip)]
-    pub debug_writes: Option<Vec<PpuWrite>>,
+    pub debug_accesses: Option<Vec<PpuAccess>>,
     /// 512 B palette memory.
     pub cgram: Cgram,
     /// 544 B object attribute memory.
@@ -511,7 +517,7 @@ impl Ppu {
     pub fn new() -> Self {
         Self {
             vram: Vram::new(),
-            debug_writes: None,
+            debug_accesses: None,
             cgram: Cgram::new(),
             oam: Oam::new(),
             inidisp: 0x80, // post-reset: forced blank
@@ -931,20 +937,29 @@ impl Ppu {
                 self.ppu1_mdr
             }
             register::OAMDATAREAD => {
-                self.ppu1_mdr = if self.active_display {
-                    let latch = self.obj_eval_latch();
-                    self.oam.read_during_render(latch)
-                } else {
-                    self.oam.read()
+                let latch = self.active_display.then(|| self.obj_eval_latch());
+                let off = self.oam.read_offset(latch);
+                self.ppu1_mdr = match latch {
+                    Some(latch) => self.oam.read_during_render(latch),
+                    None => self.oam.read(),
                 };
+                self.log_read(PpuMemory::Oam, off, self.ppu1_mdr);
                 self.ppu1_mdr
             }
-            register::VMDATALREAD => {
-                self.ppu1_mdr = self.vram.read_lo_gated(!self.active_display);
-                self.ppu1_mdr
-            }
-            register::VMDATAHREAD => {
-                self.ppu1_mdr = self.vram.read_hi_gated(!self.active_display);
+            register::VMDATALREAD | register::VMDATAHREAD => {
+                let high = offset == register::VMDATAHREAD;
+                // The read buffer refills from VRAM (outside the picture)
+                // on the read VMAIN increments on.
+                let fill = (self.vram.vmain.increment_on_high == high && !self.active_display)
+                    .then(|| self.vram.byte_addr());
+                self.ppu1_mdr = if high {
+                    self.vram.read_hi_gated(!self.active_display)
+                } else {
+                    self.vram.read_lo_gated(!self.active_display)
+                };
+                if let Some(a) = fill {
+                    self.log_vram_word(a);
+                }
                 self.ppu1_mdr
             }
             register::CGDATAREAD => {
@@ -954,7 +969,9 @@ impl Ppu {
                 // fetching (ares `readCGRAM`).
                 let target = self.cgram_access_redirect();
                 let high = self.cgram.read_high_pending();
+                let off = self.cgram.read_offset(target);
                 let v = self.cgram.read_at(target);
+                self.log_read(PpuMemory::Cgram, off, v);
                 self.ppu2_mdr = if high {
                     (self.ppu2_mdr & 0x80) | (v & 0x7F)
                 } else {
@@ -1054,6 +1071,32 @@ impl Ppu {
             // PPU MDR and returns the CPU's own data-bus latch
             // (ares io.cpp: `return data;`).
             _ => cpu_mdr,
+        }
+    }
+
+    /// Record a port's read of `memory` at `addr` for a debugger.
+    fn log_read(&mut self, memory: PpuMemory, addr: usize, value: u8) {
+        if let Some(log) = self.debug_accesses.as_mut() {
+            log.push(PpuAccess {
+                memory,
+                addr: addr as u16,
+                value,
+                write: false,
+            });
+        }
+    }
+
+    /// Record the read buffer's fetch of the word at byte `a`.
+    fn log_vram_word(&mut self, a: usize) {
+        for b in [a, a.wrapping_add(1) & 0xFFFF] {
+            self.log_read(PpuMemory::Vram, b, self.vram.peek(b as u16));
+        }
+    }
+
+    /// Record the fetch a VMADD write makes (none during the picture).
+    fn log_vram_fill(&mut self) {
+        if self.debug_accesses.is_some() && !self.active_display {
+            self.log_vram_word(self.vram.byte_addr());
         }
     }
 
@@ -1167,12 +1210,13 @@ impl Ppu {
                 } else {
                     self.oam.write(value)
                 };
-                if let (Some(log), Some((off, count))) = (self.debug_writes.as_mut(), written) {
+                if let (Some(log), Some((off, count))) = (self.debug_accesses.as_mut(), written) {
                     for a in off..off + count {
-                        log.push(PpuWrite {
+                        log.push(PpuAccess {
                             memory: PpuMemory::Oam,
                             addr: a as u16,
                             value: self.oam.peek(a as u16),
+                            write: true,
                         });
                     }
                 }
@@ -1241,10 +1285,12 @@ impl Ppu {
             register::VMADDL => {
                 let hi = (self.vram.address >> 8) as u8;
                 self.vram.set_address_gated(value, hi, !self.active_display);
+                self.log_vram_fill();
             }
             register::VMADDH => {
                 let lo = self.vram.address as u8;
                 self.vram.set_address_gated(lo, value, !self.active_display);
+                self.log_vram_fill();
             }
             register::VMDATAL | register::VMDATAH => {
                 let written = if offset == register::VMDATAL {
@@ -1252,11 +1298,12 @@ impl Ppu {
                 } else {
                     self.vram.write_hi_gated(value, !self.active_display)
                 };
-                if let (Some(log), Some(addr)) = (self.debug_writes.as_mut(), written) {
-                    log.push(PpuWrite {
+                if let (Some(log), Some(addr)) = (self.debug_accesses.as_mut(), written) {
+                    log.push(PpuAccess {
                         memory: PpuMemory::Vram,
                         addr: addr as u16,
                         value,
+                        write: true,
                     });
                 }
             }
@@ -1270,12 +1317,13 @@ impl Ppu {
             register::CGDATA => {
                 let target = self.cgram_access_redirect();
                 let written = self.cgram.write_at(value, target);
-                if let (Some(log), Some(off)) = (self.debug_writes.as_mut(), written) {
+                if let (Some(log), Some(off)) = (self.debug_accesses.as_mut(), written) {
                     for a in [off, off + 1] {
-                        log.push(PpuWrite {
+                        log.push(PpuAccess {
                             memory: PpuMemory::Cgram,
                             addr: a as u16,
                             value: self.cgram.peek(a as u16),
+                            write: true,
                         });
                     }
                 }

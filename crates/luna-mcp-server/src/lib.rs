@@ -556,9 +556,11 @@ pub struct BpAddParams {
     #[serde(default)]
     pub mark: bool,
     /// Mem only: the memory the range is in, by Mesen2's name —
-    /// `SnesMemory` (the CPU bus, default), `SnesVideoRam`, `SnesCgRam`,
-    /// `SnesSpriteRam`. PPU memories are watched for writes, CPU or DMA,
-    /// at the address the PPU writes.
+    /// `SnesMemory` (the CPU bus, default); `SnesVideoRam`, `SnesCgRam`,
+    /// `SnesSpriteRam` (CPU or DMA accesses through the PPU's ports, at
+    /// the address the PPU uses); `SpcMemory` (the SPC700's bus), `SpcRam`,
+    /// `SpcRom` (the SPC700's data accesses; `symbol` is then an ARAM
+    /// label).
     #[serde(default)]
     pub memory: Option<String>,
 }
@@ -2699,8 +2701,11 @@ impl LunaServer {
                                 `condition`: an expression in Mesen2's language (see `eval`) that \
                                 must be non-zero for it to fire (`value`/`address` are the access). \
                                 `mark`: record an Event Viewer mark instead of halting. \
-                                kind='spc_exec': halt with the SPC700 at the start of the \
-                                instruction at 16-bit ARAM `addr` (or ARAM `symbol`); its \
+                                `memory`: watch VRAM, CGRAM, OAM (through the PPU's ports) or the \
+                                SPC700's SpcMemory / SpcRam / SpcRom instead of the CPU bus; an \
+                                SPC700 watch stops it just after the access (kind spc_read / \
+                                spc_write). kind='spc_exec': halt with the SPC700 at the start of \
+                                the instruction at 16-bit ARAM `addr` (or ARAM `symbol`); its \
                                 condition is evaluated for the SPC700. \
                                 Returns the registry id. Run with `run_until_break`."
     )]
@@ -2710,9 +2715,34 @@ impl LunaServer {
     ) -> Result<rmcp::Json<BpAddResult>, ErrorData> {
         let id = {
             let mut em = self.emulator.lock().await;
-            let addr = resolve_addr(&em, params.symbol.as_deref(), params.addr)?;
+            let memory = params
+                .memory
+                .as_deref()
+                .map(memory_kind)
+                .transpose()?
+                .filter(|m| *m != luna_api::MemoryKind::SnesMemory);
+            // SPC700 addresses come from the ARAM symbol table.
+            let spc = params.kind == "spc_exec"
+                || matches!(
+                    memory,
+                    Some(luna_api::MemoryKind::SpcMemory | luna_api::MemoryKind::SpcRam)
+                );
+            let resolve = |sym: Option<&str>, numeric: u32| {
+                match sym {
+                Some(sym) if spc => em.resolve_symbol_spc(sym).map(u32::from).ok_or_else(|| {
+                    ErrorData::invalid_params(
+                        format!(
+                            "unknown ARAM symbol `{sym}` (load with load_symbols {{space: \"aram\"}})"
+                        ),
+                        None,
+                    )
+                }),
+                _ => resolve_addr(&em, sym, numeric),
+            }
+            };
+            let addr = resolve(params.symbol.as_deref(), params.addr)?;
             let hi = match &params.hi_symbol {
-                Some(_) => resolve_addr(&em, params.hi_symbol.as_deref(), 0)?,
+                Some(_) => resolve(params.hi_symbol.as_deref(), 0)?,
                 None => params.hi.unwrap_or(addr),
             };
             // The display name defaults to the symbol the bp was created from.
@@ -2720,32 +2750,18 @@ impl LunaServer {
             let id = match params.kind.as_str() {
                 "exec" => em.bp_add_exec(addr, name).map_err(|e| api_err_to_mcp(&e))?,
                 "spc_exec" => {
-                    let pc = match params.symbol.as_deref() {
-                        Some(sym) => em.resolve_symbol_spc(sym).ok_or_else(|| {
-                            ErrorData::invalid_params(
-                                format!("unknown ARAM symbol `{sym}` (load with load_symbols {{space: \"aram\"}})"),
-                                None,
-                            )
-                        })?,
-                        None => u16::try_from(params.addr).map_err(|_| {
-                            ErrorData::invalid_params(
-                                format!("spc_exec: ${:X} is not a 16-bit ARAM address", params.addr),
-                                None,
-                            )
-                        })?,
-                    };
+                    let pc = u16::try_from(addr).map_err(|_| {
+                        ErrorData::invalid_params(
+                            format!("spc_exec: ${addr:X} is not a 16-bit ARAM address"),
+                            None,
+                        )
+                    })?;
                     em.bp_add_spc_exec(pc, name)
                         .map_err(|e| api_err_to_mcp(&e))?
                 }
-                "mem" => match params
-                    .memory
-                    .as_deref()
-                    .map(memory_kind)
-                    .transpose()?
-                    .filter(|m| *m != luna_api::MemoryKind::SnesMemory)
-                {
+                "mem" => match memory {
                     Some(memory) => em
-                        .bp_add_watch(memory, addr, hi, name)
+                        .bp_add_watch(memory, addr, hi, params.on_read, params.on_write, name)
                         .map_err(|e| api_err_to_mcp(&e))?,
                     None => em
                         .bp_add_mem(
@@ -3260,7 +3276,8 @@ impl LunaServer {
                                 or `max_steps` instructions elapse. Exec breakpoints halt before \
                                 their instruction (resume-friendly: the first instruction of the \
                                 run is exempt); watchpoints halt after the accessing instruction \
-                                and report its PC, the address and the byte."
+                                (an SPC700 one just after the access) and report its PC, the \
+                                address and the byte."
     )]
     async fn run_until_break(
         &self,
@@ -4136,6 +4153,8 @@ const fn space_name(space: luna_api::WatchSpace) -> &'static str {
         luna_api::WatchSpace::Vram => "vram",
         luna_api::WatchSpace::Cgram => "cgram",
         luna_api::WatchSpace::Oam => "oam",
+        luna_api::WatchSpace::Aram => "aram",
+        luna_api::WatchSpace::Ipl => "ipl",
     }
 }
 
@@ -4161,6 +4180,8 @@ fn outcome_to_result(out: &luna_api::RunOutcome) -> RunUntilBreakResult {
                     luna_api::BreakKind::Scanline => "scanline",
                     luna_api::BreakKind::Step => "step",
                     luna_api::BreakKind::SpcExec => "spc_exec",
+                    luna_api::BreakKind::SpcRead => "spc_read",
+                    luna_api::BreakKind::SpcWrite => "spc_write",
                 }
                 .into(),
             ),

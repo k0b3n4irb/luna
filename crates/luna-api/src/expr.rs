@@ -753,16 +753,36 @@ impl ExprEnv for ApuView<'_> {
 /// Whether an SPC700 exec breakpoint's condition holds: evaluated as
 /// Mesen2 does at the instruction's start (`value` the opcode, `address`
 /// the PC).
-pub(crate) fn spc_holds(expr: &Expression, apu: &luna_apu::Apu) -> bool {
+pub(crate) fn spc_holds(
+    expr: &Expression,
+    apu: &luna_apu::Apu,
+    access: Option<luna_apu::SpcAccess>,
+) -> bool {
     let pc = apu.cpu.pc;
-    let access = ExprAccess {
-        value: i64::from(apu.peek(pc)),
-        address: i64::from(pc),
-        memaddress: spc_absolute(apu, u32::from(pc)),
-        write: false,
-        dma: false,
-        dummy: false,
-        oppc: i64::from(pc),
+    let access = match access {
+        // A watchpoint's: mid-instruction, `pc` has moved past the opcode.
+        Some(a) => ExprAccess {
+            value: i64::from(a.value),
+            address: i64::from(a.addr),
+            memaddress: if a.write {
+                i64::from(a.addr)
+            } else {
+                spc_absolute(apu, u32::from(a.addr))
+            },
+            write: a.write,
+            dma: false,
+            dummy: false,
+            oppc: i64::from(apu.instruction_pc()),
+        },
+        None => ExprAccess {
+            value: i64::from(apu.peek(pc)),
+            address: i64::from(pc),
+            memaddress: spc_absolute(apu, u32::from(pc)),
+            write: false,
+            dma: false,
+            dummy: false,
+            oppc: i64::from(pc),
+        },
     };
     evaluate(expr, &access, &ApuView(apu)).holds()
 }

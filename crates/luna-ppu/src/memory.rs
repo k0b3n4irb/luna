@@ -407,6 +407,12 @@ impl Cgram {
         self.high_pending
     }
 
+    /// The byte the next [`Self::read_at`] reads.
+    #[must_use]
+    pub fn read_offset(&self, target: Option<u8>) -> usize {
+        (usize::from(target.unwrap_or(self.address)) << 1) | usize::from(self.high_pending)
+    }
+
     /// `$213B` read — returns the byte at the current word address,
     /// alternating low/high and advancing on the high read.
     ///
@@ -635,12 +641,7 @@ impl Oam {
     /// `$2138` read while the PPU is drawing: same redirection as
     /// [`Self::write_during_render`] (ares `io.cpp:31-37` `readOAM`).
     pub fn read_during_render(&mut self, obj_latch: u8) -> u8 {
-        let off = if self.address & 0x200 != 0 {
-            0x200 | usize::from(obj_latch >> 2)
-        } else {
-            (usize::from(obj_latch) << 2) | usize::from(self.address & 1)
-        };
-        let value = self.data[off];
+        let value = self.data[self.read_offset(Some(obj_latch))];
         self.advance();
         value
     }
@@ -656,14 +657,21 @@ impl Oam {
     /// only when OAMADD points past the high table (then the modulo would
     /// wrongly wrap into the low table).
     pub fn read(&mut self) -> u8 {
-        let off = if self.address & 0x200 != 0 {
-            0x200 | usize::from(self.address & 0x1F)
-        } else {
-            usize::from(self.address) % self.data.len()
-        };
-        let value = self.data[off];
+        let value = self.data[self.read_offset(None)];
         self.advance();
         value
+    }
+
+    /// The byte the next read takes: [`Self::read`]'s with no latch,
+    /// [`Self::read_during_render`]'s with the evaluation's.
+    #[must_use]
+    pub fn read_offset(&self, obj_latch: Option<u8>) -> usize {
+        match obj_latch {
+            Some(latch) if self.address & 0x200 != 0 => 0x200 | usize::from(latch >> 2),
+            Some(latch) => (usize::from(latch) << 2) | usize::from(self.address & 1),
+            None if self.address & 0x200 != 0 => 0x200 | usize::from(self.address & 0x1F),
+            None => usize::from(self.address) % self.data.len(),
+        }
     }
 
     const fn advance(&mut self) {

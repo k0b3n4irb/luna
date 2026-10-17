@@ -1515,3 +1515,44 @@ async fn server_bp_add_takes_a_condition_and_a_mark() {
     assert_eq!((r.value, r.kind.as_str()), (7, "numeric"));
     let _ = std::fs::remove_file(&path);
 }
+
+/// `bp_add {kind: "mem", memory: "SpcRam"}` stops the SPC700 just after
+/// the access it watches.
+#[tokio::test]
+async fn server_bp_add_watches_the_spc700() {
+    let s = LunaServer::new();
+    let path = PathBuf::from("/tmp/luna_mcp_bp_spc_watch_demo.smc");
+    std::fs::write(&path, demo_lorom()).unwrap();
+    s.load_rom(Parameters(rom_params(&path.to_string_lossy())))
+        .await
+        .unwrap();
+    // The IPL ROM clears ARAM page zero from $EF down.
+    s.bp_add(Parameters(BpAddParams {
+        condition: None,
+        mark: false,
+        memory: Some("SpcRam".into()),
+        kind: "mem".into(),
+        addr: 0x80,
+        symbol: None,
+        hi: None,
+        hi_symbol: None,
+        on_read: false,
+        on_write: true,
+        mirror: None,
+        name: None,
+    }))
+    .await
+    .unwrap();
+    let r = s
+        .run_until_break(Parameters(RunUntilBreakParams { max_steps: 100_000 }))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(r.kind.as_deref(), Some("spc_write"));
+    assert_eq!((r.pc, r.addr, r.value), (Some(0xFFC5), Some(0x80), Some(0)));
+    assert_eq!(r.space.as_deref(), Some("aram"));
+    let list = s.bp_list().await.unwrap().0.breakpoints;
+    assert_eq!(list[0].cpu, "spc");
+    assert_eq!(list[0].space, "aram");
+    let _ = std::fs::remove_file(&path);
+}
