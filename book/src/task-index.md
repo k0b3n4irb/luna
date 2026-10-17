@@ -85,6 +85,7 @@ means that transport has no form of it.
 | find the address of a variable I can only see on screen | — | `search_begin`, `search_refine`, `search_results` | [MCP catalogue](using/mcp.md#mcp-tool-catalogue) |
 | pin a byte, or change one | — | `freeze_add`, `poke_memory`, `set_cpu_register` | [MCP catalogue](using/mcp.md#mcp-tool-catalogue) |
 | check what a breakpoint condition or a watch expression gives right now | — | `eval` | [Expressions](using/mcp.md#expressions) |
+| stop, check or poke at the first arrival on a routine where something holds (the first goal, the first hit) | `--until-pc tick --until-if "[score] != 0"`, or the same condition on a `[[checkpoint]]` / `[[poke]]` of a manifest | — | [Stopping on a routine](using/cli-run-state.md#stopping-on-a-routine-not-on-a-frame) |
 | step over a call, out of a routine, by scanline or by frame | — | `step_kind` | [Conditional breakpoints](using/mcp.md#conditional-breakpoints) |
 | stop on a `BRK` / `COP` / `WDM` / `STP`, at the next NMI or IRQ handler, or on a scanline | — | `set_break_sources`, `run_until_break` | [Conditional breakpoints](using/mcp.md#conditional-breakpoints) |
 | stop only when a condition holds (the sixth enemy, a write of a given value), or mark an event without stopping | — | `bp_add` with `condition` / `mark`, `run_until_break` | [Conditional breakpoints](using/mcp.md#conditional-breakpoints) |

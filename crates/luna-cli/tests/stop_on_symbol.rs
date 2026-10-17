@@ -1115,3 +1115,106 @@ fn a_profile_pokes_on_arrival_to_reach_the_scene_it_measures() {
         assert_eq!(luna("profile", &rom, args).status.code(), Some(2));
     }
 }
+
+#[test]
+fn until_if_stops_at_the_first_arrival_where_a_condition_holds() {
+    let dir = fresh_dir("until_if");
+    let rom = slow_tick_rom(&dir);
+    // At arrival N on `tick`, `half_a` holds N-1 (the INC has not run).
+    let stop = |args: &[&str]| {
+        let out = luna(
+            "state",
+            &rom,
+            &[&["--until-pc", "tick", "--out", "-"], args].concat(),
+        );
+        assert!(out.status.success(), "{}", text(&out));
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        (
+            v["until_pc"]["hits_seen"].as_u64().unwrap(),
+            v["until_pc"]["matches"].as_u64().unwrap(),
+            text(&out),
+        )
+    };
+    let (arrival, matches, log) = stop(&["--until-if", "[half_a] == 3"]);
+    assert_eq!((arrival, matches), (4, 1), "{log}");
+    assert!(
+        log.contains("where `[half_a] == 3` held, arrival 4"),
+        "{log}"
+    );
+    // `--hit N` counts the arrivals where it holds.
+    assert_eq!(stop(&["--until-if", "[half_a] >= 3", "--hit", "2"]).0, 5);
+    // A word through a label (`half_a` then `half_b`, both counted by the
+    // tick), and the registers, are there too.
+    assert_eq!(
+        stop(&["--until-if", "{half_a} == $0202 && pc == tick"]).0,
+        3
+    );
+    // An expression that does not parse is a usage error; a condition that
+    // never holds is a miss.
+    let out = luna(
+        "state",
+        &rom,
+        &["--until-pc", "tick", "--until-if", "x = 1"],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    let out = luna(
+        "state",
+        &rom,
+        &[
+            "--until-pc",
+            "tick",
+            "--until-if",
+            "[half_a] == 200",
+            "--until-frame",
+            "30",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(text(&out).contains("0 where it held"), "{}", text(&out));
+}
+
+#[test]
+fn manifest_checkpoints_and_pokes_take_until_if() {
+    let dir = fresh_dir("until_if_manifest");
+    slow_tick_rom(&dir);
+    let head = "rom = \"game.sfc\"\nforce_mapper = \"lorom\"\nframes = 60\n";
+    // The checkpoint fires at the first arrival where the condition holds
+    // (arrival 4: half_a = 3), whatever its number; the poke writes at the
+    // first arrival where its own holds (half_a = 1, arrival 2), so the
+    // tick that follows counts half_b on from $40.
+    let manifest = format!(
+        "{head}[[poke]]\nat_symbol = \"tick\"\nuntil_if = \"[half_a] == 1\"\n\
+         [poke.values]\nhalf_b = 0x40\n\
+         [[checkpoint]]\nat_symbol = \"tick\"\nuntil_if = \"[half_a] == 3\"\n\
+         [checkpoint.values]\nhalf_a = 3\nhalf_b = 0x42\n\
+         [[checkpoint]]\nat_symbol = \"tick\"\nuntil_if = \"[half_a] >= 5\"\nhit = 2\n\
+         [checkpoint.values]\nhalf_a = 6\n"
+    );
+    let out = luna_test(&dir, "until_if.toml", &manifest, &["--report", "json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout[stdout.find('{').unwrap()..]).unwrap();
+    let cps = &v["tests"][0]["symbol_checkpoints"];
+    assert_eq!(cps[0]["arrival"], 4, "{v}");
+    assert_eq!(cps[0]["until_if"], "[half_a] == 3");
+    assert_eq!(cps[1]["arrival"], 7, "the second arrival where half_a >= 5");
+    // A condition that never holds is reported with how often it held.
+    let never = format!(
+        "{head}[[checkpoint]]\nat_symbol = \"tick\"\nuntil_if = \"[half_a] == 200\"\n\
+         [checkpoint.values]\nhalf_a = 0\n"
+    );
+    let out = luna_test(&dir, "never.toml", &never, &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(text(&out).contains("0 where it held"), "{}", text(&out));
+    // `until_if` without `at_symbol`, or that does not parse, is refused.
+    let bad = format!("{head}[[checkpoint]]\nat_frame = 5\nuntil_if = \"1\"\n");
+    assert_eq!(
+        luna_test(&dir, "bad.toml", &bad, &[]).status.code(),
+        Some(2)
+    );
+    let bad = format!("{head}[[checkpoint]]\nat_symbol = \"tick\"\nuntil_if = \"x = 1\"\n");
+    assert_eq!(
+        luna_test(&dir, "bad2.toml", &bad, &[]).status.code(),
+        Some(2)
+    );
+}

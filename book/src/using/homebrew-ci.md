@@ -403,6 +403,32 @@ ball_x = 0x140                 # the keys and widths of [asserts.values]:
 ball_y = 0x30                  # two bytes when the .sym says two
 ```
 
+**At an event, not at a number.** `until_if` on an `at_symbol`
+checkpoint or a `[[poke]]` makes it fire at the first arrival where an
+[expression](mcp.md#expressions) holds, and `hit` then counts those
+arrivals (from power-on, as without it). The report gives the arrival it
+fired on, so a test keeps following the event when the game's logic
+moves it:
+
+```toml
+[[checkpoint]]
+at_symbol = "tick_start"
+until_if = "[score] != 0"      # the first tick after the first goal
+[checkpoint.values]
+ball_x = 0x80
+
+[[poke]]
+at_symbol = "tick_start"
+until_if = "[player_hp] < 10"  # once the player is weak: heal
+[poke.values]
+player_hp = 99
+```
+
+`until_if` needs `at_symbol`. An expression that does not parse makes
+the manifest invalid (exit 2). A checkpoint whose condition never held
+fails with the count of arrivals where it did. In `--report json`,
+`symbol_checkpoints[].arrival` is the arrival it fired on.
+
 A checkpoint on the same arrival reads the values written. A `[[poke]]`
 whose arrival the run never reaches fails the test (`poke@tick_start#91:
 not reached by frame 600 …; nothing was written`): every assert after it

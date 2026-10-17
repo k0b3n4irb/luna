@@ -9,6 +9,15 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ### Added
 
+- **`--until-if`: stop, check or poke where a condition holds.**
+  `luna state --until-pc tick --until-if "[score] != 0"` stops at the first
+  arrival on the routine where the expression (Mesen2's debugger language)
+  holds; `--hit N` takes the `N`-th such arrival, and the JSON's
+  `until_pc.hits_seen` / `matches` give the arrival it stopped on and how
+  many held. In a manifest, `until_if` on an `at_symbol` `[[checkpoint]]`
+  or a `[[poke]]` does the same, and the report's
+  `symbol_checkpoints[].arrival` names the arrival.
+
 - **Step over, step out, by scanline, by frame.** `Emulator::step_kind`
   runs one of Mesen2's steps: into, over (a `JSR` / `JSL` whole, back at
   the same stack depth), out (until the routine returns through `RTS` /

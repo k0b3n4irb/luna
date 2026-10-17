@@ -127,6 +127,7 @@ and is the hub for every headless diagnostic.
 | `--until-frame <F>` | — | Run until PPU frame `F` (then snapshot) instead of the `-n` count, which is then ignored. Frame-indexed baselines and asserts (see `run`). |
 | `--until-pc <SYMBOL>` | — | Run until execution **reaches a routine** (then snapshot): a `.sym` label, `label+N`, or `BANK:OFFSET` in hex. The stop is just before its first instruction runs. Bounded by `--until-frame` when given, else by 36000 frames; not reaching it is an error (exit 1). See *Stopping on a routine* below. |
 | `--hit <N>` | `1` | With `--until-pc`: stop the `N`-th time execution reaches it. |
+| `--until-if <EXPR>` | — | With `--until-pc`: stop only at an arrival where this [expression](mcp.md#expressions) is non-zero (`--hit N`: the `N`-th such arrival). The JSON's `until_pc.hits_seen` is the arrival it stopped on. |
 | `--peek-at <SYMBOL>` | — | Read every `--peek` **each time** execution reaches this routine, one line per arrival with its frame and scanline. The run length stays `-n` / `--until-frame` / `--until-pc`. |
 | `--peek-at-out <PATH>` | — | Write the `--peek-at` rows as CSV (`hit,frame,line`, then one column of hex bytes per `--peek`) instead of printing them. |
 | `--poke-at <SYMBOL>`, `--poke-hit <N>`, `--poke <NAME=HEX>` | —, `1`, — | Write bytes into memory at the `N`-th arrival on a routine, just before its first instruction: puts the game in a state it does not reach by itself. Repeatable: each `--poke-at` takes the `--poke-hit` and `--poke`s that follow it. See *Stopping on a routine* below. |
@@ -322,6 +323,33 @@ luna state --until-pc tick_end --hit 3 --peek half_a:2 --out /dev/null game.sfc
 luna state --until-frame 8 --peek half_a:2 --out /dev/null game.sfc
 #   $7E0010  03 02
 ```
+
+**Stopping where something happens, not at a number.** `--until-if`
+adds a condition: the run stops at the first arrival where it holds. The
+arrival number then comes out of the run instead of going into it, so a
+check stays on the event when the game's logic moves it:
+
+```bash
+# The first tick where both halves read 3.
+luna state --until-pc tick --until-if "{half_a} == $0303" --out - game.sfc
+# reached tick ($00:8007), hit 1 where `{half_a} == $0303` held, arrival 4 — frame 9, line 225
+#   (until_pc.hits_seen = 4, until_pc.matches = 1 in the JSON)
+# The second tick where the score is non-zero.
+luna state --until-pc tick --until-if "[score] != 0" --hit 2 --out - game.sfc
+```
+
+The condition is an expression in Mesen2's debugger language
+([Expressions](mcp.md#expressions)), evaluated as an exec breakpoint's
+just before the routine's first instruction:
+- a label stands for its address, `[label]` reads a byte, `{label}` a
+  word;
+- the registers (`a`, `x`, `pc`…), `scanline` and `frame` are there;
+- C's operators apply.
+
+An expression that does not parse is a usage error (exit 2). One that
+never holds is a miss like any other (exit 1), with the count of the
+arrivals where it did:
+`hit 1 where … held not reached by frame 600 (reached 97 time(s), 0 where it held)`.
 
 The target is a label of the `.sym`, `label+N` (decimal, or `0x`-hex),
 or `BANK:OFFSET` in hex; a label linked in `$00-$7D` also matches the

@@ -163,8 +163,12 @@ struct Manifest {
 struct Poke {
     /// The routine: a loaded symbol, `symbol+N` or `BANK:OFFSET`.
     at_symbol: String,
-    /// Which arrival, counted from power-on (default 1).
+    /// Which arrival, counted from power-on (default 1). With `until_if`,
+    /// which arrival where the condition held.
     hit: Option<u64>,
+    /// Write only at an arrival where this expression, in Mesen2's
+    /// debugger language, is non-zero (`luna state --until-if`).
+    until_if: Option<String>,
     /// `key = value`, the keys and widths of `[asserts.values]`: two
     /// bytes, little-endian, when the `.sym` records the symbol as two or
     /// the value needs them; one byte otherwise.
@@ -176,6 +180,9 @@ struct PendingPoke {
     /// Index of its routine in the watch.
     pc: usize,
     hit: u64,
+    /// `until_if`, compiled, and the arrivals where it held so far.
+    condition: Option<luna_api::Expression>,
+    matches: u64,
     /// `poke@symbol#hit`, for the failure line.
     label: String,
     writes: Vec<(u32, Vec<u8>)>,
@@ -195,7 +202,12 @@ struct Checkpoint {
     /// boundary cannot give once a game tick spans more than one frame.
     at_symbol: Option<String>,
     /// With `at_symbol`: which arrival, counted from power-on (default 1).
+    /// With `until_if`, which arrival where the condition held.
     hit: Option<u64>,
+    /// With `at_symbol`: fire only at an arrival where this expression, in
+    /// Mesen2's debugger language, is non-zero (`luna state --until-if`).
+    /// The report's `arrival` is the arrival it fired on.
+    until_if: Option<String>,
     /// This leg's joypad entries (absolute frames, same grammar as the
     /// top-level `input`).
     input: Option<String>,
@@ -484,6 +496,12 @@ struct TestOutcome {
 struct SymbolCheckpoint {
     at_symbol: String,
     hit: u64,
+    /// `until_if`, verbatim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    until_if: Option<String>,
+    /// The arrival on `at_symbol` it fired on, counted from power-on (the
+    /// last one seen when not reached).
+    arrival: u64,
     /// `false` = the run's horizon came first.
     reached: bool,
     /// PPU frame and scanline of the stop (where the run ended, if not
@@ -498,6 +516,10 @@ struct SymbolWatch {
     pcs: Vec<u32>,
     counts: Vec<u64>,
     pokes: Vec<PendingPoke>,
+    /// Per checkpoint with `until_if`: its routine's index, the compiled
+    /// condition and the arrivals where it held so far (counted from
+    /// power-on, as `hit` is).
+    conditions: Vec<Option<(usize, luna_api::Expression, u64)>>,
     /// The first write the machine refused.
     poke_error: Option<String>,
     /// The checkpoint frame hashes, read as their picture completes.
@@ -1168,15 +1190,20 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
         pcs: Vec::new(),
         counts: Vec::new(),
         pokes: Vec::new(),
+        conditions: Vec::new(),
         poke_error: None,
         hashes: Vec::new(),
     };
     for p in &m.poke {
         let hit = p.hit.unwrap_or(1);
-        let label = format!("poke@{}#{hit}", p.at_symbol);
+        let label = match &p.until_if {
+            Some(c) => format!("poke@{}#{hit} if `{c}`", p.at_symbol),
+            None => format!("poke@{}#{hit}", p.at_symbol),
+        };
         if hit == 0 {
             return Err(format!("{label}: `hit` counts from 1"));
         }
+        let condition = compile_until_if(&em, p.until_if.as_deref(), &label)?;
         let at = resolve_key(&em, &p.at_symbol).map_err(|e| format!("{label}: {e}"))?;
         let mut writes = Vec::with_capacity(p.values.len());
         for (key, &value) in &p.values {
@@ -1192,6 +1219,8 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
         watch.pokes.push(PendingPoke {
             pc,
             hit,
+            condition,
+            matches: 0,
             label,
             writes,
             done: false,
@@ -1206,6 +1235,18 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
                 Some(watch.index_of(addr))
             }
         });
+    }
+    for (cp, pc) in m.checkpoint.iter().zip(&cp_pc) {
+        let entry = match (&cp.until_if, pc) {
+            (None, _) => None,
+            (Some(_), None) => {
+                return Err("a [[checkpoint]] `until_if` needs `at_symbol`".into());
+            }
+            (Some(text), Some(pc)) => {
+                compile_until_if(&em, Some(text), "checkpoint `until_if`")?.map(|e| (*pc, e, 0))
+            }
+        };
+        watch.conditions.push(entry);
     }
     let mut symbol_checkpoints: Vec<SymbolCheckpoint> = Vec::new();
     let final_frame = match bound {
@@ -1291,28 +1332,46 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
                 &mut pooled,
                 &mut watch,
                 final_frame,
-                Some((pc, hit)),
+                Some((pc, hit, i)),
             )?;
             let frame = em.frame_count().map_err(|e| e.to_string())?;
             let line = em.beam().map_or(0, |(line, _)| line);
+            let arrival = watch.counts[pc];
             symbol_checkpoints.push(SymbolCheckpoint {
                 at_symbol: sym.clone(),
                 hit,
+                until_if: cp.until_if.clone(),
+                arrival,
                 reached,
                 frame,
                 line,
             });
+            let cond = cp
+                .until_if
+                .as_ref()
+                .map(|c| format!(" if `{c}`"))
+                .unwrap_or_default();
             if !reached {
                 // Asserting on wherever the run gave up would compare
                 // against a state the manifest never meant.
+                let held = watch.conditions[i]
+                    .as_ref()
+                    .map(|(_, _, held)| format!(", {held} where it held"))
+                    .unwrap_or_default();
                 failures.push(format!(
-                    "checkpoint@{sym}#{hit}: not reached by frame {frame} (reached {} time(s))",
-                    watch.counts[pc]
+                    "checkpoint@{sym}#{hit}{cond}: not reached by frame {frame} (reached {arrival} \
+                     time(s){held})"
                 ));
                 snapshot_deltas(&mut em, &m.checkpoint, i + 1, &mut delta_prev);
                 continue;
             }
-            format!("checkpoint@{sym}#{hit} (frame {frame}, line {line})")
+            if cp.until_if.is_some() {
+                format!(
+                    "checkpoint@{sym}#{hit}{cond} (arrival {arrival}, frame {frame}, line {line})"
+                )
+            } else {
+                format!("checkpoint@{sym}#{hit} (frame {frame}, line {line})")
+            }
         } else {
             let frame = cp.at_frame.unwrap_or(0);
             drive_watching(&mut em, &mut script, &mut pooled, &mut watch, frame, None)?;
@@ -1740,6 +1799,19 @@ enum Bound {
     Steps(u64),
 }
 
+/// Compile a manifest's `until_if`, or name it in the error.
+fn compile_until_if(
+    em: &luna_api::Emulator,
+    text: Option<&str>,
+    label: &str,
+) -> Result<Option<luna_api::Expression>, String> {
+    text.map(|t| {
+        em.compile_expression(t, luna_api::ExprCpu::Snes)
+            .ok_or_else(|| format!("{label}: `{t}` is not a valid expression"))
+    })
+    .transpose()
+}
+
 /// Advance to frame `to_frame` while counting arrivals on the watched
 /// routines (issue #269); with `stop = (pc index, hit)`, end the run the
 /// moment that routine is reached for the `hit`-th time since power-on.
@@ -1751,9 +1823,18 @@ fn drive_watching(
     pooled: &mut Pooled,
     watch: &mut SymbolWatch,
     to_frame: u64,
-    stop: Option<(usize, u64)>,
+    stop: Option<(usize, u64, usize)>,
 ) -> Result<bool, String> {
-    if stop.is_some_and(|(pc, hit)| watch.counts[pc] >= hit) {
+    // `(routine, hit, checkpoint)`: with `until_if`, `hit` counts the
+    // arrivals where the checkpoint's condition held.
+    let counted = |watch: &SymbolWatch, (pc, _, cp): (usize, u64, usize)| {
+        watch
+            .conditions
+            .get(cp)
+            .and_then(Option::as_ref)
+            .map_or(watch.counts[pc], |(_, _, held)| *held)
+    };
+    if stop.is_some_and(|s| counted(watch, s) >= s.1) {
         return Ok(false); // that arrival is behind us
     }
     let pcs = watch.pcs.clone();
@@ -1767,10 +1848,34 @@ fn drive_watching(
                 luna_api::WatchEvent::Pc(i) => {
                     watch.counts[i] += 1;
                     let arrival = watch.counts[i];
+                    let addr = pcs[i];
+                    // The checkpoint conditions on this routine, counted on
+                    // every arrival.
+                    let mut held_now = false;
+                    for (n, c) in watch.conditions.iter_mut().enumerate() {
+                        if let Some((pc, cond, held)) = c.as_mut()
+                            && *pc == i
+                            && crate::state::arrival_holds(em, cond, addr)
+                        {
+                            *held += 1;
+                            held_now |= stop.is_some_and(|(_, _, cp)| cp == n);
+                        }
+                    }
                     // Writes land before a checkpoint on the same arrival
                     // reads the machine.
                     for p in &mut watch.pokes {
-                        if p.pc != i || p.hit != arrival {
+                        if p.pc != i || p.done {
+                            continue;
+                        }
+                        let due = match &p.condition {
+                            None => p.hit == arrival,
+                            Some(cond) => {
+                                let holds = crate::state::arrival_holds(em, cond, addr);
+                                p.matches += u64::from(holds);
+                                holds && p.matches == p.hit
+                            }
+                        };
+                        if !due {
                             continue;
                         }
                         for (at, bytes) in &p.writes {
@@ -1782,7 +1887,13 @@ fn drive_watching(
                         }
                         p.done = true;
                     }
-                    stop == Some((i, arrival))
+                    match stop {
+                        Some((pc, hit, cp)) if pc == i => match &watch.conditions.get(cp) {
+                            Some(Some((_, _, held))) => held_now && *held == hit,
+                            _ => arrival == hit,
+                        },
+                        _ => false,
+                    }
                 }
                 luna_api::WatchEvent::Frame => {
                     for h in &mut watch.hashes {

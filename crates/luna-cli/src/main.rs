@@ -496,6 +496,14 @@ enum Command {
             value_parser = clap::value_parser!(u64).range(1..)
         )]
         hit: u64,
+        /// With `--until-pc`: stop only at an arrival where this expression,
+        /// in Mesen2's debugger language, is non-zero (`--hit N`: the N-th
+        /// such arrival). Labels stand for their address, `[label]` reads a
+        /// byte and `{label}` a word. The JSON's `until_pc.hits_seen` is the
+        /// arrival it stopped on. Example: `--until-pc tick --until-if
+        /// "[score] != 0"`.
+        #[arg(long = "until-if", requires = "until_pc")]
+        until_if: Option<String>,
         /// Read every `--peek` EACH time execution reaches this routine
         /// (same forms as `--until-pc`), one line per arrival with its
         /// frame and scanline: a whole run's worth of consistent samples
@@ -1459,6 +1467,7 @@ fn main() -> ExitCode {
             until_frame,
             until_pc,
             hit,
+            until_if,
             peek_at,
             peek_at_out,
             input_at,
@@ -1592,6 +1601,7 @@ fn main() -> ExitCode {
                 power_on.as_deref(),
                 until_pc.as_deref(),
                 hit,
+                until_if.as_deref(),
                 peek_at.as_deref(),
                 peek_at_out.as_deref(),
                 input_at.as_deref(),

@@ -195,9 +195,16 @@ struct UntilPcOut {
     spec: String,
     /// The address it resolved to (`bank << 16 | offset`).
     addr: u32,
-    /// The `--hit` asked for.
+    /// The `--hit` asked for (with `--until-if`: the N-th arrival where
+    /// the condition held).
     hit: u64,
-    /// How many times execution reached it before the run ended.
+    /// `--until-if`, verbatim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    until_if: Option<String>,
+    /// Arrivals where `--until-if` held (every arrival without it).
+    matches: u64,
+    /// How many times execution reached it before the run ended: on a
+    /// stop, the number of the arrival it stopped on.
     hits_seen: u64,
     /// The run stopped on the asked hit. `false` = the bound came first.
     reached: bool,
@@ -278,6 +285,8 @@ struct Watch {
     /// The distinct addresses watched.
     pcs: Vec<u32>,
     until: Option<UntilPcOut>,
+    /// `--until-if`, compiled.
+    condition: Option<luna_api::Expression>,
     /// `--peek-at`: its spec and address.
     peek_at: Option<(String, u32)>,
     hits: Vec<PeekHit>,
@@ -353,6 +362,7 @@ impl Watch {
         em: &luna_api::Emulator,
         until_pc: Option<&str>,
         hit: u64,
+        until_if: Option<&str>,
         peek_at: Option<&str>,
         needs_watching_run: bool,
         poke: &[PokeGroup],
@@ -366,11 +376,19 @@ impl Watch {
                     spec: spec.to_string(),
                     addr,
                     hit,
+                    until_if: until_if.map(str::to_string),
+                    matches: 0,
                     hits_seen: 0,
                     reached: false,
                     frame: None,
                     line: None,
                 })
+            })
+            .transpose()?;
+        let condition = until_if
+            .map(|text| {
+                em.compile_expression(text, luna_api::ExprCpu::Snes)
+                    .ok_or_else(|| format!("--until-if `{text}`: not a valid expression"))
             })
             .transpose()?;
         let peek_at = peek_at
@@ -393,6 +411,7 @@ impl Watch {
         Ok((!pcs.is_empty() || needs_watching_run).then_some(Self {
             pcs,
             until,
+            condition,
             peek_at,
             hits: Vec::new(),
             pokes,
@@ -418,7 +437,14 @@ impl Watch {
         }
         if let Some(u) = self.until.as_mut().filter(|u| u.addr == addr) {
             u.hits_seen += 1;
-            if u.hits_seen == u.hit {
+            let holds = self
+                .condition
+                .as_ref()
+                .is_none_or(|c| arrival_holds(em, c, addr));
+            if holds {
+                u.matches += 1;
+            }
+            if holds && u.matches == u.hit {
                 u.reached = true;
                 u.frame = Some(frame);
                 u.line = Some(line);
@@ -427,6 +453,36 @@ impl Watch {
         }
         false
     }
+}
+
+/// Whether `condition` holds at an arrival on `addr`, evaluated as an
+/// exec breakpoint's (`value` is the opcode, `address` the PC).
+pub(crate) fn arrival_holds(
+    em: &luna_api::Emulator,
+    condition: &luna_api::Expression,
+    addr: u32,
+) -> bool {
+    let at = em
+        .cpu_state()
+        .map_or(addr, |c| (u32::from(c.pb) << 16) | u32::from(c.pc));
+    let opcode = em
+        .read_memory(luna_api::MemoryKind::SnesMemory, at, 1)
+        .map_or(0, |b| b[0]);
+    let access = luna_api::ExprAccess {
+        value: i64::from(opcode),
+        address: i64::from(at),
+        memaddress: em
+            .absolute_address(at)
+            .ok()
+            .flatten()
+            .map_or(-1, |l| i64::from(l.offset)),
+        write: false,
+        dma: false,
+        dummy: false,
+        oppc: i64::from(at),
+    };
+    em.evaluate_expression(condition, &access)
+        .is_ok_and(luna_api::ExprResult::holds)
 }
 
 /// The `--vram-writers` text: one line per range and source, then one
@@ -581,6 +637,7 @@ pub(crate) fn run_state(
     power_on: Option<&str>,
     until_pc: Option<&str>,
     hit: u64,
+    until_if: Option<&str>,
     peek_at: Option<&str>,
     peek_at_out: Option<&std::path::Path>,
     input_at: Option<&str>,
@@ -813,6 +870,7 @@ pub(crate) fn run_state(
         &em,
         until_pc,
         hit,
+        until_if,
         peek_at,
         input_at.is_some() || shots.is_some() || writers.is_some(),
         poke,
@@ -1032,9 +1090,19 @@ pub(crate) fn run_state(
         }
         let end_frame = em.frame_count().unwrap_or(0);
         if let Some(u) = &w.until {
+            let cond = u
+                .until_if
+                .as_ref()
+                .map(|c| format!(" where `{c}` held"))
+                .unwrap_or_default();
             if let (true, Some(frame), Some(line)) = (u.reached, u.frame, u.line) {
+                let arrival = if u.until_if.is_some() {
+                    format!(", arrival {}", u.hits_seen)
+                } else {
+                    String::new()
+                };
                 eprintln!(
-                    "reached {} (${:02X}:{:04X}), hit {} — frame {frame}, line {line}",
+                    "reached {} (${:02X}:{:04X}), hit {}{cond}{arrival} — frame {frame}, line {line}",
                     u.spec,
                     u.addr >> 16,
                     u.addr & 0xFFFF,
@@ -1042,13 +1110,14 @@ pub(crate) fn run_state(
                 );
             } else {
                 eprintln!(
-                    "error: --until-pc {} (${:02X}:{:04X}): hit {} not reached by frame \
-                     {end_frame} (reached {} time(s))",
+                    "error: --until-pc {} (${:02X}:{:04X}): hit {}{cond} not reached by frame \
+                     {end_frame} (reached {} time(s), {} where it held)",
                     u.spec,
                     u.addr >> 16,
                     u.addr & 0xFFFF,
                     u.hit,
-                    u.hits_seen
+                    u.hits_seen,
+                    u.matches
                 );
                 step_failed = true;
             }
