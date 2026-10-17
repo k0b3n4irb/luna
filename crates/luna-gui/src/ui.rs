@@ -2017,10 +2017,7 @@ fn draw_video_menus<F: FnMut(MenuAction)>(ui: &mut egui::Ui, state: &UiState<'_>
             let radio = egui::RadioButton::new(state.video.filter == filter, filter.label());
             if ui
                 .add_enabled(filter.is_available(), radio)
-                .on_disabled_hover_text(
-                    "Not in luna: this filter's only implementation is copyleft code, \
-                     which luna's licence (MPL-2.0) does not take in",
-                )
+                .on_disabled_hover_text("Not in luna: Mesen2 offers this filter for the NES only")
                 .clicked()
             {
                 emit(MenuAction::SetVideoFilter(filter));

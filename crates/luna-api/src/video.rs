@@ -4,11 +4,10 @@
 //! Both act on the picture a front-end shows, after the emulation: the frame
 //! `Emulator::render_frame_rgba` returns is untouched. The behaviour follows
 //! Mesen2; the code is luna's own, written from the algorithms (for NTSC
-//! (blargg), xBRZ and the 2xSaI family, from a functional description of
-//! Mesen2's, checked identical to its pictures). The filters luna does not
-//! implement yet (NTSC (Bisqwit), NES-only in Mesen2, and `HQx`) are listed
-//! so a menu can show Mesen2's whole list, and report
-//! [`VideoFilter::is_available`] `false`.
+//! (blargg), xBRZ, `HQx` and the 2xSaI family, from a functional
+//! description of Mesen2's, checked identical to its pictures). NTSC
+//! (Bisqwit), NES-only in Mesen2, is listed so a menu can show Mesen2's
+//! whole list, and reports [`VideoFilter::is_available`] `false`.
 
 /// One entry of Mesen2's Video Filter menu, in its order (`VideoFilterType`).
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
@@ -32,11 +31,11 @@ pub enum VideoFilter {
     Xbrz5x,
     /// xBRZ 6x (Zenju).
     Xbrz6x,
-    /// HQ 2x. Not available.
+    /// HQ 2x (Maxim Stepin).
     Hq2x,
-    /// HQ 3x. Not available.
+    /// HQ 3x (Maxim Stepin).
     Hq3x,
-    /// HQ 4x. Not available.
+    /// HQ 4x (Maxim Stepin).
     Hq4x,
     /// Scale2x (EPX).
     Scale2x,
@@ -188,6 +187,9 @@ impl VideoFilter {
             Self::None
                 | Self::NtscBlargg
                 | Self::LcdGrid
+                | Self::Hq2x
+                | Self::Hq3x
+                | Self::Hq4x
                 | Self::Xbrz2x
                 | Self::Xbrz3x
                 | Self::Xbrz4x
@@ -220,9 +222,10 @@ impl VideoFilter {
             | Self::Super2xSai
             | Self::SuperEagle
             | Self::Xbrz2x
+            | Self::Hq2x
             | Self::Prescale2x => 2,
-            Self::Xbrz3x | Self::Scale3x | Self::Prescale3x => 3,
-            Self::Xbrz4x | Self::Scale4x | Self::Prescale4x => 4,
+            Self::Xbrz3x | Self::Hq3x | Self::Scale3x | Self::Prescale3x => 3,
+            Self::Xbrz4x | Self::Hq4x | Self::Scale4x | Self::Prescale4x => 4,
             Self::Xbrz5x => 5,
             Self::Xbrz6x | Self::Prescale6x => 6,
             Self::Prescale8x => 8,
@@ -274,6 +277,9 @@ impl VideoFilter {
             Self::LcdGrid => lcd_grid(pixels, width, height, LCD_GRID_BRIGHTNESS, out),
             Self::Xbrz2x | Self::Xbrz3x | Self::Xbrz4x | Self::Xbrz5x | Self::Xbrz6x => {
                 xbrz(s, pixels, width, height, out);
+            }
+            Self::Hq2x | Self::Hq3x | Self::Hq4x => {
+                hqx(s, HqxYuv::default(), pixels, width, height, out);
             }
             Self::Scale2x => scale2x(pixels, width, height, out),
             Self::Scale3x => scale3x(pixels, width, height, out),
@@ -1554,6 +1560,224 @@ fn ntsc(src: &[u8], width: usize, height: usize, frame: u64, out: &mut [u8]) {
     }
 }
 
+// --- HQx -------------------------------------------------------------------
+//
+// HQ2x / HQ3x / HQ4x (Maxim Stepin): each source pixel becomes an s × s
+// block chosen by which of its eight neighbours differ from it in YUV. The
+// 256 patterns per scale are data (`hqx_tables.txt`): each sub-pixel copies
+// the centre or blends it with neighbours, some only when two neighbours
+// differ.
+
+/// How `HQx` turns a colour into YUV for its similarity test. Mesen2's
+/// picture depends on the machine it was built for: the two differ on a
+/// few percent of the pixels, near the thresholds. luna gives the same one
+/// everywhere (`f64::mul_add` is exact on every target).
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum HqxYuv {
+    /// Fused multiply-adds, negative U / V clamped to 0: what Mesen2's
+    /// aarch64 builds compute, checked identical to their pictures.
+    #[default]
+    Fused,
+    /// Each product rounded on its own, negative U / V kept: the
+    /// algorithm as written, as an x86-64 build computes it.
+    Separate,
+}
+
+/// `0x00YYUUVV` of an `0xAARRGGBB` colour. Pure white gives 0, as in the
+/// reference, whose table never fills that entry.
+// Plain products and sums in the separate variant, as the reference
+// rounds them.
+#[allow(clippy::suboptimal_flops)]
+fn hqx_yuv(c: u32, variant: HqxYuv) -> u32 {
+    let c = c & 0x00FF_FFFF;
+    if c == 0x00FF_FFFF {
+        return 0;
+    }
+    let (r, g, b) = (
+        f64::from(c >> 16),
+        f64::from((c >> 8) & 0xFF),
+        f64::from(c & 0xFF),
+    );
+    let (y, u, v) = match variant {
+        HqxYuv::Separate => {
+            let y = 0.299 * r + 0.587 * g + 0.114 * b;
+            let u = -0.169 * r - 0.331 * g + 0.5 * b;
+            let v = 0.5 * r - 0.419 * g - 0.081 * b;
+            (y as i32, u as i32 + 128, v as i32 + 128)
+        }
+        HqxYuv::Fused => {
+            let y = 0.114f64.mul_add(b, 0.299f64.mul_add(r, 0.587 * g));
+            let u = 0.5f64.mul_add(b, (-0.169f64).mul_add(r, -0.331 * g));
+            let v = (-0.081f64).mul_add(b, 0.5f64.mul_add(r, -0.419 * g));
+            (
+                y as u32 as i32,
+                u as u32 as i32 + 128,
+                v as u32 as i32 + 128,
+            )
+        }
+    };
+    ((y as u32) << 16) | ((u as u32) << 8) | v as u32
+}
+
+/// Whether two YUV values are far enough apart to count as an edge.
+fn hqx_differ(a: u32, b: u32) -> bool {
+    let d = |shift: u32| (((a >> shift) & 0xFF) as i32 - ((b >> shift) & 0xFF) as i32).abs();
+    d(16) > 48 || d(8) > 7 || d(0) > 6
+}
+
+/// The weights and the divisor's shift of blend kind `k` (1 … 10).
+const HQX_BLEND: [([u32; 3], u32); 11] = [
+    ([1, 0, 0], 0),
+    ([3, 1, 0], 2),
+    ([2, 1, 1], 2),
+    ([7, 1, 0], 3),
+    ([2, 7, 7], 4),
+    ([1, 1, 0], 1),
+    ([5, 2, 1], 3),
+    ([6, 1, 1], 3),
+    ([5, 3, 0], 3),
+    ([2, 3, 3], 3),
+    ([14, 1, 1], 4),
+];
+
+/// One way to fill a sub-pixel: blend kind (0 = copy) of up to three
+/// neighbours (1 … 9).
+#[derive(Copy, Clone, Debug, Default)]
+struct HqxPick {
+    kind: u8,
+    of: [u8; 3],
+}
+
+/// A sub-pixel: `then`, or `other` when `test` names two neighbours that do
+/// not differ.
+#[derive(Copy, Clone, Debug, Default)]
+struct HqxCell {
+    test: Option<(u8, u8)>,
+    then: HqxPick,
+    other: HqxPick,
+}
+
+/// The blocks of every pattern for scale 2, 3 and 4.
+fn hqx_table(s: usize) -> &'static [Vec<HqxCell>] {
+    static TABLES: std::sync::OnceLock<[Vec<Vec<HqxCell>>; 3]> = std::sync::OnceLock::new();
+    let tables = TABLES.get_or_init(|| {
+        let pick = |t: &str| -> HqxPick {
+            if let Some(n) = t.strip_prefix('w') {
+                return HqxPick {
+                    kind: 0,
+                    of: [n.parse().expect("hqx table"), 0, 0],
+                };
+            }
+            let (kind, args) = t[1..]
+                .trim_end_matches(')')
+                .split_once('(')
+                .expect("hqx table");
+            let mut of = [0u8; 3];
+            for (o, a) in of.iter_mut().zip(args.split(',')) {
+                *o = a.parse().expect("hqx table");
+            }
+            HqxPick {
+                kind: kind.parse().expect("hqx table"),
+                of,
+            }
+        };
+        let mut tables: [Vec<Vec<HqxCell>>; 3] = Default::default();
+        let mut current = 0;
+        for line in include_str!("hqx_tables.txt").lines() {
+            if line.starts_with('#') || line.is_empty() {
+                continue;
+            }
+            if let Some(name) = line.strip_prefix("[hq") {
+                current = usize::from(name.as_bytes()[0] - b'2');
+                tables[current] = vec![Vec::new(); 256];
+                continue;
+            }
+            let (patterns, cells) = line.split_once(" :: ").expect("hqx table");
+            let block: Vec<HqxCell> = cells
+                .split([' ', ';'])
+                .filter(|t| !t.is_empty())
+                .map(|t| match t.strip_prefix('D') {
+                    Some(rest) => {
+                        let (pair, choice) = rest.split_once(':').expect("hqx table");
+                        let (a, b) = choice.split_once('|').expect("hqx table");
+                        let p = pair.as_bytes();
+                        HqxCell {
+                            test: Some((p[0] - b'0', p[1] - b'0')),
+                            then: pick(a),
+                            other: pick(b),
+                        }
+                    }
+                    None => HqxCell {
+                        test: None,
+                        then: pick(t),
+                        other: HqxPick::default(),
+                    },
+                })
+                .collect();
+            for p in patterns.split(',') {
+                tables[current][p.parse::<usize>().expect("hqx table")].clone_from(&block);
+            }
+        }
+        tables
+    });
+    &tables[s - 2]
+}
+
+/// `HQx` at scale `s` (2 … 4) of a `width` × `height` RGBA frame into `out`
+/// (`s·width` × `s·height` RGBA), testing similarity with `yuv`.
+pub fn hqx(s: usize, yuv: HqxYuv, src: &[u8], width: usize, height: usize, out: &mut [u8]) {
+    let table = hqx_table(s);
+    let argb: Vec<u32> = src
+        .chunks_exact(4)
+        .map(|p| u32::from_be_bytes([p[3], p[0], p[1], p[2]]))
+        .collect();
+    let key: Vec<u32> = argb.iter().map(|&c| hqx_yuv(c, yuv)).collect();
+    let row = width * s * 4;
+    for y in 0..height {
+        let rows = [y.saturating_sub(1), y, (y + 1).min(height - 1)];
+        for x in 0..width {
+            let cols = [x.saturating_sub(1), x, (x + 1).min(width - 1)];
+            // Neighbours 1 … 9, keypad order; index 0 unused.
+            let mut at = [0usize; 10];
+            for (k, slot) in at[1..].iter_mut().enumerate() {
+                *slot = rows[k / 3] * width + cols[k % 3];
+            }
+            let differ =
+                |a: u8, b: u8| hqx_differ(key[at[usize::from(a)]], key[at[usize::from(b)]]);
+            let pattern = [1, 2, 3, 4, 6, 7, 8, 9]
+                .iter()
+                .enumerate()
+                .fold(0, |p, (bit, &n)| p | (usize::from(differ(5, n)) << bit));
+            let eval = |pick: HqxPick| -> u32 {
+                let (weights, shift) = HQX_BLEND[usize::from(pick.kind)];
+                (0..4).fold(0, |acc, ch| {
+                    let sum: u32 = weights
+                        .iter()
+                        .zip(pick.of)
+                        .filter(|(w, _)| **w != 0)
+                        .map(|(w, n)| w * ((argb[at[usize::from(n)]] >> (8 * ch)) & 0xFF))
+                        .sum();
+                    acc | ((sum >> shift) << (8 * ch))
+                })
+            };
+            for (i, cell) in table[pattern].iter().enumerate() {
+                let pick = match cell.test {
+                    Some((a, b)) if !differ(a, b) => cell.other,
+                    _ => cell.then,
+                };
+                let c = eval(pick);
+                let o = (y * s + i / s) * row + (x * s + i % s) * 4;
+                out[o..o + 4].copy_from_slice(&[
+                    (c >> 16) as u8,
+                    (c >> 8) as u8,
+                    c as u8,
+                    (c >> 24) as u8,
+                ]);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1918,5 +2142,222 @@ mod tests {
             "{:08x}",
             out[300]
         );
+    }
+
+    /// The reference frames' hash helper.
+    const fn hqx_h(x: u32, y: u32) -> u32 {
+        let mut h = x.wrapping_mul(73_856_093) ^ y.wrapping_mul(19_349_663);
+        h ^= h >> 13;
+        h = h.wrapping_mul(0x5BD1_E995);
+        h ^ (h >> 15)
+    }
+
+    /// The reference frames, as `0xAARRGGBB` words.
+    fn hqx_frame(name: &str) -> (usize, usize, Vec<u32>) {
+        const PALETTE: [u32; 8] = [
+            0xFF00_0000,
+            0xFFFF_FFFF,
+            0xFFF8_F8F8,
+            0xFF20_40C0,
+            0xFF20_C040,
+            0xFFC0_2020,
+            0x80FF_FFFF,
+            0xFF80_8080,
+        ];
+        let (w, h) = match name {
+            "F1s" => (5, 3),
+            "F4t" => (1, 1),
+            "F4n" => (3, 1),
+            "F4v" => (1, 4),
+            _ => (256, 224),
+        };
+        let e = |v: u32| v * 8 + v / 4;
+        let px = |x: u32, y: u32| match name {
+            "F1" | "F1s" => hqx_h(x, y),
+            "F2" => {
+                let n = hqx_h(x, y);
+                let i = if n.is_multiple_of(16) {
+                    (n >> 8) % 8
+                } else {
+                    hqx_h(x / 8, y / 8) % 8
+                };
+                PALETTE[i as usize]
+            }
+            "F3" => {
+                let (dx, dy) = (x as i32 - 128, y as i32 - 112);
+                if x == y {
+                    0xFFFF_FFFF
+                } else if dx * dx + dy * dy < 3600 {
+                    0xFFE0_C000
+                } else if ((x + y) / 16) % 2 == 1 {
+                    0xFF00_30A0
+                } else {
+                    0xFF00_0000 + (x & 0xF8) * 65536 + (y & 0xF8) * 256 + 0x40
+                }
+            }
+            "F5" => {
+                let c = hqx_h(x / 4, y / 4) & 0x7FFF;
+                0xFF00_0000 + e(c & 31) * 65536 + e((c >> 5) & 31) * 256 + e((c >> 10) & 31)
+            }
+            _ => hqx_h(x + 7, y + 3),
+        };
+        let v = (0..h as u32)
+            .flat_map(|y| (0..w as u32).map(move |x| (x, y)))
+            .map(|(x, y)| px(x, y))
+            .collect();
+        (w, h, v)
+    }
+
+    fn fnv_std(words: impl IntoIterator<Item = u32>) -> u64 {
+        words
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .fold(0xcbf2_9ce4_8422_2325, |h, b| {
+                (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+            })
+    }
+
+    #[test]
+    fn hqx_matches_the_reference_hashes_in_both_yuv_variants() {
+        let run = |name: &str, s: usize, yuv: HqxYuv| {
+            let (w, h, words) = hqx_frame(name);
+            let rgba: Vec<u8> = words
+                .iter()
+                .flat_map(|&c| [(c >> 16) as u8, (c >> 8) as u8, c as u8, (c >> 24) as u8])
+                .collect();
+            let mut out = vec![0u8; w * h * s * s * 4];
+            hqx(s, yuv, &rgba, w, h, &mut out);
+            fnv_std(
+                out.chunks_exact(4)
+                    .map(|p| u32::from_be_bytes([p[3], p[0], p[1], p[2]])),
+            )
+        };
+        assert_eq!(fnv_std(hqx_frame("F1").2), 0x69d1_f1ba_5752_3b4a);
+        assert_eq!(fnv_std(hqx_frame("F2").2), 0x1833_3c10_879c_42ed);
+        assert_eq!(fnv_std(hqx_frame("F3").2), 0xb498_44b0_a991_01d5);
+        assert_eq!(fnv_std(hqx_frame("F5").2), 0x7182_b1a2_89aa_7525);
+        let fused = [
+            (
+                "F1",
+                [
+                    0x89f4_97fe_5686_f3e5,
+                    0x135c_590f_fcb8_2a3a,
+                    0x9eaf_715c_15a5_a7b6,
+                ],
+            ),
+            (
+                "F2",
+                [
+                    0x1cfc_7f05_0b12_afa4,
+                    0x38bd_5c6f_96a4_79d8,
+                    0x3cf0_9f9c_10b9_52d5,
+                ],
+            ),
+            (
+                "F3",
+                [
+                    0x0b38_925b_25ee_65e1,
+                    0x00c2_900b_aa16_2856,
+                    0xf3e3_40e1_f2b2_0021,
+                ],
+            ),
+            (
+                "F5",
+                [
+                    0x651b_f2b9_22df_682f,
+                    0x62d7_b50e_467d_5fc9,
+                    0xc521_1e8c_2eaf_a83d,
+                ],
+            ),
+            (
+                "F1s",
+                [
+                    0x68f8_5a07_2da2_502f,
+                    0x12c0_64ea_a0a3_bc7f,
+                    0x2f17_6415_f090_a6c4,
+                ],
+            ),
+        ];
+        let separate = [
+            (
+                "F1",
+                [
+                    0x5de2_2cb3_50d3_8cd5,
+                    0xcc8f_9097_dc6a_fa57,
+                    0xb01b_645c_c6cf_d1ce,
+                ],
+            ),
+            (
+                "F2",
+                [
+                    0x9b61_3a3c_a0b7_54de,
+                    0xbd4f_04d4_e29b_2f18,
+                    0xf2a0_6bc3_dd4a_12d9,
+                ],
+            ),
+            (
+                "F3",
+                [
+                    0xcca9_688e_dbf0_7153,
+                    0x7f83_15b3_de82_681d,
+                    0x295f_ca08_7d9c_574a,
+                ],
+            ),
+            (
+                "F5",
+                [
+                    0x401f_408d_d6e0_61ac,
+                    0x43b8_ff10_7307_d89e,
+                    0x28ee_6828_a886_986e,
+                ],
+            ),
+            (
+                "F1s",
+                [
+                    0x1b3d_53a2_afb4_3f1d,
+                    0x9a16_8f65_5e1f_f7c5,
+                    0xee7a_6e52_6425_e245,
+                ],
+            ),
+            (
+                "F4t",
+                [
+                    0x2a47_b6b5_8e70_70ad,
+                    0x0a2e_68fb_58a3_5bce,
+                    0x1779_38f5_eec8_7085,
+                ],
+            ),
+            (
+                "F4n",
+                [
+                    0xecd6_56b0_9a0c_d365,
+                    0xf23c_ceff_7e6c_0ecf,
+                    0xedb6_fc70_2232_39e5,
+                ],
+            ),
+            (
+                "F4v",
+                [
+                    0x39b9_a87b_1e12_bc5d,
+                    0xae64_ff2e_48e7_4e3f,
+                    0xd316_d3f7_1570_4345,
+                ],
+            ),
+        ];
+        for (yuv, table) in [
+            (HqxYuv::Fused, &fused[..]),
+            (HqxYuv::Separate, &separate[..]),
+        ] {
+            for (name, hashes) in table {
+                for (s, &hash) in (2..=4).zip(hashes) {
+                    assert_eq!(run(name, s, yuv), hash, "{name} {s}x {yuv:?}");
+                }
+            }
+        }
+        // The white quirk and the two conversions.
+        assert_eq!(hqx_yuv(0xFFFF_FFFF, HqxYuv::Separate), 0);
+        assert_eq!(hqx_yuv(0x00F8_F8F8, HqxYuv::Fused), 0xF7_8080);
+        assert_eq!(hqx_yuv(0x00F8_F8F8, HqxYuv::Separate), 0xF8_8080);
+        assert_eq!(hqx_yuv(0x0000_FF00, HqxYuv::Separate), 0x95_2C16);
     }
 }

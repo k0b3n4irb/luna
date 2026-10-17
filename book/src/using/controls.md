@@ -178,13 +178,15 @@ when a Super Multitap is on port 2. Fixed, Mesen2-like layout:
   television did, with its colour fringes on fine detail, dot crawl
   between frames and soft horizontal edges (for example, the waterfalls
   and dithered shadows of many games blend into the colours they were
-  drawn for). *Use bilinear interpolation* smooths the final stretch
-  instead of keeping square pixels. *NTSC (Bisqwit)* (NES-only in Mesen2)
-  and HQx are listed greyed out: their only implementations are copyleft
-  code, which luna's licence (MPL-2.0) does not take in, so they are being
-  rewritten from their algorithms (NTSC (blargg), xBRZ and the 2xSaI
-  family already give Mesen2's pictures to the pixel, NTSC at Mesen2's
-  default settings). A
+  drawn for); *HQ 2x … 4x* round off the edges between colours with
+  soft gradients, keeping flat areas flat. *Use bilinear interpolation*
+  smooths the final stretch instead of keeping square pixels. *NTSC
+  (Bisqwit)* is listed greyed out: Mesen2 offers it for the NES only. The
+  copyleft filters (NTSC (blargg), xBRZ, HQx, the 2xSaI family) are
+  rewritten from their algorithms, since luna's licence (MPL-2.0) does not
+  take in their code, and give Mesen2's pictures to the pixel (NTSC at
+  Mesen2's default settings, HQx as Mesen2 computes it on 64-bit ARM; on
+  x86-64 its picture differs on a few percent of the pixels). A
   screenshot goes through the filter, not the aspect ratio. Filter,
   aspect ratio and bilinear choice are kept in `video.json` with the
   frame-rate counter.

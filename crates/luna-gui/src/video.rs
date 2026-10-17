@@ -182,7 +182,7 @@ mod tests {
         assert_eq!(old.filter, VideoFilter::None);
         // A filter luna does not implement is not restored.
         assert_eq!(
-            VideoSettings::parse("{\"filter\": \"HQ2x\"}").filter,
+            VideoSettings::parse("{\"filter\": \"NtscBisqwit\"}").filter,
             VideoFilter::None
         );
         assert!(
