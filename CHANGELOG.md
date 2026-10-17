@@ -9,6 +9,18 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ### Added
 
+- **Every memory by one name, as Mesen2 names it.** `luna_api::MemoryKind`
+  covers the CPU and SPC buses, ROM, work RAM, save RAM (SA-1 BW-RAM
+  included), VRAM, OAM, CGRAM, ARAM, the IPL ROM, the S-DSP registers, the
+  SA-1's I-RAM, the Super FX RAM and the DSP-1's program, data ROM and
+  data RAM. `Emulator::read_memory` / `write_memory` / `memory_size` /
+  `memory_kinds` reach them without side effects (a CPU-bus address goes
+  to the memory behind it, never through the bus), and
+  `absolute_address` names the memory and offset behind a bus address as
+  the mapper's banking selects it. MCP: `memory_kinds`, `read_memory`,
+  `write_memory`, `absolute_address`. The first lot of the Mesen2 parity
+  roadmap (`docs/mesen2_parity.md`).
+
 - **`--input-at`: an entry `N+K:` presses K frames after the N-th
   arrival.** A screen that opens ignores a button already held, so a
   press on the arrival that opens it is lost; `--input-at screen_open

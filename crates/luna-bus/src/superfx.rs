@@ -21,8 +21,8 @@
 //! and Mesen2 `Core/SNES/Coprocessors/GSU`.
 
 use crate::mapper::{
-    Mapper, MapperKind, MapperStateError, SuperFxJob, SuperFxTraceEvent, check_state_len,
-    decode_state,
+    CartMemory, Mapper, MapperKind, MapperStateError, SuperFxJob, SuperFxTraceEvent,
+    check_state_len, decode_state,
 };
 use crate::types::{Addr24, bank_of, offset_of};
 
@@ -1917,6 +1917,37 @@ impl Mapper for SuperFxMapper {
 
     fn sram_size(&self) -> usize {
         self.ram_len
+    }
+
+    fn debug_bytes(&self, kind: CartMemory) -> Option<&[u8]> {
+        match kind {
+            CartMemory::Rom => Some(&self.rom[..self.rom_len]),
+            CartMemory::GsuRam => Some(&self.ram[..self.ram_len]),
+            _ => None,
+        }
+    }
+
+    fn debug_bytes_mut(&mut self, kind: CartMemory) -> Option<&mut [u8]> {
+        match kind {
+            CartMemory::Rom => Some(&mut self.rom[..self.rom_len]),
+            CartMemory::GsuRam => Some(&mut self.ram[..self.ram_len]),
+            _ => None,
+        }
+    }
+
+    fn debug_resolve(&self, addr: Addr24) -> Option<(CartMemory, usize)> {
+        let (bank, offset) = (bank_of(addr), offset_of(addr));
+        if Self::mmio_addr(bank, offset).is_some() {
+            return None;
+        }
+        if let Some(o) = Self::rom_offset(bank, offset) {
+            let o = o & self.rom_mask;
+            return (o < self.rom_len).then_some((CartMemory::Rom, o));
+        }
+        Self::ram_offset(bank, offset)
+            .map(|o| o & self.ram_mask)
+            .filter(|&o| o < self.ram_len)
+            .map(|o| (CartMemory::GsuRam, o))
     }
 
     /// The board's own flag decides (`with_battery`), not the caller's.

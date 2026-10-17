@@ -22,8 +22,8 @@
 
 use luna_bus::sa1::{Sa1Mapper, Sa1Region};
 use luna_bus::{
-    Addr24, Bus, InterruptSample, MCycles, Mapper, MapperKind, MapperStateError, Sa1SideEvent,
-    Sa1Snapshot, Sa1Stats, Sa1TraceEvent,
+    Addr24, Bus, CartMemory, InterruptSample, MCycles, Mapper, MapperKind, MapperStateError,
+    Sa1SideEvent, Sa1Snapshot, Sa1Stats, Sa1TraceEvent,
 };
 use luna_cpu_65c816::Cpu;
 
@@ -136,6 +136,18 @@ impl Mapper for Sa1Chip {
 
     fn read(&mut self, addr: Addr24) -> Option<u8> {
         self.inner.read(addr)
+    }
+
+    fn debug_bytes(&self, kind: CartMemory) -> Option<&[u8]> {
+        self.inner.debug_bytes(kind)
+    }
+
+    fn debug_bytes_mut(&mut self, kind: CartMemory) -> Option<&mut [u8]> {
+        self.inner.debug_bytes_mut(kind)
+    }
+
+    fn debug_resolve(&self, addr: Addr24) -> Option<(CartMemory, usize)> {
+        self.inner.debug_resolve(addr)
     }
 
     /// Writes go through to the inner mapper. We additionally watch

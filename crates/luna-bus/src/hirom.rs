@@ -37,7 +37,9 @@
 //! Banks `$20..$3F` and `$A0..$BF` at offsets `$6000-$7FFF` expose
 //! battery-backed SRAM, wrapping at the cart-declared size.
 
-use crate::mapper::{Mapper, MapperKind, MapperStateError, check_state_len, decode_state};
+use crate::mapper::{
+    CartMemory, Mapper, MapperKind, MapperStateError, check_state_len, decode_state,
+};
 use crate::types::{Addr24, bank_of, offset_of, rom_mirror};
 
 /// `HiROM` / `ExHiROM` mapper.
@@ -164,6 +166,32 @@ impl Mapper for HiRomMapper {
         if !battery {
             fill(&mut self.sram);
         }
+    }
+
+    fn debug_bytes(&self, kind: CartMemory) -> Option<&[u8]> {
+        match kind {
+            CartMemory::Rom => Some(&self.rom),
+            CartMemory::SaveRam if !self.sram.is_empty() => Some(&self.sram),
+            _ => None,
+        }
+    }
+
+    fn debug_bytes_mut(&mut self, kind: CartMemory) -> Option<&mut [u8]> {
+        match kind {
+            CartMemory::Rom => Some(&mut self.rom),
+            CartMemory::SaveRam if !self.sram.is_empty() => Some(&mut self.sram),
+            _ => None,
+        }
+    }
+
+    fn debug_resolve(&self, addr: Addr24) -> Option<(CartMemory, usize)> {
+        let (bank, offset) = (bank_of(addr), offset_of(addr));
+        self.rom_offset(bank, offset)
+            .map(|o| (CartMemory::Rom, o))
+            .or_else(|| {
+                self.sram_offset(bank, offset)
+                    .map(|o| (CartMemory::SaveRam, o))
+            })
     }
 
     fn sram_size(&self) -> usize {

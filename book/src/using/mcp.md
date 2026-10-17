@@ -66,6 +66,9 @@ method, so the MCP transport adds reach, not capability.
 | `peek_vram` | `peek_vram` | Read `count` bytes from the 64 KB VRAM (same one-call full-dump range). |
 | `peek_cgram` | `peek_cgram` | All 256 CGRAM palette entries as BGR555 words. |
 | `poke_memory` | `poke_memory` | Write bytes into WRAM (state injection). |
+| `memory_kinds` | `memory_kinds` | The memories this cartridge has, by Mesen2's name, with their size: `SnesMemory` (the CPU bus), `SpcMemory`, `SnesPrgRom`, `SnesWorkRam`, `SnesSaveRam`, `SnesVideoRam`, `SnesSpriteRam`, `SnesCgRam`, `SpcRam`, `SpcRom`, `SpcDspRegisters`, `DspProgramRom` / `DspDataRom` / `DspDataRam`, `Sa1InternalRam`, `GsuWorkRam`. |
+| `read_memory` / `write_memory` | `read_memory` / `write_memory` | `count` bytes of any of them from `offset` (or `symbol`), and back, without side effects: a `SnesMemory` address goes to the memory behind it, never through the bus, so a read starts no S-DD1 decompression and drains no DSP-1 port (a register reads 0, open bus `$FF`). Writes reach ROM too. See the example below. |
+| `absolute_address` | `absolute_address` | The memory and offset behind a CPU-bus address or label — `{"kind": "SnesPrgRom", "offset": 16}` for `$80:8010` on a 32 KB `LoROM` — as the mapper's banking selects it now; `null` for a register. |
 | `poke_vram` / `poke_cgram` / `poke_oam` / `poke_aram` | same names | Direct writes into the other memory spaces (bus-bypassing state injection; each wraps at its size). |
 | `freeze_add` / `freeze_remove` / `freeze_list` | same names | Cheat-style per-frame pinning: the byte is re-applied at every frame boundary in **every** run path (CLI, MCP and GUI behave identically), and once immediately on add. WRAM only. |
 | `enable_call_stack` / `call_stack` | `enable_call_stack` / `call_stack` | Opt-in JSR/JSL/RTS/RTL + interrupt tracking → `[{pc, from, kind, symbol}]`, oldest first. The CLI form is `luna state --call-stack` (the `--out` JSON gains a `call_stack` array). |
@@ -171,6 +174,29 @@ peek_coproc_ram {offset: 0, count: 64}     # what it left in Game Pak RAM
 
 `hit: false` means `max_steps` ran out first. On a cartridge without the
 chip both tools return the error `this cartridge has no Super FX`.
+
+### Every memory by one name
+
+`memory_kinds`, `read_memory` and `write_memory` reach every memory of the
+machine by the name Mesen2's tools and Lua API give it, so one call shape
+inspects work RAM, the cartridge's RAMs, the PPU's and the APU's. A
+CPU-bus read is a debugger's read: it goes to the memory behind the
+address, so peeking an S-DD1 or DSP-1 cartridge's windows changes
+nothing in the run.
+
+```text
+load_rom {path: "game.sfc"}
+memory_kinds {}                                   # → [{kind: "SnesMemory", size: 16777216}, {kind: "SnesPrgRom", …}, …]
+absolute_address {address: 0xC00000}              # HiROM → {kind: "SnesPrgRom", offset: 0}
+read_memory {kind: "SnesWorkRam", offset: 0x100, count: 16}
+write_memory {kind: "SnesPrgRom", offset: 0x1234, data: [0xEA, 0xEA]}   # patch two NOPs into ROM
+read_memory {kind: "SnesMemory", offset: 0xC01234, count: 2}            # → [234, 234]
+read_memory {kind: "Sa1InternalRam", offset: 0, count: 64}              # an SA-1 cart's I-RAM
+```
+
+A memory the cartridge lacks is an error (`GsuWorkRam: this cartridge has
+none`), and so is a range past its end; the two buses (`SnesMemory`,
+`SpcMemory`) wrap around instead.
 
 ### Loading homebrew straight from the assembler
 

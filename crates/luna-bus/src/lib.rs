@@ -44,9 +44,9 @@ pub mod testing;
 
 pub use bus::{Bus, InterruptSample};
 pub use mapper::{
-    Dsp1Snapshot, Dsp1TraceEvent, Dsp1TraceKind, Mapper, MapperKind, MapperStateError, NullMapper,
-    STATE_DECODE_CONFIG, STATE_DECODE_LIMIT, Sa1SideEvent, Sa1Snapshot, Sa1Stats, Sa1TraceEvent,
-    SuperFxJob, SuperFxTraceEvent, check_state_len, decode_state,
+    CartMemory, Dsp1Snapshot, Dsp1TraceEvent, Dsp1TraceKind, Mapper, MapperKind, MapperStateError,
+    NullMapper, STATE_DECODE_CONFIG, STATE_DECODE_LIMIT, Sa1SideEvent, Sa1Snapshot, Sa1Stats,
+    Sa1TraceEvent, SuperFxJob, SuperFxTraceEvent, check_state_len, decode_state,
 };
 pub use speed::{MemorySpeed, address_speed};
 pub use types::{Addr24, MCycles, bank_of, make_addr, offset_of};

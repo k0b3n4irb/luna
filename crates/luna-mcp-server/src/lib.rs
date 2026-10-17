@@ -1276,6 +1276,87 @@ pub struct PokeOffsetParams {
     pub data: Vec<u8>,
 }
 
+/// `read_memory` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct ReadMemoryParams {
+    /// The memory, by Mesen2's name: `SnesMemory` (the CPU bus),
+    /// `SpcMemory`, `SnesPrgRom`, `SnesWorkRam`, `SnesSaveRam`,
+    /// `SnesVideoRam`, `SnesSpriteRam`, `SnesCgRam`, `SpcRam`, `SpcRom`,
+    /// `SpcDspRegisters`, `DspProgramRom`, `DspDataRom`, `DspDataRam`,
+    /// `Sa1InternalRam`, `GsuWorkRam` (case ignored).
+    pub kind: String,
+    /// Byte offset in it (a 24-bit address on `SnesMemory`).
+    #[serde(default)]
+    pub offset: u32,
+    /// A `.sym` label in place of `offset` (`SnesMemory` only).
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// Bytes to read.
+    pub count: u32,
+}
+
+/// `write_memory` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct WriteMemoryParams {
+    /// The memory, as in `read_memory`.
+    pub kind: String,
+    /// Byte offset in it (a 24-bit address on `SnesMemory`).
+    #[serde(default)]
+    pub offset: u32,
+    /// A `.sym` label in place of `offset` (`SnesMemory` only).
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// Bytes to write (JSON array).
+    pub data: Vec<u8>,
+}
+
+/// `absolute_address` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct AbsoluteAddressParams {
+    /// 24-bit CPU-bus address.
+    #[serde(default)]
+    pub address: u32,
+    /// A `.sym` label in place of `address`.
+    #[serde(default)]
+    pub symbol: Option<String>,
+}
+
+/// One memory of `memory_kinds`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct MemoryKindRow {
+    /// Mesen2's name.
+    pub kind: String,
+    /// Size in bytes.
+    pub size: usize,
+}
+
+/// `memory_kinds` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct MemoryKindsResult {
+    /// The memories this cartridge has.
+    pub kinds: Vec<MemoryKindRow>,
+}
+
+/// `absolute_address` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct AbsoluteAddressResult {
+    /// The memory behind the address, `null` for a register or open bus.
+    pub kind: Option<String>,
+    /// The byte's offset in it.
+    pub offset: Option<u32>,
+}
+
+/// A memory kind by name, or an invalid-params error naming the choices.
+fn memory_kind(name: &str) -> Result<luna_api::MemoryKind, ErrorData> {
+    luna_api::MemoryKind::from_name(name).ok_or_else(|| {
+        let names: Vec<&str> = luna_api::MemoryKind::ALL.iter().map(|k| k.name()).collect();
+        ErrorData::invalid_params(
+            format!("unknown memory `{name}`; one of {}", names.join(", ")),
+            None,
+        )
+    })
+}
+
 /// `freeze_add` parameters.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct FreezeAddParams {
@@ -2575,6 +2656,91 @@ impl LunaServer {
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(BpSetEnabledResult { found }))
+    }
+
+    // ------------- Every memory by name (Mesen2's memory types) -------------
+
+    #[rmcp::tool(
+        description = "The memories this cartridge has, by Mesen2's name (`SnesMemory` \
+                                the CPU bus, `SnesPrgRom`, `SnesWorkRam`, `SnesSaveRam`, \
+                                `SnesVideoRam`, `SnesSpriteRam`, `SnesCgRam`, `SpcRam`, \
+                                `Sa1InternalRam`, `GsuWorkRam`, `DspProgramRom`, …), with \
+                                their size in bytes."
+    )]
+    async fn memory_kinds(&self) -> Result<rmcp::Json<MemoryKindsResult>, ErrorData> {
+        let kinds = {
+            let em = self.emulator.lock().await;
+            em.memory_kinds().map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(MemoryKindsResult {
+            kinds: kinds
+                .into_iter()
+                .map(|(k, size)| MemoryKindRow {
+                    kind: k.name().to_string(),
+                    size,
+                })
+                .collect(),
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Read `count` bytes of any memory by name (see `memory_kinds`), \
+                                without side effects: a CPU-bus read goes to the memory \
+                                behind the address, never through the bus (a register \
+                                reads 0, open bus $FF)."
+    )]
+    async fn read_memory(
+        &self,
+        Parameters(params): Parameters<ReadMemoryParams>,
+    ) -> Result<rmcp::Json<MemoryResult>, ErrorData> {
+        let kind = memory_kind(&params.kind)?;
+        let bytes = {
+            let em = self.emulator.lock().await;
+            let offset = resolve_addr(&em, params.symbol.as_deref(), params.offset)?;
+            em.read_memory(kind, offset, params.count as usize)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(MemoryResult { bytes }))
+    }
+
+    #[rmcp::tool(
+        description = "Write bytes into any memory by name (see `memory_kinds`), ROM \
+                                included, without side effects. On `SnesMemory` each byte \
+                                lands in the memory behind its address; registers are \
+                                skipped. Returns bytes written."
+    )]
+    async fn write_memory(
+        &self,
+        Parameters(params): Parameters<WriteMemoryParams>,
+    ) -> Result<rmcp::Json<PokeResult>, ErrorData> {
+        let kind = memory_kind(&params.kind)?;
+        let written = {
+            let mut em = self.emulator.lock().await;
+            let offset = resolve_addr(&em, params.symbol.as_deref(), params.offset)?;
+            em.write_memory(kind, offset, &params.data)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(PokeResult { written }))
+    }
+
+    #[rmcp::tool(
+        description = "The memory and offset behind a CPU-bus address (or label): work \
+                                RAM, or the ROM / save RAM / coprocessor RAM the mapper's \
+                                banking selects now. `null` for a register or open bus."
+    )]
+    async fn absolute_address(
+        &self,
+        Parameters(params): Parameters<AbsoluteAddressParams>,
+    ) -> Result<rmcp::Json<AbsoluteAddressResult>, ErrorData> {
+        let loc = {
+            let em = self.emulator.lock().await;
+            let addr = resolve_addr(&em, params.symbol.as_deref(), params.address)?;
+            em.absolute_address(addr).map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(AbsoluteAddressResult {
+            kind: loc.map(|l| l.kind.name().to_string()),
+            offset: loc.map(|l| l.offset),
+        }))
     }
 
     // ------------- Pokes beyond WRAM + freezes (issue #178) -------------

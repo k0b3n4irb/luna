@@ -2172,3 +2172,123 @@ fn a_product_read_too_early_is_the_one_in_progress() {
         [0xF9, 0xE1, 0x01, 0xFE]
     );
 }
+
+#[test]
+fn every_memory_kind_answers_by_name_without_side_effects() {
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom_sram()).unwrap();
+    let kinds: Vec<MemoryKind> = e
+        .memory_kinds()
+        .unwrap()
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect();
+    assert!(kinds.contains(&MemoryKind::SnesSaveRam) && kinds.contains(&MemoryKind::SnesPrgRom));
+    assert!(
+        !kinds.contains(&MemoryKind::Sa1InternalRam) && !kinds.contains(&MemoryKind::DspProgramRom)
+    );
+    assert_eq!(e.memory_size(MemoryKind::SnesSaveRam).unwrap(), 0x2000);
+    assert_eq!(
+        MemoryKind::from_name("snesWorkRam"),
+        Some(MemoryKind::SnesWorkRam)
+    );
+
+    // A bus address resolves to the memory behind it.
+    let at = |e: &Emulator, a: u32| e.absolute_address(a).unwrap().map(|l| (l.kind, l.offset));
+    assert_eq!(at(&e, 0x80_1234), Some((MemoryKind::SnesWorkRam, 0x1234)));
+    assert_eq!(at(&e, 0x7F_0010), Some((MemoryKind::SnesWorkRam, 0x1_0010)));
+    assert_eq!(
+        at(&e, 0x01_8000),
+        Some((MemoryKind::SnesPrgRom, 0x8000 % 0x8000))
+    );
+    assert_eq!(at(&e, 0x00_8123), Some((MemoryKind::SnesPrgRom, 0x123)));
+    assert_eq!(at(&e, 0x70_0005), Some((MemoryKind::SnesSaveRam, 5)));
+    assert_eq!(at(&e, 0x00_2100), None);
+
+    // Writes through the bus land in the memory behind it, ROM included.
+    assert_eq!(
+        e.write_memory(MemoryKind::SnesMemory, 0x00_0100, &[1, 2])
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        e.read_memory(MemoryKind::SnesWorkRam, 0x100, 2).unwrap(),
+        [1, 2]
+    );
+    e.write_memory(MemoryKind::SnesPrgRom, 0x10, &[0xAB])
+        .unwrap();
+    assert_eq!(
+        e.read_memory(MemoryKind::SnesMemory, 0x80_8010, 1).unwrap(),
+        [0xAB]
+    );
+    e.write_memory(MemoryKind::SnesMemory, 0x70_0000, &[0x5A])
+        .unwrap();
+    assert_eq!(e.sram()[0], 0x5A);
+    // A register reads 0 and is not written; an unmapped address reads $FF.
+    assert_eq!(
+        e.write_memory(MemoryKind::SnesMemory, 0x00_2100, &[0x0F])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        e.read_memory(MemoryKind::SnesMemory, 0x00_2100, 1).unwrap(),
+        [0]
+    );
+    assert_eq!(
+        e.read_memory(MemoryKind::SnesMemory, 0x40_0000, 1).unwrap(),
+        [0xFF]
+    );
+
+    // The PPU and APU memories.
+    for kind in [
+        MemoryKind::SnesVideoRam,
+        MemoryKind::SnesSpriteRam,
+        MemoryKind::SnesCgRam,
+        MemoryKind::SpcRam,
+    ] {
+        e.write_memory(kind, 0x1F, &[0x3C]).unwrap();
+        assert_eq!(e.read_memory(kind, 0x1F, 1).unwrap(), [0x3C], "{kind:?}");
+    }
+    assert_eq!(e.peek_vram(0x1F, 1).unwrap(), [0x3C]);
+    // The IPL ROM covers the top page of the SPC bus at power-on, not ARAM.
+    e.write_memory(MemoryKind::SpcRam, 0xFFC0, &[0x00]).unwrap();
+    let ipl = e.read_memory(MemoryKind::SpcRom, 0, 1).unwrap();
+    assert_eq!(
+        e.read_memory(MemoryKind::SpcMemory, 0xFFC0, 1).unwrap(),
+        ipl
+    );
+    assert_ne!(ipl, [0x00]);
+
+    // Ranges past the end are refused; the buses wrap.
+    assert!(e.read_memory(MemoryKind::SnesCgRam, 0x1FF, 2).is_err());
+    assert!(e.read_memory(MemoryKind::SpcRam, 0xFFFF, 2).is_err());
+    assert_eq!(
+        e.read_memory(MemoryKind::SpcMemory, 0xFFFF, 2)
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(e.read_memory(MemoryKind::GsuWorkRam, 0, 1).is_err());
+}
+
+#[test]
+fn dsp1_memories_read_as_little_endian_words() {
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_dsp1()).unwrap();
+    let fw: Vec<u8> = (0..6u32)
+        .map(|i| (i.wrapping_mul(0x9E37_79B1) >> 24) as u8)
+        .collect();
+    assert_eq!(e.memory_size(MemoryKind::DspProgramRom).unwrap(), 2048 * 3);
+    assert_eq!(e.memory_size(MemoryKind::DspDataRam).unwrap(), 256 * 2);
+    // The firmware's first program word, 3 bytes little-endian.
+    assert_eq!(
+        e.read_memory(MemoryKind::DspProgramRom, 0, 3).unwrap(),
+        fw[..3]
+    );
+    e.write_memory(MemoryKind::DspDataRam, 2, &[0x34, 0x12])
+        .unwrap();
+    assert_eq!(
+        e.read_memory(MemoryKind::DspDataRam, 2, 2).unwrap(),
+        [0x34, 0x12]
+    );
+}

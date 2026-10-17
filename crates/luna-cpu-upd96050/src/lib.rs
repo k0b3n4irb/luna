@@ -489,6 +489,39 @@ impl Upd96050 {
         &self.data_ram[..]
     }
 
+    /// The program ROM words this revision addresses (2048 for DSP-1).
+    #[must_use]
+    pub fn program_rom(&self) -> &[u32] {
+        &self.program_rom[..1 << self.revision.pointer_bits().0]
+    }
+
+    /// [`Self::program_rom`], writable: a debugger edits the microcode.
+    pub fn program_rom_mut(&mut self) -> &mut [u32] {
+        &mut self.program_rom[..1 << self.revision.pointer_bits().0]
+    }
+
+    /// The data ROM words this revision addresses (1024 for DSP-1).
+    #[must_use]
+    pub fn data_rom(&self) -> &[u16] {
+        &self.data_rom[..1 << self.revision.pointer_bits().1]
+    }
+
+    /// [`Self::data_rom`], writable.
+    pub fn data_rom_mut(&mut self) -> &mut [u16] {
+        &mut self.data_rom[..1 << self.revision.pointer_bits().1]
+    }
+
+    /// The data RAM words this revision addresses (256 for DSP-1).
+    #[must_use]
+    pub fn data_ram_used(&self) -> &[u16] {
+        &self.data_ram[..1 << self.revision.pointer_bits().2]
+    }
+
+    /// [`Self::data_ram_used`], writable.
+    pub fn data_ram_mut(&mut self) -> &mut [u16] {
+        &mut self.data_ram[..1 << self.revision.pointer_bits().2]
+    }
+
     // ── Execution (ares processor/upd96050/instructions.cpp) ──
 
     /// Append a trace event when the trace is enabled and has room.

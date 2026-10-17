@@ -13,7 +13,7 @@
 
 use luna_bus::hirom::HiRomMapper;
 use luna_bus::lorom::LoRomMapper;
-use luna_bus::mapper::{Mapper, MapperKind, MapperStateError, decode_state};
+use luna_bus::mapper::{CartMemory, Mapper, MapperKind, MapperStateError, decode_state};
 use luna_bus::types::{Addr24, NTSC_MASTER_HZ, bank_of, offset_of};
 use luna_cartridge::DSP1_FIRMWARE_LEN;
 use luna_cpu_upd96050::{Revision, Upd96050};
@@ -212,6 +212,78 @@ impl Mapper for Dsp1Mapper {
 
     fn sram(&self) -> &[u8] {
         self.base.sram()
+    }
+
+    fn debug_bytes(&self, kind: CartMemory) -> Option<&[u8]> {
+        self.base.debug_bytes(kind)
+    }
+
+    fn debug_bytes_mut(&mut self, kind: CartMemory) -> Option<&mut [u8]> {
+        self.base.debug_bytes_mut(kind)
+    }
+
+    /// The DSP's own memories are words: a 24-bit program word is 3
+    /// bytes, a data word 2, little-endian.
+    fn debug_size(&self, kind: CartMemory) -> usize {
+        match kind {
+            CartMemory::DspProgram => self.dsp.program_rom().len() * 3,
+            CartMemory::DspDataRom => self.dsp.data_rom().len() * 2,
+            CartMemory::DspDataRam => self.dsp.data_ram_used().len() * 2,
+            _ => self.base.debug_size(kind),
+        }
+    }
+
+    fn debug_peek(&self, kind: CartMemory, offset: usize) -> Option<u8> {
+        match kind {
+            CartMemory::DspProgram => {
+                let w = *self.dsp.program_rom().get(offset / 3)?;
+                Some((w >> (8 * (offset % 3))) as u8)
+            }
+            CartMemory::DspDataRom => {
+                let w = *self.dsp.data_rom().get(offset / 2)?;
+                Some((w >> (8 * (offset % 2))) as u8)
+            }
+            CartMemory::DspDataRam => {
+                let w = *self.dsp.data_ram_used().get(offset / 2)?;
+                Some((w >> (8 * (offset % 2))) as u8)
+            }
+            _ => self.base.debug_peek(kind, offset),
+        }
+    }
+
+    fn debug_poke(&mut self, kind: CartMemory, offset: usize, value: u8) -> bool {
+        let shift = |bytes: usize| 8 * (offset % bytes) as u32;
+        match kind {
+            CartMemory::DspProgram => match self.dsp.program_rom_mut().get_mut(offset / 3) {
+                Some(w) => {
+                    *w = (*w & !(0xFF << shift(3))) | (u32::from(value) << shift(3));
+                    true
+                }
+                None => false,
+            },
+            CartMemory::DspDataRom | CartMemory::DspDataRam => {
+                let words = if kind == CartMemory::DspDataRom {
+                    self.dsp.data_rom_mut()
+                } else {
+                    self.dsp.data_ram_mut()
+                };
+                match words.get_mut(offset / 2) {
+                    Some(w) => {
+                        *w = (*w & !(0xFF << shift(2))) | (u16::from(value) << shift(2));
+                        true
+                    }
+                    None => false,
+                }
+            }
+            _ => self.base.debug_poke(kind, offset, value),
+        }
+    }
+
+    fn debug_resolve(&self, addr: Addr24) -> Option<(CartMemory, usize)> {
+        if self.dsp_select(bank_of(addr), offset_of(addr)).is_some() {
+            return None;
+        }
+        self.base.debug_resolve(addr)
     }
 
     fn fill_volatile_ram(&mut self, battery: bool, fill: &mut dyn FnMut(&mut [u8])) {

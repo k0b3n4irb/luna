@@ -38,7 +38,9 @@
 //! contiguous 256 KB view). I-RAM (2 KB, shared with the SA-1 CPU)
 //! appears at `$00-$3F:$3000-$37FF`.
 
-use crate::mapper::{Mapper, MapperKind, MapperStateError, check_state_len, decode_state};
+use crate::mapper::{
+    CartMemory, Mapper, MapperKind, MapperStateError, check_state_len, decode_state,
+};
 use crate::types::{Addr24, bank_of, offset_of};
 
 /// Up-to-256 KB SA-1 BW-RAM.
@@ -1360,6 +1362,38 @@ impl Mapper for Sa1Mapper {
 
     fn sram_size(&self) -> usize {
         self.bwram.len()
+    }
+
+    fn debug_bytes(&self, kind: CartMemory) -> Option<&[u8]> {
+        match kind {
+            CartMemory::Rom => Some(&self.rom),
+            CartMemory::SaveRam if !self.bwram.is_empty() => Some(&self.bwram),
+            CartMemory::Sa1Iram => Some(&self.iram),
+            _ => None,
+        }
+    }
+
+    fn debug_bytes_mut(&mut self, kind: CartMemory) -> Option<&mut [u8]> {
+        match kind {
+            CartMemory::Rom => Some(&mut self.rom),
+            CartMemory::SaveRam if !self.bwram.is_empty() => Some(&mut self.bwram),
+            CartMemory::Sa1Iram => Some(&mut self.iram),
+            _ => None,
+        }
+    }
+
+    fn debug_resolve(&self, addr: Addr24) -> Option<(CartMemory, usize)> {
+        if Self::mmio_offset(addr).is_some() {
+            return None;
+        }
+        let (bank, offset) = (bank_of(addr), offset_of(addr));
+        Self::iram_offset(bank, offset)
+            .map(|o| (CartMemory::Sa1Iram, o))
+            .or_else(|| {
+                self.bwram_offset(bank, offset)
+                    .map(|o| (CartMemory::SaveRam, o))
+            })
+            .or_else(|| self.rom_offset(bank, offset).map(|o| (CartMemory::Rom, o)))
     }
 
     fn save_state(&self) -> Vec<u8> {

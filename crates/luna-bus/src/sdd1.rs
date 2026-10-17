@@ -15,7 +15,9 @@
 //! [`Sdd1Mapper`] is the whole chip: the MMC (ROM banking + `$4800-$4807`
 //! control registers) plus the DMA-triggered decompression.
 
-use crate::mapper::{Mapper, MapperKind, MapperStateError, check_state_len, decode_state};
+use crate::mapper::{
+    CartMemory, Mapper, MapperKind, MapperStateError, check_state_len, decode_state,
+};
 use crate::types::{Addr24, bank_of, offset_of, rom_mirror};
 
 /// Raw (already MMC-bank-switched) ROM byte source for the decompressor — the
@@ -641,6 +643,34 @@ impl Mapper for Sdd1Mapper {
         if !battery {
             fill(&mut self.sram);
         }
+    }
+
+    fn debug_bytes(&self, kind: CartMemory) -> Option<&[u8]> {
+        match kind {
+            CartMemory::Rom => Some(&self.rom),
+            CartMemory::SaveRam if !self.sram.is_empty() => Some(&self.sram),
+            _ => None,
+        }
+    }
+
+    fn debug_bytes_mut(&mut self, kind: CartMemory) -> Option<&mut [u8]> {
+        match kind {
+            CartMemory::Rom => Some(&mut self.rom),
+            CartMemory::SaveRam if !self.sram.is_empty() => Some(&mut self.sram),
+            _ => None,
+        }
+    }
+
+    fn debug_resolve(&self, addr: Addr24) -> Option<(CartMemory, usize)> {
+        let (bank, offset) = (bank_of(addr), offset_of(addr));
+        if matches!(bank, 0x00..=0x3F | 0x80..=0xBF) && (0x4800..=0x480F).contains(&offset) {
+            return None;
+        }
+        if let Some(o) = self.sram_offset(bank, offset) {
+            return Some((CartMemory::SaveRam, o));
+        }
+        let a = self.rom_addr(addr)?;
+        (!self.rom.is_empty()).then(|| (CartMemory::Rom, rom_mirror(a as usize, self.rom.len())))
     }
 
     fn sram_size(&self) -> usize {

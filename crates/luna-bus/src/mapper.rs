@@ -2,6 +2,26 @@
 
 use crate::types::Addr24;
 
+/// A cartridge memory a debugger reads and writes directly, as Mesen2's
+/// memory types name them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CartMemory {
+    /// Program ROM.
+    Rom,
+    /// Cartridge RAM on the CPU bus: SRAM, or the SA-1's BW-RAM.
+    SaveRam,
+    /// The SA-1's 2 KB internal RAM.
+    Sa1Iram,
+    /// The Super FX Game Pak RAM.
+    GsuRam,
+    /// DSP program ROM, 3 bytes per 24-bit word, little-endian.
+    DspProgram,
+    /// DSP data ROM, 2 bytes per word, little-endian.
+    DspDataRom,
+    /// DSP data RAM, 2 bytes per word, little-endian.
+    DspDataRam,
+}
+
 /// SNES cartridge mapping mode.
 ///
 /// Determines how the cartridge ROM and SRAM are mapped into the 24-bit
@@ -213,6 +233,46 @@ pub trait Mapper {
     /// Plain `LoROM` / `HiROM` carts return `false`.
     fn coproc_main_irq_pending(&self) -> bool {
         false
+    }
+
+    /// The bytes of cartridge memory `kind`, for a debugger, when they are
+    /// stored as bytes. `None` if the cartridge has no such memory.
+    fn debug_bytes(&self, _kind: CartMemory) -> Option<&[u8]> {
+        None
+    }
+
+    /// [`Mapper::debug_bytes`], writable.
+    fn debug_bytes_mut(&mut self, _kind: CartMemory) -> Option<&mut [u8]> {
+        None
+    }
+
+    /// Size in bytes of cartridge memory `kind` (0 if absent).
+    fn debug_size(&self, kind: CartMemory) -> usize {
+        self.debug_bytes(kind).map_or(0, <[u8]>::len)
+    }
+
+    /// Byte `offset` of cartridge memory `kind`, without side effects.
+    fn debug_peek(&self, kind: CartMemory, offset: usize) -> Option<u8> {
+        self.debug_bytes(kind).and_then(|b| b.get(offset).copied())
+    }
+
+    /// Write byte `offset` of cartridge memory `kind` (ROM included).
+    /// Returns whether the byte exists.
+    fn debug_poke(&mut self, kind: CartMemory, offset: usize, value: u8) -> bool {
+        match self.debug_bytes_mut(kind).and_then(|b| b.get_mut(offset)) {
+            Some(slot) => {
+                *slot = value;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The cartridge memory and offset a CPU-bus address reads, as the
+    /// mapper's own read path picks it (banking registers included).
+    /// `None` for an address no cartridge memory answers (MMIO, open bus).
+    fn debug_resolve(&self, _addr: Addr24) -> Option<(CartMemory, usize)> {
+        None
     }
 
     /// Diagnostic: the coprocessor's work RAM (e.g. Super FX Game Pak RAM)
@@ -590,4 +650,53 @@ pub struct Dsp1Snapshot {
     pub dr: u16,
     /// `RQM` — set when the chip is waiting on the master.
     pub rqm: bool,
+}
+
+#[cfg(test)]
+mod debug_resolve_tests {
+    use super::{CartMemory, Mapper};
+    use crate::types::make_addr;
+
+    /// Fill every byte-stored cartridge memory with a pattern, then check
+    /// that each bus address the mapper resolves reads back the very byte
+    /// it names: the debugger's view and the bus agree.
+    fn agrees(mut m: Box<dyn Mapper>) -> usize {
+        for kind in [
+            CartMemory::Rom,
+            CartMemory::SaveRam,
+            CartMemory::Sa1Iram,
+            CartMemory::GsuRam,
+        ] {
+            if let Some(bytes) = m.debug_bytes_mut(kind) {
+                for (i, b) in bytes.iter_mut().enumerate() {
+                    *b = (i.wrapping_mul(0x9E37_79B1) >> 13) as u8 ^ kind as u8;
+                }
+            }
+        }
+        let mut checked = 0;
+        for bank in 0..=0xFFu8 {
+            for off in (0..=0xFFFFu16)
+                .step_by(0x0FFB)
+                .chain([0x8000, 0xFFFF, 0x3000, 0x6000])
+            {
+                let addr = make_addr(bank, off);
+                if let Some((kind, o)) = m.debug_resolve(addr) {
+                    let want = m.debug_peek(kind, o);
+                    assert_eq!(m.read(addr), want, "{bank:02X}:{off:04X} -> {kind:?}+{o:X}");
+                    checked += 1;
+                }
+            }
+        }
+        checked
+    }
+
+    #[test]
+    fn every_mapper_resolves_as_its_bus_reads() {
+        let rom = || vec![0u8; 0x10_0000];
+        assert!(agrees(Box::new(crate::lorom::LoRomMapper::new(rom(), 0x2000))) > 1000);
+        assert!(agrees(Box::new(crate::hirom::HiRomMapper::new(rom(), 0x2000))) > 1000);
+        assert!(agrees(Box::new(crate::sa1::Sa1Mapper::new(rom(), 0x2000))) > 1000);
+        assert!(agrees(Box::new(crate::superfx::SuperFxMapper::new(rom(), 0x8000))) > 500);
+        assert!(agrees(Box::new(crate::sdd1::Sdd1Mapper::new(rom(), 0x2000))) > 1000);
+    }
 }
