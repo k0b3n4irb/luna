@@ -390,6 +390,23 @@ pub trait Mapper {
         Vec::new()
     }
 
+    /// The coprocessor's breakpoints, for a debugger to arm (`None` for a
+    /// cart without one that takes them).
+    fn coproc_debug(&mut self) -> Option<&mut crate::CoprocDebug> {
+        None
+    }
+
+    /// The breakpoint hit the coprocessor stands on, if any.
+    fn coproc_hit(&self) -> Option<crate::CoprocHit> {
+        None
+    }
+
+    /// Hand `f` a view of the coprocessor (its registers and bus) and
+    /// return `true`, or `false` for a cart without one.
+    fn with_coproc_view(&self, _f: &mut dyn FnMut(&dyn crate::CoprocView)) -> bool {
+        false
+    }
+
     /// DSP-1 instructions executed since power-on — the coproc-liveness
     /// counter, available without enabling a trace. `None` when the cart
     /// has no DSP-1.

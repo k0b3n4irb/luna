@@ -265,6 +265,7 @@ async fn server_p2_breakpoints_round_trip() {
     // Watchpoint on the STA target (defaults: single address, write).
     let wp = s
         .bp_add(Parameters(BpAddParams {
+            cpu: None,
             condition: None,
             mark: false,
             memory: None,
@@ -285,6 +286,7 @@ async fn server_p2_breakpoints_round_trip() {
     // Exec bp on the JMP.
     let xp = s
         .bp_add(Parameters(BpAddParams {
+            cpu: None,
             condition: None,
             mark: false,
             memory: None,
@@ -304,6 +306,7 @@ async fn server_p2_breakpoints_round_trip() {
         .id;
     assert!(
         s.bp_add(Parameters(BpAddParams {
+            cpu: None,
             condition: None,
             mark: false,
             memory: None,
@@ -438,6 +441,7 @@ async fn server_p3_symbols_round_trip() {
     // bp_add by symbol registers at the resolved address.
     let id = s
         .bp_add(Parameters(BpAddParams {
+            cpu: None,
             condition: None,
             mark: false,
             memory: None,
@@ -931,6 +935,7 @@ async fn server_symbol_tools_round_trip() {
     // bp_add: watch a symbol..=hi_symbol range.
     let id = s
         .bp_add(Parameters(BpAddParams {
+            cpu: None,
             condition: None,
             mark: false,
             memory: None,
@@ -1259,6 +1264,7 @@ async fn server_breakpoints_v2_round_trip() {
     // A named, bank-exact (mirror off) watch created from a symbol.
     let id = s
         .bp_add(Parameters(BpAddParams {
+            cpu: None,
             condition: None,
             mark: false,
             memory: None,
@@ -1476,6 +1482,7 @@ async fn server_bp_add_takes_a_condition_and_a_mark() {
         .await
         .unwrap();
     let add = |condition: Option<&str>, mark: bool| BpAddParams {
+        cpu: None,
         condition: condition.map(str::to_string),
         mark,
         memory: None,
@@ -1528,6 +1535,7 @@ async fn server_bp_add_watches_the_spc700() {
         .unwrap();
     // The IPL ROM clears ARAM page zero from $EF down.
     s.bp_add(Parameters(BpAddParams {
+        cpu: None,
         condition: None,
         mark: false,
         memory: Some("SpcRam".into()),
@@ -1548,7 +1556,10 @@ async fn server_bp_add_watches_the_spc700() {
         .await
         .unwrap()
         .0;
-    assert_eq!(r.kind.as_deref(), Some("spc_write"));
+    assert_eq!(
+        (r.kind.as_deref(), r.cpu.as_deref()),
+        (Some("write"), Some("spc"))
+    );
     assert_eq!((r.pc, r.addr, r.value), (Some(0xFFC5), Some(0x80), Some(0)));
     assert_eq!(r.space.as_deref(), Some("aram"));
     let list = s.bp_list().await.unwrap().0.breakpoints;

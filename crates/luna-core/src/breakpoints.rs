@@ -46,14 +46,6 @@ pub enum BreakKind {
     Scanline,
     /// The step asked for (over, out, a scanline, N frames…) completed.
     Step,
-    /// The SPC700 is about to execute the instruction at the registered
-    /// address (`pc` is that 16-bit address).
-    SpcExec,
-    /// An SPC700 instruction read a watched address (`pc` is the
-    /// instruction's, `addr` the offset in the watched memory).
-    SpcRead,
-    /// An SPC700 instruction wrote a watched address.
-    SpcWrite,
 }
 
 /// The memory a watchpoint watches.
@@ -84,6 +76,18 @@ pub enum BreakCpu {
     Snes,
     /// The SPC700.
     Spc,
+    /// The SA-1's 65C816.
+    Sa1,
+}
+
+impl BreakCpu {
+    /// The mask of its addresses (24-bit buses, the SPC700's 16).
+    const fn mask(self) -> u32 {
+        match self {
+            Self::Spc => 0xFFFF,
+            Self::Snes | Self::Sa1 => 0x00FF_FFFF,
+        }
+    }
 }
 
 /// The id a [`BreakHit`] carries when a break source, not a registered
@@ -135,8 +139,12 @@ pub struct BreakHit {
     pub id: u32,
     /// What fired.
     pub kind: BreakKind,
-    /// 24-bit PC — for exec, the about-to-execute instruction; for
-    /// mem, the instruction that performed the access.
+    /// The CPU it fired on: `pc` is that CPU's, `addr` on its bus or in
+    /// `space`.
+    #[serde(default)]
+    pub cpu: BreakCpu,
+    /// PC — for exec, the about-to-execute instruction; for mem, the
+    /// instruction that performed the access.
     pub pc: u32,
     /// Mem hits: the accessed 24-bit bus address.
     pub addr: Option<u32>,
@@ -265,13 +273,9 @@ impl BreakpointSet {
     pub fn add_exec_on(&mut self, cpu: BreakCpu, pc: u32, name: Option<String>) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
-        let mask = match cpu {
-            BreakCpu::Snes => 0x00FF_FFFF,
-            BreakCpu::Spc => 0xFFFF,
-        };
         self.exec.push(ExecBp {
             id,
-            pc: pc & mask,
+            pc: pc & cpu.mask(),
             cpu,
             extra: Self::extra(name),
         });
@@ -287,13 +291,13 @@ impl BreakpointSet {
         self.exec.iter().find(|b| b.id == id).map(|b| b.cpu)
     }
 
-    /// The enabled SPC700 exec breakpoints, as `(id, address)`.
+    /// The enabled exec breakpoints of `cpu`, as `(id, address)`.
     #[must_use]
-    pub fn spc_exec(&self) -> Vec<(u32, u16)> {
+    pub fn exec_on(&self, cpu: BreakCpu) -> Vec<(u32, u32)> {
         self.exec
             .iter()
-            .filter(|b| b.cpu == BreakCpu::Spc && b.extra.enabled)
-            .map(|b| (b.id, b.pc as u16))
+            .filter(|b| b.cpu == cpu && b.extra.enabled)
+            .map(|b| (b.id, b.pc))
             .collect()
     }
 
@@ -348,29 +352,24 @@ impl BreakpointSet {
         id
     }
 
-    /// Register an SPC700 memory watchpoint over `lo..=hi` of `space`
-    /// ([`WatchSpace::Bus`] for its 16-bit bus, [`WatchSpace::Aram`],
-    /// [`WatchSpace::Ipl`]). The APU checks it; the registry keeps it.
-    pub fn add_spc_mem(
+    /// Register a memory watchpoint of a CPU other than the 65C816 over
+    /// `lo..=hi` of `space` (its bus as [`WatchSpace::Bus`]; for the
+    /// SPC700 also [`WatchSpace::Aram`], [`WatchSpace::Ipl`]). The chip
+    /// checks it; the registry keeps it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_mem_on(
         &mut self,
+        cpu: BreakCpu,
         space: WatchSpace,
-        lo: u16,
-        hi: u16,
+        lo: u32,
+        hi: u32,
         on_read: bool,
         on_write: bool,
         name: Option<String>,
     ) -> u32 {
-        let id = self.add_mem_in(
-            space,
-            u32::from(lo),
-            u32::from(hi),
-            on_read,
-            on_write,
-            false,
-            name,
-        );
+        let id = self.add_mem_in(space, lo, hi, on_read, on_write, false, name);
         if let Some(w) = self.mem.last_mut() {
-            w.cpu = BreakCpu::Spc;
+            w.cpu = cpu;
         }
         id
     }
@@ -409,6 +408,7 @@ impl BreakpointSet {
                 self.pending.push(BreakHit {
                     id: w.id,
                     kind,
+                    cpu: BreakCpu::Snes,
                     pc,
                     addr: Some(addr),
                     value: Some(access.value),
@@ -550,6 +550,7 @@ impl BreakpointSet {
             .map(|b| BreakHit {
                 id: b.id,
                 kind: BreakKind::Exec,
+                cpu: BreakCpu::Snes,
                 pc,
                 addr: None,
                 value: None,
@@ -585,6 +586,7 @@ impl BreakpointSet {
                 self.pending.push(BreakHit {
                     id: w.id,
                     kind: break_kind,
+                    cpu: BreakCpu::Snes,
                     pc,
                     addr: Some(addr),
                     value: Some(value),

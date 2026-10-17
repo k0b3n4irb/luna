@@ -1376,6 +1376,15 @@ pub struct Emulator {
     break_sources: BreakSources,
 }
 
+/// A CPU's name in a message.
+const fn cpu_label(cpu: BreakCpu) -> &'static str {
+    match cpu {
+        BreakCpu::Snes => "65C816",
+        BreakCpu::Spc => "SPC700",
+        BreakCpu::Sa1 => "SA-1",
+    }
+}
+
 /// A step of the debugger (Mesen2's step commands), for
 /// [`Emulator::step_kind`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2010,8 +2019,11 @@ impl Emulator {
         let freezes = self.freezes.clone();
         let mut cstack = self.call_stack.take();
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
-        // An SPC700 left standing on a breakpoint runs again.
+        // A CPU left standing on a breakpoint runs again.
         snes.apu_real.resume_break();
+        if let Some(debug) = snes.mapper.coproc_debug() {
+            debug.resume();
+        }
         let mut last_frame = snes.frame_count;
         let mut executed = 0u64;
         let mut stack_low = self.stack_low.clone();
@@ -3660,15 +3672,47 @@ impl Emulator {
         Ok(self.bp_registry()?.add_exec(pc, name))
     }
 
-    /// Register an SPC700 exec breakpoint at ARAM address `pc`. A
-    /// [`Self::run_until_break`] then stops with the SPC700 standing at
-    /// the start of that instruction (a [`BreakKind::SpcExec`] hit), the
-    /// 65C816 at the end of the instruction it was running. Returns its id.
+    /// Register an SPC700 exec breakpoint at ARAM address `pc`: see
+    /// [`Self::bp_add_exec_on`].
     pub fn bp_add_spc_exec(&mut self, pc: u16, name: Option<&str>) -> Result<u32, ApiError> {
+        self.bp_add_exec_on(BreakCpu::Spc, u32::from(pc), name)
+    }
+
+    /// Register an exec breakpoint on `cpu` at `pc` (24-bit for the
+    /// 65C816 and the SA-1, 16-bit for the SPC700). Returns its id.
+    ///
+    /// A [`Self::run_until_break`] stops with that CPU standing at the
+    /// start of the instruction (a hit whose `cpu` names it); the 65C816,
+    /// when another CPU stopped, at the end of the instruction it was
+    /// running. Refused for a coprocessor the cartridge does not have.
+    pub fn bp_add_exec_on(
+        &mut self,
+        cpu: BreakCpu,
+        pc: u32,
+        name: Option<&str>,
+    ) -> Result<u32, ApiError> {
+        self.require_cpu(cpu)?;
         let name = name.map(str::to_string);
-        Ok(self
-            .bp_registry()?
-            .add_exec_on(luna_core::BreakCpu::Spc, u32::from(pc), name))
+        Ok(self.bp_registry()?.add_exec_on(cpu, pc, name))
+    }
+
+    /// Refuse a coprocessor the cartridge does not have.
+    fn require_cpu(&self, cpu: BreakCpu) -> Result<(), ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let mut regs = None;
+        snes.mapper.with_coproc_view(&mut |v| regs = Some(v.regs()));
+        let present = match cpu {
+            BreakCpu::Snes | BreakCpu::Spc => true,
+            BreakCpu::Sa1 => matches!(regs, Some(luna_core::CoprocRegs::Sa1 { .. })),
+        };
+        if present {
+            Ok(())
+        } else {
+            Err(ApiError::BadArg(format!(
+                "this cartridge has no {}",
+                cpu_label(cpu)
+            )))
+        }
     }
 
     /// Register a memory watchpoint over the inclusive 24-bit bus range
@@ -3735,7 +3779,7 @@ impl Emulator {
             MemoryKind::SnesVideoRam => WatchSpace::Vram,
             MemoryKind::SnesCgRam => WatchSpace::Cgram,
             MemoryKind::SnesSpriteRam => WatchSpace::Oam,
-            MemoryKind::SpcMemory => WatchSpace::Bus,
+            MemoryKind::SpcMemory | MemoryKind::Sa1Memory => WatchSpace::Bus,
             MemoryKind::SpcRam => WatchSpace::Aram,
             MemoryKind::SpcRom => WatchSpace::Ipl,
             other => {
@@ -3766,7 +3810,10 @@ impl Emulator {
         let bp = self.bp_registry()?;
         Ok(match memory {
             MemoryKind::SpcMemory | MemoryKind::SpcRam | MemoryKind::SpcRom => {
-                bp.add_spc_mem(space, lo as u16, hi as u16, on_read, on_write, name)
+                bp.add_mem_on(BreakCpu::Spc, space, lo, hi, on_read, on_write, name)
+            }
+            MemoryKind::Sa1Memory => {
+                bp.add_mem_on(BreakCpu::Sa1, space, lo, hi, on_read, on_write, name)
             }
             _ => bp.add_mem_in(space, lo, hi, on_read, on_write, false, name),
         })
@@ -3806,8 +3853,9 @@ impl Emulator {
     pub fn bp_set_condition(&mut self, id: u32, condition: Option<&str>) -> Result<bool, ApiError> {
         let text = condition.map(str::trim).filter(|t| !t.is_empty());
         let cpu = match self.bp_registry()?.cpu_of(id) {
-            Some(luna_core::BreakCpu::Spc) => expr::ExprCpu::Spc,
-            Some(luna_core::BreakCpu::Snes) => expr::ExprCpu::Snes,
+            Some(BreakCpu::Spc) => expr::ExprCpu::Spc,
+            Some(BreakCpu::Snes) => expr::ExprCpu::Snes,
+            Some(BreakCpu::Sa1) => expr::ExprCpu::Sa1,
             None => return Ok(false),
         };
         let compiled = match text {
@@ -3846,10 +3894,11 @@ impl Emulator {
     /// on. Returns `false` for an unknown id.
     pub fn bp_set_mark(&mut self, id: u32, mark: bool) -> Result<bool, ApiError> {
         let registry = self.bp_registry()?;
-        if mark && registry.cpu_of(id) == Some(luna_core::BreakCpu::Spc) {
-            return Err(ApiError::BadArg(
-                "marks are for 65C816 breakpoints; an SPC700 breakpoint halts".into(),
-            ));
+        if let Some(cpu) = registry.cpu_of(id).filter(|c| mark && *c != BreakCpu::Snes) {
+            return Err(ApiError::BadArg(format!(
+                "marks are for 65C816 breakpoints; an {} breakpoint halts",
+                cpu_label(cpu)
+            )));
         }
         Ok(registry.set_mark(id, mark))
     }
@@ -4014,10 +4063,18 @@ impl Emulator {
                 .as_ref()
                 .is_some_and(|b| b.has_ppu_watches());
             snes.ppu.debug_accesses = ppu.then(Vec::new);
-            let spc = snes
+            let exec_on = |cpu| {
+                snes.breakpoints
+                    .as_ref()
+                    .map(|b| b.exec_on(cpu))
+                    .unwrap_or_default()
+            };
+            let spc = exec_on(BreakCpu::Spc);
+            let sa1 = exec_on(BreakCpu::Sa1);
+            let listed = snes
                 .breakpoints
                 .as_ref()
-                .map(|b| b.spc_exec())
+                .map(|b| b.list())
                 .unwrap_or_default();
             let condition = |id: u32| {
                 conditions.get(&id).map(|e| {
@@ -4033,17 +4090,46 @@ impl Emulator {
                 .into_iter()
                 .map(|(id, pc)| luna_apu::SpcBreak {
                     id,
-                    pc,
+                    pc: pc as u16,
                     condition: condition(id),
                 })
                 .collect();
-            snes.apu_real.watches = snes
-                .breakpoints
-                .as_ref()
-                .map(|b| b.list())
-                .unwrap_or_default()
+            let coproc_condition = |id: u32| {
+                conditions.get(&id).map(|e| {
+                    let e = e.clone();
+                    let check: luna_core::CoprocCondition = std::sync::Arc::new(
+                        move |view: &dyn luna_core::CoprocView, access, oppc| {
+                            expr::coproc_holds(&e, view, access, oppc)
+                        },
+                    );
+                    check
+                })
+            };
+            if let Some(debug) = snes.mapper.coproc_debug() {
+                debug.breaks = sa1
+                    .into_iter()
+                    .map(|(id, pc)| luna_core::CoprocBreak {
+                        id,
+                        pc,
+                        condition: coproc_condition(id),
+                    })
+                    .collect();
+                debug.watches = listed
+                    .iter()
+                    .filter(|b| b.cpu == BreakCpu::Sa1 && !b.exec && b.enabled)
+                    .map(|b| luna_core::CoprocWatch {
+                        id: b.id,
+                        lo: b.lo,
+                        hi: b.hi,
+                        read: b.on_read,
+                        write: b.on_write,
+                        condition: coproc_condition(b.id),
+                    })
+                    .collect();
+            }
+            snes.apu_real.watches = listed
                 .into_iter()
-                .filter(|b| b.cpu == luna_core::BreakCpu::Spc && !b.exec && b.enabled)
+                .filter(|b| b.cpu == BreakCpu::Spc && !b.exec && b.enabled)
                 .map(|b| luna_apu::SpcWatch {
                     id: b.id,
                     region: match b.space {
@@ -4116,6 +4202,7 @@ impl Emulator {
                     let source = |kind| BreakHit {
                         id: BREAK_SOURCE_ID,
                         kind,
+                        cpu: BreakCpu::Snes,
                         pc: at(snes),
                         addr: None,
                         value: None,
@@ -4147,30 +4234,46 @@ impl Emulator {
                     let source = |kind| BreakHit {
                         id: BREAK_SOURCE_ID,
                         kind,
+                        cpu: BreakCpu::Snes,
                         pc: at(snes),
                         addr: None,
                         value: None,
                         dma: false,
                         space: luna_core::WatchSpace::Bus,
                     };
-                    if let Some(hit) = snes.apu_real.break_hit {
-                        let space = snes
-                            .breakpoints
+                    let kind_of = |write: Option<bool>| match write {
+                        None => BreakKind::Exec,
+                        Some(true) => BreakKind::Write,
+                        Some(false) => BreakKind::Read,
+                    };
+                    let space_of = |id| {
+                        snes.breakpoints
                             .as_ref()
-                            .and_then(|b| b.list().into_iter().find(|i| i.id == hit.id))
-                            .map_or(luna_core::WatchSpace::Bus, |i| i.space);
+                            .and_then(|b| b.list().into_iter().find(|i| i.id == id))
+                            .map_or(luna_core::WatchSpace::Bus, |i| i.space)
+                    };
+                    if let Some(hit) = snes.apu_real.break_hit {
                         return Some(BreakHit {
                             id: hit.id,
-                            kind: match hit.access {
-                                None => BreakKind::SpcExec,
-                                Some(a) if a.write => BreakKind::SpcWrite,
-                                Some(_) => BreakKind::SpcRead,
-                            },
+                            kind: kind_of(hit.access.map(|a| a.write)),
+                            cpu: BreakCpu::Spc,
                             pc: u32::from(hit.pc),
                             addr: hit.access.map(|a| u32::from(a.addr)),
                             value: hit.access.map(|a| a.value),
                             dma: false,
-                            space,
+                            space: space_of(hit.id),
+                        });
+                    }
+                    if let Some(hit) = snes.mapper.coproc_hit() {
+                        return Some(BreakHit {
+                            id: hit.id,
+                            kind: kind_of(hit.access.map(|a| a.write)),
+                            cpu: BreakCpu::Sa1,
+                            pc: hit.pc,
+                            addr: hit.access.map(|a| a.addr),
+                            value: hit.access.map(|a| a.value),
+                            dma: false,
+                            space: space_of(hit.id),
                         });
                     }
                     let ran = (!nmi && !irq).then(|| opcode.get());
@@ -4205,6 +4308,9 @@ impl Emulator {
         if let Some(snes) = self.snes.as_mut() {
             snes.apu_real.breaks.clear();
             snes.apu_real.watches.clear();
+            if let Some(debug) = snes.mapper.coproc_debug() {
+                debug.disarm();
+            }
             snes.ppu.debug_accesses = None;
         }
         if let Some(bp) = self.snes.as_mut().and_then(|s| s.breakpoints.as_mut())

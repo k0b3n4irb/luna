@@ -22,8 +22,9 @@
 
 use luna_bus::sa1::{Sa1Mapper, Sa1Region};
 use luna_bus::{
-    Addr24, Bus, CartMemory, InterruptSample, MCycles, Mapper, MapperKind, MapperStateError,
-    Sa1SideEvent, Sa1Snapshot, Sa1Stats, Sa1TraceEvent,
+    Addr24, Bus, CartMemory, CoprocAccess, CoprocDebug, CoprocRegs, CoprocView, InterruptSample,
+    MCycles, Mapper, MapperKind, MapperStateError, Sa1SideEvent, Sa1Snapshot, Sa1Stats,
+    Sa1TraceEvent,
 };
 use luna_cpu_65c816::Cpu;
 
@@ -77,6 +78,38 @@ pub struct Sa1Chip {
     /// declares none still has some — and no save. Construction data, not
     /// state: absent from `Sa1ChipState`.
     save_bytes: usize,
+    /// A debugger's breakpoints on the SA-1 (never in a save-state).
+    debug: CoprocDebug,
+}
+
+/// The SA-1 as a breakpoint condition sees it.
+struct Sa1View<'a> {
+    cpu: &'a Cpu,
+    mapper: &'a Sa1Mapper,
+}
+
+impl CoprocView for Sa1View<'_> {
+    fn regs(&self) -> CoprocRegs {
+        let c = self.cpu;
+        CoprocRegs::Sa1 {
+            a: c.a,
+            x: c.x,
+            y: c.y,
+            sp: c.sp,
+            d: c.dp,
+            db: c.db,
+            pc: (u32::from(c.pb) << 16) | u32::from(c.pc),
+            p: c.p.bits(),
+            nmi: c.pending_nmi,
+            irq: c.pending_irq,
+            scanline: self.mapper.hv_position().0,
+            hclock: self.mapper.hv_position().1,
+        }
+    }
+
+    fn peek(&self, addr: u32) -> u8 {
+        self.mapper.peek_from_sa1(addr & 0x00FF_FFFF)
+    }
 }
 
 /// One SA-1 step = 2 master clocks (SA-1 @ 10.74 MHz; ares
@@ -96,6 +129,7 @@ impl Sa1Chip {
             sa1_trace: None,
             stats: Sa1Stats::ZERO,
             save_bytes: 0,
+            debug: CoprocDebug::new(),
         }
     }
 
@@ -250,6 +284,19 @@ impl Mapper for Sa1Chip {
         self.stats.steps += u64::from(dma_stall);
         self.deficit -= dma_stall as i32 * MCLK_PER_SA1_STEP;
         while self.deficit > 0 && !self.cpu.stopped {
+            if self.debug.hit.is_some() {
+                break; // frozen on a breakpoint; the time owed is kept
+            }
+            if self.debug.armed() {
+                let pc = (u32::from(self.cpu.pb) << 16) | u32::from(self.cpu.pc);
+                let view = Sa1View {
+                    cpu: &self.cpu,
+                    mapper: &self.inner,
+                };
+                if self.debug.check_exec(pc, &view) {
+                    break;
+                }
+            }
             // Self-referential bus borrow: `cpu`, `inner` and
             // `sa1_side_log` are disjoint fields of `Sa1Chip`, so we can
             // lend `inner`/`sa1_side_log` to the bus view while `cpu`
@@ -294,6 +341,7 @@ impl Mapper for Sa1Chip {
                 steps: &mut steps,
                 scpu_mar,
                 stats: &mut self.stats,
+                watch: self.debug.watching().then_some(&mut self.debug),
             };
             let was_waiting = self.cpu.waiting;
             self.cpu.step(&mut bus);
@@ -312,6 +360,13 @@ impl Mapper for Sa1Chip {
             self.stats.steps += u64::from(steps.max(1));
             // Floor at 1 step so a zero-cost path can never stall the loop.
             self.deficit -= steps.max(1) as i32 * MCLK_PER_SA1_STEP;
+            if self.debug.watching() {
+                let view = Sa1View {
+                    cpu: &self.cpu,
+                    mapper: &self.inner,
+                };
+                self.debug.check_accesses(sa1_pc, &view);
+            }
         }
         // A CPU stopped by `STP` spends its time idling (ares loops `idle()`
         // until reset): nothing to carry into the run after the reset.
@@ -322,6 +377,22 @@ impl Mapper for Sa1Chip {
 
     fn set_scpu_refresh(&mut self, active: bool) {
         self.inner.set_scpu_refresh(active);
+    }
+
+    fn coproc_debug(&mut self) -> Option<&mut CoprocDebug> {
+        Some(&mut self.debug)
+    }
+
+    fn coproc_hit(&self) -> Option<luna_bus::CoprocHit> {
+        self.debug.hit
+    }
+
+    fn with_coproc_view(&self, f: &mut dyn FnMut(&dyn CoprocView)) -> bool {
+        f(&Sa1View {
+            cpu: &self.cpu,
+            mapper: &self.inner,
+        });
+        true
     }
 
     fn coproc_main_irq_pending(&self) -> bool {
@@ -386,6 +457,8 @@ struct Sa1Bus<'a> {
     scpu_mar: u32,
     /// Cumulative accounting the chip reports (`OpenSNES` R5).
     stats: &'a mut Sa1Stats,
+    /// The chip's breakpoints, while watchpoints need its accesses.
+    watch: Option<&'a mut CoprocDebug>,
 }
 
 /// SA-1 MMIO register (`$2200-$23FF`) if `addr` hits the register window.
@@ -465,6 +538,13 @@ impl Bus for Sa1Bus<'_> {
         // Use the SA-1-side read path so the I-RAM mirror at
         // $00-3F/$80-BF:$0000-07FF resolves.
         let value = self.mapper.read_from_sa1(addr).unwrap_or(0xFF);
+        if let Some(debug) = self.watch.as_deref_mut() {
+            debug.record(CoprocAccess {
+                addr,
+                value,
+                write: false,
+            });
+        }
         if let (Some(log), Some(reg)) = (self.log.as_deref_mut(), sa1_reg(addr)) {
             log.push(Sa1SideEvent {
                 sa1_pc: self.sa1_pc,
@@ -495,6 +575,13 @@ impl Bus for Sa1Bus<'_> {
                 write: true,
                 reg,
                 value,
+            });
+        }
+        if let Some(debug) = self.watch.as_deref_mut() {
+            debug.record(CoprocAccess {
+                addr,
+                value,
+                write: true,
             });
         }
         // Route through the SA-1-side entry so I-RAM / BW-RAM
@@ -848,6 +935,7 @@ mod tests {
             steps: &mut sa1_steps,
             scpu_mar: 0,
             stats: &mut Sa1Stats::default(),
+            watch: None,
         };
         let sample = bus.last_cycle(false);
         assert!(sample.irq, "the S-CPU's request reaches the SA-1's poll");
@@ -902,6 +990,7 @@ mod tests {
             steps: &mut sa1_steps,
             scpu_mar: 0,
             stats: &mut Sa1Stats::default(),
+            watch: None,
         };
         assert!(bus.last_cycle(false).irq);
     }

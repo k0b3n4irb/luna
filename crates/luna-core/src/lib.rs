@@ -25,8 +25,9 @@ pub use cpu_regs::CpuRegs;
 pub use dma::{DmaTraceEvent, DmaTraceLog};
 pub use luna_apu::Spc700TraceEvent;
 pub use luna_bus::{
-    CartMemory, Dsp1TraceEvent, Dsp1TraceKind, Mapper, MapperKind, NullMapper, STATE_DECODE_CONFIG,
-    Sa1SideEvent, Sa1Stats, Sa1TraceEvent, SuperFxJob, SuperFxTraceEvent,
+    CartMemory, CoprocAccess, CoprocBreak, CoprocCondition, CoprocHit, CoprocRegs, CoprocView,
+    CoprocWatch, Dsp1TraceEvent, Dsp1TraceKind, Mapper, MapperKind, NullMapper,
+    STATE_DECODE_CONFIG, Sa1SideEvent, Sa1Stats, Sa1TraceEvent, SuperFxJob, SuperFxTraceEvent,
 };
 pub use mclk::{MclkAccounting, MclkBuckets, MclkKind};
 pub use power::{PowerOnRng, PowerOnState};

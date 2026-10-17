@@ -1417,6 +1417,37 @@ impl Mapper for Sa1Mapper {
 }
 
 impl Sa1Mapper {
+    /// The PPU position the SA-1's H/V timer follows: `(scanline,
+    /// master clock in the line)`.
+    #[must_use]
+    pub const fn hv_position(&self) -> (u16, u16) {
+        (self.vcounter, self.hcounter)
+    }
+
+    /// The byte the SA-1 reads at `addr`, without side effects, for a
+    /// debugger: its vectors, I-RAM, BW-RAM (bitmap view included) and
+    /// ROM. Its `$2200-$23FF` registers, and anything unmapped, peek as 0.
+    #[must_use]
+    pub fn peek_from_sa1(&self, addr: Addr24) -> u8 {
+        let bank = bank_of(addr);
+        let offset = offset_of(addr);
+        if let Some(v) = self.sa1_vector_override(bank, offset) {
+            return v;
+        }
+        if Self::mmio_offset(addr).is_some() {
+            return 0;
+        }
+        if let Some(o) = Self::iram_offset_sa1(bank, offset) {
+            return self.iram[o];
+        }
+        match self.bwram_target_sa1(bank, offset) {
+            Some(BwTarget::Linear(o)) => return self.bwram[o],
+            Some(BwTarget::Bitmap(pixel)) => return self.bitmap_read(pixel),
+            None => {}
+        }
+        self.rom_offset(bank, offset).map_or(0, |o| self.rom[o])
+    }
+
     /// The SA-1's own view of the bus (ares `memory.cpp:21-63`): its
     /// register set (`readIOSA1`), I-RAM at both `$3000-$37FF` and the
     /// `$0000-$07FF` direct-page mirror, BW-RAM in its three views, ROM

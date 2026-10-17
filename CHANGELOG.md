@@ -27,12 +27,23 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   frames ("break in N"). A breakpoint or break source met on the way stops
   it first. MCP: `step_kind`.
 
+- **SA-1 breakpoints.** `Emulator::bp_add_exec_on(BreakCpu::Sa1, pc)` and
+  `bp_add_watch(MemoryKind::Sa1Memory, …)` stop a breakpoint run with the
+  SA-1 frozen: at the start of the instruction for an exec breakpoint,
+  after the accessing instruction for a watchpoint. Conditions are
+  evaluated in the SA-1's own context (`ExprCpu::Sa1`: its registers, its
+  bus). `Sa1Memory` reads the SA-1's bus in `read_memory`. Every hit now
+  carries the `cpu` it fired on, and an SPC700 hit is an `Exec` / `Read` /
+  `Write` like the others. MCP: `bp_add {kind: "exec", cpu: "sa1"}`,
+  `memory: "Sa1Memory"`, `eval {cpu: "sa1"}`; `run_until_break` reports
+  `cpu`.
+
 - **SPC700 watchpoints.** `bp_add_watch` on `SpcMemory` (its bus),
   `SpcRam` (ARAM, the `$F0-$FF` registers left out) or `SpcRom` (the IPL
   ROM, reads) watches the SPC700's data accesses, its code fetches left
   out. The SPC700 stops just after the access, in the middle of its
-  instruction if need be, as Mesen2 does; the hit's `kind` is `SpcRead` /
-  `SpcWrite` and `pc` the instruction's address. MCP: `bp_add {kind:
+  instruction if need be, as Mesen2 does; `pc` is the instruction's
+  address. MCP: `bp_add {kind:
   "mem", memory: "SpcRam"}`, `symbol` then an ARAM label.
 
 - **VRAM, CGRAM and OAM watchpoints.** `Emulator::bp_add_watch` (MCP:

@@ -50,11 +50,15 @@ pub enum MemoryKind {
     Sa1InternalRam,
     /// The Super FX Game Pak RAM.
     GsuWorkRam,
+    /// The SA-1's 24-bit bus: its I-RAM at `$0000-$07FF` and
+    /// `$3000-$37FF`, BW-RAM, ROM, its vectors. Read only (its registers
+    /// read 0); write the memories behind it.
+    Sa1Memory,
 }
 
 impl MemoryKind {
     /// Every kind, in Mesen2's order.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::SnesMemory,
         Self::SpcMemory,
         Self::SnesPrgRom,
@@ -71,6 +75,7 @@ impl MemoryKind {
         Self::DspDataRam,
         Self::Sa1InternalRam,
         Self::GsuWorkRam,
+        Self::Sa1Memory,
     ];
 
     /// Mesen2's name, e.g. `SnesWorkRam`.
@@ -92,6 +97,7 @@ impl MemoryKind {
             Self::DspDataRam => "DspDataRam",
             Self::Sa1InternalRam => "Sa1InternalRam",
             Self::GsuWorkRam => "GsuWorkRam",
+            Self::Sa1Memory => "Sa1Memory",
         }
     }
 
@@ -161,6 +167,13 @@ impl View<'_> {
             MemoryKind::SnesCgRam => 0x200,
             MemoryKind::SpcRom => IPL_ROM.len(),
             MemoryKind::SpcDspRegisters => 128,
+            MemoryKind::Sa1Memory => {
+                let mut sa1 = false;
+                self.0.mapper.with_coproc_view(&mut |v| {
+                    sa1 = matches!(v.regs(), luna_core::CoprocRegs::Sa1 { .. });
+                });
+                if sa1 { 0x100_0000 } else { 0 }
+            }
             _ => kind.cart().map_or(0, |c| self.0.mapper.debug_size(c)),
         }
     }
@@ -204,6 +217,12 @@ impl View<'_> {
             MemoryKind::SpcRam => snes.apu_real.aram[a],
             MemoryKind::SpcRom => IPL_ROM[a],
             MemoryKind::SpcDspRegisters => snes.apu_real.dsp.registers[a],
+            MemoryKind::Sa1Memory => {
+                let mut byte = unmapped;
+                snes.mapper
+                    .with_coproc_view(&mut |v| byte = v.peek(a as u32));
+                byte
+            }
             _ => kind
                 .cart()
                 .and_then(|c| snes.mapper.debug_peek(c, a))
@@ -329,7 +348,10 @@ impl Emulator {
                     snes.apu_real.dsp.registers[o] = v;
                     true
                 }
-                MemoryKind::SnesMemory | MemoryKind::SpcMemory | MemoryKind::SpcRom => false,
+                MemoryKind::SnesMemory
+                | MemoryKind::SpcMemory
+                | MemoryKind::SpcRom
+                | MemoryKind::Sa1Memory => false,
                 _ => kind.cart().is_some_and(|c| snes.mapper.debug_poke(c, o, v)),
             };
             written += usize::from(done);
@@ -339,7 +361,10 @@ impl Emulator {
 
     /// Refuse a range past the end of a memory that is not a bus.
     fn check_range(kind: MemoryKind, size: usize, offset: u32, len: usize) -> Result<(), ApiError> {
-        let bus = matches!(kind, MemoryKind::SnesMemory | MemoryKind::SpcMemory);
+        let bus = matches!(
+            kind,
+            MemoryKind::SnesMemory | MemoryKind::SpcMemory | MemoryKind::Sa1Memory
+        );
         if size == 0 {
             return Err(ApiError::BadArg(format!(
                 "{}: this cartridge has none",

@@ -66,7 +66,7 @@ method, so the MCP transport adds reach, not capability.
 | `peek_vram` | `peek_vram` | Read `count` bytes from the 64 KB VRAM (same one-call full-dump range). |
 | `peek_cgram` | `peek_cgram` | All 256 CGRAM palette entries as BGR555 words. |
 | `poke_memory` | `poke_memory` | Write bytes into WRAM (state injection). |
-| `memory_kinds` | `memory_kinds` | The memories this cartridge has, by Mesen2's name, with their size: `SnesMemory` (the CPU bus), `SpcMemory`, `SnesPrgRom`, `SnesWorkRam`, `SnesSaveRam`, `SnesVideoRam`, `SnesSpriteRam`, `SnesCgRam`, `SpcRam`, `SpcRom`, `SpcDspRegisters`, `DspProgramRom` / `DspDataRom` / `DspDataRam`, `Sa1InternalRam`, `GsuWorkRam`. |
+| `memory_kinds` | `memory_kinds` | The memories this cartridge has, by Mesen2's name, with their size: `SnesMemory` (the CPU bus), `SpcMemory`, `SnesPrgRom`, `SnesWorkRam`, `SnesSaveRam`, `SnesVideoRam`, `SnesSpriteRam`, `SnesCgRam`, `SpcRam`, `SpcRom`, `SpcDspRegisters`, `DspProgramRom` / `DspDataRom` / `DspDataRam`, `Sa1InternalRam`, `GsuWorkRam`, `Sa1Memory` (the SA-1's bus, read only). |
 | `read_memory` / `write_memory` | `read_memory` / `write_memory` | `count` bytes of any of them from `offset` (or `symbol`), and back, without side effects: a `SnesMemory` address goes to the memory behind it, never through the bus, so a read starts no S-DD1 decompression and drains no DSP-1 port (a register reads 0, open bus `$FF`). Writes reach ROM too. See the example below. |
 | `eval` | `evaluate` | A debugger expression in Mesen2's language, evaluated as a watch: `{"value": 1, "kind": "boolean"}`. See [Expressions](#expressions) below. |
 | `absolute_address` | `absolute_address` | The memory and offset behind a CPU-bus address or label — `{"kind": "SnesPrgRom", "offset": 16}` for `$80:8010` on a 32 KB `LoROM` — as the mapper's banking selects it now; `null` for a register. |
@@ -87,7 +87,7 @@ method, so the MCP transport adds reach, not capability.
 | `enable_cpu_trace` / `take_cpu_trace` | `enable_cpu_trace` / `take_cpu_trace_log` | Per-instruction CPU trace ring (PC + registers). |
 | `enable_profile` / `take_profile` | `enable_profile` / `take_profile` | Master cycles per symbol (folded, heaviest first). (Per-PC samples are the Rust API's `take_profile_raw`; there is no MCP tool for them.) |
 | `enable_mem_trace` / `take_mem_trace` | `enable_mem_trace_filtered` / `take_mem_trace_log` | Per-bus-access trace with bank / offset-range / offset-list / writes-only filters; every event carries `origin` (`cpu`, `dma<n>`, `hdma<n>`). |
-| `bp_add` | `bp_add_exec` / `bp_add_mem`, `bp_set_condition`, `bp_set_mark` | Register an exec breakpoint or a read/write watchpoint range. `mirror: false` makes a mem watch bank-exact (default follows WRAM/MMIO mirrors); `name` (defaulting to the `symbol` used) labels it in `bp_list`. `condition` is an [expression](#expressions) that must be non-zero for it to fire; `mark: true` puts a mark on the Event Viewer instead of halting. `kind: "spc_exec"` stops with the SPC700 at the start of an instruction (`addr` in ARAM, or an ARAM `symbol`). `memory` on a `mem` watch watches another memory: `"SnesVideoRam"` / `"SnesCgRam"` / `"SnesSpriteRam"` (through the PPU's ports), `"SpcMemory"` / `"SpcRam"` / `"SpcRom"` (the SPC700's data accesses). See [Conditional breakpoints](#conditional-breakpoints). |
+| `bp_add` | `bp_add_exec` / `bp_add_mem`, `bp_set_condition`, `bp_set_mark` | Register an exec breakpoint or a read/write watchpoint range. `mirror: false` makes a mem watch bank-exact (default follows WRAM/MMIO mirrors); `name` (defaulting to the `symbol` used) labels it in `bp_list`. `condition` is an [expression](#expressions) that must be non-zero for it to fire; `mark: true` puts a mark on the Event Viewer instead of halting. `cpu: "spc"` / `"sa1"` on an `exec` breakpoint stops that CPU at the start of an instruction (`addr` in ARAM, or an ARAM `symbol`, for the SPC700; `kind: "spc_exec"` is the short form). `memory` on a `mem` watch watches another memory: `"SnesVideoRam"` / `"SnesCgRam"` / `"SnesSpriteRam"` (through the PPU's ports), `"SpcMemory"` / `"SpcRam"` / `"SpcRom"` (the SPC700's data accesses), `"Sa1Memory"` (the SA-1's bus). A hit's `cpu` names the CPU that stopped. See [Conditional breakpoints](#conditional-breakpoints). |
 | `bp_set_enabled` | `bp_set_enabled` | Disable/re-enable without removing — id, name and hit count survive. |
 | `bp_remove` / `bp_clear_all` / `bp_list` | `bp_remove` / `bp_clear` / `bp_list` | Manage the registry. `bp_list` rows now carry `enabled`, `hit_count` (mem: at most one per instruction), `mirror` and `name`. |
 | `run_until_break` | `run_until_break` | Run at full speed until a breakpoint or a break source fires (or a step budget). |
@@ -214,13 +214,15 @@ eval {expression: "[player_hp] < 10 && scanline > 200"} # a .sym label stands fo
 eval {expression: "{$7E0010} == $1234"}                 # {…} reads a little-endian word
 eval {expression: ":$C08000"}                           # the ROM offset behind a HiROM address
 eval {expression: "[$F2]", cpu: "spc"}                  # the SPC700's DSP register index
+eval {expression: "a", cpu: "sa1"}                      # the SA-1's accumulator
 eval {expression: "10 / x"}                             # → {value: 0, kind: "divide_by_zero"} when X is 0
 ```
 
 - **Values.** Decimal, `$hex` / `0xhex` and `%binary` literals. The
   registers of the CPU: `a x y sp d db pc ps`, the `ps…` flags (`pscarry`,
   `psnegative`…), `nmi`, `irq`, `frame`, `scanline`, `hclock`, `cycle`;
-  on the SPC700 `a x y sp ps pc dspreg`.
+  on the SPC700 `a x y sp ps pc dspreg`. The SA-1 has the 65C816's, its
+  own registers and bus, the console's PPU position.
 - **Memory.** `[a]` reads a byte, `{a}` a word, `#a` a long, without side
   effects. `:a` gives the offset of the memory behind `a`.
 - **Operators.** C's, with C's precedence: `x & 1 == 1` is `x & (1 == 1)`.
@@ -286,12 +288,12 @@ bp_add {kind: "mem", memory: "SnesSpriteRam", addr: 0x200, hi: 0x21F, on_read: t
 - During the picture the PPU owns VRAM and OAM: a port write is dropped
   or redirected, and a VRAM read fetches nothing, so no read fires.
 
-**The SPC700.** `kind: "spc_exec"` puts a breakpoint on an SPC700
-instruction:
+**The SPC700.** `cpu: "spc"` puts a breakpoint on an SPC700
+instruction (`kind: "spc_exec"` says the same):
 
 ```text
-bp_add {kind: "spc_exec", addr: 0x0400, condition: "a == $10"}   # the sound driver's command loop
-run_until_break {max_steps: 50000000}   # → {kind: "spc_exec", pc: 1024, …}
+bp_add {kind: "exec", cpu: "spc", addr: 0x0400, condition: "a == $10"}   # the sound driver's command loop
+run_until_break {max_steps: 50000000}   # → {kind: "exec", cpu: "spc", pc: 1024, …}
 disasm_spc {}                           # the SPC700 stands on $0400
 ```
 
@@ -315,7 +317,7 @@ down:
 
 ```text
 bp_add {kind: "mem", memory: "SpcRam", addr: 0x80}
-run_until_break {max_steps: 100000}  # → {kind: "spc_write", pc: 65477, addr: 128, value: 0, space: "aram"}
+run_until_break {max_steps: 100000}  # → {kind: "write", cpu: "spc", pc: 65477, addr: 128, value: 0, space: "aram"}
 eval {expression: "x", cpu: "spc"}   # → 128: `MOV (X),A` at $FFC5 has written, `DEC X` has not run
 bp_add {kind: "mem", memory: "SpcMemory", addr: 0xF4, on_read: true, on_write: false}   # the SPC700 reads mailbox 0
 ```
@@ -323,6 +325,26 @@ bp_add {kind: "mem", memory: "SpcMemory", addr: 0xF4, on_read: true, on_write: f
 `symbol` and `hi_symbol` are then ARAM labels. A condition sees the
 access (`value`, `address`, `iswrite`), and the SPC700's registers at
 that point of the instruction.
+
+**The SA-1.** `cpu: "sa1"` puts a breakpoint on the SA-1's 65C816, and
+`memory: "Sa1Memory"` a watchpoint on its bus (its I-RAM at `$0000-$07FF`
+and `$3000-$37FF`, BW-RAM, ROM). The SA-1 runs behind the S-CPU and
+catches up with it; a hit freezes it until the next run, the time it
+stood still caught up then.
+
+```text
+bp_add {kind: "exec", cpu: "sa1", addr: 0x008105, condition: "a == $45"}
+run_until_break {max_steps: 10000}   # → {kind: "exec", cpu: "sa1", pc: 33029, …}
+bp_add {kind: "mem", memory: "Sa1Memory", addr: 0x3000}   # who in the SA-1 writes this I-RAM byte?
+```
+
+- **Where it stops.** An exec breakpoint at the start of the
+  instruction. A watchpoint after the instruction that made the access,
+  as on the 65C816; reads include its code fetches, as on the 65C816.
+- **The condition** is evaluated inside the chip, for the SA-1: its
+  registers and its bus. `scanline` and `hclock` are the position its
+  H/V timer follows; `frame` reads 0 there.
+- **Marks** are for the 65C816 only.
 
 Mesen2's "break on" options and its "run to NMI / IRQ" are break sources,
 set once for every run:

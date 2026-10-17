@@ -513,10 +513,14 @@ pub struct EnableMemTraceParams {
 /// `bp_add` parameters.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct BpAddParams {
-    /// `"exec"` for a PC breakpoint, `"mem"` for a memory watchpoint,
-    /// `"spc_exec"` for an SPC700 PC breakpoint (`addr` 16-bit, `symbol`
-    /// an ARAM label).
+    /// `"exec"` for a PC breakpoint, `"mem"` for a memory watchpoint;
+    /// `"spc_exec"` is `"exec"` on `cpu: "spc"`.
     pub kind: String,
+    /// Exec only: the CPU — `"snes"` (the 65C816, default), `"spc"` (`addr`
+    /// 16-bit, `symbol` an ARAM label), `"sa1"`. A watchpoint's CPU follows
+    /// its `memory`.
+    #[serde(default)]
+    pub cpu: Option<String>,
     /// Exec: the 24-bit `PB:PC`. Mem: the 24-bit range start. Ignored
     /// when `symbol` is given.
     #[serde(default)]
@@ -1395,7 +1399,7 @@ pub struct StepKindParams {
 pub struct EvalParams {
     /// The expression, in Mesen2's language (`[$7E0010] == 3 && scanline > 200`).
     pub expression: String,
-    /// The CPU it is for: `snes` (default) or `spc`.
+    /// The CPU it is for: `snes` (default), `spc` or `sa1`.
     #[serde(default)]
     pub cpu: Option<String>,
 }
@@ -1528,9 +1532,11 @@ pub struct RunUntilBreakResult {
     pub hit: bool,
     /// Id of the breakpoint that fired.
     pub bp_id: Option<u32>,
-    /// `"exec"`, `"read"`, `"write"`, `"spc_exec"`, a break source
-    /// (`"brk"`, `"nmi"`, …) or `"step"`.
+    /// `"exec"`, `"read"`, `"write"`, a break source (`"brk"`, `"nmi"`,
+    /// …) or `"step"`.
     pub kind: Option<String>,
+    /// The CPU it fired on: `"snes"` (the 65C816), `"spc"`, `"sa1"`.
+    pub cpu: Option<String>,
     /// Exec: the about-to-execute PC. Mem: the accessing instruction's PC.
     pub pc: Option<u32>,
     /// Mem hits: the accessed address (24-bit bus address, or the byte
@@ -1538,7 +1544,8 @@ pub struct RunUntilBreakResult {
     pub addr: Option<u32>,
     /// Mem hits: the byte transferred.
     pub value: Option<u8>,
-    /// Mem hits: the memory `addr` is in — `bus`, `vram`, `cgram` or `oam`.
+    /// Mem hits: the memory `addr` is in — `bus` (the CPU's), `vram`,
+    /// `cgram`, `oam`, `aram` or `ipl`.
     pub space: Option<String>,
     /// Mem hits: the access was a DMA cycle.
     pub dma: Option<bool>,
@@ -2703,10 +2710,11 @@ impl LunaServer {
                                 `mark`: record an Event Viewer mark instead of halting. \
                                 `memory`: watch VRAM, CGRAM, OAM (through the PPU's ports) or the \
                                 SPC700's SpcMemory / SpcRam / SpcRom instead of the CPU bus; an \
-                                SPC700 watch stops it just after the access (kind spc_read / \
-                                spc_write). kind='spc_exec': halt with the SPC700 at the start of \
-                                the instruction at 16-bit ARAM `addr` (or ARAM `symbol`); its \
-                                condition is evaluated for the SPC700. \
+                                SPC700 watch stops it just after the access. `cpu` ('spc', \
+                                'sa1') puts an exec breakpoint on another CPU: it halts standing \
+                                at the start of the instruction, its condition evaluated for that \
+                                CPU (ARAM `addr` / `symbol` for the SPC700; kind='spc_exec' is \
+                                the short form). Memory 'Sa1Memory' watches the SA-1's bus. \
                                 Returns the registry id. Run with `run_until_break`."
     )]
     async fn bp_add(
@@ -2721,8 +2729,20 @@ impl LunaServer {
                 .map(memory_kind)
                 .transpose()?
                 .filter(|m| *m != luna_api::MemoryKind::SnesMemory);
+            let cpu = match (params.kind.as_str(), params.cpu.as_deref()) {
+                ("spc_exec", _) => luna_api::BreakCpu::Spc,
+                (_, None | Some("snes" | "cpu")) => luna_api::BreakCpu::Snes,
+                (_, Some("spc" | "spc700" | "apu")) => luna_api::BreakCpu::Spc,
+                (_, Some("sa1" | "sa-1")) => luna_api::BreakCpu::Sa1,
+                (_, Some(other)) => {
+                    return Err(ErrorData::invalid_params(
+                        format!("cpu must be 'snes', 'spc' or 'sa1', got `{other}`"),
+                        None,
+                    ));
+                }
+            };
             // SPC700 addresses come from the ARAM symbol table.
-            let spc = params.kind == "spc_exec"
+            let spc = cpu == luna_api::BreakCpu::Spc
                 || matches!(
                     memory,
                     Some(luna_api::MemoryKind::SpcMemory | luna_api::MemoryKind::SpcRam)
@@ -2748,15 +2768,14 @@ impl LunaServer {
             // The display name defaults to the symbol the bp was created from.
             let name = params.name.as_deref().or(params.symbol.as_deref());
             let id = match params.kind.as_str() {
-                "exec" => em.bp_add_exec(addr, name).map_err(|e| api_err_to_mcp(&e))?,
-                "spc_exec" => {
-                    let pc = u16::try_from(addr).map_err(|_| {
-                        ErrorData::invalid_params(
-                            format!("spc_exec: ${addr:X} is not a 16-bit ARAM address"),
+                "exec" | "spc_exec" => {
+                    if cpu == luna_api::BreakCpu::Spc && addr > 0xFFFF {
+                        return Err(ErrorData::invalid_params(
+                            format!("${addr:X} is not a 16-bit ARAM address"),
                             None,
-                        )
-                    })?;
-                    em.bp_add_spc_exec(pc, name)
+                        ));
+                    }
+                    em.bp_add_exec_on(cpu, addr, name)
                         .map_err(|e| api_err_to_mcp(&e))?
                 }
                 "mem" => match memory {
@@ -2944,6 +2963,7 @@ impl LunaServer {
         {
             None | Some("snes" | "cpu") => luna_api::ExprCpu::Snes,
             Some("spc" | "spc700" | "apu") => luna_api::ExprCpu::Spc,
+            Some("sa1" | "sa-1") => luna_api::ExprCpu::Sa1,
             Some(other) => {
                 return Err(ErrorData::invalid_params(
                     format!("unknown cpu `{other}`; `snes` or `spc`"),
@@ -3261,10 +3281,7 @@ impl LunaServer {
                     name: b.name,
                     condition: b.condition,
                     mark: b.mark,
-                    cpu: match b.cpu {
-                        luna_api::BreakCpu::Snes => "snes".into(),
-                        luna_api::BreakCpu::Spc => "spc".into(),
-                    },
+                    cpu: cpu_name(b.cpu).into(),
                     space: space_name(b.space).into(),
                 })
                 .collect(),
@@ -4146,6 +4163,15 @@ fn png_dimensions(png: &[u8]) -> (u32, u32) {
     (field(16), field(20))
 }
 
+/// The wire name of a breakpoint's CPU.
+const fn cpu_name(cpu: luna_api::BreakCpu) -> &'static str {
+    match cpu {
+        luna_api::BreakCpu::Snes => "snes",
+        luna_api::BreakCpu::Spc => "spc",
+        luna_api::BreakCpu::Sa1 => "sa1",
+    }
+}
+
 /// The wire name of a watchpoint's memory.
 const fn space_name(space: luna_api::WatchSpace) -> &'static str {
     match space {
@@ -4179,12 +4205,10 @@ fn outcome_to_result(out: &luna_api::RunOutcome) -> RunUntilBreakResult {
                     luna_api::BreakKind::Irq => "irq",
                     luna_api::BreakKind::Scanline => "scanline",
                     luna_api::BreakKind::Step => "step",
-                    luna_api::BreakKind::SpcExec => "spc_exec",
-                    luna_api::BreakKind::SpcRead => "spc_read",
-                    luna_api::BreakKind::SpcWrite => "spc_write",
                 }
                 .into(),
             ),
+            cpu: Some(cpu_name(hit.cpu).into()),
             pc: Some(hit.pc),
             addr: hit.addr,
             value: hit.value,
@@ -4197,6 +4221,7 @@ fn outcome_to_result(out: &luna_api::RunOutcome) -> RunUntilBreakResult {
             hit: false,
             bp_id: None,
             kind: None,
+            cpu: None,
             pc: None,
             addr: None,
             value: None,

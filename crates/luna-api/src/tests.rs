@@ -2520,7 +2520,10 @@ fn spc700_breakpoints_freeze_it_at_the_instruction_start() {
     let id = e.bp_add_spc_exec(0xFFC6, None).unwrap();
     e.bp_set_condition(id, Some("x == $80")).unwrap();
     let hit = e.run_until_break(100_000).unwrap().hit.unwrap();
-    assert_eq!((hit.kind, hit.id, hit.pc), (BreakKind::SpcExec, id, 0xFFC6));
+    assert_eq!(
+        (hit.kind, hit.cpu, hit.id, hit.pc),
+        (BreakKind::Exec, BreakCpu::Spc, id, 0xFFC6)
+    );
     assert_eq!(
         e.spc700_state().unwrap().pc,
         0xFFC6,
@@ -2697,7 +2700,7 @@ fn spc700_watchpoints_stop_it_just_after_the_access() {
     assert_eq!(
         (hit.kind, hit.pc, hit.addr, hit.value, hit.space),
         (
-            BreakKind::SpcWrite,
+            BreakKind::Write,
             0xFFC5,
             Some(0x80),
             Some(0),
@@ -2731,7 +2734,10 @@ fn spc700_watchpoints_stop_it_just_after_the_access() {
         .bp_add_watch(MemoryKind::SpcMemory, 0xF4, 0xF4, true, false, None)
         .unwrap();
     let hit = e.run_until_break(100_000).unwrap().hit.unwrap();
-    assert_eq!((hit.id, hit.kind), (read, BreakKind::SpcRead));
+    assert_eq!(
+        (hit.id, hit.kind, hit.cpu),
+        (read, BreakKind::Read, BreakCpu::Spc)
+    );
     e.bp_clear().unwrap();
 
     // Code fetches are not data reads: the IPL ROM runs, its watch stays
@@ -2744,4 +2750,71 @@ fn spc700_watchpoints_stop_it_just_after_the_access() {
         e.bp_add_watch(MemoryKind::SpcRom, 0, 0, false, true, None)
             .is_err()
     );
+}
+
+/// A SA-1 cart: the S-CPU points CRV at `$8100` and releases the SA-1,
+/// which loops `STA $3000 ; INC A` from A = `$42`.
+fn demo_sa1() -> Vec<u8> {
+    let mut rom = blank_cart(0x8000, 0x7FD8);
+    rom[..15].copy_from_slice(&[
+        0xA9, 0x00, 0x8D, 0x03, 0x22, // CRV low
+        0xA9, 0x81, 0x8D, 0x04, 0x22, // CRV high: $8100
+        0x9C, 0x00, 0x22, // CCNT = 0: the SA-1 runs
+        0x80, 0xFE,
+    ]);
+    rom[0x100..0x108].copy_from_slice(&[0xA9, 0x42, 0x8D, 0x00, 0x30, 0x1A, 0x80, 0xFA]);
+    rom
+}
+
+#[test]
+fn sa1_breakpoints_freeze_it_with_its_own_registers() {
+    let mut e = Emulator::new();
+    e.load_rom_bytes_forced(demo_sa1(), luna_core::MapperKind::Sa1)
+        .unwrap();
+    let sa1_a = |e: &Emulator| e.evaluate("a & $FF", ExprCpu::Sa1).unwrap().value;
+
+    let id = e.bp_add_exec_on(BreakCpu::Sa1, 0x00_8105, None).unwrap();
+    e.bp_set_condition(id, Some("a == $45")).unwrap();
+    let hit = e.run_until_break(10_000).unwrap().hit.unwrap();
+    assert_eq!(
+        (hit.kind, hit.cpu, hit.id, hit.pc),
+        (BreakKind::Exec, BreakCpu::Sa1, id, 0x00_8105)
+    );
+    assert_eq!(sa1_a(&e), 0x45, "at the start of INC A");
+    assert_eq!(e.evaluate("[$3000]", ExprCpu::Sa1).unwrap().value, 0x45);
+    assert_eq!(
+        e.read_memory(MemoryKind::Sa1Memory, 0x3000, 1).unwrap(),
+        [0x45]
+    );
+    assert_eq!(e.bp_list().unwrap()[0].cpu, BreakCpu::Sa1);
+    assert!(e.bp_set_mark(id, true).is_err(), "a SA-1 breakpoint halts");
+    // A resume leaves the instruction it stands on and comes round again.
+    e.bp_set_condition(id, None).unwrap();
+    e.run_until_break(10_000).unwrap().hit.unwrap();
+    assert_eq!(sa1_a(&e), 0x46);
+    e.bp_clear().unwrap();
+
+    // A watchpoint on its bus sees its writes, after the instruction.
+    let w = e
+        .bp_add_watch(MemoryKind::Sa1Memory, 0x3000, 0x3000, false, true, None)
+        .unwrap();
+    e.bp_set_condition(w, Some("value == $50")).unwrap();
+    let hit = e.run_until_break(10_000).unwrap().hit.unwrap();
+    assert_eq!(
+        (hit.kind, hit.cpu, hit.pc, hit.addr, hit.value),
+        (
+            BreakKind::Write,
+            BreakCpu::Sa1,
+            0x00_8102,
+            Some(0x3000),
+            Some(0x50)
+        )
+    );
+    assert_eq!(sa1_a(&e), 0x50);
+
+    // No SA-1 on a plain cart.
+    let mut plain = Emulator::new();
+    plain.load_rom_bytes(demo_lorom()).unwrap();
+    assert!(plain.bp_add_exec_on(BreakCpu::Sa1, 0x8000, None).is_err());
+    assert_eq!(plain.memory_size(MemoryKind::Sa1Memory).unwrap(), 0);
 }

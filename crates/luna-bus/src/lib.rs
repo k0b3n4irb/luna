@@ -10,6 +10,8 @@
 //! - [`mod@speed`]: SNES memory access speed lookup
 //!   (`FAST` / `SLOW` / `XSLOW`).
 //! - [`mod@bus`]: the [`Bus`] trait.
+//! - [`mod@debug`]: [`CoprocDebug`] — breakpoints on a cartridge
+//!   coprocessor.
 //! - [`mod@mapper`]: [`Mapper`] trait for cartridge mappings.
 //! - [`mod@lorom`]: [`lorom::LoRomMapper`] — Mode 20 cartridge mapping.
 //! - [`mod@hirom`]: [`hirom::HiRomMapper`] — Mode 21 `HiROM` and Mode 25
@@ -30,6 +32,7 @@
 //! See `ARCHITECTURE.md` §5.
 
 pub mod bus;
+pub mod debug;
 pub mod hirom;
 pub mod lorom;
 pub mod mapper;
@@ -43,6 +46,10 @@ pub mod types;
 pub mod testing;
 
 pub use bus::{Bus, InterruptSample};
+pub use debug::{
+    CoprocAccess, CoprocBreak, CoprocCondition, CoprocDebug, CoprocHit, CoprocRegs, CoprocView,
+    CoprocWatch,
+};
 pub use mapper::{
     CartMemory, Dsp1Snapshot, Dsp1TraceEvent, Dsp1TraceKind, Mapper, MapperKind, MapperStateError,
     NullMapper, STATE_DECODE_CONFIG, STATE_DECODE_LIMIT, Sa1SideEvent, Sa1Snapshot, Sa1Stats,

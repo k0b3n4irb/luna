@@ -32,6 +32,8 @@ pub enum ExprCpu {
     Snes,
     /// The SPC700 on its 16-bit bus.
     Spc,
+    /// The SA-1's 65C816 on its own 24-bit bus.
+    Sa1,
 }
 
 /// What an evaluation produced. Every kind but `Numeric` and `Boolean`
@@ -246,7 +248,7 @@ const fn reg_named(cpu: ExprCpu, name: &str) -> Option<Reg> {
         ("dspreg", Reg::DspIndex),
     ];
     let table = match cpu {
-        ExprCpu::Snes => snes,
+        ExprCpu::Snes | ExprCpu::Sa1 => snes,
         ExprCpu::Spc => spc,
     };
     let mut i = 0;
@@ -652,6 +654,17 @@ impl ExprEnv for View<'_> {
                 }
             }
             ExprCpu::Spc => spc_reg(&snes.apu_real, reg),
+            ExprCpu::Sa1 => {
+                // The PPU tokens come from the console's PPU, as Mesen2's do.
+                let hclock = i64::from(snes.mcycles_in_line.min(u32::from(u16::MAX)));
+                match reg {
+                    Reg::Frame => i64::from(snes.frame_count as u32),
+                    Reg::Scanline => i64::from(snes.ppu_line),
+                    Reg::HClock => hclock,
+                    Reg::Cycle => dot_of(hclock),
+                    _ => coproc_regs(&*snes.mapper).map_or(0, |r| coproc_reg(r, reg)),
+                }
+            }
         }
     }
 
@@ -660,14 +673,12 @@ impl ExprEnv for View<'_> {
             // Mesen2 reads 0 where nothing answers.
             ExprCpu::Snes => self.bus_peek(addr, 0),
             ExprCpu::Spc => spc_byte(&self.0.apu_real, addr),
+            ExprCpu::Sa1 => coproc_peek(&*self.0.mapper, addr),
         }
     }
 
     fn space(&self, cpu: ExprCpu) -> u32 {
-        match cpu {
-            ExprCpu::Snes => 0x100_0000,
-            ExprCpu::Spc => 0x1_0000,
-        }
+        cpu_space(cpu)
     }
 
     fn absolute(&self, cpu: ExprCpu, addr: u32) -> i64 {
@@ -686,8 +697,141 @@ impl ExprEnv for View<'_> {
                 }
             }
             ExprCpu::Spc => spc_absolute(&self.0.apu_real, addr),
+            ExprCpu::Sa1 => sa1_absolute(*self, addr),
         }
     }
+}
+
+/// The size of `cpu`'s address space.
+const fn cpu_space(cpu: ExprCpu) -> u32 {
+    match cpu {
+        ExprCpu::Snes | ExprCpu::Sa1 => 0x100_0000,
+        ExprCpu::Spc => 0x1_0000,
+    }
+}
+
+/// The coprocessor's registers, if the cartridge has one that shows them.
+fn coproc_regs(mapper: &dyn luna_core::Mapper) -> Option<luna_core::CoprocRegs> {
+    let mut regs = None;
+    mapper.with_coproc_view(&mut |v| regs = Some(v.regs()));
+    regs
+}
+
+/// A byte of the coprocessor's bus (0 without one).
+fn coproc_peek(mapper: &dyn luna_core::Mapper, addr: u32) -> u8 {
+    let mut byte = 0;
+    mapper.with_coproc_view(&mut |v| byte = v.peek(addr));
+    byte
+}
+
+/// A coprocessor register token's value.
+fn coproc_reg(regs: luna_core::CoprocRegs, reg: Reg) -> i64 {
+    match regs {
+        luna_core::CoprocRegs::Sa1 {
+            a,
+            x,
+            y,
+            sp,
+            d,
+            db,
+            pc,
+            p,
+            nmi,
+            irq,
+            scanline,
+            hclock,
+        } => match reg {
+            Reg::A => i64::from(a),
+            Reg::X => i64::from(x),
+            Reg::Y => i64::from(y),
+            Reg::Sp => i64::from(sp),
+            Reg::D => i64::from(d),
+            Reg::Db => i64::from(db),
+            Reg::Pc => i64::from(pc),
+            Reg::Ps => i64::from(p),
+            Reg::Flag(b) => i64::from((p >> b) & 1),
+            Reg::Nmi => i64::from(nmi),
+            Reg::Irq => i64::from(irq),
+            Reg::Scanline => i64::from(scanline),
+            Reg::HClock => i64::from(hclock),
+            Reg::Cycle => dot_of(i64::from(hclock)),
+            Reg::Frame | Reg::DspIndex => 0,
+        },
+    }
+}
+
+/// `:addr` on the SA-1: its I-RAM, then what the cartridge maps there.
+fn sa1_absolute(view: View<'_>, addr: u32) -> i64 {
+    let addr = addr & 0x00FF_FFFF;
+    let (bank, off) = (addr >> 16, addr & 0xFFFF);
+    let system = bank <= 0x3F || (0x80..=0xBF).contains(&bank);
+    if system && off < 0x0800 {
+        return i64::from(off);
+    }
+    if system && (0x3000..=0x37FF).contains(&off) {
+        return i64::from(off - 0x3000);
+    }
+    if system && (0x2200..=0x23FF).contains(&off) {
+        return i64::from(off);
+    }
+    view.0
+        .mapper
+        .debug_resolve(addr)
+        .map_or(-1, |(_, o)| o as i64)
+}
+
+/// A coprocessor alone, for its breakpoint's condition (checked inside
+/// the chip). `frame` reads 0 there; the PPU position is the one the
+/// chip follows.
+struct CoprocEnv<'a>(&'a dyn luna_core::CoprocView, ExprCpu);
+
+impl ExprEnv for CoprocEnv<'_> {
+    fn reg(&self, _cpu: ExprCpu, reg: Reg) -> i64 {
+        coproc_reg(self.0.regs(), reg)
+    }
+
+    fn byte(&self, _cpu: ExprCpu, addr: u32) -> u8 {
+        self.0.peek(addr)
+    }
+
+    fn space(&self, _cpu: ExprCpu) -> u32 {
+        cpu_space(self.1)
+    }
+
+    fn absolute(&self, _cpu: ExprCpu, _addr: u32) -> i64 {
+        -1
+    }
+}
+
+/// Whether `expr` holds for a coprocessor breakpoint: at an instruction
+/// start (`access` `None`), or after the instruction made `access`.
+pub(crate) fn coproc_holds(
+    expr: &Expression,
+    view: &dyn luna_core::CoprocView,
+    access: Option<luna_core::CoprocAccess>,
+    oppc: u32,
+) -> bool {
+    let access = match access {
+        Some(a) => ExprAccess {
+            value: i64::from(a.value),
+            address: i64::from(a.addr),
+            memaddress: -1,
+            write: a.write,
+            dma: false,
+            dummy: false,
+            oppc: i64::from(oppc),
+        },
+        None => ExprAccess {
+            value: i64::from(view.peek(oppc)),
+            address: i64::from(oppc),
+            memaddress: -1,
+            write: false,
+            dma: false,
+            dummy: false,
+            oppc: i64::from(oppc),
+        },
+    };
+    evaluate(expr, &access, &CoprocEnv(view, expr.cpu)).holds()
 }
 
 /// An SPC700 register token's value.
@@ -801,7 +945,7 @@ impl Emulator {
             let bus = self.lookup_symbol(name).ok();
             let spc = self.resolve_symbol_spc(name);
             match (cpu, bus, spc) {
-                (ExprCpu::Snes, Some(a), _) => Some(LabelAt::Address(i64::from(a))),
+                (ExprCpu::Snes | ExprCpu::Sa1, Some(a), _) => Some(LabelAt::Address(i64::from(a))),
                 (_, _, Some(a)) => Some(LabelAt::Address(i64::from(a))),
                 (ExprCpu::Spc, Some(_), None) => Some(LabelAt::OutOfScope),
                 _ => None,
@@ -829,6 +973,12 @@ impl Emulator {
                 (i64::from(c.pb) << 16) | i64::from(c.pc)
             }
             ExprCpu::Spc => i64::from(self.spc700_state()?.pc),
+            ExprCpu::Sa1 => {
+                match coproc_regs(&*self.snes.as_ref().ok_or(ApiError::NoRom)?.mapper) {
+                    Some(luna_core::CoprocRegs::Sa1 { pc, .. }) => i64::from(pc),
+                    _ => return Err(ApiError::BadArg("this cartridge has no SA-1".into())),
+                }
+            }
         };
         let access = ExprAccess {
             value: 0,
