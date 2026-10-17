@@ -170,11 +170,15 @@ when a Super Multitap is on port 2. Fixed, Mesen2-like layout:
   *Prescale 2x … 10x* repeat each pixel (combine with *Use bilinear
   interpolation* for a soft picture with sharp pixel edges); *Scale 2x …
   4x* round off diagonals (the Scale2x / Scale3x algorithm); *LCD Grid*
-  draws each pixel as four cells, three of them dimmed. *Use bilinear
+  draws each pixel as four cells, three of them dimmed; *2xSai*,
+  *Super2xSai* and *SuperEagle* smooth edges between blocks of colour by
+  blending, each with its own weighting. *Use bilinear
   interpolation* smooths the final stretch instead of keeping square
-  pixels. NTSC (blargg and Bisqwit), xBRZ, HQx, 2xSaI, Super2xSaI and
-  SuperEagle are listed greyed out: their only implementations are
-  copyleft code, which luna's licence (MPL-2.0) does not take in. A
+  pixels. NTSC (blargg and Bisqwit), xBRZ and HQx are listed greyed
+  out: their only implementations are copyleft code, which luna's licence
+  (MPL-2.0) does not take in, so they are being rewritten from their
+  algorithms (the 2xSaI family already gives Mesen2's pictures to the
+  pixel). A
   screenshot goes through the filter, not the aspect ratio. Filter,
   aspect ratio and bilinear choice are kept in `video.json` with the
   frame-rate counter.

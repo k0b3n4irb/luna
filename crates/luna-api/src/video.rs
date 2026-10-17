@@ -3,10 +3,11 @@
 //!
 //! Both act on the picture a front-end shows, after the emulation: the frame
 //! `Emulator::render_frame_rgba` returns is untouched. The behaviour follows
-//! Mesen2; the code is luna's own. The filters whose only implementation is
-//! third-party code under a copyleft licence (the two NTSC filters, xBRZ, `HQx`,
-//! the 2xSaI family) are listed so a menu can show Mesen2's whole list, and
-//! report [`VideoFilter::is_available`] `false`.
+//! Mesen2; the code is luna's own, written from the algorithms (for the
+//! 2xSaI family, from a functional description of Mesen2's, checked
+//! identical to its pictures). The filters luna does not implement yet (the
+//! two NTSC filters, xBRZ, `HQx`) are listed so a menu can show Mesen2's
+//! whole list, and report [`VideoFilter::is_available`] `false`.
 
 /// One entry of Mesen2's Video Filter menu, in its order (`VideoFilterType`).
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
@@ -42,11 +43,11 @@ pub enum VideoFilter {
     Scale3x,
     /// Scale4x: Scale2x applied twice.
     Scale4x,
-    /// 2xSaI. Not available.
+    /// 2xSaI (Kreed).
     TwoXSai,
-    /// `Super2xSaI`. Not available.
+    /// `Super2xSaI` (Kreed).
     Super2xSai,
-    /// `SuperEagle`. Not available.
+    /// `SuperEagle` (Kreed).
     SuperEagle,
     /// Nearest-neighbour 2x.
     Prescale2x,
@@ -188,6 +189,9 @@ impl VideoFilter {
                 | Self::Scale2x
                 | Self::Scale3x
                 | Self::Scale4x
+                | Self::TwoXSai
+                | Self::Super2xSai
+                | Self::SuperEagle
                 | Self::Prescale2x
                 | Self::Prescale3x
                 | Self::Prescale4x
@@ -201,7 +205,12 @@ impl VideoFilter {
     /// filter that is not available (it leaves the frame as rendered).
     pub const fn scale(self) -> usize {
         match self {
-            Self::LcdGrid | Self::Scale2x | Self::Prescale2x => 2,
+            Self::LcdGrid
+            | Self::Scale2x
+            | Self::TwoXSai
+            | Self::Super2xSai
+            | Self::SuperEagle
+            | Self::Prescale2x => 2,
             Self::Scale3x | Self::Prescale3x => 3,
             Self::Scale4x | Self::Prescale4x => 4,
             Self::Prescale6x => 6,
@@ -233,6 +242,9 @@ impl VideoFilter {
                 scale2x(pixels, width, height, &mut half);
                 scale2x(&half, width * 2, height * 2, out);
             }
+            Self::TwoXSai => sai(Sai::TwoX, pixels, width, height, out),
+            Self::Super2xSai => sai(Sai::Super, pixels, width, height, out),
+            Self::SuperEagle => sai(Sai::Eagle, pixels, width, height, out),
             _ if s > 1 => prescale(pixels, width, height, s, out),
             _ => out.copy_from_slice(pixels),
         }
@@ -466,6 +478,233 @@ fn scale3x(src: &[u8], width: usize, height: usize, out: &mut [u8]) {
     }
 }
 
+/// Kreed's 2x filters, after the behaviour of Mesen2's (written from a
+/// functional description, not from its code).
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum Sai {
+    TwoX,
+    Super,
+    Eagle,
+}
+
+/// Per-byte `⌊(u + v) / 2⌋`, alpha included.
+const fn half(u: u32, v: u32) -> u32 {
+    ((u & 0xFEFE_FEFE) >> 1) + ((v & 0xFEFE_FEFE) >> 1) + (u & v & 0x0101_0101)
+}
+
+/// Per-byte `⌊(u + v + w + z) / 4⌋`, alpha included.
+const fn quarter(u: u32, v: u32, w: u32, z: u32) -> u32 {
+    let high = ((u & 0xFCFC_FCFC) >> 2)
+        + ((v & 0xFCFC_FCFC) >> 2)
+        + ((w & 0xFCFC_FCFC) >> 2)
+        + ((z & 0xFCFC_FCFC) >> 2);
+    let low = ((u & 0x0303_0303) + (v & 0x0303_0303) + (w & 0x0303_0303) + (z & 0x0303_0303)) >> 2
+        & 0x0303_0303;
+    high + low
+}
+
+/// Which of two candidates the probes `s`, `t` side with: a candidate both
+/// probes equal scores 0, any other 1; the vote is `p`'s score minus `q`'s.
+fn vote(p: u32, q: u32, s: u32, t: u32) -> i32 {
+    let score = |z: u32| i32::from(!(z == s && z == t));
+    score(p) - score(q)
+}
+
+fn sai(kind: Sai, src: &[u8], width: usize, height: usize, out: &mut [u8]) {
+    let at = |x: usize, y: usize| {
+        let i = (y * width + x) * 4;
+        u32::from_le_bytes([src[i], src[i + 1], src[i + 2], src[i + 3]])
+    };
+    let w2 = width * 2;
+    for y in 0..height {
+        for x in 0..width {
+            // The 4 × 4 window, offsets -1..=2, clamped to the frame per axis.
+            let p = |dx: isize, dy: isize| {
+                let cx = x.saturating_add_signed(dx).min(width - 1);
+                let cy = y.saturating_add_signed(dy).min(height - 1);
+                at(cx, cy)
+            };
+            let [tl, tr, bl, br] = match kind {
+                Sai::TwoX => two_x_sai(&p),
+                Sai::Super => super_2x_sai(&p),
+                Sai::Eagle => super_eagle(&p),
+            };
+            let i = y * 2 * w2 + x * 2;
+            for (k, c) in [(i, tl), (i + 1, tr), (i + w2, bl), (i + w2 + 1, br)] {
+                out[k * 4..k * 4 + 4].copy_from_slice(&c.to_le_bytes());
+            }
+        }
+    }
+}
+
+fn two_x_sai(p: &impl Fn(isize, isize) -> u32) -> [u32; 4] {
+    let (a, b, c, d) = (p(0, 0), p(1, 0), p(0, 1), p(1, 1));
+    if a == d && b != c {
+        let tr = if (a == p(0, -1) && b == p(2, 1))
+            || (a == c && a == p(1, -1) && b != p(0, -1) && b == p(2, -1))
+        {
+            a
+        } else {
+            half(a, b)
+        };
+        let bl = if (a == p(-1, 0) && c == p(1, 2))
+            || (a == b && a == p(-1, 1) && p(-1, 0) != c && c == p(-1, 2))
+        {
+            a
+        } else {
+            half(a, c)
+        };
+        [a, tr, bl, a]
+    } else if b == c && a != d {
+        let tr = if (b == p(1, -1) && a == p(-1, 1))
+            || (b == p(0, -1) && b == d && a != p(1, -1) && a == p(-1, -1))
+        {
+            b
+        } else {
+            half(a, b)
+        };
+        let bl = if (c == p(-1, 1) && a == p(1, -1))
+            || (c == p(-1, 0) && c == d && a != p(-1, 1) && a == p(-1, -1))
+        {
+            c
+        } else {
+            half(a, c)
+        };
+        [a, tr, bl, b]
+    } else if a == d && b == c {
+        if a == b {
+            return [a; 4];
+        }
+        let r = vote(a, b, p(-1, 0), p(0, -1))
+            + vote(b, a, p(2, 0), p(1, -1))
+            + vote(b, a, p(-1, 1), p(0, 2))
+            + vote(a, b, p(2, 1), p(1, 2));
+        let br = match r.signum() {
+            1 => a,
+            -1 => b,
+            _ => quarter(a, b, c, d),
+        };
+        [a, half(a, b), half(a, c), br]
+    } else {
+        let tr = if a == c && a == p(1, -1) && b != p(0, -1) && b == p(2, -1) {
+            a
+        } else if b == p(0, -1) && b == d && a != p(1, -1) && a == p(-1, -1) {
+            b
+        } else {
+            half(a, b)
+        };
+        let bl = if a == b && a == p(-1, 1) && p(-1, 0) != c && c == p(-1, 2) {
+            a
+        } else if c == p(-1, 0) && c == d && a != p(-1, 1) && a == p(-1, -1) {
+            c
+        } else {
+            half(a, c)
+        };
+        [a, tr, bl, quarter(a, b, c, d)]
+    }
+}
+
+/// The diagonal vote `Super2xSaI` and `SuperEagle` share: positive keeps `b`'s
+/// diagonal, negative `a`'s.
+fn diagonal_vote(p: &impl Fn(isize, isize) -> u32, a: u32, b: u32) -> i32 {
+    vote(b, a, p(-1, 1), p(0, 2))
+        + vote(b, a, p(-1, 0), p(0, -1))
+        + vote(b, a, p(1, 2), p(2, 1))
+        + vote(b, a, p(1, -1), p(2, 0))
+}
+
+fn super_2x_sai(p: &impl Fn(isize, isize) -> u32) -> [u32; 4] {
+    let (a, b, c, d) = (p(0, 0), p(1, 0), p(0, 1), p(1, 1));
+    let (tr, br) = if c == b && a != d {
+        (c, c)
+    } else if a == d && c != b {
+        (a, a)
+    } else if a == d && c == b {
+        let v = match diagonal_vote(p, a, b).signum() {
+            1 => b,
+            -1 => a,
+            _ => half(a, b),
+        };
+        (v, v)
+    } else {
+        let br = if b == d && d == p(0, 2) && c != p(1, 2) && d != p(-1, 2) {
+            quarter(d, d, d, c)
+        } else if a == c && c == p(1, 2) && p(0, 2) != d && c != p(2, 2) {
+            quarter(c, c, c, d)
+        } else {
+            half(c, d)
+        };
+        let tr = if b == d && b == p(0, -1) && a != p(1, -1) && b != p(-1, -1) {
+            quarter(b, b, b, a)
+        } else if a == c && a == p(1, -1) && p(0, -1) != b && a != p(2, -1) {
+            quarter(a, a, a, b)
+        } else {
+            half(a, b)
+        };
+        (tr, br)
+    };
+    let bl = if (a == d && c != b && p(-1, 0) == a && a != p(1, 2))
+        || (a == p(-1, 1) && b == a && p(-1, 0) != c && a != p(-1, 2))
+    {
+        half(a, c)
+    } else {
+        c
+    };
+    let tl = if (c == b && a != d && p(-1, 1) == c && c != p(1, -1))
+        || (p(-1, 0) == c && d == c && p(-1, 1) != a && c != p(-1, -1))
+    {
+        half(a, c)
+    } else {
+        a
+    };
+    [tl, tr, bl, br]
+}
+
+fn super_eagle(p: &impl Fn(isize, isize) -> u32) -> [u32; 4] {
+    let (a, b, c, d) = (p(0, 0), p(1, 0), p(0, 1), p(1, 1));
+    if c == b && a != d {
+        let tl = if p(-1, 1) == c || b == p(1, -1) {
+            half(c, half(c, a))
+        } else {
+            half(a, b)
+        };
+        let br = if b == p(2, 0) || c == p(0, 2) {
+            half(c, half(c, d))
+        } else {
+            half(c, d)
+        };
+        [tl, c, c, br]
+    } else if a == d && c != b {
+        let tr = if p(0, -1) == a || d == p(2, 1) {
+            half(a, half(a, b))
+        } else {
+            half(a, b)
+        };
+        // Mesen2 falls back to `c` blended with `d` here, not with `a`.
+        let bl = if d == p(1, 2) || p(-1, 0) == a {
+            half(a, half(a, c))
+        } else {
+            half(c, d)
+        };
+        [a, tr, bl, a]
+    } else if a == d && c == b {
+        match diagonal_vote(p, a, b).signum() {
+            1 => [half(a, b), c, c, half(a, b)],
+            -1 => [a, half(a, b), half(a, b), a],
+            _ => [a, c, c, a],
+        }
+    } else {
+        let t = half(c, b);
+        let u = half(a, d);
+        [
+            quarter(a, a, a, t),
+            quarter(b, b, b, u),
+            quarter(c, c, c, u),
+            quarter(d, d, d, t),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,6 +789,85 @@ mod tests {
         assert!(cells(&out).iter().all(|&c| c == K));
         assert_eq!(VideoFilter::Scale4x.apply(&flat, 3, 2, &mut out), (12, 8));
         assert!(cells(&out).iter().all(|&c| c == K));
+    }
+
+    /// A `width` × `height` frame of `0xAARRGGBB` pixels through `filter`,
+    /// back as `0xAARRGGBB` rows.
+    fn sai_rows(filter: VideoFilter, width: usize, argb: &[u32]) -> Vec<Vec<u32>> {
+        let src: Vec<u8> = argb.iter().flat_map(|p| p.to_le_bytes()).collect();
+        let mut out = Vec::new();
+        let (w, _) = filter.apply(&src, width, argb.len() / width, &mut out);
+        out.chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect::<Vec<_>>()
+            .chunks(w)
+            .map(<[u32]>::to_vec)
+            .collect()
+    }
+
+    #[test]
+    fn the_2xsai_family_matches_its_worked_examples() {
+        // Small frames whose every pixel meets the edge clamp. The filters
+        // gave Mesen2's pictures to the pixel on three commercial scenes.
+        const X: u32 = 0xFF11_3355;
+        const Y: u32 = 0xFFEE_AA01;
+        const Z: u32 = 0xFF00_FF7F;
+        let checker = [X, Y, Y, X];
+        assert_eq!(
+            sai_rows(VideoFilter::TwoXSai, 2, &checker),
+            [
+                [X, 0xFF7F_6E2B, Y, Y],
+                [0xFF7F_6E2B, Y, 0xFF7F_6E2B, 0xFF7F_6E2B],
+                [Y, 0xFF7F_6E2B, X, X],
+                [Y, 0xFF7F_6E2B, X, X],
+            ]
+        );
+        assert_eq!(
+            sai_rows(VideoFilter::Super2xSai, 2, &checker),
+            [
+                [X, 0xFF7F_6E2B, Y, Y],
+                [Y, 0xFF7F_6E2B, X, X],
+                [Y, 0xFF7F_6E2B, X, X],
+                [Y, 0xFF7F_6E2B, X, X],
+            ]
+        );
+        assert_eq!(
+            sai_rows(VideoFilter::SuperEagle, 2, &checker),
+            [
+                [X, Y, 0xFFD2_9B0B, 0xFFD2_9B0B],
+                [Y, X, 0xFF2C_414A, 0xFF2C_414A],
+                [0xFFD2_9B0B, 0xFF2C_414A, X, X],
+                [0xFFD2_9B0B, 0xFF2C_414A, X, X],
+            ]
+        );
+        let strip = [X, Y, Z, Z, X, Y];
+        assert_eq!(
+            sai_rows(VideoFilter::TwoXSai, 3, &strip),
+            [
+                [X, X, Y, 0xFF77_D440, Z, Z],
+                [0xFF08_996A, X, 0xFF7F_6E2B, Y, 0xFF77_D440, 0xFF77_D440],
+                [Z, 0xFF08_996A, X, Y, Y, Y],
+                [Z, 0xFF08_996A, X, 0xFF7F_6E2B, Y, Y],
+            ]
+        );
+        assert_eq!(
+            sai_rows(VideoFilter::Super2xSai, 3, &strip),
+            [
+                [X, X, Y, Y, Z, Z],
+                [Z, X, X, Y, Y, Y],
+                [Z, 0xFF08_996A, X, 0xFFB6_8C16, Y, Y],
+                [Z, 0xFF08_996A, X, 0xFF7F_6E2B, Y, Y],
+            ]
+        );
+        assert_eq!(
+            sai_rows(VideoFilter::SuperEagle, 3, &strip),
+            [
+                [X, 0xFF48_5040, Y, 0xFFB2_BF20, 0xFF1D_F46F, 0xFF1D_F46F],
+                [0xFF0C_665F, X, 0xFFB6_8C16, Y, 0xFFD0_B410, 0xFFD0_B410],
+                [0xFF02_E579, 0xFF0E_4C5A, 0xFF2C_414A, 0xFFD2_9B0B, Y, Y],
+                [0xFF02_E579, 0xFF0E_4C5A, 0xFF2C_414A, 0xFFD2_9B0B, Y, Y],
+            ]
+        );
     }
 
     #[test]
