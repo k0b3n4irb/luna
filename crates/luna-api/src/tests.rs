@@ -3138,5 +3138,25 @@ fn layer_capture_keeps_each_layer_alone_and_finds_overlaps() {
         ),
         (Layer::Bg1, Layer::Bg2, 56, 0, 7, 6)
     );
+    assert_eq!(o[0].regions.len(), 1, "one patch");
     assert_eq!(Layer::from_name("OBJ"), Some(Layer::Obj));
+}
+
+#[test]
+fn overlap_regions_split_patches_that_do_not_touch() {
+    let mut mask = vec![false; FRAME_W * 4];
+    // A 2×2 patch at (0,0), a diagonal pair at (10,1)-(11,2) (touching by
+    // a corner: one patch), a lone pixel at (200,3).
+    for (x, y) in [(0, 0), (1, 0), (0, 1), (1, 1), (10, 1), (11, 2), (200, 3)] {
+        mask[y * FRAME_W + x] = true;
+    }
+    let r = overlap_regions(&mask);
+    let boxes: Vec<_> = r
+        .iter()
+        .map(|r| (r.pixels, r.x0, r.y0, r.x1, r.y1))
+        .collect();
+    assert_eq!(
+        boxes,
+        [(4, 0, 0, 1, 1), (2, 10, 1, 11, 2), (1, 200, 3, 200, 3)]
+    );
 }

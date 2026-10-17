@@ -134,15 +134,28 @@ fn write_layer_shots(
     );
     for o in &overlaps {
         eprintln!(
-            "  {} and {}: {} pixel(s) in x {}..={}, y {}..={}",
+            "  {} and {}: {} pixel(s) in x {}..={}, y {}..={}{}",
             o.a.name(),
             o.b.name(),
             o.pixels,
             o.x0,
             o.x1,
             o.y0,
-            o.y1
+            o.y1,
+            if o.regions.len() > 1 {
+                format!(", {} regions:", o.regions.len())
+            } else {
+                String::new()
+            }
         );
+        if o.regions.len() > 1 {
+            for r in &o.regions {
+                eprintln!(
+                    "    {} pixel(s) in x {}..={}, y {}..={}",
+                    r.pixels, r.x0, r.x1, r.y0, r.y1
+                );
+            }
+        }
     }
     Ok(LayersOut {
         written: layers.to_vec(),

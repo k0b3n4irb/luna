@@ -306,8 +306,11 @@ luna state --until-frame 600 --layers bg1,obj --layer-shots layers \
 - **`--layers`** restricts the files and the pairs to some layers
   (`bg1,bg2,bg3,bg4,obj`, the default all five).
 - **In the `--out` JSON**, `layers.written` names the files and
-  `layers.overlaps` gives each pair: `a`, `b`, `pixels`, and the box
-  `x0`, `y0`, `x1`, `y1` around them. An overlap is not an error in
+  `layers.overlaps` gives each pair: `a`, `b`, `pixels`, the box `x0`,
+  `y0`, `x1`, `y1` around them, and `regions`: each patch of touching
+  pixels with its own count and box, largest first, so two overlaps far
+  apart are told apart. The text lists the regions when there are
+  several. An overlap is not an error in
   itself — a scene puts its sprites in front of its ground — it is where
   to look; a test can assert the pairs a screen must not have.
 - `--no-render` composes nothing, so it is refused with `--layer-shots`.

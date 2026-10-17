@@ -14,8 +14,8 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   by line, so each `<layer>.png` is the same instant as `--screenshot`,
   HDMA and mid-frame writes included; transparent where the layer shows
   nothing. The run lists every pair of layers that both show a pixel,
-  with the count and the box around them, and the `--out` JSON carries
-  them as `layers.overlaps`. `--layers bg2,bg3,obj` restricts it. API:
+  with the count, the box around them and each patch of touching pixels
+  on its own, and the `--out` JSON carries them as `layers.overlaps`. `--layers bg2,bg3,obj` restricts it. API:
   `set_layer_capture`, `render_layer_png`, `layer_overlaps`. Asked for by
   the game, to find two elements biting into each other without looking.
 
