@@ -1109,15 +1109,20 @@ pub(crate) fn run_state(
                     u.hit
                 );
             } else {
+                // How many arrivals the condition held on, when there is one.
+                let held = if u.until_if.is_some() {
+                    format!(", {} where it held", u.matches)
+                } else {
+                    String::new()
+                };
                 eprintln!(
                     "error: --until-pc {} (${:02X}:{:04X}): hit {}{cond} not reached by frame \
-                     {end_frame} (reached {} time(s), {} where it held)",
+                     {end_frame} (reached {} time(s){held})",
                     u.spec,
                     u.addr >> 16,
                     u.addr & 0xFFFF,
                     u.hit,
                     u.hits_seen,
-                    u.matches
                 );
                 step_failed = true;
             }
