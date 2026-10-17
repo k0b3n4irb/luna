@@ -1376,6 +1376,30 @@ pub struct Emulator {
     break_sources: BreakSources,
 }
 
+/// A step of the debugger (Mesen2's step commands), for
+/// [`Emulator::step_kind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum StepKind {
+    /// One instruction (an interrupt entry counts as one).
+    Into,
+    /// One instruction, or a whole call: on a `JSR` / `JSL`, run until the
+    /// instruction after it is reached at the same stack depth.
+    Over,
+    /// Until the current routine returns: an `RTS`, `RTL` or `RTI` that
+    /// leaves the stack above where it was.
+    Out,
+    /// Until the PPU starts the next scanline.
+    Scanline,
+    /// Until the PPU starts the next frame.
+    Frame,
+    /// N instructions (Mesen2's "break in N instructions").
+    Instructions(u64),
+    /// N scanlines.
+    Scanlines(u64),
+    /// N frames.
+    Frames(u64),
+}
+
 /// What, besides the registered breakpoints, stops
 /// [`Emulator::run_until_break`] (Mesen2's "break on" options and its
 /// "run to NMI / IRQ"). A stop by one of them reports a [`BreakHit`]
@@ -3781,6 +3805,98 @@ impl Emulator {
         max_steps: u64,
         interrupt: &std::sync::atomic::AtomicBool,
     ) -> Result<RunOutcome, ApiError> {
+        self.run_until_break_with(max_steps, interrupt, false, &mut |_, _| false)
+    }
+
+    /// Run one step of `kind` (Mesen2's step commands), at full speed. A
+    /// breakpoint or break source met on the way stops it first; otherwise
+    /// it ends with a [`BreakKind::Step`] hit, or with no hit when
+    /// `max_steps` instructions ran out.
+    ///
+    /// luna runs instructions whole, so there is no CPU-cycle or PPU-cycle
+    /// step: the finest step is one instruction.
+    pub fn step_kind(&mut self, kind: StepKind, max_steps: u64) -> Result<RunOutcome, ApiError> {
+        self.step_kind_interruptible(kind, max_steps, &std::sync::atomic::AtomicBool::new(false))
+    }
+
+    /// [`Self::step_kind`] that an external `interrupt` flag (a `pause`)
+    /// ends early, as [`Self::run_until_break_interruptible`].
+    pub fn step_kind_interruptible(
+        &mut self,
+        kind: StepKind,
+        max_steps: u64,
+        interrupt: &std::sync::atomic::AtomicBool,
+    ) -> Result<RunOutcome, ApiError> {
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let (pc, sp) = (
+            (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc),
+            snes.cpu.sp,
+        );
+        let (line0, frame0) = (snes.ppu_line, snes.frame_count);
+        let op = memory::View(snes).bus_peek(pc, 0);
+        // Step over a call: the instruction after it, back at this depth.
+        let call_len = match op {
+            0x20 | 0xFC => Some(3),
+            0x22 => Some(4),
+            _ => None,
+        };
+        let mut left = match kind {
+            StepKind::Instructions(n) | StepKind::Scanlines(n) | StepKind::Frames(n) => n,
+            _ => 1,
+        };
+        if left == 0 {
+            return Ok(RunOutcome {
+                steps: 0,
+                hit: None,
+                interrupted: false,
+            });
+        }
+        let (mut line, mut frame) = (line0, frame0);
+        let mut done = |snes: &Snes, ran: Option<u8>| -> bool {
+            let at = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
+            let mut tick = |moved: bool| {
+                if moved {
+                    left -= 1;
+                }
+                left == 0
+            };
+            match kind {
+                StepKind::Into | StepKind::Instructions(_) => tick(true),
+                StepKind::Over => match call_len {
+                    Some(len) => {
+                        let back = (pc & 0xFF_0000) | ((pc + len) & 0xFFFF);
+                        at == back && snes.cpu.sp >= sp
+                    }
+                    None => true,
+                },
+                StepKind::Out => matches!(ran, Some(0x60 | 0x6B | 0x40)) && snes.cpu.sp > sp,
+                StepKind::Scanline | StepKind::Scanlines(_) => {
+                    let moved = snes.ppu_line != line;
+                    line = snes.ppu_line;
+                    tick(moved)
+                }
+                StepKind::Frame | StepKind::Frames(_) => {
+                    let moved = snes.frame_count != frame;
+                    frame = snes.frame_count;
+                    tick(moved)
+                }
+            }
+        };
+        let need_opcode = kind == StepKind::Out;
+        self.run_until_break_with(max_steps, interrupt, need_opcode, &mut done)
+    }
+
+    /// [`Self::run_until_break_interruptible`] that also stops, with a
+    /// [`BreakKind::Step`] hit, when `done` says so after an instruction
+    /// (`done(snes, opcode)` gets the machine and the opcode that ran, or
+    /// `None` for an interrupt served): the step kinds are built on it.
+    fn run_until_break_with(
+        &mut self,
+        max_steps: u64,
+        interrupt: &std::sync::atomic::AtomicBool,
+        need_opcode: bool,
+        done: &mut dyn FnMut(&Snes, Option<u8>) -> bool,
+    ) -> Result<RunOutcome, ApiError> {
         // The flag is the CALLER's: clearing it here wiped a pause that had
         // been raised while this call was still waiting for the emulator
         // lock, so the run then ignored it and could not be stopped at all.
@@ -3798,6 +3914,7 @@ impl Emulator {
         let conditions = self.bp_conditions.clone();
         let sources = self.break_sources;
         let before_step: std::cell::Cell<(bool, bool, u16)> = std::cell::Cell::default();
+        let opcode: std::cell::Cell<u8> = std::cell::Cell::default();
         // Marks that fired, with their beam position: shared by the two
         // checks below.
         let marks: std::cell::RefCell<Vec<(BreakHit, u16, u16)>> = std::cell::RefCell::default();
@@ -3840,6 +3957,9 @@ impl Emulator {
                 |snes, executed| {
                     // What this step is about to do, for the check after it.
                     before_step.set((snes.cpu.pending_nmi, snes.cpu.pending_irq, snes.ppu_line));
+                    if need_opcode {
+                        opcode.set(memory::View(snes).bus_peek(at(snes), 0));
+                    }
                     if executed == 0 {
                         return None;
                     }
@@ -3881,6 +4001,10 @@ impl Emulator {
                         value: None,
                         dma: false,
                     };
+                    let ran = (!nmi && !irq).then(|| opcode.get());
+                    if done(snes, ran) {
+                        return Some(source(BreakKind::Step));
+                    }
                     if nmi && sources.nmi {
                         return Some(source(BreakKind::Nmi));
                     }

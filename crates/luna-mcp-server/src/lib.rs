@@ -1362,6 +1362,20 @@ pub struct BreakSourcesParams {
     pub scanline: Option<u16>,
 }
 
+/// `step_kind` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct StepKindParams {
+    /// `into`, `over`, `out`, `scanline`, `frame`, `instructions`,
+    /// `scanlines` or `frames`.
+    pub kind: String,
+    /// N for `instructions` / `scanlines` / `frames` (default 1).
+    #[serde(default)]
+    pub count: Option<u64>,
+    /// Instruction budget (default 50 000 000).
+    #[serde(default)]
+    pub max_steps: Option<u64>,
+}
+
 /// `eval` parameters.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct EvalParams {
@@ -3207,6 +3221,51 @@ impl LunaServer {
     }
 
     #[rmcp::tool(
+        description = "One debugger step, as Mesen2's step commands: `into` (one \
+                                instruction), `over` (a JSR/JSL whole, back at the same stack \
+                                depth), `out` (until the routine returns), `scanline`, `frame`, \
+                                or N `instructions` / `scanlines` / `frames` (`count`). A \
+                                breakpoint or break source met on the way stops it first; \
+                                otherwise the result's `kind` is `step`. `pause` ends it."
+    )]
+    async fn step_kind(
+        &self,
+        Parameters(params): Parameters<StepKindParams>,
+    ) -> Result<rmcp::Json<RunUntilBreakResult>, ErrorData> {
+        let n = params.count.unwrap_or(1);
+        let kind = match params.kind.to_ascii_lowercase().as_str() {
+            "into" => luna_api::StepKind::Into,
+            "over" => luna_api::StepKind::Over,
+            "out" => luna_api::StepKind::Out,
+            "scanline" => luna_api::StepKind::Scanline,
+            "frame" => luna_api::StepKind::Frame,
+            "instructions" => luna_api::StepKind::Instructions(n),
+            "scanlines" => luna_api::StepKind::Scanlines(n),
+            "frames" => luna_api::StepKind::Frames(n),
+            other => {
+                return Err(ErrorData::invalid_params(
+                    format!(
+                        "unknown step `{other}`; into, over, out, scanline, frame, \
+                         instructions, scanlines or frames"
+                    ),
+                    None,
+                ));
+            }
+        };
+        self.interrupt.store(false, Ordering::Relaxed);
+        let out = {
+            let mut em = self.emulator.lock().await;
+            em.step_kind_interruptible(
+                kind,
+                params.max_steps.unwrap_or(50_000_000),
+                &self.interrupt,
+            )
+            .map_err(|e| api_err_to_mcp(&e))?
+        };
+        Ok(rmcp::Json(outcome_to_result(&out)))
+    }
+
+    #[rmcp::tool(
         description = "Run at full emulation speed until a breakpoint fires, the CPU \
                                 STOPs, or a `pause` is issued (issue #92) — an interruptible run \
                                 with no mandatory step budget. `max_steps` is an optional safety \
@@ -4035,6 +4094,7 @@ fn outcome_to_result(out: &luna_api::RunOutcome) -> RunUntilBreakResult {
                     luna_api::BreakKind::Nmi => "nmi",
                     luna_api::BreakKind::Irq => "irq",
                     luna_api::BreakKind::Scanline => "scanline",
+                    luna_api::BreakKind::Step => "step",
                 }
                 .into(),
             ),

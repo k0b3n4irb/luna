@@ -36,7 +36,8 @@ lands it.
 | D1c | Conditions (Mesen2's language) and marks on the 65C816's exec breakpoints and watchpoints; every match of an instruction checked; DMA flagged | ✅ |
 | D1c | Break sources: BRK, COP, WDM, STP, NMI and IRQ handler entry, a scanline; MCP `set_break_sources` | ✅ |
 | D1c | Breakpoints v2: every CPU (65C816, SPC700, SA-1, GSU, DSP-1), every memory (VRAM, CGRAM, OAM, ARAM watchpoints), condition, hit count, *mark*, *forbid*; break on BRK / COP / WDM / STP / NMI / IRQ / scanline | ⬜ |
-| D1d | Step types: over, out, cycle, scanline, frame, to NMI / IRQ, *break in N*, run to here, move PC | ⬜ |
+| D1d | Step types: into, over, out, scanline, frame, *break in N* instructions / scanlines / frames (to NMI / IRQ are break sources; run to here is `run_until_pc`; move PC is `set_cpu_register`); MCP `step_kind` | ✅ |
+| D1d | CPU-cycle and PPU-cycle steps — not possible while luna runs instructions whole | ⬜ |
 | D2 | Debugger window per CPU (disassembly with labels, comments, effective addresses; editable status; breakpoint, watch, label, function, call-stack lists; go to / find all); labels and comments in `.mlb`, ca65 `.dbg`, bass, SDCC `.cdb`, ELF; default register labels; workspace per ROM | ⬜ |
 | D3 | Per-byte access counters; Memory Tools (every memory, edit, highlight by access / code / data, freeze, find, `.tbl`); Memory Search on every memory | ⬜ |
 | D4 | Trace logger (per CPU, Mesen2's format tags, condition, to file); profiler with calls and inclusive / exclusive time; Event Viewer completed and exposed to MCP and CLI | ⬜ |

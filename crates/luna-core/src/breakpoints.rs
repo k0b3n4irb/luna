@@ -44,6 +44,8 @@ pub enum BreakKind {
     Irq,
     /// The PPU has just reached the chosen scanline.
     Scanline,
+    /// The step asked for (over, out, a scanline, N frames…) completed.
+    Step,
 }
 
 /// The id a [`BreakHit`] carries when a break source, not a registered

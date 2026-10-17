@@ -9,6 +9,13 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ### Added
 
+- **Step over, step out, by scanline, by frame.** `Emulator::step_kind`
+  runs one of Mesen2's steps: into, over (a `JSR` / `JSL` whole, back at
+  the same stack depth), out (until the routine returns through `RTS` /
+  `RTL` / `RTI`), a scanline, a frame, or N instructions / scanlines /
+  frames ("break in N"). A breakpoint or break source met on the way stops
+  it first. MCP: `step_kind`.
+
 - **Break sources: BRK, COP, WDM, STP, NMI, IRQ, a scanline.** Besides the
   registered breakpoints, a run stops, as chosen, before a `BRK`, `COP`,
   `WDM` or `STP` runs, on the first instruction of the NMI or IRQ handler

@@ -2449,3 +2449,62 @@ fn break_sources_stop_on_opcodes_interrupts_and_scanlines() {
     e.set_break_sources(BreakSources::default());
     assert!(e.run_until_break(5_000).unwrap().hit.is_none(), "all off");
 }
+
+#[test]
+fn step_kinds_move_like_mesen2_steps() {
+    // 8000 JSR $8010 ; 8003 NOP ; 8004 BRA $8003
+    // 8010 LDA #1 ; 8012 JSR $8020 ; 8015 RTS ; 8020 RTS
+    let mut code = vec![0x20, 0x10, 0x80, 0xEA, 0x80, 0xFD];
+    code.resize(0x10, 0xEA);
+    code.extend([0xA9, 0x01, 0x20, 0x20, 0x80, 0x60]);
+    code.resize(0x20, 0xEA);
+    code.push(0x60);
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
+    let pc = |e: &Emulator| e.cpu_state().unwrap().pc;
+    let fresh = |e: &mut Emulator| {
+        e.reset().unwrap();
+        assert_eq!(pc(e), 0x8000);
+    };
+
+    fresh(&mut e);
+    let out = e.step_kind(StepKind::Over, 1_000).unwrap();
+    assert_eq!(out.hit.map(|h| h.kind), Some(BreakKind::Step));
+    assert_eq!(
+        (pc(&e), out.steps),
+        (0x8003, 5),
+        "the whole call, nested one included"
+    );
+
+    fresh(&mut e);
+    e.step_kind(StepKind::Into, 1_000).unwrap();
+    assert_eq!(pc(&e), 0x8010);
+    let out = e.step_kind(StepKind::Out, 1_000).unwrap();
+    assert_eq!(
+        (pc(&e), out.steps),
+        (0x8003, 4),
+        "out of $8010, past the nested call"
+    );
+    // Over a plain instruction is one instruction.
+    e.step_kind(StepKind::Over, 1_000).unwrap();
+    assert_eq!(pc(&e), 0x8004);
+
+    let out = e.step_kind(StepKind::Instructions(7), 1_000).unwrap();
+    assert_eq!(out.steps, 7);
+    let line = e.beam().unwrap().0;
+    e.step_kind(StepKind::Scanline, 100_000).unwrap();
+    assert_eq!(e.beam().unwrap().0, line + 1);
+    let frame = e.frame_count().unwrap();
+    e.step_kind(StepKind::Frames(2), 1_000_000).unwrap();
+    assert_eq!(e.frame_count().unwrap(), frame + 2);
+
+    // A breakpoint inside the call stops a step over first.
+    fresh(&mut e);
+    let id = e.bp_add_exec(0x00_8020, None).unwrap();
+    let out = e.step_kind(StepKind::Over, 1_000).unwrap();
+    assert_eq!(out.hit.map(|h| h.id), Some(id));
+    // A budget too short ends with no hit.
+    e.bp_clear().unwrap();
+    fresh(&mut e);
+    assert!(e.step_kind(StepKind::Frames(5), 10).unwrap().hit.is_none());
+}
