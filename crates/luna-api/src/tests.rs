@@ -2050,6 +2050,58 @@ fn a_watched_pc_is_reached_once_per_pass_and_frames_keep_the_script() {
 }
 
 #[test]
+fn an_n_plus_k_press_lands_k_frames_after_its_arrival_once() {
+    // `demo_slow_tick` reaches `$8007` once every three frames. `2+2`
+    // presses Start two frames after the second arrival, `2+4` lets go
+    // two frames later; the third arrival does not replay them.
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_slow_tick()).unwrap();
+    let mut script = InputScript::new();
+    script.add_pad(0, "2+2:0x1000,2+4:0").unwrap();
+    script.set_clock_pc(0x00_8007);
+    let (mut arrivals, mut held) = (Vec::new(), Vec::new());
+    e.run_script_watching(
+        &mut script,
+        ScriptBound::Frame(15),
+        &[0x00_8007],
+        |e, ev| {
+            let frame = e.frame_count().unwrap();
+            match ev {
+                WatchEvent::Pc(_) => arrivals.push(frame),
+                WatchEvent::Frame => {
+                    if e.joypad(0).unwrap() == 0x1000 {
+                        held.push(frame);
+                    }
+                }
+            }
+            false
+        },
+    )
+    .unwrap();
+    assert!(arrivals.len() >= 3, "{arrivals:?}");
+    // The press is set as frame `arrival + 2` starts and released as
+    // `arrival + 4` starts: it is held through frames `arrival + 2` and
+    // `arrival + 3`. A frame event comes once its frame is complete, the
+    // counter already on the next one.
+    let second = arrivals[1];
+    assert_eq!(held, vec![second + 3, second + 4], "arrivals {arrivals:?}");
+
+    // A run by frame cannot count arrivals: the script is refused.
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_slow_tick()).unwrap();
+    let mut script = InputScript::new();
+    script.add_pad(0, "2+2:0x1000").unwrap();
+    let err = e
+        .run_input_script(&mut script, ScriptBound::Frame(5))
+        .unwrap_err();
+    assert!(err.to_string().contains("`2+2`"), "{err}");
+    assert!(
+        crate::input::parse_pad_script("2+2:1").is_err(),
+        "the plain grammar has no `N+K`"
+    );
+}
+
+#[test]
 fn a_step_longer_than_a_frame_is_split_across_the_series() {
     // A 64 KB DMA to VRAM is one CPU step of 524 288 master clocks, about
     // a frame and a half. Started two thirds into frame 0, it covers

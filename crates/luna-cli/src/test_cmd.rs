@@ -65,7 +65,7 @@ use std::process::ExitCode;
 
 use serde::Deserialize;
 
-use crate::parsers::pad_events;
+use crate::parsers::add_pad_events;
 use crate::rom::load_rom_into;
 
 /// Instruction budget granted per frame of `frames` bound (matches the
@@ -1064,10 +1064,8 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
          -> Result<(), String> {
             for (spec, port) in [(input, 0u8), (input2, 1)] {
                 if let Some(spec) = spec {
-                    script.extend(
-                        pad_events(&resolve(spec), port)
-                            .map_err(|e| format!("input script: {e}"))?,
-                    );
+                    add_pad_events(&mut script, &resolve(spec), port, m.input_at.is_some())
+                        .map_err(|e| format!("input script: {e}"))?;
                 }
             }
             if let Some(spec) = mouse {

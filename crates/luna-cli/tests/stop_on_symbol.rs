@@ -688,6 +688,26 @@ fn input_clocked_by_a_routine_drives_two_builds_through_the_same_ticks() {
     let out = luna("state", &slow, &["--input-at", "nowhere", "--input", "1:0"]);
     assert_eq!(out.status.code(), Some(2), "{}", text(&out));
 
+    // `N+K`: K frames after the N-th arrival. `N+0` is `N`; the form needs
+    // a routine to count arrivals on, on the command line and in a
+    // manifest alike.
+    let plus_zero = ["--input-at", "tick", "--input", "3+0:0x0080,6+0:0"];
+    assert_eq!(seen(&slow, &plus_zero), "000000808080000000");
+    // A tick of the slow build lasts three frames: four frames after
+    // arrivals 3 and 6, the press and the release each land one tick later.
+    let later = ["--input-at", "tick", "--input", "3+4:0x0080,6+4:0"];
+    assert_eq!(seen(&slow, &later), "000000008080800000");
+    let out = luna("state", &slow, &["--input", "3+30:0x8000"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert!(text(&out).contains("needs --input-at"), "{}", text(&out));
+    let out = luna_test(
+        &slow_dir,
+        "byframe.toml",
+        "rom = \"game.sfc\"\nforce_mapper = \"lorom\"\nframes = 10\ninput = \"3+2:0x0080\"\n",
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+
     // The profiler replays the same clocked script: both builds run the
     // same number of ticks' worth of presses, and it stays a profile.
     let out = luna(

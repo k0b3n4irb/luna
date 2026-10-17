@@ -778,6 +778,7 @@ pub(crate) fn run_state(
             port2,
             mouse: mouse_script,
             superscope: superscope_script,
+            clocked: input_at.is_some(),
         },
     ) {
         Ok(s) => s,

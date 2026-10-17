@@ -549,7 +549,10 @@ enum Command {
         /// slower; an arrival does not, so the run depends on the game's
         /// logic alone. The press changes the controller, and the game
         /// sees it at its next read: with the auto-read, from arrival N+1.
-        /// Example: `--input-at tickStart --input "81:0x0800,96:0"`.
+        /// A joypad entry `N+K:` sets the mask K frames after the N-th
+        /// arrival, for a screen that ignores a button held as it opens.
+        /// Example: `--input-at tickStart --input "81:0x0800,96:0"`, or
+        /// `--input-at screen_open --input "3+30:0x8000,3+36:0"`.
         #[arg(
             long = "input-at",
             conflicts_with_all = ["cpu_trace_from", "mem_trace_from", "dma_trace_from", "superfx_trace_from"]
@@ -879,7 +882,7 @@ enum Command {
         #[arg(long)]
         input2: Option<String>,
         /// Index the input scripts by arrivals on this routine instead of
-        /// by frame (`state --input-at`).
+        /// by frame (`state --input-at`; `N+K:` = K frames after arrival N).
         #[arg(long = "input-at")]
         input_at: Option<String>,
         /// Write every `--poke` into memory when execution reaches this
@@ -1112,7 +1115,8 @@ enum Command {
         gsu_pc_set: Option<PathBuf>,
         /// Index the input scripts by arrivals on this routine instead of
         /// by frame (`state --input-at`): the same script then drives two
-        /// builds of a game through the same ticks, whatever their speed.
+        /// builds of a game through the same ticks, whatever their speed
+        /// (`N+K:` = K frames after arrival N).
         #[arg(long = "input-at")]
         input_at: Option<String>,
         /// Write every `--poke` into memory when execution reaches this
@@ -1826,6 +1830,7 @@ fn main() -> ExitCode {
                     port2: &port2,
                     mouse: mouse.as_deref(),
                     superscope: superscope.as_deref(),
+                    clocked: input_at.is_some(),
                 },
                 sym: sym.as_deref(),
                 top,

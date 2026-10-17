@@ -9,8 +9,8 @@
 //! (so an exported recording replays directly with `--input @file`); the
 //! pure body it delegates to is [`parse_input_script_body`].
 
-/// Parse a `--input` script into `(frame, mask)` checkpoints sorted by
-/// ascending frame.
+/// Parse a `--input` script into `(frame, after, mask)` checkpoints sorted
+/// by ascending frame (`after` is the `K` of an `N+K` entry, else 0).
 ///
 /// The script is comma- **and** newline-separated `frame:hex` entries; a
 /// `#` starts a comment to end-of-line. The frame is decimal; the hex mask
@@ -18,7 +18,7 @@
 /// argument starts with `@`, the rest is a **file path** whose contents are
 /// parsed instead — so a recording exported by the GUI (a commented,
 /// multi-line file) replays directly via `--input @recording.input`.
-pub(crate) fn parse_input_script(script: &str) -> Result<Vec<(u64, u16)>, String> {
+pub(crate) fn parse_input_script(script: &str) -> Result<Vec<(u64, u64, u16)>, String> {
     let script = script.trim();
     if let Some(path) = script.strip_prefix('@') {
         let path = path.trim();
@@ -30,22 +30,29 @@ pub(crate) fn parse_input_script(script: &str) -> Result<Vec<(u64, u16)>, String
     }
 }
 
-/// A `--input` / `--input2` script (inline or `@file`) as joypad `port`
-/// events, ready for a [`luna_api::InputScript`].
-pub(crate) fn pad_events(
-    script: &str,
+/// Add a `--input` / `--input2` script (inline or `@file`) to `script` as
+/// joypad `port` events. `N+K:hex` entries (K frames after the N-th
+/// arrival) are taken only when `clocked`, i.e. under `--input-at`.
+pub(crate) fn add_pad_events(
+    script: &mut luna_api::InputScript,
+    spec: &str,
     port: u8,
-) -> Result<Vec<(u64, luna_api::InputEvent)>, String> {
-    Ok(parse_input_script(script)?
-        .into_iter()
-        .map(|(f, mask)| (f, luna_api::InputEvent::Pad { port, mask }))
-        .collect())
+    clocked: bool,
+) -> Result<(), String> {
+    let entries = parse_input_script(spec)?;
+    if !clocked && let Some(&(n, k, _)) = entries.iter().find(|e| e.1 != 0) {
+        return Err(format!(
+            "`{n}+{k}` counts {k} frames after arrival {n} on a routine: it needs --input-at"
+        ));
+    }
+    script.extend_pad(port, entries);
+    Ok(())
 }
 
 /// Pure `frame:hex` body parser (no I/O): comma/newline-separated entries,
 /// `#` line comments, sorted by frame. See [`parse_input_script`].
-pub(crate) fn parse_input_script_body(script: &str) -> Result<Vec<(u64, u16)>, String> {
-    luna_api::input::parse_pad_script(script)
+pub(crate) fn parse_input_script_body(script: &str) -> Result<Vec<(u64, u64, u16)>, String> {
+    luna_api::input::parse_pad_script_after(script)
 }
 
 /// A scripted mouse checkpoint: `(frame, (dx, dy, buttons))`.
@@ -378,6 +385,8 @@ pub(crate) struct InputFlags<'a> {
     /// `--mouse` / `--superscope` pointer scripts.
     pub mouse: Option<&'a str>,
     pub superscope: Option<&'a str>,
+    /// `--input-at` is given: the pad scripts may hold `N+K` entries.
+    pub clocked: bool,
 }
 
 impl<'a> InputFlags<'a> {
@@ -391,6 +400,7 @@ impl<'a> InputFlags<'a> {
             port2: "pad",
             mouse: None,
             superscope: None,
+            clocked: false,
         }
     }
 }
@@ -426,8 +436,8 @@ pub(crate) fn input_script(f: &InputFlags<'_>) -> Result<luna_api::InputScript, 
     let pads = std::iter::once((0u8, f.input)).chain(f.extra_pads.iter().copied());
     for (port, spec) in pads {
         if let Some(s) = spec {
-            match pad_events(s, port) {
-                Ok(v) => script.extend(v),
+            match add_pad_events(&mut script, s, port, f.clocked) {
+                Ok(()) => {}
                 Err(e) => {
                     // --input, --input2 … --input5 (port is 0-based).
                     let n = if port == 0 {
@@ -492,13 +502,13 @@ mod tests {
     #[test]
     fn input_script_parses_and_sorts_by_frame() {
         let v = parse_input_script("1610:0,1600:0x1000").unwrap();
-        assert_eq!(v, vec![(1600, 0x1000), (1610, 0)]);
+        assert_eq!(v, vec![(1600, 0, 0x1000), (1610, 0, 0)]);
     }
 
     #[test]
     fn input_script_accepts_0x_and_bare_hex_and_whitespace() {
         let v = parse_input_script(" 5 : 0X80 , 6:c0 ").unwrap();
-        assert_eq!(v, vec![(5, 0x80), (6, 0xC0)]);
+        assert_eq!(v, vec![(5, 0, 0x80), (6, 0, 0xC0)]);
     }
 
     #[test]
@@ -539,13 +549,17 @@ mod tests {
 # 8000:0x8000
 ";
         let v = parse_input_script(file).unwrap();
-        assert_eq!(v, vec![(1600, 0x1000), (1610, 0)], "P2 comment ignored");
+        assert_eq!(
+            v,
+            vec![(1600, 0, 0x1000), (1610, 0, 0)],
+            "P2 comment ignored"
+        );
     }
 
     #[test]
     fn input_script_strips_trailing_comment() {
         let v = parse_input_script("5:0x80  # press A").unwrap();
-        assert_eq!(v, vec![(5, 0x80)]);
+        assert_eq!(v, vec![(5, 0, 0x80)]);
     }
 
     #[test]
@@ -557,7 +571,24 @@ mod tests {
         let arg = format!("@{}", path.display());
         let v = parse_input_script(&arg).unwrap();
         let _ = std::fs::remove_file(&path);
-        assert_eq!(v, vec![(3, 0x1000), (7, 0)]);
+        assert_eq!(v, vec![(3, 0, 0x1000), (7, 0, 0)]);
+    }
+
+    #[test]
+    fn input_script_takes_n_plus_k_only_under_input_at() {
+        let v = parse_input_script("3+36:0, 3+30:0x8000, 2:0x10").unwrap();
+        assert_eq!(v, vec![(2, 0, 0x10), (3, 36, 0), (3, 30, 0x8000)]);
+        assert!(
+            parse_input_script("3+x:1")
+                .unwrap_err()
+                .contains("bad frame `3+x`")
+        );
+        let mut script = luna_api::InputScript::new();
+        let err = add_pad_events(&mut script, "3+30:0x8000", 0, false).unwrap_err();
+        assert!(err.contains("needs --input-at"), "got: {err}");
+        add_pad_events(&mut script, "3+30:0x8000,4:0", 0, true).unwrap();
+        assert!(script.has_after());
+        assert_eq!(script.next_frame(), Some(4));
     }
 
     #[test]

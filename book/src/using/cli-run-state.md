@@ -130,7 +130,7 @@ and is the hub for every headless diagnostic.
 | `--peek-at <SYMBOL>` | — | Read every `--peek` **each time** execution reaches this routine, one line per arrival with its frame and scanline. The run length stays `-n` / `--until-frame` / `--until-pc`. |
 | `--peek-at-out <PATH>` | — | Write the `--peek-at` rows as CSV (`hit,frame,line`, then one column of hex bytes per `--peek`) instead of printing them. |
 | `--poke-at <SYMBOL>`, `--poke-hit <N>`, `--poke <NAME=HEX>` | —, `1`, — | Write bytes into memory at the `N`-th arrival on a routine, just before its first instruction: puts the game in a state it does not reach by itself. Repeatable: each `--poke-at` takes the `--poke-hit` and `--poke`s that follow it. See *Stopping on a routine* below. |
-| `--input-at <SYMBOL>` | — | Index the input scripts by arrivals on this routine instead of by frame, so the presses land in the same game ticks whatever the speed of the code ([input scripts](input-scripts.md#a-script-clocked-by-the-game-not-by-the-frame)). |
+| `--input-at <SYMBOL>` | — | Index the input scripts by arrivals on this routine instead of by frame, so the presses land in the same game ticks whatever the speed of the code; a joypad entry `N+K:` lands K frames after the N-th arrival ([input scripts](input-scripts.md#a-script-clocked-by-the-game-not-by-the-frame)). |
 | `--schema` | off | Print the JSON Schema of the `--out` payload ([the state JSON](state-json.md)) and exit — no ROM needed. |
 | `--out <PATH>` | `-` | Where to write the JSON (`-` = stdout). |
 | `--force-mapper <M>` | auto | Force a mapper for headerless ROMs: `lorom`, `hirom`, `exhirom`, `sa1`, `superfx`, `dsp1`, `sdd1` (as in `run`; `spc7110` is recognised but not emulated). |

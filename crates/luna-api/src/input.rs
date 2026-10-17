@@ -77,6 +77,13 @@ pub struct InputScript {
     clock: Option<u32>,
     /// Arrivals on `clock` counted so far.
     arrivals: u64,
+    /// `N+K` events: `(arrival N, K frames after it, event)`, sorted by
+    /// arrival (see [`Self::extend_after`]).
+    after: Vec<(u64, u64, InputEvent)>,
+    /// Cursor into `after`: the entries before it are scheduled.
+    after_next: usize,
+    /// Scheduled `N+K` events by the frame they fire at, sorted.
+    pending: Vec<(u64, InputEvent)>,
 }
 
 impl InputScript {
@@ -93,14 +100,41 @@ impl InputScript {
         self.events.sort_by_key(|&(frame, _)| frame);
     }
 
-    /// Add a joypad script (see [`parse_pad_script`]) for `port`.
+    /// Add events that fire `K` frames after the `N`-th arrival on the
+    /// clock routine, as `(N, K, event)` (the `N+K:mask` entries of a
+    /// script). Only a script clocked by a routine
+    /// ([`Self::set_clock_pc`]) can replay them; a run by frame refuses
+    /// the script.
+    ///
+    /// An event cannot usefully land *on* an arrival when the arrival is a
+    /// screen opening: the screen ignores a button already held. `K`
+    /// frames later it is a press the screen sees, however long the game
+    /// took to get there. Each entry fires once, after its own arrival.
+    pub fn extend_after(&mut self, events: impl IntoIterator<Item = (u64, u64, InputEvent)>) {
+        self.after.extend(events);
+        self.after.sort_by_key(|&(arrival, _, _)| arrival);
+    }
+
+    /// Add a joypad script (see [`parse_pad_script_after`]) for `port`.
     pub fn add_pad(&mut self, port: u8, body: &str) -> Result<(), String> {
-        let v = parse_pad_script(body)?;
-        self.extend(
-            v.into_iter()
-                .map(|(f, mask)| (f, InputEvent::Pad { port, mask })),
-        );
+        let v = parse_pad_script_after(body)?;
+        self.extend_pad(port, v);
         Ok(())
+    }
+
+    /// Add parsed `(at, after, mask)` joypad entries for `port`: those
+    /// with `after == 0` by `at`, the others by [`Self::extend_after`].
+    pub fn extend_pad(&mut self, port: u8, entries: Vec<(u64, u64, u16)>) {
+        let (now, later): (Vec<_>, Vec<_>) = entries.into_iter().partition(|e| e.1 == 0);
+        self.extend(
+            now.into_iter()
+                .map(|(f, _, mask)| (f, InputEvent::Pad { port, mask })),
+        );
+        self.extend_after(
+            later
+                .into_iter()
+                .map(|(n, k, mask)| (n, k, InputEvent::Pad { port, mask })),
+        );
     }
 
     /// Add a mouse script (see [`parse_pointer_script`]).
@@ -150,7 +184,56 @@ impl InputScript {
     /// No events at all.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.events.is_empty()
+        self.events.is_empty() && self.after.is_empty()
+    }
+
+    /// The script holds `N+K` events ([`Self::extend_after`]).
+    #[must_use]
+    pub const fn has_after(&self) -> bool {
+        !self.after.is_empty()
+    }
+
+    /// The refusal of a run by frame: `N+K` events count from arrivals.
+    fn check_clocked(&self) -> Result<(), ApiError> {
+        if self.clock.is_none()
+            && let Some(&(n, k, _)) = self.after.first()
+        {
+            return Err(ApiError::BadArg(format!(
+                "`{n}+{k}` counts {k} frames after arrival {n} on a routine: \
+                 the script needs a routine to count arrivals on"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Arrival `arrival` happened during `frame`: schedule the `N+K`
+    /// events it starts.
+    fn schedule_after(&mut self, arrival: u64, frame: u64) {
+        let mut added = false;
+        while let Some(&(n, k, ev)) = self.after.get(self.after_next) {
+            if n > arrival {
+                break;
+            }
+            self.pending.push((frame.saturating_add(k), ev));
+            self.after_next += 1;
+            added = true;
+        }
+        if added {
+            self.pending.sort_by_key(|&(at, _)| at);
+        }
+    }
+
+    /// Apply the scheduled `N+K` events due at or before `frame`.
+    fn apply_pending(&mut self, em: &mut Emulator, frame: u64) -> Result<(), ApiError> {
+        let due = self
+            .pending
+            .iter()
+            .take_while(|&&(at, _)| at <= frame)
+            .count();
+        for (_, ev) in self.pending.drain(..due) {
+            em.apply_input(ev)?;
+        }
+        Ok(())
     }
 
     /// Every event, frame-sorted.
@@ -185,6 +268,7 @@ impl InputScript {
     /// Call it once per frame before stepping that frame (a frame-by-frame
     /// driver), or let [`Emulator::run_input_script`] chase the frames.
     pub fn apply_due(&mut self, em: &mut Emulator, frame: u64) -> Result<(), ApiError> {
+        self.check_clocked()?;
         while let Some(&(at, ev)) = self.events.get(self.next) {
             if at > frame {
                 break;
@@ -201,7 +285,26 @@ impl InputScript {
 /// comment to end-of-line, the frame is decimal, the mask 16-bit hex with an
 /// optional `0x`. (Reading an `@file` is the front-end's job.)
 pub fn parse_pad_script(body: &str) -> Result<Vec<(u64, u16)>, String> {
-    let mut out: Vec<(u64, u16)> = Vec::new();
+    parse_pad_script_after(body)?
+        .into_iter()
+        .map(|(at, after, mask)| {
+            if after == 0 {
+                Ok((at, mask))
+            } else {
+                Err(format!(
+                    "bad frame `{at}+{after}`: `N+K` counts frames after an arrival on a routine"
+                ))
+            }
+        })
+        .collect()
+}
+
+/// [`parse_pad_script`] that also takes `N+K:hex` entries, as
+/// `(at, after, mask)` sorted by `at`: the mask is set `K` frames after
+/// the `N`-th arrival on the script's clock routine (see
+/// [`InputScript::extend_after`]). A plain `N:hex` entry has `after = 0`.
+pub fn parse_pad_script_after(body: &str) -> Result<Vec<(u64, u64, u16)>, String> {
+    let mut out: Vec<(u64, u64, u16)> = Vec::new();
     for line in body.lines() {
         // Drop a `#` comment (whole-line or trailing) before splitting.
         let line = line.split('#').next().unwrap_or("");
@@ -213,20 +316,24 @@ pub fn parse_pad_script(body: &str) -> Result<Vec<(u64, u16)>, String> {
             let (frame_str, mask_str) = entry
                 .split_once(':')
                 .ok_or_else(|| format!("missing ':' in entry `{entry}`"))?;
-            let frame: u64 = frame_str
-                .trim()
-                .parse()
-                .map_err(|e| format!("bad frame `{frame_str}`: {e}"))?;
+            let bad = |e: std::num::ParseIntError| format!("bad frame `{}`: {e}", frame_str.trim());
+            let (at, after) = match frame_str.split_once('+') {
+                Some((n, k)) => (
+                    n.trim().parse::<u64>().map_err(bad)?,
+                    k.trim().parse::<u64>().map_err(bad)?,
+                ),
+                None => (frame_str.trim().parse::<u64>().map_err(bad)?, 0),
+            };
             let mask_str = mask_str
                 .trim()
                 .trim_start_matches("0x")
                 .trim_start_matches("0X");
             let mask: u16 = u16::from_str_radix(mask_str, 16)
                 .map_err(|e| format!("bad hex mask `{mask_str}`: {e}"))?;
-            out.push((frame, mask));
+            out.push((at, after, mask));
         }
     }
-    out.sort_by_key(|(f, _)| *f);
+    out.sort_by_key(|&(at, _, _)| at);
     Ok(out)
 }
 
@@ -356,6 +463,7 @@ impl Emulator {
         pcs: &[u32],
         mut on_event: impl FnMut(&mut Self, WatchEvent) -> bool,
     ) -> Result<bool, ApiError> {
+        script.check_clocked()?;
         let start = self.instructions_executed();
         // A script clocked by a routine adds that routine to the watch;
         // its arrivals are not the caller's events unless it asked too.
@@ -374,6 +482,8 @@ impl Emulator {
             let frame = self.frame_count()?;
             if clock.is_none() {
                 script.apply_due(self, frame)?;
+            } else {
+                script.apply_pending(self, frame)?;
             }
             let left = match bound {
                 ScriptBound::Frame(target) if frame >= target => return Ok(false),
@@ -395,6 +505,7 @@ impl Emulator {
                         script.arrivals += 1;
                         let arrival = script.arrivals;
                         script.apply_due(self, arrival)?;
+                        script.schedule_after(arrival, self.frame_count()?);
                     }
                     if i < pcs.len() && on_event(self, WatchEvent::Pc(i)) {
                         return Ok(true);
@@ -422,6 +533,7 @@ impl Emulator {
         bound: ScriptBound,
         mut audio: Option<&mut Vec<(i16, i16)>>,
     ) -> Result<u64, ApiError> {
+        script.check_clocked()?;
         let start = self.instructions_executed();
         if script.clock.is_some() {
             // Events fire on arrivals, which only a watching run sees; it

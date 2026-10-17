@@ -9,6 +9,17 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ### Added
 
+- **`--input-at`: an entry `N+K:` presses K frames after the N-th
+  arrival.** A screen that opens ignores a button already held, so a
+  press on the arrival that opens it is lost; `--input-at screen_open
+  --input "3+30:0x8000,3+36:0"` presses 30 frames after the third screen
+  opened, however long it took to appear. Each entry fires once, after
+  its own arrival. The joypad scripts of `luna state`, `luna profile`,
+  `luna record` and a manifest with `input_at` take it; without a
+  routine to count on, `N+K` is refused (exit 2).
+  `InputScript::extend_after` and `input::parse_pad_script_after` carry
+  it in `luna-api`.
+
 - **GUI: Settings → Video → Video Size, Video Filter and Aspect Ratio,
   as in Mesen2.** Video Size (1x … 10x, `Alt+1` … `Alt+0`) sizes the
   window to a whole multiple of the picture; Aspect Ratio offers Mesen2's

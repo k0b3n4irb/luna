@@ -105,3 +105,22 @@ above. This holds whatever the speed of the code as long as an
 auto-read completes between two arrivals — true of any loop that waits
 for VBlank — and as long as the game does not read `$4218` in the three
 scanlines the auto-read takes after VBlank starts.
+
+**A press some frames after an arrival.** A screen that opens ignores a
+button already held: a press on the arrival that opens it is lost. An
+entry `N+K:` sets the mask `K` frames after the `N`-th arrival, wherever
+in the run that arrival falls. Give `--input-at` the routine that opens
+a screen, and the menus are crossed at the same point whatever the time
+each screen took to appear:
+
+```bash
+# Start pressed 30 frames after the 3rd screen opened, let go 6 later.
+luna state --input-at screen_open --input "3+30:0x1000,3+36:0"   --until-frame 900 --screenshot /tmp/menu.png game.sfc
+```
+
+Each entry fires once, after its own arrival; the later arrivals do not
+replay it. `N+0:` is `N:`, and the two forms mix in one script. Without
+`--input-at` there is no arrival to count from, and `N+K` is refused
+(``--input: `3+30` counts 30 frames after arrival 3 on a routine: it
+needs --input-at``, exit 2). Only the joypad scripts take it (`--input`
+… `--input5`, `input` / `input2` in a manifest).

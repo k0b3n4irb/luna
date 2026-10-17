@@ -648,6 +648,7 @@ fn record(o: &RecordOptions<'_>) -> Result<(), Fail> {
     let extra_pads = [(1u8, o.input2)];
     let flags = InputFlags {
         extra_pads: &extra_pads,
+        clocked: o.input_at.is_some(),
         ..InputFlags::pad1(o.input)
     };
     let mut script =

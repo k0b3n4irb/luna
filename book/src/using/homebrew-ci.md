@@ -353,7 +353,10 @@ cam_x = 384
 The input can follow the same clock. With `input_at = "tick_start"` at
 the top of the manifest, every `input` (top level and checkpoints) is
 indexed by arrivals on that routine instead of by frame — `input =
-"81:0x0800"` presses at the 81st tick. Checkpoints on a routine and
+"81:0x0800"` presses at the 81st tick, and `input = "3+30:0x8000"`
+30 frames after the 3rd arrival
+([a press some frames after an arrival](input-scripts.md#a-script-clocked-by-the-game-not-by-the-frame)).
+Checkpoints on a routine and
 input on frames still depend on the speed of the code, because the tick
 that receives the press does; with both on the routine, a test that
 fails after a compiler change means the logic changed
