@@ -3,11 +3,12 @@
 //!
 //! Both act on the picture a front-end shows, after the emulation: the frame
 //! `Emulator::render_frame_rgba` returns is untouched. The behaviour follows
-//! Mesen2; the code is luna's own, written from the algorithms (for xBRZ
-//! and the 2xSaI family, from a functional description of Mesen2's, checked
-//! identical to its pictures). The filters luna does not implement yet (the
-//! two NTSC filters, `HQx`) are listed so a menu can show Mesen2's
-//! whole list, and report [`VideoFilter::is_available`] `false`.
+//! Mesen2; the code is luna's own, written from the algorithms (for NTSC
+//! (blargg), xBRZ and the 2xSaI family, from a functional description of
+//! Mesen2's, checked identical to its pictures). The filters luna does not
+//! implement yet (NTSC (Bisqwit), NES-only in Mesen2, and `HQx`) are listed
+//! so a menu can show Mesen2's whole list, and report
+//! [`VideoFilter::is_available`] `false`.
 
 /// One entry of Mesen2's Video Filter menu, in its order (`VideoFilterType`).
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
@@ -15,7 +16,7 @@ pub enum VideoFilter {
     /// The frame as rendered.
     #[default]
     None,
-    /// NTSC composite signal (blargg's `snes_ntsc`). Not available.
+    /// NTSC composite signal (blargg's `snes_ntsc`), 602 pixels wide.
     NtscBlargg,
     /// NTSC composite signal (Bisqwit), NES-only in Mesen2. Not available.
     NtscBisqwit,
@@ -185,6 +186,7 @@ impl VideoFilter {
         matches!(
             self,
             Self::None
+                | Self::NtscBlargg
                 | Self::LcdGrid
                 | Self::Xbrz2x
                 | Self::Xbrz3x
@@ -207,7 +209,9 @@ impl VideoFilter {
     }
 
     /// How many output pixels per input pixel, on each axis; `1` for a
-    /// filter that is not available (it leaves the frame as rendered).
+    /// filter that is not available (it leaves the frame as rendered) and
+    /// for NTSC, whose width is not a whole multiple (see
+    /// [`Self::output_size`]).
     pub const fn scale(self) -> usize {
         match self {
             Self::LcdGrid
@@ -227,9 +231,20 @@ impl VideoFilter {
         }
     }
 
+    /// The size of the filtered picture of a `width` × `height` frame.
+    /// NTSC makes every row [`NTSC_WIDTH`] wide and doubles the rows of a
+    /// low-res (256-wide) frame.
+    pub const fn output_size(self, width: usize, height: usize) -> (usize, usize) {
+        match self {
+            Self::NtscBlargg if width >= 512 => (NTSC_WIDTH, height),
+            Self::NtscBlargg => (NTSC_WIDTH, height * 2),
+            _ => (width * self.scale(), height * self.scale()),
+        }
+    }
+
     /// Filter a `width` × `height` RGBA frame into `out` (resized to fit),
     /// returning the output size. A filter that is not available copies the
-    /// frame unchanged.
+    /// frame unchanged. [`Self::apply_at`] with frame 0.
     pub fn apply(
         self,
         src: &[u8],
@@ -237,10 +252,25 @@ impl VideoFilter {
         height: usize,
         out: &mut Vec<u8>,
     ) -> (usize, usize) {
+        self.apply_at(src, width, height, 0, out)
+    }
+
+    /// [`Self::apply`] for PPU frame `frame`, whose parity sets the NTSC
+    /// filter's burst phase (the other filters ignore it).
+    pub fn apply_at(
+        self,
+        src: &[u8],
+        width: usize,
+        height: usize,
+        frame: u64,
+        out: &mut Vec<u8>,
+    ) -> (usize, usize) {
         let s = self.scale();
-        out.resize(width * s * height * s * 4, 0);
+        let (ow, oh) = self.output_size(width, height);
+        out.resize(ow * oh * 4, 0);
         let pixels = &src[..width * height * 4];
         match self {
+            Self::NtscBlargg => ntsc(pixels, width, height, frame, out),
             Self::LcdGrid => lcd_grid(pixels, width, height, LCD_GRID_BRIGHTNESS, out),
             Self::Xbrz2x | Self::Xbrz3x | Self::Xbrz4x | Self::Xbrz5x | Self::Xbrz6x => {
                 xbrz(s, pixels, width, height, out);
@@ -258,7 +288,7 @@ impl VideoFilter {
             _ if s > 1 => prescale(pixels, width, height, s, out),
             _ => out.copy_from_slice(pixels),
         }
-        (width * s, height * s)
+        (ow, oh)
     }
 }
 
@@ -1126,6 +1156,404 @@ fn xbrz_blend(
     }
 }
 
+// --- NTSC (blargg) ---------------------------------------------------------
+//
+// The composite signal of a SNES on an NTSC set, as Mesen2's `snes_ntsc`
+// gives it: every reduced SNES colour is turned once into the share it
+// lends to its neighbours (for each burst phase and each column alignment),
+// and a row is then the sum of those shares. All the float work happens
+// when the table is built, in single precision, in the reference's order
+// of operations: the table must come out bit for bit.
+
+/// Mesen2's NTSC filter settings, each in −1 … +1 (the UI's −100 … 100
+/// divided by 100); all zero is Mesen2's default and its Composite preset.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct NtscSettings {
+    /// Hue: −1 = −180°, +1 = +180°.
+    pub hue: f32,
+    /// Saturation: −1 = grey, +1 = twice.
+    pub saturation: f32,
+    /// Contrast: −1 = half, +1 = one and a half.
+    pub contrast: f32,
+    /// Brightness.
+    pub brightness: f32,
+    /// Edge enhancement (+) or blur (−).
+    pub sharpness: f32,
+    /// Gamma: −1 = 1.5 (dark), +1 = 0.5 (light).
+    pub gamma: f32,
+    /// Luma bandwidth.
+    pub resolution: f32,
+    /// Colour artefacts from colour changes.
+    pub artifacts: f32,
+    /// Colour artefacts from brightness changes.
+    pub fringing: f32,
+    /// Chroma bandwidth reduction.
+    pub bleed: f32,
+    /// Average the three burst phases (forced on when both `artifacts`
+    /// and `fringing` are −1).
+    pub merge_fields: bool,
+}
+
+/// Width of an NTSC row, low-res or hi-res: 86 chunks of 7 pixels.
+pub const NTSC_WIDTH: usize = 602;
+/// Packed words per table entry (126 used).
+const NTSC_ENTRY: usize = 128;
+/// Words of one burst phase in an entry.
+const NTSC_KERNEL: usize = 42;
+/// A field's lowest bit, in each of the three packed channels.
+const NTSC_BUILDER: u32 = 0x0020_0802;
+/// `pack(256, 256, 256)`.
+const NTSC_BIAS: u32 = NTSC_BUILDER * 256;
+/// Per column alignment: start in the kernel bank, sign, composite weights.
+const NTSC_ALIGN: [(usize, f32, [f32; 4]); 3] = [
+    (353, 1.0, [1.0, 1.0, 0.6667, 0.0]),
+    (22, -1.0, [0.3333, 1.0, 1.0, 0.3333]),
+    (154, 1.0, [0.0, 0.6667, 1.0, 1.0]),
+];
+
+/// The YIQ decoder: the (I, Q) weights of red, green and blue.
+const NTSC_DECODER: [f32; 6] = [0.956, 0.621, -0.272, -0.647, -1.105, 1.702];
+
+/// Three channels in one word: red in bits 21–30, green 11–20, blue 1–10.
+const fn ntsc_pack([r, g, b]: [i32; 3]) -> u32 {
+    ((r as u32) << 21) | ((g as u32) << 11) | ((b as u32) << 1)
+}
+
+/// YIQ to truncated RGB through one burst's decoder matrix.
+// Plain products and sums, as the reference rounds them (no fused
+// multiply-add).
+#[allow(clippy::suboptimal_flops)]
+fn ntsc_rgb(y: f32, i: f32, q: f32, m: &[f32; 6]) -> [i32; 3] {
+    [
+        (y + m[0] * i + m[1] * q) as i32,
+        (y + m[2] * i + m[3] * q) as i32,
+        (y + m[4] * i + m[5] * q) as i32,
+    ]
+}
+
+/// The precomputed shares of every reduced colour (8192 × 128 words).
+#[derive(Clone)]
+pub struct NtscTable {
+    words: Box<[u32]>,
+}
+
+impl std::fmt::Debug for NtscTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NtscTable")
+    }
+}
+
+// The reference rounds every product and sum on its own: a fused
+// multiply-add gives another table.
+#[allow(clippy::suboptimal_flops)]
+impl NtscTable {
+    /// Build the table for `s`.
+    #[must_use]
+    pub fn new(s: &NtscSettings) -> Self {
+        use std::f32::consts::PI;
+        // Luma: a windowed sinc with roll-off, in t[33..66]; chroma: a
+        // Gaussian, in t[0..33].
+        let mut t = [0f32; 66];
+        let rolloff = 1.0 + s.sharpness * 0.032;
+        let n = 32.0f32;
+        let pow_a_n = rolloff.powf(n);
+        let r1 = s.resolution + 1.0;
+        let to_angle = ((PI / n) * 0.20) * (r1 * r1 + 1.0);
+        t[49] = 32.0;
+        for i in 0..33 {
+            let x = i as i32 - 16;
+            let angle = x as f32 * to_angle;
+            if x != 0 || !(0.981..=1.056).contains(&pow_a_n) {
+                let rc = rolloff * angle.cos();
+                let num = ((1.0 - rc) - (pow_a_n * (n * angle).cos()))
+                    + ((pow_a_n * rolloff) * (31.0 * angle).cos());
+                let den = ((1.0 - rc) - rc) + (rolloff * rolloff);
+                t[33 + i] = (num / den) - 0.5;
+            }
+        }
+        let mut sum = 0f32;
+        for i in 0..33 {
+            let u = ((PI * 2.0) / 32.0) * i as f32;
+            let w = (0.42 - (0.5 * u.cos())) + (0.08 * (u * 2.0).cos());
+            t[33 + i] *= w;
+            sum += t[33 + i];
+        }
+        let scale = 1.0 / sum;
+        for v in &mut t[33..] {
+            *v *= scale;
+        }
+        let mut c = s.bleed;
+        if c < 0.0 {
+            c *= c;
+            c *= c;
+            c *= c;
+            c *= -30.0f32 / 0.65;
+        }
+        c = (-0.03125) - ((0.65 * (-0.03125)) * c);
+        for i in -16i32..=16 {
+            t[(16 + i) as usize] = ((i * i) as f32 * c).exp();
+        }
+        for parity in 0..2 {
+            let sum: f32 = t[..33].iter().skip(parity).step_by(2).sum();
+            let scale = 1.0 / sum;
+            for v in t[..33].iter_mut().skip(parity).step_by(2) {
+                *v *= scale;
+            }
+        }
+        // The 8 → 7 resampling bank: seven phases of both kernels. The
+        // remainder runs on from the chroma half into the luma half.
+        let mut bank = [0f32; 7 * 66];
+        let mut weight = 1.0f32;
+        for block in bank.chunks_exact_mut(66) {
+            weight -= 0.125;
+            let mut rest = 0f32;
+            for (k, &cur) in block.iter_mut().zip(&t) {
+                let m = cur * weight;
+                *k = m + rest;
+                rest = cur - m;
+            }
+        }
+
+        let step = 1.0f32 / 31.0;
+        let gamma = 1.1333 - s.gamma * 0.5;
+        let contrast = s.contrast * 64.0 + 128.0;
+        let brightness = s.brightness * 64.0 + 256.5;
+        let level: [f32; 32] =
+            std::array::from_fn(|i| (i as f32 * step).powf(gamma) * contrast + brightness);
+
+        let mut hue = s.hue * PI + (PI / 180.0) * 15.0;
+        hue += (PI / 180.0) * -15.0;
+        let sat = s.saturation + 1.0;
+        let (mut sn, mut cs) = (hue.sin() * sat, hue.cos() * sat);
+        let mut matrix = [[0f32; 6]; 3];
+        for m in &mut matrix {
+            for (pair, d) in m.chunks_exact_mut(2).zip(NTSC_DECODER.chunks_exact(2)) {
+                pair[0] = d[0] * cs - d[1] * sn;
+                pair[1] = d[0] * sn + d[1] * cs;
+            }
+            let t = sn * -0.5 - cs * 0.866_025;
+            cs = sn * 0.866_025 + cs * -0.5;
+            sn = t;
+        }
+
+        let mut a = s.artifacts;
+        if a > 0.0 {
+            a *= 0.5;
+        }
+        let artifacts = a * 1.0 + 1.0;
+        let mut f = s.fringing;
+        if f > 0.0 {
+            f *= 1.0;
+        }
+        let fringing = f * 1.0 + 1.0;
+        let merge = s.merge_fields || (s.artifacts <= -1.0 && s.fringing <= -1.0);
+
+        let mut words = vec![0u32; 8192 * NTSC_ENTRY].into_boxed_slice();
+        for (e, w) in words.chunks_exact_mut(NTSC_ENTRY).enumerate() {
+            let rr = level[(e >> 8) & 0x1E];
+            let gg = level[(e >> 4) & 0x1F];
+            let bb = level[(e << 1) & 0x1E];
+            let y = rr * 0.299 + gg * 0.587 + bb * 0.114;
+            let (mut i, mut q) = (
+                rr * 0.596 - gg * 0.275 - bb * 0.321,
+                rr * 0.212 - gg * 0.523 + bb * 0.311,
+            );
+            let color = ntsc_pack(ntsc_rgb(y, i, q, &matrix[0]));
+            let y = y - 256.5;
+            for (burst, m) in matrix.iter().enumerate() {
+                for (align, &(start, ng, k)) in NTSC_ALIGN.iter().enumerate() {
+                    let yy = (y * fringing) * ng;
+                    let (ic0, qc1) = ((i + yy) * k[0], (q + yy) * k[1]);
+                    let (ic2, qc3) = ((i - yy) * k[2], (q - yy) * k[3]);
+                    let fac = artifacts * ng;
+                    let ii = i * fac;
+                    let (yc0, yc2) = ((y + ii) * k[0], (y - ii) * k[2]);
+                    let qq = q * fac;
+                    let (yc1, yc3) = ((y + qq) * k[1], (y - qq) * k[3]);
+                    let mut p = start;
+                    for n in 0..14 {
+                        let k = &bank[p..p + 37];
+                        let ic = k[0] * ic0 + k[2] * ic2;
+                        let qc = k[1] * qc1 + k[3] * qc3;
+                        let yc = k[33] * yc0 + k[34] * yc1 + k[35] * yc2 + k[36] * yc3 + 256.5;
+                        p = if p < 396 { p + 65 } else { p - 398 };
+                        w[burst * NTSC_KERNEL + align * 14 + n] =
+                            ntsc_pack(ntsc_rgb(yc, ic, qc, m)).wrapping_sub(NTSC_BIAS);
+                    }
+                }
+                let t = i * -0.5 - q * -0.866_025;
+                q = i * -0.866_025 + q * -0.5;
+                i = t;
+            }
+            if merge {
+                let avg =
+                    |x: u32, y: u32| (x.wrapping_add(y).wrapping_sub((x ^ y) & NTSC_BUILDER)) >> 1;
+                for n in 0..NTSC_KERNEL {
+                    let p0 = w[n].wrapping_add(NTSC_BIAS);
+                    let p1 = w[42 + n].wrapping_add(NTSC_BIAS);
+                    let p2 = w[84 + n].wrapping_add(NTSC_BIAS);
+                    w[n] = avg(p0, p1).wrapping_sub(NTSC_BIAS);
+                    w[42 + n] = avg(p1, p2).wrapping_sub(NTSC_BIAS);
+                    w[84 + n] = avg(p2, p0).wrapping_sub(NTSC_BIAS);
+                }
+            }
+            // A flat area must come out exactly `color`: the six words of
+            // one output pixel are corrected to sum to it.
+            for k in w[..3 * NTSC_KERNEL].chunks_exact_mut(NTSC_KERNEL) {
+                for i in 0..7 {
+                    let (t1, t2) = ((i + 12) % 14 + 14, (i + 10) % 14 + 28);
+                    let e = [i, t1, t2, i + 7, i + 19, i + 31]
+                        .iter()
+                        .fold(color, |e, &j| e.wrapping_sub(k[j]));
+                    let f = ((e.wrapping_add(0x0040_1004) >> 2) & 0x0FE3_F8FE)
+                        .wrapping_sub(0x0802_0080);
+                    for j in [i + 31, i + 19, i + 7] {
+                        k[j] = k[j].wrapping_add(f);
+                    }
+                    k[i] = k[i].wrapping_add(e.wrapping_sub(f.wrapping_mul(3)));
+                }
+            }
+        }
+        Self { words }
+    }
+
+    /// The table for Mesen2's default settings, built once.
+    pub fn default_table() -> &'static Self {
+        static TABLE: std::sync::OnceLock<NtscTable> = std::sync::OnceLock::new();
+        TABLE.get_or_init(|| Self::new(&NtscSettings::default()))
+    }
+
+    /// The 42 words of colour `c` (15-bit BGR) at burst `phase`.
+    fn kernel(&self, c: u16, phase: usize) -> &[u32] {
+        let (r, g, b) = (c & 31, (c >> 5) & 31, (c >> 10) & 31);
+        let e = usize::from(((r >> 1) << 9) | (g << 4) | (b >> 1));
+        let at = e * NTSC_ENTRY + phase * NTSC_KERNEL;
+        &self.words[at..at + NTSC_KERNEL]
+    }
+
+    /// One row of 256 (low-res) or 512 (hi-res) SNES colours into
+    /// [`NTSC_WIDTH`] pixels `0xAARRGGBB`, at burst `phase` (0 … 2).
+    pub fn blit_row(&self, row: &[u16], phase: usize, out: &mut [u32]) {
+        if row.len() >= 512 {
+            self.blit_hires(&row[..512], phase, out);
+        } else {
+            self.blit_lores(&row[..256], phase, out);
+        }
+    }
+
+    fn blit_lores(&self, row: &[u16], phase: usize, out: &mut [u32]) {
+        const TAPS: [[usize; 6]; 7] = [
+            [0, 19, 31, 7, 26, 38],
+            [1, 20, 32, 8, 27, 39],
+            [2, 14, 33, 9, 21, 40],
+            [3, 15, 34, 10, 22, 41],
+            [4, 16, 28, 11, 23, 35],
+            [5, 17, 29, 12, 24, 36],
+            [6, 18, 30, 13, 25, 37],
+        ];
+        let black = self.kernel(0, phase);
+        let (mut cur, mut prev) = ([black, black, self.kernel(row[0], phase)], [black; 3]);
+        let emit = |cur: &[&[u32]; 3], prev: &[&[u32]; 3], x: usize| {
+            let t = TAPS[x];
+            let s = cur[0][t[0]]
+                .wrapping_add(cur[1][t[1]])
+                .wrapping_add(cur[2][t[2]])
+                .wrapping_add(prev[0][t[3]])
+                .wrapping_add(prev[1][t[4]])
+                .wrapping_add(prev[2][t[5]]);
+            ntsc_extract(s, 1)
+        };
+        let colours = row[1..]
+            .chunks_exact(3)
+            .chain(std::iter::once(&[0u16; 3][..]));
+        for (chunk, px) in colours.zip(out.chunks_exact_mut(7)) {
+            for (slot, xs) in [0..2, 2..4, 4..7].into_iter().enumerate() {
+                prev[slot] = cur[slot];
+                cur[slot] = self.kernel(chunk[slot], phase);
+                for x in xs {
+                    px[x] = emit(&cur, &prev, x);
+                }
+            }
+        }
+    }
+
+    fn blit_hires(&self, row: &[u16], phase: usize, out: &mut [u32]) {
+        const TAPS: [[usize; 12]; 7] = [
+            [0, 6, 19, 18, 31, 30, 7, 13, 26, 25, 38, 37],
+            [1, 0, 20, 19, 32, 31, 8, 7, 27, 26, 39, 38],
+            [2, 1, 14, 20, 33, 32, 9, 8, 21, 27, 40, 39],
+            [3, 2, 15, 14, 34, 33, 10, 9, 22, 21, 41, 40],
+            [4, 3, 16, 15, 28, 34, 11, 10, 23, 22, 35, 41],
+            [5, 4, 17, 16, 29, 28, 12, 11, 24, 23, 36, 35],
+            [6, 5, 18, 17, 30, 29, 13, 12, 25, 24, 37, 36],
+        ];
+        let black = self.kernel(0, phase);
+        let mut cur = [black; 6];
+        cur[4] = self.kernel(row[0], phase);
+        cur[5] = self.kernel(row[1], phase);
+        let mut prev = [black; 6];
+        let emit = |cur: &[&[u32]; 6], prev: &[&[u32]; 6], x: usize| {
+            let t = TAPS[x];
+            let s = (0..6).fold(0u32, |s, k| {
+                s.wrapping_add(cur[k][t[k]]).wrapping_add(prev[k][t[6 + k]])
+            });
+            ntsc_extract(s, 0)
+        };
+        let colours = row[2..]
+            .chunks_exact(6)
+            .chain(std::iter::once(&[0u16; 6][..]));
+        for (chunk, px) in colours.zip(out.chunks_exact_mut(7)) {
+            for slot in 0..6 {
+                prev[slot] = cur[slot];
+                cur[slot] = self.kernel(chunk[slot], phase);
+                px[slot] = emit(&cur, &prev, slot);
+            }
+            px[6] = emit(&cur, &prev, 6);
+        }
+    }
+}
+
+/// Clamp the three packed channels of a summed word and extract them as
+/// `0xFFRRGGBB`; `shift` is 1 for a low-res sum, 0 for a hi-res one.
+const fn ntsc_extract(mut s: u32, shift: u32) -> u32 {
+    let u = (s >> (9 - shift)) & 0x0030_0C03;
+    let mut c = 0x2028_0A02u32.wrapping_sub(u);
+    s |= c;
+    c = c.wrapping_sub(u);
+    s &= c;
+    let s = s >> (1 - shift);
+    0xFF00_0000 | (((s >> 20) & 0xFF) << 16) | (((s >> 10) & 0xFF) << 8) | (s & 0xFF)
+}
+
+/// The NTSC filter on a `width` × `height` RGBA frame (256 wide low-res or
+/// 512 wide hi-res), as Mesen2 shows it with its default overscan: low-res
+/// rows are output twice. The burst phase starts at 0 on an even `frame`
+/// and 1 on an odd one, then follows the row's place in Mesen2's 239-row
+/// picture (a 224-row frame sits 7 rows down).
+fn ntsc(src: &[u8], width: usize, height: usize, frame: u64, out: &mut [u8]) {
+    let table = NtscTable::default_table();
+    let hires = width >= 512;
+    let lines = if hires { height / 2 } else { height };
+    let pad = if lines == 239 { 0 } else { 7 } * if hires { 2 } else { 1 };
+    let start = (frame % 2) as usize;
+    let mut row = vec![0u16; width];
+    let mut line = vec![0u32; NTSC_WIDTH];
+    let copies = if hires { 1 } else { 2 };
+    for (y, (src, dst)) in src
+        .chunks_exact(width * 4)
+        .zip(out.chunks_exact_mut(NTSC_WIDTH * 4 * copies))
+        .enumerate()
+    {
+        for (c, p) in row.iter_mut().zip(src.chunks_exact(4)) {
+            *c = u16::from(p[0] >> 3) | u16::from(p[1] >> 3) << 5 | u16::from(p[2] >> 3) << 10;
+        }
+        table.blit_row(&row, (start + pad + y) % 3, &mut line);
+        for (d, &px) in dst.chunks_exact_mut(4).zip(line.iter().cycle()) {
+            d.copy_from_slice(&[(px >> 16) as u8, (px >> 8) as u8, px as u8, 0xFF]);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1371,5 +1799,124 @@ mod tests {
         assert!((xbrz_dist_rgb(0xFF00_0000, 0xFFFF_FFFF) - 255.0).abs() < 1e-12);
         assert!((xbrz_dist_rgb(0, 0x0002_0000) - 1.845_218_54).abs() < 1e-6);
         assert!((xbrz_dist_rgb(0x0002_0000, 0) - 1.141_591_55).abs() < 1e-6);
+    }
+
+    /// FNV-1a 64 over little-endian words, from the basis the reference
+    /// hashes were taken with (the standard one with a digit missing).
+    fn fnv(words: impl IntoIterator<Item = u32>) -> u64 {
+        words
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .fold(0x1465_0FB0_739D_0383, |h, b| {
+                (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+            })
+    }
+
+    #[test]
+    fn ntsc_tables_match_the_reference_hashes() {
+        let table = |hue, sat, con, bri, sharp, gamma, res, art, fringe, bleed, merge| {
+            let s = NtscSettings {
+                hue,
+                saturation: sat,
+                contrast: con,
+                brightness: bri,
+                sharpness: sharp,
+                gamma,
+                resolution: res,
+                artifacts: art,
+                fringing: fringe,
+                bleed,
+                merge_fields: merge,
+            };
+            fnv(NtscTable::new(&s).words.iter().copied())
+        };
+        let z = 0.0;
+        assert_eq!(
+            table(z, z, z, z, z, z, z, z, z, z, false),
+            0xb45d_294e_040d_5056
+        );
+        assert_eq!(
+            table(z, z, z, z, z, z, z, z, z, z, true),
+            0xd57c_4a81_536d_39ea
+        );
+        // S-Video, RGB, Mesen2's Monochrome.
+        assert_eq!(
+            table(z, z, z, z, 0.2, z, 0.2, -1.0, -1.0, z, false),
+            0x45bb_d88a_51bd_2217
+        );
+        assert_eq!(
+            table(z, z, z, z, 0.2, z, 0.7, -1.0, -1.0, -1.0, false),
+            0xa2f7_a544_ad30_987a
+        );
+        assert_eq!(
+            table(z, -1.0, z, z, 0.2, z, 0.7, -0.2, -0.2, -0.1, false),
+            0xff9e_2cd9_a64c_8134
+        );
+        assert_eq!(
+            table(
+                0.13, 0.27, -0.31, 0.11, -0.45, 0.33, -0.6, 0.5, 0.4, 0.7, false
+            ),
+            0x05eb_5c53_ce94_1886
+        );
+        assert_eq!(
+            table(-1.0, 1.0, 1.0, -1.0, 1.0, -1.0, 1.0, 1.0, 1.0, 1.0, false),
+            0x0b87_e9af_9fbe_9462
+        );
+        assert_eq!(
+            table(
+                0.5, -0.5, 0.5, 0.5, -1.0, 1.0, -1.0, -1.0, -0.5, -0.37, true
+            ),
+            0xd68c_cbfe_c31d_b186
+        );
+        let t = NtscTable::default_table();
+        let white = &t.words[0x1FFF * NTSC_ENTRY..][..4];
+        assert_eq!(white, [0x2167_ea0a, 0x21c7_e212, 0x2127_6a02, 0x2107_4206]);
+    }
+
+    #[test]
+    fn ntsc_rows_match_the_reference_blits() {
+        let t = NtscTable::default_table();
+        let blit = |w: usize, h: usize, start: usize, px: fn(usize, usize) -> u16| {
+            let mut line = vec![0u32; NTSC_WIDTH];
+            let mut all = Vec::new();
+            for y in 0..h {
+                let row: Vec<u16> = (0..w).map(|x| px(x, y)).collect();
+                t.blit_row(&row, (start + y) % 3, &mut line);
+                all.extend_from_slice(&line);
+            }
+            all
+        };
+        let lores = |x: usize, y: usize| ((37 * x + 101 * y + (x * y) % 7) & 0x7FFF) as u16;
+        let hires = |x: usize, y: usize| ((19 * x + 53 * y + (x ^ y)) & 0x7FFF) as u16;
+        for (start, hash, spot) in [
+            (0, 0xec42_e5d8_a543_d5ef, 0xff7e_6266),
+            (1, 0x7c16_24a5_5812_d4eb, 0xff80_666a),
+            (2, 0x66ae_ad95_ac6f_11e3, 0xff78_6662),
+        ] {
+            let out = blit(256, 239, start, lores);
+            assert_eq!(out[100 * NTSC_WIDTH + 300], spot, "phase {start}");
+            assert_eq!(fnv(out), hash, "phase {start}");
+        }
+        let out = blit(256, 239, 0, lores);
+        assert_eq!(
+            out[..4],
+            [0xff04_0002, 0xff02_0000, 0xff06_0000, 0xff0a_0000]
+        );
+        for (start, hash, spot) in [
+            (0, 0xd577_25d8_543b_e7af, 0xff4a_1e3b),
+            (1, 0x2bd3_05b7_a684_97df, 0xff2a_2207),
+            (2, 0xe04f_1f9e_6ffd_235c, 0xff5f_250b),
+        ] {
+            let out = blit(512, 478, start, hires);
+            assert_eq!(out[100 * NTSC_WIDTH + 300], spot, "hi-res phase {start}");
+            assert_eq!(fnv(out), hash, "hi-res phase {start}");
+        }
+        // Flat white settles on F6FCF6: the low-res clamp stops green at 252.
+        let out = blit(256, 1, 0, |_, _| 0x7FFF);
+        assert!(
+            out[9..595].iter().all(|&p| p == 0xFFF6_FCF6),
+            "{:08x}",
+            out[300]
+        );
     }
 }

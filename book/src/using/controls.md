@@ -174,12 +174,17 @@ when a Super Multitap is on port 2. Fixed, Mesen2-like layout:
   follow the edges of the drawing and keep them sharp, the strongest
   smoothing of the list; *2xSai*, *Super2xSai* and *SuperEagle* smooth
   edges between blocks of colour by blending, each with its own
-  weighting. *Use bilinear interpolation* smooths the final stretch
-  instead of keeping square pixels. NTSC (blargg and Bisqwit) and HQx are
-  listed greyed out: their only implementations are copyleft code, which
-  luna's licence (MPL-2.0) does not take in, so they are being rewritten
-  from their algorithms (xBRZ and the 2xSaI family already give Mesen2's
-  pictures to the pixel). A
+  weighting; *NTSC (blargg)* shows the picture as a composite NTSC
+  television did, with its colour fringes on fine detail, dot crawl
+  between frames and soft horizontal edges (for example, the waterfalls
+  and dithered shadows of many games blend into the colours they were
+  drawn for). *Use bilinear interpolation* smooths the final stretch
+  instead of keeping square pixels. *NTSC (Bisqwit)* (NES-only in Mesen2)
+  and HQx are listed greyed out: their only implementations are copyleft
+  code, which luna's licence (MPL-2.0) does not take in, so they are being
+  rewritten from their algorithms (NTSC (blargg), xBRZ and the 2xSaI
+  family already give Mesen2's pictures to the pixel, NTSC at Mesen2's
+  default settings). A
   screenshot goes through the filter, not the aspect ratio. Filter,
   aspect ratio and bilinear choice are kept in `video.json` with the
   frame-rate counter.

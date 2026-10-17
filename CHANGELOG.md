@@ -25,9 +25,10 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   window to a whole multiple of the picture; Aspect Ratio offers Mesen2's
   seven choices (square pixels by default, NTSC 8:7, PAL 11:8, Auto by
   region, 4:3, 16:9, a custom ratio); Video Filter offers Prescale 2x …
-  10x, Scale 2x … 4x, LCD Grid, xBRZ 2x … 6x, 2xSai, Super2xSai,
-  SuperEagle and bilinear interpolation, each giving Mesen2's pictures to
-  the pixel. Mesen2's other filters (NTSC, HQx) are listed greyed out:
+  10x, Scale 2x … 4x, LCD Grid, NTSC (blargg, at Mesen2's default
+  settings), xBRZ 2x … 6x, 2xSai, Super2xSai, SuperEagle and bilinear
+  interpolation, each giving Mesen2's pictures to the pixel. Mesen2's other
+  filters (NTSC (Bisqwit), NES-only there, and HQx) are listed greyed out:
   their only implementations are copyleft code, which MPL-2.0 luna does
   not take in, and they are rewritten from their algorithms one by one.
   `luna_api::video` holds the filters and the ratios,

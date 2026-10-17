@@ -133,10 +133,10 @@ struct LunaApp {
     region_pal: bool,
     /// The filtered frame, reused across redraws.
     filter_buf: Vec<u8>,
-    /// What the picture's size last derived from: frame rows, filter scale
+    /// What the picture's size last derived from: frame rows, filter output size
     /// and aspect ratio. A change re-applies the Video Size scale (Mesen2
     /// `ProcessResolutionChange`).
-    last_resolution: Option<(usize, usize, u64)>,
+    last_resolution: Option<(usize, (usize, usize), u64)>,
     /// Host gamepads (gilrs). `None` when the backend failed to init.
     gilrs: Option<gilrs::Gilrs>,
     /// Live SNES button mask per player derived from gamepads 1 and 2,
@@ -634,7 +634,11 @@ impl LunaApp {
     /// window was just created at its size.
     fn process_resolution_change(&mut self) {
         let ratio = self.video.ratio(self.region_pal, CANVAS_W, self.frame_h);
-        let key = (self.frame_h, self.video.filter.scale(), ratio.to_bits());
+        let key = (
+            self.frame_h,
+            self.video.filter.output_size(CANVAS_W, self.frame_h),
+            ratio.to_bits(),
+        );
         let previous = self.last_resolution.replace(key);
         if previous.is_none() || previous == Some(key) {
             return;
@@ -1391,11 +1395,11 @@ impl LunaApp {
             let fb = self.framebuffer_out.read();
             let h = (fb.len() / (FRAME_W * 4)).clamp(1, CANVAS_H);
             self.frame_h = h;
-            // Settings ▸ Video Filter: the canvas is the filter's scale
-            // times the 256 × 239 one.
+            // Settings ▸ Video Filter: the canvas is the filter's picture
+            // of the 256 × 239 one (602 × 478 for NTSC).
             let filter = self.video.filter;
-            let s = filter.scale();
-            let (tw, th) = ((CANVAS_W * s) as u32, (CANVAS_H * s) as u32);
+            let (cw, ch) = filter.output_size(CANVAS_W, CANVAS_H);
+            let (tw, th) = (cw as u32, ch as u32);
             let texture = pixels.texture();
             if (texture.width(), texture.height()) != (tw, th)
                 && let Err(e) = pixels.resize_buffer(tw, th)
@@ -1403,10 +1407,11 @@ impl LunaApp {
                 eprintln!("luna-gui: pixels buffer resize failed: {e}");
             }
             let frame = &fb[..FRAME_W * h * 4];
-            let src: &[u8] = if s == 1 {
+            let src: &[u8] = if (cw, ch) == (CANVAS_W, CANVAS_H) {
                 frame
             } else {
-                filter.apply(frame, FRAME_W, h, &mut self.filter_buf);
+                let number = self.emu_shared.frame.load(Ordering::Acquire);
+                filter.apply_at(frame, FRAME_W, h, number, &mut self.filter_buf);
                 &self.filter_buf
             };
             let canvas = pixels.frame_mut();
@@ -1967,10 +1972,13 @@ impl LunaApp {
         // filter (not the aspect ratio).
         let buf = self.framebuffer_out.read().clone();
         let mut filtered = Vec::new();
-        let (width, height) =
-            self.video
-                .filter
-                .apply(&buf, FRAME_W, buf.len() / (FRAME_W * 4), &mut filtered);
+        let (width, height) = self.video.filter.apply_at(
+            &buf,
+            FRAME_W,
+            buf.len() / (FRAME_W * 4),
+            self.emu_shared.frame.load(Ordering::Acquire),
+            &mut filtered,
+        );
         let Some(img) = image::RgbaImage::from_raw(width as u32, height as u32, filtered) else {
             eprintln!("luna-gui: screenshot skipped — framebuffer size mismatch");
             return;

@@ -26,7 +26,7 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -82,6 +82,9 @@ pub(crate) struct EmuShared {
     /// (601 = 60.1 fps). Written once a second by the emu thread while it
     /// runs, read by the UI for the on-screen counter.
     pub fps_tenths: AtomicU32,
+    /// PPU frame number of the last published picture: the NTSC video
+    /// filter's burst phase follows its parity.
+    pub frame: AtomicU64,
 }
 
 impl EmuShared {
@@ -97,6 +100,7 @@ impl EmuShared {
             audio_swap: Mutex::new(None),
             audio_swap_pending: AtomicBool::new(false),
             fps_tenths: AtomicU32::new(0),
+            frame: AtomicU64::new(0),
         }
     }
 
@@ -258,6 +262,7 @@ fn run(
                     // Republish so the user SEES the effect of the step
                     // (paused = inspecting; show the current PPU state).
                     if let Ok(rgba) = em.render_frame_rgba(false) {
+                        shared.frame.store(cur, Ordering::Release);
                         framebuffer_in.write(rgba);
                     }
                 }
@@ -304,6 +309,9 @@ fn run(
                         }
                         shared.paused.store(true, Ordering::Release);
                         if let Ok(rgba) = em.render_frame_rgba(false) {
+                            shared
+                                .frame
+                                .store(em.frame_count().unwrap_or(0), Ordering::Release);
                             framebuffer_in.write(rgba);
                         }
                     }
@@ -410,6 +418,7 @@ fn run(
                     // Lock-free publish into the triple buffer (moves
                     // `rgba`, no copy; the UI reads the latest contention-
                     // free).
+                    shared.frame.store(cur_frame, Ordering::Release);
                     framebuffer_in.write(rgba);
                 }
             }
