@@ -98,6 +98,56 @@ struct StateOut<'a> {
     /// Who wrote what into VRAM (absent without `--vram-writers`).
     #[serde(skip_serializing_if = "Option::is_none")]
     vram_writers: Option<&'a luna_api::VramWritersReport>,
+    /// The layers written by `--layer-shots` (absent without it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    layers: Option<&'a LayersOut>,
+}
+
+/// What `--layer-shots` wrote and found.
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct LayersOut {
+    /// The layers written, one `<name>.png` each.
+    pub(crate) written: Vec<luna_api::Layer>,
+    /// Every pair of them that both show a pixel somewhere.
+    pub(crate) overlaps: Vec<luna_api::LayerOverlap>,
+}
+
+/// Write `<layer>.png` for each of `layers` into `dir`, and find where
+/// they overlap.
+fn write_layer_shots(
+    em: &luna_api::Emulator,
+    dir: &std::path::Path,
+    layers: &[luna_api::Layer],
+) -> Result<LayersOut, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    for &layer in layers {
+        let png = em.render_layer_png(layer).map_err(|e| e.to_string())?;
+        let path = dir.join(format!("{}.png", layer.name()));
+        std::fs::write(&path, png).map_err(|e| format!("writing {}: {e}", path.display()))?;
+    }
+    let overlaps = em.layer_overlaps(layers).map_err(|e| e.to_string())?;
+    eprintln!(
+        "{} layer(s) written to {}, {} overlapping pair(s)",
+        layers.len(),
+        dir.display(),
+        overlaps.len()
+    );
+    for o in &overlaps {
+        eprintln!(
+            "  {} and {}: {} pixel(s) in x {}..={}, y {}..={}",
+            o.a.name(),
+            o.b.name(),
+            o.pixels,
+            o.x0,
+            o.x1,
+            o.y0,
+            o.y1
+        );
+    }
+    Ok(LayersOut {
+        written: layers.to_vec(),
+        overlaps,
+    })
 }
 
 /// The `--poke`s to write at one arrival on `--poke-at`.
@@ -646,7 +696,22 @@ pub(crate) fn run_state(
     screenshot_dir: Option<&std::path::Path>,
     vram_writers: Option<&std::path::Path>,
     vram_writers_from: u64,
+    layer_shots: Option<&std::path::Path>,
+    layers: Option<&str>,
 ) -> ExitCode {
+    let layer_list = match layers {
+        None => luna_api::Layer::ALL.to_vec(),
+        Some(list) => {
+            let parsed: Option<Vec<_>> = list.split(',').map(luna_api::Layer::from_name).collect();
+            match parsed {
+                Some(l) if !l.is_empty() => l,
+                _ => {
+                    eprintln!("error: --layers {list}: expected names among bg1,bg2,bg3,bg4,obj");
+                    return ExitCode::from(2);
+                }
+            }
+        }
+    };
     let mut writers = vram_writers.map(|_| luna_api::VramWriters::new(vram_writers_from));
     let mut shots = match screenshot_dir {
         None => None,
@@ -699,6 +764,9 @@ pub(crate) fn run_state(
     }
     if no_render {
         em.set_rendering(false).expect("rom just loaded");
+    }
+    if layer_shots.is_some() {
+        em.set_layer_capture(true).expect("rom just loaded");
     }
     // Explicit `--sym` overrides the `<rom>.sym` auto-detection done by
     // `load_rom_into` (issue #67).
@@ -1567,6 +1635,16 @@ pub(crate) fn run_state(
         );
     }
 
+    let layers_out = match layer_shots {
+        None => None,
+        Some(dir) => match write_layer_shots(&em, dir, &layer_list) {
+            Ok(out) => Some(out),
+            Err(e) => {
+                eprintln!("error: --layer-shots: {e}");
+                return ExitCode::from(1);
+            }
+        },
+    };
     let state = em.state();
     let json = match serde_json::to_string_pretty(&StateOut {
         state: &state,
@@ -1582,6 +1660,7 @@ pub(crate) fn run_state(
             .filter(|w| !w.pokes.is_empty())
             .map(|w| w.pokes.as_slice()),
         vram_writers: writers_report.as_ref(),
+        layers: layers_out.as_ref(),
     }) {
         Ok(s) => s,
         Err(e) => {

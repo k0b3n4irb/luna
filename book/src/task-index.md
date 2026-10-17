@@ -32,6 +32,7 @@ means that transport has no form of it.
 | a run twice as fast when nothing reads the screen | `--no-render` (`state`, `profile`) | — | [`luna state`](using/cli-run-state.md#a-run-that-never-looks-at-the-screen---no-render) |
 | a hash of the frame, to compare runs | `--print-fbhash` | `frame_hash` | [`luna run`](using/cli-run-state.md#luna-run--quick-render--audio-dump) |
 | which table or routine wrote a range of VRAM, and what two of them both wrote | `luna state --vram-writers writers.txt` | — | [Who wrote this into VRAM?](using/cli-run-state.md#who-wrote-this-into-vram---vram-writers) |
+| each layer alone at the instant of the picture, and where two of them overlap | `luna state --layer-shots DIR --layers bg2,bg3,obj` | — | [Each layer alone](using/cli-run-state.md#each-layer-alone---layer-shots) |
 | a picture per frame over a range, in one run | `luna state --until-frame B --screenshot-frames A..B/K --screenshot-dir DIR` | `step_until_frame`, `screenshot` | [A picture per frame](using/cli-run-state.md#a-picture-per-frame-in-one-run) |
 | consecutive frames, to catch a flicker | `luna frames --from-frame N -c K` | — | [`luna frames`](using/cli-analysis.md#luna-frames--consecutive-frame-capture-temporal-artefacts) |
 | a run as a small video, with a text timeline and contact sheets a model can read | `luna record --from-frame N -c K --out BASE` | — | [`luna record`](using/cli-analysis.md#luna-record--a-run-as-a-video-a-timeline-and-contact-sheets) |

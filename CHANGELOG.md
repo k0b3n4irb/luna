@@ -7,6 +7,18 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+### Added
+
+- **`luna state --layer-shots DIR`: each layer alone.** The compositor
+  keeps BG1-BG4 and the sprites apart while it composes the frame, line
+  by line, so each `<layer>.png` is the same instant as `--screenshot`,
+  HDMA and mid-frame writes included; transparent where the layer shows
+  nothing. The run lists every pair of layers that both show a pixel,
+  with the count and the box around them, and the `--out` JSON carries
+  them as `layers.overlaps`. `--layers bg2,bg3,obj` restricts it. API:
+  `set_layer_capture`, `render_layer_png`, `layer_overlaps`. Asked for by
+  the game, to find two elements biting into each other without looking.
+
 ## [1.39.0] — 2026-10-18
 
 The debugger takes Mesen2's: conditions in its expression language,

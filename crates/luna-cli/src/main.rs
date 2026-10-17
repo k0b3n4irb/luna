@@ -313,9 +313,26 @@ enum Command {
         /// an option that reads the picture.
         #[arg(
             long = "no-render",
-            conflicts_with_all = ["screenshot", "screenshot_frames", "print_fbhash", "native_res"]
+            conflicts_with_all = [
+                "screenshot", "screenshot_frames", "print_fbhash", "native_res", "layer_shots"
+            ]
         )]
         no_render: bool,
+        /// Write each layer of the last frame alone into this directory:
+        /// `bg1.png` … `bg4.png`, `obj.png`, transparent where the layer
+        /// shows nothing. Each is composed with the picture, line by line,
+        /// so it is the same instant as `--screenshot`, HDMA and mid-frame
+        /// writes included. A layer shows its own colour (before colour
+        /// math, master brightness applied) wherever it reaches the main
+        /// or the sub screen, TM / TS and their windows applied. The
+        /// `--out` JSON gains `layers.overlaps`: every pair of layers that
+        /// both show a pixel, with the count and the box around them.
+        #[arg(long = "layer-shots")]
+        layer_shots: Option<PathBuf>,
+        /// With `--layer-shots`: only these layers, comma-separated
+        /// (`bg1,bg2,bg3,bg4,obj`; default all five).
+        #[arg(long = "layers", requires = "layer_shots")]
+        layers: Option<String>,
         /// Dump all 64 KB of PPU VRAM (raw bytes) to this file after the
         /// run. For diagnosing the framebuffer DMA → VRAM → display path.
         #[arg(long = "dump-vram")]
@@ -1517,6 +1534,8 @@ fn main() -> ExitCode {
             call_stack,
             native_res,
             no_render,
+            layer_shots,
+            layers,
         } => {
             if schema {
                 // `--schema` needs no ROM: print the `--out` payload's JSON
@@ -1610,6 +1629,8 @@ fn main() -> ExitCode {
                 screenshot_dir.as_deref(),
                 vram_writers.as_deref(),
                 vram_writers_from,
+                layer_shots.as_deref(),
+                layers.as_deref(),
             )
         }
         Command::Frames {

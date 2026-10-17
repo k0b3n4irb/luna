@@ -7,8 +7,8 @@
 
 use crate::memory::{Cgram, Oam, VmainSettings, Vram};
 use crate::renderer::{
-    FRAME_H, FRAME_H_MAX, FRAME_W, RenderOptions, SpriteEntry, SpriteEval, decode_all_sprites,
-    evaluate_sprite_line, obj_eval_latch, render_scanline_partial_into_from,
+    FRAME_H, FRAME_H_MAX, FRAME_W, LAYERS, LayerRow, RenderOptions, SpriteEntry, SpriteEval,
+    decode_all_sprites, evaluate_sprite_line, obj_eval_latch, render_scanline_partial_into_from,
 };
 // `render_scanline_into` is no longer used directly here — full-line
 // renders go through `flush_partial_scanline`.
@@ -456,6 +456,13 @@ pub struct Ppu {
     /// capture, regenerable — so save states skip it.
     #[serde(skip)]
     pub native_framebuffer: Vec<[u8; 3]>,
+    /// Each layer alone (BG1-BG4, then OBJ), maintained per scanline by
+    /// the compositor while [`Self::set_layer_capture`] is on: the
+    /// layer's own colour where it shows a pixel, `None` where it is
+    /// transparent. Empty when capture is off. A debug capture, not
+    /// console state: save states skip it.
+    #[serde(skip)]
+    pub layer_framebuffer: Vec<Option<[u8; 3]>>,
 
     /// How far the current scanline has been rendered into the
     /// framebuffer. Phase 2 of gap G6: a `$21xx` write that lands
@@ -592,6 +599,7 @@ impl Ppu {
             native_capture: false,
             skip_pixels: false,
             native_framebuffer: Vec::new(),
+            layer_framebuffer: Vec::new(),
             last_flushed_dot: 0,
             line_sprites: None,
             // Post-reset state is forced-blanked (INIDISP=$80), so
@@ -782,6 +790,8 @@ impl Ppu {
         let capture = self.native_capture;
         let mut native_even = [[0u8; 3]; FRAME_W * 2];
         let mut native_odd = [[0u8; 3]; FRAME_W * 2];
+        let layered = !self.layer_framebuffer.is_empty();
+        let mut layer_row: [LayerRow; LAYERS] = [[None; FRAME_W]; LAYERS];
         if self.setini & 0x01 != 0 {
             // Interlace (Phase C): the 448-line image is collapsed to 224 by
             // averaging the two fields (logical lines y*2 and y*2+1) — the
@@ -801,6 +811,7 @@ impl Ppu {
                 &mut row,
                 precomp,
                 capture.then_some(&mut native_even),
+                layered.then_some(&mut layer_row),
             );
             self.field = true;
             render_scanline_partial_into_from(
@@ -812,6 +823,7 @@ impl Ppu {
                 &mut row_odd,
                 precomp,
                 capture.then_some(&mut native_odd),
+                layered.then_some(&mut layer_row),
             );
             self.field = saved_field;
             for x in si..ei {
@@ -829,12 +841,19 @@ impl Ppu {
                 &mut row,
                 precomp,
                 capture.then_some(&mut native_even),
+                layered.then_some(&mut layer_row),
             );
             // Not interlaced: both native rows carry the same field.
             native_odd = native_even;
         }
         let off = yi * FRAME_W;
         self.framebuffer[off + si..off + ei].copy_from_slice(&row[si..ei]);
+        if layered {
+            for (l, layer) in layer_row.iter().enumerate() {
+                let o = (l * FRAME_H_MAX + yi) * FRAME_W;
+                self.layer_framebuffer[o + si..o + ei].copy_from_slice(&layer[si..ei]);
+            }
+        }
         if capture {
             let w = FRAME_W * 2;
             let (nsi, nei) = (si * 2, ei * 2);
@@ -869,6 +888,29 @@ impl Ppu {
         } else {
             self.native_framebuffer = Vec::new();
         }
+    }
+
+    /// Enable / disable the per-layer capture: from the next rendered
+    /// scanline on, the compositor also keeps each layer alone (see
+    /// [`Self::layer_framebuffer`]), at the same instant as the picture.
+    pub fn set_layer_capture(&mut self, on: bool) {
+        self.layer_framebuffer = if on {
+            vec![None; LAYERS * FRAME_H_MAX * FRAME_W]
+        } else {
+            Vec::new()
+        };
+    }
+
+    /// Layer `layer` (0-3 = BG1-BG4, 4 = OBJ) of the current frame,
+    /// row-major over [`Self::frame_height`] rows; empty when capture is
+    /// off.
+    #[must_use]
+    pub fn layer_frame(&self, layer: usize) -> &[Option<[u8; 3]>] {
+        if self.layer_framebuffer.is_empty() || layer >= LAYERS {
+            return &[];
+        }
+        let o = layer * FRAME_H_MAX * FRAME_W;
+        &self.layer_framebuffer[o..o + self.frame_height() * FRAME_W]
     }
 
     /// Rows the current frame's picture has: 224, or 239 when the frame

@@ -1376,6 +1376,68 @@ pub struct Emulator {
     break_sources: BreakSources,
 }
 
+/// A layer of the picture, as the per-layer capture keeps it.
+#[derive(
+    Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum Layer {
+    /// BG1.
+    Bg1,
+    /// BG2.
+    Bg2,
+    /// BG3.
+    Bg3,
+    /// BG4.
+    Bg4,
+    /// The sprites.
+    Obj,
+}
+
+impl Layer {
+    /// Every layer, in order.
+    pub const ALL: [Self; 5] = [Self::Bg1, Self::Bg2, Self::Bg3, Self::Bg4, Self::Obj];
+
+    /// Its name: `bg1` … `bg4`, `obj`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Bg1 => "bg1",
+            Self::Bg2 => "bg2",
+            Self::Bg3 => "bg3",
+            Self::Bg4 => "bg4",
+            Self::Obj => "obj",
+        }
+    }
+
+    /// The layer named `name`, ignoring case.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|l| l.name().eq_ignore_ascii_case(name.trim()))
+    }
+}
+
+/// Two layers that both show a pixel somewhere in a frame.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct LayerOverlap {
+    /// The first layer.
+    pub a: Layer,
+    /// The second layer.
+    pub b: Layer,
+    /// Pixels where both show something.
+    pub pixels: u32,
+    /// The box around them: left column.
+    pub x0: u32,
+    /// Top row.
+    pub y0: u32,
+    /// Right column (inclusive).
+    pub x1: u32,
+    /// Bottom row (inclusive).
+    pub y1: u32,
+}
+
 /// A CPU's name in a message.
 const fn cpu_label(cpu: BreakCpu) -> &'static str {
     match cpu {
@@ -2951,6 +3013,91 @@ impl Emulator {
             ));
         }
         Ok(snes.ppu.native_framebuffer().as_flattened().to_vec())
+    }
+
+    /// Keep each layer alone while the picture is composed (`luna state
+    /// --layer-shots`): from the next rendered scanline on, the compositor
+    /// also records, per layer, the colour it puts on a screen (before
+    /// colour math, master brightness applied) wherever it reaches the main
+    /// or the sub screen — TM / TS and their windows applied — at the same
+    /// instant as the picture, mid-frame changes and HDMA included. Run at
+    /// least one full frame, then read [`Self::render_layer_png`] /
+    /// [`Self::layer_overlaps`].
+    pub fn set_layer_capture(&mut self, on: bool) -> Result<(), ApiError> {
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        snes.ppu.set_layer_capture(on);
+        Ok(())
+    }
+
+    /// The pixels of `layer` in the current frame (`None` = transparent).
+    fn layer_pixels(&self, layer: Layer) -> Result<&[Option<[u8; 3]>], ApiError> {
+        self.require_picture()?;
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let px = snes.ppu.layer_frame(layer as usize);
+        if px.is_empty() {
+            return Err(ApiError::BadArg(
+                "layer capture is not enabled (set_layer_capture / --layer-shots)".into(),
+            ));
+        }
+        Ok(px)
+    }
+
+    /// One layer of the current frame as an RGBA PNG, transparent where
+    /// the layer shows nothing — see [`Self::set_layer_capture`].
+    pub fn render_layer_png(&self, layer: Layer) -> Result<Vec<u8>, ApiError> {
+        let px = self.layer_pixels(layer)?;
+        let h = px.len() / FRAME_W;
+        let buf: Vec<u8> = px
+            .iter()
+            .flat_map(|p| match p {
+                Some([r, g, b]) => [*r, *g, *b, 0xFF],
+                None => [0, 0, 0, 0],
+            })
+            .collect();
+        let img = image::RgbaImage::from_raw(FRAME_W as u32, h as u32, buf)
+            .ok_or_else(|| ApiError::Io(std::io::Error::other("layer frame size mismatch")))?;
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .map_err(|e| ApiError::Io(std::io::Error::other(e.to_string())))?;
+        Ok(png)
+    }
+
+    /// Where two of `layers` both show a pixel in the current frame: one
+    /// entry per pair that overlaps, with the pixel count and the box
+    /// around them.
+    pub fn layer_overlaps(&self, layers: &[Layer]) -> Result<Vec<LayerOverlap>, ApiError> {
+        let mut out = Vec::new();
+        for (i, &a) in layers.iter().enumerate() {
+            for &b in &layers[i + 1..] {
+                let (pa, pb) = (self.layer_pixels(a)?, self.layer_pixels(b)?);
+                let mut o = LayerOverlap {
+                    a,
+                    b,
+                    pixels: 0,
+                    x0: u32::MAX,
+                    y0: u32::MAX,
+                    x1: 0,
+                    y1: 0,
+                };
+                for (n, _) in pa
+                    .iter()
+                    .zip(pb)
+                    .enumerate()
+                    .filter(|(_, (p, q))| p.is_some() && q.is_some())
+                {
+                    let (x, y) = ((n % FRAME_W) as u32, (n / FRAME_W) as u32);
+                    o.pixels += 1;
+                    o.x0 = o.x0.min(x);
+                    o.y0 = o.y0.min(y);
+                    o.x1 = o.x1.max(x);
+                    o.y1 = o.y1.max(y);
+                }
+                if o.pixels > 0 {
+                    out.push(o);
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Rows in the displayed frame: 224, or 239 while the game runs in

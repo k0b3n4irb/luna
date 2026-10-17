@@ -416,7 +416,7 @@ pub(crate) fn render_scanline_partial_into(
     opts: RenderOptions,
     out: &mut [[u8; 3]],
 ) {
-    render_scanline_partial_into_from(ppu, y, start_x, end_x, opts, out, None, None);
+    render_scanline_partial_into_from(ppu, y, start_x, end_x, opts, out, None, None, None);
 }
 
 /// Core of [`render_scanline_partial_into`]. `precomp` optionally
@@ -424,6 +424,13 @@ pub(crate) fn render_scanline_partial_into(
 /// decodes sprites once per scanline and shares them across the
 /// overflow-flag read and (in interlace) both field renders (PERF-2).
 /// `None` decodes sprites internally, as the full-frame paths do.
+/// Layers the per-layer capture keeps: BG1-BG4, then OBJ.
+pub const LAYERS: usize = 5;
+
+/// One row of one layer alone: its colour where it shows a pixel, `None`
+/// where it is transparent.
+pub type LayerRow = [Option<[u8; 3]>; FRAME_W];
+
 pub(crate) fn render_scanline_partial_into_from(
     ppu: &Ppu,
     y: u16,
@@ -438,6 +445,10 @@ pub(crate) fn render_scanline_partial_into_from(
     // dots duplicate the main pixel). `average(native pair) == out[x]` holds
     // by construction.
     mut native: Option<&mut [[u8; 3]; FRAME_W * 2]>,
+    // Per-layer capture: when `Some`, each layer's own pixel (the colour
+    // it puts on a screen, before colour math) where it reaches the main
+    // or the sub screen, `None` elsewhere.
+    mut layers: Option<&mut [LayerRow; LAYERS]>,
 ) {
     debug_assert_eq!(
         out.len(),
@@ -458,6 +469,11 @@ pub(crate) fn render_scanline_partial_into_from(
         if let Some(native) = native {
             for px in &mut native[start * 2..end * 2] {
                 *px = [0, 0, 0];
+            }
+        }
+        if let Some(layers) = layers {
+            for row in layers.iter_mut() {
+                row[start..end].fill(None);
             }
         }
         return;
@@ -583,6 +599,29 @@ pub(crate) fn render_scanline_partial_into_from(
             true
         };
 
+        if let Some(layers) = layers.as_deref_mut() {
+            for (li, row) in layers.iter_mut().enumerate() {
+                let shown = screen_layer_enabled(li, ppu.tm, ppu.tmw)
+                    || screen_layer_enabled(li, ppu.ts, ppu.tsw);
+                let pixel = if li < 4 {
+                    bgs_above[li][x].map(|(cg, prio)| {
+                        if ppu.cgwsel & 0x01 != 0 && bg_bpp(ppu.bgmode, li) == 8 {
+                            direct_color_to_bgr5(cg, (prio >> 1) & 0x07)
+                        } else {
+                            cgram_to_bgr5(ppu, cg)
+                        }
+                    })
+                } else {
+                    sprites[x].map(|(cg, _)| cgram_to_bgr5(ppu, cg))
+                };
+                row[x] = pixel.filter(|_| shown).map(|c| {
+                    apply_brightness(
+                        [scale_5_to_8(c.0), scale_5_to_8(c.1), scale_5_to_8(c.2)],
+                        brightness,
+                    )
+                });
+            }
+        }
         let main = pick_pixel_winner(ppu, table, &bgs_above, &sprites, x, backdrop_bgr5, |li| {
             screen_layer_enabled(li, ppu.tm, ppu.tmw)
         });

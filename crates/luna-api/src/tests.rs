@@ -3069,3 +3069,74 @@ fn forbid_ranges_stop_halts_not_marks() {
     e.run_until_break(10_000).unwrap().hit.unwrap();
     assert_eq!(e.evaluate("a & $FF", ExprCpu::Sa1).unwrap().value, 0x45);
 }
+
+/// Mode 1: an 8×8 white square on BG1 at (0,0), a 16×8 white bar on BG2
+/// at (0,0). They overlap on the square.
+fn demo_two_layers() -> Vec<u8> {
+    let mut code: Vec<u8> = vec![
+        0xA9, 0x80, 0x8D, 0x00, 0x21, // forced blank
+        0x8D, 0x15, 0x21, // VMAIN: increment after $2119
+        0xA9, 0x10, 0x8D, 0x16, 0x21, 0x9C, 0x17, 0x21, // VMADD $0010: tile 1
+        0xA2, 0x08, // 8 rows of plane 0 = $FF: colour 1
+        0xA9, 0xFF, 0x8D, 0x18, 0x21, 0x9C, 0x19, 0x21, 0xCA, 0xD0, 0xF5,
+    ];
+    let entry = |hi: u8, count: usize| {
+        let mut v = vec![0x9C, 0x16, 0x21, 0xA9, hi, 0x8D, 0x17, 0x21];
+        for _ in 0..count {
+            v.extend([0xA9, 0x01, 0x8D, 0x18, 0x21, 0x9C, 0x19, 0x21]);
+        }
+        v
+    };
+    code.extend(entry(0x04, 1)); // BG1 map at $0400: tile 1
+    code.extend(entry(0x08, 2)); // BG2 map at $0800: tiles 1, 1
+    code.extend([
+        0xA9, 0x04, 0x8D, 0x07, 0x21, // BG1SC
+        0xA9, 0x08, 0x8D, 0x08, 0x21, // BG2SC
+        0x9C, 0x0B, 0x21, // BG12NBA = 0
+        0xA9, 0x01, 0x8D, 0x05, 0x21, // BGMODE 1
+        0xA9, 0x01, 0x8D, 0x21, 0x21, 0xA9, 0xFF, 0x8D, 0x22, 0x21, 0xA9, 0x7F, 0x8D, 0x22,
+        0x21, // CGRAM 1 = white
+        0xA9, 0x03, 0x8D, 0x2C, 0x21, // TM: BG1, BG2
+        0xA9, 0x0F, 0x8D, 0x00, 0x21, // display on
+        0x80, 0xFE,
+    ]);
+    demo_lorom_with(&code, None)
+}
+
+#[test]
+fn layer_capture_keeps_each_layer_alone_and_finds_overlaps() {
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_two_layers()).unwrap();
+    assert!(e.render_layer_png(Layer::Bg1).is_err(), "capture is off");
+    e.set_layer_capture(true).unwrap();
+    for _ in 0..3 {
+        e.step_until_frame(1_000_000).unwrap();
+    }
+    let opaque = |l| {
+        let png = e.render_layer_png(l).unwrap();
+        let img = image::load_from_memory(&png).unwrap().to_rgba8();
+        assert_eq!(img.width(), 256);
+        img.pixels().filter(|p| p.0[3] == 0xFF).count()
+    };
+    // With no vertical scroll a BG's first row falls on PPU line 0,
+    // which the console does not show: 7 rows of each tile.
+    assert_eq!(
+        Layer::ALL.map(opaque),
+        [56, 112, 0, 0, 0],
+        "BG1's square, BG2's bar, nothing else"
+    );
+    let o = e.layer_overlaps(&Layer::ALL).unwrap();
+    assert_eq!(o.len(), 1);
+    assert_eq!(
+        (
+            o[0].a,
+            o[0].b,
+            o[0].pixels,
+            o[0].x0,
+            o[0].x1,
+            o[0].y1 - o[0].y0
+        ),
+        (Layer::Bg1, Layer::Bg2, 56, 0, 7, 6)
+    );
+    assert_eq!(Layer::from_name("OBJ"), Some(Layer::Obj));
+}

@@ -279,6 +279,39 @@ writes the pictures it reached and says how many.
 `luna frames` remains the tool for a flicker: it tags each consecutive
 frame with whether the screen showed anything.
 
+### Each layer alone (`--layer-shots`)
+
+Two elements that bite into each other on screen — a label over a
+border, a face under a line of text — come from two layers both drawing
+the same pixel. `--layer-shots DIR` writes each layer of the last frame
+alone, `bg1.png` … `bg4.png` and `obj.png`, transparent where the layer
+shows nothing, and lists the pairs of layers that both show a pixel:
+
+```bash
+luna state --until-frame 600 --layers bg1,obj --layer-shots layers \
+  --out state.json "Super Mario World (USA).sfc"
+# 2 layer(s) written to layers, 1 overlapping pair(s)
+#   bg1 and obj: 383 pixel(s) in x 107..=132, y 155..=174
+```
+
+- **The same instant as the picture.** Each layer is kept by the
+  compositor while it composes the frame, line by line: an HDMA effect, a
+  mode switched for a status bar, a write in the middle of a line show in
+  the layers as they show on screen. It is not a redraw from the state
+  the PPU ends the frame in.
+- **What a layer shows** is its own colour (before colour math, master
+  brightness applied) wherever it reaches the main or the sub screen:
+  TM / TS and their windows apply, priorities do not (a layer behind
+  another still shows its pixels). Lines in forced blank show nothing.
+- **`--layers`** restricts the files and the pairs to some layers
+  (`bg1,bg2,bg3,bg4,obj`, the default all five).
+- **In the `--out` JSON**, `layers.written` names the files and
+  `layers.overlaps` gives each pair: `a`, `b`, `pixels`, and the box
+  `x0`, `y0`, `x1`, `y1` around them. An overlap is not an error in
+  itself — a scene puts its sprites in front of its ground — it is where
+  to look; a test can assert the pairs a screen must not have.
+- `--no-render` composes nothing, so it is refused with `--layer-shots`.
+
 ### A run that never looks at the screen (`--no-render`)
 
 Composing the pixels of each scanline is more than half of what luna
