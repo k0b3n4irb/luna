@@ -43,7 +43,7 @@ lands it.
 | D1c | SA-1 exec breakpoints and `Sa1Memory` watchpoints, frozen in the chip; MCP `bp_add {cpu: "sa1"}` | ✅ |
 | D1c | GSU exec breakpoints and `GsuMemory` watchpoints; MCP `bp_add {cpu: "gsu"}` | ✅ |
 | D1c | DSP-1 exec breakpoints (program ROM bytes) and `DspDataRam` watchpoints; MCP `bp_add {cpu: "dsp"}` | ✅ |
-| D1c | *Forbid* breakpoints | ⬜ |
+| D1c | *Forbid* ranges on every CPU, by its address or (65C816) the memory behind it, with a condition; marks and steps unaffected; MCP `bp_add {kind: "forbid"}` | ✅ |
 | D1d | Step types: into, over, out, scanline, frame, *break in N* instructions / scanlines / frames (to NMI / IRQ are break sources; run to here is `run_until_pc`; move PC is `set_cpu_register`); MCP `step_kind` | ✅ |
 | D1d | CPU-cycle and PPU-cycle steps — not possible while luna runs instructions whole | ⬜ |
 | D2 | Debugger window per CPU (disassembly with labels, comments, effective addresses; editable status; breakpoint, watch, label, function, call-stack lists; go to / find all); labels and comments in `.mlb`, ca65 `.dbg`, bass, SDCC `.cdb`, ELF; default register labels; workspace per ROM | ⬜ |

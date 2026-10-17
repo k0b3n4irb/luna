@@ -27,6 +27,15 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   frames ("break in N"). A breakpoint or break source met on the way stops
   it first. MCP: `step_kind`.
 
+- **Forbid ranges** (Mesen2's forbid breakpoints).
+  `Emulator::bp_add_forbid(cpu, memory, lo, hi)` (MCP: `bp_add {kind:
+  "forbid"}`) marks a range of a CPU's code where it does not halt: while
+  the instruction running starts there, that CPU's breakpoints,
+  watchpoints and BRK / COP / WDM / STP sources let the run go on. A
+  condition limits it; marks, steps and the NMI / IRQ / scanline sources
+  are not affected. On the 65C816 the range can be in the memory the
+  address resolves to (`SnesPrgRom`, `SnesWorkRam`, `SnesSaveRam`).
+
 - **DSP-1 breakpoints.** The NEC uPD7725 takes the same:
   `bp_add_exec_on(BreakCpu::Dsp, byte)` on a program ROM byte (the word
   × 3, as in Mesen2), `bp_add_watch(MemoryKind::DspDataRam, …)` on the

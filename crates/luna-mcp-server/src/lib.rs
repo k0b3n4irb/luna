@@ -513,10 +513,11 @@ pub struct EnableMemTraceParams {
 /// `bp_add` parameters.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct BpAddParams {
-    /// `"exec"` for a PC breakpoint, `"mem"` for a memory watchpoint;
-    /// `"spc_exec"` is `"exec"` on `cpu: "spc"`.
+    /// `"exec"` for a PC breakpoint, `"mem"` for a memory watchpoint,
+    /// `"forbid"` for a range where `cpu` does not halt; `"spc_exec"` is
+    /// `"exec"` on `cpu: "spc"`.
     pub kind: String,
-    /// Exec only: the CPU — `"snes"` (the 65C816, default), `"spc"` (`addr`
+    /// Exec and forbid: the CPU — `"snes"` (the 65C816, default), `"spc"` (`addr`
     /// 16-bit, `symbol` an ARAM label), `"sa1"`, `"gsu"`, `"dsp"` (`addr` a
     /// program ROM byte, the word × 3). A watchpoint's CPU follows
     /// its `memory`.
@@ -1214,11 +1215,11 @@ pub struct BpRemoveResult {
 pub struct BpEntry {
     /// Registry id.
     pub id: u32,
-    /// `"exec"` or `"mem"`.
+    /// `"exec"`, `"mem"` or `"forbid"`.
     pub kind: String,
-    /// Exec: the PC. Mem: range start.
+    /// Exec: the PC. Mem, forbid: range start.
     pub lo: u32,
-    /// Exec: same as `lo`. Mem: inclusive range end.
+    /// Exec: same as `lo`. Mem, forbid: inclusive range end.
     pub hi: u32,
     /// Mem: fires on reads.
     pub on_read: bool,
@@ -1237,9 +1238,11 @@ pub struct BpEntry {
     pub condition: Option<String>,
     /// A mark: it records an Event Viewer mark instead of halting.
     pub mark: bool,
-    /// The CPU it watches: `snes` or `spc`.
+    /// The CPU it watches: `snes`, `spc`, `sa1`, `gsu` or `dsp`.
     pub cpu: String,
-    /// Mem: the memory the range is in — `bus`, `vram`, `cgram`, `oam`.
+    /// Mem, forbid: the memory the range is in — `bus` (the CPU's),
+    /// `vram`, `cgram`, `oam`, `aram`, `ipl`, `dsp_data_ram`, `prg_rom`,
+    /// `work_ram`, `save_ram`.
     pub space: String,
 }
 
@@ -2717,6 +2720,10 @@ impl LunaServer {
                                 at the start of the instruction, its condition evaluated for that \
                                 CPU (ARAM `addr` / `symbol` for the SPC700; kind='spc_exec' is \
                                 the short form). Memory 'Sa1Memory' / 'GsuMemory' / 'DspDataRam' watches that chip's memory. \
+                                kind='forbid': a range `addr`..=`hi` of the `cpu`'s code (its bus, \
+                                or `memory` SnesPrgRom / SnesWorkRam / SnesSaveRam on the 65C816) \
+                                where that CPU's breakpoints and BRK/COP/WDM/STP sources do not \
+                                halt; marks still mark, steps still stop; `condition` limits it. \
                                 Returns the registry id. Run with `run_until_break`."
     )]
     async fn bp_add(
@@ -2797,9 +2804,23 @@ impl LunaServer {
                         )
                         .map_err(|e| api_err_to_mcp(&e))?,
                 },
+                "forbid" => {
+                    let memory = match (memory, cpu) {
+                        (Some(m), _) => m,
+                        (None, luna_api::BreakCpu::Snes) => luna_api::MemoryKind::SnesMemory,
+                        (None, luna_api::BreakCpu::Spc) => luna_api::MemoryKind::SpcMemory,
+                        (None, luna_api::BreakCpu::Sa1) => luna_api::MemoryKind::Sa1Memory,
+                        (None, luna_api::BreakCpu::Gsu) => luna_api::MemoryKind::GsuMemory,
+                        (None, luna_api::BreakCpu::Dsp) => luna_api::MemoryKind::DspProgramRom,
+                    };
+                    em.bp_add_forbid(cpu, memory, addr, hi, name)
+                        .map_err(|e| api_err_to_mcp(&e))?
+                }
                 other => {
                     return Err(ErrorData::invalid_params(
-                        format!("kind must be 'exec', 'mem' or 'spc_exec', got `{other}`"),
+                        format!(
+                            "kind must be 'exec', 'mem', 'forbid' or 'spc_exec', got `{other}`"
+                        ),
                         None,
                     ));
                 }
@@ -3276,7 +3297,13 @@ impl LunaServer {
                 .into_iter()
                 .map(|b| BpEntry {
                     id: b.id,
-                    kind: if b.exec { "exec".into() } else { "mem".into() },
+                    kind: if b.forbid {
+                        "forbid".into()
+                    } else if b.exec {
+                        "exec".into()
+                    } else {
+                        "mem".into()
+                    },
                     lo: b.lo,
                     hi: b.hi,
                     on_read: b.on_read,
@@ -4190,6 +4217,9 @@ const fn space_name(space: luna_api::WatchSpace) -> &'static str {
         luna_api::WatchSpace::Aram => "aram",
         luna_api::WatchSpace::Ipl => "ipl",
         luna_api::WatchSpace::DspDataRam => "dsp_data_ram",
+        luna_api::WatchSpace::PrgRom => "prg_rom",
+        luna_api::WatchSpace::WorkRam => "work_ram",
+        luna_api::WatchSpace::SaveRam => "save_ram",
     }
 }
 

@@ -1567,3 +1567,48 @@ async fn server_bp_add_watches_the_spc700() {
     assert_eq!(list[0].space, "aram");
     let _ = std::fs::remove_file(&path);
 }
+
+/// `bp_add {kind: "forbid"}` keeps the SPC700 from halting in a range.
+#[tokio::test]
+async fn server_bp_add_takes_a_forbid_range() {
+    let s = LunaServer::new();
+    let path = PathBuf::from("/tmp/luna_mcp_bp_forbid_demo.smc");
+    std::fs::write(&path, demo_lorom()).unwrap();
+    s.load_rom(Parameters(rom_params(&path.to_string_lossy())))
+        .await
+        .unwrap();
+    let add = |kind: &str, memory: Option<&str>, addr: u32| BpAddParams {
+        cpu: (kind == "forbid").then(|| "spc".into()),
+        condition: None,
+        mark: false,
+        memory: memory.map(str::to_string),
+        kind: kind.into(),
+        addr,
+        symbol: None,
+        hi: None,
+        hi_symbol: None,
+        on_read: false,
+        on_write: true,
+        mirror: None,
+        name: None,
+    };
+    // The IPL ROM clears ARAM page zero with the instruction at $FFC5.
+    s.bp_add(Parameters(add("mem", Some("SpcRam"), 0x80)))
+        .await
+        .unwrap();
+    s.bp_add(Parameters(add("forbid", None, 0xFFC5)))
+        .await
+        .unwrap();
+    let r = s
+        .run_until_break(Parameters(RunUntilBreakParams { max_steps: 100_000 }))
+        .await
+        .unwrap()
+        .0;
+    assert!(!r.hit);
+    let list = s.bp_list().await.unwrap().0.breakpoints;
+    assert_eq!(
+        (list[1].kind.as_str(), list[1].cpu.as_str()),
+        ("forbid", "spc")
+    );
+    let _ = std::fs::remove_file(&path);
+}

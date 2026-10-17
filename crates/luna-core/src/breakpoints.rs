@@ -67,6 +67,12 @@ pub enum WatchSpace {
     Ipl,
     /// The DSP-1's data RAM, 2 bytes per word, low first.
     DspDataRam,
+    /// The cartridge's program ROM, by offset (a forbid range).
+    PrgRom,
+    /// Work RAM, by offset (a forbid range).
+    WorkRam,
+    /// Cartridge save RAM, by offset (a forbid range).
+    SaveRam,
 }
 
 /// The CPU a breakpoint watches.
@@ -136,6 +142,10 @@ pub struct BreakpointInfo {
     pub condition: Option<String>,
     /// A *mark*: when it fires it records an event instead of halting.
     pub mark: bool,
+    /// A *forbid* range: while its CPU runs an instruction that starts in
+    /// it (and its condition holds), that CPU's breakpoints do not halt.
+    #[serde(default)]
+    pub forbid: bool,
 }
 
 /// A breakpoint/watchpoint hit, returned to the driving run loop.
@@ -230,6 +240,34 @@ struct MemWatch {
     extra: Extra,
 }
 
+/// A registered forbid range (inclusive): no halt on its CPU while the
+/// instruction running starts inside it.
+#[derive(Debug, Clone)]
+struct Forbid {
+    id: u32,
+    cpu: BreakCpu,
+    space: WatchSpace,
+    lo: u32,
+    hi: u32,
+    extra: Extra,
+}
+
+/// One enabled forbid range, for the driving loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForbidRange {
+    /// Its id (its condition is the driving loop's).
+    pub id: u32,
+    /// The CPU it protects.
+    pub cpu: BreakCpu,
+    /// What `lo..=hi` are addresses in: the CPU's bus, or a memory the
+    /// instruction's address resolves to.
+    pub space: WatchSpace,
+    /// The range start.
+    pub lo: u32,
+    /// The inclusive range end.
+    pub hi: u32,
+}
+
 /// Most candidate hits one instruction parks (a block move touches many
 /// bytes; the first ones are what a debugger reports).
 const PENDING_MAX: usize = 64;
@@ -245,6 +283,8 @@ pub struct BreakpointSet {
     exec: Vec<ExecBp>,
     /// Memory watchpoints.
     mem: Vec<MemWatch>,
+    /// Forbid ranges.
+    forbid: Vec<Forbid>,
     /// Watchpoint matches parked by the bus during an instruction, in
     /// access order, for the driving loop to check (conditions) after the
     /// instruction completes.
@@ -288,11 +328,59 @@ impl BreakpointSet {
         id
     }
 
+    /// Register a forbid range over `lo..=hi` of `space` for `cpu`.
+    /// Returns its id.
+    pub fn add_forbid(
+        &mut self,
+        cpu: BreakCpu,
+        space: WatchSpace,
+        lo: u32,
+        hi: u32,
+        name: Option<String>,
+    ) -> u32 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.forbid.push(Forbid {
+            id,
+            cpu,
+            space,
+            lo,
+            hi,
+            extra: Self::extra(name),
+        });
+        id
+    }
+
+    /// The enabled forbid ranges.
+    #[must_use]
+    pub fn forbids(&self) -> Vec<ForbidRange> {
+        self.forbid
+            .iter()
+            .filter(|f| f.extra.enabled)
+            .map(|f| ForbidRange {
+                id: f.id,
+                cpu: f.cpu,
+                space: f.space,
+                lo: f.lo,
+                hi: f.hi,
+            })
+            .collect()
+    }
+
+    /// Whether `id` is a forbid range.
+    #[must_use]
+    pub fn is_forbid(&self, id: u32) -> bool {
+        self.forbid.iter().any(|f| f.id == id)
+    }
+
     /// The CPU breakpoint `id` watches, `None` for an unknown id.
     #[must_use]
     pub fn cpu_of(&self, id: u32) -> Option<BreakCpu> {
         if let Some(w) = self.mem.iter().find(|w| w.id == id) {
             return Some(w.cpu);
+        }
+        if let Some(f) = self.forbid.iter().find(|f| f.id == id) {
+            return Some(f.cpu);
         }
         self.exec.iter().find(|b| b.id == id).map(|b| b.cpu)
     }
@@ -436,6 +524,12 @@ impl BreakpointSet {
                     .find(|w| w.id == id)
                     .map(|w| &mut w.extra)
             })
+            .or_else(|| {
+                self.forbid
+                    .iter_mut()
+                    .find(|f| f.id == id)
+                    .map(|f| &mut f.extra)
+            })
     }
 
     /// Enable / disable a breakpoint without removing it (issue #176).
@@ -479,23 +573,25 @@ impl BreakpointSet {
 
     /// Remove a breakpoint by id. Returns `true` if it existed.
     pub fn remove(&mut self, id: u32) -> bool {
-        let before = self.exec.len() + self.mem.len();
+        let before = self.exec.len() + self.mem.len() + self.forbid.len();
         self.exec.retain(|b| b.id != id);
         self.mem.retain(|w| w.id != id);
-        before != self.exec.len() + self.mem.len()
+        self.forbid.retain(|f| f.id != id);
+        before != self.exec.len() + self.mem.len() + self.forbid.len()
     }
 
     /// Remove every breakpoint and any parked hit.
     pub fn clear(&mut self) {
         self.exec.clear();
         self.mem.clear();
+        self.forbid.clear();
         self.pending.clear();
     }
 
     /// No breakpoint registered.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.exec.is_empty() && self.mem.is_empty()
+        self.exec.is_empty() && self.mem.is_empty() && self.forbid.is_empty()
     }
 
     /// Every registered breakpoint, by id.
@@ -517,6 +613,7 @@ impl BreakpointSet {
                 name: e.name.clone(),
                 condition: e.condition.clone(),
                 mark: e.mark,
+                forbid: false,
             };
         let mut out: Vec<BreakpointInfo> = self
             .exec
@@ -539,6 +636,12 @@ impl BreakpointSet {
                 let (lo, hi) = (w.lo, w.hi);
                 info(
                     w.id, w.cpu, w.space, false, lo, hi, w.on_read, w.on_write, w.mirror, &w.extra,
+                )
+            }))
+            .chain(self.forbid.iter().map(|f| BreakpointInfo {
+                forbid: true,
+                ..info(
+                    f.id, f.cpu, f.space, false, f.lo, f.hi, false, false, false, &f.extra,
                 )
             }))
             .collect();

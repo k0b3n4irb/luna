@@ -87,7 +87,7 @@ method, so the MCP transport adds reach, not capability.
 | `enable_cpu_trace` / `take_cpu_trace` | `enable_cpu_trace` / `take_cpu_trace_log` | Per-instruction CPU trace ring (PC + registers). |
 | `enable_profile` / `take_profile` | `enable_profile` / `take_profile` | Master cycles per symbol (folded, heaviest first). (Per-PC samples are the Rust API's `take_profile_raw`; there is no MCP tool for them.) |
 | `enable_mem_trace` / `take_mem_trace` | `enable_mem_trace_filtered` / `take_mem_trace_log` | Per-bus-access trace with bank / offset-range / offset-list / writes-only filters; every event carries `origin` (`cpu`, `dma<n>`, `hdma<n>`). |
-| `bp_add` | `bp_add_exec` / `bp_add_mem`, `bp_set_condition`, `bp_set_mark` | Register an exec breakpoint or a read/write watchpoint range. `mirror: false` makes a mem watch bank-exact (default follows WRAM/MMIO mirrors); `name` (defaulting to the `symbol` used) labels it in `bp_list`. `condition` is an [expression](#expressions) that must be non-zero for it to fire; `mark: true` puts a mark on the Event Viewer instead of halting. `cpu: "spc"` / `"sa1"` / `"gsu"` / `"dsp"` on an `exec` breakpoint stops that CPU at the start of an instruction (`addr` in ARAM, or an ARAM `symbol`, for the SPC700; `kind: "spc_exec"` is the short form). `memory` on a `mem` watch watches another memory: `"SnesVideoRam"` / `"SnesCgRam"` / `"SnesSpriteRam"` (through the PPU's ports), `"SpcMemory"` / `"SpcRam"` / `"SpcRom"` (the SPC700's data accesses), `"Sa1Memory"` / `"GsuMemory"` (that chip's bus), `"DspDataRam"` (the DSP-1's). A hit's `cpu` names the CPU that stopped. See [Conditional breakpoints](#conditional-breakpoints). |
+| `bp_add` | `bp_add_exec` / `bp_add_mem`, `bp_set_condition`, `bp_set_mark` | Register an exec breakpoint or a read/write watchpoint range. `mirror: false` makes a mem watch bank-exact (default follows WRAM/MMIO mirrors); `name` (defaulting to the `symbol` used) labels it in `bp_list`. `condition` is an [expression](#expressions) that must be non-zero for it to fire; `mark: true` puts a mark on the Event Viewer instead of halting. `cpu: "spc"` / `"sa1"` / `"gsu"` / `"dsp"` on an `exec` breakpoint stops that CPU at the start of an instruction (`addr` in ARAM, or an ARAM `symbol`, for the SPC700; `kind: "spc_exec"` is the short form). `memory` on a `mem` watch watches another memory: `"SnesVideoRam"` / `"SnesCgRam"` / `"SnesSpriteRam"` (through the PPU's ports), `"SpcMemory"` / `"SpcRam"` / `"SpcRom"` (the SPC700's data accesses), `"Sa1Memory"` / `"GsuMemory"` (that chip's bus), `"DspDataRam"` (the DSP-1's). A hit's `cpu` names the CPU that stopped. `kind: "forbid"` is a range where a CPU does not halt (see [Forbid ranges](#forbid-ranges)). See [Conditional breakpoints](#conditional-breakpoints). |
 | `bp_set_enabled` | `bp_set_enabled` | Disable/re-enable without removing — id, name and hit count survive. |
 | `bp_remove` / `bp_clear_all` / `bp_list` | `bp_remove` / `bp_clear` / `bp_list` | Manage the registry. `bp_list` rows now carry `enabled`, `hit_count` (mem: at most one per instruction), `mirror` and `name`. |
 | `run_until_break` | `run_until_break` | Run at full speed until a breakpoint or a break source fires (or a step budget). |
@@ -375,6 +375,34 @@ bp_add {kind: "mem", memory: "Sa1Memory", addr: 0x3000}   # who in the SA-1 writ
   registers and its bus. `scanline` and `hclock` are the position its
   H/V timer follows; `frame` reads 0 there.
 - **Marks** are for the 65C816 only.
+
+#### Forbid ranges
+
+A *forbid* range is Mesen2's forbid breakpoint: a stretch of a CPU's code
+where it does not halt. While that CPU runs an instruction that starts
+inside the range, its breakpoints and watchpoints do not stop the run,
+nor, on the 65C816, a `BRK` / `COP` / `WDM` / `STP` break source. It
+keeps a noisy routine (a decompressor, a memory clear, an interrupt
+handler) out of a watchpoint's way.
+
+```text
+bp_add {kind: "mem", addr: 0x7E0010, hi: 0x7E001F}                     # who writes these bytes?
+bp_add {kind: "forbid", addr: 0x008008, hi: 0x00800B}                    # … except the routine at $8008
+bp_add {kind: "forbid", memory: "SnesPrgRom", addr: 0x8, hi: 0xB}        # the same, by its ROM bytes: every mirror
+bp_add {kind: "forbid", cpu: "spc", addr: 0xFFC0, hi: 0xFFFF}            # never stop the SPC700 in the IPL ROM
+bp_add {kind: "forbid", addr: 0x008008, hi: 0x00800B, condition: "[$10] == 1"}
+```
+
+- **The test** is the address of the instruction running, the opcode's,
+  on the CPU that would halt. Each CPU's ranges protect that CPU only. On
+  the 65C816 `memory` can name the memory the address resolves to
+  (`SnesPrgRom`, `SnesWorkRam`, `SnesSaveRam`) instead of the bus.
+- **A condition** limits the range to when it holds; it sees the access
+  the halting breakpoint saw.
+- **What still stops:** a step (`step_kind`), the NMI / IRQ and scanline
+  sources, `pause`. **Marks** still mark: only the halt is forbidden.
+- A range cannot be a mark. `bp_list` shows it with `kind: "forbid"`; a
+  disabled one does nothing.
 
 Mesen2's "break on" options and its "run to NMI / IRQ" are break sources,
 set once for every run:

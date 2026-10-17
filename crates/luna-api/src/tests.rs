@@ -2964,3 +2964,108 @@ fn dsp1_breakpoints_freeze_it_with_its_own_registers() {
     plain.load_rom_bytes(demo_lorom()).unwrap();
     assert!(plain.bp_add_exec_on(BreakCpu::Dsp, 0, None).is_err());
 }
+
+#[test]
+fn forbid_ranges_stop_halts_not_marks() {
+    // 8000 JSR $8008 ; 8003 STA $0011 ; 8006 BRA $8000
+    // 8008 INC $0010 ; 800B RTS
+    let code = [
+        0x20, 0x08, 0x80, 0x8D, 0x11, 0x00, 0x80, 0xF8, 0xEE, 0x10, 0x00, 0x60,
+    ];
+    let rom = demo_lorom_with(&code, None);
+    let fresh = || {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(rom.clone()).unwrap();
+        e.bp_add_mem(0x10, 0x11, false, true, true, None).unwrap();
+        e
+    };
+    let first_pc = |e: &mut Emulator| e.run_until_break(1_000).unwrap().hit.map(|h| h.pc);
+
+    // Without a forbid range, INC $0010 in the routine stops first.
+    assert_eq!(first_pc(&mut fresh()), Some(0x00_8008));
+    // Inside one, only the store outside the routine halts; by CPU
+    // address or by the ROM bytes it runs from.
+    let mut e = fresh();
+    e.bp_add_forbid(
+        BreakCpu::Snes,
+        MemoryKind::SnesMemory,
+        0x00_8008,
+        0x00_800B,
+        None,
+    )
+    .unwrap();
+    assert_eq!(first_pc(&mut e), Some(0x00_8003));
+    assert_eq!(first_pc(&mut e), Some(0x00_8003));
+    let mut e = fresh();
+    e.bp_add_forbid(BreakCpu::Snes, MemoryKind::SnesPrgRom, 8, 11, None)
+        .unwrap();
+    assert_eq!(first_pc(&mut e), Some(0x00_8003));
+    // A condition limits it: the first INC (to 1) is forbidden, the
+    // second is not.
+    let mut e = fresh();
+    let f = e
+        .bp_add_forbid(
+            BreakCpu::Snes,
+            MemoryKind::SnesMemory,
+            0x00_8008,
+            0x00_800B,
+            None,
+        )
+        .unwrap();
+    e.bp_set_condition(f, Some("[$10] == 1")).unwrap();
+    assert_eq!(first_pc(&mut e), Some(0x00_8003));
+    assert_eq!(first_pc(&mut e), Some(0x00_8008));
+    // A disabled one is inert.
+    e.bp_set_enabled(f, false).unwrap();
+    assert_eq!(first_pc(&mut e), Some(0x00_8003));
+    assert_eq!(first_pc(&mut e), Some(0x00_8008));
+    // A mark inside it still marks; the range itself cannot be a mark.
+    let mut e = Emulator::new();
+    e.load_rom_bytes(rom.clone()).unwrap();
+    let m = e.bp_add_exec(0x00_8008, None).unwrap();
+    e.bp_set_mark(m, true).unwrap();
+    let f = e
+        .bp_add_forbid(
+            BreakCpu::Snes,
+            MemoryKind::SnesMemory,
+            0x00_8008,
+            0x00_800B,
+            None,
+        )
+        .unwrap();
+    assert!(e.run_until_break(100).unwrap().hit.is_none());
+    assert!(e.bp_list().unwrap()[0].hit_count > 0);
+    assert!(e.bp_list().unwrap()[1].forbid);
+    assert!(e.bp_set_mark(f, true).is_err());
+    assert!(
+        e.bp_add_forbid(BreakCpu::Snes, MemoryKind::SnesVideoRam, 0, 1, None)
+            .is_err()
+    );
+
+    // The SPC700: the IPL ROM clears page zero from $FFC5.
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom()).unwrap();
+    e.bp_add_watch(MemoryKind::SpcRam, 0, 0xEF, false, true, None)
+        .unwrap();
+    e.bp_add_forbid(BreakCpu::Spc, MemoryKind::SpcMemory, 0xFFC5, 0xFFC5, None)
+        .unwrap();
+    assert!(e.run_until_break(100_000).unwrap().hit.is_none());
+
+    // The SA-1, with a condition: A < $45 is forbidden at $8105.
+    let mut e = Emulator::new();
+    e.load_rom_bytes_forced(demo_sa1(), luna_core::MapperKind::Sa1)
+        .unwrap();
+    e.bp_add_exec_on(BreakCpu::Sa1, 0x00_8105, None).unwrap();
+    let f = e
+        .bp_add_forbid(
+            BreakCpu::Sa1,
+            MemoryKind::Sa1Memory,
+            0x00_8105,
+            0x00_8105,
+            None,
+        )
+        .unwrap();
+    e.bp_set_condition(f, Some("a < $45")).unwrap();
+    e.run_until_break(10_000).unwrap().hit.unwrap();
+    assert_eq!(e.evaluate("a & $FF", ExprCpu::Sa1).unwrap().value, 0x45);
+}

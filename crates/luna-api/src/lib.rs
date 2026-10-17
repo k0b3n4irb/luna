@@ -1387,6 +1387,16 @@ const fn cpu_label(cpu: BreakCpu) -> &'static str {
     }
 }
 
+/// The registry's name for an absolute 65C816 forbid memory.
+const fn memory_space(kind: MemoryKind) -> Option<luna_core::WatchSpace> {
+    match kind {
+        MemoryKind::SnesPrgRom => Some(luna_core::WatchSpace::PrgRom),
+        MemoryKind::SnesWorkRam => Some(luna_core::WatchSpace::WorkRam),
+        MemoryKind::SnesSaveRam => Some(luna_core::WatchSpace::SaveRam),
+        _ => None,
+    }
+}
+
 /// The coprocessor CPU the cartridge's debugger hook stands for, if any.
 fn coproc_cpu(mapper: &dyn luna_core::Mapper) -> Option<BreakCpu> {
     let mut cpu = None;
@@ -3711,6 +3721,57 @@ impl Emulator {
         Ok(self.bp_registry()?.add_exec_on(cpu, pc, name))
     }
 
+    /// Register a *forbid* range (Mesen2's forbid breakpoints) over
+    /// `lo..=hi` of `memory` for `cpu`: while that CPU runs an instruction
+    /// that starts inside it, its breakpoints, watchpoints and (on the
+    /// 65C816) its `BRK` / `COP` / `WDM` / `STP` break sources do not halt
+    /// the run. Marks still mark; steps, NMI / IRQ entry and the scanline
+    /// source are not affected. A condition ([`Self::bp_set_condition`])
+    /// limits it to when it holds. Returns its id.
+    ///
+    /// `memory` is the CPU's own address space (`SnesMemory`, `SpcMemory`,
+    /// `Sa1Memory`, `GsuMemory`, `DspProgramRom` for the DSP-1), or on the
+    /// 65C816 the memory the instruction's address resolves to
+    /// (`SnesPrgRom`, `SnesWorkRam`, `SnesSaveRam`), which covers every
+    /// mirror of it.
+    pub fn bp_add_forbid(
+        &mut self,
+        cpu: BreakCpu,
+        memory: MemoryKind,
+        lo: u32,
+        hi: u32,
+        name: Option<&str>,
+    ) -> Result<u32, ApiError> {
+        use luna_core::WatchSpace;
+        self.require_cpu(cpu)?;
+        let space = match (cpu, memory) {
+            (BreakCpu::Snes, MemoryKind::SnesMemory)
+            | (BreakCpu::Spc, MemoryKind::SpcMemory)
+            | (BreakCpu::Sa1, MemoryKind::Sa1Memory)
+            | (BreakCpu::Gsu, MemoryKind::GsuMemory)
+            | (BreakCpu::Dsp, MemoryKind::DspProgramRom) => WatchSpace::Bus,
+            (BreakCpu::Snes, kind) if memory_space(kind).is_some() => {
+                memory_space(kind).unwrap_or(WatchSpace::Bus)
+            }
+            _ => {
+                return Err(ApiError::BadArg(format!(
+                    "{}: not where {} code runs",
+                    memory.name(),
+                    cpu_label(cpu)
+                )));
+            }
+        };
+        let size = self.memory_size(memory)? as u32;
+        if lo > hi || hi >= size {
+            return Err(ApiError::BadArg(format!(
+                "{}: range ${lo:X}..=${hi:X} outside its {size} bytes",
+                memory.name()
+            )));
+        }
+        let name = name.map(str::to_string);
+        Ok(self.bp_registry()?.add_forbid(cpu, space, lo, hi, name))
+    }
+
     /// Refuse a coprocessor the cartridge does not have.
     fn require_cpu(&self, cpu: BreakCpu) -> Result<(), ApiError> {
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
@@ -3924,6 +3985,11 @@ impl Emulator {
     /// on. Returns `false` for an unknown id.
     pub fn bp_set_mark(&mut self, id: u32, mark: bool) -> Result<bool, ApiError> {
         let registry = self.bp_registry()?;
+        if mark && registry.is_forbid(id) {
+            return Err(ApiError::BadArg(
+                "a forbid range cannot be a mark: it only stops halts".into(),
+            ));
+        }
         if let Some(cpu) = registry.cpu_of(id).filter(|c| mark && *c != BreakCpu::Snes) {
             return Err(ApiError::BadArg(format!(
                 "marks are for 65C816 breakpoints; an {} breakpoint halts",
@@ -4084,6 +4150,12 @@ impl Emulator {
         let at = |snes: &Snes| (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
         let conditions = self.bp_conditions.clone();
         let sources = self.break_sources;
+        let forbids = self
+            .snes
+            .as_ref()
+            .and_then(|s| s.breakpoints.as_ref())
+            .map(|b| b.forbids())
+            .unwrap_or_default();
         // The SPC700's breakpoints live in the APU for this run only, so a
         // plain step never freezes it; the PPU reports its writes only
         // while a watchpoint needs them.
@@ -4107,12 +4179,33 @@ impl Emulator {
                 .as_ref()
                 .map(|b| b.list())
                 .unwrap_or_default();
+            // A CPU's forbid ranges ride on its breakpoints' conditions: a
+            // match inside one does not freeze the chip.
+            let forbids_of = |cpu| -> Vec<(u32, u32, Option<expr::Expression>)> {
+                forbids
+                    .iter()
+                    .filter(|f| f.cpu == cpu && f.space == luna_core::WatchSpace::Bus)
+                    .map(|f| (f.lo, f.hi, conditions.get(&f.id).cloned()))
+                    .collect()
+            };
+            let spc_forbids = std::sync::Arc::new(forbids_of(BreakCpu::Spc));
             let condition = |id: u32| {
-                conditions.get(&id).map(|e| {
-                    let e = e.clone();
+                let e = conditions.get(&id).cloned();
+                (e.is_some() || !spc_forbids.is_empty()).then(|| {
+                    let forbids = spc_forbids.clone();
                     let check: luna_apu::SpcCondition =
                         std::sync::Arc::new(move |apu: &luna_apu::Apu, access| {
-                            expr::spc_holds(&e, apu, access)
+                            let pc = u32::from(if access.is_some() {
+                                apu.instruction_pc()
+                            } else {
+                                apu.cpu.pc
+                            });
+                            e.as_ref().is_none_or(|e| expr::spc_holds(e, apu, access))
+                                && !forbids.iter().any(|(lo, hi, f)| {
+                                    (*lo..=*hi).contains(&pc)
+                                        && f.as_ref()
+                                            .is_none_or(|f| expr::spc_holds(f, apu, access))
+                                })
                         });
                     check
                 })
@@ -4125,12 +4218,21 @@ impl Emulator {
                     condition: condition(id),
                 })
                 .collect();
+            let chip_forbids = std::sync::Arc::new(chip.map(forbids_of).unwrap_or_default());
             let coproc_condition = |id: u32| {
-                conditions.get(&id).map(|e| {
-                    let e = e.clone();
+                let e = conditions.get(&id).cloned();
+                (e.is_some() || !chip_forbids.is_empty()).then(|| {
+                    let forbids = chip_forbids.clone();
                     let check: luna_core::CoprocCondition = std::sync::Arc::new(
                         move |view: &dyn luna_core::CoprocView, access, oppc| {
-                            expr::coproc_holds(&e, view, access, oppc)
+                            e.as_ref()
+                                .is_none_or(|e| expr::coproc_holds(e, view, access, oppc))
+                                && !forbids.iter().any(|(lo, hi, f)| {
+                                    (*lo..=*hi).contains(&oppc)
+                                        && f.as_ref().is_none_or(|f| {
+                                            expr::coproc_holds(f, view, access, oppc)
+                                        })
+                                })
                         },
                     );
                     check
@@ -4147,7 +4249,7 @@ impl Emulator {
                     .collect();
                 debug.watches = listed
                     .iter()
-                    .filter(|b| Some(b.cpu) == chip && !b.exec && b.enabled)
+                    .filter(|b| Some(b.cpu) == chip && !b.exec && !b.forbid && b.enabled)
                     .map(|b| luna_core::CoprocWatch {
                         id: b.id,
                         lo: b.lo,
@@ -4160,7 +4262,7 @@ impl Emulator {
             }
             snes.apu_real.watches = listed
                 .into_iter()
-                .filter(|b| b.cpu == BreakCpu::Spc && !b.exec && b.enabled)
+                .filter(|b| b.cpu == BreakCpu::Spc && !b.exec && !b.forbid && b.enabled)
                 .map(|b| luna_apu::SpcWatch {
                     id: b.id,
                     region: match b.space {
@@ -4183,32 +4285,57 @@ impl Emulator {
         let marks: std::cell::RefCell<Vec<(BreakHit, u16, u16)>> = std::cell::RefCell::default();
         // The first hit that passes its condition: a mark is recorded and
         // the run goes on, anything else stops it.
+        // The access a 65C816 hit's condition sees.
+        let access_of = |view: memory::View<'_>, hit: &BreakHit| {
+            let address = hit.addr.unwrap_or(hit.pc);
+            expr::ExprAccess {
+                value: i64::from(hit.value.unwrap_or_else(|| view.bus_peek(hit.pc, 0))),
+                address: i64::from(address),
+                memaddress: if hit.space == luna_core::WatchSpace::Bus {
+                    view.absolute(address).map_or(-1, |l| i64::from(l.offset))
+                } else {
+                    i64::from(address)
+                },
+                write: hit.kind == BreakKind::Write,
+                dma: hit.dma,
+                dummy: false,
+                oppc: i64::from(hit.pc),
+            }
+        };
+        // Whether a 65C816 halt at `hit` falls in a forbid range: the
+        // instruction's address (or the memory it resolves to) inside it,
+        // and its condition holding.
+        let forbidden = |snes: &Snes, hit: &BreakHit| -> bool {
+            let view = memory::View(snes);
+            forbids.iter().filter(|f| f.cpu == BreakCpu::Snes).any(|f| {
+                let at = match f.space {
+                    luna_core::WatchSpace::Bus => Some(hit.pc),
+                    space => view
+                        .absolute(hit.pc)
+                        .and_then(|l| (memory_space(l.kind) == Some(space)).then_some(l.offset)),
+                };
+                at.is_some_and(|a| (f.lo..=f.hi).contains(&a))
+                    && conditions
+                        .get(&f.id)
+                        .is_none_or(|c| expr::evaluate_on(c, &access_of(view, hit), view).holds())
+            })
+        };
         let decide = |snes: &Snes, hits: Vec<BreakHit>| -> Option<BreakHit> {
             let bp = snes.breakpoints.as_ref()?;
             let view = memory::View(snes);
             for hit in hits {
-                if let Some(cond) = conditions.get(&hit.id) {
-                    let address = hit.addr.unwrap_or(hit.pc);
-                    let access = expr::ExprAccess {
-                        value: i64::from(hit.value.unwrap_or_else(|| view.bus_peek(hit.pc, 0))),
-                        address: i64::from(address),
-                        memaddress: if hit.space == luna_core::WatchSpace::Bus {
-                            view.absolute(address).map_or(-1, |l| i64::from(l.offset))
-                        } else {
-                            i64::from(address)
-                        },
-                        write: hit.kind == BreakKind::Write,
-                        dma: hit.dma,
-                        dummy: false,
-                        oppc: i64::from(hit.pc),
-                    };
-                    if !expr::evaluate_on(cond, &access, view).holds() {
-                        continue;
-                    }
+                if let Some(cond) = conditions.get(&hit.id)
+                    && !expr::evaluate_on(cond, &access_of(view, &hit), view).holds()
+                {
+                    continue;
                 }
+                // A mark is recorded even inside a forbid range.
                 if bp.is_mark(hit.id) {
                     let hclock = snes.mcycles_in_line.min(u32::from(u16::MAX)) as u16;
                     marks.borrow_mut().push((hit, snes.ppu_line, hclock));
+                    continue;
+                }
+                if forbidden(snes, &hit) {
                     continue;
                 }
                 return Some(hit);
@@ -4250,7 +4377,9 @@ impl Emulator {
                             0xDB if sources.stp => Some(BreakKind::Stp),
                             _ => None,
                         };
-                        if let Some(kind) = kind {
+                        if let Some(kind) = kind
+                            && !forbidden(snes, &source(kind))
+                        {
                             return Some(source(kind));
                         }
                     }
