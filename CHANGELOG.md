@@ -7,6 +7,33 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+## [1.39.0] — 2026-10-18
+
+The debugger takes Mesen2's: conditions in its expression language,
+marks, break sources, step over / out / by scanline or frame, forbid
+ranges, and breakpoints and watchpoints on every CPU of the console and
+its cartridges — the 65C816, the SPC700, the SA-1, the Super FX and the
+DSP-1 — and on VRAM, CGRAM, OAM and ARAM. The GUI gets Mesen2's video
+filters, each matching its picture to the pixel. And the 5A22's
+multiplier and divider now take their time. This release also carries
+the two fixes prepared as 1.38.1, which was never published.
+
+**Upgrading from 1.38.0:**
+
+- **Save states are version 9:** a state saved by 1.38.0 is refused with
+  the version mismatch message.
+- **A routine that reads `$4214-$4217` too soon after `$4203` / `$4206`**
+  now gets the value in progress, as on the console: a test that passed
+  with no wait may fail, and the frames of such a ROM can move.
+- **DSP-1 LoROM boards** without save RAM, or with more than 1 MB, have
+  their chip where the board puts it.
+- **A count of arrivals on a routine** (`--hit N`, `--peek-at`,
+  `--input-at`, `at_symbol`, `luna profile --until-pc`) that was one
+  ahead because an interrupt fell on the watched instruction is now
+  exact: such a value recorded with 1.38.0 moves by one.
+- Everything else is new: options, MCP tools and parameters, result
+  fields.
+
 ### Added
 
 - **`--until-if`: stop, check or poke where a condition holds.**
@@ -260,26 +287,6 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   1 MB (SHVC-2B3B-01), at `$60-$6F:0000-7FFF`, data below `$4000` and
   status above. All mirrored in `$80-$FF`.
 
-### Changed
-
-- **Save states are version 9.** The multiplier's counters and shift
-  register are part of the machine. A state saved by an earlier version
-  is refused with the version mismatch message.
-
-## [1.38.1] — 2026-10-11
-
-A count of arrivals that could be one ahead is corrected (the defect
-dates from 1.36.0), and one line of `luna diff --audio` made
-honest about a number it printed.
-
-**Upgrading from 1.38.0:** a count of arrivals on a routine (`--hit N`,
-`--peek-at`, `--input-at`, `at_symbol`, `luna profile --until-pc`) that
-was one ahead because an interrupt fell on the watched instruction is
-now exact: a value recorded with 1.38.0 on such a run moves by one
-arrival. Emulation, frames, audio and save states are unchanged.
-
-### Fixed
-
 - **An arrival on a routine is counted once when an interrupt is taken
   on its first instruction.** When the NMI or an IRQ was latched with
   the program counter standing on the watched instruction, the arrival
@@ -291,6 +298,10 @@ arrival. Emulation, frames, audio and save states are unchanged.
   interrupt about to be taken in front of it.
 
 ### Changed
+
+- **Save states are version 9.** The multiplier's counters and shift
+  register are part of the machine. A state saved by an earlier version
+  is refused with the version mismatch message.
 
 - **`luna diff --audio --align-onset` marks a shift that is the search
   limit.** On a held sound that starts a frame sooner, the best fit
