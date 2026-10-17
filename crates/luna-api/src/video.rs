@@ -3,10 +3,10 @@
 //!
 //! Both act on the picture a front-end shows, after the emulation: the frame
 //! `Emulator::render_frame_rgba` returns is untouched. The behaviour follows
-//! Mesen2; the code is luna's own, written from the algorithms (for the
-//! 2xSaI family, from a functional description of Mesen2's, checked
+//! Mesen2; the code is luna's own, written from the algorithms (for xBRZ
+//! and the 2xSaI family, from a functional description of Mesen2's, checked
 //! identical to its pictures). The filters luna does not implement yet (the
-//! two NTSC filters, xBRZ, `HQx`) are listed so a menu can show Mesen2's
+//! two NTSC filters, `HQx`) are listed so a menu can show Mesen2's
 //! whole list, and report [`VideoFilter::is_available`] `false`.
 
 /// One entry of Mesen2's Video Filter menu, in its order (`VideoFilterType`).
@@ -21,15 +21,15 @@ pub enum VideoFilter {
     NtscBisqwit,
     /// 2x, each pixel split in four cells of decreasing brightness.
     LcdGrid,
-    /// xBRZ 2x. Not available.
+    /// xBRZ 2x (Zenju).
     Xbrz2x,
-    /// xBRZ 3x. Not available.
+    /// xBRZ 3x (Zenju).
     Xbrz3x,
-    /// xBRZ 4x. Not available.
+    /// xBRZ 4x (Zenju).
     Xbrz4x,
-    /// xBRZ 5x. Not available.
+    /// xBRZ 5x (Zenju).
     Xbrz5x,
-    /// xBRZ 6x. Not available.
+    /// xBRZ 6x (Zenju).
     Xbrz6x,
     /// HQ 2x. Not available.
     Hq2x,
@@ -186,6 +186,11 @@ impl VideoFilter {
             self,
             Self::None
                 | Self::LcdGrid
+                | Self::Xbrz2x
+                | Self::Xbrz3x
+                | Self::Xbrz4x
+                | Self::Xbrz5x
+                | Self::Xbrz6x
                 | Self::Scale2x
                 | Self::Scale3x
                 | Self::Scale4x
@@ -210,10 +215,12 @@ impl VideoFilter {
             | Self::TwoXSai
             | Self::Super2xSai
             | Self::SuperEagle
+            | Self::Xbrz2x
             | Self::Prescale2x => 2,
-            Self::Scale3x | Self::Prescale3x => 3,
-            Self::Scale4x | Self::Prescale4x => 4,
-            Self::Prescale6x => 6,
+            Self::Xbrz3x | Self::Scale3x | Self::Prescale3x => 3,
+            Self::Xbrz4x | Self::Scale4x | Self::Prescale4x => 4,
+            Self::Xbrz5x => 5,
+            Self::Xbrz6x | Self::Prescale6x => 6,
             Self::Prescale8x => 8,
             Self::Prescale10x => 10,
             _ => 1,
@@ -235,6 +242,9 @@ impl VideoFilter {
         let pixels = &src[..width * height * 4];
         match self {
             Self::LcdGrid => lcd_grid(pixels, width, height, LCD_GRID_BRIGHTNESS, out),
+            Self::Xbrz2x | Self::Xbrz3x | Self::Xbrz4x | Self::Xbrz5x | Self::Xbrz6x => {
+                xbrz(s, pixels, width, height, out);
+            }
             Self::Scale2x => scale2x(pixels, width, height, out),
             Self::Scale3x => scale3x(pixels, width, height, out),
             Self::Scale4x => {
@@ -705,6 +715,417 @@ fn super_eagle(p: &impl Fn(isize, isize) -> u32) -> [u32; 4] {
     }
 }
 
+// xBRZ (Zenju), after the behaviour of Mesen2's: alpha-aware, default
+// settings, the whole frame at once. Written from a functional description,
+// not from its code. Pixels are `0xAARRGGBB`.
+
+const XBRZ_EQUAL: f64 = 30.0;
+const XBRZ_DOMINANT: f64 = 3.6;
+const XBRZ_STEEP: f64 = 2.2;
+
+/// A corner's blend class: none, normal or dominant.
+type Blend = u8;
+const NORMAL: Blend = 1;
+const DOMINANT: Blend = 2;
+
+const fn channel(p: u32, shift: u32) -> u32 {
+    (p >> shift) & 0xFF
+}
+
+/// The YCbCr (BT.2020) length of the difference, each channel difference
+/// first quantised to 8 bits (an even difference loses one, zero becomes
+/// −1), rounded to single precision as xBRZ's table holds it.
+// Plain products and sums, in this order: a fused multiply-add would round
+// differently from the reference.
+#[allow(clippy::suboptimal_flops)]
+fn xbrz_dist_rgb(p: u32, q: u32) -> f64 {
+    let e = |shift| {
+        let d = channel(p, shift) as i32 - channel(q, shift) as i32;
+        f64::from(((d + 255) >> 1) * 2 - 255)
+    };
+    let (r, g, b) = (e(16), e(8), e(0));
+    let (kb, kr) = (0.0593, 0.2627);
+    let kg = 1.0 - kb - kr;
+    let y = kr * r + kg * g + kb * b;
+    let cb = 0.5 / (1.0 - kb) * (b - y);
+    let cr = 0.5 / (1.0 - kr) * (r - y);
+    f64::from((y * y + cb * cb + cr * cr).sqrt() as f32)
+}
+
+/// The distance with alpha: a transparent pixel is far from an opaque one.
+// Same operation order as the reference (see `xbrz_dist_rgb`).
+#[allow(clippy::suboptimal_flops)]
+fn xbrz_dist(p: u32, q: u32) -> f64 {
+    let a1 = f64::from(channel(p, 24)) / 255.0;
+    let a2 = f64::from(channel(q, 24)) / 255.0;
+    let d = xbrz_dist_rgb(p, q);
+    if a1 < a2 {
+        a1 * d + 255.0 * (a2 - a1)
+    } else {
+        a2 * d + 255.0 * (a1 - a2)
+    }
+}
+
+fn xbrz_similar(p: u32, q: u32) -> bool {
+    xbrz_dist(p, q) < XBRZ_EQUAL
+}
+
+/// `m/n` of `front` over `back`, the colours weighted by alpha too.
+fn xbrz_mix(front: u32, back: u32, m: u32, n: u32) -> u32 {
+    let wf = channel(front, 24) * m;
+    let wb = channel(back, 24) * (n - m);
+    let w = wf + wb;
+    if w == 0 {
+        return 0;
+    }
+    let mix = |shift| (channel(front, shift) * wf + channel(back, shift) * wb) / w;
+    (w / n) << 24 | mix(16) << 16 | mix(8) << 8 | mix(0)
+}
+
+/// The five ways a corner is drawn.
+#[derive(Copy, Clone)]
+enum Line {
+    Shallow,
+    Steep,
+    SteepShallow,
+    Diagonal,
+    Corner,
+}
+
+/// One write of a pattern: row, column, `m/n` of the blend colour; `m == n`
+/// sets the cell.
+type Cell = (u8, u8, u16, u16);
+
+/// The bottom-right corner's writes at scale `s`; the steep line is the
+/// shallow one transposed.
+const fn xbrz_pattern(s: usize, line: Line) -> &'static [Cell] {
+    const C: (u16, u16) = (1, 1);
+    macro_rules! p {
+        ($(($r:expr, $c:expr, $f:expr)),* $(,)?) => {
+            &[$(($r, $c, $f.0, $f.1)),*]
+        };
+    }
+    match (s, line) {
+        (2, Line::Shallow | Line::Steep) => p![(1, 0, (1, 4)), (1, 1, (3, 4))],
+        (2, Line::SteepShallow) => p![(0, 1, (1, 4)), (1, 0, (1, 4)), (1, 1, (5, 6))],
+        (2, Line::Diagonal) => p![(1, 1, (1, 2))],
+        (2, Line::Corner) => p![(1, 1, (21, 100))],
+        (3, Line::Shallow | Line::Steep) => {
+            p![(1, 2, (1, 4)), (2, 0, (1, 4)), (2, 1, (3, 4)), (2, 2, C)]
+        }
+        (3, Line::SteepShallow) => p![
+            (0, 2, (1, 4)),
+            (1, 2, (3, 4)),
+            (2, 0, (1, 4)),
+            (2, 1, (3, 4)),
+            (2, 2, C),
+        ],
+        (3, Line::Diagonal) => p![(1, 2, (1, 8)), (2, 1, (1, 8)), (2, 2, (7, 8))],
+        (3, Line::Corner) => p![(2, 2, (45, 100))],
+        (4, Line::Shallow | Line::Steep) => p![
+            (2, 2, (1, 4)),
+            (2, 3, (3, 4)),
+            (3, 0, (1, 4)),
+            (3, 1, (3, 4)),
+            (3, 2, C),
+            (3, 3, C),
+        ],
+        (4, Line::SteepShallow) => p![
+            (0, 3, (1, 4)),
+            (1, 3, (3, 4)),
+            (2, 2, (1, 3)),
+            (2, 3, C),
+            (3, 0, (1, 4)),
+            (3, 1, (3, 4)),
+            (3, 2, C),
+            (3, 3, C),
+        ],
+        (4, Line::Diagonal) => p![(2, 3, (1, 2)), (3, 2, (1, 2)), (3, 3, C)],
+        (4, Line::Corner) => p![(2, 3, (9, 100)), (3, 2, (9, 100)), (3, 3, (68, 100))],
+        (5, Line::Shallow | Line::Steep) => p![
+            (2, 4, (1, 4)),
+            (3, 2, (1, 4)),
+            (3, 3, (3, 4)),
+            (3, 4, C),
+            (4, 0, (1, 4)),
+            (4, 1, (3, 4)),
+            (4, 2, C),
+            (4, 3, C),
+            (4, 4, C),
+        ],
+        (5, Line::SteepShallow) => p![
+            (0, 4, (1, 4)),
+            (1, 4, (3, 4)),
+            (2, 3, (1, 4)),
+            (2, 4, C),
+            (3, 2, (1, 4)),
+            (3, 3, (2, 3)),
+            (3, 4, C),
+            (4, 0, (1, 4)),
+            (4, 1, (3, 4)),
+            (4, 2, C),
+            (4, 3, C),
+            (4, 4, C),
+        ],
+        (5, Line::Diagonal) => p![
+            (2, 4, (1, 8)),
+            (3, 3, (1, 8)),
+            (3, 4, (7, 8)),
+            (4, 2, (1, 8)),
+            (4, 3, (7, 8)),
+            (4, 4, C),
+        ],
+        (5, Line::Corner) => p![(3, 4, (23, 100)), (4, 3, (23, 100)), (4, 4, (86, 100))],
+        (6, Line::Shallow | Line::Steep) => p![
+            (3, 4, (1, 4)),
+            (3, 5, (3, 4)),
+            (4, 2, (1, 4)),
+            (4, 3, (3, 4)),
+            (4, 4, C),
+            (4, 5, C),
+            (5, 0, (1, 4)),
+            (5, 1, (3, 4)),
+            (5, 2, C),
+            (5, 3, C),
+            (5, 4, C),
+            (5, 5, C),
+        ],
+        (6, Line::SteepShallow) => p![
+            (0, 5, (1, 4)),
+            (1, 5, (3, 4)),
+            (2, 4, (1, 4)),
+            (2, 5, C),
+            (3, 4, (3, 4)),
+            (3, 5, C),
+            (4, 2, (1, 4)),
+            (4, 3, (3, 4)),
+            (4, 4, C),
+            (4, 5, C),
+            (5, 0, (1, 4)),
+            (5, 1, (3, 4)),
+            (5, 2, C),
+            (5, 3, C),
+            (5, 4, C),
+            (5, 5, C),
+        ],
+        (6, Line::Diagonal) => p![
+            (3, 5, (1, 2)),
+            (4, 4, (1, 2)),
+            (4, 5, C),
+            (5, 3, (1, 2)),
+            (5, 4, C),
+            (5, 5, C),
+        ],
+        (6, Line::Corner) => p![
+            (3, 5, (6, 100)),
+            (4, 5, (42, 100)),
+            (5, 3, (6, 100)),
+            (5, 4, (42, 100)),
+            (5, 5, (97, 100)),
+        ],
+        _ => &[],
+    }
+}
+
+/// View cell `(i, j)` of an `n` × `n` grid turned `r` quarter-turns: the
+/// bottom-right corner's view becomes the top-right one at `r = 1`, the
+/// top-left at 2, the bottom-left at 3.
+const fn rotate(r: usize, n: usize, i: usize, j: usize) -> (usize, usize) {
+    match r {
+        0 => (i, j),
+        1 => (n - 1 - j, i),
+        2 => (n - 1 - i, n - 1 - j),
+        _ => (j, n - 1 - i),
+    }
+}
+
+/// The classes of the corner between `f`, `g` (right of it), `j` (below)
+/// and `k`, as seen from each: `[f, g, j, k]`.
+// Plain products and sums, as in `xbrz_dist_rgb`.
+#[allow(clippy::suboptimal_flops)]
+fn xbrz_corner(at: &impl Fn(isize, isize) -> u32) -> [Blend; 4] {
+    let (b, c) = (at(0, -1), at(1, -1));
+    let (e, f, g, h) = (at(-1, 0), at(0, 0), at(1, 0), at(2, 0));
+    let (i, j, k, l) = (at(-1, 1), at(0, 1), at(1, 1), at(2, 1));
+    let (n, o) = (at(0, 2), at(1, 2));
+    let mut out = [0; 4];
+    if (f == g && j == k) || (f == j && g == k) {
+        return out;
+    }
+    let jg = xbrz_dist(i, f)
+        + xbrz_dist(f, c)
+        + xbrz_dist(n, k)
+        + xbrz_dist(k, h)
+        + 4.0 * xbrz_dist(j, g);
+    let fk = xbrz_dist(e, j)
+        + xbrz_dist(j, o)
+        + xbrz_dist(b, g)
+        + xbrz_dist(g, l)
+        + 4.0 * xbrz_dist(f, k);
+    let strength = |small: f64, large: f64| {
+        if XBRZ_DOMINANT * small < large {
+            DOMINANT
+        } else {
+            NORMAL
+        }
+    };
+    if jg < fk {
+        let s = strength(jg, fk);
+        if f != g && f != j {
+            out[0] = s;
+        }
+        if k != j && k != g {
+            out[3] = s;
+        }
+    } else if fk < jg {
+        let s = strength(fk, jg);
+        if j != f && j != k {
+            out[2] = s;
+        }
+        if g != f && g != k {
+            out[1] = s;
+        }
+    }
+    out
+}
+
+fn xbrz(s: usize, src: &[u8], width: usize, height: usize, out: &mut [u8]) {
+    let argb: Vec<u32> = src
+        .chunks_exact(4)
+        .map(|p| u32::from_be_bytes([p[3], p[0], p[1], p[2]]))
+        .collect();
+    let clamped = |x: usize, y: usize, dx: isize, dy: isize| {
+        let cx = x.saturating_add_signed(dx).min(width - 1);
+        let cy = y.saturating_add_signed(dy).min(height - 1);
+        argb[cy * width + cx]
+    };
+    // Every corner whose top-left pixel is in the frame; the corners above
+    // row 0 and left of column 0 are never classed.
+    let mut corners = vec![[0; 4]; width * height];
+    for y in 0..height {
+        for x in 0..width {
+            corners[y * width + x] = xbrz_corner(&|dx, dy| clamped(x, y, dx, dy));
+        }
+    }
+    let ow = width * s;
+    let mut block = vec![0u32; s * s];
+    for y in 0..height {
+        for x in 0..width {
+            let centre = argb[y * width + x];
+            // Bottom-right, top-right, top-left, bottom-left.
+            let classes = [
+                corners[y * width + x][0],
+                if y > 0 {
+                    corners[(y - 1) * width + x][2]
+                } else {
+                    0
+                },
+                if x > 0 && y > 0 {
+                    corners[(y - 1) * width + x - 1][3]
+                } else {
+                    0
+                },
+                if x > 0 {
+                    corners[y * width + x - 1][1]
+                } else {
+                    0
+                },
+            ];
+            block.fill(centre);
+            if classes != [0; 4] {
+                for r in 0..4 {
+                    xbrz_blend(
+                        s,
+                        r,
+                        classes,
+                        &|i, j| {
+                            let (pi, pj) = rotate(r, 3, i, j);
+                            clamped(x, y, pj as isize - 1, pi as isize - 1)
+                        },
+                        &mut block,
+                    );
+                }
+            }
+            for (i, row) in block.chunks_exact(s).enumerate() {
+                let base = ((y * s + i) * ow + x * s) * 4;
+                for (j, &p) in row.iter().enumerate() {
+                    let [a, r, g, b] = p.to_be_bytes();
+                    out[base + j * 4..base + j * 4 + 4].copy_from_slice(&[r, g, b, a]);
+                }
+            }
+        }
+    }
+}
+
+/// Draw one corner of a pixel into its `s` × `s` block, in the view turned
+/// `r` quarter-turns (`view` reads its 3 × 3 neighbourhood in that view).
+fn xbrz_blend(
+    s: usize,
+    r: usize,
+    classes: [Blend; 4],
+    view: &impl Fn(usize, usize) -> u32,
+    block: &mut [u32],
+) {
+    let (br, tr, bl) = (classes[r], classes[(r + 1) % 4], classes[(r + 3) % 4]);
+    if br == 0 {
+        return;
+    }
+    let [b, c, d, e, f, g, h, i] = [
+        (0, 1),
+        (0, 2),
+        (1, 0),
+        (1, 1),
+        (1, 2),
+        (2, 0),
+        (2, 1),
+        (2, 2),
+    ]
+    .map(|(vi, vj)| view(vi, vj));
+    let do_line = if br == DOMINANT {
+        true
+    } else if (tr != 0 && !xbrz_similar(e, g)) || (bl != 0 && !xbrz_similar(e, c)) {
+        false
+    } else {
+        !(!xbrz_similar(e, i)
+            && xbrz_similar(g, h)
+            && xbrz_similar(h, i)
+            && xbrz_similar(i, f)
+            && xbrz_similar(f, c))
+    };
+    let col = if xbrz_dist(e, f) <= xbrz_dist(e, h) {
+        f
+    } else {
+        h
+    };
+    let line = if do_line {
+        let (fg, hc) = (xbrz_dist(f, g), xbrz_dist(h, c));
+        let shallow = XBRZ_STEEP * fg <= hc && e != g && d != g;
+        let steep = XBRZ_STEEP * hc <= fg && e != c && b != c;
+        match (shallow, steep) {
+            (true, true) => Line::SteepShallow,
+            (true, false) => Line::Shallow,
+            (false, true) => Line::Steep,
+            (false, false) => Line::Diagonal,
+        }
+    } else {
+        Line::Corner
+    };
+    for &(vi, vj, m, n) in xbrz_pattern(s, line) {
+        let (vi, vj) = if matches!(line, Line::Steep) {
+            (vj, vi)
+        } else {
+            (vi, vj)
+        };
+        let (pi, pj) = rotate(r, s, usize::from(vi), usize::from(vj));
+        let t = &mut block[pi * s + pj];
+        *t = if m == n {
+            col
+        } else {
+            xbrz_mix(col, *t, u32::from(m), u32::from(n))
+        };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -882,5 +1303,73 @@ mod tests {
         assert!((r(AspectRatio::Widescreen, true) - 16.0 / 9.0).abs() < 1e-12);
         assert!((r(AspectRatio::Custom, false) - 1.5).abs() < 1e-12);
         assert!((AspectRatio::Custom.ratio(9.0, false, 256, 224) - 5.0).abs() < 1e-12);
+    }
+
+    /// `0xAARRGGBB` cells, as frame bytes.
+    fn argb(cells: &[u32]) -> Vec<u8> {
+        cells
+            .iter()
+            .flat_map(|&p| {
+                let [a, r, g, b] = p.to_be_bytes();
+                [r, g, b, a]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn xbrz_matches_its_worked_examples() {
+        let x2 = |cells: &[u32], w: usize, h: usize| {
+            let mut out = Vec::new();
+            assert_eq!(
+                VideoFilter::Xbrz2x.apply(&argb(cells), w, h, &mut out),
+                (w * 2, h * 2)
+            );
+            out
+        };
+        // A dark pixel on white: four corner blends of 21/100.
+        let (wh, bk) = (0xFFFF_FFFF, 0xFF00_0000);
+        let mut want = vec![wh; 36];
+        for i in [14, 15, 20, 21] {
+            want[i] = 0xFF35_3535;
+        }
+        assert_eq!(x2(&[wh, wh, wh, wh, bk, wh, wh, wh, wh], 3, 3), argb(&want));
+        // A 45° red/blue edge: 1/2 diagonals inside, 1/4-3/4 lines at the
+        // clamped top and left borders.
+        let (rd, bl) = (0xFFFF_0000, 0xFF00_00FF);
+        let (q1, q3, h) = (0xFFBF_003F, 0xFF3F_00BF, 0xFF7F_007F);
+        let src = [
+            rd, rd, rd, bl, rd, rd, bl, bl, rd, bl, bl, bl, bl, bl, bl, bl,
+        ];
+        let want = [
+            [rd, rd, rd, rd, rd, q1, bl, bl],
+            [rd, rd, rd, rd, rd, q3, bl, bl],
+            [rd, rd, rd, rd, h, bl, bl, bl],
+            [rd, rd, rd, h, bl, bl, bl, bl],
+            [rd, rd, h, bl, bl, bl, bl, bl],
+            [q1, q3, bl, bl, bl, bl, bl, bl],
+            [bl; 8],
+            [bl; 8],
+        ];
+        assert_eq!(x2(&src, 4, 4), argb(want.as_flattened()));
+        // A ramp of near colours, which the distance's quantisation decides.
+        let (a, b, c, d) = (0xFF10_2030, 0xFF40_5060, 0xFF70_8090, 0xFFA0_B0C0);
+        let src = [a, b, c, d, a, a, b, c, a, a, a, b];
+        let want: [[u32; 8]; 6] = [
+            [a, a, 0xFF34_4454, b, 0xFF64_7484, c, d, d],
+            [a, a, 0xFF1C_2C3C, b, 0xFF4C_5C6C, c, 0xFF88_98A8, d],
+            [a, a, a, 0xFF28_3848, b, 0xFF58_6878, c, c],
+            [a, a, a, a, 0xFF28_3848, b, 0xFF4C_5C6C, 0xFF64_7484],
+            [a, a, a, a, a, 0xFF34_4454, b, b],
+            [a, a, a, a, a, 0xFF1C_2C3C, b, b],
+        ];
+        assert_eq!(x2(&src, 4, 3), argb(want.as_flattened()));
+    }
+
+    #[test]
+    fn xbrz_distance_quantises_and_is_not_symmetric() {
+        assert!((xbrz_dist_rgb(0xFF12_3456, 0xFF12_3456) - 1.0).abs() < 1e-12);
+        assert!((xbrz_dist_rgb(0xFF00_0000, 0xFFFF_FFFF) - 255.0).abs() < 1e-12);
+        assert!((xbrz_dist_rgb(0, 0x0002_0000) - 1.845_218_54).abs() < 1e-6);
+        assert!((xbrz_dist_rgb(0x0002_0000, 0) - 1.141_591_55).abs() < 1e-6);
     }
 }
