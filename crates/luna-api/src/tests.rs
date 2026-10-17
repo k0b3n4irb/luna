@@ -2896,3 +2896,71 @@ fn gsu_breakpoints_freeze_it_with_its_own_registers() {
     plain.load_rom_bytes(demo_lorom()).unwrap();
     assert!(plain.bp_add_exec_on(BreakCpu::Gsu, 0x8000, None).is_err());
 }
+
+/// [`demo_dsp1`] with microcode of our own: `LD #$10,DP ; LD #$1234,A`,
+/// then a loop storing `$BEEF` at `[DP]` (`LD #$BEEF,[DP] ; JMP 2`).
+fn demo_dsp1_loop() -> Vec<u8> {
+    let mut rom = demo_dsp1();
+    let fw = rom.len() - 0x2000;
+    let ld = |imm: u32, dst: u32| (3 << 22) | (imm << 6) | dst;
+    let words = [
+        ld(0x10, 4),
+        ld(0x1234, 1),
+        ld(0xBEEF, 15),
+        (2 << 22) | (0x100 << 13) | (2 << 2),
+    ];
+    for (i, w) in words.into_iter().enumerate() {
+        rom[fw + i * 3..fw + i * 3 + 3].copy_from_slice(&w.to_le_bytes()[..3]);
+    }
+    rom
+}
+
+#[test]
+fn dsp1_breakpoints_freeze_it_with_its_own_registers() {
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_dsp1_loop()).unwrap();
+    let dsp = |e: &Emulator, t: &str| e.evaluate(t, ExprCpu::Dsp).unwrap().value;
+
+    // Addresses are program ROM bytes: word 2 is byte 6.
+    let id = e.bp_add_exec_on(BreakCpu::Dsp, 6, None).unwrap();
+    e.bp_set_condition(id, Some("a == $1234 && dp == $10"))
+        .unwrap();
+    let hit = e.run_until_break(1_000).unwrap().hit.unwrap();
+    assert_eq!(
+        (hit.kind, hit.cpu, hit.id, hit.pc),
+        (BreakKind::Exec, BreakCpu::Dsp, id, 6)
+    );
+    assert_eq!(dsp(&e, "pc"), 2, "the word index");
+    assert_eq!(
+        dsp(&e, "[6]"),
+        0xCF,
+        "memory operators read the program ROM"
+    );
+    e.bp_clear().unwrap();
+
+    // A watchpoint on the data RAM's bytes: word $10 is bytes $20-$21.
+    let w = e
+        .bp_add_watch(MemoryKind::DspDataRam, 0x20, 0x21, false, true, None)
+        .unwrap();
+    e.bp_set_condition(w, Some("value == $BE")).unwrap();
+    let hit = e.run_until_break(1_000).unwrap().hit.unwrap();
+    assert_eq!(
+        (hit.kind, hit.cpu, hit.pc, hit.addr, hit.value, hit.space),
+        (
+            BreakKind::Write,
+            BreakCpu::Dsp,
+            6,
+            Some(0x21),
+            Some(0xBE),
+            WatchSpace::DspDataRam
+        )
+    );
+    assert_eq!(
+        e.read_memory(MemoryKind::DspDataRam, 0x20, 2).unwrap(),
+        [0xEF, 0xBE]
+    );
+
+    let mut plain = Emulator::new();
+    plain.load_rom_bytes(demo_lorom()).unwrap();
+    assert!(plain.bp_add_exec_on(BreakCpu::Dsp, 0, None).is_err());
+}

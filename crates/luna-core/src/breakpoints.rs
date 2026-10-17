@@ -65,6 +65,8 @@ pub enum WatchSpace {
     Aram,
     /// The SPC700's 64-byte IPL ROM, read at `$FFC0-$FFFF`.
     Ipl,
+    /// The DSP-1's data RAM, 2 bytes per word, low first.
+    DspDataRam,
 }
 
 /// The CPU a breakpoint watches.
@@ -80,13 +82,15 @@ pub enum BreakCpu {
     Sa1,
     /// The Super FX's GSU.
     Gsu,
+    /// The DSP-1's NEC uPD7725 (addresses in its program ROM's bytes).
+    Dsp,
 }
 
 impl BreakCpu {
     /// The mask of its addresses (24-bit buses, the SPC700's 16).
     const fn mask(self) -> u32 {
         match self {
-            Self::Spc => 0xFFFF,
+            Self::Spc | Self::Dsp => 0xFFFF,
             Self::Snes | Self::Sa1 | Self::Gsu => 0x00FF_FFFF,
         }
     }

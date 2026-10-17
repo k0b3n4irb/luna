@@ -36,6 +36,9 @@ pub enum ExprCpu {
     Sa1,
     /// The Super FX's GSU on its 24-bit bus.
     Gsu,
+    /// The DSP-1's NEC uPD7725, its memory operators on its program ROM
+    /// bytes.
+    Dsp,
 }
 
 /// What an evaluation produced. Every kind but `Numeric` and `Boolean`
@@ -138,6 +141,18 @@ enum Reg {
     Pbr,
     RomBr,
     RamBr,
+    /// NEC DSP registers.
+    B,
+    Tr,
+    Trb,
+    Rp,
+    Dp,
+    Dr,
+    Sr,
+    K,
+    L,
+    M,
+    N,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -283,10 +298,27 @@ const fn reg_named(cpu: ExprCpu, name: &str) -> Option<Reg> {
         ("rombr", Reg::RomBr),
         ("rambr", Reg::RamBr),
     ];
+    let dsp: &[(&str, Reg)] = &[
+        ("a", Reg::A),
+        ("b", Reg::B),
+        ("tr", Reg::Tr),
+        ("trb", Reg::Trb),
+        ("rp", Reg::Rp),
+        ("dp", Reg::Dp),
+        ("dr", Reg::Dr),
+        ("sr", Reg::Sr),
+        ("k", Reg::K),
+        ("l", Reg::L),
+        ("m", Reg::M),
+        ("n", Reg::N),
+        ("sp", Reg::Sp),
+        ("pc", Reg::Pc),
+    ];
     let table = match cpu {
         ExprCpu::Snes | ExprCpu::Sa1 => snes,
         ExprCpu::Spc => spc,
         ExprCpu::Gsu => gsu,
+        ExprCpu::Dsp => dsp,
     };
     let mut i = 0;
     while i < table.len() {
@@ -691,7 +723,9 @@ impl ExprEnv for View<'_> {
                 }
             }
             ExprCpu::Spc => spc_reg(&snes.apu_real, reg),
-            ExprCpu::Gsu => coproc_regs(&*snes.mapper).map_or(0, |r| coproc_reg(r, reg)),
+            ExprCpu::Gsu | ExprCpu::Dsp => {
+                coproc_regs(&*snes.mapper).map_or(0, |r| coproc_reg(r, reg))
+            }
             ExprCpu::Sa1 => {
                 // The PPU tokens come from the console's PPU, as Mesen2's do.
                 let hclock = i64::from(snes.mcycles_in_line.min(u32::from(u16::MAX)));
@@ -711,7 +745,7 @@ impl ExprEnv for View<'_> {
             // Mesen2 reads 0 where nothing answers.
             ExprCpu::Snes => self.bus_peek(addr, 0),
             ExprCpu::Spc => spc_byte(&self.0.apu_real, addr),
-            ExprCpu::Sa1 | ExprCpu::Gsu => coproc_peek(&*self.0.mapper, addr),
+            ExprCpu::Sa1 | ExprCpu::Gsu | ExprCpu::Dsp => coproc_peek(&*self.0.mapper, addr),
         }
     }
 
@@ -737,6 +771,7 @@ impl ExprEnv for View<'_> {
             ExprCpu::Spc => spc_absolute(&self.0.apu_real, addr),
             ExprCpu::Sa1 => sa1_absolute(*self, addr),
             ExprCpu::Gsu => gsu_absolute(addr),
+            ExprCpu::Dsp => i64::from(addr),
         }
     }
 }
@@ -746,6 +781,8 @@ const fn cpu_space(cpu: ExprCpu) -> u32 {
     match cpu {
         ExprCpu::Snes | ExprCpu::Sa1 | ExprCpu::Gsu => 0x100_0000,
         ExprCpu::Spc => 0x1_0000,
+        // The DSP-1's 2048 program words, 3 bytes each.
+        ExprCpu::Dsp => 0x1800,
     }
 }
 
@@ -814,6 +851,38 @@ fn coproc_reg(regs: luna_core::CoprocRegs, reg: Reg) -> i64 {
             Reg::RamBr => i64::from(rambr),
             _ => 0,
         },
+        luna_core::CoprocRegs::Dsp {
+            a,
+            b,
+            tr,
+            trb,
+            rp,
+            dp,
+            dr,
+            sr,
+            k,
+            l,
+            m,
+            n,
+            sp,
+            pc,
+        } => i64::from(match reg {
+            Reg::A => a,
+            Reg::B => b,
+            Reg::Tr => tr,
+            Reg::Trb => trb,
+            Reg::Rp => rp,
+            Reg::Dp => dp,
+            Reg::Dr => dr,
+            Reg::Sr => sr,
+            Reg::K => k,
+            Reg::L => l,
+            Reg::M => m,
+            Reg::N => n,
+            Reg::Sp => u16::from(sp),
+            Reg::Pc => pc,
+            _ => 0,
+        }),
     }
 }
 
@@ -1047,20 +1116,23 @@ impl Emulator {
                 (i64::from(c.pb) << 16) | i64::from(c.pc)
             }
             ExprCpu::Spc => i64::from(self.spc700_state()?.pc),
-            ExprCpu::Sa1 | ExprCpu::Gsu => {
+            ExprCpu::Sa1 | ExprCpu::Gsu | ExprCpu::Dsp => {
                 let regs = coproc_regs(&*self.snes.as_ref().ok_or(ApiError::NoRom)?.mapper);
                 match (cpu, regs) {
                     (ExprCpu::Sa1, Some(luna_core::CoprocRegs::Sa1 { pc, .. })) => i64::from(pc),
                     (ExprCpu::Gsu, Some(luna_core::CoprocRegs::Gsu { r, pbr, .. })) => {
                         (i64::from(pbr) << 16) | i64::from(r[15])
                     }
+                    (ExprCpu::Dsp, Some(luna_core::CoprocRegs::Dsp { pc, .. })) => {
+                        i64::from(pc) * 3
+                    }
                     _ => {
                         return Err(ApiError::BadArg(format!(
                             "this cartridge has no {}",
-                            if cpu == ExprCpu::Sa1 {
-                                "SA-1"
-                            } else {
-                                "Super FX"
+                            match cpu {
+                                ExprCpu::Sa1 => "SA-1",
+                                ExprCpu::Gsu => "Super FX",
+                                _ => "DSP-1 with its firmware",
                             }
                         )));
                     }

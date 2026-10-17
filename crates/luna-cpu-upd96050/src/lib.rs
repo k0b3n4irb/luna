@@ -221,8 +221,55 @@ pub struct TraceLog {
     pub ports_only: bool,
 }
 
+/// One data RAM word the DSP's microcode read or wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RamAccess {
+    /// The word index.
+    pub word: u16,
+    /// The word read or written.
+    pub value: u16,
+    /// A write (else a read).
+    pub write: bool,
+}
+
+/// The registers a debugger shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DebugRegisters {
+    /// Accumulator A.
+    pub a: u16,
+    /// Accumulator B.
+    pub b: u16,
+    /// Temporary register TR.
+    pub tr: u16,
+    /// Temporary register TRB.
+    pub trb: u16,
+    /// ROM pointer.
+    pub rp: u16,
+    /// Data pointer.
+    pub dp: u16,
+    /// Data register.
+    pub dr: u16,
+    /// Status register.
+    pub sr: u16,
+    /// Multiplier input K.
+    pub k: u16,
+    /// Multiplier input L.
+    pub l: u16,
+    /// Multiplier output M.
+    pub m: u16,
+    /// Multiplier output N.
+    pub n: u16,
+    /// Stack pointer.
+    pub sp: u8,
+    /// Program counter, a word index.
+    pub pc: u16,
+}
+
 /// A NEC uPD7725 / uPD96050 DSP instance.
 pub struct Upd96050 {
+    /// The microcode's data RAM accesses, when a debugger asks for them
+    /// (`None`, the default, records nothing). Not in the save state.
+    pub ram_accesses: Option<Vec<RamAccess>>,
     /// Optional instruction + port trace (`--dsp1-trace`). `None` = off.
     /// Not part of the save state (a trace is a debugging session, not
     /// machine state).
@@ -255,6 +302,7 @@ impl Upd96050 {
             flags_b: Flag::default(),
             trace: None,
             instructions_executed: 0,
+            ram_accesses: None,
         };
         core.power();
         core
@@ -483,6 +531,53 @@ impl Upd96050 {
     pub const fn dr(&self) -> u16 {
         self.regs.dr
     }
+    /// The registers, for a debugger.
+    #[must_use]
+    pub const fn debug_registers(&self) -> DebugRegisters {
+        let r = &self.regs;
+        DebugRegisters {
+            a: r.a as u16,
+            b: r.b as u16,
+            tr: r.tr,
+            trb: r.trb,
+            rp: r.rp.get(),
+            dp: r.dp.get(),
+            dr: r.dr,
+            sr: r.sr.to_u16(),
+            k: r.k as u16,
+            l: r.l as u16,
+            m: r.m as u16,
+            n: r.n as u16,
+            sp: r.sp,
+            pc: r.pc.get(),
+        }
+    }
+
+    /// The microcode's read of data RAM word `a`.
+    fn ram_get(&mut self, a: usize) -> u16 {
+        let value = self.data_ram[a];
+        if let Some(log) = self.ram_accesses.as_mut() {
+            log.push(RamAccess {
+                word: a as u16,
+                value,
+                write: false,
+            });
+        }
+        value
+    }
+
+    /// The microcode's write of data RAM word `a`.
+    fn ram_set(&mut self, a: usize, value: u16) {
+        self.data_ram[a] = value;
+        if let Some(log) = self.ram_accesses.as_mut() {
+            log.push(RamAccess {
+                word: a as u16,
+                value,
+                write: true,
+            });
+        }
+    }
+
     /// Data RAM contents (256 words for DSP-1, up to 2048 for uPD96050).
     #[must_use]
     pub fn data_ram(&self) -> &[u16] {
@@ -616,12 +711,12 @@ impl Upd96050 {
             11 | 12 => self.regs.si,
             13 => self.regs.k as u16,
             14 => self.regs.l as u16,
-            _ => self.data_ram[self.regs.dp.get() as usize], // 15
+            _ => self.ram_get(self.regs.dp.get() as usize), // 15
         };
 
         if alu != 0 {
             let mut p: u16 = match pselect {
-                0 => self.data_ram[self.regs.dp.get() as usize],
+                0 => self.ram_get(self.regs.dp.get() as usize),
                 1 => idb,
                 2 => self.regs.m as u16,
                 _ => self.regs.n as u16, // 3
@@ -828,11 +923,11 @@ impl Upd96050 {
             }
             12 => {
                 self.regs.l = id as i16;
-                self.regs.k = self.data_ram[(self.regs.dp.get() | 0x40) as usize] as i16;
+                self.regs.k = self.ram_get((self.regs.dp.get() | 0x40) as usize) as i16;
             }
             13 => self.regs.l = id as i16,
             14 => self.regs.trb = id,
-            _ => self.data_ram[self.regs.dp.get() as usize] = id, // 15
+            _ => self.ram_set(self.regs.dp.get() as usize, id), // 15
         }
     }
 }

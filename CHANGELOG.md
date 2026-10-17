@@ -27,6 +27,14 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   frames ("break in N"). A breakpoint or break source met on the way stops
   it first. MCP: `step_kind`.
 
+- **DSP-1 breakpoints.** The NEC uPD7725 takes the same:
+  `bp_add_exec_on(BreakCpu::Dsp, byte)` on a program ROM byte (the word
+  × 3, as in Mesen2), `bp_add_watch(MemoryKind::DspDataRam, …)` on the
+  microcode's data RAM reads and writes, conditions in `ExprCpu::Dsp`
+  (`a b tr trb rp dp dr sr k l m n sp pc`, memory operators on the
+  program ROM). MCP: `cpu: "dsp"`, `memory: "DspDataRam"`, `eval {cpu:
+  "dsp"}`.
+
 - **Super FX breakpoints.** The GSU takes the same: `bp_add_exec_on(
   BreakCpu::Gsu, pc)` at `PBR:R15`, `bp_add_watch(MemoryKind::GsuMemory,
   …)` on its data accesses (ROM buffer, RAM, plot cache), conditions in

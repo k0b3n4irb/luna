@@ -56,6 +56,37 @@ pub enum CoprocRegs {
         /// RAM data bank.
         rambr: u8,
     },
+    /// The DSP-1's NEC uPD7725.
+    Dsp {
+        /// Accumulators A and B.
+        a: u16,
+        /// Accumulator B.
+        b: u16,
+        /// Temporary registers TR, TRB.
+        tr: u16,
+        /// Temporary register TRB.
+        trb: u16,
+        /// ROM pointer.
+        rp: u16,
+        /// Data pointer.
+        dp: u16,
+        /// Data register.
+        dr: u16,
+        /// Status register.
+        sr: u16,
+        /// Multiplier inputs K, L and outputs M, N.
+        k: u16,
+        /// Multiplier input L.
+        l: u16,
+        /// Multiplier output M.
+        m: u16,
+        /// Multiplier output N.
+        n: u16,
+        /// Stack pointer.
+        sp: u8,
+        /// Program counter, a word index.
+        pc: u16,
+    },
 }
 
 /// One data access an instruction made on the coprocessor's bus.

@@ -517,7 +517,8 @@ pub struct BpAddParams {
     /// `"spc_exec"` is `"exec"` on `cpu: "spc"`.
     pub kind: String,
     /// Exec only: the CPU — `"snes"` (the 65C816, default), `"spc"` (`addr`
-    /// 16-bit, `symbol` an ARAM label), `"sa1"`, `"gsu"`. A watchpoint's CPU follows
+    /// 16-bit, `symbol` an ARAM label), `"sa1"`, `"gsu"`, `"dsp"` (`addr` a
+    /// program ROM byte, the word × 3). A watchpoint's CPU follows
     /// its `memory`.
     #[serde(default)]
     pub cpu: Option<String>,
@@ -1399,7 +1400,7 @@ pub struct StepKindParams {
 pub struct EvalParams {
     /// The expression, in Mesen2's language (`[$7E0010] == 3 && scanline > 200`).
     pub expression: String,
-    /// The CPU it is for: `snes` (default), `spc`, `sa1` or `gsu`.
+    /// The CPU it is for: `snes` (default), `spc`, `sa1`, `gsu` or `dsp`.
     #[serde(default)]
     pub cpu: Option<String>,
 }
@@ -1535,7 +1536,8 @@ pub struct RunUntilBreakResult {
     /// `"exec"`, `"read"`, `"write"`, a break source (`"brk"`, `"nmi"`,
     /// …) or `"step"`.
     pub kind: Option<String>,
-    /// The CPU it fired on: `"snes"` (the 65C816), `"spc"`, `"sa1"`, `"gsu"`.
+    /// The CPU it fired on: `"snes"` (the 65C816), `"spc"`, `"sa1"`,
+    /// `"gsu"`, `"dsp"`.
     pub cpu: Option<String>,
     /// Exec: the about-to-execute PC. Mem: the accessing instruction's PC.
     pub pc: Option<u32>,
@@ -2711,10 +2713,10 @@ impl LunaServer {
                                 `memory`: watch VRAM, CGRAM, OAM (through the PPU's ports) or the \
                                 SPC700's SpcMemory / SpcRam / SpcRom instead of the CPU bus; an \
                                 SPC700 watch stops it just after the access. `cpu` ('spc', \
-                                'sa1', 'gsu') puts an exec breakpoint on another CPU: it halts standing \
+                                'sa1', 'gsu', 'dsp') puts an exec breakpoint on another CPU: it halts standing \
                                 at the start of the instruction, its condition evaluated for that \
                                 CPU (ARAM `addr` / `symbol` for the SPC700; kind='spc_exec' is \
-                                the short form). Memory 'Sa1Memory' / 'GsuMemory' watches that chip's bus. \
+                                the short form). Memory 'Sa1Memory' / 'GsuMemory' / 'DspDataRam' watches that chip's memory. \
                                 Returns the registry id. Run with `run_until_break`."
     )]
     async fn bp_add(
@@ -2735,9 +2737,10 @@ impl LunaServer {
                 (_, Some("spc" | "spc700" | "apu")) => luna_api::BreakCpu::Spc,
                 (_, Some("sa1" | "sa-1")) => luna_api::BreakCpu::Sa1,
                 (_, Some("gsu" | "superfx")) => luna_api::BreakCpu::Gsu,
+                (_, Some("dsp" | "dsp1")) => luna_api::BreakCpu::Dsp,
                 (_, Some(other)) => {
                     return Err(ErrorData::invalid_params(
-                        format!("cpu must be 'snes', 'spc', 'sa1' or 'gsu', got `{other}`"),
+                        format!("cpu must be 'snes', 'spc', 'sa1', 'gsu' or 'dsp', got `{other}`"),
                         None,
                     ));
                 }
@@ -2966,6 +2969,7 @@ impl LunaServer {
             Some("spc" | "spc700" | "apu") => luna_api::ExprCpu::Spc,
             Some("sa1" | "sa-1") => luna_api::ExprCpu::Sa1,
             Some("gsu" | "superfx") => luna_api::ExprCpu::Gsu,
+            Some("dsp" | "dsp1") => luna_api::ExprCpu::Dsp,
             Some(other) => {
                 return Err(ErrorData::invalid_params(
                     format!("unknown cpu `{other}`; `snes` or `spc`"),
@@ -4172,6 +4176,7 @@ const fn cpu_name(cpu: luna_api::BreakCpu) -> &'static str {
         luna_api::BreakCpu::Spc => "spc",
         luna_api::BreakCpu::Sa1 => "sa1",
         luna_api::BreakCpu::Gsu => "gsu",
+        luna_api::BreakCpu::Dsp => "dsp",
     }
 }
 
@@ -4184,6 +4189,7 @@ const fn space_name(space: luna_api::WatchSpace) -> &'static str {
         luna_api::WatchSpace::Oam => "oam",
         luna_api::WatchSpace::Aram => "aram",
         luna_api::WatchSpace::Ipl => "ipl",
+        luna_api::WatchSpace::DspDataRam => "dsp_data_ram",
     }
 }
 

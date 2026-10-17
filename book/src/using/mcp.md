@@ -87,7 +87,7 @@ method, so the MCP transport adds reach, not capability.
 | `enable_cpu_trace` / `take_cpu_trace` | `enable_cpu_trace` / `take_cpu_trace_log` | Per-instruction CPU trace ring (PC + registers). |
 | `enable_profile` / `take_profile` | `enable_profile` / `take_profile` | Master cycles per symbol (folded, heaviest first). (Per-PC samples are the Rust API's `take_profile_raw`; there is no MCP tool for them.) |
 | `enable_mem_trace` / `take_mem_trace` | `enable_mem_trace_filtered` / `take_mem_trace_log` | Per-bus-access trace with bank / offset-range / offset-list / writes-only filters; every event carries `origin` (`cpu`, `dma<n>`, `hdma<n>`). |
-| `bp_add` | `bp_add_exec` / `bp_add_mem`, `bp_set_condition`, `bp_set_mark` | Register an exec breakpoint or a read/write watchpoint range. `mirror: false` makes a mem watch bank-exact (default follows WRAM/MMIO mirrors); `name` (defaulting to the `symbol` used) labels it in `bp_list`. `condition` is an [expression](#expressions) that must be non-zero for it to fire; `mark: true` puts a mark on the Event Viewer instead of halting. `cpu: "spc"` / `"sa1"` / `"gsu"` on an `exec` breakpoint stops that CPU at the start of an instruction (`addr` in ARAM, or an ARAM `symbol`, for the SPC700; `kind: "spc_exec"` is the short form). `memory` on a `mem` watch watches another memory: `"SnesVideoRam"` / `"SnesCgRam"` / `"SnesSpriteRam"` (through the PPU's ports), `"SpcMemory"` / `"SpcRam"` / `"SpcRom"` (the SPC700's data accesses), `"Sa1Memory"` / `"GsuMemory"` (that chip's bus). A hit's `cpu` names the CPU that stopped. See [Conditional breakpoints](#conditional-breakpoints). |
+| `bp_add` | `bp_add_exec` / `bp_add_mem`, `bp_set_condition`, `bp_set_mark` | Register an exec breakpoint or a read/write watchpoint range. `mirror: false` makes a mem watch bank-exact (default follows WRAM/MMIO mirrors); `name` (defaulting to the `symbol` used) labels it in `bp_list`. `condition` is an [expression](#expressions) that must be non-zero for it to fire; `mark: true` puts a mark on the Event Viewer instead of halting. `cpu: "spc"` / `"sa1"` / `"gsu"` / `"dsp"` on an `exec` breakpoint stops that CPU at the start of an instruction (`addr` in ARAM, or an ARAM `symbol`, for the SPC700; `kind: "spc_exec"` is the short form). `memory` on a `mem` watch watches another memory: `"SnesVideoRam"` / `"SnesCgRam"` / `"SnesSpriteRam"` (through the PPU's ports), `"SpcMemory"` / `"SpcRam"` / `"SpcRom"` (the SPC700's data accesses), `"Sa1Memory"` / `"GsuMemory"` (that chip's bus), `"DspDataRam"` (the DSP-1's). A hit's `cpu` names the CPU that stopped. See [Conditional breakpoints](#conditional-breakpoints). |
 | `bp_set_enabled` | `bp_set_enabled` | Disable/re-enable without removing — id, name and hit count survive. |
 | `bp_remove` / `bp_clear_all` / `bp_list` | `bp_remove` / `bp_clear` / `bp_list` | Manage the registry. `bp_list` rows now carry `enabled`, `hit_count` (mem: at most one per instruction), `mirror` and `name`. |
 | `run_until_break` | `run_until_break` | Run at full speed until a breakpoint or a break source fires (or a step budget). |
@@ -216,6 +216,7 @@ eval {expression: ":$C08000"}                           # the ROM offset behind 
 eval {expression: "[$F2]", cpu: "spc"}                  # the SPC700's DSP register index
 eval {expression: "a", cpu: "sa1"}                      # the SA-1's accumulator
 eval {expression: "r15", cpu: "gsu"}                    # the Super FX's program counter
+eval {expression: "dp", cpu: "dsp"}                     # the DSP-1's data pointer
 eval {expression: "10 / x"}                             # → {value: 0, kind: "divide_by_zero"} when X is 0
 ```
 
@@ -225,7 +226,8 @@ eval {expression: "10 / x"}                             # → {value: 0, kind: "
   on the SPC700 `a x y sp ps pc dspreg`. The SA-1 has the 65C816's, its
   own registers and bus, the console's PPU position. The GSU has
   `r0`-`r15`, `srcreg`, `dstreg`, `sfr`, `pbr`, `rombr`, `rambr` (no `pc`:
-  `r15`) and its bus.
+  `r15`) and its bus. The DSP-1 has `a b tr trb rp dp dr sr k l m n sp pc`
+  (`pc` a word index), and its memory operators read its program ROM.
 - **Memory.** `[a]` reads a byte, `{a}` a word, `#a` a long, without side
   effects. `:a` gives the offset of the memory behind `a`.
 - **Operators.** C's, with C's precedence: `x & 1 == 1` is `x & (1 == 1)`.
@@ -322,6 +324,17 @@ clocks after `STW`, so its hit's `pc` is the instruction after the store.
 bp_add {kind: "exec", cpu: "gsu", addr: 0x008104, condition: "r1 == $45"}
 bp_add {kind: "mem", memory: "GsuMemory", addr: 0x700010, condition: "value == $48"}
 run_until_break {max_steps: 10000}   # → {kind: "write", cpu: "gsu", pc: 33031, addr: 7340048, value: 72}
+```
+
+**The DSP-1.** `cpu: "dsp"` stops the NEC uPD7725 at the start of a
+microcode instruction. Its address is a byte of `DspProgramRom`, the word
+× 3, as in Mesen2. `memory: "DspDataRam"` watches the microcode's reads
+and writes of its data RAM, 2 bytes per word, low first. The DSP runs
+behind the S-CPU and freezes on a hit, like the others.
+
+```text
+bp_add {kind: "exec", cpu: "dsp", addr: 6, condition: "a == $1234"}   # word 2
+bp_add {kind: "mem", memory: "DspDataRam", addr: 0x20, hi: 0x21}       # data RAM word $10
 ```
 
 The SPC700's memories take watchpoints too: `SpcMemory` (its 16-bit bus,

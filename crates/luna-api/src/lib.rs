@@ -1383,6 +1383,7 @@ const fn cpu_label(cpu: BreakCpu) -> &'static str {
         BreakCpu::Spc => "SPC700",
         BreakCpu::Sa1 => "SA-1",
         BreakCpu::Gsu => "Super FX",
+        BreakCpu::Dsp => "DSP-1",
     }
 }
 
@@ -1393,6 +1394,7 @@ fn coproc_cpu(mapper: &dyn luna_core::Mapper) -> Option<BreakCpu> {
         cpu = Some(match v.regs() {
             luna_core::CoprocRegs::Sa1 { .. } => BreakCpu::Sa1,
             luna_core::CoprocRegs::Gsu { .. } => BreakCpu::Gsu,
+            luna_core::CoprocRegs::Dsp { .. } => BreakCpu::Dsp,
         });
     });
     cpu
@@ -3795,6 +3797,7 @@ impl Emulator {
             }
             MemoryKind::SpcRam => WatchSpace::Aram,
             MemoryKind::SpcRom => WatchSpace::Ipl,
+            MemoryKind::DspDataRam => WatchSpace::DspDataRam,
             other => {
                 return Err(ApiError::BadArg(format!(
                     "{}: no watchpoints on this memory yet",
@@ -3806,6 +3809,12 @@ impl Emulator {
             return Err(ApiError::BadArg(
                 "watchpoint must fire on reads, writes, or both".into(),
             ));
+        }
+        match memory {
+            MemoryKind::Sa1Memory => self.require_cpu(BreakCpu::Sa1)?,
+            MemoryKind::GsuMemory => self.require_cpu(BreakCpu::Gsu)?,
+            MemoryKind::DspDataRam => self.require_cpu(BreakCpu::Dsp)?,
+            _ => {}
         }
         if memory == MemoryKind::SpcRom && on_write {
             return Err(ApiError::BadArg(
@@ -3830,6 +3839,9 @@ impl Emulator {
             }
             MemoryKind::GsuMemory => {
                 bp.add_mem_on(BreakCpu::Gsu, space, lo, hi, on_read, on_write, name)
+            }
+            MemoryKind::DspDataRam => {
+                bp.add_mem_on(BreakCpu::Dsp, space, lo, hi, on_read, on_write, name)
             }
             _ => bp.add_mem_in(space, lo, hi, on_read, on_write, false, name),
         })
@@ -3873,6 +3885,7 @@ impl Emulator {
             Some(BreakCpu::Snes) => expr::ExprCpu::Snes,
             Some(BreakCpu::Sa1) => expr::ExprCpu::Sa1,
             Some(BreakCpu::Gsu) => expr::ExprCpu::Gsu,
+            Some(BreakCpu::Dsp) => expr::ExprCpu::Dsp,
             None => return Ok(false),
         };
         let compiled = match text {

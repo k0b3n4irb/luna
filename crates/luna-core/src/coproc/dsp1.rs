@@ -15,6 +15,7 @@ use luna_bus::hirom::HiRomMapper;
 use luna_bus::lorom::LoRomMapper;
 use luna_bus::mapper::{CartMemory, Mapper, MapperKind, MapperStateError, decode_state};
 use luna_bus::types::{Addr24, NTSC_MASTER_HZ, bank_of, offset_of};
+use luna_bus::{CoprocAccess, CoprocDebug, CoprocHit, CoprocRegs, CoprocView};
 use luna_cartridge::DSP1_FIRMWARE_LEN;
 use luna_cpu_upd96050::{Revision, Upd96050};
 
@@ -122,6 +123,43 @@ pub struct Dsp1Mapper {
     has_firmware: bool,
     /// DSP-cycle accumulator (numerator over [`NTSC_MASTER_HZ`]).
     cycle_acc: u64,
+    /// A debugger's breakpoints on the DSP (never in a save-state).
+    debug: CoprocDebug,
+}
+
+/// The DSP as a breakpoint condition sees it: its registers, and its
+/// program ROM as bytes (3 per word, low first), where Mesen2's memory
+/// operators read.
+struct DspView<'a>(&'a Upd96050);
+
+impl CoprocView for DspView<'_> {
+    fn regs(&self) -> CoprocRegs {
+        let r = self.0.debug_registers();
+        CoprocRegs::Dsp {
+            a: r.a,
+            b: r.b,
+            tr: r.tr,
+            trb: r.trb,
+            rp: r.rp,
+            dp: r.dp,
+            dr: r.dr,
+            sr: r.sr,
+            k: r.k,
+            l: r.l,
+            m: r.m,
+            n: r.n,
+            sp: r.sp,
+            pc: r.pc,
+        }
+    }
+
+    fn peek(&self, addr: u32) -> u8 {
+        let a = addr as usize;
+        self.0
+            .program_rom()
+            .get(a / 3)
+            .map_or(0, |w| (w >> (8 * (a % 3))) as u8)
+    }
 }
 
 impl Dsp1Mapper {
@@ -143,6 +181,7 @@ impl Dsp1Mapper {
             board,
             has_firmware,
             cycle_acc: 0,
+            debug: CoprocDebug::new(),
         }
     }
 
@@ -370,6 +409,22 @@ impl Mapper for Dsp1Mapper {
         })
     }
 
+    fn coproc_debug(&mut self) -> Option<&mut CoprocDebug> {
+        Some(&mut self.debug)
+    }
+
+    fn coproc_hit(&self) -> Option<CoprocHit> {
+        self.debug.hit
+    }
+
+    fn with_coproc_view(&self, f: &mut dyn FnMut(&dyn CoprocView)) -> bool {
+        if !self.has_firmware {
+            return false;
+        }
+        f(&DspView(&self.dsp));
+        true
+    }
+
     fn step_coproc(&mut self, main_mclk: u32, _scpu_mar: u32) {
         if !self.has_firmware {
             return;
@@ -380,8 +435,31 @@ impl Mapper for Dsp1Mapper {
         // caught up whenever the CPU polls SR.rqm.
         self.cycle_acc += u64::from(main_mclk) * DSP1_HZ;
         while self.cycle_acc >= NTSC_MASTER_HZ {
+            if self.debug.hit.is_some() {
+                break; // frozen on a breakpoint; the time owed is kept
+            }
+            // Breakpoint addresses are program ROM bytes, 3 per word.
+            let pc = u32::from(self.dsp.pc()) * 3;
+            if self.debug.armed() && self.debug.check_exec(pc, &DspView(&self.dsp)) {
+                break;
+            }
+            self.dsp.ram_accesses = self.debug.watching().then(Vec::new);
             self.dsp.exec();
             self.cycle_acc -= NTSC_MASTER_HZ;
+            if let Some(log) = self.dsp.ram_accesses.take() {
+                // Watchpoints are on DspDataRam's bytes, 2 per word, low
+                // first.
+                for a in log {
+                    for (i, byte) in a.value.to_le_bytes().into_iter().enumerate() {
+                        self.debug.record(CoprocAccess {
+                            addr: u32::from(a.word) * 2 + i as u32,
+                            value: byte,
+                            write: a.write,
+                        });
+                    }
+                }
+                self.debug.check_accesses(pc, &DspView(&self.dsp));
+            }
         }
     }
 }
