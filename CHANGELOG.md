@@ -9,6 +9,16 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ### Added
 
+- **Conditional breakpoints and marks.** A breakpoint takes a condition in
+  Mesen2's expression language and fires only when it holds (`x == 5` on
+  an exec breakpoint, `value & $80` on a watchpoint, where `value` and
+  `address` are the access). A *mark* breakpoint puts a mark on the Event
+  Viewer and lets the run go on. Every watchpoint match of an instruction
+  is now checked, not only the first, and a DMA cycle says it is one
+  (`isdma`). The hit count counts firings. API: `bp_set_condition`,
+  `bp_set_mark`; MCP: `condition` and `mark` on `bp_add`, shown by
+  `bp_list`.
+
 - **Debugger expressions in Mesen2's language.** `luna_api::expr` parses
   and evaluates the language of Mesen2's breakpoint conditions, watches
   and trace filters: literals, the registers and flags of the 65C816 or

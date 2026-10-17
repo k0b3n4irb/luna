@@ -145,24 +145,15 @@ const fn system_bank(bank: u32) -> bool {
     bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF)
 }
 
-impl Emulator {
-    /// The memories this cartridge has, with their size in bytes (the two
-    /// buses report their address space).
-    pub fn memory_kinds(&self) -> Result<Vec<(MemoryKind, usize)>, ApiError> {
-        let mut out = Vec::new();
-        for kind in MemoryKind::ALL {
-            let size = self.memory_size(kind)?;
-            if size > 0 {
-                out.push((kind, size));
-            }
-        }
-        Ok(out)
-    }
+/// A read-only view of a machine, for the code that only holds the core
+/// (the run loop's stop checks).
+#[derive(Clone, Copy)]
+pub(crate) struct View<'a>(pub(crate) &'a luna_core::Snes);
 
+impl View<'_> {
     /// Size of `kind` in bytes, 0 if this cartridge has none.
-    pub fn memory_size(&self, kind: MemoryKind) -> Result<usize, ApiError> {
-        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
-        Ok(match kind {
+    pub(crate) fn size(self, kind: MemoryKind) -> usize {
+        match kind {
             MemoryKind::SnesMemory => 0x100_0000,
             MemoryKind::SpcMemory | MemoryKind::SpcRam | MemoryKind::SnesVideoRam => 0x1_0000,
             MemoryKind::SnesWorkRam => 0x2_0000,
@@ -170,15 +161,12 @@ impl Emulator {
             MemoryKind::SnesCgRam => 0x200,
             MemoryKind::SpcRom => IPL_ROM.len(),
             MemoryKind::SpcDspRegisters => 128,
-            _ => kind.cart().map_or(0, |c| snes.mapper.debug_size(c)),
-        })
+            _ => kind.cart().map_or(0, |c| self.0.mapper.debug_size(c)),
+        }
     }
 
-    /// The memory and offset behind CPU-bus address `addr` (24-bit): work
-    /// RAM, or the cartridge memory the mapper's banking selects now.
-    /// `None` for a register or an address nothing answers.
-    pub fn absolute_address(&self, addr: u32) -> Result<Option<MemoryLocation>, ApiError> {
-        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+    /// The memory and offset behind CPU-bus address `addr`.
+    pub(crate) fn absolute(self, addr: u32) -> Option<MemoryLocation> {
         let addr = addr & 0x00FF_FFFF;
         let (bank, off) = (addr >> 16, addr & 0xFFFF);
         let wram = |offset| {
@@ -188,53 +176,102 @@ impl Emulator {
             })
         };
         if matches!(bank, 0x7E..=0x7F) {
-            return Ok(wram(addr - 0x7E_0000));
+            return wram(addr - 0x7E_0000);
         }
         if system_bank(bank) && off < 0x2000 {
-            return Ok(wram(off));
+            return wram(off);
         }
-        Ok(snes
+        self.0
             .mapper
             .debug_resolve(addr)
             .map(|(c, offset)| MemoryLocation {
                 kind: MemoryKind::from_cart(c),
                 offset: offset as u32,
-            }))
+            })
+    }
+
+    /// Byte `a` of `kind`, `a` already inside it; `unmapped` for a CPU-bus
+    /// address nothing answers.
+    pub(crate) fn byte(self, kind: MemoryKind, a: usize, unmapped: u8) -> u8 {
+        let snes = self.0;
+        match kind {
+            MemoryKind::SnesMemory => self.bus_peek(a as u32, unmapped),
+            MemoryKind::SpcMemory => snes.apu_real.peek(a as u16),
+            MemoryKind::SnesWorkRam => snes.wram[a],
+            MemoryKind::SnesVideoRam => snes.ppu.vram.peek(a as u16),
+            MemoryKind::SnesSpriteRam => snes.ppu.oam.peek(a as u16),
+            MemoryKind::SnesCgRam => snes.ppu.cgram.peek(a as u16),
+            MemoryKind::SpcRam => snes.apu_real.aram[a],
+            MemoryKind::SpcRom => IPL_ROM[a],
+            MemoryKind::SpcDspRegisters => snes.apu_real.dsp.registers[a],
+            _ => kind
+                .cart()
+                .and_then(|c| snes.mapper.debug_peek(c, a))
+                .unwrap_or(0xFF),
+        }
+    }
+
+    /// One CPU-bus byte as a debugger sees it: the memory behind it, a DMA
+    /// register, 0 for any other register, `unmapped` for open bus.
+    pub(crate) fn bus_peek(self, addr: u32, unmapped: u8) -> u8 {
+        if let Some(MemoryLocation { kind, offset }) = self.absolute(addr) {
+            return self.byte(kind, offset as usize, unmapped);
+        }
+        let (bank, off) = (addr >> 16, addr & 0xFFFF);
+        if system_bank(bank) && (0x4300..=0x437F).contains(&off) {
+            // The DMA registers read back without a side effect.
+            return self.0.dma.channels[((off >> 4) & 7) as usize].read((off & 0xF) as u8);
+        }
+        if system_bank(bank) && (0x2000..=0x5FFF).contains(&off) {
+            return 0;
+        }
+        unmapped
+    }
+}
+
+impl Emulator {
+    pub(crate) fn view(&self) -> Result<View<'_>, ApiError> {
+        self.snes.as_ref().map(View).ok_or(ApiError::NoRom)
+    }
+
+    /// The memories this cartridge has, with their size in bytes (the two
+    /// buses report their address space).
+    pub fn memory_kinds(&self) -> Result<Vec<(MemoryKind, usize)>, ApiError> {
+        let view = self.view()?;
+        Ok(MemoryKind::ALL
+            .into_iter()
+            .map(|k| (k, view.size(k)))
+            .filter(|&(_, size)| size > 0)
+            .collect())
+    }
+
+    /// Size of `kind` in bytes, 0 if this cartridge has none.
+    pub fn memory_size(&self, kind: MemoryKind) -> Result<usize, ApiError> {
+        Ok(self.view()?.size(kind))
+    }
+
+    /// The memory and offset behind CPU-bus address `addr` (24-bit): work
+    /// RAM, or the cartridge memory the mapper's banking selects now.
+    /// `None` for a register or an address nothing answers.
+    pub fn absolute_address(&self, addr: u32) -> Result<Option<MemoryLocation>, ApiError> {
+        Ok(self.view()?.absolute(addr))
     }
 
     /// `len` bytes of `kind` from `offset`, without side effects. The two
     /// buses wrap around their address space; any other memory refuses a
-    /// range past its end.
+    /// range past its end. An address nothing answers reads `$FF`.
     pub fn read_memory(
         &self,
         kind: MemoryKind,
         offset: u32,
         len: usize,
     ) -> Result<Vec<u8>, ApiError> {
-        let size = self.memory_size(kind)?;
+        let view = self.view()?;
+        let size = view.size(kind);
         Self::check_range(kind, size, offset, len)?;
-        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
-        let at = |i: usize| (offset as usize + i) % size.max(1);
-        let mut out = Vec::with_capacity(len);
-        for i in 0..len {
-            let a = at(i);
-            out.push(match kind {
-                MemoryKind::SnesMemory => self.bus_peek(a as u32)?,
-                MemoryKind::SpcMemory => snes.apu_real.peek(a as u16),
-                MemoryKind::SnesWorkRam => snes.wram[a],
-                MemoryKind::SnesVideoRam => snes.ppu.vram.peek(a as u16),
-                MemoryKind::SnesSpriteRam => snes.ppu.oam.peek(a as u16),
-                MemoryKind::SnesCgRam => snes.ppu.cgram.peek(a as u16),
-                MemoryKind::SpcRam => snes.apu_real.aram[a],
-                MemoryKind::SpcRom => IPL_ROM[a],
-                MemoryKind::SpcDspRegisters => snes.apu_real.dsp.registers[a],
-                _ => kind
-                    .cart()
-                    .and_then(|c| snes.mapper.debug_peek(c, a))
-                    .unwrap_or(0xFF),
-            });
-        }
-        Ok(out)
+        Ok((0..len)
+            .map(|i| view.byte(kind, (offset as usize + i) % size, 0xFF))
+            .collect())
     }
 
     /// Write `data` into `kind` from `offset`, without side effects (ROM
@@ -250,7 +287,7 @@ impl Emulator {
         Self::check_range(kind, size, offset, data.len())?;
         let mut written = 0;
         for (i, &v) in data.iter().enumerate() {
-            let a = (offset as usize + i) % size.max(1);
+            let a = (offset as usize + i) % size;
             let target = match kind {
                 MemoryKind::SnesMemory => self.absolute_address(a as u32)?,
                 MemoryKind::SpcMemory => Some(MemoryLocation {
@@ -316,22 +353,5 @@ impl Emulator {
             )));
         }
         Ok(())
-    }
-
-    /// One CPU-bus byte as a debugger sees it.
-    fn bus_peek(&self, addr: u32) -> Result<u8, ApiError> {
-        if let Some(MemoryLocation { kind, offset }) = self.absolute_address(addr)? {
-            return Ok(self.read_memory(kind, offset, 1)?[0]);
-        }
-        let (bank, off) = (addr >> 16, addr & 0xFFFF);
-        if system_bank(bank) && (0x4300..=0x437F).contains(&off) {
-            // The DMA registers read back without a side effect.
-            let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
-            return Ok(snes.dma.channels[((off >> 4) & 7) as usize].read((off & 0xF) as u8));
-        }
-        if system_bank(bank) && (0x2000..=0x5FFF).contains(&off) {
-            return Ok(0);
-        }
-        Ok(0xFF)
     }
 }

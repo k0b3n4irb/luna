@@ -87,7 +87,7 @@ method, so the MCP transport adds reach, not capability.
 | `enable_cpu_trace` / `take_cpu_trace` | `enable_cpu_trace` / `take_cpu_trace_log` | Per-instruction CPU trace ring (PC + registers). |
 | `enable_profile` / `take_profile` | `enable_profile` / `take_profile` | Master cycles per symbol (folded, heaviest first). (Per-PC samples are the Rust API's `take_profile_raw`; there is no MCP tool for them.) |
 | `enable_mem_trace` / `take_mem_trace` | `enable_mem_trace_filtered` / `take_mem_trace_log` | Per-bus-access trace with bank / offset-range / offset-list / writes-only filters; every event carries `origin` (`cpu`, `dma<n>`, `hdma<n>`). |
-| `bp_add` | `bp_add_exec` / `bp_add_mem` | Register an exec breakpoint or a read/write watchpoint range. `mirror: false` makes a mem watch bank-exact (default follows WRAM/MMIO mirrors); `name` (defaulting to the `symbol` used) labels it in `bp_list`. |
+| `bp_add` | `bp_add_exec` / `bp_add_mem`, `bp_set_condition`, `bp_set_mark` | Register an exec breakpoint or a read/write watchpoint range. `mirror: false` makes a mem watch bank-exact (default follows WRAM/MMIO mirrors); `name` (defaulting to the `symbol` used) labels it in `bp_list`. `condition` is an [expression](#expressions) that must be non-zero for it to fire; `mark: true` puts a mark on the Event Viewer instead of halting. See [Conditional breakpoints](#conditional-breakpoints). |
 | `bp_set_enabled` | `bp_set_enabled` | Disable/re-enable without removing — id, name and hit count survive. |
 | `bp_remove` / `bp_clear_all` / `bp_list` | `bp_remove` / `bp_clear` / `bp_list` | Manage the registry. `bp_list` rows now carry `enabled`, `hit_count` (mem: at most one per instruction), `mirror` and `name`. |
 | `run_until_break` | `run_until_break` | Run at full speed until a breakpoint fires (or a step budget). |
@@ -230,6 +230,36 @@ eval {expression: "10 / x"}                             # → {value: 0, kind: "
     `[~1]` is invalid (write `[(~1)]`).
 - **Where luna departs from Mesen2:** a closing bracket must match the
   innermost open one, and a label may contain `.`, as WLA-DX labels do.
+
+### Conditional breakpoints
+
+A breakpoint can carry a condition in the [expression](#expressions)
+language: it fires only when the condition is non-zero, the way Mesen2's
+breakpoints do, so a condition carries over between the two emulators.
+
+```text
+bp_add {kind: "exec", symbol: "enemy_spawn", condition: "x == 5"}   # the sixth slot
+bp_add {kind: "mem", symbol: "player_hp", condition: "value > [player_hp_max]"}
+bp_add {kind: "mem", addr: 0x002100, condition: "value & $80"}      # forced blank switched on
+bp_add {kind: "exec", symbol: "nmi_handler", mark: true}            # no halt: one dot per NMI on the Event Viewer
+run_until_break {max_steps: 50000000}                              # → {hit: {id, kind, pc, addr, value}}
+bp_list {}                                                          # condition, mark, hit_count of each
+```
+
+- **What the condition sees.**
+  - On an exec breakpoint, `value` is the opcode and `address` the PC, and
+    the registers are those before the instruction runs.
+  - On a watchpoint, `value` and `address` are the byte and address of the
+    access, and `iswrite` / `isdma` tell what it was.
+  - Registers and memory are those of the end of the accessing instruction:
+    luna runs an instruction whole, where Mesen2 checks in the middle of
+    it. A condition on `[address]` therefore sees the byte already written.
+- **Failures.**
+  - A condition that cannot be computed (`1/0`, a label out of reach)
+    never fires its breakpoint, as in Mesen2.
+  - One that does not parse is refused when it is set.
+- **Counting.** The hit count counts firings, marks included; a match whose
+  condition is false does not count.
 
 ### Loading homebrew straight from the assembler
 

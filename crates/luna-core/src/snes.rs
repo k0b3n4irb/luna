@@ -1943,7 +1943,7 @@ struct SnesBus<'a> {
     vram_cpu_writes: &'a mut Option<Vec<VramCpuWrite>>,
     gsu_bus_log: &'a mut Option<GsuBusLog>,
     /// Breakpoint/watchpoint registry (issue #66) — watch hits are parked
-    /// on the registry's `pending_hit` for the driving loop.
+    /// on the registry for the driving loop.
     breakpoints: &'a mut Option<Box<crate::breakpoints::BreakpointSet>>,
     /// `$21FC` Nocash-TTY capture (the SDK's `SNES_NOCASH`/`SNES_ASSERT`).
     nocash_log: &'a mut Option<Vec<u8>>,
@@ -2238,7 +2238,7 @@ impl DmaBusView<'_> {
     /// `$21xx` as `$00:21xx`, or an A-bus address).
     fn note_write(&mut self, addr: Addr24, value: u8) {
         if let Some(bp) = self.breakpoints.as_deref_mut() {
-            bp.check_mem(addr, MemEventKind::Write, value, self.cpu_pc);
+            bp.check_mem(addr, MemEventKind::Write, value, self.cpu_pc, true);
         }
         if let Some(log) = self.mem_trace.as_deref_mut()
             && log.accepts(addr, MemEventKind::Write)
@@ -2433,7 +2433,7 @@ impl SnesBus<'_> {
         // `Option` check when no registry is installed — the same cost
         // class as the trace hook itself.
         if let Some(bp) = self.breakpoints.as_mut() {
-            bp.check_mem(addr, kind, value, self.cpu_pc_full);
+            bp.check_mem(addr, kind, value, self.cpu_pc_full, false);
         }
         // Before the write: the high-byte port may step the address.
         if let Some(log) = self.vram_cpu_writes.as_mut()

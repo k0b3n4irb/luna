@@ -33,6 +33,7 @@ lands it.
 | D1a | Every memory by Mesen2's name (`MemoryKind`): read / write / size, a CPU-bus address resolved to the memory behind it, without side effects; MCP `memory_kinds`, `read_memory`, `write_memory`, `absolute_address` | ✅ |
 | D1b | Expression evaluator, Mesen2's grammar (`[byte]`, `{word}`, `#long`, `:abs`, labels, `value`, `address`, `scanline`…), checked on Mesen2's 87 reference cases; 65C816 and SPC700 contexts; MCP `eval` | ✅ |
 | D1b | Expression contexts for the SA-1, GSU and DSP-1 (their full register sets reach `luna-api` with D1c) | ⬜ |
+| D1c | Conditions (Mesen2's language) and marks on the 65C816's exec breakpoints and watchpoints; every match of an instruction checked; DMA flagged | ✅ |
 | D1c | Breakpoints v2: every CPU (65C816, SPC700, SA-1, GSU, DSP-1), every memory (VRAM, CGRAM, OAM, ARAM watchpoints), condition, hit count, *mark*, *forbid*; break on BRK / COP / WDM / STP / NMI / IRQ / scanline | ⬜ |
 | D1d | Step types: over, out, cycle, scanline, frame, to NMI / IRQ, *break in N*, run to here, move PC | ⬜ |
 | D2 | Debugger window per CPU (disassembly with labels, comments, effective addresses; editable status; breakpoint, watch, label, function, call-stack lists; go to / find all); labels and comments in `.mlb`, ca65 `.dbg`, bass, SDCC `.cdb`, ELF; default register labels; workspace per ROM | ⬜ |

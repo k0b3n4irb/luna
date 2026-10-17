@@ -2334,3 +2334,68 @@ fn expressions_read_the_live_machine() {
         i64::from(e.read_memory(MemoryKind::SpcRom, 0, 1).unwrap()[0])
     );
 }
+
+#[test]
+fn breakpoint_conditions_and_marks_decide_the_stop() {
+    // 8000 LDX #0 ; 8002 INX ; 8003 STX $10 ; 8005 BRA $8002 (8-bit X).
+    let code = [0xA2, 0x00, 0xE8, 0x86, 0x10, 0x80, 0xFB];
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
+    let x = |e: &Emulator| e.cpu_state().unwrap().x & 0xFF;
+
+    // An exec breakpoint fires only when its condition holds, before the
+    // instruction runs.
+    let id = e.bp_add_exec(0x00_8003, None).unwrap();
+    assert!(e.bp_set_condition(id, Some("x == 5")).unwrap());
+    let out = e.run_until_break(10_000).unwrap();
+    assert_eq!(out.hit.map(|h| h.id), Some(id));
+    assert_eq!(x(&e), 5);
+    assert_eq!(
+        e.evaluate("[$10]", ExprCpu::Snes).unwrap().value,
+        4,
+        "STX not run yet"
+    );
+    let info = &e.bp_list().unwrap()[0];
+    assert_eq!(
+        (info.hit_count, info.condition.as_deref()),
+        (1, Some("x == 5"))
+    );
+    e.bp_clear().unwrap();
+
+    // A watchpoint's condition sees the byte written.
+    let w = e
+        .bp_add_mem(0x7E_0010, 0x7E_0010, false, true, true, None)
+        .unwrap();
+    e.bp_set_condition(w, Some("value == 9 && iswrite"))
+        .unwrap();
+    let out = e.run_until_break(10_000).unwrap();
+    let hit = out.hit.unwrap();
+    assert_eq!((hit.id, hit.value), (w, Some(9)));
+    assert_eq!(x(&e), 9);
+    e.bp_clear().unwrap();
+
+    // A mark never stops the run but counts its firings.
+    let m = e.bp_add_exec(0x00_8002, None).unwrap();
+    e.bp_set_mark(m, true).unwrap();
+    let out = e.run_until_break(300).unwrap();
+    assert!(out.hit.is_none());
+    assert_eq!(out.steps, 300);
+    assert!(e.bp_list().unwrap()[0].hit_count >= 99, "{:?}", e.bp_list());
+    assert!(e.bp_list().unwrap()[0].mark);
+    e.bp_clear().unwrap();
+
+    // A condition that cannot be computed never fires; one that does not
+    // parse is refused.
+    let z = e.bp_add_exec(0x00_8003, None).unwrap();
+    e.bp_set_condition(z, Some("1 / (x - x)")).unwrap();
+    assert!(e.run_until_break(2_000).unwrap().hit.is_none());
+    assert!(
+        e.bp_set_condition(z, Some("x ==")).is_ok(),
+        "Mesen2 accepts a trailing operator"
+    );
+    assert!(e.bp_set_condition(z, Some("x = 1")).is_err());
+    assert!(!e.bp_set_condition(999, Some("1")).unwrap(), "unknown id");
+    // Clearing the condition makes it plain again.
+    e.bp_set_condition(z, None).unwrap();
+    assert_eq!(e.run_until_break(2_000).unwrap().hit.map(|h| h.id), Some(z));
+}

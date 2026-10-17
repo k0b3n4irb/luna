@@ -265,6 +265,8 @@ async fn server_p2_breakpoints_round_trip() {
     // Watchpoint on the STA target (defaults: single address, write).
     let wp = s
         .bp_add(Parameters(BpAddParams {
+            condition: None,
+            mark: false,
             kind: "mem".into(),
             addr: 0x00_0200,
             symbol: None,
@@ -282,6 +284,8 @@ async fn server_p2_breakpoints_round_trip() {
     // Exec bp on the JMP.
     let xp = s
         .bp_add(Parameters(BpAddParams {
+            condition: None,
+            mark: false,
             kind: "exec".into(),
             addr: 0x00_0105,
             symbol: None,
@@ -298,6 +302,8 @@ async fn server_p2_breakpoints_round_trip() {
         .id;
     assert!(
         s.bp_add(Parameters(BpAddParams {
+            condition: None,
+            mark: false,
             kind: "bogus".into(),
             addr: 0,
             symbol: None,
@@ -429,6 +435,8 @@ async fn server_p3_symbols_round_trip() {
     // bp_add by symbol registers at the resolved address.
     let id = s
         .bp_add(Parameters(BpAddParams {
+            condition: None,
+            mark: false,
             kind: "mem".into(),
             addr: 0,
             symbol: Some("monster_x".into()),
@@ -919,6 +927,8 @@ async fn server_symbol_tools_round_trip() {
     // bp_add: watch a symbol..=hi_symbol range.
     let id = s
         .bp_add(Parameters(BpAddParams {
+            condition: None,
+            mark: false,
             kind: "mem".into(),
             addr: 0,
             symbol: Some("monster_x".into()),
@@ -1244,6 +1254,8 @@ async fn server_breakpoints_v2_round_trip() {
     // A named, bank-exact (mirror off) watch created from a symbol.
     let id = s
         .bp_add(Parameters(BpAddParams {
+            condition: None,
+            mark: false,
             kind: "mem".into(),
             addr: 0,
             symbol: Some("monster_x".into()),
@@ -1445,4 +1457,54 @@ fn demo_lorom() -> Vec<u8> {
     rom[0x7FDE] = checksum as u8;
     rom[0x7FDF] = (checksum >> 8) as u8;
     rom
+}
+
+/// `bp_add` carries a condition and a mark; a condition that does not
+/// parse is refused and leaves no breakpoint behind.
+#[tokio::test]
+async fn server_bp_add_takes_a_condition_and_a_mark() {
+    let s = LunaServer::new();
+    let path = PathBuf::from("/tmp/luna_mcp_bp_condition_demo.smc");
+    std::fs::write(&path, demo_lorom()).unwrap();
+    s.load_rom(Parameters(rom_params(&path.to_string_lossy())))
+        .await
+        .unwrap();
+    let add = |condition: Option<&str>, mark: bool| BpAddParams {
+        condition: condition.map(str::to_string),
+        mark,
+        kind: "exec".into(),
+        addr: 0x00_8000,
+        symbol: None,
+        hi: None,
+        hi_symbol: None,
+        on_read: false,
+        on_write: true,
+        mirror: None,
+        name: None,
+    };
+    assert!(
+        s.bp_add(Parameters(add(Some("x = 1"), false)))
+            .await
+            .is_err()
+    );
+    assert!(
+        s.bp_list().await.unwrap().0.breakpoints.is_empty(),
+        "nothing half-made"
+    );
+    s.bp_add(Parameters(add(Some("x == 1"), true)))
+        .await
+        .unwrap();
+    let list = s.bp_list().await.unwrap().0.breakpoints;
+    assert_eq!(list[0].condition.as_deref(), Some("x == 1"));
+    assert!(list[0].mark);
+    let r = s
+        .eval(Parameters(EvalParams {
+            expression: "1 + 2 * 3".into(),
+            cpu: None,
+        }))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!((r.value, r.kind.as_str()), (7, "numeric"));
+    let _ = std::fs::remove_file(&path);
 }

@@ -57,6 +57,12 @@ pub struct BreakpointInfo {
     pub mirror: bool,
     /// Display name (e.g. the symbol it was created from).
     pub name: Option<String>,
+    /// The condition (an expression in Mesen2's language) that must hold
+    /// for the breakpoint to fire; `None` fires on every match. The
+    /// driving loop evaluates it.
+    pub condition: Option<String>,
+    /// A *mark*: when it fires it records an event instead of halting.
+    pub mark: bool,
 }
 
 /// A breakpoint/watchpoint hit, returned to the driving run loop.
@@ -73,6 +79,8 @@ pub struct BreakHit {
     pub addr: Option<u32>,
     /// Mem hits: the byte transferred.
     pub value: Option<u8>,
+    /// Mem hits: the access was a DMA cycle.
+    pub dma: bool,
 }
 
 /// Fold an address to a canonical form so a watchpoint matches accesses that
@@ -104,17 +112,22 @@ const fn fold_mirror(addr: u32) -> u32 {
     addr
 }
 
+/// What every breakpoint carries besides where it matches.
+#[derive(Debug, Clone, Default)]
+struct Extra {
+    enabled: bool,
+    name: Option<String>,
+    condition: Option<String>,
+    mark: bool,
+    hits: u64,
+}
+
 /// A registered exec breakpoint.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ExecBp {
     id: u32,
     pc: u32,
-    enabled: bool,
-    name: Option<String>,
-    /// `Cell` because [`BreakpointSet::check_exec`] is deliberately
-    /// `&self` — the run loop holds the registry by shared reference
-    /// while stepping the machine mutably elsewhere.
-    hits: std::cell::Cell<u64>,
+    extra: Extra,
 }
 
 /// A registered memory watchpoint (inclusive 24-bit address range).
@@ -131,11 +144,12 @@ struct MemWatch {
     mirror: bool,
     clo: u32,
     chi: u32,
-    enabled: bool,
-    name: Option<String>,
-    /// Plain counter — [`BreakpointSet::check_mem`] is already `&mut`.
-    hits: u64,
+    extra: Extra,
 }
+
+/// Most candidate hits one instruction parks (a block move touches many
+/// bytes; the first ones are what a debugger reports).
+const PENDING_MAX: usize = 64;
 
 /// The registry. Installed on [`crate::Snes`] as an `Option<Box<_>>` so
 /// the no-debugger fast path costs one pointer-sized check.
@@ -148,10 +162,10 @@ pub struct BreakpointSet {
     exec: Vec<ExecBp>,
     /// Memory watchpoints.
     mem: Vec<MemWatch>,
-    /// Watchpoint hit parked by the bus mid-instruction, consumed by the
-    /// driving loop after the instruction completes. Only the FIRST hit
-    /// of an instruction is kept (a 16-bit write may touch a range twice).
-    pub pending_hit: Option<BreakHit>,
+    /// Watchpoint matches parked by the bus during an instruction, in
+    /// access order, for the driving loop to check (conditions) after the
+    /// instruction completes.
+    pending: Vec<BreakHit>,
 }
 
 impl BreakpointSet {
@@ -159,6 +173,16 @@ impl BreakpointSet {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    const fn extra(name: Option<String>) -> Extra {
+        Extra {
+            enabled: true,
+            name,
+            condition: None,
+            mark: false,
+            hits: 0,
+        }
     }
 
     /// Register an exec breakpoint at a 24-bit `PB:PC`, optionally named
@@ -169,9 +193,7 @@ impl BreakpointSet {
         self.exec.push(ExecBp {
             id,
             pc: pc & 0x00FF_FFFF,
-            enabled: true,
-            name,
-            hits: std::cell::Cell::new(0),
+            extra: Self::extra(name),
         });
         id
     }
@@ -203,25 +225,61 @@ impl BreakpointSet {
             mirror,
             clo: fold_mirror(lo),
             chi: fold_mirror(hi),
-            enabled: true,
-            name,
-            hits: 0,
+            extra: Self::extra(name),
         });
         id
     }
 
-    /// Enable / disable a breakpoint without removing it (issue #176) —
-    /// keeps its id, name and hit count. Returns `true` if the id exists.
+    fn extra_mut(&mut self, id: u32) -> Option<&mut Extra> {
+        self.exec
+            .iter_mut()
+            .find(|b| b.id == id)
+            .map(|b| &mut b.extra)
+            .or_else(|| {
+                self.mem
+                    .iter_mut()
+                    .find(|w| w.id == id)
+                    .map(|w| &mut w.extra)
+            })
+    }
+
+    /// Enable / disable a breakpoint without removing it (issue #176).
+    /// Returns `true` if the id exists.
     pub fn set_enabled(&mut self, id: u32, enabled: bool) -> bool {
-        if let Some(bp) = self.exec.iter_mut().find(|b| b.id == id) {
-            bp.enabled = enabled;
-            return true;
+        self.extra_mut(id).map(|e| e.enabled = enabled).is_some()
+    }
+
+    /// Set or clear a breakpoint's condition. Returns `true` if the id
+    /// exists.
+    pub fn set_condition(&mut self, id: u32, condition: Option<String>) -> bool {
+        self.extra_mut(id)
+            .map(|e| e.condition = condition)
+            .is_some()
+    }
+
+    /// Make a breakpoint a mark (it records an event instead of halting)
+    /// or a plain one again. Returns `true` if the id exists.
+    pub fn set_mark(&mut self, id: u32, mark: bool) -> bool {
+        self.extra_mut(id).map(|e| e.mark = mark).is_some()
+    }
+
+    /// Whether breakpoint `id` is a mark.
+    #[must_use]
+    pub fn is_mark(&self, id: u32) -> bool {
+        self.exec
+            .iter()
+            .find(|b| b.id == id)
+            .map(|b| &b.extra)
+            .or_else(|| self.mem.iter().find(|w| w.id == id).map(|w| &w.extra))
+            .is_some_and(|e| e.mark)
+    }
+
+    /// Count one firing of breakpoint `id` (the driving loop calls it once
+    /// a hit passed its condition).
+    pub fn count_hit(&mut self, id: u32) {
+        if let Some(e) = self.extra_mut(id) {
+            e.hits += 1;
         }
-        if let Some(w) = self.mem.iter_mut().find(|w| w.id == id) {
-            w.enabled = enabled;
-            return true;
-        }
-        false
     }
 
     /// Remove a breakpoint by id. Returns `true` if it existed.
@@ -232,75 +290,72 @@ impl BreakpointSet {
         before != self.exec.len() + self.mem.len()
     }
 
-    /// Remove every breakpoint (ids are not reused).
+    /// Remove every breakpoint and any parked hit.
     pub fn clear(&mut self) {
         self.exec.clear();
         self.mem.clear();
-        self.pending_hit = None;
+        self.pending.clear();
     }
 
-    /// `true` when nothing is registered.
+    /// No breakpoint registered.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.exec.is_empty() && self.mem.is_empty()
     }
 
-    /// Snapshot the registry for a debugger UI / MCP client.
+    /// Every registered breakpoint, by id.
     #[must_use]
     pub fn list(&self) -> Vec<BreakpointInfo> {
+        let info = |id, exec, lo, hi, on_read, on_write, mirror, e: &Extra| BreakpointInfo {
+            id,
+            exec,
+            lo,
+            hi,
+            on_read,
+            on_write,
+            enabled: e.enabled,
+            hit_count: e.hits,
+            mirror,
+            name: e.name.clone(),
+            condition: e.condition.clone(),
+            mark: e.mark,
+        };
         let mut out: Vec<BreakpointInfo> = self
             .exec
             .iter()
-            .map(|b| BreakpointInfo {
-                id: b.id,
-                exec: true,
-                lo: b.pc,
-                hi: b.pc,
-                on_read: false,
-                on_write: false,
-                enabled: b.enabled,
-                hit_count: b.hits.get(),
-                mirror: false,
-                name: b.name.clone(),
-            })
-            .chain(self.mem.iter().map(|w| BreakpointInfo {
-                id: w.id,
-                exec: false,
-                lo: w.lo,
-                hi: w.hi,
-                on_read: w.on_read,
-                on_write: w.on_write,
-                enabled: w.enabled,
-                hit_count: w.hits,
-                mirror: w.mirror,
-                name: w.name.clone(),
+            .map(|b| info(b.id, true, b.pc, b.pc, false, false, false, &b.extra))
+            .chain(self.mem.iter().map(|w| {
+                info(
+                    w.id, false, w.lo, w.hi, w.on_read, w.on_write, w.mirror, &w.extra,
+                )
             }))
             .collect();
         out.sort_by_key(|b| b.id);
         out
     }
 
-    /// Exec check — called with the live `PB:PC` before an instruction
-    /// executes.
+    /// The enabled exec breakpoints at `pc`, in registration order (empty,
+    /// without allocating, when none matches).
     #[must_use]
-    pub fn check_exec(&self, pc: u32) -> Option<BreakHit> {
-        self.exec.iter().find(|b| b.enabled && b.pc == pc).map(|b| {
-            b.hits.set(b.hits.get() + 1);
-            BreakHit {
+    pub fn check_exec(&self, pc: u32) -> Vec<BreakHit> {
+        self.exec
+            .iter()
+            .filter(|b| b.extra.enabled && b.pc == pc)
+            .map(|b| BreakHit {
                 id: b.id,
                 kind: BreakKind::Exec,
                 pc,
                 addr: None,
                 value: None,
-            }
-        })
+                dma: false,
+            })
+            .collect()
     }
 
-    /// Memory check — called from the bus on every access when a registry
-    /// is installed. Parks the FIRST hit of the instruction in
-    /// [`Self::pending_hit`].
-    pub fn check_mem(&mut self, addr: u32, kind: MemEventKind, value: u8, pc: u32) {
-        if self.pending_hit.is_some() || self.mem.is_empty() {
+    /// Park every enabled watchpoint this access matches. Called by the
+    /// bus on each access; `dma` marks a DMA cycle.
+    pub fn check_mem(&mut self, addr: u32, kind: MemEventKind, value: u8, pc: u32, dma: bool) {
+        if self.mem.is_empty() || self.pending.len() >= PENDING_MAX {
             return;
         }
         let (is_read, break_kind) = match kind {
@@ -310,27 +365,29 @@ impl BreakpointSet {
             MemEventKind::NmiSignal | MemEventKind::IrqSignal => return,
         };
         let faddr = fold_mirror(addr);
-        if let Some(w) = self.mem.iter_mut().find(|w| {
+        for w in &self.mem {
             let kind_ok = if is_read { w.on_read } else { w.on_write };
-            w.enabled
+            if w.extra.enabled
                 && kind_ok
                 && ((w.lo..=w.hi).contains(&addr)
                     || (w.mirror && w.clo <= w.chi && (w.clo..=w.chi).contains(&faddr)))
-        }) {
-            w.hits += 1;
-            self.pending_hit = Some(BreakHit {
-                id: w.id,
-                kind: break_kind,
-                pc,
-                addr: Some(addr),
-                value: Some(value),
-            });
+                && self.pending.len() < PENDING_MAX
+            {
+                self.pending.push(BreakHit {
+                    id: w.id,
+                    kind: break_kind,
+                    pc,
+                    addr: Some(addr),
+                    value: Some(value),
+                    dma,
+                });
+            }
         }
     }
 
-    /// Consume the watchpoint hit parked by the bus, if any.
-    pub const fn take_pending(&mut self) -> Option<BreakHit> {
-        self.pending_hit.take()
+    /// The watchpoint matches parked since the last call, in access order.
+    pub fn take_pending(&mut self) -> Vec<BreakHit> {
+        std::mem::take(&mut self.pending)
     }
 }
 
@@ -338,12 +395,19 @@ impl BreakpointSet {
 mod tests {
     use super::*;
 
+    /// The one parked hit of an access.
+    fn one(bp: &mut BreakpointSet) -> Option<BreakHit> {
+        let v = bp.take_pending();
+        assert!(v.len() <= 1, "{v:?}");
+        v.into_iter().next()
+    }
+
     #[test]
     fn exec_breakpoint_matches_exact_pc() {
         let mut bp = BreakpointSet::new();
         let id = bp.add_exec(0x00_8012, None);
-        assert!(bp.check_exec(0x00_8011).is_none());
-        let hit = bp.check_exec(0x00_8012).unwrap();
+        assert!(bp.check_exec(0x00_8011).is_empty());
+        let hit = bp.check_exec(0x00_8012)[0];
         assert_eq!((hit.id, hit.kind), (id, BreakKind::Exec));
         assert_eq!(hit.pc, 0x00_8012);
     }
@@ -352,38 +416,51 @@ mod tests {
     fn mem_watchpoint_matches_range_and_kind() {
         let mut bp = BreakpointSet::new();
         let id = bp.add_mem(0x7E_1000, 0x7E_10FF, false, true, false, None); // write-only
-        // Read inside the range: no hit (write-only watch).
-        bp.check_mem(0x7E_1080, MemEventKind::Read, 0xAA, 0x00_8000);
-        assert!(bp.pending_hit.is_none());
-        // Write outside the range: no hit.
-        bp.check_mem(0x7E_1100, MemEventKind::Write, 0xAA, 0x00_8000);
-        assert!(bp.pending_hit.is_none());
-        // Write inside: hit with full context.
-        bp.check_mem(0x7E_1080, MemEventKind::Write, 0xAA, 0x00_8000);
-        let hit = bp.take_pending().unwrap();
+        bp.check_mem(0x7E_1080, MemEventKind::Read, 0xAA, 0x00_8000, false);
+        assert!(one(&mut bp).is_none(), "a read does not trip a write watch");
+        bp.check_mem(0x7E_1100, MemEventKind::Write, 0xAA, 0x00_8000, false);
+        assert!(one(&mut bp).is_none(), "outside the range");
+        bp.check_mem(0x7E_1080, MemEventKind::Write, 0xAA, 0x00_8000, true);
+        let hit = one(&mut bp).unwrap();
         assert_eq!(hit.id, id);
         assert_eq!(hit.kind, BreakKind::Write);
         assert_eq!(hit.addr, Some(0x7E_1080));
         assert_eq!(hit.value, Some(0xAA));
         assert_eq!(hit.pc, 0x00_8000);
+        assert!(hit.dma);
     }
 
     #[test]
-    fn first_hit_of_an_instruction_wins() {
+    fn every_match_of_an_instruction_is_parked_in_order() {
         let mut bp = BreakpointSet::new();
-        bp.add_mem(0x7E_0000, 0x7E_FFFF, true, true, false, None);
-        bp.check_mem(0x7E_0001, MemEventKind::Write, 1, 0);
-        bp.check_mem(0x7E_0002, MemEventKind::Write, 2, 0);
-        assert_eq!(bp.take_pending().unwrap().addr, Some(0x7E_0001));
+        let a = bp.add_mem(0x7E_0000, 0x7E_FFFF, true, true, false, None);
+        let b = bp.add_mem(0x7E_0002, 0x7E_0002, false, true, false, None);
+        bp.check_mem(0x7E_0001, MemEventKind::Write, 1, 0, false);
+        bp.check_mem(0x7E_0002, MemEventKind::Write, 2, 0, false);
+        let v: Vec<(u32, Option<u32>)> = bp.take_pending().iter().map(|h| (h.id, h.addr)).collect();
+        assert_eq!(
+            v,
+            [
+                (a, Some(0x7E_0001)),
+                (a, Some(0x7E_0002)),
+                (b, Some(0x7E_0002))
+            ]
+        );
+        assert!(bp.take_pending().is_empty());
+        // A block move cannot park without bound.
+        for i in 0..1000 {
+            bp.check_mem(0x7E_1000 + i, MemEventKind::Write, 0, 0, false);
+        }
+        assert_eq!(bp.take_pending().len(), PENDING_MAX);
     }
 
     #[test]
     fn interrupt_markers_never_trip_watchpoints() {
         let mut bp = BreakpointSet::new();
         bp.add_mem(0x00_0000, 0xFF_FFFF, true, true, false, None);
-        bp.check_mem(0x00_FFEA, MemEventKind::NmiSignal, 0, 0);
-        bp.check_mem(0x00_FFEE, MemEventKind::IrqSignal, 0, 0);
-        assert!(bp.pending_hit.is_none());
+        bp.check_mem(0x00_FFEA, MemEventKind::NmiSignal, 0, 0, false);
+        bp.check_mem(0x00_FFEE, MemEventKind::IrqSignal, 0, 0, false);
+        assert!(one(&mut bp).is_none());
     }
 
     #[test]
@@ -403,49 +480,45 @@ mod tests {
     }
 
     #[test]
-    fn disabled_breakpoints_never_fire_and_keep_state() {
+    fn disabled_breakpoints_never_match_and_keep_state() {
         let mut bp = BreakpointSet::new();
         let x = bp.add_exec(0x00_8000, Some("main".into()));
         let m = bp.add_mem(0x7E_0100, 0x7E_0100, false, true, false, None);
-
-        // Hit both once.
-        assert!(bp.check_exec(0x00_8000).is_some());
-        bp.check_mem(0x7E_0100, MemEventKind::Write, 1, 0);
-        assert!(bp.take_pending().is_some());
-
-        // Disable: neither fires, both stay listed with state intact.
+        assert!(bp.set_condition(x, Some("a == 1".into())));
+        assert!(bp.set_mark(m, true));
+        bp.count_hit(x);
         assert!(bp.set_enabled(x, false));
         assert!(bp.set_enabled(m, false));
-        assert!(bp.check_exec(0x00_8000).is_none());
-        bp.check_mem(0x7E_0100, MemEventKind::Write, 2, 0);
-        assert!(bp.pending_hit.is_none());
+        assert!(bp.check_exec(0x00_8000).is_empty());
+        bp.check_mem(0x7E_0100, MemEventKind::Write, 2, 0, false);
+        assert!(one(&mut bp).is_none());
         let list = bp.list();
-        assert_eq!(list.len(), 2);
         assert!(list.iter().all(|b| !b.enabled));
         assert_eq!(list[0].hit_count, 1);
         assert_eq!(list[0].name.as_deref(), Some("main"));
-
-        // Re-enable: fires again, counts resume.
+        assert_eq!(list[0].condition.as_deref(), Some("a == 1"));
+        assert!(list[1].mark && !list[0].mark);
         assert!(bp.set_enabled(x, true));
-        assert!(bp.check_exec(0x00_8000).is_some());
-        assert_eq!(bp.list()[0].hit_count, 2);
-
-        // Unknown id.
-        assert!(!bp.set_enabled(999, true));
+        assert_eq!(bp.check_exec(0x00_8000).len(), 1);
+        assert!(!bp.set_enabled(999, true), "unknown id");
     }
 
     #[test]
-    fn hit_counts_accumulate_per_breakpoint() {
+    fn hit_counts_are_what_the_driver_counts() {
         let mut bp = BreakpointSet::new();
         let a = bp.add_exec(0x00_8000, None);
-        let b = bp.add_exec(0x00_9000, None);
+        let b = bp.add_exec(0x00_8000, None);
+        assert_eq!(bp.check_exec(0x00_8000).len(), 2, "both match");
         for _ in 0..3 {
-            let _ = bp.check_exec(0x00_8000);
+            bp.count_hit(a);
         }
-        let _ = bp.check_exec(0x00_9000);
         let list = bp.list();
         assert_eq!(list.iter().find(|e| e.id == a).unwrap().hit_count, 3);
-        assert_eq!(list.iter().find(|e| e.id == b).unwrap().hit_count, 1);
+        assert_eq!(
+            list.iter().find(|e| e.id == b).unwrap().hit_count,
+            0,
+            "matching is not firing"
+        );
     }
 
     #[test]
@@ -454,21 +527,12 @@ mod tests {
         // must fire, but $7F (different WRAM half) and WRAM-high must not.
         let mut bp = BreakpointSet::new();
         bp.add_mem(0x7E_0500, 0x7E_0500, false, true, true, None);
-        bp.check_mem(0x00_0500, MemEventKind::Write, 0x11, 0x00_8000);
-        assert_eq!(
-            bp.take_pending().unwrap().addr,
-            Some(0x00_0500),
-            "$00 mirror"
-        );
-        bp.check_mem(0x80_0500, MemEventKind::Write, 0x22, 0x00_8000);
-        assert_eq!(
-            bp.take_pending().unwrap().addr,
-            Some(0x80_0500),
-            "$80 mirror"
-        );
-        // $7F:0500 is a different physical byte (WRAM high half) — no hit.
-        bp.check_mem(0x7F_0500, MemEventKind::Write, 0x33, 0x00_8000);
-        assert!(bp.pending_hit.is_none(), "$7F is not a mirror of $7E-low");
+        bp.check_mem(0x00_0500, MemEventKind::Write, 0x11, 0x00_8000, false);
+        assert_eq!(one(&mut bp).unwrap().addr, Some(0x00_0500), "$00 mirror");
+        bp.check_mem(0x80_0500, MemEventKind::Write, 0x22, 0x00_8000, false);
+        assert_eq!(one(&mut bp).unwrap().addr, Some(0x80_0500), "$80 mirror");
+        bp.check_mem(0x7F_0500, MemEventKind::Write, 0x33, 0x00_8000, false);
+        assert!(one(&mut bp).is_none(), "$7F is not a mirror of $7E-low");
     }
 
     #[test]
@@ -476,20 +540,19 @@ mod tests {
         // Watch $00:2100 (INIDISP); a FastROM access via $80:2100 must fire.
         let mut bp = BreakpointSet::new();
         bp.add_mem(0x00_2100, 0x00_2100, false, true, true, None);
-        bp.check_mem(0x80_2100, MemEventKind::Write, 0x8F, 0x80_8000);
-        assert_eq!(bp.take_pending().unwrap().addr, Some(0x80_2100));
+        bp.check_mem(0x80_2100, MemEventKind::Write, 0x8F, 0x80_8000, false);
+        assert_eq!(one(&mut bp).unwrap().addr, Some(0x80_2100));
     }
 
     #[test]
     fn mirror_off_stays_bank_exact() {
-        // Without mirroring, a $7E watch does NOT fire on the $00 mirror.
         let mut bp = BreakpointSet::new();
         bp.add_mem(0x7E_0500, 0x7E_0500, false, true, false, None);
-        bp.check_mem(0x00_0500, MemEventKind::Write, 0x11, 0x00_8000);
-        assert!(bp.pending_hit.is_none(), "bank-exact: no mirror match");
-        bp.check_mem(0x7E_0500, MemEventKind::Write, 0x11, 0x00_8000);
+        bp.check_mem(0x00_0500, MemEventKind::Write, 0x11, 0x00_8000, false);
+        assert!(one(&mut bp).is_none(), "bank-exact: no mirror match");
+        bp.check_mem(0x7E_0500, MemEventKind::Write, 0x11, 0x00_8000, false);
         assert_eq!(
-            bp.take_pending().unwrap().addr,
+            one(&mut bp).unwrap().addr,
             Some(0x7E_0500),
             "exact still hits"
         );

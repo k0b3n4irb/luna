@@ -809,7 +809,7 @@ fn mem_trace_tags_dma_writes_with_their_origin_and_fires_watchpoints() {
         }
         snes.step();
         if let Some(bp) = snes.breakpoints.as_mut()
-            && bp.take_pending().is_some()
+            && !bp.take_pending().is_empty()
         {
             hits += 1;
         }

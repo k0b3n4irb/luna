@@ -85,6 +85,7 @@ means that transport has no form of it.
 | find the address of a variable I can only see on screen | — | `search_begin`, `search_refine`, `search_results` | [MCP catalogue](using/mcp.md#mcp-tool-catalogue) |
 | pin a byte, or change one | — | `freeze_add`, `poke_memory`, `set_cpu_register` | [MCP catalogue](using/mcp.md#mcp-tool-catalogue) |
 | check what a breakpoint condition or a watch expression gives right now | — | `eval` | [Expressions](using/mcp.md#expressions) |
+| stop only when a condition holds (the sixth enemy, a write of a given value), or mark an event without stopping | — | `bp_add` with `condition` / `mark`, `run_until_break` | [Conditional breakpoints](using/mcp.md#conditional-breakpoints) |
 | read or patch any memory by its Mesen2 name (ROM, save RAM, SA-1 I-RAM, GSU RAM, DSP-1, VRAM…), or find what a bus address points at | — | `memory_kinds`, `read_memory`, `write_memory`, `absolute_address` | [Every memory by one name](using/mcp.md#every-memory-by-one-name) |
 | see when in the frame a register was written | the GUI's Event Viewer | `enable_mem_trace` | [The Event Viewer](using/debugging.md#the-event-viewer) |
 | see what a DMA sent to VRAM | `--dma-trace`, `--dump-vram` | `enable_dma_trace`, `peek_vram` | [`luna state`](using/cli-run-state.md#luna-state--json-snapshot--diagnostics-the-workhorse) |

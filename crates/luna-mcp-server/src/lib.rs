@@ -544,6 +544,15 @@ pub struct BpAddParams {
     /// used at creation.
     #[serde(default)]
     pub name: Option<String>,
+    /// A condition in Mesen2's expression language (see `eval`): the
+    /// breakpoint fires only when it is non-zero, e.g. `x == 5` or
+    /// `value & $80` on a watchpoint (`value` is the byte accessed).
+    #[serde(default)]
+    pub condition: Option<String>,
+    /// A mark: when it fires it puts a breakpoint event on the Event
+    /// Viewer and the run goes on (default false).
+    #[serde(default)]
+    pub mark: bool,
 }
 
 const fn default_true() -> bool {
@@ -1202,12 +1211,17 @@ pub struct BpEntry {
     pub on_write: bool,
     /// A disabled breakpoint stays registered but never fires.
     pub enabled: bool,
-    /// Times fired since creation (mem: at most once per instruction).
+    /// Times fired since creation (marks included; a match whose
+    /// condition is false does not count; at most once per instruction).
     pub hit_count: u64,
     /// Mem: mirror folding active (WRAM/MMIO bank mirrors also fire).
     pub mirror: bool,
     /// Display name (the symbol it was created from, or an explicit name).
     pub name: Option<String>,
+    /// The condition it fires on, if any.
+    pub condition: Option<String>,
+    /// A mark: it records an Event Viewer mark instead of halting.
+    pub mark: bool,
 }
 
 /// `bp_set_enabled` parameters.
@@ -2623,6 +2637,9 @@ impl LunaServer {
                                 inclusive bus range `addr`..=`hi` (default single address), firing \
                                 on reads (`on_read`) and/or writes (`on_write`, default true); \
                                 halts AFTER the accessing instruction with its PC/addr/value. \
+                                `condition`: an expression in Mesen2's language (see `eval`) that \
+                                must be non-zero for it to fire (`value`/`address` are the access). \
+                                `mark`: record an Event Viewer mark instead of halting. \
                                 Returns the registry id. Run with `run_until_break`."
     )]
     async fn bp_add(
@@ -2638,7 +2655,7 @@ impl LunaServer {
             };
             // The display name defaults to the symbol the bp was created from.
             let name = params.name.as_deref().or(params.symbol.as_deref());
-            match params.kind.as_str() {
+            let id = match params.kind.as_str() {
                 "exec" => em.bp_add_exec(addr, name).map_err(|e| api_err_to_mcp(&e))?,
                 "mem" => em
                     .bp_add_mem(
@@ -2656,7 +2673,18 @@ impl LunaServer {
                         None,
                     ));
                 }
+            };
+            if params.condition.is_some()
+                && let Err(e) = em.bp_set_condition(id, params.condition.as_deref())
+            {
+                // Refused condition: no half-made breakpoint is left behind.
+                let _ = em.bp_remove(id);
+                return Err(api_err_to_mcp(&e));
             }
+            if params.mark {
+                em.bp_set_mark(id, true).map_err(|e| api_err_to_mcp(&e))?;
+            }
+            id
         };
         Ok(rmcp::Json(BpAddResult { id }))
     }
@@ -3097,6 +3125,8 @@ impl LunaServer {
                     hit_count: b.hit_count,
                     mirror: b.mirror,
                     name: b.name,
+                    condition: b.condition,
+                    mark: b.mark,
                 })
                 .collect(),
         }))

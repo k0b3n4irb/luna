@@ -20,7 +20,8 @@
 //!   (Mesen2 accepts some mismatched pairs, which only typos produce), and
 //!   a label may contain `.`, as WLA-DX's do.
 
-use crate::{ApiError, Emulator, MemoryKind};
+use crate::memory::View;
+use crate::{ApiError, Emulator};
 
 /// The CPU an expression is evaluated for: it picks the registers and the
 /// address space `[ ]`, `{ }`, `#` and `:` work in.
@@ -622,17 +623,13 @@ const fn dot_of(hclock: i64) -> i64 {
     }
 }
 
-impl ExprEnv for Emulator {
+impl ExprEnv for View<'_> {
     fn reg(&self, cpu: ExprCpu, reg: Reg) -> i64 {
-        let Some(snes) = self.snes.as_ref() else {
-            return 0;
-        };
+        let snes = self.0;
         match cpu {
             ExprCpu::Snes => {
-                let Ok(c) = self.cpu_state() else {
-                    return 0;
-                };
-                let (line, hclock) = self.beam().unwrap_or((0, 0));
+                let c = &snes.cpu;
+                let hclock = i64::from(snes.mcycles_in_line.min(u32::from(u16::MAX)));
                 match reg {
                     Reg::A => i64::from(c.a),
                     Reg::X => i64::from(c.x),
@@ -641,30 +638,28 @@ impl ExprEnv for Emulator {
                     Reg::D => i64::from(c.dp),
                     Reg::Db => i64::from(c.db),
                     Reg::Pc => (i64::from(c.pb) << 16) | i64::from(c.pc),
-                    Reg::Ps => i64::from(c.p),
-                    Reg::Flag(b) => i64::from((c.p >> b) & 1),
+                    Reg::Ps => i64::from(c.p.bits()),
+                    Reg::Flag(b) => i64::from((c.p.bits() >> b) & 1),
                     Reg::Nmi => i64::from(snes.nmi_pending),
                     Reg::Irq => {
                         i64::from(snes.cpu_regs.irq_flag || snes.mapper.coproc_main_irq_pending())
                     }
                     Reg::Frame => i64::from(snes.frame_count as u32),
-                    Reg::Scanline => i64::from(line),
-                    Reg::HClock => i64::from(hclock),
-                    Reg::Cycle => dot_of(i64::from(hclock)),
+                    Reg::Scanline => i64::from(snes.ppu_line),
+                    Reg::HClock => hclock,
+                    Reg::Cycle => dot_of(hclock),
                     Reg::DspIndex => 0,
                 }
             }
             ExprCpu::Spc => {
-                let Ok(s) = self.spc700_state() else {
-                    return 0;
-                };
+                let c = &snes.apu_real.cpu;
                 match reg {
-                    Reg::A => i64::from(s.a),
-                    Reg::X => i64::from(s.x),
-                    Reg::Y => i64::from(s.y),
-                    Reg::Sp => i64::from(s.sp),
-                    Reg::Ps => i64::from(s.psw),
-                    Reg::Pc => i64::from(s.pc),
+                    Reg::A => i64::from(c.a),
+                    Reg::X => i64::from(c.x),
+                    Reg::Y => i64::from(c.y),
+                    Reg::Sp => i64::from(c.sp),
+                    Reg::Ps => i64::from(c.psw.0),
+                    Reg::Pc => i64::from(c.pc),
                     Reg::DspIndex => i64::from(snes.apu_real.dsp_index),
                     _ => 0,
                 }
@@ -674,15 +669,10 @@ impl ExprEnv for Emulator {
 
     fn byte(&self, cpu: ExprCpu, addr: u32) -> u8 {
         match cpu {
-            ExprCpu::Snes => self.absolute_address(addr).ok().flatten().map_or_else(
-                || self.bus_register_peek(addr).unwrap_or(0),
-                |l| self.read_memory(l.kind, l.offset, 1).map_or(0, |b| b[0]),
-            ),
+            // Mesen2 reads 0 where nothing answers.
+            ExprCpu::Snes => self.bus_peek(addr, 0),
             ExprCpu::Spc => {
-                let Some(snes) = self.snes.as_ref() else {
-                    return 0;
-                };
-                let apu = &snes.apu_real;
+                let apu = &self.0.apu_real;
                 match addr {
                     0xF0 | 0xF1 => 0,
                     0xF2 => apu.dsp_index,
@@ -704,7 +694,7 @@ impl ExprEnv for Emulator {
         match cpu {
             ExprCpu::Snes => {
                 let addr = addr & 0x00FF_FFFF;
-                if let Some(l) = self.absolute_address(addr).ok().flatten() {
+                if let Some(l) = View::absolute(*self, addr) {
                     return i64::from(l.offset);
                 }
                 let (bank, off) = (addr >> 16, addr & 0xFFFF);
@@ -717,11 +707,7 @@ impl ExprEnv for Emulator {
             }
             ExprCpu::Spc => {
                 let a = addr & 0xFFFF;
-                let ipl = self
-                    .snes
-                    .as_ref()
-                    .is_some_and(|s| s.apu_real.control & 0x80 != 0);
-                if a >= 0xFFC0 && ipl {
+                if a >= 0xFFC0 && self.0.apu_real.control & 0x80 != 0 {
                     i64::from(a & 0x3F)
                 } else {
                     i64::from(a)
@@ -729,6 +715,11 @@ impl ExprEnv for Emulator {
             }
         }
     }
+}
+
+/// Evaluate `expr` on a machine the caller only holds as its core.
+pub(crate) fn evaluate_on(expr: &Expression, access: &ExprAccess, view: View<'_>) -> ExprResult {
+    evaluate(expr, access, &view)
 }
 
 impl Emulator {
@@ -755,8 +746,7 @@ impl Emulator {
         expr: &Expression,
         access: &ExprAccess,
     ) -> Result<ExprResult, ApiError> {
-        self.snes.as_ref().ok_or(ApiError::NoRom)?;
-        Ok(evaluate(expr, access, self))
+        Ok(evaluate(expr, access, &self.view()?))
     }
 
     /// Evaluate `text` for `cpu` as a watch does: no access (`value` and
@@ -779,25 +769,12 @@ impl Emulator {
             dummy: false,
             oppc,
         };
+        let view = self.view()?;
         Ok(self
             .compile_expression(text, cpu)
             .map_or(ExprResult::fail(ExprKind::Invalid), |e| {
-                evaluate(&e, &access, self)
+                evaluate(&e, &access, &view)
             }))
-    }
-
-    /// A register on the CPU bus as a debugger peeks it (no side effect),
-    /// `None` for an address that is not a register.
-    pub(crate) fn bus_register_peek(&self, addr: u32) -> Option<u8> {
-        let (bank, off) = (addr >> 16, addr & 0xFFFF);
-        let system = bank <= 0x3F || (0x80..=0xBF).contains(&bank);
-        if !system || !(0x2000..=0x5FFF).contains(&off) {
-            return None;
-        }
-        Some(
-            self.read_memory(MemoryKind::SnesMemory, addr, 1)
-                .map_or(0, |b| b[0]),
-        )
     }
 }
 

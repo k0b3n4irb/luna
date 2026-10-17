@@ -1366,6 +1366,11 @@ pub struct Emulator {
     forced_region: Option<Region>,
     /// [`Emulator::set_power_on`]: what RAM holds when a ROM is loaded.
     power_on: PowerOnState,
+    /// The compiled condition of every breakpoint that has one, by id.
+    bp_conditions: std::collections::BTreeMap<u32, expr::Expression>,
+    /// Event Viewer marks of *mark* breakpoints that fired since the last
+    /// [`Emulator::swap_frame_events`].
+    pending_marks: Vec<CapturedEvent>,
 }
 
 /// One raw captured Event Viewer event before category/filter decode — either
@@ -1467,6 +1472,8 @@ impl Emulator {
             input_capture: None,
             forced_region: None,
             power_on: PowerOnState::Zero,
+            bp_conditions: std::collections::BTreeMap::new(),
+            pending_marks: Vec::new(),
         }
     }
 
@@ -1712,6 +1719,8 @@ impl Emulator {
         match result {
             Ok(Ok(snes)) => {
                 self.snes = Some(snes);
+                self.bp_conditions.clear();
+                self.pending_marks.clear();
                 self.rom_info = Some(info.clone());
                 self.instructions_executed = 0;
                 self.rom_hash = rom_hash;
@@ -3631,13 +3640,56 @@ impl Emulator {
 
     /// Remove a breakpoint by id. Returns `true` if it existed.
     pub fn bp_remove(&mut self, id: u32) -> Result<bool, ApiError> {
+        self.bp_conditions.remove(&id);
         Ok(self.bp_registry()?.remove(id))
     }
 
     /// Remove every breakpoint.
     pub fn bp_clear(&mut self) -> Result<(), ApiError> {
+        self.bp_conditions.clear();
         self.bp_registry()?.clear();
         Ok(())
+    }
+
+    /// Give breakpoint `id` a condition in Mesen2's expression language
+    /// (see [`expr`]), or remove it with `None` / an empty string. The
+    /// breakpoint then fires only when the condition is non-zero; an
+    /// evaluation that fails (division by zero, label out of scope) does
+    /// not fire it. Labels resolve now. An expression that does not parse
+    /// is refused. Returns `false` for an unknown id.
+    ///
+    /// The condition sees the access: on an exec breakpoint `value` is the
+    /// opcode and `address` the PC, before the instruction runs; on a
+    /// watchpoint `value` and `address` are the byte and address of the
+    /// access, and the registers and memory those of the end of the
+    /// accessing instruction (luna runs instructions whole).
+    pub fn bp_set_condition(&mut self, id: u32, condition: Option<&str>) -> Result<bool, ApiError> {
+        let text = condition.map(str::trim).filter(|t| !t.is_empty());
+        let compiled =
+            match text {
+                Some(t) => Some(self.compile_expression(t, expr::ExprCpu::Snes).ok_or_else(
+                    || ApiError::BadArg(format!("condition `{t}` is not a valid expression")),
+                )?),
+                None => None,
+            };
+        if !self
+            .bp_registry()?
+            .set_condition(id, text.map(str::to_string))
+        {
+            return Ok(false);
+        }
+        match compiled {
+            Some(e) => self.bp_conditions.insert(id, e),
+            None => self.bp_conditions.remove(&id),
+        };
+        Ok(true)
+    }
+
+    /// Make breakpoint `id` a *mark* (Mesen2's "mark" breakpoints): when it
+    /// fires it puts a breakpoint event on the Event Viewer and the run goes
+    /// on. Returns `false` for an unknown id.
+    pub fn bp_set_mark(&mut self, id: u32, mark: bool) -> Result<bool, ApiError> {
+        Ok(self.bp_registry()?.set_mark(id, mark))
     }
 
     /// Snapshot the registered breakpoints.
@@ -3697,6 +3749,40 @@ impl Emulator {
             bp.take_pending(); // discard stale
         }
         let at = |snes: &Snes| (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
+        let conditions = self.bp_conditions.clone();
+        // Marks that fired, with their beam position: shared by the two
+        // checks below.
+        let marks: std::cell::RefCell<Vec<(BreakHit, u16, u16)>> = std::cell::RefCell::default();
+        // The first hit that passes its condition: a mark is recorded and
+        // the run goes on, anything else stops it.
+        let decide = |snes: &Snes, hits: Vec<BreakHit>| -> Option<BreakHit> {
+            let bp = snes.breakpoints.as_ref()?;
+            let view = memory::View(snes);
+            for hit in hits {
+                if let Some(cond) = conditions.get(&hit.id) {
+                    let address = hit.addr.unwrap_or(hit.pc);
+                    let access = expr::ExprAccess {
+                        value: i64::from(hit.value.unwrap_or_else(|| view.bus_peek(hit.pc, 0))),
+                        address: i64::from(address),
+                        memaddress: view.absolute(address).map_or(-1, |l| i64::from(l.offset)),
+                        write: hit.kind == BreakKind::Write,
+                        dma: hit.dma,
+                        dummy: false,
+                        oppc: i64::from(hit.pc),
+                    };
+                    if !expr::evaluate_on(cond, &access, view).holds() {
+                        continue;
+                    }
+                }
+                if bp.is_mark(hit.id) {
+                    let hclock = snes.mcycles_in_line.min(u32::from(u16::MAX)) as u16;
+                    marks.borrow_mut().push((hit, snes.ppu_line, hclock));
+                    continue;
+                }
+                return Some(hit);
+            }
+            None
+        };
         let out = self
             .run_core(
                 max_steps,
@@ -3704,21 +3790,47 @@ impl Emulator {
                 // An exec breakpoint on the CURRENT instruction does not fire at
                 // entry (else a resume would never leave it).
                 |snes, executed| {
-                    (executed > 0)
-                        .then(|| {
-                            snes.breakpoints
-                                .as_ref()
-                                .and_then(|b| b.check_exec(at(snes)))
-                        })
-                        .flatten()
+                    if executed == 0 {
+                        return None;
+                    }
+                    let hits = snes.breakpoints.as_ref()?.check_exec(at(snes));
+                    if hits.is_empty() {
+                        return None;
+                    }
+                    decide(snes, hits)
                 },
-                |snes| snes.breakpoints.as_mut().and_then(|b| b.take_pending()),
+                |snes| {
+                    let hits = snes.breakpoints.as_mut()?.take_pending();
+                    if hits.is_empty() {
+                        return None;
+                    }
+                    decide(snes, hits)
+                },
             )
             .map(|run| RunOutcome {
                 steps: run.steps,
                 hit: run.stop,
                 interrupted: run.interrupted,
             })?;
+        let marks = marks.into_inner();
+        if let Some(bp) = self.snes.as_mut().and_then(|s| s.breakpoints.as_mut()) {
+            for (hit, _, _) in &marks {
+                bp.count_hit(hit.id);
+            }
+            if let Some(hit) = out.hit {
+                bp.count_hit(hit.id);
+            }
+        }
+        self.pending_marks
+            .extend(
+                marks
+                    .into_iter()
+                    .map(|(hit, line, hclock)| CapturedEvent::Break {
+                        pc: hit.pc,
+                        line,
+                        hclock,
+                    }),
+            );
         if let Some(hit) = out.hit {
             // Surface the hit on the Event Viewer overlay (Mesen2's
             // MarkedBreakpoint category, issue #68). Injected straight
@@ -4325,6 +4437,7 @@ impl Emulator {
         let mut merged: Vec<CapturedEvent> = Vec::with_capacity(cpu.len() + dma.len());
         merged.extend(cpu.into_iter().map(CapturedEvent::Cpu));
         merged.extend(dma.into_iter().map(CapturedEvent::Dma));
+        merged.append(&mut self.pending_marks);
         // Order by PPU position so the list/overlay are sequential.
         merged.sort_by_key(CapturedEvent::sort_key);
         std::mem::swap(&mut self.prev_frame_events, &mut self.last_frame_events);
