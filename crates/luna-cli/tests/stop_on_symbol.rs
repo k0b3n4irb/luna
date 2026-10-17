@@ -1198,6 +1198,19 @@ fn manifest_checkpoints_and_pokes_take_until_if() {
     assert_eq!(cps[0]["arrival"], 4, "{v}");
     assert_eq!(cps[0]["until_if"], "[half_a] == 3");
     assert_eq!(cps[1]["arrival"], 7, "the second arrival where half_a >= 5");
+    // After a numbered checkpoint, an `until_if` one looks from there on:
+    // `[half_a] >= 1` already held long before arrival 6, so it fires at 7.
+    let mixed = format!(
+        "{head}[[checkpoint]]\nat_symbol = \"tick\"\nhit = 6\n[checkpoint.values]\nhalf_a = 5\n\
+         [[checkpoint]]\nat_symbol = \"tick\"\nuntil_if = \"[half_a] >= 1\"\n\
+         [checkpoint.values]\nhalf_a = 6\n\
+         [[checkpoint]]\nat_symbol = \"tick\"\nhit = 9\n[checkpoint.values]\nhalf_a = 8\n"
+    );
+    let out = luna_test(&dir, "mixed.toml", &mixed, &["--report", "json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout[stdout.find('{').unwrap()..]).unwrap();
+    assert_eq!(v["tests"][0]["symbol_checkpoints"][1]["arrival"], 7, "{v}");
     // A condition that never holds is reported with how often it held.
     let never = format!(
         "{head}[[checkpoint]]\nat_symbol = \"tick\"\nuntil_if = \"[half_a] == 200\"\n\

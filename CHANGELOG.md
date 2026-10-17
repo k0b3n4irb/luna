@@ -15,8 +15,10 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   holds; `--hit N` takes the `N`-th such arrival, and the JSON's
   `until_pc.hits_seen` / `matches` give the arrival it stopped on and how
   many held. In a manifest, `until_if` on an `at_symbol` `[[checkpoint]]`
-  or a `[[poke]]` does the same, and the report's
-  `symbol_checkpoints[].arrival` names the arrival.
+  fires at the first arrival after the checkpoint before it where the
+  condition holds (so it can follow numbered checkpoints), on a `[[poke]]`
+  at the first since power-on; the report's `symbol_checkpoints[].arrival`
+  names the arrival.
 
 - **Step over, step out, by scanline, by frame.** `Emulator::step_kind`
   runs one of Mesen2's steps: into, over (a `JSR` / `JSL` whole, back at

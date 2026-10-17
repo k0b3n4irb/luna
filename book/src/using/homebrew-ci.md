@@ -406,9 +406,10 @@ ball_y = 0x30                  # two bytes when the .sym says two
 **At an event, not at a number.** `until_if` on an `at_symbol`
 checkpoint or a `[[poke]]` makes it fire at the first arrival where an
 [expression](mcp.md#expressions) holds, and `hit` then counts those
-arrivals (from power-on, as without it). The report gives the arrival it
-fired on, so a test keeps following the event when the game's logic
-moves it:
+arrivals. A checkpoint looks from the checkpoint before it on ("the
+first goal after tick 216"), so it can follow numbered ones; a
+`[[poke]]` counts from power-on. The report gives the arrival it fired
+on, so a test keeps following the event when the game's logic moves it:
 
 ```toml
 [[checkpoint]]

@@ -204,9 +204,10 @@ struct Checkpoint {
     /// With `at_symbol`: which arrival, counted from power-on (default 1).
     /// With `until_if`, which arrival where the condition held.
     hit: Option<u64>,
-    /// With `at_symbol`: fire only at an arrival where this expression, in
-    /// Mesen2's debugger language, is non-zero (`luna state --until-if`).
-    /// The report's `arrival` is the arrival it fired on.
+    /// With `at_symbol`: fire at the first arrival after the checkpoint
+    /// before it where this expression, in Mesen2's debugger language, is
+    /// non-zero (`hit = N`: the N-th such arrival of that stretch). The
+    /// report's `arrival` is the arrival it fired on, from power-on.
     until_if: Option<String>,
     /// This leg's joypad entries (absolute frames, same grammar as the
     /// top-level `input`).
@@ -517,8 +518,9 @@ struct SymbolWatch {
     counts: Vec<u64>,
     pokes: Vec<PendingPoke>,
     /// Per checkpoint with `until_if`: its routine's index, the compiled
-    /// condition and the arrivals where it held so far (counted from
-    /// power-on, as `hit` is).
+    /// condition and the arrivals where it held so far — counted only while
+    /// that checkpoint is the one being driven to, i.e. after the
+    /// checkpoint before it.
     conditions: Vec<Option<(usize, luna_api::Expression, u64)>>,
     /// The first write the machine refused.
     poke_error: Option<String>,
@@ -1021,7 +1023,12 @@ fn run_one(path: &Path) -> Result<TestOutcome, String> {
                     return Err(format!("checkpoint {}: `hit` counts from 1", i + 1));
                 }
                 // Arrivals are counted from power-on, so a later checkpoint
-                // on the same routine must ask for a later one.
+                // on the same routine must ask for a later one. An `until_if`
+                // checkpoint counts from the checkpoint before it, and its
+                // arrival is only known by playing: it takes no part.
+                if cp.until_if.is_some() {
+                    continue;
+                }
                 if let Some(&prev) = prev_hit.get(sym).filter(|&&p| hit <= p) {
                     return Err(format!(
                         "checkpoint {}: `{sym}` hit {hit} comes after hit {prev} — hits count \
@@ -1851,16 +1858,16 @@ fn drive_watching(
                     let addr = pcs[i];
                     // The checkpoint conditions on this routine, counted on
                     // every arrival.
-                    let mut held_now = false;
-                    for (n, c) in watch.conditions.iter_mut().enumerate() {
-                        if let Some((pc, cond, held)) = c.as_mut()
-                            && *pc == i
-                            && crate::state::arrival_holds(em, cond, addr)
-                        {
-                            *held += 1;
-                            held_now |= stop.is_some_and(|(_, _, cp)| cp == n);
-                        }
-                    }
+                    let held_now = if let Some((_, _, cp)) = stop
+                        && let Some(Some((pc, cond, held))) = watch.conditions.get_mut(cp)
+                        && *pc == i
+                        && crate::state::arrival_holds(em, cond, addr)
+                    {
+                        *held += 1;
+                        true
+                    } else {
+                        false
+                    };
                     // Writes land before a checkpoint on the same arrival
                     // reads the machine.
                     for p in &mut watch.pokes {
