@@ -2292,3 +2292,45 @@ fn dsp1_memories_read_as_little_endian_words() {
         [0x34, 0x12]
     );
 }
+
+#[test]
+fn expressions_read_the_live_machine() {
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom()).unwrap();
+    e.set_cpu_register("a", 0x1234).unwrap();
+    e.set_cpu_register("x", 7).unwrap();
+    e.write_memory(MemoryKind::SnesWorkRam, 0x0107, &[0x99, 0x88])
+        .unwrap();
+    e.load_symbols_str("[labels]\n7e:0100 table\n00:8000 main\n");
+    let snes = |t: &str| e.evaluate(t, ExprCpu::Snes).unwrap();
+    assert_eq!(snes("a").value, 0x1234);
+    assert_eq!(snes("[table + x]").value, 0x99);
+    assert_eq!(snes("{table+x} == $8899").value, 1);
+    assert_eq!(snes("{table+x} == $8899").kind, ExprKind::Boolean);
+    assert_eq!(snes("main").value, 0x8000);
+    assert_eq!(snes(":main").value, 0, "LoROM $00:8000 is ROM offset 0");
+    assert_eq!(snes(":$7E0107").value, 0x107);
+    assert_eq!(snes("[$2100]").value, 0, "a register peeks as 0");
+    assert_eq!(snes("nolabel").kind, ExprKind::Invalid);
+    assert_eq!(snes("oppc == pc").value, 1);
+    assert!(snes("frame >= 0 && scanline < 262").holds());
+
+    // The SPC700 sees its own registers and memory; a CPU-bus label is out
+    // of its reach.
+    e.write_memory(MemoryKind::SpcRam, 0x0042, &[0x5A]).unwrap();
+    let spc = |t: &str| e.evaluate(t, ExprCpu::Spc).unwrap();
+    assert_eq!(spc("[$42]").value, 0x5A);
+    assert_eq!(spc("pc").value, i64::from(e.spc700_state().unwrap().pc));
+    assert_eq!(spc("main").kind, ExprKind::OutOfScope);
+    assert_eq!(
+        spc("scanline").kind,
+        ExprKind::Invalid,
+        "no PPU token on the SPC700"
+    );
+    // The IPL ROM is mapped at power-on: `:$FFC0` is its first byte.
+    assert_eq!(spc(":$FFC0").value, 0);
+    assert_eq!(
+        spc("[$FFC0]").value,
+        i64::from(e.read_memory(MemoryKind::SpcRom, 0, 1).unwrap()[0])
+    );
+}

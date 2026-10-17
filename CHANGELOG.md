@@ -9,6 +9,16 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ### Added
 
+- **Debugger expressions in Mesen2's language.** `luna_api::expr` parses
+  and evaluates the language of Mesen2's breakpoint conditions, watches
+  and trace filters: literals, the registers and flags of the 65C816 or
+  the SPC700, `scanline` / `hclock` / `frame` / `nmi` / `irq`, `.sym`
+  labels, `[byte]` / `{word}` / `#long` reads and `:` offsets, C
+  operators and precedence, Mesen2's 64-bit arithmetic and final clamp.
+  It reproduces Mesen2's results on 87 reference cases, quirks included.
+  `Emulator::evaluate` (a watch), `compile_expression` +
+  `evaluate_expression` (a condition against an access); MCP `eval`.
+
 - **Every memory by one name, as Mesen2 names it.** `luna_api::MemoryKind`
   covers the CPU and SPC buses, ROM, work RAM, save RAM (SA-1 BW-RAM
   included), VRAM, OAM, CGRAM, ARAM, the IPL ROM, the S-DSP registers, the

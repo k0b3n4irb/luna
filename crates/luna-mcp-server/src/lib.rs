@@ -1321,6 +1321,25 @@ pub struct AbsoluteAddressParams {
     pub symbol: Option<String>,
 }
 
+/// `eval` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct EvalParams {
+    /// The expression, in Mesen2's language (`[$7E0010] == 3 && scanline > 200`).
+    pub expression: String,
+    /// The CPU it is for: `snes` (default) or `spc`.
+    #[serde(default)]
+    pub cpu: Option<String>,
+}
+
+/// `eval` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct EvalResult {
+    /// The value (0 unless `kind` is `numeric` or `boolean`).
+    pub value: i64,
+    /// `numeric`, `boolean`, `invalid`, `divide_by_zero` or `out_of_scope`.
+    pub kind: String,
+}
+
 /// One memory of `memory_kinds`.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct MemoryKindRow {
@@ -2740,6 +2759,51 @@ impl LunaServer {
         Ok(rmcp::Json(AbsoluteAddressResult {
             kind: loc.map(|l| l.kind.name().to_string()),
             offset: loc.map(|l| l.offset),
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Evaluate a debugger expression in Mesen2's language, as a watch \
+                                does: registers (`a`, `x`, `pc`, `ps`, `pscarry`…), \
+                                `scanline`, `hclock`, `frame`, `nmi`, `irq`, `.sym` labels \
+                                (their address), `[addr]` / `{addr}` / `#addr` byte / word / \
+                                long reads, `:addr` the offset behind an address, C \
+                                operators and precedence. `cpu`: `snes` (default) or `spc`."
+    )]
+    async fn eval(
+        &self,
+        Parameters(params): Parameters<EvalParams>,
+    ) -> Result<rmcp::Json<EvalResult>, ErrorData> {
+        let cpu = match params
+            .cpu
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            None | Some("snes" | "cpu") => luna_api::ExprCpu::Snes,
+            Some("spc" | "spc700" | "apu") => luna_api::ExprCpu::Spc,
+            Some(other) => {
+                return Err(ErrorData::invalid_params(
+                    format!("unknown cpu `{other}`; `snes` or `spc`"),
+                    None,
+                ));
+            }
+        };
+        let r = {
+            let em = self.emulator.lock().await;
+            em.evaluate(&params.expression, cpu)
+                .map_err(|e| api_err_to_mcp(&e))?
+        };
+        let kind = match r.kind {
+            luna_api::ExprKind::Numeric => "numeric",
+            luna_api::ExprKind::Boolean => "boolean",
+            luna_api::ExprKind::Invalid => "invalid",
+            luna_api::ExprKind::DivideBy0 => "divide_by_zero",
+            luna_api::ExprKind::OutOfScope => "out_of_scope",
+        };
+        Ok(rmcp::Json(EvalResult {
+            value: r.value,
+            kind: kind.to_string(),
         }))
     }
 

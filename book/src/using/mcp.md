@@ -68,6 +68,7 @@ method, so the MCP transport adds reach, not capability.
 | `poke_memory` | `poke_memory` | Write bytes into WRAM (state injection). |
 | `memory_kinds` | `memory_kinds` | The memories this cartridge has, by Mesen2's name, with their size: `SnesMemory` (the CPU bus), `SpcMemory`, `SnesPrgRom`, `SnesWorkRam`, `SnesSaveRam`, `SnesVideoRam`, `SnesSpriteRam`, `SnesCgRam`, `SpcRam`, `SpcRom`, `SpcDspRegisters`, `DspProgramRom` / `DspDataRom` / `DspDataRam`, `Sa1InternalRam`, `GsuWorkRam`. |
 | `read_memory` / `write_memory` | `read_memory` / `write_memory` | `count` bytes of any of them from `offset` (or `symbol`), and back, without side effects: a `SnesMemory` address goes to the memory behind it, never through the bus, so a read starts no S-DD1 decompression and drains no DSP-1 port (a register reads 0, open bus `$FF`). Writes reach ROM too. See the example below. |
+| `eval` | `evaluate` | A debugger expression in Mesen2's language, evaluated as a watch: `{"value": 1, "kind": "boolean"}`. See [Expressions](#expressions) below. |
 | `absolute_address` | `absolute_address` | The memory and offset behind a CPU-bus address or label — `{"kind": "SnesPrgRom", "offset": 16}` for `$80:8010` on a 32 KB `LoROM` — as the mapper's banking selects it now; `null` for a register. |
 | `poke_vram` / `poke_cgram` / `poke_oam` / `poke_aram` | same names | Direct writes into the other memory spaces (bus-bypassing state injection; each wraps at its size). |
 | `freeze_add` / `freeze_remove` / `freeze_list` | same names | Cheat-style per-frame pinning: the byte is re-applied at every frame boundary in **every** run path (CLI, MCP and GUI behave identically), and once immediately on add. WRAM only. |
@@ -197,6 +198,38 @@ read_memory {kind: "Sa1InternalRam", offset: 0, count: 64}              # an SA-
 A memory the cartridge lacks is an error (`GsuWorkRam: this cartridge has
 none`), and so is a range past its end; the two buses (`SnesMemory`,
 `SpcMemory`) wrap around instead.
+
+### Expressions
+
+`eval` evaluates a debugger expression in Mesen2's language, the one its
+breakpoint conditions, watches and trace filters use, so a condition
+written for one emulator means the same in the other. It is the language
+luna's own conditions build on.
+
+```text
+eval {expression: "a"}                                  # → {value: 4660, kind: "numeric"}   the 16-bit accumulator
+eval {expression: "[player_hp] < 10 && scanline > 200"} # a .sym label stands for its address
+eval {expression: "{$7E0010} == $1234"}                 # {…} reads a little-endian word
+eval {expression: ":$C08000"}                           # the ROM offset behind a HiROM address
+eval {expression: "[$F2]", cpu: "spc"}                  # the SPC700's DSP register index
+eval {expression: "10 / x"}                             # → {value: 0, kind: "divide_by_zero"} when X is 0
+```
+
+- **Values.** Decimal, `$hex` / `0xhex` and `%binary` literals. The
+  registers of the CPU: `a x y sp d db pc ps`, the `ps…` flags (`pscarry`,
+  `psnegative`…), `nmi`, `irq`, `frame`, `scanline`, `hclock`, `cycle`;
+  on the SPC700 `a x y sp ps pc dspreg`.
+- **Memory.** `[a]` reads a byte, `{a}` a word, `#a` a long, without side
+  effects. `:a` gives the offset of the memory behind `a`.
+- **Operators.** C's, with C's precedence: `x & 1 == 1` is `x & (1 == 1)`.
+- **Arithmetic.** Signed 64-bit, with the result clamped to −2³¹ … 2³²−1.
+  `&&` and `||` evaluate both sides.
+- **Mesen2's quirks**, which luna keeps:
+  - spaces are removed first, so `1 2` is 12;
+  - right after `[`, an operator is binary: `[-1]` reads `[0-1]`, and
+    `[~1]` is invalid (write `[(~1)]`).
+- **Where luna departs from Mesen2:** a closing bracket must match the
+  innermost open one, and a label may contain `.`, as WLA-DX labels do.
 
 ### Loading homebrew straight from the assembler
 

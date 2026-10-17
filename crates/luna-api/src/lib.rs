@@ -45,6 +45,7 @@ use serde::Serialize;
 /// on [`Emulator`].
 pub mod dsp1_commands;
 pub mod event_viewer;
+pub mod expr;
 pub mod input;
 pub mod memory;
 pub mod paths;
@@ -57,6 +58,7 @@ mod vram_writers;
 pub use event_viewer::{
     CATEGORY_COUNT, EventCategory, EventViewerConfig, EventViewerEvent, register_name,
 };
+pub use expr::{ExprAccess, ExprCpu, ExprKind, ExprResult, Expression};
 pub use input::{FRAME_STEP_BUDGET, InputEvent, InputScript, ScriptBound, WatchEvent};
 pub use memory::{MemoryKind, MemoryLocation};
 pub use power_on::parse_power_on;
