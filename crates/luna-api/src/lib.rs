@@ -31,7 +31,7 @@ pub use luna_core::{
     Dsp1TraceEvent, Dsp1TraceKind, GsuBusAccess, GsuBusEvent, MailboxEvent, MailboxEventKind,
     MapperKind, MemEventKind, MemOrigin, MemTraceEvent, MemTraceFilter, Profile, ProfileSample,
     Sa1LogEvent, Sa1SideEvent, Sa1Stats, Sa1TraceEvent, Spc700TraceEvent, SuperFxJob,
-    SuperFxTraceEvent,
+    SuperFxTraceEvent, WatchSpace,
 };
 /// Decoded BG tilemap image (Tilemap Viewer), re-exported so the GUI uses
 /// `luna_api::TilemapImage` rather than depending on `luna-ppu`.
@@ -3703,6 +3703,44 @@ impl Emulator {
             .add_mem(lo, hi, on_read, on_write, mirror, name))
     }
 
+    /// Register a write watchpoint over the byte range `lo..=hi` of a PPU
+    /// memory (`SnesVideoRam`, `SnesCgRam`, `SnesSpriteRam`), firing when
+    /// the CPU or a DMA writes it through its port, at the address the
+    /// PPU actually writes (VMAIN's remap, the picture-time redirects).
+    /// The hit's `addr` is that address and its `space` the memory.
+    /// [`MemoryKind::SnesMemory`] is [`Self::bp_add_mem`]. Returns its id.
+    pub fn bp_add_watch(
+        &mut self,
+        memory: MemoryKind,
+        lo: u32,
+        hi: u32,
+        name: Option<&str>,
+    ) -> Result<u32, ApiError> {
+        let space = match memory {
+            MemoryKind::SnesMemory => return self.bp_add_mem(lo, hi, false, true, true, name),
+            MemoryKind::SnesVideoRam => luna_core::WatchSpace::Vram,
+            MemoryKind::SnesCgRam => luna_core::WatchSpace::Cgram,
+            MemoryKind::SnesSpriteRam => luna_core::WatchSpace::Oam,
+            other => {
+                return Err(ApiError::BadArg(format!(
+                    "{}: no watchpoints on this memory yet",
+                    other.name()
+                )));
+            }
+        };
+        let size = self.memory_size(memory)? as u32;
+        if lo > hi || hi >= size {
+            return Err(ApiError::BadArg(format!(
+                "{}: range ${lo:X}..=${hi:X} outside its {size} bytes",
+                memory.name()
+            )));
+        }
+        let name = name.map(str::to_string);
+        Ok(self
+            .bp_registry()?
+            .add_mem_in(space, lo, hi, false, true, false, name))
+    }
+
     /// Enable / disable a breakpoint without removing it (issue #176) —
     /// keeps its id, name and hit count. Returns `true` if the id exists.
     pub fn bp_set_enabled(&mut self, id: u32, enabled: bool) -> Result<bool, ApiError> {
@@ -3937,8 +3975,14 @@ impl Emulator {
         let conditions = self.bp_conditions.clone();
         let sources = self.break_sources;
         // The SPC700's breakpoints live in the APU for this run only, so a
-        // plain step never freezes it.
+        // plain step never freezes it; the PPU reports its writes only
+        // while a watchpoint needs them.
         if let Some(snes) = self.snes.as_mut() {
+            let ppu = snes
+                .breakpoints
+                .as_ref()
+                .is_some_and(|b| b.has_ppu_watches());
+            snes.ppu.debug_writes = ppu.then(Vec::new);
             let spc = snes
                 .breakpoints
                 .as_ref()
@@ -3976,7 +4020,11 @@ impl Emulator {
                     let access = expr::ExprAccess {
                         value: i64::from(hit.value.unwrap_or_else(|| view.bus_peek(hit.pc, 0))),
                         address: i64::from(address),
-                        memaddress: view.absolute(address).map_or(-1, |l| i64::from(l.offset)),
+                        memaddress: if hit.space == luna_core::WatchSpace::Bus {
+                            view.absolute(address).map_or(-1, |l| i64::from(l.offset))
+                        } else {
+                            i64::from(address)
+                        },
                         write: hit.kind == BreakKind::Write,
                         dma: hit.dma,
                         dummy: false,
@@ -4017,6 +4065,7 @@ impl Emulator {
                         addr: None,
                         value: None,
                         dma: false,
+                        space: luna_core::WatchSpace::Bus,
                     };
                     // An interrupt about to be served runs no opcode.
                     let opcodes = sources.brk || sources.cop || sources.wdm || sources.stp;
@@ -4047,6 +4096,7 @@ impl Emulator {
                         addr: None,
                         value: None,
                         dma: false,
+                        space: luna_core::WatchSpace::Bus,
                     };
                     if let Some((id, pc)) = snes.apu_real.break_hit {
                         return Some(BreakHit {
@@ -4056,6 +4106,7 @@ impl Emulator {
                             addr: None,
                             value: None,
                             dma: false,
+                            space: luna_core::WatchSpace::Bus,
                         });
                     }
                     let ran = (!nmi && !irq).then(|| opcode.get());
@@ -4089,6 +4140,7 @@ impl Emulator {
         let marks = marks.into_inner();
         if let Some(snes) = self.snes.as_mut() {
             snes.apu_real.breaks.clear();
+            snes.ppu.debug_writes = None;
         }
         if let Some(bp) = self.snes.as_mut().and_then(|s| s.breakpoints.as_mut())
             && out.hit.is_none_or(|h| h.id != BREAK_SOURCE_ID)

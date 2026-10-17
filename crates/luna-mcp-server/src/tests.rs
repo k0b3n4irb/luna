@@ -267,6 +267,7 @@ async fn server_p2_breakpoints_round_trip() {
         .bp_add(Parameters(BpAddParams {
             condition: None,
             mark: false,
+            memory: None,
             kind: "mem".into(),
             addr: 0x00_0200,
             symbol: None,
@@ -286,6 +287,7 @@ async fn server_p2_breakpoints_round_trip() {
         .bp_add(Parameters(BpAddParams {
             condition: None,
             mark: false,
+            memory: None,
             kind: "exec".into(),
             addr: 0x00_0105,
             symbol: None,
@@ -304,6 +306,7 @@ async fn server_p2_breakpoints_round_trip() {
         s.bp_add(Parameters(BpAddParams {
             condition: None,
             mark: false,
+            memory: None,
             kind: "bogus".into(),
             addr: 0,
             symbol: None,
@@ -437,6 +440,7 @@ async fn server_p3_symbols_round_trip() {
         .bp_add(Parameters(BpAddParams {
             condition: None,
             mark: false,
+            memory: None,
             kind: "mem".into(),
             addr: 0,
             symbol: Some("monster_x".into()),
@@ -929,6 +933,7 @@ async fn server_symbol_tools_round_trip() {
         .bp_add(Parameters(BpAddParams {
             condition: None,
             mark: false,
+            memory: None,
             kind: "mem".into(),
             addr: 0,
             symbol: Some("monster_x".into()),
@@ -1256,6 +1261,7 @@ async fn server_breakpoints_v2_round_trip() {
         .bp_add(Parameters(BpAddParams {
             condition: None,
             mark: false,
+            memory: None,
             kind: "mem".into(),
             addr: 0,
             symbol: Some("monster_x".into()),
@@ -1472,6 +1478,7 @@ async fn server_bp_add_takes_a_condition_and_a_mark() {
     let add = |condition: Option<&str>, mark: bool| BpAddParams {
         condition: condition.map(str::to_string),
         mark,
+        memory: None,
         kind: "exec".into(),
         addr: 0x00_8000,
         symbol: None,

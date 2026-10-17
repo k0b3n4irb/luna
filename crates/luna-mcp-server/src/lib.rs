@@ -555,6 +555,12 @@ pub struct BpAddParams {
     /// Viewer and the run goes on (default false).
     #[serde(default)]
     pub mark: bool,
+    /// Mem only: the memory the range is in, by Mesen2's name —
+    /// `SnesMemory` (the CPU bus, default), `SnesVideoRam`, `SnesCgRam`,
+    /// `SnesSpriteRam`. PPU memories are watched for writes, CPU or DMA,
+    /// at the address the PPU writes.
+    #[serde(default)]
+    pub memory: Option<String>,
 }
 
 const fn default_true() -> bool {
@@ -1226,6 +1232,8 @@ pub struct BpEntry {
     pub mark: bool,
     /// The CPU it watches: `snes` or `spc`.
     pub cpu: String,
+    /// Mem: the memory the range is in — `bus`, `vram`, `cgram`, `oam`.
+    pub space: String,
 }
 
 /// `bp_set_enabled` parameters.
@@ -1518,14 +1526,20 @@ pub struct RunUntilBreakResult {
     pub hit: bool,
     /// Id of the breakpoint that fired.
     pub bp_id: Option<u32>,
-    /// `"exec"`, `"read"` or `"write"`.
+    /// `"exec"`, `"read"`, `"write"`, `"spc_exec"`, a break source
+    /// (`"brk"`, `"nmi"`, …) or `"step"`.
     pub kind: Option<String>,
     /// Exec: the about-to-execute PC. Mem: the accessing instruction's PC.
     pub pc: Option<u32>,
-    /// Mem hits: the accessed 24-bit bus address.
+    /// Mem hits: the accessed address (24-bit bus address, or the byte
+    /// address in the memory `space` names).
     pub addr: Option<u32>,
     /// Mem hits: the byte transferred.
     pub value: Option<u8>,
+    /// Mem hits: the memory `addr` is in — `bus`, `vram`, `cgram` or `oam`.
+    pub space: Option<String>,
+    /// Mem hits: the access was a DMA cycle.
+    pub dma: Option<bool>,
     /// `true` if a `pause` ended the run before a breakpoint or the step
     /// budget (issue #92): `hit == false && interrupted == true`.
     pub interrupted: bool,
@@ -2723,16 +2737,27 @@ impl LunaServer {
                     em.bp_add_spc_exec(pc, name)
                         .map_err(|e| api_err_to_mcp(&e))?
                 }
-                "mem" => em
-                    .bp_add_mem(
-                        addr,
-                        hi,
-                        params.on_read,
-                        params.on_write,
-                        params.mirror.unwrap_or(true),
-                        name,
-                    )
-                    .map_err(|e| api_err_to_mcp(&e))?,
+                "mem" => match params
+                    .memory
+                    .as_deref()
+                    .map(memory_kind)
+                    .transpose()?
+                    .filter(|m| *m != luna_api::MemoryKind::SnesMemory)
+                {
+                    Some(memory) => em
+                        .bp_add_watch(memory, addr, hi, name)
+                        .map_err(|e| api_err_to_mcp(&e))?,
+                    None => em
+                        .bp_add_mem(
+                            addr,
+                            hi,
+                            params.on_read,
+                            params.on_write,
+                            params.mirror.unwrap_or(true),
+                            name,
+                        )
+                        .map_err(|e| api_err_to_mcp(&e))?,
+                },
                 other => {
                     return Err(ErrorData::invalid_params(
                         format!("kind must be 'exec', 'mem' or 'spc_exec', got `{other}`"),
@@ -3224,6 +3249,7 @@ impl LunaServer {
                         luna_api::BreakCpu::Snes => "snes".into(),
                         luna_api::BreakCpu::Spc => "spc".into(),
                     },
+                    space: space_name(b.space).into(),
                 })
                 .collect(),
         }))
@@ -4103,6 +4129,16 @@ fn png_dimensions(png: &[u8]) -> (u32, u32) {
     (field(16), field(20))
 }
 
+/// The wire name of a watchpoint's memory.
+const fn space_name(space: luna_api::WatchSpace) -> &'static str {
+    match space {
+        luna_api::WatchSpace::Bus => "bus",
+        luna_api::WatchSpace::Vram => "vram",
+        luna_api::WatchSpace::Cgram => "cgram",
+        luna_api::WatchSpace::Oam => "oam",
+    }
+}
+
 /// Flatten a [`luna_api::RunOutcome`] into the wire result shared by
 /// `run_until_break` and `run` (issue #92).
 fn outcome_to_result(out: &luna_api::RunOutcome) -> RunUntilBreakResult {
@@ -4131,6 +4167,8 @@ fn outcome_to_result(out: &luna_api::RunOutcome) -> RunUntilBreakResult {
             pc: Some(hit.pc),
             addr: hit.addr,
             value: hit.value,
+            space: hit.addr.map(|_| space_name(hit.space).into()),
+            dma: hit.addr.map(|_| hit.dma),
             interrupted: out.interrupted,
         },
         None => RunUntilBreakResult {
@@ -4141,6 +4179,8 @@ fn outcome_to_result(out: &luna_api::RunOutcome) -> RunUntilBreakResult {
             pc: None,
             addr: None,
             value: None,
+            space: None,
+            dma: None,
             interrupted: out.interrupted,
         },
     }

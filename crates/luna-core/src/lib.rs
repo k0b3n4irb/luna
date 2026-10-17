@@ -19,7 +19,7 @@ pub mod snes;
 
 pub use apu_stub::{ApuStub, Phase as ApuPhase};
 pub use breakpoints::{
-    BREAK_SOURCE_ID, BreakCpu, BreakHit, BreakKind, BreakpointInfo, BreakpointSet,
+    BREAK_SOURCE_ID, BreakCpu, BreakHit, BreakKind, BreakpointInfo, BreakpointSet, WatchSpace,
 };
 pub use cpu_regs::CpuRegs;
 pub use dma::{DmaTraceEvent, DmaTraceLog};

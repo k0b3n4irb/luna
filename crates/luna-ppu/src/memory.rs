@@ -149,25 +149,31 @@ impl Vram {
     /// only when `allow_data` is `true` (i.e. forced-blank or `VBlank`).
     /// The address counter advances regardless, matching ares
     /// (`ppu_io.cpp:397-401`) and Mesen2 (`SnesPpu.cpp:2046-2057`).
-    pub fn write_lo_gated(&mut self, value: u8, allow_data: bool) {
-        if allow_data {
+    /// Returns the byte address written, `None` when the gate dropped it.
+    pub fn write_lo_gated(&mut self, value: u8, allow_data: bool) -> Option<usize> {
+        let written = allow_data.then(|| {
             let byte_addr = self.byte_addr();
             self.data[byte_addr] = value;
-        }
+            byte_addr
+        });
         if !self.vmain.increment_on_high {
             self.advance();
         }
+        written
     }
 
     /// `$2119` write variant with the same active-display gate.
-    pub fn write_hi_gated(&mut self, value: u8, allow_data: bool) {
-        if allow_data {
+    /// Returns the byte address written, `None` when the gate dropped it.
+    pub fn write_hi_gated(&mut self, value: u8, allow_data: bool) -> Option<usize> {
+        let written = allow_data.then(|| {
             let byte_addr = self.byte_addr().wrapping_add(1) & 0xFFFF;
             self.data[byte_addr] = value;
-        }
+            byte_addr
+        });
         if self.vmain.increment_on_high {
             self.advance();
         }
+        written
     }
 
     /// Read the low byte (`$2139`). Returns the buffered byte first,
@@ -369,16 +375,21 @@ impl Cgram {
     /// The picture-time redirect (ares `writeCGRAM`, `io.cpp:55-61`):
     /// with `target` set, the word lands there — the entry the PPU is
     /// fetching — while CGADD still advances.
-    pub fn write_at(&mut self, value: u8, target: Option<u8>) {
+    ///
+    /// Returns the byte offset of the word committed (its two bytes are
+    /// at it and the next), `None` when only the latch was set.
+    pub fn write_at(&mut self, value: u8, target: Option<u8>) -> Option<usize> {
         if self.high_pending {
             let off = usize::from(target.unwrap_or(self.address)) << 1;
             self.data[off] = self.latch;
             self.data[off + 1] = value;
             self.address = self.address.wrapping_add(1);
             self.high_pending = false;
+            Some(off)
         } else {
             self.latch = value;
             self.high_pending = true;
+            None
         }
     }
 
@@ -555,8 +566,12 @@ impl Oam {
 
     /// `$2104` write — OAM data write with the even/odd dance for the
     /// low table and direct byte write for the high table.
-    pub fn write(&mut self, value: u8) {
+    ///
+    /// Returns where the bytes landed, `(offset, count)`: one high-table
+    /// byte, a low-table pair, or `None` when only the latch was set.
+    pub fn write(&mut self, value: u8) -> Option<(usize, usize)> {
         let addr = self.address;
+        let written;
         if addr & 0x200 != 0 {
             // High table: indexed by the LOW 5 bits of the address only —
             // ares `ppu/oam.cpp` `OAM::write` and Mesen2
@@ -565,14 +580,18 @@ impl Oam {
             // `% self.data.len()`, which would wrap an `addr >= 0x220`
             // into the low table instead of the hardware high-table byte.
             self.data[usize::from(addr & 0x21F)] = value;
+            written = Some((usize::from(addr & 0x21F), 1));
         } else if addr & 1 == 0 {
             self.latch = value;
+            written = None;
         } else {
             let even_off = usize::from(addr.wrapping_sub(1) & 0x1FF);
             self.data[even_off] = self.latch;
             self.data[even_off + 1] = value;
+            written = Some((even_off, 2));
         }
         self.advance();
+        written
     }
 
     /// `$2104` write while the PPU is drawing the picture. Hardware does
@@ -591,20 +610,26 @@ impl Oam {
     /// while rendering, and switches from the evaluation index to the
     /// tile-fetch index past dot 255. ares does neither; luna follows
     /// ares, the gold standard.
-    pub fn write_during_render(&mut self, value: u8, obj_latch: u8) {
+    pub fn write_during_render(&mut self, value: u8, obj_latch: u8) -> Option<(usize, usize)> {
         let addr = self.address;
+        let written;
         if addr & 0x200 != 0 {
-            self.data[0x200 | usize::from(obj_latch >> 2)] = value;
+            let off = 0x200 | usize::from(obj_latch >> 2);
+            self.data[off] = value;
+            written = Some((off, 1));
         } else if addr & 1 == 0 {
             self.latch = value;
+            written = None;
         } else {
             // ares commits the pair at `(address & ~1) + 0` and `+ 1`, both
             // redirected: the low bit survives into the target offset.
             let base = usize::from(obj_latch) << 2;
             self.data[base] = self.latch;
             self.data[base + 1] = value;
+            written = Some((base, 2));
         }
         self.advance();
+        written
     }
 
     /// `$2138` read while the PPU is drawing: same redirection as

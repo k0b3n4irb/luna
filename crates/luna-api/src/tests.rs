@@ -2552,3 +2552,68 @@ fn spc700_breakpoints_freeze_it_at_the_instruction_start() {
     // An SPC700 breakpoint halts; it cannot be a mark.
     assert!(e.bp_set_mark(w, true).is_err());
 }
+
+#[test]
+fn ppu_memory_watchpoints_see_the_address_the_ppu_writes() {
+    let mut code: Vec<u8> = vec![
+        0xA9, 0x80, 0x8D, 0x00, 0x21, // forced blank
+        0x8D, 0x15, 0x21, // VMAIN: increment after $2119
+        0xA9, 0x00, 0x8D, 0x16, 0x21, 0xA9, 0x10, 0x8D, 0x17, 0x21, // word $1000
+        0xA9, 0xAA, 0x8D, 0x18, 0x21, 0xA9, 0xBB, 0x8D, 0x19, 0x21, // bytes $2000, $2001
+        0xA9, 0x05, 0x8D, 0x21, 0x21, // CGADD 5
+        0xA9, 0x11, 0x8D, 0x22, 0x21, 0xA9, 0x22, 0x8D, 0x22, 0x21, // bytes 10, 11
+        0x9C, 0x02, 0x21, 0x9C, 0x03, 0x21, // OAMADD 0
+        0xA9, 0x33, 0x8D, 0x04, 0x21, 0xA9, 0x44, 0x8D, 0x04, 0x21, // bytes 0, 1
+        0xA9, 0x00, 0x8D, 0x16, 0x21, 0xA9, 0x20, 0x8D, 0x17, 0x21, // word $2000
+        0xA9, 0x01, 0x8D, 0x00, 0x43, 0xA9, 0x18, 0x8D, 0x01, 0x43, // DMA 0: mode 1 to $2118
+        0xA9, 0x80, 0x8D, 0x02, 0x43, 0x8D, 0x03, 0x43, 0x9C, 0x04, 0x43, // from $00:8080
+        0xA9, 0x04, 0x8D, 0x05, 0x43, 0x9C, 0x06, 0x43, // 4 bytes
+        0xA9, 0x01, 0x8D, 0x0B, 0x42, // go
+        0x80, 0xFE,
+    ];
+    code.resize(0x80, 0xEA);
+    code.extend([0xDE, 0xAD, 0xBE, 0xEF]);
+    let rom = demo_lorom_with(&code, None);
+    let first_hit = |memory, addr| {
+        let mut e = Emulator::new();
+        e.load_rom_bytes(rom.clone()).unwrap();
+        let id = e.bp_add_watch(memory, addr, addr, None).unwrap();
+        let hit = e.run_until_break(1_000).unwrap().hit.unwrap();
+        assert_eq!(hit.id, id);
+        (hit.addr.unwrap(), hit.value.unwrap(), hit.dma, hit.space)
+    };
+    assert_eq!(
+        first_hit(MemoryKind::SnesVideoRam, 0x2001),
+        (0x2001, 0xBB, false, WatchSpace::Vram)
+    );
+    assert_eq!(
+        first_hit(MemoryKind::SnesCgRam, 11),
+        (11, 0x22, false, WatchSpace::Cgram)
+    );
+    assert_eq!(
+        first_hit(MemoryKind::SnesSpriteRam, 1),
+        (1, 0x44, false, WatchSpace::Oam)
+    );
+    assert_eq!(
+        first_hit(MemoryKind::SnesVideoRam, 0x4002),
+        (0x4002, 0xBE, true, WatchSpace::Vram)
+    );
+
+    // A condition on a PPU watchpoint sees its address and value.
+    let mut e = Emulator::new();
+    e.load_rom_bytes(rom.clone()).unwrap();
+    let id = e
+        .bp_add_watch(MemoryKind::SnesVideoRam, 0x4000, 0x4003, None)
+        .unwrap();
+    e.bp_set_condition(id, Some("value == $EF && address == $4003 && isdma"))
+        .unwrap();
+    let hit = e.run_until_break(1_000).unwrap().hit.unwrap();
+    assert_eq!(hit.addr, Some(0x4003));
+    // Out-of-range ranges and memories without watchpoints are refused.
+    assert!(
+        e.bp_add_watch(MemoryKind::SnesCgRam, 0, 0x200, None)
+            .is_err()
+    );
+    assert!(e.bp_add_watch(MemoryKind::SpcRam, 0, 1, None).is_err());
+    assert_eq!(e.bp_list().unwrap()[0].space, WatchSpace::Vram);
+}

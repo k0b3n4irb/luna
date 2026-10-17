@@ -51,6 +51,21 @@ pub enum BreakKind {
     SpcExec,
 }
 
+/// The memory a watchpoint watches.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WatchSpace {
+    /// The 65C816's 24-bit bus.
+    #[default]
+    Bus,
+    /// Video RAM, byte-addressed, written through `$2118` / `$2119`.
+    Vram,
+    /// Palette RAM, byte-addressed, written through `$2122`.
+    Cgram,
+    /// Sprite memory, byte-addressed, written through `$2104`.
+    Oam,
+}
+
 /// The CPU a breakpoint watches.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -94,6 +109,8 @@ pub struct BreakpointInfo {
     pub name: Option<String>,
     /// The CPU it watches.
     pub cpu: BreakCpu,
+    /// Mem watchpoints: the memory the range is in.
+    pub space: WatchSpace,
     /// The condition (an expression in Mesen2's language) that must hold
     /// for the breakpoint to fire; `None` fires on every match. The
     /// driving loop evaluates it.
@@ -118,6 +135,9 @@ pub struct BreakHit {
     pub value: Option<u8>,
     /// Mem hits: the access was a DMA cycle.
     pub dma: bool,
+    /// Mem hits: the memory `addr` is in (VRAM addresses for a VRAM
+    /// watchpoint, …).
+    pub space: WatchSpace,
 }
 
 /// Fold an address to a canonical form so a watchpoint matches accesses that
@@ -182,6 +202,7 @@ struct MemWatch {
     mirror: bool,
     clo: u32,
     chi: u32,
+    space: WatchSpace,
     extra: Extra,
 }
 
@@ -280,10 +301,27 @@ impl BreakpointSet {
         mirror: bool,
         name: Option<String>,
     ) -> u32 {
+        self.add_mem_in(WatchSpace::Bus, lo, hi, on_read, on_write, mirror, name)
+    }
+
+    /// [`Self::add_mem`] over a range of `space` (bus addresses for
+    /// [`WatchSpace::Bus`], byte addresses in that memory otherwise).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_mem_in(
+        &mut self,
+        space: WatchSpace,
+        lo: u32,
+        hi: u32,
+        on_read: bool,
+        on_write: bool,
+        mirror: bool,
+        name: Option<String>,
+    ) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
         let lo = lo & 0x00FF_FFFF;
         let hi = hi & 0x00FF_FFFF;
+        let mirror = mirror && space == WatchSpace::Bus;
         self.mem.push(MemWatch {
             id,
             lo,
@@ -293,9 +331,48 @@ impl BreakpointSet {
             mirror,
             clo: fold_mirror(lo),
             chi: fold_mirror(hi),
+            space,
             extra: Self::extra(name),
         });
         id
+    }
+
+    /// Whether any enabled watchpoint watches a PPU memory: the PPU then
+    /// has to report its writes.
+    #[must_use]
+    pub fn has_ppu_watches(&self) -> bool {
+        self.mem
+            .iter()
+            .any(|w| w.space != WatchSpace::Bus && w.extra.enabled)
+    }
+
+    /// Park every enabled watchpoint a PPU memory write matches (`dma`
+    /// marks a DMA cycle). PPU memories are watched for writes.
+    pub fn check_ppu(&mut self, write: luna_ppu::PpuWrite, pc: u32, dma: bool) {
+        let space = match write.memory {
+            luna_ppu::PpuMemory::Vram => WatchSpace::Vram,
+            luna_ppu::PpuMemory::Cgram => WatchSpace::Cgram,
+            luna_ppu::PpuMemory::Oam => WatchSpace::Oam,
+        };
+        let addr = u32::from(write.addr);
+        for w in &self.mem {
+            if w.space == space
+                && w.extra.enabled
+                && w.on_write
+                && (w.lo..=w.hi).contains(&addr)
+                && self.pending.len() < PENDING_MAX
+            {
+                self.pending.push(BreakHit {
+                    id: w.id,
+                    kind: BreakKind::Write,
+                    pc,
+                    addr: Some(addr),
+                    value: Some(write.value),
+                    dma,
+                    space,
+                });
+            }
+        }
     }
 
     fn extra_mut(&mut self, id: u32) -> Option<&mut Extra> {
@@ -374,30 +451,46 @@ impl BreakpointSet {
     /// Every registered breakpoint, by id.
     #[must_use]
     pub fn list(&self) -> Vec<BreakpointInfo> {
-        let info = |id, cpu, exec, lo, hi, on_read, on_write, mirror, e: &Extra| BreakpointInfo {
-            id,
-            cpu,
-            exec,
-            lo,
-            hi,
-            on_read,
-            on_write,
-            enabled: e.enabled,
-            hit_count: e.hits,
-            mirror,
-            name: e.name.clone(),
-            condition: e.condition.clone(),
-            mark: e.mark,
-        };
+        let info =
+            |id, cpu, space, exec, lo, hi, on_read, on_write, mirror, e: &Extra| BreakpointInfo {
+                id,
+                cpu,
+                space,
+                exec,
+                lo,
+                hi,
+                on_read,
+                on_write,
+                enabled: e.enabled,
+                hit_count: e.hits,
+                mirror,
+                name: e.name.clone(),
+                condition: e.condition.clone(),
+                mark: e.mark,
+            };
         let mut out: Vec<BreakpointInfo> = self
             .exec
             .iter()
-            .map(|b| info(b.id, b.cpu, true, b.pc, b.pc, false, false, false, &b.extra))
+            .map(|b| {
+                info(
+                    b.id,
+                    b.cpu,
+                    WatchSpace::Bus,
+                    true,
+                    b.pc,
+                    b.pc,
+                    false,
+                    false,
+                    false,
+                    &b.extra,
+                )
+            })
             .chain(self.mem.iter().map(|w| {
                 let (lo, hi) = (w.lo, w.hi);
                 info(
                     w.id,
                     BreakCpu::Snes,
+                    w.space,
                     false,
                     lo,
                     hi,
@@ -426,6 +519,7 @@ impl BreakpointSet {
                 addr: None,
                 value: None,
                 dma: false,
+                space: WatchSpace::Bus,
             })
             .collect()
     }
@@ -445,7 +539,8 @@ impl BreakpointSet {
         let faddr = fold_mirror(addr);
         for w in &self.mem {
             let kind_ok = if is_read { w.on_read } else { w.on_write };
-            if w.extra.enabled
+            if w.space == WatchSpace::Bus
+                && w.extra.enabled
                 && kind_ok
                 && ((w.lo..=w.hi).contains(&addr)
                     || (w.mirror && w.clo <= w.chi && (w.clo..=w.chi).contains(&faddr)))
@@ -458,6 +553,7 @@ impl BreakpointSet {
                     addr: Some(addr),
                     value: Some(value),
                     dma,
+                    space: WatchSpace::Bus,
                 });
             }
         }

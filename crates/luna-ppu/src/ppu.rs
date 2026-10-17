@@ -179,6 +179,28 @@ pub(crate) const fn bg_state(ppu: &Ppu, idx: usize) -> BgState {
     ppu.bg[idx]
 }
 
+/// A PPU memory a port writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PpuMemory {
+    /// Video RAM (`$2118` / `$2119`), byte-addressed.
+    Vram,
+    /// Palette RAM (`$2122`), byte-addressed.
+    Cgram,
+    /// Sprite attribute memory (`$2104`), byte-addressed.
+    Oam,
+}
+
+/// One byte a port wrote into a PPU memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PpuWrite {
+    /// The memory.
+    pub memory: PpuMemory,
+    /// The byte's address in it.
+    pub addr: u16,
+    /// The byte written.
+    pub value: u8,
+}
+
 /// The SNES Picture Processing Unit.
 ///
 /// Owns VRAM / CGRAM / OAM, the `$21xx` register state and the
@@ -189,6 +211,11 @@ pub(crate) const fn bg_state(ppu: &Ppu, idx: usize) -> BgState {
 pub struct Ppu {
     /// 64 KB tile and tilemap memory.
     pub vram: Vram,
+    /// Every byte the CPU or a DMA writes into VRAM, CGRAM or OAM, in
+    /// order, when a debugger asks for it (`None`, the default, records
+    /// nothing). Never in a save-state.
+    #[serde(skip)]
+    pub debug_writes: Option<Vec<PpuWrite>>,
     /// 512 B palette memory.
     pub cgram: Cgram,
     /// 544 B object attribute memory.
@@ -484,6 +511,7 @@ impl Ppu {
     pub fn new() -> Self {
         Self {
             vram: Vram::new(),
+            debug_writes: None,
             cgram: Cgram::new(),
             oam: Oam::new(),
             inidisp: 0x80, // post-reset: forced blank
@@ -1133,11 +1161,20 @@ impl Ppu {
             register::OAMDATA => {
                 // Hardware redirects the write to the sprite evaluation is
                 // looking at rather than dropping it (ares `io.cpp:39-45`).
-                if self.active_display {
+                let written = if self.active_display {
                     let latch = self.obj_eval_latch();
-                    self.oam.write_during_render(value, latch);
+                    self.oam.write_during_render(value, latch)
                 } else {
-                    self.oam.write(value);
+                    self.oam.write(value)
+                };
+                if let (Some(log), Some((off, count))) = (self.debug_writes.as_mut(), written) {
+                    for a in off..off + count {
+                        log.push(PpuWrite {
+                            memory: PpuMemory::Oam,
+                            addr: a as u16,
+                            value: self.oam.peek(a as u16),
+                        });
+                    }
                 }
             }
             register::BGMODE => self.bgmode = value,
@@ -1209,8 +1246,20 @@ impl Ppu {
                 let lo = self.vram.address as u8;
                 self.vram.set_address_gated(lo, value, !self.active_display);
             }
-            register::VMDATAL => self.vram.write_lo_gated(value, !self.active_display),
-            register::VMDATAH => self.vram.write_hi_gated(value, !self.active_display),
+            register::VMDATAL | register::VMDATAH => {
+                let written = if offset == register::VMDATAL {
+                    self.vram.write_lo_gated(value, !self.active_display)
+                } else {
+                    self.vram.write_hi_gated(value, !self.active_display)
+                };
+                if let (Some(log), Some(addr)) = (self.debug_writes.as_mut(), written) {
+                    log.push(PpuWrite {
+                        memory: PpuMemory::Vram,
+                        addr: addr as u16,
+                        value,
+                    });
+                }
+            }
             register::CGADD => self.cgram.set_address(value),
             // CGRAM is never dropped on hardware — unlike VRAM/OAM, a CGDATA
             // write during active display always commits (ares io.cpp:55-60),
@@ -1220,7 +1269,16 @@ impl Ppu {
             // and the HiColor CPU-IRQ palette streams.
             register::CGDATA => {
                 let target = self.cgram_access_redirect();
-                self.cgram.write_at(value, target);
+                let written = self.cgram.write_at(value, target);
+                if let (Some(log), Some(off)) = (self.debug_writes.as_mut(), written) {
+                    for a in [off, off + 1] {
+                        log.push(PpuWrite {
+                            memory: PpuMemory::Cgram,
+                            addr: a as u16,
+                            value: self.cgram.peek(a as u16),
+                        });
+                    }
+                }
             }
             register::W12SEL => self.w12sel = value,
             register::W34SEL => self.w34sel = value,

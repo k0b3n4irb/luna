@@ -2377,6 +2377,14 @@ impl DmaBus for DmaBusView<'_> {
             // at the source in Ppu::write — ares io.cpp:55-60); VRAM/OAM still
             // drop via their own `active_display` gates.
             self.ppu.write(b_offset, value);
+            if let (Some(bp), Some(log)) = (
+                self.breakpoints.as_deref_mut(),
+                self.ppu.debug_writes.as_mut(),
+            ) {
+                for w in log.drain(..) {
+                    bp.check_ppu(w, self.cpu_pc, true);
+                }
+            }
         } else if (0x40..=0x7F).contains(&b_offset) {
             // APU mailbox — both the real APU and the fallback stub, as the
             // CPU path does.
@@ -3546,6 +3554,13 @@ impl SnesBus<'_> {
                 }
             }
             self.ppu.write(off, value);
+            if let (Some(bp), Some(log)) =
+                (self.breakpoints.as_mut(), self.ppu.debug_writes.as_mut())
+            {
+                for w in log.drain(..) {
+                    bp.check_ppu(w, self.cpu_pc_full, false);
+                }
+            }
             if off == 0x00 {
                 // INIDISP just changed forced-blank: recompute `active_display`
                 // LIVE so a MID-SCANLINE forced-blank gates VRAM/OAM writes

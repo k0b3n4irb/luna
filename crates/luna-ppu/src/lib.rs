@@ -15,7 +15,7 @@ mod renderer;
 mod tile;
 
 pub use memory::{Cgram, Oam, Vram};
-pub use ppu::{BgState, Ppu, register};
+pub use ppu::{BgState, Ppu, PpuMemory, PpuWrite, register};
 pub use renderer::{
     FRAME_H, FRAME_H_MAX, FRAME_W, RenderOptions, Scanline, SpriteEntry, TilemapImage, bg_bpp,
     decode_all_sprites, render_bg_tilemap, render_cgram_palette, render_frame_bg_with,

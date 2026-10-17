@@ -27,6 +27,13 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   frames ("break in N"). A breakpoint or break source met on the way stops
   it first. MCP: `step_kind`.
 
+- **VRAM, CGRAM and OAM watchpoints.** `Emulator::bp_add_watch` (MCP:
+  `bp_add {kind: "mem", memory: "SnesVideoRam" | "SnesCgRam" |
+  "SnesSpriteRam"}`) watches a PPU memory's writes, by the CPU or a DMA,
+  at the address the PPU actually writes (VMAIN's remap, the picture-time
+  redirects). The hit's `space` names the memory and `dma` says whether a
+  DMA wrote; a condition sees that address and byte.
+
 - **SPC700 breakpoints.** `Emulator::bp_add_spc_exec` (MCP:
   `bp_add {kind: "spc_exec"}`) stops a breakpoint run with the SPC700 at
   the start of an instruction, as Mesen2 does. Its condition (Mesen2's
