@@ -39,6 +39,23 @@ pub enum CoprocRegs {
         /// The master clock in that line.
         hclock: u16,
     },
+    /// The Super FX's GSU.
+    Gsu {
+        /// R0-R15 (R15 is the program counter).
+        r: [u16; 16],
+        /// The source register `FROM` / `WITH` selected.
+        src: u8,
+        /// The destination register `TO` / `WITH` selected.
+        dst: u8,
+        /// The status flags register SFR.
+        sfr: u16,
+        /// Program bank.
+        pbr: u8,
+        /// ROM data bank.
+        rombr: u8,
+        /// RAM data bank.
+        rambr: u8,
+    },
 }
 
 /// One data access an instruction made on the coprocessor's bus.

@@ -33,14 +33,16 @@ lands it.
 | D1a | Every memory by Mesen2's name (`MemoryKind`): read / write / size, a CPU-bus address resolved to the memory behind it, without side effects; MCP `memory_kinds`, `read_memory`, `write_memory`, `absolute_address` | ✅ |
 | D1b | Expression evaluator, Mesen2's grammar (`[byte]`, `{word}`, `#long`, `:abs`, labels, `value`, `address`, `scanline`…), checked on Mesen2's 87 reference cases; 65C816 and SPC700 contexts; MCP `eval` | ✅ |
 | D1b | SA-1 expression context (`ExprCpu::Sa1`) | ✅ |
-| D1b | Expression contexts for the GSU and DSP-1 | ⬜ |
+| D1b | GSU expression context (`ExprCpu::Gsu`) | ✅ |
+| D1b | DSP-1 expression context | ⬜ |
 | D1c | Conditions (Mesen2's language) and marks on the 65C816's exec breakpoints and watchpoints; every match of an instruction checked; DMA flagged | ✅ |
 | D1c | Break sources: BRK, COP, WDM, STP, NMI and IRQ handler entry, a scanline; MCP `set_break_sources` | ✅ |
 | D1c | SPC700 exec breakpoints, with conditions, stopping at the instruction start; MCP `bp_add {kind: "spc_exec"}` | ✅ |
 | D1c | VRAM, CGRAM, OAM read and write watchpoints (CPU and DMA, through the ports, at the PPU's own address); MCP `bp_add {memory}` | ✅ |
 | D1c | SPC700 watchpoints on `SpcMemory`, `SpcRam`, `SpcRom` (data accesses, stopping just after the access) | ✅ |
 | D1c | SA-1 exec breakpoints and `Sa1Memory` watchpoints, frozen in the chip; MCP `bp_add {cpu: "sa1"}` | ✅ |
-| D1c | GSU and DSP-1 breakpoints | ⬜ |
+| D1c | GSU exec breakpoints and `GsuMemory` watchpoints; MCP `bp_add {cpu: "gsu"}` | ✅ |
+| D1c | DSP-1 breakpoints | ⬜ |
 | D1c | *Forbid* breakpoints | ⬜ |
 | D1d | Step types: into, over, out, scanline, frame, *break in N* instructions / scanlines / frames (to NMI / IRQ are break sources; run to here is `run_until_pc`; move PC is `set_cpu_register`); MCP `step_kind` | ✅ |
 | D1d | CPU-cycle and PPU-cycle steps — not possible while luna runs instructions whole | ⬜ |

@@ -25,6 +25,7 @@ use crate::mapper::{
     check_state_len, decode_state,
 };
 use crate::types::{Addr24, bank_of, offset_of};
+use crate::{CoprocAccess, CoprocDebug, CoprocRegs, CoprocView};
 
 // --- SFR (Status Flag Register) bit masks (spec §1.2) ---------------------
 const SFR_Z: u16 = 1 << 1; // zero
@@ -255,6 +256,45 @@ impl PixelCache {
     }
 }
 
+/// The GSU as a breakpoint condition sees it.
+struct GsuView<'a> {
+    regs: &'a Registers,
+    rom: &'a [u8],
+    rom_mask: usize,
+    ram: &'a [u8],
+    ram_mask: usize,
+}
+
+impl CoprocView for GsuView<'_> {
+    fn regs(&self) -> CoprocRegs {
+        let r = self.regs;
+        CoprocRegs::Gsu {
+            r: r.r,
+            src: r.sreg as u8,
+            dst: r.dreg as u8,
+            sfr: r.sfr,
+            pbr: r.pbr,
+            rombr: r.rombr,
+            rambr: u8::from(r.rambr),
+        }
+    }
+
+    /// The GSU's bus as it reads it: ROM at `$00-$3F` (the upper half of
+    /// each bank) and `$40-$5F`, Game Pak RAM at `$70-$71`.
+    fn peek(&self, addr: u32) -> u8 {
+        let a = (addr & 0xFF_FFFF) as usize;
+        if a & 0xC0_0000 == 0 {
+            self.rom[(((a & 0x3F_0000) >> 1) | (a & 0x7FFF)) & self.rom_mask]
+        } else if a & 0xE0_0000 == 0x40_0000 {
+            self.rom[a & self.rom_mask]
+        } else if a & 0xFE_0000 == 0x70_0000 {
+            self.ram[a & self.ram_mask]
+        } else {
+            0
+        }
+    }
+}
+
 /// Super FX (GSU) mapper + coprocessor state.
 pub struct SuperFxMapper {
     /// ROM image, zero-padded up to `rom_mask + 1` (a power of two) so
@@ -349,6 +389,8 @@ pub struct SuperFxMapper {
     /// (drops the oldest half when full) so a long run captures the GSU's
     /// *current* activity. Enabled via [`Mapper::enable_superfx_trace`].
     trace: Option<(Vec<SuperFxTraceEvent>, usize)>,
+    /// A debugger's breakpoints on the GSU (never in a save-state).
+    debug: CoprocDebug,
 }
 
 impl SuperFxMapper {
@@ -390,6 +432,7 @@ impl SuperFxMapper {
             modified_r14: false,
             modified_r15: false,
             trace: None,
+            debug: CoprocDebug::new(),
         }
     }
 
@@ -723,7 +766,21 @@ impl SuperFxMapper {
         self.regs.wait_for_rom_access || self.regs.wait_for_ram_access
     }
 
+    /// A data read on the GSU's bus (a watchpoint sees it).
     fn gsu_read(&mut self, addr: u32) -> u8 {
+        let value = self.gsu_fetch(addr);
+        if self.debug.watching() {
+            self.debug.record(CoprocAccess {
+                addr: addr & 0xFF_FFFF,
+                value,
+                write: false,
+            });
+        }
+        value
+    }
+
+    /// A read on the GSU's bus: code, or the data [`Self::gsu_read`] reads.
+    fn gsu_fetch(&mut self, addr: u32) -> u8 {
         let a = (addr & 0xFF_FFFF) as usize;
         if a & 0xC0_0000 == 0x00_0000 {
             // $00-3F: pack the upper-half $8000-$FFFF of each LoROM bank.
@@ -745,6 +802,13 @@ impl SuperFxMapper {
 
     /// GSU writes only reach Game Pak RAM at $70-71 (spec §3.1).
     fn gsu_write(&mut self, addr: u32, data: u8) {
+        if self.debug.watching() {
+            self.debug.record(CoprocAccess {
+                addr: addr & 0xFF_FFFF,
+                value: data,
+                write: true,
+            });
+        }
         let a = (addr & 0xFF_FFFF) as usize;
         if a & 0xFE_0000 == 0x70_0000 {
             self.check_ram_access();
@@ -861,7 +925,7 @@ impl SuperFxMapper {
                 for n in 0..16u32 {
                     let mc = self.mem_cycles();
                     self.step(mc);
-                    let b = self.gsu_read(sp + n);
+                    let b = self.gsu_fetch(sp + n);
                     self.cache[dp + n as usize] = b;
                 }
                 self.cache_valid[line] = true;
@@ -877,7 +941,7 @@ impl SuperFxMapper {
         }
         let mc = self.mem_cycles();
         self.step(mc);
-        self.gsu_read((u32::from(self.regs.pbr) << 16) | u32::from(address))
+        self.gsu_fetch((u32::from(self.regs.pbr) << 16) | u32::from(address))
     }
 
     /// Return the prefetched opcode and prefetch the next byte at the
@@ -2002,10 +2066,36 @@ impl Mapper for SuperFxMapper {
         // Mirror Mesen `Gsu::Run`: run whole instructions until caught up to the
         // CPU clock, but STOP the moment the GSU parks on a bus it doesn't own.
         while self.sfr_get(SFR_G) && !self.stalled() && self.clock_deficit > 0 {
+            if self.debug.hit.is_some() {
+                break; // frozen on a breakpoint; the time owed is kept
+            }
+            let pc = (u32::from(self.regs.pbr) << 16) | u32::from(self.regs.r[15]);
+            if self.debug.armed() {
+                let view = GsuView {
+                    regs: &self.regs,
+                    rom: &self.rom,
+                    rom_mask: self.rom_mask,
+                    ram: &self.ram,
+                    ram_mask: self.ram_mask,
+                };
+                if self.debug.check_exec(pc, &view) {
+                    break;
+                }
+            }
             self.run_one();
             // Each instruction is ≥ 1 GSU clock, so this always progresses and
             // the deficit bounds the loop.
             self.clock_deficit -= i64::from(self.cycles.max(1));
+            if self.debug.watching() {
+                let view = GsuView {
+                    regs: &self.regs,
+                    rom: &self.rom,
+                    rom_mask: self.rom_mask,
+                    ram: &self.ram,
+                    ram_mask: self.ram_mask,
+                };
+                self.debug.check_accesses(pc, &view);
+            }
         }
         // While parked (waiting for the CPU to release ROM/RAM), the GSU still
         // advances its clock with no work — Mesen `Run`'s trailing
@@ -2037,6 +2127,25 @@ impl Mapper for SuperFxMapper {
 
     fn coproc_ram(&self) -> Option<&[u8]> {
         Some(&self.ram)
+    }
+
+    fn coproc_debug(&mut self) -> Option<&mut CoprocDebug> {
+        Some(&mut self.debug)
+    }
+
+    fn coproc_hit(&self) -> Option<crate::CoprocHit> {
+        self.debug.hit
+    }
+
+    fn with_coproc_view(&self, f: &mut dyn FnMut(&dyn CoprocView)) -> bool {
+        f(&GsuView {
+            regs: &self.regs,
+            rom: &self.rom,
+            rom_mask: self.rom_mask,
+            ram: &self.ram,
+            ram_mask: self.ram_mask,
+        });
+        true
     }
 
     fn enable_superfx_trace(&mut self, max_events: usize) {

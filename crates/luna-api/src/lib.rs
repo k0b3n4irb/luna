@@ -1382,7 +1382,20 @@ const fn cpu_label(cpu: BreakCpu) -> &'static str {
         BreakCpu::Snes => "65C816",
         BreakCpu::Spc => "SPC700",
         BreakCpu::Sa1 => "SA-1",
+        BreakCpu::Gsu => "Super FX",
     }
+}
+
+/// The coprocessor CPU the cartridge's debugger hook stands for, if any.
+fn coproc_cpu(mapper: &dyn luna_core::Mapper) -> Option<BreakCpu> {
+    let mut cpu = None;
+    mapper.with_coproc_view(&mut |v| {
+        cpu = Some(match v.regs() {
+            luna_core::CoprocRegs::Sa1 { .. } => BreakCpu::Sa1,
+            luna_core::CoprocRegs::Gsu { .. } => BreakCpu::Gsu,
+        });
+    });
+    cpu
 }
 
 /// A step of the debugger (Mesen2's step commands), for
@@ -3699,11 +3712,9 @@ impl Emulator {
     /// Refuse a coprocessor the cartridge does not have.
     fn require_cpu(&self, cpu: BreakCpu) -> Result<(), ApiError> {
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
-        let mut regs = None;
-        snes.mapper.with_coproc_view(&mut |v| regs = Some(v.regs()));
         let present = match cpu {
             BreakCpu::Snes | BreakCpu::Spc => true,
-            BreakCpu::Sa1 => matches!(regs, Some(luna_core::CoprocRegs::Sa1 { .. })),
+            chip => coproc_cpu(&*snes.mapper) == Some(chip),
         };
         if present {
             Ok(())
@@ -3779,7 +3790,9 @@ impl Emulator {
             MemoryKind::SnesVideoRam => WatchSpace::Vram,
             MemoryKind::SnesCgRam => WatchSpace::Cgram,
             MemoryKind::SnesSpriteRam => WatchSpace::Oam,
-            MemoryKind::SpcMemory | MemoryKind::Sa1Memory => WatchSpace::Bus,
+            MemoryKind::SpcMemory | MemoryKind::Sa1Memory | MemoryKind::GsuMemory => {
+                WatchSpace::Bus
+            }
             MemoryKind::SpcRam => WatchSpace::Aram,
             MemoryKind::SpcRom => WatchSpace::Ipl,
             other => {
@@ -3814,6 +3827,9 @@ impl Emulator {
             }
             MemoryKind::Sa1Memory => {
                 bp.add_mem_on(BreakCpu::Sa1, space, lo, hi, on_read, on_write, name)
+            }
+            MemoryKind::GsuMemory => {
+                bp.add_mem_on(BreakCpu::Gsu, space, lo, hi, on_read, on_write, name)
             }
             _ => bp.add_mem_in(space, lo, hi, on_read, on_write, false, name),
         })
@@ -3856,6 +3872,7 @@ impl Emulator {
             Some(BreakCpu::Spc) => expr::ExprCpu::Spc,
             Some(BreakCpu::Snes) => expr::ExprCpu::Snes,
             Some(BreakCpu::Sa1) => expr::ExprCpu::Sa1,
+            Some(BreakCpu::Gsu) => expr::ExprCpu::Gsu,
             None => return Ok(false),
         };
         let compiled = match text {
@@ -4070,7 +4087,8 @@ impl Emulator {
                     .unwrap_or_default()
             };
             let spc = exec_on(BreakCpu::Spc);
-            let sa1 = exec_on(BreakCpu::Sa1);
+            let chip = coproc_cpu(&*snes.mapper);
+            let chip_exec = chip.map(exec_on).unwrap_or_default();
             let listed = snes
                 .breakpoints
                 .as_ref()
@@ -4106,7 +4124,7 @@ impl Emulator {
                 })
             };
             if let Some(debug) = snes.mapper.coproc_debug() {
-                debug.breaks = sa1
+                debug.breaks = chip_exec
                     .into_iter()
                     .map(|(id, pc)| luna_core::CoprocBreak {
                         id,
@@ -4116,7 +4134,7 @@ impl Emulator {
                     .collect();
                 debug.watches = listed
                     .iter()
-                    .filter(|b| b.cpu == BreakCpu::Sa1 && !b.exec && b.enabled)
+                    .filter(|b| Some(b.cpu) == chip && !b.exec && b.enabled)
                     .map(|b| luna_core::CoprocWatch {
                         id: b.id,
                         lo: b.lo,
@@ -4264,11 +4282,13 @@ impl Emulator {
                             space: space_of(hit.id),
                         });
                     }
-                    if let Some(hit) = snes.mapper.coproc_hit() {
+                    if let (Some(hit), Some(cpu)) =
+                        (snes.mapper.coproc_hit(), coproc_cpu(&*snes.mapper))
+                    {
                         return Some(BreakHit {
                             id: hit.id,
                             kind: kind_of(hit.access.map(|a| a.write)),
-                            cpu: BreakCpu::Sa1,
+                            cpu,
                             pc: hit.pc,
                             addr: hit.access.map(|a| a.addr),
                             value: hit.access.map(|a| a.value),

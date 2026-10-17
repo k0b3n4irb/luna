@@ -27,6 +27,13 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   frames ("break in N"). A breakpoint or break source met on the way stops
   it first. MCP: `step_kind`.
 
+- **Super FX breakpoints.** The GSU takes the same: `bp_add_exec_on(
+  BreakCpu::Gsu, pc)` at `PBR:R15`, `bp_add_watch(MemoryKind::GsuMemory,
+  …)` on its data accesses (ROM buffer, RAM, plot cache), conditions in
+  `ExprCpu::Gsu` (`r0`-`r15`, `sfr`, `pbr`, `rombr`, `rambr`, `srcreg`,
+  `dstreg`). MCP: `cpu: "gsu"`, `memory: "GsuMemory"`, `eval {cpu:
+  "gsu"}`.
+
 - **SA-1 breakpoints.** `Emulator::bp_add_exec_on(BreakCpu::Sa1, pc)` and
   `bp_add_watch(MemoryKind::Sa1Memory, …)` stop a breakpoint run with the
   SA-1 frozen: at the start of the instruction for an exec breakpoint,

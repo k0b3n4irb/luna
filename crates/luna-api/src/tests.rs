@@ -2818,3 +2818,81 @@ fn sa1_breakpoints_freeze_it_with_its_own_registers() {
     assert!(plain.bp_add_exec_on(BreakCpu::Sa1, 0x8000, None).is_err());
     assert_eq!(plain.memory_size(MemoryKind::Sa1Memory).unwrap(), 0);
 }
+
+/// A Super FX cart: the S-CPU starts the GSU at `$00:8100` from a stub in
+/// WRAM (it loses the ROM while the GSU holds it). The GSU loops
+/// `INC R1 ; STW (R2)` from R1 = `$42`, R2 = `$10`.
+fn demo_superfx() -> Vec<u8> {
+    let mut rom = blank_cart(0x8000, 0x7FBD);
+    let cpu = [
+        0x9C, 0x34, 0x30, // PBR = 0
+        0x9C, 0x1E, 0x30, // R15 low = 0
+        0xA2, 0x00, 0xBD, 0x20, 0x80, 0x9D, 0x00, 0x01, 0xE8, 0xE0, 0x0C, 0xD0,
+        0xF5, // stub → $0100
+        0x4C, 0x00, 0x01, // run it
+    ];
+    rom[..cpu.len()].copy_from_slice(&cpu);
+    // SCMR: ROM and RAM to the GSU; R15 high = $81 starts it.
+    rom[0x20..0x2C].copy_from_slice(&[
+        0xA9, 0x18, 0x8D, 0x3A, 0x30, 0xA9, 0x81, 0x8D, 0x1F, 0x30, 0x80, 0xFE,
+    ]);
+    // IBT R1,#$42 ; IBT R2,#$10 ; INC R1 ; FROM R1 ; STW (R2) ;
+    // IWT R15,#$8104 ; NOP (the delay slot)
+    rom[0x100..0x10B].copy_from_slice(&[
+        0xA1, 0x42, 0xA2, 0x10, 0xD1, 0xB1, 0x32, 0xFF, 0x04, 0x81, 0x01,
+    ]);
+    rom
+}
+
+#[test]
+fn gsu_breakpoints_freeze_it_with_its_own_registers() {
+    let mut e = Emulator::new();
+    e.load_rom_bytes_forced(demo_superfx(), luna_core::MapperKind::SuperFx)
+        .unwrap();
+    let r1 = |e: &Emulator| e.evaluate("r1", ExprCpu::Gsu).unwrap().value;
+
+    let id = e.bp_add_exec_on(BreakCpu::Gsu, 0x00_8104, None).unwrap();
+    e.bp_set_condition(id, Some("r1 == $45")).unwrap();
+    let hit = e.run_until_break(10_000).unwrap().hit.unwrap();
+    assert_eq!(
+        (hit.kind, hit.cpu, hit.id, hit.pc),
+        (BreakKind::Exec, BreakCpu::Gsu, id, 0x00_8104)
+    );
+    assert_eq!(r1(&e), 0x45, "at the start of INC R1");
+    assert_eq!(e.evaluate("r2", ExprCpu::Gsu).unwrap().value, 0x10);
+    // The pass before stored the R1 it had just incremented.
+    assert_eq!(e.evaluate("{$700010}", ExprCpu::Gsu).unwrap().value, 0x45);
+    assert_eq!(
+        e.read_memory(MemoryKind::GsuMemory, 0x70_0010, 2).unwrap(),
+        [0x45, 0x00]
+    );
+    e.bp_set_condition(id, None).unwrap();
+    e.run_until_break(10_000).unwrap().hit.unwrap();
+    assert_eq!(r1(&e), 0x46, "a resume comes round again");
+    e.bp_clear().unwrap();
+
+    let w = e
+        .bp_add_watch(
+            MemoryKind::GsuMemory,
+            0x70_0010,
+            0x70_0010,
+            false,
+            true,
+            None,
+        )
+        .unwrap();
+    e.bp_set_condition(w, Some("value == $48")).unwrap();
+    let hit = e.run_until_break(10_000).unwrap().hit.unwrap();
+    assert_eq!(
+        (hit.kind, hit.cpu, hit.addr, hit.value),
+        (BreakKind::Write, BreakCpu::Gsu, Some(0x70_0010), Some(0x48))
+    );
+    // The RAM buffer lands the byte a few clocks after STW, during the
+    // instruction after it.
+    assert_eq!(hit.pc, 0x00_8107);
+    assert!(e.bp_set_mark(w, true).is_err());
+
+    let mut plain = Emulator::new();
+    plain.load_rom_bytes(demo_lorom()).unwrap();
+    assert!(plain.bp_add_exec_on(BreakCpu::Gsu, 0x8000, None).is_err());
+}

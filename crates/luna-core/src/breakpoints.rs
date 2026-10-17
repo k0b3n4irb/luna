@@ -78,6 +78,8 @@ pub enum BreakCpu {
     Spc,
     /// The SA-1's 65C816.
     Sa1,
+    /// The Super FX's GSU.
+    Gsu,
 }
 
 impl BreakCpu {
@@ -85,7 +87,7 @@ impl BreakCpu {
     const fn mask(self) -> u32 {
         match self {
             Self::Spc => 0xFFFF,
-            Self::Snes | Self::Sa1 => 0x00FF_FFFF,
+            Self::Snes | Self::Sa1 | Self::Gsu => 0x00FF_FFFF,
         }
     }
 }
