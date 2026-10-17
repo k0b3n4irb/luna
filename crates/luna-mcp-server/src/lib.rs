@@ -513,7 +513,9 @@ pub struct EnableMemTraceParams {
 /// `bp_add` parameters.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct BpAddParams {
-    /// `"exec"` for a PC breakpoint, `"mem"` for a memory watchpoint.
+    /// `"exec"` for a PC breakpoint, `"mem"` for a memory watchpoint,
+    /// `"spc_exec"` for an SPC700 PC breakpoint (`addr` 16-bit, `symbol`
+    /// an ARAM label).
     pub kind: String,
     /// Exec: the 24-bit `PB:PC`. Mem: the 24-bit range start. Ignored
     /// when `symbol` is given.
@@ -1222,6 +1224,8 @@ pub struct BpEntry {
     pub condition: Option<String>,
     /// A mark: it records an Event Viewer mark instead of halting.
     pub mark: bool,
+    /// The CPU it watches: `snes` or `spc`.
+    pub cpu: String,
 }
 
 /// `bp_set_enabled` parameters.
@@ -2681,6 +2685,9 @@ impl LunaServer {
                                 `condition`: an expression in Mesen2's language (see `eval`) that \
                                 must be non-zero for it to fire (`value`/`address` are the access). \
                                 `mark`: record an Event Viewer mark instead of halting. \
+                                kind='spc_exec': halt with the SPC700 at the start of the \
+                                instruction at 16-bit ARAM `addr` (or ARAM `symbol`); its \
+                                condition is evaluated for the SPC700. \
                                 Returns the registry id. Run with `run_until_break`."
     )]
     async fn bp_add(
@@ -2698,6 +2705,24 @@ impl LunaServer {
             let name = params.name.as_deref().or(params.symbol.as_deref());
             let id = match params.kind.as_str() {
                 "exec" => em.bp_add_exec(addr, name).map_err(|e| api_err_to_mcp(&e))?,
+                "spc_exec" => {
+                    let pc = match params.symbol.as_deref() {
+                        Some(sym) => em.resolve_symbol_spc(sym).ok_or_else(|| {
+                            ErrorData::invalid_params(
+                                format!("unknown ARAM symbol `{sym}` (load with load_symbols {{space: \"aram\"}})"),
+                                None,
+                            )
+                        })?,
+                        None => u16::try_from(params.addr).map_err(|_| {
+                            ErrorData::invalid_params(
+                                format!("spc_exec: ${:X} is not a 16-bit ARAM address", params.addr),
+                                None,
+                            )
+                        })?,
+                    };
+                    em.bp_add_spc_exec(pc, name)
+                        .map_err(|e| api_err_to_mcp(&e))?
+                }
                 "mem" => em
                     .bp_add_mem(
                         addr,
@@ -2710,7 +2735,7 @@ impl LunaServer {
                     .map_err(|e| api_err_to_mcp(&e))?,
                 other => {
                     return Err(ErrorData::invalid_params(
-                        format!("kind must be 'exec' or 'mem', got `{other}`"),
+                        format!("kind must be 'exec', 'mem' or 'spc_exec', got `{other}`"),
                         None,
                     ));
                 }
@@ -3195,6 +3220,10 @@ impl LunaServer {
                     name: b.name,
                     condition: b.condition,
                     mark: b.mark,
+                    cpu: match b.cpu {
+                        luna_api::BreakCpu::Snes => "snes".into(),
+                        luna_api::BreakCpu::Spc => "spc".into(),
+                    },
                 })
                 .collect(),
         }))
@@ -4095,6 +4124,7 @@ fn outcome_to_result(out: &luna_api::RunOutcome) -> RunUntilBreakResult {
                     luna_api::BreakKind::Irq => "irq",
                     luna_api::BreakKind::Scanline => "scanline",
                     luna_api::BreakKind::Step => "step",
+                    luna_api::BreakKind::SpcExec => "spc_exec",
                 }
                 .into(),
             ),

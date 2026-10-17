@@ -304,6 +304,36 @@ pub struct Apu {
     /// Transient — `serde(skip)` so it never enters a save-state.
     #[serde(skip)]
     spc_trace: Option<(Vec<Spc700TraceEvent>, usize)>,
+
+    // ------------- Debugger -------------
+    /// SPC700 exec breakpoints, checked at the start of every instruction
+    /// (a debugger's; never in a save-state).
+    #[serde(skip)]
+    pub breaks: Vec<SpcBreak>,
+    /// The breakpoint that froze the SPC700, `(id, pc)`. While it is set
+    /// the APU does not advance: the SPC700 stands at the start of that
+    /// instruction until [`Self::resume_break`].
+    #[serde(skip)]
+    pub break_hit: Option<(u32, u16)>,
+    /// The PC a resume steps over once, so the breakpoint the SPC700
+    /// stands on does not fire again at once.
+    #[serde(skip)]
+    break_resume: Option<u16>,
+}
+
+/// A condition an SPC700 breakpoint fires on, given the APU at the start
+/// of the instruction.
+pub type SpcCondition = std::sync::Arc<dyn Fn(&Apu) -> bool + Send + Sync>;
+
+/// One SPC700 exec breakpoint.
+#[derive(Clone)]
+pub struct SpcBreak {
+    /// The debugger's id for it.
+    pub id: u32,
+    /// The instruction's address.
+    pub pc: u16,
+    /// Fire only when this holds; `None` fires every time.
+    pub condition: Option<SpcCondition>,
 }
 
 impl Default for Apu {
@@ -353,6 +383,9 @@ impl Apu {
             timer_enabled: [false; 3],
             timer_subdivider: 0,
             spc_trace: None,
+            breaks: Vec::new(),
+            break_hit: None,
+            break_resume: None,
         };
         // Reset the SPC700 — reads $FFFE/$FFFF for the PC vector,
         // which the IPL ROM populates as $FFC0.
@@ -576,6 +609,9 @@ impl Apu {
     /// echo / write visibility that the whole-cycle approximations couldn't
     /// reproduce. Stops mid-instruction (the SPC core is resumable).
     fn run_to_target(&mut self) {
+        if self.break_hit.is_some() {
+            return; // frozen on a breakpoint
+        }
         // `-1` matches Mesen (`Spc.Instructions.cpp`): each step advances 2.
         let target = self.cpu_target_2x.saturating_sub(1);
         while self.spc_pos_2x < target {
@@ -585,9 +621,39 @@ impl Apu {
                 self.spc_pos_2x = self.cpu_target_2x;
                 break;
             }
+            if !self.breaks.is_empty() && !self.cpu.in_instruction && self.check_break() {
+                return;
+            }
             // Advance by the access's wait-state cost (ares `cycleWaitStates`;
             // 2 at the default ws=0, i.e. the old fixed `+= 2`).
             self.spc_pos_2x += u64::from(self.run_one_cycle());
+        }
+    }
+
+    /// At an instruction start: freeze on a breakpoint at this PC whose
+    /// condition holds. Returns whether it froze.
+    fn check_break(&mut self) -> bool {
+        let pc = self.cpu.pc;
+        if self.break_resume.take() == Some(pc) {
+            return false;
+        }
+        let hit = self
+            .breaks
+            .iter()
+            .find(|b| b.pc == pc && b.condition.as_ref().is_none_or(|c| c(self)))
+            .map(|b| b.id);
+        if let Some(id) = hit {
+            self.break_hit = Some((id, pc));
+        }
+        hit.is_some()
+    }
+
+    /// Leave the breakpoint the SPC700 is frozen on: it runs again, the
+    /// time it stood still caught up at its next step, and that
+    /// breakpoint does not fire again before the next instruction.
+    pub const fn resume_break(&mut self) {
+        if let Some((_, pc)) = self.break_hit.take() {
+            self.break_resume = Some(pc);
         }
     }
 

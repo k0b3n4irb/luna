@@ -35,6 +35,7 @@ lands it.
 | D1b | Expression contexts for the SA-1, GSU and DSP-1 (their full register sets reach `luna-api` with D1c) | ⬜ |
 | D1c | Conditions (Mesen2's language) and marks on the 65C816's exec breakpoints and watchpoints; every match of an instruction checked; DMA flagged | ✅ |
 | D1c | Break sources: BRK, COP, WDM, STP, NMI and IRQ handler entry, a scanline; MCP `set_break_sources` | ✅ |
+| D1c | SPC700 exec breakpoints, with conditions, stopping at the instruction start; MCP `bp_add {kind: "spc_exec"}` | ✅ |
 | D1c | Breakpoints v2: every CPU (65C816, SPC700, SA-1, GSU, DSP-1), every memory (VRAM, CGRAM, OAM, ARAM watchpoints), condition, hit count, *mark*, *forbid*; break on BRK / COP / WDM / STP / NMI / IRQ / scanline | ⬜ |
 | D1d | Step types: into, over, out, scanline, frame, *break in N* instructions / scanlines / frames (to NMI / IRQ are break sources; run to here is `run_until_pc`; move PC is `set_cpu_register`); MCP `step_kind` | ✅ |
 | D1d | CPU-cycle and PPU-cycle steps — not possible while luna runs instructions whole | ⬜ |

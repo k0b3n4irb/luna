@@ -46,6 +46,20 @@ pub enum BreakKind {
     Scanline,
     /// The step asked for (over, out, a scanline, N frames…) completed.
     Step,
+    /// The SPC700 is about to execute the instruction at the registered
+    /// address (`pc` is that 16-bit address).
+    SpcExec,
+}
+
+/// The CPU a breakpoint watches.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BreakCpu {
+    /// The 65C816.
+    #[default]
+    Snes,
+    /// The SPC700.
+    Spc,
 }
 
 /// The id a [`BreakHit`] carries when a break source, not a registered
@@ -78,6 +92,8 @@ pub struct BreakpointInfo {
     pub mirror: bool,
     /// Display name (e.g. the symbol it was created from).
     pub name: Option<String>,
+    /// The CPU it watches.
+    pub cpu: BreakCpu,
     /// The condition (an expression in Mesen2's language) that must hold
     /// for the breakpoint to fire; `None` fires on every match. The
     /// driving loop evaluates it.
@@ -148,6 +164,7 @@ struct Extra {
 struct ExecBp {
     id: u32,
     pc: u32,
+    cpu: BreakCpu,
     extra: Extra,
 }
 
@@ -209,14 +226,44 @@ impl BreakpointSet {
     /// Register an exec breakpoint at a 24-bit `PB:PC`, optionally named
     /// (e.g. after the symbol it was created from). Returns its id.
     pub fn add_exec(&mut self, pc: u32, name: Option<String>) -> u32 {
+        self.add_exec_on(BreakCpu::Snes, pc, name)
+    }
+
+    /// Register an exec breakpoint on `cpu` (a 24-bit address for the
+    /// 65C816, 16-bit for the SPC700). Returns its id.
+    pub fn add_exec_on(&mut self, cpu: BreakCpu, pc: u32, name: Option<String>) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
+        let mask = match cpu {
+            BreakCpu::Snes => 0x00FF_FFFF,
+            BreakCpu::Spc => 0xFFFF,
+        };
         self.exec.push(ExecBp {
             id,
-            pc: pc & 0x00FF_FFFF,
+            pc: pc & mask,
+            cpu,
             extra: Self::extra(name),
         });
         id
+    }
+
+    /// The CPU breakpoint `id` watches, `None` for an unknown id.
+    #[must_use]
+    pub fn cpu_of(&self, id: u32) -> Option<BreakCpu> {
+        if self.mem.iter().any(|w| w.id == id) {
+            return Some(BreakCpu::Snes);
+        }
+        self.exec.iter().find(|b| b.id == id).map(|b| b.cpu)
+    }
+
+    /// The enabled SPC700 exec breakpoints, as `(id, address)`.
+    #[must_use]
+    pub fn spc_exec(&self) -> Vec<(u32, u16)> {
+        self.exec
+            .iter()
+            .filter(|b| b.cpu == BreakCpu::Spc && b.extra.enabled)
+            .map(|b| (b.id, b.pc as u16))
+            .collect()
     }
 
     /// Register a memory watchpoint over the inclusive 24-bit bus range
@@ -327,8 +374,9 @@ impl BreakpointSet {
     /// Every registered breakpoint, by id.
     #[must_use]
     pub fn list(&self) -> Vec<BreakpointInfo> {
-        let info = |id, exec, lo, hi, on_read, on_write, mirror, e: &Extra| BreakpointInfo {
+        let info = |id, cpu, exec, lo, hi, on_read, on_write, mirror, e: &Extra| BreakpointInfo {
             id,
+            cpu,
             exec,
             lo,
             hi,
@@ -344,10 +392,19 @@ impl BreakpointSet {
         let mut out: Vec<BreakpointInfo> = self
             .exec
             .iter()
-            .map(|b| info(b.id, true, b.pc, b.pc, false, false, false, &b.extra))
+            .map(|b| info(b.id, b.cpu, true, b.pc, b.pc, false, false, false, &b.extra))
             .chain(self.mem.iter().map(|w| {
+                let (lo, hi) = (w.lo, w.hi);
                 info(
-                    w.id, false, w.lo, w.hi, w.on_read, w.on_write, w.mirror, &w.extra,
+                    w.id,
+                    BreakCpu::Snes,
+                    false,
+                    lo,
+                    hi,
+                    w.on_read,
+                    w.on_write,
+                    w.mirror,
+                    &w.extra,
                 )
             }))
             .collect();
@@ -361,7 +418,7 @@ impl BreakpointSet {
     pub fn check_exec(&self, pc: u32) -> Vec<BreakHit> {
         self.exec
             .iter()
-            .filter(|b| b.extra.enabled && b.pc == pc)
+            .filter(|b| b.cpu == BreakCpu::Snes && b.extra.enabled && b.pc == pc)
             .map(|b| BreakHit {
                 id: b.id,
                 kind: BreakKind::Exec,

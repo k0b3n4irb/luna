@@ -2508,3 +2508,47 @@ fn step_kinds_move_like_mesen2_steps() {
     fresh(&mut e);
     assert!(e.step_kind(StepKind::Frames(5), 10).unwrap().hit.is_none());
 }
+
+#[test]
+fn spc700_breakpoints_freeze_it_at_the_instruction_start() {
+    // The IPL ROM clears page zero with `DEC X` at $FFC6 from X = $EF,
+    // then waits at $FFCF for the CPU's $CC.
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom()).unwrap();
+    let spc_x = |e: &Emulator| e.evaluate("x", ExprCpu::Spc).unwrap().value;
+
+    let id = e.bp_add_spc_exec(0xFFC6, None).unwrap();
+    e.bp_set_condition(id, Some("x == $80")).unwrap();
+    let hit = e.run_until_break(100_000).unwrap().hit.unwrap();
+    assert_eq!((hit.kind, hit.id, hit.pc), (BreakKind::SpcExec, id, 0xFFC6));
+    assert_eq!(
+        e.spc700_state().unwrap().pc,
+        0xFFC6,
+        "at the start of the instruction"
+    );
+    assert_eq!(spc_x(&e), 0x80);
+    assert_eq!(e.bp_list().unwrap()[0].cpu, BreakCpu::Spc);
+    assert_eq!(e.bp_list().unwrap()[0].hit_count, 1);
+    // A plain step lets it run on: the breakpoint is not armed outside a
+    // breakpoint run.
+    e.step(200).unwrap();
+    assert!(spc_x(&e) < 0x80, "x = {:#x}", spc_x(&e));
+    // Resuming a breakpoint run moves past the stop to the next match.
+    e.bp_set_condition(id, Some("x == $10")).unwrap();
+    e.run_until_break(100_000).unwrap().hit.unwrap();
+    assert_eq!(spc_x(&e), 0x10);
+    e.bp_clear().unwrap();
+
+    // The wait loop: a plain breakpoint fires on every pass; a condition
+    // that never holds never freezes it.
+    let w = e.bp_add_spc_exec(0xFFCF, Some("wait")).unwrap();
+    let hit = e.run_until_break(100_000).unwrap().hit.unwrap();
+    assert_eq!((hit.id, hit.pc), (w, 0xFFCF));
+    let again = e.run_until_break(100_000).unwrap();
+    assert_eq!(again.hit.map(|h| h.pc), Some(0xFFCF));
+    assert!(again.steps > 0, "it went round the loop");
+    e.bp_set_condition(w, Some("a == $77")).unwrap();
+    assert!(e.run_until_break(5_000).unwrap().hit.is_none());
+    // An SPC700 breakpoint halts; it cannot be a mark.
+    assert!(e.bp_set_mark(w, true).is_err());
+}

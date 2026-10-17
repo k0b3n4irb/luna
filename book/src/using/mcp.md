@@ -87,7 +87,7 @@ method, so the MCP transport adds reach, not capability.
 | `enable_cpu_trace` / `take_cpu_trace` | `enable_cpu_trace` / `take_cpu_trace_log` | Per-instruction CPU trace ring (PC + registers). |
 | `enable_profile` / `take_profile` | `enable_profile` / `take_profile` | Master cycles per symbol (folded, heaviest first). (Per-PC samples are the Rust API's `take_profile_raw`; there is no MCP tool for them.) |
 | `enable_mem_trace` / `take_mem_trace` | `enable_mem_trace_filtered` / `take_mem_trace_log` | Per-bus-access trace with bank / offset-range / offset-list / writes-only filters; every event carries `origin` (`cpu`, `dma<n>`, `hdma<n>`). |
-| `bp_add` | `bp_add_exec` / `bp_add_mem`, `bp_set_condition`, `bp_set_mark` | Register an exec breakpoint or a read/write watchpoint range. `mirror: false` makes a mem watch bank-exact (default follows WRAM/MMIO mirrors); `name` (defaulting to the `symbol` used) labels it in `bp_list`. `condition` is an [expression](#expressions) that must be non-zero for it to fire; `mark: true` puts a mark on the Event Viewer instead of halting. See [Conditional breakpoints](#conditional-breakpoints). |
+| `bp_add` | `bp_add_exec` / `bp_add_mem`, `bp_set_condition`, `bp_set_mark` | Register an exec breakpoint or a read/write watchpoint range. `mirror: false` makes a mem watch bank-exact (default follows WRAM/MMIO mirrors); `name` (defaulting to the `symbol` used) labels it in `bp_list`. `condition` is an [expression](#expressions) that must be non-zero for it to fire; `mark: true` puts a mark on the Event Viewer instead of halting. `kind: "spc_exec"` stops with the SPC700 at the start of an instruction (`addr` in ARAM, or an ARAM `symbol`). See [Conditional breakpoints](#conditional-breakpoints). |
 | `bp_set_enabled` | `bp_set_enabled` | Disable/re-enable without removing — id, name and hit count survive. |
 | `bp_remove` / `bp_clear_all` / `bp_list` | `bp_remove` / `bp_clear` / `bp_list` | Manage the registry. `bp_list` rows now carry `enabled`, `hit_count` (mem: at most one per instruction), `mirror` and `name`. |
 | `run_until_break` | `run_until_break` | Run at full speed until a breakpoint or a break source fires (or a step budget). |
@@ -262,6 +262,25 @@ bp_list {}                                                          # condition,
   - One that does not parse is refused when it is set.
 - **Counting.** The hit count counts firings, marks included; a match whose
   condition is false does not count.
+
+**The SPC700.** `kind: "spc_exec"` puts a breakpoint on an SPC700
+instruction:
+
+```text
+bp_add {kind: "spc_exec", addr: 0x0400, condition: "a == $10"}   # the sound driver's command loop
+run_until_break {max_steps: 50000000}   # → {kind: "spc_exec", pc: 1024, …}
+disasm_spc {}                           # the SPC700 stands on $0400
+```
+
+- **Where each CPU stops.** The SPC700 stops at the start of that
+  instruction, exactly as in Mesen2. The 65C816 finishes the instruction
+  it was running.
+- **The condition** is evaluated inside the APU at that instruction's
+  start, for the SPC700: `a x y sp ps pc dspreg` and its 64 KB bus.
+  A condition that does not hold leaves the run's timing untouched.
+- **Outside a breakpoint run.** These breakpoints are armed only for
+  `run_until_break` / `run`, so a plain `step` never stops the SPC700.
+- **Marks** are for the 65C816 only.
 
 Mesen2's "break on" options and its "run to NMI / IRQ" are break sources,
 set once for every run:

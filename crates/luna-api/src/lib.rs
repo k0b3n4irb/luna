@@ -27,7 +27,7 @@ use luna_core::Snes;
 /// GUI's port-device selector goes through `luna-api`, not `luna-core`.
 pub use luna_core::controller::PortDevice;
 pub use luna_core::{
-    BREAK_SOURCE_ID, BreakHit, BreakKind, BreakpointInfo, CpuTraceEvent, DmaTraceEvent,
+    BREAK_SOURCE_ID, BreakCpu, BreakHit, BreakKind, BreakpointInfo, CpuTraceEvent, DmaTraceEvent,
     Dsp1TraceEvent, Dsp1TraceKind, GsuBusAccess, GsuBusEvent, MailboxEvent, MailboxEventKind,
     MapperKind, MemEventKind, MemOrigin, MemTraceEvent, MemTraceFilter, Profile, ProfileSample,
     Sa1LogEvent, Sa1SideEvent, Sa1Stats, Sa1TraceEvent, Spc700TraceEvent, SuperFxJob,
@@ -2010,6 +2010,8 @@ impl Emulator {
         let freezes = self.freezes.clone();
         let mut cstack = self.call_stack.take();
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        // An SPC700 left standing on a breakpoint runs again.
+        snes.apu_real.resume_break();
         let mut last_frame = snes.frame_count;
         let mut executed = 0u64;
         let mut stack_low = self.stack_low.clone();
@@ -3658,6 +3660,17 @@ impl Emulator {
         Ok(self.bp_registry()?.add_exec(pc, name))
     }
 
+    /// Register an SPC700 exec breakpoint at ARAM address `pc`. A
+    /// [`Self::run_until_break`] then stops with the SPC700 standing at
+    /// the start of that instruction (a [`BreakKind::SpcExec`] hit), the
+    /// 65C816 at the end of the instruction it was running. Returns its id.
+    pub fn bp_add_spc_exec(&mut self, pc: u16, name: Option<&str>) -> Result<u32, ApiError> {
+        let name = name.map(str::to_string);
+        Ok(self
+            .bp_registry()?
+            .add_exec_on(luna_core::BreakCpu::Spc, u32::from(pc), name))
+    }
+
     /// Register a memory watchpoint over the inclusive 24-bit bus range
     /// `lo..=hi`, firing on reads and/or writes. Returns its id.
     ///
@@ -3723,13 +3736,17 @@ impl Emulator {
     /// accessing instruction (luna runs instructions whole).
     pub fn bp_set_condition(&mut self, id: u32, condition: Option<&str>) -> Result<bool, ApiError> {
         let text = condition.map(str::trim).filter(|t| !t.is_empty());
-        let compiled =
-            match text {
-                Some(t) => Some(self.compile_expression(t, expr::ExprCpu::Snes).ok_or_else(
-                    || ApiError::BadArg(format!("condition `{t}` is not a valid expression")),
-                )?),
-                None => None,
-            };
+        let cpu = match self.bp_registry()?.cpu_of(id) {
+            Some(luna_core::BreakCpu::Spc) => expr::ExprCpu::Spc,
+            Some(luna_core::BreakCpu::Snes) => expr::ExprCpu::Snes,
+            None => return Ok(false),
+        };
+        let compiled = match text {
+            Some(t) => Some(self.compile_expression(t, cpu).ok_or_else(|| {
+                ApiError::BadArg(format!("condition `{t}` is not a valid expression"))
+            })?),
+            None => None,
+        };
         if !self
             .bp_registry()?
             .set_condition(id, text.map(str::to_string))
@@ -3759,7 +3776,13 @@ impl Emulator {
     /// fires it puts a breakpoint event on the Event Viewer and the run goes
     /// on. Returns `false` for an unknown id.
     pub fn bp_set_mark(&mut self, id: u32, mark: bool) -> Result<bool, ApiError> {
-        Ok(self.bp_registry()?.set_mark(id, mark))
+        let registry = self.bp_registry()?;
+        if mark && registry.cpu_of(id) == Some(luna_core::BreakCpu::Spc) {
+            return Err(ApiError::BadArg(
+                "marks are for 65C816 breakpoints; an SPC700 breakpoint halts".into(),
+            ));
+        }
+        Ok(registry.set_mark(id, mark))
     }
 
     /// Snapshot the registered breakpoints.
@@ -3913,6 +3936,30 @@ impl Emulator {
         let at = |snes: &Snes| (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
         let conditions = self.bp_conditions.clone();
         let sources = self.break_sources;
+        // The SPC700's breakpoints live in the APU for this run only, so a
+        // plain step never freezes it.
+        if let Some(snes) = self.snes.as_mut() {
+            let spc = snes
+                .breakpoints
+                .as_ref()
+                .map(|b| b.spc_exec())
+                .unwrap_or_default();
+            snes.apu_real.breaks = spc
+                .into_iter()
+                .map(|(id, pc)| luna_apu::SpcBreak {
+                    id,
+                    pc,
+                    condition: conditions.get(&id).map(|e| {
+                        let e = e.clone();
+                        let check: luna_apu::SpcCondition =
+                            std::sync::Arc::new(move |apu: &luna_apu::Apu| {
+                                expr::spc_holds(&e, apu)
+                            });
+                        check
+                    }),
+                })
+                .collect();
+        }
         let before_step: std::cell::Cell<(bool, bool, u16)> = std::cell::Cell::default();
         let opcode: std::cell::Cell<u8> = std::cell::Cell::default();
         // Marks that fired, with their beam position: shared by the two
@@ -4001,6 +4048,16 @@ impl Emulator {
                         value: None,
                         dma: false,
                     };
+                    if let Some((id, pc)) = snes.apu_real.break_hit {
+                        return Some(BreakHit {
+                            id,
+                            kind: BreakKind::SpcExec,
+                            pc: u32::from(pc),
+                            addr: None,
+                            value: None,
+                            dma: false,
+                        });
+                    }
                     let ran = (!nmi && !irq).then(|| opcode.get());
                     if done(snes, ran) {
                         return Some(source(BreakKind::Step));
@@ -4030,6 +4087,9 @@ impl Emulator {
                 interrupted: run.interrupted,
             })?;
         let marks = marks.into_inner();
+        if let Some(snes) = self.snes.as_mut() {
+            snes.apu_real.breaks.clear();
+        }
         if let Some(bp) = self.snes.as_mut().and_then(|s| s.breakpoints.as_mut())
             && out.hit.is_none_or(|h| h.id != BREAK_SOURCE_ID)
         {

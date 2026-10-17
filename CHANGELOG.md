@@ -27,6 +27,13 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   frames ("break in N"). A breakpoint or break source met on the way stops
   it first. MCP: `step_kind`.
 
+- **SPC700 breakpoints.** `Emulator::bp_add_spc_exec` (MCP:
+  `bp_add {kind: "spc_exec"}`) stops a breakpoint run with the SPC700 at
+  the start of an instruction, as Mesen2 does. Its condition (Mesen2's
+  language, SPC700 registers and bus) is checked inside the APU at that
+  instruction start, so one that does not hold leaves the timing
+  untouched. `bp_list` gives each breakpoint's `cpu`.
+
 - **Break sources: BRK, COP, WDM, STP, NMI, IRQ, a scanline.** Besides the
   registered breakpoints, a run stops, as chosen, before a `BRK`, `COP`,
   `WDM` or `STP` runs, on the first instruction of the NMI or IRQ handler

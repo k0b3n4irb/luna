@@ -651,19 +651,7 @@ impl ExprEnv for View<'_> {
                     Reg::DspIndex => 0,
                 }
             }
-            ExprCpu::Spc => {
-                let c = &snes.apu_real.cpu;
-                match reg {
-                    Reg::A => i64::from(c.a),
-                    Reg::X => i64::from(c.x),
-                    Reg::Y => i64::from(c.y),
-                    Reg::Sp => i64::from(c.sp),
-                    Reg::Ps => i64::from(c.psw.0),
-                    Reg::Pc => i64::from(c.pc),
-                    Reg::DspIndex => i64::from(snes.apu_real.dsp_index),
-                    _ => 0,
-                }
-            }
+            ExprCpu::Spc => spc_reg(&snes.apu_real, reg),
         }
     }
 
@@ -671,15 +659,7 @@ impl ExprEnv for View<'_> {
         match cpu {
             // Mesen2 reads 0 where nothing answers.
             ExprCpu::Snes => self.bus_peek(addr, 0),
-            ExprCpu::Spc => {
-                let apu = &self.0.apu_real;
-                match addr {
-                    0xF0 | 0xF1 => 0,
-                    0xF2 => apu.dsp_index,
-                    0xF3 => apu.dsp.registers[usize::from(apu.dsp_index & 0x7F)],
-                    _ => apu.peek(addr as u16),
-                }
-            }
+            ExprCpu::Spc => spc_byte(&self.0.apu_real, addr),
         }
     }
 
@@ -705,16 +685,86 @@ impl ExprEnv for View<'_> {
                     -1
                 }
             }
-            ExprCpu::Spc => {
-                let a = addr & 0xFFFF;
-                if a >= 0xFFC0 && self.0.apu_real.control & 0x80 != 0 {
-                    i64::from(a & 0x3F)
-                } else {
-                    i64::from(a)
-                }
-            }
+            ExprCpu::Spc => spc_absolute(&self.0.apu_real, addr),
         }
     }
+}
+
+/// An SPC700 register token's value.
+fn spc_reg(apu: &luna_apu::Apu, reg: Reg) -> i64 {
+    let c = &apu.cpu;
+    match reg {
+        Reg::A => i64::from(c.a),
+        Reg::X => i64::from(c.x),
+        Reg::Y => i64::from(c.y),
+        Reg::Sp => i64::from(c.sp),
+        Reg::Ps => i64::from(c.psw.0),
+        Reg::Pc => i64::from(c.pc),
+        Reg::DspIndex => i64::from(apu.dsp_index),
+        _ => 0,
+    }
+}
+
+/// An SPC700 bus byte as Mesen2 peeks it: `$F0` / `$F1` read 0, `$F2` the
+/// DSP index, `$F3` the DSP register it selects, the IPL ROM over the top
+/// page while it is enabled.
+fn spc_byte(apu: &luna_apu::Apu, addr: u32) -> u8 {
+    match addr {
+        0xF0 | 0xF1 => 0,
+        0xF2 => apu.dsp_index,
+        0xF3 => apu.dsp.registers[usize::from(apu.dsp_index & 0x7F)],
+        _ => apu.peek(addr as u16),
+    }
+}
+
+/// `:addr` on the SPC700: an IPL ROM offset over the top page while it is
+/// enabled, else the ARAM offset.
+fn spc_absolute(apu: &luna_apu::Apu, addr: u32) -> i64 {
+    let a = addr & 0xFFFF;
+    if a >= 0xFFC0 && apu.control & 0x80 != 0 {
+        i64::from(a & 0x3F)
+    } else {
+        i64::from(a)
+    }
+}
+
+/// The APU alone, for an SPC700 breakpoint's condition (checked inside
+/// the APU, at the start of an instruction).
+struct ApuView<'a>(&'a luna_apu::Apu);
+
+impl ExprEnv for ApuView<'_> {
+    fn reg(&self, _cpu: ExprCpu, reg: Reg) -> i64 {
+        spc_reg(self.0, reg)
+    }
+
+    fn byte(&self, _cpu: ExprCpu, addr: u32) -> u8 {
+        spc_byte(self.0, addr)
+    }
+
+    fn space(&self, _cpu: ExprCpu) -> u32 {
+        0x1_0000
+    }
+
+    fn absolute(&self, _cpu: ExprCpu, addr: u32) -> i64 {
+        spc_absolute(self.0, addr)
+    }
+}
+
+/// Whether an SPC700 exec breakpoint's condition holds: evaluated as
+/// Mesen2 does at the instruction's start (`value` the opcode, `address`
+/// the PC).
+pub(crate) fn spc_holds(expr: &Expression, apu: &luna_apu::Apu) -> bool {
+    let pc = apu.cpu.pc;
+    let access = ExprAccess {
+        value: i64::from(apu.peek(pc)),
+        address: i64::from(pc),
+        memaddress: spc_absolute(apu, u32::from(pc)),
+        write: false,
+        dma: false,
+        dummy: false,
+        oppc: i64::from(pc),
+    };
+    evaluate(expr, &access, &ApuView(apu)).holds()
 }
 
 /// Evaluate `expr` on a machine the caller only holds as its core.
