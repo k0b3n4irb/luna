@@ -3073,6 +3073,12 @@ fn forbid_ranges_stop_halts_not_marks() {
 /// Mode 1: an 8×8 white square on BG1 at (0,0), a 16×8 white bar on BG2
 /// at (0,0). They overlap on the square.
 fn demo_two_layers() -> Vec<u8> {
+    demo_two_layers_with(0)
+}
+
+/// [`demo_two_layers`], BG2's map entries with high byte `bg2_attr`
+/// (`$20` = tile priority 1).
+fn demo_two_layers_with(bg2_attr: u8) -> Vec<u8> {
     let mut code: Vec<u8> = vec![
         0xA9, 0x80, 0x8D, 0x00, 0x21, // forced blank
         0x8D, 0x15, 0x21, // VMAIN: increment after $2119
@@ -3080,15 +3086,15 @@ fn demo_two_layers() -> Vec<u8> {
         0xA2, 0x08, // 8 rows of plane 0 = $FF: colour 1
         0xA9, 0xFF, 0x8D, 0x18, 0x21, 0x9C, 0x19, 0x21, 0xCA, 0xD0, 0xF5,
     ];
-    let entry = |hi: u8, count: usize| {
+    let entry = |hi: u8, count: usize, attr: u8| {
         let mut v = vec![0x9C, 0x16, 0x21, 0xA9, hi, 0x8D, 0x17, 0x21];
         for _ in 0..count {
-            v.extend([0xA9, 0x01, 0x8D, 0x18, 0x21, 0x9C, 0x19, 0x21]);
+            v.extend([0xA9, 0x01, 0x8D, 0x18, 0x21, 0xA9, attr, 0x8D, 0x19, 0x21]);
         }
         v
     };
-    code.extend(entry(0x04, 1)); // BG1 map at $0400: tile 1
-    code.extend(entry(0x08, 2)); // BG2 map at $0800: tiles 1, 1
+    code.extend(entry(0x04, 1, 0)); // BG1 map at $0400: tile 1
+    code.extend(entry(0x08, 2, bg2_attr)); // BG2 map at $0800: tiles 1, 1
     code.extend([
         0xA9, 0x04, 0x8D, 0x07, 0x21, // BG1SC
         0xA9, 0x08, 0x8D, 0x08, 0x21, // BG2SC
@@ -3139,24 +3145,48 @@ fn layer_capture_keeps_each_layer_alone_and_finds_overlaps() {
         (Layer::Bg1, Layer::Bg2, 56, 0, 7, 6)
     );
     assert_eq!(o[0].regions.len(), 1, "one patch");
+    assert_eq!(
+        (o[0].a_in_front, o[0].b_in_front),
+        (56, 0),
+        "Mode 1, both at tile priority 0: BG1 is in front"
+    );
     assert_eq!(Layer::from_name("OBJ"), Some(Layer::Obj));
+
+    // BG2 at tile priority 1 rises above BG1 at priority 0.
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_two_layers_with(0x20)).unwrap();
+    e.set_layer_capture(true).unwrap();
+    for _ in 0..3 {
+        e.step_until_frame(1_000_000).unwrap();
+    }
+    let o = e.layer_overlaps(&[Layer::Bg1, Layer::Bg2]).unwrap();
+    assert_eq!((o[0].pixels, o[0].a_in_front, o[0].b_in_front), (56, 0, 56));
+    assert_eq!(
+        (o[0].regions[0].a_in_front, o[0].regions[0].b_in_front),
+        (0, 56)
+    );
 }
 
 #[test]
 fn overlap_regions_split_patches_that_do_not_touch() {
-    let mut mask = vec![false; FRAME_W * 4];
+    let mut front = vec![None; FRAME_W * 4];
     // A 2×2 patch at (0,0), a diagonal pair at (10,1)-(11,2) (touching by
-    // a corner: one patch), a lone pixel at (200,3).
+    // a corner: one patch), a lone pixel at (200,3). `a` is in front on
+    // the patch's top row only.
     for (x, y) in [(0, 0), (1, 0), (0, 1), (1, 1), (10, 1), (11, 2), (200, 3)] {
-        mask[y * FRAME_W + x] = true;
+        front[y * FRAME_W + x] = Some(y == 0);
     }
-    let r = overlap_regions(&mask);
+    let r = overlap_regions(&front);
     let boxes: Vec<_> = r
         .iter()
-        .map(|r| (r.pixels, r.x0, r.y0, r.x1, r.y1))
+        .map(|r| (r.pixels, r.x0, r.y0, r.x1, r.y1, r.a_in_front, r.b_in_front))
         .collect();
     assert_eq!(
         boxes,
-        [(4, 0, 0, 1, 1), (2, 10, 1, 11, 2), (1, 200, 3, 200, 3)]
+        [
+            (4, 0, 0, 1, 1, 2, 2),
+            (2, 10, 1, 11, 2, 0, 2),
+            (1, 200, 3, 200, 3, 0, 1)
+        ]
     );
 }

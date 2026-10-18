@@ -291,7 +291,7 @@ shows nothing, and lists the pairs of layers that both show a pixel:
 luna state --until-frame 600 --layers bg1,obj --layer-shots layers \
   --out state.json "Super Mario World (USA).sfc"
 # 2 layer(s) written to layers, 1 overlapping pair(s)
-#   bg1 and obj: 383 pixel(s) in x 107..=132, y 155..=174
+#   bg1 and obj: 383 pixel(s) in x 107..=132, y 155..=174, obj in front
 ```
 
 - **The same instant as the picture.** Each layer is kept by the
@@ -310,7 +310,15 @@ luna state --until-frame 600 --layers bg1,obj --layer-shots layers \
   `y0`, `x1`, `y1` around them, and `regions`: each patch of touching
   pixels with its own count and box, largest first, so two overlaps far
   apart are told apart. The text lists the regions when there are
-  several. An overlap is not an error in
+  several.
+- **Which one is in front.** The pair, and each region, carry
+  `a_in_front` and `b_in_front`: of its pixels, those where `a` comes
+  first in the PPU's priority order (for the mode, the tiles' priority
+  bits and the sprites' priorities), and those where `b` does. The text
+  says `obj in front`, or splits it (`bg1 in front on 12, obj on 30`).
+  That tells who covers whom without looking at the capture; whether
+  the pixel in front is the one on screen still depends on TM / TS and
+  colour math. An overlap is not an error in
   itself — a scene puts its sprites in front of its ground — it is where
   to look; a test can assert the pairs a screen must not have.
 - `--no-render` composes nothing, so it is refused with `--layer-shots`.

@@ -134,7 +134,7 @@ fn write_layer_shots(
     );
     for o in &overlaps {
         eprintln!(
-            "  {} and {}: {} pixel(s) in x {}..={}, y {}..={}{}",
+            "  {} and {}: {} pixel(s) in x {}..={}, y {}..={}, {}{}",
             o.a.name(),
             o.b.name(),
             o.pixels,
@@ -142,6 +142,7 @@ fn write_layer_shots(
             o.x1,
             o.y0,
             o.y1,
+            in_front(o.a, o.b, o.a_in_front, o.b_in_front),
             if o.regions.len() > 1 {
                 format!(", {} regions:", o.regions.len())
             } else {
@@ -151,8 +152,13 @@ fn write_layer_shots(
         if o.regions.len() > 1 {
             for r in &o.regions {
                 eprintln!(
-                    "    {} pixel(s) in x {}..={}, y {}..={}",
-                    r.pixels, r.x0, r.x1, r.y0, r.y1
+                    "    {} pixel(s) in x {}..={}, y {}..={}, {}",
+                    r.pixels,
+                    r.x0,
+                    r.x1,
+                    r.y0,
+                    r.y1,
+                    in_front(o.a, o.b, r.a_in_front, r.b_in_front)
                 );
             }
         }
@@ -161,6 +167,15 @@ fn write_layer_shots(
         written: layers.to_vec(),
         overlaps,
     })
+}
+
+/// Which of `a` and `b` is in front: `bg1 in front`, or the split.
+fn in_front(a: luna_api::Layer, b: luna_api::Layer, a_n: u32, b_n: u32) -> String {
+    match (a_n, b_n) {
+        (_, 0) => format!("{} in front", a.name()),
+        (0, _) => format!("{} in front", b.name()),
+        _ => format!("{} in front on {a_n}, {} on {b_n}", a.name(), b.name()),
+    }
 }
 
 /// The `--poke`s to write at one arrival on `--poke-at`.

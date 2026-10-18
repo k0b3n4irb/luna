@@ -87,7 +87,7 @@ fn layer_shots_write_each_layer_and_report_overlaps() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr}");
     assert!(
-        stderr.contains("bg1 and bg2: 56 pixel(s) in x 0..=7"),
+        stderr.contains("bg1 and bg2: 56 pixel(s) in x 0..=7, y 0..=6, bg1 in front"),
         "{stderr}"
     );
     for name in ["bg1", "bg2", "obj"] {
@@ -101,6 +101,7 @@ fn layer_shots_write_each_layer_and_report_overlaps() {
         serde_json::json!(["bg1", "bg2", "obj"])
     );
     assert_eq!(v["layers"]["overlaps"][0]["pixels"], 56);
+    assert_eq!(v["layers"]["overlaps"][0]["a_in_front"], 56);
 
     let bad = Command::new(luna_bin())
         .args(["state"])

@@ -427,9 +427,20 @@ pub(crate) fn render_scanline_partial_into(
 /// Layers the per-layer capture keeps: BG1-BG4, then OBJ.
 pub const LAYERS: usize = 5;
 
-/// One row of one layer alone: its colour where it shows a pixel, `None`
+/// One pixel of one layer alone.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct LayerPixel {
+    /// The colour the layer puts on a screen there, before colour math.
+    pub rgb: [u8; 3],
+    /// Its place in the PPU's priority order for the current mode, 0 =
+    /// front-most: of two layers' pixels at one dot, the lower depth is
+    /// the one in front.
+    pub depth: u8,
+}
+
+/// One row of one layer alone: its pixel where it shows one, `None`
 /// where it is transparent.
-pub type LayerRow = [Option<[u8; 3]>; FRAME_W];
+pub type LayerRow = [Option<LayerPixel>; FRAME_W];
 
 pub(crate) fn render_scanline_partial_into_from(
     ppu: &Ppu,
@@ -495,6 +506,17 @@ pub(crate) fn render_scanline_partial_into_from(
         priority_table(ppu.bgmode)
     };
     let backdrop_bgr5 = cgram_to_bgr5(ppu, 0);
+    // Depth of each BG (by tile priority bit) and OBJ priority in `table`,
+    // for the per-layer capture.
+    let mut bg_depth = [[u8::MAX; 2]; 4];
+    let mut obj_depth = [u8::MAX; 4];
+    for (depth, slot) in table.iter().enumerate() {
+        let depth = depth as u8;
+        match slot.kind {
+            LayerKind::Bg => bg_depth[slot.idx as usize][slot.bg_prio as usize & 1] = depth,
+            LayerKind::Obj => obj_depth[slot.idx as usize & 3] = depth,
+        }
+    }
 
     // Fixed COLDATA — the sub operand when CGWSEL bit 1 = 0, or when
     // bit 1 = 1 but the sub had no real winner (math.transparent
@@ -605,20 +627,24 @@ pub(crate) fn render_scanline_partial_into_from(
                     || screen_layer_enabled(li, ppu.ts, ppu.tsw);
                 let pixel = if li < 4 {
                     bgs_above[li][x].map(|(cg, prio)| {
-                        if ppu.cgwsel & 0x01 != 0 && bg_bpp(ppu.bgmode, li) == 8 {
+                        let c = if ppu.cgwsel & 0x01 != 0 && bg_bpp(ppu.bgmode, li) == 8 {
                             direct_color_to_bgr5(cg, (prio >> 1) & 0x07)
                         } else {
                             cgram_to_bgr5(ppu, cg)
-                        }
+                        };
+                        (c, bg_depth[li][usize::from(prio & 1)])
                     })
                 } else {
-                    sprites[x].map(|(cg, _)| cgram_to_bgr5(ppu, cg))
+                    sprites[x].map(|(cg, prio)| {
+                        (cgram_to_bgr5(ppu, cg), obj_depth[usize::from(prio & 3)])
+                    })
                 };
-                row[x] = pixel.filter(|_| shown).map(|c| {
-                    apply_brightness(
+                row[x] = pixel.filter(|_| shown).map(|(c, depth)| LayerPixel {
+                    rgb: apply_brightness(
                         [scale_5_to_8(c.0), scale_5_to_8(c.1), scale_5_to_8(c.2)],
                         brightness,
-                    )
+                    ),
+                    depth,
                 });
             }
         }

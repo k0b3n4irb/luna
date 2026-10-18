@@ -7,8 +7,9 @@
 
 use crate::memory::{Cgram, Oam, VmainSettings, Vram};
 use crate::renderer::{
-    FRAME_H, FRAME_H_MAX, FRAME_W, LAYERS, LayerRow, RenderOptions, SpriteEntry, SpriteEval,
-    decode_all_sprites, evaluate_sprite_line, obj_eval_latch, render_scanline_partial_into_from,
+    FRAME_H, FRAME_H_MAX, FRAME_W, LAYERS, LayerPixel, LayerRow, RenderOptions, SpriteEntry,
+    SpriteEval, decode_all_sprites, evaluate_sprite_line, obj_eval_latch,
+    render_scanline_partial_into_from,
 };
 // `render_scanline_into` is no longer used directly here — full-line
 // renders go through `flush_partial_scanline`.
@@ -458,11 +459,11 @@ pub struct Ppu {
     pub native_framebuffer: Vec<[u8; 3]>,
     /// Each layer alone (BG1-BG4, then OBJ), maintained per scanline by
     /// the compositor while [`Self::set_layer_capture`] is on: the
-    /// layer's own colour where it shows a pixel, `None` where it is
-    /// transparent. Empty when capture is off. A debug capture, not
-    /// console state: save states skip it.
+    /// layer's own pixel (colour and depth) where it shows one, `None`
+    /// where it is transparent. Empty when capture is off. A debug
+    /// capture, not console state: save states skip it.
     #[serde(skip)]
-    pub layer_framebuffer: Vec<Option<[u8; 3]>>,
+    pub layer_framebuffer: Vec<Option<LayerPixel>>,
 
     /// How far the current scanline has been rendered into the
     /// framebuffer. Phase 2 of gap G6: a `$21xx` write that lands
@@ -905,7 +906,7 @@ impl Ppu {
     /// row-major over [`Self::frame_height`] rows; empty when capture is
     /// off.
     #[must_use]
-    pub fn layer_frame(&self, layer: usize) -> &[Option<[u8; 3]>] {
+    pub fn layer_frame(&self, layer: usize) -> &[Option<LayerPixel>] {
         if self.layer_framebuffer.is_empty() || layer >= LAYERS {
             return &[];
         }

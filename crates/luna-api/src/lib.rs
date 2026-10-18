@@ -1436,6 +1436,11 @@ pub struct LayerOverlap {
     pub x1: u32,
     /// Bottom row (inclusive).
     pub y1: u32,
+    /// Of `pixels`, those where `a` is in front of `b` (earlier in the
+    /// PPU's priority order for the mode and the pixels' priorities).
+    pub a_in_front: u32,
+    /// Of `pixels`, those where `b` is in front of `a`.
+    pub b_in_front: u32,
     /// Each patch of touching pixels (8-connected) on its own, largest
     /// first: two overlaps far apart are two regions.
     pub regions: Vec<OverlapRegion>,
@@ -1454,11 +1459,17 @@ pub struct OverlapRegion {
     pub x1: u32,
     /// Bottom row (inclusive).
     pub y1: u32,
+    /// Of `pixels`, those where the pair's `a` is in front of its `b`.
+    pub a_in_front: u32,
+    /// Of `pixels`, those where `b` is in front of `a`.
+    pub b_in_front: u32,
 }
 
-/// The 8-connected patches of `mask` (row-major, [`FRAME_W`] wide),
+/// The 8-connected patches of the dots `front` marks (row-major,
+/// [`FRAME_W`] wide; `Some(true)` = `a` in front, `Some(false)` = `b`),
 /// largest first.
-fn overlap_regions(mask: &[bool]) -> Vec<OverlapRegion> {
+fn overlap_regions(front: &[Option<bool>]) -> Vec<OverlapRegion> {
+    let mask: Vec<bool> = front.iter().map(Option::is_some).collect();
     let w = FRAME_W;
     let h = mask.len() / w;
     let mut seen = vec![false; mask.len()];
@@ -1475,10 +1486,17 @@ fn overlap_regions(mask: &[bool]) -> Vec<OverlapRegion> {
             y0: u32::MAX,
             x1: 0,
             y1: 0,
+            a_in_front: 0,
+            b_in_front: 0,
         };
         while let Some(n) = stack.pop() {
             let (x, y) = (n % w, n / w);
             r.pixels += 1;
+            if front[n] == Some(true) {
+                r.a_in_front += 1;
+            } else {
+                r.b_in_front += 1;
+            }
             r.x0 = r.x0.min(x as u32);
             r.y0 = r.y0.min(y as u32);
             r.x1 = r.x1.max(x as u32);
@@ -3095,7 +3113,7 @@ impl Emulator {
     }
 
     /// The pixels of `layer` in the current frame (`None` = transparent).
-    fn layer_pixels(&self, layer: Layer) -> Result<&[Option<[u8; 3]>], ApiError> {
+    fn layer_pixels(&self, layer: Layer) -> Result<&[Option<luna_ppu::LayerPixel>], ApiError> {
         self.require_picture()?;
         let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
         let px = snes.ppu.layer_frame(layer as usize);
@@ -3115,7 +3133,7 @@ impl Emulator {
         let buf: Vec<u8> = px
             .iter()
             .flat_map(|p| match p {
-                Some([r, g, b]) => [*r, *g, *b, 0xFF],
+                Some(p) => [p.rgb[0], p.rgb[1], p.rgb[2], 0xFF],
                 None => [0, 0, 0, 0],
             })
             .collect();
@@ -3129,18 +3147,19 @@ impl Emulator {
 
     /// Where two of `layers` both show a pixel in the current frame: one
     /// entry per pair that overlaps, with the pixel count, the box around
-    /// them, and each patch of touching pixels on its own.
+    /// them, which of the two is in front, and each patch of touching
+    /// pixels on its own.
     pub fn layer_overlaps(&self, layers: &[Layer]) -> Result<Vec<LayerOverlap>, ApiError> {
         let mut out = Vec::new();
         for (i, &a) in layers.iter().enumerate() {
             for &b in &layers[i + 1..] {
                 let (pa, pb) = (self.layer_pixels(a)?, self.layer_pixels(b)?);
-                let mask: Vec<bool> = pa
+                let front: Vec<Option<bool>> = pa
                     .iter()
                     .zip(pb)
-                    .map(|(p, q)| p.is_some() && q.is_some())
+                    .map(|(p, q)| Some(p.as_ref()?.depth < q.as_ref()?.depth))
                     .collect();
-                let regions = overlap_regions(&mask);
+                let regions = overlap_regions(&front);
                 if regions.is_empty() {
                     continue;
                 }
@@ -3152,6 +3171,8 @@ impl Emulator {
                     y0: regions.iter().map(|r| r.y0).min().unwrap_or(0),
                     x1: regions.iter().map(|r| r.x1).max().unwrap_or(0),
                     y1: regions.iter().map(|r| r.y1).max().unwrap_or(0),
+                    a_in_front: regions.iter().map(|r| r.a_in_front).sum(),
+                    b_in_front: regions.iter().map(|r| r.b_in_front).sum(),
                     regions,
                 });
             }
