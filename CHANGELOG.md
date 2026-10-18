@@ -59,7 +59,9 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   `listing_find_all`), the function list from the code log
   (`functions`), the label list per CPU (`label_rows`) and the call stack
   as its pane reads (`call_stack_rows`: `label ($XXXXXX)`, `[nmi]`,
-  `[irq]`, `[bottom of stack]`).
+  `[irq]`, `[bottom of stack]`). MCP: `watch`, `goto`, `goto_all`,
+  `find`, `find_all`, `functions`, `debugger_status` (the Status pane:
+  registers, pending interrupts, PPU position, the stack).
 
 - **The Debugger window** (GUI, *Debug ▸ Debugger*), Mesen2's for the
   65C816, laid out as its default: the code listing with its gutter

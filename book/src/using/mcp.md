@@ -105,6 +105,11 @@ method, so the MCP transport adds reach, not capability.
 | `labels_import` / `labels_export` | `import_labels_mlb` / `export_labels_mlb` | Read or write a Mesen2 `.mlb` label file. |
 | `enable_code_log` | `enable_code_log` | Log which bytes the 65C816 and the SPC700 run as code (what `listing` knows code by). |
 | `listing` | `listing` / `listing_back` / `listing_pos_of` | The debugger's code listing, as Mesen2's Disassembly pane draws it. See [The code listing](#the-code-listing). |
+| `watch` | `watch_value` | Watch entries in Mesen2's formats (`, H2`, `, S`, `[addr, n]`). See [The debugger's panes](#the-debuggers-panes). |
+| `goto` / `goto_all` | `goto_address` / `goto_all` | Mesen2's Go To (a label, bare hex, an expression) and Go To All (labels and `.sym` names by terms). |
+| `find` / `find_all` | `listing_find` / `listing_find_all` | Find in the listing from a row; Find All Occurrences (up to 500 rows). |
+| `functions` | `functions` | Every subroutine entry the code log saw in the program ROM. |
+| `debugger_status` | `debugger_status` | The Debugger window's Status pane: registers, pending interrupts, PPU position, the stack. |
 | `resolve_symbol` | `resolve_symbol` | Label name → 24-bit address (null if unknown). A bare name stands for the only label spelled `name.<suffix>` (a C `static`: `player_x` for `player_x.main`); several candidates are an error that names them. The same rule applies to every tool's `symbol` argument. |
 | `symbol_for_addr` | `symbol_for_addr` | 24-bit address → nearest preceding label in its bank (the inverse). |
 | `enable_dma_trace` / `take_dma_trace` | `enable_dma_trace` / `take_dma_trace` | DMA→VRAM transfer bytes with scanline/H-clock + blank flags (the CLI `--dma-trace`). |
@@ -205,6 +210,35 @@ read_memory {kind: "Sa1InternalRam", offset: 0, count: 64}              # an SA-
 A memory the cartridge lacks is an error (`GsuWorkRam: this cartridge has
 none`), and so is a range past its end; the two buses (`SnesMemory`,
 `SpcMemory`) wrap around instead.
+
+### The debugger's panes
+
+What the GUI's Debugger window shows beside the listing is a tool too,
+so an agent reads the same values the window draws.
+
+```text
+label_set {memory: "SnesWorkRam", address: 0x10, length: 2, name: "counter"}
+watch {entries: ["{counter}", "[counter], B", "1 / 0"]}
+                       # → {values: ["$1234", "%0011.0100", "<division by zero>"]}
+goto {text: "counter"}                       # → {address: 8257552}   $7E:0010
+goto {text: "8000"}                          # → {address: 32768}     bare digits are hex
+goto_all {query: "inidisp"}                  # → {results: [{name: "INIDISP", address: 8448, …}]}
+find {text: "STA $2100"}                     # → {pos: {addr, row}} of the next such row from the PC
+find_all {text: "counter", whole_word: true} # every instruction row naming it
+functions {}                                 # needs enable_code_log
+debugger_status {}                           # registers, IRQs, H clock, scanline, stack…
+```
+
+- **`watch`** formats as Mesen2's Watch pane: a suffix `, H`, `, S`,
+  `, U`, `, B` and a byte count 1-4, `[addr, count]` for bytes; `style`
+  (`hex`, `decimal`, `binary`) when an entry names no format, a `{word}`
+  entry two bytes wide.
+- **`goto`** reads a label first, then bare hex digits, then an
+  expression; **`goto_all`** wants every term of the query (split at
+  spaces and capitals), those in view listed first.
+- **`find`** starts at `from` (default: the PC's row) and wraps round the
+  space; **`find_all`** walks the whole listing, the ROM's mirrors
+  included.
 
 ### Labels and comments
 

@@ -1715,6 +1715,136 @@ pub struct EnableCodeLogParams {
     pub on: bool,
 }
 
+/// The CPU a debugger tool asks for: `snes` (default) or `spc`.
+fn listing_cpu(name: Option<&str>) -> Result<luna_api::ListingCpu, ErrorData> {
+    match name {
+        None | Some("snes" | "cpu") => Ok(luna_api::ListingCpu::Snes),
+        Some("spc") => Ok(luna_api::ListingCpu::Spc),
+        Some(other) => Err(ErrorData::invalid_params(
+            format!("cpu `{other}`: `snes` or `spc`"),
+            None,
+        )),
+    }
+}
+
+/// `watch` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct WatchParams {
+    /// Watch entries, as Mesen2's Watch pane takes them: an expression,
+    /// optionally `, H` / `, S` / `, U` / `, B` and a byte count 1-4;
+    /// `[addr, count]` for count bytes.
+    pub entries: Vec<String>,
+    /// `snes` (default) or `spc`.
+    #[serde(default)]
+    pub cpu: Option<String>,
+    /// The style when an entry names no format: `hex` (default),
+    /// `decimal`, `binary`.
+    #[serde(default)]
+    pub style: Option<luna_api::WatchStyle>,
+}
+
+/// `watch` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct WatchResult {
+    /// One value per entry, in order.
+    pub values: Vec<String>,
+}
+
+/// `goto` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct GotoParams {
+    /// A label, bare hex digits (`8000` is `$8000`), or an expression.
+    pub text: String,
+    /// `snes` (default) or `spc`.
+    #[serde(default)]
+    pub cpu: Option<String>,
+}
+
+/// `goto` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct GotoResultOut {
+    /// The address, `null` when the text names none in the CPU's space.
+    pub address: Option<u32>,
+}
+
+/// `goto_all` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct GotoAllParams {
+    /// The query: every term must match, case ignored; terms split at
+    /// spaces and capitals (`PlayerX` is `player` and `x`).
+    pub query: String,
+    /// `snes` (default) or `spc`.
+    #[serde(default)]
+    pub cpu: Option<String>,
+}
+
+/// `goto_all` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct GotoAllResult {
+    /// Those in view first, then names starting with the query, then by name.
+    pub results: Vec<luna_api::GotoResult>,
+}
+
+/// `find` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct FindParams {
+    /// The text to look for in the listing (instruction, effective
+    /// address, value, comment; case ignored).
+    pub text: String,
+    /// Where to start: the row of this address (default: the PC's).
+    #[serde(default)]
+    pub from: Option<u32>,
+    /// Look backward instead.
+    #[serde(default)]
+    pub backward: bool,
+    /// `snes` (default) or `spc`.
+    #[serde(default)]
+    pub cpu: Option<String>,
+    /// Listing options; Mesen2's defaults when absent.
+    #[serde(default)]
+    pub options: Option<luna_api::ListingOptions>,
+}
+
+/// `find` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FindResultOut {
+    /// The row found, `null` when there is none.
+    pub pos: Option<luna_api::ListingPos>,
+}
+
+/// `find_all` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct FindAllParams {
+    /// The text to look for in the instruction rows of the whole space.
+    pub text: String,
+    /// Match its case.
+    #[serde(default)]
+    pub match_case: bool,
+    /// Match it as a whole word.
+    #[serde(default)]
+    pub whole_word: bool,
+    /// `snes` (default) or `spc`.
+    #[serde(default)]
+    pub cpu: Option<String>,
+    /// Listing options; Mesen2's defaults when absent.
+    #[serde(default)]
+    pub options: Option<luna_api::ListingOptions>,
+}
+
+/// `find_all` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FindAllResult {
+    /// Up to 500 rows, in address order.
+    pub results: Vec<luna_api::FindResult>,
+}
+
+/// `functions` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FunctionsResult {
+    /// Every subroutine entry the code log saw in the program ROM.
+    pub functions: Vec<luna_api::FunctionRow>,
+}
+
 /// A memory named in a label tool.
 fn label_memory(name: &str) -> Result<luna_api::MemoryKind, ErrorData> {
     luna_api::MemoryKind::from_name(name).ok_or_else(|| {
@@ -2900,16 +3030,7 @@ impl LunaServer {
         &self,
         Parameters(params): Parameters<ListingParams>,
     ) -> Result<rmcp::Json<ListingResult>, ErrorData> {
-        let cpu = match params.cpu.as_deref() {
-            None | Some("snes" | "cpu") => luna_api::ListingCpu::Snes,
-            Some("spc") => luna_api::ListingCpu::Spc,
-            Some(other) => {
-                return Err(ErrorData::invalid_params(
-                    format!("cpu `{other}`: `snes` or `spc`"),
-                    None,
-                ));
-            }
-        };
+        let cpu = listing_cpu(params.cpu.as_deref())?;
         let opts = params.options.unwrap_or_default();
         let count = params.rows.unwrap_or(40).min(1000);
         let em = self.emulator.lock().await;
@@ -2945,6 +3066,154 @@ impl LunaServer {
         let code_log = em.code_logging();
         drop(em);
         Ok(rmcp::Json(ListingResult { rows, code_log }))
+    }
+
+    #[rmcp::tool(
+        description = "Watch values as Mesen2's Watch pane shows them: each entry an \
+                                expression with an optional `, H2` / `, S` / `, U` / `, B` \
+                                format, or `[addr, count]` for bytes; `style` (`hex`, \
+                                `decimal`, `binary`) when an entry names none. Errors read \
+                                `<invalid expression>`, `<division by zero>`, `<label out of \
+                                scope>`."
+    )]
+    async fn watch(
+        &self,
+        Parameters(params): Parameters<WatchParams>,
+    ) -> Result<rmcp::Json<WatchResult>, ErrorData> {
+        let cpu = match params.cpu.as_deref() {
+            None | Some("snes" | "cpu") => luna_api::ExprCpu::Snes,
+            Some("spc") => luna_api::ExprCpu::Spc,
+            Some(other) => {
+                return Err(ErrorData::invalid_params(
+                    format!("cpu `{other}`: `snes` or `spc`"),
+                    None,
+                ));
+            }
+        };
+        let style = params.style.unwrap_or_default();
+        let em = self.emulator.lock().await;
+        let values = params
+            .entries
+            .iter()
+            .map(|e| em.watch_value(e, cpu, style))
+            .collect();
+        drop(em);
+        Ok(rmcp::Json(WatchResult { values }))
+    }
+
+    #[rmcp::tool(
+        description = "Mesen2's Go To: the address a label, bare hex digits (`8000` is \
+                                `$8000`) or an expression (`{$FFEA}`, `pc+4`) names, in the \
+                                CPU's space; `null` when none."
+    )]
+    async fn goto(
+        &self,
+        Parameters(params): Parameters<GotoParams>,
+    ) -> Result<rmcp::Json<GotoResultOut>, ErrorData> {
+        let cpu = listing_cpu(params.cpu.as_deref())?;
+        let address = self.emulator.lock().await.goto_address(cpu, &params.text);
+        Ok(rmcp::Json(GotoResultOut { address }))
+    }
+
+    #[rmcp::tool(
+        description = "Mesen2's Go To All: the labels and `.sym` names of a CPU matching a \
+                                query (every term, case ignored, terms split at spaces and \
+                                capitals), with the memory they name and where the CPU sees \
+                                them now (`null` when out of view)."
+    )]
+    async fn goto_all(
+        &self,
+        Parameters(params): Parameters<GotoAllParams>,
+    ) -> Result<rmcp::Json<GotoAllResult>, ErrorData> {
+        let cpu = listing_cpu(params.cpu.as_deref())?;
+        let results = self.emulator.lock().await.goto_all(cpu, &params.query);
+        Ok(rmcp::Json(GotoAllResult { results }))
+    }
+
+    #[rmcp::tool(
+        description = "Find in the code listing: the next row (or the previous, \
+                                `backward`) after `from` whose instruction, effective \
+                                address, value or comment contains `text`, case ignored, \
+                                wrapping round the space; `null` when there is none."
+    )]
+    async fn find(
+        &self,
+        Parameters(params): Parameters<FindParams>,
+    ) -> Result<rmcp::Json<FindResultOut>, ErrorData> {
+        let cpu = listing_cpu(params.cpu.as_deref())?;
+        let opts = params.options.unwrap_or_default();
+        let em = self.emulator.lock().await;
+        let from = match params.from {
+            Some(a) => a,
+            None => match cpu {
+                luna_api::ListingCpu::Snes => {
+                    let c = em.cpu_state().map_err(|e| api_err_to_mcp(&e))?;
+                    (u32::from(c.pb) << 16) | u32::from(c.pc)
+                }
+                luna_api::ListingCpu::Spc => {
+                    u32::from(em.spc700_state().map_err(|e| api_err_to_mcp(&e))?.pc)
+                }
+            },
+        };
+        let pos = em
+            .listing_pos_of(cpu, from, opts)
+            .and_then(|p| em.listing_find(cpu, p, &params.text, !params.backward, opts))
+            .map_err(|e| api_err_to_mcp(&e))?;
+        drop(em);
+        Ok(rmcp::Json(FindResultOut { pos }))
+    }
+
+    #[rmcp::tool(
+        description = "Mesen2's Find All Occurrences: up to 500 instruction rows of the \
+                                whole listing containing `text` (optionally matching its \
+                                case, as a whole word), with their text and effective address."
+    )]
+    async fn find_all(
+        &self,
+        Parameters(params): Parameters<FindAllParams>,
+    ) -> Result<rmcp::Json<FindAllResult>, ErrorData> {
+        let cpu = listing_cpu(params.cpu.as_deref())?;
+        let opts = params.options.unwrap_or_default();
+        let results = self
+            .emulator
+            .lock()
+            .await
+            .listing_find_all(
+                cpu,
+                &params.text,
+                params.match_case,
+                params.whole_word,
+                opts,
+            )
+            .map_err(|e| api_err_to_mcp(&e))?;
+        Ok(rmcp::Json(FindAllResult { results }))
+    }
+
+    #[rmcp::tool(
+        description = "The function list (65C816): every subroutine entry the code log \
+                                saw in the program ROM (calls, BRK / COP, NMI / IRQ \
+                                handlers), with its label and where the CPU sees it now. \
+                                Turn `enable_code_log` on and run first."
+    )]
+    async fn functions(&self) -> rmcp::Json<FunctionsResult> {
+        let functions = self.emulator.lock().await.functions();
+        rmcp::Json(FunctionsResult { functions })
+    }
+
+    #[rmcp::tool(
+        description = "What the Debugger window's Status pane shows (65C816): registers \
+                                and flags, master clocks, pending NMI / H/V IRQ / coprocessor \
+                                IRQ, the PPU's H clock, dot and scanline, its VRAM / OAM / \
+                                CGRAM addresses, the stack from SP+1 to the end of its page."
+    )]
+    async fn debugger_status(&self) -> Result<rmcp::Json<luna_api::DebuggerStatus>, ErrorData> {
+        let status = self
+            .emulator
+            .lock()
+            .await
+            .debugger_status()
+            .map_err(|e| api_err_to_mcp(&e))?;
+        Ok(rmcp::Json(status))
     }
 
     #[rmcp::tool(

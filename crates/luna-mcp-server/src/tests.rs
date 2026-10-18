@@ -1742,3 +1742,106 @@ async fn server_listing_shows_logged_code_with_labels() {
     assert!(bad.is_err());
     let _ = std::fs::remove_file(&path);
 }
+
+#[tokio::test]
+async fn server_debugger_tools_answer_as_the_window_does() {
+    let s = LunaServer::new();
+    let path = PathBuf::from("/tmp/luna_mcp_debugger_tools_demo.smc");
+    std::fs::write(&path, demo_lorom()).unwrap();
+    s.load_rom(Parameters(rom_params(&path.to_string_lossy())))
+        .await
+        .unwrap();
+    s.enable_code_log(Parameters(EnableCodeLogParams { on: true }))
+        .await;
+    s.step(Parameters(StepParams { count: 50 })).await.unwrap();
+    s.label_set(Parameters(LabelSetParams {
+        memory: "SnesWorkRam".into(),
+        address: 0x10,
+        length: Some(2),
+        name: "counter".into(),
+        comment: String::new(),
+    }))
+    .await
+    .unwrap();
+    s.poke_memory(Parameters(
+        serde_json::from_value(serde_json::json!({
+            "bank": 0x7E, "offset": 0x10, "data": [0x34, 0x12]
+        }))
+        .unwrap(),
+    ))
+    .await
+    .unwrap();
+
+    let w = s
+        .watch(Parameters(WatchParams {
+            entries: vec!["{counter}".into(), "[counter], B".into(), "1 / 0".into()],
+            cpu: None,
+            style: None,
+        }))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(w.values, ["$1234", "%0011.0100", "<division by zero>"]);
+
+    let g = s
+        .goto(Parameters(GotoParams {
+            text: "counter".into(),
+            cpu: None,
+        }))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(g.address, Some(0x7E_0010));
+    let g = s
+        .goto(Parameters(GotoParams {
+            text: "8000".into(),
+            cpu: None,
+        }))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(g.address, Some(0x8000));
+
+    let all = s
+        .goto_all(Parameters(GotoAllParams {
+            query: "inidisp".into(),
+            cpu: None,
+        }))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(all.results[0].name, "INIDISP");
+    assert_eq!(all.results[0].address, Some(0x2100));
+
+    let f = s
+        .find(Parameters(FindParams {
+            text: "BRK".into(),
+            from: None,
+            backward: false,
+            cpu: None,
+            options: None,
+        }))
+        .await
+        .unwrap()
+        .0;
+    assert!(f.pos.is_some(), "the demo ROM is BRKs");
+    let none = s
+        .find(Parameters(FindParams {
+            text: "no such text".into(),
+            from: None,
+            backward: false,
+            cpu: None,
+            options: None,
+        }))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(none.pos, None);
+
+    let st = s.debugger_status().await.unwrap().0;
+    assert!(st.master_clocks > 0);
+    assert!(!st.stack.is_empty());
+    let funcs = s.functions().await.0;
+    assert!(funcs.functions.iter().all(|f| f.address.is_some()));
+    let _ = std::fs::remove_file(&path);
+}
