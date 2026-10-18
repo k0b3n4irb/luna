@@ -45,6 +45,7 @@ pub(crate) enum DebugPanel {
     EventViewer,
     Breakpoints,
     Debugger,
+    SpcDebugger,
 }
 
 impl DebugPanel {
@@ -63,6 +64,7 @@ impl DebugPanel {
             Self::Tilemap => "Tilemap",
             Self::Breakpoints => "Breakpoints",
             Self::Debugger => "Debugger",
+            Self::SpcDebugger => "SPC Debugger",
         }
     }
 
@@ -81,6 +83,7 @@ impl DebugPanel {
             Self::Tilemap => (540, 580),
             Self::Breakpoints => (420, 360),
             Self::Debugger => (1180, 760),
+            Self::SpcDebugger => (1080, 700),
         }
     }
 }
@@ -453,7 +456,7 @@ impl DebugWindows {
                         // so it is NOT wrapped in the outer scroll area.
                         if panel == DebugPanel::EventViewer {
                             nav = ui::event_viewer_body(&mut body, snap);
-                        } else if panel == DebugPanel::Debugger {
+                        } else if matches!(panel, DebugPanel::Debugger | DebugPanel::SpcDebugger) {
                             if let Some(view) = snap.debugger.as_deref() {
                                 nav = Some(PanelNav::Debugger(ui::debugger_body(&mut body, view)));
                             }
@@ -465,7 +468,9 @@ impl DebugWindows {
                                 DebugPanel::Registers => ui::registers_body(ui, snap),
                                 DebugPanel::Palette => ui::palette_body(ui, snap),
                                 DebugPanel::Tilemap => nav = ui::tilemap_body(ui, snap),
-                                DebugPanel::EventViewer | DebugPanel::Debugger => {}
+                                DebugPanel::EventViewer
+                                | DebugPanel::Debugger
+                                | DebugPanel::SpcDebugger => {}
                                 DebugPanel::Spc700Disasm => nav = ui::spc700_disasm_body(ui, snap),
                                 DebugPanel::CpuDisasm => nav = ui::cpu_disasm_body(ui, snap),
                                 DebugPanel::Breakpoints => {

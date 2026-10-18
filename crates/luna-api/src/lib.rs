@@ -18,6 +18,7 @@ use std::path::Path;
 /// DSP register-write trace event (issue #122), re-exported so the CLI
 /// and MCP consume it through `luna-api` rather than depending on
 /// `luna-apu` (`.claude/rules/api-first.md`).
+pub use luna_apu::SpcStepKind;
 pub use luna_apu::dsp::DspWriteEvent;
 pub use luna_cartridge::Region;
 use luna_cartridge::{CartError, Cartridge};
@@ -4393,6 +4394,54 @@ impl Emulator {
         self.run_until_break_with(max_steps, interrupt, false, &mut |_, _| false)
     }
 
+    /// Write an SPC700 register: `a`, `x`, `y`, `sp`, `pc`, `psw` (or `p`).
+    /// Meant for a stopped SPC700 (a breakpoint or a step): between two of
+    /// its instructions.
+    pub fn set_spc_register(&mut self, reg: &str, val: u32) -> Result<(), ApiError> {
+        let c = &mut self.snes.as_mut().ok_or(ApiError::NoRom)?.apu_real.cpu;
+        match reg.to_ascii_lowercase().as_str() {
+            "a" => c.a = val as u8,
+            "x" => c.x = val as u8,
+            "y" => c.y = val as u8,
+            "sp" | "s" => c.sp = val as u8,
+            "pc" => c.pc = val as u16,
+            "psw" | "p" => c.psw.0 = val as u8,
+            other => {
+                return Err(ApiError::BadArg(format!(
+                    "unknown SPC700 register `{other}`"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// One of Mesen2's SPC700 steps (into, over, out): run until the
+    /// SPC700 ends it, a breakpoint fires, or `max_steps` 65C816
+    /// instructions elapse. The stop is a [`BreakKind::Step`] hit on the
+    /// SPC700, at the instruction the SPC700 stands on.
+    pub fn step_spc(&mut self, kind: SpcStepKind, max_steps: u64) -> Result<RunOutcome, ApiError> {
+        self.step_spc_interruptible(kind, max_steps, &std::sync::atomic::AtomicBool::new(false))
+    }
+
+    /// [`Self::step_spc`] that an external `interrupt` flag ends early.
+    pub fn step_spc_interruptible(
+        &mut self,
+        kind: SpcStepKind,
+        max_steps: u64,
+        interrupt: &std::sync::atomic::AtomicBool,
+    ) -> Result<RunOutcome, ApiError> {
+        self.snes
+            .as_mut()
+            .ok_or(ApiError::NoRom)?
+            .apu_real
+            .start_step(kind);
+        let out = self.run_until_break_interruptible(max_steps, interrupt);
+        if let Some(snes) = self.snes.as_mut() {
+            snes.apu_real.cancel_step();
+        }
+        out
+    }
+
     /// Run one step of `kind` (Mesen2's step commands), at full speed. A
     /// breakpoint or break source met on the way stops it first; otherwise
     /// it ends with a [`BreakKind::Step`] hit, or with no hit when
@@ -4760,6 +4809,20 @@ impl Emulator {
                             .and_then(|b| b.list().into_iter().find(|i| i.id == id))
                             .map_or(luna_core::WatchSpace::Bus, |i| i.space)
                     };
+                    if let Some(hit) = snes.apu_real.break_hit
+                        && hit.id == luna_apu::SPC_STEP_ID
+                    {
+                        return Some(BreakHit {
+                            id: BREAK_SOURCE_ID,
+                            kind: BreakKind::Step,
+                            cpu: BreakCpu::Spc,
+                            pc: u32::from(hit.pc),
+                            addr: None,
+                            value: None,
+                            dma: false,
+                            space: luna_core::WatchSpace::Bus,
+                        });
+                    }
                     if let Some(hit) = snes.apu_real.break_hit {
                         return Some(BreakHit {
                             id: hit.id,

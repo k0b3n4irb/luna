@@ -73,6 +73,13 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   label, comment, breakpoint and Find All dialogs; Mesen2's shortcuts;
   File ▸ Workspace imports and exports. Steps run on the emu thread and
   Break ends a long one.
+- **The SPC Debugger window** (GUI, *Debug ▸ SPC Debugger*), Mesen2's
+  for the SPC700: its listing, its Status pane (registers, PSW flags, the
+  stack), Labels, Find Results, Watch, Breakpoints, its steps. When a CPU
+  stops, the window of that CPU comes forward. API: `step_spc` (into, over
+  a `CALL` / `PCALL` / `TCALL` / `BRK`, out after a `RET` / `RETI`, a
+  `step` hit on the SPC700) and `set_spc_register`; MCP: `step_kind` and
+  `set_cpu_register` take `cpu: "spc"`.
 - **Labels from ca65 / cc65 `.dbg` and bass `.sym` files**, read as
   Mesen2 reads them for a SNES cartridge (from a clean-room description
   measured on Mesen2, its sample files kept as test fixtures): `.dbg`

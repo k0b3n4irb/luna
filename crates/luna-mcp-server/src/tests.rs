@@ -257,6 +257,7 @@ async fn server_p2_breakpoints_round_trip() {
         s.set_cpu_register(Parameters(SetRegisterParams {
             reg: reg.into(),
             val,
+            cpu: None,
         }))
         .await
         .unwrap();
@@ -1924,4 +1925,35 @@ async fn server_workspace_saves_and_loads_keeping_the_guis_part() {
     let list = t.bp_list().await.unwrap().0.breakpoints;
     assert_eq!(list[0].condition.as_deref(), Some("a == 1"));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn server_step_kind_steps_the_spc700() {
+    let s = LunaServer::new();
+    let path = PathBuf::from("/tmp/luna_mcp_spc_step_demo.smc");
+    std::fs::write(&path, demo_lorom()).unwrap();
+    s.load_rom(Parameters(rom_params(&path.to_string_lossy())))
+        .await
+        .unwrap();
+    let step = |kind: &str| {
+        serde_json::from_value::<StepKindParams>(serde_json::json!({"kind": kind, "cpu": "spc"}))
+            .unwrap()
+    };
+    let r = s.step_kind(Parameters(step("into"))).await.unwrap().0;
+    assert!(r.hit);
+    assert_eq!(r.cpu.as_deref(), Some("spc"));
+    s.set_cpu_register(Parameters(SetRegisterParams {
+        reg: "pc".into(),
+        val: 0x0200,
+        cpu: Some("spc".into()),
+    }))
+    .await
+    .unwrap();
+    let r = s.step_kind(Parameters(step("into"))).await.unwrap().0;
+    assert!(r.hit, "{r:?}");
+    assert!(
+        s.step_kind(Parameters(step("frame"))).await.is_err(),
+        "not an SPC700 step"
+    );
+    let _ = std::fs::remove_file(&path);
 }

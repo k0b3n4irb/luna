@@ -261,15 +261,10 @@ struct LunaApp {
     cpu_disasm_lines: u16,
     /// Tilemap Viewer: which BG layer (0..3) to render.
     tilemap_bg: usize,
-    /// The Debugger window's state.
-    debugger: debugger_host::DebuggerHost,
-    /// Whether the Debugger window was open last frame (to see it close).
-    debugger_open: bool,
+    /// The Debugger windows' state (65C816, SPC700).
+    debugger: debugger_host::Debuggers,
     /// Debugger steps the emu thread had served at the last look.
     debugger_steps_seen: u64,
-    /// The last Debugger view, redrawn while the emulator is busy (a long
-    /// step holds it).
-    debugger_view: Option<Box<crate::ui::DebuggerView>>,
     /// The workspace file of the ROM loaded, and what was last written
     /// to it (saved only when that changes).
     workspace_file: Option<(PathBuf, String)>,
@@ -279,12 +274,20 @@ struct LunaApp {
     debugger_file_rx: Option<(DebuggerFile, mpsc::Receiver<Option<PathBuf>>)>,
 }
 
+/// The window of a debugger's CPU.
+const fn debugger_panel(cpu: luna_api::ListingCpu) -> DebugPanel {
+    match cpu {
+        luna_api::ListingCpu::Snes => DebugPanel::Debugger,
+        luna_api::ListingCpu::Spc => DebugPanel::SpcDebugger,
+    }
+}
+
 /// What a Debugger file dialog is for.
 #[derive(Clone, Debug)]
 enum DebuggerFile {
     ImportLabels,
     ExportLabels(String),
-    ImportWatches,
+    ImportWatches(luna_api::ListingCpu),
     ExportWatches(String),
 }
 
@@ -374,11 +377,9 @@ impl LunaApp {
             cpu_disasm_addr: 0x00_8000,
             cpu_disasm_lines: 32,
             tilemap_bg: 0,
-            debugger: debugger_host::DebuggerHost::default(),
-            debugger_open: false,
+            debugger: debugger_host::Debuggers::default(),
             debugger_steps_seen: 0,
             debugger_file_rx: None,
-            debugger_view: None,
             workspace_file: None,
             workspace_saved_at: std::time::Instant::now(),
         };
@@ -459,8 +460,8 @@ impl LunaApp {
         self.last_srm_flush = std::time::Instant::now();
         // The ROM's debugger workspace: its labels, breakpoints, watches and
         // window settings, over the defaults and the `.mlb` the load read.
-        self.debugger.rom_changed();
         self.workspace_file = None;
+        let mut loaded_ws = None;
         if let Some(file) = em.workspace_file() {
             let written = luna_api::Workspace::load(&file).map_or_else(
                 |_| String::new(),
@@ -474,15 +475,13 @@ impl LunaApp {
                         }
                         Err(e) => eprintln!("luna-gui: workspace {}: {e}", file.display()),
                     }
-                    self.debugger.load_workspace(&ws);
+                    loaded_ws = Some(ws);
                     std::fs::read_to_string(&file).unwrap_or_default()
                 },
             );
             self.workspace_file = Some((file, written));
         }
-        if self.debugger_open {
-            self.debugger.opened(&mut em);
-        }
+        self.debugger.rom_loaded(&mut em, loaded_ws.as_ref());
         if let Ok(mut guard) = self.emu.lock() {
             *guard = Some(em);
         }
@@ -879,7 +878,7 @@ impl LunaApp {
             return;
         }
         // The Debugger's Controllers pane forces buttons on top of the input.
-        let forced = self.debugger.pad_override;
+        let forced = self.debugger.snes.pad_override;
         let p1 = self.key_bindings.mask_from_pressed(0, &self.pressed_keys)
             | self.pad_masks[0]
             | forced[0];
@@ -1036,19 +1035,23 @@ impl LunaApp {
         });
         // With the Debugger open, it shows the stop (and comes forward);
         // otherwise jump the disassembly panel to the halt PC.
-        if self.debug_windows.is_open(DebugPanel::Debugger) {
-            let effects = self
+        if self.debugger.any_open() {
+            let stopped = self
                 .emu
                 .lock()
                 .ok()
                 .and_then(|mut g| g.as_mut().map(|em| self.debugger.stopped(em, Some(&hit))));
-            if effects.is_some_and(|e| !e.is_empty()) {
-                self.sync_has_breakpoints();
+            if let Some((effects, owner)) = stopped {
+                if !effects.is_empty() {
+                    self.sync_has_breakpoints();
+                }
+                // Only the window of the CPU that stopped comes forward.
+                if self.debugger.is_open(owner) && self.debugger.host(owner).settings.bring_to_front
+                {
+                    self.debug_windows.focus(debugger_panel(owner));
+                }
             }
             self.debugger_steps_seen = self.emu_shared.steps_served.load(Ordering::Acquire);
-            if self.debugger.settings.bring_to_front {
-                self.debug_windows.focus(DebugPanel::Debugger);
-            }
             return;
         }
         self.cpu_disasm_addr = hit.pc;
@@ -1572,6 +1575,7 @@ impl LunaApp {
             show_tilemap: self.debug_windows.is_open(DebugPanel::Tilemap),
             show_event_viewer: self.debug_windows.is_open(DebugPanel::EventViewer),
             show_debugger: self.debug_windows.is_open(DebugPanel::Debugger),
+            show_spc_debugger: self.debug_windows.is_open(DebugPanel::SpcDebugger),
             pending_rebind: self.pending_rebind,
             pending_hotkey_rebind: self.pending_hotkey_rebind,
             screenshot_status: self.screenshot_status.clone(),
@@ -1697,7 +1701,7 @@ impl LunaApp {
                                 .map(|b| b.lo)
                                 .collect();
                         }
-                        DebugPanel::Debugger => {}
+                        DebugPanel::Debugger | DebugPanel::SpcDebugger => {}
                         DebugPanel::Breakpoints => {
                             snap.breakpoints = em.bp_list().ok().map(|list| {
                                 list.into_iter()
@@ -1722,16 +1726,22 @@ impl LunaApp {
             return;
         };
         // The Debugger builds its own view without blocking on the lock.
-        let mut snap = if panel == DebugPanel::Debugger {
+        let dbg_cpu = match panel {
+            DebugPanel::Debugger => Some(luna_api::ListingCpu::Snes),
+            DebugPanel::SpcDebugger => Some(luna_api::ListingCpu::Spc),
+            _ => None,
+        };
+        let mut snap = if dbg_cpu.is_some() {
             DebugSnapshot::default()
         } else {
             self.build_panel_snapshot(panel)
         };
-        if panel == DebugPanel::Debugger {
+        if let Some(cpu) = dbg_cpu {
             self.sync_debugger_open();
             let paused = self.emu_shared.paused.load(Ordering::Acquire)
                 && !self.emu_shared.stepping.load(Ordering::Acquire);
             let served = self.emu_shared.steps_served.load(Ordering::Acquire);
+            let slot = usize::from(cpu == luna_api::ListingCpu::Spc);
             if let Ok(mut g) = self.emu.try_lock()
                 && let Some(em) = g.as_mut()
             {
@@ -1739,11 +1749,12 @@ impl LunaApp {
                     self.debugger_steps_seen = served;
                     let _ = self.debugger.stopped(em, None);
                 }
-                self.debugger_view = Some(Box::new(self.debugger.view(em, paused)));
-            } else if let Some(v) = self.debugger_view.as_mut() {
+                let view = self.debugger.host(cpu).view(em, paused);
+                self.debugger.views[slot] = Some(Box::new(view));
+            } else if let Some(v) = self.debugger.views[slot].as_mut() {
                 v.paused = paused;
             }
-            snap.debugger.clone_from(&self.debugger_view);
+            snap.debugger.clone_from(&self.debugger.views[slot]);
         }
         let (nav, close) = self.debug_windows.render(id, &snap);
         match nav {
@@ -1859,7 +1870,10 @@ impl LunaApp {
                     }
                 }
             }
-            Some(PanelNav::Debugger(actions)) => self.apply_debugger(actions),
+            Some(PanelNav::Debugger(actions)) => {
+                let cpu = dbg_cpu.unwrap_or(luna_api::ListingCpu::Snes);
+                self.apply_debugger(cpu, actions);
+            }
             None => {}
         }
         if close {
@@ -1871,31 +1885,39 @@ impl LunaApp {
     /// See the Debugger window open or close: it logs code and calls while
     /// open, and breaks on opening when its setting says so.
     fn sync_debugger_open(&mut self) {
-        let open = self.debug_windows.is_open(DebugPanel::Debugger);
-        if open == self.debugger_open {
+        let open = [
+            self.debug_windows.is_open(DebugPanel::Debugger),
+            self.debug_windows.is_open(DebugPanel::SpcDebugger),
+        ];
+        let was = [
+            self.debugger.is_open(luna_api::ListingCpu::Snes),
+            self.debugger.is_open(luna_api::ListingCpu::Spc),
+        ];
+        if open == was {
             return;
         }
-        self.debugger_open = open;
-        if let Ok(mut g) = self.emu.lock()
-            && let Some(em) = g.as_mut()
-        {
-            if open {
-                self.debugger.opened(em);
-            } else {
-                debugger_host::DebuggerHost::closed(em);
-            }
-        }
-        if !open {
+        let opened = match self.emu.lock() {
+            Ok(mut g) => self.debugger.sync_open(g.as_mut(), open),
+            Err(_) => Vec::new(),
+        };
+        if open.iter().zip(was).any(|(now, before)| before && !now) {
             self.save_workspace();
         }
-        if open && self.debugger.settings.break_on_open {
+        if opened
+            .iter()
+            .any(|&cpu| self.debugger.host(cpu).settings.break_on_open)
+        {
             self.emu_shared.paused.store(true, Ordering::Release);
             self.emu_shared.unpark_emu();
         }
     }
 
     /// Apply what the Debugger window did, then what only the app can do.
-    fn apply_debugger(&mut self, actions: Vec<crate::ui::DebuggerAction>) {
+    fn apply_debugger(
+        &mut self,
+        cpu: luna_api::ListingCpu,
+        actions: Vec<crate::ui::DebuggerAction>,
+    ) {
         use debugger_host::HostEffect;
         // Break first, before waiting on the emulator a long step holds.
         if actions.iter().any(|a| {
@@ -1923,7 +1945,7 @@ impl LunaApp {
                     }
                     a => a,
                 };
-                effects.extend(self.debugger.apply(em, a));
+                effects.extend(self.debugger.host(cpu).apply(em, a));
             }
         }
         for fx in effects {
@@ -1937,6 +1959,7 @@ impl LunaApp {
                     self.emu_shared
                         .step_interrupt
                         .store(true, Ordering::Release);
+                    self.debugger.stepping(cpu);
                     if !self.emu_shared.paused.swap(true, Ordering::AcqRel)
                         && let Ok(mut g) = self.emu.lock()
                         && let Some(em) = g.as_mut()
@@ -1945,10 +1968,16 @@ impl LunaApp {
                     }
                     self.emu_shared.unpark_emu();
                 }
-                HostEffect::Step(kind) => {
+                HostEffect::Step(_) | HostEffect::SpcStep(_) => {
+                    let step = match fx {
+                        HostEffect::SpcStep(k) => crate::emu_thread::DebugStep::Spc(k),
+                        HostEffect::Step(k) => crate::emu_thread::DebugStep::Cpu(k),
+                        _ => unreachable!("matched above"),
+                    };
+                    self.debugger.stepping(cpu);
                     self.emu_shared.paused.store(true, Ordering::Release);
                     if let Ok(mut g) = self.emu_shared.step_kind_request.lock() {
-                        *g = Some(kind);
+                        *g = Some(step);
                     }
                     self.emu_shared.unpark_emu();
                 }
@@ -1959,7 +1988,9 @@ impl LunaApp {
                 HostEffect::ExportLabels(t) => {
                     self.debugger_file_dialog(DebuggerFile::ExportLabels(t));
                 }
-                HostEffect::ImportWatches => self.debugger_file_dialog(DebuggerFile::ImportWatches),
+                HostEffect::ImportWatches => {
+                    self.debugger_file_dialog(DebuggerFile::ImportWatches(cpu));
+                }
                 HostEffect::ExportWatches(t) => {
                     self.debugger_file_dialog(DebuggerFile::ExportWatches(t));
                 }
@@ -2000,7 +2031,9 @@ impl LunaApp {
                         .add_filter("Mesen label file", &["mlb"])
                         .set_file_name(format!("{stem}.mlb"))
                         .save_file(),
-                    DebuggerFile::ImportWatches => d.add_filter("Watch file", &["txt"]).pick_file(),
+                    DebuggerFile::ImportWatches(_) => {
+                        d.add_filter("Watch file", &["txt"]).pick_file()
+                    }
                     DebuggerFile::ExportWatches(_) => d
                         .add_filter("Watch file", &["txt"])
                         .set_file_name(format!("{stem}.txt"))
@@ -2036,9 +2069,9 @@ impl LunaApp {
             DebuggerFile::ExportLabels(text) | DebuggerFile::ExportWatches(text) => {
                 Some(std::fs::write(&path, text).map_err(|e| e.to_string()))
             }
-            DebuggerFile::ImportWatches => Some(
+            DebuggerFile::ImportWatches(cpu) => Some(
                 std::fs::read_to_string(&path)
-                    .map(|t| self.debugger.set_watches(&t))
+                    .map(|t| self.debugger.host(cpu).set_watches(&t))
                     .map_err(|e| e.to_string()),
             ),
         };
@@ -2069,6 +2102,11 @@ impl LunaApp {
             }
             MenuAction::ToggleDebugger => {
                 self.debug_windows.toggle(event_loop, DebugPanel::Debugger);
+                self.sync_debugger_open();
+            }
+            MenuAction::ToggleSpcDebugger => {
+                self.debug_windows
+                    .toggle(event_loop, DebugPanel::SpcDebugger);
                 self.sync_debugger_open();
             }
             MenuAction::StepInstruction => self.step_instruction(),

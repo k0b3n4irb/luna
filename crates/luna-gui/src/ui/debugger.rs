@@ -86,6 +86,8 @@ pub(crate) struct WatchLine {
 /// What the Debugger window shows, built by `LunaApp` each frame.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct DebuggerView {
+    /// The CPU this window debugs.
+    pub cpu: luna_api::ListingCpu,
     /// The emulation is paused.
     pub paused: bool,
     /// The listing rows from the top of the view.
@@ -100,8 +102,10 @@ pub(crate) struct DebuggerView {
     pub bp_marks: Vec<(f32, bool)>,
     /// Settings.
     pub settings: DebuggerSettings,
-    /// The Status pane.
+    /// The Status pane (65C816).
     pub status: Option<DebuggerStatus>,
+    /// The Status pane (SPC700): registers and the stack from `SP + 1`.
+    pub spc_status: Option<(luna_api::Spc700State, Vec<u8>)>,
     /// The watch list.
     pub watches: Vec<WatchLine>,
     /// Its default style.
@@ -540,7 +544,7 @@ fn shortcuts(ui: &egui::Ui, view: &DebuggerView, st: &mut UiState, out: &mut Vec
 fn label_dialog_for(r: &ListingRow, view: &DebuggerView) -> Dialog {
     let (memory, address) = r
         .absolute
-        .map_or((MemoryKind::SnesMemory, r.pos.addr), |l| (l.kind, l.offset));
+        .map_or_else(|| (bus_of(view), r.pos.addr), |l| (l.kind, l.offset));
     let existing = view.labels.iter().find(|l| {
         l.label.memory == memory
             && (l.label.address..l.label.address + l.label.length).contains(&address)
@@ -706,8 +710,12 @@ fn debug_items(
         "Shift+F11",
         Some(DebuggerAction::Step(StepKind::Out)),
     );
+    let main = view.cpu == luna_api::ListingCpu::Snes;
     ui.separator();
-    for label in ["Step back", "Step back (1 scanline)", "Step back (1 frame)"] {
+    for label in ["Step back", "Step back (1 scanline)", "Step back (1 frame)"]
+        .into_iter()
+        .filter(|_| main)
+    {
         ui.add_enabled(false, egui::Button::new(label))
             .on_disabled_hover_text("Comes with rewind.");
     }
@@ -731,8 +739,10 @@ fn debug_items(
         Some(DebuggerAction::Step(StepKind::Frame)),
     );
     ui.separator();
-    item(ui, true, "Run to NMI", "", Some(DebuggerAction::RunToNmi));
-    item(ui, true, "Run to IRQ", "", Some(DebuggerAction::RunToIrq));
+    if main {
+        item(ui, true, "Run to NMI", "", Some(DebuggerAction::RunToNmi));
+        item(ui, true, "Run to IRQ", "", Some(DebuggerAction::RunToIrq));
+    }
     if item(ui, true, "Run to scanline…", "Alt+B", None) {
         st.dialog = Dialog::RunToScanline;
     }
@@ -835,8 +845,10 @@ fn toolbar(
             DebuggerAction::Step(StepKind::Frame),
         );
         ui.separator();
-        b(ui, true, "NMI", "Run to NMI", DebuggerAction::RunToNmi);
-        b(ui, true, "IRQ", "Run to IRQ", DebuggerAction::RunToIrq);
+        if view.cpu == luna_api::ListingCpu::Snes {
+            b(ui, true, "NMI", "Run to NMI", DebuggerAction::RunToNmi);
+            b(ui, true, "IRQ", "Run to IRQ", DebuggerAction::RunToIrq);
+        }
         if ui
             .button("Line#")
             .on_hover_text("Run to scanline… (Alt+B)")
@@ -932,12 +944,14 @@ fn settings_panel(ui: &mut egui::Ui, view: &DebuggerView, out: &mut Vec<Debugger
     ui.checkbox(&mut s.listing.lower_case, "Use lower case");
     ui.separator();
     ui.strong("Break on…");
-    let mut on = view.break_on;
-    for (i, name) in ["BRK", "COP", "WDM", "STP"].iter().enumerate() {
-        ui.checkbox(&mut on[i], *name);
-    }
-    if on != view.break_on {
-        out.push(DebuggerAction::BreakOn(on));
+    if view.cpu == luna_api::ListingCpu::Snes {
+        let mut on = view.break_on;
+        for (i, name) in ["BRK", "COP", "WDM", "STP"].iter().enumerate() {
+            ui.checkbox(&mut on[i], *name);
+        }
+        if on != view.break_on {
+            out.push(DebuggerAction::BreakOn(on));
+        }
     }
     ui.checkbox(&mut s.break_on_open, "Debugger opened");
     ui.separator();
@@ -954,14 +968,20 @@ fn settings_panel(ui: &mut egui::Ui, view: &DebuggerView, out: &mut Vec<Debugger
 // The code view
 // ---------------------------------------------------------------------------
 
+/// `$` and `a` in the CPU's address width.
+fn hexa(view: &DebuggerView, a: u32) -> String {
+    format!("${a:0w$X}", w = view.cpu.digits())
+}
+
 /// The address the margin prints for a row.
-fn margin_text(r: &ListingRow, mode: MarginMode) -> String {
+fn margin_text(r: &ListingRow, mode: MarginMode, digits: usize) -> String {
     let abs = r.absolute.map(|l| l.offset);
+    let w = digits;
     match (mode, abs) {
-        (MarginMode::Cpu, _) | (_, None) => format!("{:06X}", r.pos.addr),
-        (MarginMode::Rom, Some(a)) => format!("{a:06X}"),
-        (MarginMode::Both, Some(a)) => format!("{:06X} [{a:06X}]", r.pos.addr),
-        (MarginMode::Compact, Some(a)) => format!("{:06X} [{:X}]", r.pos.addr, a >> 12),
+        (MarginMode::Cpu, _) | (_, None) => format!("{:0w$X}", r.pos.addr),
+        (MarginMode::Rom, Some(a)) => format!("{a:0w$X}"),
+        (MarginMode::Both, Some(a)) => format!("{:0w$X} [{a:0w$X}]", r.pos.addr),
+        (MarginMode::Compact, Some(a)) => format!("{:0w$X} [{:X}]", r.pos.addr, a >> 12),
     }
 }
 
@@ -1022,7 +1042,7 @@ fn code_job(
 
 /// The address a double-click on a row goes to: its effective address,
 /// else a full target written in its text.
-fn row_target(r: &ListingRow) -> Option<u32> {
+fn row_target(r: &ListingRow, digits: usize) -> Option<u32> {
     if let Some(e) = &r.effective
         && let Some(h) = e.strip_prefix("[$").and_then(|e| e.strip_suffix(']'))
     {
@@ -1033,7 +1053,7 @@ fn row_target(r: &ListingRow) -> Option<u32> {
         .chars()
         .take_while(char::is_ascii_hexdigit)
         .collect();
-    (hex.len() == 6)
+    (hex.len() == digits)
         .then(|| u32::from_str_radix(&hex, 16).ok())
         .flatten()
 }
@@ -1154,7 +1174,7 @@ fn code_view(
             painter.text(
                 egui::pos2(area.min.x + gutter_w + margin_w - char_w * 0.5, y + 1.0),
                 egui::Align2::RIGHT_TOP,
-                margin_text(r, view.settings.margin),
+                margin_text(r, view.settings.margin, view.cpu.digits()),
                 font.clone(),
                 C_MARGIN,
             );
@@ -1279,7 +1299,7 @@ fn code_view(
         }
         if resp.double_clicked()
             && !in_gutter
-            && let Some(t) = row_target(r)
+            && let Some(t) = row_target(r, view.cpu.digits())
         {
             out.push(DebuggerAction::Goto(t));
         }
@@ -1455,7 +1475,7 @@ fn code_menu(
     out: &mut Vec<DebuggerAction>,
 ) {
     let target = sel.map(|r| r.pos.addr);
-    let hint = target.map_or_else(String::new, |a| format!(" (${a:06X})"));
+    let hint = target.map_or_else(String::new, |a| format!(" ({})", hexa(view, a)));
     let item = |ui: &mut egui::Ui, enabled: bool, label: String, keys: &str| {
         let r = ui.add_enabled(enabled, egui::Button::new(label).shortcut_text(keys));
         let c = r.clicked();
@@ -1472,7 +1492,11 @@ fn code_menu(
     if let Some(r) = sel
         && item(ui, true, "Copy".into(), "Ctrl+C")
     {
-        let mut line = format!("{}  {}", margin_text(r, view.settings.margin), r.text);
+        let mut line = format!(
+            "{}  {}",
+            margin_text(r, view.settings.margin, view.cpu.digits()),
+            r.text
+        );
         if let Some(e) = &r.effective {
             line = format!("{line} {e}");
         }
@@ -1491,7 +1515,7 @@ fn code_menu(
         }
         let watch = sel
             .and_then(|r| r.effective.clone())
-            .unwrap_or_else(|| format!("[${a:06X}]"));
+            .unwrap_or_else(|| format!("[{}]", hexa(view, a)));
         if item(ui, true, "Add to Watch".into(), "") {
             out.push(DebuggerAction::AddWatch(watch));
         }
@@ -1508,7 +1532,7 @@ fn code_menu(
         ui.separator();
         let term = sel
             .and_then(|r| r.effective.clone())
-            .unwrap_or_else(|| format!("${a:06X}"));
+            .unwrap_or_else(|| hexa(view, a));
         if item(ui, true, format!("Find all occurrences ({term})"), "") {
             out.push(DebuggerAction::FindAll(term, true, true));
             st.tab = Tab::FindResults;
@@ -1526,8 +1550,8 @@ fn code_menu(
             out.push(DebuggerAction::RunTo(a));
         }
         ui.separator();
-        if let Some(t) = sel.and_then(row_target)
-            && item(ui, true, format!("Go to Location (${t:06X})"), "")
+        if let Some(t) = sel.and_then(|r| row_target(r, view.cpu.digits()))
+            && item(ui, true, format!("Go to Location ({})", hexa(view, t)), "")
         {
             out.push(DebuggerAction::Goto(t));
         }
@@ -1556,6 +1580,10 @@ fn status_pane(
     st: &mut UiState,
     out: &mut Vec<DebuggerAction>,
 ) {
+    if view.cpu == luna_api::ListingCpu::Spc {
+        spc_status_pane(ui, view, st, out);
+        return;
+    }
     let Some(s) = &view.status else {
         ui.label("(no ROM loaded)");
         return;
@@ -1691,14 +1719,114 @@ fn status_pane(
     });
 }
 
+/// The SPC700's Status pane, as Mesen2's: A, X, Y, PC, SP, the PSW with
+/// its flags, the stack from `SP + 1` to `$01FF`.
+fn spc_status_pane(
+    ui: &mut egui::Ui,
+    view: &DebuggerView,
+    st: &mut UiState,
+    out: &mut Vec<DebuggerAction>,
+) {
+    let Some((c, stack)) = &view.spc_status else {
+        ui.label("(no ROM loaded)");
+        return;
+    };
+    let editable = view.paused;
+    let fields: [(&'static str, &'static str, u32, usize); 5] = [
+        ("A", "a", u32::from(c.a), 2),
+        ("X", "x", u32::from(c.x), 2),
+        ("Y", "y", u32::from(c.y), 2),
+        ("PC", "pc", u32::from(c.pc), 4),
+        ("SP", "sp", u32::from(c.sp), 2),
+    ];
+    if !editable || st.regs.len() != fields.len() {
+        st.regs = fields
+            .iter()
+            .map(|&(_, k, v, w)| (k, format!("{v:0w$X}")))
+            .collect();
+    }
+    egui::Grid::new("dbg_spc_regs")
+        .num_columns(10)
+        .spacing([4.0, 4.0])
+        .show(ui, |ui| {
+            for (i, &(label, key, _, width)) in fields.iter().enumerate() {
+                ui.monospace(format!("{label}:"));
+                let buf = &mut st.regs[i].1;
+                let r = ui.add_enabled(
+                    editable,
+                    egui::TextEdit::singleline(buf)
+                        .desired_width(8.0 * width as f32 + 6.0)
+                        .font(egui::TextStyle::Monospace),
+                );
+                if r.lost_focus()
+                    && let Ok(v) = u32::from_str_radix(buf.trim(), 16)
+                {
+                    out.push(DebuggerAction::SetRegister(key, v));
+                }
+            }
+            ui.end_row();
+        });
+    ui.separator();
+    let mut p = c.psw;
+    ui.monospace(format!("P: {:02X}", c.psw));
+    egui::Grid::new("dbg_spc_flags")
+        .num_columns(4)
+        .show(ui, |ui| {
+            for (k, &(bit, name)) in [
+                (0x01, "Carry"),
+                (0x02, "Zero"),
+                (0x04, "IRQ"),
+                (0x08, "Half"),
+                (0x10, "Break"),
+                (0x20, "Dir. Page"),
+                (0x40, "Overflow"),
+                (0x80, "Negative"),
+            ]
+            .iter()
+            .enumerate()
+            {
+                let mut on = p & bit != 0;
+                if ui
+                    .add_enabled(editable, egui::Checkbox::new(&mut on, name))
+                    .changed()
+                {
+                    p = if on { p | bit } else { p & !bit };
+                }
+                if k % 4 == 3 {
+                    ui.end_row();
+                }
+            }
+        });
+    if p != c.psw {
+        out.push(DebuggerAction::SetRegister("psw", u32::from(p)));
+    }
+    if c.stopped {
+        ui.colored_label(egui::Color32::RED, "STOPPED");
+    }
+    if c.sleeping {
+        ui.colored_label(egui::Color32::YELLOW, "SLEEPING");
+    }
+    ui.separator();
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Stack:");
+        ui.monospace(
+            stack
+                .iter()
+                .map(|b| format!("${b:02X}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Tabs: Labels, Functions, Find Results, Controllers
 // ---------------------------------------------------------------------------
 
-fn addr_cell(a: Option<u32>) -> egui::RichText {
+fn addr_cell(view: &DebuggerView, a: Option<u32>) -> egui::RichText {
     a.map_or_else(
         || egui::RichText::new("<unavailable>").italics().weak(),
-        |a| egui::RichText::new(format!("${a:06X}")).monospace(),
+        |a| egui::RichText::new(hexa(view, a)).monospace(),
     )
 }
 
@@ -1717,6 +1845,10 @@ fn rom_cell(memory: MemoryKind, offset: u32) -> String {
 }
 
 fn tabs(ui: &mut egui::Ui, view: &DebuggerView, st: &mut UiState, out: &mut Vec<DebuggerAction>) {
+    let main = view.cpu == luna_api::ListingCpu::Snes;
+    if !main && matches!(st.tab, Tab::Functions | Tab::Controllers) {
+        st.tab = Tab::Labels;
+    }
     ui.horizontal(|ui| {
         for (t, name) in [
             (Tab::Labels, "Labels"),
@@ -1724,7 +1856,10 @@ fn tabs(ui: &mut egui::Ui, view: &DebuggerView, st: &mut UiState, out: &mut Vec<
             (Tab::FindResults, "Find Results"),
             (Tab::Controllers, "Controllers"),
         ] {
-            ui.selectable_value(&mut st.tab, t, name);
+            // The SPC700 has no function list nor controllers (Mesen2's).
+            if main || matches!(t, Tab::Labels | Tab::FindResults) {
+                ui.selectable_value(&mut st.tab, t, name);
+            }
         }
     });
     ui.separator();
@@ -1749,7 +1884,7 @@ fn tabs(ui: &mut egui::Ui, view: &DebuggerView, st: &mut UiState, out: &mut Vec<
                                 {
                                     out.push(DebuggerAction::Goto(a));
                                 }
-                                ui.label(addr_cell(f.address));
+                                ui.label(addr_cell(view, f.address));
                                 ui.monospace(rom_cell(MemoryKind::SnesPrgRom, f.rom));
                                 ui.end_row();
                             }
@@ -1774,8 +1909,7 @@ fn tabs(ui: &mut egui::Ui, view: &DebuggerView, st: &mut UiState, out: &mut Vec<
                                 if ui
                                     .selectable_label(
                                         false,
-                                        egui::RichText::new(format!("${:06X}", r.pos.addr))
-                                            .monospace(),
+                                        egui::RichText::new(hexa(view, r.pos.addr)).monospace(),
                                     )
                                     .double_clicked()
                                 {
@@ -1895,7 +2029,7 @@ fn labels_tab(
                                 ui.close();
                             }
                         });
-                        ui.label(addr_cell(l.address));
+                        ui.label(addr_cell(view, l.address));
                         ui.monospace(rom_cell(l.label.memory, l.label.address));
                         ui.label(l.label.comment.lines().next().unwrap_or(""));
                         ui.end_row();
@@ -2041,17 +2175,28 @@ fn watch_menu(ui: &mut egui::Ui, view: &DebuggerView, i: usize, out: &mut Vec<De
     }
 }
 
+/// The bus memory of the window's CPU.
+const fn bus_of(view: &DebuggerView) -> MemoryKind {
+    match view.cpu {
+        luna_api::ListingCpu::Snes => MemoryKind::SnesMemory,
+        luna_api::ListingCpu::Spc => MemoryKind::SpcMemory,
+    }
+}
+
 fn bp_type(b: &BreakpointInfo) -> String {
     use luna_api::WatchSpace;
     let mem = match b.space {
+        WatchSpace::Bus if b.cpu == luna_api::BreakCpu::Spc => "SPC",
         WatchSpace::Bus => "CPU",
+        WatchSpace::Aram => "ARAM",
+        WatchSpace::Ipl => "IPL",
         WatchSpace::Vram => "VRAM",
         WatchSpace::Cgram => "CGRAM",
         WatchSpace::Oam => "OAM",
         WatchSpace::PrgRom => "PRG",
         WatchSpace::WorkRam => "WRAM",
         WatchSpace::SaveRam => "SRAM",
-        _ => "MEM",
+        WatchSpace::DspDataRam => "DSP",
     };
     if b.forbid {
         return format!("{mem}:\u{1F6C7}");
@@ -2065,7 +2210,7 @@ fn bp_type(b: &BreakpointInfo) -> String {
     )
 }
 
-fn bp_dialog(b: Option<&BreakpointInfo>, forbid: bool) -> Dialog {
+fn bp_dialog(view: &DebuggerView, b: Option<&BreakpointInfo>, forbid: bool) -> Dialog {
     use luna_api::WatchSpace;
     match b {
         Some(b) => Dialog::EditBreakpoint {
@@ -2077,7 +2222,9 @@ fn bp_dialog(b: Option<&BreakpointInfo>, forbid: bool) -> Dialog {
                 WatchSpace::PrgRom => MemoryKind::SnesPrgRom,
                 WatchSpace::WorkRam => MemoryKind::SnesWorkRam,
                 WatchSpace::SaveRam => MemoryKind::SnesSaveRam,
-                _ => MemoryKind::SnesMemory,
+                WatchSpace::Aram => MemoryKind::SpcRam,
+                WatchSpace::Ipl => MemoryKind::SpcRom,
+                _ => bus_of(view),
             },
             lo: format!("{:X}", b.lo),
             hi: format!("{:X}", b.hi),
@@ -2089,7 +2236,7 @@ fn bp_dialog(b: Option<&BreakpointInfo>, forbid: bool) -> Dialog {
         },
         None => Dialog::EditBreakpoint {
             replace: None,
-            memory: MemoryKind::SnesMemory,
+            memory: bus_of(view),
             lo: String::new(),
             hi: String::new(),
             rwx: [!forbid, !forbid, true],
@@ -2137,14 +2284,14 @@ fn breakpoints_pane(
                         let r =
                             ui.selectable_label(false, egui::RichText::new(bp_type(b)).monospace());
                         if r.double_clicked() {
-                            st.dialog = bp_dialog(Some(b), false);
+                            st.dialog = bp_dialog(view, Some(b), false);
                         }
                         r.context_menu(|ui| {
                             if ui
                                 .add(egui::Button::new("Edit").shortcut_text("F2"))
                                 .clicked()
                             {
-                                st.dialog = bp_dialog(Some(b), false);
+                                st.dialog = bp_dialog(view, Some(b), false);
                                 ui.close();
                             }
                             if ui
@@ -2171,9 +2318,9 @@ fn breakpoints_pane(
                             }
                         });
                         let mut addr = if b.lo == b.hi {
-                            format!("${:06X}", b.lo)
+                            hexa(view, b.lo)
                         } else {
-                            format!("${:06X} - ${:06X}", b.lo, b.hi)
+                            format!("{} - {}", hexa(view, b.lo), hexa(view, b.hi))
                         };
                         if let Some(l) = label {
                             addr = format!("{addr} [{l}]");
@@ -2186,14 +2333,14 @@ fn breakpoints_pane(
         });
     ui.horizontal(|ui| {
         if ui.small_button("Add…").on_hover_text("Insert").clicked() {
-            st.dialog = bp_dialog(None, false);
+            st.dialog = bp_dialog(view, None, false);
         }
         if ui
             .small_button("Add forbid…")
             .on_hover_text("Ctrl+Insert")
             .clicked()
         {
-            st.dialog = bp_dialog(None, true);
+            st.dialog = bp_dialog(view, None, true);
         }
     });
 }
@@ -2224,7 +2371,7 @@ fn call_stack_pane(ui: &mut egui::Ui, view: &DebuggerView, out: &mut Vec<Debugge
                         if ui.selectable_label(false, text).double_clicked() && mapped {
                             out.push(DebuggerAction::Goto(r.pc));
                         }
-                        ui.monospace(format!("${:06X}", r.pc));
+                        ui.monospace(hexa(view, r.pc));
                         ui.monospace(
                             r.absolute
                                 .map_or_else(String::new, |l| rom_cell(l.kind, l.offset)),
@@ -2232,7 +2379,9 @@ fn call_stack_pane(ui: &mut egui::Ui, view: &DebuggerView, out: &mut Vec<Debugge
                         ui.end_row();
                     }
                 });
-            if view.call_stack.is_empty() {
+            if view.cpu == luna_api::ListingCpu::Spc {
+                ui.label(egui::RichText::new("(no SPC700 call stack yet)").weak());
+            } else if view.call_stack.is_empty() {
                 ui.label(
                     egui::RichText::new("(the call stack is tracked while this window is open)")
                         .weak(),
@@ -2308,7 +2457,7 @@ fn dialogs(ui: &egui::Ui, view: &DebuggerView, st: &mut UiState, out: &mut Vec<D
                         for r in &view.goto_all {
                             let line = r.address.map_or_else(
                                 || format!("\u{26A0} {}   <unavailable>", r.name),
-                                |a| format!("{}   ${a:06X}", r.name),
+                                |a| format!("{}   {}", r.name, hexa(view, a)),
                             );
                             if ui
                                 .add_enabled(
@@ -2417,13 +2566,23 @@ fn dialogs(ui: &egui::Ui, view: &DebuggerView, st: &mut UiState, out: &mut Vec<D
                         egui::ComboBox::from_id_salt("dbg_label_mem")
                             .selected_text(memory.name())
                             .show_ui(ui, |ui| {
-                                for k in [
-                                    MemoryKind::SnesPrgRom,
-                                    MemoryKind::SnesWorkRam,
-                                    MemoryKind::SnesSaveRam,
-                                    MemoryKind::SnesRegister,
-                                    MemoryKind::SnesMemory,
-                                ] {
+                                let kinds: &[MemoryKind] = if view.cpu == luna_api::ListingCpu::Spc
+                                {
+                                    &[
+                                        MemoryKind::SpcRam,
+                                        MemoryKind::SpcRom,
+                                        MemoryKind::SpcMemory,
+                                    ]
+                                } else {
+                                    &[
+                                        MemoryKind::SnesPrgRom,
+                                        MemoryKind::SnesWorkRam,
+                                        MemoryKind::SnesSaveRam,
+                                        MemoryKind::SnesRegister,
+                                        MemoryKind::SnesMemory,
+                                    ]
+                                };
+                                for &k in kinds {
                                     ui.selectable_value(memory, k, k.name());
                                 }
                             });
@@ -2540,7 +2699,14 @@ fn dialogs(ui: &egui::Ui, view: &DebuggerView, st: &mut UiState, out: &mut Vec<D
                         egui::ComboBox::from_id_salt("dbg_bp_mem")
                             .selected_text(memory.name())
                             .show_ui(ui, |ui| {
-                                let kinds: &[MemoryKind] = if forbid {
+                                let kinds: &[MemoryKind] = if view.cpu == luna_api::ListingCpu::Spc
+                                {
+                                    &[
+                                        MemoryKind::SpcMemory,
+                                        MemoryKind::SpcRam,
+                                        MemoryKind::SpcRom,
+                                    ]
+                                } else if forbid {
                                     &[
                                         MemoryKind::SnesMemory,
                                         MemoryKind::SnesPrgRom,

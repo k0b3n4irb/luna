@@ -40,6 +40,15 @@ use ringbuf::traits::{Observer, Producer};
 pub(crate) type AudioReclaim = (HeapProd<(i16, i16)>, Arc<AtomicBool>);
 
 /// State shared between the UI thread, the emu thread, and the cpal
+/// A debugger step the emu thread runs while paused.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DebugStep {
+    /// One of the 65C816's (or the console's: a scanline, a frame).
+    Cpu(luna_api::StepKind),
+    /// One of the SPC700's.
+    Spc(luna_api::SpcStepKind),
+}
+
 /// The most instructions one debugger step may run (a step out of a
 /// routine that never returns ends there).
 const STEP_KIND_LIMIT: u64 = 200_000_000;
@@ -75,7 +84,7 @@ pub(crate) struct EmuShared {
     pub last_break: Mutex<Option<BreakHit>>,
     /// A debugger step (Mesen2's step commands) to run while paused, queued
     /// by the Debugger window and served in the paused branch.
-    pub step_kind_request: Mutex<Option<luna_api::StepKind>>,
+    pub step_kind_request: Mutex<Option<DebugStep>>,
     /// Raised by the Debugger window's Break to end a long step (a step
     /// out, a frame); cleared when the next step starts.
     pub step_interrupt: AtomicBool,
@@ -267,8 +276,15 @@ fn run(
                 if let Ok(mut guard) = emu.lock()
                     && let Some(em) = guard.as_mut()
                 {
-                    match em.step_kind_interruptible(kind, STEP_KIND_LIMIT, &shared.step_interrupt)
-                    {
+                    let ran = match kind {
+                        DebugStep::Cpu(k) => {
+                            em.step_kind_interruptible(k, STEP_KIND_LIMIT, &shared.step_interrupt)
+                        }
+                        DebugStep::Spc(k) => {
+                            em.step_spc_interruptible(k, STEP_KIND_LIMIT, &shared.step_interrupt)
+                        }
+                    };
+                    match ran {
                         Ok(out) => {
                             if let Some(hit) = out.hit
                                 && let Ok(mut g) = shared.last_break.lock()

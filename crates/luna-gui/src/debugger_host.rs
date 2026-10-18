@@ -6,14 +6,13 @@
 
 use luna_api::{
     BreakCpu, BreakHit, BreakKind, BreakSources, Emulator, FindResult, ListingCpu, ListingPos,
-    MemoryKind, StepKind, WatchSpace, WatchStyle,
+    MemoryKind, SpcStepKind, StepKind, WatchSpace, WatchStyle,
 };
 
 use crate::ui::{DebuggerAction, DebuggerSettings, DebuggerView, WatchLine};
 
-const CPU: ListingCpu = ListingCpu::Snes;
-
-/// The GUI's name in a workspace file.
+/// The GUI's name in a workspace file (the 65C816 window's settings; the
+/// SPC700 window's go under the same name with `-spc`).
 const WORKSPACE_KEY: &str = "luna-gui";
 
 /// Something only `LunaApp` can do.
@@ -25,6 +24,8 @@ pub(crate) enum HostEffect {
     Break,
     /// Run one of Mesen2's steps while paused.
     Step(StepKind),
+    /// Run one of the SPC700's steps while paused.
+    SpcStep(SpcStepKind),
     /// The breakpoint registry or the break sources changed.
     SyncBreakpoints,
     /// Pick a label file to import.
@@ -44,6 +45,8 @@ pub(crate) enum HostEffect {
 /// The Debugger window's state between frames.
 #[derive(Default)]
 pub(crate) struct DebuggerHost {
+    /// The CPU this window debugs.
+    cpu: ListingCpu,
     pub settings: DebuggerSettings,
     top: ListingPos,
     visible: usize,
@@ -75,10 +78,50 @@ pub(crate) struct DebuggerHost {
 }
 
 impl DebuggerHost {
-    /// The window opened: log code and calls while it is open.
+    /// The window of the SPC700, or of the 65C816.
+    pub(crate) fn for_cpu(cpu: ListingCpu) -> Self {
+        Self {
+            cpu,
+            ..Self::default()
+        }
+    }
+
+    const fn break_cpu(&self) -> BreakCpu {
+        match self.cpu {
+            ListingCpu::Snes => BreakCpu::Snes,
+            ListingCpu::Spc => BreakCpu::Spc,
+        }
+    }
+
+    const fn bus(&self) -> MemoryKind {
+        match self.cpu {
+            ListingCpu::Snes => MemoryKind::SnesMemory,
+            ListingCpu::Spc => MemoryKind::SpcMemory,
+        }
+    }
+
+    const fn expr_cpu(&self) -> luna_api::ExprCpu {
+        match self.cpu {
+            ListingCpu::Snes => luna_api::ExprCpu::Snes,
+            ListingCpu::Spc => luna_api::ExprCpu::Spc,
+        }
+    }
+
+    /// This window's names in a workspace: its watches', its settings'.
+    const fn keys(&self) -> (&'static str, &'static str) {
+        match self.cpu {
+            ListingCpu::Snes => ("snes", WORKSPACE_KEY),
+            ListingCpu::Spc => ("spc", "luna-gui-spc"),
+        }
+    }
+
+    /// The window opened: log code (and, for the 65C816, calls) while it
+    /// is open.
     pub(crate) fn opened(&mut self, em: &mut Emulator) {
         em.enable_code_log(true);
-        em.enable_call_stack(true);
+        if self.cpu == ListingCpu::Snes {
+            em.enable_call_stack(true);
+        }
         self.dirty = true;
         self.center_on_pc = true;
         if self.visible == 0 {
@@ -106,11 +149,12 @@ impl DebuggerHost {
 
     /// Take the watches and the settings a ROM's workspace kept.
     pub(crate) fn load_workspace(&mut self, ws: &luna_api::Workspace) {
-        self.watches = ws.watches.get("snes").cloned().unwrap_or_default();
+        let (watch_key, settings_key) = self.keys();
+        self.watches = ws.watches.get(watch_key).cloned().unwrap_or_default();
         self.watch_values.clear();
         if let Some(s) = ws
             .front_end
-            .get(WORKSPACE_KEY)
+            .get(settings_key)
             .and_then(|v| serde_json::from_value(v.clone()).ok())
         {
             self.settings = s;
@@ -120,18 +164,24 @@ impl DebuggerHost {
 
     /// Add the watches and the settings to a workspace being saved.
     pub(crate) fn store_workspace(&self, ws: &mut luna_api::Workspace) {
+        let (watch_key, settings_key) = self.keys();
         if !self.watches.is_empty() {
-            ws.watches.insert("snes".into(), self.watches.clone());
+            ws.watches.insert(watch_key.into(), self.watches.clone());
         }
         if let Ok(v) = serde_json::to_value(self.settings) {
-            ws.front_end.insert(WORKSPACE_KEY.into(), v);
+            ws.front_end.insert(settings_key.into(), v);
         }
     }
 
-    /// The window closed: stop logging (what was logged stays).
-    pub(crate) fn closed(em: &mut Emulator) {
-        em.enable_code_log(false);
-        em.enable_call_stack(false);
+    /// The window closed: stop logging (what was logged stays), the code
+    /// log only when no other debugger window is open.
+    pub(crate) fn closed(&self, em: &mut Emulator, other_open: bool) {
+        if !other_open {
+            em.enable_code_log(false);
+        }
+        if self.cpu == ListingCpu::Snes {
+            em.enable_call_stack(false);
+        }
     }
 
     /// The CPU stopped: on a breakpoint (`hit`), after a step, or paused.
@@ -149,14 +199,21 @@ impl DebuggerHost {
         self.break_reason = Some(match hit {
             None => "CPU Step".to_string(),
             Some(h) => match h.kind {
-                BreakKind::Exec => format!("Breakpoint: Exec CPU (${:06X})", h.pc),
+                BreakKind::Step => "CPU Step".to_string(),
+                BreakKind::Exec => format!(
+                    "Breakpoint: Exec {} (${:0w$X})",
+                    self.short_name(),
+                    h.pc,
+                    w = self.cpu.digits()
+                ),
                 BreakKind::Read | BreakKind::Write => format!(
-                    "Breakpoint: {} CPU (${:04X}:${:02X})",
+                    "Breakpoint: {} {} (${:04X}:${:02X})",
                     if h.kind == BreakKind::Read {
                         "Read"
                     } else {
                         "Write"
                     },
+                    self.short_name(),
                     h.addr.unwrap_or(0),
                     h.value.unwrap_or(0)
                 ),
@@ -182,27 +239,39 @@ impl DebuggerHost {
         }
     }
 
-    fn pc(em: &Emulator) -> Option<u32> {
-        em.cpu_state()
-            .ok()
-            .map(|c| (u32::from(c.pb) << 16) | u32::from(c.pc))
+    fn pc(&self, em: &Emulator) -> Option<u32> {
+        match self.cpu {
+            ListingCpu::Snes => em
+                .cpu_state()
+                .ok()
+                .map(|c| (u32::from(c.pb) << 16) | u32::from(c.pc)),
+            ListingCpu::Spc => em.spc700_state().ok().map(|c| u32::from(c.pc)),
+        }
+    }
+
+    /// Mesen2's short name of the CPU's memory in a break reason.
+    const fn short_name(&self) -> &'static str {
+        match self.cpu {
+            ListingCpu::Snes => "CPU",
+            ListingCpu::Spc => "SPC",
+        }
     }
 
     /// Bring `addr` into view: centred unless already comfortably shown.
     fn bring_into_view(&mut self, em: &Emulator, addr: u32, force_center: bool) {
         let opts = self.settings.listing;
-        let Ok(pos) = em.listing_pos_of(CPU, addr, opts) else {
+        let Ok(pos) = em.listing_pos_of(self.cpu, addr, opts) else {
             return;
         };
         let shown = em
-            .listing(CPU, self.top, self.visible.max(1), opts)
+            .listing(self.cpu, self.top, self.visible.max(1), opts)
             .unwrap_or_default();
         let inside = shown
             .iter()
             .position(|r| r.pos == pos)
             .is_some_and(|i| i >= 1 && i + 2 < shown.len());
         if (force_center || !inside)
-            && let Ok(top) = em.listing_back(CPU, pos, self.visible / 2, opts)
+            && let Ok(top) = em.listing_back(self.cpu, pos, self.visible / 2, opts)
         {
             self.top = top;
         }
@@ -221,7 +290,7 @@ impl DebuggerHost {
         let opts = self.settings.listing;
         if self.center_on_pc && paused {
             self.center_on_pc = false;
-            if let Some(pc) = Self::pc(em) {
+            if let Some(pc) = self.pc(em) {
                 self.bring_into_view(em, pc, self.settings.keep_centered);
             }
         }
@@ -229,26 +298,36 @@ impl DebuggerHost {
             self.bring_into_view(em, a, true);
         }
         let rows = em
-            .listing(CPU, self.top, self.visible.max(1) + 1, opts)
+            .listing(self.cpu, self.top, self.visible.max(1) + 1, opts)
             .unwrap_or_default();
-        let space = CPU.space() as f32;
+        let space = self.cpu.space() as f32;
         let bps = em.bp_list().unwrap_or_default();
         let bp_marks = bps
             .iter()
             .filter(|b| {
-                b.cpu == BreakCpu::Snes && b.space == WatchSpace::Bus && (b.exec || b.forbid)
+                b.cpu == self.break_cpu() && b.space == WatchSpace::Bus && (b.exec || b.forbid)
             })
             .map(|b| (b.lo as f32 / space, b.enabled))
             .collect();
+        let main = self.cpu == ListingCpu::Snes;
         if paused || self.settings.refresh_running || self.status.is_none() {
+            // The master clocks (the elapsed time) come from the console's
+            // status, whatever the window.
             self.status = em.debugger_status().ok();
         }
+        let spc_status = (!main).then(|| em.spc700_state().ok()).flatten().map(|c| {
+            let sp = u32::from(c.sp);
+            let stack = em
+                .read_memory(MemoryKind::SpcRam, 0x100 + sp + 1, (0xFF - sp) as usize)
+                .unwrap_or_default();
+            (c, stack)
+        });
         if self.dirty || self.settings.refresh_running && !paused {
             self.dirty = false;
             let values: Vec<String> = self
                 .watches
                 .iter()
-                .map(|w| em.watch_value(w, luna_api::ExprCpu::Snes, self.watch_style))
+                .map(|w| em.watch_value(w, self.expr_cpu(), self.watch_style))
                 .collect();
             self.watch_changed = values
                 .iter()
@@ -270,14 +349,14 @@ impl DebuggerHost {
             })
             .collect();
         let label_of = |a: u32| {
-            em.label_at(MemoryKind::SnesMemory, a)
+            em.label_at(self.bus(), a)
                 .ok()
                 .flatten()
                 .and_then(|h| h.name())
         };
         let breakpoints = bps
             .into_iter()
-            .filter(|b| b.cpu == BreakCpu::Snes)
+            .filter(|b| b.cpu == self.break_cpu())
             .map(|b| {
                 let l = (b.space == WatchSpace::Bus)
                     .then(|| label_of(b.lo))
@@ -294,9 +373,11 @@ impl DebuggerHost {
             (name, at, target)
         };
         DebuggerView {
+            cpu: self.cpu,
+            spc_status,
             paused,
             scroll: self.top.addr as f32 / space,
-            pc_mark: Self::pc(em).map(|pc| pc as f32 / space),
+            pc_mark: self.pc(em).map(|pc| pc as f32 / space),
             bp_marks,
             rows,
             cursor: self.cursor,
@@ -305,14 +386,18 @@ impl DebuggerHost {
             watches,
             watch_style: self.watch_style,
             breakpoints,
-            call_stack: em.call_stack_rows(),
-            labels: em.label_rows(CPU),
-            functions: em.functions(),
+            call_stack: if main {
+                em.call_stack_rows()
+            } else {
+                Vec::new()
+            },
+            labels: em.label_rows(self.cpu),
+            functions: if main { em.functions() } else { Vec::new() },
             find_results: self.find_results.clone(),
             goto_all: if self.goto_all_query.trim().is_empty() {
                 Vec::new()
             } else {
-                em.goto_all(CPU, &self.goto_all_query)
+                em.goto_all(self.cpu, &self.goto_all_query)
             },
             break_reason: if paused {
                 self.break_reason.clone()
@@ -329,16 +414,20 @@ impl DebuggerHost {
             find_miss: self.find_miss,
             pad_override: self.pad_override,
             break_on: self.break_on,
-            vectors: vec![
-                vector("NMI", 0xFFEA),
-                vector("IRQ", 0xFFEE),
-                vector("Reset", 0xFFFC),
-                vector("BRK", 0xFFE6),
-                vector("COP", 0xFFE4),
-                vector("NMI (6502)", 0xFFFA),
-                vector("IRQ (6502)", 0xFFFE),
-                vector("COP (6502)", 0xFFF4),
-            ],
+            vectors: if main {
+                vec![
+                    vector("NMI", 0xFFEA),
+                    vector("IRQ", 0xFFEE),
+                    vector("Reset", 0xFFFC),
+                    vector("BRK", 0xFFE6),
+                    vector("COP", 0xFFE4),
+                    vector("NMI (6502)", 0xFFFA),
+                    vector("IRQ (6502)", 0xFFFE),
+                    vector("COP (6502)", 0xFFF4),
+                ]
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -362,7 +451,14 @@ impl DebuggerHost {
             DebuggerAction::Continue => fx.push(HostEffect::Continue),
             DebuggerAction::Break => fx.push(HostEffect::Break),
             DebuggerAction::ToggleBreak => fx.push(HostEffect::Break),
-            DebuggerAction::Step(k) => fx.push(HostEffect::Step(k)),
+            DebuggerAction::Step(k) => fx.push(match (self.cpu, k) {
+                // The SPC700 steps by its own instructions; a scanline, a
+                // frame or N of them run the console as a whole.
+                (ListingCpu::Spc, StepKind::Into) => HostEffect::SpcStep(SpcStepKind::Into),
+                (ListingCpu::Spc, StepKind::Over) => HostEffect::SpcStep(SpcStepKind::Over),
+                (ListingCpu::Spc, StepKind::Out) => HostEffect::SpcStep(SpcStepKind::Out),
+                (_, k) => HostEffect::Step(k),
+            }),
             DebuggerAction::RunToNmi
             | DebuggerAction::RunToIrq
             | DebuggerAction::RunToScanline(_) => {
@@ -387,20 +483,21 @@ impl DebuggerHost {
             }
             DebuggerAction::Scroll(n) if n > 0 => {
                 let rows = em
-                    .listing(CPU, self.top, n as usize + 1, opts)
+                    .listing(self.cpu, self.top, n as usize + 1, opts)
                     .unwrap_or_default();
                 if let Some(r) = rows.get(n as usize).or_else(|| rows.last()) {
                     self.top = r.pos;
                 }
             }
             DebuggerAction::Scroll(n) => {
-                if let Ok(t) = em.listing_back(CPU, self.top, n.unsigned_abs() as usize, opts) {
+                if let Ok(t) = em.listing_back(self.cpu, self.top, n.unsigned_abs() as usize, opts)
+                {
                     self.top = t;
                 }
             }
             DebuggerAction::ScrollTo(f) => {
-                let addr = ((f * CPU.space() as f32) as u32).min(CPU.space() - 1);
-                if let Ok(p) = em.listing_pos_of(CPU, addr, opts) {
+                let addr = ((f * self.cpu.space() as f32) as u32).min(self.cpu.space() - 1);
+                if let Ok(p) = em.listing_pos_of(self.cpu, addr, opts) {
                     self.top = ListingPos {
                         addr: p.addr,
                         row: 0,
@@ -412,13 +509,13 @@ impl DebuggerHost {
                 self.center_on = Some(a);
             }
             DebuggerAction::GotoText(t) => {
-                if let Some(a) = em.goto_address(CPU, &t) {
+                if let Some(a) = em.goto_address(self.cpu, &t) {
                     self.record_jump();
                     self.center_on = Some(a);
                 }
             }
             DebuggerAction::GotoPc => {
-                if let Some(pc) = Self::pc(em) {
+                if let Some(pc) = self.pc(em) {
                     self.record_jump();
                     self.center_on = Some(pc);
                 }
@@ -426,43 +523,54 @@ impl DebuggerHost {
             DebuggerAction::Select(p) => self.cursor = Some(p),
             DebuggerAction::VisibleRows(n) => self.visible = n,
             DebuggerAction::ToggleBreakpoint(a) => {
-                let list = em.bp_list().unwrap_or_default();
-                match list.iter().find(|b| {
-                    b.cpu == BreakCpu::Snes && b.exec && b.space == WatchSpace::Bus && b.lo == a
-                }) {
-                    Some(b) => {
-                        let _ = em.bp_remove(b.id);
-                    }
-                    None => {
-                        let _ = em.bp_add_exec(a, None);
-                    }
-                }
-                fx.push(HostEffect::SyncBreakpoints);
-            }
-            DebuggerAction::ToggleForbid(a) => {
+                let cpu = self.break_cpu();
                 let list = em.bp_list().unwrap_or_default();
                 match list
                     .iter()
-                    .find(|b| b.forbid && b.space == WatchSpace::Bus && (b.lo..=b.hi).contains(&a))
+                    .find(|b| b.cpu == cpu && b.exec && b.space == WatchSpace::Bus && b.lo == a)
                 {
                     Some(b) => {
                         let _ = em.bp_remove(b.id);
                     }
                     None => {
-                        let _ =
-                            em.bp_add_forbid(BreakCpu::Snes, MemoryKind::SnesMemory, a, a, None);
+                        let _ = em.bp_add_exec_on(cpu, a, None);
+                    }
+                }
+                fx.push(HostEffect::SyncBreakpoints);
+            }
+            DebuggerAction::ToggleForbid(a) => {
+                let cpu = self.break_cpu();
+                let list = em.bp_list().unwrap_or_default();
+                match list.iter().find(|b| {
+                    b.cpu == cpu
+                        && b.forbid
+                        && b.space == WatchSpace::Bus
+                        && (b.lo..=b.hi).contains(&a)
+                }) {
+                    Some(b) => {
+                        let _ = em.bp_remove(b.id);
+                    }
+                    None => {
+                        let _ = em.bp_add_forbid(cpu, self.bus(), a, a, None);
                     }
                 }
                 fx.push(HostEffect::SyncBreakpoints);
             }
             DebuggerAction::RunTo(a) => {
-                self.temp_bp = em.bp_add_exec(a, Some("run to location")).ok();
+                self.temp_bp = em
+                    .bp_add_exec_on(self.break_cpu(), a, Some("run to location"))
+                    .ok();
                 fx.extend([HostEffect::SyncBreakpoints, HostEffect::Continue]);
             }
             DebuggerAction::MovePc(a) => {
-                let _ = em.set_cpu_register("pb", a >> 16);
-                let _ = em.set_cpu_register("pc", a & 0xFFFF);
+                let _ = match self.cpu {
+                    ListingCpu::Snes => em
+                        .set_cpu_register("pb", a >> 16)
+                        .and_then(|()| em.set_cpu_register("pc", a & 0xFFFF)),
+                    ListingCpu::Spc => em.set_spc_register("pc", a & 0xFFFF),
+                };
                 self.dirty = true;
+                self.center_on_pc = true;
             }
             DebuggerAction::Back => {
                 if let Some(a) = self.back.pop() {
@@ -549,10 +657,13 @@ impl DebuggerHost {
                 }
                 let mut ids = Vec::new();
                 if forbid {
-                    ids.extend(em.bp_add_forbid(BreakCpu::Snes, memory, lo, hi, None).ok());
+                    ids.extend(
+                        em.bp_add_forbid(self.break_cpu(), memory, lo, hi, None)
+                            .ok(),
+                    );
                 } else {
-                    if rwx[2] && memory == MemoryKind::SnesMemory {
-                        ids.extend(em.bp_add_exec(lo, None).ok());
+                    if rwx[2] && memory == self.bus() {
+                        ids.extend(em.bp_add_exec_on(self.break_cpu(), lo, None).ok());
                     }
                     if rwx[0] || rwx[1] {
                         ids.extend(em.bp_add_watch(memory, lo, hi, rwx[0], rwx[1], None).ok());
@@ -573,7 +684,10 @@ impl DebuggerHost {
                 fx.push(HostEffect::SyncBreakpoints);
             }
             DebuggerAction::SetRegister(reg, v) => {
-                let _ = em.set_cpu_register(reg, v);
+                let _ = match self.cpu {
+                    ListingCpu::Snes => em.set_cpu_register(reg, v),
+                    ListingCpu::Spc => em.set_spc_register(reg, v),
+                };
                 self.dirty = true;
                 self.status = em.debugger_status().ok();
             }
@@ -592,7 +706,7 @@ impl DebuggerHost {
             }
             DebuggerAction::Find(text, forward) => {
                 let from = self.cursor.unwrap_or(self.top);
-                match em.listing_find(CPU, from, &text, forward, opts) {
+                match em.listing_find(self.cpu, from, &text, forward, opts) {
                     Ok(Some(p)) => {
                         self.find_miss = false;
                         self.center_on = Some(p.addr);
@@ -602,7 +716,7 @@ impl DebuggerHost {
             }
             DebuggerAction::FindAll(text, case, word) => {
                 self.find_results = em
-                    .listing_find_all(CPU, &text, case, word, opts)
+                    .listing_find_all(self.cpu, &text, case, word, opts)
                     .unwrap_or_default();
             }
             DebuggerAction::GotoAllQuery(q) => self.goto_all_query = q,
@@ -630,6 +744,142 @@ impl DebuggerHost {
             DebuggerAction::Reload => fx.push(HostEffect::Reload),
         }
         fx
+    }
+}
+
+/// The two Debugger windows (65C816, SPC700) and what they share.
+pub(crate) struct Debuggers {
+    /// The 65C816's.
+    pub snes: DebuggerHost,
+    /// The SPC700's.
+    pub spc: DebuggerHost,
+    /// Which is open, as last seen.
+    open: [bool; 2],
+    /// The window that asked for the step running now.
+    step_owner: ListingCpu,
+    /// The last view of each, redrawn while the emulator is busy.
+    pub views: [Option<Box<DebuggerView>>; 2],
+}
+
+impl Default for Debuggers {
+    fn default() -> Self {
+        Self {
+            snes: DebuggerHost::for_cpu(ListingCpu::Snes),
+            spc: DebuggerHost::for_cpu(ListingCpu::Spc),
+            open: [false; 2],
+            step_owner: ListingCpu::Snes,
+            views: [None, None],
+        }
+    }
+}
+
+const fn index(cpu: ListingCpu) -> usize {
+    match cpu {
+        ListingCpu::Snes => 0,
+        ListingCpu::Spc => 1,
+    }
+}
+
+impl Debuggers {
+    /// The window of `cpu`.
+    pub(crate) const fn host(&mut self, cpu: ListingCpu) -> &mut DebuggerHost {
+        match cpu {
+            ListingCpu::Snes => &mut self.snes,
+            ListingCpu::Spc => &mut self.spc,
+        }
+    }
+
+    /// Whether the window of `cpu` is open, as last seen.
+    pub(crate) const fn is_open(&self, cpu: ListingCpu) -> bool {
+        self.open[index(cpu)]
+    }
+
+    /// Whether any is open.
+    pub(crate) const fn any_open(&self) -> bool {
+        self.open[0] || self.open[1]
+    }
+
+    /// See the windows open or close (`open` is what is open now).
+    /// Returns the windows just opened.
+    pub(crate) fn sync_open(
+        &mut self,
+        em: Option<&mut Emulator>,
+        open: [bool; 2],
+    ) -> Vec<ListingCpu> {
+        let mut opened = Vec::new();
+        let mut em = em;
+        for cpu in [ListingCpu::Snes, ListingCpu::Spc] {
+            let i = index(cpu);
+            if open[i] == self.open[i] {
+                continue;
+            }
+            self.open[i] = open[i];
+            let other = open[1 - i];
+            if let Some(em) = em.as_deref_mut() {
+                if open[i] {
+                    self.host(cpu).opened(em);
+                } else {
+                    self.host(cpu).closed(em, other);
+                }
+            }
+            if open[i] {
+                opened.push(cpu);
+            }
+        }
+        opened
+    }
+
+    /// A ROM was loaded into `em`: the windows start over on it.
+    pub(crate) fn rom_loaded(&mut self, em: &mut Emulator, ws: Option<&luna_api::Workspace>) {
+        for cpu in [ListingCpu::Snes, ListingCpu::Spc] {
+            let open = self.open[index(cpu)];
+            let h = self.host(cpu);
+            h.rom_changed();
+            if let Some(ws) = ws {
+                h.load_workspace(ws);
+            }
+            if open {
+                h.opened(em);
+            }
+        }
+        self.views = [None, None];
+    }
+
+    /// Add both windows' watches and settings to a workspace.
+    pub(crate) fn store_workspace(&self, ws: &mut luna_api::Workspace) {
+        self.snes.store_workspace(ws);
+        self.spc.store_workspace(ws);
+    }
+
+    /// The window `cpu` asked for a step.
+    pub(crate) const fn stepping(&mut self, cpu: ListingCpu) {
+        self.step_owner = cpu;
+    }
+
+    /// A CPU stopped (`hit`: on a breakpoint or a step of its; `None`: a
+    /// step served or a pause). The window of the CPU that stopped takes
+    /// the reason, the other shows where its CPU stands. Returns what only
+    /// the app can do, and the window to bring forward.
+    pub(crate) fn stopped(
+        &mut self,
+        em: &mut Emulator,
+        hit: Option<&BreakHit>,
+    ) -> (Vec<HostEffect>, ListingCpu) {
+        let owner = match hit.map(|h| h.cpu) {
+            Some(BreakCpu::Spc) => ListingCpu::Spc,
+            Some(_) => ListingCpu::Snes,
+            None => self.step_owner,
+        };
+        let mut fx = self.host(owner).stopped(em, hit);
+        let other = match owner {
+            ListingCpu::Snes => ListingCpu::Spc,
+            ListingCpu::Spc => ListingCpu::Snes,
+        };
+        // A temporary breakpoint or break source the other window set ends
+        // at any stop.
+        fx.extend(self.host(other).stopped(em, None));
+        self.host(other).break_reason = None;
+        (fx, owner)
     }
 }
 
@@ -761,5 +1011,52 @@ mod tests {
         assert_eq!(fresh.settings, s);
         fresh.rom_changed();
         assert!(fresh.watches.is_empty(), "another ROM starts its own");
+    }
+
+    #[test]
+    fn the_spc700_window_lists_steps_and_breaks_on_its_cpu() {
+        let (mut em, _) = loaded();
+        let mut d = Debuggers::default();
+        let opened = d.sync_open(Some(&mut em), [false, true]);
+        assert_eq!(opened, [ListingCpu::Spc]);
+        d.spc.apply(&mut em, DebuggerAction::VisibleRows(20));
+        let hit = em
+            .step_spc(SpcStepKind::Into, 100_000)
+            .unwrap()
+            .hit
+            .expect("the SPC700 steps");
+        let (fx, owner) = d.stopped(&mut em, Some(&hit));
+        assert!(fx.is_empty());
+        assert_eq!(owner, ListingCpu::Spc);
+        let v = d.spc.view(&em, true);
+        assert_eq!(v.cpu, ListingCpu::Spc);
+        let pc = v
+            .rows
+            .iter()
+            .find(|r| r.is_pc)
+            .expect("the SPC700's PC row");
+        assert_eq!(pc.pos.addr, hit.pc);
+        assert!(pc.pos.addr <= 0xFFFF);
+        assert_eq!(v.break_reason.as_deref(), Some("CPU Step"));
+        assert!(v.spc_status.is_some() && v.status.is_some());
+        assert!(v.vectors.is_empty() && v.functions.is_empty());
+
+        // Its breakpoints are the SPC700's.
+        let fx = d
+            .spc
+            .apply(&mut em, DebuggerAction::ToggleBreakpoint(0xFFC5));
+        assert_eq!(fx, [HostEffect::SyncBreakpoints]);
+        let bp = &em.bp_list().unwrap()[0];
+        assert_eq!((bp.cpu, bp.lo, bp.exec), (BreakCpu::Spc, 0xFFC5, true));
+        // Into, over and out are the SPC700's steps.
+        assert_eq!(
+            d.spc.apply(&mut em, DebuggerAction::Step(StepKind::Over)),
+            [HostEffect::SpcStep(SpcStepKind::Over)]
+        );
+        assert_eq!(
+            d.spc.apply(&mut em, DebuggerAction::Step(StepKind::Frame)),
+            [HostEffect::Step(StepKind::Frame)],
+            "a frame runs the console"
+        );
     }
 }

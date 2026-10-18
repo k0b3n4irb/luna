@@ -26,11 +26,12 @@ use crate::{ApiError, BreakpointInfo, Emulator};
 
 /// The CPUs that have a listing.
 #[derive(
-    Copy, Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize, schemars::JsonSchema,
+    Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum ListingCpu {
     /// The 65C816.
+    #[default]
     Snes,
     /// The SPC700.
     Spc,

@@ -3826,3 +3826,40 @@ fn label_files_next_to_the_rom_load_in_mesen2s_order() {
     assert!(!names.contains(&"FromMlb".to_string()));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_spc700_steps_into_over_and_out() {
+    use crate::SpcStepKind;
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom()).unwrap();
+    e.step(2000).unwrap();
+    // $0200: CALL $0300; NOP; BRA $0204.  $0300: NOP; RET.
+    e.write_memory(
+        MemoryKind::SpcRam,
+        0x200,
+        &[0x3F, 0x00, 0x03, 0x00, 0x2F, 0xFE],
+    )
+    .unwrap();
+    e.write_memory(MemoryKind::SpcRam, 0x300, &[0x00, 0x6F])
+        .unwrap();
+    // Stand the SPC700 on an instruction start, then move it to $0200.
+    let r = e.step_spc(SpcStepKind::Into, 100_000).unwrap();
+    assert!(
+        r.hit
+            .is_some_and(|h| h.kind == BreakKind::Step && h.cpu == BreakCpu::Spc)
+    );
+    e.set_spc_register("pc", 0x200).unwrap();
+    let sp0 = e.spc700_state().unwrap().sp;
+    let pc = |e: &mut Emulator, k| {
+        let r = e.step_spc(k, 100_000).unwrap();
+        let h = r.hit.expect("the step ends");
+        assert_eq!(u32::from(e.spc700_state().unwrap().pc), h.pc);
+        h.pc
+    };
+    assert_eq!(pc(&mut e, SpcStepKind::Over), 0x203, "over the CALL");
+    assert_eq!(e.spc700_state().unwrap().sp, sp0, "back at the same depth");
+    e.set_spc_register("pc", 0x200).unwrap();
+    assert_eq!(pc(&mut e, SpcStepKind::Into), 0x300, "into the CALL");
+    assert_eq!(pc(&mut e, SpcStepKind::Out), 0x203, "out of the routine");
+    assert_eq!(pc(&mut e, SpcStepKind::Into), 0x204);
+}

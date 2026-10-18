@@ -332,6 +332,9 @@ pub struct Apu {
     /// (never in a save-state).
     #[serde(skip)]
     pub exec_log: Option<SpcExecLog>,
+    /// A debugger step in progress (never in a save-state).
+    #[serde(skip)]
+    step: Option<SpcStep>,
 }
 
 /// A condition an SPC700 breakpoint fires on, given the APU and, for a
@@ -434,6 +437,36 @@ impl SpcExecLog {
     }
 }
 
+/// The id an [`SpcHit`] carries when a debugger step, not a breakpoint,
+/// froze the SPC700.
+pub const SPC_STEP_ID: u32 = u32::MAX - 1;
+
+/// A debugger step of the SPC700 (Mesen2's step commands).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpcStepKind {
+    /// One instruction.
+    Into,
+    /// One instruction, or a whole call (`CALL`, `PCALL`, `TCALL`, `BRK`):
+    /// until the instruction after it, back at the same stack depth.
+    Over,
+    /// Until a `RET` / `RETI` leaves the stack above where it was.
+    Out,
+}
+
+/// A step in progress, checked at each instruction start.
+#[derive(Debug, Clone, Copy)]
+pub struct SpcStep {
+    kind: SpcStepKind,
+    /// The stack pointer when it was asked for.
+    sp0: u8,
+    /// The instruction the step is over has started.
+    started: bool,
+    /// Where a step over a call stops.
+    ret: Option<u16>,
+    /// The opcode of the instruction that just ran.
+    last_op: u8,
+}
+
 /// What froze the SPC700.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpcHit {
@@ -510,6 +543,7 @@ impl Apu {
             inst_pc: 0,
             break_resume: None,
             exec_log: None,
+            step: None,
         };
         // Reset the SPC700 — reads $FFFE/$FFFF for the PC vector,
         // which the IPL ROM populates as $FFC0.
@@ -749,6 +783,9 @@ impl Apu {
                 if !self.breaks.is_empty() && self.check_break() {
                     return;
                 }
+                if self.step.is_some() && self.check_step() {
+                    return;
+                }
                 self.inst_pc = self.cpu.pc;
                 if let Some(log) = self.exec_log.as_mut() {
                     let pc = self.cpu.pc;
@@ -811,6 +848,63 @@ impl Apu {
             });
         }
         hit.is_some()
+    }
+
+    /// Ask for a debugger step: the SPC700 freezes (an [`SpcHit`] with
+    /// [`SPC_STEP_ID`]) where it ends. Replaces a step not yet done.
+    pub fn start_step(&mut self, kind: SpcStepKind) {
+        let pc = if self.cpu.in_instruction {
+            self.inst_pc
+        } else {
+            self.cpu.pc
+        };
+        let op = self.peek(pc);
+        // CALL, PCALL, TCALL n, BRK.
+        let call = matches!(op, 0x3F | 0x4F | 0x0F) || op & 0x0F == 0x01;
+        let len = luna_cpu_spc700::disassemble(|a| self.peek(a), pc).length;
+        self.step = Some(SpcStep {
+            kind,
+            sp0: self.cpu.sp,
+            started: self.cpu.in_instruction,
+            ret: (kind == SpcStepKind::Over && call).then(|| pc.wrapping_add(u16::from(len))),
+            last_op: op,
+        });
+    }
+
+    /// Drop a step not yet done.
+    pub const fn cancel_step(&mut self) {
+        self.step = None;
+    }
+
+    /// At an instruction start: freeze when the step in progress ends
+    /// here. Returns whether it froze.
+    const fn check_step(&mut self) -> bool {
+        let pc = self.cpu.pc;
+        let sp = self.cpu.sp;
+        let op = self.peek(pc);
+        let Some(st) = self.step.as_mut() else {
+            return false;
+        };
+        if !st.started {
+            st.started = true;
+            st.last_op = op;
+            return false;
+        }
+        let done = match (st.kind, st.ret) {
+            (SpcStepKind::Over, Some(ret)) => (pc == ret && sp == st.sp0) || sp > st.sp0,
+            (SpcStepKind::Into | SpcStepKind::Over, _) => true,
+            (SpcStepKind::Out, _) => matches!(st.last_op, 0x6F | 0x7F) && sp > st.sp0,
+        };
+        st.last_op = op;
+        if done {
+            self.step = None;
+            self.break_hit = Some(SpcHit {
+                id: SPC_STEP_ID,
+                pc,
+                access: None,
+            });
+        }
+        done
     }
 
     /// The address of the instruction the SPC700 is running, while

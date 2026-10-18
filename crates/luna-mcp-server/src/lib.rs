@@ -383,10 +383,14 @@ pub struct RunUntilGsuParams {
 /// `set_cpu_register` parameters.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct SetRegisterParams {
-    /// Register name: `a/x/y/sp/dp/pc/pb/db/p` (case-insensitive).
+    /// Register name: `a/x/y/sp/dp/pc/pb/db/p/e` (case-insensitive); for
+    /// the SPC700 `a/x/y/sp/pc/psw`.
     pub reg: String,
     /// Value (low byte/word used per the register's width).
     pub val: u32,
+    /// `snes` (default) or `spc`.
+    #[serde(default)]
+    pub cpu: Option<String>,
 }
 
 /// `run_until_mem_write` / `run_until_mem_read` parameters.
@@ -1396,6 +1400,10 @@ pub struct StepKindParams {
     /// Instruction budget (default 50 000 000).
     #[serde(default)]
     pub max_steps: Option<u64>,
+    /// `snes` (default) or `spc`: the SPC700 takes `into`, `over` (a
+    /// `CALL` / `PCALL` / `TCALL` / `BRK` whole) and `out`.
+    #[serde(default)]
+    pub cpu: Option<String>,
 }
 
 /// `eval` parameters.
@@ -2423,8 +2431,9 @@ impl LunaServer {
     }
 
     #[rmcp::tool(
-        description = "Set a CPU register by name (a/x/y/sp/dp/pc/pb/db/p). For setting \
-                                up a test state before stepping."
+        description = "Set a CPU register by name (a/x/y/sp/dp/pc/pb/db/p/e), or the \
+                                SPC700's with `cpu: \"spc\"` (a/x/y/sp/pc/psw). For setting up a \
+                                test state, or moving the PC, while stopped."
     )]
     async fn set_cpu_register(
         &self,
@@ -2432,8 +2441,11 @@ impl LunaServer {
     ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
         {
             let mut em = self.emulator.lock().await;
-            em.set_cpu_register(&params.reg, params.val)
-                .map_err(|e| api_err_to_mcp(&e))?;
+            match listing_cpu(params.cpu.as_deref())? {
+                luna_api::ListingCpu::Snes => em.set_cpu_register(&params.reg, params.val),
+                luna_api::ListingCpu::Spc => em.set_spc_register(&params.reg, params.val),
+            }
+            .map_err(|e| api_err_to_mcp(&e))?;
         }
         Ok(rmcp::Json(EmptyOk { ok: true }))
     }
@@ -4032,12 +4044,38 @@ impl LunaServer {
                                 depth), `out` (until the routine returns), `scanline`, `frame`, \
                                 or N `instructions` / `scanlines` / `frames` (`count`). A \
                                 breakpoint or break source met on the way stops it first; \
-                                otherwise the result's `kind` is `step`. `pause` ends it."
+                                otherwise the result's `kind` is `step`. `pause` ends it. With \
+                                `cpu: \"spc\"` the SPC700 steps: `into`, `over` (a CALL / PCALL \
+                                / TCALL / BRK whole), `out` (until a RET / RETI returns)."
     )]
     async fn step_kind(
         &self,
         Parameters(params): Parameters<StepKindParams>,
     ) -> Result<rmcp::Json<RunUntilBreakResult>, ErrorData> {
+        if listing_cpu(params.cpu.as_deref())? == luna_api::ListingCpu::Spc {
+            let kind = match params.kind.to_ascii_lowercase().as_str() {
+                "into" => luna_api::SpcStepKind::Into,
+                "over" => luna_api::SpcStepKind::Over,
+                "out" => luna_api::SpcStepKind::Out,
+                other => {
+                    return Err(ErrorData::invalid_params(
+                        format!("unknown SPC700 step `{other}`; into, over or out"),
+                        None,
+                    ));
+                }
+            };
+            self.interrupt.store(false, Ordering::Relaxed);
+            let out = {
+                let mut em = self.emulator.lock().await;
+                em.step_spc_interruptible(
+                    kind,
+                    params.max_steps.unwrap_or(50_000_000),
+                    &self.interrupt,
+                )
+                .map_err(|e| api_err_to_mcp(&e))?
+            };
+            return Ok(rmcp::Json(outcome_to_result(&out)));
+        }
         let n = params.count.unwrap_or(1);
         let kind = match params.kind.to_ascii_lowercase().as_str() {
             "into" => luna_api::StepKind::Into,

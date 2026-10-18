@@ -109,9 +109,20 @@ disabled, `+` with a condition).
   on quit, and at most once a minute while you work. The MCP
   `workspace_save` / `workspace_load` read and write the same file.
 
+**The SPC Debugger** (*Debug ▸ SPC Debugger*) is the same window for the
+SPC700, as Mesen2's: its listing (4-digit addresses, ARAM and the IPL
+ROM), its Status pane (A, X, Y, PC, SP, the PSW and its flags, the stack
+from `SP + 1` to `$01FF`), Labels and Find Results (no function list, no
+controllers), Watch and Breakpoints on the SPC700. `F11` / `F10` /
+`Shift+F11` step the SPC700 into, over (a `CALL`, `PCALL`, `TCALL`, `BRK`
+whole) and out (until a `RET` / `RETI` returns); `F7` / `F8` and *Break
+in…* run the console by scanlines and frames. When a CPU stops, the window
+of that CPU comes forward; the other one shows where its CPU stands.
+
 Not there yet: step back (rewind), the CPU-cycle and PPU-cycle steps
 (luna runs instructions whole), the code/data logger's menu, the
-assembler, the memory viewer link, the SPC700 and coprocessor windows.
+assembler, the memory viewer link, the SPC700's call stack, the
+coprocessors' windows.
 
 ## GUI conveniences
 

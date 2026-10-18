@@ -106,6 +106,8 @@ pub(crate) enum MenuAction {
     ToggleBreakpoints,
     /// Open / close the Debugger window (Mesen2's).
     ToggleDebugger,
+    /// Open / close the SPC Debugger window.
+    ToggleSpcDebugger,
     /// Debugger: execute one instruction (pauses first if running).
     StepInstruction,
     /// Debugger: run to the next frame boundary (pauses first if running).
@@ -263,6 +265,7 @@ pub(crate) struct UiState<'a> {
     pub show_tilemap: bool,
     pub show_event_viewer: bool,
     pub show_debugger: bool,
+    pub show_spc_debugger: bool,
     /// When `Some((player, button))`, the input modal is waiting on the
     /// user to press a key to rebind that player's SNES button.
     pub pending_rebind: Option<(usize, crate::input::SnesButton)>,

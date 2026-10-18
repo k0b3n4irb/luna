@@ -50,6 +50,7 @@ lands it.
 | D2a | `ui.rs` split into one module per panel (no behaviour change) | ✅ |
 | D2b | Code log (instructions run, widths, jump targets, subroutine entries, decoded ahead) for the 65C816 and the SPC700 — the code half of the CDL, brought forward | ✅ |
 | D2d | Debugger window (GUI) for the 65C816: code view, Status, Labels / Functions / Find Results / Controllers, Watch / Breakpoints / Call Stack, dialogs, shortcuts, settings panel, workspace import / export | ✅ |
+| D2g | SPC Debugger window (listing, Status, Labels, Find Results, Watch, Breakpoints); SPC700 steps into / over / out and register writes in the API and the MCP. The SPC700's call stack is still to come | ✅ |
 | D2f | Label imports: ca65 `.dbg` (segments, sizes, source comments) and bass `.sym`, Mesen2's auto-load order (`.dbg`, `.sym`, `.mlb`). SDCC `.cdb` and ELF: Mesen2 reads neither for SNES, so neither does luna | ✅ |
 | D2e | Workspace per ROM (labels, breakpoints, watches, window settings), shared by the GUI and the MCP | ✅ |
 | D2c | Panes' content in `luna-api`: watch formats, Go To, Go To All, Find, Find All Occurrences, function list, label list, call stack rows | ✅ |

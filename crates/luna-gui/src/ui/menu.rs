@@ -394,6 +394,13 @@ pub(super) fn draw_menu_bar<F: FnMut(MenuAction)>(
                         emit(MenuAction::ToggleDebugger);
                         ui.close();
                     }
+                    if ui
+                        .selectable_label(state.show_spc_debugger, "SPC Debugger")
+                        .clicked()
+                    {
+                        emit(MenuAction::ToggleSpcDebugger);
+                        ui.close();
+                    }
                     ui.separator();
                     ui.label(egui::RichText::new("SPC700").weak().small());
                     if ui
