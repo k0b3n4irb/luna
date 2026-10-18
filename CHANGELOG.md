@@ -119,6 +119,14 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   Mario World at frame 120 the counts of touched bytes equal Mesen2's in
   every memory. API: `enable_access_counters`, `access_counters`,
   `reset_access_counters`, `master_clock`; MCP: the same names.
+- **Write freezes, Mesen2's.** A write through a frozen CPU-bus or SPC700
+  address is dropped, so the byte keeps its value: the CPU's and the
+  DMA's writes (a register's side effects too), by address, mirrors not
+  included; on the SPC700 ARAM is left unchanged. A debugger's write
+  still lands. Kept across a reset or a state load. API:
+  `set_write_freeze`, `write_freezes`, `write_frozen`; MCP:
+  `freeze_writes`, `frozen_writes`. `freeze_add` still writes its value
+  back every frame.
 
 ### Changed
 

@@ -2086,9 +2086,13 @@ impl Emulator {
         // again (Mesen2), it does not turn them off.
         let counters = snes.access_counters.take();
         let spc_counters = snes.apu_real.access_counters.take();
+        let frozen = snes.frozen_writes.take();
+        let spc_frozen = snes.apu_real.frozen_writes.take();
         snes.reset();
         snes.access_counters = counters;
         snes.apu_real.access_counters = spc_counters;
+        snes.frozen_writes = frozen;
+        snes.apu_real.frozen_writes = spc_frozen;
         snes.clear_access_counters();
         self.instructions_executed = 0;
         // The stack watermark measures a run; a reset starts a new one.
@@ -3440,6 +3444,8 @@ impl Emulator {
         // state load (Mesen2).
         restored.access_counters = snes.access_counters.take();
         restored.apu_real.access_counters = snes.apu_real.access_counters.take();
+        restored.frozen_writes = snes.frozen_writes.take();
+        restored.apu_real.frozen_writes = snes.apu_real.frozen_writes.take();
         restored.clear_access_counters();
         // What the session asked of the picture is not in a state: keep it.
         restored.ppu.skip_pixels = snes.ppu.skip_pixels;

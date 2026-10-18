@@ -225,6 +225,10 @@ pub struct Snes {
     /// [`Snes::enable_access_counters`].
     #[serde(skip)]
     pub access_counters: Option<Box<crate::access::CpuAccessCounters>>,
+    /// CPU-bus addresses whose writes are dropped (a debugger's freeze,
+    /// Mesen2's): the CPU's and the DMA's A-bus writes. `None` = none.
+    #[serde(skip)]
+    pub frozen_writes: Option<Box<luna_bus::WriteFreeze>>,
     /// CPU writes to the VRAM data ports (`$2118/$2119`), each with the
     /// word it lands on and the instruction that wrote it; `None` when
     /// not capturing. The DMA side of the same question is the DMA
@@ -1130,6 +1134,7 @@ impl Snes {
             profile: None,
             mem_trace_log: None,
             access_counters: None,
+            frozen_writes: None,
             vram_cpu_writes: None,
             gsu_bus_log: None,
             breakpoints: None,
@@ -1974,6 +1979,8 @@ struct SnesBus<'a> {
     access_counters: &'a mut Option<Box<crate::access::CpuAccessCounters>>,
     /// The read in flight is a code read (`Bus::fetch`).
     fetching: bool,
+    /// Addresses whose writes are dropped.
+    frozen_writes: &'a Option<Box<luna_bus::WriteFreeze>>,
     /// CPU writes to the VRAM data ports; `None` = disabled.
     vram_cpu_writes: &'a mut Option<Vec<VramCpuWrite>>,
     gsu_bus_log: &'a mut Option<GsuBusLog>,
@@ -2155,6 +2162,7 @@ impl Snes {
             sa1_log,
             mem_trace_log,
             access_counters,
+            frozen_writes,
             vram_cpu_writes,
             gsu_bus_log,
             breakpoints,
@@ -2190,6 +2198,7 @@ impl Snes {
             mem_trace_log,
             access_counters,
             fetching: false,
+            frozen_writes,
             vram_cpu_writes,
             gsu_bus_log,
             breakpoints,
@@ -2262,6 +2271,8 @@ struct DmaBusView<'a> {
     mem_trace: Option<&'a mut MemTraceLog>,
     /// Per-byte access counters: a DMA counts on both buses.
     access_counters: Option<&'a mut crate::access::CpuAccessCounters>,
+    /// A-bus addresses whose writes are dropped.
+    frozen_writes: Option<&'a luna_bus::WriteFreeze>,
     /// The watchpoint registry: a `run_until_mem_write` / `bp_add mem`
     /// fires on a DMA / HDMA write too (issue #226).
     breakpoints: Option<&'a mut crate::breakpoints::BreakpointSet>,
@@ -2345,6 +2356,12 @@ impl DmaBus for DmaBusView<'_> {
         *self.scpu_mar = addr;
         self.note_write(addr, value);
         self.count(addr, Access::Write);
+        if self
+            .frozen_writes
+            .is_some_and(|f| f.contains((addr & 0xFF_FFFF) as usize))
+        {
+            return;
+        }
         if let Some(o) = SnesBus::wram_offset(addr) {
             self.wram[o] = value;
             return;
@@ -2834,6 +2851,7 @@ impl SnesBus<'_> {
                 dma_channel: 0,
                 mem_trace: self.mem_trace_log.as_mut(),
                 access_counters: self.access_counters.as_deref_mut(),
+                frozen_writes: self.frozen_writes.as_deref(),
                 breakpoints: self.breakpoints.as_deref_mut(),
                 cpu_pc: self.cpu_pc_full,
                 trace_mclk: line_start_mclk,
@@ -2934,6 +2952,7 @@ impl SnesBus<'_> {
                 dma_channel: 0,
                 mem_trace: self.mem_trace_log.as_mut(),
                 access_counters: self.access_counters.as_deref_mut(),
+                frozen_writes: self.frozen_writes.as_deref(),
                 breakpoints: self.breakpoints.as_deref_mut(),
                 cpu_pc: self.cpu_pc_full,
                 trace_mclk: line_start_mclk,
@@ -3207,6 +3226,7 @@ impl SnesBus<'_> {
                     dma_channel: 0,
                     mem_trace: self.mem_trace_log.as_mut(),
                     access_counters: self.access_counters.as_deref_mut(),
+                    frozen_writes: self.frozen_writes.as_deref(),
                     breakpoints: self.breakpoints.as_deref_mut(),
                     cpu_pc: self.cpu_pc_full,
                     trace_mclk: mclk_at_edge,
@@ -3268,6 +3288,7 @@ impl SnesBus<'_> {
                     dma_channel: 0,
                     mem_trace: self.mem_trace_log.as_mut(),
                     access_counters: self.access_counters.as_deref_mut(),
+                    frozen_writes: self.frozen_writes.as_deref(),
                     breakpoints: self.breakpoints.as_deref_mut(),
                     cpu_pc: self.cpu_pc_full,
                     trace_mclk: *self.mclk_total,
@@ -3608,6 +3629,16 @@ impl SnesBus<'_> {
         // ares `CPU::write` runs `dmaEdge()` before stepping (`memory.cpp:24`).
         self.dma_edge();
         self.advance_time(speed.mcycles(), true);
+
+        // A frozen address drops the whole write, a register's side
+        // effects included (Mesen2's freeze).
+        if self
+            .frozen_writes
+            .as_deref()
+            .is_some_and(|f| f.contains((addr & 0xFF_FFFF) as usize))
+        {
+            return;
+        }
 
         // Nocash debug TTY: capture `$21FC` writes (no$/Mesen console port —
         // the SDK's `SNES_NOCASH`/`SNES_ASSERT`) when enabled, bounded so a

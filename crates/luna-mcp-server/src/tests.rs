@@ -2027,3 +2027,40 @@ async fn server_counts_accesses_per_byte() {
     assert!(got.bytes.is_empty());
     let _ = std::fs::remove_file(&path);
 }
+
+#[tokio::test]
+async fn server_freezes_writes() {
+    let s = LunaServer::new();
+    let path = PathBuf::from("/tmp/luna_mcp_freeze_writes_demo.smc");
+    std::fs::write(&path, demo_lorom()).unwrap();
+    s.load_rom(Parameters(rom_params(&path.to_string_lossy())))
+        .await
+        .unwrap();
+    let freeze = |offset, frozen| FreezeWritesParams {
+        kind: "SnesMemory".into(),
+        offset,
+        symbol: None,
+        count: 2,
+        frozen,
+    };
+    s.freeze_writes(Parameters(freeze(0x7E_0100, true)))
+        .await
+        .unwrap();
+    let list = || FrozenWritesParams {
+        kind: "SnesMemory".into(),
+    };
+    let got = s.frozen_writes(Parameters(list())).await.unwrap().0;
+    assert_eq!(got.ranges, [(0x7E_0100, 0x7E_0101)]);
+    s.freeze_writes(Parameters(freeze(0x7E_0100, false)))
+        .await
+        .unwrap();
+    assert!(
+        s.frozen_writes(Parameters(list()))
+            .await
+            .unwrap()
+            .0
+            .ranges
+            .is_empty()
+    );
+    let _ = std::fs::remove_file(&path);
+}

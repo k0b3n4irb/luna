@@ -1,4 +1,4 @@
-//! Per-byte access counters for a debugger (Mesen2's "access counters"):
+//! Per-byte access counters and write freezes for a debugger (Mesen2's "access counters"):
 //! how many times each byte of a memory was read, written and executed,
 //! and the master clock of the last time.
 //!
@@ -93,6 +93,69 @@ impl AccessCounters {
     }
 }
 
+/// The addresses of a bus whose writes are dropped (Mesen2's memory
+/// viewer *Freeze*): the byte keeps its value because nothing written
+/// through that address lands, not because it is written back.
+#[derive(Debug, Clone, Default)]
+pub struct WriteFreeze {
+    bits: Vec<u64>,
+}
+
+impl WriteFreeze {
+    /// No frozen address on a bus of `size` addresses.
+    #[must_use]
+    pub fn new(size: usize) -> Self {
+        Self {
+            bits: vec![0; size.div_ceil(64)],
+        }
+    }
+
+    /// Freeze (`on`) or thaw address `addr`; past the end is ignored.
+    pub fn set(&mut self, addr: usize, on: bool) {
+        if let Some(w) = self.bits.get_mut(addr / 64) {
+            let bit = 1 << (addr % 64);
+            if on {
+                *w |= bit;
+            } else {
+                *w &= !bit;
+            }
+        }
+    }
+
+    /// Whether a write to `addr` is dropped.
+    #[inline]
+    #[must_use]
+    pub fn contains(&self, addr: usize) -> bool {
+        self.bits
+            .get(addr / 64)
+            .is_some_and(|w| w & (1 << (addr % 64)) != 0)
+    }
+
+    /// No frozen address.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.bits.iter().all(|&w| w == 0)
+    }
+
+    /// The frozen addresses as `(first, last)` runs, in order.
+    #[must_use]
+    pub fn ranges(&self) -> Vec<(usize, usize)> {
+        let mut out: Vec<(usize, usize)> = Vec::new();
+        for (i, &w) in self.bits.iter().enumerate() {
+            let mut w = w;
+            while w != 0 {
+                let a = i * 64 + w.trailing_zeros() as usize;
+                w &= w - 1;
+                match out.last_mut() {
+                    Some(last) if last.1 + 1 == a => last.1 = a,
+                    _ => out.push((a, a)),
+                }
+            }
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,5 +175,20 @@ mod tests {
         assert_eq!(c.get(9), ByteCounters::default());
         c.clear();
         assert_eq!(c.get(1), ByteCounters::default());
+    }
+
+    #[test]
+    fn a_write_freeze_lists_its_runs() {
+        let mut f = WriteFreeze::new(0x200);
+        for a in [3, 4, 5, 63, 64, 100, 0x1FF, 0x200] {
+            f.set(a, true);
+        }
+        f.set(4, false);
+        assert!(f.contains(63) && f.contains(64) && !f.contains(4) && !f.contains(0x200));
+        assert_eq!(
+            f.ranges(),
+            [(3, 3), (5, 5), (63, 64), (100, 100), (0x1FF, 0x1FF)]
+        );
+        assert!(!f.is_empty());
     }
 }

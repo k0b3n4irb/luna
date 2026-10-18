@@ -106,6 +106,7 @@ method, so the MCP transport adds reach, not capability.
 | `absolute_address` | `absolute_address` | The memory and offset behind a CPU-bus address or label — `{"kind": "SnesPrgRom", "offset": 16}` for `$80:8010` on a 32 KB `LoROM` — as the mapper's banking selects it now; `{"kind": "SnesRegister", "offset": 8448}` for `$00:2100` and its mirrors; `null` for open bus or a coprocessor's register window. |
 | `poke_vram` / `poke_cgram` / `poke_oam` / `poke_aram` | same names | Direct writes into the other memory spaces (bus-bypassing state injection; each wraps at its size). |
 | `freeze_add` / `freeze_remove` / `freeze_list` | same names | Cheat-style per-frame pinning: the byte is re-applied at every frame boundary in **every** run path (CLI, MCP and GUI behave identically), and once immediately on add. WRAM only. |
+| `freeze_writes` / `frozen_writes` | `set_write_freeze` / `write_freezes` | Mesen2's memory viewer *Freeze*: a write through a frozen `SnesMemory` or `SpcMemory` address is dropped, so the byte keeps its value between frames too. See *Write freezes* below. |
 | `enable_call_stack` / `call_stack` | `enable_call_stack` / `call_stack` | Opt-in JSR/JSL/RTS/RTL + interrupt tracking → `[{pc, from, kind, symbol}]`, oldest first. The CLI form is `luna state --call-stack` (the `--out` JSON gains a `call_stack` array). |
 | `spc_call_stack` | `enable_spc_call_stack` / `spc_call_stack` | The SPC700's call stack, tracked once `enable_call_stack {enabled: true, cpu: "spc"}` is on: `[{pc, from, kind, label}]`, oldest first, `kind` `call` / `pcall` / `tcall` / `brk`. |
 | `search_memory` | `search_memory` | Find a byte pattern in `$7E-$7F` WRAM (hits report canonical `$7E`/`$7F` addresses). |
@@ -286,6 +287,27 @@ On that run, the byte counts of every memory equal those Mesen2 gives
 for the same frame: 4282 work RAM bytes read, 11416 written, 387 run;
 48933 ROM bytes read and 2166 run; all of VRAM's 20480 written bytes;
 41273 ARAM bytes read and 838 run.
+
+### Write freezes
+
+`freeze_writes` freezes bus addresses as Mesen2's memory viewer does:
+nothing is written back, a write through the address is simply dropped.
+On `SnesMemory` that is every CPU write and every DMA write to that A-bus
+address (freezing a register's address drops its side effects too); on
+`SpcMemory`, ARAM is left unchanged while a register's side effects still
+happen, and the S-DSP's echo writes still land. A freeze belongs to the
+address: `$7E:0010` frozen leaves its mirror `$00:0010` writable. A
+debugger's own write (`write_memory`) still changes a frozen byte, which
+is how to set the value it holds. A reset and a state load keep the
+freezes; loading a ROM drops them. `freeze_add` is the other kind: it
+writes a value back at every frame, in work RAM only.
+
+```text
+write_memory {kind: "SnesWorkRam", offset: 0x100, data: [99, 0]}   # the value to hold
+freeze_writes {kind: "SnesMemory", offset: 0x7E0100, count: 2, frozen: true}
+frozen_writes {kind: "SnesMemory"}          # → {ranges: [[8257792, 8257793]]}
+freeze_writes {kind: "SnesMemory", offset: 0x7E0100, count: 2, frozen: false}
+```
 
 ### The debugger's panes
 

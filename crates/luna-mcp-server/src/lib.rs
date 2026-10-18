@@ -1335,6 +1335,42 @@ pub struct ReadMemoryParams {
     pub count: u32,
 }
 
+/// `freeze_writes` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct FreezeWritesParams {
+    /// `SnesMemory` (the CPU bus) or `SpcMemory`.
+    pub kind: String,
+    /// The first address.
+    #[serde(default)]
+    pub offset: u32,
+    /// A label in place of `offset` (`SnesMemory` only).
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// Addresses from it (default 1).
+    #[serde(default = "one")]
+    pub count: u32,
+    /// `true` freezes, `false` thaws.
+    pub frozen: bool,
+}
+
+const fn one() -> u32 {
+    1
+}
+
+/// `frozen_writes` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct FrozenWritesParams {
+    /// `SnesMemory` (the CPU bus) or `SpcMemory`.
+    pub kind: String,
+}
+
+/// `frozen_writes` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FrozenWritesResult {
+    /// The frozen addresses, as `[first, last]` runs in order.
+    pub ranges: Vec<(u32, u32)>,
+}
+
 /// `enable_access_counters` parameters.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct EnableAccessCountersParams {
@@ -3675,6 +3711,45 @@ impl LunaServer {
             .enable_access_counters(params.enabled)
             .map_err(|e| api_err_to_mcp(&e))?;
         Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "Freeze (or thaw) bus addresses, Mesen2's memory viewer way: a write \
+                                through a frozen address is dropped, so the byte keeps its \
+                                value. `SnesMemory`: CPU and DMA A-bus writes (a register's \
+                                side effects too), by address, mirrors not included. \
+                                `SpcMemory`: ARAM is left unchanged. `write_memory` still \
+                                changes a frozen byte. Not `freeze_add`, which writes a value \
+                                back every frame."
+    )]
+    async fn freeze_writes(
+        &self,
+        Parameters(params): Parameters<FreezeWritesParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        let kind = memory_kind(&params.kind)?;
+        let mut em = self.emulator.lock().await;
+        let offset = resolve_addr(&em, params.symbol.as_deref(), params.offset)?;
+        em.set_write_freeze(kind, offset, params.count as usize, params.frozen)
+            .map_err(|e| api_err_to_mcp(&e))?;
+        drop(em);
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "The addresses `freeze_writes` froze on a bus, as `[first, last]` runs."
+    )]
+    async fn frozen_writes(
+        &self,
+        Parameters(params): Parameters<FrozenWritesParams>,
+    ) -> Result<rmcp::Json<FrozenWritesResult>, ErrorData> {
+        let kind = memory_kind(&params.kind)?;
+        let ranges = self
+            .emulator
+            .lock()
+            .await
+            .write_freezes(kind)
+            .map_err(|e| api_err_to_mcp(&e))?;
+        Ok(rmcp::Json(FrozenWritesResult { ranges }))
     }
 
     #[rmcp::tool(description = "Every access counter back to zero (Mesen2's Reset access stats).")]

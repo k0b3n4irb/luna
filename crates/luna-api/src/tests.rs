@@ -3996,3 +3996,52 @@ fn access_counters_count_on_the_byte_behind_the_address() {
     e.enable_access_counters(false).unwrap();
     assert!(!e.access_counters_enabled());
 }
+
+/// A frozen address drops the writes through it (Mesen2's freeze): the
+/// byte keeps the value a debugger gave it, its mirrors stay writable.
+#[test]
+fn a_frozen_address_drops_the_writes_through_it() {
+    use crate::memory::MemoryKind;
+    // $8000: LDA #$05 ; STA $0011 ; STA $0012 ; BRA $8000
+    let code = [0xA9, 0x05, 0x8D, 0x11, 0x00, 0x8D, 0x12, 0x00, 0x80, 0xF6];
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
+    e.write_memory(MemoryKind::SnesWorkRam, 0x11, &[0x33, 0x33])
+        .unwrap();
+    e.write_memory(MemoryKind::SpcRam, 0x10, &[0x5A, 0x5A])
+        .unwrap();
+    e.set_write_freeze(MemoryKind::SnesMemory, 0x00_0011, 1, true)
+        .unwrap();
+    // The mirror of $00:0012, not the address the program writes.
+    e.set_write_freeze(MemoryKind::SnesMemory, 0x7E_0012, 1, true)
+        .unwrap();
+    e.set_write_freeze(MemoryKind::SpcMemory, 0x10, 1, true)
+        .unwrap();
+    assert_eq!(
+        e.write_freezes(MemoryKind::SnesMemory).unwrap(),
+        [(0x11, 0x11), (0x7E_0012, 0x7E_0012)]
+    );
+    assert!(
+        e.set_write_freeze(MemoryKind::SnesWorkRam, 0, 1, true)
+            .is_err()
+    );
+    e.step(20_000).unwrap();
+    let ram = |e: &Emulator| e.read_memory(MemoryKind::SnesWorkRam, 0x11, 2).unwrap();
+    assert_eq!(ram(&e), [0x33, 0x05]);
+    // The IPL ROM clears the zero page; the frozen byte stays.
+    assert_eq!(
+        e.read_memory(MemoryKind::SpcRam, 0x10, 2).unwrap(),
+        [0x5A, 0]
+    );
+    // A debugger's write still lands; a reset keeps the freeze.
+    e.write_memory(MemoryKind::SnesWorkRam, 0x11, &[0x44])
+        .unwrap();
+    e.reset().unwrap();
+    e.step(100).unwrap();
+    assert_eq!(ram(&e)[0], 0x44);
+    assert!(e.write_frozen(MemoryKind::SnesMemory, 0x11).unwrap());
+    e.set_write_freeze(MemoryKind::SnesMemory, 0x11, 1, false)
+        .unwrap();
+    e.step(100).unwrap();
+    assert_eq!(ram(&e)[0], 0x05);
+}

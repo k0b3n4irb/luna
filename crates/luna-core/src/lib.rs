@@ -31,6 +31,7 @@ pub use luna_bus::{
     ByteCounters, CartMemory, CoprocAccess, CoprocBreak, CoprocCondition, CoprocHit, CoprocRegs,
     CoprocView, CoprocWatch, Dsp1TraceEvent, Dsp1TraceKind, Mapper, MapperKind, NullMapper,
     STATE_DECODE_CONFIG, Sa1SideEvent, Sa1Stats, Sa1TraceEvent, SuperFxJob, SuperFxTraceEvent,
+    WriteFreeze,
 };
 pub use mclk::{MclkAccounting, MclkBuckets, MclkKind};
 pub use power::{PowerOnRng, PowerOnState};

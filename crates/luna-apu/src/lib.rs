@@ -34,7 +34,7 @@
 //! S-DSP in position (`ApuBusView::clock_cycle`), at the cost set by
 //! the `$F0` wait-state fields.
 
-use luna_bus::{Access, AccessCounters};
+use luna_bus::{Access, AccessCounters, WriteFreeze};
 use luna_cpu_spc700::{IPL_ROM, IPL_ROM_BASE, Spc700, SpcBus};
 
 /// Read one ARAM byte as the **SPC700** sees it: `$FFC0-$FFFF` returns
@@ -338,6 +338,11 @@ pub struct Apu {
     /// ARAM accesses are not counted (Mesen2's default).
     #[serde(skip)]
     pub access_counters: Option<Box<SpcAccessCounters>>,
+    /// SPC700 addresses whose writes leave ARAM unchanged (a debugger's
+    /// freeze, Mesen2's): a register's side effects still happen, and the
+    /// S-DSP's echo writes still land.
+    #[serde(skip)]
+    pub frozen_writes: Option<Box<WriteFreeze>>,
     /// A debugger step in progress (never in a save-state).
     #[serde(skip)]
     step: Option<SpcStep>,
@@ -614,6 +619,7 @@ impl Apu {
             break_resume: None,
             exec_log: None,
             access_counters: None,
+            frozen_writes: None,
             step: None,
             call_stack: None,
         };
@@ -639,6 +645,7 @@ impl Apu {
             audio_right: &mut apu.audio_right,
             clocked: 0,
             cost_2x: 2,
+            frozen_writes: None,
         };
         apu.cpu.reset(&mut bus);
         apu
@@ -1110,6 +1117,7 @@ impl Apu {
                 audio_right: &mut self.audio_right,
                 clocked: 0,
                 cost_2x: 2,
+                frozen_writes: self.frozen_writes.as_deref(),
             };
             let cycles = u32::from(self.cpu.step(&mut bus));
             (cycles, bus.clocked)
@@ -1171,6 +1179,7 @@ impl Apu {
             audio_right: &mut self.audio_right,
             clocked: 0,
             cost_2x: 2,
+            frozen_writes: self.frozen_writes.as_deref(),
         };
         let mut access = None;
         let mut fetched = None;
@@ -1304,6 +1313,8 @@ struct ApuBusView<'a> {
     /// `{2,4,10,20}` once a game sets non-zero wait-states (ares
     /// `smp/timing.cpp` `cycleWaitStates`). `run_to_target` reads it back.
     cost_2x: u32,
+    /// Addresses whose writes leave ARAM unchanged.
+    frozen_writes: Option<&'a WriteFreeze>,
 }
 
 /// Advance one SPC timer (0/1/2) by one base-clock tick: bump the
@@ -1463,6 +1474,14 @@ impl SpcBus for WatchedBus<'_, '_> {
     }
 }
 
+impl ApuBusView<'_> {
+    /// Whether a debugger froze `addr`.
+    fn frozen(&self, addr: u16) -> bool {
+        self.frozen_writes
+            .is_some_and(|f| f.contains(usize::from(addr)))
+    }
+}
+
 impl SpcBus for ApuBusView<'_> {
     fn read(&mut self, addr: u16) -> u8 {
         self.clock_cycle(spc_ws_internal(addr, *self.control));
@@ -1572,7 +1591,8 @@ impl SpcBus for ApuBusView<'_> {
             0x00F4..=0x00F7 => self.to_cpu_ports[(addr - 0x00F4) as usize] = value,
             // $F8-$F9 — auxiliary RAM-mapped regs. Store in ARAM so
             // reads come back consistent.
-            0x00F8..=0x00F9 => self.aram[addr as usize] = value,
+            0x00F8..=0x00F9 if !self.frozen(addr) => self.aram[addr as usize] = value,
+            0x00F8..=0x00F9 => {}
             // $FA-$FC — timer reload (target) values.
             0x00FA..=0x00FC => {
                 let idx = (addr - 0x00FA) as usize;
@@ -1581,6 +1601,7 @@ impl SpcBus for ApuBusView<'_> {
             // $FD-$FF — timer outputs are read-only; writes drop.
             0x00FD..=0x00FF => {}
             // Everything else — ARAM.
+            _ if self.frozen(addr) => {}
             _ => self.aram[addr as usize] = value,
         }
     }
@@ -1716,6 +1737,7 @@ mod tests {
             audio_right: &mut apu.audio_right,
             clocked: 0,
             cost_2x: 2,
+            frozen_writes: None,
         };
         // Pick voice 0 envelope-X output register ($08).
         bus.write(0x00F2, 0x08);
@@ -1760,6 +1782,7 @@ mod tests {
             audio_right: &mut apu.audio_right,
             clocked: 0,
             cost_2x: 2,
+            frozen_writes: None,
         };
         bus.write(0x00F2, 0x7C); // point the index at ENDX
         assert_eq!(bus.read(0x00F3), 0b0000_0101);
@@ -1935,6 +1958,7 @@ mod tests {
                 audio_right: &mut apu.audio_right,
                 clocked: 0,
                 cost_2x: 2,
+                frozen_writes: None,
             };
             assert_eq!(bus.read(0x00FF), 3);
             assert_eq!(bus.read(0x00FF), 0, "second read should be cleared");
@@ -1964,6 +1988,7 @@ mod tests {
             audio_right: &mut apu.audio_right,
             clocked: 0,
             cost_2x: 2,
+            frozen_writes: None,
         };
         // Enable all 3 timers via $F1.
         bus.write(0x00F1, 0x07);
@@ -2002,6 +2027,7 @@ mod tests {
                 audio_right: &mut apu.audio_right,
                 clocked: 0,
                 cost_2x: 2,
+                frozen_writes: None,
             };
             bus.write(0x00F1, 0x10); // bit 4 → clear ports 0/1
         }
@@ -2027,6 +2053,7 @@ mod tests {
                 audio_right: &mut apu.audio_right,
                 clocked: 0,
                 cost_2x: 2,
+                frozen_writes: None,
             };
             bus.write(0x00F1, 0x20); // bit 5 → clear ports 2/3
         }
@@ -2058,6 +2085,7 @@ mod tests {
             audio_right: &mut apu.audio_right,
             clocked: 0,
             cost_2x: 2,
+            frozen_writes: None,
         };
         bus.write(0x00F8, 0x42);
         bus.write(0x00F9, 0x99);

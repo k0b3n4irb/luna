@@ -15,8 +15,11 @@
 //!
 //! The counters start at zero when turned on, and go back to zero on a
 //! reset and when a state is loaded, as in Mesen2.
+//!
+//! The write freezes of Mesen2's memory viewer live here too: a frozen
+//! address drops the writes through it.
 
-use luna_core::CountedMemory;
+use luna_core::{CountedMemory, WriteFreeze};
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -158,5 +161,79 @@ impl Emulator {
                 offsets.map(|a| cpu_byte(m, a)).collect()
             }
         })
+    }
+
+    /// Freeze (`on`) or thaw `len` addresses of a bus from `offset`
+    /// (Mesen2's memory viewer *Freeze*): a write through a frozen address
+    /// is dropped, so the byte keeps its value. `SnesMemory`: the CPU's and
+    /// the DMA's A-bus writes, a register's side effects included, keyed by
+    /// the address (a mirror is not frozen with it). `SpcMemory`: ARAM is
+    /// left unchanged, a register's side effects still happen, the S-DSP's
+    /// echo writes still land. A debugger's write (`write_memory`) still
+    /// changes a frozen byte. Kept across a reset or a state load; a ROM
+    /// load drops them.
+    pub fn set_write_freeze(
+        &mut self,
+        kind: MemoryKind,
+        offset: u32,
+        len: usize,
+        on: bool,
+    ) -> Result<(), ApiError> {
+        let size = self.freezable_size(kind)?;
+        Self::check_range(kind, size, offset, len)?;
+        let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        let slot = if kind == MemoryKind::SnesMemory {
+            &mut snes.frozen_writes
+        } else {
+            &mut snes.apu_real.frozen_writes
+        };
+        let set = slot.get_or_insert_with(|| Box::new(WriteFreeze::new(size)));
+        for i in 0..len {
+            set.set((offset as usize + i) % size, on);
+        }
+        if set.is_empty() {
+            *slot = None;
+        }
+        Ok(())
+    }
+
+    /// The frozen addresses of a bus, as `(first, last)` runs in order.
+    pub fn write_freezes(&self, kind: MemoryKind) -> Result<Vec<(u32, u32)>, ApiError> {
+        self.freezable_size(kind)?;
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let slot = if kind == MemoryKind::SnesMemory {
+            &snes.frozen_writes
+        } else {
+            &snes.apu_real.frozen_writes
+        };
+        Ok(slot.as_deref().map_or_else(Vec::new, |f| {
+            f.ranges()
+                .into_iter()
+                .map(|(a, b)| (a as u32, b as u32))
+                .collect()
+        }))
+    }
+
+    /// Whether address `offset` of a bus is frozen.
+    pub fn write_frozen(&self, kind: MemoryKind, offset: u32) -> Result<bool, ApiError> {
+        self.freezable_size(kind)?;
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let slot = if kind == MemoryKind::SnesMemory {
+            &snes.frozen_writes
+        } else {
+            &snes.apu_real.frozen_writes
+        };
+        Ok(slot.as_deref().is_some_and(|f| f.contains(offset as usize)))
+    }
+
+    /// The size of a bus that can be frozen (the CPU's and the SPC700's).
+    fn freezable_size(&self, kind: MemoryKind) -> Result<usize, ApiError> {
+        match kind {
+            MemoryKind::SnesMemory | MemoryKind::SpcMemory => self.memory_size(kind),
+            _ => Err(ApiError::BadArg(format!(
+                "{}: only SnesMemory and SpcMemory addresses can be frozen",
+                kind.name()
+            ))),
+        }
     }
 }

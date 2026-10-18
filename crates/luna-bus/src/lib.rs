@@ -48,7 +48,7 @@ pub mod types;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
 
-pub use access::{Access, AccessCounters, ByteCounters};
+pub use access::{Access, AccessCounters, ByteCounters, WriteFreeze};
 pub use bus::{Bus, InterruptSample};
 pub use debug::{
     CoprocAccess, CoprocBreak, CoprocCondition, CoprocDebug, CoprocHit, CoprocRegs, CoprocView,
