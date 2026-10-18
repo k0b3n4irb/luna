@@ -518,8 +518,9 @@ A snapshot gives a PC; `--call-stack` gives the chain of calls that led to
 it. Tracking is off by default (it costs one opcode peek per instruction)
 and starts with the run, so the stack holds the calls made since reset.
 The array is ordered oldest first, each frame `{pc, from, kind, symbol}`:
-the address entered, the address of the call, `jsr` / `jsl` / `interrupt`,
-and the nearest label when a symbol file is loaded.
+the address entered, the address of the call, `jsr` / `jsl`, `interrupt`
+(`BRK` / `COP`), `nmi` / `irq` (the instruction the interrupt cut in front
+of is `from`), and the nearest label when a symbol file is loaded.
 
 ```bash
 luna state --until-frame 120 --call-stack --out - "game.sfc" \

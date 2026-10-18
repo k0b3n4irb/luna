@@ -3322,9 +3322,10 @@ fn the_code_log_knows_what_ran_with_which_widths() {
     );
 }
 
-#[test]
-fn the_listing_reads_like_mesen2s() {
-    use crate::listing::{ListingCpu, ListingOptions, RowCode, RowKind};
+/// A ROM for the debugger's panes: native mode, `REP #$30`, a `JSR` to a
+/// routine reading `$10` and writing `$2100`, a `BRA` loop; labels `Sub`
+/// (two-line comment) and `counter` (WRAM `$10-$11`), the code logged.
+fn debugger_demo() -> Emulator {
     let code = [
         0x78, // $8000 SEI
         0x18, // $8001 CLC
@@ -3347,7 +3348,15 @@ fn the_listing_reads_like_mesen2s() {
     e.write_memory(MemoryKind::SnesWorkRam, 0x10, &[0x34, 0x12])
         .unwrap();
     e.enable_code_log(true);
+    e.enable_call_stack(true);
     e.step(30).unwrap();
+    e
+}
+
+#[test]
+fn the_listing_reads_like_mesen2s() {
+    use crate::listing::{ListingCpu, ListingOptions, RowCode, RowKind};
+    let mut e = debugger_demo();
     e.bp_add_exec(0x00_8012, None).unwrap();
     let opts = ListingOptions::default();
     let at = e.listing_pos_of(ListingCpu::Snes, 0x00_8000, opts).unwrap();
@@ -3471,5 +3480,96 @@ fn the_listing_reads_like_mesen2s() {
     assert_eq!(
         r[2].text, ".db $00 $00 $00 $00 $00 $00 $00 $00",
         "16 bytes later"
+    );
+}
+
+#[test]
+fn the_debugger_panes_read_like_mesen2s() {
+    use crate::debugger::WatchStyle;
+    use crate::listing::{ListingCpu, ListingOptions};
+    let e = debugger_demo();
+    let w = |entry: &str| e.watch_value(entry, ExprCpu::Snes, WatchStyle::Hex);
+    assert_eq!(w("[counter]"), "$34");
+    assert_eq!(w("{counter}"), "$1234", "a word by default");
+    assert_eq!(w("[counter], H2"), "$0034");
+    assert_eq!(w("{counter}, S2"), "4660");
+    assert_eq!(w("[counter], B"), "%0011.0100");
+    assert_eq!(w("[counter, 2]"), "$34 $12");
+    assert_eq!(w("1 == 1"), "true");
+    assert_eq!(w("1 / 0"), "<division by zero>");
+    assert_eq!(w("(1"), "<invalid expression>");
+    assert_eq!(
+        e.watch_value("[$7E0010]", ExprCpu::Snes, WatchStyle::Decimal),
+        "52"
+    );
+
+    // Go To: a label, hex digits, an expression.
+    let goto = |t: &str| e.goto_address(ListingCpu::Snes, t);
+    assert_eq!(goto("Sub"), Some(0x00_8010));
+    assert_eq!(goto("8012"), Some(0x8012));
+    assert_eq!(goto("$8000 + 5"), Some(0x8005));
+    assert_eq!(goto("nothing here"), None);
+
+    // Go To All: terms split at capitals, the defaults among the labels.
+    let names: Vec<String> = e
+        .goto_all(ListingCpu::Snes, "nmitim")
+        .into_iter()
+        .map(|r| r.name)
+        .collect();
+    assert_eq!(names, ["NMITIMEN"]);
+    let hits = e.goto_all(ListingCpu::Snes, "cou");
+    assert_eq!(
+        (hits[0].name.as_str(), hits[0].address),
+        ("counter", Some(0x7E_0010))
+    );
+
+    // Find, and Find All Occurrences.
+    let opts = ListingOptions::default();
+    let start = e.listing_pos_of(ListingCpu::Snes, 0x00_8000, opts).unwrap();
+    let found = e
+        .listing_find(ListingCpu::Snes, start, "inidisp", true, opts)
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.addr, 0x00_8012);
+    let back = e
+        .listing_find(ListingCpu::Snes, found, "rep", false, opts)
+        .unwrap()
+        .unwrap();
+    assert_eq!(back.addr, 0x00_8003);
+    let all = e
+        .listing_find_all(ListingCpu::Snes, "counter", true, true, opts)
+        .unwrap();
+    // The 32 KB ROM shows in every bank's upper half: the routine at each
+    // of its mirrors, as the listing has it.
+    assert_eq!(
+        (all[0].pos.addr, all[0].text.as_str()),
+        (0x00_8010, "LDA $10 [counter]")
+    );
+    assert!(all.iter().all(|r| r.pos.addr & 0xFFFF == 0x8010));
+    assert!(all.len() > 100);
+
+    // The routine the JSR entered, its label, where the CPU sees it.
+    let f = e.functions();
+    assert_eq!(f.len(), 1);
+    assert_eq!(
+        (f[0].name.as_deref(), f[0].rom, f[0].address),
+        (Some("Sub"), 0x10, Some(0x00_8010))
+    );
+
+    // The label list: the SNES defaults and ours, not the SPC700's.
+    let rows = e.label_rows(ListingCpu::Snes);
+    assert!(
+        rows.iter()
+            .any(|r| r.label.name == "INIDISP" && r.address == Some(0x2100))
+    );
+    assert!(rows.iter().any(|r| r.label.name == "Sub"));
+    assert!(!rows.iter().any(|r| r.label.name == "CPUIO0"));
+
+    // The call stack: the JSR returned; the CPU loops in the reset code.
+    let stack = e.call_stack_rows();
+    assert_eq!(stack.len(), 1, "{stack:?}");
+    assert_eq!(
+        (stack[0].function.as_str(), stack[0].pc),
+        ("[bottom of stack]", 0x00_8008)
     );
 }

@@ -50,9 +50,23 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   memory values, jump labels, lower case. MCP: `enable_code_log`,
   `listing`. The CPU crates gain `effective_address` and a
   `disassemble_named` that writes far targets in full or by name.
+- **What the debugger window's panes show**, in `luna-api`, as Mesen2
+  lays them out: watch values in its formats (`watch_value`: `, H2`,
+  `, S`, `, U`, `, B`, `[addr, count]`, hex / decimal / binary styles, its
+  error texts), Go To (`goto_address`: a label, bare hex, an expression),
+  Go To All (`goto_all`: terms split at spaces and capitals), Find and
+  Find All Occurrences in the listing (`listing_find`,
+  `listing_find_all`), the function list from the code log
+  (`functions`), the label list per CPU (`label_rows`) and the call stack
+  as its pane reads (`call_stack_rows`: `label ($XXXXXX)`, `[nmi]`,
+  `[irq]`, `[bottom of stack]`).
 
 ### Changed
 
+- The call stack (`--call-stack`, `call_stack`) records the IRQs taken,
+  not only the NMIs, and names them: a frame's `kind` is `nmi` or `irq`
+  for an interrupt, `interrupt` for `BRK` / `COP`. A step that took an
+  interrupt no longer also counts the instruction it cut in front of.
 - `absolute_address` of a register address (`$00:2100`, `$80:4300`…) is
   now `{kind: "SnesRegister", offset}` instead of `null`, so an
   expression's `:` and a watch's `memaddress` give the register.

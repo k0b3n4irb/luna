@@ -450,6 +450,15 @@ impl SymbolTable {
     pub fn iter(&self) -> impl Iterator<Item = (&str, u32)> {
         self.entries.iter().map(|e| (e.name.as_str(), e.value))
     }
+
+    /// The labels (not the constants) of one space, `(name, address)`,
+    /// in load order.
+    pub fn labels_in(&self, space: SymbolSpace) -> impl Iterator<Item = (&str, u32)> {
+        self.entries
+            .iter()
+            .filter(move |e| e.space == space && e.kind == SymbolKind::Label)
+            .map(|e| (e.name.as_str(), e.value))
+    }
 }
 
 #[cfg(test)]

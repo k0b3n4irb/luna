@@ -89,6 +89,17 @@ impl CodeLog {
             .unwrap_or(0)
     }
 
+    /// The offsets of `kind` whose flags have any of `flag`'s bits.
+    pub(crate) fn offsets_with(&self, kind: MemoryKind, flag: u8) -> Vec<u32> {
+        self.flags.get(&kind).map_or_else(Vec::new, |v| {
+            v.iter()
+                .enumerate()
+                .filter(|&(_, &f)| f & flag != 0)
+                .map(|(o, _)| o as u32)
+                .collect()
+        })
+    }
+
     /// The flags of the byte behind CPU-bus address `addr`.
     pub(crate) fn at(&self, view: View<'_>, addr: u32) -> u8 {
         view.absolute(addr)

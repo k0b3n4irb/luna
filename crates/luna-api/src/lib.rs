@@ -45,6 +45,7 @@ use serde::Serialize;
 /// names, config). The GUI Event Viewer panel consumes this via the accessors
 /// on [`Emulator`].
 pub mod code_log;
+pub mod debugger;
 pub mod dsp1_commands;
 pub mod event_viewer;
 pub mod expr;
@@ -59,6 +60,7 @@ pub mod video;
 mod vocab;
 mod vram_writers;
 
+pub use debugger::{CallStackRow, FindResult, FunctionRow, GotoResult, LabelRow, WatchStyle};
 pub use event_viewer::{
     CATEGORY_COUNT, EventCategory, EventViewerConfig, EventViewerEvent, register_name,
 };
@@ -1203,8 +1205,12 @@ pub enum CallKind {
     Jsr,
     /// `JSL` (long).
     Jsl,
-    /// An interrupt entry: NMI dispatch, `BRK` or `COP`.
+    /// `BRK` or `COP`.
     Interrupt,
+    /// An NMI taken.
+    Nmi,
+    /// An IRQ taken.
+    Irq,
 }
 
 /// One entry of the tracked 65C816 call stack (issue #180), oldest
@@ -3530,7 +3536,7 @@ impl Emulator {
     /// Pre-step capture for call-stack tracking: the opcode about to
     /// execute, the live PC, and the NMI-service count (to detect an
     /// NMI dispatched inside the step).
-    fn call_track_pre(snes: &mut Snes) -> (u8, u32, u64) {
+    fn call_track_pre(snes: &mut Snes) -> (u8, u32, u64, u64) {
         let pb = snes.cpu.pb;
         let pc = snes.cpu.pc;
         let op = snes.dbg_peek_bytes(pb, pc, 1)[0];
@@ -3538,19 +3544,19 @@ impl Emulator {
             op,
             (u32::from(pb) << 16) | u32::from(pc),
             snes.nmis_serviced,
+            snes.cpu.interrupts_serviced,
         )
     }
 
-    /// Post-step: interpret the pre-captured opcode as a push (JSR $20 /
-    /// JSR (a,x) $FC / JSL $22 / BRK $00 / COP $02), a pop (RTS $60 /
-    /// RTL $6B / RTI $40), or neither; an NMI dispatched inside the step
-    /// (service-count delta) pushes an interrupt frame. Bounded at 256
-    /// frames (oldest dropped) and tolerant of RTS-without-JSR. Known
-    /// approximation: a call and an interrupt in the same step record
-    /// the interrupt handler as both entries.
-    fn call_track_post(snes: &Snes, stack: &mut Vec<CallFrame>, pre: (u8, u32, u64)) {
+    /// Post-step: a step that took an NMI or an IRQ (the CPU's count of
+    /// them moved) ran no instruction and pushes that frame; otherwise the
+    /// pre-captured opcode is a push (JSR $20 / JSR (a,x) $FC / JSL $22 /
+    /// BRK $00 / COP $02), a pop (RTS $60 / RTL $6B / RTI $40), or
+    /// neither. Bounded at 256 frames (oldest dropped) and tolerant of
+    /// RTS-without-JSR.
+    fn call_track_post(snes: &Snes, stack: &mut Vec<CallFrame>, pre: (u8, u32, u64, u64)) {
         const CAP: usize = 256;
-        let (op, from, nmis_before) = pre;
+        let (op, from, nmis_before, interrupts_before) = pre;
         let cur = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
         let mut push = |kind: CallKind| {
             if stack.len() >= CAP {
@@ -3563,6 +3569,14 @@ impl Emulator {
                 symbol: None,
             });
         };
+        if snes.cpu.interrupts_serviced != interrupts_before {
+            push(if snes.nmis_serviced == nmis_before {
+                CallKind::Irq
+            } else {
+                CallKind::Nmi
+            });
+            return;
+        }
         match op {
             0x20 | 0xFC => push(CallKind::Jsr),
             0x22 => push(CallKind::Jsl),
@@ -3571,17 +3585,6 @@ impl Emulator {
                 stack.pop();
             }
             _ => {}
-        }
-        if snes.nmis_serviced != nmis_before {
-            if stack.len() >= CAP {
-                stack.remove(0);
-            }
-            stack.push(CallFrame {
-                pc: cur,
-                from,
-                kind: CallKind::Interrupt,
-                symbol: None,
-            });
         }
     }
 

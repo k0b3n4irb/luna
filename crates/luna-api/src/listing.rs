@@ -490,7 +490,7 @@ impl Emulator {
     }
 
     /// The length of the item at `addr` and its rows.
-    fn item_rows(
+    pub(crate) fn item_rows(
         &self,
         cpu: ListingCpu,
         view: View<'_>,
