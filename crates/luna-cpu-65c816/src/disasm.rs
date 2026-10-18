@@ -123,6 +123,31 @@ pub struct Instruction {
 /// bank), reading bytes through `read`. `m8` / `x8` are the effective
 /// 8-bit accumulator / index widths. Never panics.
 pub fn disassemble(read: impl Fn(u16) -> u8, pc: u16, m8: bool, x8: bool) -> Instruction {
+    decode(&read, None, pc, m8, x8, &|_| None)
+}
+
+/// [`disassemble`] as a debugger's listing shows it: a branch's target
+/// and a long (24-bit) operand in full, `$PPAAAA` with the program bank
+/// `pb`, or as the name `name` gives that address.
+pub fn disassemble_named(
+    read: impl Fn(u16) -> u8,
+    pb: u8,
+    pc: u16,
+    m8: bool,
+    x8: bool,
+    name: &dyn Fn(u32) -> Option<String>,
+) -> Instruction {
+    decode(&read, Some(pb), pc, m8, x8, name)
+}
+
+fn decode(
+    read: &dyn Fn(u16) -> u8,
+    pb: Option<u8>,
+    pc: u16,
+    m8: bool,
+    x8: bool,
+    name: &dyn Fn(u32) -> Option<String>,
+) -> Instruction {
     let op = read(pc);
     let (mnemonic, mode) = OPCODES[op as usize];
     let length = 1 + mode.operand_bytes(m8, x8);
@@ -144,6 +169,9 @@ pub fn disassemble(read: impl Fn(u16) -> u8, pc: u16, m8: bool, x8: bool) -> Ins
         }
     };
 
+    // A 24-bit address: by name when the listing has one.
+    let far = |a: u32| name(a).unwrap_or_else(|| format!("${a:06X}"));
+
     let operand = match mode {
         Mode::Imp => String::new(),
         Mode::ImmM => imm(!m8),
@@ -163,10 +191,15 @@ pub fn disassemble(read: impl Fn(u16) -> u8, pc: u16, m8: bool, x8: bool) -> Ins
         Mode::AbsInd => format!("(${w16:04X})"),
         Mode::AbsXInd => format!("(${w16:04X},X)"),
         Mode::AbsIndLong => format!("[${w16:04X}]"),
-        Mode::Long => format!("${w24:06X}"),
-        Mode::LongX => format!("${w24:06X},X"),
-        Mode::Rel => format!("${rel8:04X}"),
-        Mode::RelLong => format!("${rel16:04X}"),
+        Mode::Long => far(w24),
+        Mode::LongX => format!("{},X", far(w24)),
+        Mode::Rel | Mode::RelLong => {
+            let target = if mode == Mode::Rel { rel8 } else { rel16 };
+            pb.map_or_else(
+                || format!("${target:04X}"),
+                |pb| far((u32::from(pb) << 16) | u32::from(target)),
+            )
+        }
         Mode::Sr => format!("${b1:02X},S"),
         Mode::SrIndY => format!("(${b1:02X},S),Y"),
         // Block-move operand bytes are [dest][src]; assembler syntax shows
@@ -372,5 +405,299 @@ mod tests {
             assert!((1..=4).contains(&i.length));
             assert!(!i.text.is_empty());
         }
+    }
+}
+
+/// The registers an effective address depends on.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct EffectiveRegs {
+    /// Program bank.
+    pub pb: u8,
+    /// Data bank.
+    pub db: u8,
+    /// Direct page.
+    pub d: u16,
+    /// Stack pointer.
+    pub s: u16,
+    /// Index X.
+    pub x: u16,
+    /// Index Y.
+    pub y: u16,
+    /// 8-bit accumulator (`E` or `M`).
+    pub m8: bool,
+    /// 8-bit index registers (`E` or `X`).
+    pub x8: bool,
+    /// Emulation mode.
+    pub e: bool,
+}
+
+/// Where an instruction would reach if it ran now.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Effective {
+    /// The 24-bit address.
+    pub addr: u32,
+    /// Bytes it reads or writes there (1 or 2); 0 for a jump's target.
+    pub width: u8,
+}
+
+/// The data address (or, for `JMP` / `JSR` through a 16-bit operand,
+/// the target) of the instruction at `pb:pc`, from the registers `r` as
+/// they are now — what a debugger's listing shows after the operand.
+/// `peek` reads the bus without side effects. `None` for an instruction
+/// that names no such address: implied, immediate, a push or pull, a
+/// block move, a branch, a long operand without an index.
+pub fn effective_address(
+    peek: impl Fn(u32) -> u8,
+    pc: u16,
+    r: &EffectiveRegs,
+) -> Option<Effective> {
+    let at = |o: u16| peek((u32::from(r.pb) << 16) | u32::from(pc.wrapping_add(o)));
+    let op = at(0);
+    let (_, mode) = OPCODES[op as usize];
+    let b1 = at(1);
+    let w16 = u16::from(b1) | (u16::from(at(2)) << 8);
+    let w24 = u32::from(w16) | (u32::from(at(3)) << 16);
+    let bank0 = |a: u16| u32::from(a);
+    let word0 =
+        |a: u16| u16::from(peek(bank0(a))) | (u16::from(peek(bank0(a.wrapping_add(1)))) << 8);
+    let long0 = |a: u16| u32::from(word0(a)) | (u32::from(peek(bank0(a.wrapping_add(2)))) << 16);
+    let data = |a: u32| (u32::from(r.db) << 16).wrapping_add(a) & 0xFF_FFFF;
+    let x = if r.x8 { r.x & 0xFF } else { r.x };
+    let y = if r.x8 { r.y & 0xFF } else { r.y };
+    // Direct page: in emulation mode with DL = 0, an indexed direct-page
+    // address wraps in its page.
+    let dp = |off: u16| {
+        if r.e && r.d & 0xFF == 0 {
+            r.d | (off & 0xFF)
+        } else {
+            r.d.wrapping_add(off)
+        }
+    };
+    let index_op = matches!(
+        op,
+        0xA2 | 0xA6
+            | 0xAE
+            | 0xB6
+            | 0xBE
+            | 0xA0
+            | 0xA4
+            | 0xAC
+            | 0xB4
+            | 0xBC
+            | 0x86
+            | 0x8E
+            | 0x96
+            | 0x84
+            | 0x8C
+            | 0x94
+            | 0xE0
+            | 0xE4
+            | 0xEC
+            | 0xC0
+            | 0xC4
+            | 0xCC
+    );
+    let width = if (index_op && r.x8) || (!index_op && r.m8) {
+        1
+    } else {
+        2
+    };
+    let jump = |addr| Some(Effective { addr, width: 0 });
+    let pbank = u32::from(r.pb) << 16;
+    let addr = match (op, mode) {
+        // PEI, PEA, PER push; MVN / MVP move blocks.
+        (0xD4 | 0xF4 | 0x62, _) | (_, Mode::BlockMove) => return None,
+        // JMP / JSR $aaaa: the target in the program bank.
+        (0x4C | 0x20, _) => return jump(pbank | u32::from(w16)),
+        // JMP ($aaaa): pointer in bank 0.
+        (0x6C, _) => return jump(pbank | u32::from(word0(w16))),
+        // JMP / JSR ($aaaa,X): pointer in the program bank.
+        (0x7C | 0xFC, _) => {
+            let p = w16.wrapping_add(x);
+            let lo = peek(pbank | u32::from(p));
+            let hi = peek(pbank | u32::from(p.wrapping_add(1)));
+            return jump(pbank | u32::from(u16::from(lo) | (u16::from(hi) << 8)));
+        }
+        // JML [$aaaa]: pointer in bank 0.
+        (0xDC, _) => return jump(long0(w16)),
+        (_, Mode::Dp) => bank0(dp(u16::from(b1))),
+        (_, Mode::DpX) => bank0(dp(u16::from(b1).wrapping_add(x))),
+        (_, Mode::DpY) => bank0(dp(u16::from(b1).wrapping_add(y))),
+        (_, Mode::DpInd) => data(u32::from(word0(dp(u16::from(b1))))),
+        (_, Mode::DpIndY) => data(u32::from(word0(dp(u16::from(b1)))) + u32::from(y)),
+        (_, Mode::DpXInd) => data(u32::from(word0(dp(u16::from(b1).wrapping_add(x))))),
+        (_, Mode::DpIndLong) => long0(r.d.wrapping_add(u16::from(b1))),
+        (_, Mode::DpIndLongY) => {
+            long0(r.d.wrapping_add(u16::from(b1))).wrapping_add(u32::from(y)) & 0xFF_FFFF
+        }
+        (_, Mode::Sr) => bank0(r.s.wrapping_add(u16::from(b1))),
+        (_, Mode::SrIndY) => data(u32::from(word0(r.s.wrapping_add(u16::from(b1)))) + u32::from(y)),
+        (_, Mode::Abs) => data(u32::from(w16)),
+        (_, Mode::AbsX) => data(u32::from(w16) + u32::from(x)),
+        (_, Mode::AbsY) => data(u32::from(w16) + u32::from(y)),
+        (_, Mode::LongX) => w24.wrapping_add(u32::from(x)) & 0xFF_FFFF,
+        _ => return None,
+    };
+    Some(Effective { addr, width })
+}
+
+#[cfg(test)]
+mod effective_tests {
+    use super::*;
+
+    /// A bus: `code` at `$00:8000`, then `mem` pairs.
+    fn bus(code: &[u8], mem: &[(u32, u8)]) -> impl Fn(u32) -> u8 {
+        let mut m = std::collections::HashMap::new();
+        for (i, &b) in code.iter().enumerate() {
+            m.insert(0x8000 + i as u32, b);
+        }
+        for &(a, b) in mem {
+            m.insert(a, b);
+        }
+        move |a| m.get(&a).copied().unwrap_or(0)
+    }
+
+    fn regs() -> EffectiveRegs {
+        EffectiveRegs {
+            db: 0x7E,
+            d: 0x0100,
+            s: 0x01F0,
+            x: 0x0004,
+            y: 0x0010,
+            ..EffectiveRegs::default()
+        }
+    }
+
+    fn ea(code: &[u8], mem: &[(u32, u8)], r: &EffectiveRegs) -> Option<(u32, u8)> {
+        effective_address(bus(code, mem), 0x8000, r).map(|e| (e.addr, e.width))
+    }
+
+    #[test]
+    fn data_addresses_follow_the_registers() {
+        let r = regs();
+        assert_eq!(ea(&[0xA5, 0x10], &[], &r), Some((0x00_0110, 2)), "LDA $10");
+        assert_eq!(
+            ea(&[0xB5, 0x10], &[], &r),
+            Some((0x00_0114, 2)),
+            "LDA $10,X"
+        );
+        assert_eq!(
+            ea(&[0xAD, 0x00, 0x21], &[], &r),
+            Some((0x7E_2100, 2)),
+            "LDA $2100"
+        );
+        assert_eq!(
+            ea(&[0xBD, 0xFF, 0xFF], &[], &r),
+            Some((0x7F_0003, 2)),
+            "LDA $FFFF,X carries into the next bank"
+        );
+        assert_eq!(
+            ea(&[0xB1, 0x20], &[(0x0120, 0x00), (0x0121, 0x45)], &r),
+            Some((0x7E_4510, 2)),
+            "LDA ($20),Y"
+        );
+        assert_eq!(
+            ea(
+                &[0xB7, 0x20],
+                &[(0x0120, 0x00), (0x0121, 0x45), (0x0122, 0xC0)],
+                &r
+            ),
+            Some((0xC0_4510, 2)),
+            "LDA [$20],Y"
+        );
+        assert_eq!(
+            ea(&[0xA3, 0x02], &[], &r),
+            Some((0x00_01F2, 2)),
+            "LDA $02,S"
+        );
+        let r8 = EffectiveRegs {
+            m8: true,
+            x8: true,
+            ..r
+        };
+        assert_eq!(
+            ea(&[0x85, 0x10], &[], &r8),
+            Some((0x00_0110, 1)),
+            "STA $10, 8-bit"
+        );
+        assert_eq!(
+            ea(&[0xAE, 0x00, 0x10], &[], &r),
+            Some((0x7E_1000, 2)),
+            "LDX: X width"
+        );
+        assert_eq!(ea(&[0xAE, 0x00, 0x10], &[], &r8), Some((0x7E_1000, 1)));
+        // Emulation mode, DL = 0: an indexed direct page wraps in its page.
+        let re = EffectiveRegs {
+            e: true,
+            m8: true,
+            x8: true,
+            d: 0x0000,
+            x: 0x20,
+            ..r
+        };
+        assert_eq!(
+            ea(&[0xB5, 0xF0], &[], &re),
+            Some((0x00_0010, 1)),
+            "LDA $F0,X"
+        );
+    }
+
+    #[test]
+    fn jumps_show_their_target_and_the_rest_nothing() {
+        let r = EffectiveRegs { pb: 0x80, ..regs() };
+        let at = |code: &[u8], mem: &[(u32, u8)]| {
+            let mut m: Vec<(u32, u8)> = code
+                .iter()
+                .enumerate()
+                .map(|(i, &b)| (0x80_8000 + i as u32, b))
+                .collect();
+            m.extend_from_slice(mem);
+            effective_address(bus(&[], &m), 0x8000, &r).map(|e| (e.addr, e.width))
+        };
+        assert_eq!(
+            at(&[0x20, 0x23, 0x81], &[]),
+            Some((0x80_8123, 0)),
+            "JSR $8123"
+        );
+        assert_eq!(
+            at(&[0x6C, 0x00, 0x02], &[(0x0200, 0x34), (0x0201, 0x92)]),
+            Some((0x80_9234, 0)),
+            "JMP ($0200), pointer in bank 0"
+        );
+        for none in [
+            &[0xEA][..],               // NOP
+            &[0xA9, 0x12, 0x34],       // LDA #
+            &[0xF4, 0x00, 0x10],       // PEA
+            &[0x54, 0x7E, 0x7F],       // MVN
+            &[0xD0, 0x02],             // BNE
+            &[0xAF, 0x00, 0x10, 0x7E], // LDA long
+            &[0x22, 0x00, 0x80, 0x80], // JSL
+        ] {
+            assert_eq!(at(none, &[]), None, "{none:02X?}");
+        }
+    }
+
+    #[test]
+    fn the_named_form_writes_far_targets_in_full_or_by_name() {
+        let code = [0xD0, 0x02, 0x22, 0x00, 0xA0, 0x80];
+        let read = |a: u16| {
+            code.get(usize::from(a.wrapping_sub(0x8000)))
+                .copied()
+                .unwrap_or(0)
+        };
+        let name = |a: u32| (a == 0x80_A000).then(|| "Mul".to_string());
+        assert_eq!(
+            disassemble_named(read, 0x80, 0x8000, true, true, &name).text,
+            "BNE $808004"
+        );
+        assert_eq!(
+            disassemble_named(read, 0x80, 0x8002, true, true, &name).text,
+            "JSL Mul"
+        );
+        assert_eq!(
+            disassemble(read, 0x8000, true, true).text,
+            "BNE $8004",
+            "unchanged"
+        );
     }
 }

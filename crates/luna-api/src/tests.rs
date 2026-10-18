@@ -3296,7 +3296,7 @@ fn the_code_log_knows_what_ran_with_which_widths() {
     assert_eq!(f(0x0008), CODE | START | JUMP_TARGET, "BRA to itself");
     // Decoded ahead after the JSR, never run: BRK $00 pairs, 16-bit.
     assert_eq!(f(0x000A), START | PREDECODED);
-    assert_eq!(f(0x000B), 0, "BRK's signature byte");
+    assert_eq!(f(0x000B), PREDECODED, "BRK's signature byte");
     assert_eq!(
         e.code_flags_at(0x80_8010).unwrap(),
         f(0x0010),
@@ -3319,5 +3319,157 @@ fn the_code_log_knows_what_ran_with_which_widths() {
         e.code_flags(MemoryKind::SnesPrgRom, 0x0010),
         CODE | START | SUB_ENTRY,
         "kept while off"
+    );
+}
+
+#[test]
+fn the_listing_reads_like_mesen2s() {
+    use crate::listing::{ListingCpu, ListingOptions, RowCode, RowKind};
+    let code = [
+        0x78, // $8000 SEI
+        0x18, // $8001 CLC
+        0xFB, // $8002 XCE
+        0xC2, 0x30, // $8003 REP #$30
+        0x20, 0x10, 0x80, // $8005 JSR $8010
+        0x80, 0xFE, // $8008 BRA $8008
+        0, 0, 0, 0, 0, 0, // $800A..
+        0xA5, 0x10, // $8010 LDA $10
+        0x8D, 0x00, 0x21, // $8012 STA $2100
+        0x60, // $8015 RTS
+    ];
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
+    e.import_labels_mlb(
+        "SnesPrgRom:0010:Sub:two\\nlines\nSnesWorkRam:0010-0011:counter\n",
+        false,
+    )
+    .unwrap();
+    e.write_memory(MemoryKind::SnesWorkRam, 0x10, &[0x34, 0x12])
+        .unwrap();
+    e.enable_code_log(true);
+    e.step(30).unwrap();
+    e.bp_add_exec(0x00_8012, None).unwrap();
+    let opts = ListingOptions::default();
+    let at = e.listing_pos_of(ListingCpu::Snes, 0x00_8000, opts).unwrap();
+    let rows = e.listing(ListingCpu::Snes, at, 20, opts).unwrap();
+    let line = |r: &crate::listing::ListingRow| {
+        let mut s = format!("{:06X} {:?} {}", r.pos.addr, r.kind, r.text);
+        if let Some(x) = &r.effective {
+            s = format!("{s} {x}");
+        }
+        if let Some(v) = &r.value {
+            s = format!("{s} = {v}");
+        }
+        s
+    };
+    let text: Vec<String> = rows.iter().map(line).collect();
+    assert_eq!(
+        &text[..15],
+        [
+            "008000 Instruction SEI",
+            "008001 Instruction CLC",
+            "008002 Instruction XCE",
+            "008003 Instruction REP #$30",
+            "008005 Instruction JSR $8010 [Sub]",
+            "008008 Instruction BRA $008008",
+            "00800A Instruction BRK #$00",
+            "00800C Instruction BRK #$00",
+            "00800E Instruction BRK #$00",
+            "008010 FunctionStart Sub",
+            "008010 Comment ;two",
+            "008010 Comment ;lines",
+            "008010 Label Sub:",
+            "008010 Instruction LDA $10 [counter] = $1234",
+            "008012 Instruction STA $2100 [INIDISP] = $0000",
+        ],
+        "{text:#?}"
+    );
+    assert_eq!(text[15], "008015 Instruction RTS");
+    assert_eq!(rows[16].kind, RowKind::FunctionEnd);
+    assert!(rows[5].is_pc, "the CPU loops on the BRA");
+    assert_eq!(
+        (rows[6].code, rows[0].code),
+        (RowCode::Predecoded, RowCode::Executed)
+    );
+    assert_eq!(
+        rows[14].breakpoint.map(|b| (b.kind, b.enabled)),
+        Some(("exec", true))
+    );
+    assert_eq!(rows[4].bytes, [0x20, 0x10, 0x80]);
+
+    // Back from the routine's first row, one row: the last BRK.
+    let sub = rows[9].pos;
+    let back = e.listing_back(ListingCpu::Snes, sub, 1, opts).unwrap();
+    assert_eq!((back.addr, back.row), (0x00_800E, 0));
+    let back = e
+        .listing_back(ListingCpu::Snes, rows[13].pos, 4, opts)
+        .unwrap();
+    assert_eq!(back, sub, "four rows up from the instruction");
+
+    // What is not code collapses, bank by bank.
+    let block = |a: u32| {
+        let p = e.listing_pos_of(ListingCpu::Snes, a, opts).unwrap();
+        let r = e.listing(ListingCpu::Snes, p, 3, opts).unwrap();
+        (
+            p.addr,
+            r.iter()
+                .map(|r| (r.kind, r.text.clone()))
+                .collect::<Vec<_>>(),
+        )
+    };
+    assert_eq!(
+        block(0x7E_1234),
+        (
+            0x7E_0000,
+            vec![
+                (RowKind::BlockStart, "unidentified".to_string()),
+                (RowKind::BlockBody, String::new()),
+                (RowKind::BlockEnd, String::new()),
+            ]
+        )
+    );
+    assert_eq!(
+        block(0x00_4300).0,
+        0x00_2000,
+        "registers and open bus: unmapped"
+    );
+    assert_eq!(block(0x00_4300).1[0].1, "unmapped");
+    let next = e
+        .listing(
+            ListingCpu::Snes,
+            crate::listing::ListingPos {
+                addr: 0x7E_0000,
+                row: 2,
+            },
+            2,
+            opts,
+        )
+        .unwrap();
+    assert_eq!(
+        next[1].pos.addr, 0x7F_0000,
+        "the next bank opens its own block"
+    );
+
+    // Lower case keeps names; a shown block lists its bytes.
+    let low = ListingOptions {
+        lower_case: true,
+        unidentified: crate::listing::BlockView::Show,
+        ..opts
+    };
+    let r = e.listing(ListingCpu::Snes, rows[13].pos, 1, low).unwrap();
+    assert_eq!(
+        (
+            r[0].text.as_str(),
+            r[0].effective.as_deref(),
+            r[0].value.as_deref()
+        ),
+        ("lda $10", Some("[counter]"), Some("$1234"))
+    );
+    let p = e.listing_pos_of(ListingCpu::Snes, 0x7E_0000, low).unwrap();
+    let r = e.listing(ListingCpu::Snes, p, 3, low).unwrap();
+    assert_eq!(r[1].text, ".db $00 $00 $00 $00 $00 $00 $00 $00");
+    assert_eq!(
+        r[2].text, ".db $00 $00 $00 $00 $00 $00 $00 $00",
+        "16 bytes later"
     );
 }

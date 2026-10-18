@@ -50,6 +50,7 @@ pub mod event_viewer;
 pub mod expr;
 pub mod input;
 pub mod labels;
+pub mod listing;
 pub mod memory;
 pub mod paths;
 mod power_on;
@@ -64,6 +65,9 @@ pub use event_viewer::{
 pub use expr::{ExprAccess, ExprCpu, ExprKind, ExprResult, Expression};
 pub use input::{FRAME_STEP_BUDGET, InputEvent, InputScript, ScriptBound, WatchEvent};
 pub use labels::{Label, LabelError, LabelHit, LabelStore, MlbImport};
+pub use listing::{
+    BlockView, ListingCpu, ListingOptions, ListingPos, ListingRow, RowBreakpoint, RowCode, RowKind,
+};
 pub use memory::{MemoryKind, MemoryLocation};
 pub use power_on::parse_power_on;
 pub use vocab::{

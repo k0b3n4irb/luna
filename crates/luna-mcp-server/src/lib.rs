@@ -1674,6 +1674,47 @@ pub struct LabelsExportResult {
     pub count: usize,
 }
 
+/// `listing` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct ListingParams {
+    /// `snes` (the 65C816, default) or `spc`.
+    #[serde(default)]
+    pub cpu: Option<String>,
+    /// The address to show: the listing starts at the row it is on
+    /// (default: the CPU's program counter).
+    #[serde(default)]
+    pub address: Option<u32>,
+    /// A label or `.sym` name in place of `address`.
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// Rows before that row (default 0).
+    #[serde(default)]
+    pub before: usize,
+    /// Rows in all (default 40, at most 1000).
+    #[serde(default)]
+    pub rows: Option<usize>,
+    /// Display options; Mesen2's defaults when absent.
+    #[serde(default)]
+    pub options: Option<luna_api::ListingOptions>,
+}
+
+/// `listing` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ListingResult {
+    /// The rows, in address order.
+    pub rows: Vec<luna_api::ListingRow>,
+    /// Whether the code log is on (without it, only the code already
+    /// logged, or none, is known).
+    pub code_log: bool,
+}
+
+/// `enable_code_log` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct EnableCodeLogParams {
+    /// Log from now on (`false` stops, keeping what was logged).
+    pub on: bool,
+}
+
 /// A memory named in a label tool.
 fn label_memory(name: &str) -> Result<luna_api::MemoryKind, ErrorData> {
     luna_api::MemoryKind::from_name(name).ok_or_else(|| {
@@ -2831,6 +2872,79 @@ impl LunaServer {
                 .map_err(|e| ErrorData::invalid_params(format!("{p}: {e}"), None))?;
         }
         Ok(rmcp::Json(LabelsExportResult { text, count }))
+    }
+
+    #[rmcp::tool(
+        description = "Log which bytes the 65C816 and the SPC700 run as code, with the \
+                                widths they ran with, where calls and jumps land, and what \
+                                is decoded ahead: what `listing` knows code by. Off by \
+                                default; costs a few percent of speed while on."
+    )]
+    async fn enable_code_log(
+        &self,
+        Parameters(params): Parameters<EnableCodeLogParams>,
+    ) -> rmcp::Json<EmptyOk> {
+        self.emulator.lock().await.enable_code_log(params.on);
+        rmcp::Json(EmptyOk { ok: true })
+    }
+
+    #[rmcp::tool(
+        description = "The debugger's code listing, as Mesen2's Disassembly pane draws \
+                                it: the whole address space, code the code log knows \
+                                disassembled with labels, comments, the effective address \
+                                each instruction would reach now and the value there; what is \
+                                not code collapsed into `unidentified` / `data` / `unmapped` \
+                                blocks. Turn `enable_code_log` on and run first."
+    )]
+    async fn listing(
+        &self,
+        Parameters(params): Parameters<ListingParams>,
+    ) -> Result<rmcp::Json<ListingResult>, ErrorData> {
+        let cpu = match params.cpu.as_deref() {
+            None | Some("snes" | "cpu") => luna_api::ListingCpu::Snes,
+            Some("spc") => luna_api::ListingCpu::Spc,
+            Some(other) => {
+                return Err(ErrorData::invalid_params(
+                    format!("cpu `{other}`: `snes` or `spc`"),
+                    None,
+                ));
+            }
+        };
+        let opts = params.options.unwrap_or_default();
+        let count = params.rows.unwrap_or(40).min(1000);
+        let em = self.emulator.lock().await;
+        let address = match (params.symbol.as_deref(), params.address) {
+            (Some(name), _) => match cpu {
+                luna_api::ListingCpu::Snes => resolve_addr(&em, Some(name), 0)?,
+                luna_api::ListingCpu::Spc => em
+                    .label_address(name, luna_api::MemoryKind::SpcMemory)
+                    .map_err(|e| api_err_to_mcp(&e))?
+                    .or_else(|| em.resolve_symbol_spc(name).map(u32::from))
+                    .ok_or_else(|| {
+                        ErrorData::invalid_params(format!("unknown SPC700 name `{name}`"), None)
+                    })?,
+            },
+            (None, Some(a)) => a,
+            (None, None) => match cpu {
+                luna_api::ListingCpu::Snes => {
+                    let c = em.cpu_state().map_err(|e| api_err_to_mcp(&e))?;
+                    (u32::from(c.pb) << 16) | u32::from(c.pc)
+                }
+                luna_api::ListingCpu::Spc => {
+                    u32::from(em.spc700_state().map_err(|e| api_err_to_mcp(&e))?.pc)
+                }
+            },
+        };
+        let pos = em
+            .listing_pos_of(cpu, address, opts)
+            .and_then(|p| em.listing_back(cpu, p, params.before, opts))
+            .map_err(|e| api_err_to_mcp(&e))?;
+        let rows = em
+            .listing(cpu, pos, count, opts)
+            .map_err(|e| api_err_to_mcp(&e))?;
+        let code_log = em.code_logging();
+        drop(em);
+        Ok(rmcp::Json(ListingResult { rows, code_log }))
     }
 
     #[rmcp::tool(

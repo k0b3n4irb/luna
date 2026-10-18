@@ -1696,3 +1696,49 @@ async fn server_labels_set_list_import_export() {
     assert_eq!(removed.map(|l| l.name).as_deref(), Some("counter"));
     let _ = std::fs::remove_file(&path);
 }
+
+#[tokio::test]
+async fn server_listing_shows_logged_code_with_labels() {
+    let s = LunaServer::new();
+    let path = PathBuf::from("/tmp/luna_mcp_listing_demo.smc");
+    std::fs::write(&path, demo_lorom()).unwrap();
+    s.load_rom(Parameters(rom_params(&path.to_string_lossy())))
+        .await
+        .unwrap();
+    s.enable_code_log(Parameters(EnableCodeLogParams { on: true }))
+        .await;
+    s.step(Parameters(StepParams { count: 50 })).await.unwrap();
+    let r = s
+        .listing(Parameters(ListingParams {
+            cpu: None,
+            address: None,
+            symbol: None,
+            before: 2,
+            rows: Some(5),
+            options: None,
+        }))
+        .await
+        .unwrap()
+        .0;
+    assert!(r.code_log);
+    assert_eq!(r.rows.len(), 5);
+    assert_eq!(
+        r.rows.iter().filter(|row| row.is_pc).count(),
+        1,
+        "the PC's row, two rows down: {:?}",
+        r.rows
+    );
+    assert!(r.rows[2].is_pc);
+    let bad = s
+        .listing(Parameters(ListingParams {
+            cpu: Some("gsu".into()),
+            address: None,
+            symbol: None,
+            before: 0,
+            rows: None,
+            options: None,
+        }))
+        .await;
+    assert!(bad.is_err());
+    let _ = std::fs::remove_file(&path);
+}

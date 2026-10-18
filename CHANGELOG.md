@@ -40,6 +40,16 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   calls, interrupts and jumps landed, and what was decoded ahead of what
   ran, kept by memory and offset as Mesen2's listing knows code. Off
   unless asked for (about 7 % slower on Super Mario World while on).
+- **The debugger's code listing** (`listing`, MCP and `luna-api`), as
+  Mesen2's Disassembly pane draws it: the whole address space of the
+  65C816 or the SPC700, the logged code disassembled with labels,
+  comments, function separators, the address each instruction would reach
+  now from the live registers and the value there (`[$7ECBAA] = $2525`),
+  what is not code collapsed into `unidentified` / `unmapped` blocks bank
+  by bank. Mesen2's options: `data` / `unidentified` shown as `.db` rows,
+  memory values, jump labels, lower case. MCP: `enable_code_log`,
+  `listing`. The CPU crates gain `effective_address` and a
+  `disassemble_named` that writes far targets in full or by name.
 
 ### Changed
 

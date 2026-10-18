@@ -31,7 +31,8 @@ pub const INDEX8: u8 = 0x10;
 pub const MEMORY8: u8 = 0x20;
 /// An instruction starts here (run, or decoded ahead).
 pub const START: u8 = 0x40;
-/// That instruction was only decoded ahead, never run.
+/// Decoded ahead, never run: the start of such an instruction (with
+/// [`START`]) or one of its operand bytes.
 pub const PREDECODED: u8 = 0x80;
 
 /// Per-memory flags.
@@ -129,7 +130,12 @@ impl CodeLog {
         let len =
             u32::from(luna_cpu_65c816::disassemble(read, pre.pc as u16, pre.m8, pre.x8).length);
         for i in 0..len {
-            self.mark(view, in_bank(pre.pc, i), CODE);
+            if let Some(b) = view
+                .absolute(in_bank(pre.pc, i))
+                .and_then(|l| self.slot(view, l))
+            {
+                *b = (*b & !PREDECODED) | CODE;
+            }
         }
         if let Some(b) = self.slot(view, loc) {
             *b = (*b & !(PREDECODED | INDEX8 | MEMORY8)) | START | widths;
@@ -199,6 +205,14 @@ impl CodeLog {
                 *b |=
                     START | PREDECODED | if m8 { MEMORY8 } else { 0 } | if x8 { INDEX8 } else { 0 };
             }
+            for i in 1..len {
+                let operand = bank | u32::from(pc.wrapping_add(i));
+                if let Some(b) = view.absolute(operand).and_then(|l| self.slot(view, l))
+                    && *b & (CODE | START) == 0
+                {
+                    *b |= PREDECODED;
+                }
+            }
             if !Self::widths_after(op, read(pc.wrapping_add(1)), &mut m8, &mut x8, e) {
                 return;
             }
@@ -243,7 +257,7 @@ impl CodeLog {
             let n = len(pc);
             for i in 0..n {
                 if let Some(b) = self.slot(view, loc(pc.wrapping_add(i), ipl)) {
-                    *b |= CODE;
+                    *b = (*b & !PREDECODED) | CODE;
                 }
             }
             if let Some(b) = self.slot(view, start) {
@@ -262,6 +276,14 @@ impl CodeLog {
                 }
                 if let Some(b) = self.slot(view, l) {
                     *b |= START | PREDECODED;
+                }
+                for i in 1..len(a) {
+                    let o = loc(a.wrapping_add(i), ipl);
+                    if let Some(b) = self.slot(view, o)
+                        && *b & (CODE | START) == 0
+                    {
+                        *b |= PREDECODED;
+                    }
                 }
                 a = a.wrapping_add(len(a));
             }
@@ -283,6 +305,12 @@ impl crate::Emulator {
         if let Some(snes) = self.snes.as_mut() {
             snes.apu_real.exec_log = on.then(luna_apu::SpcExecLog::default);
         }
+    }
+
+    /// Whether the code log is on.
+    #[must_use]
+    pub const fn code_logging(&self) -> bool {
+        self.code_logging
     }
 
     /// Forget everything logged.

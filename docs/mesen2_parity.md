@@ -48,6 +48,8 @@ lands it.
 | D1d | CPU-cycle and PPU-cycle steps — not possible while luna runs instructions whole | ⬜ |
 | D2a | Labels and comments by memory and offset, Mesen2's model: default register labels, `.mlb` import / export (Mesen2's grammar, measured on Mesen2), `<rom>.mlb` loaded with the ROM; seen by disassembly, expressions and every `symbol` argument; `SnesRegister` memory; MCP `label_set`, `label_remove`, `label_list`, `labels_import`, `labels_export` | ✅ |
 | D2a | `ui.rs` split into one module per panel (no behaviour change) | ✅ |
+| D2b | Code log (instructions run, widths, jump targets, subroutine entries, decoded ahead) for the 65C816 and the SPC700 — the code half of the CDL, brought forward | ✅ |
+| D2b | Code listing, Mesen2's Disassembly pane: whole address space, blocks, labels, comments, function separators, effective address and value from the live registers; MCP `listing` | ✅ |
 | D2 | Debugger window per CPU (disassembly with labels, comments, effective addresses; editable status; breakpoint, watch, label, function, call-stack lists; go to / find all); labels and comments in `.mlb`, ca65 `.dbg`, bass, SDCC `.cdb`, ELF; default register labels; workspace per ROM | ⬜ |
 | D3 | Per-byte access counters; Memory Tools (every memory, edit, highlight by access / code / data, freeze, find, `.tbl`); Memory Search on every memory | ⬜ |
 | D4 | Trace logger (per CPU, Mesen2's format tags, condition, to file); profiler with calls and inclusive / exclusive time; Event Viewer completed and exposed to MCP and CLI | ⬜ |

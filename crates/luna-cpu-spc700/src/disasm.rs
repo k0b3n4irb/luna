@@ -100,6 +100,21 @@ pub struct Instruction {
 /// `read`. Never panics; unknown encodings cannot occur (all 256 opcodes
 /// are tabulated).
 pub fn disassemble(read: impl Fn(u16) -> u8, pc: u16) -> Instruction {
+    decode(&read, pc, &|_| None)
+}
+
+/// [`disassemble`] as a debugger's listing shows it: a 16-bit absolute
+/// operand and a branch's target as the name `name` gives that address,
+/// when it gives one.
+pub fn disassemble_named(
+    read: impl Fn(u16) -> u8,
+    pc: u16,
+    name: &dyn Fn(u16) -> Option<String>,
+) -> Instruction {
+    decode(&read, pc, name)
+}
+
+fn decode(read: &dyn Fn(u16) -> u8, pc: u16, name: &dyn Fn(u16) -> Option<String>) -> Instruction {
     let op = read(pc);
     let (tmpl, mode) = OPCODES[op as usize];
     let length = 1 + mode.operand_bytes();
@@ -111,6 +126,7 @@ pub fn disassemble(read: impl Fn(u16) -> u8, pc: u16) -> Instruction {
             .wrapping_add(rel as i8 as u16)
     };
 
+    let addr = |a: u16| name(a).unwrap_or_else(|| format!("${a:04X}"));
     let operand = match mode {
         Mode::Imp => String::new(),
         Mode::Imm => format!("#${b1:02X}"),
@@ -119,19 +135,19 @@ pub fn disassemble(read: impl Fn(u16) -> u8, pc: u16) -> Instruction {
         Mode::DpY => format!("${b1:02X}+Y"),
         Mode::IndIdxX => format!("[${b1:02X}+X]"),
         Mode::IdxIndY => format!("[${b1:02X}]+Y"),
-        Mode::Abs => format!("${word:04X}"),
-        Mode::AbsX => format!("${word:04X}+X"),
-        Mode::AbsY => format!("${word:04X}+Y"),
-        Mode::AbsIndX => format!("[${word:04X}+X]"),
+        Mode::Abs => addr(word),
+        Mode::AbsX => format!("{}+X", addr(word)),
+        Mode::AbsY => format!("{}+Y", addr(word)),
+        Mode::AbsIndX => format!("[{}+X]", addr(word)),
         Mode::DpDp => format!("${b2:02X}, ${b1:02X}"),
         Mode::DpImm => format!("${b2:02X}, #${b1:02X}"),
-        Mode::Rel => format!("${:04X}", target(b1)),
-        Mode::DpRel => format!("${b1:02X}, ${:04X}", target(b2)),
-        Mode::DpXRel => format!("${b1:02X}+X, ${:04X}", target(b2)),
-        Mode::DpBitRel => format!("${b1:02X}, ${:04X}", target(b2)),
+        Mode::Rel => addr(target(b1)),
+        Mode::DpRel => format!("${b1:02X}, {}", addr(target(b2))),
+        Mode::DpXRel => format!("${b1:02X}+X, {}", addr(target(b2))),
+        Mode::DpBitRel => format!("${b1:02X}, {}", addr(target(b2))),
         Mode::DpBit => format!("${b1:02X}.{}", (op >> 5) & 7),
         Mode::MemBit => format!("${:04X}.{}", word & 0x1FFF, word >> 13),
-        Mode::PCall => format!("${:04X}", 0xFF00 | u16::from(b1)),
+        Mode::PCall => addr(0xFF00 | u16::from(b1)),
         Mode::TCall => format!("{}", op >> 4),
     };
 
@@ -319,5 +335,129 @@ mod tests {
     }
     const fn a_pc(_op: u16) -> u16 {
         0x1000
+    }
+}
+
+/// The registers an SPC700 effective address depends on.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct EffectiveRegs {
+    /// Index X.
+    pub x: u8,
+    /// Index Y.
+    pub y: u8,
+    /// The `P` flag: direct page at `$0100` instead of `$0000`.
+    pub p: bool,
+}
+
+/// Where an SPC700 instruction reads or writes memory if it ran now.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Effective {
+    /// The 16-bit address.
+    pub addr: u16,
+    /// Bytes it reads or writes there: 2 for the word instructions.
+    pub width: u8,
+}
+
+/// The memory address the instruction at `pc` accesses, from the
+/// registers `r` as they are now. `peek` reads ARAM without side effects.
+/// `None` for an instruction that accesses no memory operand, a jump or
+/// a call included; for a two-address one, the destination.
+pub fn effective_address(peek: impl Fn(u16) -> u8, pc: u16, r: EffectiveRegs) -> Option<Effective> {
+    let op = peek(pc);
+    let (tmpl, mode) = OPCODES[op as usize];
+    let b1 = peek(pc.wrapping_add(1));
+    let b2 = peek(pc.wrapping_add(2));
+    let word = u16::from(b1) | (u16::from(b2) << 8);
+    let page = if r.p { 0x0100 } else { 0 };
+    let dp = |d: u8| page | u16::from(d);
+    let ptr = |a: u16| u16::from(peek(a)) | (u16::from(peek(dp((a as u8).wrapping_add(1)))) << 8);
+    let mnemonic = tmpl.split(' ').next().unwrap_or("");
+    if matches!(mnemonic, "JMP" | "CALL" | "PCALL" | "TCALL" | "BRK") {
+        return None;
+    }
+    let width = if mnemonic.ends_with('W') { 2 } else { 1 };
+    let addr = match mode {
+        Mode::Dp | Mode::DpRel | Mode::DpBit | Mode::DpBitRel => dp(b1),
+        Mode::DpX | Mode::DpXRel => dp(b1.wrapping_add(r.x)),
+        Mode::DpY => dp(b1.wrapping_add(r.y)),
+        Mode::IndIdxX => ptr(dp(b1.wrapping_add(r.x))),
+        Mode::IdxIndY => ptr(dp(b1)).wrapping_add(u16::from(r.y)),
+        Mode::Abs => word,
+        Mode::AbsX => word.wrapping_add(u16::from(r.x)),
+        Mode::AbsY => word.wrapping_add(u16::from(r.y)),
+        Mode::DpDp => dp(b2),
+        Mode::DpImm => dp(b2),
+        Mode::MemBit => word & 0x1FFF,
+        // `(X)`, `(X)+`: the direct-page byte X points at.
+        Mode::Imp if tmpl.contains("(X)") => dp(r.x),
+        _ => return None,
+    };
+    Some(Effective { addr, width })
+}
+
+#[cfg(test)]
+mod effective_tests {
+    use super::*;
+
+    fn ea(code: &[u8], mem: &[(u16, u8)], r: EffectiveRegs) -> Option<(u16, u8)> {
+        let peek = |a: u16| {
+            if a >= 0x0400 && usize::from(a - 0x0400) < code.len() {
+                return code[usize::from(a - 0x0400)];
+            }
+            mem.iter().find(|&&(m, _)| m == a).map_or(0, |&(_, v)| v)
+        };
+        effective_address(peek, 0x0400, r).map(|e| (e.addr, e.width))
+    }
+
+    #[test]
+    fn memory_operands_and_nothing_for_jumps() {
+        let r = EffectiveRegs {
+            x: 2,
+            y: 3,
+            p: false,
+        };
+        assert_eq!(ea(&[0xE4, 0xF4], &[], r), Some((0x00F4, 1)), "MOV A, $F4");
+        assert_eq!(ea(&[0xF4, 0x10], &[], r), Some((0x0012, 1)), "MOV A, $10+X");
+        assert_eq!(
+            ea(&[0xE5, 0x00, 0x02], &[], r),
+            Some((0x0200, 1)),
+            "MOV A, $0200"
+        );
+        assert_eq!(
+            ea(&[0xF7, 0x20], &[(0x20, 0x00), (0x21, 0x03)], r),
+            Some((0x0303, 1)),
+            "MOV A, [$20]+Y"
+        );
+        assert_eq!(ea(&[0xBA, 0x30], &[], r), Some((0x0030, 2)), "MOVW YA, $30");
+        assert_eq!(ea(&[0xE6], &[], r), Some((0x0002, 1)), "MOV A, (X)");
+        assert_eq!(
+            ea(&[0x8F, 0xAA, 0xF4], &[], r),
+            Some((0x00F4, 1)),
+            "MOV $F4, #$AA"
+        );
+        let rp = EffectiveRegs { p: true, ..r };
+        assert_eq!(ea(&[0xE4, 0x10], &[], rp), Some((0x0110, 1)), "P = 1");
+        for none in [
+            &[0x3F, 0x00, 0x08][..],
+            &[0x5F, 0x00, 0x08],
+            &[0x2F, 0x02],
+            &[0xE8, 0x01],
+        ] {
+            assert_eq!(ea(none, &[], r), None, "{none:02X?}");
+        }
+    }
+
+    #[test]
+    fn the_named_form_names_absolute_operands_and_targets() {
+        let code = [0x3F, 0x00, 0x08, 0xD0, 0xFB];
+        let read = |a: u16| {
+            code.get(usize::from(a.wrapping_sub(0x0400)))
+                .copied()
+                .unwrap_or(0)
+        };
+        let name = |a: u16| (a == 0x0800).then(|| "Play".to_string());
+        assert_eq!(disassemble_named(read, 0x0400, &name).text, "CALL Play");
+        assert_eq!(disassemble_named(read, 0x0403, &name).text, "BNE $0400");
+        assert_eq!(disassemble(read, 0x0400).text, "CALL $0800", "unchanged");
     }
 }

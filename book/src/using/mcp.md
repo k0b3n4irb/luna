@@ -103,6 +103,8 @@ method, so the MCP transport adds reach, not capability.
 | `label_set` / `label_remove` | `set_label` / `remove_label` | Add, replace or remove a debugger label: a name and/or comment on bytes of a memory. See [Labels and comments](#labels-and-comments). |
 | `label_list` | `labels` | The labels, by memory then address; `user_only` leaves out the register defaults. |
 | `labels_import` / `labels_export` | `import_labels_mlb` / `export_labels_mlb` | Read or write a Mesen2 `.mlb` label file. |
+| `enable_code_log` | `enable_code_log` | Log which bytes the 65C816 and the SPC700 run as code (what `listing` knows code by). |
+| `listing` | `listing` / `listing_back` / `listing_pos_of` | The debugger's code listing, as Mesen2's Disassembly pane draws it. See [The code listing](#the-code-listing). |
 | `resolve_symbol` | `resolve_symbol` | Label name → 24-bit address (null if unknown). A bare name stands for the only label spelled `name.<suffix>` (a C `static`: `player_x` for `player_x.main`); several candidates are an error that names them. The same rule applies to every tool's `symbol` argument. |
 | `symbol_for_addr` | `symbol_for_addr` | 24-bit address → nearest preceding label in its bank (the inverse). |
 | `enable_dma_trace` / `take_dma_trace` | `enable_dma_trace` / `take_dma_trace` | DMA→VRAM transfer bytes with scanline/H-clock + blank flags (the CLI `--dma-trace`). |
@@ -251,6 +253,63 @@ label_list {user_only: true}
   label, the defaults included, sorted by memory then address, so Mesen2
   reads it back.
 - `import` without `merge` puts the defaults back first, as Mesen2 does.
+
+### The code listing
+
+`listing` returns the rows Mesen2's Disassembly pane shows, the same
+listing the GUI's debugger draws. It knows code from the **code log**:
+turn `enable_code_log` on, run, then ask. An instruction is known once it
+ran, with the accumulator and index widths it ran with; what follows a
+first run is decoded ahead until a `PLP`, `XCE` or `RTI`, and those rows
+say `predecoded`. Everything else, bank by bank, collapses into a block.
+
+```text
+enable_code_log {on: true}
+step_until_frame {}                          # … run a while
+listing {before: 20, rows: 40}               # around the 65C816's PC
+listing {symbol: "NmiHandler", rows: 30}
+listing {cpu: "spc", rows: 20}
+listing {address: 0x7E8000, options: {unidentified: "show"}}
+```
+
+Rows from Super Mario World after 600 frames with the log on from power-on:
+
+```text
+058A57 Instruction LDA [$6B],Y   [$7ECBAA] = $2525
+058A59 Instruction AND #$00FF
+058A6E Instruction LDA [$0A],Y   [$0D8172] = $1838
+108001 Instruction STZ $4200     [NMITIMEN] = $0000
+7E0000 BlockStart  unidentified
+7E0000 BlockBody
+7E0000 BlockEnd
+```
+
+- **Each row** has its `pos` (`{addr, row}`: an address and the row of
+  what starts there), its `kind` (`instruction`, `label`, `comment`,
+  `function_start`, `function_end`, `block_start`, `block_body`,
+  `block_end`), the `absolute` memory behind it, its `bytes`, its `text`,
+  `effective` and `value`, a one-line `comment`, `code` (`executed`,
+  `predecoded`, `data`, `unidentified`, `unmapped`), `is_pc`, and the
+  `breakpoint` drawn on it.
+- **`effective`** is the address the instruction would reach **if it
+  ran now**, from the live registers (D, DB, X, Y, S, the widths), as
+  Mesen2 computes it for every visible row: `[$7ECBAA]`, or the label
+  there, `[NMITIMEN]`. `value` is what is there, 8 or 16 bits as the
+  instruction would access it. A `JMP` / `JSR` through a 16-bit operand
+  shows its target, with no value; a branch and a long operand show their
+  full 24-bit target, or its label, in the text itself.
+- **Labels and comments** shape the rows: a `name:` row before a
+  labelled instruction, one `;` row per line of a multi-line comment, a
+  one-line comment at the end of its row, a `function_start` separator
+  (titled with the label, else `sub start`) before a subroutine entry and
+  a `function_end` after a return.
+- **`options`** are Mesen2's: `data` / `unidentified` (`hide`, one empty
+  row, the default; `show`, `.db` rows of 8 bytes), `memory_values`
+  (default on), `jump_labels` (a `$ADDR:` row before an unlabelled jump
+  target), `lower_case`.
+- **Where it stops**: the SA-1, the Super FX and the DSP-1 have no
+  listing yet, and bytes read as data are not logged yet (no `data` block
+  until the code/data log reads them).
 
 ### Expressions
 

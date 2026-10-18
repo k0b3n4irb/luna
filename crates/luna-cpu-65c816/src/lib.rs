@@ -19,5 +19,7 @@ pub mod flags;
 pub mod opcodes;
 
 pub use cpu::Cpu;
-pub use disasm::{Instruction, disassemble};
+pub use disasm::{
+    Effective, EffectiveRegs, Instruction, disassemble, disassemble_named, effective_address,
+};
 pub use flags::StatusFlags;

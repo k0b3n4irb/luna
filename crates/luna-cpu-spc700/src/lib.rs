@@ -27,6 +27,8 @@ pub mod testing;
 pub use bus::SpcBus;
 pub use cpu::Spc700;
 pub use cycles::SPC700_CYCLES;
-pub use disasm::{Instruction, disassemble};
+pub use disasm::{
+    Effective, EffectiveRegs, Instruction, disassemble, disassemble_named, effective_address,
+};
 pub use flags::Psw;
 pub use iplrom::{IPL_ROM, IPL_ROM_BASE};
