@@ -44,6 +44,7 @@ use serde::Serialize;
 /// Faithful Mesen2 SNES Event Viewer data layer (categories, colors, register
 /// names, config). The GUI Event Viewer panel consumes this via the accessors
 /// on [`Emulator`].
+pub mod code_log;
 pub mod dsp1_commands;
 pub mod event_viewer;
 pub mod expr;
@@ -1341,6 +1342,10 @@ pub struct Emulator {
     labels: labels::LabelStore,
     /// Whether [`Self::reset_labels`] puts the register names back.
     default_labels: bool,
+    /// Which bytes ran as code (see [`code_log`]).
+    code_log: code_log::CodeLog,
+    /// Whether the run loop adds to [`Self::code_log`].
+    code_logging: bool,
     /// Live narrowing memory-search session (issue #177); `None` until
     /// [`Emulator::search_begin`] runs.
     search_session: Option<SearchSession>,
@@ -1704,6 +1709,8 @@ impl Emulator {
             symbols: None,
             labels: labels::LabelStore::new(),
             default_labels: true,
+            code_log: code_log::CodeLog::new(),
+            code_logging: false,
             search_session: None,
             profile_frames: std::collections::BTreeMap::new(),
             profile_frames_done: 0,
@@ -2000,6 +2007,9 @@ impl Emulator {
                 self.instructions_executed = 0;
                 self.rom_hash = rom_hash;
                 self.reset_labels();
+                self.clear_code_log();
+                let logging = self.code_logging;
+                self.enable_code_log(logging);
                 Ok(info)
             }
             Ok(Err(unsupported)) => Err(ApiError::UnsupportedMapper(unsupported)),
@@ -2227,6 +2237,9 @@ impl Emulator {
         }
         let freezes = self.freezes.clone();
         let mut cstack = self.call_stack.take();
+        let mut code_log = self
+            .code_logging
+            .then(|| std::mem::take(&mut self.code_log));
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
         // A CPU left standing on a breakpoint runs again.
         snes.apu_real.resume_break();
@@ -2246,6 +2259,7 @@ impl Emulator {
                     return (Some(stop), false);
                 }
                 let pre = cstack.as_ref().map(|_| Self::call_track_pre(snes));
+                let code_pre = code_log.as_ref().map(|_| code_log::CodePre::capture(snes));
                 // Whose instruction this is, for the stack watermark below —
                 // after the step, `pc` is already the next one.
                 let sp_pc = (u32::from(snes.cpu.pb) << 16) | u32::from(snes.cpu.pc);
@@ -2280,6 +2294,9 @@ impl Emulator {
                 if let (Some(stack), Some(pre)) = (cstack.as_mut(), pre) {
                     Self::call_track_post(snes, stack, pre);
                 }
+                if let (Some(log), Some(pre)) = (code_log.as_mut(), code_pre) {
+                    log.record(snes, pre);
+                }
                 Self::apply_freezes_on_frame_edge(snes, &freezes, &mut last_frame);
                 if let Some(stop) = after(snes) {
                     return (Some(stop), false);
@@ -2288,6 +2305,12 @@ impl Emulator {
             (None, false)
         }));
         self.call_stack = cstack;
+        if let Some(mut log) = code_log {
+            if let Some(snes) = self.snes.as_mut() {
+                log.collect_spc(snes);
+            }
+            self.code_log = log;
+        }
         self.stack_low = stack_low;
         self.instructions_executed += executed;
         self.fold_profile_frames();

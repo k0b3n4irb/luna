@@ -73,6 +73,11 @@ pub struct Cpu {
     /// serialized.
     #[serde(skip)]
     pub wdm_log: Option<Vec<(u32, u8)>>,
+    /// NMIs and IRQs taken so far, so a debugger can tell a step that
+    /// entered a handler from one that ran an instruction. Debug state,
+    /// not serialized.
+    #[serde(skip)]
+    pub interrupts_serviced: u64,
 }
 
 impl Default for Cpu {
@@ -101,6 +106,7 @@ impl Cpu {
             waiting: false,
             pending_nmi: false,
             pending_irq: false,
+            interrupts_serviced: 0,
             bank0_wrap: false,
             wdm_log: None,
         }

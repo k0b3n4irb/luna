@@ -3267,3 +3267,57 @@ fn labels_name_memories_and_show_on_every_bus_address_behind_them() {
     assert!(e.labels().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_code_log_knows_what_ran_with_which_widths() {
+    use crate::code_log::{CODE, INDEX8, JUMP_TARGET, MEMORY8, PREDECODED, START, SUB_ENTRY};
+    let code = [
+        0x78, // $8000 SEI
+        0x18, // $8001 CLC
+        0xFB, // $8002 XCE: native, widths still 8-bit
+        0xC2, 0x30, // $8003 REP #$30
+        0x20, 0x10, 0x80, // $8005 JSR $8010
+        0x80, 0xFE, // $8008 BRA $8008
+        0, 0, 0, 0, 0, 0, // $800A..
+        0xA9, 0x34, 0x12, // $8010 LDA #$1234
+        0x60, // $8013 RTS
+    ];
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
+    e.enable_code_log(true);
+    e.step(20).unwrap();
+    let f = |a: u32| e.code_flags(MemoryKind::SnesPrgRom, a);
+    assert_eq!(f(0x0000), CODE | START | MEMORY8 | INDEX8);
+    assert_eq!(f(0x0003), CODE | START | MEMORY8 | INDEX8, "REP ran 8-bit");
+    assert_eq!(f(0x0004), CODE, "its operand");
+    assert_eq!(f(0x0005), CODE | START, "JSR ran 16-bit");
+    assert_eq!(f(0x0010), CODE | START | SUB_ENTRY);
+    assert_eq!((f(0x0011), f(0x0012)), (CODE, CODE), "a 16-bit immediate");
+    assert_eq!(f(0x0008), CODE | START | JUMP_TARGET, "BRA to itself");
+    // Decoded ahead after the JSR, never run: BRK $00 pairs, 16-bit.
+    assert_eq!(f(0x000A), START | PREDECODED);
+    assert_eq!(f(0x000B), 0, "BRK's signature byte");
+    assert_eq!(
+        e.code_flags_at(0x80_8010).unwrap(),
+        f(0x0010),
+        "every mirror"
+    );
+    // The SPC700 runs its IPL ROM's page-zero clear (`MOV (X), A`,
+    // `DEC X`, `BNE` at $FFC5-$FFC8; what came before ran during the reset
+    // sequence, before the log was on), and what follows is decoded ahead.
+    e.step(2000).unwrap();
+    let ipl = |o: u32| e.code_flags(MemoryKind::SpcRom, o);
+    assert_eq!(
+        (ipl(5), ipl(6), ipl(7), ipl(8)),
+        (CODE | START, CODE | START, CODE | START, CODE)
+    );
+    assert_eq!(ipl(9), START | PREDECODED);
+    assert_eq!(e.spc_code_flags_at(0xFFC5).unwrap(), CODE | START);
+    e.enable_code_log(false);
+    e.step(5).unwrap();
+    assert_eq!(
+        e.code_flags(MemoryKind::SnesPrgRom, 0x0010),
+        CODE | START | SUB_ENTRY,
+        "kept while off"
+    );
+}

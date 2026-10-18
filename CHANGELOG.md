@@ -34,6 +34,13 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   `$4000-$4FFF` of the system banks), as in Mesen2: `memory_kinds` lists
   it and `read_memory` reads it without side effects.
 
+- **A code log for the debugger** (`enable_code_log`, `code_flags`,
+  `code_flags_at`, `spc_code_flags_at` in `luna-api`): which bytes the
+  65C816 and the SPC700 ran as instructions, with which widths, where
+  calls, interrupts and jumps landed, and what was decoded ahead of what
+  ran, kept by memory and offset as Mesen2's listing knows code. Off
+  unless asked for (about 7 % slower on Super Mario World while on).
+
 ### Changed
 
 - `absolute_address` of a register address (`$00:2100`, `$80:4300`…) is

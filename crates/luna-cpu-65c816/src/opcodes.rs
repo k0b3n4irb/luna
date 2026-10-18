@@ -138,6 +138,7 @@ impl Cpu {
     /// has the B bit CLEARED — that's how the handler distinguishes a
     /// BRK from an NMI/IRQ in emulation mode.
     fn service_nmi<B: Bus>(&mut self, bus: &mut B) {
+        self.interrupts_serviced += 1;
         self.hardware_interrupt_entry(bus);
         self.service_software_interrupt(
             bus, /* vec_native */ 0xFFEA, /* vec_emulation */ 0xFFFA,
@@ -153,6 +154,7 @@ impl Cpu {
     /// The B bit is CLEARED on the pushed status so the handler can
     /// tell apart a BRK from an IRQ/NMI in emulation mode.
     fn service_irq<B: Bus>(&mut self, bus: &mut B) {
+        self.interrupts_serviced += 1;
         self.hardware_interrupt_entry(bus);
         self.service_software_interrupt(
             bus, /* vec_native */ 0xFFEE, /* vec_emulation */ 0xFFFE,

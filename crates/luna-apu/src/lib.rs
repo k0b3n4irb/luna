@@ -328,6 +328,10 @@ pub struct Apu {
     /// stands on does not fire again at once.
     #[serde(skip)]
     break_resume: Option<u16>,
+    /// Where SPC700 instructions started, while a debugger logs code
+    /// (never in a save-state).
+    #[serde(skip)]
+    pub exec_log: Option<SpcExecLog>,
 }
 
 /// A condition an SPC700 breakpoint fires on, given the APU and, for a
@@ -391,6 +395,42 @@ impl SpcWatch {
             SpcRegion::Rom if rom => Some(a - IPL_ROM_BASE),
             SpcRegion::Rom => None,
         }
+    }
+}
+
+/// The SPC700 instruction starts a debugger has not collected yet.
+#[derive(Clone, Debug)]
+pub struct SpcExecLog {
+    /// Per address: bit 0 = an instruction started there in RAM, bit 1 =
+    /// in the IPL ROM.
+    seen: Box<[u8]>,
+    /// The starts seen for the first time since the last [`Self::take`]:
+    /// the address, and whether it ran from the IPL ROM.
+    fresh: Vec<(u16, bool)>,
+}
+
+impl Default for SpcExecLog {
+    fn default() -> Self {
+        Self {
+            seen: vec![0; 0x1_0000].into_boxed_slice(),
+            fresh: Vec::new(),
+        }
+    }
+}
+
+impl SpcExecLog {
+    fn note(&mut self, pc: u16, ipl: bool) {
+        let bit = 1 << u8::from(ipl);
+        let b = &mut self.seen[usize::from(pc)];
+        if *b & bit == 0 {
+            *b |= bit;
+            self.fresh.push((pc, ipl));
+        }
+    }
+
+    /// The new starts, oldest first, emptying the list.
+    pub fn take(&mut self) -> Vec<(u16, bool)> {
+        std::mem::take(&mut self.fresh)
     }
 }
 
@@ -469,6 +509,7 @@ impl Apu {
             break_hit: None,
             inst_pc: 0,
             break_resume: None,
+            exec_log: None,
         };
         // Reset the SPC700 — reads $FFFE/$FFFF for the PC vector,
         // which the IPL ROM populates as $FFC0.
@@ -709,6 +750,10 @@ impl Apu {
                     return;
                 }
                 self.inst_pc = self.cpu.pc;
+                if let Some(log) = self.exec_log.as_mut() {
+                    let pc = self.cpu.pc;
+                    log.note(pc, pc >= 0xFFC0 && self.control & 0x80 != 0);
+                }
             }
             // Advance by the access's wait-state cost (ares `cycleWaitStates`;
             // 2 at the default ws=0, i.e. the old fixed `+= 2`).
