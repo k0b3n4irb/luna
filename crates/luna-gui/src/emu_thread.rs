@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use luna_api::{BreakHit, Emulator};
+use luna_api::{BreakHit, DisplayFrame, Emulator};
 use ringbuf::HeapProd;
 use ringbuf::traits::{Observer, Producer};
 
@@ -153,8 +153,10 @@ impl EmuShared {
 /// with the cpal callback — the emu thread flips it on first push so
 /// the callback's "silence until ready" gate opens.
 ///
-/// `framebuffer_in` is the writer side of a triple buffer holding a
-/// 256 × (224 | 239) × 4 RGBA frame: the emu thread publishes once per
+/// `framebuffer_in` is the writer side of a triple buffer holding the
+/// picture a screen shows (`Emulator::render_display_rgba`: 256 × (224 |
+/// 239), or 512 × twice the rows for a frame drawn in hi-res, RGBA): the
+/// emu thread publishes once per
 /// emulated frame and the UI thread reads the latest one without any
 /// lock, then uploads it to the GPU. This decouples the UI's repaint
 /// cadence from the emulator mutex (which the emu thread holds for
@@ -173,7 +175,7 @@ pub(crate) fn spawn(
     emu: Arc<Mutex<Option<Emulator>>>,
     shared: Arc<EmuShared>,
     audio: Option<AudioReclaim>,
-    framebuffer_in: triple_buffer::Input<Vec<u8>>,
+    framebuffer_in: triple_buffer::Input<DisplayFrame>,
 ) -> JoinHandle<Option<AudioReclaim>> {
     thread::Builder::new()
         .name("luna-emu".into())
@@ -191,7 +193,7 @@ fn run(
     emu: Arc<Mutex<Option<Emulator>>>,
     shared: Arc<EmuShared>,
     mut audio: Option<AudioReclaim>,
-    mut framebuffer_in: triple_buffer::Input<Vec<u8>>,
+    mut framebuffer_in: triple_buffer::Input<DisplayFrame>,
 ) -> Option<AudioReclaim> {
     const BATCH: usize = 1024;
     // Hold the last content frame across up to this many consecutive
@@ -302,7 +304,7 @@ fn run(
                         last_emu_frame = cur;
                         em.swap_frame_events();
                     }
-                    if let Ok(rgba) = em.render_frame_rgba(false) {
+                    if let Ok(rgba) = em.render_display_rgba() {
                         shared.frame.store(cur, Ordering::Release);
                         framebuffer_in.write(rgba);
                     }
@@ -337,7 +339,7 @@ fn run(
                     }
                     // Republish so the user SEES the effect of the step
                     // (paused = inspecting; show the current PPU state).
-                    if let Ok(rgba) = em.render_frame_rgba(false) {
+                    if let Ok(rgba) = em.render_display_rgba() {
                         shared.frame.store(cur, Ordering::Release);
                         framebuffer_in.write(rgba);
                     }
@@ -384,7 +386,7 @@ fn run(
                             *g = Some(hit);
                         }
                         shared.paused.store(true, Ordering::Release);
-                        if let Ok(rgba) = em.render_frame_rgba(false) {
+                        if let Ok(rgba) = em.render_display_rgba() {
                             shared
                                 .frame
                                 .store(em.frame_count().unwrap_or(0), Ordering::Release);
@@ -490,7 +492,7 @@ fn run(
                     // threshold (a genuine transition); hold otherwise.
                     blank_run == BLANK_HOLD_FRAMES
                 };
-                if publish && let Ok(rgba) = em.render_frame_rgba(false) {
+                if publish && let Ok(rgba) = em.render_display_rgba() {
                     // Lock-free publish into the triple buffer (moves
                     // `rgba`, no copy; the UI reads the latest contention-
                     // free).

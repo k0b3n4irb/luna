@@ -533,6 +533,17 @@ pub struct RunOutcome {
     pub interrupted: bool,
 }
 
+/// The picture a screen shows: [`Emulator::render_display_rgba`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DisplayFrame {
+    /// Columns: 256, or 512 for a frame drawn in hi-res.
+    pub width: usize,
+    /// Rows: the frame's, or twice them for a frame drawn in hi-res.
+    pub height: usize,
+    /// `width × height` RGBA pixels, row-major.
+    pub rgba: Vec<u8>,
+}
+
 /// One recorded joypad transition captured during play (issue #83).
 ///
 /// A capture logs only *changes* to the per-port button mask, keyed by the
@@ -2895,6 +2906,35 @@ impl Emulator {
         Ok(out)
     }
 
+    /// The picture as a screen shows it, Mesen2's way: 256 columns, or —
+    /// when a row of it was drawn in hi-res, pseudo-512 or interlace and
+    /// the native capture is on ([`Self::set_native_capture`]) — the whole
+    /// frame at 512 × twice the rows, so hi-res text keeps both halves of
+    /// each dot instead of their average. Raw RGBA, alpha `0xFF`.
+    pub fn render_display_rgba(&self) -> Result<DisplayFrame, ApiError> {
+        self.require_picture()?;
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let (width, height, px) = if snes.ppu.native_frame_is_wide() {
+            (
+                FRAME_W * 2,
+                snes.ppu.native_frame_height(),
+                snes.ppu.native_framebuffer(),
+            )
+        } else {
+            (FRAME_W, snes.ppu.frame_height(), snes.ppu.framebuffer())
+        };
+        let mut rgba = Vec::with_capacity(width * height * 4);
+        for p in px {
+            rgba.extend_from_slice(p);
+            rgba.push(0xFF);
+        }
+        Ok(DisplayFrame {
+            width,
+            height,
+            rgba,
+        })
+    }
+
     /// Cheap 65C816 register snapshot for a debugger panel — reads the
     /// main CPU directly, without building (and cloning) a full
     /// [`Emulator::state`] every frame. Same data as
@@ -3387,6 +3427,14 @@ impl Emulator {
         // The deserialized `Snes` has a placeholder mapper (the trait object
         // is `serde(skip)`): move the live, now-restored one into it.
         restored.mapper = std::mem::replace(&mut snes.mapper, luna_core::null_mapper());
+        // What the session asked of the picture is not in a state: keep it.
+        restored.ppu.skip_pixels = snes.ppu.skip_pixels;
+        if snes.ppu.native_capture {
+            restored.ppu.set_native_capture(true);
+        }
+        if !snes.ppu.layer_framebuffer.is_empty() {
+            restored.ppu.set_layer_capture(true);
+        }
         *snes = restored;
         Ok(())
     }

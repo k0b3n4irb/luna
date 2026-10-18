@@ -112,6 +112,13 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ### Changed
 
+- **The GUI shows hi-res frames on their 512 columns.** A frame with a
+  row in Mode 5 / 6, pseudo-512 or interlace is shown, filtered and
+  captured at 512 × twice its rows, as Mesen2 does, instead of the blend
+  of each dot's two halves on 256 columns, which broke the strokes of
+  text written in hi-res. API: `render_display_rgba` (`DisplayFrame`).
+  A state loaded keeps the native and layer captures and `--no-render`
+  the session had asked for. Reported by the game.
 - The call stack (`--call-stack`, `call_stack`) records the IRQs taken,
   not only the NMIs, and names them: a frame's `kind` is `nmi` or `irq`
   for an interrupt, `interrupt` for `BRK` / `COP`. A step that took an

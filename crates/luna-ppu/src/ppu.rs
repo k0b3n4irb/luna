@@ -457,6 +457,11 @@ pub struct Ppu {
     /// capture, regenerable — so save states skip it.
     #[serde(skip)]
     pub native_framebuffer: Vec<[u8; 3]>,
+    /// Per row of the native capture's picture: whether the PPU drew it
+    /// wide — Mode 5 / 6, pseudo-512 (SETINI bit 3) or interlace (bit 0) —
+    /// as it last drew that row. Empty when capture is off.
+    #[serde(skip)]
+    pub native_wide_rows: Vec<bool>,
     /// Each layer alone (BG1-BG4, then OBJ), maintained per scanline by
     /// the compositor while [`Self::set_layer_capture`] is on: the
     /// layer's own pixel (colour and depth) where it shows one, `None`
@@ -600,6 +605,7 @@ impl Ppu {
             native_capture: false,
             skip_pixels: false,
             native_framebuffer: Vec::new(),
+            native_wide_rows: Vec::new(),
             layer_framebuffer: Vec::new(),
             last_flushed_dot: 0,
             line_sprites: None,
@@ -856,6 +862,10 @@ impl Ppu {
             }
         }
         if capture {
+            let wide = matches!(self.bgmode & 0x07, 5 | 6) || self.setini & 0x09 != 0;
+            if let Some(row) = self.native_wide_rows.get_mut(yi) {
+                *row = wide || (si > 0 && *row);
+            }
             let w = FRAME_W * 2;
             let (nsi, nei) = (si * 2, ei * 2);
             let even_off = (yi * 2) * w;
@@ -886,8 +896,10 @@ impl Ppu {
         self.native_capture = on;
         if on {
             self.native_framebuffer = vec![[0u8; 3]; FRAME_W * 2 * FRAME_H_MAX * 2];
+            self.native_wide_rows = vec![false; FRAME_H_MAX];
         } else {
             self.native_framebuffer = Vec::new();
+            self.native_wide_rows = Vec::new();
         }
     }
 
@@ -930,6 +942,17 @@ impl Ppu {
     #[must_use]
     pub const fn native_frame_height(&self) -> usize {
         self.frame_height() * 2
+    }
+
+    /// Whether a row of the current picture was drawn wide (hi-res,
+    /// pseudo-512 or interlace): the frame then needs the native capture's
+    /// 512 columns to be shown whole. `false` when capture is off.
+    #[must_use]
+    pub fn native_frame_is_wide(&self) -> bool {
+        self.native_wide_rows
+            .iter()
+            .take(self.frame_height())
+            .any(|&w| w)
     }
 
     /// Borrow the current persistent framebuffer: 256 × [`Self::frame_height`]
@@ -1945,6 +1968,24 @@ mod tests {
             "right subpixel = unhalved main red"
         );
         assert_ne!(left, right, "the pair must survive unaveraged");
+    }
+
+    #[test]
+    fn native_capture_notes_the_rows_drawn_wide() {
+        let mut p = ppu_with_solid_bg1_tile();
+        p.set_native_capture(true);
+        p.render_current_scanline(1, RenderOptions::default());
+        assert!(!p.native_frame_is_wide(), "a lores row is not wide");
+        p.write(register::SETINI, 0x08);
+        p.render_current_scanline(2, RenderOptions::default());
+        assert!(p.native_wide_rows[1] && !p.native_wide_rows[0]);
+        assert!(p.native_frame_is_wide());
+        p.write(register::SETINI, 0x00);
+        p.render_current_scanline(2, RenderOptions::default());
+        assert!(
+            !p.native_frame_is_wide(),
+            "redrawn lores, the row is not wide"
+        );
     }
 
     #[test]

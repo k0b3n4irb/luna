@@ -190,6 +190,12 @@ when a Super Multitap is on port 2. Fixed, Mesen2-like layout:
   screenshot goes through the filter, not the aspect ratio. Filter,
   aspect ratio and bilinear choice are kept in `video.json` with the
   frame-rate counter.
+- **Hi-res pictures**: a frame drawn in Mode 5 / 6, in pseudo-512
+  (`SETINI` bit 3) or interlaced is shown on its 512 columns and twice
+  its rows, as Mesen2 shows it, at the same size on screen: text written
+  in hi-res keeps both halves of each dot instead of their blend. The
+  filters and the screenshot take that picture (a screenshot of such a
+  frame is 512 × 448, the same pixels as `luna state --native-res`).
 - The *Step frame* debugger hotkey moved from `F11` to `F6` (fullscreen
   claimed the universal key); saved hotkey configs keep working and can
   be rebound under *Settings → Hotkeys*.

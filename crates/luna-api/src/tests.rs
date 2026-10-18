@@ -1401,7 +1401,51 @@ fn rendering_off_changes_no_state_and_refuses_the_picture() {
     refused(off.framebuffer_hash().map(drop));
     refused(off.render_frame_png_native().map(drop));
     refused(off.frame_hash_native().map(drop));
+    refused(off.render_display_rgba().map(drop));
     assert!(on.framebuffer_hash().is_ok());
+}
+
+/// The picture a screen shows is 512 columns, twice the rows, once a row
+/// is drawn in pseudo-512 — the native capture itself, not its average.
+#[test]
+fn the_displayed_frame_is_wide_while_the_ppu_draws_hi_res() {
+    // LDA #$0F ; STA $2100 (display on) ; LDA #setini ; STA $2133 ; BRA *
+    let shown = |setini: u8, capture: bool| {
+        let code = [
+            0xA9, 0x0F, 0x8D, 0x00, 0x21, 0xA9, setini, 0x8D, 0x33, 0x21, 0x80, 0xFE,
+        ];
+        let mut e = Emulator::new();
+        e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
+        e.set_native_capture(capture).unwrap();
+        for _ in 0..3 {
+            e.step_until_frame(1_000_000).unwrap();
+        }
+        (e.render_display_rgba().unwrap(), e)
+    };
+    let (wide, e) = shown(0x08, true);
+    assert_eq!((wide.width, wide.height), (512, 448));
+    let native: Vec<u8> = e
+        .render_frame_rgb_native()
+        .unwrap()
+        .chunks(3)
+        .flat_map(|p| [p[0], p[1], p[2], 0xFF])
+        .collect();
+    assert_eq!(wide.rgba, native);
+
+    let (lores, e) = shown(0x00, true);
+    assert_eq!((lores.width, lores.height), (256, 224));
+    assert_eq!(lores.rgba, e.render_frame_rgba(false).unwrap());
+
+    // A state loaded keeps the capture the session asked for.
+    let (_, mut e) = shown(0x08, true);
+    let state = e.save_state().unwrap();
+    e.load_state(&state).unwrap();
+    e.step_until_frame(1_000_000).unwrap();
+    assert_eq!(e.render_display_rgba().unwrap().width, 512);
+
+    // Without the capture there is no 512-column picture to show.
+    let (off, _) = shown(0x08, false);
+    assert_eq!((off.width, off.height), (256, 224));
 }
 
 #[test]

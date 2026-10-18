@@ -45,7 +45,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 
-use luna_api::{Emulator, FRAME_H, FRAME_H_MAX, FRAME_W};
+use luna_api::{DisplayFrame, Emulator, FRAME_H, FRAME_H_MAX, FRAME_W};
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -81,6 +81,15 @@ const MENU_BAR_LOGICAL_H: u32 = 28;
 const CANVAS_W: usize = FRAME_W;
 const CANVAS_H: usize = FRAME_H_MAX;
 
+/// A black 256 × 224 picture, before the first frame.
+fn blank_frame() -> DisplayFrame {
+    DisplayFrame {
+        width: FRAME_W,
+        height: FRAME_H,
+        rgba: vec![0; FRAME_W * FRAME_H * 4],
+    }
+}
+
 /// Application state owned by the winit event loop.
 struct LunaApp {
     /// Window + pixels surface. Created on first `resumed` event.
@@ -104,7 +113,7 @@ struct LunaApp {
     /// The producer never blocks on the UI and the UI never sees a
     /// half-written frame — no lock contention between the two ~60 Hz
     /// clocks (ness `triple_buffer`).
-    framebuffer_out: triple_buffer::Output<Vec<u8>>,
+    framebuffer_out: triple_buffer::Output<DisplayFrame>,
 
     /// Audio backend kept alive while its stream is healthy. cpal owns
     /// the ring's consumer end internally; we hand the producer to the
@@ -316,7 +325,7 @@ impl LunaApp {
             emu: Arc::new(Mutex::new(None)),
             emu_join: None,
             emu_shared,
-            framebuffer_out: triple_buffer::triple_buffer(&vec![0u8; FRAME_W * FRAME_H * 4]).1,
+            framebuffer_out: triple_buffer::triple_buffer(&blank_frame()).1,
             audio,
             audio_producer,
             audio_primed,
@@ -408,6 +417,8 @@ impl LunaApp {
         };
         let info = match result {
             Ok(info) => {
+                // Hi-res frames are shown on their 512 columns.
+                let _ = em.set_native_capture(true);
                 self.load_notice = None;
                 self.pending_force_path = None;
                 info
@@ -498,7 +509,7 @@ impl LunaApp {
         if audio_pair.is_none() {
             self.load_notice = Some(AUDIO_NOTICE.to_string());
         }
-        let (fb_in, fb_out) = triple_buffer::triple_buffer(&vec![0u8; FRAME_W * FRAME_H * 4]);
+        let (fb_in, fb_out) = triple_buffer::triple_buffer(&blank_frame());
         self.framebuffer_out = fb_out;
         self.emu_join = Some(crate::emu_thread::spawn(
             self.emu.clone(),
@@ -836,7 +847,7 @@ impl LunaApp {
         self.srm_path = None;
         // Black the screen with a fresh empty triple buffer (the old one's
         // producer was the emu thread we just joined).
-        self.framebuffer_out = triple_buffer::triple_buffer(&vec![0u8; FRAME_W * FRAME_H * 4]).1;
+        self.framebuffer_out = triple_buffer::triple_buffer(&blank_frame()).1;
         self.rom_loaded = false;
     }
 
@@ -1512,16 +1523,20 @@ impl LunaApp {
         // Copy the latest published SNES frame into the pixels canvas
         // (256 × 239 at most; a 224-row frame fills the top 224 rows and
         // the rest is cleared so a switch out of overscan leaves nothing
-        // stale). egui draws exactly `frame_h` rows of it.
+        // stale). egui draws exactly `frame_h` rows of it. A frame drawn in
+        // hi-res comes 512 wide and twice as tall, as in Mesen2: the canvas
+        // doubles with it (`hires`), the picture keeps its size on screen.
         {
             // Lock-free fetch of the latest published frame (no Mutex).
             let fb = self.framebuffer_out.read();
-            let h = (fb.len() / (FRAME_W * 4)).clamp(1, CANVAS_H);
+            let hires = (fb.width / FRAME_W).clamp(1, 2);
+            let h = (fb.height / hires).clamp(1, CANVAS_H);
             self.frame_h = h;
             // Settings ▸ Video Filter: the canvas is the filter's picture
             // of the 256 × 239 one (602 × 478 for NTSC).
             let filter = self.video.filter;
-            let (cw, ch) = filter.output_size(CANVAS_W, CANVAS_H);
+            let (fw, fh) = (FRAME_W * hires, h * hires);
+            let (cw, ch) = filter.output_size(CANVAS_W * hires, CANVAS_H * hires);
             let (tw, th) = (cw as u32, ch as u32);
             let texture = pixels.texture();
             if (texture.width(), texture.height()) != (tw, th)
@@ -1529,12 +1544,12 @@ impl LunaApp {
             {
                 eprintln!("luna-gui: pixels buffer resize failed: {e}");
             }
-            let frame = &fb[..FRAME_W * h * 4];
-            let src: &[u8] = if (cw, ch) == (CANVAS_W, CANVAS_H) {
+            let frame = &fb.rgba[..fw * fh * 4];
+            let src: &[u8] = if (cw, ch) == (CANVAS_W * hires, CANVAS_H * hires) {
                 frame
             } else {
                 let number = self.emu_shared.frame.load(Ordering::Acquire);
-                filter.apply_at(frame, FRAME_W, h, number, &mut self.filter_buf);
+                filter.apply_at(frame, fw, fh, number, &mut self.filter_buf);
                 &self.filter_buf
             };
             let canvas = pixels.frame_mut();
@@ -2333,17 +2348,18 @@ impl LunaApp {
     /// (`~/.local/luna/screenshots`; `%APPDATA%\luna\screenshots` on Windows).
     ///
     /// We capture the GUI's published RGBA framebuffer (256 × 224, or
-    /// 256 × 239 under overscan) — the exact pixels on screen — so the PNG
-    /// matches what the user sees.
+    /// 256 × 239 under overscan; 512 × twice the rows for a frame drawn in
+    /// hi-res) — the exact pixels on screen — so the PNG matches what the
+    /// user sees.
     fn take_screenshot(&mut self) {
         // Like Mesen2's `TakeScreenshot`, the picture goes through the video
         // filter (not the aspect ratio).
         let buf = self.framebuffer_out.read().clone();
         let mut filtered = Vec::new();
         let (width, height) = self.video.filter.apply_at(
-            &buf,
-            FRAME_W,
-            buf.len() / (FRAME_W * 4),
+            &buf.rgba,
+            buf.width,
+            buf.height,
             self.emu_shared.frame.load(Ordering::Acquire),
             &mut filtered,
         );
