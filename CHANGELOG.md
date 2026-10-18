@@ -73,6 +73,18 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   label, comment, breakpoint and Find All dialogs; Mesen2's shortcuts;
   File ▸ Workspace imports and exports. Steps run on the emu thread and
   Break ends a long one.
+- **Labels from ca65 / cc65 `.dbg` and bass `.sym` files**, read as
+  Mesen2 reads them for a SNES cartridge (from a clean-room description
+  measured on Mesen2, its sample files kept as test fixtures): `.dbg`
+  symbols placed by their segment (program ROM by output offset, RAM
+  through the memory map, an `rw` segment with an output offset as SPC700
+  code), with their size and the comments of the source files; bass
+  `AAAAAAAA name` lines through the memory map, registers included. Next
+  to the ROM they load in Mesen2's order: `.dbg` (which then stands for
+  the others), `.sym`, `.mlb`. `load_label_file` (API), `labels_import
+  {path}` (MCP) and *File ▸ Workspace ▸ Import labels* (GUI) read a file
+  by its extension. SDCC `.cdb` and ELF are not read: Mesen2 has no SNES
+  reader for them.
 - **A debugger workspace per ROM**, as Mesen2's: the labels set, the
   breakpoints (condition, mark, state), the watches and the Debugger
   window's settings, in `<settings>/debugger/<rom name>.json`, restored at

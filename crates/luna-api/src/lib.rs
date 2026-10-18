@@ -55,6 +55,7 @@ pub mod dsp1_commands;
 pub mod event_viewer;
 pub mod expr;
 pub mod input;
+pub mod label_import;
 pub mod labels;
 pub mod listing;
 pub mod memory;
@@ -270,11 +271,12 @@ pub struct RomInfo {
     /// itself loaded fine).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub symbols_error: Option<String>,
-    /// What the Mesen2 label file next to the ROM (`<rom>.mlb`, else
-    /// `<rom>.sfc.mlb`) brought in, if there is one.
+    /// What the label file next to the ROM brought in, if there is one:
+    /// a ca65 `<rom>.dbg`, a bass `<rom>.sym`, a Mesen2 `<rom>.mlb` (each
+    /// also `<rom>.sfc.<ext>`); the last one read when there are several.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels_loaded: Option<MlbImport>,
-    /// Why a `<rom>.mlb` next to the ROM could not be read.
+    /// Why a label file next to the ROM could not be read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels_error: Option<String>,
 }
@@ -1799,29 +1801,49 @@ impl Emulator {
         Ok(self.load_sidecar_symbols(path, info))
     }
 
-    /// Load the WLA-DX `<rom>.sym` next to `rom` into the CPU symbol space,
-    /// recording the outcome in `info` (and in the stored [`RomInfo`]). An
-    /// explicit [`Self::load_symbols`] afterwards replaces it.
+    /// Load the symbol and label files next to `rom`, in Mesen2's order:
+    /// `<rom>.dbg` (ca65; it then stands for the others), `<rom>.sym`
+    /// (WLA-DX's into the symbol table, bass's into the labels),
+    /// `<rom>.mlb`. The outcome goes in `info` (and in the stored
+    /// [`RomInfo`]). An explicit [`Self::load_symbols`] afterwards replaces
+    /// the symbols.
     fn load_sidecar_symbols(&mut self, rom: &Path, mut info: RomInfo) -> RomInfo {
         self.rom_file = Some(rom.to_path_buf());
-        let mlb = [
-            rom.with_extension("mlb"),
-            std::path::PathBuf::from(format!("{}.mlb", rom.display())),
-        ]
-        .into_iter()
-        .find(|p| p.is_file());
-        if let Some(mlb) = mlb {
-            match self.load_labels(&mlb, true) {
+        // Mesen2's order: `<rom>.dbg` (which then stands for the others),
+        // `<rom>.sym`, `<rom>.mlb`; each `Game.ext`, else `Game.sfc.ext`.
+        let beside = |ext: &str| {
+            [
+                rom.with_extension(ext),
+                std::path::PathBuf::from(format!("{}.{ext}", rom.display())),
+            ]
+            .into_iter()
+            .find(|p| p.is_file())
+        };
+        if let Some(dbg) = beside("dbg") {
+            match self.load_label_file(&dbg, true) {
                 Ok(n) => info.labels_loaded = Some(n),
-                Err(e) => info.labels_error = Some(format!("{}: {e}", mlb.display())),
+                Err(e) => info.labels_error = Some(format!("{}: {e}", dbg.display())),
+            }
+            self.rom_info = Some(info.clone());
+            return info;
+        }
+        if let Some(sym) = beside("sym") {
+            match std::fs::read_to_string(&sym) {
+                Ok(text) if label_import::is_wla_sym(&text) || text.trim().is_empty() => {
+                    info.symbols_loaded = Some(self.load_symbols_str(&text));
+                }
+                Ok(text) => match self.import_labels_bass(&text) {
+                    Ok(n) => info.labels_loaded = Some(n),
+                    Err(e) => info.labels_error = Some(format!("{}: {e}", sym.display())),
+                },
+                Err(e) => info.symbols_error = Some(format!("{}: {e}", sym.display())),
             }
             self.rom_info = Some(info.clone());
         }
-        let sym = rom.with_extension("sym");
-        if sym.is_file() {
-            match self.load_symbols(&sym) {
-                Ok(n) => info.symbols_loaded = Some(n),
-                Err(e) => info.symbols_error = Some(format!("{}: {e}", sym.display())),
+        if let Some(mlb) = beside("mlb") {
+            match self.load_labels(&mlb, true) {
+                Ok(n) => info.labels_loaded = Some(n),
+                Err(e) => info.labels_error = Some(format!("{}: {e}", mlb.display())),
             }
             self.rom_info = Some(info.clone());
         }

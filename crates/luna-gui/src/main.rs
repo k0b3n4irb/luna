@@ -1993,7 +1993,7 @@ impl LunaApp {
                 }
                 let path = match job {
                     DebuggerFile::ImportLabels => d
-                        .add_filter("All label files", &["mlb", "sym"])
+                        .add_filter("All label files", &["mlb", "sym", "dbg"])
                         .add_filter("All files", &["*"])
                         .pick_file(),
                     DebuggerFile::ExportLabels(_) => d
@@ -2028,15 +2028,9 @@ impl LunaApp {
         let result = match what {
             DebuggerFile::ImportLabels => self.emu.lock().ok().and_then(|mut g| {
                 g.as_mut().map(|em| {
-                    if path
-                        .extension()
-                        .is_some_and(|e| e.eq_ignore_ascii_case("sym"))
-                    {
-                        em.load_symbols(&path).map(|_| ())
-                    } else {
-                        em.load_labels(&path, true).map(|_| ())
-                    }
-                    .map_err(|e| e.to_string())
+                    em.load_label_file(&path, true)
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
                 })
             }),
             DebuggerFile::ExportLabels(text) | DebuggerFile::ExportWatches(text) => {

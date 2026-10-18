@@ -1,0 +1,22 @@
+00808000 Reset
+00808003 Reset.loop
+00818000 Table
+007E2000 Buffer
+00000010 PlayerX
+007F0004 HiVar
+00700000 SaveSlot
+00002100 MyReg
+00C00000 HighRom
+00005000 Unmapped
+8010 ShortAddr
+0x8020 HexPrefix
+00808040 name with spaces ; comment
+00808050 1digit
+00808060 Dup
+00808070 Dup
+00808000 SameAddr
+00808080	Tabbed
+NoSpaceLine
+
+  00808090   _under
+00808098 @loop

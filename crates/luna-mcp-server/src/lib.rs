@@ -1644,7 +1644,9 @@ pub struct LabelRemoveResult {
 /// `labels_import` parameters.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct LabelsImportParams {
-    /// A Mesen2 `.mlb` file on the host.
+    /// A label file on the host, read by its extension: `.mlb` (Mesen2),
+    /// `.dbg` (ca65 / cc65), `.sym` (WLA-DX into the symbol table, else
+    /// bass into the labels).
     #[serde(default)]
     pub path: Option<String>,
     /// `.mlb` text in place of `path`.
@@ -2987,8 +2989,9 @@ impl LunaServer {
     }
 
     #[rmcp::tool(
-        description = "Import a Mesen2 `.mlb` label file (`Memory:ADDR[-END]:Name[:Comment]` \
-                                lines), from a host `path` or as `text`. Returns the lines \
+        description = "Import a label file: a Mesen2 `.mlb` (`Memory:ADDR[-END]:Name[:Comment]` \
+                                lines) from a host `path` or as `text`; by `path`, a ca65 \
+                                `.dbg` or a bass `.sym` too, read as Mesen2 reads them. Returns the lines \
                                 imported, the lines that did not parse, and the lines skipped \
                                 for a memory this cartridge lacks."
     )]
@@ -2996,23 +2999,19 @@ impl LunaServer {
         &self,
         Parameters(params): Parameters<LabelsImportParams>,
     ) -> Result<rmcp::Json<luna_api::MlbImport>, ErrorData> {
-        let text = match (params.path, params.text) {
-            (Some(p), None) => std::fs::read_to_string(&p)
-                .map_err(|e| ErrorData::invalid_params(format!("{p}: {e}"), None))?,
-            (None, Some(t)) => t,
+        let mut em = self.emulator.lock().await;
+        let r = match (params.path, params.text) {
+            (Some(p), None) => em.load_label_file(std::path::Path::new(&p), !params.merge),
+            (None, Some(t)) => em.import_labels_mlb(&t, !params.merge),
             _ => {
                 return Err(ErrorData::invalid_params(
                     "give `path` or `text`, not both",
                     None,
                 ));
             }
-        };
-        let r = self
-            .emulator
-            .lock()
-            .await
-            .import_labels_mlb(&text, !params.merge)
-            .map_err(|e| api_err_to_mcp(&e))?;
+        }
+        .map_err(|e| api_err_to_mcp(&e))?;
+        drop(em);
         Ok(rmcp::Json(r))
     }
 

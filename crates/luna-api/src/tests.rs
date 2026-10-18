@@ -3653,3 +3653,176 @@ fn a_workspace_round_trips_labels_and_breakpoints() {
             .is_some_and(|p| p.ends_with("debugger/My Game.json"))
     );
 }
+
+/// A 512 KB `LoROM` with 2 KB of save RAM, F-Zero's shape: what the
+/// clean-room description of Mesen2's label imports measured on.
+fn fzero_shaped() -> Emulator {
+    let mut rom = vec![0u8; 0x8_0000];
+    rom[0x7FC0..0x7FD5].copy_from_slice(b"LUNA LABEL IMPORTS   ");
+    rom[0x7FD5] = 0x20;
+    rom[0x7FD7] = 0x09;
+    rom[0x7FD8] = 0x01;
+    rom[0x7FFC] = 0x00;
+    rom[0x7FFD] = 0x80;
+    let mut e = Emulator::new();
+    e.load_rom_bytes_forced(rom, MapperKind::LoRom).unwrap();
+    assert_eq!(e.memory_size(MemoryKind::SnesSaveRam).unwrap(), 0x800);
+    e
+}
+
+#[test]
+fn a_ca65_dbg_imports_as_mesen2_imports_it() {
+    use MemoryKind::{SnesPrgRom as Rom, SnesSaveRam as Sram, SnesWorkRam as Wram, SpcRam};
+    // Mesen2's measured results for this file on a LoROM cartridge with
+    // save RAM (the clean-room description of its import).
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let mut e = fzero_shaped();
+    e.set_label(Label {
+        memory: MemoryKind::SnesWorkRam,
+        address: 0x500,
+        length: 1,
+        name: "before".into(),
+        comment: String::new(),
+    })
+    .unwrap();
+    let r = e.load_label_file(&dir.join("mesen2_lo.dbg"), true).unwrap();
+    assert_eq!(r.errors, 0);
+    let at = |name: &str| {
+        let l = e.labels().into_iter().find(|l| l.name == name)?;
+        Some((l.memory, l.address, l.length))
+    };
+    for (name, want) in [
+        ("Reset", (Rom, 0x0, 1)),
+        ("Reset_2", (Rom, 0x30, 1)),
+        ("@loop", (Rom, 0x3, 1)),
+        ("@loop_2", (Rom, 0x10, 1)),
+        ("Sub1", (Rom, 0x20, 1)),
+        ("Table", (Rom, 0x8000, 16)),
+        ("Words", (Rom, 0x8010, 4)),
+        ("PlayerX", (Wram, 0x10, 2)),
+        ("Buffer", (Wram, 0x2000, 256)),
+        ("HiVar", (Wram, 0x1_0004, 1)),
+        ("SaveSlot", (Sram, 0x0, 4)),
+        ("SaveNoSize", (Sram, 0x8, 1)),
+        ("SpcMain", (SpcRam, 0x200, 1)),
+        ("SizedEqu", (Wram, 0x2100, 2)),
+        ("RomViaRam", (Rom, 0x4000, 1)),
+        ("_under", (Rom, 0x38, 1)),
+        ("Fixed", (Rom, 0x100A, 1)),
+    ] {
+        assert_eq!(at(name), Some(want), "{name}");
+    }
+    for absent in [
+        "Reset_3",
+        "@loop_3",
+        "MyReg",
+        "CONST_A",
+        "ResetAlias",
+        "bad.name",
+        "bad_name",
+        "Neg",
+        "Imported",
+        "Unmapped",
+        "1digit",
+        "main",
+        "before",
+    ] {
+        assert_eq!(at(absent), None, "{absent}");
+    }
+    assert!(at("INIDISP").is_some(), "the defaults come back first");
+    // The comments of lo.s, next to the .dbg: the line's own and the ones
+    // just above it.
+    let comment = |m: MemoryKind, a: u32| {
+        e.labels()
+            .into_iter()
+            .find(|l| l.memory == m && l.address == a)
+            .map(|l| l.comment)
+    };
+    assert_eq!(comment(Rom, 0x0).as_deref(), Some("reset vector entry"));
+    assert_eq!(comment(Rom, 0x8000).as_deref(), Some("a 16-byte table"));
+}
+
+#[test]
+fn a_bass_sym_merges_as_mesen2_merges_it() {
+    use MemoryKind::{
+        SnesPrgRom as Rom, SnesRegister as Reg, SnesSaveRam as Sram, SnesWorkRam as Wram,
+    };
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let mut e = fzero_shaped();
+    e.set_label(Label {
+        memory: MemoryKind::SnesWorkRam,
+        address: 0x500,
+        length: 1,
+        name: "before".into(),
+        comment: String::new(),
+    })
+    .unwrap();
+    let r = e
+        .load_label_file(&dir.join("mesen2_lo_bass.sym"), true)
+        .unwrap();
+    let at = |name: &str| {
+        let l = e.labels().into_iter().find(|l| l.name == name)?;
+        Some((l.memory, l.address))
+    };
+    for (name, want) in [
+        ("Reset_loop", (Rom, 0x3)),
+        ("Table", (Rom, 0x8000)),
+        ("Buffer", (Wram, 0x2000)),
+        ("PlayerX", (Wram, 0x10)),
+        ("HiVar", (Wram, 0x1_0004)),
+        ("SaveSlot", (Sram, 0x0)),
+        ("MyReg", (Reg, 0x2100)),
+        ("ShortAddr", (Rom, 0x10)),
+        ("name_with_spaces___comment", (Rom, 0x40)),
+        ("Dup", (Rom, 0x70)),
+        ("SameAddr", (Rom, 0x0)),
+        ("___under", (Rom, 0x90)),
+        ("@loop", (Rom, 0x98)),
+        ("before", (Wram, 0x500)),
+    ] {
+        assert_eq!(at(name), Some(want), "{name}");
+    }
+    for absent in [
+        "Reset",
+        "Unmapped",
+        "HexPrefix",
+        "1digit",
+        "Tabbed",
+        "INIDISP",
+    ] {
+        assert_eq!(at(absent), None, "{absent}");
+    }
+    // HexPrefix, 1digit, the TAB line, NoSpaceLine and the empty line.
+    assert_eq!(r.errors, 5);
+}
+
+#[test]
+fn label_files_next_to_the_rom_load_in_mesen2s_order() {
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let dir = std::env::temp_dir().join(format!("luna_sidecars_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let rom = dir.join("game.sfc");
+    std::fs::write(&rom, demo_lorom()).unwrap();
+    std::fs::write(dir.join("game.mlb"), "SnesWorkRam:0300:FromMlb\n").unwrap();
+
+    // A bass .sym goes into the labels; the .mlb after it starts over.
+    std::fs::write(dir.join("game.sym"), "00808000 FromBass\n").unwrap();
+    let mut e = Emulator::new();
+    let info = e.load_rom(&rom).unwrap();
+    assert!(info.symbols_loaded.is_none(), "not a WLA-DX file");
+    let names: Vec<String> = e.labels().into_iter().map(|l| l.name).collect();
+    assert!(names.contains(&"FromMlb".to_string()));
+    assert!(
+        !names.contains(&"FromBass".to_string()),
+        "the .mlb resets the labels, as in Mesen2"
+    );
+
+    // A .dbg stands for the others: no .mlb then.
+    std::fs::copy(fixtures.join("mesen2_lo.dbg"), dir.join("game.dbg")).unwrap();
+    let info = e.load_rom(&rom).unwrap();
+    assert!(info.labels_loaded.is_some_and(|r| r.imported > 0));
+    let names: Vec<String> = e.labels().into_iter().map(|l| l.name).collect();
+    assert!(names.contains(&"Reset".to_string()));
+    assert!(!names.contains(&"FromMlb".to_string()));
+    let _ = std::fs::remove_dir_all(&dir);
+}

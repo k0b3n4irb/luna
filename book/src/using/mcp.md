@@ -293,9 +293,12 @@ Labels come from three places:
   (`CPUIO0` at `$F4`, `T2OUT`…), each with a one-line comment. They are
   ordinary labels: a label of yours on the same byte or with the same name
   replaces one.
-- **The `.mlb` next to the ROM.** At each ROM load the labels go back to
-  the defaults, then `<rom>.mlb` (else `<rom>.sfc.mlb`) is imported;
-  `rom.labels_loaded` in the `load_rom` result counts what it brought.
+- **The files next to the ROM**, in Mesen2's order, each `<rom>.<ext>`
+  else `<rom>.sfc.<ext>`: a ca65 / cc65 **`.dbg`** (it then stands for the
+  others), a **`.sym`** (WLA-DX's into the symbol table, bass's into the
+  labels), a Mesen2 **`.mlb`**. At each ROM load the labels go back to the
+  defaults first; `rom.labels_loaded` in the `load_rom` result counts what
+  the label file brought.
 - **What you set or import** with the tools below.
 
 ```text
@@ -328,6 +331,24 @@ label_list {user_only: true}
   label, the defaults included, sorted by memory then address, so Mesen2
   reads it back.
 - `import` without `merge` puts the defaults back first, as Mesen2 does.
+- **A ca65 `.dbg`** (`labels_import {path: "game.dbg"}`) is read as
+  Mesen2 reads it for a SNES cartridge: a symbol in a segment with an
+  output offset is a program-ROM label at `val - start + ooffs`; one in a
+  segment without (BSS, zero page, SRAM) is a CPU address placed through
+  the memory map, kept in work RAM, save RAM or ROM; an `rw` segment with
+  an output offset is taken for SPC700 code. Labels (`type=lab`, or any
+  symbol with a `size`) keep their name as it is — `@loop` stays `@loop`,
+  a name met again becomes `name_2` — and their size (code labels are one
+  byte). The comments come from the source files the `.dbg` names, found
+  next to it or in a folder above: the text after `;` on the line and the
+  comment lines just above it (`//` for C). The labels go back to the
+  defaults first.
+- **A bass `.sym`** (`AAAAAAAA name` lines) merges into the labels: the
+  address is a CPU address placed through the memory map, registers
+  included, and every character a label cannot hold becomes `_`
+  (`main.loop` → `main_loop`).
+- **SDCC `.cdb` and ELF files** are not read: Mesen2 has no SNES reader
+  for them either (its ELF reader is for the GBA).
 
 ### The code listing
 
