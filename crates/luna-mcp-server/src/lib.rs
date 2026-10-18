@@ -1335,6 +1335,58 @@ pub struct ReadMemoryParams {
     pub count: u32,
 }
 
+/// `enable_access_counters` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct EnableAccessCountersParams {
+    /// `true` counts from zero; `false` stops and drops the counters.
+    pub enabled: bool,
+}
+
+/// `access_counters` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct AccessCountersParams {
+    /// The memory, as in `read_memory` (`SnesMemory` / `SpcMemory` give
+    /// the counters of the byte behind each address).
+    pub kind: String,
+    /// Byte offset in it (a 24-bit address on `SnesMemory`).
+    #[serde(default)]
+    pub offset: u32,
+    /// A label in place of `offset` (`SnesMemory` only).
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// Bytes to look at (at most 65536).
+    pub count: u32,
+    /// List every byte, untouched ones included (default: only the bytes
+    /// read, written or executed at least once).
+    #[serde(default)]
+    pub all: bool,
+}
+
+/// One byte's counters in `access_counters`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct AccessCounterRow {
+    /// Its offset in the memory (its address on a bus).
+    pub offset: u32,
+    /// The counters.
+    #[serde(flatten)]
+    pub counters: luna_api::AccessCounter,
+}
+
+/// `access_counters` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct AccessCountersResult {
+    /// The bytes, in address order.
+    pub bytes: Vec<AccessCounterRow>,
+    /// Sums over the whole range: reads, writes, code reads.
+    pub total_read: u64,
+    /// See `total_read`.
+    pub total_write: u64,
+    /// See `total_read`.
+    pub total_exec: u64,
+    /// The master clock now, to age the `last_*` stamps against.
+    pub master_clock: u64,
+}
+
 /// `write_memory` parameters.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct WriteMemoryParams {
@@ -3605,6 +3657,83 @@ impl LunaServer {
                 .map_err(|e| api_err_to_mcp(&e))?
         };
         Ok(rmcp::Json(MemoryResult { bytes }))
+    }
+
+    #[rmcp::tool(
+        description = "Count every access to each byte (Mesen2's access counters): reads, \
+                                writes and code reads, and the master clock of the last of \
+                                each. From zero when turned on; a reset or a state load \
+                                zeroes them. Read them with `access_counters`."
+    )]
+    async fn enable_access_counters(
+        &self,
+        Parameters(params): Parameters<EnableAccessCountersParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        self.emulator
+            .lock()
+            .await
+            .enable_access_counters(params.enabled)
+            .map_err(|e| api_err_to_mcp(&e))?;
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(description = "Every access counter back to zero (Mesen2's Reset access stats).")]
+    async fn reset_access_counters(&self) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        self.emulator
+            .lock()
+            .await
+            .reset_access_counters()
+            .map_err(|e| api_err_to_mcp(&e))?;
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(
+        description = "The access counters of `count` bytes of a memory (see `memory_kinds`): \
+                                `[{offset, read, write, exec, last_read, last_write, \
+                                last_exec}]` for the bytes touched (`all` lists every one), \
+                                with totals. On `SnesMemory` / `SpcMemory`, each address \
+                                shows the byte behind it, so mirrors agree. Needs \
+                                `enable_access_counters`."
+    )]
+    async fn access_counters(
+        &self,
+        Parameters(params): Parameters<AccessCountersParams>,
+    ) -> Result<rmcp::Json<AccessCountersResult>, ErrorData> {
+        let kind = memory_kind(&params.kind)?;
+        if params.count > 0x1_0000 {
+            return Err(ErrorData::invalid_params(
+                "count: at most 65536 bytes per call",
+                None,
+            ));
+        }
+        let em = self.emulator.lock().await;
+        let offset = resolve_addr(&em, params.symbol.as_deref(), params.offset)?;
+        let counters = em
+            .access_counters(kind, offset, params.count as usize)
+            .map_err(|e| api_err_to_mcp(&e))?;
+        let master_clock = em.master_clock().unwrap_or(0);
+        drop(em);
+        let total = |f: fn(&luna_api::AccessCounter) -> u32| {
+            counters.iter().map(|c| u64::from(f(c))).sum::<u64>()
+        };
+        let (total_read, total_write, total_exec) =
+            (total(|c| c.read), total(|c| c.write), total(|c| c.exec));
+        let bytes = counters
+            .into_iter()
+            .enumerate()
+            .filter(|(_, c)| params.all || c.read > 0 || c.write > 0 || c.exec > 0)
+            .map(|(i, counters)| AccessCounterRow {
+                offset: offset.wrapping_add(i as u32),
+                counters,
+            })
+            .collect();
+        Ok(rmcp::Json(AccessCountersResult {
+            bytes,
+            total_read,
+            total_write,
+            total_exec,
+            master_clock,
+        }))
     }
 
     #[rmcp::tool(

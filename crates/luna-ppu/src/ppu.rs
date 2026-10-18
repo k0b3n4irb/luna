@@ -204,6 +204,9 @@ pub struct PpuAccess {
     pub value: u8,
     /// A write (else a read).
     pub write: bool,
+    /// The read buffer's refill after a `VMADD` write, not a port read: a
+    /// watchpoint sees it, the access counters do not (Mesen2 counts none).
+    pub fill: bool,
 }
 
 /// The SNES Picture Processing Unit.
@@ -1009,7 +1012,7 @@ impl Ppu {
                     Some(latch) => self.oam.read_during_render(latch),
                     None => self.oam.read(),
                 };
-                self.log_read(PpuMemory::Oam, off, self.ppu1_mdr);
+                self.log_read(PpuMemory::Oam, off, self.ppu1_mdr, false);
                 self.ppu1_mdr
             }
             register::VMDATALREAD | register::VMDATAHREAD => {
@@ -1024,7 +1027,7 @@ impl Ppu {
                     self.vram.read_lo_gated(!self.active_display)
                 };
                 if let Some(a) = fill {
-                    self.log_vram_word(a);
+                    self.log_vram_word(a, false);
                 }
                 self.ppu1_mdr
             }
@@ -1037,7 +1040,7 @@ impl Ppu {
                 let high = self.cgram.read_high_pending();
                 let off = self.cgram.read_offset(target);
                 let v = self.cgram.read_at(target);
-                self.log_read(PpuMemory::Cgram, off, v);
+                self.log_read(PpuMemory::Cgram, off, v, false);
                 self.ppu2_mdr = if high {
                     (self.ppu2_mdr & 0x80) | (v & 0x7F)
                 } else {
@@ -1141,28 +1144,29 @@ impl Ppu {
     }
 
     /// Record a port's read of `memory` at `addr` for a debugger.
-    fn log_read(&mut self, memory: PpuMemory, addr: usize, value: u8) {
+    fn log_read(&mut self, memory: PpuMemory, addr: usize, value: u8, fill: bool) {
         if let Some(log) = self.debug_accesses.as_mut() {
             log.push(PpuAccess {
                 memory,
                 addr: addr as u16,
                 value,
                 write: false,
+                fill,
             });
         }
     }
 
     /// Record the read buffer's fetch of the word at byte `a`.
-    fn log_vram_word(&mut self, a: usize) {
+    fn log_vram_word(&mut self, a: usize, fill: bool) {
         for b in [a, a.wrapping_add(1) & 0xFFFF] {
-            self.log_read(PpuMemory::Vram, b, self.vram.peek(b as u16));
+            self.log_read(PpuMemory::Vram, b, self.vram.peek(b as u16), fill);
         }
     }
 
     /// Record the fetch a VMADD write makes (none during the picture).
     fn log_vram_fill(&mut self) {
         if self.debug_accesses.is_some() && !self.active_display {
-            self.log_vram_word(self.vram.byte_addr());
+            self.log_vram_word(self.vram.byte_addr(), true);
         }
     }
 
@@ -1283,6 +1287,7 @@ impl Ppu {
                             addr: a as u16,
                             value: self.oam.peek(a as u16),
                             write: true,
+                            fill: false,
                         });
                     }
                 }
@@ -1370,6 +1375,7 @@ impl Ppu {
                         addr: addr as u16,
                         value,
                         write: true,
+                        fill: false,
                     });
                 }
             }
@@ -1390,6 +1396,7 @@ impl Ppu {
                             addr: a as u16,
                             value: self.cgram.peek(a as u16),
                             write: true,
+                            fill: false,
                         });
                     }
                 }

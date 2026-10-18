@@ -50,6 +50,13 @@ pub trait Bus {
     /// access cost.
     fn write(&mut self, addr: Addr24, value: u8);
 
+    /// A code read at `PB:PC`: the opcode or an operand. One bus access,
+    /// like [`Bus::read`], which it defaults to; a debugger's bus overrides
+    /// it to tell code reads from data reads.
+    fn fetch(&mut self, addr: Addr24) -> u8 {
+        self.read(addr)
+    }
+
     /// Pay `mcycles` master cycles of bus time.
     ///
     /// This is the **key primitive for mid-instruction accuracy**. It is

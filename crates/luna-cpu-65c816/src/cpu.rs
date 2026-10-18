@@ -179,7 +179,7 @@ impl Cpu {
     #[inline]
     pub fn fetch_u8<B: Bus>(&mut self, bus: &mut B) -> u8 {
         let addr = make_addr(self.pb, self.pc);
-        let value = bus.read(addr);
+        let value = bus.fetch(addr);
         self.pc = self.pc.wrapping_add(1);
         value
     }

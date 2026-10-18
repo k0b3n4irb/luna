@@ -1985,3 +1985,45 @@ async fn server_tracks_the_spc700_call_stack() {
     assert!(s.spc_call_stack().await.0.frames.is_empty());
     let _ = std::fs::remove_file(&path);
 }
+
+#[tokio::test]
+async fn server_counts_accesses_per_byte() {
+    let s = LunaServer::new();
+    let path = PathBuf::from("/tmp/luna_mcp_access_counters_demo.smc");
+    std::fs::write(&path, demo_lorom()).unwrap();
+    s.load_rom(Parameters(rom_params(&path.to_string_lossy())))
+        .await
+        .unwrap();
+    let ask = |all| AccessCountersParams {
+        kind: "SnesMemory".into(),
+        offset: 0x00_8000,
+        symbol: None,
+        count: 4,
+        all,
+    };
+    assert!(s.access_counters(Parameters(ask(false))).await.is_err());
+    s.enable_access_counters(Parameters(EnableAccessCountersParams { enabled: true }))
+        .await
+        .unwrap();
+    s.step(Parameters(StepParams { count: 100 })).await.unwrap();
+    let got = s.access_counters(Parameters(ask(false))).await.unwrap().0;
+    assert!(!got.bytes.is_empty() && got.total_exec > 0);
+    assert!(
+        got.bytes
+            .iter()
+            .all(|b| b.counters.last_exec <= got.master_clock)
+    );
+    assert_eq!(
+        s.access_counters(Parameters(ask(true)))
+            .await
+            .unwrap()
+            .0
+            .bytes
+            .len(),
+        4
+    );
+    s.reset_access_counters().await.unwrap();
+    let got = s.access_counters(Parameters(ask(false))).await.unwrap().0;
+    assert!(got.bytes.is_empty());
+    let _ = std::fs::remove_file(&path);
+}

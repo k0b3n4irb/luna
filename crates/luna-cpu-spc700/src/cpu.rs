@@ -105,7 +105,7 @@ impl Spc700 {
     /// clocking, not for state.
     #[inline]
     pub fn dummy_read_pc<B: SpcBus>(&mut self, bus: &mut B) {
-        let _ = bus.fetch(self.pc);
+        let _ = bus.dummy_read(self.pc);
     }
 
     /// An internal idle cycle: no bus access, but the SPC still burns a

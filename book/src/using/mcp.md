@@ -100,6 +100,7 @@ method, so the MCP transport adds reach, not capability.
 | `peek_cgram` | `peek_cgram` | All 256 CGRAM palette entries as BGR555 words. |
 | `poke_memory` | `poke_memory` | Write bytes into WRAM (state injection). |
 | `memory_kinds` | `memory_kinds` | The memories this cartridge has, by Mesen2's name, with their size: `SnesMemory` (the CPU bus), `SpcMemory`, `SnesPrgRom`, `SnesWorkRam`, `SnesSaveRam`, `SnesVideoRam`, `SnesSpriteRam`, `SnesCgRam`, `SnesRegister` (the I/O registers by their 16-bit address, read without side effects), `SpcRam`, `SpcRom`, `SpcDspRegisters`, `DspProgramRom` / `DspDataRom` / `DspDataRam`, `Sa1InternalRam`, `GsuWorkRam`, `Sa1Memory` / `GsuMemory` (the SA-1's, the Super FX GSU's bus, read only). |
+| `enable_access_counters` / `access_counters` / `reset_access_counters` | `enable_access_counters` / `access_counters` / `reset_access_counters` | Mesen2's access counters: per byte, the reads, writes and code reads, and the master clock of the last of each, counted on the byte behind the address (mirrors agree). See *Access counters* below. |
 | `read_memory` / `write_memory` | `read_memory` / `write_memory` | `count` bytes of any of them from `offset` (or `symbol`), and back, without side effects: a `SnesMemory` address goes to the memory behind it, never through the bus, so a read starts no S-DD1 decompression and drains no DSP-1 port (a register reads 0, open bus `$FF`). Writes reach ROM too. See the example below. |
 | `eval` | `evaluate` | A debugger expression in Mesen2's language, evaluated as a watch: `{"value": 1, "kind": "boolean"}`. See [Expressions](#expressions) below. |
 | `absolute_address` | `absolute_address` | The memory and offset behind a CPU-bus address or label — `{"kind": "SnesPrgRom", "offset": 16}` for `$80:8010` on a 32 KB `LoROM` — as the mapper's banking selects it now; `{"kind": "SnesRegister", "offset": 8448}` for `$00:2100` and its mirrors; `null` for open bus or a coprocessor's register window. |
@@ -245,6 +246,46 @@ read_memory {kind: "Sa1InternalRam", offset: 0, count: 64}              # an SA-
 A memory the cartridge lacks is an error (`GsuWorkRam: this cartridge has
 none`), and so is a range past its end; the two buses (`SnesMemory`,
 `SpcMemory`) wrap around instead.
+
+### Access counters
+
+Which bytes a game reads, writes or runs, how often, and when last: the
+counters behind Mesen2's Memory Viewer colours and Memory Search columns.
+A byte counts its accesses wherever they come from, so a bus view
+(`SnesMemory`, `SpcMemory`) shows at each address the byte behind it, and
+`$7E:0013` and its mirror `$00:0013` give the same counts. What counts:
+
+- the 65C816's opcode and operand reads, as code reads (`exec`), and its
+  data reads and writes;
+- both buses of a DMA or HDMA: the A-bus byte, and the `$21xx` register
+  (`SnesRegister`);
+- VRAM, OAM and CGRAM at the byte their ports touch, never the PPU's own
+  fetches while it draws;
+- the SPC700's accesses to ARAM and to the IPL ROM while it is mapped
+  (its dummy read after a short opcode is a read, as in Mesen2), not the
+  S-DSP's.
+
+The coprocessors' own accesses (SA-1, Super FX, DSP-1) are not counted
+yet. The `last_*` stamps are master clocks (`master_clock` is now), 0 for
+never. A reset or a state load starts the counts again. Counting costs
+about a tenth of the run time.
+
+```text
+load_rom {path: "Super Mario World (U) [!].smc"}
+enable_access_counters {enabled: true}
+step_until_frame … (to frame 120)
+access_counters {kind: "SnesMemory", offset: 0x7E0013, count: 1}
+# → {bytes: [{offset: 8257555, read: 145, write: 38, exec: 0,
+#             last_read: 42850114, last_write: 42850124, last_exec: 0}],
+#    total_read: 145, total_write: 38, total_exec: 0, master_clock: 42883928}
+access_counters {kind: "SnesWorkRam", offset: 0, count: 65536}   # the touched bytes of the first 64 KB
+reset_access_counters {}
+```
+
+On that run, the byte counts of every memory equal those Mesen2 gives
+for the same frame: 4282 work RAM bytes read, 11416 written, 387 run;
+48933 ROM bytes read and 2166 run; all of VRAM's 20480 written bytes;
+41273 ARAM bytes read and 838 run.
 
 ### The debugger's panes
 

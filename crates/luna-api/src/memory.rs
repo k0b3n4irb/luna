@@ -122,7 +122,7 @@ impl MemoryKind {
     }
 
     /// The cartridge memory behind this kind, if it is one.
-    const fn cart(self) -> Option<CartMemory> {
+    pub(crate) const fn cart(self) -> Option<CartMemory> {
         match self {
             Self::SnesPrgRom => Some(CartMemory::Rom),
             Self::SnesSaveRam => Some(CartMemory::SaveRam),
@@ -135,7 +135,7 @@ impl MemoryKind {
         }
     }
 
-    const fn from_cart(c: CartMemory) -> Self {
+    pub(crate) const fn from_cart(c: CartMemory) -> Self {
         match c {
             CartMemory::Rom => Self::SnesPrgRom,
             CartMemory::SaveRam => Self::SnesSaveRam,
@@ -199,33 +199,10 @@ impl View<'_> {
 
     /// The memory and offset behind CPU-bus address `addr`.
     pub(crate) fn absolute(self, addr: u32) -> Option<MemoryLocation> {
-        let addr = addr & 0x00FF_FFFF;
-        let (bank, off) = (addr >> 16, addr & 0xFFFF);
-        let wram = |offset| {
-            Some(MemoryLocation {
-                kind: MemoryKind::SnesWorkRam,
-                offset,
-            })
-        };
-        if matches!(bank, 0x7E..=0x7F) {
-            return wram(addr - 0x7E_0000);
-        }
-        if system_bank(bank) && off < 0x2000 {
-            return wram(off);
-        }
-        if system_bank(bank) && matches!(off, 0x2000..=0x2FFF | 0x4000..=0x4FFF) {
-            return Some(MemoryLocation {
-                kind: MemoryKind::SnesRegister,
-                offset: off,
-            });
-        }
-        self.0
-            .mapper
-            .debug_resolve(addr)
-            .map(|(c, offset)| MemoryLocation {
-                kind: MemoryKind::from_cart(c),
-                offset: offset as u32,
-            })
+        luna_core::locate(self.0.mapper.as_ref(), addr).map(|(m, offset)| MemoryLocation {
+            kind: crate::access::kind_of(m),
+            offset: offset as u32,
+        })
     }
 
     /// Byte `a` of `kind`, `a` already inside it; `unmapped` for a CPU-bus
@@ -389,7 +366,12 @@ impl Emulator {
     }
 
     /// Refuse a range past the end of a memory that is not a bus.
-    fn check_range(kind: MemoryKind, size: usize, offset: u32, len: usize) -> Result<(), ApiError> {
+    pub(crate) fn check_range(
+        kind: MemoryKind,
+        size: usize,
+        offset: u32,
+        len: usize,
+    ) -> Result<(), ApiError> {
         let bus = matches!(
             kind,
             MemoryKind::SnesMemory

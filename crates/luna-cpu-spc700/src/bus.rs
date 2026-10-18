@@ -39,11 +39,18 @@ pub trait SpcBus {
     /// it to clock one cycle.
     fn idle(&mut self) {}
 
-    /// A code read at PC: the opcode, an operand, or the dummy read of the
-    /// next byte. One bus cycle, like [`read`](Self::read), which it
+    /// A code read at PC: the opcode or an operand. One bus cycle, like [`read`](Self::read), which it
     /// defaults to; a debugger's view overrides it to tell code reads from
     /// data reads.
     fn fetch(&mut self, addr: u16) -> u8 {
+        self.read(addr)
+    }
+
+    /// The dummy read of the byte at PC after a short opcode, its value
+    /// unused. One bus cycle, like [`read`](Self::read), which it defaults
+    /// to; a debugger's view counts it as a data read (Mesen2) without
+    /// taking it for one.
+    fn dummy_read(&mut self, addr: u16) -> u8 {
         self.read(addr)
     }
 }

@@ -56,6 +56,7 @@ lands it.
 | D2c | Panes' content in `luna-api`: watch formats, Go To, Go To All, Find, Find All Occurrences, function list, label list, call stack rows | ✅ |
 | D2b | Code listing, Mesen2's Disassembly pane: whole address space, blocks, labels, comments, function separators, effective address and value from the live registers; MCP `listing` | ✅ |
 | D2 | Debugger window per CPU (disassembly with labels, comments, effective addresses; editable status; breakpoint, watch, label, function, call-stack lists; go to / find all); labels and comments in `.mlb`, ca65 `.dbg`, bass, SDCC `.cdb`, ELF; default register labels; workspace per ROM | ⬜ |
+| D3a | Per-byte access counters (reads, writes, code reads, last master clock) on the byte behind each address: 65C816, DMA / HDMA on both buses, PPU ports, SPC700; API and MCP. Measured equal to Mesen2's byte counts on a commercial title at frame 120. The coprocessors' own accesses are not counted yet | ✅ |
 | D3 | Per-byte access counters; Memory Tools (every memory, edit, highlight by access / code / data, freeze, find, `.tbl`); Memory Search on every memory | ⬜ |
 | D4 | Trace logger (per CPU, Mesen2's format tags, condition, to file); profiler with calls and inclusive / exclusive time; Event Viewer completed and exposed to MCP and CLI | ⬜ |
 | D5 | Code/Data Logger (`.cdl` compatible with Mesen2), function list; Tile, Tilemap (main / sub screen), Sprite and Palette viewers; Tile Editor; decoded Register Viewer | ⬜ |

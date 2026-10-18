@@ -110,6 +110,16 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   says which binary a project's MCP runs (*Which luna a project's MCP
   runs*).
 
+- **Access counters, Mesen2's.** Per byte of every memory: how many
+  reads, writes and code reads (opcode and operands), and the master
+  clock of the last of each, counted on the byte an access lands on, so
+  every mirror shows the same counts. The 65C816, both buses of a DMA,
+  the PPU ports (VRAM, OAM, CGRAM) and the SPC700 count; the S-DSP and
+  the coprocessors do not. A reset or a state load zeroes them. On Super
+  Mario World at frame 120 the counts of touched bytes equal Mesen2's in
+  every memory. API: `enable_access_counters`, `access_counters`,
+  `reset_access_counters`, `master_clock`; MCP: the same names.
+
 ### Changed
 
 - **The GUI shows hi-res frames on their 512 columns.** A frame with a

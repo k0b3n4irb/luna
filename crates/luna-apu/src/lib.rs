@@ -34,6 +34,7 @@
 //! S-DSP in position (`ApuBusView::clock_cycle`), at the cost set by
 //! the `$F0` wait-state fields.
 
+use luna_bus::{Access, AccessCounters};
 use luna_cpu_spc700::{IPL_ROM, IPL_ROM_BASE, Spc700, SpcBus};
 
 /// Read one ARAM byte as the **SPC700** sees it: `$FFC0-$FFFF` returns
@@ -332,6 +333,11 @@ pub struct Apu {
     /// (never in a save-state).
     #[serde(skip)]
     pub exec_log: Option<SpcExecLog>,
+    /// Per-byte read / write / exec counters of ARAM and the IPL ROM, while
+    /// a debugger asks for them (never in a save-state). The S-DSP's own
+    /// ARAM accesses are not counted (Mesen2's default).
+    #[serde(skip)]
+    pub access_counters: Option<Box<SpcAccessCounters>>,
     /// A debugger step in progress (never in a save-state).
     #[serde(skip)]
     step: Option<SpcStep>,
@@ -401,6 +407,34 @@ impl SpcWatch {
             SpcRegion::Rom if rom => Some(a - IPL_ROM_BASE),
             SpcRegion::Rom => None,
         }
+    }
+}
+
+/// The SPC700's per-byte access counters: ARAM, and the IPL ROM while it
+/// is mapped over `$FFC0-$FFFF` (a write there still lands in ARAM).
+/// Stamps are in the S-CPU's master clock.
+#[derive(Clone, Debug)]
+pub struct SpcAccessCounters {
+    /// The 64 KB of ARAM.
+    pub ram: AccessCounters,
+    /// The 64-byte IPL ROM.
+    pub rom: AccessCounters,
+}
+
+impl Default for SpcAccessCounters {
+    fn default() -> Self {
+        Self {
+            ram: AccessCounters::new(0x1_0000),
+            rom: AccessCounters::new(IPL_ROM.len()),
+        }
+    }
+}
+
+impl SpcAccessCounters {
+    /// Every counter back to zero.
+    pub fn clear(&mut self) {
+        self.ram.clear();
+        self.rom.clear();
     }
 }
 
@@ -579,6 +613,7 @@ impl Apu {
             inst_pc: 0,
             break_resume: None,
             exec_log: None,
+            access_counters: None,
             step: None,
             call_stack: None,
         };
@@ -1138,15 +1173,21 @@ impl Apu {
             cost_2x: 2,
         };
         let mut access = None;
-        if self.watches.is_empty() {
+        let mut fetched = None;
+        let mut dummy = None;
+        if self.watches.is_empty() && self.access_counters.is_none() {
             self.cpu.step_cycle(&mut bus);
         } else {
             let mut watched = WatchedBus {
                 bus: &mut bus,
                 access: None,
+                fetched: None,
+                dummy: None,
             };
             self.cpu.step_cycle(&mut watched);
             access = watched.access;
+            fetched = watched.fetched;
+            dummy = watched.dummy;
         }
         // The access's 2×-domain wait-state cost (ares `cycleWaitStates`),
         // captured before `bus` drops so the borrow ends here. `run_to_target`
@@ -1163,10 +1204,45 @@ impl Apu {
         if self.cpu.pc < IPL_ROM_BASE {
             self.past_iplrom = true;
         }
+        if self.access_counters.is_some() {
+            self.count_access(access, fetched, dummy);
+        }
         if let Some(access) = access {
             self.check_watches(access);
         }
         cost_2x
+    }
+
+    /// Count this cycle's access on its byte, stamped in master clocks.
+    fn count_access(
+        &mut self,
+        access: Option<SpcAccess>,
+        fetched: Option<u16>,
+        dummy: Option<u16>,
+    ) {
+        let clock = (u128::from(self.spc_pos_2x) * u128::from(self.master_hz)
+            / u128::from(SPC_2X_HZ)) as u64;
+        let ipl = self.control & 0x80 != 0;
+        let Some(c) = self.access_counters.as_deref_mut() else {
+            return;
+        };
+        let mut note = |addr: u16, kind: Access, write: bool| {
+            if !write && ipl && addr >= IPL_ROM_BASE {
+                c.rom.note(usize::from(addr - IPL_ROM_BASE), kind, clock);
+            } else {
+                c.ram.note(usize::from(addr), kind, clock);
+            }
+        };
+        if let Some(a) = access {
+            let kind = if a.write { Access::Write } else { Access::Read };
+            note(a.addr, kind, a.write);
+        }
+        if let Some(addr) = fetched {
+            note(addr, Access::Exec, false);
+        }
+        if let Some(addr) = dummy {
+            note(addr, Access::Read, false);
+        }
     }
 
     #[cfg(any(test, feature = "atomic-oracle"))]
@@ -1346,6 +1422,10 @@ impl ApuBusView<'_> {
 struct WatchedBus<'a, 'b> {
     bus: &'a mut ApuBusView<'b>,
     access: Option<SpcAccess>,
+    /// The cycle's code read, for the access counters.
+    fetched: Option<u16>,
+    /// The cycle's dummy read at PC, for the access counters.
+    dummy: Option<u16>,
 }
 
 impl SpcBus for WatchedBus<'_, '_> {
@@ -1373,6 +1453,12 @@ impl SpcBus for WatchedBus<'_, '_> {
     }
 
     fn fetch(&mut self, addr: u16) -> u8 {
+        self.fetched = Some(addr);
+        self.bus.read(addr)
+    }
+
+    fn dummy_read(&mut self, addr: u16) -> u8 {
+        self.dummy = Some(addr);
         self.bus.read(addr)
     }
 }

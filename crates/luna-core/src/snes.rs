@@ -15,8 +15,8 @@ use luna_bus::sa1::Sa1Mapper;
 use luna_bus::sdd1::Sdd1Mapper;
 use luna_bus::superfx::SuperFxMapper;
 use luna_bus::{
-    Addr24, Bus, InterruptSample, MCycles, Mapper, MapperKind, address_speed, bank_of, make_addr,
-    offset_of,
+    Access, Addr24, Bus, InterruptSample, MCycles, Mapper, MapperKind, address_speed, bank_of,
+    make_addr, offset_of,
 };
 use luna_cartridge::Cartridge;
 use luna_cpu_65c816::Cpu;
@@ -220,6 +220,11 @@ pub struct Snes {
     /// [`Snes::enable_mem_trace`].
     #[serde(skip)]
     pub mem_trace_log: Option<MemTraceLog>,
+    /// Per-byte read / write / exec counters of the memories the S-CPU
+    /// side reaches; `None` (the common path) counts nothing. See
+    /// [`Snes::enable_access_counters`].
+    #[serde(skip)]
+    pub access_counters: Option<Box<crate::access::CpuAccessCounters>>,
     /// CPU writes to the VRAM data ports (`$2118/$2119`), each with the
     /// word it lands on and the instruction that wrote it; `None` when
     /// not capturing. The DMA side of the same question is the DMA
@@ -1124,6 +1129,7 @@ impl Snes {
             cpu_trace_log: None,
             profile: None,
             mem_trace_log: None,
+            access_counters: None,
             vram_cpu_writes: None,
             gsu_bus_log: None,
             breakpoints: None,
@@ -1324,6 +1330,31 @@ impl Snes {
                 (std::mem::take(&mut log.events), seen)
             }
             None => (Vec::new(), 0),
+        }
+    }
+
+    /// Count every access to each byte the S-CPU side and the SPC700
+    /// reach (`true`, from zero), or stop and drop the counters (`false`).
+    /// The PPU must log its port accesses for VRAM / OAM / CGRAM to count
+    /// (`Ppu::debug_accesses`); the caller turns that on.
+    pub fn enable_access_counters(&mut self, on: bool) {
+        self.access_counters =
+            on.then(|| Box::new(crate::access::CpuAccessCounters::new(self.mapper.as_ref())));
+        self.apu_real.access_counters = on.then(Box::default);
+        // VRAM / OAM / CGRAM count at the byte their ports touch, which
+        // the PPU reports while asked to.
+        if on {
+            self.ppu.debug_accesses.get_or_insert_with(Vec::new);
+        }
+    }
+
+    /// Every access counter back to zero, if counting.
+    pub fn clear_access_counters(&mut self) {
+        if let Some(c) = self.access_counters.as_deref_mut() {
+            c.clear();
+        }
+        if let Some(c) = self.apu_real.access_counters.as_deref_mut() {
+            c.clear();
         }
     }
 
@@ -1939,6 +1970,10 @@ struct SnesBus<'a> {
     sa1_log: &'a mut Option<Vec<Sa1LogEvent>>,
     /// Memory access trace. `None` = disabled. See [`Snes::enable_mem_trace`].
     mem_trace_log: &'a mut Option<MemTraceLog>,
+    /// Per-byte access counters; `None` = off.
+    access_counters: &'a mut Option<Box<crate::access::CpuAccessCounters>>,
+    /// The read in flight is a code read (`Bus::fetch`).
+    fetching: bool,
     /// CPU writes to the VRAM data ports; `None` = disabled.
     vram_cpu_writes: &'a mut Option<Vec<VramCpuWrite>>,
     gsu_bus_log: &'a mut Option<GsuBusLog>,
@@ -2119,6 +2154,7 @@ impl Snes {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            access_counters,
             vram_cpu_writes,
             gsu_bus_log,
             breakpoints,
@@ -2152,6 +2188,8 @@ impl Snes {
             mailbox_log,
             sa1_log,
             mem_trace_log,
+            access_counters,
+            fetching: false,
             vram_cpu_writes,
             gsu_bus_log,
             breakpoints,
@@ -2222,6 +2260,8 @@ struct DmaBusView<'a> {
     /// The CPU's memory trace, so DMA / HDMA writes land in the same
     /// stream as instruction writes, tagged by origin (issue #226).
     mem_trace: Option<&'a mut MemTraceLog>,
+    /// Per-byte access counters: a DMA counts on both buses.
+    access_counters: Option<&'a mut crate::access::CpuAccessCounters>,
     /// The watchpoint registry: a `run_until_mem_write` / `bp_add mem`
     /// fires on a DMA / HDMA write too (issue #226).
     breakpoints: Option<&'a mut crate::breakpoints::BreakpointSet>,
@@ -2234,6 +2274,33 @@ struct DmaBusView<'a> {
 }
 
 impl DmaBusView<'_> {
+    /// Count a DMA access on the byte it reaches: an A-bus address, or a
+    /// `$21xx` register (`0x2100 | b`) for the B-bus.
+    #[inline]
+    fn count(&mut self, addr: Addr24, access: Access) {
+        if let Some(c) = self.access_counters.as_deref_mut() {
+            c.note_bus(&*self.mapper, addr, access, self.trace_mclk);
+        }
+    }
+
+    /// Hand the PPU-memory bytes a B-bus access touched to the
+    /// watchpoints and the counters.
+    fn drain_ppu_accesses(&mut self) {
+        let Some(log) = self.ppu.debug_accesses.as_mut() else {
+            return;
+        };
+        if let Some(c) = self.access_counters.as_deref_mut() {
+            c.note_ppu(log, self.trace_mclk);
+        }
+        if let Some(bp) = self.breakpoints.as_deref_mut() {
+            for a in log.drain(..) {
+                bp.check_ppu(a, self.cpu_pc, true);
+            }
+        } else {
+            log.clear();
+        }
+    }
+
     /// Watchpoints + memory trace for a DMA-side write (B-bus register
     /// `$21xx` as `$00:21xx`, or an A-bus address).
     fn note_write(&mut self, addr: Addr24, value: u8) {
@@ -2265,6 +2332,7 @@ impl DmaBus for DmaBusView<'_> {
         // read-then-write per byte) can record where a VRAM byte came from.
         self.last_a_addr = addr;
         *self.scpu_mar = addr;
+        self.count(addr, Access::Read);
         if let Some(o) = SnesBus::wram_offset(addr) {
             return self.wram[o];
         }
@@ -2276,6 +2344,7 @@ impl DmaBus for DmaBusView<'_> {
     fn write_a(&mut self, addr: Addr24, value: u8) {
         *self.scpu_mar = addr;
         self.note_write(addr, value);
+        self.count(addr, Access::Write);
         if let Some(o) = SnesBus::wram_offset(addr) {
             self.wram[o] = value;
             return;
@@ -2290,16 +2359,10 @@ impl DmaBus for DmaBusView<'_> {
         // as the CPU port (`read_inner` $2180). $40-$7F = the APU mailbox.
         // Everything else reads the open bus (ares `bus.read(0x2100 |
         // address, cpu.r.mdr)`).
+        self.count(0x2100 | u32::from(b_offset), Access::Read);
         if b_offset <= 0x3F {
             let value = self.ppu.read(b_offset, *self.mdr);
-            if let (Some(bp), Some(log)) = (
-                self.breakpoints.as_deref_mut(),
-                self.ppu.debug_accesses.as_mut(),
-            ) {
-                for a in log.drain(..) {
-                    bp.check_ppu(a, self.cpu_pc, true);
-                }
-            }
+            self.drain_ppu_accesses();
             value
         } else if (0x40..=0x7F).contains(&b_offset) {
             // APU mailbox, 4 ports mirrored across $2140-$217F — the CPU
@@ -2326,6 +2389,7 @@ impl DmaBus for DmaBusView<'_> {
 
     fn write_b(&mut self, b_offset: u8, value: u8) {
         self.note_write(0x2100 | u32::from(b_offset), value);
+        self.count(0x2100 | u32::from(b_offset), Access::Write);
         if b_offset <= 0x3F {
             // Mirror of the CPU path's intra-line partial flush (gap G6,
             // `write_inner` $21xx): a DMA byte hitting a render-affecting
@@ -2386,14 +2450,7 @@ impl DmaBus for DmaBusView<'_> {
             // at the source in Ppu::write — ares io.cpp:55-60); VRAM/OAM still
             // drop via their own `active_display` gates.
             self.ppu.write(b_offset, value);
-            if let (Some(bp), Some(log)) = (
-                self.breakpoints.as_deref_mut(),
-                self.ppu.debug_accesses.as_mut(),
-            ) {
-                for w in log.drain(..) {
-                    bp.check_ppu(w, self.cpu_pc, true);
-                }
-            }
+            self.drain_ppu_accesses();
         } else if (0x40..=0x7F).contains(&b_offset) {
             // APU mailbox — both the real APU and the fallback stub, as the
             // CPU path does.
@@ -2441,6 +2498,32 @@ impl DmaBus for DmaBusView<'_> {
 }
 
 impl SnesBus<'_> {
+    /// Count a CPU access on the byte it reaches, when counting.
+    #[inline]
+    fn count_access(&mut self, addr: Addr24, access: Access) {
+        if let Some(c) = self.access_counters.as_deref_mut() {
+            c.note_bus(&*self.mapper, addr, access, *self.mclk_total);
+        }
+    }
+
+    /// Hand the PPU-memory bytes a port access touched to the counters
+    /// and the watchpoints.
+    fn drain_ppu_accesses(&mut self) {
+        let Some(log) = self.ppu.debug_accesses.as_mut() else {
+            return;
+        };
+        if let Some(c) = self.access_counters.as_deref_mut() {
+            c.note_ppu(log, *self.mclk_total);
+        }
+        if let Some(bp) = self.breakpoints.as_mut() {
+            for a in log.drain(..) {
+                bp.check_ppu(a, self.cpu_pc_full, false);
+            }
+        } else {
+            log.clear();
+        }
+    }
+
     /// Push a memory access event to the optional tracer, honouring
     /// the bank filter. Cheap when disabled.
     #[inline]
@@ -2750,6 +2833,7 @@ impl SnesBus<'_> {
                 trace_hclock,
                 dma_channel: 0,
                 mem_trace: self.mem_trace_log.as_mut(),
+                access_counters: self.access_counters.as_deref_mut(),
                 breakpoints: self.breakpoints.as_deref_mut(),
                 cpu_pc: self.cpu_pc_full,
                 trace_mclk: line_start_mclk,
@@ -2849,6 +2933,7 @@ impl SnesBus<'_> {
                 trace_hclock,
                 dma_channel: 0,
                 mem_trace: self.mem_trace_log.as_mut(),
+                access_counters: self.access_counters.as_deref_mut(),
                 breakpoints: self.breakpoints.as_deref_mut(),
                 cpu_pc: self.cpu_pc_full,
                 trace_mclk: line_start_mclk,
@@ -2877,7 +2962,14 @@ impl Bus for SnesBus<'_> {
         // A write drives the data bus too, so it updates the MDR.
         *self.mdr = value;
         self.trace_mem_access(addr, MemEventKind::Write, value);
+        self.count_access(addr, Access::Write);
         self.write_inner(addr, value);
+    }
+    fn fetch(&mut self, addr: Addr24) -> u8 {
+        self.fetching = true;
+        let value = self.read(addr);
+        self.fetching = false;
+        value
     }
     fn io_cycle(&mut self, mcycles: MCycles) {
         // ares `CPU::idle` (`cpu/memory.cpp:1-6`): the clocks, then the
@@ -3114,6 +3206,7 @@ impl SnesBus<'_> {
                     trace_hclock,
                     dma_channel: 0,
                     mem_trace: self.mem_trace_log.as_mut(),
+                    access_counters: self.access_counters.as_deref_mut(),
                     breakpoints: self.breakpoints.as_deref_mut(),
                     cpu_pc: self.cpu_pc_full,
                     trace_mclk: mclk_at_edge,
@@ -3174,6 +3267,7 @@ impl SnesBus<'_> {
                     trace_hclock,
                     dma_channel: 0,
                     mem_trace: self.mem_trace_log.as_mut(),
+                    access_counters: self.access_counters.as_deref_mut(),
                     breakpoints: self.breakpoints.as_deref_mut(),
                     cpu_pc: self.cpu_pc_full,
                     trace_mclk: *self.mclk_total,
@@ -3226,6 +3320,14 @@ impl SnesBus<'_> {
         // Timestamp the trace / fire watchpoints at the sampling point — that
         // is where the byte was latched.
         self.trace_mem_access(addr, MemEventKind::Read, data);
+        self.count_access(
+            addr,
+            if self.fetching {
+                Access::Exec
+            } else {
+                Access::Read
+            },
+        );
         self.advance_time(READ_SAMPLE_TAIL, true);
         // ares `aluEdge()` closes the read (`cpu/memory.cpp:15`): a read of
         // RDMPY / RDDIV sees the cycles before its own, not its own.
@@ -3306,13 +3408,7 @@ impl SnesBus<'_> {
                 }
             }
             let value = self.ppu.read(off, *self.mdr);
-            if let (Some(bp), Some(log)) =
-                (self.breakpoints.as_mut(), self.ppu.debug_accesses.as_mut())
-            {
-                for a in log.drain(..) {
-                    bp.check_ppu(a, self.cpu_pc_full, false);
-                }
-            }
+            self.drain_ppu_accesses();
             return value;
         }
         if let Some(port) = Self::apu_port(addr) {
@@ -3571,13 +3667,7 @@ impl SnesBus<'_> {
                 }
             }
             self.ppu.write(off, value);
-            if let (Some(bp), Some(log)) =
-                (self.breakpoints.as_mut(), self.ppu.debug_accesses.as_mut())
-            {
-                for w in log.drain(..) {
-                    bp.check_ppu(w, self.cpu_pc_full, false);
-                }
-            }
+            self.drain_ppu_accesses();
             if off == 0x00 {
                 // INIDISP just changed forced-blank: recompute `active_display`
                 // LIVE so a MID-SCANLINE forced-blank gates VRAM/OAM writes

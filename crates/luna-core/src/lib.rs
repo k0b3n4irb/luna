@@ -7,6 +7,7 @@
 //! `luna-api` — front-ends (CLI / GUI / MCP) never depend on this
 //! crate directly (see `.claude/rules/api-first.md`).
 
+pub mod access;
 pub mod apu_stub;
 pub mod breakpoints;
 pub mod controller;
@@ -17,6 +18,7 @@ pub mod mclk;
 pub mod power;
 pub mod snes;
 
+pub use access::{CountedMemory, CpuAccessCounters, locate};
 pub use apu_stub::{ApuStub, Phase as ApuPhase};
 pub use breakpoints::{
     BREAK_SOURCE_ID, BreakCpu, BreakHit, BreakKind, BreakpointInfo, BreakpointSet, ForbidRange,
@@ -26,8 +28,8 @@ pub use cpu_regs::CpuRegs;
 pub use dma::{DmaTraceEvent, DmaTraceLog};
 pub use luna_apu::Spc700TraceEvent;
 pub use luna_bus::{
-    CartMemory, CoprocAccess, CoprocBreak, CoprocCondition, CoprocHit, CoprocRegs, CoprocView,
-    CoprocWatch, Dsp1TraceEvent, Dsp1TraceKind, Mapper, MapperKind, NullMapper,
+    ByteCounters, CartMemory, CoprocAccess, CoprocBreak, CoprocCondition, CoprocHit, CoprocRegs,
+    CoprocView, CoprocWatch, Dsp1TraceEvent, Dsp1TraceKind, Mapper, MapperKind, NullMapper,
     STATE_DECODE_CONFIG, Sa1SideEvent, Sa1Stats, Sa1TraceEvent, SuperFxJob, SuperFxTraceEvent,
 };
 pub use mclk::{MclkAccounting, MclkBuckets, MclkKind};

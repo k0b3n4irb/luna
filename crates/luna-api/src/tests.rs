@@ -3960,3 +3960,39 @@ fn the_spc700_call_stack_follows_calls_and_returns() {
     assert_eq!(e.spc700_state().unwrap().pc, 0x203);
     assert!(e.spc_call_stack().is_empty(), "{:?}", e.spc_call_stack());
 }
+
+/// Each byte counts its reads, writes and code reads, on the byte and not
+/// the address; a reset starts the counts again.
+#[test]
+fn access_counters_count_on_the_byte_behind_the_address() {
+    use crate::memory::MemoryKind;
+    // $8000: LDA $0010 ; STA $0011 ; BRA $8000
+    let code = [0xAD, 0x10, 0x00, 0x8D, 0x11, 0x00, 0x80, 0xF8];
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
+    assert!(e.access_counters(MemoryKind::SnesWorkRam, 0, 1).is_err());
+    e.enable_access_counters(true).unwrap();
+    e.step(300).unwrap();
+    let rom = e.access_counters(MemoryKind::SnesPrgRom, 0, 8).unwrap();
+    let loops = rom[0].exec;
+    assert!(loops > 50);
+    // Opcode and operands are code reads, never data reads.
+    for b in &rom[..3] {
+        assert_eq!((b.exec, b.read), (loops, 0));
+    }
+    let ram = e.access_counters(MemoryKind::SnesWorkRam, 0x10, 2).unwrap();
+    assert_eq!((ram[0].read, ram[1].write), (loops, loops));
+    assert!(ram[1].last_write > ram[0].last_read && ram[0].last_read > 0);
+    // Every mirror shows the same byte.
+    let bus = |a| e.access_counters(MemoryKind::SnesMemory, a, 1).unwrap()[0];
+    assert_eq!(bus(0x7E_0010), ram[0]);
+    assert_eq!(bus(0x80_0010), ram[0]);
+    assert_eq!(bus(0x00_8000), rom[0]);
+    assert_eq!(bus(0x00_5000), AccessCounter::default());
+
+    e.reset().unwrap();
+    let ram = e.access_counters(MemoryKind::SnesWorkRam, 0x10, 1).unwrap();
+    assert_eq!(ram[0], AccessCounter::default());
+    e.enable_access_counters(false).unwrap();
+    assert!(!e.access_counters_enabled());
+}

@@ -50,6 +50,8 @@ use serde::Serialize;
 /// (`1.39.0+4360f7c`); the plain version when built without git.
 pub const VERSION: &str = env!("LUNA_BUILD_VERSION");
 
+pub mod access;
+pub use access::AccessCounter;
 pub mod code_log;
 pub mod debugger;
 pub mod dsp1_commands;
@@ -2080,7 +2082,14 @@ impl Emulator {
     /// to running the SNES reset vector. Errors if no ROM is loaded.
     pub fn reset(&mut self) -> Result<(), ApiError> {
         let snes = self.snes.as_mut().ok_or(ApiError::NoRom)?;
+        // The access counters are the session's: a reset starts their counts
+        // again (Mesen2), it does not turn them off.
+        let counters = snes.access_counters.take();
+        let spc_counters = snes.apu_real.access_counters.take();
         snes.reset();
+        snes.access_counters = counters;
+        snes.apu_real.access_counters = spc_counters;
+        snes.clear_access_counters();
         self.instructions_executed = 0;
         // The stack watermark measures a run; a reset starts a new one.
         self.stack_low = None;
@@ -3427,6 +3436,11 @@ impl Emulator {
         // The deserialized `Snes` has a placeholder mapper (the trait object
         // is `serde(skip)`): move the live, now-restored one into it.
         restored.mapper = std::mem::replace(&mut snes.mapper, luna_core::null_mapper());
+        // The access counters are the session's, and go back to zero on a
+        // state load (Mesen2).
+        restored.access_counters = snes.access_counters.take();
+        restored.apu_real.access_counters = snes.apu_real.access_counters.take();
+        restored.clear_access_counters();
         // What the session asked of the picture is not in a state: keep it.
         restored.ppu.skip_pixels = snes.ppu.skip_pixels;
         if snes.ppu.native_capture {
@@ -4610,7 +4624,8 @@ impl Emulator {
                 .breakpoints
                 .as_ref()
                 .is_some_and(|b| b.has_ppu_watches());
-            snes.ppu.debug_accesses = ppu.then(Vec::new);
+            let counting = snes.access_counters.is_some();
+            snes.ppu.debug_accesses = (ppu || counting).then(Vec::new);
             let exec_on = |cpu| {
                 snes.breakpoints
                     .as_ref()
@@ -4933,7 +4948,9 @@ impl Emulator {
             if let Some(debug) = snes.mapper.coproc_debug() {
                 debug.disarm();
             }
-            snes.ppu.debug_accesses = None;
+            if snes.access_counters.is_none() {
+                snes.ppu.debug_accesses = None;
+            }
         }
         if let Some(bp) = self.snes.as_mut().and_then(|s| s.breakpoints.as_mut())
             && out.hit.is_none_or(|h| h.id != BREAK_SOURCE_ID)

@@ -18,6 +18,8 @@ atomic-oracle = ["luna-cpu-spc700/atomic-oracle"]
 
 [dependencies]
 luna-cpu-spc700 = { workspace = true }
+# The per-byte access counters type a debugger reads.
+luna-bus        = { workspace = true }
 # Save-state: serde derives on APU + DSP state.
 serde       = { workspace = true, features = ["std", "derive"] }
 serde_bytes = { workspace = true }

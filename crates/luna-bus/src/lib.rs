@@ -6,6 +6,8 @@
 //!
 //! # Crate layout
 //!
+//! - [`mod@access`]: [`AccessCounters`] — per-byte read / write / exec
+//!   counters for a debugger.
 //! - [`mod@types`]: time / address aliases (`MCycles`, address helpers).
 //! - [`mod@speed`]: SNES memory access speed lookup
 //!   (`FAST` / `SLOW` / `XSLOW`).
@@ -31,6 +33,7 @@
 //!
 //! See `ARCHITECTURE.md` §5.
 
+pub mod access;
 pub mod bus;
 pub mod debug;
 pub mod hirom;
@@ -45,6 +48,7 @@ pub mod types;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
 
+pub use access::{Access, AccessCounters, ByteCounters};
 pub use bus::{Bus, InterruptSample};
 pub use debug::{
     CoprocAccess, CoprocBreak, CoprocCondition, CoprocDebug, CoprocHit, CoprocRegs, CoprocView,
