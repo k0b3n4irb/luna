@@ -3208,6 +3208,11 @@ fn labels_name_memories_and_show_on_every_bus_address_behind_them() {
     let info = e.load_rom(&rom).unwrap();
     let loaded = info.labels_loaded.unwrap();
     assert_eq!((loaded.imported, loaded.errors), (2, 1));
+    assert!(
+        e.workspace_file()
+            .is_some_and(|p| p.ends_with("debugger/game.json")),
+        "the workspace goes by the ROM's file name"
+    );
 
     // The register defaults, and the file's labels, at every mirror.
     let name = |e: &Emulator, a: u32| {
@@ -3571,5 +3576,80 @@ fn the_debugger_panes_read_like_mesen2s() {
     assert_eq!(
         (stack[0].function.as_str(), stack[0].pc),
         ("[bottom of stack]", 0x00_8008)
+    );
+}
+
+#[test]
+fn a_workspace_round_trips_labels_and_breakpoints() {
+    use crate::workspace::Workspace;
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom()).unwrap();
+    e.set_label(Label {
+        memory: MemoryKind::SnesWorkRam,
+        address: 0x10,
+        length: 2,
+        name: "counter".into(),
+        comment: "frames".into(),
+    })
+    .unwrap();
+    let exec = e.bp_add_exec(0x00_8010, Some("sub")).unwrap();
+    e.bp_set_condition(exec, Some("a == $12")).unwrap();
+    let watch = e
+        .bp_add_mem(0x7E_0010, 0x7E_0011, false, true, true, None)
+        .unwrap();
+    e.bp_set_enabled(watch, false).unwrap();
+    let vram = e
+        .bp_add_watch(MemoryKind::SnesVideoRam, 0x1000, 0x1FFF, true, false, None)
+        .unwrap();
+    e.bp_set_mark(vram, true).unwrap();
+    e.bp_add_forbid(BreakCpu::Snes, MemoryKind::SnesPrgRom, 0, 0xFF, None)
+        .unwrap();
+
+    let ws = e.workspace().unwrap();
+    assert_eq!(ws.labels.len(), 1, "the defaults are not stored");
+    let path = std::env::temp_dir().join(format!("luna_ws_{}/demo.json", std::process::id()));
+    ws.save(&path).unwrap();
+
+    let mut f = Emulator::new();
+    f.load_rom_bytes(demo_lorom()).unwrap();
+    let missed = f.apply_workspace(&Workspace::load(&path).unwrap()).unwrap();
+    assert_eq!(missed, 0);
+    let key = |e: &Emulator| {
+        e.bp_list()
+            .unwrap()
+            .into_iter()
+            .map(|b| {
+                (
+                    b.exec,
+                    b.lo,
+                    b.hi,
+                    b.on_read,
+                    b.on_write,
+                    b.enabled,
+                    b.mark,
+                    b.forbid,
+                    b.space,
+                    b.condition,
+                    b.name,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(key(&f), key(&e));
+    assert_eq!(
+        f.label_at(MemoryKind::SnesMemory, 0x00_0011)
+            .unwrap()
+            .and_then(|h| h.name())
+            .as_deref(),
+        Some("counter+1")
+    );
+    assert!(
+        f.labels().iter().any(|l| l.name == "INIDISP"),
+        "the defaults are still there"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    assert!(
+        crate::workspace::workspace_path("games/My Game.sfc")
+            .is_some_and(|p| p.ends_with("debugger/My Game.json"))
     );
 }

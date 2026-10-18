@@ -110,6 +110,7 @@ method, so the MCP transport adds reach, not capability.
 | `find` / `find_all` | `listing_find` / `listing_find_all` | Find in the listing from a row; Find All Occurrences (up to 500 rows). |
 | `functions` | `functions` | Every subroutine entry the code log saw in the program ROM. |
 | `debugger_status` | `debugger_status` | The Debugger window's Status pane: registers, pending interrupts, PPU position, the stack. |
+| `workspace_save` / `workspace_load` | `workspace` / `apply_workspace` | The ROM's debugger workspace (labels set, breakpoints), the file the GUI's Debugger window uses. See [The debugger's panes](#the-debuggers-panes). |
 | `resolve_symbol` | `resolve_symbol` | Label name → 24-bit address (null if unknown). A bare name stands for the only label spelled `name.<suffix>` (a C `static`: `player_x` for `player_x.main`); several candidates are an error that names them. The same rule applies to every tool's `symbol` argument. |
 | `symbol_for_addr` | `symbol_for_addr` | 24-bit address → nearest preceding label in its bank (the inverse). |
 | `enable_dma_trace` / `take_dma_trace` | `enable_dma_trace` / `take_dma_trace` | DMA→VRAM transfer bytes with scanline/H-clock + blank flags (the CLI `--dma-trace`). |
@@ -239,6 +240,13 @@ debugger_status {}                           # registers, IRQs, H clock, scanlin
 - **`find`** starts at `from` (default: the PC's row) and wraps round the
   space; **`find_all`** walks the whole listing, the ROM's mirrors
   included.
+- **`workspace_save` / `workspace_load`** write and read the ROM's
+  debugger workspace: the labels set and every breakpoint (condition,
+  mark, state). The file is the one the GUI's Debugger window loads with
+  the ROM (`<settings>/debugger/<rom name>.json`, `~/.config/luna/…` on
+  Linux), so what an agent sets the window shows, and the other way
+  round; a save keeps the watches and window settings the GUI wrote
+  there. `path` names another file.
 
 ### Labels and comments
 

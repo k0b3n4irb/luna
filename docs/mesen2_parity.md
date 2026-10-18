@@ -50,6 +50,7 @@ lands it.
 | D2a | `ui.rs` split into one module per panel (no behaviour change) | ✅ |
 | D2b | Code log (instructions run, widths, jump targets, subroutine entries, decoded ahead) for the 65C816 and the SPC700 — the code half of the CDL, brought forward | ✅ |
 | D2d | Debugger window (GUI) for the 65C816: code view, Status, Labels / Functions / Find Results / Controllers, Watch / Breakpoints / Call Stack, dialogs, shortcuts, settings panel, workspace import / export | ✅ |
+| D2e | Workspace per ROM (labels, breakpoints, watches, window settings), shared by the GUI and the MCP | ✅ |
 | D2c | Panes' content in `luna-api`: watch formats, Go To, Go To All, Find, Find All Occurrences, function list, label list, call stack rows | ✅ |
 | D2b | Code listing, Mesen2's Disassembly pane: whole address space, blocks, labels, comments, function separators, effective address and value from the live registers; MCP `listing` | ✅ |
 | D2 | Debugger window per CPU (disassembly with labels, comments, effective addresses; editable status; breakpoint, watch, label, function, call-stack lists; go to / find all); labels and comments in `.mlb`, ca65 `.dbg`, bass, SDCC `.cdb`, ELF; default register labels; workspace per ROM | ⬜ |

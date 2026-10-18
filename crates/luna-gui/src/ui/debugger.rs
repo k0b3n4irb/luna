@@ -21,7 +21,7 @@ use luna_api::{
 };
 
 /// How the address margin reads (Mesen2's "Margin:").
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum MarginMode {
     /// `008000`.
     #[default]
@@ -34,8 +34,10 @@ pub(crate) enum MarginMode {
     Compact,
 }
 
-/// The window's settings (Mesen2's settings panel).
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+/// The window's settings (Mesen2's settings panel), kept in the ROM's
+/// workspace.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub(crate) struct DebuggerSettings {
     /// The listing options.
     pub listing: ListingOptions,

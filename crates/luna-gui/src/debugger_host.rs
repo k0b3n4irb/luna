@@ -13,6 +13,9 @@ use crate::ui::{DebuggerAction, DebuggerSettings, DebuggerView, WatchLine};
 
 const CPU: ListingCpu = ListingCpu::Snes;
 
+/// The GUI's name in a workspace file.
+const WORKSPACE_KEY: &str = "luna-gui";
+
 /// Something only `LunaApp` can do.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum HostEffect {
@@ -80,6 +83,48 @@ impl DebuggerHost {
         self.center_on_pc = true;
         if self.visible == 0 {
             self.visible = 40;
+        }
+    }
+
+    /// Another ROM was loaded: what pointed into the old one goes.
+    pub(crate) fn rom_changed(&mut self) {
+        self.top = ListingPos::default();
+        self.cursor = None;
+        self.back.clear();
+        self.forward.clear();
+        self.find_results.clear();
+        self.status = None;
+        self.break_reason = None;
+        self.break_mclk = None;
+        self.temp_bp = None;
+        self.temp_sources = false;
+        self.watches.clear();
+        self.watch_values.clear();
+        self.center_on_pc = true;
+        self.dirty = true;
+    }
+
+    /// Take the watches and the settings a ROM's workspace kept.
+    pub(crate) fn load_workspace(&mut self, ws: &luna_api::Workspace) {
+        self.watches = ws.watches.get("snes").cloned().unwrap_or_default();
+        self.watch_values.clear();
+        if let Some(s) = ws
+            .front_end
+            .get(WORKSPACE_KEY)
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+        {
+            self.settings = s;
+        }
+        self.dirty = true;
+    }
+
+    /// Add the watches and the settings to a workspace being saved.
+    pub(crate) fn store_workspace(&self, ws: &mut luna_api::Workspace) {
+        if !self.watches.is_empty() {
+            ws.watches.insert("snes".into(), self.watches.clone());
+        }
+        if let Ok(v) = serde_json::to_value(self.settings) {
+            ws.front_end.insert(WORKSPACE_KEY.into(), v);
         }
     }
 
@@ -695,5 +740,26 @@ mod tests {
             v.break_reason.as_deref(),
             Some("Breakpoint: Exec CPU ($008008)")
         );
+    }
+
+    #[test]
+    fn watches_and_settings_ride_in_the_workspace() {
+        let (mut em, mut host) = loaded();
+        host.apply(&mut em, DebuggerAction::AddWatch("[$7E0010], H2".into()));
+        let mut s = host.settings;
+        s.byte_code = true;
+        s.listing.lower_case = true;
+        host.apply(&mut em, DebuggerAction::Settings(s));
+        let mut ws = em.workspace().unwrap();
+        host.store_workspace(&mut ws);
+        let text = serde_json::to_string(&ws).unwrap();
+
+        let mut fresh = DebuggerHost::default();
+        fresh.rom_changed();
+        fresh.load_workspace(&serde_json::from_str(&text).unwrap());
+        assert_eq!(fresh.watches, ["[$7E0010], H2"]);
+        assert_eq!(fresh.settings, s);
+        fresh.rom_changed();
+        assert!(fresh.watches.is_empty(), "another ROM starts its own");
     }
 }

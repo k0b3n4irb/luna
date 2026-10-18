@@ -270,6 +270,11 @@ struct LunaApp {
     /// The last Debugger view, redrawn while the emulator is busy (a long
     /// step holds it).
     debugger_view: Option<Box<crate::ui::DebuggerView>>,
+    /// The workspace file of the ROM loaded, and what was last written
+    /// to it (saved only when that changes).
+    workspace_file: Option<(PathBuf, String)>,
+    /// When the workspace was last saved.
+    workspace_saved_at: std::time::Instant,
     /// A Debugger file dialog in flight: what it is for, and its answer.
     debugger_file_rx: Option<(DebuggerFile, mpsc::Receiver<Option<PathBuf>>)>,
 }
@@ -374,6 +379,8 @@ impl LunaApp {
             debugger_steps_seen: 0,
             debugger_file_rx: None,
             debugger_view: None,
+            workspace_file: None,
+            workspace_saved_at: std::time::Instant::now(),
         };
         if let Some(path) = auto_rom {
             app.load_rom(&path);
@@ -450,9 +457,36 @@ impl LunaApp {
         // first auto-flush only writes once the game actually modifies it.
         self.last_srm_written = em.sram();
         self.last_srm_flush = std::time::Instant::now();
+        // The ROM's debugger workspace: its labels, breakpoints, watches and
+        // window settings, over the defaults and the `.mlb` the load read.
+        self.debugger.rom_changed();
+        self.workspace_file = None;
+        if let Some(file) = em.workspace_file() {
+            let written = luna_api::Workspace::load(&file).map_or_else(
+                |_| String::new(),
+                |ws| {
+                    match em.apply_workspace(&ws) {
+                        Ok(0) => {}
+                        Ok(n) => {
+                            eprintln!(
+                                "luna-gui: {n} breakpoint(s) of the workspace could not be set"
+                            );
+                        }
+                        Err(e) => eprintln!("luna-gui: workspace {}: {e}", file.display()),
+                    }
+                    self.debugger.load_workspace(&ws);
+                    std::fs::read_to_string(&file).unwrap_or_default()
+                },
+            );
+            self.workspace_file = Some((file, written));
+        }
+        if self.debugger_open {
+            self.debugger.opened(&mut em);
+        }
         if let Ok(mut guard) = self.emu.lock() {
             *guard = Some(em);
         }
+        self.sync_has_breakpoints();
         // Spawn the emu thread UNCONDITIONALLY. Audio is an optional
         // passenger: with no output device the thread runs silent, paced
         // by its video-as-clock frame limiter (the old audio-gated spawn
@@ -733,7 +767,37 @@ impl LunaApp {
         }
     }
 
+    /// Write the ROM's debugger workspace when it changed since the last
+    /// write (and is not empty with no file yet).
+    fn save_workspace(&mut self) {
+        self.workspace_saved_at = std::time::Instant::now();
+        let Some((file, written)) = self.workspace_file.as_mut() else {
+            return;
+        };
+        let ws = self.emu.lock().ok().and_then(|g| {
+            g.as_ref().and_then(|em| em.workspace().ok()).map(|mut ws| {
+                self.debugger.store_workspace(&mut ws);
+                ws
+            })
+        });
+        let Some(ws) = ws else { return };
+        if written.is_empty() && ws.is_empty() {
+            return;
+        }
+        let Ok(text) = serde_json::to_string_pretty(&ws).map(|t| t + "\n") else {
+            return;
+        };
+        if text == *written {
+            return;
+        }
+        match ws.save(file) {
+            Ok(()) => *written = text,
+            Err(e) => eprintln!("luna-gui: workspace {}: {e}", file.display()),
+        }
+    }
+
     fn unload_emu(&mut self) {
+        self.save_workspace();
         self.emu_shared.shutdown.store(true, Ordering::Release);
         self.emu_shared.unpark_emu();
         if let Some(join) = self.emu_join.take() {
@@ -1387,6 +1451,10 @@ impl ApplicationHandler for LunaApp {
         self.poll_gamepads();
         self.poll_break_hit(event_loop);
         self.poll_debugger_file();
+        if self.rom_loaded && self.workspace_saved_at.elapsed() >= std::time::Duration::from_mins(1)
+        {
+            self.save_workspace();
+        }
         // Feed the host pointer to a Mouse / Super Scope once per loop tick.
         self.push_devices();
         // Watch-mode auto-reload: reboot the ROM if its file changed (#93).
@@ -1816,6 +1884,9 @@ impl LunaApp {
             } else {
                 debugger_host::DebuggerHost::closed(em);
             }
+        }
+        if !open {
+            self.save_workspace();
         }
         if open && self.debugger.settings.break_on_open {
             self.emu_shared.paused.store(true, Ordering::Release);

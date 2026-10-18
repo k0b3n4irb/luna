@@ -73,6 +73,12 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   label, comment, breakpoint and Find All dialogs; Mesen2's shortcuts;
   File ▸ Workspace imports and exports. Steps run on the emu thread and
   Break ends a long one.
+- **A debugger workspace per ROM**, as Mesen2's: the labels set, the
+  breakpoints (condition, mark, state), the watches and the Debugger
+  window's settings, in `<settings>/debugger/<rom name>.json`, restored at
+  the next load of that ROM over its `.mlb`. API: `workspace`,
+  `apply_workspace`, `workspace_file`, `rom_file`; MCP: `workspace_save`,
+  `workspace_load` (same file as the GUI).
 
 ### Changed
 

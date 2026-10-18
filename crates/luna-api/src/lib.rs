@@ -59,6 +59,7 @@ pub mod symbols;
 pub mod video;
 mod vocab;
 mod vram_writers;
+pub mod workspace;
 
 pub use debugger::{
     CallStackRow, DebuggerStatus, FindResult, FunctionRow, GotoResult, LabelRow, WatchStyle,
@@ -78,6 +79,7 @@ pub use vocab::{
     dsp_register_index, dsp_register_name, dsp_register_table, force_mapper_names, parse_region,
 };
 pub use vram_writers::{VramOverlap, VramWriteKind, VramWriterRow, VramWriters, VramWritersReport};
+pub use workspace::{Workspace, workspace_path};
 
 /// Parse a controller-device name — the CLI `--port1/--port2` and MCP
 /// `set_port_device` vocabulary: `pad` (or `joypad`), `mouse`, `superscope`,
@@ -1358,6 +1360,8 @@ pub struct Emulator {
     code_log: code_log::CodeLog,
     /// Whether the run loop adds to [`Self::code_log`].
     code_logging: bool,
+    /// The file the ROM was loaded from (`None` for a ROM from bytes).
+    rom_file: Option<std::path::PathBuf>,
     /// Live narrowing memory-search session (issue #177); `None` until
     /// [`Emulator::search_begin`] runs.
     search_session: Option<SearchSession>,
@@ -1723,6 +1727,7 @@ impl Emulator {
             default_labels: true,
             code_log: code_log::CodeLog::new(),
             code_logging: false,
+            rom_file: None,
             search_session: None,
             profile_frames: std::collections::BTreeMap::new(),
             profile_frames_done: 0,
@@ -1793,6 +1798,7 @@ impl Emulator {
     /// recording the outcome in `info` (and in the stored [`RomInfo`]). An
     /// explicit [`Self::load_symbols`] afterwards replaces it.
     fn load_sidecar_symbols(&mut self, rom: &Path, mut info: RomInfo) -> RomInfo {
+        self.rom_file = Some(rom.to_path_buf());
         let mlb = [
             rom.with_extension("mlb"),
             std::path::PathBuf::from(format!("{}.mlb", rom.display())),
@@ -2020,6 +2026,7 @@ impl Emulator {
                 self.rom_hash = rom_hash;
                 self.reset_labels();
                 self.clear_code_log();
+                self.rom_file = None;
                 let logging = self.code_logging;
                 self.enable_code_log(logging);
                 Ok(info)

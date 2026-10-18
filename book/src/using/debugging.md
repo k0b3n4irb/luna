@@ -100,11 +100,18 @@ disabled, `+` with a condition).
 - **File ▸ Workspace** imports labels (`.mlb`, `.sym`) and exports the
   `.mlb`, imports and exports the watch list, resets the workspace.
 - **Controllers** forces buttons pressed on ports 1 and 2.
+- **The workspace**: the labels you set, the breakpoints, the watches
+  and the window's settings are kept per ROM, as Mesen2 keeps them, in
+  `<settings>/debugger/<rom name>.json` (`~/.config/luna/debugger/` on
+  Linux, `%APPDATA%\luna\debugger\` on Windows), and come back at the
+  next load of a ROM of that name — over its `<rom>.mlb`, so what you set
+  last wins. It is written when the window closes, when another ROM loads,
+  on quit, and at most once a minute while you work. The MCP
+  `workspace_save` / `workspace_load` read and write the same file.
 
 Not there yet: step back (rewind), the CPU-cycle and PPU-cycle steps
 (luna runs instructions whole), the code/data logger's menu, the
-assembler, the memory viewer link, the SPC700 and coprocessor windows,
-and saving the window's state per ROM.
+assembler, the memory viewer link, the SPC700 and coprocessor windows.
 
 ## GUI conveniences
 

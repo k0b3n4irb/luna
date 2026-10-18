@@ -1845,3 +1845,79 @@ async fn server_debugger_tools_answer_as_the_window_does() {
     assert!(funcs.functions.iter().all(|f| f.address.is_some()));
     let _ = std::fs::remove_file(&path);
 }
+
+#[tokio::test]
+async fn server_workspace_saves_and_loads_keeping_the_guis_part() {
+    let dir = std::env::temp_dir().join(format!("luna_mcp_ws_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ws_path = dir.join("demo.json");
+    // What the GUI wrote: a watch and its window settings.
+    std::fs::write(
+        &ws_path,
+        r#"{"version":1,"labels":[],"breakpoints":[],"watches":{"snes":["[$7E0010]"]},"front_end":{"luna-gui":{"byte_code":true}}}"#,
+    )
+    .unwrap();
+    let rom = dir.join("demo.smc");
+    std::fs::write(&rom, demo_lorom()).unwrap();
+    let s = LunaServer::new();
+    s.load_rom(Parameters(rom_params(&rom.to_string_lossy())))
+        .await
+        .unwrap();
+    s.label_set(Parameters(LabelSetParams {
+        memory: "SnesPrgRom".into(),
+        address: 0,
+        length: None,
+        name: "start".into(),
+        comment: String::new(),
+    }))
+    .await
+    .unwrap();
+    s.bp_add(Parameters(BpAddParams {
+        cpu: None,
+        condition: Some("a == 1".into()),
+        mark: false,
+        memory: None,
+        kind: "exec".into(),
+        addr: 0x8000,
+        symbol: None,
+        hi: None,
+        hi_symbol: None,
+        on_read: false,
+        on_write: false,
+        mirror: None,
+        name: None,
+    }))
+    .await
+    .unwrap();
+    let path = Some(ws_path.to_string_lossy().into_owned());
+    let saved = s
+        .workspace_save(Parameters(WorkspaceParams { path: path.clone() }))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!((saved.labels, saved.breakpoints), (1, 1));
+    let back = luna_api::Workspace::load(&ws_path).unwrap();
+    assert_eq!(
+        back.watches["snes"],
+        ["[$7E0010]"],
+        "the GUI's watches stay"
+    );
+    assert!(back.front_end.contains_key("luna-gui"));
+
+    let t = LunaServer::new();
+    t.load_rom(Parameters(rom_params(&rom.to_string_lossy())))
+        .await
+        .unwrap();
+    let loaded = t
+        .workspace_load(Parameters(WorkspaceParams { path }))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(
+        (loaded.labels, loaded.breakpoints, loaded.missed),
+        (1, 1, 0)
+    );
+    let list = t.bp_list().await.unwrap().0.breakpoints;
+    assert_eq!(list[0].condition.as_deref(), Some("a == 1"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

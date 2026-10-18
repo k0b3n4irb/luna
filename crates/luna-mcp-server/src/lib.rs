@@ -1715,6 +1715,15 @@ pub struct EnableCodeLogParams {
     pub on: bool,
 }
 
+/// The workspace file a workspace tool reads or writes.
+fn workspace_target(em: &Emulator, path: Option<String>) -> Result<PathBuf, ErrorData> {
+    path.map(PathBuf::from)
+        .or_else(|| em.workspace_file())
+        .ok_or_else(|| {
+            ErrorData::invalid_params("no ROM loaded, or no settings folder: give `path`", None)
+        })
+}
+
 /// The CPU a debugger tool asks for: `snes` (default) or `spc`.
 fn listing_cpu(name: Option<&str>) -> Result<luna_api::ListingCpu, ErrorData> {
     match name {
@@ -1836,6 +1845,29 @@ pub struct FindAllParams {
 pub struct FindAllResult {
     /// Up to 500 rows, in address order.
     pub results: Vec<luna_api::FindResult>,
+}
+
+/// `workspace_save` / `workspace_load` parameters.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct WorkspaceParams {
+    /// The workspace file; default the loaded ROM's, the one the GUI's
+    /// Debugger window uses.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// `workspace_save` / `workspace_load` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct WorkspaceResult {
+    /// The file.
+    pub path: String,
+    /// Labels written or read.
+    pub labels: usize,
+    /// Breakpoints written or read.
+    pub breakpoints: usize,
+    /// Breakpoints read that could not be set (a CPU or a memory this
+    /// cartridge lacks).
+    pub missed: usize,
 }
 
 /// `functions` result.
@@ -3198,6 +3230,55 @@ impl LunaServer {
     async fn functions(&self) -> rmcp::Json<FunctionsResult> {
         let functions = self.emulator.lock().await.functions();
         rmcp::Json(FunctionsResult { functions })
+    }
+
+    #[rmcp::tool(
+        description = "Save the session's debugger workspace (the labels set, every \
+                                breakpoint with its condition, mark and state) to the ROM's \
+                                workspace file, the one the GUI's Debugger window loads, or to \
+                                `path`. Watches and window settings already in the file stay."
+    )]
+    async fn workspace_save(
+        &self,
+        Parameters(params): Parameters<WorkspaceParams>,
+    ) -> Result<rmcp::Json<WorkspaceResult>, ErrorData> {
+        let em = self.emulator.lock().await;
+        let path = workspace_target(&em, params.path)?;
+        let mut ws = em.workspace().map_err(|e| api_err_to_mcp(&e))?;
+        drop(em);
+        if let Ok(old) = luna_api::Workspace::load(&path) {
+            ws.watches = old.watches;
+            ws.front_end = old.front_end;
+        }
+        ws.save(&path).map_err(|e| api_err_to_mcp(&e))?;
+        Ok(rmcp::Json(WorkspaceResult {
+            path: path.display().to_string(),
+            labels: ws.labels.len(),
+            breakpoints: ws.breakpoints.len(),
+            missed: 0,
+        }))
+    }
+
+    #[rmcp::tool(
+        description = "Load a debugger workspace (the ROM's file by default, as the GUI \
+                                does at each ROM load): its labels over those set, its \
+                                breakpoints added."
+    )]
+    async fn workspace_load(
+        &self,
+        Parameters(params): Parameters<WorkspaceParams>,
+    ) -> Result<rmcp::Json<WorkspaceResult>, ErrorData> {
+        let mut em = self.emulator.lock().await;
+        let path = workspace_target(&em, params.path)?;
+        let ws = luna_api::Workspace::load(&path).map_err(|e| api_err_to_mcp(&e))?;
+        let missed = em.apply_workspace(&ws).map_err(|e| api_err_to_mcp(&e))?;
+        drop(em);
+        Ok(rmcp::Json(WorkspaceResult {
+            path: path.display().to_string(),
+            labels: ws.labels.len(),
+            breakpoints: ws.breakpoints.len(),
+            missed,
+        }))
     }
 
     #[rmcp::tool(
