@@ -4791,7 +4791,7 @@ impl ServerHandler for LunaServer {
         let mut info = rmcp::model::ServerInfo::default();
         let mut implementation = rmcp::model::Implementation::default();
         implementation.name = "luna".into();
-        implementation.version = env!("CARGO_PKG_VERSION").into();
+        implementation.version = luna_api::VERSION.into();
         info.server_info = implementation;
         info.capabilities = rmcp::model::ServerCapabilities::builder()
             .enable_tools()

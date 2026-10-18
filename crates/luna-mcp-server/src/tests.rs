@@ -1113,7 +1113,11 @@ fn get_info_reports_luna_identity_and_instructions() {
     let s = LunaServer::new();
     let info = s.get_info();
     assert_eq!(info.server_info.name, "luna");
-    assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(info.server_info.version, luna_api::VERSION);
+    assert!(
+        luna_api::VERSION.starts_with(env!("CARGO_PKG_VERSION")),
+        "the workspace version first, then the build's commit"
+    );
     let instructions = info.instructions.expect("server instructions present");
     assert!(instructions.contains("load_rom"));
     assert!(instructions.contains("take_wdm_log"));

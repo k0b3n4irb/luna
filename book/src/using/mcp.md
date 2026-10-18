@@ -33,6 +33,39 @@ instructions describing the load → run → observe → trace workflow — an
 MCP client sees how to drive the emulator before listing a single tool.
 
 
+### Which luna a project's MCP runs
+
+An MCP client starts the server itself: the `command` of the project's
+`.mcp.json` (or `claude mcp add`) is the binary that runs, nothing else —
+no luna registers itself anywhere. A bare `luna` is looked up in `PATH`.
+A session keeps the process it started: a newer binary is only picked up
+when the client reconnects the server.
+
+```json
+{
+  "mcpServers": {
+    "luna": {
+      "command": "luna",
+      "args": ["mcp", "--rom", "build/game.sfc"]
+    }
+  }
+}
+```
+
+Name the binary for what the project needs: a release's for a fixed,
+reproducible version (OpenSNES pins one for its CI); a build of `develop`
+to follow luna as it moves. Every build says what it was made from, in
+`luna --version` and in the version the server announces to its client
+(`serverInfo`): the workspace version, the commit, and `-dirty` when its
+code differed from that commit:
+
+```text
+$ luna --version
+luna 1.39.0+4360f7c-dirty
+```
+
+A build without git (from a source archive) reports the plain version.
+
 ## MCP tool catalogue
 
 Each tool is a thin wrapper over the matching `luna_api::Emulator`

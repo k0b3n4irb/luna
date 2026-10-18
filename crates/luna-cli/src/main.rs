@@ -41,7 +41,7 @@ use wram_trace::run_wram_trace;
 #[derive(Parser, Debug)]
 #[command(
     name = "luna",
-    version,
+    version = luna_api::VERSION,
     about = "SNES emulator with introspection API",
     long_about = None,
 )]

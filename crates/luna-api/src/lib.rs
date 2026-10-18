@@ -44,6 +44,11 @@ use serde::Serialize;
 /// Faithful Mesen2 SNES Event Viewer data layer (categories, colors, register
 /// names, config). The GUI Event Viewer panel consumes this via the accessors
 /// on [`Emulator`].
+/// This build's version: the workspace version, the commit it was built
+/// from, `-dirty` when its code differs from that commit
+/// (`1.39.0+4360f7c`); the plain version when built without git.
+pub const VERSION: &str = env!("LUNA_BUILD_VERSION");
+
 pub mod code_log;
 pub mod debugger;
 pub mod dsp1_commands;

@@ -80,6 +80,13 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   `apply_workspace`, `workspace_file`, `rom_file`; MCP: `workspace_save`,
   `workspace_load` (same file as the GUI).
 
+- **A build says what it was made from**: `luna --version` and the
+  version the MCP server announces (`serverInfo`) read
+  `1.39.0+<commit>`, with `-dirty` when the code differed from that
+  commit (`luna_api::VERSION`); the plain version without git. The guide
+  says which binary a project's MCP runs (*Which luna a project's MCP
+  runs*).
+
 ### Changed
 
 - The call stack (`--call-stack`, `call_stack`) records the IRQs taken,
