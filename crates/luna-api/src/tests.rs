@@ -2203,7 +2203,9 @@ fn every_memory_kind_answers_by_name_without_side_effects() {
     );
     assert_eq!(at(&e, 0x00_8123), Some((MemoryKind::SnesPrgRom, 0x123)));
     assert_eq!(at(&e, 0x70_0005), Some((MemoryKind::SnesSaveRam, 5)));
-    assert_eq!(at(&e, 0x00_2100), None);
+    assert_eq!(at(&e, 0x00_2100), Some((MemoryKind::SnesRegister, 0x2100)));
+    assert_eq!(at(&e, 0xBF_4300), Some((MemoryKind::SnesRegister, 0x4300)));
+    assert_eq!(at(&e, 0x40_2100), None, "not a system bank");
 
     // Writes through the bus land in the memory behind it, ROM included.
     assert_eq!(
@@ -3189,4 +3191,79 @@ fn overlap_regions_split_patches_that_do_not_touch() {
             (1, 200, 3, 200, 3, 0, 1)
         ]
     );
+}
+
+#[test]
+fn labels_name_memories_and_show_on_every_bus_address_behind_them() {
+    let dir = std::env::temp_dir().join(format!("luna_labels_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let rom = dir.join("game.sfc");
+    std::fs::write(&rom, demo_lorom()).unwrap();
+    std::fs::write(
+        dir.join("game.mlb"),
+        "SnesPrgRom:0000:Start:entry point\nSnesWorkRam:0010-0011:Counter\nnot a line\n",
+    )
+    .unwrap();
+    let mut e = Emulator::new();
+    let info = e.load_rom(&rom).unwrap();
+    let loaded = info.labels_loaded.unwrap();
+    assert_eq!((loaded.imported, loaded.errors), (2, 1));
+
+    // The register defaults, and the file's labels, at every mirror.
+    let name = |e: &Emulator, a: u32| {
+        e.label_at(MemoryKind::SnesMemory, a)
+            .unwrap()
+            .and_then(|h| h.name())
+    };
+    assert_eq!(name(&e, 0x80_2100).as_deref(), Some("INIDISP"));
+    assert_eq!(name(&e, 0x00_8000).as_deref(), Some("Start"));
+    assert_eq!(name(&e, 0x80_8000).as_deref(), Some("Start"));
+    assert_eq!(name(&e, 0x7E_0011).as_deref(), Some("Counter+1"));
+    assert_eq!(name(&e, 0x00_0010).as_deref(), Some("Counter"));
+    assert_eq!(
+        e.label_at(MemoryKind::SpcMemory, 0xF4)
+            .unwrap()
+            .and_then(|h| h.name())
+            .as_deref(),
+        Some("CPUIO0")
+    );
+
+    // A name back to the bus: work RAM at $7E, ROM at its first mirror.
+    assert_eq!(
+        e.label_address("Counter", MemoryKind::SnesMemory).unwrap(),
+        Some(0x7E_0010)
+    );
+    assert_eq!(
+        e.label_address("Start", MemoryKind::SnesMemory).unwrap(),
+        Some(0x00_8000)
+    );
+    assert_eq!(
+        e.label_address("Start", MemoryKind::SpcMemory).unwrap(),
+        None
+    );
+
+    // Expressions see them; the SPC700 does not see the CPU's ROM.
+    let v = e.evaluate("Start + 1", ExprCpu::Snes).unwrap();
+    assert_eq!(v.value, 0x8001);
+    assert_eq!(
+        e.evaluate("Start", ExprCpu::Spc).unwrap().kind,
+        ExprKind::OutOfScope
+    );
+    assert_eq!(e.evaluate("CPUIO0", ExprCpu::Spc).unwrap().value, 0xF4);
+
+    // The disassembly carries the label and its comment.
+    let lines = e.disassemble_cpu(0x00_8000, 1, true, true).unwrap();
+    assert_eq!(lines[0].label.as_deref(), Some("Start"));
+    assert_eq!(lines[0].comment.as_deref(), Some("entry point"));
+
+    // Export writes the defaults too; a reset keeps only them.
+    let mlb = e.export_labels_mlb();
+    assert!(mlb.contains("SnesPrgRom:0000:Start:entry point\n"), "{mlb}");
+    assert!(mlb.contains("SnesRegister:2100:INIDISP:"), "{mlb}");
+    e.reset_labels();
+    assert_eq!(e.labels().len(), 104 + 88 + 16);
+    e.set_default_labels(false);
+    e.reset_labels();
+    assert!(e.labels().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
 }

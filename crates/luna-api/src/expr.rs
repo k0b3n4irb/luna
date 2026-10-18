@@ -20,7 +20,7 @@
 //!   (Mesen2 accepts some mismatched pairs, which only typos produce), and
 //!   a label may contain `.`, as WLA-DX's do.
 
-use crate::memory::View;
+use crate::memory::{MemoryKind, View};
 use crate::{ApiError, Emulator};
 
 /// The CPU an expression is evaluated for: it picks the registers and the
@@ -1078,12 +1078,34 @@ pub(crate) fn evaluate_on(expr: &Expression, access: &ExprAccess, view: View<'_>
 }
 
 impl Emulator {
-    /// Compile `text` for `cpu`, or `None` if it is invalid. Labels are
-    /// resolved now from the loaded `.sym`: in the CPU's own table first;
-    /// a CPU-bus label in an SPC700 expression is out of scope.
+    /// A debugger label (see [`Emulator::labels`]) as `cpu` sees it: its
+    /// address on that CPU's bus, or out of scope. The 65C816 and the
+    /// SPC700 see the memories behind their bus; the SA-1 and the GSU only
+    /// labels given on their own bus (`Sa1Memory`, `GsuMemory`); the
+    /// DSP-1 its program ROM. `None` when there is no such label.
+    fn label_in_expression(&self, name: &str, cpu: ExprCpu) -> Option<LabelAt> {
+        let (memory, offset) = self.labels.find(name)?;
+        let bus = match cpu {
+            ExprCpu::Snes => MemoryKind::SnesMemory,
+            ExprCpu::Spc => MemoryKind::SpcMemory,
+            ExprCpu::Sa1 => MemoryKind::Sa1Memory,
+            ExprCpu::Gsu => MemoryKind::GsuMemory,
+            ExprCpu::Dsp => MemoryKind::DspProgramRom,
+        };
+        let at = match cpu {
+            ExprCpu::Snes | ExprCpu::Spc => self.label_address(name, bus).ok().flatten(),
+            _ => (memory == bus).then_some(offset),
+        };
+        Some(at.map_or(LabelAt::OutOfScope, |a| LabelAt::Address(i64::from(a))))
+    }
+
+    /// Compile `text` for `cpu`, or `None` if it is invalid. Names are
+    /// resolved now: from the loaded `.sym` first, in the CPU's own table
+    /// first (a CPU-bus label in an SPC700 expression is out of scope),
+    /// then from the debugger labels.
     pub fn compile_expression(&self, text: &str, cpu: ExprCpu) -> Option<Expression> {
         let label = |name: &str| -> Option<LabelAt> {
-            let bus = self.lookup_symbol(name).ok();
+            let bus = self.symbols.as_ref().and_then(|t| t.lookup(name).ok());
             let spc = self.resolve_symbol_spc(name);
             match (cpu, bus, spc) {
                 (ExprCpu::Snes | ExprCpu::Sa1 | ExprCpu::Gsu, Some(a), _) => {
@@ -1091,7 +1113,7 @@ impl Emulator {
                 }
                 (_, _, Some(a)) => Some(LabelAt::Address(i64::from(a))),
                 (ExprCpu::Spc, Some(_), None) => Some(LabelAt::OutOfScope),
-                _ => None,
+                _ => self.label_in_expression(name, cpu),
             }
         };
         Expression::compile(text, cpu, &label)

@@ -1612,3 +1612,87 @@ async fn server_bp_add_takes_a_forbid_range() {
     );
     let _ = std::fs::remove_file(&path);
 }
+
+#[tokio::test]
+async fn server_labels_set_list_import_export() {
+    let s = LunaServer::new();
+    let path = PathBuf::from("/tmp/luna_mcp_labels_demo.smc");
+    std::fs::write(&path, demo_lorom()).unwrap();
+    s.load_rom(Parameters(rom_params(&path.to_string_lossy())))
+        .await
+        .unwrap();
+    s.label_set(Parameters(LabelSetParams {
+        memory: "SnesWorkRam".into(),
+        address: 0x10,
+        length: Some(2),
+        name: "counter".into(),
+        comment: "frames since reset".into(),
+    }))
+    .await
+    .unwrap();
+    assert!(
+        s.label_set(Parameters(LabelSetParams {
+            memory: "SnesWorkRam".into(),
+            address: 0x20,
+            length: None,
+            name: "1bad".into(),
+            comment: String::new(),
+        }))
+        .await
+        .is_err()
+    );
+    let user = s
+        .label_list(Parameters(LabelListParams {
+            memory: None,
+            user_only: true,
+        }))
+        .await
+        .unwrap()
+        .0
+        .labels;
+    assert_eq!(user.len(), 1);
+    assert_eq!(user[0].name, "counter");
+
+    // A label is a symbol for the address-taking tools.
+    let r = s
+        .resolve_symbol(Parameters(ResolveSymbolParams {
+            name: "counter".into(),
+            space: None,
+        }))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(r.addr, Some(0x7E_0010));
+
+    let r = s
+        .labels_import(Parameters(LabelsImportParams {
+            path: None,
+            text: Some("SnesPrgRom:0000:start\nbroken\n".into()),
+            merge: true,
+        }))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!((r.imported, r.errors), (1, 1));
+    let out = s
+        .labels_export(Parameters(LabelsExportParams { path: None }))
+        .await
+        .unwrap()
+        .0;
+    assert!(out.text.contains("SnesPrgRom:0000:start\n"));
+    assert!(
+        out.text
+            .contains("SnesWorkRam:0010-0011:counter:frames since reset\n")
+    );
+    let removed = s
+        .label_remove(Parameters(LabelRemoveParams {
+            memory: "SnesWorkRam".into(),
+            address: 0x11,
+        }))
+        .await
+        .unwrap()
+        .0
+        .removed;
+    assert_eq!(removed.map(|l| l.name).as_deref(), Some("counter"));
+    let _ = std::fs::remove_file(&path);
+}

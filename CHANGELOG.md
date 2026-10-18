@@ -20,6 +20,25 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   JSON carries them as `layers.overlaps`. `--layers bg2,bg3,obj` restricts it. API:
   `set_layer_capture`, `render_layer_png`, `layer_overlaps`. Asked for by
   the game, to find two elements biting into each other without looking.
+- **Debugger labels and comments, Mesen2's way.** A label names bytes of
+  a memory (a ROM offset, work RAM, an I/O register), not a bus address,
+  so it shows at every mirror; it may carry a comment, and a comment may
+  stand alone. The SNES and SPC700 register names are there by default
+  (`INIDISP`, `DMAP0` … `NTLR7`, `CPUIO0`…). A Mesen2 `.mlb` next to the
+  ROM (`<rom>.mlb`, else `<rom>.sfc.mlb`) loads with it (`rom.labels_loaded`).
+  Disassembly lines carry `label` and `comment`; expressions, breakpoint
+  conditions and every tool taking a `symbol` read labels after the
+  `.sym`'s own names. MCP: `label_set`, `label_remove`, `label_list`,
+  `labels_import`, `labels_export` (the `.mlb` Mesen2 reads back).
+- **`SnesRegister`**, the memory of the I/O registers (`$2000-$2FFF`,
+  `$4000-$4FFF` of the system banks), as in Mesen2: `memory_kinds` lists
+  it and `read_memory` reads it without side effects.
+
+### Changed
+
+- `absolute_address` of a register address (`$00:2100`, `$80:4300`…) is
+  now `{kind: "SnesRegister", offset}` instead of `null`, so an
+  expression's `:` and a watch's `memaddress` give the register.
 
 ## [1.39.0] — 2026-10-18
 

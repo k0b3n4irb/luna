@@ -48,6 +48,7 @@ pub mod dsp1_commands;
 pub mod event_viewer;
 pub mod expr;
 pub mod input;
+pub mod labels;
 pub mod memory;
 pub mod paths;
 mod power_on;
@@ -61,6 +62,7 @@ pub use event_viewer::{
 };
 pub use expr::{ExprAccess, ExprCpu, ExprKind, ExprResult, Expression};
 pub use input::{FRAME_STEP_BUDGET, InputEvent, InputScript, ScriptBound, WatchEvent};
+pub use labels::{Label, LabelError, LabelHit, LabelStore, MlbImport};
 pub use memory::{MemoryKind, MemoryLocation};
 pub use power_on::parse_power_on;
 pub use vocab::{
@@ -252,6 +254,13 @@ pub struct RomInfo {
     /// itself loaded fine).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub symbols_error: Option<String>,
+    /// What the Mesen2 label file next to the ROM (`<rom>.mlb`, else
+    /// `<rom>.sfc.mlb`) brought in, if there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels_loaded: Option<MlbImport>,
+    /// Why a `<rom>.mlb` next to the ROM could not be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels_error: Option<String>,
 }
 
 /// Snapshot of the emulator's observable state. Every field maps to
@@ -548,6 +557,13 @@ pub struct DisasmLine {
     /// Nearest symbol at or below `addr` (`name` or `name+0xNN`) when a
     /// WLA-DX `.sym` table is loaded; `None` otherwise.
     pub symbol: Option<String>,
+    /// The debugger label on this address (`name`, or `name+N` inside a
+    /// multi-byte label), from [`Emulator::labels`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// The comment of a label that starts on this address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
 }
 
 /// PPU register snapshot + memory occupancy stats.
@@ -1320,6 +1336,11 @@ pub struct Emulator {
     /// Loaded WLA-DX symbol table (issue #67); `None` until
     /// [`Emulator::load_symbols`] runs.
     symbols: Option<SymbolTable>,
+    /// Debugger labels and comments, by memory and offset: the defaults
+    /// at each ROM load, then the `<rom>.mlb` next to it.
+    labels: labels::LabelStore,
+    /// Whether [`Self::reset_labels`] puts the register names back.
+    default_labels: bool,
     /// Live narrowing memory-search session (issue #177); `None` until
     /// [`Emulator::search_begin`] runs.
     search_session: Option<SearchSession>,
@@ -1681,6 +1702,8 @@ impl Emulator {
             stack_low: None,
             rom_hash: 0,
             symbols: None,
+            labels: labels::LabelStore::new(),
+            default_labels: true,
             search_session: None,
             profile_frames: std::collections::BTreeMap::new(),
             profile_frames_done: 0,
@@ -1751,6 +1774,19 @@ impl Emulator {
     /// recording the outcome in `info` (and in the stored [`RomInfo`]). An
     /// explicit [`Self::load_symbols`] afterwards replaces it.
     fn load_sidecar_symbols(&mut self, rom: &Path, mut info: RomInfo) -> RomInfo {
+        let mlb = [
+            rom.with_extension("mlb"),
+            std::path::PathBuf::from(format!("{}.mlb", rom.display())),
+        ]
+        .into_iter()
+        .find(|p| p.is_file());
+        if let Some(mlb) = mlb {
+            match self.load_labels(&mlb, true) {
+                Ok(n) => info.labels_loaded = Some(n),
+                Err(e) => info.labels_error = Some(format!("{}: {e}", mlb.display())),
+            }
+            self.rom_info = Some(info.clone());
+        }
         let sym = rom.with_extension("sym");
         if sym.is_file() {
             match self.load_symbols(&sym) {
@@ -1942,6 +1978,8 @@ impl Emulator {
             },
             symbols_loaded: None,
             symbols_error: None,
+            labels_loaded: None,
+            labels_error: None,
         };
         // Unsupported coprocessor carts surface as a typed
         // `UnsupportedMapper` error (no longer a panic). The
@@ -1961,6 +1999,7 @@ impl Emulator {
                 self.rom_info = Some(info.clone());
                 self.instructions_executed = 0;
                 self.rom_hash = rom_hash;
+                self.reset_labels();
                 Ok(info)
             }
             Ok(Err(unsupported)) => Err(ApiError::UnsupportedMapper(unsupported)),
@@ -2847,6 +2886,7 @@ impl Emulator {
             let bytes = (0..u16::from(insn.length))
                 .map(|i| read(addr.wrapping_add(i)))
                 .collect();
+            let (label, comment) = self.line_label(MemoryKind::SpcMemory, u32::from(addr));
             out.push(DisasmLine {
                 addr: u32::from(addr),
                 bytes,
@@ -2855,6 +2895,8 @@ impl Emulator {
                 // Annotated from the ARAM symbol space (issue #179) — CPU
                 // .sym labels never claim ARAM addresses.
                 symbol: self.symbols.as_ref().and_then(|t| t.nearest_spc(addr)),
+                label,
+                comment,
             });
             addr = addr.wrapping_add(u16::from(insn.length));
         }
@@ -2899,12 +2941,15 @@ impl Emulator {
                 .map(|i| read(off.wrapping_add(i)))
                 .collect();
             let addr_full = (u32::from(bank) << 16) | u32::from(off);
+            let (label, comment) = self.line_label(MemoryKind::SnesMemory, addr_full);
             out.push(DisasmLine {
                 addr: addr_full,
                 bytes,
                 text: insn.text,
                 is_pc: addr_full == pc_full,
                 symbol: self.symbols.as_ref().and_then(|t| t.nearest(addr_full)),
+                label,
+                comment,
             });
             // Track REP/SEP so later lines use the right immediate widths.
             match read(off) {
@@ -3876,12 +3921,22 @@ impl Emulator {
 
     /// [`Self::resolve_symbol`] with the reason for a miss: the name is
     /// unknown, or it stands for several `name.<suffix>` labels (see
-    /// [`SymbolTable::lookup`]).
+    /// [`SymbolTable::lookup`]). A name the `.sym` does not know is then
+    /// looked for among the debugger labels, at the bus address
+    /// [`Self::label_address`] gives.
     pub fn lookup_symbol(&self, name: &str) -> Result<u32, SymbolError> {
-        self.symbols.as_ref().map_or_else(
+        let found = self.symbols.as_ref().map_or_else(
             || Err(SymbolError::Unknown(name.to_string())),
             |t| t.lookup(name),
-        )
+        );
+        match found {
+            Err(SymbolError::Unknown(_)) => self
+                .label_address(name, MemoryKind::SnesMemory)
+                .ok()
+                .flatten()
+                .ok_or_else(|| SymbolError::Unknown(name.to_string())),
+            other => other,
+        }
     }
 
     /// The size in bytes the loaded `.sym` records for a label (see

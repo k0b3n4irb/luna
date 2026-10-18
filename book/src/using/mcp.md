@@ -66,10 +66,10 @@ method, so the MCP transport adds reach, not capability.
 | `peek_vram` | `peek_vram` | Read `count` bytes from the 64 KB VRAM (same one-call full-dump range). |
 | `peek_cgram` | `peek_cgram` | All 256 CGRAM palette entries as BGR555 words. |
 | `poke_memory` | `poke_memory` | Write bytes into WRAM (state injection). |
-| `memory_kinds` | `memory_kinds` | The memories this cartridge has, by Mesen2's name, with their size: `SnesMemory` (the CPU bus), `SpcMemory`, `SnesPrgRom`, `SnesWorkRam`, `SnesSaveRam`, `SnesVideoRam`, `SnesSpriteRam`, `SnesCgRam`, `SpcRam`, `SpcRom`, `SpcDspRegisters`, `DspProgramRom` / `DspDataRom` / `DspDataRam`, `Sa1InternalRam`, `GsuWorkRam`, `Sa1Memory` / `GsuMemory` (the SA-1's, the Super FX GSU's bus, read only). |
+| `memory_kinds` | `memory_kinds` | The memories this cartridge has, by Mesen2's name, with their size: `SnesMemory` (the CPU bus), `SpcMemory`, `SnesPrgRom`, `SnesWorkRam`, `SnesSaveRam`, `SnesVideoRam`, `SnesSpriteRam`, `SnesCgRam`, `SnesRegister` (the I/O registers by their 16-bit address, read without side effects), `SpcRam`, `SpcRom`, `SpcDspRegisters`, `DspProgramRom` / `DspDataRom` / `DspDataRam`, `Sa1InternalRam`, `GsuWorkRam`, `Sa1Memory` / `GsuMemory` (the SA-1's, the Super FX GSU's bus, read only). |
 | `read_memory` / `write_memory` | `read_memory` / `write_memory` | `count` bytes of any of them from `offset` (or `symbol`), and back, without side effects: a `SnesMemory` address goes to the memory behind it, never through the bus, so a read starts no S-DD1 decompression and drains no DSP-1 port (a register reads 0, open bus `$FF`). Writes reach ROM too. See the example below. |
 | `eval` | `evaluate` | A debugger expression in Mesen2's language, evaluated as a watch: `{"value": 1, "kind": "boolean"}`. See [Expressions](#expressions) below. |
-| `absolute_address` | `absolute_address` | The memory and offset behind a CPU-bus address or label — `{"kind": "SnesPrgRom", "offset": 16}` for `$80:8010` on a 32 KB `LoROM` — as the mapper's banking selects it now; `null` for a register. |
+| `absolute_address` | `absolute_address` | The memory and offset behind a CPU-bus address or label — `{"kind": "SnesPrgRom", "offset": 16}` for `$80:8010` on a 32 KB `LoROM` — as the mapper's banking selects it now; `{"kind": "SnesRegister", "offset": 8448}` for `$00:2100` and its mirrors; `null` for open bus or a coprocessor's register window. |
 | `poke_vram` / `poke_cgram` / `poke_oam` / `poke_aram` | same names | Direct writes into the other memory spaces (bus-bypassing state injection; each wraps at its size). |
 | `freeze_add` / `freeze_remove` / `freeze_list` | same names | Cheat-style per-frame pinning: the byte is re-applied at every frame boundary in **every** run path (CLI, MCP and GUI behave identically), and once immediately on add. WRAM only. |
 | `enable_call_stack` / `call_stack` | `enable_call_stack` / `call_stack` | Opt-in JSR/JSL/RTS/RTL + interrupt tracking → `[{pc, from, kind, symbol}]`, oldest first. The CLI form is `luna state --call-stack` (the `--out` JSON gains a `call_stack` array). |
@@ -100,6 +100,9 @@ method, so the MCP transport adds reach, not capability.
 | `load_symbols` | `load_symbols` | Load a WLA-DX `.sym`; disasm + traces become annotated. |
 | `load_symbols_str` | `load_symbols_str` | Load `.sym` text directly (no host file — e.g. an in-memory build's output). Replaces the table. |
 | `clear_symbols` | `clear_symbols` | Drop the loaded table. |
+| `label_set` / `label_remove` | `set_label` / `remove_label` | Add, replace or remove a debugger label: a name and/or comment on bytes of a memory. See [Labels and comments](#labels-and-comments). |
+| `label_list` | `labels` | The labels, by memory then address; `user_only` leaves out the register defaults. |
+| `labels_import` / `labels_export` | `import_labels_mlb` / `export_labels_mlb` | Read or write a Mesen2 `.mlb` label file. |
 | `resolve_symbol` | `resolve_symbol` | Label name → 24-bit address (null if unknown). A bare name stands for the only label spelled `name.<suffix>` (a C `static`: `player_x` for `player_x.main`); several candidates are an error that names them. The same rule applies to every tool's `symbol` argument. |
 | `symbol_for_addr` | `symbol_for_addr` | 24-bit address → nearest preceding label in its bank (the inverse). |
 | `enable_dma_trace` / `take_dma_trace` | `enable_dma_trace` / `take_dma_trace` | DMA→VRAM transfer bytes with scanline/H-clock + blank flags (the CLI `--dma-trace`). |
@@ -200,6 +203,54 @@ read_memory {kind: "Sa1InternalRam", offset: 0, count: 64}              # an SA-
 A memory the cartridge lacks is an error (`GsuWorkRam: this cartridge has
 none`), and so is a range past its end; the two buses (`SnesMemory`,
 `SpcMemory`) wrap around instead.
+
+### Labels and comments
+
+A debugger label names bytes of a **memory**, not a bus address, as in
+Mesen2: a label on ROM offset `$0000` shows at `$00:8000`, `$80:8000` and
+every other mirror, and a work-RAM label at `$00:0010` as at `$7E:0010`.
+Labels come from three places:
+
+- **The defaults.** The SNES I/O registers (`INIDISP` at `$2100`,
+  `NMITIMEN`, the DMA registers `DMAP0` … `NTLR7`) and the SPC700's
+  (`CPUIO0` at `$F4`, `T2OUT`…), each with a one-line comment. They are
+  ordinary labels: a label of yours on the same byte or with the same name
+  replaces one.
+- **The `.mlb` next to the ROM.** At each ROM load the labels go back to
+  the defaults, then `<rom>.mlb` (else `<rom>.sfc.mlb`) is imported;
+  `rom.labels_loaded` in the `load_rom` result counts what it brought.
+- **What you set or import** with the tools below.
+
+```text
+label_set {memory: "SnesWorkRam", address: 0x10, length: 2, name: "counter", comment: "frames since reset"}
+resolve_symbol {name: "counter"}                       # → {addr: 8257552}   $7E:0010
+labels_import {text: "SnesPrgRom:0000:start\nbroken\n", merge: true}
+                                                       # → {imported: 1, errors: 1, skipped: 0}
+labels_export {}                                       # → {text: "…SnesWorkRam:0010-0011:counter:frames since reset\n…", count: …}
+label_list {user_only: true}
+```
+
+- **Names** are letters, digits, `_` and `@`, not starting with a digit,
+  and keep their case. One name, one place; one byte, one label: a new
+  label replaces the one with its name and the ones on its bytes, whole.
+  Byte N of a multi-byte label reads `name+N`.
+- **Where they show.** Every tool that takes a `symbol` accepts a label
+  (after the `.sym`'s own names); `eval` and breakpoint conditions read it
+  as its address on the CPU's bus; `disasm_cpu` / `disasm_spc` lines carry
+  `label` and the `comment` of a label starting there.
+- **Which CPU sees which.** The 65C816 and the SPC700 see every label of
+  a memory behind their bus. The SA-1 and the Super FX see the labels
+  given on their own bus (`Sa1Memory`, `GsuMemory`), the DSP-1 those on
+  its program ROM; a label they cannot place is out of scope.
+- **`.mlb` lines** read `Memory:ADDR[-END]:Name[:Comment]`, as Mesen2
+  writes them: the memory by its name, the offset in hex with no prefix,
+  both ends of a range included, `\n` for a line break in the comment.
+  Mesen-S prefixes (`PRG`, `WORK`, `SAVE`, `REG`, `SPCRAM`…) are read too.
+  A line that does not parse counts as an error and the rest goes on; a
+  line for a memory the cartridge lacks is skipped. An export writes every
+  label, the defaults included, sorted by memory then address, so Mesen2
+  reads it back.
+- `import` without `merge` puts the defaults back first, as Mesen2 does.
 
 ### Expressions
 

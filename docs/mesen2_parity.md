@@ -46,6 +46,8 @@ lands it.
 | D1c | *Forbid* ranges on every CPU, by its address or (65C816) the memory behind it, with a condition; marks and steps unaffected; MCP `bp_add {kind: "forbid"}` | ✅ |
 | D1d | Step types: into, over, out, scanline, frame, *break in N* instructions / scanlines / frames (to NMI / IRQ are break sources; run to here is `run_until_pc`; move PC is `set_cpu_register`); MCP `step_kind` | ✅ |
 | D1d | CPU-cycle and PPU-cycle steps — not possible while luna runs instructions whole | ⬜ |
+| D2a | Labels and comments by memory and offset, Mesen2's model: default register labels, `.mlb` import / export (Mesen2's grammar, measured on Mesen2), `<rom>.mlb` loaded with the ROM; seen by disassembly, expressions and every `symbol` argument; `SnesRegister` memory; MCP `label_set`, `label_remove`, `label_list`, `labels_import`, `labels_export` | ✅ |
+| D2a | `ui.rs` split into one module per panel (no behaviour change) | ✅ |
 | D2 | Debugger window per CPU (disassembly with labels, comments, effective addresses; editable status; breakpoint, watch, label, function, call-stack lists; go to / find all); labels and comments in `.mlb`, ca65 `.dbg`, bass, SDCC `.cdb`, ELF; default register labels; workspace per ROM | ⬜ |
 | D3 | Per-byte access counters; Memory Tools (every memory, edit, highlight by access / code / data, freeze, find, `.tbl`); Memory Search on every memory | ⬜ |
 | D4 | Trace logger (per CPU, Mesen2's format tags, condition, to file); profiler with calls and inclusive / exclusive time; Event Viewer completed and exposed to MCP and CLI | ⬜ |

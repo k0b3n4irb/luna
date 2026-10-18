@@ -77,6 +77,7 @@ means that transport has no form of it.
 | I want to… | CLI | MCP | Shown in |
 |---|---|---|---|
 | read memory by address or by label | `--peek`, `--sym` | `peek_memory`, `load_symbols` | [`luna state`](using/cli-run-state.md#luna-state--json-snapshot--diagnostics-the-workhorse) |
+| name memory and comment code, in Mesen2's `.mlb` | a `<rom>.mlb` next to the ROM | `label_set`, `labels_import`, `labels_export` | [Labels and comments](using/mcp.md#labels-and-comments) |
 | know who wrote this register | `--mem-trace` with `--trace-writes` | `enable_mem_trace`, `run_until_mem_write` | [Who wrote this register?](using/cli-run-state.md#who-wrote-this-register---trace-writes) |
 | stop when an address is reached, read or written | — | `bp_add`, `run_until_break`, `run_until_pc`, `run_until_mem_read` | [Breakpoints & stepping](using/debugging.md#breakpoints--stepping) |
 | see where the CPU is and how it got there | `--call-stack` | `enable_call_stack`, `call_stack` | [`--call-stack`](using/cli-run-state.md#where-is-the-cpu-and-how-did-it-get-there---call-stack) |

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::{ApiError, Emulator};
 
 /// One addressable memory, named as Mesen2 names it.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum MemoryKind {
     /// The 65C816's 24-bit bus.
     SnesMemory,
@@ -34,6 +34,11 @@ pub enum MemoryKind {
     SnesSpriteRam,
     /// CGRAM: 256 little-endian BGR555 words.
     SnesCgRam,
+    /// The main CPU's I/O registers, `$2000-$2FFF` and `$4000-$4FFF` of
+    /// the system banks, by their 16-bit address. Read without side
+    /// effects: the DMA registers read back, any other register reads 0.
+    /// Never written.
+    SnesRegister,
     /// The SPC700's 64 KB of audio RAM, without the IPL ROM.
     SpcRam,
     /// The 64-byte IPL ROM.
@@ -61,7 +66,7 @@ pub enum MemoryKind {
 
 impl MemoryKind {
     /// Every kind, in Mesen2's order.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::SnesMemory,
         Self::SpcMemory,
         Self::SnesPrgRom,
@@ -70,6 +75,7 @@ impl MemoryKind {
         Self::SnesVideoRam,
         Self::SnesSpriteRam,
         Self::SnesCgRam,
+        Self::SnesRegister,
         Self::SpcRam,
         Self::SpcRom,
         Self::SpcDspRegisters,
@@ -93,6 +99,7 @@ impl MemoryKind {
             Self::SnesVideoRam => "SnesVideoRam",
             Self::SnesSpriteRam => "SnesSpriteRam",
             Self::SnesCgRam => "SnesCgRam",
+            Self::SnesRegister => "SnesRegister",
             Self::SpcRam => "SpcRam",
             Self::SpcRom => "SpcRom",
             Self::SpcDspRegisters => "SpcDspRegisters",
@@ -166,7 +173,10 @@ impl View<'_> {
     pub(crate) fn size(self, kind: MemoryKind) -> usize {
         match kind {
             MemoryKind::SnesMemory => 0x100_0000,
-            MemoryKind::SpcMemory | MemoryKind::SpcRam | MemoryKind::SnesVideoRam => 0x1_0000,
+            MemoryKind::SpcMemory
+            | MemoryKind::SpcRam
+            | MemoryKind::SnesVideoRam
+            | MemoryKind::SnesRegister => 0x1_0000,
             MemoryKind::SnesWorkRam => 0x2_0000,
             MemoryKind::SnesSpriteRam => 0x220,
             MemoryKind::SnesCgRam => 0x200,
@@ -203,6 +213,12 @@ impl View<'_> {
         if system_bank(bank) && off < 0x2000 {
             return wram(off);
         }
+        if system_bank(bank) && matches!(off, 0x2000..=0x2FFF | 0x4000..=0x4FFF) {
+            return Some(MemoryLocation {
+                kind: MemoryKind::SnesRegister,
+                offset: off,
+            });
+        }
         self.0
             .mapper
             .debug_resolve(addr)
@@ -226,6 +242,11 @@ impl View<'_> {
             MemoryKind::SpcRam => snes.apu_real.aram[a],
             MemoryKind::SpcRom => IPL_ROM[a],
             MemoryKind::SpcDspRegisters => snes.apu_real.dsp.registers[a],
+            MemoryKind::SnesRegister if (0x4300..=0x437F).contains(&a) => {
+                // The DMA registers read back without a side effect.
+                snes.dma.channels[(a >> 4) & 7].read((a & 0xF) as u8)
+            }
+            MemoryKind::SnesRegister => 0,
             MemoryKind::Sa1Memory | MemoryKind::GsuMemory => {
                 let mut byte = unmapped;
                 snes.mapper
@@ -246,10 +267,6 @@ impl View<'_> {
             return self.byte(kind, offset as usize, unmapped);
         }
         let (bank, off) = (addr >> 16, addr & 0xFFFF);
-        if system_bank(bank) && (0x4300..=0x437F).contains(&off) {
-            // The DMA registers read back without a side effect.
-            return self.0.dma.channels[((off >> 4) & 7) as usize].read((off & 0xF) as u8);
-        }
         if system_bank(bank) && (0x2000..=0x5FFF).contains(&off) {
             return 0;
         }
@@ -279,8 +296,9 @@ impl Emulator {
     }
 
     /// The memory and offset behind CPU-bus address `addr` (24-bit): work
-    /// RAM, or the cartridge memory the mapper's banking selects now.
-    /// `None` for a register or an address nothing answers.
+    /// RAM, an I/O register (`SnesRegister`), or the cartridge memory the
+    /// mapper's banking selects now. `None` for an address nothing answers
+    /// (a coprocessor's register window included).
     pub fn absolute_address(&self, addr: u32) -> Result<Option<MemoryLocation>, ApiError> {
         Ok(self.view()?.absolute(addr))
     }
@@ -359,6 +377,7 @@ impl Emulator {
                 }
                 MemoryKind::SnesMemory
                 | MemoryKind::SpcMemory
+                | MemoryKind::SnesRegister
                 | MemoryKind::SpcRom
                 | MemoryKind::Sa1Memory
                 | MemoryKind::GsuMemory => false,

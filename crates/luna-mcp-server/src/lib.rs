@@ -1585,6 +1585,106 @@ pub struct LoadSymbolsStrParams {
     pub space: Option<String>,
 }
 
+/// `label_set` parameters: one debugger label.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct LabelSetParams {
+    /// The memory, by its Mesen2 name: `SnesPrgRom`, `SnesWorkRam`,
+    /// `SnesSaveRam`, `SnesRegister`, `SpcRam`, `Sa1InternalRam`,
+    /// `GsuWorkRam`, … or a bus (`SnesMemory`, `SpcMemory`, `Sa1Memory`,
+    /// `GsuMemory`) for an address with no memory behind it.
+    pub memory: String,
+    /// Offset of the first byte in that memory.
+    pub address: u32,
+    /// Bytes covered (default 1).
+    #[serde(default)]
+    pub length: Option<u32>,
+    /// The name: letters, digits, `_`, `@`, not starting with a digit.
+    /// Empty for a comment alone.
+    #[serde(default)]
+    pub name: String,
+    /// A comment, lines separated by `\n`.
+    #[serde(default)]
+    pub comment: String,
+}
+
+/// `label_remove` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct LabelRemoveParams {
+    /// The memory, by its Mesen2 name (see `label_set`).
+    pub memory: String,
+    /// Any byte of the label.
+    pub address: u32,
+}
+
+/// `label_list` parameters.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct LabelListParams {
+    /// Only the labels of this memory (Mesen2 name).
+    #[serde(default)]
+    pub memory: Option<String>,
+    /// Leave out the default register labels.
+    #[serde(default)]
+    pub user_only: bool,
+}
+
+/// `label_list` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct LabelListResult {
+    /// The labels, by memory then address.
+    pub labels: Vec<luna_api::Label>,
+}
+
+/// `label_remove` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct LabelRemoveResult {
+    /// The label removed, `null` if there was none at that byte.
+    pub removed: Option<luna_api::Label>,
+}
+
+/// `labels_import` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct LabelsImportParams {
+    /// A Mesen2 `.mlb` file on the host.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// `.mlb` text in place of `path`.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Keep the labels already there and merge the file's in (the file
+    /// wins where they meet). Default: back to the default labels first,
+    /// as Mesen2 does.
+    #[serde(default)]
+    pub merge: bool,
+}
+
+/// `labels_export` parameters.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct LabelsExportParams {
+    /// Write the `.mlb` to this host path as well.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// `labels_export` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct LabelsExportResult {
+    /// The `.mlb` text.
+    pub text: String,
+    /// Labels written.
+    pub count: usize,
+}
+
+/// A memory named in a label tool.
+fn label_memory(name: &str) -> Result<luna_api::MemoryKind, ErrorData> {
+    luna_api::MemoryKind::from_name(name).ok_or_else(|| {
+        let names: Vec<&str> = luna_api::MemoryKind::ALL.iter().map(|k| k.name()).collect();
+        ErrorData::invalid_params(
+            format!("unknown memory `{name}` (one of {})", names.join(", ")),
+            None,
+        )
+    })
+}
+
 /// `symbol_for_addr` parameters.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct SymbolForAddrParams {
@@ -2614,6 +2714,126 @@ impl LunaServer {
     }
 
     #[rmcp::tool(
+        description = "Add or replace a debugger label: a name and/or a comment on bytes \
+                                of a memory (Mesen2's model — a ROM label shows at every \
+                                mirror). A label with the same name, or on one of the same \
+                                bytes, is replaced. Disassembly, expressions and every tool that \
+                                takes a `symbol` see it."
+    )]
+    async fn label_set(
+        &self,
+        Parameters(params): Parameters<LabelSetParams>,
+    ) -> Result<rmcp::Json<EmptyOk>, ErrorData> {
+        let memory = label_memory(&params.memory)?;
+        self.emulator
+            .lock()
+            .await
+            .set_label(luna_api::Label {
+                memory,
+                address: params.address,
+                length: params.length.unwrap_or(1),
+                name: params.name,
+                comment: params.comment,
+            })
+            .map_err(|e| api_err_to_mcp(&e))?;
+        Ok(rmcp::Json(EmptyOk { ok: true }))
+    }
+
+    #[rmcp::tool(description = "Remove the debugger label on a byte of a memory.")]
+    async fn label_remove(
+        &self,
+        Parameters(params): Parameters<LabelRemoveParams>,
+    ) -> Result<rmcp::Json<LabelRemoveResult>, ErrorData> {
+        let memory = label_memory(&params.memory)?;
+        let removed = self
+            .emulator
+            .lock()
+            .await
+            .remove_label(memory, params.address);
+        Ok(rmcp::Json(LabelRemoveResult { removed }))
+    }
+
+    #[rmcp::tool(
+        description = "List the debugger labels, by memory then address: the register \
+                                defaults, the `<rom>.mlb` loaded next to the ROM, and what was \
+                                set or imported since."
+    )]
+    async fn label_list(
+        &self,
+        Parameters(params): Parameters<LabelListParams>,
+    ) -> Result<rmcp::Json<LabelListResult>, ErrorData> {
+        let memory = params.memory.as_deref().map(label_memory).transpose()?;
+        let defaults: Vec<luna_api::Label> = if params.user_only {
+            luna_api::LabelStore::with_defaults()
+                .iter()
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let labels = self
+            .emulator
+            .lock()
+            .await
+            .labels()
+            .into_iter()
+            .filter(|l| memory.is_none_or(|m| l.memory == m))
+            .filter(|l| !defaults.contains(l))
+            .collect();
+        Ok(rmcp::Json(LabelListResult { labels }))
+    }
+
+    #[rmcp::tool(
+        description = "Import a Mesen2 `.mlb` label file (`Memory:ADDR[-END]:Name[:Comment]` \
+                                lines), from a host `path` or as `text`. Returns the lines \
+                                imported, the lines that did not parse, and the lines skipped \
+                                for a memory this cartridge lacks."
+    )]
+    async fn labels_import(
+        &self,
+        Parameters(params): Parameters<LabelsImportParams>,
+    ) -> Result<rmcp::Json<luna_api::MlbImport>, ErrorData> {
+        let text = match (params.path, params.text) {
+            (Some(p), None) => std::fs::read_to_string(&p)
+                .map_err(|e| ErrorData::invalid_params(format!("{p}: {e}"), None))?,
+            (None, Some(t)) => t,
+            _ => {
+                return Err(ErrorData::invalid_params(
+                    "give `path` or `text`, not both",
+                    None,
+                ));
+            }
+        };
+        let r = self
+            .emulator
+            .lock()
+            .await
+            .import_labels_mlb(&text, !params.merge)
+            .map_err(|e| api_err_to_mcp(&e))?;
+        Ok(rmcp::Json(r))
+    }
+
+    #[rmcp::tool(
+        description = "Every debugger label as a Mesen2 `.mlb` file (the defaults \
+                                included, as Mesen2 writes them), returned as text and written \
+                                to `path` if given."
+    )]
+    async fn labels_export(
+        &self,
+        Parameters(params): Parameters<LabelsExportParams>,
+    ) -> Result<rmcp::Json<LabelsExportResult>, ErrorData> {
+        let (text, count) = {
+            let em = self.emulator.lock().await;
+            (em.export_labels_mlb(), em.labels().len())
+        };
+        if let Some(p) = &params.path {
+            std::fs::write(p, &text)
+                .map_err(|e| ErrorData::invalid_params(format!("{p}: {e}"), None))?;
+        }
+        Ok(rmcp::Json(LabelsExportResult { text, count }))
+    }
+
+    #[rmcp::tool(
         description = "Reverse symbol lookup: 24-bit address → nearest preceding label \
                                 in the same bank (`name` or `name+0xOFF`), null if none. The \
                                 inverse of `resolve_symbol`."
@@ -2923,8 +3143,9 @@ impl LunaServer {
 
     #[rmcp::tool(
         description = "The memory and offset behind a CPU-bus address (or label): work \
-                                RAM, or the ROM / save RAM / coprocessor RAM the mapper's \
-                                banking selects now. `null` for a register or open bus."
+                                RAM, an I/O register (`SnesRegister`), or the ROM / save RAM / \
+                                coprocessor RAM the mapper's banking selects now. `null` for \
+                                open bus or a coprocessor's register window."
     )]
     async fn absolute_address(
         &self,
