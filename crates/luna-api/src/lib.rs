@@ -60,7 +60,9 @@ pub mod video;
 mod vocab;
 mod vram_writers;
 
-pub use debugger::{CallStackRow, FindResult, FunctionRow, GotoResult, LabelRow, WatchStyle};
+pub use debugger::{
+    CallStackRow, DebuggerStatus, FindResult, FunctionRow, GotoResult, LabelRow, WatchStyle,
+};
 pub use event_viewer::{
     CATEGORY_COUNT, EventCategory, EventViewerConfig, EventViewerEvent, register_name,
 };
@@ -4848,6 +4850,7 @@ impl Emulator {
             "pb" | "k" => c.pb = val as u8,
             "db" | "dbr" => c.db = val as u8,
             "p" => c.p.0 = val as u8,
+            "e" => c.e = val != 0,
             other => return Err(ApiError::BadArg(format!("unknown register `{other}`"))),
         }
         Ok(())

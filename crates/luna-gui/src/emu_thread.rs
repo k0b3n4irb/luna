@@ -40,6 +40,10 @@ use ringbuf::traits::{Observer, Producer};
 pub(crate) type AudioReclaim = (HeapProd<(i16, i16)>, Arc<AtomicBool>);
 
 /// State shared between the UI thread, the emu thread, and the cpal
+/// The most instructions one debugger step may run (a step out of a
+/// routine that never returns ends there).
+const STEP_KIND_LIMIT: u64 = 200_000_000;
+
 /// callback. Cheaply clonable via `Arc<Self>`.
 pub(crate) struct EmuShared {
     /// Set by the UI thread on ROM unload / app exit. The emu thread
@@ -69,6 +73,18 @@ pub(crate) struct EmuShared {
     /// The breakpoint hit that auto-paused the emu thread, for the UI
     /// to display (halt banner + disasm jump). Taken by the UI.
     pub last_break: Mutex<Option<BreakHit>>,
+    /// A debugger step (Mesen2's step commands) to run while paused, queued
+    /// by the Debugger window and served in the paused branch.
+    pub step_kind_request: Mutex<Option<luna_api::StepKind>>,
+    /// Raised by the Debugger window's Break to end a long step (a step
+    /// out, a frame); cleared when the next step starts.
+    pub step_interrupt: AtomicBool,
+    /// Steps served so far: the Debugger window re-centres on the PC when
+    /// it moves.
+    pub steps_served: AtomicU64,
+    /// A debugger step is running (the window shows the CPU as running
+    /// and offers Break).
+    pub stepping: AtomicBool,
     /// Hot audio hand-off: when the UI rebuilds the cpal stream (device
     /// reconnected, or one appearing after a silent start), it parks the
     /// fresh producer + primed gate here and raises
@@ -97,6 +113,10 @@ impl EmuShared {
             step_request: AtomicU32::new(0),
             step_frame_request: AtomicBool::new(false),
             last_break: Mutex::new(None),
+            step_kind_request: Mutex::new(None),
+            step_interrupt: AtomicBool::new(false),
+            steps_served: AtomicU64::new(0),
+            stepping: AtomicBool::new(false),
             audio_swap: Mutex::new(None),
             audio_swap_pending: AtomicBool::new(false),
             fps_tenths: AtomicU32::new(0),
@@ -235,6 +255,46 @@ fn run(
             // republishing stay on the same path as normal running.
             let step_n = shared.step_request.swap(0, Ordering::AcqRel);
             let step_frame = shared.step_frame_request.swap(false, Ordering::AcqRel);
+            let step_kind = shared
+                .step_kind_request
+                .lock()
+                .ok()
+                .and_then(|mut g| g.take());
+            if let Some(kind) = step_kind.filter(|_| !emu_dead) {
+                // A debugger step: bounded, and Break ends it early.
+                shared.step_interrupt.store(false, Ordering::Release);
+                shared.stepping.store(true, Ordering::Release);
+                if let Ok(mut guard) = emu.lock()
+                    && let Some(em) = guard.as_mut()
+                {
+                    match em.step_kind_interruptible(kind, STEP_KIND_LIMIT, &shared.step_interrupt)
+                    {
+                        Ok(out) => {
+                            if let Some(hit) = out.hit
+                                && let Ok(mut g) = shared.last_break.lock()
+                            {
+                                *g = Some(hit);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("luna-emu: EMULATOR PANIC during a debugger step — {e}");
+                            emu_dead = true;
+                        }
+                    }
+                    let cur = em.frame_count().unwrap_or(last_emu_frame);
+                    if cur != last_emu_frame {
+                        last_emu_frame = cur;
+                        em.swap_frame_events();
+                    }
+                    if let Ok(rgba) = em.render_frame_rgba(false) {
+                        shared.frame.store(cur, Ordering::Release);
+                        framebuffer_in.write(rgba);
+                    }
+                }
+                shared.stepping.store(false, Ordering::Release);
+                shared.steps_served.fetch_add(1, Ordering::AcqRel);
+                continue;
+            }
             if (step_n > 0 || step_frame) && !emu_dead {
                 if let Ok(mut guard) = emu.lock()
                     && let Some(em) = guard.as_mut()

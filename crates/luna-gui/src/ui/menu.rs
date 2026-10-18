@@ -387,6 +387,13 @@ pub(super) fn draw_menu_bar<F: FnMut(MenuAction)>(
                         emit(MenuAction::ToggleBreakpoints);
                         ui.close();
                     }
+                    if ui
+                        .selectable_label(state.show_debugger, "Debugger")
+                        .clicked()
+                    {
+                        emit(MenuAction::ToggleDebugger);
+                        ui.close();
+                    }
                     ui.separator();
                     ui.label(egui::RichText::new("SPC700").weak().small());
                     if ui

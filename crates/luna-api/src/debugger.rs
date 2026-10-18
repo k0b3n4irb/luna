@@ -141,6 +141,36 @@ pub struct CallStackRow {
     pub absolute: Option<MemoryLocation>,
 }
 
+/// What the Status pane of the 65C816 debugger shows beside the
+/// registers.
+#[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
+pub struct DebuggerStatus {
+    /// The registers and flags.
+    pub cpu: crate::CpuState,
+    /// Master clocks since power-on.
+    pub master_clocks: u64,
+    /// An NMI is pending.
+    pub nmi: bool,
+    /// The H/V timer's IRQ is raised (`TIMEUP`).
+    pub hv_irq: bool,
+    /// A cartridge coprocessor holds the IRQ line.
+    pub coprocessor_irq: bool,
+    /// Master clocks into the current scanline.
+    pub h_clock: u32,
+    /// The PPU dot (`h_clock / 4`).
+    pub dot: u32,
+    /// The current scanline.
+    pub scanline: u16,
+    /// The VRAM word address.
+    pub vram_addr: u16,
+    /// OAM's internal byte address.
+    pub oam_addr: u16,
+    /// The CGRAM word address.
+    pub cgram_addr: u8,
+    /// The stack from `SP + 1` to the end of its page.
+    pub stack: Vec<u8>,
+}
+
 /// One result of Find All Occurrences.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct FindResult {
@@ -271,6 +301,31 @@ impl Emulator {
             },
             Err(_) => "<invalid expression>".into(),
         }
+    }
+
+    /// The Status pane's content (see [`DebuggerStatus`]).
+    pub fn debugger_status(&self) -> Result<DebuggerStatus, ApiError> {
+        let cpu = self.cpu_state()?;
+        let snes = self.snes.as_ref().ok_or(ApiError::NoRom)?;
+        let view = self.view()?;
+        let sp = u32::from(cpu.sp);
+        let stack = (sp + 1..=(sp | 0xFF))
+            .map(|a| view.bus_peek(a & 0xFFFF, 0))
+            .collect();
+        Ok(DebuggerStatus {
+            master_clocks: snes.total_mclk,
+            nmi: snes.nmi_pending,
+            hv_irq: snes.cpu_regs.irq_flag,
+            coprocessor_irq: snes.mapper.coproc_main_irq_pending(),
+            h_clock: snes.mcycles_in_line,
+            dot: snes.mcycles_in_line / 4,
+            scanline: snes.ppu_line,
+            vram_addr: snes.ppu.vram.address,
+            oam_addr: snes.ppu.oam.address,
+            cgram_addr: snes.ppu.cgram.address,
+            stack,
+            cpu,
+        })
     }
 
     /// The address Go To lands on for `text`: a label's, plain digits

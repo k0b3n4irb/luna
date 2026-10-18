@@ -13,6 +13,7 @@ in real time as the game runs.
 | **SPC700** (audio CPU) | State, Memory (ARAM hex), Disassembly |
 | **PPU** | Sprites (OAM), Palette (CGRAM), Tilemap, **Event Viewer** |
 | **System** | Registers (full snapshot) |
+| **Debugger** | Mesen2's Debugger window for the 65C816 (below) |
 
 The disassemblers are M/X-aware for the 65C816 (operand widths follow the
 current register sizes); the memory viewers show the live CPU bus and ARAM.
@@ -50,6 +51,60 @@ Driving this from a script (MCP), a run needs no step budget: `run` executes
 until a breakpoint, a `STOP`, or a `pause` from another call, then returns
 `interrupted: true` — so a debugger client can "continue" and "pause" without
 polling.
+
+## The Debugger window
+
+*Debug ▸ Debugger* opens Mesen2's Debugger window for the 65C816, laid
+out as Mesen2's: the code on the left, **Status** above the
+**Labels / Functions / Find Results / Controllers** tabs on the right,
+**Watch / Breakpoints / Call Stack** along the bottom, a status bar, and
+the settings panel at the right edge (`Ctrl+Q`). While it is open the
+code log and the call stack are recorded (a few percent of speed); by
+default it breaks when it opens.
+
+**The code** is the listing the MCP `listing` tool returns (see [The code
+listing](mcp.md#the-code-listing)): the whole address space, the code that
+ran disassembled with the widths it ran with, code decoded ahead of it on
+a green tint, what is not code collapsed into *unidentified* / *unmapped*
+blocks, labels and comments in their rows, and after each operand the
+address it would reach now and the value there (`LDA $10 [counter] =
+$1234`). The PC's instruction has a yellow box and an arrow; a breakpoint
+a coloured dot (red exec, green write, blue read, grey forbid; hollow when
+disabled, `+` with a condition).
+
+- **Mouse**: click a row to select it; click the gutter to toggle an exec
+  breakpoint, middle-click for a forbid one; double-click a row to go to
+  the address it reaches; the wheel scrolls, the scrollbar on the right
+  spans the whole space with the PC (yellow) and the breakpoints marked;
+  the mouse's back / forward buttons walk the navigation history.
+- **Right-click** a row: toggle breakpoint, add to watch, edit label,
+  find all occurrences, move program counter, run to location, go to
+  location, navigate backward / forward, copy.
+- **Keys**, Mesen2's: `F5` continue, `Shift+F5` break, `Esc` either;
+  `F11` step into, `F10` step over, `Shift+F11` step out, `F7` one
+  scanline, `F8` one frame, `Alt+B` run to a scanline, `Ctrl+B` break in
+  N instructions / scanlines / frames; `Ctrl+G` go to (an address, a
+  label, an expression), `Ctrl+,` go to all (labels by name), `Ctrl+F`
+  find (`F3` / `Shift+F3`), `Ctrl+Shift+F` find all occurrences; `F9`
+  toggle breakpoint, `F2` edit label, `;` edit comment, `Ctrl+F11` run to
+  the selected row, `Ctrl+Shift+F10` move the PC there, `Ctrl+-` /
+  `Ctrl+Shift+-` back / forward.
+- **Status** edits the registers and flags while paused; it shows the
+  pending interrupts, the stack, the PPU's position and its VRAM / OAM /
+  CGRAM addresses.
+- **Watch** takes Mesen2's expressions and formats (`[player_hp]`,
+  `{$7E0010}, S2`, `[table, 8]`); a value that changed since the last stop
+  is red. **Breakpoints** lists, enables, marks, edits (memory, range,
+  read / write / execute, condition) and removes them. **Call Stack**
+  reads as Mesen2's, `[nmi]` / `[irq]` for the interrupts.
+- **File ▸ Workspace** imports labels (`.mlb`, `.sym`) and exports the
+  `.mlb`, imports and exports the watch list, resets the workspace.
+- **Controllers** forces buttons pressed on ports 1 and 2.
+
+Not there yet: step back (rewind), the CPU-cycle and PPU-cycle steps
+(luna runs instructions whole), the code/data logger's menu, the
+assembler, the memory viewer link, the SPC700 and coprocessor windows,
+and saving the window's state per ROM.
 
 ## GUI conveniences
 

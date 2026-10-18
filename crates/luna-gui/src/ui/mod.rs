@@ -19,6 +19,7 @@ use winit::window::Window;
 mod breakpoints;
 mod config;
 mod cpu_state;
+mod debugger;
 mod disasm;
 mod event_viewer;
 mod memory;
@@ -27,6 +28,9 @@ mod widgets;
 
 pub(crate) use breakpoints::breakpoints_body;
 pub(crate) use cpu_state::cpu_state_body;
+pub(crate) use debugger::{
+    DebuggerAction, DebuggerSettings, DebuggerView, WatchLine, debugger_body,
+};
 pub(crate) use disasm::{cpu_disasm_body, spc700_disasm_body};
 pub(crate) use event_viewer::event_viewer_body;
 pub(crate) use memory::{cpu_memory_body, spc700_memory_body};
@@ -100,6 +104,8 @@ pub(crate) enum MenuAction {
     ToggleTilemap,
     ToggleEventViewer,
     ToggleBreakpoints,
+    /// Open / close the Debugger window (Mesen2's).
+    ToggleDebugger,
     /// Debugger: execute one instruction (pauses first if running).
     StepInstruction,
     /// Debugger: run to the next frame boundary (pauses first if running).
@@ -121,7 +127,7 @@ pub(crate) enum MenuAction {
 
 /// A navigation request a debug panel's toolbar emits this frame, applied
 /// by `LunaApp` to the panel's cursor state.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum PanelNav {
     /// Toggle an exec breakpoint at this 24-bit address (disasm row click).
     DisasmToggleBreakpoint(u32),
@@ -145,6 +151,8 @@ pub(crate) enum PanelNav {
     TilemapSetBg(usize),
     /// An Event Viewer filter-panel change to apply to `event_config_mut()`.
     EventViewer(EventViewerAction),
+    /// What the Debugger window did this frame.
+    Debugger(Vec<DebuggerAction>),
 }
 
 /// A change the Event Viewer's filter panel requests this frame, applied by
@@ -206,6 +214,8 @@ pub(crate) struct DebugSnapshot {
     /// Breakpoints panel rows: each registry entry + the resolved symbol
     /// for its (start) address when a `.sym` table is loaded.
     pub breakpoints: Option<Vec<(luna_api::BreakpointInfo, Option<String>)>>,
+    /// The Debugger window's content.
+    pub debugger: Option<Box<DebuggerView>>,
 }
 
 /// State the egui overlay reads to drive its widgets — passed in by
@@ -252,6 +262,7 @@ pub(crate) struct UiState<'a> {
     pub show_palette: bool,
     pub show_tilemap: bool,
     pub show_event_viewer: bool,
+    pub show_debugger: bool,
     /// When `Some((player, button))`, the input modal is waiting on the
     /// user to press a key to rebind that player's SNES button.
     pub pending_rebind: Option<(usize, crate::input::SnesButton)>,

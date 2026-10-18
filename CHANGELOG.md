@@ -61,6 +61,17 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   as its pane reads (`call_stack_rows`: `label ($XXXXXX)`, `[nmi]`,
   `[irq]`, `[bottom of stack]`).
 
+- **The Debugger window** (GUI, *Debug ▸ Debugger*), Mesen2's for the
+  65C816, laid out as its default: the code listing with its gutter
+  (breakpoints, the PC), margin, optional byte code, tinted blocks,
+  scrollbar over the whole space, find box and context menu; the Status
+  pane (registers and flags editable while paused, interrupts, stack, PPU
+  position); Labels, Functions, Find Results, Controllers tabs; Watch,
+  Breakpoints, Call Stack; Go To, Go To All, Break In, Run to Scanline,
+  label, comment, breakpoint and Find All dialogs; Mesen2's shortcuts;
+  File ▸ Workspace imports and exports. Steps run on the emu thread and
+  Break ends a long one.
+
 ### Changed
 
 - The call stack (`--call-stack`, `call_stack`) records the IRQs taken,

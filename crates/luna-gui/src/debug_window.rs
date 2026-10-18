@@ -44,6 +44,7 @@ pub(crate) enum DebugPanel {
     Tilemap,
     EventViewer,
     Breakpoints,
+    Debugger,
 }
 
 impl DebugPanel {
@@ -61,6 +62,7 @@ impl DebugPanel {
             Self::Palette => "Palette (CGRAM)",
             Self::Tilemap => "Tilemap",
             Self::Breakpoints => "Breakpoints",
+            Self::Debugger => "Debugger",
         }
     }
 
@@ -78,6 +80,7 @@ impl DebugPanel {
             Self::Palette => (380, 440),
             Self::Tilemap => (540, 580),
             Self::Breakpoints => (420, 360),
+            Self::Debugger => (1180, 760),
         }
     }
 }
@@ -450,6 +453,10 @@ impl DebugWindows {
                         // so it is NOT wrapped in the outer scroll area.
                         if panel == DebugPanel::EventViewer {
                             nav = ui::event_viewer_body(&mut body, snap);
+                        } else if panel == DebugPanel::Debugger {
+                            if let Some(view) = snap.debugger.as_deref() {
+                                nav = Some(PanelNav::Debugger(ui::debugger_body(&mut body, view)));
+                            }
                         } else {
                             egui::ScrollArea::both().show(&mut body, |ui| match panel {
                                 DebugPanel::Cpu => ui::cpu_state_body(ui, snap),
@@ -458,7 +465,7 @@ impl DebugWindows {
                                 DebugPanel::Registers => ui::registers_body(ui, snap),
                                 DebugPanel::Palette => ui::palette_body(ui, snap),
                                 DebugPanel::Tilemap => nav = ui::tilemap_body(ui, snap),
-                                DebugPanel::EventViewer => {}
+                                DebugPanel::EventViewer | DebugPanel::Debugger => {}
                                 DebugPanel::Spc700Disasm => nav = ui::spc700_disasm_body(ui, snap),
                                 DebugPanel::CpuDisasm => nav = ui::cpu_disasm_body(ui, snap),
                                 DebugPanel::Breakpoints => {
@@ -575,6 +582,13 @@ impl DebugWindows {
         }
 
         (nav, want_close)
+    }
+
+    /// Bring a panel's window to the front, if it is open.
+    pub(crate) fn focus(&self, panel: DebugPanel) {
+        if let Some(win) = self.by_panel.get(&panel).and_then(|id| self.wins.get(id)) {
+            win.window.focus_window();
+        }
     }
 
     /// Close (and drop) the debug window for `id`, if present.
