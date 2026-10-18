@@ -2379,9 +2379,7 @@ fn call_stack_pane(ui: &mut egui::Ui, view: &DebuggerView, out: &mut Vec<Debugge
                         ui.end_row();
                     }
                 });
-            if view.cpu == luna_api::ListingCpu::Spc {
-                ui.label(egui::RichText::new("(no SPC700 call stack yet)").weak());
-            } else if view.call_stack.is_empty() {
+            if view.call_stack.is_empty() {
                 ui.label(
                     egui::RichText::new("(the call stack is tracked while this window is open)")
                         .weak(),

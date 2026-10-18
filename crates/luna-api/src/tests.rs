@@ -3863,3 +3863,56 @@ fn the_spc700_steps_into_over_and_out() {
     assert_eq!(pc(&mut e, SpcStepKind::Out), 0x203, "out of the routine");
     assert_eq!(pc(&mut e, SpcStepKind::Into), 0x204);
 }
+
+#[test]
+fn the_spc700_call_stack_follows_calls_and_returns() {
+    use crate::SpcStepKind;
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom()).unwrap();
+    e.step(2000).unwrap();
+    e.write_memory(
+        MemoryKind::SpcRam,
+        0x200,
+        &[0x3F, 0x00, 0x03, 0x00, 0x2F, 0xFE],
+    )
+    .unwrap();
+    e.write_memory(MemoryKind::SpcRam, 0x300, &[0x00, 0x6F])
+        .unwrap();
+    e.set_label(Label {
+        memory: MemoryKind::SpcRam,
+        address: 0x300,
+        length: 1,
+        name: "Play".into(),
+        comment: String::new(),
+    })
+    .unwrap();
+    e.step_spc(SpcStepKind::Into, 100_000).unwrap();
+    e.set_spc_register("pc", 0x200).unwrap();
+    assert!(e.spc_call_stack().is_empty(), "off by default");
+    e.enable_spc_call_stack(true);
+    // The CALL ran: one frame, shown at the routine's first instruction.
+    e.step_spc(SpcStepKind::Into, 100_000).unwrap();
+    assert_eq!(e.spc700_state().unwrap().pc, 0x300);
+    let frames = e.spc_call_stack();
+    assert_eq!(frames.len(), 1, "{frames:?}");
+    assert_eq!(
+        (
+            frames[0].pc,
+            frames[0].from,
+            frames[0].kind,
+            frames[0].label.as_deref()
+        ),
+        (0x300, 0x200, "call", Some("Play"))
+    );
+    let rows = e.spc_call_stack_rows();
+    assert_eq!(
+        rows.iter()
+            .map(|r| (r.function.as_str(), r.pc))
+            .collect::<Vec<_>>(),
+        [("Play ($0300)", 0x300), ("[bottom of stack]", 0x200)]
+    );
+    // The RET returns: empty again, back after the CALL.
+    e.step_spc(SpcStepKind::Out, 100_000).unwrap();
+    assert_eq!(e.spc700_state().unwrap().pc, 0x203);
+    assert!(e.spc_call_stack().is_empty(), "{:?}", e.spc_call_stack());
+}

@@ -1506,6 +1506,17 @@ pub struct EnableCallStackParams {
     /// `true` starts tracking (empty stack — earlier calls are
     /// unknowable); `false` stops and drops it.
     pub enabled: bool,
+    /// `snes` (default) or `spc`: the SPC700's (`CALL`, `PCALL`, `TCALL`,
+    /// `BRK` push, `RET` / `RETI` pop), read with `spc_call_stack`.
+    #[serde(default)]
+    pub cpu: Option<String>,
+}
+
+/// `spc_call_stack` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SpcCallStackResult {
+    /// Tracked frames, oldest first (last = innermost).
+    pub frames: Vec<luna_api::SpcCallFrame>,
 }
 
 /// `call_stack` result.
@@ -3833,9 +3844,23 @@ impl LunaServer {
     ) -> rmcp::Json<EmptyOk> {
         {
             let mut em = self.emulator.lock().await;
-            em.enable_call_stack(params.enabled);
+            if params.cpu.as_deref() == Some("spc") {
+                em.enable_spc_call_stack(params.enabled);
+            } else {
+                em.enable_call_stack(params.enabled);
+            }
         }
         rmcp::Json(EmptyOk { ok: true })
+    }
+
+    #[rmcp::tool(
+        description = "The tracked SPC700 call stack: `[{pc, from, kind, label}]`, oldest \
+                                first (last = innermost); `kind` is call / pcall / tcall / brk. \
+                                Empty unless `enable_call_stack {cpu: \"spc\"}` is on."
+    )]
+    async fn spc_call_stack(&self) -> rmcp::Json<SpcCallStackResult> {
+        let frames = self.emulator.lock().await.spc_call_stack();
+        rmcp::Json(SpcCallStackResult { frames })
     }
 
     #[rmcp::tool(

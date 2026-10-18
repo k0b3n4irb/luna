@@ -79,7 +79,11 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   stops, the window of that CPU comes forward. API: `step_spc` (into, over
   a `CALL` / `PCALL` / `TCALL` / `BRK`, out after a `RET` / `RETI`, a
   `step` hit on the SPC700) and `set_spc_register`; MCP: `step_kind` and
-  `set_cpu_register` take `cpu: "spc"`.
+  `set_cpu_register` take `cpu: "spc"`. The SPC700's call stack too
+  (`enable_spc_call_stack`, `spc_call_stack`, `spc_call_stack_rows`;
+  MCP `enable_call_stack {cpu: "spc"}`, `spc_call_stack`), shown in the
+  window's Call Stack pane: `CALL`, `PCALL`, `TCALL`, `BRK` push a
+  frame, `RET` / `RETI` pop it.
 - **Labels from ca65 / cc65 `.dbg` and bass `.sym` files**, read as
   Mesen2 reads them for a SNES cartridge (from a clean-room description
   measured on Mesen2, its sample files kept as test fixtures): `.dbg`

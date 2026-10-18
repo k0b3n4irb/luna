@@ -69,7 +69,8 @@ mod vram_writers;
 pub mod workspace;
 
 pub use debugger::{
-    CallStackRow, DebuggerStatus, FindResult, FunctionRow, GotoResult, LabelRow, WatchStyle,
+    CallStackRow, DebuggerStatus, FindResult, FunctionRow, GotoResult, LabelRow, SpcCallFrame,
+    WatchStyle,
 };
 pub use event_viewer::{
     CATEGORY_COUNT, EventCategory, EventViewerConfig, EventViewerEvent, register_name,

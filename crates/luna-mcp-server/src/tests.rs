@@ -1429,16 +1429,22 @@ async fn server_call_stack_round_trip() {
     // Off: empty.
     assert!(s.call_stack().await.0.frames.is_empty());
 
-    s.enable_call_stack(Parameters(EnableCallStackParams { enabled: true }))
-        .await;
+    s.enable_call_stack(Parameters(EnableCallStackParams {
+        enabled: true,
+        cpu: None,
+    }))
+    .await;
     s.step(Parameters(StepParams { count: 2 })).await.unwrap();
     let frames = s.call_stack().await.0.frames;
     assert_eq!(frames.len(), 2);
     assert_eq!(frames[0].pc, 0x00_8010);
     assert_eq!(frames[1].pc, 0x00_8020);
 
-    s.enable_call_stack(Parameters(EnableCallStackParams { enabled: false }))
-        .await;
+    s.enable_call_stack(Parameters(EnableCallStackParams {
+        enabled: false,
+        cpu: None,
+    }))
+    .await;
     assert!(s.call_stack().await.0.frames.is_empty());
 }
 
@@ -1955,5 +1961,27 @@ async fn server_step_kind_steps_the_spc700() {
         s.step_kind(Parameters(step("frame"))).await.is_err(),
         "not an SPC700 step"
     );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn server_tracks_the_spc700_call_stack() {
+    let s = LunaServer::new();
+    let path = PathBuf::from("/tmp/luna_mcp_spc_stack_demo.smc");
+    std::fs::write(&path, demo_lorom()).unwrap();
+    s.load_rom(Parameters(rom_params(&path.to_string_lossy())))
+        .await
+        .unwrap();
+    assert!(s.spc_call_stack().await.0.frames.is_empty());
+    s.enable_call_stack(Parameters(EnableCallStackParams {
+        enabled: true,
+        cpu: Some("spc".into()),
+    }))
+    .await;
+    // The IPL ROM makes no call before the CPU talks to it.
+    s.step(Parameters(StepParams { count: 5000 }))
+        .await
+        .unwrap();
+    assert!(s.spc_call_stack().await.0.frames.is_empty());
     let _ = std::fs::remove_file(&path);
 }

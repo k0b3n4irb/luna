@@ -335,6 +335,9 @@ pub struct Apu {
     /// A debugger step in progress (never in a save-state).
     #[serde(skip)]
     step: Option<SpcStep>,
+    /// The call stack, while a debugger tracks it (never in a save-state).
+    #[serde(skip)]
+    pub call_stack: Option<SpcCallStack>,
 }
 
 /// A condition an SPC700 breakpoint fires on, given the APU and, for a
@@ -453,6 +456,39 @@ pub enum SpcStepKind {
     Out,
 }
 
+/// What pushed an [`SpcFrame`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpcCallKind {
+    /// `CALL !a`.
+    Call,
+    /// `PCALL u` (into the `$FFxx` page).
+    Pcall,
+    /// `TCALL n` (through the vector table at `$FFC0-$FFDF`).
+    Tcall,
+    /// `BRK` (through `$FFDE`).
+    Brk,
+}
+
+/// One entry of the tracked SPC700 call stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpcFrame {
+    /// The routine entered.
+    pub pc: u16,
+    /// The instruction that called it.
+    pub from: u16,
+    /// What called it.
+    pub kind: SpcCallKind,
+}
+
+/// The SPC700 call stack while a debugger tracks it.
+#[derive(Debug, Clone, Default)]
+pub struct SpcCallStack {
+    /// Oldest first; the last is the innermost.
+    pub frames: Vec<SpcFrame>,
+    /// The instruction that ran last: its address and opcode.
+    last: Option<(u16, u8)>,
+}
+
 /// A step in progress, checked at each instruction start.
 #[derive(Debug, Clone, Copy)]
 pub struct SpcStep {
@@ -544,6 +580,7 @@ impl Apu {
             break_resume: None,
             exec_log: None,
             step: None,
+            call_stack: None,
         };
         // Reset the SPC700 — reads $FFFE/$FFFF for the PC vector,
         // which the IPL ROM populates as $FFC0.
@@ -780,6 +817,11 @@ impl Apu {
                 break;
             }
             if !self.cpu.in_instruction {
+                // The call stack first: a stop at this instruction already
+                // shows the call that led to it.
+                if self.call_stack.is_some() {
+                    self.track_call();
+                }
                 if !self.breaks.is_empty() && self.check_break() {
                     return;
                 }
@@ -869,6 +911,40 @@ impl Apu {
             ret: (kind == SpcStepKind::Over && call).then(|| pc.wrapping_add(u16::from(len))),
             last_op: op,
         });
+    }
+
+    /// At an instruction start: push the routine the last instruction
+    /// called, or pop the one it returned from. Bounded at 256 frames
+    /// (oldest dropped), tolerant of a `RET` without a call.
+    fn track_call(&mut self) {
+        const CAP: usize = 256;
+        let pc = self.cpu.pc;
+        let op = self.peek(pc);
+        let Some(cs) = self.call_stack.as_mut() else {
+            return;
+        };
+        // Back on the instruction it stopped at: nothing ran since.
+        if cs.last.is_some_and(|(at, _)| at == pc) {
+            return;
+        }
+        if let Some((from, last)) = cs.last {
+            let kind = match last {
+                0x3F => Some(SpcCallKind::Call),
+                0x4F => Some(SpcCallKind::Pcall),
+                0x0F => Some(SpcCallKind::Brk),
+                x if x & 0x0F == 0x01 => Some(SpcCallKind::Tcall),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                if cs.frames.len() >= CAP {
+                    cs.frames.remove(0);
+                }
+                cs.frames.push(SpcFrame { pc, from, kind });
+            } else if matches!(last, 0x6F | 0x7F) {
+                cs.frames.pop();
+            }
+        }
+        cs.last = Some((pc, op));
     }
 
     /// Drop a step not yet done.

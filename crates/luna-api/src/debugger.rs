@@ -171,6 +171,19 @@ pub struct DebuggerStatus {
     pub stack: Vec<u8>,
 }
 
+/// One entry of the tracked SPC700 call stack.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct SpcCallFrame {
+    /// The routine entered.
+    pub pc: u16,
+    /// The instruction that called it.
+    pub from: u16,
+    /// `call`, `pcall`, `tcall` or `brk`.
+    pub kind: &'static str,
+    /// The label of the routine, when it has one.
+    pub label: Option<String>,
+}
+
 /// One result of Find All Occurrences.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct FindResult {
@@ -593,6 +606,105 @@ impl Emulator {
                 },
             })
             .collect()
+    }
+
+    /// Start or stop tracking the SPC700's call stack (`CALL`, `PCALL`,
+    /// `TCALL`, `BRK` push a frame, `RET` / `RETI` pop one). Starting
+    /// begins empty; stopping drops it.
+    pub fn enable_spc_call_stack(&mut self, on: bool) {
+        if let Some(snes) = self.snes.as_mut() {
+            let apu = &mut snes.apu_real;
+            match (on, apu.call_stack.is_some()) {
+                (true, false) => apu.call_stack = Some(luna_apu::SpcCallStack::default()),
+                (false, _) => apu.call_stack = None,
+                (true, true) => {}
+            }
+        }
+    }
+
+    /// The tracked SPC700 call stack, oldest first (empty while tracking
+    /// is off).
+    #[must_use]
+    pub fn spc_call_stack(&self) -> Vec<SpcCallFrame> {
+        let Some(cs) = self
+            .snes
+            .as_ref()
+            .and_then(|s| s.apu_real.call_stack.as_ref())
+        else {
+            return Vec::new();
+        };
+        cs.frames
+            .iter()
+            .map(|f| SpcCallFrame {
+                pc: f.pc,
+                from: f.from,
+                kind: match f.kind {
+                    luna_apu::SpcCallKind::Call => "call",
+                    luna_apu::SpcCallKind::Pcall => "pcall",
+                    luna_apu::SpcCallKind::Tcall => "tcall",
+                    luna_apu::SpcCallKind::Brk => "brk",
+                },
+                label: self
+                    .label_at(MemoryKind::SpcMemory, u32::from(f.pc))
+                    .ok()
+                    .flatten()
+                    .and_then(|h| h.name()),
+            })
+            .collect()
+    }
+
+    /// The SPC700's call stack as Mesen2's pane lists it, innermost first
+    /// (see [`Self::call_stack_rows`]).
+    #[must_use]
+    pub fn spc_call_stack_rows(&self) -> Vec<CallStackRow> {
+        let Some(snes) = self.snes.as_ref() else {
+            return Vec::new();
+        };
+        let Some(cs) = snes.apu_real.call_stack.as_ref() else {
+            return Vec::new();
+        };
+        let ipl = snes.apu_real.control & 0x80 != 0;
+        let absolute = |pc: u16| {
+            Some(if ipl && pc >= 0xFFC0 {
+                MemoryLocation {
+                    kind: MemoryKind::SpcRom,
+                    offset: u32::from(pc - 0xFFC0),
+                }
+            } else {
+                MemoryLocation {
+                    kind: MemoryKind::SpcRam,
+                    offset: u32::from(pc),
+                }
+            })
+        };
+        let name = |pc: u16| {
+            self.label_at(MemoryKind::SpcMemory, u32::from(pc))
+                .ok()
+                .flatten()
+                .and_then(|h| h.name())
+                .map_or_else(|| format!("${pc:04X}"), |l| format!("{l} (${pc:04X})"))
+        };
+        let row = |function: String, pc: u16| CallStackRow {
+            function,
+            pc: u32::from(pc),
+            absolute: absolute(pc),
+        };
+        let here = snes.apu_real.cpu.pc;
+        let mut out = vec![row(
+            cs.frames
+                .last()
+                .map_or_else(|| "[bottom of stack]".to_string(), |f| name(f.pc)),
+            here,
+        )];
+        for (i, f) in cs.frames.iter().enumerate().rev() {
+            let function = if i == 0 {
+                "[bottom of stack]".to_string()
+            } else {
+                name(cs.frames[i - 1].pc)
+            };
+            out.push(row(function, f.from));
+        }
+        out
     }
 
     /// The call stack as Mesen2's pane lists it, innermost first: the

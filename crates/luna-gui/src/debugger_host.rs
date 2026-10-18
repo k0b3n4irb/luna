@@ -119,8 +119,9 @@ impl DebuggerHost {
     /// is open.
     pub(crate) fn opened(&mut self, em: &mut Emulator) {
         em.enable_code_log(true);
-        if self.cpu == ListingCpu::Snes {
-            em.enable_call_stack(true);
+        match self.cpu {
+            ListingCpu::Snes => em.enable_call_stack(true),
+            ListingCpu::Spc => em.enable_spc_call_stack(true),
         }
         self.dirty = true;
         self.center_on_pc = true;
@@ -179,8 +180,9 @@ impl DebuggerHost {
         if !other_open {
             em.enable_code_log(false);
         }
-        if self.cpu == ListingCpu::Snes {
-            em.enable_call_stack(false);
+        match self.cpu {
+            ListingCpu::Snes => em.enable_call_stack(false),
+            ListingCpu::Spc => em.enable_spc_call_stack(false),
         }
     }
 
@@ -389,7 +391,7 @@ impl DebuggerHost {
             call_stack: if main {
                 em.call_stack_rows()
             } else {
-                Vec::new()
+                em.spc_call_stack_rows()
             },
             labels: em.label_rows(self.cpu),
             functions: if main { em.functions() } else { Vec::new() },
