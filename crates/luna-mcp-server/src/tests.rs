@@ -2064,3 +2064,65 @@ async fn server_freezes_writes() {
     );
     let _ = std::fs::remove_file(&path);
 }
+
+#[tokio::test]
+async fn server_runs_a_memory_search() {
+    let s = LunaServer::new();
+    let path = PathBuf::from("/tmp/luna_mcp_mem_search_demo.smc");
+    std::fs::write(&path, demo_lorom()).unwrap();
+    s.load_rom(Parameters(rom_params(&path.to_string_lossy())))
+        .await
+        .unwrap();
+    let start = |kind: &str| MemSearchStartParams { kind: kind.into() };
+    assert!(
+        s.mem_search_start(Parameters(start("SnesMemory")))
+            .await
+            .is_err()
+    );
+    // The 64-byte IPL ROM: a few of its bytes are zero.
+    let got = s
+        .mem_search_start(Parameters(start("SpcRom")))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!((got.candidates, got.undo), (64, 0));
+    let filter: luna_api::SearchFilter = serde_json::from_value(serde_json::json!({
+        "target": {"kind": "value", "value": 0},
+        "operator": "not_equal"
+    }))
+    .unwrap();
+    s.step(Parameters(StepParams { count: 2000 }))
+        .await
+        .unwrap();
+    let got = s
+        .mem_search_filter(Parameters(MemSearchFilterParams {
+            format: luna_api::SearchFormat::default(),
+            filter,
+        }))
+        .await
+        .unwrap()
+        .0;
+    assert!(
+        got.candidates > 32 && got.candidates < 64,
+        "{}",
+        got.candidates
+    );
+    assert_eq!(got.undo, 1);
+    let rows = s
+        .mem_search_rows(Parameters(MemSearchRowsParams {
+            first: 0,
+            count: 3,
+            format: luna_api::SearchFormat::default(),
+            preview: Some(filter),
+        }))
+        .await
+        .unwrap()
+        .0;
+    assert!(
+        rows.rows
+            .iter()
+            .all(|r| r.value != 0 && r.matches == Some(true))
+    );
+    assert_eq!(s.mem_search_undo().await.unwrap().0.candidates, 64);
+    let _ = std::fs::remove_file(&path);
+}

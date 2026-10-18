@@ -4045,3 +4045,54 @@ fn a_frozen_address_drops_the_writes_through_it() {
     e.step(100).unwrap();
     assert_eq!(ram(&e)[0], 0x05);
 }
+
+/// Memory Search narrows candidates filter by filter, against the previous
+/// search, a value or an address, and undoes them.
+#[test]
+fn memory_search_narrows_and_undoes() {
+    use crate::memory::MemoryKind;
+    use crate::memory_search::{SearchFilter, SearchFormat, SearchOperator, SearchTarget};
+    // $8000: INC $0010 ; BRA $8000 — one byte counts up.
+    let code = [0xEE, 0x10, 0x00, 0x80, 0xFB];
+    let mut e = Emulator::new();
+    e.load_rom_bytes(demo_lorom_with(&code, None)).unwrap();
+    assert!(e.mem_search_start(MemoryKind::SnesMemory).is_err());
+    assert_eq!(
+        e.mem_search_start(MemoryKind::SnesWorkRam).unwrap(),
+        0x2_0000
+    );
+    let byte = SearchFormat::default();
+    let changed = SearchFilter {
+        target: SearchTarget::PreviousSearch,
+        operator: SearchOperator::NotEqual,
+    };
+    e.step(7).unwrap();
+    assert_eq!(e.mem_search_filter(byte, changed).unwrap(), 1);
+    let row = e.mem_search_rows(0, 10, byte, Some(changed)).unwrap()[0];
+    assert_eq!(row.offset, 0x10);
+    // Unchanged since the filter: the preview says it no longer matches.
+    assert_eq!(row.matches, Some(false));
+    let v = row.value;
+    let equal = |target| SearchFilter {
+        target,
+        operator: SearchOperator::Equal,
+    };
+    assert_eq!(
+        e.mem_search_filter(byte, equal(SearchTarget::Value(v + 1)))
+            .unwrap(),
+        0
+    );
+    assert_eq!(e.mem_search_undo().unwrap(), 1);
+    assert_eq!(e.mem_search_undo().unwrap(), 0x2_0000);
+    assert!(e.mem_search_undo().is_err());
+    // 16-bit: the address of a value equal to the one at $11 (zero).
+    let word = SearchFormat {
+        size: 2,
+        signed: true,
+    };
+    let n = e
+        .mem_search_filter(word, equal(SearchTarget::Address(0x11)))
+        .unwrap();
+    assert!(n > 0x1_0000 && n < 0x2_0000, "{n}");
+    assert_eq!(e.mem_search_count().unwrap(), (n, 1));
+}

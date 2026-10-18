@@ -1371,6 +1371,61 @@ pub struct FrozenWritesResult {
     pub ranges: Vec<(u32, u32)>,
 }
 
+/// `mem_search_start` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct MemSearchStartParams {
+    /// A memory, not a bus: `SnesWorkRam`, `SnesSaveRam`, `SpcRam`,
+    /// `SnesVideoRam`… (see `memory_kinds`).
+    pub kind: String,
+}
+
+/// `mem_search_filter` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct MemSearchFilterParams {
+    /// How values are read: `{size: 1 | 2 | 4, signed}`.
+    #[serde(default)]
+    pub format: luna_api::SearchFormat,
+    /// The filter: `{target: {kind: "previous_search"} | {kind:
+    /// "previous_refresh"} | {kind: "value", value: N} | {kind: "address",
+    /// value: OFFSET}, operator: "equal" | "not_equal" | "less_than" |
+    /// "greater_than" | "less_than_or_equal" | "greater_than_or_equal"}`.
+    pub filter: luna_api::SearchFilter,
+}
+
+/// `mem_search_rows` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct MemSearchRowsParams {
+    /// The first candidate (0 = the lowest address left).
+    #[serde(default)]
+    pub first: u32,
+    /// Candidates to list (at most 4096).
+    pub count: u32,
+    /// How values are read.
+    #[serde(default)]
+    pub format: luna_api::SearchFormat,
+    /// A filter to preview: each row says whether it would pass it.
+    #[serde(default)]
+    pub preview: Option<luna_api::SearchFilter>,
+}
+
+/// A Memory Search call's outcome.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct MemSearchResult {
+    /// Candidates left.
+    pub candidates: usize,
+    /// Filters that `mem_search_undo` can take back.
+    pub undo: usize,
+}
+
+/// `mem_search_rows` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct MemSearchRowsResult {
+    /// The rows, in address order.
+    pub rows: Vec<luna_api::SearchRow>,
+    /// Candidates left in all.
+    pub candidates: usize,
+}
+
 /// `enable_access_counters` parameters.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct EnableAccessCountersParams {
@@ -3750,6 +3805,102 @@ impl LunaServer {
             .write_freezes(kind)
             .map_err(|e| api_err_to_mcp(&e))?;
         Ok(rmcp::Json(FrozenWritesResult { ranges }))
+    }
+
+    /// The search's counts, as a tool result.
+    async fn mem_search_counts(&self) -> Result<rmcp::Json<MemSearchResult>, ErrorData> {
+        let (candidates, undo) = self
+            .emulator
+            .lock()
+            .await
+            .mem_search_count()
+            .map_err(|e| api_err_to_mcp(&e))?;
+        Ok(rmcp::Json(MemSearchResult { candidates, undo }))
+    }
+
+    #[rmcp::tool(
+        description = "Start Mesen2's Memory Search over a memory (not a bus): every address \
+                                a candidate, previous values = current ones. Then \
+                                `mem_search_filter` narrows, `mem_search_undo` takes a \
+                                filter back, `mem_search_rows` lists what is left."
+    )]
+    async fn mem_search_start(
+        &self,
+        Parameters(params): Parameters<MemSearchStartParams>,
+    ) -> Result<rmcp::Json<MemSearchResult>, ErrorData> {
+        let kind = memory_kind(&params.kind)?;
+        self.emulator
+            .lock()
+            .await
+            .mem_search_start(kind)
+            .map_err(|e| api_err_to_mcp(&e))?;
+        self.mem_search_counts().await
+    }
+
+    #[rmcp::tool(
+        description = "Keep the Memory Search candidates whose value (read as `format`: 1, 2 \
+                                or 4 bytes little-endian, signed or not) passes `filter` \
+                                against the previous search, the previous refresh, a value \
+                                or the value at an address. The previous-search values \
+                                then become the current ones."
+    )]
+    async fn mem_search_filter(
+        &self,
+        Parameters(params): Parameters<MemSearchFilterParams>,
+    ) -> Result<rmcp::Json<MemSearchResult>, ErrorData> {
+        self.emulator
+            .lock()
+            .await
+            .mem_search_filter(params.format, params.filter)
+            .map_err(|e| api_err_to_mcp(&e))?;
+        self.mem_search_counts().await
+    }
+
+    #[rmcp::tool(description = "Take back the last Memory Search filter.")]
+    async fn mem_search_undo(&self) -> Result<rmcp::Json<MemSearchResult>, ErrorData> {
+        self.emulator
+            .lock()
+            .await
+            .mem_search_undo()
+            .map_err(|e| api_err_to_mcp(&e))?;
+        self.mem_search_counts().await
+    }
+
+    #[rmcp::tool(
+        description = "Take the current values as Memory Search's previous-refresh values \
+                                (the `previous_refresh` target)."
+    )]
+    async fn mem_search_refresh(&self) -> Result<rmcp::Json<MemSearchResult>, ErrorData> {
+        self.emulator
+            .lock()
+            .await
+            .mem_search_refresh()
+            .map_err(|e| api_err_to_mcp(&e))?;
+        self.mem_search_counts().await
+    }
+
+    #[rmcp::tool(
+        description = "The Memory Search candidates from `first`: `[{offset, value, \
+                                last_value, matches, counters}]` — `last_value` at the \
+                                previous refresh, `matches` against `preview` when given, \
+                                `counters` when the access counters are on."
+    )]
+    async fn mem_search_rows(
+        &self,
+        Parameters(params): Parameters<MemSearchRowsParams>,
+    ) -> Result<rmcp::Json<MemSearchRowsResult>, ErrorData> {
+        let em = self.emulator.lock().await;
+        let rows = em
+            .mem_search_rows(
+                params.first as usize,
+                params.count.min(4096) as usize,
+                params.format,
+                params.preview,
+            )
+            .map_err(|e| api_err_to_mcp(&e))?;
+        let (candidates, _) = em.mem_search_count().map_err(|e| api_err_to_mcp(&e))?;
+        drop(em);
+        Ok(rmcp::Json(MemSearchRowsResult { rows, candidates }))
     }
 
     #[rmcp::tool(description = "Every access counter back to zero (Mesen2's Reset access stats).")]

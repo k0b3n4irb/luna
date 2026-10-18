@@ -119,6 +119,15 @@ fast-forwarded to (binaries attached by CI). Format inspired by
   Mario World at frame 120 the counts of touched bytes equal Mesen2's in
   every memory. API: `enable_access_counters`, `access_counters`,
   `reset_access_counters`, `master_clock`; MCP: the same names.
+- **Memory Search, Mesen2's.** A cheat finder over any memory: every
+  address a candidate, narrowed filter by filter on 1, 2 or 4-byte values
+  (signed or not) against the previous search, the previous refresh, a
+  value or the value at an address, with six operators and undo. Rows
+  carry the value at the previous refresh, a preview of the next filter
+  and the access counters. API: `mem_search_start`, `mem_search_filter`,
+  `mem_search_undo`, `mem_search_refresh`, `mem_search_rows`,
+  `mem_search_count`; MCP: the same names. `search_begin` /
+  `search_refine` are unchanged.
 - **Write freezes, Mesen2's.** A write through a frozen CPU-bus or SPC700
   address is dropped, so the byte keeps its value: the CPU's and the
   DMA's writes (a register's side effects too), by address, mirrors not

@@ -52,6 +52,7 @@ pub const VERSION: &str = env!("LUNA_BUILD_VERSION");
 
 pub mod access;
 pub use access::AccessCounter;
+pub use memory_search::{SearchFilter, SearchFormat, SearchOperator, SearchRow, SearchTarget};
 pub mod code_log;
 pub mod debugger;
 pub mod dsp1_commands;
@@ -62,6 +63,7 @@ pub mod label_import;
 pub mod labels;
 pub mod listing;
 pub mod memory;
+pub mod memory_search;
 pub mod paths;
 mod power_on;
 pub mod symbols;
@@ -1387,6 +1389,8 @@ pub struct Emulator {
     /// Live narrowing memory-search session (issue #177); `None` until
     /// [`Emulator::search_begin`] runs.
     search_session: Option<SearchSession>,
+    /// Memory Search (Mesen2's), over any memory.
+    mem_search: Option<memory_search::MemSearch>,
     /// The profiler's per-frame figures by folded row (`OpenSNES` R-B),
     /// folded from the core's completed frames on every run call so the
     /// pending list never outgrows one call.
@@ -1751,6 +1755,7 @@ impl Emulator {
             code_logging: false,
             rom_file: None,
             search_session: None,
+            mem_search: None,
             profile_frames: std::collections::BTreeMap::new(),
             profile_frames_done: 0,
             watch_stood_at: None,
@@ -2068,6 +2073,7 @@ impl Emulator {
                 self.rom_hash = rom_hash;
                 self.reset_labels();
                 self.clear_code_log();
+                self.mem_search = None;
                 self.rom_file = None;
                 let logging = self.code_logging;
                 self.enable_code_log(logging);

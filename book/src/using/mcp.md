@@ -106,6 +106,7 @@ method, so the MCP transport adds reach, not capability.
 | `absolute_address` | `absolute_address` | The memory and offset behind a CPU-bus address or label — `{"kind": "SnesPrgRom", "offset": 16}` for `$80:8010` on a 32 KB `LoROM` — as the mapper's banking selects it now; `{"kind": "SnesRegister", "offset": 8448}` for `$00:2100` and its mirrors; `null` for open bus or a coprocessor's register window. |
 | `poke_vram` / `poke_cgram` / `poke_oam` / `poke_aram` | same names | Direct writes into the other memory spaces (bus-bypassing state injection; each wraps at its size). |
 | `freeze_add` / `freeze_remove` / `freeze_list` | same names | Cheat-style per-frame pinning: the byte is re-applied at every frame boundary in **every** run path (CLI, MCP and GUI behave identically), and once immediately on add. WRAM only. |
+| `mem_search_start` / `mem_search_filter` / `mem_search_undo` / `mem_search_refresh` / `mem_search_rows` | same names | Mesen2's Memory Search over any memory: candidates narrowed filter by filter (against the previous search, the previous refresh, a value or an address; 8 / 16 / 32-bit, signed or not), with undo. See *Memory Search* below. |
 | `freeze_writes` / `frozen_writes` | `set_write_freeze` / `write_freezes` | Mesen2's memory viewer *Freeze*: a write through a frozen `SnesMemory` or `SpcMemory` address is dropped, so the byte keeps its value between frames too. See *Write freezes* below. |
 | `enable_call_stack` / `call_stack` | `enable_call_stack` / `call_stack` | Opt-in JSR/JSL/RTS/RTL + interrupt tracking → `[{pc, from, kind, symbol}]`, oldest first. The CLI form is `luna state --call-stack` (the `--out` JSON gains a `call_stack` array). |
 | `spc_call_stack` | `enable_spc_call_stack` / `spc_call_stack` | The SPC700's call stack, tracked once `enable_call_stack {enabled: true, cpu: "spc"}` is on: `[{pc, from, kind, label}]`, oldest first, `kind` `call` / `pcall` / `tcall` / `brk`. |
@@ -308,6 +309,39 @@ freeze_writes {kind: "SnesMemory", offset: 0x7E0100, count: 2, frozen: true}
 frozen_writes {kind: "SnesMemory"}          # → {ranges: [[8257792, 8257793]]}
 freeze_writes {kind: "SnesMemory", offset: 0x7E0100, count: 2, frozen: false}
 ```
+
+### Memory Search
+
+Mesen2's cheat finder, on any memory (`SnesWorkRam`, `SnesSaveRam`,
+`SpcRam`, VRAM…; not a bus). Every address starts as a candidate; each
+`mem_search_filter` reads every candidate's value now (`format`: 1, 2 or
+4 bytes little-endian from each address, windows overlapping; signed or
+not) and keeps those that pass the filter against a target:
+`previous_search` (the value at the last filter), `previous_refresh` (the
+value at the last `mem_search_refresh`), a `value`, or the value at an
+`address`. `mem_search_undo` takes filters back without limit;
+`mem_search_rows` lists what is left, and with `preview` says which rows
+the next filter would keep. The older `search_begin` / `search_refine`
+(work RAM, 8 or 16-bit) still work as before.
+
+Finding a byte that grows by one each frame, on Super Mario World:
+
+```text
+mem_search_start {kind: "SnesWorkRam"}                     # → {candidates: 131072, undo: 0}
+step_until_frame …                                         # one frame
+mem_search_filter {filter: {target: {kind: "previous_search"}, operator: "not_equal"}}
+                                                           # → {candidates: 2, undo: 1}
+step_until_frame …
+mem_search_filter {filter: {target: {kind: "previous_search"}, operator: "greater_than"}}
+                                                           # → {candidates: 1, undo: 2}
+mem_search_rows {count: 5}
+# → {rows: [{offset: 19, value: 40, last_value: 37, matches: null, counters: null}], candidates: 1}
+mem_search_undo {}                                         # → {candidates: 2, undo: 1}
+```
+
+`format` defaults to one unsigned byte: `{size: 2, signed: true}` reads
+16-bit signed values. With the access counters on, each row carries its
+byte's counters.
 
 ### The debugger's panes
 
