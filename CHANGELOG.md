@@ -7,6 +7,33 @@ fast-forwarded to (binaries attached by CI). Format inspired by
 
 ## [Unreleased]
 
+## [1.40.0] — 2026-10-21
+
+The GUI gets Mesen2's Debugger window, for the 65C816 and for the
+SPC700: the code listing built from a code log, the Status pane,
+labels and comments (`.mlb`, ca65 `.dbg`, bass `.sym`), watches, the
+call stacks, and a workspace per ROM, all of it reachable through MCP
+too. Mesen2's access counters, write freezes and Memory Search come
+with it, through the API and MCP. `luna state --layer-shots` shows each layer alone and which
+of two overlapping layers is in front; the GUI shows hi-res frames on
+their 512 columns. `luna bench` runs in parallel and calls a missing
+firmware by its name, and a negative control over commercial ROMs runs
+before every release.
+
+**Upgrading from 1.39.0:**
+
+- **Save states stay at version 9:** a state saved by 1.39.0 loads.
+- **`luna --version` and the MCP `serverInfo` read `1.40.0+<commit>`**
+  (`-dirty` when built from modified code): a script that compares the
+  whole string to `1.40.0` should compare the part before `+`.
+- **Call stack frames name their interrupt** (`kind`: `nmi`, `irq`,
+  `interrupt`), and the IRQs taken now appear in it.
+- **`absolute_address` of an I/O register** returns
+  `{kind: "SnesRegister", offset}` where it returned `null`.
+- **`luna bench`:** a title whose firmware is missing comes out 🔑
+  firmware, no longer ❌ bug; `.SFC` / `.SMC` files are now scanned, so a
+  corpus may count more titles.
+
 ### Added
 
 - **`luna state --layer-shots DIR`: each layer alone.** The compositor

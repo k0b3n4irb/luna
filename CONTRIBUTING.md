@@ -196,7 +196,9 @@ The version tracks luna's **user-facing contract**, not the Rust API:
   ```
 
   `<corpus>` is the directory `tools/fetch-snes-test-roms.sh` filled
-  (`../luna_tests` by default). `LUNA_SNES_TEST_REQUIRE=1` turns a missing
+  (`../luna_tests` by default), given as an **absolute** path: each test
+  runs from its own crate's directory, so a relative one points nowhere
+  and every corpus test fails. `LUNA_SNES_TEST_REQUIRE=1` turns a missing
   corpus, or a missing ROM of the homebrew golden suite, into a failure
   instead of a skip. `LUNA_GAME_TEST_REQUIRE=1` does the same for every
   test that needs a file the repository cannot ship: the commercial-game
